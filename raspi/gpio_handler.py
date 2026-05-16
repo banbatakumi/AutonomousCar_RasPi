@@ -1,15 +1,23 @@
 import threading
+import time
 import logging
 
 logger = logging.getLogger(__name__)
 
-BUZZER_PIN  = 18
-LED1_PIN    = 19  # remote control indicator
-LED2_PIN    = 13  # PC connection indicator
+BUZZER_PIN = 18
+LED1_PIN   = 19   # remote control indicator
+LED2_PIN   = 13   # PC connection indicator
 
-BUZZ_FREQ_HZ   = 2000
-BUZZ_DUTY      = 50
-BUZZ_DURATION  = 0.1  # seconds
+BUZZ_DUTY = 50
+
+# 接続メロディー: (周波数Hz, 音長ms, 次の音までの無音ms)
+# C5 → E5 → G5 → C6 の上昇アルペジオ
+CONNECT_MELODY = [
+    (523,  100, 20),   # C5
+    (659,  100, 20),   # E5
+    (784,  100, 20),   # G5
+    (1047, 350,  0),   # C6
+]
 
 
 class GPIOHandler:
@@ -25,7 +33,7 @@ class GPIOHandler:
                 GPIO.setup(pin, GPIO.OUT)
             GPIO.output(LED1_PIN, GPIO.LOW)
             GPIO.output(LED2_PIN, GPIO.LOW)
-            self._buzzer_pwm = GPIO.PWM(BUZZER_PIN, BUZZ_FREQ_HZ)
+            self._buzzer_pwm = GPIO.PWM(BUZZER_PIN, 440)
             self._available = True
         except Exception as e:
             logger.warning("GPIO not available: %s", e)
@@ -34,7 +42,7 @@ class GPIOHandler:
         if not self._available:
             return
         self._GPIO.output(LED2_PIN, self._GPIO.HIGH)
-        self._buzz()
+        self._play_melody(CONNECT_MELODY)
 
     def on_disconnect(self):
         if not self._available:
@@ -46,12 +54,17 @@ class GPIOHandler:
             return
         self._GPIO.output(LED1_PIN, self._GPIO.HIGH if active else self._GPIO.LOW)
 
-    def _buzz(self):
-        pwm = self._buzzer_pwm
-        pwm.start(BUZZ_DUTY)
-        t = threading.Timer(BUZZ_DURATION, pwm.stop)
-        t.daemon = True
-        t.start()
+    def _play_melody(self, melody):
+        def _run():
+            pwm = self._buzzer_pwm
+            for freq, dur_ms, gap_ms in melody:
+                pwm.ChangeFrequency(freq)
+                pwm.start(BUZZ_DUTY)
+                time.sleep(dur_ms / 1000)
+                pwm.stop()
+                if gap_ms > 0:
+                    time.sleep(gap_ms / 1000)
+        threading.Thread(target=_run, daemon=True).start()
 
     def cleanup(self):
         if not self._available:

@@ -3,117 +3,148 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>RobotCar Controller</title>
+  <title>ROBOTCAR — COCKPIT</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="container">
 
-  <!-- Camera -->
-  <div class="camera-section">
-    <img id="camera-stream" src="/stream" alt="Camera">
-    <div class="status-bar">
-      <span id="ws-status" class="ws-status disconnected">切断中</span>
-      <span id="kbd-hint" class="kbd-hint">W/A/S/D で操作</span>
+<header class="hdr">
+  <div class="hdr-brand">◈ ROBOTCAR</div>
+  <div class="hdr-right">
+    <span id="kbd-hint" class="kbd-hint">W/A/S/D · SPACE:BRAKE</span>
+    <span id="ws-status" class="ws-status disconnected">● OFFLINE</span>
+  </div>
+</header>
+
+<div class="cockpit">
+
+  <!-- ── LEFT: Camera ──────────────────────────────── -->
+  <div class="cam-col">
+    <div class="cam-frame">
+      <img id="camera-stream" src="/stream" alt="CAMERA FEED">
+      <div class="hud-corner tl"></div>
+      <div class="hud-corner tr"></div>
+      <div class="hud-corner bl"></div>
+      <div class="hud-corner br"></div>
+    </div>
+
+    <div class="dist-bar">
+      <div class="dist-cell front">
+        <span class="dist-arrow">▲</span>
+        <span class="dist-label">FRONT</span>
+        <span class="dist-val" id="disp-front">-- cm</span>
+      </div>
+      <div class="dist-cell left">
+        <span class="dist-arrow">◀</span>
+        <span class="dist-label">LEFT</span>
+        <span class="dist-val" id="disp-left">-- cm</span>
+      </div>
+      <div class="dist-cell right">
+        <span class="dist-arrow">▶</span>
+        <span class="dist-label">RIGHT</span>
+        <span class="dist-val" id="disp-right">-- cm</span>
+      </div>
+      <div class="dist-cell back">
+        <span class="dist-arrow">▼</span>
+        <span class="dist-label">BACK</span>
+        <span class="dist-val" id="disp-back">-- cm</span>
+      </div>
     </div>
   </div>
 
-  <!-- Controls -->
-  <div class="controls-section">
+  <!-- ── RIGHT: Instruments ────────────────────────── -->
+  <div class="inst-col">
 
-    <!-- Drive / Remote switches -->
-    <div class="panel">
-      <div class="panel-title">走行制御</div>
-
-      <div class="switch-row">
-        <span class="switch-name">走行</span>
-        <label class="slide-switch">
-          <input type="checkbox" id="sw-drive">
-          <span class="track"></span>
-        </label>
+    <!-- Gauge rows (2×2) -->
+    <div class="gauge-row">
+      <!-- Speed gauge -->
+      <div class="gauge-wrap">
+        <svg class="gauge-svg" viewBox="0 0 100 100">
+          <circle class="g-track" cx="50" cy="50" r="38"/>
+          <circle class="g-fill g-fill-red" id="g-speed" cx="50" cy="50" r="38"/>
+          <text class="g-val" id="disp-speed" x="50" y="50">0.0</text>
+          <text class="g-unit" x="50" y="63">m/s</text>
+          <text class="g-lbl" x="50" y="22">SPEED</text>
+        </svg>
       </div>
-
-      <div class="switch-row">
-        <span class="switch-name">リモコン</span>
-        <label class="slide-switch">
-          <input type="checkbox" id="sw-remote">
-          <span class="track"></span>
-        </label>
+      <!-- Acceleration gauge -->
+      <div class="gauge-wrap">
+        <svg class="gauge-svg" viewBox="0 0 100 100">
+          <circle class="g-track" cx="50" cy="50" r="38"/>
+          <circle class="g-fill g-fill-yellow" id="g-accel" cx="50" cy="50" r="38"/>
+          <text class="g-val" id="disp-accel" x="50" y="50">0.0</text>
+          <text class="g-unit" x="50" y="63">m/s²</text>
+          <text class="g-lbl" x="50" y="22">ACCEL</text>
+        </svg>
+      </div>
+    </div>
+    <div class="gauge-row">
+      <!-- Signal voltage gauge -->
+      <div class="gauge-wrap">
+        <svg class="gauge-svg" viewBox="0 0 100 100">
+          <circle class="g-track" cx="50" cy="50" r="38"/>
+          <circle class="g-fill g-fill-blue" id="g-vsig" cx="50" cy="50" r="38"/>
+          <text class="g-val" id="disp-vsig" x="50" y="50">0.0</text>
+          <text class="g-unit" x="50" y="63">V SIG</text>
+          <text class="g-lbl" x="50" y="22">SIGNAL</text>
+        </svg>
+      </div>
+      <!-- Power voltage gauge -->
+      <div class="gauge-wrap">
+        <svg class="gauge-svg" viewBox="0 0 100 100">
+          <circle class="g-track" cx="50" cy="50" r="38"/>
+          <circle class="g-fill g-fill-green" id="g-volt" cx="50" cy="50" r="38"/>
+          <text class="g-val" id="disp-vpow" x="50" y="50">0.0</text>
+          <text class="g-unit" x="50" y="63">V PWR</text>
+          <text class="g-lbl" x="50" y="22">POWER</text>
+        </svg>
       </div>
     </div>
 
-    <!-- Speed / Accel sliders -->
-    <div class="panel">
-      <div class="panel-title">速度設定</div>
-
-      <div class="slider-row">
-        <div class="slider-header">
-          <span>目標速度</span>
-          <span class="val" id="speed-val">0.0 m/s</span>
-        </div>
-        <input type="range" id="slider-speed" min="-128" max="127" value="0" step="1">
+    <!-- Sliders -->
+    <div class="sliders-block">
+      <div class="sl-row">
+        <span class="sl-lbl">SPD</span>
+        <input type="range" id="slider-speed" min="0" max="127" value="0" step="1">
+        <span class="sl-val" id="speed-val">0.0 m/s</span>
       </div>
-
-      <div class="slider-row">
-        <div class="slider-header">
-          <span>加速度</span>
-          <span class="val" id="accel-val">0.0 m/s²</span>
-        </div>
+      <div class="sl-row">
+        <span class="sl-lbl">ACC</span>
         <input type="range" id="slider-accel" min="0" max="127" value="0" step="1">
+        <span class="sl-val" id="accel-val">0.0 m/s²</span>
       </div>
     </div>
 
-    <!-- Headlight / Brake buttons -->
-    <div class="panel">
-      <div class="panel-title">補助操作</div>
-      <div class="btn-row">
-        <button id="btn-headlight" class="toggle-btn">ヘッドライト</button>
-        <button id="btn-brake" class="toggle-btn brake">ブレーキ</button>
+    <!-- Switches -->
+    <div class="sw-block">
+      <label class="sw-item">
+        <input type="checkbox" id="sw-drive">
+        <span class="sw-track"><span class="sw-thumb"></span></span>
+        <span class="sw-name">DRIVE</span>
+      </label>
+      <label class="sw-item">
+        <input type="checkbox" id="sw-remote">
+        <span class="sw-track"><span class="sw-thumb"></span></span>
+        <span class="sw-name">REMOTE</span>
+      </label>
+    </div>
+
+    <!-- Buttons -->
+    <div class="btn-block">
+      <button id="btn-headlight" class="act-btn">💡 LIGHT</button>
+      <button id="btn-hazard"    class="act-btn hazard">⚠ HAZARD</button>
+    </div>
+
+    <!-- Telemetry strip -->
+    <div class="telem-strip">
+      <div class="tl-cell" id="disp-err-item">
+        <span class="tl-lbl">MOTOR</span>
+        <span class="tl-val" id="disp-err">OK</span>
       </div>
     </div>
 
-    <!-- Sensor readouts -->
-    <div class="panel">
-      <div class="panel-title">センサー情報</div>
-      <div class="sensor-grid">
-
-        <div class="sensor-item">
-          <div class="label">速度</div>
-          <div class="value" id="disp-speed">0.0 m/s</div>
-        </div>
-        <div class="sensor-item">
-          <div class="label">加速度</div>
-          <div class="value" id="disp-accel">0.0 m/s²</div>
-        </div>
-
-        <!-- Distance visual -->
-        <div class="dist-visual">
-          <div class="front"><span class="dist-chip" id="disp-front">0 cm</span></div>
-          <div class="left"><span class="dist-chip" id="disp-left">0 cm</span></div>
-          <div class="car-icon">🚗</div>
-          <div class="right"><span class="dist-chip" id="disp-right">0 cm</span></div>
-          <div class="back"><span class="dist-chip" id="disp-back">0 cm</span></div>
-        </div>
-
-        <div class="sensor-item">
-          <div class="label">信号系電圧</div>
-          <div class="value" id="disp-vsig">0.0 V</div>
-        </div>
-        <div class="sensor-item">
-          <div class="label">動力系電圧</div>
-          <div class="value" id="disp-vpow">0.0 V</div>
-        </div>
-
-        <div class="sensor-item full-width" id="disp-err-item">
-          <div class="label">モーターエラー</div>
-          <div class="value" id="disp-err">正常</div>
-        </div>
-
-      </div>
-    </div>
-
-  </div>
-</div>
+  </div><!-- /inst-col -->
+</div><!-- /cockpit -->
 
 <script src="main.js"></script>
 </body>

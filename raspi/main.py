@@ -57,6 +57,11 @@ async def stream():
     return StreamingResponse(
         camera.generate(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 
