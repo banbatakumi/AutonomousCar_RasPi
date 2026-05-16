@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RobotCar Controller</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="container">
+
+  <!-- Camera -->
+  <div class="camera-section">
+    <img id="camera-stream" src="/stream" alt="Camera">
+    <div class="status-bar">
+      <span id="ws-status" class="ws-status disconnected">切断中</span>
+      <span id="kbd-hint" class="kbd-hint">W/A/S/D で操作</span>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls-section">
+
+    <!-- Drive / Remote switches -->
+    <div class="panel">
+      <div class="panel-title">走行制御</div>
+
+      <div class="switch-row">
+        <span class="switch-name">走行</span>
+        <label class="slide-switch">
+          <input type="checkbox" id="sw-drive">
+          <span class="track"></span>
+        </label>
+      </div>
+
+      <div class="switch-row">
+        <span class="switch-name">リモコン</span>
+        <label class="slide-switch">
+          <input type="checkbox" id="sw-remote">
+          <span class="track"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Speed / Accel sliders -->
+    <div class="panel">
+      <div class="panel-title">速度設定</div>
+
+      <div class="slider-row">
+        <div class="slider-header">
+          <span>目標速度</span>
+          <span class="val" id="speed-val">0.0 m/s</span>
+        </div>
+        <input type="range" id="slider-speed" min="-128" max="127" value="0" step="1">
+      </div>
+
+      <div class="slider-row">
+        <div class="slider-header">
+          <span>加速度</span>
+          <span class="val" id="accel-val">0.0 m/s²</span>
+        </div>
+        <input type="range" id="slider-accel" min="0" max="127" value="0" step="1">
+      </div>
+    </div>
+
+    <!-- Headlight / Brake buttons -->
+    <div class="panel">
+      <div class="panel-title">補助操作</div>
+      <div class="btn-row">
+        <button id="btn-headlight" class="toggle-btn">ヘッドライト</button>
+        <button id="btn-brake" class="toggle-btn brake">ブレーキ</button>
+      </div>
+    </div>
+
+    <!-- Sensor readouts -->
+    <div class="panel">
+      <div class="panel-title">センサー情報</div>
+      <div class="sensor-grid">
+
+        <div class="sensor-item">
+          <div class="label">速度</div>
+          <div class="value" id="disp-speed">0.0 m/s</div>
+        </div>
+        <div class="sensor-item">
+          <div class="label">加速度</div>
+          <div class="value" id="disp-accel">0.0 m/s²</div>
+        </div>
+
+        <!-- Distance visual -->
+        <div class="dist-visual">
+          <div class="front"><span class="dist-chip" id="disp-front">0 cm</span></div>
+          <div class="left"><span class="dist-chip" id="disp-left">0 cm</span></div>
+          <div class="car-icon">🚗</div>
+          <div class="right"><span class="dist-chip" id="disp-right">0 cm</span></div>
+          <div class="back"><span class="dist-chip" id="disp-back">0 cm</span></div>
+        </div>
+
+        <div class="sensor-item">
+          <div class="label">信号系電圧</div>
+          <div class="value" id="disp-vsig">0.0 V</div>
+        </div>
+        <div class="sensor-item">
+          <div class="label">動力系電圧</div>
+          <div class="value" id="disp-vpow">0.0 V</div>
+        </div>
+
+        <div class="sensor-item full-width" id="disp-err-item">
+          <div class="label">モーターエラー</div>
+          <div class="value" id="disp-err">正常</div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="main.js"></script>
+</body>
+</html>
