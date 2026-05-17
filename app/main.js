@@ -63,6 +63,13 @@ const dispErr     = document.getElementById("disp-err");
 const dispErrItem = document.getElementById("disp-err-item");
 const gVolt       = document.getElementById("g-volt");
 
+const gTempLeft     = document.getElementById("g-temp-left");
+const gTempRight    = document.getElementById("g-temp-right");
+const gTempSteer    = document.getElementById("g-temp-steer");
+const dispTempLeft  = document.getElementById("disp-temp-left");
+const dispTempRight = document.getElementById("disp-temp-right");
+const dispTempSteer = document.getElementById("disp-temp-steer");
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws = null;
 
@@ -101,6 +108,10 @@ function connect() {
     updateGMeter(d.accel_x, d.accel_y);
     dispVsig.textContent = d.volt_signal.toFixed(1);
     setGauge("g-vsig", (d.volt_signal - 8) / 4);
+
+    updateTemp(gTempLeft,  dispTempLeft,  d.temp_left);
+    updateTemp(gTempRight, dispTempRight, d.temp_right);
+    updateTemp(gTempSteer, dispTempSteer, d.temp_steer);
 
     const err = d.motor_error;
     dispErr.textContent = err ? "ERROR" : "OK";
@@ -363,6 +374,15 @@ function updateRadar(dists) {
   if (poly) poly.setAttribute("points", points.join(" "));
 }
 
+// ── Temperature display ───────────────────────────────────────────────────────
+function updateTemp(gaugeEl, dispEl, temp) {
+  dispEl.textContent = temp;
+  setGauge(gaugeEl.id, temp / 100);
+  gaugeEl.style.stroke =
+    temp >= 75 ? "#e02020" :
+    temp >= 50 ? "#ca8a04" : "#16a34a";
+}
+
 // ── IMU display ───────────────────────────────────────────────────────────────
 function updateAHI(pitch, roll) {
   const scene = document.getElementById("ahi-scene");
@@ -411,10 +431,10 @@ function updateGMeter(ax, ay) {
     try {
       ctx.drawImage(img, 0, 0, 8, 5);
       const px = ctx.getImageData(0, 0, 8, 5).data.join(",");
-      if (px === prevPx) { if (++frozenCount >= 2) reconnect(); }
+      if (px === prevPx) { if (++frozenCount >= 1) reconnect(); }
       else { frozenCount = 0; prevPx = px; }
     } catch (e) {}
-  }, 4000);
+  }, 2000);
 })();
 
 // ── Init ──────────────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 HEADER = 0xFF
 FOOTER = 0xAA
 SEND_SIZE = 6
-RECV_SIZE = 28
+RECV_SIZE = 31
 SEND_INTERVAL = 0.05  # 20Hz
 
 # EMA smoothing factors (0=frozen, 1=no filter)
@@ -17,6 +17,7 @@ _ALPHA_DIST  = 0.50   # distance sensors: responsive but noise-reduced
 _ALPHA_VOLT  = 0.15   # voltages: slow-changing → heavy smoothing
 _ALPHA_IMU_A = 0.50   # IMU accelerometer: responsive
 _ALPHA_IMU_G = 0.30   # IMU pitch/roll: smoothed for display
+_ALPHA_TEMP  = 0.10   # motor temperature: slow-changing
 
 
 class UARTHandler:
@@ -51,6 +52,9 @@ class UARTHandler:
             "accel_y": 0.0,  # lateral G (right positive), 4-bit signed × 0.1
             "pitch": 0.0,    # degrees, nose-up positive
             "roll": 0.0,     # degrees, right-bank positive
+            "temp_left":  0, # left motor temperature, °C
+            "temp_right": 0, # right motor temperature, °C
+            "temp_steer": 0, # steer motor temperature, °C
         }
 
     def start(self):
@@ -164,6 +168,9 @@ class UARTHandler:
         ay = s4(pkt[24] & 0xF) * 0.1
         pitch = struct.unpack("b", bytes([pkt[25]]))[0] * 1.0  # degrees
         roll  = struct.unpack("b", bytes([pkt[26]]))[0] * 1.0  # degrees
+        temp_l = pkt[27]
+        temp_r = pkt[28]
+        temp_s = pkt[29]
 
         with self._lock:
             p = self._sensor_data
@@ -183,4 +190,7 @@ class UARTHandler:
                 "accel_y":      round(ema(ay,    p["accel_y"], _ALPHA_IMU_A), 2),
                 "pitch":        round(ema(pitch, p["pitch"],   _ALPHA_IMU_G), 1),
                 "roll":         round(ema(roll,  p["roll"],    _ALPHA_IMU_G), 1),
+                "temp_left":    round(ema(temp_l, p["temp_left"],  _ALPHA_TEMP)),
+                "temp_right":   round(ema(temp_r, p["temp_right"], _ALPHA_TEMP)),
+                "temp_steer":   round(ema(temp_s, p["temp_steer"], _ALPHA_TEMP)),
             }

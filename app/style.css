@@ -84,7 +84,7 @@ body {
 /* ── Main cockpit grid ─────────────────────────────────── */
 .cockpit {
   display: grid;
-  grid-template-columns: 1fr 390px;
+  grid-template-columns: 1fr 430px;
   gap: 10px;
   padding: 10px;
   flex: 1;
@@ -254,11 +254,36 @@ body {
 /* ── Control bar (below camera) ─────────────────────────── */
 .ctrl-bar {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-direction: row;
+  gap: 10px;
+  align-items: stretch;
   flex-shrink: 0;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+
+.ctrl-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.temp-gauge-row {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  align-self: stretch;
+}
+
+.temp-gauge-mini {
+  height: 100%;
+  aspect-ratio: 1;
+}
+
+.temp-gauge-mini .gauge-svg {
+  height: 100%;
+  width: auto;
 }
 
 .mode-bar {
@@ -304,9 +329,19 @@ body {
 }
 
 .action-btns {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 6px;
   align-items: stretch;
+}
+
+.action-btns .act-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  line-height: 1;
 }
 
 /* ── Sliders ───────────────────────────────────────────── */
@@ -473,4 +508,5 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text);
 }
 
+.tl-cell.warn  .tl-val { color: var(--yellow); }
 .tl-cell.error .tl-val { color: var(--red); }

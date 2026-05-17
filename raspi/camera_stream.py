@@ -6,10 +6,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-CAPTURE_FPS = 20
+CAPTURE_FPS = 30
 CAPTURE_WIDTH = 240
 CAPTURE_HEIGHT = 144   # 240 * 3/5: 下2/5（車体）を除外
-JPEG_QUALITY = 55
+JPEG_QUALITY = 80
 
 # IMX219 フルセンサー座標 (3280x2464) の上位 4/5 を使用
 _SENSOR_CROP = (0, 0, 3280, 1971)   # 2464 * 0.8 ≈ 1971

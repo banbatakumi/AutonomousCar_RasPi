@@ -53,31 +53,81 @@
     </div>
 
     <div class="ctrl-bar">
-      <div class="mode-bar">
-        <button id="btn-drive"     class="act-btn">DRIVE</button>
-        <button id="btn-autobrake" class="act-btn">AUTO BRAKE</button>
-        <div class="mode-sep"></div>
-        <button id="btn-remote"    class="mode-btn">REMOTE</button>
-        <button id="btn-mode1"     class="mode-btn">MODE 1</button>
-        <button id="btn-mode2"     class="mode-btn">MODE 2</button>
-      </div>
-      <div class="slider-action-row">
-        <div class="sliders-block">
-          <div class="sl-row">
-            <span class="sl-lbl">SPD</span>
-            <input type="range" id="slider-speed" min="0" max="127" value="10" step="1">
-            <span class="sl-val" id="speed-val">0.0 m/s</span>
+      <div class="ctrl-main">
+        <div class="mode-bar">
+          <button id="btn-drive"     class="act-btn">DRIVE</button>
+          <button id="btn-autobrake" class="act-btn">AUTO BRAKE</button>
+          <div class="mode-sep"></div>
+          <button id="btn-remote"    class="mode-btn">REMOTE</button>
+          <button id="btn-mode1"     class="mode-btn">MODE 1</button>
+          <button id="btn-mode2"     class="mode-btn">MODE 2</button>
+        </div>
+        <div class="slider-action-row">
+          <div class="sliders-block">
+            <div class="sl-row">
+              <span class="sl-lbl">SPD</span>
+              <input type="range" id="slider-speed" min="0" max="127" value="10" step="1">
+              <span class="sl-val" id="speed-val">0.0 m/s</span>
+            </div>
+            <div class="sl-row">
+              <span class="sl-lbl">ACC</span>
+              <input type="range" id="slider-accel" min="0" max="127" value="10" step="1">
+              <span class="sl-val" id="accel-val">0.0 m/s²</span>
+            </div>
           </div>
-          <div class="sl-row">
-            <span class="sl-lbl">ACC</span>
-            <input type="range" id="slider-accel" min="0" max="127" value="10" step="1">
-            <span class="sl-val" id="accel-val">0.0 m/s²</span>
+          <div class="action-btns">
+            <button id="btn-headlight" class="act-btn"><span>💡</span><span>LIGHT</span></button>
+            <button id="btn-hazard"    class="act-btn hazard"><span>⚠</span><span>HAZARD</span></button>
+            <button id="btn-horn"      class="act-btn"><span>📯</span><span>HORN</span></button>
           </div>
         </div>
-        <div class="action-btns">
-          <button id="btn-headlight" class="act-btn">💡 LIGHT</button>
-          <button id="btn-hazard"    class="act-btn hazard">⚠ HAZARD</button>
-          <button id="btn-horn"      class="act-btn">📯 HORN</button>
+      </div>
+      <!-- Voltage + Temperature gauges: SIGNAL / POWER / LEFT / RIGHT / STEER -->
+      <div class="temp-gauge-row">
+        <div class="temp-gauge-mini">
+          <svg class="gauge-svg" viewBox="0 0 100 100">
+            <circle class="g-track" cx="50" cy="50" r="38"/>
+            <circle class="g-fill g-fill-red" id="g-vsig" cx="50" cy="50" r="38"/>
+            <text class="g-val" id="disp-vsig" x="50" y="50">0.0</text>
+            <text class="g-unit" x="50" y="63">V</text>
+            <text class="g-lbl" x="50" y="36">SIGNAL</text>
+          </svg>
+        </div>
+        <div class="temp-gauge-mini">
+          <svg class="gauge-svg" viewBox="0 0 100 100">
+            <circle class="g-track" cx="50" cy="50" r="38"/>
+            <circle class="g-fill g-fill-red" id="g-volt" cx="50" cy="50" r="38"/>
+            <text class="g-val" id="disp-vpow" x="50" y="50">0.0</text>
+            <text class="g-unit" x="50" y="63">V</text>
+            <text class="g-lbl" x="50" y="36">POWER</text>
+          </svg>
+        </div>
+        <div class="temp-gauge-mini">
+          <svg class="gauge-svg" viewBox="0 0 100 100">
+            <circle class="g-track" cx="50" cy="50" r="38"/>
+            <circle class="g-fill g-fill-red" id="g-temp-left" cx="50" cy="50" r="38"/>
+            <text class="g-val" id="disp-temp-left" x="50" y="50">--</text>
+            <text class="g-unit" x="50" y="63">°C</text>
+            <text class="g-lbl" x="50" y="36">LEFT</text>
+          </svg>
+        </div>
+        <div class="temp-gauge-mini">
+          <svg class="gauge-svg" viewBox="0 0 100 100">
+            <circle class="g-track" cx="50" cy="50" r="38"/>
+            <circle class="g-fill g-fill-red" id="g-temp-right" cx="50" cy="50" r="38"/>
+            <text class="g-val" id="disp-temp-right" x="50" y="50">--</text>
+            <text class="g-unit" x="50" y="63">°C</text>
+            <text class="g-lbl" x="50" y="36">RIGHT</text>
+          </svg>
+        </div>
+        <div class="temp-gauge-mini">
+          <svg class="gauge-svg" viewBox="0 0 100 100">
+            <circle class="g-track" cx="50" cy="50" r="38"/>
+            <circle class="g-fill g-fill-red" id="g-temp-steer" cx="50" cy="50" r="38"/>
+            <text class="g-val" id="disp-temp-steer" x="50" y="50">--</text>
+            <text class="g-unit" x="50" y="63">°C</text>
+            <text class="g-lbl" x="50" y="36">STEER</text>
+          </svg>
         </div>
       </div>
     </div>
@@ -86,26 +136,27 @@
   <!-- ── RIGHT: Instruments ────────────────────────── -->
   <div class="inst-col">
 
-    <!-- Gauge rows -->
-    <div class="gauge-row">
-      <div class="gauge-wrap">
-        <svg class="gauge-svg" viewBox="0 0 100 100">
-          <circle class="g-track" cx="50" cy="50" r="38"/>
-          <circle class="g-fill g-fill-red" id="g-vsig" cx="50" cy="50" r="38"/>
-          <text class="g-val" id="disp-vsig" x="50" y="50">0.0</text>
-          <text class="g-unit" x="50" y="63">V</text>
-          <text class="g-lbl" x="50" y="36">SIGNAL</text>
-        </svg>
-      </div>
-      <div class="gauge-wrap">
-        <svg class="gauge-svg" viewBox="0 0 100 100">
-          <circle class="g-track" cx="50" cy="50" r="38"/>
-          <circle class="g-fill g-fill-red" id="g-volt" cx="50" cy="50" r="38"/>
-          <text class="g-val" id="disp-vpow" x="50" y="50">0.0</text>
-          <text class="g-unit" x="50" y="63">V</text>
-          <text class="g-lbl" x="50" y="36">POWER</text>
-        </svg>
-      </div>
+    <!-- Radar (lines/dots generated by JS) -->
+    <div class="radar-wrap">
+      <svg id="radar-svg" class="radar-svg" viewBox="0 0 200 200">
+        <circle cx="100" cy="100" r="88" class="radar-bg"/>
+        <circle cx="100" cy="100" r="22" class="radar-grid"/>
+        <circle cx="100" cy="100" r="44" class="radar-grid"/>
+        <circle cx="100" cy="100" r="66" class="radar-grid"/>
+        <circle cx="100" cy="100" r="88" class="radar-grid"/>
+        <g id="radar-divs"></g>
+        <polygon id="radar-poly" class="radar-poly"/>
+        <g id="radar-dots"></g>
+        <text class="radar-lbl" x="100" y="8">F</text>
+        <text class="radar-lbl" x="172" y="32">FR</text>
+        <text class="radar-lbl" x="196" y="102">R</text>
+        <text class="radar-lbl" x="172" y="172">BR</text>
+        <text class="radar-lbl" x="100" y="196">B</text>
+        <text class="radar-lbl" x="28"  y="172">BL</text>
+        <text class="radar-lbl" x="4"   y="102">L</text>
+        <text class="radar-lbl" x="28"  y="32">FL</text>
+        <circle cx="100" cy="100" r="4" class="radar-center"/>
+      </svg>
     </div>
 
     <!-- IMU: Attitude Indicator + G-meter -->
@@ -150,29 +201,6 @@
           <text class="g-unit" x="12" y="53">L</text>
         </svg>
       </div>
-    </div>
-
-    <!-- Radar (lines/dots generated by JS) -->
-    <div class="radar-wrap">
-      <svg id="radar-svg" class="radar-svg" viewBox="0 0 200 200">
-        <circle cx="100" cy="100" r="88" class="radar-bg"/>
-        <circle cx="100" cy="100" r="22" class="radar-grid"/>
-        <circle cx="100" cy="100" r="44" class="radar-grid"/>
-        <circle cx="100" cy="100" r="66" class="radar-grid"/>
-        <circle cx="100" cy="100" r="88" class="radar-grid"/>
-        <g id="radar-divs"></g>
-        <polygon id="radar-poly" class="radar-poly"/>
-        <g id="radar-dots"></g>
-        <text class="radar-lbl" x="100" y="8">F</text>
-        <text class="radar-lbl" x="172" y="32">FR</text>
-        <text class="radar-lbl" x="196" y="102">R</text>
-        <text class="radar-lbl" x="172" y="172">BR</text>
-        <text class="radar-lbl" x="100" y="196">B</text>
-        <text class="radar-lbl" x="28"  y="172">BL</text>
-        <text class="radar-lbl" x="4"   y="102">L</text>
-        <text class="radar-lbl" x="28"  y="32">FL</text>
-        <circle cx="100" cy="100" r="4" class="radar-center"/>
-      </svg>
     </div>
 
     <!-- Telemetry strip -->

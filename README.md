@@ -56,6 +56,10 @@ echo on | sudo tee /sys/class/net/wlan0/power/control
 echo 'echo on > /sys/class/net/wlan0/power/control' | sudo tee -a /etc/rc.local
 ```
 
+> **注**: brcmfmac ドライバーの AP モードでは省電力モードを完全に無効化できない場合があります。  
+> `hostapd.conf` のチャンネルを 11 に設定することで干渉を軽減しています。  
+> カメラストリームのウォッチドッグ（2秒間隔）が自動で再接続を行います。
+
 ---
 
 ## 2. アプリケーションのセットアップ
@@ -116,7 +120,7 @@ sudo journalctl -u robotcar -f
 |------|------|
 | Raspberry Pi 3 Model B | ホスト名: `robotcar`、ユーザー: `pi` |
 | STM32F446RE | UART（GPIO14/TX, 15/RX）、230400bps |
-| カメラ | Raspberry Pi Camera Module v2（CSI接続） |
+| カメラ | Raspberry Pi Camera Module v2（CSI接続、30fps / JPEG quality 80） |
 | ブザー | GPIO18（PWM0） |
 | LED1 | GPIO19 |
 | LED2 | GPIO13（PWM1） |
@@ -138,10 +142,10 @@ sudo journalctl -u robotcar -f
 | acceleration | int8 | 加速度 × 0.1 m/s² |
 | steer | int8 | ステア -127〜+127（左〜右） |
 
-### STM32 → RasPi（28 バイト）
+### STM32 → RasPi（31 バイト）
 
 ```
-[0xFF][speed][accel][dist×18bytes(36nibbles)][volt_s][volt_p][motor_err][accel_xy][pitch][roll][0xAA]
+[0xFF][speed][accel][dist×18bytes(36nibbles)][volt_s][volt_p][motor_err][accel_xy][pitch][roll][temp_l][temp_r][temp_s][0xAA]
 ```
 
 | バイト | 説明 |
@@ -155,7 +159,10 @@ sudo journalctl -u robotcar -f
 | [24] | IMU 加速度 high nibble=X(前後)、low nibble=Y(左右)、4bit符号付き×0.1g |
 | [25] | ピッチ int8（度） |
 | [26] | ロール int8（度） |
-| [27] | 0xAA（フッタ） |
+| [27] | 左モーター温度 uint8（°C） |
+| [28] | 右モーター温度 uint8（°C） |
+| [29] | ステアリングモーター温度 uint8（°C） |
+| [30] | 0xAA（フッタ） |
 
 ---
 
