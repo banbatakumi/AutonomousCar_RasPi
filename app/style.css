@@ -12,7 +12,7 @@
   --green:   #16a34a;
   --yellow:  #ca8a04;
   --text:    #eeeeee;
-  --muted:   #484848;
+  --muted:   #888888;
   --mono:    'Courier New', Courier, monospace;
 }
 
@@ -66,6 +66,13 @@ body {
 .ws-status.connected    { color: #22c55e; }
 .ws-status.disconnected { color: var(--red); }
 
+.gp-status {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 1px;
+}
+.gp-status.connected { color: #22c55e; }
+
 .kbd-hint {
   font-size: 10px;
   color: var(--muted);
@@ -77,7 +84,7 @@ body {
 /* ── Main cockpit grid ─────────────────────────────────── */
 .cockpit {
   display: grid;
-  grid-template-columns: 1fr 300px;
+  grid-template-columns: 1fr 390px;
   gap: 10px;
   padding: 10px;
   flex: 1;
@@ -108,6 +115,26 @@ body {
   display: block;
 }
 
+/* HUD speed/accel overlay */
+.cam-hud {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.hud-gauge-wrap {
+  width: 117px;
+}
+
+.hud-gauge-svg {
+  filter: drop-shadow(0 2px 10px rgba(0,0,0,0.95));
+}
+
 /* HUD corner brackets */
 .hud-corner {
   position: absolute;
@@ -123,28 +150,31 @@ body {
 .hud-corner.bl { bottom: 8px; left:  8px; border-width: 0 0 2px 2px; }
 .hud-corner.br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
 
-/* Distance bar */
-.dist-bar {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
+/* Radar */
+.radar-wrap {
   flex-shrink: 0;
-}
-
-.dist-cell {
+  display: flex;
+  justify-content: center;
   background: var(--surface);
   border: 1px solid var(--border);
   border-top: 2px solid #1a1a1a;
-  padding: 5px 6px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
+  padding: 6px 0;
 }
 
-.dist-arrow { font-size: 10px; color: var(--red); line-height: 1; }
-.dist-label { font-size: 8px;  color: var(--muted); letter-spacing: 1px; }
-.dist-val   { font-size: 12px; color: var(--text); }
+.radar-svg { width: 100%; height: auto; display: block; }
+
+.radar-bg     { fill: #050505; }
+.radar-grid   { fill: none; stroke: #1e1e1e; stroke-width: 0.8; }
+.radar-div    { stroke: #1e1e1e; stroke-width: 0.8; }
+.radar-poly {
+  fill: rgba(22, 163, 74, 0.12);
+  stroke: #22c55e;
+  stroke-width: 1;
+  stroke-linejoin: round;
+}
+.radar-lbl    { fill: var(--muted); font-size: 9px; font-family: 'Courier New', monospace;
+                text-anchor: middle; dominant-baseline: middle; }
+.radar-center { fill: var(--red); }
 
 /* ── Instrument column ─────────────────────────────────── */
 .inst-col {
@@ -219,6 +249,64 @@ body {
   text-anchor: middle;
   letter-spacing: 2px;
   text-transform: uppercase;
+}
+
+/* ── Control bar (below camera) ─────────────────────────── */
+.ctrl-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.mode-bar {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.mode-sep {
+  width: 1px;
+  background: var(--border);
+  flex-shrink: 0;
+  margin: 0 2px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 8px 0;
+  background: #0a0a0a;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 2px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all .15s;
+  text-transform: uppercase;
+}
+.mode-btn:hover { border-color: #2a2a2a; color: var(--text); }
+.mode-btn.active { background: var(--red); border-color: var(--red); color: #fff; box-shadow: 0 0 12px var(--red-glow); }
+
+.slider-action-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.slider-action-row .sliders-block {
+  flex: 1;
+  border: none;
+  padding: 0;
+}
+
+.action-btns {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
 }
 
 /* ── Sliders ───────────────────────────────────────────── */

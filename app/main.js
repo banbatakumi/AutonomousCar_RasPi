@@ -14,38 +14,48 @@ function setGauge(id, ratio) {
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
   do_stop:           true,
-  do_remote_control: false,
   do_brake:          false,
   on_headlight:      false,
   on_hazard:         false,
+  play_sound:        false,
+  enable_auto_brake: false,
+  mode:              0,
   move_speed:        0.0,
   acceleration:      0.0,
   steer:             0.0,
 };
 
-let targetSpeedRaw = 0;
-let targetAccelRaw = 0;
+let currentMode = null; // null | 'drive' | 'autobrake' | 'remote' | 'mode1' | 'mode2'
+
+let targetSpeedRaw = 10;
+let targetAccelRaw = 10;
 const keysDown = new Set();
 
+// Gamepad state
+let gpIndex     = null;
+let gpRafId     = null;
+let gpSpeed     = 0;     // -1..+1  right stick Y (positive = forward)
+let gpSteer     = 0;     // -1..+1  left stick X
+let gpBraking   = false; // R1
+let gpLightPrev = false; // L2 edge detection
+
+const GP_DEAD = 0.12;
+
 // ── Elements ──────────────────────────────────────────────────────────────────
-const swDrive      = document.getElementById("sw-drive");
-const swRemote     = document.getElementById("sw-remote");
 const sliderSpeed  = document.getElementById("slider-speed");
 const sliderAccel  = document.getElementById("slider-accel");
 const speedVal     = document.getElementById("speed-val");
 const accelVal     = document.getElementById("accel-val");
 const btnHeadlight = document.getElementById("btn-headlight");
 const btnHazard    = document.getElementById("btn-hazard");
+const btnHorn      = document.getElementById("btn-horn");
 const wsStatus     = document.getElementById("ws-status");
 const kbdHint      = document.getElementById("kbd-hint");
 
+const gpStatusEl  = document.getElementById("gp-status");
 const dispSpeed   = document.getElementById("disp-speed");
 const dispAccel   = document.getElementById("disp-accel");
 const gAccel      = document.getElementById("g-accel");
-const dispFront   = document.getElementById("disp-front");
-const dispBack    = document.getElementById("disp-back");
-const dispLeft    = document.getElementById("disp-left");
-const dispRight   = document.getElementById("disp-right");
 const dispVsig    = document.getElementById("disp-vsig");
 const dispVpow    = document.getElementById("disp-vpow");
 const gVsig       = document.getElementById("g-vsig");
@@ -80,22 +90,17 @@ function connect() {
     dispSpeed.textContent = d.speed.toFixed(1);
     setGauge("g-speed", Math.abs(d.speed) / 5);
 
-    // Voltage gauge with colour coding (0–15V range)
+    // Voltage gauge with colour coding (8–12V range)
     dispVpow.textContent = d.volt_power.toFixed(1);
-    setGauge("g-volt", d.volt_power / 15);
-    gVolt.style.stroke =
-      d.volt_power > 11.5 ? "#16a34a" :
-      d.volt_power >  9.5 ? "#ca8a04" : "#e02020";
+    setGauge("g-volt", (d.volt_power - 8) / 4);
 
     dispAccel.textContent = d.acceleration.toFixed(1);
     setGauge("g-accel", Math.abs(d.acceleration) / 5);
-    gAccel.style.stroke = d.acceleration >= 0 ? "#ca8a04" : "#e06020";
-    dispFront.textContent  = `${d.dist_front} cm`;
-    dispBack.textContent   = `${d.dist_back} cm`;
-    dispLeft.textContent   = `${d.dist_left} cm`;
-    dispRight.textContent  = `${d.dist_right} cm`;
+    updateRadar(d.dists);
+    updateAHI(d.pitch, d.roll);
+    updateGMeter(d.accel_x, d.accel_y);
     dispVsig.textContent = d.volt_signal.toFixed(1);
-    setGauge("g-vsig", d.volt_signal / 5);
+    setGauge("g-vsig", (d.volt_signal - 8) / 4);
 
     const err = d.motor_error;
     dispErr.textContent = err ? "ERROR" : "OK";
@@ -109,19 +114,98 @@ function sendState() {
   }
 }
 
+// ── Gamepad ───────────────────────────────────────────────────────────────────
+function gpApplyDead(v) {
+  return Math.abs(v) > GP_DEAD ? Math.max(-1, Math.min(1, v)) : 0;
+}
+
+function gpConnect(index) {
+  if (gpIndex !== null) return;
+  gpIndex = index;
+  gpStatusEl.textContent = "GAMEPAD READY";
+  gpStatusEl.classList.add("connected");
+  if (!gpRafId) gpRafId = requestAnimationFrame(pollGamepad);
+}
+
+function gpDisconnect() {
+  cancelAnimationFrame(gpRafId);
+  gpRafId = null;
+  gpIndex = null;
+  gpSpeed = 0;
+  gpSteer = 0;
+  if (gpBraking) { gpBraking = false; state.do_brake = false; sendState(); }
+  gpStatusEl.textContent = "GAMEPAD --";
+  gpStatusEl.classList.remove("connected");
+}
+
+// Event-based detection (Chrome/Firefox)
+window.addEventListener("gamepadconnected",    (e) => gpConnect(e.gamepad.index));
+window.addEventListener("gamepaddisconnected", (e) => { if (e.gamepad.index === gpIndex) gpDisconnect(); });
+
+// Polling fallback for Safari (gamepadconnected may not fire)
+setInterval(() => {
+  if (gpIndex !== null) return;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (let i = 0; i < pads.length; i++) {
+    if (pads[i]) { gpConnect(i); break; }
+  }
+}, 500);
+
+function pollGamepad() {
+  gpRafId = requestAnimationFrame(pollGamepad);
+
+  const gp = navigator.getGamepads()[gpIndex];
+  if (!gp) { gpDisconnect(); return; }
+
+  // Left stick Y → speed (axes[1]; up = −1 → invert for forward)
+  const newSpeed = gpApplyDead(-gp.axes[1]);
+  // Right stick X → steer (axes[2] on JC-U3613M)
+  const newSteer = gpApplyDead(gp.axes[2]);
+
+  if (newSpeed !== gpSpeed || newSteer !== gpSteer) {
+    gpSpeed = newSpeed;
+    gpSteer = newSteer;
+    if (currentMode === 'remote') applyControls();
+  }
+
+  // R1 (button[5]) → brake
+  const brakeNow = gp.buttons[5]?.pressed ?? false;
+  if (brakeNow !== gpBraking) {
+    gpBraking = brakeNow;
+    state.do_brake = gpBraking;
+    sendState();
+  }
+
+  // L1 (button[4]) → headlight toggle on press (rising edge)
+  const lightNow = gp.buttons[4]?.pressed ?? false;
+  if (lightNow && !gpLightPrev) {
+    state.on_headlight = !state.on_headlight;
+    btnHeadlight.classList.toggle("active", state.on_headlight);
+    sendState();
+  }
+  gpLightPrev = lightNow;
+}
+
 // ── Control logic ─────────────────────────────────────────────────────────────
 function applyControls() {
   state.acceleration = targetAccelRaw * 0.1;
 
-  if (state.do_remote_control) {
+  if (currentMode === 'remote') {
     const mag = Math.abs(targetSpeedRaw) * 0.1;
-    if      (keysDown.has("w")) state.move_speed =  mag;
-    else if (keysDown.has("s")) state.move_speed = -mag;
-    else                        state.move_speed =  0.0;
 
-    if      (keysDown.has("a")) state.steer = -1.0;
-    else if (keysDown.has("d")) state.steer =  1.0;
-    else                        state.steer =  0.0;
+    // Gamepad analog input takes priority when stick is deflected
+    if (gpIndex !== null && (gpSpeed !== 0 || gpSteer !== 0)) {
+      state.move_speed = gpSpeed * mag;
+      state.steer      = gpSteer;
+    } else {
+      if      (keysDown.has("w")) state.move_speed =  mag;
+      else if (keysDown.has("s")) state.move_speed = -mag;
+      else                        state.move_speed =  0.0;
+
+      if      (keysDown.has("a")) state.steer = -1.0;
+      else if (keysDown.has("d")) state.steer =  1.0;
+      else                        state.steer =  0.0;
+    }
   } else {
     state.move_speed = targetSpeedRaw * 0.1;
     state.steer = 0.0;
@@ -130,19 +214,46 @@ function applyControls() {
   sendState();
 }
 
-// ── UI handlers ───────────────────────────────────────────────────────────────
-swDrive.addEventListener("change", () => {
-  state.do_stop = !swDrive.checked;
+// ── Mode selection ────────────────────────────────────────────────────────────
+const btnDrive     = document.getElementById("btn-drive");
+const btnAutobrake = document.getElementById("btn-autobrake");
+
+btnDrive.addEventListener("click", () => {
+  state.do_stop = !state.do_stop;
+  btnDrive.classList.toggle("active", !state.do_stop);
   sendState();
 });
 
-swRemote.addEventListener("change", () => {
-  state.do_remote_control = swRemote.checked;
-  kbdHint.classList.toggle("visible", swRemote.checked);
-  if (!swRemote.checked) keysDown.clear();
-  applyControls();
+btnAutobrake.addEventListener("click", () => {
+  state.enable_auto_brake = !state.enable_auto_brake;
+  btnAutobrake.classList.toggle("active", state.enable_auto_brake);
+  sendState();
 });
 
+function setMode(name) {
+  const btns = document.querySelectorAll('.mode-btn');
+  if (currentMode === name) {
+    currentMode = null;
+    btns.forEach(b => b.classList.remove('active'));
+    state.mode = 0;
+    kbdHint.classList.remove('visible');
+    keysDown.clear();
+  } else {
+    currentMode = name;
+    btns.forEach(b => b.classList.remove('active'));
+    document.getElementById(`btn-${name}`).classList.add('active');
+    state.mode = name === 'remote' ? 1 : name === 'mode1' ? 2 : 3;
+    kbdHint.classList.toggle('visible', name === 'remote');
+    if (name !== 'remote') keysDown.clear();
+  }
+  applyControls();
+}
+
+['remote', 'mode1', 'mode2'].forEach(m => {
+  document.getElementById(`btn-${m}`).addEventListener('click', () => setMode(m));
+});
+
+// ── UI handlers ───────────────────────────────────────────────────────────────
 sliderSpeed.addEventListener("input", () => {
   targetSpeedRaw = parseInt(sliderSpeed.value);
   speedVal.textContent = `${(targetSpeedRaw * 0.1).toFixed(1)} m/s`;
@@ -167,6 +278,14 @@ btnHazard.addEventListener("click", () => {
   sendState();
 });
 
+const hornOn  = () => { state.play_sound = true;  btnHorn.classList.add("active");    sendState(); };
+const hornOff = () => { state.play_sound = false;  btnHorn.classList.remove("active"); sendState(); };
+btnHorn.addEventListener("mousedown",  hornOn);
+btnHorn.addEventListener("mouseup",    hornOff);
+btnHorn.addEventListener("mouseleave", hornOff);
+btnHorn.addEventListener("touchstart", (e) => { e.preventDefault(); hornOn(); });
+btnHorn.addEventListener("touchend",   hornOff);
+
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 document.addEventListener("keydown", (e) => {
   if (e.code === "Space") {
@@ -174,7 +293,7 @@ document.addEventListener("keydown", (e) => {
     if (!state.do_brake) { state.do_brake = true; sendState(); }
     return;
   }
-  if (!state.do_remote_control) return;
+  if (currentMode !== 'remote') return;
   const key = e.key.toLowerCase();
   if (!["w","a","s","d"].includes(key)) return;
   e.preventDefault();
@@ -193,5 +312,113 @@ document.addEventListener("keyup", (e) => {
   applyControls();
 });
 
+// ── Radar ─────────────────────────────────────────────────────────────────────
+const RADAR_N = 36;
+const RADAR_CX = 100, RADAR_CY = 100, RADAR_R = 88, RADAR_MAX_CM = 150;
+const RADAR_DEG = 360 / RADAR_N; // 10° per sector
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function initRadar() {
+  const divsG = document.getElementById("radar-divs");
+  const dotsG = document.getElementById("radar-dots");
+  for (let i = 0; i < RADAR_N; i++) {
+    const theta = (i * RADAR_DEG - 90) * Math.PI / 180;
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", RADAR_CX);
+    line.setAttribute("y1", RADAR_CY);
+    line.setAttribute("x2", (RADAR_CX + RADAR_R * Math.cos(theta)).toFixed(1));
+    line.setAttribute("y2", (RADAR_CY + RADAR_R * Math.sin(theta)).toFixed(1));
+    line.setAttribute("class", "radar-div");
+    divsG.appendChild(line);
+
+    const dot = document.createElementNS(SVG_NS, "circle");
+    dot.setAttribute("id", `radar-dot-${i}`);
+    dot.setAttribute("r", "0");
+    dotsG.appendChild(dot);
+  }
+}
+
+function updateRadar(dists) {
+  const points = [];
+  for (let i = 0; i < RADAR_N; i++) {
+    const theta = (i * RADAR_DEG - 90) * Math.PI / 180;
+    const d = dists[i];
+    const r = d > 0 ? (d / RADAR_MAX_CM) * RADAR_R : RADAR_R;
+    const x = RADAR_CX + r * Math.cos(theta);
+    const y = RADAR_CY + r * Math.sin(theta);
+    points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    const dot = document.getElementById(`radar-dot-${i}`);
+    if (!dot) continue;
+    dot.setAttribute("cx", x.toFixed(1));
+    dot.setAttribute("cy", y.toFixed(1));
+    if (d === 0) {
+      dot.setAttribute("r", "1.5");
+      dot.setAttribute("fill", "#2a2a2a");
+    } else {
+      dot.setAttribute("r", "2.5");
+      dot.setAttribute("fill", d <= 40 ? "#e02020" : d <= 80 ? "#ca8a04" : "#16a34a");
+    }
+  }
+  const poly = document.getElementById("radar-poly");
+  if (poly) poly.setAttribute("points", points.join(" "));
+}
+
+// ── IMU display ───────────────────────────────────────────────────────────────
+function updateAHI(pitch, roll) {
+  const scene = document.getElementById("ahi-scene");
+  if (scene) {
+    const pitchPx = Math.max(-36, Math.min(36, pitch * 0.72)); // 50° → edge
+    scene.setAttribute("transform", `rotate(${roll}, 50, 50) translate(0, ${pitchPx})`);
+  }
+  const pe = document.getElementById("disp-pitch");
+  const re = document.getElementById("disp-roll");
+  if (pe) pe.textContent = `${pitch > 0 ? "+" : ""}${pitch.toFixed(0)}°`;
+  if (re) re.textContent = `${roll  > 0 ? "+" : ""}${roll.toFixed(0)}°`;
+}
+
+function updateGMeter(ax, ay) {
+  const dot = document.getElementById("g-dot");
+  if (!dot) return;
+  const SCALE = 28; // 1g = 28px (range ±1g visible in r=38 circle)
+  const cx = Math.max(14, Math.min(86, 50 + ay * SCALE));
+  const cy = Math.max(14, Math.min(86, 50 - ax * SCALE));
+  dot.setAttribute("cx", cx.toFixed(1));
+  dot.setAttribute("cy", cy.toFixed(1));
+  const g = Math.sqrt(ax * ax + ay * ay);
+  dot.setAttribute("fill", g > 0.6 ? "#e02020" : g > 0.3 ? "#ca8a04" : "#16a34a");
+}
+
+// ── Camera stream watchdog ────────────────────────────────────────────────────
+(function () {
+  const img = document.getElementById("camera-stream");
+  let prevPx = null;
+  let frozenCount = 0;
+
+  function reconnect() {
+    frozenCount = 0;
+    prevPx = null;
+    img.src = `/stream?t=${Date.now()}`;
+  }
+
+  img.onerror = () => setTimeout(reconnect, 2000);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 8; canvas.height = 5;
+  const ctx = canvas.getContext("2d");
+
+  setInterval(() => {
+    if (!img.naturalWidth) return;
+    try {
+      ctx.drawImage(img, 0, 0, 8, 5);
+      const px = ctx.getImageData(0, 0, 8, 5).data.join(",");
+      if (px === prevPx) { if (++frozenCount >= 2) reconnect(); }
+      else { frozenCount = 0; prevPx = px; }
+    } catch (e) {}
+  }, 4000);
+})();
+
 // ── Init ──────────────────────────────────────────────────────────────────────
+speedVal.textContent = `${(targetSpeedRaw * 0.1).toFixed(1)} m/s`;
+accelVal.textContent = `${(targetAccelRaw * 0.1).toFixed(1)} m/s²`;
+initRadar();
 connect();

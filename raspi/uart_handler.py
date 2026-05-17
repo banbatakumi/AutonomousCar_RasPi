@@ -8,13 +8,15 @@ logger = logging.getLogger(__name__)
 HEADER = 0xFF
 FOOTER = 0xAA
 SEND_SIZE = 6
-RECV_SIZE = 11
+RECV_SIZE = 28
 SEND_INTERVAL = 0.05  # 20Hz
 
 # EMA smoothing factors (0=frozen, 1=no filter)
 _ALPHA_SPEED = 0.35   # speed / accel: moderate
 _ALPHA_DIST  = 0.50   # distance sensors: responsive but noise-reduced
 _ALPHA_VOLT  = 0.15   # voltages: slow-changing → heavy smoothing
+_ALPHA_IMU_A = 0.50   # IMU accelerometer: responsive
+_ALPHA_IMU_G = 0.30   # IMU pitch/roll: smoothed for display
 
 
 class UARTHandler:
@@ -27,10 +29,12 @@ class UARTHandler:
 
         self._command = {
             "do_stop": True,
-            "do_remote_control": False,
             "do_brake": False,
             "on_headlight": False,
             "on_hazard": False,
+            "play_sound": False,
+            "enable_auto_brake": False,
+            "mode": 0,
             "move_speed": 0.0,
             "acceleration": 0.0,
             "steer": 0.0,
@@ -39,13 +43,14 @@ class UARTHandler:
         self._sensor_data = {
             "speed": 0.0,
             "acceleration": 0.0,
-            "dist_front": 0,
-            "dist_left": 0,
-            "dist_right": 0,
-            "dist_back": 0,
+            "dists": [0] * 36,  # cm, 0=out of range; sectors: 0°,10°,...,350°
             "volt_signal": 0.0,
             "volt_power": 0.0,
             "motor_error": False,
+            "accel_x": 0.0,  # longitudinal G (forward positive), 4-bit signed × 0.1
+            "accel_y": 0.0,  # lateral G (right positive), 4-bit signed × 0.1
+            "pitch": 0.0,    # degrees, nose-up positive
+            "roll": 0.0,     # degrees, right-bank positive
         }
 
     def start(self):
@@ -74,10 +79,12 @@ class UARTHandler:
 
         flags = 0
         if cmd["do_stop"]:           flags |= 0x01
-        if cmd["do_remote_control"]: flags |= 0x02
-        if cmd["do_brake"]:          flags |= 0x04
-        if cmd["on_headlight"]:      flags |= 0x08
-        if cmd["on_hazard"]:         flags |= 0x10
+        if cmd["do_brake"]:          flags |= 0x02
+        if cmd["on_headlight"]:      flags |= 0x04
+        if cmd["on_hazard"]:         flags |= 0x08
+        if cmd["play_sound"]:        flags |= 0x10
+        if cmd["enable_auto_brake"]: flags |= 0x20
+        flags |= (int(cmd["mode"]) & 0x03) << 6
 
         move_speed   = max(-128, min(127, round(cmd["move_speed"]   / 0.1)))
         acceleration = max(-128, min(127, round(cmd["acceleration"] / 0.1)))
@@ -138,14 +145,28 @@ class UARTHandler:
                     logger.error("UART recv error: %s", e)
 
     def _parse_packet(self, pkt: bytes):
-        # [0xFF, speed, accel, dist_f, dist_l, dist_r, dist_b, volt_s, volt_p, motor_err, 0xAA]
+        # [0xFF, speed, accel, b3..b20(36 nibbles), volt_s, volt_p, motor_err,
+        #  accel_xy, pitch, roll, 0xAA]
         speed  = struct.unpack("b", bytes([pkt[1]]))[0] * 0.1
         accel  = struct.unpack("b", bytes([pkt[2]]))[0] * 0.1
-        volt_s = pkt[7] * 0.1
-        volt_p = pkt[8] * 0.1
+        volt_s = pkt[21] * 0.1
+        volt_p = pkt[22] * 0.1
+
+        raw = []
+        for b in pkt[3:21]:
+            raw.append((b >> 4) & 0xF)
+            raw.append(b & 0xF)
+        dists = [v * 10 for v in raw]  # cm; 0=out of range, else 10-150
+
+        # IMU: accel nibbles (int8_t signed 4-bit, × 0.1g)
+        def s4(v): return v - 16 if v >= 8 else v  # 4-bit two's complement
+        ax = s4((pkt[24] >> 4) & 0xF) * 0.1
+        ay = s4(pkt[24] & 0xF) * 0.1
+        pitch = struct.unpack("b", bytes([pkt[25]]))[0] * 1.0  # degrees
+        roll  = struct.unpack("b", bytes([pkt[26]]))[0] * 1.0  # degrees
 
         with self._lock:
-            p = self._sensor_data  # previous filtered values
+            p = self._sensor_data
 
             def ema(new, old, a):
                 return new * a + old * (1 - a)
@@ -153,11 +174,13 @@ class UARTHandler:
             self._sensor_data = {
                 "speed":        round(ema(speed,  p["speed"],        _ALPHA_SPEED), 2),
                 "acceleration": round(ema(accel,  p["acceleration"], _ALPHA_SPEED), 2),
-                "dist_front":   round(ema(pkt[3], p["dist_front"],   _ALPHA_DIST)),
-                "dist_left":    round(ema(pkt[4], p["dist_left"],    _ALPHA_DIST)),
-                "dist_right":   round(ema(pkt[5], p["dist_right"],   _ALPHA_DIST)),
-                "dist_back":    round(ema(pkt[6], p["dist_back"],    _ALPHA_DIST)),
+                "dists":        [round(ema(d, p["dists"][i], _ALPHA_DIST)) if d > 0 else 0
+                                 for i, d in enumerate(dists)],
                 "volt_signal":  round(ema(volt_s, p["volt_signal"],  _ALPHA_VOLT), 1),
                 "volt_power":   round(ema(volt_p, p["volt_power"],   _ALPHA_VOLT), 1),
-                "motor_error":  bool(pkt[9]),
+                "motor_error":  bool(pkt[23]),
+                "accel_x":      round(ema(ax,    p["accel_x"], _ALPHA_IMU_A), 2),
+                "accel_y":      round(ema(ay,    p["accel_y"], _ALPHA_IMU_A), 2),
+                "pitch":        round(ema(pitch, p["pitch"],   _ALPHA_IMU_G), 1),
+                "roll":         round(ema(roll,  p["roll"],    _ALPHA_IMU_G), 1),
             }

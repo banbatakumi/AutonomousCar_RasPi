@@ -21,7 +21,7 @@ robotcar/
 └── app/            # ブラウザ UI（バニラ JS）
     ├── index.html
     ├── style.css
-    └── main.js         # WebSocket・W/A/S/D キーボード制御
+    └── main.js         # WebSocket・W/A/S/D キーボード制御・ゲームパッド制御
 ```
 
 ## Running the Server (on Raspberry Pi)
@@ -52,10 +52,17 @@ sudo systemctl start robotcar
 - **ゲージ（2×2 SVG アークゲージ）**:
   - 上段: SPEED（赤、0-5 m/s）/ ACCEL（黄、0-5 m/s²）
   - 下段: SIGNAL V（青、0-5V）/ POWER V（緑、0-15V、色が電圧で変化）
-- **スライダー**: SPD (0–12.7 m/s) / ACC (0–12.7 m/s²)
-- **スイッチ**: DRIVE（do_stop 反転）/ REMOTE（W/A/S/D 操作モード）
+- **スライダー**: SPD (0–12.7 m/s) / ACC (0–12.7 m/s²)　デフォルト値: 1.0 m/s / 1.0 m/s²
+- **スイッチ**: DRIVE（do_stop 反転）/ REMOTE（W/A/S/D・ゲームパッド操作モード）
 - **ボタン**: LIGHT（ヘッドライト）/ HAZARD（ハザード）
 - **キーボード**: W/A/S/D=移動方向（REMOTEモード時）、Space長押し=ブレーキ
+- **ゲームパッド**: Elecom JC-U3613M（USB接続、**Chrome のみ対応**、Safari 非対応）
+  - `axes[1]`（左スティック Y）→ 速度（上=前進、SPD スライダーで最大値設定）
+  - `axes[2]`（右スティック X）→ ステアリング（±1.0）
+  - `button[5]`（R1）→ ブレーキ（押している間）
+  - `button[4]`（L1）→ ライト ON/OFF（押した瞬間にトグル）
+  - 接続状態はヘッダーの `GAMEPAD --` / `GAMEPAD READY` で確認
+  - ページロード後にコントローラーのボタンを1回押すと認識される
 - **テレメトリ**: MOTOR エラー表示のみ（距離は画面左下の dist-bar で表示）
 
 ## Network / Access
@@ -64,6 +71,12 @@ sudo systemctl start robotcar
 - RasPi 固定 IP: `192.168.10.1`
 - ブラウザアクセス: `http://192.168.10.1:8000`
 - SSH: `ssh pi@192.168.10.1`（PW: `robotcar`）
+
+### 開発時（有線 LAN 接続時）
+- 有線 LAN 接続中は `robotcar.local` で解決可能（DHCP）
+- ファイル更新: `scp <file> pi@robotcar.local:/home/pi/robotcar/app/`
+- 静的ファイル（HTML/CSS/JS）の変更はサーバー再起動不要
+- **転送後は必ず** `curl -s http://robotcar.local:8000/main.js | node --check /dev/stdin` で構文確認すること（並列 scp によるファイル破損を防ぐため）
 
 ## Setup Reference
 
