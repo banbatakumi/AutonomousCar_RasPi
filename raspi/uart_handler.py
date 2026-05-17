@@ -5,61 +5,62 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-HEADER = 0xFF
-FOOTER = 0xAA
-SEND_SIZE = 6
-RECV_SIZE = 31
-SEND_INTERVAL = 0.05  # 20Hz
+HEADER        = 0xFF
+FOOTER        = 0xAA
+SEND_SIZE     = 6
+RECV_SIZE     = 733  # [0xFF][motor_err][speed][accel][volt_s][volt_p][accel_xy]
+                     # [pitch][roll][tmp_l][tmp_r][tmp_s][dis×360×uint16 big-endian mm][0xAA]
+SEND_INTERVAL = 0.05  # 20 Hz
 
 # EMA smoothing factors (0=frozen, 1=no filter)
-_ALPHA_SPEED = 0.35   # speed / accel: moderate
-_ALPHA_DIST  = 0.50   # distance sensors: responsive but noise-reduced
-_ALPHA_VOLT  = 0.15   # voltages: slow-changing → heavy smoothing
-_ALPHA_IMU_A = 0.50   # IMU accelerometer: responsive
-_ALPHA_IMU_G = 0.30   # IMU pitch/roll: smoothed for display
-_ALPHA_TEMP  = 0.10   # motor temperature: slow-changing
+_ALPHA_SPEED = 0.35
+_ALPHA_DIST  = 0.50
+_ALPHA_VOLT  = 0.15
+_ALPHA_IMU_A = 0.50
+_ALPHA_IMU_G = 0.30
+_ALPHA_TEMP  = 0.10
 
 
 class UARTHandler:
-    def __init__(self, port="/dev/serial0", baudrate=230400):
-        self._port = port
+    def __init__(self, port="/dev/serial0", baudrate=1000000):
+        self._port     = port
         self._baudrate = baudrate
-        self._serial = None
-        self._lock = threading.Lock()
-        self._running = False
+        self._serial   = None
+        self._lock     = threading.Lock()
+        self._running  = False
 
         self._command = {
-            "do_stop": True,
-            "do_brake": False,
-            "on_headlight": False,
-            "on_hazard": False,
-            "play_sound": False,
+            "do_stop":           True,
+            "do_brake":          False,
+            "on_headlight":      False,
+            "on_hazard":         False,
+            "play_sound":        False,
             "enable_auto_brake": False,
-            "mode": 0,
-            "move_speed": 0.0,
-            "acceleration": 0.0,
-            "steer": 0.0,
+            "mode":              0,
+            "move_speed":        0.0,
+            "acceleration":      0.0,
+            "steer":             0.0,
         }
 
         self._sensor_data = {
-            "speed": 0.0,
+            "speed":        0.0,
             "acceleration": 0.0,
-            "dists": [0] * 36,  # cm, 0=out of range; sectors: 0°,10°,...,350°
-            "volt_signal": 0.0,
-            "volt_power": 0.0,
-            "motor_error": False,
-            "accel_x": 0.0,  # longitudinal G (forward positive), 4-bit signed × 0.1
-            "accel_y": 0.0,  # lateral G (right positive), 4-bit signed × 0.1
-            "pitch": 0.0,    # degrees, nose-up positive
-            "roll": 0.0,     # degrees, right-bank positive
-            "temp_left":  0, # left motor temperature, °C
-            "temp_right": 0, # right motor temperature, °C
-            "temp_steer": 0, # steer motor temperature, °C
+            "dists":        [0] * 360,  # mm; 360 sectors×1°, 0=範囲外, 最大12000mm
+            "volt_signal":  0.0,
+            "volt_power":   0.0,
+            "motor_error":  False,
+            "accel_x":      0.0,
+            "accel_y":      0.0,
+            "pitch":        0.0,
+            "roll":         0.0,
+            "temp_left":    0,
+            "temp_right":   0,
+            "temp_steer":   0,
         }
 
     def start(self):
         import serial
-        self._serial = serial.Serial(self._port, self._baudrate, timeout=0.1)
+        self._serial  = serial.Serial(self._port, self._baudrate, timeout=0.1)
         self._running = True
         threading.Thread(target=self._send_loop, daemon=True).start()
         threading.Thread(target=self._recv_loop, daemon=True).start()
@@ -106,22 +107,19 @@ class UARTHandler:
             time.sleep(SEND_INTERVAL)
 
     def _recv_loop(self):
-        buf = bytearray()
-        _diag_bytes = 0
+        buf          = bytearray()
+        _diag_bytes  = 0
         _diag_frames = 0
-        _diag_t = time.time()
+        _diag_t      = time.time()
 
         while self._running:
             try:
                 waiting = self._serial.in_waiting
-                chunk = self._serial.read(waiting if waiting > 0 else 1)
-                if not chunk:
-                    pass
-                else:
+                chunk   = self._serial.read(waiting if waiting > 0 else 1)
+                if chunk:
                     _diag_bytes += len(chunk)
                     buf.extend(chunk)
 
-                    # ヘッダ(0xFF)とフッタ(0xAA)の両方が正しい位置にある最後のフレームを使用
                     last_pos = -1
                     i = 0
                     while i <= len(buf) - RECV_SIZE:
@@ -136,41 +134,38 @@ class UARTHandler:
                     elif len(buf) > RECV_SIZE * 4:
                         del buf[:len(buf) - RECV_SIZE + 1]
 
-                # 10秒ごとに受信統計をログ出力
                 now = time.time()
                 if now - _diag_t >= 10.0:
-                    logger.info("UART recv: %d bytes, %d frames / 10s", _diag_bytes, _diag_frames)
-                    _diag_bytes = 0
+                    logger.info("UART recv: %d bytes, %d frames / 10s",
+                                _diag_bytes, _diag_frames)
+                    _diag_bytes  = 0
                     _diag_frames = 0
-                    _diag_t = now
+                    _diag_t      = now
 
             except Exception as e:
                 if self._running:
                     logger.error("UART recv error: %s", e)
 
     def _parse_packet(self, pkt: bytes):
-        # [0xFF, speed, accel, b3..b20(36 nibbles), volt_s, volt_p, motor_err,
-        #  accel_xy, pitch, roll, 0xAA]
-        speed  = struct.unpack("b", bytes([pkt[1]]))[0] * 0.1
-        accel  = struct.unpack("b", bytes([pkt[2]]))[0] * 0.1
-        volt_s = pkt[21] * 0.1
-        volt_p = pkt[22] * 0.1
+        # [0xFF][motor_err][speed][accel][volt_s][volt_p][accel_xy][pitch][roll]
+        # [tmp_l][tmp_r][tmp_s][dis×360bytes][0xAA]
+        motor_err = bool(pkt[1])
+        speed  = struct.unpack("b", bytes([pkt[2]]))[0] * 0.1
+        accel  = struct.unpack("b", bytes([pkt[3]]))[0] * 0.1
+        volt_s = pkt[4] * 0.1
+        volt_p = pkt[5] * 0.1
 
-        raw = []
-        for b in pkt[3:21]:
-            raw.append((b >> 4) & 0xF)
-            raw.append(b & 0xF)
-        dists = [v * 10 for v in raw]  # cm; 0=out of range, else 10-150
-
-        # IMU: accel nibbles (int8_t signed 4-bit, × 0.1g)
         def s4(v): return v - 16 if v >= 8 else v  # 4-bit two's complement
-        ax = s4((pkt[24] >> 4) & 0xF) * 0.1
-        ay = s4(pkt[24] & 0xF) * 0.1
-        pitch = struct.unpack("b", bytes([pkt[25]]))[0] * 1.0  # degrees
-        roll  = struct.unpack("b", bytes([pkt[26]]))[0] * 1.0  # degrees
-        temp_l = pkt[27]
-        temp_r = pkt[28]
-        temp_s = pkt[29]
+        ax    = s4((pkt[6] >> 4) & 0xF) * 0.5
+        ay    = s4(pkt[6] & 0xF) * 0.5
+        pitch = struct.unpack("b", bytes([pkt[7]]))[0] * 1.0
+        roll  = struct.unpack("b", bytes([pkt[8]]))[0] * 1.0
+        temp_l = pkt[9]
+        temp_r = pkt[10]
+        temp_s = pkt[11]
+
+        # LiDAR: bytes [12..731] = 720 bytes = 360 × uint16 big-endian, mm, 0=範囲外
+        dists = [((pkt[12 + i*2] << 8) | pkt[12 + i*2 + 1]) for i in range(360)]  # mm
 
         with self._lock:
             p = self._sensor_data
@@ -182,10 +177,10 @@ class UARTHandler:
                 "speed":        round(ema(speed,  p["speed"],        _ALPHA_SPEED), 2),
                 "acceleration": round(ema(accel,  p["acceleration"], _ALPHA_SPEED), 2),
                 "dists":        [round(ema(d, p["dists"][i], _ALPHA_DIST)) if d > 0 else 0
-                                 for i, d in enumerate(dists)],
+                                 for i, d in enumerate(dists)],  # 360 sectors
                 "volt_signal":  round(ema(volt_s, p["volt_signal"],  _ALPHA_VOLT), 1),
                 "volt_power":   round(ema(volt_p, p["volt_power"],   _ALPHA_VOLT), 1),
-                "motor_error":  bool(pkt[23]),
+                "motor_error":  motor_err,
                 "accel_x":      round(ema(ax,    p["accel_x"], _ALPHA_IMU_A), 2),
                 "accel_y":      round(ema(ay,    p["accel_y"], _ALPHA_IMU_A), 2),
                 "pitch":        round(ema(pitch, p["pitch"],   _ALPHA_IMU_G), 1),

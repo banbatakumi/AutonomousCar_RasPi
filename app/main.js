@@ -59,9 +59,13 @@ const gAccel      = document.getElementById("g-accel");
 const dispVsig    = document.getElementById("disp-vsig");
 const dispVpow    = document.getElementById("disp-vpow");
 const gVsig       = document.getElementById("g-vsig");
-const dispErr     = document.getElementById("disp-err");
-const dispErrItem = document.getElementById("disp-err-item");
-const gVolt       = document.getElementById("g-volt");
+const dispErr = document.getElementById("disp-err");
+const gVolt   = document.getElementById("g-volt");
+
+const dispRssi    = document.getElementById("disp-rssi");
+const dispCpuTemp = document.getElementById("disp-cpu-temp");
+const dispCpuLoad = document.getElementById("disp-cpu-load");
+const dispMem     = document.getElementById("disp-mem");
 
 const gTempLeft     = document.getElementById("g-temp-left");
 const gTempRight    = document.getElementById("g-temp-right");
@@ -115,7 +119,23 @@ function connect() {
 
     const err = d.motor_error;
     dispErr.textContent = err ? "ERROR" : "OK";
-    dispErrItem.classList.toggle("error", err);
+    dispErr.className = "hdr-telem-val" + (err ? " error" : "");
+
+    const cpu = d.cpu_temp;
+    dispCpuTemp.textContent = cpu != null ? `${cpu}` : "--";
+    dispCpuTemp.className = "hdr-telem-val" + (!cpu ? "" : cpu >= 80 ? " error" : cpu >= 70 ? " warn" : "");
+
+    const load = d.cpu_load;
+    dispCpuLoad.textContent = load != null ? `${load}%` : "--%";
+    dispCpuLoad.className = "hdr-telem-val" + (!load ? "" : load >= 80 ? " error" : load >= 50 ? " warn" : "");
+
+    const mem = d.mem_usage;
+    dispMem.textContent = mem != null ? `${mem}%` : "--%";
+    dispMem.className = "hdr-telem-val" + (!mem ? "" : mem >= 85 ? " error" : mem >= 70 ? " warn" : "");
+
+    const rssi = d.wifi_tx_mbps;
+    dispRssi.textContent = rssi !== null && rssi !== undefined ? `${rssi}` : "--";
+    dispRssi.className = "hdr-telem-val" + (rssi == null ? "" : rssi >= -60 ? "" : rssi >= -75 ? " warn" : " error");
   };
 }
 
@@ -289,6 +309,15 @@ btnHazard.addEventListener("click", () => {
   sendState();
 });
 
+const btnBrake = document.getElementById("btn-brake");
+const brakeOn  = () => { state.do_brake = true;  btnBrake.classList.add("active");    sendState(); };
+const brakeOff = () => { state.do_brake = false; btnBrake.classList.remove("active"); sendState(); };
+btnBrake.addEventListener("mousedown",  brakeOn);
+btnBrake.addEventListener("mouseup",    brakeOff);
+btnBrake.addEventListener("mouseleave", brakeOff);
+btnBrake.addEventListener("touchstart", (e) => { e.preventDefault(); brakeOn(); });
+btnBrake.addEventListener("touchend",   brakeOff);
+
 const hornOn  = () => { state.play_sound = true;  btnHorn.classList.add("active");    sendState(); };
 const hornOff = () => { state.play_sound = false;  btnHorn.classList.remove("active"); sendState(); };
 btnHorn.addEventListener("mousedown",  hornOn);
@@ -324,16 +353,17 @@ document.addEventListener("keyup", (e) => {
 });
 
 // ── Radar ─────────────────────────────────────────────────────────────────────
-const RADAR_N = 36;
-const RADAR_CX = 100, RADAR_CY = 100, RADAR_R = 88, RADAR_MAX_CM = 150;
-const RADAR_DEG = 360 / RADAR_N; // 10° per sector
-const SVG_NS = "http://www.w3.org/2000/svg";
+const RADAR_N        = 360;   // LiDARセクター数（1°刻み）
+const RADAR_DOTS     = 36;    // 分割線数（10°刻み）
+const RADAR_DOT_STEP = 10;    // 分割線間隔（°）
+const RADAR_CX       = 100, RADAR_CY = 100, RADAR_R = 88;
+let   radarMaxMm     = 2500;  // 最大表示距離 (mm), スライダーで変更
+const SVG_NS         = "http://www.w3.org/2000/svg";
 
 function initRadar() {
   const divsG = document.getElementById("radar-divs");
-  const dotsG = document.getElementById("radar-dots");
-  for (let i = 0; i < RADAR_N; i++) {
-    const theta = (i * RADAR_DEG - 90) * Math.PI / 180;
+  for (let i = 0; i < RADAR_DOTS; i++) {
+    const theta = (i * RADAR_DOT_STEP - 90) * Math.PI / 180;
     const line = document.createElementNS(SVG_NS, "line");
     line.setAttribute("x1", RADAR_CX);
     line.setAttribute("y1", RADAR_CY);
@@ -341,34 +371,17 @@ function initRadar() {
     line.setAttribute("y2", (RADAR_CY + RADAR_R * Math.sin(theta)).toFixed(1));
     line.setAttribute("class", "radar-div");
     divsG.appendChild(line);
-
-    const dot = document.createElementNS(SVG_NS, "circle");
-    dot.setAttribute("id", `radar-dot-${i}`);
-    dot.setAttribute("r", "0");
-    dotsG.appendChild(dot);
   }
 }
 
 function updateRadar(dists) {
+  // dists: 360要素 (mm, 0=範囲外), 1°刻み
   const points = [];
   for (let i = 0; i < RADAR_N; i++) {
-    const theta = (i * RADAR_DEG - 90) * Math.PI / 180;
+    const theta = (i - 90) * Math.PI / 180;
     const d = dists[i];
-    const r = d > 0 ? (d / RADAR_MAX_CM) * RADAR_R : RADAR_R;
-    const x = RADAR_CX + r * Math.cos(theta);
-    const y = RADAR_CY + r * Math.sin(theta);
-    points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-    const dot = document.getElementById(`radar-dot-${i}`);
-    if (!dot) continue;
-    dot.setAttribute("cx", x.toFixed(1));
-    dot.setAttribute("cy", y.toFixed(1));
-    if (d === 0) {
-      dot.setAttribute("r", "1.5");
-      dot.setAttribute("fill", "#2a2a2a");
-    } else {
-      dot.setAttribute("r", "2.5");
-      dot.setAttribute("fill", d <= 40 ? "#e02020" : d <= 80 ? "#ca8a04" : "#16a34a");
-    }
+    const r = d > 0 ? Math.min(d / radarMaxMm, 1.0) * RADAR_R : RADAR_R;
+    points.push(`${(RADAR_CX + r * Math.cos(theta)).toFixed(1)},${(RADAR_CY + r * Math.sin(theta)).toFixed(1)}`);
   }
   const poly = document.getElementById("radar-poly");
   if (poly) poly.setAttribute("points", points.join(" "));
@@ -408,34 +421,43 @@ function updateGMeter(ax, ay) {
   dot.setAttribute("fill", g > 0.6 ? "#e02020" : g > 0.3 ? "#ca8a04" : "#16a34a");
 }
 
-// ── Camera stream watchdog ────────────────────────────────────────────────────
+// ── Camera WebSocket ──────────────────────────────────────────────────────────
 (function () {
   const img = document.getElementById("camera-stream");
-  let prevPx = null;
-  let frozenCount = 0;
+  let prevUrl = null;
+  let camWs = null;
 
-  function reconnect() {
-    frozenCount = 0;
-    prevPx = null;
-    img.src = `/stream?t=${Date.now()}`;
+  function connectCamera() {
+    camWs = new WebSocket(`ws://${location.host}/ws/camera`);
+    camWs.binaryType = "arraybuffer";
+
+    camWs.onmessage = (e) => {
+      const blob = new Blob([e.data], { type: "image/jpeg" });
+      const url = URL.createObjectURL(blob);
+      const old = prevUrl;
+      img.onload = () => { if (old) URL.revokeObjectURL(old); };
+      img.src = url;
+      prevUrl = url;
+    };
+
+    camWs.onclose = () => {
+      if (prevUrl) { URL.revokeObjectURL(prevUrl); prevUrl = null; }
+      setTimeout(connectCamera, 2000);
+    };
+
+    camWs.onerror = () => camWs.close();
   }
 
-  img.onerror = () => setTimeout(reconnect, 2000);
-
-  const canvas = document.createElement("canvas");
-  canvas.width = 8; canvas.height = 5;
-  const ctx = canvas.getContext("2d");
-
-  setInterval(() => {
-    if (!img.naturalWidth) return;
-    try {
-      ctx.drawImage(img, 0, 0, 8, 5);
-      const px = ctx.getImageData(0, 0, 8, 5).data.join(",");
-      if (px === prevPx) { if (++frozenCount >= 1) reconnect(); }
-      else { frozenCount = 0; prevPx = px; }
-    } catch (e) {}
-  }, 2000);
+  connectCamera();
 })();
+
+// ── Radar range slider ────────────────────────────────────────────────────────
+const sliderRadarRange = document.getElementById("slider-radar-range");
+const radarRangeVal    = document.getElementById("radar-range-val");
+sliderRadarRange.addEventListener("input", () => {
+  radarMaxMm = parseInt(sliderRadarRange.value);
+  radarRangeVal.textContent = `${radarMaxMm / 10} cm`;
+});
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 speedVal.textContent = `${(targetSpeedRaw * 0.1).toFixed(1)} m/s`;

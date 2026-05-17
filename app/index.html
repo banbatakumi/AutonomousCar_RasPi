@@ -11,6 +11,14 @@
 <header class="hdr">
   <div class="hdr-brand">◈ ROBOTCAR</div>
   <div class="hdr-right">
+    <span class="hdr-inline-telem">
+      CPU: <span id="disp-cpu-temp" class="hdr-telem-val">--</span>°C
+      <span id="disp-cpu-load" class="hdr-telem-val">--%</span>
+      &nbsp;&nbsp;MEM: <span id="disp-mem" class="hdr-telem-val">--%</span>
+      &nbsp;&nbsp;MOTOR: <span id="disp-err" class="hdr-telem-val">OK</span>
+      &nbsp;&nbsp;WiFi: <span id="disp-rssi" class="hdr-telem-val">--</span> dBm
+    </span>
+    <span class="hdr-sep">|</span>
     <span id="gp-status" class="gp-status">GAMEPAD --</span>
     <span id="kbd-hint" class="kbd-hint">W/A/S/D · SPACE:BRAKE</span>
     <span id="ws-status" class="ws-status disconnected">● OFFLINE</span>
@@ -22,7 +30,7 @@
   <!-- ── LEFT: Camera + Controls ──────────────────── -->
   <div class="cam-col">
     <div class="cam-frame">
-      <img id="camera-stream" src="/stream" alt="CAMERA FEED">
+      <img id="camera-stream" alt="CAMERA FEED">
       <div class="hud-corner tl"></div>
       <div class="hud-corner tr"></div>
       <div class="hud-corner bl"></div>
@@ -76,6 +84,7 @@
             </div>
           </div>
           <div class="action-btns">
+            <button id="btn-brake"     class="act-btn"><span>⏹</span><span>BRAKE</span></button>
             <button id="btn-headlight" class="act-btn"><span>💡</span><span>LIGHT</span></button>
             <button id="btn-hazard"    class="act-btn hazard"><span>⚠</span><span>HAZARD</span></button>
             <button id="btn-horn"      class="act-btn"><span>📯</span><span>HORN</span></button>
@@ -159,6 +168,15 @@
       </svg>
     </div>
 
+    <!-- Radar range slider -->
+    <div class="radar-range-wrap">
+      <div class="sl-row">
+        <span class="sl-lbl">RNG</span>
+        <input type="range" id="slider-radar-range" min="500" max="12000" value="2500" step="500">
+        <span class="sl-val" id="radar-range-val">250 cm</span>
+      </div>
+    </div>
+
     <!-- IMU: Attitude Indicator + G-meter -->
     <div class="gauge-row">
       <!-- Artificial Horizon Indicator -->
@@ -203,13 +221,6 @@
       </div>
     </div>
 
-    <!-- Telemetry strip -->
-    <div class="telem-strip">
-      <div class="tl-cell" id="disp-err-item">
-        <span class="tl-lbl">MOTOR</span>
-        <span class="tl-val" id="disp-err">OK</span>
-      </div>
-    </div>
 
   </div><!-- /inst-col -->
 </div><!-- /cockpit -->

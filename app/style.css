@@ -73,6 +73,24 @@ body {
 }
 .gp-status.connected { color: #22c55e; }
 
+.hdr-inline-telem {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 1px;
+  white-space: nowrap;
+}
+.hdr-telem-val {
+  color: var(--text);
+  font-weight: bold;
+}
+.hdr-telem-val.warn  { color: var(--yellow); }
+.hdr-telem-val.error { color: var(--red); }
+.hdr-sep {
+  color: var(--border);
+  font-size: 16px;
+  align-self: center;
+}
+
 .kbd-hint {
   font-size: 10px;
   color: var(--muted);
@@ -84,7 +102,7 @@ body {
 /* ── Main cockpit grid ─────────────────────────────────── */
 .cockpit {
   display: grid;
-  grid-template-columns: 1fr 430px;
+  grid-template-columns: 1fr 500px;
   gap: 10px;
   padding: 10px;
   flex: 1;
@@ -103,7 +121,7 @@ body {
   position: relative;
   background: #000;
   border: 1px solid #1a1a1a;
-  aspect-ratio: 5 / 3;
+  aspect-ratio: 320 / 182;
   overflow: hidden;
   width: 100%;
 }
@@ -175,6 +193,14 @@ body {
 .radar-lbl    { fill: var(--muted); font-size: 9px; font-family: 'Courier New', monospace;
                 text-anchor: middle; dominant-baseline: middle; }
 .radar-center { fill: var(--red); }
+
+/* Radar range slider */
+.radar-range-wrap {
+  padding: 4px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
 
 /* ── Instrument column ─────────────────────────────────── */
 .inst-col {
@@ -330,7 +356,7 @@ body {
 
 .action-btns {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 6px;
   align-items: stretch;
 }

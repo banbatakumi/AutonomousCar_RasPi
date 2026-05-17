@@ -7,12 +7,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 CAPTURE_FPS = 30
-CAPTURE_WIDTH = 240
-CAPTURE_HEIGHT = 144   # 240 * 3/5: 下2/5（車体）を除外
-JPEG_QUALITY = 80
+CAPTURE_WIDTH = 320
+CAPTURE_HEIGHT = 182   # 320 * 4/7: 下3/7（車体）を除外
+JPEG_QUALITY = 70
 
-# IMX219 フルセンサー座標 (3280x2464) の上位 4/5 を使用
-_SENSOR_CROP = (0, 0, 3280, 1971)   # 2464 * 0.8 ≈ 1971
+# IMX219 フルセンサー座標 (3280x2464) の上位 4/7 を使用
+_SENSOR_CROP = (0, 0, 3280, 1866)   # 3280 * 182/320 ≈ 1866
 
 
 class _Output(io.BufferedIOBase):
@@ -69,8 +69,9 @@ class CameraStream:
             self._output = output
             cam.start_recording(JpegEncoder(q=JPEG_QUALITY), FileOutput(output), name="lores")
             cam.set_controls({
-                "FrameDurationLimits": (frame_us, frame_us),
+                "FrameDurationLimits": (frame_us, 100_000),  # 暗時は最低10fpsまで露光延長
                 "ScalerCrop": _SENSOR_CROP,
+                "AeEnable": True,
             })
 
             try:
@@ -81,6 +82,22 @@ class CameraStream:
                 self._output = None
         except Exception as e:
             logger.error("Camera error: %s", e)
+
+    async def generate_raw(self):
+        loop = asyncio.get_event_loop()
+        last_frame = None
+        while True:
+            output = self._output
+            if output is None:
+                await asyncio.sleep(0.1)
+                continue
+            frame = await loop.run_in_executor(None, output.wait_new, last_frame)
+            if frame is None:
+                if not self._running:
+                    break
+                continue
+            last_frame = frame
+            yield frame
 
     async def generate(self):
         loop = asyncio.get_event_loop()

@@ -4,11 +4,25 @@ Raspberry Pi 3 + STM32F446RE によるロボットカー遠隔操縦システム
 
 - **RasPi** が FastAPI サーバーを起動し、Wi-Fi AP として動作
 - **ブラウザ**（Mac 等）が `http://192.168.10.1:8000` へアクセスして操作
-- **STM32** とは UART 230400bps で制御コマンド・センサーデータを交換
+- **STM32** とは UART 1Mbps で制御コマンド・センサーデータを交換
 
 ---
 
-## 1. AP モード設定
+## ハードウェア構成
+
+| 部品 | 詳細 |
+|------|------|
+| Raspberry Pi 3 Model B | ホスト名: `robotcar`、ユーザー: `pi` |
+| STM32F446RE | UART（GPIO14/TX, 15/RX）、**1,000,000bps** |
+| カメラ | Raspberry Pi Camera Module v2（CSI接続） |
+| USB WiFi | MT7610U（Archer T2U相当）、wlan1、2.4GHz 802.11n |
+| ブザー | GPIO18（PWM0） |
+| LED1 | GPIO19（リモコン表示） |
+| LED2 | GPIO13（PC接続表示） |
+
+---
+
+## 1. AP モード設定（USB WiFi アダプタ wlan1 使用）
 
 ### 必要パッケージのインストール
 
@@ -18,47 +32,76 @@ sudo apt install -y hostapd dnsmasq
 sudo systemctl stop hostapd dnsmasq
 ```
 
-### 静的 IP の設定（`/etc/dhcpcd.conf` に追記）
+### hostapd 設定（`/etc/hostapd/hostapd.conf`）
 
 ```
-interface wlan0
-    static ip_address=192.168.10.1/24
-    nohook wpa_supplicant
+interface=wlan1
+driver=nl80211
+ssid=robotcar
+hw_mode=g
+channel=1
+country_code=JP
+ieee80211n=1
+wmm_enabled=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=2
+wpa_passphrase=robotcar1234
+wpa_key_mgmt=WPA-PSK
+wpa_pairwise=CCMP
+rsn_pairwise=CCMP
 ```
-
-### hostapd 設定
 
 ```bash
-sudo cp raspi/setup/hostapd.conf /etc/hostapd/hostapd.conf
 echo 'DAEMON_CONF="/etc/hostapd/hostapd.conf"' | sudo tee -a /etc/default/hostapd
 ```
 
-### dnsmasq 設定
+### hostapd の systemd drop-in（`/etc/systemd/system/hostapd.service.d/wait-wlan0.conf`）
+
+```ini
+[Unit]
+After=systemd-networkd.service sys-subsystem-net-devices-wlan1.device
+Requires=sys-subsystem-net-devices-wlan1.device
+```
+
+### dnsmasq 設定（`/etc/dnsmasq.conf`）
+
+```
+interface=wlan1
+dhcp-range=192.168.10.2,192.168.10.20,255.255.255.0,24h
+domain=local
+address=/robotcar.local/192.168.10.1
+```
+
+### 静的 IP と省電力無効化（`/etc/rc.local`）
 
 ```bash
-sudo mv /etc/dnsmasq.conf /etc/dnsmasq.conf.bak
-sudo cp raspi/setup/dnsmasq.conf /etc/dnsmasq.conf
+#!/bin/sh -e
+echo on > /sys/class/net/wlan1/power/control
+ip addr add 192.168.10.1/24 dev wlan1 2>/dev/null || true
+ip link set wlan1 up
+exit 0
+```
+
+### wlan0 の無効化（`/etc/dhcpcd.conf` に追記）
+
+```
+denyinterfaces wlan0
+interface wlan1
+    static ip_address=192.168.10.1/24
+    nohook wpa_supplicant
 ```
 
 ### サービス有効化
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl unmask hostapd
 sudo systemctl enable hostapd dnsmasq
 sudo reboot
 ```
-
-### Wi-Fi 省電力モードの無効化
-
-```bash
-echo on | sudo tee /sys/class/net/wlan0/power/control
-# 永続化（/etc/rc.local に追記）
-echo 'echo on > /sys/class/net/wlan0/power/control' | sudo tee -a /etc/rc.local
-```
-
-> **注**: brcmfmac ドライバーの AP モードでは省電力モードを完全に無効化できない場合があります。  
-> `hostapd.conf` のチャンネルを 11 に設定することで干渉を軽減しています。  
-> カメラストリームのウォッチドッグ（2秒間隔）が自動で再接続を行います。
 
 ---
 
@@ -104,26 +147,18 @@ sudo systemctl start robotcar
 sudo journalctl -u robotcar -f
 ```
 
+> **サービス再起動**: `systemctl restart` ではなく以下を使う（接続待ちで止まるため）
+> ```bash
+> sudo systemctl kill -s SIGKILL robotcar && sleep 2 && sudo systemctl start robotcar
+> ```
+
 ---
 
-## 4. Mac からの接続手順
+## 4. 接続手順
 
-1. Mac の Wi-Fi で `robotcar`（パスワード: `robotcar1234`）に接続
+1. Wi-Fi で `robotcar`（パスワード: `robotcar1234`）に接続
 2. ブラウザ（Chrome 推奨）で `http://192.168.10.1:8000` を開く
 3. **DRIVE** ボタンをクリックして走行開始
-
----
-
-## ハードウェア構成
-
-| 部品 | 詳細 |
-|------|------|
-| Raspberry Pi 3 Model B | ホスト名: `robotcar`、ユーザー: `pi` |
-| STM32F446RE | UART（GPIO14/TX, 15/RX）、230400bps |
-| カメラ | Raspberry Pi Camera Module v2（CSI接続、30fps / JPEG quality 80） |
-| ブザー | GPIO18（PWM0） |
-| LED1 | GPIO19 |
-| LED2 | GPIO13（PWM1） |
 
 ---
 
@@ -142,27 +177,40 @@ sudo journalctl -u robotcar -f
 | acceleration | int8 | 加速度 × 0.1 m/s² |
 | steer | int8 | ステア -127〜+127（左〜右） |
 
-### STM32 → RasPi（31 バイト）
+### STM32 → RasPi（733 バイト、1Mbps）
 
 ```
-[0xFF][speed][accel][dist×18bytes(36nibbles)][volt_s][volt_p][motor_err][accel_xy][pitch][roll][temp_l][temp_r][temp_s][0xAA]
+[0xFF][motor_err][speed][accel][volt_s][volt_p][accel_xy][pitch][roll][tmp_l][tmp_r][tmp_s][dist×360×2bytes][0xAA]
 ```
 
 | バイト | 説明 |
 |---|---|
-| [1] | 速度 int8 × 0.1 m/s |
-| [2] | 加速度 int8 × 0.1 m/s² |
-| [3..20] | 36 センサー距離（各4bit nibble、値×10cm、0=範囲外） |
-| [21] | 信号電圧 × 0.1 V |
-| [22] | バッテリー電圧 × 0.1 V |
-| [23] | モーターエラーフラグ |
-| [24] | IMU 加速度 high nibble=X(前後)、low nibble=Y(左右)、4bit符号付き×0.1g |
-| [25] | ピッチ int8（度） |
-| [26] | ロール int8（度） |
-| [27] | 左モーター温度 uint8（°C） |
-| [28] | 右モーター温度 uint8（°C） |
-| [29] | ステアリングモーター温度 uint8（°C） |
-| [30] | 0xAA（フッタ） |
+| [1] | モーターエラーフラグ uint8 |
+| [2] | 速度 int8 × 0.1 m/s |
+| [3] | 加速度 int8 × 0.1 m/s² |
+| [4] | 信号電圧 uint8 × 0.1 V |
+| [5] | バッテリー電圧 uint8 × 0.1 V |
+| [6] | IMU加速度 high nibble=X(前後)、low nibble=Y(左右)、4bit符号付き×0.5g |
+| [7] | ピッチ int8（度） |
+| [8] | ロール int8（度） |
+| [9] | 左モーター温度 uint8（°C） |
+| [10] | 右モーター温度 uint8（°C） |
+| [11] | ステアリングモーター温度 uint8（°C） |
+| [12..731] | LiDAR 360点 × uint16 big-endian（mm、0=範囲外、最大12000mm） |
+| [732] | 0xAA（フッタ） |
+
+---
+
+## カメラ設定
+
+| 項目 | 値 |
+|---|---|
+| 解像度 | 320×182（下3/7カット） |
+| FPS | 30fps（暗所では自動で最低10fpsまで低下） |
+| JPEG品質 | 70 |
+| センサーモード | 1640×1232（フルFOV 2x2ビニング） |
+| 配信方式 | WebSocket binary `/ws/camera` |
+| 自動露光 | 有効（暗所で露光時間を自動延長） |
 
 ---
 
@@ -175,9 +223,6 @@ sudo journalctl -u robotcar -f
 scp app/index.html app/style.css app/main.js pi@robotcar.local:/home/pi/robotcar/app/
 
 # Python ファイルの転送（転送後にサービス再起動が必要）
-scp raspi/uart_handler.py pi@robotcar.local:/home/pi/robotcar/raspi/
-ssh pi@robotcar.local "sudo systemctl restart robotcar"
-
-# 構文確認（転送後に必ず実行）
-curl -s http://robotcar.local:8000/main.js | node --check /dev/stdin
+scp raspi/main.py raspi/uart_handler.py raspi/camera_stream.py pi@robotcar.local:/home/pi/robotcar/raspi/
+ssh pi@robotcar.local "sudo systemctl kill -s SIGKILL robotcar && sleep 2 && sudo systemctl start robotcar"
 ```
