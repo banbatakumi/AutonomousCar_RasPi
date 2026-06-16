@@ -1,0 +1,29 @@
+simulation:
+  dt: 0.02              # 制御周期 [s] (50Hz)
+  screen_width: 1800
+  screen_height: 900
+  map_margin: 0.5       # コース表示マージン [m]
+  lidar_noise_sigma: 0.02  # LiDARガウスノイズ標準偏差 [m]
+  speed_multipliers: [0.5, 1.0, 2.0]
+
+localization:
+  mode: "cheat"         # "cheat" | "slam" | "ekf"
+
+# Phase2: Pure Pursuit 経路追従パラメータ
+planner:
+  lookahead_distance: 0.4   # 基準先読み距離 [m]
+  lookahead_gain: 0.3       # 速度比例ゲイン [s]（Ld = base + gain*v）
+  min_lookahead: 0.3        # 先読み距離下限 [m]
+  max_lookahead: 1.2        # 先読み距離上限 [m]
+  cruise_speed: 1.5         # 巡航目標速度 [m/s]
+  curvature_slowdown: 0.6   # コーナーでの減速の強さ
+  # Reactive (Follow the Gap) — 地図不要・LiDAR直接制御
+  reactive_fov_deg: 90.0    # 前方視野 [deg]
+  reactive_bubble_m: 0.30   # 安全バブル半径 [m]
+
+display:
+  show_lidar: true
+  show_center_line: true    # Phase2で有効化
+  show_racing_line: false   # Phase4で有効化
+  show_slam_overlay: false  # Phase3で有効化
+  graph_buffer_seconds: 5.0

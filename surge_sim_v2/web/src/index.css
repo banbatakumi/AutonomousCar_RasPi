@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: #121216;
+  color: #e5e5e5;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+canvas {
+  display: block;
+}

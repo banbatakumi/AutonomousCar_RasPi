@@ -1,0 +1,28 @@
+uart:
+  port: "/dev/ttyUSB0"
+  baudrate: 250000
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  broadcast_hz: 20
+
+localization:
+  mode: "slam"    # 実機は LiDAR のみで自己位置推定
+
+slam:
+  resolution: 0.05
+  map_rate_divider: 8
+  loc_rate_divider: 1
+
+racing_line:
+  enabled: true
+  safety_margin: 0.15
+  a_lat: 4.0
+  a_long: 3.0
+  min_speed: 0.5
+  smooth_iters: 2
+
+watchdog:
+  command_timeout_ms: 500
+  uart_timeout_ms: 500

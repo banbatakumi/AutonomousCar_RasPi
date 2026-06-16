@@ -1,7 +1,26 @@
+# Python
 __pycache__/
-*.pyc
-.env
+*.py[cod]
+*.pyo
 venv/
+.venv/
 *.egg-info/
+
+# Node / フロントエンド
+node_modules/
 dist/
-build/
+web/dist/
+.env.local
+
+# 実行時生成物（SURGE Sim）
+logs/*.jsonl
+saved_maps/*.npz
+saved_maps/*.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

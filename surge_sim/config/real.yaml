@@ -1,0 +1,14 @@
+real:
+  port: "/dev/serial0"   # 実機UARTポート
+  baudrate: 250000       # UART通信速度 [bps]
+  timeout: 0.1           # 受信タイムアウト [s]
+
+localization:
+  mode: "cheat"          # 実機ではPhase3以降で "slam" に切り替え
+
+display:
+  show_lidar: true
+  show_center_line: false
+  show_racing_line: false
+  show_slam_overlay: false
+  graph_buffer_seconds: 5.0

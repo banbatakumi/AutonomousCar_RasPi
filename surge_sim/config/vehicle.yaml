@@ -1,0 +1,9 @@
+vehicle:
+  wheelbase: 0.230          # ホイールベース [m]
+  tread: 0.155              # トレッド幅 [m]
+  max_steer_angle: 40.0     # 最大ステア角 [deg]
+  max_speed: 3.0            # 最大速度 [m/s]
+  wheel_radius: 0.028       # タイヤ半径 [m]
+  # 制御モデル用時定数
+  speed_time_constant: 0.1   # 速度の一次遅れ時定数 [s]
+  steer_time_constant: 0.05  # ステアの一次遅れ時定数 [s]

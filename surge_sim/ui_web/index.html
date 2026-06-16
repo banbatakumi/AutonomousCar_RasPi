@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>SURGE Mark.2 — Web UI</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 左: シミュレーション/実機ビュー -->
+    <div id="view">
+      <canvas id="canvas"></canvas>
+      <div id="overlay">
+        <span id="conn" class="badge badge-off">DISCONNECTED</span>
+        <span id="role" class="badge">—</span>
+        <span id="src" class="badge">—</span>
+      </div>
+    </div>
+
+    <!-- 右: 計器・操作 -->
+    <aside id="panel">
+      <h1>SURGE Mk.2</h1>
+
+      <section class="card">
+        <h2>INFO</h2>
+        <div class="rows">
+          <div><span>Mode</span><b id="i-mode">—</b></div>
+          <div><span>Speed</span><b id="i-speed">—</b></div>
+          <div><span>Accel</span><b id="i-accel">—</b></div>
+          <div><span>Steer</span><b id="i-steer">—</b></div>
+          <div><span>X</span><b id="i-x">—</b></div>
+          <div><span>Y</span><b id="i-y">—</b></div>
+          <div><span>Heading</span><b id="i-hd">—</b></div>
+          <div><span>LiDAR min</span><b id="i-lmin">—</b></div>
+          <div><span>Loc src</span><b id="i-locsrc">—</b></div>
+          <div><span>Time</span><b id="i-time">—</b></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>MODE</h2>
+        <div class="btn-row">
+          <button data-mode="manual" class="mode-btn">MANUAL</button>
+          <button data-mode="auto" class="mode-btn">AUTO</button>
+          <button data-mode="reactive" class="mode-btn">REACTIVE</button>
+        </div>
+        <button id="estop" class="estop">■ E-STOP</button>
+      </section>
+
+      <section class="card">
+        <h2>SLAM / RACING LINE</h2>
+        <div class="btn-row">
+          <button id="map-btn" class="ctrl-btn">M: マッピング</button>
+          <button id="rl-btn" class="ctrl-btn">G: 走行ライン生成</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>DRIVE (manual)</h2>
+        <div class="pad">
+          <button id="d-up" class="pad-btn pad-up">▲</button>
+          <button id="d-left" class="pad-btn pad-left">◀</button>
+          <button id="d-down" class="pad-btn pad-down">▼</button>
+          <button id="d-right" class="pad-btn pad-right">▶</button>
+        </div>
+        <p class="hint">↑↓:速度 ←→:ステア A:Auto F:Reactive R:Reset Space:Pause</p>
+      </section>
+
+      <section class="card">
+        <h2>COURSE</h2>
+        <div id="course-list"></div>
+      </section>
+
+      <section class="card">
+        <h2>SIM CTRL</h2>
+        <div class="btn-row">
+          <button id="c-play" class="ctrl-btn">▶</button>
+          <button id="c-pause" class="ctrl-btn">⏸</button>
+          <button id="c-reset" class="ctrl-btn">↺</button>
+        </div>
+        <div id="mult-row" class="btn-row"></div>
+        <button id="claim" class="ctrl-btn wide">操作権を取得</button>
+      </section>
+    </aside>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

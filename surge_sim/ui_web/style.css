@@ -1,0 +1,82 @@
+:root {
+  --bg: #121216;
+  --pane: #0a0a0e;
+  --panel: #1c1c22;
+  --card: #24242c;
+  --text: #e6e6e6;
+  --dim: #969699;
+  --accent: #5aaafa;
+  --btn: #373a46;
+  --btn-active: #4682dc;
+  --ok: #3cc878;
+  --warn: #fab450;
+  --danger: #e0503c;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: Menlo, Monaco, "SF Mono", monospace;
+  overflow: hidden;
+}
+
+#app { display: flex; height: 100vh; width: 100vw; }
+
+/* ---- 左ビュー ---- */
+#view { position: relative; flex: 1 1 auto; background: var(--pane); }
+#canvas { display: block; width: 100%; height: 100%; }
+#overlay { position: absolute; top: 10px; left: 10px; display: flex; gap: 8px; }
+.badge {
+  font-size: 12px; padding: 3px 8px; border-radius: 4px;
+  background: #2a2a33; color: var(--dim); letter-spacing: .5px;
+}
+.badge-on { background: #14402a; color: var(--ok); }
+.badge-off { background: #401a14; color: var(--danger); }
+.badge-ctrl { background: #143a5a; color: var(--accent); }
+
+/* ---- 右パネル ---- */
+#panel {
+  flex: 0 0 320px; background: var(--panel);
+  padding: 14px; overflow-y: auto; border-left: 1px solid #33333c;
+}
+#panel h1 { font-size: 20px; color: var(--accent); margin-bottom: 12px; }
+.card { background: var(--card); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+.card h2 { font-size: 13px; color: var(--accent); margin-bottom: 8px; letter-spacing: 1px; }
+
+.rows > div { display: flex; justify-content: space-between; padding: 3px 0; font-size: 14px; }
+.rows span { color: var(--dim); }
+.rows b { font-variant-numeric: tabular-nums; }
+
+.btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+button {
+  font-family: inherit; color: var(--text); background: var(--btn);
+  border: none; border-radius: 6px; padding: 8px 10px; cursor: pointer;
+  font-size: 14px; flex: 1; transition: background .1s;
+}
+button:hover { background: #444856; }
+button.active { background: var(--btn-active); }
+.ctrl-btn { font-size: 16px; }
+.ctrl-btn.wide { flex-basis: 100%; margin-top: 8px; }
+.mode-btn { font-size: 12px; }
+.estop {
+  width: 100%; margin-top: 8px; background: #5a1d16; color: #ff8a78;
+  font-weight: bold; letter-spacing: 1px;
+}
+.estop:hover { background: var(--danger); color: #fff; }
+
+/* ---- 方向パッド ---- */
+.pad {
+  display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: repeat(3, 44px);
+  gap: 6px; width: 100%; max-width: 220px; margin: 0 auto;
+}
+.pad-btn { font-size: 18px; }
+.pad-up { grid-area: 1 / 2; } .pad-left { grid-area: 2 / 1; }
+.pad-down { grid-area: 3 / 2; } .pad-right { grid-area: 2 / 3; }
+.pad-btn.held { background: var(--btn-active); }
+
+.hint { font-size: 11px; color: var(--dim); margin-top: 8px; line-height: 1.5; }
+
+#course-list button, #mult-row button { margin-bottom: 6px; }
+#course-list button { width: 100%; text-align: left; font-size: 13px; }

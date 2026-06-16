@@ -1,0 +1,8 @@
+vehicle:
+  wheelbase: 0.230
+  tread: 0.155
+  max_steer_angle: 40.0
+  max_speed: 3.0
+  wheel_radius: 0.028
+  speed_time_constant: 0.1
+  steer_time_constant: 0.05
