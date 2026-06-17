@@ -78,6 +78,7 @@ def run_sim(localization_mode: str | None = None) -> None:
                             planner_cfg=sim_cfg.get("planner", {}),
                             slam_cfg=sim_cfg.get("slam", {}),
                             racing_cfg=sim_cfg.get("racing_line", {}),
+                            obstacle_cfg=sim_cfg.get("obstacle", {}),
                             localization_mode=loc_mode,
                             saved_maps_dir=str(ROOT / "saved_maps"))
     controller.set_course(cur_course)   # 初期コース（slam時は経路は探索後に生成）
@@ -99,6 +100,7 @@ def run_sim(localization_mode: str | None = None) -> None:
             "walls": c["walls"],
             "center_line": c.get("center_line") or [],
             "racing_line": path.tolist() if path is not None else [],
+            "obstacles": [(o["x"], o["y"], o["r"]) for o in backend.get_obstacles()],
         }
 
     ctx = server_context.AppContext(
@@ -163,6 +165,7 @@ def run_real(localization_mode: str | None = None) -> None:
                             planner_cfg=real_cfg.get("planner", {}),
                             slam_cfg=real_cfg.get("slam", {}),
                             racing_cfg=real_cfg.get("racing_line", {}),
+                            obstacle_cfg=real_cfg.get("obstacle", {}),
                             localization_mode=loc_mode,
                             saved_maps_dir=str(ROOT / "saved_maps"))
 

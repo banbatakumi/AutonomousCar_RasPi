@@ -93,6 +93,31 @@ def sim_speed(body: SpeedBody):
     return {"ok": True, "speed_multiplier": body.multiplier}
 
 
+@router.post("/sim/obstacle")
+def sim_spawn_obstacle():
+    """車両の前方 ~2m に動的障害物を1つ置く（回避テスト用、シミュ専用）。"""
+    ctx = get_context()
+    be = ctx.controller.backend
+    if not hasattr(be, "add_obstacle"):
+        return {"ok": False, "error": "実機では障害物スポーン不可"}
+    import math
+    v = ctx.shared_state.get_vehicle()
+    h = math.radians(v.heading)
+    ox = v.x + 2.0 * math.cos(h)
+    oy = v.y + 2.0 * math.sin(h)
+    be.add_obstacle(ox, oy, 0.18)
+    return {"ok": True, "obstacle": {"x": round(ox, 2), "y": round(oy, 2)}}
+
+
+@router.post("/sim/obstacle/clear")
+def sim_clear_obstacles():
+    ctx = get_context()
+    be = ctx.controller.backend
+    if hasattr(be, "clear_obstacles"):
+        be.clear_obstacles()
+    return {"ok": True}
+
+
 @router.post("/map/save")
 def map_save(body: MapNameBody):
     ctx = get_context()

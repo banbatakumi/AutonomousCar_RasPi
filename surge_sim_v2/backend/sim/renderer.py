@@ -181,6 +181,12 @@ class SimRenderer:
         if self.show_racing:
             self._draw_polyline(course.get("racing_line"), C_RACING, dashed=False, closed=True)
 
+        # Layer2.5: 動的障害物（人・車）= マゼンタの円
+        for obs in course.get("obstacles") or []:
+            cx, cy = self._w2s(obs[0], obs[1])
+            rpx = max(3, int(obs[2] * self._scale))
+            pygame.draw.circle(self.screen, (230, 80, 200), (cx, cy), rpx)
+
         # Layer3: LiDAR スキャン点（赤）
         self._draw_lidar()
 

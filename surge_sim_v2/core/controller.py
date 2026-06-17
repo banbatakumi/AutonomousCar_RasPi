@@ -22,6 +22,7 @@ from .course_analyzer import CourseAnalyzer
 from .interfaces import BackendBase, ControlCommand, DriveMode, LocalizationResult
 from .localization import CheatLocalizer
 from .logger import Logger
+from .obstacle import ObstacleAvoider
 from .path_utils import extract_loop
 from .planner import PurePursuitPlanner
 from .racing_line import RacingLineOptimizer
@@ -41,6 +42,7 @@ class Controller:
                  planner_cfg: dict | None = None,
                  slam_cfg: dict | None = None,
                  racing_cfg: dict | None = None,
+                 obstacle_cfg: dict | None = None,
                  localization_mode: str = "slam",
                  saved_maps_dir: str = "saved_maps") -> None:
         self.backend = backend
@@ -77,6 +79,12 @@ class Controller:
         self.racing_enabled = bool(rcfg.get("enabled", True))
         self.racing_optimizer = RacingLineOptimizer(config=rcfg)
         self.speed_profile: np.ndarray | None = None
+
+        # 動的障害物回避
+        ocfg = obstacle_cfg or {}
+        self.avoid_enabled = bool(ocfg.get("enabled", True))
+        self.avoider = ObstacleAvoider(ocfg, max_steer=float(pcfg.get("max_steer_angle", 40.0)))
+        self.obstacle_info: dict = {"detected": False, "estop": False, "distance": None}
 
         # Phase3 / 実機相当 SLAM
         scfg = slam_cfg or {}
@@ -311,6 +319,11 @@ class Controller:
         """
         if paused:
             return
+        # 地図生成前は SLAM を動かさない＝Webに地図を出さない。
+        # MapBuilding（地図生成）に入るか、既に地図がある時だけ動く。
+        # （実機同様、地図が無い状態では何も表示しない／自己位置も出さない）
+        if mode != DriveMode.MAP_BUILDING and not self.has_slam_map:
+            return
         self._slam_loc_tick += 1
         if self._slam_loc_tick % self._slam_loc_divider != 0:
             return  # 25Hz 程度で実行。間は直前の推定を保持。
@@ -348,8 +361,13 @@ class Controller:
                 return ControlCommand(0.0, 0.0, time.time())
             # Pure Pursuit で経路追従。Phase4 では racing_line＋速度プロファイル。
             loc = self.shared.get_localization()
-            return self.planner.compute_command(
+            cmd = self.planner.compute_command(
                 loc, self.path, speed_cap=self.auto_target_speed,
                 speed_profile=self.speed_profile)
+            # 動的障害物回避：SLAM占有地図で「地図free上の点＝障害物」を検知して回避
+            if self.avoid_enabled and self.has_slam_map:
+                cmd, self.obstacle_info = self.avoider.adjust(
+                    cmd, loc, self.backend.get_lidar_scan(), self.slam.mapper)
+            return cmd
 
         return cmd

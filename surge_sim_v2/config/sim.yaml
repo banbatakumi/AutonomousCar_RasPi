@@ -3,6 +3,7 @@ simulation:
   screen_width: 1200
   screen_height: 800
   map_margin: 0.5
+  command_latency_ms: 40    # アクチュエータ遅延[ms]（UART往復+STM32+サーボ応答の模擬、実機相当）
   lidar_noise_sigma: 0.02   # 後方互換（lidar.noise_floor_m 未指定時のフォールバック）
   lidar:                    # LD06 データシート準拠のセンサモデル
     max_range: 12.0         # [m]
@@ -41,6 +42,15 @@ planner:
   cruise_speed: 1.5          # [m/s] 直線巡航速度
   min_speed: 0.4             # [m/s] コーナー最低速度
   curvature_slowdown: 1.0    # 曲率による減速係数（大きいほど減速）
+
+obstacle:                    # 動的障害物（人・車）の検知・回避
+  enabled: true
+  detect_range: 1.8          # [m] 反応開始距離
+  stop_dist: 0.45            # [m] 経路上障害物で停止
+  estop_dist: 0.40           # [m] 直前方至近の緊急停止
+  fov_deg: 70                # [deg] 前方探索半角
+  path_band: 0.30            # [m] 経路近傍判定（壁と障害物の区別）
+  avoid_gain: 28.0           # 操舵回避ゲイン
 
 racing_line:
   enabled: true              # コース構築時にレーシングラインを自動生成するか

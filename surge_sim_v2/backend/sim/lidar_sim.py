@@ -37,7 +37,12 @@ class LidarSimulator:
         n_rays = int(cfg.get("n_rays", 360))
         self.n_rays = n_rays
         self._angles = np.linspace(0.0, 360.0, n_rays, endpoint=False)  # [deg]
+        self._obstacles = np.zeros((0, 3))   # (K,3): x, y, r（人・車などの動的障害物）
         self.set_walls(walls)
+
+    def set_obstacles(self, obstacles) -> None:
+        """障害物（円）リスト [(x, y, r), ...] を設定。"""
+        self._obstacles = np.array(obstacles, dtype=float).reshape(-1, 3) if len(obstacles) else np.zeros((0, 3))
 
     def set_walls(self, walls: list) -> None:
         """壁線分リスト [((x1,y1),(x2,y2)), ...] を numpy 配列に変換。"""
@@ -59,6 +64,10 @@ class LidarSimulator:
 
         if self._p1.shape[0] > 0:
             distances = self._raycast(ox, oy, dirs)
+
+        # 障害物（円）も測距し、より近い方を採用
+        if self._obstacles.shape[0] > 0:
+            distances = np.minimum(distances, self._raycast_circles(ox, oy, dirs))
 
         hit = distances < (self.max_range - 1e-3)
 
@@ -122,3 +131,21 @@ class LidarSimulator:
         min_t = np.min(t, axis=1)          # (N,)
         return np.where(np.isfinite(min_t),
                         np.minimum(min_t, self.max_range), self.max_range)
+
+    def _raycast_circles(self, ox: float, oy: float, dirs: np.ndarray) -> np.ndarray:
+        """全レイ × 全円のヒット距離（最近）。レイは単位方向 dirs。"""
+        C = self._obstacles[:, :2]             # (K,2)
+        r = self._obstacles[:, 2]              # (K,)
+        dx = dirs[:, 0][:, None]               # (N,1)
+        dy = dirs[:, 1][:, None]
+        ocx = ox - C[:, 0][None, :]            # (1,K)
+        ocy = oy - C[:, 1][None, :]
+        b = 2.0 * (dx * ocx + dy * ocy)        # (N,K)
+        c = (ocx ** 2 + ocy ** 2) - r[None, :] ** 2   # (1,K)
+        disc = b * b - 4.0 * c                 # (N,K)
+        with np.errstate(invalid="ignore"):
+            sq = np.sqrt(np.where(disc >= 0, disc, np.nan))
+            t = (-b - sq) / 2.0                # 手前の交点
+        t = np.where((disc >= 0) & (t > 1e-6), t, np.inf)
+        min_t = np.min(t, axis=1)
+        return np.where(np.isfinite(min_t), min_t, self.max_range)
