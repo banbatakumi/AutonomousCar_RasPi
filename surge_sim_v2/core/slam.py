@@ -50,20 +50,21 @@ class HectorSLAM:
         return self.mapper.to_occupancy_grid()
 
     # ---- 実機相当 SLAM（自己位置推定＋常時マッピング） -------------------
-    def process(self, scan: LidarScan) -> LocalizationResult:
+    def process(self, scan: LidarScan, imu_heading: float | None = None) -> LocalizationResult:
         self._count += 1
         if self._count <= self.bootstrap_scans:
             # スタート地点で地図を種まき（全体が見えるのでほぼ完成する）
+            h0 = imu_heading if imu_heading is not None else self.start_pose[2]
             seed = LocalizationResult(
-                x=self.start_pose[0], y=self.start_pose[1], heading=self.start_pose[2],
+                x=self.start_pose[0], y=self.start_pose[1], heading=h0,
                 confidence=0.3, source="slam", timestamp=scan.timestamp,
             )
             self.mapper.integrate_scan(scan, seed)
-            self.localizer.set_pose(*self.start_pose)
-            self._last_kf = self.start_pose
+            self.localizer.set_pose(self.start_pose[0], self.start_pose[1], h0)
+            self._last_kf = (self.start_pose[0], self.start_pose[1], h0)
             return seed
 
-        result = self.localizer.update(scan)
+        result = self.localizer.update(scan, imu_heading=imu_heading)
         # キーフレーム時のみ、かつ未知セルだけを埋める形で地図更新する。
         # 既知セルを凍結することで、良い地図を壊さず（＝自己位置推定を安定に保ち）、
         # 未探索領域だけを継続的に追加できる。

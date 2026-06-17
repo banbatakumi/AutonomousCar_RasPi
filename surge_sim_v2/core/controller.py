@@ -314,7 +314,9 @@ class Controller:
             return  # 25Hz 程度で実行。間は直前の推定を保持。
 
         scan = self.backend.get_lidar_scan()
-        loc = self.slam.process(scan)        # 自己位置推定＋地図更新（常時）
+        imu = self.backend.get_imu_reading()
+        imu_heading = imu.heading if imu is not None else None
+        loc = self.slam.process(scan, imu_heading=imu_heading)  # 自己位置推定＋地図更新
         self._last_loc = loc
         self.shared.update_localization(loc)
 

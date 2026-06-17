@@ -46,15 +46,16 @@ class SLAMLocalizer:
 
     def __init__(self, mapper,
                  start_pose: tuple[float, float, float] = (0.0, 0.0, 0.0),
-                 blur_sigmas: tuple[float, ...] = (3.0, 1.5, 0.0),
+                 blur_sigmas_m: tuple[float, ...] = (0.15, 0.075, 0.0),  # [m] 解像度非依存
                  iters: tuple[int, ...] = (6, 6, 6),
                  damping: float = 1e-3,
                  max_step_xy: float = 0.25, max_step_th: float = 0.20,
-                 prior_xy: float = 2000.0, prior_th: float = 400.0) -> None:
+                 prior_xy: float = 2000.0, prior_th: float = 400.0,
+                 prior_th_imu: float = 8000.0) -> None:
         self.mapper = mapper
         self.x, self.y, self.heading = start_pose
         self.px, self.py, self.ph = start_pose       # 直前姿勢（等速度予測用）
-        self.blur_sigmas = blur_sigmas
+        self.blur_sigmas_m = blur_sigmas_m           # [m] 単位（マッチ時にセルへ換算）
         self.iters = iters
         self.damping = damping
         self.max_step_xy = max_step_xy
@@ -62,6 +63,8 @@ class SLAMLocalizer:
         # 運動モデル事前分布の重み（縦方向など拘束不足な方向を予測で補う）
         self.prior_xy = prior_xy
         self.prior_th = prior_th
+        # IMU ヨーを事前分布中心に使うときの重み（運動予測より強く信頼）
+        self.prior_th_imu = prior_th_imu
 
     def set_pose(self, x: float, y: float, heading: float) -> None:
         self.x, self.y, self.heading = x, y, heading
@@ -70,7 +73,7 @@ class SLAMLocalizer:
     def get_map(self) -> OccupancyGrid:
         return self.mapper.to_occupancy_grid()
 
-    def update(self, scan: LidarScan) -> LocalizationResult:
+    def update(self, scan: LidarScan, imu_heading: float | None = None) -> LocalizationResult:
         d = np.asarray(scan.distances, dtype=float)
         ang = np.radians(np.asarray(scan.angles, dtype=float))
         hit = d < (MAX_RANGE - 1e-3)
@@ -81,19 +84,29 @@ class SLAMLocalizer:
         # 予測デルタが無制限だと、一度マッチが飛んだとき指数的に発散するため制限する。
         dxp = float(np.clip(self.x - self.px, -self.max_step_xy, self.max_step_xy))
         dyp = float(np.clip(self.y - self.py, -self.max_step_xy, self.max_step_xy))
-        dthp = float(np.clip(_wrap180(self.heading - self.ph),
-                             -math.degrees(self.max_step_th), math.degrees(self.max_step_th)))
         gx = self.x + dxp
         gy = self.y + dyp
-        gth = self.heading + dthp
 
-        prior = (gx, gy, gth)   # 等速度予測を事前分布の中心に使う
+        # 方位の事前分布中心：IMU があればそれを信頼、無ければ等速度予測
+        if imu_heading is not None:
+            gth = float(imu_heading)
+            th_weight = self.prior_th_imu
+        else:
+            dthp = float(np.clip(_wrap180(self.heading - self.ph),
+                                 -math.degrees(self.max_step_th), math.degrees(self.max_step_th)))
+            gth = self.heading + dthp
+            th_weight = self.prior_th
+
+        prior = (gx, gy, gth)
         last_res = 1.0
         if len(bx) >= 10:
             prob = 1.0 - 1.0 / (1.0 + np.exp(np.clip(self.mapper.log_odds, -20, 20)))
-            for sigma, nit in zip(self.blur_sigmas, self.iters):
+            res = self.mapper.resolution
+            for sigma_m, nit in zip(self.blur_sigmas_m, self.iters):
+                sigma = sigma_m / res                # [m] → セル
                 field = self._blur(prob, sigma) if sigma > 0 else prob
-                gx, gy, gth, last_res = self._match(bx, by, gx, gy, gth, field, nit, prior)
+                gx, gy, gth, last_res = self._match(
+                    bx, by, gx, gy, gth, field, nit, prior, th_weight)
 
         # --- コミット ---
         self.px, self.py, self.ph = self.x, self.y, self.heading
@@ -105,7 +118,7 @@ class SLAMLocalizer:
         )
 
     # ---- Gauss-Newton 合わせ込み ----------------------------------------
-    def _match(self, bx, by, x, y, th_deg, field, n_iter, prior=None):
+    def _match(self, bx, by, x, y, th_deg, field, n_iter, prior=None, th_weight=None):
         th = math.radians(th_deg)
         px, py, pth = (prior if prior is not None else (x, y, th_deg))
         pth_r = math.radians(pth)
@@ -126,12 +139,13 @@ class SLAMLocalizer:
             # 運動モデル事前分布：拘束不足な方向を予測 (px,py,pth) に引き寄せる。
             # scan が強く拘束する方向では H が大きく事前分布は無視される。
             if prior is not None:
+                w_th = self.prior_th if th_weight is None else th_weight
                 H[0, 0] += self.prior_xy + self.damping
                 H[1, 1] += self.prior_xy + self.damping
-                H[2, 2] += self.prior_th + self.damping
+                H[2, 2] += w_th + self.damping
                 g[0] += self.prior_xy * (px - x)
                 g[1] += self.prior_xy * (py - y)
-                g[2] += self.prior_th * math.radians(_wrap180(pth - math.degrees(th)))
+                g[2] += w_th * math.radians(_wrap180(pth - math.degrees(th)))
             else:
                 H[0, 0] += self.damping
                 H[1, 1] += self.damping

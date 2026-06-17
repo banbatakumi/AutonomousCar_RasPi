@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
+
 from backend.base import BackendBase
-from core.interfaces import ConnectionStatus, ControlCommand, LidarScan, VehicleState
+from core.interfaces import (
+    ConnectionStatus, ControlCommand, ImuReading, LidarScan, VehicleState,
+)
 from core.shared_state import SharedState
 
 from .lidar_sim import LidarSimulator
@@ -27,6 +31,16 @@ class SimBackend(BackendBase):
         self._cmd: ControlCommand | None = None
         self._last_lidar_ts = time.time()
 
+        # IMU 模擬（実機の AHRS ヨーを模す）：小さなノイズ＋ゆっくりしたバイアスドリフト
+        imu_cfg = sim_cfg.get("imu", {}) if isinstance(sim_cfg, dict) else {}
+        self._imu_enabled = bool(imu_cfg.get("enabled", True))
+        self._imu_noise = float(imu_cfg.get("noise_deg", 0.3))
+        self._imu_bias_walk = float(imu_cfg.get("bias_walk_deg", 0.0005))
+        self._imu_bias_max = float(imu_cfg.get("bias_max_deg", 0.5))  # AHRSの残留バイアス上限
+        self._imu_bias = 0.0
+        self._prev_heading = start_pose[2]
+        self._imu: ImuReading | None = None
+
     def set_course(self, walls: list, start_pose: tuple[float, float, float]) -> None:
         self.lidar.set_walls(walls)
         self.physics.set_start_pose(start_pose)
@@ -37,8 +51,25 @@ class SimBackend(BackendBase):
 
     def step(self, dt: float) -> None:
         self.physics.step(dt, self._cmd)
-        scan = self.lidar.scan(self.physics_state())
+        v = self.physics_state()
+        scan = self.lidar.scan(v)
         self._last_lidar_ts = scan.timestamp
+        self._update_imu(v, dt)
+
+    def _update_imu(self, v: VehicleState, dt: float) -> None:
+        if not self._imu_enabled:
+            self._imu = None
+            return
+        # ゆっくりしたバイアスのランダムウォーク（AHRS の残留バイアスを模擬）
+        self._imu_bias += np.random.normal(0.0, self._imu_bias_walk)
+        self._imu_bias = float(np.clip(self._imu_bias, -self._imu_bias_max, self._imu_bias_max))
+        meas = v.heading + self._imu_bias + np.random.normal(0.0, self._imu_noise)
+        yaw_rate = (((v.heading - self._prev_heading + 180) % 360) - 180) / dt if dt > 0 else 0.0
+        self._prev_heading = v.heading
+        self._imu = ImuReading(heading=meas % 360.0, yaw_rate=yaw_rate, timestamp=time.time())
+
+    def get_imu_reading(self) -> ImuReading | None:
+        return self._imu
 
     def physics_state(self) -> VehicleState:
         return self.shared.get_vehicle()

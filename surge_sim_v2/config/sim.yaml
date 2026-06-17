@@ -7,6 +7,11 @@ simulation:
   speed_multipliers: [0.5, 1.0, 2.0]
   show_center_line: false
   show_racing_line: false
+  imu:
+    enabled: true          # 実機IMU(AHRSヨー)を模擬。falseでIMUなし(従来挙動)
+    noise_deg: 0.3         # ヨー観測ノイズ[deg]
+    bias_walk_deg: 0.0005  # ヨーバイアスのランダムウォーク[deg/step]
+    bias_max_deg: 0.5      # 残留バイアス上限[deg]（AHRS+地磁気で有界）
 
 server:
   host: "0.0.0.0"
@@ -17,7 +22,7 @@ localization:
   mode: "slam"    # "slam"=実機相当（LiDARのみ自己位置推定）| "cheat"=真値（デバッグ用）
 
 slam:
-  resolution: 0.05           # [m/cell] 占有格子解像度
+  resolution: 0.03           # [m/cell] 占有格子解像度（高精度化：5cm→3cm）
   map_rate_divider: 8        # 地図配信の間引き（SLAM実行何回に1回）
   loc_rate_divider: 1        # SLAM自己位置推定の実行間隔（制御50Hz/1=50Hz、動きを小さく保ち頑健化）
 

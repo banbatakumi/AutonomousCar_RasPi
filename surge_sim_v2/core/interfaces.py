@@ -44,6 +44,13 @@ class ControlCommand:
 
 
 @dataclass
+class ImuReading:
+    heading: float              # [deg] ヨー角 0=East、反時計回り正
+    yaw_rate: float             # [deg/s] ヨー角速度
+    timestamp: float
+
+
+@dataclass
 class LocalizationResult:
     x: float
     y: float
@@ -116,3 +123,7 @@ class BackendBase(ABC):
 
     @abstractmethod
     def get_connection_status(self) -> ConnectionStatus: ...
+
+    def get_imu_reading(self) -> "ImuReading | None":
+        """IMU のヨー姿勢を返す（無い場合は None）。実機/シミュで上書きする。"""
+        return None
