@@ -113,12 +113,17 @@ class CourseAnalyzer:
         center_line = self._smooth_closed(np.array(centers), k=7)
         center_line = resample_closed(center_line, self.waypoint_spacing)
 
+        # 幅は最終 center_line 上で距離変換から再計算（内接円直径＝コース幅）。
+        # こうすると width_profile が center_line と点数・位置で整合する
+        # （レーシングライン最適化のクリップが正しい場所に効く）。
+        width_profile = np.array([2.0 * dist_at(p[0], p[1]) for p in center_line])
+
         return CourseMap(
             left_wall=np.array(left_pts),
             right_wall=np.array(right_pts),
             center_line=center_line,
             racing_line=center_line.copy(),   # Phase4 で最適化に置換
-            width_profile=np.array(widths),
+            width_profile=width_profile,
         )
 
     def extract_walls(self, grid: OccupancyGrid) -> tuple[np.ndarray, np.ndarray]:

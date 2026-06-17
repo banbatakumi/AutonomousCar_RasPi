@@ -72,6 +72,8 @@ class Controller:
         # Phase4: レーシングライン最適化
         rcfg = dict(racing_cfg or {})
         rcfg.setdefault("max_speed", vcfg.get("max_speed", 3.0))
+        # 車体半幅 ≈ トレッド/2 + ボディ余裕（壁との実クリアランス確保に使う）
+        rcfg.setdefault("vehicle_half_width", vcfg.get("tread", 0.155) / 2.0 + 0.03)
         self.racing_enabled = bool(rcfg.get("enabled", True))
         self.racing_optimizer = RacingLineOptimizer(config=rcfg)
         self.speed_profile: np.ndarray | None = None

@@ -44,7 +44,8 @@ planner:
 
 racing_line:
   enabled: true              # コース構築時にレーシングラインを自動生成するか
-  safety_margin: 0.15        # [m] 壁からの余裕（αクリップ）
+  safety_margin: 0.15        # [m] 車体端から壁への余裕（αクリップ）
+  # vehicle_half_width: 0.11 # [m] 未指定なら車両トレッド/2+0.03で自動算出
   a_lat: 4.0                 # [m/s²] 横加速度上限（コーナー速度）
   a_long: 3.0                # [m/s²] 縦加速度上限（加減速）
   min_speed: 0.5             # [m/s] 速度プロファイル下限

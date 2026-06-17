@@ -19,7 +19,8 @@ from .path_utils import path_curvature, path_normals
 class RacingLineOptimizer:
     def __init__(self, config: dict | None = None) -> None:
         cfg = config or {}
-        self.safety_margin = float(cfg.get("safety_margin", 0.15))   # [m] 壁からの余裕
+        self.safety_margin = float(cfg.get("safety_margin", 0.15))   # [m] 車体端から壁への余裕
+        self.vehicle_half_width = float(cfg.get("vehicle_half_width", 0.10))  # [m] 車体半幅
         self.a_lat = float(cfg.get("a_lat", 4.0))                    # [m/s²] 横加速度上限
         self.a_long = float(cfg.get("a_long", 3.0))                  # [m/s²] 縦加速度上限
         self.max_speed = float(cfg.get("max_speed", 3.0))
@@ -56,15 +57,27 @@ class RacingLineOptimizer:
         g = Ax.T @ (D @ Cx) + Ay.T @ (D @ Cy)
         alpha = np.linalg.solve(H, -g)
 
-        # コース幅−安全マージンでクリップ
+        # 許容横オフセット = 半幅 − 安全マージン − 車体半幅（車体端が壁から margin 残る）
         w = self._width_to_n(course_map.width_profile, N)
-        bound = np.maximum(w / 2.0 - self.safety_margin, 0.0)
+        bound = np.maximum(w / 2.0 - self.safety_margin - self.vehicle_half_width, 0.0)
+        alpha = np.clip(alpha, -bound, bound)
+
+        # オフセットを平滑化（急な横移動を抑制）→ 最後に再クリップして必ず境界内に収める
+        for _ in range(self.smooth_iters):
+            alpha = self._smooth_scalar_closed(alpha)
         alpha = np.clip(alpha, -bound, bound)
 
         racing = center + n * alpha[:, None]
-        for _ in range(self.smooth_iters):
-            racing = self._smooth_closed(racing)
+
+        # 安全策：中心線が既に最適に近い（滑らかな）コースでは、クリップ等で
+        # かえって曲率が増えることがある。中心線より悪ければ中心線を採用する。
+        if self._curv_energy(racing) > self._curv_energy(center):
+            return center
         return racing
+
+    @staticmethod
+    def _curv_energy(pts: np.ndarray) -> float:
+        return float(np.sum(path_curvature(pts) ** 2))
 
     # ---- 速度プロファイル ------------------------------------------------
     def compute_speed_profile(self, racing_line: np.ndarray,
@@ -76,20 +89,24 @@ class RacingLineOptimizer:
             return np.full(N, self.min_speed)
 
         kappa = path_curvature(pts)
+        kappa = self._smooth_scalar_closed(kappa, k=5)   # 離散外接円のスパイクを抑制
         ds = np.hypot(*(np.roll(pts, -1, axis=0) - pts).T)   # ds[i]: i→i+1 区間長
 
         # 横加速度制限: v = sqrt(a_lat / κ)
-        v = np.sqrt(self.a_lat / np.maximum(kappa, 1e-3))
+        v = np.sqrt(self.a_lat / np.maximum(np.abs(kappa), 1e-3))
         v = np.minimum(v, mx)
 
-        # 前後パス（閉ループ、数回反復で収束）
-        for _ in range(2):
+        # 前後パス（閉ループ、収束するまで反復＝最大 N 回で打ち切り）
+        for _ in range(min(N, 8)):
+            v_prev = v.copy()
             for i in range(N):                  # 前方（加速制限）
                 j = (i + 1) % N
                 v[j] = min(v[j], np.sqrt(v[i] ** 2 + 2.0 * self.a_long * ds[i]))
             for i in range(N - 1, -1, -1):       # 後方（減速制限）
                 j = (i - 1) % N
                 v[j] = min(v[j], np.sqrt(v[i] ** 2 + 2.0 * self.a_long * ds[j]))
+            if np.max(np.abs(v - v_prev)) < 1e-3:
+                break
 
         return np.maximum(v, self.min_speed)
 
@@ -114,3 +131,14 @@ class RacingLineOptimizer:
         x = np.convolve(np.r_[pts[-k:, 0], pts[:, 0], pts[:k, 0]], kernel, mode="same")
         y = np.convolve(np.r_[pts[-k:, 1], pts[:, 1], pts[:k, 1]], kernel, mode="same")
         return np.column_stack([x[k:-k], y[k:-k]])
+
+    @staticmethod
+    def _smooth_scalar_closed(a: np.ndarray, k: int = 5) -> np.ndarray:
+        """閉ループのスカラー列（オフセット α や曲率）を移動平均で平滑化。"""
+        a = np.asarray(a, dtype=float)
+        if len(a) < k:
+            return a
+        kernel = np.ones(k) / k
+        padded = np.r_[a[-k:], a, a[:k]]
+        sm = np.convolve(padded, kernel, mode="same")
+        return sm[k:-k]
