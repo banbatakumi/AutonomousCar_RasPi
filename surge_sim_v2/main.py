@@ -79,6 +79,7 @@ def run_sim(localization_mode: str | None = None) -> None:
                             slam_cfg=sim_cfg.get("slam", {}),
                             racing_cfg=sim_cfg.get("racing_line", {}),
                             obstacle_cfg=sim_cfg.get("obstacle", {}),
+                            reactive_cfg=sim_cfg.get("reactive", {}),
                             localization_mode=loc_mode,
                             saved_maps_dir=str(ROOT / "saved_maps"))
     controller.set_course(cur_course)   # 初期コース（slam時は経路は探索後に生成）
@@ -166,6 +167,7 @@ def run_real(localization_mode: str | None = None) -> None:
                             slam_cfg=real_cfg.get("slam", {}),
                             racing_cfg=real_cfg.get("racing_line", {}),
                             obstacle_cfg=real_cfg.get("obstacle", {}),
+                            reactive_cfg=real_cfg.get("reactive", {}),
                             localization_mode=loc_mode,
                             saved_maps_dir=str(ROOT / "saved_maps"))
 

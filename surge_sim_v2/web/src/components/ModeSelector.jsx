@@ -1,7 +1,7 @@
 import { MODE_LABELS, MODE_LIST, MODES, apiPost } from "../constants/modes";
 
-// Manual / MapBuilding / Autonomous の切替。
-// Autonomous は slam_map がある時のみ有効。切替時に確認ダイアログ。
+// Manual / MapBuilding / Reactive / Autonomous の切替。
+// Reactive=LiDARのみ自動走行（自動探索）。Autonomous は地図がある時のみ有効。
 export default function ModeSelector({ state }) {
   const currentMode = state?.mode ?? MODES.MANUAL;
   // Phase2: course_map（カンニング中心線）でも追従可能。Phase3 で slam_map が加わる。
@@ -25,7 +25,7 @@ export default function ModeSelector({ state }) {
             key={mode}
             onClick={() => changeMode(mode)}
             disabled={disabled}
-            className={`flex-1 py-2 rounded text-sm font-semibold transition ${
+            className={`flex-1 py-2 rounded text-xs font-semibold transition ${
               active
                 ? "bg-surge-accent text-white"
                 : disabled

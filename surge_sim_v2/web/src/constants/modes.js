@@ -2,16 +2,23 @@
 export const MODES = {
   MANUAL: "manual",
   MAP_BUILDING: "map_building",
+  REACTIVE: "reactive",
   AUTONOMOUS: "autonomous",
 };
 
 export const MODE_LABELS = {
   [MODES.MANUAL]: "Manual",
   [MODES.MAP_BUILDING]: "MapBuilding",
+  [MODES.REACTIVE]: "Reactive",
   [MODES.AUTONOMOUS]: "Autonomous",
 };
 
-export const MODE_LIST = [MODES.MANUAL, MODES.MAP_BUILDING, MODES.AUTONOMOUS];
+export const MODE_LIST = [
+  MODES.MANUAL,
+  MODES.MAP_BUILDING,
+  MODES.REACTIVE,
+  MODES.AUTONOMOUS,
+];
 
 // 車両スペック（UI クランプ用）
 export const MAX_SPEED = 3.0; // m/s

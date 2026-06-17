@@ -67,8 +67,10 @@ python main.py --mode replay --log logs/YYYYMMDD_HHMMSS.jsonl
 
 ## 走行モード
 - **Manual**: キーボードで速度・ステア操作
-- **MapBuilding**: 手動走行しながら SLAM で地図構築（Phase3）
-- **Autonomous**: 保存済み地図からレーシングライン生成 → ライン追従（Phase2/4）
+- **MapBuilding**: 手動走行しながら SLAM で地図構築
+- **Reactive**: LiDARのみで自動走行（前方を探索し最も開けた方向へ進む）。
+  地図/自己位置不要で未知コースを周回でき、**手動探索の代わりに地図を自動構築**する。
+- **Autonomous**: 地図からレーシングライン生成 → ライン追従＋動的障害物回避
 
 ## 実装状況（Phase）
 - **Phase1 ✅**: シミュレータ基盤（物理・LiDAR・WebUI・ログ・手動操作）
@@ -115,8 +117,12 @@ python main.py --mode sim --localization cheat
 pygame では **青=真値 / 橙=SLAM推定** を重ねて表示し、ズレを目視できる。
 `MPCPlanner` は将来拡張のスタブのまま。
 
-### 使い方（実機相当フロー：既定の slam モード）
-> 地図生成前（MapBuilding に入る前）は Web に地図を表示しない（実機同様、未知から始まる）。
+### 使い方（一番ラク：Reactive で自動探索）
+1. モードを **Reactive** に切替 → LiDARのみで自動周回しながら地図を自動構築（手動運転不要）
+2. 1周以上したら **Autonomous** に切替 → **スタート**（自動構築した地図からレーシングライン生成→追従）
+
+### 使い方（手動探索：slam モード）
+> 地図生成前（MapBuilding / Reactive に入る前）は Web に地図を表示しない（実機同様、未知から始まる）。
 1. モードを **MapBuilding** にし、↑↓←→ で**コースを1周以上**手動走行
    → SLAM が自己位置推定しながら占有格子を構築（WebUI 左ペインに表示）
 2. 「地図を保存」で `saved_maps/<名前>.npz` に保存（任意。占有格子＋探索軌跡）

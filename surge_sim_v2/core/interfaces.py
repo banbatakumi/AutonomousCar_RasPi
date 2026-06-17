@@ -16,6 +16,7 @@ class DriveMode(Enum):
     MANUAL = "manual"
     MAP_BUILDING = "map_building"
     AUTONOMOUS = "autonomous"
+    REACTIVE = "reactive"      # LiDARのみのリアクティブ走行（自動探索＝地図も構築）
 
 
 @dataclass

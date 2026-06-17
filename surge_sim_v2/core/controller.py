@@ -26,6 +26,7 @@ from .obstacle import ObstacleAvoider
 from .path_utils import extract_loop
 from .planner import PurePursuitPlanner
 from .racing_line import RacingLineOptimizer
+from .reactive_planner import ReactivePlanner
 from .shared_state import SharedState
 from .slam import HectorSLAM
 
@@ -43,6 +44,7 @@ class Controller:
                  slam_cfg: dict | None = None,
                  racing_cfg: dict | None = None,
                  obstacle_cfg: dict | None = None,
+                 reactive_cfg: dict | None = None,
                  localization_mode: str = "slam",
                  saved_maps_dir: str = "saved_maps") -> None:
         self.backend = backend
@@ -85,6 +87,13 @@ class Controller:
         self.avoid_enabled = bool(ocfg.get("enabled", True))
         self.avoider = ObstacleAvoider(ocfg, max_steer=float(pcfg.get("max_steer_angle", 40.0)))
         self.obstacle_info: dict = {"detected": False, "estop": False, "distance": None}
+
+        # リアクティブ走行（LiDARのみ・自動探索）
+        self.reactive = ReactivePlanner(
+            reactive_cfg or {},
+            max_steer=float(pcfg.get("max_steer_angle", 40.0)),
+            max_speed=float(vcfg.get("max_speed", 3.0)),
+        )
 
         # Phase3 / 実機相当 SLAM
         scfg = slam_cfg or {}
@@ -297,7 +306,7 @@ class Controller:
             # cheat: 真値を使用。MapBuilding 中のみ既知姿勢でマッピング。
             loc = self.localizer.update(vehicle)
             self.shared.update_localization(loc)
-            if mode == DriveMode.MAP_BUILDING and not paused:
+            if mode in (DriveMode.MAP_BUILDING, DriveMode.REACTIVE) and not paused:
                 self._map_tick += 1
                 if self._map_tick % self._map_rate_divider == 0:
                     grid = self.slam.update(self.backend.get_lidar_scan(), loc)
@@ -320,9 +329,9 @@ class Controller:
         if paused:
             return
         # 地図生成前は SLAM を動かさない＝Webに地図を出さない。
-        # MapBuilding（地図生成）に入るか、既に地図がある時だけ動く。
+        # MapBuilding / Reactive（地図生成・自動探索）に入るか、既に地図がある時だけ動く。
         # （実機同様、地図が無い状態では何も表示しない／自己位置も出さない）
-        if mode != DriveMode.MAP_BUILDING and not self.has_slam_map:
+        if mode not in (DriveMode.MAP_BUILDING, DriveMode.REACTIVE) and not self.has_slam_map:
             return
         self._slam_loc_tick += 1
         if self._slam_loc_tick % self._slam_loc_divider != 0:
@@ -341,8 +350,8 @@ class Controller:
             self.shared.update_slam_map(self.slam.get_map())
             self.has_slam_map = True
 
-        # 探索（手動走行）中は推定軌跡を記録 → コース構築の種にする
-        if mode in (DriveMode.MANUAL, DriveMode.MAP_BUILDING):
+        # 探索（手動 or リアクティブ）中は推定軌跡を記録 → コース構築の種にする
+        if mode in (DriveMode.MANUAL, DriveMode.MAP_BUILDING, DriveMode.REACTIVE):
             self.trajectory.append((loc.x, loc.y))
 
     def _resolve_command(self, mode: DriveMode) -> ControlCommand:
@@ -353,6 +362,10 @@ class Controller:
         if mode in (DriveMode.MANUAL, DriveMode.MAP_BUILDING):
             # 手動操作の指令をそのまま使う
             return cmd
+
+        if mode == DriveMode.REACTIVE:
+            # LiDARのみのリアクティブ走行（地図/自己位置不要、自動探索）
+            return self.reactive.compute_command(self.backend.get_lidar_scan())
 
         if mode == DriveMode.AUTONOMOUS:
             if not self.shared.get_autonomous_running():

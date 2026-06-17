@@ -43,6 +43,17 @@ planner:
   min_speed: 0.4             # [m/s] コーナー最低速度
   curvature_slowdown: 1.0    # 曲率による減速係数（大きいほど減速）
 
+reactive:                    # LiDARのみのリアクティブ走行（自動探索）
+  fov_deg: 90                # 前方探索角（全幅）
+  window_deg: 30             # 平均をとる角度窓幅（任意の角度幅）
+  step_deg: 3                # 窓をずらす刻み
+  steer_gain: 0.9            # 目標角→操舵ゲイン
+  cruise_speed: 1.2
+  min_speed: 0.4
+  slow_dist: 2.0             # 前方これ以下で減速
+  stop_dist: 0.35            # 前方これ以下で停止
+  safety_bubble: 0.30        # 近接点の無視半径（壁際へ寄らせない）
+
 obstacle:                    # 動的障害物（人・車）の検知・回避
   enabled: true
   detect_range: 1.8          # [m] 反応開始距離

@@ -58,7 +58,10 @@ class RacingLineOptimizer:
         alpha = np.linalg.solve(H, -g)
 
         # 許容横オフセット = 半幅 − 安全マージン − 車体半幅（車体端が壁から margin 残る）
+        # 幅は最小値フィルタ（収縮）してから使う：局所的に幅が過大推定された点や
+        # この先で狭くなる点で、オフセットが壁に寄りすぎる（外れる）のを防ぐ。
         w = self._width_to_n(course_map.width_profile, N)
+        w = self._min_filter_closed(w, k=5)
         bound = np.maximum(w / 2.0 - self.safety_margin - self.vehicle_half_width, 0.0)
         alpha = np.clip(alpha, -bound, bound)
 
@@ -131,6 +134,19 @@ class RacingLineOptimizer:
         x = np.convolve(np.r_[pts[-k:, 0], pts[:, 0], pts[:k, 0]], kernel, mode="same")
         y = np.convolve(np.r_[pts[-k:, 1], pts[:, 1], pts[:k, 1]], kernel, mode="same")
         return np.column_stack([x[k:-k], y[k:-k]])
+
+    @staticmethod
+    def _min_filter_closed(a: np.ndarray, k: int = 5) -> np.ndarray:
+        """閉ループのスカラー列に最小値フィルタ（収縮）。各点を近傍 ±k//2 の最小値に。"""
+        a = np.asarray(a, dtype=float)
+        n = len(a)
+        if n < k:
+            return a
+        h = k // 2
+        out = a.copy()
+        for off in range(-h, h + 1):
+            out = np.minimum(out, np.roll(a, off))
+        return out
 
     @staticmethod
     def _smooth_scalar_closed(a: np.ndarray, k: int = 5) -> np.ndarray:

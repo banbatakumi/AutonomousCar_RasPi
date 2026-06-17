@@ -73,6 +73,25 @@ export default function Controller({ state, isSim, cmd }) {
       <div className="mt-2">
         {mode === MODES.MANUAL && <KeyGuide />}
 
+        {mode === MODES.REACTIVE && (
+          <div className="text-sm text-gray-300">
+            🛰 LiDARのみで自動走行中（前方を探索し最も開けた方向へ）。地図も自動構築されます。
+            走り終えたら Autonomous に切り替えてください。
+            {isSim && (
+              <div className="flex gap-2 mt-2">
+                <button onClick={() => apiPost("/api/sim/obstacle")}
+                        className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-xs">
+                  障害物を前方に出す
+                </button>
+                <button onClick={() => apiPost("/api/sim/obstacle/clear")}
+                        className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-xs">
+                  障害物クリア
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {mode === MODES.MAP_BUILDING && (
           <div>
             <KeyGuide />
@@ -115,6 +134,18 @@ export default function Controller({ state, isSim, cmd }) {
               onChange={(e) => setTargetSpeed(Number(e.target.value))}
               className="flex-1 min-w-[120px]"
             />
+            {isSim && (
+              <div className="flex gap-2 w-full mt-1">
+                <button onClick={() => apiPost("/api/sim/obstacle")}
+                        className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-xs">
+                  障害物を前方に出す
+                </button>
+                <button onClick={() => apiPost("/api/sim/obstacle/clear")}
+                        className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-xs">
+                  障害物クリア
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
