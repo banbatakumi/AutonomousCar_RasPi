@@ -3,7 +3,13 @@ simulation:
   screen_width: 1200
   screen_height: 800
   map_margin: 0.5
-  lidar_noise_sigma: 0.02
+  lidar_noise_sigma: 0.02   # 後方互換（lidar.noise_floor_m 未指定時のフォールバック）
+  lidar:                    # LD06 データシート準拠のセンサモデル
+    max_range: 12.0         # [m]
+    min_range: 0.02         # [m]
+    noise_floor_m: 0.01     # 近距離ノイズ下限 1σ [m]
+    noise_pct: 0.006        # 距離比例ノイズ（≒±1%クラス）σ=max(floor, pct×距離)
+    n_rays: 360             # 点数（LD06実機≒450/0.8°。互換のため既定360/1°）
   speed_multipliers: [0.5, 1.0, 2.0]
   show_center_line: false
   show_racing_line: false

@@ -1,8 +1,13 @@
 """レイキャスト LiDAR シミュレータ（LD06 模擬）。
 
 コース壁（線分リスト）に対して numpy ベクトル演算でレイキャストする。
-LD06 スペック: 360度・角度分解能1度・最大測定距離12m。
-車両座標・heading を考慮した座標変換を行い、ガウスノイズを付加する。
+
+LD06 データシート準拠のセンサモデル：
+  - 測距範囲: 0.02 m 〜 12 m
+  - 測距精度: 約 ±1% クラス（距離依存）→ 1σ = max(noise_floor, noise_pct × 距離)
+    （近距離は数 mm〜1cm、遠距離ほど大きくなる）
+  - 角度分解能: 既定 1°/360点（LD06 実機は約0.8°/450点。config で変更可）
+車両座標・heading を考慮した座標変換を行い、距離依存ガウスノイズを付加する。
 """
 from __future__ import annotations
 
@@ -13,17 +18,25 @@ import numpy as np
 from core.interfaces import LidarScan, VehicleState
 from core.shared_state import SharedState
 
-MAX_RANGE = 12.0    # [m]
-N_RAYS = 360
-ANGLE_RES = 1.0     # [deg]
+MAX_RANGE = 12.0    # [m] LD06 最大測距
+MIN_RANGE = 0.02    # [m] LD06 最小測距
 
 
 class LidarSimulator:
     def __init__(self, walls: list, shared_state: SharedState,
-                 noise_sigma: float = 0.02) -> None:
+                 noise_sigma: float = 0.02,
+                 config: dict | None = None) -> None:
         self.shared = shared_state
-        self.noise_sigma = float(noise_sigma)
-        self._angles = np.arange(N_RAYS, dtype=float) * ANGLE_RES  # [deg]
+        cfg = config or {}
+        # LD06 データシート由来パラメータ
+        self.max_range = float(cfg.get("max_range", MAX_RANGE))
+        self.min_range = float(cfg.get("min_range", MIN_RANGE))
+        # 距離依存ノイズ: σ(d) = max(noise_floor, noise_pct × d)
+        self.noise_floor = float(cfg.get("noise_floor_m", noise_sigma))
+        self.noise_pct = float(cfg.get("noise_pct", 0.006))    # ≒ ±1% クラス
+        n_rays = int(cfg.get("n_rays", 360))
+        self.n_rays = n_rays
+        self._angles = np.linspace(0.0, 360.0, n_rays, endpoint=False)  # [deg]
         self.set_walls(walls)
 
     def set_walls(self, walls: list) -> None:
@@ -42,16 +55,21 @@ class LidarSimulator:
         ray_angles = np.radians(self._angles + vehicle.heading)
         dirs = np.stack([np.cos(ray_angles), np.sin(ray_angles)], axis=1)  # (N,2)
 
-        distances = np.full(N_RAYS, MAX_RANGE, dtype=float)
+        distances = np.full(self.n_rays, self.max_range, dtype=float)
 
         if self._p1.shape[0] > 0:
             distances = self._raycast(ox, oy, dirs)
 
-        # ガウスノイズ付加（範囲内ヒットのみ）
-        if self.noise_sigma > 0:
-            hit = distances < MAX_RANGE
-            noise = np.random.normal(0.0, self.noise_sigma, size=N_RAYS)
-            distances[hit] = np.clip(distances[hit] + noise[hit], 0.0, MAX_RANGE)
+        hit = distances < (self.max_range - 1e-3)
+
+        # 距離依存ガウスノイズ（LD06 ≒ ±1% クラス）。ヒットのみに付加。
+        sigma = np.maximum(self.noise_floor, self.noise_pct * distances)
+        noise = np.random.normal(0.0, 1.0, size=self.n_rays) * sigma
+        distances[hit] = distances[hit] + noise[hit]
+
+        # 最小測距未満は無効（範囲外＝max_range 扱い）
+        distances[distances < self.min_range] = self.max_range
+        distances = np.clip(distances, 0.0, self.max_range)
 
         scan = LidarScan(
             distances=distances,
@@ -102,4 +120,5 @@ class LidarSimulator:
         t = np.where(valid, t, np.inf)
 
         min_t = np.min(t, axis=1)          # (N,)
-        return np.where(np.isfinite(min_t), np.minimum(min_t, MAX_RANGE), MAX_RANGE)
+        return np.where(np.isfinite(min_t),
+                        np.minimum(min_t, self.max_range), self.max_range)

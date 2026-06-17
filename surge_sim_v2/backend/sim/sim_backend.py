@@ -27,6 +27,7 @@ class SimBackend(BackendBase):
         self.lidar = LidarSimulator(
             walls, shared_state,
             noise_sigma=float(sim_cfg.get("lidar_noise_sigma", 0.02)),
+            config=sim_cfg.get("lidar", {}),
         )
         self._cmd: ControlCommand | None = None
         self._last_lidar_ts = time.time()
