@@ -12,7 +12,7 @@ dist/
 web/dist/
 .env.local
 
-# 実行時生成物（SURGE Sim）
+# 実行時生成物
 logs/*.jsonl
 saved_maps/*.npz
 saved_maps/*.json
