@@ -17,6 +17,7 @@
 | UART プロトコル v0.4 | **確定**（STM32 側と2往復して合意） |
 | プロトコル実装（Python + C ヘッダ生成） | **完了** |
 | **Pi 実機セットアップ** | **完了**（SSH・リポジトリ配置・venv・UART 有効化） |
+| **STM32 実機との UART 疎通** | **確認済み**（双方向・v0.4 一致・エラー0） |
 | GPIO / 時刻同期 / io_node | 未着手 |
 | ログ記録・再生（MCAP） | 未着手 |
 | WS サーバ / GUI 骨格 | 未着手 |
@@ -95,6 +96,22 @@ ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/
 - 前輪のスリップ量を見るときも射影が要る
 
 ---
+
+## STM32 実機との疎通（2026-08-07 確認済み）
+
+`raspi/tools/probe_uart.py` で Pi ↔ STM32 の双方向通信を実機確認した。**ファームは v0.4 準拠。**
+
+- 受信: `TELEMETRY` 50Hz / `STATS` 1Hz が正しい頻度で来る。**CRC・長さ・ロスすべて 0**
+- 送信: `VERSION_REQ` → `VERSION` 応答（`protocol_version=0x0004` 一致、`fw_id=0x4D463303`）、
+  `PING` → `PONG` 応答
+- ベンチ状態の観測（正常）:
+  - `accel_z ≈ +9.87 m/s²`（IMU 健全、静止で重力を検出）
+  - `flags` に `fault_drive_undervoltage`(0x2000) + `armed` — **駆動バッテリー未接続**のため
+  - `md_status` 全 `0x00`（`comm_ok` ビット無し）— **MD/モータ未接続**。この間 temp/current は当てにしない
+  - `batt_signal` 9.55V は正常、`batt_drive` 1.55V は未接続
+- 診断ツール: `.venv/bin/python raspi/tools/probe_uart.py [--passive|--ping]`
+
+**注意: STM32 に給電・配線されていないと 0 バイトになる**（最初はそれで空振りした）。
 
 ## やったこと
 
