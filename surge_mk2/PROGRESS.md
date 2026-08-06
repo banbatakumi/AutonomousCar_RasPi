@@ -18,7 +18,8 @@
 | プロトコル実装（Python + C ヘッダ生成） | **完了** |
 | **Pi 実機セットアップ** | **完了**（SSH・リポジトリ配置・venv・UART 有効化） |
 | **STM32 実機との UART 疎通** | **確認済み**（双方向・v0.4 一致・エラー0） |
-| GPIO / 時刻同期 / io_node | 未着手 |
+| **io_node 中核（シリアル+時刻同期）** | **実機動作確認済み**（10秒実行成功） |
+| ログ記録・再生 / GPIO / バス配信 | 未着手 |
 | ログ記録・再生（MCAP） | 未着手 |
 | WS サーバ / GUI 骨格 | 未着手 |
 
@@ -112,6 +113,31 @@ ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/
 - 診断ツール: `.venv/bin/python raspi/tools/probe_uart.py [--passive|--ping]`
 
 **注意: STM32 に給電・配線されていないと 0 バイトになる**（最初はそれで空振りした）。
+
+## io_node 中核（2026-08-07・方針 A で実装）
+
+バス（ZeroMQ）を入れる前に、シリアル送受信と時刻同期だけの単体版を作り、実機で回した。
+
+- `raspi/core/timesync.py` — PING/PONG 4タイムスタンプ。u32 μs の unwrap、min filter、
+  線形回帰でドリフト推定。**短い時間スパン（<15秒）では回帰せずオフセットのみ**にフォールバック
+- `raspi/io/serial_link.py` — pyserial ラッパ。poll()/send() で T1/T4 を ns で取得
+- `raspi/nodes/io_node.py` — 起動時 VERSION 照合 → PING(5Hz/warmup 20Hz) →
+  **COMMAND は常に DISARM（安全ハートビート、arm は絶対しない）** → 受信集計 → ライブ表示
+- テスト計 50件（proto 37 + timesync 13）。実行:
+  `.venv/bin/python -m raspi.nodes.io_node --duration 10`
+
+### 実機10秒実行の結果（成功）
+- VERSION 一致（0x0004）、health INIT→OK、TELEMETRY 50Hz、CRC0・ロス0
+- 往復遅延 best_delay ≈ **1.41ms**（PING+PONG の伝送 ≈1.2ms と整合）
+- **要追試: クロックドリフト。** 10秒ではオフセットが約6ms/8s 動き（≈-785ppm 相当）、
+  回帰は不安定に -3300ppm を出した → 15秒ガードを追加済み。**次回 45秒以上回して
+  真のドリフトを確定する**（STM32 の t_us が本当に 1MHz からずれているのか要確認）。
+  45秒実行は Pi がネットワークから落ちたため未完（下記）。
+
+### 未解決: Pi が実行中にネットワークから消えた
+10秒実行の直後、`192.168.68.55` が到達不能に（サブネット全スキャンでも SSH ゼロ）。
+電源断 / Wi-Fi 切断 / スリープのいずれか。**DHCP で IP が変わった可能性もある**ため、
+復帰後はまず `dns-sd` かサブネットスキャンで IP を再確認する。ルータで固定割当推奨。
 
 ## やったこと
 
