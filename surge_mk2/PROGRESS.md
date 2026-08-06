@@ -16,9 +16,39 @@
 | 設計フェーズ | 完了 |
 | UART プロトコル v0.4 | **確定**（STM32 側と2往復して合意） |
 | プロトコル実装（Python + C ヘッダ生成） | **完了** |
+| **Pi 実機セットアップ** | **完了**（SSH・リポジトリ配置・venv・UART 有効化） |
 | GPIO / 時刻同期 / io_node | 未着手 |
 | ログ記録・再生（MCAP） | 未着手 |
 | WS サーバ / GUI 骨格 | 未着手 |
+
+## Pi 実機（surge-mk2）
+
+接続情報の詳細と機密は `docs/setup_credentials.md`（gitignore 済み）。要点だけ:
+
+- **Raspberry Pi 5 / Debian 13 (Trixie) / Python 3.13.5**、IP `192.168.68.55`
+- `ssh surge-mk2` で接続（`~/.ssh/config` 登録済み）。**mDNS (`.local`) は不通**なので IP 直
+- **UART 設定済み**: `/dev/serial0 -> ttyAMA0`。io_node では `/dev/serial0` を使う（名前直書き禁止）
+- リポジトリは **Mac → Pi へ rsync** で配置（`~/surge_mk2`）。git remote はあるが未 push
+- venv は `~/surge_mk2/.venv`（`--system-site-packages`）。pyserial 3.5 導入済み。
+  gpiozero/lgpio は OS プリインストールを利用
+- **Pi 上でも 37 テストが通ることを確認済み**
+
+### Mac ↔ Pi の同期（現状の運用）
+
+```bash
+# Mac で編集 → Pi へ反映（sshpass のパスワードは docs/setup_credentials.md）
+export SSHPASS='<パスワード>'
+rsync -az --delete --exclude __pycache__ --exclude '*.pyc' --exclude .venv \
+  --exclude docs/setup_credentials.md \
+  -e "sshpass -e ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no" \
+  surge_mk2/ surge-mk2:~/surge_mk2/
+
+# Pi でテスト
+ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/tests -t .'
+```
+
+**鍵認証にすると sshpass 不要になる。** 秘密鍵にパスフレーズがあるため、バンビが一度
+`ssh-add ~/.ssh/id_ed25519` すれば `ssh surge-mk2` が鍵で通る（`docs/setup_credentials.md` 参照）。
 
 ---
 

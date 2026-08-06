@@ -1,0 +1,21 @@
+# SURGE Mark.2 — Raspberry Pi 5 側 Python 依存
+#
+# venv は --system-site-packages で作る（gpiozero/lgpio は OS プリインストールを使う）:
+#   python3 -m venv --system-site-packages .venv
+#   .venv/bin/pip install -r raspi/requirements.txt
+#
+# gpiozero / lgpio は Raspberry Pi OS に同梱済みのため、ここには書かない。
+# （pip 版を入れると OS 版と競合しうる）
+
+# ── Phase 0（通信基盤） ──
+pyserial==3.5          # UART 送受信
+
+# ── Phase 0 後半（内部バス・メッセージ）※ 使う段階で有効化 ──
+# pyzmq                # ZeroMQ PUB/SUB
+# msgspec              # 内部メッセージのシリアライズ
+# numpy                # 点群・占有格子
+
+# ── Phase 1（カメラ・可視化）※ 使う段階で有効化 ──
+# picamera2            # OS 同梱版を使う場合は --system-site-packages 側で解決
+# opencv-python-headless
+# mcap                 # ログ記録
