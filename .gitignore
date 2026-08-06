@@ -24,3 +24,6 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# 機密情報
+surge_mk2/docs/setup_credentials.md
