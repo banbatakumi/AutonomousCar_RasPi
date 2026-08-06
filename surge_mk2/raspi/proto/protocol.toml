@@ -1,0 +1,312 @@
+# SURGE Mark.2 UART プロトコル定義（唯一の正）
+#
+# このファイルが Pi 側 Python パーサと STM32 側 C ヘッダの**両方**を生成する。
+# 仕様の説明は docs/uart_protocol.md を参照。数値の正はこのファイル。
+#
+#   再生成:  python3 raspi/proto/generate.py
+#
+# 型:  u8 i8 u16 i16 u32 i32 f32  /  count = 配列長  /  bytes = 可変長（末尾のみ）
+# dir: "s2p" = STM32 → Pi,  "p2s" = Pi → STM32
+#
+# scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
+
+[meta]
+protocol_version = 0x0004      # 上位=メジャー 下位=マイナー
+doc = "docs/uart_protocol.md"
+
+[frame]
+sync = [0xAA, 0x55]
+header_size = 5                # SYNC(2) + TYPE(1) + SEQ(1) + LEN(1)
+crc_size = 2
+overhead = 7
+endian = "little"
+max_payload = 255
+
+[crc]
+name = "CRC-16/CCITT-FALSE"
+poly = 0x1021
+init = 0xFFFF
+refin = false
+refout = false
+xorout = 0x0000
+check = 0x29B1                 # "123456789" の CRC
+
+
+# ─────────────────────────────────────────────────────────────
+# STM32 → Pi
+# ─────────────────────────────────────────────────────────────
+
+[[packets]]
+name = "LIDAR_SECTOR"
+type = 0x01
+dir = "s2p"
+len = 69
+rate_hz = 120
+doc = "1周360点を12セクタに分割。角度は sector_idx*30 + i [deg]"
+fields = [
+  { name = "sector_idx",    type = "u8" },
+  { name = "t_start_us",    type = "u32", unit = "us" },
+  { name = "duration_us",   type = "u16", unit = "us" },
+  { name = "rot_speed_dps", type = "u16", scale = 0.01, unit = "deg/s" },
+  { name = "dist",          type = "u16", count = 30, scale = 0.001, unit = "m", note = "0=無効" },
+]
+
+[[packets]]
+name = "TELEMETRY"
+type = 0x02
+dir = "s2p"
+len = 66
+rate_hz = 50
+doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）"
+fields = [
+  { name = "t_us",                type = "u32", unit = "us" },
+  { name = "flags",               type = "u32", note = "FLG_* 参照" },
+  { name = "speed",               type = "i16", scale = 0.001,  unit = "m/s",   note = "車体中心線方向に射影済み" },
+  { name = "yaw_rate",            type = "i16", scale = 0.001,  unit = "rad/s" },
+  { name = "steer_actual",        type = "i16", scale = 0.0001, unit = "rad",   note = "路面舵角" },
+  { name = "steer_cmd_echo",      type = "i16", scale = 0.0001, unit = "rad" },
+  { name = "wheel_speed",         type = "i16", count = 4, scale = 0.001, unit = "m/s", note = "[FL,FR,RL,RR] 射影なし" },
+  { name = "odom_dist",           type = "i32", count = 2, scale = 0.0001, unit = "m",  note = "[FL,FR] 射影なし・累積" },
+  { name = "accel_x",             type = "i16", scale = 0.001,  unit = "m/s2" },
+  { name = "accel_y",             type = "i16", scale = 0.001,  unit = "m/s2" },
+  { name = "accel_z",             type = "i16", scale = 0.001,  unit = "m/s2" },
+  { name = "pitch",               type = "i16", scale = 0.0001, unit = "rad" },
+  { name = "roll",                type = "i16", scale = 0.0001, unit = "rad" },
+  { name = "motor_current",       type = "i16", count = 3, scale = 0.001, unit = "A", note = "[RL,RR,ST] 双方向" },
+  { name = "torque_cmd",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] 指令値" },
+  { name = "temp",                type = "u8",  count = 4, scale = 1.0, unit = "degC", note = "[RL,RR,ST,MCU]" },
+  { name = "batt_voltage_drive",  type = "u8",  scale = 0.05, unit = "V" },
+  { name = "batt_voltage_signal", type = "u8",  scale = 0.05, unit = "V" },
+  { name = "batt_current_drive",  type = "u8",  scale = 0.05, unit = "A", note = "単方向" },
+  { name = "batt_current_signal", type = "u8",  scale = 0.02, unit = "A", note = "単方向" },
+  { name = "us_front",            type = "u8",  scale = 0.02, unit = "m", note = "0=無効" },
+  { name = "us_rear",             type = "u8",  scale = 0.02, unit = "m", note = "0=無効" },
+  { name = "md_status",           type = "u8",  count = 3, note = "[RL,RR,ST] MDS_* 参照" },
+  { name = "cmd_seq_echo",        type = "u8" },
+]
+
+[[packets]]
+name = "CONFIG_ACK"
+type = 0x03
+dir = "s2p"
+len = 7
+fields = [
+  { name = "param_id", type = "u16" },
+  { name = "applied",  type = "f32" },
+  { name = "result",   type = "u8", note = "0=OK 1=不明ID 2=範囲外 3=変更不可" },
+]
+
+[[packets]]
+name = "LOG"
+type = 0x04
+dir = "s2p"
+variable = true
+doc = "severity + ASCII 文字列（改行なし・NUL 終端なし）"
+fields = [
+  { name = "severity", type = "u8", note = "0=DEBUG 1=INFO 2=WARN 3=ERROR" },
+  { name = "message",  type = "bytes" },
+]
+
+[[packets]]
+name = "LIDAR_SECTOR_I"
+type = 0x05
+dir = "s2p"
+len = 99
+rate_hz = 120
+doc = "強度付き。param 0x0040 = 1 のときのみ"
+fields = [
+  { name = "sector_idx",    type = "u8" },
+  { name = "t_start_us",    type = "u32", unit = "us" },
+  { name = "duration_us",   type = "u16", unit = "us" },
+  { name = "rot_speed_dps", type = "u16", scale = 0.01, unit = "deg/s" },
+  { name = "dist",          type = "u16", count = 30, scale = 0.001, unit = "m" },
+  { name = "intensity",     type = "u8",  count = 30 },
+]
+
+[[packets]]
+name = "PONG"
+type = 0x06
+dir = "s2p"
+len = 12
+fields = [
+  { name = "ping_id",      type = "u32" },
+  { name = "t_ping_rx_us", type = "u32", unit = "us", note = "T2: IDLE割り込みで取得" },
+  { name = "t_pong_tx_us", type = "u32", unit = "us", note = "T3: 送信開始割り込みで取得" },
+]
+
+[[packets]]
+name = "VERSION"
+type = 0x07
+dir = "s2p"
+len = 10
+fields = [
+  { name = "protocol_version", type = "u16" },
+  { name = "fw_id",            type = "u32" },
+  { name = "build_epoch",      type = "u32", unit = "s" },
+]
+
+[[packets]]
+name = "STATS"
+type = 0x08
+dir = "s2p"
+len = 48
+rate_hz = 1
+doc = "すべて起動からの累積値。0クリアしない"
+fields = [
+  { name = "t_us",            type = "u32", unit = "us" },
+  { name = "rx_frame_ok",     type = "u32" },
+  { name = "rx_crc_error",    type = "u32" },
+  { name = "rx_len_error",    type = "u32" },
+  { name = "rx_unknown_type", type = "u32" },
+  { name = "tx_drop",         type = "u32" },
+  { name = "md_rx_count",     type = "u32", count = 3, note = "[RL,RR,ST]" },
+  { name = "md_rx_error",     type = "u32", count = 3, note = "[RL,RR,ST]" },
+]
+
+[[packets]]
+name = "LIDAR_SECTOR_C"
+type = 0x09
+dir = "s2p"
+len = 39
+rate_hz = 120
+doc = "距離1バイト圧縮。param 0x0040 = 2 のときのみ。255 = 5.10m 以上（飽和）"
+fields = [
+  { name = "sector_idx",    type = "u8" },
+  { name = "t_start_us",    type = "u32", unit = "us" },
+  { name = "duration_us",   type = "u16", unit = "us" },
+  { name = "rot_speed_dps", type = "u16", scale = 0.01, unit = "deg/s" },
+  { name = "dist",          type = "u8", count = 30, scale = 0.02, unit = "m", note = "0=無効 255=飽和" },
+]
+
+
+# ─────────────────────────────────────────────────────────────
+# Pi → STM32
+# ─────────────────────────────────────────────────────────────
+
+[[packets]]
+name = "COMMAND"
+type = 0x10
+dir = "p2s"
+len = 10
+rate_hz = 100
+fields = [
+  { name = "mode",             type = "u8", note = "0=DISARM 1=MANUAL 2=AUTO (3=予約)" },
+  { name = "flags",            type = "u8", note = "bit0=arm bit1=brake bit2=horn bit3=light" },
+  { name = "target_speed",     type = "i16", scale = 0.001,  unit = "m/s" },
+  { name = "target_steer",     type = "i16", scale = 0.0001, unit = "rad", note = "路面舵角" },
+  { name = "accel_limit",      type = "u16", scale = 0.001,  unit = "m/s2" },
+  { name = "steer_rate_limit", type = "u16", scale = 0.001,  unit = "rad/s" },
+]
+
+[[packets]]
+name = "CONFIG_SET"
+type = 0x11
+dir = "p2s"
+len = 6
+fields = [
+  { name = "param_id", type = "u16" },
+  { name = "value",    type = "f32" },
+]
+
+[[packets]]
+name = "PING"
+type = 0x12
+dir = "p2s"
+len = 4
+rate_hz = 5
+fields = [
+  { name = "ping_id", type = "u32" },
+]
+
+[[packets]]
+name = "CONFIG_GET"
+type = 0x13
+dir = "p2s"
+len = 2
+fields = [
+  { name = "param_id", type = "u16" },
+]
+
+[[packets]]
+name = "VERSION_REQ"
+type = 0x14
+dir = "p2s"
+len = 0
+doc = "ペイロードなし。応答は VERSION (0x07)"
+fields = []
+
+
+# ─────────────────────────────────────────────────────────────
+# ビット定義・enum（C ヘッダにも出力する）
+# ─────────────────────────────────────────────────────────────
+
+[bits.FLG]
+comment = "TELEMETRY.flags (u32)"
+MODE_MASK                 = 0x00000003   # bit0-1
+ARMED                     = 0x00000004
+ESTOP_ACTIVE              = 0x00000008
+UART_TIMEOUT              = 0x00000010
+TC_ACTIVE                 = 0x00000020
+TV_ACTIVE                 = 0x00000040
+IMU_OK                    = 0x00000080
+LIDAR_OK                  = 0x00000100
+# bit9 は予約（旧 calib_running）
+STEER_CENTER_VALID        = 0x00000400
+FAULT_DRIVE_OVERCURRENT   = 0x00000800
+FAULT_SIGNAL_OVERCURRENT  = 0x00001000
+FAULT_DRIVE_UNDERVOLTAGE  = 0x00002000
+FAULT_SIGNAL_UNDERVOLTAGE = 0x00004000
+DRIVE_POWER_LOCKED        = 0x00008000
+
+[bits.MDS]
+comment = "md_status[i] (u8)"
+RUNNING          = 0x01
+VOLTAGE_OOR      = 0x02
+OVERHEAT         = 0x04
+OVERCURRENT      = 0x08
+COMM_OK          = 0x10
+LIMIT_SYNCED     = 0x20
+
+[bits.CMD_FLG]
+comment = "COMMAND.flags (u8)"
+ARM   = 0x01
+BRAKE = 0x02
+HORN  = 0x04
+LIGHT = 0x08
+
+[enums.MODE]
+comment = "COMMAND.mode / TELEMETRY.flags bit0-1"
+DISARM = 0
+MANUAL = 1
+AUTO   = 2
+
+[enums.LOG_SEVERITY]
+DEBUG = 0
+INFO  = 1
+WARN  = 2
+ERROR = 3
+
+[enums.CONFIG_RESULT]
+OK           = 0
+UNKNOWN_ID   = 1
+OUT_OF_RANGE = 2
+NOT_ALLOWED  = 3
+
+[enums.LIDAR_FORMAT]
+comment = "param_id 0x0040"
+NORMAL     = 0
+INTENSITY  = 1
+COMPRESSED = 2
+
+[params]
+comment = "CONFIG_SET / CONFIG_GET の param_id"
+MAX_SPEED      = 0x0001
+MAX_ACCEL      = 0x0002
+MAX_STEER      = 0x0003
+TC_ENABLE      = 0x0010
+TC_SLIP_THRESH = 0x0011
+TV_ENABLE      = 0x0020
+TV_GAIN        = 0x0021
+SPEED_KP       = 0x0030
+SPEED_KI       = 0x0031
+LIDAR_FORMAT   = 0x0040
