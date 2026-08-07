@@ -204,7 +204,7 @@ def _status_line(node: IoNode) -> None:
     sys.stdout.write(
         f"\r[{s.health:8}] sync off={off_s} delay={delay_s} drift={drift_s} "
         f"n={sync.n_samples:>3} | {veh} | {counts} "
-        f"crc={rst.crc_error} loss={rst.packet_loss}    ")
+        f"crc={rst.crc_error} loss={rst.packet_loss} reord={rst.reordered}    ")
     sys.stdout.flush()
 
 
@@ -250,8 +250,9 @@ def main() -> int:
 
     st = link.stats
     print("\n\n=== 終了時の統計 ===")
-    print(f"frames_ok={st.frame_ok} crc_err={st.crc_error} "
-          f"len_err={st.len_error} loss={st.packet_loss} unknown={st.unknown_type}")
+    print(f"frames_ok={st.frame_ok} crc_err={st.crc_error} len_err={st.len_error} "
+          f"loss={st.packet_loss} reordered={st.reordered} dup={st.duplicate} "
+          f"unknown={st.unknown_type} resync={st.resync_bytes}B")
     print(f"time sync: n={node.sync.n_samples} "
           f"offset={node.sync.offset_ns} ns best_delay={node.sync.best_delay_ns} ns "
           f"drift={node.sync.drift_ppm} ppm")

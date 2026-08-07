@@ -328,6 +328,31 @@ class TestFrameParser(unittest.TestCase):
         self.parser.feed(build_frame(0x12, 1, b"\x00" * 4))
         self.assertEqual(self.parser.stats.packet_loss, 2)
 
+    def test_seq_reorder_not_counted_as_loss(self):
+        """STM32 の優先度キューで SEQ が逆行しても大量ロスに化けない。
+
+        単純な (seq-last-1)&0xFF だと 1つの逆行を 254 ロスと誤計上していた。
+        """
+        for s in (10, 12, 11, 13):        # 11 が 12 に追い越される並び
+            self.parser.feed(build_frame(0x12, s, b"\x00" * 4))
+        st = self.parser.stats
+        self.assertEqual(st.reordered, 1)          # 逆行 1回
+        self.assertEqual(st.packet_loss, 0)        # 全フレーム届いたので実ロスは 0
+        self.assertEqual(st.duplicate, 0)
+
+    def test_duplicate_seq(self):
+        self.parser.feed(build_frame(0x12, 7, b"\x00" * 4))
+        self.parser.feed(build_frame(0x12, 7, b"\x00" * 4))
+        self.assertEqual(self.parser.stats.duplicate, 1)
+        self.assertEqual(self.parser.stats.packet_loss, 0)
+
+    def test_single_backward_step_bounded(self):
+        """逆行1個が 254 ロスに化けないことを直接確認（退行テスト）。"""
+        self.parser.feed(build_frame(0x12, 100, b"\x00" * 4))
+        self.parser.feed(build_frame(0x12, 99, b"\x00" * 4))
+        self.assertEqual(self.parser.stats.packet_loss, 0)
+        self.assertEqual(self.parser.stats.reordered, 1)
+
     def test_wrong_direction_rejected(self):
         """Pi 側の受信機は STM32→Pi のパケットだけを受け付ける。"""
         parser = FrameParser(expect_types=packets.S2P_TYPES)

@@ -134,6 +134,8 @@ class RxStats:
     unknown_type: int = 0
     wrong_direction: int = 0
     packet_loss: int = 0
+    reordered: int = 0     #: SEQ が逆行した回数（STM32 の優先度キューによる並べ替え）
+    duplicate: int = 0     #: 同一 SEQ の重複
     resync_bytes: int = 0  #: SYNC を探して読み飛ばしたバイト数
 
     def as_dict(self) -> dict[str, int]:
@@ -220,9 +222,26 @@ class FrameParser:
         del buf[:total]
 
         # CRC が通った時点で SEQ は信用できる。未知の TYPE でもロス計上には使う。
+        #
+        # 注意: STM32 は送信優先度キューを持ち、TELEMETRY が LIDAR を追い越すため
+        # SEQ が数個ぶん前後する（逆行しうる）。単純な (seq-last-1)&0xFF だと
+        # 1つの逆行を「254個ロスした」と誤計上して数字が爆発する。
+        # 前方への飛びだけをロスとみなし、逆行は reordered として別に数える。
         if self._last_seq is not None:
-            self.stats.packet_loss += (seq - self._last_seq - 1) & 0xFF
-        self._last_seq = seq
+            delta = (seq - self._last_seq) & 0xFF
+            if delta == 0:
+                self.stats.duplicate += 1
+            elif delta < 128:                       # 前方（=進んだ）: 飛んだ分がロス
+                self.stats.packet_loss += delta - 1
+                self._last_seq = seq
+            else:                                   # 後方（=逆行）: 並べ替え。基準は進めない
+                # 直前に「飛んだ」と数えた分が遅れて届いたので、そのロス計上を相殺する。
+                # ±数個の追い越しならこれで loss が実ロスだけを表す。
+                self.stats.reordered += 1
+                if self.stats.packet_loss > 0:
+                    self.stats.packet_loss -= 1
+        else:
+            self._last_seq = seq
 
         if not known:
             self.stats.unknown_type += 1

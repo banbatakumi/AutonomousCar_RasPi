@@ -18,7 +18,7 @@
 | プロトコル実装（Python + C ヘッダ生成） | **完了** |
 | **Pi 実機セットアップ** | **完了**（SSH・リポジトリ配置・venv・UART 有効化） |
 | **STM32 実機との UART 疎通** | **確認済み**（双方向・v0.4 一致・エラー0） |
-| **io_node 中核（シリアル+時刻同期）** | **実機動作確認済み**（10秒実行成功） |
+| **io_node 中核（シリアル+時刻同期）** | **実機で安定動作**（loss=0/crc=0、45秒実証） |
 | ログ記録・再生 / GPIO / バス配信 | 未着手 |
 | ログ記録・再生（MCAP） | 未着手 |
 | WS サーバ / GUI 骨格 | 未着手 |
@@ -27,30 +27,33 @@
 
 接続情報の詳細と機密は `docs/setup_credentials.md`（gitignore 済み）。要点だけ:
 
-- **Raspberry Pi 5 / Debian 13 (Trixie) / Python 3.13.5**、IP `192.168.68.55`
-- `ssh surge-mk2` で接続（`~/.ssh/config` 登録済み）。**mDNS (`.local`) は不通**なので IP 直
-- **UART 設定済み**: `/dev/serial0 -> ttyAMA0`。io_node では `/dev/serial0` を使う（名前直書き禁止）
-- リポジトリは **Mac → Pi へ rsync** で配置（`~/surge_mk2`）。git remote はあるが未 push
-- venv は `~/surge_mk2/.venv`（`--system-site-packages`）。pyserial 3.5 導入済み。
-  gpiozero/lgpio は OS プリインストールを利用
-- **Pi 上でも 37 テストが通ることを確認済み**
+- **Raspberry Pi 5 / Debian 13 (Trixie) / Python 3.13.5**
+- **接続は Ethernet 直結**。Mac の USB アダプタ(en18) ↔ Pi。
+  **Pi eth0 = 固定 `169.254.55.2`**。`ssh surge-mk2` で決め打ち接続（`~/.ssh/config` 更新済み）
+- **UART**: `/dev/serial0 -> ttyAMA0`。io_node では `/dev/serial0` を使う（名前直書き禁止）
+- リポジトリは **Mac → Pi へ rsync**（`~/surge_mk2`）。git remote はあるが未 push
+- venv は `~/surge_mk2/.venv`（`--system-site-packages`）。pyserial 3.5。
+  gpiozero/lgpio は OS プリインストール利用
+
+### ★ 不安定だった原因＝電源不足（解決済み）
+
+Pi が「起動 → 数十秒 → ハングして消える」を繰り返していたのは **Pi 5 の電源不足**。
+USB 給電では足りず、**5V/5A（27W）USB-C PD に交換して解決**。`vcgencmd get_throttled`=`0x0`。
+緑 LED が点いていても OS はハングし得るので、LED だけで健全判断しないこと。
 
 ### Mac ↔ Pi の同期（現状の運用）
 
-```bash
-# Mac で編集 → Pi へ反映（sshpass のパスワードは docs/setup_credentials.md）
-export SSHPASS='<パスワード>'
-rsync -az --delete --exclude __pycache__ --exclude '*.pyc' --exclude .venv \
-  --exclude docs/setup_credentials.md \
-  -e "sshpass -e ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no" \
-  surge_mk2/ surge-mk2:~/surge_mk2/
+秘密鍵にパスフレーズがあり agent 未ロードのため、当面 **sshpass + パスワード**で運用
+（パスワードは `docs/setup_credentials.md`）。バンビが一度 `ssh-add ~/.ssh/id_ed25519` すれば
+鍵認証に移行できる。
 
-# Pi でテスト
+```bash
+export SSHPASS='<パスワード>'
+OPT='-o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no'
+rsync -az --exclude __pycache__ --exclude '*.pyc' --exclude .venv --exclude docs/setup_credentials.md \
+  -e "sshpass -e ssh $OPT" surge_mk2/ pi@169.254.55.2:~/surge_mk2/
 ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/tests -t .'
 ```
-
-**鍵認証にすると sshpass 不要になる。** 秘密鍵にパスフレーズがあるため、バンビが一度
-`ssh-add ~/.ssh/id_ed25519` すれば `ssh surge-mk2` が鍵で通る（`docs/setup_credentials.md` 参照）。
 
 ---
 
@@ -126,18 +129,27 @@ ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/
 - テスト計 50件（proto 37 + timesync 13）。実行:
   `.venv/bin/python -m raspi.nodes.io_node --duration 10`
 
-### 実機10秒実行の結果（成功）
-- VERSION 一致（0x0004）、health INIT→OK、TELEMETRY 50Hz、CRC0・ロス0
-- 往復遅延 best_delay ≈ **1.41ms**（PING+PONG の伝送 ≈1.2ms と整合）
-- **要追試: クロックドリフト。** 10秒ではオフセットが約6ms/8s 動き（≈-785ppm 相当）、
-  回帰は不安定に -3300ppm を出した → 15秒ガードを追加済み。**次回 45秒以上回して
-  真のドリフトを確定する**（STM32 の t_us が本当に 1MHz からずれているのか要確認）。
-  45秒実行は Pi がネットワークから落ちたため未完（下記）。
+### 実機での実証結果（電源修正後・安定）
+- VERSION 一致（0x0004、fw=0x4D463303="MF3"）、health INIT→OK
+- TELEMETRY 50Hz / LIDAR 120Hz(12セクタ) / STATS 1Hz を正しい頻度で受信
+- **loss=0・crc=0・resync=0B**（45秒実証）。リンクは完全にクリーン
 
-### 未解決: Pi が実行中にネットワークから消えた
-10秒実行の直後、`192.168.68.55` が到達不能に（サブネット全スキャンでも SSH ゼロ）。
-電源断 / Wi-Fi 切断 / スリープのいずれか。**DHCP で IP が変わった可能性もある**ため、
-復帰後はまず `dns-sd` かサブネットスキャンで IP を再確認する。ルータで固定割当推奨。
+### 確定した実機の性質（2つ）
+
+1. **STM32 のクロックが約 -3360ppm ドリフトしている。**
+   4回の実行で -3339/-3352/-3353/-3362ppm と安定。0.336% は水晶にしては大きく、
+   **STM32 が外部水晶でなく内蔵 RC(HSI, ±1%級)で μs タイマを回している**とみられる。
+   時刻同期の回帰補正がこれを吸収するので実害なし。**15秒未満は回帰せずオフセットのみ**の
+   ガードも入れた（短窓だとジッタで傾きが暴れて -3300 のような値が出るため）。
+
+2. **STM32 は送信優先度キューで SEQ を数個ぶん並べ替える**（TELEMETRY が LIDAR を追い越す）。
+   逆行しても実フレームは全部届く（`tx_drop=0`）。
+   → **framing.py の loss 計算バグを修正**（逆行を 254 ロスと誤計上していた）。
+   逆行は `reordered` として別集計し、飛び計上を相殺して loss=実ロスだけにした。
+
+### 補足: MD は未接続
+`STATS.md_rx_error` が巨大・`md_rx_count=0`・`md_status=0x00`。モータドライバ未接続の
+ベンチ状態なので正常。この間 temp/current/wheel_speed は当てにしない。
 
 ## やったこと
 
