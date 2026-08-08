@@ -1,0 +1,332 @@
+/*
+ * 暗い背景の計器盤。走行中に**横目で読む**ことを前提にしている。
+ *
+ * 色は意味に割り当てる。装飾で色を使わない。
+ *   lv-ok   正常     lv-warn 注意（見ておく）   lv-bad 異常（今すぐ）
+ *   dim     参考値・無効
+ */
+
+:root {
+  --bg: #0b0e11;
+  --panel: #12161b;
+  --panel2: #171d23;
+  --line: #232b34;
+  --fg: #d6dde5;
+  --dim: #6a7683;
+  --ok: #3ac26a;
+  --warn: #e8ab21;
+  --bad: #f2544b;
+  --accent: #4aa8ff;
+  --live: #ffc63f;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+button:hover { border-color: #3a4652; }
+button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
+
+.dim { color: var(--dim); }
+.lv-ok { color: var(--ok); }
+.lv-warn { color: var(--warn); }
+.lv-bad { color: var(--bad); }
+.spacer { flex: 1; }
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── ステータスバー（層 B） ─────────────────────────────── */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.brand { font-weight: 700; letter-spacing: .04em; margin-right: 6px; }
+
+.pill {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pill.lv-ok { border-color: #1f5c37; }
+.pill.lv-warn { border-color: #6b5210; }
+.pill.lv-bad { border-color: #6e2b27; }
+
+.metric { display: inline-flex; align-items: baseline; gap: 3px; }
+.metric b { font-weight: 600; }
+.metric i { font-style: normal; color: var(--dim); font-size: 10px; }
+
+/* ARM は「保持されている」ことが遠目にも分かる必要がある */
+.armbtn {
+  min-width: 8.5em;
+  font-weight: 600;
+  letter-spacing: .03em;
+}
+.armbtn.on {
+  background: #4a3a08;
+  border-color: #b08a15;
+  color: var(--live);
+  animation: armpulse 1.2s ease-in-out infinite;
+}
+.armbtn:disabled { opacity: .35; cursor: not-allowed; }
+@keyframes armpulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 198, 63, .45); }
+  50%      { box-shadow: 0 0 0 4px rgba(255, 198, 63, 0); }
+}
+
+.estop {
+  background: #40140f;
+  border-color: #7d2b23;
+  color: #ffb4ae;
+  font-weight: 700;
+  letter-spacing: .05em;
+}
+.estop:hover { background: #5b1a13; border-color: var(--bad); }
+
+/* ラッチ系は health より目立たせる。人間が物理操作しないと戻らないため */
+.latch {
+  background: #3a1512;
+  border-bottom: 1px solid #7d2b23;
+  color: #ffc9c4;
+  padding: 5px 12px;
+  font-weight: 600;
+}
+
+/* ── タブ ────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.hint { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.badge-live {
+  background: #4a3a08;
+  border: 1px solid #8a6d13;
+  color: var(--live);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-weight: 600;
+}
+.badge-warn {
+  background: #3d3208;
+  border: 1px solid #6b5210;
+  color: var(--warn);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  margin-left: 5px;
+}
+.badge-bad {
+  background: #3a1512;
+  border: 1px solid #7d2b23;
+  color: #ff9b93;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  margin-left: 5px;
+}
+
+/* ── 運転ビュー ───────────────────────────────────────── */
+
+.drive {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'cams  lidar'
+    'bar   bar'
+    'diag  diag';
+  gap: 6px;
+  padding: 6px;
+}
+
+.cams {
+  grid-area: cams;
+  position: relative;
+  display: grid;
+  grid-template-rows: 2.2fr 1fr;
+  gap: 6px;
+  min-height: 0;
+}
+/* 駐車時は後方を大きくする */
+.cams.rear-big { grid-template-rows: 1fr 2.2fr; }
+.cams.rear-big > .camera:first-child { order: 2; }
+.cams.rear-big > .camera:nth-child(2) { order: 1; }
+
+.camera {
+  position: relative;
+  background: #07090b;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  min-height: 0;
+}
+.camera canvas { width: 100%; height: 100%; display: block; }
+.camera-tag {
+  position: absolute;
+  top: 5px;
+  left: 7px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  background: #0009;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.cam-controls {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  background: #000a;
+  padding: 3px 6px;
+  border-radius: 4px;
+  z-index: 2;
+}
+
+.lidar {
+  grid-area: lidar;
+  position: relative;
+  background: #0b0e11;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  min-height: 0;
+}
+.lidar-canvas { width: 100%; height: 100%; display: block; }
+.lidar-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: #000a;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+.scan-badge {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  background: #000a;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+/* ── 速度・舵角の帯 ──────────────────────────────────── */
+
+.drivebar {
+  grid-area: bar;
+  display: grid;
+  grid-template-columns: 1.4fr 1.4fr 1fr 1fr;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px 12px;
+}
+/* 受信が途絶したら数字をグレーにする。**古い値を現在値に見せない** */
+.drivebar.stale { opacity: .45; }
+
+.gauge { min-width: 0; }
+.gauge-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.gauge .label { color: var(--dim); font-size: 11px; }
+.gauge .big { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.gauge .unit { color: var(--dim); font-size: 11px; }
+.gauge .sub { color: var(--dim); font-size: 11px; }
+.gauge .note { display: block; color: var(--dim); font-size: 10px; margin-top: 3px; }
+
+.bibar {
+  position: relative;
+  height: 9px;
+  margin-top: 5px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.bibar-zero { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #3b4550; }
+.bibar-fill { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .85; }
+/* 指令値は線で重ねる。実測との差＝アクチュエータの遅れ */
+.bibar-target { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--live); }
+
+.kv { display: flex; gap: 8px; align-items: baseline; }
+.kv span { color: var(--dim); min-width: 5.5em; }
+.kv b { font-weight: 600; min-width: 4.5em; }
+
+/* ── 層 C（畳んである診断） ──────────────────────────── */
+
+.diag {
+  grid-area: diag;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 10px;
+  max-height: 34vh;
+  overflow: auto;
+}
+.diag.open { border-color: #3b4550; }
+.diag-toggle { background: none; border: none; padding: 2px 0; color: var(--fg); }
+.diag-alerts { display: flex; flex-wrap: wrap; gap: 5px; padding: 3px 0 6px; }
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 18px;
+  padding: 6px 0 2px;
+}
+.diag-grid h4 { margin: 0 0 4px; font-size: 11px; color: var(--dim); font-weight: 600; }
+.diag-grid section { border-left: 2px solid var(--line); padding-left: 8px; }
+.diag-grid .note { display: block; color: var(--dim); font-size: 10px; margin-top: 4px; }
+
+/* ── 未実装のタブ ────────────────────────────────────── */
+
+.placeholder { padding: 28px; max-width: 44rem; }
+.placeholder h2 { margin: 0 0 8px; }
+.placeholder code { color: var(--accent); }

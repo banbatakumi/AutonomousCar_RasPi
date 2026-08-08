@@ -273,22 +273,75 @@ def main() -> int:
     ap.add_argument("--end", type=float, default=None, help="終了位置 [s]")
     ap.add_argument("--quiet", action="store_true", help="ライブ表示なし")
     ap.add_argument("--verify", action="store_true", help="記録内容と突き合わせる")
+    ap.add_argument("--bus", action="store_true",
+                    help="バスに配信する（io_node のふりをする＝実車なしで GUI を動かせる）")
+    ap.add_argument("--loop", action="store_true", help="終端まで行ったら先頭から繰り返す")
     args = ap.parse_args()
 
     if not args.path.exists():
         print(f"ファイルがありません: {args.path}", file=sys.stderr)
         return 2
 
-    node = ReplayNode(args.path, speed=args.speed,
-                      start_s=args.start, end_s=args.end)
-    signal.signal(signal.SIGINT, lambda *_: node.stop())
+    # ── バス配信（`io_node` と同じ endpoint に bind する。下流から区別がつかないのが狙い） ──
+    pub = bridge = None
+    if args.bus:
+        from raspi.bus import Publisher
+        from raspi.core.bus_bridge import BusBridge
+        from raspi.proto.generated.packets import PROTOCOL_VERSION
+
+        holder: dict = {}
+        pub = Publisher("io")
+        # **時刻はログのカーソル**。壁時計を使うと記録時と時刻の座標系がずれる
+        bridge = BusBridge(pub, clock=lambda: holder["node"]._cursor_ns)
+        print(f"# バス配信 {pub.endpoint}（io_node のふり）")
+        if args.speed == 0:
+            print("!! --speed 0 は待たずに流すので、購読側は取りこぼす。"
+                  "GUI に繋ぐなら等速で")
+
+        n_telem = 0
+
+        def _on_telem(t, t_pi_ns):
+            nonlocal n_telem
+            bridge.on_telemetry(t, t_pi_ns)
+            n_telem += 1
+            if n_telem % 5 == 0:            # 50Hz の 1/5 = 10Hz
+                bridge.publish_diag(
+                    holder["node"].state, holder["node"].sync,
+                    holder["node"].recorded_stats,
+                    arm_inhibited=True, cmd_source="replay", cmd_stale=True,
+                    expected_version=PROTOCOL_VERSION)
+
+        node = ReplayNode(args.path, speed=args.speed,
+                          start_s=args.start, end_s=args.end,
+                          on_telemetry=_on_telem, on_frame=bridge.on_frame)
+        holder["node"] = node
+    else:
+        node = ReplayNode(args.path, speed=args.speed,
+                          start_s=args.start, end_s=args.end)
+    interrupted = [False]
+
+    def _sigint(*_):
+        interrupted[0] = True
+        node.stop()
+
+    signal.signal(signal.SIGINT, _sigint)
 
     print(f"# replay {args.path} speed={'最速' if args.speed == 0 else f'x{args.speed}'}")
     if args.start or args.end is not None:
         print(f"# 区間 {args.start}s .. {args.end if args.end is not None else '終端'}s")
 
     t_wall = time.monotonic()
-    node.run(status_cb=None if args.quiet else _status_line)
+    loops = 0
+    while True:
+        node.run(status_cb=None if args.quiet else _status_line)
+        loops += 1
+        if not args.loop or interrupted[0]:
+            break
+        # 周回のたびに累積量を切る。前輪オドメトリの差分が先頭に戻る瞬間に
+        # 巨大な負の差分を作らないため
+        if bridge is not None:
+            bridge.state_builder.reset()
+        print(f"\n# --loop: {loops} 周目を終えて先頭へ戻る")
     t_wall = time.monotonic() - t_wall
 
     print(f"\n\n=== 再生結果 ({t_wall:.2f}s で {node.rel_s(node._cursor_ns):.2f}s 分) ===")
@@ -308,6 +361,13 @@ def main() -> int:
         print(f"lidar sectors seen: {len(node.state.lidar_sectors)}/12")
     if getattr(node, "truncated", False):
         print("!! ログの末尾が切れている（記録中に落ちた可能性）")
+
+    if bridge is not None:
+        print(f"bus: vehicle_state={bridge.vehicle_states} scan={bridge.published_scans} "
+              f"lidar_sectors_lost={bridge.scans.sectors_lost} "
+              f"odom_center={bridge.state_builder.odom_center:.3f}m")
+    if pub is not None:
+        pub.close()
 
     if args.verify:
         return 0 if verify(node) else 1

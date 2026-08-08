@@ -158,11 +158,17 @@ class TestIoNodeLogging(unittest.TestCase):
         self.assertGreater(node._log_errors, 0)
         self.assertGreater(len(link.sent), 0)   # 送信は止まっていない
 
-    def test_no_log_means_no_hook(self):
+    def test_tx_hook_is_always_set_but_logs_nothing_without_a_writer(self):
+        """`on_tx` はログが無くても張る（エンドツーエンド遅延の測定に要る）。
+
+        ただし Writer が無ければ何も書かないこと。ログ機能と遅延測定が
+        同じフックに相乗りしているので、片方だけを止められる必要がある。
+        """
         link = FakeLink()
         node = IoNode(link)
         node.run(duration_s=0.05)
-        self.assertIsNone(link.on_tx)
+        self.assertIsNotNone(link.on_tx)
+        self.assertEqual(node._log_errors, 0)
         self.assertGreater(len(link.sent), 0)
 
 

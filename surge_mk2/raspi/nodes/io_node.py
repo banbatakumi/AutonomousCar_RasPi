@@ -1,27 +1,39 @@
-"""io_node — STM32 との UART 送受信ノード（Phase 0・バス無しの単体版）。
+"""io_node — STM32 との UART 送受信ノード。
 
-    .venv/bin/python -m raspi.nodes.io_node                # ライブ状態表示
+    .venv/bin/python -m raspi.nodes.io_node                # ライブ状態表示＋バス配信
     .venv/bin/python -m raspi.nodes.io_node --duration 10  # 10秒で終了
     .venv/bin/python -m raspi.nodes.io_node --quiet        # 表示なし（統計のみ最後に）
     .venv/bin/python -m raspi.nodes.io_node --log          # logs/ に .sfl を記録
-    .venv/bin/python -m raspi.nodes.io_node --log run1.sfl # ファイル名を指定
+    .venv/bin/python -m raspi.nodes.io_node --no-bus       # バスを使わない（診断用）
+    .venv/bin/python -m raspi.nodes.io_node --allow-arm    # ★ モータを回せる状態にする
 
 やること:
 - 起動時に VERSION_REQ → VERSION を照合（protocol_version 不一致は警告）
 - PING を 5Hz（最初の3秒は 20Hz）で送り、PONG から時刻同期を推定
-- COMMAND を 100Hz で送る。**安全のため常に DISARM・停止指令**（STM32 の
-  COMMAND タイムアウトを防ぐハートビートを兼ねる。arm は絶対にしない）
+- COMMAND を 100Hz で送る（STM32 の COMMAND タイムアウトを防ぐハートビートを兼ねる）
 - TELEMETRY / STATS / PONG / VERSION / LIDAR を受信・集計
 - リンク健全性（TELEMETRY 途絶 100ms=警告 / 200ms=FAULT）を判定
-- ライブ状態を1行で表示
+- **バスへ配信**: `vehicle_state`(50Hz) / `scan`(10Hz) / `diag/link`(10Hz) / `hb/io`(10Hz)
+- **バスから購読**: `cmd`（走行指令）
 - 送受信フレームを生のまま `.sfl` に記録（`--log`）
 
-下流配信（ZeroMQ）はまだ入れない。受信は self.latest に保持し、コールバックで渡す。
+## COMMAND の安全設計 — 3つの独立した条件が全部そろわないとモータは回らない
+
+1. **`--allow-arm` が無ければ DISARM 固定。** GUI・WS・バスに何が流れていようと
+   ここで断つ。判断を1箇所に閉じないと「どこかで解禁されていた」が起きる
+2. **`cmd` が 150ms 途絶したら DISARM に落とす。** publish 側（GUI や
+   planning_node）が死んだ＝上位が落ちた、なので止めるのが正しい
+3. **Pi 側でも速度・舵角を上限でクランプする。** STM32 にも上限はあるが、
+   下位だけが守る構造にしない
+
+さらに GPIO6 ハートビート（第1層）と STM32 の COMMAND タイムアウト（第2層）が
+下にある。ここは第3層（`docs/architecture.md` §7）。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -30,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from raspi.core.bus_bridge import BusBridge  # noqa: E402
 from raspi.core.link_tracker import (  # noqa: E402
     LinkState,
     LinkTracker,
@@ -47,6 +60,8 @@ from raspi.io.gpio import (  # noqa: E402
     open_output,
 )
 from raspi.io.serial_link import SerialLink  # noqa: E402
+from raspi.msgs import DriveCmd, Heartbeat as HbMsg, command_from_cmd  # noqa: E402
+from raspi.msgs.types import TOPIC_CMD, TOPIC_HB_PREFIX  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
@@ -59,6 +74,16 @@ PING_HZ = 5
 PING_WARMUP_HZ = 20
 WARMUP_S = 3.0
 LINKSTATS_HZ = 1
+DIAG_HZ = 10
+HB_HZ = 10
+
+#: `cmd` がこれだけ途絶したら DISARM に落とす。20Hz 送信に対して 3発の猶予。
+#: `docs/architecture.md` §9.4 の「PC → Pi 150ms 途切れたら停止」に合わせてある
+CMD_TIMEOUT_NS = 150 * 1_000_000
+
+#: Pi 側のクランプ既定値。STM32 側の上限とは独立に効かせる（多層防御）
+DEFAULT_MAX_SPEED = 1.0        # m/s
+DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
 
 
 class IoNode:
@@ -71,21 +96,49 @@ class IoNode:
     def __init__(self, link: SerialLink, on_telemetry=None,
                  log: FrameLogWriter | None = None,
                  heartbeat: Heartbeat | None = None,
-                 indicator: StatusIndicator | None = None) -> None:
+                 indicator: StatusIndicator | None = None,
+                 pub=None, sub=None, *,
+                 allow_arm: bool = False,
+                 max_speed: float = DEFAULT_MAX_SPEED,
+                 max_steer: float = DEFAULT_MAX_STEER) -> None:
         self.link = link
-        self.tracker = LinkTracker(on_telemetry=on_telemetry, on_latch=self._on_latch)
+        self.bridge = BusBridge(pub)
+        self.tracker = LinkTracker(
+            on_telemetry=self._on_telemetry_chain(on_telemetry),
+            on_frame=self.bridge.on_frame,
+            on_latch=self._on_latch)
         # 受信状態と時刻同期の実体は tracker が持つ。ここは同じ物への別名。
         self.state = self.tracker.state
         self.sync = self.tracker.sync
         self.heartbeat = heartbeat
         self.indicator = indicator
+        self.pub = pub
+        self.sub = sub
+        self.allow_arm = allow_arm
+        self.max_speed = max_speed
+        self.max_steer = max_steer
+
+        #: 直近に受け取った走行指令と、その受信時刻。**古くなったら使わない**
+        self.cmd: DriveCmd | None = None
+        self._cmd_ns = 0
+        self.cmd_stale = True
+        #: `cmd` 途絶で DISARM に落とした回数。1回でも起きたら GUI 側を疑う
+        self.cmd_timeouts = 0
+
         self._log = log
         self._log_errors = 0
         self._ping_seq = 0
         self._running = False
         self._t_start = 0
-        if log is not None:
-            link.on_tx = self._log_tx
+        link.on_tx = self._on_tx
+
+    def _on_telemetry_chain(self, extra):
+        """バスへの配信を必ず通しつつ、呼び出し側のコールバックも呼ぶ。"""
+        def _cb(t, t_pi_ns):
+            self.bridge.on_telemetry(t, t_pi_ns)
+            if extra is not None:
+                extra(t, t_pi_ns)
+        return _cb
 
     # ── LED 表示 ──
 
@@ -125,7 +178,16 @@ class IoNode:
 
     # ── ログ ──
 
-    def _log_tx(self, t_ns: int, pkt_type: int, seq: int, payload: bytes) -> None:
+    def _on_tx(self, t_ns: int, pkt_type: int, seq: int, payload: bytes) -> None:
+        """送信フック。記録と、エンドツーエンド遅延の測定に使う。
+
+        送信 SEQ はエンコーダ内部にしか無く呼び出し側から見えないので、
+        `COMMAND` を送った時刻の記録はここでしかできない。
+        """
+        if pkt_type == packets.Command.TYPE:
+            self.bridge.note_command_tx(seq, t_ns)
+        if self._log is None:
+            return
         try:
             self._log.write_tx(t_ns, pkt_type, seq, payload)
         except Exception:
@@ -202,6 +264,32 @@ class IoNode:
             target_speed=0, target_steer=0,
             accel_limit=0, steer_rate_limit=0))
 
+    def _recv_cmd(self, now_ns: int) -> None:
+        """バスから走行指令を取り込み、古くなっていないかを判定する。"""
+        if self.sub is not None:
+            for topic, msg in self.sub.poll(0):
+                if topic == TOPIC_CMD:
+                    self.cmd = msg
+                    self._cmd_ns = now_ns
+        stale = self.cmd is None or (now_ns - self._cmd_ns) > CMD_TIMEOUT_NS
+        if stale and not self.cmd_stale and self.cmd is not None:
+            self.cmd_timeouts += 1
+            self._log_event("cmd_timeout", {"source": self.cmd.source})
+        self.cmd_stale = stale
+
+    def _send_command(self) -> None:
+        """今この瞬間送るべき `COMMAND` を決めて送る。
+
+        **`allow_arm` が False、または `cmd` が古ければ必ず DISARM。**
+        分岐をここ1箇所に集めてある（判断が散ると、どこかで解禁されていたが起きる）。
+        """
+        if self.cmd_stale or not self.allow_arm:
+            self._send_command_disarm()
+            return
+        self.link.send(command_from_cmd(
+            self.cmd, allow_arm=True,
+            max_speed=self.max_speed, max_steer=self.max_steer))
+
     # ── メインループ ──
 
     def run(self, duration_s: float | None = None, status_cb=None) -> None:
@@ -211,6 +299,8 @@ class IoNode:
         next_ping = next_cmd
         next_status = next_cmd
         next_linkstats = next_cmd + NS // LINKSTATS_HZ
+        next_diag = next_cmd
+        next_hb = next_cmd
         cmd_period = NS // COMMAND_HZ
 
         while self._running:
@@ -227,8 +317,10 @@ class IoNode:
                     self._log_rx(rx)
                 self.tracker.feed(rx.rx_ns, rx.type, rx.seq, rx.payload)
 
+            self._recv_cmd(now)
+
             if now >= next_cmd:
-                self._send_command_disarm()
+                self._send_command()
                 next_cmd += cmd_period
                 if now - next_cmd > cmd_period * 5:   # 大きく遅れたら追いつきをやめる
                     next_cmd = now + cmd_period
@@ -252,6 +344,22 @@ class IoNode:
             if status_cb and now >= next_status:
                 status_cb(self)
                 next_status = now + NS // 2      # 2Hz 更新
+
+            if now >= next_diag:
+                self.bridge.publish_diag(
+                    self.state, self.sync, self.link.stats,
+                    heartbeat=self.heartbeat,
+                    arm_inhibited=not self.allow_arm,
+                    cmd_source=self.cmd.source if self.cmd else "",
+                    cmd_stale=self.cmd_stale,
+                    expected_version=PROTOCOL_VERSION)
+                next_diag = now + NS // DIAG_HZ
+
+            if self.pub is not None and now >= next_hb:
+                self.pub.send(TOPIC_HB_PREFIX + "io",
+                              HbMsg(node="io", pid=os.getpid(),
+                                    detail=self.state.health))
+                next_hb = now + NS // HB_HZ
 
             if duration_s is not None and time.monotonic() - self._t_start >= duration_s:
                 break
@@ -281,6 +389,15 @@ def main() -> int:
     ap.add_argument("--require-gpio", action="store_true",
                     help="GPIO を開けなければ起動しない")
     ap.add_argument("--no-leds", action="store_true", help="LED/ブザーを使わない")
+    ap.add_argument("--no-bus", action="store_true",
+                    help="ZeroMQ に配信しない（pyzmq 無しでも動かせる診断モード）")
+    ap.add_argument("--allow-arm", action="store_true",
+                    help="★ バスの cmd を実際に STM32 へ通す。"
+                         "付けない限り COMMAND は DISARM 固定")
+    ap.add_argument("--max-speed", type=float, default=DEFAULT_MAX_SPEED,
+                    help=f"Pi 側の速度クランプ [m/s]（既定 {DEFAULT_MAX_SPEED}）")
+    ap.add_argument("--max-steer", type=float, default=DEFAULT_MAX_STEER,
+                    help=f"Pi 側の舵角クランプ [rad]（既定 {DEFAULT_MAX_STEER}）")
     args = ap.parse_args()
 
     try:
@@ -288,6 +405,20 @@ def main() -> int:
     except Exception as e:
         print(f"ポートを開けない: {e}", file=sys.stderr)
         return 2
+
+    # ── バス ──
+    pub = sub = None
+    if not args.no_bus:
+        try:
+            from raspi.bus import LATEST, Publisher, Subscriber
+            pub = Publisher("io")
+            sub = Subscriber({TOPIC_CMD: LATEST})
+            print(f"# バス配信 {pub.endpoint} "
+                  f"(vehicle_state / scan / diag/link / hb/io)")
+        except ImportError as e:
+            print(f"!! pyzmq/msgspec が無いのでバス無しで動く: {e}")
+        except Exception as e:
+            print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
 
     log = None
     if args.log is not None:
@@ -327,7 +458,9 @@ def main() -> int:
         if any(p is not None for p in pins):
             indicator = StatusIndicator(*pins)
 
-    node = IoNode(link, log=log, heartbeat=heartbeat, indicator=indicator)
+    node = IoNode(link, log=log, heartbeat=heartbeat, indicator=indicator,
+                  pub=pub, sub=sub, allow_arm=args.allow_arm,
+                  max_speed=args.max_speed, max_steer=args.max_steer)
 
     def _shutdown(*_):
         node.stop()
@@ -343,7 +476,13 @@ def main() -> int:
         print(f"# STM32 protocol_version=0x{ver.protocol_version:04X} "
               f"fw=0x{ver.fw_id:08X} {ok}")
 
-    print("# COMMAND は常に DISARM（安全）。Ctrl-C で停止。\n")
+    if args.allow_arm:
+        print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")
+        print(f"#     Pi 側クランプ: 速度 ±{args.max_speed} m/s / 舵角 ±{args.max_steer} rad")
+        print(f"#     cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら DISARM に落ちる")
+        print("#     車輪を浮かせるか、周囲に人と物が無いことを確認すること\n")
+    else:
+        print("# COMMAND は常に DISARM（安全）。--allow-arm で解禁。Ctrl-C で停止。\n")
     if heartbeat is not None:
         node._log_event("heartbeat_start", {"pin": PIN_HEARTBEAT, "hz": heartbeat.hz})
         heartbeat.start()
@@ -369,6 +508,10 @@ def main() -> int:
             node._log_linkstats(time.monotonic_ns())
             log.close()
         link.close()
+        if sub is not None:
+            sub.close()
+        if pub is not None:
+            pub.close()
 
     st = link.stats
     print("\n\n=== 終了時の統計 ===")
@@ -380,6 +523,13 @@ def main() -> int:
           f"drift={node.sync.drift_ppm} ppm")
     if node.state.lidar_sectors:
         print(f"lidar sectors seen: {len(node.state.lidar_sectors)}/12")
+    b = node.bridge
+    print(f"bus: vehicle_state={b.vehicle_states} scan={b.published_scans} "
+          f"lidar_sectors_lost={b.scans.sectors_lost} "
+          f"cmd_rtt={'—' if b.cmd_rtt_ms is None else f'{b.cmd_rtt_ms:.1f}ms'} "
+          f"cmd_timeout={node.cmd_timeouts}回 "
+          f"odom_center={b.state_builder.odom_center:.3f}m "
+          f"(jump={b.state_builder.odom_jumps})")
     if heartbeat is not None:
         st = heartbeat.stats
         hz = st.edges / 2 / args.duration if args.duration else None

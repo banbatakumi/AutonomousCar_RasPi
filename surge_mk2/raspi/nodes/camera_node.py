@@ -11,9 +11,10 @@
   2台目は常に1フレーム古いものを掴む（実測 5.6ms → 38.1ms）
 - `t_capture` には picamera2 の `SensorTimestamp` をそのまま入れる。
   **これは Pi の CLOCK_MONOTONIC 基準**であることを実機で確認済みなので変換不要
-- フレームの説明（`FrameDesc`）をコールバックで渡す。**画素は渡さない**
+- フレームの説明（`FrameDesc`）を `image/front` `image/rear` に publish する。
+  **画素はバスに流さない**（下流は共有メモリからゼロコピーで読む）
 
-下流配信（ZeroMQ）はまだ無い。バスができたら `FrameDesc` をそのまま publish する。
+カメラ番号とトピックの対応は `CAM_TOPIC`。**取り付けを入れ替えたらここだけ直す。**
 
 共有メモリの名前は `surge_cam0` / `surge_cam1`。読み手は:
 
@@ -36,6 +37,9 @@ from raspi.bus import FrameRing  # noqa: E402
 
 SHM_PREFIX = "surge_cam"
 DEFAULT_SLOTS = 8
+
+#: カメラ番号 → バスのトピックと役割名。**取り付けを入れ替えたらここだけ直す**
+CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの
@@ -238,13 +242,43 @@ def main() -> int:
                     help="リングの枚数（既定8。読み手が遅れても上書きされにくくなる）")
     ap.add_argument("--duration", type=float, default=None, help="秒で自動終了")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--no-bus", action="store_true", help="ZeroMQ に配信しない")
     args = ap.parse_args()
 
     w, h = (int(v) for v in args.size.lower().split("x"))
     indices = [int(v) for v in args.cameras.split(",") if v.strip()]
 
+    # ── バス配信（画素は流さない。共有メモリへの参照だけ） ──
+    pub = None
+    on_frame = None
+    if not args.no_bus:
+        try:
+            from raspi.bus import Publisher
+            from raspi.msgs import ImageRef
+
+            # **カメラごとに別スレッドから publish するので thread_safe が必須。**
+            # ZeroMQ のソケットはスレッドセーフではない
+            pub = Publisher("camera", thread_safe=True)
+
+            def on_frame(desc):                              # noqa: F811
+                idx = int(desc.name[len(SHM_PREFIX):] or 0)
+                topic, role = CAM_TOPIC.get(idx, (f"image/cam{idx}", f"cam{idx}"))
+                pub.send(topic, ImageRef(
+                    t_capture=desc.t_capture_ns, cam=role,
+                    shm_name=desc.name, slot=desc.slot, ring_seq=desc.seq,
+                    frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes))
+
+            print(f"# バス配信 {pub.endpoint} "
+                  + " ".join(CAM_TOPIC.get(i, (f'image/cam{i}',))[0] for i in indices))
+        except ImportError as e:
+            print(f"!! pyzmq/msgspec が無いのでバス無しで動く: {e}")
+        except Exception as e:
+            print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
+
     try:
-        node = CameraNode(indices, (w, h), args.fmt, args.fps, args.slots)
+        node = CameraNode(indices, (w, h), args.fmt, args.fps, args.slots,
+                          on_frame=on_frame)
     except Exception as e:
         print(f"カメラを開けない: {e}", file=sys.stderr)
         return 2
@@ -268,6 +302,9 @@ def main() -> int:
             print(f"cam{wk.idx}: {wk.stats.summary(el)}")
             if wk.error:
                 print(f"  !! 異常終了: {wk.error}")
+        if pub is not None:
+            print(f"bus: {pub.sent} 件 publish")
+            pub.close()
         node.close()
     return 0
 
