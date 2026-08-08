@@ -96,7 +96,7 @@ class LidarSector:
     LEN: ClassVar[int | None] = 69
     FMT: ClassVar[str] = '<BI32H'
     RATE_HZ: ClassVar[float] = 120
-    META: ClassVar[dict] = {'t_start_us': (None, 'us'), 'duration_us': (None, 'us'), 'rot_speed_dps': (0.01, 'deg/s'), 'dist': (0.001, 'm')}
+    META: ClassVar[dict] = {'t_start_us': (None, 'us'), 'duration_us': (None, 'us'), 'rot_speed_dps': (1.0, 'deg/s'), 'dist': (0.001, 'm')}
 
     sector_idx: int = 0
     t_start_us: int = 0
@@ -226,7 +226,7 @@ class LidarSectorI:
     LEN: ClassVar[int | None] = 99
     FMT: ClassVar[str] = '<BI32H30B'
     RATE_HZ: ClassVar[float] = 120
-    META: ClassVar[dict] = {'t_start_us': (None, 'us'), 'duration_us': (None, 'us'), 'rot_speed_dps': (0.01, 'deg/s'), 'dist': (0.001, 'm')}
+    META: ClassVar[dict] = {'t_start_us': (None, 'us'), 'duration_us': (None, 'us'), 'rot_speed_dps': (1.0, 'deg/s'), 'dist': (0.001, 'm')}
 
     sector_idx: int = 0
     t_start_us: int = 0
@@ -344,7 +344,7 @@ class LidarSectorC:
     LEN: ClassVar[int | None] = 39
     FMT: ClassVar[str] = '<BI2H30B'
     RATE_HZ: ClassVar[float] = 120
-    META: ClassVar[dict] = {'t_start_us': (None, 'us'), 'duration_us': (None, 'us'), 'rot_speed_dps': (0.01, 'deg/s'), 'dist': (0.02, 'm')}
+    META: ClassVar[dict] = {'t_start_us': (None, 'us'), 'duration_us': (None, 'us'), 'rot_speed_dps': (1.0, 'deg/s'), 'dist': (0.02, 'm')}
 
     sector_idx: int = 0
     t_start_us: int = 0

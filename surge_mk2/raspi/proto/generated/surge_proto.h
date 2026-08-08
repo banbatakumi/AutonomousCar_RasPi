@@ -110,7 +110,7 @@ typedef struct {
     uint8_t  sector_idx;
     uint32_t t_start_us;     /* us */
     uint16_t duration_us;    /* us */
-    uint16_t rot_speed_dps;  /* 0.01 deg/s */
+    uint16_t rot_speed_dps;  /* 1 deg/s */
     uint16_t dist[30];       /* 0.001 m  0=無効 */
 } surge_lidar_sector_t;
 
@@ -156,7 +156,7 @@ typedef struct {
     uint8_t  sector_idx;
     uint32_t t_start_us;     /* us */
     uint16_t duration_us;    /* us */
-    uint16_t rot_speed_dps;  /* 0.01 deg/s */
+    uint16_t rot_speed_dps;  /* 1 deg/s */
     uint16_t dist[30];       /* 0.001 m */
     uint8_t  intensity[30];
 } surge_lidar_sector_i_t;
@@ -192,7 +192,7 @@ typedef struct {
     uint8_t  sector_idx;
     uint32_t t_start_us;     /* us */
     uint16_t duration_us;    /* us */
-    uint16_t rot_speed_dps;  /* 0.01 deg/s */
+    uint16_t rot_speed_dps;  /* 1 deg/s */
     uint8_t  dist[30];       /* 0.02 m  0=無効 255=飽和 */
 } surge_lidar_sector_c_t;
 

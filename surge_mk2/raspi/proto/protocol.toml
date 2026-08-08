@@ -47,7 +47,7 @@ fields = [
   { name = "sector_idx",    type = "u8" },
   { name = "t_start_us",    type = "u32", unit = "us" },
   { name = "duration_us",   type = "u16", unit = "us" },
-  { name = "rot_speed_dps", type = "u16", scale = 0.01, unit = "deg/s" },
+  { name = "rot_speed_dps", type = "u16", scale = 1.0, unit = "deg/s" },
   { name = "dist",          type = "u16", count = 30, scale = 0.001, unit = "m", note = "0=無効" },
 ]
 
@@ -118,7 +118,7 @@ fields = [
   { name = "sector_idx",    type = "u8" },
   { name = "t_start_us",    type = "u32", unit = "us" },
   { name = "duration_us",   type = "u16", unit = "us" },
-  { name = "rot_speed_dps", type = "u16", scale = 0.01, unit = "deg/s" },
+  { name = "rot_speed_dps", type = "u16", scale = 1.0, unit = "deg/s" },
   { name = "dist",          type = "u16", count = 30, scale = 0.001, unit = "m" },
   { name = "intensity",     type = "u8",  count = 30 },
 ]
@@ -174,7 +174,7 @@ fields = [
   { name = "sector_idx",    type = "u8" },
   { name = "t_start_us",    type = "u32", unit = "us" },
   { name = "duration_us",   type = "u16", unit = "us" },
-  { name = "rot_speed_dps", type = "u16", scale = 0.01, unit = "deg/s" },
+  { name = "rot_speed_dps", type = "u16", scale = 1.0, unit = "deg/s" },
   { name = "dist",          type = "u8", count = 30, scale = 0.02, unit = "m", note = "0=無効 255=飽和" },
 ]
 
