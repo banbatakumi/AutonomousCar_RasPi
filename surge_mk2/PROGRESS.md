@@ -183,7 +183,8 @@ ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/
 設計書（`docs/architecture.md` §11）はログを MCAP と決めているが、**MCAP はトピック
 （意味のあるメッセージ）の器**であり、`msgs/`（msgspec 型）と `bus/` が決まってから。
 今それをやるとメッセージ型を先に凍結することになる（知覚方式が Phase 3 まで未定なのに）。
-加えて Mac に pip パッケージが入らないため、`mcap` に依存すると Mac 側でテストできない。
+（当時は「Mac に pip が無い」と誤解しており、それも理由に挙げていた。
+前提は誤りだったが、**実時間パスに外部依存を持ち込まない**という判断自体は維持する。）
 
 そこで **生フレームログを先に作り、MCAP は後段のエクスポータ**にした。
 
@@ -695,13 +696,25 @@ FFC が下から出る向き（imx219 の標準）で、**画像は正立**す�
 
 ---
 
-## 開発環境の制約
+## 開発環境の方針
 
-Mac 側の python3.12 に **pyyaml も pytest も入っていない**（venv も無い）。
-勝手に入れずに標準ライブラリで済ませる方針にした。
+### ★ 訂正（2026-08-08）— 「Mac に pip が無い」は誤りだった
+
+初期に pyyaml と pytest が無いのを見て「Mac にはパッケージを入れられない」と
+思い込み、それが前提として残っていた。**実際には pip 25.0.1 も venv も使える**
+（numpy / pyserial / pillow など30パッケージが既に入っている）。
+
+**この誤った前提のせいで「バス層は Mac でテストできない」という論点を立てていたが、
+それは存在しない。** ZeroMQ / msgspec を Mac の venv に入れれば、
+これまでどおり「Mac で決定的にテスト、実機で実証」を続けられる。
+
+ここまでの選択（TOML / unittest / stdlib だけの framelog・shm_ring）は
+**依存が少ないという意味で結果的に良かった**ので、そのまま維持する。
 
 - 設定ファイルは YAML ではなく **TOML**（`tomllib` は標準ライブラリ）
 - テストは **`unittest`**
+- **実時間で回るコードには外部依存を持ち込まない**方針は継続する
+  （io_node / framelog / shm_ring は stdlib のみで書けている）
 
 ```bash
 # テスト
@@ -731,22 +744,24 @@ Pi 5 実機では ZeroMQ / msgspec / numpy / picamera2 / gpiozero+lgpio が要�
    ここが決まったら `logger_node`（MCAP）と `.sfl` → MCAP エクスポータを作る
 8. **WS サーバ + GUI 骨格** — `replay_node` を繋げば実車なしで作れる
 
-### ★ バスの手前で決めること（未決・次のセッションの最初の議題）
+### バスに入る前の準備（論点は解消済み）
 
-**Pi にまだ `pyzmq` も `msgspec` も入っていない。** Pi は Wi-Fi が通ったので
-apt/pip で入れられるが、**Mac 側には入れない方針**（開発環境の制約を参照）。
-このままだとバス層のコードが Mac でテストできなくなる。
+かつて「Mac でバス層をテストできない」ことを論点として挙げていたが、
+**それは Mac に pip が無いという誤った前提に基づいていた**（開発環境の方針を参照）。
+Mac にも venv を作って `pyzmq` / `msgspec` を入れれば、
+これまでどおり **Mac で決定的にテスト、実機で実証**を続けられる。
 
-ここまで「**Mac で決定的にテストして、実機で実証する**」流れが一貫して効いてきた
-（proto / timesync / framelog / replay / gpio / shm_ring はすべて Mac でテスト可能）。
-バス層でそれを崩すかどうかの判断が要る。選択肢:
+やること:
 
-- そのまま入れて「バス層は Pi でしかテストできない」を受け入れる
-- 抽象を1枚挟み、輸送層を差し替え可能にして中身は Mac でも回す
-- Mac にも venv を作って揃える（開発環境の方針変更）
+```bash
+# Mac 側
+python3 -m venv .venv && .venv/bin/pip install pyzmq msgspec
+# Pi 側（Wi-Fi 経由）
+ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/pip install pyzmq msgspec'
+```
 
-**`shm_ring` は stdlib だけで書けたので Mac でテストできている**（29件）。
-同じことが ZeroMQ 側でできるかが論点。
+`requirements.txt` を作って両方を揃えること。ZeroMQ は `ipc://` や
+`tcp://127.0.0.1` で完結するので、**ハードウェア無しで単体テストが書ける**。
 
 達成条件: **PC からラジコン操縦できる / 全データが記録できる。**
 
