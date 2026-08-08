@@ -13,7 +13,7 @@ from typing import NamedTuple
 import serial
 
 from ..proto import FrameEncoder, FrameParser
-from ..proto.generated.packets import S2P_TYPES
+from ..proto.generated.packets import HEADER_SIZE, S2P_TYPES
 
 
 class RxFrame(NamedTuple):
@@ -33,6 +33,10 @@ class SerialLink:
 
     :param port: 通常 ``/dev/serial0``（GPIO14/15）。名前直書きは避ける
     :param read_timeout: read のブロッキング上限 [s]。ループの応答性を決める
+
+    :ivar on_tx: 送信フックを差すと ``(t_ns, type, seq, payload)`` で呼ばれる。
+        送信フレームの SEQ はエンコーダの内部にしか無く、呼び出し側からは
+        見えない。記録は横断的な関心事なのでコールバックで外に出す。
     """
 
     def __init__(self, port: str = "/dev/serial0", baud: int = 250_000,
@@ -42,6 +46,7 @@ class SerialLink:
         self._enc = FrameEncoder()
         self.port = port
         self.baud = baud
+        self.on_tx = None
 
     # ── 受信 ──
 
@@ -71,15 +76,17 @@ class SerialLink:
         PING の T1 に使う。write は OS バッファに積むだけなので厳密な線上時刻では
         ないが、Python 層で取れる最善。
         """
-        frame = self._enc.encode(packet)
-        t_ns = time.monotonic_ns()
-        self._ser.write(frame)
-        return t_ns
+        return self._write(self._enc.encode(packet))
 
     def send_raw(self, pkt_type: int, payload: bytes = b"") -> int:
-        frame = self._enc.encode_raw(pkt_type, payload)
+        return self._write(self._enc.encode_raw(pkt_type, payload))
+
+    def _write(self, frame: bytes) -> int:
         t_ns = time.monotonic_ns()
         self._ser.write(frame)
+        if self.on_tx is not None:
+            # frame = SYNC(2) TYPE SEQ LEN PAYLOAD CRC(2)
+            self.on_tx(t_ns, frame[2], frame[3], frame[HEADER_SIZE:HEADER_SIZE + frame[4]])
         return t_ns
 
     # ── 後始末 ──
