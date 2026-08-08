@@ -37,6 +37,25 @@ from raspi.bus import FrameRing  # noqa: E402
 SHM_PREFIX = "surge_cam"
 DEFAULT_SLOTS = 8
 
+#: **libcamera の形式名はメモリ上のバイト順ではない。**
+#: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの
+#: メモリ上では逆順になる。実測で確認済み: `format="RGB888"` で赤い物を撮ると
+#: 配列の ch2 が最大になる（＝ ch0=B, ch1=G, ch2=R）。
+#:
+#: リングには**メモリ上の実際の並び**を記録する。下流が `fmt` を見て
+#: そのまま解釈できることを優先する（名前を信じて色が入れ替わる事故を防ぐ）。
+_MEMORY_ORDER = {
+    "RGB888": "BGR888",
+    "BGR888": "RGB888",
+    "XRGB8888": "XBGR8888",
+    "XBGR8888": "XRGB8888",
+}
+
+
+def memory_format(libcamera_name: str) -> str:
+    """libcamera の形式名 → メモリ上のバイト順の名前。"""
+    return _MEMORY_ORDER.get(libcamera_name, libcamera_name)
+
 
 @dataclass(slots=True)
 class CamStats:
@@ -88,7 +107,8 @@ class CameraWorker(threading.Thread):
         # 実際に確定した幾何をリングに使う。要求と食い違うことがあるため
         main = self.cam.camera_configuration()["main"]
         self.size = main["size"]
-        self.fmt = main["format"]
+        self.libcamera_fmt = main["format"]
+        self.fmt = memory_format(self.libcamera_fmt)      # メモリ上の並びで記録する
         self.ring = FrameRing.create(f"{SHM_PREFIX}{idx}", self.size[0], self.size[1],
                                      self.fmt, n_slots=n_slots)
 

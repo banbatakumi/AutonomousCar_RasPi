@@ -29,8 +29,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from raspi.bus import FrameRing  # noqa: E402
 
 
+def to_rgb(arr, fmt: str):
+    """PNG が要求する RGB 順に直す。**必要なときだけ**チャンネルを入れ替える。
+
+    リングには**メモリ上の実際の並び**が記録されている（`camera_node` が
+    libcamera の名前を変換して入れている）ので、その名前を見て判断する。
+    ここで無条件に入れ替えると、正しい並びの画を壊すことになる。
+    """
+    if not fmt.startswith(("BGR", "XBGR")):
+        return arr
+    return arr[..., ::-1] if arr.ndim == 3 and arr.shape[2] == 3 else arr[..., 2::-1]
+
+
 def write_png(path: Path, arr) -> None:
-    """numpy 配列を PNG にする。標準ライブラリだけで完結させる。"""
+    """numpy 配列を PNG にする。標準ライブラリだけで完結させる。
+
+    **入力は RGB 順であること**（`to_rgb()` を通してから渡す）。
+    """
     import numpy as np
 
     a = np.asarray(arr)
@@ -112,7 +127,7 @@ def main() -> int:
         checksum = int(arr[::64, ::64].sum())
         want_save = bool(args.save) and not saved
         if want_save:
-            write_png(args.save, arr)
+            write_png(args.save, to_rgb(arr, ref.desc.fmt))
 
         # **画素を使い終わってから** seqlock を再検査する
         ok = ref.still_valid()
