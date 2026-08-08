@@ -6,7 +6,7 @@
  */
 import { useNumbers } from '../bus/live'
 import { MODE_NAME, healthLevel, ms, rttLevel } from '../format'
-import { useUi } from '../store/ui'
+import { BOOST_SCALE, CRUISE_SCALE, UI_MAX_SPEED, useUi } from '../store/ui'
 
 export function StatusBar({ onEstop }: { onEstop: () => void }) {
   const n = useNumbers()
@@ -39,6 +39,14 @@ export function StatusBar({ onEstop }: { onEstop: () => void }) {
             arm 封印中
           </span>
         )}
+        {/* **今どこまで出るか**は握る前に知りたい。armed かどうかに関係なく出す */}
+        <span
+          className={`pill ${ui.boost ? 'lv-warn' : 'dim'}`}
+          title="Shift（パッドは R1）を押している間だけ全開。離すと低速に戻る"
+        >
+          {ui.boost ? 'BOOST' : '低速'}{' '}
+          {(UI_MAX_SPEED * (ui.boost ? BOOST_SCALE : CRUISE_SCALE)).toFixed(2)}
+        </span>
         {vs?.tc_active && <span className="pill lv-warn">TC</span>}
         {vs?.tv_active && <span className="pill lv-warn">TV</span>}
 

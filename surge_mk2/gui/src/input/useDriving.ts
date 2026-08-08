@@ -1,15 +1,15 @@
 /**
- * ラジコン入力（ゲームパッド + キーボード）→ 20Hz の `cmd` 送信。
+ * ラジコン入力（ゲームパッド + キーボード）→ 50Hz の `cmd` 送信。
  *
  * ## 方式：ARM ボタン保持 ＋ 無操作タイムアウト
  *
  * 以前は「Space を押している間だけ送る」デッドマン方式だったが、
  * **押しながら WASD を操作するのが難しい**ため、明示的な ARM に変えた。
  *
- * | | ARM | 速度 | 舵 | 停止 |
- * |---|---|---|---|---|
- * | キーボード | `Enter` または画面の ARM ボタン | W,↑ / S,↓ | A,← / D,→ | `Esc` |
- * | ゲームパッド | 同上 | R2 前進 / L2 後退 | 左スティック X | B/○ |
+ * | | ARM | 速度 | 舵 | ブースト | 停止 |
+ * |---|---|---|---|---|---|
+ * | キーボード | `Enter` または画面の ARM ボタン | W,↑ / S,↓ | A,← / D,→ | `Shift` | `Esc` |
+ * | ゲームパッド | 同上 | R2 前進 / L2 後退 | 左スティック X | R1 | B/○ |
  *
  * ## この方式で失ったもの・残したもの
  *
@@ -28,36 +28,116 @@
  * つまり「ブラウザが固まる」「Wi-Fi が切れる」「PC を閉じる」は従来どおり停止する。
  * 弱くなったのは**人間が意図して手を離した場合だけ**。
  *
- * ## キーボードは押下時間でランプさせる
+ * ## 応答設計（2026-08-09 改訂）
  *
- * キーは on/off の2値なので、そのまま最大速度に叩き込むと乗り物として扱えない。
- * 押している間だけ加速度を積分し、離したら戻す。
+ * ### 1. ループは rAF、送信は 50Hz
+ *
+ * 以前は `setInterval` の 20Hz で積分と送信を兼ねていた。下流は
+ * telemetry_node が 50Hz、io_node が 100Hz で回っているので、
+ * **20Hz だった GUI だけがボトルネック**だった。積分は rAF（≈60Hz、実 dt）で回し、
+ * 送信は 50Hz に間引く（telemetry_node の publish レートに合わせる。それ以上出しても
+ * 途中で捨てられるだけ）。パッドのスティックも rAF で読むのでカクつかない。
+ *
+ * rAF はタブが隠れると止まる ＝ 送信も止まる ＝ 150ms でサーバが DISARM。
+ * **止まる方向に転ぶので安全側**（`visibilitychange` の即 DISARM と二重）。
+ *
+ * ### 2. レートリミットは「GUI で作り、STM32 は保険」に一元化
+ *
+ * 以前は `accel_limit=0`（STM32 の既定に任せる）を送っていたので、GUI 側のランプと
+ * STM32 側のリミットが二重にかかり、**どちらが操作感を決めているのか分からなかった**。
+ * 今は GUI から明示的に `ACCEL_LIMIT` / `STEER_RATE_LIMIT` を送る。値は GUI のランプより
+ * わざと速くしてあり、通常走行では GUI のランプが支配的になる。STM32 側は
+ * 「指令が飛んだ／GUI が壊れた」ときにメカを守る保険として残る。
+ *
+ * ### 3. 逆キーはブレーキ
+ *
+ * 前進中の S は「後退を積分し始める」のではなく**強い減速**。0 を跨いだら後退に移る。
+ * 止めたいときに止まらないのが一番怖い。
+ *
+ * ### 4. 発進キック
+ *
+ * 停止からじわじわ指令を上げると、STM32 の速度 PI ループが動き出すまで無駄時間が出て
+ * 「押した→無反応→急に出る」になる。押した瞬間に `KICK_SPEED` へ跳ばしてから積分する。
+ * **`KICK_SPEED` は実車が実際に転がり始める指令値に合わせて調整すること**
+ * （DriveBar の実測速度を見ながら詰める。低速では `wheel_speed` が使えないので
+ * `speed` の生値と目視で判断する）。
  */
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
-import { ARM_IDLE_TIMEOUT_MS, UI_MAX_SPEED, UI_MAX_STEER, useUi } from '../store/ui'
+import {
+  ARM_IDLE_TIMEOUT_MS, BOOST_SCALE, CRUISE_SCALE, UI_MAX_SPEED, UI_MAX_STEER, useUi,
+} from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
-const TX_HZ = 20
-const DT = 1 / TX_HZ
+/** 送信レート。telemetry_node の `CMD_PUB_HZ` に合わせる */
+const TX_HZ = 50
+const TX_INTERVAL_MS = 1000 / TX_HZ
+/** 1フレームの積分幅の上限。タブ復帰やカクつきで一気に飛ぶのを防ぐ */
+const DT_MAX = 0.05
 
-/** キーボードのランプ速度。実車の accel_limit とは別物（あくまで入力の整形） */
-const KEY_ACCEL = 0.8 // m/s per second
-const KEY_DECEL = 1.6
-const KEY_STEER_RATE = 1.2 // rad/s（±60° まで約 0.9 秒）
-const KEY_STEER_RETURN = 1.8
-const DEADZONE = 0.12
+// ── 速度の応答 [m/s²] ────────────────────────────────────────────
+/** 押している間の加速。0→1.0 m/s を 0.5 秒 */
+const ACCEL = 2.0
+/** キーを離したときの惰行減速 */
+const COAST = 2.5
+/** **逆キーを押したときのブレーキ。** 加速より強くする */
+const BRAKE = 5.0
+/**
+ * 発進キック [m/s]。停止から押した瞬間にここまで跳ばす。
+ * **実車が転がり始める値に合わせて調整すること**（大きすぎると飛び出す）
+ */
+const KICK_SPEED = 0.12
+
+// ── 舵の応答 [rad/s] ─────────────────────────────────────────────
+/** 押している間の切り込み。60° まで 0.40 秒 */
+const STEER_RATE = 2.6
+/** **離したときのセンター戻り。切り込みより速くする**（直進が安定する） */
+const STEER_RETURN = 5.2
+/** 逆キーでの切り戻し。センターを跨ぐまではこの速さ、跨いだら `STEER_RATE` */
+const STEER_COUNTER = 5.2
+
+// ── STM32 に渡すレートリミット ───────────────────────────────────
+/** GUI のランプ（`ACCEL`/`BRAKE`）より速い値。**通常は効かず、保険として残る** */
+const ACCEL_LIMIT = 6.0 // m/s²
+const STEER_RATE_LIMIT = 7.0 // rad/s
+
+// ── ゲームパッド ─────────────────────────────────────────────────
+const STICK_DZ = 0.12
+const TRIGGER_DZ = 0.06
+/** 中央付近を緩くする度合い（0=リニア, 1=完全3乗）。舵は強め、スロットルは控えめ */
+const STEER_EXPO = 0.45
+const THROTTLE_EXPO = 0.25
 
 const SPEED_KEYS_FWD = ['KeyW', 'ArrowUp']
 const SPEED_KEYS_REV = ['KeyS', 'ArrowDown']
 const STEER_KEYS_LEFT = ['KeyA', 'ArrowLeft']
 const STEER_KEYS_RIGHT = ['KeyD', 'ArrowRight']
+const BOOST_KEYS = ['ShiftLeft', 'ShiftRight']
 const DRIVING_KEYS = [
   ...SPEED_KEYS_FWD, ...SPEED_KEYS_REV, ...STEER_KEYS_LEFT, ...STEER_KEYS_RIGHT,
 ]
 
-function dz(v: number): number {
-  return Math.abs(v) < DEADZONE ? 0 : v
+/** 操縦権の再要求はこの間隔まで。rAF ごとに投げると 60発/秒になる */
+const TAKE_CONTROL_MS = 250
+/** E-STOP をパッドで押しっぱなしにしたときの再送間隔 */
+const ESTOP_REPEAT_MS = 100
+
+/** デッドゾーンを**切り落とすのではなく再スケールする**。段差が出ない */
+function dz(v: number, zone: number): number {
+  const a = Math.abs(v)
+  if (a < zone) return 0
+  return Math.sign(v) * ((a - zone) / (1 - zone))
+}
+
+/** 中央付近を緩く、端は素直に。`e=0` でリニア */
+function expo(v: number, e: number): number {
+  return (1 - e) * v + e * v * v * v
+}
+
+function approach(cur: number, target: number, rate: number, dt: number): number {
+  const d = rate * dt
+  if (Math.abs(target - cur) <= d) return target
+  return cur + Math.sign(target - cur) * d
 }
 
 export function useDriving(ch: ControlChannel | null) {
@@ -65,12 +145,14 @@ export function useDriving(ch: ControlChannel | null) {
   const speed = useRef(0)
   const steer = useRef(0)
   const lastActivity = useRef(0)
+  const sourceRef = useRef<'keyboard' | 'gamepad'>('keyboard')
 
   // ── キーボード ──
   useEffect(() => {
     const disarm = (why: string) => {
       keys.current.clear()
       const ui = useUi.getState()
+      if (ui.boost) ui.set({ boost: false })
       if (ui.armRequested) ui.set({ armRequested: false, disarmReason: why })
     }
 
@@ -89,6 +171,10 @@ export function useDriving(ch: ControlChannel | null) {
           lastActivity.current = performance.now()
           ui.set({ armRequested: true, disarmReason: '' })
         }
+        return
+      }
+      if (BOOST_KEYS.includes(e.code)) {
+        keys.current.add(e.code)
         return
       }
       if (DRIVING_KEYS.includes(e.code)) {
@@ -117,20 +203,40 @@ export function useDriving(ch: ControlChannel | null) {
     }
   }, [ch])
 
-  // ── 20Hz の送信ループ ──
+  // ── rAF で積分し、50Hz で送る ──
   useEffect(() => {
     if (!ch) return
-    const id = window.setInterval(() => {
-      const ui = useUi.getState()
+    let raf = 0
+    let prevMs = performance.now()
+    let lastTxMs = 0
+    let lastTakeMs = 0
+    let lastEstopMs = 0
+    let padEstopWas = false
+
+    const tick = () => {
+      raf = requestAnimationFrame(tick)
+
       const now = performance.now()
+      const dt = Math.min((now - prevMs) / 1000, DT_MAX)
+      prevMs = now
+      if (dt <= 0) return
+
+      const ui = useUi.getState()
       const pad = navigator.getGamepads?.().find((p) => p && p.connected) ?? null
 
       // ゲームパッドの B/○ はいつでも E-STOP（ARM していなくても効く）
-      if (pad?.buttons[1]?.pressed) {
-        ch.estop()
+      const padEstop = pad?.buttons[1]?.pressed ?? false
+      if (padEstop) {
+        // 押した瞬間に1発、握り続けている間は 100ms ごとに再送
+        if (!padEstopWas || now - lastEstopMs >= ESTOP_REPEAT_MS) {
+          ch.estop()
+          lastEstopMs = now
+        }
+        padEstopWas = true
         if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'パッドの B で E-STOP' })
         return
       }
+      padEstopWas = false
 
       // ── 入力を読む ──
       const k = keys.current
@@ -139,11 +245,17 @@ export function useDriving(ch: ControlChannel | null) {
       const left = STEER_KEYS_LEFT.some((c) => k.has(c))
       const right = STEER_KEYS_RIGHT.some((c) => k.has(c))
       const keyActive = fwd || rev || left || right
+      const keyBoost = BOOST_KEYS.some((c) => k.has(c))
 
-      const rt = pad?.buttons[7]?.value ?? 0
-      const lt = pad?.buttons[6]?.value ?? 0
-      const padSteer = dz(pad?.axes[0] ?? 0)
-      const padActive = rt > 0.08 || lt > 0.08 || padSteer !== 0
+      const rt = dz(pad?.buttons[7]?.value ?? 0, TRIGGER_DZ)
+      const lt = dz(pad?.buttons[6]?.value ?? 0, TRIGGER_DZ)
+      const padSteer = dz(pad?.axes[0] ?? 0, STICK_DZ)
+      const padBoost = pad?.buttons[5]?.pressed ?? false
+      const padActive = rt > 0 || lt > 0 || padSteer !== 0
+
+      const boost = keyBoost || padBoost
+      if (ui.boost !== boost) ui.set({ boost })
+      const maxSpeed = UI_MAX_SPEED * (boost ? BOOST_SCALE : CRUISE_SCALE)
 
       // **押しっぱなしも「操作中」に数える。** keydown だけを見ると、
       // W を握り続けているのにタイムアウトで切れる
@@ -172,33 +284,68 @@ export function useDriving(ch: ControlChannel | null) {
 
       // 操縦権が無ければ取りに行く（サーバが拒否したら denied が来る）
       if (!ui.hasControl) {
-        ch.takeControl()
+        if (now - lastTakeMs >= TAKE_CONTROL_MS) {
+          ch.takeControl()
+          lastTakeMs = now
+        }
         return
       }
 
       // ── 指令値を作る ──
-      let source: 'keyboard' | 'gamepad' = 'keyboard'
-      if (padActive) {
-        source = 'gamepad'
-        // 左スティック左 (-1) が左旋回 (+steer)。反時計回りが正
-        steer.current = -padSteer * UI_MAX_STEER
-        speed.current = (rt - lt) * UI_MAX_SPEED
-      } else {
-        if (fwd) speed.current += KEY_ACCEL * DT
-        else if (rev) speed.current -= KEY_ACCEL * DT
-        else
-          speed.current -=
-            Math.sign(speed.current) * Math.min(Math.abs(speed.current), KEY_DECEL * DT)
+      //
+      // **入力元は「最後に動かした側」で固定する。** 「今どちらが動いているか」で
+      // 選ぶと、パッドのトリガーを戻した瞬間だけキーボード側の惰行カーブに落ちて、
+      // 離し方によって減速の効きが変わってしまう
+      if (padActive) sourceRef.current = 'gamepad'
+      else if (keyActive) sourceRef.current = 'keyboard'
+      else if (!pad) sourceRef.current = 'keyboard'
+      const source = sourceRef.current
 
-        if (left) steer.current += KEY_STEER_RATE * DT
-        else if (right) steer.current -= KEY_STEER_RATE * DT
-        else
-          steer.current -=
-            Math.sign(steer.current) * Math.min(Math.abs(steer.current), KEY_STEER_RETURN * DT)
+      if (source === 'gamepad') {
+        // **アナログ入力はランプを挟まず、目標をそのまま出す。**
+        // 人の指がすでにランプになっているので、二重に鈍らせない。
+        // 急な踏み込みは STM32 の accel_limit / steer_rate_limit が受け持つ
+        // 左スティック左 (-1) が左旋回 (+steer)。反時計回りが正
+        steer.current = -expo(padSteer, STEER_EXPO) * UI_MAX_STEER
+        speed.current = expo(rt - lt, THROTTLE_EXPO) * maxSpeed
+      } else {
+        // ── 速度：押している間は加速、逆キーはブレーキ ──
+        const dir = fwd ? 1 : rev ? -1 : 0
+        if (dir === 0) {
+          speed.current = approach(speed.current, 0, COAST, dt)
+        } else if (speed.current * dir < 0) {
+          // 進行方向と逆を押している ＝ ブレーキ。0 を行き過ぎたら 0 で受け止め、
+          // 次のフレームからキック＋加速で逆走に移る
+          const next = speed.current + dir * BRAKE * dt
+          speed.current = next * dir > 0 ? 0 : next
+        } else if (Math.abs(speed.current) < KICK_SPEED) {
+          speed.current = dir * KICK_SPEED // 発進キック
+        } else {
+          speed.current += dir * ACCEL * dt
+        }
+
+        // ── 舵：切り込みより戻しを速く、切り返しはさらに速く ──
+        const sdir = left ? 1 : right ? -1 : 0
+        if (sdir === 0) {
+          steer.current = approach(steer.current, 0, STEER_RETURN, dt)
+        } else {
+          const rate = steer.current * sdir < 0 ? STEER_COUNTER : STEER_RATE
+          steer.current = approach(steer.current, sdir * UI_MAX_STEER, rate, dt)
+        }
       }
-      speed.current = Math.max(-UI_MAX_SPEED, Math.min(UI_MAX_SPEED, speed.current))
+      speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
       steer.current = Math.max(-UI_MAX_STEER, Math.min(UI_MAX_STEER, steer.current))
 
+      cmdOut.speed = speed.current
+      cmdOut.steer = steer.current
+      cmdOut.active = true
+      if (!ui.deadman || ui.inputSource !== source) {
+        ui.set({ deadman: true, inputSource: source })
+      }
+
+      // ── 送信は 50Hz に間引く ──
+      if (now - lastTxMs < TX_INTERVAL_MS) return
+      lastTxMs = now
       ch.cmd({
         mode: 1, // MANUAL
         arm: true,
@@ -207,18 +354,14 @@ export function useDriving(ch: ControlChannel | null) {
         light: false,
         speed: speed.current,
         steer: steer.current,
-        // 0 は「STM32 の既定に任せる」の意。ここで固めない
-        accel_limit: 0,
-        steer_rate_limit: 0,
+        // **0（STM32 の既定に任せる）ではなく明示的に送る。** 操作感を作るのは
+        // 上の GUI 側ランプで、こちらはそれより速い＝通常は効かない保険
+        accel_limit: ACCEL_LIMIT,
+        steer_rate_limit: STEER_RATE_LIMIT,
       })
-      cmdOut.speed = speed.current
-      cmdOut.steer = steer.current
-      cmdOut.active = true
-      if (!ui.deadman || ui.inputSource !== source) {
-        ui.set({ deadman: true, inputSource: source })
-      }
-    }, 1000 / TX_HZ)
+    }
 
-    return () => window.clearInterval(id)
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
   }, [ch])
 }

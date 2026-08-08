@@ -48,7 +48,10 @@ PY="$ROOT/.venv/bin/python -u"
 UNITS=(surge-io surge-camera surge-telemetry)
 WITH_LOGGER=0
 
-ARM="--allow-arm --max-speed 0.3 --max-steer 1.05"   # 1.05 rad ≒ 60°
+# ⚠ `--max-speed` は **GUI の `UI_MAX_SPEED`（gui/src/store/ui.ts）と一致させること。**
+# ずれると GUI の表示より遅い、という分かりにくい状態になる。
+# 0.3 → 0.6 に変更（2026-08-09）。0.3 では加速ランプもブレーキも体感できなかったため。
+ARM="--allow-arm --max-speed 0.6 --max-steer 1.05"   # 1.05 rad ≒ 60°
 MODE="arm 有効"
 case "${1:-}" in
   --safe)   ARM=""; MODE="arm 封印（DISARM 固定）" ;;
@@ -187,6 +190,6 @@ else
 fi
 if [ -n "$ARM" ]; then
   echo
-  echo "  ★★ arm 有効。GUI で ARM を押せばモータが回る（上限 0.3 m/s / 1.05 rad ≒ 60°）"
+  echo "  ★★ arm 有効。GUI で ARM を押せばモータが回る（上限 0.6 m/s / 1.05 rad ≒ 60°）"
   echo "  ★  surge-io を止めた時点で STM32 が E-Stop をラッチする（車両のボタン2で解除）"
 fi
