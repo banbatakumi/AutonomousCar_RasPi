@@ -19,6 +19,7 @@ from raspi.io.gpio import (  # noqa: E402
     PIN_HEARTBEAT,
     FakePin,
     Heartbeat,
+    Indication,
     StatusIndicator,
     open_output,
 )
@@ -232,86 +233,162 @@ class TestOpenOutput(unittest.TestCase):
 
 
 class TestStatusIndicator(unittest.TestCase):
+    """LED 2個で何を伝えるかの仕様を固定する。
+
+    - 緑 = 生存と可動性（**変化し続けること自体が生存の証拠**）
+    - 赤 = 異常の重さ（＝人間が何をすべきか）
+    """
+
     def setUp(self):
         self.clk = VirtualClock()
         self.g, self.r, self.b = FakePin("g"), FakePin("r"), FakePin("b")
         self.ind = StatusIndicator(self.g, self.r, self.b, clock=self.clk.now)
 
-    def test_ok_is_green(self):
-        self.ind.update("OK")
-        self.assertTrue(self.g.level)
-        self.assertFalse(self.r.level)
+    def show(self, seconds: float, **kw):
+        """指定秒ぶん進めながら更新し、緑・赤それぞれが取った値の集合を返す。"""
+        gs, rs = set(), set()
+        for _ in range(max(2, int(seconds / 0.02))):
+            self.ind.update(Indication(**kw))
+            gs.add(self.g.level)
+            rs.add(self.r.level)
+            self.clk.advance(0.02)
+        return gs, rs
 
-    def test_fault_is_red_and_beeps(self):
-        self.ind.update("OK")
-        self.ind.update("FAULT")
-        self.assertFalse(self.g.level)
-        self.assertTrue(self.r.level)
+    def duty(self, seconds: float, pin, **kw) -> float:
+        """指定秒のあいだ、そのピンが点いていた割合。"""
+        n = max(2, int(seconds / 0.01))
+        on = 0
+        for _ in range(n):
+            self.ind.update(Indication(**kw))
+            on += pin.level
+            self.clk.advance(0.01)
+        return on / n
+
+    # ── 緑 ──
+
+    def test_armed_is_solid_green(self):
+        """車輪が動きうる状態が一番目立つこと。"""
+        gs, _ = self.show(1.5, health="OK", armed=True)
+        self.assertEqual(gs, {True})
+
+    def test_disarmed_green_flashes(self):
+        """点きっぱなしにしない。**明滅そのものが生存の証拠**。"""
+        gs, _ = self.show(2.5, health="OK", armed=False)
+        self.assertEqual(gs, {True, False})
+
+    def test_disarmed_flash_is_short(self):
+        """ARMED の点灯と見間違えないよう、消えている時間のほうが長いこと。"""
+        self.assertLess(self.duty(2.0, self.g, health="OK"), 0.3)
+
+    def test_init_blinks_green_more_than_alive_flash(self):
+        init = self.duty(1.0, self.g, health="INIT")
+        self.clk.advance(1.0)
+        alive = self.duty(2.0, self.g, health="OK")
+        self.assertGreater(init, alive)
+
+    def test_armed_wins_over_init(self):
+        gs, _ = self.show(1.0, health="INIT", armed=True)
+        self.assertEqual(gs, {True})
+
+    # ── 赤 ──
+
+    def test_no_trouble_is_dark(self):
+        _, rs = self.show(2.0, health="OK")
+        self.assertEqual(rs, {False})
+
+    def test_latched_is_solid_red(self):
+        """人間が車両を触るまで戻らない状態を最も強く出す。"""
+        _, rs = self.show(2.0, health="OK", estop=True)
+        self.assertEqual(rs, {True})
+
+    def test_power_lock_is_solid_red_too(self):
+        _, rs = self.show(2.0, health="OK", power_locked=True)
+        self.assertEqual(rs, {True})
+
+    def test_fault_blinks_red(self):
+        _, rs = self.show(1.0, health="FAULT")
+        self.assertEqual(rs, {True, False})
+
+    def test_warning_blinks_red(self):
+        _, rs = self.show(2.0, health="OK", warning=True)
+        self.assertEqual(rs, {True, False})
+
+    def test_degraded_is_warning_tier(self):
+        _, rs = self.show(2.0, health="DEGRADED")
+        self.assertEqual(rs, {True, False})
+
+    def test_fault_blinks_faster_than_warning(self):
+        fault = self._transitions(1.0, health="FAULT")
+        self.clk.advance(1.0)
+        warn = self._transitions(1.0, health="OK", warning=True)
+        self.assertGreater(fault, warn)
+
+    def _transitions(self, seconds: float, **kw) -> int:
+        prev = None
+        n = 0
+        for _ in range(int(seconds / 0.01)):
+            self.ind.update(Indication(**kw))
+            if prev is not None and self.r.level != prev:
+                n += 1
+            prev = self.r.level
+            self.clk.advance(0.01)
+        return n
+
+    def test_latched_wins_over_fault(self):
+        _, rs = self.show(2.0, health="FAULT", estop=True)
+        self.assertEqual(rs, {True})
+
+    # ── 緑と赤は独立 ──
+
+    def test_axes_are_independent(self):
+        """ARMED かつ警告あり、が同時に出せること。"""
+        gs, rs = self.show(2.0, health="OK", armed=True, warning=True)
+        self.assertEqual(gs, {True})
+        self.assertEqual(rs, {True, False})
+
+    # ── ブザー ──
+
+    def test_beeps_on_entering_estop(self):
+        self.ind.update(Indication(health="OK"))
+        self.ind.update(Indication(health="OK", estop=True))
         self.assertTrue(self.b.level)
 
-    def test_beep_stops_after_the_window(self):
-        self.ind.update("FAULT")
-        self.clk.advance(StatusIndicator.BEEP_S + 0.01)
-        self.ind.update("FAULT")
+    def test_no_beep_while_estop_persists(self):
+        self.ind.update(Indication(health="OK"))
+        self.ind.update(Indication(health="OK", estop=True))
+        self.clk.advance(5.0)
+        self.ind.update(Indication(health="OK", estop=True))
         self.assertFalse(self.b.level)
 
-    def test_no_repeat_beep_while_still_faulted(self):
-        self.ind.update("FAULT")
-        self.clk.advance(1.0)
-        self.ind.update("FAULT")
+    def test_beeps_on_entering_fault(self):
+        self.ind.update(Indication(health="OK"))
+        self.ind.update(Indication(health="FAULT"))
+        self.assertTrue(self.b.level)
+
+    def test_no_beep_on_first_update(self):
+        """起動直後にいきなり鳴らさないこと。"""
+        self.ind.update(Indication(health="FAULT", estop=True))
         self.assertFalse(self.b.level)
-
-    def test_degraded_blinks_green(self):
-        seen = set()
-        for _ in range(8):
-            self.ind.update("DEGRADED")
-            seen.add(self.g.level)
-            self.clk.advance(0.13)
-        self.assertEqual(seen, {True, False})
-
-    def test_missing_pins_are_tolerated(self):
-        """ブザーだけ配線されていない、のような状態でも落ちないこと。"""
-        ind = StatusIndicator(FakePin(), None, None, clock=self.clk.now)
-        ind.update("FAULT")
-        ind.close()
-
-    def test_estop_overrides_health(self):
-        """リンクが健全でも E-Stop 中は E-Stop の表示が勝つこと。"""
-        self.ind.update("OK", estop=True)
-        self.assertFalse(self.g.level)
-        self.assertTrue(self.b.level)          # 発動時は長めのブザー
-
-    def test_estop_blinks_red_faster_than_init(self):
-        seen = set()
-        for _ in range(8):
-            self.ind.update("OK", estop=True)
-            seen.add(self.r.level)
-            self.clk.advance(0.065)            # 4Hz を捉える間隔
-        self.assertEqual(seen, {True, False})
 
     def test_estop_beep_is_longer_than_fault_beep(self):
-        self.ind.update("OK", estop=True)
+        self.ind.update(Indication(health="OK"))
+        self.ind.update(Indication(health="OK", estop=True))
         self.clk.advance(StatusIndicator.BEEP_S + 0.01)
-        self.ind.update("OK", estop=True)
-        self.assertTrue(self.b.level)          # FAULT 用の 0.2秒では終わらない
+        self.ind.update(Indication(health="OK", estop=True))
+        self.assertTrue(self.b.level)
         self.clk.advance(StatusIndicator.ESTOP_BEEP_S)
-        self.ind.update("OK", estop=True)
+        self.ind.update(Indication(health="OK", estop=True))
         self.assertFalse(self.b.level)
 
-    def test_no_repeat_beep_while_estop_persists(self):
-        self.ind.update("OK", estop=True)
-        self.clk.advance(5.0)
-        self.ind.update("OK", estop=True)
-        self.assertFalse(self.b.level)
+    # ── 配線の欠けに強いこと ──
 
-    def test_recovery_from_estop(self):
-        self.ind.update("OK", estop=True)
-        self.ind.update("OK", estop=False)
-        self.assertTrue(self.g.level)
-        self.assertFalse(self.r.level)
+    def test_missing_pins_are_tolerated(self):
+        ind = StatusIndicator(FakePin(), None, None, clock=self.clk.now)
+        ind.update(Indication(health="FAULT", estop=True))
+        ind.close()
 
     def test_close_turns_everything_off(self):
-        self.ind.update("FAULT")
+        self.ind.update(Indication(health="OK", estop=True))
         self.ind.close()
         self.assertFalse(self.r.level)
         self.assertTrue(self.g.closed and self.r.closed and self.b.closed)

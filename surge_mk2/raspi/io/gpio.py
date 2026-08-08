@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 __all__ = [
     "PIN_HEARTBEAT", "PIN_LED_GREEN", "PIN_LED_RED", "PIN_BUZZER",
     "FakePin", "GpiozeroPin", "open_output",
-    "Heartbeat", "HeartbeatStats", "StatusIndicator",
+    "Heartbeat", "HeartbeatStats", "Indication", "StatusIndicator",
 ]
 
 PIN_HEARTBEAT = 6
@@ -254,59 +254,105 @@ class Heartbeat:
 
 # ── 状態表示 ────────────────────────────────────────────────────────────
 
+@dataclass(slots=True)
+class Indication:
+    """LED に出す状態。**何を優先して見せるかの判断をここに集約する。**"""
+
+    health: str = "INIT"          #: INIT / OK / DEGRADED / FAULT
+    armed: bool = False           #: 車輪が動きうるか
+    estop: bool = False           #: E-Stop ラッチ中（車両のボタン2で解除）
+    power_locked: bool = False    #: 駆動電源ラッチ中（電源を入れ直す）
+    warning: bool = False         #: 低電圧など。走行は継続できる
+
+    @property
+    def latched(self) -> bool:
+        """人間が車両を物理的に触らないと戻らない状態か。"""
+        return self.estop or self.power_locked
+
+
 class StatusIndicator:
-    """LED とブザーで health を示す。**配線は未検証**（実機で確認していない）。
+    """LED 2個で「生存と可動性」「異常の重さ」を示す。
 
-    | 状態 | 緑 | 赤 | ブザー |
-    |---|---|---|---|
-    | **E-Stop 発動中** | 消灯 | **点滅 4Hz** | 発動時に 0.6秒 |
-    | OK | 点灯 | 消灯 | — |
-    | DEGRADED | 点滅 2Hz | 消灯 | — |
-    | INIT | 消灯 | 点滅 2Hz | — |
-    | FAULT | 消灯 | 点灯 | 遷移時に 0.2秒 |
+    **配線は実機で確認済み**（2026-08-08）: GPIO19=緑 / GPIO13=赤、アクティブ High。
 
-    **E-Stop は health より優先して示す。** 人間が車両のボタンを押しに行かないと
-    解除されないので、他の表示に埋もれさせない。速い点滅と長いブザーで区別する。
+    ## 緑 — 生存と可動性
+
+    | 緑 | 意味 |
+    |---|---|
+    | 消灯 | **Pi が動いていない**（電源断・フリーズ・未起動） |
+    | 速い点滅 4Hz | 起動中・通信待ち（INIT） |
+    | 短い明滅 1Hz | 正常・**DISARM**（動かない） |
+    | 点灯 | **ARMED — 車輪が動きうる** |
+
+    **「点いている」ことより「変化し続けている」ことに意味がある。**
+    明滅そのものがソフトウェアが生きている証拠で、固まれば LED も固まる。
+    車両のそばに手を伸ばすとき最初に知りたいのは「動きうるか」なので、
+    ARMED だけを点灯しっぱなしにして最も目立たせる。
+
+    ## 赤 — 異常の重さ（＝人間が何をすべきか）
+
+    | 赤 | 意味 | すべきこと |
+    |---|---|---|
+    | 消灯 | 異常なし | — |
+    | ゆっくり点滅 1Hz | 警告（低電圧・DEGRADED） | 覚えておく。走行は継続可 |
+    | 速い点滅 4Hz | FAULT（リンク断） | 見に行く。自動復帰しうる |
+    | 点灯 | **ラッチ**（E-Stop / 駆動電源） | **車両を触りに行く** |
+
+    「異常」で一括りにせず、**要求される行動**で段階を分けている。
+    ラッチ系だけが「今すぐ車両まで歩く」必要があるので、点灯しっぱなしで最も強く出す。
 
     ピンが開けなかったものは黙って無視する（表示が出ないだけで走行に影響しない）。
     """
 
     BEEP_S = 0.2
     ESTOP_BEEP_S = 0.6
+    ALIVE_FLASH_S = 0.12          #: DISARM 時に緑を光らせる長さ（1秒周期の中で）
 
     def __init__(self, green=None, red=None, buzzer=None,
                  *, clock=time.monotonic) -> None:
         self.green, self.red, self.buzzer = green, red, buzzer
         self._clock = clock
-        self._prev_health: str | None = None
-        self._prev_estop = False
+        self._prev: Indication | None = None
         self._beep_until = 0.0
 
-    def update(self, health: str, estop: bool = False) -> None:
+    def update(self, ind: Indication) -> None:
         now = self._clock()
-        if estop and not self._prev_estop:
-            self._beep_until = now + self.ESTOP_BEEP_S
-        elif health != self._prev_health and health == "FAULT":
-            self._beep_until = now + self.BEEP_S
-        self._prev_health = health
-        self._prev_estop = estop
+        self._maybe_beep(ind, now)
+        self._prev = ind
 
-        blink = int(now * 4) % 2 == 0          # 2Hz
-        fast = int(now * 8) % 2 == 0           # 4Hz
-        if estop:
-            g, r = False, fast
-        elif health == "OK":
-            g, r = True, False
-        elif health == "DEGRADED":
-            g, r = blink, False
-        elif health == "INIT":
-            g, r = False, blink
-        else:                                   # FAULT
-            g, r = False, True
-
-        self._set(self.green, g)
-        self._set(self.red, r)
+        self._set(self.green, self._green_on(ind, now))
+        self._set(self.red, self._red_on(ind, now))
         self._set(self.buzzer, now < self._beep_until)
+
+    # ── 各色の判断 ──
+
+    def _green_on(self, ind: Indication, now: float) -> bool:
+        if ind.armed:
+            return True                                  # 動きうる → 点灯
+        if ind.health == "INIT":
+            return int(now * 8) % 2 == 0                 # 4Hz 起動中
+        return (now % 1.0) < self.ALIVE_FLASH_S          # 1Hz の短い明滅＝生存
+
+    def _red_on(self, ind: Indication, now: float) -> bool:
+        if ind.latched:
+            return True                                  # 人間が触るまで戻らない
+        if ind.health == "FAULT":
+            return int(now * 8) % 2 == 0                 # 4Hz
+        if ind.warning or ind.health == "DEGRADED":
+            return int(now * 2) % 2 == 0                 # 1Hz
+        return False
+
+    def _maybe_beep(self, ind: Indication, now: float) -> None:
+        """**状態が悪化した瞬間だけ**鳴らす。鳴りっぱなしにはしない。"""
+        p = self._prev
+        if p is None:
+            return
+        if ind.estop and not p.estop:
+            self._beep_until = now + self.ESTOP_BEEP_S
+        elif ind.power_locked and not p.power_locked:
+            self._beep_until = now + self.ESTOP_BEEP_S
+        elif ind.health == "FAULT" and p.health != "FAULT":
+            self._beep_until = now + self.BEEP_S
 
     @staticmethod
     def _set(pin, value: bool) -> None:

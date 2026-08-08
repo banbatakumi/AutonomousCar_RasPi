@@ -42,6 +42,7 @@ from raspi.io.gpio import (  # noqa: E402
     PIN_LED_GREEN,
     PIN_LED_RED,
     Heartbeat,
+    Indication,
     StatusIndicator,
     open_output,
 )
@@ -85,6 +86,25 @@ class IoNode:
         self._t_start = 0
         if log is not None:
             link.on_tx = self._log_tx
+
+    # ── LED 表示 ──
+
+    def _indication(self) -> Indication:
+        """`LinkState` から LED に出す状態を作る。
+
+        `armed` と低電圧は毎フレーム変わるのでラッチ扱いにせず、ここで読む。
+        """
+        t = self.state.telemetry
+        flags = t.flags if t else 0
+        undervolt = (packets.FLG_FAULT_DRIVE_UNDERVOLTAGE
+                     | packets.FLG_FAULT_SIGNAL_UNDERVOLTAGE)
+        return Indication(
+            health=self.state.health,
+            armed=bool(flags & packets.FLG_ARMED),
+            estop=self.state.estop_active,
+            power_locked=self.state.drive_power_locked,
+            warning=bool(flags & undervolt),
+        )
 
     # ── ラッチ系フラグ ──
 
@@ -221,7 +241,7 @@ class IoNode:
             prev_health = self.state.health
             changed = self.tracker.update_health(now)
             if self.indicator is not None:
-                self.indicator.update(self.state.health, self.state.estop_active)
+                self.indicator.update(self._indication())
             if self._log is not None:
                 if changed is not None:
                     self._log_event("health", {"from": prev_health, "to": changed})
