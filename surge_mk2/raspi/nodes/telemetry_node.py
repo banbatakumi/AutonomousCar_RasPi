@@ -62,6 +62,7 @@ from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
+from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.msgs import DriveCmd, Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
@@ -91,39 +92,6 @@ CMD_DEADMAN_NS = 150 * 1_000_000
 _encoder = msgspec.msgpack.Encoder()
 _json_encode = msgspec.json.encode
 _json_decode = msgspec.json.decode
-
-
-# ── JPEG ────────────────────────────────────────────────────────────
-
-def _make_jpeg_encoder(quality: int):
-    """使える JPEG エンコーダを探す。無ければ None。
-
-    `simplejpeg` は picamera2 が依存しているので Pi には既に入っている。
-    Mac で開発するときは Pillow に落ちる（速度は要らない。カメラが無いため）。
-    """
-    try:
-        import simplejpeg
-
-        def enc(arr, colorspace):
-            return simplejpeg.encode_jpeg(arr, quality=quality,
-                                          colorspace=colorspace)
-        return enc, "simplejpeg"
-    except ImportError:
-        pass
-    try:
-        from io import BytesIO
-
-        from PIL import Image
-
-        def enc(arr, colorspace):
-            if colorspace == "BGR":
-                arr = arr[:, :, ::-1]
-            buf = BytesIO()
-            Image.fromarray(arr).save(buf, "JPEG", quality=quality)
-            return buf.getvalue()
-        return enc, "pillow"
-    except ImportError:
-        return None, None
 
 
 # ── サーバ ──────────────────────────────────────────────────────────
@@ -164,9 +132,12 @@ class TelemetryServer:
         self.frames_sent = 0
         self.cmds_published = 0
 
-        self._jpeg, self._jpeg_impl = (_make_jpeg_encoder(jpeg_quality)
-                                       if camera else (None, None))
-        self._rings: dict[str, object] = {}
+        # エンコーダが無い環境は「カメラ配信なし」に落とす。**`None` に潰しておく**
+        # ことで、以降の判定を `self._jpeg is None` の1種類に保つ
+        self._jpeg = RingJpeg(jpeg_quality) if camera else None
+        if self._jpeg is not None and not self._jpeg.ok:
+            self._jpeg = None
+        self._jpeg_impl = self._jpeg.impl if self._jpeg is not None else None
 
     # ── 静的ファイル（GUI 本体） ──
 
@@ -447,25 +418,9 @@ class TelemetryServer:
                         clients.discard(ws)
 
     def _encode_frame(self, ref) -> bytes | None:
-        """`ImageRef` → JPEG。共有メモリからゼロコピーで読む。"""
-        try:
-            from raspi.bus import FrameRing
-
-            ring = self._rings.get(ref.shm_name)
-            if ring is None:
-                ring = self._rings[ref.shm_name] = FrameRing.attach(ref.shm_name)
-            frame = ring.latest()
-            if frame is None:
-                return None
-            arr = frame.as_array()
-            # `fmt` は**メモリ上の実際のバイト順**。名前を信じて入れ替えない
-            colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
-            jpg = self._jpeg(arr, colorspace)
-            del arr
-            # 読んでいる間に書き手が同じスロットを上書きしていたら捨てる
-            return jpg if frame.still_valid() else None
-        except Exception:
-            return None
+        """`ImageRef` → JPEG。共有メモリからゼロコピーで読む（`core.jpeg`）。"""
+        got = self._jpeg.encode_latest(ref.shm_name, expect_seq=ref.ring_seq)
+        return got[0] if got else None
 
     # ── 起動 ──
 

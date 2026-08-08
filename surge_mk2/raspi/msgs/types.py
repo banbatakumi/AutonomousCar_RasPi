@@ -129,16 +129,30 @@ class Scan(MsgBase):
     **角度は配列の添字がそのまま度**（`dist[i]` は i 度の距離）。STM32 側で
     1° ビンに整形済みなので、実測角度は送られてこない。
 
-    `t_capture` はセクタ0の先頭時刻。**1周に 100ms かかるので、点ごとの時刻は
-    `sector_t_ns` から引くこと。** 時速 10km/h なら1周で 28cm 動き、点群が扇形に歪む。
+    **添字は車両座標の角度**（x=前 が 0°、反時計回りが正）。LD06 は裏向きに
+    取り付けてあり生の角度は左右が鏡像なので、`ScanAssembler` が反転済みにして渡す。
+
+    `t_capture` はこの1周で最初に取得したセクタの時刻。**1周に 100ms かかるので、
+    点ごとの時刻は `sector_t_ns` から引くこと。** 時速 10km/h なら1周で 28cm 動き、
+    点群が扇形に歪む。
     """
 
     dist: list[float] = msgspec.field(default_factory=lambda: [0.0] * 360)  #: [m] 0=無効
-    #: 各セクタ先頭の時刻 [ns]（Pi 時刻に換算済み）。欠けたセクタは 0
+    #: 各セクタ先頭の時刻 [ns]（Pi 時刻に換算済み）。欠けたセクタは 0。
+    #: **反転の結果、セクタ `s` が持つのは `dist[30*s+1]` 〜 `dist[(30*s+30) % 360]` の30点**
+    #: で、`30*s` ちょうどの点は**隣のセクタ `s-1` のパケット由来**。境界がずれている
     sector_t_ns: list[int] = msgspec.field(default_factory=lambda: [0] * 12)
-    #: 各セクタ30点の取得所要時間 [μs]。`t[i] = t_start + dur * i / 29`
+    #: 各セクタ30点の取得所要時間 [μs]。**車両角 `deg` の点の時刻はこう引く**：
+    #:
+    #:     sensor = (360 - deg) % 360                 # センサ角に戻す
+    #:     s, i = 11 - sensor // 30, sensor % 30      # セクタ番号とパケット内の添字
+    #:     t_ns = sector_t_ns[s] + sector_dur_us[s] * 1000 * i / 29
+    #:
+    #: `i` はパケット内の添字なので、**車両角では添字が減る向きに時刻が進む**。
+    #: `deg` から直に `30*s+j` と分解して式を立てると、`j=0` の点で最大1周ぶん外す
     sector_dur_us: list[int] = msgspec.field(default_factory=lambda: [0] * 12)
-    #: この1周で受信できたセクタ。**False の区間は「障害物なし」ではない**
+    #: この1周で受信できたセクタ。**False の区間は「障害物なし」ではない**。
+    #: `False` のとき欠けている車両角は上と同じ `30*s+1` 〜 `(30*s+30) % 360`
     sector_seen: list[bool] = msgspec.field(default_factory=lambda: [False] * 12)
     rot_speed_dps: float = 0.0             #: LD06 の回転速度 [deg/s]。正常は約 3600
     intensity: list[int] | None = None     #: 強度付きフォーマットのときだけ入る

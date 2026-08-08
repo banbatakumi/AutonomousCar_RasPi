@@ -12,6 +12,7 @@
    直進 100m のあとハンドルを 60° 切った瞬間に累積距離が半分になる。
 2. **LiDAR セクタ12個の組み立て**。1周が揃うまで待ち、欠けたセクタは
    「見えなかった」として残す。**0m 埋めにすると「そこに壁がある」と読める。**
+   ここで**センサ座標 → 車両座標の鏡像反転**も行う（`ScanAssembler` の解説）。
 """
 
 from __future__ import annotations
@@ -38,6 +39,10 @@ _BATT_A_SIGNAL = 0.02  # A
 _ULTRASONIC = 0.02     # m (2cm/LSB)
 _LIDAR_MM = 1e-3       # m
 _LIDAR_C = 0.02        # m (2cm/LSB、255 は飽和)
+
+# センサ角 sector_idx*30+i [deg] → 車両角 (360 - センサ角) % 360 [deg] の対応表。
+# 毎セクタ (120Hz) 組み立て直す意味がないので先に引いておく
+_DEG = [[(360 - s * 30 - i) % 360 for i in range(30)] for s in range(12)]
 
 #: 圧縮フォーマットの `255` が意味する距離。**「5.10m ちょうど」ではなく「5.10m 以上」**
 LIDAR_C_SATURATED_M = 255 * _LIDAR_C
@@ -231,6 +236,25 @@ class ScanAssembler:
 
     欠けたセクタは `dist=0`（無効）のまま `sector_seen=False` にする。
     **0 を「距離0の障害物」と解釈してはならない。**
+
+    ## センサ座標 → 車両座標（左右の鏡像反転）
+
+    **LD06 は PCB 面を下にして裏向きに取り付けてある。** 0° は機体前方を向いているが、
+    角度が増える向きが上から見て車両座標（反時計回りが正）と逆になるため、
+    `sector_idx * 30 + i` をそのまま度として使うと**点群が左右反転する**。
+    STM32 側は「センサ基準の角度をそのまま送り、解釈は Pi 側で行う」設計なので
+    （`stm32_interface.md`、STM32 の `src/sensing/lidar.h`）、ここで
+
+        車両角 = (360 - センサ角) % 360
+
+    に直す。**`Scan.dist` の添字は車両角**であり、以降のノード・GUI・地図生成は
+    反転を意識しなくてよい。
+
+    この反転で1周ぶんの点は**添字の降順に取得される**ことになる（センサ角が
+    増える = 車両角が減る）。`sector_t_ns` / `sector_dur_us` / `sector_seen` も
+    車両座標のセクタ番号 `11 - sector_idx` へ移して持つが、その結果
+    **セクタ内の時刻は添字が大きい側から流れ、30° の境界も1° ずれる**。
+    点の時刻は必ず**車両角をセンサ角に戻してから**引くこと（`Scan.sector_dur_us` の式）。
     """
 
     def __init__(self) -> None:
@@ -256,7 +280,8 @@ class ScanAssembler:
         seen_n = sum(self._seen)
         self.sectors_lost += 12 - seen_n
         self.scans += 1
-        t0 = next((t for t in self._t_ns if t), 0)
+        # 添字は車両座標なので取得時刻の順に並んでいない。先頭ではなく最小を取る
+        t0 = min((t for t in self._t_ns if t), default=0)
         scan = Scan(
             t_capture=t0,
             dist=self._dist,
@@ -285,27 +310,32 @@ class ScanAssembler:
         if self._any and idx <= self._last_idx:
             done = self._emit()
 
-        base = idx * 30
+        deg = _DEG[idx]
         if isinstance(msg, packets.LidarSectorC):
             self._fmt = 2
             if self._saturated is None:
                 self._saturated = [False] * 360
             for i, d in enumerate(msg.dist):
-                self._dist[base + i] = d * _LIDAR_C
-                self._saturated[base + i] = (d == 255)
+                self._dist[deg[i]] = d * _LIDAR_C
+                self._saturated[deg[i]] = (d == 255)
         else:
             self._fmt = 1 if isinstance(msg, packets.LidarSectorI) else 0
             for i, d in enumerate(msg.dist):
-                self._dist[base + i] = d * _LIDAR_MM
+                self._dist[deg[i]] = d * _LIDAR_MM
             if isinstance(msg, packets.LidarSectorI):
                 if self._intensity is None:
                     self._intensity = [0] * 360
                 for i, v in enumerate(msg.intensity):
-                    self._intensity[base + i] = v
+                    self._intensity[deg[i]] = v
 
-        self._t_ns[idx] = t_rx_ns
-        self._dur[idx] = msg.duration_us
-        self._seen[idx] = True
+        # 反転後のセクタ番号。このパケットの30点は車両角 30*out+1 〜 30*out+30 に入るので、
+        # 29点が out に、**先頭の1点 (i=0) だけが隣の out+1 の先頭**に落ちる。
+        # 時刻を引くときは車両角をセンサ角に戻すこと（`Scan.sector_dur_us` の式）。
+        # 車両角のまま 30*s+j で式を立てると j=0 の点で最大1周ぶん外す
+        out = 11 - idx
+        self._t_ns[out] = t_rx_ns
+        self._dur[out] = msg.duration_us
+        self._seen[out] = True
         self._rot = float(msg.rot_speed_dps)
         self._last_idx = idx
         self._any = True

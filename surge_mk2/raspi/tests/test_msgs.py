@@ -171,9 +171,48 @@ class TestScanAssembler(unittest.TestCase):
             a.feed(self.sector(i), 0)
         scan = a.feed(self.sector(0), 0)
         self.assertIsNotNone(scan)
-        self.assertFalse(scan.sector_seen[3])
-        self.assertEqual(scan.dist[3 * 30], 0.0)         # 0 = 無効
+        self.assertFalse(scan.sector_seen[11 - 3])       # 反転後のセクタ番号
+        self.assertEqual(scan.dist[270], 0.0)            # センサ 90° = 車両 270°、0 = 無効
         self.assertEqual(a.sectors_lost, 1)
+
+    def test_sensor_angles_are_mirrored_into_the_vehicle_frame(self):
+        """LD06 は裏向き実装なので生の角度は左右が鏡像。ここで直さないと GUI が反転する。"""
+        a = ScanAssembler()
+        for i in range(12):
+            d = [0] * 30
+            if i == 3:
+                d[0] = 2000                              # センサ 90° = 車両 270°（右真横）
+            if i == 0:
+                d[0], d[1] = 1000, 3000                  # センサ 0°/1° = 車両 0°/359°
+            a.feed(packets.LidarSector(sector_idx=i, duration_us=8300,
+                                       rot_speed_dps=3594, dist=d), 0)
+        scan = a.feed(self.sector(0), 0)
+        self.assertAlmostEqual(scan.dist[270], 2.0)
+        self.assertEqual(scan.dist[90], 0.0)             # 反転し忘れならここに出る
+        self.assertAlmostEqual(scan.dist[0], 1.0)        # 前方は反転軸上なので動かない
+        self.assertAlmostEqual(scan.dist[359], 3.0)
+
+    def test_point_times_stay_continuous_across_sector_boundaries(self):
+        """歪み補正で引く点ごとの時刻。**車両角のまま `30*s+j` と分解してはいけない。**
+
+        反転で 30° の境界が 1° ずれ、`j=0` の点だけ隣のパケット由来になる。
+        1点 0.3ms 間隔になる `duration` と受信間隔を与え、**全周で等間隔に並ぶか**を見る。
+        誤った分解だと境界の点だけ1セクタぶん飛ぶ。
+        """
+        a = ScanAssembler()
+        for s in range(12):
+            # 距離[mm] にセンサ角を入れて、どの点がどこへ行ったか追えるようにする
+            a.feed(packets.LidarSector(sector_idx=s, duration_us=8700, rot_speed_dps=3594,
+                                       dist=[s * 30 + i for i in range(30)]),
+                   s * 9_000_000)
+        scan = a.feed(self.sector(0), 12 * 9_000_000)
+
+        for deg in range(360):
+            sensor = (360 - deg) % 360                   # `Scan.sector_dur_us` の式
+            s, i = 11 - sensor // 30, sensor % 30
+            self.assertEqual(round(scan.dist[deg] * 1000), sensor, f"deg={deg}")
+            t = scan.sector_t_ns[s] + scan.sector_dur_us[s] * 1000 * i / 29
+            self.assertAlmostEqual(t, 300_000 * sensor, delta=1, msg=f"deg={deg}")
 
     def test_compressed_marks_saturation_instead_of_a_hit(self):
         """255 は「5.10m ちょうど」ではなく「5.10m 以上」。壁として打たない。"""

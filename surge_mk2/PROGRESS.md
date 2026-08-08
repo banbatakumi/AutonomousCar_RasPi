@@ -3,7 +3,7 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」だけを書く。
 
-最終更新: 2026-08-08（バス + WS + GUI（運転ビュー）まで実装。**Mac 上で端から端まで動作確認済み。実機未検証**）
+最終更新: 2026-08-09（**MCAP 記録を実機で検証完了。SD 保護のため記録は PC 側で受ける方式に変更**）
 
 ---
 
@@ -35,7 +35,12 @@
 | **systemd 自動起動** | **合格**（電源投入から20秒で全部復帰。**arm 有効で入れてある**） |
 | **★ STM32 の時刻が +3378 ppm 速い** | **新発見。STM32 側と要相談**（下記） |
 | **★ MD バスの CRC エラー率 23〜25%** | **新発見。STM32 側と要相談**（下記） |
-| MCAP エクスポート | 未着手（`.sfl` → MCAP の変換ツールとして作る） |
+| **mDNS（`surge-mk2.local`）運用** | **確立**（直結/Wi-Fi の生きている方を自動選択。IP 探索が不要に） |
+| ~~AP モード~~ | **実装しない方針に変更**（屋外は持込ルーターへ STA 接続。下記） |
+| **MCAP 記録（`logger_node`）と `.sfl` → MCAP 変換** | **実機で合格**（実写・実点群を記録。テスト 295件） |
+| **★ 記録は PC 側で受ける（`tools/record.sh`）** | **実装・実機確認済み**。SD 書き込み 10.54→2.42MB/分 |
+| **★ `RemoveIPC=yes` で `/dev/shm/surge_cam*` が消える** | **発見・修正済み**（SSH を切ると消えていた。下記） |
+| Pi 純正ファン | **正常**（`pwm-fan` 認識・63°C で 5040RPM・段2/4。設定不要） |
 
 ## Pi 実機（surge-mk2）
 
@@ -87,6 +92,48 @@ rsync -az --exclude __pycache__ --exclude '*.pyc' --exclude .venv --exclude docs
 ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/tests -t .'
 ```
 
+#### ★★ mDNS（`surge-mk2.local`）で運用する — 2026-08-08 に確立
+
+**IP を探す作業はもう要らない。** `surge-mk2.local` が直結・Wi-Fi のどちらでも
+生きている方を指すので、`ssh surge-mk2` / `rsync ... surge-mk2:` /
+`http://surge-mk2.local:8000/` が常に通る。詳細は `docs/setup_credentials.md`。
+
+**発端は「avahi が入っていない」という記録が誤りだったこと。** 実際には
+`avahi-daemon` は `enabled` かつ `active` だった（picamera2 の apt 導入時に
+依存で入ったとみられる）。**入れる作業ではなく、記録を直す作業だった。**
+
+実測（`nmcli device disconnect eth0` でフェイルオーバーを検証済み）:
+
+| 状況 | 解決先 | 実測 |
+|---|---|---|
+| 直結あり | `169.254.55.2` | ssh・HTTP とも 6ms |
+| 直結なし | `192.168.68.87` | HTTP 10ms |
+| 直結が復旧 | `169.254.55.2` に戻る | — |
+
+- **`AddressFamily inet` を必ず付ける。** avahi は IPv6 リンクローカルも広告し、
+  ssh は IPv6 を優先するので、**直結があるのに `fe80::…%wlan0`（Wi-Fi 経由）へ行く**。
+  `~/.ssh/config` には設定済み。curl は `-4`
+- **IF を落として戻すと avahi が再広告しないことがある。**
+  eth0 を `nmcli` で切って戻したら、リンクは復活したのに mDNS が Wi-Fi 側しか
+  返さなくなった。**`ssh surge-mk2 'sudo systemctl restart avahi-daemon'` で直る。**
+  「直結が生きているのに遅い」ときはこれを疑う
+- **素の `ping 169.254.55.2` は直結が生きていても失敗する。** `169.254/16` の
+  ルートが複数 IF に重複して載り、既定が別の IF に出るため。
+  **これで「直結が死んだ」と誤診した**（実際は 1000baseT でリンクしていた）。
+  直結の生死は **`ping -b en18 169.254.55.2`** のように IF を明示して見る。
+  **アダプタの IF 名は挿し直すと変わる**（en18 → en19 になっていた）
+- **zsh は `$OPT` を単語分割しない。** `-e "sshpass -e ssh $OPT"` は rsync では
+  効くが、`ssh $OPT host` と直に書くと `keyword ... extra arguments` で落ちる。
+  `ssh` に渡すときは `-o` を並べて書くか `${=OPT}` にすること
+
+（参考）mDNS が使えない環境で IP から探す場合は、**MAC のベンダ prefix
+`2c:cf:67`（Raspberry Pi Ltd）**が速い:
+
+```bash
+for i in $(seq 1 254); do ping -c1 -t1 192.168.68.$i >/dev/null 2>&1 & done; wait
+arp -an | grep -i 2c:cf:67          # → 192.168.68.87 のように出る
+```
+
 ---
 
 ## 決まっていること
@@ -130,6 +177,49 @@ ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/
 - **射影は累積値ではなく差分に対して行う。** `cos(δ)` を累積距離に掛けるのは誤り
 - 射影済みなのは `speed` だけ（STM32 側で処理）
 - 前輪のスリップ量を見るときも射影が要る
+
+### ★ ネットワーク — **Pi は常に STA。AP モードは実装しない**（2026-08-08 決定）
+
+設計当初は「本番・屋外は AP モード」としていたが、**取りやめた。**
+**屋外では Wi-Fi ルーターを持ち込み、Pi と PC の両方をそれに STA 接続する。**
+Pi から見れば繋ぎ先の SSID が変わるだけで、**モード切替という操作が存在しなくなる。**
+詳細と手順は `docs/architecture.md` §9.1。
+
+| 場面 | 構成 |
+|---|---|
+| 据置開発 | 有線 Ethernet 直結（`169.254.55.2`） |
+| 研究室での走行テスト | STA（`tplink`） |
+| **屋外・大会** | **STA（持込ルーター）** |
+| ルーターを忘れた/壊れた | **Ethernet 直結**（AP モードではない） |
+
+**やめた理由（重い順）:**
+
+1. **電波は「弱い側」が親機になると全体が弱くなる。** AP モードでは Pi の基板上の
+   小さなアンテナが上限になり、距離が開くと STA より先に切れる。
+   **切断は `cmd` の 150ms 途絶 → DISARM に直結する**（走行が勝手に止まる）。
+   ルーターなら外部アンテナ・MIMO の強い側が親機になる
+2. **ヘッドレスの Pi でモード切替に失敗すると救出手段が消える。** 屋外で AP 起動に
+   失敗し STA にも戻れないと、その場では SD カードを抜くしかない。
+   **STA のままなら、この事故が原理的に起きない**
+3. **屋外の 5GHz は日本の電波法で W56 のみ**（W52/W53 は屋内限定）。W56 は DFS 必須で
+   レーダー検出時に**最大60秒**通信が止まる。走行中の1分の途絶は使えない。
+   → 屋外の AP は実質 2.4GHz 一択になり、混雑した会場で不利
+4. **インターネットが来ないと NTP が効かず時計がずれる**（実際に約1日ずれた実績あり）。
+   SIM 入りモバイルルーターなら解決する
+5. Pi がビーコン送信と DHCP を負担しなくて済む（Phase 3 以降で効く）
+
+**★ 屋外に出る前に、研究室で SSID を登録しておくこと。**
+NetworkManager は知らない SSID に自動接続しない。**現地で登録しようとすると、
+Pi に繋ぐ手段が直結 Ethernet しか無い状態になる。**
+
+```bash
+ssh surge-mk2 'sudo nmcli device wifi connect "SURGE-FIELD" password "********" ifname wlan0'
+ssh surge-mk2 'sudo nmcli connection modify "SURGE-FIELD" connection.autoconnect-priority 20'
+ssh surge-mk2 'sudo nmcli connection modify "tplink"      connection.autoconnect-priority 10'
+```
+
+これで**会場ではルーターの電源を入れるだけ**、研究室に戻れば自動で `tplink` に戻る。
+**IP が変わっても mDNS があるので `surge-mk2.local` で届く。**
 
 ---
 
@@ -393,6 +483,37 @@ u16×0.01 の上限 655 deg/s は、LD06 の 10 rps = 3600 deg/s を最初から
 **他の全フィールドも同じやり方で監査済み（2026-08-07）。`rot_speed_dps` 以外は問題なし。**
 電源系は 8セル NiMH（8.0〜11.2V）に対し u8×0.05 = 0〜12.75V で余裕 1.55V、
 電流も過電流しきい値（駆動 5.0A / シグナル 3.0A）に対し 2.5倍 / 1.7倍 とれている。
+
+### ★ GUI の点群が左右反転していた（2026-08-08・修正済み）
+
+**LD06 は PCB 面を下にして裏向きに取り付けてある。** 0° は機体前方を向いているが、
+角度が増える向きが上から見て車両座標（反時計回りが正）と**逆**になる。
+STM32 は「センサ基準の角度をそのまま送り、解釈は Pi 側で行う」設計（`stm32_interface.md` §7.1）
+なのに、`ScanAssembler` が `sector_idx * 30 + i` をそのまま度として使っていたのが原因。
+
+**`raspi/msgs/convert.py` の `ScanAssembler` 1箇所だけ**で
+`車両角 = (360 - センサ角) % 360` に直す。`Scan.dist` の添字は車両角なので、
+以降のノード・GUI・地図生成は反転を意識しなくてよい。
+
+- 反転で**1周は添字の降順に取得される**ため、`sector_t_ns` / `sector_dur_us` /
+  `sector_seen` も車両座標のセクタ番号 `11 - sector_idx` へ移した。
+  GUI の欠測セクタ表示（扇形ハッチ）が点群とずれないようにするため
+- セクタ内の時刻の向きも逆になり、**30° の境界も 1° ずれる**。セクタ `s` が持つのは
+  `30*s+1` 〜 `(30*s+30) % 360` で、`30*s` の点だけ隣のパケット由来。
+  点の時刻は**車両角をセンサ角に戻してから**引くこと（式は `types.py`）。
+  車両角のまま `30*s+j` と分解すると `j=0` の点で**最大 108ms（ほぼ1周）外す**。
+  歪み補正はまだ実装していないが、実装時に必ず踏むので回帰テストで固定してある
+- `t_capture` は「先頭の非ゼロ」ではなく**最小**を取るように変更。
+  添字が時刻順に並ばなくなったため
+- ワイヤ形式・`protocol_version` は無変更。**STM32 側の変更は不要**
+- 回帰テスト `test_sensor_angles_are_mirrored_into_the_vehicle_frame` を追加
+  （センサ 90° → 車両 270°、前方 0° は反転軸上なので不動）
+- 回帰テスト `test_point_times_stay_continuous_across_sector_boundaries` を追加
+  （全周360点の時刻が等間隔に並ぶか。境界の分解ミスがあれば1セクタぶん飛ぶ）
+
+**STM32 側で直さないのは意図的。** 0°/180° がセクタ境界に乗るため1セクタが出力側の
+隣接2セクタに分裂するうえ、実際に試したところ原因不明の通信エラー増発が再現している
+（STM32 の `src/sensing/lidar.h` に経緯あり）。
 
 ## replay_node（2026-08-07）
 
@@ -1103,7 +1224,252 @@ sudo ./raspi/setup/install_services.sh --remove
 - **`--allow-arm` は未実施。** 走らせる前に `estop_test.py` の回し直しが必要
 - カメラの進路ガイドは**校正前の近似**（Phase 1）。車体寸法も暫定値
 - `gui/src/types.ts` は `raspi/msgs/types.py` の手写し。**2箇所にあるのでズレうる**
-- Pi に avahi が無いので `surge.local` は使えない。IP 直打ちが必要
+- ~~Pi に avahi が無いので `surge.local` は使えない~~ → **解決。`surge-mk2.local` で運用中**
+- **屋外用ルーターの SSID がまだ Pi に登録されていない。**
+  屋外で走らせる前に研究室で登録しておくこと（下記。現地では登録できない）
+
+## MCAP 記録を実装した（2026-08-08）— Mac で確認済み・**実機未検証**
+
+Phase 0 の達成条件の残り半分「**全データが記録できる**」に対応する。
+
+### なぜ `.sfl` だけでは足りなかったか
+
+**カメラ画像がどこにも記録されていなかった。** LiDAR も車両状態も UART 経由なので
+`.sfl` に入っているが、カメラは共有メモリに置いて捨てているだけだった。
+記録点をバス側にもう1つ足す必要がある、というのが `logger_node` を作った理由。
+
+**`.sfl` を置き換えるのではなく2段構えにした**（`docs/architecture.md` §11）。
+`.sfl` にしか残らないもの（CRC エラー・SEQ 逆行・再同期バイト数＝捨てたフレームの証拠）と、
+`.mcap` にしか残らないもの（カメラ画像）があるため。**両方回すのが既定。**
+
+| | `.sfl`（io_node） | `.mcap`（logger_node） |
+|---|---|---|
+| 中身 | UART の生バイト | 解釈済みトピック＋画像 |
+| 依存 | stdlib のみ | `mcap` |
+| 量 | 2.5MB/分 | **10.3MB/分（実測）**。大半は画像。→ **PC 側で録る**ことにした |
+
+### 作ったもの
+
+- `raspi/rec/mcap_log.py` — MCAP 書き出し。スキーマは `msgspec.json.schema()` が
+  型から生成する（**手書きしないので、型を足したときに書き忘れる余地がない**）
+- `raspi/nodes/logger_node.py` — バス全トピック → `.mcap`。画像は共有メモリから
+  読んで JPEG に焼く
+- `raspi/tools/sfl2mcap.py` — 既存の `.sfl` を後から変換
+- `raspi/tools/mcap_repair.py` — 電源断で索引が書かれなかった `.mcap` を救う
+- `raspi/core/jpeg.py` — 共有メモリ → JPEG。**telemetry_node と共有**
+  （2箇所に書くと片方だけ BGR/RGB が入れ替わる事故になる）
+- テスト 34件（`raspi/tests/test_mcap.py`）。**書いた MCAP を読み直して**検査している。
+  画像経路（共有メモリ → JPEG → MCAP）と色順（BGR/RGB）も含む。
+  **Mac で試すには `pip install pillow` が要る**（無ければ画像テストは skip）
+
+### 効いた設計判断
+
+- **変換ではなく「再生してから書く」。** `sfl2mcap` は `replay_node` + `BusBridge` を
+  そのまま通す。SI 換算・前輪射影・LiDAR 12セクタ組み立てを書き直すと実機とズレる
+- **中身は JSON にした。** Foxglove Studio が MCAP で読める符号化に msgpack が無い。
+  内部バス（msgpack）とは形を変えている。**開けなければ MCAP にした意味がない**
+- **時刻は UNIX epoch に直して `log_time` に入れる。** 単調時刻のままだと Foxglove が
+  1970年と表示する。**メッセージ内の `t_capture` は単調時刻のまま**なので
+  `.sfl` と突き合わせられる。換算に使った1組はメタデータ `surge` に残してある
+- **`/viz/scan` では無効点（`dist=0`）を落とす。** 残すと原点を囲む円状の壁として描かれる
+- **`mcap` は io_node に入れない。** 実時間で回るコードは stdlib のみ、の方針は維持。
+  `mcap` が入っていなくても車は走る（記録が MCAP にならないだけ）
+
+### 使い方
+
+```bash
+# 記録（systemd に surge-logger として入る。run_stack.sh でも上がる）
+python3 -m raspi.nodes.logger_node                 # logs/surge_<日時>.mcap
+python3 -m raspi.nodes.logger_node --image-hz 0    # 画像なし（ディスク節約）
+
+# 既存の .sfl を後から変換
+python3 -m raspi.tools.sfl2mcap logs/surge_20260808_120000.sfl
+python3 -m raspi.tools.sfl2mcap logs/run.sfl --start 10 --end 40
+```
+
+Mac での実測（`bus_demo` を相手に5秒）: `vehicle_state` の `seq` に**抜けゼロ**
+（RELIABLE 購読が効いている）。合成した5秒の `.sfl`（77KB）→ `.mcap` 45KB、
+Foxglove のインデックス付きでシークも通った。
+
+## 実機検証（2026-08-08 夜）— 合格。ただし**共有メモリの罠を1つ踏んだ**
+
+Pi 実機で `logger_node` を回し、実写・実点群を記録できることを確認した。
+テストは **Pi 上でも 291件すべてパス**。
+
+### ★★★ `RemoveIPC=yes` で `/dev/shm/surge_cam*` が消える（発見・修正済み）
+
+**最初の記録で画像だけが 448件すべて失敗した。** 原因は Pi 側の設定だった。
+
+```
+$ ls /dev/shm/            # 空
+$ sudo grep surge_cam /proc/<camera_node>/maps
+7ffeb38f4000-... /dev/shm/surge_cam0 (deleted)     ← 掴んだまま動いている
+$ loginctl show-user pi | grep Linger
+Linger=no
+```
+
+**systemd-logind の既定 `RemoveIPC=yes` は、そのユーザーの最後のセッションが
+終わった時点で uid 所有の POSIX 共有メモリを全部消す。`User=pi` で動く
+systemd サービスの分まで巻き添えになる。** つまり **SSH を切った瞬間に
+`camera_node` の共有メモリが unlink される。**
+
+症状が分かりにくいのが厄介だった:
+
+- `camera_node` 自身はマッピングを保持しているので**動き続ける**
+  （`image/front` は 30Hz で流れ続ける。バスを見ても異常が無い）
+- **新しく attach するプロセスだけが失敗する**（`FileNotFoundError: /surge_cam0`）
+- したがって **`telemetry_node` の GUI カメラも同じ理由で映らなくなる。**
+  「再起動すると直る」ので原因に辿り着きにくい
+
+修正（Pi 側に投入済み）:
+
+```
+/etc/systemd/logind.conf.d/10-surge-removeipc.conf
+[Login]
+RemoveIPC=no
+```
+
+`sudo systemctl restart systemd-logind` で反映。**SSH を切っても
+`/dev/shm/surge_cam0` が `(deleted)` にならないことを確認済み。**
+（代替として `loginctl enable-linger pi` でも防げるが、こちらの方が意図が明確）
+
+### ★ 計器が悪くて原因に辿り着けなかった（修正済み）
+
+最初の失敗は `画像の取りこぼし: エラー 448` としか出ず、**なぜ失敗したのかが
+どこにも残っていなかった。** `md_rx_count` を合計で出して MD の誤診をしたのと
+まったく同じ失敗。`RingJpeg.last_error` に**直近の例外を文字列で残す**ようにした。
+
+ついでに、より悪い壊れ方も塞いだ。**`camera_node` を再起動すると共有メモリは
+作り直されるが、既に attach しているプロセスは古い方を掴んだままになる**
+（Linux では unlink 後もマッピングが生きる）。これは**エラーすら出さずに
+同じ画像を記録し続ける。** `ImageRef.ring_seq` と手元の `write_seq` を比べて
+掴み直すようにした（`core/jpeg.py` の `STALE_GAP`）。テストで固定済み。
+
+### 実測
+
+```
+記録         45秒 → 8.7MB / 9801件。**10.3MB/分**（画像 5Hz×2台・JPEG 約20KB）
+バス         vehicle_state 50.4Hz / scan 10.1Hz / diag 10.1Hz / image 30.3Hz×2
+cmd_rtt      ロガー無し 中央値 6.8ms → 有り 8.4〜11.1ms（最大 22.4ms）
+             ★ 50ms 警告に対して余裕あり。--image-hz を下げる必要はなかった
+温度/ファン  61.7〜66.7°C / 5040〜5255RPM / 段2 …… ロガーの有無で変化なし
+load         0.6 → 0.6〜1.2
+変換         実機 .sfl 52MB（52分）→ .mcap 76.5MB（60万件）も通った
+```
+
+中身も Mac に持ってきて確認した。**カメラは実写（640×480 JPEG 20KB、色順も正常）、
+LiDAR は 360点 0.21〜3.70m の実点群**、`vehicle_state` は DISARM・駆動 1.65V・
+MD 温度 None×3（駆動電源が落ちているので `comm_ok=0`。設計どおり）。
+
+### ★★ SD カードの書き換え寿命 → **MCAP は PC 側で録るように変更**（バンビの指摘）
+
+「SD は書き換えに弱いので、周期が落ちても PC 側でログを取れないか」という指摘。
+**正しい。実測すると 1日 15GB を SD に書いていた。**
+
+`/sys/block/mmcblk0/stat` で A/B 測定（デバイスへの実書き込み量）:
+
+```
+ロガー有り: 10.54 MB/分   ← 1日 15GB。28GB の SD を毎日半分書き潰す勢い
+ロガー無し:  2.42 MB/分   ← 現在の既定（.sfl ＋ journald ＋ FS のオーバーヘッド）
+```
+
+**77%減。** 判断の根拠は「数値だけなら `.mcap` は `.sfl` とほぼ同じ内容」
+（どちらも UART 由来）であること。**SD に二重に書く価値があるのは実質カメラ画像だけ**
+なので、その画像を PC 側へ逃がした。
+
+#### `logger_node -o -` — MCAP を標準出力に流す
+
+```bash
+tools/record.sh                    # Mac で実行。Ctrl-C で終了
+tools/record.sh --image-hz 15      # PC のディスクなので画像を増やしてもよい
+tools/record.sh --duration 60 -o ~/logs/test.mcap
+```
+
+中身はこれだけ:
+
+```bash
+ssh surge-mk2 '… -m raspi.nodes.logger_node -o -' > run.mcap
+```
+
+**SD には1バイトも書かれない。** MCAP は追記型なのでパイプでそのまま成立する。
+実測 3.6MB/20秒 = 約 200KB/s なので Wi-Fi でも足りる。**周期を落とす必要すら
+無かった**（`vehicle_state` 49.9Hz・画像 5Hz をそのまま PC で受けられた）。
+
+実装で1つ詰まった: `mcap.writer.Writer` は索引のオフセットを `stream.tell()` で
+取るので、**パイプだと `OSError: Illegal seek` で落ちる。** MCAP は追記専用で
+**書いたバイト数がそのままオフセット**なので、ラッパで数えて返すようにした。
+
+#### Pi 側の既定を変えた
+
+- `install_services.sh` は **`surge-logger` を enable しない**（unit は置くので
+  `sudo systemctl start surge-logger` で一時的に録れる）
+- Pi 単体で画像も録りたいときは `sudo ./raspi/setup/install_services.sh --with-logger`
+- **`.sfl` は常時記録のまま。** PC を繋いでいない間や Wi-Fi が切れた瞬間の
+  記録が失われては意味がない
+
+### ★ `.mcap` は尻切れに弱い → 復旧ツールを用意した
+
+**MCAP は `finish()` を呼んで初めて索引が書かれる。** 記録途中のファイルを
+読もうとすると、データは書けているのにリーダが落ちる:
+
+```
+RecordLengthLimitExceeded: unknown (opcode 0) record has length ... exceeds limit
+```
+
+`.sfl` は尻切れでも必ず前半が読めるのに、`.mcap` はそうではない。
+**原因不明の再起動が2回あった Pi でこれは放置できない**ので
+`raspi/tools/mcap_repair.py` を作った。先頭から舐めて切れたところで打ち切り、
+索引付きで書き直す。
+
+```bash
+python3 -m raspi.tools.mcap_repair logs/surge_20260808_233813.mcap
+```
+
+**実機の記録中のファイル（87MB）から 10万件・カメラ画像 4869枚を復旧できた。**
+
+（実装上の落とし穴: 正常な MCAP は Schema/Channel をデータ部と要約部の
+**両方**に持つので、素直に舐めると同じトピックのチャネルが2本でき、
+片方が0件になる。id で重複を弾くこと。テストで固定済み）
+
+### ★ ログ掃除が間に合わなくなったので直した
+
+`.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 = **約 12.8MB/分 = 1日 18GB**。
+空きは 22GB しかないので、**「毎日・7日より古いものを消す」では掃除が来る前に
+カードが埋まる**（そもそも `.sfl` 単独でも 6日で埋まる計算だった）。
+
+- タイマーを**毎時**に変更
+- **合計 8GB を超えている間、古い順に消す**処理を追加（連続運転の保険）
+- 隔離ディレクトリで削除順（古い順）と停止条件を実測確認済み
+
+### Pi 純正ファンについて（バンビの質問）
+
+**正常。設定は要らない。**
+
+```
+cooling_device0  type=pwm-fan  cur=2/4
+temp=64.2'C   fan RPM: 5041   throttled=0x0
+config.txt にファンの記述なし＝既定のカーブ
+```
+
+「起動時しか回らない」ように見えたのは、**既定では 50°C を下回ると完全に止まる**ため。
+過去に記録した 49.4°C はまさに閾値の直下だった。既定カーブは
+50°C→約30% / 60°C→約49% / 67.5°C→約69% / 75°C→約98%（各 5°C のヒステリシス）。
+今はノード一式が動いていて 63〜66°C なので**段2で常時回っている。**
+
+### ★ SSH 鍵を入れ替えた
+
+`~/.ssh/id_ed25519` は**パスフレーズが分からなくなった**（Keychain にも無い）。
+Pi 側の `authorized_keys` は無事だったが署名できないため、
+**Pi 専用の `~/.ssh/id_surge_mk2`（パスフレーズ無し）を作って登録した。**
+
+**`~/.ssh/config` はまだ `id_ed25519` を指したまま**なので、次の2箇所を
+手で直すこと（`Host surge-mk2` と `Host surge-direct`）:
+
+```
+    IdentityFile ~/.ssh/id_surge_mk2
+```
+
+直すまでは `ssh -i ~/.ssh/id_surge_mk2 -o IdentitiesOnly=yes surge-mk2` で入る。
 
 ## やったこと
 
@@ -1195,15 +1561,19 @@ Pi 5 実機では ZeroMQ / msgspec / numpy / picamera2 / gpiozero+lgpio が要�
 6. ~~**`camera_node`**~~ 完了（共有メモリリングまで実機確認）
 7. ~~**メッセージ型とバス**~~ 完了（Mac で実測。実機未検証）
 8. ~~**WS サーバ + GUI 骨格**~~ 完了（運転ビュー1枚。Mac で端から端まで確認）
-9. **★ 実機でバスと GUI を通す** ← いまここ
-10. `logger_node`（MCAP）と `.sfl` → MCAP エクスポータ
+9. ~~**★ 実機でバスと GUI を通す**~~ 完了（実車をキーボードで操縦できた）
+10. ~~**`logger_node`（MCAP）と `.sfl` → MCAP エクスポータ**~~ **実装済み・実機未検証**（下記）
 
-### 9〜10 は完了。**いまは systemd で自動起動している**
+### **Phase 0 の残りは「実機で MCAP を回すこと」と `estop_test.py` の回し直し**
+
+一時期この節に「9〜10 は完了」と書いてあったが、**10 は着手すらしていなかった**
+（`logger_node.py` が存在しなかった）。9 と systemd を完了と書いたときの取り違え。
+**表と本文が食い違ったら、ファイルが在るかどうかで判断すること。**
 
 日常の操作:
 
 ```bash
-ssh surge-mk2 'systemctl status surge-io surge-camera surge-telemetry'
+ssh surge-mk2 'systemctl status surge-io surge-camera surge-telemetry surge-logger'
 ssh surge-mk2 'tail -F ~/surge_mk2/logs/surge-io.out'
 ssh surge-mk2 'sudo systemctl restart surge-telemetry'   # GUI だけ直したなら rsync のみで足りる
 ```
@@ -1228,7 +1598,7 @@ python -m raspi.nodes.io_node          # ★ --allow-arm は付けない（DISAR
 python -m raspi.nodes.camera_node
 python -m raspi.nodes.telemetry_node
 
-# ④ Mac のブラウザで http://surge.local:8000/
+# ④ Mac のブラウザで http://surge-mk2.local:8000/
 ```
 
 **見るべきもの（この順に切り分ける）**:

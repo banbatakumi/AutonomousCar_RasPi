@@ -15,12 +15,16 @@ pyzmq                  # 内部バス（PUB/SUB）
 msgspec                # メッセージ定義とシリアライズ（内部 msgpack / WS も同じ形）
 websockets             # telemetry_node の WS サーバ。純 Python・依存なし
 numpy                  # 点群・占有格子・共有メモリ画像の view
+mcap                   # ログ記録（logger_node / tools/sfl2mcap.py）。zstandard が付いてくる
 
 # JPEG エンコードは simplejpeg（picamera2 が同梱）を使い、無ければ Pillow に落ちる。
 # **Pi では picamera2 経由で入るので明示しない。** Mac でカメラ配信を試すときだけ:
 #   pip install pillow
 
+# **`mcap` は io_node には要らない。** 実時間で回るコード（io_node / framelog /
+# shm_ring）は stdlib のみで動く方針を維持している。MCAP を書くのは別プロセスの
+# logger_node とオフライン変換だけなので、入っていなくても車は走る。
+
 # ── Phase 1 以降 ※ 使う段階で有効化 ──
 # picamera2            # OS 同梱版を使う場合は --system-site-packages 側で解決
 # opencv-python-headless
-# mcap                 # ログ記録（.sfl からのオフライン変換で使う）

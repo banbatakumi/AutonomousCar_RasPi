@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Pi 上で Phase 0 のノード一式を起動/停止する。systemd unit を書くまでの繋ぎ。
 #
-#   ./raspi/setup/run_stack.sh start          # io + camera + telemetry
+#   ./raspi/setup/run_stack.sh start          # io + camera + telemetry + logger
 #   ./raspi/setup/run_stack.sh start --heartbeat   # ★ GPIO6 ハートビートも出す
+#   ./raspi/setup/run_stack.sh start --no-logger   # MCAP 記録を止める（ディスク節約）
 #   ./raspi/setup/run_stack.sh status
 #   ./raspi/setup/run_stack.sh stop
 #   ./raspi/setup/run_stack.sh logs
@@ -32,8 +33,10 @@ PATTERN='raspi\.nodes\.'
 # **一度出すと、止めた時点で STM32 が E-Stop をラッチし、車両のボタン2を押すまで
 # 解除されない。** 配線やGUIの確認で何度も再起動する段階では邪魔になる。
 HB=--no-heartbeat
+LOGGER=1
 for a in "${@:2}"; do
   [ "$a" = "--heartbeat" ] && HB=""
+  [ "$a" = "--no-logger" ] && LOGGER=0
 done
 
 start_one() {           # start_one <名前> <モジュール> [引数...]
@@ -55,6 +58,8 @@ case "${1:-status}" in
     start_one camera   raspi.nodes.camera_node   --quiet
     sleep 4
     start_one telemetry raspi.nodes.telemetry_node
+    # ロガーは最後。**カメラより後に上げる**と、記録の先頭から画像が入る
+    [ "$LOGGER" = 1 ] && start_one logger raspi.nodes.logger_node --quiet
     sleep 3
     exec "$0" status
     ;;
@@ -67,7 +72,7 @@ case "${1:-status}" in
     echo "=== 稼働中 ==="
     pgrep -af "$PATTERN" | sed 's#.*/python -m ##' || echo "  （無し）"
     echo
-    for f in io camera telemetry; do
+    for f in io camera telemetry logger; do
       [ -f "$LOGS/$f.out" ] || continue
       echo "=== $f ==="
       grep -v '^$' "$LOGS/$f.out" | tail -6
@@ -76,11 +81,11 @@ case "${1:-status}" in
     ;;
 
   logs)
-    tail -n 40 -F "$LOGS"/io.out "$LOGS"/camera.out "$LOGS"/telemetry.out
+    tail -n 40 -F "$LOGS"/io.out "$LOGS"/camera.out "$LOGS"/telemetry.out "$LOGS"/logger.out
     ;;
 
   *)
-    echo "使い方: $0 {start|stop|status|logs} [--heartbeat]" >&2
+    echo "使い方: $0 {start|stop|status|logs} [--heartbeat] [--no-logger]" >&2
     exit 2
     ;;
 esac

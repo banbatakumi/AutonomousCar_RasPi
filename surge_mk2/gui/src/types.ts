@@ -57,8 +57,11 @@ export type Scan = {
   t_capture: number
   t_pub: number
   seq: number
-  dist: number[] // 360点 [m] 添字がそのまま度。0 = 無効
-  sector_t_ns: number[] // 12
+  // 360点 [m] 添字がそのまま度。0 = 無効。添字は**車両座標**の角度
+  // （x=前 が 0°、反時計回りが正）。センサ基準からの左右反転は ScanAssembler で
+  // 済ませてあるので、描画側で座標変換してはいけない
+  dist: number[]
+  sector_t_ns: number[] // 12（こちらも車両座標のセクタ番号）
   sector_dur_us: number[]
   sector_seen: boolean[] // false の区間は「障害物なし」ではない
   rot_speed_dps: number
