@@ -1,0 +1,272 @@
+"""内部バスに流れるメッセージ型（`docs/architecture.md` §6.3）。
+
+`msgspec.Struct` で定義する。Rust 実装で速く、そのまま msgpack に落ちる。
+
+## 全メッセージが `t_capture` / `t_pub` / `seq` を持つ
+
+後からセンサ融合を作るときに全メッセージ定義を書き直さずに済ませるため。
+**`t_capture` は「センサが取得した時刻」**であって publish した時刻ではない。
+この2つを混ぜると、UART の往復や Python の処理遅延がそのまま位置推定の誤差になる。
+
+- `t_capture` … STM32 が測った時刻を時刻同期で Pi の `CLOCK_MONOTONIC` に換算した値 [ns]
+- `t_pub` … `Publisher.send()` が押す [ns]
+- `seq` … トピックごとの通し番号。`Publisher` が押す
+
+## 単位は SI で固定する
+
+UART 上は `0.001 m/s` のような整数スケールだが、**バスに出た時点で SI の float にする**
+（`docs/architecture.md` §5.1）。km/h や度への変換は GUI の表示直前だけ。
+どの層でスケールが掛かっているか分からなくなるのが一番危ない。
+
+## 「値が無い」は 0 ではなく None で表す
+
+`us_front` は `0 = 無効`、`temp` は MD の `comm_ok=0` なら**信じてはいけない**。
+これらを 0.0 のまま下流に流すと「0m に障害物がある」「0℃ である」と読める。
+型で潰しておく。
+"""
+
+from __future__ import annotations
+
+import msgspec
+
+__all__ = [
+    "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
+    "Heartbeat",
+    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
+    "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
+    "TOPIC_TYPES", "type_for_topic",
+]
+
+# ── トピック名 ──────────────────────────────────────────────────────────
+#: `/` で階層にする。購読は前方一致なので `image/` で両カメラを取れる
+TOPIC_VEHICLE_STATE = "vehicle_state"
+TOPIC_SCAN = "scan"
+TOPIC_CMD = "cmd"
+TOPIC_DIAG_LINK = "diag/link"
+TOPIC_IMAGE_FRONT = "image/front"
+TOPIC_IMAGE_REAR = "image/rear"
+TOPIC_HB_PREFIX = "hb/"
+
+
+class MsgBase(msgspec.Struct):
+    """全メッセージ共通のヘッダ。
+
+    **全フィールドに既定値を持たせてある。** msgspec は dataclass と同じ引数順の
+    規則を持つので、基底に既定値なしのフィールドがあると派生側で詰む。
+    """
+
+    t_capture: int = 0
+    t_pub: int = 0
+    seq: int = 0
+
+
+class VehicleState(MsgBase):
+    """`TELEMETRY`(0x02) を SI に直したもの。50Hz。
+
+    生値と Pi 側の派生量を**同じメッセージに入れる**。別トピックに分けると
+    「どの派生量がどの生値から出たか」の対応が時刻合わせの問題に化ける。
+    """
+
+    # ── STM32 が測った生の値（SI 換算のみ） ──
+    #: 車体中心線方向に射影済み [m/s]（射影済みなのはこれだけ）
+    speed: float = 0.0
+    yaw_rate: float = 0.0                  #: [rad/s] IMU。**yaw の絶対値は出ない**
+    steer_actual: float = 0.0              #: 路面舵角 [rad] 反時計回り正
+    steer_cmd_echo: float = 0.0            #: 指令のエコーバック [rad]
+    #: 車輪周速 [m/s] [FL, FR, RL, RR]。**前2輪は操舵輪なので射影されていない**
+    wheel_speed: list[float] = msgspec.field(default_factory=lambda: [0.0] * 4)
+    #: 前輪の累積走行距離 [m] [FL, FR]。**累積値・射影なし**
+    odom_dist: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    accel: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [m/s²] x,y,z
+    pitch: float = 0.0                     #: [rad] 重力で補正済み。ドリフトしない
+    roll: float = 0.0                      #: [rad] 同上
+    motor_current: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [A] RL,RR,ST
+    #: [N·m] [RL, RR]。**指令値であって実測ではない**（Kt が未実測のため測れない）
+    torque_cmd: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    #: [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None
+    temp: list[int | None] = msgspec.field(default_factory=lambda: [None] * 4)
+    batt_voltage: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)  #: [V] 駆動,信号
+    #: [A] 駆動,信号。**単方向センサなので回生中は 0 に張り付く。信用しないこと**
+    batt_current: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    us_front: float | None = None          #: [m] 無効なら None。実質 20Hz 更新
+    us_rear: float | None = None           #: [m] 同上
+    md_status: list[int] = msgspec.field(default_factory=lambda: [0] * 3)  #: MDS_* ビット
+    flags: int = 0                         #: FLG_* ビット（生のまま。下流で解釈する）
+    cmd_seq_echo: int = 0                  #: 最後に受理した COMMAND の SEQ
+    t_stm_us: int = 0                      #: STM32 の生の時刻。ログ突き合わせ用
+
+    # ── flags を解いたもの（GUI と安全判定が毎回ビット演算するのを避ける） ──
+    mode: int = 0                          #: 0=DISARM 1=MANUAL 2=AUTO
+    armed: bool = False
+    estop_active: bool = False
+    uart_timeout: bool = False
+    tc_active: bool = False                #: 今まさに TC が介入中
+    tv_active: bool = False                #: 今まさに TV が介入中
+    imu_ok: bool = False
+    lidar_ok: bool = False
+    steer_center_valid: bool = False       #: 0 なら走行禁止
+    #: 過電流ラッチで `arm` を拒否中。**これは仕様であって FAULT ではない**
+    drive_power_locked: bool = False
+    faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
+
+    # ── Pi 側で計算した派生量 ──
+    #: 車体中心線方向の累積走行距離 [m]。**1周期ぶんの差分に舵角で射影して積算**
+    #: したもの。累積値に cos を掛けるのは誤り（`uart_protocol.md` §5.3）
+    odom_center: float = 0.0
+    #: 前輪スリップ [m/s] [FL, FR]。`wheel_speed * cos(δ) - speed`
+    slip_front: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    #: 後輪スリップ [m/s] [RL, RR]。非操舵輪なので射影不要
+    slip_rear: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    #: `|speed|` がデッドバンド未満。前輪エンコーダは静止付近で符号がばたつくので、
+    #: **生値はそのまま残し、「止まっている」の判断だけを別に持つ**。
+    #: GUI はこれが True なら 0.00 と表示する
+    stopped: bool = True
+
+
+class Scan(MsgBase):
+    """LiDAR 1周ぶん。10Hz。
+
+    **角度は配列の添字がそのまま度**（`dist[i]` は i 度の距離）。STM32 側で
+    1° ビンに整形済みなので、実測角度は送られてこない。
+
+    `t_capture` はセクタ0の先頭時刻。**1周に 100ms かかるので、点ごとの時刻は
+    `sector_t_ns` から引くこと。** 時速 10km/h なら1周で 28cm 動き、点群が扇形に歪む。
+    """
+
+    dist: list[float] = msgspec.field(default_factory=lambda: [0.0] * 360)  #: [m] 0=無効
+    #: 各セクタ先頭の時刻 [ns]（Pi 時刻に換算済み）。欠けたセクタは 0
+    sector_t_ns: list[int] = msgspec.field(default_factory=lambda: [0] * 12)
+    #: 各セクタ30点の取得所要時間 [μs]。`t[i] = t_start + dur * i / 29`
+    sector_dur_us: list[int] = msgspec.field(default_factory=lambda: [0] * 12)
+    #: この1周で受信できたセクタ。**False の区間は「障害物なし」ではない**
+    sector_seen: list[bool] = msgspec.field(default_factory=lambda: [False] * 12)
+    rot_speed_dps: float = 0.0             #: LD06 の回転速度 [deg/s]。正常は約 3600
+    intensity: list[int] | None = None     #: 強度付きフォーマットのときだけ入る
+    #: 圧縮フォーマットで 255（**5.10m ちょうどではなく「5.10m 以上」**）だった点。
+    #: ここを実測点として地図に打つと実在しない壁が円状に生成される
+    saturated: list[bool] | None = None
+    lidar_format: int = 0                  #: 0=通常 1=強度付き 2=圧縮
+
+
+class DriveCmd(MsgBase):
+    """走行指令。GUI（MANUAL）または planning_node（AUTO）が publish する。
+
+    **io_node はこれを 150ms 受け取らなければ DISARM に落とす。**
+    publish 側が止まった＝上位が死んだ、なので車を止めるのが正しい。
+    """
+
+    mode: int = 0                          #: 0=DISARM 1=MANUAL 2=AUTO
+    arm: bool = False
+    brake: bool = False
+    horn: bool = False
+    light: bool = False
+    target_speed: float = 0.0              #: [m/s] 負で後退
+    target_steer: float = 0.0              #: 路面舵角 [rad] 反時計回り正
+    accel_limit: float = 0.0               #: [m/s²] 0 は STM32 の既定に任せる意
+    steer_rate_limit: float = 0.0          #: [rad/s]
+    source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
+
+
+class LinkDiag(MsgBase):
+    """リンクの健全性。1〜10Hz。**上りと下りのどちらが悪いかを切り分けるため**の情報。
+
+    Pi 側のカウンタ（`rx`）だけでは STM32 → Pi の品質しか分からないので、
+    STM32 が数えた `stm_rx`（累積）と並べて出す。
+    """
+
+    health: str = "INIT"                   #: INIT / OK / DEGRADED / FAULT
+    #: E-Stop 発動中。**車両のボタン2を人間が押すまで解除されない**
+    estop_active: bool = False
+    #: 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない**
+    drive_power_locked: bool = False
+    #: io_node が `arm` を封印しているか（`--allow-arm` が無い状態）
+    arm_inhibited: bool = True
+    #: 直近に受理した `cmd` の発行元。誰も出していなければ ""
+    cmd_source: str = ""
+    #: `cmd` が途絶して DISARM にフォールバックしているか
+    cmd_stale: bool = True
+
+    rx: dict[str, int] = msgspec.field(default_factory=dict)      #: Pi 側 RxStats
+    stm_rx: dict[str, int] | None = None   #: STM32 の STATS（**累積値**）
+
+    #: STM32 ⇄ MD 間の受信数とエラー数 [RL, RR, ST]。**合計にしないこと。**
+    #: 合計にすると「1台だけ起動が遅れている」「1台だけ配線が悪い」が
+    #: 他の2台に埋もれて見えなくなる（2026-08-08 に実際に誤診した）
+    md_rx_count: list[int] | None = None
+    md_rx_error: list[int] | None = None
+    counts: dict[str, int] = msgspec.field(default_factory=dict)  #: TYPE 名 → 受信数
+
+    sync_offset_ns: int | None = None
+    sync_delay_ns: int | None = None       #: min filter 後の片道遅延
+    sync_drift_ppm: float | None = None
+    sync_n: int = 0
+
+    #: `COMMAND` を送ってから `cmd_seq_echo` で返るまで [ms]。**時刻同期に依存しない**
+    #: 純粋な往復測定。50ms を超えたら警告（`uart_protocol.md` §6.1）
+    cmd_rtt_ms: float | None = None
+
+    protocol_version: int | None = None
+    fw_id: int | None = None
+    protocol_match: bool | None = None
+
+    hb_alive: bool | None = None           #: GPIO6 ハートビートを出せているか
+    hb_max_late_ms: float | None = None
+    hb_stalls: int = 0
+
+    lidar_scans: int = 0
+    lidar_sectors_lost: int = 0
+
+
+class ImageRef(MsgBase):
+    """共有メモリ上の画像1枚への参照。**画素はバスに流さない**（§6.2）。
+
+    640×480×3 を 30Hz で msgpack に通すと 28MB/s のコピーが起きる。
+    下流は `FrameRing.attach(shm_name)` してゼロコピーで読む。
+    """
+
+    cam: str = ""                          #: "front" / "rear"
+    shm_name: str = ""                     #: 共有メモリ名（例 "surge_cam0"）
+    slot: int = 0
+    ring_seq: int = 0                      #: リングの write_seq。seqlock の検証に使う
+    frame_id: int = 0                      #: picamera2 の FrameCount
+    width: int = 0
+    height: int = 0
+    fmt: str = ""                          #: **メモリ上の実際のバイト順**（BGR888 等）
+    stride: int = 0
+    nbytes: int = 0
+
+
+class Heartbeat(MsgBase):
+    """ノードの生存申告。10Hz。`safety_node` が 300ms 途絶で FAULT にする。"""
+
+    node: str = ""
+    pid: int = 0
+    detail: str = ""
+
+
+#: トピック → 型。`Subscriber` がデコードに使う。
+#: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
+TOPIC_TYPES: dict[str, type[MsgBase]] = {
+    TOPIC_VEHICLE_STATE: VehicleState,
+    TOPIC_SCAN: Scan,
+    TOPIC_CMD: DriveCmd,
+    TOPIC_DIAG_LINK: LinkDiag,
+    TOPIC_IMAGE_FRONT: ImageRef,
+    TOPIC_IMAGE_REAR: ImageRef,
+}
+
+
+def type_for_topic(topic: str) -> type[MsgBase]:
+    """トピック名から型を引く。前方一致も見る（`image/` → `ImageRef`）。
+
+    :raises KeyError: 未登録のトピック。**黙って dict を返さない。**
+        型が分からないまま下流に流すと、フィールド名の typo が実行時まで残る
+    """
+    t = TOPIC_TYPES.get(topic)
+    if t is not None:
+        return t
+    if topic.startswith(TOPIC_HB_PREFIX):
+        return Heartbeat
+    if topic.startswith("image/"):
+        return ImageRef
+    raise KeyError(f"未登録のトピック: {topic!r}")

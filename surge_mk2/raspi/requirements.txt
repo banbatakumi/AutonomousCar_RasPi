@@ -10,12 +10,17 @@
 # ── Phase 0（通信基盤） ──
 pyserial==3.5          # UART 送受信
 
-# ── Phase 0 後半（内部バス・メッセージ）※ 使う段階で有効化 ──
-# pyzmq                # ZeroMQ PUB/SUB
-# msgspec              # 内部メッセージのシリアライズ
-# numpy                # 点群・占有格子
+# ── Phase 0 後半（内部バス・WebSocket） ──
+pyzmq                  # 内部バス（PUB/SUB）
+msgspec                # メッセージ定義とシリアライズ（内部 msgpack / WS も同じ形）
+websockets             # telemetry_node の WS サーバ。純 Python・依存なし
+numpy                  # 点群・占有格子・共有メモリ画像の view
 
-# ── Phase 1（カメラ・可視化）※ 使う段階で有効化 ──
+# JPEG エンコードは simplejpeg（picamera2 が同梱）を使い、無ければ Pillow に落ちる。
+# **Pi では picamera2 経由で入るので明示しない。** Mac でカメラ配信を試すときだけ:
+#   pip install pillow
+
+# ── Phase 1 以降 ※ 使う段階で有効化 ──
 # picamera2            # OS 同梱版を使う場合は --system-site-packages 側で解決
 # opencv-python-headless
-# mcap                 # ログ記録
+# mcap                 # ログ記録（.sfl からのオフライン変換で使う）
