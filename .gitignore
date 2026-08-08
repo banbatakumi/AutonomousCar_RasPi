@@ -14,6 +14,8 @@ web/dist/
 
 # 実行時生成物
 logs/*.jsonl
+*.sfl          # 生フレームログ（大きい・実行ごとに増える）
+*.mcap
 saved_maps/*.npz
 saved_maps/*.json
 
