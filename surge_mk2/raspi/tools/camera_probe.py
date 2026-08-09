@@ -61,6 +61,8 @@ class Probe:
                  fmt: str = "RGB888") -> None:
         from picamera2 import Picamera2
 
+        from raspi.nodes.camera_node import full_fov_sensor_size
+
         self.idx = idx
         self.cam = Picamera2(idx)
         ctrl = {}
@@ -68,8 +70,13 @@ class Probe:
             # フレーム時間の上下限を同じ値にして fps を固定する
             us = int(1e6 / fps)
             ctrl["FrameDurationLimits"] = (us, us)
-        cfg = self.cam.create_video_configuration(
-            main={"size": size, "format": fmt}, buffer_count=6, controls=ctrl)
+        # main の size に一致するセンサーネイティブモードが望遠クロップのことがある
+        # （camera_node.full_fov_sensor_size 参照）。フル画角のモードを明示する
+        sensor_size = full_fov_sensor_size(self.cam, size)
+        cfg_kwargs = {"main": {"size": size, "format": fmt}, "buffer_count": 6, "controls": ctrl}
+        if sensor_size:
+            cfg_kwargs["sensor"] = {"output_size": sensor_size}
+        cfg = self.cam.create_video_configuration(**cfg_kwargs)
         self.cam.configure(cfg)
         self.size = size
         self.fmt = fmt

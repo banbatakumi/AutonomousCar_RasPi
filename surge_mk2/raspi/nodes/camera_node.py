@@ -41,6 +41,12 @@ DEFAULT_SLOTS = 8
 #: カメラ番号 → バスのトピックと役割名。**取り付けを入れ替えたらここだけ直す**
 CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 
+#: カメラごとの下端カット率。前方はボンネット等が映り込む下1/4を、
+#: 後方は下1/16だけ軽く除去する。**ISP の ScalerCrop で最初から読み出し範囲を
+#: 絞るので、余分な画素は main ストリームに出てこない**（後段でスライスして
+#: 捨てるより、共有メモリ書き込み・下流の処理・帯域がその分だけ軽くなる）
+CAM_BOTTOM_CROP = {0: 0.25, 1: 1 / 16}
+
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの
 #: メモリ上では逆順になる。実測で確認済み: `format="RGB888"` で赤い物を撮ると
@@ -59,6 +65,49 @@ _MEMORY_ORDER = {
 def memory_format(libcamera_name: str) -> str:
     """libcamera の形式名 → メモリ上のバイト順の名前。"""
     return _MEMORY_ORDER.get(libcamera_name, libcamera_name)
+
+
+def full_fov_sensor_size(cam, main_size: tuple[int, int]) -> tuple[int, int] | None:
+    """`main_size` を満たすフル画角のセンサーモードのサイズを選ぶ。
+
+    **`main` の size だけ指定すると、picamera2 はそのサイズにちょうど一致する
+    センサーネイティブモードを選ぶことがある。** IMX219 では 640x480 モードが
+    センサー中央 1280x960 だけを切り出す望遠クロップで、フル画角 3280x2464 の
+    約39%しか写らない（実機で `ScalerCrop=(1000,752,1280,960)` と確認済み）。
+    `crop_limits` がセンサー全域と一致するモードだけを候補にし、要求解像度を
+    満たす最小のものを選ぶことで、ISP 側の縮小でフル画角を保つ。
+    """
+    full = tuple(cam.camera_properties.get("PixelArraySize", (0, 0)))
+    candidates = [m for m in cam.sensor_modes
+                  if tuple(m["crop_limits"][2:]) == full]
+    if not candidates:
+        return None
+    fits = [m for m in candidates
+            if m["size"][0] >= main_size[0] and m["size"][1] >= main_size[1]]
+    best = min(fits, key=lambda m: m["size"][0] * m["size"][1]) if fits \
+        else max(candidates, key=lambda m: m["size"][0] * m["size"][1])
+    return best["size"]
+
+
+def bottom_cropped(cam, size: tuple[int, int],
+                    fraction: float) -> tuple[tuple[int, int], tuple[int, int, int, int] | None]:
+    """下端を `fraction` だけ切った main size と ScalerCrop を返す。
+
+    **配列を受け取ってから下端をスライスするのではなく、ISP に最初から
+    小さい画を作らせる。** main size をその分小さくして ScalerCrop で
+    上側だけを選ぶので、共有メモリへの書き込み量・下流の処理・帯域が
+    そのぶん減る（CSI からのセンサー読み出し自体はセンサーモード次第で
+    変わらないので、そこは削れない）。
+    """
+    if not fraction:
+        return size, None
+    full = tuple(cam.camera_properties.get("PixelArraySize", (0, 0)))
+    if not all(full):
+        return size, None
+    fw, fh = full
+    keep_h = round(fh * (1 - fraction))
+    out_h = round(size[1] * (1 - fraction))
+    return (size[0], out_h), (0, 0, fw, keep_h)
 
 
 @dataclass(slots=True)
@@ -104,8 +153,14 @@ class CameraWorker(threading.Thread):
         if fps:
             us = int(1e6 / fps)
             ctrl["FrameDurationLimits"] = (us, us)
-        cfg = self.cam.create_video_configuration(
-            main={"size": size, "format": fmt}, buffer_count=6, controls=ctrl)
+        size, crop_rect = bottom_cropped(self.cam, size, CAM_BOTTOM_CROP.get(idx, 0.0))
+        if crop_rect:
+            ctrl["ScalerCrop"] = crop_rect
+        sensor_size = full_fov_sensor_size(self.cam, size)
+        cfg_kwargs = {"main": {"size": size, "format": fmt}, "buffer_count": 6, "controls": ctrl}
+        if sensor_size:
+            cfg_kwargs["sensor"] = {"output_size": sensor_size}
+        cfg = self.cam.create_video_configuration(**cfg_kwargs)
         self.cam.configure(cfg)
 
         # 実際に確定した幾何をリングに使う。要求と食い違うことがあるため
