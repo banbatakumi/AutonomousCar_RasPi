@@ -171,13 +171,21 @@ class DriveCmd(MsgBase):
 
     mode: int = 0                          #: 0=DISARM 1=MANUAL 2=AUTO
     arm: bool = False
+    #: 制動。**v0.5 では速度 PI を迂回して `brake_torque` を直接掛ける。**
+    #: 立てている間 `target_speed` は無視される
     brake: bool = False
-    horn: bool = False
-    light: bool = False
+    horn: bool = False                     #: **立てている間ずっと鳴る**（v0.4 は単発）
+    light_mode: int = 0                    #: 0=OFF 1=DAYTIME 2=NORMAL（`packets.LightMode`）
+    #: パッシング。立てている間 `light_mode` に関わらず前照灯だけが全光量になる
+    passing: bool = False
     target_speed: float = 0.0              #: [m/s] 負で後退
     target_steer: float = 0.0              #: 路面舵角 [rad] 反時計回り正
     accel_limit: float = 0.0               #: [m/s²] 0 は STM32 の既定に任せる意
     steer_rate_limit: float = 0.0          #: [rad/s]
+    #: 後輪**各輪**の制動トルク [N·m]。`brake` が立っているときだけ意味を持つ。
+    #: **0 は「制動しない」ではなく「未指定」で、STM32 が最大値で制動する**
+    #: （`accel_limit` と同じ約束。埋め忘れでブレーキが効かない方が危険なため）
+    brake_torque: float = 0.0
     source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
 
 

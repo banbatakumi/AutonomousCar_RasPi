@@ -1,13 +1,16 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.4（**確定・両者合意版**）
-**最終更新**: 2026-08-06
+**バージョン**: v0.5
+**最終更新**: 2026-08-09
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: STM32 側の「v0.4 合意版」を反映。**§14 の未実測項目を除き確定**
+**状態**: STM32 側 v0.5 実装済み。**§14 の未実測項目を除き確定**
 
-> **v0.4 は 2往復の議論を経て確定した。** 初回ドラフト（Pi 側が先に書いた v0.4）とは
-> `TELEMETRY` のフィールド順・`STATS` の形式・TYPE 0x14 の割り当てが異なる。
-> **本書が最終版**であり、`protocol_version = 0x0004` はこの内容を指す。
+> **v0.5 で変わったのは `COMMAND` (0x10) だけ**（LEN 10→**12**、`flags` のビット定義変更）。
+> `TELEMETRY` / `LIDAR_SECTOR` / `PING` / `CONFIG_*` / `VERSION` / `STATS` は v0.4 のまま。
+> **`COMMAND` の LEN が変わるため、Pi と STM32 の版数がずれている間は走行指令が一切通らない**
+> （受信側が LEN 不一致として破棄し `STATS.rx_len_error` に計上する）。
+> 中途半端に効くより完全に弾かれる方が安全なので、これは意図した破壊的変更である。
+> **本書が最終版**であり、`protocol_version = 0x0005` はこの内容を指す。
 
 ---
 
@@ -199,7 +202,7 @@ STM32 側は速度が必要なら 256エントリのテーブル駆動版に置�
 | `0x07` | `VERSION` | STM32 → Pi | 起動時×3 / 要求時 | **10** |
 | `0x08` | `STATS` | STM32 → Pi | 1 Hz | **48** |
 | `0x09` | `LIDAR_SECTOR_C` | STM32 → Pi | 120 Hz（圧縮・既定OFF） | **39** |
-| `0x10` | `COMMAND` | Pi → STM32 | 100 Hz | 10 |
+| `0x10` | `COMMAND` | Pi → STM32 | 100 Hz | **12**（v0.5 で 10→12） |
 | `0x11` | `CONFIG_SET` | Pi → STM32 | イベント | 6 |
 | `0x12` | `PING` | Pi → STM32 | 5 Hz | 4 |
 | `0x13` | `CONFIG_GET` | Pi → STM32 | イベント | **2** |
@@ -488,6 +491,12 @@ slip_front = wheel_speed[FL] * math.cos(steer_actual) - speed # 前輪は射影�
   **実測トルクは存在しない**（MD が返すのは `iq [mA]` のみで、トルク定数 Kt が未実測）。
   これは指令値であり実測値ではない、という点を GUI でも明示すること。
 
+- **符号は「正 = 駆動、負 = 制動」**（★v0.5 で明確化。レイアウトは変更なし）
+  ブレーキ中・停車保持中は掛けている制動トルクが**負値**で入る
+  （`brake_torque = 0.05 N·m` で制動中なら `-0.05`）。v0.4 は停車保持中に `0` を
+  入れていたため、押さえているのか何もしていないのか区別が付かなかった。
+  **「車両が自分で駆動している」判定には正値だけを使うこと。**
+
 - **スケールが 0.0001 N·m/LSB である理由**
   モータの最大トルクが 0.1557 N·m、ステアの上限が 0.1 N·m と**値域が極めて小さい**。
   0.001 N·m 刻みでは 156 段階しか無く分解能が足りない。
@@ -553,7 +562,7 @@ v0.3 の u16 では足りないため **u32 に拡張**した。
 | bit | 名称 | 意味 |
 |---|---|---|
 | 0-1 | `mode` | STM32 が**実際に採用している**モード（0=DISARM / 1=MANUAL / 2=AUTO / **3=予約**） |
-| 2 | `armed` | DRIVE_POWER 投入済み（モータ出力可能） |
+| 2 | `armed` | DRIVE_POWER 投入済み（モータ出力可能）。**v0.5 以降、起動から Pi が `arm` するまで一度も立たない**（v0.4 は Setup 中のステア原点読み込みで一瞬立った。ボタン1を押しながらの原点較正時を除く） |
 | 3 | `estop_active` | ハートビート断で発動中 |
 | 4 | `uart_timeout` | `COMMAND` 途絶で自動ブレーキ中 |
 | 5 | `tc_active` | **トラクションコントロールが今まさに介入中** |
@@ -601,20 +610,57 @@ MD が死んで無言になると status は最後の値のまま固まるため
 
 Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウトし、FAULT へ遷移する。
 
-### 5.6 `COMMAND` (0x10) — LEN = 10
+### 5.6 `COMMAND` (0x10) — LEN = 12
 
 | offset | size | type | field | 単位 |
 |---|---|---|---|---|
 | 0 | 1 | u8 | `mode` | 0=DISARM / 1=MANUAL / 2=AUTO（**3 は予約・送らない**） |
-| 1 | 1 | u8 | `flags` | bit0=`arm`, bit1=`brake`, bit2=`horn`, bit3=`light` |
-| 2 | 2 | i16 | `target_speed` | 0.001 m/s（負 = 後退） |
+| 1 | 1 | u8 | `flags` | §5.6.1 |
+| 2 | 2 | i16 | `target_speed` | 0.001 m/s（負 = 後退）**`brake` 中は無視される** |
 | 4 | 2 | i16 | `target_steer` | 0.0001 rad **路面舵角**（反時計回り正 = 左旋回） |
 | 6 | 2 | u16 | `accel_limit` | 0.001 m/s²（加減速のレートリミット） |
 | 8 | 2 | u16 | `steer_rate_limit` | 0.001 rad/s（舵角のレートリミット） |
+| 10 | 2 | u16 | `brake_torque` | 0.0001 N·m **後輪各輪**。`0` = 未指定（最大で制動）★v0.5 |
 
-**合計 10 バイト**
+**合計 12 バイト**（フレーム 19 バイト、100Hz で 1.90 kB/s）
 
 時刻同期は `PING` / `PONG` に分離したため、`COMMAND` に Pi 側タイムスタンプは含めない。
+
+#### 5.6.1 `flags` (u8) ビット定義
+
+| bit | 名称 | 意味 |
+|---|---|---|
+| 0 | `arm` | 駆動電源投入を要求 |
+| 1 | `brake` | ブレーキを掛ける（強さは `brake_torque`） |
+| 2 | `horn` | クラクション。**立てている間ずっと鳴る**（v0.5 で変更） |
+| 3-4 | `light_mode` | 0=`OFF` / 1=`DAYTIME` / 2=`NORMAL`（3 は予約・送らない） |
+| 5 | `passing` | パッシング |
+| 6-7 | — | 予約（0 を入れること） |
+
+| `light_mode` | 前照灯 | 尾灯 |
+|---|---|---|
+| 0 `OFF` | 消灯 | 消灯 |
+| 1 `DAYTIME` | 減光（duty 0.1） | 薄点灯（duty 0.1） |
+| 2 `NORMAL` | 全光量 | 薄点灯（duty 0.1） |
+
+- ブレーキランプは `light_mode` と独立で、**`brake` が立っている間は尾灯が全光量**になる。
+- `passing` は立てている間、`light_mode` に関わらず**前照灯だけ**が全光量になる。
+  **尾灯は連動しない**（消灯状態でのパッシングが後続車から制動と紛らわしくなるため）。
+  離せば `light_mode` の状態へ戻る（モードは STM32 側で保持されている）。
+- 緊急停止発動時と `COMMAND` 途絶時は、`horn` と `passing` が STM32 側で強制解除される。
+
+#### 5.6.2 `brake_torque` の約束（★v0.5）
+
+- **`0` は「制動トルク 0」ではなく「未指定」**で、STM32 側の最大値で制動する。
+  `accel_limit` / `steer_rate_limit` と同じ約束であり、**フィールドの埋め忘れで
+  ブレーキが効かなくなる方が危険**なのでゼロ値を安全側に倒してある。
+  Pi 側は正の指定が丸めで 0 に落ちないよう最小 1 LSB に留める（`msgs/convert.py`）。
+- STM32 側の上限は **0.075 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM`）。超えた値は
+  黙ってクランプされるので、Pi 側でも同じ上限を持つ（`msgs.MAX_BRAKE_TORQUE_NM`）。
+- **`brake` が立っている間、車速 PI ループは完全に迂回される。** v0.4 は「目標車速を 0 に
+  する」だけで実際の制動力は PI ゲイン任せだったが、v0.5 は MD を制動モードに切り替えて
+  指定トルクを直接掛ける。離すと目標車速 0 から `accel_limit` に従って加速し直すので、
+  ブレーキ中に `target_speed` を保持し続けても離した瞬間に飛び出すことはない。
 
 #### 設計意図
 
@@ -635,6 +681,9 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **`COMMAND` が 100ms 途絶したら STM32 は自動ブレーキ。**（v0.3 の 200ms から短縮）
   100Hz 送信に対して 200ms は 20発の取りこぼしを許すことになり緩すぎる。
   3 m/s なら 60cm 進んでからブレーキがかかる計算になる。100ms（10発）とする。
+  **v0.5 では緊急停止時・途絶時とも最大制動トルク（0.075 N·m/輪）を直接掛ける**
+  （v0.4 は「目標車速 0」を与えるだけで減速は速度 PI 任せだった）。**停止距離が短くなる。**
+  舵角は最後の指令値のまま保持される（直進に戻すと車体が予期しない方向へ動くため）。
 
 ### 5.7 `PING` (0x12) — LEN = 4 / `PONG` (0x06) — LEN = 12
 
@@ -761,7 +810,7 @@ Pi 側は ack が 500ms 以内に返らなければ再送する（最大3回、�
 
 | offset | size | type | field | 備考 |
 |---|---|---|---|---|
-| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。**v0.4 = `0x0004`** |
+| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。**v0.5 = `0x0005`** |
 | 2 | 4 | u32 | `fw_id` | ファームの git short hash 等 |
 | 6 | 4 | u32 | `build_epoch` | ビルド時刻（UNIX epoch 秒） |
 
@@ -1079,7 +1128,7 @@ GUI でも赤（層1-3）と黄（層4）で明確に分けること。
 
 | パケット | フレーム長 | 頻度 | 帯域 |
 |---|---|---|---|
-| `COMMAND` (0x10) | 17 B | 100 Hz | 1.70 kB/s（7%） |
+| `COMMAND` (0x10) | 19 B | 100 Hz | 1.90 kB/s（8%） |
 | `PING` (0x12) | 11 B | 5 Hz | 0.06 kB/s |
 | `CONFIG_SET` / `CONFIG_GET` / `VERSION_REQ` | — | 散発 | < 0.1 kB/s |
 
@@ -1168,7 +1217,7 @@ LIDAR_C_FMT = "<BIHH30B"        # LIDAR_SECTOR_C 39 B
 STATS_FMT   = "<12I"            # STATS          48 B
 VERSION_FMT = "<HII"            # VERSION        10 B
 PONG_FMT    = "<3I"             # PONG           12 B
-CMD_FMT     = "<BBhhHH"         # COMMAND        10 B
+CMD_FMT     = "<BBhhHHH"        # COMMAND        12 B
 CFG_ACK_FMT = "<HfB"            # CONFIG_ACK      7 B
 
 assert struct.calcsize(TELEM_FMT) == 66
@@ -1256,6 +1305,7 @@ STM32 側の作業を待たずに Pi 側で採寸して `vehicle.yaml` に入れ
 | v0.2 | 2026-08-06 | 車両構成の確定を反映。`motor_current[2]→[3]`、`temp[4]` の対象を確定、`odom_ticks` を左右2本化。`TELEMETRY` LEN 47→53 |
 | v0.3 | 2026-08-06 | 時刻同期を `PING`/`PONG` の4タイムスタンプ方式に分離（`PONG` 0x06 を追加）。`COMMAND` から `t_pi_us` を削除し LEN 14→10。`flags` に `calib_running`/`calib_done` を追加 |
 | **v0.4** | 2026-08-06 | **STM32 側と2往復の議論を経て確定。** `TELEMETRY` を全面改訂（LEN 53→**66**）: 電源2系統化、`odom_ticks` → `wheel_speed[4]` + `odom_dist[2]`、`torque_cmd` / `accel_z` / `md_status[3]` を追加、電圧・電流・超音波を1バイト化、`flags` を u32 に拡張し `mode` を bit0-1 へ移動。`LIDAR_SECTOR` の `angle_start`/`angle_step` を `duration_us`/`rot_speed_dps` に置換、ビニングを min → 代表点に変更。**`VERSION`(0x07) / `STATS`(0x08) / `LIDAR_SECTOR_C`(0x09) / `CONFIG_GET`(0x13) / `VERSION_REQ`(0x14) を追加**、`LOG` に `severity` を追加。`param 0x0040` を LiDAR 出力フォーマットの enum に変更（`0x0041` 廃止）。`COMMAND` タイムアウト 200→100ms、`TELEMETRY` 途絶を 100/200ms の2段階に。**CALIB モード廃止**（`mode=3` は予約、`calib_done` → `steer_center_valid` に改名）。`CONFIG_SET` は揮発（Flash 保存なし）。前輪オドメトリの射影（§5.3）を明記 |
+| **v0.5** | 2026-08-09 | **STM32 側発。`COMMAND` (0x10) のみの変更。** LEN 10→**12**、末尾に `brake_torque : u16`（0.0001 N·m/輪、`0` = 未指定 = 最大制動）を追加。`flags` bit3 の1ビット `light` を bit3-4 の2ビット `light_mode`（OFF/DAYTIME/NORMAL）へ拡張し、**`light=1`（旧 NORMAL）と `light_mode=1`（DAYTIME）で値の意味が変わった**。bit5 `passing` を新設。`horn` を単発ビープから「立てている間ずっと鳴る」に変更。`brake` 中は車速 PI を迂回して指定トルクを直接掛ける（`target_speed` は無視）。緊急停止・`COMMAND` 途絶時の制動を最大トルクに変更。起動時に駆動電源が一瞬 ON になる問題を修正（`armed` の観測が変わる）。`torque_cmd` の符号を「正=駆動 / 負=制動」と明確化（レイアウト変更なし） |
 | v0.4 | 2026-08-07 | **記述誤りの訂正のみ（ワイヤ形式・`protocol_version` とも変更なし）。** `LIDAR_SECTOR` / `LIDAR_SECTOR_I` / `LIDAR_SECTOR_C` の `rot_speed_dps` のスケールを `0.01 deg/s` → **`1 deg/s`**（§5.1 参照）。u16×0.01 では実回転 3600 deg/s を表現できず、実機ログで生値がそのまま deg/s であることを確認した。**STM32 側の変更は不要** |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）

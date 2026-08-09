@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x0004
+PROTOCOL_VERSION = 0x0005
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -40,17 +40,25 @@ MDS_OVERCURRENT = 0x08
 MDS_COMM_OK = 0x10
 MDS_LIMIT_SYNCED = 0x20
 
-# COMMAND.flags (u8)
+# COMMAND.flags (u8)。light_mode は bit3-4 の2ビット幅 = (mode << LIGHT_SHIFT) & LIGHT_MASK
 CMD_FLG_ARM = 0x01
 CMD_FLG_BRAKE = 0x02
 CMD_FLG_HORN = 0x04
-CMD_FLG_LIGHT = 0x08
+CMD_FLG_LIGHT_MASK = 0x18
+CMD_FLG_LIGHT_SHIFT = 0x03
+CMD_FLG_PASSING = 0x20
 
 class Mode:
     """COMMAND.mode / TELEMETRY.flags bit0-1"""
     DISARM = 0
     MANUAL = 1
     AUTO = 2
+
+class LightMode:
+    """COMMAND.flags bit3-4。**v0.4 の light=1 は NORMAL だったが v0.5 の 1 は DAYTIME**"""
+    OFF = 0
+    DAYTIME = 1
+    NORMAL = 2
 
 class LogSeverity:
     DEBUG = 0
@@ -361,7 +369,7 @@ class LidarSectorC:
         return _S_LIDAR_SECTOR_C.pack(self.sector_idx, self.t_start_us, self.duration_us, self.rot_speed_dps, *self.dist)
 
 
-_S_COMMAND = struct.Struct('<2B2h2H')
+_S_COMMAND = struct.Struct('<2B2h3H')
 
 
 @dataclass(slots=True)
@@ -371,25 +379,26 @@ class Command:
     TYPE: ClassVar[int] = 0x10
     NAME: ClassVar[str] = 'COMMAND'
     DIR: ClassVar[str] = 'p2s'
-    LEN: ClassVar[int | None] = 10
-    FMT: ClassVar[str] = '<2B2h2H'
+    LEN: ClassVar[int | None] = 12
+    FMT: ClassVar[str] = '<2B2h3H'
     RATE_HZ: ClassVar[float] = 100
-    META: ClassVar[dict] = {'target_speed': (0.001, 'm/s'), 'target_steer': (0.0001, 'rad'), 'accel_limit': (0.001, 'm/s2'), 'steer_rate_limit': (0.001, 'rad/s')}
+    META: ClassVar[dict] = {'target_speed': (0.001, 'm/s'), 'target_steer': (0.0001, 'rad'), 'accel_limit': (0.001, 'm/s2'), 'steer_rate_limit': (0.001, 'rad/s'), 'brake_torque': (0.0001, 'N.m')}
 
     mode: int = 0  # 0=DISARM 1=MANUAL 2=AUTO (3=予約)
-    flags: int = 0  # bit0=arm bit1=brake bit2=horn bit3=light
+    flags: int = 0  # bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing
     target_speed: int = 0
     target_steer: int = 0  # 路面舵角
     accel_limit: int = 0
     steer_rate_limit: int = 0
+    brake_torque: int = 0  # 後輪各輪。0=未指定(最大で制動)
 
     @classmethod
     def decode(cls, payload: bytes) -> 'Command':
         v = _S_COMMAND.unpack(payload)
-        return cls(mode=v[0], flags=v[1], target_speed=v[2], target_steer=v[3], accel_limit=v[4], steer_rate_limit=v[5])
+        return cls(mode=v[0], flags=v[1], target_speed=v[2], target_steer=v[3], accel_limit=v[4], steer_rate_limit=v[5], brake_torque=v[6])
 
     def encode(self) -> bytes:
-        return _S_COMMAND.pack(self.mode, self.flags, self.target_speed, self.target_steer, self.accel_limit, self.steer_rate_limit)
+        return _S_COMMAND.pack(self.mode, self.flags, self.target_speed, self.target_steer, self.accel_limit, self.steer_rate_limit, self.brake_torque)
 
 
 _S_CONFIG_SET = struct.Struct('<Hf')

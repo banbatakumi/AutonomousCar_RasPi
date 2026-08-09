@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.3（`uart_protocol.md` **v0.4 確定版**に対応）
+**バージョン**: v0.4（`uart_protocol.md` **v0.5** に対応）
 **最終更新**: 2026-08-06
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
@@ -226,7 +226,7 @@ bool frame_send(uint8_t type, const void *payload, uint8_t len)
 #define PKT_LIDAR_SECTOR_C  0x09   /* LEN = 39 （圧縮・既定OFF）★v0.4 追加  */
 
 /* Pi → STM32 */
-#define PKT_COMMAND         0x10   /* LEN = 10                              */
+#define PKT_COMMAND         0x10   /* LEN = 12  ★v0.5 で 10→12             */
 #define PKT_CONFIG_SET      0x11   /* LEN = 6                               */
 #define PKT_PING            0x12   /* LEN = 4                               */
 #define PKT_CONFIG_GET      0x13   /* LEN = 2   ★v0.4 追加                  */
@@ -412,7 +412,7 @@ typedef struct {
 
 ```c
 typedef struct {
-    uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。v0.4 → 0x0004 */
+    uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。v0.5 → 0x0005 */
     uint32_t fw_id;             /* git short hash 等                        */
     uint32_t build_epoch;       /* ビルド時刻（UNIX epoch 秒）               */
 } version_t;                    /* = 10 bytes */
@@ -488,18 +488,30 @@ typedef struct {
 
 ### 4.4 受信するパケット
 
-#### `COMMAND` (0x10) — 10 バイト
+#### `COMMAND` (0x10) — 12 バイト ★v0.5 で 10→12
 
 ```c
 typedef struct {
     uint8_t  mode;              /* 0=DISARM 1=MANUAL 2=AUTO （3 は予約・来ない） */
-    uint8_t  flags;             /* bit0=arm bit1=brake bit2=horn bit3=light      */
-    int16_t  target_speed;      /* 0.001 m/s  （負 = 後退）                      */
+    uint8_t  flags;             /* 下表 ★v0.5 でビット定義変更                   */
+    int16_t  target_speed;      /* 0.001 m/s  （負 = 後退）★brake 中は無視       */
     int16_t  target_steer;      /* 0.0001 rad ★路面舵角（反時計回り正 = 左）     */
     uint16_t accel_limit;       /* 0.001 m/s²                                    */
     uint16_t steer_rate_limit;  /* 0.001 rad/s                                   */
-} command_t;                    /* = 10 bytes */
+    uint16_t brake_torque;      /* 0.0001 N·m 後輪各輪。0=未指定(最大) ★v0.5     */
+} command_t;                    /* = 12 bytes */
 ```
+
+`flags` (u8):
+
+| bit | 名称 | 意味 |
+|---|---|---|
+| 0 | `arm` | 駆動電源投入を要求 |
+| 1 | `brake` | ブレーキ（強さは `brake_torque`） |
+| 2 | `horn` | クラクション。**立てている間ずっと鳴る** |
+| 3-4 | `light_mode` | 0=OFF / 1=DAYTIME / 2=NORMAL（3 は予約・Pi は送らない） |
+| 5 | `passing` | パッシング（前照灯のみ全光量。尾灯は連動しない） |
+| 6-7 | — | 予約（Pi は 0 を入れる） |
 
 - `target_speed` は**目標速度**であり目標加速度ではない。`accel_limit` は
   「その目標速度へ向かうときの加減速の上限」
@@ -507,7 +519,10 @@ typedef struct {
 - **`mode` は Pi 側の要求であり、STM32 は拒否できる。** 実際に採用したモードは
   `TELEMETRY.flags` **bit0-1** で返す（v0.3 の bit8-9 から移動）
 - `steer_rate_limit` は角度制御ループの追従限界を超える指令によるオーバーシュート・発振を防ぐ
-- **`COMMAND` が 100ms 途絶したら自動ブレーキ**（v0.3 の 200ms から短縮。§8.2）
+- **`brake` 中は車速 PI を迂回し、`brake_torque` を直接掛ける**（★v0.5）。
+  `brake_torque = 0` は「制動 0」ではなく「未指定 = 最大制動」。上限 0.075 N·m/輪
+- **`COMMAND` が 100ms 途絶したら自動ブレーキ**（v0.3 の 200ms から短縮。§8.2）。
+  ★v0.5 では最大制動トルクを直接掛け、`horn` と `passing` は強制解除する
 
 #### `CONFIG_SET` (0x11) — 6 バイト / `CONFIG_GET` (0x13) — 2 バイト
 
@@ -706,7 +721,7 @@ __HAL_DMA_DISABLE_IT(&hdma_rx, DMA_IT_HT);   /* Half-Transfer 割り込みは不
 
 | TYPE | 期待 LEN |
 |---|---|
-| `0x10` `COMMAND` | 10 |
+| `0x10` `COMMAND` | 12 |
 | `0x11` `CONFIG_SET` | 6 |
 | `0x12` `PING` | 4 |
 | `0x13` `CONFIG_GET` | 2 |
@@ -1377,4 +1392,5 @@ LD06 を接続。Pi 側で 360点を極座標プロットし、**部屋の形が
 |---|---|---|
 | v0.1 | 2026-08-06 | 初版。`uart_protocol.md` v0.3 に対応 |
 | v0.2 | 2026-08-06 | `uart_protocol.md` v0.4 ドラフトに対応。**確定版で覆された箇所があるため破棄** |
-| **v0.3** | 2026-08-06 | **`uart_protocol.md` v0.4 確定版に対応。** `TELEMETRY` を全面改訂（53→66B、電源2系統・`wheel_speed[4]`・`odom_dist[2]`・`accel_z`・`torque_cmd`・`md_status[3]`）し、**フィールド順を `wheel_speed`→`odom_dist`→`accel` に確定**。`flags` を u32 化し `mode` を bit0-1 へ移動、bit9 を予約・bit10 を `steer_center_valid` に改名。`LIDAR_SECTOR` の `angle_start`/`angle_step` を `duration_us`/`rot_speed_dps` に置換、ビニングを代表点方式に変更。`VERSION`(0x07)/`STATS`(0x08、**累積 u32・LEN 48**)/`LIDAR_SECTOR_C`(0x09)/`CONFIG_GET`(0x13)/**`VERSION_REQ`(0x14)** を追加。`LOG` に `severity` 追加。`param 0x0040` を **enum 化**（`0x0041` 廃止）。`COMMAND` タイムアウト 200→100ms。`CALIB` モード廃止。ハートビートを PB12 ポーリング方式に。**`CONFIG_SAVE` は不採用**、制御パラメータは揮発。時刻同期の T2/T3 取得タイミングを厳密化。`speed` の車体中心線射影を STM32 の責務として明記 |
+| **v0.4** | 2026-08-09 | **`uart_protocol.md` v0.5 に対応（STM32 側実装済みの内容を反映）。** `COMMAND` を 10→**12** バイトに拡張し `brake_torque : u16` を追加。`flags` bit3 の1ビット `light` を bit3-4 の2ビット `light_mode`（OFF/DAYTIME/NORMAL）へ、bit5 に `passing` を新設。`horn` を「立てている間ずっと鳴る」に変更。`brake` 中は車速 PI を迂回して指定トルクを直接掛ける。緊急停止・`COMMAND` 途絶時は最大制動トルク。起動時に駆動電源が一瞬 ON になる問題を修正。`torque_cmd` の符号を「正=駆動 / 負=制動」と明確化 |
+| v0.3 | 2026-08-06 | **`uart_protocol.md` v0.4 確定版に対応。** `TELEMETRY` を全面改訂（53→66B、電源2系統・`wheel_speed[4]`・`odom_dist[2]`・`accel_z`・`torque_cmd`・`md_status[3]`）し、**フィールド順を `wheel_speed`→`odom_dist`→`accel` に確定**。`flags` を u32 化し `mode` を bit0-1 へ移動、bit9 を予約・bit10 を `steer_center_valid` に改名。`LIDAR_SECTOR` の `angle_start`/`angle_step` を `duration_us`/`rot_speed_dps` に置換、ビニングを代表点方式に変更。`VERSION`(0x07)/`STATS`(0x08、**累積 u32・LEN 48**)/`LIDAR_SECTOR_C`(0x09)/`CONFIG_GET`(0x13)/**`VERSION_REQ`(0x14)** を追加。`LOG` に `severity` 追加。`param 0x0040` を **enum 化**（`0x0041` 廃止）。`COMMAND` タイムアウト 200→100ms。`CALIB` モード廃止。ハートビートを PB12 ポーリング方式に。**`CONFIG_SAVE` は不採用**、制御パラメータは揮発。時刻同期の T2/T3 取得タイミングを厳密化。`speed` の車体中心線射影を STM32 の責務として明記 |

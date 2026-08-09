@@ -252,11 +252,15 @@ class TelemetryServer:
                 arm=bool(m.get("arm", False)),
                 brake=bool(m.get("brake", False)),
                 horn=bool(m.get("horn", False)),
-                light=bool(m.get("light", False)),
+                light_mode=int(m.get("light_mode", 0)),
+                passing=bool(m.get("passing", False)),
                 target_speed=float(m.get("speed", 0.0)),
                 target_steer=float(m.get("steer", 0.0)),
                 accel_limit=float(m.get("accel_limit", 0.0)),
                 steer_rate_limit=float(m.get("steer_rate_limit", 0.0)),
+                # **既定は 0 = 未指定 = STM32 の最大制動。** 古い GUI が繋がって
+                # このキーを送ってこなくても、ブレーキが弱くなる方には転ばない
+                brake_torque=float(m.get("brake_torque", 0.0)),
                 source=f"gui:{self.controller_name}")
             self._last_cmd_ns = time.monotonic_ns()
 

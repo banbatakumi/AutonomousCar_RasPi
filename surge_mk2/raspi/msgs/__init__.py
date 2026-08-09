@@ -8,6 +8,7 @@ from .convert import (
     DISARM_COMMAND,
     FAULT_FLAGS,
     LIDAR_C_SATURATED_M,
+    MAX_BRAKE_TORQUE_NM,
     SPEED_DEADBAND_MPS,
     ScanAssembler,
     StateBuilder,
@@ -41,4 +42,5 @@ __all__ = [
     "TOPIC_TYPES", "type_for_topic",
     "StateBuilder", "ScanAssembler", "decode_flags", "command_from_cmd",
     "DISARM_COMMAND", "FAULT_FLAGS", "SPEED_DEADBAND_MPS", "LIDAR_C_SATURATED_M",
+    "MAX_BRAKE_TORQUE_NM",
 ]

@@ -262,7 +262,7 @@ class IoNode:
         self.link.send(packets.Command(
             mode=packets.Mode.DISARM, flags=0,
             target_speed=0, target_steer=0,
-            accel_limit=0, steer_rate_limit=0))
+            accel_limit=0, steer_rate_limit=0, brake_torque=0))
 
     def _recv_cmd(self, now_ns: int) -> None:
         """バスから走行指令を取り込み、古くなっていないかを判定する。"""

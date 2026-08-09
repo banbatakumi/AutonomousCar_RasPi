@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.msgs import (  # noqa: E402
+    MAX_BRAKE_TORQUE_NM,
     SPEED_DEADBAND_MPS,
     DriveCmd,
     ScanAssembler,
@@ -272,6 +273,43 @@ class TestCommandGate(unittest.TestCase):
     def test_reserved_mode_3_is_never_sent(self):
         c = command_from_cmd(DriveCmd(mode=3), allow_arm=True)
         self.assertEqual(c.mode, packets.Mode.DISARM)
+
+
+class TestCommandAuxiliaries(unittest.TestCase):
+    """v0.5 で増えた灯火・パッシング・制動トルク。**値の意味が変わった箇所**を押さえる。"""
+
+    def _cmd(self, **kw) -> packets.Command:
+        return command_from_cmd(DriveCmd(mode=1, arm=True, **kw), allow_arm=True)
+
+    def test_light_mode_occupies_bit3_4(self):
+        for mode, want in ((0, 0x00), (1, 0x08), (2, 0x10)):
+            with self.subTest(light_mode=mode):
+                c = self._cmd(light_mode=mode)
+                self.assertEqual(c.flags & packets.CMD_FLG_LIGHT_MASK, want)
+
+    def test_reserved_light_mode_3_is_never_sent(self):
+        """3 を受けた STM32 は NORMAL 扱いにする。**予約値に寄りかからない。**"""
+        self.assertEqual(self._cmd(light_mode=3).flags & packets.CMD_FLG_LIGHT_MASK, 0)
+
+    def test_passing_is_independent_of_light_mode(self):
+        c = self._cmd(light_mode=0, passing=True)
+        self.assertTrue(c.flags & packets.CMD_FLG_PASSING)
+        self.assertEqual(c.flags & packets.CMD_FLG_LIGHT_MASK, 0)
+
+    def test_brake_torque_scale(self):
+        self.assertEqual(self._cmd(brake_torque=0.05).brake_torque, 500)
+
+    def test_brake_torque_zero_means_unspecified(self):
+        self.assertEqual(self._cmd(brake_torque=0.0).brake_torque, 0)
+
+    def test_tiny_brake_torque_never_rounds_to_unspecified(self):
+        """**0 は最大制動を意味する。** 弱い指定が丸めで 0 になると挙動が正反対になる。"""
+        self.assertEqual(self._cmd(brake_torque=1e-9).brake_torque, 1)
+
+    def test_brake_torque_clamped_to_stm32_maximum(self):
+        c = self._cmd(brake_torque=10.0)
+        self.assertEqual(c.brake_torque, round(MAX_BRAKE_TORQUE_NM / 1e-4))
+        c.encode()                       # 例外が出ないこと
 
 
 class TestTopicRegistry(unittest.TestCase):

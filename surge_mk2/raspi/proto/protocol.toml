@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0004      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0005      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -187,15 +187,16 @@ fields = [
 name = "COMMAND"
 type = 0x10
 dir = "p2s"
-len = 10
+len = 12
 rate_hz = 100
 fields = [
   { name = "mode",             type = "u8", note = "0=DISARM 1=MANUAL 2=AUTO (3=予約)" },
-  { name = "flags",            type = "u8", note = "bit0=arm bit1=brake bit2=horn bit3=light" },
+  { name = "flags",            type = "u8", note = "bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing" },
   { name = "target_speed",     type = "i16", scale = 0.001,  unit = "m/s" },
   { name = "target_steer",     type = "i16", scale = 0.0001, unit = "rad", note = "路面舵角" },
   { name = "accel_limit",      type = "u16", scale = 0.001,  unit = "m/s2" },
   { name = "steer_rate_limit", type = "u16", scale = 0.001,  unit = "rad/s" },
+  { name = "brake_torque",     type = "u16", scale = 0.0001, unit = "N.m", note = "後輪各輪。0=未指定(最大で制動)" },
 ]
 
 [[packets]]
@@ -268,17 +269,25 @@ COMM_OK          = 0x10
 LIMIT_SYNCED     = 0x20
 
 [bits.CMD_FLG]
-comment = "COMMAND.flags (u8)"
-ARM   = 0x01
-BRAKE = 0x02
-HORN  = 0x04
-LIGHT = 0x08
+comment = "COMMAND.flags (u8)。light_mode は bit3-4 の2ビット幅 = (mode << LIGHT_SHIFT) & LIGHT_MASK"
+ARM         = 0x01
+BRAKE       = 0x02
+HORN        = 0x04   # v0.5: 立てている間ずっと鳴る（v0.4 は立ち上がりで単発）
+LIGHT_MASK  = 0x18   # bit3-4 = LIGHT_MODE_*
+LIGHT_SHIFT = 0x03   # マスクではなくシフト量
+PASSING     = 0x20
 
 [enums.MODE]
 comment = "COMMAND.mode / TELEMETRY.flags bit0-1"
 DISARM = 0
 MANUAL = 1
 AUTO   = 2
+
+[enums.LIGHT_MODE]
+comment = "COMMAND.flags bit3-4。**v0.4 の light=1 は NORMAL だったが v0.5 の 1 は DAYTIME**"
+OFF     = 0
+DAYTIME = 1
+NORMAL  = 2
 
 [enums.LOG_SEVERITY]
 DEBUG = 0

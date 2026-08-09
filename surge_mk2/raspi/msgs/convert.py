@@ -23,7 +23,8 @@ from ..proto import packets
 from .types import DriveCmd, Scan, VehicleState
 
 __all__ = ["StateBuilder", "ScanAssembler", "SPEED_DEADBAND_MPS",
-           "decode_flags", "FAULT_FLAGS", "command_from_cmd", "DISARM_COMMAND"]
+           "decode_flags", "FAULT_FLAGS", "command_from_cmd", "DISARM_COMMAND",
+           "MAX_BRAKE_TORQUE_NM"]
 
 # ── スケール（uart_protocol.md §5.3。protocol.toml の META と一致させること） ──
 _SPEED = 1e-3          # m/s
@@ -52,6 +53,11 @@ LIDAR_C_SATURATED_M = 255 * _LIDAR_C
 SPEED_DEADBAND_MPS = 0.05
 
 _I32_SPAN = 1 << 32
+
+#: 後輪1輪あたりの制動トルクの上限 [N·m]（STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM`）。
+#: **STM32 側でもクランプされるが、GUI のスライダ上限をここから引くために持つ。**
+#: 超えた値を送ると黙って丸められ、「スライダを上げても効きが変わらない」に見える
+MAX_BRAKE_TORQUE_NM = 0.075
 
 #: 立っていたら名前で持ち回る fault。ビットのまま流すと GUI 側で意味を再定義する羽目になる
 FAULT_FLAGS = {
@@ -183,7 +189,8 @@ def _clamp(v: float, lo: int, hi: int) -> int:
 #: 何を送ればよいか分からないときに送るもの。**停止が既定値。**
 DISARM_COMMAND = packets.Command(
     mode=packets.Mode.DISARM, flags=0,
-    target_speed=0, target_steer=0, accel_limit=0, steer_rate_limit=0)
+    target_speed=0, target_steer=0, accel_limit=0, steer_rate_limit=0,
+    brake_torque=0)
 
 
 def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
@@ -214,8 +221,12 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         flags |= packets.CMD_FLG_BRAKE
     if cmd.horn:
         flags |= packets.CMD_FLG_HORN
-    if cmd.light:
-        flags |= packets.CMD_FLG_LIGHT
+    if cmd.passing:
+        flags |= packets.CMD_FLG_PASSING
+    # bit3-4 の2ビット。**3 は予約なので送らない**（STM32 は NORMAL として扱うが、
+    # 「予約値を送っておいて向こうの解釈に頼る」形にはしない）
+    light = cmd.light_mode if cmd.light_mode in (0, 1, 2) else 0
+    flags |= (light << packets.CMD_FLG_LIGHT_SHIFT) & packets.CMD_FLG_LIGHT_MASK
 
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0
@@ -225,7 +236,21 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         target_steer=_clamp(steer / _ANGLE, -32768, 32767),
         accel_limit=_clamp(cmd.accel_limit / _SPEED, 0, 65535),
         steer_rate_limit=_clamp(cmd.steer_rate_limit / _YAW_RATE, 0, 65535),
+        brake_torque=_brake_torque_raw(cmd.brake_torque),
     )
+
+
+def _brake_torque_raw(nm: float) -> int:
+    """[N·m] → `brake_torque` の生値。**0 は「未指定＝最大制動」を意味する。**
+
+    そのため、正の値が丸めで 0 に落ちるのを禁じる（最小 1 LSB = 0.0001 N·m に留める）。
+    これをやらないと「スライダを最弱にしたら最大制動になった」という、
+    操作と挙動が正反対になる壊れ方をする。上限は STM32 でもクランプされるが、
+    **どこで頭打ちになったか分からなくなる**ので Pi 側でも掛けておく。
+    """
+    if nm <= 0.0:
+        return 0
+    return _clamp(min(nm, MAX_BRAKE_TORQUE_NM) / _TORQUE, 1, 65535)
 
 
 class ScanAssembler:

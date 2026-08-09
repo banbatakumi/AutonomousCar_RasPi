@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.msgs import LinkDiag, Scan, VehicleState  # noqa: E402
+from raspi.proto.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -229,7 +230,7 @@ def main() -> int:
                 sync_offset_ns=-1_234_567, sync_delay_ns=180_000,
                 sync_drift_ppm=-12.4, sync_n=50,
                 cmd_rtt_ms=11.0 + random.gauss(0, 1.5),
-                protocol_version=0x0004, fw_id=0xDEADBEEF, protocol_match=True,
+                protocol_version=PROTOCOL_VERSION, fw_id=0xDEADBEEF, protocol_match=True,
                 hb_alive=True, hb_max_late_ms=0.46, hb_stalls=0,
                 lidar_scans=n_scan, lidar_sectors_lost=n_scan // 7))
             next_diag = now + 1.0 / DIAG_HZ
