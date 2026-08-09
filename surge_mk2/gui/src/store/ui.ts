@@ -15,9 +15,9 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider'
  * GUI が「0.33 m/s 出している」と表示しているのに Pi 側で切られて実際は出ない、
  * という状態になる。合わせ先は `raspi/setup/install_services.sh` の `ARM=` 行。 */
 export const UI_MAX_SPEED = 0.6 // m/s（io_node の --max-speed 0.6 と一致させてある）
-/** ±60°。**大舵角では前輪オドメトリの射影誤差が効く**（60° で 1/cos = 2倍）。
+/** ±45°。**大舵角では前輪オドメトリの射影誤差が効く**（45° で 1/cos ≒ 1.41倍）。
  * 据え切りを続けるとステア MD が過熱するので `temp[2]` を見ておくこと */
-export const UI_MAX_STEER = 1.047 // rad = 60°
+export const UI_MAX_STEER = 0.785 // rad = 45°
 
 /**
  * 速度レンジ。`UI_MAX_SPEED` に対する倍率。
