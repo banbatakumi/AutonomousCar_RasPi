@@ -42,6 +42,34 @@ export const BOOST_SCALE = 1.0
  */
 export const ARM_IDLE_TIMEOUT_MS = 20_000
 
+/**
+ * 灯火モード（`COMMAND.flags` bit3-4）。
+ *
+ * ⚠ **v0.4 の 1ビット `light` とは値の意味が違う。** 旧 `light=1` は全光量だったが、
+ * v0.5 の `1` は DAYTIME（減光）である。旧 GUI の値をそのまま送ると暗いまま走る。
+ */
+export const LIGHT_OFF = 0
+export const LIGHT_DAYTIME = 1
+export const LIGHT_NORMAL = 2
+export const LIGHT_LABEL = ['消灯', 'DAY', 'NORMAL']
+/** `L` キー / パッド △ で回す順。**消灯を含む**（v0.4 では消灯にできなかった） */
+export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
+
+/**
+ * 後輪1輪あたりの制動トルクの上限 [N·m]。**STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM` と
+ * `raspi/msgs/convert.py` の `MAX_BRAKE_TORQUE_NM` に合わせること。**
+ * 超えた値を送っても黙って丸められ、「スライダを上げても効きが変わらない」に見える。
+ */
+export const MAX_BRAKE_TORQUE_NM = 0.075
+/** スライダの最小。**0 は「未指定 ＝ 最大制動」を意味するので選ばせない** */
+export const MIN_BRAKE_TORQUE_NM = 0.005
+/**
+ * 制動トルクの既定値。**上限そのもの**にしてある。
+ * 「効きすぎて驚く」より「踏んだのに止まらない」方が危険なので、
+ * 弱める操作を人間の明示的な意思にする。低速の詰め作業で弱めたいときだけ下げる。
+ */
+export const DEFAULT_BRAKE_TORQUE_NM = MAX_BRAKE_TORQUE_NM
+
 type UiState = {
   telemetryOpen: boolean
   controlOpen: boolean
@@ -61,6 +89,21 @@ type UiState = {
   boost: boolean
   /** 直前に DISARM した理由。**「なぜ止まったか」が分からないのが一番消耗する** */
   disarmReason: string
+
+  // ── 補機（v0.5） ──
+  //
+  // **押している間だけ立つものは `boost` と同じ扱い**で、rAF ループが値の変化時だけ
+  // ここへ書き戻す。毎フレーム set すると 60Hz で再レンダリングが走る。
+  /** Space / パッド L1 を押している間。`brake_torque` を直接掛けている */
+  braking: boolean
+  /** H / パッド A を押している間。**鳴りっぱなしになる** */
+  horning: boolean
+  /** P / パッド X を押している間。前照灯だけが全光量 */
+  passing: boolean
+  /** 0=消灯 1=DAYTIME 2=NORMAL。**ARM 中しか反映されない**（§下） */
+  lightMode: number
+  /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
+  brakeTorque: number
 
   /** 異常時のみ出す層(C)を人間が明示的に開いた状態 */
   diagOpen: boolean
@@ -87,6 +130,12 @@ export const useUi = create<UiState>((set) => ({
   inputSource: 'none',
   boost: false,
   disarmReason: '',
+
+  braking: false,
+  horning: false,
+  passing: false,
+  lightMode: LIGHT_OFF,
+  brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
 
   diagOpen: false,
   lidarZoom: 4, // 画面半径が何メートルぶんか

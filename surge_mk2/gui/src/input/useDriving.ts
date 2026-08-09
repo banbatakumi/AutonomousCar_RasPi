@@ -11,6 +11,22 @@
  * | キーボード | `Enter` または画面の ARM ボタン | W,↑ / S,↓ | A,← / D,→ | `Shift` | `Esc` |
  * | ゲームパッド | 同上 | R2 前進 / L2 後退 | 左スティック X | R1 | B/○ |
  *
+ * 補機（v0.5 で追加）
+ *
+ * | | ブレーキ | クラクション | パッシング | 灯火切替 |
+ * |---|---|---|---|---|
+ * | キーボード | `Space` | `H` | `P` | `L`（消灯→DAY→NORMAL→…） |
+ * | ゲームパッド | L1 | A/× | X/□ | Y/△ |
+ *
+ * **灯火切替以外はすべて「押している間だけ」。** STM32 側の意味論
+ * （`horn` / `passing` は立てている間ずっと効く）に素直に対応させてある。
+ * GUI 側でタイマーを持つと、DISARM やタブ切替と競合したときに消し忘れが起きる。
+ *
+ * ⚠ **補機は ARM 保持中しか効かない。** `cmd` を送るのが armed のときだけで、
+ * 途絶すれば io_node が DISARM（`flags = 0`）に落とすため、灯火も消える。
+ * 「停めたまま前照灯だけ点ける」には cmd の送信条件そのものを変える必要があり、
+ * それは「送らないことが停止を意味する」設計に手を入れることになるので今はしない。
+ *
  * ## この方式で失ったもの・残したもの
  *
  * **失った**: 「手を離した瞬間に止まる」性質。無操作でも `ARM_IDLE_TIMEOUT_MS`
@@ -65,7 +81,8 @@
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
 import {
-  ARM_IDLE_TIMEOUT_MS, BOOST_SCALE, CRUISE_SCALE, UI_MAX_SPEED, UI_MAX_STEER, useUi,
+  ARM_IDLE_TIMEOUT_MS, BOOST_SCALE, CRUISE_SCALE, LIGHT_CYCLE, UI_MAX_SPEED, UI_MAX_STEER,
+  useUi,
 } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
@@ -113,9 +130,24 @@ const SPEED_KEYS_REV = ['KeyS', 'ArrowDown']
 const STEER_KEYS_LEFT = ['KeyA', 'ArrowLeft']
 const STEER_KEYS_RIGHT = ['KeyD', 'ArrowRight']
 const BOOST_KEYS = ['ShiftLeft', 'ShiftRight']
+const BRAKE_KEY = 'Space'
+const HORN_KEY = 'KeyH'
+const PASSING_KEY = 'KeyP'
+const LIGHT_KEY = 'KeyL'
 const DRIVING_KEYS = [
   ...SPEED_KEYS_FWD, ...SPEED_KEYS_REV, ...STEER_KEYS_LEFT, ...STEER_KEYS_RIGHT,
+  BRAKE_KEY, HORN_KEY, PASSING_KEY,
 ]
+
+// ── ゲームパッドのボタン番号（standard mapping） ──
+/** A/× — クラクション */
+const PAD_HORN = 0
+/** X/□ — パッシング */
+const PAD_PASSING = 2
+/** Y/△ — 灯火モードを1つ進める（**押した瞬間だけ**） */
+const PAD_LIGHT = 3
+/** L1 — ブレーキ */
+const PAD_BRAKE = 4
 
 /** 操縦権の再要求はこの間隔まで。rAF ごとに投げると 60発/秒になる */
 const TAKE_CONTROL_MS = 250
@@ -177,6 +209,13 @@ export function useDriving(ch: ControlChannel | null) {
         keys.current.add(e.code)
         return
       }
+      if (e.code === LIGHT_KEY) {
+        // **押した瞬間に1つ進めるだけ。** 押しっぱなしで回り続けると
+        // どのモードで手を離したのか分からなくなる（`e.repeat` は上で弾いてある）
+        const i = LIGHT_CYCLE.indexOf(ui.lightMode)
+        ui.set({ lightMode: LIGHT_CYCLE[(i + 1) % LIGHT_CYCLE.length] })
+        return
+      }
       if (DRIVING_KEYS.includes(e.code)) {
         e.preventDefault() // 矢印キーでページがスクロールしないように
         keys.current.add(e.code)
@@ -212,6 +251,19 @@ export function useDriving(ch: ControlChannel | null) {
     let lastTakeMs = 0
     let lastEstopMs = 0
     let padEstopWas = false
+    let padLightWas = false
+
+    /**
+     * 補機の押下状態を store に写す。**変化したときだけ**書く（毎フレーム書くと
+     * 60Hz で再レンダリングが走る）。指令を送らない経路では必ず false を写すこと。
+     * **画面に「鳴っている」と出したまま実際は送っていない**のが一番混乱する。
+     */
+    const mirrorAux = (brake: boolean, horn: boolean, passing: boolean) => {
+      const u = useUi.getState()
+      if (u.braking !== brake || u.horning !== horn || u.passing !== passing) {
+        u.set({ braking: brake, horning: horn, passing })
+      }
+    }
 
     const tick = () => {
       raf = requestAnimationFrame(tick)
@@ -234,6 +286,7 @@ export function useDriving(ch: ControlChannel | null) {
         }
         padEstopWas = true
         if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'パッドの B で E-STOP' })
+        mirrorAux(false, false, false)
         return
       }
       padEstopWas = false
@@ -257,9 +310,24 @@ export function useDriving(ch: ControlChannel | null) {
       if (ui.boost !== boost) ui.set({ boost })
       const maxSpeed = UI_MAX_SPEED * (boost ? BOOST_SCALE : CRUISE_SCALE)
 
+      // ── 補機（すべて「押している間だけ」） ──
+      const brake = k.has(BRAKE_KEY) || (pad?.buttons[PAD_BRAKE]?.pressed ?? false)
+      const horn = k.has(HORN_KEY) || (pad?.buttons[PAD_HORN]?.pressed ?? false)
+      const passing = k.has(PASSING_KEY) || (pad?.buttons[PAD_PASSING]?.pressed ?? false)
+
+      // 灯火切替だけはトグル。**押した瞬間のエッジで1つ進める**
+      // （rAF で読むので、キーの `e.repeat` に相当する処理を自前で持つ）
+      const padLight = pad?.buttons[PAD_LIGHT]?.pressed ?? false
+      if (padLight && !padLightWas) {
+        const i = LIGHT_CYCLE.indexOf(ui.lightMode)
+        ui.set({ lightMode: LIGHT_CYCLE[(i + 1) % LIGHT_CYCLE.length] })
+      }
+      padLightWas = padLight
+
       // **押しっぱなしも「操作中」に数える。** keydown だけを見ると、
-      // W を握り続けているのにタイムアウトで切れる
-      if (keyActive || padActive) lastActivity.current = now
+      // W を握り続けているのにタイムアウトで切れる。
+      // 補機も操作のうち（人間が目の前にいる証拠なので ARM を維持してよい）
+      if (keyActive || padActive || brake || horn || passing) lastActivity.current = now
 
       if (!ui.armRequested) {
         speed.current = 0
@@ -269,6 +337,7 @@ export function useDriving(ch: ControlChannel | null) {
         cmdOut.active = false
         live.armRemainingMs = 0
         if (ui.deadman) ui.set({ deadman: false, inputSource: 'none' })
+        mirrorAux(false, false, false)
         return
       }
 
@@ -278,6 +347,7 @@ export function useDriving(ch: ControlChannel | null) {
           armRequested: false,
           disarmReason: `${ARM_IDLE_TIMEOUT_MS / 1000}秒 無操作で自動解除`,
         })
+        mirrorAux(false, false, false)
         return
       }
       live.armRemainingMs = ARM_IDLE_TIMEOUT_MS - idle
@@ -288,6 +358,7 @@ export function useDriving(ch: ControlChannel | null) {
           ch.takeControl()
           lastTakeMs = now
         }
+        mirrorAux(false, false, false)
         return
       }
 
@@ -333,6 +404,13 @@ export function useDriving(ch: ControlChannel | null) {
           steer.current = approach(steer.current, sdir * UI_MAX_STEER, rate, dt)
         }
       }
+      // **ブレーキ中は速度指令を 0 に落とす。**
+      // STM32 は `brake` の間 `target_speed` を無視し、離すと 0 から
+      // `accel_limit` に従って加速し直す。GUI 側のランプを走らせたままにすると、
+      // 「画面は 0.4 m/s と出ているのに車は止まっている」という嘘の表示になる。
+      // 舵はブレーキ中も生かす（曲がりながら止めたい場面がある）
+      if (brake) speed.current = 0
+
       speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
       steer.current = Math.max(-UI_MAX_STEER, Math.min(UI_MAX_STEER, steer.current))
 
@@ -346,18 +424,23 @@ export function useDriving(ch: ControlChannel | null) {
       // ── 送信は 50Hz に間引く ──
       if (now - lastTxMs < TX_INTERVAL_MS) return
       lastTxMs = now
+      mirrorAux(brake, horn, passing)
       ch.cmd({
         mode: 1, // MANUAL
         arm: true,
-        brake: false,
-        horn: false,
-        light: false,
+        brake,
+        horn,
+        light_mode: ui.lightMode,
+        passing,
         speed: speed.current,
         steer: steer.current,
         // **0（STM32 の既定に任せる）ではなく明示的に送る。** 操作感を作るのは
         // 上の GUI 側ランプで、こちらはそれより速い＝通常は効かない保険
         accel_limit: ACCEL_LIMIT,
         steer_rate_limit: STEER_RATE_LIMIT,
+        // **こちらは逆に 0 を送ってはいけない。** `brake_torque` の 0 は
+        // 「未指定 ＝ STM32 の最大制動」を意味する。スライダの下限は 0 より上にしてある
+        brake_torque: ui.brakeTorque,
       })
     }
 

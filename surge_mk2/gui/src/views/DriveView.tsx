@@ -5,6 +5,7 @@
  * 温度・電圧の類は畳んであり、**しきい値を超えたときだけ自動で前に出る**。
  */
 import { useNumbers } from '../bus/live'
+import { AuxPanel } from '../components/AuxPanel'
 import { DiagStrip } from '../components/DiagStrip'
 import { DriveBar } from '../components/DriveBar'
 import { CameraView } from '../render/CameraView'
@@ -49,6 +50,7 @@ export function DriveView() {
       </div>
 
       <DriveBar />
+      <AuxPanel />
       <DiagStrip />
     </div>
   )

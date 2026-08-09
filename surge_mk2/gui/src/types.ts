@@ -131,11 +131,19 @@ export type CmdOut = {
   type: 'cmd'
   mode: number
   arm: boolean
+  /** **立てている間 `speed` は STM32 側で無視され、`brake_torque` が直接掛かる**（v0.5） */
   brake: boolean
+  /** **立てている間ずっと鳴る。** v0.4 の「押した瞬間に1発」ではない */
   horn: boolean
-  light: boolean
+  /** 0=OFF 1=DAYTIME 2=NORMAL。**v0.4 の `light=1` は NORMAL だったが 1 は DAYTIME** */
+  light_mode: number
+  /** パッシング。前照灯だけが全光量になる（**尾灯は連動しない**） */
+  passing: boolean
   speed: number
   steer: number
   accel_limit: number
   steer_rate_limit: number
+  /** 後輪**各輪**の制動トルク [N·m]。
+   * **0 は「制動しない」ではなく「未指定」で、STM32 の最大値で制動する** */
+  brake_torque: number
 }
