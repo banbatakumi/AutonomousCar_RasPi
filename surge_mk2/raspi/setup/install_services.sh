@@ -60,6 +60,8 @@ case "${1:-}" in
     systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service
     systemctl daemon-reload
+    # 節電のために切ったものを元に戻す（下の「節電」節を参照）
+    systemctl enable --now bluetooth 2>/dev/null || true
     echo "削除した"
     exit 0 ;;
 esac
@@ -116,6 +118,62 @@ cat > /etc/systemd/logind.conf.d/10-surge-removeipc.conf <<'EOF'
 RemoveIPC=no
 EOF
 systemctl restart systemd-logind || true
+
+# ── ★ 節電（2026-08-10 の PMIC 実測にもとづく） ──
+#
+# `vcgencmd pmic_read_adc` で全レールを実測して切り分けた結果（3ノード稼働・
+# GUI 未接続 = 走行相当で **合計 4.06W**）:
+#
+# | カメラ2台（モジュール+ISP+node） | 1.15W | 28% |
+# | Wi-Fi/BT レール                 | 0.42W | 10% |
+# | telemetry_node                  | 0.26W |  6% |
+# | HDMI / ディスプレイスタック      | 0.17W |  4% |
+# | io_node + OS + レール固定        | 2.07W | 51% |
+#
+# ## ★★ CPU クロックを下げても節電にはならない（実測で確認）
+#
+# 負荷をかけて「電力」と「処理速度」を同時に測ると、**1仕事あたりの
+# エネルギーはクロックによらずほぼ一定**だった:
+#
+#   2400MHz: 6.64W / 16.6 ops/s = 0.400 J/op
+#   2000MHz: 5.51W / 13.9 ops/s = 0.395 J/op
+#   1500MHz: 4.15W / 10.5 ops/s = 0.394 J/op
+#
+# アイドルの固定消費（約2.5W）が大きいので、クロックを絞ると瞬時電力は
+# 下がるが**その分だけ時間が伸びて総エネルギーは変わらない**（race to idle）。
+# よって `scaling_max_freq` や governor はいじらない。**ondemand のままが正解。**
+# 下げる意味があるのはピーク電流・発熱・ファン回転を抑えたいときだけ。
+#
+# ここで削るのは「仕事をしていないのに消えている分」だけにする。
+#
+# ## ★★ HDMI を落とす案は**採用できなかった**（2026-08-10）
+#
+# `vcgencmd display_power 0` を oneshot unit で叩く案を入れかけたが、
+# **Pi 5 では動かない**:
+#
+#     $ sudo vcgencmd display_power 0
+#     vc_gencmd_read_response returned -1
+#     error=1 error_msg="Command not registered"     # 終了コード 255
+#
+# 原因は Pi 5 のファームウェアが **`variant start_cd`**（機能削減版。
+# `dmesg | grep firmware` で確認できる）で、ディスプレイ系の gencmd を
+# 持っていないため。Pi 5 は表示が Linux 側の KMS に移っており、VideoCore に
+# 頼む昔のやり方が通らない。
+#
+# ⚠ **この失敗は最初の実測を汚染していた。** エラーを `2>/dev/null` で潰したまま
+#    測ったので「HDMI を切ると 0.17W 減る」と読めてしまったが、実際にはコマンドは
+#    何もしていない。あの差はノイズだった。**効果を測るときは終了コードを見ること。**
+#
+# HDMI レールは実測 0.061W で、モニタ未接続でも出ている（コネクタの HPD 用）。
+# ソフトからは落とせないので**諦める**。`cmdline.txt` の `video=HDMI-A-1:d` は
+# 未検証（再起動が要るうえ、効くのは KMS の処理分だけで 0.06W ではない）。
+
+# Bluetooth は**一度も使う予定がない**ので落とす。
+# ただし実測の差は測定ノイズ以下（<0.05W）だった。**節電目的では効かない。**
+# 動かす理由のないデーモンを消しておく、以上の意味はないと理解しておくこと。
+# ⚠ `config.txt` の `dtoverlay=disable-bt` は**使わない**。あれは BT を UART から
+#    切り離す副作用で `/dev/serial0` の割り当てを動かすので、STM32 との UART が壊れる
+systemctl disable --now bluetooth 2>/dev/null || true
 
 write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet --log $ARM"
 write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quiet"
