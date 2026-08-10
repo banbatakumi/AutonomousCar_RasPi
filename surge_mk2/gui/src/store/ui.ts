@@ -8,52 +8,61 @@ import type { ControlStatus } from '../types'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider'
 
-/** ラジコンの上限。**表示用の見た目の上限であって安全装置ではない。**
- * 本当の上限は io_node の `--max-speed` / `--max-steer`（Pi 側）と STM32。
+/**
+ * ラジコン操作の調整値。**設定タブから変更でき、`localStorage` に保存される。**
  *
- * ⚠ **io_node 側の `--max-speed` と手で合わせること。** ずれていると
- * GUI が「0.33 m/s 出している」と表示しているのに Pi 側で切られて実際は出ない、
- * という状態になる。合わせ先は `raspi/setup/install_services.sh` の `ARM=` 行。 */
-export const UI_MAX_SPEED = 0.6 // m/s（io_node の --max-speed 0.6 と一致させてある）
-/** ±45°。**大舵角では前輪オドメトリの射影誤差が効く**（45° で 1/cos ≒ 1.41倍）。
- * 据え切りを続けるとステア MD が過熱するので `temp[2]` を見ておくこと */
-export const UI_MAX_STEER = 0.785 // rad = 45°
+ * ⚠ `maxSpeed` / `maxSteer` は io_node の `--max-speed` / `--max-steer`
+ * （Pi 側のハード上限。`raspi/setup/install_services.sh` の `ARM=` 行）を
+ * **超えて設定してはいけない**。超えた分は Pi 側で黙って切り捨てられ、
+ * 「GUI は 0.9 m/s と表示しているのに実際は 0.6 m/s しか出ない」という
+ * 食い違いが起きる（`architecture.md` §10.5）。そのためレンジ上限を
+ * ハード上限そのものにしてあり、**それより上には振れない**。
+ */
+export type DrivingSettings = {
+  /** 見た目の最高速度 [m/s]。既定値 0.6。Pi 側ハード上限（`PI_MAX_SPEED_CAP`）を超えられない */
+  maxSpeed: number
+  /** 見た目の最大舵角 [rad]。既定値 0.785(45°)。Pi 側ハード上限（`PI_MAX_STEER_CAP`）を超えられない */
+  maxSteer: number
+  /** 既定（巡航）レンジ。`maxSpeed` に対する倍率 */
+  cruiseScale: number
+  /** Shift / パッド R1 を押している間のレンジ。`maxSpeed` に対する倍率 */
+  boostScale: number
+  /** 押している間の加速 [m/s²] */
+  accel: number
+  /** キーを離したときの惰行減速 [m/s²] */
+  coast: number
+  /** 逆キーを押したときのブレーキ [m/s²]（`accel` より強くすること） */
+  brake: number
+  /** 発進キック [m/s]。停止から押した瞬間にここまで跳ばす */
+  kickSpeed: number
+  /** 押している間の切り込み [rad/s] */
+  steerRate: number
+  /** 離したときのセンター戻り [rad/s]（`steerRate` より速くすること） */
+  steerReturn: number
+  /** 逆キーでの切り戻し [rad/s] */
+  steerCounter: number
+  /** ARM を保持したまま無操作でいられる時間 [ms]。超えたら自動 DISARM */
+  armIdleTimeoutMs: number
+  /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
+  brakeTorque: number
+}
 
 /**
- * 速度レンジ。`UI_MAX_SPEED` に対する倍率。
+ * io_node 側のハード上限。**GUI からはこれを超えられない**（超えても切り捨てられるだけ）。
  *
- * **既定は低速側**。`Shift`（パッドは R1）を押している間だけ全開になる。
- * 「いつでも全開が出せる」より「全開にするには意識的な操作が要る」方が、
- * 狭い場所で壁に刺さる回数が減る。
+ * ⚠ **60° は一度 45° に落とした値を戻したもの**（2026-08-10、指示による）。
+ * 大舵角では前輪オドメトリの射影誤差が効き（60° で 1/cos ≒ 2倍）、据え切りを
+ * 続けるとステア MD が過熱するので `temp[2]` を見ておくこと。速度 2.0 m/s も
+ * `DEFAULT_SETTINGS.maxSpeed`（0.6）よりはるかに速い。**既定値はあえて上げていない**
+ * ので、この上限まで使うのは設定タブで人間が明示的に上げたときだけになる。
  */
-export const CRUISE_SCALE = 0.55
-export const BOOST_SCALE = 1.0
+export const PI_MAX_SPEED_CAP = 2.0 // m/s（install_services.sh の --max-speed と一致させてある）
+export const PI_MAX_STEER_CAP = 1.047 // rad ≒ 60°（同 --max-steer）
 
-/**
- * ARM を保持したまま無操作でいられる時間。これを過ぎたら自動 DISARM。
- *
- * **「キーを離したら即停止」ではない。** 握り続ける方式より操作性を優先した
- * 選択で、手を離しても最大この時間は armed のままモータが励磁される
- * （速度指令は 0 に落ちるので進みはしないが、完全な停止ではない）。
- *
- * 20秒は**この保険がほぼ効かない長さ**である。実質的な停止手段は
- * `Esc` / E-STOP ボタン / パッドの B / フォーカス喪失 / 通信断の方であり、
- * このタイマーは「操作を忘れて放置した」場合の最後の受け皿でしかない。
- */
-export const ARM_IDLE_TIMEOUT_MS = 20_000
-
-/**
- * 灯火モード（`COMMAND.flags` bit3-4）。
- *
- * ⚠ **v0.4 の 1ビット `light` とは値の意味が違う。** 旧 `light=1` は全光量だったが、
- * v0.5 の `1` は DAYTIME（減光）である。旧 GUI の値をそのまま送ると暗いまま走る。
- */
-export const LIGHT_OFF = 0
-export const LIGHT_DAYTIME = 1
-export const LIGHT_NORMAL = 2
-export const LIGHT_LABEL = ['消灯', 'DAY', 'NORMAL']
-/** `L` キー / パッド △ で回す順。**消灯を含む**（v0.4 では消灯にできなかった） */
-export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
+/** STM32 に渡すレートリミット（安全側の保険）。設定タブの `accel`/`steerRate` はこれより
+ * 十分遅く保つこと。**これ自体はユーザー設定にしない**（`useDriving.ts` 参照） */
+export const ACCEL_SAFETY_LIMIT = 6.0 // m/s²
+export const STEER_RATE_SAFETY_LIMIT = 7.0 // rad/s
 
 /**
  * 後輪1輪あたりの制動トルクの上限 [N·m]。**STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM` と
@@ -69,6 +78,83 @@ export const MIN_BRAKE_TORQUE_NM = 0.005
  * 弱める操作を人間の明示的な意思にする。低速の詰め作業で弱めたいときだけ下げる。
  */
 export const DEFAULT_BRAKE_TORQUE_NM = MAX_BRAKE_TORQUE_NM
+
+export const DEFAULT_SETTINGS: DrivingSettings = {
+  maxSpeed: 0.6,
+  maxSteer: 0.785,
+  cruiseScale: 0.55,
+  boostScale: 1.0,
+  accel: 2.0,
+  coast: 2.5,
+  brake: 5.0,
+  kickSpeed: 0.12,
+  steerRate: 2.6,
+  steerReturn: 5.2,
+  steerCounter: 5.2,
+  armIdleTimeoutMs: 20_000,
+  brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
+}
+
+/** 設定タブのスライダのレンジ。`min`/`max`/`step` の3つ組。 */
+export const SETTINGS_RANGE: Record<keyof DrivingSettings, { min: number; max: number; step: number }> = {
+  maxSpeed: { min: 0.1, max: PI_MAX_SPEED_CAP, step: 0.01 },
+  maxSteer: { min: 0.175, max: PI_MAX_STEER_CAP, step: 0.005 }, // 0.175rad ≒ 10°
+  cruiseScale: { min: 0.1, max: 1.0, step: 0.05 },
+  boostScale: { min: 0.1, max: 1.0, step: 0.05 },
+  accel: { min: 0.5, max: 5.5, step: 0.1 },
+  coast: { min: 0.5, max: 5.5, step: 0.1 },
+  brake: { min: 0.5, max: 5.5, step: 0.1 },
+  kickSpeed: { min: 0, max: 0.3, step: 0.01 },
+  steerRate: { min: 0.5, max: 6.5, step: 0.1 },
+  steerReturn: { min: 0.5, max: 6.5, step: 0.1 },
+  steerCounter: { min: 0.5, max: 6.5, step: 0.1 },
+  armIdleTimeoutMs: { min: 5_000, max: 60_000, step: 1_000 },
+  brakeTorque: { min: MIN_BRAKE_TORQUE_NM, max: MAX_BRAKE_TORQUE_NM, step: 0.001 },
+}
+
+const SETTINGS_KEY = 'surge.driveSettings.v1'
+
+function clampSettings(s: DrivingSettings): DrivingSettings {
+  const out = { ...s }
+  for (const k of Object.keys(SETTINGS_RANGE) as (keyof DrivingSettings)[]) {
+    const { min, max } = SETTINGS_RANGE[k]
+    const v = out[k]
+    out[k] = typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULT_SETTINGS[k]
+  }
+  return out
+}
+
+/** 壊れた値・古いスキーマの値で走り出さないよう、読み込み時に必ずクランプする */
+function loadSettings(): DrivingSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY)
+    if (!raw) return DEFAULT_SETTINGS
+    return clampSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw) })
+  } catch {
+    return DEFAULT_SETTINGS
+  }
+}
+
+function saveSettings(s: DrivingSettings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
+  } catch {
+    // 保存できなくても走行は続けられるべきなので無視する
+  }
+}
+
+/**
+ * 灯火モード（`COMMAND.flags` bit3-4）。
+ *
+ * ⚠ **v0.4 の 1ビット `light` とは値の意味が違う。** 旧 `light=1` は全光量だったが、
+ * v0.5 の `1` は DAYTIME（減光）である。旧 GUI の値をそのまま送ると暗いまま走る。
+ */
+export const LIGHT_OFF = 0
+export const LIGHT_DAYTIME = 1
+export const LIGHT_NORMAL = 2
+export const LIGHT_LABEL = ['消灯', 'DAY', 'NORMAL']
+/** `L` キー / パッド △ で回す順。**消灯を含む**（v0.4 では消灯にできなかった） */
+export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
 
 type UiState = {
   telemetryOpen: boolean
@@ -102,8 +188,6 @@ type UiState = {
   passing: boolean
   /** 0=消灯 1=DAYTIME 2=NORMAL。**ARM 中しか反映されない**（§下） */
   lightMode: number
-  /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
-  brakeTorque: number
 
   /** 異常時のみ出す層(C)を人間が明示的に開いた状態 */
   diagOpen: boolean
@@ -114,10 +198,16 @@ type UiState = {
   pathGuide: boolean
   rearBig: boolean
 
+  /** ラジコン操作の調整値。設定タブで変更、`localStorage` に自動保存 */
+  settings: DrivingSettings
+
   set: (p: Partial<UiState>) => void
+  /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
+  setSettings: (p: Partial<DrivingSettings>) => void
+  resetSettings: () => void
 }
 
-export const useUi = create<UiState>((set) => ({
+export const useUi = create<UiState>((set, get) => ({
   telemetryOpen: false,
   controlOpen: false,
   status: null,
@@ -135,7 +225,6 @@ export const useUi = create<UiState>((set) => ({
   horning: false,
   passing: false,
   lightMode: LIGHT_OFF,
-  brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
 
   diagOpen: false,
   lidarZoom: 4, // 画面半径が何メートルぶんか
@@ -143,5 +232,16 @@ export const useUi = create<UiState>((set) => ({
   pathGuide: true,
   rearBig: false,
 
+  settings: loadSettings(),
+
   set: (p) => set(p),
+  setSettings: (p) => {
+    const next = clampSettings({ ...get().settings, ...p })
+    saveSettings(next)
+    set({ settings: next })
+  },
+  resetSettings: () => {
+    saveSettings(DEFAULT_SETTINGS)
+    set({ settings: DEFAULT_SETTINGS })
+  },
 }))

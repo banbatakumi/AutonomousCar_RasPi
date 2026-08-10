@@ -7,6 +7,7 @@ import { StatusBar } from './components/StatusBar'
 import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
 import { DriveView } from './views/DriveView'
+import { SettingsView } from './views/SettingsView'
 import { ControlChannel } from './ws/control'
 import { connectTelemetry } from './ws/telemetry'
 
@@ -61,7 +62,13 @@ export function App() {
         <DriveHint />
       </nav>
 
-      {tab === '運転' ? <DriveView /> : <Placeholder tab={tab} />}
+      {tab === '運転' ? (
+        <DriveView />
+      ) : tab === '設定' ? (
+        <SettingsView />
+      ) : (
+        <Placeholder tab={tab} />
+      )}
     </div>
   )
 }
@@ -92,7 +99,6 @@ function Placeholder({ tab }: { tab: Tab }) {
   const what: Record<string, string> = {
     地図: 'SLAM・占有格子・生成経路のデバッグ（Phase 3 で中身が入る）',
     診断: '時系列グラフ（uPlot）、パケットロスの推移、STATS の突き合わせ',
-    設定: 'TC/TV・最大速度・各種ゲイン。CONFIG_GET で実機の現在値を読んでから表示する',
     ログ: '.sfl の再生とエクスポート。replay_node --bus を GUI から叩けるようにする',
   }
   return (

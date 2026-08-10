@@ -6,7 +6,7 @@
  */
 import { useNumbers } from '../bus/live'
 import { MODE_NAME, healthLevel, ms, rttLevel } from '../format'
-import { BOOST_SCALE, CRUISE_SCALE, UI_MAX_SPEED, useUi } from '../store/ui'
+import { useUi } from '../store/ui'
 
 export function StatusBar({ onEstop }: { onEstop: () => void }) {
   const n = useNumbers()
@@ -45,7 +45,7 @@ export function StatusBar({ onEstop }: { onEstop: () => void }) {
           title="Shift（パッドは R1）を押している間だけ全開。離すと低速に戻る"
         >
           {ui.boost ? 'BOOST' : '低速'}{' '}
-          {(UI_MAX_SPEED * (ui.boost ? BOOST_SCALE : CRUISE_SCALE)).toFixed(2)}
+          {(ui.settings.maxSpeed * (ui.boost ? ui.settings.boostScale : ui.settings.cruiseScale)).toFixed(2)}
         </span>
         {vs?.tc_active && <span className="pill lv-warn">TC</span>}
         {vs?.tv_active && <span className="pill lv-warn">TV</span>}

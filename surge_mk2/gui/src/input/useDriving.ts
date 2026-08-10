@@ -29,9 +29,9 @@
  *
  * ## この方式で失ったもの・残したもの
  *
- * **失った**: 「手を離した瞬間に止まる」性質。無操作でも `ARM_IDLE_TIMEOUT_MS`
- * （現在 20秒）は armed のまま（速度指令は 0 に落ちるので進みはしないが、
- * モータは励磁されたまま）。**20秒はこの保険がほぼ効かない長さ**なので、
+ * **失った**: 「手を離した瞬間に止まる」性質。無操作でも `settings.armIdleTimeoutMs`
+ * （既定 20秒。設定タブで変更可）は armed のまま（速度指令は 0 に落ちるので進みはしないが、
+ * モータは励磁されたまま）。**既定 20秒はこの保険がほぼ効かない長さ**なので、
  * 実質的な停止手段は下の即時系だと考えること。
  *
  * **残した**（ここは操作性と衝突しないので削らない）:
@@ -39,7 +39,7 @@
  * - `Esc` / E-STOP ボタン / パッドの B … 即 DISARM。**権限も条件も要らない**
  * - ウィンドウのフォーカス喪失・タブが背後に回る … 即 DISARM
  * - 送信が止まれば 150ms でサーバが DISARM、さらに io_node が 150ms で DISARM
- * - 無操作 `ARM_IDLE_TIMEOUT_MS` … 自動 DISARM（放置した場合の最後の受け皿）
+ * - 無操作 `settings.armIdleTimeoutMs` … 自動 DISARM（放置した場合の最後の受け皿）
  *
  * つまり「ブラウザが固まる」「Wi-Fi が切れる」「PC を閉じる」は従来どおり停止する。
  * 弱くなったのは**人間が意図して手を離した場合だけ**。
@@ -61,8 +61,9 @@
  *
  * 以前は `accel_limit=0`（STM32 の既定に任せる）を送っていたので、GUI 側のランプと
  * STM32 側のリミットが二重にかかり、**どちらが操作感を決めているのか分からなかった**。
- * 今は GUI から明示的に `ACCEL_LIMIT` / `STEER_RATE_LIMIT` を送る。値は GUI のランプより
- * わざと速くしてあり、通常走行では GUI のランプが支配的になる。STM32 側は
+ * 今は GUI から明示的に `ACCEL_LIMIT` / `STEER_RATE_LIMIT` を送る。値は設定タブの
+ * `accel`/`steerRate` より意図的に速くしてあり（ユーザー設定にはしない）、
+ * 通常走行では GUI のランプが支配的になる。STM32 側は
  * 「指令が飛んだ／GUI が壊れた」ときにメカを守る保険として残る。
  *
  * ### 3. 逆キーはブレーキ
@@ -73,16 +74,15 @@
  * ### 4. 発進キック
  *
  * 停止からじわじわ指令を上げると、STM32 の速度 PI ループが動き出すまで無駄時間が出て
- * 「押した→無反応→急に出る」になる。押した瞬間に `KICK_SPEED` へ跳ばしてから積分する。
- * **`KICK_SPEED` は実車が実際に転がり始める指令値に合わせて調整すること**
+ * 「押した→無反応→急に出る」になる。押した瞬間に `settings.kickSpeed` へ跳ばしてから積分する。
+ * **`kickSpeed` は設定タブで、実車が実際に転がり始める指令値に合わせて調整すること**
  * （DriveBar の実測速度を見ながら詰める。低速では `wheel_speed` が使えないので
  * `speed` の生値と目視で判断する）。
  */
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
 import {
-  ARM_IDLE_TIMEOUT_MS, BOOST_SCALE, CRUISE_SCALE, LIGHT_CYCLE, UI_MAX_SPEED, UI_MAX_STEER,
-  useUi,
+  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, STEER_RATE_SAFETY_LIMIT, useUi,
 } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
@@ -92,31 +92,17 @@ const TX_INTERVAL_MS = 1000 / TX_HZ
 /** 1フレームの積分幅の上限。タブ復帰やカクつきで一気に飛ぶのを防ぐ */
 const DT_MAX = 0.05
 
-// ── 速度の応答 [m/s²] ────────────────────────────────────────────
-/** 押している間の加速。0→1.0 m/s を 0.5 秒 */
-const ACCEL = 2.0
-/** キーを離したときの惰行減速 */
-const COAST = 2.5
-/** **逆キーを押したときのブレーキ。** 加速より強くする */
-const BRAKE = 5.0
-/**
- * 発進キック [m/s]。停止から押した瞬間にここまで跳ばす。
- * **実車が転がり始める値に合わせて調整すること**（大きすぎると飛び出す）
- */
-const KICK_SPEED = 0.12
-
-// ── 舵の応答 [rad/s] ─────────────────────────────────────────────
-/** 押している間の切り込み。60° まで 0.40 秒 */
-const STEER_RATE = 2.6
-/** **離したときのセンター戻り。切り込みより速くする**（直進が安定する） */
-const STEER_RETURN = 5.2
-/** 逆キーでの切り戻し。センターを跨ぐまではこの速さ、跨いだら `STEER_RATE` */
-const STEER_COUNTER = 5.2
+// ── 速度・舵の応答は「設定タブ」から調整する ──────────────────────
+//
+// 加速・惰行・ブレーキ・発進キック・切り込み/戻し/切り返し速度は
+// `store/ui.ts` の `DrivingSettings`（`ui.settings`）に移した。
+// ここでは毎フレーム `useUi.getState().settings` から読む。
 
 // ── STM32 に渡すレートリミット ───────────────────────────────────
-/** GUI のランプ（`ACCEL`/`BRAKE`）より速い値。**通常は効かず、保険として残る** */
-const ACCEL_LIMIT = 6.0 // m/s²
-const STEER_RATE_LIMIT = 7.0 // rad/s
+/** GUI のランプ（設定タブの `accel`/`brake`）より速い値。**通常は効かず、保険として残る**。
+ * ユーザー設定にはしない（`ACCEL_SAFETY_LIMIT` 参照） */
+const ACCEL_LIMIT = ACCEL_SAFETY_LIMIT // m/s²
+const STEER_RATE_LIMIT = STEER_RATE_SAFETY_LIMIT // rad/s
 
 // ── ゲームパッド ─────────────────────────────────────────────────
 const STICK_DZ = 0.12
@@ -274,6 +260,7 @@ export function useDriving(ch: ControlChannel | null) {
       if (dt <= 0) return
 
       const ui = useUi.getState()
+      const s = ui.settings
       const pad = navigator.getGamepads?.().find((p) => p && p.connected) ?? null
 
       // ゲームパッドの B/○ はいつでも E-STOP（ARM していなくても効く）
@@ -308,7 +295,7 @@ export function useDriving(ch: ControlChannel | null) {
 
       const boost = keyBoost || padBoost
       if (ui.boost !== boost) ui.set({ boost })
-      const maxSpeed = UI_MAX_SPEED * (boost ? BOOST_SCALE : CRUISE_SCALE)
+      const maxSpeed = s.maxSpeed * (boost ? s.boostScale : s.cruiseScale)
 
       // ── 補機（すべて「押している間だけ」） ──
       const brake = k.has(BRAKE_KEY) || (pad?.buttons[PAD_BRAKE]?.pressed ?? false)
@@ -342,15 +329,15 @@ export function useDriving(ch: ControlChannel | null) {
       }
 
       const idle = now - lastActivity.current
-      if (idle > ARM_IDLE_TIMEOUT_MS) {
+      if (idle > s.armIdleTimeoutMs) {
         ui.set({
           armRequested: false,
-          disarmReason: `${ARM_IDLE_TIMEOUT_MS / 1000}秒 無操作で自動解除`,
+          disarmReason: `${s.armIdleTimeoutMs / 1000}秒 無操作で自動解除`,
         })
         mirrorAux(false, false, false)
         return
       }
-      live.armRemainingMs = ARM_IDLE_TIMEOUT_MS - idle
+      live.armRemainingMs = s.armIdleTimeoutMs - idle
 
       // 操縦権が無ければ取りに行く（サーバが拒否したら denied が来る）
       if (!ui.hasControl) {
@@ -377,31 +364,31 @@ export function useDriving(ch: ControlChannel | null) {
         // 人の指がすでにランプになっているので、二重に鈍らせない。
         // 急な踏み込みは STM32 の accel_limit / steer_rate_limit が受け持つ
         // 左スティック左 (-1) が左旋回 (+steer)。反時計回りが正
-        steer.current = -expo(padSteer, STEER_EXPO) * UI_MAX_STEER
+        steer.current = -expo(padSteer, STEER_EXPO) * s.maxSteer
         speed.current = expo(rt - lt, THROTTLE_EXPO) * maxSpeed
       } else {
         // ── 速度：押している間は加速、逆キーはブレーキ ──
         const dir = fwd ? 1 : rev ? -1 : 0
         if (dir === 0) {
-          speed.current = approach(speed.current, 0, COAST, dt)
+          speed.current = approach(speed.current, 0, s.coast, dt)
         } else if (speed.current * dir < 0) {
           // 進行方向と逆を押している ＝ ブレーキ。0 を行き過ぎたら 0 で受け止め、
           // 次のフレームからキック＋加速で逆走に移る
-          const next = speed.current + dir * BRAKE * dt
+          const next = speed.current + dir * s.brake * dt
           speed.current = next * dir > 0 ? 0 : next
-        } else if (Math.abs(speed.current) < KICK_SPEED) {
-          speed.current = dir * KICK_SPEED // 発進キック
+        } else if (Math.abs(speed.current) < s.kickSpeed) {
+          speed.current = dir * s.kickSpeed // 発進キック
         } else {
-          speed.current += dir * ACCEL * dt
+          speed.current += dir * s.accel * dt
         }
 
         // ── 舵：切り込みより戻しを速く、切り返しはさらに速く ──
         const sdir = left ? 1 : right ? -1 : 0
         if (sdir === 0) {
-          steer.current = approach(steer.current, 0, STEER_RETURN, dt)
+          steer.current = approach(steer.current, 0, s.steerReturn, dt)
         } else {
-          const rate = steer.current * sdir < 0 ? STEER_COUNTER : STEER_RATE
-          steer.current = approach(steer.current, sdir * UI_MAX_STEER, rate, dt)
+          const rate = steer.current * sdir < 0 ? s.steerCounter : s.steerRate
+          steer.current = approach(steer.current, sdir * s.maxSteer, rate, dt)
         }
       }
       // **ブレーキ中は速度指令を 0 に落とす。**
@@ -412,7 +399,7 @@ export function useDriving(ch: ControlChannel | null) {
       if (brake) speed.current = 0
 
       speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
-      steer.current = Math.max(-UI_MAX_STEER, Math.min(UI_MAX_STEER, steer.current))
+      steer.current = Math.max(-s.maxSteer, Math.min(s.maxSteer, steer.current))
 
       cmdOut.speed = speed.current
       cmdOut.steer = steer.current
@@ -440,7 +427,7 @@ export function useDriving(ch: ControlChannel | null) {
         steer_rate_limit: STEER_RATE_LIMIT,
         // **こちらは逆に 0 を送ってはいけない。** `brake_torque` の 0 は
         // 「未指定 ＝ STM32 の最大制動」を意味する。スライダの下限は 0 より上にしてある
-        brake_torque: ui.brakeTorque,
+        brake_torque: s.brakeTorque,
       })
     }
 

@@ -11,11 +11,12 @@
  * 速度は「自分が送っている指令」と「実測」を並べる。
  */
 import { useNumbers } from '../bus/live'
-import { UI_MAX_SPEED, UI_MAX_STEER } from '../store/ui'
+import { useUi } from '../store/ui'
 import { deg, kmh, metres } from '../format'
 
 export function DriveBar() {
   const n = useNumbers()
+  const { maxSpeed, maxSteer } = useUi((s) => s.settings)
   const vs = n.vs
   const speed = vs ? (vs.stopped ? 0 : vs.speed) : 0
   const target = n.out.active ? n.out.speed : 0
@@ -32,7 +33,7 @@ export function DriveBar() {
             指令 {n.out.active ? `${target.toFixed(2)}` : '—'}
           </span>
         </div>
-        <BiBar value={speed} target={n.out.active ? target : null} max={UI_MAX_SPEED} />
+        <BiBar value={speed} target={n.out.active ? target : null} max={maxSpeed} />
         {vs?.stopped && <span className="note">停止判定（デッドバンド内。生値 {vs.speed.toFixed(3)}）</span>}
       </div>
 
@@ -46,7 +47,7 @@ export function DriveBar() {
         <BiBar
           value={vs?.steer_actual ?? 0}
           target={vs?.steer_cmd_echo ?? null}
-          max={UI_MAX_STEER}
+          max={maxSteer}
           flip
         />
       </div>
