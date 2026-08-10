@@ -42,7 +42,7 @@ class TestCrc(unittest.TestCase):
 
 
 class TestPacketDefinitions(unittest.TestCase):
-    """docs/uart_protocol.md v0.5 の値を直接書いて生成物を検証する。
+    """docs/uart_protocol.md v0.6 の値を直接書いて生成物を検証する。
 
     protocol.toml と同じ値をここに書き写すのは重複だが、**それが目的**。
     生成器のバグや定義の書き換えミスを、仕様書の値そのもので検出する。
@@ -58,7 +58,7 @@ class TestPacketDefinitions(unittest.TestCase):
         "VERSION": (0x07, 10, "s2p"),
         "STATS": (0x08, 48, "s2p"),
         "LIDAR_SECTOR_C": (0x09, 39, "s2p"),
-        "COMMAND": (0x10, 12, "p2s"),
+        "COMMAND": (0x10, 14, "p2s"),
         "CONFIG_SET": (0x11, 6, "p2s"),
         "PING": (0x12, 4, "p2s"),
         "CONFIG_GET": (0x13, 2, "p2s"),
@@ -90,7 +90,7 @@ class TestPacketDefinitions(unittest.TestCase):
                 self.assertEqual(cls.DIR, "s2p" if cls.TYPE < 0x10 else "p2s")
 
     def test_protocol_version(self):
-        self.assertEqual(packets.PROTOCOL_VERSION, 0x0005)
+        self.assertEqual(packets.PROTOCOL_VERSION, 0x0006)
 
     def test_generated_files_up_to_date(self):
         """protocol.toml を編集して再生成し忘れていないか。"""

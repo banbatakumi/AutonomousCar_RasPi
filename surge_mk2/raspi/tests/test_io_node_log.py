@@ -9,6 +9,7 @@ SerialLink を差し替えた偽リンクで io_node を回し、
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import time
@@ -170,6 +171,70 @@ class TestIoNodeLogging(unittest.TestCase):
         self.assertIsNotNone(link.on_tx)
         self.assertEqual(node._log_errors, 0)
         self.assertGreater(len(link.sent), 0)
+
+
+class TestIoNodeLogToggle(unittest.TestCase):
+    """`log/ctrl`（GUI の記録ボタン）によるセッション中の開始/停止。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._old_cwd = os.getcwd()
+        os.chdir(self._td.name)          # default_log_path() の "logs/" をここに閉じ込める
+
+    def tearDown(self):
+        os.chdir(self._old_cwd)
+        self._td.cleanup()
+
+    def test_toggle_opens_and_closes_a_writer(self):
+        link = FakeLink()
+        node = IoNode(link, log_meta={"node": "io_node", "port": "fake"})
+        self.assertIsNone(node._log)
+
+        node._set_log_active(True)
+        self.assertIsNotNone(node._log)
+        path = node._log.path
+
+        node._set_log_active(False)
+        self.assertIsNone(node._log)
+        self.assertTrue(path.is_file())
+
+    def test_toggle_to_the_same_state_is_a_no_op(self):
+        """同じ状態への遷移では Writer を握り直さない（多重 open を避ける）。"""
+        link = FakeLink()
+        node = IoNode(link, log_meta={"node": "io_node", "port": "fake"})
+        node._set_log_active(True)
+        first = node._log
+        node._set_log_active(True)
+        self.assertIs(node._log, first)
+
+    def test_bus_log_ctrl_message_toggles_recording(self):
+        """`_recv_cmd` が `log/ctrl` を拾って記録を開始/停止すること。"""
+        from raspi.msgs import LogCtrl
+        from raspi.msgs.types import TOPIC_LOG_CTRL
+
+        link = FakeLink()
+
+        class FakeSub:
+            def __init__(self):
+                self._queue = []
+
+            def push(self, topic, msg):
+                self._queue.append((topic, msg))
+
+            def poll(self, _ms):
+                q, self._queue = self._queue, []
+                return q
+
+        sub = FakeSub()
+        node = IoNode(link, sub=sub, log_meta={"node": "io_node", "port": "fake"})
+
+        sub.push(TOPIC_LOG_CTRL, LogCtrl(active=True))
+        node._recv_cmd(time.monotonic_ns())
+        self.assertIsNotNone(node._log)
+
+        sub.push(TOPIC_LOG_CTRL, LogCtrl(active=False))
+        node._recv_cmd(time.monotonic_ns())
+        self.assertIsNone(node._log)
 
 
 if __name__ == "__main__":

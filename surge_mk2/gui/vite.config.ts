@@ -18,6 +18,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/ws': { target: `ws://${host}:${port}`, ws: true, changeOrigin: true },
+      // `.sfl`/`.mcap` のダウンロード（`GET /logs/<name>`）。開発中もPiから直接落とせるように
+      '/logs': { target: `http://${host}:${port}`, changeOrigin: true },
     },
   },
 })

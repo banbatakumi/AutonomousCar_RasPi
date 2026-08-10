@@ -46,6 +46,7 @@ TOPIC_DIAG_LINK = "diag/link"
 TOPIC_IMAGE_FRONT = "image/front"
 TOPIC_IMAGE_REAR = "image/rear"
 TOPIC_HB_PREFIX = "hb/"
+TOPIC_LOG_CTRL = "log/ctrl"
 
 
 class MsgBase(msgspec.Struct):
@@ -186,6 +187,12 @@ class DriveCmd(MsgBase):
     #: **0 は「制動しない」ではなく「未指定」で、STM32 が最大値で制動する**
     #: （`accel_limit` と同じ約束。埋め忘れでブレーキが効かない方が危険なため）
     brake_torque: float = 0.0
+    #: 立っている間 `target_speed` を無視し `target_torque` を直接掛ける（v0.6）。
+    #: `brake` と同様に速度 PI を迂回する。`brake` が同時に立っていれば `brake` が優先
+    torque_mode: bool = False
+    #: [N·m] 駆動トルク直接指令。`torque_mode` のときだけ意味を持つ。負は後退方向。
+    #: 範囲 ±`convert.MAX_TARGET_TORQUE_NM`（v0.6）
+    target_torque: float = 0.0
     source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
 
 
@@ -266,6 +273,16 @@ class Heartbeat(MsgBase):
     detail: str = ""
 
 
+class LogCtrl(MsgBase):
+    """`.sfl` 記録の意思表示。**telemetry_node が継続的に送り続け、io_node が従う。**
+
+    1回だけ送ると io_node の再起動やメッセージ取りこぼしで食い違ったままになるので、
+    `cmd`（`TOPIC_CMD`）と同じく「現在の意思」を繰り返し流す設計にしてある。
+    """
+
+    active: bool = False
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -275,6 +292,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_DIAG_LINK: LinkDiag,
     TOPIC_IMAGE_FRONT: ImageRef,
     TOPIC_IMAGE_REAR: ImageRef,
+    TOPIC_LOG_CTRL: LogCtrl,
 }
 
 

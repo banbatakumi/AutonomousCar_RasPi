@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0005      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0006      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -187,16 +187,17 @@ fields = [
 name = "COMMAND"
 type = 0x10
 dir = "p2s"
-len = 12
+len = 14
 rate_hz = 100
 fields = [
   { name = "mode",             type = "u8", note = "0=DISARM 1=MANUAL 2=AUTO (3=予約)" },
-  { name = "flags",            type = "u8", note = "bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing" },
+  { name = "flags",            type = "u8", note = "bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing bit6=torque_mode" },
   { name = "target_speed",     type = "i16", scale = 0.001,  unit = "m/s" },
   { name = "target_steer",     type = "i16", scale = 0.0001, unit = "rad", note = "路面舵角" },
   { name = "accel_limit",      type = "u16", scale = 0.001,  unit = "m/s2" },
   { name = "steer_rate_limit", type = "u16", scale = 0.001,  unit = "rad/s" },
   { name = "brake_torque",     type = "u16", scale = 0.0001, unit = "N.m", note = "後輪各輪。0=未指定(最大で制動)" },
+  { name = "target_torque",    type = "i16", scale = 0.0001, unit = "N.m", note = "駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6" },
 ]
 
 [[packets]]
@@ -276,6 +277,7 @@ HORN        = 0x04   # v0.5: 立てている間ずっと鳴る（v0.4 は立ち�
 LIGHT_MASK  = 0x18   # bit3-4 = LIGHT_MODE_*
 LIGHT_SHIFT = 0x03   # マスクではなくシフト量
 PASSING     = 0x20
+TORQUE_MODE = 0x40   # v0.6: 立っている間 target_speed を無視し target_torque を直接掛ける（brakeと同様PI迂回。brake優先）
 
 [enums.MODE]
 comment = "COMMAND.mode / TELEMETRY.flags bit0-1"

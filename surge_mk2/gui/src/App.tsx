@@ -1,12 +1,13 @@
 /**
- * 画面の骨格。今回作り込むのは **運転ビュー1枚**。
- * 他のタブ（地図 / 診断 / 設定 / ログ）は `architecture.md` §10.2 の枠だけ置いてある。
+ * 画面の骨格。運転・設定・ログの3ビューは作り込んである。
+ * 残る「地図」「診断」は `architecture.md` §10.2 の枠だけ置いてある。
  */
 import { useEffect, useRef, useState } from 'react'
 import { StatusBar } from './components/StatusBar'
 import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
 import { DriveView } from './views/DriveView'
+import { LogView } from './views/LogView'
 import { SettingsView } from './views/SettingsView'
 import { ControlChannel } from './ws/control'
 import { connectTelemetry } from './ws/telemetry'
@@ -32,9 +33,12 @@ export function App() {
           status: s,
           hasControl: s.has_controller && s.controller === c.id,
           deniedBy: s.has_controller && s.controller !== c.id ? s.controller : null,
+          sfl: s.sfl,
+          mcap: s.mcap,
         }),
       onDenied: (holder) => set({ deniedBy: holder, hasControl: false }),
       onRtt: (v) => set({ wsRttMs: v }),
+      onLogs: (files) => set({ logFiles: files }),
     })
     chRef.current = c
     setCh(c)
@@ -66,6 +70,8 @@ export function App() {
         <DriveView />
       ) : tab === '設定' ? (
         <SettingsView />
+      ) : tab === 'ログ' ? (
+        <LogView ch={ch} />
       ) : (
         <Placeholder tab={tab} />
       )}
@@ -99,7 +105,6 @@ function Placeholder({ tab }: { tab: Tab }) {
   const what: Record<string, string> = {
     地図: 'SLAM・占有格子・生成経路のデバッグ（Phase 3 で中身が入る）',
     診断: '時系列グラフ（uPlot）、パケットロスの推移、STATS の突き合わせ',
-    ログ: '.sfl の再生とエクスポート。replay_node --bus を GUI から叩けるようにする',
   }
   return (
     <div className="placeholder">

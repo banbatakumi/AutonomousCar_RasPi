@@ -28,7 +28,7 @@ export const live = {
 }
 
 /** 自分が今送っている指令。20Hz で書き換わるのでここに置く（zustand には入れない） */
-export const cmdOut = { speed: 0, steer: 0, active: false }
+export const cmdOut = { speed: 0, steer: 0, active: false, torqueMode: false, torque: 0 }
 
 let rxCount = 0
 let scanCount = 0
@@ -79,7 +79,7 @@ export type Numbers = {
   scanAgeMs: number
   /** **直近の1周**で欠けていたセクタ数。累積ではない（累積は link 側にある） */
   scanMissing: number
-  out: { speed: number; steer: number; active: boolean }
+  out: { speed: number; steer: number; active: boolean; torqueMode: boolean; torque: number }
   /** ARM の自動解除までの残り [ms] */
   armRemainingMs: number
 }
@@ -93,7 +93,7 @@ let snapshot: Numbers = {
   scanHz: 0,
   scanAgeMs: Infinity,
   scanMissing: 0,
-  out: { speed: 0, steer: 0, active: false },
+  out: { speed: 0, steer: 0, active: false, torqueMode: false, torque: 0 },
   armRemainingMs: 0,
 }
 const listeners = new Set<() => void>()

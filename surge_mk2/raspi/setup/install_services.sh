@@ -6,19 +6,26 @@
 #   sudo ./raspi/setup/install_services.sh --with-logger  #    MCAP も SD に録る
 #   sudo ./raspi/setup/install_services.sh --remove
 #
-# ## ★ MCAP 記録（surge-logger）は既定で止めてある — SD カードを削らないため
+# ## ★ 記録は GUI の「ログ」タブから操作する（2026-08-10 に運用変更）
 #
-# 実測で `.mcap` は **10.3MB/分**（大半がカメラ画像）。**1日 15GB を SD に
-# 書き続けることになり、書き換え寿命に効く。** そして数値だけなら
-# `.sfl`（io_node が常時記録・2.5MB/分）とほぼ同じ内容なので、
-# **SD に二重に書く価値があるのは実質カメラ画像だけ。**
+# `.sfl`（UART生ログ）・`.mcap`（画像込み）とも、既定では**何も自動記録しない**。
+# 走行中に GUI の「ログ」タブで開始/停止する:
 #
-# そこで既定は「Pi は `.sfl` だけ」にし、画像込みの記録は **PC 側で受ける**:
+# - `.sfl` は `io_node` が実時間ループの中で直接 Pi の SD に書く
+#   （`log/ctrl` というバスのメッセージで開始/停止を伝えるだけ。ネットワーク越しには
+#   流さない — Wi-Fi が切れても Pi 単体で記録が続くのがこの形式の価値なので）。
+#   GUI の「ログ」タブから一覧・ダウンロード・削除できる
+# - `.mcap` は `logger_node -o -` の標準出力を WebSocket でそのまま中継し、
+#   **Pi の SD には一切書かない**。ブラウザが受け取ったバイト列を直接 PC へ
+#   ダウンロードする（`tools/record.sh` が ssh パイプでやっていることを
+#   GUI から起動できるようにしただけ）
+#
+# `surge-logger`（`--with-logger`）は「GUI を開けない・ヘッドレスで長時間
+# 録りたい」ときの代替として残してある。既定では入れない
+# （実測で `.mcap` は 10.3MB/分・1日 15GB と大きく、SD の書き換え寿命に効くため）。
 #
 #     tools/record.sh                 # Mac で実行。ssh 越しに MCAP を PC へ流す
-#
-# こうすると SD への書き込みは 12.8MB/分 → 2.5MB/分（**8割減**）になる。
-# それでも Pi 単体で画像を録りたいときだけ `--with-logger` を付ける。
+#                                      # （GUI を開けないときの代替経路）
 #
 # ## ★★ 既定で `--allow-arm` が入る
 #
@@ -181,7 +188,9 @@ systemctl restart systemd-logind || true
 #    切り離す副作用で `/dev/serial0` の割り当てを動かすので、STM32 との UART が壊れる
 systemctl disable --now bluetooth 2>/dev/null || true
 
-write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet --log $ARM"
+# **`--log` は付けない。** `.sfl` の記録は GUI の「ログ」タブ（`log/ctrl`）で
+# セッション中に開始/停止する運用にしたため、既定では記録なしで起動する
+write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet $ARM"
 write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quiet"
 write_unit surge-telemetry "WebSocket サーバ"  "raspi.nodes.telemetry_node" "surge-io.service"
 # ロガーの unit は**常に置く**（`--with-logger` を付けたときだけ enable する）。
@@ -249,8 +258,10 @@ if [ "$WITH_LOGGER" = 1 ]; then
   echo "  ★ surge-logger 有効。SD に約 10.3MB/分（1日 15GB）書く。書き換え寿命に注意"
 else
   echo
-  echo "  記録: Pi は .sfl のみ（2.5MB/分）。**画像込みの MCAP は PC 側で受ける**:"
-  echo "        tools/record.sh          # Mac で実行（SD には書かない）"
+  echo "  記録: 既定では何も録らない。GUI の「ログ」タブから開始/停止する"
+  echo "        .sfl  … Pi の SD に書く（GUI から一覧・ダウンロード・削除できる）"
+  echo "        .mcap … SD には書かず、ブラウザに直接ダウンロードされる"
+  echo "        GUI を開けないときは代わりに: tools/record.sh（Mac で実行）"
 fi
 if [ -n "$ARM" ]; then
   echo

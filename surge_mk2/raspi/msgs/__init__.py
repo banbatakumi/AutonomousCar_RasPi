@@ -9,6 +9,7 @@ from .convert import (
     FAULT_FLAGS,
     LIDAR_C_SATURATED_M,
     MAX_BRAKE_TORQUE_NM,
+    MAX_TARGET_TORQUE_NM,
     SPEED_DEADBAND_MPS,
     ScanAssembler,
     StateBuilder,
@@ -21,6 +22,7 @@ from .types import (
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_REAR,
+    TOPIC_LOG_CTRL,
     TOPIC_SCAN,
     TOPIC_TYPES,
     TOPIC_VEHICLE_STATE,
@@ -28,6 +30,7 @@ from .types import (
     Heartbeat,
     ImageRef,
     LinkDiag,
+    LogCtrl,
     MsgBase,
     Scan,
     VehicleState,
@@ -36,11 +39,11 @@ from .types import (
 
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
-    "Heartbeat",
+    "Heartbeat", "LogCtrl",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
-    "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
+    "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX", "TOPIC_LOG_CTRL",
     "TOPIC_TYPES", "type_for_topic",
     "StateBuilder", "ScanAssembler", "decode_flags", "command_from_cmd",
     "DISARM_COMMAND", "FAULT_FLAGS", "SPEED_DEADBAND_MPS", "LIDAR_C_SATURATED_M",
-    "MAX_BRAKE_TORQUE_NM",
+    "MAX_BRAKE_TORQUE_NM", "MAX_TARGET_TORQUE_NM",
 ]

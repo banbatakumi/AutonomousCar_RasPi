@@ -24,7 +24,7 @@ from .types import DriveCmd, Scan, VehicleState
 
 __all__ = ["StateBuilder", "ScanAssembler", "SPEED_DEADBAND_MPS",
            "decode_flags", "FAULT_FLAGS", "command_from_cmd", "DISARM_COMMAND",
-           "MAX_BRAKE_TORQUE_NM"]
+           "MAX_BRAKE_TORQUE_NM", "MAX_TARGET_TORQUE_NM"]
 
 # ── スケール（uart_protocol.md §5.3。protocol.toml の META と一致させること） ──
 _SPEED = 1e-3          # m/s
@@ -58,6 +58,11 @@ _I32_SPAN = 1 << 32
 #: **STM32 側でもクランプされるが、GUI のスライダ上限をここから引くために持つ。**
 #: 超えた値を送ると黙って丸められ、「スライダを上げても効きが変わらない」に見える
 MAX_BRAKE_TORQUE_NM = 0.075
+
+#: `target_torque`（駆動トルク直接指令）の上限 [N·m]（v0.6）。**一旦の値**
+#: （モータ物理上限 0.1557 N·m 未満）。STM32 側の対応クランプ値・GUI の
+#: `store/ui.ts` の `MAX_TARGET_TORQUE_NM` と合わせること
+MAX_TARGET_TORQUE_NM = 0.1
 
 #: 立っていたら名前で持ち回る fault。ビットのまま流すと GUI 側で意味を再定義する羽目になる
 FAULT_FLAGS = {
@@ -190,7 +195,7 @@ def _clamp(v: float, lo: int, hi: int) -> int:
 DISARM_COMMAND = packets.Command(
     mode=packets.Mode.DISARM, flags=0,
     target_speed=0, target_steer=0, accel_limit=0, steer_rate_limit=0,
-    brake_torque=0)
+    brake_torque=0, target_torque=0)
 
 
 def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
@@ -223,6 +228,8 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         flags |= packets.CMD_FLG_HORN
     if cmd.passing:
         flags |= packets.CMD_FLG_PASSING
+    if cmd.torque_mode:
+        flags |= packets.CMD_FLG_TORQUE_MODE
     # bit3-4 の2ビット。**3 は予約なので送らない**（STM32 は NORMAL として扱うが、
     # 「予約値を送っておいて向こうの解釈に頼る」形にはしない）
     light = cmd.light_mode if cmd.light_mode in (0, 1, 2) else 0
@@ -230,6 +237,8 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
 
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0
+    torque_raw = _clamp(cmd.target_torque / _TORQUE,
+                         -round(MAX_TARGET_TORQUE_NM / _TORQUE), round(MAX_TARGET_TORQUE_NM / _TORQUE))
     return packets.Command(
         mode=mode, flags=flags,
         target_speed=_clamp(speed / _SPEED, -32768, 32767),
@@ -237,6 +246,7 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         accel_limit=_clamp(cmd.accel_limit / _SPEED, 0, 65535),
         steer_rate_limit=_clamp(cmd.steer_rate_limit / _YAW_RATE, 0, 65535),
         brake_torque=_brake_torque_raw(cmd.brake_torque),
+        target_torque=torque_raw,
     )
 
 

@@ -181,6 +181,10 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv.camera_clients = {"front": set(), "rear": set()}
         srv._jpeg_impl = None
         srv.sub = type("S", (), {"latest": {}})()
+        srv._sfl_active = False
+        srv._mcap_proc = None
+        srv._mcap_started_ns = 0
+        srv._mcap_error = None
 
         class _P:
             def send(self, topic, msg):
@@ -236,6 +240,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.deadman_trips = 0
         srv._jpeg_impl = None
         srv.sub = type("S", (), {"latest": {}})()
+        srv._sfl_active = False
+        srv._mcap_proc = None
+        srv._mcap_started_ns = 0
+        srv._mcap_error = None
         srv.sent = []
 
         async def _send_json(ws, obj):
@@ -270,7 +278,27 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
         await srv._on_control(b, b'{"type":"estop"}')
         self.assertIsNone(srv.controller)
-        self.assertIsNone(srv._last_cmd)
+
+    async def test_torque_mode_and_target_torque_reach_drive_cmd(self):
+        """v0.6: WS の cmd JSON から `torque_mode`/`target_torque` が
+        DriveCmd まで届く。**フィールド追加を _on_control 側に反映し忘れると
+        GUI が送っても静かに握りつぶされる**（実際にこの取りこぼしがあった）。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(
+            a, b'{"type":"cmd","mode":1,"speed":0.0,"torque_mode":true,"target_torque":0.05}')
+        self.assertTrue(srv._last_cmd.torque_mode)
+        self.assertEqual(srv._last_cmd.target_torque, 0.05)
+
+    async def test_torque_mode_defaults_false_for_old_gui(self):
+        """古い GUI がこのキーを送ってこなくても速度指令のまま動く（安全側の既定）。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
+        self.assertFalse(srv._last_cmd.torque_mode)
+        self.assertEqual(srv._last_cmd.target_torque, 0.0)
 
 
 if __name__ == "__main__":

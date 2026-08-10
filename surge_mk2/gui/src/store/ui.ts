@@ -4,7 +4,7 @@
  * **20Hz で変わるものはここに入れない。** 接続状態・操縦権・設定の類だけ。
  */
 import { create } from 'zustand'
-import type { ControlStatus } from '../types'
+import type { ControlStatus, LogFile } from '../types'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider'
 
@@ -45,7 +45,18 @@ export type DrivingSettings = {
   armIdleTimeoutMs: number
   /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
   brakeTorque: number
+  /** 駆動をトルク直接指令にするか（v0.6）。設定タブの永続トグル。true の間、
+   * スロットル入力はすべて `target_speed` ではなく `target_torque` になる */
+  torqueMode: boolean
+  /** トルクモード中にスロットル全開で出す駆動トルク [N·m]。上限 `MAX_TARGET_TORQUE_NM` */
+  driveTorque: number
 }
+
+/** `DrivingSettings` のうち数値項目のキーだけ。スライダのレンジは数値項目にしか無い
+ * （`torqueMode` は boolean なので対象外） */
+export type NumericSettingKey = {
+  [K in keyof DrivingSettings]: DrivingSettings[K] extends number ? K : never
+}[keyof DrivingSettings]
 
 /**
  * io_node 側のハード上限。**GUI からはこれを超えられない**（超えても切り捨てられるだけ）。
@@ -79,6 +90,18 @@ export const MIN_BRAKE_TORQUE_NM = 0.005
  */
 export const DEFAULT_BRAKE_TORQUE_NM = MAX_BRAKE_TORQUE_NM
 
+/**
+ * 駆動トルク直接指令の上限 [N·m]（v0.6）。**`raspi/msgs/convert.py` の
+ * `MAX_TARGET_TORQUE_NM` と合わせること。** 超えた値を送っても黙って丸められる。
+ */
+export const MAX_TARGET_TORQUE_NM = 0.1
+/**
+ * トルクモードの既定の強さ。**上限より控えめにしてある。**
+ * ブレーキと違い「強すぎて空転・飛び出す」方が「弱くて動かない」より危険なため、
+ * 弱めから始めて設定タブで上限まで上げてもらう方針（ブレーキとは逆）。
+ */
+export const DEFAULT_DRIVE_TORQUE_NM = 0.05
+
 export const DEFAULT_SETTINGS: DrivingSettings = {
   maxSpeed: 0.6,
   maxSteer: 0.785,
@@ -93,10 +116,13 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   steerCounter: 5.2,
   armIdleTimeoutMs: 20_000,
   brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
+  torqueMode: false,
+  driveTorque: DEFAULT_DRIVE_TORQUE_NM,
 }
 
-/** 設定タブのスライダのレンジ。`min`/`max`/`step` の3つ組。 */
-export const SETTINGS_RANGE: Record<keyof DrivingSettings, { min: number; max: number; step: number }> = {
+/** 設定タブのスライダのレンジ。`min`/`max`/`step` の3つ組。
+ * **数値項目だけ。** boolean 項目（`torqueMode`）はスライダを持たないのでここに含めない */
+export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: number; step: number }> = {
   maxSpeed: { min: 0.1, max: PI_MAX_SPEED_CAP, step: 0.01 },
   maxSteer: { min: 0.175, max: PI_MAX_STEER_CAP, step: 0.005 }, // 0.175rad ≒ 10°
   cruiseScale: { min: 0.1, max: 1.0, step: 0.05 },
@@ -110,17 +136,19 @@ export const SETTINGS_RANGE: Record<keyof DrivingSettings, { min: number; max: n
   steerCounter: { min: 0.5, max: 6.5, step: 0.1 },
   armIdleTimeoutMs: { min: 5_000, max: 60_000, step: 1_000 },
   brakeTorque: { min: MIN_BRAKE_TORQUE_NM, max: MAX_BRAKE_TORQUE_NM, step: 0.001 },
+  driveTorque: { min: 0.01, max: MAX_TARGET_TORQUE_NM, step: 0.001 },
 }
 
 const SETTINGS_KEY = 'surge.driveSettings.v1'
 
 function clampSettings(s: DrivingSettings): DrivingSettings {
   const out = { ...s }
-  for (const k of Object.keys(SETTINGS_RANGE) as (keyof DrivingSettings)[]) {
+  for (const k of Object.keys(SETTINGS_RANGE) as NumericSettingKey[]) {
     const { min, max } = SETTINGS_RANGE[k]
     const v = out[k]
     out[k] = typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULT_SETTINGS[k]
   }
+  out.torqueMode = typeof out.torqueMode === 'boolean' ? out.torqueMode : DEFAULT_SETTINGS.torqueMode
   return out
 }
 
@@ -201,6 +229,14 @@ type UiState = {
   /** ラジコン操作の調整値。設定タブで変更、`localStorage` に自動保存 */
   settings: DrivingSettings
 
+  // ── 記録・再生（ログタブ） ──
+  /** `.sfl` を録ってほしいという意思。null はまだ status を受け取っていない */
+  sfl: ControlStatus['sfl'] | null
+  /** mcap のライブ中継。Piには保存されない */
+  mcap: ControlStatus['mcap'] | null
+  /** `logs/` にある `.sfl`/`.mcap` の一覧 */
+  logFiles: LogFile[]
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -233,6 +269,10 @@ export const useUi = create<UiState>((set, get) => ({
   rearBig: false,
 
   settings: loadSettings(),
+
+  sfl: null,
+  mcap: null,
+  logFiles: [],
 
   set: (p) => set(p),
   setSettings: (p) => {

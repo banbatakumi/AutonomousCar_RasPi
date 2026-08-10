@@ -124,6 +124,25 @@ export type ControlStatus = {
   clients: { telemetry: number; control: number; camera: Record<string, number> }
   camera_encoder: string | null
   deadman_trips: number
+  /** `.sfl` を録ってほしいという意思。実際に開閉するのは io_node 側 */
+  sfl: { active: boolean }
+  /** mcap のライブ中継。**Piのディスクには一切書かない**（ブラウザが直接ダウンロードする） */
+  mcap: { active: boolean; elapsed_s: number; error: string | null }
+}
+
+/** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */
+export type LogFile = {
+  name: string
+  kind: 'sfl' | 'mcap'
+  size: number
+  /** UNIX epoch秒（Pythonの `os.stat().st_mtime` そのまま） */
+  mtime: number
+}
+
+/** `/ws/control` のサーバ → GUI。`logs_list`/`logs_delete` への応答。 */
+export type LogsMsg = {
+  type: 'logs'
+  files: LogFile[]
 }
 
 /** GUI → サーバ の走行指令。SI 単位。 */
@@ -146,4 +165,8 @@ export type CmdOut = {
   /** 後輪**各輪**の制動トルク [N·m]。
    * **0 は「制動しない」ではなく「未指定」で、STM32 の最大値で制動する** */
   brake_torque: number
+  /** **立っている間 `speed` は無視され、`target_torque` が駆動トルクとして直接掛かる**（v0.6） */
+  torque_mode: boolean
+  /** [N·m] 駆動トルク直接指令。`torque_mode` のときだけ意味を持つ。負は後退方向（v0.6） */
+  target_torque: number
 }

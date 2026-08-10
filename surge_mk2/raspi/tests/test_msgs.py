@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.msgs import (  # noqa: E402
     MAX_BRAKE_TORQUE_NM,
+    MAX_TARGET_TORQUE_NM,
     SPEED_DEADBAND_MPS,
     DriveCmd,
     ScanAssembler,
@@ -310,6 +311,37 @@ class TestCommandAuxiliaries(unittest.TestCase):
         c = self._cmd(brake_torque=10.0)
         self.assertEqual(c.brake_torque, round(MAX_BRAKE_TORQUE_NM / 1e-4))
         c.encode()                       # 例外が出ないこと
+
+
+class TestTorqueMode(unittest.TestCase):
+    """v0.6 で追加した駆動トルク直接指令。`brake_torque` と違い 0 に特別な意味はない。"""
+
+    def _cmd(self, **kw) -> packets.Command:
+        return command_from_cmd(DriveCmd(mode=1, arm=True, **kw), allow_arm=True)
+
+    def test_torque_mode_occupies_bit6(self):
+        self.assertEqual(self._cmd(torque_mode=True).flags & packets.CMD_FLG_TORQUE_MODE,
+                          packets.CMD_FLG_TORQUE_MODE)
+        self.assertEqual(self._cmd(torque_mode=False).flags & packets.CMD_FLG_TORQUE_MODE, 0)
+
+    def test_target_torque_scale(self):
+        self.assertEqual(self._cmd(target_torque=0.05).target_torque, 500)
+
+    def test_target_torque_zero_is_just_zero(self):
+        """`brake_torque` の 0 とは違い「未指定」の特別扱いはない。"""
+        self.assertEqual(self._cmd(target_torque=0.0).target_torque, 0)
+
+    def test_target_torque_supports_negative_for_reverse(self):
+        self.assertEqual(self._cmd(target_torque=-0.05).target_torque, -500)
+
+    def test_target_torque_clamped_to_max_both_directions(self):
+        max_raw = round(MAX_TARGET_TORQUE_NM / 1e-4)
+        c_pos = self._cmd(target_torque=10.0)
+        c_neg = self._cmd(target_torque=-10.0)
+        self.assertEqual(c_pos.target_torque, max_raw)
+        self.assertEqual(c_neg.target_torque, -max_raw)
+        c_pos.encode()                   # 例外が出ないこと
+        c_neg.encode()
 
 
 class TestTopicRegistry(unittest.TestCase):

@@ -9,7 +9,7 @@
  * 同じ経路で停止する。「止める指令を送る」設計だと、その指令が届かない
  * 状況（＝一番止めたい状況）で止まらない。
  */
-import type { CmdOut, ControlStatus } from '../types'
+import type { CmdOut, ControlStatus, LogFile } from '../types'
 import { wsUrl } from './url'
 
 const RECONNECT_MS = 500
@@ -20,6 +20,8 @@ export type ControlHandlers = {
   onDenied: (holder: string) => void
   /** 往復遅延の実測 [ms]。**GUI↔Pi 区間**（UART 区間は link.cmd_rtt_ms） */
   onRtt: (ms: number) => void
+  /** `logs_list`/`logs_delete` への応答 */
+  onLogs: (files: LogFile[]) => void
 }
 
 export class ControlChannel {
@@ -53,6 +55,7 @@ export class ControlChannel {
       }
       if (m.type === 'status') this.h.onStatus(m as ControlStatus)
       else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '')
+      else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
@@ -83,6 +86,30 @@ export class ControlChannel {
 
   cmd(c: Omit<CmdOut, 'type'>) {
     this.send({ type: 'cmd', ...c })
+  }
+
+  // ── 記録・再生 ──
+
+  /** `.sfl` の記録意思を送る。実際に開閉するのは io_node（`log/ctrl` 経由） */
+  sflRecord(active: boolean) {
+    this.send({ type: 'sfl_record', active })
+  }
+
+  /** mcap のライブ中継を開始する。`/ws/record` を別途つないでおくこと */
+  mcapRecordStart(imageHz?: number) {
+    this.send({ type: 'mcap_record_start', image_hz: imageHz })
+  }
+
+  mcapRecordStop() {
+    this.send({ type: 'mcap_record_stop' })
+  }
+
+  logsList() {
+    this.send({ type: 'logs_list' })
+  }
+
+  logsDelete(name: string) {
+    this.send({ type: 'logs_delete', name })
   }
 
   ping() {

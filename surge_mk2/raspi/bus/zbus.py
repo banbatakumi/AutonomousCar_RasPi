@@ -78,6 +78,7 @@ TOPIC_OWNER: dict[str, str] = {
     "scan": "io",
     "diag/link": "io",
     "cmd": "control",
+    "log/ctrl": "control",
     "image/": "camera",
     "image/front": "camera",
     "image/rear": "camera",

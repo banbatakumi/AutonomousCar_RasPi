@@ -162,6 +162,7 @@ export function useDriving(ch: ControlChannel | null) {
   const keys = useRef(new Set<string>())
   const speed = useRef(0)
   const steer = useRef(0)
+  const torque = useRef(0)
   const lastActivity = useRef(0)
   const sourceRef = useRef<'keyboard' | 'gamepad'>('keyboard')
 
@@ -319,9 +320,12 @@ export function useDriving(ch: ControlChannel | null) {
       if (!ui.armRequested) {
         speed.current = 0
         steer.current = 0
+        torque.current = 0
         cmdOut.speed = 0
         cmdOut.steer = 0
         cmdOut.active = false
+        cmdOut.torqueMode = false
+        cmdOut.torque = 0
         live.armRemainingMs = 0
         if (ui.deadman) ui.set({ deadman: false, inputSource: 'none' })
         mirrorAux(false, false, false)
@@ -365,24 +369,40 @@ export function useDriving(ch: ControlChannel | null) {
         // 急な踏み込みは STM32 の accel_limit / steer_rate_limit が受け持つ
         // 左スティック左 (-1) が左旋回 (+steer)。反時計回りが正
         steer.current = -expo(padSteer, STEER_EXPO) * s.maxSteer
-        speed.current = expo(rt - lt, THROTTLE_EXPO) * maxSpeed
-      } else {
-        // ── 速度：押している間は加速、逆キーはブレーキ ──
-        const dir = fwd ? 1 : rev ? -1 : 0
-        if (dir === 0) {
-          speed.current = approach(speed.current, 0, s.coast, dt)
-        } else if (speed.current * dir < 0) {
-          // 進行方向と逆を押している ＝ ブレーキ。0 を行き過ぎたら 0 で受け止め、
-          // 次のフレームからキック＋加速で逆走に移る
-          const next = speed.current + dir * s.brake * dt
-          speed.current = next * dir > 0 ? 0 : next
-        } else if (Math.abs(speed.current) < s.kickSpeed) {
-          speed.current = dir * s.kickSpeed // 発進キック
+        if (s.torqueMode) {
+          // トルクモード（v0.6）も同じ理由でランプなし。速度指令は使わないので 0
+          torque.current = expo(rt - lt, THROTTLE_EXPO) * s.driveTorque
+          speed.current = 0
         } else {
-          speed.current += dir * s.accel * dt
+          speed.current = expo(rt - lt, THROTTLE_EXPO) * maxSpeed
+          torque.current = 0
+        }
+      } else {
+        const dir = fwd ? 1 : rev ? -1 : 0
+        if (s.torqueMode) {
+          // **トルクモードはランプを挟まない。** 0.1N・m 程度と値域が小さく、
+          // 速度用の加速度ランプ（m/s²）はそのままでは単位が合わない。
+          // 押している間だけ `driveTorque` をそのまま出す（v0.6）
+          torque.current = dir * s.driveTorque
+          speed.current = 0
+        } else {
+          // ── 速度：押している間は加速、逆キーはブレーキ ──
+          if (dir === 0) {
+            speed.current = approach(speed.current, 0, s.coast, dt)
+          } else if (speed.current * dir < 0) {
+            // 進行方向と逆を押している ＝ ブレーキ。0 を行き過ぎたら 0 で受け止め、
+            // 次のフレームからキック＋加速で逆走に移る
+            const next = speed.current + dir * s.brake * dt
+            speed.current = next * dir > 0 ? 0 : next
+          } else if (Math.abs(speed.current) < s.kickSpeed) {
+            speed.current = dir * s.kickSpeed // 発進キック
+          } else {
+            speed.current += dir * s.accel * dt
+          }
+          torque.current = 0
         }
 
-        // ── 舵：切り込みより戻しを速く、切り返しはさらに速く ──
+        // ── 舵：切り込みより戻しを速く、切り返しはさらに速く ──（速度/トルク共通）
         const sdir = left ? 1 : right ? -1 : 0
         if (sdir === 0) {
           steer.current = approach(steer.current, 0, s.steerReturn, dt)
@@ -391,19 +411,25 @@ export function useDriving(ch: ControlChannel | null) {
           steer.current = approach(steer.current, sdir * s.maxSteer, rate, dt)
         }
       }
-      // **ブレーキ中は速度指令を 0 に落とす。**
-      // STM32 は `brake` の間 `target_speed` を無視し、離すと 0 から
+      // **ブレーキ中は速度・トルク指令を 0 に落とす。**
+      // STM32 は `brake` の間 `target_speed`/`target_torque` を無視し、離すと 0 から
       // `accel_limit` に従って加速し直す。GUI 側のランプを走らせたままにすると、
       // 「画面は 0.4 m/s と出ているのに車は止まっている」という嘘の表示になる。
       // 舵はブレーキ中も生かす（曲がりながら止めたい場面がある）
-      if (brake) speed.current = 0
+      if (brake) {
+        speed.current = 0
+        torque.current = 0
+      }
 
       speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
+      torque.current = Math.max(-s.driveTorque, Math.min(s.driveTorque, torque.current))
       steer.current = Math.max(-s.maxSteer, Math.min(s.maxSteer, steer.current))
 
       cmdOut.speed = speed.current
       cmdOut.steer = steer.current
       cmdOut.active = true
+      cmdOut.torqueMode = s.torqueMode
+      cmdOut.torque = torque.current
       if (!ui.deadman || ui.inputSource !== source) {
         ui.set({ deadman: true, inputSource: source })
       }
@@ -428,6 +454,9 @@ export function useDriving(ch: ControlChannel | null) {
         // **こちらは逆に 0 を送ってはいけない。** `brake_torque` の 0 は
         // 「未指定 ＝ STM32 の最大制動」を意味する。スライダの下限は 0 より上にしてある
         brake_torque: s.brakeTorque,
+        // v0.6: 立っている間 `speed` は無視され `target_torque` が駆動トルクとして直接掛かる
+        torque_mode: s.torqueMode,
+        target_torque: torque.current,
       })
     }
 

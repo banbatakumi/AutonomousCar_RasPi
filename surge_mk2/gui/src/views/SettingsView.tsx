@@ -10,14 +10,15 @@
  * する」設計はまだ未実装）。ここで扱うのは、あくまで GUI が指令を作る
  * ときのランプ・上限だけ。
  */
-import type { DrivingSettings } from '../store/ui'
+import type { DrivingSettings, NumericSettingKey } from '../store/ui'
 import {
-  DEFAULT_SETTINGS, MAX_BRAKE_TORQUE_NM, PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, SETTINGS_RANGE, useUi,
+  DEFAULT_SETTINGS, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM, PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP,
+  SETTINGS_RANGE, useUi,
 } from '../store/ui'
 import { RAD2DEG } from '../format'
 
 type Field = {
-  key: keyof DrivingSettings
+  key: NumericSettingKey
   label: string
   unit: string
   note?: string
@@ -68,6 +69,16 @@ const BRAKE_FIELDS: Field[] = [
   },
 ]
 
+const TORQUE_FIELDS: Field[] = [
+  {
+    key: 'driveTorque',
+    label: 'トルク強さ',
+    unit: 'N·m',
+    note: `トルクモード中、スロットル全開で出す駆動トルク。上限 ${MAX_TARGET_TORQUE_NM} N·m（STM32 側の上限。超えても丸められる）`,
+    digits: 3,
+  },
+]
+
 const MISC_FIELDS: Field[] = [
   {
     key: 'armIdleTimeoutMs',
@@ -99,6 +110,26 @@ export function SettingsView() {
       <SettingGroup title="速度" fields={SPEED_FIELDS} settings={settings} onChange={setSettings} />
       <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} onChange={setSettings} />
       <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} onChange={setSettings} />
+
+      <section className="settings-group">
+        <h3>駆動トルク（実験的）</h3>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={settings.torqueMode}
+            onChange={(e) => setSettings({ torqueMode: e.target.checked })}
+          />
+          スロットルをトルク直接指令にする
+        </label>
+        <span className="note">
+          ONの間、速度指令の代わりに駆動トルクを直接送る（v0.6）。速度 PI を迂回するため
+          挙動が変わる。切っている間は従来どおり速度指令
+        </span>
+        {settings.torqueMode && TORQUE_FIELDS.map((f) => (
+          <SettingRow key={f.key} field={f} settings={settings} onChange={setSettings} />
+        ))}
+      </section>
+
       <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} onChange={setSettings} />
     </div>
   )

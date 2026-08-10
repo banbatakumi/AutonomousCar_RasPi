@@ -395,6 +395,8 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .settings-row-head .unit { color: var(--dim); font-size: 11px; }
 .settings-row input[type='range'] { width: 100%; accent-color: var(--accent); }
 .settings-row .note { display: block; color: var(--dim); font-size: 10px; margin-top: 3px; }
+.settings-checkbox { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; }
+.settings-group > .note { display: block; color: var(--dim); font-size: 10px; margin: 0 0 6px; }
 
 .settings-reset {
   margin-left: auto;
@@ -402,3 +404,26 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 1px 7px;
   color: var(--dim);
 }
+
+/* ── ログタブ ─────────────────────────────────────────── */
+
+.logs-section .note { display: block; color: var(--dim); font-size: 10px; margin-top: 6px; }
+.logs-section .badge-bad { margin-top: 6px; }
+.logs-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.logs-checkbox { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+.logs-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+
+.logs-table-wrap { overflow-x: auto; margin: 8px 0 4px; }
+.logs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.logs-table th {
+  text-align: left;
+  color: var(--dim);
+  font-weight: 600;
+  font-size: 10px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.logs-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.logs-actions { display: flex; gap: 8px; align-items: center; }
+.logs-actions a { color: var(--accent); }

@@ -19,6 +19,7 @@ export function DriveBar() {
   const { maxSpeed, maxSteer } = useUi((s) => s.settings)
   const vs = n.vs
   const speed = vs ? (vs.stopped ? 0 : vs.speed) : 0
+  const torqueMode = n.out.active && n.out.torqueMode
   const target = n.out.active ? n.out.speed : 0
 
   return (
@@ -29,11 +30,16 @@ export function DriveBar() {
           <span className="big">{speed.toFixed(2)}</span>
           <span className="unit">m/s</span>
           <span className="sub">{kmh(speed)} km/h</span>
-          <span className="sub">
-            指令 {n.out.active ? `${target.toFixed(2)}` : '—'}
-          </span>
+          {torqueMode ? (
+            <span className="sub">指令(トルク) {n.out.torque.toFixed(3)} N·m</span>
+          ) : (
+            <span className="sub">
+              指令 {n.out.active ? `${target.toFixed(2)}` : '—'}
+            </span>
+          )}
         </div>
-        <BiBar value={speed} target={n.out.active ? target : null} max={maxSpeed} />
+        {/* トルクモード中は target_speed を送らない（0 固定）ので、速度の目標線は表示しない */}
+        <BiBar value={speed} target={n.out.active && !torqueMode ? target : null} max={maxSpeed} />
         {vs?.stopped && <span className="note">停止判定（デッドバンド内。生値 {vs.speed.toFixed(3)}）</span>}
       </div>
 

@@ -7,7 +7,7 @@
 ブラウザから http://surge.local:8000/ を開けば GUI（`gui/dist`）が出る。
 `gui/dist` が無ければビルド方法を書いたページを返す。
 
-## チャンネルを3本に分ける（§9.2）
+## チャンネルを4本に分ける（§9.2）
 
 **1本にまとめない。** カメラのフレームが詰まった瞬間にラジコン入力まで遅延する。
 
@@ -15,9 +15,29 @@
 |---|---|---|---|
 | `/ws/telemetry` | 車両状態・点群・リンク診断 | msgpack バイナリ | 20Hz |
 | `/ws/camera/front`, `/ws/camera/rear` | JPEG | バイナリ | 最大15Hz |
-| `/ws/control` | ラジコン入力・操縦権・E-Stop | JSON | イベント + 20Hz |
+| `/ws/control` | ラジコン入力・操縦権・E-Stop・記録の操作 | JSON | イベント + 20Hz |
+| `/ws/record` | mcap記録の生バイト列 | バイナリ | 録画中のみ |
 
 点群を JSON で送ると CPU を無駄に食うのでテレメトリはバイナリにする。
+
+## 記録は2本とも「開始/停止」だけを `/ws/control` で操作する（`docs/architecture.md` §11）
+
+- **`.sfl`**: `io_node` の実時間ループが直接 Pi のSDに書く（本ノードはバス経由で
+  「録ってほしい/やめてほしい」という意思を `log/ctrl` に流すだけ）。Wi-Fi が
+  切れても Pi 単体で記録が続くのがこの形式の価値なので、ネットワーク越しには
+  中継しない。ファイルは `/ws/control` の `logs_list`/`logs_delete`、
+  および `GET /logs/<name>` でGUIから一覧・ダウンロード・削除できる。
+- **`.mcap`**: `logger_node -o -` をサブプロセスとして起動し、標準出力（＝MCAP
+  バイナリそのもの）を `/ws/record` へそのまま中継する。**Piのディスクには
+  一度も書かない**（`tools/record.sh` が SSH パイプでやっているのと同じこと）。
+  ブラウザ側がバイト列を保持し、停止時に手元のPCへダウンロードする。
+
+**`.sfl` の再生（`replay_node --bus`）は本ノードには無い。** 実車の `surge-io`
+と同じ `io` エンドポイントを取り合うため、Pi上でGUI経由にすると「使うには先に
+SSHで surge-io を止める」手順が結局要り、GUIに置く意味が薄い。実車なしで
+知覚/SLAM/経路生成を開発したいだけなら、Mac側でローカルに
+`replay_node --bus` と本ノードを直接叩けば足りる（そちらは別のバスで動くので
+実車と衝突しない）。
 
 ## 操縦権は同時に1人だけ
 
@@ -63,13 +83,14 @@ from websockets.http11 import Response  # noqa: E402
 
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.msgs import DriveCmd, Heartbeat as HbMsg  # noqa: E402
+from raspi.msgs import DriveCmd, Heartbeat as HbMsg, LogCtrl  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_REAR,
+    TOPIC_LOG_CTRL,
     TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
@@ -78,16 +99,25 @@ __all__ = ["TelemetryServer"]
 
 NS = 1_000_000_000
 DEFAULT_PORT = 8000
-GUI_DIST = Path(__file__).resolve().parents[2] / "gui" / "dist"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GUI_DIST = REPO_ROOT / "gui" / "dist"
+LOGS_DIR = REPO_ROOT / "logs"
 
 TELEMETRY_HZ = 20
 CMD_PUB_HZ = 50
 CAMERA_HZ = 15
 HB_HZ = 10
+#: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
+#: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
+LOG_CTRL_HZ = 1
 #: バスを覗きに行く間隔。20Hz 配信に対して十分細かく、CPU は無視できる
 BUS_POLL_S = 0.005
 #: 操縦クライアントからの指令がこれだけ途絶したら DISARM に落とす（§9.4）
 CMD_DEADMAN_NS = 150 * 1_000_000
+#: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` と同じ値）
+DEFAULT_MCAP_IMAGE_HZ = 5.0
+#: 中継の読み取り単位
+RECORD_CHUNK = 65536
 
 _encoder = msgspec.msgpack.Encoder()
 _json_encode = msgspec.json.encode
@@ -117,6 +147,8 @@ class TelemetryServer:
         self.telemetry_clients: set = set()
         self.control_clients: set = set()
         self.camera_clients: dict[str, set] = {"front": set(), "rear": set()}
+        #: mcap のライブ中継を見ている `/ws/record` クライアント
+        self.record_clients: set = set()
 
         #: 操縦権を持つ接続。**同時に1つだけ**
         self.controller = None
@@ -126,6 +158,17 @@ class TelemetryServer:
         #: デッドマンが働いて DISARM に落とした回数
         self.deadman_trips = 0
         self._why_released = ""
+
+        self.logs_dir = LOGS_DIR
+
+        #: `.sfl` を録ってほしいという「意思」。実際に開閉するのは io_node
+        self._sfl_active = False
+
+        #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
+        self._mcap_proc: asyncio.subprocess.Process | None = None
+        self._mcap_started_ns = 0
+        self._mcap_error: str | None = None
+
 
         self._last_scan_seq = -1
         self._running = False
@@ -162,8 +205,23 @@ class TelemetryServer:
             ctype += "; charset=utf-8"
         return _response(200, ctype, target.read_bytes())
 
+    def _serve_log_file(self, path: str) -> Response:
+        """`GET /logs/<name>` — `.sfl`/`.mcap` のダウンロード。**GETのみ**。
+
+        削除・一覧は `/ws/control` のJSONメッセージ（`logs_delete`/`logs_list`）
+        で扱う。ダウンロードだけはブラウザの `<a download>` で完結させたいので
+        HTTP に残してある。
+        """
+        from urllib.parse import unquote
+        name = unquote(path[len("/logs/"):].split("?")[0])
+        target = self._resolve_log_path(name)
+        if target is None or not target.is_file():
+            return _response(404, "text/plain; charset=utf-8", b"not found")
+        return _response(200, "application/octet-stream", target.read_bytes(),
+                         extra={"Content-Disposition": f'attachment; filename="{target.name}"'})
+
     def _process_request(self, connection, request):
-        """WebSocket 以外のリクエストは静的ファイルとして返す。
+        """WebSocket 以外のリクエストは静的ファイルまたはログのダウンロードとして返す。
 
         HTTP サーバを別プロセスに分けないのは、**GUI と WS を同一オリジンに
         載せるため**。別ポートにすると「開発中は動くのに Pi では繋がらない」
@@ -171,6 +229,8 @@ class TelemetryServer:
         """
         if request.path.startswith("/ws/"):
             return None                       # WebSocket として処理させる
+        if request.path.startswith("/logs/"):
+            return self._serve_log_file(request.path)
         return self._serve_static(request.path)
 
     # ── WebSocket ──
@@ -183,6 +243,8 @@ class TelemetryServer:
             await self._control_channel(ws)
         elif path.startswith("/ws/camera/"):
             await self._camera_channel(ws, path.rsplit("/", 1)[-1])
+        elif path == "/ws/record":
+            await self._record_channel(ws)
         else:
             await ws.close(1008, "unknown channel")
 
@@ -205,6 +267,18 @@ class TelemetryServer:
             await ws.wait_closed()
         finally:
             self.camera_clients[cam].discard(ws)
+
+    async def _record_channel(self, ws) -> None:
+        """mcap のライブ中継を見るクライアント。**Piは中継するだけでSDに書かない。**"""
+        self.record_clients.add(ws)
+        try:
+            await ws.wait_closed()
+        finally:
+            self.record_clients.discard(ws)
+            if not self.record_clients and self._mcap_proc is not None:
+                # 見ている人が誰もいなくなった録画を続ける意味は無い
+                await self._mcap_stop()
+                await self._broadcast_control_status()
 
     async def _control_channel(self, ws) -> None:
         self.control_clients.add(ws)
@@ -261,6 +335,9 @@ class TelemetryServer:
                 # **既定は 0 = 未指定 = STM32 の最大制動。** 古い GUI が繋がって
                 # このキーを送ってこなくても、ブレーキが弱くなる方には転ばない
                 brake_torque=float(m.get("brake_torque", 0.0)),
+                # v0.6: 古い GUI はこのキーを送らないので、既定 False/0.0（速度指令のまま）
+                torque_mode=bool(m.get("torque_mode", False)),
+                target_torque=float(m.get("target_torque", 0.0)),
                 source=f"gui:{self.controller_name}")
             self._last_cmd_ns = time.monotonic_ns()
 
@@ -274,6 +351,27 @@ class TelemetryServer:
         elif kind == "ping":
             await self._send_json(ws, {"type": "pong", "id": m.get("id"),
                                        "t_server": time.monotonic_ns()})
+
+        # ── 記録（誰でも操作できる。走行の操縦権とは別物） ──
+
+        elif kind == "sfl_record":
+            self._sfl_active = bool(m.get("active", False))
+            await self._broadcast_control_status()
+
+        elif kind == "mcap_record_start":
+            await self._mcap_start(image_hz=float(m.get("image_hz", DEFAULT_MCAP_IMAGE_HZ)))
+            await self._broadcast_control_status()
+
+        elif kind == "mcap_record_stop":
+            await self._mcap_stop()
+            await self._broadcast_control_status()
+
+        elif kind == "logs_list":
+            await self._send_json(ws, self._logs_list())
+
+        elif kind == "logs_delete":
+            self._logs_delete(str(m.get("name", "")))
+            await self._send_json(ws, self._logs_list())
 
     def _release_control(self, why: str) -> None:
         self.controller = None
@@ -298,7 +396,120 @@ class TelemetryServer:
                         "camera": {k: len(v) for k, v in self.camera_clients.items()}},
             "camera_encoder": self._jpeg_impl,
             "deadman_trips": self.deadman_trips,
+            "sfl": {"active": self._sfl_active},
+            "mcap": self._mcap_status(),
         }
+
+    def _mcap_status(self) -> dict:
+        active = self._mcap_proc is not None
+        elapsed = (time.monotonic_ns() - self._mcap_started_ns) / NS if active else 0.0
+        return {"active": active, "elapsed_s": elapsed, "error": self._mcap_error}
+
+    # ── mcap のライブ中継（Piのディスクには書かない） ──
+
+    async def _mcap_start(self, *, image_hz: float) -> None:
+        if self._mcap_proc is not None:
+            return                            # 既に録画中
+        self._mcap_error = None
+        cmd = [sys.executable, "-u", "-m", "raspi.nodes.logger_node",
+               "--quiet", "-o", "-", "--image-hz", str(image_hz)]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(REPO_ROOT),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        except Exception as e:
+            self._mcap_error = f"logger_node を起動できない: {e}"
+            return
+        self._mcap_proc = proc
+        self._mcap_started_ns = time.monotonic_ns()
+        asyncio.create_task(self._mcap_pump(proc))
+
+    async def _mcap_pump(self, proc: asyncio.subprocess.Process) -> None:
+        """`logger_node -o -` の標準出力を `/ws/record` へ生中継する。
+
+        **視聴者が居なくても読み続ける。** 読まないと子プロセスのパイプが詰まって
+        書き込みがブロックしてしまう（Piには保存しないので読んだ分は捨てるだけ）。
+        """
+        assert proc.stdout is not None
+        try:
+            while True:
+                chunk = await proc.stdout.read(RECORD_CHUNK)
+                if not chunk:
+                    break
+                if not self.record_clients:
+                    continue
+                dead = []
+                for ws in list(self.record_clients):
+                    try:
+                        await ws.send(chunk)
+                    except Exception:
+                        dead.append(ws)
+                for ws in dead:
+                    self.record_clients.discard(ws)
+        finally:
+            rc = await proc.wait()
+            # `self._mcap_proc is proc` が False なら `_mcap_stop` が既に片付け済み
+            # （＝人間が止めた）。ここで上書きすると正常終了がエラー扱いになる
+            if self._mcap_proc is proc:
+                if rc != 0:
+                    self._mcap_error = f"logger_node が異常終了しました（rc={rc}）"
+                self._mcap_proc = None
+                asyncio.create_task(self._broadcast_control_status())
+            # **中継が完全に終わった合図として `/ws/record` を切る。** MCAP の索引は
+            # 最後に書かれるので、GUI 側はこの切断イベントを「もう来ない」の目印にして
+            # ダウンロードを発火する（`record.ts` の `onClose`）
+            for ws in list(self.record_clients):
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+
+    async def _mcap_stop(self) -> None:
+        proc = self._mcap_proc
+        if proc is None:
+            return
+        self._mcap_proc = None
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        # 実際の終了待ち・末尾チャンク（MCAPの索引）の中継は `_mcap_pump` が続ける
+
+    # ── `logs/` の一覧・ダウンロード・削除 ──
+    #
+    # **`.sfl` の再生はここでは扱わない。** `replay_node --bus` は実車の
+    # `surge-io` と同じ `io` エンドポイントを取り合うため、Pi上でGUI経由にすると
+    # 「使うにはまずSSHで surge-io を止める」という手順が結局要り、GUIボタンの
+    # 意味が薄い。**実車なしで知覚/SLAM/経路生成を開発する**という本来の目的には
+    # `replay_node --bus` をローカル（Mac）でCLIから直接叩けば十分足りる
+    # （そちらは `.sfl` を記録したPiと無関係な別のバスで動くので衝突しない）。
+
+    def _resolve_log_path(self, name: str) -> Path | None:
+        """`logs/` の外に出るファイル名（`../`・絶対パス等）を弾く。"""
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            return None
+        base = self.logs_dir.resolve()
+        target = (base / name).resolve()
+        if target.parent != base:
+            return None
+        return target
+
+    def _logs_list(self) -> dict:
+        files = []
+        if self.logs_dir.is_dir():
+            for p in sorted(self.logs_dir.iterdir()):
+                if not p.is_file() or p.suffix not in (".sfl", ".mcap"):
+                    continue
+                st = p.stat()
+                files.append({"name": p.name, "kind": p.suffix.lstrip("."),
+                              "size": st.st_size, "mtime": st.st_mtime})
+        return {"type": "logs", "files": files}
+
+    def _logs_delete(self, name: str) -> None:
+        path = self._resolve_log_path(name)
+        if path is None or not path.is_file():
+            return
+        path.unlink(missing_ok=True)
 
     async def _broadcast_control_status(self) -> None:
         st = self._control_status()
@@ -392,6 +603,20 @@ class TelemetryServer:
                           HbMsg(node="control",
                                 detail=f"ws={len(self.telemetry_clients)}"))
 
+    async def _log_ctrl_pump(self) -> None:
+        """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
+
+        `_cmd_pump` と同じ理由（1回だけ送ると io_node の再起動や取りこぼしで
+        食い違ったままになる）。録画中だけステータスも再送し、GUI の
+        経過時間表示を進める（アイドル時は既存どおりイベント駆動のみ）。
+        """
+        period = 1.0 / LOG_CTRL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self.pub.send(TOPIC_LOG_CTRL, LogCtrl(active=self._sfl_active))
+            if self._mcap_proc is not None:
+                await self._broadcast_control_status()
+
     async def _camera_pump(self) -> None:
         """共有メモリから読んで JPEG にして送る。**購読者がいないときは何もしない。**
 
@@ -435,7 +660,7 @@ class TelemetryServer:
                          max_queue=8, ping_interval=20) as server:  # noqa: F841
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._cmd_pump,
-                self._camera_pump, self._hb_pump)]
+                self._camera_pump, self._hb_pump, self._log_ctrl_pump)]
             try:
                 await stop
             finally:
@@ -450,19 +675,28 @@ class TelemetryServer:
             self.pub.send(TOPIC_CMD, DriveCmd(mode=0, source="shutdown"))
         except Exception:
             pass
+        # mcap 中継のサブプロセスも道連れにする（ベストエフォート。
+        # systemd 配下なら KillMode=control-group で既に片付いているはず）
+        if self._mcap_proc is not None:
+            try:
+                self._mcap_proc.terminate()
+            except ProcessLookupError:
+                pass
         self.sub.close()
         self.pub.close()
 
 
 # ── HTTP ヘルパ ─────────────────────────────────────────────────────
 
-def _response(status: int, ctype: str, body: bytes) -> Response:
-    headers = Headers({
+def _response(status: int, ctype: str, body: bytes, *, extra: dict[str, str] | None = None) -> Response:
+    h = {
         "Content-Type": ctype,
         "Content-Length": str(len(body)),
         "Cache-Control": "no-store",
-    })
-    return Response(status, http.HTTPStatus(status).phrase, headers, body)
+    }
+    if extra:
+        h.update(extra)
+    return Response(status, http.HTTPStatus(status).phrase, Headers(h), body)
 
 
 def _no_gui_page(dist: Path) -> bytes:

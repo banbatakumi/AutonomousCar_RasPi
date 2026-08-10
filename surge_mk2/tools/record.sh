@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # ★ PC（Mac）側で実行する。Pi の記録を **SD カードに書かずに** PC へ流し込む。
 #
+# **通常は GUI の「ログ」タブの録画ボタンで足りる**（同じ `logger_node -o -` を
+# WebSocket 経由で使っている）。このスクリプトは GUI を開けない・ヘッドレスで
+# 長時間録りたいときの代替経路として残してある。
+#
 #   tools/record.sh                       # Ctrl-C で終了
 #   tools/record.sh --duration 60         # 60秒で自動終了
 #   tools/record.sh --image-hz 15         # 画像を増やす（PC のディスクなので余裕がある）

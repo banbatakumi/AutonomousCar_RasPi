@@ -1,16 +1,17 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.5
-**最終更新**: 2026-08-09
+**バージョン**: v0.6
+**最終更新**: 2026-08-11
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: STM32 側 v0.5 実装済み。**§14 の未実測項目を除き確定**
+**状態**: Pi 側 v0.6 実装済み（`protocol.toml`/`raspi/msgs`）。**STM32 側は未実装**
+（`torque_mode`/`target_torque` の実装が必要。§14 #8 の TC/TV との関係も未確定）
 
-> **v0.5 で変わったのは `COMMAND` (0x10) だけ**（LEN 10→**12**、`flags` のビット定義変更）。
-> `TELEMETRY` / `LIDAR_SECTOR` / `PING` / `CONFIG_*` / `VERSION` / `STATS` は v0.4 のまま。
+> **v0.6 で変わったのは `COMMAND` (0x10) だけ**（LEN 12→**14**、`flags` bit6 `torque_mode` を新設）。
+> `TELEMETRY` / `LIDAR_SECTOR` / `PING` / `CONFIG_*` / `VERSION` / `STATS` は v0.5 のまま。
 > **`COMMAND` の LEN が変わるため、Pi と STM32 の版数がずれている間は走行指令が一切通らない**
 > （受信側が LEN 不一致として破棄し `STATS.rx_len_error` に計上する）。
 > 中途半端に効くより完全に弾かれる方が安全なので、これは意図した破壊的変更である。
-> **本書が最終版**であり、`protocol_version = 0x0005` はこの内容を指す。
+> **本書が最終版**であり、`protocol_version = 0x0006` はこの内容を指す。
 
 ---
 
@@ -202,7 +203,7 @@ STM32 側は速度が必要なら 256エントリのテーブル駆動版に置�
 | `0x07` | `VERSION` | STM32 → Pi | 起動時×3 / 要求時 | **10** |
 | `0x08` | `STATS` | STM32 → Pi | 1 Hz | **48** |
 | `0x09` | `LIDAR_SECTOR_C` | STM32 → Pi | 120 Hz（圧縮・既定OFF） | **39** |
-| `0x10` | `COMMAND` | Pi → STM32 | 100 Hz | **12**（v0.5 で 10→12） |
+| `0x10` | `COMMAND` | Pi → STM32 | 100 Hz | **14**（v0.5 で 10→12、v0.6 で 12→14） |
 | `0x11` | `CONFIG_SET` | Pi → STM32 | イベント | 6 |
 | `0x12` | `PING` | Pi → STM32 | 5 Hz | 4 |
 | `0x13` | `CONFIG_GET` | Pi → STM32 | イベント | **2** |
@@ -610,19 +611,20 @@ MD が死んで無言になると status は最後の値のまま固まるため
 
 Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウトし、FAULT へ遷移する。
 
-### 5.6 `COMMAND` (0x10) — LEN = 12
+### 5.6 `COMMAND` (0x10) — LEN = 14
 
 | offset | size | type | field | 単位 |
 |---|---|---|---|---|
 | 0 | 1 | u8 | `mode` | 0=DISARM / 1=MANUAL / 2=AUTO（**3 は予約・送らない**） |
 | 1 | 1 | u8 | `flags` | §5.6.1 |
-| 2 | 2 | i16 | `target_speed` | 0.001 m/s（負 = 後退）**`brake` 中は無視される** |
+| 2 | 2 | i16 | `target_speed` | 0.001 m/s（負 = 後退）**`brake`／`torque_mode` 中は無視される** |
 | 4 | 2 | i16 | `target_steer` | 0.0001 rad **路面舵角**（反時計回り正 = 左旋回） |
 | 6 | 2 | u16 | `accel_limit` | 0.001 m/s²（加減速のレートリミット） |
 | 8 | 2 | u16 | `steer_rate_limit` | 0.001 rad/s（舵角のレートリミット） |
 | 10 | 2 | u16 | `brake_torque` | 0.0001 N·m **後輪各輪**。`0` = 未指定（最大で制動）★v0.5 |
+| 12 | 2 | i16 | `target_torque` | 0.0001 N·m **駆動トルク直接指令**（負 = 後退方向）。`torque_mode` 時のみ有効 ★v0.6 |
 
-**合計 12 バイト**（フレーム 19 バイト、100Hz で 1.90 kB/s）
+**合計 14 バイト**（フレーム 21 バイト、100Hz で 2.10 kB/s）
 
 時刻同期は `PING` / `PONG` に分離したため、`COMMAND` に Pi 側タイムスタンプは含めない。
 
@@ -631,11 +633,12 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 | bit | 名称 | 意味 |
 |---|---|---|
 | 0 | `arm` | 駆動電源投入を要求 |
-| 1 | `brake` | ブレーキを掛ける（強さは `brake_torque`） |
+| 1 | `brake` | ブレーキを掛ける（強さは `brake_torque`）。**`torque_mode` より優先** |
 | 2 | `horn` | クラクション。**立てている間ずっと鳴る**（v0.5 で変更） |
 | 3-4 | `light_mode` | 0=`OFF` / 1=`DAYTIME` / 2=`NORMAL`（3 は予約・送らない） |
 | 5 | `passing` | パッシング |
-| 6-7 | — | 予約（0 を入れること） |
+| 6 | `torque_mode` | 立っている間 `target_speed` を無視し `target_torque` を直接掛ける ★v0.6 |
+| 7 | — | 予約（0 を入れること） |
 
 | `light_mode` | 前照灯 | 尾灯 |
 |---|---|---|
@@ -661,6 +664,21 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   する」だけで実際の制動力は PI ゲイン任せだったが、v0.5 は MD を制動モードに切り替えて
   指定トルクを直接掛ける。離すと目標車速 0 から `accel_limit` に従って加速し直すので、
   ブレーキ中に `target_speed` を保持し続けても離した瞬間に飛び出すことはない。
+
+#### 5.6.3 `torque_mode` / `target_torque` の約束（★v0.6）
+
+- ラジコン（MANUAL）モードで、速度指令ではなく**駆動トルクを直接指令**したい要望に対応する。
+  `brake_torque` と同じ理由（値域が小さい）で `target_torque` のスケールも 0.0001 N·m/LSB。
+- **`target_torque` に `0` の特別な意味はない。** `brake_torque` の「0=未指定=最大制動」とは
+  違い、そのまま「駆動トルク 0」として扱ってよい。丸めで 0 に落ちても危険側には振れない。
+- **上限は 0.1 N·m**（一旦の値。モータ物理上限 0.1557 N·m 未満）。超えた値は STM32 側で
+  クランプされる想定。Pi 側にも同じ上限を持つ（`msgs.MAX_TARGET_TORQUE_NM`）。
+- **`torque_mode` が立っている間、車速 PI ループは `brake` と同様に迂回**し、
+  `target_torque` を各輪へ直接掛ける（`target_speed` は無視）。
+  **`brake` と `torque_mode` が同時に立っていたら `brake` が優先**（制動は駆動より安全側）。
+- TC（トラクションコントロール）/TV（トルクベクタリング）が `torque_mode` 中の
+  `target_torque` にどう関与するか（そのまま通すか、TC が空転抑制のため減衰させるか）は
+  **未確定**（§14 参照）。STM32 側の実装方針が決まり次第この節を更新する。
 
 #### 設計意図
 
@@ -810,7 +828,7 @@ Pi 側は ack が 500ms 以内に返らなければ再送する（最大3回、�
 
 | offset | size | type | field | 備考 |
 |---|---|---|---|---|
-| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。**v0.5 = `0x0005`** |
+| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。**v0.6 = `0x0006`** |
 | 2 | 4 | u32 | `fw_id` | ファームの git short hash 等 |
 | 6 | 4 | u32 | `build_epoch` | ビルド時刻（UNIX epoch 秒） |
 
@@ -1128,7 +1146,7 @@ GUI でも赤（層1-3）と黄（層4）で明確に分けること。
 
 | パケット | フレーム長 | 頻度 | 帯域 |
 |---|---|---|---|
-| `COMMAND` (0x10) | 19 B | 100 Hz | 1.90 kB/s（8%） |
+| `COMMAND` (0x10) | 21 B | 100 Hz | 2.10 kB/s（8%）★v0.6 で 19→21B |
 | `PING` (0x12) | 11 B | 5 Hz | 0.06 kB/s |
 | `CONFIG_SET` / `CONFIG_GET` / `VERSION_REQ` | — | 散発 | < 0.1 kB/s |
 
@@ -1288,6 +1306,7 @@ STM32 側で実測してから確定する量。**これらが出るまで `conf
 | 5 | **トルク定数 Kt** | `torque_cmd` の物理的意味。TC のゲイン設計 | STM32 |
 | 6 | 前輪エンコーダの実分解能（ADC ビット数と実効ノイズ） | `odom_dist` の量子化誤差、デッドバンド幅 | STM32 |
 | 7 | LiDAR の実効最大測距（コースでの最遠壁距離） | `param 0x0040 = 2`（圧縮）を常用できるか | Pi（実測） |
+| 8 | **`torque_mode` 中の TC/TV との関係**（★v0.6）。`target_torque` をそのまま各輪へ通すか、TC が空転抑制のため減衰させるか | `torque_mode` の実際の挙動、safety の考え方 | STM32 |
 
 **#1 と #2 が最優先。** この2つが決まらないと Pi 側は「舵を何 rad 切ったか」も
 「何 m 進んだか」も正しく知ることができず、SLAM も経路追従も成立しない。
@@ -1307,6 +1326,7 @@ STM32 側の作業を待たずに Pi 側で採寸して `vehicle.yaml` に入れ
 | **v0.4** | 2026-08-06 | **STM32 側と2往復の議論を経て確定。** `TELEMETRY` を全面改訂（LEN 53→**66**）: 電源2系統化、`odom_ticks` → `wheel_speed[4]` + `odom_dist[2]`、`torque_cmd` / `accel_z` / `md_status[3]` を追加、電圧・電流・超音波を1バイト化、`flags` を u32 に拡張し `mode` を bit0-1 へ移動。`LIDAR_SECTOR` の `angle_start`/`angle_step` を `duration_us`/`rot_speed_dps` に置換、ビニングを min → 代表点に変更。**`VERSION`(0x07) / `STATS`(0x08) / `LIDAR_SECTOR_C`(0x09) / `CONFIG_GET`(0x13) / `VERSION_REQ`(0x14) を追加**、`LOG` に `severity` を追加。`param 0x0040` を LiDAR 出力フォーマットの enum に変更（`0x0041` 廃止）。`COMMAND` タイムアウト 200→100ms、`TELEMETRY` 途絶を 100/200ms の2段階に。**CALIB モード廃止**（`mode=3` は予約、`calib_done` → `steer_center_valid` に改名）。`CONFIG_SET` は揮発（Flash 保存なし）。前輪オドメトリの射影（§5.3）を明記 |
 | **v0.5** | 2026-08-09 | **STM32 側発。`COMMAND` (0x10) のみの変更。** LEN 10→**12**、末尾に `brake_torque : u16`（0.0001 N·m/輪、`0` = 未指定 = 最大制動）を追加。`flags` bit3 の1ビット `light` を bit3-4 の2ビット `light_mode`（OFF/DAYTIME/NORMAL）へ拡張し、**`light=1`（旧 NORMAL）と `light_mode=1`（DAYTIME）で値の意味が変わった**。bit5 `passing` を新設。`horn` を単発ビープから「立てている間ずっと鳴る」に変更。`brake` 中は車速 PI を迂回して指定トルクを直接掛ける（`target_speed` は無視）。緊急停止・`COMMAND` 途絶時の制動を最大トルクに変更。起動時に駆動電源が一瞬 ON になる問題を修正（`armed` の観測が変わる）。`torque_cmd` の符号を「正=駆動 / 負=制動」と明確化（レイアウト変更なし） |
 | v0.4 | 2026-08-07 | **記述誤りの訂正のみ（ワイヤ形式・`protocol_version` とも変更なし）。** `LIDAR_SECTOR` / `LIDAR_SECTOR_I` / `LIDAR_SECTOR_C` の `rot_speed_dps` のスケールを `0.01 deg/s` → **`1 deg/s`**（§5.1 参照）。u16×0.01 では実回転 3600 deg/s を表現できず、実機ログで生値がそのまま deg/s であることを確認した。**STM32 側の変更は不要** |
+| **v0.6** | 2026-08-11 | **`COMMAND` (0x10) のみの変更。** LEN 12→**14**、末尾に `target_torque : i16`（0.0001 N·m、負=後退方向）を追加。`flags` bit6 に `torque_mode` を新設。**ラジコン（MANUAL）モードで駆動トルクを直接指令できるようにするため。** 立っている間は `brake` と同様に車速 PI を迂回し `target_torque` を各輪へ直接掛ける（`target_speed` は無視、`brake` が同時に立っていれば `brake` が優先）。上限は一旦 **0.1 N·m**（モータ物理上限 0.1557 N·m 未満）とし Pi 側でクランプ。`target_torque` の `0` に `brake_torque` のような特別な意味はない。TC/TV との関係は未確定（§14 #8） |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）
 

@@ -1,13 +1,23 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.4（`uart_protocol.md` **v0.5** に対応）
-**最終更新**: 2026-08-06
+**バージョン**: v0.5（`uart_protocol.md` **v0.6** に対応）
+**最終更新**: 2026-08-11
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.6 での変更（★未実装。STM32 側の対応が必要）**
+> - `COMMAND` (0x10) の LEN が 12→**14**。末尾に `target_torque : int16_t`
+>   （0.0001 N·m、負=後退方向）を追加
+> - `flags` bit6 に `torque_mode` を新設。立っている間は `brake` と同様に車速 PI を
+>   迂回し `target_torque` を各輪へ直接掛ける（`brake` が同時に立っていれば `brake` 優先）
+> - 上限は一旦 **0.1 N·m**（モータ物理上限 0.1557 N·m 未満）。Pi 側は送信前にクランプ済み
+>   だが、STM32 側でも同じ上限でクランプすること（`brake_torque` と同じ多層防御）
+> - TC/TV が `torque_mode` 中の `target_torque` にどう関与するかは未確定
+>   （`uart_protocol.md` §14 #8）。実装方針が決まったらこの節と §4.4 を更新すること
 
 > **v0.3 での変更**（STM32 側「v0.4 合意版」を反映。**本書の v0.2 は破棄**）
 > - `TELEMETRY` の**フィールド順を変更**（`odom_dist` を offset 24 へ、accel/pitch/roll を 32-41 へ）
@@ -226,7 +236,7 @@ bool frame_send(uint8_t type, const void *payload, uint8_t len)
 #define PKT_LIDAR_SECTOR_C  0x09   /* LEN = 39 （圧縮・既定OFF）★v0.4 追加  */
 
 /* Pi → STM32 */
-#define PKT_COMMAND         0x10   /* LEN = 12  ★v0.5 で 10→12             */
+#define PKT_COMMAND         0x10   /* LEN = 14  ★v0.5 で 10→12、v0.6 で 12→14 */
 #define PKT_CONFIG_SET      0x11   /* LEN = 6                               */
 #define PKT_PING            0x12   /* LEN = 4                               */
 #define PKT_CONFIG_GET      0x13   /* LEN = 2   ★v0.4 追加                  */
@@ -488,18 +498,19 @@ typedef struct {
 
 ### 4.4 受信するパケット
 
-#### `COMMAND` (0x10) — 12 バイト ★v0.5 で 10→12
+#### `COMMAND` (0x10) — 14 バイト ★v0.6 で 12→14（**未実装。要 STM32 側対応**）
 
 ```c
 typedef struct {
     uint8_t  mode;              /* 0=DISARM 1=MANUAL 2=AUTO （3 は予約・来ない） */
-    uint8_t  flags;             /* 下表 ★v0.5 でビット定義変更                   */
-    int16_t  target_speed;      /* 0.001 m/s  （負 = 後退）★brake 中は無視       */
+    uint8_t  flags;             /* 下表 ★v0.6 で bit6 追加                       */
+    int16_t  target_speed;      /* 0.001 m/s  （負 = 後退）★brake/torque_mode 中は無視 */
     int16_t  target_steer;      /* 0.0001 rad ★路面舵角（反時計回り正 = 左）     */
     uint16_t accel_limit;       /* 0.001 m/s²                                    */
     uint16_t steer_rate_limit;  /* 0.001 rad/s                                   */
     uint16_t brake_torque;      /* 0.0001 N·m 後輪各輪。0=未指定(最大) ★v0.5     */
-} command_t;                    /* = 12 bytes */
+    int16_t  target_torque;     /* 0.0001 N·m 駆動トルク直接指令（負=後退方向）★v0.6 */
+} command_t;                    /* = 14 bytes */
 ```
 
 `flags` (u8):
@@ -507,20 +518,26 @@ typedef struct {
 | bit | 名称 | 意味 |
 |---|---|---|
 | 0 | `arm` | 駆動電源投入を要求 |
-| 1 | `brake` | ブレーキ（強さは `brake_torque`） |
+| 1 | `brake` | ブレーキ（強さは `brake_torque`）。**`torque_mode` より優先** |
 | 2 | `horn` | クラクション。**立てている間ずっと鳴る** |
 | 3-4 | `light_mode` | 0=OFF / 1=DAYTIME / 2=NORMAL（3 は予約・Pi は送らない） |
 | 5 | `passing` | パッシング（前照灯のみ全光量。尾灯は連動しない） |
-| 6-7 | — | 予約（Pi は 0 を入れる） |
+| 6 | `torque_mode` | 立っている間 `target_speed` を無視し `target_torque` を直接掛ける ★v0.6 |
+| 7 | — | 予約（Pi は 0 を入れる） |
 
 - `target_speed` は**目標速度**であり目標加速度ではない。`accel_limit` は
   「その目標速度へ向かうときの加減速の上限」
 - **`target_steer` は路面舵角。** リンク比を掛けてモータ機械角に変換するのは STM32 の仕事
 - **`mode` は Pi 側の要求であり、STM32 は拒否できる。** 実際に採用したモードは
-  `TELEMETRY.flags` **bit0-1** で返す（v0.3 の bit8-9 から移動）
+  `TELEMETRY.flags` **bit0-1** で返る（v0.3 の bit8-9 から移動）
 - `steer_rate_limit` は角度制御ループの追従限界を超える指令によるオーバーシュート・発振を防ぐ
 - **`brake` 中は車速 PI を迂回し、`brake_torque` を直接掛ける**（★v0.5）。
   `brake_torque = 0` は「制動 0」ではなく「未指定 = 最大制動」。上限 0.075 N·m/輪
+- **`torque_mode` 中は車速 PI を迂回し、`target_torque` を各輪へ直接掛ける**（★v0.6）。
+  `brake` と同時に立っていたら `brake` を優先すること。`target_torque` の `0` は
+  「未指定」ではなく素直に「駆動トルク 0」。上限は一旦 **0.1 N·m**（Pi 側でもクランプ済み。
+  モータ物理上限 0.1557 N·m 未満）。**TC/TV との関係は未確定**
+  （そのまま通すか、空転抑制のため減衰させるか。`uart_protocol.md` §14 #8）
 - **`COMMAND` が 100ms 途絶したら自動ブレーキ**（v0.3 の 200ms から短縮。§8.2）。
   ★v0.5 では最大制動トルクを直接掛け、`horn` と `passing` は強制解除する
 
@@ -721,7 +738,7 @@ __HAL_DMA_DISABLE_IT(&hdma_rx, DMA_IT_HT);   /* Half-Transfer 割り込みは不
 
 | TYPE | 期待 LEN |
 |---|---|
-| `0x10` `COMMAND` | 12 |
+| `0x10` `COMMAND` | 14 |
 | `0x11` `CONFIG_SET` | 6 |
 | `0x12` `PING` | 4 |
 | `0x13` `CONFIG_GET` | 2 |
@@ -1226,6 +1243,9 @@ Pi 側が計算する:
 - [ ] MD ステアの据え切り過熱保護がある
 - [ ] **`md_status[i].comm_ok` を直近 100ms の受信有無で更新している**
 - [ ] パラメータのデフォルト値が安全側である
+- [ ] **`torque_mode`（bit6）が立っている間、車速 PI を迂回し `target_torque` を直接掛けている**（★v0.6）
+- [ ] `brake` と `torque_mode` が同時に立っていたら **`brake` を優先**している（★v0.6）
+- [ ] `target_torque` を **±0.1 N·m でクランプ**している（Pi 側のクランプに頼っていない）（★v0.6）
 
 ### センサ・データ
 

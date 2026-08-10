@@ -14,8 +14,9 @@
 - TELEMETRY / STATS / PONG / VERSION / LIDAR を受信・集計
 - リンク健全性（TELEMETRY 途絶 100ms=警告 / 200ms=FAULT）を判定
 - **バスへ配信**: `vehicle_state`(50Hz) / `scan`(10Hz) / `diag/link`(10Hz) / `hb/io`(10Hz)
-- **バスから購読**: `cmd`（走行指令）
-- 送受信フレームを生のまま `.sfl` に記録（`--log`）
+- **バスから購読**: `cmd`（走行指令）、`log/ctrl`（`.sfl` 記録の開始/停止）
+- 送受信フレームを生のまま `.sfl` に記録（`--log` で起動時から、または `log/ctrl`
+  でセッション中いつでも GUI から開始/停止できる。§後述）
 
 ## COMMAND の安全設計 — 3つの独立した条件が全部そろわないとモータは回らない
 
@@ -61,7 +62,7 @@ from raspi.io.gpio import (  # noqa: E402
 )
 from raspi.io.serial_link import SerialLink  # noqa: E402
 from raspi.msgs import DriveCmd, Heartbeat as HbMsg, command_from_cmd  # noqa: E402
-from raspi.msgs.types import TOPIC_CMD, TOPIC_HB_PREFIX  # noqa: E402
+from raspi.msgs.types import TOPIC_CMD, TOPIC_HB_PREFIX, TOPIC_LOG_CTRL  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
@@ -87,7 +88,10 @@ DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
 
 
 class IoNode:
-    """:param log: 生フレームログの Writer。None なら記録しない。
+    """:param log: 生フレームログの Writer。None なら記録しない（起動時点の状態）。
+    :param log_meta: `log/ctrl` で動的に記録を開始したときに使うメタデータ
+        （`port`/`baud`/`protocol_version` など）。`--log` を付けなかった場合でも
+        GUI から開始できるよう、常に渡しておく。
 
     記録は「回っている限り必ず残る」ことが価値なので、ログ書き込みで例外が出ても
     ループは止めない（記録が壊れても走行は続けられるべき）。
@@ -95,6 +99,7 @@ class IoNode:
 
     def __init__(self, link: SerialLink, on_telemetry=None,
                  log: FrameLogWriter | None = None,
+                 log_meta: dict | None = None,
                  heartbeat: Heartbeat | None = None,
                  indicator: StatusIndicator | None = None,
                  pub=None, sub=None, *,
@@ -126,6 +131,7 @@ class IoNode:
         self.cmd_timeouts = 0
 
         self._log = log
+        self._log_meta = log_meta
         self._log_errors = 0
         self._ping_seq = 0
         self._running = False
@@ -201,6 +207,31 @@ class IoNode:
         except Exception:
             self._log_errors += 1
 
+    def _set_log_active(self, active: bool) -> None:
+        """`log/ctrl`（GUI の記録ボタン）に従って `.sfl` を開始/停止する。
+
+        **`self._log is not None` が現在の記録状態そのもの。** 呼び出し側
+        （`_log_rx`/`_on_tx`/`_log_event` 等）は既にこれを None チェックしているので、
+        ここで差し替えるだけで他のコードは変更しなくてよい。書き込み例外と同じ理由で、
+        開始に失敗してもループは止めない（走行は記録より優先する）。
+        """
+        if active == (self._log is not None):
+            return
+        if active:
+            try:
+                path = default_log_path()
+                self._log = FrameLogWriter(path, meta=self._log_meta)
+            except Exception as e:
+                print(f"\n!! .sfl 記録を開始できない: {e}", file=sys.stderr)
+                return
+            print(f"\n# .sfl 記録開始: {path}", file=sys.stderr)
+            self._log_event("record_start", {"path": str(path)})
+        else:
+            self._log_event("record_stop")
+            self._log.close()
+            self._log = None
+            print("\n# .sfl 記録停止", file=sys.stderr)
+
     def _log_linkstats(self, now_ns: int) -> None:
         """1Hz のリンク健全性スナップショット。
 
@@ -265,12 +296,14 @@ class IoNode:
             accel_limit=0, steer_rate_limit=0, brake_torque=0))
 
     def _recv_cmd(self, now_ns: int) -> None:
-        """バスから走行指令を取り込み、古くなっていないかを判定する。"""
+        """バスから走行指令と `.sfl` 記録の意思（`log/ctrl`）を取り込む。"""
         if self.sub is not None:
             for topic, msg in self.sub.poll(0):
                 if topic == TOPIC_CMD:
                     self.cmd = msg
                     self._cmd_ns = now_ns
+                elif topic == TOPIC_LOG_CTRL:
+                    self._set_log_active(msg.active)
         stale = self.cmd is None or (now_ns - self._cmd_ns) > CMD_TIMEOUT_NS
         if stale and not self.cmd_stale and self.cmd is not None:
             self.cmd_timeouts += 1
@@ -382,8 +415,9 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=None, help="秒で自動終了")
     ap.add_argument("--quiet", action="store_true", help="ライブ表示なし")
     ap.add_argument("--log", nargs="?", const="logs", default=None, metavar="PATH",
-                    help="生フレームログを記録。値なしで logs/ に自動命名、"
-                         "*.sfl でファイル指定、それ以外はディレクトリ扱い")
+                    help="起動直後から生フレームログを記録。値なしで logs/ に自動命名、"
+                         "*.sfl でファイル指定、それ以外はディレクトリ扱い。"
+                         "付けなくても log/ctrl（GUI の記録ボタン）でいつでも開始できる")
     ap.add_argument("--no-heartbeat", action="store_true",
                     help="GPIO6 の E-Stop ハートビートを出さない（診断用）")
     ap.add_argument("--require-gpio", action="store_true",
@@ -412,7 +446,7 @@ def main() -> int:
         try:
             from raspi.bus import LATEST, Publisher, Subscriber
             pub = Publisher("io")
-            sub = Subscriber({TOPIC_CMD: LATEST})
+            sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST})
             print(f"# バス配信 {pub.endpoint} "
                   f"(vehicle_state / scan / diag/link / hb/io)")
         except ImportError as e:
@@ -420,15 +454,14 @@ def main() -> int:
         except Exception as e:
             print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
 
+    # **`args.log` 無しでも常に用意しておく。** `log/ctrl`（GUI の記録ボタン）で
+    # セッション中に記録を始めるとき、同じメタデータで書けるようにするため
+    log_meta = {"node": "io_node", "port": args.port, "baud": args.baud,
+                "protocol_version": PROTOCOL_VERSION}
     log = None
     if args.log is not None:
         path = Path(args.log) if args.log.endswith(".sfl") else default_log_path(args.log)
-        log = FrameLogWriter(path, meta={
-            "node": "io_node",
-            "port": args.port,
-            "baud": args.baud,
-            "protocol_version": PROTOCOL_VERSION,
-        })
+        log = FrameLogWriter(path, meta=log_meta)
         print(f"# 記録: {path}")
 
     # ── GPIO ──
@@ -458,8 +491,8 @@ def main() -> int:
         if any(p is not None for p in pins):
             indicator = StatusIndicator(*pins)
 
-    node = IoNode(link, log=log, heartbeat=heartbeat, indicator=indicator,
-                  pub=pub, sub=sub, allow_arm=args.allow_arm,
+    node = IoNode(link, log=log, log_meta=log_meta, heartbeat=heartbeat,
+                  indicator=indicator, pub=pub, sub=sub, allow_arm=args.allow_arm,
                   max_speed=args.max_speed, max_steer=args.max_steer)
 
     def _shutdown(*_):
@@ -504,9 +537,11 @@ def main() -> int:
                   "\n   次に走らせる前に車両のボタン2を押して解除すること")
         if indicator is not None:
             indicator.close()
-        if log is not None:
+        # **`log` ではなく `node._log` を見る。** `log/ctrl` で記録が途中から
+        # 始まった／途中で止められた場合、起動時の `log` 変数はもう最新ではない
+        if node._log is not None:
             node._log_linkstats(time.monotonic_ns())
-            log.close()
+            node._log.close()
         link.close()
         if sub is not None:
             sub.close()
@@ -537,10 +572,11 @@ def main() -> int:
               + (f" ({hz:.1f}Hz)" if hz else "")
               + f" 最大遅れ={st.max_late_ns / 1e6:.2f}ms "
                 f"停止={st.stalls}回 skip={st.skipped} {st.late_hist}")
-    if log is not None:
-        mb = log.stats.bytes_written / 1e6
-        print(f"log: {log.path} rx={log.stats.rx} tx={log.stats.tx} "
-              f"events={log.stats.events} {mb:.1f}MB"
+    if node._log is not None:
+        lg = node._log
+        mb = lg.stats.bytes_written / 1e6
+        print(f"log: {lg.path} rx={lg.stats.rx} tx={lg.stats.tx} "
+              f"events={lg.stats.events} {mb:.1f}MB"
               + (f" !! 書き込みエラー {node._log_errors} 回" if node._log_errors else ""))
     return 0
 

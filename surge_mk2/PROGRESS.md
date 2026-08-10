@@ -3,7 +3,7 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」だけを書く。
 
-最終更新: 2026-08-10（**`estop_test.py` を arm 経路まで拡張して回し直し、合格。★ Phase 0 完了**）
+最終更新: 2026-08-11（**UART プロトコル v0.6：ラジコンのトルク直接指令を追加。Pi 側実装済み、STM32 側は未実装**）
 
 ---
 
@@ -15,6 +15,7 @@
 |---|---|
 | 設計フェーズ | 完了 |
 | UART プロトコル v0.5 | **実車で確認済み**（2026-08-10。GUI 表示・ラジコン操縦とも正常） |
+| **UART プロトコル v0.6（トルク直接指令）** | **Pi 側・GUI 側は実装済み。STM32 側は未実装**（2026-08-11。下記） |
 | プロトコル実装（Python + C ヘッダ生成） | **完了** |
 | **Pi 実機セットアップ** | **完了**（SSH・リポジトリ配置・venv・UART 有効化） |
 | **STM32 実機との UART 疎通** | **確認済み**（双方向・エラー0）。**v0.5 でも確認済み**（往復 8.4ms・loss/tx_drop 0） |
@@ -43,7 +44,8 @@
 | **mDNS（`surge-mk2.local`）運用** | **確立**（直結/Wi-Fi の生きている方を自動選択。IP 探索が不要に） |
 | ~~AP モード~~ | **実装しない方針に変更**（屋外は持込ルーターへ STA 接続。下記） |
 | **MCAP 記録（`logger_node`）と `.sfl` → MCAP 変換** | **実機で合格**（実写・実点群を記録。テスト 295件） |
-| **★ 記録は PC 側で受ける（`tools/record.sh`）** | **実装・実機確認済み**。SD 書き込み 10.54→2.42MB/分 |
+| **★ 記録は PC 側で受ける（`tools/record.sh`）** | **実装・実機確認済み**。SD 書き込み 10.54→2.42MB/分（GUI 完成後は代替経路の位置づけに降格。下記） |
+| **★ GUI「ログ」タブ（記録・一覧・DL・削除）** | **実装・実機反映済み**（再生機能は撤回。CLIの`replay_node --bus`を使う方針。下記） |
 | **★ `RemoveIPC=yes` で `/dev/shm/surge_cam*` が消える** | **発見・修正済み**（SSH を切ると消えていた。下記） |
 | Pi 純正ファン | **正常**（`pwm-fan` 認識・63°C で 5040RPM・段2/4。設定不要） |
 
@@ -1901,6 +1903,73 @@ Pi 5 実機では ZeroMQ / msgspec / numpy / picamera2 / gpiozero+lgpio が要�
 
 ---
 
+## GUI「ログ」タブを実装した（2026-08-10）— **実機に反映済み**（`--restart-io` 実施・E-Stopラッチ→解除済み）
+
+placeholder のままだった「ログ」タブに、記録の開始/停止・一覧・ダウンロード・削除を
+実装した。バンビからの指摘で、当初案（Piに一時保存→DL→削除）は「結局SDに書いている」
+と気づき、mcap は完全にライブ中継へ設計を変えた。
+
+### 記録は2本で仕組みが違う
+
+- **`.sfl`**: 自動記録をやめ、GUIの開始/停止ボタンに変更（バンビの判断）。
+  `io_node` が実時間ループの中で直接 Pi の SD に書くのは変えていない。
+  telemetry_node は `log/ctrl` というバスのメッセージで「録ってほしい」という
+  **意思だけ**を1Hzで送り続け、io_node 側が `self._log` を開閉する
+  （`_cmd_pump` と同じ「1回だけ送ると取りこぼしで食い違う」への対策）。
+  Wi-Fi が切れても記録は止まらない
+- **mcap**: `logger_node -o -` をサブプロセスにして、標準出力を新設の
+  `/ws/record`（バイナリ）でそのまま中継するだけにした。**Piのディスクには
+  一度も書かない。** ブラウザがチャンクを `Blob` に溜め、
+  サーバが `/ws/record` を切断した瞬間（＝索引まで書き終わった合図）に
+  ダウンロードを発火する。`tools/record.sh`（SSH パイプ）と原理は同じで、
+  GUI から起動できるようにしただけ
+
+### ★ GUIからの `.sfl` 再生は作った直後に撤回した（2026-08-11）
+
+いったん `replay_start`/`replay_stop` を `/ws/control` に実装し実機まで反映したが、
+バンビの指摘で**実運用に合わないと判明**した:
+
+- GUIはPi上の `surge-telemetry` が配っている＝GUIが動いている間は既定の構成で
+  **常に `surge-io` も動いている**
+- 再生（`replay_node --bus`）は `surge-io` と**同じ ZeroMQ エンドポイントを
+  取り合う**ため、`surge-io` が動いている限り必ず失敗する
+- つまりGUIの再生ボタンを使うには、結局SSHで先に `sudo systemctl stop surge-io`
+  する必要があり、**ボタンを作った意味がほぼ無かった**
+
+一方で「実車なしで知覚/SLAM/経路生成を開発する」という本来の目的（`architecture.md`
+§11）は、**Mac側でローカルに `replay_node --bus` と `telemetry_node` を直接叩く**
+だけで完全に足りる（別のバスで動くので実車と衝突しない、CLIツールとして既に
+2026-08-07 完成済み）。GUIへの再実装は行わず、`replay_node --bus` はCLIツールの
+まま残す方針にした。**telemetry_node / GUI から `replay_start`/`replay_stop`/
+`ReplaySection`/`ControlStatus.replay` を全部削除して単純化した。**
+
+### 新設・変更した主なもの
+
+- `raspi/msgs/types.py`: `TOPIC_LOG_CTRL` / `LogCtrl` を追加
+- `raspi/bus/zbus.py`: `TOPIC_OWNER["log/ctrl"] = "control"`
+- `raspi/nodes/io_node.py`: `_set_log_active()` で `.sfl` を動的に開閉。
+  `--log` はまだ残す（起動直後から録りたい・オフライン用途向け）が、
+  `install_services.sh` の既定からは外した
+- `raspi/nodes/telemetry_node.py`: `/ws/record` チャンネル新設、
+  `/ws/control` に `sfl_record`/`mcap_record_start`/`mcap_record_stop`/
+  `logs_list`/`logs_delete` を追加、`GET /logs/<name>` でダウンロード
+- `gui/src/views/LogView.tsx`（新規）・`gui/src/ws/record.ts`（新規）
+- テストは `raspi/tests/test_io_node_log.py` に `TestIoNodeLogToggle` を追加
+  （3件）。既存 `test_cmd_path.py` の `TelemetryServer.__new__` フィクスチャは
+  新フィールド分を追加しないと `AttributeError` になるので直した
+
+### 実機での反映状況
+
+- `tools/deploy.sh --services --restart-io --restart --test`（Pi上のテスト305件込み）で
+  一度反映・確認済み。ただし**それは再生機能ありのバージョン**で、その後の削除は
+  まだ Pi に反映していない（次回 deploy が必要。再生を削っただけなので
+  `--restart-io` までは不要、`--services` は不要、GUIのrsyncだけで足りるはず）
+- Pi実機で `.sfl` 開始/停止が実際にファイルを開閉すること・Wi-Fiを切っても
+  記録が止まらないこと・mcap録画中に `logs/` が増えないことは**未確認**
+- ブラウザ（Chrome/Safari）での実際のダウンロード動作も未確認
+
+---
+
 ## 次にやること（Phase 0 の残り）
 
 優先度順。上ほど他が依存する。
@@ -2005,3 +2074,38 @@ telemetry_node を上げていない状態でも io_node は自前で DISARM を
 - ベンチ観測で `steer_actual ≈ +0.392 rad`（約22.4°）が張り付いている。
   `steer_center_valid` は立っているので、**原点は有効なまま実際に切れている**か、
   原点そのものがずれている。実車で確認すること
+
+## UART プロトコル v0.6（2026-08-11）— ラジコンモードのトルク直接指令。**Pi 側は実装済み、STM32 側は未実装**
+
+ラジコン（MANUAL）操作で、速度指令ではなく駆動トルクを直接指令できるようにする要望に対応。
+`COMMAND` (0x10) のみの変更で、v0.4→v0.5 と同じ「TOML 編集 → `generate.py` 再生成」の手順。
+
+### 変更内容
+
+- `COMMAND` LEN 12→**14**。末尾に `target_torque : i16`（0.0001 N·m、負=後退方向）を追加
+- `flags` bit6 に `torque_mode` を新設。立っている間は `brake` と同様に**車速 PI を迂回**し
+  `target_torque` を直接掛ける（`target_speed` は無視）。`brake` と同時に立っていたら
+  **`brake` が優先**（制動は駆動より安全側という判断）
+- 上限は一旦 **0.1 N·m**（モータ物理上限 0.1557 N·m 未満。ユーザー指示）。
+  `target_torque` の `0` に `brake_torque` のような「未指定＝最大」の特別扱いはない
+- `raspi/proto/protocol.toml` → `generate.py` で `packets.py` / `surge_proto.h` 両方再生成
+- `raspi/msgs/{types,convert}.py` に `torque_mode` / `target_torque` / `MAX_TARGET_TORQUE_NM`（0.1）を追加
+- テスト: `test_proto.py`（LEN 14 に更新）、`test_msgs.py`（`TestTorqueMode` 追加）。**unittest 310件 green**
+
+### GUI（v0.6 対応）
+
+- 設定タブに永続トグル「スロットルをトルク直接指令にする」を追加（ユーザー確認済み：
+  設定タブのトグル方式、既定強さは上限より控えめな 0.05 N·m から）
+- ON の間、`useDriving.ts` のスロットル入力（ゲームパッド/キーボードとも）が
+  `target_speed` の代わりに `target_torque` を出す。**ランプは挟まない**（値域が
+  0.1 N·m と小さく、速度用の m/s² ランプがそのまま使えないため）
+- `DriveBar` の速度ゲージはトルクモード中「指令(トルク) X.XXX N·m」に表示を切り替え
+  （`target_speed` は 0 固定で送るため、そのまま表示すると嘘になる）
+- `tsc -b --noEmit` / `vite build` とも green
+
+### 残作業（このリポジトリのスコープ外）
+
+- **STM32 ファームウェア側が未実装。** `docs/stm32_interface.md` §4.4 に実装すべき構造体・
+  ビット・チェックリストを追記済み。TC/TV が `target_torque` にどう関与するかは未確定
+  （`docs/uart_protocol.md` §14 #8）
+- 実車での動作確認は STM32 側の対応後
