@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.6（`uart_protocol.md` **v0.6** に対応）
+**バージョン**: v0.7（`uart_protocol.md` **v0.7** に対応）
 **最終更新**: 2026-08-11
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
@@ -8,6 +8,17 @@
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.7 での変更（★STM32 側 実装・ベンチ確認済み。2026-08-11）**
+> - **LEN は全パケット変更なし。** `flags` の空きビットを使うだけなので、
+>   片側が未対応でも通信は継続する（bit7 を立てなければ v0.6 と同じ挙動）
+> - `COMMAND` (0x10) の `flags` bit7 に **`auto_stop`** を新設。立っている間、
+>   **進行方向**の超音波が **20cm 未満**なら STM32 が指令を無視して最大制動する
+> - `TELEMETRY` (0x02) の `flags` bit16 に **`auto_stop_active`**（今まさに介入中）を新設
+> - 優先順位は **`brake` > `auto_stop` > 通常指令**。`auto_stop` 単独での作動時は
+>   `brake_torque` を見ず**常に最大制動**
+> - 検知距離 20cm は固定でヒステリシス無し。`CONFIG_SET` の param も無い
+>   （`uart_protocol.md` §14 #9）。LiDAR による全周版は未実装（同 #10）
 
 > **v0.6 での変更（★STM32 側も実装・実車確認済み。2026-08-11）**
 > - `COMMAND` (0x10) の LEN が 12→**14**。末尾に `target_torque : int16_t`
@@ -504,7 +515,7 @@ typedef struct {
 ```c
 typedef struct {
     uint8_t  mode;              /* 0=DISARM 1=MANUAL 2=AUTO （3 は予約・来ない） */
-    uint8_t  flags;             /* 下表 ★v0.6 で bit6 追加                       */
+    uint8_t  flags;             /* 下表 ★v0.6 で bit6、v0.7 で bit7 追加         */
     int16_t  target_speed;      /* 0.001 m/s  （負 = 後退）★brake/torque_mode 中は無視 */
     int16_t  target_steer;      /* 0.0001 rad ★路面舵角（反時計回り正 = 左）     */
     uint16_t accel_limit;       /* 0.001 m/s²                                    */
@@ -524,7 +535,7 @@ typedef struct {
 | 3-4 | `light_mode` | 0=OFF / 1=DAYTIME / 2=NORMAL（3 は予約・Pi は送らない） |
 | 5 | `passing` | パッシング（前照灯のみ全光量。尾灯は連動しない） |
 | 6 | `torque_mode` | 立っている間 `target_speed` を無視し `target_torque` を直接掛ける ★v0.6 |
-| 7 | — | 予約（Pi は 0 を入れる） |
+| 7 | `auto_stop` | 立っている間、進行方向の超音波 20cm 未満で自動的に最大制動 ★v0.7 |
 
 - `target_speed` は**目標速度**であり目標加速度ではない。`accel_limit` は
   「その目標速度へ向かうときの加減速の上限」
@@ -540,6 +551,12 @@ typedef struct {
   「未指定」ではなく素直に「駆動トルク 0」。上限は **0.125 N·m**（Pi 側でもクランプ済み。
   モータ物理上限 0.1557 N·m 未満。実車確認後に 0.1 から引き上げ）。**TC/TV との関係は未確定**
   （そのまま通すか、空転抑制のため減衰させるか。`uart_protocol.md` §14 #8）
+- **`auto_stop` 中は進行方向の超音波だけを見る**（★v0.7）。`torque_mode` が立っていなければ
+  `target_speed`、立っていれば `target_torque` の符号で向きを決め、`>= 0` なら前方センサ、
+  負なら後方センサ**だけ**を見る（逆方向は見ないので後退で抜けられる）。検知不能
+  （`ULTRASONIC_NO_ECHO`・範囲外）では作動しない。`brake` が同時なら `brake` 優先で、
+  `auto_stop` 単独時は `brake_torque` を見ず常に最大制動。**ラッチせず**、離れれば自動解除。
+  介入中は `TELEMETRY.flags` bit16 を立てること
 - **`COMMAND` が 100ms 途絶したら自動ブレーキ**（v0.3 の 200ms から短縮。§8.2）。
   ★v0.5 では最大制動トルクを直接掛け、`horn` と `passing` は強制解除する
 
@@ -1007,11 +1024,14 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 #define FLG_FAULT_DRIVE_UNDERVOLTAGE  (1u << 13)   /* 駆動系低電圧。自動クリア          */
 #define FLG_FAULT_SIGNAL_UNDERVOLTAGE (1u << 14)   /* シグナル系低電圧。自動クリア      */
 #define FLG_DRIVE_POWER_LOCKED        (1u << 15)   /* ラッチにより arm 要求を拒否中     */
-/* bit16-31 予約（0 を送ること） */
+#define FLG_AUTO_STOP_ACTIVE          (1u << 16)   /* ★v0.7 自動停止が今まさに介入中   */
+/* bit17-31 予約（0 を送ること） */
 ```
 
 - **`mode` が bit8-9 から bit0-1 へ移動した。** v0.3 からの変更点なので注意
-- **`TC_ACTIVE` / `TV_ACTIVE` は「有効/無効」ではなく「今まさに介入しているか」**
+- **`TC_ACTIVE` / `TV_ACTIVE` / `AUTO_STOP_ACTIVE` は「有効/無効」ではなく
+  「今まさに介入しているか」**（★v0.7）。`auto_stop` を許可しているかどうかは
+  Pi 自身が送った `COMMAND.flags` bit7 で分かるので、テレメトリには載せない
 - **bit11/12 はリセットするまで消えない。** bit13/14 は電圧が復帰すると消える
 - **bit10 は旧 `calib_done` を改名したもので、意味も変わった。**
   「今この起動で実行した」ではなく「**Flash に有効な原点が保存されている**」。
@@ -1248,6 +1268,12 @@ Pi 側が計算する:
 - [ ] **`torque_mode`（bit6）が立っている間、車速 PI を迂回し `target_torque` を直接掛けている**（★v0.6）
 - [ ] `brake` と `torque_mode` が同時に立っていたら **`brake` を優先**している（★v0.6）
 - [ ] `target_torque` を **±0.125 N·m でクランプ**している（Pi 側のクランプに頼っていない）（★v0.6）
+- [ ] **`auto_stop`（bit7）が立っている間、進行方向の超音波 20cm 未満で最大制動している**（★v0.7）
+- [ ] `auto_stop` の進行方向判定に `torque_mode` の有無を反映している（速度 or トルクの符号）（★v0.7）
+- [ ] **逆方向のセンサを見ていない**（前方に障害物があっても後退できる）（★v0.7）
+- [ ] 検知不能（`ULTRASONIC_NO_ECHO`・範囲外）では `auto_stop` が作動しない（★v0.7）
+- [ ] 優先順位が **`brake` > `auto_stop` > 通常指令**になっている（★v0.7）
+- [ ] 介入中だけ `FLG_AUTO_STOP_ACTIVE` を立てている（許可されているかではない）（★v0.7）
 
 ### センサ・データ
 
@@ -1412,6 +1438,7 @@ LD06 を接続。Pi 側で 360点を極座標プロットし、**部屋の形が
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.7** | 2026-08-11 | **`uart_protocol.md` v0.7 に対応。STM32 側実装済み。** `COMMAND.flags` bit7 に `auto_stop`、`TELEMETRY.flags` bit16 に `auto_stop_active` を新設（**LEN 変更なし**）。進行方向の超音波 20cm 未満で最大制動、逆方向のセンサは見ない、検知不能時は不作動、ラッチなし。優先順位は `brake` > `auto_stop` > 通常指令。検知距離のパラメータ化・LiDAR 全周版は未実装（`uart_protocol.md` §14 #9/#10） |
 | **v0.6** | 2026-08-11 | **`uart_protocol.md` v0.6 に対応。STM32 側実装・実車確認済み。** `COMMAND` を 12→**14** バイトに拡張し `target_torque : int16_t` を追加、`flags` bit6 に `torque_mode` を新設。実車確認後、`target_torque`/`brake_torque` の上限をともに 0.1/0.075 N·m → **0.125 N·m** へ引き上げ |
 | v0.1 | 2026-08-06 | 初版。`uart_protocol.md` v0.3 に対応 |
 | v0.2 | 2026-08-06 | `uart_protocol.md` v0.4 ドラフトに対応。**確定版で覆された箇所があるため破棄** |

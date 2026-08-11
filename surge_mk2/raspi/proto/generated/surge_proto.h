@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x0006u
+#define SURGE_PROTOCOL_VERSION  0x0007u
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -55,6 +55,7 @@
 #define FLG_FAULT_DRIVE_UNDERVOLTAGE   0x00002000u
 #define FLG_FAULT_SIGNAL_UNDERVOLTAGE  0x00004000u
 #define FLG_DRIVE_POWER_LOCKED         0x00008000u
+#define FLG_AUTO_STOP_ACTIVE           0x00010000u
 
 /* md_status[i] (u8) */
 #define MDS_RUNNING       0x01u
@@ -72,6 +73,7 @@
 #define CMD_FLG_LIGHT_SHIFT  0x03u
 #define CMD_FLG_PASSING      0x20u
 #define CMD_FLG_TORQUE_MODE  0x40u
+#define CMD_FLG_AUTO_STOP    0x80u
 
 /* ── enum / param_id ──────────────────────────────────────── */
 #define MODE_DISARM               0u
@@ -206,7 +208,7 @@ typedef struct {
 /* COMMAND (0x10) —  */
 typedef struct {
     uint8_t  mode;              /* 0=DISARM 1=MANUAL 2=AUTO (3=予約) */
-    uint8_t  flags;             /* bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing bit6=torque_mode */
+    uint8_t  flags;             /* bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing bit6=torque_mode bit7=auto_stop */
     int16_t  target_speed;      /* 0.001 m/s */
     int16_t  target_steer;      /* 0.0001 rad  路面舵角 */
     uint16_t accel_limit;       /* 0.001 m/s2 */

@@ -40,6 +40,9 @@
  * - ウィンドウのフォーカス喪失・タブが背後に回る … 即 DISARM
  * - 送信が止まれば 150ms でサーバが DISARM、さらに io_node が 150ms で DISARM
  * - 無操作 `settings.armIdleTimeoutMs` … 自動 DISARM（放置した場合の最後の受け皿）
+ * - `settings.autoStop`（v0.7、既定 ON）… **進行方向の超音波が 20cm 未満なら STM32 が単独で
+ *   最大制動**。GUI は `auto_stop` を立てるだけで判定には関与しない。DISARM はしないので、
+ *   離れれば自動的に解除されて再び走れる（**停止手段ではなく衝突緩和**として数えること）
  *
  * つまり「ブラウザが固まる」「Wi-Fi が切れる」「PC を閉じる」は従来どおり停止する。
  * 弱くなったのは**人間が意図して手を離した場合だけ**。
@@ -457,6 +460,9 @@ export function useDriving(ch: ControlChannel | null) {
         // v0.6: 立っている間 `speed` は無視され `target_torque` が駆動トルクとして直接掛かる
         torque_mode: s.torqueMode,
         target_torque: torque.current,
+        // v0.7: 進行方向の超音波が 20cm 未満なら STM32 が単独で最大制動する。
+        // **GUI は許可を出すだけで、判定にも制動にも関与しない**（二重制御にしない）
+        auto_stop: s.autoStop,
       })
     }
 

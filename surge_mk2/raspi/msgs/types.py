@@ -108,6 +108,10 @@ class VehicleState(MsgBase):
     steer_center_valid: bool = False       #: 0 なら走行禁止
     #: 過電流ラッチで `arm` を拒否中。**これは仕様であって FAULT ではない**
     drive_power_locked: bool = False
+    #: 超音波の自動停止が**今まさに制動へ介入中**（v0.7）。`tc_active` と同じ「介入中」の意味で、
+    #: 有効/無効そのものではない（有効かどうかは Pi が送った `auto_stop` を見れば分かる）。
+    #: **急に減速した理由がこれかどうかを後から説明できるようにするため**に持つ
+    auto_stop_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
 
     # ── Pi 側で計算した派生量 ──
@@ -193,6 +197,11 @@ class DriveCmd(MsgBase):
     #: [N·m] 駆動トルク直接指令。`torque_mode` のときだけ意味を持つ。負は後退方向。
     #: 範囲 ±`convert.MAX_TARGET_TORQUE_NM`（v0.6）
     target_torque: float = 0.0
+    #: 立っている間、**STM32 が単独で**進行方向の超音波を見て 20cm 未満なら最大制動する（v0.7）。
+    #: 進行方向は `torque_mode` なら `target_torque`、そうでなければ `target_speed` の符号で決まり、
+    #: **逆方向のセンサは見ない**（前に障害物があっても後退はできる）。
+    #: 優先順位は `brake` > `auto_stop` > 通常指令。**Pi 側で二重に制御する必要はない**
+    auto_stop: bool = False
     source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
 
 

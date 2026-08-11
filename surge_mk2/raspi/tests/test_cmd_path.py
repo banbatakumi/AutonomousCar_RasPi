@@ -300,6 +300,22 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(srv._last_cmd.torque_mode)
         self.assertEqual(srv._last_cmd.target_torque, 0.0)
 
+    async def test_auto_stop_reaches_drive_cmd(self):
+        """v0.7: WS の cmd JSON の `auto_stop` が DriveCmd まで届く。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5,"auto_stop":true}')
+        self.assertTrue(srv._last_cmd.auto_stop)
+
+    async def test_auto_stop_defaults_false_for_old_gui(self):
+        """キーを送ってこない GUI に**勝手な自動介入を足さない**（既定 False）。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
+        self.assertFalse(srv._last_cmd.auto_stop)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x0006
+PROTOCOL_VERSION = 0x0007
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -31,6 +31,7 @@ FLG_FAULT_SIGNAL_OVERCURRENT = 0x00001000
 FLG_FAULT_DRIVE_UNDERVOLTAGE = 0x00002000
 FLG_FAULT_SIGNAL_UNDERVOLTAGE = 0x00004000
 FLG_DRIVE_POWER_LOCKED = 0x00008000
+FLG_AUTO_STOP_ACTIVE = 0x00010000
 
 # md_status[i] (u8)
 MDS_RUNNING = 0x01
@@ -48,6 +49,7 @@ CMD_FLG_LIGHT_MASK = 0x18
 CMD_FLG_LIGHT_SHIFT = 0x03
 CMD_FLG_PASSING = 0x20
 CMD_FLG_TORQUE_MODE = 0x40
+CMD_FLG_AUTO_STOP = 0x80
 
 class Mode:
     """COMMAND.mode / TELEMETRY.flags bit0-1"""
@@ -386,7 +388,7 @@ class Command:
     META: ClassVar[dict] = {'target_speed': (0.001, 'm/s'), 'target_steer': (0.0001, 'rad'), 'accel_limit': (0.001, 'm/s2'), 'steer_rate_limit': (0.001, 'rad/s'), 'brake_torque': (0.0001, 'N.m'), 'target_torque': (0.0001, 'N.m')}
 
     mode: int = 0  # 0=DISARM 1=MANUAL 2=AUTO (3=予約)
-    flags: int = 0  # bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing bit6=torque_mode
+    flags: int = 0  # bit0=arm bit1=brake bit2=horn bit3-4=light_mode bit5=passing bit6=torque_mode bit7=auto_stop
     target_speed: int = 0
     target_steer: int = 0  # 路面舵角
     accel_limit: int = 0

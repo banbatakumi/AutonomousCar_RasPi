@@ -300,12 +300,13 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .kv span { color: var(--dim); min-width: 5.5em; }
 .kv b { font-weight: 600; min-width: 4.5em; }
 
-/* ── 補機（灯火・ブレーキ強さ・押下状態） ─────────────── */
+/* ── 補機（灯火・ブレーキ実トルク・押下状態・自動停止） ─────────────── */
 
 .aux {
   grid-area: aux;
   display: grid;
-  grid-template-columns: auto minmax(260px, 1fr) auto;
+  /* 4列目は自動停止（v0.7）。狭い画面では折り返してよい */
+  grid-template-columns: auto minmax(200px, 1fr) auto auto;
   gap: 10px 18px;
   background: var(--panel);
   border: 1px solid var(--line);

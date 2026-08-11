@@ -50,10 +50,13 @@ export type DrivingSettings = {
   torqueMode: boolean
   /** トルクモード中にスロットル全開で出す駆動トルク [N·m]。上限 `MAX_TARGET_TORQUE_NM` */
   driveTorque: number
+  /** 超音波の自動停止を STM32 に許可するか（v0.7）。**判定も制動も STM32 側で完結する**ので、
+   * GUI は `COMMAND.flags` bit7 を立てるかどうかだけを決める。既定 ON */
+  autoStop: boolean
 }
 
 /** `DrivingSettings` のうち数値項目のキーだけ。スライダのレンジは数値項目にしか無い
- * （`torqueMode` は boolean なので対象外） */
+ * （`torqueMode` / `autoStop` は boolean なので対象外） */
 export type NumericSettingKey = {
   [K in keyof DrivingSettings]: DrivingSettings[K] extends number ? K : never
 }[keyof DrivingSettings]
@@ -102,6 +105,18 @@ export const MAX_TARGET_TORQUE_NM = 0.125
  */
 export const DEFAULT_DRIVE_TORQUE_NM = 0.05
 
+/**
+ * STM32 が自動停止に入る距離 [m]（v0.7）。**GUI 側では変更できない**（STM32 の固定値）。
+ * 表示に使うためだけに持つ。`CONFIG_SET` の param もまだ無い。
+ */
+export const AUTO_STOP_DISTANCE_M = 0.2
+/**
+ * 自動停止の既定。**ON にしてある。** 「効きすぎて止まる」より「気づかず当てる」方が
+ * 損害が大きいため。⚠ STM32 側にヒステリシスが無いので、20cm 前後では
+ * 効いたり切れたりする（チャタリング）。低速で壁に詰める作業では設定タブで切ること。
+ */
+export const DEFAULT_AUTO_STOP = true
+
 export const DEFAULT_SETTINGS: DrivingSettings = {
   maxSpeed: 0.6,
   maxSteer: 0.785,
@@ -118,6 +133,7 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
   torqueMode: false,
   driveTorque: DEFAULT_DRIVE_TORQUE_NM,
+  autoStop: DEFAULT_AUTO_STOP,
 }
 
 /** 設定タブのスライダのレンジ。`min`/`max`/`step` の3つ組。
@@ -149,6 +165,8 @@ function clampSettings(s: DrivingSettings): DrivingSettings {
     out[k] = typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULT_SETTINGS[k]
   }
   out.torqueMode = typeof out.torqueMode === 'boolean' ? out.torqueMode : DEFAULT_SETTINGS.torqueMode
+  // 古い localStorage（v0.6 以前）にはこのキーが無い。**既定の ON に倒す**
+  out.autoStop = typeof out.autoStop === 'boolean' ? out.autoStop : DEFAULT_SETTINGS.autoStop
   return out
 }
 

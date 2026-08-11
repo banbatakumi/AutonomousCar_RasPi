@@ -21,7 +21,7 @@
  * ここが 0 のままならブレーキが効いていない。
  */
 import { useNumbers } from '../bus/live'
-import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
+import { AUTO_STOP_DISTANCE_M, LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
 
 export function AuxPanel() {
   const n = useNumbers()
@@ -82,6 +82,29 @@ export function AuxPanel() {
             気づかずに「壊れている」と判断するのを防ぐため明示する */}
         <span className="note">
           {ui.armRequested ? '押している間だけ効く' : 'ARM 保持中のみ有効（未 ARM）'}
+        </span>
+      </section>
+
+      {/* 自動停止（v0.7）。**灯火と同じ「状態」なのでここで切り替えてよい**
+          （押しっぱなし系と違い、カーソルが外れても取り残されない）。
+          設定タブの `autoStop` と同じ値を読み書きするので、どちらで変えても保存される */}
+      <section className="aux-autostop">
+        <span className="label">自動停止</span>
+        <div className="aux-row">
+          <div className="seg">
+            <button className={ui.settings.autoStop ? 'on' : ''}
+                    onClick={() => ui.setSettings({ autoStop: true })}>ON</button>
+            <button className={ui.settings.autoStop ? '' : 'on'}
+                    onClick={() => ui.setSettings({ autoStop: false })}>OFF</button>
+          </div>
+          {/* 「許可している」と「今まさに止めている」は別物。**効いている間だけ赤く出す** */}
+          <span className={`pill ${vs?.auto_stop_active ? 'lv-bad' : 'dim'}`}>
+            {vs?.auto_stop_active ? '作動中' : '待機'}
+          </span>
+        </div>
+        <span className="note">
+          進行方向（前進なら前・後退なら後）の超音波が {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm
+          未満で STM32 が最大制動。逆方向のセンサは見ないので後退で抜けられる。DISARM はされない
         </span>
       </section>
     </div>

@@ -49,6 +49,19 @@ export function StatusBar({ onEstop }: { onEstop: () => void }) {
         </span>
         {vs?.tc_active && <span className="pill lv-warn">TC</span>}
         {vs?.tv_active && <span className="pill lv-warn">TV</span>}
+        {/* v0.7 自動停止。**「許可しているか」と「今まさに効いているか」は別物**なので
+            両方を1つのピルで出し分ける。効いている間は急減速の理由がこれだと即分かるように
+            lv-bad まで上げる（TC/TV より強い介入で、指令が完全に無視されるため） */}
+        <span
+          className={`pill ${vs?.auto_stop_active ? 'lv-bad' : 'dim'}`}
+          title={
+            ui.settings.autoStop
+              ? '進行方向の超音波が 20cm 未満なら STM32 が指令を無視して最大制動する（設定タブで OFF にできる）'
+              : '自動停止は無効。STM32 は超音波を見ても止めない（設定タブで ON にできる）'
+          }
+        >
+          {vs?.auto_stop_active ? '自動停止 作動中' : ui.settings.autoStop ? '自動停止' : '自動停止 OFF'}
+        </span>
 
         <div className="spacer" />
 

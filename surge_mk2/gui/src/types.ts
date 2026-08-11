@@ -45,6 +45,9 @@ export type VehicleState = {
   lidar_ok: boolean
   steer_center_valid: boolean
   drive_power_locked: boolean
+  /** 超音波の自動停止が**今まさに制動へ介入中**（v0.7）。有効/無効そのものではない
+   * （有効かどうかは GUI が送っている `auto_stop` の側で分かる） */
+  auto_stop_active: boolean
   faults: string[]
 
   odom_center: number // m 射影して積算した中心線距離
@@ -169,4 +172,8 @@ export type CmdOut = {
   torque_mode: boolean
   /** [N·m] 駆動トルク直接指令。`torque_mode` のときだけ意味を持つ。負は後退方向（v0.6） */
   target_torque: number
+  /** **立っている間、STM32 が単独で**進行方向の超音波を見て 20cm 未満なら最大制動する（v0.7）。
+   * 進行方向は `torque_mode` なら `target_torque`、そうでなければ `speed` の符号で決まり、
+   * 逆方向のセンサは見ない。優先順位は `brake` > `auto_stop` > 通常指令 */
+  auto_stop: boolean
 }

@@ -95,6 +95,7 @@ def decode_flags(flags: int) -> dict:
         "lidar_ok": bool(flags & packets.FLG_LIDAR_OK),
         "steer_center_valid": bool(flags & packets.FLG_STEER_CENTER_VALID),
         "drive_power_locked": bool(flags & packets.FLG_DRIVE_POWER_LOCKED),
+        "auto_stop_active": bool(flags & packets.FLG_AUTO_STOP_ACTIVE),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 
@@ -230,6 +231,11 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         flags |= packets.CMD_FLG_PASSING
     if cmd.torque_mode:
         flags |= packets.CMD_FLG_TORQUE_MODE
+    # v0.7: 立てるだけでよい。**判定も制動も STM32 側で完結する**ので、
+    # Pi 側で `us_front`/`us_rear` を見て速度を落とすような二重制御はしない
+    # （二重にすると「どちらが止めたのか」が分からなくなる）
+    if cmd.auto_stop:
+        flags |= packets.CMD_FLG_AUTO_STOP
     # bit3-4 の2ビット。**3 は予約なので送らない**（STM32 は NORMAL として扱うが、
     # 「予約値を送っておいて向こうの解釈に頼る」形にはしない）
     light = cmd.light_mode if cmd.light_mode in (0, 1, 2) else 0

@@ -12,8 +12,8 @@
  */
 import type { DrivingSettings, NumericSettingKey } from '../store/ui'
 import {
-  DEFAULT_SETTINGS, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM, PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP,
-  SETTINGS_RANGE, useUi,
+  AUTO_STOP_DISTANCE_M, DEFAULT_SETTINGS, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
+  PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, SETTINGS_RANGE, useUi,
 } from '../store/ui'
 import { RAD2DEG } from '../format'
 
@@ -128,6 +128,32 @@ export function SettingsView() {
         {settings.torqueMode && TORQUE_FIELDS.map((f) => (
           <SettingRow key={f.key} field={f} settings={settings} onChange={setSettings} />
         ))}
+      </section>
+
+      {/* ここだけは GUI の調整値ではなく「STM32 の機能を許可するかどうか」。
+          距離も制動力も STM32 側の固定値で、GUI からは変えられない（v0.7） */}
+      <section className="settings-group">
+        <h3>自動停止（超音波）</h3>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={settings.autoStop}
+            onChange={(e) => setSettings({ autoStop: e.target.checked })}
+          />
+          進行方向 {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で STM32 に自動停止させる
+        </label>
+        <span className="note">
+          ON の間、進行方向（前進なら前・後退なら後）の超音波が{' '}
+          {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm を切ると、STM32 が指令を無視して最大制動する（v0.7）。
+          <b>逆方向のセンサは見ないので、前に壁があっても後退はできる。</b>
+          判定も制動も STM32 側で完結し、Pi/GUI は許可を出すだけ。実際に効いている間は
+          画面上部に「自動停止」が出る
+        </span>
+        <span className="note">
+          ⚠ ヒステリシスが無いため、{(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm
+          付近では効いたり切れたりする。壁に詰めて止める作業のときは切ること。
+          <b>DISARM はされない</b>ので、離れれば自動的に走れる状態に戻る
+        </span>
       </section>
 
       <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} onChange={setSettings} />

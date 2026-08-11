@@ -19,6 +19,7 @@ from raspi.msgs import (  # noqa: E402
     ScanAssembler,
     StateBuilder,
     command_from_cmd,
+    decode_flags,
 )
 from raspi.msgs.types import type_for_topic  # noqa: E402
 from raspi.proto import packets  # noqa: E402
@@ -342,6 +343,37 @@ class TestTorqueMode(unittest.TestCase):
         self.assertEqual(c_neg.target_torque, -max_raw)
         c_pos.encode()                   # 例外が出ないこと
         c_neg.encode()
+
+
+class TestAutoStop(unittest.TestCase):
+    """v0.7 で追加した超音波の自動停止。**Pi は許可を出すだけ**で判定はしない。"""
+
+    def _cmd(self, **kw) -> packets.Command:
+        return command_from_cmd(DriveCmd(mode=1, arm=True, **kw), allow_arm=True)
+
+    def test_auto_stop_occupies_bit7(self):
+        self.assertEqual(self._cmd(auto_stop=True).flags & packets.CMD_FLG_AUTO_STOP,
+                         packets.CMD_FLG_AUTO_STOP)
+        self.assertEqual(self._cmd(auto_stop=False).flags & packets.CMD_FLG_AUTO_STOP, 0)
+
+    def test_auto_stop_does_not_disturb_other_flags(self):
+        """bit7 まで使い切ったので、隣のビットを壊していないことを毎回見ておく。
+
+        `light_mode=2` は bit4 だけなので全ビット同時には立たない（bit3 が 0 で 0xF7）。
+        **light=3 は予約なので送らない**（`command_from_cmd` の該当箇所を参照）。
+        """
+        c = self._cmd(auto_stop=True, torque_mode=True, brake=True,
+                      light_mode=2, passing=True, horn=True)
+        self.assertEqual(c.flags, 0xF7)
+
+    def test_auto_stop_does_not_touch_speed_or_torque(self):
+        """**制動は STM32 側で完結する。** Pi 側で指令値を落とす二重制御はしない。"""
+        c = self._cmd(auto_stop=True, target_speed=0.5)
+        self.assertEqual(c.target_speed, 500)
+
+    def test_telemetry_flag_decodes(self):
+        self.assertTrue(decode_flags(packets.FLG_AUTO_STOP_ACTIVE)["auto_stop_active"])
+        self.assertFalse(decode_flags(0)["auto_stop_active"])
 
 
 class TestTopicRegistry(unittest.TestCase):

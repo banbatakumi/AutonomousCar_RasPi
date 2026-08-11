@@ -2127,3 +2127,59 @@ telemetry_node を上げていない状態でも io_node は自前で DISARM を
 モータ物理上限 0.1557 N·m 未満（ユーザー指示）。ワイヤ形式（`protocol.toml`）は
 変更なし、Pi (`msgs/convert.py`) ・GUI (`store/ui.ts`) ・STM32 のクランプ定数のみの変更。
 `raspi/tests/test_msgs.py` は定数を動的に参照しているため変更不要、312件 green。
+
+## UART プロトコル v0.7（2026-08-11）— 超音波による自動停止。**STM32 側実装済み → Pi/GUI 対応完了**
+
+STM32 側発の変更（`pi_uart_protocol_v0.7_delta.md`）。前後の超音波センサを使い、
+**STM32 単独で障害物への自動停止**ができるようになった。Pi は毎周期「許可」を送るだけ。
+
+### 変更内容（ワイヤ形式）
+
+- **LEN はどのパケットも変わらない。** `flags` の空きビットを使うだけなので、
+  片側が未対応でも通信は継続する（v0.6 とワイヤ非互換ではない）
+- `COMMAND` (0x10) の `flags` **bit7 = `auto_stop`**。立っている間、**進行方向**の
+  超音波が **20cm 未満**になると STM32 が指令を無視して最大制動する
+- `TELEMETRY` (0x02) の `flags` **bit16 = `auto_stop_active`**（今まさに介入中）。
+  `tc_active`/`tv_active` と同じ「介入中」の意味で、有効/無効そのものではない
+- `protocol_version` **0x0006 → 0x0007**
+
+### 仕様で押さえておくこと
+
+- **進行方向の判定**は `torque_mode` なら `target_torque`、そうでなければ `target_speed` の符号。
+  `>= 0` で前方センサ、負で後方センサ**だけ**を見る。**逆方向は見ないので後退で抜けられる**
+- 検知不能（`ULTRASONIC_NO_ECHO`・範囲外）では作動しない
+- 優先順位は **`brake` > `auto_stop` > 通常指令**。`auto_stop` 単独作動時は
+  `brake_torque` を見ず**常に最大制動**
+- **ラッチしない**が**ヒステリシスも無い**ので、20cm 前後ではチャタリングし得る。
+  壁に詰める作業では GUI 側で切ること
+- **DISARM はされない。** 停止手段ではなく衝突緩和で、E-Stop とは別系統
+
+### Pi 側の対応
+
+- `protocol.toml`（version 0x0007、`CMD_FLG_AUTO_STOP=0x80`、`FLG_AUTO_STOP_ACTIVE=0x00010000`）
+  → `generate.py` で `packets.py` / `surge_proto.h` を再生成
+- `msgs/types.py`: `DriveCmd.auto_stop` / `VehicleState.auto_stop_active`
+- `msgs/convert.py`: `command_from_cmd` で bit7 を立てる、`decode_flags` で bit16 を開く。
+  **Pi 側で `us_front`/`us_rear` を見て速度を落とす二重制御はしない**（どちらが止めたか
+  分からなくなるため。判定も制動も STM32 側で完結させる）
+- `telemetry_node.py`: WS の `cmd` JSON から `auto_stop` を拾う（**v0.6 でここを
+  拾い忘れた前科があるので最初から入れた**）。既定は False（古い GUI に勝手な介入を足さない）
+- テスト: `test_proto.py`（0x0007）、`test_msgs.py`（`TestAutoStop`）、
+  `test_cmd_path.py`（WS → DriveCmd の経路）。**unittest 318件 green**
+
+### GUI の対応
+
+- 設定タブに「自動停止（超音波）」グループを新設。**既定 ON**（「効きすぎて止まる」より
+  「気づかず当てる」方が損害が大きいという判断）。`localStorage` に永続化され、
+  v0.6 以前の保存値にキーが無い場合も既定 ON に倒す
+- 補機パネルに ON/OFF のセグメントボタンと「作動中/待機」表示（灯火と同じ「状態」なので
+  ここで切り替えても押しっぱなしの取り残しが起きない）。設定タブと同じ値を読み書きする
+- ステータスバーに「自動停止 / 自動停止 OFF / **自動停止 作動中**」のピル。
+  作動中は `lv-bad`（TC/TV より強い介入で指令が完全に無視されるため）
+- `DriveBar` の超音波ゲージにも作動中表示と「進行方向 20cm 未満で自動停止」の注記
+- `tsc -b` / `vite build` とも green
+
+### 残課題（`uart_protocol.md` §14 に追記）
+
+- #9 検知距離 20cm が固定・ヒステリシス無し・`CONFIG_SET` の param も無い
+- #10 LiDAR による全周の自動停止は未実装（`src/sensing/lidar.c` の拡張が必要）

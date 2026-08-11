@@ -11,12 +11,12 @@
  * 速度は「自分が送っている指令」と「実測」を並べる。
  */
 import { useNumbers } from '../bus/live'
-import { useUi } from '../store/ui'
+import { AUTO_STOP_DISTANCE_M, useUi } from '../store/ui'
 import { deg, kmh, metres } from '../format'
 
 export function DriveBar() {
   const n = useNumbers()
-  const { maxSpeed, maxSteer } = useUi((s) => s.settings)
+  const { maxSpeed, maxSteer, autoStop } = useUi((s) => s.settings)
   const vs = n.vs
   const speed = vs ? (vs.stopped ? 0 : vs.speed) : 0
   const torqueMode = n.out.active && n.out.torqueMode
@@ -61,6 +61,8 @@ export function DriveBar() {
       <div className="gauge narrow">
         <div className="gauge-head">
           <span className="label">超音波</span>
+          {/* 自動停止が効いているのは「距離が近い」からなので、数字のすぐ横に出す（v0.7） */}
+          {vs?.auto_stop_active && <span className="sub lv-bad">自動停止 作動中</span>}
         </div>
         <div className="kv">
           <span>前</span>
@@ -68,7 +70,10 @@ export function DriveBar() {
           <span>後</span>
           <b className={near(vs?.us_rear)}>{metres(vs?.us_rear ?? null)}</b>
         </div>
-        <span className="note">実質 20Hz・同じ値が続く</span>
+        <span className="note">
+          実質 20Hz・同じ値が続く
+          {autoStop && `／進行方向 ${(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で自動停止`}
+        </span>
       </div>
 
       <div className="gauge narrow">
