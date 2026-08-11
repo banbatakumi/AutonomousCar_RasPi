@@ -57,12 +57,12 @@ _I32_SPAN = 1 << 32
 #: 後輪1輪あたりの制動トルクの上限 [N·m]（STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM`）。
 #: **STM32 側でもクランプされるが、GUI のスライダ上限をここから引くために持つ。**
 #: 超えた値を送ると黙って丸められ、「スライダを上げても効きが変わらない」に見える
-MAX_BRAKE_TORQUE_NM = 0.075
+MAX_BRAKE_TORQUE_NM = 0.125
 
-#: `target_torque`（駆動トルク直接指令）の上限 [N·m]（v0.6）。**一旦の値**
+#: `target_torque`（駆動トルク直接指令）の上限 [N·m]（v0.6）。
 #: （モータ物理上限 0.1557 N·m 未満）。STM32 側の対応クランプ値・GUI の
 #: `store/ui.ts` の `MAX_TARGET_TORQUE_NM` と合わせること
-MAX_TARGET_TORQUE_NM = 0.1
+MAX_TARGET_TORQUE_NM = 0.125
 
 #: 立っていたら名前で持ち回る fault。ビットのまま流すと GUI 側で意味を再定義する羽目になる
 FAULT_FLAGS = {

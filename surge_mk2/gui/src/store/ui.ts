@@ -80,7 +80,7 @@ export const STEER_RATE_SAFETY_LIMIT = 7.0 // rad/s
  * `raspi/msgs/convert.py` の `MAX_BRAKE_TORQUE_NM` に合わせること。**
  * 超えた値を送っても黙って丸められ、「スライダを上げても効きが変わらない」に見える。
  */
-export const MAX_BRAKE_TORQUE_NM = 0.075
+export const MAX_BRAKE_TORQUE_NM = 0.125
 /** スライダの最小。**0 は「未指定 ＝ 最大制動」を意味するので選ばせない** */
 export const MIN_BRAKE_TORQUE_NM = 0.005
 /**
@@ -94,7 +94,7 @@ export const DEFAULT_BRAKE_TORQUE_NM = MAX_BRAKE_TORQUE_NM
  * 駆動トルク直接指令の上限 [N·m]（v0.6）。**`raspi/msgs/convert.py` の
  * `MAX_TARGET_TORQUE_NM` と合わせること。** 超えた値を送っても黙って丸められる。
  */
-export const MAX_TARGET_TORQUE_NM = 0.1
+export const MAX_TARGET_TORQUE_NM = 0.125
 /**
  * トルクモードの既定の強さ。**上限より控えめにしてある。**
  * ブレーキと違い「強すぎて空転・飛び出す」方が「弱くて動かない」より危険なため、
