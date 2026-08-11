@@ -4,6 +4,7 @@
  * **React には触れない。** 描画は Canvas 側が rAF で `live` を読む。
  */
 import { decode } from '@msgpack/msgpack'
+import { markHistoryGap, pushHistory } from '../bus/history'
 import { clearLive, noteTelemetry } from '../bus/live'
 import type { Snapshot } from '../types'
 import { wsUrl } from './url'
@@ -28,10 +29,14 @@ export function connectTelemetry(onOpenChange: (open: boolean) => void): () => v
       if (!(ev.data instanceof ArrayBuffer)) return
       const s = decode(new Uint8Array(ev.data)) as Snapshot
       noteTelemetry(s.vs, s.link, s.scan)
+      // 診断タブ用の時系列。**タブを開いていなくても常時貯める**（`bus/history.ts`）
+      pushHistory(s.vs, s.link)
     }
     ws.onclose = () => {
       onOpenChange(false)
       clearLive()
+      // 履歴は残したまま線だけ断つ。**切れたこと自体が後から見たい事象**
+      markHistoryGap()
       if (closed) return
       timer = window.setTimeout(open, backoff)
       backoff = Math.min(backoff * 2, RECONNECT_MAX_MS)

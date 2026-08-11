@@ -163,31 +163,35 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 
 /* ── 運転ビュー ───────────────────────────────────────── */
 
+/*
+ * 上段は**前方・後方・LiDAR を等幅で3分割**。デバッグ用の画面なので前方を
+ * 特別扱いしない（ラジコンビューは逆に前方を全面に使う。`.rc` を参照）。
+ */
 .drive {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-template-rows: minmax(0, 1fr) auto auto auto;
   grid-template-areas:
-    'cams  lidar'
-    'bar   bar'
-    'aux   aux'
-    'diag  diag';
+    'camf camr lidar'
+    'bar  bar  bar'
+    'aux  aux  aux'
+    'diag diag diag';
   gap: 6px;
   padding: 6px;
 }
 
-.cams {
-  grid-area: cams;
+.cam-front,
+.cam-rear {
   position: relative;
-  display: grid;
-  grid-template-rows: 2.2fr 1fr;
-  gap: 6px;
   min-height: 0;
+  display: flex;
 }
-/* 駐車時は後方を大きくする（位置は固定のまま行サイズだけ入れ替える） */
-.cams.rear-big { grid-template-rows: 1fr 2.2fr; }
+.cam-front { grid-area: camf; }
+.cam-rear { grid-area: camr; }
+.cam-front > .camera,
+.cam-rear > .camera { flex: 1; min-width: 0; }
 
 .camera {
   position: relative;
@@ -360,13 +364,309 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .diag-grid section { border-left: 2px solid var(--line); padding-left: 8px; }
 .diag-grid .note { display: block; color: var(--dim); font-size: 10px; margin-top: 4px; }
 
-/* ── 未実装のタブ ────────────────────────────────────── */
+/* ── ラジコンビュー ───────────────────────────────────── */
 
-.placeholder { padding: 28px; max-width: 44rem; }
-.placeholder h2 { margin: 0 0 8px; }
-.placeholder code { color: var(--accent); }
+/*
+ * **操縦は前方の映像を見て行う。** 帯を下に積むと映像が縦に潰れるので、
+ * 左 2/3 を映像だけに使い、右 1/3 を LiDAR（上）と計器（下）で分ける。
+ * 層 C（診断）は丸ごと診断タブへ移した。
+ */
+.rc {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-areas:
+    'cams  lidar'
+    'cams  meters';
+  gap: 6px;
+  padding: 6px;
+  position: relative; /* 設定ドロワーの基準 */
+  overflow: hidden;
+}
 
-/* ── 設定タブ（層 D） ─────────────────────────────────── */
+.rc-cams {
+  grid-area: cams;
+  position: relative;
+  min-height: 0;
+  display: flex;
+}
+.rc-cams > .camera { flex: 1; min-width: 0; }
+/* 前方のラベルは右上へ逃がす。**左上は後方 PIP の定位置**で、重なって読めなくなる */
+.rc-cams > .camera > .camera-tag { left: auto; right: 7px; }
+
+/* バックミラー。**前方の視界を削らない大きさ**に留める（消せば WS ごと閉じる） */
+.rc-pip {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 24%;
+  max-width: 260px;
+  min-width: 130px;
+  aspect-ratio: 4 / 3;
+  border-radius: 5px;
+  overflow: hidden;
+  box-shadow: 0 3px 12px #000c;
+}
+.rc-pip .camera { height: 100%; border-color: #2f3a46; }
+.rc-pip .camera-tag { font-size: 9px; padding: 1px 5px; gap: 5px; }
+
+.rc-lidar {
+  grid-area: lidar;
+  position: relative;
+  background: #0b0e11;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* 計器パネル。狭い画面では縦に溢れるので、ここだけスクロールを許す */
+.rcpanel {
+  grid-area: meters;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px 12px 10px;
+}
+/* 受信が途絶したら計器を沈める。**古い値を現在値に見せない**（.drivebar と同じ） */
+.rcpanel.stale { opacity: .45; }
+.rcpanel > .note { color: var(--dim); font-size: 10px; }
+
+/*
+ * パネル幅に応じて 2 → 1 列に折り返す。
+ * **上端で揃える。** 速度計と G メータは同じ高さの箱で、どちらも
+ * 「箱の中心＝計器の中心」なので、上端を揃えれば2つの円の中心が水平に並ぶ。
+ * 下端で揃えると、下に付く説明行の数の差ぶんだけ円がずれる。
+ */
+.rc-gauges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-around;
+  align-items: flex-start;
+  gap: 4px 10px;
+}
+
+/* 灯火と自動停止だけを残す。**押しっぱなし系はランプに逃がした**（RcBar.tsx 参照） */
+.rc-controls { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.rc-ctl { display: flex; align-items: center; gap: 7px; }
+.rc-ctl .label { color: var(--dim); font-size: 11px; }
+.rc-ctl .seg { margin-top: 0; }
+
+.meter { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+.meter .arc { display: block; }
+/*
+ * ## 速度計と G メータの中心を揃える
+ *
+ * 速度計は viewBox `0 0 120 92` で針の軸が (60, 58)。つまり**計器の中心は
+ * 箱の上から 58/92 = 63% の位置**で、箱の中央ではない。G メータは正方形の
+ * 中心が計器の中心。そのまま上端で並べると円の中心が段違いになる。
+ *
+ *   速度計の中心 = 156 × 92/120 × 58/92 = 75.4px（上端から）
+ *   G の中心     = 118/2 = 59px
+ *   → G を 75.4 − 59 ≒ 16px 下げると2つの円の中心が水平に並ぶ
+ *
+ * **どれか1つを変えたら3つとも計算し直すこと。**
+ *
+ * ⚠ 2つの合計幅（＋説明文の幅）がパネル内寸を超えると折り返し、
+ * 温度・電圧・灯火がスクロールの下へ落ちる。**変えるときは実画面で確認すること。**
+ */
+.meter-speed .arc { width: 156px; height: auto; }
+
+.arc-bg { fill: none; stroke: var(--panel2); stroke-width: 7; stroke-linecap: round; }
+.arc-red { fill: none; stroke: #5a231f; stroke-width: 7; stroke-linecap: round; }
+.arc-fill { fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round; }
+.arc-tick { stroke: #3b4550; stroke-width: 1; }
+.arc-zero { stroke: #4d5966; stroke-width: 1.5; }
+/* 指令値は針とは別の色（--live）。実測との差＝アクチュエータの遅れ */
+.arc-target { stroke: var(--live); stroke-width: 2; }
+
+/*
+ * 針は 8Hz でしか角度が変わらないので、間を CSS で埋めて滑らかに見せる。
+ * transform-box を指定しないと transform-origin が要素の bbox 基準になり、
+ * 針が明後日の方向へ飛ぶ。
+ */
+.needle {
+  transform-box: view-box;
+  transform-origin: 60px 58px;
+  transition: transform 125ms linear;
+}
+.needle line { stroke: var(--fg); stroke-width: 2.2; stroke-linecap: round; }
+.needle-hub { fill: var(--fg); }
+
+.meter-read { display: flex; align-items: baseline; gap: 4px; margin-top: -6px; }
+.meter-read b { font-size: 30px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.meter-read i { font-style: normal; color: var(--dim); font-size: 11px; }
+.meter-sub { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--dim); margin-top: 2px; }
+.meter-sub b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.meter-scale { font-size: 10px; margin-top: 1px; }
+
+/* margin-top は上の計算の結果。速度計の中心に高さを合わせるためのもの */
+.gmeter-wrap { position: relative; width: 118px; height: 118px; margin-top: 16px; }
+.gmeter { width: 100%; height: 100%; display: block; }
+.gmeter-axis { position: absolute; font-size: 9px; color: var(--dim); pointer-events: none; }
+.gmeter-axis-t { top: 0; left: 50%; transform: translateX(-50%); }
+.gmeter-axis-b { bottom: 0; left: 50%; transform: translateX(-50%); }
+.gmeter-axis-l { left: 0; top: 50%; transform: translateY(-50%); }
+.gmeter-axis-r { right: 0; top: 50%; transform: translateY(-50%); }
+
+.rc-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.rc-small { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rc-small .note { color: var(--dim); font-size: 10px; }
+
+/*
+ * 介入ランプ。**消えている間は主張しない**（枠だけ）。
+ * 点いたら発光させる — 一瞬でも視界の端で捉えられる必要がある。
+ */
+.lamps { display: flex; flex-wrap: wrap; gap: 5px; }
+.lamp {
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel2);
+  color: #3d4753;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  white-space: nowrap;
+  transition: color 90ms linear, background 90ms linear, box-shadow 90ms linear;
+}
+.lamp-warn.on {
+  color: var(--warn);
+  background: #3d3208;
+  border-color: #8a6d13;
+  box-shadow: 0 0 8px rgba(232, 171, 33, .35);
+}
+.lamp-bad.on {
+  color: #ff9b93;
+  background: #3a1512;
+  border-color: #7d2b23;
+  box-shadow: 0 0 8px rgba(242, 84, 75, .4);
+}
+.lamp-accent.on {
+  color: #cfe7ff;
+  background: #22313f;
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(74, 168, 255, .35);
+}
+.lamp-dim.on { color: var(--dim); border-color: #3b4550; }
+
+/* 水温計・燃料計。実車と同じで**正常でも常時出す**（走行を切り上げる判断に使う） */
+/* 画面幅いっぱいに伸ばさない。**横に長いバーは残量の変化が読み取りにくい** */
+.bar-row { display: flex; align-items: center; gap: 7px; font-size: 11px; max-width: 340px; }
+.bar-row .label { color: var(--dim); min-width: 2.6em; }
+.bar-row b { font-variant-numeric: tabular-nums; min-width: 4.2em; text-align: right; }
+.minibar {
+  flex: 1;
+  min-width: 60px;
+  height: 7px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.minibar-fill { height: 100%; transition: width 150ms linear; }
+.lv-bg-dim { background: #2f3a46; }
+.lv-bg-ok { background: var(--ok); }
+.lv-bg-warn { background: var(--warn); }
+.lv-bg-bad { background: var(--bad); }
+
+/* ── 設定ドロワー（ラジコンタブ内） ───────────────────── */
+
+.gear {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 4;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  background: #000a;
+  border-radius: 6px;
+}
+.gear.on { background: #22313f; border-color: var(--accent); }
+
+/*
+ * 右端に寄せるだけで、背景は覆わない。
+ * **開けている間もカメラと計器が見えている**必要がある（走りながら調整するため）。
+ */
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  width: min(420px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px #0008;
+  transform: translateX(100%);
+  transition: transform 180ms ease;
+  visibility: hidden;
+}
+.drawer.open { transform: translateX(0); visibility: visible; }
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.drawer-head h2 { margin: 0; font-size: 14px; flex: 1; }
+.drawer-body { flex: 1; min-height: 0; overflow-y: auto; }
+/* タブだったころの余白は広すぎる。ドロワー幅に合わせて詰める */
+.drawer .settings { padding: 12px 14px 32px; max-width: none; height: auto; }
+
+/* ── 診断タブ ─────────────────────────────────────────── */
+
+.diagview { padding: 16px 22px 40px; overflow-y: auto; height: 100%; }
+.diagview-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 14px; }
+.diagview-head h2 { margin: 0; }
+.diagview-head p { margin: 0; flex: 1 1 100%; font-size: 12px; }
+/* 診断タブでは畳まないので、区切りをはっきりさせる */
+.diagview .diag-grid {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.chart {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px 12px 10px;
+  min-width: 0;
+}
+.chart-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.chart-head h4 { margin: 0; font-size: 12px; font-weight: 600; }
+.chart-head .unit { color: var(--dim); font-size: 10px; }
+.chart-head .dim { font-size: 10px; margin-left: auto; }
+.chart-legend { display: flex; gap: 10px; font-size: 10px; color: var(--dim); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.chart-legend i { width: 9px; height: 2px; display: inline-block; }
+.chart-host { width: 100%; }
+.chart .note { display: block; color: var(--dim); font-size: 10px; margin-top: 4px; }
+
+/* uPlot は明るいテーマ前提の既定値なので、暗い計器盤に合わせて上書きする */
+.chart .u-legend { display: none; }
+.chart .u-select { background: #4aa8ff22; }
+
+/* ── 設定パネル（ドロワーの中身） ─────────────────────── */
 
 .settings {
   padding: 20px 28px 40px;

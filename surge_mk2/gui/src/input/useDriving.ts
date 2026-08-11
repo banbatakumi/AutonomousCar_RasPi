@@ -22,15 +22,21 @@
  * （`horn` / `passing` は立てている間ずっと効く）に素直に対応させてある。
  * GUI 側でタイマーを持つと、DISARM やタブ切替と競合したときに消し忘れが起きる。
  *
- * ⚠ **補機は ARM 保持中しか効かない。** `cmd` を送るのが armed のときだけで、
- * 途絶すれば io_node が DISARM（`flags = 0`）に落とすため、灯火も消える。
- * 「停めたまま前照灯だけ点ける」には cmd の送信条件そのものを変える必要があり、
- * それは「送らないことが停止を意味する」設計に手を入れることになるので今はしない。
+ * **灯火・ホーン・パッシングは未 ARM でも効く**（2026-08-11 に変更）。
+ * ARM していない間は `mode=DISARM` / `arm=false` / 速度・舵 0 の cmd を送り、
+ * 灯火とホーンのビットだけを載せる。`command_from_cmd`（`msgs/convert.py`）は
+ * 灯火/ホーンを `arm` とは独立に組むので、**モータが回る余地は無いまま灯火だけ届く**。
+ *
+ * ⚠ 出したいものが無い（消灯・ホーン離し）ときは送らない。送り続けると
+ * **操縦権を握りっぱなしになり、2枚目のタブが操縦できなくなる**（操縦権は同時に1人）。
+ *
+ * ⚠ **ブレーキだけは未 ARM で送らない。** モータが励磁されていないので効かず、
+ * 「押しているのに効かない」体験になるだけ。
  *
  * ## この方式で失ったもの・残したもの
  *
  * **失った**: 「手を離した瞬間に止まる」性質。無操作でも `settings.armIdleTimeoutMs`
- * （既定 20秒。設定タブで変更可）は armed のまま（速度指令は 0 に落ちるので進みはしないが、
+ * （既定 20秒。設定パネルで変更可）は armed のまま（速度指令は 0 に落ちるので進みはしないが、
  * モータは励磁されたまま）。**既定 20秒はこの保険がほぼ効かない長さ**なので、
  * 実質的な停止手段は下の即時系だと考えること。
  *
@@ -64,7 +70,7 @@
  *
  * 以前は `accel_limit=0`（STM32 の既定に任せる）を送っていたので、GUI 側のランプと
  * STM32 側のリミットが二重にかかり、**どちらが操作感を決めているのか分からなかった**。
- * 今は GUI から明示的に `ACCEL_LIMIT` / `STEER_RATE_LIMIT` を送る。値は設定タブの
+ * 今は GUI から明示的に `ACCEL_LIMIT` / `STEER_RATE_LIMIT` を送る。値は設定パネルの
  * `accel`/`steerRate` より意図的に速くしてあり（ユーザー設定にはしない）、
  * 通常走行では GUI のランプが支配的になる。STM32 側は
  * 「指令が飛んだ／GUI が壊れた」ときにメカを守る保険として残る。
@@ -78,14 +84,14 @@
  *
  * 停止からじわじわ指令を上げると、STM32 の速度 PI ループが動き出すまで無駄時間が出て
  * 「押した→無反応→急に出る」になる。押した瞬間に `settings.kickSpeed` へ跳ばしてから積分する。
- * **`kickSpeed` は設定タブで、実車が実際に転がり始める指令値に合わせて調整すること**
+ * **`kickSpeed` は設定パネルで、実車が実際に転がり始める指令値に合わせて調整すること**
  * （DriveBar の実測速度を見ながら詰める。低速では `wheel_speed` が使えないので
  * `speed` の生値と目視で判断する）。
  */
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
 import {
-  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, STEER_RATE_SAFETY_LIMIT, useUi,
+  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, STEER_RATE_SAFETY_LIMIT, useUi,
 } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
@@ -95,14 +101,14 @@ const TX_INTERVAL_MS = 1000 / TX_HZ
 /** 1フレームの積分幅の上限。タブ復帰やカクつきで一気に飛ぶのを防ぐ */
 const DT_MAX = 0.05
 
-// ── 速度・舵の応答は「設定タブ」から調整する ──────────────────────
+// ── 速度・舵の応答は「設定パネル」から調整する ──────────────────────
 //
 // 加速・惰行・ブレーキ・発進キック・切り込み/戻し/切り返し速度は
 // `store/ui.ts` の `DrivingSettings`（`ui.settings`）に移した。
 // ここでは毎フレーム `useUi.getState().settings` から読む。
 
 // ── STM32 に渡すレートリミット ───────────────────────────────────
-/** GUI のランプ（設定タブの `accel`/`brake`）より速い値。**通常は効かず、保険として残る**。
+/** GUI のランプ（設定パネルの `accel`/`brake`）より速い値。**通常は効かず、保険として残る**。
  * ユーザー設定にはしない（`ACCEL_SAFETY_LIMIT` 参照） */
 const ACCEL_LIMIT = ACCEL_SAFETY_LIMIT // m/s²
 const STEER_RATE_LIMIT = STEER_RATE_SAFETY_LIMIT // rad/s
@@ -299,7 +305,8 @@ export function useDriving(ch: ControlChannel | null) {
 
       const boost = keyBoost || padBoost
       if (ui.boost !== boost) ui.set({ boost })
-      const maxSpeed = s.maxSpeed * (boost ? s.boostScale : s.cruiseScale)
+      // **ブーストは「最高速度そのもの」。** 倍率は持たない（`cruiseScale` の注記参照）
+      const maxSpeed = boost ? s.maxSpeed : s.maxSpeed * s.cruiseScale
 
       // ── 補機（すべて「押している間だけ」） ──
       const brake = k.has(BRAKE_KEY) || (pad?.buttons[PAD_BRAKE]?.pressed ?? false)
@@ -331,7 +338,53 @@ export function useDriving(ch: ControlChannel | null) {
         cmdOut.torque = 0
         live.armRemainingMs = 0
         if (ui.deadman) ui.set({ deadman: false, inputSource: 'none' })
-        mirrorAux(false, false, false)
+
+        // ── 未 ARM でも灯火・ホーン・パッシングは通す（2026-08-11） ──
+        //
+        // 「停めたまま前照灯だけ点ける」「人をどかすのにクラクションを鳴らす」は
+        // ARM とは無関係の操作なので、ARM を条件にしていたのは筋が悪かった。
+        //
+        // **速度・舵は 0、`arm=false`、`mode=DISARM` で送る。** `command_from_cmd` は
+        // 灯火/ホーンのビットを `arm` とは独立に組む（`msgs/convert.py`）ので、
+        // ARM ビットを立てないまま灯火だけが STM32 に届く。モータが回る余地は無い。
+        //
+        // ⚠ **出したいものが無ければ送らない。** 送り続けると操縦権を握りっぱなしになり、
+        // 2枚目のタブや別の PC が操縦できなくなる（操縦権は同時に1人）。
+        // 消灯に戻したあとは送信が止まり、150ms で io_node が DISARM_COMMAND
+        //（`flags=0`）に落とすので、灯火はそのまま消える。
+        const wantAux = horn || passing || ui.lightMode !== LIGHT_OFF
+        if (!wantAux) {
+          mirrorAux(false, false, false)
+          return
+        }
+        if (!ui.hasControl) {
+          if (now - lastTakeMs >= TAKE_CONTROL_MS) {
+            ch.takeControl()
+            lastTakeMs = now
+          }
+          mirrorAux(false, false, false)
+          return
+        }
+        if (now - lastTxMs < TX_INTERVAL_MS) return
+        lastTxMs = now
+        // ブレーキは未 ARM では意味を持たない（モータが励磁されていない）
+        mirrorAux(false, horn, passing)
+        ch.cmd({
+          mode: 0, // DISARM
+          arm: false,
+          brake: false,
+          horn,
+          light_mode: ui.lightMode,
+          passing,
+          speed: 0,
+          steer: 0,
+          accel_limit: ACCEL_LIMIT,
+          steer_rate_limit: STEER_RATE_LIMIT,
+          brake_torque: s.brakeTorque,
+          torque_mode: false,
+          target_torque: 0,
+          auto_stop: s.autoStop,
+        })
         return
       }
 

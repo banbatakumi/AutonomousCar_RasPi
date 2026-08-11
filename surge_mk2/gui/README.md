@@ -1,7 +1,15 @@
 # SURGE Mk.2 GUI
 
 React + TypeScript + Vite。`docs/architecture.md` §10 の設計に沿う。
-今回のスコープは **運転ビュー1枚**（他タブは枠のみ）。
+
+タブは4枚。**同じテレメトリを見ているが、出す物の選び方が違う。**
+
+| タブ | 誰のための画面か | 特徴 |
+|---|---|---|
+| **ラジコン**（既定） | 運転する人 | 速度・G・舵角をメータで。介入は数値ではなくランプ。設定は ⚙ ドロワー |
+| **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。Phase 3 で経路・地図が入る |
+| **診断** | 原因を追う人 | 現在値の全項目 + 時系列グラフ（uPlot・直近180秒） |
+| **ログ** | 後で見る人 | `.sfl` 記録と mcap ライブ中継 |
 
 ## 動かす
 
@@ -81,15 +89,32 @@ E-Stop だけは誰でも押せる。
 ```
 src/
 ├── bus/live.ts        20Hz のデータ置き場。**React の state には入れない**
+├── bus/history.ts     診断グラフ用リングバッファ（10Hz × 180秒・常時記録）
 ├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・20Hz）
 ├── ws/control.ts      /ws/control（JSON・操縦権・E-Stop）
 ├── input/useDriving.ts ゲームパッド + キーボード → 20Hz の cmd
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas
-├── components/        StatusBar(層B) / DriveBar(層B) / DiagStrip(層C)
+├── views/             RcView / AutoView / DiagView / LogView（＝タブ4枚）
+├── components/        StatusBar(層B) / DriveBar(層B) / DiagStrip(層C) / DiagGrid / DiagCharts
+├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps）
+├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）
 ├── store/ui.ts        イベント駆動の状態だけ（zustand）
 └── format.ts          SI → 表示単位。**ここ以外で単位を変えない**
 ```
+
+### メータの更新頻度は3種類ある
+
+- **G メータ**だけ rAF で `live.vs` を直読する。軌跡を描くので 8Hz では点が飛ぶ
+- **介入ランプ**も rAF。`tc_active` は1〜2フレームで落ちるため、**300ms ラッチ**して
+  「介入したのに光らない」を防ぐ。class の付け外しだけで React state は使わない
+- **速度計・舵角計**は 8Hz の `useNumbers()`。針の間は CSS の transition で埋める
+
+### G メータの軸は実機で合わせる
+
+`components/rc/GMeter.tsx` の `AX_SIGN` / `AY_SIGN`。IMU の取り付け向きに依存するので、
+**前進加速で上・右旋回で右**に振れるかを実車で確認し、違えば符号を反転する。
+重力は補正していない（坂では中心がずれる。見て楽しむ計器で、制御には使わないため）。
 
 ### 20Hz のデータを React state に入れない
 

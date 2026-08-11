@@ -9,7 +9,7 @@ import type { ControlStatus, LogFile } from '../types'
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider'
 
 /**
- * ラジコン操作の調整値。**設定タブから変更でき、`localStorage` に保存される。**
+ * ラジコン操作の調整値。**設定パネルから変更でき、`localStorage` に保存される。**
  *
  * ⚠ `maxSpeed` / `maxSteer` は io_node の `--max-speed` / `--max-steer`
  * （Pi 側のハード上限。`raspi/setup/install_services.sh` の `ARM=` 行）を
@@ -17,16 +17,27 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider'
  * 「GUI は 0.9 m/s と表示しているのに実際は 0.6 m/s しか出ない」という
  * 食い違いが起きる（`architecture.md` §10.5）。そのためレンジ上限を
  * ハード上限そのものにしてあり、**それより上には振れない**。
+ *
+ * ⚠ **速度の上限は3段ある。** ここと Pi を上げても、3段目で頭打ちになりうる。
+ *
+ *   1. ここ `PI_MAX_SPEED_CAP` …………… スライダの上限
+ *   2. io_node `--max-speed` …………… 超えた分を黙って切り捨てる
+ *   3. STM32 `PARAM_MAX_SPEED`（0x0001）… **Pi 側が `CONFIG_SET` 未実装で読み書きできない**
+ *
+ * 3 の値はこのリポジトリからは分からない（ファームウェア側）。上限を上げても実車が
+ * そこまで出ないなら、まず 3 を疑うこと。
  */
 export type DrivingSettings = {
   /** 見た目の最高速度 [m/s]。既定値 0.6。Pi 側ハード上限（`PI_MAX_SPEED_CAP`）を超えられない */
   maxSpeed: number
   /** 見た目の最大舵角 [rad]。既定値 0.785(45°)。Pi 側ハード上限（`PI_MAX_STEER_CAP`）を超えられない */
   maxSteer: number
-  /** 既定（巡航）レンジ。`maxSpeed` に対する倍率 */
+  /**
+   * 既定（巡航）レンジ。`maxSpeed` に対する倍率。
+   * **ブースト側は倍率を持たない** — Shift / R1 を押している間は常に `maxSpeed` そのもの。
+   * 「全開が最高速度」でないと、最高速度という名前が何を指すのか分からなくなる。
+   */
   cruiseScale: number
-  /** Shift / パッド R1 を押している間のレンジ。`maxSpeed` に対する倍率 */
-  boostScale: number
   /** 押している間の加速 [m/s²] */
   accel: number
   /** キーを離したときの惰行減速 [m/s²] */
@@ -45,7 +56,7 @@ export type DrivingSettings = {
   armIdleTimeoutMs: number
   /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
   brakeTorque: number
-  /** 駆動をトルク直接指令にするか（v0.6）。設定タブの永続トグル。true の間、
+  /** 駆動をトルク直接指令にするか（v0.6）。設定パネルの永続トグル。true の間、
    * スロットル入力はすべて `target_speed` ではなく `target_torque` になる */
   torqueMode: boolean
   /** トルクモード中にスロットル全開で出す駆動トルク [N·m]。上限 `MAX_TARGET_TORQUE_NM` */
@@ -66,14 +77,17 @@ export type NumericSettingKey = {
  *
  * ⚠ **60° は一度 45° に落とした値を戻したもの**（2026-08-10、指示による）。
  * 大舵角では前輪オドメトリの射影誤差が効き（60° で 1/cos ≒ 2倍）、据え切りを
- * 続けるとステア MD が過熱するので `temp[2]` を見ておくこと。速度 2.0 m/s も
- * `DEFAULT_SETTINGS.maxSpeed`（0.6）よりはるかに速い。**既定値はあえて上げていない**
- * ので、この上限まで使うのは設定タブで人間が明示的に上げたときだけになる。
+ * 続けるとステア MD が過熱するので `temp[2]` を見ておくこと。
+ *
+ * ⚠ 速度は 2.0 → **3.0 m/s ＝ 10.8 km/h** に引き上げた（2026-08-11、指示による）。
+ * `DEFAULT_SETTINGS.maxSpeed`（0.6）の5倍で、ミニカーの大きさに対してはかなり速い。
+ * **既定値はあえて上げていない**ので、この上限まで使うのは設定パネルで人間が
+ * 明示的に上げたときだけになる。
  */
-export const PI_MAX_SPEED_CAP = 2.0 // m/s（install_services.sh の --max-speed と一致させてある）
+export const PI_MAX_SPEED_CAP = 3.0 // m/s（install_services.sh の --max-speed と一致させてある）
 export const PI_MAX_STEER_CAP = 1.047 // rad ≒ 60°（同 --max-steer）
 
-/** STM32 に渡すレートリミット（安全側の保険）。設定タブの `accel`/`steerRate` はこれより
+/** STM32 に渡すレートリミット（安全側の保険）。設定パネルの `accel`/`steerRate` はこれより
  * 十分遅く保つこと。**これ自体はユーザー設定にしない**（`useDriving.ts` 参照） */
 export const ACCEL_SAFETY_LIMIT = 6.0 // m/s²
 export const STEER_RATE_SAFETY_LIMIT = 7.0 // rad/s
@@ -101,7 +115,7 @@ export const MAX_TARGET_TORQUE_NM = 0.125
 /**
  * トルクモードの既定の強さ。**上限より控えめにしてある。**
  * ブレーキと違い「強すぎて空転・飛び出す」方が「弱くて動かない」より危険なため、
- * 弱めから始めて設定タブで上限まで上げてもらう方針（ブレーキとは逆）。
+ * 弱めから始めて設定パネルで上限まで上げてもらう方針（ブレーキとは逆）。
  */
 export const DEFAULT_DRIVE_TORQUE_NM = 0.05
 
@@ -113,7 +127,7 @@ export const AUTO_STOP_DISTANCE_M = 0.2
 /**
  * 自動停止の既定。**ON にしてある。** 「効きすぎて止まる」より「気づかず当てる」方が
  * 損害が大きいため。⚠ STM32 側にヒステリシスが無いので、20cm 前後では
- * 効いたり切れたりする（チャタリング）。低速で壁に詰める作業では設定タブで切ること。
+ * 効いたり切れたりする（チャタリング）。低速で壁に詰める作業では設定パネルで切ること。
  */
 export const DEFAULT_AUTO_STOP = true
 
@@ -121,7 +135,6 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   maxSpeed: 0.6,
   maxSteer: 0.785,
   cruiseScale: 0.55,
-  boostScale: 1.0,
   accel: 2.0,
   coast: 2.5,
   brake: 5.0,
@@ -136,13 +149,12 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   autoStop: DEFAULT_AUTO_STOP,
 }
 
-/** 設定タブのスライダのレンジ。`min`/`max`/`step` の3つ組。
+/** 設定パネルのスライダのレンジ。`min`/`max`/`step` の3つ組。
  * **数値項目だけ。** boolean 項目（`torqueMode`）はスライダを持たないのでここに含めない */
 export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: number; step: number }> = {
   maxSpeed: { min: 0.1, max: PI_MAX_SPEED_CAP, step: 0.01 },
   maxSteer: { min: 0.175, max: PI_MAX_STEER_CAP, step: 0.005 }, // 0.175rad ≒ 10°
   cruiseScale: { min: 0.1, max: 1.0, step: 0.05 },
-  boostScale: { min: 0.1, max: 1.0, step: 0.05 },
   accel: { min: 0.5, max: 5.5, step: 0.1 },
   coast: { min: 0.5, max: 5.5, step: 0.1 },
   brake: { min: 0.5, max: 5.5, step: 0.1 },
@@ -237,14 +249,27 @@ type UiState = {
 
   /** 異常時のみ出す層(C)を人間が明示的に開いた状態 */
   diagOpen: boolean
+  /**
+   * ラジコンタブの設定ドロワーが開いているか。
+   *
+   * **`localStorage` には保存しない。** 開きっぱなしで起動すると層 A（カメラ）が
+   * 狭いまま走り出すことになる。開くのは調整したいと思ったときだけでよい。
+   */
+  settingsOpen: boolean
   /** LiDAR ビューの設定 */
   lidarZoom: number
   lidarFollow: boolean
   /** カメラの進路ガイド。**カメラ校正前なので暫定表示** */
   pathGuide: boolean
-  rearBig: boolean
+  /**
+   * ラジコンビューで後方カメラを PIP 表示するか。
+   *
+   * **切ると `CameraView` ごと外れて WS が閉じる。** 後方の JPEG が流れなくなるので、
+   * 前方のフレームレートに回せる（カメラ2台ぶんの帯域が効いている環境向け）。
+   */
+  rearPip: boolean
 
-  /** ラジコン操作の調整値。設定タブで変更、`localStorage` に自動保存 */
+  /** ラジコン操作の調整値。設定パネルで変更、`localStorage` に自動保存 */
   settings: DrivingSettings
 
   // ── 記録・再生（ログタブ） ──
@@ -281,10 +306,11 @@ export const useUi = create<UiState>((set, get) => ({
   lightMode: LIGHT_OFF,
 
   diagOpen: false,
+  settingsOpen: false,
   lidarZoom: 4, // 画面半径が何メートルぶんか
   lidarFollow: true,
   pathGuide: true,
-  rearBig: false,
+  rearPip: true,
 
   settings: loadSettings(),
 

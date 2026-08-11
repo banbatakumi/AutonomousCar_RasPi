@@ -1,8 +1,19 @@
 /**
- * 運転ビュー — 走行中に見る唯一の画面（`architecture.md` §10.2 / §10.3）。
+ * 自動運転ビュー — 自律走行を**監視・デバッグする**ための画面（`architecture.md` §10.2 / §10.3）。
  *
- * 左に前方カメラ（＋後方は小窓）、右に LiDAR 俯瞰、下に速度・舵角の帯。
+ * 上段に**前方・後方・LiDAR を同じ幅で3分割**、下に速度・舵角の帯。
  * 温度・電圧の類は畳んであり、**しきい値を超えたときだけ自動で前に出る**。
+ *
+ * ラジコンビューと違い、前方を特別扱いしない。自律走行の検証では
+ * 「後方に何が映っているか」も「点群がどう見えているか」も同じ重さで見比べる。
+ *
+ * ## ラジコンビューとの違い
+ *
+ * 出しているデータはほぼ同じだが、選び方の基準が違う。こちらは指令と実測を数値で
+ * 並べ、遅れやスリップをそのまま読ませる**開発者向けの画面**。運転を楽しむための
+ * 画面は `RcView.tsx`（メータ主体、介入はランプのみ）。
+ *
+ * 自律走行そのもの（経路・占有格子の重畳）は Phase 3 以降で、ここに足していく。
  */
 import { useNumbers } from '../bus/live'
 import { AuxPanel } from '../components/AuxPanel'
@@ -12,14 +23,15 @@ import { CameraView } from '../render/CameraView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
 
-export function DriveView() {
+export function AutoView() {
   const ui = useUi()
 
   return (
     <div className="drive">
-      <div className={`cams ${ui.rearBig ? 'rear-big' : ''}`}>
+      {/* 前方・後方・LiDAR を**同じ幅で横並び**にする。デバッグ用の画面なので、
+          「前方が主で後方が従」ではなく3つを対等に見比べられる方が使いやすい */}
+      <div className="cam-front">
         <CameraView cam="front" label="前方" />
-        <CameraView cam="rear" label="後方" />
         <div className="cam-controls">
           <label>
             <input
@@ -29,10 +41,11 @@ export function DriveView() {
             />
             進路ガイド
           </label>
-          <button onClick={() => ui.set({ rearBig: !ui.rearBig })}>
-            {ui.rearBig ? '前方を大きく' : '後方を大きく'}
-          </button>
         </div>
+      </div>
+
+      <div className="cam-rear">
+        <CameraView cam="rear" label="後方" />
       </div>
 
       <div className="lidar">

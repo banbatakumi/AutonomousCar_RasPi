@@ -1,5 +1,12 @@
 /**
- * 設定ビュー — 層 D（走行後・調整時に開く）。
+ * 設定パネル — ラジコンタブの歯車から開くドロワーの中身（`components/SettingsDrawer.tsx`）。
+ *
+ * ## なぜ独立したタブをやめたのか
+ *
+ * ここの項目は**すべてラジコン操作のためのもの**で、自動運転でも診断でもログでも
+ * 使わない。タブを1枚使って画面上部を占有する価値がなく、かつ
+ * 「走らせて → 加速が鈍い → 直す → また走らせる」の往復でタブを切り替えるのは
+ * 手間でしかない。ラジコンタブの中に畳んで、走りながら開けるようにした。
  *
  * ここにあるのは**すべて GUI 側だけで完結する調整値**（`store/ui.ts` の
  * `DrivingSettings`）。`localStorage` に保存され、次回起動時も引き継がれる。
@@ -37,7 +44,6 @@ const SPEED_FIELDS: Field[] = [
     digits: 2,
   },
   { key: 'cruiseScale', label: '巡航レンジ', unit: '×', note: '既定（低速側）。最高速度に対する倍率', digits: 2 },
-  { key: 'boostScale', label: 'ブーストレンジ', unit: '×', note: 'Shift / パッド R1 を押している間。最高速度に対する倍率', digits: 2 },
   { key: 'accel', label: '加速', unit: 'm/s²', note: '押している間の加速度', digits: 1 },
   { key: 'coast', label: '惰行減速', unit: 'm/s²', note: 'キーを離したときの減速度', digits: 1 },
   { key: 'brake', label: '逆キーブレーキ', unit: 'm/s²', note: '進行方向と逆を押したときの減速度。加速より強くすること', digits: 1 },
@@ -74,8 +80,20 @@ const TORQUE_FIELDS: Field[] = [
     key: 'driveTorque',
     label: 'トルク強さ',
     unit: 'N·m',
-    note: `トルクモード中、スロットル全開で出す駆動トルク。上限 ${MAX_TARGET_TORQUE_NM} N·m（STM32 側の上限。超えても丸められる）`,
+    note: `スロットル全開で出す駆動トルク。上限 ${MAX_TARGET_TORQUE_NM} N·m（STM32 側の上限。超えても丸められる）`,
     digits: 3,
+  },
+  /*
+   * トルク制御では速度指令を送らないので、`maxSpeed` は走りに影響しない。
+   * **それでも出しておく** — 速度メータの目盛りがこの値で決まるため、
+   * ここを触れないと「針が振り切ったまま」または「まったく動かない」計器になる。
+   */
+  {
+    key: 'maxSpeed',
+    label: '速度メータの目盛り',
+    unit: 'm/s',
+    note: 'トルク制御では速度指令を送らないので、走りには影響しない（メータの上限だけを決める）',
+    digits: 2,
   },
 ]
 
@@ -91,7 +109,7 @@ const MISC_FIELDS: Field[] = [
   },
 ]
 
-export function SettingsView() {
+export function SettingsPanel() {
   const settings = useUi((s) => s.settings)
   const setSettings = useUi((s) => s.setSettings)
   const resetSettings = useUi((s) => s.resetSettings)
@@ -99,36 +117,57 @@ export function SettingsView() {
   return (
     <div className="settings">
       <div className="settings-head">
-        <h2>設定</h2>
         <p className="dim">
           ラジコン操作の速度・舵の応答を調整する。ブラウザの <code>localStorage</code>{' '}
           に保存され、このブラウザでは次回以降も引き継がれる。
+          <b>走らせながら変えて、その場で効きを確かめられる。</b>
         </p>
         <button onClick={resetSettings}>既定値に戻す</button>
       </div>
 
-      <SettingGroup title="速度" fields={SPEED_FIELDS} settings={settings} onChange={setSettings} />
+      {/*
+        制御方式を先頭に置く。**これがスロットルの意味そのものを変える**ので、
+        下に並ぶ項目のどれが効くかもここで決まる。チェックボックスだと
+        「今どちらなのか」がラベルを読まないと分からないので、2択のセグメントにした。
+      */}
+      <section className="settings-group">
+        <h3>制御方式</h3>
+        <div className="seg">
+          <button
+            className={settings.torqueMode ? '' : 'on'}
+            onClick={() => setSettings({ torqueMode: false })}
+          >
+            速度制御
+          </button>
+          <button
+            className={settings.torqueMode ? 'on' : ''}
+            onClick={() => setSettings({ torqueMode: true })}
+          >
+            トルク制御
+          </button>
+        </div>
+        <span className="note">
+          {settings.torqueMode ? (
+            <>
+              スロットルが<b>駆動トルクの直接指令</b>になる（v0.6・実験的）。STM32 の速度 PI を
+              迂回するので、坂道でも「同じ入力なら同じトルク」になる代わりに速度は保たれない
+            </>
+          ) : (
+            <>
+              スロットルが<b>目標速度</b>になる。STM32 の速度 PI が負荷によらず速度を保つ
+            </>
+          )}
+        </span>
+      </section>
+
+      {settings.torqueMode ? (
+        <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} onChange={setSettings} />
+      ) : (
+        <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} onChange={setSettings} />
+      )}
+
       <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} onChange={setSettings} />
       <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} onChange={setSettings} />
-
-      <section className="settings-group">
-        <h3>駆動トルク（実験的）</h3>
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={settings.torqueMode}
-            onChange={(e) => setSettings({ torqueMode: e.target.checked })}
-          />
-          スロットルをトルク直接指令にする
-        </label>
-        <span className="note">
-          ONの間、速度指令の代わりに駆動トルクを直接送る（v0.6）。速度 PI を迂回するため
-          挙動が変わる。切っている間は従来どおり速度指令
-        </span>
-        {settings.torqueMode && TORQUE_FIELDS.map((f) => (
-          <SettingRow key={f.key} field={f} settings={settings} onChange={setSettings} />
-        ))}
-      </section>
 
       {/* ここだけは GUI の調整値ではなく「STM32 の機能を許可するかどうか」。
           距離も制動力も STM32 側の固定値で、GUI からは変えられない（v0.7） */}
@@ -147,7 +186,7 @@ export function SettingsView() {
           {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm を切ると、STM32 が指令を無視して最大制動する（v0.7）。
           <b>逆方向のセンサは見ないので、前に壁があっても後退はできる。</b>
           判定も制動も STM32 側で完結し、Pi/GUI は許可を出すだけ。実際に効いている間は
-          画面上部に「自動停止」が出る
+          計器の <b>STOP</b> ランプが点く
         </span>
         <span className="note">
           ⚠ ヒステリシスが無いため、{(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm

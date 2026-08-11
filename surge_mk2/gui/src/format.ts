@@ -4,6 +4,14 @@
 
 export const RAD2DEG = 180 / Math.PI
 
+/** 標準重力 [m/s²]。加速度を「G」で読ませるためだけに持つ */
+export const G = 9.80665
+
+/** 加速度 [m/s²] → G。**ラジコンの G メータ専用**（制御には使わない） */
+export function gForce(a: number): number {
+  return a / G
+}
+
 export function deg(rad: number, digits = 1): string {
   return `${(rad * RAD2DEG).toFixed(digits)}°`
 }

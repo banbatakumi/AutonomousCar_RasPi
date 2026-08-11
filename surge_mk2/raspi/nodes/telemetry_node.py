@@ -339,7 +339,7 @@ class TelemetryServer:
                 torque_mode=bool(m.get("torque_mode", False)),
                 target_torque=float(m.get("target_torque", 0.0)),
                 # v0.7: 超音波の自動停止。**既定は False**（キーを送ってこない古い GUI に
-                # 勝手な自動介入を足さない）。有効にするかは GUI の設定タブで人間が決める
+                # 勝手な自動介入を足さない）。有効にするかは GUI の設定パネルで人間が決める
                 auto_stop=bool(m.get("auto_stop", False)),
                 source=f"gui:{self.controller_name}")
             self._last_cmd_ns = time.monotonic_ns()

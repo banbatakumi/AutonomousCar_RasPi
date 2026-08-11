@@ -1,22 +1,36 @@
 /**
- * 画面の骨格。運転・設定・ログの3ビューは作り込んである。
- * 残る「地図」「診断」は `architecture.md` §10.2 の枠だけ置いてある。
+ * 画面の骨格。タブは4枚（`architecture.md` §10.2）。
+ *
+ *   ラジコン   運転を楽しむための画面。メータ主体、設定は歯車から
+ *   自動運転   自律走行の監視・デバッグ。指令と実測を数値で並べる（Phase 3 で中身が育つ）
+ *   診断       現在値と時系列。走行画面から外した数字はすべてここ
+ *   ログ       記録の開始・停止・ダウンロード
+ *
+ * **既定はラジコン。** 自動運転は Phase 3 以降にならないと中身が無く、
+ * 今開いて意味があるのはラジコンのため。
+ *
+ * 「地図」タブは削除した（プレースホルダのままだった）。SLAM を実装する
+ * Phase 3 で、自動運転ビューの中に入れるか独立させるかを決め直す。
  */
 import { useEffect, useRef, useState } from 'react'
 import { StatusBar } from './components/StatusBar'
 import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
-import { DriveView } from './views/DriveView'
+import { AutoView } from './views/AutoView'
+import { DiagView } from './views/DiagView'
 import { LogView } from './views/LogView'
-import { SettingsView } from './views/SettingsView'
+import { RcView } from './views/RcView'
 import { ControlChannel } from './ws/control'
 import { connectTelemetry } from './ws/telemetry'
 
-const TABS = ['運転', '地図', '診断', '設定', 'ログ'] as const
+const TABS = ['ラジコン', '自動運転', '診断', 'ログ'] as const
 type Tab = (typeof TABS)[number]
 
+/** 操縦しうるタブ。ここでだけ操作ヒントを出す（診断・ログでは邪魔になる） */
+const DRIVING_TABS: Tab[] = ['ラジコン', '自動運転']
+
 export function App() {
-  const [tab, setTab] = useState<Tab>('運転')
+  const [tab, setTab] = useState<Tab>('ラジコン')
   const [ch, setCh] = useState<ControlChannel | null>(null)
   const chRef = useRef<ControlChannel | null>(null)
   const set = useUi((s) => s.set)
@@ -51,11 +65,12 @@ export function App() {
     }
   }, [set])
 
+  // **タブに関係なく操縦は生きている。** 診断タブを見ている間に急に止まると事故になる
   useDriving(ch)
 
   return (
     <div className="app">
-      <StatusBar onEstop={() => ch?.estop()} />
+      <StatusBar onEstop={() => ch?.estop()} variant={tab === 'ラジコン' ? 'rc' : 'full'} />
       <nav className="tabs">
         {TABS.map((t) => (
           <button key={t} className={t === tab ? 'on' : ''} onClick={() => setTab(t)}>
@@ -63,17 +78,17 @@ export function App() {
           </button>
         ))}
         <div className="spacer" />
-        <DriveHint />
+        {DRIVING_TABS.includes(tab) && <DriveHint />}
       </nav>
 
-      {tab === '運転' ? (
-        <DriveView />
-      ) : tab === '設定' ? (
-        <SettingsView />
-      ) : tab === 'ログ' ? (
-        <LogView ch={ch} />
+      {tab === 'ラジコン' ? (
+        <RcView />
+      ) : tab === '自動運転' ? (
+        <AutoView />
+      ) : tab === '診断' ? (
+        <DiagView />
       ) : (
-        <Placeholder tab={tab} />
+        <LogView ch={ch} />
       )}
     </div>
   )
@@ -97,23 +112,6 @@ function DriveHint() {
       <span className="dim">
         Enter で ARM ／ W A S D ／ パッド R2 + 左スティック ／ Esc で E-STOP
       </span>
-    </div>
-  )
-}
-
-function Placeholder({ tab }: { tab: Tab }) {
-  const what: Record<string, string> = {
-    地図: 'SLAM・占有格子・生成経路のデバッグ（Phase 3 で中身が入る）',
-    診断: '時系列グラフ（uPlot）、パケットロスの推移、STATS の突き合わせ',
-  }
-  return (
-    <div className="placeholder">
-      <h2>{tab}</h2>
-      <p>{what[tab]}</p>
-      <p className="dim">
-        今回のスコープは運転ビュー1枚。WS の形が固まったので、ここは同じ
-        <code>/ws/telemetry</code> の購読を足すだけで作れる。
-      </p>
     </div>
   )
 }
