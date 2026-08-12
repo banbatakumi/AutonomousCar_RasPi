@@ -82,6 +82,19 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .pill.lv-warn { border-color: #6b5210; }
 .pill.lv-bad { border-color: #6e2b27; }
 
+/* SIM — 相手が実 STM32 ではなくシミュレータのときだけ出る。
+   **他のどのピルとも似ていない見た目にする。** 実機と見分けがつかないまま
+   --allow-arm すると本物の車が動くので、ここは控えめにしてはいけない。
+   斜線は「この画面の数字は本物ではない」の記号として効く */
+.pill.sim {
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: #14181d;
+  border-color: #b98b1b;
+  background: repeating-linear-gradient(
+    -45deg, #e0aa2a, #e0aa2a 6px, #c9971f 6px, #c9971f 12px);
+}
+
 .metric { display: inline-flex; align-items: baseline; gap: 3px; }
 .metric b { font-weight: 600; }
 .metric i { font-style: normal; color: var(--dim); font-size: 10px; }

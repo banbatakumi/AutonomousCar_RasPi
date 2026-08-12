@@ -6,6 +6,7 @@
     .venv/bin/python -m raspi.nodes.io_node --log          # logs/ に .sfl を記録
     .venv/bin/python -m raspi.nodes.io_node --no-bus       # バスを使わない（診断用）
     .venv/bin/python -m raspi.nodes.io_node --allow-arm    # ★ モータを回せる状態にする
+    .venv/bin/python -m raspi.nodes.io_node --sim          # Mac 上のシミュレータに繋ぐ（`sim/`）
 
 やること:
 - 起動時に VERSION_REQ → VERSION を照合（protocol_version 不一致は警告）
@@ -385,7 +386,10 @@ class IoNode:
                     arm_inhibited=not self.allow_arm,
                     cmd_source=self.cmd.source if self.cmd else "",
                     cmd_stale=self.cmd_stale,
-                    expected_version=PROTOCOL_VERSION)
+                    expected_version=PROTOCOL_VERSION,
+                    # シミュレータの link だけがこれを持つ（`sim/link.py`）。
+                    # GUI に SIM バッジを出す唯一の根拠。**実機の link には何も足さない**
+                    sim=getattr(self.link, "is_sim", False))
                 next_diag = now + NS // DIAG_HZ
 
             if self.pub is not None and now >= next_hb:
@@ -432,10 +436,21 @@ def main() -> int:
                     help=f"Pi 側の速度クランプ [m/s]（既定 {DEFAULT_MAX_SPEED}）")
     ap.add_argument("--max-steer", type=float, default=DEFAULT_MAX_STEER,
                     help=f"Pi 側の舵角クランプ [rad]（既定 {DEFAULT_MAX_STEER}）")
+    ap.add_argument("--sim", action="store_true",
+                    help="UART の相手を Mac 上のシミュレータにする（`sim/` 参照）。"
+                         "実機では使わない")
+    ap.add_argument("--course", default="sim/courses/oval.png",
+                    help="--sim のときのコース PNG")
     args = ap.parse_args()
 
     try:
-        link = SerialLink(args.port, args.baud)
+        if args.sim:
+            # **遅延 import。** Pi にはこのパッケージを配らないので、
+            # --sim を付けない限り評価されてはいけない
+            from sim.link import create_sim_link
+            link = create_sim_link(args.course)
+        else:
+            link = SerialLink(args.port, args.baud)
     except Exception as e:
         print(f"ポートを開けない: {e}", file=sys.stderr)
         return 2
@@ -456,8 +471,10 @@ def main() -> int:
 
     # **`args.log` 無しでも常に用意しておく。** `log/ctrl`（GUI の記録ボタン）で
     # セッション中に記録を始めるとき、同じメタデータで書けるようにするため
-    log_meta = {"node": "io_node", "port": args.port, "baud": args.baud,
-                "protocol_version": PROTOCOL_VERSION}
+    # `args.port` ではなく `link.port` を書く。--sim のとき記録に "/dev/serial0" と
+    # 残ると、後からログを見て実機の記録と区別がつかなくなる
+    log_meta = {"node": "io_node", "port": link.port, "baud": link.baud,
+                "protocol_version": PROTOCOL_VERSION, "sim": args.sim}
     log = None
     if args.log is not None:
         path = Path(args.log) if args.log.endswith(".sfl") else default_log_path(args.log)
@@ -500,7 +517,7 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, _shutdown)
 
-    print(f"# io_node port={args.port} baud={args.baud} 期待 v{PROTOCOL_VERSION:#06x}")
+    print(f"# io_node port={link.port} baud={link.baud} 期待 v{PROTOCOL_VERSION:#06x}")
     ver = node.handshake()
     if ver is None:
         print("!! VERSION 応答なし。STM32 が繋がっていない可能性。受信は続行する。")

@@ -254,6 +254,11 @@ class LinkDiag(MsgBase):
     lidar_scans: int = 0
     lidar_sectors_lost: int = 0
 
+    #: **このリンクの相手が実 STM32 ではなくシミュレータか。**
+    #: 利便性ではなく安全のために出す。シムと実機の画面が見分けられないと
+    #: 「シムのつもりで --allow-arm した実車が動く」が起きる（GUI が SIM バッジを出す）
+    sim: bool = False
+
 
 class ImageRef(MsgBase):
     """共有メモリ上の画像1枚への参照。**画素はバスに流さない**（§6.2）。

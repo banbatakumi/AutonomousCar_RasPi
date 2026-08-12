@@ -102,6 +102,15 @@ export type LinkDiag = {
   hb_stalls: number
   lidar_scans: number
   lidar_sectors_lost: number
+  /**
+   * 相手が実 STM32 ではなくシミュレータか（`sim/link.py`）。
+   *
+   * **GUI がシミュレータについて知っている唯一のこと。** コース切替やノイズ量の
+   * 操作は `sim.gui`（pygame）側にあり、ここには持ち込まない。これは利便性ではなく
+   * 安全のための表示で、シムと実機の画面が見分けられないと
+   * 「シムのつもりで --allow-arm した実車が動く」が起きる。
+   */
+  sim: boolean
 }
 
 /** `/ws/telemetry` が 20Hz で送ってくるスナップショット。 */

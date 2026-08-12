@@ -1,0 +1,86 @@
+# SURGE Mk.2 車両諸元 — `docs/architecture.md` §5.3
+#
+# **全ノードがここだけを見る。** 同じ数字を2箇所に書くと必ず片方が古くなる。
+#
+# 形式について: §5.3 は `config/vehicle.yaml` と書いているが TOML にしてある。
+# Python 3.11+ の `tomllib`（標準ライブラリ）で読めるので依存が増えず、
+# `raspi/proto/protocol.toml` と同じ流儀に揃うため。中身のスキーマは §5.3 のまま。
+#
+# ★ ここの値の多くは**未実測の暫定値**（`architecture.md` §15 未決事項 #3/#4）。
+#   実車で測ったら差し替えること。measured = false が「まだ測っていない」印。
+
+measured = false
+
+# ── 幾何 ────────────────────────────────────────────────────────────────
+# 原点は base_link ＝ **後輪車軸の中心**（§5.2）。x = 前、y = 左、z = 上。
+
+wheelbase = 0.25              # L [m]  ★未実測
+track = 0.19                  # トレッド [m]  ★未実測
+max_steer = 1.047             # 最大路面舵角 [rad] = 60°
+wheel_radius = 0.033          # [m]  ★未実測（STM32 側のギア比と併せて要実測）
+encoder_ticks_per_rev = 0     # ★未確定（STM32 の実測待ち）
+mass = 1.6                    # 車両質量 [kg]  ★未実測
+
+# 車体外形ポリゴン [m]。base_link 基準・反時計回り。
+# 現在値は `gui/src/render/LidarView.tsx` の VEHICLE（width 0.19 / wheelbase 0.25 /
+# frontOverhang 0.06 / rearOverhang 0.03）と同じものを多角形で書き直したもの。
+footprint = [
+  [ 0.310,  0.095],   # 右前 → ではなく左前（y=左が正）
+  [ 0.310, -0.095],
+  [-0.030, -0.095],
+  [-0.030,  0.095],
+]
+
+# ── アクチュエータの動特性 ──────────────────────────────────────────────
+# **すべて実測待ちの仮値。** シミュレータと、将来のフィードフォワード制御が使う。
+# 実車で測る手順: 舵角ステップ入力 → TELEMETRY の steer_actual をログに取り、
+# 立ち上がりの遅れ（= dead_time_s）と 63.2% 到達時間（= tau_steer_s）を読む。
+
+[dynamics]
+tau_steer_s = 0.12            # 操舵の1次遅れ時定数 [s]  ★未実測
+dead_time_s = 0.030           # 操舵のむだ時間 [s]  ★未実測
+tau_speed_s = 0.35            # 速度応答の1次遅れ時定数 [s]  ★未実測
+rolling_resistance = 0.35     # 転がり抵抗による減速度 [m/s²]  ★未実測
+drive_ratio = 2.0             # 駆動輪数（後輪2輪ぶんのトルクが効く）
+
+# ── センサ取付位置 ──────────────────────────────────────────────────────
+# base_link からの固定変換。★すべて未実測の暫定値。
+
+[sensors.lidar]
+x = 0.120
+y = 0.0
+z = 0.105
+yaw = 0.0
+# LD06 は裏向きに実装されているため、センサ角と車両角が鏡像関係になる。
+# その反転は `raspi/msgs/convert.py` の ScanAssembler が行う（ここでは表現しない）
+mirrored = true
+
+[sensors.cam_front]
+x = 0.150
+y = 0.0
+z = 0.140
+roll = 0.0
+pitch = 0.12
+yaw = 0.0
+hfov = 1.152                  # [rad] ≒ 66°
+
+[sensors.cam_rear]
+x = -0.020
+y = 0.0
+z = 0.140
+roll = 0.0
+pitch = 0.12
+yaw = 3.14159265
+hfov = 1.152
+
+[sensors.us_front]
+x = 0.300
+y = 0.0
+z = 0.060
+yaw = 0.0
+
+[sensors.us_rear]
+x = -0.020
+y = 0.0
+z = 0.060
+yaw = 3.14159265

@@ -5,8 +5,12 @@
 | 文書 | 内容 | 読む人 |
 |---|---|---|
 | [architecture.md](architecture.md) | **ソフトウェア設計書**。全体アーキテクチャ、座標系規約、内部バス設計、安全設計、GUI 方針、ロードマップ | 全員。まずこれを読む |
-| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.5**）。パケット定義の**正** | STM32 / RasPi 双方の実装者 |
-| [stm32_interface.md](stm32_interface.md) | **STM32 側 実装仕様書**（v0.4 = プロトコル v0.5 に対応）。C 構造体、送受信の実装、安全要件、チェックリスト、立ち上げ手順 | STM32 ファームウェア実装者 |
+| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.7**）。仕様の説明の**正** | STM32 / RasPi 双方の実装者 |
+| [stm32_interface.md](stm32_interface.md) | **STM32 側 実装仕様書**。C 構造体、送受信の実装、安全要件、チェックリスト、立ち上げ手順 | STM32 ファームウェア実装者 |
+| [../sim/README.md](../sim/README.md) | **シミュレータ**（Mac 専用）。実機と同じ制御コードのまま走らせる | 自律走行を書く人 |
+
+**数値の正は `raspi/proto/protocol.toml`。** そこから Python パーサと C ヘッダの両方を
+生成する（`python3 raspi/proto/generate.py`）。文書と食い違ったら toml が正しい。
 
 ## 文書間の関係
 
@@ -25,13 +29,15 @@ architecture.md          全体設計（何をどこでやるか）
 
 ## 現在の状態
 
-- 設計フェーズ完了。**Phase 0（通信基盤・ログ記録再生・GUI 骨格）に着手可能**
-- 実装コードはまだ存在しない
+**この節は腐りやすい。詳しい現在地は `PROGRESS.md` を見ること**（そちらが正）。
+
+- **Phase 0（通信基盤・ログ記録再生・GUI 骨格）完了。実車で走行実績あり。**
+  Pi 側の実装は `raspi/`、GUI は `gui/`（React 4タブ）
+- **シミュレータあり**（`sim/`、Mac 専用）。`io_node --sim` で実機と同じ制御コードのまま
+  コース上を走らせられる。実車が無いときの自律走行開発はこちら
+- **プロトコルは v0.7**（2026-08-11）。v0.6 からはビット追加のみで**ワイヤ互換**
+  （`COMMAND.flags` bit7 = `auto_stop`、`TELEMETRY.flags` bit16 = `auto_stop_active`）。
+  v0.4 → v0.5 → v0.6 の経緯は `uart_protocol.md` の改版履歴にある
 - SLAM / 自己位置推定の方式は **Phase 3 着手時に決定**する方針
-- **プロトコルは v0.5**（2026-08-09、STM32 側発の変更を反映）。
-  v0.4 からの差分は **`COMMAND` (0x10) だけ**で、LEN が 10→12 に変わっている。
-  **LEN が変わるため、Pi と STM32 の版数がずれている間は走行指令が一切通らない。**
-  灯火の 3段切替・パッシング・クラクションの押下中継続・制動トルク指定が増えた。
-  v0.4 確定の経緯（STM32 側と2往復の議論）は `uart_protocol.md` §0 と §15 に残してある
-- **ステアリングのリンク比と車輪半径が未実測**のため、`config/vehicle.yaml` は暫定値。
-  この2つが Phase 0 のクリティカルパス（`architecture.md` §15）
+- **ステアリングのリンク比と車輪半径が未実測**のため、`config/vehicle.toml` は暫定値。
+  この2つが残っているクリティカルパス（`architecture.md` §15）

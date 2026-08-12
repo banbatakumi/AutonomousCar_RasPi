@@ -1,0 +1,11 @@
+# シミュレータ（Mac 専用） — **Pi には入れない**
+#
+#   .venv/bin/pip install -r sim/requirements.txt
+#
+# 本体（sim/link.py・stm32.py・vehicle.py・lidar.py・course.py）が要るのは
+# numpy と pillow だけで、どちらも既に入っている（numpy は raspi/requirements.txt、
+# pillow は Mac でカメラ配信を試すために入れてある）。
+# pygame はシミュレータGUI（sim/gui.py）専用で、無くてもシミュレーションは走る。
+
+pygame                 # シミュレータGUI（俯瞰ビュー＋パラメータ調整パネル）
+pillow                 # コース PNG の読み込み（raspi 側では任意扱いなのでここにも書く）

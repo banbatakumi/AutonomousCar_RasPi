@@ -51,6 +51,19 @@ export function StatusBar({
       <header className="statusbar">
         <div className="brand">SURGE&nbsp;Mk.2</div>
 
+        {/* **実機かシムかは何よりも先に分かる必要がある。** variant で省かない。
+            これを見落としたまま --allow-arm すると本物の車が動く。
+            GUI がシミュレータについて知っているのはこの1ビットだけで、
+            コース切替やノイズ量の操作は sim.gui（pygame）側にある */}
+        {link?.sim && (
+          <span
+            className="pill sim"
+            title="UART の相手は実 STM32 ではなくシミュレータ（sim/link.py）。コース切替やノイズ量の調整はシミュレータGUI 側で行う"
+          >
+            SIM
+          </span>
+        )}
+
         {/* ラジコンでは health が OK の間だけ省く。**異常なら variant に関係なく出す** */}
         {(variant === 'full' || health !== 'OK') && (
           <span className={`pill lv-${healthLevel(health)}`}>{health}</span>

@@ -34,16 +34,31 @@ cd gui && npm install && npm run dev      # http://localhost:5173
 `--faults` を付けると 60秒周期で E-Stop・低電圧・過熱を演出する。
 **異常表示の作り込みはこれで確認する**（実車で異常を出して確かめるのは無理）。
 
-### 2. 実機ログを流す（本物のセンサノイズ入り）
+### 2. シミュレータで走らせる（**指令に反応する。自律走行の開発台**）
 
-`bus_demo` は運動学だけのモックで、センサのばらつきは入っていない。
-記録済みの `.sfl` があるならこちらが正しい（`architecture.md` §11）。
+`bus_demo` と違い、**UART プロトコルから下を丸ごと偽装する**ので、
+`convert.py`・`ScanAssembler`・安全ゲートを含む実機と同じコードが全部動く。
+LiDAR にはノイズ・欠損・遅延が入り、コース上の壁が点群として見える。
+
+```bash
+.venv/bin/python -m sim.run                  # 3つまとめて起動。Ctrl-C で全部落ちる
+.venv/bin/python -m sim.run --course slalom  # コース指定
+```
+
+**この GUI にはシミュレータ用の操作を一切足していない。** 出るのは
+ステータスバーの **SIM** バッジだけ（`link.sim`）。コース切替・ノイズ量・欠損率は
+`sim.gui` 側にある。詳しくは [`sim/README.md`](../sim/README.md)。
+
+### 3. 実機ログを流す（本物のセンサノイズ入り）
+
+記録済みの `.sfl` を実時間で流す。**本物のセンサそのもの**だが、
+指令には反応しない（走らせて試すならシミュレータ）。
 
 ```bash
 .venv/bin/python -m raspi.nodes.replay_node logs/run.sfl --bus --loop
 ```
 
-### 3. 実車
+### 4. 実車
 
 ```bash
 # Pi 上で

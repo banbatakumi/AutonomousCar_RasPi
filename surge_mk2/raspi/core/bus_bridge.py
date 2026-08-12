@@ -96,8 +96,8 @@ class BusBridge:
 
     def build_diag(self, state, sync, rx_stats=None, *, heartbeat=None,
                    arm_inhibited: bool = True, cmd_source: str = "",
-                   cmd_stale: bool = True, expected_version: int | None = None
-                   ) -> LinkDiag:
+                   cmd_stale: bool = True, expected_version: int | None = None,
+                   sim: bool = False) -> LinkDiag:
         """`diag/link` の中身を組み立てる。
 
         **Pi 側の受信統計（`rx`）と STM32 側の `STATS`（`stm_rx`）を並べて出す。**
@@ -124,6 +124,7 @@ class BusBridge:
             cmd_rtt_ms=self.cmd_rtt_ms,
             lidar_scans=self.scans.scans,
             lidar_sectors_lost=self.scans.sectors_lost,
+            sim=sim,
         )
         if s is not None:
             d.stm_rx = {
