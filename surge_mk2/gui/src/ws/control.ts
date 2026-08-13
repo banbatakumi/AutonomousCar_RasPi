@@ -88,6 +88,21 @@ export class ControlChannel {
     this.send({ type: 'cmd', ...c })
   }
 
+  // ── 自動運転 ──
+
+  /**
+   * モード選択・engage・パラメータ。**3つとも省略できる**（送った項目だけ効く）。
+   *
+   * `engaged` を GUI 側で覚えないのは、**サーバが真値**だから。ブラウザを2枚
+   * 開いたときに片方だけ「走っているつもり」になるのを防ぐ。押した結果は
+   * `status` のブロードキャストで返ってくる。
+   *
+   * ⚠ **モードを変えると engage は必ず落ちる**（サーバ側の約束）。
+   */
+  setAuto(p: { mode?: string; engaged?: boolean; params?: Record<string, number> }) {
+    this.send({ type: 'auto', ...p })
+  }
+
   // ── 記録・再生 ──
 
   /** `.sfl` の記録意思を送る。実際に開閉するのは io_node（`log/ctrl` 経由） */

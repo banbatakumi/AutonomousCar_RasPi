@@ -70,15 +70,25 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 
 #: ノードごとに1本の endpoint を bind する。**トピックごとではない。**
 #: PUB を1プロセス1本にしておくと、購読側は接続先が固定されて配線が単純になる
-_NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "test": 5579}
+_NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
+                  "test": 5579}
 
 #: トピック → どのノードが publish するか
+#:
+#: **`cmd` の発行元は `control`（telemetry_node）だけ。** planning_node は
+#: `auto/cmd` に出し、engage されている間だけ telemetry_node が `cmd` へ中継する。
+#: 2つのノードが同じ `cmd` に publish すると、購読側からは区別できないまま
+#: 50Hz で交互に上書きし合い、「勝手にハンドルが戻る」という再現困難な症状になる
+#: （`docs/architecture.md` §7.4 / `telemetry_node` の `_cmd_pump`）。
 TOPIC_OWNER: dict[str, str] = {
     "vehicle_state": "io",
     "scan": "io",
     "diag/link": "io",
     "cmd": "control",
     "log/ctrl": "control",
+    "auto/ctrl": "control",
+    "auto/cmd": "planning",
+    "auto/state": "planning",
     "image/": "camera",
     "image/front": "camera",
     "image/rear": "camera",
@@ -107,7 +117,7 @@ def endpoints_for_topic(topic: str) -> list[str]:
     `hb/` は全ノードが publish するので全 endpoint に繋ぐ。
     """
     if topic.startswith("hb/") or topic == "hb/":
-        return [endpoint_for_node(n) for n in ("io", "camera", "control")]
+        return [endpoint_for_node(n) for n in ("io", "camera", "control", "planning")]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）

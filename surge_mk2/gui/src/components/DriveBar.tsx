@@ -34,7 +34,9 @@ export function DriveBar() {
             <span className="sub">指令(トルク) {n.out.torque.toFixed(3)} N·m</span>
           ) : (
             <span className="sub">
-              指令 {n.out.active ? `${target.toFixed(2)}` : '—'}
+              {/* 自律走行中の「指令」は planner が出した値（`bus/live.ts` の `cmdOut`）。
+                  誰が出しているのか分からないまま数字だけ動くのを避ける */}
+              {n.out.auto ? '指令(自律)' : '指令'} {n.out.active ? `${target.toFixed(2)}` : '—'}
             </span>
           )}
         </div>

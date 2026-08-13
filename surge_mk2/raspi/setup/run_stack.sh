@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pi 上で Phase 0 のノード一式を起動/停止する。systemd unit を書くまでの繋ぎ。
 #
-#   ./raspi/setup/run_stack.sh start          # io + camera + telemetry + logger
+#   ./raspi/setup/run_stack.sh start          # io + camera + telemetry + planning + logger
 #   ./raspi/setup/run_stack.sh start --heartbeat   # ★ GPIO6 ハートビートも出す
 #   ./raspi/setup/run_stack.sh start --no-logger   # MCAP 記録を止める（ディスク節約）
 #   ./raspi/setup/run_stack.sh status
@@ -58,6 +58,8 @@ case "${1:-status}" in
     start_one camera   raspi.nodes.camera_node   --quiet
     sleep 4
     start_one telemetry raspi.nodes.telemetry_node
+    # 自動運転。**上げただけでは何も起きない**（engage は GUI から人間が行う）
+    start_one planning raspi.nodes.planning_node --quiet
     # ロガーは最後。**カメラより後に上げる**と、記録の先頭から画像が入る
     [ "$LOGGER" = 1 ] && start_one logger raspi.nodes.logger_node --quiet
     sleep 3
@@ -72,7 +74,7 @@ case "${1:-status}" in
     echo "=== 稼働中 ==="
     pgrep -af "$PATTERN" | sed 's#.*/python -m ##' || echo "  （無し）"
     echo
-    for f in io camera telemetry logger; do
+    for f in io camera telemetry planning logger; do
       [ -f "$LOGS/$f.out" ] || continue
       echo "=== $f ==="
       grep -v '^$' "$LOGS/$f.out" | tail -6
@@ -81,7 +83,8 @@ case "${1:-status}" in
     ;;
 
   logs)
-    tail -n 40 -F "$LOGS"/io.out "$LOGS"/camera.out "$LOGS"/telemetry.out "$LOGS"/logger.out
+    tail -n 40 -F "$LOGS"/io.out "$LOGS"/camera.out "$LOGS"/telemetry.out \
+         "$LOGS"/planning.out "$LOGS"/logger.out
     ;;
 
   *)

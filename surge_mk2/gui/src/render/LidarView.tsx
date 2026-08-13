@@ -14,6 +14,15 @@
  *
  * `saturated`（生値 255 = 5.10m 以上）を実測点として打つと、**実在しない壁が
  * 円状に生成される**（`uart_protocol.md` §5.2）。マーカーを変えて別扱いにする。
+ *
+ * ## 自動運転の判断を重ねる
+ *
+ * planning_node が選んだギャップ・安全バブル・狙っている方位を点群の上に描く。
+ * **数字だけでは「なぜそっちへ曲がったか」が読めない。** 点群と重ねて初めて、
+ * 「この壁を避けている」「欠測を壁として避けている」が一目で分かる。
+ *
+ * engage していなくても描く（planning_node は常に判断を出している）ので、
+ * **手動で走らせながら planner の狙いを検分できる。**
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
@@ -41,6 +50,9 @@ const C = {
   missing: '#3a2a20',
   path: '#ffc63f',
   us: '#8b6bd6',
+  gap: '#2bd67b',
+  bubble: '#e0574d',
+  heading: '#5ef0a8',
 }
 
 export function LidarView() {
@@ -82,6 +94,9 @@ export function LidarView() {
       const scan = live.scan
       if (scan) {
         drawMissingSectors(ctx, scan.sector_seen, cx, cy, px, zoom)
+        // **点群より先に塗る。** 後から塗ると点が半透明の下に沈んで、
+        // ギャップの中に何が見えているのかが読めなくなる
+        drawPlan(ctx, cx, cy, px, zoom)
         ctx.save()
         for (let deg = 0; deg < 360; deg++) {
           const d = scan.dist[deg]
@@ -169,6 +184,58 @@ function drawMissingSectors(
     ctx.closePath()
     ctx.fillStyle = C.missing
     ctx.fill()
+  }
+}
+
+/**
+ * planning_node の判断（`live.auto`）を重ねる。
+ *
+ * 描くのは3つだけ。**選んだギャップ（緑の扇）・安全バブル（赤の扇）・狙う方位**。
+ * これ以上足すと点群が読めなくなる。
+ *
+ * 角度は車両座標（x=前 が 0、反時計回りが正）で、画面角は `-(θ + 90°)`
+ * （`drawMissingSectors` と同じ変換。上向きを 0 にする回転）。
+ */
+function drawPlan(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  px: number,
+  zoom: number,
+) {
+  const a = live.auto
+  if (!a || !a.mode) return
+  const r = zoom * 1.6 * px
+  const wedge = (fromDeg: number, toDeg: number, fill: string) => {
+    const a0 = (fromDeg * Math.PI) / 180
+    const a1 = (toDeg * Math.PI) / 180
+    ctx.beginPath()
+    ctx.moveTo(cx, cy)
+    ctx.arc(cx, cy, r, -a1 - Math.PI / 2, -a0 - Math.PI / 2)
+    ctx.closePath()
+    ctx.fillStyle = fill
+    ctx.fill()
+  }
+
+  // 選んだギャップ。**ready でないときは描かない**（選べていないので）
+  if (a.ready && a.gap_end_deg > a.gap_start_deg) {
+    wedge(a.gap_start_deg, a.gap_end_deg, `${C.gap}22`)
+  }
+  // 安全バブル。`start > end` は「バブル無し」（`AutoState` の約束）
+  if (a.bubble_end_deg >= a.bubble_start_deg) {
+    wedge(a.bubble_start_deg, a.bubble_end_deg, `${C.bubble}2e`)
+  }
+  // 狙っている方位。**舵角ではなく「どこを向きたいか」**
+  if (a.ready) {
+    const th = a.heading
+    ctx.beginPath()
+    ctx.moveTo(cx, cy)
+    ctx.lineTo(cx - Math.sin(th) * r, cy - Math.cos(th) * r)
+    ctx.strokeStyle = C.heading
+    ctx.lineWidth = 2
+    ctx.setLineDash([2, 5])
+    ctx.stroke()
+    ctx.setLineDash([])
   }
 }
 

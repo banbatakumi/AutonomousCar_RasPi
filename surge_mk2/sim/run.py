@@ -5,8 +5,9 @@
     .venv/bin/python -m sim.run --no-gui             # 俯瞰ビュー無し
     .venv/bin/python -m sim.run --list               # コース一覧
 
-`io_node --sim` / `telemetry_node --no-camera` / `sim.gui` の 3 つを子プロセスとして
-起動し、出力に印を付けて1つの画面に流す。**Ctrl-C か、俯瞰ビューの窓を閉じると全部止まる。**
+`io_node --sim` / `telemetry_node --no-camera` / `planning_node` / `sim.gui` の 4 つを
+子プロセスとして起動し、出力に印を付けて1つの画面に流す。
+**Ctrl-C か、俯瞰ビューの窓を閉じると全部止まる。**
 
 俯瞰ビューが**異常終了したときだけ**は巻き添えにしない（二重起動や描画のバグで
 落ちただけなら、走っている車まで止める理由が無い）。終了コードで区別している。
@@ -104,7 +105,7 @@ def port_holder(port: int) -> tuple[int, str] | None:
 
 
 def bus_rivals() -> list[tuple[int, str, str]]:
-    """`io` endpoint を取り合う相手（io_node / bus_demo / replay_node）。
+    """endpoint を取り合う相手（io_node / bus_demo / replay_node / planning_node）。
 
     **起動時刻を必ず出す。** 実際に4日前の `bus_demo --faults` が動きっぱなしで、
     その偽データが GUI に出ていたことがある。コマンド名だけ見ても気づけない。
@@ -119,7 +120,10 @@ def bus_rivals() -> list[tuple[int, str, str]]:
     rivals = []
     for line in out:
         if not any(k in line for k in ("raspi.nodes.io_node", "raspi.tools.bus_demo",
-                                       "raspi.nodes.replay_node")):
+                                       "raspi.nodes.replay_node",
+                                       # planning_node は `planning` endpoint を
+                                       # bind するので、残っていると新しい方が上がれない
+                                       "raspi.nodes.planning_node")):
             continue
         if "sim.run" in line or "ps -eo" in line:
             continue
@@ -234,19 +238,25 @@ def resolve_course(name: str) -> Path:
 # ── 子プロセス ──────────────────────────────────────────────────────────
 
 class Child:
-    """:param essential: False なら**異常終了しても**他を巻き添えにしない。
+    """:param essential: False なら**落ちても他を巻き添えにしない。**
+    :param window: この子の正常終了（終了コード 0）を「人が終わりにした」と読む。
 
     俯瞰ビュー（`sim.gui`）は無くてもシミュレーションは成立するので、
     二重起動や描画のバグで GUI だけ落ちたときに走っている車まで止める理由が無い。
-
-    **ただし正常終了（終了コード 0）は別扱い。** それは「窓を閉じた」＝
-    人が終わりにしたという意思表示なので、全部畳む。この2つを区別しないと、
+    **ただし正常終了は別扱い**で、それは「窓を閉じた」＝人が終わりにしたという
+    意思表示なので全部畳む（`window=True`）。この2つを区別しないと、
     「閉じたのに裏でシムが走り続ける」か「バグで落ちたら全部道連れ」のどちらかになる。
+
+    `planning_node` も `essential=False` だが `window=False`。自動運転の実装を
+    いじっている最中に落ちても、**手動で走らせている車まで道連れにしない**
+    （自律指令が途絶えれば telemetry_node が制動に落とすので、危険側には転ばない）。
     """
 
-    def __init__(self, tag: str, args: list[str], essential: bool = True) -> None:
+    def __init__(self, tag: str, args: list[str], essential: bool = True,
+                 window: bool = False) -> None:
         self.tag = tag
         self.essential = essential
+        self.window = window
         self.proc = subprocess.Popen(
             [sys.executable, "-u", "-m", *args], cwd=ROOT,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -301,6 +311,8 @@ def main() -> int:
     ap.add_argument("--course", default="oval", help="コース名 or PNG パス（既定 oval）")
     ap.add_argument("--list", action="store_true", help="コース一覧を出して終わる")
     ap.add_argument("--no-gui", action="store_true", help="pygame の俯瞰ビューを開かない")
+    ap.add_argument("--no-planning", action="store_true",
+                    help="planning_node を上げない（自動運転タブが使えなくなる）")
     ap.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
     ap.add_argument("--kill-stale", action="store_true",
                     help="ポートや endpoint を掴んでいる古いプロセスを落としてから起動する")
@@ -337,8 +349,13 @@ def main() -> int:
     children = [Child("io", io),
                 Child("tele", ["raspi.nodes.telemetry_node", "--no-camera",
                               "--port", str(args.port)])]
+    # 自動運転（§8）。**engage は GUI の自動運転タブから人間が行う**ので、
+    # 上げておくだけでは車は動かない（`--mode` も渡さない）
+    if not args.no_planning:
+        children.append(Child("plan", ["raspi.nodes.planning_node", "--quiet"],
+                              essential=False))
     if not args.no_gui:
-        children.append(Child("gui", ["sim.gui"], essential=False))
+        children.append(Child("gui", ["sim.gui"], essential=False, window=True))
 
     url = f"http://localhost:{args.port}/"
     if wait_port(args.port):
@@ -366,15 +383,17 @@ def main() -> int:
             if c.essential:
                 say("err", f"{c.tag} が終了しました（code {code}）。全部止めます")
                 stop.set()
-            elif code == 0:
+            elif c.window and code == 0:
                 # **窓を閉じた＝終わりの意思表示。** 端末に戻って Ctrl-C を押させない
                 say("run", f"{c.tag} のウィンドウが閉じられました。全部止めます")
                 stop.set()
             else:
                 # 落ちただけ。車は走っているので巻き添えにしない
-                say("err", f"{c.tag} が異常終了しました（code {code}）。"
+                again = ("python -m sim.gui" if c.window
+                         else "python -m raspi.nodes.planning_node")
+                say("err", f"{c.tag} が終了しました（code {code}）。"
                            f"シミュレーションは続行します"
-                           f"（開き直すなら別ターミナルで python -m sim.gui）")
+                           f"（上げ直すなら別ターミナルで {again}）")
     print()
     say("run", "停止中…")
     for c in reversed(children):

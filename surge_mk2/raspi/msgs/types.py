@@ -31,9 +31,10 @@ import msgspec
 
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
-    "Heartbeat",
+    "Heartbeat", "AutoCtrl", "AutoState",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
+    "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -47,6 +48,13 @@ TOPIC_IMAGE_FRONT = "image/front"
 TOPIC_IMAGE_REAR = "image/rear"
 TOPIC_HB_PREFIX = "hb/"
 TOPIC_LOG_CTRL = "log/ctrl"
+
+#: どの自動運転モードで走るかの意思。telemetry_node が流し planning_node が従う
+TOPIC_AUTO_CTRL = "auto/ctrl"
+#: planning_node が出す走行指令。**`cmd` とは別トピック**（下の AutoCtrl 参照）
+TOPIC_AUTO_CMD = "auto/cmd"
+#: planning_node が「何を見てそう決めたか」。GUI のデバッグ表示用
+TOPIC_AUTO_STATE = "auto/state"
 
 
 class MsgBase(msgspec.Struct):
@@ -297,6 +305,71 @@ class LogCtrl(MsgBase):
     active: bool = False
 
 
+class AutoCtrl(MsgBase):
+    """どの自動運転モードで走るかの意思。**telemetry_node が送り続け、planning_node が従う。**
+
+    `log/ctrl` と同じく「現在の意思」を繰り返し流す（1回だけ送ると、どちらかの
+    再起動や取りこぼしで食い違ったままになる）。
+
+    ## `engaged` は「モータを回してよい」ではない
+
+    自律走行が実際に車を動かすには、これとは独立に**人間が GUI で ARM を保持**して
+    いる必要がある。`planning_node` は `engaged=False` でも計画そのものは回し続け、
+    `auto/state` に「今なら何をするか」を出す。**走らせる前に見られる**ようにするため。
+    """
+
+    #: 使う planner の id（`raspi/auto/registry.py`）。**空文字は「自動運転しない」**
+    mode: str = ""
+    #: 人間が自律走行を engage したか。**`False` なら `auto/cmd` は車に届かない**
+    engaged: bool = False
+    #: planner のパラメータ。**未指定のキーは planner 側の既定値**
+    params: dict[str, float] = msgspec.field(default_factory=dict)
+
+
+class AutoState(MsgBase):
+    """planning_node の判断そのもの。**指令ではなく「なぜそう決めたか」を運ぶ。**
+
+    `auto/cmd`（実際に出す指令）と分けてあるのは、**指令を見ても原因が分からない**
+    ため。「なぜ急に止まったか」「なぜ左を選んだか」は、選んだギャップと前方余裕を
+    並べて初めて読める。GUI の LiDAR ビューはここを重畳して描く。
+
+    **角度はすべて車両座標**（x=前 が 0、反時計回りが正）。`*_deg` は
+    **符号付き ±180 度**で持つ（`Scan.dist` の添字は 0〜359 だが、前方を跨ぐ
+    ギャップが `350〜10` のように分断されて読めなくなるため）。
+    """
+
+    mode: str = ""                         #: planner の id。空なら自動運転していない
+    planner: str = ""                      #: 表示名
+    engaged: bool = False                  #: `AutoCtrl.engaged` のエコーバック
+    #: 走らせてよい状態か。**False の理由は必ず `reason` に入る**
+    ready: bool = False
+    #: ready でない理由、または減速・停止の理由。**常に日本語で入れる**（GUI にそのまま出す）
+    reason: str = ""
+
+    # ── planner が出した指令（`auto/cmd` と同じ値。表示用に重複させてある） ──
+    target_speed: float = 0.0              #: [m/s]
+    target_steer: float = 0.0              #: 路面舵角 [rad] 反時計回り正
+    brake: bool = False                    #: 制動を掛けているか
+
+    # ── 判断の根拠（Follow the Gap の場合） ──
+    heading: float = 0.0                   #: 狙っている方位 [rad]
+    gap_start_deg: float = 0.0             #: 選んだギャップの右端 [deg] 符号付き
+    gap_end_deg: float = 0.0               #: 同 左端 [deg]。**`start <= end`**
+    #: 安全バブル（最近傍点の周りに置く侵入禁止の扇）。`bubble_start > bubble_end` は
+    #: バブルが無いことを表す（最近傍が遠すぎて置く必要が無かった場合）
+    bubble_start_deg: float = 0.0
+    bubble_end_deg: float = -1.0
+    free_ahead: float = 0.0                #: 正面の余裕 [m]。**速度を決めているのはこれ**
+    nearest: float = 0.0                   #: 最近傍の距離 [m]
+    nearest_deg: float = 0.0               #: その方位 [deg] 符号付き
+    #: 視野内で有効だった点の割合 [0..1]。**低いのに走っているなら疑う**
+    valid_ratio: float = 0.0
+
+    # ── 鮮度（planning_node が入れる） ──
+    scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]
+    plan_hz: float = 0.0                   #: 実測の計画レート [Hz]
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -307,6 +380,10 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_IMAGE_FRONT: ImageRef,
     TOPIC_IMAGE_REAR: ImageRef,
     TOPIC_LOG_CTRL: LogCtrl,
+    TOPIC_AUTO_CTRL: AutoCtrl,
+    #: **`cmd` と同じ型。** io_node は `auto/cmd` を購読しない（`AutoCtrl` 参照）
+    TOPIC_AUTO_CMD: DriveCmd,
+    TOPIC_AUTO_STATE: AutoState,
 }
 
 

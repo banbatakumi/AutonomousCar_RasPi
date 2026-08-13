@@ -244,6 +244,14 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._mcap_proc = None
         srv._mcap_started_ns = 0
         srv._mcap_error = None
+        # 自動運転（§8）。**engage していない既定の状態**を組む
+        srv._auto_mode = ""
+        srv._auto_engaged = False
+        srv._auto_params = {}
+        srv._auto_was_fresh = True
+        srv.auto_stalls = 0
+        srv._publish_auto_ctrl = lambda: None      # バスに触らせない
+        srv._save_auto_conf = lambda: None         # ディスクに触らせない
         srv.sent = []
 
         async def _send_json(ws, obj):

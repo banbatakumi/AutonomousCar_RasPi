@@ -45,16 +45,27 @@ cd surge_mk2
 .venv/bin/python -m sim.run                        # ★ これだけ
 ```
 
-`io_node --sim` / `telemetry_node --no-camera` / `sim.gui` の 3 つを立ち上げ、
-出力に印を付けて1画面に流し、ブラウザを開く。
+`io_node --sim` / `telemetry_node --no-camera` / `planning_node` / `sim.gui` の 4 つを
+立ち上げ、出力に印を付けて1画面に流し、ブラウザを開く。
 **Ctrl-C か、俯瞰ビューの窓を閉じると全部止まる。**
+
+**自動運転もそのまま試せる。** ブラウザの「自動運転」タブでモード（Follow the Gap）を
+選び、`Enter` で ARM してから「自律走行を開始」を押す。LiDAR ビューに planner が
+選んだギャップが重なる。engage しなくても判断だけは流れているので、**手動で走らせ
+ながら planner の狙いを検分できる。**
 
 俯瞰ビューが**異常終了したときだけ**は巻き添えにしない（二重起動や描画のバグで
 落ちただけなら、走っている車まで止める理由が無い）。**終了コードで区別**していて、
 正常終了 0 なら「人が終わりにした」、非0なら「事故」とみなす。
 
+`planning_node` は**どう終わっても巻き添えにしない。** 自動運転のコードをいじって
+いる最中に落ちても、手動で走らせている車まで止める理由が無いため（自律指令が途絶
+すれば telemetry_node が制動に落とすので、危険側には転ばない）。上げ直すのは
+`python -m raspi.nodes.planning_node` を別ターミナルで叩くだけでよい。
+
 ```bash
 .venv/bin/python -m sim.run --course slalom     # コース指定（名前だけでよい）
+.venv/bin/python -m sim.run --no-planning       # 自動運転ノード無し
 .venv/bin/python -m sim.run --list              # コース一覧
 .venv/bin/python -m sim.run --no-gui            # 俯瞰ビュー無し
 .venv/bin/python -m sim.run --kill-stale        # 古いプロセスを落としてから起動
@@ -72,6 +83,7 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 .venv/bin/python -m raspi.nodes.io_node --sim --course sim/courses/oval.png \
     --allow-arm --max-speed 3.0 --max-steer 1.047 --no-heartbeat --no-leds
 .venv/bin/python -m raspi.nodes.telemetry_node --no-camera
+.venv/bin/python -m raspi.nodes.planning_node        # 自動運転タブを使うなら
 .venv/bin/python -m sim.gui
 # ブラウザ http://localhost:8000/
 ```

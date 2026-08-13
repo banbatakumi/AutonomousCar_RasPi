@@ -13,6 +13,9 @@ web/dist/
 .env.local
 
 # 実行時生成物
+# 自動運転のモードとパラメータ（telemetry_node が GUI の操作を保存する）。
+# **機体ごとに詰めた値なのでコミットしない**（別の機体に持っていくと危ない）
+surge_mk2/config/auto.json
 logs/*.jsonl
 *.sfl          # 生フレームログ（大きい・実行ごとに増える）
 *.mcap

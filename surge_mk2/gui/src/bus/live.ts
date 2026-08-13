@@ -9,13 +9,15 @@
  *   3. 接続状態・設定 → イベント時だけ zustand（`store/ui.ts`）
  */
 import { useSyncExternalStore } from 'react'
-import type { LinkDiag, Scan, VehicleState } from '../types'
+import type { AutoState, LinkDiag, Scan, VehicleState } from '../types'
 
 /** 最新値。**書き換わり続けるので、React から直接読まないこと。** */
 export const live = {
   vs: null as VehicleState | null,
   scan: null as Scan | null,
   link: null as LinkDiag | null,
+  /** planning_node の判断。LiDAR ビューが rAF で読んでギャップを重畳する */
+  auto: null as AutoState | null,
   /** テレメトリを最後に受けた時刻（performance.now） */
   lastRxMs: 0,
   /** 実測の受信レート [Hz]。**GUI 側が詰まっていないか**を見るために出す */
@@ -23,21 +25,41 @@ export const live = {
   /** 点群を最後に受けた時刻 */
   lastScanMs: 0,
   scanHz: 0,
+  /** planning_node の判断を最後に受けた時刻。**古さで「planner が死んだ」が分かる** */
+  lastAutoMs: 0,
   /** ARM が自動解除されるまでの残り [ms]。20Hz で減るのでここに置く */
   armRemainingMs: 0,
 }
 
-/** 自分が今送っている指令。20Hz で書き換わるのでここに置く（zustand には入れない） */
-export const cmdOut = { speed: 0, steer: 0, active: false, torqueMode: false, torque: 0 }
+/**
+ * 実際に車へ向かっている指令。20Hz で書き換わるのでここに置く（zustand には入れない）。
+ *
+ * **自律走行中は planner の値**（`live.auto`）を写す。GUI が送っている生の値
+ * （AUTO では速度・舵とも 0）を出すと、走っているのに計器が 0 のままになる。
+ */
+export const cmdOut = {
+  speed: 0, steer: 0, active: false, torqueMode: false, torque: 0,
+  /** 今の指令が planner 由来か。計器に「AUTO」と出すために持つ */
+  auto: false,
+}
 
 let rxCount = 0
 let scanCount = 0
 let rateT0 = 0
 
-export function noteTelemetry(vs: VehicleState | null, link: LinkDiag | null, scan: Scan | null) {
+export function noteTelemetry(
+  vs: VehicleState | null,
+  link: LinkDiag | null,
+  scan: Scan | null,
+  auto: AutoState | null,
+) {
   const now = performance.now()
   if (vs) live.vs = vs
   if (link) live.link = link
+  if (auto) {
+    live.auto = auto
+    live.lastAutoMs = now
+  }
   if (scan) {
     live.scan = scan
     live.lastScanMs = now
@@ -59,6 +81,7 @@ export function clearLive() {
   live.vs = null
   live.scan = null
   live.link = null
+  live.auto = null
   live.rxHz = 0
   live.scanHz = 0
 }
@@ -79,9 +102,16 @@ export type Numbers = {
   scanAgeMs: number
   /** **直近の1周**で欠けていたセクタ数。累積ではない（累積は link 側にある） */
   scanMissing: number
-  out: { speed: number; steer: number; active: boolean; torqueMode: boolean; torque: number }
+  out: {
+    speed: number; steer: number; active: boolean
+    torqueMode: boolean; torque: number; auto: boolean
+  }
   /** ARM の自動解除までの残り [ms] */
   armRemainingMs: number
+  /** planning_node の判断。**engage していなくても入る** */
+  auto: AutoState | null
+  /** その判断の古さ [ms]。`Infinity` は未受信 */
+  autoAgeMs: number
 }
 
 let snapshot: Numbers = {
@@ -93,8 +123,10 @@ let snapshot: Numbers = {
   scanHz: 0,
   scanAgeMs: Infinity,
   scanMissing: 0,
-  out: { speed: 0, steer: 0, active: false, torqueMode: false, torque: 0 },
+  out: { speed: 0, steer: 0, active: false, torqueMode: false, torque: 0, auto: false },
   armRemainingMs: 0,
+  auto: null,
+  autoAgeMs: Infinity,
 }
 const listeners = new Set<() => void>()
 
@@ -111,6 +143,8 @@ setInterval(() => {
     scanMissing: live.scan ? live.scan.sector_seen.filter((s) => !s).length : 0,
     out: { ...cmdOut },
     armRemainingMs: live.armRemainingMs,
+    auto: live.auto,
+    autoAgeMs: live.lastAutoMs ? now - live.lastAutoMs : Infinity,
   }
   for (const l of listeners) l()
 }, 1000 / NUMBERS_HZ)

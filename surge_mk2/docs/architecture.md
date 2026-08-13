@@ -264,6 +264,23 @@ Python の GIL があるため、**スレッドではなくプロセスで分け
 
 **制御コマンドは `planning_node` → `io_node` の直行パス**にし、遅延段数を最小化する。
 
+#### ★ 実装では `cmd` を1本に絞った（2026-08-13）
+
+直行パスにすると、**`cmd` の publish 元が planning_node と telemetry_node の2つ**に
+なる。telemetry_node は操縦者不在でも 50Hz で DISARM を流し続けている（§9.4）ので、
+2つが同じトピックに出すと購読側からは区別できないまま交互に上書きし合い、
+**止める側が負けることがある**。
+
+そこで `planning_node` は `auto/cmd` に出し、GUI から engage されている間だけ
+telemetry_node が**速度・舵・制動だけを差し替えて** `cmd` に流す形にした。
+
+    GUI ──cmd(mode=AUTO, arm, 灯火…)──▶ telemetry_node ──cmd──▶ io_node
+    planning_node ──auto/cmd(速度・舵)──▶      ↑ ここで差し替える
+
+増える遅延は telemetry_node の 50Hz 周期ぶん（最悪 20ms）で、**指令の生成元が
+1つに定まる価値の方が大きい**と判断した。この形なら自律走行中も人間の安全網
+（ARM 保持・150ms 途絶で DISARM・E-Stop）がそのまま生きる。詳細は §8.1。
+
 ### 6.2 内部バス
 
 ZeroMQ を土台に、その上のメッセージ規約だけを自作する。輸送層まで自作するのは無駄。
@@ -323,7 +340,10 @@ class MsgBase(msgspec.Struct):
 | `grid/local` | ローカル占有格子 | 10 Hz | perception_node |
 | `pose` | 自己位置（map / odom） | 30 Hz | planning_node |
 | `path` | 生成経路 | 10 Hz | planning_node |
-| `cmd` | 目標速度・舵角 | 50 Hz | planning_node |
+| `cmd` | 目標速度・舵角 | 50 Hz | **telemetry_node（唯一の発行元。下記）** |
+| `auto/ctrl` | どの自動運転モードで走るかの意思 | 5 Hz | telemetry_node |
+| `auto/cmd` | 自律走行の目標速度・舵角 | 50 Hz | planning_node |
+| `auto/state` | その判断の根拠（選んだギャップ等） | 10 Hz | planning_node |
 | `hb/<node>` | ハートビート | 10 Hz | 全ノード |
 | `diag` | 統計・エラーカウンタ | 1 Hz | 各ノード |
 
@@ -424,6 +444,55 @@ Pi 側は `TELEMETRY` が **100ms 途絶で DEGRADED（警告のみ）、200ms �
 - **`ESTOP` からの復帰は人間の明示操作が必須**
 - **現在状態と、直前の遷移理由を必ず GUI に出す**
   「なぜ止まったか」が分からないのがデバッグを最も消耗させる
+
+### 8.1 自動運転の実装（2026-08-13）
+
+上の状態機械はまだ全部は無い。**行動判断だけを先に作った**（`raspi/auto/`）。
+第1号は **Follow the Gap**（`ftg`）で、地図も自己位置も使わず、点群の中で最も
+広く空いた方向へ走る。SLAM を作る前に、**点群が実車で使える品質かを確かめる**
+のが目的。
+
+#### モードは増える前提で作る
+
+`raspi/auto/` に `Planner` のサブクラスを1つ書き、`registry.py` に1行足すだけで
+GUI の選択肢に出る。パラメータのスライダも planner が宣言した `ParamSpec` から
+自動生成される。**GUI にモード名を書かない**（書くと増やすたびに2箇所直すことになり、
+いつか片方が古くなる）。
+
+| ファイル | 役割 |
+|---|---|
+| `raspi/auto/base.py` | `Planner` と `ParamSpec`。**バスも WS も知らない純粋な計算** |
+| `raspi/auto/follow_the_gap.py` | FTG 本体 |
+| `raspi/auto/registry.py` | id → クラス。GUI へ渡す宣言（`catalog()`）もここ |
+| `raspi/nodes/planning_node.py` | 配線だけ（購読・周期・publish） |
+
+#### 「走る」より「止まる」を先に決める
+
+| 条件 | 挙動 |
+|---|---|
+| セクタ欠損が視野の 40% 超 | 計画を放棄（`ready=False`）→ 制動 |
+| 通れる隙間が見つからない | 同上 |
+| 正面の余裕が `stop_dist` 未満 | 意図的な停止（`ready=True` + `brake`） |
+| 点群が 300ms 古い | planning_node が制動指令に読み替える |
+| `auto/cmd` が 200ms 途絶 | telemetry_node が制動に読み替える（planner の死亡） |
+| 人が舵・スロットル・ブレーキを触った | 自律を解除して手動に戻す（クルコンと同じ作法） |
+| E-Stop / 操縦権の解放 / 接続断 | engage も同時に落とす |
+
+**`sector_seen[s] == False` は「障害物なし」ではない。** 欠測した方向は距離 0
+（侵入禁止）として扱う。ここを空きとして扱うと、LiDAR が片側だけ落ちた瞬間に
+その方向へ舵を切る。
+
+#### engage ≠ ARM
+
+engage は「自律に任せてよい」という意思表示にすぎず、**モータが回るには人間が
+GUI で ARM を保持している必要がある**。planning_node は `arm` を立てられない。
+engage の状態は保存しない（`config/auto.json` に入るのはモードとパラメータだけ）
+ので、**電源を入れただけで走り出す経路が存在しない**。
+
+⚠ **自律走行中だけは無操作タイムアウト（既定 20秒）を掛けていない。** 人が何も
+触らないのが正常な状態のため。他の受け皿（Esc・E-STOP・フォーカス喪失・タブが
+背後に回る・150ms 途絶）は全部生きているので、**画面を見ていられる間だけ走る**
+という前提は変わっていない。
 
 ---
 
@@ -580,7 +649,7 @@ Wi-Fi の実効帯域からは余裕。**問題は帯域ではなく遅延のス
 
 ```
 [ラジコン]  運転を楽しむための画面        ← 既定タブ。メータ主体、設定は ⚙ ドロワー
-[自動運転]  自律走行の監視・デバッグ       ← 指令と実測を数値で並べる（Phase 3 で中身が育つ）
+[自動運転]  自律走行の操作・監視・デバッグ  ← モード選択と engage・指令と実測・判断の根拠
 [診断]      現在値 + 時系列グラフ(uPlot)   ← 走行画面から外した数字はすべてここ
 [ログ]      記録の再生・エクスポート
 ```
@@ -806,11 +875,13 @@ surge_mk2/
 │   │   ├── io_node.py           UART送受信・GPIO・時刻同期
 │   │   ├── camera_node.py       picamera2 → 共有メモリ
 │   │   ├── perception_node.py   点群処理・占有格子・カメラ認識
-│   │   ├── planning_node.py     自己位置推定・経路生成・行動判断
+│   │   ├── planning_node.py     自律走行（配線のみ。中身は raspi/auto/）
 │   │   ├── telemetry_node.py    WebSocket サーバ
 │   │   ├── safety_node.py       Watchdog（最小依存）
 │   │   ├── logger_node.py       MCAP 記録
 │   │   └── replay_node.py       ログ再生（io_node の代替）
+│   ├── auto/                    自動運転アルゴリズム（Follow the Gap ほか）
+│   │                            ★バスも WS も知らない純粋な計算。planner を足すのはここ
 │   ├── proto/                   UARTフレーム定義（STM32と共有する唯一の定義）
 │   ├── bus/                     ZeroMQラッパ・共有メモリ画像バッファ
 │   ├── msgs/                    msgspec メッセージ型

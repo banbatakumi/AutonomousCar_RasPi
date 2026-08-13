@@ -113,6 +113,80 @@ export type LinkDiag = {
   sim: boolean
 }
 
+/**
+ * planning_node の判断（`raspi/msgs/types.py` の `AutoState`）。
+ *
+ * **指令ではなく「なぜそう決めたか」。** 指令だけ見ても原因は分からないので、
+ * 選んだギャップ・正面余裕・最近傍を並べて出す。LiDAR ビューがこれを重畳する。
+ *
+ * 角度は車両座標（x=前 が 0、反時計回りが正）。`*_deg` は**符号付き ±180 度**
+ * （前方を跨ぐギャップが `350〜10` に分断されて読めなくなるのを避けるため）。
+ */
+export type AutoState = {
+  t_capture: number
+  t_pub: number
+  seq: number
+  mode: string
+  planner: string
+  engaged: boolean
+  /** 走らせてよい状態か。**false の理由は必ず `reason` に入る** */
+  ready: boolean
+  /** ready でない理由、または減速・停止の理由。日本語がそのまま入る */
+  reason: string
+  target_speed: number
+  target_steer: number
+  brake: boolean
+  heading: number // rad
+  gap_start_deg: number
+  gap_end_deg: number
+  /** `start > end` は「バブル無し」を表す */
+  bubble_start_deg: number
+  bubble_end_deg: number
+  free_ahead: number // m ★速度を決めているのはこれ
+  nearest: number // m
+  nearest_deg: number
+  valid_ratio: number
+  scan_age_ms: number
+  plan_hz: number
+}
+
+/** 調整できるパラメータ1つ。**スライダはこれ1件から自動で作られる。** */
+export type AutoParamSpec = {
+  key: string
+  label: string
+  min: number
+  max: number
+  step: number
+  default: number
+  unit: string
+  note: string
+}
+
+/** 選べる自動運転モード1つ（`raspi/auto/registry.py` の `catalog()`）。 */
+export type AutoPlannerInfo = {
+  id: string
+  name: string
+  description: string
+  params: AutoParamSpec[]
+}
+
+/**
+ * 自動運転の意思と、選べるモードの宣言。
+ *
+ * **`catalog` はサーバから降ってくる。** GUI にモードの一覧を書かないので、
+ * `raspi/auto/` に planner を足せばこの画面に勝手に出る。
+ */
+export type AutoStatus = {
+  /** 選ばれている planner の id。**空文字 = 自動運転しない** */
+  mode: string
+  /** 人間が engage したか。**サーバが真値**（GUI 側で持たない） */
+  engaged: boolean
+  params: Record<string, number>
+  catalog: AutoPlannerInfo[]
+  /** engage したまま `auto/cmd` が途絶して制動に落ちた回数 */
+  stalls: number
+}
+
 /** `/ws/telemetry` が 20Hz で送ってくるスナップショット。 */
 export type Snapshot = {
   t_server: number
@@ -120,6 +194,8 @@ export type Snapshot = {
   link: LinkDiag | null
   /** 点群は 10Hz なので、同じ周は2回送られてこない（新しいときだけ入る） */
   scan: Scan | null
+  /** **engage していなくても流れる**（走らせる前に何をするか見られる） */
+  auto: AutoState | null
   ctl: { has_controller: boolean; controller: string }
 }
 
@@ -140,6 +216,8 @@ export type ControlStatus = {
   sfl: { active: boolean }
   /** mcap のライブ中継。**Piのディスクには一切書かない**（ブラウザが直接ダウンロードする） */
   mcap: { active: boolean; elapsed_s: number; error: string | null }
+  /** 自動運転の意思と、選べるモードの宣言。**サーバが真値** */
+  auto: AutoStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */
@@ -160,6 +238,13 @@ export type LogsMsg = {
 /** GUI → サーバ の走行指令。SI 単位。 */
 export type CmdOut = {
   type: 'cmd'
+  /**
+   * 0=DISARM 1=MANUAL 2=AUTO。
+   *
+   * **`2` は「自律走行を許す」の意味。** このとき `speed`/`steer` は
+   * telemetry_node が `auto/cmd` の値に差し替えるので、GUI は 0 を送る。
+   * それ以外（灯火・ホーン・`auto_stop`・レートリミット・`arm`）はそのまま通る。
+   */
   mode: number
   arm: boolean
   /** **立てている間 `speed` は STM32 側で無視され、`brake_torque` が直接掛かる**（v0.5） */

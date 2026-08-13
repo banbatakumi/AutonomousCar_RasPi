@@ -52,7 +52,7 @@ ROOT=$(pwd)
 USER_NAME=${SUDO_USER:-pi}
 PY="$ROOT/.venv/bin/python -u"
 # **surge-logger は既定でこの一覧に入れない**（SD 書き込みを減らすため。上記）
-UNITS=(surge-io surge-camera surge-telemetry)
+UNITS=(surge-io surge-camera surge-telemetry surge-planning)
 WITH_LOGGER=0
 
 # ⚠ `--max-speed` / `--max-steer` は **GUI の `PI_MAX_SPEED_CAP` / `PI_MAX_STEER_CAP`
@@ -201,6 +201,11 @@ systemctl disable --now bluetooth 2>/dev/null || true
 write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet $ARM"
 write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quiet"
 write_unit surge-telemetry "WebSocket サーバ"  "raspi.nodes.telemetry_node" "surge-io.service"
+# **常時上げてよい。** planning_node は `auto/cmd` に出すだけで、`cmd` には
+# 一切 publish しない。engage するのは GUI の自動運転タブから人間が行うので、
+# 起動していること自体が車を動かす条件にはならない（`--allow-arm` とは独立）
+write_unit surge-planning  "自動運転"         "raspi.nodes.planning_node --quiet" \
+           "surge-io.service"
 # ロガーの unit は**常に置く**（`--with-logger` を付けたときだけ enable する）。
 # 置いておけば `sudo systemctl start surge-logger` で一時的に録れる
 write_unit surge-logger    "MCAP 記録"        "raspi.nodes.logger_node --quiet" \

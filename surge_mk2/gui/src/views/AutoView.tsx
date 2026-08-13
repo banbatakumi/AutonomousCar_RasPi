@@ -13,17 +13,25 @@
  * 並べ、遅れやスリップをそのまま読ませる**開発者向けの画面**。運転を楽しむための
  * 画面は `RcView.tsx`（メータ主体、介入はランプのみ）。
  *
- * 自律走行そのもの（経路・占有格子の重畳）は Phase 3 以降で、ここに足していく。
+ * 経路・占有格子の重畳は Phase 3 以降で、ここに足していく。
+ *
+ * ## 自動運転の操作もここに置く
+ *
+ * `AutoPanel` でモードを選び engage する。**モードの一覧は GUI に書いていない**
+ * （サーバの `status.auto.catalog` から生える）ので、`raspi/auto/` に planner を
+ * 足せばこの画面に勝手に出る。LiDAR ビューには planner が選んだギャップを重ねる。
  */
 import { useNumbers } from '../bus/live'
+import { AutoPanel } from '../components/AutoPanel'
 import { AuxPanel } from '../components/AuxPanel'
 import { DiagStrip } from '../components/DiagStrip'
 import { DriveBar } from '../components/DriveBar'
 import { CameraView } from '../render/CameraView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
+import type { ControlChannel } from '../ws/control'
 
-export function AutoView() {
+export function AutoView({ ch }: { ch: ControlChannel | null }) {
   const ui = useUi()
 
   return (
@@ -62,6 +70,7 @@ export function AutoView() {
         </div>
       </div>
 
+      <AutoPanel ch={ch} />
       <DriveBar />
       <AuxPanel />
       <DiagStrip />

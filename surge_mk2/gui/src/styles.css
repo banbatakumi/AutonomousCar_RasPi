@@ -185,9 +185,10 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  grid-template-rows: minmax(0, 1fr) auto auto auto auto;
   grid-template-areas:
     'camf camr lidar'
+    'auto auto auto'
     'bar  bar  bar'
     'aux  aux  aux'
     'diag diag diag';
@@ -316,6 +317,79 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .kv { display: flex; gap: 8px; align-items: baseline; }
 .kv span { color: var(--dim); min-width: 5.5em; }
 .kv b { font-weight: 600; min-width: 4.5em; }
+
+/* ── 自動運転（モード選択・engage・判断・パラメータ） ───────────────
+ *
+ * **engage 中は枠を光らせる。** 自律で走っているのか手動なのかが、
+ * 画面のどこを見ていても分かる必要がある。
+ */
+
+.autopanel {
+  grid-area: auto;
+  display: grid;
+  grid-template-columns: minmax(180px, auto) minmax(200px, auto) minmax(240px, 1fr);
+  gap: 8px 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 7px 12px;
+}
+.autopanel.engaged { border-color: var(--live); box-shadow: inset 0 0 0 1px #ffc63f33; }
+.autopanel section { min-width: 0; }
+.autopanel .label { color: var(--dim); font-size: 11px; display: block; }
+.autopanel .note { display: block; color: var(--dim); font-size: 10px; margin-top: 3px; }
+
+.auto-mode-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
+.auto-mode-row button { font-size: 12px; }
+
+.auto-engage { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* **押し間違えない大きさにする。** 走り出すボタンなので他より一段大きい */
+.auto-engage .engage {
+  padding: 6px 16px;
+  font-weight: 600;
+  border-color: #3b4550;
+}
+.auto-engage .engage.on {
+  background: #4a3a12;
+  border-color: var(--live);
+  color: #ffe6a6;
+}
+.auto-engage .engage:disabled { color: var(--dim); cursor: default; opacity: .6; }
+
+.auto-state .auto-reason {
+  margin-top: 3px;
+  font-size: 12px;
+  /* 理由は 1 行に収める。折り返すと下の数値が押し出されて配置が揺れる */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auto-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  align-items: baseline;
+  margin-top: 3px;
+  font-size: 12px;
+}
+.auto-metrics b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.auto-metrics i { font-style: normal; color: var(--dim); font-size: 10px; margin-right: 4px; }
+
+.auto-params { grid-column: 1 / -1; margin-top: 2px; }
+.auto-params summary { color: var(--dim); font-size: 11px; cursor: pointer; }
+.auto-params > .note { display: block; color: var(--dim); font-size: 10px; margin-top: 6px; }
+.auto-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px 16px;
+  margin-top: 6px;
+}
+.auto-param { display: block; min-width: 0; }
+.auto-param-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; }
+.auto-param-head b { margin-left: auto; font-variant-numeric: tabular-nums; }
+.auto-param-head i { font-style: normal; color: var(--dim); }
+.auto-param input[type='range'] { width: 100%; accent-color: var(--accent); }
+.auto-param .note { font-size: 10px; }
 
 /* ── 補機（灯火・ブレーキ実トルク・押下状態・自動停止） ─────────────── */
 

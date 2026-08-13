@@ -55,6 +55,28 @@ SSHで surge-io を止める」手順が結局要り、GUIに置く意味が薄�
 「沈黙」ではなく「明示的な DISARM」を流すことで、
 io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけを見ればよくなる。
 
+## 自律走行は「中継」であって「別経路」ではない（§8）
+
+`cmd` に publish するノードは**本ノードだけ**にしてある。planning_node は
+`auto/cmd` に出し、engage されている間だけここが `cmd` へ差し替える。
+
+    GUI  ──cmd(mode=AUTO, arm, 灯火…)──▶ telemetry_node ──cmd──▶ io_node
+    planning_node ──auto/cmd(速度・舵)──▶      ↑ ここで速度と舵だけ差し替える
+
+2つのノードが `cmd` に publish すると、購読側からは区別できないまま 50Hz で
+交互に上書きし合う。**止める側が負けることがある**ので、経路は1本に保つ。
+
+この形にすると、自律走行中も人間の安全網がそのまま生きる:
+
+- **ARM は人間が GUI で保持する。** planning_node は arm を立てられない
+- GUI が 50Hz で送り続けている限りだけ走る（150ms 途絶 → DISARM）
+- E-Stop・操縦権の解放・接続断は、いずれも **engage も同時に落とす**
+- `auto/cmd` が 200ms 途絶したら、engage したままでも**制動**に読み替える
+
+差し替えるのは `target_speed` / `target_steer` / `brake` だけ。灯火・ホーン・
+`auto_stop`・`brake_torque`・レートリミットは**GUI が送ってきた値のまま**通す。
+自律走行中に前照灯の操作だけ効かなくなる理由が無いため。
+
 ## arm はここでは解禁できない
 
 モータを回してよいかの判断は io_node の `--allow-arm` にしかない。
@@ -81,10 +103,14 @@ from websockets.asyncio.server import serve  # noqa: E402
 from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
+from raspi.auto import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.msgs import DriveCmd, Heartbeat as HbMsg, LogCtrl  # noqa: E402
+from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_AUTO_CMD,
+    TOPIC_AUTO_CTRL,
+    TOPIC_AUTO_STATE,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_HB_PREFIX,
@@ -102,6 +128,9 @@ DEFAULT_PORT = 8000
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUI_DIST = REPO_ROOT / "gui" / "dist"
 LOGS_DIR = REPO_ROOT / "logs"
+#: 自動運転のモードとパラメータを覚えておく場所。**`engaged` は保存しない**
+#: （電源投入で自律走行が始まる経路を作らない）
+AUTO_CONF = REPO_ROOT / "config" / "auto.json"
 
 TELEMETRY_HZ = 20
 CMD_PUB_HZ = 50
@@ -110,6 +139,12 @@ HB_HZ = 10
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
+#: 自動運転の意思（`auto/ctrl`）の再送周期。`log/ctrl` より速いのは、
+#: **planning_node が落ちて上がり直したときに engage が届くまでの空白を短くする**ため
+AUTO_CTRL_HZ = 5
+#: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
+#: planning_node は 50Hz で出しているので 10 発ぶんの猶予
+AUTO_CMD_STALE_NS = 200 * 1_000_000
 #: バスを覗きに行く間隔。20Hz 配信に対して十分細かく、CPU は無視できる
 BUS_POLL_S = 0.005
 #: 操縦クライアントからの指令がこれだけ途絶したら DISARM に落とす（§9.4）
@@ -141,6 +176,8 @@ class TelemetryServer:
             TOPIC_DIAG_LINK: LATEST,
             TOPIC_IMAGE_FRONT: LATEST,
             TOPIC_IMAGE_REAR: LATEST,
+            TOPIC_AUTO_CMD: LATEST,
+            TOPIC_AUTO_STATE: LATEST,
         })
         self.pub = Publisher("control")
 
@@ -163,6 +200,18 @@ class TelemetryServer:
 
         #: `.sfl` を録ってほしいという「意思」。実際に開閉するのは io_node
         self._sfl_active = False
+
+        # ── 自動運転（§8） ──
+        #: 選ばれている planner の id。**空文字 = 自動運転しない**
+        self._auto_mode = ""
+        #: 人間が engage したか。**永続化しない**（起動しただけで走り出さない）
+        self._auto_engaged = False
+        #: planner のパラメータ。`config/auto.json` に保存され、次回起動で戻る
+        self._auto_params: dict[str, float] = {}
+        #: engage したまま `auto/cmd` が途絶して制動に落とした回数
+        self.auto_stalls = 0
+        self._auto_was_fresh = True
+        self._load_auto_conf()
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -351,6 +400,13 @@ class TelemetryServer:
             self._release_control("E-Stop 要求")
             await self._broadcast_control_status()
 
+        # ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
+
+        elif kind == "auto":
+            self._on_auto(m)
+            self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
+            await self._broadcast_control_status()
+
         elif kind == "ping":
             await self._send_json(ws, {"type": "pong", "id": m.get("id"),
                                        "t_server": time.monotonic_ns()})
@@ -382,6 +438,69 @@ class TelemetryServer:
         self._last_cmd = None
         self._last_cmd_ns = 0
         self._why_released = why
+        # **操縦者が消えたら自律走行も解除する。** engage を残すと、次に誰かが
+        # 操縦権を取って ARM した瞬間に、その人の意思と無関係に走り出す
+        if self._auto_engaged:
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+
+    # ── 自動運転（§8） ──
+
+    def _on_auto(self, m: dict) -> None:
+        """`{"type":"auto", "mode"?, "engaged"?, "params"?}` を反映する。
+
+        3つとも省略可。**モードを変えたら engage は必ず落とす**（前のモードの
+        つもりで engage したままアルゴリズムだけ入れ替わるのを防ぐ）。
+        """
+        if "mode" in m:
+            mode = str(m.get("mode") or "")
+            if mode and mode not in PLANNERS:
+                return                     # 知らないモードは黙って捨てる
+            if mode != self._auto_mode:
+                self._auto_mode = mode
+                self._auto_engaged = False
+                self._auto_params = merged_params(mode, self._auto_params)
+        if "params" in m and isinstance(m["params"], dict):
+            raw = {k: v for k, v in m["params"].items() if isinstance(v, (int, float))}
+            # **サーバ側でもクランプする。** GUI を信じて素通しにすると、
+            # 古いタブや手書きの WS クライアントの値がそのまま planner に入る
+            self._auto_params = merged_params(self._auto_mode,
+                                              {**self._auto_params, **raw})
+        if "engaged" in m:
+            want = bool(m.get("engaged"))
+            # モードが無いのに engage はできない。**解除は常に通す**
+            self._auto_engaged = want and bool(self._auto_mode)
+            if self._auto_engaged:
+                self.auto_stalls = 0
+                self._auto_was_fresh = True
+        self._save_auto_conf()
+
+    def _auto_ctrl(self) -> AutoCtrl:
+        return AutoCtrl(mode=self._auto_mode, engaged=self._auto_engaged,
+                        params=dict(self._auto_params))
+
+    def _publish_auto_ctrl(self) -> None:
+        self.pub.send(TOPIC_AUTO_CTRL, self._auto_ctrl())
+
+    def _load_auto_conf(self) -> None:
+        """`config/auto.json` からモードとパラメータを戻す。**engage は戻さない。**"""
+        try:
+            raw = _json_decode(AUTO_CONF.read_bytes())
+        except Exception:
+            return                         # 無い・壊れている → 既定のまま
+        mode = str(raw.get("mode") or "")
+        self._auto_mode = mode if mode in PLANNERS else ""
+        params = raw.get("params")
+        self._auto_params = merged_params(
+            self._auto_mode, params if isinstance(params, dict) else {})
+
+    def _save_auto_conf(self) -> None:
+        try:
+            AUTO_CONF.parent.mkdir(parents=True, exist_ok=True)
+            AUTO_CONF.write_bytes(_json_encode(
+                {"mode": self._auto_mode, "params": self._auto_params}))
+        except Exception:
+            pass                           # 保存できなくても走行は続けられるべき
 
     def _control_status(self) -> dict:
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
@@ -401,6 +520,22 @@ class TelemetryServer:
             "deadman_trips": self.deadman_trips,
             "sfl": {"active": self._sfl_active},
             "mcap": self._mcap_status(),
+            "auto": self._auto_status(),
+        }
+
+    def _auto_status(self) -> dict:
+        """自動運転の意思と、**選べるモードの宣言そのもの**。
+
+        `catalog` は `raspi/auto/registry.py` の内容をそのまま流している。
+        GUI のモード選択もパラメータのスライダもこれ 1 つから組まれるので、
+        **planner を足しても GUI は 1 行も変えなくてよい。**
+        """
+        return {
+            "mode": self._auto_mode,
+            "engaged": self._auto_engaged,
+            "params": self._auto_params,
+            "catalog": auto_catalog(),
+            "stalls": self.auto_stalls,
         }
 
     def _mcap_status(self) -> dict:
@@ -570,6 +705,9 @@ class TelemetryServer:
             "vs": vs,
             "link": link,
             "scan": scan,
+            # 自律走行の「判断の根拠」。**engage していなくても流れる**ので、
+            # 手動走行しながら planner が何を選ぶかを見比べられる
+            "auto": self.sub.latest.get(TOPIC_AUTO_STATE),
             "ctl": {"has_controller": self.controller is not None,
                     "controller": self.controller_name},
         })
@@ -589,6 +727,8 @@ class TelemetryServer:
                     and (now - self._last_cmd_ns) <= CMD_DEADMAN_NS)
             if live:
                 cmd = self._last_cmd
+                if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
+                    cmd = self._merge_auto(cmd, now)
             else:
                 if was_live:
                     self.deadman_trips += 1
@@ -597,6 +737,39 @@ class TelemetryServer:
             was_live = live
             self.pub.send(TOPIC_CMD, cmd)
             self.cmds_published += 1
+
+    def _merge_auto(self, gui: DriveCmd, now: int) -> DriveCmd:
+        """GUI の `cmd` の**速度・舵・制動だけ**を `auto/cmd` で差し替える。
+
+        差し替えないもの（灯火・ホーン・パッシング・`auto_stop`・`brake_torque`・
+        レートリミット・`arm`）は GUI の値のまま通す。**自律走行中に前照灯の
+        操作だけ効かなくなる理由が無い**し、`arm` は人間しか立てられない。
+
+        `auto/cmd` が古ければ**制動**に落とす。engage したまま planning_node が
+        死んだときに、最後の「走れ」が 150ms 残って壁に向かうのを防ぐ。
+        `brake_torque` は GUI の値をそのまま使う（0 なら STM32 の最大制動）。
+        """
+        auto = self.sub.latest.get(TOPIC_AUTO_CMD)
+        fresh = auto is not None and (now - auto.t_pub) <= AUTO_CMD_STALE_NS
+        if not fresh:
+            if self._auto_was_fresh:
+                self.auto_stalls += 1
+                asyncio.create_task(self._broadcast_control_status())
+            self._auto_was_fresh = False
+            return msgspec.structs.replace(
+                gui, mode=2, brake=True, target_speed=0.0, target_steer=0.0,
+                torque_mode=False, target_torque=0.0,
+                source=f"auto:{self._auto_mode}:stale")
+        self._auto_was_fresh = True
+        # **人間のブレーキは自律中も必ず通る。** GUI は engage 解除も同時に投げるが、
+        # その往復（数十 ms）のあいだブレーキが効かない時間を作らない
+        return msgspec.structs.replace(
+            gui, mode=2, brake=gui.brake or auto.brake,
+            target_speed=auto.target_speed, target_steer=auto.target_steer,
+            # 自律走行はトルク直接指令を使わない。**GUI 側の設定を持ち込まない**
+            # （ラジコンのトルクモードが ON のまま engage されうる）
+            torque_mode=False, target_torque=0.0,
+            source=f"auto:{self._auto_mode}")
 
     async def _hb_pump(self) -> None:
         period = 1.0 / HB_HZ
@@ -619,6 +792,18 @@ class TelemetryServer:
             self.pub.send(TOPIC_LOG_CTRL, LogCtrl(active=self._sfl_active))
             if self._mcap_proc is not None:
                 await self._broadcast_control_status()
+
+    async def _auto_ctrl_pump(self) -> None:
+        """自動運転の意思（`auto/ctrl`）を低頻度で再送する。
+
+        `_log_ctrl_pump` と同じ理由（1回だけ送ると planning_node の再起動や
+        取りこぼしで食い違ったままになる）。**変更時は `_on_control` が
+        即座に 1 発送っている**ので、こちらは取りこぼしの保険。
+        """
+        period = 1.0 / AUTO_CTRL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_auto_ctrl()
 
     async def _camera_pump(self) -> None:
         """共有メモリから読んで JPEG にして送る。**購読者がいないときは何もしない。**
@@ -663,7 +848,8 @@ class TelemetryServer:
                          max_queue=8, ping_interval=20) as server:  # noqa: F841
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._cmd_pump,
-                self._camera_pump, self._hb_pump, self._log_ctrl_pump)]
+                self._camera_pump, self._hb_pump, self._log_ctrl_pump,
+                self._auto_ctrl_pump)]
             try:
                 await stop
             finally:
@@ -673,8 +859,11 @@ class TelemetryServer:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     def close(self) -> None:
-        # 終了時に一発 DISARM を置いてから消える
+        # 終了時に一発 DISARM を置いてから消える。**自律走行の engage も落とす**
+        # （planning_node だけが生き残っても、走れの意思が残らないように）
         try:
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
             self.pub.send(TOPIC_CMD, DriveCmd(mode=0, source="shutdown"))
         except Exception:
             pass
@@ -742,6 +931,9 @@ def main() -> int:
     print(f"# cmd publish {srv.pub.endpoint} @{CMD_PUB_HZ}Hz "
           f"(操縦者不在なら DISARM)")
     print(f"# JPEG エンコーダ: {srv._jpeg_impl or '無し（カメラ配信は無効）'}")
+    print(f"# 自動運転 {', '.join(PLANNERS) or '（planner 無し）'}"
+          f" / 起動時のモード {srv._auto_mode or 'なし'}"
+          f"（engage は保存しない）")
     print("# arm の可否は io_node が持つ。ここでは解禁できない\n")
 
     async def run() -> None:

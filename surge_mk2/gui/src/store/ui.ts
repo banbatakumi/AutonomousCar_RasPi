@@ -4,9 +4,9 @@
  * **20Hz で変わるものはここに入れない。** 接続状態・操縦権・設定の類だけ。
  */
 import { create } from 'zustand'
-import type { ControlStatus, LogFile } from '../types'
+import type { AutoStatus, ControlStatus, LogFile } from '../types'
 
-export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider'
+export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
 
 /**
  * ラジコン操作の調整値。**設定パネルから変更でき、`localStorage` に保存される。**
@@ -233,6 +233,8 @@ type UiState = {
   boost: boolean
   /** 直前に DISARM した理由。**「なぜ止まったか」が分からないのが一番消耗する** */
   disarmReason: string
+  /** 直前に自律走行が解除された理由。同上（engage したときに消す） */
+  autoOffReason: string
 
   // ── 補機（v0.5） ──
   //
@@ -280,6 +282,15 @@ type UiState = {
   /** `logs/` にある `.sfl`/`.mcap` の一覧 */
   logFiles: LogFile[]
 
+  /**
+   * 自動運転の意思と、選べるモードの宣言。**サーバが真値なのでここでは編集しない。**
+   *
+   * 押した結果は `status` のブロードキャストで返ってくる（`ws/control.ts` の
+   * `setAuto`）。GUI 側に「engage したつもり」の状態を持つと、2枚目のタブや
+   * サーバ側の拒否（モード未選択・E-Stop）と食い違う。
+   */
+  auto: AutoStatus | null
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -299,6 +310,7 @@ export const useUi = create<UiState>((set, get) => ({
   inputSource: 'none',
   boost: false,
   disarmReason: '',
+  autoOffReason: '',
 
   braking: false,
   horning: false,
@@ -317,6 +329,7 @@ export const useUi = create<UiState>((set, get) => ({
   sfl: null,
   mcap: null,
   logFiles: [],
+  auto: null,
 
   set: (p) => set(p),
   setSettings: (p) => {

@@ -49,6 +49,7 @@ export function App() {
           deniedBy: s.has_controller && s.controller !== c.id ? s.controller : null,
           sfl: s.sfl,
           mcap: s.mcap,
+          auto: s.auto,
         }),
       onDenied: (holder) => set({ deniedBy: holder, hasControl: false }),
       onRtt: (v) => set({ wsRttMs: v }),
@@ -84,7 +85,7 @@ export function App() {
       {tab === 'ラジコン' ? (
         <RcView />
       ) : tab === '自動運転' ? (
-        <AutoView />
+        <AutoView ch={ch} />
       ) : tab === '診断' ? (
         <DiagView />
       ) : (
@@ -101,9 +102,11 @@ function DriveHint() {
     <div className="hint">
       {ui.deniedBy && <span className="badge-bad">操縦権は {ui.deniedBy} が保持中</span>}
       <span className={ui.deadman ? 'badge-live' : 'dim'}>
-        {ui.deadman
-          ? `操縦中（${ui.inputSource === 'gamepad' ? 'パッド' : 'キーボード'}）`
-          : 'ARM していません'}
+        {!ui.deadman
+          ? 'ARM していません'
+          : ui.inputSource === 'auto'
+            ? '自律走行中'
+            : `操縦中（${ui.inputSource === 'gamepad' ? 'パッド' : 'キーボード'}）`}
       </span>
       {/* **なぜ止まったかを必ず出す。** 分からないのがデバッグを最も消耗させる */}
       {!ui.armRequested && ui.disarmReason && (

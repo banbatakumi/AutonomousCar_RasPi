@@ -53,6 +53,18 @@
  * つまり「ブラウザが固まる」「Wi-Fi が切れる」「PC を閉じる」は従来どおり停止する。
  * 弱くなったのは**人間が意図して手を離した場合だけ**。
  *
+ * ## 自律走行（AUTO）でも、このループが車を生かしている
+ *
+ * 自動運転タブで engage しても、**指令を 50Hz で送り続けているのはここ**。
+ * 送るのは `mode=2` と補機だけで、速度・舵は telemetry_node が planning_node の
+ * `auto/cmd` に差し替える。上のデッドマン（ARM 保持・フォーカス喪失・150ms 途絶）が
+ * そのまま自律走行の停止手段になるのはこのため。**planning_node は arm を立てられない。**
+ *
+ * 手動と違うのは2点だけ:
+ *
+ * - **人が舵・スロットル・ブレーキを触ったら自律を解除する**（クルコンと同じ作法）
+ * - **無操作タイムアウトを掛けない**（人が触らないのが正常な状態なので）
+ *
  * ## 応答設計（2026-08-09 改訂）
  *
  * ### 1. ループは rAF、送信は 50Hz
@@ -174,6 +186,8 @@ export function useDriving(ch: ControlChannel | null) {
   const torque = useRef(0)
   const lastActivity = useRef(0)
   const sourceRef = useRef<'keyboard' | 'gamepad'>('keyboard')
+  /** 自律解除を投げた時刻。rAF ごとに投げると 60発/秒になる（`TAKE_CONTROL_MS` と同じ理由） */
+  const lastAutoCancel = useRef(0)
 
   // ── キーボード ──
   useEffect(() => {
@@ -327,6 +341,24 @@ export function useDriving(ch: ControlChannel | null) {
       // 補機も操作のうち（人間が目の前にいる証拠なので ARM を維持してよい）
       if (keyActive || padActive || brake || horn || passing) lastActivity.current = now
 
+      // ── 自律走行中に人が操作したら、自律を解除して手動に戻す ──
+      //
+      // クルーズコントロールと同じ作法。**「人の操作が勝つ」を無条件にする**。
+      // どちらが舵を出しているのか分からない状態を作らないための解除であって、
+      // 停止手段ではない（止めるのは Esc / E-STOP / ブレーキ）。
+      //
+      // ⚠ ブレーキは解除の往復を待たずに**そのまま送り続ける**。サーバ側の
+      // 中継も `gui.brake or auto.brake` にしてあるので、解除が届くまでの
+      // 数十 ms にブレーキが効かない時間は生まれない。
+      const engaged = ui.auto?.engaged ?? false
+      if (engaged && (keyActive || padActive || brake)) {
+        if (now - lastAutoCancel.current >= TAKE_CONTROL_MS) {
+          lastAutoCancel.current = now
+          ch.setAuto({ engaged: false })
+          ui.set({ autoOffReason: brake ? 'ブレーキ操作で解除' : '手動操作で解除' })
+        }
+      }
+
       if (!ui.armRequested) {
         speed.current = 0
         steer.current = 0
@@ -336,6 +368,7 @@ export function useDriving(ch: ControlChannel | null) {
         cmdOut.active = false
         cmdOut.torqueMode = false
         cmdOut.torque = 0
+        cmdOut.auto = false
         live.armRemainingMs = 0
         if (ui.deadman) ui.set({ deadman: false, inputSource: 'none' })
 
@@ -388,6 +421,13 @@ export function useDriving(ch: ControlChannel | null) {
         return
       }
 
+      // ⚠ **自律走行中は無操作タイムアウトを掛けない。** 人が何も触らないのが
+      // 正常な状態なので、20秒で勝手に止まったら自律走行にならない。
+      // 代わりの受け皿は従来どおり全部生きている（Esc / E-STOP / フォーカス喪失 /
+      // タブが背後に回る / 送信が止まれば 150ms で DISARM）。
+      // **画面を見ていられる間だけ走る**という前提は変わっていない
+      if (engaged) lastActivity.current = now
+
       const idle = now - lastActivity.current
       if (idle > s.armIdleTimeoutMs) {
         ui.set({
@@ -406,6 +446,58 @@ export function useDriving(ch: ControlChannel | null) {
           lastTakeMs = now
         }
         mirrorAux(false, false, false)
+        return
+      }
+
+      // ── 自律走行（AUTO） ──
+      //
+      // **速度と舵は送らない。** `mode=2` で送ると telemetry_node が
+      // `auto/cmd`（planning_node）の値に差し替える。GUI が 0 を送っているのは
+      // 「ここは planner が埋める」という意思表示で、届かなければ 0 のまま
+      // ＝ 止まる方向に転ぶ（`raspi/nodes/telemetry_node.py` の `_merge_auto`）。
+      //
+      // 灯火・ホーン・パッシング・`auto_stop` は手動と同じに効く。自律走行中に
+      // 前照灯の操作だけ効かなくなる理由が無い。
+      if (engaged) {
+        // 手動側の積分は 0 に戻しておく。**解除した瞬間に前の速度から再開しない**
+        speed.current = 0
+        steer.current = 0
+        torque.current = 0
+
+        // 計器には**実際に車へ向かっている値**（planner の指令）を出す。
+        // GUI が送っている生の 0 を出すと、走っているのに計器が 0 のままになる
+        const a = live.auto
+        cmdOut.speed = a?.target_speed ?? 0
+        cmdOut.steer = a?.target_steer ?? 0
+        cmdOut.active = true
+        cmdOut.auto = true
+        cmdOut.torqueMode = false
+        cmdOut.torque = 0
+        if (!ui.deadman || ui.inputSource !== 'auto') {
+          ui.set({ deadman: true, inputSource: 'auto' })
+        }
+
+        if (now - lastTxMs < TX_INTERVAL_MS) return
+        lastTxMs = now
+        mirrorAux(brake, horn, passing)
+        ch.cmd({
+          mode: 2, // AUTO
+          arm: true,
+          // **人間のブレーキはそのまま通す**（解除の往復を待たない）
+          brake,
+          horn,
+          light_mode: ui.lightMode,
+          passing,
+          speed: 0,
+          steer: 0,
+          accel_limit: ACCEL_LIMIT,
+          steer_rate_limit: STEER_RATE_LIMIT,
+          brake_torque: s.brakeTorque,
+          // 自律走行はトルク直接指令を使わない。サーバ側でも落としてある
+          torque_mode: false,
+          target_torque: 0,
+          auto_stop: s.autoStop,
+        })
         return
       }
 
@@ -484,6 +576,7 @@ export function useDriving(ch: ControlChannel | null) {
       cmdOut.speed = speed.current
       cmdOut.steer = steer.current
       cmdOut.active = true
+      cmdOut.auto = false
       cmdOut.torqueMode = s.torqueMode
       cmdOut.torque = torque.current
       if (!ui.deadman || ui.inputSource !== source) {
