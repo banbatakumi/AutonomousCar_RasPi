@@ -20,10 +20,6 @@ export function DiagView() {
     <div className="diagview">
       <div className="diagview-head">
         <h2>診断</h2>
-        <p className="dim">
-          テレメトリの現在値と時系列。<b>記録はタブを開いていなくても走っている</b>ので、
-          異常に気づいてからここへ来ても直前の履歴が残っている。
-        </p>
         {n.stale && <span className="badge-bad">テレメトリ途絶中（表示は最後の値）</span>}
       </div>
 

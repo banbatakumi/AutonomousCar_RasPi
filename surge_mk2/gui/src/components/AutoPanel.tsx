@@ -78,9 +78,6 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <span className="dim">planner がありません</span>
           )}
         </div>
-        <span className="note">
-          {selected ? selected.description : 'モードを選ぶと、engage しなくても判断だけ先に見られます'}
-        </span>
       </section>
 
       {/* ── engage ── */}
@@ -105,10 +102,6 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
         {auto.stalls > 0 && (
           <span className="badge-bad">指令の途絶で制動 {auto.stalls} 回</span>
         )}
-        <span className="note">
-          engage しても、ARM を保持している間しか走りません。Esc・E-STOP・
-          舵/スロットル/ブレーキ操作でいつでも解除できます
-        </span>
       </section>
 
       {/* ── planner の判断 ── */}
@@ -156,7 +149,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             {selected.params.map((p) => {
               const v = auto.params[p.key] ?? p.default
               return (
-                <label key={p.key} className="auto-param">
+                <label key={p.key} className="auto-param" title={p.note}>
                   <span className="auto-param-head">
                     {p.label}
                     <b>
@@ -174,15 +167,10 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
                       ch?.setAuto({ params: { [p.key]: Number(e.target.value) } })
                     }
                   />
-                  <span className="note">{p.note}</span>
                 </label>
               )
             })}
           </div>
-          <span className="note">
-            変更は即座に効き、Pi の <code>config/auto.json</code> に保存されます
-            （engage の状態は保存されません）
-          </span>
         </details>
       )}
     </div>

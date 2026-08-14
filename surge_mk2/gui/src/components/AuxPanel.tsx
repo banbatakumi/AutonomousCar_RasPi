@@ -25,7 +25,7 @@
  * ここが 0 のままならブレーキが効いていない。
  */
 import { useNumbers } from '../bus/live'
-import { AUTO_STOP_DISTANCE_M, LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
+import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
 
 export function AuxPanel() {
   const n = useNumbers()
@@ -51,9 +51,6 @@ export function AuxPanel() {
             </button>
           ))}
         </div>
-        {/* v0.4 の light=1 は全光量だったが、v0.5 の 1 は DAYTIME（減光）。
-            値の意味が変わっているので画面にも書いておく */}
-        <span className="note">L キー / パッド △ で送り。DAY は減光（duty 0.1）</span>
       </section>
 
       <section className="aux-brake">
@@ -65,8 +62,6 @@ export function AuxPanel() {
           <span className="unit">N·m/輪</span>
           <span className="dim">{load}</span>
         </div>
-        {/* 目標のブレーキ強さ（N·m）は設定パネルで変える。ここは実測だけ */}
-        <span className="note">後輪 RL/RR 平均・指令値。強さはラジコンタブの ⚙ で変更</span>
       </section>
 
       <section className="aux-state">
@@ -82,13 +77,6 @@ export function AuxPanel() {
             パッシング
           </span>
         </div>
-        {/* 灯火・ホーン・パッシングは未 ARM でも効く（2026-08-11。`useDriving.ts` 参照）。
-            ブレーキだけはモータが励磁されていないと意味を持たないので ARM 中のみ */}
-        <span className="note">
-          {ui.armRequested
-            ? '押している間だけ効く'
-            : '灯火・ホーン・パッシングは未 ARM でも効く（ブレーキは ARM 中のみ）'}
-        </span>
       </section>
 
       {/* 自動停止（v0.7）。**灯火と同じ「状態」なのでここで切り替えてよい**
@@ -108,10 +96,6 @@ export function AuxPanel() {
             {vs?.auto_stop_active ? '作動中' : '待機'}
           </span>
         </div>
-        <span className="note">
-          進行方向（前進なら前・後退なら後）の超音波が {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm
-          未満で STM32 が最大制動。逆方向のセンサは見ないので後退で抜けられる。DISARM はされない
-        </span>
       </section>
     </div>
   )

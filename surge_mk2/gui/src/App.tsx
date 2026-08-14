@@ -122,9 +122,6 @@ function DriveHint() {
       {!ui.armRequested && ui.disarmReason && (
         <span className="badge-warn">{ui.disarmReason}</span>
       )}
-      <span className="dim">
-        Enter で ARM ／ W A S D ／ パッド R2 + 左スティック ／ Esc で E-STOP
-      </span>
     </div>
   )
 }

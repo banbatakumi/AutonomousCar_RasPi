@@ -36,7 +36,6 @@ const C = {
 
 type ChartDef = {
   title: string
-  note: string
   keys: SeriesKey[]
   labels: string[]
   colors: string[]
@@ -67,7 +66,6 @@ function yRange(minSpan: number) {
 const CHARTS: ChartDef[] = [
   {
     title: '速度',
-    note: '指令と実測の開きが速度制御の応答。トルクモード中は指令が途切れる',
     keys: ['speed', 'speedCmd'],
     labels: ['実測', '指令'],
     colors: [C.accent, C.live],
@@ -76,7 +74,6 @@ const CHARTS: ChartDef[] = [
   },
   {
     title: '舵角',
-    note: 'この差がステアリングの遅れそのもの（推定ではなく実測）',
     keys: ['steer', 'steerCmd'],
     labels: ['実測', '指令'],
     colors: [C.accent, C.live],
@@ -85,7 +82,6 @@ const CHARTS: ChartDef[] = [
   },
   {
     title: '温度',
-    note: '通信断（null）は線が切れる。0℃ に落ちて見えることはない',
     keys: ['temp0', 'temp1', 'temp2', 'temp3'],
     labels: ['MD後左', 'MD後右', 'MDステア', 'MCU'],
     colors: [C.accent, C.live, C.ok, C.dim],
@@ -94,7 +90,6 @@ const CHARTS: ChartDef[] = [
   },
   {
     title: '電源・モータ電流',
-    note: '加速のたびに電圧が落ちるなら内部抵抗。電流と見比べる',
     keys: ['battDrive', 'currDrive', 'motorRL', 'motorRR', 'motorST'],
     labels: ['駆動電圧V', '駆動電流A', '後左A', '後右A', 'ステアA'],
     colors: [C.warn, C.accent, C.ok, C.live, C.dim],
@@ -103,7 +98,6 @@ const CHARTS: ChartDef[] = [
   },
   {
     title: '加速度',
-    note: '前後 G と横 G の生値 [m/s²]。ラジコンの G メータと同じ値',
     keys: ['accelX', 'accelY'],
     labels: ['前後', '左右'],
     colors: [C.accent, C.live],
@@ -112,7 +106,6 @@ const CHARTS: ChartDef[] = [
   },
   {
     title: 'リンク',
-    note: 'CRC とロスは増分（累積のままでは右上がりの直線になって読めない）',
     keys: ['rttMs', 'rxHz', 'crcDelta', 'lossDelta'],
     labels: ['UART往復ms', '受信Hz', 'CRC', 'loss'],
     colors: [C.accent, C.dim, C.bad, C.warn],
@@ -210,7 +203,6 @@ function Chart({ def }: { def: ChartDef }) {
         <span className="dim">直近 {HISTORY_SPAN_S}s</span>
       </div>
       <div ref={host} className="chart-host" />
-      <span className="note">{def.note}</span>
     </section>
   )
 }

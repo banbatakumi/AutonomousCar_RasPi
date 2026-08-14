@@ -11,12 +11,12 @@
  * 速度は「自分が送っている指令」と「実測」を並べる。
  */
 import { useNumbers } from '../bus/live'
-import { AUTO_STOP_DISTANCE_M, useUi } from '../store/ui'
+import { useUi } from '../store/ui'
 import { deg, kmh, metres } from '../format'
 
 export function DriveBar() {
   const n = useNumbers()
-  const { maxSpeed, maxSteer, autoStop } = useUi((s) => s.settings)
+  const { maxSpeed, maxSteer } = useUi((s) => s.settings)
   const vs = n.vs
   const speed = vs ? (vs.stopped ? 0 : vs.speed) : 0
   const torqueMode = n.out.active && n.out.torqueMode
@@ -50,7 +50,6 @@ export function DriveBar() {
           <span className="label">舵角</span>
           <span className="big">{vs ? deg(vs.steer_actual) : '—'}</span>
           <span className="sub">指令 {vs ? deg(vs.steer_cmd_echo) : '—'}</span>
-          <span className="sub dim">← 差がステアリングの遅れ</span>
         </div>
         <BiBar
           value={vs?.steer_actual ?? 0}
@@ -72,10 +71,6 @@ export function DriveBar() {
           <span>後</span>
           <b className={near(vs?.us_rear)}>{metres(vs?.us_rear ?? null)}</b>
         </div>
-        <span className="note">
-          実質 20Hz・同じ値が続く
-          {autoStop && `／進行方向 ${(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で自動停止`}
-        </span>
       </div>
 
       <div className="gauge narrow">
@@ -86,7 +81,6 @@ export function DriveBar() {
           <span>中心線</span>
           <b>{vs ? `${vs.odom_center.toFixed(2)}m` : '—'}</b>
         </div>
-        <span className="note">前輪を舵角で射影して積算</span>
       </div>
     </div>
   )

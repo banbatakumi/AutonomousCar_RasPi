@@ -43,7 +43,6 @@ export function DiagGrid({ n }: { n: Numbers }) {
           <b className={`lv-${battLevel(vs.batt_voltage[1])}`}>{vs.batt_voltage[1].toFixed(2)}V</b>
           <b>{vs.batt_current[1].toFixed(2)}A</b>
         </div>
-        <span className="note">電流は単方向センサ。回生中は 0 に張り付く</span>
       </section>
 
       <section>
@@ -55,7 +54,6 @@ export function DiagGrid({ n }: { n: Numbers }) {
             {i < 2 && <b className="dim">{vs.torque_cmd[i].toFixed(3)}N·m</b>}
           </div>
         ))}
-        <span className="note">トルクは指令値。実測ではない（Kt 未実測）</span>
       </section>
 
       <section>
@@ -68,7 +66,6 @@ export function DiagGrid({ n }: { n: Numbers }) {
           <span>後 RL/RR</span>
           <b>{vs.slip_rear.map((v) => v.toFixed(2)).join(' / ')}</b>
         </div>
-        <span className="note">前輪は射影後の値。低速では前輪エンコーダが当てにならない</span>
       </section>
 
       <section>
@@ -88,7 +85,6 @@ export function DiagGrid({ n }: { n: Numbers }) {
           <b>{link?.rx?.packet_loss ?? 0}</b>
           <b className="dim">{link?.stm_rx?.tx_drop ?? '—'}</b>
         </div>
-        <span className="note">片方向だけ増えるか両方かで原因の切り分けが変わる</span>
       </section>
 
       <section>
@@ -108,9 +104,6 @@ export function DiagGrid({ n }: { n: Numbers }) {
             </div>
           )
         })}
-        <span className="note">
-          受信数が 0 の台は起動待ちか配線。駆動電源を入れた直後は後右が約5秒遅れる
-        </span>
       </section>
 
       <section>
@@ -133,7 +126,6 @@ export function DiagGrid({ n }: { n: Numbers }) {
             {((vs.pitch * 180) / Math.PI).toFixed(1)}° / {((vs.roll * 180) / Math.PI).toFixed(1)}°
           </b>
         </div>
-        <span className="note">yaw は出ない（地磁気センサ無し）</span>
       </section>
     </div>
   )

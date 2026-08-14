@@ -56,7 +56,6 @@ export function LogView({ ch }: { ch: ControlChannel | null }) {
     <div className="settings logs-view">
       <div className="settings-head">
         <h2>ログ</h2>
-        <p className="dim">記録の開始/停止と、一覧・エクスポートをここで操作する。</p>
       </div>
 
       <SflSection ch={ch} sfl={sfl} />
@@ -77,9 +76,6 @@ function SflSection({ ch, sfl }: { ch: ControlChannel | null; sfl: ControlStatus
           {active ? '停止' : '開始'}
         </button>
       </div>
-      <span className="note">
-        Pi の SD カードに書き込まれる。Wi-Fi が切れても記録は止まらない（下の一覧からダウンロード・削除できる）
-      </span>
     </section>
   )
 }
@@ -164,9 +160,6 @@ function McapSection({
         </label>
       )}
       {mcap?.error && <span className="badge-bad">{mcap.error}</span>}
-      <span className="note">
-        Pi には保存されない。停止するとブラウザから直接このPCへダウンロードされる。タブを閉じると記録は失われる
-      </span>
     </section>
   )
 }
@@ -181,7 +174,7 @@ function FilesSection({ ch, files }: { ch: ControlChannel | null; files: LogFile
         </button>
       </div>
       {files.length === 0 ? (
-        <p className="note">記録がありません</p>
+        <p className="dim">記録がありません</p>
       ) : (
         <div className="logs-table-wrap">
           <table className="logs-table">

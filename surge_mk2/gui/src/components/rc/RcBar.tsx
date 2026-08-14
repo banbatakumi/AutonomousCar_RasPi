@@ -66,7 +66,6 @@ export function RcBar() {
           a={vs?.batt_current[1] ?? null}
           title="信号系。STM32・センサ・LED。ここが落ちると車両が無言になる"
         />
-        <span className="note">電流は単方向センサ。回生中は 0 に張り付く</span>
       </div>
 
       <div className="rc-small">
@@ -95,8 +94,6 @@ export function RcBar() {
           </div>
         </div>
       </div>
-
-      <span className="note">灯火・ホーン・パッシングは ARM していなくても効く</span>
     </div>
   )
 }

@@ -117,11 +117,6 @@ export function SettingsPanel() {
   return (
     <div className="settings">
       <div className="settings-head">
-        <p className="dim">
-          ラジコン操作の速度・舵の応答を調整する。ブラウザの <code>localStorage</code>{' '}
-          に保存され、このブラウザでは次回以降も引き継がれる。
-          <b>走らせながら変えて、その場で効きを確かめられる。</b>
-        </p>
         <button onClick={resetSettings}>既定値に戻す</button>
       </div>
 
@@ -146,18 +141,6 @@ export function SettingsPanel() {
             トルク制御
           </button>
         </div>
-        <span className="note">
-          {settings.torqueMode ? (
-            <>
-              スロットルが<b>駆動トルクの直接指令</b>になる（v0.6・実験的）。STM32 の速度 PI を
-              迂回するので、坂道でも「同じ入力なら同じトルク」になる代わりに速度は保たれない
-            </>
-          ) : (
-            <>
-              スロットルが<b>目標速度</b>になる。STM32 の速度 PI が負荷によらず速度を保つ
-            </>
-          )}
-        </span>
       </section>
 
       {settings.torqueMode ? (
@@ -181,18 +164,6 @@ export function SettingsPanel() {
           />
           進行方向 {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で STM32 に自動停止させる
         </label>
-        <span className="note">
-          ON の間、進行方向（前進なら前・後退なら後）の超音波が{' '}
-          {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm を切ると、STM32 が指令を無視して最大制動する（v0.7）。
-          <b>逆方向のセンサは見ないので、前に壁があっても後退はできる。</b>
-          判定も制動も STM32 側で完結し、Pi/GUI は許可を出すだけ。実際に効いている間は
-          計器の <b>STOP</b> ランプが点く
-        </span>
-        <span className="note">
-          ⚠ ヒステリシスが無いため、{(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm
-          付近では効いたり切れたりする。壁に詰めて止める作業のときは切ること。
-          <b>DISARM はされない</b>ので、離れれば自動的に走れる状態に戻る
-        </span>
       </section>
 
       <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} onChange={setSettings} />
@@ -239,7 +210,7 @@ function SettingRow({
   const isDefault = stored === DEFAULT_SETTINGS[f.key]
 
   return (
-    <div className="settings-row">
+    <div className="settings-row" title={f.note}>
       <div className="settings-row-head">
         <span className="label">{f.label}</span>
         <b>{display.toFixed(digits)}</b>
@@ -258,7 +229,6 @@ function SettingRow({
         value={display}
         onChange={(e) => onChange({ [f.key]: toStored(Number(e.target.value)) })}
       />
-      {f.note && <span className="note">{f.note}</span>}
     </div>
   )
 }
