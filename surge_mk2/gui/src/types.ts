@@ -146,8 +146,61 @@ export type AutoState = {
   nearest: number // m
   nearest_deg: number
   valid_ratio: number
+
+  // ── 地図を使う planner（`raspi/auto/raceline.py`）── */
+  /** "EXPLORE"（地図を作っている）/"BUILD"（経路を作っている）/"RACE" */
+  phase: string
+  /** map フレームの自己位置。**base_link（後輪車軸中心）基準** */
+  pose_x: number
+  pose_y: number
+  pose_yaw: number // rad
+  /** スキャンマッチの一致度 0〜1。**低いのに走っているなら疑う** */
+  match_score: number
+  /** 周回の進み具合 [周]。位置ではなく**累積回頭**で数えている */
+  lap_progress: number
+  laps: number
+  /** レーシングラインからの横偏差 [m]。**RACE 段の主要な指標** */
+  cross_track: number
+  /** Pure Pursuit が狙っている経路上の点（map フレーム） */
+  target_x: number
+  target_y: number
+  /** 動的障害物 `[x, y, r, ...]` を平坦化したもの（map フレーム） */
+  obstacles: number[]
+
   scan_age_ms: number
   plan_hz: number
+}
+
+/** `/ws/map` で届く生のメッセージ（`raspi/msgs/types.py` の `AutoMap`）。 */
+export type AutoMapMsg = {
+  map_seq: number
+  resolution: number
+  origin_x: number
+  origin_y: number
+  width: number
+  height: number
+  /** 3値を 2bit に詰めて zlib 圧縮したもの。展開は `ws/map.ts` */
+  cells: Uint8Array
+  centerline: number[]
+  raceline: number[]
+  raceline_v: number[]
+}
+
+/** 展開して描画用に焼いたあとの地図。**`live.map` に置く。** */
+export type MapData = {
+  seq: number
+  res: number
+  originX: number
+  originY: number
+  width: number
+  height: number
+  /** 着色済みの画像。**描画側は貼るだけ**（展開は受信時に1回だけ） */
+  bitmap: ImageBitmap | null
+  centerline: Float64Array
+  raceline: Float64Array
+  racelineV: Float64Array
+  /** 観測できた範囲 [m]。**画面はここに合わせる**（地図の枠ではなく） */
+  known: { x0: number; y0: number; x1: number; y1: number } | null
 }
 
 /** 調整できるパラメータ1つ。**スライダはこれ1件から自動で作られる。** */

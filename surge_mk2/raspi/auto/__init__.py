@@ -7,12 +7,16 @@
 配線は `raspi/nodes/planning_node.py` の仕事。
 """
 
-from .base import ParamSpec, Planner, sector_of_deg, wrap_deg
+from .base import (ParamSpec, Planner, ScanWindow, min_filter, scan_window,
+                   sector_of_deg, wrap_deg)
+from .disparity_extender import DisparityExtender
 from .follow_the_gap import FollowTheGap
+from .raceline import RaceLine
 from .registry import PLANNERS, catalog, make_planner, merged_params
 
 __all__ = [
-    "Planner", "ParamSpec", "sector_of_deg", "wrap_deg",
-    "FollowTheGap",
+    "Planner", "ParamSpec", "ScanWindow", "min_filter", "scan_window",
+    "sector_of_deg", "wrap_deg",
+    "DisparityExtender", "FollowTheGap", "RaceLine",
     "PLANNERS", "catalog", "make_planner", "merged_params",
 ]

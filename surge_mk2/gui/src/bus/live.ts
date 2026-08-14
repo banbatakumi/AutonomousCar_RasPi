@@ -9,7 +9,7 @@
  *   3. 接続状態・設定 → イベント時だけ zustand（`store/ui.ts`）
  */
 import { useSyncExternalStore } from 'react'
-import type { AutoState, LinkDiag, Scan, VehicleState } from '../types'
+import type { AutoState, LinkDiag, MapData, Scan, VehicleState } from '../types'
 
 /** 最新値。**書き換わり続けるので、React から直接読まないこと。** */
 export const live = {
@@ -18,6 +18,10 @@ export const live = {
   link: null as LinkDiag | null,
   /** planning_node の判断。LiDAR ビューが rAF で読んでギャップを重畳する */
   auto: null as AutoState | null,
+  /** 地図と経路（`/ws/map`）。**点群と違って変わったときだけ届く**ので、
+   *  接続が切れても消さない（`clearLive` で触らない）。最後に見えていた地図が
+   *  残っている方が、再接続待ちの間も状況を読める */
+  map: null as MapData | null,
   /** テレメトリを最後に受けた時刻（performance.now） */
   lastRxMs: 0,
   /** 実測の受信レート [Hz]。**GUI 側が詰まっていないか**を見るために出す */

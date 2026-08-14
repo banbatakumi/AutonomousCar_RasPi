@@ -4,6 +4,7 @@
 ハードウェアもバスも要らない。
 """
 
+import math
 import sys
 import time
 import unittest
@@ -13,8 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import msgspec  # noqa: E402
 
-from raspi.auto import PLANNERS, FollowTheGap, catalog, make_planner  # noqa: E402
+from raspi.auto import (PLANNERS, DisparityExtender, FollowTheGap,  # noqa: E402
+                        catalog, make_planner)
 from raspi.auto.base import sector_of_deg  # noqa: E402
+from raspi.auto.disparity_extender import _extend  # noqa: E402
 from raspi.msgs import AutoState, DriveCmd, Scan  # noqa: E402
 
 
@@ -214,6 +217,138 @@ class TestFollowTheGap(unittest.TestCase):
         for open_dist in (0.5, 1.0, 2.0, 5.0):
             st = self.plan(corridor(120, open_dist=open_dist), max_speed=0.3)
             self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+
+class TestDisparityExtender(unittest.TestCase):
+    """**FTG と同じ安全条件を満たしたうえで、狙点が「一番遠く」になること。**"""
+
+    def setUp(self):
+        self.p = DisparityExtender()
+        self.params = DisparityExtender.merged({})
+
+    def plan(self, scan, **over):
+        p = {**self.params, **over}
+        return self.p.plan(scan, None, p, 0.1)
+
+    # ── 段差を埋める本体 ──
+
+    def test_extends_the_far_side_of_a_disparity(self):
+        """近い側 0.5m・遠い側 5.0m の縁は、**遠い側**が 0.5m で塗られる。"""
+        r = [0.5] * 10 + [5.0] * 60
+        out = _extend(r, 0.30, 0.16)
+        # atan2(0.16, 0.5) = 17.7° → 18 点ぶん塗られる
+        self.assertEqual(out[10:28], [0.5] * 18)
+        self.assertEqual(out[28], 5.0)                 # その先は残る
+        self.assertEqual(out[:10], [0.5] * 10)         # 近い側は動かさない
+
+    def test_extends_the_other_way_too(self):
+        r = [5.0] * 60 + [0.5] * 10
+        out = _extend(r, 0.30, 0.16)
+        self.assertEqual(out[42:60], [0.5] * 18)
+        self.assertEqual(out[41], 5.0)
+
+    def test_nearer_disparity_paints_wider(self):
+        """**近いほど広く塗る。** 同じ半幅を見込む角度が広がるため。"""
+        near = _extend([0.3] * 5 + [5.0] * 60, 0.30, 0.16)
+        far = _extend([2.0] * 5 + [5.0] * 60, 0.30, 0.16)
+        self.assertGreater(sum(v < 5.0 for v in near), sum(v < 5.0 for v in far))
+
+    def test_painting_is_order_independent(self):
+        """左右から同じ所を塗り合っても答えが変わらない（`min` で入れている）。"""
+        r = [5.0] * 20 + [0.4] * 3 + [5.0] * 20
+        out = _extend(r, 0.30, 0.16)
+        self.assertEqual(out, _extend(list(reversed(r)), 0.30, 0.16)[::-1])
+
+    def test_a_narrow_slot_is_closed_and_the_wide_opening_wins(self):
+        """車体が通れない細い抜けは**塞がって選ばれない**。ここが FTG との差。"""
+        dist = [0.8] * 360
+        for deg in (-5, -4, -3):                     # 右の細い抜け（3°）
+            dist[deg % 360] = 5.0
+        for deg in range(60, 91):                    # 左の広い開口（31°）
+            dist[deg] = 5.0
+        st = self.plan(Scan(dist=dist, sector_seen=[True] * 12))
+        self.assertTrue(st.ready, st.reason)
+        self.assertGreater(st.heading, 0.0, "細い抜けの方を狙っている")
+
+    # ── 狙点 ──
+
+    def test_aims_at_the_deepest_not_the_middle(self):
+        """FTG は真ん中を狙うが、DE は**一番遠い方向**を狙う。"""
+        # 右 40° が 5m、左 40° が 2m。どちらも十分広い
+        dist = [1.0] * 360
+        for deg in range(-60, -20):
+            dist[deg % 360] = 5.0
+        for deg in range(20, 60):
+            dist[deg % 360] = 2.0
+        scan = Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
+        st = self.plan(scan)
+        self.assertLess(st.heading, 0.0, "遠い右側を狙っていない")
+
+    def test_open_field_goes_straight(self):
+        """視野いっぱいが同じ距離なら、**正面**を選ぶ（配列の端に寄らない）。"""
+        st = self.plan(make_scan(default=6.0))
+        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
+
+    # ── 安全条件は FTG と同じ ──
+
+    def test_stops_when_wall_is_close_ahead(self):
+        st = self.plan(make_scan(default=0.2))
+        self.assertTrue(st.brake)
+        self.assertEqual(st.target_speed, 0.0)
+        self.assertIn("停止", st.reason)
+
+    def test_missing_sectors_are_walls_not_free_space(self):
+        st = self.plan(make_scan(seen=False))
+        self.assertFalse(st.ready)
+        self.assertIn("欠測", st.reason)
+
+    def test_a_single_missing_sector_blocks_that_direction(self):
+        """1セクタだけ欠けたら、**その方向は壁**として扱われる。"""
+        dist = [5.0] * 360
+        seen = [True] * 12
+        seen[sector_of_deg(45)] = False            # 左 30〜60° が届いていない
+        scan = Scan(dist=dist, sector_seen=seen, rot_speed_dps=3600.0)
+        st = self.plan(scan)
+        self.assertTrue(st.ready, st.reason)
+        self.assertLessEqual(st.heading, math.radians(30.0),
+                             "欠測している方向を狙っている")
+
+    def test_saturated_points_are_free_space(self):
+        dist = [0.8] * 360
+        sat = [False] * 360
+        for deg in range(-30, 31):
+            dist[deg % 360] = 5.10
+            sat[deg % 360] = True
+        scan = Scan(dist=dist, sector_seen=[True] * 12, saturated=sat,
+                    rot_speed_dps=3600.0)
+        st = self.plan(scan)
+        self.assertTrue(st.ready, st.reason)
+        self.assertGreater(st.target_speed, 0.0)
+
+    def test_speed_never_exceeds_max_speed(self):
+        for open_dist in (0.5, 1.0, 2.0, 5.0):
+            st = self.plan(corridor(120, open_dist=open_dist), max_speed=0.3)
+            self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+    def test_reset_clears_the_steering_state(self):
+        dist = [0.8] * 360
+        # 左が広く開いた場面で舵を寄せる。**安全半幅ぶん塗られても残る幅**にする
+        for deg in range(20, 91):
+            dist[deg] = 4.0
+        turn = Scan(dist=dist, sector_seen=[True] * 12)
+        for _ in range(40):
+            converged = self.plan(turn).target_steer
+        self.assertGreater(abs(converged), 0.1)
+        self.p.reset()
+        self.assertLess(abs(self.plan(turn).target_steer), abs(converged) * 0.8)
+
+    def test_not_ready_always_carries_a_reason(self):
+        """`base.py` の約束2。**止めた理由の無い停止を作らない。**"""
+        for scan in (make_scan(seen=False), make_scan(default=0.2),
+                     make_scan(default=0.05)):
+            st = self.plan(scan)
+            if not st.ready or st.brake:
+                self.assertTrue(st.reason)
 
 
 class TestRegistry(unittest.TestCase):

@@ -19,6 +19,7 @@ from .convert import (
 from .types import (
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
+    TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -30,6 +31,7 @@ from .types import (
     TOPIC_TYPES,
     TOPIC_VEHICLE_STATE,
     AutoCtrl,
+    AutoMap,
     AutoState,
     DriveCmd,
     Heartbeat,
@@ -44,10 +46,10 @@ from .types import (
 
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
-    "Heartbeat", "LogCtrl", "AutoCtrl", "AutoState",
+    "Heartbeat", "LogCtrl", "AutoCtrl", "AutoState", "AutoMap",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX", "TOPIC_LOG_CTRL",
-    "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE",
+    "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "TOPIC_TYPES", "type_for_topic",
     "StateBuilder", "ScanAssembler", "decode_flags", "command_from_cmd",
     "DISARM_COMMAND", "FAULT_FLAGS", "SPEED_DEADBAND_MPS", "LIDAR_C_SATURATED_M",

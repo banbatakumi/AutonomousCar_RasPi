@@ -15,13 +15,17 @@ GUI・WS・planning_node のどれも触らなくてよい。モード選択も�
 from __future__ import annotations
 
 from .base import Planner
+from .disparity_extender import DisparityExtender
 from .follow_the_gap import FollowTheGap
+from .raceline import RaceLine
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
 
 #: id → クラス。**並び順がそのまま GUI の並び順**
 PLANNERS: dict[str, type[Planner]] = {
     FollowTheGap.id: FollowTheGap,
+    DisparityExtender.id: DisparityExtender,
+    RaceLine.id: RaceLine,
 }
 
 

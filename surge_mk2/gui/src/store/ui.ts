@@ -217,6 +217,9 @@ export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
 type UiState = {
   telemetryOpen: boolean
   controlOpen: boolean
+  /** `/ws/map` が繋がっているか。**地図が更新されないのが「切れている」のか
+   *  「凍結して変わらない」のかを区別するために要る** */
+  mapOpen: boolean
   status: ControlStatus | null
   /** 自分が操縦権を持っているか */
   hasControl: boolean
@@ -298,6 +301,7 @@ type UiState = {
 }
 
 export const useUi = create<UiState>((set, get) => ({
+  mapOpen: false,
   telemetryOpen: false,
   controlOpen: false,
   status: null,

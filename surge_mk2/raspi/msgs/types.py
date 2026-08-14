@@ -31,10 +31,10 @@ import msgspec
 
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
-    "Heartbeat", "AutoCtrl", "AutoState",
+    "Heartbeat", "AutoCtrl", "AutoState", "AutoMap",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
-    "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE",
+    "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -55,6 +55,8 @@ TOPIC_AUTO_CTRL = "auto/ctrl"
 TOPIC_AUTO_CMD = "auto/cmd"
 #: planning_node が「何を見てそう決めたか」。GUI のデバッグ表示用
 TOPIC_AUTO_STATE = "auto/state"
+#: 地図と経路。**変わったときだけ**流れる（`AutoMap` の docstring）
+TOPIC_AUTO_MAP = "auto/map"
 
 
 class MsgBase(msgspec.Struct):
@@ -324,6 +326,12 @@ class AutoCtrl(MsgBase):
     engaged: bool = False
     #: planner のパラメータ。**未指定のキーは planner 側の既定値**
     params: dict[str, float] = msgspec.field(default_factory=dict)
+    #: 「地図を確定」を押した回数。**真偽値ではなく回数**にしてある。
+    #: このメッセージは現在の意思を繰り返し流す（CONFLATE）ので、`True` を立てると
+    #: 次に押していないのに何度も確定してしまう。**値が増えたときだけ**効かせる
+    freeze_seq: int = 0
+    #: 「地図を削除」を押した回数。理由は `freeze_seq` と同じ
+    clear_seq: int = 0
 
 
 class AutoState(MsgBase):
@@ -365,9 +373,58 @@ class AutoState(MsgBase):
     #: 視野内で有効だった点の割合 [0..1]。**低いのに走っているなら疑う**
     valid_ratio: float = 0.0
 
+    # ── 地図を使う planner の状態（`raspi/auto/raceline.py`） ──
+    #: 走行段。"EXPLORE"（地図を作っている）/"BUILD"（経路を作っている）/"RACE"
+    phase: str = ""
+    pose_x: float = 0.0                    #: [m] map フレーム。**base_link 基準**
+    pose_y: float = 0.0
+    pose_yaw: float = 0.0                  #: [rad] 反時計回り正
+    #: スキャンマッチの一致度 0〜1。**低いのに走っているなら疑う**
+    match_score: float = 0.0
+    #: 周回の進み具合 [周]。累積回頭 ÷ 360°。位置ではなく回頭で数えている
+    lap_progress: float = 0.0
+    laps: int = 0                          #: 走り切った周回数
+    #: レーシングラインからの横偏差 [m]。**RACE 段の主要な指標**
+    cross_track: float = 0.0
+    #: Pure Pursuit が狙っている経路上の点（map フレーム）。**舵角の理由がこれ**
+    target_x: float = 0.0
+    target_y: float = 0.0
+    #: 検出した動的障害物 `[x, y, r, ...]`（map フレーム）。上限あり
+    obstacles: list[float] = msgspec.field(default_factory=list)
+
     # ── 鮮度（planning_node が入れる） ──
     scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]
     plan_hz: float = 0.0                   #: 実測の計画レート [Hz]
+
+
+class AutoMap(MsgBase):
+    """地図と経路。**`auto/state` と分けてあるのは寿命と大きさが違うから。**
+
+    `AutoState` は 10Hz で流れる「今の判断」だが、地図は 400×400 = 160KB あり、
+    しかも**確定したら二度と変わらない**。同じ頻度で流す理由が無い。
+
+    planning_node は `Planner.snapshot()` の `map_seq` が変わったときだけ publish し、
+    telemetry_node は `/ws/map` に流す。**地図を凍結したあとは 1 回も流れない**
+    （新しく繋いだ GUI にだけ最後の1枚を送る）。
+
+    `cells` は 3 値（`0=未知 1=空き 2=占有`）を 2bit に詰めて `zlib` で圧縮したもの。
+    生の 160KB が数KB になる。展開はブラウザ標準の `DecompressionStream('deflate')`
+    でできるので、GUI 側にライブラリを増やさずに済む。
+    """
+
+    map_seq: int = 0                       #: 地図の版。**変わったときだけ送る**
+    resolution: float = 0.05               #: [m/セル]
+    origin_x: float = 0.0                  #: セル(0,0)の角の世界座標 [m]
+    origin_y: float = 0.0
+    width: int = 0                         #: 列数（+x 方向）
+    height: int = 0                        #: 行数（+y 方向）。**行0 が y 最小**
+    cells: bytes = b""                     #: 上記の圧縮済み 2bit 配列
+    #: 中心線 `[x0, y0, x1, y1, ...]`（map フレーム）
+    centerline: list[float] = msgspec.field(default_factory=list)
+    #: レーシングライン `[x0, y0, ...]`。**アウトインアウトはこれを見れば分かる**
+    raceline: list[float] = msgspec.field(default_factory=list)
+    #: 各点の目標速度 [m/s]。`raceline` の半分の要素数（点ごとに1つ）
+    raceline_v: list[float] = msgspec.field(default_factory=list)
 
 
 #: トピック → 型。`Subscriber` がデコードに使う。
@@ -384,6 +441,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     #: **`cmd` と同じ型。** io_node は `auto/cmd` を購読しない（`AutoCtrl` 参照）
     TOPIC_AUTO_CMD: DriveCmd,
     TOPIC_AUTO_STATE: AutoState,
+    TOPIC_AUTO_MAP: AutoMap,
 }
 
 

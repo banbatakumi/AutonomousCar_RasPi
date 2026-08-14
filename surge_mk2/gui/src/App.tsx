@@ -19,11 +19,15 @@ import { useUi } from './store/ui'
 import { AutoView } from './views/AutoView'
 import { DiagView } from './views/DiagView'
 import { LogView } from './views/LogView'
+import { MapView } from './views/MapView'
 import { RcView } from './views/RcView'
 import { ControlChannel } from './ws/control'
+import { connectMap } from './ws/map'
 import { connectTelemetry } from './ws/telemetry'
 
-const TABS = ['ラジコン', '自動運転', '診断', 'ログ'] as const
+//: **地図は自動運転の隣**。世界座標の情報（自己位置・経路・障害物）は
+//: 走行中にも見たいので、EXPLORE 専用の画面にはしない（`views/MapView.tsx`）
+const TABS = ['ラジコン', '自動運転', '地図生成', '診断', 'ログ'] as const
 type Tab = (typeof TABS)[number]
 
 /** 操縦しうるタブ。ここでだけ操作ヒントを出す（診断・ログでは邪魔になる） */
@@ -37,6 +41,9 @@ export function App() {
 
   useEffect(() => {
     const stopTelemetry = connectTelemetry((open) => set({ telemetryOpen: open }))
+    // 地図は**変わったときだけ**届く別チャンネル。タブを開いていなくても繋いでおく
+    // （後から地図タブを開いた人に、その時点の1枚が出ている必要がある）
+    const stopMap = connectMap((open) => set({ mapOpen: open }))
 
     const c: ControlChannel = new ControlChannel({
       onOpenChange: (open) => set({ controlOpen: open, ...(open ? {} : { hasControl: false }) }),
@@ -63,6 +70,7 @@ export function App() {
       window.clearInterval(ping)
       c.close()
       stopTelemetry()
+      stopMap()
     }
   }, [set])
 
@@ -86,6 +94,8 @@ export function App() {
         <RcView />
       ) : tab === '自動運転' ? (
         <AutoView ch={ch} />
+      ) : tab === '地図生成' ? (
+        <MapView ch={ch} />
       ) : tab === '診断' ? (
         <DiagView />
       ) : (

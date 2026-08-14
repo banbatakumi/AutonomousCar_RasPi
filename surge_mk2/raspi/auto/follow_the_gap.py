@@ -16,26 +16,12 @@
 一番遠い点を狙うと壁際すれすれを縫う挙動になり、車幅ぶんの余裕が無い
 ミニカーだと外輪が壁に当たるため。真ん中なら通路の中央に寄る。
 
-## 前処理で安全側に倒す3つ（ここが実質すべて）
+## 前処理（②）は `base.scan_window()` にある
 
-| 入力 | どう読むか | なぜ |
-|---|---|---|
-| `sector_seen[s] == False` | **壁**（距離 0 ＝ 侵入禁止） | 受信できていないだけで、そこが空いている保証はまったく無い |
-| `saturated[i]`（5.10m 以上） | `max_range`（空き） | 「5.10m ちょうど」ではなく「以上」。壁として打つと実在しない円い壁ができる |
-| `dist[i] == 0`（測距不能） | `max_range`（空き） | ★下記。**唯一、危険側に倒している判断** |
-
-`dist == 0` は LD06 が「反射が返らなかった」と言っているだけで、
-**射程外に何も無い**場合と**黒い/斜めの面が至近にある**場合の両方がありうる。
-壁として扱うと、開けた場所でギャップが1つも見つからず一歩も動けない
-（実用にならない）ので、空きとして扱っている。**この判断の穴は
-`stop_dist` による正面の停止距離と、STM32 側の超音波 `auto_stop`（20cm）で
-受ける**という前提で成り立っている。片方でも切るとこの穴が開くことを覚えておくこと。
-
-## 平滑化は平均ではなく最小値
-
-移動平均を掛けると、椅子の脚やパイロンのような**幅の細い障害物が周囲の
-遠い距離に薄められて消える**。最小値フィルタなら障害物は決して消えず、
-太る方向にしか間違えない。
+欠測・飽和・測距不能をどう読むかは**点群の読み方の契約**そのもので、
+`Disparity Extender`（`auto/disparity_extender.py`）と共有している。
+片方だけ直すともう片方が古い読み方のまま走るので、**ここには書き写さない。**
+`stop_dist` が「測距不能を空き扱いにしている穴」を受ける側であることも同様。
 """
 
 from __future__ import annotations
@@ -43,7 +29,7 @@ from __future__ import annotations
 import math
 
 from ..msgs.types import AutoState, Scan, VehicleState
-from .base import ParamSpec, Planner, sector_of_deg
+from .base import ParamSpec, Planner, min_filter, scan_window
 
 __all__ = ["FollowTheGap"]
 
@@ -118,41 +104,14 @@ class FollowTheGap(Planner):
         st = AutoState(mode=self.id, planner=self.name)
 
         max_range = p["max_range"]
-        half = int(round(p["fov_deg"] / 2))
-        degs = list(range(-half, half + 1))
-        n = len(degs)
 
-        # ── ① / ② 視野の切り出しと前処理 ──
-        #
-        # `usable[j] == 0.0` は「そこへは進んではいけない」の意味に統一する。
-        # 「見えていない」と「近すぎる」を別扱いにすると、以降の分岐が倍に増える
-        usable: list[float] = []
-        measured: list[bool] = []          # 実測点かどうか（最近傍の判定に使う）
-        seen = 0
-        for d in degs:
-            i = d % 360
-            if not scan.sector_seen[sector_of_deg(i)]:
-                usable.append(0.0)         # 欠測は壁。**空きではない**
-                measured.append(False)
-                continue
-            seen += 1
-            if scan.saturated is not None and scan.saturated[i]:
-                usable.append(max_range)   # 「5.10m 以上」。実測点として扱わない
-                measured.append(False)
-                continue
-            raw = scan.dist[i]
-            if raw <= 0.0:
-                usable.append(max_range)   # 測距不能。★docstring の「唯一の危険側」
-                measured.append(False)
-            else:
-                usable.append(min(raw, max_range))
-                measured.append(True)
+        # ── ① / ② 視野の切り出しと前処理（`base.scan_window`）──
+        w = scan_window(scan, p["fov_deg"], max_range)
+        degs, usable, measured = w.degs, list(w.dist), w.measured
+        st.valid_ratio = w.valid_ratio
 
-        seen_ratio = seen / n if n else 0.0
-        st.valid_ratio = sum(measured) / n if n else 0.0
-
-        if seen_ratio < MIN_SEEN_RATIO:
-            st.reason = (f"点群の欠測が多すぎる（視野の {seen_ratio * 100:.0f}% しか"
+        if w.seen_ratio < MIN_SEEN_RATIO:
+            st.reason = (f"点群の欠測が多すぎる（視野の {w.seen_ratio * 100:.0f}% しか"
                          f"受信できていない）")
             return st                      # ready=False のまま返す ＝ 制動
 
@@ -170,7 +129,7 @@ class FollowTheGap(Planner):
         st.nearest = nearest
         st.nearest_deg = float(degs[nearest_j]) if nearest_j >= 0 else 0.0
 
-        usable = _min_filter(usable, int(p["min_filter_deg"]))
+        usable = min_filter(usable, int(p["min_filter_deg"]))
 
         # 正面の余裕。**バブルを塗る前の値で測る**（バブルは進路選択のための
         # 加工であって、正面に何 m あるかという事実ではない）。
@@ -254,17 +213,6 @@ class FollowTheGap(Planner):
 
 
 # ── 小道具 ────────────────────────────────────────────────────────────
-
-def _min_filter(r: list[float], half_width: int) -> list[float]:
-    """±`half_width` の最小値を取る。**障害物を太らせる方向にしか間違えない。**
-
-    端は配列を伸ばさずに切り詰める（視野の外を仮定しない）。
-    """
-    if half_width <= 0:
-        return r
-    n = len(r)
-    return [min(r[max(0, j - half_width):min(n, j + half_width + 1)]) for j in range(n)]
-
 
 def _longest_run(r: list[float], threshold: float) -> tuple[int, int] | None:
     """`threshold` 以上が連続する最長区間 `(start, end)`（両端含む）。

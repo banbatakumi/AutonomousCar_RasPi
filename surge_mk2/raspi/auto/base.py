@@ -24,11 +24,14 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import msgspec
 
-from ..msgs.types import AutoState, Scan, VehicleState
+from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
 
-__all__ = ["ParamSpec", "Planner", "sector_of_deg", "wrap_deg"]
+__all__ = ["ParamSpec", "Planner", "ScanWindow", "min_filter", "scan_window",
+           "sector_of_deg", "wrap_deg"]
 
 
 class ParamSpec(msgspec.Struct):
@@ -75,6 +78,33 @@ class Planner:
         """
         raise NotImplementedError
 
+    def snapshot(self) -> AutoMap | None:
+        """表示専用の重い状態（地図・経路）。**既定は None。**
+
+        **これは上の「4つの約束」に入らない。** 判断ではなく表示だからで、
+        指令には一切影響しない。地図は 400×400 = 160KB あって `AutoState`
+        （10Hz）には載せられないので、別トピック `auto/map` へ逃がすための口。
+
+        planning_node は `map_seq` が変わったときだけ publish する。
+        **変わっていないものを返し続けてよい**（毎周期呼ばれる）。
+        """
+        return None
+
+    def request_freeze(self) -> None:
+        """人間が「地図を確定」と言ってきた。**自動判定の逃げ道。**
+
+        地図を作る段から走る段への遷移は不可逆なので、planner の自動判定が
+        滑ったときに人間が押せる経路を残しておく。地図を持たない planner は
+        何もしなくてよい。
+        """
+
+    def request_clear(self) -> None:
+        """人間が「地図を削除」と言ってきた。**作り直しの口。**
+
+        `reset()` を呼ぶのと同じだが、**engage を落とさずに**地図だけ捨てられる
+        経路として分けてある（disengage → engage し直すと ARM の保持まで巻き込む）。
+        """
+
     # ── ヘルパ ──
 
     @classmethod
@@ -111,6 +141,84 @@ def wrap_deg(deg: float) -> float:
     """
     d = (deg + 180.0) % 360.0 - 180.0
     return d
+
+
+class ScanWindow(NamedTuple):
+    """前処理済みの前方視野。**`scan_window()` が返すもの。**
+
+    `dist[j]` は `degs[j]` 方向の「進んでよい距離」で、**0.0 は
+    「そこへは進んではいけない」の意味に統一**してある。「見えていない」と
+    「近すぎる」を別扱いにすると、以降の分岐が倍に増える。
+    """
+
+    degs: list[int]                        #: 視野の角度 [deg]（−half 〜 +half）
+    dist: list[float]                      #: 進んでよい距離 [m]。0.0 は侵入禁止
+    measured: list[bool]                   #: 実測点か（最近傍の判定に使う）
+    seen_ratio: float                      #: セクタが見えていた割合 [0..1]
+    valid_ratio: float                     #: 実測点だった割合 [0..1]
+
+
+def scan_window(scan: Scan, fov_deg: float, max_range: float) -> ScanWindow:
+    """前方 ±`fov_deg`/2 を切り出し、**欠測・飽和・測距不能を安全側に倒す**。
+
+    | 入力 | どう読むか | なぜ |
+    |---|---|---|
+    | `sector_seen[s] == False` | **壁**（距離 0 ＝ 侵入禁止） | 受信できていないだけで、そこが空いている保証はまったく無い |
+    | `saturated[i]`（5.10m 以上） | `max_range`（空き） | 「5.10m ちょうど」ではなく「以上」。壁として打つと実在しない円い壁ができる |
+    | `dist[i] == 0`（測距不能） | `max_range`（空き） | ★下記。**唯一、危険側に倒している判断** |
+
+    `dist == 0` は LD06 が「反射が返らなかった」と言っているだけで、
+    **射程外に何も無い**場合と**黒い/斜めの面が至近にある**場合の両方がありうる。
+    壁として扱うと、開けた場所で進める方向が1つも見つからず一歩も動けない
+    （実用にならない）ので、空きとして扱っている。**この判断の穴は
+    planner 側の停止距離と、STM32 の超音波 `auto_stop`（20cm）で受ける**
+    という前提で成り立っている。片方でも切るとこの穴が開く。
+
+    ★ **planner ごとに書き写さないこと。** ここは「点群をどう安全に読むか」
+    という契約そのもので、片方だけ直すと**もう片方が古い読み方のまま走る**。
+    """
+    half = int(round(fov_deg / 2))
+    degs = list(range(-half, half + 1))
+    dist: list[float] = []
+    measured: list[bool] = []
+    seen = 0
+    for d in degs:
+        i = d % 360
+        if not scan.sector_seen[sector_of_deg(i)]:
+            dist.append(0.0)               # 欠測は壁。**空きではない**
+            measured.append(False)
+            continue
+        seen += 1
+        if scan.saturated is not None and scan.saturated[i]:
+            dist.append(max_range)         # 「5.10m 以上」。実測点として扱わない
+            measured.append(False)
+            continue
+        raw = scan.dist[i]
+        if raw <= 0.0:
+            dist.append(max_range)         # 測距不能。★上表の「唯一の危険側」
+            measured.append(False)
+        else:
+            dist.append(min(raw, max_range))
+            measured.append(True)
+
+    n = len(degs)
+    return ScanWindow(degs, dist, measured,
+                      seen / n if n else 0.0,
+                      sum(measured) / n if n else 0.0)
+
+
+def min_filter(r: list[float], half_width: int) -> list[float]:
+    """±`half_width` の最小値を取る。**障害物を太らせる方向にしか間違えない。**
+
+    移動平均を掛けると、椅子の脚やパイロンのような**幅の細い障害物が周囲の
+    遠い距離に薄められて消える**。最小値なら障害物は決して消えない。
+
+    端は配列を伸ばさずに切り詰める（視野の外を仮定しない）。
+    """
+    if half_width <= 0:
+        return r
+    n = len(r)
+    return [min(r[max(0, j - half_width):min(n, j + half_width + 1)]) for j in range(n)]
 
 
 def sector_of_deg(deg: int) -> int:

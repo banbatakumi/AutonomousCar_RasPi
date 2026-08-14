@@ -5,7 +5,8 @@
     .venv/bin/python -m raspi.nodes.planning_node --quiet
 
 - **購読**: `scan`・`vehicle_state`・`auto/ctrl`（どのモードで走るかの意思）
-- **発行**: `auto/cmd`（走行指令）・`auto/state`（判断の根拠）・`hb/planning`
+- **発行**: `auto/cmd`（走行指令）・`auto/state`（判断の根拠）・
+  `auto/map`（地図と経路。**変わったときだけ**）・`hb/planning`
 
 アルゴリズムそのものは `raspi/auto/` にあり、このノードは配線だけを持つ。
 
@@ -55,6 +56,7 @@ from raspi.msgs import AutoCtrl, AutoState, DriveCmd, Heartbeat as HbMsg  # noqa
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
+    TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_HB_PREFIX,
     TOPIC_SCAN,
@@ -94,6 +96,7 @@ class PlanningNode:
         #: 最後に出した判断。`auto/cmd` は 50Hz でこれを繰り返す
         self.state = AutoState()
         self._last_scan_seq = -1
+        self._last_map_seq = -1
         self._last_plan_ns = 0
         self._plan_dt = 0.0
         self._plans = 0
@@ -115,11 +118,25 @@ class PlanningNode:
         # disengage も状態を捨てる契機にする。次に engage したときに、
         # **前回の舵の続きから動き出さない**ようにするため
         released = self.ctrl.engaged and not c.engaged
+        # 「地図を確定」「地図を削除」は**回数が増えたときだけ**効かせる
+        # （`AutoCtrl.freeze_seq` / `clear_seq`）
+        freeze = c.freeze_seq > self.ctrl.freeze_seq and not changed
+        clear = c.clear_seq > self.ctrl.clear_seq and not changed
         self.ctrl = c
+        if clear and self.planner is not None:
+            self.planner.request_clear()
+            self._last_map_seq = -1
+            if not self.quiet:
+                print("# 地図を削除（GUI）", flush=True)
+        if freeze and self.planner is not None:
+            self.planner.request_freeze()
+            if not self.quiet:
+                print("# 地図を確定（GUI）", flush=True)
         if changed:
             self.planner = make_planner(c.mode)
             self.state = AutoState(mode=c.mode)
             self._last_scan_seq = -1
+            self._last_map_seq = -1
             if not self.quiet:
                 who = self.planner.name if self.planner else "（なし）"
                 print(f"# モード → {who}", flush=True)
@@ -199,6 +216,22 @@ class PlanningNode:
                         target_speed=st.target_speed, target_steer=st.target_steer,
                         source=f"planning:{self.ctrl.mode}")
 
+    def _publish_map(self) -> None:
+        """地図と経路を `auto/map` へ。**`map_seq` が変わったときだけ。**
+
+        地図は 400×400 あって `auto/state`（10Hz）には載せられないので別トピック。
+        planner が変わっていないものを返し続けてよい約束（`Planner.snapshot`）なので、
+        ここでは版だけを見る。`scan` を同じ周で2回送らない `telemetry_node._snapshot`
+        と同じ流儀。
+        """
+        if self.planner is None:
+            return
+        m = self.planner.snapshot()
+        if m is None or m.map_seq == self._last_map_seq:
+            return
+        self._last_map_seq = m.map_seq
+        self.pub.send(TOPIC_AUTO_MAP, m)
+
     # ── ループ ──
 
     def run(self, duration_s: float | None = None) -> None:
@@ -229,6 +262,7 @@ class PlanningNode:
                 if now >= next_state:
                     next_state = now + NS // STATE_HZ
                     self.pub.send(TOPIC_AUTO_STATE, st)
+                    self._publish_map()
 
             if now >= next_hb:
                 next_hb = now + NS // HB_HZ

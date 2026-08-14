@@ -815,3 +815,62 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .logs-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 .logs-actions { display: flex; gap: 8px; align-items: center; }
 .logs-actions a { color: var(--accent); }
+
+/* ── 地図生成ビュー ───────────────────────────────────────────────────────
+   キャンバスを主役にして、数値は右の細い柱に寄せる。自動運転ビューのように
+   3分割にしないのは、**地図は形を読む対象**なので面積がそのまま情報量になるため。 */
+.mapview {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 6px;
+  padding: 6px;
+}
+.map-main {
+  position: relative;
+  min-height: 0;
+  background: #0b0e11;
+  border: 1px solid #1b2229;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.map-canvas { width: 100%; height: 100%; display: block; }
+.map-badge {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  background: #000a;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+.map-panel {
+  min-height: 0;
+  overflow-y: auto;
+  background: #0e1318;
+  border: 1px solid #1b2229;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.map-panel h3 {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6c8296;
+  letter-spacing: 0.08em;
+}
+.map-panel h3:first-child { margin-top: 0; }
+.map-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+.map-actions { display: flex; gap: 6px; margin-top: 12px; }
+.map-actions button { flex: 1; }

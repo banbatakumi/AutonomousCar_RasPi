@@ -16,6 +16,7 @@
 | `/ws/telemetry` | 車両状態・点群・リンク診断 | msgpack バイナリ | 20Hz |
 | `/ws/camera/front`, `/ws/camera/rear` | JPEG | バイナリ | 最大15Hz |
 | `/ws/control` | ラジコン入力・操縦権・E-Stop・記録の操作 | JSON | イベント + 20Hz |
+| `/ws/map` | 地図・中心線・レーシングライン | msgpack バイナリ | **変わったときだけ** |
 | `/ws/record` | mcap記録の生バイト列 | バイナリ | 録画中のみ |
 
 点群を JSON で送ると CPU を無駄に食うのでテレメトリはバイナリにする。
@@ -110,6 +111,7 @@ from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl  # noqa: 
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
+    TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -178,6 +180,7 @@ class TelemetryServer:
             TOPIC_IMAGE_REAR: LATEST,
             TOPIC_AUTO_CMD: LATEST,
             TOPIC_AUTO_STATE: LATEST,
+            TOPIC_AUTO_MAP: LATEST,
         })
         self.pub = Publisher("control")
 
@@ -186,6 +189,10 @@ class TelemetryServer:
         self.camera_clients: dict[str, set] = {"front": set(), "rear": set()}
         #: mcap のライブ中継を見ている `/ws/record` クライアント
         self.record_clients: set = set()
+        #: 地図を見ている `/ws/map` クライアント
+        self.map_clients: set = set()
+        #: 最後に配った地図の版。**変わったときだけ流す**
+        self._last_map_seq = -1
 
         #: 操縦権を持つ接続。**同時に1つだけ**
         self.controller = None
@@ -208,6 +215,10 @@ class TelemetryServer:
         self._auto_engaged = False
         #: planner のパラメータ。`config/auto.json` に保存され、次回起動で戻る
         self._auto_params: dict[str, float] = {}
+        #: 「地図を確定」を押した回数。**保存しない**（電源投入で確定済みに
+        #: なると、地図が無いのに走る段へ進んでしまう）
+        self._auto_freeze_seq = 0
+        self._auto_clear_seq = 0
         #: engage したまま `auto/cmd` が途絶して制動に落とした回数
         self.auto_stalls = 0
         self._auto_was_fresh = True
@@ -292,6 +303,8 @@ class TelemetryServer:
             await self._control_channel(ws)
         elif path.startswith("/ws/camera/"):
             await self._camera_channel(ws, path.rsplit("/", 1)[-1])
+        elif path == "/ws/map":
+            await self._map_channel(ws)
         elif path == "/ws/record":
             await self._record_channel(ws)
         else:
@@ -316,6 +329,22 @@ class TelemetryServer:
             await ws.wait_closed()
         finally:
             self.camera_clients[cam].discard(ws)
+
+    async def _map_channel(self, ws) -> None:
+        """地図と経路を見るクライアント。**繋いだ瞬間に最新の1枚を送る。**
+
+        地図は「変わったときだけ」流れる（凍結後は二度と変わらない）ので、
+        後から画面を開いた人が**何も映らないまま待つ**ことになる。接続時に
+        1枚送っておけば、その後は差分のように振る舞う。
+        """
+        self.map_clients.add(ws)
+        try:
+            m = self.sub.latest.get(TOPIC_AUTO_MAP)
+            if m is not None:
+                await ws.send(_encoder.encode(m))
+            await ws.wait_closed()
+        finally:
+            self.map_clients.discard(ws)
 
     async def _record_channel(self, ws) -> None:
         """mcap のライブ中継を見るクライアント。**Piは中継するだけでSDに書かない。**"""
@@ -447,9 +476,9 @@ class TelemetryServer:
     # ── 自動運転（§8） ──
 
     def _on_auto(self, m: dict) -> None:
-        """`{"type":"auto", "mode"?, "engaged"?, "params"?}` を反映する。
+        """`{"type":"auto", "mode"?, "engaged"?, "params"?, "freeze_map"?, "clear_map"?}`。
 
-        3つとも省略可。**モードを変えたら engage は必ず落とす**（前のモードの
+        どれも省略可。**モードを変えたら engage は必ず落とす**（前のモードの
         つもりで engage したままアルゴリズムだけ入れ替わるのを防ぐ）。
         """
         if "mode" in m:
@@ -466,6 +495,12 @@ class TelemetryServer:
             # 古いタブや手書きの WS クライアントの値がそのまま planner に入る
             self._auto_params = merged_params(self._auto_mode,
                                               {**self._auto_params, **raw})
+        if m.get("clear_map"):
+            self._auto_clear_seq += 1
+        if m.get("freeze_map"):
+            # **回数で渡す。** `auto/ctrl` は現在の意思を繰り返し流すので、
+            # 真偽値だと押していないのに毎回確定してしまう（`AutoCtrl.freeze_seq`）
+            self._auto_freeze_seq += 1
         if "engaged" in m:
             want = bool(m.get("engaged"))
             # モードが無いのに engage はできない。**解除は常に通す**
@@ -477,7 +512,9 @@ class TelemetryServer:
 
     def _auto_ctrl(self) -> AutoCtrl:
         return AutoCtrl(mode=self._auto_mode, engaged=self._auto_engaged,
-                        params=dict(self._auto_params))
+                        params=dict(self._auto_params),
+                        freeze_seq=self._auto_freeze_seq,
+                        clear_seq=self._auto_clear_seq)
 
     def _publish_auto_ctrl(self) -> None:
         self.pub.send(TOPIC_AUTO_CTRL, self._auto_ctrl())
@@ -674,6 +711,31 @@ class TelemetryServer:
             self.sub.poll(0)
             await asyncio.sleep(BUS_POLL_S)
 
+    async def _map_pump(self) -> None:
+        """地図を `/ws/map` へ。**版が変わったときだけ。**
+
+        `_telemetry_pump`（20Hz）に相乗りさせない。地図は 400×400 あって、
+        しかも凍結したら二度と変わらない。同じ頻度で流す理由が無い
+        （`docs/architecture.md` §6.2 の「画像を流してはいけない」の趣旨）。
+        """
+        while self._running:
+            await asyncio.sleep(0.5)
+            m = self.sub.latest.get(TOPIC_AUTO_MAP)
+            if m is None or m.map_seq == self._last_map_seq:
+                continue
+            self._last_map_seq = m.map_seq
+            if not self.map_clients:
+                continue
+            payload = _encoder.encode(m)
+            dead = []
+            for ws in list(self.map_clients):
+                try:
+                    await ws.send(payload)
+                except Exception:
+                    dead.append(ws)
+            for ws in dead:
+                self.map_clients.discard(ws)
+
     async def _telemetry_pump(self) -> None:
         period = 1.0 / TELEMETRY_HZ
         while self._running:
@@ -847,7 +909,7 @@ class TelemetryServer:
                          process_request=self._process_request,
                          max_queue=8, ping_interval=20) as server:  # noqa: F841
             tasks = [asyncio.create_task(t()) for t in (
-                self._bus_pump, self._telemetry_pump, self._cmd_pump,
+                self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump)]
             try:

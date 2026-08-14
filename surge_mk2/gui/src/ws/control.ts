@@ -103,6 +103,27 @@ export class ControlChannel {
     this.send({ type: 'auto', ...p })
   }
 
+  /**
+   * 「地図を確定」。**周回の自動判定が滑ったときの逃げ道**（`nav/slam.py`）。
+   *
+   * 真偽値ではなく**回数**でサーバへ渡る（`AutoCtrl.freeze_seq`）。あちらは
+   * 現在の意思を繰り返し流す設計なので、`true` を立てると押していないのに
+   * 何度も確定してしまう。
+   */
+  freezeMap() {
+    this.send({ type: 'auto', freeze_map: true })
+  }
+
+  /**
+   * 「地図を削除」。**全部捨てて地図作成からやり直す。**
+   *
+   * engage は落ちない（ARM の保持を巻き込まないため）。経路が消えるので、
+   * 走行中に押しても次の周期で制動に落ちる。
+   */
+  clearMap() {
+    this.send({ type: 'auto', clear_map: true })
+  }
+
   // ── 記録・再生 ──
 
   /** `.sfl` の記録意思を送る。実際に開閉するのは io_node（`log/ctrl` 経由） */
