@@ -177,7 +177,8 @@ def preflight(kill_stale: bool, port: int, want_gui: bool) -> bool:
                 say("run", f"PID {pid} を落としました")
                 time.sleep(0.6)
             else:
-                print(f"        {C['dim']}kill {pid}   / --no-gui / --kill-stale{C['off']}")
+                print(
+                    f"        {C['dim']}kill {pid}   / --no-gui / --kill-stale{C['off']}")
                 ok = False
 
     for pid, started, cmd in bus_rivals():
@@ -188,7 +189,8 @@ def preflight(kill_stale: bool, port: int, want_gui: bool) -> bool:
             say("run", f"PID {pid} を落としました")
             time.sleep(0.6)
         else:
-            print(f"        {C['dim']}kill {pid}   もしくは --kill-stale を付けて再実行{C['off']}")
+            print(
+                f"        {C['dim']}kill {pid}   もしくは --kill-stale を付けて再実行{C['off']}")
             ok = False
 
     held = port_holder(port)
@@ -205,12 +207,14 @@ def preflight(kill_stale: bool, port: int, want_gui: bool) -> bool:
         else:
             print(f"        {C['dim']}古い telemetry_node が残っていることが多い。"
                   f"起動時刻が古ければまず疑う{C['off']}")
-            print(f"        {C['dim']}kill {pid}   もしくは --kill-stale を付けて再実行{C['off']}")
+            print(
+                f"        {C['dim']}kill {pid}   もしくは --kill-stale を付けて再実行{C['off']}")
             ok = False
 
     if not (ROOT / "gui" / "dist" / "index.html").exists():
         say("err", "gui/dist が無いのでブラウザに GUI が出ません")
-        print(f"        {C['dim']}cd gui && npm install && npm run build{C['off']}")
+        print(
+            f"        {C['dim']}cd gui && npm install && npm run build{C['off']}")
     return ok
 
 
@@ -308,7 +312,8 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--course", default="oval", help="コース名 or PNG パス（既定 oval）")
+    ap.add_argument("--course", default="circuit",
+                    help="コース名 or PNG パス（既定 circuit）")
     ap.add_argument("--list", action="store_true", help="コース一覧を出して終わる")
     ap.add_argument("--no-gui", action="store_true", help="pygame の俯瞰ビューを開かない")
     ap.add_argument("--no-planning", action="store_true",
@@ -318,7 +323,8 @@ def main() -> int:
                     help="ポートや endpoint を掴んでいる古いプロセスを落としてから起動する")
     ap.add_argument("--safe", action="store_true",
                     help="--allow-arm を付けない（COMMAND が DISARM 固定になる）")
-    ap.add_argument("--port", type=int, default=PORT, help=f"WS/HTTP のポート（既定 {PORT}）")
+    ap.add_argument("--port", type=int, default=PORT,
+                    help=f"WS/HTTP のポート（既定 {PORT}）")
     ap.add_argument("--max-speed", type=float, default=3.0)
     ap.add_argument("--max-steer", type=float, default=1.047)
     args = ap.parse_args()
@@ -348,14 +354,15 @@ def main() -> int:
 
     children = [Child("io", io),
                 Child("tele", ["raspi.nodes.telemetry_node", "--no-camera",
-                              "--port", str(args.port)])]
+                               "--port", str(args.port)])]
     # 自動運転（§8）。**engage は GUI の自動運転タブから人間が行う**ので、
     # 上げておくだけでは車は動かない（`--mode` も渡さない）
     if not args.no_planning:
         children.append(Child("plan", ["raspi.nodes.planning_node", "--quiet"],
                               essential=False))
     if not args.no_gui:
-        children.append(Child("gui", ["sim.gui"], essential=False, window=True))
+        children.append(
+            Child("gui", ["sim.gui"], essential=False, window=True))
 
     url = f"http://localhost:{args.port}/"
     if wait_port(args.port):

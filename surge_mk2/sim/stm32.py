@@ -283,6 +283,16 @@ class VirtualStm32:
 
     def _telemetry(self, t_ns: int) -> packets.Telemetry:
         v = self.vehicle
+        p = self.params
+        # ★ オドメトリと IMU の誤差。**ここを 0 にすると推測航法が完璧になり、
+        #   SLAM を入れる意味がシミュレータ上で消える**（`sim/params.py` 参照）。
+        #   距離は倍率誤差（車輪半径の未実測ぶん）＋ノイズ、ヨーレートは bias（方位ドリフトの正体）
+        odom = [d * (1.0 + p.odom_scale_err)
+                + (self.rng.gauss(0.0, p.odom_noise_m) if p.odom_noise_m > 0 else 0.0)
+                for d in v.odom_front]
+        yaw_rate = v.yaw_rate + math.radians(
+            p.gyro_bias_dps
+            + (self.rng.gauss(0.0, p.gyro_noise_dps) if p.gyro_noise_dps > 0 else 0.0))
         load = abs(v.speed) / 3.0                       # 0..1 の目安
         torque = v.cmd.target_torque if v.cmd.torque_mode else load * 0.05
         cur = torque / max(1e-3, self.spec.wheel_radius) * 0.5
@@ -294,11 +304,11 @@ class VirtualStm32:
             t_us=self.stm_us(t_ns),
             flags=self._flags(),
             speed=_q("speed", v.speed, -32768, 32767),
-            yaw_rate=_q("yaw_rate", v.yaw_rate, -32768, 32767),
+            yaw_rate=_q("yaw_rate", yaw_rate, -32768, 32767),
             steer_actual=_q("steer_actual", v.steer_actual, -32768, 32767),
             steer_cmd_echo=_q("steer_cmd_echo", self._steer_cmd_echo, -32768, 32767),
             wheel_speed=[_q("wheel_speed", w, -32768, 32767) for w in v.wheel_speed],
-            odom_dist=[_q("odom_dist", d, -(1 << 31), (1 << 31) - 1) for d in v.odom_front],
+            odom_dist=[_q("odom_dist", d, -(1 << 31), (1 << 31) - 1) for d in odom],
             accel_x=_q("accel_x", v.accel_x, -32768, 32767),
             accel_y=_q("accel_y", v.accel_lateral, -32768, 32767),
             accel_z=_q("accel_z", 9.81, -32768, 32767),

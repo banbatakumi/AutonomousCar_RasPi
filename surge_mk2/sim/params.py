@@ -37,6 +37,18 @@ class SimParams:
     us_noise_sigma_m: float = 0.005
     us_max_range_m: float = 4.0
 
+    # ── オドメトリと IMU ──
+    #: **ここが 0 だと推測航法が完璧になり、SLAM は必ず「悪化」する。**
+    #: 実車では車輪半径もギア比も未実測（`architecture.md` §15 の #2/#3）なので、
+    #: 距離には必ず倍率の誤差が乗る。SLAM が仕事をしているかを見るには要る
+    odom_scale_err: float = 0.01           #: 走行距離の倍率誤差（1.0 からのずれ）
+    odom_noise_m: float = 0.0005           #: 1周期あたりの距離ノイズ σ [m]
+    #: ヨーレートのバイアス [°/s]。**これが方位ドリフトの正体。**
+    #: `architecture.md` §15「地磁気センサが無いので方位ドリフト 1°/min」に合わせ、
+    #: 既定 0.02°/s ≒ 1.2°/min
+    gyro_bias_dps: float = 0.02
+    gyro_noise_dps: float = 0.3            #: ヨーレートのランダムノイズ σ [°/s]
+
     # ── リンク ──
     #: フレームのバイトを化けさせる確率（1バイトあたり）。CRC エラーの表示確認用。
     #: 既定 0 ＝ 完全な回線。0 でないと「CRC エラー 0 が正常」の判定ができなくなる
@@ -70,6 +82,10 @@ TUNABLES: tuple[Tunable, ...] = (
     Tunable("lidar_delay_ms", "LIDAR", "delay", 0.0, 100.0, 1.0, "{:.0f} ms"),
     Tunable("lidar_delay_jitter_ms", "LIDAR", "jitter", 0.0, 50.0, 1.0, "{:.0f} ms"),
     Tunable("lidar_max_range_m", "LIDAR", "max range", 1.0, 12.0, 0.5, "{:.1f} m"),
+    Tunable("odom_scale_err", "ODOM", "距離の倍率誤差", -0.05, 0.05, 0.005, "{:+.1%}"),
+    Tunable("odom_noise_m", "ODOM", "距離ノイズ", 0.0, 0.005, 0.0002, "{:.4f} m"),
+    Tunable("gyro_bias_dps", "ODOM", "ジャイロ bias", -0.2, 0.2, 0.005, "{:+.3f} °/s"),
+    Tunable("gyro_noise_dps", "ODOM", "ジャイロ noise", 0.0, 2.0, 0.05, "{:.2f} °/s"),
     Tunable("uart_bit_error_rate", "LINK", "bit error", 0.0, 1e-3, 1e-5, "{:.1e}"),
     Tunable("stm_clock_ppm", "LINK", "clock drift", -20000, 20000, 100, "{:.0f} ppm"),
 )

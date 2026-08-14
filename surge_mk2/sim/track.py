@@ -85,11 +85,21 @@ def centerline(path: list, x: float, y: float, yaw: float,
 
 
 def rasterize(pts: np.ndarray, width: float, resolution: float,
-              margin: float = 0.4) -> tuple[np.ndarray, tuple[float, float]]:
+              margin: float = 0.4, divider: list | None = None,
+              divider_width: float = 0.06) -> tuple[np.ndarray, tuple[float, float]]:
     """中心線 → 占有格子。**全部壁で埋めてから円盤で掘る。**
+
+    :param divider: 分離帯を置く区間の並び `[[s0, s1], ...]`（中心線に沿った
+        弧長 [m]）。コースを平行に2分割する薄い壁を、掘ったあとに立て直す
+    :param divider_width: 分離帯の厚み [m]
 
     :returns: (grid, origin)。grid は bool で True = 壁。行0 が y 最小
         （`sim/course.py` の規約に合わせる）
+
+    ## 分離帯は「掘ってから立てる」
+
+    先に立ててから掘ると円盤に削り取られる。順序を逆にすることで、
+    **道幅ぶん掘った中に細い壁が残る**（＝車線が2本になる）。
     """
     half = width / 2.0
     xs, ys = pts[:, 0], pts[:, 1]
@@ -107,6 +117,18 @@ def rasterize(pts: np.ndarray, width: float, resolution: float,
     rows = np.round((ys - y0) / resolution).astype(np.int64)
     for c, rw in zip(cols, rows):
         grid[rw - r:rw + r + 1, c - r:c + r + 1] &= ~disc
+
+    if divider:
+        # 中心線に沿った弧長。**始点からの距離**で区間を指定する
+        seg = np.hypot(*np.diff(pts[:, :2], axis=0).T)
+        arc = np.concatenate([[0.0], np.cumsum(seg)])
+        dr = max(1, int(round(divider_width / 2.0 / resolution)))
+        yy, xx = np.mgrid[-dr:dr + 1, -dr:dr + 1]
+        dot = (xx * xx + yy * yy) <= dr * dr
+        for a, b in divider:
+            m = (arc >= float(a)) & (arc <= float(b))
+            for c, rw in zip(cols[m], rows[m]):
+                grid[rw - dr:rw + dr + 1, c - dr:c + dr + 1] |= dot
     return grid, (x0, y0)
 
 
@@ -115,6 +137,16 @@ def build(meta: dict) -> dict:
 
     閉ループを宣言しているのに始点と終点が合っていなければ**警告する**。
     黙って繋げると、繋ぎ目に細い壁が残って「なぜかそこで必ず止まる」になる。
+
+    ## `divider`（分離帯）
+
+    `"divider": [[s0, s1], ...]` でコースを平行に2分割する薄い壁を立てられる
+    （単位は中心線に沿った弧長 [m]）。実車のコースに「ある場合がある」ため。
+
+    **これがあると走れる幅が半分になる。** 道幅 0.9m なら車線は 0.45m で、
+    車体半幅 0.095m×2 と余裕を引くと振れ幅は 8cm しか残らない。地図の分解能が
+    そのまま経路の質に効く領域なので、`raspi/auto/raceline.py` の `MAP_RES` は
+    ここに合わせて 2.5cm にしてある。
     """
     res = float(meta.get("resolution", 0.02))
     width = float(meta.get("width", 1.0))
@@ -130,7 +162,9 @@ def build(meta: dict) -> dict:
             print(f"!! loop=true だが始点と終点が合っていない: "
                   f"位置 {gap:.2f}m / 向き {math.degrees(dth):.0f}° ずれ（{meta.get('name', '')}）")
 
-    grid, origin = rasterize(pts, width, res, float(meta.get("margin", 0.4)))
+    grid, origin = rasterize(pts, width, res, float(meta.get("margin", 0.4)),
+                             divider=meta.get("divider"),
+                             divider_width=float(meta.get("divider_width", 0.06)))
 
     start = meta.get("start")
     if start is None:
