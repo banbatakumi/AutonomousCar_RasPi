@@ -29,6 +29,7 @@ from .types import (
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
     TOPIC_TYPES,
+    TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
     AutoCtrl,
     AutoMap,
@@ -40,16 +41,18 @@ from .types import (
     LogCtrl,
     MsgBase,
     Scan,
+    UiEvent,
     VehicleState,
     type_for_topic,
 )
 
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
-    "Heartbeat", "LogCtrl", "AutoCtrl", "AutoState", "AutoMap",
+    "Heartbeat", "LogCtrl", "AutoCtrl", "AutoState", "AutoMap", "UiEvent",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX", "TOPIC_LOG_CTRL",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
+    "TOPIC_UI_EVENT",
     "TOPIC_TYPES", "type_for_topic",
     "StateBuilder", "ScanAssembler", "decode_flags", "command_from_cmd",
     "DISARM_COMMAND", "FAULT_FLAGS", "SPEED_DEADBAND_MPS", "LIDAR_C_SATURATED_M",

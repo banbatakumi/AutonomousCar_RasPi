@@ -31,10 +31,11 @@ import msgspec
 
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
-    "Heartbeat", "AutoCtrl", "AutoState", "AutoMap",
+    "Heartbeat", "AutoCtrl", "AutoState", "AutoMap", "UiEvent",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
+    "TOPIC_UI_EVENT",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -57,6 +58,10 @@ TOPIC_AUTO_CMD = "auto/cmd"
 TOPIC_AUTO_STATE = "auto/state"
 #: 地図と経路。**変わったときだけ**流れる（`AutoMap` の docstring）
 TOPIC_AUTO_MAP = "auto/map"
+
+#: GUI 側の単発イベント（例: `/ws/control` への新規接続）。telemetry_node が
+#: 出し、io_node が拾ってブザーのメロディ（起動音とは別の音形）を鳴らす
+TOPIC_UI_EVENT = "ui/event"
 
 
 class MsgBase(msgspec.Struct):
@@ -427,6 +432,18 @@ class AutoMap(MsgBase):
     raceline_v: list[float] = msgspec.field(default_factory=list)
 
 
+class UiEvent(MsgBase):
+    """GUI 側の単発イベント。**「現在の意思」ではなく「今起きたこと」**なので、
+    `AutoCtrl` のように繰り返し流さず1回だけ publish する。
+
+    受け手（io_node）は継承元 `MsgBase.seq`（`Publisher` が自動で振る通し番号）
+    が前回より増えていたら「新しいイベント」と判断する。専用のカウンタを
+    別途持たなくて済む。
+    """
+
+    kind: str = ""                         #: 例: "gui_connect"
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -442,6 +459,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_AUTO_CMD: DriveCmd,
     TOPIC_AUTO_STATE: AutoState,
     TOPIC_AUTO_MAP: AutoMap,
+    TOPIC_UI_EVENT: UiEvent,
 }
 
 

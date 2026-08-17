@@ -107,7 +107,7 @@ from websockets.http11 import Response  # noqa: E402
 from raspi.auto import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl  # noqa: E402
+from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
@@ -120,6 +120,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_REAR,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
+    TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
 )
 
@@ -360,6 +361,9 @@ class TelemetryServer:
 
     async def _control_channel(self, ws) -> None:
         self.control_clients.add(ws)
+        # **GUI が繋がった合図。** io_node が拾ってブザーで接続音を鳴らす
+        # （起動音・STM32 の起動音とは別の音形。`raspi/io/gpio.py` 参照）
+        self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="gui_connect"))
         await self._send_json(ws, self._control_status())
         try:
             async for raw in ws:

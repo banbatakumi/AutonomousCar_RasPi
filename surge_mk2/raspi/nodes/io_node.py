@@ -56,14 +56,23 @@ from raspi.io.gpio import (  # noqa: E402
     PIN_HEARTBEAT,
     PIN_LED_GREEN,
     PIN_LED_RED,
+    MELODY_BOOT,
+    MELODY_GUI_CONNECT,
+    Buzzer,
     Heartbeat,
     Indication,
     StatusIndicator,
     open_output,
+    open_tone,
 )
 from raspi.io.serial_link import SerialLink  # noqa: E402
 from raspi.msgs import DriveCmd, Heartbeat as HbMsg, command_from_cmd  # noqa: E402
-from raspi.msgs.types import TOPIC_CMD, TOPIC_HB_PREFIX, TOPIC_LOG_CTRL  # noqa: E402
+from raspi.msgs.types import (  # noqa: E402
+    TOPIC_CMD,
+    TOPIC_HB_PREFIX,
+    TOPIC_LOG_CTRL,
+    TOPIC_UI_EVENT,
+)
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
@@ -103,6 +112,7 @@ class IoNode:
                  log_meta: dict | None = None,
                  heartbeat: Heartbeat | None = None,
                  indicator: StatusIndicator | None = None,
+                 buzzer: Buzzer | None = None,
                  pub=None, sub=None, *,
                  allow_arm: bool = False,
                  max_speed: float = DEFAULT_MAX_SPEED,
@@ -118,11 +128,16 @@ class IoNode:
         self.sync = self.tracker.sync
         self.heartbeat = heartbeat
         self.indicator = indicator
+        #: GUI 接続音などのメロディ再生に使う。`indicator` の内部（`StatusIndicator.buzzer`）
+        #: と同じ物理ブザーを指す（`--no-leds` なら両方 None）
+        self.buzzer = buzzer
         self.pub = pub
         self.sub = sub
         self.allow_arm = allow_arm
         self.max_speed = max_speed
         self.max_steer = max_steer
+        #: `ui/event` の既知の `seq`。これより大きければ「新しいイベント」
+        self._ui_event_seq = 0
 
         #: 直近に受け取った走行指令と、その受信時刻。**古くなったら使わない**
         self.cmd: DriveCmd | None = None
@@ -297,7 +312,7 @@ class IoNode:
             accel_limit=0, steer_rate_limit=0, brake_torque=0))
 
     def _recv_cmd(self, now_ns: int) -> None:
-        """バスから走行指令と `.sfl` 記録の意思（`log/ctrl`）を取り込む。"""
+        """バスから走行指令・`.sfl` 記録の意思（`log/ctrl`）・GUI イベントを取り込む。"""
         if self.sub is not None:
             for topic, msg in self.sub.poll(0):
                 if topic == TOPIC_CMD:
@@ -305,11 +320,21 @@ class IoNode:
                     self._cmd_ns = now_ns
                 elif topic == TOPIC_LOG_CTRL:
                     self._set_log_active(msg.active)
+                elif topic == TOPIC_UI_EVENT:
+                    self._on_ui_event(msg)
         stale = self.cmd is None or (now_ns - self._cmd_ns) > CMD_TIMEOUT_NS
         if stale and not self.cmd_stale and self.cmd is not None:
             self.cmd_timeouts += 1
             self._log_event("cmd_timeout", {"source": self.cmd.source})
         self.cmd_stale = stale
+
+    def _on_ui_event(self, msg) -> None:
+        """`ui/event`（GUI 側の単発イベント）。`seq` が増えていなければ二重処理しない。"""
+        if msg.seq <= self._ui_event_seq:
+            return
+        self._ui_event_seq = msg.seq
+        if msg.kind == "gui_connect" and self.buzzer is not None:
+            self.buzzer.play(MELODY_GUI_CONNECT)
 
     def _send_command(self) -> None:
         """今この瞬間送るべき `COMMAND` を決めて送る。
@@ -461,7 +486,8 @@ def main() -> int:
         try:
             from raspi.bus import LATEST, Publisher, Subscriber
             pub = Publisher("io")
-            sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST})
+            sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST,
+                               TOPIC_UI_EVENT: LATEST})
             print(f"# バス配信 {pub.endpoint} "
                   f"(vehicle_state / scan / diag/link / hb/io)")
         except ImportError as e:
@@ -503,13 +529,22 @@ def main() -> int:
         # ベンチ診断で E-Stop をラッチさせたくないときはこちら
         print("# ハートビート無効（ベンチ診断用）。STM32 は未接続扱いのまま")
 
+    buzzer = None
     if not args.no_leds:
-        pins = [open_output(p) for p in (PIN_LED_GREEN, PIN_LED_RED, PIN_BUZZER)]
-        if any(p is not None for p in pins):
-            indicator = StatusIndicator(*pins)
+        green_pin = open_output(PIN_LED_GREEN)
+        red_pin = open_output(PIN_LED_RED)
+        tone_dev = open_tone(PIN_BUZZER)
+        if tone_dev is not None:
+            buzzer = Buzzer(tone_dev)
+        if any(p is not None for p in (green_pin, red_pin, buzzer)):
+            indicator = StatusIndicator(green_pin, red_pin, buzzer)
+        if buzzer is not None:
+            # 起動音。STM32 側（C5→E5→G5 の上昇）と被らない下降アルペジオ
+            buzzer.play(MELODY_BOOT)
+            print(f"# 起動音 GPIO{PIN_BUZZER}")
 
     node = IoNode(link, log=log, log_meta=log_meta, heartbeat=heartbeat,
-                  indicator=indicator, pub=pub, sub=sub, allow_arm=args.allow_arm,
+                  indicator=indicator, buzzer=buzzer, pub=pub, sub=sub, allow_arm=args.allow_arm,
                   max_speed=args.max_speed, max_steer=args.max_steer)
 
     def _shutdown(*_):

@@ -52,6 +52,8 @@ __all__ = [
     "PIN_HEARTBEAT", "PIN_LED_GREEN", "PIN_LED_RED", "PIN_BUZZER",
     "FakePin", "GpiozeroPin", "open_output",
     "Heartbeat", "HeartbeatStats", "Indication", "StatusIndicator",
+    "MELODY_BOOT", "MELODY_GUI_CONNECT",
+    "FakeTone", "GpiozeroTone", "open_tone", "Buzzer",
 ]
 
 PIN_HEARTBEAT = 6
@@ -116,6 +118,160 @@ def open_output(gpio: int, initial: bool = False):
         return GpiozeroPin(gpio, initial)
     except Exception:
         return None
+
+
+# ── メロディ再生（起動音・GUI 接続音） ────────────────────────────────
+#
+# GPIO18 はパッシブ圧電ブザーで、周波数を変えて音程を出せる（`robotcar` の
+# 実装と同じ配線）。STM32 の起動音（C5→E5→G5 の上昇アルペジオ）と被らない
+# よう、Pi 側は音形をはっきり変えてある。
+
+#: 1音 = (音名, 音の長さ[ms], 次の音までの無音[ms])
+Note = tuple[str, int, int]
+
+#: 起動音。STM32 側（上昇）と対になる**下降**アルペジオにして、
+#: 「どちらが鳴ったか」を音の向きだけで聞き分けられるようにしてある
+MELODY_BOOT: tuple[Note, ...] = (
+    ("G5", 100, 20),
+    ("E5", 100, 20),
+    ("C5", 200, 0),
+)
+
+#: GUI 接続音。起動音とも STM32 とも別の音形（高い2音）にしてある
+MELODY_GUI_CONNECT: tuple[Note, ...] = (
+    ("A5", 90, 30),
+    ("C6", 220, 0),
+)
+
+
+class FakeTone:
+    """音の出ない環境（Mac・テスト）用。再生要求を記録するだけ。"""
+
+    __slots__ = ("played", "closed")
+
+    def __init__(self) -> None:
+        self.played: list[str | None] = []   # None は stop()
+        self.closed = False
+
+    def play(self, tone) -> None:
+        self.played.append(str(tone))
+
+    def stop(self) -> None:
+        self.played.append(None)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class GpiozeroTone:
+    """gpiozero の `TonalBuzzer` をこのモジュールの形に合わせる薄い層。
+
+    `TonalBuzzer` の既定は `mid_tone=A4, octaves=1`＝**A3〜A5（220〜880Hz）まで
+    しか鳴らせない**。`MELODY_GUI_CONNECT` の C6（約1047Hz）がこれを超えて
+    `ValueError` になったため、`octaves=2`（A2〜A6）に広げてある。
+    """
+
+    __slots__ = ("_dev",)
+
+    def __init__(self, gpio: int) -> None:
+        from gpiozero import TonalBuzzer
+        self._dev = TonalBuzzer(gpio, octaves=2)
+
+    def play(self, tone) -> None:
+        self._dev.play(tone)
+
+    def stop(self) -> None:
+        self._dev.stop()
+
+    def close(self) -> None:
+        try:
+            self._dev.close()
+        except Exception:
+            pass
+
+
+def open_tone(gpio: int = PIN_BUZZER):
+    """トーン出力（周波数可変）を開く。開けなければ `None`（メロディ無しで動き続ける）。"""
+    try:
+        return GpiozeroTone(gpio)
+    except Exception:
+        return None
+
+
+class Buzzer:
+    """ブザー1個を、`StatusIndicator` の単発ビープとメロディ再生の両方から使い回す。
+
+    ハードウェアは GPIO18 に1個しか無く、E-Stop/FAULT の単発ビープ
+    （`StatusIndicator` が `write(bool)` で叩く）と起動音・GUI接続音の
+    メロディ（`play()`）が同じデバイスを取り合う。両方が同時に鳴ることは
+    まず無いが、鳴れば安全側（単発ビープ）を優先してメロディを打ち切る。
+
+    `write()` は `StatusIndicator.update()` から**毎フレーム**呼ばれる
+    （状態が変わっていなくても）。呼ばれるたびに `_dev` を叩くと、
+    再生中のメロディのスレッドと数十〜100Hz で衝突して音が壊れるため、
+    **状態が実際に変化した時だけ**叩く。
+    """
+
+    #: 単発ビープの音程（E-Stop/FAULT 用）
+    BEEP_TONE = "A4"
+    #: 起動直後、初めてこのブザーを鳴らす前に置く無音時間 [s]。
+    #: GPIO18 は STM32 と共有の1本線で、電源投入直後はまだ落ち着いていないことがあり、
+    #: 一番最初の発音にパチパチとしたノイズが乗ることがある（実機で確認）。
+    #: 1回だけ待てば以降は安定して鳴るので、初回だけ短く待つ
+    SETTLE_S = 0.15
+
+    def __init__(self, tone_dev) -> None:
+        self._dev = tone_dev
+        self._beep_on = False
+        self._gen = 0
+        self._primed = False
+
+    def _prime(self) -> None:
+        if not self._primed:
+            self._primed = True
+            time.sleep(self.SETTLE_S)
+
+    # ── StatusIndicator 互換（固定音の on/off） ──
+
+    def write(self, value: bool) -> None:
+        if value == self._beep_on:
+            return
+        self._beep_on = value
+        self._gen += 1               # 鳴らす方を優先し、再生中のメロディを打ち切る
+        if value:
+            # **ここでは `_prime()` を呼ばない。** メインループのスレッドから
+            # 同期で呼ばれるため、初回待ちで `write()` を塞ぐと COMMAND 送信が
+            # 遅れる。通常は起動音（別スレッド）が先に済ませているので実害は無い
+            self._dev.play(self.BEEP_TONE)
+        else:
+            self._dev.stop()
+
+    # ── メロディ ──
+
+    def play(self, melody) -> None:
+        """メロディを非同期に鳴らす。再生中に別の要求が来たら、その場で乗り換える。"""
+        self._gen += 1
+        gen = self._gen
+        threading.Thread(target=self._run, args=(melody, gen), daemon=True).start()
+
+    def _run(self, melody, gen: int) -> None:
+        self._prime()
+        for name, dur_ms, gap_ms in melody:
+            if gen != self._gen:
+                return
+            self._dev.play(name)
+            time.sleep(dur_ms / 1000)
+            if gen != self._gen:
+                return
+            self._dev.stop()
+            if gap_ms:
+                time.sleep(gap_ms / 1000)
+
+    def close(self) -> None:
+        try:
+            self._dev.close()
+        except Exception:
+            pass
 
 
 # ── ハートビート ────────────────────────────────────────────────────────
