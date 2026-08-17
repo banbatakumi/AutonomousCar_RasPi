@@ -4,7 +4,7 @@
  * **20Hz で変わるものはここに入れない。** 接続状態・操縦権・設定の類だけ。
  */
 import { create } from 'zustand'
-import type { AutoStatus, ControlStatus, LogFile } from '../types'
+import type { AutoStatus, ControlStatus, FanStatus, LogFile } from '../types'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
 
@@ -302,6 +302,12 @@ type UiState = {
    */
   auto: AutoStatus | null
 
+  /**
+   * Pi5純正ファンの意思。**サーバが真値なのでここでは編集しない。**
+   * 押した結果は `status` のブロードキャストで返ってくる（`ws/control.ts` の `setFan`）。
+   */
+  fan: FanStatus | null
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -344,6 +350,7 @@ export const useUi = create<UiState>((set, get) => ({
   mcap: null,
   logFiles: [],
   auto: null,
+  fan: null,
 
   set: (p) => set(p),
   setSettings: (p) => {

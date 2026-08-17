@@ -3,7 +3,8 @@
  *
  * ## 何を操作でき、何を「見る」だけにしてあるか
  *
- * - **灯火モードはここで設定する。** 「状態」なので、クリックで変えても取り残しが起きない
+ * - **灯火モードはタブ行の `DriveControls` へ移設した**（2026-08-17）。ラジコンタブの
+ *   `RcBar` にも同じトグルが重複していたため、1箇所（タブ行、運転できるタブ共通）に統合した
  * - **ブレーキ強さは設定パネルに移した**（2026-08-10）。最高速度などと同じ「一度決めたら
  *   基本触らない」チューニング値として扱う。ここには実際に効いている量だけ出す
  *   （設定パネルは 2026-08-11 にタブからラジコンタブの ⚙ ドロワーへ移動した）
@@ -25,7 +26,7 @@
  * ここが 0 のままならブレーキが効いていない。
  */
 import { useNumbers } from '../bus/live'
-import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
+import { useUi } from '../store/ui'
 
 export function AuxPanel() {
   const n = useNumbers()
@@ -38,21 +39,6 @@ export function AuxPanel() {
 
   return (
     <div className="aux">
-      <section className="aux-lights">
-        <span className="label">灯火</span>
-        <div className="seg">
-          {LIGHT_CYCLE.map((m) => (
-            <button
-              key={m}
-              className={ui.lightMode === m ? 'on' : ''}
-              onClick={() => ui.set({ lightMode: m })}
-            >
-              {LIGHT_LABEL[m]}
-            </button>
-          ))}
-        </div>
-      </section>
-
       <section className="aux-brake">
         <span className="label">ブレーキ実トルク</span>
         <div className="aux-row">

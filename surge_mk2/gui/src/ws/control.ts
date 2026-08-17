@@ -124,6 +124,16 @@ export class ControlChannel {
     this.send({ type: 'auto', clear_map: true })
   }
 
+  // ── ファン（Pi5純正クーリング） ──
+
+  /**
+   * 自動/手動と、手動時のデューティ。**両方省略できる**（送った項目だけ効く）。
+   * `auto` と同じく、状態はサーバが真値。GUI側では持たない。
+   */
+  setFan(p: { mode?: 'auto' | 'manual'; duty?: number }) {
+    this.send({ type: 'fan', ...p })
+  }
+
   // ── 記録・再生 ──
 
   /** `.sfl` の記録意思を送る。実際に開閉するのは io_node（`log/ctrl` 経由） */

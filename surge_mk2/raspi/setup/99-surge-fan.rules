@@ -1,0 +1,11 @@
+# SURGE Mk.2 — Pi5純正ファン(pwm-fan)を pi ユーザー(gpioグループ)から書けるようにする。
+#
+# `raspi/io/fan.py`（surge-telemetry, User=pi で動く）が
+# /sys/class/hwmon/hwmonN/pwm1 系を直接読み書きしてファンの自動/手動デューティを
+# 切り替える。既定では root:root 644 で pi から書けない（実機で確認済み、2026-08-17）。
+#
+# `install_services.sh` が /etc/udev/rules.d/ にコピーして適用する。手で入れる場合は:
+#   sudo cp raspi/setup/99-surge-fan.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=hwmon
+SUBSYSTEM=="hwmon", ATTR{name}=="pwmfan", RUN+="/bin/chgrp gpio /sys%p/pwm1 /sys%p/pwm1_enable", RUN+="/bin/chmod 664 /sys%p/pwm1 /sys%p/pwm1_enable"

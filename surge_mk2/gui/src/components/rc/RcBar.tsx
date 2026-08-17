@@ -34,16 +34,20 @@
  * ブレーキ）は介入ランプの列に吸収した。** マウスで押しっぱなしにするボタンは
  * 置かない — カーソルが外れた瞬間に取り残されると、クラクションが鳴りっぱなしになる
  * （`AuxPanel.tsx` 冒頭の議論と同じ理由）。
+ *
+ * ## 灯火はタブ行へ移設した（2026-08-17）
+ *
+ * 自動運転タブ（`AuxPanel`）にも同じ灯火トグルが重複していたため、
+ * `components/DriveControls.tsx` に統合し、`App.tsx` のタブ行（運転できるタブの
+ * ときだけ）に1つだけ置くようにした。ファンの自動/手動もそこに同居する。
  */
 import { useNumbers } from '../../bus/live'
-import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../../store/ui'
 import { AssistLamps } from './AssistLamps'
 import { DrivePanel } from './DrivePanel'
 import { TempPanel } from './TempPanel'
 
 export function RcBar() {
   const n = useNumbers()
-  const ui = useUi()
   const vs = n.vs
 
   return (
@@ -58,26 +62,6 @@ export function RcBar() {
         <div className="kv">
           <span>走行距離</span>
           <b>{vs ? `${vs.odom_center.toFixed(2)}m` : '—'}</b>
-        </div>
-      </div>
-
-      {/* 走行中に触るのは灯火だけ。**自動停止は設定パネルへ移した**（走りながら
-          切り替えるものではなく、作業の性質で決める設定のため） */}
-      <div className="rc-controls">
-        <div className="rc-ctl">
-          <span className="label">灯火</span>
-          <div className="seg">
-            {LIGHT_CYCLE.map((m) => (
-              <button
-                key={m}
-                className={ui.lightMode === m ? 'on' : ''}
-                onClick={() => ui.set({ lightMode: m })}
-                title="L キー / パッド △ でも送れる。DAY は減光（duty 0.1）"
-              >
-                {LIGHT_LABEL[m]}
-              </button>
-            ))}
-          </div>
         </div>
       </div>
     </div>

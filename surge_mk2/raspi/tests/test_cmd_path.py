@@ -252,6 +252,11 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.auto_stalls = 0
         srv._publish_auto_ctrl = lambda: None      # バスに触らせない
         srv._save_auto_conf = lambda: None         # ディスクに触らせない
+        # ファン（Pi5純正クーリング）。**engage していない既定の状態**を組む
+        from raspi.io.fan import FakeFan
+        srv._fan = FakeFan()
+        srv._fan_mode = "auto"
+        srv._fan_duty = 0.5
         srv.sent = []
 
         async def _send_json(ws, obj):

@@ -80,7 +80,9 @@ case "${1:-}" in
   --remove)
     systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service
+    rm -f /etc/udev/rules.d/99-surge-fan.rules
     systemctl daemon-reload
+    udevadm control --reload-rules 2>/dev/null || true
     # 節電のために切ったものを元に戻す（下の「節電」節を参照）
     systemctl enable --now bluetooth 2>/dev/null || true
     echo "削除した"
@@ -254,6 +256,13 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+
+# Pi5純正ファン（`raspi/io/fan.py`）を pi ユーザーから書けるようにする udev ルール。
+# 既定では root:root 644 で書けない（実機で確認済み、2026-08-17）。`--safe` でも要る
+# （ファンの手動制御と ARM 封印は無関係なため）
+cp "$ROOT/raspi/setup/99-surge-fan.rules" /etc/udev/rules.d/99-surge-fan.rules
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=hwmon
 
 systemctl daemon-reload
 systemctl enable --now "${UNITS[@]}" surge-logclean.timer

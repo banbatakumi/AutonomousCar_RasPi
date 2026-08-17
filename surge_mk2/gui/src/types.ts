@@ -254,6 +254,17 @@ export type Snapshot = {
   pi_temp_c: number | null
 }
 
+/** Pi5純正クーリングファンの状態。**サーバが真値**（`ws/control.ts` の `setFan`）。 */
+export type FanStatus = {
+  mode: 'auto' | 'manual'
+  /** 手動時の目標値 [0.0-1.0] */
+  duty: number
+  /** この機体で手動デューティ制御が使えるか。false なら手動UIを無効化する */
+  available: boolean
+  /** 実測回転数。取得できなければ null */
+  rpm: number | null
+}
+
 /** `/ws/control` のサーバ → GUI。 */
 export type ControlStatus = {
   type: 'status'
@@ -273,6 +284,8 @@ export type ControlStatus = {
   mcap: { active: boolean; elapsed_s: number; error: string | null }
   /** 自動運転の意思と、選べるモードの宣言。**サーバが真値** */
   auto: AutoStatus
+  /** Pi5純正ファンの意思。**サーバが真値** */
+  fan: FanStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */

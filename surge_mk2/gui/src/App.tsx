@@ -13,6 +13,7 @@
  * Phase 3 で、自動運転ビューの中に入れるか独立させるかを決め直す。
  */
 import { useEffect, useRef, useState } from 'react'
+import { DriveControls } from './components/DriveControls'
 import { StatusBar } from './components/StatusBar'
 import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
@@ -57,6 +58,7 @@ export function App() {
           sfl: s.sfl,
           mcap: s.mcap,
           auto: s.auto,
+          fan: s.fan,
         }),
       onDenied: (holder) => set({ deniedBy: holder, hasControl: false }),
       onRtt: (v) => set({ wsRttMs: v }),
@@ -87,7 +89,12 @@ export function App() {
           </button>
         ))}
         <div className="spacer" />
-        {DRIVING_TABS.includes(tab) && <DriveHint />}
+        {DRIVING_TABS.includes(tab) && (
+          <>
+            <DriveControls ch={ch} />
+            <DriveHint />
+          </>
+        )}
       </nav>
 
       {tab === 'ラジコン' ? (

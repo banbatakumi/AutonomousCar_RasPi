@@ -147,6 +147,8 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   flex: 0 0 auto;
 }
 .hint { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+/* 灯火・ファン（DriveControls.tsx）。運転できるタブのときだけ `.hint` の隣に出る */
+.drive-controls { display: flex; align-items: center; gap: 12px; }
 .badge-live {
   background: #4a3a08;
   border: 1px solid #8a6d13;
@@ -658,11 +660,13 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 /* 受信が途絶したら計器を沈める。**古い値を現在値に見せない**（.drivebar と同じ） */
 .rcpanel.stale { opacity: .45; }
 
-/* 灯火と自動停止だけを残す。**押しっぱなし系はランプに逃がした**（RcBar.tsx 参照） */
-.rc-controls { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+/* 灯火・ファン共通の操作トグル（DriveControls.tsx、タブ行）。 */
 .rc-ctl { display: flex; align-items: center; gap: 7px; }
 .rc-ctl .label { color: var(--dim); font-size: 11px; }
 .rc-ctl .seg { margin-top: 0; }
+.rc-fan-duty { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
+.rc-fan-duty b { font-variant-numeric: tabular-nums; min-width: 2.6em; text-align: right; color: var(--dim); }
+.rc-fan-rpm { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; margin-left: 4px; }
 
 /*
  * `.meter` は縦並び：ダイヤル（`flex:1`、伸縮する）＋ その下の数字（自然な高さ）。

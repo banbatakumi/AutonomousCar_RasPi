@@ -107,6 +107,7 @@ from websockets.http11 import Response  # noqa: E402
 from raspi.auto import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
+from raspi.io.fan import open_fan  # noqa: E402
 from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -242,6 +243,15 @@ class TelemetryServer:
         self.auto_stalls = 0
         self._auto_was_fresh = True
         self._load_auto_conf()
+
+        # ── ファン（Pi5純正クーリング） ──
+        #: **永続化しない。** Pi再起動をまたいで前回の手動固定値のまま
+        #: 気づかず発熱し続ける事故を防ぐため、必ず自動から起動する
+        self._fan = open_fan()
+        self._fan_mode = "auto"
+        self._fan_duty = 0.5
+        # 前回異常終了で手動固定のまま残っていた場合の保険
+        self._fan.set_auto()
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -458,6 +468,12 @@ class TelemetryServer:
             self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
             await self._broadcast_control_status()
 
+        # ── ファン（誰でも操作できる。灯火と同じ「状態」トグル） ──
+
+        elif kind == "fan":
+            self._on_fan(m)
+            await self._broadcast_control_status()
+
         elif kind == "ping":
             await self._send_json(ws, {"type": "pong", "id": m.get("id"),
                                        "t_server": time.monotonic_ns()})
@@ -561,6 +577,35 @@ class TelemetryServer:
         except Exception:
             pass                           # 保存できなくても走行は続けられるべき
 
+    # ── ファン（Pi5純正クーリング） ──
+
+    def _on_fan(self, m: dict) -> None:
+        """`{"type":"fan", "mode"?: "auto"|"manual", "duty"?: number}`。両方省略可。
+
+        `_on_auto()` と同じく**サーバ側でも必ずクランプする**。実際に sysfs へ
+        反映するのはここ1箇所だけにして、判断を散らさない。
+        """
+        if "duty" in m:
+            raw = m.get("duty")
+            if isinstance(raw, (int, float)):
+                self._fan_duty = max(0.0, min(1.0, float(raw)))
+        if "mode" in m:
+            mode = str(m.get("mode") or "")
+            if mode in ("auto", "manual"):
+                self._fan_mode = mode
+        if self._fan_mode == "manual" and self._fan.available:
+            self._fan.set_manual(self._fan_duty)
+        else:
+            self._fan.set_auto()
+
+    def _fan_status(self) -> dict:
+        return {
+            "mode": self._fan_mode,
+            "duty": self._fan_duty,
+            "available": self._fan.available,
+            "rpm": self._fan.read_rpm(),
+        }
+
     def _control_status(self) -> dict:
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
         return {
@@ -580,6 +625,7 @@ class TelemetryServer:
             "sfl": {"active": self._sfl_active},
             "mcap": self._mcap_status(),
             "auto": self._auto_status(),
+            "fan": self._fan_status(),
         }
 
     def _auto_status(self) -> dict:
@@ -951,6 +997,7 @@ class TelemetryServer:
             self._auto_engaged = False
             self._publish_auto_ctrl()
             self.pub.send(TOPIC_CMD, DriveCmd(mode=0, source="shutdown"))
+            self._fan.set_auto()   # プロセスが消えても手動固定を残さない
         except Exception:
             pass
         # mcap 中継のサブプロセスも道連れにする（ベストエフォート。
