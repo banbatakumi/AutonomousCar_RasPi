@@ -250,6 +250,8 @@ export type Snapshot = {
   /** **engage していなくても流れる**（走らせる前に何をするか見られる） */
   auto: AutoState | null
   ctl: { has_controller: boolean; controller: string }
+  /** RasPi 本体（SoC）の温度 ℃。STM32側の `vs.temp` とは別枠。実機以外（シム等）では null */
+  pi_temp_c: number | null
 }
 
 /** `/ws/control` のサーバ → GUI。 */

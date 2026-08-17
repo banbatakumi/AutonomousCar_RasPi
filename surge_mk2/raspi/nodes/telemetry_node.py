@@ -161,6 +161,24 @@ _encoder = msgspec.msgpack.Encoder()
 _json_encode = msgspec.json.encode
 _json_decode = msgspec.json.decode
 
+#: RasPi 本体（SoC）の温度。カーネルがミリ℃で出している
+PI_THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
+
+
+def _read_pi_temp_c() -> float | None:
+    """RasPi 本体の CPU 温度。GUI のラジコンビュー温度計に出す（2026-08-17）。
+
+    `vcgencmd` はサブプロセス起動を挟む分だけ重く環境依存も増えるので使わない。
+    このパスは Pi 5 / Debian Trixie でも変わらず、20Hz で毎回開いても軽いので
+    キャッシュしない。**Pi 実機以外（Mac上のシムなど）ではファイルが無く None**
+    になる——STM32 側の `vs.temp` が `null = MD が無言で信用できない` を示すのと
+    同じ扱いにして、GUI 側のしきい値判定（`tempLevel()`）を1本にまとめている。
+    """
+    try:
+        return int(PI_THERMAL_ZONE.read_text().strip()) / 1000.0
+    except (OSError, ValueError):
+        return None
+
 
 # ── サーバ ──────────────────────────────────────────────────────────
 
@@ -776,6 +794,8 @@ class TelemetryServer:
             "auto": self.sub.latest.get(TOPIC_AUTO_STATE),
             "ctl": {"has_controller": self.controller is not None,
                     "controller": self.controller_name},
+            # STM32 側の温度（`vs.temp`）とは別枠。RasPi 自体は STM32 のバスに乗らない
+            "pi_temp_c": _read_pi_temp_c(),
         })
 
     async def _cmd_pump(self) -> None:

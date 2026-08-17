@@ -45,7 +45,7 @@ CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 #: 後方は下1/16だけ軽く除去する。**ISP の ScalerCrop で最初から読み出し範囲を
 #: 絞るので、余分な画素は main ストリームに出てこない**（後段でスライスして
 #: 捨てるより、共有メモリ書き込み・下流の処理・帯域がその分だけ軽くなる）
-CAM_BOTTOM_CROP = {0: 0.25, 1: 1 / 16}
+CAM_BOTTOM_CROP = {0: 1 / 3, 1: 1 / 16}
 
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの
@@ -90,7 +90,7 @@ def full_fov_sensor_size(cam, main_size: tuple[int, int]) -> tuple[int, int] | N
 
 
 def bottom_cropped(cam, size: tuple[int, int],
-                    fraction: float) -> tuple[tuple[int, int], tuple[int, int, int, int] | None]:
+                   fraction: float) -> tuple[tuple[int, int], tuple[int, int, int, int] | None]:
     """下端を `fraction` だけ切った main size と ScalerCrop を返す。
 
     **配列を受け取ってから下端をスライスするのではなく、ISP に最初から
@@ -121,7 +121,8 @@ class CamStats:
 
     def summary(self, elapsed: float) -> str:
         fps = self.frames / elapsed if elapsed > 0 else 0
-        avg_us = (self.write_ns_total / self.frames / 1000) if self.frames else 0
+        avg_us = (self.write_ns_total / self.frames /
+                  1000) if self.frames else 0
         jitter = ""
         if len(self.gaps_ms) > 2:
             g = sorted(self.gaps_ms)
@@ -153,11 +154,13 @@ class CameraWorker(threading.Thread):
         if fps:
             us = int(1e6 / fps)
             ctrl["FrameDurationLimits"] = (us, us)
-        size, crop_rect = bottom_cropped(self.cam, size, CAM_BOTTOM_CROP.get(idx, 0.0))
+        size, crop_rect = bottom_cropped(
+            self.cam, size, CAM_BOTTOM_CROP.get(idx, 0.0))
         if crop_rect:
             ctrl["ScalerCrop"] = crop_rect
         sensor_size = full_fov_sensor_size(self.cam, size)
-        cfg_kwargs = {"main": {"size": size, "format": fmt}, "buffer_count": 6, "controls": ctrl}
+        cfg_kwargs = {"main": {"size": size, "format": fmt},
+                      "buffer_count": 6, "controls": ctrl}
         if sensor_size:
             cfg_kwargs["sensor"] = {"output_size": sensor_size}
         cfg = self.cam.create_video_configuration(**cfg_kwargs)
@@ -197,7 +200,8 @@ class CameraWorker(threading.Thread):
             if not arr.flags["C_CONTIGUOUS"]:
                 arr = _contig(arr)
             t0 = time.monotonic_ns()
-            desc = self.ring.write(arr, t_capture_ns=t_cap, frame_id=max(fid, 0))
+            desc = self.ring.write(
+                arr, t_capture_ns=t_cap, frame_id=max(fid, 0))
             dt = time.monotonic_ns() - t0
         finally:
             req.release()
@@ -317,7 +321,8 @@ def main() -> int:
 
             def on_frame(desc):                              # noqa: F811
                 idx = int(desc.name[len(SHM_PREFIX):] or 0)
-                topic, role = CAM_TOPIC.get(idx, (f"image/cam{idx}", f"cam{idx}"))
+                topic, role = CAM_TOPIC.get(
+                    idx, (f"image/cam{idx}", f"cam{idx}"))
                 pub.send(topic, ImageRef(
                     t_capture=desc.t_capture_ns, cam=role,
                     shm_name=desc.name, slot=desc.slot, ring_seq=desc.seq,

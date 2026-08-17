@@ -33,6 +33,8 @@ export const live = {
   lastAutoMs: 0,
   /** ARM が自動解除されるまでの残り [ms]。20Hz で減るのでここに置く */
   armRemainingMs: 0,
+  /** RasPi 本体の CPU 温度 ℃。実機以外（シム等）では null */
+  piTempC: null as number | null,
 }
 
 /**
@@ -56,10 +58,12 @@ export function noteTelemetry(
   link: LinkDiag | null,
   scan: Scan | null,
   auto: AutoState | null,
+  piTempC: number | null = null,
 ) {
   const now = performance.now()
   if (vs) live.vs = vs
   if (link) live.link = link
+  live.piTempC = piTempC
   if (auto) {
     live.auto = auto
     live.lastAutoMs = now
@@ -116,6 +120,8 @@ export type Numbers = {
   auto: AutoState | null
   /** その判断の古さ [ms]。`Infinity` は未受信 */
   autoAgeMs: number
+  /** RasPi 本体の CPU 温度 ℃。実機以外（シム等）では null */
+  piTempC: number | null
 }
 
 let snapshot: Numbers = {
@@ -131,6 +137,7 @@ let snapshot: Numbers = {
   armRemainingMs: 0,
   auto: null,
   autoAgeMs: Infinity,
+  piTempC: null,
 }
 const listeners = new Set<() => void>()
 
@@ -149,6 +156,7 @@ setInterval(() => {
     armRemainingMs: live.armRemainingMs,
     auto: live.auto,
     autoAgeMs: live.lastAutoMs ? now - live.lastAutoMs : Infinity,
+    piTempC: live.piTempC,
   }
   for (const l of listeners) l()
 }, 1000 / NUMBERS_HZ)

@@ -267,12 +267,20 @@ type UiState = {
   /** カメラの進路ガイド。**カメラ校正前なので暫定表示** */
   pathGuide: boolean
   /**
-   * ラジコンビューで後方カメラを PIP 表示するか。
+   * ラジコンビューで左下に PIP（今メインに出ていない方のカメラ）を表示するか。
    *
-   * **切ると `CameraView` ごと外れて WS が閉じる。** 後方の JPEG が流れなくなるので、
-   * 前方のフレームレートに回せる（カメラ2台ぶんの帯域が効いている環境向け）。
+   * **切ると PIP 側の `CameraView` が外れて WS が閉じる。** 流れなくなった分、
+   * メイン映像のフレームレートに回せる（カメラ2台ぶんの帯域が効いている環境向け）。
+   *
+   * 2026-08-17: 個別ボタンは廃止。メイン映像の空いた場所をクリックすると
+   * `lidarVisible`/`pathGuide` と一緒に3つまとめて切り替わる（`RcView.tsx`）。
+   * PIP 自体のクリックは表示/非表示ではなく「メインと入れ替え」（`RcView.tsx` の `mainCam`）。
    */
   rearPip: boolean
+  /** ラジコンビューで LiDAR ミニマップ（映像右上の丸）を出すか。`rearPip` と同じ操作で連動する */
+  lidarVisible: boolean
+  /** LiDAR ミニマップを拡大表示中か。false＝映像の1/3高さ、true＝82%高さ。ミニマップ自体のクリックで切り替える */
+  lidarExpanded: boolean
 
   /** ラジコン操作の調整値。設定パネルで変更、`localStorage` に自動保存 */
   settings: DrivingSettings
@@ -327,6 +335,8 @@ export const useUi = create<UiState>((set, get) => ({
   lidarFollow: true,
   pathGuide: true,
   rearPip: true,
+  lidarVisible: true,
+  lidarExpanded: false,
 
   settings: loadSettings(),
 

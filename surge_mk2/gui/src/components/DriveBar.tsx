@@ -13,6 +13,7 @@
 import { useNumbers } from '../bus/live'
 import { useUi } from '../store/ui'
 import { deg, kmh, metres } from '../format'
+import { BiBar } from './BiBar'
 
 export function DriveBar() {
   const n = useNumbers()
@@ -91,35 +92,4 @@ function near(d: number | null | undefined): string {
   if (d < 0.25) return 'lv-bad'
   if (d < 0.5) return 'lv-warn'
   return ''
-}
-
-/** 中央 0 の両振れバー。実測を塗り、指令を線で重ねる。 */
-function BiBar({
-  value,
-  target,
-  max,
-  flip = false,
-}: {
-  value: number
-  target: number | null
-  max: number
-  flip?: boolean
-}) {
-  const clamp = (v: number) => Math.max(-1, Math.min(1, v / max))
-  // 舵角は「左が正」だが、バーは左右の見た目を合わせたいので反転させる
-  const v = clamp(value) * (flip ? -1 : 1)
-  const t = target == null ? null : clamp(target) * (flip ? -1 : 1)
-  return (
-    <div className="bibar">
-      <div className="bibar-zero" />
-      <div
-        className="bibar-fill"
-        style={{
-          left: v >= 0 ? '50%' : `${50 + v * 50}%`,
-          width: `${Math.abs(v) * 50}%`,
-        }}
-      />
-      {t != null && <div className="bibar-target" style={{ left: `${50 + t * 50}%` }} />}
-    </div>
-  )
 }

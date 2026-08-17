@@ -228,6 +228,18 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 2px 7px;
   border-radius: 4px;
 }
+/* `variant="minimal"`（ラジコンビュー）用。ラベルは出さず fps だけを隅に残す */
+.camera-fps {
+  position: absolute;
+  bottom: 5px;
+  right: 7px;
+  font-size: 10px;
+  color: var(--dim);
+  background: #0009;
+  padding: 1px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
 .cam-controls {
   position: absolute;
   right: 6px;
@@ -449,60 +461,185 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 /* ── ラジコンビュー ───────────────────────────────────── */
 
 /*
- * **操縦は前方の映像を見て行う。** 帯を下に積むと映像が縦に潰れるので、
- * 左 2/3 を映像だけに使い、右 1/3 を LiDAR（上）と計器（下）で分ける。
- * 層 C（診断）は丸ごと診断タブへ移した。
+ * GR 風「黒基調＋赤アクセント」（2026-08-17）。`.rc` の子孫だけに効く
+ * スコープ付き CSS 変数で上書きしている。**グローバルな `:root` は触らない**
+ * ——`--accent` は自動運転ビュー・診断タブなど他画面でも青のまま使われて
+ * いるため、ここで変えると意味の対応（例: 指令値の線）が食い違う。
+ * `--fg`/`--dim`/`--ok`/`--warn`/`--bad`/`--live` は安全に関わる意味色
+ * なので上書きしない。華美にならないよう、赤は彩度を落とし気味にしてある。
  */
 .rc {
+  --panel: #131013;
+  --panel2: #181415;
+  --line: #2b2224;
+  --accent: #d5303f;
+
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-  grid-template-areas:
-    'cams  lidar'
-    'cams  meters';
+  grid-template-columns: minmax(0, 4fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: 'cams meters';
   gap: 6px;
   padding: 6px;
   position: relative; /* 設定ドロワーの基準 */
   overflow: hidden;
+  background: var(--bg);
 }
 
 .rc-cams {
   grid-area: cams;
-  position: relative;
   min-height: 0;
   display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.rc-cams > .camera { flex: 1; min-width: 0; }
-/* 前方のラベルは右上へ逃がす。**左上は後方 PIP の定位置**で、重なって読めなくなる */
-.rc-cams > .camera > .camera-tag { left: auto; right: 7px; }
 
-/* バックミラー。**前方の視界を削らない大きさ**に留める（消せば WS ごと閉じる） */
+/*
+ * 映像本体（2026-08-17、指示により実寸フィットへ変更）。
+ *
+ * 以前は `flex: 1` で余った縦幅を丸ごと吸っていたため、実際のカメラ画像より
+ * ずっと縦長の箱になり、canvas の中で letterbox（上下の黒帯）が大きく空いて
+ * いた。
+ *
+ * `width`/`height` は `RcView.tsx` が `useContainFit`（`hooks/useContainFit.ts`）
+ * で実測して inline style に px で入れる。**CSS の `aspect-ratio` +
+ * `max-width`/`max-height` だけでは足りなかった**——箱の中に `flex:1` の
+ * canvas 子がいると、その子の intrinsic サイズに引っ張られて縮んだまま
+ * になる挙動を確認したため（フックのコメント参照）。比率そのものも
+ * `camera_node.py --size` の既定値からの決め打ちをやめ、`CameraView` の
+ * `onAspect` で実際に届いた画像から求めている（**実機ではセンサーが要求
+ * どおりのモードを取らず、決め打ちの比率だと箱の形がズレていた**）。
+ * ここにある `max-width`/`max-height`/`aspect-ratio` は JS が測り終わるまでの
+ * 一瞬のフォールバック。
+ *
+ * **映像は列の上に詰める**（`align-self: flex-start`、指示による）。
+ * 余った縦幅は隣の `.rc-cam-bottom` が丸ごと受け取る（`flex: 1`）。
+ *
+ * LiDAR ミニマップはこの箱の中でだけ絶対配置する。**PIP はもうここに無い**
+ * ——2026-08-17 に `.rc-cam-bottom`（メータの横）へ移した（指示による）。
+ *
+ * **クリックで PIP・LiDAR・進路ガイドを一括で表示/非表示**にする
+ * （`RcView.tsx`）。LiDAR 自身のクリックは `stopPropagation` で
+ * ここまで伝播させず、自分の拡大縮小だけを行う。
+ */
+.rc-cam-video {
+  position: relative;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 4 / 3;
+  display: flex;
+  cursor: pointer;
+}
+.rc-cam-video > .camera { flex: 1; min-width: 0; min-height: 0; cursor: default; }
+
+/*
+ * PIP とメータの段（2026-08-17、指示による新設）。
+ *
+ * **幅をメイン映像の実測幅に固定する**（`RcView.tsx` が inline style で
+ * `videoSize.width` を入れる）。映像は列の左上に詰めてあるので、この段も
+ * 同じ左端・同じ右端で揃う。PIP はここの左端、`.rc-cam-gauges`（`flex:1`）が
+ * 残りいっぱいに広がるので、**速度計は自然と「PIP の右端」と「映像の右端」の
+ * 中間に来る**——特別な座標計算をしなくても、幅の制約だけで指示どおりの
+ * 配置になる。
+ */
+.rc-cam-bottom {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+/*
+ * 舵角・速度・G メータの行（2026-08-17、指示により全面改訂）。
+ *
+ * ## 速度計を常に中央に
+ *
+ * `1fr auto 1fr` の3カラムにして、舵角（左）と G（右）を中央カラムに
+ * 寄せる（`justify-self`）。中央の速度計は auto カラムなので、左右の
+ * 中身の幅が違っても常に列の中心に来る——単純な `justify-content: center`
+ * だと左右の幅差でずれる。
+ *
+ * ## メータ自体も「都度最大の大きさ」にする
+ *
+ * `.rc-cam-bottom` の高さを、ここが `flex: 1` で丸ごと受け取る。各メータの
+ * 中身（`.meter-speed .arc` など）は `flex:1` + `aspect-ratio` で「高さ
+ * いっぱいに広がり、幅は比率から決まる」形にしてあるので、この行の高さが
+ * 変わればメータも一緒に拡大縮小する。
+ *
+ * ⚠ 3つのメータの下のテキスト量（速度計は後退警告の有無、舵角は数値のみ、
+ * G は無し）が違うぶん、ダイヤルの実サイズは厳密には揃わない。以前あった
+ * 「光学中心を揃える固定 margin-top」のハックは可変高さと相性が悪いため
+ * 廃止し、**上端揃えに割り切っている**（`SpeedGauge.tsx` 冒頭のコメント）。
+ */
+.rc-cam-gauges {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 4px 18px;
+}
+.rc-cam-gauges > .meter-steer { justify-self: end; }
+.rc-cam-gauges > .meter-speed { justify-self: center; }
+.rc-cam-gauges > .meter-g { justify-self: start; }
+
+/*
+ * PIP（`.rc-cam-bottom` 内、2026-08-17 に映像内オーバーレイから移動）。
+ *
+ * サイズは `RcView.tsx` が `dialHeight`（メータのダイヤルと同じ高さ）から
+ * inline style で決める——中に `<canvas>` を持つ replaced element なので、
+ * CSS の `flex`/`aspect-ratio` だけでは縮んだままになる罠を避けるため
+ * （`SpeedGauge.tsx` 冒頭のコメントと同じ理由）。**クリックでメインと
+ * 入れ替わる**（拡大ではない。`RcView.tsx` の `mainCam`）。
+ */
 .rc-pip {
+  flex: 0 0 auto;
+  border-radius: 5px;
+  overflow: hidden;
+  box-shadow: 0 3px 12px #000c, 0 0 0 1px var(--line);
+  cursor: pointer;
+}
+.rc-pip .camera { height: 100%; border-color: var(--line); }
+.rc-pip .camera-fps { font-size: 9px; padding: 1px 5px; }
+
+/* LiDAR ミニマップ（映像右上、指示により据え置き）。クリックで拡大縮小 */
+.rc-lidar-mini {
   position: absolute;
   top: 8px;
-  left: 8px;
+  right: 8px;
   z-index: 2;
-  width: 24%;
-  max-width: 260px;
-  min-width: 130px;
-  aspect-ratio: 4 / 3;
-  border-radius: 5px;
+  height: 33.333%;
+  min-height: 90px;
+  max-height: 220px;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
   overflow: hidden;
-  box-shadow: 0 3px 12px #000c;
+  box-shadow: 0 3px 12px #000c, 0 0 0 2px var(--accent);
+  cursor: pointer;
+  transition: height 140ms ease;
 }
-.rc-pip .camera { height: 100%; border-color: #2f3a46; }
-.rc-pip .camera-tag { font-size: 9px; padding: 1px 5px; gap: 5px; }
+/* 拡大時は縮小時と別の max-height にする。**同じ上限だと広い画面で「拡大」が効かない** */
+.rc-lidar-mini.expanded { height: 82%; max-height: 640px; }
 
-.rc-lidar {
-  grid-area: lidar;
-  position: relative;
-  background: #0b0e11;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  overflow: hidden;
-  min-height: 0;
+/* `LidarMini.tsx` の中身。円形クリップは親（`.rc-lidar-mini`）の border-radius が担う */
+.lidar-mini { position: relative; width: 100%; height: 100%; }
+.lidar-mini-canvas { width: 100%; height: 100%; display: block; }
+.lidar-mini-ng {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--bad);
+  background: #0009;
+  pointer-events: none;
 }
 
 /* 計器パネル。狭い画面では縦に溢れるので、ここだけスクロールを許す */
@@ -521,51 +658,47 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 /* 受信が途絶したら計器を沈める。**古い値を現在値に見せない**（.drivebar と同じ） */
 .rcpanel.stale { opacity: .45; }
 
-/*
- * パネル幅に応じて 2 → 1 列に折り返す。
- * **上端で揃える。** 速度計と G メータは同じ高さの箱で、どちらも
- * 「箱の中心＝計器の中心」なので、上端を揃えれば2つの円の中心が水平に並ぶ。
- * 下端で揃えると、下に付く説明行の数の差ぶんだけ円がずれる。
- */
-.rc-gauges {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-around;
-  align-items: flex-start;
-  gap: 4px 10px;
-}
-
 /* 灯火と自動停止だけを残す。**押しっぱなし系はランプに逃がした**（RcBar.tsx 参照） */
 .rc-controls { display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .rc-ctl { display: flex; align-items: center; gap: 7px; }
 .rc-ctl .label { color: var(--dim); font-size: 11px; }
 .rc-ctl .seg { margin-top: 0; }
 
-.meter { display: flex; flex-direction: column; align-items: center; min-width: 0; }
-.meter .arc { display: block; }
 /*
- * ## 速度計と G メータの中心を揃える
+ * `.meter` は縦並び：ダイヤル（`flex:1`、伸縮する）＋ その下の数字（自然な高さ）。
+ * 行全体の高さ（`.rc-cam-gauges`）が変わればダイヤルがそのまま追従して
+ * 拡大縮小する（2026-08-17、指示によりウィンドウサイズ応答に変更）。
+ * `min-width: 0` は grid セル内で潰れないようにするため。
  *
- * 速度計は viewBox `0 0 120 92` で針の軸が (60, 58)。つまり**計器の中心は
- * 箱の上から 58/92 = 63% の位置**で、箱の中央ではない。G メータは正方形の
- * 中心が計器の中心。そのまま上端で並べると円の中心が段違いになる。
- *
- *   速度計の中心 = 156 × 92/120 × 58/92 = 75.4px（上端から）
- *   G の中心     = 118/2 = 59px
- *   → G を 75.4 − 59 ≒ 16px 下げると2つの円の中心が水平に並ぶ
- *
- * **どれか1つを変えたら3つとも計算し直すこと。**
- *
- * ⚠ 2つの合計幅（＋説明文の幅）がパネル内寸を超えると折り返し、
- * 温度・電圧・灯火がスクロールの下へ落ちる。**変えるときは実画面で確認すること。**
+ * サイズ計算は `.dial-wrap`（ただの div）が担う。`<svg>` は replaced element
+ * なので `flex`/`aspect-ratio` を直に乗せても intrinsic サイズに負けて縮んだ
+ * ままになる——`DrivePanel.tsx` の `.drivepanel-wrap`／`GMeter.tsx` の
+ * `.gmeter-wrap` と同じ「div に計算させ、中身は width/height:100% だけ」の型。
  */
-.meter-speed .arc { width: 156px; height: auto; }
+.meter { display: flex; flex-direction: column; align-items: center; min-width: 0; min-height: 0; }
+.dial-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: auto;
+  max-width: 100%;
+  /* viewBox 0 0 120 92 と同じ比率 */
+  aspect-ratio: 120 / 92;
+}
+.meter .arc { display: block; width: 100%; height: 100%; }
 
 .arc-bg { fill: none; stroke: var(--panel2); stroke-width: 7; stroke-linecap: round; }
-.arc-red { fill: none; stroke: #5a231f; stroke-width: 7; stroke-linecap: round; }
-.arc-fill { fill: none; stroke: var(--accent); stroke-width: 7; stroke-linecap: round; }
-.arc-tick { stroke: #3b4550; stroke-width: 1; }
-.arc-zero { stroke: #4d5966; stroke-width: 1.5; }
+.arc-red { fill: none; stroke: #5a1f23; stroke-width: 7; stroke-linecap: round; }
+/* 実測の塗り。**ほんの少しだけ発光させる**（GR 風の締まり — 出しすぎると眩しいので控えめに） */
+.arc-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 7;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 3px rgba(213, 48, 63, .55));
+}
+.arc-tick { stroke: #453036; stroke-width: 1; }
+.arc-zero { stroke: #59383e; stroke-width: 1.5; }
 /* 指令値は針とは別の色（--live）。実測との差＝アクチュエータの遅れ */
 .arc-target { stroke: var(--live); stroke-width: 2; }
 
@@ -580,17 +713,30 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   transition: transform 125ms linear;
 }
 .needle line { stroke: var(--fg); stroke-width: 2.2; stroke-linecap: round; }
-.needle-hub { fill: var(--fg); }
+.needle-hub { fill: var(--fg); stroke: var(--accent); stroke-width: 1.5; }
 
 .meter-read { display: flex; align-items: baseline; gap: 4px; margin-top: -6px; }
-.meter-read b { font-size: 30px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.meter-read b {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .01em;
+  font-variant-numeric: tabular-nums;
+  font-style: italic;
+}
 .meter-read i { font-style: normal; color: var(--dim); font-size: 11px; }
+/* 正常時は数値を出さない方針にしたため（2026-08-17）、今は「後退」警告表示だけがここを使う */
 .meter-sub { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--dim); margin-top: 2px; }
-.meter-sub b { color: var(--fg); font-variant-numeric: tabular-nums; }
-.meter-scale { font-size: 10px; margin-top: 1px; }
 
-/* margin-top は上の計算の結果。速度計の中心に高さを合わせるためのもの */
-.gmeter-wrap { position: relative; width: 118px; height: 118px; margin-top: 16px; }
+/* 速度計・舵角計と同じく、高さいっぱいに広がる正方形（2026-08-17） */
+.gmeter-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+}
 .gmeter { width: 100%; height: 100%; display: block; }
 .gmeter-axis { position: absolute; font-size: 9px; color: var(--dim); pointer-events: none; }
 .gmeter-axis-t { top: 0; left: 50%; transform: translateX(-50%); }
@@ -600,6 +746,32 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 
 .rc-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .rc-small { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+/*
+ * 駆動配分パネル — 車体を上から見た図（`DrivePanel.tsx`）。
+ * バーは ok/warn/bad の意味を持たない単色（量だけを示す）。
+ */
+/*
+ * svg は replaced element なので、flex の align-items: stretch だけでは
+ * 幅が親に追従しない。ただの div（.drivepanel-wrap）で幅を確定させてから
+ * 中の svg に width: 100% を効かせる。
+ */
+.drivepanel-wrap { width: 100%; max-width: 250px; margin: 0 auto; }
+.drivepanel { width: 100%; height: auto; display: block; }
+.dp-body { fill: var(--panel2); stroke: var(--accent); stroke-opacity: .35; stroke-width: 1.5; }
+/* タイヤの地色（ゴム）。中の塗り（`.dp-wheel-fill`）が無い前輪もこの色のまま */
+.dp-wheel { fill: #171213; }
+/* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境に電流ぶんだけ塗る単色ゲージ */
+.dp-wheel-fill { fill: var(--accent); }
+.dp-wheel-zero { fill: #4a3438; }
+.dp-wheel-tread { stroke: #2a2224; stroke-width: 1; }
+/* ゲージ・トレッドの上から輪郭を引き直して縁を締める */
+.dp-wheel-outline { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.dp-label { fill: var(--dim); font-size: 9px; }
+.dp-value { fill: var(--fg); font-size: 10px; font-variant-numeric: tabular-nums; }
+/* 駆動・信号系統の乾電池型ゲージ。塗りは lv-bg-* を流用（`battLevel` の色分けと共通） */
+.dp-batt-body { fill: var(--panel2); stroke: var(--line); stroke-width: 1.5; }
+.dp-batt-nub { fill: var(--line); }
 
 /*
  * 介入ランプ。**消えている間は主張しない**（枠だけ）。
@@ -630,13 +802,10 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-color: #7d2b23;
   box-shadow: 0 0 8px rgba(242, 84, 75, .4);
 }
-.lamp-accent.on {
-  color: #cfe7ff;
-  background: #22313f;
-  border-color: var(--accent);
-  box-shadow: 0 0 8px rgba(74, 168, 255, .35);
-}
 .lamp-dim.on { color: var(--dim); border-color: #3b4550; }
+
+/* 温度計（`TempPanel.tsx`）。車体図の下に縦に並べる */
+.rc-temps { display: flex; flex-direction: column; gap: 4px; }
 
 /* 水温計・燃料計。実車と同じで**正常でも常時出す**（走行を切り上げる判断に使う） */
 /* 画面幅いっぱいに伸ばさない。**横に長いバーは残量の変化が読み取りにくい** */
@@ -653,10 +822,15 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   overflow: hidden;
 }
 .minibar-fill { height: 100%; transition: width 150ms linear; }
-.lv-bg-dim { background: #2f3a46; }
-.lv-bg-ok { background: var(--ok); }
-.lv-bg-warn { background: var(--warn); }
-.lv-bg-bad { background: var(--bad); }
+/*
+ * `background` は div のミニバー用、`fill` は SVG rect（駆動配分パネルの
+ * 乾電池ゲージ）用。同じ意味色を両方の文脈で使い回すため両方に指定している。
+ * `fill` は SVG 以外の要素には無視されるだけなので害はない。
+ */
+.lv-bg-dim { background: #2f3a46; fill: #2f3a46; }
+.lv-bg-ok { background: var(--ok); fill: var(--ok); }
+.lv-bg-warn { background: var(--warn); fill: var(--warn); }
+.lv-bg-bad { background: var(--bad); fill: var(--bad); }
 
 /* ── 設定ドロワー（ラジコンタブ内） ───────────────────── */
 
@@ -673,7 +847,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   background: #000a;
   border-radius: 6px;
 }
-.gear.on { background: #22313f; border-color: var(--accent); }
+.gear.on { background: #3a1418; border-color: var(--accent); }
 
 /*
  * 右端に寄せるだけで、背景は覆わない。

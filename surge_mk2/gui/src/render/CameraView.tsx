@@ -9,7 +9,28 @@
  * 画像上に予測進路を重ねるには、カメラの内部・外部パラメータ（校正）が要る。
  * **これは Phase 1 の作業でまだ済んでいない。** ここで描いているのは、
  * 平面路面と仮の取り付け姿勢を仮定した近似であり、**実測値ではない**。
- * 校正前のガイドを信じて経路の当たり判定に使わないよう、画面にも印を出す。
+ * 校正前のガイドを信じて経路の当たり判定に使わないよう、画面にも印を出す
+ * ——ただし出すのは自動運転ビュー（`variant="full"`）のみ。ラジコンビューは
+ * 運転を楽しむ画面なので文字を極力出さない方針（`RcView.tsx`）で、下記
+ * `variant="minimal"` では出さない。
+ *
+ * ## `variant`：ラジコンビューは文字を出さない（2026-08-17）
+ *
+ * `full`（既定・自動運転ビュー）は左上に「前方/後方」ラベルと fps を
+ * 並べたタグを出し、校正前バッジも出す。`minimal`（ラジコンビュー）は
+ * ラベルもバッジも出さず、fps だけを右下に小さく残す。**fps だけは
+ * 消さない** — 配信が生きているかを判断する最後の手がかりのため。
+ *
+ * ## `onAspect`：実際に届いた画像の縦横比を親へ返す（2026-08-17）
+ *
+ * `RcView.tsx` は映像の箱を「取得したサイズのまま」表示したい（指示による）。
+ * `camera_node.py --size` の既定値から比率を決め打ちしていたら、実機では
+ * センサーが要求どおりのモードを取らないことがあり（冒頭コメント参照するまでも
+ * なく `camera_node.py` 自身が「センサーネイティブモードを選ぶことがある」と
+ * 警告している）、**箱の形が実際の画像とズレて余白ができた**。デコードした
+ * `ImageBitmap` の実寸こそが正なので、フレームが来るたびにその比率を
+ * `onAspect` で返す。比率が変わったときだけ呼ぶ（毎フレーム呼ぶと 15Hz で
+ * 親を再レンダリングしてしまう）。
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
@@ -24,7 +45,18 @@ const CAM = {
 }
 const WHEELBASE = 0.25
 
-export function CameraView({ cam, label }: { cam: 'front' | 'rear'; label: string }) {
+export function CameraView({
+  cam,
+  label,
+  variant = 'full',
+  onAspect,
+}: {
+  cam: 'front' | 'rear'
+  label: string
+  variant?: 'full' | 'minimal'
+  /** デコードした画像の実際の幅/高さ比。変わったときだけ呼ばれる */
+  onAspect?: (aspect: number) => void
+}) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide)
   const statusRef = useRef<HTMLSpanElement>(null)
@@ -44,6 +76,7 @@ export function CameraView({ cam, label }: { cam: 'front' | 'rear'; label: strin
     let timer: number | undefined
     let raf = 0
     let decoding = false
+    let lastAspect = 0
 
     const open = () => {
       ws = new WebSocket(wsUrl(`/ws/camera/${cam}`))
@@ -58,6 +91,13 @@ export function CameraView({ cam, label }: { cam: 'front' | 'rear'; label: strin
           bitmap?.close()
           bitmap = bmp
           frames++
+          if (onAspect) {
+            const ar = bmp.width / bmp.height
+            if (Math.abs(ar - lastAspect) > 0.001) {
+              lastAspect = ar
+              onAspect(ar)
+            }
+          }
         } catch {
           /* 壊れたフレームは捨てる */
         } finally {
@@ -115,16 +155,22 @@ export function CameraView({ cam, label }: { cam: 'front' | 'rear'; label: strin
       ws?.close()
       bitmap?.close()
     }
-  }, [cam, guide])
+  }, [cam, guide, onAspect])
 
   return (
-    <div className="camera">
+    <div className="camera" title={label}>
       <canvas ref={ref} />
-      <div className="camera-tag">
-        {label}
-        <span ref={statusRef} className="dim" />
-        {cam === 'front' && guide && <span className="badge-warn">ガイドは校正前・暫定</span>}
-      </div>
+      {variant === 'full' ? (
+        <div className="camera-tag">
+          {label}
+          <span ref={statusRef} className="dim" />
+          {cam === 'front' && guide && <span className="badge-warn">ガイドは校正前・暫定</span>}
+        </div>
+      ) : (
+        <div className="camera-fps">
+          <span ref={statusRef} />
+        </div>
+      )}
     </div>
   )
 }

@@ -3,14 +3,29 @@
  *
  * ## 何を出さないか
  *
- * スリップ量の数値、CRC / パケットロス、時刻同期のオフセット、UART・WS の RTT、
- * モータ電流、pitch / roll は**ここには出さない**。運転を楽しむのに使わないうえ、
- * 面積を食って速度計と G メータが小さくなる。全部いつでも診断タブで見られる。
+ * CRC / パケットロス、時刻同期のオフセット、UART・WS の RTT、pitch / roll は
+ * **ここには出さない**。運転を楽しむのに使わないうえ、診断タブで見られる。
  *
- * ## 逆に温度と電圧は出す
+ * ## 速度計・G メータは左の映像下へ移した（2026-08-17）
  *
- * 実車の水温計・燃料計に相当する。**走行を切り上げる判断に使う**ので、
- * 異常時だけ出るのでは遅い（`DiagStrip` の畳み方とは扱いを変えている）。
+ * 右パネルは LiDAR と駆動配分パネルの上下 1:1 に専念させたいという要望で、
+ * `SpeedGauge`/`GMeter` は `RcView.tsx` の `.rc-cam-gauges`（前方映像の下）へ
+ * 移動した。ここには残っていない。
+ *
+ * ## 駆動配分パネルに統合した（2026-08-17）
+ *
+ * スリップ・モータ電流・トルク・駆動と信号の電圧電流は `DrivePanel`（車体を
+ * 上から見た図）にまとめてある。以前ここにあった水温計・燃料計の `TempBar`/
+ * `BattBar` も、電圧・電流は `DrivePanel` の乾電池型ゲージに統合した。温度は
+ * 一旦落としたが、同日中に指示で `TempPanel` として復活させた（下記）。
+ * しきい値の考え方など詳細は `DrivePanel.tsx` 冒頭のコメントを参照。
+ *
+ * ## 温度計を車体図の下に復活（2026-08-17）
+ *
+ * 後輪モータ2つ・ステアモータ・STM32 MCU・RasPi 本体の CPU、計5つ
+ * （`TempPanel.tsx`）。RcView 冒頭の方針どおり「温度と電圧は常時出す」に
+ * 揃えた——電圧（`DrivePanel` の乾電池ゲージ）はあるのに温度が無いのは
+ * 片手落ちだった。
  *
  * ## 補機もここに畳んだ（2026-08-11）
  *
@@ -21,20 +36,10 @@
  * （`AuxPanel.tsx` 冒頭の議論と同じ理由）。
  */
 import { useNumbers } from '../../bus/live'
-import { battLevel, tempLevel } from '../../format'
 import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../../store/ui'
 import { AssistLamps } from './AssistLamps'
-import { GMeter } from './GMeter'
-import { SpeedGauge } from './SpeedGauge'
-
-/** 温度バーの表示範囲。下限を 20℃ にしないと常に半分以上溜まって見える */
-const TEMP_MIN = 20
-const TEMP_MAX = 80
-/** 8セル NiMH。放電終止 8.0V / 満充電 11.2V（`uart_protocol.md` §5.3） */
-const BATT_MIN = 8.0
-const BATT_MAX = 11.2
-
-const TEMP_LABEL = ['MD後左', 'MD後右', 'MDステア', 'MCU']
+import { DrivePanel } from './DrivePanel'
+import { TempPanel } from './TempPanel'
 
 export function RcBar() {
   const n = useNumbers()
@@ -43,30 +48,11 @@ export function RcBar() {
 
   return (
     <div className={`rcpanel ${n.stale ? 'stale' : ''}`}>
-      <div className="rc-gauges">
-        <SpeedGauge />
-        <GMeter />
-      </div>
-
       <AssistLamps />
 
-      <div className="rc-small">
-        <TempBar />
-        {/* 駆動と信号は別系統。**片方だけ落ちる**（駆動を切っても Pi と STM32 は生きている）
-            ので、まとめずに2本出す。電流はバーにせず数字だけ — 上限が決まっていない */}
-        <BattBar
-          label="駆動"
-          v={vs?.batt_voltage[0] ?? null}
-          a={vs?.batt_current[0] ?? null}
-          title="駆動系（8セル NiMH）。8.0V で放電終止。モータはこちらから取る"
-        />
-        <BattBar
-          label="信号"
-          v={vs?.batt_voltage[1] ?? null}
-          a={vs?.batt_current[1] ?? null}
-          title="信号系。STM32・センサ・LED。ここが落ちると車両が無言になる"
-        />
-      </div>
+      <DrivePanel />
+
+      <TempPanel />
 
       <div className="rc-small">
         <div className="kv">
@@ -96,67 +82,4 @@ export function RcBar() {
       </div>
     </div>
   )
-}
-
-/**
- * 水温計。**4点の最悪値**を1本にまとめる（内訳はホバーで出す）。
- *
- * ⚠ **未接続を赤で出さない。** テレメトリが来ていないだけの状態を「異常」と
- * 同じ色にすると、本当に温度が上がったときの赤が効かなくなる。
- * 値が来ていないなら灰色で「—」。MD からの通信断（`temp[i] == null`）は
- * 本物の異常なので、そちらは赤のままにする。
- */
-function TempBar() {
-  const vs = useNumbers().vs
-  const temps = vs?.temp ?? []
-  const valid = temps.filter((t): t is number => t != null)
-  // 通信断（null）が1つでもあれば、最大値より先にそれを伝える
-  const lost = temps.some((t) => t == null)
-  const max = valid.length ? Math.max(...valid) : null
-  const lv = !vs ? 'dim' : lost ? 'bad' : tempLevel(max)
-  const frac = max == null ? 0 : (max - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
-  const title = vs
-    ? temps.map((t, i) => `${TEMP_LABEL[i]} ${t == null ? '通信断' : `${t}℃`}`).join(' / ')
-    : 'テレメトリ未受信'
-
-  return (
-    <div className="bar-row" title={title}>
-      <span className="label">温度</span>
-      <div className="minibar">
-        <div className={`minibar-fill lv-bg-${lv}`} style={{ width: `${clamp01(frac) * 100}%` }} />
-      </div>
-      <b className={`lv-${lv}`}>{!vs ? '—' : lost ? '通信断' : max == null ? '—' : `${max}℃`}</b>
-    </div>
-  )
-}
-
-/** 燃料計。電圧はバー、電流は数字だけ（消費電流に「満タン」が無いのでバーにできない） */
-function BattBar({
-  label,
-  v,
-  a,
-  title,
-}: {
-  label: string
-  v: number | null
-  a: number | null
-  title: string
-}) {
-  const lv = v == null ? 'dim' : battLevel(v)
-  const frac = v == null ? 0 : (v - BATT_MIN) / (BATT_MAX - BATT_MIN)
-
-  return (
-    <div className="bar-row" title={title}>
-      <span className="label">{label}</span>
-      <div className="minibar">
-        <div className={`minibar-fill lv-bg-${lv}`} style={{ width: `${clamp01(frac) * 100}%` }} />
-      </div>
-      <b className={`lv-${lv}`}>{v == null ? '—' : `${v.toFixed(2)}V`}</b>
-      <b className="dim">{a == null ? '—' : `${a.toFixed(2)}A`}</b>
-    </div>
-  )
-}
-
-function clamp01(v: number): number {
-  return Math.max(0, Math.min(1, v))
 }

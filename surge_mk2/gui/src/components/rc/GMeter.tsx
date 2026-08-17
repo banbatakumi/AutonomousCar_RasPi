@@ -22,6 +22,25 @@
  * IMU の生値には重力が乗る。平坦路では x/y 成分にはほぼ出ないが、坂では
  * `pitch`/`roll` のぶんだけ傾く。**補正はしていない**（見て楽しむための計器であり、
  * 制御には使わないため）。坂で中心がずれるのは仕様。
+ *
+ * ## 色（2026-08-17、GR 風に変更）
+ *
+ * 軌跡は `.rc` のスコープ変数 `--accent`（赤）と同じ色を直書きしている
+ * （Canvas は CSS 変数を読めないため）。**上限超過の点だけ従来どおり目立つ色を
+ * 別に割り当てる**——軌跡自体が赤になったので、そのままだと超過の合図が
+ * 埋もれる。ここだけ白にして「振り切れた」を伝える。
+ *
+ * ## 最大 G の表示は無くした（2026-08-17、指示による）
+ *
+ * 走行中に見るものではないと判断し、ピーク保持のロジックごと削除した。
+ * 「今どれだけ G が出ているか」は点の位置そのもので分かる。
+ *
+ * ## `dialHeight`（2026-08-17）
+ *
+ * `RcView.tsx` がメータ行の実測高さから逆算して渡す px。速度計・舵角計と
+ * サイズを揃えるために使う（`SpeedGauge.tsx` 冒頭のコメント参照）。描画ループ
+ * 自体は元々 `getBoundingClientRect()` で毎フレーム実寸を読んでいるので、
+ * ここでは `.gmeter-wrap` の CSS サイズを変えるだけで追従する。
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
@@ -39,9 +58,8 @@ const TRAIL_MAX = 120
 
 type P = { x: number; y: number; t: number }
 
-export function GMeter() {
+export function GMeter({ dialHeight }: { dialHeight: number | null }) {
   const ref = useRef<HTMLCanvasElement>(null)
-  const peakRef = useRef<HTMLSpanElement>(null)
 
   useEffect(() => {
     const cv = ref.current
@@ -50,8 +68,6 @@ export function GMeter() {
     if (!ctx) return
 
     const trail: P[] = []
-    let peak = 0
-    let lastPeakShown = -1
     let raf = 0
 
     const draw = () => {
@@ -74,8 +90,6 @@ export function GMeter() {
         const gx = gForce(AY_SIGN * vs.accel[1]) // 横G（右が正）
         const gy = gForce(AX_SIGN * vs.accel[0]) // 前後G（加速が正）
         trail.push({ x: gx, y: gy, t: now })
-        const mag = Math.hypot(gx, gy)
-        if (mag > peak) peak = mag
       }
       while (trail.length && now - trail[0].t > TRAIL_MS) trail.shift()
       while (trail.length > TRAIL_MAX) trail.shift()
@@ -86,16 +100,19 @@ export function GMeter() {
       const r = size / 2 - 4 * dpr
 
       ctx.clearRect(0, 0, w, h)
+      // レイアウト確定前など、箱がまだ豆粒サイズのフレームがある。
+      // `r<=0` で `ctx.arc()` に渡すと例外になるので、その回は素通りする
+      if (r <= 0) return
 
       // ── 目盛り（同心円と十字） ──
       ctx.lineWidth = dpr
       for (const ring of [1 / 3, 2 / 3, 1]) {
         ctx.beginPath()
         ctx.arc(cx, cy, r * ring, 0, Math.PI * 2)
-        ctx.strokeStyle = ring === 1 ? '#2f3a46' : '#232b34'
+        ctx.strokeStyle = ring === 1 ? '#3a2226' : '#241b1d'
         ctx.stroke()
       }
-      ctx.strokeStyle = '#232b34'
+      ctx.strokeStyle = '#241b1d'
       ctx.beginPath()
       ctx.moveTo(cx - r, cy)
       ctx.lineTo(cx + r, cy)
@@ -109,7 +126,7 @@ export function GMeter() {
       for (let i = 1; i < trail.length; i++) {
         const age = (now - trail[i].t) / TRAIL_MS
         ctx.globalAlpha = Math.max(0, 0.55 * (1 - age))
-        ctx.strokeStyle = '#4aa8ff'
+        ctx.strokeStyle = '#d5303f'
         ctx.lineWidth = 1.6 * dpr
         ctx.beginPath()
         ctx.moveTo(px(trail[i - 1].x), py(trail[i - 1].y))
@@ -122,16 +139,10 @@ export function GMeter() {
       const cur = trail[trail.length - 1]
       if (cur && fresh) {
         const mag = Math.hypot(cur.x, cur.y)
-        ctx.fillStyle = mag > FULL_G ? '#f2544b' : '#ffc63f'
+        ctx.fillStyle = mag > FULL_G ? '#ffffff' : '#ffc63f'
         ctx.beginPath()
         ctx.arc(px(cur.x), py(cur.y), 3.5 * dpr, 0, Math.PI * 2)
         ctx.fill()
-      }
-
-      // ピークは DOM 側に出す。**Canvas に文字を描くと DPR ごとに滲む**
-      if (peakRef.current && Math.abs(peak - lastPeakShown) > 0.005) {
-        peakRef.current.textContent = peak.toFixed(2)
-        lastPeakShown = peak
       }
     }
     raf = requestAnimationFrame(draw)
@@ -140,20 +151,12 @@ export function GMeter() {
 
   return (
     <div className="meter meter-g">
-      <div className="gmeter-wrap">
+      <div className="gmeter-wrap" style={dialHeight ? { width: dialHeight, height: dialHeight } : undefined}>
         <canvas ref={ref} className="gmeter" />
         <span className="gmeter-axis gmeter-axis-t">加速</span>
         <span className="gmeter-axis gmeter-axis-b">制動</span>
         <span className="gmeter-axis gmeter-axis-l">左</span>
         <span className="gmeter-axis gmeter-axis-r">右</span>
-      </div>
-      {/* 外周の G は文字を増やさず title に逃がす。**この1行が横に伸びると
-          計器が折り返し、温度・電圧がスクロールの下へ落ちる**（styles.css 参照） */}
-      <div className="meter-sub" title={`外周 = ${FULL_G.toFixed(1)}G。前後G と横G の合成`}>
-        <span className="dim">最大G</span>
-        <b>
-          <span ref={peakRef}>0.00</span>
-        </b>
       </div>
     </div>
   )

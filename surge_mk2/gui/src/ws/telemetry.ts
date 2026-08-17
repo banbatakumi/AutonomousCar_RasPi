@@ -28,7 +28,7 @@ export function connectTelemetry(onOpenChange: (open: boolean) => void): () => v
     ws.onmessage = (ev) => {
       if (!(ev.data instanceof ArrayBuffer)) return
       const s = decode(new Uint8Array(ev.data)) as Snapshot
-      noteTelemetry(s.vs, s.link, s.scan, s.auto)
+      noteTelemetry(s.vs, s.link, s.scan, s.auto, s.pi_temp_c)
       // 診断タブ用の時系列。**タブを開いていなくても常時貯める**（`bus/history.ts`）
       pushHistory(s.vs, s.link)
     }

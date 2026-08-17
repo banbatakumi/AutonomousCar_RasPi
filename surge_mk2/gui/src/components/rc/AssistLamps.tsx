@@ -16,6 +16,14 @@
  * React の state は使わない（60Hz で setState すると再レンダリングで破綻する）。
  * class の付け外しを直接やる。
  */
+/**
+ * 2026-08-17: BOOST・HORN・PASS のランプを削除（指示による）。
+ * いずれも「押している間だけ光る」自分の操作の可視化で、押しっぱなしを防ぐ目的
+ * ——だったが、常時ここに並んでいる価値がないと判断された。ボタン自体・
+ * `useDriving.ts` の入力処理は変えていない（鳴らす・光らせる機能自体は残る）。
+ * BOOST は Shift / パッド R1 を押している間だけ速度レンジが `maxSpeed` まで
+ * 伸びる機能（`cruiseScale` を超えられる）で、`ui.boost` はそのフラグ。
+ */
 import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
 import { useUi } from '../../store/ui'
@@ -77,15 +85,6 @@ export function AssistLamps() {
           カーソルが外れた瞬間に取り残されてクラクションが鳴り続ける（`AuxPanel.tsx` 参照） */}
       <span className={`lamp lamp-warn ${ui.braking ? 'on' : ''}`} title="Space / パッド L1">
         BRAKE
-      </span>
-      <span className={`lamp lamp-accent ${ui.boost ? 'on' : ''}`} title="Shift / パッド R1 を押している間だけ全開">
-        BOOST
-      </span>
-      <span className={`lamp lamp-warn ${ui.horning ? 'on' : ''}`} title="H / パッド A（押している間ずっと鳴る）">
-        HORN
-      </span>
-      <span className={`lamp lamp-accent ${ui.passing ? 'on' : ''}`} title="P / パッド X（前照灯だけ全光量。尾灯は連動しない）">
-        PASS
       </span>
       {!ui.settings.autoStop && (
         <span className="lamp lamp-dim on" title="超音波の自動停止を切っている。壁に当たっても止まらない">
