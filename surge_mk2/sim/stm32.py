@@ -286,7 +286,7 @@ class VirtualStm32:
         p = self.params
         # ★ オドメトリと IMU の誤差。**ここを 0 にすると推測航法が完璧になり、
         #   SLAM を入れる意味がシミュレータ上で消える**（`sim/params.py` 参照）。
-        #   距離は倍率誤差（車輪半径の未実測ぶん）＋ノイズ、ヨーレートは bias（方位ドリフトの正体）
+        #   距離は倍率誤差（タイヤの摩耗・スリップぶん）＋ノイズ、ヨーレートは bias（方位ドリフトの正体）
         odom = [d * (1.0 + p.odom_scale_err)
                 + (self.rng.gauss(0.0, p.odom_noise_m) if p.odom_noise_m > 0 else 0.0)
                 for d in v.odom_front]

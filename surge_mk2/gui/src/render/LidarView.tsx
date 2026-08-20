@@ -27,15 +27,16 @@
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
 import { useUi } from '../store/ui'
+import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 
-/** 車体寸法 [m]。**未実測の暫定値**（`architecture.md` §15 の #2〜#4）。
- * 原点は base_link ＝ 後輪車軸の中心。実測したら `config/vehicle.yaml` を正とし、
- * ここへは WS 経由で配る（今は形が分かればよいので直書き）。 */
+/** 車体の描画用寸法 [m]。原点は base_link ＝ 後輪車軸の中心。
+ * `config/vehicle.toml`（唯一の正）から生成された `footprint` ポリゴンの
+ * バウンディングボックスとして算出する。手で数値を書かない。 */
 const VEHICLE = {
-  width: 0.19,
-  wheelbase: 0.25,
-  rearOverhang: 0.03, // 原点より後ろに出ている量
-  frontOverhang: 0.06, // 前輪より前に出ている量
+  wheelbase: VEHICLE_GEOM.wheelbase,
+  front: Math.max(...VEHICLE_GEOM.footprint.map(([x]) => x)), // 原点より前に出ている量
+  back: -Math.min(...VEHICLE_GEOM.footprint.map(([x]) => x)), // 原点より後ろに出ている量
+  width: 2 * Math.max(...VEHICLE_GEOM.footprint.map(([, y]) => Math.abs(y))),
 }
 
 const C = {
@@ -248,8 +249,8 @@ function drawVehicle(
 ) {
   // base_link は後輪車軸の中心（`architecture.md` §5.2）。原点はそこ
   const W = VEHICLE.width * px
-  const front = (VEHICLE.wheelbase + VEHICLE.frontOverhang) * px
-  const back = VEHICLE.rearOverhang * px
+  const front = VEHICLE.front * px
+  const back = VEHICLE.back * px
   ctx.save()
   ctx.translate(cx, cy)
 

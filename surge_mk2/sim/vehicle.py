@@ -1,7 +1,7 @@
 """車両モデル — 自転車モデル + 操舵のむだ時間 + 1次遅れ。
 
 **運動学と遅れだけ。** タイヤモデル・スリップ・TC/TV は入れていない。
-実車の車輪半径・ギア比・ホイールベースが未実測（`architecture.md` §15 #3/#4）で、
+実車の`[dynamics]`（操舵のむだ時間・1次遅れなど）が未実測の仮値で、
 合わせ込む相手がまだ無いため。入れるなら実測後。
 
 指令は SI で受ける（整数スケールの解釈は `sim/stm32.py` の仕事）。
@@ -22,15 +22,15 @@ DEFAULT_SPEC_PATH = Path(__file__).resolve().parents[1] / "config" / "vehicle.to
 
 @dataclass
 class VehicleSpec:
-    """`config/vehicle.toml` の中身。**値はほぼ未実測の暫定値。**"""
+    """`config/vehicle.toml` の中身。**幾何・質量は実測確定。`[dynamics]` はまだ仮値。**"""
 
-    wheelbase: float = 0.25
-    track: float = 0.19
-    max_steer: float = 1.047
-    wheel_radius: float = 0.033
-    mass: float = 1.6
+    wheelbase: float = 0.23
+    track: float = 0.155
+    max_steer: float = 0.524
+    wheel_radius: float = 0.03
+    mass: float = 2.0
     footprint: list = field(default_factory=lambda: [
-        [0.310, 0.095], [0.310, -0.095], [-0.030, -0.095], [-0.030, 0.095]])
+        [0.30, 0.09], [0.30, -0.09], [-0.07, -0.09], [-0.07, 0.09]])
 
     tau_steer_s: float = 0.12
     dead_time_s: float = 0.030
@@ -46,11 +46,11 @@ class VehicleSpec:
             d = tomllib.load(fp)
         dyn = d.get("dynamics", {})
         return cls(
-            wheelbase=d.get("wheelbase", 0.25),
-            track=d.get("track", 0.19),
-            max_steer=d.get("max_steer", 1.047),
-            wheel_radius=d.get("wheel_radius", 0.033),
-            mass=d.get("mass", 1.6),
+            wheelbase=d.get("wheelbase", 0.23),
+            track=d.get("track", 0.155),
+            max_steer=d.get("max_steer", 0.524),
+            wheel_radius=d.get("wheel_radius", 0.03),
+            mass=d.get("mass", 2.0),
             footprint=d.get("footprint", cls().footprint),
             tau_steer_s=dyn.get("tau_steer_s", 0.12),
             dead_time_s=dyn.get("dead_time_s", 0.030),

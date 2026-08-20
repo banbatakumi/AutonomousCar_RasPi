@@ -81,7 +81,7 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 
 ```bash
 .venv/bin/python -m raspi.nodes.io_node --sim --course sim/courses/oval.png \
-    --allow-arm --max-speed 3.0 --max-steer 1.047 --no-heartbeat --no-leds
+    --allow-arm --max-speed 3.0 --max-steer 0.524 --no-heartbeat --no-leds
 .venv/bin/python -m raspi.nodes.telemetry_node --no-camera
 .venv/bin/python -m raspi.nodes.planning_node        # 自動運転タブを使うなら
 .venv/bin/python -m sim.gui
@@ -130,9 +130,9 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 **E-Stop は自動発動しない。** GPIO6 ハートビートが Mac に無いため（`--no-heartbeat` と
 同じ扱い）。シミュレータGUI の `E` で手動発動できる。
 
-物理の合わせ込みが浅いのは意図的で、実車の車輪半径・ギア比・ホイールベースが未実測
-（`docs/architecture.md` §15 #3/#4）＝**合わせる相手がまだ無い**ため。実測後に
-`config/vehicle.toml` を直せば全部が追随する。
+物理の合わせ込みが浅いのは意図的で、実車の `[dynamics]`（アクチュエータの動特性）が
+未実測＝**合わせる相手がまだ無い**ため。実測後に `config/vehicle.toml` を直せば
+全部が追随する（幾何・質量は実測確定済み）。
 
 ## わざと鏡像で出している
 

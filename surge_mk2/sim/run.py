@@ -326,7 +326,7 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=PORT,
                     help=f"WS/HTTP のポート（既定 {PORT}）")
     ap.add_argument("--max-speed", type=float, default=3.0)
-    ap.add_argument("--max-steer", type=float, default=1.047)
+    ap.add_argument("--max-steer", type=float, default=0.524)
     args = ap.parse_args()
 
     if args.list:

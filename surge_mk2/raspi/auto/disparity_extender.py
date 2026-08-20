@@ -106,7 +106,7 @@ class DisparityExtender(Planner):
                        "小さくすると壁の凹凸まで縁になり、視野が塞がって遅くなる"),
         ParamSpec(key="safety_half_width", label="安全半幅", min=0.08, max=0.60,
                   step=0.01, default=0.30, unit="m",
-                  note="★縁の陰を塗る幅。車体半幅 0.095m の3倍あるのは、"
+                  note="★縁の陰を塗る幅。車体半幅 0.09m の3倍あるのは、"
                        "旋回半径ぶんの膨らみと点群の遅延をここで飲むため"
                        "（0.25 だと circuit で行き止まりに入り込んで停止した）。"
                        "★分離帯コース（車線 0.42m）では 0.12 まで下げること"),
@@ -130,8 +130,8 @@ class DisparityExtender(Planner):
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
                   default=0.12, unit="m/s",
                   note="減速しきってもこれ以下にはしない。0 にすると詰まった所で動けなくなる"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=1.047, step=0.005,
-                  default=0.60, unit="rad",
+        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
+                  default=0.50, unit="rad",
                   note="★io_node の --max-steer を超えても切り捨てられるだけ"),
         ParamSpec(key="steer_gain", label="舵角ゲイン", min=0.1, max=2.0, step=0.05,
                   default=0.80, unit="",

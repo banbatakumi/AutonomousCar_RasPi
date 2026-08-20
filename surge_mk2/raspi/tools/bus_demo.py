@@ -46,7 +46,7 @@ STATE_HZ = 50
 SCAN_HZ = 10
 DIAG_HZ = 10
 
-WHEELBASE = 0.25          # m  暫定値（実測待ち。`architecture.md` §15-#4）
+WHEELBASE = 0.23          # m（実測確定、2026-08-20。`architecture.md` §15-#4）
 ROOM = (6.0, 4.0)         # m  部屋の内寸
 #: ステアリングの1次遅れ時定数。**実測待ちの仮値**（Phase 1 で測る）
 STEER_TAU_S = 0.12

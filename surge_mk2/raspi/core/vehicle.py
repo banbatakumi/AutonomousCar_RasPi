@@ -8,11 +8,13 @@
 （ホイールベース・車体外形・センサ取付）だけ。`raspi/` は `sim/` を import できない
 （実機に `sim/` を配らない、`raspi/nodes/io_node.py:447-453`）ので、共有はしていない。
 
-## ★ 値のほとんどは未実測
+## ★ 実測が残っているのはアクチュエータの動特性だけ
 
-`measured = false` の間は `wheelbase` も `wheel_radius` も暫定値（§15 未決事項 #2〜#4）。
+`wheelbase`・`track`・ステアのリンク比（`max_steer` に反映済み）・`wheel_radius`・
+車体外形・センサ取付は 2026-08-20 に実測確定済み（§15 #2〜#4。後輪はダイレクト
+ドライブでギア比の概念が無いため #3 は車輪半径だけで確定）。残るは `[dynamics]`
+（操舵のむだ時間・1次遅れなど）だけ。
 **`measured` を見て「この数字を信じてよいか」を呼び出し側が判断できる**ようにしてある。
-経路追従の精度はここが実測されるまで原理的に出ない。
 """
 
 from __future__ import annotations
@@ -32,10 +34,10 @@ class Vehicle:
 
     #: 諸元が実測済みか。**False の間は経路追従の精度を云々しても意味が無い**
     measured: bool = False
-    wheelbase: float = 0.25                #: L [m]
-    track: float = 0.19                    #: トレッド [m]
-    max_steer: float = 1.047               #: 最大路面舵角 [rad]
-    wheel_radius: float = 0.033            #: [m]
+    wheelbase: float = 0.23                #: L [m]（実測確定）
+    track: float = 0.155                   #: トレッド [m]（実測確定）
+    max_steer: float = 0.524               #: 最大路面舵角 [rad] = 30°（リンク比 0.5 実測確定）
+    wheel_radius: float = 0.03             #: [m]（実測確定）
     #: 車体外形ポリゴン [m]。base_link 基準
     footprint: tuple[tuple[float, float], ...] = ()
     #: LiDAR の取付位置 [m]。**base_link（後輪車軸中心）より前に出ている**
@@ -86,10 +88,10 @@ class Vehicle:
         fp_raw = d.get("footprint", []) or []
         return cls(
             measured=bool(d.get("measured", False)),
-            wheelbase=float(d.get("wheelbase", 0.25)),
-            track=float(d.get("track", 0.19)),
-            max_steer=float(d.get("max_steer", 1.047)),
-            wheel_radius=float(d.get("wheel_radius", 0.033)),
+            wheelbase=float(d.get("wheelbase", 0.23)),
+            track=float(d.get("track", 0.155)),
+            max_steer=float(d.get("max_steer", 0.524)),
+            wheel_radius=float(d.get("wheel_radius", 0.03)),
             footprint=tuple((float(v[0]), float(v[1])) for v in fp_raw if len(v) >= 2),
             lidar_x=float(lidar.get("x", 0.0)),
             lidar_y=float(lidar.get("y", 0.0)),

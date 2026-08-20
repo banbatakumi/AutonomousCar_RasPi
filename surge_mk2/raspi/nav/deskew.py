@@ -10,14 +10,14 @@ LD06 は 10Hz 回転なので、1周する 100ms の間に車体が動く。**3 
 
 補正に要る「1周のあいだにどれだけ動いたか」は、**`Slam` が自分の推定姿勢の差分から
 出した速度**を渡す。車輪エンコーダは操舵輪である前輪に付いていて、しかも
-`encoder_ticks_per_rev` も車輪半径も未実測（`architecture.md` §15 の #3）。
+`encoder_ticks_per_rev` が未実測（STM32 側の実測待ち）。
 低速では `wheel_speed[]` が使い物にならないことも実測済み（`PROGRESS.md`）。
 **「LiDAR 情報のみ」を看板にする以上、ここに車輪の値を混ぜない。**
 
 ## 出力は base_link 座標
 
-`config/vehicle.toml` の `[sensors.lidar] x = 0.120` — LiDAR は **base_link
-（後輪車軸中心）より 12cm 前**にある。ここで取付オフセットまで畳んでしまい、
+`config/vehicle.toml` の `[sensors.lidar] x = 0.07` — LiDAR は **base_link
+（後輪車軸中心）より 7cm 前**にある。ここで取付オフセットまで畳んでしまい、
 **下流（地図・スキャンマッチ・Pure Pursuit）は全部 base_link で統一する。**
 
 「SLAM は lidar フレームで回して最後に base_link へ直す」でも等価だが、

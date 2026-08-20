@@ -26,10 +26,16 @@
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
+import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 
-/** 車体寸法 [m]。`LidarView.tsx` の `VEHICLE` と同じ暫定値
- *  （`architecture.md` §15 の #2〜#4 が未実測）。 */
-const VEHICLE = { width: 0.19, wheelbase: 0.25, rearOverhang: 0.03, frontOverhang: 0.06 }
+/** 車体の描画用寸法 [m]。`LidarView.tsx` と同じ算出方法（`config/vehicle.toml` の
+ * `footprint` から生成）。手で数値を書かない。 */
+const VEHICLE = {
+  wheelbase: VEHICLE_GEOM.wheelbase,
+  front: Math.max(...VEHICLE_GEOM.footprint.map(([x]) => x)),
+  back: -Math.min(...VEHICLE_GEOM.footprint.map(([x]) => x)),
+  width: 2 * Math.max(...VEHICLE_GEOM.footprint.map(([, y]) => Math.abs(y))),
+}
 
 const C = {
   bg: '#0b0e11',
@@ -281,8 +287,8 @@ function drawVehicle(
   px: number,
 ) {
   const W = VEHICLE.width * px
-  const front = (VEHICLE.wheelbase + VEHICLE.frontOverhang) * px
-  const back = VEHICLE.rearOverhang * px
+  const front = VEHICLE.front * px
+  const back = VEHICLE.back * px
   ctx.save()
   ctx.translate(sx(x), sy(y))
   // 世界の反時計回り正 → 画面は y 反転なので符号を返す

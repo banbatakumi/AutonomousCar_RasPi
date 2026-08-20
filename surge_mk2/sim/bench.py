@@ -95,7 +95,7 @@ class Result:
 
 class Bench:
     def __init__(self, course: str | Path, mode: str, params: dict[str, float], *,
-                 max_speed: float = 3.0, max_steer: float = 1.047,
+                 max_speed: float = 3.0, max_steer: float = 0.524,
                  quiet: bool = False) -> None:
         self.link = create_sim_link(course, with_channel=False)
         self.sim = self.link.sim
@@ -258,7 +258,7 @@ def main() -> int:
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="planner のパラメータを上書き（複数可）")
     ap.add_argument("--max-speed", type=float, default=3.0)
-    ap.add_argument("--max-steer", type=float, default=1.047)
+    ap.add_argument("--max-steer", type=float, default=0.524)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 

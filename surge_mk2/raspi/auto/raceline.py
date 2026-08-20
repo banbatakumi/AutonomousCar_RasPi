@@ -70,7 +70,7 @@ EXPLORE, BUILD, RACE = "EXPLORE", "BUILD", "RACE"
 #: 地図を作り直すしかなくなり、「触ったら消えた」という事故になる。
 #:
 #: ★ 2.5cm にしてあるのは**分離帯があるコースのため**。コースが2分割されると
-#: 車線幅は 0.45m しかなく、そこから車体半幅 0.095m×2 と余裕 0.05m×2 を引くと
+#: 車線幅は 0.45m しかなく、そこから車体半幅 0.09m×2 と余裕 0.05m×2 を引くと
 #: **振れ幅は 0.08m しか残らない**。5cm 格子だと壁の表現が ±1セル、幅測定の
 #: 膨張が 1セルで、誤差だけで 5〜10cm 出てアウトインアウトが誤差に埋もれる。
 #:
@@ -166,7 +166,7 @@ class RaceLine(Planner):
                   step=0.01, unit="s",
                   note="★舵が効き始めるまでの時間。この秒数だけ先の位置で判断する。"
                        "実測して合わせること（architecture.md §14）"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=1.047, default=0.60,
+        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, default=0.50,
                   step=0.005, unit="rad", note="★io_node の --max-steer を超えても切られるだけ"),
 
         # ── 安全 ──

@@ -53,5 +53,7 @@ system_overview.md       システム全体像（何がどう動いているか�
   （`COMMAND.flags` bit7 = `auto_stop`、`TELEMETRY.flags` bit16 = `auto_stop_active`）。
   v0.4 → v0.5 → v0.6 の経緯は `uart_protocol.md` の改版履歴にある
 - SLAM / 自己位置推定の方式は **Phase 3 着手時に決定**する方針
-- **ステアリングのリンク比と車輪半径が未実測**のため、`config/vehicle.toml` は暫定値。
-  この2つが残っているクリティカルパス（`architecture.md` §15）
+- `config/vehicle.toml` は `[dynamics]`（アクチュエータの動特性）を除き実測確定済み
+  （2026-08-20。後輪はダイレクトドライブでギア比の概念が無い）。車輪半径 0.03m・
+  リンク比 0.5 は STM32 ファームウェアの換算定数にも反映済みで、残るクリティカルパスは
+  `[dynamics]` の実測のみ

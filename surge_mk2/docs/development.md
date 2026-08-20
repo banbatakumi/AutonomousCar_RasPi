@@ -61,7 +61,7 @@
 | `raspi/nodes/telemetry_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera） | しない |
 | `raspi/nodes/camera_node.py` | 同上 | しない |
 | **`raspi/auto/` `raspi/nav/` `planning_node.py`** | **`ssh surge-mk2 'sudo systemctl restart surge-planning'`**（★ `--restart` に入っていない。下記） | しない |
-| `config/vehicle.toml` `config/auto.json` | 読んでいるノードを再起動（planning / io） | io なら**する** |
+| `config/vehicle.toml` `config/auto.json` | 読んでいるノードを再起動（planning / io）。`vehicle.toml` は**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
 | `raspi/nodes/io_node.py` `raspi/io/` `raspi/msgs/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
 | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |
@@ -394,8 +394,9 @@ tools/deploy.sh --test                                           # Pi 上でも�
 **1 と 2 は必ず一致させる。** ずれると「GUI では上限まで上げられるのに実機は出ない」という
 分かりにくい状態になる。2 を上げても出ないなら **3 を疑う**。
 
-舵角も同様で `--max-steer`（既定 1.047 rad ＝ 60°）と `PI_MAX_STEER_CAP` の対で持っている。
-**60° の据え切りを続けるとステア MD が過熱する**ので `temp[2]` を見ておくこと。
+舵角も同様で `--max-steer`（既定 0.524 rad ＝ 30°。路面舵角の実機上限。モータ機械角の
+可動域 ±60° をリンク比 0.5 で割った値、2026-08-20 実測確定）と `PI_MAX_STEER_CAP` の対で
+持っている。**据え切りを続けるとステア MD が過熱する**ので `temp[2]` を見ておくこと。
 
 ### 8.6 カメラが映らない
 
