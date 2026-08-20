@@ -86,11 +86,6 @@ export function AssistLamps() {
       <span className={`lamp lamp-warn ${ui.braking ? 'on' : ''}`} title="Space / パッド L1">
         BRAKE
       </span>
-      {!ui.settings.autoStop && (
-        <span className="lamp lamp-dim on" title="超音波の自動停止を切っている。壁に当たっても止まらない">
-          自動停止 OFF
-        </span>
-      )}
     </div>
   )
 }
