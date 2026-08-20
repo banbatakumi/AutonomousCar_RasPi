@@ -257,6 +257,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._fan = FakeFan()
         srv._fan_mode = "auto"
         srv._fan_duty = 0.5
+        # Wi-Fi（SSID・電波強度）。**未接続の既定状態**を組む
+        from raspi.io.wifi import FakeWifi, WifiState
+        srv._wifi = FakeWifi()
+        srv._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
         srv.sent = []
 
         async def _send_json(ws, obj):

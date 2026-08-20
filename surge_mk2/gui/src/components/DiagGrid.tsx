@@ -10,13 +10,15 @@
  * 1箇所に集めてある（散らすと「なぜ開いたのか」が追えなくなる）。ここは表示だけ。
  */
 import type { Numbers } from '../bus/live'
-import { battLevel, ms, tempLevel } from '../format'
+import { battLevel, ms, tempLevel, wifiLevel } from '../format'
+import { useUi } from '../store/ui'
 
 export const TEMP_LABEL = ['MD後左', 'MD後右', 'MDステア', 'MCU']
 
 export function DiagGrid({ n }: { n: Numbers }) {
   const vs = n.vs
   const link = n.link
+  const wifi = useUi((s) => s.status?.wifi)
   if (!vs) return null
 
   return (
@@ -65,6 +67,20 @@ export function DiagGrid({ n }: { n: Numbers }) {
         <div className="kv">
           <span>後 RL/RR</span>
           <b>{vs.slip_rear.map((v) => v.toFixed(2)).join(' / ')}</b>
+        </div>
+      </section>
+
+      <section>
+        <h4>Wi-Fi</h4>
+        <div className="kv">
+          <span>SSID</span>
+          <b>{wifi?.available === false ? '取得不可' : (wifi?.ssid ?? '未接続')}</b>
+        </div>
+        <div className="kv">
+          <span>電波強度</span>
+          <b className={`lv-${wifiLevel(wifi?.rssi_dbm ?? null)}`}>
+            {wifi?.rssi_dbm == null ? '—' : `${wifi.rssi_dbm}dBm`}
+          </b>
         </div>
       </section>
 

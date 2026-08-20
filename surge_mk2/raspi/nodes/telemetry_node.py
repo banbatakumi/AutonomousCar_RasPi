@@ -108,6 +108,7 @@ from raspi.auto import PLANNERS, catalog as auto_catalog, merged_params  # noqa:
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
+from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
 from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -150,6 +151,9 @@ AUTO_CTRL_HZ = 5
 #: `pwm1_enable=1` のままでも温度のしきい値越えで `pwm1` を書き換えてくることがあり
 #: （`raspi/io/fan.py` 参照）、GUI からの指定が 1 回きりだと巻き戻されたまま気づけない
 FAN_PUMP_HZ = 1
+#: Wi-Fi(SSID・電波強度)の再取得周期。`nmcli` のサブプロセス起動が数十〜百数十msかかる
+#: ため 20Hz の `/ws/telemetry` には乗せず、`fan` と同じ低頻度ポーリングで `/ws/control` に載せる
+WIFI_PUMP_HZ = 1
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = 200 * 1_000_000
@@ -256,6 +260,12 @@ class TelemetryServer:
         self._fan_duty = 0.5
         # 前回異常終了で手動固定のまま残っていた場合の保険
         self._fan.set_auto()
+
+        # ── Wi-Fi（SSID・電波強度） ──
+        self._wifi = open_wifi()
+        #: `_wifi_pump` が低頻度で更新するキャッシュ。読み取り自体が `nmcli` の
+        #: サブプロセス起動を伴うため、`_control_status()` から毎回同期で呼ばない
+        self._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -610,6 +620,30 @@ class TelemetryServer:
             "rpm": self._fan.read_rpm(),
         }
 
+    # ── Wi-Fi（SSID・電波強度） ──
+
+    def _wifi_status(self) -> dict:
+        st = self._wifi_state
+        return {
+            "ssid": st.ssid,
+            "rssi_dbm": st.rssi_dbm,
+            "available": st.available,
+        }
+
+    async def _wifi_pump(self) -> None:
+        """Wi-Fi状態（SSID・電波強度）を低頻度で読み直し、変化をGUIへ流す。
+
+        `nmcli` のサブプロセス起動はイベントループを塞ぐため `to_thread` に逃がす
+        （`_camera_pump` のJPEGエンコードと同じ理由）。
+        """
+        period = 1.0 / WIFI_PUMP_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            if not self._wifi.available:
+                continue
+            self._wifi_state = await asyncio.to_thread(self._wifi.read)
+            await self._broadcast_control_status()
+
     def _control_status(self) -> dict:
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
         return {
@@ -630,6 +664,7 @@ class TelemetryServer:
             "mcap": self._mcap_status(),
             "auto": self._auto_status(),
             "fan": self._fan_status(),
+            "wifi": self._wifi_status(),
         }
 
     def _auto_status(self) -> dict:
@@ -1011,7 +1046,7 @@ class TelemetryServer:
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
-                self._auto_ctrl_pump, self._fan_pump)]
+                self._auto_ctrl_pump, self._fan_pump, self._wifi_pump)]
             try:
                 await stop
             finally:

@@ -4,19 +4,26 @@
  * ここに数字を増やすと読めなくなるので、載せるのは
  * 「状態が変わったら即座に気づきたいもの」に限る。
  *
- * ## variant='rc'（ラジコンタブ）
+ * 通信の生の数字（UART/WS の RTT、受信 Hz、CRC/loss）は**平常時はどのタブでも畳む**
+ * （2026-08-21: 以前はフル表示タブ側では常時4つ並べていたが、診断タブに同じ数字が
+ * 全部あって重複なだけだった）。リンクが劣化したときだけ1つのピルにまとめて出す。
  *
- * 通信の生の数字（UART/WS の RTT、受信 Hz、CRC/loss）を**平常時は畳む**。
- * 運転を楽しんでいる最中に読む数字ではなく、常時4つ並んでいると
- * ARM 状態や介入ピルが埋もれる。
+ * health（OK/DEGRADED等）は**variantに関係なく常に出す**（2026-08-21変更。以前は
+ * ラジコンタブでは正常時に隠していたが、正常なことも一目で分かる方が良いという
+ * 判断で常時表示にした）。
  *
- * **隠すのは正常時だけ。** リンクが劣化したら1つのピルにまとめて出し、
- * E-STOP・ARM・ラッチ警告・接続断は variant に関係なく必ず出す。
- * 詳しい数字は診断タブに全部ある。
+ * ## variant='rc'（ラジコンタブ）でも残っている違い
+ *
+ * TC/TVのピルは引き続き `variant === 'full'` のときだけ出す。ラジコンでは同じ介入を
+ * `AssistLamps`（映像下のランプ）が別の見た目で常時出しているので、ピルまで出すと重複する。
+ *
+ * E-STOP・ARM・ラッチ警告・接続断・Wi-Fi・health・自動停止 は variant に関係なく必ず出す
+ * （2026-08-21: 自動停止はラジコンだけ場所が違って分かりにくいという指摘で統一した）。
  */
 import { useNumbers } from '../bus/live'
 import { MODE_NAME, healthLevel, ms, rttLevel } from '../format'
 import { useUi } from '../store/ui'
+import { WifiIcon } from './WifiIcon'
 
 export type StatusVariant = 'full' | 'rc'
 
@@ -64,10 +71,7 @@ export function StatusBar({
           </span>
         )}
 
-        {/* ラジコンでは health が OK の間だけ省く。**異常なら variant に関係なく出す** */}
-        {(variant === 'full' || health !== 'OK') && (
-          <span className={`pill lv-${healthLevel(health)}`}>{health}</span>
-        )}
+        <span className={`pill lv-${healthLevel(health)}`}>{health}</span>
         <span className="pill">{mode}</span>
         <span className={`pill ${vs?.armed ? 'lv-warn' : 'dim'}`}>
           {vs?.armed ? 'ARMED' : 'DISARM'}
@@ -85,60 +89,55 @@ export function StatusBar({
           {ui.boost ? 'BOOST' : '低速'}{' '}
           {(ui.boost ? ui.settings.maxSpeed : ui.settings.maxSpeed * ui.settings.cruiseScale).toFixed(2)}
         </span>
-        {/* ラジコンでは介入をランプ（`components/rc/AssistLamps.tsx`）で出すので重複させない。
-            あちらは一瞬の介入もラッチして光る */}
+        {/* ラジコンでは TC/TV の介入をランプ（`components/rc/AssistLamps.tsx`）で出すので
+            重複させない。あちらは一瞬の介入もラッチして光る */}
         {variant === 'full' && vs?.tc_active && <span className="pill lv-warn">TC</span>}
         {variant === 'full' && vs?.tv_active && <span className="pill lv-warn">TV</span>}
         {/* v0.7 自動停止。**「許可しているか」と「今まさに効いているか」は別物**なので
             両方を1つのピルで出し分ける。効いている間は急減速の理由がこれだと即分かるように
-            lv-bad まで上げる（TC/TV より強い介入で、指令が完全に無視されるため） */}
-        {variant === 'full' && (
-          <span
-            className={`pill ${vs?.auto_stop_active ? 'lv-bad' : 'dim'}`}
-            title={
-              ui.settings.autoStop
-                ? '進行方向の超音波が 20cm 未満なら STM32 が指令を無視して最大制動する（ラジコンタブの設定で OFF にできる）'
-                : '自動停止は無効。STM32 は超音波を見ても止めない（ラジコンタブの設定で ON にできる）'
-            }
-          >
-            {vs?.auto_stop_active ? '自動停止 作動中' : ui.settings.autoStop ? '自動停止' : '自動停止 OFF'}
-          </span>
-        )}
+            lv-bad まで上げる（TC/TV より強い介入で、指令が完全に無視されるため）。
+            **variantに関係なく常に出す**（2026-08-21: 以前はフル表示タブだけで、ラジコン側は
+            `AssistLamps` の「自動停止 OFF」ランプが同じ情報を別の場所に出していたが、
+            場所が揃っていない方が分かりにくいという指摘で、こちらに一本化した） */}
+        <span
+          className={`pill ${vs?.auto_stop_active ? 'lv-bad' : 'dim'}`}
+          title={
+            ui.settings.autoStop
+              ? '進行方向の超音波が 20cm 未満なら STM32 が指令を無視して最大制動する（ラジコンタブの設定で OFF にできる）'
+              : '自動停止は無効。STM32 は超音波を見ても止めない（ラジコンタブの設定で ON にできる）'
+          }
+        >
+          {vs?.auto_stop_active ? '自動停止 作動中' : ui.settings.autoStop ? '自動停止' : '自動停止 OFF'}
+        </span>
 
         <div className="spacer" />
 
-        {variant === 'full' ? (
-          <>
-            <span className="metric" title="COMMAND を送ってから cmd_seq_echo で返るまで（UART 往復）">
-              <b className={`lv-${rtt}`}>{ms(link?.cmd_rtt_ms)}</b>
-              <i>uart</i>
-            </span>
-            <span className="metric" title="GUI ↔ Pi の往復（WebSocket）">
-              <b>{ms(ui.wsRttMs)}</b>
-              <i>ws</i>
-            </span>
-            <span className="metric" title="テレメトリの実受信レート。20Hz を大きく割ったら GUI 側が詰まっている">
-              <b className={n.stale ? 'lv-bad' : ''}>{n.rxHz.toFixed(0)}</b>
-              <i>Hz</i>
-            </span>
-            <span className="metric" title="Pi 側で数えた CRC エラー / パケットロス">
-              <b className={(link?.rx?.crc_error ?? 0) + (link?.rx?.packet_loss ?? 0) > 0 ? 'lv-warn' : ''}>
-                {link?.rx?.crc_error ?? 0}/{link?.rx?.packet_loss ?? 0}
-              </b>
-              <i>crc/loss</i>
-            </span>
-          </>
-        ) : (
-          // 平常時は何も出さない。**遅い・切れかけのときだけ**1つのピルで割り込む
-          linkPoor && (
-            <span
-              className={`pill ${n.stale || linkBad ? 'lv-bad' : 'lv-warn'}`}
-              title="通信の詳しい数字（RTT・受信 Hz・CRC・パケットロス）は診断タブにある"
-            >
-              {n.stale ? '通信 途絶' : linkBad ? `通信 ${health}` : `通信 遅延 ${ms(link?.cmd_rtt_ms, 0)}`}
-            </span>
-          )
+        {/* 平常時はどのタブでも何も出さない。**遅い・切れかけのときだけ**1つのピルで割り込む。
+            詳しい数字（RTT・受信Hz・CRC・パケットロス）は診断タブに全部ある */}
+        {linkPoor && (
+          <span
+            className={`pill ${n.stale || linkBad ? 'lv-bad' : 'lv-warn'}`}
+            title="通信の詳しい数字（RTT・受信 Hz・CRC・パケットロス）は診断タブにある"
+          >
+            {n.stale ? '通信 途絶' : linkBad ? `通信 ${health}` : `通信 遅延 ${ms(link?.cmd_rtt_ms, 0)}`}
+          </span>
         )}
+
+        {/* Pi側の物理Wi-Fiリンク。**「接続/切断」（WSが繋がっているか）とは別物**——
+            電波は繋がっていてもPi側プロセスが落ちていればWSは切れるし、逆にWSが
+            繋がっていても電波が弱ければ切れる予兆として先に読める */}
+        <span
+          className="metric"
+          title={
+            ui.status?.wifi?.available === false
+              ? 'この機体ではWi-Fi状態を取得できない'
+              : ui.status?.wifi?.ssid == null
+                ? 'Wi-Fi 未接続'
+                : `SSID: ${ui.status.wifi.ssid} / ${ui.status.wifi.rssi_dbm ?? '—'}dBm`
+          }
+        >
+          <WifiIcon dbm={ui.status?.wifi?.rssi_dbm ?? null} />
+        </span>
 
         <span className={`pill ${ui.telemetryOpen ? 'lv-ok' : 'lv-bad'}`}>
           {ui.telemetryOpen ? '接続' : '切断'}

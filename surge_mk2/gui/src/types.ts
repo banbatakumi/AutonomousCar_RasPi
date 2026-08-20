@@ -265,6 +265,16 @@ export type FanStatus = {
   rpm: number | null
 }
 
+/** 接続中Wi-FiのSSID・電波強度。**サーバが真値**（`raspi/io/wifi.py`、1Hzで再取得）。 */
+export type WifiStatus = {
+  /** 接続中のSSID。未接続なら null */
+  ssid: string | null
+  /** 電波強度 [dBm]。取得できなければ null */
+  rssi_dbm: number | null
+  /** この機体でWi-Fi状態の取得自体ができるか（Mac等の開発機では false） */
+  available: boolean
+}
+
 /** `/ws/control` のサーバ → GUI。 */
 export type ControlStatus = {
   type: 'status'
@@ -286,6 +296,8 @@ export type ControlStatus = {
   auto: AutoStatus
   /** Pi5純正ファンの意思。**サーバが真値** */
   fan: FanStatus
+  /** 接続中Wi-FiのSSID・電波強度。**サーバが真値** */
+  wifi: WifiStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */

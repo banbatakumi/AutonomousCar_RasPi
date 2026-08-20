@@ -836,6 +836,19 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .lv-bg-warn { background: var(--warn); fill: var(--warn); }
 .lv-bg-bad { background: var(--bad); fill: var(--bad); }
 
+/*
+ * `lv-bg-dim` はゲージの「空の器」用でほぼ黒（#2f3a46）— 器の輪郭に囲まれて
+ * 初めて見える色なので、輪郭を持たない `WifiIcon` の消灯部分に使うと
+ * 背景に溶けて見えなくなる。こちらは `--dim`（#6a7683、`.dim` と同じ）を使う。
+ */
+.lv-bg-dim2 { fill: var(--dim); }
+.lv-stroke-dim { stroke: var(--dim); }
+.lv-stroke-ok { stroke: var(--ok); }
+.lv-stroke-warn { stroke: var(--warn); }
+.lv-stroke-bad { stroke: var(--bad); }
+
+.wifi-icon { flex: 0 0 auto; vertical-align: middle; }
+
 /* ── 設定ドロワー（ラジコンタブ内） ───────────────────── */
 
 .gear {

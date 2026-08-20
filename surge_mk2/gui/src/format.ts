@@ -64,3 +64,19 @@ export function healthLevel(h: string | undefined): Level {
   if (h === 'DEGRADED') return 'warn'
   return 'bad'
 }
+
+/** Wi-Fi RSSI [dBm]。null は未接続/取得不可（信用できないので bad 扱い、`tempLevel` と同じ方針）。 */
+export function wifiLevel(dbm: number | null): Level {
+  if (dbm == null) return 'bad'
+  if (dbm <= -75) return 'bad'
+  if (dbm <= -60) return 'warn'
+  return 'ok'
+}
+
+/** Wi-Fi RSSI [dBm] → バー本数(0-3)。`WifiIcon` の表示専用（しきい値は `wifiLevel` と共通）。 */
+export function wifiBars(dbm: number | null): 0 | 1 | 2 | 3 {
+  if (dbm == null) return 0
+  if (dbm <= -75) return 1
+  if (dbm <= -60) return 2
+  return 3
+}
