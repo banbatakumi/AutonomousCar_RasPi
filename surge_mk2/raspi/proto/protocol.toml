@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0007      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0009      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -313,13 +313,23 @@ COMPRESSED = 2
 
 [params]
 comment = "CONFIG_SET / CONFIG_GET の param_id"
+# MAX_SPEED/MAX_ACCEL/MAX_STEER: STM32側がtarget_speed等のクランプに使う自前の既定値として
+# 持っている。CONFIG_SETはFlash永続化されず毎起動リセットされる上、Pi側からの動的変更の
+# ユースケースも無いため、Piからは意図的に送信しない（STM32側の既定値を単独の権威とする）。
 MAX_SPEED      = 0x0001
 MAX_ACCEL      = 0x0002
 MAX_STEER      = 0x0003
+# TC_ENABLE/TV_ENABLE: v0.8でSTM32ファームウェアが実装済み（以前は未実装で
+# RAS_CONFIG_UNKNOWN_PARAM を返していた）。Pi側から実際に送信する（raspi/nodes/io_node.py）。
 TC_ENABLE      = 0x0010
-TC_SLIP_THRESH = 0x0011
+TC_SLIP_THRESH = 0x0011  # 未実装（STM32側が UNKNOWN_ID を返す）
 TV_ENABLE      = 0x0020
-TV_GAIN        = 0x0021
-SPEED_KP       = 0x0030
-SPEED_KI       = 0x0031
+TV_GAIN        = 0x0021  # 未実装（STM32側が UNKNOWN_ID を返す）
+SPEED_KP       = 0x0030  # 未実装（STM32側が UNKNOWN_ID を返す）
+SPEED_KI       = 0x0031  # 未実装（STM32側が UNKNOWN_ID を返す）
 LIDAR_FORMAT   = 0x0040
+# WHEEL_LIFT_GUARD_ENABLE: v0.9でSTM32ファームウェアが実装済み（後輪片浮きの検知・
+# トルク遮断）。TC_ENABLE/TV_ENABLE本体とは独立に動く別機構。Pi側から実際に送信する
+# （raspi/nodes/io_node.py）。
+WHEEL_LIFT_GUARD_ENABLE = 0x0050
+WHEEL_LIFT_GUARD_THRESH = 0x0051  # 未実装（STM32側が UNKNOWN_ID を返す）

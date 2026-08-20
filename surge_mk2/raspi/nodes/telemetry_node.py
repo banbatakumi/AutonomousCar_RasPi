@@ -488,6 +488,23 @@ class TelemetryServer:
             self._on_fan(m)
             await self._broadcast_control_status()
 
+        # ── TC/TV 有効切り替え（誰でも操作できる。★v0.8） ──
+        # STM32側の適用結果は `diag/link`(tc_enabled/tv_enabled) 経由で戻ってくるので
+        # ここでは broadcast しない（fan と違いサーバ内で完結する状態を持たないため）
+
+        elif kind == "tc_tv":
+            if "tc" in m:
+                self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tc_enable", value=bool(m["tc"])))
+            if "tv" in m:
+                self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tv_enable", value=bool(m["tv"])))
+
+        # ── 片輪浮き対策（誰でも操作できる。TC/TV本体とは独立した別機構。★v0.9） ──
+
+        elif kind == "wheel_lift_guard":
+            if "enabled" in m:
+                self.pub.send(TOPIC_UI_EVENT,
+                               UiEvent(kind="wheel_lift_guard_enable", value=bool(m["enabled"])))
+
         elif kind == "ping":
             await self._send_json(ws, {"type": "pong", "id": m.get("id"),
                                        "t_server": time.monotonic_ns()})
@@ -655,6 +672,11 @@ class TelemetryServer:
             "health": link.health if link else "INIT",
             "estop_active": link.estop_active if link else False,
             "drive_power_locked": link.drive_power_locked if link else False,
+            # ★v0.8: STM32が実際に適用しているTC/TVの有効状態。CONFIG_ACKをまだ
+            # 受け取っていなければ None（未確定）
+            "tc_enabled": link.tc_enabled if link else None,
+            "tv_enabled": link.tv_enabled if link else None,
+            "wheel_lift_guard_enabled": link.wheel_lift_guard_enabled if link else None,
             "clients": {"telemetry": len(self.telemetry_clients),
                         "control": len(self.control_clients),
                         "camera": {k: len(v) for k, v in self.camera_clients.items()}},

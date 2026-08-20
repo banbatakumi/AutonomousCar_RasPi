@@ -1,20 +1,27 @@
 /**
- * 設定パネル — ラジコンタブの歯車から開くドロワーの中身（`components/SettingsDrawer.tsx`）。
+ * 設定パネル — 走行タブ（ラジコン／自動運転）の歯車から開くドロワーの中身
+ * （`components/SettingsDrawer.tsx`）。
  *
  * ## なぜ独立したタブをやめたのか
  *
- * ここの項目は**すべてラジコン操作のためのもの**で、自動運転でも診断でもログでも
- * 使わない。タブを1枚使って画面上部を占有する価値がなく、かつ
+ * ここの項目は**すべて手動（キーボード/パッド）操作のためのもの**で、診断でも
+ * ログでも使わない。タブを1枚使って画面上部を占有する価値がなく、かつ
  * 「走らせて → 加速が鈍い → 直す → また走らせる」の往復でタブを切り替えるのは
- * 手間でしかない。ラジコンタブの中に畳んで、走りながら開けるようにした。
+ * 手間でしかない。走行タブの中に畳んで、走りながら開けるようにした。
+ *
+ * 自動運転タブでも中身は同じもの（2026-08-20）——engage 中でも人間がキーボードで
+ * 位置を微調整する場面があり、そこで効く速度・舵の調整値はラジコンタブと共通
+ * （`store/ui.ts` の `DrivingSettings` は1つしかなく、タブごとに分かれていない）。
  *
  * ここにあるのは**すべて GUI 側だけで完結する調整値**（`store/ui.ts` の
  * `DrivingSettings`）。`localStorage` に保存され、次回起動時も引き継がれる。
  *
- * ⚠ **Pi 側の実機設定（TC/TV ゲインなど、`CONFIG_SET`/`CONFIG_GET` で
- * STM32 と同期するもの）はまだここに無い。** io_node 側にその WS 経路が
- * 無いため（`architecture.md` §10.5 の「Pi を single source of truth に
- * する」設計はまだ未実装）。ここで扱うのは、あくまで GUI が指令を作る
+ * ⚠ **STM32 実機の `CONFIG_SET`/`CONFIG_GET` で同期する設定は、
+ * TC/TV の有効・無効切り替え（★v0.8）だけ対応済み。** ゲイン等の連続値
+ * パラメータ（`TC_SLIP_THRESH`/`TV_GAIN`/`SPEED_KP`/`SPEED_KI`）は
+ * STM32 ファームウェア側が未実装のため、まだここに無い
+ * （`architecture.md` §10.5 の「Pi を single source of truth にする」
+ * 設計は部分的にしか実現していない）。他はすべて GUI が指令を作る
  * ときのランプ・上限だけ。
  */
 import type { DrivingSettings, NumericSettingKey } from '../store/ui'
@@ -23,6 +30,8 @@ import {
   PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, SETTINGS_RANGE, useUi,
 } from '../store/ui'
 import { RAD2DEG } from '../format'
+import { useNumbers } from '../bus/live'
+import type { ControlChannel } from '../ws/control'
 
 type Field = {
   key: NumericSettingKey
@@ -109,10 +118,19 @@ const MISC_FIELDS: Field[] = [
   },
 ]
 
-export function SettingsPanel() {
+export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const settings = useUi((s) => s.settings)
   const setSettings = useUi((s) => s.setSettings)
   const resetSettings = useUi((s) => s.resetSettings)
+  // estop_active/drive_power_locked と同じく、これは `/ws/control` の status
+  // （イベント発生時にしかbroadcastされない）ではなく `/ws/telemetry` 経由で
+  // 継続更新される LinkDiag（8Hz、`bus/live.ts`）から読む。status から読むと
+  // 実際は変わっているのにチェックボックスが更新されず、リロードするまで
+  // 反映されないように見える（2026-08-19 実機で発覚）
+  const { link } = useNumbers()
+  const tcEnabled = link?.tc_enabled ?? null
+  const tvEnabled = link?.tv_enabled ?? null
+  const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
 
   return (
     <div className="settings">
@@ -163,6 +181,43 @@ export function SettingsPanel() {
             onChange={(e) => setSettings({ autoStop: e.target.checked })}
           />
           進行方向 {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で STM32 に自動停止させる
+        </label>
+      </section>
+
+      {/* TC/TV・片輪浮き対策 も自動停止と同じく「STM32の機能を許可するかどうか」
+          （TC/TVは★v0.8、片輪浮き対策は★v0.9。片輪浮き対策はTC/TV本体とは独立した別機構）。
+          表示値は STM32 の CONFIG_ACK を経由したサーバ真値
+          （`status.tc_enabled`/`tv_enabled`/`wheel_lift_guard_enabled`）。
+          未確定（起動直後でまだ CONFIG_ACK が届いていない）間は null になる */}
+      <section className="settings-group">
+        <h3>走行アシスト（STM32）</h3>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={tcEnabled ?? true}
+            disabled={tcEnabled === null}
+            onChange={(e) => ch?.setTcTv({ tc: e.target.checked })}
+          />
+          トラクションコントロール（TC）{tcEnabled === null && '（未確認）'}
+        </label>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={tvEnabled ?? true}
+            disabled={tvEnabled === null}
+            onChange={(e) => ch?.setTcTv({ tv: e.target.checked })}
+          />
+          トルクベクタリング（TV）{tvEnabled === null && '（未確認）'}
+        </label>
+        {/* 片輪浮き対策はTC/TV本体とは独立した別機構（★v0.9） */}
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={wheelLiftGuardEnabled ?? true}
+            disabled={wheelLiftGuardEnabled === null}
+            onChange={(e) => ch?.setWheelLiftGuard(e.target.checked)}
+          />
+          片輪浮き対策{wheelLiftGuardEnabled === null && '（未確認）'}
         </label>
       </section>
 

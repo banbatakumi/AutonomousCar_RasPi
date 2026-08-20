@@ -80,6 +80,11 @@ export type LinkDiag = {
   health: 'INIT' | 'OK' | 'DEGRADED' | 'FAULT'
   estop_active: boolean
   drive_power_locked: boolean
+  /** STM32側で実際に適用されているTC/TVの有効状態（★v0.8）。CONFIG_ACK未受信ならnull */
+  tc_enabled: boolean | null
+  tv_enabled: boolean | null
+  /** STM32側で実際に適用されている片輪浮き対策の有効状態（★v0.9）。TC/TV本体とは独立した別機構。CONFIG_ACK未受信ならnull */
+  wheel_lift_guard_enabled: boolean | null
   arm_inhibited: boolean
   cmd_source: string
   cmd_stale: boolean
@@ -285,6 +290,11 @@ export type ControlStatus = {
   health: string
   estop_active: boolean
   drive_power_locked: boolean
+  /** STM32側で実際に適用されているTC/TVの有効状態（★v0.8）。CONFIG_ACK未受信ならnull */
+  tc_enabled: boolean | null
+  tv_enabled: boolean | null
+  /** STM32側で実際に適用されている片輪浮き対策の有効状態（★v0.9）。TC/TV本体とは独立した別機構。CONFIG_ACK未受信ならnull */
+  wheel_lift_guard_enabled: boolean | null
   clients: { telemetry: number; control: number; camera: Record<string, number> }
   camera_encoder: string | null
   deadman_trips: number

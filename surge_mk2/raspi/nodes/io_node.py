@@ -335,6 +335,15 @@ class IoNode:
         self._ui_event_seq = msg.seq
         if msg.kind == "gui_connect" and self.buzzer is not None:
             self.buzzer.play(MELODY_GUI_CONNECT)
+        elif msg.kind == "tc_enable":
+            self.link.send(packets.ConfigSet(
+                param_id=packets.Param.TC_ENABLE, value=1.0 if msg.value else 0.0))
+        elif msg.kind == "tv_enable":
+            self.link.send(packets.ConfigSet(
+                param_id=packets.Param.TV_ENABLE, value=1.0 if msg.value else 0.0))
+        elif msg.kind == "wheel_lift_guard_enable":
+            self.link.send(packets.ConfigSet(
+                param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE, value=1.0 if msg.value else 0.0))
 
     def _send_command(self) -> None:
         """今この瞬間送るべき `COMMAND` を決めて送る。
@@ -484,10 +493,15 @@ def main() -> int:
     pub = sub = None
     if not args.no_bus:
         try:
-            from raspi.bus import LATEST, Publisher, Subscriber
+            from raspi.bus import LATEST, RELIABLE, Publisher, Subscriber
             pub = Publisher("io")
+            # UiEvent は「今起きた単発イベント」の列であって「現在の状態」ではない
+            # （`msgs/types.py` の UiEvent docstring参照）。LATEST(CONFLATE=1) だと、
+            # 例えば tc_enable と tv_enable を短時間に連続 publish したとき片方が
+            # 消費前に上書きされて消える（2026-08-19、TC/TVトグルの実装で発覚）。
+            # 取りこぼしてはいけないので RELIABLE にする
             sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST,
-                               TOPIC_UI_EVENT: LATEST})
+                               TOPIC_UI_EVENT: RELIABLE})
             print(f"# バス配信 {pub.endpoint} "
                   f"(vehicle_state / scan / diag/link / hb/io)")
         except ImportError as e:
@@ -560,6 +574,12 @@ def main() -> int:
         ok = "✓" if ver.protocol_version == PROTOCOL_VERSION else "✗ 不一致!"
         print(f"# STM32 protocol_version=0x{ver.protocol_version:04X} "
               f"fw=0x{ver.fw_id:08X} {ok}")
+        # ★v0.8: TC/TV、★v0.9: 片輪浮き対策の有効/無効はGUI操作を待たず、接続確立直後に
+        # 一度だけ現在値を取得しておく（`CONFIG_SET` はFlash永続化されないので、GUI操作前でも
+        # STM32起動直後の実際の状態をGUIに出せるようにするため）
+        node.link.send(packets.ConfigGet(param_id=packets.Param.TC_ENABLE))
+        node.link.send(packets.ConfigGet(param_id=packets.Param.TV_ENABLE))
+        node.link.send(packets.ConfigGet(param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE))
 
     if args.allow_arm:
         print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")

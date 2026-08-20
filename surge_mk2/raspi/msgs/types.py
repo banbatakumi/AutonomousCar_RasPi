@@ -239,6 +239,15 @@ class LinkDiag(MsgBase):
     #: `cmd` が途絶して DISARM にフォールバックしているか
     cmd_stale: bool = True
 
+    #: TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.8）。
+    #: 未確認（起動直後でまだ `CONFIG_ACK` を受け取っていない）なら None
+    tc_enabled: bool | None = None
+    tv_enabled: bool | None = None
+
+    #: 片輪浮き対策（Wheel Lift Guard）が STM32 側で実際に有効化されているか
+    #: （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。未確認なら None
+    wheel_lift_guard_enabled: bool | None = None
+
     rx: dict[str, int] = msgspec.field(default_factory=dict)      #: Pi 側 RxStats
     stm_rx: dict[str, int] | None = None   #: STM32 の STATS（**累積値**）
 
@@ -441,7 +450,9 @@ class UiEvent(MsgBase):
     別途持たなくて済む。
     """
 
-    kind: str = ""                         #: 例: "gui_connect"
+    kind: str = ""                         #: 例: "gui_connect", "tc_enable", "tv_enable", "wheel_lift_guard_enable"
+    #: `kind` が真偽値を伴うイベント（"tc_enable"/"tv_enable"/"wheel_lift_guard_enable" 等）のときだけ意味を持つ
+    value: bool = False
 
 
 #: トピック → 型。`Subscriber` がデコードに使う。

@@ -134,6 +134,26 @@ export class ControlChannel {
     this.send({ type: 'fan', ...p })
   }
 
+  // ── TC/TV 有効切り替え（★v0.8） ──
+
+  /**
+   * STM32側のトラクションコントロール/トルクベクタリングの有効・無効を切り替える。
+   * `fan` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。**両方省略できる**（送った項目だけ効く）。
+   */
+  setTcTv(p: { tc?: boolean; tv?: boolean }) {
+    this.send({ type: 'tc_tv', ...p })
+  }
+
+  // ── 片輪浮き対策 有効切り替え（★v0.9） ──
+
+  /**
+   * STM32側の片輪浮き対策（後輪片浮き検知・トルク遮断）の有効・無効を切り替える。
+   * TC/TV本体とは独立した別機構。`tc_tv` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。
+   */
+  setWheelLiftGuard(enabled: boolean) {
+    this.send({ type: 'wheel_lift_guard', enabled })
+  }
+
   // ── 記録・再生 ──
 
   /** `.sfl` の記録意思を送る。実際に開閉するのは io_node（`log/ctrl` 経由） */

@@ -43,6 +43,15 @@ LATCHING_FLAGS = {
     "drive_power_locked": packets.FLG_DRIVE_POWER_LOCKED,
 }
 
+#: `CONFIG_ACK` の `param_id` のうち、`LinkState` に bool として持たせるもの（★v0.8）。
+#: `CONFIG_SET`/`CONFIG_GET` どちらの応答でも同じ形式で返るので区別しない
+#: `WHEEL_LIFT_GUARD_ENABLE` も同様（★v0.9）。TC/TV本体とは独立した別機構
+CONFIG_ACK_BOOL_PARAMS = {
+    packets.Param.TC_ENABLE: "tc_enabled",
+    packets.Param.TV_ENABLE: "tv_enabled",
+    packets.Param.WHEEL_LIFT_GUARD_ENABLE: "wheel_lift_guard_enabled",
+}
+
 
 @dataclass(slots=True)
 class LinkState:
@@ -61,6 +70,16 @@ class LinkState:
     estop_active: bool = False
     #: 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない**
     drive_power_locked: bool = False
+
+    #: TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.8）。
+    #: まだ `CONFIG_ACK` を受け取っていなければ None
+    tc_enabled: bool | None = None
+    tv_enabled: bool | None = None
+
+    #: 片輪浮き対策（Wheel Lift Guard）が STM32 側で実際に有効化されているか
+    #: （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。
+    #: まだ `CONFIG_ACK` を受け取っていなければ None
+    wheel_lift_guard_enabled: bool | None = None
 
 
 class LinkTracker:
@@ -120,6 +139,8 @@ class LinkTracker:
         elif isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
                               packets.LidarSectorC)):
             self.state.lidar_sectors.add(msg.sector_idx)
+        elif isinstance(msg, packets.ConfigAck):
+            self._update_config_ack(msg)
 
         if self.on_frame:
             self.on_frame(rx_ns, pkt_type, seq, msg)
@@ -137,6 +158,18 @@ class LinkTracker:
                 setattr(self.state, name, new)
                 if self.on_latch:
                     self.on_latch(name, new, t_ns)
+
+    def _update_config_ack(self, msg) -> None:
+        """`CONFIG_ACK`（`CONFIG_SET`/`CONFIG_GET` どちらへの応答も含む）を取り込む。
+
+        対象外の `param_id` や、`result != OK`（範囲外・不明ID等）は無視する。
+        `result == OK` のときの `applied` が STM32 側で実際に適用された値
+        （クランプ後・現在値そのもの）
+        """
+        name = CONFIG_ACK_BOOL_PARAMS.get(msg.param_id)
+        if name is None or msg.result != packets.ConfigResult.OK:
+            return
+        setattr(self.state, name, msg.applied != 0.0)
 
     # ── health ──
 

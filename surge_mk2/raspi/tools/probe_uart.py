@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """STM32 との UART 疎通を確認する診断ツール。
 
-io_node を書く前に「そもそも通信できているか」「ファームが v0.5 か」を切り分ける。
+io_node を書く前に「そもそも通信できているか」「ファームが v0.8 か」を切り分ける。
 
     .venv/bin/python raspi/tools/probe_uart.py                 # VERSION_REQ を投げて 3秒聞く
     .venv/bin/python raspi/tools/probe_uart.py --passive       # 何も送らず受信だけ見る
@@ -10,7 +10,7 @@ io_node を書く前に「そもそも通信できているか」「ファーム
 出力:
 - 生バイトの先頭サンプル（フレーミングが合わなくても中身が見える）
 - TYPE 別のフレーム数
-- VERSION が返れば protocol_version を照合（0x0005 = v0.5）
+- VERSION が返れば protocol_version を照合（0x0008 = v0.8）
 - 最初の TELEMETRY を SI 単位でデコード表示
 - CRC / ロス / 長さエラーの統計
 """
