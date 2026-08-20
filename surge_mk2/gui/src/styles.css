@@ -187,15 +187,15 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: minmax(0, 1fr) auto auto auto auto;
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
   grid-template-areas:
     'camf camr lidar'
     'auto auto auto'
     'bar  bar  bar'
-    'aux  aux  aux'
-    'diag diag diag';
+    'aux  aux  aux';
   gap: 6px;
   padding: 6px;
+  position: relative; /* 設定ドロワーの基準（`.rc` と同じ理由、`SettingsDrawer.tsx` 参照） */
 }
 
 .cam-front,
@@ -437,20 +437,8 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 .seg button + button { border-left: none; }
 .seg button.on { background: #2a3441; color: var(--fg); border-color: #3b4550; }
 
-/* ── 層 C（畳んである診断） ──────────────────────────── */
+/* ── 診断（現在値グリッド。診断タブ `DiagView` から使う） ─────────── */
 
-.diag {
-  grid-area: diag;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 5px 10px;
-  max-height: 34vh;
-  overflow: auto;
-}
-.diag.open { border-color: #3b4550; }
-.diag-toggle { background: none; border: none; padding: 2px 0; color: var(--fg); }
-.diag-alerts { display: flex; flex-wrap: wrap; gap: 5px; padding: 3px 0 6px; }
 .diag-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

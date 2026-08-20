@@ -1,5 +1,11 @@
 /**
- * 設定ドロワー — ラジコンタブの右上の歯車から出てくるパネル。
+ * 設定ドロワー — 走行タブ（ラジコン／自動運転）の右上の歯車から出てくるパネル。
+ *
+ * 2026-08-20 まではラジコンタブ専用だった。自動運転タブでも `useDriving` は
+ * 生きており、engage 中の微調整や engage 前後のキーボード操作で同じ調整値
+ * （速度・舵のレート等）を使うため、`AutoView.tsx` にも同じコンポーネントを
+ * 置いた。中身（`SettingsPanel`）は1つを共有する——タブごとに別の設定を
+ * 持たせると「どちらのタブで変えた値が効いているか」が分からなくなる。
  *
  * ## 走りながら開けること
  *
@@ -18,9 +24,10 @@
  * 右端に寄せるだけにして、カメラと計器は出したままにする。
  */
 import { useUi } from '../store/ui'
+import type { ControlChannel } from '../ws/control'
 import { SettingsPanel } from './SettingsPanel'
 
-export function SettingsDrawer() {
+export function SettingsDrawer({ ch }: { ch: ControlChannel | null }) {
   const open = useUi((s) => s.settingsOpen)
   const set = useUi((s) => s.set)
 
@@ -44,7 +51,7 @@ export function SettingsDrawer() {
           </button>
         </div>
         <div className="drawer-body">
-          <SettingsPanel />
+          <SettingsPanel ch={ch} />
         </div>
       </aside>
     </>

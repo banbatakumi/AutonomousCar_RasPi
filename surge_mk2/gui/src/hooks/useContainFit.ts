@@ -17,10 +17,20 @@
  * 0 になりうる）。呼び出し側で「メータ行に確保したい最小高さ」を渡す。
  * 映像がその最小分より小さくて済むとき（横長のコンテナなど）は、余った分は
  * 自動的にメータ行（`flex: 1` 側）に回る——ここでは映像の上限だけを決める。
+ *
+ * ## `widthOverride` — 幅だけ呼び出し側から渡す（2026-08-17）
+ *
+ * 呼び出し側（`RcView.tsx`）が、この結果（映像幅）を使って**測定対象の要素
+ * 自身の幅を変える**ことがある（高さ律速で映像が狭くなった分、隣の列を
+ * 広げて隙間を消す）。その場合 `el.clientWidth` をそのまま使うと
+ * 「上書き→再測定→再上書き…」で循環してしまうため、幅だけは呼び出し側が
+ * 別の（上書きの影響を受けない）要素から測った値を渡せるようにしている。
+ * 未指定なら従来どおり `el.clientWidth` を使う。高さは対象要素からの実測
+ * のままでよい（列の高さは幅の上書きでは変わらないため）。
  */
 import { useEffect, useRef, useState } from 'react'
 
-export function useContainFit<T extends HTMLElement>(aspect: number, reservePx = 0) {
+export function useContainFit<T extends HTMLElement>(aspect: number, reservePx = 0, widthOverride?: number) {
   const ref = useRef<T>(null)
   const [size, setSize] = useState<{ width: number; height: number } | null>(null)
 
@@ -29,7 +39,7 @@ export function useContainFit<T extends HTMLElement>(aspect: number, reservePx =
     if (!el) return
 
     const measure = () => {
-      const cw = el.clientWidth
+      const cw = widthOverride ?? el.clientWidth
       const ch = Math.max(0, el.clientHeight - reservePx)
       if (!cw || !ch) return
       let w = cw
@@ -45,7 +55,7 @@ export function useContainFit<T extends HTMLElement>(aspect: number, reservePx =
     const ro = new ResizeObserver(measure)
     ro.observe(el)
     return () => ro.disconnect()
-  }, [aspect, reservePx])
+  }, [aspect, reservePx, widthOverride])
 
   return { ref, size }
 }

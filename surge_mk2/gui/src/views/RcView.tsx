@@ -21,7 +21,7 @@
  *   ├──────┬──────────────────────────┤   │
  *   │ [PIP]│      速度計 / G メータ     │   │
  *   └──────┴──────────────────────────┴───┘
- *          映像 : 車体図 = 4 : 1
+ *          映像 : 車体図 = 4 : 1（下段が最低高さのときは車体図側が広がる。後述）
  * ```
  *
  * **操縦はメインの映像を見て行う。** 右パネルは車体図（`RcBar`／`DrivePanel`）専任にし、
@@ -50,9 +50,11 @@
  * の描画ループが元々やっている contain-fit（`Math.min(w/bw,h/bh)` で中央に
  * 描く）がそのまま効くので、ここでは何もしなくてよい。
  *
- * **メイン映像のうち PIP・LiDAR 以外をクリックすると、PIP・LiDAR・進路ガイドが
- * まとめて表示/非表示になる**（不要なときに一瞬で消せる非常用スイッチ。
- * 前後入れ替え自体は PIP を再表示すればまた使える）。
+ * **メイン映像のうち PIP・LiDAR 以外をクリックすると、LiDAR・進路ガイドが
+ * まとめて表示/非表示になる**（不要なときに一瞬で消せる非常用スイッチ）。
+ * PIP（小さい映像）はこの切り替えに含めない（2026-08-20）——同じクリックで
+ * 一緒に消えると「LiDAR を消したつもりが映像まで消えた」と紛らわしいため、
+ * PIP は独立させ常時表示のままにしてある。
  * fps だけはどちらの操作でも消えない。
  *
  * 文字は極力出さない方針にした。「前方」「後方」ラベルとガイドの校正前バッジは
@@ -75,6 +77,23 @@
  *
  * 映像は列の**上に詰める**（`align-self: flex-start`、`styles.css`）。
  * 余った縦幅はすべて `.rc-cam-bottom`（`flex: 1`）に渡る。
+ *
+ * ## 下段が最低高さのとき、車体図の列を横に広げて隙間を消す（2026-08-17）
+ *
+ * 下段（PIP＋メータ）が `BOTTOM_RESERVE_PX` の最低値まで縮む＝映像が
+ * **高さ律速**で決まっているとき、映像の幅は列の本来の幅（`4fr` 分）より
+ * 狭くなる。何もしないと映像の右側・車体図の左側の間に縦長の隙間ができる。
+ *
+ * `naturalCamsWidth`（`.rc` 自体の実測幅から `4:1` 比率で逆算した「列の本来の
+ * 幅」）と実際の映像幅の差分だけ、`.rc` の `grid-template-columns` を
+ * `${映像の実測幅}px minmax(0,1fr)` に上書きし、車体図の列（`grid-area:
+ * meters`）に丸ごと渡す。横幅律速（隙間が無い）のときは上書きせず CSS 既定の
+ * `4fr 1fr` に任せる——常に固定 px で上書きすると、ウィンドウ幅が変わっても
+ * 映像列が追従しなくなるため。
+ *
+ * `naturalCamsWidth` は `.rc-cams` ではなく `.rc` 自体から測る。`.rc-cams` を
+ * 測ると、上書き後の幅を拾って「上書き→再測定→再上書き」の循環に陥る
+ * （`hooks/useContainFit.ts` の `widthOverride` コメント参照）。
  */
 import { useState } from 'react'
 import { useUi } from '../store/ui'
@@ -87,6 +106,7 @@ import { SettingsDrawer } from '../components/SettingsDrawer'
 import { useContainFit } from '../hooks/useContainFit'
 import { useElementSize } from '../hooks/useElementSize'
 import { CameraView } from '../render/CameraView'
+import type { ControlChannel } from '../ws/control'
 
 /** 最初のフレームが届くまでの仮の比率（4:3）。実測が来次第、下記 `frontAspect` に置き換わる */
 const FALLBACK_ASPECT = 4 / 3
@@ -100,31 +120,63 @@ const BOTTOM_RESERVE_PX = 150
  * （`GMeter` 側は使わなかった分だけ余白が残るが、大きさが不揃いになるよりましという判断） */
 const DIAL_TEXT_RESERVE_PX = 34
 
+/** 以下3つは `.rc` の CSS（`styles.css`）と値を合わせている。高さ律速で映像列に
+ * 余白ができたとき、その分だけ車体図の列（`grid-area: meters`）を広げて隙間を
+ * 埋めるために「列の本来の幅」を逆算するのに使う（`naturalCamsWidth` 参照）。 */
+const RC_PADDING_PX = 6 // `.rc { padding: 6px }`
+const RC_GAP_PX = 6 // `.rc { gap: 6px }`（列は2つなのでgapは1回分だけ引く）
+const RC_CAMS_RATIO = 4 / 5 // `.rc { grid-template-columns: minmax(0,4fr) minmax(0,1fr) }`
+
 const CAM_LABEL: Record<'front' | 'rear', string> = { front: '前方', rear: '後方' }
 
-export function RcView() {
+export function RcView({ ch }: { ch: ControlChannel | null }) {
   const ui = useUi()
-  const overlaysOn = ui.rearPip && ui.lidarVisible && ui.pathGuide
+  /* PIP（`rearPip`）はここに含めない（2026-08-20、コメント参照）。LiDAR・進路ガイドの
+   * 2つだけをメイン映像クリックで一括切り替えする */
+  const overlaysOn = ui.lidarVisible && ui.pathGuide
   const [mainCam, setMainCam] = useState<'front' | 'rear'>('front')
   const [frontAspect, setFrontAspect] = useState(FALLBACK_ASPECT)
-  const { ref: camsRef, size: videoSize } = useContainFit<HTMLDivElement>(frontAspect, BOTTOM_RESERVE_PX)
+
+  /* `.rc-cams` 自身ではなく `.rc` 自体の幅を測る。`.rc-cams` を測ると、下で
+   * 列幅を上書きしたときにその上書き後の値を拾ってしまい循環する
+   * （`useContainFit.ts` の `widthOverride` コメント参照）。`.rc` の幅は
+   * 内部の列比率と無関係に親から決まるので、循環しない安定した基準になる。 */
+  const { ref: rcRef, size: rcSize } = useElementSize<HTMLDivElement>()
+  const naturalCamsWidth = rcSize
+    ? Math.floor((rcSize.width - RC_PADDING_PX * 2 - RC_GAP_PX) * RC_CAMS_RATIO)
+    : undefined
+  const { ref: camsRef, size: videoSize } = useContainFit<HTMLDivElement>(
+    frontAspect,
+    BOTTOM_RESERVE_PX,
+    naturalCamsWidth,
+  )
   const { ref: bottomRef, size: bottomSize } = useElementSize<HTMLDivElement>()
   const dialH = bottomSize ? Math.max(40, bottomSize.height - DIAL_TEXT_RESERVE_PX) : null
   const pipCam = mainCam === 'front' ? 'rear' : 'front'
 
+  /* 下段が高さ律速で最低値（`BOTTOM_RESERVE_PX`）に達すると、映像は列の本来の
+   * 幅（`naturalCamsWidth`）より狭くなる。その差分だけ映像列を実測幅に縮め、
+   * 空いた分は車体図の列（`grid-area: meters`）が丸ごと受け取る（指示による）。
+   * 差が無い（横幅律速）ときは undefined を返し、CSS 既定の `4fr 1fr` に任せる
+   * ——固定 px で上書きし続けると、ウィンドウ幅が変わっても映像列が追従
+   * しなくなるため。 */
+  const camsGap = videoSize && naturalCamsWidth != null ? naturalCamsWidth - videoSize.width : 0
+  const rcGridStyle =
+    camsGap > 0 && videoSize ? { gridTemplateColumns: `${videoSize.width}px minmax(0, 1fr)` } : undefined
+
   const toggleOverlays = () => {
     const next = !overlaysOn
-    ui.set({ rearPip: next, lidarVisible: next, pathGuide: next })
+    ui.set({ lidarVisible: next, pathGuide: next })
   }
 
   return (
-    <div className="rc">
+    <div className="rc" ref={rcRef} style={rcGridStyle}>
       <div className="rc-cams" ref={camsRef}>
         <div
           className="rc-cam-video"
           style={videoSize ? { width: videoSize.width, height: videoSize.height } : undefined}
           onClick={toggleOverlays}
-          title={overlaysOn ? 'クリックで後方・LiDAR・進路ガイドを隠す' : 'クリックで後方・LiDAR・進路ガイドを表示'}
+          title={overlaysOn ? 'クリックで LiDAR・進路ガイドを隠す' : 'クリックで LiDAR・進路ガイドを表示'}
         >
           {/* 箱のサイズは常に front 側が決める。後方がメインのときは onAspect を渡さない */}
           <CameraView
@@ -183,7 +235,7 @@ export function RcView() {
       </div>
 
       <RcBar />
-      <SettingsDrawer />
+      <SettingsDrawer ch={ch} />
     </div>
   )
 }

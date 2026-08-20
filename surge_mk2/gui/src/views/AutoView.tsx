@@ -2,7 +2,8 @@
  * 自動運転ビュー — 自律走行を**監視・デバッグする**ための画面（`architecture.md` §10.2 / §10.3）。
  *
  * 上段に**前方・後方・LiDAR を同じ幅で3分割**、下に速度・舵角の帯。
- * 温度・電圧の類は畳んであり、**しきい値を超えたときだけ自動で前に出る**。
+ * 温度・電圧・リンク統計は出さない（2026-08-20）——正常時に読む数字ではなく、
+ * 異常は `StatusBar` が全タブ共通で必ず伝える。詳しい数字は診断タブ（`DiagView`）で見る。
  *
  * ラジコンビューと違い、前方を特別扱いしない。自律走行の検証では
  * 「後方に何が映っているか」も「点群がどう見えているか」も同じ重さで見比べる。
@@ -20,12 +21,19 @@
  * `AutoPanel` でモードを選び engage する。**モードの一覧は GUI に書いていない**
  * （サーバの `status.auto.catalog` から生える）ので、`raspi/auto/` に planner を
  * 足せばこの画面に勝手に出る。LiDAR ビューには planner が選んだギャップを重ねる。
+ *
+ * ## 操作設定の歯車もここに置く（2026-08-20）
+ *
+ * `SettingsDrawer` はラジコンタブ専用だったが、自律走行中でもキーボードで
+ * 位置を微調整する場面がある（`DRIVING_TABS` に自動運転タブも含まれ、
+ * `useDriving` は常時生きている）。速度・舵の調整値はどちらのタブで
+ * 操作しても同じ意味を持つので、ラジコンタブと同じドロワーをここにも出す。
  */
 import { useNumbers } from '../bus/live'
 import { AutoPanel } from '../components/AutoPanel'
 import { AuxPanel } from '../components/AuxPanel'
-import { DiagStrip } from '../components/DiagStrip'
 import { DriveBar } from '../components/DriveBar'
+import { SettingsDrawer } from '../components/SettingsDrawer'
 import { CameraView } from '../render/CameraView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
@@ -73,7 +81,7 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
       <AutoPanel ch={ch} />
       <DriveBar />
       <AuxPanel />
-      <DiagStrip />
+      <SettingsDrawer ch={ch} />
     </div>
   )
 }

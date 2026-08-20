@@ -98,7 +98,7 @@ export function App() {
       </nav>
 
       {tab === 'ラジコン' ? (
-        <RcView />
+        <RcView ch={ch} />
       ) : tab === '自動運転' ? (
         <AutoView ch={ch} />
       ) : tab === '地図生成' ? (
