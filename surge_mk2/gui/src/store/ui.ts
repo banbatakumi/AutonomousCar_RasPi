@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand'
 import type { AutoStatus, ControlStatus, FanStatus, LogFile } from '../types'
+import { VEHICLE } from '../generated/vehicle'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
 
@@ -64,6 +65,17 @@ export type DrivingSettings = {
   /** 超音波の自動停止を STM32 に許可するか（v0.7）。**判定も制動も STM32 側で完結する**ので、
    * GUI は `COMMAND.flags` bit7 を立てるかどうかだけを決める。既定 ON */
   autoStop: boolean
+  /**
+   * 前カメラの進路ガイド（`CameraView.tsx` の `drawGuide`）が使う取付高さ [m]。
+   * 既定値は `config/vehicle.toml` の `sensors.cam_front.z`（実測済みのセンサ位置）だが、
+   * レンズ光学中心とはズレがありうるため、実写を見ながらここで追い込む前提の値。
+   *
+   * ⚠ 俯角（取付角度）はここに無い。**一度ネジ止めしたら変わらない物理値**なので
+   * `vehicle.toml` の `sensors.cam_front.pitch` を直接使う（`VEHICLE.camFront.pitch`）。
+   * 高さだけスライダを残すのは、こちらはレンズ光学中心と `z` の実測点がズレうる
+   * （定規で測れるのは筐体の位置で、レンズ内部の光学中心そのものではない）ため。
+   */
+  camHeight: number
 }
 
 /** `DrivingSettings` のうち数値項目のキーだけ。スライダのレンジは数値項目にしか無い
@@ -75,17 +87,22 @@ export type NumericSettingKey = {
 /**
  * io_node 側のハード上限。**GUI からはこれを超えられない**（超えても切り捨てられるだけ）。
  *
- * ⚠ **60° は一度 45° に落とした値を戻したもの**（2026-08-10、指示による）。
- * 大舵角では前輪オドメトリの射影誤差が効き（60° で 1/cos ≒ 2倍）、据え切りを
- * 続けるとステア MD が過熱するので `temp[2]` を見ておくこと。
+ * ⚠ 60°（1.047 rad）は一度 45° に落とした値を戻したもの（2026-08-10、指示による）が、
+ * これは**モータ機械角の可動域**であって路面舵角ではなかった。リンク比 0.5
+ * （2026-08-20 実測確定）によりタイヤは半分しか切れないため、路面舵角の上限は
+ * **30°（0.524 rad）**に修正した。据え切りを続けるとステア MD が過熱するので
+ * `temp[2]` を見ておくこと。**`PI_MAX_STEER_CAP` は手で書かず `config/vehicle.toml` の
+ * `max_steer` から生成する**（`config/generate.py`）。値を直すには toml を直して
+ * 再生成すること。
  *
  * ⚠ 速度は 2.0 → **3.0 m/s ＝ 10.8 km/h** に引き上げた（2026-08-11、指示による）。
  * `DEFAULT_SETTINGS.maxSpeed`（0.6）の5倍で、ミニカーの大きさに対してはかなり速い。
  * **既定値はあえて上げていない**ので、この上限まで使うのは設定パネルで人間が
- * 明示的に上げたときだけになる。
+ * 明示的に上げたときだけになる。速度は `vehicle.toml` に持たせる値ではない
+ * （運用上の速度制限であって車両の物理諸元ではない）ため、こちらは引き続き直書き。
  */
 export const PI_MAX_SPEED_CAP = 3.0 // m/s（install_services.sh の --max-speed と一致させてある）
-export const PI_MAX_STEER_CAP = 1.047 // rad ≒ 60°（同 --max-steer）
+export const PI_MAX_STEER_CAP: number = VEHICLE.maxSteer // rad ≒ 30°（同 --max-steer。路面舵角の実機上限）
 
 /** STM32 に渡すレートリミット（安全側の保険）。設定パネルの `accel`/`steerRate` はこれより
  * 十分遅く保つこと。**これ自体はユーザー設定にしない**（`useDriving.ts` 参照） */
@@ -147,6 +164,7 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   torqueMode: false,
   driveTorque: DEFAULT_DRIVE_TORQUE_NM,
   autoStop: DEFAULT_AUTO_STOP,
+  camHeight: VEHICLE.camFront.height,
 }
 
 /** 設定パネルのスライダのレンジ。`min`/`max`/`step` の3つ組。
@@ -165,6 +183,7 @@ export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: numbe
   armIdleTimeoutMs: { min: 5_000, max: 60_000, step: 1_000 },
   brakeTorque: { min: MIN_BRAKE_TORQUE_NM, max: MAX_BRAKE_TORQUE_NM, step: 0.001 },
   driveTorque: { min: 0.01, max: MAX_TARGET_TORQUE_NM, step: 0.001 },
+  camHeight: { min: 0.03, max: 0.25, step: 0.005 },
 }
 
 const SETTINGS_KEY = 'surge.driveSettings.v1'
@@ -252,8 +271,6 @@ type UiState = {
   /** 0=消灯 1=DAYTIME 2=NORMAL。**ARM 中しか反映されない**（§下） */
   lightMode: number
 
-  /** 異常時のみ出す層(C)を人間が明示的に開いた状態 */
-  diagOpen: boolean
   /**
    * ラジコンタブの設定ドロワーが開いているか。
    *
@@ -272,12 +289,16 @@ type UiState = {
    * **切ると PIP 側の `CameraView` が外れて WS が閉じる。** 流れなくなった分、
    * メイン映像のフレームレートに回せる（カメラ2台ぶんの帯域が効いている環境向け）。
    *
-   * 2026-08-17: 個別ボタンは廃止。メイン映像の空いた場所をクリックすると
-   * `lidarVisible`/`pathGuide` と一緒に3つまとめて切り替わる（`RcView.tsx`）。
-   * PIP 自体のクリックは表示/非表示ではなく「メインと入れ替え」（`RcView.tsx` の `mainCam`）。
+   * 2026-08-17: 個別ボタンは廃止し、メイン映像の空いた場所のクリックで
+   * `lidarVisible`/`pathGuide` と一緒に切り替える方式にした。しかし
+   * **2026-08-20 に外した**——LiDAR を消したいだけのクリックで小さい映像
+   * まで一緒に消えるのが紛らわしいと指摘されたため。今は常時 true のまま
+   * （切り替える操作が無い）。PIP 自体のクリックは表示/非表示ではなく
+   * 「メインと入れ替え」（`RcView.tsx` の `mainCam`）。
    */
   rearPip: boolean
-  /** ラジコンビューで LiDAR ミニマップ（映像右上の丸）を出すか。`rearPip` と同じ操作で連動する */
+  /** ラジコンビューで LiDAR ミニマップ（映像右上の丸）を出すか。メイン映像クリックで `pathGuide` と連動する
+   * （2026-08-20: `rearPip` はこの連動から外した） */
   lidarVisible: boolean
   /** LiDAR ミニマップを拡大表示中か。false＝映像の1/3高さ、true＝82%高さ。ミニマップ自体のクリックで切り替える */
   lidarExpanded: boolean
@@ -335,7 +356,6 @@ export const useUi = create<UiState>((set, get) => ({
   passing: false,
   lightMode: LIGHT_OFF,
 
-  diagOpen: false,
   settingsOpen: false,
   lidarZoom: 4, // 画面半径が何メートルぶんか
   lidarFollow: true,

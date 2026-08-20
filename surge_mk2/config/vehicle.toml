@@ -64,9 +64,13 @@ x = 0.097
 y = 0.0
 z = 0.09
 roll = 0.0
-pitch = 0.0
+pitch = 0.0                   # 下向きが正。取り付け角度そのもの＝一度決めたら変わらない
 yaw = 0.0
 hfov = 1.152                  # [rad] ≒ 66°
+# ボンネット等の映り込みを除くため ISP の ScalerCrop で下端を切る
+# （`raspi/nodes/camera_node.py` の `bottom_cropped` が実際の読み出しに反映する）。
+# GUI の進路ガイド（`CameraView.tsx`）は上端基準でこの分だけ主点が下にずれる補正に使う。
+bottom_crop = 0.25             # 下端カット率（下1/4）
 
 [sensors.cam_rear]
 x = 0.044
@@ -76,6 +80,7 @@ roll = 0.0
 pitch = 0.0
 yaw = 3.14159265
 hfov = 1.152
+bottom_crop = 0.0625           # 下端カット率（下1/16）
 
 [sensors.us_front]
 x = 0.26

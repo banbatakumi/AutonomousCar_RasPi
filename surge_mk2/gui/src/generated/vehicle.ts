@@ -11,4 +11,15 @@ export const VEHICLE = {
   wheelRadius: 0.03, // m
   /** 車体外形ポリゴン [m]。反時計回り */
   footprint: [[0.3, 0.09], [0.3, -0.09], [-0.07, -0.09], [-0.07, 0.09]] as const,
+  /** 前カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値
+   * （`sensors.cam_front.z`）。`pitch`（取付角度）・`hfov`（レンズ公称値）は
+   * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`bottomCrop` は
+   * ISP が読み出し時に切り捨てる下端の割合（`camera_node.py` の `bottom_cropped`）。
+   * 進路ガイドの投影はこの分だけ主点が下にずれる補正が要る（`CameraView.tsx`） */
+  camFront: {
+    height: 0.09, // m 路面からの高さ
+    pitch: 0.0, // rad 下向きが正（固定値）
+    hfov: 1.152, // rad 水平画角
+    bottomCrop: 0.25, // 下端カット率
+  },
 } as const

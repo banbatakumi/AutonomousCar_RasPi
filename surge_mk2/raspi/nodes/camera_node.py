@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import FrameRing  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
 
 SHM_PREFIX = "surge_cam"
 DEFAULT_SLOTS = 8
@@ -45,7 +46,10 @@ CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 #: 後方は下1/16だけ軽く除去する。**ISP の ScalerCrop で最初から読み出し範囲を
 #: 絞るので、余分な画素は main ストリームに出てこない**（後段でスライスして
 #: 捨てるより、共有メモリ書き込み・下流の処理・帯域がその分だけ軽くなる）
-CAM_BOTTOM_CROP = {0: 1 / 3, 1: 1 / 16}
+#: 値は `config/vehicle.toml` の `sensors.cam_front/cam_rear.bottom_crop` が正
+#: （GUI の進路ガイド `CameraView.tsx` もここを参照して主点補正する。二重管理しない）。
+_vehicle = Vehicle.load()
+CAM_BOTTOM_CROP = {0: _vehicle.cam_front_bottom_crop, 1: _vehicle.cam_rear_bottom_crop}
 
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの

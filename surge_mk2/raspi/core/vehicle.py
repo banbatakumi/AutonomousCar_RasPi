@@ -44,6 +44,10 @@ class Vehicle:
     lidar_x: float = 0.0
     lidar_y: float = 0.0
     lidar_yaw: float = 0.0                 #: [rad]
+    #: カメラの下端カット率（ボンネット等の映り込み除去。`camera_node.py` の ISP
+    #: ScalerCrop が実際の読み出しに反映する）。GUI の進路ガイドの主点補正にも使う
+    cam_front_bottom_crop: float = 0.0
+    cam_rear_bottom_crop: float = 0.0
     #: 操舵のむだ時間と1次遅れ [s]。Pure Pursuit の遅延補償の既定値になる
     dead_time_s: float = 0.030
     tau_steer_s: float = 0.12
@@ -84,7 +88,10 @@ class Vehicle:
             return cls()
 
         dyn = d.get("dynamics", {})
-        lidar = d.get("sensors", {}).get("lidar", {})
+        sensors = d.get("sensors", {})
+        lidar = sensors.get("lidar", {})
+        cam_front = sensors.get("cam_front", {})
+        cam_rear = sensors.get("cam_rear", {})
         fp_raw = d.get("footprint", []) or []
         return cls(
             measured=bool(d.get("measured", False)),
@@ -96,6 +103,8 @@ class Vehicle:
             lidar_x=float(lidar.get("x", 0.0)),
             lidar_y=float(lidar.get("y", 0.0)),
             lidar_yaw=float(lidar.get("yaw", 0.0)),
+            cam_front_bottom_crop=float(cam_front.get("bottom_crop", 0.0)),
+            cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
             dead_time_s=float(dyn.get("dead_time_s", 0.030)),
             tau_steer_s=float(dyn.get("tau_steer_s", 0.12)),
             _path=p,

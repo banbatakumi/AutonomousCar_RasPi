@@ -118,10 +118,24 @@ const MISC_FIELDS: Field[] = [
   },
 ]
 
+const CAMERA_FIELDS: Field[] = [
+  {
+    key: 'camHeight',
+    label: '取付高さ',
+    unit: 'm',
+    note: '前カメラの路面からの高さ。既定値は vehicle.toml の実測位置。レンズ光学中心とはズレうるので映像のガイド線を見ながら追い込む',
+    digits: 3,
+  },
+  // 俯角（取付角度）はここに無い。一度ネジ止めしたら変わらない固定値なので
+  // vehicle.toml の sensors.cam_front.pitch を直接使う（store/ui.ts 参照）
+]
+
 export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const settings = useUi((s) => s.settings)
   const setSettings = useUi((s) => s.setSettings)
   const resetSettings = useUi((s) => s.resetSettings)
+  const pathGuide = useUi((s) => s.pathGuide)
+  const set = useUi((s) => s.set)
   // estop_active/drive_power_locked と同じく、これは `/ws/control` の status
   // （イベント発生時にしかbroadcastされない）ではなく `/ws/telemetry` 経由で
   // 継続更新される LinkDiag（8Hz、`bus/live.ts`）から読む。status から読むと
@@ -222,6 +236,19 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
       </section>
 
       <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} onChange={setSettings} />
+
+      {/* 進路ガイド（前カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
+          height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない */}
+      <section className="settings-group">
+        <h3>進路ガイド校正</h3>
+        <label className="settings-checkbox">
+          <input type="checkbox" checked={pathGuide} onChange={(e) => set({ pathGuide: e.target.checked })} />
+          前カメラに進路ガイドを重ねる（校正前・暫定）
+        </label>
+        {CAMERA_FIELDS.map((f) => (
+          <SettingRow key={f.key} field={f} settings={settings} onChange={setSettings} />
+        ))}
+      </section>
     </div>
   )
 }

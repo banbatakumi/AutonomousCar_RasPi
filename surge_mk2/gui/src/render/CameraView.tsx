@@ -8,11 +8,43 @@
  *
  * 画像上に予測進路を重ねるには、カメラの内部・外部パラメータ（校正）が要る。
  * **これは Phase 1 の作業でまだ済んでいない。** ここで描いているのは、
- * 平面路面と仮の取り付け姿勢を仮定した近似であり、**実測値ではない**。
+ * 平面路面と取り付け姿勢を仮定した近似であり、**実測値ではない**。
  * 校正前のガイドを信じて経路の当たり判定に使わないよう、画面にも印を出す
  * ——ただし出すのは自動運転ビュー（`variant="full"`）のみ。ラジコンビューは
  * 運転を楽しむ画面なので文字を極力出さない方針（`RcView.tsx`）で、下記
  * `variant="minimal"` では出さない。
+ *
+ * 高さ（設定パネルの `camHeight`）は `config/vehicle.toml` の `sensors.cam_front.z`
+ * を初期値に、実写を見ながら追い込める——定規で測れる筐体の位置とレンズ光学中心が
+ * ズレうるため。**俯角（取付角度）・水平画角は調整UIを持たない**。一度ネジ止めしたら
+ * 変わらない物理値で、`VEHICLE.camFront.pitch`/`hfov`（`vehicle.toml` 直）をそのまま使う
+ * （2026-08-21、指示による——「絶対変わらないものにスライダーは要らない」）。
+ *
+ * ## 下端クロップぶんの主点補正
+ *
+ * 前カメラは ISP の ScalerCrop でボンネット等が映る下1/4を最初から読み出さない
+ * （`camera_node.py` の `CAM_BOTTOM_CROP`）。配信される画像はセンサー上側3/4だけなので、
+ * 光軸中心（センサー中心）は配信画像の中央ではなく、**上端から 1/(2·(1−bottomCrop)) の
+ * 位置**にある（下1/4カットなら 66.7%）。ここを画像中央（h/2）のまま投影すると、
+ * ガイド線が実際より上に描かれる。`VEHICLE.camFront.bottomCrop` で補正する。
+ *
+ * ## 走行中の車体姿勢（IMU）でも補正する（2026-08-21）
+ *
+ * カメラは車体に固定されているので、走行中に車体が pitch/roll すると
+ * カメラの向きも一緒に傾く。`vs.pitch`/`vs.roll`（`TELEMETRY` の IMU 実測値。
+ * 重力ベクトルで補正済みでドリフトしない）で毎フレーム補う。符号の向きは
+ * 実車で確認済み（指示による）: **前が沈む（前輪側）ほど `pitch` は負**、
+ * **右が沈む（右輪側）ほど `roll` は負**。
+ *
+ * - pitch: 固定取付角に `−vs.pitch` を足す。前のめり（pitch 負）になるほど
+ *   カメラも一緒に下を向く（実効的な俯角が増える）ので符号を反転して足す。
+ * - roll: 画像面内の回転として扱う（ロールはカメラの光軸まわりの回転にほぼ
+ *   一致するため、画像を principal point 中心に回すだけで近似できる）。
+ *   カメラが右に傾く（roll 負）と、写真の一般則どおり像は反時計回りに回って
+ *   見える——回転角は `−vs.roll`。**pitch/roll は独立に合成する近似**
+ *   （厳密な3D外部パラメータではない。もともと未校正の暫定ガイドなので、
+ *   このクラスの近似で十分と判断している）。
+ * - IMU が無効（`imu_ok=false`）な間は 0 として扱い、固定値だけで描く。
  *
  * ## `variant`：ラジコンビューは文字を出さない（2026-08-17）
  *
@@ -36,14 +68,7 @@ import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
 import { useUi } from '../store/ui'
 import { wsUrl } from '../ws/url'
-
-/** 仮のカメラ姿勢。**校正前の暫定値**（`architecture.md` §14 Phase 1）。 */
-const CAM = {
-  height: 0.14, // m 路面からの高さ
-  pitch: 0.12, // rad 下向きが正
-  hfovDeg: 66, // 水平画角（imx219 の公称値）
-}
-const WHEELBASE = 0.25
+import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 
 export function CameraView({
   cam,
@@ -59,7 +84,12 @@ export function CameraView({
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide)
+  const camHeight = useUi((s) => s.settings.camHeight)
   const statusRef = useRef<HTMLSpanElement>(null)
+  // スライダー操作のたびに WS を再接続させないよう ref 経由で最新値を渡す
+  // （下の draw ループの useEffect 依存に camHeight を入れない）
+  const camHeightRef = useRef(camHeight)
+  camHeightRef.current = camHeight
 
   useEffect(() => {
     const cv = ref.current
@@ -131,7 +161,7 @@ export function CameraView({
         const dw = bitmap.width * s
         const dh = bitmap.height * s
         ctx.drawImage(bitmap, (w - dw) / 2, (h - dh) / 2, dw, dh)
-        if (guide && cam === 'front') drawGuide(ctx, w, h)
+        if (guide && cam === 'front') drawGuide(ctx, w, h, camHeightRef.current)
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
@@ -175,20 +205,46 @@ export function CameraView({
   )
 }
 
-/** 実測舵角から予測進路を路面平面に置き、仮のピンホールで画像に落とす。 */
-function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number) {
+/** 実測舵角から予測進路を路面平面に置き、仮のピンホールで画像に落とす。
+ * `height` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`）。
+ * `pitch`/`hfov`/`bottomCrop` は `vehicle.toml` 由来の固定値（`VEHICLE.camFront`）。
+ * `vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
+ * （符号の向きはファイル冒頭コメント参照）。 */
+function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number, height: number) {
   const vs = live.vs
   if (!vs) return
-  const f = w / 2 / Math.tan((CAM.hfovDeg * Math.PI) / 360)
+  const { pitch: pitchFixed, hfov, bottomCrop } = VEHICLE_GEOM.camFront
+  const f = w / 2 / Math.tan(hfov / 2)
+  const cx = w / 2
+  // 下端クロップぶん、光軸（センサー中心）は配信画像の中央より下にずれる
+  const principalY = h / (2 * (1 - bottomCrop))
+
+  // IMU が無効な間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）
+  const dPitch = vs.imu_ok ? vs.pitch : 0
+  const dRoll = vs.imu_ok ? vs.roll : 0
+
+  // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す
+  const pitch = pitchFixed - dPitch
+  const cp = Math.cos(pitch)
+  const sp = Math.sin(pitch)
 
   const project = (x: number, y: number): [number, number] | null => {
     // 車両座標 (x=前, y=左, z=上) → カメラ座標。pitch だけ傾いている前提
-    const cp = Math.cos(CAM.pitch)
-    const sp = Math.sin(CAM.pitch)
-    const zc = x * cp + CAM.height * sp // 光軸方向
-    const yc = -x * sp + CAM.height * cp // 下向きが正
+    const zc = x * cp + height * sp // 光軸方向
+    const yc = -x * sp + height * cp // 下向きが正
     if (zc < 0.15) return null
-    return [w / 2 - (y * f) / zc, h / 2 + (yc * f) / zc]
+    return [cx - (y * f) / zc, principalY + (yc * f) / zc]
+  }
+
+  // roll: 画像面内の回転として近似する。右が沈む（dRoll 負）とカメラも右に傾き、
+  // 写真の一般則どおり像は principal point を中心に反時計回りへ回って見える
+  const rollImg = -dRoll
+  const cr = Math.cos(rollImg)
+  const sr = Math.sin(rollImg)
+  const rotateRoll = (p: [number, number]): [number, number] => {
+    const dx = p[0] - cx
+    const dy = p[1] - principalY
+    return [cx + dx * cr + dy * sr, principalY - dx * sr + dy * cr]
   }
 
   // 車体の左右端をなぞる2本
@@ -200,10 +256,11 @@ function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number) {
     let started = false
     const ds = 0.08
     for (let i = 0; i < 45; i++) {
-      th += (ds / WHEELBASE) * Math.tan(vs.steer_actual)
+      th += (ds / VEHICLE_GEOM.wheelbase) * Math.tan(vs.steer_actual)
       x += ds * Math.cos(th)
       y += ds * Math.sin(th)
-      const p = project(x, y + off)
+      const projected = project(x, y + off)
+      const p = projected && rotateRoll(projected)
       if (!p) continue
       if (!started) {
         ctx.moveTo(p[0], p[1])
@@ -216,4 +273,4 @@ function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number) {
   }
 }
 
-const VEHICLE_HALF_WIDTH = 0.095
+const VEHICLE_HALF_WIDTH = Math.max(...VEHICLE_GEOM.footprint.map(([, y]) => Math.abs(y)))
