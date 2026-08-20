@@ -36,12 +36,12 @@ import numpy as np
 
 from .raceline import RaceLine
 
-__all__ = ["Pursuit", "PursuitConfig", "follow"]
+__all__ = ["Pursuit", "PursuitConfig", "follow", "steer_for_target"]
 
 
 class PursuitConfig(NamedTuple):
-    wheelbase: float = 0.25                #: L [m]
-    max_steer: float = 0.60                #: [rad]
+    wheelbase: float = 0.23                #: L [m]（実測確定）
+    max_steer: float = 0.524               #: [rad] = 30°（リンク比 0.5 実測確定）
     lookahead_k: float = 0.8               #: `Ld = k·v + min` の k [s]
     lookahead_min: float = 0.35            #: [m]
     delay_s: float = 0.15                  #: 遅延補償の時間 [s]
@@ -68,6 +68,21 @@ def _predict(x: float, y: float, yaw: float, v: float, steer: float,
     return (x + r * (math.sin(yaw + dyaw) - math.sin(yaw)),
             y - r * (math.cos(yaw + dyaw) - math.cos(yaw)),
             yaw + dyaw)
+
+
+def steer_for_target(eta: float, lookahead: float, wheelbase: float, max_steer: float) -> float:
+    """狙点までの方位 `eta`[rad]・距離 `lookahead`[m] を舵角[rad]に変換する。
+
+    Pure Pursuit の標準式 δ = atan(2L·sinη / Ld)。**この式自体は自己位置を
+    要らない** — 自分（後輪車軸）を原点とした目標点の方位と距離さえあれば
+    決まる。`follow()` が `pose` を使うのは、地図座標系の経路点列から
+    「今の自分から見た目標点」を切り出す前段のためで、この式のためではない。
+
+    `lookahead` は正の値を仮定（呼び出し側で下限を保証すること。ここでは
+    0 除算だけ避ける）。
+    """
+    steer = math.atan2(2.0 * wheelbase * math.sin(eta), max(lookahead, 1e-3))
+    return max(-max_steer, min(max_steer, steer))
 
 
 def nearest_index(path: RaceLine, x: float, y: float, hint: int = -1,
@@ -115,9 +130,8 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     dx, dy = goal[0] - px, goal[1] - py
     eta = math.atan2(dy, dx) - pyaw
     eta = (eta + math.pi) % (2.0 * math.pi) - math.pi
-    dist = max(1e-3, math.hypot(dx, dy))
-    steer = math.atan2(2.0 * cfg.wheelbase * math.sin(eta), dist)
-    steer = max(-cfg.max_steer, min(cfg.max_steer, steer))
+    dist = math.hypot(dx, dy)
+    steer = steer_for_target(eta, dist, cfg.wheelbase, cfg.max_steer)
 
     return Pursuit(steer=steer, speed=float(path.v[k]), index=i,
                    cross_track=cross, target=(float(goal[0]), float(goal[1])),

@@ -11,12 +11,13 @@ from .base import (ParamSpec, Planner, ScanWindow, min_filter, scan_window,
                    sector_of_deg, wrap_deg)
 from .disparity_extender import DisparityExtender
 from .follow_the_gap import FollowTheGap
+from .gap_pursuit import DisparityPursuit
 from .raceline import RaceLine
 from .registry import PLANNERS, catalog, make_planner, merged_params
 
 __all__ = [
     "Planner", "ParamSpec", "ScanWindow", "min_filter", "scan_window",
     "sector_of_deg", "wrap_deg",
-    "DisparityExtender", "FollowTheGap", "RaceLine",
+    "DisparityExtender", "FollowTheGap", "DisparityPursuit", "RaceLine",
     "PLANNERS", "catalog", "make_planner", "merged_params",
 ]

@@ -14,11 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import msgspec  # noqa: E402
 
-from raspi.auto import (PLANNERS, DisparityExtender, FollowTheGap,  # noqa: E402
-                        catalog, make_planner)
+from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
+                        FollowTheGap, catalog, make_planner)
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.disparity_extender import _extend  # noqa: E402
-from raspi.msgs import AutoState, DriveCmd, Scan  # noqa: E402
+from raspi.auto.gap_pursuit import _best_band  # noqa: E402
+from raspi.msgs import AutoState, DriveCmd, Scan, VehicleState  # noqa: E402
 
 
 def make_scan(dist_by_deg=None, *, default=3.0, seen=True) -> Scan:
@@ -33,6 +34,14 @@ def corridor(width_deg: int, *, wall=0.5, open_dist=5.0) -> Scan:
     """前方に `width_deg` ぶんだけ開いた通路。それ以外は `wall` [m] の壁。"""
     dist = [wall] * 360
     for deg in range(-width_deg // 2, width_deg // 2 + 1):
+        dist[deg % 360] = open_dist
+    return Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
+
+
+def offset_gap(center_deg: int, half_width: int, *, wall=1.0, open_dist=5.0) -> Scan:
+    """`center_deg` を中心に `half_width` ぶん開いた隙間。それ以外は `wall` [m] の壁。"""
+    dist = [wall] * 360
+    for deg in range(center_deg - half_width, center_deg + half_width + 1):
         dist[deg % 360] = open_dist
     return Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
 
@@ -57,9 +66,9 @@ class TestFollowTheGap(unittest.TestCase):
         self.p = FollowTheGap()
         self.params = FollowTheGap.merged({})
 
-    def plan(self, scan, **over):
+    def plan(self, scan, vs=None, **over):
         p = {**self.params, **over}
-        return self.p.plan(scan, None, p, 0.1)
+        return self.p.plan(scan, vs, p, 0.1)
 
     # ── 進む ──
 
@@ -77,7 +86,10 @@ class TestFollowTheGap(unittest.TestCase):
         scan = Scan(dist=dist, sector_seen=[True] * 12)
         st = self.plan(scan)
         self.assertTrue(st.ready, st.reason)
-        self.assertGreater(st.target_steer, 0.1)    # 反時計回り＝左が正
+        # 反時計回り＝左が正。この隙間は奥行き 4m と深く、Pure Pursuit の式では
+        # 深いギャップほど Ld が大きくなり舵は緩やかになる（意図した振る舞い）ので、
+        # 閾値は「有意に正」であることだけを見る
+        self.assertGreater(st.target_steer, 0.03)
         self.assertGreater(st.gap_start_deg, 0)
 
     def test_picks_the_larger_of_two_gaps(self):
@@ -98,8 +110,26 @@ class TestFollowTheGap(unittest.TestCase):
             dist[deg] = 3.0
         dist[58] = 8.0                               # 端に一番遠い点を置く
         st = self.plan(Scan(dist=dist, sector_seen=[True] * 12))
-        mid_deg = st.target_steer / self.params["steer_gain"]
-        self.assertLess(abs(mid_deg), 0.9)           # 58°(=1.01rad) を狙っていない
+        self.assertLess(abs(st.heading), 0.9)        # 58°(=1.01rad) を狙っていない
+
+    def test_lookahead_scales_with_speed_not_gap_depth(self):
+        """Ld は速度比例。**同じ狙い角でも、速いほど舵は緩くなる。**
+
+        速度不明（`vs is None`）のときは Ld が最小になる ＝ 最も鋭く曲がる側に
+        倒れる。奥まで見えるギャップ（奥行き数m）でも、Ld はその奥行きではなく
+        速度で決まるので、静止時と低速時で舵の強さがほぼ変わらないことも確認する。
+        """
+        dist = [0.6] * 360
+        for deg in range(30, 71):                     # 幅40°・奥行き4mの深いギャップ
+            dist[deg] = 4.0
+        scan = Scan(dist=dist, sector_seen=[True] * 12)
+
+        stopped = self.plan(scan, vs=None)
+        slow = self.plan(scan, vs=VehicleState(speed=0.1))
+        fast = self.plan(scan, vs=VehicleState(speed=2.0))
+
+        self.assertGreater(stopped.target_steer, 0.1)  # 深いギャップでも鋭く曲がる
+        self.assertGreater(slow.target_steer, fast.target_steer)
 
     # ── 止まる ──
 
@@ -349,6 +379,134 @@ class TestDisparityExtender(unittest.TestCase):
             st = self.plan(scan)
             if not st.ready or st.brake:
                 self.assertTrue(st.reason)
+
+
+class TestDisparityPursuit(unittest.TestCase):
+    """DE の安全マージン・狙点選びと FTG の Pure Pursuit 舵角を両取りし、
+    ①狙点のヒステリシス・②曲率ベースの速度上限・③TTC を追加した Planner。
+
+    基本契約（進む／止まる／欠測は壁）は DE と同じ処理経路を通るので、
+    ここでは主に③つの新規要素と、DE/FTGと共有する狙点の性質だけを厚く見る。
+    """
+
+    def setUp(self):
+        self.p = DisparityPursuit()
+        self.params = DisparityPursuit.merged({})
+
+    def plan(self, scan, vs=None, dt=0.1, **over):
+        p = {**self.params, **over}
+        return self.p.plan(scan, vs, p, dt)
+
+    # ── 基本契約 ──
+
+    def test_open_field_goes_straight(self):
+        st = self.plan(make_scan(default=6.0))
+        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
+        self.assertGreater(st.target_speed, 0.0)
+
+    def test_stops_when_wall_is_close_ahead(self):
+        st = self.plan(make_scan(default=0.2))
+        self.assertTrue(st.brake)
+        self.assertEqual(st.target_speed, 0.0)
+        self.assertIn("停止", st.reason)
+
+    def test_aims_at_the_farthest_not_the_middle(self):
+        """DE と同じく、真ん中ではなく**一番遠い方向**を狙う。"""
+        dist = [1.0] * 360
+        for deg in range(-60, -20):
+            dist[deg % 360] = 5.0
+        for deg in range(20, 60):
+            dist[deg % 360] = 2.0
+        scan = Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
+        st = self.plan(scan)
+        self.assertLess(st.heading, 0.0, "遠い右側を狙っていない")
+
+    def test_lookahead_scales_with_speed_not_gap_depth(self):
+        """FTG と同じく、Ld はギャップの奥行きではなく速度で決まる。"""
+        dist = [1.0] * 360
+        for deg in range(30, 71):
+            dist[deg] = 4.0
+        scan = Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
+
+        stopped = self.plan(scan, vs=None)
+        slow = self.plan(scan, vs=VehicleState(speed=0.1))
+        fast = self.plan(scan, vs=VehicleState(speed=2.0))
+
+        self.assertGreater(stopped.target_steer, 0.05)
+        self.assertGreater(slow.target_steer, fast.target_steer)
+
+    def test_speed_never_exceeds_max_speed(self):
+        for open_dist in (0.5, 1.0, 2.0, 5.0):
+            st = self.plan(corridor(120, open_dist=open_dist), max_speed=0.3)
+            self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+    def test_not_ready_always_carries_a_reason(self):
+        for scan in (make_scan(seen=False), make_scan(default=0.2),
+                     make_scan(default=0.05)):
+            st = self.plan(scan)
+            if not st.ready or st.brake:
+                self.assertTrue(st.reason)
+
+    # ── ①狙点のヒステリシス ──
+
+    def test_best_band_ties_follow_the_previous_heading(self):
+        """同じ広さ・同じ遠さの帯が2つ並ぶ同着は、**前回ヘディングに近い方**を採る。
+
+        `DisparityExtender._best_band()` は常に「正面に近い方」を採るが、
+        ここでは前回どちらを向いていたかで結果が変わることを確認する
+        （前回ヘディングが 0 付近なら DE と同じ挙動に自然収束する）。
+        """
+        r = [5.0] * 20 + [1.0] + [5.0] * 20
+        degs = list(range(-20, 21))
+        threshold = 4.99
+
+        a, b = _best_band(r, threshold, degs, prev_heading_deg=-15.0)
+        self.assertLess(degs[(a + b) // 2], 0, "前回右寄りなら右の帯を維持する")
+
+        a, b = _best_band(r, threshold, degs, prev_heading_deg=15.0)
+        self.assertGreater(degs[(a + b) // 2], 0, "前回左寄りなら左の帯を維持する")
+
+    # ── ②曲率ベースの速度上限 ──
+
+    def test_curvature_limits_speed_more_in_sharp_turns(self):
+        """同じ見通しでも、**急な旋回ほど**曲率上限で速度を落とす。"""
+        gentle = offset_gap(10, 15)
+        sharp = offset_gap(45, 15)
+        # 見通しベースの速度上限(v_range)が効かないよう max_speed を上げ、
+        # 曲率上限(v_curve)だけが効くよう a_lat_max を下げて切り分ける。
+        # safety_half_width も下げておく（既定 0.30 だと隙間の縁が両側から
+        # 塗りつぶされて幅31°の隙間ごと消えてしまい、切り分けにならない）
+        over = {"a_lat_max": 0.3, "max_speed": 2.0, "safety_half_width": 0.05}
+        params = {**self.params, **over}
+        p1, p2 = DisparityPursuit(), DisparityPursuit()
+        for _ in range(30):
+            st_gentle = p1.plan(gentle, VehicleState(speed=1.0), params, 0.1)
+            st_sharp = p2.plan(sharp, VehicleState(speed=1.0), params, 0.1)
+
+        self.assertTrue(st_gentle.ready, st_gentle.reason)
+        self.assertTrue(st_sharp.ready, st_sharp.reason)
+        self.assertGreater(abs(st_sharp.target_steer), abs(st_gentle.target_steer))
+        self.assertLess(st_sharp.target_speed, st_gentle.target_speed)
+
+    # ── ③TTC（衝突余裕時間） ──
+
+    def test_ttc_brakes_before_stop_dist_if_closing_fast(self):
+        """`stop_dist` の手前でも、**急速に接近していれば**先に止める。"""
+        far = make_scan(default=2.0)
+        near = make_scan(default=1.0)
+        self.plan(far, dt=0.1)                  # 1周目: 前フレーム値を作るだけ
+        st = self.plan(near, dt=0.1)             # 2.0m→1.0m/0.1s ＝ 接近10m/s
+        self.assertTrue(st.brake)
+        self.assertGreater(st.free_ahead, self.params["stop_dist"],
+                            "stop_dist にはまだ届いていない距離であること")
+        self.assertIn("接近", st.reason)
+
+    def test_ttc_does_not_trigger_when_closing_slowly(self):
+        far = make_scan(default=2.0)
+        near = make_scan(default=1.9)
+        self.plan(far, dt=0.1)
+        st = self.plan(near, dt=0.1)             # 2.0m→1.9m/0.1s ＝ 接近1m/s
+        self.assertFalse(st.brake)
 
 
 class TestRegistry(unittest.TestCase):

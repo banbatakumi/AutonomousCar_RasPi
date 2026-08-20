@@ -17,6 +17,7 @@ from __future__ import annotations
 from .base import Planner
 from .disparity_extender import DisparityExtender
 from .follow_the_gap import FollowTheGap
+from .gap_pursuit import DisparityPursuit
 from .raceline import RaceLine
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
@@ -25,6 +26,7 @@ __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
 PLANNERS: dict[str, type[Planner]] = {
     FollowTheGap.id: FollowTheGap,
     DisparityExtender.id: DisparityExtender,
+    DisparityPursuit.id: DisparityPursuit,
     RaceLine.id: RaceLine,
 }
 

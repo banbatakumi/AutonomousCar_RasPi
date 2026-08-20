@@ -16,6 +16,30 @@
 一番遠い点を狙うと壁際すれすれを縫う挙動になり、車幅ぶんの余裕が無い
 ミニカーだと外輪が壁に当たるため。真ん中なら通路の中央に寄る。
 
+角度から舵角への変換は `nav.purepursuit.steer_for_target()`（Pure Pursuit の
+δ = atan(2L·sinη / Ld)）を使う。**η はギャップ中央の方位。** 地図も経路点列も
+要らない — Pure Pursuit の式は自分を原点とした目標点の方位と距離さえあれば
+決まるので、LiDAR から毎周期直接それを作れる FTG とは相性がよい。
+
+## Ld（前方注視距離）は速度比例。ギャップの奥行きではない
+
+`Ld = look_k·v + look_min`（`RaceLine` の RACE フェーズ・`nav/purepursuit.py` と
+同じ式）。速度が上がるほど遠くを狙って滑らかに、下がるほど近くを狙って鋭く曲がる。
+
+★ **最初はギャップの奥行き（区間の平均距離）を Ld にしていたが、これは
+コーナーで曲がりきれず壁に当たる欠陥があった。** 交差点やコーナーでは曲がる
+方向のギャップが奥まで開けていることが多く、奥行きをそのまま Ld にすると
+「奥まで見えるから急がなくていい」という判断になる。しかし実際にはその場の
+通路幅の中で曲がりきらないといけないので、舵が緩すぎて外側の壁に当たる。
+速度比例なら、壁に近づいて減速するとき（`slow_dist`／`turn_slow`）に Ld も
+一緒に縮むので、**減速している＝鋭く曲がりたい瞬間ほど鋭く曲がる**、という
+向きが自然に揃う。
+
+ギャップの奥行きは完全に捨てるわけではなく、Ld の**安全上限**として残す
+（`min(奥行き, look_k·v + look_min)`）。見えている範囲より先を目標点にしない
+ため。`_longest_run()` が選ぶ区間は既に `gap_min` 以上なので、この上限が
+効くのは高速で `look_k·v + look_min` が奥行きを超えるような場合だけ。
+
 ## 前処理（②）は `base.scan_window()` にある
 
 欠測・飽和・測距不能をどう読むかは**点群の読み方の契約**そのもので、
@@ -28,7 +52,9 @@ from __future__ import annotations
 
 import math
 
+from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
+from ..nav.purepursuit import steer_for_target
 from .base import ParamSpec, Planner, min_filter, scan_window
 
 __all__ = ["FollowTheGap"]
@@ -60,6 +86,12 @@ class FollowTheGap(Planner):
         ParamSpec(key="gap_min", label="ギャップの下限", min=0.2, max=4.0, step=0.05,
                   default=1.0, unit="m",
                   note="この距離以上が続く区間だけを「通れる隙間」と数える"),
+        ParamSpec(key="look_k", label="前方注視の速度係数", min=0.0, max=2.0, step=0.05,
+                  default=0.7, unit="s",
+                  note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで曲がりきれなくなる"),
+        ParamSpec(key="look_min", label="前方注視の最小値", min=0.15, max=1.5, step=0.05,
+                  default=0.35, unit="m",
+                  note="低速時の注視距離。小さすぎると舵が振動する"),
         ParamSpec(key="front_deg", label="正面とみなす幅", min=5, max=45, step=1,
                   default=20, unit="°",
                   note="速度を決める前方余裕をこの範囲の最小距離で測る。車幅と見る距離から決まる"),
@@ -75,12 +107,9 @@ class FollowTheGap(Planner):
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
                   default=0.12, unit="m/s",
                   note="減速しきってもこれ以下にはしない。0 にすると詰まった所で動けなくなる"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=1.047, step=0.005,
-                  default=0.60, unit="rad",
+        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
+                  default=0.50, unit="rad",
                   note="★io_node の --max-steer を超えても切り捨てられるだけ"),
-        ParamSpec(key="steer_gain", label="舵角ゲイン", min=0.1, max=2.0, step=0.05,
-                  default=0.80, unit="",
-                  note="狙う方位[rad]に掛けて舵角にする。上げると食いつくが振動しやすい"),
         ParamSpec(key="turn_slow", label="旋回時の減速", min=0.0, max=1.0, step=0.05,
                   default=0.50, unit="",
                   note="舵角いっぱいで速度をこの割合ぶん落とす。1.0 で全舵時に停止"),
@@ -90,6 +119,7 @@ class FollowTheGap(Planner):
     )
 
     def __init__(self) -> None:
+        self.vehicle = Vehicle.load()
         self._steer = 0.0
 
     def reset(self) -> None:
@@ -159,7 +189,7 @@ class FollowTheGap(Planner):
         # ── ④ 最長ギャップ ──
         gap = _longest_run(usable, p["gap_min"])
         if gap is not None:
-            a, b = gap
+            a, b, _depth = gap
             st.gap_start_deg = float(degs[a])
             st.gap_end_deg = float(degs[b])
 
@@ -180,15 +210,20 @@ class FollowTheGap(Planner):
                          f"下限 {p['gap_min']:.2f}m）")
             return st                      # ready=False ＝ 制動
 
-        a, b = gap
+        a, b, depth = gap
         st.ready = True
 
-        # ── ⑤ 狙点はギャップの真ん中 ──
+        # ── ⑤ 狙点はギャップの真ん中。舵角は Pure Pursuit の式で作る ──
+        # η ＝ ギャップ中央の方位。Ld は速度比例（`vs` が届いていなければ
+        # 速度不明 ＝ 0 とみなす。**Ld が最小になる ＝ 最も鋭く曲がる側に倒れる**
+        # ので安全側）。ギャップの奥行きは Ld の安全上限としてだけ残す
         mid = (degs[a] + degs[b]) / 2.0
         st.heading = math.radians(mid)
 
         max_steer = p["max_steer"]
-        target = max(-max_steer, min(max_steer, p["steer_gain"] * st.heading))
+        v_now = vs.speed if vs is not None else 0.0
+        ld = min(depth, p["look_k"] * v_now + p["look_min"])
+        target = steer_for_target(st.heading, ld, self.vehicle.wheelbase, max_steer)
         # 時間ベースの1次遅れ。フレームレートに依存させない
         tau = p["steer_tau"]
         alpha = 1.0 if tau <= 1e-3 or dt <= 0 else 1.0 - math.exp(-dt / tau)
@@ -214,15 +249,20 @@ class FollowTheGap(Planner):
 
 # ── 小道具 ────────────────────────────────────────────────────────────
 
-def _longest_run(r: list[float], threshold: float) -> tuple[int, int] | None:
-    """`threshold` 以上が連続する最長区間 `(start, end)`（両端含む）。
+def _longest_run(r: list[float], threshold: float) -> tuple[int, int, float] | None:
+    """`threshold` 以上が連続する最長区間 `(start, end, mean_depth)`（両端含む）。
 
     同じ長さが並んだときは**平均距離が大きい方**を採る。左右対称な通路の
     真ん中に立ったときに、毎周期どちらを選ぶか揺れて舵が振動するのを防ぐ
     ……ためではなく（それは平滑化の仕事）、単純に**より奥まで抜けている方**が
     通路として正しいため。
+
+    `mean_depth`（区間の平均距離）は呼び出し側で Pure Pursuit の前方注視距離
+    `Ld` として使う。区間は必ず `threshold` 以上の値だけで構成されるので、
+    `mean_depth` も自動的に `threshold` 以上になる
+    （`Ld` の下限に専用パラメータが要らない理由）。
     """
-    best: tuple[int, int] | None = None
+    best: tuple[int, int, float] | None = None
     best_len = 0
     best_mean = 0.0
     j = 0
@@ -237,6 +277,6 @@ def _longest_run(r: list[float], threshold: float) -> tuple[int, int] | None:
         length = k - j + 1
         mean = sum(r[j:k + 1]) / length
         if length > best_len or (length == best_len and mean > best_mean):
-            best, best_len, best_mean = (j, k), length, mean
+            best, best_len, best_mean = (j, k, mean), length, mean
         j = k + 1
     return best
