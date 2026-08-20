@@ -47,7 +47,7 @@ Phase 3（自律走行）は非SLAM系（FTG / Disparity Extender）と SLAM 系
 | | 状態 |
 |---|---|
 | 設計フェーズ | 完了 |
-| UART プロトコル | **v0.7 まで実車確認・反映済み**（v0.4確定→v0.5トルク直接指令の下地→v0.6トルク直接指令→v0.7超音波auto_stop。経緯はアーカイブ） |
+| UART プロトコル | **v0.7 まで実車確認・v0.9 は Pi 側実装済み・STM32 側は単体確認のみ**（v0.4確定→v0.5トルク直接指令の下地→v0.6トルク直接指令→v0.7超音波auto_stop→v0.8 TC/TV有効切替→v0.9片輪浮き対策。経緯はアーカイブ） |
 | プロトコル実装（Python + C ヘッダ生成） | **完了** |
 | **Pi 実機セットアップ** | **完了**（SSH・リポジトリ配置・venv・UART 有効化） |
 | **STM32 実機との UART 疎通** | **確認済み**（双方向・エラー0） |
@@ -55,6 +55,7 @@ Phase 3（自律走行）は非SLAM系（FTG / Disparity Extender）と SLAM 系
 | **生フレームログ `.sfl` 記録＋解析ツール／`replay_node`** | **実機で記録・再生・完全一致まで確認済み** |
 | **★ 2D シミュレータ（Mac 専用・`sim/`）** | **完了**（`io_node --sim` で実機と同じ制御コードのまま走る） |
 | **★ 自動運転（FTG・SLAM+raceline・Disparity Extender）** | **シムで確認済み・実車未検証**（下記「未解決」） |
+| **Disparity Pursuit（id `dp`）新設**（DEの段差塗り＋狙点選択 と FTGのPure Pursuit舵角を統合し、①狙点のヒステリシス ②曲率ベース速度上限 ③TTCによる早期停止 を追加。`raspi/auto/gap_pursuit.py`） | **実装完了・単体テスト58件green（2026-08-18）。シム・実車とも未検証** |
 | **GPIO E-Stop ハートビート＋端から端までの動作確認** | **実機で合格**（`--allow-arm` 経路も含め2026-08-10に合格） |
 | **カメラの実力測定／`camera_node` + 共有メモリリング** | **実機で動作確認済み**（2台30fps・ゼロコピー） |
 | **LED 表示（緑=生存と可動性 / 赤=異常の重さ）** | **実機で目視確認済み** |
@@ -138,12 +139,14 @@ ssh surge-mk2 'sudo nmcli connection modify "tplink"      connection.autoconnect
 
 ## 決まっていること
 
-### UART プロトコル — 現在 v0.7（`docs/uart_protocol.md` が正）
+### UART プロトコル — 現在 v0.9（`docs/uart_protocol.md` が正）
 
 `raspi/proto/protocol.toml` が実装上の唯一の定義で、そこから Python パーサと STM32 側 C
 ヘッダを生成する（`python3 raspi/proto/generate.py`）。v0.4確定 →
 v0.5（`COMMAND` LEN10→12・ブレーキ/灯火/ホーン拡張）→ v0.6（トルク直接指令、上限0.125N·m）→
-v0.7（超音波 `auto_stop`、ワイヤ非破壊）と進んだ。各版の変更点・実車確認の経緯は
+v0.7（超音波 `auto_stop`、ワイヤ非破壊）→ v0.8（TC/TV 有効切替、`param_id 0x0010`/`0x0020`）→
+v0.9（片輪浮き対策、`param_id 0x0050`。TC本体とは独立。**Pi側実装済みだが STM32側は
+実機未検証**、2026-08-20）と進んだ。各版の変更点・実車確認の経緯は
 アーカイブの該当節（`UART プロトコル v0.6` / `v0.7` / `v0.5 に追従した` など）。
 
 確定している主要仕様:
@@ -216,9 +219,11 @@ Disparity Extender（非SLAM反射型）の両方をシムで試作した。**�
 
 ### 自動運転（シムのみで検証・実車一式が未検証）
 
-- **FTG / Disparity Extender / SLAM+raceline とも実車未検証。** 車輪を浮かせて
+- **FTG / Disparity Extender / SLAM+raceline / Disparity Pursuit とも実車未検証。** 車輪を浮かせて
   `auto/state` の `reason` と選ぶギャップ／自己位置を先に確認し、`max_speed` を
   0.2m/s 程度まで落として床に降ろす、という段階を踏むこと
+- **Disparity Pursuit（`dp`）の `a_lat_max`（既定3.0 m/s²）・`ttc_min`（既定0.6s）は
+  未計測の暫定値。** まずシムで衝突なしを確認し、実車で横滑り・急制動の体感から詰めること
 - **RACE 段が circuit で開始2秒後に壁へ接触して固着する（SLAM側・未修正）。**
   BUILD（停止）→RACE の受け渡しで Pure Pursuit の遅延補償が怪しいところまで切り分け済み
 - **oval が「渦巻き」になる＝ループ閉じが1周目に走らない（SLAM側・未着手）。**
@@ -242,8 +247,17 @@ Disparity Extender（非SLAM反射型）の両方をシムで試作した。**�
 
 ### 未実測・未着手（クリティカルパス）
 
-- **ステアリングのリンク比・車輪半径が未実測。** `config/vehicle.toml` は暫定値のまま
-  （`docs/architecture.md` §15 #2/#3/#4）。実測すればシムの合わせ込みも追随する
+- **`config/vehicle.toml` は `[dynamics]`（アクチュエータの動特性）を除き全項目を実測確定**
+  （2026-08-20）。ホイールベース L=0.23m・トレッド=0.155m・車輪半径 0.03m・質量 2.0kg・
+  車体外形・センサ取付位置・ステアリングのリンク比（0.5、路面舵角上限 ±30°=0.524 rad）。
+  **後輪はダイレクトドライブでギア比の概念が無い**ため、`docs/architecture.md` §15 #2〜#4 はこれで確定
+  （`raspi/` 各種 / GUI `PI_MAX_STEER_CAP` / `sim/` に反映済み）。**車輪半径・リンク比は
+  STM32 ファームウェアの換算定数にも反映済み**（本人確認）。`speed`/`wheel_speed`/
+  `odom_dist`/`steer_actual` はもう暫定スケールではない。残るクリティカルパスは
+  `[dynamics]` の実測のみ
+- **GUI の車体寸法定数を `config/vehicle.toml` から生成する仕組みを追加**（`config/generate.py`
+  → `gui/src/generated/vehicle.ts`。`raspi/proto/generate.py` と同じ考え方）。
+  toml を直したら手で GUI 側を書き換えなくてよくなった。編集後は再生成を忘れずに
 - 屋外用ルーターの SSID が Pi に未登録（上記「Pi 実機」節）
 - `perception_node` / `safety_node` は未実装（`architecture.md` の設計と実装のズレ。
   一覧は `docs/development.md` §11）
@@ -255,7 +269,7 @@ Disparity Extender（非SLAM反射型）の両方をシムで試作した。**�
 1. **`steer_actual` の −24° 張り付きの原因特定**（原点ずれ or 符号規約。他の何より先）
 2. **Disparity Extender を車輪を浮かせて実車検証**（`--max-speed 0.2` 程度から）
 3. GUI カメラ 14fps の切り分け
-4. ステアリングのリンク比・車輪半径の実測
+4. `[dynamics]`（操舵のむだ時間・1次遅れなど）の実測
 5. 屋外用ルーターの SSID を研究室で登録
 
 SLAM 側の課題（RACE固着・oval渦巻き・split未解決）は方針により**棚上げ中**。
