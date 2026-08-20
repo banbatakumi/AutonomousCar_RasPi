@@ -4,8 +4,14 @@
 # /sys/class/hwmon/hwmonN/pwm1 系を直接読み書きしてファンの自動/手動デューティを
 # 切り替える。既定では root:root 644 で pi から書けない（実機で確認済み、2026-08-17）。
 #
+# cooling_deviceN/cur_state は、auto復帰後に thermal governor の再評価が
+# 止まったまま pwm1 が下がらなくなる不具合の回避策（`_kick_governor()`）で
+# 書き込む。同じく既定 root:root 644 で pi からは書けない（実機で確認済み、
+# 2026-08-19）。
+#
 # `install_services.sh` が /etc/udev/rules.d/ にコピーして適用する。手で入れる場合は:
 #   sudo cp raspi/setup/99-surge-fan.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
-#   sudo udevadm trigger --subsystem-match=hwmon
+#   sudo udevadm trigger --subsystem-match=hwmon --subsystem-match=thermal
 SUBSYSTEM=="hwmon", ATTR{name}=="pwmfan", RUN+="/bin/chgrp gpio /sys%p/pwm1 /sys%p/pwm1_enable", RUN+="/bin/chmod 664 /sys%p/pwm1 /sys%p/pwm1_enable"
+SUBSYSTEM=="thermal", KERNEL=="cooling_device*", ATTR{type}=="pwm-fan", RUN+="/bin/chgrp gpio /sys%p/cur_state", RUN+="/bin/chmod 664 /sys%p/cur_state"

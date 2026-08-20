@@ -263,6 +263,7 @@ EOF
 cp "$ROOT/raspi/setup/99-surge-fan.rules" /etc/udev/rules.d/99-surge-fan.rules
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=hwmon
+udevadm trigger --subsystem-match=thermal
 
 systemctl daemon-reload
 systemctl enable --now "${UNITS[@]}" surge-logclean.timer

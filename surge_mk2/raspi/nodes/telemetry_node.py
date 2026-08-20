@@ -146,6 +146,10 @@ LOG_CTRL_HZ = 1
 #: 自動運転の意思（`auto/ctrl`）の再送周期。`log/ctrl` より速いのは、
 #: **planning_node が落ちて上がり直したときに engage が届くまでの空白を短くする**ため
 AUTO_CTRL_HZ = 5
+#: 手動ファンデューティの再送周期。カーネルの thermal governor（`cooling_device0`）が
+#: `pwm1_enable=1` のままでも温度のしきい値越えで `pwm1` を書き換えてくることがあり
+#: （`raspi/io/fan.py` 参照）、GUI からの指定が 1 回きりだと巻き戻されたまま気づけない
+FAN_PUMP_HZ = 1
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = 200 * 1_000_000
@@ -911,6 +915,32 @@ class TelemetryServer:
                           HbMsg(node="control",
                                 detail=f"ws={len(self.telemetry_clients)}"))
 
+    async def _fan_pump(self) -> None:
+        """ファンの意思（manualデューティ／autoへの追従）を低頻度で再適用する。
+
+        `_log_ctrl_pump`/`_auto_ctrl_pump` と同じ理由。`_on_fan` はGUIからの
+        メッセージが来た瞬間にしか書き込まないため：
+
+        - manual時: そのあとカーネルの thermal governor が `pwm1` を上書き
+          してくると（`raspi/io/fan.py` の「高温になると強制上書き」の記述
+          どおり、温度がしきい値を跨ぐたびに低温側でも起こりうる）、GUI
+          表示は manual/指定値のままなのに実回転数だけ落ちて気づけない
+        - auto時: governor 自体が再評価を止めてしまい、`pwm1` が manual
+          時の値に張り付いたまま下がらないことがある（同モジュール参照）
+
+        どちらも定期的に `set_manual`/`set_auto` を再送することで、巻き
+        戻され／固まっても最大1秒で復帰させる。
+        """
+        period = 1.0 / FAN_PUMP_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            if not self._fan.available:
+                continue
+            if self._fan_mode == "manual":
+                self._fan.set_manual(self._fan_duty)
+            else:
+                self._fan.set_auto()
+
     async def _log_ctrl_pump(self) -> None:
         """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
 
@@ -981,7 +1011,7 @@ class TelemetryServer:
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
-                self._auto_ctrl_pump)]
+                self._auto_ctrl_pump, self._fan_pump)]
             try:
                 await stop
             finally:
