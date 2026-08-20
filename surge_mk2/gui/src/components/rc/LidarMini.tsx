@@ -17,11 +17,23 @@
  * ズームは固定（`RADIUS_M`）。前方映像の隅に置く小さな丸にコントロール UI を
  * 足す余地がないので、常時 3m 圏を映す。詳しく見たいときは診断タブ／
  * 自動運転ビューの `LidarView`（ズーム可）を使う。
+ *
+ * ## 極座標グリッド（2026-08-20）
+ *
+ * `LidarView` と同じ「1m 間隔の同心円＋十字」を薄く重ねる。線が無いと
+ * 縮小時は距離感がまるで掴めず、点の並びだけでは「今どれくらい近いか」が
+ * 読めなかったため。**ただし数字（`1m` 等のラベル）は縮小時には出さない**
+ * ——小さな丸に文字を詰めると点群そのものが読めなくなる。拡大時
+ * （`ui.lidarExpanded`）だけ `LidarView` と同じ流儀でラベルを出す。
+ * この値は rAF ループの中で `useUi.getState()` を毎フレーム直接読む
+ * （`live.scan` と同じ理由——React の再レンダーを待たずに反映するため）。
  */
 import { useEffect, useRef } from 'react'
 import { live, useNumbers } from '../../bus/live'
+import { useUi } from '../../store/ui'
 
 const RADIUS_M = 3
+const GRID_STEP_M = 1
 
 const BG = '#0d0b0c'
 /** 近い＝危険＝赤（`--bad` と同じ意味の色） */
@@ -32,6 +44,38 @@ const SATURATED = '#3a3234'
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t
+}
+
+/** 1m 間隔の同心円＋十字（`LidarView.tsx` の `drawGrid` と同じ流儀）。
+ * ラベルは拡大表示中だけ出す（縮小時は文字が点群と重なって読めなくなる） */
+function drawGrid(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  cx: number,
+  cy: number,
+  px: number,
+  expanded: boolean,
+) {
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+  ctx.lineWidth = 1
+  for (let r = GRID_STEP_M; r <= RADIUS_M; r += GRID_STEP_M) {
+    ctx.beginPath()
+    ctx.arc(cx, cy, r * px, 0, Math.PI * 2)
+    ctx.stroke()
+    if (expanded) {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)'
+      ctx.font = '9px ui-monospace, monospace'
+      ctx.fillText(`${r}m`, cx + 3, cy - r * px - 2)
+    }
+  }
+  // 正面方向・左右の十字
+  ctx.beginPath()
+  ctx.moveTo(cx, 0)
+  ctx.lineTo(cx, h)
+  ctx.moveTo(0, cy)
+  ctx.lineTo(w, cy)
+  ctx.stroke()
 }
 
 export function LidarMini() {
@@ -61,6 +105,8 @@ export function LidarMini() {
       const cx = w / 2
       const cy = h / 2
       const px = Math.min(w, h) / 2 / RADIUS_M
+
+      drawGrid(ctx, w, h, cx, cy, px, useUi.getState().lidarExpanded)
 
       const scan = live.scan
       if (scan) {
