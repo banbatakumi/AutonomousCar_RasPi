@@ -237,13 +237,15 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
 
       <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} onChange={setSettings} />
 
-      {/* 進路ガイド（前カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
-          height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない */}
+      {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
+          height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
+          高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ——後カメラは
+          固定値（VEHICLE.camRear.height）を使い調整UIを持たない（2026-08-21） */}
       <section className="settings-group">
         <h3>進路ガイド校正</h3>
         <label className="settings-checkbox">
           <input type="checkbox" checked={pathGuide} onChange={(e) => set({ pathGuide: e.target.checked })} />
-          前カメラに進路ガイドを重ねる（校正前・暫定）
+          前後カメラに進路ガイドを重ねる（校正前・暫定）
         </label>
         {CAMERA_FIELDS.map((f) => (
           <SettingRow key={f.key} field={f} settings={settings} onChange={setSettings} />

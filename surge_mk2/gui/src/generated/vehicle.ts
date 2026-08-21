@@ -22,6 +22,16 @@ export const VEHICLE = {
     hfov: 1.152, // rad 水平画角
     bottomCrop: 0.25, // 下端カット率
   },
+  /** 後カメラ取付。`height`/`pitch`/`hfov`/`bottomCrop` の意味は `camFront` と同じ。
+   * こちらは高さの調整UIを持たない（前カメラほど精密な校正の要求がまだ無いため）。
+   * `yaw` は生成しない——GUI 側の進路ガイド（`CameraView.tsx`）は「後ろ向きに付いている」
+   * こと自体を前提にした投影式を別に持っており、汎用の yaw 回転はしていない */
+  camRear: {
+    height: 0.09, // m 路面からの高さ
+    pitch: 0.0, // rad 下向きが正（固定値）
+    hfov: 1.152, // rad 水平画角
+    bottomCrop: 0.0625, // 下端カット率
+  },
 } as const
 
 /** 安全タイマ [ms]。`docs/architecture.md` §9.4。

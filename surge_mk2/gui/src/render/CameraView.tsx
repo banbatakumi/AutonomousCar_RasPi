@@ -46,6 +46,23 @@
  *   このクラスの近似で十分と判断している）。
  * - IMU が無効（`imu_ok=false`）な間は 0 として扱い、固定値だけで描く。
  *
+ * ## 後カメラにも同じガイドを出す（2026-08-21）
+ *
+ * 後カメラは車体に対し180°反対向きに付いている（`vehicle.toml` の
+ * `sensors.cam_rear.yaw`）。そのため前カメラ用にそのまま流用できない点が3つある：
+ *
+ * 1. **奥行き・左右が反転する。** 後ろ向きのカメラにとっての「奥（画面奥）」は
+ *    車体座標では −x（後方）、「左」は車体座標の −y（後ろを振り返ると左右が
+ *    入れ替わるのと同じ）。`project()` へは `(−x, −y)` を渡す。
+ * 2. **姿勢補正の符号が反転する。** 前が沈む（`pitch` 負）と前カメラは俯角が
+ *    増えるが、後ろは持ち上がるので後カメラは俯角が減る——`dPitch` の符号を
+ *    反転してから同じ式に通す。左右ロールも見ている向きが逆なので同様に反転する。
+ * 3. **軌跡は「後退した場合」を描く。** 自転車モデルの曲率式 dθ/ds = tanδ/L は
+ *    弧長 s の符号に依存しない（前進・後退で式の形が変わらない）ので、
+ *    ループの刻み `ds` を負にするだけで「今の舵角のまま下がったら」の軌跡になる。
+ *
+ * ここも校正前の近似であることに変わりはない（冒頭コメント参照）。
+ *
  * ## `variant`：ラジコンビューは文字を出さない（2026-08-17）
  *
  * `full`（既定・自動運転ビュー）は左上に「前方/後方」ラベルと fps を
@@ -75,15 +92,20 @@ export function CameraView({
   label,
   variant = 'full',
   onAspect,
+  guideDisabled = false,
 }: {
   cam: 'front' | 'rear'
   label: string
   variant?: 'full' | 'minimal'
   /** デコードした画像の実際の幅/高さ比。変わったときだけ呼ばれる */
   onAspect?: (aspect: number) => void
+  /** true の間は `pathGuide` が ON でもこのインスタンスには描かない。
+   * ラジコンビューの PIP（小さい方の映像）専用——**大きい方の映像だけに
+   * ガイドを出す**ため（`RcView.tsx`、指示による。2026-08-21） */
+  guideDisabled?: boolean
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
-  const guide = useUi((s) => s.pathGuide)
+  const guide = useUi((s) => s.pathGuide) && !guideDisabled
   const camHeight = useUi((s) => s.settings.camHeight)
   const statusRef = useRef<HTMLSpanElement>(null)
   // スライダー操作のたびに WS を再接続させないよう ref 経由で最新値を渡す
@@ -161,7 +183,7 @@ export function CameraView({
         const dw = bitmap.width * s
         const dh = bitmap.height * s
         ctx.drawImage(bitmap, (w - dw) / 2, (h - dh) / 2, dw, dh)
-        if (guide && cam === 'front') drawGuide(ctx, w, h, camHeightRef.current)
+        if (guide) drawGuide(ctx, w, h, camHeightRef.current, cam)
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
@@ -194,7 +216,7 @@ export function CameraView({
         <div className="camera-tag">
           {label}
           <span ref={statusRef} className="dim" />
-          {cam === 'front' && guide && <span className="badge-warn">ガイドは校正前・暫定</span>}
+          {guide && <span className="badge-warn">ガイドは校正前・暫定</span>}
         </div>
       ) : (
         <div className="camera-fps">
@@ -206,22 +228,35 @@ export function CameraView({
 }
 
 /** 実測舵角から予測進路を路面平面に置き、仮のピンホールで画像に落とす。
- * `height` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`）。
- * `pitch`/`hfov`/`bottomCrop` は `vehicle.toml` 由来の固定値（`VEHICLE.camFront`）。
+ * `camHeightSetting` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`。
+ * **前カメラにしか適用しない**——後カメラは高さの調整UIを持たないので
+ * `VEHICLE.camRear.height` を固定で使う）。`pitch`/`hfov`/`bottomCrop` は
+ * `vehicle.toml` 由来の固定値（`cam` に応じて `camFront`/`camRear` を選ぶ）。
  * `vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
- * （符号の向きはファイル冒頭コメント参照）。 */
-function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number, height: number) {
+ * （符号の向きはファイル冒頭コメント参照。後カメラは反転して使う）。 */
+function drawGuide(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  camHeightSetting: number,
+  cam: 'front' | 'rear',
+) {
   const vs = live.vs
   if (!vs) return
-  const { pitch: pitchFixed, hfov, bottomCrop } = VEHICLE_GEOM.camFront
+  const isFront = cam === 'front'
+  const geom = isFront ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
+  const { pitch: pitchFixed, hfov, bottomCrop } = geom
+  const height = isFront ? camHeightSetting : geom.height
   const f = w / 2 / Math.tan(hfov / 2)
   const cx = w / 2
   // 下端クロップぶん、光軸（センサー中心）は配信画像の中央より下にずれる
   const principalY = h / (2 * (1 - bottomCrop))
 
-  // IMU が無効な間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）
-  const dPitch = vs.imu_ok ? vs.pitch : 0
-  const dRoll = vs.imu_ok ? vs.roll : 0
+  // IMU が無効な間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）。
+  // 後カメラは前カメラと逆向きを見ているので、姿勢補正の符号を反転する
+  // （前が沈む＝後ろは持ち上がる。左右も振り返った側から見るので鏡像になる）
+  const dPitch = (vs.imu_ok ? vs.pitch : 0) * (isFront ? 1 : -1)
+  const dRoll = (vs.imu_ok ? vs.roll : 0) * (isFront ? 1 : -1)
 
   // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す
   const pitch = pitchFixed - dPitch
@@ -229,7 +264,7 @@ function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number, height: 
   const sp = Math.sin(pitch)
 
   const project = (x: number, y: number): [number, number] | null => {
-    // 車両座標 (x=前, y=左, z=上) → カメラ座標。pitch だけ傾いている前提
+    // カメラ座標 (x=奥行き, y=左, z=上) → 画像。pitch だけ傾いている前提
     const zc = x * cp + height * sp // 光軸方向
     const yc = -x * sp + height * cp // 下向きが正
     if (zc < 0.15) return null
@@ -247,6 +282,10 @@ function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number, height: 
     return [cx + dx * cr + dy * sr, principalY - dx * sr + dy * cr]
   }
 
+  // 自転車モデルの曲率式は弧長の符号によらないので、後カメラは ds を負にして
+  // 「今の舵角のまま後退したら」の軌跡を積分する（ファイル冒頭コメント参照）
+  const ds = isFront ? 0.08 : -0.08
+
   // 車体の左右端をなぞる2本
   for (const off of [-VEHICLE_HALF_WIDTH, VEHICLE_HALF_WIDTH]) {
     ctx.beginPath()
@@ -254,12 +293,14 @@ function drawGuide(ctx: CanvasRenderingContext2D, w: number, h: number, height: 
     let y = 0
     let th = 0
     let started = false
-    const ds = 0.08
     for (let i = 0; i < 45; i++) {
       th += (ds / VEHICLE_GEOM.wheelbase) * Math.tan(vs.steer_actual)
       x += ds * Math.cos(th)
       y += ds * Math.sin(th)
-      const projected = project(x, y + off)
+      // 車両座標 (x=前, y=左) → カメラ座標。後カメラは奥行き・左右とも反転する
+      // （振り返った視点なので、車体の後方＝カメラの奥、車体の左＝カメラの右）
+      const [depth, lateral] = isFront ? [x, y + off] : [-x, -(y + off)]
+      const projected = project(depth, lateral)
       const p = projected && rotateRoll(projected)
       if (!p) continue
       if (!started) {

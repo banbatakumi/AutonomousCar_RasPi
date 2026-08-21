@@ -49,13 +49,15 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
       <div className="cam-front">
         <CameraView cam="front" label="前方" />
         <div className="cam-controls">
+          {/* 前後どちらのカメラにも同じ `pathGuide` が効く（`CameraView.tsx`）ので、
+              チェックボックスは1つだけ置けば足りる */}
           <label>
             <input
               type="checkbox"
               checked={ui.pathGuide}
               onChange={(e) => ui.set({ pathGuide: e.target.checked })}
             />
-            進路ガイド
+            進路ガイド（前後）
           </label>
         </div>
       </div>

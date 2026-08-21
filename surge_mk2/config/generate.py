@@ -34,6 +34,7 @@ def gen_ts(spec: dict) -> str:
     pts = ", ".join(f"[{float(x)}, {float(y)}]" for x, y in footprint)
     sensors = spec.get("sensors", {})
     cam = sensors.get("cam_front", {})
+    cam_rear = sensors.get("cam_rear", {})
     safety = spec.get("safety", {})
     return "\n".join([
         f"// {BANNER}",
@@ -59,6 +60,16 @@ def gen_ts(spec: dict) -> str:
         f"    pitch: {float(cam.get('pitch', 0))}, // rad 下向きが正（固定値）",
         f"    hfov: {float(cam.get('hfov', 0))}, // rad 水平画角",
         f"    bottomCrop: {float(cam.get('bottom_crop', 0))}, // 下端カット率",
+        "  },",
+        "  /** 後カメラ取付。`height`/`pitch`/`hfov`/`bottomCrop` の意味は `camFront` と同じ。",
+        "   * こちらは高さの調整UIを持たない（前カメラほど精密な校正の要求がまだ無いため）。",
+        "   * `yaw` は生成しない——GUI 側の進路ガイド（`CameraView.tsx`）は「後ろ向きに付いている」",
+        "   * こと自体を前提にした投影式を別に持っており、汎用の yaw 回転はしていない */",
+        "  camRear: {",
+        f"    height: {float(cam_rear.get('z', 0))}, // m 路面からの高さ",
+        f"    pitch: {float(cam_rear.get('pitch', 0))}, // rad 下向きが正（固定値）",
+        f"    hfov: {float(cam_rear.get('hfov', 0))}, // rad 水平画角",
+        f"    bottomCrop: {float(cam_rear.get('bottom_crop', 0))}, // 下端カット率",
         "  },",
         "} as const",
         "",

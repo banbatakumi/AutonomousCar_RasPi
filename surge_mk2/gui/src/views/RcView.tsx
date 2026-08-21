@@ -57,6 +57,13 @@
  * PIP は独立させ常時表示のままにしてある。
  * fps だけはどちらの操作でも消えない。
  *
+ * **進路ガイドは大きい方（メイン）の映像にしか出さない**（2026-08-21）。
+ * ガイドは前後どちらのカメラにも描けるようになったが（`CameraView.tsx`）、
+ * PIP は前後の入れ替え用サムネイルなので小さくガイドを重ねても読めないし、
+ * メインと2重に出ると紛らわしい。PIP 側の `CameraView` には常に
+ * `guideDisabled` を渡し、on/off の切り替えは従来どおりメイン映像クリック
+ * （`toggleOverlays`）だけが担う。
+ *
  * 文字は極力出さない方針にした。「前方」「後方」ラベルとガイドの校正前バッジは
  * 消し（`CameraView` の `variant="minimal"`）、fps だけを画像隅に残している。
  *
@@ -222,6 +229,7 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
                 label={CAM_LABEL[pipCam]}
                 variant="minimal"
                 onAspect={pipCam === 'front' ? setFrontAspect : undefined}
+                guideDisabled
               />
             </div>
           )}
