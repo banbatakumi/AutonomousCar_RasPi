@@ -35,6 +35,23 @@ footprint = [
   [-0.07,  0.09],
 ]
 
+# ── 安全タイマ ──────────────────────────────────────────────────────────
+# **同じ数字が3箇所に手書きされていた**（io_node・telemetry_node・GUI の
+# `useDriving.ts`）。今は一致しているが、一致していることを保証する仕組みが
+# 無かった（2026-08-21 のレビュー 🟢11）。`docs/architecture.md` §9.4 が
+# 正とされている値をここに移し、Python は `raspi/core/vehicle.py` 経由で、
+# TypeScript は `config/generate.py` の生成物経由で読む。
+
+[safety]
+# 指令が途絶してから DISARM に落とすまで [ms]。**二重に持つ**:
+#   - telemetry_node: GUI からの `cmd` が途絶 → バスへ DISARM を流す
+#   - io_node:        バスの `cmd` が途絶     → STM32 へ DISARM を送る
+# 片方が死んでも成立させるための冗長なので、**値そのものは1つに保つ**。
+cmd_deadman_ms = 150
+# `auto/cmd` がこれだけ古ければ中継せず制動に読み替える [ms]。
+# planning_node は 50Hz で出しているので 10 発ぶんの猶予
+auto_cmd_stale_ms = 200
+
 # ── アクチュエータの動特性 ──────────────────────────────────────────────
 # **すべて実測待ちの仮値。** シミュレータと、将来のフィードフォワード制御が使う。
 # 実車で測る手順: 舵角ステップ入力 → TELEMETRY の steer_actual をログに取り、

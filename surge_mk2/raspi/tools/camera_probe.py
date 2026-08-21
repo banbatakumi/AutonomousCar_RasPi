@@ -32,6 +32,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from raspi.core.cleanup import quiet_close  # noqa: E402
+
 NS = 1_000_000_000
 
 
@@ -97,11 +99,9 @@ class Probe:
             req.release()
 
     def stop(self) -> None:
-        try:
+        with quiet_close("picamera2 のカメラ（camera_probe）"):
             self.cam.stop()
             self.cam.close()
-        except Exception:
-            pass
 
     # ── 集計 ──
 

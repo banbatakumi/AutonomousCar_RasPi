@@ -23,3 +23,15 @@ export const VEHICLE = {
     bottomCrop: 0.25, // 下端カット率
   },
 } as const
+
+/** 安全タイマ [ms]。`docs/architecture.md` §9.4。
+ * **同じ数字を GUI 側に手書きしない。** 以前は `useDriving.ts` の
+ * コメントに 150ms と書いてあるだけで、Pi 側の2つの定数と一致している
+ * 保証が無かった（2026-08-21 のレビュー 🟢11）。 */
+export const SAFETY = {
+  /** 指令が途絶してから DISARM に落とすまで [ms]。**GUI はこれより速く
+   * 送り続けなければならない**（`useDriving.ts` の送信周期の根拠） */
+  cmdDeadmanMs: 150.0,
+  /** `auto/cmd` がこれだけ古ければ制動に読み替える [ms] */
+  autoCmdStaleMs: 200.0,
+} as const

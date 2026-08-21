@@ -91,7 +91,7 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
         const gy = gForce(AX_SIGN * vs.accel[0]) // 前後G（加速が正）
         trail.push({ x: gx, y: gy, t: now })
       }
-      while (trail.length && now - trail[0].t > TRAIL_MS) trail.shift()
+      while (trail.length && now - trail[0]!.t > TRAIL_MS) trail.shift()
       while (trail.length > TRAIL_MAX) trail.shift()
 
       const size = Math.min(w, h)
@@ -124,13 +124,16 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
       const px = (g: number) => cx + (g / FULL_G) * r
       const py = (g: number) => cy - (g / FULL_G) * r
       for (let i = 1; i < trail.length; i++) {
-        const age = (now - trail[i].t) / TRAIL_MS
+        // 添字は `1 <= i < length` に閉じているので必ず在る（`!` は型の都合）
+        const prev = trail[i - 1]!
+        const cur = trail[i]!
+        const age = (now - cur.t) / TRAIL_MS
         ctx.globalAlpha = Math.max(0, 0.55 * (1 - age))
         ctx.strokeStyle = '#d5303f'
         ctx.lineWidth = 1.6 * dpr
         ctx.beginPath()
-        ctx.moveTo(px(trail[i - 1].x), py(trail[i - 1].y))
-        ctx.lineTo(px(trail[i].x), py(trail[i].y))
+        ctx.moveTo(px(prev.x), py(prev.y))
+        ctx.lineTo(px(cur.x), py(cur.y))
         ctx.stroke()
       }
       ctx.globalAlpha = 1

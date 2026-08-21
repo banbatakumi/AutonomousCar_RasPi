@@ -9,6 +9,11 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
+    // 配列の添字アクセスに `| undefined` を付ける。**固定長の想定を型に守らせる**
+    // ため（`wheel_speed[3]` が無条件に `number` になっていた）。
+    // `generated/msgs.ts` が固定長をタプル型で吐くので、正しい添字はそのまま
+    // `number` のまま通り、範囲外だけがエラーになる（2026-08-21 レビュー 🟠3）
+    "noUncheckedIndexedAccess": true,
     "noUncheckedSideEffectImports": true,
     "skipLibCheck": true,
     "isolatedModules": true,

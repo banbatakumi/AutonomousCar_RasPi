@@ -52,6 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.auto import PLANNERS, make_planner, merged_params  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
+from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.msgs import AutoCtrl, AutoState, DriveCmd, Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -277,11 +278,10 @@ class PlanningNode:
     def close(self) -> None:
         # 終了時に一発「止まれ」を置いてから消える。中継側が engage を見ている
         # ので実害は無いが、**最後の値が「走れ」で残らない**方が読みやすい
-        try:
+        # 届かなくても実害は無い（中継側が engage を見ている）。**送れたら送る**
+        with quiet_close("終了時の auto/cmd 停止指令"):
             self.pub.send(TOPIC_AUTO_CMD, DriveCmd(mode=0, source="planning:shutdown"))
             self.pub.send(TOPIC_AUTO_STATE, AutoState(reason="planning_node 終了"))
-        except Exception:
-            pass
         self.sub.close()
         self.pub.close()
 

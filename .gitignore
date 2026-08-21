@@ -32,3 +32,5 @@ Thumbs.db
 
 # 機密情報
 surge_mk2/docs/setup_credentials.md
+# telemetry_node の操縦権トークン（`--token` 省略時の読み先）
+surge_mk2/config/secret.txt

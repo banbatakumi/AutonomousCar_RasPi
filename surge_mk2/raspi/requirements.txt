@@ -7,15 +7,29 @@
 # gpiozero / lgpio は Raspberry Pi OS に同梱済みのため、ここには書かない。
 # （pip 版を入れると OS 版と競合しうる）
 
+# ## バージョンは必ず範囲で留める（2026-08-21 のレビュー 🟡6）
+#
+# 以前は `pyserial` だけ固定で、あとは無指定だった。GUI は
+# `package-lock.json` で守られているのに、**Pi 側だけ無防備**な状態。
+# 大会当日に `pip install -r` をやり直して `msgspec` のメジャーが上がっていると、
+# シリアライズ挙動が変わったまま走り出す。
+#
+# メジャー（`msgspec` は 0.x なのでマイナー）までを上限にしてある。
+# **完全固定にしないのは、セキュリティ修正のパッチが自動で入るようにするため。**
+# 実機に入れるときは `requirements.lock.txt`（`pip freeze` の結果）を使う:
+#
+#   .venv/bin/pip install -r raspi/requirements.lock.txt   # 実機・大会当日
+#   .venv/bin/pip install -r raspi/requirements.txt        # 開発機
+
 # ── Phase 0（通信基盤） ──
-pyserial==3.5          # UART 送受信
+pyserial==3.5          # UART 送受信。**枯れているので完全固定のまま**
 
 # ── Phase 0 後半（内部バス・WebSocket） ──
-pyzmq                  # 内部バス（PUB/SUB）
-msgspec                # メッセージ定義とシリアライズ（内部 msgpack / WS も同じ形）
-websockets             # telemetry_node の WS サーバ。純 Python・依存なし
-numpy                  # 点群・占有格子・共有メモリ画像の view
-mcap                   # ログ記録（logger_node / tools/sfl2mcap.py）。zstandard が付いてくる
+pyzmq>=26,<28          # 内部バス（PUB/SUB）
+msgspec>=0.19,<0.22    # メッセージ定義とシリアライズ（内部 msgpack / WS も同じ形）
+websockets>=13,<18     # telemetry_node の WS サーバ。純 Python・依存なし
+numpy>=2.1,<3          # 点群・占有格子・共有メモリ画像の view
+mcap>=1.2,<2           # ログ記録（logger_node / tools/sfl2mcap.py）。zstandard が付いてくる
 
 # JPEG エンコードは simplejpeg（picamera2 が同梱）を使い、無ければ Pillow に落ちる。
 # **Pi では picamera2 経由で入るので明示しない。** Mac でカメラ配信を試すときだけ:

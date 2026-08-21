@@ -139,8 +139,17 @@ export function StatusBar({
           <WifiIcon dbm={ui.status?.wifi?.rssi_dbm ?? null} />
         </span>
 
-        <span className={`pill ${ui.telemetryOpen ? 'lv-ok' : 'lv-bad'}`}>
-          {ui.telemetryOpen ? '接続' : '切断'}
+        {/* **型の食い違いは「切断」と別に出す。** 同じ表示にすると Wi-Fi を
+            疑って時間を溶かす。実際には繋がっていて、GUI が古いだけ */}
+        <span
+          className={`pill ${ui.schemaMismatch ? 'lv-bad' : ui.telemetryOpen ? 'lv-ok' : 'lv-bad'}`}
+          title={
+            ui.schemaMismatch
+              ? 'Pi 側とテレメトリの型定義が食い違っています。gui を再ビルドしてください（npm run build）'
+              : undefined
+          }
+        >
+          {ui.schemaMismatch ? '型不一致' : ui.telemetryOpen ? '接続' : '切断'}
         </span>
         <ArmButton />
         <button className="estop" onClick={onEstop} title="Esc キーでも同じ">

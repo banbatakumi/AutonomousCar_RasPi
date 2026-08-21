@@ -44,7 +44,7 @@
  *
  * - `Esc` / E-STOP ボタン / パッドの B … 即 DISARM。**権限も条件も要らない**
  * - ウィンドウのフォーカス喪失・タブが背後に回る … 即 DISARM
- * - 送信が止まれば 150ms でサーバが DISARM、さらに io_node が 150ms で DISARM
+ * - 送信が止まれば `SAFETY.cmdDeadmanMs` でサーバが DISARM、さらに io_node が同じだけで DISARM
  * - 無操作 `settings.armIdleTimeoutMs` … 自動 DISARM（放置した場合の最後の受け皿）
  * - `settings.autoStop`（v0.7、既定 ON）… **進行方向の超音波が 20cm 未満なら STM32 が単独で
  *   最大制動**。GUI は `auto_stop` を立てるだけで判定には関与しない。DISARM はしないので、
@@ -57,7 +57,7 @@
  *
  * 自動運転タブで engage しても、**指令を 50Hz で送り続けているのはここ**。
  * 送るのは `mode=2` と補機だけで、速度・舵は telemetry_node が planning_node の
- * `auto/cmd` に差し替える。上のデッドマン（ARM 保持・フォーカス喪失・150ms 途絶）が
+ * `auto/cmd` に差し替える。上のデッドマン（ARM 保持・フォーカス喪失・送信途絶）が
  * そのまま自律走行の停止手段になるのはこのため。**planning_node は arm を立てられない。**
  *
  * 手動と違うのは2点だけ:
@@ -75,7 +75,7 @@
  * 送信は 50Hz に間引く（telemetry_node の publish レートに合わせる。それ以上出しても
  * 途中で捨てられるだけ）。パッドのスティックも rAF で読むのでカクつかない。
  *
- * rAF はタブが隠れると止まる ＝ 送信も止まる ＝ 150ms でサーバが DISARM。
+ * rAF はタブが隠れると止まる ＝ 送信も止まる ＝ `DEADMAN_MS` でサーバが DISARM。
  * **止まる方向に転ぶので安全側**（`visibilitychange` の即 DISARM と二重）。
  *
  * ### 2. レートリミットは「GUI で作り、STM32 は保険」に一元化
@@ -105,11 +105,31 @@ import { cmdOut, live } from '../bus/live'
 import {
   ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, STEER_RATE_SAFETY_LIMIT, useUi,
 } from '../store/ui'
+import { SAFETY } from '../generated/vehicle'
 import type { ControlChannel } from '../ws/control'
 
 /** 送信レート。telemetry_node の `CMD_PUB_HZ` に合わせる */
 const TX_HZ = 50
 const TX_INTERVAL_MS = 1000 / TX_HZ
+
+/**
+ * 送信が途絶えてから車が止まるまで [ms]。
+ *
+ * **数字を GUI に手書きしない。** `config/vehicle.toml` の `[safety]` が正で、
+ * `config/generate.py` がここへ配り、Pi 側は `raspi/core/vehicle.py` から
+ * 同じ値を読む。以前は Pi の2つの定数と GUI のコメントに 150 が3回書いてあり、
+ * 一致していることを保証する仕組みが無かった（2026-08-21 のレビュー 🟢11）。
+ */
+const DEADMAN_MS = SAFETY.cmdDeadmanMs
+
+// **送信周期がデッドマンに近づいたら設計が破綻している。** 1発落としただけで
+// 停止する状態になるので、開発中に気づけるようにここで見ておく
+if (import.meta.env.DEV && TX_INTERVAL_MS * 3 > DEADMAN_MS) {
+  console.warn(
+    `送信周期 ${TX_INTERVAL_MS}ms に対しデッドマンが ${DEADMAN_MS}ms しかない。` +
+      '取りこぼし数発で DISARM に落ちる',
+  )
+}
 /** 1フレームの積分幅の上限。タブ復帰やカクつきで一気に飛ぶのを防ぐ */
 const DT_MAX = 0.05
 
@@ -383,7 +403,7 @@ export function useDriving(ch: ControlChannel | null) {
         //
         // ⚠ **出したいものが無ければ送らない。** 送り続けると操縦権を握りっぱなしになり、
         // 2枚目のタブや別の PC が操縦できなくなる（操縦権は同時に1人）。
-        // 消灯に戻したあとは送信が止まり、150ms で io_node が DISARM_COMMAND
+        // 消灯に戻したあとは送信が止まり、`DEADMAN_MS` で io_node が DISARM_COMMAND
         //（`flags=0`）に落とすので、灯火はそのまま消える。
         const wantAux = horn || passing || ui.lightMode !== LIGHT_OFF
         if (!wantAux) {
@@ -424,7 +444,7 @@ export function useDriving(ch: ControlChannel | null) {
       // ⚠ **自律走行中は無操作タイムアウトを掛けない。** 人が何も触らないのが
       // 正常な状態なので、20秒で勝手に止まったら自律走行にならない。
       // 代わりの受け皿は従来どおり全部生きている（Esc / E-STOP / フォーカス喪失 /
-      // タブが背後に回る / 送信が止まれば 150ms で DISARM）。
+      // タブが背後に回る / 送信が止まれば `DEADMAN_MS` で DISARM）。
       // **画面を見ていられる間だけ走る**という前提は変わっていない
       if (engaged) lastActivity.current = now
 

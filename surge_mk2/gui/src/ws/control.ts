@@ -10,14 +10,33 @@
  * 状況（＝一番止めたい状況）で止まらない。
  */
 import type { CmdOut, ControlStatus, LogFile } from '../types'
+import { authToken } from './token'
 import { wsUrl } from './url'
 
 const RECONNECT_MS = 500
 
+/**
+ * `/ws/control` でサーバから降ってくる JSON の**振り分けに要る分だけ**の形。
+ *
+ * 全フィールドを実行時に検証はしない（`type` で分岐したあとの中身は
+ * `ControlStatus` の宣言を信じる）。ここで潰したいのは「`any` にしたせいで
+ * 打ち間違いまで通る」ことのほうで、境界の実行時検証は
+ * `/ws/telemetry` 側の札（`MSGS_SCHEMA`）が担っている。
+ */
+type ServerMsg = {
+  type?: string
+  holder?: string
+  reason?: string
+  files?: LogFile[]
+  id?: number
+}
+
 export type ControlHandlers = {
   onStatus: (s: ControlStatus) => void
   onOpenChange: (open: boolean) => void
-  onDenied: (holder: string) => void
+  /** `holder` は操縦権を持っている相手。`reason` は拒否の理由
+   * （`bad_token` = トークン不一致、`auto_engage` = engage に操縦権が要る） */
+  onDenied: (holder: string, reason?: string) => void
   /** 往復遅延の実測 [ms]。**GUI↔Pi 区間**（UART 区間は link.cmd_rtt_ms） */
   onRtt: (ms: number) => void
   /** `logs_list`/`logs_delete` への応答 */
@@ -47,14 +66,17 @@ export class ControlChannel {
     this.ws = ws
     ws.onopen = () => this.h.onOpenChange(true)
     ws.onmessage = (ev) => {
-      let m: any
+      // **`any` にしない。** `any` は以降のフィールドアクセスを全て検査対象から
+      // 外すので、`m.holdr` のような打ち間違いも通る。`unknown` に寄せた形の
+      // 部分型で受けて、使うところで絞る
+      let m: ServerMsg
       try {
-        m = JSON.parse(ev.data as string)
+        m = JSON.parse(ev.data as string) as ServerMsg
       } catch {
         return
       }
-      if (m.type === 'status') this.h.onStatus(m as ControlStatus)
-      else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '')
+      if (m.type === 'status') this.h.onStatus(m as unknown as ControlStatus)
+      else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '', m.reason)
       else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)
@@ -72,7 +94,7 @@ export class ControlChannel {
   }
 
   takeControl() {
-    this.send({ type: 'take_control', name: this.id })
+    this.send({ type: 'take_control', name: this.id, token: authToken() })
   }
 
   releaseControl() {

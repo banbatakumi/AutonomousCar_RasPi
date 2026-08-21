@@ -57,7 +57,11 @@ case "${1:-status}" in
     sleep 3
     start_one camera   raspi.nodes.camera_node   --quiet
     sleep 4
-    start_one telemetry raspi.nodes.telemetry_node
+    # **`--host 0.0.0.0` はここで明示的に打つ。** telemetry_node の既定は
+    # loopback（制御 API を持つサーバの既定が全インタフェースだと、
+    # 打ち忘れではなく「打たなかった日」が危険側に転ぶ）。
+    # 手元の PC から GUI を開くのがこのスタックの前提なので、ここでは開ける
+    start_one telemetry raspi.nodes.telemetry_node --host 0.0.0.0
     # 自動運転。**上げただけでは何も起きない**（engage は GUI から人間が行う）
     start_one planning raspi.nodes.planning_node --quiet
     # ロガーは最後。**カメラより後に上げる**と、記録の先頭から画像が入る

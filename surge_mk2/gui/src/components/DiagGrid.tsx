@@ -45,11 +45,19 @@ export function DiagGrid({ n }: { n: Numbers }) {
 
       <section>
         <h4>モータ</h4>
-        {['後左', '後右', 'ステア'].map((lbl, i) => (
+        {/* **添字を変数で回さず、値を並べて書く。** `motor_current` は3要素で
+            `torque_cmd` は2要素（ステア軸のトルクは測っていない）と長さが違い、
+            同じ `i` で両方を引くと 3 本目で範囲外を踏む。型（タプル）に
+            守らせるには添字がリテラルである必要がある */}
+        {([
+          ['後左', vs.motor_current[0], vs.torque_cmd[0]],
+          ['後右', vs.motor_current[1], vs.torque_cmd[1]],
+          ['ステア', vs.motor_current[2], null],
+        ] as const).map(([lbl, cur, trq]) => (
           <div className="kv" key={lbl}>
             <span>{lbl}</span>
-            <b>{vs.motor_current[i].toFixed(2)}A</b>
-            {i < 2 && <b className="dim">{vs.torque_cmd[i].toFixed(3)}N·m</b>}
+            <b>{cur.toFixed(2)}A</b>
+            {trq !== null && <b className="dim">{trq.toFixed(3)}N·m</b>}
           </div>
         ))}
       </section>

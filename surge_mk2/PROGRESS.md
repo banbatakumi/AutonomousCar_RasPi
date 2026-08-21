@@ -3,7 +3,8 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-08-17（3561行あった本ファイルを軽量版とアーカイブに分割。**情報は削除しておらず、
+最終更新: 2026-08-21（コードレビュー13項目を全修正し実機へ反映。下記「2026-08-21」節）
+旧: 2026-08-17（3561行あった本ファイルを軽量版とアーカイブに分割。**情報は削除しておらず、
 詳細な実験経緯・実測値はすべて `docs/progress_archive.md` に移した**。分割前と同じ内容が
 アーカイブに残っているので、根拠が要るときはそちらを見ること）
 
@@ -34,6 +35,62 @@ SLAM が1周もできなかった分離帯コース（split）も周回できた
 | 先読みブレーキ（次のコーナーの形） | 見通し（`ext`）で近似。**原理的に劣る** |
 | ラップ計測・周回数 | **ジャイロの累積回頭 ÷ 360°** で数えられる（地図不要） |
 | 「経路から落ちた」の検出 | 無い。`stop_dist` と超音波 `auto_stop` が最後の砦 |
+
+## ★ 2026-08-21：コードレビュー13項目を全修正し、実機へ反映済み
+
+`docs/review_2026-08-21.md` の指摘を**全項目**片付けた（各項目に「解決済」を追記済み）。
+**中身と判断の根拠はレビュー文書側にある。** ここには実機に効く要点だけ書く。
+
+### ★★ 運用が変わった点（これだけは覚えておくこと）
+
+1. **`telemetry_node` の既定バインドが `127.0.0.1` になった。**
+   外の PC から GUI を開くには `--host 0.0.0.0` が要る。
+   `run_stack.sh` と `install_services.sh` の両方に明示済みなので通常運用は変わらないが、
+   **手で `python -m raspi.nodes.telemetry_node` と打つと Pi 自身からしか見えない**
+2. **Origin 検査が入った。** 別サイトから `/ws/*` を張ると 403。
+   判定は `Host` ヘッダとの一致なので、`surge-mk2.local` でも IP 直打ちでも通る
+3. **自律走行の `engage` に操縦権が要る**（解除は従来どおり誰でも通る）
+4. **共有トークンは既定で無効。** 使うなら `config/secret.txt`（gitignore 済み）に書き、
+   GUI を一度 `?token=…` 付きで開く
+5. **検査コマンドが1本になった**: `./tools/check.sh`（`--fast` で生成物だけ）。
+   同じものを GitHub Actions（`.github/workflows/ci.yml`）が Python 3.12/3.13 で回す
+
+### 新しく増えた「正」
+
+| 正 | 生成物 | 検査 |
+|---|---|---|
+| `raspi/msgs/types.py` | `gui/src/generated/msgs.ts` | `config/gen_msgs.py --check` |
+| `config/vehicle.toml` の `[safety]` | `gui/src/generated/vehicle.ts` の `SAFETY` | `config/generate.py --check` |
+| `raspi/proto/protocol.toml` の版番号 | （文書の見出し） | `config/check_docs.py --check` |
+
+**メッセージ型を GUI に手書きしないこと。** `types.py` を直して `gen_msgs.py` を回す。
+デッドマン 150ms も同様で、`vehicle.toml` の `[safety]` が唯一の出どころ。
+
+### 実機で確認したこと（2026-08-21・surge-mk2）
+
+- `pytest` **435 tests OK**（Pi 上・Python 3.13）
+- Origin 検査: 同一オリジン/Vite dev/Origin無し = 通す、別サイト/ポート違い/接尾辞偽装 = **403**
+- テレメトリの札 `schema=0x667639be` が Pi と手元で一致
+- デッドマンが io_node / telemetry_node / GUI の3箇所とも **150ms** で一致
+- `_fence()`（seqlock のメモリバリア）実機 Cortex-A76 で **169ns/回**。無視できる
+- 再起動後 `health=OK` / `protocol=0x0009` / `sim=False` / `estop_active=False` /
+  `hb_stalls=0` / `cmd_rtt_ms≈9.6ms` / TC・TV・片輪浮き対策すべて有効
+
+### ★ JPEG 二重エンコードは「測って、直さないと決めた」
+
+レビュー 🟡7。実測 **3.13ms/枚**（simplejpeg・実機）。二重ぶん（logger の
+`image_hz=5` × 2台）は **Pi 5 全体の 0.8%** しかない。camera_node に寄せると
+「誰が見ているか」の伝達まで作る必要があり、0.8% では割に合わない。
+計測は `status.camera_jpeg` に残してあるので、`image_hz` を上げたり
+カメラを増やしたときに再確認できる。
+
+### 副産物：`noUncheckedIndexedAccess` で実バグが1つ出た
+
+`gui/src/ws/map.ts` の `PALETTE` が3要素しかなく、圧縮データが壊れて 2bit 値 `3` が
+出ると `PALETTE[3]` が `undefined` になり、分割代入の例外で**地図の描画が止まる**
+形だった。4要素にして「壊れた1セルは未知として塗る」ようにした。
+
+---
 
 ## 現在地
 

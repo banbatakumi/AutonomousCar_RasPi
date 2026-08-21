@@ -235,6 +235,12 @@ export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
 
 type UiState = {
   telemetryOpen: boolean
+  /** `/ws/telemetry` の型定義の札が GUI 側と食い違っているか。
+   *
+   * **true の間はテレメトリを一切描かない**（`ws/telemetry.ts` がフレームを
+   * 捨てている）。GUI を再ビルドするまで直らないので、切断とは別に出す——
+   * 「切断」と表示すると Wi-Fi を疑って時間を溶かす。 */
+  schemaMismatch: boolean
   controlOpen: boolean
   /** `/ws/map` が繋がっているか。**地図が更新されないのが「切れている」のか
    *  「凍結して変わらない」のかを区別するために要る** */
@@ -243,6 +249,9 @@ type UiState = {
   /** 自分が操縦権を持っているか */
   hasControl: boolean
   deniedBy: string | null
+  /** 操縦権を取れなかった理由。**`bad_token` は「誰かが持っている」ではなく
+   *  「トークンが違う」** なので、表示を分けないと原因を探して時間を溶かす */
+  deniedReason: string | null
   /** GUI ↔ Pi の往復 [ms]。UART 区間の遅延とは別物 */
   wsRttMs: number | null
 
@@ -338,10 +347,12 @@ type UiState = {
 export const useUi = create<UiState>((set, get) => ({
   mapOpen: false,
   telemetryOpen: false,
+  schemaMismatch: false,
   controlOpen: false,
   status: null,
   hasControl: false,
   deniedBy: null,
+  deniedReason: null,
   wsRttMs: null,
 
   armRequested: false,

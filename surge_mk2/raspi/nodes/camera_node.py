@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
+from raspi.core.cleanup import quiet_close  # noqa: E402
 
 SHM_PREFIX = "surge_cam"
 DEFAULT_SLOTS = 8
@@ -228,11 +229,9 @@ class CameraWorker(threading.Thread):
         self._running = False
 
     def close(self) -> None:
-        try:
+        with quiet_close("picamera2 のカメラ"):
             self.cam.stop()
             self.cam.close()
-        except Exception:
-            pass
         self.ring.unlink()
 
 

@@ -140,7 +140,7 @@ export function MapCanvas() {
         }
         ctx.beginPath()
         for (let i = 0; i < t.length; i++) {
-          const p = t[i]
+          const p = t[i]!            // 添字は length 未満なので必ず在る
           if (i === 0) ctx.moveTo(sx(p[0]), sy(p[1]))
           else ctx.lineTo(sx(p[0]), sy(p[1]))
         }
@@ -214,9 +214,10 @@ function drawPolyline(
   if (pts.length < 4) return
   ctx.setLineDash(dash)
   ctx.beginPath()
+  // `i + 1 < length` で回しているので、`i` と `i+1` はどちらも範囲内
   for (let i = 0; i + 1 < pts.length; i += 2) {
-    const x = sx(pts[i])
-    const y = sy(pts[i + 1])
+    const x = sx(pts[i]!)
+    const y = sy(pts[i + 1]!)
     if (i === 0) ctx.moveTo(x, y)
     else ctx.lineTo(x, y)
   }
@@ -250,9 +251,10 @@ function drawRaceline(
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n
     ctx.beginPath()
-    ctx.moveTo(sx(p[i * 2]), sy(p[i * 2 + 1]))
-    ctx.lineTo(sx(p[j * 2]), sy(p[j * 2 + 1]))
-    ctx.strokeStyle = v.length > i ? speedColor(v[i], lo, hi) : '#ffc63f'
+    // `n = p.length / 2` なので `i*2+1` も `j*2+1` も範囲内（`j` は環状に折り返す）
+    ctx.moveTo(sx(p[i * 2]!), sy(p[i * 2 + 1]!))
+    ctx.lineTo(sx(p[j * 2]!), sy(p[j * 2 + 1]!))
+    ctx.strokeStyle = v.length > i ? speedColor(v[i]!, lo, hi) : '#ffc63f'
     ctx.stroke()
   }
   ctx.lineCap = 'butt'
@@ -266,9 +268,10 @@ function drawObstacles(
   sy: (y: number) => number,
   px: number,
 ) {
+  // `[x, y, r]` の3つ組。`i + 2 < length` で回すので3要素とも範囲内
   for (let i = 0; i + 2 < flat.length; i += 3) {
     ctx.beginPath()
-    ctx.arc(sx(flat[i]), sy(flat[i + 1]), Math.max(3, flat[i + 2] * px), 0, Math.PI * 2)
+    ctx.arc(sx(flat[i]!), sy(flat[i + 1]!), Math.max(3, flat[i + 2]! * px), 0, Math.PI * 2)
     ctx.fillStyle = `${C.obstacle}55`
     ctx.fill()
     ctx.strokeStyle = C.obstacle

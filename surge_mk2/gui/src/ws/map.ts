@@ -28,10 +28,24 @@ const RECONNECT_MAX_MS = 3000
 /** 0=未知 1=空き 2=占有。**未知と空きは必ず別の色にする。**
  *  同じ色にすると「まだ見ていない」と「何も無いと分かっている」の区別が消え、
  *  動的障害物の誤検出をデバッグできなくなる。 */
-const PALETTE: [number, number, number][] = [
-  [13, 17, 20], // 未知
-  [26, 36, 46], // 空き
-  [134, 169, 196], // 占有
+/**
+ * 2bit の値 → 色。**添字は 0〜3 の4通りすべてを埋める。**
+ *
+ * Python 側（`AutoMap.cells`）が書くのは 0/1/2 だけだが、圧縮データが途中で
+ * 壊れれば 3 も出る。3 要素だと `PALETTE[3]` が `undefined` になり、
+ * 直後の分割代入がその場で例外を投げてフレームごと描画が止まる。
+ * **壊れた1セルのために地図全体が消えるほうが困る**ので、未知として塗る。
+ */
+const PALETTE: readonly [
+  readonly [number, number, number],
+  readonly [number, number, number],
+  readonly [number, number, number],
+  readonly [number, number, number],
+] = [
+  [13, 17, 20], // 0 未知
+  [26, 36, 46], // 1 空き
+  [134, 169, 196], // 2 占有
+  [13, 17, 20], // 3 ありえない値。未知として塗る
 ]
 
 async function inflate(data: Uint8Array): Promise<Uint8Array> {
@@ -46,7 +60,8 @@ async function build(msg: AutoMapMsg): Promise<MapData | null> {
   const packed = await inflate(new Uint8Array(msg.cells))
   const n = width * height
   const cells = new Uint8Array(n)
-  for (let i = 0; i < n; i++) cells[i] = (packed[i >> 2] >> ((i & 3) * 2)) & 3
+  // 展開後が短ければ末尾は 0（未知）のまま。**途中で例外にせず地図は出す**
+  for (let i = 0; i < n; i++) cells[i] = ((packed[i >> 2] ?? 0) >> ((i & 3) * 2)) & 3
 
   // 行0 は y が最小。画面は下に向かって y が増えるので**上下を入れ替えて焼く**
   const img = new ImageData(width, height)
@@ -56,7 +71,7 @@ async function build(msg: AutoMapMsg): Promise<MapData | null> {
     const src = r * width
     const dst = (height - 1 - r) * width
     for (let c = 0; c < width; c++) {
-      const v = cells[src + c]
+      const v = (cells[src + c] ?? 0) as 0 | 1 | 2 | 3   // 2bit なので必ずこの4値
       const [rr, gg, bb] = PALETTE[v]
       const o = (dst + c) * 4
       px[o] = rr

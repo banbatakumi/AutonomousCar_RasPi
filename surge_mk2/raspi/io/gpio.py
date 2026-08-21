@@ -48,6 +48,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from ..core.cleanup import quiet_close
+
 __all__ = [
     "PIN_HEARTBEAT", "PIN_LED_GREEN", "PIN_LED_RED", "PIN_BUZZER",
     "FakePin", "GpiozeroPin", "open_output",
@@ -102,10 +104,8 @@ class GpiozeroPin:
         self._dev.value = 1 if value else 0
 
     def close(self) -> None:
-        try:
+        with quiet_close(f"gpiozero DigitalOutputDevice ({self.name})"):
             self._dev.close()
-        except Exception:
-            pass
 
 
 def open_output(gpio: int, initial: bool = False):
@@ -184,10 +184,8 @@ class GpiozeroTone:
         self._dev.stop()
 
     def close(self) -> None:
-        try:
+        with quiet_close("gpiozero TonalBuzzer"):
             self._dev.close()
-        except Exception:
-            pass
 
 
 def open_tone(gpio: int = PIN_BUZZER):
@@ -268,10 +266,8 @@ class Buzzer:
                 time.sleep(gap_ms / 1000)
 
     def close(self) -> None:
-        try:
+        with quiet_close("gpiozero PWMOutputDevice（ブザー）"):
             self._dev.close()
-        except Exception:
-            pass
 
 
 # ── ハートビート ────────────────────────────────────────────────────────
@@ -394,11 +390,11 @@ class Heartbeat:
         if self._thread is not None:
             self._thread.join(timeout=join_timeout)
             self._thread = None
-        try:
+        # ここで失敗しても**車両は既に安全側**（波形が止まった時点で STM32 が
+        # 50ms 後に E-Stop をラッチする）。閉じ損ねを理由に終了を止めない
+        with quiet_close(f"ハートビートのピン GPIO{PIN_HEARTBEAT}"):
             self._pin.write(False)
             self._pin.close()
-        except Exception:
-            pass
 
     def __enter__(self) -> "Heartbeat":
         self.start()
@@ -518,8 +514,6 @@ class StatusIndicator:
     def close(self) -> None:
         for pin in (self.green, self.red, self.buzzer):
             if pin is not None:
-                try:
+                with quiet_close(f"表示灯のピン {pin.name}"):
                     pin.write(False)
                     pin.close()
-                except Exception:
-                    pass

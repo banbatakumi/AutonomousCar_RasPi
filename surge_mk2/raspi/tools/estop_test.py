@@ -59,6 +59,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.core.link_tracker import LinkTracker  # noqa: E402
 from raspi.io.gpio import PIN_HEARTBEAT, Heartbeat, open_output  # noqa: E402
 from raspi.io.serial_link import SerialLink  # noqa: E402
@@ -581,10 +582,11 @@ def main() -> int:
     finally:
         for h in (hb, hb2):
             if h is not None:
-                try:
+                # **止まらなくても検査は続行する。** 止め損ねても直後の
+                # DISARM 連打と、波形が途切れたことによる STM32 側の
+                # E-Stop ラッチのほうが効く
+                with quiet_close("検査用ハートビートの停止"):
                     h.stop()
-                except Exception:
-                    pass
         # 検査で E-Stop を掛けた以上、最後に停止指令を送っておく。
         # **arm を上げたなら確実に降ろす**ため複数回送る
         for _ in range(10):

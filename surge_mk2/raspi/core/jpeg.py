@@ -33,6 +33,10 @@ systemd-logind の既定 `RemoveIPC=yes` は、そのユーザーの最後のセ
 
 from __future__ import annotations
 
+import time
+
+from .cleanup import quiet_close
+
 __all__ = ["make_encoder", "RingJpeg", "STALE_GAP"]
 
 #: `ImageRef.ring_seq` と手元の `write_seq` がこれ以上開いていたら、
@@ -94,6 +98,38 @@ class RingJpeg:
         #: 直近の失敗理由。**数だけ数えても原因は分からない**ので文字列で残す
         #: （`errors=448` だけ見えても「なぜ」が分からず時間を溶かす）
         self.last_error: str = ""
+        #: 実際にエンコードした枚数と、それに使った CPU 時間 [s]。
+        #:
+        #: **telemetry_node と logger_node が同じフレームを別々にエンコードしている**
+        #: （2026-08-21 のレビュー 🟡7）。素朴に共通化すると
+        #: 「誰も見ていない間も camera_node が焼き続ける」形になって idle の CPU が
+        #: むしろ増えるので、**まず本当にボトルネックかを測れるようにした。**
+        #: `process_time` を使うのは、待ちを含む wall clock では
+        #: 「エンコードが重い」と「バスが詰まっている」が区別できないため
+        self.encoded = 0
+        self.encode_cpu_s = 0.0
+
+    @property
+    def cpu_per_frame_ms(self) -> float:
+        """1枚あたりのエンコード CPU 時間 [ms]。**0 枚なら 0。**
+
+        カメラ2台ぶんの実測値がここに出る。`image_hz` を掛ければ、
+        二重エンコードで何%の CPU を無駄にしているかが直接わかる。
+        """
+        return (self.encode_cpu_s / self.encoded * 1000.0) if self.encoded else 0.0
+
+    def stats(self) -> dict:
+        """診断・終了統計に出す形。**捨てた数と「なぜ」を必ず並べる。**"""
+        return {
+            "impl": self.impl,
+            "encoded": self.encoded,
+            "cpu_per_frame_ms": round(self.cpu_per_frame_ms, 2),
+            "cpu_total_s": round(self.encode_cpu_s, 2),
+            "torn": self.torn,
+            "errors": self.errors,
+            "reattached": self.reattached,
+            "last_error": self.last_error,
+        }
 
     @property
     def ok(self) -> bool:
@@ -133,7 +169,10 @@ class RingJpeg:
             arr = frame.as_array()
             # `fmt` は**メモリ上の実際のバイト順**。名前を信じて入れ替えない
             colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
+            t0 = time.process_time()
             jpg = self.encode(arr, colorspace)
+            self.encode_cpu_s += time.process_time() - t0
+            self.encoded += 1
             t = frame.desc.t_capture_ns
             del arr
             if not frame.still_valid():
@@ -150,10 +189,8 @@ class RingJpeg:
     def _drop(self, shm_name: str) -> None:
         ring = self._rings.pop(shm_name, None)
         if ring is not None:
-            try:
+            with quiet_close(f"FrameRing {shm_name}"):
                 ring.close()
-            except Exception:
-                pass
 
     def close(self) -> None:
         for name in list(self._rings):

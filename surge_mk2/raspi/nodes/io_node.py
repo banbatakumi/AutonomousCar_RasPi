@@ -76,6 +76,8 @@ from raspi.msgs.types import (  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
+from raspi.core.cleanup import quiet_close  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
 
 __all__ = ["IoNode", "LinkState"]
 
@@ -88,9 +90,12 @@ LINKSTATS_HZ = 1
 DIAG_HZ = 10
 HB_HZ = 10
 
-#: `cmd` がこれだけ途絶したら DISARM に落とす。20Hz 送信に対して 3発の猶予。
-#: `docs/architecture.md` §9.4 の「PC → Pi 150ms 途切れたら停止」に合わせてある
-CMD_TIMEOUT_NS = 150 * 1_000_000
+#: `cmd` がこれだけ途絶したら DISARM に落とす。
+#: **値は `config/vehicle.toml` の `[safety]` が正**（`docs/architecture.md` §9.4）。
+#: telemetry_node も同じ判定を独立に持つ（片方が死んでも成立させるための冗長）が、
+#: **数字そのものは1箇所**にしてある。以前は3箇所に手書きされていた
+#: （2026-08-21 のレビュー 🟢11）
+CMD_TIMEOUT_NS = int(Vehicle.load().cmd_deadman_ms * 1_000_000)
 
 #: Pi 側のクランプ既定値。STM32 側の上限とは独立に効かせる（多層防御）
 DEFAULT_MAX_SPEED = 1.0        # m/s
@@ -596,10 +601,10 @@ def main() -> int:
                  status_cb=None if args.quiet else _status_line)
     finally:
         # 終了時にも DISARM を一発
-        try:
+        # UART が既に死んでいれば送れないが、**その場合 STM32 側は
+        # `uart_timeout` で自力で DISARM に落ちる**ので、ここで止まる必要は無い
+        with quiet_close("終了時の DISARM 送信"):
             node._send_command_disarm()
-        except Exception:
-            pass
         if heartbeat is not None:
             # 波形を止める＝E-Stop を掛けて終わる。正常終了でもそうする。
             # Pi が監視をやめた以上、車両を止めておくのが正しい

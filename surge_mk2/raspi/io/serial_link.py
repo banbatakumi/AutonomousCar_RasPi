@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 import serial
 
+from ..core.cleanup import quiet_close
 from ..proto import FrameEncoder, FrameParser
 from ..proto.generated.packets import HEADER_SIZE, S2P_TYPES
 
@@ -96,10 +97,8 @@ class SerialLink:
         self._parser.reset()
 
     def close(self) -> None:
-        try:
+        with quiet_close(f"SerialLink の pyserial ({self._ser.port})"):
             self._ser.close()
-        except Exception:
-            pass
 
     def __enter__(self) -> "SerialLink":
         return self

@@ -41,7 +41,18 @@ export function App() {
   const set = useUi((s) => s.set)
 
   useEffect(() => {
-    const stopTelemetry = connectTelemetry((open) => set({ telemetryOpen: open }))
+    const stopTelemetry = connectTelemetry(
+      (open) => set({ telemetryOpen: open }),
+      // **Pi 側だけ新しくなった状態。** 描き続けるほうが危ないので、
+      // `ws/telemetry.ts` はフレームを捨てている。ここは知らせるだけ
+      (got) => {
+        console.error(
+          `テレメトリの型定義が食い違っています（Pi: 0x${got.toString(16)}）。` +
+            'gui を再ビルドしてください: npm run build',
+        )
+        set({ schemaMismatch: true })
+      },
+    )
     // 地図は**変わったときだけ**届く別チャンネル。タブを開いていなくても繋いでおく
     // （後から地図タブを開いた人に、その時点の1枚が出ている必要がある）
     const stopMap = connectMap((open) => set({ mapOpen: open }))
@@ -55,12 +66,14 @@ export function App() {
           status: s,
           hasControl: s.has_controller && s.controller === c.id,
           deniedBy: s.has_controller && s.controller !== c.id ? s.controller : null,
+          ...(s.has_controller && s.controller === c.id ? { deniedReason: null } : {}),
           sfl: s.sfl,
           mcap: s.mcap,
           auto: s.auto,
           fan: s.fan,
         }),
-      onDenied: (holder) => set({ deniedBy: holder, hasControl: false }),
+      onDenied: (holder, reason) =>
+        set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false }),
       onRtt: (v) => set({ wsRttMs: v }),
       onLogs: (files) => set({ logFiles: files }),
     })
@@ -117,7 +130,15 @@ function DriveHint() {
   const ui = useUi()
   return (
     <div className="hint">
-      {ui.deniedBy && <span className="badge-bad">操縦権は {ui.deniedBy} が保持中</span>}
+      {ui.deniedReason === 'bad_token' ? (
+        <span className="badge-bad">
+          トークンが違います（<code>?token=…</code> 付きの URL で開き直してください）
+        </span>
+      ) : ui.deniedReason === 'auto_engage' ? (
+        <span className="badge-bad">自律走行の開始には操縦権が要ります</span>
+      ) : ui.deniedBy ? (
+        <span className="badge-bad">操縦権は {ui.deniedBy} が保持中</span>
+      ) : null}
       <span className={ui.deadman ? 'badge-live' : 'dim'}>
         {!ui.deadman
           ? 'ARM していません'

@@ -31,10 +31,24 @@
     読み手: seq を読む（奇数なら再試行） → データを読む → seq を読み直す
             → 値が変わっていたら**読んでいる間に上書きされた**ので破棄
 
-**注意（正直に書く）**: Python には明示的なメモリバリアが無く、この順序は
-CPython の実装と x86/ARM のストア順序に依存している。厳密な保証ではない。
-実効的な守りは「リング段数を十分取ること」で、seqlock はその**検出手段**である。
+### メモリ順序について（2026-08-21 のレビュー 🟢12）
+
+アルゴリズムとしては正しいが、**Pi 5 の Cortex-A76 は弱いメモリモデル**で、
+プロセス間には GIL の保護も無い。理屈の上では `seq += 1`（安定を示すストア）が
+データ書き込みより先に他コアから見えることがあり、読み手が `still_valid()` を
+通過しながら壊れたフレームを掴みうる。
+
+Python には明示的なメモリバリアが無いので、`_fence()` で代用している——
+`threading.Lock` の acquire/release は CPython 内部で atomic 命令になり、
+ARM64 では実際に `dmb` が出る。**言語仕様の保証ではなく実装の性質に頼っている**
+ので、これで「証明された」とは言わない。順序が壊れる確率を実用上無視できる
+ところまで下げるだけのもの。
+
+実効的な守りは今も**リング段数を十分取ること**（書き手が同じスロットに戻るまで
+の時間を稼ぐ）で、seqlock はその**検出手段**である。
 `still_valid()` が False を返したら、そのフレームは捨てて次を待つこと。
+
+将来 `torn` が説明のつかない増え方をしたら、まずここを疑うこと。
 
 ## 使い方
 
@@ -57,11 +71,33 @@ if ref is not None:
 from __future__ import annotations
 
 import struct
+import threading
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from typing import NamedTuple
 
+from ..core.cleanup import note_cleanup_failure
+
 __all__ = ["FrameRing", "FrameRef", "FrameDesc", "MAGIC", "FORMAT_VERSION"]
+
+#: メモリバリアの代用。**`acquire`/`release` は CPython 内部で atomic 命令になり、
+#: ARM64 では実際に `dmb` が出る。** Python に明示的なフェンスが無いための方便で、
+#: 言語仕様の保証ではない（`_FENCE` の docstring と本モジュールの冒頭を参照）。
+#:
+#: 30Hz の書き込みと、検証1回につき1度しか通らないので、費用は無視できる
+#: （実測 100ns 程度。1フレームの JPEG エンコードは ms オーダー）。
+_FENCE = threading.Lock()
+
+
+def _fence() -> None:
+    """ストアとロードの順序を CPU に守らせる（`shm_ring` の seqlock 用）。
+
+    **これは「バリアが欲しい」という意図をコードに残すためのものでもある。**
+    消しても x86 では動いてしまい、Pi 5（Cortex-A76）でだけ、
+    再現困難な形で壊れたフレームが混じるようになる。
+    """
+    _FENCE.acquire()
+    _FENCE.release()
 
 MAGIC = b"SURGERNG"
 FORMAT_VERSION = 1
@@ -148,6 +184,9 @@ class FrameRef:
 
     def still_valid(self) -> bool:
         """読んでいる間に上書きされていないか（seqlock の後段）。"""
+        # 画素の読み取りがこの検証より後ろに繰り下がらないようにする。
+        # **書き手側のバリアと対で初めて意味を持つ**（`FrameRing.write`）
+        _fence()
         seq, _, _, _ = self.ring._read_slot_meta(self.desc.slot)
         return seq == self._seq_at_read and seq % 2 == 0
 
@@ -263,10 +302,15 @@ class FrameRing:
 
         # seqlock: 奇数にしてから書き、書き終わってから偶数に戻す
         _S_SLOT.pack_into(self._shm.buf, off, cur + 1, t_capture_ns, frame_id, n)
+        _fence()                             # 「書き込み中」が画素より先に見えるように
         self._slot_data(slot)[:n] = view
+        # **ここのバリアが要（かなめ）。** 弱いメモリモデルの ARM では、これが
+        # 無いと「安定」のストアが画素の書き込みより先に他コアへ見えうる
+        _fence()
         _S_SLOT.pack_into(self._shm.buf, off, cur + 2, t_capture_ns, frame_id, n)
 
         # 最後に write_seq を進める。ここまでは読み手にこのフレームは見えない
+        _fence()
         _S_WRITE_SEQ.pack_into(self._shm.buf, _WRITE_SEQ_OFF, seq + 1)
         return FrameDesc(self.name, slot, seq + 1, t_capture_ns, frame_id,
                          self.width, self.height, self.fmt, self.stride, n)
@@ -334,8 +378,10 @@ class FrameRing:
         except BufferError:
             self.close_blocked = True
             return                     # _closed は立てない（後で閉じ直せる）
-        except Exception:
-            pass
+        except Exception as e:
+            # BufferError 以外は閉じ直しても直らない（消えている等）。
+            # **閉じたことにして先へ進む**が、理由は残す
+            note_cleanup_failure(f"SharedMemory {self.name} の close", e)
         self._closed = True
 
     def unlink(self) -> None:

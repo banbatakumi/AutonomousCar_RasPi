@@ -145,7 +145,7 @@ function Chart({ def }: { def: ChartDef }) {
           ticks: { stroke: C.line },
           // 経過時間は「何秒前か」で読みたい。絶対時刻（ページを開いてからの秒）に意味は無い
           values: (_u, vals) => {
-            const last = vals.length ? vals[vals.length - 1] : 0
+            const last = vals[vals.length - 1] ?? 0
             return vals.map((v) => `${Math.round(v - last)}s`)
           },
         },

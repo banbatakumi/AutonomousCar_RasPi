@@ -203,7 +203,13 @@ systemctl disable --now bluetooth 2>/dev/null || true
 # セッション中に開始/停止する運用にしたため、既定では記録なしで起動する
 write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet $ARM"
 write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quiet"
-write_unit surge-telemetry "WebSocket サーバ"  "raspi.nodes.telemetry_node" "surge-io.service"
+# **`--host 0.0.0.0` を明示する。** telemetry_node の既定は loopback にしてある
+# （制御 API を持つサーバの既定が全インタフェースだと、「打ち忘れ」ではなく
+# 「打たなかった日」が危険側に転ぶ。2026-08-21 のレビュー 🔴1-④）。
+# 手元の PC から GUI を開くのがこのシステムの前提なので、ここでは開ける。
+# **この引数を消すと Pi 自身からしか GUI が見えなくなる**（症状は「繋がらない」だけで
+# 原因が分かりにくいので、消す前にこのコメントを読むこと）
+write_unit surge-telemetry "WebSocket サーバ"  "raspi.nodes.telemetry_node --host 0.0.0.0" "surge-io.service"
 # **常時上げてよい。** planning_node は `auto/cmd` に出すだけで、`cmd` には
 # 一切 publish しない。engage するのは GUI の自動運転タブから人間が行うので、
 # 起動していること自体が車を動かす条件にはならない（`--allow-arm` とは独立）

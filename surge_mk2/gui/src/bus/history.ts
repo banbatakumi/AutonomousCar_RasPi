@@ -157,12 +157,16 @@ export function readHistory(keys: readonly SeriesKey[]): (number | null)[][] {
   const start = (head - n + CAP) % CAP
   const x: number[] = new Array(n)
   const ys: (number | null)[][] = keys.map(() => new Array(n))
+  // 系列ごとの Float32Array は**ループの外で1回だけ引く。**
+  // `noUncheckedIndexedAccess` で `keys[s]` が `| undefined` になるのを
+  // 内側で毎回捌くより、ここで確定させたほうが速くも読みやすくもなる
+  const src = keys.map((key) => data[key])
   for (let k = 0; k < n; k++) {
     const i = (start + k) % CAP
-    x[k] = ts[i]
+    x[k] = ts[i]!
     for (let s = 0; s < keys.length; s++) {
-      const v = data[keys[s]][i]
-      ys[s][k] = Number.isNaN(v) ? null : v
+      const v = src[s]![i]!
+      ys[s]![k] = Number.isNaN(v) ? null : v
     }
   }
   return [x, ...ys]

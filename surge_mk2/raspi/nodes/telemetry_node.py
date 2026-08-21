@@ -78,6 +78,21 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
 `auto_stop`・`brake_torque`・レートリミットは**GUI が送ってきた値のまま**通す。
 自律走行中に前照灯の操作だけ効かなくなる理由が無いため。
 
+## 公開面の守り方（2026-08-21 のレビュー指摘）
+
+制御 API を持つサーバなので、**既定は安全側**に倒してある。
+
+| 層 | 何を止めるか |
+|---|---|
+| `--host` の既定が `127.0.0.1` | 「打ち忘れ」で外に開くのを止める。外に出すなら `--host 0.0.0.0` を明示 |
+| Origin 検査（`_origin_ok`） | **クロスサイト WebSocket ハイジャック**。操縦中に別タブで開いた悪意あるページが `/ws/control` を張るのを弾く |
+| 共有トークン（`--token`） | 同一ネットワーク上の第三者。実際には**隣の班の PC の誤接続**を止める意味が大きい |
+| `engage` に操縦権を要求 | 操縦権を持たない接続が自律走行を**開始**するのを止める |
+
+**止める操作には条件をつけない。** E-Stop・操縦権の解放・engage の解除は
+トークンも操縦権も要求しない。止める指令に条件を足すと、
+**一番止めたい状況で止まらない**設計になる。
+
 ## arm はここでは解禁できない
 
 モータを回してよいかの判断は io_node の `--allow-arm` にしかない。
@@ -91,6 +106,8 @@ import argparse
 import asyncio
 import http
 import mimetypes
+import os
+import secrets
 import signal
 import sys
 import time
@@ -106,10 +123,13 @@ from websockets.http11 import Response  # noqa: E402
 
 from raspi.auto import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
+from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
 from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
+from raspi.msgs.schema import schema_version  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
@@ -130,12 +150,19 @@ __all__ = ["TelemetryServer"]
 
 NS = 1_000_000_000
 DEFAULT_PORT = 8000
+#: **既定は loopback。** 外から見せるには `--host 0.0.0.0` を明示的に打つ
+#: （`raspi/setup/run_stack.sh` は打っている）。制御 API を持つサーバの既定が
+#: 全インタフェース待ち受けだと、「打ち忘れ」ではなく「打たなかった日」が危険側に転ぶ
+DEFAULT_HOST = "127.0.0.1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUI_DIST = REPO_ROOT / "gui" / "dist"
 LOGS_DIR = REPO_ROOT / "logs"
 #: 自動運転のモードとパラメータを覚えておく場所。**`engaged` は保存しない**
 #: （電源投入で自律走行が始まる経路を作らない）
 AUTO_CONF = REPO_ROOT / "config" / "auto.json"
+#: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
+#: 無ければここを読む。無ければトークン無し（＝従来どおり誰でも操縦権を取れる）
+SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
 
 TELEMETRY_HZ = 20
 CMD_PUB_HZ = 50
@@ -154,17 +181,34 @@ FAN_PUMP_HZ = 1
 #: Wi-Fi(SSID・電波強度)の再取得周期。`nmcli` のサブプロセス起動が数十〜百数十msかかる
 #: ため 20Hz の `/ws/telemetry` には乗せず、`fan` と同じ低頻度ポーリングで `/ws/control` に載せる
 WIFI_PUMP_HZ = 1
+#: 安全タイマの正。**`config/vehicle.toml` の `[safety]` が唯一の出どころ**で、
+#: io_node は同じファイルから、GUI は `config/generate.py` の生成物から読む
+#: （2026-08-21 のレビュー 🟢11）
+_SAFETY = Vehicle.load()
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
-AUTO_CMD_STALE_NS = 200 * 1_000_000
+AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
 #: バスを覗きに行く間隔。20Hz 配信に対して十分細かく、CPU は無視できる
 BUS_POLL_S = 0.005
-#: 操縦クライアントからの指令がこれだけ途絶したら DISARM に落とす（§9.4）
-CMD_DEADMAN_NS = 150 * 1_000_000
+#: 操縦クライアントからの指令がこれだけ途絶したら DISARM に落とす（§9.4）。
+#: io_node の `CMD_TIMEOUT_NS` と**同じ値**（別々に判定するが数字は1つ）
+CMD_DEADMAN_NS = int(_SAFETY.cmd_deadman_ms * 1_000_000)
 #: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` と同じ値）
 DEFAULT_MCAP_IMAGE_HZ = 5.0
 #: 中継の読み取り単位
 RECORD_CHUNK = 65536
+#: `GET /logs/<name>` でメモリに載せてよい上限。これを超えたら 413 を返して
+#: `scp` 運用に倒す。**全量を一度に `read_bytes()` すると Pi のメモリが尽きる**
+#: （`image_hz=5` × カメラ2台で `.mcap` は毎時 1GB 近く育つ）
+MAX_INLINE_LOG_BYTES = 64 * 1024 * 1024
+#: 同一オリジン以外で許すオリジン。**Vite の dev サーバだけ。**
+#: 本番（telemetry_node が GUI も配る）は Host ヘッダと突き合わせるので列挙しない
+DEV_ORIGINS = frozenset(
+    f"http://{h}:5173" for h in ("localhost", "127.0.0.1", "surge.local"))
+
+#: `/ws/telemetry` の各フレームに載せる型定義の札（`raspi/msgs/schema.py`）。
+#: **起動時に1回だけ計算する**（20Hz のホットパスで毎回ハッシュを取らない）
+SCHEMA_VERSION = schema_version()
 
 _encoder = msgspec.msgpack.Encoder()
 _json_encode = msgspec.json.encode
@@ -192,13 +236,24 @@ def _read_pi_temp_c() -> float | None:
 # ── サーバ ──────────────────────────────────────────────────────────
 
 class TelemetryServer:
-    def __init__(self, *, port: int = DEFAULT_PORT, host: str = "0.0.0.0",
+    def __init__(self, *, port: int = DEFAULT_PORT, host: str = DEFAULT_HOST,
                  dist: Path = GUI_DIST, camera: bool = True,
-                 jpeg_quality: int = 70, camera_hz: float = CAMERA_HZ) -> None:
+                 jpeg_quality: int = 70, camera_hz: float = CAMERA_HZ,
+                 token: str = "") -> None:
         self.port = port
         self.host = host
         self.dist = dist
         self.camera_hz = camera_hz
+        #: 共有トークン。**空文字 = 検査しない。** 「操縦権を取る」「自律走行を
+        #: 開始する」の2つだけに掛ける。止める側（E-Stop・解放・engage 解除）には
+        #: 掛けない——**止める操作に条件をつけると、一番止めたい状況で止まらない**
+        self.token = token
+        #: トークン不一致で弾いた回数。診断タブに出す
+        self.auth_rejects = 0
+        #: Origin 不一致で弾いた回数
+        self.origin_rejects = 0
+        #: 型が壊れた `cmd` を捨てた回数
+        self.bad_cmds = 0
 
         self.sub = Subscriber({
             TOPIC_VEHICLE_STATE: LATEST,
@@ -290,8 +345,9 @@ class TelemetryServer:
     def _serve_static(self, path: str) -> Response:
         rel = path.split("?")[0].lstrip("/") or "index.html"
         target = (self.dist / rel).resolve()
-        # ディレクトリ外への脱出を許さない
-        if not str(target).startswith(str(self.dist.resolve())):
+        # ディレクトリ外への脱出を許さない。**前方一致では駄目**——`dist` に対して
+        # 兄弟の `dist-old/secret` が通ってしまう。パス要素単位で判定する
+        if not target.is_relative_to(self.dist.resolve()):
             return _response(403, "text/plain; charset=utf-8", b"forbidden")
         if target.is_dir():
             target = target / "index.html"
@@ -320,8 +376,43 @@ class TelemetryServer:
         target = self._resolve_log_path(name)
         if target is None or not target.is_file():
             return _response(404, "text/plain; charset=utf-8", b"not found")
+        size = target.stat().st_size
+        if size > MAX_INLINE_LOG_BYTES:
+            # **全量をメモリに載せてから返す実装なので、上限を切る。**
+            # 長時間走行の `.mcap` は毎時 1GB 近くになり、繰り返し叩かれると
+            # それだけで Pi が OOM で落ちる。大きいログは scp で取る運用にする
+            return _response(413, "text/plain; charset=utf-8",
+                             f"{target.name} は {size >> 20}MB あります"
+                             f"（上限 {MAX_INLINE_LOG_BYTES >> 20}MB）。"
+                             f"scp で取得してください: "
+                             f"scp pi@surge.local:~/surge_mk2/logs/{target.name} .".encode())
         return _response(200, "application/octet-stream", target.read_bytes(),
                          extra={"Content-Disposition": f'attachment; filename="{target.name}"'})
+
+    # ── Origin 検査（クロスサイト WebSocket ハイジャック対策） ──
+
+    @staticmethod
+    def _origin_ok(request) -> bool:
+        """ブラウザから来た接続のうち、**別サイトが張った WS を弾く**。
+
+        WebSocket は同一オリジンポリシーの対象外で、preflight も飛ばない。
+        操縦中に別タブで悪意あるページを開くと、そのページの JS がそのまま
+        `ws://surge.local:8000/ws/control` を張れてしまう。ブラウザは `Origin`
+        を必ず付けるので、**サーバが見さえすれば**この経路は塞げる。
+
+        `Origin` が無い＝ブラウザ以外（curl・自作クライアント・`tools/`）。
+        そちらは通す——クロスサイトの話ではないので、この検査の対象外。
+        同一ネットワークの第三者を止めるのは Origin ではなくトークン（`self.token`）。
+
+        許可の判定は **Host ヘッダとの一致**で行う。オリジンを定数で列挙すると、
+        `surge.local` でも `192.168.x.x` でも繋ぎたい実運用で必ず取りこぼす。
+        同一オリジンなら Origin は必ず `scheme://<Host と同じ>` になる。
+        """
+        origin = request.headers.get("Origin")
+        if origin is None:
+            return True
+        host = request.headers.get("Host") or ""
+        return origin in (f"http://{host}", f"https://{host}") or origin in DEV_ORIGINS
 
     def _process_request(self, connection, request):
         """WebSocket 以外のリクエストは静的ファイルまたはログのダウンロードとして返す。
@@ -331,6 +422,9 @@ class TelemetryServer:
         という接続先の食い違いを毎回踏む。
         """
         if request.path.startswith("/ws/"):
+            if not self._origin_ok(request):
+                self.origin_rejects += 1
+                return _response(403, "text/plain; charset=utf-8", b"bad origin")
             return None                       # WebSocket として処理させる
         if request.path.startswith("/logs/"):
             return self._serve_log_file(request.path)
@@ -427,6 +521,11 @@ class TelemetryServer:
         kind = m.get("type")
 
         if kind == "take_control":
+            if not self._token_ok(m):
+                self.auth_rejects += 1
+                await self._send_json(ws, {"type": "control_denied",
+                                           "holder": "", "reason": "bad_token"})
+                return
             if self.controller is not None and self.controller is not ws:
                 await self._send_json(ws, {"type": "control_denied",
                                            "holder": self.controller_name})
@@ -445,27 +544,17 @@ class TelemetryServer:
         elif kind == "cmd":
             if self.controller is not ws:
                 return                        # 操縦権が無い接続の指令は捨てる
-            self._last_cmd = DriveCmd(
-                mode=int(m.get("mode", 0)),
-                arm=bool(m.get("arm", False)),
-                brake=bool(m.get("brake", False)),
-                horn=bool(m.get("horn", False)),
-                light_mode=int(m.get("light_mode", 0)),
-                passing=bool(m.get("passing", False)),
-                target_speed=float(m.get("speed", 0.0)),
-                target_steer=float(m.get("steer", 0.0)),
-                accel_limit=float(m.get("accel_limit", 0.0)),
-                steer_rate_limit=float(m.get("steer_rate_limit", 0.0)),
-                # **既定は 0 = 未指定 = STM32 の最大制動。** 古い GUI が繋がって
-                # このキーを送ってこなくても、ブレーキが弱くなる方には転ばない
-                brake_torque=float(m.get("brake_torque", 0.0)),
-                # v0.6: 古い GUI はこのキーを送らないので、既定 False/0.0（速度指令のまま）
-                torque_mode=bool(m.get("torque_mode", False)),
-                target_torque=float(m.get("target_torque", 0.0)),
-                # v0.7: 超音波の自動停止。**既定は False**（キーを送ってこない古い GUI に
-                # 勝手な自動介入を足さない）。有効にするかは GUI の設定パネルで人間が決める
-                auto_stop=bool(m.get("auto_stop", False)),
-                source=f"gui:{self.controller_name}")
+            try:
+                cmd = self._decode_cmd(m)
+            except (TypeError, ValueError):
+                # **壊れた指令は捨てるだけ。接続は維持する。**
+                # msgspec は NaN / 1e400 を弾くが `{"speed": "abc"}` は素通りし、
+                # `float("abc")` が伝播すると制御チャネルのタスクごと死ぬ。
+                # 切ると 150ms 後に DISARM して復帰に人手が要るので、
+                # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
+                self.bad_cmds += 1
+                return
+            self._last_cmd = cmd
             self._last_cmd_ns = time.monotonic_ns()
 
         elif kind == "estop":
@@ -478,6 +567,14 @@ class TelemetryServer:
         # ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
 
         elif kind == "auto":
+            # **解除・停止は誰でも通す。開始だけ操縦権を要求する。**
+            # engage も同じ経路を通していたので、操縦権を持たない第三者が
+            # 自律走行を開始できてしまっていた。止める側の条件は増やさない
+            if m.get("engaged") and self.controller is not ws:
+                await self._send_json(ws, {"type": "control_denied",
+                                           "holder": self.controller_name,
+                                           "reason": "auto_engage"})
+                return
             self._on_auto(m)
             self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
             await self._broadcast_control_status()
@@ -529,6 +626,45 @@ class TelemetryServer:
         elif kind == "logs_delete":
             self._logs_delete(str(m.get("name", "")))
             await self._send_json(ws, self._logs_list())
+
+    def _token_ok(self, m: dict) -> bool:
+        """共有トークンの照合。**未設定なら常に通す**（従来どおりの挙動）。
+
+        学内デモで攻撃者を想定するというより、**隣の班の PC が誤接続する事故**を
+        防ぐ意味が大きい。だから掛けるのは「操縦権を取る」ときだけで、
+        止める操作（E-Stop・解放）には掛けない。
+        """
+        if not self.token:
+            return True
+        return secrets.compare_digest(str(m.get("token", "")), self.token)
+
+    def _decode_cmd(self, m: dict) -> DriveCmd:
+        """`{"type":"cmd", ...}` → `DriveCmd`。**`float()`/`int()` をここに閉じる。**
+
+        壊れた値は `TypeError` / `ValueError` として呼び元に返す。呼び元は
+        捨てるだけで接続を維持する（切ると 150ms 後に DISARM してしまう）。
+        """
+        return DriveCmd(
+            mode=int(m.get("mode", 0)),
+            arm=bool(m.get("arm", False)),
+            brake=bool(m.get("brake", False)),
+            horn=bool(m.get("horn", False)),
+            light_mode=int(m.get("light_mode", 0)),
+            passing=bool(m.get("passing", False)),
+            target_speed=float(m.get("speed", 0.0)),
+            target_steer=float(m.get("steer", 0.0)),
+            accel_limit=float(m.get("accel_limit", 0.0)),
+            steer_rate_limit=float(m.get("steer_rate_limit", 0.0)),
+            # **既定は 0 = 未指定 = STM32 の最大制動。** 古い GUI が繋がって
+            # このキーを送ってこなくても、ブレーキが弱くなる方には転ばない
+            brake_torque=float(m.get("brake_torque", 0.0)),
+            # v0.6: 古い GUI はこのキーを送らないので、既定 False/0.0（速度指令のまま）
+            torque_mode=bool(m.get("torque_mode", False)),
+            target_torque=float(m.get("target_torque", 0.0)),
+            # v0.7: 超音波の自動停止。**既定は False**（キーを送ってこない古い GUI に
+            # 勝手な自動介入を足さない）。有効にするかは GUI の設定パネルで人間が決める
+            auto_stop=bool(m.get("auto_stop", False)),
+            source=f"gui:{self.controller_name}")
 
     def _release_control(self, why: str) -> None:
         self.controller = None
@@ -681,7 +817,18 @@ class TelemetryServer:
                         "control": len(self.control_clients),
                         "camera": {k: len(v) for k, v in self.camera_clients.items()}},
             "camera_encoder": self._jpeg_impl,
+            # JPEG エンコードの実測（2026-08-21 のレビュー 🟡7）。
+            # **同じフレームを logger_node も焼いている。** 素朴な共通化は
+            # 「誰も見ていない間も camera_node が焼き続ける」形になって idle が
+            # 悪化するので、まず本当にボトルネックかをここで見えるようにした
+            "camera_jpeg": self._jpeg.stats() if self._jpeg is not None else None,
             "deadman_trips": self.deadman_trips,
+            # **無言で捨てた回数を必ず表に出す。** 捨てるだけの処理は、
+            # 出さないと「効いていない」と「そもそも来ていない」が区別できない
+            "auth_required": bool(self.token),
+            "auth_rejects": self.auth_rejects,
+            "origin_rejects": self.origin_rejects,
+            "bad_cmds": self.bad_cmds,
             "sfl": {"active": self._sfl_active},
             "mcap": self._mcap_status(),
             "auto": self._auto_status(),
@@ -763,10 +910,9 @@ class TelemetryServer:
             # 最後に書かれるので、GUI 側はこの切断イベントを「もう来ない」の目印にして
             # ダウンロードを発火する（`record.ts` の `onClose`）
             for ws in list(self.record_clients):
-                try:
+                # 既に相手が切っていれば例外になる。**それはむしろ望んだ状態**
+                with quiet_close("/ws/record の切断（mcap 中継の終了合図）"):
                     await ws.close()
-                except Exception:
-                    pass
 
     async def _mcap_stop(self) -> None:
         proc = self._mcap_proc
@@ -822,6 +968,14 @@ class TelemetryServer:
 
     @staticmethod
     async def _send_json(ws, obj) -> None:
+        """1クライアントへ JSON を1本送る。**送れなくても黙って捨てる。**
+
+        ここで例外が漏れると `_broadcast_control_status()` の
+        `asyncio.gather` が全クライアントぶん巻き添えになる。切れた接続は
+        `_control_channel` の `finally` が片付けるので、ここでは何もしない
+        （後始末ではないが「捨ててよい」根拠が別にある形。`quiet_close` は
+        使わない——20Hz で回るので記録が環状バッファを埋め尽くす）。
+        """
         try:
             await ws.send(_json_encode(obj).decode())
         except Exception:
@@ -892,6 +1046,11 @@ class TelemetryServer:
         elif scan is not None:
             self._last_scan_seq = scan.seq
         return _encoder.encode({
+            # **型定義そのものから決まる札。** GUI はこれが自分の持つ値と違えば
+            # そのフレームを捨てて警告を出す。Pi だけ新しくなった GUI が、
+            # 消えたフィールドを静かに `undefined` として読んで
+            # 空欄や NaN を出したまま動き続けるのを止める（レビュー 🟠3）
+            "schema": SCHEMA_VERSION,
             "t_server": time.monotonic_ns(),
             "vs": vs,
             "link": link,
@@ -1080,13 +1239,13 @@ class TelemetryServer:
     def close(self) -> None:
         # 終了時に一発 DISARM を置いてから消える。**自律走行の engage も落とす**
         # （planning_node だけが生き残っても、走れの意思が残らないように）
-        try:
+        # バスが既に閉じていれば送れないが、**その場合 io_node 側は
+        # `cmd` の途絶を 150ms で検出して自力で DISARM に落ちる**
+        with quiet_close("終了時の DISARM / engage 解除 / ファン自動化"):
             self._auto_engaged = False
             self._publish_auto_ctrl()
             self.pub.send(TOPIC_CMD, DriveCmd(mode=0, source="shutdown"))
             self._fan.set_auto()   # プロセスが消えても手動固定を残さない
-        except Exception:
-            pass
         # mcap 中継のサブプロセスも道連れにする（ベストエフォート。
         # systemd 配下なら KillMode=control-group で既に片付いているはず）
         if self._mcap_proc is not None:
@@ -1128,23 +1287,51 @@ npm run build      # -&gt; {dist}</code></pre>
 """.encode()
 
 
+def _load_token() -> str:
+    """`$SURGE_TOKEN` → `config/secret.txt` の順に共有トークンを探す。
+
+    **見つからなければ空文字**＝検査しない。トークンを必須にすると、
+    「走行日にトークンを忘れて操縦できない」という**止まる方向ではない事故**が
+    起きる（そのとき人は `--host 0.0.0.0` ごと安全機構を外しにかかる）。
+    """
+    env = os.environ.get("SURGE_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        return SECRET_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default=DEFAULT_HOST,
+                    help="待ち受けアドレス。**外から繋ぐには 0.0.0.0 を明示する**"
+                         f"（既定 {DEFAULT_HOST} = このPi からのみ）")
     ap.add_argument("--dist", type=Path, default=GUI_DIST, help="GUI のビルド成果物")
     ap.add_argument("--no-camera", action="store_true", help="JPEG 配信をしない")
     ap.add_argument("--jpeg-quality", type=int, default=70)
     ap.add_argument("--camera-hz", type=float, default=CAMERA_HZ)
+    ap.add_argument("--token", default="",
+                    help="操縦権を取るのに要る共有トークン。省略時は "
+                         f"$SURGE_TOKEN → {SECRET_PATH.name} の順に探す")
     args = ap.parse_args()
+
+    token = args.token or _load_token()
 
     srv = TelemetryServer(port=args.port, host=args.host, dist=args.dist,
                           camera=not args.no_camera,
-                          jpeg_quality=args.jpeg_quality, camera_hz=args.camera_hz)
+                          jpeg_quality=args.jpeg_quality, camera_hz=args.camera_hz,
+                          token=token)
 
     print(f"# telemetry_node  http://{args.host}:{args.port}/  "
           f"(mDNS を入れてあれば http://surge.local:{args.port}/)")
+    if args.host in ("127.0.0.1", "localhost"):
+        print("# ★ loopback のみで待ち受け中。外の PC から繋ぐには --host 0.0.0.0")
+    print("# 操縦権トークン: " + ("設定あり（GUI は ?token=… で一度開く）"
+                                  if token else "無し（誰でも操縦権を取れる）"))
     print(f"# GUI: {args.dist}" + ("" if args.dist.is_dir() else "  ← 未ビルド"))
     from raspi.bus import endpoints_for_topic
     print(f"# バス購読 {' '.join(endpoints_for_topic(TOPIC_VEHICLE_STATE))} ほか")
@@ -1170,6 +1357,20 @@ def main() -> int:
         print(f"\n=== 終了時の統計 ===\n"
               f"telemetry frames={srv.frames_sent} cmd published={srv.cmds_published} "
               f"deadman={srv.deadman_trips}回")
+        if srv._jpeg is not None and srv._jpeg.encoded:
+            jp = srv._jpeg
+            print(f"JPEG: {jp.encoded}枚 {jp.cpu_per_frame_ms:.1f}ms/枚 "
+                  f"(CPU 計 {jp.encode_cpu_s:.1f}s) [{jp.impl}]"
+                  f"  ※ logger_node も同じフレームを焼いている（レビュー 🟡7）")
+        if srv.bad_cmds or srv.auth_rejects or srv.origin_rejects:
+            print(f"捨てた入力: 壊れた cmd={srv.bad_cmds} "
+                  f"トークン不一致={srv.auth_rejects} Origin 不一致={srv.origin_rejects}")
+        # **握り潰した後始末は必ず表に出す。** 0 なのが正常で、
+        # 増えているなら閉じられていない資源がある（`raspi/core/cleanup.py`）
+        if failure_count():
+            print(f"後始末で捨てた例外 {failure_count()}件（直近）:")
+            for _, what, why in recent_failures():
+                print(f"  - {what}: {why}")
     return 0
 
 

@@ -180,6 +180,7 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv.telemetry_clients = set()
         srv.camera_clients = {"front": set(), "rear": set()}
         srv._jpeg_impl = None
+        srv._jpeg = None                   # カメラ配信なし（JPEG の実測も出ない）
         srv.sub = type("S", (), {"latest": {}})()
         srv._sfl_active = False
         srv._mcap_proc = None
@@ -238,7 +239,14 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.telemetry_clients = set()
         srv.camera_clients = {"front": set(), "rear": set()}
         srv.deadman_trips = 0
+        # 公開面の守り（2026-08-21 レビュー 🔴1・🟡4）。既定は**トークン無し**
+        # ＝従来どおりの挙動。トークンを掛けた場合は個別のテストで差し替える
+        srv.token = ""
+        srv.auth_rejects = 0
+        srv.origin_rejects = 0
+        srv.bad_cmds = 0
         srv._jpeg_impl = None
+        srv._jpeg = None                   # カメラ配信なし（JPEG の実測も出ない）
         srv.sub = type("S", (), {"latest": {}})()
         srv._sfl_active = False
         srv._mcap_proc = None
@@ -332,6 +340,137 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         await srv._on_control(a, b'{"type":"take_control","name":"A"}')
         await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
         self.assertFalse(srv._last_cmd.auto_stop)
+
+
+    # ── 自律走行の開始には操縦権が要る（レビュー 🔴1-(c)） ──
+
+    async def test_auto_engage_requires_control(self):
+        """**未認証の第三者が自律走行を開始できてはいけない。**
+
+        `auto` は「解除は誰でもできるべき」という意図で無条件に通していたが、
+        `engage` も同じ経路だったため開始まで誰でもできてしまっていた。
+        """
+        srv = self._server()
+        a, b = object(), object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"auto","mode":"ftg"}')
+        # 操縦権を持たない b は engage できない
+        await srv._on_control(b, b'{"type":"auto","engaged":true}')
+        self.assertFalse(srv._auto_engaged)
+        self.assertTrue(any(o.get("reason") == "auto_engage" for _, o in srv.sent))
+        # 操縦権を持つ a は engage できる
+        await srv._on_control(a, b'{"type":"auto","engaged":true}')
+        self.assertTrue(srv._auto_engaged)
+
+    async def test_anyone_can_disengage_auto(self):
+        """**止める側には条件をつけない。** 解除は操縦権が無くても通す。"""
+        srv = self._server()
+        a, b = object(), object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"auto","mode":"ftg"}')
+        await srv._on_control(a, b'{"type":"auto","engaged":true}')
+        self.assertTrue(srv._auto_engaged)
+        await srv._on_control(b, b'{"type":"auto","engaged":false}')
+        self.assertFalse(srv._auto_engaged)
+
+    # ── 共有トークン（レビュー 🔴1-(a)） ──
+
+    async def test_take_control_needs_the_token_when_set(self):
+        """トークンを設定したら、合っていない `take_control` は通らない。"""
+        srv = self._server()
+        srv.token = "himitsu"
+        a, b = object(), object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        self.assertIsNone(srv.controller)
+        await srv._on_control(a, b'{"type":"take_control","name":"A","token":"chigau"}')
+        self.assertIsNone(srv.controller)
+        self.assertEqual(srv.auth_rejects, 2)
+        self.assertTrue(any(o.get("reason") == "bad_token" for _, o in srv.sent))
+        await srv._on_control(b, b'{"type":"take_control","name":"B","token":"himitsu"}')
+        self.assertIs(srv.controller, b)
+
+    async def test_estop_works_without_the_token(self):
+        """**止める操作にトークンを要求しない。**
+
+        止める指令に条件を足すと、その条件が満たせない状況
+        （＝一番止めたい状況）で止まらなくなる。
+        """
+        srv = self._server()
+        srv.token = "himitsu"
+        a, b = object(), object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A","token":"himitsu"}')
+        self.assertIs(srv.controller, a)
+        await srv._on_control(b, b'{"type":"estop"}')
+        self.assertIsNone(srv.controller)
+
+    # ── 壊れた cmd で接続を切らない（レビュー 🟡4） ──
+
+    async def test_a_malformed_cmd_is_dropped_without_killing_the_channel(self):
+        """`{"speed":"abc"}` は msgspec を素通りし `float()` で例外になる。
+
+        伝播すると制御チャネルのタスクごと死に、**GUI のバグ1つで走行中に
+        操縦が切れる**。捨てるだけにして接続は維持する。
+        """
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
+        good = srv._last_cmd
+        # 例外が外に漏れないこと（漏れれば await がここで落ちる）
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":"abc"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":"x","speed":0.5}')
+        self.assertEqual(srv.bad_cmds, 2)
+        # 直前の正常な指令は残っており、操縦権も生きている
+        self.assertIs(srv._last_cmd, good)
+        self.assertIs(srv.controller, a)
+        # 次の正常な指令はそのまま通る
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.25}')
+        self.assertEqual(srv._last_cmd.target_speed, 0.25)
+
+
+class TestOriginCheck(unittest.TestCase):
+    """クロスサイト WebSocket ハイジャック対策（レビュー 🔴1-(b)）。
+
+    WebSocket は同一オリジンポリシーの対象外なので、**サーバが `Origin` を
+    見なければ**別サイトのページから `/ws/control` を張れてしまう。
+    """
+
+    @staticmethod
+    def _req(origin, host="surge.local:8000"):
+        headers = {"Host": host}
+        if origin is not None:
+            headers["Origin"] = origin
+        return type("R", (), {"headers": headers, "path": "/ws/control"})()
+
+    def _ok(self, origin, host="surge.local:8000"):
+        from raspi.nodes.telemetry_node import TelemetryServer
+        return TelemetryServer._origin_ok(self._req(origin, host))
+
+    def test_same_origin_passes(self):
+        self.assertTrue(self._ok("http://surge.local:8000"))
+        self.assertTrue(self._ok("https://surge.local:8000"))
+
+    def test_ip_address_access_passes(self):
+        """**IP 直打ちでも通ること。** オリジンを定数で列挙すると必ず取りこぼす。"""
+        self.assertTrue(self._ok("http://192.168.1.20:8000", host="192.168.1.20:8000"))
+
+    def test_vite_dev_server_passes(self):
+        """開発中は 5173 の Vite から Pi へ中継する（`gui/vite.config.ts`）。"""
+        self.assertTrue(self._ok("http://localhost:5173"))
+
+    def test_a_foreign_site_is_rejected(self):
+        self.assertFalse(self._ok("http://evil.example"))
+        self.assertFalse(self._ok("http://surge.local.evil.example:8000"))
+        # ポートだけ違うのも別オリジン
+        self.assertFalse(self._ok("http://surge.local:9999"))
+
+    def test_no_origin_passes(self):
+        """`Origin` 無し = ブラウザ以外（curl・`tools/`）。
+
+        クロスサイトの話ではないのでこの検査の対象外。同一ネットワークの
+        第三者を止めるのは Origin ではなくトークン。
+        """
+        self.assertTrue(self._ok(None))
 
 
 if __name__ == "__main__":

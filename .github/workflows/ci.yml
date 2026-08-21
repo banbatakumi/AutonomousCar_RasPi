@@ -1,0 +1,68 @@
+# surge_mk2 の CI。
+#
+# ## 何のためにあるか（2026-08-21 のレビュー 🟡5）
+#
+# 生成器の `--check` を3つ用意しているのに、**実行を人間の記憶に頼っていた。**
+# 生成物と正（`vehicle.toml` / `protocol.toml` / `types.py`）がずれても、
+# ずれた当日は誰も気づかない。気づくのは走行後になる。
+#
+# **`--check` を人間の外に置くのがこのファイルの目的。** テストと型検査は
+# ついでで、本体は3つの `--check`。
+#
+# robotcar/（V1）は対象外。休眠中で、CI を通す前提で書かれていない。
+name: ci
+
+on:
+  push:
+    paths: ['surge_mk2/**', '.github/workflows/ci.yml']
+  pull_request:
+    paths: ['surge_mk2/**', '.github/workflows/ci.yml']
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # **実機（Pi）は 3.13、開発機（Mac）は 3.12。** 片方だけ回すと、
+      # もう片方でだけ壊れているのに気づけない。実機側が 3.13 なので、
+      # そちらで通ることのほうが重い
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: surge_mk2/raspi/requirements.txt
+      # gpiozero/lgpio は Pi OS 同梱で requirements.txt に無い。
+      # テストは FakeGpio に落ちるので、CI では入れなくてよい
+      - run: pip install -r surge_mk2/raspi/requirements.txt pytest
+      - name: 生成物が正と一致しているか
+        working-directory: surge_mk2
+        run: |
+          python config/generate.py --check       # vehicle.toml  → gui/src/generated/vehicle.ts
+          python raspi/proto/generate.py --check  # protocol.toml → proto/packets.py, surge_proto.h
+          python config/gen_msgs.py --check       # msgs/types.py → gui/src/generated/msgs.ts
+          python config/check_docs.py --check     # protocol.toml → 文書中の版番号
+      - name: pytest
+        working-directory: surge_mk2
+        run: python -m pytest raspi/tests -q
+
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: surge_mk2/gui/package-lock.json
+      - working-directory: surge_mk2/gui
+        run: npm ci
+      # `tsc -b` は `strict` + `noUncheckedIndexedAccess` で通す
+      - working-directory: surge_mk2/gui
+        run: npx tsc -b
+      # ビルドまで通しておく。**型が通ってもバンドルが割れることがある**
+      - working-directory: surge_mk2/gui
+        run: npm run build

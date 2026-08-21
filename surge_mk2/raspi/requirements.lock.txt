@@ -1,0 +1,37 @@
+# 実機に入れる版の固定（2026-08-21 のレビュー 🟡6）。
+#
+#   .venv/bin/pip install -r raspi/requirements.lock.txt
+#
+# `requirements.txt` は範囲指定（開発機はパッチが自動で入ってよい）。
+# **走る機体はこちらで入れる。** 大会当日に入れ直して挙動が変わるのを防ぐ。
+#
+# ## ★ この値は **Pi 実機から** 取ること（Mac からではない）
+#
+# 開発機（Mac）の `pip freeze` を貼ると、Pi に無い版を要求してしまう。
+# 実際 numpy は Mac 2.5.1 / Pi 2.2.4 と食い違っていて、Mac 版を貼ると
+# **実機で動いている構成をわざわざ壊しにいく**ことになる
+# （ARM の wheel が無ければソースビルドで数十分かかる）。
+# ここに書いてあるのは **surge-mk2 で実際に動いている版**（Python 3.13.5）。
+#
+# ## 作り直し方
+#
+#   ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/pip list --format=freeze' \
+#     | grep -iE '^(mcap|msgspec|numpy|pyserial|pyzmq|websockets|lz4|zstandard)='
+#
+# **pytest 系と pygame は入れない。** テストは開発機で走らせるものだし、
+# pygame はシミュレータ（`sim/`、Mac 側）専用で Pi には要らない。
+# **pillow も入れない。** Pi の JPEG エンコードは picamera2 同梱の simplejpeg
+# が使われ、pillow はそれが無い環境（Mac）用の落ち先でしかない。
+#
+# gpiozero / lgpio は Raspberry Pi OS 同梱を使う（`--system-site-packages`）。
+
+mcap==1.4.0
+msgspec==0.21.1
+numpy==2.2.4
+pyserial==3.5
+pyzmq==27.1.0
+websockets==17.0.1
+
+# ── mcap が引き込む圧縮ライブラリ（直接は import しない） ──
+lz4==4.4.5
+zstandard==0.25.0

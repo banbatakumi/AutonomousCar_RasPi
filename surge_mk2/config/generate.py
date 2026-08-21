@@ -34,6 +34,7 @@ def gen_ts(spec: dict) -> str:
     pts = ", ".join(f"[{float(x)}, {float(y)}]" for x, y in footprint)
     sensors = spec.get("sensors", {})
     cam = sensors.get("cam_front", {})
+    safety = spec.get("safety", {})
     return "\n".join([
         f"// {BANNER}",
         "",
@@ -59,6 +60,18 @@ def gen_ts(spec: dict) -> str:
         f"    hfov: {float(cam.get('hfov', 0))}, // rad 水平画角",
         f"    bottomCrop: {float(cam.get('bottom_crop', 0))}, // 下端カット率",
         "  },",
+        "} as const",
+        "",
+        "/** 安全タイマ [ms]。`docs/architecture.md` §9.4。",
+        " * **同じ数字を GUI 側に手書きしない。** 以前は `useDriving.ts` の",
+        " * コメントに 150ms と書いてあるだけで、Pi 側の2つの定数と一致している",
+        " * 保証が無かった（2026-08-21 のレビュー 🟢11）。 */",
+        "export const SAFETY = {",
+        "  /** 指令が途絶してから DISARM に落とすまで [ms]。**GUI はこれより速く",
+        "   * 送り続けなければならない**（`useDriving.ts` の送信周期の根拠） */",
+        f"  cmdDeadmanMs: {float(safety.get('cmd_deadman_ms', 150))},",
+        "  /** `auto/cmd` がこれだけ古ければ制動に読み替える [ms] */",
+        f"  autoCmdStaleMs: {float(safety.get('auto_cmd_stale_ms', 200))},",
         "} as const",
         "",
     ])

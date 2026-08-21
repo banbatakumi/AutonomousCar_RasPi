@@ -51,6 +51,11 @@ class Vehicle:
     #: 操舵のむだ時間と1次遅れ [s]。Pure Pursuit の遅延補償の既定値になる
     dead_time_s: float = 0.030
     tau_steer_s: float = 0.12
+    #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/architecture.md` §9.4）。
+    #: **telemetry_node と io_node が独立に持つが、値はここ 1 つ**
+    cmd_deadman_ms: float = 150.0
+    #: `auto/cmd` がこれだけ古ければ中継せず制動に読み替える [ms]
+    auto_cmd_stale_ms: float = 200.0
     _path: Path | None = field(default=None, compare=False)
 
     # ── 派生量 ──
@@ -88,6 +93,7 @@ class Vehicle:
             return cls()
 
         dyn = d.get("dynamics", {})
+        safety = d.get("safety", {})
         sensors = d.get("sensors", {})
         lidar = sensors.get("lidar", {})
         cam_front = sensors.get("cam_front", {})
@@ -107,5 +113,7 @@ class Vehicle:
             cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
             dead_time_s=float(dyn.get("dead_time_s", 0.030)),
             tau_steer_s=float(dyn.get("tau_steer_s", 0.12)),
+            cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),
+            auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),
             _path=p,
         )
