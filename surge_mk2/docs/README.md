@@ -7,10 +7,11 @@
 | [system_overview.md](system_overview.md) | **システム全体像**。何をどこでやっているかを図と表で一通り。**まずこれ** | はじめて触る人 / 久しぶりに戻ってきた人 |
 | [development.md](development.md) | **開発ガイド**。何を直したら何を再起動するか、コマンド集、**トラブルシューティング** | 手を動かす人。困ったらここ |
 | [architecture.md](architecture.md) | **ソフトウェア設計書**。**「なぜそう設計したか」の正** | 設計の意図を知りたい人 |
-| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.7**）。仕様の説明の**正** | STM32 / RasPi 双方の実装者 |
+| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.9**）。仕様の説明の**正** | STM32 / RasPi 双方の実装者 |
 | [stm32_interface.md](stm32_interface.md) | **STM32 側 実装仕様書**。C 構造体、送受信の実装、安全要件、チェックリスト、立ち上げ手順 | STM32 ファームウェア実装者 |
 | [../sim/README.md](../sim/README.md) | **シミュレータ**（Mac 専用）。実機と同じ制御コードのまま走らせる | 自律走行を書く人 |
 | [../gui/README.md](../gui/README.md) | GUI のコード地図 | GUI を直す人 |
+| [review_2026-08-21.md](review_2026-08-21.md) | **コードレビュー**（2026-08-21）。指摘と修正案を重要度順に。**シロだった箇所の記録**も含む | 品質を上げたい人 / 次にレビューする人 |
 
 > **`architecture.md` は設計時の文書で、実装が先へ進んでいる箇所がある。**
 > ズレの一覧は [development.md §11](development.md#11-文書と実装のズレ2026-08-16-時点の棚卸し) にまとめてある。
@@ -49,7 +50,9 @@ system_overview.md       システム全体像（何がどう動いているか�
   Pi 側の実装は `raspi/`、GUI は `gui/`（React 5タブ）
 - **シミュレータあり**（`sim/`、Mac 専用）。`io_node --sim` で実機と同じ制御コードのまま
   コース上を走らせられる。実車が無いときの自律走行開発はこちら
-- **プロトコルは v0.7**（2026-08-11）。v0.6 からはビット追加のみで**ワイヤ互換**
+- **プロトコルは v0.9**（`protocol.toml` の `protocol_version = 0x0009` が正）。
+  **v0.9 まで Pi 側・STM32 側とも実機で動作確認済み**（2026-08-20）。
+  v0.6 → v0.7 はビット追加のみで**ワイヤ互換**
   （`COMMAND.flags` bit7 = `auto_stop`、`TELEMETRY.flags` bit16 = `auto_stop_active`）。
   v0.4 → v0.5 → v0.6 の経緯は `uart_protocol.md` の改版履歴にある
 - SLAM / 自己位置推定の方式は **Phase 3 着手時に決定**する方針

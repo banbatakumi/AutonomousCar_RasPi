@@ -3,7 +3,7 @@
 **バージョン**: v0.9
 **最終更新**: 2026-08-20
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: Pi 側 v0.9 実装済み（`protocol.toml`/`raspi/msgs`/GUI）。**STM32 側は実装・単体確認済み、実機での動作検証は未実施**
+**状態**: Pi 側 v0.9 実装済み（`protocol.toml`/`raspi/msgs`/GUI）。**STM32 側も実装・実機動作確認済み（2026-08-20）**
 
 > **v0.9 で変わったのはワイヤ形式ではなく `CONFIG_SET`/`CONFIG_GET` の `param_id` の
 > 実装状況だけ。** `param_id = 0x0050`（片輪浮き対策 有効）が STM32 ファームウェアで
@@ -1394,7 +1394,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.6** | 2026-08-11 | **`COMMAND` (0x10) のみの変更。** LEN 12→**14**、末尾に `target_torque : i16`（0.0001 N·m、負=後退方向）を追加。`flags` bit6 に `torque_mode` を新設。**ラジコン（MANUAL）モードで駆動トルクを直接指令できるようにするため。** 立っている間は `brake` と同様に車速 PI を迂回し `target_torque` を各輪へ直接掛ける（`target_speed` は無視、`brake` が同時に立っていれば `brake` が優先）。上限は一旦 **0.1 N·m**（モータ物理上限 0.1557 N·m 未満）とし Pi 側でクランプ。`target_torque` の `0` に `brake_torque` のような特別な意味はない。TC/TV との関係は未確定（§14 #8）。**同日、実車確認後に上限を `target_torque`/`brake_torque` とも 0.125 N·m へ引き上げ**（ワイヤ形式は変更なし、Pi/GUI/STM32 のクランプ値のみの変更） |
 | **v0.7** | 2026-08-11 | **STM32 側発。ビットの追加のみで LEN は全パケット変更なし**（`flags` の空きビットを使う）。`COMMAND` (0x10) の `flags` bit7 に **`auto_stop`**、`TELEMETRY` (0x02) の `flags` bit16 に **`auto_stop_active`** を新設。`auto_stop` が立っている間、**進行方向**（`torque_mode` なら `target_torque`、そうでなければ `target_speed` の符号で決まる）の超音波が **20cm 未満**になると STM32 が指令を無視して**最大制動**する（§5.6.4）。逆方向のセンサは見ないので後退で抜けられる。検知不能時は作動せず、ラッチもしない（ヒステリシス無し＝境界でチャタリングし得る）。`brake` が同時に立っていれば `brake` が優先。**v0.6 とワイヤ非互換ではない**ため、片側が未対応でも通信は継続する |
 | **v0.8** | 2026-08-19 | **STM32 側発。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0010`（TC 有効）/ `0x0020`（TV 有効）が STM32 ファームウェアで実際に機能するようになった（以前は `RAS_CONFIG_UNKNOWN_PARAM` を返していた）。Pi 側は `io_node` にハンドシェイク直後の `CONFIG_GET` 初期同期と、GUI トグル操作に応じた `CONFIG_SET` 送信を実装（§5.8）。`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`0x0001`-`0x0003`）は STM32 側で既にクランプに使われているが、Flash 非永続化かつ動的変更のユースケースが無いため Pi からは意図的に未送信のまま（§5.8.1） |
-| **v0.9** | 2026-08-20 | **STM32 側発。ワイヤ形式・LEN の変更なし。** 後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策として「片輪浮き対策（Wheel Lift Guard）」を追加、`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050` で ON/OFF できるようになった（§5.8.2）。既存の TC 本体（`0x0010`）とは独立に動作し、個別に有効/無効を切り替えられる。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）操作に応じた `CONFIG_SET` 送信を実装。**STM32 側は単体テスト済みだが実機での動作検証は未実施**（`pi_uart_protocol_v0.9_delta.md`） |
+| **v0.9** | 2026-08-20 | **STM32 側発。ワイヤ形式・LEN の変更なし。** 後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策として「片輪浮き対策（Wheel Lift Guard）」を追加、`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050` で ON/OFF できるようになった（§5.8.2）。既存の TC 本体（`0x0010`）とは独立に動作し、個別に有効/無効を切り替えられる。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）操作に応じた `CONFIG_SET` 送信を実装。**STM32 側も実機で動作確認済み（2026-08-20）**（`pi_uart_protocol_v0.9_delta.md`） |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）
 
