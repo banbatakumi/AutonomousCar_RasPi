@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.9（`uart_protocol.md` **v0.9** に対応）
+**バージョン**: v0.10（`uart_protocol.md` **v0.10** に対応）
 **最終更新**: 2026-08-21
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
@@ -8,6 +8,19 @@
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.10 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-08-21）**
+> - **ワイヤ形式・LEN の変更は無い。** 変わったのは `CONFIG_SET`/`CONFIG_GET` で
+>   受け付ける `param_id` だけなので、この版に未対応でも通信はそのまま継続する
+> - `param_id = 0x0001`（最大速度）/`0x0002`（最大加速度）/`0x0003`（最大舵角）を**廃止**。
+>   以後は常に `RAS_CONFIG_UNKNOWN_PARAM` を返す
+> - これらが担っていた上限は STM32 側の固定定数に一本化: `DRIVE_MAX_SPEED_M_S`
+>   （5.0 m/s）、`DRIVE_MAX_ACCEL_M_S2`（3.0 m/s²）、路面舵角 ±30°
+> - `COMMAND` の `accel_limit`/`steer_rate_limit`（毎指令ごとのレート制限）は今回の
+>   変更と無関係で、従来通り使える
+> - `protocol_version` を `0x0009`→**`0x000A`** に上げる
+> - **Pi はこの3つの `param_id` を元々送信していなかった**ため（`uart_protocol.md` §5.8.1）、
+>   Pi 側の対応は `protocol_version` の更新のみ
 
 > **v0.9 での変更（★STM32 側 実装・実機動作確認済み。2026-08-20）**
 > - **ワイヤ形式・LEN の変更は無い。** 変わったのは `CONFIG_SET`/`CONFIG_GET` で
@@ -1132,9 +1145,9 @@ MD が返す status バイトをそのまま転送し、上位ビットを STM32
 
 | param_id | 内容 | 型 | 備考 |
 |---|---|---|---|
-| `0x0001` | 最大速度 | float | m/s |
-| `0x0002` | 最大加速度 | float | m/s² |
-| `0x0003` | 最大舵角（**路面舵角**） | float | rad |
+| ~~`0x0001`~~ | ~~最大速度~~ | — | **v0.10 で廃止**（`result=1` を返す）。`DRIVE_MAX_SPEED_M_S`（5.0 m/s）固定 |
+| ~~`0x0002`~~ | ~~最大加速度~~ | — | **v0.10 で廃止**（同上）。`DRIVE_MAX_ACCEL_M_S2`（3.0 m/s²）固定 |
+| ~~`0x0003`~~ | ~~最大舵角（路面舵角）~~ | — | **v0.10 で廃止**（同上）。路面舵角 ±30° 固定 |
 | `0x0010` | TC 有効 | 0/1 | ★v0.8 で STM32 側が実装。それ以前は `result=1`（不明な param_id） |
 | `0x0011` | TC スリップ率しきい値 | float | |
 | `0x0020` | トルクベクタリング 有効 | 0/1 | ★v0.8 で STM32 側が実装。それ以前は `result=1` |
@@ -1463,6 +1476,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.10** | 2026-08-21 | **`uart_protocol.md` v0.10 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0001`（最大速度）/`0x0002`（最大加速度）/`0x0003`（最大舵角）を廃止し、以後は常に `RAS_CONFIG_UNKNOWN_PARAM` を返す。上限は STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s、`DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s²、路面舵角 ±30°）に一本化。`COMMAND.accel_limit`/`steer_rate_limit`（毎指令ごとのレート制限）は無関係で変更なし。`protocol_version` を `0x0009`→`0x000A` に更新。Pi はこの3つの `param_id` を元々送信していなかったため、Pi 側の対応は `protocol_version` の更新のみ |
 | **v0.9** | 2026-08-21 | **`uart_protocol.md` v0.9 に対応。STM32 側実装・実機動作確認済み（2026-08-20）。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050`（**片輪浮き対策 / Wheel Lift Guard**）を実装。後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策で、**TC 本体（`0x0010`）とは独立に動作し個別に切り替えられる**。既定値は有効。`0x0051`（しきい値・ゲイン）は未実装で、しきい値は固定値。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）に応じた `CONFIG_SET` 送信を実装 |
 | **v0.8** | 2026-08-21 | **`uart_protocol.md` v0.8 に対応。STM32 側実装済み（2026-08-19）。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0010`（TC 有効）/ `0x0020`（TV 有効）が実際に機能するようになった（**それ以前は `RAS_CONFIG_UNKNOWN_PARAM` = `result=1` を返していた**）。Pi 側は `io_node` にハンドシェイク直後の `CONFIG_GET` 初期同期と、GUI トグル操作に応じた `CONFIG_SET` 送信を実装（`uart_protocol.md` §5.8）。`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`0x0001`-`0x0003`）は STM32 側で既にクランプに使われているが、Flash 非永続化かつ動的変更のユースケースが無いため Pi からは意図的に未送信（同 §5.8.1） |
 | **v0.7** | 2026-08-11 | **`uart_protocol.md` v0.7 に対応。STM32 側実装済み。** `COMMAND.flags` bit7 に `auto_stop`、`TELEMETRY.flags` bit16 に `auto_stop_active` を新設（**LEN 変更なし**）。進行方向の超音波 20cm 未満で最大制動、逆方向のセンサは見ない、検知不能時は不作動、ラッチなし。優先順位は `brake` > `auto_stop` > 通常指令。検知距離のパラメータ化・LiDAR 全周版は未実装（`uart_protocol.md` §14 #9/#10） |

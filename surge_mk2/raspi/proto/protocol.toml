@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0009      # 上位=メジャー 下位=マイナー
+protocol_version = 0x000A      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -313,12 +313,13 @@ COMPRESSED = 2
 
 [params]
 comment = "CONFIG_SET / CONFIG_GET の param_id"
-# MAX_SPEED/MAX_ACCEL/MAX_STEER: STM32側がtarget_speed等のクランプに使う自前の既定値として
-# 持っている。CONFIG_SETはFlash永続化されず毎起動リセットされる上、Pi側からの動的変更の
-# ユースケースも無いため、Piからは意図的に送信しない（STM32側の既定値を単独の権威とする）。
-MAX_SPEED      = 0x0001
-MAX_ACCEL      = 0x0002
-MAX_STEER      = 0x0003
+# MAX_SPEED/MAX_ACCEL/MAX_STEER: v0.10でSTM32側が廃止し、STM32側の固定定数
+# （DRIVE_MAX_SPEED_M_S等）へ一本化された。常にUNKNOWN_IDを返す。
+# Piは元々Flash非永続化・動的変更のユースケース無しを理由に意図的に未送信だったため、
+# Pi側の挙動に変化は無い。
+MAX_SPEED      = 0x0001  # 廃止（STM32側が UNKNOWN_ID を返す。v0.10）
+MAX_ACCEL      = 0x0002  # 廃止（同上）
+MAX_STEER      = 0x0003  # 廃止（同上）
 # TC_ENABLE/TV_ENABLE: v0.8でSTM32ファームウェアが実装済み（以前は未実装で
 # RAS_CONFIG_UNKNOWN_PARAM を返していた）。Pi側から実際に送信する（raspi/nodes/io_node.py）。
 TC_ENABLE      = 0x0010
