@@ -23,9 +23,13 @@
   color-scheme: dark;
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
   background: var(--bg);
@@ -42,14 +46,36 @@ button {
   padding: 3px 9px;
   cursor: pointer;
 }
-button:hover { border-color: #3a4652; }
-button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 
-.dim { color: var(--dim); }
-.lv-ok { color: var(--ok); }
-.lv-warn { color: var(--warn); }
-.lv-bad { color: var(--bad); }
-.spacer { flex: 1; }
+button:hover {
+  border-color: #3a4652;
+}
+
+button.on {
+  background: #22313f;
+  border-color: var(--accent);
+  color: #cfe7ff;
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.lv-ok {
+  color: var(--ok);
+}
+
+.lv-warn {
+  color: var(--warn);
+}
+
+.lv-bad {
+  color: var(--bad);
+}
+
+.spacer {
+  flex: 1;
+}
 
 .app {
   display: flex;
@@ -68,7 +94,12 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
-.brand { font-weight: 700; letter-spacing: .04em; margin-right: 6px; }
+
+.brand {
+  font-weight: 700;
+  letter-spacing: .04em;
+  margin-right: 6px;
+}
 
 .pill {
   padding: 2px 8px;
@@ -78,9 +109,18 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   font-size: 11px;
   white-space: nowrap;
 }
-.pill.lv-ok { border-color: #1f5c37; }
-.pill.lv-warn { border-color: #6b5210; }
-.pill.lv-bad { border-color: #6e2b27; }
+
+.pill.lv-ok {
+  border-color: #1f5c37;
+}
+
+.pill.lv-warn {
+  border-color: #6b5210;
+}
+
+.pill.lv-bad {
+  border-color: #6e2b27;
+}
 
 /* SIM — 相手が実 STM32 ではなくシミュレータのときだけ出る。
    **他のどのピルとも似ていない見た目にする。** 実機と見分けがつかないまま
@@ -91,13 +131,24 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   letter-spacing: .08em;
   color: #14181d;
   border-color: #b98b1b;
-  background: repeating-linear-gradient(
-    -45deg, #e0aa2a, #e0aa2a 6px, #c9971f 6px, #c9971f 12px);
+  background: repeating-linear-gradient(-45deg, #e0aa2a, #e0aa2a 6px, #c9971f 6px, #c9971f 12px);
 }
 
-.metric { display: inline-flex; align-items: baseline; gap: 3px; }
-.metric b { font-weight: 600; }
-.metric i { font-style: normal; color: var(--dim); font-size: 10px; }
+.metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.metric b {
+  font-weight: 600;
+}
+
+.metric i {
+  font-style: normal;
+  color: var(--dim);
+  font-size: 10px;
+}
 
 /* ARM は「保持されている」ことが遠目にも分かる必要がある */
 .armbtn {
@@ -105,16 +156,29 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   font-weight: 600;
   letter-spacing: .03em;
 }
+
 .armbtn.on {
   background: #4a3a08;
   border-color: #b08a15;
   color: var(--live);
   animation: armpulse 1.2s ease-in-out infinite;
 }
-.armbtn:disabled { opacity: .35; cursor: not-allowed; }
+
+.armbtn:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}
+
 @keyframes armpulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 198, 63, .45); }
-  50%      { box-shadow: 0 0 0 4px rgba(255, 198, 63, 0); }
+
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 198, 63, .45);
+  }
+
+  50% {
+    box-shadow: 0 0 0 4px rgba(255, 198, 63, 0);
+  }
 }
 
 .estop {
@@ -124,7 +188,11 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   font-weight: 700;
   letter-spacing: .05em;
 }
-.estop:hover { background: #5b1a13; border-color: var(--bad); }
+
+.estop:hover {
+  background: #5b1a13;
+  border-color: var(--bad);
+}
 
 /* ラッチ系は health より目立たせる。人間が物理操作しないと戻らないため */
 .latch {
@@ -146,9 +214,21 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
-.hint { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+
+.hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
 /* 灯火・ファン（DriveControls.tsx）。運転できるタブのときだけ `.hint` の隣に出る */
-.drive-controls { display: flex; align-items: center; gap: 12px; }
+.drive-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .badge-live {
   background: #4a3a08;
   border: 1px solid #8a6d13;
@@ -157,6 +237,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 1px 7px;
   font-weight: 600;
 }
+
 .badge-warn {
   background: #3d3208;
   border: 1px solid #6b5210;
@@ -166,6 +247,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   font-size: 10px;
   margin-left: 5px;
 }
+
 .badge-bad {
   background: #3a1512;
   border: 1px solid #7d2b23;
@@ -195,7 +277,8 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
     'aux  aux  aux';
   gap: 6px;
   padding: 6px;
-  position: relative; /* 設定ドロワーの基準（`.rc` と同じ理由、`SettingsDrawer.tsx` 参照） */
+  position: relative;
+  /* 設定ドロワーの基準（`.rc` と同じ理由、`SettingsDrawer.tsx` 参照） */
 }
 
 .cam-front,
@@ -204,10 +287,20 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   min-height: 0;
   display: flex;
 }
-.cam-front { grid-area: camf; }
-.cam-rear { grid-area: camr; }
-.cam-front > .camera,
-.cam-rear > .camera { flex: 1; min-width: 0; }
+
+.cam-front {
+  grid-area: camf;
+}
+
+.cam-rear {
+  grid-area: camr;
+}
+
+.cam-front>.camera,
+.cam-rear>.camera {
+  flex: 1;
+  min-width: 0;
+}
 
 .camera {
   position: relative;
@@ -217,7 +310,13 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   overflow: hidden;
   min-height: 0;
 }
-.camera canvas { width: 100%; height: 100%; display: block; }
+
+.camera canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .camera-tag {
   position: absolute;
   top: 5px;
@@ -230,6 +329,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 2px 7px;
   border-radius: 4px;
 }
+
 /* `variant="minimal"`（ラジコンビュー）用。ラベルは出さず fps だけを隅に残す */
 .camera-fps {
   position: absolute;
@@ -242,6 +342,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 4px;
   pointer-events: none;
 }
+
 .cam-controls {
   position: absolute;
   right: 6px;
@@ -265,7 +366,13 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   overflow: hidden;
   min-height: 0;
 }
-.lidar-canvas { width: 100%; height: 100%; display: block; }
+
+.lidar-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .lidar-controls {
   position: absolute;
   right: 8px;
@@ -278,6 +385,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 4px;
   font-size: 11px;
 }
+
 .scan-badge {
   position: absolute;
   left: 8px;
@@ -303,16 +411,50 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 5px;
   padding: 8px 12px;
 }
-/* 受信が途絶したら数字をグレーにする。**古い値を現在値に見せない** */
-.drivebar.stale { opacity: .45; }
 
-.gauge { min-width: 0; }
-.gauge-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.gauge .label { color: var(--dim); font-size: 11px; }
-.gauge .big { font-size: 26px; font-weight: 700; line-height: 1.1; }
-.gauge .unit { color: var(--dim); font-size: 11px; }
-.gauge .sub { color: var(--dim); font-size: 11px; }
-.gauge .note { display: block; color: var(--dim); font-size: 10px; margin-top: 3px; }
+/* 受信が途絶したら数字をグレーにする。**古い値を現在値に見せない** */
+.drivebar.stale {
+  opacity: .45;
+}
+
+.gauge {
+  min-width: 0;
+}
+
+.gauge-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.gauge .label {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.gauge .big {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.gauge .unit {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.gauge .sub {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.gauge .note {
+  display: block;
+  color: var(--dim);
+  font-size: 10px;
+  margin-top: 3px;
+}
 
 .bibar {
   position: relative;
@@ -323,14 +465,48 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 3px;
   overflow: hidden;
 }
-.bibar-zero { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #3b4550; }
-.bibar-fill { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .85; }
-/* 指令値は線で重ねる。実測との差＝アクチュエータの遅れ */
-.bibar-target { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--live); }
 
-.kv { display: flex; gap: 8px; align-items: baseline; }
-.kv span { color: var(--dim); min-width: 5.5em; }
-.kv b { font-weight: 600; min-width: 4.5em; }
+.bibar-zero {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #3b4550;
+}
+
+.bibar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+  opacity: .85;
+}
+
+/* 指令値は線で重ねる。実測との差＝アクチュエータの遅れ */
+.bibar-target {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--live);
+}
+
+.kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.kv span {
+  color: var(--dim);
+  min-width: 5.5em;
+}
+
+.kv b {
+  font-weight: 600;
+  min-width: 4.5em;
+}
 
 /* ── 自動運転（モード選択・engage・判断・パラメータ） ───────────────
  *
@@ -348,26 +524,58 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 5px;
   padding: 7px 12px;
 }
-.autopanel.engaged { border-color: var(--live); box-shadow: inset 0 0 0 1px #ffc63f33; }
-.autopanel section { min-width: 0; }
-.autopanel .label { color: var(--dim); font-size: 11px; display: block; }
 
-.auto-mode-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
-.auto-mode-row button { font-size: 12px; }
+.autopanel.engaged {
+  border-color: var(--live);
+  box-shadow: inset 0 0 0 1px #ffc63f33;
+}
 
-.auto-engage { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.autopanel section {
+  min-width: 0;
+}
+
+.autopanel .label {
+  color: var(--dim);
+  font-size: 11px;
+  display: block;
+}
+
+.auto-mode-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
+.auto-mode-row button {
+  font-size: 12px;
+}
+
+.auto-engage {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
 /* **押し間違えない大きさにする。** 走り出すボタンなので他より一段大きい */
 .auto-engage .engage {
   padding: 6px 16px;
   font-weight: 600;
   border-color: #3b4550;
 }
+
 .auto-engage .engage.on {
   background: #4a3a12;
   border-color: var(--live);
   color: #ffe6a6;
 }
-.auto-engage .engage:disabled { color: var(--dim); cursor: default; opacity: .6; }
+
+.auto-engage .engage:disabled {
+  color: var(--dim);
+  cursor: default;
+  opacity: .6;
+}
 
 .auto-state .auto-reason {
   margin-top: 3px;
@@ -377,6 +585,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 .auto-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -385,22 +594,63 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   margin-top: 3px;
   font-size: 12px;
 }
-.auto-metrics b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.auto-metrics i { font-style: normal; color: var(--dim); font-size: 10px; margin-right: 4px; }
 
-.auto-params { grid-column: 1 / -1; margin-top: 2px; }
-.auto-params summary { color: var(--dim); font-size: 11px; cursor: pointer; }
+.auto-metrics b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-metrics i {
+  font-style: normal;
+  color: var(--dim);
+  font-size: 10px;
+  margin-right: 4px;
+}
+
+.auto-params {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+}
+
+.auto-params summary {
+  color: var(--dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
 .auto-param-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 8px 16px;
   margin-top: 6px;
 }
-.auto-param { display: block; min-width: 0; }
-.auto-param-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; }
-.auto-param-head b { margin-left: auto; font-variant-numeric: tabular-nums; }
-.auto-param-head i { font-style: normal; color: var(--dim); }
-.auto-param input[type='range'] { width: 100%; accent-color: var(--accent); }
+
+.auto-param {
+  display: block;
+  min-width: 0;
+}
+
+.auto-param-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+}
+
+.auto-param-head b {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-param-head i {
+  font-style: normal;
+  color: var(--dim);
+}
+
+.auto-param input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
 
 /* ── 補機（灯火・ブレーキ実トルク・押下状態・自動停止） ─────────────── */
 
@@ -415,15 +665,46 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 5px;
   padding: 6px 12px;
 }
-.aux section { min-width: 0; }
-.aux .label { color: var(--dim); font-size: 11px; display: block; }
-.aux .unit { color: var(--dim); font-size: 11px; }
-.aux-row { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
-.aux-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.aux-brake input[type='range'] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+
+.aux section {
+  min-width: 0;
+}
+
+.aux .label {
+  color: var(--dim);
+  font-size: 11px;
+  display: block;
+}
+
+.aux .unit {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.aux-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+.aux-row b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.aux-brake input[type='range'] {
+  flex: 1;
+  min-width: 120px;
+  accent-color: var(--accent);
+}
 
 /* 3段の灯火モード。**今どれなのかが一目で分かること**だけを狙う */
-.seg { display: inline-flex; margin-top: 3px; }
+.seg {
+  display: inline-flex;
+  margin-top: 3px;
+}
+
 .seg button {
   border: 1px solid var(--line);
   background: var(--panel2);
@@ -432,10 +713,24 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 0;
   font-size: 11px;
 }
-.seg button:first-child { border-radius: 4px 0 0 4px; }
-.seg button:last-child { border-radius: 0 4px 4px 0; }
-.seg button + button { border-left: none; }
-.seg button.on { background: #2a3441; color: var(--fg); border-color: #3b4550; }
+
+.seg button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.seg button:last-child {
+  border-radius: 0 4px 4px 0;
+}
+
+.seg button+button {
+  border-left: none;
+}
+
+.seg button.on {
+  background: #2a3441;
+  color: var(--fg);
+  border-color: #3b4550;
+}
 
 /* ── 診断（現在値グリッド。診断タブ `DiagView` から使う） ─────────── */
 
@@ -445,8 +740,18 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   gap: 10px 18px;
   padding: 6px 0 2px;
 }
-.diag-grid h4 { margin: 0 0 4px; font-size: 11px; color: var(--dim); font-weight: 600; }
-.diag-grid section { border-left: 2px solid var(--line); padding-left: 8px; }
+
+.diag-grid h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.diag-grid section {
+  border-left: 2px solid var(--line);
+  padding-left: 8px;
+}
 
 /* ── ラジコンビュー ───────────────────────────────────── */
 
@@ -472,7 +777,8 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   grid-template-areas: 'cams meters';
   gap: 6px;
   padding: 6px;
-  position: relative; /* 設定ドロワーの基準 */
+  position: relative;
+  /* 設定ドロワーの基準 */
   overflow: hidden;
   background: var(--bg);
 }
@@ -523,7 +829,13 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   display: flex;
   cursor: pointer;
 }
-.rc-cam-video > .camera { flex: 1; min-width: 0; min-height: 0; cursor: default; }
+
+.rc-cam-video>.camera {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  cursor: default;
+}
 
 /*
  * PIP とメータの段（2026-08-17、指示による新設）。
@@ -573,9 +885,18 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   grid-template-rows: minmax(0, 1fr);
   gap: 4px 18px;
 }
-.rc-cam-gauges > .meter-steer { justify-self: end; }
-.rc-cam-gauges > .meter-speed { justify-self: center; }
-.rc-cam-gauges > .meter-g { justify-self: start; }
+
+.rc-cam-gauges>.meter-steer {
+  justify-self: end;
+}
+
+.rc-cam-gauges>.meter-speed {
+  justify-self: center;
+}
+
+.rc-cam-gauges>.meter-g {
+  justify-self: start;
+}
 
 /*
  * PIP（`.rc-cam-bottom` 内、2026-08-17 に映像内オーバーレイから移動）。
@@ -593,8 +914,16 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   box-shadow: 0 3px 12px #000c, 0 0 0 1px var(--line);
   cursor: pointer;
 }
-.rc-pip .camera { height: 100%; border-color: var(--line); }
-.rc-pip .camera-fps { font-size: 9px; padding: 1px 5px; }
+
+.rc-pip .camera {
+  height: 100%;
+  border-color: var(--line);
+}
+
+.rc-pip .camera-fps {
+  font-size: 9px;
+  padding: 1px 5px;
+}
 
 /* LiDAR ミニマップ（映像右上、指示により据え置き）。クリックで拡大縮小 */
 .rc-lidar-mini {
@@ -612,12 +941,26 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   cursor: pointer;
   transition: height 140ms ease;
 }
+
 /* 拡大時は縮小時と別の max-height にする。**同じ上限だと広い画面で「拡大」が効かない** */
-.rc-lidar-mini.expanded { height: 82%; max-height: 640px; }
+.rc-lidar-mini.expanded {
+  height: 82%;
+  max-height: 640px;
+}
 
 /* `LidarMini.tsx` の中身。円形クリップは親（`.rc-lidar-mini`）の border-radius が担う */
-.lidar-mini { position: relative; width: 100%; height: 100%; }
-.lidar-mini-canvas { width: 100%; height: 100%; display: block; }
+.lidar-mini {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.lidar-mini-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .lidar-mini-ng {
   position: absolute;
   inset: 0;
@@ -645,16 +988,48 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 5px;
   padding: 8px 12px 10px;
 }
+
 /* 受信が途絶したら計器を沈める。**古い値を現在値に見せない**（.drivebar と同じ） */
-.rcpanel.stale { opacity: .45; }
+.rcpanel.stale {
+  opacity: .45;
+}
 
 /* 灯火・ファン共通の操作トグル（DriveControls.tsx、タブ行）。 */
-.rc-ctl { display: flex; align-items: center; gap: 7px; }
-.rc-ctl .label { color: var(--dim); font-size: 11px; }
-.rc-ctl .seg { margin-top: 0; }
-.rc-fan-duty { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
-.rc-fan-duty b { font-variant-numeric: tabular-nums; min-width: 2.6em; text-align: right; color: var(--dim); }
-.rc-fan-rpm { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; margin-left: 4px; }
+.rc-ctl {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.rc-ctl .label {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.rc-ctl .seg {
+  margin-top: 0;
+}
+
+.rc-fan-duty {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+}
+
+.rc-fan-duty b {
+  font-variant-numeric: tabular-nums;
+  min-width: 2.6em;
+  text-align: right;
+  color: var(--dim);
+}
+
+.rc-fan-rpm {
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+}
 
 /*
  * `.meter` は縦並び：ダイヤル（`flex:1`、伸縮する）＋ その下の数字（自然な高さ）。
@@ -667,7 +1042,14 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
  * ままになる——`DrivePanel.tsx` の `.drivepanel-wrap`／`GMeter.tsx` の
  * `.gmeter-wrap` と同じ「div に計算させ、中身は width/height:100% だけ」の型。
  */
-.meter { display: flex; flex-direction: column; align-items: center; min-width: 0; min-height: 0; }
+.meter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  min-height: 0;
+}
+
 .dial-wrap {
   position: relative;
   flex: 1 1 auto;
@@ -677,10 +1059,27 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   /* viewBox 0 0 120 92 と同じ比率 */
   aspect-ratio: 120 / 92;
 }
-.meter .arc { display: block; width: 100%; height: 100%; }
 
-.arc-bg { fill: none; stroke: var(--panel2); stroke-width: 7; stroke-linecap: round; }
-.arc-red { fill: none; stroke: #5a1f23; stroke-width: 7; stroke-linecap: round; }
+.meter .arc {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.arc-bg {
+  fill: none;
+  stroke: var(--panel2);
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+.arc-red {
+  fill: none;
+  stroke: #5a1f23;
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
 /* 実測の塗り。**ほんの少しだけ発光させる**（GR 風の締まり — 出しすぎると眩しいので控えめに） */
 .arc-fill {
   fill: none;
@@ -689,10 +1088,22 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   stroke-linecap: round;
   filter: drop-shadow(0 0 3px rgba(213, 48, 63, .55));
 }
-.arc-tick { stroke: #453036; stroke-width: 1; }
-.arc-zero { stroke: #59383e; stroke-width: 1.5; }
+
+.arc-tick {
+  stroke: #453036;
+  stroke-width: 1;
+}
+
+.arc-zero {
+  stroke: #59383e;
+  stroke-width: 1.5;
+}
+
 /* 指令値は針とは別の色（--live）。実測との差＝アクチュエータの遅れ */
-.arc-target { stroke: var(--live); stroke-width: 2; }
+.arc-target {
+  stroke: var(--live);
+  stroke-width: 2;
+}
 
 /*
  * 針は 8Hz でしか角度が変わらないので、間を CSS で埋めて滑らかに見せる。
@@ -704,10 +1115,26 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   transform-origin: 60px 58px;
   transition: transform 125ms linear;
 }
-.needle line { stroke: var(--fg); stroke-width: 2.2; stroke-linecap: round; }
-.needle-hub { fill: var(--fg); stroke: var(--accent); stroke-width: 1.5; }
 
-.meter-read { display: flex; align-items: baseline; gap: 4px; margin-top: -6px; }
+.needle line {
+  stroke: var(--fg);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.needle-hub {
+  fill: var(--fg);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.meter-read {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: -6px;
+}
+
 .meter-read b {
   font-size: 30px;
   font-weight: 700;
@@ -716,9 +1143,22 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   font-variant-numeric: tabular-nums;
   font-style: italic;
 }
-.meter-read i { font-style: normal; color: var(--dim); font-size: 11px; }
+
+.meter-read i {
+  font-style: normal;
+  color: var(--dim);
+  font-size: 11px;
+}
+
 /* 正常時は数値を出さない方針にしたため（2026-08-17）、今は「後退」警告表示だけがここを使う */
-.meter-sub { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--dim); margin-top: 2px; }
+.meter-sub {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--dim);
+  margin-top: 2px;
+}
 
 /* 速度計・舵角計と同じく、高さいっぱいに広がる正方形（2026-08-17） */
 .gmeter-wrap {
@@ -729,15 +1169,57 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   max-width: 100%;
   aspect-ratio: 1 / 1;
 }
-.gmeter { width: 100%; height: 100%; display: block; }
-.gmeter-axis { position: absolute; font-size: 9px; color: var(--dim); pointer-events: none; }
-.gmeter-axis-t { top: 0; left: 50%; transform: translateX(-50%); }
-.gmeter-axis-b { bottom: 0; left: 50%; transform: translateX(-50%); }
-.gmeter-axis-l { left: 0; top: 50%; transform: translateY(-50%); }
-.gmeter-axis-r { right: 0; top: 50%; transform: translateY(-50%); }
 
-.rc-side { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.rc-small { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.gmeter {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.gmeter-axis {
+  position: absolute;
+  font-size: 9px;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+.gmeter-axis-t {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.gmeter-axis-b {
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.gmeter-axis-l {
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.gmeter-axis-r {
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.rc-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rc-small {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
 
 /*
  * 駆動配分パネル — 車体を上から見た図（`DrivePanel.tsx`）。
@@ -748,28 +1230,83 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
  * 幅が親に追従しない。ただの div（.drivepanel-wrap）で幅を確定させてから
  * 中の svg に width: 100% を効かせる。
  */
-.drivepanel-wrap { width: 100%; max-width: 250px; margin: 0 auto; }
-.drivepanel { width: 100%; height: auto; display: block; }
-.dp-body { fill: var(--panel2); stroke: var(--accent); stroke-opacity: .35; stroke-width: 1.5; }
+.drivepanel-wrap {
+  width: 100%;
+  max-width: 250px;
+  margin: 0 auto;
+}
+
+.drivepanel {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.dp-body {
+  fill: var(--panel2);
+  stroke: var(--accent);
+  stroke-opacity: .35;
+  stroke-width: 1.5;
+}
+
 /* タイヤの地色（ゴム）。中の塗り（`.dp-wheel-fill`）が無い前輪もこの色のまま */
-.dp-wheel { fill: #171213; }
+.dp-wheel {
+  fill: #171213;
+}
+
 /* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境に電流ぶんだけ塗る単色ゲージ */
-.dp-wheel-fill { fill: var(--accent); }
-.dp-wheel-zero { fill: #4a3438; }
-.dp-wheel-tread { stroke: #2a2224; stroke-width: 1; }
+.dp-wheel-fill {
+  fill: var(--accent);
+}
+
+.dp-wheel-zero {
+  fill: #4a3438;
+}
+
+.dp-wheel-tread {
+  stroke: #2a2224;
+  stroke-width: 1;
+}
+
 /* ゲージ・トレッドの上から輪郭を引き直して縁を締める */
-.dp-wheel-outline { fill: none; stroke: var(--line); stroke-width: 1.5; }
-.dp-label { fill: var(--dim); font-size: 9px; }
-.dp-value { fill: var(--fg); font-size: 10px; font-variant-numeric: tabular-nums; }
+.dp-wheel-outline {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+.dp-label {
+  fill: var(--dim);
+  font-size: 9px;
+}
+
+.dp-value {
+  fill: var(--fg);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 駆動・信号系統の乾電池型ゲージ。塗りは lv-bg-* を流用（`battLevel` の色分けと共通） */
-.dp-batt-body { fill: var(--panel2); stroke: var(--line); stroke-width: 1.5; }
-.dp-batt-nub { fill: var(--line); }
+.dp-batt-body {
+  fill: var(--panel2);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+.dp-batt-nub {
+  fill: var(--line);
+}
 
 /*
  * 介入ランプ。**消えている間は主張しない**（枠だけ）。
  * 点いたら発光させる — 一瞬でも視界の端で捉えられる必要がある。
  */
-.lamps { display: flex; flex-wrap: wrap; gap: 5px; }
+.lamps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
 .lamp {
   padding: 2px 9px;
   border: 1px solid var(--line);
@@ -782,28 +1319,54 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   white-space: nowrap;
   transition: color 90ms linear, background 90ms linear, box-shadow 90ms linear;
 }
+
 .lamp-warn.on {
   color: var(--warn);
   background: #3d3208;
   border-color: #8a6d13;
   box-shadow: 0 0 8px rgba(232, 171, 33, .35);
 }
+
 .lamp-bad.on {
   color: #ff9b93;
   background: #3a1512;
   border-color: #7d2b23;
   box-shadow: 0 0 8px rgba(242, 84, 75, .4);
 }
-.lamp-dim.on { color: var(--dim); border-color: #3b4550; }
+
+.lamp-dim.on {
+  color: var(--dim);
+  border-color: #3b4550;
+}
 
 /* 温度計（`TempPanel.tsx`）。車体図の下に縦に並べる */
-.rc-temps { display: flex; flex-direction: column; gap: 4px; }
+.rc-temps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
 /* 水温計・燃料計。実車と同じで**正常でも常時出す**（走行を切り上げる判断に使う） */
 /* 画面幅いっぱいに伸ばさない。**横に長いバーは残量の変化が読み取りにくい** */
-.bar-row { display: flex; align-items: center; gap: 7px; font-size: 11px; max-width: 340px; }
-.bar-row .label { color: var(--dim); min-width: 2.6em; }
-.bar-row b { font-variant-numeric: tabular-nums; min-width: 4.2em; text-align: right; }
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  max-width: 340px;
+}
+
+.bar-row .label {
+  color: var(--dim);
+  min-width: 2.6em;
+}
+
+.bar-row b {
+  font-variant-numeric: tabular-nums;
+  min-width: 4.2em;
+  text-align: right;
+}
+
 .minibar {
   flex: 1;
   min-width: 60px;
@@ -813,29 +1376,66 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 3px;
   overflow: hidden;
 }
-.minibar-fill { height: 100%; transition: width 150ms linear; }
+
+.minibar-fill {
+  height: 100%;
+  transition: width 150ms linear;
+}
+
 /*
  * `background` は div のミニバー用、`fill` は SVG rect（駆動配分パネルの
  * 乾電池ゲージ）用。同じ意味色を両方の文脈で使い回すため両方に指定している。
  * `fill` は SVG 以外の要素には無視されるだけなので害はない。
  */
-.lv-bg-dim { background: #2f3a46; fill: #2f3a46; }
-.lv-bg-ok { background: var(--ok); fill: var(--ok); }
-.lv-bg-warn { background: var(--warn); fill: var(--warn); }
-.lv-bg-bad { background: var(--bad); fill: var(--bad); }
+.lv-bg-dim {
+  background: #2f3a46;
+  fill: #2f3a46;
+}
+
+.lv-bg-ok {
+  background: var(--ok);
+  fill: var(--ok);
+}
+
+.lv-bg-warn {
+  background: var(--warn);
+  fill: var(--warn);
+}
+
+.lv-bg-bad {
+  background: var(--bad);
+  fill: var(--bad);
+}
 
 /*
  * `lv-bg-dim` はゲージの「空の器」用でほぼ黒（#2f3a46）— 器の輪郭に囲まれて
  * 初めて見える色なので、輪郭を持たない `WifiIcon` の消灯部分に使うと
  * 背景に溶けて見えなくなる。こちらは `--dim`（#6a7683、`.dim` と同じ）を使う。
  */
-.lv-bg-dim2 { fill: var(--dim); }
-.lv-stroke-dim { stroke: var(--dim); }
-.lv-stroke-ok { stroke: var(--ok); }
-.lv-stroke-warn { stroke: var(--warn); }
-.lv-stroke-bad { stroke: var(--bad); }
+.lv-bg-dim2 {
+  fill: var(--dim);
+}
 
-.wifi-icon { flex: 0 0 auto; vertical-align: middle; }
+.lv-stroke-dim {
+  stroke: var(--dim);
+}
+
+.lv-stroke-ok {
+  stroke: var(--ok);
+}
+
+.lv-stroke-warn {
+  stroke: var(--warn);
+}
+
+.lv-stroke-bad {
+  stroke: var(--bad);
+}
+
+.wifi-icon {
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
 
 /* ── 設定ドロワー（ラジコンタブ内） ───────────────────── */
 
@@ -852,7 +1452,11 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   background: #000a;
   border-radius: 6px;
 }
-.gear.on { background: #3a1418; border-color: var(--accent); }
+
+.gear.on {
+  background: #3a1418;
+  border-color: var(--accent);
+}
 
 /*
  * 右端に寄せるだけで、背景は覆わない。
@@ -874,7 +1478,12 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   transition: transform 180ms ease;
   visibility: hidden;
 }
-.drawer.open { transform: translateX(0); visibility: visible; }
+
+.drawer.open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
 .drawer-head {
   display: flex;
   align-items: center;
@@ -883,17 +1492,52 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
-.drawer-head h2 { margin: 0; font-size: 14px; flex: 1; }
-.drawer-body { flex: 1; min-height: 0; overflow-y: auto; }
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 14px;
+  flex: 1;
+}
+
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* タブだったころの余白は広すぎる。ドロワー幅に合わせて詰める */
-.drawer .settings { padding: 12px 14px 32px; max-width: none; height: auto; }
+.drawer .settings {
+  padding: 12px 14px 32px;
+  max-width: none;
+  height: auto;
+}
 
 /* ── 診断タブ ─────────────────────────────────────────── */
 
-.diagview { padding: 16px 22px 40px; overflow-y: auto; height: 100%; }
-.diagview-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 14px; }
-.diagview-head h2 { margin: 0; }
-.diagview-head p { margin: 0; flex: 1 1 100%; font-size: 12px; }
+.diagview {
+  padding: 16px 22px 40px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.diagview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.diagview-head h2 {
+  margin: 0;
+}
+
+.diagview-head p {
+  margin: 0;
+  flex: 1 1 100%;
+  font-size: 12px;
+}
+
 /* 診断タブでは畳まないので、区切りをはっきりさせる */
 .diagview .diag-grid {
   background: var(--panel);
@@ -903,7 +1547,12 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   margin-bottom: 16px;
 }
 
-.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 12px;
+}
+
 .chart {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -911,18 +1560,62 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 8px 12px 10px;
   min-width: 0;
 }
-.chart-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
-.chart-head h4 { margin: 0; font-size: 12px; font-weight: 600; }
-.chart-head .unit { color: var(--dim); font-size: 10px; }
-.chart-head .dim { font-size: 10px; margin-left: auto; }
-.chart-legend { display: flex; gap: 10px; font-size: 10px; color: var(--dim); }
-.chart-legend span { display: inline-flex; align-items: center; gap: 4px; }
-.chart-legend i { width: 9px; height: 2px; display: inline-block; }
-.chart-host { width: 100%; }
+
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.chart-head h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chart-head .unit {
+  color: var(--dim);
+  font-size: 10px;
+}
+
+.chart-head .dim {
+  font-size: 10px;
+  margin-left: auto;
+}
+
+.chart-legend {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chart-legend i {
+  width: 9px;
+  height: 2px;
+  display: inline-block;
+}
+
+.chart-host {
+  width: 100%;
+}
 
 /* uPlot は明るいテーマ前提の既定値なので、暗い計器盤に合わせて上書きする */
-.chart .u-legend { display: none; }
-.chart .u-select { background: #4aa8ff22; }
+.chart .u-legend {
+  display: none;
+}
+
+.chart .u-select {
+  background: #4aa8ff22;
+}
 
 /* ── 設定パネル（ドロワーの中身） ─────────────────────── */
 
@@ -932,10 +1625,29 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   overflow-y: auto;
   height: 100%;
 }
-.settings-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 18px; }
-.settings-head h2 { margin: 0; }
-.settings-head p { margin: 0; flex: 1 1 100%; color: var(--dim); font-size: 12px; }
-.settings-head code { color: var(--accent); }
+
+.settings-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.settings-head h2 {
+  margin: 0;
+}
+
+.settings-head p {
+  margin: 0;
+  flex: 1 1 100%;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.settings-head code {
+  color: var(--accent);
+}
 
 .settings-group {
   background: var(--panel);
@@ -944,16 +1656,56 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 10px 16px 4px;
   margin-bottom: 14px;
 }
-.settings-group h3 { margin: 0 0 6px; font-size: 12px; color: var(--dim); font-weight: 600; }
 
-.settings-row { padding: 8px 0 10px; border-top: 1px solid var(--line); }
-.settings-row:first-of-type { border-top: none; }
-.settings-row-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; }
-.settings-row-head .label { min-width: 11em; }
-.settings-row-head b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.settings-row-head .unit { color: var(--dim); font-size: 11px; }
-.settings-row input[type='range'] { width: 100%; accent-color: var(--accent); }
-.settings-checkbox { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; }
+.settings-group h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.settings-row {
+  padding: 8px 0 10px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-row:first-of-type {
+  border-top: none;
+}
+
+.settings-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.settings-row-head .label {
+  min-width: 11em;
+}
+
+.settings-row-head b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-row-head .unit {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.settings-row input[type='range'] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
 
 .settings-reset {
   margin-left: auto;
@@ -964,13 +1716,44 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
 
 /* ── ログタブ ─────────────────────────────────────────── */
 
-.logs-section .badge-bad { margin-top: 6px; }
-.logs-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.logs-checkbox { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--dim); }
-.logs-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.logs-section .badge-bad {
+  margin-top: 6px;
+}
 
-.logs-table-wrap { overflow-x: auto; margin: 8px 0 4px; }
-.logs-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.logs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.logs-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.logs-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.logs-table-wrap {
+  overflow-x: auto;
+  margin: 8px 0 4px;
+}
+
+.logs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
 .logs-table th {
   text-align: left;
   color: var(--dim);
@@ -980,9 +1763,22 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
-.logs-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.logs-actions { display: flex; gap: 8px; align-items: center; }
-.logs-actions a { color: var(--accent); }
+
+.logs-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.logs-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.logs-actions a {
+  color: var(--accent);
+}
 
 /* ── 地図生成ビュー ───────────────────────────────────────────────────────
    キャンバスを主役にして、数値は右の細い柱に寄せる。自動運転ビューのように
@@ -995,6 +1791,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   gap: 6px;
   padding: 6px;
 }
+
 .map-main {
   position: relative;
   min-height: 0;
@@ -1003,7 +1800,13 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   border-radius: 4px;
   overflow: hidden;
 }
-.map-canvas { width: 100%; height: 100%; display: block; }
+
+.map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
 .map-badge {
   position: absolute;
   left: 8px;
@@ -1016,6 +1819,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 3px 8px;
   border-radius: 4px;
 }
+
 .map-panel {
   min-height: 0;
   overflow-y: auto;
@@ -1025,6 +1829,7 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 8px 10px;
   font-size: 12px;
 }
+
 .map-panel h3 {
   margin: 10px 0 4px;
   font-size: 11px;
@@ -1032,7 +1837,11 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   color: #6c8296;
   letter-spacing: 0.08em;
 }
-.map-panel h3:first-child { margin-top: 0; }
+
+.map-panel h3:first-child {
+  margin-top: 0;
+}
+
 .map-row {
   display: flex;
   justify-content: space-between;
@@ -1040,5 +1849,42 @@ button.on { background: #22313f; border-color: var(--accent); color: #cfe7ff; }
   padding: 2px 0;
   font-variant-numeric: tabular-nums;
 }
-.map-actions { display: flex; gap: 6px; margin-top: 12px; }
-.map-actions button { flex: 1; }
+
+.map-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.map-actions button {
+  flex: 1;
+}
+
+/* 起動時のみ出るエンブレム。裏の操作を邪魔しないので pointer-events は殺す */
+.splash-emblem {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity 0.9s ease;
+}
+
+.splash-emblem.fade-out {
+  opacity: 0;
+}
+
+.splash-emblem img {
+  width: min(100vmin, 2000px);
+  filter: drop-shadow(0 0 24px rgba(242, 84, 75, 0.35));
+  opacity: 0;
+  transition: opacity 0.7s ease;
+}
+
+.splash-emblem img.show {
+  opacity: 1;
+}

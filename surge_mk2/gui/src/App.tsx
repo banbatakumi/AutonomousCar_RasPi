@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { DriveControls } from './components/DriveControls'
+import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
 import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
@@ -36,6 +37,7 @@ const DRIVING_TABS: Tab[] = ['ラジコン', '自動運転']
 
 export function App() {
   const [tab, setTab] = useState<Tab>('ラジコン')
+  const [showSplash, setShowSplash] = useState(true)
   const [ch, setCh] = useState<ControlChannel | null>(null)
   const chRef = useRef<ControlChannel | null>(null)
   const set = useUi((s) => s.set)
@@ -94,6 +96,7 @@ export function App() {
 
   return (
     <div className="app">
+      {showSplash && <SplashEmblem onDone={() => setShowSplash(false)} />}
       <StatusBar onEstop={() => ch?.estop()} variant={tab === 'ラジコン' ? 'rc' : 'full'} />
       <nav className="tabs">
         {TABS.map((t) => (
