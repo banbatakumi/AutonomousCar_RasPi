@@ -4,6 +4,7 @@
  * **20Hz で変わるものはここに入れない。** 接続状態・操縦権・設定の類だけ。
  */
 import { create } from 'zustand'
+import { live } from '../bus/live'
 import type { AutoStatus, ControlStatus, FanStatus, LogFile } from '../types'
 import { VEHICLE } from '../generated/vehicle'
 
@@ -12,24 +13,27 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
 /**
  * ラジコン操作の調整値。**設定パネルから変更でき、`localStorage` に保存される。**
  *
- * ⚠ `maxSpeed` / `maxSteer` は io_node の `--max-speed` / `--max-steer`
- * （Pi 側のハード上限。`raspi/setup/install_services.sh` の `ARM=` 行）を
- * **超えて設定してはいけない**。超えた分は Pi 側で黙って切り捨てられ、
- * 「GUI は 0.9 m/s と表示しているのに実際は 0.6 m/s しか出ない」という
- * 食い違いが起きる（`architecture.md` §10.5）。そのためレンジ上限を
- * ハード上限そのものにしてあり、**それより上には振れない**。
+ * ⚠ `maxSpeed` / `maxSteer` のスライダ上限は `effectiveRange()` が動的に決める
+ * （★v0.11。STM32/仮想STM32の `LIMITS` を受信済みならそれを使う。§`effectiveRange` 参照）。
+ * 超えた分は `io_node` の `_send_command`（`--max-speed`/`--max-steer` と `LIMITS` の
+ * 小さい方でクランプ）で黙って切り捨てられるので、GUI 側のレンジが実際の上限より
+ * 緩いと「表示上は出せるはずなのに実際は出ない」食い違いが起きる
+ * （`architecture.md` §10.5）。**GUI 側の `--max-speed` 相当の運用上限
+ * （`raspi/setup/install_services.sh` の deploy 引数）を上げ忘れていないか確認すること。**
  *
- * ⚠ **速度の上限は3段ある。** ここと Pi を上げても、3段目で頭打ちになりうる。
+ * ⚠ **速度の上限は今も2段ある。**
  *
- *   1. ここ `PI_MAX_SPEED_CAP` …………… スライダの上限
- *   2. io_node `--max-speed` …………… 超えた分を黙って切り捨てる
- *   3. STM32 `PARAM_MAX_SPEED`（0x0001）… **Pi 側が `CONFIG_SET` 未実装で読み書きできない**
+ *   1. io_node `--max-speed` …………… Pi 側の運用上限。超えた分を黙って切り捨てる
+ *   2. STM32 の物理的な上限 …………… ★v0.11 `LIMITS` で Pi/GUI が取得できるようになった
  *
- * 3 の値はこのリポジトリからは分からない（ファームウェア側）。上限を上げても実車が
- * そこまで出ないなら、まず 3 を疑うこと。
+ * 以前は 2 がこのリポジトリから分からず、GUI 側の `PI_MAX_SPEED_CAP` を手で
+ * 静的に書いていたが、**今は `LIMITS` を受信済みならそちらを使う**（`effectiveRange`）。
  */
 export type DrivingSettings = {
-  /** 見た目の最高速度 [m/s]。既定値 0.6。Pi 側ハード上限（`PI_MAX_SPEED_CAP`）を超えられない */
+  /** RC の速度ダイヤル（速度制御モードの実際の上限）[m/s]。既定値 3.0（2026-08-22、
+   * それまで手で使っていた値に更新）。範囲は `LIMITS` 受信済みならそちらが上限
+   * （`effectiveRange`）。**速度メータの目盛りはこれとは独立**（`SpeedGauge.tsx` 参照、
+   * 常に `LIMITS.max_speed_m_s` 固定） */
   maxSpeed: number
   /** 見た目の最大舵角 [rad]。既定値 0.785(45°)。Pi 側ハード上限（`PI_MAX_STEER_CAP`）を超えられない */
   maxSteer: number
@@ -85,7 +89,10 @@ export type NumericSettingKey = {
 }[keyof DrivingSettings]
 
 /**
- * io_node 側のハード上限。**GUI からはこれを超えられない**（超えても切り捨てられるだけ）。
+ * **`LIMITS` 未受信の間だけ使う起動時プレースホルダ。** WS 接続前や STM32/仮想STM32が
+ * まだ `LIMITS` を返していない一瞬だけこの値でスライダを描き、届き次第
+ * {@link effectiveRange} が実測値に置き換える（★v0.11。届いた後はこの値は使われない
+ * ——`SETTINGS_RANGE` の「小さい方」ではなく実測値をそのまま採用する）。
  *
  * ⚠ 60°（1.047 rad）は一度 45° に落とした値を戻したもの（2026-08-10、指示による）が、
  * これは**モータ機械角の可動域**であって路面舵角ではなかった。リンク比 0.5
@@ -96,10 +103,17 @@ export type NumericSettingKey = {
  * 再生成すること。
  *
  * ⚠ 速度は 2.0 → **3.0 m/s ＝ 10.8 km/h** に引き上げた（2026-08-11、指示による）。
- * `DEFAULT_SETTINGS.maxSpeed`（0.6）の5倍で、ミニカーの大きさに対してはかなり速い。
- * **既定値はあえて上げていない**ので、この上限まで使うのは設定パネルで人間が
- * 明示的に上げたときだけになる。速度は `vehicle.toml` に持たせる値ではない
- * （運用上の速度制限であって車両の物理諸元ではない）ため、こちらは引き続き直書き。
+ * **`DEFAULT_SETTINGS.maxSpeed` も 2026-08-22 に 0.6 → 3.0（当時この上限いっぱいで
+ * 使っていた値）へ更新した**ので、この2つは今は同じ 3.0 m/s。速度は `vehicle.toml`
+ * に持たせる値ではない（運用上の速度制限であって車両の物理諸元ではない）ため、
+ * こちらは引き続き直書き。
+ *
+ * ⚠ **速度の上限は今も2段ある。** `effectiveRange` はスライダの見た目の話でしかなく、
+ * 実際にモータへ効く安全側のクランプは別（`io_node._send_command` 参照）。
+ *
+ *   1. io_node `--max-speed` …………… Pi 側の運用上限。超えた分を黙って切り捨てる
+ *   2. STM32 の物理的な上限 …………… ★v0.11 `LIMITS` パケットで Pi/GUI が取得できる
+ *      ようになった。以前はこのリポジトリから分からなかった
  */
 export const PI_MAX_SPEED_CAP = 3.0 // m/s（install_services.sh の --max-speed と一致させてある）
 export const PI_MAX_STEER_CAP: number = VEHICLE.maxSteer // rad ≒ 30°（同 --max-steer。路面舵角の実機上限）
@@ -149,7 +163,7 @@ export const AUTO_STOP_DISTANCE_M = 0.2
 export const DEFAULT_AUTO_STOP = true
 
 export const DEFAULT_SETTINGS: DrivingSettings = {
-  maxSpeed: 0.6,
+  maxSpeed: 3.0,
   maxSteer: 0.785,
   cruiseScale: 0.55,
   accel: 2.0,
@@ -186,12 +200,74 @@ export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: numbe
   camHeight: { min: 0.03, max: 0.25, step: 0.005 },
 }
 
+export type SettingRange = { min: number; max: number; step: number }
+
+/**
+ * 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`LinkDiag`（`/ws/telemetry`
+ * 8Hz、`bus/live.ts`）から読む値の形。まだ受け取っていなければ全フィールド null
+ * （`ControlStatus`＝`/ws/control` の status には乗せない。`tc_enabled` 等と同じ理由で
+ * status はイベント発生時にしかbroadcastされないため、リロードするまで反映されずに
+ * 見えるバグを避ける。`components/SettingsPanel.tsx` 参照）
+ */
+export type VehicleLimits = {
+  max_speed_m_s: number | null
+  max_accel_m_s2: number | null
+  max_torque_nm: number | null
+  max_steer_rad: number | null
+}
+
+/**
+ * `SETTINGS_RANGE` に STM32（または `sim/stm32.py` の仮想STM32）実測の `LIMITS`
+ * （★v0.11）を重ねた、**実際にスライダへ使うべきレンジ**。
+ *
+ * **`LIMITS` を受信済みならその値を無条件に使う（`SETTINGS_RANGE` の静的値より優先）。**
+ * `SETTINGS_RANGE` はあくまで**未接続でまだ `LIMITS` を受け取っていない間だけ使う
+ * 起動時のプレースホルダ**であって、車両の実際の上限のつもりで書いた値ではない
+ * （実機・シムどちらも `LIMITS`/`LIMITS_REQ` に対応しており、接続していれば
+ * 数百ms 以内に本物の値へ置き換わる）。
+ *
+ * ⚠ これはスライダの**表示・入力レンジ**の話であって、安全側のクランプではない。
+ * 実際にモータへ効く上限は `raspi/nodes/io_node.py` の `_send_command` が
+ * （`--max-speed`/`--max-steer` という Pi 側の運用上限と）別に持っており、
+ * そちらは意図的に「小さい方を使う」多層防御のまま変えていない。
+ *
+ * - `maxSpeed` ← `max_speed_m_s`
+ * - `maxSteer` ← `max_steer_rad`
+ * - `accel`/`coast`/`brake` ← `max_accel_m_s2`（GUI 側のランプ速度。実際の `COMMAND.accel_limit`
+ *   はこれとは別に固定値 `ACCEL_SAFETY_LIMIT` を送っているが、STM32 側でどのみち
+ *   `max_accel_m_s2` に丸められるため、ここより上に振ってもスライダが「上げても
+ *   効かない」ものになるだけ。丸められる前に GUI 側で上限を揃えておく）
+ * - `brakeTorque`/`driveTorque` ← `max_torque_nm`
+ */
+export function effectiveRange(limits: VehicleLimits | null | undefined): Record<NumericSettingKey, SettingRange> {
+  const withLive = (r: SettingRange, live: number | null | undefined): SettingRange =>
+    typeof live === 'number' && isFinite(live) && live > 0 ? { ...r, max: live } : r
+  const accelCap = withLive(SETTINGS_RANGE.accel, limits?.max_accel_m_s2)
+  const torqueCap = withLive(SETTINGS_RANGE.brakeTorque, limits?.max_torque_nm)
+  return {
+    ...SETTINGS_RANGE,
+    maxSpeed: withLive(SETTINGS_RANGE.maxSpeed, limits?.max_speed_m_s),
+    maxSteer: withLive(SETTINGS_RANGE.maxSteer, limits?.max_steer_rad),
+    accel: accelCap,
+    coast: { ...accelCap, min: SETTINGS_RANGE.coast.min },
+    brake: { ...accelCap, min: SETTINGS_RANGE.brake.min },
+    brakeTorque: torqueCap,
+    driveTorque: withLive(SETTINGS_RANGE.driveTorque, limits?.max_torque_nm),
+  }
+}
+
 const SETTINGS_KEY = 'surge.driveSettings.v1'
 
 function clampSettings(s: DrivingSettings): DrivingSettings {
+  // **`SETTINGS_RANGE`（静的）ではなく `effectiveRange`（`LIMITS` 受信済みならそちら
+  // 優先）で必ずクランプすること。** ここを静的値のままにすると、スライダの DOM 要素
+  // 自体は動的な `max` まで動くのに、`setSettings` を呼んだ瞬間ここで静的値まで
+  // 巻き戻され「ドラッグしても弾かれる」バグになる（2026-08-22、実機で発覚）。
+  // `live` はフックではない素の可変オブジェクトなので、コンポーネント外のここからでも読める
+  const range = effectiveRange(live.link)
   const out = { ...s }
-  for (const k of Object.keys(SETTINGS_RANGE) as NumericSettingKey[]) {
-    const { min, max } = SETTINGS_RANGE[k]
+  for (const k of Object.keys(range) as NumericSettingKey[]) {
+    const { min, max } = range[k]
     const v = out[k]
     out[k] = typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULT_SETTINGS[k]
   }
@@ -217,6 +293,37 @@ function saveSettings(s: DrivingSettings) {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s))
   } catch {
     // 保存できなくても走行は続けられるべきなので無視する
+  }
+}
+
+/**
+ * 「既定値に戻す」ボタン・各行の「既定値 X」ボタンが指す先。**`DEFAULT_SETTINGS`
+ * （ソースコードに焼き込まれた工場出荷値）とは別に、`localStorage` に持つ。
+ *
+ * 2026-08-22: 「今使っている値を既定値にしたい」という要望への対応。以前は
+ * `DEFAULT_SETTINGS` をソースコードで直接書き換えるしかなく、**Claude が実機の
+ * 現在値を見られないまま数値を推測して書く**という壊れ方をした（スクリーンショットの
+ * 値が古くなっていた）。設定パネルの「現在の値を既定値として保存」ボタン
+ * （`saveCurrentAsDefault`）で、ユーザー自身がいつでも更新できるようにする。
+ */
+const DEFAULT_OVERRIDE_KEY = 'surge.driveSettingsDefault.v1'
+
+/** 保存されていなければソースコードの `DEFAULT_SETTINGS`（工場出荷値）を返す。 */
+function loadDefaultSettings(): DrivingSettings {
+  try {
+    const raw = localStorage.getItem(DEFAULT_OVERRIDE_KEY)
+    if (!raw) return DEFAULT_SETTINGS
+    return clampSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw) })
+  } catch {
+    return DEFAULT_SETTINGS
+  }
+}
+
+function saveDefaultSettings(s: DrivingSettings) {
+  try {
+    localStorage.setItem(DEFAULT_OVERRIDE_KEY, JSON.stringify(s))
+  } catch {
+    // 同上、保存できなくても走行は続けられるべき
   }
 }
 
@@ -314,6 +421,9 @@ type UiState = {
 
   /** ラジコン操作の調整値。設定パネルで変更、`localStorage` に自動保存 */
   settings: DrivingSettings
+  /** 「既定値に戻す」の戻り先。既定はソースコードの `DEFAULT_SETTINGS` だが、
+   * `saveCurrentAsDefault` で `settings` の現在値に上書きできる（★2026-08-22） */
+  settingsDefault: DrivingSettings
 
   // ── 記録・再生（ログタブ） ──
   /** `.sfl` を録ってほしいという意思。null はまだ status を受け取っていない */
@@ -341,7 +451,11 @@ type UiState = {
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
+  /** `settingsDefault`（＝「既定値に戻す」の戻り先）へ戻す。値そのものは変えない */
   resetSettings: () => void
+  /** 今の `settings` を新しい既定値として保存する（★2026-08-22）。
+   * 以後の「既定値に戻す」・各行の「既定値 X」表示はこの値を指す */
+  saveCurrentAsDefault: () => void
 }
 
 export const useUi = create<UiState>((set, get) => ({
@@ -376,6 +490,7 @@ export const useUi = create<UiState>((set, get) => ({
   lidarExpanded: false,
 
   settings: loadSettings(),
+  settingsDefault: loadDefaultSettings(),
 
   sfl: null,
   mcap: null,
@@ -390,7 +505,13 @@ export const useUi = create<UiState>((set, get) => ({
     set({ settings: next })
   },
   resetSettings: () => {
-    saveSettings(DEFAULT_SETTINGS)
-    set({ settings: DEFAULT_SETTINGS })
+    const def = get().settingsDefault
+    saveSettings(def)
+    set({ settings: def })
+  },
+  saveCurrentAsDefault: () => {
+    const cur = get().settings
+    saveDefaultSettings(cur)
+    set({ settingsDefault: cur })
   },
 }))

@@ -60,6 +60,9 @@ class LinkState:
     telemetry: packets.Telemetry | None = None
     stats: packets.Stats | None = None
     version: packets.Version | None = None
+    #: 車両の物理的な上限値（★v0.11）。読み取り専用・実行時に変化しないので
+    #: 起動時に一度取得できればよい。まだ受け取っていなければ None
+    limits: packets.Limits | None = None
     last_telem_ns: int = 0
     lidar_sectors: set[int] = field(default_factory=set)
     counts: dict[int, int] = field(default_factory=dict)
@@ -136,6 +139,8 @@ class LinkTracker:
             self.state.stats = msg
         elif isinstance(msg, packets.Version):
             self.state.version = msg
+        elif isinstance(msg, packets.Limits):
+            self.state.limits = msg
         elif isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
                               packets.LidarSectorC)):
             self.state.lidar_sectors.add(msg.sector_idx)

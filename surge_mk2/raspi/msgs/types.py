@@ -283,6 +283,13 @@ class LinkDiag(MsgBase):
     #: 「シムのつもりで --allow-arm した実車が動く」が起きる（GUI が SIM バッジを出す）
     sim: bool = False
 
+    #: 車両の物理的な上限値（`LIMITS` パケットから取得。★v0.11）。
+    #: 読み取り専用・実行時に変化しない。まだ受け取っていなければ None
+    max_speed_m_s: float | None = None
+    max_accel_m_s2: float | None = None
+    max_torque_nm: float | None = None
+    max_steer_rad: float | None = None
+
 
 class ImageRef(MsgBase):
     """共有メモリ上の画像1枚への参照。**画素はバスに流さない**（§6.2）。

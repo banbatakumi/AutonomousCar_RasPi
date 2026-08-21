@@ -813,6 +813,12 @@ class TelemetryServer:
             "tc_enabled": link.tc_enabled if link else None,
             "tv_enabled": link.tv_enabled if link else None,
             "wheel_lift_guard_enabled": link.wheel_lift_guard_enabled if link else None,
+            # 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）は、ここ（`status`、
+            # イベント発生時にしかbroadcastされない）ではなく `LinkDiag`（`/ws/telemetry`
+            # 8Hz、`bus/live.ts`）から出す。`tc_enabled`/`wheel_lift_guard_enabled` と
+            # 同じ理由（2026-08-19 実機で発覚）: status から読むと、受信が status の
+            # 最後のbroadcastより後になった場合に GUI が更新されずリロードするまで
+            # 気づかない
             "clients": {"telemetry": len(self.telemetry_clients),
                         "control": len(self.control_clients),
                         "camera": {k: len(v) for k, v in self.camera_clients.items()}},

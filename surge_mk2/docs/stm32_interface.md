@@ -1,13 +1,29 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.10（`uart_protocol.md` **v0.10** に対応）
-**最終更新**: 2026-08-21
+**バージョン**: v0.11（`uart_protocol.md` **v0.11** に対応）
+**最終更新**: 2026-08-22
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.11 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-08-21）**
+> - **ワイヤ形式・LEN の変更は無い。** 新設したのは `LIMITS`(0x0A)/`LIMITS_REQ`(0x15) の
+>   2つだけなので、この版に未対応でも既存の通信はそのまま継続する
+> - `LIMITS` (0x0A, LEN=16): `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/
+>   `max_steer_rad`（f32×4、読み取り専用）を STM32 → Pi へ返す。`VERSION` と同じく
+>   起動直後 3回自発送信 + `LIMITS_REQ` (0x15, LEN=0) への応答（§4.3/4.4）
+> - v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `param_id` を廃止した結果、
+>   Pi が STM32 側の実際の固定上限値を知る手段が無くなっていた問題への対応
+> - `protocol_version` を `0x000A`→**`0x000B`** に上げる
+> - Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り、未受信なら
+>   1秒おきに再送する。受け取った `LIMITS` は RC（MANUAL）・自律走行（AUTO）どちらの
+>   `COMMAND` 送信でも**無条件に採用する**（2026-08-22。当初は Pi 側設定上限との
+>   「小さい方」だったが、GUI 側が実測値を見せているのに実車だけ古い設定値で頭打ちに
+>   なる食い違いを避けるため変更）。`--max-speed`/`--max-steer` は `LIMITS` 未受信の
+>   間だけ使うフォールバック（`uart_protocol.md` §5.12）
 
 > **v0.10 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-08-21）**
 > - **ワイヤ形式・LEN の変更は無い。** 変わったのは `CONFIG_SET`/`CONFIG_GET` で
@@ -282,6 +298,7 @@ bool frame_send(uint8_t type, const void *payload, uint8_t len)
 #define PKT_VERSION         0x07   /* LEN = 10  ★v0.4 追加                  */
 #define PKT_STATS           0x08   /* LEN = 48  ★v0.4 追加                  */
 #define PKT_LIDAR_SECTOR_C  0x09   /* LEN = 39 （圧縮・既定OFF）★v0.4 追加  */
+#define PKT_LIMITS          0x0A   /* LEN = 16  ★v0.11 追加                 */
 
 /* Pi → STM32 */
 #define PKT_COMMAND         0x10   /* LEN = 14  ★v0.5 で 10→12、v0.6 で 12→14 */
@@ -289,6 +306,7 @@ bool frame_send(uint8_t type, const void *payload, uint8_t len)
 #define PKT_PING            0x12   /* LEN = 4                               */
 #define PKT_CONFIG_GET      0x13   /* LEN = 2   ★v0.4 追加                  */
 #define PKT_VERSION_REQ     0x14   /* LEN = 0   ★v0.4 追加                  */
+#define PKT_LIMITS_REQ      0x15   /* LEN = 0   ★v0.11 追加                 */
 ```
 
 **方向規約: `0x01-0x0F` = STM32 → Pi、`0x10-0x1F` = Pi → STM32。**
@@ -485,6 +503,26 @@ typedef struct {
 - **ファーム更新と Pi 側コードの食い違いは必ず起きる。** バージョンを交換しないと
   「原因不明のバグ」に化けて何時間も溶かすので、必須。
 
+#### `LIMITS` (0x0A) — 16 バイト ★v0.11 追加
+
+```c
+typedef struct {
+    float max_speed_m_s;    /* target_speed の上限（DRIVE_MAX_SPEED_M_S）        */
+    float max_accel_m_s2;   /* accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2）*/
+    float max_torque_nm;    /* 1輪あたり。target_torque/brake_torque 共通          */
+    float max_steer_rad;    /* 路面舵角の上限（片側振れ幅、Steering_GetMaxRoadWheelAngleRad()）*/
+} limits_t;                  /* = 16 bytes */
+```
+
+- **読み取り専用。** `CONFIG_SET` のような書き込み経路は無い（v0.10 で
+  `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `param_id` 自体を廃止したのと表裏）
+- `VERSION` と同じく**起動直後に 3回（100ms 間隔）自発送信**し、
+  `LIMITS_REQ` (0x15, LEN = 0) を受信したら即座にこれを返す
+- **実行時に変化しない値**（走行中に上限が変わる想定は無い）なので、送信頻度はこれで十分
+- v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `CONFIG_SET`/`CONFIG_GET` を廃止した
+  結果、Pi が STM32 の実際の固定上限値を知る手段が無くなっていた。それを埋めるための
+  パケット（`uart_protocol.md` §5.12）
+
 #### `STATS` (0x08) — 22 バイト ★v0.4 追加
 
 ```c
@@ -625,6 +663,11 @@ typedef struct {
 
 **受信ステートマシンが `LEN = 0` で止まらないことを必ず確認すること**（§6.2）。
 
+#### `LIMITS_REQ` (0x15) — 0 バイト ★v0.11 追加
+
+ペイロードなし（LEN = 0）。受信したら `limits_t` を `PKT_LIMITS` (0x0A) で返す。
+`VERSION_REQ` と同じ扱いでよい（`LEN = 0` の受信経路を共有できる）。
+
 ### 4.5 コンパイル時にサイズを検証する
 
 ```c
@@ -633,6 +676,7 @@ _Static_assert(sizeof(lidar_sector_i_t) == 99, "lidar_sector_i_t size mismatch")
 _Static_assert(sizeof(lidar_sector_c_t) == 39, "lidar_sector_c_t size mismatch");
 _Static_assert(sizeof(telemetry_t)      == 66, "telemetry_t size mismatch");
 _Static_assert(sizeof(pong_t)           == 12, "pong_t size mismatch");
+_Static_assert(sizeof(limits_t)         == 16, "limits_t size mismatch");
 _Static_assert(sizeof(version_t)        == 10, "version_t size mismatch");
 _Static_assert(sizeof(stats_t)          == 48, "stats_t size mismatch");
 _Static_assert(sizeof(config_ack_t)     ==  7, "config_ack_t size mismatch");
@@ -658,13 +702,14 @@ _Static_assert(sizeof(ping_t)           ==  4, "ping_t size mismatch");
 | `LIDAR_SECTOR` | セクタ（30点）が揃うたび。10Hz 回転なら約 8.3ms ごと |
 | `CONFIG_ACK` | `CONFIG_SET` / `CONFIG_GET` 受信時 |
 | `VERSION` | 起動直後 3回（100ms 間隔）+ `VERSION_REQ` 受信時 |
+| `LIMITS` | 起動直後 3回（100ms 間隔、`VERSION` と同じタイミング）+ `LIMITS_REQ` 受信時 ★v0.11 |
 | `STATS` | 1000ms 周期（1Hz）。**カウンタは 0 クリアしない**（累積値） |
 | `LOG` | 任意。TX リングに空きがあるときのみ |
 
 ### 5.2 送信優先度
 
 ```
-高  PONG  >  TELEMETRY  >  LIDAR_SECTOR  >  CONFIG_ACK  >  VERSION  >  STATS  >  LOG  低
+高  PONG  >  TELEMETRY  >  LIDAR_SECTOR  >  CONFIG_ACK  >  VERSION  >  LIMITS  >  STATS  >  LOG  低
 ```
 
 `LOG` は TX リングの使用率が 50% を超えたら破棄する（`tx_drop_count++`）。
@@ -798,6 +843,7 @@ __HAL_DMA_DISABLE_IT(&hdma_rx, DMA_IT_HT);   /* Half-Transfer 割り込みは不
 | `0x12` `PING` | 4 |
 | `0x13` `CONFIG_GET` | 2 |
 | `0x14` `VERSION_REQ` | **0** |
+| `0x15` `LIMITS_REQ` | **0** ★v0.11 |
 
 上記以外の TYPE は「未知」として `LEN` 分読み飛ばす。
 **`0x01-0x0F` が受信側に来ることはない**（方向規約違反なので `unknown_type` に計上する）。
@@ -1343,6 +1389,8 @@ Pi 側が計算する:
 - [ ] `t_ping_rx_us` を **IDLE 割り込み内**で取得している
 - [ ] **μs カウンタが 71.6 分周期**である（24秒でラップする旧タイマを使っていない）
 - [ ] `VERSION` を起動時に3回送り、`VERSION_REQ` (0x14) にも応答する
+- [ ] `LIMITS` を `VERSION` と同じタイミングで起動時に3回送り、`LIMITS_REQ` (0x15) に
+      も応答する（★v0.11。値は実装済みの固定定数と一致させること）
 - [ ] `STATS` を 1Hz で送り、カウンタは **累積のまま 0 クリアしていない**
 - [ ] `param 0x0040` が **enum (0/1/2)** として実装されている（bool ではない）
 - [ ] `param 0x0040` の切り替えを**走行中も許可**している
@@ -1476,6 +1524,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.11** | 2026-08-22 | **`uart_protocol.md` v0.11 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設。`LIMITS` は `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`（f32×4・LEN16・読み取り専用）を返し、`VERSION` と同じく起動直後3回自発送信＋`LIMITS_REQ`応答。v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `param_id` を廃止した結果 Pi が STM32 の実際の固定上限値を知れなくなっていた問題への対応。`protocol_version` を `0x000A`→`0x000B` に更新。Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り未受信なら1秒おきに再送、`IoNode._send_command` が RC/AUTO 問わず `LIMITS` 受信済みなら無条件にそちらでクランプし `--max-speed`/`--max-steer` は未受信時のみのフォールバックにするよう実装（`raspi/msgs/convert.py` に `max_accel`/`max_torque` 引数を追加。GUI・`sim/stm32.py` も同じ方針で対応） |
 | **v0.10** | 2026-08-21 | **`uart_protocol.md` v0.10 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0001`（最大速度）/`0x0002`（最大加速度）/`0x0003`（最大舵角）を廃止し、以後は常に `RAS_CONFIG_UNKNOWN_PARAM` を返す。上限は STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s、`DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s²、路面舵角 ±30°）に一本化。`COMMAND.accel_limit`/`steer_rate_limit`（毎指令ごとのレート制限）は無関係で変更なし。`protocol_version` を `0x0009`→`0x000A` に更新。Pi はこの3つの `param_id` を元々送信していなかったため、Pi 側の対応は `protocol_version` の更新のみ |
 | **v0.9** | 2026-08-21 | **`uart_protocol.md` v0.9 に対応。STM32 側実装・実機動作確認済み（2026-08-20）。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050`（**片輪浮き対策 / Wheel Lift Guard**）を実装。後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策で、**TC 本体（`0x0010`）とは独立に動作し個別に切り替えられる**。既定値は有効。`0x0051`（しきい値・ゲイン）は未実装で、しきい値は固定値。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）に応じた `CONFIG_SET` 送信を実装 |
 | **v0.8** | 2026-08-21 | **`uart_protocol.md` v0.8 に対応。STM32 側実装済み（2026-08-19）。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0010`（TC 有効）/ `0x0020`（TV 有効）が実際に機能するようになった（**それ以前は `RAS_CONFIG_UNKNOWN_PARAM` = `result=1` を返していた**）。Pi 側は `io_node` にハンドシェイク直後の `CONFIG_GET` 初期同期と、GUI トグル操作に応じた `CONFIG_SET` 送信を実装（`uart_protocol.md` §5.8）。`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`0x0001`-`0x0003`）は STM32 側で既にクランプに使われているが、Flash 非永続化かつ動的変更のユースケースが無いため Pi からは意図的に未送信（同 §5.8.1） |

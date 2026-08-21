@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x000A
+PROTOCOL_VERSION = 0x000B
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -344,6 +344,34 @@ class Stats:
         return _S_STATS.pack(self.t_us, self.rx_frame_ok, self.rx_crc_error, self.rx_len_error, self.rx_unknown_type, self.tx_drop, *self.md_rx_count, *self.md_rx_error)
 
 
+_S_LIMITS = struct.Struct('<4f')
+
+
+@dataclass(slots=True)
+class Limits:
+    """0x0A s2p — 車両の物理的な上限値（読み取り専用・実行時に変化しない）。★v0.11 新設。起動直後に VERSION と同じタイミングで自動送信（100ms間隔×3回）、任意タイミングでも LIMITS_REQ で再取得可"""
+
+    TYPE: ClassVar[int] = 0x0A
+    NAME: ClassVar[str] = 'LIMITS'
+    DIR: ClassVar[str] = 's2p'
+    LEN: ClassVar[int | None] = 16
+    FMT: ClassVar[str] = '<4f'
+    META: ClassVar[dict] = {'max_speed_m_s': (None, 'm/s'), 'max_accel_m_s2': (None, 'm/s2'), 'max_torque_nm': (None, 'N.m'), 'max_steer_rad': (None, 'rad')}
+
+    max_speed_m_s: float = 0.0  # COMMAND.target_speed の上限（DRIVE_MAX_SPEED_M_S）。超えると STM32 側でクランプされる
+    max_accel_m_s2: float = 0.0  # COMMAND.accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2）
+    max_torque_nm: float = 0.0  # 1輪あたり。target_torque/brake_torque 共通（DRIVE_MAX_TORQUE_NM）
+    max_steer_rad: float = 0.0  # 路面舵角。原点(直進)からの片側振れ幅（Steering_GetMaxRoadWheelAngleRad()）
+
+    @classmethod
+    def decode(cls, payload: bytes) -> 'Limits':
+        v = _S_LIMITS.unpack(payload)
+        return cls(max_speed_m_s=v[0], max_accel_m_s2=v[1], max_torque_nm=v[2], max_steer_rad=v[3])
+
+    def encode(self) -> bytes:
+        return _S_LIMITS.pack(self.max_speed_m_s, self.max_accel_m_s2, self.max_torque_nm, self.max_steer_rad)
+
+
 _S_LIDAR_SECTOR_C = struct.Struct('<BI2H30B')
 
 
@@ -504,6 +532,29 @@ class VersionReq:
         return b''
 
 
+_S_LIMITS_REQ = struct.Struct('<')
+
+
+@dataclass(slots=True)
+class LimitsReq:
+    """0x15 p2s — ペイロードなし。応答は LIMITS (0x0A)。★v0.11 新設"""
+
+    TYPE: ClassVar[int] = 0x15
+    NAME: ClassVar[str] = 'LIMITS_REQ'
+    DIR: ClassVar[str] = 'p2s'
+    LEN: ClassVar[int | None] = 0
+    FMT: ClassVar[str] = '<'
+
+    pass
+
+    @classmethod
+    def decode(cls, payload: bytes) -> 'LimitsReq':
+        return cls()
+
+    def encode(self) -> bytes:
+        return b''
+
+
 ALL = (
     LidarSector,
     Telemetry,
@@ -513,12 +564,14 @@ ALL = (
     Pong,
     Version,
     Stats,
+    Limits,
     LidarSectorC,
     Command,
     ConfigSet,
     Ping,
     ConfigGet,
     VersionReq,
+    LimitsReq,
 )
 
 BY_TYPE = {c.TYPE: c for c in ALL}

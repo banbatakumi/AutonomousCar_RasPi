@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x000A      # 上位=メジャー 下位=マイナー
+protocol_version = 0x000B      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -164,6 +164,19 @@ fields = [
 ]
 
 [[packets]]
+name = "LIMITS"
+type = 0x0A
+dir = "s2p"
+len = 16
+doc = "車両の物理的な上限値（読み取り専用・実行時に変化しない）。★v0.11 新設。起動直後に VERSION と同じタイミングで自動送信（100ms間隔×3回）、任意タイミングでも LIMITS_REQ で再取得可"
+fields = [
+  { name = "max_speed_m_s",  type = "f32", unit = "m/s",  note = "COMMAND.target_speed の上限（DRIVE_MAX_SPEED_M_S）。超えると STM32 側でクランプされる" },
+  { name = "max_accel_m_s2", type = "f32", unit = "m/s2", note = "COMMAND.accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2）" },
+  { name = "max_torque_nm",  type = "f32", unit = "N.m",  note = "1輪あたり。target_torque/brake_torque 共通（DRIVE_MAX_TORQUE_NM）" },
+  { name = "max_steer_rad",  type = "f32", unit = "rad",  note = "路面舵角。原点(直進)からの片側振れ幅（Steering_GetMaxRoadWheelAngleRad()）" },
+]
+
+[[packets]]
 name = "LIDAR_SECTOR_C"
 type = 0x09
 dir = "s2p"
@@ -235,6 +248,14 @@ type = 0x14
 dir = "p2s"
 len = 0
 doc = "ペイロードなし。応答は VERSION (0x07)"
+fields = []
+
+[[packets]]
+name = "LIMITS_REQ"
+type = 0x15
+dir = "p2s"
+len = 0
+doc = "ペイロードなし。応答は LIMITS (0x0A)。★v0.11 新設"
 fields = []
 
 

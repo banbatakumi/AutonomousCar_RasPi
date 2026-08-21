@@ -57,6 +57,18 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(tr.state.version.fw_id, 0xABCD)
         self.assertEqual(tr.state.stats.rx_frame_ok, 42)
 
+    def test_limits_stored(self):
+        """★v0.11。受け取るまでは None、受け取ったらそのままキャッシュされる。"""
+        tr = LinkTracker()
+        self.assertIsNone(tr.state.limits)
+        feed(tr, packets.Limits(max_speed_m_s=5.0, max_accel_m_s2=3.0,
+                                 max_torque_nm=0.15, max_steer_rad=0.524), 1)
+        self.assertEqual(tr.state.limits.max_speed_m_s, 5.0)
+        self.assertEqual(tr.state.limits.max_accel_m_s2, 3.0)
+        # f32 の丸め誤差。0.15 は f32 で正確に表現できない（0x11/0x13 の f32 と同じ事情）
+        self.assertAlmostEqual(tr.state.limits.max_torque_nm, 0.15, places=6)
+        self.assertAlmostEqual(tr.state.limits.max_steer_rad, 0.524, places=6)
+
     def test_unknown_type_counted_but_returns_none(self):
         tr = LinkTracker()
         self.assertIsNone(tr.feed(1, 0x7F, 0, b"\x00"))

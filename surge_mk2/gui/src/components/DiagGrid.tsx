@@ -108,6 +108,37 @@ export function DiagGrid({ n }: { n: Numbers }) {
       </section>
 
       <section>
+        {/* ★v0.11。GUI のスライダ上限がここより先に進んでいないか切り分けるための表示。
+            null なら「まだ LIMITS を受信していない」ので、GUI 側は静的な既定値
+            （`PI_MAX_SPEED_CAP` 等）にフォールバックしている（`store/ui.ts` の `effectiveRange`） */}
+        <h4>車両上限（LIMITS・★v0.11）</h4>
+        <div className="kv">
+          <span>速度</span>
+          <b className={link?.max_speed_m_s == null ? 'lv-warn' : ''}>
+            {link?.max_speed_m_s == null ? '未受信' : `${link.max_speed_m_s.toFixed(2)}m/s`}
+          </b>
+        </div>
+        <div className="kv">
+          <span>加速度</span>
+          <b className={link?.max_accel_m_s2 == null ? 'lv-warn' : ''}>
+            {link?.max_accel_m_s2 == null ? '未受信' : `${link.max_accel_m_s2.toFixed(2)}m/s²`}
+          </b>
+        </div>
+        <div className="kv">
+          <span>トルク</span>
+          <b className={link?.max_torque_nm == null ? 'lv-warn' : ''}>
+            {link?.max_torque_nm == null ? '未受信' : `${link.max_torque_nm.toFixed(3)}N·m`}
+          </b>
+        </div>
+        <div className="kv">
+          <span>舵角</span>
+          <b className={link?.max_steer_rad == null ? 'lv-warn' : ''}>
+            {link?.max_steer_rad == null ? '未受信' : `${((link.max_steer_rad * 180) / Math.PI).toFixed(1)}°`}
+          </b>
+        </div>
+      </section>
+
+      <section>
         <h4>MD バス（STM32 ⇄ MD・累積）</h4>
         {['後左', '後右', 'ステア'].map((lbl, i) => {
           const ok = link?.md_rx_count?.[i]

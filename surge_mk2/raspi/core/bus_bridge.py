@@ -147,6 +147,11 @@ class BusBridge:
             d.hb_alive = heartbeat.alive
             d.hb_max_late_ms = heartbeat.stats.max_late_ns / 1e6
             d.hb_stalls = heartbeat.stats.stalls
+        if state.limits is not None:
+            d.max_speed_m_s = state.limits.max_speed_m_s
+            d.max_accel_m_s2 = state.limits.max_accel_m_s2
+            d.max_torque_nm = state.limits.max_torque_nm
+            d.max_steer_rad = state.limits.max_steer_rad
         return d
 
     def publish_diag(self, *args, **kw) -> LinkDiag:

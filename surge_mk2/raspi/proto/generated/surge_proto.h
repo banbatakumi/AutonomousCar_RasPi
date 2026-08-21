@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x000Au
+#define SURGE_PROTOCOL_VERSION  0x000Bu
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -30,6 +30,7 @@
 #define PKT_PONG               0x06u   /* LEN = 12 */
 #define PKT_VERSION            0x07u   /* LEN = 10 */
 #define PKT_STATS              0x08u   /* LEN = 48 */
+#define PKT_LIMITS             0x0Au   /* LEN = 16 */
 #define PKT_LIDAR_SECTOR_C     0x09u   /* LEN = 39 */
 
 /* Pi -> STM32 */
@@ -38,6 +39,7 @@
 #define PKT_PING               0x12u   /* LEN = 4 */
 #define PKT_CONFIG_GET         0x13u   /* LEN = 2 */
 #define PKT_VERSION_REQ        0x14u   /* LEN = 0 */
+#define PKT_LIMITS_REQ         0x15u   /* LEN = 0 */
 
 /* ── ビット定義 ───────────────────────────────────────────── */
 /* TELEMETRY.flags (u32) */
@@ -198,6 +200,14 @@ typedef struct {
     uint32_t md_rx_error[3];   /* [RL,RR,ST] */
 } surge_stats_t;
 
+/* LIMITS (0x0A) — 車両の物理的な上限値（読み取り専用・実行時に変化しない）。★v0.11 新設。起動直後に VERSION と同じタイミングで自動送信（100ms間隔×3回）、任意タイミングでも LIMITS_REQ で再取得可 */
+typedef struct {
+    float max_speed_m_s;   /* m/s  COMMAND.target_speed の上限（DRIVE_MAX_SPEED_M_S）。超えると STM32 側でクランプされる */
+    float max_accel_m_s2;  /* m/s2  COMMAND.accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2） */
+    float max_torque_nm;   /* N.m  1輪あたり。target_torque/brake_torque 共通（DRIVE_MAX_TORQUE_NM） */
+    float max_steer_rad;   /* rad  路面舵角。原点(直進)からの片側振れ幅（Steering_GetMaxRoadWheelAngleRad()） */
+} surge_limits_t;
+
 /* LIDAR_SECTOR_C (0x09) — 距離1バイト圧縮。param 0x0040 = 2 のときのみ。255 = 5.10m 以上（飽和） */
 typedef struct {
     uint8_t  sector_idx;
@@ -237,6 +247,8 @@ typedef struct {
 
 /* VERSION_REQ (0x14) はペイロードなし (LEN = 0) */
 
+/* LIMITS_REQ (0x15) はペイロードなし (LEN = 0) */
+
 #pragma pack(pop)
 
 /* サイズ検証。#pragma pack の付け忘れをビルド時に検出する。 */
@@ -247,6 +259,7 @@ _Static_assert(sizeof(surge_lidar_sector_i_t) == 99, "surge_lidar_sector_i_t siz
 _Static_assert(sizeof(surge_pong_t) == 12, "surge_pong_t size mismatch");
 _Static_assert(sizeof(surge_version_t) == 10, "surge_version_t size mismatch");
 _Static_assert(sizeof(surge_stats_t) == 48, "surge_stats_t size mismatch");
+_Static_assert(sizeof(surge_limits_t) == 16, "surge_limits_t size mismatch");
 _Static_assert(sizeof(surge_lidar_sector_c_t) == 39, "surge_lidar_sector_c_t size mismatch");
 _Static_assert(sizeof(surge_command_t) == 14, "surge_command_t size mismatch");
 _Static_assert(sizeof(surge_config_set_t) == 6, "surge_config_set_t size mismatch");

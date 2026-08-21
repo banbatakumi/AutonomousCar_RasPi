@@ -24,10 +24,10 @@
  * 設計は部分的にしか実現していない）。他はすべて GUI が指令を作る
  * ときのランプ・上限だけ。
  */
-import type { DrivingSettings, NumericSettingKey } from '../store/ui'
+import type { DrivingSettings, NumericSettingKey, SettingRange } from '../store/ui'
 import {
-  AUTO_STOP_DISTANCE_M, DEFAULT_SETTINGS, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
-  PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, SETTINGS_RANGE, useUi,
+  AUTO_STOP_DISTANCE_M, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
+  PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, effectiveRange, useUi,
 } from '../store/ui'
 import { RAD2DEG } from '../format'
 import { useNumbers } from '../bus/live'
@@ -37,7 +37,9 @@ type Field = {
   key: NumericSettingKey
   label: string
   unit: string
-  note?: string
+  /** レンジ（動的に決まる `effectiveRange` の結果）を受け取って説明文を作る。
+   * 固定文言でよいものは string のままでよい */
+  note?: string | ((range: SettingRange) => string)
   /** 表示だけ変換する（保存値は SI のまま）。deg 表示用 */
   toDisplay?: (v: number) => number
   toStored?: (v: number) => number
@@ -49,7 +51,9 @@ const SPEED_FIELDS: Field[] = [
     key: 'maxSpeed',
     label: '最高速度',
     unit: 'm/s',
-    note: `Pi 側ハード上限 ${PI_MAX_SPEED_CAP.toFixed(2)} m/s を超えては設定できない（超えても切り捨てられるだけ）`,
+    note: (r) =>
+      `上限 ${r.max.toFixed(2)} m/s を超えては設定できない（超えても切り捨てられるだけ）。` +
+      `STM32 実測（LIMITS）が届いていればそれを使う。未接続時のみ既定 ${PI_MAX_SPEED_CAP.toFixed(2)} m/s`,
     digits: 2,
   },
   { key: 'cruiseScale', label: '巡航レンジ', unit: '×', note: '既定（低速側）。最高速度に対する倍率', digits: 2 },
@@ -64,7 +68,9 @@ const STEER_FIELDS: Field[] = [
     key: 'maxSteer',
     label: '最大舵角',
     unit: '°',
-    note: `Pi 側ハード上限 ${(PI_MAX_STEER_CAP * RAD2DEG).toFixed(0)}° を超えては設定できない`,
+    note: (r) =>
+      `上限 ${(r.max * RAD2DEG).toFixed(0)}° を超えては設定できない。` +
+      `STM32 実測（LIMITS）が届いていればそれを使う。未接続時のみ既定 ${(PI_MAX_STEER_CAP * RAD2DEG).toFixed(0)}°`,
     toDisplay: (v) => v * RAD2DEG,
     toStored: (v) => v / RAD2DEG,
     digits: 0,
@@ -79,7 +85,9 @@ const BRAKE_FIELDS: Field[] = [
     key: 'brakeTorque',
     label: 'ブレーキ強さ',
     unit: 'N·m/輪',
-    note: `Space / パッド L1 を押している間に掛かるトルク。上限 ${MAX_BRAKE_TORQUE_NM} N·m（STM32 側の上限。超えても丸められる）`,
+    note: (r) =>
+      `Space / パッド L1 を押している間に掛かるトルク。上限 ${r.max.toFixed(3)} N·m` +
+      `（STM32 実測 max_torque_nm が届いていればそれを使う。未接続時のみ既定 ${MAX_BRAKE_TORQUE_NM} N·m。超えても丸められる）`,
     digits: 3,
   },
 ]
@@ -89,21 +97,14 @@ const TORQUE_FIELDS: Field[] = [
     key: 'driveTorque',
     label: 'トルク強さ',
     unit: 'N·m',
-    note: `スロットル全開で出す駆動トルク。上限 ${MAX_TARGET_TORQUE_NM} N·m（STM32 側の上限。超えても丸められる）`,
+    note: (r) =>
+      `スロットル全開で出す駆動トルク。上限 ${r.max.toFixed(3)} N·m` +
+      `（STM32 実測 max_torque_nm が届いていればそれを使う。未接続時のみ既定 ${MAX_TARGET_TORQUE_NM} N·m。超えても丸められる）`,
     digits: 3,
   },
-  /*
-   * トルク制御では速度指令を送らないので、`maxSpeed` は走りに影響しない。
-   * **それでも出しておく** — 速度メータの目盛りがこの値で決まるため、
-   * ここを触れないと「針が振り切ったまま」または「まったく動かない」計器になる。
-   */
-  {
-    key: 'maxSpeed',
-    label: '速度メータの目盛り',
-    unit: 'm/s',
-    note: 'トルク制御では速度指令を送らないので、走りには影響しない（メータの上限だけを決める）',
-    digits: 2,
-  },
+  // ★2026-08-22: 「速度メータの目盛り」フィールドは廃止。速度メータ（`SpeedGauge.tsx`）の
+  // 目盛りは、速度制御・トルク制御どちらでも常に STM32 実測 `LIMITS.max_speed_m_s` に
+  // 固定されるようになったため、`maxSpeed` を経由してユーザーが調整する意味が無くなった
 ]
 
 const MISC_FIELDS: Field[] = [
@@ -132,8 +133,10 @@ const CAMERA_FIELDS: Field[] = [
 
 export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const settings = useUi((s) => s.settings)
+  const settingsDefault = useUi((s) => s.settingsDefault)
   const setSettings = useUi((s) => s.setSettings)
   const resetSettings = useUi((s) => s.resetSettings)
+  const saveCurrentAsDefault = useUi((s) => s.saveCurrentAsDefault)
   const pathGuide = useUi((s) => s.pathGuide)
   const set = useUi((s) => s.set)
   // estop_active/drive_power_locked と同じく、これは `/ws/control` の status
@@ -145,11 +148,26 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const tcEnabled = link?.tc_enabled ?? null
   const tvEnabled = link?.tv_enabled ?? null
   const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
+  // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、
+  // `/ws/telemetry` 8Hz）から読む理由は tc_enabled 等と同じ（上のコメント参照）
+  const range = effectiveRange({
+    max_speed_m_s: link?.max_speed_m_s ?? null,
+    max_accel_m_s2: link?.max_accel_m_s2 ?? null,
+    max_torque_nm: link?.max_torque_nm ?? null,
+    max_steer_rad: link?.max_steer_rad ?? null,
+  })
 
   return (
     <div className="settings">
       <div className="settings-head">
         <button onClick={resetSettings}>既定値に戻す</button>
+        {/* ★2026-08-22: 「既定値」はソースコードの固定値ではなく、ここで上書きできる
+            （`store/ui.ts` の `settingsDefault`、`localStorage` に保存）。以前は
+            「今使っている値を既定値にしたい」と言われるたびにソースを直接書き換えて
+            いたが、実機の現在値を見られないまま推測することになっていた */}
+        <button onClick={saveCurrentAsDefault} title="今の設定値を「既定値に戻す」の戻り先として保存する">
+          現在の値を既定値として保存
+        </button>
       </div>
 
       {/*
@@ -176,13 +194,13 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
       </section>
 
       {settings.torqueMode ? (
-        <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} onChange={setSettings} />
+        <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
       ) : (
-        <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} onChange={setSettings} />
+        <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
       )}
 
-      <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} onChange={setSettings} />
-      <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} onChange={setSettings} />
+      <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+      <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
 
       {/* ここだけは GUI の調整値ではなく「STM32 の機能を許可するかどうか」。
           距離も制動力も STM32 側の固定値で、GUI からは変えられない（v0.7） */}
@@ -235,7 +253,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
         </label>
       </section>
 
-      <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} onChange={setSettings} />
+      <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
 
       {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
           height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
@@ -248,7 +266,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
           前後カメラに進路ガイドを重ねる（校正前・暫定）
         </label>
         {CAMERA_FIELDS.map((f) => (
-          <SettingRow key={f.key} field={f} settings={settings} onChange={setSettings} />
+          <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
         ))}
       </section>
     </div>
@@ -259,18 +277,22 @@ function SettingGroup({
   title,
   fields,
   settings,
+  range,
+  defaults,
   onChange,
 }: {
   title: string
   fields: Field[]
   settings: DrivingSettings
+  range: Record<NumericSettingKey, SettingRange>
+  defaults: DrivingSettings
   onChange: (p: Partial<DrivingSettings>) => void
 }) {
   return (
     <section className="settings-group">
       <h3>{title}</h3>
       {fields.map((f) => (
-        <SettingRow key={f.key} field={f} settings={settings} onChange={onChange} />
+        <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={defaults} onChange={onChange} />
       ))}
     </section>
   )
@@ -279,29 +301,36 @@ function SettingGroup({
 function SettingRow({
   field: f,
   settings,
+  range: fullRange,
+  defaults,
   onChange,
 }: {
   field: Field
   settings: DrivingSettings
+  range: Record<NumericSettingKey, SettingRange>
+  defaults: DrivingSettings
   onChange: (p: Partial<DrivingSettings>) => void
 }) {
-  const range = SETTINGS_RANGE[f.key]
+  const range = fullRange[f.key]
   const toDisplay = f.toDisplay ?? ((v: number) => v)
   const toStored = f.toStored ?? ((v: number) => v)
   const digits = f.digits ?? 2
   const stored = settings[f.key]
   const display = toDisplay(stored)
-  const isDefault = stored === DEFAULT_SETTINGS[f.key]
+  // **`DEFAULT_SETTINGS`（ソースコード固定値）ではなく `defaults`（`settingsDefault`、
+  // ユーザーが「現在の値を既定値として保存」で上書きできる）を指すこと。**
+  const isDefault = stored === defaults[f.key]
+  const note = typeof f.note === 'function' ? f.note(range) : f.note
 
   return (
-    <div className="settings-row" title={f.note}>
+    <div className="settings-row" title={note}>
       <div className="settings-row-head">
         <span className="label">{f.label}</span>
         <b>{display.toFixed(digits)}</b>
         <span className="unit">{f.unit}</span>
         {!isDefault && (
-          <button className="settings-reset" onClick={() => onChange({ [f.key]: DEFAULT_SETTINGS[f.key] })}>
-            既定値 {toDisplay(DEFAULT_SETTINGS[f.key]).toFixed(digits)}
+          <button className="settings-reset" onClick={() => onChange({ [f.key]: defaults[f.key] })}>
+            既定値 {toDisplay(defaults[f.key]).toFixed(digits)}
           </button>
         )}
       </div>

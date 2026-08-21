@@ -276,6 +276,27 @@ class TestCommandGate(unittest.TestCase):
         c = command_from_cmd(DriveCmd(mode=3), allow_arm=True)
         self.assertEqual(c.mode, packets.Mode.DISARM)
 
+    def test_max_accel_clamps_accel_limit(self):
+        """★v0.11。`LIMITS.max_accel_m_s2` を超える `accel_limit` は丸める。"""
+        c = command_from_cmd(
+            DriveCmd(mode=1, arm=True, target_speed=1.0, accel_limit=5.0),
+            allow_arm=True, max_accel=3.0)
+        self.assertEqual(c.accel_limit, round(3.0 / 1e-3))
+
+    def test_max_accel_does_not_touch_the_stm32_default_sentinel(self):
+        """`accel_limit=0` は「STM32 の既定に任せる」の意味。クランプで足してはいけない。"""
+        c = command_from_cmd(
+            DriveCmd(mode=1, arm=True, target_speed=1.0, accel_limit=0.0),
+            allow_arm=True, max_accel=3.0)
+        self.assertEqual(c.accel_limit, 0)
+
+    def test_no_max_accel_leaves_accel_limit_unclamped(self):
+        """`LIMITS` 未受信（`max_accel=None`）なら従来通りそのまま送る。"""
+        c = command_from_cmd(
+            DriveCmd(mode=1, arm=True, target_speed=1.0, accel_limit=5.0),
+            allow_arm=True, max_accel=None)
+        self.assertEqual(c.accel_limit, round(5.0 / 1e-3))
+
 
 class TestCommandAuxiliaries(unittest.TestCase):
     """v0.5 で増えた灯火・パッシング・制動トルク。**値の意味が変わった箇所**を押さえる。"""
@@ -313,6 +334,19 @@ class TestCommandAuxiliaries(unittest.TestCase):
         self.assertEqual(c.brake_torque, round(MAX_BRAKE_TORQUE_NM / 1e-4))
         c.encode()                       # 例外が出ないこと
 
+    def test_brake_torque_clamped_by_limits_max_torque(self):
+        """★v0.11。`LIMITS.max_torque_nm` が `MAX_BRAKE_TORQUE_NM` より小さければそちらを使う。"""
+        c = command_from_cmd(DriveCmd(mode=1, arm=True, brake_torque=10.0),
+                             allow_arm=True, max_torque=0.05)
+        self.assertEqual(c.brake_torque, round(0.05 / 1e-4))
+
+    def test_max_torque_larger_than_default_does_not_relax_the_cap(self):
+        """`LIMITS.max_torque_nm` が既定の `MAX_BRAKE_TORQUE_NM` より大きくても、
+        既定の方（Pi 側の保守的な値）を超えて緩めてはいけない（小さい方を使う）。"""
+        c = command_from_cmd(DriveCmd(mode=1, arm=True, brake_torque=10.0),
+                             allow_arm=True, max_torque=999.0)
+        self.assertEqual(c.brake_torque, round(MAX_BRAKE_TORQUE_NM / 1e-4))
+
 
 class TestTorqueMode(unittest.TestCase):
     """v0.6 で追加した駆動トルク直接指令。`brake_torque` と違い 0 に特別な意味はない。"""
@@ -343,6 +377,12 @@ class TestTorqueMode(unittest.TestCase):
         self.assertEqual(c_neg.target_torque, -max_raw)
         c_pos.encode()                   # 例外が出ないこと
         c_neg.encode()
+
+    def test_target_torque_clamped_by_limits_max_torque(self):
+        """★v0.11。`LIMITS.max_torque_nm` が既定より小さければそちらを使う（両方向）。"""
+        c = command_from_cmd(DriveCmd(mode=1, arm=True, target_torque=10.0),
+                             allow_arm=True, max_torque=0.05)
+        self.assertEqual(c.target_torque, round(0.05 / 1e-4))
 
 
 class TestAutoStop(unittest.TestCase):

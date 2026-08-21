@@ -49,6 +49,13 @@ COMMAND_TIMEOUT_NS = 100 * 1_000_000
 #: `auto_stop`（v0.7）が効き始める距離 [m]
 AUTO_STOP_DISTANCE_M = 0.20
 
+#: `LIMITS`(0x0A、★v0.11) が返す値。**実機 STM32 の固定定数
+#: （`DRIVE_MAX_SPEED_M_S`/`DRIVE_MAX_ACCEL_M_S2`/`DRIVE_MAX_TORQUE_NM`）と
+#: 一致させること。** `docs/uart_protocol.md` §5.12 に記載の値が正
+DRIVE_MAX_SPEED_M_S = 5.0
+DRIVE_MAX_ACCEL_M_S2 = 3.0
+DRIVE_MAX_TORQUE_NM = 0.15   # VehicleModel.MAX_BRAKE_TORQUE_NM と同値
+
 #: 積分の刻み。細かくしても運動学モデルでは意味が薄く、粗いと舵の遅れが崩れる
 STEP_S = 0.001
 
@@ -106,6 +113,7 @@ class VirtualStm32:
         self._next_tlm = 0
         self._next_stats = 0
         self._boot_versions = 3
+        self._boot_limits = 3
         self._config: dict[int, float] = {}
         self._stats = packets.Stats()
 
@@ -144,6 +152,8 @@ class VirtualStm32:
                                     t_pong_tx_us=self.stm_us(t_ns)), t_ns)
         elif isinstance(msg, packets.VersionReq):
             self._emit_version(t_ns)
+        elif isinstance(msg, packets.LimitsReq):
+            self._emit_limits(t_ns)
         elif isinstance(msg, packets.ConfigSet):
             self._config[msg.param_id] = msg.value
             known = msg.param_id in vars(packets.Param).values()
@@ -198,6 +208,9 @@ class VirtualStm32:
         if self._boot_versions > 0:
             self._boot_versions -= 1
             self._emit_version(t_ns)
+        if self._boot_limits > 0:
+            self._boot_limits -= 1
+            self._emit_limits(t_ns)
 
         while t_ns >= self._next_tlm:
             self._emit(self._telemetry(self._next_tlm), self._next_tlm)
@@ -331,6 +344,14 @@ class VirtualStm32:
     def _emit_version(self, t_ns: int) -> None:
         self._emit(packets.Version(protocol_version=PROTOCOL_VERSION,
                                    fw_id=FW_ID, build_epoch=0), t_ns)
+
+    def _emit_limits(self, t_ns: int) -> None:
+        """★v0.11。`VERSION` と同じタイミングで自動送信 + `LIMITS_REQ` への応答。"""
+        self._emit(packets.Limits(
+            max_speed_m_s=DRIVE_MAX_SPEED_M_S,
+            max_accel_m_s2=DRIVE_MAX_ACCEL_M_S2,
+            max_torque_nm=DRIVE_MAX_TORQUE_NM,
+            max_steer_rad=self.spec.max_steer), t_ns)
 
     # ── 送信キュー ──
 

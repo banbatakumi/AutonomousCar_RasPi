@@ -1,20 +1,22 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.10
-**最終更新**: 2026-08-21
+**バージョン**: v0.11
+**最終更新**: 2026-08-22
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: Pi 側 v0.10 実装済み（`protocol.toml`/`raspi/msgs`）。**STM32 側は実装済み・実機での動作検証は未了（2026-08-21）**
+**状態**: Pi 側 v0.11 実装済み（`protocol.toml`/`raspi/msgs`/`raspi/nodes/io_node.py`/GUI/`sim/stm32.py`）。**STM32 側は実装済み・実機での動作検証は未了（2026-08-21）**
 
-> **v0.10 で変わったのは `CONFIG_SET`/`CONFIG_GET` で使う `param_id` だけ。**
-> `param_id = 0x0001`（最大速度）/`0x0002`（最大加速度）/`0x0003`（最大舵角）が
-> **廃止**され、以後は常に `RAS_CONFIG_UNKNOWN_PARAM` を返す。これらが担っていた
-> 上限は STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s,
-> `DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s², 路面舵角 ±30°）に一本化された。
-> **Pi はこの3つの `param_id` を元々送信していなかった**ため（§5.8.1）、
-> Pi 側の実際の通信挙動に変化はない。`COMMAND` の `accel_limit`/`steer_rate_limit`
-> フィールド（毎指令ごとのレート制限）はこの変更と無関係で、そのまま残る。
-> フレーム構造・LEN・`flags` のビット定義は v0.7 から変更なし。
-> **本書が最終版**であり、`protocol_version = 0x000A` はこの内容を指す。
+> **v0.11 で新設したのは `LIMITS` (0x0A) / `LIMITS_REQ` (0x15) のみ**（§5.12）。
+> `COMMAND`/`TELEMETRY`/`CONFIG_SET`/`CONFIG_GET` を含む既存パケットの構造・LEN は
+> 変更なし。v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を廃止して STM32 側の固定
+> 定数へ一本化した結果、Pi がその実際の値を知る手段が無くなっていた問題への対応。
+> STM32 は起動直後に `VERSION` と同じタイミングで `LIMITS` を自発送信（3回・100ms間隔）
+> し、Pi はいつでも `LIMITS_REQ` で再取得できる。**Pi 側はこの値を RC（MANUAL）・
+> 自律走行（AUTO）どちらの指令でも `IoNode._send_command` の1箇所でクランプに使う。
+> `LIMITS` を受信済みなら無条件にそちらを使い、`--max-speed`/`--max-steer`（Pi 側の
+> 設定上限）は未受信の間だけ使うフォールバックにすぎない**（2026-08-22、当初は
+> 「小さい方」だったが GUI 側の表示と食い違うため「STM32 実測を優先」に変更。§5.12）。
+> `protocol_version` を `0x000A`→`0x000B` に上げる。
+> **本書が最終版**であり、`protocol_version = 0x000B` はこの内容を指す。
 
 ---
 
@@ -980,6 +982,46 @@ Pi 側の `crc_error_count` / `packet_loss_count`（下り側）と並べて GUI
 **最低優先度で送信**し、帯域が逼迫したら破棄してよい（破棄数は `STATS.tx_drop` に計上）。
 Pi 側は `severity` でフィルタし、既定では WARN 以上のみを GUI に出す。
 
+### 5.12 `LIMITS` (0x0A) — LEN = 16 / `LIMITS_REQ` (0x15) — LEN = 0 ★v0.11
+
+**車両の物理的な上限値を STM32 側の権威として Pi に伝える、読み取り専用パケット。**
+v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`param_id 0x0001`-`0x0003`）を廃止し
+STM32 側の固定定数へ一本化した結果、Pi 側がその**実際の値を知る手段が無くなった**
+（`config/vehicle.toml` の想定値と STM32 の実装値がズレても気づけない）。それを埋める。
+
+**`LIMITS_REQ`**（Pi → STM32、LEN = 0）: ペイロードなし。応答は `LIMITS` 1回。
+**`LIMITS`**（STM32 → Pi、LEN = 16）:
+
+| offset | size | type | field | 備考 |
+|---|---|---|---|---|
+| 0 | 4 | f32 | `max_speed_m_s` | `COMMAND.target_speed` の上限（`DRIVE_MAX_SPEED_M_S`）。超えると STM32 側でクランプ |
+| 4 | 4 | f32 | `max_accel_m_s2` | `COMMAND.accel_limit` に指定できる上限（`DRIVE_MAX_ACCEL_M_S2`） |
+| 8 | 4 | f32 | `max_torque_nm` | 1輪あたりのトルク上限。`target_torque`/`brake_torque` 共通（`DRIVE_MAX_TORQUE_NM`） |
+| 12 | 4 | f32 | `max_steer_rad` | 路面舵角の上限。原点（直進）からの片側の振れ幅（`Steering_GetMaxRoadWheelAngleRad()`） |
+
+**合計 16 バイト。すべて生の f32（スケール無し）。**
+
+- **読み取り専用。** `CONFIG_SET` のような書き込み手段は無い（v0.10 でむしろ廃止された）
+- STM32 は`VERSION`と同じタイミングで**起動直後に3回**（100ms間隔）自発送信する。
+  Pi はリンク確立時に `VERSION_REQ` と併せて `LIMITS_REQ` を送り、両方を確実に取る
+  （`raspi/nodes/io_node.py` の `handshake()`）
+- **実行時に変化しない値**なので、Pi は起動時に一度取得してキャッシュすれば十分。
+  以後の毎 `COMMAND` 送信でこのキャッシュ値を読むだけでよい（`_send_command`）
+- Pi 側は、RC（MANUAL）・自律走行（AUTO）どちらの指令でも、`LIMITS` を受信済みなら
+  **無条件にそちらをクランプに使う。** `--max-speed`/`--max-steer`（Pi 側の設定上限、
+  `raspi/setup/install_services.sh` の deploy 引数）は `LIMITS` を**まだ受け取っていない
+  間だけ**使うフォールバックで、GUI の `effectiveRange()`（`gui/src/store/ui.ts`）も
+  同じ「受信済みならそちらを優先」の方針（2026-08-22、当初は「小さい方」だったが、
+  それだと `LIMITS` の方が緩いケースで GUI が実測値を見せているのに実車だけ古い値で
+  頭打ちのままになる食い違いが起きるため変更）。モードによらず `IoNode._send_command`
+  の1箇所を必ず通るため、送信元を問わず同じ上限が効く
+- `LIMITS` が届かない（旧ファームウェア等）場合は Pi 側設定値のみでクランプし、通信は継続する
+- `sim/stm32.py`（開発用シミュレータ）も `LIMITS`/`LIMITS_REQ` に対応済み。実機と同じ
+  固定値（`DRIVE_MAX_SPEED_M_S`=5.0 等）を返すので、シムでも実機と同じ経路で検証できる
+- **実機での動作検証は STM32 側で未実施（2026-08-21時点）。** 特に `max_steer_rad` の
+  元になる `STEERING_LINKAGE_RATIO`（モータ機械角→路面舵角の換算比）は実測前の暫定値で、
+  実際の路面舵角上限とズレている可能性がある
+
 ---
 
 ## 6. 時刻同期（STM32 ⇄ Pi）
@@ -1402,6 +1444,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.7** | 2026-08-11 | **STM32 側発。ビットの追加のみで LEN は全パケット変更なし**（`flags` の空きビットを使う）。`COMMAND` (0x10) の `flags` bit7 に **`auto_stop`**、`TELEMETRY` (0x02) の `flags` bit16 に **`auto_stop_active`** を新設。`auto_stop` が立っている間、**進行方向**（`torque_mode` なら `target_torque`、そうでなければ `target_speed` の符号で決まる）の超音波が **20cm 未満**になると STM32 が指令を無視して**最大制動**する（§5.6.4）。逆方向のセンサは見ないので後退で抜けられる。検知不能時は作動せず、ラッチもしない（ヒステリシス無し＝境界でチャタリングし得る）。`brake` が同時に立っていれば `brake` が優先。**v0.6 とワイヤ非互換ではない**ため、片側が未対応でも通信は継続する |
 | **v0.8** | 2026-08-19 | **STM32 側発。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0010`（TC 有効）/ `0x0020`（TV 有効）が STM32 ファームウェアで実際に機能するようになった（以前は `RAS_CONFIG_UNKNOWN_PARAM` を返していた）。Pi 側は `io_node` にハンドシェイク直後の `CONFIG_GET` 初期同期と、GUI トグル操作に応じた `CONFIG_SET` 送信を実装（§5.8）。`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`0x0001`-`0x0003`）は STM32 側で既にクランプに使われているが、Flash 非永続化かつ動的変更のユースケースが無いため Pi からは意図的に未送信のまま（§5.8.1） |
 | **v0.9** | 2026-08-20 | **STM32 側発。ワイヤ形式・LEN の変更なし。** 後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策として「片輪浮き対策（Wheel Lift Guard）」を追加、`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050` で ON/OFF できるようになった（§5.8.2）。既存の TC 本体（`0x0010`）とは独立に動作し、個別に有効/無効を切り替えられる。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）操作に応じた `CONFIG_SET` 送信を実装。**STM32 側も実機で動作確認済み（2026-08-20）**（`pi_uart_protocol_v0.9_delta.md`） |
+| **v0.11** | 2026-08-22 | **STM32 側発。`LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設（`COMMAND`/`TELEMETRY`/`CONFIG_SET`/`CONFIG_GET` を含む既存パケットの構造・LEN は変更なし）。** v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を廃止した結果 Pi が STM32 側の固定上限値を知る手段が無くなっていた問題への対応。`LIMITS` は `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`（f32×4・LEN16・読み取り専用）を返す。STM32 は起動直後に `VERSION` と同じタイミングで3回自発送信、Pi は `LIMITS_REQ` でいつでも再取得できる（§5.12）。`protocol_version` を `0x000A`→`0x000B` に上げる。Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り、未受信なら1秒おきに再送する。`IoNode._send_command` は `LIMITS` を受信済みなら**無条件にそちらでクランプ**し（RC/AUTO 問わず）、`--max-speed`/`--max-steer`（Pi 側設定）は未受信時のみのフォールバックにした（`raspi/msgs/convert.py` の `command_from_cmd` に `max_accel`/`max_torque` 引数を追加。2026-08-22、当初は「小さい方」だったが GUI 表示との食い違いを避けるため「STM32 実測を優先」に変更）。GUI（`gui/src/store/ui.ts` の `effectiveRange()`）も同じ方針。`sim/stm32.py` にも `LIMITS`/`LIMITS_REQ` を実装済み。**STM32 側実装済み、実機での動作検証は未了**（`pi_uart_protocol_v0.11_delta.md`） |
 | **v0.10** | 2026-08-21 | **STM32 側発。`CONFIG_SET`/`CONFIG_GET` の `param_id` のみの変更（`COMMAND`/`TELEMETRY` を含むパケット構造・LEN は変更なし）。** `RAS_PARAM_MAX_SPEED`(`0x0001`)/`RAS_PARAM_MAX_ACCEL`(`0x0002`)/`RAS_PARAM_MAX_STEER`(`0x0003`) を廃止し、STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s、`DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s²、路面舵角 ±30°）に一本化。この3つの `param_id` は以後常に `RAS_CONFIG_UNKNOWN_PARAM` を返す（§5.8.1）。`protocol_version` を `0x0009`→`0x000A` に上げる。Pi はこの3つの `param_id` を元々送信していなかったため、`protocol.toml`/`packets.py`/`surge_proto.h` の `protocol_version` 更新のみで Pi 側の実質的な挙動変化はない。**STM32 側実装・単体テスト済み、実機での動作検証は未了**（`pi_uart_protocol_v0.10_delta.md`） |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）

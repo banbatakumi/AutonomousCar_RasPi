@@ -58,11 +58,13 @@ class TestPacketDefinitions(unittest.TestCase):
         "VERSION": (0x07, 10, "s2p"),
         "STATS": (0x08, 48, "s2p"),
         "LIDAR_SECTOR_C": (0x09, 39, "s2p"),
+        "LIMITS": (0x0A, 16, "s2p"),
         "COMMAND": (0x10, 14, "p2s"),
         "CONFIG_SET": (0x11, 6, "p2s"),
         "PING": (0x12, 4, "p2s"),
         "CONFIG_GET": (0x13, 2, "p2s"),
         "VERSION_REQ": (0x14, 0, "p2s"),
+        "LIMITS_REQ": (0x15, 0, "p2s"),
     }
 
     def test_all_packets_present(self):
@@ -90,7 +92,7 @@ class TestPacketDefinitions(unittest.TestCase):
                 self.assertEqual(cls.DIR, "s2p" if cls.TYPE < 0x10 else "p2s")
 
     def test_protocol_version(self):
-        self.assertEqual(packets.PROTOCOL_VERSION, 0x000A)
+        self.assertEqual(packets.PROTOCOL_VERSION, 0x000B)
 
     def test_generated_files_up_to_date(self):
         """protocol.toml を編集して再生成し忘れていないか。"""

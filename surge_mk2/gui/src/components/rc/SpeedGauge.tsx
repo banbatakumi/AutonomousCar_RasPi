@@ -20,7 +20,7 @@
  */
 import { useNumbers } from '../../bus/live'
 import { kmh } from '../../format'
-import { useUi } from '../../store/ui'
+import { PI_MAX_SPEED_CAP, useUi } from '../../store/ui'
 
 /**
  * 目盛りの円弧。**真上（0°）を直進側の基準に、-120°〜120°の240°**
@@ -54,12 +54,18 @@ function arcPath(from: number, to: number, r: number): string {
 
 export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   const n = useNumbers()
-  const { maxSpeed, cruiseScale, torqueMode } = useUi((s) => s.settings)
+  const { cruiseScale, torqueMode } = useUi((s) => s.settings)
   const vs = n.vs
 
   // 停止判定中は 0 に落とす（`DriveBar` と同じ扱い。デッドバンド内の生値を速度に見せない）
   const speed = vs ? (vs.stopped ? 0 : Math.abs(vs.speed)) : 0
-  const full = Math.max(0.1, maxSpeed)
+  // ★2026-08-22: 目盛りは常に STM32 実測の物理上限（`LIMITS.max_speed_m_s`）に固定する。
+  // 速度制御・トルク制御どちらでも同じ扱い。以前は RC の速度ダイヤル（`settings.maxSpeed`）
+  // を目盛りにも流用していたため、ダイヤルを下げるとメータの目盛りまで一緒に縮み、
+  // 「実際に出せる速度」とメータの見え方が一致しなくなっていた（トルク制御は特に、
+  // 速度指令自体を送らないのでダイヤルとメータを結びつける理由が無い）。
+  // `LIMITS` 未受信の間は `PI_MAX_SPEED_CAP` にフォールバックする
+  const full = Math.max(0.1, n.link?.max_speed_m_s ?? PI_MAX_SPEED_CAP)
   const frac = Math.min(1, speed / full)
   // トルクモード中は速度指令を送っていないので目標マーカーを出さない（`DriveBar` と同じ判断）
   const showTarget = n.out.active && !(torqueMode && n.out.torqueMode)

@@ -201,7 +201,9 @@ DISARM_COMMAND = packets.Command(
 
 def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
                      max_speed: float | None = None,
-                     max_steer: float | None = None) -> packets.Command:
+                     max_steer: float | None = None,
+                     max_accel: float | None = None,
+                     max_torque: float | None = None) -> packets.Command:
     """`DriveCmd`（SI）→ `COMMAND`(0x10)。
 
     :param allow_arm: False なら **mode と arm を強制的に DISARM に落とす**。
@@ -209,6 +211,11 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         ここで断つ。判断を1箇所に閉じておかないと「どこかで解禁されていた」が起きる
     :param max_speed: Pi 側の上限 [m/s]。STM32 側にも上限はあるが、
         **上位が壊れたときに下位だけが守る構造にしない**（多層防御）
+    :param max_steer: Pi 側の舵角上限 [rad]
+    :param max_accel: `accel_limit` に指定できる上限 [m/s²]（★v0.11 `LIMITS.max_accel_m_s2`）。
+        None なら無制限（クランプしない）。`0`（=STM32既定に任せる）はそのまま通す
+    :param max_torque: `target_torque`/`brake_torque` の上限 [N·m]（★v0.11 `LIMITS.max_torque_nm`）。
+        None なら `MAX_TARGET_TORQUE_NM`/`MAX_BRAKE_TORQUE_NM` の既定値を使う
     """
     if not allow_arm:
         return DISARM_COMMAND
@@ -219,6 +226,10 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         speed = max(-max_speed, min(max_speed, speed))
     if max_steer is not None:
         steer = max(-max_steer, min(max_steer, steer))
+
+    accel_limit = cmd.accel_limit
+    if max_accel is not None and accel_limit > 0.0:
+        accel_limit = min(accel_limit, max_accel)
 
     flags = 0
     if cmd.arm:
@@ -243,30 +254,34 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
 
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0
+    torque_limit = MAX_TARGET_TORQUE_NM if max_torque is None else min(MAX_TARGET_TORQUE_NM, max_torque)
     torque_raw = _clamp(cmd.target_torque / _TORQUE,
-                         -round(MAX_TARGET_TORQUE_NM / _TORQUE), round(MAX_TARGET_TORQUE_NM / _TORQUE))
+                         -round(torque_limit / _TORQUE), round(torque_limit / _TORQUE))
     return packets.Command(
         mode=mode, flags=flags,
         target_speed=_clamp(speed / _SPEED, -32768, 32767),
         target_steer=_clamp(steer / _ANGLE, -32768, 32767),
-        accel_limit=_clamp(cmd.accel_limit / _SPEED, 0, 65535),
+        accel_limit=_clamp(accel_limit / _SPEED, 0, 65535),
         steer_rate_limit=_clamp(cmd.steer_rate_limit / _YAW_RATE, 0, 65535),
-        brake_torque=_brake_torque_raw(cmd.brake_torque),
+        brake_torque=_brake_torque_raw(cmd.brake_torque, max_torque),
         target_torque=torque_raw,
     )
 
 
-def _brake_torque_raw(nm: float) -> int:
+def _brake_torque_raw(nm: float, max_torque: float | None = None) -> int:
     """[N·m] → `brake_torque` の生値。**0 は「未指定＝最大制動」を意味する。**
 
     そのため、正の値が丸めで 0 に落ちるのを禁じる（最小 1 LSB = 0.0001 N·m に留める）。
     これをやらないと「スライダを最弱にしたら最大制動になった」という、
     操作と挙動が正反対になる壊れ方をする。上限は STM32 でもクランプされるが、
     **どこで頭打ちになったか分からなくなる**ので Pi 側でも掛けておく。
+
+    :param max_torque: `LIMITS.max_torque_nm`（★v0.11）。None なら `MAX_BRAKE_TORQUE_NM` を使う
     """
     if nm <= 0.0:
         return 0
-    return _clamp(min(nm, MAX_BRAKE_TORQUE_NM) / _TORQUE, 1, 65535)
+    limit = MAX_BRAKE_TORQUE_NM if max_torque is None else min(MAX_BRAKE_TORQUE_NM, max_torque)
+    return _clamp(min(nm, limit) / _TORQUE, 1, 65535)
 
 
 class ScanAssembler:

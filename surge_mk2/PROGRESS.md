@@ -196,15 +196,97 @@ ssh surge-mk2 'sudo nmcli connection modify "tplink"      connection.autoconnect
 
 ## 決まっていること
 
-### UART プロトコル — 現在 v0.9（`docs/uart_protocol.md` が正）
+### UART プロトコル — 現在 v0.11（`docs/uart_protocol.md` が正）
 
 `raspi/proto/protocol.toml` が実装上の唯一の定義で、そこから Python パーサと STM32 側 C
 ヘッダを生成する（`python3 raspi/proto/generate.py`）。v0.4確定 →
-v0.5（`COMMAND` LEN10→12・ブレーキ/灯火/ホーン拡張）→ v0.6（トルク直接指令、上限0.125N·m）→
+v0.5（`COMMAND` LEN10→12・ブレーキ/灯火/ホーン拡張）→ v0.6（トルク直接指令、上限0.125→0.15N·m）→
 v0.7（超音波 `auto_stop`、ワイヤ非破壊）→ v0.8（TC/TV 有効切替、`param_id 0x0010`/`0x0020`）→
-v0.9（片輪浮き対策、`param_id 0x0050`。TC本体とは独立、2026-08-20）と進んだ。
-**v0.8・v0.9 とも 2026-08-20 に実機で動作確認済み。**
+v0.9（片輪浮き対策、`param_id 0x0050`。TC本体とは独立、2026-08-20）→
+v0.10（`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `param_id 0x0001-3` を廃止し STM32 側固定定数へ
+一本化）→ **v0.11（`LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設。STM32側発、2026-08-21）**と進んだ。
+**v0.8・v0.9 は実機で動作確認済み。v0.10・v0.11 は STM32側実装済みだが実機での動作検証は
+まだ（STM32側ドキュメント曰く「実機での動作検証は未了」）。**
 各版の変更点・実車確認の経緯はアーカイブの該当節（`UART プロトコル v0.6` / `v0.7` / `v0.5 に追従した` など）。
+
+#### ★v0.11 `LIMITS`（車両の物理的な上限値。2026-08-21、Pi側実装済み・未コミット）
+
+`LIMITS`（STM32→Pi、16B、`max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`
+のf32×4・読み取り専用）を新設。v0.10でPiからパラメータの動的変更手段が失われた代わりに、
+**STM32側の実際の固定上限値をPiが起動時に知れるようにする**のが目的。
+
+- Pi側の対応（`raspi/nodes/io_node.py`）: `handshake()` で `VERSION_REQ` と同時に
+  `LIMITS_REQ` を送る。**`_send_command()` が毎回 `state.limits` を読み、RC(MANUAL)・
+  AUTO(自律走行) 問わず `--max-speed`/`--max-steer`（Pi側設定）と `LIMITS`（STM32実測）の
+  小さい方でクランプする**（`raspi/msgs/convert.py` の `command_from_cmd` に
+  `max_accel`/`max_torque` 引数を追加）。全指令がこの1箇所を通るので送信元を問わず効く
+- **バグを1つ踏んで直した**: 最初の実装は `handshake()` の1秒タイムアウト内に `LIMITS` が
+  届かなければ**二度と再送しない**ままだった（バンビが実機で「STM32から送っているはずの
+  上限が適用されない」「同時起動しないと受け取れない」と報告して発覚）。
+  `run()` のメインループで `state.limits is None` の間 1秒おきに `LIMITS_REQ` を再送する
+  よう修正済み
+- **GUIへの反映も追加実装した**（当初「多分ほぼ変更ないと思う」と見積もっていたが、
+  バンビの「GUIの上限が3/5.5のままでSTM32実測(5/3)が反映されていない」という指摘で
+  スコープに入れた）。`LinkDiag`（`raspi/msgs/types.py`）に `max_speed_m_s` 等を追加し、
+  `bus_bridge.py` の `build_diag()` で伝搬
+- **★2026-08-22 に「STMからの値を優先してほしい」で再修正**: 最初は
+  `Math.min(静的既定, STM実測)` にしていたが、これだと STM32 実測の方が大きい場合
+  （3.0固定→実際は5.0出せる、等）に古い静的値で頭打ちになったまま。
+  `gui/src/store/ui.ts` の `effectiveRange()` を「**`LIMITS` 受信済みなら無条件にそれを
+  使う**（静的値は WS 接続前のプレースホルダでしかない）」に変更。
+  **`sim/stm32.py` にも `LIMITS`/`LIMITS_REQ` を実装した**（`_emit_limits`。実機と同じ
+  `DRIVE_MAX_SPEED_M_S=5.0`/`DRIVE_MAX_ACCEL_M_S2=3.0`/`DRIVE_MAX_TORQUE_NM=0.15`/
+  `spec.max_steer` を返す）ので、シムでも実機と同じ経路で動く
+- **バンビに確認 → 「LIMITSを優先に変える」で回答済み（2026-08-22）。**
+  `io_node.py` の `_send_command` も `min(--max-speed, LIMITS)` から「**`LIMITS` 受信済み
+  なら無条件にそちらを使う**」に変更した（`--max-speed`/`--max-steer` は未受信時だけの
+  フォールバック）。GUI・Pi 両方で「STM32実測を優先」に統一済み。
+  `raspi/tests/test_cmd_path.py` に往復方向（LIMITSがより緩い場合／より厳しい場合）
+  それぞれのテストを追加
+- **★はまりどころ**: `LIMITS` は `ControlStatus`（`/ws/control` の status。イベント発生時
+  にしかbroadcastされない）ではなく **`LinkDiag`（`/ws/telemetry` 8Hz、`bus/live.ts` の
+  `useNumbers()`）から読むこと。** `tc_enabled`/`wheel_lift_guard_enabled` と同じ理由
+  （2026-08-19に実機で発覚した「statusから読むと更新されずリロードするまで気づかない」
+  バグを避けるため）。一度 `ControlStatus` 側に実装してから気づいてリバートした
+- **★★実機で踏んだ本命バグ（2026-08-22）**: 実機で `--restart-io` までして確認したのに
+  「最高速度スライダーが3で止まる」（診断タブの LIMITS 表示は正しく 5.00m/s）。
+  原因は `SettingsPanel.tsx` ではなく **`store/ui.ts` の `setSettings` アクション**。
+  `clampSettings()` が `effectiveRange()`（動的）ではなく**静的な `SETTINGS_RANGE`
+  （3.0固定）でクランプしていた**ため、スライダの DOM `max` 自体は動的に5.0まで動くのに、
+  `onChange` → `setSettings()` が呼ばれた瞬間に静的値へ巻き戻されていた
+  （見た目は動くのにドラッグすると弾かれる、という分かりにくい壊れ方）。
+  `clampSettings()` を `effectiveRange(live.link)` でクランプするよう修正
+  （`live` は `bus/live.ts` の素の可変オブジェクト。フックではないので `store/ui.ts`
+  という非コンポーネントのコードからでも直接読める。**これが今回のようにクランプ関数を
+  複数箇所に持つ設計の落とし穴** — 表示側だけ直して、保存側の別の静的クランプを
+  見落とすと再現する）
+- 診断タブに「車両上限（LIMITS）」の生値表示を追加済み（`DiagGrid.tsx`）。
+  今後同種の不具合は、まずここで Pi が実際に受け取っている値を確認してから
+  GUI 側のバグを疑うと切り分けが速い
+- **★速度メータの目盛りを `settings.maxSpeed` から切り離した（2026-08-22、バンビ指示）**。
+  それまで `SpeedGauge.tsx`（RC タブの主計器）は速度制御・トルク制御どちらでも
+  `settings.maxSpeed`（RC の速度ダイヤル、ユーザーが下げられる）を目盛りの満尺に
+  流用していたため、ダイヤルを下げるとメータの目盛りまで一緒に縮み「実際に出せる
+  速度」と食い違っていた。`SpeedGauge.tsx` の `full` を常に `LIMITS.max_speed_m_s`
+  （`n.link?.max_speed_m_s`、未受信時のみ `PI_MAX_SPEED_CAP` にフォールバック）に固定。
+  この役割が要らなくなったので `SettingsPanel.tsx` の `TORQUE_FIELDS` から
+  「速度メータの目盛り」フィールド（`key: 'maxSpeed'` の重複エントリ）を削除。
+  `DEFAULT_SETTINGS.maxSpeed` も 0.6 → **3.0**（バンビがそれまで手で設定していた値）
+  に更新。`maxSpeed` は今は「速度制御モードの実際の RC 上限」のみを表す
+- **★「現在の値を既定値として保存」ボタンを追加（2026-08-22、バンビ指示）**。
+  上の `DEFAULT_SETTINGS.maxSpeed` 更新は Claude がスクリーンショットの値を見て
+  ソースコードに決め打ちで書いただけで、**実機の現在値を確認したわけではなかった**
+  （バンビに指摘されて発覚）。今後同じ往復をしないための恒久対応:
+  - `store/ui.ts` に `settingsDefault`（`localStorage` キー
+    `surge.driveSettingsDefault.v1`）を新設。「既定値に戻す」・各行の「既定値 X」表示は
+    今後ソースコードの `DEFAULT_SETTINGS`（工場出荷値）ではなく、この値を指す
+  - `saveCurrentAsDefault()` アクションで `settings` の現在値をここへコピーできる。
+    設定パネル上部「既定値に戻す」の隣に「現在の値を既定値として保存」ボタンを追加
+  - `DEFAULT_SETTINGS` 自体は据え置き（壊れた localStorage から復旧するときの
+    最終フォールバックとして `clampSettings`/`loadSettings`/`loadDefaultSettings` が使う）
+- GUIの型は自動生成なので変更したら **`python3 config/gen_msgs.py`** を忘れずに
+  （`gui/src/generated/msgs.ts` の `MSGS_SCHEMA` が変わる。App.tsx が食い違いを検出する）
+- **まだコミットしていない。** 実機テストで確認してから commit する予定
 
 確定している主要仕様:
 - `TELEMETRY` LEN = 66。`STATS` は累積 u32。`CONFIG_SET` は揮発（Flash はステア原点とIMUキャリブのみ）

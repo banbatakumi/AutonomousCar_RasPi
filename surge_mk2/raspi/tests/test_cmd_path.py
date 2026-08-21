@@ -109,6 +109,32 @@ class TestIoNodeArmGate(unittest.TestCase):
         self.assertEqual(live[0].target_speed, 300)
         self.assertEqual(live[0].target_steer, 500)
 
+    def test_limits_overrides_max_speed_even_when_more_permissive(self):
+        """★v0.11・2026-08-22。`LIMITS` を受信済みなら `--max-speed`/`--max-steer` より
+        緩くても無条件に採用する（`min()` の多層防御ではなく「STM32 実測を優先」に変更した）。"""
+        n = self.node(allow_arm=True, max_speed=0.3, max_steer=0.05)
+        n.state.limits = packets.Limits(max_speed_m_s=5.0, max_accel_m_s2=3.0,
+                                        max_torque_nm=0.15, max_steer_rad=0.524)
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=9.0, target_steer=1.5))
+        n.run(duration_s=0.1)
+        live = [c for c in commands(self.link) if c.mode == packets.Mode.MANUAL]
+        self.assertTrue(live)
+        # 9.0/1.5 は LIMITS(5.0/0.524) でクランプされる。--max-speed=0.3 の出る幕は無い
+        self.assertEqual(live[0].target_speed, 5000)
+        self.assertEqual(live[0].target_steer, 5240)
+
+    def test_limits_overrides_max_speed_even_when_more_restrictive(self):
+        """逆方向。`LIMITS` が `--max-speed` より厳しくても、こちらが優先される。"""
+        n = self.node(allow_arm=True, max_speed=2.0, max_steer=0.5)
+        n.state.limits = packets.Limits(max_speed_m_s=0.2, max_accel_m_s2=3.0,
+                                        max_torque_nm=0.15, max_steer_rad=0.05)
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, target_steer=0.3))
+        n.run(duration_s=0.1)
+        live = [c for c in commands(self.link) if c.mode == packets.Mode.MANUAL]
+        self.assertTrue(live)
+        self.assertEqual(live[0].target_speed, 200)
+        self.assertEqual(live[0].target_steer, 500)
+
     def test_stale_cmd_falls_back_to_disarm(self):
         """publish 側が死んだら止める。**沈黙は「そのまま走り続けろ」ではない。**"""
         n = self.node(allow_arm=True)

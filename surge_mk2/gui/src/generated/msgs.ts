@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x667639be
+export const MSGS_SCHEMA = 0x7fc81e6f
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -223,6 +223,14 @@ export type LinkDiag = {
    * 「シムのつもりで --allow-arm した実車が動く」が起きる（GUI が SIM バッジを出す）
    */
   sim: boolean
+  /**
+   * 車両の物理的な上限値（`LIMITS` パケットから取得。★v0.11）。
+   * 読み取り専用・実行時に変化しない。まだ受け取っていなければ None
+   */
+  max_speed_m_s: number | null
+  max_accel_m_s2: number | null
+  max_torque_nm: number | null
+  max_steer_rad: number | null
 }
 
 /**

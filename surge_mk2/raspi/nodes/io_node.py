@@ -9,7 +9,8 @@
     .venv/bin/python -m raspi.nodes.io_node --sim          # Mac 上のシミュレータに繋ぐ（`sim/`）
 
 やること:
-- 起動時に VERSION_REQ → VERSION を照合（protocol_version 不一致は警告）
+- 起動時に VERSION_REQ → VERSION を照合（protocol_version 不一致は警告）、
+  LIMITS_REQ → LIMITS で車両の物理的な上限値を取得（★v0.11。速度・舵角クランプに使う）
 - PING を 5Hz（最初の3秒は 20Hz）で送り、PONG から時刻同期を推定
 - COMMAND を 100Hz で送る（STM32 の COMMAND タイムアウトを防ぐハートビートを兼ねる）
 - TELEMETRY / STATS / PONG / VERSION / LIDAR を受信・集計
@@ -26,7 +27,9 @@
 2. **`cmd` が 150ms 途絶したら DISARM に落とす。** publish 側（GUI や
    planning_node）が死んだ＝上位が落ちた、なので止めるのが正しい
 3. **Pi 側でも速度・舵角を上限でクランプする。** STM32 にも上限はあるが、
-   下位だけが守る構造にしない
+   下位だけが守る構造にしない。上限は STM32 から取得した `LIMITS`（★v0.11・
+   車両の物理的な上限）を受信済みならそちらを使う。`--max-speed`/`--max-steer`
+   は `LIMITS` 未受信の間だけ使うフォールバック（`_send_command`）
 
 さらに GPIO6 ハートビート（第1層）と STM32 の COMMAND タイムアウト（第2層）が
 下にある。ここは第3層（`docs/architecture.md` §7）。
@@ -35,6 +38,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import signal
 import sys
@@ -90,6 +94,11 @@ LINKSTATS_HZ = 1
 DIAG_HZ = 10
 HB_HZ = 10
 
+#: `handshake()` で `LIMITS` を取り損ねた場合（STM32 の起動burstを取り逃した、
+#: 応答が1回ノイズで落ちた等）に `LIMITS_REQ` を再送する間隔（★v0.11）。
+#: `state.limits` が一度埋まれば以降は送らない（実行時に変化しない値のため）
+LIMITS_RETRY_S = 1.0
+
 #: `cmd` がこれだけ途絶したら DISARM に落とす。
 #: **値は `config/vehicle.toml` の `[safety]` が正**（`docs/architecture.md` §9.4）。
 #: telemetry_node も同じ判定を独立に持つ（片方が死んでも成立させるための冗長）が、
@@ -97,7 +106,10 @@ HB_HZ = 10
 #: （2026-08-21 のレビュー 🟢11）
 CMD_TIMEOUT_NS = int(Vehicle.load().cmd_deadman_ms * 1_000_000)
 
-#: Pi 側のクランプ既定値。STM32 側の上限とは独立に効かせる（多層防御）
+#: Pi 側のクランプ既定値。**STM32 から `LIMITS`（★v0.11・車両の物理的な上限）を
+#: まだ受信していない間だけ使うフォールバック。** 受信済みならそちらを無条件に使う
+#: ので、実車の挙動を変えたいときはここではなく STM32 側の固定定数を直すこと
+#: （`IoNode._send_command` 参照。2026-08-22、GUI 側の `effectiveRange()` と方針統一）
 DEFAULT_MAX_SPEED = 1.0        # m/s
 DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
 
@@ -273,18 +285,29 @@ class IoNode:
             },
         })
 
-    # ── 起動時の VERSION 照合 ──
+    # ── 起動時の VERSION / LIMITS 照合 ──
 
     def handshake(self, timeout_s: float = 1.0) -> packets.Version | None:
+        """`VERSION_REQ`/`LIMITS_REQ` を送り、両方の応答を待つ（★v0.11: `LIMITS` 追加）。
+
+        `LIMITS` は読み取り専用・実行時に変化しない値なので、ここで一度取得できれば
+        以降は `state.limits` をそのまま使い回してよい（`_send_command` 参照）。
+        STM32 は起動直後に `VERSION`/`LIMITS` をどちらも自動送信するが、Pi の再起動・
+        再接続時はその窓を過ぎている可能性があるため、明示的に `_REQ` を送って揃える。
+        `LIMITS` が届かなくても（旧ファームウェア等）通信自体は継続する。
+        """
         self.link.reset_input()
         self.link.send(packets.VersionReq())
+        self.link.send(packets.LimitsReq())
         deadline = time.monotonic() + timeout_s
+        version = None
         while time.monotonic() < deadline:
             for rx in self.link.poll():
                 if self._log is not None:
                     self._log_rx(rx)
                 msg = rx.decode()
                 if isinstance(msg, packets.Version):
+                    version = msg
                     self.state.version = msg
                     self._log_event("handshake", {
                         "protocol_version": msg.protocol_version,
@@ -292,9 +315,19 @@ class IoNode:
                         "match": msg.protocol_version == PROTOCOL_VERSION,
                         "fw_id": msg.fw_id,
                     })
-                    return msg
-        self._log_event("handshake", {"match": False, "reason": "timeout"})
-        return None
+                elif isinstance(msg, packets.Limits):
+                    self.state.limits = msg
+                    self._log_event("limits", {
+                        "max_speed_m_s": msg.max_speed_m_s,
+                        "max_accel_m_s2": msg.max_accel_m_s2,
+                        "max_torque_nm": msg.max_torque_nm,
+                        "max_steer_rad": msg.max_steer_rad,
+                    })
+            if version is not None and self.state.limits is not None:
+                return version
+        if version is None:
+            self._log_event("handshake", {"match": False, "reason": "timeout"})
+        return version
 
     def _log_rx(self, rx) -> None:
         try:
@@ -355,13 +388,28 @@ class IoNode:
 
         **`allow_arm` が False、または `cmd` が古ければ必ず DISARM。**
         分岐をここ1箇所に集めてある（判断が散ると、どこかで解禁されていたが起きる）。
+
+        速度・舵角・加速度・トルクの上限は、STM32 から受け取った `LIMITS`（★v0.11。
+        車両の物理的な上限）を**受信済みなら無条件にそちらを使う**（2026-08-22、GUI
+        側の `effectiveRange()` と方針を合わせた。それまでは `self.max_speed`/
+        `self.max_steer` との小さい方だったが、それだと LIMITS の方が緩い場合に
+        `--max-speed`/`--max-steer` の古い値で頭打ちのままになり、GUI 側が実測値
+        まで見せているのに実車だけ変わらない食い違いが起きるため）。`self.max_speed`/
+        `self.max_steer`（CLI/GUI で設定した値）は **`LIMITS` をまだ受け取っていない
+        間だけ**使うフォールバック。RC（MANUAL）・自律走行（AUTO）どちらの `cmd` も
+        この1箇所を通るため、モードを問わず同じ上限が効く。
         """
         if self.cmd_stale or not self.allow_arm:
             self._send_command_disarm()
             return
+        lim = self.state.limits
+        max_speed = lim.max_speed_m_s if lim else self.max_speed
+        max_steer = lim.max_steer_rad if lim else self.max_steer
         self.link.send(command_from_cmd(
             self.cmd, allow_arm=True,
-            max_speed=self.max_speed, max_steer=self.max_steer))
+            max_speed=max_speed, max_steer=max_steer,
+            max_accel=lim.max_accel_m_s2 if lim else None,
+            max_torque=lim.max_torque_nm if lim else None))
 
     # ── メインループ ──
 
@@ -374,6 +422,7 @@ class IoNode:
         next_linkstats = next_cmd + NS // LINKSTATS_HZ
         next_diag = next_cmd
         next_hb = next_cmd
+        next_limits_retry = next_cmd
         cmd_period = NS // COMMAND_HZ
 
         while self._running:
@@ -385,10 +434,31 @@ class IoNode:
             if self.heartbeat is not None:
                 self.heartbeat.kick()
 
+            had_limits = self.state.limits is not None
             for rx in self.link.poll():
                 if self._log is not None:
                     self._log_rx(rx)
                 self.tracker.feed(rx.rx_ns, rx.type, rx.seq, rx.payload)
+            if self.state.limits is not None and not had_limits:
+                lim = self.state.limits
+                print(f"# STM32 LIMITS 受信（handshake 後の再送で取得）: "
+                      f"速度{lim.max_speed_m_s:.2f}m/s 加速度{lim.max_accel_m_s2:.2f}m/s² "
+                      f"トルク{lim.max_torque_nm:.3f}N·m 舵角±{math.degrees(lim.max_steer_rad):.1f}°",
+                      file=sys.stderr)
+                self._log_event("limits", {
+                    "max_speed_m_s": lim.max_speed_m_s,
+                    "max_accel_m_s2": lim.max_accel_m_s2,
+                    "max_torque_nm": lim.max_torque_nm,
+                    "max_steer_rad": lim.max_steer_rad,
+                    "via": "retry",
+                })
+
+            # `handshake()` が LIMITS を取り損ねていたら定期的に再送する（★v0.11）。
+            # STM32 起動時の3回burstを取り逃した／応答が1回落ちた場合の保険。
+            # 一度受け取れば `state.limits` が埋まるので、以降は送らなくなる
+            if self.state.limits is None and now >= next_limits_retry:
+                self.link.send(packets.LimitsReq())
+                next_limits_retry = now + int(LIMITS_RETRY_S * NS)
 
             self._recv_cmd(now)
 
@@ -472,9 +542,12 @@ def main() -> int:
                     help="★ バスの cmd を実際に STM32 へ通す。"
                          "付けない限り COMMAND は DISARM 固定")
     ap.add_argument("--max-speed", type=float, default=DEFAULT_MAX_SPEED,
-                    help=f"Pi 側の速度クランプ [m/s]（既定 {DEFAULT_MAX_SPEED}）")
+                    help=f"Pi 側の速度クランプ [m/s]（既定 {DEFAULT_MAX_SPEED}）。"
+                         "STM32 から LIMITS を受信済みならそちらが優先されるので、"
+                         "実質的には未接続時のフォールバックにしかならない")
     ap.add_argument("--max-steer", type=float, default=DEFAULT_MAX_STEER,
-                    help=f"Pi 側の舵角クランプ [rad]（既定 {DEFAULT_MAX_STEER}）")
+                    help=f"Pi 側の舵角クランプ [rad]（既定 {DEFAULT_MAX_STEER}）。"
+                         "同上、LIMITS 受信後はそちらが優先される")
     ap.add_argument("--sim", action="store_true",
                     help="UART の相手を Mac 上のシミュレータにする（`sim/` 参照）。"
                          "実機では使わない")
@@ -586,9 +659,24 @@ def main() -> int:
         node.link.send(packets.ConfigGet(param_id=packets.Param.TV_ENABLE))
         node.link.send(packets.ConfigGet(param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE))
 
+    # ★v0.11: 車両の物理的な上限値。RC/AUTO 問わず _send_command が毎回これで
+    # クランプする。受信済みなら無条件にこちらを使う（2026-08-22、--max-speed/
+    # --max-steer との「小さい方」から変更。詳細は _send_command）
+    lim = node.state.limits
+    if lim is not None:
+        print(f"# STM32 上限値(LIMITS): 速度{lim.max_speed_m_s:.2f}m/s "
+              f"加速度{lim.max_accel_m_s2:.2f}m/s² トルク{lim.max_torque_nm:.3f}N·m "
+              f"舵角±{math.degrees(lim.max_steer_rad):.1f}°")
+    else:
+        print("!! LIMITS 応答なし。Pi 側の既定上限（--max-speed/--max-steer）のみでクランプする"
+              "（受信でき次第そちらへ切り替わる）")
+
     if args.allow_arm:
+        eff_speed = lim.max_speed_m_s if lim else args.max_speed
+        eff_steer = lim.max_steer_rad if lim else args.max_steer
+        source = "LIMITS" if lim else f"--max-speed={args.max_speed}/--max-steer={args.max_steer}（未受信のフォールバック）"
         print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")
-        print(f"#     Pi 側クランプ: 速度 ±{args.max_speed} m/s / 舵角 ±{args.max_steer} rad")
+        print(f"#     実効クランプ: 速度 ±{eff_speed:.3f} m/s / 舵角 ±{eff_steer:.3f} rad（出所: {source}）")
         print(f"#     cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら DISARM に落ちる")
         print("#     車輪を浮かせるか、周囲に人と物が無いことを確認すること\n")
     else:
