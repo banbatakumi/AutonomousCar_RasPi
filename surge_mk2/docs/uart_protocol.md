@@ -661,7 +661,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `accel_limit` / `steer_rate_limit` と同じ約束であり、**フィールドの埋め忘れで
   ブレーキが効かなくなる方が危険**なのでゼロ値を安全側に倒してある。
   Pi 側は正の指定が丸めで 0 に落ちないよう最小 1 LSB に留める（`msgs/convert.py`）。
-- STM32 側の上限は **0.125 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM`）。超えた値は
+- STM32 側の上限は **0.15 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM`）。超えた値は
   黙ってクランプされるので、Pi 側でも同じ上限を持つ（`msgs.MAX_BRAKE_TORQUE_NM`）。
 - **`brake` が立っている間、車速 PI ループは完全に迂回される。** v0.4 は「目標車速を 0 に
   する」だけで実際の制動力は PI ゲイン任せだったが、v0.5 は MD を制動モードに切り替えて
@@ -674,7 +674,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `brake_torque` と同じ理由（値域が小さい）で `target_torque` のスケールも 0.0001 N·m/LSB。
 - **`target_torque` に `0` の特別な意味はない。** `brake_torque` の「0=未指定=最大制動」とは
   違い、そのまま「駆動トルク 0」として扱ってよい。丸めで 0 に落ちても危険側には振れない。
-- **上限は 0.125 N·m**（モータ物理上限 0.1557 N·m 未満）。超えた値は STM32 側で
+- **上限は 0.15 N·m**（モータ物理上限 0.1557 N·m 未満）。超えた値は STM32 側で
   クランプされる想定。Pi 側にも同じ上限を持つ（`msgs.MAX_TARGET_TORQUE_NM`）。
 - **`torque_mode` が立っている間、車速 PI ループは `brake` と同様に迂回**し、
   `target_torque` を各輪へ直接掛ける（`target_speed` は無視）。

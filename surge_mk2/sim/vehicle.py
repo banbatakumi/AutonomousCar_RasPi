@@ -86,7 +86,7 @@ class VehicleModel:
 
     #: `brake_torque = 0`（未指定）のときに使う最大制動トルク [N·m]。
     #: `convert.py` の MAX_BRAKE_TORQUE_NM と同値
-    MAX_BRAKE_TORQUE_NM = 0.125
+    MAX_BRAKE_TORQUE_NM = 0.15
 
     def __init__(self, spec: VehicleSpec, start: tuple[float, float, float]) -> None:
         self.spec = spec
