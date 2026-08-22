@@ -15,12 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import msgspec  # noqa: E402
 
 from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
-                        FollowTheGap, FollowTheGapCam, catalog, make_planner)
+                        FollowTheGap, FollowTheGapCam, LineTrace, catalog,
+                        make_planner)
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.disparity_extender import _extend  # noqa: E402
 from raspi.auto.gap_pursuit import _best_band  # noqa: E402
-from raspi.msgs import AutoState, DriveCmd, Scan, VehicleState  # noqa: E402
-from raspi.msgs.types import TOPIC_SCAN, TOPIC_SCAN_CAM  # noqa: E402
+from raspi.msgs import AutoState, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
+from raspi.msgs.types import TOPIC_LINE_CAM, TOPIC_SCAN, TOPIC_SCAN_CAM  # noqa: E402
 
 
 def make_scan(dist_by_deg=None, *, default=3.0, seen=True) -> Scan:
@@ -322,6 +323,81 @@ class TestFollowTheGapCam(unittest.TestCase):
         self.assertTrue(st.reason)
 
 
+class TestLineTrace(unittest.TestCase):
+    """白線の目標点（`LineScan`）を Pure Pursuit で追う。"""
+
+    def setUp(self):
+        self.p = LineTrace()
+        self.params = LineTrace.merged({})
+
+    def plan(self, line, vs=None, dt=0.1, **over):
+        p = {**self.params, **over}
+        return self.p.plan(line, vs, p, dt)
+
+    def test_declares_a_distinct_input_topic(self):
+        self.assertEqual(LineTrace.input_topic, TOPIC_LINE_CAM)
+        self.assertNotEqual(LineTrace.input_topic, TOPIC_SCAN)
+
+    def test_line_straight_ahead_goes_straight(self):
+        line = LineScan(seen=True, far_seen=True, far_x=1.0, far_y=0.0, coverage=0.05)
+        st = self.plan(line)
+        self.assertTrue(st.ready, st.reason)
+        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
+        self.assertGreater(st.target_speed, 0.0)
+
+    def test_line_to_the_left_steers_left(self):
+        """左（y正）にある目標点へは正の舵角（反時計回り正）で向く。"""
+        line = LineScan(seen=True, far_seen=True, far_x=1.0, far_y=0.3, coverage=0.05)
+        st = self.plan(line)
+        self.assertTrue(st.ready, st.reason)
+        self.assertGreater(st.target_steer, 0.0)
+
+    def test_line_to_the_right_steers_right(self):
+        line = LineScan(seen=True, far_seen=True, far_x=1.0, far_y=-0.3, coverage=0.05)
+        st = self.plan(line)
+        self.assertTrue(st.ready, st.reason)
+        self.assertLess(st.target_steer, 0.0)
+
+    def test_falls_back_to_near_point_when_far_is_not_seen(self):
+        line = LineScan(seen=True, near_seen=True, near_x=0.3, near_y=0.1, coverage=0.05)
+        st = self.plan(line)
+        self.assertTrue(st.ready, st.reason)
+        self.assertGreater(st.target_steer, 0.0)
+
+    def test_stops_when_line_is_not_seen(self):
+        line = LineScan(seen=False)
+        st = self.plan(line)
+        self.assertFalse(st.ready)
+        self.assertIn("見失", st.reason)
+        self.assertEqual(st.target_speed, 0.0)
+
+    def test_stops_when_coverage_is_below_minimum(self):
+        """検出はできているが割合が低すぎる（ノイズの疑い）。"""
+        line = LineScan(seen=True, far_seen=True, far_x=1.0, far_y=0.0, coverage=0.001)
+        st = self.plan(line, min_coverage=0.01)
+        self.assertFalse(st.ready)
+
+    def test_speed_never_exceeds_max_speed(self):
+        for y in (-0.3, 0.0, 0.3):
+            st = self.plan(LineScan(seen=True, far_seen=True, far_x=1.0, far_y=y,
+                                    coverage=0.05), max_speed=0.3)
+            self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+    def test_reset_clears_the_steering_state(self):
+        line = LineScan(seen=True, far_seen=True, far_x=1.0, far_y=0.4, coverage=0.05)
+        for _ in range(20):
+            converged = self.plan(line).target_steer
+        self.assertGreater(abs(converged), 0.05)
+        self.p.reset()
+        self.assertLess(abs(self.plan(line).target_steer), abs(converged) * 0.8)
+
+    def test_not_ready_always_carries_a_reason(self):
+        for line in (LineScan(seen=False), LineScan(seen=True, coverage=0.0)):
+            st = self.plan(line)
+            if not st.ready or st.brake:
+                self.assertTrue(st.reason)
+
+
 class TestDisparityExtender(unittest.TestCase):
     """**FTG と同じ安全条件を満たしたうえで、狙点が「一番遠く」になること。**"""
 
@@ -606,6 +682,10 @@ class TestRegistry(unittest.TestCase):
         """`ftg_cam` が 1 ファイル＋1 行の追加だけで GUI の選択肢に出る。"""
         self.assertIn("ftg_cam", PLANNERS)
         self.assertIsInstance(make_planner("ftg_cam"), FollowTheGapCam)
+
+    def test_line_trace_planner_is_registered(self):
+        self.assertIn("line_trace", PLANNERS)
+        self.assertIsInstance(make_planner("line_trace"), LineTrace)
 
 
 class FakeSub:

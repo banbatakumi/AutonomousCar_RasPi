@@ -36,8 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.cleanup import quiet_close  # noqa: E402
+from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import ImageRef, Scan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
@@ -56,8 +55,6 @@ NS = 1_000_000_000
 HB_HZ = 10
 #: `dist` に絶対に置かない値（契約1）
 _MIN_DIST = 0.01
-#: 共有メモリの write_seq がこれ以上ズレたら作り直されたとみなす（`core/jpeg.py` と同じ流儀）
-_STALE_GAP = 1000
 
 
 class SegmentationModel:
@@ -139,14 +136,10 @@ class CamPerceptionNode:
         #: カメラの実視野に入る `sector_seen` の添字。**この外は常に False**
         self._sectors = sorted({sector_of_deg(int(d) % 360) for d in self._degs})
 
-        self._ring: FrameRing | None = None
-        self._ring_name = ""
+        self._reader = FrameReader()
 
     def close(self) -> None:
-        if self._ring is not None:
-            with quiet_close("cam_perception のフレームリング"):
-                self._ring.close()
-            self._ring = None
+        self._reader.close()
 
     # ── 1周期ぶんの処理（純粋関数。バスを知らない） ──
 
@@ -192,39 +185,11 @@ class CamPerceptionNode:
         """フレームが読めない／推論が失敗した周期。**契約2＝全セクタ壁扱い。**"""
         return Scan(dist=[0.0] * 360, sector_seen=[False] * 12, seq=seq)
 
-    # ── 共有メモリの読み取り（`raspi/core/jpeg.py` の掴み直しと同じ作法） ──
+    # ── 共有メモリの読み取り（`raspi/core/frame_reader.py` に委譲） ──
 
     def read_frame(self, ref: ImageRef) -> tuple[np.ndarray, int] | None:
-        """`ref` が指す共有メモリから最新フレームを読む。読めなければ `None`。
-
-        画素を使い終わってから `still_valid()` を確認する（seqlock）。
-        **例外は投げない**——1周期読めなくても `failed_frame()` に落ちて
-        続行できるようにする。
-        """
-        try:
-            if self._ring is not None and ref.shm_name != self._ring_name:
-                self.close()
-            if self._ring is None:
-                self._ring = FrameRing.attach(ref.shm_name)
-                self._ring_name = ref.shm_name
-            elif abs(ref.ring_seq - self._ring.write_seq) > _STALE_GAP:
-                # 掴んでいるのは作り直される前の共有メモリ（`core/jpeg.py` と同じ検出）
-                self.close()
-                self._ring = FrameRing.attach(ref.shm_name)
-                self._ring_name = ref.shm_name
-
-            frame_ref = self._ring.latest()
-            if frame_ref is None:
-                return None
-            arr = frame_ref.as_array().copy()      # 推論中ずっと保持するのでコピーする
-            t_capture = frame_ref.desc.t_capture_ns
-            ok = frame_ref.still_valid()
-            if not ok:
-                return None
-            return arr, t_capture
-        except Exception:
-            self.close()
-            return None
+        """`ref` が指す共有メモリから最新フレームを読む。読めなければ `None`。"""
+        return self._reader.read(ref)
 
     # ── ループ（実バス配線） ──
 

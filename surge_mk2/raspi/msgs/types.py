@@ -30,9 +30,9 @@ from __future__ import annotations
 import msgspec
 
 __all__ = [
-    "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
+    "MsgBase", "VehicleState", "Scan", "LineScan", "DriveCmd", "LinkDiag", "ImageRef",
     "Heartbeat", "AutoCtrl", "AutoState", "AutoMap", "UiEvent",
-    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_CMD",
+    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM", "TOPIC_CMD",
     "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
@@ -50,6 +50,9 @@ TOPIC_SCAN = "scan"
 #: （`planning_node.py` が `cmd`/`auto/cmd` を分けた理由と同じ）。
 #: 型は `Scan` をそのまま使う（専用の CamScan 型は作らない）
 TOPIC_SCAN_CAM = "scan/cam"
+#: カメラで検出した白線の目標点（`line_perception_node.py` が publish）。
+#: 型は `Scan`（距離配列）とは形が違うので専用の `LineScan` を使う
+TOPIC_LINE_CAM = "line/cam"
 TOPIC_CMD = "cmd"
 TOPIC_DIAG_LINK = "diag/link"
 TOPIC_IMAGE_FRONT = "image/front"
@@ -187,6 +190,32 @@ class Scan(MsgBase):
     #: ここを実測点として地図に打つと実在しない壁が円状に生成される
     saturated: list[bool] | None = None
     lidar_format: int = 0                  #: 0=通常 1=強度付き 2=圧縮
+
+
+class LineScan(MsgBase):
+    """前方カメラで検出した白線1本ぶん。`line_perception_node.py` が publish する。
+
+    白線の画素を画面下寄り（近傍）・中央寄り（遠方）の2つの帯で検出し、
+    それぞれの重心を `raspi.nav.ipm.pixel_to_ground()` で地面座標（base_link
+    基準）へ逆投影した2点として持つ。**Pure Pursuit の目標点そのものの形**
+    （原点から見た方位と距離だけで舵角が決まる）にしてあるので、
+    `raspi/auto/line_trace.py` は `follow_the_gap.py` と同じ
+    `nav.purepursuit.steer_for_target()` をそのまま使える。
+
+    `Scan`（距離配列）とは形が違う情報のため専用の型にしてある
+    （`follow_the_gap_cam.py` が `Scan` を再利用できたのとは対照的）。
+    """
+
+    seen: bool = False              #: 近傍・遠方いずれかの帯で白線を検出できたか
+    near_seen: bool = False
+    far_seen: bool = False
+    near_x: float = 0.0             #: [m] base_link 座標。近傍帯の白線重心
+    near_y: float = 0.0
+    far_x: float = 0.0              #: [m] 遠方帯の白線重心
+    far_y: float = 0.0
+    #: ROI（近傍・遠方の帯）内で白と判定された画素の割合の最大値 [0..1]。
+    #: 低いのに走っているなら疑う（`follow_the_gap.py` の `valid_ratio` と同じ扱い）
+    coverage: float = 0.0
 
 
 class DriveCmd(MsgBase):
@@ -475,6 +504,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_VEHICLE_STATE: VehicleState,
     TOPIC_SCAN: Scan,
     TOPIC_SCAN_CAM: Scan,
+    TOPIC_LINE_CAM: LineScan,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,
     TOPIC_IMAGE_FRONT: ImageRef,

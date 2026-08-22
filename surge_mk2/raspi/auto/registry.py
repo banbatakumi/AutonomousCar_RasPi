@@ -19,6 +19,7 @@ from .disparity_extender import DisparityExtender
 from .follow_the_gap import FollowTheGap
 from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
+from .line_trace import LineTrace
 from .raceline import RaceLine
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
@@ -30,6 +31,7 @@ PLANNERS: dict[str, type[Planner]] = {
     DisparityExtender.id: DisparityExtender,
     DisparityPursuit.id: DisparityPursuit,
     RaceLine.id: RaceLine,
+    LineTrace.id: LineTrace,
 }
 
 
