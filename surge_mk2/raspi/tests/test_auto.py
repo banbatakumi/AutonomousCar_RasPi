@@ -15,11 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import msgspec  # noqa: E402
 
 from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
-                        FollowTheGap, catalog, make_planner)
+                        FollowTheGap, FollowTheGapCam, catalog, make_planner)
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.disparity_extender import _extend  # noqa: E402
 from raspi.auto.gap_pursuit import _best_band  # noqa: E402
 from raspi.msgs import AutoState, DriveCmd, Scan, VehicleState  # noqa: E402
+from raspi.msgs.types import TOPIC_SCAN, TOPIC_SCAN_CAM  # noqa: E402
 
 
 def make_scan(dist_by_deg=None, *, default=3.0, seen=True) -> Scan:
@@ -44,6 +45,24 @@ def offset_gap(center_deg: int, half_width: int, *, wall=1.0, open_dist=5.0) -> 
     for deg in range(center_deg - half_width, center_deg + half_width + 1):
         dist[deg % 360] = open_dist
     return Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
+
+
+def camera_scan(fov_deg: int, *, wall=0.5, open_dist=5.0, open_within=None) -> Scan:
+    """**カメラの視野（±`fov_deg`/2）だけが見えている**点群。
+
+    LiDAR 用の `corridor()`/`offset_gap()` は `sector_seen=[True]*12`（全周が
+    見えている）前提だが、カメラは実視野の外を一切受信できない。その外側の
+    セクタを `sector_seen=False` にして、`FollowTheGapCam` が本当に
+    「カメラが見えている範囲だけ」で判断できることを試す。
+    """
+    half = fov_deg // 2
+    open_half = (fov_deg if open_within is None else open_within) // 2
+    dist = [wall] * 360
+    for deg in range(-open_half, open_half + 1):
+        dist[deg % 360] = open_dist
+    visible = {sector_of_deg(d % 360) for d in range(-half, half + 1)}
+    sector_seen = [s in visible for s in range(12)]
+    return Scan(dist=dist, sector_seen=sector_seen, rot_speed_dps=3600.0)
 
 
 class TestSectorMapping(unittest.TestCase):
@@ -247,6 +266,60 @@ class TestFollowTheGap(unittest.TestCase):
         for open_dist in (0.5, 1.0, 2.0, 5.0):
             st = self.plan(corridor(120, open_dist=open_dist), max_speed=0.3)
             self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+
+class TestFollowTheGapCam(unittest.TestCase):
+    """カメラ由来の擬似スキャンでも `FollowTheGap` のロジックがそのまま動くこと。
+
+    `follow_the_gap_cam.py` は `plan()` を一切上書きしていない——それ自体が
+    設計の核心（`raspi/nav/ipm.py`・`cam_perception_node.py` が作る）なので、
+    ここでまず**同じ関数であること**を直接確認してから、実際にカメラの
+    実視野しか見えていない点群で動くことを試す。
+    """
+
+    def test_plan_is_not_overridden(self):
+        """`FollowTheGapCam` はギャップ探索を1行も書いていない証明。"""
+        self.assertIs(FollowTheGapCam.plan, FollowTheGap.plan)
+
+    def test_declares_a_distinct_input_topic_and_staleness(self):
+        self.assertEqual(FollowTheGapCam.input_topic, TOPIC_SCAN_CAM)
+        self.assertNotEqual(FollowTheGapCam.input_topic, FollowTheGap.input_topic)
+        self.assertEqual(FollowTheGap.input_topic, TOPIC_SCAN)
+        self.assertGreater(FollowTheGapCam.stale_ms, FollowTheGap.stale_ms)
+
+    def test_only_fov_deg_param_differs_from_follow_the_gap(self):
+        """`fov_deg` の範囲/既定値だけをカメラの実視野に合わせて狭めている。"""
+        base = {s.key: s for s in FollowTheGap.params}
+        cam = {s.key: s for s in FollowTheGapCam.params}
+        self.assertEqual(set(base), set(cam), "パラメータの構成が変わっている")
+        for key in base:
+            if key == "fov_deg":
+                self.assertNotEqual(cam[key].default, base[key].default)
+                self.assertLessEqual(cam[key].max, base[key].max)
+            else:
+                self.assertEqual(cam[key], base[key], f"{key} が無断で変わっている")
+
+    def test_drives_using_only_the_camera_fov(self):
+        """視野の外（`sector_seen=False`）が壁として扱われても、視野内の
+        隙間だけで普通に走り出す（LiDAR 版と同じ安全側の読み方を継承）。"""
+        p = FollowTheGapCam()
+        params = FollowTheGapCam.merged({})
+        scan = camera_scan(int(params["fov_deg"]))
+        st = p.plan(scan, None, params, 0.1)
+        self.assertTrue(st.ready, st.reason)
+        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
+        self.assertGreater(st.target_speed, 0.0)
+
+    def test_stops_when_camera_fov_is_too_narrow_to_see_enough(self):
+        """視野の大半が `sector_seen=False` なら、LiDAR 版と同じ
+        `MIN_SEEN_RATIO` の下限に引っかかって止まる（＝カメラの推論が
+        止まった／未起動のフレームを「壁」として安全側に倒す設計の確認）。"""
+        p = FollowTheGapCam()
+        params = FollowTheGapCam.merged({"fov_deg": 60})
+        scan = Scan(dist=[5.0] * 360, sector_seen=[False] * 12)
+        st = p.plan(scan, None, params, 0.1)
+        self.assertFalse(st.ready)
+        self.assertTrue(st.reason)
 
 
 class TestDisparityExtender(unittest.TestCase):
@@ -528,6 +601,11 @@ class TestRegistry(unittest.TestCase):
         self.assertIsNone(make_planner("no-such-mode"))
         self.assertIsNone(make_planner(""))
         self.assertIsInstance(make_planner("ftg"), FollowTheGap)
+
+    def test_camera_planner_is_registered(self):
+        """`ftg_cam` が 1 ファイル＋1 行の追加だけで GUI の選択肢に出る。"""
+        self.assertIn("ftg_cam", PLANNERS)
+        self.assertIsInstance(make_planner("ftg_cam"), FollowTheGapCam)
 
 
 class FakeSub:

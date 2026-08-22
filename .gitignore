@@ -22,6 +22,15 @@ logs/*.jsonl
 saved_maps/*.npz
 saved_maps/*.json
 
+# ml/（カメラセグメンテーションのオフライン学習パイプライン）の生成物・大容量ファイル
+# 走行データ・アノテーション・学習済み重みは機体/走行ごとに違い、しかも大きい
+surge_mk2/ml/data/        # 抽出フレーム・マスク・manifest.csv
+surge_mk2/ml/runs/        # チェックポイント(.pt)・ONNX書き出し・学習ログ
+# SAM のチェックポイント（`ml/annotate.py` が使う、数百MB〜数GB）。
+# ダウンロード先はどこでも良いのでリポジトリ全体で除外する
+sam_*.pth
+*.pth
+
 # OS
 .DS_Store
 Thumbs.db

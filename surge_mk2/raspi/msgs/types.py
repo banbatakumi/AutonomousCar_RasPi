@@ -32,7 +32,8 @@ import msgspec
 __all__ = [
     "MsgBase", "VehicleState", "Scan", "DriveCmd", "LinkDiag", "ImageRef",
     "Heartbeat", "AutoCtrl", "AutoState", "AutoMap", "UiEvent",
-    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_CMD", "TOPIC_DIAG_LINK",
+    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_CMD",
+    "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "TOPIC_UI_EVENT",
@@ -43,6 +44,12 @@ __all__ = [
 #: `/` で階層にする。購読は前方一致なので `image/` で両カメラを取れる
 TOPIC_VEHICLE_STATE = "vehicle_state"
 TOPIC_SCAN = "scan"
+#: カメラ由来の擬似 `Scan`（`cam_perception_node.py` が publish）。
+#: **`scan`（実 LiDAR）とは別トピックにしてある。** 同じトピックに2つの
+#: publisher が出すと、どちらが勝つか購読側から区別できなくなる
+#: （`planning_node.py` が `cmd`/`auto/cmd` を分けた理由と同じ）。
+#: 型は `Scan` をそのまま使う（専用の CamScan 型は作らない）
+TOPIC_SCAN_CAM = "scan/cam"
 TOPIC_CMD = "cmd"
 TOPIC_DIAG_LINK = "diag/link"
 TOPIC_IMAGE_FRONT = "image/front"
@@ -467,6 +474,7 @@ class UiEvent(MsgBase):
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_VEHICLE_STATE: VehicleState,
     TOPIC_SCAN: Scan,
+    TOPIC_SCAN_CAM: Scan,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,
     TOPIC_IMAGE_FRONT: ImageRef,

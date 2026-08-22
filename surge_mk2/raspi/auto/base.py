@@ -28,7 +28,7 @@ from typing import NamedTuple
 
 import msgspec
 
-from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
+from ..msgs.types import TOPIC_SCAN, AutoMap, AutoState, Scan, VehicleState
 
 __all__ = ["ParamSpec", "Planner", "ScanWindow", "min_filter", "scan_window",
            "sector_of_deg", "wrap_deg"]
@@ -63,6 +63,15 @@ class Planner:
     name: str = ""                         #: GUI のボタンに出る名前
     description: str = ""                  #: 1行の説明。GUI の選択肢の下に出る
     params: tuple[ParamSpec, ...] = ()
+    #: `plan()` の第一引数に何を渡すか。**既定は実 LiDAR の `scan`。**
+    #: カメラ由来の擬似スキャンで走る planner（`follow_the_gap_cam.py` 等）だけが
+    #: ここを上書きする。既存 planner はこの属性の存在を意識しなくてよい
+    #: （`planning_node.py` がここを見て購読トピックを組み立てる）
+    input_topic: str = TOPIC_SCAN
+    #: `input_topic` の鮮度上限 [ms]。これより古ければ制動に読み替える
+    #: （`planning_node.py` の `_current()`）。**LiDAR の 10Hz を前提にした値が
+    #: 既定なので、ケイデンスが違うセンサの planner は上書きすること**
+    stale_ms: int = 300
 
     def reset(self) -> None:
         """内部状態を捨てる。**モード切替・disengage のたびに呼ばれる。**"""

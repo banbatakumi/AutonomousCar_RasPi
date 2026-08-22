@@ -37,6 +37,8 @@ from . import centerline, obstacles
 from .centerline import Centerline
 from .deskew import Points, deskew
 from .grid import OccGrid, dilate, pack_trinary
+from .ipm import (CameraExtrinsics, CameraIntrinsics, camera_intrinsics,
+                  ground_to_pixel, pixel_to_ground, project_mask_to_grid)
 from .obstacles import Obstacle
 from .purepursuit import Pursuit, PursuitConfig, follow
 from .raceline import RaceLine, optimize
@@ -44,6 +46,8 @@ from .scanmatch import MatchResult, match
 from .slam import Slam, SlamConfig, SlamUpdate
 
 __all__ = [
+    "CameraExtrinsics",
+    "CameraIntrinsics",
     "Centerline",
     "MatchResult",
     "Obstacle",
@@ -55,12 +59,16 @@ __all__ = [
     "Slam",
     "SlamConfig",
     "SlamUpdate",
+    "camera_intrinsics",
     "centerline",
     "deskew",
     "dilate",
     "follow",
+    "ground_to_pixel",
     "match",
     "obstacles",
     "optimize",
     "pack_trinary",
+    "pixel_to_ground",
+    "project_mask_to_grid",
 ]

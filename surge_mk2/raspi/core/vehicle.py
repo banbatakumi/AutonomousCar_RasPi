@@ -48,6 +48,21 @@ class Vehicle:
     #: ScalerCrop が実際の読み出しに反映する）。GUI の進路ガイドの主点補正にも使う
     cam_front_bottom_crop: float = 0.0
     cam_rear_bottom_crop: float = 0.0
+    #: カメラの取付位置・姿勢・画角。**IPM（`raspi/nav/ipm.py`）と `CameraView.tsx` の
+    #: 進路ガイドが同じ値を見る。** `pitch` は下向きが正（`vehicle.toml` の注記どおり）で、
+    #: 取り付け角度そのもの。走行中の車体姿勢ぶんは `vs.pitch`（IMU実測）で別途補正する
+    cam_front_x: float = 0.097
+    cam_front_y: float = 0.0
+    cam_front_z: float = 0.09
+    cam_front_pitch: float = 0.0           #: [rad] 下向きが正
+    cam_front_yaw: float = 0.0             #: [rad]
+    cam_front_hfov: float = 1.152          #: [rad]
+    cam_rear_x: float = 0.044
+    cam_rear_y: float = 0.0
+    cam_rear_z: float = 0.09
+    cam_rear_pitch: float = 0.0
+    cam_rear_yaw: float = 3.14159265
+    cam_rear_hfov: float = 1.152
     #: 操舵のむだ時間と1次遅れ [s]。Pure Pursuit の遅延補償の既定値になる
     dead_time_s: float = 0.030
     tau_steer_s: float = 0.12
@@ -111,6 +126,18 @@ class Vehicle:
             lidar_yaw=float(lidar.get("yaw", 0.0)),
             cam_front_bottom_crop=float(cam_front.get("bottom_crop", 0.0)),
             cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
+            cam_front_x=float(cam_front.get("x", 0.097)),
+            cam_front_y=float(cam_front.get("y", 0.0)),
+            cam_front_z=float(cam_front.get("z", 0.09)),
+            cam_front_pitch=float(cam_front.get("pitch", 0.0)),
+            cam_front_yaw=float(cam_front.get("yaw", 0.0)),
+            cam_front_hfov=float(cam_front.get("hfov", 1.152)),
+            cam_rear_x=float(cam_rear.get("x", 0.044)),
+            cam_rear_y=float(cam_rear.get("y", 0.0)),
+            cam_rear_z=float(cam_rear.get("z", 0.09)),
+            cam_rear_pitch=float(cam_rear.get("pitch", 0.0)),
+            cam_rear_yaw=float(cam_rear.get("yaw", 3.14159265)),
+            cam_rear_hfov=float(cam_rear.get("hfov", 1.152)),
             dead_time_s=float(dyn.get("dead_time_s", 0.030)),
             tau_steer_s=float(dyn.get("tau_steer_s", 0.12)),
             cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),

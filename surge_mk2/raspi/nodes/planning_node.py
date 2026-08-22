@@ -4,7 +4,9 @@
     .venv/bin/python -m raspi.nodes.planning_node --mode ftg   # 起動時のモードを指定
     .venv/bin/python -m raspi.nodes.planning_node --quiet
 
-- **購読**: `scan`・`vehicle_state`・`auto/ctrl`（どのモードで走るかの意思）
+- **購読**: `vehicle_state`・`auto/ctrl`（どのモードで走るかの意思）・
+  登録されている全 planner の `input_topic`（既定 `scan`。カメラ系 planner は
+  `scan/cam` を使う。`input_topics()` が和集合を作る）
 - **発行**: `auto/cmd`（走行指令）・`auto/state`（判断の根拠）・
   `auto/map`（地図と経路。**変わったときだけ**）・`hb/planning`
 
@@ -34,10 +36,12 @@ telemetry_node も 50Hz で `cmd`（操縦者不在なら DISARM）を流して�
 このとき `auto/cmd` は `mode=DISARM` / `arm=False` / 速度 0 で出る。
 中継側でも engage を確認しているので**二重に閉じている**。
 
-## 計画は点群が来たときだけ
+## 計画は入力が来たときだけ
 
-`scan` は 10Hz、`auto/cmd` の発行は 50Hz。同じ点群で 5 回計算しても答えは
-変わらないので、**新しい周が来たときだけ** planner を回して結果を保持する。
+`scan`（LiDAR）は 10Hz、`auto/cmd` の発行は 50Hz。同じ周で 5 回計算しても
+答えは変わらないので、**新しい周が来たときだけ** planner を回して結果を
+保持する（どのトピックが「入力」かは `Planner.input_topic` が決める。
+カメラ系 planner なら `scan/cam` のケイデンスがこれに当たる）。
 """
 
 from __future__ import annotations
@@ -60,11 +64,10 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_HB_PREFIX,
-    TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
 
-__all__ = ["PlanningNode"]
+__all__ = ["PlanningNode", "input_topics"]
 
 NS = 1_000_000_000
 #: `auto/cmd` の発行レート。**telemetry_node の `CMD_PUB_HZ` と揃える**
@@ -72,8 +75,19 @@ CMD_HZ = 50
 #: `auto/state` の発行レート。点群が 10Hz なのでそれ以上出しても同じ絵になる
 STATE_HZ = 10
 HB_HZ = 10
-#: 点群がこれより古ければ計画を捨てて停止する。**10Hz に対して 3 周ぶんの猶予**
-SCAN_STALE_NS = 300 * 1_000_000
+
+
+def input_topics() -> set[str]:
+    """登録されている全 planner が使う `input_topic` の和集合。
+
+    **`Subscriber` は購読するトピック集合をコンストラクタ時に固定する**
+    （後から `add_topic()` する口が無い）ので、GUI でモードを切り替えた瞬間に
+    そのトピックが未購読、という事態を避けるには起動時に全部読んでおく必要がある。
+    LiDAR 系 planner しか無かった今までは `scan` 1つで足りていたが、
+    カメラ系 planner（`follow_the_gap_cam.py`）が初めてそれ以外を使う
+    （`raspi/auto/base.py` の `Planner.input_topic`）。
+    """
+    return {cls.input_topic for cls in PLANNERS.values()}
 
 
 class PlanningNode:
@@ -148,8 +162,10 @@ class PlanningNode:
     # ── 計画 ──
 
     def _replan(self, now_ns: int) -> None:
-        scan = self.sub.latest.get(TOPIC_SCAN)
-        if scan is None or self.planner is None:
+        if self.planner is None:
+            return
+        scan = self.sub.latest.get(self.planner.input_topic)
+        if scan is None:
             return
         if scan.seq == self._last_scan_seq:
             return                          # 同じ周。計算しても答えは変わらない
@@ -180,15 +196,15 @@ class PlanningNode:
         直前の判断が残り続ける。ここで鮮度を見て制動に読み替える。
         """
         st = self.state
-        scan = self.sub.latest.get(TOPIC_SCAN)
         if self.planner is None:
             return AutoState(mode=self.ctrl.mode, engaged=self.ctrl.engaged,
                              reason="モードが選ばれていない")
+        scan = self.sub.latest.get(self.planner.input_topic)
         if scan is None:
             return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                              engaged=self.ctrl.engaged, reason="点群がまだ届いていない")
         age = now_ns - scan.t_pub
-        if age > SCAN_STALE_NS:
+        if age > self.planner.stale_ms * 1_000_000:
             return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                              engaged=self.ctrl.engaged,
                              scan_age_ms=age / 1e6, plan_hz=self._plan_hz,
@@ -301,8 +317,9 @@ def main() -> int:
         return 2
 
     pub = Publisher("planning")
-    sub = Subscriber({TOPIC_SCAN: LATEST, TOPIC_VEHICLE_STATE: LATEST,
-                      TOPIC_AUTO_CTRL: LATEST})
+    topics = {TOPIC_VEHICLE_STATE: LATEST, TOPIC_AUTO_CTRL: LATEST}
+    topics.update({t: LATEST for t in input_topics()})
+    sub = Subscriber(topics)
     node = PlanningNode(pub=pub, sub=sub, mode=args.mode, quiet=args.quiet)
 
     if not args.quiet:

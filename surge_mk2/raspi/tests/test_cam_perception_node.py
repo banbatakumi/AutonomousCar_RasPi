@@ -1,0 +1,164 @@
+"""`raspi/nodes/cam_perception_node.py` の配線テスト。
+
+**実モデル・実カメラは要らない。** ダミーの ONNX モデル（1オペレータだけの
+恒等/閾値モデル）で、フレーム読み取り→前処理→推論→IPM→raycast→`Scan`化
+という配管全体が壊れずに流れることだけを確認する（計画の構築順序 6番）。
+推論の精度は問わない——それは実データが要る領域（`ml/`）の仕事。
+"""
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import numpy as np  # noqa: E402
+import onnx  # noqa: E402
+from onnx import TensorProto, helper  # noqa: E402
+
+from raspi.bus import FrameRing  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
+from raspi.msgs import ImageRef  # noqa: E402
+from raspi.nodes.cam_perception_node import (  # noqa: E402
+    CamPerceptionNode,
+    SegmentationModel,
+)
+
+
+def _make_dummy_model(path: Path, h: int, w: int) -> None:
+    """RGB 3チャンネルの平均を取るだけの ONNX モデル。**1オペレータ。**
+
+    前処理で `(pixel - mean) / std` に正規化した入力を渡すので、出力は
+    そのまま「明るいほど 1 に近い」確率マップになる——推論そのものの
+    正しさは問わず、配管が通ることだけを確認したいのでこれで十分。
+    """
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, h, w])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, h, w])
+    node = helper.make_node("ReduceMean", ["input"], ["output"], axes=[1], keepdims=1)
+    graph = helper.make_graph([node], "dummy", [inp], [out])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
+class TestSegmentationModel(unittest.TestCase):
+    def test_bright_region_is_drivable_dark_region_is_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "dummy.onnx"
+            _make_dummy_model(model_path, 32, 32)
+            model = SegmentationModel(str(model_path), input_size=(32, 32),
+                                      mean=0.0, std=255.0, threshold=0.5)
+
+            frame = np.full((240, 320, 3), 255, dtype=np.uint8)   # 全面「走行可能」
+            frame[100:180, 100:220] = 0                          # 暗い矩形＝障害物
+
+            mask = model.infer(frame)
+            self.assertEqual(mask.shape, (32, 32))
+            # リサイズ後もおおむね中央付近が暗い（障害物）はず
+            self.assertFalse(bool(mask[16, 16]))
+            self.assertTrue(bool(mask[2, 2]))                    # 端は明るいまま
+
+
+class TestCamPerceptionNodeProcessFrame(unittest.TestCase):
+    def setUp(self):
+        # `tearDown` まで実体を残すため `with` を使わず自前で閉じる
+        self._tmp = tempfile.TemporaryDirectory()
+        self.model_path = Path(self._tmp.name) / "dummy.onnx"
+        _make_dummy_model(self.model_path, 64, 64)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_returns_scan_shaped_message_with_camera_fov_only(self):
+        model = SegmentationModel(str(self.model_path), input_size=(64, 64),
+                                  mean=0.0, std=255.0, threshold=0.5)
+        node = CamPerceptionNode(model=model, vehicle=Vehicle.load(), fov_deg=60.0,
+                                 max_range=3.0, grid_resolution=0.05, grid_size_m=6.0)
+
+        frame = np.full((240, 320, 3), 255, dtype=np.uint8)      # 全面「走行可能」
+        st = node.process_frame(frame, seq=7)
+
+        self.assertEqual(len(st.dist), 360)
+        self.assertEqual(st.seq, 7)
+        # カメラ視野の外は常に sector_seen=False（契約2）
+        visible = {i for i, s in enumerate(st.sector_seen) if s}
+        self.assertLess(len(visible), 12, "視野外まで見えている扱いになっている")
+        self.assertGreater(len(visible), 0, "視野内が1セクタも見えていない")
+        # 全面「走行可能」なら、視野内の距離は 0.0 に張り付かない（契約1）
+        for deg in range(-25, 26):
+            self.assertGreater(st.dist[deg % 360], 0.0)
+
+    def test_a_dark_region_shortens_distance_in_that_direction(self):
+        """暗い矩形（障害物）を置いた方向だけ距離が縮むこと。"""
+        model = SegmentationModel(str(self.model_path), input_size=(64, 64),
+                                  mean=0.0, std=255.0, threshold=0.5)
+        node = CamPerceptionNode(model=model, vehicle=Vehicle.load(), fov_deg=60.0,
+                                 max_range=3.0, grid_resolution=0.05, grid_size_m=6.0)
+
+        open_frame = np.full((240, 320, 3), 255, dtype=np.uint8)
+        blocked_frame = open_frame.copy()
+        blocked_frame[140:200, 130:190] = 0                      # 画面下寄り中央＝正面近く
+
+        st_open = node.process_frame(open_frame, seq=1)
+        st_blocked = node.process_frame(blocked_frame, seq=2)
+
+        self.assertLess(st_blocked.dist[0], st_open.dist[0],
+                        "障害物を置いても正面方向の距離が縮まなかった")
+
+    def test_failed_frame_marks_everything_unseen(self):
+        model = SegmentationModel(str(self.model_path), input_size=(64, 64))
+        node = CamPerceptionNode(model=model, vehicle=Vehicle.load())
+        st = node.failed_frame(seq=3)
+        self.assertEqual(st.sector_seen, [False] * 12)
+        self.assertEqual(st.seq, 3)
+
+
+class TestReadFrame(unittest.TestCase):
+    """`FrameRing` からの読み取り（`raspi/core/jpeg.py` と同じ掴み直しの作法）。"""
+
+    def test_reads_back_a_written_frame(self):
+        model_dir = tempfile.TemporaryDirectory()
+        try:
+            model_path = Path(model_dir.name) / "dummy.onnx"
+            _make_dummy_model(model_path, 8, 8)
+            model = SegmentationModel(str(model_path), input_size=(8, 8))
+            node = CamPerceptionNode(model=model, vehicle=Vehicle.load())
+
+            ring = FrameRing.create("surge_test_cam_perception", 16, 12, "RGB888",
+                                    n_slots=4)
+            try:
+                data = np.zeros((12, 16, 3), dtype=np.uint8)
+                data[..., 0] = 42
+                desc = ring.write(data, t_capture_ns=123456789, frame_id=1)
+                ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                               frame_id=desc.frame_id, width=desc.width,
+                               height=desc.height, fmt=desc.fmt, stride=desc.stride,
+                               nbytes=desc.nbytes, cam="front")
+
+                got = node.read_frame(ref)
+                self.assertIsNotNone(got)
+                arr, t_capture = got
+                self.assertTrue(np.array_equal(arr, data))
+                self.assertEqual(t_capture, 123456789)
+            finally:
+                node.close()
+                ring.unlink()
+        finally:
+            model_dir.cleanup()
+
+    def test_missing_shm_returns_none_instead_of_raising(self):
+        model_dir = tempfile.TemporaryDirectory()
+        try:
+            model_path = Path(model_dir.name) / "dummy.onnx"
+            _make_dummy_model(model_path, 8, 8)
+            model = SegmentationModel(str(model_path), input_size=(8, 8))
+            node = CamPerceptionNode(model=model, vehicle=Vehicle.load())
+            ref = ImageRef(shm_name="surge_does_not_exist", ring_seq=1)
+            self.assertIsNone(node.read_frame(ref))
+        finally:
+            model_dir.cleanup()
+
+
+if __name__ == "__main__":
+    unittest.main()

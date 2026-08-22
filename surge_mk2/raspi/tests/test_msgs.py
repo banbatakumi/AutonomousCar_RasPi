@@ -424,6 +424,15 @@ class TestTopicRegistry(unittest.TestCase):
         self.assertIs(type_for_topic("image/rear"), ImageRef)
         self.assertIs(type_for_topic("hb/io"), Heartbeat)
 
+    def test_scan_cam_reuses_scan_type(self):
+        """`scan/cam`（カメラ由来の擬似スキャン）は `Scan` 型を使い回す。
+
+        専用の CamScan 型は作らない（`AutoState`/GUI が無改造で動く前提）。
+        """
+        from raspi.msgs import Scan
+
+        self.assertIs(type_for_topic("scan/cam"), Scan)
+
     def test_unknown_topic_raises(self):
         """型が分からないまま dict で流すと、フィールド名の typo が実行時まで残る。"""
         with self.assertRaises(KeyError):
