@@ -10,7 +10,7 @@
     ③ 安全バブル             最近傍の点の周りを「侵入禁止」で塗り潰す
     ④ ギャップ探索           gap_min[m] 以上が続く最長の区間を選ぶ
     ⑤ 狙点                   その区間の**真ん中**を向く
-    ⑥ 速度                   正面の余裕と舵角の大きさで落とす
+    ⑥ 速度                   正面の余裕と、実際に切る舵から求めた曲率で落とす
 
 ⑤ を「区間の中で一番遠い点」にする流儀もある。**真ん中を採っている**のは、
 一番遠い点を狙うと壁際すれすれを縫う挙動になり、車幅ぶんの余裕が無い
@@ -39,6 +39,21 @@
 （`min(奥行き, look_k·v + look_min)`）。見えている範囲より先を目標点にしない
 ため。`_longest_run()` が選ぶ区間は既に `gap_min` 以上なので、この上限が
 効くのは高速で `look_k·v + look_min` が奥行きを超えるような場合だけ。
+
+## 速度は「正面の余裕」と「曲率」の両方で頭打ちにする
+
+正面の余裕（`free_ahead`）による減速は従来通り。★ それとは別に、実際に切る
+舵角から円運動の曲率 `κ = tan(δ)/L` を求め、横加速度制限
+`v ≤ sqrt(a_lat_max/κ)` を速度のもう一つの上限にする（`DisparityPursuit`
+の②と同じ式・同じ理由。`auto/gap_pursuit.py` の docstring 参照）。
+
+**以前はここが `turn_slow`（舵角いっぱいで一律 x% 減速）という発見的な調整
+だった。** 緩いカーブもきついカーブも同じ割合でしか区別できず、`turn_slow`
+の意味も車体（ホイールベース・最大舵角）や `a_lat` の実測値と無関係だった。
+曲率ベースにすると、緩い旋回は落としすぎず、きつい旋回は物理的な根拠がある
+分だけ確実に落ちる。κ は**クランプ後の `target`**（平滑化前）から求める。
+舵が頭打ちのときでも実際に描く円弧に対して正しく、しかも平滑化の遅れぶん
+速度側は先回りして落ちる（安全側）。
 
 ## 前処理（②）は `base.scan_window()` にある
 
@@ -110,9 +125,11 @@ class FollowTheGap(Planner):
         ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
                   default=0.50, unit="rad",
                   note="★io_node の --max-steer を超えても切り捨てられるだけ"),
-        ParamSpec(key="turn_slow", label="旋回時の減速", min=0.0, max=1.0, step=0.05,
-                  default=0.50, unit="",
-                  note="舵角いっぱいで速度をこの割合ぶん落とす。1.0 で全舵時に停止"),
+        ParamSpec(key="a_lat_max", label="旋回時の横加速度上限", min=0.5, max=8.0, step=0.1,
+                  default=3.0, unit="m/s²",
+                  note="★実車未計測の暫定値。実際に切る舵角から曲率 κ=tan(δ)/L を求め、"
+                       "v ≤ sqrt(これ/κ) で速度を抑える（`DisparityPursuit` と同じ式）。"
+                       "上げるほど旋回中に速度が残るが横滑りしやすくなる"),
         ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
                   default=0.10, unit="s",
                   note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが反応が鈍る"),
@@ -237,13 +254,17 @@ class FollowTheGap(Planner):
 
         ratio = min(1.0, (st.free_ahead - stop_d) / (slow_d - stop_d))
         v = v_min + (v_max - v_min) * ratio
-        turn = abs(st.target_steer) / max_steer if max_steer > 0 else 0.0
-        v *= 1.0 - p["turn_slow"] * min(1.0, turn)
-        st.target_speed = max(0.0, v)
+
+        # 曲率ベースの物理的な上限。実際に切る舵角（クランプ後の `target`。
+        # 平滑化前）から曲率を求め、円運動の横加速度制限で頭打ちにする
+        # （`DisparityPursuit` の②と同じ式。`gap_pursuit.py` の docstring）
+        kappa = abs(math.tan(target) / self.vehicle.wheelbase)
+        v_curve = math.sqrt(p["a_lat_max"] / kappa) if kappa > 1e-6 else math.inf
+        st.target_speed = max(v_min, min(v, v_curve, v_max))
 
         width = degs[b] - degs[a]
         st.reason = (f"{mid:+.0f}° のギャップ（幅 {width:.0f}°）へ・"
-                     f"正面 {st.free_ahead:.2f}m")
+                     f"正面 {st.free_ahead:.2f}m・曲率制限 {min(v_curve, v_max):.2f}m/s")
         return st
 
 
