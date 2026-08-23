@@ -71,7 +71,7 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 #: ノードごとに1本の endpoint を bind する。**トピックごとではない。**
 #: PUB を1プロセス1本にしておくと、購読側は接続先が固定されて配線が単純になる
 _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
-                  "test": 5579}
+                  "cam_perception": 5574, "line_perception": 5575, "test": 5579}
 
 #: トピック → どのノードが publish するか
 #:
@@ -80,6 +80,13 @@ _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
 #: 2つのノードが同じ `cmd` に publish すると、購読側からは区別できないまま
 #: 50Hz で交互に上書きし合い、「勝手にハンドルが戻る」という再現困難な症状になる
 #: （`docs/architecture.md` §7.4 / `telemetry_node` の `_cmd_pump`）。
+#:
+#: ★ **完全一致で先に引けるキーを持たせること。** 前方一致フォールバック
+#: （`endpoints_for_topic()` 参照）は辞書の並び順に依存する上、
+#: `"scan/cam"` が `"scan"` の前方一致に誤って拾われ `cam_perception` ではなく
+#: `io` に解決される、という事故が実際に起きた（2026-08-23、`scan/cam` が
+#: 常に空のまま `ftg_cam` が動かなかった）。新しいトピックを足すときは、
+#: 既存キーの前方一致に誤って拾われないか必ず確認すること
 TOPIC_OWNER: dict[str, str] = {
     "vehicle_state": "io",
     "scan": "io",
@@ -94,6 +101,8 @@ TOPIC_OWNER: dict[str, str] = {
     "image/": "camera",
     "image/front": "camera",
     "image/rear": "camera",
+    "scan/cam": "cam_perception",
+    "line/cam": "line_perception",
 }
 
 
@@ -119,7 +128,9 @@ def endpoints_for_topic(topic: str) -> list[str]:
     `hb/` は全ノードが publish するので全 endpoint に繋ぐ。
     """
     if topic.startswith("hb/") or topic == "hb/":
-        return [endpoint_for_node(n) for n in ("io", "camera", "control", "planning")]
+        return [endpoint_for_node(n) for n in
+                ("io", "camera", "control", "planning",
+                 "cam_perception", "line_perception")]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）

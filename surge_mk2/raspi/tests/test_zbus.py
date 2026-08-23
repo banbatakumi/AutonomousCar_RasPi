@@ -181,5 +181,41 @@ class TestPubSub(BusCase):
             Subscriber(["mystery"])
 
 
+class TestTopicOwner(unittest.TestCase):
+    """★ `TOPIC_OWNER` の登録漏れ・前方一致の事故を防ぐ。
+
+    `planning_node.main()` は登録されている**全** planner の `input_topic` を
+    起動時にまとめて購読する（`input_topics()`）。ここに登録の無いトピックが
+    1つでもあると `Subscriber.__init__` が `KeyError` で落ち、**存在する
+    planner を選ばなくても** planning_node そのものが起動しない。実際に
+    `line_trace`（`line/cam`）を `raspi/auto/registry.py` に足したときに
+    `raspi/bus/zbus.py` の `TOPIC_OWNER` を更新し忘れて、`sim.run` の起動時に
+    再現した（2026-08-23）。
+    """
+
+    def test_every_registered_planner_input_topic_has_an_owner(self):
+        from raspi.auto import PLANNERS
+        from raspi.bus.zbus import endpoints_for_topic
+
+        for cls in PLANNERS.values():
+            with self.subTest(planner=cls.id, topic=cls.input_topic):
+                endpoints_for_topic(cls.input_topic)   # 例外が出ないこと
+
+    def test_scan_cam_is_not_swallowed_by_the_scan_prefix(self):
+        """`"scan/cam"` は `"scan"` の前方一致フォールバックに拾われてはいけない。
+
+        両方とも辞書に**完全一致キー**として存在すべきで、`"scan/cam"` を
+        引いたときに `"scan"`（io ノード）の endpoint が返ってきたら事故
+        （`cam_perception_node` の配信が誰にも届かない、が例外にはならず
+        `ftg_cam` が「動くのにデータが来ない」という気づきにくい壊れ方をする）。
+        """
+        from raspi.bus.zbus import endpoint_for_node, endpoints_for_topic
+
+        self.assertEqual(endpoints_for_topic("scan/cam"),
+                         [endpoint_for_node("cam_perception")])
+        self.assertEqual(endpoints_for_topic("scan"),
+                         [endpoint_for_node("io")])
+
+
 if __name__ == "__main__":
     unittest.main()
