@@ -20,6 +20,52 @@
 中心線を「壁からの距離が極大になる尾根」として求める手もあるが、厳密な EDT は
 400×400 で数百 ms 掛かり、近似すると 2 割近い誤差が出る。**法線方向にレイを
 撃って測る方が直接的で速く、`scipy` も要らない。**
+
+## ★ 壁の小さな穴が中心線を暴れさせる
+
+`measure()` のレイは `OccGrid.raycast()`（既定 `fill=1` セルまで穴を埋める）を
+使うが、それでも埋め切れない穴（数セル分、`min_hits` を満たせなかった箇所。
+`raspi/nav/grid.py` の `_END_BACKOFF` docstring 参照）を抜けると、**本来の
+壁ではなく奥の別の壁**に当たり、その1点だけ幅が数十cm〜`max_width`へ跳ね上がる。
+
+`build()` の反復は「幅の中間へ寄せる」ので、この1点の異常値をそのまま使うと
+**その1点だけ大きく横へ飛ぶ**（GUI で中心線が局所的に暴れて見える症状）。
+しかも異常に測った幅がそのまま `w_left`/`w_right` として `nav/raceline.py` の
+最適化に渡ると、**壁の穴の分だけ実際には無い余白がある**とレーシングラインが
+誤認し、そこだけ壁側へ寄った経路を引きかねない。
+
+そこで**近傍の中央値より明らかに大きい値だけ**を中央値へクランプする
+（`_declutter()`）。**小さい方へは倒さない**——本当に道が狭い場所を
+誤って広げるのは避けたいので、「穴を抜けて広く見えすぎた」側だけを直す。
+これは穴そのものを塞ぐわけではない（`raycast` の結果はそのまま）ので、
+コース出口のような**本物の広い区間**は連続して広いままで中央値も高く保たれ、
+クランプされない。
+
+## ★★ ヘアピン・シケインでは「穴」が無くても暴れる（知覚エイリアシング）
+
+`_declutter()` は**孤立した1点の異常値**には効くが、`fuji` コース（急な
+0.5m 半径のシケイン区間）を `sim.bench` で実測したところ、**穴が1つも
+無くても**その区間だけ幅の測定が数点にわたって暴れることを確認した
+（例: `left/right` が `0.63/1.73 → 0.43/1.63 → 2.41/0.04 → 2.26/1.95`
+と隣接点ごとに大きく反転）。近傍の複数点が同時に暴れるので、中央値
+そのものが汚染されて `_declutter()` では捉えられない。
+
+原因は穴ではなく**法線方向の推定の脆さ**。急カーブでは中央差分
+（`tangents()`）で作る接ベクトルがわずかに傾いただけで、その法線が
+本来の壁（数十cm先）ではなく**通路に沿って何mも先**まで抜けてしまう
+（浅い角度でレイが壁を舐める、`nav/grid.py` の `_END_BACKOFF` と同じ
+現象が中心線側でも起きる）。シケインでは通路の先が別の区間（あるいは
+反対側の壁）なので、抜けた先で拾う距離が点ごとにばらつき、幅が
+無関係な値へ跳ねる。
+
+これを幅の異常値検出だけで直すのは筋が悪い（何が「正しい壁」かを
+区別する情報が無い）。代わりに**1回の反復で動かせる量に上限を掛ける**
+（`_MAX_SHIFT_M`）。1回の測定がどれだけ暴れても、中心線の点が
+一気に1m以上テレポートすることはなくなり、`iters` 回の反復で
+（暴れが収まった後続の測定に助けられながら）緩やかに真ん中へ寄っていく。
+GUI で見えた「点線が一直線に飛ぶ」症状は主にこのテレポートが原因なので、
+これで大幅に緩和されるはず——ただし**急カーブ内の測定精度そのものが
+上がるわけではない**（下記「未解決」参照）。
 """
 
 from __future__ import annotations
@@ -113,19 +159,55 @@ def normals(xy: np.ndarray) -> np.ndarray:
     return np.column_stack([-t[:, 1], t[:, 0]])
 
 
+#: `_declutter()` の窓幅 [点]。奇数。step=0.10m なら 0.5m ぶんの近傍を見る
+_SPIKE_WINDOW = 5
+#: 近傍の中央値よりこれ以上大きければ「穴を抜けた」とみなす [m]
+_SPIKE_JUMP = 0.5
+#: `build()` の反復1回で動かしてよい量の上限 [m]（上の docstring「ヘアピン・
+#: シケインでは穴が無くても暴れる」参照）。**小さくしすぎない**——本当に
+#: 中心へ寄せたい量（道幅のズレの半分、数十cm）まで削ると収束しない
+_MAX_SHIFT_M = 0.15
+
+
+def _median_filter_loop(x: np.ndarray, k: int) -> np.ndarray:
+    """巡回配列の移動中央値。"""
+    n = len(x)
+    if n < k:
+        return x.copy()
+    pad = k // 2
+    wrapped = np.concatenate([x[-pad:], x, x[:pad]])
+    windows = np.lib.stride_tricks.sliding_window_view(wrapped, k)
+    return np.median(windows, axis=1)
+
+
+def _declutter(width: np.ndarray) -> np.ndarray:
+    """近傍の中央値より明らかに大きい値だけを中央値へクランプする（上の docstring）。"""
+    if len(width) < _SPIKE_WINDOW:
+        return width
+    med = _median_filter_loop(width, _SPIKE_WINDOW)
+    spike = width > med + _SPIKE_JUMP
+    out = width.copy()
+    out[spike] = med[spike]
+    return out
+
+
 def measure(grid: OccGrid, xy: np.ndarray, nrm: np.ndarray,
             max_width: float) -> tuple[np.ndarray, np.ndarray]:
     """各点から左右の壁までの距離 [m]。**壁の穴は `raycast` が塞いでくれる。**
 
     左右 2N 本を**一度に**撃つ。点ごとに呼ぶと 278 点で 130ms 掛かり、
     BUILD 段の予算（1周期 15ms）を1発で使い切る。
+
+    塞ぎ切れなかった穴を抜けて奥の壁を拾った異常値は `_declutter()` で
+    近傍の中央値へクランプする（上の docstring「壁の小さな穴が中心線を
+    暴れさせる」）。
     """
     ang = np.arctan2(nrm[:, 1], nrm[:, 0])
     both = grid.raycast(np.concatenate([xy[:, 0], xy[:, 0]]),
                         np.concatenate([xy[:, 1], xy[:, 1]]),
                         np.concatenate([ang, ang + np.pi]), max_width)
     n = len(xy)
-    return both[:n], both[n:]
+    return _declutter(both[:n]), _declutter(both[n:])
 
 
 def lateral_offset(cl: Centerline, xy: np.ndarray) -> np.ndarray:
@@ -156,8 +238,13 @@ def build(grid: OccGrid, traj: np.ndarray, *, step: float = 0.10,
     nrm = normals(xy)
     left, right = measure(grid, xy, nrm, max_width)
     for _ in range(max(0, iters - 1)):
-        # 左右の壁の真ん中へ寄せる。**寄せてから測り直す**ことで法線の傾きも直る
-        xy = xy + nrm * ((left - right) / 2.0)[:, None]
+        # 左右の壁の真ん中へ寄せる。**寄せてから測り直す**ことで法線の傾きも直る。
+        # ★ 1回で動かす量は `_MAX_SHIFT_M` に上限を掛ける——急カーブで法線が
+        # 通路の先まで抜けた1回の暴れが、そのまま1m以上のテレポートに
+        # ならないようにする（上の docstring「ヘアピン・シケインでは穴が
+        # 無くても暴れる」参照）
+        shift = np.clip((left - right) / 2.0, -_MAX_SHIFT_M, _MAX_SHIFT_M)
+        xy = xy + nrm * shift[:, None]
         xy = smooth_loop(resample_loop(xy, step), smooth)
         nrm = normals(xy)
         left, right = measure(grid, xy, nrm, max_width)
