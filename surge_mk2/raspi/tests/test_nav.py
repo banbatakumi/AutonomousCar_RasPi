@@ -26,7 +26,7 @@ from raspi.msgs import Scan  # noqa: E402
 from raspi.nav import OccGrid, deskew, match  # noqa: E402
 from raspi.nav.deskew import _point_times_ns, integrate_pose  # noqa: E402
 from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, dilate  # noqa: E402
-from raspi.nav.slam import Slam, SlamConfig  # noqa: E402
+from raspi.nav.slam import Slam, SlamConfig, _blend_xy  # noqa: E402
 
 NS = 1_000_000_000
 
@@ -461,6 +461,41 @@ class TestSlam(unittest.TestCase):
             self.slam.update(scan, 0.1, yaw_rate=0.0, speed=0.5)
         dt_ms = (time.perf_counter() - t0) / 5 * 1000
         self.assertLess(dt_ms, 50.0, f"1周期 {dt_ms:.1f}ms は遅すぎる")
+
+
+class TestBlendXY(unittest.TestCase):
+    """★ 補正の異方性（`SlamConfig.match_gain_fwd_ratio`）。
+
+    oval が「渦巻き」になった原因は、進行方向（corridor problem で観測でき
+    ない方向）にまで横方向と同じ強さで補正を混ぜていたこと
+    （`docs/progress_archive.md`「oval が渦巻きになる」節）。**横方向は強く、
+    進行方向は弱く**寄せることを直接確かめる。
+    """
+
+    def test_lateral_residual_is_pulled_at_gain_lat(self):
+        """真横（進行方向に対して垂直）のズレは `gain_lat` で満額寄る。"""
+        # 進行方向 = +x（yaw=0）。マッチは +y 側に 1m ズレた答え → 横方向のみ
+        nx, ny = _blend_xy(0.0, 0.0, 0.0, 0.0, 1.0, gain_lat=0.5, gain_fwd=0.0)
+        self.assertAlmostEqual(nx, 0.0)
+        self.assertAlmostEqual(ny, 0.5)
+
+    def test_forward_residual_is_damped(self):
+        """真正面（進行方向）のズレは `gain_fwd` だけ寄り、`gain_lat` より弱い。"""
+        nx, ny = _blend_xy(0.0, 0.0, 0.0, 1.0, 0.0, gain_lat=0.5, gain_fwd=0.1)
+        self.assertAlmostEqual(nx, 0.1)
+        self.assertAlmostEqual(ny, 0.0)
+
+    def test_decomposition_rotates_with_heading(self):
+        """yaw=90° なら「進行方向」は世界座標の +y になる。"""
+        nx, ny = _blend_xy(0.0, 0.0, math.pi / 2, 0.0, 1.0,
+                            gain_lat=0.5, gain_fwd=0.1)
+        self.assertAlmostEqual(nx, 0.0)
+        self.assertAlmostEqual(ny, 0.1)
+
+    def test_zero_residual_does_not_move(self):
+        nx, ny = _blend_xy(1.0, 2.0, 0.3, 1.0, 2.0, gain_lat=0.5, gain_fwd=0.1)
+        self.assertAlmostEqual(nx, 1.0)
+        self.assertAlmostEqual(ny, 2.0)
 
 
 def _wrap(a: float) -> float:

@@ -188,6 +188,17 @@ RELOC_STAGES: tuple[Stage, ...] = (
     Stage(0.02, 0.005, math.radians(1.0), math.radians(0.2)),
 )
 
+#: `close_loop()` 専用の探索範囲。**`RELOC_STAGES` より広く取ってよい**——
+#: 見失い復帰は毎周期の予算（10Hz）を食うが、ループ閉じは1周に1回しか
+#: 呼ばれないので余裕がある。周回ごとに `close_loop()` を呼ぶようになった
+#: （`raspi/auto/raceline.py`）ことで1回ぶんのドリフトは 20〜30cm 程度に
+#: 収まる想定だが、実車のジャイロ・LiDAR ノイズは未確認のため余裕を持たせる
+LOOP_CLOSE_STAGES: tuple[Stage, ...] = (
+    Stage(0.60, 0.10, math.radians(20.0), math.radians(5.0)),
+    Stage(0.10, 0.03, math.radians(5.0), math.radians(1.0)),
+    Stage(0.02, 0.005, math.radians(1.0), math.radians(0.2)),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SlamConfig:
@@ -250,6 +261,24 @@ class SlamConfig:
     #: 弱いままだと走行中に自己位置がじわじわ流れ、動的障害物の判定
     #: （壁から 15cm 以内は無視）が誤検出だらけになる
     match_gain_frozen: float = 0.5
+    #: `match_gain`（横方向）に対する**進行方向**の寄せ方の比率。0〜1。
+    #:
+    #: ★ **等方的に寄せると oval のような角の無いループで位置推定が回転する。**
+    #: 進行方向の位置は直線区間では点群から決まらない（corridor problem、上の
+    #: docstring）。それでもマッチは候補ごとの得点差（ノイズで ±0.001 程度）で
+    #: 最大値を選ぶので、その「意味の無い差」を横方向と同じ強さで採用すると、
+    #: 毎周期ランダムな向きへ滑り、角が無いコースでは1方向へ蓄積して全体が
+    #: コース中心まわりに回転する（実測: 前後誤差 ÷ 向き誤差[rad] がコースの
+    #: 実効半径と一致。`docs/progress_archive.md`「oval が渦巻きになる」節）。
+    #: そこでマッチの答えを**進行方向・横方向に分解**し、信用できる横方向は
+    #: そのまま、信用できない進行方向はこの比率だけ弱めて混ぜる。
+    #:
+    #: 0 にしないのは、コーナーでは進行方向にも壁からの情報が実在するため
+    #: （四方を囲む壁の曲率が付けば、そこだけ進行方向も観測できる）。
+    #:
+    #: ★★ **未検証。** 上のシム実測はすべて旧（等方的）実装のもの。
+    #: この値を含む異方性の効果は `sim.bench` で再確認してから信じること
+    match_gain_fwd_ratio: float = 0.3
     lidar_x: float = 0.0                   #: LiDAR の取付位置 [m]（base_link 基準）
     lidar_y: float = 0.0
 
@@ -329,7 +358,8 @@ class Slam:
         return len(self._frames)
 
     def close_loop(self, pts: Points | None = None, *,
-                   max_residual: float = 1.0) -> float:
+                   max_residual: float = 1.0,
+                   stages: tuple[Stage, ...] = LOOP_CLOSE_STAGES) -> float:
         """1周ぶんの誤差を軌跡へ配り、**地図を焼き直す**（上の docstring）。
 
         :param pts: 今の点群。**これを地図に照合して残差を測る。** 省略すると
@@ -346,7 +376,7 @@ class Slam:
 
         # ★ 今どこに居るかを**地図に聞く**。広く探すのは、1周ぶんのドリフトが
         #   通常の探索範囲（±8cm）より大きいことが普通だから
-        fix = match(self.grid, pts, self.pose, stages=RELOC_STAGES, prior_w=0.0)
+        fix = match(self.grid, pts, self.pose, stages=stages, prior_w=0.0)
         if not fix.searched or fix.score < self.cfg.min_score:
             return 0.0
         ex, ey = fix.x - self.x, fix.y - self.y
@@ -482,8 +512,8 @@ class Slam:
             # 凍結後は地図を汚す心配が無いので強く寄せる
             g = (self.cfg.match_gain_frozen if self.grid.frozen
                  else self.cfg.match_gain)
-            nx = gx + g * (m.x - gx)
-            ny = gy + g * (m.y - gy)
+            nx, ny = _blend_xy(gx, gy, gyaw, m.x, m.y,
+                               g, g * self.cfg.match_gain_fwd_ratio)
             nyaw = gyaw + g * _wrap(m.yaw - gyaw)
 
         # ── 速度の更新。**次の周期の初期値がこれで決まる** ──
@@ -562,3 +592,25 @@ class Slam:
 
 def _wrap(a: float) -> float:
     return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _blend_xy(gx: float, gy: float, gyaw: float, mx: float, my: float,
+              gain_lat: float, gain_fwd: float) -> tuple[float, float]:
+    """マッチの答え `(mx, my)` を予測 `(gx, gy)` へ**異方的に**混ぜる。
+
+    残差を進行方向（`gyaw` 向き）と横方向に分解し、別々の利得で寄せてから
+    世界座標へ戻す。**横方向（壁との距離）は観測できるので `gain_lat` で
+    素直に寄せ、進行方向（corridor problem で観測できない）は `gain_fwd`
+    で弱める。** 等方的な利得だと、この「決まらない方向」にまで補正が
+    漏れて蓄積し、角の無いループ（oval）で位置推定全体が回転する
+    （`SlamConfig.match_gain_fwd_ratio` の docstring 参照）。
+    """
+    c, s = math.cos(gyaw), math.sin(gyaw)
+    ex, ey = mx - gx, my - gy
+    e_fwd = ex * c + ey * s
+    e_lat = -ex * s + ey * c
+    corr_fwd = gain_fwd * e_fwd
+    corr_lat = gain_lat * e_lat
+    nx = gx + corr_fwd * c - corr_lat * s
+    ny = gy + corr_fwd * s + corr_lat * c
+    return nx, ny

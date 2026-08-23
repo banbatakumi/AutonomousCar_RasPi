@@ -107,6 +107,33 @@ class TestStateMachine(unittest.TestCase):
         self.assertEqual(self.p.phase, EXPLORE)
         self.assertEqual(self.p.laps, 0)
 
+    def test_close_loop_runs_on_every_lap_not_only_the_last(self):
+        """★ 2周目まで待たず、周回を検出するたびに `close_loop()` を呼ぶ。
+
+        以前は `laps >= explore_laps` のときしか周回終了と判定せず、
+        `close_loop()` も同じ条件でしか呼ばれなかった。`explore_laps=2` だと
+        1周目のループ閉じが永遠に走らず、2周ぶんのドリフトを貯めてから
+        1回だけ閉じることになり、oval コースの地図が「渦巻き」になっていた
+        （`docs/progress_archive.md`「oval が渦巻きになる」節）。
+        """
+        self.drive(6, move=0.02)
+        calls = []
+        orig = self.p.slam.close_loop
+        self.p.slam.close_loop = lambda *a, **k: calls.append(1) or orig(*a, **k)
+
+        # 1周目だけ検出（探索そのものはまだ終わらない）→ BUILD へは行かない
+        self.p._check_lap = lambda p: (True, False)
+        st = self.drive(1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(st.phase, EXPLORE)
+        self.assertEqual(self.p.phase, EXPLORE)
+
+        # 最終周（探索終了）→ BUILD へ。この周のループ閉じも呼ばれる
+        self.p._check_lap = lambda p: (True, True)
+        st = self.drive(1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(st.phase, BUILD)
+
     def test_manual_freeze_moves_to_build(self):
         """「地図を確定」は**自動判定の逃げ道**。押したら次の周期で BUILD。"""
         self.drive(14, move=0.02)
@@ -162,6 +189,30 @@ class TestStateMachine(unittest.TestCase):
             self.p.plan(make_room_scan(3.0 + 0.02 * _, 2.0, 0.0),
                         vs(yaw_rate=0.2, speed=0.2), self.params, 0.1)
         self.assertGreater(self.p.slam.gyro_updates, 0)
+
+    def test_lidar_only_hides_the_gyro_and_speed_from_slam(self):
+        """★ `lidar_only=1` なら、ジャイロ/`speed` が来ていても SLAM には渡さない。
+
+        IMU/オドメトリへの依存を切り分ける実験用トグル。ジャイロが実際に
+        使われたかは `Slam.gyro_updates` に出る（`test_gyro_is_used` の逆）。
+        """
+        params = RaceLine.merged({"lidar_only": 1})
+        for i in range(5):
+            self.p.plan(make_room_scan(3.0 + 0.02 * i, 2.0, 0.0),
+                        vs(yaw_rate=0.2, speed=0.2), params, 0.1)
+        self.assertEqual(self.p.slam.gyro_updates, 0)
+
+    def test_lidar_only_switches_on_scan_to_scan(self):
+        """`lidar_only` はジャイロ/`speed` を隠すだけでなく、そのぶんの動き推定を
+        `scan_to_scan`（LiDAR 同士の直接照合）に肩代わりさせる。"""
+        self.assertFalse(self.p.slam.cfg.scan_to_scan)
+        self.p.plan(make_room_scan(3.0, 2.0, 0.0), vs(speed=0.2),
+                    RaceLine.merged({"lidar_only": 1}), 0.1)
+        self.assertTrue(self.p.slam.cfg.scan_to_scan)
+
+        self.p.plan(make_room_scan(3.02, 2.0, 0.0), vs(speed=0.2),
+                    RaceLine.merged({"lidar_only": 0}), 0.1)
+        self.assertFalse(self.p.slam.cfg.scan_to_scan)
 
     def test_plan_stays_within_the_cycle_budget(self):
         """1周期が長すぎると `auto/cmd` が途絶し、中継側が制動に落とす。

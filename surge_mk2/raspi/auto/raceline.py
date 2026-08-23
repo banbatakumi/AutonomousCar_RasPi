@@ -48,6 +48,7 @@ Phase 4（大域経路計画 + 経路追従）。**アルゴリズムは `raspi/
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -106,6 +107,15 @@ class RaceLine(Planner):
     description = "LiDAR で地図を作り、アウトインアウトの経路を引いて周回する"
 
     params = (
+        # ── 自己位置推定 ──
+        ParamSpec(key="lidar_only", label="LiDARのみで自己位置推定", min=0, max=1,
+                  step=1, default=0, unit="",
+                  note="★実験用。1にすると、ジャイロと`speed`（車輪由来）を"
+                       "SLAMの入力から外し、スキャン同士の直接照合（scan_to_scan、"
+                       "`nav/scan2scan.py`）だけで1周期ぶんの動きを推定する。"
+                       "IMU/オドメトリへの依存度を切り分けたいときに使う。"
+                       "既定0（ジャイロ+speedを使う、通常の動作）"),
+
         # ── 地図を作る周（EXPLORE） ──
         ParamSpec(key="explore_laps", label="地図を作る周回数", min=1, max=4, step=1,
                   default=2, unit="周",
@@ -196,6 +206,10 @@ class RaceLine(Planner):
         self.slam = Slam(SlamConfig(
             resolution=MAP_RES, size_m=MAP_SIZE_M,
             lidar_x=self.vehicle.lidar_x, lidar_y=self.vehicle.lidar_y))
+        #: `self.slam.cfg.scan_to_scan` の現在値の写し。**`reset()` では触らない**
+        #: （`Slam.reset()` は姿勢と地図だけを消し `cfg` はそのまま残るので、ここも
+        #: 一緒に消すと「パラメータは変わっていないのに `cfg` だけ古くなる」事故になる）
+        self._lidar_only = False
         self.reset()
 
     # ── 状態 ──
@@ -249,9 +263,22 @@ class RaceLine(Planner):
             st.reason = "車両状態がまだ届いていない"
             return st
 
-        # ★ 回頭は**ジャイロ**、前進は `speed`（射影済み・ローパス済みの値）。
-        #   `wheel_speed[]` は低速でばたつくので渡してはいけない（`nav/slam.py`）
-        u = self.slam.update(scan, dt, yaw_rate=vs.yaw_rate, speed=vs.speed)
+        # ★ `lidar_only` が立っていれば、ジャイロと `speed` を SLAM から隠す。
+        #   `Slam.update()` は `None` を渡されると自分の前回推定（等速度モデル）で
+        #   代用しつつ、`scan_to_scan`（LiDAR のスキャン同士の直接照合。
+        #   `nav/scan2scan.py`）で動きを磨く。IMU/オドメトリへの依存を切り分ける
+        #   実験用の入口（`raspi/nav/slam.py` の `SlamConfig.scan_to_scan` docstring）
+        lidar_only = bool(p.get("lidar_only", 0.0))
+        if lidar_only != self._lidar_only:
+            self._lidar_only = lidar_only
+            self.slam.cfg = replace(self.slam.cfg, scan_to_scan=lidar_only)
+
+        if lidar_only:
+            u = self.slam.update(scan, dt, yaw_rate=None, speed=None)
+        else:
+            # ★ 回頭は**ジャイロ**、前進は `speed`（射影済み・ローパス済みの値）。
+            #   `wheel_speed[]` は低速でばたつくので渡してはいけない（`nav/slam.py`）
+            u = self.slam.update(scan, dt, yaw_rate=vs.yaw_rate, speed=vs.speed)
         st.pose_x, st.pose_y, st.pose_yaw = u.x, u.y, u.yaw
         st.match_score = u.score
         st.lap_progress = self.slam.lap_progress()
@@ -267,19 +294,28 @@ class RaceLine(Planner):
 
     def _explore(self, st: AutoState, scan: Scan, vs: VehicleState,
                  p: dict[str, float], dt: float, lost: bool) -> AutoState:
-        if self._lap_ready(p):
-            # **凍結する前にループを閉じる。** 1周ぶんの誤差を軌跡へ配って
-            # 地図を焼き直す（`nav/slam.py`）。ここでやらないと、2周目の壁が
-            # 1周目とずれたまま確定してしまう
+        lap_msg = ""
+        lap_done, explore_done = self._check_lap(p)
+        if lap_done:
+            # **凍結する前に、この周のループを閉じる。** 1周ぶんの誤差を軌跡へ
+            # 配って地図を焼き直す（`nav/slam.py`）。★ 以前は `explore_laps` の
+            # 最終周でしか呼んでおらず、2周目以降の壁が前の周とずれたまま
+            # 積み上がって oval が「渦巻き」になっていた（docs/progress_archive.md
+            # 「oval が渦巻きになる」節）。**周回を検出するたび**に閉じることで
+            # 毎回のドリフトを1周ぶん（20〜30cm程度）に抑える
             residual = self.slam.close_loop(self.slam.last_points)
-            self.slam.freeze()
-            self.phase = st.phase = BUILD
-            self._build_step = 0
-            st.reason = (f"地図を確定した（1周の残差 {residual * 100:.0f}cm を"
-                         f"配って焼き直し）。経路を作っている"
-                         if residual > 0 else
-                         "地図を確定した（残差を測れず、焼き直しは省略）。経路を作っている")
-            return st
+            if explore_done:
+                self.slam.freeze()
+                self.phase = st.phase = BUILD
+                self._build_step = 0
+                st.reason = (f"地図を確定した（最終周の残差 {residual * 100:.0f}cm を"
+                             f"配って焼き直し）。経路を作っている"
+                             if residual > 0 else
+                             "地図を確定した（残差を測れず、焼き直しは省略）。経路を作っている")
+                return st
+            lap_msg = (f"{self.laps}周目のループを閉じた（残差 {residual * 100:.0f}cm）"
+                       if residual > 0 else
+                       f"{self.laps}周目のループを閉じた（残差を測れず継続）")
 
         # 走らせるのは Follow the Gap。**狭い車線に効く4つだけ差し替える**
         # （残りは FTG の既定値。全部をここに並べるとスライダが倍になる）
@@ -314,19 +350,26 @@ class RaceLine(Planner):
         if lost:
             # 地図は汚していない（`Slam.update`）。走りは FTG のままでよい
             st.reason = f"{head}・自己位置を見失っている"
+        elif lap_msg:
+            st.reason = f"{head}・{lap_msg}"
         else:
             st.reason = f"{head}・{sub.reason}"
         return st
 
-    def _lap_ready(self, p: dict[str, float]) -> bool:
-        """周回が終わったか。**主判定は累積回頭**（`nav/slam.py` の docstring）。"""
+    def _check_lap(self, p: dict[str, float]) -> tuple[bool, bool]:
+        """周回が終わったか。**主判定は累積回頭**（`nav/slam.py` の docstring）。
+
+        :returns: `(この周が終わったか, 探索そのものが終わったか)`。
+            前者が `True` のときは毎回 `close_loop()` を呼ぶこと。後者は
+            `explore_laps` に達した（＝ BUILD へ移ってよい）ときだけ `True`
+        """
         if self._freeze_requested:
             self._freeze_requested = False
             self._lap_idx.append(len(self.slam.trajectory))
             self.laps = max(1, self.laps)
-            return True
+            return True, True
         if not self.slam.trajectory:
-            return False
+            return False, False
 
         want = int(p["explore_laps"])
         target = self.laps + 1
@@ -335,12 +378,12 @@ class RaceLine(Planner):
               and self._near_start())
         self._lap_hits = self._lap_hits + 1 if ok else 0
         if self._lap_hits < LAP_CONFIRM:
-            return False
+            return False, False
 
         self._lap_hits = 0
         self.laps += 1
         self._lap_idx.append(len(self.slam.trajectory))
-        return self.laps >= want
+        return True, self.laps >= want
 
     def _near_start(self) -> bool:
         sx, sy, syaw = self.slam.trajectory[0]
