@@ -5,7 +5,7 @@
  */
 import { create } from 'zustand'
 import { live } from '../bus/live'
-import type { AutoStatus, ControlStatus, FanStatus, LogFile } from '../types'
+import type { AutoStatus, CameraConfigStatus, ControlStatus, FanStatus, LogFile } from '../types'
 import { VEHICLE } from '../generated/vehicle'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
@@ -448,6 +448,13 @@ type UiState = {
    */
   fan: FanStatus | null
 
+  /**
+   * capture側(camera_node)のFPS上限・後方カメラON/OFF・GUI配信頻度。
+   * **サーバが真値なのでここでは編集しない。** 押した結果は `status` の
+   * ブロードキャストで返ってくる（`ws/control.ts` の `setCamera`）。
+   */
+  cameraConfig: CameraConfigStatus | null
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -497,6 +504,7 @@ export const useUi = create<UiState>((set, get) => ({
   logFiles: [],
   auto: null,
   fan: null,
+  cameraConfig: null,
 
   set: (p) => set(p),
   setSettings: (p) => {

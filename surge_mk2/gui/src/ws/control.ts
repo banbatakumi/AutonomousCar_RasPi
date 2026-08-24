@@ -166,6 +166,28 @@ export class ControlChannel {
     this.send({ type: 'tc_tv', ...p })
   }
 
+  // ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
+
+  /**
+   * capture側(camera_node)のFPS上限・後方カメラの取得ON/OFF・GUIへのJPEG配信頻度。
+   * `fan`/`tc_tv` と同じく状態はサーバが真値。**4つとも省略できる**（送った項目だけ効く）。
+   *
+   * `frontCapHz` は目安の上限にすぎない——カメラを使う自動運転モード
+   * （`line_trace`/`ftg_cam`）が engage されている間は、サーバ側がこれを無視して
+   * 上限まで引き上げる（`status.camera_config.auto_override` で分かる）。
+   * `guiHz` はブラウザへ送るJPEGの頻度で、`frontCapHz`/`rearCapHz` とは別物
+   * （前者はWi-Fi帯域、後者はcamera_nodeの消費電力が理由）。
+   */
+  setCamera(p: { frontCapHz?: number; rearCapHz?: number; rearEnabled?: boolean; guiHz?: number }) {
+    this.send({
+      type: 'camera',
+      front_cap_hz: p.frontCapHz,
+      rear_cap_hz: p.rearCapHz,
+      rear_enabled: p.rearEnabled,
+      gui_hz: p.guiHz,
+    })
+  }
+
   // ── 片輪浮き対策 有効切り替え（★v0.9） ──
 
   /**

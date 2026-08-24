@@ -73,6 +73,7 @@ export function App() {
           mcap: s.mcap,
           auto: s.auto,
           fan: s.fan,
+          cameraConfig: s.camera_config,
         }),
       onDenied: (holder, reason) =>
         set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false }),

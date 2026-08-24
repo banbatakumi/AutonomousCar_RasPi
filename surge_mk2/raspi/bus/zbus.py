@@ -95,6 +95,7 @@ TOPIC_OWNER: dict[str, str] = {
     "log/ctrl": "control",
     "auto/ctrl": "control",
     "ui/event": "control",
+    "cam/config": "control",
     "auto/cmd": "planning",
     "auto/state": "planning",
     "auto/map": "planning",

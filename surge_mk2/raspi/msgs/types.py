@@ -73,6 +73,10 @@ TOPIC_AUTO_MAP = "auto/map"
 #: 出し、io_node が拾ってブザーのメロディ（起動音とは別の音形）を鳴らす
 TOPIC_UI_EVENT = "ui/event"
 
+#: capture側(camera_node)のFPS上限・後方カメラON/OFFの意思。telemetry_node が出し、
+#: camera_node が拾って `Picamera2.set_controls()`/`stop()`/`start()` を呼ぶ
+TOPIC_CAM_CONFIG = "cam/config"
+
 
 class MsgBase(msgspec.Struct):
     """全メッセージ共通のヘッダ。
@@ -498,6 +502,24 @@ class UiEvent(MsgBase):
     value: bool = False
 
 
+class CamConfig(MsgBase):
+    """camera_node への capture 側の希望設定。`AutoCtrl`/ファンと同じく
+    **「現在の意思」を繰り返し流す**（telemetry_node の `_cam_config_pump`）。
+
+    一度きりの `UiEvent` にしなかったのは、camera_node が再起動したときに
+    1秒以内で最新の意思に復帰させたいため（`_fan_pump`/`_auto_ctrl_pump` と同じ理由）。
+
+    後方カメラは自動運転が使わない（GUI表示とロギング専用）ので `rear_fps` に
+    自動運転による上書きは無い。前カメラだけ、カメラを使う自動運転モードで
+    engage 中は telemetry_node 側が `front_fps` を上限まで引き上げる。
+    """
+
+    front_fps: float = 30.0
+    rear_fps: float = 30.0
+    #: False なら camera_node が該当カメラの `Picamera2.stop()` を呼び、実際に撮像を止める
+    rear_enabled: bool = True
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -516,6 +538,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_AUTO_STATE: AutoState,
     TOPIC_AUTO_MAP: AutoMap,
     TOPIC_UI_EVENT: UiEvent,
+    TOPIC_CAM_CONFIG: CamConfig,
 }
 
 

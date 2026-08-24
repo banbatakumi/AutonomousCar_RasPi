@@ -111,6 +111,23 @@ export type FanStatus = {
   rpm: number | null
 }
 
+/** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
+ * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
+export type CameraConfigStatus = {
+  /** 後方カメラの取得(capture)自体を止めるか */
+  rear_enabled: boolean
+  /** 前カメラのcapture fps上限（目安）。カメラを使う自動運転モードのengage中は無視される */
+  front_cap_hz: number
+  /** 後カメラのcapture fps上限。自動運転はrear_capture_fpsを使わないので上書きは無い */
+  rear_cap_hz: number
+  /** ブラウザへ送るJPEGの頻度。`front_cap_hz`/`rear_cap_hz` とは別物（Wi-Fi帯域が理由） */
+  gui_hz: number
+  /** 実際にcamera_nodeへ指示している前カメラのfps（自動運転中はfront_cap_hzより優先して最大になる） */
+  front_fps_effective: number
+  /** カメラを使う自動運転モードでengage中で、front_cap_hzを上書きしているか */
+  auto_override: boolean
+}
+
 /** 接続中Wi-FiのSSID・電波強度。**サーバが真値**（`raspi/io/wifi.py`、1Hzで再取得）。 */
 export type WifiStatus = {
   /** 接続中のSSID。未接続なら null */
@@ -176,6 +193,8 @@ export type ControlStatus = {
   fan: FanStatus
   /** 接続中Wi-FiのSSID・電波強度。**サーバが真値** */
   wifi: WifiStatus
+  /** capture側のFPS上限・後方カメラON/OFF・GUI配信頻度。**サーバが真値** */
+  camera_config: CameraConfigStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */

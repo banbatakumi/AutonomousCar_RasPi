@@ -23,7 +23,18 @@
  * （`architecture.md` §10.5 の「Pi を single source of truth にする」
  * 設計は部分的にしか実現していない）。他はすべて GUI が指令を作る
  * ときのランプ・上限だけ。
+ *
+ * ## 中身のタブ分け（2026-08-24）
+ *
+ * 上の「独立したページタブをやめた」話とは別物——ここは**このドロワーの中だけ**
+ * で完結する軽いタブ（`SETTINGS_TABS`）。項目が増えて縦に長くなりすぎたので、
+ * 「走行」（制御方式・速度orトルク・舵・ブレーキ）「安全」（自動停止・TC/TV・
+ * 片輪浮き対策・ARMタイムアウト）「カメラ」（capture FPS上限・後方ON/OFF・
+ * GUI配信fps・進路ガイド校正）の3つに分けた。「既定値に戻す」等のヘッダは
+ * タブの外に置いてある——`DrivingSettings` は1つしかなく、どのタブの値も
+ * まとめて戻す/保存するので、特定のタブだけの操作ではないため。
  */
+import { useState } from 'react'
 import type { DrivingSettings, NumericSettingKey, SettingRange } from '../store/ui'
 import {
   AUTO_STOP_DISTANCE_M, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
@@ -131,7 +142,20 @@ const CAMERA_FIELDS: Field[] = [
   // vehicle.toml の sensors.cam_front.pitch を直接使う（store/ui.ts 参照）
 ]
 
+/**
+ * 項目が増えて縦に長くなりすぎたので、テーマごとにタブで分けてある（2026-08-24）。
+ * 「既定値に戻す」等のヘッダはタブの外——`DrivingSettings` 全体（走行・安全・
+ * カメラ校正のどのタブの値も含む）に効くので、特定のタブだけの操作ではない。
+ */
+const SETTINGS_TABS = [
+  { id: 'drive', label: '走行' },
+  { id: 'safety', label: '安全' },
+  { id: 'camera', label: 'カメラ' },
+] as const
+type SettingsTab = (typeof SETTINGS_TABS)[number]['id']
+
 export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
+  const [tab, setTab] = useState<SettingsTab>('drive')
   const settings = useUi((s) => s.settings)
   const settingsDefault = useUi((s) => s.settingsDefault)
   const setSettings = useUi((s) => s.setSettings)
@@ -148,6 +172,9 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const tcEnabled = link?.tc_enabled ?? null
   const tvEnabled = link?.tv_enabled ?? null
   const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
+  // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
+  // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
+  const cam = useUi((s) => s.cameraConfig)
   // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、
   // `/ws/telemetry` 8Hz）から読む理由は tc_enabled 等と同じ（上のコメント参照）
   const range = effectiveRange({
@@ -170,105 +197,200 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
         </button>
       </div>
 
-      {/*
-        制御方式を先頭に置く。**これがスロットルの意味そのものを変える**ので、
-        下に並ぶ項目のどれが効くかもここで決まる。チェックボックスだと
-        「今どちらなのか」がラベルを読まないと分からないので、2択のセグメントにした。
-      */}
-      <section className="settings-group">
-        <h3>制御方式</h3>
-        <div className="seg">
-          <button
-            className={settings.torqueMode ? '' : 'on'}
-            onClick={() => setSettings({ torqueMode: false })}
-          >
-            速度制御
+      <div className="seg settings-tabs">
+        {SETTINGS_TABS.map((t) => (
+          <button key={t.id} className={tab === t.id ? 'on' : ''} onClick={() => setTab(t.id)}>
+            {t.label}
           </button>
-          <button
-            className={settings.torqueMode ? 'on' : ''}
-            onClick={() => setSettings({ torqueMode: true })}
-          >
-            トルク制御
-          </button>
-        </div>
-      </section>
+        ))}
+      </div>
 
-      {settings.torqueMode ? (
-        <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
-      ) : (
-        <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+      {tab === 'drive' && (
+        <>
+          {/*
+            制御方式を先頭に置く。**これがスロットルの意味そのものを変える**ので、
+            下に並ぶ項目のどれが効くかもここで決まる。チェックボックスだと
+            「今どちらなのか」がラベルを読まないと分からないので、2択のセグメントにした。
+          */}
+          <section className="settings-group">
+            <h3>制御方式</h3>
+            <div className="seg">
+              <button
+                className={settings.torqueMode ? '' : 'on'}
+                onClick={() => setSettings({ torqueMode: false })}
+              >
+                速度制御
+              </button>
+              <button
+                className={settings.torqueMode ? 'on' : ''}
+                onClick={() => setSettings({ torqueMode: true })}
+              >
+                トルク制御
+              </button>
+            </div>
+          </section>
+
+          {settings.torqueMode ? (
+            <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+          ) : (
+            <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+          )}
+
+          <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+          <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+        </>
       )}
 
-      <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
-      <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+      {tab === 'safety' && (
+        <>
+          {/* ここだけは GUI の調整値ではなく「STM32 の機能を許可するかどうか」。
+              距離も制動力も STM32 側の固定値で、GUI からは変えられない（v0.7） */}
+          <section className="settings-group">
+            <h3>自動停止（超音波）</h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={settings.autoStop}
+                onChange={(e) => setSettings({ autoStop: e.target.checked })}
+              />
+              進行方向 {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で STM32 に自動停止させる
+            </label>
+          </section>
 
-      {/* ここだけは GUI の調整値ではなく「STM32 の機能を許可するかどうか」。
-          距離も制動力も STM32 側の固定値で、GUI からは変えられない（v0.7） */}
-      <section className="settings-group">
-        <h3>自動停止（超音波）</h3>
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={settings.autoStop}
-            onChange={(e) => setSettings({ autoStop: e.target.checked })}
-          />
-          進行方向 {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で STM32 に自動停止させる
-        </label>
-      </section>
+          {/* TC/TV・片輪浮き対策 も自動停止と同じく「STM32の機能を許可するかどうか」
+              （TC/TVは★v0.8、片輪浮き対策は★v0.9。片輪浮き対策はTC/TV本体とは独立した別機構）。
+              表示値は STM32 の CONFIG_ACK を経由したサーバ真値
+              （`status.tc_enabled`/`tv_enabled`/`wheel_lift_guard_enabled`）。
+              未確定（起動直後でまだ CONFIG_ACK が届いていない）間は null になる */}
+          <section className="settings-group">
+            <h3>走行アシスト（STM32）</h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={tcEnabled ?? true}
+                disabled={tcEnabled === null}
+                onChange={(e) => ch?.setTcTv({ tc: e.target.checked })}
+              />
+              トラクションコントロール（TC）{tcEnabled === null && '（未確認）'}
+            </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={tvEnabled ?? true}
+                disabled={tvEnabled === null}
+                onChange={(e) => ch?.setTcTv({ tv: e.target.checked })}
+              />
+              トルクベクタリング（TV）{tvEnabled === null && '（未確認）'}
+            </label>
+            {/* 片輪浮き対策はTC/TV本体とは独立した別機構（★v0.9） */}
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={wheelLiftGuardEnabled ?? true}
+                disabled={wheelLiftGuardEnabled === null}
+                onChange={(e) => ch?.setWheelLiftGuard(e.target.checked)}
+              />
+              片輪浮き対策{wheelLiftGuardEnabled === null && '（未確認）'}
+            </label>
+          </section>
 
-      {/* TC/TV・片輪浮き対策 も自動停止と同じく「STM32の機能を許可するかどうか」
-          （TC/TVは★v0.8、片輪浮き対策は★v0.9。片輪浮き対策はTC/TV本体とは独立した別機構）。
-          表示値は STM32 の CONFIG_ACK を経由したサーバ真値
-          （`status.tc_enabled`/`tv_enabled`/`wheel_lift_guard_enabled`）。
-          未確定（起動直後でまだ CONFIG_ACK が届いていない）間は null になる */}
-      <section className="settings-group">
-        <h3>走行アシスト（STM32）</h3>
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={tcEnabled ?? true}
-            disabled={tcEnabled === null}
-            onChange={(e) => ch?.setTcTv({ tc: e.target.checked })}
-          />
-          トラクションコントロール（TC）{tcEnabled === null && '（未確認）'}
-        </label>
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={tvEnabled ?? true}
-            disabled={tvEnabled === null}
-            onChange={(e) => ch?.setTcTv({ tv: e.target.checked })}
-          />
-          トルクベクタリング（TV）{tvEnabled === null && '（未確認）'}
-        </label>
-        {/* 片輪浮き対策はTC/TV本体とは独立した別機構（★v0.9） */}
-        <label className="settings-checkbox">
-          <input
-            type="checkbox"
-            checked={wheelLiftGuardEnabled ?? true}
-            disabled={wheelLiftGuardEnabled === null}
-            onChange={(e) => ch?.setWheelLiftGuard(e.target.checked)}
-          />
-          片輪浮き対策{wheelLiftGuardEnabled === null && '（未確認）'}
-        </label>
-      </section>
+          <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+        </>
+      )}
 
-      <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+      {tab === 'camera' && (
+        <>
+          {/* capture側(camera_node)のFPS上限・後方カメラON/OFF・GUI配信頻度。
+              TC/TVと同じく状態はサーバ真値（`status.camera_config`）。
+              前カメラの上限は目安——カメラを使う自動運転（`line_trace`/`ftg_cam`）が
+              engage 中はサーバ側が無視して最大まで引き上げる（`auto_override`） */}
+          <section className="settings-group">
+            <h3>カメラ</h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={cam?.rear_enabled ?? true}
+                disabled={cam === null}
+                onChange={(e) => ch?.setCamera({ rearEnabled: e.target.checked })}
+              />
+              後方カメラの映像取得{cam === null && '（未確認）'}
+            </label>
+            <div
+              className="settings-row"
+              title={
+                cam?.auto_override
+                  ? '自動運転（ライントレース等）が走行中は、この上限を無視して最大まで引き上がっている'
+                  : '自動運転がカメラを使うモードで engage されている間は、この上限を無視して最大まで引き上がる'
+              }
+            >
+              <div className="settings-row-head">
+                <span className="label">前カメラ 取得上限</span>
+                <b>{(cam?.front_cap_hz ?? 30).toFixed(0)}</b>
+                <span className="unit">fps</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={cam?.front_cap_hz ?? 30}
+                disabled={cam === null}
+                onChange={(e) => ch?.setCamera({ frontCapHz: Number(e.target.value) })}
+              />
+              {cam?.auto_override && (
+                <span className="unit">実効 {cam.front_fps_effective.toFixed(0)}fps（自動運転中）</span>
+              )}
+            </div>
+            <div className="settings-row" title="後方カメラは自動運転では使わない（GUI表示とロギング専用）ので上書きは無い">
+              <div className="settings-row-head">
+                <span className="label">後カメラ 取得上限</span>
+                <b>{(cam?.rear_cap_hz ?? 10).toFixed(0)}</b>
+                <span className="unit">fps</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={cam?.rear_cap_hz ?? 10}
+                disabled={cam === null || cam?.rear_enabled === false}
+                onChange={(e) => ch?.setCamera({ rearCapHz: Number(e.target.value) })}
+              />
+            </div>
+            <div className="settings-row" title="ブラウザへ送るJPEGの頻度。上げるとWi-Fi帯域を余計に使う（2026-08-24 実機で前後同時30fpsでも問題ないことを確認済み）">
+              <div className="settings-row-head">
+                <span className="label">GUIへの配信</span>
+                <b>{(cam?.gui_hz ?? 30).toFixed(0)}</b>
+                <span className="unit">fps</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={cam?.gui_hz ?? 30}
+                disabled={cam === null}
+                onChange={(e) => ch?.setCamera({ guiHz: Number(e.target.value) })}
+              />
+            </div>
+          </section>
 
-      {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
-          height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
-          高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ——後カメラは
-          固定値（VEHICLE.camRear.height）を使い調整UIを持たない（2026-08-21） */}
-      <section className="settings-group">
-        <h3>進路ガイド校正</h3>
-        <label className="settings-checkbox">
-          <input type="checkbox" checked={pathGuide} onChange={(e) => set({ pathGuide: e.target.checked })} />
-          前後カメラに進路ガイドを重ねる（校正前・暫定）
-        </label>
-        {CAMERA_FIELDS.map((f) => (
-          <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
-        ))}
-      </section>
+          {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
+              height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
+              高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ——後カメラは
+              固定値（VEHICLE.camRear.height）を使い調整UIを持たない（2026-08-21） */}
+          <section className="settings-group">
+            <h3>進路ガイド校正</h3>
+            <label className="settings-checkbox">
+              <input type="checkbox" checked={pathGuide} onChange={(e) => set({ pathGuide: e.target.checked })} />
+              前後カメラに進路ガイドを重ねる（校正前・暫定）
+            </label>
+            {CAMERA_FIELDS.map((f) => (
+              <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+            ))}
+          </section>
+        </>
+      )}
     </div>
   )
 }

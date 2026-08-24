@@ -1649,6 +1649,17 @@ button.on {
   color: var(--accent);
 }
 
+/* 項目テーマ別のタブ（走行／安全／カメラ）。`.seg`（制御方式トグル等と同じ見た目）を
+   流用し、ここだけ少し大きくして「切り替えるとページが変わる」感を出す */
+.settings-tabs {
+  margin-bottom: 16px;
+}
+
+.settings-tabs button {
+  padding: 5px 16px;
+  font-size: 12px;
+}
+
 .settings-group {
   background: var(--panel);
   border: 1px solid var(--line);

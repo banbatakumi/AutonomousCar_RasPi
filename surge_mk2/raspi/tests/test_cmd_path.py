@@ -295,6 +295,13 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         from raspi.io.wifi import FakeWifi, WifiState
         srv._wifi = FakeWifi()
         srv._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
+        # カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps）。**既定値のまま**を組む
+        srv._cam_rear_enabled = True
+        srv._cam_front_cap_hz = 15.0
+        srv._cam_rear_cap_hz = 15.0
+        srv.camera_hz = 15.0
+        srv._publish_cam_config = lambda: None     # バスに触らせない
+        srv._save_camera_conf = lambda: None       # ディスクに触らせない
         srv.sent = []
 
         async def _send_json(ws, obj):

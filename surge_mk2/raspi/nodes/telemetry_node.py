@@ -128,13 +128,14 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
-from raspi.msgs import AutoCtrl, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
+from raspi.msgs import AutoCtrl, CamConfig, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
 from raspi.msgs.schema import schema_version  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
+    TOPIC_CAM_CONFIG,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_HB_PREFIX,
@@ -160,14 +161,39 @@ LOGS_DIR = REPO_ROOT / "logs"
 #: 自動運転のモードとパラメータを覚えておく場所。**`engaged` は保存しない**
 #: （電源投入で自律走行が始まる経路を作らない）
 AUTO_CONF = REPO_ROOT / "config" / "auto.json"
+#: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
+CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝従来どおり誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
 
 TELEMETRY_HZ = 20
 CMD_PUB_HZ = 50
-CAMERA_HZ = 15
+#: GUIへ配信する既定のJPEG頻度。当初は`docs/architecture.md` §9の帯域見積もり
+#: （640×480 JPEG q70 @15fps ≒ 7Mbps）を理由に15で始めたが、2026-08-24に実機で
+#: 前後カメラ同時30fps配信を検証——**帯域自体は問題なかった**。ただし当時の
+#: `_camera_pump` は相対 `sleep` でドリフトしており実測22fps止まりだったのを
+#: 絶対時刻スケジューリングに直して解消済み（同日）。以後は既定30
+CAMERA_HZ = 30
 HB_HZ = 10
+#: capture側(camera_node)のFPS上限の許容範囲、および前後カメラそれぞれの既定値。
+#: 2026-08-24の実機計測で「30→10fpsで全体消費電力が約13〜15%下がる・
+#: 10→5fpsはほぼ横ばい」と分かった一方、GUI配信を30fpsにしても問題ないことも
+#: 実機で確認できたため、**前カメラは自動運転の応答性を優先して既定30**（ほぼ
+#: 常に画角内の変化を追う）、**後カメラはGUI表示とロギング専用**（駐車・後退の
+#: 目視確認程度で足りる）なので既定10に分けてある
+CAM_FRONT_FPS_DEFAULT = 30.0
+CAM_REAR_FPS_DEFAULT = 10.0
+CAM_FPS_MIN = 1.0
+CAM_FPS_MAX = 30.0
+#: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
+#: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
+CAM_CONFIG_HZ = 1
+#: カメラ画像を実際に使う自動運転モードの id（`raspi/auto/registry.py`）。
+#: この集合に入っているモードが engage されている間だけ、telemetry_node は
+#: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
+#: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外
+CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam"})
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
@@ -321,6 +347,13 @@ class TelemetryServer:
         #: `_wifi_pump` が低頻度で更新するキャッシュ。読み取り自体が `nmcli` の
         #: サブプロセス起動を伴うため、`_control_status()` から毎回同期で呼ばない
         self._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
+
+        # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
+        #: `config/camera.json` に保存され、次回起動で戻る（`auto.json` と同じ流儀）
+        self._cam_rear_enabled = True
+        self._cam_front_cap_hz = CAM_FRONT_FPS_DEFAULT
+        self._cam_rear_cap_hz = CAM_REAR_FPS_DEFAULT
+        self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -577,12 +610,21 @@ class TelemetryServer:
                 return
             self._on_auto(m)
             self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
+            # **モード・engage が変わると前カメラの capture fps の希望も変わりうる**
+            # （`CAMERA_AUTO_MODES` を engage した瞬間に上限まで上げたい）
+            self._publish_cam_config()
             await self._broadcast_control_status()
 
         # ── ファン（誰でも操作できる。灯火と同じ「状態」トグル） ──
 
         elif kind == "fan":
             self._on_fan(m)
+            await self._broadcast_control_status()
+
+        # ── カメラ capture 設定（誰でも操作できる。ファンと同じ「状態」トグル） ──
+
+        elif kind == "camera":
+            self._on_camera(m)
             await self._broadcast_control_status()
 
         # ── TC/TV 有効切り替え（誰でも操作できる。★v0.8） ──
@@ -773,6 +815,85 @@ class TelemetryServer:
             "rpm": self._fan.read_rpm(),
         }
 
+    # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
+
+    @staticmethod
+    def _clamp_cam_hz(v: float) -> float:
+        return max(CAM_FPS_MIN, min(CAM_FPS_MAX, v))
+
+    def _on_camera(self, m: dict) -> None:
+        """`{"type":"camera", "rear_enabled"?, "front_cap_hz"?, "rear_cap_hz"?, "gui_hz"?}`。
+
+        どれも省略可。`_on_auto`/`_on_fan` と同じく**サーバ側でも必ずクランプする**。
+        `front_cap_hz`/`rear_cap_hz` は capture 側（camera_node）のFPS上限、
+        `gui_hz` はブラウザへ配信するJPEGの頻度で、**別物**（前者は電力、
+        後者はWi-Fi帯域が理由）。
+        """
+        if "rear_enabled" in m:
+            self._cam_rear_enabled = bool(m["rear_enabled"])
+        if "front_cap_hz" in m and isinstance(m["front_cap_hz"], (int, float)):
+            self._cam_front_cap_hz = self._clamp_cam_hz(float(m["front_cap_hz"]))
+        if "rear_cap_hz" in m and isinstance(m["rear_cap_hz"], (int, float)):
+            self._cam_rear_cap_hz = self._clamp_cam_hz(float(m["rear_cap_hz"]))
+        if "gui_hz" in m and isinstance(m["gui_hz"], (int, float)):
+            self.camera_hz = self._clamp_cam_hz(float(m["gui_hz"]))
+        self._save_camera_conf()
+        self._publish_cam_config()      # 待たせない。fan と同じく即座に効かせる
+
+    def _desired_front_fps(self) -> float:
+        """前カメラの capture fps。**カメラを使う自動運転が engage 中は上限を無視する。**
+
+        `line_trace`/`ftg_cam` はライン検出・走行可能領域セグメンテーションに
+        毎フレーム新しい画を欲しがる。ユーザーの節電設定（既定15fps）より
+        走行の安全性を優先する。
+        """
+        if self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES:
+            return CAM_FPS_MAX
+        return self._cam_front_cap_hz
+
+    def _camera_config_status(self) -> dict:
+        return {
+            "rear_enabled": self._cam_rear_enabled,
+            "front_cap_hz": self._cam_front_cap_hz,
+            "rear_cap_hz": self._cam_rear_cap_hz,
+            "gui_hz": self.camera_hz,
+            "front_fps_effective": self._desired_front_fps(),
+            "auto_override": self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES,
+        }
+
+    def _publish_cam_config(self) -> None:
+        self.pub.send(TOPIC_CAM_CONFIG, CamConfig(
+            front_fps=self._desired_front_fps(),
+            rear_fps=self._cam_rear_cap_hz,
+            rear_enabled=self._cam_rear_enabled))
+
+    def _load_camera_conf(self) -> None:
+        """`config/camera.json` から戻す。`_load_auto_conf` と同じ流儀。"""
+        try:
+            raw = _json_decode(CAMERA_CONF.read_bytes())
+        except Exception:
+            return                         # 無い・壊れている → 既定のまま
+        if isinstance(raw.get("rear_enabled"), bool):
+            self._cam_rear_enabled = raw["rear_enabled"]
+        if isinstance(raw.get("front_cap_hz"), (int, float)):
+            self._cam_front_cap_hz = self._clamp_cam_hz(float(raw["front_cap_hz"]))
+        if isinstance(raw.get("rear_cap_hz"), (int, float)):
+            self._cam_rear_cap_hz = self._clamp_cam_hz(float(raw["rear_cap_hz"]))
+        if isinstance(raw.get("gui_hz"), (int, float)):
+            self.camera_hz = self._clamp_cam_hz(float(raw["gui_hz"]))
+
+    def _save_camera_conf(self) -> None:
+        try:
+            CAMERA_CONF.parent.mkdir(parents=True, exist_ok=True)
+            CAMERA_CONF.write_bytes(_json_encode({
+                "rear_enabled": self._cam_rear_enabled,
+                "front_cap_hz": self._cam_front_cap_hz,
+                "rear_cap_hz": self._cam_rear_cap_hz,
+                "gui_hz": self.camera_hz,
+            }))
+        except Exception:
+            pass                           # 保存できなくても走行は続けられるべき
+
     # ── Wi-Fi（SSID・電波強度） ──
 
     def _wifi_status(self) -> dict:
@@ -840,6 +961,7 @@ class TelemetryServer:
             "auto": self._auto_status(),
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
+            "camera_config": self._camera_config_status(),
         }
 
     def _auto_status(self) -> dict:
@@ -1163,6 +1285,19 @@ class TelemetryServer:
             else:
                 self._fan.set_auto()
 
+    async def _cam_config_pump(self) -> None:
+        """capture側(camera_node)への希望（FPS上限・後方ON/OFF）を低頻度で再送する。
+
+        `_fan_pump`/`_auto_ctrl_pump` と同じ理由：camera_node が再起動しても
+        1秒以内に最新の意思へ復帰させる。また `_desired_front_fps()` は
+        自動運転の engage 状態にも依存するため、engage 側のイベントを
+        取りこぼしても最大1秒で追従する保険にもなる。
+        """
+        period = 1.0 / CAM_CONFIG_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_cam_config()
+
     async def _log_ctrl_pump(self) -> None:
         """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
 
@@ -1197,11 +1332,23 @@ class TelemetryServer:
         """
         if self._jpeg is None:
             return
-        period = 1.0 / self.camera_hz
         topics = {"front": TOPIC_IMAGE_FRONT, "rear": TOPIC_IMAGE_REAR}
         last_seq = {"front": -1, "rear": -1}
+        #: **相対 `sleep(period)` ではなく絶対時刻で刻む。** 前後カメラ2台ぶんの
+        #: エンコード＋送信（数ms）が毎周期そのまま次の待ちに積み増しされると、
+        #: 目標30fpsのつもりが実測22fps止まりになる（2026-08-24 実機で発覚）。
+        #: 遅れが大きすぎるとき（クライアント遅延等）は基準を今に取り直し、
+        #: 積み残しを一気に消化しようとして詰まるのを防ぐ
+        next_tick = time.monotonic()
         while self._running:
-            await asyncio.sleep(period)
+            # `camera_hz` は設定パネルの `gui_hz`（`setCamera`）で実行中に変わりうる
+            # ので、周期はループの中で毎回読む
+            next_tick += 1.0 / self.camera_hz
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                next_tick = time.monotonic()
             for cam, clients in self.camera_clients.items():
                 if not clients:
                     continue
@@ -1233,7 +1380,8 @@ class TelemetryServer:
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
-                self._auto_ctrl_pump, self._fan_pump, self._wifi_pump)]
+                self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
+                self._cam_config_pump)]
             try:
                 await stop
             finally:

@@ -151,6 +151,14 @@ class CameraWorker(threading.Thread):
         self.error: Exception | None = None
         self._running = False
         self._last_frame_id = -1
+        #: **`run()` のスレッドだけが picamera2 を呼ぶ。** `request_fps`/
+        #: `request_enabled` は他スレッド（`CameraNode._config_loop`）から呼ばれるが、
+        #: そこでは pending 変数を書き換えるだけで picamera2 には触らない
+        #: （`Picamera2` はマルチスレッドからの同時呼び出しを想定していないため）
+        self._cfg_lock = threading.Lock()
+        self._pending_fps: float | None = None
+        self._pending_enabled: bool | None = None
+        self._enabled = True
 
         from picamera2 import Picamera2
 
@@ -186,11 +194,48 @@ class CameraWorker(threading.Thread):
         self._running = True
         try:
             while self._running:
+                self._apply_pending()
+                if not self._enabled:
+                    # **止めている間は capture_request を呼ばない。** `Picamera2.stop()`
+                    # 済みなので呼んでも取れない上、CPU を無駄に回さないため
+                    time.sleep(0.2)
+                    continue
                 self._grab()
         except Exception as e:                       # 1台落ちても他は回す
             self.error = e
         finally:
             self._running = False
+
+    def _apply_pending(self) -> None:
+        """他スレッドから来た希望（FPS・ON/OFF）を、このスレッドの中で picamera2 に反映する。"""
+        with self._cfg_lock:
+            fps = self._pending_fps
+            self._pending_fps = None
+            enabled = self._pending_enabled
+            self._pending_enabled = None
+        if fps is not None and fps != self.fps:
+            self.fps = fps
+            us = int(1e6 / fps)
+            self.cam.set_controls({"FrameDurationLimits": (us, us)})
+        if enabled is not None and enabled != self._enabled:
+            self._enabled = enabled
+            if enabled:
+                self.cam.start()
+            else:
+                self.cam.stop()
+            # stop/start で picamera2 の FrameCount が 0 に戻ることがある。
+            # 前回値と比較して「大量に落ちた」と誤集計しないようにリセットする
+            self._last_frame_id = -1
+
+    def request_fps(self, fps: float) -> None:
+        """**picamera2 には触らない。** 次のループで `_apply_pending` が反映する。"""
+        with self._cfg_lock:
+            self._pending_fps = fps
+
+    def request_enabled(self, enabled: bool) -> None:
+        """**picamera2 には触らない。** 次のループで `_apply_pending` が反映する。"""
+        with self._cfg_lock:
+            self._pending_enabled = enabled
 
     def _grab(self) -> None:
         req = self.cam.capture_request()
@@ -243,10 +288,15 @@ def _contig(arr):
 
 class CameraNode:
     def __init__(self, indices: list[int], size, fmt: str, fps, n_slots: int,
-                 on_frame=None) -> None:
+                 on_frame=None, cfg_sub=None) -> None:
         self.workers = [CameraWorker(i, size, fmt, fps, n_slots, on_frame)
                         for i in indices]
         self._t_start = 0.0
+        #: GUI/自動運転からの capture 設定（`cam/config`）を拾うための Subscriber。
+        #: `--no-bus` やバス未接続なら None（既定 fps・常時 ON のまま動く）
+        self._cfg_sub = cfg_sub
+        self._cfg_thread: threading.Thread | None = None
+        self._cfg_running = False
 
     def run(self, duration_s: float | None = None, status_cb=None) -> None:
         for w in self.workers:
@@ -255,6 +305,12 @@ class CameraNode:
         for w in self.workers:
             w.stats = CamStats()
             w.start()
+
+        if self._cfg_sub is not None:
+            self._cfg_running = True
+            self._cfg_thread = threading.Thread(
+                target=self._config_loop, name="camcfg", daemon=True)
+            self._cfg_thread.start()
 
         self._t_start = time.monotonic()
         next_status = 0.0
@@ -270,11 +326,41 @@ class CameraNode:
         finally:
             self.stop()
 
+    def _config_loop(self) -> None:
+        """`cam/config`（`CamConfig`）を低頻度で受け、該当ワーカーに希望を伝える。
+
+        **ここでは picamera2 を直接呼ばない。** `CameraWorker.request_fps`/
+        `request_enabled` は pending 変数を書き換えるだけで、実際の適用は
+        そのワーカー自身のスレッドが次のループで行う（`_apply_pending`）。
+        """
+        from raspi.msgs.types import TOPIC_CAM_CONFIG
+
+        role_of = {w.idx: CAM_TOPIC.get(w.idx, (None, f"cam{w.idx}"))[1]
+                  for w in self.workers}
+        while self._cfg_running:
+            try:
+                events = self._cfg_sub.poll(200)
+            except Exception:
+                break
+            for topic, msg in events:
+                if topic != TOPIC_CAM_CONFIG:
+                    continue
+                for w in self.workers:
+                    role = role_of[w.idx]
+                    if role == "front":
+                        w.request_fps(msg.front_fps)
+                    elif role == "rear":
+                        w.request_fps(msg.rear_fps)
+                        w.request_enabled(msg.rear_enabled)
+
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self._t_start if self._t_start else 0.0
 
     def stop(self) -> None:
+        self._cfg_running = False
+        if self._cfg_thread is not None:
+            self._cfg_thread.join(timeout=1.0)
         for w in self.workers:
             w.stop()
         for w in self.workers:
@@ -283,6 +369,8 @@ class CameraNode:
     def close(self) -> None:
         for w in self.workers:
             w.close()
+        if self._cfg_sub is not None:
+            self._cfg_sub.close()
 
 
 def _status(node: CameraNode) -> None:
@@ -313,10 +401,11 @@ def main() -> int:
     # ── バス配信（画素は流さない。共有メモリへの参照だけ） ──
     pub = None
     on_frame = None
+    cfg_sub = None
     if not args.no_bus:
         try:
-            from raspi.bus import Publisher
-            from raspi.msgs import ImageRef
+            from raspi.bus import LATEST, Publisher, Subscriber
+            from raspi.msgs import ImageRef, TOPIC_CAM_CONFIG
 
             # **カメラごとに別スレッドから publish するので thread_safe が必須。**
             # ZeroMQ のソケットはスレッドセーフではない
@@ -334,6 +423,10 @@ def main() -> int:
 
             print(f"# バス配信 {pub.endpoint} "
                   + " ".join(CAM_TOPIC.get(i, (f'image/cam{i}',))[0] for i in indices))
+
+            # telemetry_node からの capture 設定（FPS上限・後方カメラON/OFF）を拾う。
+            # **失敗しても撮像自体は続ける**（既定 fps・常時 ON のまま動くだけ）
+            cfg_sub = Subscriber({TOPIC_CAM_CONFIG: LATEST})
         except ImportError as e:
             print(f"!! pyzmq/msgspec が無いのでバス無しで動く: {e}")
         except Exception as e:
@@ -341,7 +434,7 @@ def main() -> int:
 
     try:
         node = CameraNode(indices, (w, h), args.fmt, args.fps, args.slots,
-                          on_frame=on_frame)
+                          on_frame=on_frame, cfg_sub=cfg_sub)
     except Exception as e:
         print(f"カメラを開けない: {e}", file=sys.stderr)
         return 2
