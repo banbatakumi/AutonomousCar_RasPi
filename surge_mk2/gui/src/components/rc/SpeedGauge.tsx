@@ -19,7 +19,7 @@
  * rAF で回す必要があるのは軌跡を描く G メータだけ（`GMeter.tsx`）。
  */
 import { useNumbers } from '../../bus/live'
-import { kmh } from '../../format'
+import { kmh, mps } from '../../format'
 import { PI_MAX_SPEED_CAP, useUi } from '../../store/ui'
 
 /**
@@ -54,7 +54,8 @@ function arcPath(from: number, to: number, r: number): string {
 
 export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   const n = useNumbers()
-  const { cruiseScale, torqueMode } = useUi((s) => s.settings)
+  const { cruiseScale, torqueMode, speedUnit } = useUi((s) => s.settings)
+  const setSettings = useUi((s) => s.setSettings)
   const vs = n.vs
 
   // 停止判定中は 0 に落とす（`DriveBar` と同じ扱い。デッドバンド内の生値を速度に見せない）
@@ -125,9 +126,13 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
         </svg>
       </div>
 
-      <div className="meter-read">
-        <b>{kmh(speed)}</b>
-        <i>km/h</i>
+      <div
+        className="meter-read"
+        onClick={() => setSettings({ speedUnit: speedUnit === 'kmh' ? 'ms' : 'kmh' })}
+        title="クリックで m/s ⇔ km/h を切替"
+      >
+        <b>{speedUnit === 'kmh' ? kmh(speed) : mps(speed)}</b>
+        <i>{speedUnit === 'kmh' ? 'km/h' : 'm/s'}</i>
       </div>
       {/* 正常時の数値（m/s・レンジ）は出さない。**後退だけは異常系として残す** */}
       {reversing && (

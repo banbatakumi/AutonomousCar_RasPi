@@ -98,7 +98,11 @@ export function App() {
   return (
     <div className="app">
       {showSplash && <SplashEmblem onDone={() => setShowSplash(false)} />}
-      <StatusBar onEstop={() => ch?.estop()} variant={tab === 'ラジコン' ? 'rc' : 'full'} />
+      <StatusBar
+        onEstop={() => ch?.estop()}
+        onShutdown={() => ch?.shutdown()}
+        variant={tab === 'ラジコン' ? 'rc' : 'full'}
+      />
       <nav className="tabs">
         {TABS.map((t) => (
           <button key={t} className={t === tab ? 'on' : ''} onClick={() => setTab(t)}>

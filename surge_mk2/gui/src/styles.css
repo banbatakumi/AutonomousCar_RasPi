@@ -1133,6 +1133,7 @@ button.on {
   align-items: baseline;
   gap: 4px;
   margin-top: -6px;
+  cursor: pointer;
 }
 
 .meter-read b {
@@ -1232,7 +1233,10 @@ button.on {
  */
 .drivepanel-wrap {
   width: 100%;
-  max-width: 250px;
+  /* `.rc` の映像:計器＝4:1（`styles.css:775`）のもとでも計器パネルの列幅は
+   * この上限よりだいぶ広いことが多く、以前はここが実質の頭打ちになって
+   * 余白ばかり増えていた（映像パネル側は狭めない前提での対応） */
+  max-width: 600px;
   margin: 0 auto;
 }
 
@@ -1257,6 +1261,7 @@ button.on {
 /* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境に電流ぶんだけ塗る単色ゲージ */
 .dp-wheel-fill {
   fill: var(--accent);
+  filter: drop-shadow(0 0 2px rgba(213, 48, 63, .5));
 }
 
 .dp-wheel-zero {
@@ -1275,14 +1280,41 @@ button.on {
   stroke-width: 1.5;
 }
 
+/*
+ * スリップゲージ（後輪はタイヤの外側半分、前輪はタイヤ全幅）。ok/warn/bad の
+ * 判定を持たない量なので `--dim`（「参考値」の意味、ファイル冒頭のコメント
+ * 参照）で塗る——電流ゲージの `--accent`（赤系、RCビュー用の上書き）とは
+ * 意図的に違う色にして見分ける。
+ */
+.dp-slip-fill {
+  fill: var(--dim);
+}
+
+/* 後輪タイヤの車体側/外側の境目 */
+.dp-wheel-divider {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+/* バッテリーイラストの真上に置く S/P 1文字。背景チップは満充電時に塗りと
+ * 混ざって読みにくかったため廃止し、白文字だけにした */
+.dp-batt-letter {
+  fill: var(--fg);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+/* viewBox を横だけ詰めた（`DrivePanel.tsx`）分、単位あたりの実寸が上がって
+ * 文字だけ相対的に大きく見えるようになったため、他の要素より font-size を
+ * 少し絞ってある */
 .dp-label {
   fill: var(--dim);
-  font-size: 9px;
+  font-size: 8px;
 }
 
 .dp-value {
   fill: var(--fg);
-  font-size: 10px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1295,6 +1327,50 @@ button.on {
 
 .dp-batt-nub {
   fill: var(--line);
+}
+
+/*
+ * 駆動バッテリー→後輪モータのフローライン。破線が流れて見える＝電流が流れて
+ * いることを示す（Tesla Energy Flow 風）。色は .dp-wheel-fill と同じ単色
+ * （安全判定を持たせない）。駆動/回生は向き（順再生/逆再生）だけで表す。
+ */
+.dp-flow-bg {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.dp-flow {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 3 6;
+  filter: drop-shadow(0 0 2px rgba(213, 48, 63, .5));
+  animation: dp-flow-move 1s linear infinite;
+  transition: opacity 200ms linear;
+}
+
+/* ほぼ無電流。常に動いていると「今流れていない」ことが伝わらないので、止めて薄く */
+.dp-flow--idle {
+  opacity: .15;
+  animation-play-state: paused;
+}
+
+@keyframes dp-flow-move {
+  to {
+    stroke-dashoffset: -9;
+  }
+}
+
+/*
+ * 障害物近接リング（`ProximityRing.tsx`）。色は JS 側で `--warn`/`--bad` 相当を
+ * 補間して1本ずつ `style.stroke` に入れるので、ここでは線の太さ・端の形だけ。
+ */
+.dp-proximity-seg {
+  stroke-width: 4;
+  stroke-linecap: round;
 }
 
 /*

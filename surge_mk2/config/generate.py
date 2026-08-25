@@ -35,6 +35,7 @@ def gen_ts(spec: dict) -> str:
     sensors = spec.get("sensors", {})
     cam = sensors.get("cam_front", {})
     cam_rear = sensors.get("cam_rear", {})
+    lidar = sensors.get("lidar", {})
     safety = spec.get("safety", {})
     return "\n".join([
         f"// {BANNER}",
@@ -50,6 +51,13 @@ def gen_ts(spec: dict) -> str:
         f"  wheelRadius: {float(spec.get('wheel_radius', 0))}, // m",
         "  /** 車体外形ポリゴン [m]。反時計回り */",
         f"  footprint: [{pts}] as const,",
+        "  /** LiDAR 取付位置。base_link 基準・水平面のみ（`z`/`yaw` は2D俯瞰表示では不要）。",
+        "   * 角度反転（`mirrored`）は `ScanAssembler` が Pi 側で処理済みなので、",
+        "   * GUI が受け取る `Scan.dist[deg]` は既に車両角。ここでは並進オフセットだけ使う */",
+        "  lidar: {",
+        f"    x: {float(lidar.get('x', 0))}, // m",
+        f"    y: {float(lidar.get('y', 0))}, // m",
+        "  },",
         "  /** 前カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値",
         "   * （`sensors.cam_front.z`）。`pitch`（取付角度）・`hfov`（レンズ公称値）は",
         "   * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`bottomCrop` は",

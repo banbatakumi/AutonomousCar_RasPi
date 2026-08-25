@@ -29,9 +29,11 @@ export type StatusVariant = 'full' | 'rc'
 
 export function StatusBar({
   onEstop,
+  onShutdown,
   variant = 'full',
 }: {
   onEstop: () => void
+  onShutdown: () => void
   variant?: StatusVariant
 }) {
   const n = useNumbers()
@@ -154,6 +156,14 @@ export function StatusBar({
         <ArmButton />
         <button className="estop" onClick={onEstop} title="Esc キーでも同じ">
           E-STOP
+        </button>
+        <button
+          onClick={() => {
+            if (window.confirm('ラズパイをシャットダウンしますか？')) onShutdown()
+          }}
+          title="Pi を安全にシャットダウンする"
+        >
+          シャットダウン
         </button>
       </header>
 

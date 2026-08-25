@@ -11,6 +11,13 @@ export const VEHICLE = {
   wheelRadius: 0.03, // m
   /** 車体外形ポリゴン [m]。反時計回り */
   footprint: [[0.3, 0.09], [0.3, -0.09], [-0.07, -0.09], [-0.07, 0.09]] as const,
+  /** LiDAR 取付位置。base_link 基準・水平面のみ（`z`/`yaw` は2D俯瞰表示では不要）。
+   * 角度反転（`mirrored`）は `ScanAssembler` が Pi 側で処理済みなので、
+   * GUI が受け取る `Scan.dist[deg]` は既に車両角。ここでは並進オフセットだけ使う */
+  lidar: {
+    x: 0.07, // m
+    y: 0.0, // m
+  },
   /** 前カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値
    * （`sensors.cam_front.z`）。`pitch`（取付角度）・`hfov`（レンズ公称値）は
    * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`bottomCrop` は

@@ -222,6 +222,12 @@ export class ControlChannel {
     this.send({ type: 'logs_delete', name })
   }
 
+  /** Pi を安全にシャットダウンする。estop と同じく誰でも実行できる（走行の操縦権とは無関係）。
+   * 実行するかどうかの確認は呼び出し側（`StatusBar.tsx`）の責務 */
+  shutdown() {
+    this.send({ type: 'shutdown' })
+  }
+
   ping() {
     this.pingId++
     this.pingSentAt = performance.now()

@@ -38,10 +38,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import signal
 import sys
+import tempfile
 import time
 
 from pathlib import Path
@@ -113,6 +115,38 @@ CMD_TIMEOUT_NS = int(Vehicle.load().cmd_deadman_ms * 1_000_000)
 DEFAULT_MAX_SPEED = 1.0        # m/s
 DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
 
+#: 総走行距離（`odom_center` の起点）を永続化する場所。**`.gitignore` 済み**
+#: （機体ごとの実測値なのでコミットしない、`config/auto.json` 等と同じ理由）
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ODOM_CONF = REPO_ROOT / "config" / "odometer.json"
+#: 保存の間引き条件（両方満たしたときだけ書く）。**単調増加の値なので
+#: 停止中は書かない**（SDカードの消耗を避ける。バンビ指定、2026-08-25）
+ODOM_SAVE_INTERVAL_S = 30.0
+ODOM_SAVE_MIN_DELTA_M = 1.0
+
+
+def _load_odometer_base() -> float:
+    """`ODOM_CONF` から総走行距離を読む。無い・壊れている・負値なら 0.0（初回起動と同じ扱い）"""
+    try:
+        v = float(json.loads(ODOM_CONF.read_text()).get("total_m", 0.0))
+        return v if math.isfinite(v) and v >= 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _save_odometer_base(v: float) -> None:
+    """total_m を書く。**単調増加であるべき値**なので、書き込み中の電源断で
+    壊れないよう tmp ファイル + `os.replace()` でアトミックに置き換える
+    （`config/auto.json` 等の直接書きとは異なる、このリポジトリ初のパターン）"""
+    try:
+        ODOM_CONF.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(ODOM_CONF.parent), prefix=".odometer-")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"total_m": v}, f)
+        os.replace(tmp, ODOM_CONF)
+    except Exception:
+        pass  # 保存できなくても走行は続けられるべき
+
 
 class IoNode:
     """:param log: 生フレームログの Writer。None なら記録しない（起動時点の状態）。
@@ -135,7 +169,9 @@ class IoNode:
                  max_speed: float = DEFAULT_MAX_SPEED,
                  max_steer: float = DEFAULT_MAX_STEER) -> None:
         self.link = link
-        self.bridge = BusBridge(pub)
+        self.bridge = BusBridge(pub, base_m=_load_odometer_base())
+        #: 直近に保存した総走行距離。周期保存の間引き判定（1m以上動いたか）に使う
+        self._last_saved_odom = self.bridge.state_builder.odom_center
         self.tracker = LinkTracker(
             on_telemetry=self._on_telemetry_chain(on_telemetry),
             on_frame=self.bridge.on_frame,
@@ -423,6 +459,7 @@ class IoNode:
         next_diag = next_cmd
         next_hb = next_cmd
         next_limits_retry = next_cmd
+        next_odom_save = next_cmd + int(ODOM_SAVE_INTERVAL_S * NS)
         cmd_period = NS // COMMAND_HZ
 
         while self._running:
@@ -506,6 +543,15 @@ class IoNode:
                               HbMsg(node="io", pid=os.getpid(),
                                     detail=self.state.health))
                 next_hb = now + NS // HB_HZ
+
+            # 総走行距離の永続化。**両方満たしたときだけ書く**——止まっている間は
+            # 30秒経っても書かない（SDカードの消耗を避ける、バンビ指定）
+            if now >= next_odom_save:
+                next_odom_save = now + int(ODOM_SAVE_INTERVAL_S * NS)
+                current_odom = self.bridge.state_builder.odom_center
+                if abs(current_odom - self._last_saved_odom) >= ODOM_SAVE_MIN_DELTA_M:
+                    _save_odometer_base(current_odom)
+                    self._last_saved_odom = current_odom
 
             if duration_s is not None and time.monotonic() - self._t_start >= duration_s:
                 break
@@ -693,6 +739,9 @@ def main() -> int:
         # `uart_timeout` で自力で DISARM に落ちる**ので、ここで止まる必要は無い
         with quiet_close("終了時の DISARM 送信"):
             node._send_command_disarm()
+        # 総走行距離の最終保存。**間引き条件（1m以上）を無視して無条件に書く**——
+        # 正常終了の取りこぼし（直近30秒未満の差分）をここで拾う
+        _save_odometer_base(node.bridge.state_builder.odom_center)
         if heartbeat is not None:
             # 波形を止める＝E-Stop を掛けて終わる。正常終了でもそうする。
             # Pi が監視をやめた以上、車両を止めておくのが正しい

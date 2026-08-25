@@ -18,6 +18,8 @@ web/dist/
 surge_mk2/config/auto.json
 # カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps）。auto.json と同じ理由
 surge_mk2/config/camera.json
+# 総走行距離（io_node が odom_center の起点として読む）。auto.json と同じ理由
+surge_mk2/config/odometer.json
 logs/*.jsonl
 *.sfl          # 生フレームログ（大きい・実行ごとに増える）
 *.mcap

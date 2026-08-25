@@ -82,6 +82,7 @@ case "${1:-}" in
     systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service
     rm -f /etc/udev/rules.d/99-surge-fan.rules
+    rm -f /etc/sudoers.d/surge-shutdown
     systemctl daemon-reload
     udevadm control --reload-rules 2>/dev/null || true
     # 節電のために切ったものを元に戻す（下の「節電」節を参照）
@@ -271,6 +272,15 @@ cp "$ROOT/raspi/setup/99-surge-fan.rules" /etc/udev/rules.d/99-surge-fan.rules
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=hwmon
 udevadm trigger --subsystem-match=thermal
+
+# GUIからのシャットダウンを許可する（telemetry_node が sudo 経由で叩く固定コマンドのみ）。
+# 引数まで固定しているので、GUI 側からの任意コマンド実行にはならない
+# （99-surge-fan.rules が sysfs 書き込み権限だけを絞って渡しているのと同じ思想）
+cat > /etc/sudoers.d/surge-shutdown <<EOF
+$USER_NAME ALL=(root) NOPASSWD: /sbin/shutdown -h now
+EOF
+chmod 0440 /etc/sudoers.d/surge-shutdown
+visudo -cf /etc/sudoers.d/surge-shutdown
 
 systemctl daemon-reload
 systemctl enable --now "${UNITS[@]}" surge-logclean.timer

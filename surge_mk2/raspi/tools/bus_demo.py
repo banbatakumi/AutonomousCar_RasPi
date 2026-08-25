@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.msgs import LinkDiag, Scan, VehicleState  # noqa: E402
-from raspi.proto.packets import PROTOCOL_VERSION  # noqa: E402
+from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_DIAG_LINK,

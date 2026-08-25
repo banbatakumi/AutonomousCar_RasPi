@@ -669,6 +669,22 @@ class TelemetryServer:
             self._logs_delete(str(m.get("name", "")))
             await self._send_json(ws, self._logs_list())
 
+        # ── シャットダウン（誰でも実行できる。estop と同じく、走行の操縦権とは無関係。
+        #    誤操作は GUI 側の window.confirm で防ぐ——操縦権を要求すると
+        #    「操縦権が無い接続には holder="" の control_denied が返るだけで GUI に
+        #    何も表示されない」という無反応バグになる。2026-08-25 実機で発覚） ──
+
+        elif kind == "shutdown":
+            await self._shutdown_pi()
+
+    async def _shutdown_pi(self) -> None:
+        """Pi を安全にシャットダウンする。`raspi/setup/install_services.sh` が入れる
+        `sudoers.d` で、この固定コマンドだけ NOPASSWD 許可されている前提"""
+        try:
+            await asyncio.create_subprocess_exec("sudo", "/sbin/shutdown", "-h", "now")
+        except Exception:
+            pass  # sudoers 未設定等。GUI 側は反応が無ければ気付ける
+
     def _token_ok(self, m: dict) -> bool:
         """共有トークンの照合。**未設定なら常に通す**（従来どおりの挙動）。
 

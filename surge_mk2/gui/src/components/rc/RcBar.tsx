@@ -42,6 +42,7 @@
  * ときだけ）に1つだけ置くようにした。ファンの自動/手動もそこに同居する。
  */
 import { useNumbers } from '../../bus/live'
+import { useUi } from '../../store/ui'
 import { AssistLamps } from './AssistLamps'
 import { DrivePanel } from './DrivePanel'
 import { TempPanel } from './TempPanel'
@@ -49,6 +50,12 @@ import { TempPanel } from './TempPanel'
 export function RcBar() {
   const n = useNumbers()
   const vs = n.vs
+  const tripOdomBase = useUi((s) => s.tripOdomBase)
+  const resetTripOdom = useUi((s) => s.resetTripOdom)
+  // odom_center は STM32 側の累積値でリセットできない。STM32 再起動で 0 に
+  // 戻ることがあるため、起点より小さくなったらマイナス表示にせず odom_center を
+  // そのまま使う（`store/ui.ts` の `tripOdomBase` 参照）
+  const trip = vs ? (vs.odom_center < tripOdomBase ? vs.odom_center : vs.odom_center - tripOdomBase) : null
 
   return (
     <div className={`rcpanel ${n.stale ? 'stale' : ''}`}>
@@ -62,6 +69,13 @@ export function RcBar() {
         <div className="kv">
           <span>走行距離</span>
           <b>{vs ? `${vs.odom_center.toFixed(2)}m` : '—'}</b>
+        </div>
+        <div className="kv">
+          <span>リセット間走行距離</span>
+          <b>{trip == null ? '—' : `${trip.toFixed(2)}m`}</b>
+          <button className="settings-reset" onClick={resetTripOdom}>
+            リセット
+          </button>
         </div>
       </div>
     </div>

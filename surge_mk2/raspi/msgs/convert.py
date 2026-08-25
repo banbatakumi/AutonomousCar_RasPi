@@ -109,11 +109,13 @@ class StateBuilder:
     :param max_gap_m: 1周期の前輪移動量がこれを超えたら「連続していない」と見なし、
         `odom_center` を進めない。起動直後・再接続直後に巨大な差分で
         累積距離が飛ぶのを防ぐ（50Hz・3m/s でも 1周期 6cm）
+    :param base_m: `odom_center` の起点。SDに永続化した総走行距離を io_node が
+        ここへ渡すことで、プロセス再起動をまたいでも積算が続く（`io_node.py` 参照）
     """
 
-    def __init__(self, max_gap_m: float = 0.5) -> None:
+    def __init__(self, max_gap_m: float = 0.5, base_m: float = 0.0) -> None:
         self.max_gap_m = max_gap_m
-        self.odom_center = 0.0
+        self.odom_center = base_m
         self._prev_odom: list[int] | None = None
         #: 連続性が切れて `odom_center` を進めなかった回数。診断用
         self.odom_jumps = 0

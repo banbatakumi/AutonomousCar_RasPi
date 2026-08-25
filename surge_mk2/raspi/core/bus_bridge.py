@@ -35,12 +35,16 @@ class BusBridge:
     :param pub: `bus.Publisher`。None なら何もしない（バス無しで動かす診断モード）
     :param clock: 「今」を返す関数。実機は `time.monotonic_ns`、
         再生はログ時刻のカーソル。**ここを差し替えられることが replay の肝**
+    :param base_m: `StateBuilder.odom_center` の起点。**実機（`io_node`）だけが
+        SDの永続値を渡す。** replay/ツール類は既定の 0.0 のままでよい
+        （再生対象のログはそのログの走行だけで完結すべきなので、実機の
+        総走行距離を混ぜてはいけない）
     """
 
-    def __init__(self, pub=None, clock=time.monotonic_ns) -> None:
+    def __init__(self, pub=None, clock=time.monotonic_ns, base_m: float = 0.0) -> None:
         self.pub = pub
         self.clock = clock
-        self.state_builder = StateBuilder()
+        self.state_builder = StateBuilder(base_m=base_m)
         self.scans = ScanAssembler()
 
         #: SEQ(u8) → その COMMAND を送った時刻。SEQ が一周するので固定長で持つ
