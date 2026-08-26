@@ -114,7 +114,12 @@ class VirtualStm32:
         self._next_stats = 0
         self._boot_versions = 3
         self._boot_limits = 3
-        self._config: dict[int, float] = {}
+        # AUTO_STOP_MARGIN_CM は STM32 実機の既定が15cm。0.0 も範囲内の値として
+        # 有効なため他の bool 系パラメータと違って見た目上は不正にならないが、
+        # 未初期化のまま「マージン0cm」で動くとsimと実機の既定が食い違うので揃えておく（★v0.12）
+        self._config: dict[int, float] = {
+            packets.Param.AUTO_STOP_MARGIN_CM: 15.0,
+        }
         self._stats = packets.Stats()
 
     # ── 時計 ──

@@ -1,22 +1,22 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.11
-**最終更新**: 2026-08-22
+**バージョン**: v0.12
+**最終更新**: 2026-08-25（`param_id = 0x0060` の値の意味を3段階enumからcm直接指定へ改訂）
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: Pi 側 v0.11 実装済み（`protocol.toml`/`raspi/msgs`/`raspi/nodes/io_node.py`/GUI/`sim/stm32.py`）。**STM32 側は実装済み・実機での動作検証は未了（2026-08-21）**
+**状態**: Pi 側 v0.12 実装済み（`protocol.toml`/`raspi/msgs`/`raspi/nodes/io_node.py`/GUI/`sim/stm32.py`）。**STM32 側は実装済み・実機での動作検証は未了（2026-08-25、`pi_uart_protocol_v0.12_delta.md`）**
 
-> **v0.11 で新設したのは `LIMITS` (0x0A) / `LIMITS_REQ` (0x15) のみ**（§5.12）。
-> `COMMAND`/`TELEMETRY`/`CONFIG_SET`/`CONFIG_GET` を含む既存パケットの構造・LEN は
-> 変更なし。v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を廃止して STM32 側の固定
-> 定数へ一本化した結果、Pi がその実際の値を知る手段が無くなっていた問題への対応。
-> STM32 は起動直後に `VERSION` と同じタイミングで `LIMITS` を自発送信（3回・100ms間隔）
-> し、Pi はいつでも `LIMITS_REQ` で再取得できる。**Pi 側はこの値を RC（MANUAL）・
-> 自律走行（AUTO）どちらの指令でも `IoNode._send_command` の1箇所でクランプに使う。
-> `LIMITS` を受信済みなら無条件にそちらを使い、`--max-speed`/`--max-steer`（Pi 側の
-> 設定上限）は未受信の間だけ使うフォールバックにすぎない**（2026-08-22、当初は
-> 「小さい方」だったが GUI 側の表示と食い違うため「STM32 実測を優先」に変更。§5.12）。
-> `protocol_version` を `0x000A`→`0x000B` に上げる。
-> **本書が最終版**であり、`protocol_version = 0x000B` はこの内容を指す。
+> **v0.12 で変わったのは `CONFIG_SET`/`CONFIG_GET` で使う `param_id` が増えたことと、
+> `auto_stop`（`COMMAND.flags` bit7）の下位側の判定ロジックだけ**（§5.6.4/5.8.3）。
+> `COMMAND`/`TELEMETRY` を含むどのパケットも構造・LEN は変更なし。旧版（v0.7〜v0.11）
+> の「進行方向の超音波が固定20cm未満で自動停止」を、**`v・t_delay + v²/(2・a_max) +
+> margin`（速度に応じて伸びる動的停止距離）＋ LiDAR を主センサ・超音波を補助センサに
+> したフェイルセーフ判定**へ置き換えた。`t_delay`/`a_max` は STM32 側の固定定数、
+> Pi から `CONFIG_SET`（`param_id = 0x0060`, `auto_stop_margin_cm`）で指定できるのは
+> 安全マージン `margin` の値そのもの（cm単位の連続値、範囲0-100、既定15）。
+> **当初案は3段階enum（NEAR/STANDARD/FAR）だったが、実機投入前に STM32 側が
+> cm直接指定へ変更した**（本書はその改訂を反映した版）。送らなければ既定の15cmの
+> まま動く。`protocol_version` を `0x000B`→`0x000C` に上げる。
+> **本書が最終版**であり、`protocol_version = 0x000C` はこの内容を指す。
 
 ---
 
@@ -646,7 +646,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 | 3-4 | `light_mode` | 0=`OFF` / 1=`DAYTIME` / 2=`NORMAL`（3 は予約・送らない） |
 | 5 | `passing` | パッシング |
 | 6 | `torque_mode` | 立っている間 `target_speed` を無視し `target_torque` を直接掛ける ★v0.6 |
-| 7 | `auto_stop` | 立っている間、進行方向の超音波が 20cm 未満なら STM32 が自動で最大制動 ★v0.7 |
+| 7 | `auto_stop` | 立っている間、進行方向の動的停止距離 `d_stop` 未満なら STM32 が自動で最大制動 ★v0.7（判定は★v0.12でLiDAR主・超音波補助に刷新。§5.6.4） |
 
 | `light_mode` | 前照灯 | 尾灯 |
 |---|---|---|
@@ -688,33 +688,48 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `target_torque` にどう関与するか（そのまま通すか、TC が空転抑制のため減衰させるか）は
   **未確定**（§14 参照）。STM32 側の実装方針が決まり次第この節を更新する。
 
-#### 5.6.4 `auto_stop` の約束（★v0.7）
+#### 5.6.4 `auto_stop` の約束（★v0.7、判定ロジックは★v0.12で刷新）
 
 **STM32 単独で完結する障害物への自動停止。** Pi は許可（bit7）を毎周期出すだけで、
-判定にも制動にも関与しない。**Pi 側で `us_front`/`us_rear` を見て速度を落とす二重制御を
-書かないこと**（どちらが止めたのか分からなくなる）。
+判定にも制動にも関与しない。**Pi 側で `us_front`/`us_rear`/LiDAR を見て速度を落とす
+二重制御を書かないこと**（どちらが止めたのか分からなくなる）。
 
-- 立っている間、**進行方向**の超音波距離が **20cm 未満**になると、STM32 が
-  `target_speed`/`target_torque` を無視して**最大制動トルクで停止**する。
+- 立っている間、**進行方向**の障害物までの距離が動的停止距離 `d_stop` 未満になると、
+  STM32 が `target_speed`/`target_torque` を無視して**最大制動トルクで停止**する。
+- **`d_stop` は固定値ではない**（v0.7〜v0.11 は前後超音波固定20cm未満だった）。
+  `d_stop = v・t_delay + v²/(2・a_max) + margin` で、`v` は進行方向の実走行速度の
+  絶対値。`t_delay`/`a_max` は STM32 側の固定定数（`VEHICLE_AUTO_STOP_DELAY_S`/
+  `DRIVE_MAX_ACCEL_M_S2`）。走行速度が上がるほど `d_stop` は伸び、早い段階で作動する。
+  `margin` だけが `CONFIG_SET`（`param_id = 0x0060`）でcm単位の連続値として直接
+  指定できる（§5.8.3）。
+- **判定は3つのセンサ条件の OR**（いずれか1つでも成立すれば作動）:
+  1. **LiDAR（主センサ）**: 進行方向 ±20° の角度窓のうち、直近300ms以内に更新された
+     点で `d_stop` 以内の点が **3点以上**あれば障害物ありと確定する（1点だけの反射
+     ノイズを弾く設計）。
+  2. **超音波（フォールバック）**: LiDAR の角度窓に直近300ms以内のデータが1点も無い
+     （死角・センサ不調）場合に限り、超音波の距離を `d_stop` と比較する。
+  3. **超音波（近接フェイルセーフ）**: LiDAR の結果によらず、超音波が **5cm未満**を
+     検知したら常に作動する（LiDAR の最短測距距離より低い死角・バンパー直下等を補う）。
 - **進行方向の判定**は `torque_mode` が立っていなければ `target_speed` の符号、
-  立っていれば `target_torque` の符号で行う。`>= 0`（前進・停止）なら前方センサ、
-  負（後退）なら後方センサ**だけ**を見る。**逆方向のセンサは見ない**ので、
-  前方に障害物があっても `target_speed` を負にすれば後退で抜けられる。
-- 検知不能（`ULTRASONIC_NO_ECHO`、検知範囲外）のときは作動しない。
-  **`us_front`/`us_rear` の `0 = 無効` を「距離 0」と読まない**のと同じ理由で、
-  「見えていない」を「近い」に倒さない設計になっている。
+  立っていれば `target_torque` の符号で行う。`>= 0`（前進・停止）なら前方、
+  負（後退）なら後方**だけ**を見る。**逆方向は見ない**ので、前方に障害物があっても
+  `target_speed` を負にすれば後退で抜けられる。
+- 超音波が検知不能（`ULTRASONIC_NO_ECHO`、検知範囲外）のときはそのセンサ条件は
+  作動しない。**`us_front`/`us_rear` の `0 = 無効` を「距離 0」と読まない**のと
+  同じ理由で、「見えていない」を「近い」に倒さない設計になっている。
 - **`brake` (bit1) と同時に立っている場合は `brake` が優先**され、制動トルクは
   `brake_torque`（未指定なら最大）を使う。`auto_stop` 単独での作動時は
   **常に最大制動トルク**（`brake_torque` の値は見ない）。
   優先順位は **`brake` > `auto_stop` > 通常指令**（`torque_mode` 中の TC/TV と同じ経路）。
-- **ラッチしない。** 障害物が離れて検知距離を上回れば、その周期で自動的に解除される。
-  **ヒステリシスが無いので 20cm 前後ではチャタリングし得る。** 壁に詰める作業のように
-  それが許容できない場面では、Pi 側（GUI の設定パネル）で `auto_stop` を切ること。
+- **ラッチしない。** 障害物が離れて `d_stop` を上回れば、その周期で自動的に解除される。
+  どのセンサ条件にもヒステリシスは無いので、境界付近ではチャタリングし得る。
+  壁に詰める作業のようにそれが許容できない場面では、Pi 側（GUI の設定パネル）で
+  `auto_stop` を切るか、`margin` を小さい値まで下げること。
 - **DISARM はされない。** これは停止手段ではなく衝突緩和であり、E-Stop・DISARM・
   `COMMAND` 途絶とは別系統である。
-- 見るセンサは前後の超音波（`RangeSensor`）のみで、**LiDAR は使っていない**。
-  360点の最小距離集合を使った全周の自動停止は STM32 側 `src/sensing/lidar.c` の
-  拡張が必要で、現状は未実装。
+- **実機での動作検証は未了（2026-08-25）。** `t_delay`/`a_max`/LiDAR点数しきい値/
+  超音波5cmフェイルセーフはいずれも実測前の値であり、誤作動・未作動が出た場合は
+  一旦 `auto_stop` を切って様子を見ること（`pi_uart_protocol_v0.12_delta.md`）。
 
 #### 設計意図
 
@@ -791,12 +806,12 @@ CONFIG_ACK : [param_id : u16][applied : f32][result : u8]    = 7 B   (STM32 → 
 
 `applied` は書き込んだときしか返らないため、**GUI 起動時に実機の現在値を同期できなかった**。
 
-> **実装状況（2026-08-20時点）**: 上記は当初の設計意図であり、実際に Pi 側が
+> **実装状況（2026-08-25時点）**: 上記は当初の設計意図であり、実際に Pi 側が
 > `CONFIG_GET`/`CONFIG_SET` を送信しているのは `TC_ENABLE`(0x0010) / `TV_ENABLE`(0x0020) /
-> `WHEEL_LIFT_GUARD_ENABLE`(0x0050) の3つのみ（`raspi/nodes/io_node.py`）。`io_node` は
-> 起動時のハンドシェイク直後にこの3つだけ `CONFIG_GET` を送って初期状態を取得し、
-> 以降は GUI のトグル操作に応じて `CONFIG_SET` を送る。他の `param_id`（`MAX_SPEED` 等）
-> は§5.8.1の理由により未実装。
+> `WHEEL_LIFT_GUARD_ENABLE`(0x0050) / `AUTO_STOP_MARGIN_CM`(0x0060、★v0.12) の4つのみ
+> （`raspi/nodes/io_node.py`）。`io_node` は起動時のハンドシェイク直後にこの4つだけ
+> `CONFIG_GET` を送って初期状態を取得し、以降は GUI の操作に応じて `CONFIG_SET` を送る。
+> 他の `param_id`（`MAX_SPEED` 等）は§5.8.1の理由により未実装。
 
 #### 設定は Flash に永続化しない（揮発）
 
@@ -837,6 +852,7 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 | `0x0040` | **LiDAR 出力フォーマット** | **enum** | 下表。★v0.4 で bool から変更 |
 | `0x0050` | 片輪浮き対策 有効 | 0/1 | ★v0.9 で STM32 ファームウェアが実装。TC/TV 本体とは独立。Pi 側 `io_node` が GUI のトグルに応じて送信。既定値は有効 |
 | `0x0051` | 片輪浮き対策 しきい値・ゲイン | f32 | STM32 側未実装（`RAS_CONFIG_UNKNOWN_PARAM` を返す） |
+| `0x0060` | **自動停止の安全マージン** [cm] | f32 | ★v0.12 で STM32 ファームウェアが実装。§5.8.3。範囲 0.0-100.0、既定15.0。Pi 側 `io_node` が GUI の操作に応じて送信 |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
 
 #### 5.8.1 なぜ `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を Pi から送らないか
@@ -882,6 +898,33 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 - **実機での動作検証は STM32 側で未実施。** しきい値（後輪左右速度差の異常検知・絶対
   車輪速上限）は実測前の暫定値であり、誤介入等が起きた場合は一旦 OFF にして切り分ける
   ことを推奨する
+
+#### 5.8.3 自動停止の安全マージン（`param_id = 0x0060`, `auto_stop_margin_cm`、★v0.12）
+
+`auto_stop`（§5.6.4）が使う動的停止距離 `d_stop = v・t_delay + v²/(2・a_max) + margin`
+のうち、**`margin`（安全マージン）だけ**をcm単位の連続値として直接指定する。
+`t_delay`/`a_max` は STM32 側の固定定数で、物理項（速度に応じて伸びる分）は
+`margin` の値に関係なく一定。
+
+| 値 | 意味 |
+|---|---|
+| 0.0-100.0（f32、cm単位） | 範囲。**既定 15.0** |
+
+> **改訂履歴（2026-08-25）**: 当初案は `NEAR`(5cm)/`STANDARD`(15cm)/`FAR`(30cm) の
+> 3段階enumだったが、実機投入前に STM32 側の判断で**cm単位の連続値を直接指定**する
+> 方式へ変更された。本節は改訂後の仕様。
+
+- `CONFIG_SET`/`CONFIG_GET` の `value`/`applied` はそのまま cm 単位の f32
+- `applied` に実際に適用された値が入る。0.0〜100.0 の範囲外を送るとクランプして適用し、
+  `result` は `RAS_CONFIG_OUT_OF_RANGE`（2）になる
+- 走行中でも `CONFIG_SET` で切り替え可能
+- **旧版（v0.7〜v0.11）の固定20cmとは値の意味が異なる。** 停車中（`v = 0`）は
+  `margin` のみが効き、既定の15.0cmで作動する。走行中は速度が上がるほど `d_stop` が
+  伸び、旧版の固定値より早い段階で作動するようになる
+- **実機での動作検証は未了（2026-08-25）。** `t_delay`/`a_max` の値自体（制御側への
+  流用）・LiDAR点数しきい値・超音波5cmフェイルセーフも含め実測前の値であり、誤作動・
+  未作動が起きた場合は一旦 `auto_stop` を切って STM32 側に一報すること
+  （`pi_uart_protocol_v0.12_delta.md`）
 
 #### 設計意図
 
@@ -1422,8 +1465,8 @@ STM32 側で実測・確認してから確定する量。`config/vehicle.toml` �
 | 6 | 前輪エンコーダの実分解能（ADC ビット数と実効ノイズ） | `odom_dist` の量子化誤差、デッドバンド幅 | STM32 |
 | 7 | LiDAR の実効最大測距（コースでの最遠壁距離） | `param 0x0040 = 2`（圧縮）を常用できるか | Pi（実測） |
 | 8 | **`torque_mode` 中の TC/TV との関係**（★v0.6）。`target_torque` をそのまま各輪へ通すか、TC が空転抑制のため減衰させるか | `torque_mode` の実際の挙動、safety の考え方 | STM32 |
-| 9 | **`auto_stop` の検知距離とヒステリシス**（★v0.7）。現状は 20cm 固定・ヒステリシス無しで、`CONFIG_SET` の param も無い。詰め作業ではチャタリングする | 低速で壁に寄せる作業の可否、GUI から距離を変えられるか | STM32 |
-| 10 | **LiDAR による全周の自動停止**（★v0.7）。現状 `auto_stop` は前後の超音波しか見ない | 側方・斜め前の障害物に対する保護。`src/sensing/lidar.c` の拡張が要る | STM32 |
+| 9 | **`auto_stop` のヒステリシス**（★v0.7、★v0.12で距離自体は動的化・LiDAR併用済み）。境界付近でのチャタリングは未対策のまま | 低速で壁に寄せる作業の可否 | STM32 |
+| 10 | ~~**LiDAR による全周の自動停止**~~ **→ ★v0.12 で進行方向 ±20° の角度窓を主センサに採用、解決**。全周（側方・後方）はまだ見ていない | 側方・斜め前の障害物に対する保護を広げるか | STM32 |
 
 **残るは #5〜#6。** #1・#2 は STM32 ファームウェアの換算定数への反映まで済んでおり、
 Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知ることができる。
@@ -1444,6 +1487,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.7** | 2026-08-11 | **STM32 側発。ビットの追加のみで LEN は全パケット変更なし**（`flags` の空きビットを使う）。`COMMAND` (0x10) の `flags` bit7 に **`auto_stop`**、`TELEMETRY` (0x02) の `flags` bit16 に **`auto_stop_active`** を新設。`auto_stop` が立っている間、**進行方向**（`torque_mode` なら `target_torque`、そうでなければ `target_speed` の符号で決まる）の超音波が **20cm 未満**になると STM32 が指令を無視して**最大制動**する（§5.6.4）。逆方向のセンサは見ないので後退で抜けられる。検知不能時は作動せず、ラッチもしない（ヒステリシス無し＝境界でチャタリングし得る）。`brake` が同時に立っていれば `brake` が優先。**v0.6 とワイヤ非互換ではない**ため、片側が未対応でも通信は継続する |
 | **v0.8** | 2026-08-19 | **STM32 側発。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0010`（TC 有効）/ `0x0020`（TV 有効）が STM32 ファームウェアで実際に機能するようになった（以前は `RAS_CONFIG_UNKNOWN_PARAM` を返していた）。Pi 側は `io_node` にハンドシェイク直後の `CONFIG_GET` 初期同期と、GUI トグル操作に応じた `CONFIG_SET` 送信を実装（§5.8）。`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`0x0001`-`0x0003`）は STM32 側で既にクランプに使われているが、Flash 非永続化かつ動的変更のユースケースが無いため Pi からは意図的に未送信のまま（§5.8.1） |
 | **v0.9** | 2026-08-20 | **STM32 側発。ワイヤ形式・LEN の変更なし。** 後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策として「片輪浮き対策（Wheel Lift Guard）」を追加、`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050` で ON/OFF できるようになった（§5.8.2）。既存の TC 本体（`0x0010`）とは独立に動作し、個別に有効/無効を切り替えられる。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）操作に応じた `CONFIG_SET` 送信を実装。**STM32 側も実機で動作確認済み（2026-08-20）**（`pi_uart_protocol_v0.9_delta.md`） |
+| **v0.12** | 2026-08-25（`param_id = 0x0060` の値を3段階enumからcm直接指定へ改訂） | **STM32 側発。`CONFIG_SET`/`CONFIG_GET` の `param_id` が増えたのと `auto_stop` の下位判定ロジックの変更のみ（`COMMAND`/`TELEMETRY` を含む既存パケットの構造・LEN は変更なし）。** 固定20cmの自動停止判定を、走行速度に応じて伸びる動的停止距離 `d_stop = v・t_delay + v²/(2・a_max) + margin` と、LiDAR（進行方向±20°の角度窓・直近300ms・3点以上）を主センサ、超音波をフォールバック（LiDAR死角時のみ）と近接フェイルセーフ（5cm未満で常時作動）に使う判定へ置き換えた（§5.6.4）。Pi から変更できるのは安全マージン `margin`（`param_id = 0x0060`, `auto_stop_margin_cm`: cm単位の連続値、範囲0-100、既定15）のみ（§5.8.3）。**当初は `AutoStopLevel`（NEAR=5cm/STANDARD=15cm/FAR=30cmの3段階enum）として実装されていたが、実機投入前に STM32 側がcm直接指定へ変更**（本表はこの改訂を反映）。`t_delay`/`a_max` は STM32 側の固定定数。`protocol_version` を `0x000B`→`0x000C` に上げる。Pi 側は `io_node` に4つ目の `CONFIG_GET` 初期同期と、GUI 操作（`SettingsPanel` のスライダー）に応じた `CONFIG_SET` 送信を実装。**STM32 側実装済み、実機での動作検証は未了**（`pi_uart_protocol_v0.12_delta.md`） |
 | **v0.11** | 2026-08-22 | **STM32 側発。`LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設（`COMMAND`/`TELEMETRY`/`CONFIG_SET`/`CONFIG_GET` を含む既存パケットの構造・LEN は変更なし）。** v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を廃止した結果 Pi が STM32 側の固定上限値を知る手段が無くなっていた問題への対応。`LIMITS` は `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`（f32×4・LEN16・読み取り専用）を返す。STM32 は起動直後に `VERSION` と同じタイミングで3回自発送信、Pi は `LIMITS_REQ` でいつでも再取得できる（§5.12）。`protocol_version` を `0x000A`→`0x000B` に上げる。Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り、未受信なら1秒おきに再送する。`IoNode._send_command` は `LIMITS` を受信済みなら**無条件にそちらでクランプ**し（RC/AUTO 問わず）、`--max-speed`/`--max-steer`（Pi 側設定）は未受信時のみのフォールバックにした（`raspi/msgs/convert.py` の `command_from_cmd` に `max_accel`/`max_torque` 引数を追加。2026-08-22、当初は「小さい方」だったが GUI 表示との食い違いを避けるため「STM32 実測を優先」に変更）。GUI（`gui/src/store/ui.ts` の `effectiveRange()`）も同じ方針。`sim/stm32.py` にも `LIMITS`/`LIMITS_REQ` を実装済み。**STM32 側実装済み、実機での動作検証は未了**（`pi_uart_protocol_v0.11_delta.md`） |
 | **v0.10** | 2026-08-21 | **STM32 側発。`CONFIG_SET`/`CONFIG_GET` の `param_id` のみの変更（`COMMAND`/`TELEMETRY` を含むパケット構造・LEN は変更なし）。** `RAS_PARAM_MAX_SPEED`(`0x0001`)/`RAS_PARAM_MAX_ACCEL`(`0x0002`)/`RAS_PARAM_MAX_STEER`(`0x0003`) を廃止し、STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s、`DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s²、路面舵角 ±30°）に一本化。この3つの `param_id` は以後常に `RAS_CONFIG_UNKNOWN_PARAM` を返す（§5.8.1）。`protocol_version` を `0x0009`→`0x000A` に上げる。Pi はこの3つの `param_id` を元々送信していなかったため、`protocol.toml`/`packets.py`/`surge_proto.h` の `protocol_version` 更新のみで Pi 側の実質的な挙動変化はない。**STM32 側実装・単体テスト済み、実機での動作検証は未了**（`pi_uart_protocol_v0.10_delta.md`） |
 

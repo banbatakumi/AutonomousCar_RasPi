@@ -153,10 +153,14 @@ export const MAX_TARGET_TORQUE_NM = 0.15
 export const DEFAULT_DRIVE_TORQUE_NM = 0.05
 
 /**
- * STM32 が自動停止に入る距離 [m]（v0.7）。**GUI 側では変更できない**（STM32 の固定値）。
- * 表示に使うためだけに持つ。`CONFIG_SET` の param もまだ無い。
+ * ★v0.12 で廃止。STM32 の自動停止距離は固定20cmではなく
+ * `v・t_delay + v²/(2・a_max) + margin`（速度に応じて伸びる）に変わった。
+ * `margin` だけが `CONFIG_SET`（`param_id=0x0060`, `AUTO_STOP_MARGIN_CM`）で
+ * cm単位の連続値として直接指定できる（範囲0-100cm、既定15cm。当初は3段階enumの
+ * 予定だったが実機投入前にSTM32側がcm直接指定へ変更した）。表示は
+ * `link.auto_stop_margin_cm`（STM32 の `CONFIG_ACK` 由来のサーバ真値）を使うこと。
+ * `pi_uart_protocol_v0.12_delta.md` 参照
  */
-export const AUTO_STOP_DISTANCE_M = 0.2
 /**
  * 自動停止の既定。**ON にしてある。** 「効きすぎて止まる」より「気づかず当てる」方が
  * 損害が大きいため。⚠ STM32 側にヒステリシスが無いので、20cm 前後では

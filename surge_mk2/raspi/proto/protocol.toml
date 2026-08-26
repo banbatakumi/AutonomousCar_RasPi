@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x000B      # 上位=メジャー 下位=マイナー
+protocol_version = 0x000C      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -355,3 +355,9 @@ LIDAR_FORMAT   = 0x0040
 # （raspi/nodes/io_node.py）。
 WHEEL_LIFT_GUARD_ENABLE = 0x0050
 WHEEL_LIFT_GUARD_THRESH = 0x0051  # 未実装（STM32側が UNKNOWN_ID を返す）
+# AUTO_STOP_MARGIN_CM: v0.12でSTM32ファームウェアが実装済み。自動停止（COMMAND.flags
+# bit7=AUTO_STOP）が使う安全マージンをcm単位の連続値で直接指定する（段階enumではない。
+# 当初案は3段階enumだったが実機投入前にSTM32側がcm直接指定へ変更した）。
+# 範囲 0.0-100.0、既定15.0。未送信ならSTM32側の既定15cmのまま
+# （pi_uart_protocol_v0.12_delta.md）
+AUTO_STOP_MARGIN_CM = 0x0060

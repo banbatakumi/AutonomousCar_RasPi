@@ -37,7 +37,7 @@
 import { useState } from 'react'
 import type { DrivingSettings, NumericSettingKey, SettingRange } from '../store/ui'
 import {
-  AUTO_STOP_DISTANCE_M, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
+  MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
   PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, effectiveRange, useUi,
 } from '../store/ui'
 import { RAD2DEG } from '../format'
@@ -172,6 +172,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const tcEnabled = link?.tc_enabled ?? null
   const tvEnabled = link?.tv_enabled ?? null
   const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
+  const autoStopMarginCm = link?.auto_stop_margin_cm ?? null
   // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
   // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
   const cam = useUi((s) => s.cameraConfig)
@@ -244,17 +245,39 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
       {tab === 'safety' && (
         <>
           {/* ここだけは GUI の調整値ではなく「STM32 の機能を許可するかどうか」。
-              距離も制動力も STM32 側の固定値で、GUI からは変えられない（v0.7） */}
+              制動力自体は STM32 側の固定値で、GUI からは変えられない（v0.7）。
+              ★v0.12: 停止距離はもう固定値ではなく `v・t_delay + v²/(2・a_max) + margin`
+              （速度が上がるほど早い段階で作動する）。GUI から変えられるのは
+              margin をcm単位で直接指定する連続値だけ（`CONFIG_SET` param_id=0x0060）。
+              当初は3段階enumの予定だったが実機投入前にSTM32側がcm直接指定へ変更した。
+              表示値は STM32 の CONFIG_ACK 経由のサーバ真値（`link.auto_stop_margin_cm`）。
+              未確定（起動直後でまだ CONFIG_ACK が届いていない）間は null になる */}
           <section className="settings-group">
-            <h3>自動停止（超音波）</h3>
+            <h3>自動停止（超音波+LiDAR）</h3>
             <label className="settings-checkbox">
               <input
                 type="checkbox"
                 checked={settings.autoStop}
                 onChange={(e) => setSettings({ autoStop: e.target.checked })}
               />
-              進行方向 {(AUTO_STOP_DISTANCE_M * 100).toFixed(0)}cm 未満で STM32 に自動停止させる
+              走行速度に応じた停止距離＋余裕（margin）未満で STM32 に自動停止させる
             </label>
+            <div className="settings-row" title="停止距離の余裕（margin）。速度に応じて伸びる物理項とは別に、この分だけ手前で止める">
+              <div className="settings-row-head">
+                <span className="label">停止余裕（margin）{autoStopMarginCm === null && '（未確認）'}</span>
+                <b>{(autoStopMarginCm ?? 15).toFixed(0)}</b>
+                <span className="unit">cm</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={autoStopMarginCm ?? 15}
+                disabled={autoStopMarginCm === null}
+                onChange={(e) => ch?.setAutoStopMargin(Number(e.target.value))}
+              />
+            </div>
           </section>
 
           {/* TC/TV・片輪浮き対策 も自動停止と同じく「STM32の機能を許可するかどうか」

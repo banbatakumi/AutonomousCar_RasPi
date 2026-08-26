@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x7fc81e6f
+export const MSGS_SCHEMA = 0x51d16808
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -185,6 +185,12 @@ export type LinkDiag = {
    * （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。未確認なら None
    */
   wheel_lift_guard_enabled: boolean | null
+  /**
+   * 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
+   * から取得。★v0.12。範囲0.0-100.0の連続値。未確認（起動直後でまだ `CONFIG_ACK`
+   * を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
+   */
+  auto_stop_margin_cm: number | null
   /** Pi 側 RxStats */
   rx: Record<string, number>
   /** STM32 の STATS（**累積値**） */

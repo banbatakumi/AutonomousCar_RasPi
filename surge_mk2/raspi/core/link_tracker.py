@@ -52,6 +52,14 @@ CONFIG_ACK_BOOL_PARAMS = {
     packets.Param.WHEEL_LIFT_GUARD_ENABLE: "wheel_lift_guard_enabled",
 }
 
+#: `CONFIG_ACK` の `param_id` のうち、`LinkState` に連続値（float）として持たせるもの
+#: （★v0.12）。bool（0.0/1.0）に丸めず `applied` をそのまま持つ点が
+#: `CONFIG_ACK_BOOL_PARAMS` と違う。当初は3段階enumだったが、実機投入前に STM32 側が
+#: cm単位の直接指定へ変更した（`pi_uart_protocol_v0.12_delta.md` 改訂版）
+CONFIG_ACK_FLOAT_PARAMS = {
+    packets.Param.AUTO_STOP_MARGIN_CM: "auto_stop_margin_cm",
+}
+
 
 @dataclass(slots=True)
 class LinkState:
@@ -83,6 +91,11 @@ class LinkState:
     #: （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。
     #: まだ `CONFIG_ACK` を受け取っていなければ None
     wheel_lift_guard_enabled: bool | None = None
+
+    #: 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
+    #: から取得。★v0.12。範囲0.0-100.0の連続値。未送信ならSTM32側の既定15cmで
+    #: 動いているが、Pi起動直後で `CONFIG_ACK` を受け取っていなければ None）
+    auto_stop_margin_cm: float | None = None
 
 
 class LinkTracker:
@@ -171,10 +184,15 @@ class LinkTracker:
         `result == OK` のときの `applied` が STM32 側で実際に適用された値
         （クランプ後・現在値そのもの）
         """
-        name = CONFIG_ACK_BOOL_PARAMS.get(msg.param_id)
-        if name is None or msg.result != packets.ConfigResult.OK:
+        if msg.result != packets.ConfigResult.OK:
             return
-        setattr(self.state, name, msg.applied != 0.0)
+        name = CONFIG_ACK_BOOL_PARAMS.get(msg.param_id)
+        if name is not None:
+            setattr(self.state, name, msg.applied != 0.0)
+            return
+        name = CONFIG_ACK_FLOAT_PARAMS.get(msg.param_id)
+        if name is not None:
+            setattr(self.state, name, float(msg.applied))
 
     # ── health ──
 

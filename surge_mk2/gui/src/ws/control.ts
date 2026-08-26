@@ -198,6 +198,15 @@ export class ControlChannel {
     this.send({ type: 'wheel_lift_guard', enabled })
   }
 
+  /**
+   * 自動停止（RC/AUTO 問わず COMMAND.flags bit7=AUTO_STOP）が使う安全マージンを
+   * cm単位で直接指定する（★v0.12。範囲 0-100cm、既定15cm）。
+   * `tc_tv`/`wheel_lift_guard` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。
+   */
+  setAutoStopMargin(marginCm: number) {
+    this.send({ type: 'auto_stop_margin', margin_cm: marginCm })
+  }
+
   // ── 記録・再生 ──
 
   /** `.sfl` の記録意思を送る。実際に開閉するのは io_node（`log/ctrl` 経由） */

@@ -118,6 +118,7 @@ class BusBridge:
             tc_enabled=state.tc_enabled,
             tv_enabled=state.tv_enabled,
             wheel_lift_guard_enabled=state.wheel_lift_guard_enabled,
+            auto_stop_margin_cm=state.auto_stop_margin_cm,
             arm_inhibited=arm_inhibited,
             cmd_source=cmd_source,
             cmd_stale=cmd_stale,

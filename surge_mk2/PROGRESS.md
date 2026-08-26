@@ -3,8 +3,11 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-08-23（zbus のトピック登録漏れを修正／中心線を壁の穴に頑健化／
-`lidar_only` 実験モードを追加。下記「2026-08-23」節）
+最終更新: 2026-08-25（UART プロトコル v0.12 対応。`auto_stop` の判定を固定20cmから
+動的停止距離＋LiDAR併用へ刷新、安全マージンを `CONFIG_SET` param_id 0x0060 で
+3段階切替可能に。下記「2026-08-25」節）
+旧: 2026-08-23（zbus のトピック登録漏れを修正／中心線を壁の穴に頑健化／
+`lidar_only` 実験モードを追加）
 旧: 2026-08-22（SLAM の未解決3点に着手）
 旧: 2026-08-21（コードレビュー13項目を全修正し実機へ反映）
 旧: 2026-08-17（3561行あった本ファイルを軽量版とアーカイブに分割。**情報は削除しておらず、
@@ -14,6 +17,85 @@
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（下記「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-08-25：UART プロトコル v0.12 対応（STM32側発の delta doc を受けて）
+
+STM32 側から `pi_uart_protocol_v0.12_delta.md` が届き、Pi 側の対応チェックリストに
+従って実装した。**STM32 側は実装済みだが実機での動作検証は未了**なので、Pi 側も
+それに合わせて未検証の前提で実装（実機で誤作動が出たら `auto_stop` を切って様子見）。
+
+### 変わったこと
+
+- `auto_stop`（`COMMAND.flags` bit7）の判定が、**固定20cm・超音波単独**から
+  **`d_stop = v・t_delay + v²/(2・a_max) + margin`（速度に応じて伸びる）・
+  LiDAR主センサ＋超音波補助（フォールバック＋5cm近接フェイルセーフ）** へ変更。
+  `t_delay`/`a_max` は STM32 固定定数、Pi から変えられるのは `margin` の3段階
+  （NEAR=5cm/STANDARD=15cm(既定)/FAR=30cm）のみ
+- `CONFIG_SET`/`CONFIG_GET` に `param_id = 0x0060`（`AutoStopLevel`）を追加。
+  `TC_ENABLE`/`TV_ENABLE`/`WHEEL_LIFT_GUARD_ENABLE` と同じ形（整数enumをf32で
+  送受信、`io_node` がハンドシェイク直後に `CONFIG_GET` で初期同期、GUI操作で
+  `CONFIG_SET`）
+- `protocol_version` を `0x000B`→`0x000C`
+
+### 変更箇所
+
+- `raspi/proto/protocol.toml`: version bump、`enums.AUTO_STOP_LEVEL`、
+  `params.AUTO_STOP_LEVEL = 0x0060`（生成物は `generate.py` で再生成済み）
+- `raspi/core/link_tracker.py`: `CONFIG_ACK_BOOL_PARAMS` は bool 専用のままにし、
+  整数enum用に `CONFIG_ACK_INT_PARAMS` を新設（`LinkState.auto_stop_level: int | None`）
+- `raspi/msgs/types.py`: `LinkDiag.auto_stop_level` 追加。`UiEvent` に `int_value`
+  フィールドを追加（既存の `value: bool` とは別枠——混ぜると0/1に丸まるため）
+- `raspi/core/bus_bridge.py`: `LinkDiag` 組み立てに `auto_stop_level` を追加
+- `raspi/nodes/io_node.py`: `ui/event` の `"auto_stop_level"` kind を処理して
+  `CONFIG_SET` 送信、ハンドシェイク後に4つ目の `CONFIG_GET` を追加
+- `raspi/nodes/telemetry_node.py`: `/ws/control` の `"auto_stop_level"` kind
+  （`{level: 1|2|3}`）を `UiEvent` にブリッジ
+- `sim/stm32.py`: `_config` の初期値に `AUTO_STOP_LEVEL: STANDARD` を追加
+  （他の bool 系パラメータと違い、未設定時の 0.0 が enum のどの値でもなく
+  不正値になってしまうため）
+- GUI: `gui/src/ws/control.ts` に `setAutoStopLevel()`、`SettingsPanel.tsx` の
+  安全タブに margin 3段階セグメント（`link.auto_stop_level` がサーバ真値）。
+  `store/ui.ts` の `AUTO_STOP_DISTANCE_M`（固定20cm前提の表示用定数）は廃止
+- `docs/uart_protocol.md`/`docs/stm32_interface.md`/`docs/README.md`:
+  バージョン表記・§5.6.4・§5.8.3・changelog を更新（`config/check_docs.py --check` 通過）
+- `raspi/tests/test_proto.py`: `PROTOCOL_VERSION` の期待値を更新
+
+`./tools/check.sh`（生成物一致・文書版番号・pytest 504件）と `gui` の `tsc -b` は
+全部通した。**実機での動作検証はまだ**（STM32側も同様）。
+
+### 実機反映で `surge-telemetry` の再起動漏れが型不一致を起こした
+
+`tools/deploy.sh --restart-io` で `surge-io` は再起動したが、`surge-telemetry` は
+再起動していなかった。`gui/src/generated/msgs.ts` の `MSGS_SCHEMA` は
+`raspi/msgs/types.py` の型構造から決定的に導かれる値（`raspi/msgs/schema.py`）で、
+`LinkDiag` にフィールドを足すと変わる。ビルド済みGUIは新スキーマだが、
+`surge-telemetry` プロセスは Python を再インポートしない限り古い型定義を
+メモリに持ったままなので、`/ws/telemetry` で送るスキーマ値が食い違ったまま
+「テレメトリの型定義が食い違っています」の警告が出続けた。
+**`raspi/msgs/types.py`（`LinkDiag`/`Scan`/`VehicleState`/`AutoState`/`AutoMap`
+のいずれか）を触ったときは `surge-io` だけでなく `surge-telemetry` も
+再起動が要る**（`tools/deploy.sh --restart` または `--restart-io` と併用）。
+
+### `param_id = 0x0060` を3段階enumからcm直接指定へ改訂（同日中に revert 相当）
+
+上記の実装・実機反映の直後、STM32側から改訂版の delta doc が届いた。**実機投入前に
+STM32側の判断で、`auto_stop` の安全マージンを `AutoStopLevel`（NEAR/STANDARD/FAR
+の3段階enum）ではなく `auto_stop_margin_cm`（0.0-100.0cmの連続値、既定15.0）を
+直接指定する方式へ変更**。`param_id`（`0x0060`）自体は変わっていないが、
+**`protocol_version` は据え置き（`0x000C`のまま）で値の意味だけが変わった**——
+ワイヤ上は区別できないので、Pi側の実装が新しい方に揃っているかは人間が確認するしかない
+（`docs/stm32_interface.md` にその旨を明記した）。
+
+Pi側は enum 関連のコードを一通り書き換えた: `link_tracker.py` の
+`CONFIG_ACK_INT_PARAMS`→`CONFIG_ACK_FLOAT_PARAMS`（`applied` をそのままfloatで
+持つ）、`LinkState`/`LinkDiag` の `auto_stop_level: int`→`auto_stop_margin_cm: float`、
+`UiEvent.int_value`→`float_value`（他に使う場所が無かったのでrename）、
+GUI の `SettingsPanel.tsx` は3段階の `.seg` ボタンから0-100cmの `<input type=range>`
+スライダーへ（`cam?.front_cap_hz` のfpsスライダーと同じパターン）。
+`sim/stm32.py` の既定値も `AutoStopLevel.STANDARD` → `15.0`(cm) に修正。
+protocol_versionは変えていないので `raspi/tests/test_proto.py` の再修正は不要だった。
 
 ---
 

@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x000Bu
+#define SURGE_PROTOCOL_VERSION  0x000Cu
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -112,6 +112,7 @@
 #define PARAM_LIDAR_FORMAT       0x0040u
 #define PARAM_WHEEL_LIFT_GUARD_ENABLE 0x0050u
 #define PARAM_WHEEL_LIFT_GUARD_THRESH 0x0051u
+#define PARAM_AUTO_STOP_MARGIN_CM 0x0060u
 
 /* ── パケット構造体 ───────────────────────────────────────── */
 /* ペイロードはフレーム先頭から5バイト目に始まるため u32/i32 が4バイト境界に乗らない。

@@ -1,13 +1,38 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.11（`uart_protocol.md` **v0.11** に対応）
-**最終更新**: 2026-08-22
+**バージョン**: v0.12（`uart_protocol.md` **v0.12** に対応）
+**最終更新**: 2026-08-25（`param_id = 0x0060` の値の意味を3段階enumからcm直接指定へ改訂）
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.12 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-08-25。`pi_uart_protocol_v0.12_delta.md`）**
+> - **ワイヤ形式・LEN の変更は無い。** 変わったのは `CONFIG_SET`/`CONFIG_GET` で
+>   受け付ける `param_id` が増えたことと、`auto_stop`（`COMMAND.flags` bit7）の
+>   下位側の判定ロジックだけなので、この版に未対応でも既存の通信はそのまま継続する
+> - `auto_stop` の検知距離を、固定20cmから **`d_stop = v・t_delay + v²/(2・a_max) +
+>   margin`**（進行方向の実走行速度 `v` に応じて伸びる）へ変更。`t_delay`/`a_max` は
+>   STM32 側の固定定数（`VEHICLE_AUTO_STOP_DELAY_S`/`DRIVE_MAX_ACCEL_M_S2`）。
+>   Pi から変えられるのは `margin` のcm単位の値そのもの（下記 `param_id = 0x0060`）
+> - 判定ロジックを**超音波単独**から**LiDAR主・超音波補助**へ変更: LiDAR（進行方向
+>   ±20°、直近300ms以内、3点以上で確定）／超音波フォールバック（LiDARの当該角度窓に
+>   直近300ms以内のデータが無いときだけ`d_stop`と比較）／超音波近接フェイルセーフ
+>   （LiDARの結果によらず5cm未満で常時作動）のOR判定（`uart_protocol.md` §5.6.4）
+> - `param_id = 0x0060`（**自動停止の安全マージン / `auto_stop_margin_cm`**）を実装。
+>   f32、cm単位の連続値、範囲0.0-100.0、既定15.0
+> - **改訂（2026-08-25）**: 当初 `AutoStopLevel`（1=`NEAR`(5cm)/2=`STANDARD`(15cm)/
+>   3=`FAR`(30cm) の3段階enum）として実装していたが、実機投入前にcm直接指定へ変更した。
+>   `param_id` は同じ `0x0060` のまま、値の意味だけが変わっている
+> - `protocol_version` を `0x000B`→**`0x000C`** に上げる（enumからcm直接指定への
+>   改訂時点では上げ直していない。**値の意味の変更に気づかず古い前提でクランプ範囲
+>   （1〜3）のまま実装しないこと**）
+> - Pi 側は `io_node` に4つ目の `CONFIG_GET` 初期同期と、GUI の操作（`SettingsPanel`
+>   のスライダー、0-100cm）に応じた `CONFIG_SET` 送信を実装（`uart_protocol.md` §5.8.3）
+> - 旧版（v0.7〜v0.11）の固定20cmとは意味が異なる値。互換性は意図的に取らない
+>   （`uart_protocol.md` §5.8.3）
 
 > **v0.11 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-08-21）**
 > - **ワイヤ形式・LEN の変更は無い。** 新設したのは `LIMITS`(0x0A)/`LIMITS_REQ`(0x15) の
@@ -609,7 +634,7 @@ typedef struct {
 | 3-4 | `light_mode` | 0=OFF / 1=DAYTIME / 2=NORMAL（3 は予約・Pi は送らない） |
 | 5 | `passing` | パッシング（前照灯のみ全光量。尾灯は連動しない） |
 | 6 | `torque_mode` | 立っている間 `target_speed` を無視し `target_torque` を直接掛ける ★v0.6 |
-| 7 | `auto_stop` | 立っている間、進行方向の超音波 20cm 未満で自動的に最大制動 ★v0.7 |
+| 7 | `auto_stop` | 立っている間、進行方向の動的停止距離 `d_stop` 未満で自動的に最大制動 ★v0.7（★v0.12で距離自体を動的化・LiDAR併用に変更） |
 
 - `target_speed` は**目標速度**であり目標加速度ではない。`accel_limit` は
   「その目標速度へ向かうときの加減速の上限」
@@ -625,12 +650,17 @@ typedef struct {
   「未指定」ではなく素直に「駆動トルク 0」。上限は **0.125 N·m**（Pi 側でもクランプ済み。
   モータ物理上限 0.1557 N·m 未満。実車確認後に 0.1 から引き上げ）。**TC/TV との関係は未確定**
   （そのまま通すか、空転抑制のため減衰させるか。`uart_protocol.md` §14 #8）
-- **`auto_stop` 中は進行方向の超音波だけを見る**（★v0.7）。`torque_mode` が立っていなければ
-  `target_speed`、立っていれば `target_torque` の符号で向きを決め、`>= 0` なら前方センサ、
-  負なら後方センサ**だけ**を見る（逆方向は見ないので後退で抜けられる）。検知不能
-  （`ULTRASONIC_NO_ECHO`・範囲外）では作動しない。`brake` が同時なら `brake` 優先で、
-  `auto_stop` 単独時は `brake_torque` を見ず常に最大制動。**ラッチせず**、離れれば自動解除。
-  介入中は `TELEMETRY.flags` bit16 を立てること
+- **`auto_stop` 中は動的停止距離 `d_stop = v・t_delay + v²/(2・a_max) + margin` を使う**
+  （★v0.7、距離の算出は★v0.12）。`torque_mode` が立っていなければ `target_speed`、
+  立っていれば `target_torque` の符号で向きを決め、`>= 0` なら前方、負なら後方**だけ**
+  を見る（逆方向は見ないので後退で抜けられる）。障害物ありの判定は次の3条件の OR
+  （★v0.12）: (1) LiDAR — 進行方向±20°の角度窓のうち直近300ms以内に更新された点で
+  `d_stop` 以内が3点以上、(2) 超音波フォールバック — LiDAR の当該角度窓に直近300ms
+  以内のデータが無いときだけ、超音波距離を `d_stop` と比較、(3) 超音波近接フェイル
+  セーフ — LiDAR の結果によらず超音波が5cm未満なら常時作動。超音波が検知不能
+  （`ULTRASONIC_NO_ECHO`・範囲外）ならそのセンサ条件は不作動。`brake` が同時なら
+  `brake` 優先で、`auto_stop` 単独時は `brake_torque` を見ず常に最大制動。
+  **ラッチせず**、`d_stop` を上回れば自動解除。介入中は `TELEMETRY.flags` bit16 を立てること
 - **`COMMAND` が 100ms 途絶したら自動ブレーキ**（v0.3 の 200ms から短縮。§8.2）。
   ★v0.5 では最大制動トルクを直接掛け、`horn` と `passing` は強制解除する
 
@@ -1203,7 +1233,19 @@ MD が返す status バイトをそのまま転送し、上位ビットを STM32
 | `0x0040` | **LiDAR 出力フォーマット** | **enum** | 下表。★v0.4 で bool から変更 |
 | `0x0050` | 片輪浮き対策 有効 | 0/1 | ★v0.9 で STM32 側が実装。TC 本体（`0x0010`）とは独立 |
 | `0x0051` | 片輪浮き対策 しきい値・ゲイン | float | 未実装 |
+| `0x0060` | **自動停止 安全マージン（`auto_stop_margin_cm`）** [cm] | float | ★v0.12 で実装。下表。範囲0.0-100.0、既定15.0 |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
+
+**`param_id 0x0060` — 自動停止 安全マージン（★v0.12。2026-08-25、enumからcm直接指定へ改訂）**
+
+`d_stop = v・t_delay + v²/(2・a_max) + margin` の `margin` を cm単位の連続値として
+直接指定する。範囲 0.0〜100.0、既定 15.0。範囲外は `result=2`（範囲外）でクランプ後
+の値を`applied`に返す。詳細は `uart_protocol.md` §5.8.3。
+
+> 当初は 1=`NEAR`(5cm)/2=`STANDARD`(15cm)/3=`FAR`(30cm) の3段階enumだったが、
+> 実機投入前にこの方式へ変更された。**古い1〜3のenum値をそのまま送ると
+> 「1.0cm」「2.0cm」「3.0cm」という極端に小さいマージンとして適用されてしまう**ので、
+> Pi 側の実装（`raspi/proto/protocol.toml`）が新しい方に揃っているか確認すること。
 
 **`param_id 0x0040` — LiDAR 出力フォーマット（enum）**
 
@@ -1352,12 +1394,17 @@ Pi 側が計算する:
 - [ ] **`torque_mode`（bit6）が立っている間、車速 PI を迂回し `target_torque` を直接掛けている**（★v0.6）
 - [ ] `brake` と `torque_mode` が同時に立っていたら **`brake` を優先**している（★v0.6）
 - [ ] `target_torque` を **±0.125 N·m でクランプ**している（Pi 側のクランプに頼っていない）（★v0.6）
-- [ ] **`auto_stop`（bit7）が立っている間、進行方向の超音波 20cm 未満で最大制動している**（★v0.7）
+- [ ] **`auto_stop`（bit7）が立っている間、進行方向の `d_stop = v・t_delay + v²/(2・a_max) +
+      margin` 未満で最大制動している**（★v0.7、距離の算出は★v0.12）
 - [ ] `auto_stop` の進行方向判定に `torque_mode` の有無を反映している（速度 or トルクの符号）（★v0.7）
 - [ ] **逆方向のセンサを見ていない**（前方に障害物があっても後退できる）（★v0.7）
-- [ ] 検知不能（`ULTRASONIC_NO_ECHO`・範囲外）では `auto_stop` が作動しない（★v0.7）
+- [ ] LiDAR（進行方向±20°、直近300ms以内、3点以上）を主判定に使っている（★v0.12）
+- [ ] 超音波はLiDARの当該角度窓に直近300ms以内のデータが無いときだけフォールバックで見ている（★v0.12）
+- [ ] 超音波5cm未満はLiDARの結果によらず常に作動する近接フェイルセーフになっている（★v0.12）
+- [ ] 超音波が検知不能（`ULTRASONIC_NO_ECHO`・範囲外）のときそのセンサ条件は作動しない（★v0.7）
 - [ ] 優先順位が **`brake` > `auto_stop` > 通常指令**になっている（★v0.7）
 - [ ] 介入中だけ `FLG_AUTO_STOP_ACTIVE` を立てている（許可されているかではない）（★v0.7）
+- [ ] `CONFIG_SET`（`param_id=0x0060`）で `margin` がcm単位の連続値として切り替わる（★v0.12。0.0-100.0の範囲、既定15.0）
 
 ### センサ・データ
 
@@ -1524,6 +1571,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.12** | 2026-08-25（`param_id=0x0060`の値を3段階enumからcm直接指定へ改訂） | **`uart_protocol.md` v0.12 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `auto_stop` の検知距離を固定20cmから `d_stop = v・t_delay + v²/(2・a_max) + margin`（速度に応じて伸びる）へ変更し、判定を超音波単独からLiDAR主・超音波補助（フォールバック＋5cm近接フェイルセーフ）へ刷新。`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0060`（`auto_stop_margin_cm`: cm単位の連続値、範囲0-100、既定15）で `margin` を直接指定可能に。**当初 `AutoStopLevel`（1=NEAR/2=STANDARD(既定)/3=FAR の3段階enum）として実装されていたが、実機投入前にSTM32側がcm直接指定へ変更**（`param_id`は据え置き、値の意味だけ変更）。`protocol_version` を `0x000B`→`0x000C` に更新（enumからcmへの改訂時点では再度は上げていない）。Pi 側は `io_node` に4つ目の `CONFIG_GET` 初期同期と、GUI（`SettingsPanel`のスライダー）操作に応じた `CONFIG_SET` 送信を実装（`pi_uart_protocol_v0.12_delta.md`） |
 | **v0.11** | 2026-08-22 | **`uart_protocol.md` v0.11 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設。`LIMITS` は `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`（f32×4・LEN16・読み取り専用）を返し、`VERSION` と同じく起動直後3回自発送信＋`LIMITS_REQ`応答。v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `param_id` を廃止した結果 Pi が STM32 の実際の固定上限値を知れなくなっていた問題への対応。`protocol_version` を `0x000A`→`0x000B` に更新。Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り未受信なら1秒おきに再送、`IoNode._send_command` が RC/AUTO 問わず `LIMITS` 受信済みなら無条件にそちらでクランプし `--max-speed`/`--max-steer` は未受信時のみのフォールバックにするよう実装（`raspi/msgs/convert.py` に `max_accel`/`max_torque` 引数を追加。GUI・`sim/stm32.py` も同じ方針で対応） |
 | **v0.10** | 2026-08-21 | **`uart_protocol.md` v0.10 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0001`（最大速度）/`0x0002`（最大加速度）/`0x0003`（最大舵角）を廃止し、以後は常に `RAS_CONFIG_UNKNOWN_PARAM` を返す。上限は STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s、`DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s²、路面舵角 ±30°）に一本化。`COMMAND.accel_limit`/`steer_rate_limit`（毎指令ごとのレート制限）は無関係で変更なし。`protocol_version` を `0x0009`→`0x000A` に更新。Pi はこの3つの `param_id` を元々送信していなかったため、Pi 側の対応は `protocol_version` の更新のみ |
 | **v0.9** | 2026-08-21 | **`uart_protocol.md` v0.9 に対応。STM32 側実装・実機動作確認済み（2026-08-20）。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050`（**片輪浮き対策 / Wheel Lift Guard**）を実装。後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策で、**TC 本体（`0x0010`）とは独立に動作し個別に切り替えられる**。既定値は有効。`0x0051`（しきい値・ゲイン）は未実装で、しきい値は固定値。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）に応じた `CONFIG_SET` 送信を実装 |

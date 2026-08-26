@@ -418,6 +418,9 @@ class IoNode:
         elif msg.kind == "wheel_lift_guard_enable":
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE, value=1.0 if msg.value else 0.0))
+        elif msg.kind == "auto_stop_margin_cm":
+            self.link.send(packets.ConfigSet(
+                param_id=packets.Param.AUTO_STOP_MARGIN_CM, value=msg.float_value))
 
     def _send_command(self) -> None:
         """今この瞬間送るべき `COMMAND` を決めて送る。
@@ -704,6 +707,9 @@ def main() -> int:
         node.link.send(packets.ConfigGet(param_id=packets.Param.TC_ENABLE))
         node.link.send(packets.ConfigGet(param_id=packets.Param.TV_ENABLE))
         node.link.send(packets.ConfigGet(param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE))
+        # ★v0.12: 自動停止の安全マージン[cm]。CONFIG_SET はFlash非永続化なので、
+        # GUI操作前でもSTM32起動直後の実際の値（既定15cm）をGUIに出せるようにする
+        node.link.send(packets.ConfigGet(param_id=packets.Param.AUTO_STOP_MARGIN_CM))
 
     # ★v0.11: 車両の物理的な上限値。RC/AUTO 問わず _send_command が毎回これで
     # クランプする。受信済みなら無条件にこちらを使う（2026-08-22、--max-speed/

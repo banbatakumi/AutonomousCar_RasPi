@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x000B
+PROTOCOL_VERSION = 0x000C
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -95,6 +95,7 @@ class Param:
     LIDAR_FORMAT = 0x0040
     WHEEL_LIFT_GUARD_ENABLE = 0x0050
     WHEEL_LIFT_GUARD_THRESH = 0x0051
+    AUTO_STOP_MARGIN_CM = 0x0060
 
 _S_LIDAR_SECTOR = struct.Struct('<BI32H')
 

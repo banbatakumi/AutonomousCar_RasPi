@@ -644,6 +644,15 @@ class TelemetryServer:
                 self.pub.send(TOPIC_UI_EVENT,
                                UiEvent(kind="wheel_lift_guard_enable", value=bool(m["enabled"])))
 
+        # ── 自動停止の安全マージン[cm]（誰でも操作できる。★v0.12） ──
+        # STM32側の適用結果は tc_tv/wheel_lift_guard と同様
+        # `diag/link`(auto_stop_margin_cm) 経由で戻ってくるのでここでは broadcast しない
+
+        elif kind == "auto_stop_margin":
+            if "margin_cm" in m:
+                self.pub.send(TOPIC_UI_EVENT,
+                               UiEvent(kind="auto_stop_margin_cm", float_value=float(m["margin_cm"])))
+
         elif kind == "ping":
             await self._send_json(ws, {"type": "pong", "id": m.get("id"),
                                        "t_server": time.monotonic_ns()})
