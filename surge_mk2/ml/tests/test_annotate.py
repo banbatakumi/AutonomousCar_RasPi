@@ -101,6 +101,21 @@ class TestAnnotationSession(unittest.TestCase):
         # 右の点を取り消したので、残るのは左の点だけ → 左側が選ばれる
         self.assertTrue(mask[:, :10].all())
 
+    def test_seed_replays_points_after_load_image(self):
+        session = AnnotationSession(FakePredictor())
+        session.load_image(_image(w=20, h=10))
+        session.add_point(3, 5, foreground=True)
+        session.add_point(15, 2, foreground=False)
+        carried_points = list(session.points)
+        carried_labels = list(session.labels)
+
+        session.load_image(_image(w=20, h=10))            # 次のフレームへ（クリアされる）
+        self.assertEqual(session.points, [])
+
+        session.seed(carried_points, carried_labels)
+        self.assertEqual(session.points, carried_points)
+        self.assertEqual(session.labels, carried_labels)
+
     def test_clear_resets_points(self):
         session = AnnotationSession(FakePredictor())
         session.load_image(_image())

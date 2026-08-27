@@ -70,6 +70,40 @@ class TestExtractFrames(unittest.TestCase):
                 n = extract_one(mcap_path, out_dir, {"front"}, w)
             self.assertEqual(n, 0)
 
+    def test_min_interval_ns_thins_out_close_frames(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                log.write_viz_image(jpg, "front", t_mono_ns=0)
+                log.write_viz_image(jpg, "front", t_mono_ns=100_000_000)   # +100ms → 間引かれる
+                log.write_viz_image(jpg, "front", t_mono_ns=250_000_000)   # +250ms → 採用される
+
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                n = extract_one(mcap_path, out_dir, {"front"}, w, min_interval_ns=200_000_000)
+
+            self.assertEqual(n, 2, "0msと250msの2枚だけ採用され、100msは間引かれるはず")
+
+    def test_min_interval_ns_is_per_camera(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                log.write_viz_image(jpg, "front", t_mono_ns=0)
+                log.write_viz_image(jpg, "rear", t_mono_ns=10_000_000)
+
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                n = extract_one(mcap_path, out_dir, {"front", "rear"}, w,
+                                min_interval_ns=200_000_000)
+
+            self.assertEqual(n, 2, "別カメラなので間引きの基準時刻を共有しないはず")
+
     def test_topic_prefix_matches_mcap_log(self):
         """`VIZ_IMAGE_PREFIX` が `raspi/rec/mcap_log.py` の値とズレていないこと。"""
         from raspi.rec.mcap_log import VIZ_IMAGE_PREFIX as PI_SIDE_PREFIX

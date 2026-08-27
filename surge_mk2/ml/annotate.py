@@ -19,6 +19,13 @@
 保存先は `<frames_dir>/<frame_stem>_mask.png`（0/255 の2値。`ml/dataset.py`
 が読む場所とファイル名の約束）。
 
+## 点の引き継ぎ（既定で有効）
+
+連続するフレームは走行可能領域がほぼ同じ場所なので、Enter で保存すると
+その時点の点をそのまま次フレームの初期点として引き継ぐ。多くの場合は
+見た目を確認して Enter を押すだけで済み、ズレていた点だけ z で消して
+打ち直せばよい。`--no-carry-points` で無効化できる。
+
 ## 事前準備
 
 SAM のチェックポイントは同梱されないので別途ダウンロードしておくこと。
@@ -72,6 +79,11 @@ class AnnotationSession:
             self.points.pop()
             self.labels.pop()
 
+    def seed(self, points: list[tuple[int, int]], labels: list[int]) -> None:
+        """前フレームの点を初期値として引き継ぐ（`load_image` 直後に呼ぶ想定）。"""
+        for (x, y), lb in zip(points, labels):
+            self.add_point(x, y, foreground=bool(lb))
+
     def predict_mask(self) -> np.ndarray | None:
         """現在の点集合から2値マスク（bool, HxW、True=走行可能）を作る。
 
@@ -117,6 +129,8 @@ def main() -> int:
     ap.add_argument("--device", default="cpu", help="cpu / mps / cuda")
     ap.add_argument("--skip-labeled", action="store_true",
                     help="既にマスクがあるフレームは飛ばす")
+    ap.add_argument("--no-carry-points", action="store_true",
+                    help="前フレームの点を次フレームへ引き継がない")
     args = ap.parse_args()
 
     try:
@@ -148,6 +162,9 @@ def main() -> int:
 
     cv2.setMouseCallback(win, on_mouse)
 
+    carry_points = not args.no_carry_points
+    pending_carry: tuple[list[tuple[int, int]], list[int]] | None = None
+
     idx = 0
     while 0 <= idx < len(frame_paths):
         path = frame_paths[idx]
@@ -158,6 +175,8 @@ def main() -> int:
             continue
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         session.load_image(image_rgb)
+        if carry_points and pending_carry is not None:
+            session.seed(*pending_carry)
 
         advance = 1
         while True:
@@ -184,6 +203,7 @@ def main() -> int:
                 if mask is not None:
                     save_mask(mask, args.frames_dir / f"{path.stem}_mask.png")
                     print(f"# 保存: {path.stem}_mask.png")
+                    pending_carry = (list(session.points), list(session.labels))
                 advance = 1
                 break
             if key == ord('n'):

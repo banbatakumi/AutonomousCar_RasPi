@@ -12,6 +12,11 @@ GUIの「ログ」タブ（`gui/src/views/LogView.tsx` の `.mcap` セクショ�
 出力先に `manifest.csv`（ファイル名・元の `.mcap`・カメラ・撮像時刻）を
 追記していく。**実行するたびに追記される**ので、複数回の走行で集めた
 フレームを同じ `--out` にまとめてよい。
+
+`--min-interval-ms` で間引きができる（既定 0 = 全件出力）。走行中の映像は
+前後フレームがほとんど同じ構図になりがちで、全件出すと後続のアノテーション
+（`ml/annotate.py`）の手間がそのまま比例して増える。カメラ側の実効fpsより
+大きい間隔を指定すれば、そのぶんアノテーション対象を減らせる。
 """
 
 from __future__ import annotations
@@ -38,20 +43,29 @@ VIZ_IMAGE_PREFIX = "/viz/image/"
 
 
 def extract_one(mcap_path: Path, out_dir: Path, cams: set[str],
-                writer: csv.writer) -> int:
-    """1つの `.mcap` からフレームを書き出し、書いた枚数を返す。"""
+                writer: csv.writer, *, min_interval_ns: int = 0) -> int:
+    """1つの `.mcap` からフレームを書き出し、書いた枚数を返す。
+
+    `min_interval_ns` を指定すると、カメラごとに直前に書き出したフレームから
+    その時間未満しか経っていないフレームを飛ばす（既定 0 = 間引きなし）。
+    """
     n = 0
+    last_t_by_cam: dict[str, int] = {}
     topics = [VIZ_IMAGE_PREFIX + c for c in cams]
     with open(mcap_path, "rb") as f:
         reader = make_reader(f)
         for _schema, channel, message in reader.iter_messages(topics=topics):
             cam = channel.topic[len(VIZ_IMAGE_PREFIX):]
+            t_ns = message.log_time
+            last_t = last_t_by_cam.get(cam)
+            if last_t is not None and t_ns - last_t < min_interval_ns:
+                continue
             obj = json.loads(message.data)
             jpg = base64.b64decode(obj["data"])
-            t_ns = message.log_time
             name = f"{mcap_path.stem}_{cam}_{t_ns}.jpg"
             (out_dir / name).write_bytes(jpg)
             writer.writerow([name, mcap_path.name, cam, t_ns])
+            last_t_by_cam[cam] = t_ns
             n += 1
     return n
 
@@ -63,9 +77,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("ml/data/frames"))
     ap.add_argument("--cam", choices=("front", "rear", "both"), default="front",
                     help="取り出すカメラ（既定 front。無制限部門の MVP は前方のみ想定）")
+    ap.add_argument("--min-interval-ms", type=int, default=0,
+                    help="この間隔未満のフレームは間引く（既定 0 = 全件出力）")
     args = ap.parse_args()
 
     cams = {"front", "rear"} if args.cam == "both" else {args.cam}
+    min_interval_ns = args.min_interval_ms * 1_000_000
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.csv"
     is_new = not manifest_path.exists()
@@ -79,7 +96,7 @@ def main() -> int:
             if not p.exists():
                 print(f"# skip: {p}（見つからない）", file=sys.stderr)
                 continue
-            n = extract_one(p, args.out, cams, w)
+            n = extract_one(p, args.out, cams, w, min_interval_ns=min_interval_ns)
             print(f"# {p.name}: {n}枚")
             total += n
 
