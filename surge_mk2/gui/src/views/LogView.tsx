@@ -237,6 +237,7 @@ function FilesSection({ ch, files }: { ch: ControlChannel | null; files: LogFile
  */
 function FrameExtractSection() {
   const [cams, setCams] = useState({ front: true, rear: false })
+  const [intervalMs, setIntervalMs] = useState(500)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
 
@@ -249,7 +250,8 @@ function FrameExtractSection() {
       if (cams.rear) selected.add('rear')
 
       const buf = await file.arrayBuffer()
-      const frames = extractFramesFromMcap(buf, selected)
+      const minIntervalNs = BigInt(Math.max(0, Math.trunc(intervalMs))) * 1_000_000n
+      const frames = extractFramesFromMcap(buf, selected, minIntervalNs)
       if (frames.length === 0) {
         setStatus('選んだカメラのフレームが見つかりませんでした')
         return
@@ -285,6 +287,8 @@ function FrameExtractSection() {
       <p className="dim">
         録画した .mcap からカメラ画像だけを取り出し、ZIP でダウンロードします。
         ml/annotate.py・ml/train.py の入力にそのまま使えます。
+        間引き間隔を0より大きくすると、連続フレームで似た構図が続く分を
+        削れます（0でこれまで通り全件）。
       </p>
       <div className="logs-row">
         <label className="logs-checkbox">
@@ -302,6 +306,18 @@ function FrameExtractSection() {
             onChange={(e) => setCams((c) => ({ ...c, rear: e.target.checked }))}
           />
           後方カメラ
+        </label>
+        <label className="logs-checkbox">
+          間引き間隔(ms):
+          <input
+            type="number"
+            min={0}
+            step={100}
+            value={intervalMs}
+            disabled={busy}
+            onChange={(e) => setIntervalMs(Number(e.target.value))}
+            style={{ width: '5em', marginLeft: '0.4em' }}
+          />
         </label>
       </div>
       <div className="logs-row">

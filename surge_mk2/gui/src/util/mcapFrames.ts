@@ -37,9 +37,18 @@ function base64ToBytes(b64: string): Uint8Array {
  * `.mcap` のバイト列からカメラフレームを取り出す。
  *
  * @param cams 取り出すカメラ名の集合（`"front"` / `"rear"`）。
+ * @param minIntervalNs カメラごとに、直前に採用したフレームからこの時間未満
+ *   しか経っていないフレームを間引く（既定 0n = 間引きなし）。連続フレームは
+ *   ほぼ同じ構図になりがちで、全件出すと `ml/annotate.py` での手間が
+ *   そのまま比例して増えるため（`ml/extract_frames.py` の `--min-interval-ms`
+ *   と同じ考え方）。
  * @throws 未対応の圧縮方式（zstd 以外）が含まれていた場合
  */
-export function extractFramesFromMcap(buf: ArrayBuffer, cams: Set<string>): ExtractedFrame[] {
+export function extractFramesFromMcap(
+  buf: ArrayBuffer,
+  cams: Set<string>,
+  minIntervalNs: bigint = 0n,
+): ExtractedFrame[] {
   const reader = new McapStreamReader({
     decompressHandlers: {
       zstd: (data, decompressedSize) => fzstd.decompress(data, new Uint8Array(Number(decompressedSize))),
@@ -49,6 +58,7 @@ export function extractFramesFromMcap(buf: ArrayBuffer, cams: Set<string>): Extr
 
   const channelTopics = new Map<number, string>()
   const frames: ExtractedFrame[] = []
+  const lastByCam = new Map<string, bigint>()
   const decoder = new TextDecoder()
 
   for (let rec; (rec = reader.nextRecord()); ) {
@@ -63,10 +73,15 @@ export function extractFramesFromMcap(buf: ArrayBuffer, cams: Set<string>): Extr
     if (!cams.has(cam)) continue
 
     const obj = JSON.parse(decoder.decode(rec.data)) as { data: string; timestamp?: { sec: number; nsec: number } }
-    const jpg = base64ToBytes(obj.data)
     const tCaptureNs = obj.timestamp
       ? BigInt(obj.timestamp.sec) * 1_000_000_000n + BigInt(obj.timestamp.nsec)
       : rec.logTime
+
+    const last = lastByCam.get(cam)
+    if (last !== undefined && tCaptureNs - last < minIntervalNs) continue
+    lastByCam.set(cam, tCaptureNs)
+
+    const jpg = base64ToBytes(obj.data)
     frames.push({ name: `${cam}_${tCaptureNs}.jpg`, cam, tCaptureNs, data: jpg })
   }
   return frames
