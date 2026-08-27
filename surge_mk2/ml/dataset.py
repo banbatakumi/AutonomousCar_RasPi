@@ -1,10 +1,15 @@
 """ml/dataset.py — (フレーム, マスク) のペアを読む PyTorch Dataset。
 
 `ml/annotate.py` が書く `<frame_stem>_mask.png`（0/255 の2値）を前提にする。
-`ml/extract_frames.py` の `manifest.csv` を軸に対応関係を作る——**ラベル付けが
-終わっていないフレームは黙って除外する**（全部揃うまで学習を待たなくてよい
-ようにするため。撮り足すたびに `manifest.csv` は増えるが、学習側は増えた分だけ
-拾えばよい）。
+**ラベル付けが終わっていないフレームは黙って除外する**（全部揃うまで学習を
+待たなくてよいようにするため）。
+
+対応関係は `manifest.csv`（`ml/extract_frames.py` が書く）があればそれを使うが、
+**無くても動く。** GUI の「ログ」タブから ZIP でフレームを抽出した場合は
+`manifest.csv` が付いてこない（ブラウザ側は画像を書き出すだけで由来の記録は
+残さない）ため、その場合は `frames_dir` 直下を直接走査する
+（`ml/annotate.py` 自身も `*.jpg` を glob するだけなので、対応の取り方を
+合わせてある）。
 """
 
 from __future__ import annotations
@@ -22,18 +27,30 @@ __all__ = ["DrivableDataset", "list_labeled_pairs"]
 
 def list_labeled_pairs(frames_dir: Path,
                        masks_dir: Path | None = None) -> list[tuple[Path, Path]]:
-    """`manifest.csv` に載っているフレームのうち、対応するマスクがあるものだけ集める。"""
+    """ラベル付け済み（対応する `_mask.png` がある）フレームだけを集める。
+
+    `manifest.csv` があればそれに載っているフレームだけを見る（`source_mcap`/
+    `cam` 等の由来情報を将来使う余地を残すため）。**無ければ `frames_dir` 直下の
+    `*.jpg` を直接走査する**——`manifest.csv` はあくまで補助情報であって、
+    ペアリングの必須条件にはしない。
+    """
     masks_dir = masks_dir or frames_dir
     manifest = frames_dir / "manifest.csv"
     pairs: list[tuple[Path, Path]] = []
-    if not manifest.exists():
+
+    if manifest.exists():
+        with open(manifest) as f:
+            for row in csv.DictReader(f):
+                frame = frames_dir / row["file"]
+                mask = masks_dir / f"{frame.stem}_mask.png"
+                if frame.exists() and mask.exists():
+                    pairs.append((frame, mask))
         return pairs
-    with open(manifest) as f:
-        for row in csv.DictReader(f):
-            frame = frames_dir / row["file"]
-            mask = masks_dir / f"{frame.stem}_mask.png"
-            if frame.exists() and mask.exists():
-                pairs.append((frame, mask))
+
+    for frame in sorted(frames_dir.glob("*.jpg")):
+        mask = masks_dir / f"{frame.stem}_mask.png"
+        if mask.exists():
+            pairs.append((frame, mask))
     return pairs
 
 

@@ -54,9 +54,25 @@ class TestListLabeledPairs(unittest.TestCase):
             self.assertEqual(pairs[0][0].name, "a.jpg")
             self.assertEqual(pairs[0][1].name, "a_mask.png")
 
-    def test_missing_manifest_returns_empty(self):
+    def test_missing_manifest_returns_empty_when_no_frames_either(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(list_labeled_pairs(Path(d)), [])
+
+    def test_missing_manifest_falls_back_to_scanning_the_directory(self):
+        """GUIの「ログ」タブからZIPでフレームを抽出した場合は `manifest.csv`
+        が付いてこない（ブラウザは由来の記録を残さない）。それでも、対応する
+        `_mask.png` があるフレームはちゃんと拾えること。"""
+        with tempfile.TemporaryDirectory() as d:
+            frames_dir = Path(d)
+            _write_frame(frames_dir / "a.jpg")
+            _write_frame(frames_dir / "b.jpg")
+            _write_mask(frames_dir / "a_mask.png")     # b にはマスクを作らない
+            # manifest.csv を意図的に作らない
+
+            pairs = list_labeled_pairs(frames_dir)
+            self.assertEqual(len(pairs), 1)
+            self.assertEqual(pairs[0][0].name, "a.jpg")
+            self.assertEqual(pairs[0][1].name, "a_mask.png")
 
 
 class TestDrivableDataset(unittest.TestCase):
