@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x000C      # 上位=メジャー 下位=マイナー
+protocol_version = 0x000D      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -55,9 +55,9 @@ fields = [
 name = "TELEMETRY"
 type = 0x02
 dir = "s2p"
-len = 66
+len = 74
 rate_hz = 50
-doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）"
+doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm を追加"
 fields = [
   { name = "t_us",                type = "u32", unit = "us" },
   { name = "flags",               type = "u32", note = "FLG_* 参照" },
@@ -74,6 +74,8 @@ fields = [
   { name = "roll",                type = "i16", scale = 0.0001, unit = "rad" },
   { name = "motor_current",       type = "i16", count = 3, scale = 0.001, unit = "A", note = "[RL,RR,ST] 双方向" },
   { name = "torque_cmd",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] 指令値" },
+  { name = "slip",                type = "i16", count = 2, scale = 0.0001, note = "[RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13" },
+  { name = "tc_limit_nm",         type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13" },
   { name = "temp",                type = "u8",  count = 4, scale = 1.0, unit = "degC", note = "[RL,RR,ST,MCU]" },
   { name = "batt_voltage_drive",  type = "u8",  scale = 0.05, unit = "V" },
   { name = "batt_voltage_signal", type = "u8",  scale = 0.05, unit = "V" },
@@ -200,7 +202,7 @@ fields = [
 name = "COMMAND"
 type = 0x10
 dir = "p2s"
-len = 14
+len = 15
 rate_hz = 100
 fields = [
   { name = "mode",             type = "u8", note = "0=DISARM 1=MANUAL 2=AUTO (3=予約)" },
@@ -211,6 +213,7 @@ fields = [
   { name = "steer_rate_limit", type = "u16", scale = 0.001,  unit = "rad/s" },
   { name = "brake_torque",     type = "u16", scale = 0.0001, unit = "N.m", note = "後輪各輪。0=未指定(最大で制動)" },
   { name = "target_torque",    type = "i16", scale = 0.0001, unit = "N.m", note = "駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6" },
+  { name = "flags2",           type = "u8", note = "bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先） ★v0.13" },
 ]
 
 [[packets]]
@@ -281,6 +284,7 @@ FAULT_DRIVE_UNDERVOLTAGE  = 0x00002000
 FAULT_SIGNAL_UNDERVOLTAGE = 0x00004000
 DRIVE_POWER_LOCKED        = 0x00008000
 AUTO_STOP_ACTIVE          = 0x00010000   # v0.7: 前後超音波の自動停止が実際に制動へ介入中
+SIDE_BRAKE_ACTIVE         = 0x00020000   # v0.13: サイドブレーキが実際に位置制御へ切り替わり固定中
 
 [bits.MDS]
 comment = "md_status[i] (u8)"
@@ -301,6 +305,10 @@ LIGHT_SHIFT = 0x03   # マスクではなくシフト量
 PASSING     = 0x20
 TORQUE_MODE = 0x40   # v0.6: 立っている間 target_speed を無視し target_torque を直接掛ける（brakeと同様PI迂回。brake優先）
 AUTO_STOP   = 0x80   # v0.7: 立っている間、進行方向の超音波が20cm未満で STM32 が自動的に最大制動（brake優先）
+
+[bits.CMD_FLG2]
+comment = "COMMAND.flags2 (u8)。★v0.13 新設"
+SIDE_BRAKE  = 0x01   # v0.13: 立てている間、速度に関わらず即座に後輪を機械的に位置制御へ切り替えて固定（brakeより優先）
 
 [enums.MODE]
 comment = "COMMAND.mode / TELEMETRY.flags bit0-1"

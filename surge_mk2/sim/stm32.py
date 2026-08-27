@@ -98,11 +98,13 @@ class VirtualStm32:
         self._cmd_seq_echo = 0
         self._cmd_ns = -COMMAND_TIMEOUT_NS
         self._cmd_flags = 0
+        self._cmd_flags2 = 0
         self._steer_cmd_echo = 0.0
         self._input = DriveInput()
 
         self.estop_active = False
         self.auto_stop_active = False
+        self.side_brake_active = False
         self.uart_timeout = True
         self.mode = packets.Mode.DISARM
 
@@ -174,6 +176,7 @@ class VirtualStm32:
         self._cmd_ns = t_ns
         self._cmd_seq_echo = seq
         self._cmd_flags = c.flags
+        self._cmd_flags2 = c.flags2
         self.mode = c.mode if c.mode in (0, 1, 2) else packets.Mode.DISARM
 
         armed = bool(c.flags & packets.CMD_FLG_ARM) and self.mode != packets.Mode.DISARM
@@ -238,6 +241,15 @@ class VirtualStm32:
         if self.uart_timeout or self.estop_active:
             cmd = DriveInput(armed=False, target_steer=v.steer_actual)
 
+        # v0.13: サイドブレーキ。**個別車輪の位置制御モデルを持たないため、
+        # 最大制動として近似する**（実車は速度に関わらず後輪を機械的に位置固定するが、
+        # 運動学モデルでは表現できない。実機での動作検証も未了 — `pi_uart_protocol_v0.13_delta.md`）
+        self.side_brake_active = bool(self._cmd_flags2 & packets.CMD_FLG2_SIDE_BRAKE) and cmd.armed
+        if self.side_brake_active:
+            cmd = DriveInput(armed=cmd.armed, brake=True, brake_torque=0.0,
+                             target_steer=cmd.target_steer,
+                             steer_rate_limit=cmd.steer_rate_limit)
+
         # 超音波（前後 1 本ずつのレイキャスト）と auto_stop
         self._update_ultrasonic()
         self.auto_stop_active = self._auto_stop_should_brake(cmd)
@@ -294,6 +306,8 @@ class VirtualStm32:
             f |= packets.FLG_UART_TIMEOUT
         if self.auto_stop_active:
             f |= packets.FLG_AUTO_STOP_ACTIVE
+        if self.side_brake_active:
+            f |= packets.FLG_SIDE_BRAKE_ACTIVE
         f |= packets.FLG_IMU_OK | packets.FLG_STEER_CENTER_VALID
         if self.lidar is not None:
             f |= packets.FLG_LIDAR_OK
@@ -335,6 +349,9 @@ class VirtualStm32:
                            _q("motor_current", cur, -32768, 32767),
                            _q("motor_current", abs(v.steer_actual) * 0.4, -32768, 32767)],
             torque_cmd=[_q("torque_cmd", torque, -32768, 32767)] * 2,
+            # TC/TV 未実装（タイヤモデルが無い）なので、スリップは常に0・上限は常に全開で返す
+            slip=[0, 0],
+            tc_limit_nm=[_q("tc_limit_nm", DRIVE_MAX_TORQUE_NM, -32768, 32767)] * 2,
             temp=[temp, temp, 25 + int(10 * abs(v.steer_actual)), 40],
             batt_voltage_drive=_q("batt_voltage_drive", vd, 0, 255),
             batt_voltage_signal=_q("batt_voltage_signal", vs, 0, 255),
@@ -363,7 +380,7 @@ class VirtualStm32:
     def _emit(self, packet, gen_ns: int) -> None:
         """パケットを線上に載せる。**UART の直列化時間ぶん詰まる。**
 
-        250000bps では TELEMETRY(73B) が 2.9ms、LIDAR_SECTOR(76B) が 3.0ms かかる。
+        250000bps では TELEMETRY(81B) が 3.2ms、LIDAR_SECTOR(76B) が 3.0ms かかる。
         合計 12.8kB/s ＝ 帯域の 51% を使うので、実機では実際に順番待ちが起きる。
         ここを無視すると「全部が同時刻に届く」不自然に綺麗なシムになる。
         """

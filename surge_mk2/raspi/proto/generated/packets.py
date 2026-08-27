@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x000C
+PROTOCOL_VERSION = 0x000D
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -32,6 +32,7 @@ FLG_FAULT_DRIVE_UNDERVOLTAGE = 0x00002000
 FLG_FAULT_SIGNAL_UNDERVOLTAGE = 0x00004000
 FLG_DRIVE_POWER_LOCKED = 0x00008000
 FLG_AUTO_STOP_ACTIVE = 0x00010000
+FLG_SIDE_BRAKE_ACTIVE = 0x00020000
 
 # md_status[i] (u8)
 MDS_RUNNING = 0x01
@@ -50,6 +51,9 @@ CMD_FLG_LIGHT_SHIFT = 0x03
 CMD_FLG_PASSING = 0x20
 CMD_FLG_TORQUE_MODE = 0x40
 CMD_FLG_AUTO_STOP = 0x80
+
+# COMMAND.flags2 (u8)。★v0.13 新設
+CMD_FLG2_SIDE_BRAKE = 0x01
 
 class Mode:
     """COMMAND.mode / TELEMETRY.flags bit0-1"""
@@ -127,20 +131,20 @@ class LidarSector:
         return _S_LIDAR_SECTOR.pack(self.sector_idx, self.t_start_us, self.duration_us, self.rot_speed_dps, *self.dist)
 
 
-_S_TELEMETRY = struct.Struct('<2I8h2i10h14B')
+_S_TELEMETRY = struct.Struct('<2I8h2i14h14B')
 
 
 @dataclass(slots=True)
 class Telemetry:
-    """0x02 s2p — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）"""
+    """0x02 s2p — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm を追加"""
 
     TYPE: ClassVar[int] = 0x02
     NAME: ClassVar[str] = 'TELEMETRY'
     DIR: ClassVar[str] = 's2p'
-    LEN: ClassVar[int | None] = 66
-    FMT: ClassVar[str] = '<2I8h2i10h14B'
+    LEN: ClassVar[int | None] = 74
+    FMT: ClassVar[str] = '<2I8h2i14h14B'
     RATE_HZ: ClassVar[float] = 50
-    META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm')}
+    META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'slip': (0.0001, None), 'tc_limit_nm': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm')}
 
     t_us: int = 0
     flags: int = 0  # FLG_* 参照
@@ -157,6 +161,8 @@ class Telemetry:
     roll: int = 0
     motor_current: list[int] = field(default_factory=lambda: [0] * 3)  # [RL,RR,ST] 双方向
     torque_cmd: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] 指令値
+    slip: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13
+    tc_limit_nm: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13
     temp: list[int] = field(default_factory=lambda: [0] * 4)  # [RL,RR,ST,MCU]
     batt_voltage_drive: int = 0
     batt_voltage_signal: int = 0
@@ -170,10 +176,10 @@ class Telemetry:
     @classmethod
     def decode(cls, payload: bytes) -> 'Telemetry':
         v = _S_TELEMETRY.unpack(payload)
-        return cls(t_us=v[0], flags=v[1], speed=v[2], yaw_rate=v[3], steer_actual=v[4], steer_cmd_echo=v[5], wheel_speed=list(v[6:10]), odom_dist=list(v[10:12]), accel_x=v[12], accel_y=v[13], accel_z=v[14], pitch=v[15], roll=v[16], motor_current=list(v[17:20]), torque_cmd=list(v[20:22]), temp=list(v[22:26]), batt_voltage_drive=v[26], batt_voltage_signal=v[27], batt_current_drive=v[28], batt_current_signal=v[29], us_front=v[30], us_rear=v[31], md_status=list(v[32:35]), cmd_seq_echo=v[35])
+        return cls(t_us=v[0], flags=v[1], speed=v[2], yaw_rate=v[3], steer_actual=v[4], steer_cmd_echo=v[5], wheel_speed=list(v[6:10]), odom_dist=list(v[10:12]), accel_x=v[12], accel_y=v[13], accel_z=v[14], pitch=v[15], roll=v[16], motor_current=list(v[17:20]), torque_cmd=list(v[20:22]), slip=list(v[22:24]), tc_limit_nm=list(v[24:26]), temp=list(v[26:30]), batt_voltage_drive=v[30], batt_voltage_signal=v[31], batt_current_drive=v[32], batt_current_signal=v[33], us_front=v[34], us_rear=v[35], md_status=list(v[36:39]), cmd_seq_echo=v[39])
 
     def encode(self) -> bytes:
-        return _S_TELEMETRY.pack(self.t_us, self.flags, self.speed, self.yaw_rate, self.steer_actual, self.steer_cmd_echo, *self.wheel_speed, *self.odom_dist, self.accel_x, self.accel_y, self.accel_z, self.pitch, self.roll, *self.motor_current, *self.torque_cmd, *self.temp, self.batt_voltage_drive, self.batt_voltage_signal, self.batt_current_drive, self.batt_current_signal, self.us_front, self.us_rear, *self.md_status, self.cmd_seq_echo)
+        return _S_TELEMETRY.pack(self.t_us, self.flags, self.speed, self.yaw_rate, self.steer_actual, self.steer_cmd_echo, *self.wheel_speed, *self.odom_dist, self.accel_x, self.accel_y, self.accel_z, self.pitch, self.roll, *self.motor_current, *self.torque_cmd, *self.slip, *self.tc_limit_nm, *self.temp, self.batt_voltage_drive, self.batt_voltage_signal, self.batt_current_drive, self.batt_current_signal, self.us_front, self.us_rear, *self.md_status, self.cmd_seq_echo)
 
 
 _S_CONFIG_ACK = struct.Struct('<HfB')
@@ -403,7 +409,7 @@ class LidarSectorC:
         return _S_LIDAR_SECTOR_C.pack(self.sector_idx, self.t_start_us, self.duration_us, self.rot_speed_dps, *self.dist)
 
 
-_S_COMMAND = struct.Struct('<2B2h3Hh')
+_S_COMMAND = struct.Struct('<2B2h3HhB')
 
 
 @dataclass(slots=True)
@@ -413,8 +419,8 @@ class Command:
     TYPE: ClassVar[int] = 0x10
     NAME: ClassVar[str] = 'COMMAND'
     DIR: ClassVar[str] = 'p2s'
-    LEN: ClassVar[int | None] = 14
-    FMT: ClassVar[str] = '<2B2h3Hh'
+    LEN: ClassVar[int | None] = 15
+    FMT: ClassVar[str] = '<2B2h3HhB'
     RATE_HZ: ClassVar[float] = 100
     META: ClassVar[dict] = {'target_speed': (0.001, 'm/s'), 'target_steer': (0.0001, 'rad'), 'accel_limit': (0.001, 'm/s2'), 'steer_rate_limit': (0.001, 'rad/s'), 'brake_torque': (0.0001, 'N.m'), 'target_torque': (0.0001, 'N.m')}
 
@@ -426,14 +432,15 @@ class Command:
     steer_rate_limit: int = 0
     brake_torque: int = 0  # 後輪各輪。0=未指定(最大で制動)
     target_torque: int = 0  # 駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6
+    flags2: int = 0  # bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先） ★v0.13
 
     @classmethod
     def decode(cls, payload: bytes) -> 'Command':
         v = _S_COMMAND.unpack(payload)
-        return cls(mode=v[0], flags=v[1], target_speed=v[2], target_steer=v[3], accel_limit=v[4], steer_rate_limit=v[5], brake_torque=v[6], target_torque=v[7])
+        return cls(mode=v[0], flags=v[1], target_speed=v[2], target_steer=v[3], accel_limit=v[4], steer_rate_limit=v[5], brake_torque=v[6], target_torque=v[7], flags2=v[8])
 
     def encode(self) -> bytes:
-        return _S_COMMAND.pack(self.mode, self.flags, self.target_speed, self.target_steer, self.accel_limit, self.steer_rate_limit, self.brake_torque, self.target_torque)
+        return _S_COMMAND.pack(self.mode, self.flags, self.target_speed, self.target_steer, self.accel_limit, self.steer_rate_limit, self.brake_torque, self.target_torque, self.flags2)
 
 
 _S_CONFIG_SET = struct.Struct('<Hf')

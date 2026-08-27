@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x000Cu
+#define SURGE_PROTOCOL_VERSION  0x000Du
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -23,7 +23,7 @@
 /* ── パケット種別 ─────────────────────────────────────────── */
 /* STM32 -> Pi */
 #define PKT_LIDAR_SECTOR       0x01u   /* LEN = 69 */
-#define PKT_TELEMETRY          0x02u   /* LEN = 66 */
+#define PKT_TELEMETRY          0x02u   /* LEN = 74 */
 #define PKT_CONFIG_ACK         0x03u   /* LEN = 7 */
 #define PKT_LOG                0x04u   /* LEN = 可変 */
 #define PKT_LIDAR_SECTOR_I     0x05u   /* LEN = 99 */
@@ -34,7 +34,7 @@
 #define PKT_LIDAR_SECTOR_C     0x09u   /* LEN = 39 */
 
 /* Pi -> STM32 */
-#define PKT_COMMAND            0x10u   /* LEN = 14 */
+#define PKT_COMMAND            0x10u   /* LEN = 15 */
 #define PKT_CONFIG_SET         0x11u   /* LEN = 6 */
 #define PKT_PING               0x12u   /* LEN = 4 */
 #define PKT_CONFIG_GET         0x13u   /* LEN = 2 */
@@ -58,6 +58,7 @@
 #define FLG_FAULT_SIGNAL_UNDERVOLTAGE  0x00004000u
 #define FLG_DRIVE_POWER_LOCKED         0x00008000u
 #define FLG_AUTO_STOP_ACTIVE           0x00010000u
+#define FLG_SIDE_BRAKE_ACTIVE          0x00020000u
 
 /* md_status[i] (u8) */
 #define MDS_RUNNING       0x01u
@@ -76,6 +77,9 @@
 #define CMD_FLG_PASSING      0x20u
 #define CMD_FLG_TORQUE_MODE  0x40u
 #define CMD_FLG_AUTO_STOP    0x80u
+
+/* COMMAND.flags2 (u8)。★v0.13 新設 */
+#define CMD_FLG2_SIDE_BRAKE  0x01u
 
 /* ── enum / param_id ──────────────────────────────────────── */
 #define MODE_DISARM               0u
@@ -128,7 +132,7 @@ typedef struct {
     uint16_t dist[30];       /* 0.001 m  0=無効 */
 } surge_lidar_sector_t;
 
-/* TELEMETRY (0x02) — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel） */
+/* TELEMETRY (0x02) — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm を追加 */
 typedef struct {
     uint32_t t_us;                 /* us */
     uint32_t flags;                /* FLG_* 参照 */
@@ -145,6 +149,8 @@ typedef struct {
     int16_t  roll;                 /* 0.0001 rad */
     int16_t  motor_current[3];     /* 0.001 A  [RL,RR,ST] 双方向 */
     int16_t  torque_cmd[2];        /* 0.0001 N.m  [RL,RR] 指令値 */
+    int16_t  slip[2];              /* 0.0001  [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13 */
+    int16_t  tc_limit_nm[2];       /* 0.0001 N.m  [RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13 */
     uint8_t  temp[4];              /* 1 degC  [RL,RR,ST,MCU] */
     uint8_t  batt_voltage_drive;   /* 0.05 V */
     uint8_t  batt_voltage_signal;  /* 0.05 V */
@@ -228,6 +234,7 @@ typedef struct {
     uint16_t steer_rate_limit;  /* 0.001 rad/s */
     uint16_t brake_torque;      /* 0.0001 N.m  後輪各輪。0=未指定(最大で制動) */
     int16_t  target_torque;     /* 0.0001 N.m  駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6 */
+    uint8_t  flags2;            /* bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先） ★v0.13 */
 } surge_command_t;
 
 /* CONFIG_SET (0x11) —  */
@@ -254,7 +261,7 @@ typedef struct {
 
 /* サイズ検証。#pragma pack の付け忘れをビルド時に検出する。 */
 _Static_assert(sizeof(surge_lidar_sector_t) == 69, "surge_lidar_sector_t size mismatch");
-_Static_assert(sizeof(surge_telemetry_t) == 66, "surge_telemetry_t size mismatch");
+_Static_assert(sizeof(surge_telemetry_t) == 74, "surge_telemetry_t size mismatch");
 _Static_assert(sizeof(surge_config_ack_t) == 7, "surge_config_ack_t size mismatch");
 _Static_assert(sizeof(surge_lidar_sector_i_t) == 99, "surge_lidar_sector_i_t size mismatch");
 _Static_assert(sizeof(surge_pong_t) == 12, "surge_pong_t size mismatch");
@@ -262,7 +269,7 @@ _Static_assert(sizeof(surge_version_t) == 10, "surge_version_t size mismatch");
 _Static_assert(sizeof(surge_stats_t) == 48, "surge_stats_t size mismatch");
 _Static_assert(sizeof(surge_limits_t) == 16, "surge_limits_t size mismatch");
 _Static_assert(sizeof(surge_lidar_sector_c_t) == 39, "surge_lidar_sector_c_t size mismatch");
-_Static_assert(sizeof(surge_command_t) == 14, "surge_command_t size mismatch");
+_Static_assert(sizeof(surge_command_t) == 15, "surge_command_t size mismatch");
 _Static_assert(sizeof(surge_config_set_t) == 6, "surge_config_set_t size mismatch");
 _Static_assert(sizeof(surge_ping_t) == 4, "surge_ping_t size mismatch");
 _Static_assert(sizeof(surge_config_get_t) == 2, "surge_config_get_t size mismatch");

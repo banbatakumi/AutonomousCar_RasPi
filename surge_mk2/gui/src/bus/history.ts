@@ -46,6 +46,10 @@ export const SERIES = [
   'motorRL', // A
   'motorRR', // A
   'motorST', // A
+  'slipRL', // % TC用スリップ率（v0.13。無次元を100倍して%表示）
+  'slipRR', // %
+  'tcLimitRL', // N·m TCが動的に決めるトルク上限（v0.13）
+  'tcLimitRR', // N·m
   'accelX', // m/s² 前後
   'accelY', // m/s² 左右
   'rttMs', // ms UART 往復
@@ -103,6 +107,11 @@ export function pushHistory(vs: VehicleState | null, link: LinkDiag | null): voi
   data.motorRL[i] = vs.motor_current[0]
   data.motorRR[i] = vs.motor_current[1]
   data.motorST[i] = vs.motor_current[2]
+  // 無次元（±1=±100%空転/ロック）を % 表示にする。基準速度未満は STM32 側が 0 を送る
+  data.slipRL[i] = vs.tc_slip[0] * 100
+  data.slipRR[i] = vs.tc_slip[1] * 100
+  data.tcLimitRL[i] = vs.tc_limit_nm[0]
+  data.tcLimitRR[i] = vs.tc_limit_nm[1]
   data.accelX[i] = vs.accel[0]
   data.accelY[i] = vs.accel[1]
   data.rttMs[i] = nz(l?.cmd_rtt_ms)

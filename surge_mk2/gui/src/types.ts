@@ -264,6 +264,11 @@ export type CmdOut = {
   target_torque: number
   /** **立っている間、STM32 が単独で**進行方向の超音波を見て 20cm 未満なら最大制動する（v0.7）。
    * 進行方向は `torque_mode` なら `target_torque`、そうでなければ `speed` の符号で決まり、
-   * 逆方向のセンサは見ない。優先順位は `brake` > `auto_stop` > 通常指令 */
+   * 逆方向のセンサは見ない。優先順位は `side_brake` > `brake` > `auto_stop` > 通常指令 */
   auto_stop: boolean
+  /** サイドブレーキ（v0.13）。**立っている間、速度に関わらず即座に**後輪を機械的な
+   * 位置制御へ切り替えて固定する。`brake` より優先。**トグル**（ON にしたら明示的に
+   * OFF にするまで送り続ける）で扱う想定——駐車ブレーキのように「かけたら離れられる」
+   * ものであって、押しっぱなしが必要な `brake`/`horn` とは性質が違う */
+  side_brake: boolean
 }

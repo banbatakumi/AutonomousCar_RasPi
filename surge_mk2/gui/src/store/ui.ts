@@ -429,6 +429,20 @@ type UiState = {
   lightMode: number
 
   /**
+   * サイドブレーキの意思（`COMMAND.flags2` bit0、★v0.13）。
+   *
+   * **`braking`/`horning`/`passing` とは性質が違い、押しっぱなしではなく
+   * トグル。** ON にしたら明示的に OFF にするまで送り続ける——駐車ブレーキと
+   * 同じ操作感（かけたらハンドルから手を離せる）にしてある。STM32 は
+   * **速度に関わらず即座に**後輪を位置制御へ切り替えて固定するため、走行中に
+   * 誤って ON にしないよう、UI 側は停止中（`vs.stopped`）以外では ON を拒否する
+   * （`AuxPanel.tsx`）。ページ再読み込みでは false に戻す（`localStorage` に
+   * 保存しない）——保存すると再読み込み直後に前回の状態のまま送られてしまう。
+   * 未 ARM のときは送らない（`useDriving.ts`、`brake` と同じ理由）
+   */
+  sideBrakeRequested: boolean
+
+  /**
    * ラジコンタブの設定ドロワーが開いているか。
    *
    * **`localStorage` には保存しない。** 開きっぱなしで起動すると層 A（カメラ）が
@@ -544,6 +558,7 @@ export const useUi = create<UiState>((set, get) => ({
   horning: false,
   passing: false,
   lightMode: LIGHT_OFF,
+  sideBrakeRequested: false,
 
   settingsOpen: false,
   lidarZoom: 4, // 画面半径が何メートルぶんか

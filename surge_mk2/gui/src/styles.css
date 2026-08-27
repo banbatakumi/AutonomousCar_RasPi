@@ -732,6 +732,11 @@ button.on {
   border-color: #3b4550;
 }
 
+.seg button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 /* ── 診断（現在値グリッド。診断タブ `DiagView` から使う） ─────────── */
 
 .diag-grid {

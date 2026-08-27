@@ -96,7 +96,7 @@ class SimLink:
     def _write(self, frame: bytes) -> int:
         t_ns = time.monotonic_ns()
         self.sim.advance_to(t_ns)
-        # Pi → STM32 も線上時間ぶん遅れて届く。COMMAND(21B) で 0.84ms。
+        # Pi → STM32 も線上時間ぶん遅れて届く。COMMAND(22B) で 0.88ms。
         # ここを 0 にすると PING の往復が非現実的に速くなり、時刻同期の
         # 片道遅延推定が「ほぼ 0」に収束してしまう
         self.sim.rx_bytes(frame, t_ns + len(frame) * BYTE_NS)

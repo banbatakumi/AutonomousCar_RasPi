@@ -22,6 +22,11 @@
  * （`horn` / `passing` は立てている間ずっと効く）に素直に対応させてある。
  * GUI 側でタイマーを持つと、DISARM やタブ切替と競合したときに消し忘れが起きる。
  *
+ * **サイドブレーキ（v0.13）だけは例外でトグル。** `ui.sideBrakeRequested` を
+ * `AuxPanel.tsx` の ON/OFF ボタンで切り替え、ここでは毎フレームその値をそのまま
+ * 送るだけ（`brake`/`horn` のようにキー・パッドの押下状態からは作らない）。
+ * 駐車ブレーキと同じ「かけたら手を離せる」操作感にするため。未 ARM では送らない。
+ *
  * **灯火・ホーン・パッシングは未 ARM でも効く**（2026-08-11 に変更）。
  * ARM していない間は `mode=DISARM` / `arm=false` / 速度・舵 0 の cmd を送り、
  * 灯火とホーンのビットだけを載せる。`command_from_cmd`（`msgs/convert.py`）は
@@ -420,7 +425,7 @@ export function useDriving(ch: ControlChannel | null) {
         }
         if (now - lastTxMs < TX_INTERVAL_MS) return
         lastTxMs = now
-        // ブレーキは未 ARM では意味を持たない（モータが励磁されていない）
+        // ブレーキ・サイドブレーキは未 ARM では意味を持たない（モータが励磁されていない）
         mirrorAux(false, horn, passing)
         ch.cmd({
           mode: 0, // DISARM
@@ -437,6 +442,7 @@ export function useDriving(ch: ControlChannel | null) {
           torque_mode: false,
           target_torque: 0,
           auto_stop: s.autoStop,
+          side_brake: false,
         })
         return
       }
@@ -517,6 +523,8 @@ export function useDriving(ch: ControlChannel | null) {
           torque_mode: false,
           target_torque: 0,
           auto_stop: s.autoStop,
+          // **人間のサイドブレーキもそのまま通す**（brake と同じ理由）
+          side_brake: ui.sideBrakeRequested,
         })
         return
       }
@@ -629,6 +637,8 @@ export function useDriving(ch: ControlChannel | null) {
         // v0.7: 進行方向の超音波が 20cm 未満なら STM32 が単独で最大制動する。
         // **GUI は許可を出すだけで、判定にも制動にも関与しない**（二重制御にしない）
         auto_stop: s.autoStop,
+        // v0.13: `braking`等と違いトグル。`AuxPanel.tsx` の ON/OFF で切り替える
+        side_brake: ui.sideBrakeRequested,
       })
     }
 

@@ -118,6 +118,13 @@ class VehicleState(MsgBase):
     motor_current: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [A] RL,RR,ST
     #: [N·m] [RL, RR]。**指令値であって実測ではない**（Kt が未実測のため測れない）
     torque_cmd: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    #: STM32 の TC が内部で見ているスリップ率 [RL, RR]（無次元。正=空転 負=ロック傾向）。
+    #: 基準速度が低い区間は STM32 側で 0 を送ってくる（★v0.13）。`slip_rear` とは別物——
+    #: こちらは STM32 自身の推定値、`slip_rear` は Pi 側が `wheel_speed`/`speed` から計算する値
+    tc_slip: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    #: TC が動的に決めているトルク上限 [N·m] [RL, RR]。介入していなければ
+    #: `LinkDiag.max_torque_nm` と同じ値になる（★v0.13）
+    tc_limit_nm: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
     #: [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None
     temp: list[int | None] = msgspec.field(default_factory=lambda: [None] * 4)
     batt_voltage: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)  #: [V] 駆動,信号
@@ -146,6 +153,9 @@ class VehicleState(MsgBase):
     #: 有効/無効そのものではない（有効かどうかは Pi が送った `auto_stop` を見れば分かる）。
     #: **急に減速した理由がこれかどうかを後から説明できるようにするため**に持つ
     auto_stop_active: bool = False
+    #: サイドブレーキ（`COMMAND.flags2` bit0）が**今まさに位置制御へ切り替わり固定中**
+    #: （★v0.13）。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
+    side_brake_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
 
     # ── Pi 側で計算した派生量 ──
@@ -262,6 +272,9 @@ class DriveCmd(MsgBase):
     #: **逆方向のセンサは見ない**（前に障害物があっても後退はできる）。
     #: 優先順位は `brake` > `auto_stop` > 通常指令。**Pi 側で二重に制御する必要はない**
     auto_stop: bool = False
+    #: サイドブレーキ。立てている間、**速度に関わらず即座に**後輪を機械的な位置制御へ
+    #: 切り替えて固定する（★v0.13）。`brake` より優先。解除は明示的に下ろすまで有効
+    side_brake: bool = False
     source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
 
 

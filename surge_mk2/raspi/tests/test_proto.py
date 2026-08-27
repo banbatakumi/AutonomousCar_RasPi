@@ -50,7 +50,7 @@ class TestPacketDefinitions(unittest.TestCase):
 
     EXPECTED = {
         "LIDAR_SECTOR": (0x01, 69, "s2p"),
-        "TELEMETRY": (0x02, 66, "s2p"),
+        "TELEMETRY": (0x02, 74, "s2p"),
         "CONFIG_ACK": (0x03, 7, "s2p"),
         "LOG": (0x04, None, "s2p"),
         "LIDAR_SECTOR_I": (0x05, 99, "s2p"),
@@ -59,7 +59,7 @@ class TestPacketDefinitions(unittest.TestCase):
         "STATS": (0x08, 48, "s2p"),
         "LIDAR_SECTOR_C": (0x09, 39, "s2p"),
         "LIMITS": (0x0A, 16, "s2p"),
-        "COMMAND": (0x10, 14, "p2s"),
+        "COMMAND": (0x10, 15, "p2s"),
         "CONFIG_SET": (0x11, 6, "p2s"),
         "PING": (0x12, 4, "p2s"),
         "CONFIG_GET": (0x13, 2, "p2s"),
@@ -92,7 +92,7 @@ class TestPacketDefinitions(unittest.TestCase):
                 self.assertEqual(cls.DIR, "s2p" if cls.TYPE < 0x10 else "p2s")
 
     def test_protocol_version(self):
-        self.assertEqual(packets.PROTOCOL_VERSION, 0x000C)
+        self.assertEqual(packets.PROTOCOL_VERSION, 0x000D)
 
     def test_generated_files_up_to_date(self):
         """protocol.toml を編集して再生成し忘れていないか。"""
@@ -124,6 +124,8 @@ class TestTelemetryWireLayout(unittest.TestCase):
             pitch=61, roll=62,
             motor_current=[71, 72, 73],
             torque_cmd=[81, 82],
+            slip=[91, -92],
+            tc_limit_nm=[101, 102],
             temp=[11, 22, 33, 44],
             batt_voltage_drive=201, batt_voltage_signal=202,
             batt_current_drive=203, batt_current_signal=204,
@@ -132,7 +134,7 @@ class TestTelemetryWireLayout(unittest.TestCase):
             cmd_seq_echo=0xAB,
         )
         buf = t.encode()
-        self.assertEqual(len(buf), 66)
+        self.assertEqual(len(buf), 74)
 
         def u32(off): return struct.unpack_from("<I", buf, off)[0]
         def i32(off): return struct.unpack_from("<i", buf, off)[0]
@@ -155,11 +157,16 @@ class TestTelemetryWireLayout(unittest.TestCase):
         self.assertEqual(i16(40), 62, "roll @40")
         self.assertEqual(i16(42), 71, "motor_current[0] @42")
         self.assertEqual(i16(48), 81, "torque_cmd[0] @48")
-        self.assertEqual(buf[52], 11, "temp[0] @52")
-        self.assertEqual(buf[56], 201, "batt_voltage_drive @56")
-        self.assertEqual(buf[60], 205, "us_front @60")
-        self.assertEqual(buf[62], 0x11, "md_status[0] @62")
-        self.assertEqual(buf[65], 0xAB, "cmd_seq_echo @65")
+        # ★ v0.13 で追加。torque_cmd の直後
+        self.assertEqual(i16(52), 91, "slip[0] @52")
+        self.assertEqual(i16(54), -92, "slip[1] @54")
+        self.assertEqual(i16(56), 101, "tc_limit_nm[0] @56")
+        self.assertEqual(i16(58), 102, "tc_limit_nm[1] @58")
+        self.assertEqual(buf[60], 11, "temp[0] @60")
+        self.assertEqual(buf[64], 201, "batt_voltage_drive @64")
+        self.assertEqual(buf[68], 205, "us_front @68")
+        self.assertEqual(buf[70], 0x11, "md_status[0] @70")
+        self.assertEqual(buf[73], 0xAB, "cmd_seq_echo @73")
 
     def test_odom_dist_is_signed(self):
         """後退で負になる。符号なしで読むと 429km 飛ぶ。"""
@@ -303,7 +310,7 @@ class TestFrameParser(unittest.TestCase):
         self.assertEqual(frames[0].decode().speed, 2)
 
     def test_len_mismatch(self):
-        frame = bytearray(build_frame(0x02, 0, b"\x00" * 10))  # TELEMETRY は 66
+        frame = bytearray(build_frame(0x02, 0, b"\x00" * 10))  # TELEMETRY は 74
         frames = self.parser.feed(bytes(frame) + self._telemetry(speed=3))
         self.assertEqual(self.parser.stats.len_error, 1)
         self.assertEqual(len(frames), 1)

@@ -3,7 +3,10 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-08-25（UART プロトコル v0.12 対応。`auto_stop` の判定を固定20cmから
+最終更新: 2026-08-28（UART プロトコル v0.13 対応。`TELEMETRY` に TC の
+スリップ率・トルク上限を追加、`COMMAND` にサイドブレーキ `flags2` を新設。
+下記「2026-08-28」節）
+旧: 2026-08-25（UART プロトコル v0.12 対応。`auto_stop` の判定を固定20cmから
 動的停止距離＋LiDAR併用へ刷新、安全マージンを `CONFIG_SET` param_id 0x0060 で
 3段階切替可能に。下記「2026-08-25」節）
 旧: 2026-08-23（zbus のトピック登録漏れを修正／中心線を壁の穴に頑健化／
@@ -17,6 +20,70 @@
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（下記「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-08-28：UART プロトコル v0.13 対応（STM32側発の delta doc を受けて）
+
+STM32 側から `pi_uart_protocol_v0.13_delta.md` が届き、Pi 側の対応チェックリストに
+従って実装した。**STM32 側は実装済みだが実機での動作検証は未了**（TC ゲインの
+実測・サイドブレーキとも）。
+
+### 変わったこと
+
+- `TELEMETRY`（LEN 66→**74**）: `torque_cmd[2]` の直後に `slip[2]`（TC用スリップ率、
+  無次元、正=空転/負=ロック傾向）・`tc_limit_nm[2]`（TCが動的に決めるトルク上限）を
+  追加。TC のゲイン（`DRIVE_TC_CUT_GAIN`/`DRIVE_TC_RECOVER_RATE`）を実機で追い込むには
+  `flags` bit5（`tc_active`、介入中か否かの1bit）だけでは内部状態が見えなかったため
+- `COMMAND`（LEN 14→**15**）: 末尾に `flags2`（u8、bit0=`SIDE_BRAKE`）を新設。立てている
+  間、速度に関わらず即座に後輪を機械的な位置制御へ切り替えて固定する（既存の
+  `flags` bit1 `BRAKE` より優先）。実際に固定できたかは `TELEMETRY.flags` bit17
+  （`SIDE_BRAKE_ACTIVE`）で返る
+- `protocol_version` を `0x000C`→`0x000D`
+
+### 変更箇所
+
+- `raspi/proto/protocol.toml`: version bump、`TELEMETRY` に `slip`/`tc_limit_nm`、
+  `COMMAND` に `flags2`、`bits.FLG.SIDE_BRAKE_ACTIVE`（bit17）、
+  `bits.CMD_FLG2.SIDE_BRAKE`（新設）（生成物は `generate.py` で再生成済み）
+- `raspi/msgs/types.py`: `VehicleState` に `tc_slip`/`tc_limit_nm`/`side_brake_active`、
+  `DriveCmd` に `side_brake` を追加
+- `raspi/msgs/convert.py`: `StateBuilder.build()` で `slip`/`tc_limit_nm` をSI換算、
+  `decode_flags()` に `side_brake_active`、`command_from_cmd()` で
+  `cmd.side_brake` → `flags2` を組み立て
+- `sim/stm32.py`: TC/TVは未実装（タイヤモデルが無い）ため `slip=[0,0]`・
+  `tc_limit_nm=DRIVE_MAX_TORQUE_NM`固定で返す。`side_brake` は個別車輪の位置制御
+  モデルが無いため**最大制動として近似**（`_substep` で `flags2` を見て
+  `DriveInput` を上書き）。`FLG_SIDE_BRAKE_ACTIVE` を反映
+- `raspi/tests/test_proto.py`: `PROTOCOL_VERSION`/LEN/バイトオフセットの期待値を更新
+- `docs/uart_protocol.md`/`docs/stm32_interface.md`/`docs/README.md`:
+  バージョン表記・§5.3・§5.4・§5.6・§5.6.5(新設)・changelog を更新
+  （`config/check_docs.py --check` 通過）
+
+`./tools/check.sh`（生成物一致・文書版番号・pytest 513件・tsc）は全部通した。
+**実機での動作検証はまだ**（STM32側も同様）。
+
+### 追記（同日）: GUI にサイドブレーキ操作とTCグラフを追加
+
+- `gui/src/types.ts`: `CmdOut.side_brake` を追加
+- `gui/src/store/ui.ts`: `sideBrakeRequested`（ON/OFFトグル。`braking`等の
+  「押している間だけ」とは違い、駐車ブレーキと同じ「かけたら手を離せる」操作感。
+  誤操作防止のため `localStorage` には保存せず、再読み込みで必ず false に戻す）
+- `gui/src/input/useDriving.ts`: 全 `ch.cmd()` 呼び出しに `side_brake` を追加。
+  未ARM時は `brake` と同様に常に false（モータ非励磁で意味が無い）
+- `gui/src/components/DriveControls.tsx`: 灯火・ファンと同じ「タブ行に1つだけ」
+  の場所にON/OFFトグルを追加（ラジコン/自動運転どちらのタブでも共通。
+  `AuxPanel.tsx` は自動運転タブにしか出ないので複製しなかった）。走行中の誤操作
+  防止のため、`vs.stopped` が false の間は ON ボタンを無効化
+  （`title` でツールチップ表示）
+- `gui/src/bus/history.ts`/`components/DiagCharts.tsx`: `tc_slip`/`tc_limit_nm`
+  を時系列バッファ・診断タブのグラフに追加。**スリップ%とトルク上限N·mは値域が
+  全く違うので別チャートに分けた**（同じ軸に載せると片方が潰れる）
+- `gui/src/styles.css`: `.seg button:disabled` を追加（既存の `.armbtn:disabled`
+  はあったが `.seg` 系トグルには無かった）
+
+`./tools/check.sh` 再実行、`vite build` も確認。**ブラウザでの目視確認はしていない**
+（環境上ブラウザ操作ができないため）。実機・シムでの動作確認は次回に持ち越し。
 
 ---
 

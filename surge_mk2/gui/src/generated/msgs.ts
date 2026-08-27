@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x51d16808
+export const MSGS_SCHEMA = 0x1df6c60f
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -53,6 +53,17 @@ export type VehicleState = {
   motor_current: [number, number, number]
   /** [N·m] [RL, RR]。**指令値であって実測ではない**（Kt が未実測のため測れない） */
   torque_cmd: [number, number]
+  /**
+   * STM32 の TC が内部で見ているスリップ率 [RL, RR]（無次元。正=空転 負=ロック傾向）。
+   * 基準速度が低い区間は STM32 側で 0 を送ってくる（★v0.13）。`slip_rear` とは別物——
+   * こちらは STM32 自身の推定値、`slip_rear` は Pi 側が `wheel_speed`/`speed` から計算する値
+   */
+  tc_slip: [number, number]
+  /**
+   * TC が動的に決めているトルク上限 [N·m] [RL, RR]。介入していなければ
+   * `LinkDiag.max_torque_nm` と同じ値になる（★v0.13）
+   */
+  tc_limit_nm: [number, number]
   /** [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None */
   temp: [number | null, number | null, number | null, number | null]
   /** [V] 駆動,信号 */
@@ -92,6 +103,11 @@ export type VehicleState = {
    * **急に減速した理由がこれかどうかを後から説明できるようにするため**に持つ
    */
   auto_stop_active: boolean
+  /**
+   * サイドブレーキ（`COMMAND.flags2` bit0）が**今まさに位置制御へ切り替わり固定中**
+   * （★v0.13）。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
+   */
+  side_brake_active: boolean
   /** 立っている fault の名前 */
   faults: string[]
   /**

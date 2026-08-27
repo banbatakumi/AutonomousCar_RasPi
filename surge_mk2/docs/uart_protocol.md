@@ -1,22 +1,27 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.12
-**最終更新**: 2026-08-25（`param_id = 0x0060` の値の意味を3段階enumからcm直接指定へ改訂）
+**バージョン**: v0.13
+**最終更新**: 2026-08-28（TC のスリップ／トルク上限を `TELEMETRY` に追加、サイドブレーキ `COMMAND.flags2` を新設）
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: Pi 側 v0.12 実装済み（`protocol.toml`/`raspi/msgs`/`raspi/nodes/io_node.py`/GUI/`sim/stm32.py`）。**STM32 側は実装済み・実機での動作検証は未了（2026-08-25、`pi_uart_protocol_v0.12_delta.md`）**
+**状態**: Pi 側 v0.13 実装済み（`protocol.toml`/`raspi/msgs`/`raspi/nodes/io_node.py`/`sim/stm32.py`）。**STM32 側は実装済み・実機での動作検証は未了（2026-08-28、`pi_uart_protocol_v0.13_delta.md`）**
 
-> **v0.12 で変わったのは `CONFIG_SET`/`CONFIG_GET` で使う `param_id` が増えたことと、
-> `auto_stop`（`COMMAND.flags` bit7）の下位側の判定ロジックだけ**（§5.6.4/5.8.3）。
-> `COMMAND`/`TELEMETRY` を含むどのパケットも構造・LEN は変更なし。旧版（v0.7〜v0.11）
-> の「進行方向の超音波が固定20cm未満で自動停止」を、**`v・t_delay + v²/(2・a_max) +
-> margin`（速度に応じて伸びる動的停止距離）＋ LiDAR を主センサ・超音波を補助センサに
-> したフェイルセーフ判定**へ置き換えた。`t_delay`/`a_max` は STM32 側の固定定数、
-> Pi から `CONFIG_SET`（`param_id = 0x0060`, `auto_stop_margin_cm`）で指定できるのは
-> 安全マージン `margin` の値そのもの（cm単位の連続値、範囲0-100、既定15）。
-> **当初案は3段階enum（NEAR/STANDARD/FAR）だったが、実機投入前に STM32 側が
-> cm直接指定へ変更した**（本書はその改訂を反映した版）。送らなければ既定の15cmの
-> まま動く。`protocol_version` を `0x000B`→`0x000C` に上げる。
-> **本書が最終版**であり、`protocol_version = 0x000C` はこの内容を指す。
+> **v0.13 で変わったのは `TELEMETRY` の末尾に4バイト（`slip[2]`/`tc_limit_nm[2]`）を
+> 追加したことと、`COMMAND` の末尾に1バイト（`flags2`）を追加したことの2点だけ**
+> （§5.3/§5.6）。他のパケットに変更はない。
+>
+> - **`TELEMETRY`（LEN 66→74）**: TC（トラクションコントロール）のゲイン
+>   （`DRIVE_TC_CUT_GAIN`/`DRIVE_TC_RECOVER_RATE`）を実機で追い込むにあたり、
+>   これまで `flags` bit5（`tc_active`、介入中か否かの1bit）しか見えなかった TC の
+>   内部状態を可視化する。`slip[]`（後輪スリップ率）と `tc_limit_nm[]`（TC が動的に
+>   決めているトルク上限）を追加した（§5.3）。
+> - **`COMMAND`（LEN 14→15）**: サイドブレーキ（`flags2` bit0 = `SIDE_BRAKE`）を新設。
+>   立てている間、速度に関わらず即座に後輪を位置制御へ切り替えて機械的に固定する
+>   （§5.6.5）。既存の `flags` bit1（`BRAKE`）より優先される。
+>
+> `protocol_version` を `0x000C`→`0x000D` に上げる。
+> **本書が最終版**であり、`protocol_version = 0x000D` はこの内容を指す。
+> **STM32 側の TC ゲイン実測・サイドブレーキとも実機での動作検証は未了**
+> （`pi_uart_protocol_v0.13_delta.md`）。
 
 ---
 
@@ -358,7 +363,7 @@ else:                 mark_hit(d * 0.02)     # 通常のヒット点
 LD06 の測距精度が ±1.5cm 程度なので、2cm 量子化による情報損失はほぼ無い。
 失われるのは 5.1m 以遠の情報だけ。
 
-### 5.3 `TELEMETRY` (0x02) — LEN = 66 【確定】
+### 5.3 `TELEMETRY` (0x02) — LEN = 74 【確定】
 
 車両構成: 後輪左右 2モータ + ステアリング 1モータ（いずれも自作 MD 駆動）、
 前輪左右にアナログ絶対角エンコーダ、MPU6050、超音波 前後各1、電源2系統。
@@ -381,20 +386,22 @@ off  size  type    field                 単位 / 備考
  40    2   i16     roll                  0.0001 rad
  42    6   i16×3   motor_current[3]      mA  [RL, RR, ST] 双方向・制動時は負
  48    4   i16×2   torque_cmd[2]         0.0001 N·m [RL, RR] TC適用後の最終指令値
- 52    4   u8×4    temp[4]               1 degC [RL, RR, ST, MCU] 符号なし
- 56    1   u8      batt_voltage_drive    0.05 V/LSB  (0〜12.75V)
- 57    1   u8      batt_voltage_signal   0.05 V/LSB  (0〜12.75V)
- 58    1   u8      batt_current_drive    0.05 A/LSB  (0〜12.75A) 単方向
- 59    1   u8      batt_current_signal   0.02 A/LSB  (0〜5.10A)  単方向
- 60    1   u8      us_front              2 cm/LSB (0〜5.1m)  0 = 無効
- 61    1   u8      us_rear               2 cm/LSB (0〜5.1m)  0 = 無効
- 62    3   u8×3    md_status[3]          §5.5  [RL, RR, ST]
- 65    1   u8      cmd_seq_echo          最後に受信した COMMAND の SEQ
+ 52    4   i16×2   slip[2]               0.0001 (無次元) [RL, RR] ★v0.13 TC用スリップ率。正=空転 負=ロック傾向。基準速度未満は0
+ 56    4   i16×2   tc_limit_nm[2]        0.0001 N·m [RL, RR] ★v0.13 TCが動的に決めるトルク上限。非介入時は最大トルクと同値
+ 60    4   u8×4    temp[4]               1 degC [RL, RR, ST, MCU] 符号なし
+ 64    1   u8      batt_voltage_drive    0.05 V/LSB  (0〜12.75V)
+ 65    1   u8      batt_voltage_signal   0.05 V/LSB  (0〜12.75V)
+ 66    1   u8      batt_current_drive    0.05 A/LSB  (0〜12.75A) 単方向
+ 67    1   u8      batt_current_signal   0.02 A/LSB  (0〜5.10A)  単方向
+ 68    1   u8      us_front              2 cm/LSB (0〜5.1m)  0 = 無効
+ 69    1   u8      us_rear               2 cm/LSB (0〜5.1m)  0 = 無効
+ 70    3   u8×3    md_status[3]          §5.5  [RL, RR, ST]
+ 73    1   u8      cmd_seq_echo          最後に受信した COMMAND の SEQ
 ──────────────────────────────────────────────────────────────────────────────
-                                                            合計 66 バイト
+                                                            合計 74 バイト
 ```
 
-**フレーム長 = 66 + 7 = 73 バイト。50Hz で 3.65 kB/s。**
+**フレーム長 = 74 + 7 = 81 バイト。50Hz で 4.05 kB/s。**
 
 #### 配列インデックスの規約
 
@@ -583,12 +590,14 @@ v0.3 の u16 では足りないため **u32 に拡張**した。
 | 14 | `fault_signal_undervoltage` | シグナル系バッテリー電圧低下。警告のみ、**自動クリア** |
 | 15 | `drive_power_locked` | 過電流ラッチにより `arm` 要求を拒否中 |
 | 16 | `auto_stop_active` | **超音波の自動停止が今まさに制動へ介入中**（★v0.7・§5.6.4） |
-| 17-31 | — | 予約（0 を送ること） |
+| 17 | `side_brake_active` | **サイドブレーキが今まさに位置制御へ切り替わり固定中**（★v0.13・§5.6.5） |
+| 18-31 | — | 予約（0 を送ること） |
 
-- **bit5/6/16 は「有効/無効」ではなく「今まさに介入しているか」**を返す。
+- **bit5/6/16/17 は「有効/無効」ではなく「今まさに介入しているか」**を返す。
   GUI で介入タイミングが見えると TC/TV のチューニングが劇的に楽になる。
-  bit16 も同じ考え方で、**「なぜ急に減速したのか」を後から説明できる**ようにするためにある
-  （有効/無効そのものは Pi が送った `COMMAND.flags` bit7 を見れば分かるので返さない）。
+  bit16/17 も同じ考え方で、**「なぜ急に減速・固定したのか」を後から説明できる**ように
+  するためにある（有効/無効そのものは Pi が送った `COMMAND.flags`/`flags2` を見れば
+  分かるので返さない）。
 - **bit10 は旧 `calib_done` を改名したもの。** 意味も変わり、
   「**今この起動で実行した**」ではなく「**Flash に有効な原点が保存されている**」となった。
   CALIB モードを廃止したため、起動のたびに実行するものではなくなったことによる。
@@ -619,7 +628,7 @@ MD が死んで無言になると status は最後の値のまま固まるため
 
 Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウトし、FAULT へ遷移する。
 
-### 5.6 `COMMAND` (0x10) — LEN = 14
+### 5.6 `COMMAND` (0x10) — LEN = 15
 
 | offset | size | type | field | 単位 |
 |---|---|---|---|---|
@@ -631,8 +640,9 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 | 8 | 2 | u16 | `steer_rate_limit` | 0.001 rad/s（舵角のレートリミット） |
 | 10 | 2 | u16 | `brake_torque` | 0.0001 N·m **後輪各輪**。`0` = 未指定（最大で制動）★v0.5 |
 | 12 | 2 | i16 | `target_torque` | 0.0001 N·m **駆動トルク直接指令**（負 = 後退方向）。`torque_mode` 時のみ有効 ★v0.6 |
+| 14 | 1 | u8 | `flags2` | §5.6.5 ★v0.13 新設 |
 
-**合計 14 バイト**（フレーム 21 バイト、100Hz で 2.10 kB/s）
+**合計 15 バイト**（フレーム 22 バイト、100Hz で 2.20 kB/s）
 
 時刻同期は `PING` / `PONG` に分離したため、`COMMAND` に Pi 側タイムスタンプは含めない。
 
@@ -720,7 +730,8 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **`brake` (bit1) と同時に立っている場合は `brake` が優先**され、制動トルクは
   `brake_torque`（未指定なら最大）を使う。`auto_stop` 単独での作動時は
   **常に最大制動トルク**（`brake_torque` の値は見ない）。
-  優先順位は **`brake` > `auto_stop` > 通常指令**（`torque_mode` 中の TC/TV と同じ経路）。
+  優先順位は **`side_brake` > `brake` > `auto_stop` > 通常指令**（`torque_mode` 中の
+  TC/TV と同じ経路。`side_brake` は★v0.13、§5.6.5）。
 - **ラッチしない。** 障害物が離れて `d_stop` を上回れば、その周期で自動的に解除される。
   どのセンサ条件にもヒステリシスは無いので、境界付近ではチャタリングし得る。
   壁に詰める作業のようにそれが許容できない場面では、Pi 側（GUI の設定パネル）で
@@ -730,6 +741,28 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **実機での動作検証は未了（2026-08-25）。** `t_delay`/`a_max`/LiDAR点数しきい値/
   超音波5cmフェイルセーフはいずれも実測前の値であり、誤作動・未作動が出た場合は
   一旦 `auto_stop` を切って様子を見ること（`pi_uart_protocol_v0.12_delta.md`）。
+
+#### 5.6.5 `flags2` (u8) ビット定義・`side_brake` の約束（★v0.13 新設）
+
+| bit | 名称 | 意味 |
+|---|---|---|
+| 0 | `side_brake` | 立てている間、**速度に関わらず即座に**後輪モータを位置制御へ切り替えて機械的に固定（サイドブレーキ／パーキングロック） |
+| 1-7 | — | 予約（0 を送ること） |
+
+- **`side_brake` は既存の `flags` bit1（`brake`）より優先される。** `brake` は速度PI
+  ループを迂回して制動トルクを掛けるだけなので惰性で多少動くが、`side_brake` は
+  後輪の目標を機械角へ切り替えて**その場に固定**する点が異なる。
+- **停止していなくても即座に切り替わる。** `auto_stop` のような距離判定は挟まない。
+  走行中に誤ってこのビットを立てると急激な挙動になり得るため、**Pi 側の指令生成
+  ロジックで走行中に誤って立てないよう注意すること**。
+- Pi 側が明示的にこのビットを下ろすまで有効なまま（`brake` と同様、単発ではなく
+  「立てている間ずっと」効く連続コマンド）。
+- MD の状態やフレームが無効（給電直後など）で実際に角度を保持できていない場合でも、
+  通常の駆動系は自動的に最大制動側へフォールバックする。**実際に位置制御へ切り替わり
+  固定できたかどうか**は `TELEMETRY.flags` bit17（`side_brake_active`、§5.4）で確認する。
+- **実機での動作検証は未了（2026-08-28）。** 特に「速度に関わらず即座に位置制御へ
+  切り替わる」仕様のため、走行中に誤って `flags2` bit0 を立てないよう Pi 側の指令生成
+  ロジックで注意すること（`pi_uart_protocol_v0.13_delta.md`）。
 
 #### 設計意図
 
@@ -1488,6 +1521,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.8** | 2026-08-19 | **STM32 側発。ワイヤ形式・LEN の変更なし。** `CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0010`（TC 有効）/ `0x0020`（TV 有効）が STM32 ファームウェアで実際に機能するようになった（以前は `RAS_CONFIG_UNKNOWN_PARAM` を返していた）。Pi 側は `io_node` にハンドシェイク直後の `CONFIG_GET` 初期同期と、GUI トグル操作に応じた `CONFIG_SET` 送信を実装（§5.8）。`MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER`（`0x0001`-`0x0003`）は STM32 側で既にクランプに使われているが、Flash 非永続化かつ動的変更のユースケースが無いため Pi からは意図的に未送信のまま（§5.8.1） |
 | **v0.9** | 2026-08-20 | **STM32 側発。ワイヤ形式・LEN の変更なし。** 後輪片浮き（接地荷重ゼロ）でモータが無負荷空転する問題への対策として「片輪浮き対策（Wheel Lift Guard）」を追加、`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0050` で ON/OFF できるようになった（§5.8.2）。既存の TC 本体（`0x0010`）とは独立に動作し、個別に有効/無効を切り替えられる。Pi 側は `io_node` に3つ目の `CONFIG_GET` 初期同期と、GUI トグル（`SettingsPanel`）操作に応じた `CONFIG_SET` 送信を実装。**STM32 側も実機で動作確認済み（2026-08-20）**（`pi_uart_protocol_v0.9_delta.md`） |
 | **v0.12** | 2026-08-25（`param_id = 0x0060` の値を3段階enumからcm直接指定へ改訂） | **STM32 側発。`CONFIG_SET`/`CONFIG_GET` の `param_id` が増えたのと `auto_stop` の下位判定ロジックの変更のみ（`COMMAND`/`TELEMETRY` を含む既存パケットの構造・LEN は変更なし）。** 固定20cmの自動停止判定を、走行速度に応じて伸びる動的停止距離 `d_stop = v・t_delay + v²/(2・a_max) + margin` と、LiDAR（進行方向±20°の角度窓・直近300ms・3点以上）を主センサ、超音波をフォールバック（LiDAR死角時のみ）と近接フェイルセーフ（5cm未満で常時作動）に使う判定へ置き換えた（§5.6.4）。Pi から変更できるのは安全マージン `margin`（`param_id = 0x0060`, `auto_stop_margin_cm`: cm単位の連続値、範囲0-100、既定15）のみ（§5.8.3）。**当初は `AutoStopLevel`（NEAR=5cm/STANDARD=15cm/FAR=30cmの3段階enum）として実装されていたが、実機投入前に STM32 側がcm直接指定へ変更**（本表はこの改訂を反映）。`t_delay`/`a_max` は STM32 側の固定定数。`protocol_version` を `0x000B`→`0x000C` に上げる。Pi 側は `io_node` に4つ目の `CONFIG_GET` 初期同期と、GUI 操作（`SettingsPanel` のスライダー）に応じた `CONFIG_SET` 送信を実装。**STM32 側実装済み、実機での動作検証は未了**（`pi_uart_protocol_v0.12_delta.md`） |
+| **v0.13** | 2026-08-28 | **STM32 側発。`TELEMETRY`(0x02) の LEN・末尾に追加した4バイトと、`COMMAND`(0x10) の LEN・新設 `flags2` バイトのみ（他パケットに変更なし）。** TC（トラクションコントロール）のゲイン（`DRIVE_TC_CUT_GAIN`/`DRIVE_TC_RECOVER_RATE`）を実機で追い込むにあたり、`flags` bit5（`tc_active`、介入中か否かの1bit）だけでは内部状態が分からなかった問題への対応。`TELEMETRY` に `slip[2]`（後輪スリップ率、無次元）・`tc_limit_nm[2]`（TCが動的に決めるトルク上限）を追加（LEN 66→**74**、§5.3）。加えて、後輪モータを位置制御へ切り替えて機械的に固定する**サイドブレーキ**を新設。`COMMAND` に `flags2`（bit0=`SIDE_BRAKE`）を追加（LEN 14→**15**、§5.6.5）。速度に関わらず即座に切り替わり、既存の `flags` bit1（`BRAKE`）より優先される。実際に固定できたかは `TELEMETRY.flags` bit17（`SIDE_BRAKE_ACTIVE`、§5.4）で確認する。`protocol_version` を `0x000C`→`0x000D` に上げる。Pi 側は `protocol.toml`/`raspi/msgs`/`sim/stm32.py` を対応済み。**GUI 側にサイドブレーキを送出する操作は未実装**（`DriveCmd.side_brake` はバス上に存在するが、ドライバー向け操作パネルへの結線はまだ行っていない）。**STM32 側実装済み、実機での動作検証は未了**（`pi_uart_protocol_v0.13_delta.md`） |
 | **v0.11** | 2026-08-22 | **STM32 側発。`LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設（`COMMAND`/`TELEMETRY`/`CONFIG_SET`/`CONFIG_GET` を含む既存パケットの構造・LEN は変更なし）。** v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を廃止した結果 Pi が STM32 側の固定上限値を知る手段が無くなっていた問題への対応。`LIMITS` は `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`（f32×4・LEN16・読み取り専用）を返す。STM32 は起動直後に `VERSION` と同じタイミングで3回自発送信、Pi は `LIMITS_REQ` でいつでも再取得できる（§5.12）。`protocol_version` を `0x000A`→`0x000B` に上げる。Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り、未受信なら1秒おきに再送する。`IoNode._send_command` は `LIMITS` を受信済みなら**無条件にそちらでクランプ**し（RC/AUTO 問わず）、`--max-speed`/`--max-steer`（Pi 側設定）は未受信時のみのフォールバックにした（`raspi/msgs/convert.py` の `command_from_cmd` に `max_accel`/`max_torque` 引数を追加。2026-08-22、当初は「小さい方」だったが GUI 表示との食い違いを避けるため「STM32 実測を優先」に変更）。GUI（`gui/src/store/ui.ts` の `effectiveRange()`）も同じ方針。`sim/stm32.py` にも `LIMITS`/`LIMITS_REQ` を実装済み。**STM32 側実装済み、実機での動作検証は未了**（`pi_uart_protocol_v0.11_delta.md`） |
 | **v0.10** | 2026-08-21 | **STM32 側発。`CONFIG_SET`/`CONFIG_GET` の `param_id` のみの変更（`COMMAND`/`TELEMETRY` を含むパケット構造・LEN は変更なし）。** `RAS_PARAM_MAX_SPEED`(`0x0001`)/`RAS_PARAM_MAX_ACCEL`(`0x0002`)/`RAS_PARAM_MAX_STEER`(`0x0003`) を廃止し、STM32 側の固定定数（`DRIVE_MAX_SPEED_M_S` = 5.0 m/s、`DRIVE_MAX_ACCEL_M_S2` = 3.0 m/s²、路面舵角 ±30°）に一本化。この3つの `param_id` は以後常に `RAS_CONFIG_UNKNOWN_PARAM` を返す（§5.8.1）。`protocol_version` を `0x0009`→`0x000A` に上げる。Pi はこの3つの `param_id` を元々送信していなかったため、`protocol.toml`/`packets.py`/`surge_proto.h` の `protocol_version` 更新のみで Pi 側の実質的な挙動変化はない。**STM32 側実装・単体テスト済み、実機での動作検証は未了**（`pi_uart_protocol_v0.10_delta.md`） |
 

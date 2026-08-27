@@ -34,6 +34,7 @@ _ODOM = 1e-4           # m (0.1mm/LSB)
 _ACCEL = 1e-3          # m/s²
 _CURRENT = 1e-3        # A (mA/LSB)
 _TORQUE = 1e-4         # N·m
+_SLIP = 1e-4           # 無次元（TC用スリップ率）
 _BATT_V = 0.05         # V
 _BATT_A_DRIVE = 0.05   # A
 _BATT_A_SIGNAL = 0.02  # A
@@ -96,6 +97,7 @@ def decode_flags(flags: int) -> dict:
         "steer_center_valid": bool(flags & packets.FLG_STEER_CENTER_VALID),
         "drive_power_locked": bool(flags & packets.FLG_DRIVE_POWER_LOCKED),
         "auto_stop_active": bool(flags & packets.FLG_AUTO_STOP_ACTIVE),
+        "side_brake_active": bool(flags & packets.FLG_SIDE_BRAKE_ACTIVE),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 
@@ -166,6 +168,8 @@ class StateBuilder:
             roll=t.roll * _ANGLE,
             motor_current=[v * _CURRENT for v in t.motor_current],
             torque_cmd=[v * _TORQUE for v in t.torque_cmd],
+            tc_slip=[v * _SLIP for v in t.slip],
+            tc_limit_nm=[v * _TORQUE for v in t.tc_limit_nm],
             temp=temp,
             batt_voltage=[t.batt_voltage_drive * _BATT_V, t.batt_voltage_signal * _BATT_V],
             batt_current=[t.batt_current_drive * _BATT_A_DRIVE,
@@ -254,6 +258,10 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
     light = cmd.light_mode if cmd.light_mode in (0, 1, 2) else 0
     flags |= (light << packets.CMD_FLG_LIGHT_SHIFT) & packets.CMD_FLG_LIGHT_MASK
 
+    # v0.13: サイドブレーキ。速度に関わらず即座に位置制御へ切り替えて固定するため、
+    # Pi 側では target_speed 等をクランプせずそのまま送る（STM32 側が brake より優先して解釈する）
+    flags2 = packets.CMD_FLG2_SIDE_BRAKE if cmd.side_brake else 0
+
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0
     torque_limit = MAX_TARGET_TORQUE_NM if max_torque is None else min(MAX_TARGET_TORQUE_NM, max_torque)
@@ -267,6 +275,7 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         steer_rate_limit=_clamp(cmd.steer_rate_limit / _YAW_RATE, 0, 65535),
         brake_torque=_brake_torque_raw(cmd.brake_torque, max_torque),
         target_torque=torque_raw,
+        flags2=flags2,
     )
 
 

@@ -97,6 +97,24 @@ const CHARTS: ChartDef[] = [
     minSpan: 4,
   },
   {
+    // ★v0.13。スリップ%とトルク上限N·mは値域が全く違う（±100 vs 0〜0.15）ので
+    // 同じ軸に載せると片方が潰れる。チャートを分けること
+    title: 'TC スリップ率',
+    keys: ['slipRL', 'slipRR'],
+    labels: ['後左', '後右'],
+    colors: [C.accent, C.live],
+    unit: '%（正=空転 負=ロック傾向）',
+    minSpan: 10,
+  },
+  {
+    title: 'TC トルク上限',
+    keys: ['tcLimitRL', 'tcLimitRR'],
+    labels: ['後左', '後右'],
+    colors: [C.accent, C.live],
+    unit: 'N·m（非介入時は最大トルクに張り付く）',
+    minSpan: 0.02,
+  },
+  {
     title: '加速度',
     keys: ['accelX', 'accelY'],
     labels: ['前後', '左右'],

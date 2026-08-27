@@ -1,6 +1,6 @@
 /**
- * 運転中に共通の操作 — 灯火・ファン。**ラジコンタブでも自動運転タブでも同じものを
- * 操作するので、タブごとに複製せずタブ行に1つだけ置く。**
+ * 運転中に共通の操作 — 灯火・ファン・サイドブレーキ。**ラジコンタブでも自動運転
+ * タブでも同じものを操作するので、タブごとに複製せずタブ行に1つだけ置く。**
  *
  * 2026-08-17: `RcBar.tsx`（ラジコンタブ）と `AuxPanel.tsx`（自動運転タブ）に
  * それぞれ独立していた灯火トグルを統合し、ファンの自動/手動＋デューティを新設した。
@@ -13,13 +13,22 @@
  * プロテクション。安全機構なのでソフトウェアからは無効化しない・すべきでない）。
  * この上書きは `duty`（指定値）には出ず sysfs の実際の PWM だけが変わるので、
  * 実測 `rpm` を表示しないと「手動なのに勝手に速くなった」が原因不明に見える。
+ *
+ * ## サイドブレーキ（v0.13、2026-08-28 追加）
+ *
+ * `braking`/`horning` のような「押している間だけ」ではなく、**ON/OFF のトグル**
+ * （駐車ブレーキと同じ「かけたら手を離せる」操作感、`useDriving.ts`/`store/ui.ts`
+ * 参照）。STM32 は**速度に関わらず即座に**後輪を位置制御へ切り替えて固定するため、
+ * 走行中の誤操作を防ぐ目的で、停止中（`vs.stopped`）以外は ON ボタンを無効化する。
  */
+import { useNumbers } from '../bus/live'
 import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
 export function DriveControls({ ch }: { ch: ControlChannel | null }) {
   const ui = useUi()
   const fan = ui.fan
+  const vs = useNumbers().vs
 
   return (
     <div className="drive-controls">
@@ -79,6 +88,27 @@ export function DriveControls({ ch }: { ch: ControlChannel | null }) {
             {fan.rpm}rpm
           </span>
         )}
+      </div>
+
+      <div className="rc-ctl">
+        <span className="label">サイドブレーキ</span>
+        <div className="seg">
+          <button
+            className={ui.sideBrakeRequested ? 'on' : ''}
+            disabled={!ui.sideBrakeRequested && vs != null && !vs.stopped}
+            title={vs != null && !vs.stopped ? '走行中はONにできません（停止してから）' : ''}
+            onClick={() => ui.set({ sideBrakeRequested: true })}
+          >
+            ON
+          </button>
+          <button className={ui.sideBrakeRequested ? '' : 'on'}
+                  onClick={() => ui.set({ sideBrakeRequested: false })}>OFF</button>
+        </div>
+        {/* 「要求している」と「今まさに固定できているか」は別物。実際に位置制御へ
+            切り替わって固定できたときだけ `TELEMETRY.flags` bit17 が立つ */}
+        <span className={`pill ${vs?.side_brake_active ? 'lv-warn' : 'dim'}`}>
+          {vs?.side_brake_active ? '固定中' : ui.sideBrakeRequested ? '要求中…' : '解除'}
+        </span>
       </div>
     </div>
   )
