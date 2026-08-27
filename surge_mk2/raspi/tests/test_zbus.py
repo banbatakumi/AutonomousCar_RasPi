@@ -201,6 +201,20 @@ class TestTopicOwner(unittest.TestCase):
             with self.subTest(planner=cls.id, topic=cls.input_topic):
                 endpoints_for_topic(cls.input_topic)   # 例外が出ないこと
 
+    def test_cam_model_is_owned_by_control_and_not_swallowed_by_cam_config(self):
+        """`"cam/model"`（★モデル選択トピック）が `"cam/config"` の前方一致に
+        誤って拾われていないこと。両方とも `TOPIC_OWNER` の完全一致キーとして
+        別々に存在し、どちらも実際の owner は `control`（telemetry_node）だが、
+        **偶然同じ答えになるからといって前方一致に頼ってはいけない**——
+        将来どちらかの owner だけ変えたときに、もう片方が巻き添えで
+        壊れる経路を残さないため。
+        """
+        from raspi.bus.zbus import TOPIC_OWNER, endpoint_for_node, endpoints_for_topic
+
+        self.assertIn("cam/model", TOPIC_OWNER, "完全一致キーとして登録されていない")
+        self.assertEqual(endpoints_for_topic("cam/model"),
+                         [endpoint_for_node("control")])
+
     def test_scan_cam_is_not_swallowed_by_the_scan_prefix(self):
         """`"scan/cam"` は `"scan"` の前方一致フォールバックに拾われてはいけない。
 

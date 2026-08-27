@@ -111,6 +111,23 @@ export type FanStatus = {
   rpm: number | null
 }
 
+/** `models/` にある `.onnx` の1件（`cam_model_list` の応答）。 */
+export type CamModelFile = {
+  name: string
+  size: number
+  /** UNIX epoch秒 */
+  mtime: number
+  /** 前処理設定（`ml/export_onnx.py` が書く `<name>.json`）が同梱されているか。
+   * 無ければ既定値（0-1正規化・224x224）で読まれる */
+  has_config: boolean
+}
+
+/** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値**
+ * （`ws/control.ts` の `camModelSelect`）。空文字は未選択 */
+export type CamModelStatus = {
+  name: string
+}
+
 /** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
 export type CameraConfigStatus = {
@@ -195,6 +212,8 @@ export type ControlStatus = {
   wifi: WifiStatus
   /** capture側のFPS上限・後方カメラON/OFF・GUI配信頻度。**サーバが真値** */
   camera_config: CameraConfigStatus
+  /** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値** */
+  cam_model: CamModelStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */

@@ -9,7 +9,7 @@
  * 同じ経路で停止する。「止める指令を送る」設計だと、その指令が届かない
  * 状況（＝一番止めたい状況）で止まらない。
  */
-import type { CmdOut, ControlStatus, LogFile } from '../types'
+import type { CamModelFile, CmdOut, ControlStatus, LogFile } from '../types'
 import { authToken } from './token'
 import { wsUrl } from './url'
 
@@ -28,6 +28,7 @@ type ServerMsg = {
   holder?: string
   reason?: string
   files?: LogFile[]
+  cam_model_files?: CamModelFile[]
   id?: number
 }
 
@@ -41,6 +42,8 @@ export type ControlHandlers = {
   onRtt: (ms: number) => void
   /** `logs_list`/`logs_delete` への応答 */
   onLogs: (files: LogFile[]) => void
+  /** `cam_model_list` への応答（`models/` にある `.onnx` の一覧） */
+  onCamModels: (files: CamModelFile[]) => void
 }
 
 export class ControlChannel {
@@ -78,6 +81,7 @@ export class ControlChannel {
       if (m.type === 'status') this.h.onStatus(m as unknown as ControlStatus)
       else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '', m.reason)
       else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
+      else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
@@ -186,6 +190,25 @@ export class ControlChannel {
       rear_enabled: p.rearEnabled,
       gui_hz: p.guiHz,
     })
+  }
+
+  // ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
+
+  /** `models/` にある `.onnx` の一覧を要求する。応答は `onCamModels`。
+   * `logsList` と同じく、開いた/更新ボタンを押したタイミングで呼べばよい */
+  camModelList() {
+    this.send({ type: 'cam_model_list' })
+  }
+
+  /**
+   * `cam_perception_node` が使うモデルを選ぶ。空文字で「未選択」に戻せる。
+   * `fan`/`camera` と同じく状態はサーバが真値。
+   *
+   * ⚠ **`ftg_cam` を engage 中に選び直すと engage は必ず落ちる**
+   * （サーバ側の約束。`setAuto` のモード変更と同じ形）。
+   */
+  camModelSelect(name: string) {
+    this.send({ type: 'cam_model_select', name })
   }
 
   // ── 片輪浮き対策 有効切り替え（★v0.9） ──

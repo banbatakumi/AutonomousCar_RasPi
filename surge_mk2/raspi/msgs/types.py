@@ -36,7 +36,7 @@ __all__ = [
     "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
-    "TOPIC_UI_EVENT",
+    "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -76,6 +76,11 @@ TOPIC_UI_EVENT = "ui/event"
 #: capture側(camera_node)のFPS上限・後方カメラON/OFFの意思。telemetry_node が出し、
 #: camera_node が拾って `Picamera2.set_controls()`/`stop()`/`start()` を呼ぶ
 TOPIC_CAM_CONFIG = "cam/config"
+
+#: `cam_perception_node` が使うセグメンテーションモデルの希望。telemetry_node が
+#: `cam/config` と同じ流儀（現在の意思を繰り返し流す）で出し、cam_perception_node
+#: が拾って ONNX 推論セッションを作り直す。**`scan/cam`（推論の出力）とは別物**
+TOPIC_CAM_MODEL = "cam/model"
 
 
 class MsgBase(msgspec.Struct):
@@ -528,6 +533,22 @@ class CamConfig(MsgBase):
     rear_enabled: bool = True
 
 
+class CamModelCtrl(MsgBase):
+    """`cam_perception_node` への「このモデルを使ってほしい」という意思。
+
+    `CamConfig` と同じく**「現在の意思」を繰り返し流す**（telemetry_node の
+    `_cam_model_pump`）——cam_perception_node が再起動しても、GUI で何も
+    操作しないまま数秒で最新の意思に復帰させたい。
+
+    `name` は `models/<name>.onnx`（+ 同名の `.json`。前処理設定。
+    `ml/export_onnx.py` が書く）を指す。**空文字は「未選択」**——
+    cam_perception_node はモデルを持たないまま `scan/cam` を「壁」扱いで
+    出し続ける（`follow_the_gap_cam.py` 側の `MIN_SEEN_RATIO` で自然に停止する）。
+    """
+
+    name: str = ""
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -547,6 +568,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_AUTO_MAP: AutoMap,
     TOPIC_UI_EVENT: UiEvent,
     TOPIC_CAM_CONFIG: CamConfig,
+    TOPIC_CAM_MODEL: CamModelCtrl,
 }
 
 

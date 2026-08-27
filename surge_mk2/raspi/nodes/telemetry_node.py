@@ -128,7 +128,15 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
-from raspi.msgs import AutoCtrl, CamConfig, DriveCmd, Heartbeat as HbMsg, LogCtrl, UiEvent  # noqa: E402
+from raspi.msgs import (  # noqa: E402
+    AutoCtrl,
+    CamConfig,
+    CamModelCtrl,
+    DriveCmd,
+    Heartbeat as HbMsg,
+    LogCtrl,
+    UiEvent,
+)
 from raspi.msgs.schema import schema_version  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -136,6 +144,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CAM_CONFIG,
+    TOPIC_CAM_MODEL,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_HB_PREFIX,
@@ -163,6 +172,11 @@ LOGS_DIR = REPO_ROOT / "logs"
 AUTO_CONF = REPO_ROOT / "config" / "auto.json"
 #: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
 CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
+#: `cam_perception_node` へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場。
+#: `ml/export_onnx.py` の出力をここへ手動で配置する運用（`.gitignore` 済み）
+MODELS_DIR = REPO_ROOT / "models"
+#: 選ばれているモデル名を覚えておく場所。`AUTO_CONF`/`CAMERA_CONF` と同じ流儀
+CAM_MODEL_CONF = REPO_ROOT / "config" / "cam_model.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝従来どおり誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
@@ -194,6 +208,9 @@ CAM_CONFIG_HZ = 1
 #: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
 #: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外
 CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam"})
+#: `cam/model`（★モデル選択）の再送周期。`CAM_CONFIG_HZ` と同じ理由
+#: （cam_perception_node の再起動や取りこぼしで食い違ったままにならないように）
+CAM_MODEL_HZ = 1
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
@@ -354,6 +371,13 @@ class TelemetryServer:
         self._cam_front_cap_hz = CAM_FRONT_FPS_DEFAULT
         self._cam_rear_cap_hz = CAM_REAR_FPS_DEFAULT
         self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
+
+        # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
+        #: 選ばれているモデル名。**空文字 = 未選択**（`config/cam_model.json` に
+        #: 保存され次回起動で戻る。`engaged` は他の自動運転設定と同じく保存しない
+        #: が、こちらはモデル選択そのものなので `auto.json` 側には持たせない）
+        self._cam_model = ""
+        self._load_cam_model_conf()
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -625,6 +649,17 @@ class TelemetryServer:
 
         elif kind == "camera":
             self._on_camera(m)
+            await self._broadcast_control_status()
+
+        # ── カメラセグメンテーションモデルの選択（誰でも操作できる。
+        #    `ftg_cam` を engage する前に選び直す想定——一覧は要求があった
+        #    クライアントにだけ返す（`logs_list` と同じ流儀）） ──
+
+        elif kind == "cam_model_list":
+            await self._send_json(ws, self._cam_models_list())
+
+        elif kind == "cam_model_select":
+            self._on_cam_model(m)
             await self._broadcast_control_status()
 
         # ── TC/TV 有効切り替え（誰でも操作できる。★v0.8） ──
@@ -919,6 +954,79 @@ class TelemetryServer:
         except Exception:
             pass                           # 保存できなくても走行は続けられるべき
 
+    # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
+    #
+    # `cam_perception_node` を再起動もSSHも無しに切り替えるための口。
+    # **走行開始（engage）ボタンを押す前に選び直す**という使い方を想定していて、
+    # `_on_auto` と同じ「変えたら engage は必ず落とす」を踏襲する（このコード
+    # ベースには「engage 中は操作を拒否する」という前例が無く、代わりに
+    # 「変わったものを反映するために engage を落とす」という設計で統一されている
+    # ——`_on_auto` のモード変更、`_release_control` の操縦者消失と同じ形）。
+
+    def _cam_models_list(self) -> dict:
+        """`models/` にある `.onnx` の一覧。`_logs_list` と同じ流儀
+        （要求したクライアントにだけ返す。ブロードキャストしない）。
+
+        **キー名は `files` ではなく `cam_model_files`。** `_logs_list()` の
+        `files`（`LogFile[]`）と型が違うので、GUI 側の `ServerMsg`（型で
+        振り分けられない1つの受け皿）で混ざらないよう分けてある。
+        """
+        files = []
+        if MODELS_DIR.is_dir():
+            for p in sorted(MODELS_DIR.iterdir()):
+                if not p.is_file() or p.suffix != ".onnx":
+                    continue
+                st = p.stat()
+                files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
+                             "has_config": p.with_suffix(".json").exists()})
+        return {"type": "cam_models", "cam_model_files": files}
+
+    def _on_cam_model(self, m: dict) -> None:
+        """`{"type":"cam_model_select", "name": str}`。
+
+        `name` が `models/` に実在する `.onnx` と一致しなければ黙って捨てる
+        （`_on_auto` が知らない planner id を捨てるのと同じ——GUI の一覧に
+        出ていないものは選べないので、ここに来る時点で基本的に一致するはずだが、
+        一覧取得後にファイルが削除された等のズレを机上でも弾いておく）。
+        """
+        name = str(m.get("name") or "")
+        if name and not (MODELS_DIR / f"{name}.onnx").is_file():
+            return
+        if name == self._cam_model:
+            return
+        self._cam_model = name
+        # **モデルを変えたら ftg_cam の engage は必ず落とす。** 前のモデルの
+        # つもりで engage したまま推論だけ入れ替わるのを防ぐ（`_on_auto` の
+        # 「モードを変えたら engage は必ず落とす」と同じ理由・同じ形）
+        if self._auto_engaged and self._auto_mode == "ftg_cam":
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+        self._save_cam_model_conf()
+        self._publish_cam_model()          # 待たせない。cam_config と同じく即座に効かせる
+
+    def _cam_model_status(self) -> dict:
+        return {"name": self._cam_model}
+
+    def _publish_cam_model(self) -> None:
+        self.pub.send(TOPIC_CAM_MODEL, CamModelCtrl(name=self._cam_model))
+
+    def _load_cam_model_conf(self) -> None:
+        """`config/cam_model.json` から戻す。`_load_camera_conf` と同じ流儀。"""
+        try:
+            raw = _json_decode(CAM_MODEL_CONF.read_bytes())
+        except Exception:
+            return                         # 無い・壊れている → 既定（未選択）のまま
+        name = raw.get("name")
+        if isinstance(name, str) and (not name or (MODELS_DIR / f"{name}.onnx").is_file()):
+            self._cam_model = name
+
+    def _save_cam_model_conf(self) -> None:
+        try:
+            CAM_MODEL_CONF.parent.mkdir(parents=True, exist_ok=True)
+            CAM_MODEL_CONF.write_bytes(_json_encode({"name": self._cam_model}))
+        except Exception:
+            pass                           # 保存できなくても走行は続けられるべき
+
     # ── Wi-Fi（SSID・電波強度） ──
 
     def _wifi_status(self) -> dict:
@@ -987,6 +1095,7 @@ class TelemetryServer:
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
             "camera_config": self._camera_config_status(),
+            "cam_model": self._cam_model_status(),
         }
 
     def _auto_status(self) -> dict:
@@ -1323,6 +1432,17 @@ class TelemetryServer:
             await asyncio.sleep(period)
             self._publish_cam_config()
 
+    async def _cam_model_pump(self) -> None:
+        """`cam_perception_node` への希望モデル名を低頻度で再送する。
+
+        `_cam_config_pump` と同じ理由：cam_perception_node が再起動しても
+        1秒以内に最新の選択へ復帰させる（GUI で何も操作していなくても）。
+        """
+        period = 1.0 / CAM_MODEL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_cam_model()
+
     async def _log_ctrl_pump(self) -> None:
         """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
 
@@ -1406,7 +1526,7 @@ class TelemetryServer:
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
-                self._cam_config_pump)]
+                self._cam_config_pump, self._cam_model_pump)]
             try:
                 await stop
             finally:

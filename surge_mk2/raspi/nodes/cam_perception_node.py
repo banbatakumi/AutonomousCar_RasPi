@@ -1,6 +1,7 @@
 """cam_perception_node — 前方カメラの走行可否セグメンテーションを擬似 `Scan` に変換する。
 
-    .venv/bin/python -m raspi.nodes.cam_perception_node --model model.onnx
+    .venv/bin/python -m raspi.nodes.cam_perception_node
+    .venv/bin/python -m raspi.nodes.cam_perception_node --model model.onnx   # 開発用に既定モデルを直指定
 
 `camera_node.py` が書く共有メモリ（`image/front` の `ImageRef`）を読み、ONNX
 モデルで「走行可能／不可能」の2値マスクを作り、`raspi.nav.ipm` で地面座標へ
@@ -8,6 +9,15 @@
 使う）で角度ごとの距離配列に変換して `scan/cam`（`raspi/msgs/types.py`）へ
 publish する。ギャップ探索そのものは書かない——それは
 `raspi/auto/follow_the_gap_cam.py` が `FollowTheGap` をそのまま流用する。
+
+## どのモデルを使うかは `cam/model` トピックで決まる（GUI から選ぶ）
+
+起動時に `--model` を渡さなければ、GUI（設定タブ）で選ばれたモデル名を
+telemetry_node が `cam/model`（`CamModelCtrl`）で繰り返し流してくるのを待つ。
+モデル名は `--models-dir`（既定 `models/`）配下の `<name>.onnx` に解決される
+（前処理設定は同名の `<name>.json`。`ml/export_onnx.py` が書く）。
+`ftg_cam` を engage する前に、走行開始ボタンを押さずにモデルだけ選び直せる
+——プロセスの再起動もSSHも要らない（`reload_if_changed()`）。
 
 ## 契約1: `dist` を厳密に 0.0 にしない
 
@@ -26,6 +36,7 @@ LiDAR の「欠測は空きではない」（`follow_the_gap.py` の docstring�
 from __future__ import annotations
 
 import argparse
+import json
 import signal
 import sys
 import time
@@ -41,6 +52,7 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import ImageRef, Scan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_CAM_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN_CAM,
@@ -50,6 +62,10 @@ from raspi.nav.grid import OccGrid  # noqa: E402
 from raspi.nav.ipm import CameraExtrinsics, camera_intrinsics, project_mask_to_grid  # noqa: E402
 
 __all__ = ["SegmentationModel", "CamPerceptionNode"]
+
+#: `surge_mk2/`。GUI から選ばれたモデル名を `models/<name>.onnx` に解決する基準
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MODELS_DIR = REPO_ROOT / "models"
 
 NS = 1_000_000_000
 HB_HZ = 10
@@ -116,10 +132,17 @@ class CamPerceptionNode:
     テストで踏める）。
     """
 
-    def __init__(self, *, model: SegmentationModel, vehicle: Vehicle | None = None,
+    def __init__(self, *, model: SegmentationModel | None = None,
+                models_dir: Path | None = None, loaded_model_name: str = "",
+                vehicle: Vehicle | None = None,
                 fov_deg: float = 60.0, max_range: float = 3.0,
                 grid_resolution: float = 0.05, grid_size_m: float = 6.0) -> None:
+        #: **`None` は「まだモデルが選ばれていない」。** `run()` はこの間
+        #: `failed_frame()` を出し続ける（契約2の「壁扱い」に自然に落ちる）
         self.model = model
+        #: GUI が選んだモデル名（`cam/model`）から `models_dir/<name>.onnx` を探す
+        self.models_dir = models_dir or DEFAULT_MODELS_DIR
+        self._loaded_model_name = loaded_model_name
         self.vehicle = vehicle or Vehicle.load()
         v = self.vehicle
         #: 地面からの高さは base_link の z をそのまま使う近似（`ipm.py` docstring参照）
@@ -140,6 +163,51 @@ class CamPerceptionNode:
 
     def close(self) -> None:
         self._reader.close()
+
+    # ── モデルの切替（GUI からの `cam/model` を受けて呼ばれる） ──
+
+    def _load_model_by_name(self, name: str) -> SegmentationModel:
+        """`models_dir/<name>.onnx`（+ 同名 `.json`。前処理設定）を読む。
+
+        `.json` が無ければ `SegmentationModel` の既定値（`ml/dataset.py` の
+        正規化と揃えてある 0-1 正規化）で読む——`ml/export_onnx.py` を通さずに
+        手で置いた `.onnx` でも動かせるようにするための保険で、
+        **積極的に使うことは想定していない**（train/inference skew の温床）。
+        """
+        onnx_path = self.models_dir / f"{name}.onnx"
+        if not onnx_path.exists():
+            raise FileNotFoundError(f"モデルが見つかりません: {onnx_path}")
+        cfg = {}
+        cfg_path = onnx_path.with_suffix(".json")
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text())
+        w, h = cfg.get("input_size", [224, 224])
+        return SegmentationModel(str(onnx_path), input_size=(int(w), int(h)),
+                                 mean=float(cfg.get("mean", 0.0)),
+                                 std=float(cfg.get("std", 255.0)),
+                                 threshold=float(cfg.get("threshold", 0.5)))
+
+    def reload_if_changed(self, desired_name: str) -> bool:
+        """`desired_name` が今ロード中のモデルと違えば読み込み直す。
+
+        **失敗しても今のモデルを保持する。** GUI が壊れた・存在しないモデル名を
+        選んでも、それだけで走行が止まる（`self.model` が `None` に戻って
+        `failed_frame()` の壁扱いになる）よりは、前のモデルで走り続けられる
+        方が安全側——ただし選び間違いに気づけるようログには残す。
+
+        切り替えられたら `True`、そのまま／失敗なら `False`。
+        """
+        if not desired_name or desired_name == self._loaded_model_name:
+            return False
+        try:
+            self.model = self._load_model_by_name(desired_name)
+            self._loaded_model_name = desired_name
+            print(f"# モデル切替: {desired_name}", flush=True)
+            return True
+        except Exception as e:                                # noqa: BLE001
+            print(f"# モデル読み込み失敗（{desired_name}）: {e}。"
+                 f"前のモデルのまま続行", file=sys.stderr, flush=True)
+            return False
 
     # ── 1周期ぶんの処理（純粋関数。バスを知らない） ──
 
@@ -203,9 +271,18 @@ class CamPerceptionNode:
                 break
             for _ in sub.poll(20):
                 pass  # `latest` を見るだけなので中身の処理は不要
+
+            model_ctrl = sub.latest.get(TOPIC_CAM_MODEL)
+            if model_ctrl is not None:
+                self.reload_if_changed(model_ctrl.name)
+
             ref = sub.latest.get(TOPIC_IMAGE_FRONT)
             vs = sub.latest.get(TOPIC_VEHICLE_STATE)
-            if ref is None:
+            if self.model is None:
+                # **契約2の入口。** まだ GUI がモデルを選んでいない（起動直後・
+                # 未選択のまま）。フレームが来ていても推論しようがない
+                st = self.failed_frame(seq=seq)
+            elif ref is None:
                 st = self.failed_frame(seq=seq)
             else:
                 got = self.read_frame(ref)
@@ -229,8 +306,13 @@ class CamPerceptionNode:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", required=True, help="ONNX モデルのパス")
-    ap.add_argument("--input-size", default="224x224")
+    ap.add_argument("--model", default=None,
+                    help="起動時の既定モデル（ONNXパス。省略時は cam/model トピック"
+                         "経由のGUI選択を待つ）")
+    ap.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR),
+                    help="GUIが選んだモデル名から探すディレクトリ（既定 models/）")
+    ap.add_argument("--input-size", default="224x224",
+                    help="--model 直指定のときだけ使う入力解像度")
     ap.add_argument("--mean", type=float, default=0.0)
     ap.add_argument("--std", type=float, default=255.0)
     ap.add_argument("--threshold", type=float, default=0.5)
@@ -241,13 +323,17 @@ def main() -> int:
 
     from raspi.bus import LATEST, Publisher, Subscriber
 
-    w, h = (int(v) for v in args.input_size.lower().split("x"))
-    model = SegmentationModel(args.model, input_size=(w, h), mean=args.mean,
-                             std=args.std, threshold=args.threshold)
-    node = CamPerceptionNode(model=model, fov_deg=args.fov_deg, max_range=args.max_range)
+    model = None
+    if args.model:
+        w, h = (int(v) for v in args.input_size.lower().split("x"))
+        model = SegmentationModel(args.model, input_size=(w, h), mean=args.mean,
+                                 std=args.std, threshold=args.threshold)
+    node = CamPerceptionNode(model=model, models_dir=Path(args.models_dir),
+                             fov_deg=args.fov_deg, max_range=args.max_range)
 
     pub = Publisher("cam_perception")
-    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST})
+    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
+                      TOPIC_CAM_MODEL: LATEST})
 
     print(f"# cam_perception_node  publish {pub.endpoint}  scan/cam へ配信")
 

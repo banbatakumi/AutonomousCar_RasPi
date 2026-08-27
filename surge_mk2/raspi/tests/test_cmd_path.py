@@ -302,6 +302,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.camera_hz = 15.0
         srv._publish_cam_config = lambda: None     # バスに触らせない
         srv._save_camera_conf = lambda: None       # ディスクに触らせない
+        # カメラセグメンテーションモデルの選択（`ftg_cam` 用）。**未選択の既定状態**を組む
+        srv._cam_model = ""
+        srv._publish_cam_model = lambda: None      # バスに触らせない
+        srv._save_cam_model_conf = lambda: None    # ディスクに触らせない
         srv.sent = []
 
         async def _send_json(ws, obj):

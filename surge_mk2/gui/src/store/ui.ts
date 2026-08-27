@@ -5,7 +5,15 @@
  */
 import { create } from 'zustand'
 import { live } from '../bus/live'
-import type { AutoStatus, CameraConfigStatus, ControlStatus, FanStatus, LogFile } from '../types'
+import type {
+  AutoStatus,
+  CamModelFile,
+  CamModelStatus,
+  CameraConfigStatus,
+  ControlStatus,
+  FanStatus,
+  LogFile,
+} from '../types'
 import { VEHICLE } from '../generated/vehicle'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
@@ -493,6 +501,15 @@ type UiState = {
    */
   cameraConfig: CameraConfigStatus | null
 
+  /**
+   * cam_perception_node が使うセグメンテーションモデルの選択。
+   * **サーバが真値なのでここでは編集しない。** 押した結果は `status` の
+   * ブロードキャストで返ってくる（`ws/control.ts` の `camModelSelect`）。
+   */
+  camModel: CamModelStatus | null
+  /** `models/` にある `.onnx` の一覧（`camModelList` の応答） */
+  camModelFiles: CamModelFile[]
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -546,6 +563,8 @@ export const useUi = create<UiState>((set, get) => ({
   auto: null,
   fan: null,
   cameraConfig: null,
+  camModel: null,
+  camModelFiles: [],
 
   set: (p) => set(p),
   setSettings: (p) => {
