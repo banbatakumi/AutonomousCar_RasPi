@@ -28,3 +28,6 @@ numpy>=2.1
 
 # `.mcap` からのフレーム抽出（`ml/extract_frames.py`）。raspi 側と同じライブラリ
 mcap>=1.2,<2
+
+# 操作パネル（`ml/app.py`）— Tkinter は Python 標準ライブラリ同梱なので
+# ここに依存を追加する必要は無い（macOS の python.org 版インストーラでも同梱済み）
