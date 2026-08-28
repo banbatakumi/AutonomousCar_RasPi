@@ -54,17 +54,32 @@
  *   塗り（`.lv-bg-*`）の色と混ざって読みにくかった。不透明な `--panel2`
  *   に変更。(3) 駆動バッテリー→後輪のフローラインが微妙な斜め線になって
  *   いたので、両端の y を `CY_REAR` に揃えて水平にした。
+ * - 2026-08-28: 後輪タイヤ内の電流ゲージをトルクゲージに変更（指示による）。
+ *   満スケールはバンビ指定の仮値ではなく、STM32 `LIMITS`（★v0.11）実測の
+ *   `max_torque_nm`（1輪あたりの物理的なトルク上限、`LinkDiag` 経由）を使う。
+ *   `LIMITS` 未受信の間は `MAX_BRAKE_TORQUE_NM`（`store/ui.ts`）にフォールバック
+ *   する——`SpeedGauge.tsx` が `max_speed_m_s`/`PI_MAX_SPEED_CAP` で行っている
+ *   のと同じパターン。加えて、TC（★v0.13 `tc_limit_nm`）が動的に絞る駆動トルク
+ *   上限をバー内の横線マーカーで示す——非介入時は `max_torque_nm` と同値なので
+ *   マーカーはバーの上端（満スケール位置）に張り付き、TC が効くとバーの途中まで
+ *   下りてくる。電流（`motor_current`）はバーからは外したが、数値表示と
+ *   フローラインのアニメーション速度には引き続き使う（電流そのものが不要に
+ *   なったわけではない）。
  *
  * ## バー／ゲージの色の意味
  *
- * 電流ゲージは単色（量だけを示す。安全上の判定は持たない）。満スケール
- * ±10A はバンビ指定の表示レンジで、駆動系統の過電流ラッチ 5.0A
- * （`docs/stm32_interface.md` §5.3、系統合計でモータ個別の閾値ではない）とは
- * 別物。スリップゲージも同じ単色方針——満スケール ±1.0m/s はバンビ指定の
- * 仮の表示レンジ（TC のしきい値が未実装で根拠になる値が無いため）。
+ * トルクゲージは単色（量だけを示す。安全上の判定は持たない）。満スケールは
+ * STM32 実測の物理的なトルク上限（`max_torque_nm`）——駆動系統の過電流ラッチ
+ * 5.0A（`docs/stm32_interface.md` §5.3、系統合計でモータ個別の閾値ではない）
+ * とは別物。TC の動的トルク上限（`tc_limit_nm`）は同じバーの中に横線マーカー
+ * （`--live` 系の色、`SpeedGauge` の指令速度マーカーと同じ考え方）として重ね、
+ * バーの塗り（実際のトルク指令）がマーカーに迫っている＝ TC が効き始めている、
+ * と読めるようにしてある。スリップゲージも単色方針——満スケール ±1.0m/s は
+ * バンビ指定の仮の表示レンジ（TC のしきい値が未実装で根拠になる値が無いため）。
  * 電圧ゲージは `battLevel`（実在する放電終止電圧 8.0V 基準）で ok/warn/bad
  * に色分けする — こちらは走行を切り上げる判断に使う実際の閾値。
- * フローライン（駆動バッテリー→後輪）も電流ゲージと同じ単色方針。向きは常に
+ * フローライン（駆動バッテリー→後輪）は電流の大小で流れる速さを変える単色
+ * 方針（トルクゲージとは独立——電流自体を捨てたわけではない）。向きは常に
  * バッテリー→モータの一方向で固定（電流の符号は前進/後退の別であって回生では
  * ないため、逆流させない）。
  *
@@ -75,10 +90,12 @@
  */
 import { useNumbers } from '../../bus/live'
 import { battLevel } from '../../format'
+import { MAX_BRAKE_TORQUE_NM } from '../../store/ui'
 import { BODY_H, BODY_W, BODY_X, BODY_Y, CX_L, CX_R, CY_FRONT, CY_REAR, WHEEL_H } from './carLayout'
 import { ProximityRing } from './ProximityRing'
 
-/** 後輪電流ゲージの満スケール [A]。バンビ指定の表示レンジ */
+/** フローラインのアニメーション速度の換算に使う電流の満スケール [A]。
+ * バンビ指定の表示レンジ（トルクゲージの満スケールとは無関係） */
 const CURRENT_MAX = 10.0
 /** スリップゲージの満スケール [m/s]。バンビ指定の仮の表示レンジ（実測待ち、`docs/architecture.md` §15） */
 const SLIP_MAX = 1.0
@@ -101,13 +118,20 @@ const WHEEL_W = 17
 const NOTCH_MARGIN = 3
 
 export function DrivePanel() {
-  const vs = useNumbers().vs
+  const n = useNumbers()
+  const vs = n.vs
   const slipF = vs?.slip_front ?? null
   const slipR = vs?.slip_rear ?? null
   const cur = vs?.motor_current ?? null
   const trq = vs?.torque_cmd ?? null
+  const tcLim = vs?.tc_limit_nm ?? null
   const bv = vs?.batt_voltage ?? null
   const ba = vs?.batt_current ?? null
+  // ★2026-08-28: ゲージの満スケールは STM32 実測の物理上限（`LIMITS.max_torque_nm`）
+  // に固定する（`SpeedGauge` が `max_speed_m_s` で行っているのと同じ理由——
+  // バンビ指定の仮値だと実際に出せるトルクと表示が食い違う）。`LIMITS` 未受信の
+  // 間は `MAX_BRAKE_TORQUE_NM`（STM32 側の物理上限と同値）にフォールバックする
+  const torqueMax = n.link?.max_torque_nm ?? MAX_BRAKE_TORQUE_NM
 
   return (
     <div className="drivepanel-wrap">
@@ -149,6 +173,8 @@ export function DrivePanel() {
           gauge
           current={cur ? cur[0] : null}
           torque={trq ? trq[0] : null}
+          torqueMax={torqueMax}
+          tcLimit={tcLim ? tcLim[0] : null}
           slip={slipR ? slipR[0] : null}
         />
         <Wheel
@@ -159,6 +185,8 @@ export function DrivePanel() {
           gauge
           current={cur ? cur[1] : null}
           torque={trq ? trq[1] : null}
+          torqueMax={torqueMax}
+          tcLimit={tcLim ? tcLim[1] : null}
           slip={slipR ? slipR[1] : null}
         />
 
@@ -248,13 +276,19 @@ function gaugeFill(value: number | null, max: number, cy: number, height: number
  * （y=cy＝0）を境に、正なら上・負なら下へ塗る。
  *
  * タイヤはどの車輪も**縦2分割**——外側半分は常にスリップゲージ、車体側
- * 半分は後輪だけ電流ゲージ（駆動なら上、回生なら下）を持つ。前輪は駆動
- * モータを持たない（電流ゲージが要らない）ので車体側半分は空のまま——
+ * 半分は後輪だけトルクゲージ（駆動なら上、制動なら下）を持つ。前輪は駆動
+ * モータを持たない（トルクゲージが要らない）ので車体側半分は空のまま——
  * 4輪とも同じ「タイヤを割った」見た目に揃えるための空白で、情報を減らして
  * いるわけではない。後輪は数字も3つ（スリップ・電流・トルク）出すが、
  * タイヤが17svg単位しかなく横に並べると文字が重なるため、**スリップだけ
  * 車体側（上）、電流・トルクは車体端側（下）**に分けている——半分ずつの
  * ゲージの向きとは逆に、数字は反対側に逃がして重なりを避ける形。
+ *
+ * トルクゲージの車体側半分には、TC の動的トルク上限（`tcLimit`）を横線
+ * マーカーとして重ねる——バーの塗り（`torque`）がマーカーに迫るほど
+ * TC が効き始めていることが視覚的に分かる。非介入時は `tcLimit` が
+ * `torqueMax`（物理上限）と同値になる仕様なので、マーカーは自然とバーの
+ * 上端（満スケール位置）に張り付く。
  */
 function Wheel({
   cx,
@@ -264,6 +298,8 @@ function Wheel({
   gauge = false,
   current = null,
   torque = null,
+  torqueMax = null,
+  tcLimit = null,
   slip = null,
 }: {
   cx: number
@@ -272,10 +308,14 @@ function Wheel({
   /** 車輪の位置名（「前左」等）。ゲージの有無に関わらず常に渡す——`<title>` の
    * 識別に使うため（gauge を持たない前輪でも、どちらの車輪か分かるようにする） */
   label: string
-  /** 電流・トルクのゲージを持つか（＝後輪＝駆動モータがある側）。前輪は false */
+  /** トルクゲージを持つか（＝後輪＝駆動モータがある側）。前輪は false */
   gauge?: boolean
   current?: number | null
   torque?: number | null
+  /** トルクゲージの満スケール [N·m]（`LIMITS.max_torque_nm`）。`gauge` が true のときのみ使う */
+  torqueMax?: number | null
+  /** TC が動的に決める駆動トルク上限 [N·m]（`tc_limit_nm`）。バー内の横線マーカーに使う */
+  tcLimit?: number | null
   slip?: number | null
 }) {
   const x = cx - WHEEL_W / 2
@@ -288,12 +328,14 @@ function Wheel({
   const medialX = medialDir > 0 ? cx : cx - halfW
   const lateralX = medialDir > 0 ? cx - halfW : cx
 
-  const curGauge = gauge ? gaugeFill(current, CURRENT_MAX, cy, WHEEL_H) : null
+  const trqGauge = gauge ? gaugeFill(torque, torqueMax || 1, cy, WHEEL_H) : null
+  const tcGauge = gauge && tcLimit != null ? gaugeFill(tcLimit, torqueMax || 1, cy, WHEEL_H) : null
   const slipGauge = gaugeFill(slip, SLIP_MAX, cy, WHEEL_H)
 
   const title = gauge
-    ? `${label}モータ 電流（上が駆動・下が回生）: ${current == null ? '—' : `${current.toFixed(1)}A`} / ` +
-      `指令トルク: ${torque == null ? '—' : `${torque.toFixed(1)}N·m`} / ` +
+    ? `${label}モータ 指令トルク（上が駆動・下が制動）: ${torque == null ? '—' : `${torque.toFixed(2)}N·m`} / ` +
+      `TC動的上限: ${tcLimit == null ? '—' : `${tcLimit.toFixed(2)}N·m`} / ` +
+      `電流: ${current == null ? '—' : `${current.toFixed(1)}A`} / ` +
       `滑り（射影後の車輪速 − 車体速度）: ${slip == null ? '—' : `${slip.toFixed(1)}m/s`}`
     : `${label} 滑り（射影後の車輪速 − 車体速度）: ${slip == null ? '—' : `${slip.toFixed(1)}m/s`}`
 
@@ -309,11 +351,20 @@ function Wheel({
       <rect className="dp-wheel" x={x} y={y} width={WHEEL_W} height={WHEEL_H} rx={4} />
 
       <g clipPath={`url(#${clipId})`}>
-        {curGauge && (
-          <rect className="dp-wheel-fill" x={medialX} y={curGauge.fillY} width={halfW} height={curGauge.fillH} />
+        {trqGauge && (
+          <rect className="dp-wheel-fill" x={medialX} y={trqGauge.fillY} width={halfW} height={trqGauge.fillH} />
         )}
         <rect className="dp-slip-fill" x={lateralX} y={slipGauge.fillY} width={halfW} height={slipGauge.fillH} />
         <rect className="dp-wheel-zero" x={x} y={cy - 0.75} width={WHEEL_W} height={1.5} />
+        {tcGauge && (
+          <line
+            className="dp-tc-limit"
+            x1={medialX}
+            y1={tcGauge.fillY}
+            x2={medialX + halfW}
+            y2={tcGauge.fillY}
+          />
+        )}
       </g>
 
       {/* 車体側/外側の境界線。4輪とも同じ「タイヤを割った」見た目に揃える */}

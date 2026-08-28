@@ -1263,7 +1263,7 @@ button.on {
   fill: #171213;
 }
 
-/* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境に電流ぶんだけ塗る単色ゲージ */
+/* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境にトルクぶんだけ塗る単色ゲージ */
 .dp-wheel-fill {
   fill: var(--accent);
   filter: drop-shadow(0 0 2px rgba(213, 48, 63, .5));
@@ -1271,6 +1271,14 @@ button.on {
 
 .dp-wheel-zero {
   fill: #4a3438;
+}
+
+/* TC の動的トルク上限マーカー（`tc_limit_nm`）。`.arc-target`（指令速度マーカー）
+ * と同じ `--live` 系の色で、トルクゲージ本体（`--accent`）とは意図的に見分ける。
+ * 非介入時はバーの上端に張り付き、TC が効くとバーの途中まで下りてくる */
+.dp-tc-limit {
+  stroke: var(--live);
+  stroke-width: 1.5;
 }
 
 .dp-wheel-tread {
