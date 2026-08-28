@@ -184,6 +184,12 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   useEffect(() => {
     ch?.camModelList()
   }, [ch])
+  // e2e_lidar（強化学習）が使うモデルの選択。camModel と全く同じパターン
+  const e2eModel = useUi((s) => s.e2eModel)
+  const e2eModelFiles = useUi((s) => s.e2eModelFiles)
+  useEffect(() => {
+    ch?.e2eModelList()
+  }, [ch])
   // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、
   // `/ws/telemetry` 8Hz）から読む理由は tc_enabled 等と同じ（上のコメント参照）
   const range = effectiveRange({
@@ -432,6 +438,35 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             {camModelFiles.length === 0 && (
               <p className="dim">
                 models/ に .onnx が見つかりません（ml/export_onnx.py の出力を Pi の models/ に配置すること）
+              </p>
+            )}
+          </section>
+
+          {/* E2E LiDARモデルの選択（`e2e_lidar` 用）。上のセグメンテーションモデルと
+              全く同じ形（`raspi/auto/e2e_lidar.py` の `e2e/model` トピック）。
+              カメラ用とは別ディレクトリ（`models/e2e_lidar/`）なので一覧も別 */}
+          <section className="settings-group">
+            <h3>E2E LiDARモデル（強化学習自動運転用）</h3>
+            <div className="settings-row">
+              <select
+                value={e2eModel?.name ?? ''}
+                disabled={e2eModel === null}
+                onChange={(e) => ch?.e2eModelSelect(e.target.value)}
+              >
+                <option value="">（未選択）</option>
+                {e2eModelFiles.map((f) => (
+                  <option key={f.name} value={f.name}>
+                    {f.name}
+                    {!f.has_config && '（前処理設定なし）'}
+                  </option>
+                ))}
+              </select>
+              <button onClick={() => ch?.e2eModelList()}>更新</button>
+            </div>
+            {e2eModelFiles.length === 0 && (
+              <p className="dim">
+                models/e2e_lidar/ に .onnx が見つかりません（ml_lidar/export_onnx_rl.py の出力を
+                Pi の models/e2e_lidar/ に配置すること）
               </p>
             )}
           </section>

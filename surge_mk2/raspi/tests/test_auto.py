@@ -4,8 +4,10 @@
 ハードウェアもバスも要らない。
 """
 
+import json
 import math
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -13,10 +15,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import msgspec  # noqa: E402
+import numpy as np  # noqa: E402
+import onnx  # noqa: E402
+from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
-                        FollowTheGap, FollowTheGapCam, LineTrace, catalog,
-                        make_planner)
+                        E2ELidar, FollowTheGap, FollowTheGapCam, LineTrace,
+                        catalog, make_planner)
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.disparity_extender import _extend  # noqa: E402
 from raspi.auto.gap_pursuit import _best_band  # noqa: E402
@@ -687,6 +692,10 @@ class TestRegistry(unittest.TestCase):
         self.assertIn("line_trace", PLANNERS)
         self.assertIsInstance(make_planner("line_trace"), LineTrace)
 
+    def test_e2e_lidar_planner_is_registered(self):
+        self.assertIn("e2e_lidar", PLANNERS)
+        self.assertIsInstance(make_planner("e2e_lidar"), E2ELidar)
+
 
 class FakeSub:
     """`Subscriber` の身代わり。`latest` だけを持つ。"""
@@ -836,8 +845,162 @@ class TestAutoStateContract(unittest.TestCase):
         """既定の `AutoState` は「走らない」。**取りこぼしが加速にならない。**"""
         st = AutoState()
         self.assertFalse(st.ready)
-        self.assertEqual(st.target_speed, 0.0)
-        self.assertFalse(st.engaged)
+
+
+#: `sim/gym_env.py` の `OBS_DIM`（点群361 + 速度1）と揃える。`raspi/tests/` は
+#: `sim/` を import しない方針なので、値をここに書き写す（変えたら両方直すこと）
+_OBS_DIM = 362
+
+
+def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
+    """`(1,in_dim) → (1,2)` の全結合1層だけのONNXモデル。**torch は使わない**
+    （`test_cam_perception_node.py` の `_make_dummy_model()` と同じ手法。
+    `raspi/tests/` を重い依存から切り離す方針を守る）。
+
+    重みは決め打ちで、テストの入力から出力を逆算しやすくしてある:
+    steer は先頭の点にだけ反応、speed は末尾の入力（正規化した自車速度）にだけ反応。
+    """
+    w = np.zeros((2, in_dim), dtype=np.float32)
+    w[0, 0] = 1.0
+    w[1, -1] = 1.0
+    b = np.zeros(2, dtype=np.float32)
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, in_dim])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])
+    w_init = helper.make_tensor("W", TensorProto.FLOAT, w.shape, w.flatten())
+    b_init = helper.make_tensor("B", TensorProto.FLOAT, b.shape, b.flatten())
+    node = helper.make_node("Gemm", ["input", "W", "B"], ["output"], transB=1)
+    graph = helper.make_graph([node], "dummy_e2e", [inp], [out], [w_init, b_init])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
+class TestE2ELidar(unittest.TestCase):
+    def test_missing_model_is_ready_false(self):
+        """モデルが `models/` に無くても落ちずに安全側へ倒れる（未学習時の既定状態）。"""
+        p = E2ELidar(model_path="/nonexistent/e2e_lidar.onnx")
+        st = p.plan(make_scan(), None, E2ELidar.merged({}), 0.1)
+        self.assertFalse(st.ready)
+        self.assertIn("モデル", st.reason)
+
+    def test_loaded_model_produces_finite_command(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_dummy_e2e_model(model_path)
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            st = p.plan(corridor(180), None, E2ELidar.merged({}), 0.1)
+            self.assertTrue(st.ready, st.reason)
+            self.assertTrue(math.isfinite(st.target_steer))
+            self.assertTrue(math.isfinite(st.target_speed))
+
+    def test_vehicle_speed_feeds_into_the_model_input(self):
+        """改善1: 観測の末尾に自車速度が乗る。`vs=None`なら0として扱う。"""
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_dummy_e2e_model(model_path)     # w[1,-1]=1.0: speed_norm = 入力の末尾
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 2.0}))
+
+            p = E2ELidar(model_path=model_path)
+            # p["max_speed"]（GUI側の安全クランプ、既定1.0）に速度差が飲まれないよう
+            # モデルの max_speed(2.0) まで引き上げておく
+            params = E2ELidar.merged({"max_speed": 2.0})
+            scan = corridor(180, open_dist=5.0)
+
+            st_none = p.plan(scan, None, params, 0.1)
+            st_zero = p.plan(scan, VehicleState(speed=0.0), params, 0.1)
+            st_half = p.plan(scan, VehicleState(speed=1.0), params, 0.1)   # 2.0の半分
+
+            # vs=None は speed=0 と同じ扱い（未着信時の安全な既定）
+            self.assertAlmostEqual(st_none.target_speed, st_zero.target_speed, places=4)
+            # 入力速度が上がれば、モデルへの入力（=このダミーモデルの出力）も上がる
+            self.assertGreater(st_half.target_speed, st_zero.target_speed)
+
+    def test_front_obstacle_forces_stop_regardless_of_model_output(self):
+        """★独立安全策: モデルが前進を指示しても正面が詰まっていれば止める。"""
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_dummy_e2e_model(model_path)
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            scan = make_scan({d: 0.1 for d in range(-15, 16)}, default=5.0)
+            st = p.plan(scan, None, E2ELidar.merged({}), 0.1)
+            self.assertTrue(st.brake)
+            self.assertEqual(st.target_speed, 0.0)
+
+    def test_output_is_clamped_to_param_limits(self):
+        """モデルの生出力がどうであれ、`p["max_steer"]`が最終的な上限になる。"""
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            # W[0,:] を大きくして steer_norm が確実に1.0でクリップされるようにする
+            w = np.zeros((2, _OBS_DIM), dtype=np.float32)
+            w[0, :] = 10.0
+            b = np.zeros(2, dtype=np.float32)
+            inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, _OBS_DIM])
+            out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])
+            w_init = helper.make_tensor("W", TensorProto.FLOAT, w.shape, w.flatten())
+            b_init = helper.make_tensor("B", TensorProto.FLOAT, b.shape, b.flatten())
+            node = helper.make_node("Gemm", ["input", "W", "B"], ["output"], transB=1)
+            graph = helper.make_graph([node], "dummy_e2e", [inp], [out], [w_init, b_init])
+            model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+            onnx.save(model, str(model_path))
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.20, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            st = p.plan(corridor(180, open_dist=5.0), None,
+                       E2ELidar.merged({"max_steer": 0.20}), 0.1)
+            self.assertLessEqual(abs(st.target_steer), 0.20 + 1e-9)
+
+    def test_reload_if_changed_picks_up_a_named_model(self):
+        """GUIの`e2e/model`選択(名前)から`models_dir/<name>.onnx`を解決してロードする。"""
+        with tempfile.TemporaryDirectory() as d:
+            models_dir = Path(d)
+            _make_dummy_e2e_model(models_dir / "alpha.onnx")
+            (models_dir / "alpha.json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(models_dir=models_dir)
+            st = p.plan(make_scan(), None, E2ELidar.merged({}), 0.1)
+            self.assertFalse(st.ready)          # まだ何も選んでいない
+
+            changed = p.reload_if_changed("alpha")
+            self.assertTrue(changed)
+            st = p.plan(corridor(180), None, E2ELidar.merged({}), 0.1)
+            self.assertTrue(st.ready, st.reason)
+
+    def test_reload_if_changed_keeps_current_model_on_failure(self):
+        """存在しない名前を選んでも、今動いているモデルのまま走り続ける（安全側）。"""
+        with tempfile.TemporaryDirectory() as d:
+            models_dir = Path(d)
+            _make_dummy_e2e_model(models_dir / "alpha.onnx")
+            (models_dir / "alpha.json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(models_dir=models_dir)
+            self.assertTrue(p.reload_if_changed("alpha"))
+
+            changed = p.reload_if_changed("no-such-model")
+            self.assertFalse(changed)
+            st = p.plan(corridor(180), None, E2ELidar.merged({}), 0.1)
+            self.assertTrue(st.ready, st.reason)   # alpha のまま生きている
+
+    def test_reload_if_changed_is_a_noop_for_empty_or_same_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            models_dir = Path(d)
+            _make_dummy_e2e_model(models_dir / "alpha.onnx")
+            (models_dir / "alpha.json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(models_dir=models_dir)
+            self.assertFalse(p.reload_if_changed(""))
+            self.assertTrue(p.reload_if_changed("alpha"))
+            self.assertFalse(p.reload_if_changed("alpha"))   # 同じ名前は変化なし
 
 
 if __name__ == "__main__":

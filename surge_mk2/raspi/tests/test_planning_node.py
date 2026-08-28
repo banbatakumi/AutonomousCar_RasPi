@@ -10,11 +10,13 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import Scan  # noqa: E402
-from raspi.msgs.types import TOPIC_SCAN, TOPIC_SCAN_CAM  # noqa: E402
+from raspi.auto import E2ELidar  # noqa: E402
+from raspi.msgs import AutoCtrl, Scan  # noqa: E402
+from raspi.msgs.types import TOPIC_E2E_MODEL, TOPIC_SCAN, TOPIC_SCAN_CAM, E2EModelCtrl  # noqa: E402
 from raspi.nodes.planning_node import PlanningNode, input_topics  # noqa: E402
 
 
@@ -103,6 +105,41 @@ class TestCurrentStaleness(unittest.TestCase):
 
         stale = node._current(350 * 1_000_000)
         self.assertIn("古い", stale.reason)
+
+
+class _FakeReloadablePlanner:
+    """`reload_if_changed`を持つplannerの身代わり。呼ばれた名前を記録するだけ。"""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def reload_if_changed(self, name: str) -> None:
+        self.calls.append(name)
+
+
+class TestE2EModelRouting(unittest.TestCase):
+    """`e2e/model`（GUIが選んだモデル名）が対応する planner にだけ届くこと。"""
+
+    def test_dispatches_to_planner_with_reload_if_changed(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeReloadablePlanner()
+        node.planner = fake
+        node._apply_e2e_model(E2EModelCtrl(name="alpha"))
+        self.assertEqual(fake.calls, ["alpha"])
+
+    def test_noop_for_planner_without_reload_if_changed(self):
+        """`reload_if_changed`を持たない普通のplanner（例: `ftg`）は無視される
+        （例外にならないことだけを確認する）。"""
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        node._apply_e2e_model(E2EModelCtrl(name="alpha"))
+
+    def test_switching_to_e2e_lidar_applies_cached_model_immediately(self):
+        """モード切替直後に、既に届いている`e2e/model`を次のポンプを待たず反映する。"""
+        sub = FakeSub({TOPIC_E2E_MODEL: E2EModelCtrl(name="alpha")})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
+        with mock.patch.object(E2ELidar, "reload_if_changed") as m:
+            node._apply_ctrl(AutoCtrl(mode="e2e_lidar", engaged=False))
+        m.assert_called_once_with("alpha")
 
 
 if __name__ == "__main__":

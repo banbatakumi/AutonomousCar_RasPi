@@ -36,7 +36,7 @@ __all__ = [
     "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
-    "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL",
+    "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -81,6 +81,9 @@ TOPIC_CAM_CONFIG = "cam/config"
 #: `cam/config` と同じ流儀（現在の意思を繰り返し流す）で出し、cam_perception_node
 #: が拾って ONNX 推論セッションを作り直す。**`scan/cam`（推論の出力）とは別物**
 TOPIC_CAM_MODEL = "cam/model"
+#: `e2e_lidar`（`raspi/auto/e2e_lidar.py`）が使うモデルの選択。`cam/model`と同じ
+#: 「意思を繰り返し流す」パターン（下記 `E2EModelCtrl` 参照）
+TOPIC_E2E_MODEL = "e2e/model"
 
 
 class MsgBase(msgspec.Struct):
@@ -562,6 +565,23 @@ class CamModelCtrl(MsgBase):
     name: str = ""
 
 
+class E2EModelCtrl(MsgBase):
+    """`planning_node`（`e2e_lidar`エンゲージ中）への「このモデルを使ってほしい」意思。
+
+    `CamModelCtrl`と同じ設計: **「現在の意思」を繰り返し流す**
+    （telemetry_node の `_e2e_model_pump`）。`name`は`models/e2e_lidar/<name>.onnx`
+    （+ 同名の`.json`。`ml_lidar/export_onnx_rl.py`が書く）を指す。**空文字は
+    「未選択」**——`E2ELidar`はモデルを持たないまま`ready=False`を返し続ける。
+
+    カメラ用モデル（`models/`直下、`cam/model`）とは**別ディレクトリ**
+    （`models/e2e_lidar/`）に置く。同じ`models/`に混ぜると、GUIの一覧に
+    カメラ用とLiDAR用のモデルが混在してしまうため
+    （前処理契約が全く違うので、選び間違えると壊れた入力を渡すことになる）。
+    """
+
+    name: str = ""
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -582,6 +602,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_UI_EVENT: UiEvent,
     TOPIC_CAM_CONFIG: CamConfig,
     TOPIC_CAM_MODEL: CamModelCtrl,
+    TOPIC_E2E_MODEL: E2EModelCtrl,
 }
 
 

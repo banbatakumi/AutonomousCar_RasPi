@@ -128,6 +128,23 @@ export type CamModelStatus = {
   name: string
 }
 
+/** `models/e2e_lidar/` にある `.onnx` の1件（`e2e_model_list` の応答）。
+ * `CamModelFile` と同じ形だが、カメラ用モデルと混ざらないよう別の型にしてある */
+export type E2EModelFile = {
+  name: string
+  size: number
+  /** UNIX epoch秒 */
+  mtime: number
+  /** 前処理契約（`ml_lidar/export_onnx_rl.py` が書く `<name>.json`）が同梱されているか */
+  has_config: boolean
+}
+
+/** `e2e_lidar`（強化学習）が使うモデルの選択。**サーバが真値**
+ * （`ws/control.ts` の `e2eModelSelect`）。空文字は未選択 */
+export type E2EModelStatus = {
+  name: string
+}
+
 /** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
 export type CameraConfigStatus = {
@@ -214,6 +231,8 @@ export type ControlStatus = {
   camera_config: CameraConfigStatus
   /** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値** */
   cam_model: CamModelStatus
+  /** e2e_lidar が使うモデルの選択。**サーバが真値** */
+  e2e_model: E2EModelStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */

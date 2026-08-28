@@ -1,0 +1,27 @@
+# ml_lidar/ — LiDAR E2E 強化学習パイプラインの依存（Mac 専用、Pi には入れない）
+#
+#   .venv/bin/pip install -r ml_lidar/requirements.txt
+#
+# `ml/`（カメラのセグメンテーション学習）と同じく、Pi以外で動くコードの依存は
+# raspi/ 側に持ち込まない。Pi 側は `raspi/nodes/`（推論）が onnxruntime だけで動く。
+
+torch>=2.2
+
+# シムを Gym 環境として扱うための標準インターフェース
+gymnasium>=0.29
+
+# RL アルゴリズム本体（PPO）。自前実装せず定番ライブラリに任せる
+stable-baselines3>=2.3
+
+# ONNX エクスポート・推論側との往復検証
+onnx>=1.16
+onnxruntime>=1.18,<2
+
+numpy>=2.1
+
+# 学習曲線の可視化（train_rl.py が既定で有効化する）
+tensorboard>=2.16
+
+# 観戦ビューア（watch.py）。sim/requirements.txt と重複するが、ml_lidar/ 単体でも
+# 依存が揃うようにここにも書く
+pygame

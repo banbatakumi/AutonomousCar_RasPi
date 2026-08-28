@@ -133,6 +133,7 @@ from raspi.msgs import (  # noqa: E402
     CamConfig,
     CamModelCtrl,
     DriveCmd,
+    E2EModelCtrl,
     Heartbeat as HbMsg,
     LogCtrl,
     UiEvent,
@@ -147,6 +148,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_MODEL,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
+    TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_REAR,
@@ -177,6 +179,12 @@ CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
 MODELS_DIR = REPO_ROOT / "models"
 #: 選ばれているモデル名を覚えておく場所。`AUTO_CONF`/`CAMERA_CONF` と同じ流儀
 CAM_MODEL_CONF = REPO_ROOT / "config" / "cam_model.json"
+#: `e2e_lidar` へ渡す ONNX モデルの置き場。**カメラ用（`MODELS_DIR`直下）とは別**
+#: （前処理契約が違うので、同じ一覧に混ぜると選び間違いの温床になる。
+#: `raspi/auto/e2e_lidar.py`・`ml_lidar/export_onnx_rl.py` 参照）
+E2E_MODELS_DIR = MODELS_DIR / "e2e_lidar"
+#: 選ばれている E2E LiDAR モデル名。`CAM_MODEL_CONF` と同じ流儀
+E2E_MODEL_CONF = REPO_ROOT / "config" / "e2e_lidar_model.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝従来どおり誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
@@ -211,6 +219,8 @@ CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam"})
 #: `cam/model`（★モデル選択）の再送周期。`CAM_CONFIG_HZ` と同じ理由
 #: （cam_perception_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_MODEL_HZ = 1
+#: `e2e/model`（★モデル選択）の再送周期。`CAM_MODEL_HZ` と同じ理由
+E2E_MODEL_HZ = 1
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
@@ -378,6 +388,12 @@ class TelemetryServer:
         #: が、こちらはモデル選択そのものなので `auto.json` 側には持たせない）
         self._cam_model = ""
         self._load_cam_model_conf()
+
+        # ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
+        #: 選ばれているモデル名。**空文字 = 未選択**（`config/e2e_lidar_model.json`に
+        #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
+        self._e2e_model = ""
+        self._load_e2e_model_conf()
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -660,6 +676,16 @@ class TelemetryServer:
 
         elif kind == "cam_model_select":
             self._on_cam_model(m)
+            await self._broadcast_control_status()
+
+        # ── E2E LiDAR モデルの選択（誰でも操作できる。`cam_model_list`/`select`
+        #    と全く同じ形。`e2e_lidar` を engage する前に選び直す想定） ──
+
+        elif kind == "e2e_model_list":
+            await self._send_json(ws, self._e2e_models_list())
+
+        elif kind == "e2e_model_select":
+            self._on_e2e_model(m)
             await self._broadcast_control_status()
 
         # ── TC/TV 有効切り替え（誰でも操作できる。★v0.8） ──
@@ -1027,6 +1053,70 @@ class TelemetryServer:
         except Exception:
             pass                           # 保存できなくても走行は続けられるべき
 
+    # ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
+    #
+    # `_cam_model*` と全く同じ構造。`planning_node` を再起動もSSHも無しに
+    # 切り替えるための口で、`e2e_lidar` を engage する前に選び直す想定。
+    # 「変えたら engage を必ず落とす」も `_on_cam_model` と同じ理由で踏襲する。
+
+    def _e2e_models_list(self) -> dict:
+        """`models/e2e_lidar/` にある `.onnx` の一覧。`_cam_models_list()` と同じ流儀
+        （要求したクライアントにだけ返す）。**キー名は `e2e_model_files`**
+        （`cam_model_files` と型は同じだが、GUI側の受け皿で混ざらないよう分ける）。
+        """
+        files = []
+        if E2E_MODELS_DIR.is_dir():
+            for p in sorted(E2E_MODELS_DIR.iterdir()):
+                if not p.is_file() or p.suffix != ".onnx":
+                    continue
+                st = p.stat()
+                files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
+                             "has_config": p.with_suffix(".json").exists()})
+        return {"type": "e2e_models", "e2e_model_files": files}
+
+    def _on_e2e_model(self, m: dict) -> None:
+        """`{"type":"e2e_model_select", "name": str}`。
+
+        `name` が `models/e2e_lidar/` に実在する `.onnx` と一致しなければ黙って捨てる
+        （`_on_cam_model` と同じ理由）。
+        """
+        name = str(m.get("name") or "")
+        if name and not (E2E_MODELS_DIR / f"{name}.onnx").is_file():
+            return
+        if name == self._e2e_model:
+            return
+        self._e2e_model = name
+        # **モデルを変えたら e2e_lidar の engage は必ず落とす。**
+        # `_on_cam_model` の「モデルを変えたら ftg_cam の engage を必ず落とす」と同じ理由
+        if self._auto_engaged and self._auto_mode == "e2e_lidar":
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+        self._save_e2e_model_conf()
+        self._publish_e2e_model()          # 待たせない。cam_model と同じく即座に効かせる
+
+    def _e2e_model_status(self) -> dict:
+        return {"name": self._e2e_model}
+
+    def _publish_e2e_model(self) -> None:
+        self.pub.send(TOPIC_E2E_MODEL, E2EModelCtrl(name=self._e2e_model))
+
+    def _load_e2e_model_conf(self) -> None:
+        """`config/e2e_lidar_model.json` から戻す。`_load_cam_model_conf` と同じ流儀。"""
+        try:
+            raw = _json_decode(E2E_MODEL_CONF.read_bytes())
+        except Exception:
+            return                         # 無い・壊れている → 既定（未選択）のまま
+        name = raw.get("name")
+        if isinstance(name, str) and (not name or (E2E_MODELS_DIR / f"{name}.onnx").is_file()):
+            self._e2e_model = name
+
+    def _save_e2e_model_conf(self) -> None:
+        try:
+            E2E_MODEL_CONF.parent.mkdir(parents=True, exist_ok=True)
+            E2E_MODEL_CONF.write_bytes(_json_encode({"name": self._e2e_model}))
+        except Exception:
+            pass                           # 保存できなくても走行は続けられるべき
+
     # ── Wi-Fi（SSID・電波強度） ──
 
     def _wifi_status(self) -> dict:
@@ -1096,6 +1186,7 @@ class TelemetryServer:
             "wifi": self._wifi_status(),
             "camera_config": self._camera_config_status(),
             "cam_model": self._cam_model_status(),
+            "e2e_model": self._e2e_model_status(),
         }
 
     def _auto_status(self) -> dict:
@@ -1443,6 +1534,14 @@ class TelemetryServer:
             await asyncio.sleep(period)
             self._publish_cam_model()
 
+    async def _e2e_model_pump(self) -> None:
+        """`planning_node`（`e2e_lidar`）への希望モデル名を低頻度で再送する。
+        `_cam_model_pump` と同じ理由。"""
+        period = 1.0 / E2E_MODEL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_e2e_model()
+
     async def _log_ctrl_pump(self) -> None:
         """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
 
@@ -1526,7 +1625,7 @@ class TelemetryServer:
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
-                self._cam_config_pump, self._cam_model_pump)]
+                self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump)]
             try:
                 await stop
             finally:

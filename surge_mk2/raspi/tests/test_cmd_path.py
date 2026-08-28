@@ -306,6 +306,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._cam_model = ""
         srv._publish_cam_model = lambda: None      # バスに触らせない
         srv._save_cam_model_conf = lambda: None    # ディスクに触らせない
+        # E2E LiDARモデルの選択（`e2e_lidar` 用）。`_cam_model` と同じ形
+        srv._e2e_model = ""
+        srv._publish_e2e_model = lambda: None      # バスに触らせない
+        srv._save_e2e_model_conf = lambda: None    # ディスクに触らせない
         srv.sent = []
 
         async def _send_json(ws, obj):

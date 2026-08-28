@@ -75,12 +75,14 @@ export function App() {
           fan: s.fan,
           cameraConfig: s.camera_config,
           camModel: s.cam_model,
+          e2eModel: s.e2e_model,
         }),
       onDenied: (holder, reason) =>
         set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false }),
       onRtt: (v) => set({ wsRttMs: v }),
       onLogs: (files) => set({ logFiles: files }),
       onCamModels: (files) => set({ camModelFiles: files }),
+      onE2EModels: (files) => set({ e2eModelFiles: files }),
     })
     chRef.current = c
     setCh(c)

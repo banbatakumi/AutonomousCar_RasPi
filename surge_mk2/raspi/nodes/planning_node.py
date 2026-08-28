@@ -63,6 +63,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
+    TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_VEHICLE_STATE,
 )
@@ -155,9 +156,26 @@ class PlanningNode:
             if not self.quiet:
                 who = self.planner.name if self.planner else "（なし）"
                 print(f"# モード → {who}", flush=True)
+            # 作り直した直後に、既に届いている `e2e/model` の意思があれば
+            # 即座に反映する（次のポンプまで待たせない）
+            m = self.sub.latest.get(TOPIC_E2E_MODEL)
+            if m is not None:
+                self._apply_e2e_model(m)
         if (changed or released) and self.planner is not None:
             self.planner.reset()
         self._params = merged_params(c.mode, c.params)
+
+    def _apply_e2e_model(self, m) -> None:
+        """`e2e/model`（GUIが選んだモデル名）を、対応できる planner にだけ伝える。
+
+        `raspi/auto/` は「新しい planner を足してもこのファイルは触らない」設計
+        なので、`E2ELidar` をここで import して特別扱いしない。**`reload_if_changed`
+        という名前のメソッドを持っていれば使う**ダックタイピングで済ませる
+        （今のところ実装しているのは `E2ELidar` だけ）。
+        """
+        reload_fn = getattr(self.planner, "reload_if_changed", None)
+        if reload_fn is not None:
+            reload_fn(m.name)
 
     # ── 計画 ──
 
@@ -266,6 +284,8 @@ class PlanningNode:
             for topic, msg in self.sub.poll(2):
                 if topic == TOPIC_AUTO_CTRL:
                     self._apply_ctrl(msg)
+                elif topic == TOPIC_E2E_MODEL:
+                    self._apply_e2e_model(msg)
 
             now = time.monotonic_ns()
             self._replan(now)
@@ -317,7 +337,7 @@ def main() -> int:
         return 2
 
     pub = Publisher("planning")
-    topics = {TOPIC_VEHICLE_STATE: LATEST, TOPIC_AUTO_CTRL: LATEST}
+    topics = {TOPIC_VEHICLE_STATE: LATEST, TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_MODEL: LATEST}
     topics.update({t: LATEST for t in input_topics()})
     sub = Subscriber(topics)
     node = PlanningNode(pub=pub, sub=sub, mode=args.mode, quiet=args.quiet)

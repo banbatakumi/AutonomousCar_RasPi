@@ -48,6 +48,10 @@ sam_*.pth
 # Pi の models/ に手動で配置する運用）。機体・学習ごとに違う大容量ファイル
 surge_mk2/models/
 
+# ml_lidar/（LiDAR E2E強化学習パイプライン）の生成物・大容量ファイル
+# PPOのcheckpoint・TensorBoardログ。学習ごとに違い、しかも大きい
+surge_mk2/ml_lidar/runs/
+
 # OS
 .DS_Store
 Thumbs.db

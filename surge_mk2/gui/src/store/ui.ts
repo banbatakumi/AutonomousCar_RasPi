@@ -11,6 +11,8 @@ import type {
   CamModelStatus,
   CameraConfigStatus,
   ControlStatus,
+  E2EModelFile,
+  E2EModelStatus,
   FanStatus,
   LogFile,
 } from '../types'
@@ -524,6 +526,15 @@ type UiState = {
   /** `models/` にある `.onnx` の一覧（`camModelList` の応答） */
   camModelFiles: CamModelFile[]
 
+  /**
+   * e2e_lidar（強化学習）が使うモデルの選択。**サーバが真値なのでここでは編集しない。**
+   * 押した結果は `status` のブロードキャストで返ってくる（`ws/control.ts` の
+   * `e2eModelSelect`）。
+   */
+  e2eModel: E2EModelStatus | null
+  /** `models/e2e_lidar/` にある `.onnx` の一覧（`e2eModelList` の応答） */
+  e2eModelFiles: E2EModelFile[]
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -580,6 +591,8 @@ export const useUi = create<UiState>((set, get) => ({
   cameraConfig: null,
   camModel: null,
   camModelFiles: [],
+  e2eModel: null,
+  e2eModelFiles: [],
 
   set: (p) => set(p),
   setSettings: (p) => {

@@ -9,7 +9,7 @@
  * 同じ経路で停止する。「止める指令を送る」設計だと、その指令が届かない
  * 状況（＝一番止めたい状況）で止まらない。
  */
-import type { CamModelFile, CmdOut, ControlStatus, LogFile } from '../types'
+import type { CamModelFile, CmdOut, ControlStatus, E2EModelFile, LogFile } from '../types'
 import { authToken } from './token'
 import { wsUrl } from './url'
 
@@ -29,6 +29,7 @@ type ServerMsg = {
   reason?: string
   files?: LogFile[]
   cam_model_files?: CamModelFile[]
+  e2e_model_files?: E2EModelFile[]
   id?: number
 }
 
@@ -44,6 +45,8 @@ export type ControlHandlers = {
   onLogs: (files: LogFile[]) => void
   /** `cam_model_list` への応答（`models/` にある `.onnx` の一覧） */
   onCamModels: (files: CamModelFile[]) => void
+  /** `e2e_model_list` への応答（`models/e2e_lidar/` にある `.onnx` の一覧） */
+  onE2EModels: (files: E2EModelFile[]) => void
 }
 
 export class ControlChannel {
@@ -82,6 +85,7 @@ export class ControlChannel {
       else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '', m.reason)
       else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
       else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
+      else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
@@ -209,6 +213,24 @@ export class ControlChannel {
    */
   camModelSelect(name: string) {
     this.send({ type: 'cam_model_select', name })
+  }
+
+  // ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
+  // `camModelList`/`camModelSelect` と全く同じ形。
+
+  /** `models/e2e_lidar/` にある `.onnx` の一覧を要求する。応答は `onE2EModels`。 */
+  e2eModelList() {
+    this.send({ type: 'e2e_model_list' })
+  }
+
+  /**
+   * `e2e_lidar`（強化学習）が使うモデルを選ぶ。空文字で「未選択」に戻せる。
+   *
+   * ⚠ **`e2e_lidar` を engage 中に選び直すと engage は必ず落ちる**
+   * （サーバ側の約束。`camModelSelect` と同じ形）。
+   */
+  e2eModelSelect(name: string) {
+    this.send({ type: 'e2e_model_select', name })
   }
 
   // ── 片輪浮き対策 有効切り替え（★v0.9） ──
