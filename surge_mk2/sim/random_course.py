@@ -177,6 +177,15 @@ def generate_random_course(rng: np.random.Generator, *, name: str = "rand",
         if _min_turn_radius_m(xy) >= r_min or attempt == _MAX_GEN_ATTEMPTS - 1:
             break
 
+    # ★周回方向のランダム化（2026-08-29追加、バンビの指摘で発覚）。頂点の角度を
+    # 常に単調増加（`_filleted_polygon_xy`の`np.linspace`）で辿るため、周回方向は
+    # 常に反時計回り（数学の慣例、ROS規約の正方向）に固定されていた——生成コースが
+    # 全て同じ回転方向で、`fuji`（時計回り）とは逆だった。点列の順序を丸ごと逆転
+    # させれば、同じ壁の形状のまま走行方向だけが逆になる（`rasterize()`は点の順序に
+    # 依存しない円盤の重ね塗りなので、逆転しても壁の形は変わらない）
+    if rng.random() < 0.5:
+        xy = xy[::-1].copy()
+
     nxt = np.roll(xy, -1, axis=0)
     yaw = np.arctan2(nxt[:, 1] - xy[:, 1], nxt[:, 0] - xy[:, 0])
     centerline = np.column_stack((xy, yaw))
