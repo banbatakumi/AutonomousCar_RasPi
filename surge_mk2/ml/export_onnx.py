@@ -55,6 +55,12 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int]) -> None:
         # フォールバックする（実測）。最初から 18 を指定して無駄な変換の
         # 試行錯誤を避ける。**onnxruntime>=1.18 は opset 18 を扱える。**
         opset_version=18,
+        # **`external_data=False`が必須。** 既定(True)だと重みが`<out_path>.data`
+        # という別ファイルに切り出され、`.onnx`単体をコピー/配置すると壊れる
+        # （`ml_lidar/export_onnx_rl.py`が同じ罠を実際に踏んで判明。Pi の
+        # `models/`へは`.onnx`だけを配置する運用なので、ここが漏れると
+        # cam_perception_node のロードが実機でだけ失敗する）
+        external_data=False,
     )
 
     cfg = {

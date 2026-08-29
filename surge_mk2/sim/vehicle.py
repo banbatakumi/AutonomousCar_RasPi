@@ -1,8 +1,18 @@
-"""車両モデル — 自転車モデル + 操舵のむだ時間 + 1次遅れ。
+"""車両モデル — 自転車モデル + 操舵のむだ時間 + 1次遅れ + 横方向グリップ限界。
 
-**運動学と遅れだけ。** タイヤモデル・スリップ・TC/TV は入れていない。
-実車の`[dynamics]`（操舵のむだ時間・1次遅れなど）が未実測の仮値で、
-合わせ込む相手がまだ無いため。入れるなら実測後。
+**運動学と遅れ、それに簡易グリップ限界だけ。** スリップ角・タイヤの非線形特性・
+TC/TVは入れていない。実車の`[dynamics]`（操舵のむだ時間・1次遅れなど）が
+未実測の仮値で、合わせ込む相手がまだ無いため。詳細なタイヤモデルを入れるなら実測後。
+
+**グリップ限界（2026-08-28追加）**: 自転車運動学モデルは舵角だけでヨーレートが
+決まり、速度に関わらず同じ半径で曲がれてしまう（＝速すぎてコーナーを曲がりきれない
+という物理的な必然性が無い）。これは E2E LiDAR の強化学習がコーナー前の減速を
+学習する動機を弱めていた（`PROGRESS.md`「2026-08-28（続き2）」節）。対策として、
+要求される向心加速度 `v^2 * |tan(steer)| / L` が `mu * g` を超えたら、達成できる
+曲率を頭打ちにする（＝アンダーステアで外に膨らむ）。**質量は登場しない**——
+`F_lat_max = mu*m*g` を運動方程式 `a = F/m` に代入すると質量が消えるため、
+車両質量に関わらず摩擦係数`mu`だけで決まる（同じ理由で、急ブレーキの制動距離が
+車重に依存しないのと同じ）。
 
 指令は SI で受ける（整数スケールの解釈は `sim/stm32.py` の仕事）。
 """
@@ -15,9 +25,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["VehicleSpec", "VehicleModel", "DriveInput", "DEFAULT_SPEC_PATH"]
+__all__ = ["VehicleSpec", "VehicleModel", "DriveInput", "DEFAULT_SPEC_PATH", "GRAVITY_MPS2"]
 
 DEFAULT_SPEC_PATH = Path(__file__).resolve().parents[1] / "config" / "vehicle.toml"
+GRAVITY_MPS2 = 9.81
 
 
 @dataclass
@@ -37,6 +48,7 @@ class VehicleSpec:
     tau_speed_s: float = 0.35
     rolling_resistance: float = 0.35
     drive_ratio: float = 2.0
+    mu: float = 0.8
 
     sensors: dict = field(default_factory=dict)
 
@@ -57,6 +69,7 @@ class VehicleSpec:
             tau_speed_s=dyn.get("tau_speed_s", 0.35),
             rolling_resistance=dyn.get("rolling_resistance", 0.35),
             drive_ratio=dyn.get("drive_ratio", 2.0),
+            mu=dyn.get("mu", 0.8),
             sensors=d.get("sensors", {}),
         )
 
@@ -137,7 +150,14 @@ class VehicleModel:
         self.speed = self._next_speed(dt)
 
         # ── 運動（自転車モデル。原点は後輪車軸中心） ──
-        self.yaw_rate = self.speed / sp.wheelbase * math.tan(self.steer_actual)
+        # 舵角だけで決まる曲率を、グリップ限界(mu*g)で頭打ちにする（アンダーステア）。
+        # 曲率 = tan(steer)/L、向心加速度 = speed^2 * 曲率 なので、
+        # 曲率の上限は a_lat_max / speed^2（低速ほど緩い上限＝ほぼ無制限）
+        requested_curvature = math.tan(self.steer_actual) / sp.wheelbase
+        a_lat_max = sp.mu * GRAVITY_MPS2
+        max_curvature = a_lat_max / max(abs(self.speed), 1e-6) ** 2
+        curvature = math.copysign(min(abs(requested_curvature), max_curvature), requested_curvature)
+        self.yaw_rate = self.speed * curvature
         self.yaw = (self.yaw + self.yaw_rate * dt + math.pi) % (2 * math.pi) - math.pi
         self.x += self.speed * math.cos(self.yaw) * dt
         self.y += self.speed * math.sin(self.yaw) * dt

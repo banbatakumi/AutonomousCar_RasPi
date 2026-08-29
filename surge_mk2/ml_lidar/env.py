@@ -6,7 +6,9 @@
     観測: [scan/max_range を [0,1] に正規化した SCAN_DIM 点, 自車速度/max_speed を
           [0,1] に正規化した1個]（末尾）
     行動: [-1,1]^2 → steer は [-max_steer,+max_steer]、speed は [0,max_speed] へ線形変換
-          （後退は今回のスコープ外）
+          （後退は今回のスコープ外）。**max_steerは引数を持たない**——
+          `config/vehicle.toml`の車両物理限界（`SimE2EEnv.spec.max_steer`）を
+          そのまま使う（2026-08-28）
 """
 
 from __future__ import annotations
@@ -33,13 +35,12 @@ class GymSurgeEnv(gym.Env):
     def __init__(self, courses: list[Course] | None = None, *,
                 course_fn: Callable[[], Course] | None = None,
                 max_steps: int = 2000, max_speed: float = 1.5,
-                max_steer: float = 0.45, seed: int = 0, **env_kwargs) -> None:
+                seed: int = 0, **env_kwargs) -> None:
         super().__init__()
         self._env = SimE2EEnv(courses, course_fn=course_fn, max_steps=max_steps,
-                              max_speed=max_speed, max_steer=max_steer, seed=seed,
-                              **env_kwargs)
+                              max_speed=max_speed, seed=seed, **env_kwargs)
         self._max_speed = max_speed
-        self._max_steer = max_steer
+        self._max_steer = self._env.spec.max_steer
         self._max_range = self._env.max_range
 
         self.observation_space = spaces.Box(0.0, 1.0, shape=(OBS_DIM,), dtype=np.float32)

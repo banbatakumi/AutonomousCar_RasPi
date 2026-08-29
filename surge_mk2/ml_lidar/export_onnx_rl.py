@@ -1,16 +1,33 @@
 """ml_lidar/export_onnx_rl.py — 学習済みPPO方策の行動ヘッドだけをONNX化する。
 
     .venv/bin/python ml_lidar/export_onnx_rl.py \
-        --model ml_lidar/runs/ppo_e2e/best_model.zip \
-        --max-speed 1.5 --max-steer 0.45
+        --model ml_lidar/runs/ppo_e2e/best_model.zip --out models/e2e_lidar/<名前>.onnx
+    # ↑ --max-speedは省略可（run_config.jsonから自動で読む。下記）
 
 SB3の`ActorCriticPolicy`は`(actions, values, log_prob)`を返すが、実機推論で要るのは
 決定論的な行動（分布の平均）だけなので、それだけを返す薄いラッパーをONNX化する。
 
-**`--max-speed`/`--max-steer`は`train_rl.py`に渡したのと同じ値にすること。**
+**`--max-speed`は`train_rl.py`に渡したのと同じ値にすること。**
 SB3のcheckpointは方策ネットワークの重みだけを持ち、環境側の行動レンジ（`ml_lidar/env.py`
 の`GymSurgeEnv._to_physical()`が使う値）は保存されない。ここでズレると、
 `models/e2e_lidar.json`に書く契約と実際に学習した行動レンジが食い違う。
+
+**省略した場合**、`--model`と同じディレクトリにある`run_config.json`
+（`train_rl.py`が学習開始時に書く。2026-08-28追加）から読む。見つからなければ
+エラーで止まる——「渡した値を覚えていない」まま黙って間違った値を使ってしまう
+事故を防ぐため。
+
+**`--max-steer`という引数は無い。** 最大舵角は`config/vehicle.toml`の車両物理限界
+（`VehicleSpec.load().max_steer`）を常にそのまま使う（2026-08-28、バンビの指示。
+自動運転planner側の`max_steer`ParamSpec全廃・訓練環境側の`max_steer`引数全廃と
+同じ方針）。学習時（`train_rl.py`）も同じ値を使っているので、ここで指定を
+迷う余地自体が無い。
+
+**`--model`と同じディレクトリの`note.txt`（`ml_lidar/app.py`の備考欄が書く）が
+あれば、そのまま`models/e2e_lidar/<名前>.json`の`"note"`へ運ぶ**（2026-08-29追加）。
+実車のGUI（`AutoPanel.tsx`のE2E LiDARモデル選択）が読んで表示するので、
+「このモデルはどんな変更をした版か・どのコースで学習したか」を実車の画面からも
+確認できる。
 
 方策のGaussian分布は出力を`[-1,1]`にクリップしない（SACのtanh squashと違う）ので、
 **推論側（`raspi/auto/e2e_lidar.py`）で必ず`[-1,1]`へクリップしてから物理単位へ戻すこと**。
@@ -33,8 +50,24 @@ from stable_baselines3 import PPO  # noqa: E402
 
 from raspi.msgs import LIDAR_C_SATURATED_M  # noqa: E402
 from sim.gym_env import OBS_DIM  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["ActionOnlyPolicy", "export", "verify_parity"]
+__all__ = ["ActionOnlyPolicy", "export", "verify_parity", "load_run_config_defaults"]
+
+
+def load_run_config_defaults(model_path: Path) -> dict:
+    """`--model`と同じディレクトリの`run_config.json`（`train_rl.py`が書く）を読む。
+
+    見つからない・壊れている場合は空dictを返す（呼び出し側で必須チェックする）。
+    `best_model.zip`・`last_model.zip`とも同じ`--out`ディレクトリに並んでいる前提。
+    """
+    cfg_path = model_path.parent / "run_config.json"
+    if not cfg_path.exists():
+        return {}
+    try:
+        return json.loads(cfg_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 class ActionOnlyPolicy(nn.Module):
@@ -61,7 +94,12 @@ class ActionOnlyPolicy(nn.Module):
 
 
 def export(model_path: Path, out_path: Path, *, max_speed: float, max_steer: float,
-          fov_deg: float = 360.0, max_range: float = LIDAR_C_SATURATED_M) -> None:
+          fov_deg: float = 360.0, max_range: float = LIDAR_C_SATURATED_M,
+          note: str = "") -> None:
+    """:param note: `models/e2e_lidar/<名前>.json`に同梱する自由記述の備考
+        （どんな変更をしたか・どのコースか等）。GUIのモデル選択に表示される
+        （2026-08-29追加。`--model`と同じディレクトリの`note.txt`から`main()`が拾う）。
+    """
     model = PPO.load(str(model_path), device="cpu")
     wrapper = ActionOnlyPolicy(model.policy).eval()
 
@@ -83,6 +121,7 @@ def export(model_path: Path, out_path: Path, *, max_speed: float, max_steer: flo
                   "speed_mps = (clip(a1,-1,1) + 1) / 2 * max_speed",
         "max_steer": max_steer,
         "max_speed": max_speed,
+        "note": note,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -117,14 +156,29 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", type=Path, default=Path("ml_lidar/runs/ppo_e2e/best_model.zip"))
     ap.add_argument("--out", type=Path, default=Path("models/e2e_lidar.onnx"))
-    ap.add_argument("--max-speed", type=float, required=True,
-                    help="train_rl.py に渡したのと同じ値にすること")
-    ap.add_argument("--max-steer", type=float, required=True,
-                    help="train_rl.py に渡したのと同じ値にすること")
+    ap.add_argument("--max-speed", type=float, default=None,
+                    help="省略時は--modelと同じディレクトリのrun_config.json"
+                         "（train_rl.pyが書く）から読む")
     args = ap.parse_args()
 
+    defaults = load_run_config_defaults(args.model)
+    max_speed = args.max_speed if args.max_speed is not None else defaults.get("max_speed")
+    if max_speed is None:
+        ap.error("--max-speedを指定するか、--modelと同じディレクトリに"
+                 "train_rl.pyが書いたrun_config.jsonが必要です")
+    max_steer = VehicleSpec.load().max_steer
+
+    speed_src = "指定値" if args.max_speed is not None else "run_config.json"
+    print(f"# max_speed={max_speed}（{speed_src}） max_steer={max_steer}（vehicle.toml）")
+
+    # ★--modelと同じディレクトリのnote.txt（ml_lidar/app.pyの備考欄が書く）があれば
+    # そのまま模型の.jsonへ運ぶ。GUIのモデル選択でどんな変更・どのコースかを
+    # 確認できるようにするため（2026-08-29追加）
+    note_path = args.model.parent / "note.txt"
+    note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    export(args.model, args.out, max_speed=args.max_speed, max_steer=args.max_steer)
+    export(args.model, args.out, max_speed=max_speed, max_steer=max_steer, note=note)
     diff = verify_parity(args.model, args.out)
     print(f"# 完了 → {args.out}（PyTorch/ONNXRuntime 最大差 {diff:.2e}）")
     return 0

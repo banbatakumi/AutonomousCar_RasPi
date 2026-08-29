@@ -38,6 +38,7 @@ import json
 import math
 from pathlib import Path
 
+from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from .base import ParamSpec, Planner, scan_window
 
@@ -80,20 +81,25 @@ class E2ELidar(Planner):
     name = "E2E LiDAR"
     description = ("点群をそのままステア/速度へ回帰する方策（強化学習）。"
                    "地図も経路も持たない実験的なモード")
+    #: ギャップ探索を行わないので `nearest`/`gap` は書かない（`AutoState` の
+    #: 既定値 0.0 のまま＝GUI にも出さない）。`free_ahead` は安全側の停止判定に
+    #: 使うため書く（`plan()` 参照）
+    stats = ("free_ahead", "valid_ratio")
 
     params = (
         ParamSpec(key="max_speed", label="最高速度", min=0.05, max=2.0, step=0.05,
                   default=1.0, unit="m/s",
                   note="モデル出力をこの値でクランプする。学習時の上限（`train_rl.py`の"
                        "`--max-speed`）より大きくしても意味が無い（出力レンジがそこまで届かない）"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
-                  default=0.45, unit="rad",
-                  note="モデル出力をこの値でクランプする。学習時の上限（`train_rl.py`の"
-                       "`--max-steer`）と揃えること"),
         ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.0, step=0.01,
                   default=0.30, unit="m",
                   note="★独立した安全策。モデルの判断を経由せず、正面がこれを切ったら"
                        "無条件で停止する（`de`の`stop_dist`と同じ役目）"),
+        ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
+                  default=0.10, unit="s",
+                  note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが反応が鈍る"
+                       "（`de`/`ftg`と同じ仕組み。2026-08-29追加——LiDARスキャンのフレーム間の"
+                       "微小な揺らぎがそのままステア出力の揺らぎになっていたため）"),
     )
 
     def __init__(self, model_path: str | Path | None = None, *,
@@ -103,6 +109,7 @@ class E2ELidar(Planner):
             名前から選ぶ
         :param models_dir: `<名前>.onnx`を探すディレクトリ。既定`models/e2e_lidar/`
         """
+        self.vehicle = Vehicle.load()
         self.models_dir = Path(models_dir) if models_dir else DEFAULT_MODELS_DIR
         self._loaded_model_name = ""
         self._session = None
@@ -112,6 +119,7 @@ class E2ELidar(Planner):
         self._model_max_steer = 0.45
         self._model_max_speed = 1.5
         self._load_error = "未選択"
+        self._steer = 0.0
         if model_path:
             self._apply_loaded(Path(model_path))
 
@@ -156,7 +164,9 @@ class E2ELidar(Planner):
         return True
 
     def reset(self) -> None:
-        pass                    # 平滑化などの内部状態は持たない
+        # **モード切替・disengage のたびに呼ばれる。** 残しておくと、次に engage
+        # した瞬間に前回の舵の続きから動き出す（`de`/`ftg`と同じ約束）
+        self._steer = 0.0
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
@@ -198,15 +208,25 @@ class E2ELidar(Planner):
             return st
 
         # `ml_lidar/env.py` の `_to_physical()` と対になる後処理（[-1,1]でクリップしてから
-        # 学習時のレンジに戻す）。`p["max_steer"]`/`p["max_speed"]`（GUIの安全側クランプ）
-        # で最終的にもう一段絞る
+        # 学習時のレンジに戻す）。最大舵角は`p`（GUI）ではなく`config/vehicle.toml`の
+        # 車両物理限界（`self.vehicle.max_steer`）でもう一段絞る。`max_speed`は
+        # 引き続きGUIの安全側クランプ（`p["max_speed"]`）を使う
         steer_norm = max(-1.0, min(1.0, steer_norm))
         speed_norm = max(-1.0, min(1.0, speed_norm))
         steer = steer_norm * self._model_max_steer
         speed = (speed_norm + 1.0) * 0.5 * self._model_max_speed
 
-        max_steer, max_speed = p["max_steer"], p["max_speed"]
-        st.target_steer = max(-max_steer, min(max_steer, steer))
+        max_steer, max_speed = self.vehicle.max_steer, p["max_speed"]
+        target = max(-max_steer, min(max_steer, steer))
+
+        # ★舵の平滑化（時間ベースの1次遅れ、フレームレートに依存しない）。
+        # `de`/`ftg`と同じ`steer_tau`の仕組み（2026-08-29追加）。無いと、LiDARスキャンの
+        # フレーム間の微小な揺らぎがそのままステア出力の揺らぎになっていた
+        # （バンビが実車で「舵角の決定が少し不安定」と気づいたのがきっかけ）
+        tau = p["steer_tau"]
+        alpha = 1.0 if tau <= 1e-3 or dt <= 0 else 1.0 - math.exp(-dt / tau)
+        self._steer += (target - self._steer) * alpha
+        st.target_steer = self._steer
         st.ready = True
 
         stop_d = p["stop_dist"]

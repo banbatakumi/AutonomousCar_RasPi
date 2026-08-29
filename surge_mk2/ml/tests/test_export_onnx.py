@@ -7,6 +7,7 @@
 """
 
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
 
+import onnxruntime as ort  # noqa: E402
 import torch  # noqa: E402
 
 from export_onnx import MEAN, STD, THRESHOLD, export, verify_parity  # noqa: E402
@@ -52,6 +54,27 @@ class TestExportOnnx(unittest.TestCase):
             reloaded.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
             err = verify_parity(out_path, reloaded, (64, 48))
             self.assertLess(err, 1e-3)
+
+    def test_onnx_file_loads_alone_without_its_export_directory(self):
+        """`models/`への配置運用は`.onnx`単体をコピーする。**もとのエクスポート先
+        ディレクトリに`.data`（外部重みファイル）が残ったままだと、その隣にある間は
+        気づかず動いてしまう**——`.onnx`だけを別ディレクトリへコピーしてロードすることで、
+        `torch.onnx.export`の既定`external_data=True`が割った重みを参照できずに
+        失敗する回帰を検出する（`ml_lidar/export_onnx_rl.py`が実際に踏んだ罠と同じ）。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            ckpt_path = Path(d) / "model.pt"
+            model = DrivableSegModel(pretrained=False)
+            torch.save(model.state_dict(), ckpt_path)
+
+            out_path = Path(d) / "model.onnx"
+            export(ckpt_path, out_path, (64, 48))
+
+            with tempfile.TemporaryDirectory() as lone_dir:
+                lone_path = Path(lone_dir) / "renamed.onnx"
+                shutil.copy(out_path, lone_path)          # .json も .data も持っていかない
+                sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
+                sess.run(None, {"input": torch.zeros(1, 3, 48, 64).numpy()})
 
     def test_mismatched_model_raises(self):
         """**エクスポートできただけでは何も保証されない**——別の重みで検証すると

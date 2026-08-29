@@ -19,6 +19,7 @@ import numpy as np  # noqa: E402
 import onnx  # noqa: E402
 from onnx import TensorProto, helper  # noqa: E402
 
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
                         E2ELidar, FollowTheGap, FollowTheGapCam, LineTrace,
                         catalog, make_planner)
@@ -257,11 +258,15 @@ class TestFollowTheGap(unittest.TestCase):
     # ── パラメータ ──
 
     def test_params_are_clamped_to_the_declared_range(self):
-        """GUI を信用しない。**範囲外の値で走り出す方が、無視されるより危ない。**"""
-        p = FollowTheGap.merged({"max_speed": 99.0, "max_steer": -5.0})
+        """GUI を信用しない。**範囲外の値で走り出す方が、無視されるより危ない。**
+
+        ★`max_steer`はもうParamSpecではない（2026-08-28、`config/vehicle.toml`の
+        車両物理限界を直接参照する方針に変更。`self.vehicle.max_steer`を使う）ので、
+        ここでのクランプ対象からは外れている。
+        """
+        p = FollowTheGap.merged({"max_speed": 99.0})
         spec = {s.key: s for s in FollowTheGap.params}
         self.assertEqual(p["max_speed"], spec["max_speed"].max)
-        self.assertEqual(p["max_steer"], spec["max_steer"].min)
 
     def test_unknown_and_broken_params_fall_back_to_defaults(self):
         p = FollowTheGap.merged({"nonsense": 1.0, "max_speed": "速い"})
@@ -875,6 +880,23 @@ def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
     onnx.save(model, str(path))
 
 
+def _make_constant_steer_e2e_model(path: Path, steer_norm: float, in_dim: int = _OBS_DIM) -> None:
+    """入力に関わらず常に`steer_norm`（speedは0）を返すダミーモデル。舵の平滑化
+    フィルタ（`steer_tau`）の時間応答だけを、スキャン内容やindexマッピングを
+    気にせずテストしたいときに使う（2026-08-29追加）。"""
+    w = np.zeros((2, in_dim), dtype=np.float32)
+    b = np.array([steer_norm, 0.0], dtype=np.float32)
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, in_dim])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])
+    w_init = helper.make_tensor("W", TensorProto.FLOAT, w.shape, w.flatten())
+    b_init = helper.make_tensor("B", TensorProto.FLOAT, b.shape, b.flatten())
+    node = helper.make_node("Gemm", ["input", "W", "B"], ["output"], transB=1)
+    graph = helper.make_graph([node], "dummy_e2e_const", [inp], [out], [w_init, b_init])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
 class TestE2ELidar(unittest.TestCase):
     def test_missing_model_is_ready_false(self):
         """モデルが `models/` に無くても落ちずに安全側へ倒れる（未学習時の既定状態）。"""
@@ -933,8 +955,17 @@ class TestE2ELidar(unittest.TestCase):
             self.assertTrue(st.brake)
             self.assertEqual(st.target_speed, 0.0)
 
-    def test_output_is_clamped_to_param_limits(self):
-        """モデルの生出力がどうであれ、`p["max_steer"]`が最終的な上限になる。"""
+    def test_output_is_clamped_to_vehicle_max_steer(self):
+        """モデルの生出力がどうであれ、`config/vehicle.toml`の車両物理限界
+        （`self.vehicle.max_steer`）が最終的な上限になる（2026-08-28、GUIの
+        `max_steer`ParamSpecを廃止して車両限界を直接参照する方針に変更）。
+
+        モデル付属の`.json`の`max_steer`（学習時のステア出力レンジ。
+        `self.vehicle.max_steer`とは別物）を車両限界より大きく設定し、
+        「モデル側の値ではなく車両限界の方でクランプされている」ことを区別して確認する。
+        """
+        vehicle_max_steer = Vehicle.load().max_steer
+        model_max_steer = vehicle_max_steer + 0.3        # ★わざと車両限界より大きくする
         with tempfile.TemporaryDirectory() as d:
             model_path = Path(d) / "e2e_lidar.onnx"
             # W[0,:] を大きくして steer_norm が確実に1.0でクリップされるようにする
@@ -950,12 +981,68 @@ class TestE2ELidar(unittest.TestCase):
             model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
             onnx.save(model, str(model_path))
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.20, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": model_max_steer,
+                 "max_speed": 1.5}))
 
             p = E2ELidar(model_path=model_path)
-            st = p.plan(corridor(180, open_dist=5.0), None,
-                       E2ELidar.merged({"max_steer": 0.20}), 0.1)
-            self.assertLessEqual(abs(st.target_steer), 0.20 + 1e-9)
+            st = p.plan(corridor(180, open_dist=5.0), None, E2ELidar.merged({}), 0.1)
+            # モデル側のレンジ(model_max_steerいっぱい)まで出力が出ようとしても、
+            # 車両限界で頭打ちになっているはず
+            self.assertLessEqual(abs(st.target_steer), vehicle_max_steer + 1e-9)
+
+    # ── 平滑化と初期化（2026-08-29追加。`de`/`ftg`と同じ`steer_tau`の仕組み） ──
+
+    def test_steer_is_smoothed_over_time(self):
+        """モデルが同じ出力を出し続けても、`target_steer`は1周期で目標値まで
+        飛びつかず、時間をかけて近づく（`TestFollowTheGap.test_steer_is_smoothed_over_time`
+        と同じ検証）。"""
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_constant_steer_e2e_model(model_path, steer_norm=1.0)
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            scan = corridor(180, open_dist=5.0)
+            params = E2ELidar.merged({})
+            first = p.plan(scan, None, params, 0.1).target_steer
+            second = p.plan(scan, None, params, 0.1).target_steer
+            third = p.plan(scan, None, params, 0.1).target_steer
+            self.assertGreater(first, 0.0)
+            self.assertLess(first, second)
+            self.assertLess(second, third)
+            self.assertLess(third, 0.45)   # まだ目標値には完全に届いていない
+
+    def test_reset_clears_the_steering_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_constant_steer_e2e_model(model_path, steer_norm=1.0)
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            scan = corridor(180, open_dist=5.0)
+            params = E2ELidar.merged({})
+            for _ in range(20):
+                p.plan(scan, None, params, 0.1)
+            converged = p.plan(scan, None, params, 0.1).target_steer
+            self.assertGreater(converged, 0.3)
+            p.reset()
+            # reset 直後は 0 から始まるので、1周期ぶんしか動いていない
+            # （収束済みの値より必ず小さいはず。0から目標値へ単調に近づくため）
+            self.assertLess(p.plan(scan, None, params, 0.1).target_steer, converged)
+
+    def test_steer_tau_zero_disables_smoothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_constant_steer_e2e_model(model_path, steer_norm=1.0)
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            scan = corridor(180, open_dist=5.0)
+            st = p.plan(scan, None, E2ELidar.merged({"steer_tau": 0.0}), 0.1)
+            self.assertAlmostEqual(st.target_steer, 0.45, places=5)
 
     def test_reload_if_changed_picks_up_a_named_model(self):
         """GUIの`e2e/model`選択(名前)から`models_dir/<name>.onnx`を解決してロードする。"""
