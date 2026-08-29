@@ -410,6 +410,8 @@ class TelemetryServer:
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
+        #: `_mcap_start` の `await create_subprocess_exec` 中の再入防止フラグ
+        self._mcap_starting = False
         self._mcap_started_ns = 0
         self._mcap_error: str | None = None
 
@@ -1250,8 +1252,13 @@ class TelemetryServer:
     # ── mcap のライブ中継（Piのディスクには書かない） ──
 
     async def _mcap_start(self, *, image_hz: float) -> None:
-        if self._mcap_proc is not None:
-            return                            # 既に録画中
+        if self._mcap_proc is not None or self._mcap_starting:
+            return                            # 既に録画中、または起動処理の途中
+        # **`await create_subprocess_exec` の間だけこのフラグで再入を防ぐ。**
+        # `self._mcap_proc is not None` のチェックと代入の間には中断点（await）
+        # があり、素通しだと短時間の二重呼び出しで logger_node を二重起動して
+        # しまう（録画データの混線・先発プロセスのリーク）
+        self._mcap_starting = True
         self._mcap_error = None
         cmd = [sys.executable, "-u", "-m", "raspi.nodes.logger_node",
                "--quiet", "-o", "-", "--image-hz", str(image_hz)]
@@ -1262,6 +1269,8 @@ class TelemetryServer:
         except Exception as e:
             self._mcap_error = f"logger_node を起動できない: {e}"
             return
+        finally:
+            self._mcap_starting = False
         self._mcap_proc = proc
         self._mcap_started_ns = time.monotonic_ns()
         asyncio.create_task(self._mcap_pump(proc))
@@ -1280,14 +1289,10 @@ class TelemetryServer:
                     break
                 if not self.record_clients:
                     continue
-                dead = []
-                for ws in list(self.record_clients):
-                    try:
-                        await ws.send(chunk)
-                    except Exception:
-                        dead.append(ws)
-                for ws in dead:
-                    self.record_clients.discard(ws)
+                await asyncio.gather(
+                    *(self._send_or_drop(ws, chunk, self.record_clients)
+                      for ws in list(self.record_clients)),
+                    return_exceptions=True)
         finally:
             rc = await proc.wait()
             # `self._mcap_proc is proc` が False なら `_mcap_stop` が既に片付け済み
@@ -1358,6 +1363,23 @@ class TelemetryServer:
                              return_exceptions=True)
 
     @staticmethod
+    async def _send_or_drop(ws, payload, clients: set) -> bool:
+        """1クライアントへバイト列を1本送る。**失敗したら即座に `clients` から外す。**
+
+        呼び出し側が `asyncio.gather` でクライアントぶん並行に呼ぶための単位。
+        直列に `await` すると、1台の送信が詰まった（TCP輻輳・受信停止）ぶんだけ
+        同じループ内の他クライアントへの配信も足止めされる（`websockets` の
+        `send()` にタイムアウトが無いため）。1タスクずつ独立させれば、
+        詰まったクライアントだけが取り残される。
+        """
+        try:
+            await ws.send(payload)
+            return True
+        except Exception:
+            clients.discard(ws)
+            return False
+
+    @staticmethod
     async def _send_json(ws, obj) -> None:
         """1クライアントへ JSON を1本送る。**送れなくても黙って捨てる。**
 
@@ -1401,14 +1423,10 @@ class TelemetryServer:
             if not self.map_clients:
                 continue
             payload = _encoder.encode(m)
-            dead = []
-            for ws in list(self.map_clients):
-                try:
-                    await ws.send(payload)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                self.map_clients.discard(ws)
+            await asyncio.gather(
+                *(self._send_or_drop(ws, payload, self.map_clients)
+                  for ws in list(self.map_clients)),
+                return_exceptions=True)
 
     async def _telemetry_pump(self) -> None:
         period = 1.0 / TELEMETRY_HZ
@@ -1417,15 +1435,11 @@ class TelemetryServer:
             if not self.telemetry_clients:
                 continue
             payload = self._snapshot()
-            dead = []
-            for ws in list(self.telemetry_clients):
-                try:
-                    await ws.send(payload)
-                    self.frames_sent += 1
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                self.telemetry_clients.discard(ws)
+            results = await asyncio.gather(
+                *(self._send_or_drop(ws, payload, self.telemetry_clients)
+                  for ws in list(self.telemetry_clients)),
+                return_exceptions=True)
+            self.frames_sent += sum(1 for r in results if r is True)
 
     def _snapshot(self) -> bytes:
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
@@ -1644,11 +1658,9 @@ class TelemetryServer:
                 jpg = await asyncio.to_thread(self._encode_frame, ref)
                 if jpg is None:
                     continue
-                for ws in list(clients):
-                    try:
-                        await ws.send(jpg)
-                    except Exception:
-                        clients.discard(ws)
+                await asyncio.gather(
+                    *(self._send_or_drop(ws, jpg, clients) for ws in list(clients)),
+                    return_exceptions=True)
 
     def _encode_frame(self, ref) -> bytes | None:
         """`ImageRef` → JPEG。共有メモリからゼロコピーで読む（`core.jpeg`）。"""
@@ -1675,11 +1687,9 @@ class TelemetryServer:
             if m is None or m.seq == last_seq:
                 continue
             last_seq = m.seq
-            for ws in list(clients):
-                try:
-                    await ws.send(m.jpeg)
-                except Exception:
-                    clients.discard(ws)
+            await asyncio.gather(
+                *(self._send_or_drop(ws, m.jpeg, clients) for ws in list(clients)),
+                return_exceptions=True)
 
     # ── 起動 ──
 

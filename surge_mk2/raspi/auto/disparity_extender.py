@@ -76,7 +76,7 @@ import math
 
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
-from .base import ParamSpec, Planner, min_filter, scan_window
+from .base import ParamSpec, Planner, extend_disparity, min_filter, scan_window
 
 __all__ = ["DisparityExtender"]
 
@@ -189,7 +189,7 @@ class DisparityExtender(Planner):
         st.free_ahead = min(front) if front else 0.0
 
         # ── ③ 段差を埋める ──
-        ext = _extend(usable, p["disparity_m"], p["safety_half_width"])
+        ext = extend_disparity(usable, p["disparity_m"], p["safety_half_width"])
 
         # DE は安全バブルを置かない（塗りが同じ役目を果たす）。
         # `start > end` で「バブル無し」を表す（`AutoState` の約束）
@@ -292,29 +292,3 @@ def _best_band(r: list[float], threshold: float,
             best, best_len, best_off = (j, k), length, off
         j = k + 1
     return best
-
-
-
-def _extend(r: list[float], disparity: float, half_width: float) -> list[float]:
-    """段差の**遠い側**を近い側の値で塗る（docstring の図）。
-
-    塗るのは `min()`。**上書きにすると処理の順番で結果が変わる。**
-    """
-    out = list(r)
-    n = len(r)
-    for i in range(n - 1):
-        lo, hi = r[i], r[i + 1]
-        if abs(hi - lo) < disparity:
-            continue
-        near = min(lo, hi)
-        # 距離 `near` の所で半幅ぶんを見込む角度［度］。至近では 90° で頭打ち
-        span = min(90.0, math.degrees(math.atan2(half_width, max(near, 1e-3))))
-        k = int(math.ceil(span))           # 点は 1° 刻み
-        if hi > lo:
-            # 遠いのは右→左方向（添字が増える側）。i+1 から先を塗る
-            for j in range(i + 1, min(n, i + 1 + k)):
-                out[j] = min(out[j], near)
-        else:
-            for j in range(max(0, i - k + 1), i + 1):
-                out[j] = min(out[j], near)
-    return out

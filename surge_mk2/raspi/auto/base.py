@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import msgspec
@@ -212,7 +213,7 @@ def scan_window(scan: Scan, fov_deg: float, max_range: float) -> ScanWindow:
             measured.append(False)
             continue
         raw = scan.dist[i]
-        if raw <= 0.0:
+        if not (raw > 0.0):                # NaN もここに落ちる（NaN との比較は常に False）
             dist.append(max_range)         # 測距不能。★上表の「唯一の危険側」
             measured.append(False)
         else:
@@ -237,6 +238,35 @@ def min_filter(r: list[float], half_width: int) -> list[float]:
         return r
     n = len(r)
     return [min(r[max(0, j - half_width):min(n, j + half_width + 1)]) for j in range(n)]
+
+
+def extend_disparity(r: list[float], disparity: float, half_width: float) -> list[float]:
+    """段差の**遠い側**を近い側の値で塗る（Disparity Extender の中核）。
+
+    塗るのは `min()`。**上書きにすると処理の順番で結果が変わる。**
+
+    ★ `disparity_extender.py` と `gap_pursuit.py` の両方が使う共通実装。
+    片方だけに書き写すと、`scan_window`/`min_filter` と同じ理由で
+    もう片方が古い実装のまま走ることになる。
+    """
+    out = list(r)
+    n = len(r)
+    for i in range(n - 1):
+        lo, hi = r[i], r[i + 1]
+        if abs(hi - lo) < disparity:
+            continue
+        near = min(lo, hi)
+        # 距離 `near` の所で半幅ぶんを見込む角度［度］。至近では 90° で頭打ち
+        span = min(90.0, math.degrees(math.atan2(half_width, max(near, 1e-3))))
+        k = int(math.ceil(span))           # 点は 1° 刻み
+        if hi > lo:
+            # 遠いのは右→左方向（添字が増える側）。i+1 から先を塗る
+            for j in range(i + 1, min(n, i + 1 + k)):
+                out[j] = min(out[j], near)
+        else:
+            for j in range(max(0, i - k + 1), i + 1):
+                out[j] = min(out[j], near)
+    return out
 
 
 def sector_of_deg(deg: int) -> int:

@@ -23,8 +23,8 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
                         E2ELidar, FollowTheGap, FollowTheGapCam, LineTrace,
                         catalog, make_planner)
+from raspi.auto.base import extend_disparity as _extend  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.auto.disparity_extender import _extend  # noqa: E402
 from raspi.auto.gap_pursuit import _best_band  # noqa: E402
 from raspi.msgs import AutoState, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
 from raspi.msgs.types import TOPIC_LINE_CAM, TOPIC_SCAN, TOPIC_SCAN_CAM  # noqa: E402

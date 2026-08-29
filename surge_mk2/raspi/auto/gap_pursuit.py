@@ -13,9 +13,9 @@ Pure Pursuit 舵角を合わせ、さらに3つの弱点に手を入れた反射
 
 - 前処理: `base.scan_window()` / `min_filter()`（欠測→壁、飽和→空き、
   測距不能→空き。3プランナで共有する契約。片方だけ直さない）
-- 安全マージン: `DisparityExtender._extend()` と同じ「段差の遠い側を
-  車体半幅ぶん塗る」処理。最近傍1点だけを塗る円形バブル（FTG）と違い、
-  視野内の**すべての段差**を同時に処理できる
+- 安全マージン: `base.extend_disparity()`（DEと共有する共通実装）による
+  「段差の遠い側を車体半幅ぶん塗る」処理。最近傍1点だけを塗る円形バブル
+  （FTG）と違い、視野内の**すべての段差**を同時に処理できる
 - 狙点: 塗った後の「一番遠い**帯の真ん中**」（DEと同じ。端を狙うとコーナー
   内側を舐める）
 - 速度の基礎: 狙う方向の塗り後距離をそのまま使い、正面の扇で測り直さない
@@ -66,7 +66,7 @@ import math
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from ..nav.purepursuit import steer_for_target
-from .base import ParamSpec, Planner, min_filter, scan_window
+from .base import ParamSpec, Planner, extend_disparity, min_filter, scan_window
 
 __all__ = ["DisparityPursuit"]
 
@@ -197,7 +197,7 @@ class DisparityPursuit(Planner):
         self._prev_front = st.free_ahead
 
         # ── 段差を埋める（安全マージン。DEと同じ処理）──
-        ext = _extend(usable, p["disparity_m"], p["safety_half_width"])
+        ext = extend_disparity(usable, p["disparity_m"], p["safety_half_width"])
         st.bubble_start_deg = 0.0
         st.bubble_end_deg = -1.0            # DEと同じく円形バブルは置かない
 
@@ -296,26 +296,3 @@ def _best_band(r: list[float], threshold: float, degs: list[int],
             best, best_len, best_off = (j, k), length, off
         j = k + 1
     return best
-
-
-def _extend(r: list[float], disparity: float, half_width: float) -> list[float]:
-    """段差の**遠い側**を近い側の値で塗る（`DisparityExtender._extend()` と同一）。
-
-    塗るのは `min()`。**上書きにすると処理の順番で結果が変わる。**
-    """
-    out = list(r)
-    n = len(r)
-    for i in range(n - 1):
-        lo, hi = r[i], r[i + 1]
-        if abs(hi - lo) < disparity:
-            continue
-        near = min(lo, hi)
-        span = min(90.0, math.degrees(math.atan2(half_width, max(near, 1e-3))))
-        k = int(math.ceil(span))           # 点は 1° 刻み
-        if hi > lo:
-            for j in range(i + 1, min(n, i + 1 + k)):
-                out[j] = min(out[j], near)
-        else:
-            for j in range(max(0, i - k + 1), i + 1):
-                out[j] = min(out[j], near)
-    return out

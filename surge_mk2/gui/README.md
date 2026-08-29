@@ -139,8 +139,16 @@ src/
 2. 数値表示 → **8Hz に間引いて** `useNumbers()` から配る（人間は 20Hz の数字を読めない）
 3. 接続状態・操縦権・設定 → イベント時だけ zustand
 
-### 型は Python 側の写し
+### バスのメッセージ型は生成物
 
-`src/types.ts` は `raspi/msgs/types.py` の写し。**2箇所にあるのでズレうる。**
-UART のパケット定義（`proto/`）のように生成器を挟むほどの規模ではないと判断している。
-Python 側を変えたらここも直すこと。
+`src/generated/msgs.ts`（`VehicleState`・`Scan`・`LinkDiag`・`AutoState`・`AutoMapMsg`）は
+`raspi/msgs/types.py` から `python3 config/gen_msgs.py` が生成する。**`types.py` が唯一の正**
+（UART のパケット定義を `protocol.toml → Python/C` で生成しているのと同じ形）。
+
+以前は `src/types.ts` に手で写していたが、45 フィールドの写経は片方だけ直しても
+どのツールもエラーを出さず、**画面に静かに `undefined` が出る**形だった
+（2026-08-21 のレビュー 🟠2）。Python 側の型を変えたら `config/gen_msgs.py` を
+再実行すること（CI は `--check` で生成物の陳腐化を検出する）。
+
+`src/types.ts` に残っているのは、Python 側に対応物が無い GUI 固有の型だけ
+（`ControlStatus`・`CmdOut`・`Snapshot`・`MapData` など）。

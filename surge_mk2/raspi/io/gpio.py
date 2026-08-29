@@ -254,16 +254,23 @@ class Buzzer:
 
     def _run(self, melody, gen: int) -> None:
         self._prime()
-        for name, dur_ms, gap_ms in melody:
-            if gen != self._gen:
-                return
-            self._dev.play(name)
-            time.sleep(dur_ms / 1000)
-            if gen != self._gen:
-                return
-            self._dev.stop()
-            if gap_ms:
-                time.sleep(gap_ms / 1000)
+        try:
+            for name, dur_ms, gap_ms in melody:
+                if gen != self._gen:
+                    return
+                self._dev.play(name)
+                time.sleep(dur_ms / 1000)
+                if gen != self._gen:
+                    return
+                self._dev.stop()
+                if gap_ms:
+                    time.sleep(gap_ms / 1000)
+        finally:
+            # `self._dev.play()` が万一例外を送出した場合に鳴らしっぱなしに
+            # しない。**世代が古くなっていれば触らない**（write()が単発ビープを
+            # 再生中に、打ち切られたはずのこのスレッドが後から止めてしまうのを防ぐ）
+            if gen == self._gen:
+                self._dev.stop()
 
     def close(self) -> None:
         with quiet_close("gpiozero PWMOutputDevice（ブザー）"):
