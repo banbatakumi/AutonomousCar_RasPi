@@ -82,6 +82,9 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const camModelFiles = useUi((s) => s.camModelFiles)
   const e2eModel = useUi((s) => s.e2eModel)
   const e2eModelFiles = useUi((s) => s.e2eModelFiles)
+  // 選択中のカメラセグメンテーションモデルの備考（`ml_cam/app.py`の備考欄→エクスポート時に
+  // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称、2026-08-29追加）
+  const camSelectedNote = camModelFiles.find((f) => f.name === camModel?.name)?.note
   // 選択中のE2E LiDARモデルの備考（`ml_lidar/app.py`の備考欄→エクスポート時に
   // `<name>.json`へ同梱されたもの。2026-08-29追加）
   const e2eSelectedNote = e2eModelFiles.find((f) => f.name === e2eModel?.name)?.note
@@ -187,6 +190,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
           {camModelFiles.length === 0 && (
             <span className="dim">models/ に .onnx がありません</span>
           )}
+          {camSelectedNote && <div className="auto-model-note">{camSelectedNote}</div>}
         </div>
       )}
 

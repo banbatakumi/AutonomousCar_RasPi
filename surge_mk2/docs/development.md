@@ -69,7 +69,7 @@
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |
 | `raspi/msgs/types.py` | **`gui/src/types.ts` も手で直す**（写しなのでズレる）→ rsync ＋ `--restart-io` | **★★ する** |
 | `models/*.onnx`（カメラ用）`models/e2e_lidar/*.onnx`（E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
-| `ml/` `ml_lidar/`（学習パイプライン一式） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
+| `ml_cam/` `ml_lidar/`（学習パイプライン一式） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
 
 > **`--services` は unit ファイルを書き換えるだけ。** 走っている `io_node` は古い引数のまま
 > 動き続けるので、反映には `--restart-io` が要る。
@@ -585,7 +585,7 @@ GUI でモデル名を選ぶ**」という流れは共通だが、中身も検�
 | | LiDAR E2E（`e2e_lidar`） | カメラセグメンテーション（`ftg_cam`） |
 |---|---|---|
 | 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） |
-| 学習コード | `ml_lidar/`（Mac 専用。Pi には運ばない使い方をする） | `ml/`（同左） |
+| 学習コード | `ml_lidar/`（Mac 専用。Pi には運ばない使い方をする） | `ml_cam/`（同左） |
 | モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`）。**E2E とは別ディレクトリ** |
 | 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`（`FollowTheGap`をそのまま流用） |
 | シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（`sim.run` は `--no-camera` 固定でカメラを持たない） |
@@ -635,7 +635,7 @@ tools/deploy.sh --no-gui
 ```
 
 ターミナル操作をまとめて避けたいなら `ml_lidar/app.py`（または `ml_lidar/start_app.command`
-をダブルクリック）が上記1〜3をボタンで操作できる薄い Tkinter GUI（`ml/app.py` と対称、
+をダブルクリック）が上記1〜3をボタンで操作できる薄い Tkinter GUI（`ml_cam/app.py` と対称、
 2026-08-28追加）。学習前に「run名」を1つ決めるだけで、`ml_lidar/runs/<run名>` への
 学習出力と `models/e2e_lidar/<run名>.onnx` へのエクスポート先が自動的に紐づく
 （`v1`・`v2`…と自動採番も提案する）。学習run一覧タブから TensorBoard・観戦(`watch.py`)・
@@ -681,7 +681,7 @@ GUI 側にエラーは残る）。
 
 ```bash
 # 初回だけ
-.venv/bin/pip install -r ml/requirements.txt
+.venv/bin/pip install -r ml_cam/requirements.txt
 # SAM のチェックポイント（annotate.py が使う。数百MB）を別途ダウンロード:
 #   https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
@@ -689,24 +689,24 @@ GUI 側にエラーは残る）。
 #    Pi 側には新しい記録コードは不要——.mcap をダウンロードして Mac に置くだけ
 
 # 1. .mcap からフレームを抽出（間引きは --min-interval-ms、既定0=全件）
-python3 ml/extract_frames.py logs/run1.mcap --out ml/data/frames --cam front
+python3 ml_cam/extract_frames.py logs/run1.mcap --out ml_cam/data/frames --cam front
 
 # 2. アノテーション（走行可能な床を1クリック→SAMがマスクを提案。Shift+クリックで除外点）
-python3 ml/annotate.py ml/data/frames \
+python3 ml_cam/annotate.py ml_cam/data/frames \
     --checkpoint sam_vit_b_01ec64.pth --model-type vit_b
 
 # 3. 学習（毎エポック IoU を表示。過学習していないか val_iou を見ながら回す）
-python3 ml/train.py --frames ml/data/frames --epochs 30 --out ml/runs/latest
+python3 ml_cam/train.py --frames ml_cam/data/frames --epochs 30 --out ml_cam/runs/latest
 
 # 4. ONNX 化（入力解像度・正規化・閾値という前処理契約を同名 .json に焼く）
-python3 ml/export_onnx.py --checkpoint ml/runs/latest/best.pt \
+python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt \
     --size 224x224 --out models/<好きな名前>.onnx
 
 # 5. 実車に配る
 tools/deploy.sh --no-gui
 ```
 
-ターミナル操作をまとめて避けたいなら `ml/app.py`（または `ml/start_app.command` を
+ターミナル操作をまとめて避けたいなら `ml_cam/app.py`（または `ml_cam/start_app.command` を
 ダブルクリック）が上記1〜4をボタンとファイル選択ダイアログでサブプロセス起動するだけの
 薄い Tkinter GUI。推論・学習のロジックは持たないので、中身のスクリプトを直せば
 こちら側は何も変えなくてよい。
@@ -765,7 +765,7 @@ GUI での使い方:
 | `raspi/tests/` | unittest | — |
 | `gui/` | React + TypeScript | rsync だけ |
 | `sim/` | Mac 専用シミュレータ（**Pi には運ぶが使わない**）。カメラは持たない | — |
-| `ml/` | カメラセグメンテーションの学習パイプライン（Mac 専用。§12.2） | Pi には無関係 |
+| `ml_cam/` | カメラセグメンテーションの学習パイプライン（Mac 専用。§12.2） | Pi には無関係 |
 | `ml_lidar/` | LiDAR E2E 強化学習パイプライン（Mac 専用。§12.1） | Pi には無関係 |
 | `models/` | 学習済み ONNX の置き場（`models/*.onnx`=カメラ用、`models/e2e_lidar/*.onnx`=E2E用）。`.gitignore` 対象 | `tools/deploy.sh` で運ぶだけ。再起動は不要 |
 | `config/` | 車両諸元・自動運転パラメータ | 読んでいるノード |

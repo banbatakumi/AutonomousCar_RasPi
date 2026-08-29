@@ -1,4 +1,4 @@
-"""`ml/extract_frames.py` のテスト。
+"""`ml_cam/extract_frames.py` のテスト。
 
 **実データも実走行も要らない。** `raspi/rec/mcap_log.py`（Pi側の書き手、
 GUIの録画がこれを裏で呼ぶ）で実際に `.mcap` を1つ作り、それを
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))          # repo root
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))          # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))          # ml_cam/
 
 from extract_frames import VIZ_IMAGE_PREFIX, count_messages, extract_one  # noqa: E402
 from raspi.rec.mcap_log import McapLog  # noqa: E402

@@ -1,4 +1,4 @@
-"""`ml/model.py` のテスト。**事前学習重みはダウンロードしない**
+"""`ml_cam/model.py` のテスト。**事前学習重みはダウンロードしない**
 （`pretrained=False`）——ネットワーク接続が無い環境でも通ること。
 """
 
@@ -6,7 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 import torch  # noqa: E402
 

@@ -1,7 +1,7 @@
-"""`ml/app.py`（Tkinter操作パネル）のテスト。
+"""`ml_cam/app.py`（Tkinter操作パネル）のテスト。
 
-**GUIの見た目・クリック操作はテストしない**（`ml/annotate.py` の cv2 ループを
-テストしないのと同じ理由）。コマンド組み立て・ダウンロード処理という
+**GUIの見た目・クリック操作はテストしない**（`ml_cam/annotate.py` の cv2 ループを
+テストしないのと同じ理由）。モデル名・コマンド組み立て・ダウンロード処理という
 Tkinterを知らない純粋関数だけを厳密にテストし、ウィジェット構築だけ
 「例外を出さずに組み立てられるか」というスモークテストに留める
 （ディスプレイが無い環境ではスキップする）。
@@ -14,22 +14,28 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 from app import (  # noqa: E402
     App,
-    ML_DIR,
+    ML_CAM_DIR,
+    MODELS_DIR,
     REPO_ROOT,
+    RUNS_DIR,
     build_annotate_cmd,
     build_export_cmd,
     build_extract_cmd,
     build_preview_cmd,
     build_train_cmd,
     default_sam_checkpoint_path,
+    describe_model_status,
     download_file,
-    new_run_dir_str,
+    list_model_names,
+    next_model_name,
     parse_epoch_line,
+    read_note,
     rel,
+    write_note,
 )
 
 
@@ -50,7 +56,7 @@ class TestCommandBuilders(unittest.TestCase):
     def test_extract_cmd(self):
         cmd = build_extract_cmd("python3", ["a.mcap", "b.mcap"], "out_dir", "front")
         self.assertEqual(cmd[0], "python3")
-        self.assertEqual(cmd[1], str(ML_DIR / "extract_frames.py"))
+        self.assertEqual(cmd[1], str(ML_CAM_DIR / "extract_frames.py"))
         self.assertIn("a.mcap", cmd)
         self.assertIn("b.mcap", cmd)
         self.assertEqual(cmd[-2:], ["--cam", "front"])
@@ -119,16 +125,9 @@ class TestCommandBuilders(unittest.TestCase):
     def test_preview_cmd(self):
         cmd = build_preview_cmd("python3", "frames", "model.onnx")
         self.assertEqual(cmd[0], "python3")
-        self.assertEqual(cmd[1], str(ML_DIR / "preview.py"))
+        self.assertEqual(cmd[1], str(ML_CAM_DIR / "preview.py"))
         self.assertIn("frames", cmd)
         self.assertEqual(cmd[cmd.index("--model") + 1], "model.onnx")
-
-
-class TestNewRunDirStr(unittest.TestCase):
-    def test_is_under_ml_runs_with_a_timestamp_name(self):
-        s = new_run_dir_str()
-        self.assertTrue(s.startswith("ml/runs/"), s)
-        self.assertRegex(s[len("ml/runs/"):], r"^\d{8}_\d{6}$")
 
 
 class TestParseEpochLine(unittest.TestCase):
@@ -145,18 +144,111 @@ class TestParseEpochLine(unittest.TestCase):
 
 
 class TestPaths(unittest.TestCase):
-    def test_default_sam_checkpoint_path_is_under_ml_checkpoints(self):
+    def test_default_sam_checkpoint_path_is_under_ml_cam_checkpoints(self):
         p = default_sam_checkpoint_path()
         self.assertEqual(p.name, "sam_vit_b_01ec64.pth")
         self.assertEqual(p.parent.name, "checkpoints")
 
     def test_rel_shortens_paths_under_repo_root(self):
-        p = REPO_ROOT / "ml" / "data" / "frames"
-        self.assertEqual(rel(p), "ml/data/frames")
+        p = REPO_ROOT / "ml_cam" / "data" / "frames"
+        self.assertEqual(rel(p), "ml_cam/data/frames")
 
     def test_rel_falls_back_to_absolute_outside_repo(self):
         p = Path("/some/other/place")
         self.assertEqual(rel(p), str(p))
+
+    def test_runs_and_models_dir_are_under_expected_places(self):
+        self.assertEqual(RUNS_DIR, ML_CAM_DIR / "runs")
+        # `ml_lidar`と違い、実車側が`models/<name>.onnx`をフラットに探す前提なので
+        # サブディレクトリを切らない
+        self.assertEqual(MODELS_DIR, REPO_ROOT / "models")
+
+
+class TestNextModelName(unittest.TestCase):
+    def test_no_existing_models_suggests_v1(self):
+        self.assertEqual(next_model_name([]), "v1")
+
+    def test_ignores_non_v_named_models(self):
+        self.assertEqual(next_model_name(["first_model", "seg1"]), "v1")
+
+    def test_suggests_next_number_after_the_highest(self):
+        self.assertEqual(next_model_name(["v1", "v2"]), "v3")
+
+    def test_ignores_gaps_and_uses_the_max(self):
+        self.assertEqual(next_model_name(["v1", "v5", "v3"]), "v6")
+
+
+class TestListModelNames(unittest.TestCase):
+    def test_missing_dir_returns_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(list_model_names(Path(d) / "nope"), [])
+
+    def test_lists_only_directories_sorted(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "v2").mkdir()
+            (root / "v1").mkdir()
+            (root / "not_a_dir.txt").write_text("x")
+            self.assertEqual(list_model_names(root), ["v1", "v2"])
+
+
+class TestDescribeModelStatus(unittest.TestCase):
+    def test_missing_frames_dir_reports_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            status = describe_model_status(Path(d) / "v1")
+            self.assertIn("フレーム 0枚", status)
+            self.assertIn("未学習", status)
+
+    def test_counts_frames_and_labeled_frames(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_dir = Path(d) / "v1"
+            frames_dir = model_dir / "frames"
+            frames_dir.mkdir(parents=True)
+            (frames_dir / "a.jpg").write_bytes(b"")
+            (frames_dir / "b.jpg").write_bytes(b"")
+            (frames_dir / "a_mask.png").write_bytes(b"")   # aだけラベル付け済み
+
+            status = describe_model_status(model_dir)
+            self.assertIn("フレーム 2枚", status)
+            self.assertIn("ラベル付け 1枚", status)
+
+    def test_reports_trained_when_checkpoint_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_dir = Path(d) / "v1"
+            model_dir.mkdir()
+            (model_dir / "best.pt").write_bytes(b"")
+            self.assertIn("✓学習済み", describe_model_status(model_dir))
+
+
+class TestNote(unittest.TestCase):
+    """モデルごとの備考（`<model_dir>/note.txt`）。`ml_lidar/app.py`の同名機能と
+    対称（2026-08-29追加）。"""
+
+    def test_read_note_returns_empty_string_when_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(read_note(Path(d)), "")
+
+    def test_write_then_read_note_round_trips(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_dir = Path(d) / "v1"
+            write_note(model_dir, "夜間走行用、露出補正あり")
+            self.assertEqual(read_note(model_dir), "夜間走行用、露出補正あり")
+
+    def test_write_note_creates_missing_model_dir(self):
+        """フレーム抽出より前（モデル名を決めただけの段階）でも備考を書けてよい
+        （`ml_cam/app.py`は学習前後いつでも書ける自由記述として扱う）。"""
+        with tempfile.TemporaryDirectory() as d:
+            model_dir = Path(d) / "not_yet_created" / "v1"
+            write_note(model_dir, "これから抽出する")
+            self.assertTrue(model_dir.is_dir())
+            self.assertEqual(read_note(model_dir), "これから抽出する")
+
+    def test_write_note_overwrites_previous_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            model_dir = Path(d) / "v1"
+            write_note(model_dir, "1回目")
+            write_note(model_dir, "2回目に書き直した")
+            self.assertEqual(read_note(model_dir), "2回目に書き直した")
 
 
 class TestDownloadFile(unittest.TestCase):

@@ -45,5 +45,5 @@ mcap>=1.2,<2           # ログ記録（logger_node / tools/sfl2mcap.py）。zst
 
 # ── Phase 5（カメラ認識） ──
 # `cam_perception_node.py` の走行可否セグメンテーション推論。CPU 版のみ
-# （aarch64 の公式 wheel がある）。Mac 側の学習・エクスポートは `ml/requirements.txt`
+# （aarch64 の公式 wheel がある）。Mac 側の学習・エクスポートは `ml_cam/requirements.txt`
 onnxruntime>=1.18,<2

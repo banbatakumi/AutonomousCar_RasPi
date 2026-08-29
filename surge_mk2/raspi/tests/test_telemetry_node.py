@@ -72,5 +72,62 @@ class TestE2eModelsListNote(unittest.TestCase):
         self.assertEqual(files["v4"]["note"], "")
 
 
+class TestCamModelsListNote(unittest.TestCase):
+    """`_cam_models_list()`が`<名前>.json`の`note`（`ml_cam/export_onnx.py`が
+    書く自由記述の備考。`TestE2eModelsListNote`と対称、2026-08-29追加）を拾って
+    返すことを確認する。"""
+
+    def setUp(self) -> None:
+        self._orig_dir = tn.MODELS_DIR
+        self._tmp = tempfile.TemporaryDirectory()
+        tn.MODELS_DIR = Path(self._tmp.name)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self) -> None:
+        tn.MODELS_DIR = self._orig_dir
+        self._tmp.cleanup()
+
+    def _by_name(self, files: list[dict]) -> dict[str, dict]:
+        return {f["name"]: f for f in files}
+
+    def test_reads_note_from_sibling_json(self) -> None:
+        d = tn.MODELS_DIR
+        (d / "v1.onnx").write_bytes(b"dummy")
+        (d / "v1.json").write_text(json.dumps({"note": "夜間走行用、露出補正あり"}))
+
+        result = tn.TelemetryServer._cam_models_list(None)
+        files = self._by_name(result["cam_model_files"])
+        self.assertEqual(files["v1"]["note"], "夜間走行用、露出補正あり")
+        self.assertTrue(files["v1"]["has_config"])
+
+    def test_missing_json_gives_empty_note(self) -> None:
+        d = tn.MODELS_DIR
+        (d / "v2.onnx").write_bytes(b"dummy")
+
+        result = tn.TelemetryServer._cam_models_list(None)
+        files = self._by_name(result["cam_model_files"])
+        self.assertEqual(files["v2"]["note"], "")
+        self.assertFalse(files["v2"]["has_config"])
+
+    def test_corrupt_json_gives_empty_note_without_crashing(self) -> None:
+        d = tn.MODELS_DIR
+        (d / "v3.onnx").write_bytes(b"dummy")
+        (d / "v3.json").write_text("{ not json")
+
+        result = tn.TelemetryServer._cam_models_list(None)
+        files = self._by_name(result["cam_model_files"])
+        self.assertEqual(files["v3"]["note"], "")
+        self.assertTrue(files["v3"]["has_config"])   # ファイルは在る（壊れているだけ）
+
+    def test_json_without_note_field_gives_empty_note(self) -> None:
+        d = tn.MODELS_DIR
+        (d / "v4.onnx").write_bytes(b"dummy")
+        (d / "v4.json").write_text(json.dumps({"input_size": [224, 224]}))
+
+        result = tn.TelemetryServer._cam_models_list(None)
+        files = self._by_name(result["cam_model_files"])
+        self.assertEqual(files["v4"]["note"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

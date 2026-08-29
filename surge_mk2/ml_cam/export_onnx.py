@@ -1,7 +1,7 @@
-"""ml/export_onnx.py — 学習済みモデルを ONNX にエクスポートし、Pi側の前処理契約を固定する。
+"""ml_cam/export_onnx.py — 学習済みモデルを ONNX にエクスポートし、Pi側の前処理契約を固定する。
 
-    python3 ml/export_onnx.py --checkpoint ml/runs/latest/best.pt \\
-        --size 224x224 --out ml/runs/latest/model.onnx
+    python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt \\
+        --size 224x224 --out ml_cam/runs/latest/model.onnx
 
 **前処理定数（入力解像度・平均/分散・閾値）を `model.json` に書き出す。**
 `raspi/nodes/cam_perception_node.py` の `SegmentationModel` がこれと違う値で
@@ -29,7 +29,7 @@ from model import DrivableSegModel  # noqa: E402
 
 __all__ = ["export", "verify_parity", "MEAN", "STD", "THRESHOLD"]
 
-#: `ml/dataset.py` の正規化（0-1 = mean 0 / std 255）と
+#: `ml_cam/dataset.py` の正規化（0-1 = mean 0 / std 255）と
 #: `raspi/nodes/cam_perception_node.py` の `SegmentationModel` の既定値に揃えてある。
 #: **ここを変えたら両方直すこと。**
 MEAN = 0.0
@@ -37,9 +37,15 @@ STD = 255.0
 THRESHOLD = 0.5
 
 
-def export(checkpoint: Path, out_path: Path, size: tuple[int, int]) -> None:
+def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *, note: str = "") -> None:
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に
-    前処理契約を書く。"""
+    前処理契約を書く。
+
+    :param note: `<out_path>.json`に同梱する自由記述の備考（どんな変更をしたか・
+        どのコースか等）。GUIのモデル選択に表示される（`ml_lidar/export_onnx_rl.py`
+        の`note`と対称、2026-08-29追加。`--checkpoint`と同じディレクトリの
+        `note.txt`から`main()`が拾う）。
+    """
     w, h = size
     model = DrivableSegModel(pretrained=False)
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
@@ -70,6 +76,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int]) -> None:
         "std": STD,
         "threshold": THRESHOLD,
         "output": "probability (sigmoid, 0-1); >= threshold means drivable",
+        "note": note,
     }
     out_path.with_suffix(".json").write_text(json.dumps(cfg, indent=2))
 
@@ -102,12 +109,18 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--size", default="224x224")
-    ap.add_argument("--out", type=Path, default=Path("ml/runs/latest/model.onnx"))
+    ap.add_argument("--out", type=Path, default=Path("ml_cam/runs/latest/model.onnx"))
     args = ap.parse_args()
 
     w, h = (int(v) for v in args.size.lower().split("x"))
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    export(args.checkpoint, args.out, (w, h))
+
+    # ★--checkpointと同じディレクトリのnote.txt（ml_cam/app.pyの備考欄が書く）があれば
+    # そのままcfgの"note"へ運ぶ（ml_lidar/export_onnx_rl.pyと同じ流儀）
+    note_path = args.checkpoint.parent / "note.txt"
+    note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
+
+    export(args.checkpoint, args.out, (w, h), note=note)
 
     model = DrivableSegModel(pretrained=False)
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))

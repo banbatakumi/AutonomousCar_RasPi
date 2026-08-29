@@ -1,6 +1,6 @@
-"""ml/preview.py — 学習済みモデルの推論結果を、実車に乗せる前に目で確認する。
+"""ml_cam/preview.py — 学習済みモデルの推論結果を、実車に乗せる前に目で確認する。
 
-    python3 ml/preview.py ml/data/frames --model ml/runs/latest/model.onnx
+    python3 ml_cam/preview.py ml_cam/data/frames --model ml_cam/runs/latest/model.onnx
 
 **推論には `raspi/nodes/cam_perception_node.py` の `SegmentationModel` を
 そのまま使う。** ここだけ別の前処理（リサイズ方式・正規化）で確認しても、
@@ -12,7 +12,7 @@
     n / p    次/前のフレームへ
     q        終了
 
-`<frame_stem>_mask.png`（`ml/annotate.py` の出力）が同じディレクトリに
+`<frame_stem>_mask.png`（`ml_cam/annotate.py` の出力）が同じディレクトリに
 あれば、正解マスクとの差分を色分け表示し、IoU も画面に出す
 （緑=正解一致・青=過検出・赤=見落とし）。無ければ推論結果だけを
 緑オーバーレイで表示する。
@@ -54,7 +54,7 @@ def build_model(onnx_path: Path) -> SegmentationModel:
 
 
 def compute_iou(pred: np.ndarray, gt: np.ndarray) -> float:
-    """走行可能領域（True）のIoU。両方とも空なら「一致」扱い（`ml/train.py` の
+    """走行可能領域（True）のIoU。両方とも空なら「一致」扱い（`ml_cam/train.py` の
     `iou_score` と同じ考え方）。"""
     inter = int(np.logical_and(pred, gt).sum())
     union = int(np.logical_or(pred, gt).sum())
@@ -85,7 +85,7 @@ def main() -> int:
     try:
         import cv2
     except ImportError:
-        print("opencv-python が入っていません。`pip install -r ml/requirements.txt`",
+        print("opencv-python が入っていません。`pip install -r ml_cam/requirements.txt`",
               file=sys.stderr)
         return 2
 

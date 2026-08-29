@@ -1,4 +1,4 @@
-"""`ml/dataset.py` のテスト。実データは要らない——合成した画像/マスクで検証する。"""
+"""`ml_cam/dataset.py` のテスト。実データは要らない——合成した画像/マスクで検証する。"""
 
 import csv
 import sys
@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402

@@ -1,6 +1,6 @@
-# ml/ — Mac側オフラインMLパイプラインの依存（`raspi/requirements.txt` とは別管理）
+# ml_cam/ — Mac側オフラインMLパイプラインの依存（`raspi/requirements.txt` とは別管理）
 #
-#   .venv/bin/pip install -r ml/requirements.txt
+#   .venv/bin/pip install -r ml_cam/requirements.txt
 #
 # `sim/`（シミュレータ）・`gui/`（React）と同じく、Pi以外で動くコードの依存は
 # raspi/ 側に持ち込まない。torch/opencv/segment-anything を Pi に入れる必要は無い
@@ -15,7 +15,7 @@ onnx>=1.16
 onnxruntime>=1.18,<2
 onnxscript>=0.7          # torch 2.5+ の既定エクスポータ（dynamo=True）が要求する
 
-# アノテーションツール（`ml/annotate.py`）の表示・マウス入力
+# アノテーションツール（`ml_cam/annotate.py`）の表示・マウス入力
 opencv-python>=4.9
 
 # SAM（Segment Anything）— 半自動アノテーションの本体。
@@ -26,8 +26,8 @@ segment-anything==1.0
 pillow>=10
 numpy>=2.1
 
-# `.mcap` からのフレーム抽出（`ml/extract_frames.py`）。raspi 側と同じライブラリ
+# `.mcap` からのフレーム抽出（`ml_cam/extract_frames.py`）。raspi 側と同じライブラリ
 mcap>=1.2,<2
 
-# 操作パネル（`ml/app.py`）— Tkinter は Python 標準ライブラリ同梱なので
+# 操作パネル（`ml_cam/app.py`）— Tkinter は Python 標準ライブラリ同梱なので
 # ここに依存を追加する必要は無い（macOS の python.org 版インストーラでも同梱済み）

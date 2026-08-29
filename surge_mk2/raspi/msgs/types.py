@@ -561,7 +561,7 @@ class CamModelCtrl(MsgBase):
     操作しないまま数秒で最新の意思に復帰させたい。
 
     `name` は `models/<name>.onnx`（+ 同名の `.json`。前処理設定。
-    `ml/export_onnx.py` が書く）を指す。**空文字は「未選択」**——
+    `ml_cam/export_onnx.py` が書く）を指す。**空文字は「未選択」**——
     cam_perception_node はモデルを持たないまま `scan/cam` を「壁」扱いで
     出し続ける（`follow_the_gap_cam.py` 側の `MIN_SEEN_RATIO` で自然に停止する）。
     """

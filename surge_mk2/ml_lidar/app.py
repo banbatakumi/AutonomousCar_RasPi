@@ -1,14 +1,14 @@
 """ml_lidar/app.py — LiDAR E2E の学習・観戦・エクスポートをターミナル無しで
-操作するための最小限のGUI（`ml/app.py`と対称）。
+操作するための最小限のGUI（`ml_cam/app.py`と対称）。
 
     .venv/bin/python ml_lidar/app.py
     （または `ml_lidar/start_app.command` をダブルクリック）
 
 `ml_lidar/train_rl.py`・`export_onnx_rl.py`・`watch.py`・`tensorboard`を
 サブプロセスとして呼び出すだけの薄い操作パネル。**学習・推論のロジックは
-一切持たない**——`ml/app.py`と同じ設計方針。
+一切持たない**——`ml_cam/app.py`と同じ設計方針。
 
-## `ml/app.py`と違う点：複数ジョブが同時に動く
+## `ml_cam/app.py`と違う点：複数ジョブが同時に動く
 
 カメラ版は「抽出→アノテーション→学習→エクスポート」が順番に1つずつ進む
 パイプラインだったので、常に1プロセスしか同時に動かない前提で作れた。
@@ -63,7 +63,7 @@ DEFAULT_N_ENVS = os.cpu_count() or 8
 
 
 def rel(p: Path) -> str:
-    """`REPO_ROOT`からの相対パス文字列。`ml/app.py`の同名関数と同じ役目。"""
+    """`REPO_ROOT`からの相対パス文字列。`ml_cam/app.py`の同名関数と同じ役目。"""
     try:
         return str(p.relative_to(REPO_ROOT))
     except ValueError:
@@ -124,7 +124,7 @@ def discover_runs(runs_dir: Path) -> list[dict]:
 
 
 def format_run_row(run: dict) -> str:
-    """runs一覧Listboxの1行分の表示文字列。"""
+    """runs一覧ドロップダウンの1項目分の表示文字列。"""
     mark = "✓" if run["has_best_model"] else "…"
     cfg = run["config"]
     # 最大舵角(max_steer)はもう学習ごとに変わらない（常にvehicle.toml由来）ので表示しない
@@ -198,7 +198,7 @@ class App:
         root.geometry("640x640")
 
         self.python = sys.executable
-        #: job_key -> Popen（起動処理中は None）。`ml/app.py`は1個の`self.proc`
+        #: job_key -> Popen（起動処理中は None）。`ml_cam/app.py`は1個の`self.proc`
         #: だけだったが、ここは学習・TensorBoard・観戦・エクスポートが同時に
         #: 動きうるので辞書で複数追跡する
         self._active: dict[str, subprocess.Popen | None] = {}
@@ -287,9 +287,13 @@ class App:
         top.pack(fill="x")
         ttk.Button(top, text="更新", command=self._refresh_runs).pack(side="left")
 
-        self.runs_listbox = tk.Listbox(frame, height=10, width=72)
-        self.runs_listbox.pack(fill="both", expand=True, pady=(6, 0))
-        self.runs_listbox.bind("<<ListboxSelect>>", lambda e: self._on_run_select())
+        # ログ欄の縦幅を確保するため、一覧はリストではなくドロップダウンにしてある
+        # （2026-08-29、バンビの要望。`ml_cam/app.py`のモデル選択と同じ形）
+        self.run_select_var = tk.StringVar(value="")
+        self.runs_combo = ttk.Combobox(frame, textvariable=self.run_select_var,
+                                       state="readonly", width=72)
+        self.runs_combo.pack(fill="x", pady=(6, 0))
+        self.runs_combo.bind("<<ComboboxSelected>>", lambda e: self._on_run_select())
 
         self.run_detail_var = tk.StringVar(value="（runを選んでください）")
         ttk.Label(frame, textvariable=self.run_detail_var, foreground="gray",
@@ -325,16 +329,23 @@ class App:
 
     def _refresh_runs(self) -> None:
         self._runs = discover_runs(RUNS_DIR)
-        self.runs_listbox.delete(0, "end")
-        for r in self._runs:
-            self.runs_listbox.insert("end", format_run_row(r))
+        rows = [format_run_row(r) for r in self._runs]
+        self.runs_combo["values"] = rows
+        # 選択中のrunがまだ一覧に居れば維持する（学習完了時などrefreshは頻繁に
+        # 起きるので、そのたびに選択が消えると使いにくい）。無ければ先頭を選ぶ
+        if self.run_select_var.get() not in rows:
+            self.run_select_var.set(rows[0] if rows else "")
         self._on_run_select()
 
     def _selected_run(self) -> dict | None:
-        sel = self.runs_listbox.curselection()
-        if not sel or sel[0] >= len(self._runs):
+        rows = list(self.runs_combo["values"])
+        cur = self.run_select_var.get()
+        if cur not in rows:
             return None
-        return self._runs[sel[0]]
+        idx = rows.index(cur)
+        if idx >= len(self._runs):
+            return None
+        return self._runs[idx]
 
     def _on_run_select(self) -> None:
         run = self._selected_run()

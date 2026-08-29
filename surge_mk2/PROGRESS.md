@@ -3,12 +3,19 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-08-29（v3(E2E LiDAR)が長方形寄りのコースは無衝突で走れるのに
-ヘアピン/S字のあるコース（`fuji`）だけ衝突する件を診断→原因は**学習コース
-生成器がヘアピンを原理的に一度も作っていなかったこと**と判明→
-`sim/random_course.py`にヘアピン専用の生成関数を新設し、S字（チカーン）も
-真のS字・fuji並みのタイトさに書き直した。実装中に「S字が最小旋回半径を
-大幅に割り込む」バグを発見・修正済み。下記「2026-08-29（続き2）」節）
+最終更新: 2026-08-29（`ml/`を`ml_cam/`へ改名し、リポジトリ内の全参照
+（`raspi/`のコメント・`docs/`・`.gitignore`・`gui/src/types.ts`等）を統一。
+**`ml_cam/app.py`をモデル名ベースのGUIに作り替え**——①タブで決めた
+「モデル名」1つを②③④タブが自動で使い回し、フレーム抽出→アノテーション→
+学習→エクスポートの各タブでパスを手入力・参照する操作をほぼ無くした
+（`ml_lidar/app.py`の「run名」と対称。既存の`ml/runs/latest/`は自動で
+`ml_cam/runs/v1/`へ移行済み）。**⑤プレビュータブのモデル選択・
+`ml_lidar/app.py`のrun一覧をどちらもドロップダウンに変更**（ログ欄の
+縦幅確保が目的、バンビの要望）。**`ml_cam`にも備考機能を追加**——
+`ml_lidar`と同じ`note.txt`→エクスポート時`<名前>.json`同梱→
+実車GUI（`AutoPanel.tsx`のカメラモデル選択）表示、まで一気通貫。
+`ml_cam`・`ml_lidar`のGUIを同時に起動できない制約は無いことを実測で確認
+（元から無かった）。下記「2026-08-29（続き3）」節）
 旧: 2026-08-29（学習runに自由記述の備考を付けられるように——
 `ml_lidar/app.py`の備考欄→`note.txt`→エクスポート時に`<名前>.json`へ同梱→
 実車のGUI（`AutoPanel.tsx`のE2E LiDARモデル選択）にも表示、まで一気通貫。
@@ -63,6 +70,92 @@ TensorBoardのサブフォルダ(`PPO_1`・`PPO_2`…)が積み上がってい�
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（下記「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-08-29（続き3）：`ml/`→`ml_cam/`改名・モデル名ベースGUI化・run一覧ドロップダウン化・カメラ備考機能
+
+バンビからの4件の要望に対応:
+
+1. `/ml`を`/ml_cam`という名前に変更。他に`ml`だけを指している箇所も統一
+2. `/ml_cam`と`/ml_lidar`のGUIアプリが同時に開けないように見える件の調査
+3. `/ml_cam`のモデル作成時に`/ml_lidar`のようにモデルごとに名前をつけ、パス指定の
+   操作を減らす（フレーム抽出から作るモデルは基本1個、という前提で実装できるはず）
+4. `/ml_lidar`のrun一覧をリストからドロップダウンに変更（ログ欄の縦幅確保のため）。
+   `/ml_cam`でモデルを選ぶGUIを実装するときも同じくドロップダウンにする
+5. `/ml_cam`の各モデルにも`/ml_lidar`と同じく備考を書けるようにする
+
+**1. 改名**: `git mv ml ml_cam`後、`ml_cam/`配下の全`.py`/`.command`/`.txt`内の
+`ml/`表記を`ml_cam/`へ一括置換。加えて`raspi/nodes/cam_perception_node.py`・
+`telemetry_node.py`・`msgs/types.py`・`docs/development.md`・
+`gui/src/types.ts`・`.gitignore`（`surge_mk2/ml/data/`・`surge_mk2/ml/runs/`）
+のコメント・パスも全部`ml_cam/`に統一。**`.gitignore`のパターン自体がズレて
+`ml_cam/data/`・`ml_cam/runs/`が追跡対象になりかけた**のを`git check-ignore -v`で
+検出・修正（過去に同じ理由で事故った経緯が`.gitignore`のコメントに残っている）。
+
+**2. 同時起動できない件**: 実際に両GUIを同時起動して確認したが、**コード上に
+単一インスタンス制約は無く、問題なく同時に動いた**（プロセスもポートも独立、
+共有ロックファイルの類も無し）。バンビの体感した「開けない」は再現せず、
+現状のまま特に対処不要と判断。
+
+**3. モデル名ベースのGUI**（`ml_cam/app.py`を大幅書き換え）: `ml_lidar/app.py`の
+「run名がそのまま学習出力先とモデル名になる」設計を移植。
+
+```
+ml_cam/runs/<モデル名>/frames/     … ①フレーム抽出の出力・②③の入力
+ml_cam/runs/<モデル名>/best.pt     … ③学習の出力・④エクスポートの入力
+ml_cam/runs/<モデル名>/note.txt    … 備考（①タブで書ける）
+models/<モデル名>.onnx             … ④エクスポートの出力（実車GUIが選ぶ場所。
+                                      cam_perception_nodeがフラットに探す前提
+                                      に合わせ、ml_lidarのようなサブディレクトリは切らない）
+```
+
+①タブの「モデル名」欄（`ttk.Combobox`、既存名を選ぶか新規名を打てる）を
+②③④タブが`tk.StringVar`のトレース経由で自動的に使い回す。同じ名前で
+フレーム抽出を再実行すれば既存フレームに追加される（`extract_frames.py`は
+元々`manifest.csv`に追記していく設計なので変更不要だった）。既存の
+`ml_cam/runs/latest/`（改名前の共有フレーム置き場からの唯一の学習成果、
+val_iou=0.874）は`ml_cam/runs/v1/`へ自動で移行した（壊れていた旧
+`model.onnx`——`external_data`未指定バグ修正前にエクスポートされたもの
+——は引き継がず、④タブから再エクスポートする前提でnote.txtに書き残した）。
+
+**4. ドロップダウン化**: `ml_lidar/app.py`のrun一覧を`tk.Listbox`から
+`ttk.Combobox(state="readonly")`に変更（表示文字列は`format_run_row()`のまま、
+選択中run名から`self._runs`を逆引き）。`ml_cam/app.py`⑤プレビュータブの
+モデル選択も、`models/`直下の`.onnx`一覧を`ttk.Combobox`（`postcommand`で
+開く直前に最新化）にし、パスの手入力・参照を無くした。
+
+**5. カメラモデルの備考機能**: `ml_lidar`の備考機能（2026-08-29の1つ前の節）と
+全く同じ配線をカメラ側にも通した。
+
+```
+ml_cam/app.py（①タブの備考欄・保存ボタン）
+  → ml_cam/runs/<モデル名>/note.txt
+  → export_onnx.py（--checkpointと同じディレクトリのnote.txtを自動で読む）
+  → models/<名前>.json の "note" フィールド
+  → raspi/nodes/telemetry_node.py の _cam_models_list()（cam_model_files に note を追加）
+  → gui/src/components/AutoPanel.tsx（カメラモデル選択の下に選択中モデルの備考を表示）
+```
+
+**変更したファイル**（1〜5まとめて）:
+- `ml_cam/app.py`: モデル名ベースのGUIに書き換え。`list_model_names`/
+  `next_model_name`/`describe_model_status`/`read_note`/`write_note`を追加、
+  `new_run_dir_str`は削除
+- `ml_cam/export_onnx.py`: `export()`に`note`引数、`main()`が
+  `--checkpoint`と同じディレクトリの`note.txt`を自動で読む（`ml_lidar`と同型）
+- `ml_lidar/app.py`: run一覧をCombobox化
+- `raspi/nodes/telemetry_node.py`: `_cam_models_list()`が`note`を返すように
+  （`_e2e_models_list()`と対称）
+- `gui/src/types.ts`・`AutoPanel.tsx`: `CamModelFile.note`追加、
+  カメラモデル選択の下にも備考を表示
+- `.gitignore`・`docs/development.md`・`raspi/`各所のコメント: `ml/`→`ml_cam/`
+
+**テスト**: `ml_cam/tests/test_app.py`を全面書き換え（モデル名・備考の
+新規テスト追加、`new_run_dir_str`関連は削除）、`test_export_onnx.py`に
+備考往復テスト追加、`raspi/tests/test_telemetry_node.py`に
+`TestCamModelsListNote`（4件、`TestE2eModelsListNote`と対称）を追加。
+`./tools/check.sh`（生成物一致・`raspi/tests`536件・`tsc -b`）、
+`ml_cam/tests`83件、`ml_lidar/tests`68件、全部green。
 
 ---
 

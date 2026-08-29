@@ -15,7 +15,7 @@ publish する。ギャップ探索そのものは書かない——それは
 起動時に `--model` を渡さなければ、GUI（設定タブ）で選ばれたモデル名を
 telemetry_node が `cam/model`（`CamModelCtrl`）で繰り返し流してくるのを待つ。
 モデル名は `--models-dir`（既定 `models/`）配下の `<name>.onnx` に解決される
-（前処理設定は同名の `<name>.json`。`ml/export_onnx.py` が書く）。
+（前処理設定は同名の `<name>.json`。`ml_cam/export_onnx.py` が書く）。
 `ftg_cam` を engage する前に、走行開始ボタンを押さずにモデルだけ選び直せる
 ——プロセスの再起動もSSHも要らない（`reload_if_changed()`）。
 
@@ -79,7 +79,7 @@ class SegmentationModel:
     """ONNX 推論の薄いラッパ。
 
     **前処理定数（入力解像度・平均/分散・閾値）はモデルに同梱する契約**
-    （`ml/export_onnx.py` が `model.json` に書き出す）。学習時と推論時で
+    （`ml_cam/export_onnx.py` が `model.json` に書き出す）。学習時と推論時で
     別々に決め打ちすると、いつか静かにズレる（train/inference skew）。
     ここではまだそのローダを持たず、コンストラクタ引数で明示的に渡す。
     """
@@ -182,8 +182,8 @@ class CamPerceptionNode:
     def _load_model_by_name(self, name: str) -> SegmentationModel:
         """`models_dir/<name>.onnx`（+ 同名 `.json`。前処理設定）を読む。
 
-        `.json` が無ければ `SegmentationModel` の既定値（`ml/dataset.py` の
-        正規化と揃えてある 0-1 正規化）で読む——`ml/export_onnx.py` を通さずに
+        `.json` が無ければ `SegmentationModel` の既定値（`ml_cam/dataset.py` の
+        正規化と揃えてある 0-1 正規化）で読む——`ml_cam/export_onnx.py` を通さずに
         手で置いた `.onnx` でも動かせるようにするための保険で、
         **積極的に使うことは想定していない**（train/inference skew の温床）。
         """

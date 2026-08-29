@@ -69,7 +69,7 @@ class TestExportOnnxRl(unittest.TestCase):
         """`models/e2e_lidar/`への配置運用は`.onnx`単体をコピーする。`.data`（外部重み
         ファイル）が元のディレクトリに残ったままだと隣にある間は気づかず動いてしまう
         ので、別ディレクトリへコピーしてロードし、`external_data=False`の回帰を検出する
-        （このリポジトリで実際に踏んだ罠——`ml/export_onnx.py`にも同型の罠があった）。
+        （このリポジトリで実際に踏んだ罠——`ml_cam/export_onnx.py`にも同型の罠があった）。
         """
         rng = np.random.default_rng(0)
         courses = [generate_random_course(rng, name="c0")]

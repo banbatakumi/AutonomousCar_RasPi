@@ -177,7 +177,7 @@ AUTO_CONF = REPO_ROOT / "config" / "auto.json"
 #: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
 CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
 #: `cam_perception_node` へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場。
-#: `ml/export_onnx.py` の出力をここへ手動で配置する運用（`.gitignore` 済み）
+#: `ml_cam/export_onnx.py` の出力をここへ手動で配置する運用（`.gitignore` 済み）
 MODELS_DIR = REPO_ROOT / "models"
 #: 選ばれているモデル名を覚えておく場所。`AUTO_CONF`/`CAMERA_CONF` と同じ流儀
 CAM_MODEL_CONF = REPO_ROOT / "config" / "cam_model.json"
@@ -1012,6 +1012,10 @@ class TelemetryServer:
         **キー名は `files` ではなく `cam_model_files`。** `_logs_list()` の
         `files`（`LogFile[]`）と型が違うので、GUI 側の `ServerMsg`（型で
         振り分けられない1つの受け皿）で混ざらないよう分けてある。
+
+        `note`（`ml_cam/export_onnx.py`が`<名前>.json`に書く自由記述の備考。
+        `_e2e_models_list()`と同じ流儀。2026-08-29追加）も一緒に返す。
+        `.json`が壊れていても一覧自体は壊さない（空文字で返す）。
         """
         files = []
         if MODELS_DIR.is_dir():
@@ -1019,8 +1023,15 @@ class TelemetryServer:
                 if not p.is_file() or p.suffix != ".onnx":
                     continue
                 st = p.stat()
+                cfg_path = p.with_suffix(".json")
+                note = ""
+                if cfg_path.exists():
+                    try:
+                        note = str(_json_decode(cfg_path.read_bytes()).get("note", ""))
+                    except Exception:                                    # noqa: BLE001
+                        pass
                 files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
-                             "has_config": p.with_suffix(".json").exists()})
+                             "has_config": cfg_path.exists(), "note": note})
         return {"type": "cam_models", "cam_model_files": files}
 
     def _on_cam_model(self, m: dict) -> None:

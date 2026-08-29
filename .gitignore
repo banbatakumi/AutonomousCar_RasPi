@@ -30,23 +30,26 @@ logs/*.jsonl
 saved_maps/*.npz
 saved_maps/*.json
 
-# ml/（カメラセグメンテーションのオフライン学習パイプライン）の生成物・大容量ファイル
+# ml_cam/（カメラセグメンテーションのオフライン学習パイプライン。2026-08-29に
+# ml/ から改名）の生成物・大容量ファイル
 # 走行データ・アノテーション・学習済み重みは機体/走行ごとに違い、しかも大きい
 #
 # ★ .gitignore の `#` は行頭でしか comment 扱いにならない。パターン末尾に
 #   付けると `#` ごとリテラルなパターンとして解釈され、何もマッチしなくなる
 #   （実際に一度これで surge_mk2/ml/data/・surge_mk2/ml/runs/ が無視されない
 #   事故を起こした。理由を書いた行を分けておく）
-# surge_mk2/ml/data/  … 抽出フレーム・マスク・manifest.csv
-# surge_mk2/ml/runs/  … チェックポイント(.pt)・ONNX書き出し・学習ログ
-surge_mk2/ml/data/
-surge_mk2/ml/runs/
-# SAM のチェックポイント（`ml/annotate.py` が使う、数百MB〜数GB）。
+# surge_mk2/ml_cam/data/  … 抽出フレーム・マスク・manifest.csv（改名前の共有置き場。
+#   モデルごとの置き場は下のruns/以下に統合済み）
+# surge_mk2/ml_cam/runs/  … モデルごとの出力一式（フレーム・チェックポイント(.pt)・
+#   ONNX書き出し・学習ログ・備考）
+surge_mk2/ml_cam/data/
+surge_mk2/ml_cam/runs/
+# SAM のチェックポイント（`ml_cam/annotate.py` が使う、数百MB〜数GB）。
 # ダウンロード先はどこでも良いのでリポジトリ全体で除外する
 sam_*.pth
 *.pth
 
-# cam_perception_node に配置する ONNX モデル（`ml/export_onnx.py` の出力を
+# cam_perception_node に配置する ONNX モデル（`ml_cam/export_onnx.py` の出力を
 # Pi の models/ に手動で配置する運用）。機体・学習ごとに違う大容量ファイル
 surge_mk2/models/
 

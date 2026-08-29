@@ -1,16 +1,31 @@
-"""ml/app.py — アノテーション・学習をターミナル無しで操作するための最小限のGUI。
+"""ml_cam/app.py — アノテーション・学習をターミナル無しで操作するための最小限のGUI。
 
-    .venv/bin/python ml/app.py
-    （または `ml/start_app.command` をダブルクリック）
+    .venv/bin/python ml_cam/app.py
+    （または `ml_cam/start_app.command` をダブルクリック）
 
-`ml/extract_frames.py`・`ml/annotate.py`・`ml/train.py`・`ml/export_onnx.py`を
+`ml_cam/extract_frames.py`・`ml_cam/annotate.py`・`ml_cam/train.py`・`ml_cam/export_onnx.py`を
 サブプロセスとして呼び出すだけの薄い操作パネル。**推論・学習のロジックは
 一切持たない**——ここが持つのはボタンとファイル選択ダイアログ、それに
 子プロセスの標準出力をログ欄に流し込む配線だけ。中身のスクリプトを直接
 書き換えれば、このGUI側は何も変えなくてよい。
 
-Tkinter は Python 標準ライブラリ同梱なので、`ml/requirements.txt` に
+Tkinter は Python 標準ライブラリ同梱なので、`ml_cam/requirements.txt` に
 依存を追加しなくてよい。
+
+## モデル名がそのままフレーム・学習出力先を兼ねる（`ml_lidar/app.py`と対称）
+
+以前は「①フレーム抽出→②アノテーション→③学習→④エクスポート」の各タブで
+毎回フォルダを参照・入力する必要があった。1回のフレーム抽出から作る
+モデルは基本的に1個なので（バンビの指摘）、**①タブで決めた「モデル名」
+1つを②③④タブが自動で使い回す**（`ml_lidar/app.py`の「run名」と同じ考え方）。
+
+    ml_cam/runs/<モデル名>/frames/     … ①の出力・②③の入力
+    ml_cam/runs/<モデル名>/best.pt     … ③の出力・④の入力
+    ml_cam/runs/<モデル名>/note.txt    … 自由記述の備考（①タブで書ける）
+    models/<モデル名>.onnx             … ④の出力（実車のGUIが選ぶ場所）
+
+モデル名は`v1`・`v2`…の続きを自動提案するが、既存の名前を選べば続きから
+作業できる（追加のフレーム抽出・再アノテーション・再学習）。
 """
 
 from __future__ import annotations
@@ -20,7 +35,6 @@ import re
 import subprocess
 import sys
 import threading
-import time
 import tkinter as tk
 import urllib.request
 from pathlib import Path
@@ -29,17 +43,22 @@ from tkinter.scrolledtext import ScrolledText
 from typing import Callable
 
 __all__ = [
-    "ML_DIR", "REPO_ROOT",
+    "ML_CAM_DIR", "REPO_ROOT", "RUNS_DIR", "MODELS_DIR",
     "build_extract_cmd", "build_annotate_cmd", "build_train_cmd", "build_export_cmd",
-    "build_preview_cmd", "parse_epoch_line", "new_run_dir_str",
+    "build_preview_cmd", "parse_epoch_line",
+    "list_model_names", "next_model_name", "describe_model_status",
+    "read_note", "write_note",
     "default_sam_checkpoint_path", "download_file", "rel", "App",
 ]
 
-ML_DIR = Path(__file__).resolve().parent
-REPO_ROOT = ML_DIR.parent
-DEFAULT_FRAMES_DIR = ML_DIR / "data" / "frames"
-DEFAULT_CHECKPOINT_DIR = ML_DIR / "checkpoints"
-DEFAULT_RUNS_DIR = ML_DIR / "runs" / "latest"
+ML_CAM_DIR = Path(__file__).resolve().parent
+REPO_ROOT = ML_CAM_DIR.parent
+RUNS_DIR = ML_CAM_DIR / "runs"
+#: 実車側（`raspi/nodes/cam_perception_node.py`・`telemetry_node.py`）が
+#: `models/<name>.onnx`をフラットに探す前提に合わせる（`ml_lidar`の
+#: `models/e2e_lidar/`のようなサブディレクトリは切らない）
+MODELS_DIR = REPO_ROOT / "models"
+DEFAULT_CHECKPOINT_DIR = ML_CAM_DIR / "checkpoints"
 #: これまでのトラブルシューティングで実際に使った SAM のチェックポイント
 SAM_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
 
@@ -56,22 +75,57 @@ def default_sam_checkpoint_path() -> Path:
     return DEFAULT_CHECKPOINT_DIR / "sam_vit_b_01ec64.pth"
 
 
-def new_run_dir_str() -> str:
-    """学習の出力先候補（`ml/runs/<タイムスタンプ>`）。呼ぶたびに新しい名前になる。
+# ── モデル名・モデル一覧（Tkinterを一切知らない純粋関数。`ml_cam/tests/test_app.py`の
+# 対象。`ml_lidar/app.py`の`list_run_names`/`next_run_name`と同じ考え方） ──
 
-    `ml/runs/latest` 固定だと学習のたびに前の結果を上書きしてしまい、複数の
-    モデルを見比べられない。学習タブの出力先はここから始め、学習完了後にも
-    次回用としてここへ差し替える。
+_V_NAME_RE = re.compile(r"^v(\d+)$")
+
+
+def list_model_names(runs_dir: Path) -> list[str]:
+    if not runs_dir.exists():
+        return []
+    return sorted(p.name for p in runs_dir.iterdir() if p.is_dir())
+
+
+def next_model_name(existing: list[str]) -> str:
+    """`v1`・`v2`…のうち一番大きい番号の次を提案する。`v`始まりでない名前は無視する。
+    該当が無ければ`v1`（`ml_lidar/app.py`の`next_run_name`と同じ規則）。"""
+    nums = [int(m.group(1)) for name in existing if (m := _V_NAME_RE.match(name))]
+    return f"v{max(nums) + 1}" if nums else "v1"
+
+
+def describe_model_status(model_dir: Path) -> str:
+    """モデル名フィールド脇に出す短い状態表示。フレーム枚数・ラベル付け済み枚数・
+    学習済みチェックポイントの有無を要約する（`ml_lidar/app.py`の`format_run_row`と
+    似た役目だが、こちらはドロップダウンの1項目ではなく現在選択中の1モデル分だけを表す）。
     """
-    return rel(ML_DIR / "runs" / time.strftime("%Y%m%d_%H%M%S"))
+    frames_dir = model_dir / "frames"
+    frame_paths = sorted(frames_dir.glob("*.jpg")) if frames_dir.is_dir() else []
+    labeled = sum(1 for f in frame_paths if (frames_dir / f"{f.stem}_mask.png").exists())
+    mark = "✓学習済み" if (model_dir / "best.pt").exists() else "未学習"
+    return f"フレーム {len(frame_paths)}枚（ラベル付け {labeled}枚）・{mark}"
 
 
-# ── コマンド組み立て（Tkinter を一切知らない純粋関数。`ml/tests/test_app.py` の対象） ──
+def read_note(model_dir: Path) -> str:
+    """`<model_dir>/note.txt`の中身。無ければ空文字（バンビが自由に書く備考欄。
+    `ml_lidar/app.py`の`read_note`と同じ役目）。"""
+    try:
+        return (model_dir / "note.txt").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def write_note(model_dir: Path, text: str) -> None:
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "note.txt").write_text(text, encoding="utf-8")
+
+
+# ── コマンド組み立て（Tkinter を一切知らない純粋関数。`ml_cam/tests/test_app.py` の対象） ──
 
 def build_extract_cmd(python: str, mcap_files: list[str], out_dir: str, cam: str,
                       min_interval_ms: int = 0, target_count: int = 0) -> list[str]:
     """`min_interval_ms`・`target_count` は排他（両方>0なら `target_count` を優先）。"""
-    cmd = [python, str(ML_DIR / "extract_frames.py"), *mcap_files, "--out", out_dir]
+    cmd = [python, str(ML_CAM_DIR / "extract_frames.py"), *mcap_files, "--out", out_dir]
     if target_count > 0:
         cmd += ["--target-count", str(target_count)]
     elif min_interval_ms > 0:
@@ -82,7 +136,7 @@ def build_extract_cmd(python: str, mcap_files: list[str], out_dir: str, cam: str
 
 def build_annotate_cmd(python: str, frames_dir: str, checkpoint: str, model_type: str,
                        device: str, skip_labeled: bool, carry_points: bool = True) -> list[str]:
-    cmd = [python, str(ML_DIR / "annotate.py"), frames_dir,
+    cmd = [python, str(ML_CAM_DIR / "annotate.py"), frames_dir,
           "--checkpoint", checkpoint, "--model-type", model_type, "--device", device]
     if skip_labeled:
         cmd.append("--skip-labeled")
@@ -93,7 +147,7 @@ def build_annotate_cmd(python: str, frames_dir: str, checkpoint: str, model_type
 
 def build_train_cmd(python: str, frames_dir: str, out_dir: str, epochs: int,
                     batch_size: int, size: str, no_pretrained: bool) -> list[str]:
-    cmd = [python, str(ML_DIR / "train.py"), "--frames", frames_dir, "--out", out_dir,
+    cmd = [python, str(ML_CAM_DIR / "train.py"), "--frames", frames_dir, "--out", out_dir,
           "--epochs", str(epochs), "--batch-size", str(batch_size), "--size", size]
     if no_pretrained:
         cmd.append("--no-pretrained")
@@ -101,20 +155,20 @@ def build_train_cmd(python: str, frames_dir: str, out_dir: str, epochs: int,
 
 
 def build_export_cmd(python: str, checkpoint: str, out_path: str, size: str) -> list[str]:
-    return [python, str(ML_DIR / "export_onnx.py"), "--checkpoint", checkpoint,
+    return [python, str(ML_CAM_DIR / "export_onnx.py"), "--checkpoint", checkpoint,
            "--size", size, "--out", out_path]
 
 
 def build_preview_cmd(python: str, frames_dir: str, model_path: str) -> list[str]:
-    return [python, str(ML_DIR / "preview.py"), frames_dir, "--model", model_path]
+    return [python, str(ML_CAM_DIR / "preview.py"), frames_dir, "--model", model_path]
 
 
-#: `ml/train.py` の1エポック分の出力行（例 "epoch   3/30  loss=0.1234  val_iou=0.567  (12s)"）
+#: `ml_cam/train.py` の1エポック分の出力行（例 "epoch   3/30  loss=0.1234  val_iou=0.567  (12s)"）
 _EPOCH_LINE_RE = re.compile(r"epoch\s+(\d+)/\d+\s+loss=([\d.]+)\s+val_iou=([\d.]+|nan)")
 
 
 def parse_epoch_line(line: str) -> tuple[int, float, float | None] | None:
-    """`ml/train.py` の1エポック分のログ行から `(epoch, loss, val_iou)` を取り出す。
+    """`ml_cam/train.py` の1エポック分のログ行から `(epoch, loss, val_iou)` を取り出す。
 
     val_iou が "nan"（検証データが無いとき）なら `None`。該当しない行なら `None` を返す。
     """
@@ -163,7 +217,7 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("SURGE Mk.2 — 学習データ作成・学習")
-        root.geometry("760x640")
+        root.geometry("760x680")
 
         self.python = sys.executable
         self.proc: subprocess.Popen | None = None
@@ -171,9 +225,8 @@ class App:
         self.log_queue: "queue.Queue[tuple]" = queue.Queue()
         #: 実行中のジョブが標準出力の行ごとに呼びたい追加処理（学習曲線の更新など）
         self._current_on_line: Callable[[str], None] | None = None
-        #: 直近の学習・エクスポート出力先。完了後に次のタブへ引き継ぐために覚えておく
-        self._last_train_out_dir = ""
-        self._last_export_out_path = ""
+        #: 直近でエクスポートしたモデル名。完了後に⑤プレビュータブへ引き継ぐために覚えておく
+        self._last_exported_model_name = ""
 
         self._build_widgets()
         self.root.after(100, self._drain_log)
@@ -181,6 +234,17 @@ class App:
     # ── 画面構築 ──
 
     def _build_widgets(self) -> None:
+        # ①〜④タブが共有する「モデル名」と、そこから導かれる各パスの表示用変数。
+        # `_on_model_name_changed` がモデル名の変更のたびにまとめて更新する
+        # （`ml_lidar/app.py`の「run名がそのまま学習出力先とモデル名になる」と同じ考え方）
+        self.model_name_var = tk.StringVar(value=next_model_name(list_model_names(RUNS_DIR)))
+        self.model_status_var = tk.StringVar(value="")
+        self.frames_path_var = tk.StringVar(value="")
+        self.model_out_dir_var = tk.StringVar(value="")
+        self.checkpoint_path_var = tk.StringVar(value="")
+        self.export_out_path_var = tk.StringVar(value="")
+        self.preview_frames_var = tk.StringVar(value="")
+
         nb = ttk.Notebook(self.root)
         nb.pack(fill="x", padx=8, pady=8)
         self._build_extract_tab(nb)
@@ -188,6 +252,10 @@ class App:
         self._build_train_tab(nb)
         self._build_export_tab(nb)
         self._build_preview_tab(nb)
+
+        # ウィジェット（note_text等）が全部揃ってからトレースを張り、初期値を反映する
+        self.model_name_var.trace_add("write", self._on_model_name_changed)
+        self._on_model_name_changed()
 
         log_frame = ttk.LabelFrame(self.root, text="ログ")
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -211,9 +279,71 @@ class App:
         if f:
             var.set(rel(Path(f)))
 
+    # ── モデル名（①〜④タブ共有） ──
+
+    def _require_model_dir(self) -> Path | None:
+        name = self.model_name_var.get().strip()
+        if not name:
+            messagebox.showerror("入力エラー", "①タブでモデル名を入力してください")
+            return None
+        return RUNS_DIR / name
+
+    def _on_model_name_changed(self, *_args) -> None:
+        name = self.model_name_var.get().strip()
+        if name:
+            model_dir = RUNS_DIR / name
+            self.frames_path_var.set(rel(model_dir / "frames"))
+            self.model_out_dir_var.set(rel(model_dir))
+            self.checkpoint_path_var.set(rel(model_dir / "best.pt"))
+            self.export_out_path_var.set(rel(MODELS_DIR / f"{name}.onnx"))
+            self.preview_frames_var.set(rel(model_dir / "frames"))
+            self.model_status_var.set(describe_model_status(model_dir))
+            note = read_note(model_dir)
+        else:
+            self.frames_path_var.set("（モデル名を入力してください）")
+            self.model_out_dir_var.set("")
+            self.checkpoint_path_var.set("")
+            self.export_out_path_var.set("")
+            self.model_status_var.set("")
+            note = ""
+        self.note_text.delete("1.0", "end")
+        self.note_text.insert("1.0", note)
+
+    def _save_note(self) -> None:
+        model_dir = self._require_model_dir()
+        if model_dir is None:
+            return
+        write_note(model_dir, self.note_text.get("1.0", "end-1c"))
+        self._append_log(f"\n備考を保存しました（{self.model_name_var.get().strip()}）\n")
+
+    def _refresh_model_names(self) -> None:
+        """モデル名コンボボックスのドロップダウンを開く直前に呼ばれ、既存モデル名で
+        一覧を最新化する（`ttk.Combobox`の`postcommand`。新規名を打ち込む分は
+        邪魔しない——一覧はあくまで既存モデルを選び直すための候補）。"""
+        self.model_combo["values"] = list_model_names(RUNS_DIR)
+
+    def _refresh_exported_models(self) -> None:
+        """⑤タブのプレビュー対象モデル一覧（`models/*.onnx`）を最新化する。"""
+        names = sorted(p.stem for p in MODELS_DIR.glob("*.onnx")) if MODELS_DIR.is_dir() else []
+        self.preview_model_combo["values"] = names
+
     def _build_extract_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
         nb.add(frame, text="① フレーム抽出")
+
+        ttk.Label(frame, text="モデル名:").grid(row=0, column=0, sticky="w")
+        self.model_combo = ttk.Combobox(frame, textvariable=self.model_name_var, width=20)
+        self.model_combo.grid(row=0, column=1, sticky="w")
+        self.model_combo["postcommand"] = self._refresh_model_names
+        ttk.Label(frame, text="既存を選べば続きから作業、新しい名前なら新規モデル。\n"
+                             "②③④タブはここで決めた名前を自動で使います",
+                 foreground="gray").grid(row=1, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, textvariable=self.model_status_var, foreground="gray").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+        ttk.Label(frame, text="フレーム出力先:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, textvariable=self.frames_path_var, foreground="gray").grid(
+            row=3, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
         self._extract_files: list[str] = []
         files_var = tk.StringVar(value="(.mcap 未選択)")
@@ -227,44 +357,44 @@ class App:
                 more = "…" if len(paths) > 3 else ""
                 files_var.set(f"{len(paths)}個: {names}{more}")
 
-        ttk.Button(frame, text="録画(.mcap)を選ぶ", command=pick_files).grid(row=0, column=0, sticky="w")
-        ttk.Label(frame, textvariable=files_var, wraplength=500).grid(row=0, column=1, columnspan=2, sticky="w")
-
-        out_var = tk.StringVar(value=rel(DEFAULT_FRAMES_DIR))
-        ttk.Label(frame, text="出力先:").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=out_var, width=45).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Button(frame, text="参照", command=lambda: self._browse_dir(out_var)).grid(
-            row=1, column=2, pady=(8, 0))
+        ttk.Button(frame, text="録画(.mcap)を選ぶ", command=pick_files).grid(
+            row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, textvariable=files_var, wraplength=500).grid(
+            row=4, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
         cam_var = tk.StringVar(value="front")
-        ttk.Label(frame, text="カメラ:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="カメラ:").grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(frame, textvariable=cam_var, values=["front", "rear", "both"],
-                    state="readonly", width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
+                    state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=(8, 0))
 
         thin_mode = tk.StringVar(value="interval")
-        ttk.Label(frame, text="間引き方法:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="間引き方法:").grid(row=6, column=0, sticky="w", pady=(8, 0))
         mode_frame = ttk.Frame(frame)
-        mode_frame.grid(row=3, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        mode_frame.grid(row=6, column=1, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Radiobutton(mode_frame, text="間隔(ms)", variable=thin_mode,
                         value="interval").pack(side="left")
         ttk.Radiobutton(mode_frame, text="合計枚数", variable=thin_mode,
                         value="count").pack(side="left", padx=(10, 0))
 
         interval_var = tk.StringVar(value="500")
-        ttk.Label(frame, text="間引き間隔(ms):").grid(row=4, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(frame, textvariable=interval_var, width=10).grid(row=4, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="間引き間隔(ms):").grid(row=7, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(frame, textvariable=interval_var, width=10).grid(row=7, column=1, sticky="w", pady=(4, 0))
 
         count_var = tk.StringVar(value="500")
-        ttk.Label(frame, text="合計枚数:").grid(row=5, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(frame, textvariable=count_var, width=10).grid(row=5, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="合計枚数:").grid(row=8, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(frame, textvariable=count_var, width=10).grid(row=8, column=1, sticky="w", pady=(4, 0))
 
         ttk.Label(frame, text="間隔(ms): 0で間引きなし。連続フレームはほぼ同じ構図なので\n"
                              "間引くほどアノテーションの手間が減る。\n"
                              "合計枚数: 選んだ全 .mcap・全カメラを通して、指定枚数に近づくよう\n"
-                             "均等に間引く（複数ファイルでも合計でこの枚数程度になる）",
-                 foreground="gray").grid(row=6, column=0, columnspan=3, sticky="w")
+                             "均等に間引く（複数ファイルでも合計でこの枚数程度になる）\n"
+                             "同じモデル名で再実行すると、既存のフレームに追加されます。",
+                 foreground="gray").grid(row=9, column=0, columnspan=3, sticky="w")
 
         def run() -> None:
+            model_dir = self._require_model_dir()
+            if model_dir is None:
+                return
             if not self._extract_files:
                 messagebox.showwarning("未選択", ".mcap ファイルを選んでください")
                 return
@@ -282,27 +412,36 @@ class App:
                 except ValueError:
                     messagebox.showerror("入力エラー", "間引き間隔は整数で入力してください")
                     return
-            cmd = build_extract_cmd(self.python, self._extract_files, out_var.get(), cam_var.get(),
-                                    interval, count)
+            cmd = build_extract_cmd(self.python, self._extract_files, str(model_dir / "frames"),
+                                    cam_var.get(), interval, count)
             self._run(cmd, "フレーム抽出")
 
-        ttk.Button(frame, text="抽出実行", command=run).grid(row=7, column=0, sticky="w", pady=10)
+        ttk.Button(frame, text="抽出実行", command=run).grid(row=10, column=0, sticky="w", pady=10)
+
+        note_frame = ttk.LabelFrame(frame, text="備考（どんな変更をしたか・どのデータか等、自由に）")
+        note_frame.grid(row=11, column=0, columnspan=3, sticky="we", pady=(4, 0))
+        self.note_text = tk.Text(note_frame, height=3, wrap="word")
+        self.note_text.pack(fill="both", expand=True, padx=4, pady=(4, 0))
+        ttk.Button(note_frame, text="備考を保存", command=self._save_note).pack(
+            anchor="e", padx=4, pady=4)
 
     def _build_annotate_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
         nb.add(frame, text="② アノテーション")
 
-        frames_var = tk.StringVar(value=rel(DEFAULT_FRAMES_DIR))
-        ttk.Label(frame, text="フレーム:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=frames_var, width=45).grid(row=0, column=1, sticky="w")
-        ttk.Button(frame, text="参照", command=lambda: self._browse_dir(frames_var)).grid(row=0, column=2)
+        ttk.Label(frame, text="モデル名:").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, textvariable=self.model_name_var, foreground="gray").grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(frame, text="フレーム:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.frames_path_var, foreground="gray").grid(
+            row=1, column=1, columnspan=2, sticky="w", pady=(4, 0))
 
         ckpt_var = tk.StringVar(value=rel(default_sam_checkpoint_path()))
-        ttk.Label(frame, text="SAM チェックポイント:").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=ckpt_var, width=45).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="SAM チェックポイント:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=ckpt_var, width=45).grid(row=2, column=1, sticky="w", pady=(8, 0))
         ttk.Button(frame, text="参照",
                   command=lambda: self._browse_file(ckpt_var, filetypes=[("PyTorch checkpoint", "*.pth")])
-                  ).grid(row=1, column=2, pady=(8, 0))
+                  ).grid(row=2, column=2, pady=(8, 0))
 
         def download_checkpoint() -> None:
             dest = REPO_ROOT / ckpt_var.get()
@@ -312,53 +451,51 @@ class App:
             self._download_sam_checkpoint(dest)
 
         ttk.Button(frame, text="↓ ダウンロード（初回のみ・数百MB）", command=download_checkpoint).grid(
-            row=2, column=1, sticky="w", pady=(4, 0))
+            row=3, column=1, sticky="w", pady=(4, 0))
 
         model_type_var = tk.StringVar(value="vit_b")
-        ttk.Label(frame, text="model-type:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="model-type:").grid(row=4, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(frame, textvariable=model_type_var, values=["vit_b", "vit_l", "vit_h", "default"],
-                    state="readonly", width=10).grid(row=3, column=1, sticky="w", pady=(8, 0))
+                    state="readonly", width=10).grid(row=4, column=1, sticky="w", pady=(8, 0))
 
         device_var = tk.StringVar(value="cpu")
-        ttk.Label(frame, text="device:").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="device:").grid(row=5, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(frame, textvariable=device_var, values=["cpu", "mps"],
-                    state="readonly", width=10).grid(row=4, column=1, sticky="w", pady=(8, 0))
+                    state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=(8, 0))
 
         skip_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame, text="ラベル付け済みフレームは飛ばす",
-                        variable=skip_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                        variable=skip_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         carry_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame, text="前フレームの点を引き継ぐ（推奨。Enterだけで進めやすくなる）",
-                        variable=carry_var).grid(row=6, column=0, columnspan=2, sticky="w")
+                        variable=carry_var).grid(row=7, column=0, columnspan=2, sticky="w")
 
         def run() -> None:
-            cmd = build_annotate_cmd(self.python, frames_var.get(), ckpt_var.get(),
+            model_dir = self._require_model_dir()
+            if model_dir is None:
+                return
+            cmd = build_annotate_cmd(self.python, str(model_dir / "frames"), ckpt_var.get(),
                                      model_type_var.get(), device_var.get(), skip_var.get(),
                                      carry_var.get())
             self._run(cmd, "アノテーション")
 
         ttk.Button(frame, text="アノテーション開始（別ウィンドウが開きます）", command=run).grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=10)
+            row=8, column=0, columnspan=2, sticky="w", pady=10)
 
     def _build_train_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
         nb.add(frame, text="③ 学習")
 
-        frames_var = tk.StringVar(value=rel(DEFAULT_FRAMES_DIR))
-        ttk.Label(frame, text="フレーム:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=frames_var, width=45).grid(row=0, column=1, sticky="w")
-        ttk.Button(frame, text="参照", command=lambda: self._browse_dir(frames_var)).grid(row=0, column=2)
-
-        self.train_out_var = tk.StringVar(value=new_run_dir_str())
-        ttk.Label(frame, text="出力先:").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=self.train_out_var, width=45).grid(
-            row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Button(frame, text="参照", command=lambda: self._browse_dir(self.train_out_var)).grid(
-            row=1, column=2, pady=(8, 0))
-        ttk.Label(frame, text="学習ごとに違う名前になります（同じ名前にすると上書き）。\n"
-                             "複数モデルを比較したいときは名前を変えたまま残せます。",
-                 foreground="gray").grid(row=2, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="モデル名:").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, textvariable=self.model_name_var, foreground="gray").grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(frame, text="フレーム:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.frames_path_var, foreground="gray").grid(
+            row=1, column=1, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="出力先:").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, textvariable=self.model_out_dir_var, foreground="gray").grid(
+            row=2, column=1, columnspan=2, sticky="w", pady=(4, 0))
 
         epochs_var = tk.StringVar(value="30")
         ttk.Label(frame, text="エポック数:").grid(row=3, column=0, sticky="w", pady=(8, 0))
@@ -391,6 +528,9 @@ class App:
             self._redraw_train_graph()
 
         def run() -> None:
+            model_dir = self._require_model_dir()
+            if model_dir is None:
+                return
             try:
                 epochs = int(epochs_var.get())
                 batch = int(batch_var.get())
@@ -401,8 +541,7 @@ class App:
             self.train_losses = []
             self.train_ious = []
             self._redraw_train_graph()
-            self._last_train_out_dir = self.train_out_var.get()
-            cmd = build_train_cmd(self.python, frames_var.get(), self.train_out_var.get(), epochs,
+            cmd = build_train_cmd(self.python, str(model_dir / "frames"), str(model_dir), epochs,
                                   batch, size_var.get(), no_pretrained_var.get())
             self._run(cmd, "学習", on_line=on_epoch_line)
 
@@ -418,30 +557,38 @@ class App:
         frame = ttk.Frame(nb, padding=10)
         nb.add(frame, text="④ エクスポート")
 
-        self.export_ckpt_var = tk.StringVar(value=rel(DEFAULT_RUNS_DIR / "best.pt"))
-        ttk.Label(frame, text="チェックポイント:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.export_ckpt_var, width=45).grid(row=0, column=1, sticky="w")
-        ttk.Button(frame, text="参照",
-                  command=lambda: self._browse_file(self.export_ckpt_var,
-                                                    filetypes=[("PyTorch checkpoint", "*.pt")])
-                  ).grid(row=0, column=2)
+        ttk.Label(frame, text="モデル名:").grid(row=0, column=0, sticky="w")
+        ttk.Label(frame, textvariable=self.model_name_var, foreground="gray").grid(
+            row=0, column=1, sticky="w")
+        ttk.Label(frame, text="チェックポイント:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, textvariable=self.checkpoint_path_var, foreground="gray").grid(
+            row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
         size_var = tk.StringVar(value="224x224")
-        ttk.Label(frame, text="入力解像度:").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=size_var, width=10).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="入力解像度:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=size_var, width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="③学習タブと同じ値にしてください", foreground="gray").grid(
+            row=3, column=0, columnspan=3, sticky="w")
 
-        self.export_out_var = tk.StringVar(value=rel(DEFAULT_RUNS_DIR / "model.onnx"))
-        ttk.Label(frame, text="出力先:").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=self.export_out_var, width=45).grid(
-            row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="出力先:").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, textvariable=self.export_out_path_var, foreground="gray").grid(
+            row=4, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
         def run() -> None:
-            self._last_export_out_path = self.export_out_var.get()
-            cmd = build_export_cmd(self.python, self.export_ckpt_var.get(), self.export_out_var.get(),
+            model_dir = self._require_model_dir()
+            if model_dir is None:
+                return
+            name = self.model_name_var.get().strip()
+            out_path = MODELS_DIR / f"{name}.onnx"
+            if out_path.exists() and not messagebox.askyesno(
+                    "上書き確認", f"{rel(out_path)} は既にあります。上書きしますか？"):
+                return
+            self._last_exported_model_name = name
+            cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path),
                                    size_var.get())
             self._run(cmd, "エクスポート")
 
-        ttk.Button(frame, text="エクスポート実行", command=run).grid(row=3, column=0, sticky="w", pady=10)
+        ttk.Button(frame, text="エクスポート実行", command=run).grid(row=5, column=0, sticky="w", pady=10)
 
     def _build_preview_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
@@ -452,23 +599,32 @@ class App:
                              "（緑=一致・青=過検出・赤=見落とし）。",
                  foreground="gray").grid(row=0, column=0, columnspan=3, sticky="w")
 
-        frames_var = tk.StringVar(value=rel(DEFAULT_FRAMES_DIR))
         ttk.Label(frame, text="フレーム:").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=frames_var, width=45).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Button(frame, text="参照", command=lambda: self._browse_dir(frames_var)).grid(
+        ttk.Entry(frame, textvariable=self.preview_frames_var, width=45).grid(
+            row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Button(frame, text="参照", command=lambda: self._browse_dir(self.preview_frames_var)).grid(
             row=1, column=2, pady=(8, 0))
 
-        self.preview_model_var = tk.StringVar(value=rel(DEFAULT_RUNS_DIR / "model.onnx"))
-        ttk.Label(frame, text="モデル(.onnx):").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=self.preview_model_var, width=45).grid(
-            row=2, column=1, sticky="w", pady=(8, 0))
-        ttk.Button(frame, text="参照",
-                  command=lambda: self._browse_file(self.preview_model_var,
-                                                    filetypes=[("ONNX model", "*.onnx")])
-                  ).grid(row=2, column=2, pady=(8, 0))
+        # ④でエクスポート済みのモデル（`models/*.onnx`）から選ぶドロップダウン。
+        # パスを手打ち・参照する必要を無くす（2026-08-29、バンビの要望。`ml_lidar/app.py`
+        # のrun一覧ドロップダウンと同じ考え方）
+        self.preview_model_var = tk.StringVar(value="")
+        ttk.Label(frame, text="モデル:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.preview_model_combo = ttk.Combobox(frame, textvariable=self.preview_model_var,
+                                                state="readonly", width=42)
+        self.preview_model_combo.grid(row=2, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        self.preview_model_combo["postcommand"] = self._refresh_exported_models
+        self._refresh_exported_models()
+        if self.model_name_var.get().strip() in self.preview_model_combo["values"]:
+            self.preview_model_var.set(self.model_name_var.get().strip())
 
         def run() -> None:
-            cmd = build_preview_cmd(self.python, frames_var.get(), self.preview_model_var.get())
+            name = self.preview_model_var.get().strip()
+            if not name:
+                messagebox.showwarning("未選択", "モデルを選んでください（④でエクスポートが必要です）")
+                return
+            cmd = build_preview_cmd(self.python, self.preview_frames_var.get(),
+                                    str(MODELS_DIR / f"{name}.onnx"))
             self._run(cmd, "プレビュー")
 
         ttk.Button(frame, text="プレビュー開始（別ウィンドウが開きます）", command=run).grid(
@@ -599,15 +755,14 @@ class App:
                     label, code = rest
                     ok = code == 0
                     self._append_log(f"\n[{label}] {'完了' if ok else f'終了コード {code}'}\n")
-                    if ok and label == "学習":
-                        # 次のタブへ今回の出力先を引き継ぎ、学習欄は次回用の新しい名前にしておく
-                        # （同じ名前のまま連続で学習すると、さっきの結果を上書きしてしまうため）
-                        train_dir = self._last_train_out_dir
-                        self.export_ckpt_var.set(str(Path(train_dir) / "best.pt"))
-                        self.export_out_var.set(str(Path(train_dir) / "model.onnx"))
-                        self.train_out_var.set(new_run_dir_str())
+                    if ok and label in ("フレーム抽出", "学習"):
+                        # モデルの状態（フレーム枚数・学習済みか）が変わったので更新する
+                        self.model_status_var.set(
+                            describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
                     if ok and label == "エクスポート":
-                        self.preview_model_var.set(self._last_export_out_path)
+                        # ⑤タブのプレビュー対象に、今エクスポートしたモデルを選んでおく
+                        self._refresh_exported_models()
+                        self.preview_model_var.set(self._last_exported_model_name)
                     self.busy = False
                     self.status_label.config(text="待機中")
                     self.stop_btn.config(state="disabled")

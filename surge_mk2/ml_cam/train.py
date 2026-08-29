@@ -1,8 +1,8 @@
-"""ml/train.py — 走行可否セグメンテーションの学習ループ。
+"""ml_cam/train.py — 走行可否セグメンテーションの学習ループ。
 
-    python3 ml/train.py --frames ml/data/frames --epochs 30 --out ml/runs/latest
+    python3 ml_cam/train.py --frames ml_cam/data/frames --epochs 30 --out ml_cam/runs/latest
 
-`ml/dataset.list_labeled_pairs()` でラベル付け済みの (フレーム, マスク) を
+`ml_cam/dataset.list_labeled_pairs()` でラベル付け済みの (フレーム, マスク) を
 集め、train/val に分けて `DrivableSegModel` を学習する。毎エポック IoU
 （走行可能領域の一致率）を表示するので、過学習していないか（train損失は
 下がるのに val_iou が下がりだしていないか）を見ながら回せばよい——
@@ -99,10 +99,10 @@ def pick_device() -> "torch.device":
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--frames", type=Path, default=Path("ml/data/frames"))
+    ap.add_argument("--frames", type=Path, default=Path("ml_cam/data/frames"))
     ap.add_argument("--masks", type=Path, default=None,
-                    help="マスクの場所（既定は --frames と同じ。ml/annotate.py の既定出力先）")
-    ap.add_argument("--out", type=Path, default=Path("ml/runs/latest"))
+                    help="マスクの場所（既定は --frames と同じ。ml_cam/annotate.py の既定出力先）")
+    ap.add_argument("--out", type=Path, default=Path("ml_cam/runs/latest"))
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -116,7 +116,7 @@ def main() -> int:
     pairs = list_labeled_pairs(args.frames, args.masks)
     if len(pairs) < 4:
         print(f"ラベル付き画像が {len(pairs)} 枚しかありません。"
-              f"先に `ml/annotate.py` でラベル付けしてください", file=sys.stderr)
+              f"先に `ml_cam/annotate.py` でラベル付けしてください", file=sys.stderr)
         return 2
 
     train_pairs, val_pairs = split_pairs(pairs, args.val_ratio)

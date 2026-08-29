@@ -1,4 +1,4 @@
-"""`ml/export_onnx.py` のテスト。
+"""`ml_cam/export_onnx.py` のテスト。
 
 **実データ・実学習は要らない。** ランダム初期化のモデルをそのままエクスポート
 し、PyTorch と ONNXRuntime の出力が一致すること（＝配管が正しいこと）だけを
@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 import onnxruntime as ort  # noqa: E402
 import torch  # noqa: E402
@@ -40,6 +40,23 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["mean"], MEAN)
             self.assertEqual(cfg["std"], STD)
             self.assertEqual(cfg["threshold"], THRESHOLD)
+            self.assertEqual(cfg["note"], "")   # 省略時は空文字（2026-08-29追加）
+
+    def test_note_is_embedded_in_the_exported_json(self):
+        """`ml_cam/app.py`の備考欄→`note.txt`→エクスポート、という経路で
+        `<名前>.json`に書き込まれる自由記述の備考（`ml_lidar/export_onnx_rl.py`
+        の同名テストと対称、2026-08-29追加）。GUIのモデル選択（`AutoPanel.tsx`）
+        が表示するので、`note`キーの往復を確認する。"""
+        with tempfile.TemporaryDirectory() as d:
+            ckpt_path = Path(d) / "model.pt"
+            model = DrivableSegModel(pretrained=False)
+            torch.save(model.state_dict(), ckpt_path)
+
+            out_path = Path(d) / "model.onnx"
+            export(ckpt_path, out_path, (64, 48), note="夜間走行用、露出補正あり")
+
+            cfg = json.loads(out_path.with_suffix(".json").read_text())
+            self.assertEqual(cfg["note"], "夜間走行用、露出補正あり")
 
     def test_onnxruntime_output_matches_pytorch(self):
         with tempfile.TemporaryDirectory() as d:

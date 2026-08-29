@@ -1,4 +1,4 @@
-"""`ml/annotate.py` のテスト。
+"""`ml_cam/annotate.py` のテスト。
 
 **実物の SAM チェックポイント・cv2 のウィンドウは要らない。** `AnnotationSession`
 は SAM をダックタイピングで受け取るだけなので、`set_image`/`predict` を
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402

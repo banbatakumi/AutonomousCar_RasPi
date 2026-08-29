@@ -1,6 +1,6 @@
-"""ml/annotate.py — SAM 併用の半自動アノテーションツール。
+"""ml_cam/annotate.py — SAM 併用の半自動アノテーションツール。
 
-    python3 ml/annotate.py ml/data/frames \\
+    python3 ml_cam/annotate.py ml_cam/data/frames \\
         --checkpoint sam_vit_b_01ec64.pth --model-type vit_b
 
 走行可能な床を1クリックすると、その領域のマスクを SAM（Segment Anything）が
@@ -16,7 +16,7 @@
     n / p             保存せずに次/前のフレームへ
     q                 終了
 
-保存先は `<frames_dir>/<frame_stem>_mask.png`（0/255 の2値。`ml/dataset.py`
+保存先は `<frames_dir>/<frame_stem>_mask.png`（0/255 の2値。`ml_cam/dataset.py`
 が読む場所とファイル名の約束）。
 
 ## 点の引き継ぎ（既定で有効）
@@ -136,7 +136,7 @@ def main() -> int:
     try:
         import cv2
     except ImportError:
-        print("opencv-python が入っていません。`pip install -r ml/requirements.txt`",
+        print("opencv-python が入っていません。`pip install -r ml_cam/requirements.txt`",
               file=sys.stderr)
         return 2
 

@@ -1,14 +1,14 @@
-"""ml/dataset.py — (フレーム, マスク) のペアを読む PyTorch Dataset。
+"""ml_cam/dataset.py — (フレーム, マスク) のペアを読む PyTorch Dataset。
 
-`ml/annotate.py` が書く `<frame_stem>_mask.png`（0/255 の2値）を前提にする。
+`ml_cam/annotate.py` が書く `<frame_stem>_mask.png`（0/255 の2値）を前提にする。
 **ラベル付けが終わっていないフレームは黙って除外する**（全部揃うまで学習を
 待たなくてよいようにするため）。
 
-対応関係は `manifest.csv`（`ml/extract_frames.py` が書く）があればそれを使うが、
+対応関係は `manifest.csv`（`ml_cam/extract_frames.py` が書く）があればそれを使うが、
 **無くても動く。** GUI の「ログ」タブから ZIP でフレームを抽出した場合は
 `manifest.csv` が付いてこない（ブラウザ側は画像を書き出すだけで由来の記録は
 残さない）ため、その場合は `frames_dir` 直下を直接走査する
-（`ml/annotate.py` 自身も `*.jpg` を glob するだけなので、対応の取り方を
+（`ml_cam/annotate.py` 自身も `*.jpg` を glob するだけなので、対応の取り方を
 合わせてある）。
 """
 
@@ -57,7 +57,7 @@ def list_labeled_pairs(frames_dir: Path,
 class DrivableDataset(Dataset):
     """`__getitem__` は `(image[3,H,W] float32 0-1, mask[1,H,W] float32 0/1)`。
 
-    **正規化は 0-1（mean=0, std=255 相当）で固定。** `ml/export_onnx.py` の
+    **正規化は 0-1（mean=0, std=255 相当）で固定。** `ml_cam/export_onnx.py` の
     `model.json` に書く前処理定数、`raspi/nodes/cam_perception_node.py` の
     `SegmentationModel` の既定値と揃えてある——ここだけ違う値にすると
     学習と推論で入力の意味がズレる（train/inference skew）。

@@ -125,9 +125,12 @@ export type CamModelFile = {
   size: number
   /** UNIX epoch秒 */
   mtime: number
-  /** 前処理設定（`ml/export_onnx.py` が書く `<name>.json`）が同梱されているか。
+  /** 前処理設定（`ml_cam/export_onnx.py` が書く `<name>.json`）が同梱されているか。
    * 無ければ既定値（0-1正規化・224x224）で読まれる */
   has_config: boolean
+  /** 自由記述の備考（`ml_cam/app.py` の備考欄→`note.txt`→エクスポート時に`<name>.json`
+   * へ同梱される）。無ければ空文字（2026-08-29追加、`E2EModelFile.note` と対称） */
+  note: string
 }
 
 /** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値**

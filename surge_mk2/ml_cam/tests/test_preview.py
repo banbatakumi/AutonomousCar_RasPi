@@ -1,8 +1,8 @@
-"""`ml/preview.py` のテスト。
+"""`ml_cam/preview.py` のテスト。
 
 **実物のONNXモデル・cv2のウィンドウは要らない。** `compute_iou`・
 `compare_masks`・`load_model_config` という、numpy配列とファイルI/Oだけの
-純粋関数を検証する（`main()` の cv2 ループは `ml/annotate.py` と同じ理由で
+純粋関数を検証する（`main()` の cv2 ループは `ml_cam/annotate.py` と同じ理由で
 テストしない）。
 """
 
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))          # repo root
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))          # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))          # ml_cam/
 
 import numpy as np  # noqa: E402
 

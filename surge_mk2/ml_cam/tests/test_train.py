@@ -1,4 +1,4 @@
-"""`ml/train.py` のテスト。
+"""`ml_cam/train.py` のテスト。
 
 `iou_score`/`split_pairs` は純粋関数として厳密に検証し、学習ループ本体は
 「合成データ2枚で1エポック回して壊れないこと」までのスモークテストに留める
@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
