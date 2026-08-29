@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Pi 起動時に Phase 0 のノード一式を自動で上げる systemd unit を入れる。
 #
-#   sudo ./raspi/setup/install_services.sh                # ★ arm 有効（バンビの選択）
-#   sudo ./raspi/setup/install_services.sh --safe         #    arm 封印（DISARM 固定）
-#   sudo ./raspi/setup/install_services.sh --with-logger  #    MCAP も SD に録る
+#   sudo ./raspi/setup/install_services.sh                       # ★ arm 有効（バンビの選択）
+#   sudo ./raspi/setup/install_services.sh --safe                #    arm 封印（DISARM 固定）
+#   sudo ./raspi/setup/install_services.sh --with-logger         #    MCAP も SD に録る
+#   sudo ./raspi/setup/install_services.sh --with-cam-perception #    ftg_cam 用セグメンテーション推論も常時起動
 #   sudo ./raspi/setup/install_services.sh --remove
+#
+# ⚠ **フラグは1つしか同時に渡せない**（`$1` しか見ていない既知の穴。
+#   `docs/development.md` §11）。`--safe --with-logger` のように併用したいときは
+#   このスクリプトを一度読んでから手で `systemctl enable --now` すること。
 #
 # ## ★ 記録は GUI の「ログ」タブから操作する（2026-08-10 に運用変更）
 #
@@ -26,6 +31,21 @@
 #
 #     tools/record.sh                 # Mac で実行。ssh 越しに MCAP を PC へ流す
 #                                      # （GUI を開けないときの代替経路）
+#
+# ## `surge-cam-perception`（`--with-cam-perception`）も既定では入れない
+#
+# `ftg_cam`（カメラの走行可否セグメンテーションで走るモード）用の推論プロセス。
+# **`planning_node` が今どのモードを選んでいるかを一切知らない独立プロセス**で、
+# 前方カメラのフレームが来る限り無条件に CNN 推論を回し続ける
+# （`raspi/auto/e2e_lidar.py` の推論が `planning_node` の中で `e2e_lidar` 選択時
+# だけ動くのとは対照的）。**`ftg_cam` を使う気が無くても CPU と電力を常時消費する**
+# ので、既定では入れない。GUI 経由でモデルを選ぶまでは全セクタ `sector_seen=False`
+# （壁扱い）を出し続けるだけの安全設計だが、無駄には変わりない。
+#
+#     sudo systemctl start surge-cam-perception   # 一時的に（このブート限り）
+#     sudo systemctl enable --now surge-cam-perception   # 次回起動時も自動で
+#
+# 手順・GUI での使い方は `docs/development.md` §12.2。
 #
 # ## ★★ 既定で `--allow-arm` が入る
 #
@@ -51,9 +71,11 @@ cd "$(dirname "$0")/../.." || exit 1
 ROOT=$(pwd)
 USER_NAME=${SUDO_USER:-pi}
 PY="$ROOT/.venv/bin/python -u"
-# **surge-logger は既定でこの一覧に入れない**（SD 書き込みを減らすため。上記）
+# **surge-logger / surge-cam-perception は既定でこの一覧に入れない**
+# （それぞれ SD 書き込み・CPU/電力の無駄を避けるため。上記）
 UNITS=(surge-io surge-camera surge-telemetry surge-planning)
 WITH_LOGGER=0
+WITH_CAM_PERCEPTION=0
 
 # ⚠ `--max-speed` / `--max-steer` は **GUI の `PI_MAX_SPEED_CAP` / `PI_MAX_STEER_CAP`
 # （gui/src/store/ui.ts）と一致させること。** ずれると、GUI の設定パネルでは
@@ -78,8 +100,9 @@ MODE="arm 有効"
 case "${1:-}" in
   --safe)   ARM=""; MODE="arm 封印（DISARM 固定）" ;;
   --with-logger) WITH_LOGGER=1; UNITS+=(surge-logger) ;;
+  --with-cam-perception) WITH_CAM_PERCEPTION=1; UNITS+=(surge-cam-perception) ;;
   --remove)
-    systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
+    systemctl disable --now "${UNITS[@]}" surge-logger surge-cam-perception 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service
     rm -f /etc/udev/rules.d/99-surge-fan.rules
     rm -f /etc/sudoers.d/surge-shutdown
@@ -225,6 +248,18 @@ if [ "$WITH_LOGGER" = 0 ]; then
   systemctl disable --now surge-logger 2>/dev/null || true
 fi
 
+# cam_perception の unit も**常に置く**（`--with-cam-perception` を付けたときだけ
+# enable する）。置いておけば `sudo systemctl start surge-cam-perception` で
+# 一時的に動かせる。**`--quiet` は渡さない**（`cam_perception_node.py` の
+# argparse にそのオプションが無い。渡すと起動時に即エラー終了して
+# `Restart=on-failure` で再起動ループになる）
+write_unit surge-cam-perception "カメラの走行可否セグメンテーション推論(ftg_cam用)" \
+           "raspi.nodes.cam_perception_node" "surge-camera.service"
+if [ "$WITH_CAM_PERCEPTION" = 0 ]; then
+  # 既定では止める。前回 --with-cam-perception で入れたまま残っていることがある
+  systemctl disable --now surge-cam-perception 2>/dev/null || true
+fi
+
 # ── 古いログを消すタイマー（放置するとカードが埋まる） ──
 #
 # ## ★ 日付だけで消すのでは間に合わない（2026-08-08 の実測で判明）
@@ -302,6 +337,16 @@ else
   echo "        .sfl  … Pi の SD に書く（GUI から一覧・ダウンロード・削除できる）"
   echo "        .mcap … SD には書かず、ブラウザに直接ダウンロードされる"
   echo "        GUI を開けないときは代わりに: tools/record.sh（Mac で実行）"
+fi
+if [ "$WITH_CAM_PERCEPTION" = 1 ]; then
+  echo
+  echo "  ★ surge-cam-perception 有効。GUI でモデルを選ぶまでは推論を「壁」扱いのまま"
+  echo "    続ける（安全側）が、カメラフレームが来るたびに CNN 推論は回り続ける"
+else
+  echo
+  echo "  cam_perception_node（ftg_cam 用）は既定で無効。使うときは:"
+  echo "        sudo systemctl start surge-cam-perception   # 一時的に"
+  echo "        sudo $0 --with-cam-perception                # 次回起動時も自動で"
 fi
 if [ -n "$ARM" ]; then
   echo

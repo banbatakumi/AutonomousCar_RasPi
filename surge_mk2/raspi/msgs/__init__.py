@@ -22,6 +22,7 @@ from .types import (
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CAM_CONFIG,
+    TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -40,6 +41,7 @@ from .types import (
     AutoMap,
     AutoState,
     CamConfig,
+    CamMask,
     CamModelCtrl,
     DriveCmd,
     E2EModelCtrl,
@@ -56,10 +58,10 @@ from .types import (
 )
 
 __all__ = [
-    "MsgBase", "VehicleState", "Scan", "LineScan", "DriveCmd", "LinkDiag", "ImageRef",
+    "MsgBase", "VehicleState", "Scan", "LineScan", "CamMask", "DriveCmd", "LinkDiag", "ImageRef",
     "Heartbeat", "LogCtrl", "AutoCtrl", "AutoState", "AutoMap", "UiEvent", "CamConfig",
     "CamModelCtrl", "E2EModelCtrl",
-    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM",
+    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM", "TOPIC_CAM_MASK",
     "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX", "TOPIC_LOG_CTRL",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",

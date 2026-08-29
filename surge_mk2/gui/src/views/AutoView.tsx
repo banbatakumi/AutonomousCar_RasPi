@@ -1,7 +1,8 @@
 /**
  * 自動運転ビュー — 自律走行を**監視・デバッグする**ための画面（`architecture.md` §10.2 / §10.3）。
  *
- * 上段に**前方・後方・LiDAR を同じ幅で3分割**、下に速度・舵角の帯。
+ * 上段に**前方・後方・LiDAR を同じ幅で3分割**、その下に速度・舵角の細い帯、
+ * 一番下は「モード選択・engage・判断」（左2/3）と「車体図」（右1/3）。
  * 温度・電圧・リンク統計は出さない（2026-08-20）——正常時に読む数字ではなく、
  * 異常は `StatusBar` が全タブ共通で必ず伝える。詳しい数字は診断タブ（`DiagView`）で見る。
  *
@@ -21,6 +22,22 @@
  * `AutoPanel` でモードを選び engage する。**モードの一覧は GUI に書いていない**
  * （サーバの `status.auto.catalog` から生える）ので、`raspi/auto/` に planner を
  * 足せばこの画面に勝手に出る。LiDAR ビューには planner が選んだギャップを重ねる。
+ * モードごとに必要なモデル選択（`ftg_cam`/`e2e_lidar`）も `AutoPanel` の中で
+ * 選んだモードに応じて出し分ける（2026-08-28、`AutoPanel.tsx` 参照）。
+ *
+ * ## 車体図をラジコンビューと共通化（2026-08-28）
+ *
+ * `DrivePanel`（`components/rc/DrivePanel.tsx`）はスリップ・トルク・電圧・
+ * 障害物近接リングを一望できる車体図で、自律走行の監視にもそのまま使える
+ * （むしろ近接リングは自律走行の異常検知にこそ効く）。ラジコンタブ専用に
+ * 作った部品だが実体は `useNumbers()` だけで完結しており画面に依存しないので、
+ * そのまま import して右下に置くだけで足りた（指示による）。
+ *
+ * ## 補機帯（ブレーキ実トルク・操作ランプ・自動停止）を削除（2026-08-28）
+ *
+ * `AuxPanel` は走行を楽しむための情報（ラジコンタブ由来）で、自律走行の監視には
+ * 不要と判断して外した（指示による）。ブレーキの実効きは診断タブ、自動停止の
+ * 有効/無効は設定ドロワーの安全タブで見られる。
  *
  * ## 操作設定の歯車もここに置く（2026-08-20）
  *
@@ -31,9 +48,9 @@
  */
 import { useNumbers } from '../bus/live'
 import { AutoPanel } from '../components/AutoPanel'
-import { AuxPanel } from '../components/AuxPanel'
 import { DriveBar } from '../components/DriveBar'
 import { SettingsDrawer } from '../components/SettingsDrawer'
+import { DrivePanel } from '../components/rc/DrivePanel'
 import { CameraView } from '../render/CameraView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
@@ -80,9 +97,22 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
         </div>
       </div>
 
-      <AutoPanel ch={ch} />
       <DriveBar />
-      <AuxPanel />
+
+      {/* `ctrl`/`car` を1つのグリッドエリア（`bottom`）にまとめ、中身は
+          横並びの flex にした（2026-08-29）。以前はグリッドの3等分列を
+          そのまま `car` 側に割り当てていたため、車体図（縦長の実寸比率）が
+          その幅いっぱいまで**伸びない**分、左右に大きな余白ができていた
+          （指摘による）。flex なら `.auto-car` は自分の縦横比＋行の高さから
+          決まる幅だけを取り、余った横幅は `AutoPanel` 側（`flex:1`）に渡る */}
+      <div className="auto-bottom">
+        <AutoPanel ch={ch} />
+
+        <div className="auto-car">
+          <DrivePanel />
+        </div>
+      </div>
+
       <SettingsDrawer ch={ch} />
     </div>
   )

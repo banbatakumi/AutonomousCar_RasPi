@@ -8,6 +8,11 @@
  * このファイルは 1 行も変わらない。** モード名を GUI 側にも書くと、増やすたびに
  * 2箇所を直すことになり、いつか片方だけ古くなる。
  *
+ * ⚠ 例外が2つだけある——`ftg_cam`（セグメンテーション走行）と `e2e_lidar`
+ * （E2E LiDAR走行）が使うモデルの選択（下記）。この2つの id 文字列だけは
+ * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/e2e_lidar.py` と直接
+ * 対応させて GUI 側に書いてある。
+ *
  * ## engage の状態を GUI 側で持たない
  *
  * ボタンを押したら `setAuto` を投げるだけで、表示は必ずサーバの `status` を見る。
@@ -19,7 +24,47 @@
  * engage は「自律に任せてよい」という意思表示で、実際に車が動くには**人間が
  * ARM を保持している**必要がある（`Enter` または ARM ボタン）。この2つを1つの
  * ボタンにまとめないのは、自律走行の停止手段を人間側に残しておくため。
+ *
+ * ## モデル選択もここに置く（2026-08-28）
+ *
+ * 以前は設定ドロワーのカメラタブに置いていたが、**「どのモードで走るか」と
+ * 「そのモードが使うモデル」は同じ意思決定の一部**なので分離すると迷う。
+ * `ftg_cam`/`e2e_lidar` を選んだときだけ、そのモード専用のモデル選択
+ * ドロップダウンをこのパネル内に出す。一覧の取得（`camModelList`/
+ * `e2eModelList`）は `LogView.tsx` と同じくマウント時に一度要求しておく。
+ *
+ * ## モード選択はドロップダウンに（2026-08-28）
+ *
+ * planner の数が増えてボタン行が窮屈になったため、1つ選べば足りるボタン行
+ * ではなく `<select>` にした。未選択に戻す操作もボタンのトグルではなく
+ * 「（未選択）」を選ぶ形になる。
+ *
+ * ## 構造を作り直した（2026-08-28、指摘による2回目の改訂）
+ *
+ * 車体図と横並びになって幅が2/3に減ったところ、旧来の「3列固定グリッド」
+ * （走らせ方／engage／判断を横に3分割）が窮屈になり、判断の数値
+ * （`auto-metrics`）が幅の途中で折り返して**数値と単位が別の行に分離する**
+ * 崩れ方をした。**縦積みの1カラム構成**に作り直し、数値は「ラベル＋値」を
+ * 1つのグリッドセルにまとめて絶対に分離しないようにした（`.auto-stat`）。
+ * パラメータも `minmax(220px,1fr)` だと2列で頭打ちになっていたので
+ * `minmax(150px,1fr)` に詰め、無理に2列に揃えず幅なりに流れるようにした。
+ *
+ * パネル全体に `max-height` を付け、車体図（`AutoView.tsx` の `.auto-car`）と
+ * 同じ行の高さをここで決める——`.auto-car` はこの高さいっぱいまで車体図を
+ * 拡大する作りなので、ここの高さが車体図の実際の大きさを決めている
+ * （`styles.css` の `.auto-car .drivepanel-wrap` 参照）。パラメータを開いて
+ * 縦に伸びても、上段カメラ帯の高さやこの行全体を押し広げず**パネル内だけで
+ * スクロール**する。
+ *
+ * ## 「判断」欄も planner ごとに出し分ける（2026-08-29）
+ *
+ * `gap_start_deg`/`gap_end_deg`/`nearest` はギャップ探索系 planner の判断根拠で、
+ * `e2e_lidar`/`line_trace` はそもそも書かない（`AutoState` の既定値0.0のまま）。
+ * 無条件で出すと「0〜0° ギャップ」のような意味の無い数値が並んでしまうため
+ * （指摘による）、`catalog[].stats`（`raspi/auto/base.py` の `Planner.stats`）で
+ * 宣言された分だけ出す。他の宣言と同じくモード id は GUI 側に書かない。
  */
+import { useEffect } from 'react'
 import { useNumbers } from '../bus/live'
 import { RAD2DEG, mps } from '../format'
 import { useUi } from '../store/ui'
@@ -33,6 +78,18 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const auto = ui.auto
   const n = useNumbers()
 
+  const camModel = useUi((s) => s.camModel)
+  const camModelFiles = useUi((s) => s.camModelFiles)
+  const e2eModel = useUi((s) => s.e2eModel)
+  const e2eModelFiles = useUi((s) => s.e2eModelFiles)
+  // 選択中のE2E LiDARモデルの備考（`ml_lidar/app.py`の備考欄→エクスポート時に
+  // `<name>.json`へ同梱されたもの。2026-08-29追加）
+  const e2eSelectedNote = e2eModelFiles.find((f) => f.name === e2eModel?.name)?.note
+  useEffect(() => {
+    ch?.camModelList()
+    ch?.e2eModelList()
+  }, [ch])
+
   if (!auto) {
     return (
       <div className="autopanel">
@@ -42,13 +99,14 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   }
 
   const selected = auto.catalog.find((c) => c.id === auto.mode) ?? null
+  const modeStats = selected?.stats ?? []
   const st = n.auto
   // **「planner が黙っている」と「planner が止まれと言っている」を区別する。**
   // 前者は planning_node が落ちている疑いで、対処が全く違う
   const silent = !isFinite(n.autoAgeMs) || n.autoAgeMs > AUTO_STALE_MS
 
   const setMode = (id: string) => {
-    ch?.setAuto({ mode: auto.mode === id ? '' : id })
+    ch?.setAuto({ mode: id })
     ui.set({ autoOffReason: '' })
   }
 
@@ -60,49 +118,102 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
 
   return (
     <div className={`autopanel${auto.engaged ? ' engaged' : ''}`}>
-      {/* ── モード選択 ── */}
-      <section className="auto-modes">
-        <span className="label">走らせ方</span>
-        <div className="auto-mode-row">
-          {auto.catalog.map((c) => (
-            <button
-              key={c.id}
-              className={c.id === auto.mode ? 'on' : ''}
-              onClick={() => setMode(c.id)}
-              title={c.description}
-            >
-              {c.name}
-            </button>
-          ))}
+      {/* ── モード選択 + engage を横並びの1行に（狭い幅では折り返す） ── */}
+      <div className="auto-row1">
+        <section className="auto-modes">
+          <span className="label">走らせ方</span>
+          <select
+            className="auto-mode-select"
+            value={auto.mode}
+            onChange={(e) => setMode(e.target.value)}
+          >
+            <option value="">（未選択）</option>
+            {auto.catalog.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
           {auto.catalog.length === 0 && (
             <span className="dim">planner がありません</span>
           )}
-        </div>
-      </section>
+        </section>
 
-      {/* ── engage ── */}
-      <section className="auto-engage">
-        <button
-          className={auto.engaged ? 'engage on' : 'engage'}
-          disabled={!auto.mode}
-          onClick={toggleEngage}
-        >
-          {auto.engaged ? '自律走行を解除' : '自律走行を開始'}
-        </button>
-        {/* **engage と ARM は別物**。どちらが欠けているかを名指しで出す */}
-        {auto.engaged && !ui.armRequested && (
-          <span className="badge-warn">ARM してください（Enter）</span>
-        )}
-        {auto.engaged && ui.armRequested && !silent && (
-          <span className="badge-live">走行中</span>
-        )}
-        {!auto.engaged && ui.autoOffReason && (
-          <span className="badge-warn">{ui.autoOffReason}</span>
-        )}
-        {auto.stalls > 0 && (
-          <span className="badge-bad">指令の途絶で制動 {auto.stalls} 回</span>
-        )}
-      </section>
+        <section className="auto-engage">
+          <button
+            className={auto.engaged ? 'engage on' : 'engage'}
+            disabled={!auto.mode}
+            onClick={toggleEngage}
+          >
+            {auto.engaged ? '自律走行を解除' : '自律走行を開始'}
+          </button>
+          {/* **engage と ARM は別物**。どちらが欠けているかを名指しで出す */}
+          {auto.engaged && !ui.armRequested && (
+            <span className="badge-warn">ARM してください（Enter）</span>
+          )}
+          {auto.engaged && ui.armRequested && !silent && (
+            <span className="badge-live">走行中</span>
+          )}
+          {!auto.engaged && ui.autoOffReason && (
+            <span className="badge-warn">{ui.autoOffReason}</span>
+          )}
+          {auto.stalls > 0 && (
+            <span className="badge-bad">指令の途絶で制動 {auto.stalls} 回</span>
+          )}
+        </section>
+      </div>
+
+      {selected && <p className="auto-mode-desc dim">{selected.description}</p>}
+
+      {/* セグメンテーション走行（`ftg_cam`）専用のモデル選択。
+          engage 中に選び直すと `_on_auto` のモード変更と同じ理由で engage が必ず落ちる */}
+      {selected?.id === 'ftg_cam' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">セグメンテーションモデル</span>
+          <select
+            value={camModel?.name ?? ''}
+            disabled={camModel === null}
+            onChange={(e) => ch?.camModelSelect(e.target.value)}
+          >
+            <option value="">（未選択）</option>
+            {camModelFiles.map((f) => (
+              <option key={f.name} value={f.name}>
+                {f.name}
+                {!f.has_config && '（前処理設定なし）'}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => ch?.camModelList()}>更新</button>
+          {camModelFiles.length === 0 && (
+            <span className="dim">models/ に .onnx がありません</span>
+          )}
+        </div>
+      )}
+
+      {/* E2E LiDAR走行（`e2e_lidar`）専用のモデル選択。上と全く同じ形 */}
+      {selected?.id === 'e2e_lidar' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">E2E LiDARモデル</span>
+          <select
+            value={e2eModel?.name ?? ''}
+            disabled={e2eModel === null}
+            onChange={(e) => ch?.e2eModelSelect(e.target.value)}
+          >
+            <option value="">（未選択）</option>
+            {e2eModelFiles.map((f) => (
+              <option key={f.name} value={f.name}>
+                {f.name}
+                {!f.has_config && '（前処理設定なし）'}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => ch?.e2eModelList()}>更新</button>
+          {e2eModelFiles.length === 0 && (
+            <span className="dim">models/e2e_lidar/ に .onnx がありません</span>
+          )}
+          {e2eSelectedNote && <div className="auto-model-note">{e2eSelectedNote}</div>}
+        </div>
+      )}
 
       {/* ── planner の判断 ── */}
       <section className="auto-state">
@@ -117,34 +228,40 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <div className={st?.ready ? 'auto-reason' : 'auto-reason lv-bad'}>
               {st?.reason || '—'}
             </div>
-            <div className="auto-metrics">
-              <b>{mps(st?.target_speed ?? 0)}</b>
-              <i>m/s 指令</i>
-              <b>{((st?.target_steer ?? 0) * RAD2DEG).toFixed(1)}</b>
-              <i>° 舵</i>
-              <b>{(st?.free_ahead ?? 0).toFixed(2)}</b>
-              <i>m 正面</i>
-              <b>{(st?.nearest ?? 0).toFixed(2)}</b>
-              <i>m 最近傍</i>
-              <b>
-                {st ? `${st.gap_start_deg.toFixed(0)}〜${st.gap_end_deg.toFixed(0)}` : '—'}
-              </b>
-              <i>° ギャップ</i>
-              <b>{((st?.valid_ratio ?? 0) * 100).toFixed(0)}</b>
-              <i>% 有効点</i>
-              <b>{(st?.plan_hz ?? 0).toFixed(1)}</b>
-              <i>Hz 計画</i>
+            <div className="auto-stats">
+              <Stat value={mps(st?.target_speed ?? 0)} unit="m/s 指令" />
+              <Stat value={((st?.target_steer ?? 0) * RAD2DEG).toFixed(1)} unit="° 舵" />
+              {/* この先の4つは planner が書く場合だけ出す（`selected.stats`、
+                  `raspi/auto/base.py` の `Planner.stats` 参照）——書かないフィールドは
+                  `AutoState` の既定値0.0のままなので、出しても意味の無い数値になる */}
+              {modeStats.includes('free_ahead') && (
+                <Stat value={(st?.free_ahead ?? 0).toFixed(2)} unit="m 正面" />
+              )}
+              {modeStats.includes('nearest') && (
+                <Stat value={(st?.nearest ?? 0).toFixed(2)} unit="m 最近傍" />
+              )}
+              {modeStats.includes('gap') && (
+                <Stat
+                  value={st ? `${st.gap_start_deg.toFixed(0)}〜${st.gap_end_deg.toFixed(0)}` : '—'}
+                  unit="° ギャップ"
+                />
+              )}
+              {modeStats.includes('valid_ratio') && (
+                <Stat value={((st?.valid_ratio ?? 0) * 100).toFixed(0)} unit="% 有効点" />
+              )}
+              <Stat value={(st?.plan_hz ?? 0).toFixed(1)} unit="Hz 計画" />
             </div>
           </>
         )}
       </section>
 
       {/* ── パラメータ ──
-          既定で畳んである。**走行中に見たいのは上の3つ**で、ここは詰める作業を
-          するときだけ開けばよい（設定ドロワーを歯車に隠しているのと同じ作法） */}
+          2026-08-29: 常時表示に変更（指示による）。以前は `<details>` で畳んで
+          いたが、車体図を横並びにした分パネルの縦の余白に余裕ができたので、
+          開閉の手間なく常に見える方が走行中の微調整に向く */}
       {selected && (
-        <details className="auto-params">
-          <summary>パラメータ（{selected.params.length}）</summary>
+        <section className="auto-params">
+          <span className="label">パラメータ（{selected.params.length}）</span>
           <div className="auto-param-grid">
             {selected.params.map((p) => {
               const v = auto.params[p.key] ?? p.default
@@ -171,8 +288,19 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
               )
             })}
           </div>
-        </details>
+        </section>
       )}
+    </div>
+  )
+}
+
+/** 判断メトリクス1つぶん。**値と単位ラベルを1つのセルにまとめる**——
+ * 折り返しで値と単位が別の行に分離しないようにするため（`.auto-stats` 参照） */
+function Stat({ value, unit }: { value: string; unit: string }) {
+  return (
+    <div className="auto-stat">
+      <b>{value}</b>
+      <span>{unit}</span>
     </div>
   )
 }

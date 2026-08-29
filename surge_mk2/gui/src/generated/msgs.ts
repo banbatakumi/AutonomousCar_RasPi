@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x1df6c60f
+export const MSGS_SCHEMA = 0xc33562d7
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -352,4 +352,28 @@ export type AutoMapMsg = {
   raceline: number[]
   /** 各点の目標速度 [m/s]。`raceline` の半分の要素数（点ごとに1つ） */
   raceline_v: number[]
+}
+
+/**
+ * 前方カメラで検出した白線1本ぶん。`line_perception_node.py` が publish する。
+ */
+export type LineScan = {
+  t_capture: number
+  t_pub: number
+  seq: number
+  /** 近傍・遠方いずれかの帯で白線を検出できたか */
+  seen: boolean
+  near_seen: boolean
+  far_seen: boolean
+  /** [m] base_link 座標。近傍帯の白線重心 */
+  near_x: number
+  near_y: number
+  /** [m] 遠方帯の白線重心 */
+  far_x: number
+  far_y: number
+  /**
+   * ROI（近傍・遠方の帯）内で白と判定された画素の割合の最大値 [0..1]。
+   * 低いのに走っているなら疑う（`follow_the_gap.py` の `valid_ratio` と同じ扱い）
+   */
+  coverage: number
 }

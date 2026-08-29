@@ -20,6 +20,7 @@
 export type {
   AutoMapMsg,
   AutoState,
+  LineScan,
   LinkDiag,
   Scan,
   VehicleState,
@@ -27,7 +28,7 @@ export type {
 
 // 下の `Snapshot` が参照するので、再エクスポートとは別に取り込む
 // （`export ... from` は名前をこのモジュールのスコープには入れない）
-import type { AutoState, LinkDiag, Scan, VehicleState } from './generated/msgs'
+import type { AutoState, LineScan, LinkDiag, Scan, VehicleState } from './generated/msgs'
 
 /** 展開して描画用に焼いたあとの地図。**`live.map` に置く。** */
 export type MapData = {
@@ -64,6 +65,11 @@ export type AutoPlannerInfo = {
   name: string
   description: string
   params: AutoParamSpec[]
+  /** GUI の「判断」欄に出す `AutoState` フィールド（`raspi/auto/base.py` の
+   * `Planner.stats` 参照）。`"free_ahead"`/`"nearest"`/`"gap"`/`"valid_ratio"`
+   * の部分集合——この planner が書かないフィールド（既定値0.0のまま）を
+   * 表示しないようにする */
+  stats: string[]
 }
 
 /**
@@ -95,6 +101,8 @@ export type Snapshot = {
   scan: Scan | null
   /** **engage していなくても流れる**（走らせる前に何をするか見られる） */
   auto: AutoState | null
+  /** `line_trace` が認識している白線の目標点。`auto` と同じく engage 不要で流れる */
+  line_cam: LineScan | null
   ctl: { has_controller: boolean; controller: string }
   /** RasPi 本体（SoC）の温度 ℃。STM32側の `vs.temp` とは別枠。実機以外（シム等）では null */
   pi_temp_c: number | null
@@ -137,6 +145,9 @@ export type E2EModelFile = {
   mtime: number
   /** 前処理契約（`ml_lidar/export_onnx_rl.py` が書く `<name>.json`）が同梱されているか */
   has_config: boolean
+  /** 自由記述の備考（`ml_lidar/app.py` の備考欄→`note.txt`→エクスポート時に`<name>.json`
+   * へ同梱される）。無ければ空文字（2026-08-29追加） */
+  note: string
 }
 
 /** `e2e_lidar`（強化学習）が使うモデルの選択。**サーバが真値**

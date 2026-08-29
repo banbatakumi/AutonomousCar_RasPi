@@ -30,10 +30,10 @@ from __future__ import annotations
 import msgspec
 
 __all__ = [
-    "MsgBase", "VehicleState", "Scan", "LineScan", "DriveCmd", "LinkDiag", "ImageRef",
+    "MsgBase", "VehicleState", "Scan", "LineScan", "CamMask", "DriveCmd", "LinkDiag", "ImageRef",
     "Heartbeat", "AutoCtrl", "AutoState", "AutoMap", "UiEvent",
-    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM", "TOPIC_CMD",
-    "TOPIC_DIAG_LINK",
+    "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM", "TOPIC_CAM_MASK",
+    "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
@@ -53,6 +53,10 @@ TOPIC_SCAN_CAM = "scan/cam"
 #: カメラで検出した白線の目標点（`line_perception_node.py` が publish）。
 #: 型は `Scan`（距離配列）とは形が違うので専用の `LineScan` を使う
 TOPIC_LINE_CAM = "line/cam"
+#: `cam_perception_node.py` の走行可否セグメンテーションマスクを JPEG 化したもの
+#: （GUI がカメラ映像に重畳表示する用。`scan/cam` はマスクを角度→距離配列に
+#: 変換した後の値で、マスクそのものはここにしか無い）
+TOPIC_CAM_MASK = "cam/mask"
 TOPIC_CMD = "cmd"
 TOPIC_DIAG_LINK = "diag/link"
 TOPIC_IMAGE_FRONT = "image/front"
@@ -582,6 +586,20 @@ class E2EModelCtrl(MsgBase):
     name: str = ""
 
 
+class CamMask(MsgBase):
+    """`cam_perception_node` の走行可否マスクを JPEG 化したもの（GUI 表示専用）。
+
+    共有メモリ（`ImageRef`/`FrameRing`）は使わない——モデル入力解像度
+    （例 224×224）のグレースケール1枚は数KBしかなく、30Hzのフルカメラ映像
+    ほどの帯域を心配する必要が無い。バスにそのまま JPEG バイト列を流す
+    （`raspi/core/jpeg.py` の `make_encoder()` で `cam_perception_node` が
+    自前でエンコードする。telemetry_node は中身を見ずにそのまま
+    `/ws/camera/mask` へ中継するだけ）。
+    """
+
+    jpeg: bytes = b""
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -589,6 +607,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_SCAN: Scan,
     TOPIC_SCAN_CAM: Scan,
     TOPIC_LINE_CAM: LineScan,
+    TOPIC_CAM_MASK: CamMask,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,
     TOPIC_IMAGE_FRONT: ImageRef,

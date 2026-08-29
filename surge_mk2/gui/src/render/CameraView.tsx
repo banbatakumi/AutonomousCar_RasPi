@@ -70,6 +70,24 @@
  * ラベルもバッジも出さず、fps だけを右下に小さく残す。**fps だけは
  * 消さない** — 配信が生きているかを判断する最後の手がかりのため。
  *
+ * ## モード連動のデバッグ重畳（2026-08-28）
+ *
+ * 前カメラだけ、選ばれている自動運転モードに応じて2種類の重畳が自動で出る
+ * （バンビの「セグメンテーションマスクを見たい」「ライントレースがどの線を
+ * 認識しているか見たい」という要望より）。トグルは無く、モードを選んだ時点で出る
+ * ——LiDAR ビューのギャップ重畳（`LidarView.tsx`）と同じ「見せたい情報は
+ * 自動で出す」方針。
+ *
+ * - **`ftg_cam`**: `cam_perception_node.py` の走行可否マスクを
+ *   `/ws/camera/mask`（メイン映像とは別の専用 WS。`showMask` の間だけ繋ぐ）
+ *   から受け、薄い半透明でそのまま重ねる（白＝走行可）。
+ * - **`line_trace`**: `LineScan`（`/ws/telemetry` の `line_cam`）が持つ
+ *   近傍・遠方の目標点を `makeProjector()`（`drawGuide` と共用）で画像へ
+ *   逆投影し、シアン色のマーカーと線で重ねる。
+ *
+ * どちらも**メイン映像の WebSocket 接続とは独立**させてある——モードを
+ * 切り替えるたびにメイン映像まで再接続されるのを避けるため。
+ *
  * ## `onAspect`：実際に届いた画像の縦横比を親へ返す（2026-08-17）
  *
  * `RcView.tsx` は映像の箱を「取得したサイズのまま」表示したい（指示による）。
@@ -112,6 +130,23 @@ export function CameraView({
   // （下の draw ループの useEffect 依存に camHeight を入れない）
   const camHeightRef = useRef(camHeight)
   camHeightRef.current = camHeight
+
+  // ── モード連動のデバッグ重畳（2026-08-28） ──
+  //
+  // `ftg_cam` はセグメンテーションマスク、`line_trace` は認識した白線の目標点を
+  // 前カメラにだけ重ねる。**どちらもメイン映像の WS（`open()`）とは無関係**
+  // ——モードを切り替えるたびにメイン映像まで再接続されると困るので、
+  // ref 経由で `draw()` に渡す（`camHeightRef` と同じ理由）
+  const auto = useUi((s) => s.auto)
+  const showMask = cam === 'front' && auto?.mode === 'ftg_cam'
+  const showLineTarget = cam === 'front' && auto?.mode === 'line_trace'
+  const showMaskRef = useRef(showMask)
+  showMaskRef.current = showMask
+  const showLineTargetRef = useRef(showLineTarget)
+  showLineTargetRef.current = showLineTarget
+  //: `ftg_cam` の走行可否マスク（`/ws/camera/mask`）。専用の別 `useEffect`
+  //: （下記）で `showMask` の間だけ繋ぎ、`draw()` はここを読むだけ
+  const maskBitmapRef = useRef<ImageBitmap | null>(null)
 
   useEffect(() => {
     const cv = ref.current
@@ -182,8 +217,21 @@ export function CameraView({
         const s = Math.min(w / bitmap.width, h / bitmap.height)
         const dw = bitmap.width * s
         const dh = bitmap.height * s
-        ctx.drawImage(bitmap, (w - dw) / 2, (h - dh) / 2, dw, dh)
+        const dx = (w - dw) / 2
+        const dy = (h - dh) / 2
+        ctx.drawImage(bitmap, dx, dy, dw, dh)
+        // 走行可否マスク（`ftg_cam`）。**元フレームと同じ画角から単純リサイズ
+        // しただけ**（`cam_perception_node.py` の `_resize_nearest`）なので、
+        // 映像と同じ矩形にそのまま重ねれば位置は揃う。薄く重ねるだけの
+        // 最小実装（白＝走行可で明るく浮く、黒＝不可でそのまま暗い）
+        if (showMaskRef.current && maskBitmapRef.current) {
+          ctx.save()
+          ctx.globalAlpha = 0.4
+          ctx.drawImage(maskBitmapRef.current, dx, dy, dw, dh)
+          ctx.restore()
+        }
         if (guide) drawGuide(ctx, w, h, camHeightRef.current, cam)
+        if (showLineTargetRef.current) drawLineTarget(ctx, w, h, camHeightRef.current)
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
@@ -208,6 +256,49 @@ export function CameraView({
       bitmap?.close()
     }
   }, [cam, guide, onAspect])
+
+  // `ftg_cam` の走行可否マスク（`/ws/camera/mask`）。**メイン映像の WS とは
+  // 独立**——`showMask` が変わっても上の effect（メイン映像）は再接続しない。
+  // 開閉・デコードのパターンはメイン映像の `open()` と同じ
+  useEffect(() => {
+    if (!showMask) return
+    let ws: WebSocket | null = null
+    let timer: number | undefined
+    let closed = false
+    let decoding = false
+
+    const open = () => {
+      ws = new WebSocket(wsUrl('/ws/camera/mask'))
+      ws.binaryType = 'arraybuffer'
+      ws.onmessage = async (ev) => {
+        if (!(ev.data instanceof ArrayBuffer)) return
+        if (decoding) return
+        decoding = true
+        try {
+          const bmp = await createImageBitmap(new Blob([ev.data], { type: 'image/jpeg' }))
+          maskBitmapRef.current?.close()
+          maskBitmapRef.current = bmp
+        } catch {
+          /* 壊れたフレームは捨てる */
+        } finally {
+          decoding = false
+        }
+      }
+      ws.onclose = () => {
+        if (!closed) timer = window.setTimeout(open, 800)
+      }
+      ws.onerror = () => ws?.close()
+    }
+    open()
+
+    return () => {
+      closed = true
+      window.clearTimeout(timer)
+      ws?.close()
+      maskBitmapRef.current?.close()
+      maskBitmapRef.current = null
+    }
+  }, [showMask])
 
   return (
     <div className="camera" title={label}>
@@ -244,43 +335,7 @@ function drawGuide(
   const vs = live.vs
   if (!vs) return
   const isFront = cam === 'front'
-  const geom = isFront ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
-  const { pitch: pitchFixed, hfov, bottomCrop } = geom
-  const height = isFront ? camHeightSetting : geom.height
-  const f = w / 2 / Math.tan(hfov / 2)
-  const cx = w / 2
-  // 下端クロップぶん、光軸（センサー中心）は配信画像の中央より下にずれる
-  const principalY = h / (2 * (1 - bottomCrop))
-
-  // IMU が無効な間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）。
-  // 後カメラは前カメラと逆向きを見ているので、姿勢補正の符号を反転する
-  // （前が沈む＝後ろは持ち上がる。左右も振り返った側から見るので鏡像になる）
-  const dPitch = (vs.imu_ok ? vs.pitch : 0) * (isFront ? 1 : -1)
-  const dRoll = (vs.imu_ok ? vs.roll : 0) * (isFront ? 1 : -1)
-
-  // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す
-  const pitch = pitchFixed - dPitch
-  const cp = Math.cos(pitch)
-  const sp = Math.sin(pitch)
-
-  const project = (x: number, y: number): [number, number] | null => {
-    // カメラ座標 (x=奥行き, y=左, z=上) → 画像。pitch だけ傾いている前提
-    const zc = x * cp + height * sp // 光軸方向
-    const yc = -x * sp + height * cp // 下向きが正
-    if (zc < 0.15) return null
-    return [cx - (y * f) / zc, principalY + (yc * f) / zc]
-  }
-
-  // roll: 画像面内の回転として近似する。右が沈む（dRoll 負）とカメラも右に傾き、
-  // 写真の一般則どおり像は principal point を中心に反時計回りへ回って見える
-  const rollImg = -dRoll
-  const cr = Math.cos(rollImg)
-  const sr = Math.sin(rollImg)
-  const rotateRoll = (p: [number, number]): [number, number] => {
-    const dx = p[0] - cx
-    const dy = p[1] - principalY
-    return [cx + dx * cr + dy * sr, principalY - dx * sr + dy * cr]
-  }
+  const { project, rotateRoll } = makeProjector(w, h, camHeightSetting, cam)
 
   // 自転車モデルの曲率式は弧長の符号によらないので、後カメラは ds を負にして
   // 「今の舵角のまま後退したら」の軌跡を積分する（ファイル冒頭コメント参照）
@@ -311,6 +366,90 @@ function drawGuide(
     ctx.strokeStyle = 'rgba(255,198,63,0.75)'
     ctx.lineWidth = 2
     ctx.stroke()
+  }
+}
+
+/** 路面座標（base_link、x=前 y=左）→ 画像座標の投影器を作る（2026-08-28、
+ * `drawGuide` から切り出し）。IMU による姿勢（pitch/roll）補正込み。
+ * `drawGuide`（進路ガイド）と `drawLineTarget`（認識ラインの重畳）が共用する
+ * ——同じカメラ内部・外部パラメータ・IMU補正を2箇所に書くと片方だけ直し忘れる。 */
+function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'front' | 'rear') {
+  const vs = live.vs
+  const isFront = cam === 'front'
+  const geom = isFront ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
+  const { pitch: pitchFixed, hfov, bottomCrop } = geom
+  const height = isFront ? camHeightSetting : geom.height
+  const f = w / 2 / Math.tan(hfov / 2)
+  const cx = w / 2
+  // 下端クロップぶん、光軸（センサー中心）は配信画像の中央より下にずれる
+  const principalY = h / (2 * (1 - bottomCrop))
+
+  // IMU が無効・未受信の間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）。
+  // 後カメラは前カメラと逆向きを見ているので、姿勢補正の符号を反転する
+  // （前が沈む＝後ろは持ち上がる。左右も振り返った側から見るので鏡像になる）
+  const dPitch = (vs?.imu_ok ? vs.pitch : 0) * (isFront ? 1 : -1)
+  const dRoll = (vs?.imu_ok ? vs.roll : 0) * (isFront ? 1 : -1)
+
+  // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す
+  const pitch = pitchFixed - dPitch
+  const cp = Math.cos(pitch)
+  const sp = Math.sin(pitch)
+
+  const project = (x: number, y: number): [number, number] | null => {
+    // カメラ座標 (x=奥行き, y=左, z=上) → 画像。pitch だけ傾いている前提
+    const zc = x * cp + height * sp // 光軸方向
+    const yc = -x * sp + height * cp // 下向きが正
+    if (zc < 0.15) return null
+    return [cx - (y * f) / zc, principalY + (yc * f) / zc]
+  }
+
+  // roll: 画像面内の回転として近似する。右が沈む（dRoll 負）とカメラも右に傾き、
+  // 写真の一般則どおり像は principal point を中心に反時計回りへ回って見える
+  const rollImg = -dRoll
+  const cr = Math.cos(rollImg)
+  const sr = Math.sin(rollImg)
+  const rotateRoll = (p: [number, number]): [number, number] => {
+    const dx = p[0] - cx
+    const dy = p[1] - principalY
+    return [cx + dx * cr + dy * sr, principalY - dx * sr + dy * cr]
+  }
+
+  return { project, rotateRoll }
+}
+
+/**
+ * `line_trace` が認識している白線の近傍・遠方点（`LineScan`、既に base_link
+ * 座標に逆投影済み）を、進路ガイドと同じ路面→画像投影でカメラ映像に重ねる。
+ * **前カメラでしか意味を持たない**（`line_perception_node.py` は前方カメラ
+ * しか見ていない）ので `cam` は取らず、常に前カメラの内部・外部パラメータで
+ * 投影する。進路ガイドの琥珀色と混同しないよう別の色（シアン系）にする。
+ * 見えていない点は描かない——「見失っている」こと自体は判断欄の `reason` で分かる。
+ */
+function drawLineTarget(ctx: CanvasRenderingContext2D, w: number, h: number, camHeightSetting: number) {
+  const line = live.lineCam
+  if (!line || (!line.near_seen && !line.far_seen)) return
+  const { project, rotateRoll } = makeProjector(w, h, camHeightSetting, 'front')
+
+  const near = line.near_seen ? project(line.near_x, line.near_y) : null
+  const far = line.far_seen ? project(line.far_x, line.far_y) : null
+  const nearPt = near && rotateRoll(near)
+  const farPt = far && rotateRoll(far)
+  const pts = [nearPt, farPt].filter((p): p is [number, number] => p != null)
+  if (pts.length === 0) return
+
+  ctx.strokeStyle = 'rgba(80,220,255,0.85)'
+  ctx.fillStyle = 'rgba(80,220,255,0.85)'
+  if (nearPt && farPt) {
+    ctx.beginPath()
+    ctx.moveTo(nearPt[0], nearPt[1])
+    ctx.lineTo(farPt[0], farPt[1])
+    ctx.lineWidth = 2
+    ctx.stroke()
+  }
+  for (const [x, y] of pts) {
+    ctx.beginPath()
+    ctx.arc(x, y, 5, 0, Math.PI * 2)
+    ctx.fill()
   }
 }
 

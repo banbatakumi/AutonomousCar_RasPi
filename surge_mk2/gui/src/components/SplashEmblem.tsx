@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import emblemUrl from '../assets/emblem-red.svg'
+import emblemUrl from '../assets/logo.svg'
 
 /** エンブレムのフェードイン → 静止 → 全体フェードアウトの時間（CSS の transition と合わせる） */
 const EMBLEM_FADE_MS = 700

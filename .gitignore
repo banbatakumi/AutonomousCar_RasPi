@@ -22,6 +22,8 @@ surge_mk2/config/camera.json
 surge_mk2/config/odometer.json
 # 選ばれているセグメンテーションモデル名。auto.json と同じ理由
 surge_mk2/config/cam_model.json
+# 選ばれているE2E LiDARモデル名。auto.json と同じ理由
+surge_mk2/config/e2e_lidar_model.json
 logs/*.jsonl
 *.sfl          # 生フレームログ（大きい・実行ごとに増える）
 *.mcap

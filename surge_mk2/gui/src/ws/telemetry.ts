@@ -47,7 +47,7 @@ export function connectTelemetry(
         return                       // **捨てる。** 古い型のまま描くほうが危ない
       }
       const s = raw as unknown as Snapshot
-      noteTelemetry(s.vs, s.link, s.scan, s.auto, s.pi_temp_c)
+      noteTelemetry(s.vs, s.link, s.scan, s.auto, s.pi_temp_c, s.line_cam)
       // 診断タブ用の時系列。**タブを開いていなくても常時貯める**（`bus/history.ts`）
       pushHistory(s.vs, s.link)
     }

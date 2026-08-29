@@ -113,10 +113,21 @@ import { SettingsDrawer } from '../components/SettingsDrawer'
 import { useContainFit } from '../hooks/useContainFit'
 import { useElementSize } from '../hooks/useElementSize'
 import { CameraView } from '../render/CameraView'
+import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 import type { ControlChannel } from '../ws/control'
 
-/** 最初のフレームが届くまでの仮の比率（4:3）。実測が来次第、下記 `frontAspect` に置き換わる */
-const FALLBACK_ASPECT = 4 / 3
+/** センサー自体のネイティブ比率（4:3、`camera_node.py --size` の既定 640x480）。
+ * 配信される画像はここから `bottomCrop` 分だけ下端を切ったもの（後述）。 */
+const SENSOR_ASPECT = 4 / 3
+/** 最初のフレームが届くまでの仮の比率。前方カメラは下端 25%（`vehicle.toml`
+ * `sensors.cam_front.bottom_crop`）を切って配信するため、実際の映像は 4:3 より
+ * 横長（≈16:9）になる。**ここを単純な 4:3 のままにしていたところ、映像を
+ * 受信できていない間（起動直後・接続断中）だけ実際より縦長の箱として計算され、
+ * `.rc-cams` が高さ律速に陥って幅が縮み、その分だけ車体図の列（`grid-area:
+ * meters`）が異常に広がる不具合があった**（下の `camsGap` 参照）。フォールバックを
+ * 実際の配信比率に合わせておけば、映像が来ていない間もほぼ同じ計算結果になり
+ * 発生しない。実測が来次第、下記 `frontAspect` に置き換わる */
+const FALLBACK_ASPECT = SENSOR_ASPECT / (1 - VEHICLE_GEOM.camFront.bottomCrop)
 /** PIP の縦横比。前方/後方とも同じセンサーなので固定でよい */
 const PIP_ASPECT = 4 / 3
 /** 下段（PIP＋メータ）に最低限残す高さ [px]。映像を最大化する計算はこの分を先に引く

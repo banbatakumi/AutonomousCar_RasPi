@@ -40,6 +40,7 @@ MIRRORED: tuple[type, ...] = (
     types.LinkDiag,
     types.AutoState,
     types.AutoMap,
+    types.LineScan,
 )
 
 

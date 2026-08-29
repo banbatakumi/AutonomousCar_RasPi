@@ -145,6 +145,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CAM_CONFIG,
+    TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -152,6 +153,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_REAR,
+    TOPIC_LINE_CAM,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
     TOPIC_UI_EVENT,
@@ -221,6 +223,10 @@ CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam"})
 CAM_MODEL_HZ = 1
 #: `e2e/model`（★モデル選択）の再送周期。`CAM_MODEL_HZ` と同じ理由
 E2E_MODEL_HZ = 1
+#: `cam/mask`（`ftg_cam` の走行可否マスク）を中継するポーリング周期。
+#: カメラ本編（`CAMERA_HZ`）ほどの滑らかさは要らないデバッグ表示用途なので、
+#: 低めに抑えて CPU/帯域を節約する
+CAM_MASK_POLL_HZ = 8
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
@@ -317,12 +323,19 @@ class TelemetryServer:
             TOPIC_AUTO_CMD: LATEST,
             TOPIC_AUTO_STATE: LATEST,
             TOPIC_AUTO_MAP: LATEST,
+            #: ライントレースの認識点（GUI がカメラ映像へ重畳する。§`_snapshot`）
+            TOPIC_LINE_CAM: LATEST,
+            #: `ftg_cam` の走行可否マスク（JPEG。GUI がカメラ映像へ重畳する。§`_mask_pump`）
+            TOPIC_CAM_MASK: LATEST,
         })
         self.pub = Publisher("control")
 
         self.telemetry_clients: set = set()
         self.control_clients: set = set()
-        self.camera_clients: dict[str, set] = {"front": set(), "rear": set()}
+        #: `"mask"` は `ftg_cam` の走行可否マスク（`_mask_pump` が中継。
+        #: front/rear と違い telemetry_node 自身のエンコーダを使わないので
+        #: `_camera_channel` の `self._jpeg is None` チェックの対象外にしてある）
+        self.camera_clients: dict[str, set] = {"front": set(), "rear": set(), "mask": set()}
         #: mcap のライブ中継を見ている `/ws/record` クライアント
         self.record_clients: set = set()
         #: 地図を見ている `/ws/map` クライアント
@@ -531,7 +544,10 @@ class TelemetryServer:
         if cam not in self.camera_clients:
             await ws.close(1008, "unknown camera")
             return
-        if self._jpeg is None:
+        # "mask" は cam_perception_node が既に JPEG 化した `cam/mask` を
+        # そのまま中継するだけ（`_mask_pump`）——telemetry_node 自身の
+        # 共有メモリ用エンコーダ（`self._jpeg`）は使わないので、この要求から除外する
+        if cam != "mask" and self._jpeg is None:
             await ws.close(1011, "no jpeg encoder on the pi")
             return
         self.camera_clients[cam].add(ws)
@@ -1063,6 +1079,10 @@ class TelemetryServer:
         """`models/e2e_lidar/` にある `.onnx` の一覧。`_cam_models_list()` と同じ流儀
         （要求したクライアントにだけ返す）。**キー名は `e2e_model_files`**
         （`cam_model_files` と型は同じだが、GUI側の受け皿で混ざらないよう分ける）。
+
+        `note`（`ml_lidar/export_onnx_rl.py`が`<名前>.json`に書く自由記述の備考。
+        2026-08-29追加）も一緒に返す——GUIのモデル選択でどんな変更・どのコースかを
+        確認できるようにするため。`.json`が壊れていても一覧自体は壊さない（空文字で返す）。
         """
         files = []
         if E2E_MODELS_DIR.is_dir():
@@ -1070,8 +1090,15 @@ class TelemetryServer:
                 if not p.is_file() or p.suffix != ".onnx":
                     continue
                 st = p.stat()
+                cfg_path = p.with_suffix(".json")
+                note = ""
+                if cfg_path.exists():
+                    try:
+                        note = str(_json_decode(cfg_path.read_bytes()).get("note", ""))
+                    except Exception:                                    # noqa: BLE001
+                        pass
                 files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
-                             "has_config": p.with_suffix(".json").exists()})
+                             "has_config": cfg_path.exists(), "note": note})
         return {"type": "e2e_models", "e2e_model_files": files}
 
     def _on_e2e_model(self, m: dict) -> None:
@@ -1411,6 +1438,9 @@ class TelemetryServer:
             # 自律走行の「判断の根拠」。**engage していなくても流れる**ので、
             # 手動走行しながら planner が何を選ぶかを見比べられる
             "auto": self.sub.latest.get(TOPIC_AUTO_STATE),
+            # `line_trace` が認識している白線の目標点。**engage していなくても流れる**
+            # （`auto` と同じ理由——手動走行中でも見え方を確認できた方が良い）
+            "line_cam": self.sub.latest.get(TOPIC_LINE_CAM),
             "ctl": {"has_controller": self.controller is not None,
                     "controller": self.controller_name},
             # STM32 側の温度（`vs.temp`）とは別枠。RasPi 自体は STM32 のバスに乗らない
@@ -1614,6 +1644,32 @@ class TelemetryServer:
         got = self._jpeg.encode_latest(ref.shm_name, expect_seq=ref.ring_seq)
         return got[0] if got else None
 
+    async def _mask_pump(self) -> None:
+        """`cam/mask`（`cam_perception_node` が JPEG 化済み）をそのまま中継する。
+
+        `_camera_pump` と同じ「購読者がいなければ何もしない」節約はするが、
+        **エンコード作業がここには無い**（`ImageRef` の共有メモリ読み出しも
+        `to_thread` も不要）ので専用の軽いポンプにしてある。周期は
+        `camera_hz` と揃える理由が無い（マスクの更新は cam_perception_node の
+        推論周期任せ）ので、`_cam_model_pump` 等と同じ低頻度ポーリングにする。
+        """
+        last_seq = -1
+        period = 1.0 / CAM_MASK_POLL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            clients = self.camera_clients["mask"]
+            if not clients:
+                continue
+            m = self.sub.latest.get(TOPIC_CAM_MASK)
+            if m is None or m.seq == last_seq:
+                continue
+            last_seq = m.seq
+            for ws in list(clients):
+                try:
+                    await ws.send(m.jpeg)
+                except Exception:
+                    clients.discard(ws)
+
     # ── 起動 ──
 
     async def serve_forever(self, stop: asyncio.Future) -> None:
@@ -1625,7 +1681,8 @@ class TelemetryServer:
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
-                self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump)]
+                self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
+                self._mask_pump)]
             try:
                 await stop
             finally:

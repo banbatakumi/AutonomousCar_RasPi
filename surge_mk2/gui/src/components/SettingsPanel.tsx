@@ -34,7 +34,7 @@
  * タブの外に置いてある——`DrivingSettings` は1つしかなく、どのタブの値も
  * まとめて戻す/保存するので、特定のタブだけの操作ではないため。
  */
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { DrivingSettings, NumericSettingKey, SettingRange } from '../store/ui'
 import {
   MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
@@ -176,20 +176,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
   // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
   const cam = useUi((s) => s.cameraConfig)
-  // cam_perception_node（ftg_cam）が使うセグメンテーションモデルの選択。
-  // 一覧はイベント駆動（`logs_list` と同じ流儀）なので、パネルを開いたときに
-  // 一度要求しておく（`views/LogView.tsx` の `useEffect` と同じパターン）
-  const camModel = useUi((s) => s.camModel)
-  const camModelFiles = useUi((s) => s.camModelFiles)
-  useEffect(() => {
-    ch?.camModelList()
-  }, [ch])
-  // e2e_lidar（強化学習）が使うモデルの選択。camModel と全く同じパターン
-  const e2eModel = useUi((s) => s.e2eModel)
-  const e2eModelFiles = useUi((s) => s.e2eModelFiles)
-  useEffect(() => {
-    ch?.e2eModelList()
-  }, [ch])
   // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、
   // `/ws/telemetry` 8Hz）から読む理由は tc_enabled 等と同じ（上のコメント参照）
   const range = effectiveRange({
@@ -412,64 +398,9 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             </div>
           </section>
 
-          {/* セグメンテーションモデルの選択（`ftg_cam` 用）。cam_perception_node を
-              再起動もSSHも無しに切り替えられる（`raspi/nodes/cam_perception_node.py`
-              の `cam/model` トピック）。「走行開始（engage）ボタンを押す前に選ぶ」
-              という使い方を想定していて、engage 中に選び直すと `_on_auto` の
-              モード変更と同じ理由で engage が必ず落ちる */}
-          <section className="settings-group">
-            <h3>セグメンテーションモデル（カメラ自動運転用）</h3>
-            <div className="settings-row">
-              <select
-                value={camModel?.name ?? ''}
-                disabled={camModel === null}
-                onChange={(e) => ch?.camModelSelect(e.target.value)}
-              >
-                <option value="">（未選択）</option>
-                {camModelFiles.map((f) => (
-                  <option key={f.name} value={f.name}>
-                    {f.name}
-                    {!f.has_config && '（前処理設定なし）'}
-                  </option>
-                ))}
-              </select>
-              <button onClick={() => ch?.camModelList()}>更新</button>
-            </div>
-            {camModelFiles.length === 0 && (
-              <p className="dim">
-                models/ に .onnx が見つかりません（ml/export_onnx.py の出力を Pi の models/ に配置すること）
-              </p>
-            )}
-          </section>
-
-          {/* E2E LiDARモデルの選択（`e2e_lidar` 用）。上のセグメンテーションモデルと
-              全く同じ形（`raspi/auto/e2e_lidar.py` の `e2e/model` トピック）。
-              カメラ用とは別ディレクトリ（`models/e2e_lidar/`）なので一覧も別 */}
-          <section className="settings-group">
-            <h3>E2E LiDARモデル（強化学習自動運転用）</h3>
-            <div className="settings-row">
-              <select
-                value={e2eModel?.name ?? ''}
-                disabled={e2eModel === null}
-                onChange={(e) => ch?.e2eModelSelect(e.target.value)}
-              >
-                <option value="">（未選択）</option>
-                {e2eModelFiles.map((f) => (
-                  <option key={f.name} value={f.name}>
-                    {f.name}
-                    {!f.has_config && '（前処理設定なし）'}
-                  </option>
-                ))}
-              </select>
-              <button onClick={() => ch?.e2eModelList()}>更新</button>
-            </div>
-            {e2eModelFiles.length === 0 && (
-              <p className="dim">
-                models/e2e_lidar/ に .onnx が見つかりません（ml_lidar/export_onnx_rl.py の出力を
-                Pi の models/e2e_lidar/ に配置すること）
-              </p>
-            )}
-          </section>
+          {/* セグメンテーションモデル（`ftg_cam`）・E2E LiDARモデル（`e2e_lidar`）の
+              選択は自動運転タブの `AutoPanel` へ移した（2026-08-28）——「どのモードで
+              走るか」と「そのモードが使うモデル」は同じ意思決定の一部なので、ここには置かない */}
 
           {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
               height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。

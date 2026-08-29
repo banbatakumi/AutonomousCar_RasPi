@@ -105,6 +105,7 @@ TOPIC_OWNER: dict[str, str] = {
     "image/front": "camera",
     "image/rear": "camera",
     "scan/cam": "cam_perception",
+    "cam/mask": "cam_perception",
     "line/cam": "line_perception",
 }
 

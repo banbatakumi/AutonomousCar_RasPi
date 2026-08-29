@@ -1,5 +1,5 @@
 /**
- * 速度・舵角の帯 — 層 B。
+ * 速度・舵角の帯 — 上段（前後カメラ・LiDAR）のすぐ下に置く、細い HUD ライン。
  *
  * ## 実測と指令を必ず並べる
  *
@@ -9,10 +9,17 @@
  * （`architecture.md` §14 Phase 1）。
  *
  * 速度は「自分が送っている指令」と「実測」を並べる。
+ *
+ * ## 超音波・走行距離は消した（2026-08-28）
+ *
+ * どちらも正常時に読む数字ではなく、超音波は自動停止が作動した時点で
+ * `StatusBar`/`AssistLamps` 側の異常表示が拾う。走行距離は診断タブで見れば足りる。
+ * 速度・舵角だけに絞り、**上のカメラ帯の下にぴったり収まる細い1本のバー**にした
+ * （指示による——太い計器然としたパネルではなく「かっこいい HUD の線」を狙う）。
  */
 import { useNumbers } from '../bus/live'
 import { useUi } from '../store/ui'
-import { deg, kmh, metres } from '../format'
+import { deg, kmh } from '../format'
 import { BiBar } from './BiBar'
 
 export function DriveBar() {
@@ -59,37 +66,6 @@ export function DriveBar() {
           flip
         />
       </div>
-
-      <div className="gauge narrow">
-        <div className="gauge-head">
-          <span className="label">超音波</span>
-          {/* 自動停止が効いているのは「距離が近い」からなので、数字のすぐ横に出す（v0.7） */}
-          {vs?.auto_stop_active && <span className="sub lv-bad">自動停止 作動中</span>}
-        </div>
-        <div className="kv">
-          <span>前</span>
-          <b className={near(vs?.us_front)}>{metres(vs?.us_front ?? null)}</b>
-          <span>後</span>
-          <b className={near(vs?.us_rear)}>{metres(vs?.us_rear ?? null)}</b>
-        </div>
-      </div>
-
-      <div className="gauge narrow">
-        <div className="gauge-head">
-          <span className="label">走行距離</span>
-        </div>
-        <div className="kv">
-          <span>中心線</span>
-          <b>{vs ? `${vs.odom_center.toFixed(2)}m` : '—'}</b>
-        </div>
-      </div>
     </div>
   )
-}
-
-function near(d: number | null | undefined): string {
-  if (d == null) return 'dim'
-  if (d < 0.25) return 'lv-bad'
-  if (d < 0.5) return 'lv-warn'
-  return ''
 }

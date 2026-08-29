@@ -263,18 +263,43 @@ button.on {
 /*
  * 上段は**前方・後方・LiDAR を等幅で3分割**。デバッグ用の画面なので前方を
  * 特別扱いしない（ラジコンビューは逆に前方を全面に使う。`.rc` を参照）。
+ *
+ * 下2段は 2026-08-28 に再編した——速度・舵角は上段の直下に細い帯（`bar`）で
+ * 独立させ、最下段は「モード選択・engage・判断」と「車体図」に分けた
+ * （指示による）。
+ *
+ * 2026-08-29: 最下段の2要素は元々グリッドの3等分列をそのまま
+ * `ctrl`（2列ぶん）/`car`（1列ぶん）に割り当てていたが、車体図は実寸の
+ * 縦長い比率（`DrivePanel.tsx` の viewBox）を保ったまま行の高さいっぱいに
+ * 拡大する作りなので、割り当てられた列幅（1/3）よりずっと狭い幅にしか
+ * ならず、左右に大きな余白が残っていた（指摘による）。列を分けるのをやめ、
+ * `bottom` 1エリアの中を `.auto-bottom` の flex 横並びにして、車体図
+ * （`.auto-car`、`flex: 0 0 auto`＝自分の縦横比が決める幅だけを取る）と
+ * `AutoPanel`（`.autopanel`、`flex:1`＝余った幅を全部取る）に分けた。
  */
 .drive {
   flex: 1;
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  /* 3段目は固定 420px（`auto` にすると `.auto-car` の `aspect-ratio` 由来の
+   * 内在サイズ（実測 552px）が `.autopanel` の実際のコンテンツ高さを大きく
+   * 上回り、行の高さがそちらに引っ張られて `.autopanel` の下に空白ができる
+   * トラブルを実測して踏んだ——grid の `align-items:stretch`（既定）は
+   * 「行の高さに揃える」だけで、行の高さ自体が `auto` だと `.auto-car` 側の
+   * 内在サイズにつられて膨らんでしまう。**行自体を固定値にして初めて
+   * 両セルが同じ高さになる**。`.autopanel`（`overflow-y:auto` で吸収）・
+   * `.auto-car`（`height:100%` の子がここに揃う）はどちらもこの値に暗黙で
+   * 依存しているので、変えるならこの1箇所だけでよい） */
+  grid-template-rows: minmax(0, 1fr) auto 420px;
+  /* **グリッドエリア名に `auto` は使わない**——`grid-area: auto` はエリア名の
+   * 参照ではなく CSS のキーワード `auto`（＝自動配置）として解釈されてしまい、
+   * 意図した列に auto-placement されず空白ができるという罠を実機で踏んだ。
+   * 同じ理由で最下段のエリア名も `bottom` にしてある */
   grid-template-areas:
     'camf camr lidar'
-    'auto auto auto'
     'bar  bar  bar'
-    'aux  aux  aux';
+    'bottom bottom bottom';
   gap: 6px;
   padding: 6px;
   position: relative;
@@ -399,17 +424,22 @@ button.on {
   border-radius: 4px;
 }
 
-/* ── 速度・舵角の帯 ──────────────────────────────────── */
+/* ── 速度・舵角の帯（上段のすぐ下、細い HUD ライン） ─────────────────
+ *
+ * 2026-08-28: 太い計器パネルから「上のカメラ帯にぴったり収まる細い1本の
+ * バー」へ全面改訂（指示による）。超音波・走行距離は削除済み
+ * （`DriveBar.tsx` 冒頭のコメント）ので、速度・舵角の2つだけを横並びにする。
+ */
 
 .drivebar {
   grid-area: bar;
   display: grid;
-  grid-template-columns: 1.4fr 1.4fr 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 5px;
-  padding: 8px 12px;
+  padding: 5px 16px;
 }
 
 /* 受信が途絶したら数字をグレーにする。**古い値を現在値に見せない** */
@@ -419,58 +449,70 @@ button.on {
 
 .gauge {
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 10px;
 }
 
 .gauge-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
 }
 
 .gauge .label {
   color: var(--dim);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .gauge .big {
-  font-size: 26px;
+  font-size: 18px;
   font-weight: 700;
   line-height: 1.1;
+  font-variant-numeric: tabular-nums;
 }
 
 .gauge .unit {
   color: var(--dim);
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .gauge .sub {
   color: var(--dim);
-  font-size: 11px;
+  font-size: 10px;
+  white-space: nowrap;
 }
 
+/* 停止判定のただし書き。**細い帯の高さは普段どおり**、出たときだけ改行して
+ * 2行目に収める（`flex-wrap` の折返し先。`width:100%` で強制改行する） */
 .gauge .note {
-  display: block;
+  width: 100%;
   color: var(--dim);
   font-size: 10px;
-  margin-top: 3px;
+  white-space: nowrap;
 }
 
+/* バーは帯の残りいっぱいに伸ばす。**細くグロウさせて「HUD の線」に見せる**
+ * （指示の「細くかっこいい感じ」への回答） */
 .bibar {
   position: relative;
-  height: 9px;
-  margin-top: 5px;
+  flex: 1;
+  min-width: 40px;
+  height: 4px;
+  border-radius: 2px;
   background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .bibar-zero {
   position: absolute;
   left: 50%;
-  top: 0;
-  bottom: 0;
+  top: -2px;
+  bottom: -2px;
   width: 1px;
   background: #3b4550;
 }
@@ -479,17 +521,20 @@ button.on {
   position: absolute;
   top: 0;
   bottom: 0;
+  border-radius: 2px;
   background: var(--accent);
-  opacity: .85;
+  box-shadow: 0 0 6px 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 /* 指令値は線で重ねる。実測との差＝アクチュエータの遅れ */
 .bibar-target {
   position: absolute;
-  top: -2px;
-  bottom: -2px;
+  top: -3px;
+  bottom: -3px;
   width: 2px;
+  border-radius: 1px;
   background: var(--live);
+  box-shadow: 0 0 5px 0 color-mix(in srgb, var(--live) 80%, transparent);
 }
 
 .kv {
@@ -512,17 +557,41 @@ button.on {
  *
  * **engage 中は枠を光らせる。** 自律で走っているのか手動なのかが、
  * 画面のどこを見ていても分かる必要がある。
+ *
+ * 2026-08-28 に3列固定グリッドから**縦積みの1カラム**へ作り直した
+ * （`AutoPanel.tsx` 冒頭「構造を作り直した」参照）。車体図と横並びで幅が
+ * 2/3 に減ったことで3列は窮屈すぎ、判断の数値が幅の途中で折り返して
+ * 値と単位が分離する崩れ方をしたため。高さは `.drive` 側の固定行
+ * （`grid-template-rows` の3段目、420px）で決まる——ここでは
+ * `max-height` を明示しない。2026-08-29 に親を grid セルから `.auto-bottom`
+ * の flex アイテムに変えたが、`align-items:stretch`（flex の既定）で行の
+ * 高さに自動的に揃うのは変わらない。`overflow-y:auto` はパラメータを開いて
+ * 中身がそれを超えたときだけ効く。
  */
 
+/* `.autopanel`（判断・パラメータ）と `.auto-car`（車体図）の横並び
+ * （2026-08-29、`.drive` 側コメント参照）。車体図の幅は自分の内在サイズ
+ * （高さ×縦横比）で決まり、`AutoPanel` が残りの横幅を全部取る */
+.auto-bottom {
+  grid-area: bottom;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+}
+
 .autopanel {
-  grid-area: auto;
-  display: grid;
-  grid-template-columns: minmax(180px, auto) minmax(200px, auto) minmax(240px, 1fr);
-  gap: 8px 18px;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 5px;
-  padding: 7px 12px;
+  padding: 8px 12px 10px;
 }
 
 .autopanel.engaged {
@@ -540,18 +609,73 @@ button.on {
   display: block;
 }
 
-.auto-mode-row {
+/* モード選択（走らせ方）と engage を横並びの1行に。狭い幅では折り返す */
+.auto-row1 {
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
-  margin-top: 3px;
+  gap: 8px 20px;
+  align-items: flex-start;
 }
 
-.auto-mode-row button {
+.auto-modes {
+  flex: 1 1 200px;
+}
+
+/* モード選択（2026-08-28、ボタン行から `<select>` に変更）。走らせ方は
+ * 1つしか選べないので、増えても場所を取らないドロップダウンの方が合う。
+ * `max-width` は 2026-08-29 追加——`.auto-modes` が `flex:1` で伸びる分だけ
+ * `width:100%` の select も横に間延びしていた（指摘による） */
+.auto-mode-select {
+  display: block;
+  margin-top: 3px;
+  width: 100%;
+  max-width: 320px;
   font-size: 12px;
+  padding: 4px 8px;
+}
+
+.auto-mode-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* モードごとのモデル選択（`ftg_cam`/`e2e_lidar`）。選んだモードのときだけ出る */
+.auto-model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.auto-model-label {
+  color: var(--dim);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+/* `flex:1` のままだと `.auto-mode-select` と同じ理由で行いっぱいに伸びていた
+ * ので `max-width` で頭打ちにする（2026-08-29、指摘による） */
+.auto-model-row select {
+  flex: 1;
+  min-width: 120px;
+  max-width: 320px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+/* 選択中モデルの備考（`ml_lidar/app.py`の備考欄由来）。折り返して全幅を使う */
+.auto-model-note {
+  flex: 1 0 100%;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: pre-wrap;
 }
 
 .auto-engage {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -577,50 +701,64 @@ button.on {
   opacity: .6;
 }
 
+.auto-state {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
 .auto-state .auto-reason {
   margin-top: 3px;
   font-size: 12px;
-  /* 理由は 1 行に収める。折り返すと下の数値が押し出されて配置が揺れる */
+  /* パネル自体が縦スクロールするので、ここは無理に1行へ詰めず折り返してよい */
+  line-height: 1.4;
+}
+
+/* 判断の数値。**「値＋単位」を1つのグリッドセルにまとめる**ことで、
+ * 折り返しの途中で値と単位が別の行に分離しないようにする（`AutoPanel.tsx`
+ * の `Stat` コンポーネント参照。以前の `.auto-metrics`（flex + baseline）は
+ * 値と単位を別要素にしていたため、幅が狭いとここで分離していた） */
+.auto-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px 10px;
+  margin-top: 6px;
+}
+
+.auto-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.auto-stat b {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.auto-stat span {
+  font-size: 10px;
+  color: var(--dim);
   white-space: nowrap;
 }
 
-.auto-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 10px;
-  align-items: baseline;
-  margin-top: 3px;
-  font-size: 12px;
-}
-
-.auto-metrics b {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.auto-metrics i {
-  font-style: normal;
-  color: var(--dim);
-  font-size: 10px;
-  margin-right: 4px;
-}
-
+/* 2026-08-29: `<details>` の折り畳みをやめ常時表示にした（指示による）ので
+ * ラベルは他セクション（`.auto-modes`/`.auto-state`）と同じ `.label` を使う */
 .auto-params {
-  grid-column: 1 / -1;
-  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
-.auto-params summary {
-  color: var(--dim);
-  font-size: 11px;
-  cursor: pointer;
-}
-
+/* 2026-08-28: `minmax(220px,1fr)` だと2列で頭打ちになり、奇数個だと
+ * 最後の1個だけ寂しく余っていた。狭めて幅なりに3〜4列まで流れるようにした
+ * （無理に2列に揃える理由が無い、との指摘） */
 .auto-param-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px 16px;
   margin-top: 6px;
 }
@@ -652,51 +790,44 @@ button.on {
   accent-color: var(--accent);
 }
 
-/* ── 補機（灯火・ブレーキ実トルク・押下状態・自動停止） ─────────────── */
-
-.aux {
-  grid-area: aux;
-  display: grid;
-  /* 4列目は自動停止（v0.7）。狭い画面では折り返してよい */
-  grid-template-columns: auto minmax(200px, 1fr) auto auto;
-  gap: 10px 18px;
+/* ── 車体図（`AutoPanel` の右隣、右下）────────────────────────────
+ *
+ * `components/rc/DrivePanel.tsx` をラジコンビューと共用（2026-08-28、指示による）。
+ * スリップ・トルク・電圧・障害物近接リングを一望できる図で、自律走行の監視にも
+ * そのまま使える。
+ *
+ * 2026-08-28: 幅基準（`max-width`）で縮めていたところ、パネルの実際の
+ * 高さに対してかなり小さくなり余白が目立つ指摘を受けた。**高さ基準に変更**
+ * ——`.drivepanel-wrap` を `height:100%` にして `aspect-ratio`（viewBox と
+ * 同じ比）で幅を逆算させれば、**パネルの高さいっぱいまで**車体図が拡大される。
+ *
+ * 2026-08-29: `.auto-car` はグリッドの1列（幅1/3）を丸ごと専有していたが、
+ * 上の高さ基準の仕組みだと車体図（縦長）はその幅までは伸びず、左右に
+ * 大きな余白が残っていた（指摘による）。`.auto-bottom`（flex 横並び）の子に
+ * 変えたことで `flex:0 1 auto` の既定どおり**自分の内在幅（=高さ×縦横比）
+ * だけ**を取るようになり、余白は消えて余った幅が `.autopanel` 側に渡る。
+ */
+.auto-car {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 5px;
-  padding: 6px 12px;
+  padding: 8px;
 }
 
-.aux section {
-  min-width: 0;
-}
-
-.aux .label {
-  color: var(--dim);
-  font-size: 11px;
-  display: block;
-}
-
-.aux .unit {
-  color: var(--dim);
-  font-size: 11px;
-}
-
-.aux-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 3px;
-}
-
-.aux-row b {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.aux-brake input[type='range'] {
-  flex: 1;
-  min-width: 120px;
-  accent-color: var(--accent);
+.auto-car .drivepanel-wrap {
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  /* viewBox（`DrivePanel.tsx`）と同じ比。viewBox を変えたらここも合わせる */
+  aspect-ratio: 146 / 246.52;
+  margin: 0 auto;
 }
 
 /* 3段の灯火モード。**今どれなのかが一目で分かること**だけを狙う */
@@ -1245,10 +1376,35 @@ button.on {
   margin: 0 auto;
 }
 
+/* `height: 100%` にして親の縦幅いっぱいに描画領域を確保し、viewBox の既定
+ * `preserveAspectRatio="xMidYMid meet"` で縦横比を保ったまま中央に収める
+ * （contain）。`.auto-car .drivepanel-wrap` は `height:100%` を明示済みなので
+ * 影響なし。RC 側（下記 `.rcpanel .drivepanel-wrap`）はこれで縦方向の上限が
+ * 効くようになる。 */
 .drivepanel {
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
+}
+
+/*
+ * ラジコン画面（`.rcpanel`、flex column）専用の追加制約（2026-08-29、指示による修正）。
+ *
+ * 以前は `.drivepanel-wrap` の高さが `width * 縦横比` の auto 決め打ちだった
+ * ため、横に広い画面でこの列の幅が広がると（`RcView.tsx` の `camsGap` 参照）
+ * 高さも比例して伸び切り、下にある `TempPanel`・走行距離がパネル外に
+ * 押し出されて見えなくなるバグがあった。
+ *
+ * `flex: 1 1 0` + `min-height: 0` で、温度計・走行距離など他の要素が使った
+ * 残りの縦幅しか使わないようにする——`height: 100%`（上記 `.drivepanel`）と
+ * 組み合わせることで、車体図は常にこの残り高さに収まる大きさになる。
+ * `.auto-car`（自動運転タブ）は横方向（row）の flex コンテナで、こちらの
+ * `flex-basis:0` を当ててしまうと `.auto-car .drivepanel-wrap` が想定している
+ * 「高さ基準で幅を逆算」の挙動を壊すため、`.rcpanel` 配下だけに絞っている。
+ */
+.rcpanel .drivepanel-wrap {
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .dp-body {
@@ -1979,7 +2135,10 @@ button.on {
 }
 
 .splash-emblem img {
-  width: min(100vmin, 2000px);
+  width: auto;
+  height: auto;
+  max-width: min(90vw, 1600px);
+  max-height: 70vh;
   filter: drop-shadow(0 0 24px rgba(242, 84, 75, 0.35));
   opacity: 0;
   transition: opacity 0.7s ease;

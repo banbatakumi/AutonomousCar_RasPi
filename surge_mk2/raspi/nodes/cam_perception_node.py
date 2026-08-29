@@ -48,10 +48,12 @@ import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
+from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import ImageRef, Scan, VehicleState  # noqa: E402
+from raspi.msgs import CamMask, ImageRef, Scan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
@@ -161,6 +163,17 @@ class CamPerceptionNode:
 
         self._reader = FrameReader()
 
+        #: GUI にマスクを重畳表示させるための JPEG エンコーダ（`cam/mask`）。
+        #: 共有メモリ・`camera_node.py` とは無関係に、この場でモデル入力解像度の
+        #: グレースケール1枚を直接エンコードする（`CamMask` の docstring参照）。
+        #: エンコーダが無い環境（`simplejpeg`/`Pillow` どちらも無い）では `None`
+        #: のままにし、`encode_mask_jpeg()` は諦めて `None` を返す
+        self._encode_jpeg, _ = make_encoder(quality=70)
+        #: 直近の `process_frame()` が作った走行可否マスク（bool, HxW）。
+        #: **`process_frame()` 自体の戻り値は `Scan` のまま変えていない**——
+        #: 既存のテスト・呼び出し側の契約を壊さないための側路（`encode_mask_jpeg()` 参照）
+        self._last_drivable: np.ndarray | None = None
+
     def close(self) -> None:
         self._reader.close()
 
@@ -220,6 +233,7 @@ class CamPerceptionNode:
         地平線付近の投影誤差が発散するため）。
         """
         drivable = self.model.infer(frame)
+        self._last_drivable = drivable
 
         pitch = self.base_ext.pitch
         if vs is not None and vs.imu_ok:
@@ -252,6 +266,19 @@ class CamPerceptionNode:
     def failed_frame(self, *, seq: int = 0) -> Scan:
         """フレームが読めない／推論が失敗した周期。**契約2＝全セクタ壁扱い。**"""
         return Scan(dist=[0.0] * 360, sector_seen=[False] * 12, seq=seq)
+
+    def encode_mask_jpeg(self) -> bytes | None:
+        """直近の `process_frame()` が作った走行可否マスクを JPEG 化する（`cam/mask` 用）。
+
+        白＝走行可能、黒＝不可のグレースケール1枚（モデル入力解像度のまま、
+        例 224×224）。エンコーダが無い環境、または `process_frame()` がまだ
+        一度も呼ばれていない（＝モデル未選択）間は `None`——呼び出し元
+        （`run()`）はその場合 publish を諦める（カメラ映像そのものと同じ扱い）。
+        """
+        if self._encode_jpeg is None or self._last_drivable is None:
+            return None
+        img = (self._last_drivable.astype(np.uint8)) * 255
+        return self._encode_jpeg(img, "GRAY")
 
     # ── 共有メモリの読み取り（`raspi/core/frame_reader.py` に委譲） ──
 
@@ -291,6 +318,11 @@ class CamPerceptionNode:
                 else:
                     frame, t_capture = got
                     st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
+                    # 推論に成功した周期だけマスクを配る。**failed_frame の間は送らない**
+                    # ——GUI 側は直前のマスクが静止して見えるだけで、暴走はしない
+                    mask_jpeg = self.encode_mask_jpeg()
+                    if mask_jpeg is not None:
+                        pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
             pub.send(TOPIC_SCAN_CAM, st)
             seq += 1
 

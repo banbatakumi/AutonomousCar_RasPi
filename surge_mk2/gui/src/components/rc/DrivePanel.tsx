@@ -135,11 +135,20 @@ export function DrivePanel() {
 
   return (
     <div className="drivepanel-wrap">
-      {/* viewBox は実際の描画内容（車体・タイヤ・近接リング、x=34.67〜165.33）に
-       * 合わせて横だけ詰めてある。0〜200のフル幅のままだと、実寸で描いている
-       * コンテンツの左右に大きな空白ができ、`.drivepanel-wrap` の max-width を
-       * 上げても埋まらなかった（実測して気づいた——SVG 側の余白が真因） */}
-      <svg viewBox="27 0 146 260" className="drivepanel">
+      {/* viewBox は実際の描画内容（車体・タイヤ・近接リング）に合わせて
+       * 四辺とも同じ余白（≈7.7単位）になるよう詰めてある。0〜200のフル幅の
+       * ままだと、実寸で描いているコンテンツの左右に大きな空白ができ、
+       * `.drivepanel-wrap` の max-width を上げても埋まらなかった
+       * （実測して気づいた——SVG 側の余白が真因）。
+       *
+       * 2026-08-29: 横（x=34.67〜165.33、余白7.67ずつ）は揃っていたが、縦は
+       * 近接リング最前部（y≈1.4）にほぼ余白が無いのに対し最後部（y≈232.6）
+       * には27ぶんも余っていて、車体図の上下の余白が均一でないという指摘を
+       * 受けた。`y0`/`height` を車体図の縦の中心に合わせて引き直し、横と
+       * 同じ ≈7.67 の余白に揃えた（`ProximityRing.tsx` の `RING_GAP_M`
+       * を変えたら要再計算——`raspi/auto/*` と違い手計算の定数なので、
+       * 変えたらこのコメントの数値ごと更新すること）。 */}
+      <svg viewBox="27 -6.26 146 246.52" className="drivepanel">
         <defs>
           <mask id="dp-body-mask">
             <rect x={BODY_X} y={BODY_Y} width={BODY_W} height={BODY_H} rx={16} fill="white" />

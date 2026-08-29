@@ -9,7 +9,7 @@
  *   3. 接続状態・設定 → イベント時だけ zustand（`store/ui.ts`）
  */
 import { useSyncExternalStore } from 'react'
-import type { AutoState, LinkDiag, MapData, Scan, VehicleState } from '../types'
+import type { AutoState, LineScan, LinkDiag, MapData, Scan, VehicleState } from '../types'
 
 /** 最新値。**書き換わり続けるので、React から直接読まないこと。** */
 export const live = {
@@ -18,6 +18,8 @@ export const live = {
   link: null as LinkDiag | null,
   /** planning_node の判断。LiDAR ビューが rAF で読んでギャップを重畳する */
   auto: null as AutoState | null,
+  /** `line_trace` が認識している白線の目標点。`CameraView` が rAF で読んで重畳する */
+  lineCam: null as LineScan | null,
   /** 地図と経路（`/ws/map`）。**点群と違って変わったときだけ届く**ので、
    *  接続が切れても消さない（`clearLive` で触らない）。最後に見えていた地図が
    *  残っている方が、再接続待ちの間も状況を読める */
@@ -59,6 +61,7 @@ export function noteTelemetry(
   scan: Scan | null,
   auto: AutoState | null,
   piTempC: number | null = null,
+  lineCam: LineScan | null = null,
 ) {
   const now = performance.now()
   if (vs) live.vs = vs
@@ -68,6 +71,9 @@ export function noteTelemetry(
     live.auto = auto
     live.lastAutoMs = now
   }
+  // `auto` と同じ扱い（`line_perception_node` が動いていれば常に非 null）。
+  // 見失った（`seen=false`）ことも現在値として届くので、それ自体は上書きしてよい
+  if (lineCam) live.lineCam = lineCam
   if (scan) {
     live.scan = scan
     live.lastScanMs = now
@@ -90,6 +96,7 @@ export function clearLive() {
   live.scan = null
   live.link = null
   live.auto = null
+  live.lineCam = null
   live.rxHz = 0
   live.scanHz = 0
 }
