@@ -96,15 +96,25 @@ class SimE2EEnv:
     速度を混ぜているのは、点群だけでは「今どれくらいの速さで走っているか」が
     分からず、速度依存の減速判断（例: 速いほど早めに舵を戻す）を学びにくいため
     （2026-08-28、バンビの指摘で追加）。
+
+    ## 横偏差ペナルティは「中心線からの距離」ではなく「道幅の余白を使い切った分」
+
+    以前は`cross_track_weight * abs(cross_track)`で常に中心線への張り付きを要求
+    していたため、コーナーの外側から入って内側を突くレーシングラインが**構造的に
+    損**になっていた（2026-08-28、バンビの指摘）。`cross_track_margin_frac`だけ
+    道幅の半分を「自由に使ってよい余白」として与え、そこを超えた分だけ罰する
+    ことで、コース内のどこを通ってもよい自由度を残しつつ壁への接近だけ抑える。
     """
 
     def __init__(self, courses: list[Course] | None = None, *,
                 course_fn: Callable[[np.random.Generator], Course] | None = None,
                 spec: VehicleSpec | None = None,
                 max_steps: int = 2000, max_range: float = LIDAR_C_SATURATED_M,
-                max_speed: float = 1.5, max_steer: float = 0.45,
+                max_speed: float = 1.5,
                 collision_penalty: float = -5.0, progress_weight: float = 1.0,
-                cross_track_weight: float = 0.5, start_jitter_m: float = 0.03,
+                cross_track_weight: float = 0.5, cross_track_margin_frac: float = 0.5,
+                steer_tau: float = 0.10, steer_rate_weight: float = 0.2,
+                start_jitter_m: float = 0.03,
                 start_jitter_rad: float = math.radians(5), sim_params: SimParams | None = None,
                 randomize_lidar: bool = True,
                 lidar_noise_sigma_range: tuple[float, float] = (0.0, 0.03),
@@ -126,6 +136,28 @@ class SimE2EEnv:
             `*_range`からランダムに引き直す（訓練用。センサ条件のドメインランダム化）。
             `False`なら`sim_params`（既定`SimParams()`）を固定で使う（評価用。条件を
             揃えて比較したいので`ml_lidar/train_rl.py`の`make_eval_env`はこちらを使う）
+        :param cross_track_margin_frac: 道幅の半分のうち、ペナルティ無しで自由に
+            使ってよい割合。既定0.5＝道幅1.0mのコースなら中心線から±0.25mは
+            ノーペナルティ、そこから壁（±0.5m）までの残り±0.25mだけ
+            `cross_track_weight`で罰する。0にすると常に中心線への距離を罰する
+            旧来の挙動に戻る
+        :param steer_tau: 舵指令に掛ける一次遅れの時定数 [s]。`raspi/auto/e2e_lidar.py`
+            の`steer_tau`ParamSpec（既定0.10）と同じ仕組み・同じ既定値を学習側にも
+            適用する（2026-08-29、バンビの「舵が不安定」報告の診断を受けて追加）。
+            以前は方策の生出力をそのまま車両へ渡していたため、**推論側だけに付いていた
+            平滑化フィルタの分だけ学習時と実行時で応答が食い違っていた**
+            （方策は「自分の出力が即座に反映される」前提で学習していたのに、実際は
+            なまった値が反映される）。0にすると平滑化なし（旧来の挙動）
+        :param steer_rate_weight: 平滑化後の舵角が1ステップで変化した量`|Δsteer|`に
+            掛ける罰則の重み。`steer_tau`によるなまりだけでは、方策自身が滑らかな
+            出力を選ぶ動機にはならない（急な生出力を出しても、なまった後の見た目は
+            滑らかに見えてしまう）ため、実際に車両へ伝わる舵角の変化量そのものを
+            直接罰することで「滑らかに操舵した方が得」という圧力を報酬に持たせる
+
+        最大舵角は独立した引数を持たない——**`spec.max_steer`（`config/vehicle.toml`の
+        車両物理限界）をそのまま使う**（2026-08-28、バンビの指示。自動運転planner側の
+        `max_steer`ParamSpec全廃と同じ方針を訓練環境にも揃えた。テストで別の値を
+        試したいときは`spec=VehicleSpec(max_steer=...)`を渡すこと）。
         """
         if courses is None and course_fn is None:
             raise ValueError("courses か course_fn のどちらかは要ります")
@@ -135,10 +167,12 @@ class SimE2EEnv:
         self.max_steps = max_steps
         self.max_range = max_range
         self.max_speed = max_speed
-        self.max_steer = max_steer
+        self.cross_track_margin_frac = cross_track_margin_frac
         self.collision_penalty = collision_penalty
         self.progress_weight = progress_weight
         self.cross_track_weight = cross_track_weight
+        self.steer_tau = steer_tau
+        self.steer_rate_weight = steer_rate_weight
         self.start_jitter_m = start_jitter_m
         self.start_jitter_rad = start_jitter_rad
         self.sim_params = sim_params or SimParams()
@@ -158,6 +192,7 @@ class SimE2EEnv:
         self._last_scan: Scan | None = None
         self._t_ns = 0
         self._steps = 0
+        self._steer = 0.0
 
     # ── エピソード管理 ──
 
@@ -185,6 +220,7 @@ class SimE2EEnv:
         self._progress.reset(self.vehicle.x, self.vehicle.y)
         self._t_ns = 0
         self._steps = 0
+        self._steer = 0.0
 
         self._last_scan = self._prime_scan()
         return self._obs(self._last_scan)
@@ -219,11 +255,21 @@ class SimE2EEnv:
 
     def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict]:
         """:param action: `[steer, speed]`（物理単位、呼び出し側でクランプ済み前提でも
-            ここでも安全側にもう一度クランプする）。"""
-        steer = float(np.clip(action[0], -self.max_steer, self.max_steer))
+            ここでも安全側にもう一度クランプする）。`steer`は方策の生出力——実際に
+            車両へ渡す前に`steer_tau`の一次遅れを通す（`raspi/auto/e2e_lidar.py`と
+            同じ変換。下の`steer_tau`docstring参照）。"""
+        steer_cmd = float(np.clip(action[0], -self.spec.max_steer, self.spec.max_steer))
         speed = float(np.clip(action[1], 0.0, self.max_speed))
+
+        dt = _STEP_NS / NS
+        tau = self.steer_tau
+        alpha = 1.0 if tau <= 1e-3 else 1.0 - math.exp(-dt / tau)
+        prev_steer = self._steer
+        self._steer += (steer_cmd - self._steer) * alpha
+        steer = self._steer
+
         self.vehicle.apply(DriveInput(armed=True, target_speed=speed, target_steer=steer))
-        self.vehicle.step(_STEP_NS / NS)
+        self.vehicle.step(dt)
         self._t_ns += _STEP_NS
 
         hit = self.course.collides(self.vehicle.x, self.vehicle.y, self.vehicle.yaw, self._body)
@@ -235,7 +281,12 @@ class SimE2EEnv:
                 self._last_scan = s
 
         progress, cross_track = self._progress.update(self.vehicle.x, self.vehicle.y)
-        reward = self.progress_weight * progress - self.cross_track_weight * abs(cross_track)
+        half_w = (self.course.width or 1.0) / 2.0
+        margin = half_w * self.cross_track_margin_frac
+        cross_excess = max(0.0, abs(cross_track) - margin)
+        steer_rate = abs(self._steer - prev_steer)
+        reward = (self.progress_weight * progress - self.cross_track_weight * cross_excess
+                 - self.steer_rate_weight * steer_rate)
 
         terminated = False
         if hit:

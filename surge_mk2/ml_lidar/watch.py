@@ -23,7 +23,9 @@ import math
 import sys
 import time
 from collections import deque
+from functools import partial
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # surge_mk2/
 
@@ -32,39 +34,72 @@ import pygame  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
+from ml_lidar.export_onnx_rl import load_run_config_defaults  # noqa: E402
 from sim import ui  # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
-from sim.random_course import generate_random_course  # noqa: E402
+from sim.random_course import generate_random_course_dr  # noqa: E402
 
-__all__ = ["Panel", "build_courses"]
+__all__ = ["Panel", "build_panels"]
 
 TRAIL_LEN = 150
 
 
-def build_courses(n: int, *, seed: int = 0) -> list[Course]:
-    """`circuit`/`fuji`（評価に使う既知コース）を先頭に置き、残りをランダムで埋める。
-    `train_rl.py`の評価コースと同じものを見せることで、「未知コースへの汎化」を
-    そのまま目視できるようにしてある。"""
-    known = [Course.load(DEFAULT_COURSE_DIR / "circuit.json"),
-            Course.load(DEFAULT_COURSE_DIR / "fuji.json")]
-    courses = known[:n]
-    if n > len(courses):
-        rng = np.random.default_rng(seed)
-        courses += [generate_random_course(rng, name=f"rand{i}")
-                   for i in range(n - len(courses))]
-    return courses
+def build_panels(n: int, *, max_steps: int, max_speed: float, steer_tau: float,
+                 steer_rate_weight: float, seed: int = 0) -> list["Panel"]:
+    """`circuit`/`fuji`（評価に使う既知コース、幅1.0m固定）を先頭に置き、残りは
+    **`train_rl.py`の学習と全く同じ`generate_random_course_dr`**（形状だけでなく
+    道幅も0.7〜1.3mで毎エピソード引き直す）で埋める。
+
+    以前は`generate_random_course`（幅1.0m固定）を起動時に1回だけ生成し、以後
+    ずっと同じコースを使い回していたため、`circuit`/`fuji`はもちろんランダム
+    埋めのコースまで含めて**観戦ビューアには常に幅1.0mの道しか映らなかった**
+    （2026-08-29、バンビの指摘で発覚）。実際の学習が経験している「毎エピソード
+    形も道幅も変わる」感覚に近づけるため、ランダム埋めのパネルは`course_fn`
+    （`Panel`が`env.reset()`のたびに新しいコースを作る）に切り替えた。
+    `circuit`/`fuji`はこれまで通り固定のまま——`train_rl.py`の評価コースと
+    同じものを見せることで「未知コース形状への汎化」を目視できる意図は変えない。
+    """
+    known = [("circuit", Course.load(DEFAULT_COURSE_DIR / "circuit.json")),
+            ("fuji", Course.load(DEFAULT_COURSE_DIR / "fuji.json"))][:n]
+    panels = [Panel(label, course=c, max_steps=max_steps, max_speed=max_speed,
+                    steer_tau=steer_tau, steer_rate_weight=steer_rate_weight, seed=i)
+             for i, (label, c) in enumerate(known)]
+    for i in range(len(known), n):
+        label = f"rand{i}"
+        panels.append(Panel(label, course_fn=partial(generate_random_course_dr, name=label),
+                            max_steps=max_steps, max_speed=max_speed, steer_tau=steer_tau,
+                            steer_rate_weight=steer_rate_weight, seed=seed + i))
+    return panels
 
 
 class Panel:
-    """1コース分の観戦用インスタンス。学習ワーカーとは無関係の独立した環境。"""
+    """1コース分の観戦用インスタンス。学習ワーカーとは無関係の独立した環境。
 
-    def __init__(self, course: Course, *, max_steps: int, max_speed: float,
-                max_steer: float, seed: int) -> None:
-        self.course = course
-        self.env = GymSurgeEnv([course], max_steps=max_steps, max_speed=max_speed,
-                               max_steer=max_steer, seed=seed)
+    `course`（固定）と`course_fn`（`env.reset()`のたびに新しいコースを作る）は
+    `SimE2EEnv`と同じく排他——どちらか一方を渡す。`course_fn`を渡した場合、
+    コースはエピソードごとに変わるので**`self.course`は固定属性ではなくプロパティ**
+    にしてある（常に今のエピソードのコースを指す）。
+    """
+
+    def __init__(self, label: str, *, course: Course | None = None,
+                course_fn: Callable[[np.random.Generator], Course] | None = None,
+                max_steps: int, max_speed: float, steer_tau: float,
+                steer_rate_weight: float, seed: int) -> None:
+        self.label = label
+        self.env = GymSurgeEnv([course] if course is not None else None,
+                               course_fn=course_fn, max_steps=max_steps,
+                               max_speed=max_speed, steer_tau=steer_tau,
+                               steer_rate_weight=steer_rate_weight, seed=seed)
         self.obs, _ = self.env.reset()
         self.trail: deque[tuple[float, float]] = deque(maxlen=TRAIL_LEN)
+        #: コースが変わるたびに増える（`_draw_panel`の地図キャッシュキーに使う。
+        #: `course_fn`パネルは同じ`label`のまま中身が変わるので、`label`だけを
+        #: キーにすると古い地図が描画され続けてしまう）
+        self.episode = 0
+
+    @property
+    def course(self) -> Course:
+        return self.env.sim.course
 
     def step(self, model: PPO | None) -> None:
         if model is not None:
@@ -79,6 +114,7 @@ class Panel:
         if terminated or truncated:
             self.obs, _ = self.env.reset()
             self.trail.clear()
+            self.episode += 1
 
 
 def _draw_panel(screen: pygame.Surface, p: Panel, x0: int, y0: int, w: int, h: int,
@@ -95,7 +131,9 @@ def _draw_panel(screen: pygame.Surface, p: Panel, x0: int, y0: int, w: int, h: i
     ox_px = x0 + pad + (avail_w - dw) // 2
     oy_px = y0 + pad + (avail_h - dh) // 2
 
-    surf = ui.map_surface(p.course, dw, dh, key=p.course.name)
+    # `key`は`p.episode`込み——`course_fn`パネルは`p.label`が同じまま中身（形・道幅）
+    # が変わるので、`label`だけをキーにすると前のエピソードの地図が残ってしまう
+    surf = ui.map_surface(p.course, dw, dh, key=f"{p.label}-{p.episode}")
     screen.blit(surf, (ox_px, oy_px))
 
     ox, oy = p.course.origin
@@ -110,7 +148,8 @@ def _draw_panel(screen: pygame.Surface, p: Panel, x0: int, y0: int, w: int, h: i
     px, py = to_px(v.x, v.y)
     ui.arrow(screen, px, py, v.yaw, 10, ui.BAD if v.collided else ui.OK)
 
-    screen.blit(font.render(p.course.name, True, ui.DIM), (x0 + pad, y0 + h - 16))
+    label = f"{p.label} 幅{p.course.width or 1.0:.2f}m"
+    screen.blit(font.render(label, True, ui.DIM), (x0 + pad, y0 + h - 16))
     pygame.draw.rect(screen, ui.HAIR, (x0, y0, w, h), width=1)
 
 
@@ -119,18 +158,41 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", type=Path, default=Path("ml_lidar/runs/ppo_e2e/best_model.zip"))
     ap.add_argument("--panels", type=int, default=6)
-    ap.add_argument("--max-steps", type=int, default=1500)
-    ap.add_argument("--max-speed", type=float, default=1.5)
-    ap.add_argument("--max-steer", type=float, default=0.45)
+    ap.add_argument("--max-steps", type=int, default=None,
+                    help="省略時は--modelと同じディレクトリのrun_config.json"
+                         "（train_rl.pyが書く）から読む。無ければ1500")
+    ap.add_argument("--max-speed", type=float, default=None,
+                    help="省略時はrun_config.jsonから読む。無ければ1.5"
+                         "（★ここが学習時の値とズレると、モデルの速度出力を"
+                         "違う物理レンジで解釈してしまう。`export_onnx_rl.py`の"
+                         "--max-speedと同じ注意点）")
+    ap.add_argument("--steer-tau", type=float, default=None,
+                    help="省略時はrun_config.jsonから読む。無ければ0.10"
+                         "（`SimE2EEnv`の既定と同じ）")
+    ap.add_argument("--steer-rate-weight", type=float, default=None,
+                    help="省略時はrun_config.jsonから読む。無ければ0.2"
+                         "（`SimE2EEnv`の既定と同じ）")
     ap.add_argument("--reload-interval", type=float, default=3.0,
                     help="モデルの再読込を試みる間隔 [s]")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--window", type=int, default=960, help="ウィンドウの一辺 [px]")
     args = ap.parse_args()
 
-    panels = [Panel(c, max_steps=args.max_steps, max_speed=args.max_speed,
-                    max_steer=args.max_steer, seed=i)
-             for i, c in enumerate(build_courses(args.panels))]
+    # ★観戦環境を学習環境になるべく揃える（2026-08-29、バンビの指摘で追加）。
+    # `--model`と同じディレクトリの`run_config.json`（`train_rl.py`が書く）から
+    # 実際にその run が使った値を拾う。CLI指定があればそちらを優先
+    defaults = load_run_config_defaults(args.model)
+    max_steps = args.max_steps if args.max_steps is not None else int(defaults.get("max_steps", 1500))
+    max_speed = args.max_speed if args.max_speed is not None else float(defaults.get("max_speed", 1.5))
+    steer_tau = args.steer_tau if args.steer_tau is not None else float(defaults.get("steer_tau", 0.10))
+    steer_rate_weight = (args.steer_rate_weight if args.steer_rate_weight is not None
+                         else float(defaults.get("steer_rate_weight", 0.2)))
+    print(f"# max_steps={max_steps} max_speed={max_speed} steer_tau={steer_tau} "
+          f"steer_rate_weight={steer_rate_weight}"
+          f"{'（run_config.jsonから）' if defaults else '（run_config.json無し、既定値）'}")
+
+    panels = build_panels(args.panels, max_steps=max_steps, max_speed=max_speed,
+                          steer_tau=steer_tau, steer_rate_weight=steer_rate_weight)
 
     pygame.init()
     pygame.display.set_caption("E2E LiDAR — 観戦ビューア")
@@ -140,9 +202,6 @@ def main() -> int:
 
     cols = math.ceil(math.sqrt(len(panels)))
     rows = math.ceil(len(panels) / cols)
-    #: 全パネルで最大のコースがちょうどパネルに収まる縮尺を1回だけ決める。
-    #: コース自体は起動後に変わらないので、毎フレーム計算し直す必要はない
-    max_extent = max(max(p.course.size_m) for p in panels)
 
     model: PPO | None = None
     model_mtime = 0.0
@@ -185,6 +244,10 @@ def main() -> int:
 
         w, h = screen.get_size()
         cell_w, cell_h = w // cols, h // rows
+        # ★`rand*`パネルは`course_fn`でエピソードごとにコースが変わる（形も道幅も）
+        # ため、`max_extent`はもう起動時の1回だけでは済まず毎フレーム出し直す
+        # （2026-08-29。パネル数は多くても9個程度なので負荷は無視できる）
+        max_extent = max(max(p.course.size_m) for p in panels)
         # 余白(pad*2+ラベル16px)ぶんを引いた「地図に使える一辺」を基準に共通縮尺を出す
         px_per_m = (min(cell_w, cell_h) - 4 * 2 - 16) / max_extent
         screen.fill(ui.BG)

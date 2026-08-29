@@ -11,15 +11,37 @@
 できているか」を学習の外側から見張る。評価環境はLiDARノイズも固定値（既定の
 `SimParams()`）にして、条件を揃えて比較できるようにしてある。
 
+学習コースの道幅も毎エピソード0.7〜1.3mでランダム化する（`generate_random_course_dr`、
+2026-08-28。道幅1.0m固定に過学習し大会コースの狭い/広い区間に汎化できないおそれが
+あったため）。**評価用の`circuit`/`fuji`は幅1.0m固定のまま変更していない**——比較の
+条件を揃えるためで、評価スコアの改善だけでは道幅への汎化は測れない点に注意。
+
 評価スコアが `--early-stop-patience` 回連続で更新されなければ、`--timesteps` に
 達していなくても学習を打ち切る（既定で有効。`--early-stop-patience 0` で無効化）。
+
+**`--resume-from <チェックポイント.zip>`で途中から再開できる**（2026-08-28追加）。
+`PPO.load()`で読み込み、`reset_num_timesteps=False`で続きから数える。`--timesteps`は
+**累計の目標値**（再開後に追加でNステップ学習したいなら「読み込んだ時点の
+`num_timesteps` + N」を指定すること）。指定しなければ従来通りゼロから新規に作る。
+
+**★`--resume-from`を指定しない（＝新規学習）ときは、`--out`が既存でも中身を
+一度空にしてから作り直す**（2026-08-28追加）。SB3はTensorBoardログを
+`tensorboard_log`で指定すると、`reset_num_timesteps=True`のたびに
+`{アルゴリズム名}_{N+1}`という新しいサブフォルダを増やし続ける仕様のため、
+同じ`--out`（＝同じrun名）で新規学習を繰り返すと、TensorBoardに`PPO_1`・`PPO_2`・
+`PPO_3`…と過去の（もう存在しない）モデルの学習曲線がゴミとして積み上がってしまう
+（バンビが実際に踏んだ）。`--out`を「新規学習ならその名前の中身を空にする」という
+約束にすることで解決する。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import sys
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # surge_mk2/
 
@@ -33,12 +55,29 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv  # noqa:
 
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
-from sim.random_course import generate_random_course  # noqa: E402
+from sim.random_course import generate_random_course_dr  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["make_train_env_fn", "make_eval_env"]
+__all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule"]
 
 
-def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float, max_steer: float):
+def linear_schedule(initial_value: float) -> Callable[[float], float]:
+    """SB3の`learning_rate`が受け付ける形（`progress_remaining`は1.0→0.0で減る）。
+
+    学習後半ほど1回の更新を小さくして、方策が大きくズレて崩れるのを防ぐ
+    （2026-08-29、v2で2M step付近をピークに3M stepまで評価スコアが下がり続ける
+    「方策崩壊」が起きたことを受けて追加。定率の学習率のままだと、方策がある程度
+    良くなった後も同じ大きさの更新を続けてしまい、良い状態から押し出されやすい）。
+    """
+
+    def _schedule(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+
+    return _schedule
+
+
+def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
+                      steer_tau: float, steer_rate_weight: float):
     """ワーカープロセスの中で、**エピソードのたびに新しいランダムコースを作る**
     `GymSurgeEnv` を返す関数を作る。
 
@@ -46,35 +85,40 @@ def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float, max_steer:
     （プールを増やせば緩和はできるが、根本的には解決しない）。生成は軽い(数ms)ので、
     毎回新しく作らせて実質無限のコース多様性にする。
 
-    `course_fn=generate_random_course`をそのまま渡す。`SimE2EEnv`は`self.rng`
+    `course_fn=generate_random_course_dr`をそのまま渡す。`SimE2EEnv`は`self.rng`
     （`reset(seed=...)`で正しく差し替わる、環境自身の乱数状態）を渡して呼ぶ設計に
-    してあるので、外部に別のRNGを持たなくてよい（`generate_random_course(rng, ...)`
+    してあるので、外部に別のRNGを持たなくてよい（`generate_random_course_dr(rng, ...)`
     の第一引数がそのままこの形）。
 
     LiDARノイズも既定で毎エピソードランダム化される（`SimE2EEnv`の`randomize_lidar`
     既定`True`）——ドメインランダム化で、シムの既定ノイズ量以外の条件にも頑健にする。
+    道幅も`generate_random_course_dr`が毎エピソード0.7〜1.3mでランダム化する
+    （2026-08-28、幅1.0m固定への過学習を避けるため。詳細は`sim/random_course.py`）。
     """
 
     def _make():
-        env = GymSurgeEnv(course_fn=generate_random_course, max_steps=max_steps,
-                          max_speed=max_speed, max_steer=max_steer, seed=seed)
+        env = GymSurgeEnv(course_fn=generate_random_course_dr, max_steps=max_steps,
+                          max_speed=max_speed, seed=seed, steer_tau=steer_tau,
+                          steer_rate_weight=steer_rate_weight)
         return Monitor(env)   # エピソード報酬/長さの集計を正しく取るため
 
     return _make
 
 
-def make_eval_env(*, max_steps: int, max_speed: float, max_steer: float,
-                  seed: int = 0) -> GymSurgeEnv:
+def make_eval_env(*, max_steps: int, max_speed: float, steer_tau: float,
+                  steer_rate_weight: float, seed: int = 0) -> GymSurgeEnv:
     """`circuit`/`fuji` ——学習に使っていない既知コースで評価する。
 
     `randomize_lidar=False`でLiDARノイズも既定値に固定する。学習側はノイズを
     ランダム化しているので、評価だけは条件を揃えないと「今回は運良く/悪くノイズが
-    軽かった」で数字がぶれてしまう。
+    軽かった」で数字がぶれてしまう。`steer_tau`/`steer_rate_weight`は学習側と揃える
+    （実運用の滑らかさをそのまま評価スコア・`best_model`選定に反映させるため）。
     """
     courses = [Course.load(DEFAULT_COURSE_DIR / "circuit.json"),
               Course.load(DEFAULT_COURSE_DIR / "fuji.json")]
     return GymSurgeEnv(courses, max_steps=max_steps, max_speed=max_speed,
-                       max_steer=max_steer, seed=seed, randomize_lidar=False)
+                       seed=seed, randomize_lidar=False, steer_tau=steer_tau,
+                       steer_rate_weight=steer_rate_weight)
 
 
 def main() -> int:
@@ -84,37 +128,104 @@ def main() -> int:
     ap.add_argument("--n-envs", type=int, default=8)
     ap.add_argument("--max-steps", type=int, default=1500, help="1エピソードの最大ステップ数")
     ap.add_argument("--max-speed", type=float, default=1.5)
-    ap.add_argument("--max-steer", type=float, default=0.45)
     ap.add_argument("--eval-freq", type=int, default=20_000,
                     help="このステップ数ごとに circuit/fuji で評価する（全ワーカー合計換算）")
-    ap.add_argument("--n-eval-episodes", type=int, default=10)
+    ap.add_argument("--n-eval-episodes", type=int, default=30,
+                    help="評価1回あたりのエピソード数。少ないとエピソード間のばらつき"
+                         "（ランダムな開始位置・コース内の局所地形）に埋もれて"
+                         "`best_model`の選定がノイズの山を拾うだけになる"
+                         "（2026-08-29、v2の診断で発覚。旧既定は10）")
     ap.add_argument("--early-stop-patience", type=int, default=10,
                     help="評価スコアがこの回数連続で更新されなかったら学習を打ち切る。"
                          "0で無効（--timesteps まで律儀に回り続ける）")
     ap.add_argument("--early-stop-min-evals", type=int, default=10,
                     help="打ち切りを許可するまでの最低評価回数。学習ごく初期の"
                          "ノイズだけで早まって打ち切らないための下駄")
+    ap.add_argument("--target-kl", type=float, default=0.03,
+                    help="1回の方策更新で許容するKLダイバージェンスの上限。超えたら"
+                         "そのエポックの残りを打ち切る（SB3のPPOの機能）。0以下で無効。"
+                         "★2026-08-29追加: v2の学習曲線が2M step付近でピークに達した後"
+                         "3M stepまで下がり続ける「方策崩壊」を起こしていたのを受けて、"
+                         "更新1回の破壊力に上限を設ける")
+    ap.add_argument("--n-epochs", type=int, default=4,
+                    help="1回のロールアウトを何エポック再利用して勾配更新するか"
+                         "（SB3既定は10）。同じデータを回しすぎると方策が一気にズレて"
+                         "不安定化しやすいため既定を下げてある（2026-08-29、方策崩壊対策）")
+    ap.add_argument("--learning-rate", type=float, default=3e-4,
+                    help="学習率の初期値。学習の進み具合（`--timesteps`に対する残り割合）"
+                         "に比例して線形に0まで下げる（`linear_schedule()`）。学習後半の"
+                         "更新を小さくして収束を安定させる（2026-08-29、方策崩壊対策）")
+    ap.add_argument("--steer-tau", type=float, default=0.10,
+                    help="舵指令に掛ける一次遅れの時定数[s]。`raspi/auto/e2e_lidar.py`の"
+                         "`steer_tau`ParamSpec既定と同じ値を学習側にも適用し、推論時にだけ"
+                         "付いていた平滑化フィルタとのズレを無くす（2026-08-29追加）")
+    ap.add_argument("--steer-rate-weight", type=float, default=0.2,
+                    help="平滑化後の舵角の1ステップ変化量に掛ける罰則の重み。"
+                         "方策自身に「滑らかな操舵の方が得」という圧力を与える"
+                         "（2026-08-29追加。`sim/gym_env.py`の`SimE2EEnv`docstring参照）")
+    ap.add_argument("--hidden-sizes", type=int, nargs="+", default=[256, 256],
+                    help="方策/価値ネットワークの隠れ層サイズ（SB3既定は[64,64]）。"
+                         "★2026-08-29追加: 観測は点群361点+速度1個=362次元あるのに、"
+                         "SB3の既定[64,64]だと最初の層だけで362→64へ一気に圧縮されて"
+                         "しまい、点群の空間的なパターン（ギャップ・壁の位置）を"
+                         "表現する容量が乏しいのではという疑いがあった。CPU実測では"
+                         "[256,256]でも[64,64]の約1.5倍の学習時間で収まる")
     ap.add_argument("--out", type=Path, default=Path("ml_lidar/runs/ppo_e2e"))
+    ap.add_argument("--resume-from", type=Path, default=None,
+                    help="このチェックポイント(.zip)から続きを学習する（PPO.load()。"
+                         "ゼロから作り直さない）。--timestepsは累計の目標値として扱う")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu",
-                    help="MlpPolicyはネットワークが小さく、GPU転送のオーバーヘッドが"
-                         "計算量を上回りやすいため既定はcpu（SB3のドキュメントの推奨と同じ）")
+                    help="MlpPolicyはネットワークが比較的小さく、GPU転送のオーバーヘッドが"
+                         "計算量を上回りやすいため既定はcpu（SB3のドキュメントの推奨と同じ）。"
+                         "`--hidden-sizes`を大きく増やす場合はGPUの方が有利になりうる")
     args = ap.parse_args()
 
+    # ★新規学習（再開ではない）なら、古いTensorBoardログ（PPO_1・PPO_2…）が
+    # 積み上がらないよう出力先を空にしてから作り直す（上のdocstring参照）
+    if args.resume_from is None and args.out.exists():
+        shutil.rmtree(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
+    # ★`ml_lidar/export_onnx_rl.py`の`--max-speed`はこの学習に渡した値と一致していないと
+    # 壊れる（モデルの正規化出力を違う物理レンジで解釈してしまう）。覚えておく/
+    # シェル履歴を掘る運用は事故のもとなので、ここに記録しておき`export_onnx_rl.py`側が
+    # 省略時にここから拾えるようにする（2026-08-28）。`max_steer`はもうCLI引数ではない
+    # （`config/vehicle.toml`の車両物理限界を直接使う）が、この学習で実際に使われた値の
+    # 記録として残しておく（後から見返す用。`run一覧`GUIの表示にも使う）
+    (args.out / "run_config.json").write_text(json.dumps({
+        "max_speed": args.max_speed, "max_steer": VehicleSpec.load().max_steer,
+        "max_steps": args.max_steps, "timesteps": args.timesteps,
+        "n_envs": args.n_envs, "seed": args.seed,
+        "n_eval_episodes": args.n_eval_episodes, "target_kl": args.target_kl,
+        "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
+        "steer_tau": args.steer_tau, "steer_rate_weight": args.steer_rate_weight,
+        "hidden_sizes": args.hidden_sizes,
+    }, indent=2), encoding="utf-8")
 
     env_fns = [make_train_env_fn(args.seed + i, max_steps=args.max_steps,
-                                 max_speed=args.max_speed, max_steer=args.max_steer)
+                                 max_speed=args.max_speed, steer_tau=args.steer_tau,
+                                 steer_rate_weight=args.steer_rate_weight)
               for i in range(args.n_envs)]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
     vec_env = vec_cls(env_fns)
 
-    model = PPO("MlpPolicy", vec_env, verbose=1, device=args.device, seed=args.seed,
-               tensorboard_log=str(args.out / "tb"))
+    if args.resume_from is not None:
+        # ★ハイパラ（target_kl/n_epochs/learning_rate等）はチェックポイントに
+        # 保存済みの値がそのまま復元される——ここで指定したCLI引数は再開時には
+        # 効かない（SB3の`PPO.load()`の仕様）。変えたい場合はゼロから学習し直すこと
+        model = PPO.load(str(args.resume_from), env=vec_env, device=args.device,
+                         tensorboard_log=str(args.out / "tb"))
+        print(f"# {args.resume_from} から再開（既に {model.num_timesteps} ステップ学習済み）")
+    else:
+        model = PPO("MlpPolicy", vec_env, verbose=1, device=args.device, seed=args.seed,
+                   tensorboard_log=str(args.out / "tb"), n_epochs=args.n_epochs,
+                   target_kl=(args.target_kl if args.target_kl > 0 else None),
+                   learning_rate=linear_schedule(args.learning_rate),
+                   policy_kwargs=dict(net_arch=dict(pi=args.hidden_sizes, vf=args.hidden_sizes)))
 
     eval_env = DummyVecEnv([lambda: Monitor(make_eval_env(
-        max_steps=args.max_steps, max_speed=args.max_speed,
-        max_steer=args.max_steer, seed=args.seed + 999))])
+        max_steps=args.max_steps, max_speed=args.max_speed, steer_tau=args.steer_tau,
+        steer_rate_weight=args.steer_rate_weight, seed=args.seed + 999))])
     # ★早期終了。評価スコアが`early_stop_patience`回連続で更新されなければ、
     # `--timesteps`に達していなくても学習を打ち切る（無駄な計算を続けない）。
     # `min_evals`で学習ごく初期のノイズだけで早まって打ち切らないようにしてある
@@ -131,7 +242,10 @@ def main() -> int:
         callback_after_eval=stop_callback)
 
     # 早期終了時は StopTrainingOnNoModelImprovement 自身が理由をログに出す（verbose=1）
-    model.learn(total_timesteps=args.timesteps, callback=eval_callback)
+    # ★再開時は reset_num_timesteps=False で num_timesteps を引き継ぐ
+    # （True のままだとカウンタが0に戻り、--timesteps 未達のまま即終了する）
+    model.learn(total_timesteps=args.timesteps, callback=eval_callback,
+               reset_num_timesteps=args.resume_from is None)
     model.save(str(args.out / "last_model"))
     print(f"# 完了。最良モデル → {args.out}/best_model.zip 、最終モデル → "
           f"{args.out}/last_model.zip")

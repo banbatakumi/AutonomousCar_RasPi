@@ -96,12 +96,25 @@ class Result:
 class Bench:
     def __init__(self, course: str | Path, mode: str, params: dict[str, float], *,
                  max_speed: float = 3.0, max_steer: float = 0.524,
-                 quiet: bool = False) -> None:
+                 model: str | None = None, quiet: bool = False) -> None:
+        """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
+            だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
+            と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
+            **これが無いと`--mode e2e_lidar`はモデル未ロードのまま何も動かない**
+            （2026-08-29追加。GUI/`e2e/model`トピック経由でしかモデルを選べず、
+            `sim.bench`単体では検証できなかった穴を埋める）
+        """
         self.link = create_sim_link(course, with_channel=False)
         self.sim = self.link.sim
         self.planner = make_planner(mode)
         if self.planner is None:
             raise SystemExit(f"知らないモード: {mode!r}（候補 {', '.join(PLANNERS)}）")
+        if model:
+            reload_fn = getattr(self.planner, "reload_if_changed", None)
+            if reload_fn is None:
+                raise SystemExit(f"{mode!r} はモデル選択に対応していない"
+                                 f"（reload_if_changedを持たない）")
+            reload_fn(model)
         self.mode = mode
         self.params = merged_params(mode, params)
         self.max_speed = max_speed
@@ -259,6 +272,9 @@ def main() -> int:
                     help="planner のパラメータを上書き（複数可）")
     ap.add_argument("--max-speed", type=float, default=3.0)
     ap.add_argument("--max-steer", type=float, default=0.524)
+    ap.add_argument("--model", default=None,
+                    help="reload_if_changedに対応するplanner（e2e_lidar）へ渡すモデル名"
+                         "（例: v2 → models/e2e_lidar/v2.onnx）。他のモードでは無視される")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -277,7 +293,7 @@ def main() -> int:
         params[k.strip()] = float(v)
 
     b = Bench(course, args.mode, params, max_speed=args.max_speed,
-              max_steer=args.max_steer, quiet=args.quiet)
+              max_steer=args.max_steer, model=args.model, quiet=args.quiet)
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s")
     try:
         res = b.run(args.time)

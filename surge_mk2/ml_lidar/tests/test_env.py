@@ -13,6 +13,7 @@ import numpy as np  # noqa: E402
 
 from sim.gym_env import OBS_DIM, SimE2EEnv  # noqa: E402
 from sim.random_course import generate_random_course  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
 
 def _make_env(**kwargs) -> SimE2EEnv:
@@ -62,18 +63,25 @@ class TestSimE2EEnv(unittest.TestCase):
         self.assertAlmostEqual(total, 0.0, delta=1e-6)
 
     def test_action_is_clamped_to_limits(self):
-        env = _make_env(max_speed=0.5, max_steer=0.3)
+        # 最大舵角は`spec.max_steer`（vehicle.toml相当）から決まる。独立引数は無い
+        # （2026-08-28、バンビの指示）ので、別の値を試したいときは`spec`を差し替える
+        env = _make_env(max_speed=0.5, spec=VehicleSpec(max_steer=0.3))
         env.reset()
         # 範囲外の行動を渡しても例外にならず、内部でクランプされる
         env.step(np.array([10.0, 100.0]))
 
     def test_observation_speed_tracks_actual_vehicle_speed(self):
-        """観測の末尾1個が自車速度になっている（改善1）。"""
+        """観測の末尾1個が自車速度になっている（改善1）。
+
+        以前は20ステップ直進させてから確認していたが、コースの形状によっては
+        途中で壁に当たり（衝突後は速度が0に落ちる）、テストの意図と無関係な
+        理由で失敗しうる状態だった（2026-08-29、`sim/random_course.py`の
+        生成方式を書き換えた際に発覚）。速度は1ステップ目から既に正になる
+        （`tau_speed_s`の一次遅れでも0.1sで動き出すため）ので、衝突の心配が
+        ほぼ無い1ステップだけで十分に検証できる。"""
         env = _make_env(max_steps=50, max_speed=1.0)
         env.reset()
-        obs = None
-        for _ in range(20):
-            obs, _, _, _, _ = env.step(np.array([0.0, 1.0]))     # 全開で加速
+        obs, _, _, _, _ = env.step(np.array([0.0, 1.0]))     # 全開で加速
         self.assertGreater(obs[-1], 0.0)
         self.assertAlmostEqual(float(obs[-1]), env.vehicle.speed, places=5)
 
@@ -123,6 +131,26 @@ class TestSimE2EEnv(unittest.TestCase):
     def test_missing_courses_and_course_fn_raises(self):
         with self.assertRaises(ValueError):
             SimE2EEnv()
+
+    def test_cross_track_margin_frees_deviation_within_margin(self):
+        """道幅の`cross_track_margin_frac`以内のずれはペナルティ無しになる（2026-08-28、
+        レーシングライン学習を阻害しないための変更）。同じ行動列を与えたとき、
+        `cross_track_margin_frac=1.0`（実質ペナルティ無し）の方が`=0.0`（旧来通り
+        常に中心線距離を罰する）より合計報酬が高くなるはず。"""
+
+        def run(margin_frac: float) -> float:
+            env = _make_env(max_steps=60, cross_track_margin_frac=margin_frac,
+                            randomize_lidar=False)
+            env.reset()
+            total = 0.0
+            for _ in range(60):
+                _, r, terminated, truncated, _ = env.step(np.array([0.15, 0.8]))
+                total += r
+                if terminated or truncated:
+                    break
+            return total
+
+        self.assertGreater(run(1.0), run(0.0))
 
 
 if __name__ == "__main__":
