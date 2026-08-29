@@ -10,10 +10,7 @@
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
-    "@mcap/core": "^2.2.1",
     "@msgpack/msgpack": "^3.1.2",
-    "fflate": "^0.8.3",
-    "fzstd": "^0.1.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "uplot": "^1.6.32",

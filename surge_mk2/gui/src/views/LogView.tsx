@@ -21,11 +21,9 @@
  *
  * を直接叩けば足りる（そちらは別のバスで動くので実車と衝突しない）。
  */
-import { zipSync } from 'fflate'
 import { useEffect, useRef, useState } from 'react'
 import type { ControlStatus, LogFile } from '../types'
 import { useUi } from '../store/ui'
-import { extractFramesFromMcap } from '../util/mcapFrames'
 import type { ControlChannel } from '../ws/control'
 import { RecordChannel } from '../ws/record'
 
@@ -63,7 +61,6 @@ export function LogView({ ch }: { ch: ControlChannel | null }) {
       <SflSection ch={ch} sfl={sfl} />
       <McapSection ch={ch} mcap={mcap} onFinished={() => ch?.logsList()} />
       <FilesSection ch={ch} files={logFiles} />
-      <FrameExtractSection />
     </div>
   )
 }
@@ -218,121 +215,6 @@ function FilesSection({ ch, files }: { ch: ControlChannel | null; files: LogFile
           </table>
         </div>
       )}
-    </section>
-  )
-}
-
-/**
- * フレーム抽出 — `.mcap` からカメラ画像だけを取り出し ZIP でダウンロードする。
- *
- * **すべてブラウザ内で完結する（Pi・サーバは一切関与しない）。** 録画済みの
- * `.mcap`（このタブの mcap セクションで録ったもの・上の一覧からダウンロード
- * したもの、どちらでもよい）をファイル選択で渡すだけで、`raspi/rec/mcap_log.py`
- * が書き込んだ形式（`foxglove.CompressedImage`、zstd圧縮）を解いてJPEGを
- * 取り出す（`../util/mcapFrames.ts`）。Python の `ml/extract_frames.py` と
- * 同じ仕事だが、**Python環境を用意しなくてもその場でできる**のが狙い。
- *
- * 取り出したフレームは `ml/annotate.py`（アノテーション）→ `ml/train.py`（学習）
- * の入力にそのまま使える。
- */
-function FrameExtractSection() {
-  const [cams, setCams] = useState({ front: true, rear: false })
-  const [intervalMs, setIntervalMs] = useState(500)
-  const [busy, setBusy] = useState(false)
-  const [status, setStatus] = useState('')
-
-  const onFile = async (file: File) => {
-    setBusy(true)
-    setStatus('読み込み中…')
-    try {
-      const selected = new Set<string>()
-      if (cams.front) selected.add('front')
-      if (cams.rear) selected.add('rear')
-
-      const buf = await file.arrayBuffer()
-      const minIntervalNs = BigInt(Math.max(0, Math.trunc(intervalMs))) * 1_000_000n
-      const frames = extractFramesFromMcap(buf, selected, minIntervalNs)
-      if (frames.length === 0) {
-        setStatus('選んだカメラのフレームが見つかりませんでした')
-        return
-      }
-
-      setStatus(`${frames.length}枚を ZIP に圧縮中…`)
-      const entries: Record<string, Uint8Array> = {}
-      for (const f of frames) entries[f.name] = f.data
-      const zipped = zipSync(entries, { level: 6 })
-
-      const blob = new Blob([zipped as BlobPart], { type: 'application/zip' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${file.name.replace(/\.mcap$/i, '')}_frames.zip`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
-      setStatus(`${frames.length}枚を書き出しました`)
-    } catch (e) {
-      // zstd 以外の圧縮（古い .mcap 等）はここに落ちる。**Python版を使う旨を出す**
-      setStatus(`失敗: ${e instanceof Error ? e.message : String(e)}` +
-        '（zstd 圧縮以外の .mcap は ml/extract_frames.py を使ってください）')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <section className="settings-group logs-section">
-      <h3>フレーム抽出（学習データ作成用）</h3>
-      <p className="dim">
-        録画した .mcap からカメラ画像だけを取り出し、ZIP でダウンロードします。
-        ml/annotate.py・ml/train.py の入力にそのまま使えます。
-        間引き間隔を0より大きくすると、連続フレームで似た構図が続く分を
-        削れます（0でこれまで通り全件）。
-      </p>
-      <div className="logs-row">
-        <label className="logs-checkbox">
-          <input
-            type="checkbox"
-            checked={cams.front}
-            onChange={(e) => setCams((c) => ({ ...c, front: e.target.checked }))}
-          />
-          前方カメラ
-        </label>
-        <label className="logs-checkbox">
-          <input
-            type="checkbox"
-            checked={cams.rear}
-            onChange={(e) => setCams((c) => ({ ...c, rear: e.target.checked }))}
-          />
-          後方カメラ
-        </label>
-        <label className="logs-checkbox">
-          間引き間隔(ms):
-          <input
-            type="number"
-            min={0}
-            step={100}
-            value={intervalMs}
-            disabled={busy}
-            onChange={(e) => setIntervalMs(Number(e.target.value))}
-            style={{ width: '5em', marginLeft: '0.4em' }}
-          />
-        </label>
-      </div>
-      <div className="logs-row">
-        <input
-          type="file"
-          accept=".mcap"
-          disabled={busy || (!cams.front && !cams.rear)}
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            e.target.value = ''
-            if (f) void onFile(f)
-          }}
-        />
-      </div>
-      {status && <p className="dim">{status}</p>}
     </section>
   )
 }
