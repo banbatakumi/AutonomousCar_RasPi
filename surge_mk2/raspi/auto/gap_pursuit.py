@@ -116,9 +116,6 @@ class DisparityPursuit(Planner):
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
                   default=0.12, unit="m/s",
                   note="減速しきってもこれ以下にはしない。0 にすると詰まった所で動けなくなる"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
-                  default=0.50, unit="rad",
-                  note="★io_node の --max-steer を超えても切り捨てられるだけ"),
         ParamSpec(key="look_k", label="前方注視の速度係数", min=0.0, max=2.0, step=0.05,
                   default=0.7, unit="s",
                   note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで曲がりきれなくなる"),
@@ -234,7 +231,7 @@ class DisparityPursuit(Planner):
         st.heading = math.radians(degs[j_best])
         self._heading_deg = float(degs[j_best])   # 次フレームのヒステリシス基準を更新
 
-        max_steer = p["max_steer"]
+        max_steer = self.vehicle.max_steer
         v_now = vs.speed if vs is not None else 0.0
         lookahead_cap = ext[j_best]
         ld = min(lookahead_cap, p["look_k"] * v_now + p["look_min"])

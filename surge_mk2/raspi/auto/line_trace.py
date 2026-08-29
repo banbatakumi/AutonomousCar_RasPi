@@ -44,6 +44,9 @@ class LineTrace(Planner):
     input_topic = TOPIC_LINE_CAM
     #: カメラ側の推論ケイデンスに余裕を持たせる（`follow_the_gap_cam.py` と同じ理由）
     stale_ms = 500
+    #: 地図もLiDARも使わないので `free_ahead`/`nearest`/`gap` は書かない。
+    #: `valid_ratio` だけ白線の検出割合として使う（`plan()` 参照）
+    stats = ("valid_ratio",)
 
     params = (
         ParamSpec(key="min_coverage", label="最小検出割合", min=0.0, max=0.2, step=0.005,
@@ -61,9 +64,6 @@ class LineTrace(Planner):
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
                   default=0.10, unit="m/s",
                   note="旋回中でもこれ以下にはしない。0 にすると急カーブで詰まって動けなくなる"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
-                  default=0.50, unit="rad",
-                  note="★io_node の --max-steer を超えても切り捨てられるだけ"),
         ParamSpec(key="turn_slow", label="旋回時の減速", min=0.0, max=1.0, step=0.05,
                   default=0.60, unit="",
                   note="舵角いっぱいで速度をこの割合ぶん落とす。1.0 で全舵時に停止"),
@@ -107,7 +107,7 @@ class LineTrace(Planner):
         st.target_y = ty
 
         # ── Pure Pursuit。`follow_the_gap.py` の⑤と同じ式 ──
-        max_steer = p["max_steer"]
+        max_steer = self.vehicle.max_steer
         v_now = vs.speed if vs is not None else 0.0
         ld = min(dist, p["look_k"] * v_now + p["look_min"])
         target = steer_for_target(eta, ld, self.vehicle.wheelbase, max_steer)

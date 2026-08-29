@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import math
 
+from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from .base import ParamSpec, Planner, min_filter, scan_window
 
@@ -130,9 +131,6 @@ class DisparityExtender(Planner):
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
                   default=0.12, unit="m/s",
                   note="減速しきってもこれ以下にはしない。0 にすると詰まった所で動けなくなる"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
-                  default=0.50, unit="rad",
-                  note="★io_node の --max-steer を超えても切り捨てられるだけ"),
         ParamSpec(key="steer_gain", label="舵角ゲイン", min=0.1, max=2.0, step=0.05,
                   default=0.80, unit="",
                   note="狙う方位[rad]に掛けて舵角にする。上げると食いつくが振動しやすい"),
@@ -146,6 +144,7 @@ class DisparityExtender(Planner):
     )
 
     def __init__(self) -> None:
+        self.vehicle = Vehicle.load()
         self._steer = 0.0
 
     def reset(self) -> None:
@@ -224,7 +223,7 @@ class DisparityExtender(Planner):
 
         # ── ⑤ 舵 ──
         st.heading = math.radians(degs[j_best])
-        max_steer = p["max_steer"]
+        max_steer = self.vehicle.max_steer
         target = max(-max_steer, min(max_steer, p["steer_gain"] * st.heading))
         # 時間ベースの1次遅れ。フレームレートに依存させない
         tau = p["steer_tau"]

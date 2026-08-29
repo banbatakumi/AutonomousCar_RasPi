@@ -72,6 +72,15 @@ class Planner:
     #: （`planning_node.py` の `_current()`）。**LiDAR の 10Hz を前提にした値が
     #: 既定なので、ケイデンスが違うセンサの planner は上書きすること**
     stale_ms: int = 300
+    #: GUI の「判断」欄（`auto-stats`）にどの `AutoState` フィールドを出すか。
+    #: `"free_ahead"`/`"nearest"`/`"gap"`/`"valid_ratio"` の部分集合。
+    #: **既定はギャップ探索系（FTG/DE/gap_pursuit/raceline）が使う全部**——
+    #: `plan()` で書かないフィールドは `AutoState` の既定値（0.0）のまま残り、
+    #: 意味の無い数値（例: gapを持たない planner で「0〜0° ギャップ」）が
+    #: GUI に出てしまうため、書くフィールドだけをここで宣言する
+    #: （`LineTrace`/`E2ELidar` が上書きしている）。`target_speed`/
+    #: `target_steer`/`plan_hz` は全 planner が必ず書くので対象外
+    stats: tuple[str, ...] = ("free_ahead", "nearest", "gap", "valid_ratio")
 
     def reset(self) -> None:
         """内部状態を捨てる。**モード切替・disengage のたびに呼ばれる。**"""

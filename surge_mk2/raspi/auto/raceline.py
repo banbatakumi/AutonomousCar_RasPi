@@ -176,9 +176,6 @@ class RaceLine(Planner):
                   step=0.01, unit="s",
                   note="★舵が効き始めるまでの時間。この秒数だけ先の位置で判断する。"
                        "実測して合わせること（architecture.md §14）"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, default=0.50,
-                  step=0.005, unit="rad", note="★io_node の --max-steer を超えても切られるだけ"),
-
         # ── 安全 ──
         ParamSpec(key="min_score", label="自己位置の信頼下限", min=0.1, max=0.8,
                   default=0.35, step=0.01, unit="",
@@ -459,7 +456,7 @@ class RaceLine(Planner):
             return st
 
         cfg = PursuitConfig(
-            wheelbase=self.vehicle.wheelbase, max_steer=p["max_steer"],
+            wheelbase=self.vehicle.wheelbase, max_steer=self.vehicle.max_steer,
             lookahead_k=p["look_k"], lookahead_min=p["look_min"],
             delay_s=p["delay_s"])
         pp = follow(self.path, self.slam.pose, vs.speed, vs.steer_actual,

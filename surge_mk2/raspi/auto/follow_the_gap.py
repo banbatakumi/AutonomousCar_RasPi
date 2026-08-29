@@ -122,9 +122,6 @@ class FollowTheGap(Planner):
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
                   default=0.12, unit="m/s",
                   note="減速しきってもこれ以下にはしない。0 にすると詰まった所で動けなくなる"),
-        ParamSpec(key="max_steer", label="最大舵角", min=0.1, max=0.524, step=0.005,
-                  default=0.50, unit="rad",
-                  note="★io_node の --max-steer を超えても切り捨てられるだけ"),
         ParamSpec(key="a_lat_max", label="旋回時の横加速度上限", min=0.5, max=8.0, step=0.1,
                   default=3.0, unit="m/s²",
                   note="★実車未計測の暫定値。実際に切る舵角から曲率 κ=tan(δ)/L を求め、"
@@ -237,7 +234,7 @@ class FollowTheGap(Planner):
         mid = (degs[a] + degs[b]) / 2.0
         st.heading = math.radians(mid)
 
-        max_steer = p["max_steer"]
+        max_steer = self.vehicle.max_steer
         v_now = vs.speed if vs is not None else 0.0
         ld = min(depth, p["look_k"] * v_now + p["look_min"])
         target = steer_for_target(st.heading, ld, self.vehicle.wheelbase, max_steer)

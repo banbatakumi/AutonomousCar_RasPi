@@ -49,6 +49,7 @@ def catalog() -> list[dict]:
                  "step": s.step, "default": s.default, "unit": s.unit, "note": s.note}
                 for s in cls.params
             ],
+            "stats": list(cls.stats),
         }
         for cls in PLANNERS.values()
     ]
