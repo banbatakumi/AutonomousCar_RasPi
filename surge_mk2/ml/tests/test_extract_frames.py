@@ -104,7 +104,7 @@ class TestExtractFrames(unittest.TestCase):
 
             self.assertEqual(n, 2, "別カメラなので間引きの基準時刻を共有しないはず")
 
-    def test_stride_thins_by_running_index(self):
+    def test_keep_ratio_thins_by_accumulator(self):
         with tempfile.TemporaryDirectory() as d:
             mcap_path = Path(d) / "run.mcap"
             jpg = _tiny_jpeg()
@@ -116,12 +116,12 @@ class TestExtractFrames(unittest.TestCase):
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, scanned = extract_one(mcap_path, out_dir, {"front"}, w, stride=3)
+                n, acc_by_cam = extract_one(mcap_path, out_dir, {"front"}, w, keep_ratio=1 / 3)
 
-            self.assertEqual(scanned, 6)
-            self.assertEqual(n, 2, "index 0,3 の2枚だけ採用されるはず")
+            self.assertEqual(n, 2, "6枚を1/3の割合で間引くので2枚採用されるはず")
+            self.assertIn("front", acc_by_cam)
 
-    def test_stride_continues_across_files_via_start_index(self):
+    def test_keep_ratio_continues_across_files_via_acc_by_cam(self):
         with tempfile.TemporaryDirectory() as d:
             mcap_path = Path(d) / "run.mcap"
             jpg = _tiny_jpeg()
@@ -133,11 +133,55 @@ class TestExtractFrames(unittest.TestCase):
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                # 前のファイルで既に3件走査済みという想定で続きから始める
-                n, scanned = extract_one(mcap_path, out_dir, {"front"}, w, stride=3, start_index=3)
+                # 前のファイルで既に2/3まで蓄積済みという想定で続きから始める
+                n, acc_by_cam = extract_one(mcap_path, out_dir, {"front"}, w,
+                                            keep_ratio=1 / 3, acc_by_cam={"front": 2 / 3})
 
-            self.assertEqual(scanned, 3)
-            self.assertEqual(n, 1, "通し番号3,4,5のうち3の1枚だけ採用されるはず")
+            self.assertEqual(n, 1, "1件目で蓄積値が1.0を超えて採用されるはず")
+
+    def test_keep_ratio_does_not_favor_one_camera_when_both_selected(self):
+        """`--cam both` は交互に並ぶメッセージ列になりがちだが、カメラごとに
+        独立して間引くので片方のカメラだけ欠落してはいけない
+        （通し番号を stride で割った余りで間引く旧方式ではここが壊れていた）。"""
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                for i in range(10):
+                    log.write_viz_image(jpg, "front", t_mono_ns=i * 2_000_000)
+                    log.write_viz_image(jpg, "rear", t_mono_ns=i * 2_000_000 + 1_000_000)
+
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                n, _ = extract_one(mcap_path, out_dir, {"front", "rear"}, w, keep_ratio=0.5)
+
+            cams_taken = {p.stem.split("_")[1] for p in out_dir.glob("*.jpg")}
+            self.assertEqual(cams_taken, {"front", "rear"},
+                             "前後どちらのカメラも採用されているはず")
+
+    def test_keep_ratio_avoids_cliff_edge_near_target(self):
+        """総数が目標のちょうど2倍未満でも、割り算の余りで「間引きなし」に
+        転落せず目標枚数付近に収まること（floor(total/target)==1 になる境界）。"""
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            total_messages = 999
+            target_count = 500
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                for i in range(total_messages):
+                    log.write_viz_image(jpg, "front", t_mono_ns=i * 1_000_000)
+
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            keep_ratio = target_count / total_messages
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, keep_ratio=keep_ratio)
+
+            self.assertLessEqual(abs(n - target_count), 1,
+                                 "旧方式では999枚のうち999枚全部が採用されてしまっていた")
 
     def test_count_messages_counts_without_writing_files(self):
         with tempfile.TemporaryDirectory() as d:
