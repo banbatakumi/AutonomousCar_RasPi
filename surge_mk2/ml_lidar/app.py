@@ -210,6 +210,7 @@ class App:
 
         self._build_widgets()
         self.root.after(100, self._drain_log)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── 画面構築 ──
 
@@ -517,6 +518,27 @@ class App:
             return
         proc.terminate()
         self._append_log(f"\n[{label}] 停止を指示しました\n")
+
+    def _on_close(self) -> None:
+        """ウィンドウを閉じたら実行中の子プロセスも道連れにする。
+
+        以前はここに何も無く、✕ボタンで`mainloop()`を抜けるだけだったため、
+        `subprocess.Popen`で起動した学習・観戦・TensorBoardが孤児プロセス
+        （PPID=1）として残り続けていた（2026-08-29、バンビの指摘で判明）。
+        """
+        active = [(k, p) for k, p in self._active.items() if p is not None and p.poll() is None]
+        if any(k == "train" for k, _ in active):
+            label = self._job_labels.get("train", "学習")
+            if not messagebox.askyesno(
+                    "学習を停止して終了しますか？",
+                    f"{label} が実行中です。ウィンドウを閉じるとこのプロセスも終了します。\n\n"
+                    "直近の評価（--eval-freq分）より後の進捗は失われます。あとで①タブから"
+                    "同じrun名を選べば「続きから再開」できますが、完全に同じ結果には"
+                    "なりません。\n\n本当に終了しますか？"):
+                return
+        for _, p in active:
+            p.terminate()
+        self.root.destroy()
 
     def _refresh_jobs_listbox(self) -> None:
         self.jobs_listbox.delete(0, "end")
