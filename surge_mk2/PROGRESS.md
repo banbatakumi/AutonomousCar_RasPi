@@ -3,7 +3,50 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-08-28（UART プロトコル v0.13 対応。`TELEMETRY` に TC の
+最終更新: 2026-08-29（v3(E2E LiDAR)が長方形寄りのコースは無衝突で走れるのに
+ヘアピン/S字のあるコース（`fuji`）だけ衝突する件を診断→原因は**学習コース
+生成器がヘアピンを原理的に一度も作っていなかったこと**と判明→
+`sim/random_course.py`にヘアピン専用の生成関数を新設し、S字（チカーン）も
+真のS字・fuji並みのタイトさに書き直した。実装中に「S字が最小旋回半径を
+大幅に割り込む」バグを発見・修正済み。下記「2026-08-29（続き2）」節）
+旧: 2026-08-29（学習runに自由記述の備考を付けられるように——
+`ml_lidar/app.py`の備考欄→`note.txt`→エクスポート時に`<名前>.json`へ同梱→
+実車のGUI（`AutoPanel.tsx`のE2E LiDARモデル選択）にも表示、まで一気通貫。
+下記「2026-08-29（続き）」節）
+旧: 2026-08-29（`e2e_lidar.py`に他planner（`de`/`ftg`）と同じ`steer_tau`
+舵平滑化フィルタを追加。v1のTensorBoard学習曲線が早期収束後は改善していなかった
+ことも判明。下記「2026-08-29」節）
+旧: 2026-08-28（`train_rl.py`のバグ修正: 新規学習を同じrun名で繰り返すと
+TensorBoardのサブフォルダ(`PPO_1`・`PPO_2`…)が積み上がっていたのを、
+`--resume-from`無しなら`--out`を空にしてから作り直すよう修正。GUIのrun一覧から
+`max_steer`表示も削除。下記「2026-08-28（続き9）」節）
+旧: 2026-08-28（`train_rl.py`に`--resume-from`（PPO.loadで途中から再開）を
+追加し、`ml_lidar/app.py`から「続きから再開／上書き／キャンセル」を選べるように。
+学習の「選択を停止」に確認ダイアログを追加、観戦の窓数もGUIから選べるように。
+下記「2026-08-28（続き8）」節）
+旧: 2026-08-28（E2E LiDARの学習・観戦・エクスポート一式からも`max_steer`を
+完全に排除し、`config/vehicle.toml`の車両物理限界だけを参照するよう統一。
+`train_rl.py`/`ml_lidar/app.py`の`--max-steer`を削除。下記「2026-08-28（続き7）」節）
+旧: 2026-08-28（自動運転plannerの`max_steer`ParamSpecを全廃し、
+`config/vehicle.toml`の車両物理限界を直接参照するように統一。RCモードだけは
+従来通りGUIから調整可能なまま。下記「2026-08-28（続き6）」節）
+旧: 2026-08-28（`ml_lidar/app.py`——LiDAR E2Eの学習・観戦・エクスポートを
+ターミナル無しで操作するTkinter GUIを新規追加。`ml/app.py`と対称。
+下記「2026-08-28（続き5）」節）
+旧: 2026-08-28（`train_rl.py`が`--max-speed`/`--max-steer`を`run_config.json`に
+記録するようにし、`export_onnx_rl.py`はそれを省略時に自動で読むように変更。
+「エクスポート時にどの値を渡したか忘れる」事故を防ぐ。下記「2026-08-28（続き4）」節）
+旧: 2026-08-28（シム車両モデルに横方向グリップ限界(`mu*g`)を追加。
+コーナーで速すぎるとアンダーステアで曲がりきれなくなる、という物理的な
+必然性を持たせた。下記「2026-08-28（続き3）」節）
+旧: 2026-08-28（E2E LiDARの報酬設計を見直し、コーナーでのレーシングライン
+（外→内→外）を阻害していた中心線ペナルティを道幅の余白付きに変更。下記
+「2026-08-28（続き2）」節）
+旧: 2026-08-28（`ml/export_onnx.py` の `external_data` 未指定バグを修正し、
+`cam_perception_node` を systemd 化（既定は無効）。下記「2026-08-28（続き）」節）
+旧: 2026-08-28（`steer_actual` −24°張り付き問題が解決。原因はSTM32側の
+ステアモータ較正オフセットが駆動電源OFF時に乗っていたこと。下記「2026-08-28」節）
+旧: 2026-08-28（UART プロトコル v0.13 対応。`TELEMETRY` に TC の
 スリップ率・トルク上限を追加、`COMMAND` にサイドブレーキ `flags2` を新設。
 下記「2026-08-28」節）
 旧: 2026-08-25（UART プロトコル v0.12 対応。`auto_stop` の判定を固定20cmから
@@ -20,6 +63,510 @@
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（下記「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-08-29（続き2）：ヘアピン/S字での衝突を診断→学習コース生成器にヘアピン対応を追加
+
+バンビ「v3(E2E LiDAR)は長方形のようなコースでは壁に衝突せずに走れるが、
+ヘアピンやS字があるコース（シムの`fuji`）でだけ壁に衝突する」と相談。
+
+**前提（このセッションより前、`docs/progress_archive.md`未反映だがmemoryに記録済み
+の一連の作業）**: v2の学習曲線を実測解析し方策崩壊パターンを発見→PPO安定化
+（`target_kl`・`n_epochs`減・学習率減衰）・`steer_tau`/`steer_rate_weight`追加・
+`sim.bench --model`の穴埋め・`watch.py`を学習環境に同期、まで済ませ、続けて
+`sim/random_course.py`を書き直して**生成コースが車両の物理限界(R_min≈0.40m)を
+超えるコーナーを作っていた**バグを修正し、コミット`b2fd326`で**生成コースの
+周回方向が反時計回り固定**だったバグも修正した（v3学習時点ではこれらは未反映）。
+その際「ヘアピン対応は次回」と保留していた。
+
+**診断結果**: `sim/random_course.py`の`_filleted_polygon_xy`（コース生成の主関数）
+は「1つの中心から見た半径の関数」として多角形を作る方式で、**頂点の方位変化が
+原理的に最大60°程度で頭打ちになる**ことを数値実験で確認した（半径をどれだけ
+深くえぐっても、隣接頂点の角度間隔で決まる上限を超えられない——極座標表現の
+構造的限界）。つまり**学習コースには一度もヘアピンが存在しなかった**——
+`fuji`の`arc,1.0,-90`×2連続のような急な切り返しは分布外（未経験）の形状であり、
+v3が汎化できなかったのは必然だった。S字（`_add_chicanes`のシケイン）も実在は
+していたが、実際は片側にしか曲がらない「C字」で、docstringの「S字」という
+記述と実装が食い違っていた上、`fuji`の実際のシケイン（半径0.5m）より緩かった。
+
+**実装した対策**（`sim/random_course.py`、詳細はモジュールdocstring参照）:
+1. `_hairpin_polygon_xy()`を新設。ヘアピン部分だけは fuji と同じ「90°ずつの
+   アークを直線を挟まず2つ連続」で直接組み立て（1頂点で180°近くを一気に
+   折ろうとすると接線長`R*tan(|δ|/2)`が発散し現実的な辺長では作れないため）。
+   残りの頂点は「turnを先に決め、辺長を最小二乗で解いて閉じる」新方式
+   （`_filleted_polygon_xy`の「極座標だから自動的に閉じる」保証を使えないため）。
+   自己交差検査(`_polygon_is_simple`)・外接ボックスの異常サイズ検査つき。
+   単発成功率は実測1.5%と低いため`_HAIRPIN_MAX_ATTEMPTS=300`で98%まで確保
+   （1回あたり約0.03msと軽いので許容）
+2. `_add_chicanes()`を書き直し、`sin(pi*t)`（片側だけ膨らむC字）から
+   `sin(2*pi*t)`（両側に膨らむ真のS字）に変更。目標半径をfuji並み
+   （`min_radius_m*1.05`倍まで）許容するようタイト化
+3. **★実装中に踏んだ罠（重要）**: 上記2の変更後、生成コースの9割以上が
+   最小旋回半径違反になる回帰が発生。原因は「窓幅の安全マージン公式は
+   まっすぐな基準線に蛇行を乗せる前提で導出したが、実際には既にフィレットで
+   丸めた頂点の近傍に蛇行を挿入すると**base曲線側の既存曲率と蛇行の曲率が
+   加算されて**合成半径が目標の半分以下に落ち込む」こと（複数シケインの窓が
+   重なる場合も同じ理由で加算される）。`_add_chicanes`は挿入前にbase曲線側の
+   既存曲率を調べ、実質直線とみなせる区間（半径`3*min_radius_m`超）にだけ
+   蛇行を置くよう修正——窓の重複も避けるようにした。修正後は300コースで
+   違反0件（修正前は96.7%が違反）
+
+**検証方法**: matplotlibが`.venv`に無かったため、PIL（Pillow、既存依存）で
+占有格子とセンターラインをPNGにレンダリングして目視確認した（コース全体図＋
+ヘアピン単体のズーム図）。ヘアピンは半径を通常コーナーと同じレンジ
+（`min_radius_m`の1.0〜2.5倍）にすると、コース全体のスケールに対して
+「大きく優雅に曲がる」だけに見えてヘアピンらしい鋭さが視覚的に消える問題も
+見つけ、`_HAIRPIN_RADIUS_MULT=(1.0, 1.3)`とタイトな専用レンジに絞って解決した。
+プログラムでも「3m以内の弧長で総回頭角100°超」を検出する関数で確認し、
+`hairpin_prob=1.0`のとき20コース中ほとんどで130〜170°の急旋回を確認できた。
+
+**テスト**: `ml_lidar/tests/test_random_course.py`に4クラス追加
+（`TestHairpinPolygon`・`TestGenerateRandomCourseHairpin`・
+`TestGenerateRandomCourseChicaneRadius`——上記3のバグの回帰テストも含む）、
+計12件全green。`ml_lidar/tests`全ファイル・`raspi/tests`533件も確認済み
+（既知のフレーキーテスト`test_cam_perception_node`1件を除き全green、
+今回の変更と無関係）。生成コストは1コースあたり平均5〜20ms程度
+（実測、`_MAX_GEN_ATTEMPTS`retryの発生頻度による）。
+
+**How to apply**: これも推論側（`raspi/auto/e2e_lidar.py`）は無関係——学習コース
+生成側だけの変更なので、**v5として再学習しないと効果が出ない**（v3/v4の
+`.onnx`のまま試しても改善しない）。`hairpin_prob`（既定0.35）は
+`generate_random_course()`の新しい引数——`train_rl.py`・`watch.py`とも
+デフォルト値をそのまま使うので追加のCLI変更は不要。
+
+---
+
+## ★ 2026-08-29（続き）：学習runに自由記述の備考をつけられるように（Pi実車のGUIまで到達）
+
+バンビ「学習のモデルにGUIから備考をつけられるようにしたい。どんな変更をしたとか、
+どのコースかとか書きたい」→「E2EのGUIからも書けるってこと？全体のGUIからその
+備考を見ることができるようにできる？」という要望に対応。**ml_lidar側の入力から
+実車のGUIでの表示まで一気通貫**で作った。
+
+**データの流れ**:
+```
+ml_lidar/app.py（run一覧タブの備考欄・保存ボタン）
+  → ml_lidar/runs/<run名>/note.txt（プレーンテキスト。run_config.jsonとは別ファイル）
+  → export_onnx_rl.py（--modelと同じディレクトリのnote.txtを自動で読む。新規フラグ不要）
+  → models/e2e_lidar/<名前>.json の "note" フィールド
+  → raspi/nodes/telemetry_node.py の _e2e_models_list()（e2e_model_files に note を追加）
+  → gui/src/components/AutoPanel.tsx（E2E LiDARモデル選択の下に選択中モデルの備考を表示）
+```
+
+**変更したファイル**:
+- `ml_lidar/app.py`: `read_note()`/`write_note()`（`<run_dir>/note.txt`の読み書き）。
+  run一覧タブに複数行テキスト欄＋「備考を保存」ボタンを追加。runを選ぶたびに
+  読み込み直す（学習前でも後でも、いつでも書ける）
+- `ml_lidar/export_onnx_rl.py`: `export()`に`note`引数を追加、`.json`へ書く。
+  `main()`は`--model`と同じディレクトリの`note.txt`を自動で読む
+  （`run_config.json`の自動読み込みと同じ流儀。新しいCLIフラグは無し）
+- `raspi/nodes/telemetry_node.py`: `_e2e_models_list()`が各モデルの`.json`から
+  `note`を読んで`e2e_model_files`に含める。`.json`が壊れていても一覧全体は壊さない
+- `gui/src/types.ts`: `E2EModelFile`に`note: string`を追加
+- `gui/src/components/AutoPanel.tsx`・`styles.css`: E2E LiDARモデル選択の下に、
+  選択中モデルの備考を表示する行を追加（`.auto-model-note`）
+
+**テスト**: `ml_lidar/tests/test_app.py`に`TestNote`（3件）、
+`ml_lidar/tests/test_export_onnx_rl.py`に備考の往復テスト（1件）、
+`raspi/tests/test_telemetry_node.py`（新規ファイル、4件——`_e2e_models_list()`は
+`self`を使わないメソッドなので`TelemetryServer._e2e_models_list(None)`のように
+未束縛のまま軽量にテストできる。既存の`TelemetryServer`本体には他にテストが無い
+ので、初めての専用テストファイル）。GUI側は`tsc -b`と`vite build`が通ることを
+確認（テストフレームワークが無いプロジェクトのため）。`raspi/tests`533件・
+`ml_lidar/tests`（軽量分）とも全green。
+
+---
+
+## ★ 2026-08-29：`e2e_lidar.py`に舵の平滑化フィルタを追加（v1の不安定挙動の診断）
+
+バンビから「v1の学習も終わったが、舵角の決定が少し不安定なように感じる。学習不足・
+学習時の遅延固定・報酬設計、何が原因か」と相談があった。`ml_lidar/runs/v1/`の
+`evaluations.npz`を実際に見て診断した。
+
+**わかったこと**:
+- `run_config.json`: `max_speed=2.0`（bambiが既定1.5から引き上げていた）・
+  `max_steer=0.524`・`timesteps=2000000`
+- 学習は`timesteps=1,260,000`（目標の63%）で早期終了していた
+- 評価reward（circuit/fuji）は最初の数万stepで急上昇したあと、以降63回の評価まで
+  **30〜120の間でノイジーに上下するだけで、明確な右肩上がりの改善が無い**
+  （早期終了は「10回連続で更新されなかった」ため作動——これと整合する）
+- ep_lengthも350〜1500の間で評価ごとに大きくブレる＝**同じモデルでも試行によって
+  挙動が大きく揺れる**状態だった
+
+**原因（構造的な見落とし、修正した）**: `raspi/auto/e2e_lidar.py`は他の全planner
+（`de`・`ftg`・`dp`・`line_trace`）が持っている`steer_tau`（舵指令の1次遅れによる
+平滑化フィルタ）を**一つも持っていなかった**（`reset()`に「平滑化などの内部状態は
+持たない」と明記されていた）。LiDARスキャンのフレーム間の微小な揺らぎが、フィルタ
+無しでそのままステア出力の揺らぎになっていた。他plannerと同じ`ParamSpec(key=
+"steer_tau", ...)`・`self._steer`保持・1次遅れ適用を追加した（`__init__`/`reset()`/
+`plan()`）。**再学習不要、推論側だけの修正**。
+
+**まだ残っている、報酬設計とSim2Realの2つの懸念（保留・対応せず）**:
+- 報酬に舵の変化量（ジャーク）を罰する項が無いため、モデル自身に「滑らかにする
+  動機」が無い——`steer_tau`はあくまで事後的なフィルタで根治ではない
+- `config/vehicle.toml`の`[dynamics]`（`tau_steer_s`/`dead_time_s`）は未実測の
+  固定値で、道幅・LiDARノイズと違いドメインランダム化されていない。実車の実際の
+  遅延とズレていれば、実車でだけ不安定に見える可能性がある（シム/`watch.py`で
+  見えている不安定さとは別原因）——ただし`watch.py`は`raspi/auto/e2e_lidar.py`を
+  経由せずPPOモデルを直接叩くので、**今回追加した平滑化フィルタの効果は
+  `watch.py`では確認できない**。`sim.bench --mode e2e_lidar`か実車でのみ効く
+
+**テスト**: `raspi/tests/test_auto.py`の`TestE2ELidar`に3件追加
+（`test_steer_is_smoothed_over_time`・`test_reset_clears_the_steering_state`・
+`test_steer_tau_zero_disables_smoothing`）。入力に関わらず一定出力を返す
+ダミーONNXモデル（`_make_constant_steer_e2e_model`）でフィルタの時間応答だけを
+検証。`raspi/tests`529件、全green。
+
+---
+
+## ★ 2026-08-28（続き9）：TensorBoardログが積み上がるバグを修正・run一覧の`max_steer`表示を削除
+
+バンビから「TensorBoardにPPO_1〜PPO_4まである。同じv1という名前に上書きしている
+つもりなのに、うまく上書きできていない箇所がある？」と報告。
+
+**原因**: SB3は`tensorboard_log`を指定すると、`reset_num_timesteps=True`
+（＝`--resume-from`無しの新規学習）で`.learn()`を呼ぶたびに、既存の
+`{アルゴリズム名}_{N}`サブフォルダを数えて`+1`した新しいフォルダ
+（`PPO_1`→`PPO_2`→…）を作る仕様になっている。`best_model.zip`・`last_model.zip`・
+`run_config.json`・`evaluations.npz`は単一ファイルへの書き込みなので毎回正しく
+上書きされていたが、**`tb/`ディレクトリだけは`--out`（run名）を使い回すたびに
+古い学習曲線がゴミとして積み上がっていた**——GUIの「上書きして新規」を選んでも
+`tb/`だけは上書きされていなかった、という不整合。
+
+**修正**: `train_rl.py`の`main()`で、`--resume-from`が無い（＝新規学習）場合は
+`--out`が既存でも`shutil.rmtree()`で一度空にしてから作り直すようにした
+（`--resume-from`がある場合は当然クリアしない——再開先の`best_model.zip`自体を
+消してしまうため）。これで「run名を使い回す＝本当に上書きする」という約束が
+`tb/`にも及ぶようになった。
+
+**ついでに対応**: run一覧の`max_steer`表示（listbox行・詳細ラベル）も削除した
+（`続き7`で最大舵角は学習ごとに変わらなくなったのに、表示だけ残っていてバンビに
+指摘された）。`run_config.json`自体には引き続き記録する（表示しないだけ）。
+
+**テスト**: `ml_lidar/tests/test_train_rl.py`に`TestTrainRlOverwriteClearsOutDir`
+（新規学習を同じ`--out`で2回実行してもTensorBoardのサブフォルダが1個のままである
+ことを確認）を追加。既存の再開テストにも「再開は同じサブフォルダを使い続け、
+新しいフォルダを増やさない」検証を追加。実際にサブプロセスで2回連続学習させて
+確認済み。`ml_lidar/tests/test_app.py`の`format_run_row`テストも
+`max_steer`を表示しないことを確認するテストに更新。全green（このファイルは
+実PPO学習を複数回走らせるため1回の実行に80秒程度かかる）。
+
+---
+
+## ★ 2026-08-28（続き8）：学習の再開機能・停止確認・観戦の窓数選択をGUIに追加
+
+`ml_lidar/app.py`を実際に使ってみたバンビからのフィードバック3件に対応した。
+
+1. **「観戦を開始」が押せない**——`best_model.zip`が無いと押せない仕様通り
+   （評価が1回でも走れば現れる）だが、run一覧タブが自動更新されないので
+   気づきにくかった。仕様自体は正しいので変更なし（「更新」ボタンを押す運用）
+2. **観戦の窓数をGUIから選べるようにしてほしい** — run一覧タブの「観戦を開始」
+   ボタン横にスピンボックス（1〜16、既定6）を追加。`build_watch_cmd()`の
+   `panels`引数にそのまま渡す
+3. **学習を「選択を停止」で誤って止めてしまいそう。再開もできるようにしたい** —
+   2点を実装:
+   - `train_rl.py`に`--resume-from <checkpoint.zip>`を追加。`PPO.load(path, env=vec_env,
+     ...)`で読み込み、`model.learn(..., reset_num_timesteps=False)`で
+     `num_timesteps`を引き継いで続きから学習する。**`--timesteps`は累計の目標値**
+     （再開後にNステップ追加したいなら「読み込み時点のnum_timesteps + N」を指定）。
+     手動でサブプロセスとして動作確認済み（200→2200stepsで正しく再開・継続を確認）
+   - `ml_lidar/app.py`の`_start_train()`: 既存run名を選ぶと
+     「続きから再開／上書きして新規／キャンセル」の3択（`askyesnocancel`を流用）。
+     再開時は`run_dir/best_model.zip`が無ければエラーで止める
+   - `_stop_selected_job()`: `job_key == "train"`のときだけ停止前に確認ダイアログを
+     出す（TensorBoard・観戦・エクスポートは実害が小さいので確認しない）
+
+**テスト**: `ml_lidar/tests/test_train_rl.py`（新規、サブプロセス経由のCLI統合テスト
+2件。実際に短時間PPO学習→再開の一連を検証。1回あたり数秒〜十数秒かかるため
+既存の軽量テスト群とは別ファイル）。`ml_lidar/tests/test_app.py`にも
+`build_train_cmd`の`resume_from`引数のテストを追加。`ml_lidar/tests`全ファイルgreen。
+
+`docs/development.md` §12.1にも再開機能・停止確認・観戦窓数について追記済み。
+
+---
+
+## ★ 2026-08-28（続き7）：E2E LiDAR訓練パイプラインからも`max_steer`を完全排除
+
+「続き6」で自動運転plannerのGUI ParamSpecから`max_steer`を消したのに続けて、
+バンビの指示「学習する時も最大舵角はtoml参照にして、他の最大舵角設定を消して」を
+受け、**訓練・エクスポート・観戦の各スクリプトが独立して持っていた`max_steer`引数を
+全部廃止**した。訓練時に使う最大舵角も常に`config/vehicle.toml`（`VehicleSpec.load()`）
+から決まる。
+
+**変更したファイル**:
+- `sim/gym_env.py`（`SimE2EEnv`）: コンストラクタの`max_steer`引数を削除。
+  `step()`のクランプは`self.spec.max_steer`を使う（`spec`は既に持っていた
+  `VehicleSpec.load()`）。別の値でテストしたいときは`spec=VehicleSpec(max_steer=...)`
+  を渡す
+- `ml_lidar/env.py`（`GymSurgeEnv`）: 同様に`max_steer`引数を削除。
+  `self._max_steer = self._env.spec.max_steer`で内部的に導出
+- `ml_lidar/train_rl.py`: `--max-steer`CLI引数を削除。`run_config.json`には
+  引き続き`max_steer`を書く（**入力ではなく、その学習で実際に使われた値の記録**
+  ——`VehicleSpec.load().max_steer`から取る）
+- `ml_lidar/export_onnx_rl.py`: `--max-steer`CLI引数を削除。常に
+  `VehicleSpec.load().max_steer`を使う。`--max-speed`は引き続き`run_config.json`
+  フォールバック付きの任意引数のまま（速度は物理限界が無い純粋な訓練ハイパラなので
+  据え置き）
+- `ml_lidar/watch.py`: `--max-steer`CLI引数と`Panel`の`max_steer`引数を削除
+- `ml_lidar/app.py`: 学習タブから`max_steer`入力欄を削除し、
+  「vehicle.tomlを常に使うのでここでは設定しない」旨のラベルに置き換え。
+  `build_train_cmd()`の`max_steer`引数も削除
+
+**★エクスポートされたモデルの`.json`の`max_steer`は消していない（意図的）**:
+`raspi/auto/e2e_lidar.py`の`self._model_max_steer`（モデル`.json`由来、
+ステア出力を物理単位へ戻す換算に使う）は今回も維持した。訓練時のmax_steerは
+常にvehicle.tomlと一致するようになったが、**将来vehicle.tomlの値を変更した後に
+古いモデルを推論する**ケースでは、そのモデルが学習された時点のmax_steerで
+デコードしないと出力が誤って解釈される。これは「重複した設定」ではなく
+学習時点のスナップショット（provenance）なので、あえて残した。
+
+**テスト**: `ml_lidar/tests`全ファイル修正（`test_env.py`は`max_steer=`の代わりに
+`spec=VehicleSpec(max_steer=...)`を使うよう変更、`test_app.py`の
+`test_train_cmd`は`--max-steer`が渡らないことを確認）。`ml_lidar/tests`全green・
+`raspi/tests`526件も無関係のまま全green（2026-08-28時点）。
+
+`docs/development.md` §12.1も実際のCLI仕様に合わせて更新済み。
+
+---
+
+## ★ 2026-08-28（続き6）：自動運転plannerの`max_steer`ParamSpecを全廃
+
+バンビの指示：「最大舵角は自動運転からは全て調整不要にして`config/vehicle.toml`を
+直接参照するようにしたい。ラジコンモードだけは操作に関わるので調整可能なまま残す」。
+
+**対象**（GUI設定パネルの`max_steer`スライダを削除し、`p["max_steer"]`の代わりに
+`self.vehicle.max_steer`——`raspi/core/vehicle.py`の`Vehicle.load()`が
+`config/vehicle.toml`から読む車両物理限界——を直接参照するよう変更）:
+`follow_the_gap.py`(`ftg`)・`gap_pursuit.py`(`dp`)・`raceline.py`・`line_trace.py`
+（既に`self.vehicle`を持っていたのでその場で差し替え）・`disparity_extender.py`(`de`)・
+`e2e_lidar.py`（この2つは`Vehicle`未importだったので`from ..core.vehicle import Vehicle`
+と`self.vehicle = Vehicle.load()`を新規に追加）。`follow_the_gap_cam.py`(`ftg_cam`)は
+`FollowTheGap`を継承しているだけなので無改修で追随。
+
+**e2e_lidarの注意点**: モデル付属`.json`の`max_steer`（`self._model_max_steer`、学習時の
+ステア出力レンジ）とGUIの`max_steer`ParamSpecは別物だった。今回削除したのは後者のみ。
+`steer = steer_norm * self._model_max_steer`（モデル固有のレンジへの変換）はそのまま残し、
+その後の最終クランプだけ`p["max_steer"]`→`self.vehicle.max_steer`に変更した。
+
+**対象外（意図的に変更していない）**: RCモードの最大舵角（`gui/src/store/ui.ts`の
+`DrivingSettings.maxSteer`・`PI_MAX_STEER_CAP`・`raspi/nodes/io_node.py`の
+`--max-steer`）はGUIから調整可能なまま。これらは自動運転のParamSpecとは完全に別系統
+（`PI_MAX_STEER_CAP`自体も同じ`vehicle.toml`由来だが、RC操作の絶対上限としてすでに
+車両限界を参照する設計になっている）。
+
+**テスト**: `raspi/tests/test_auto.py`の2件が影響を受けたので修正した——
+`test_params_are_clamped_to_the_declared_range`（`max_steer`のクランプ検証を削除、
+`max_speed`のみ検証）・`test_output_is_clamped_to_param_limits`
+（→`test_output_is_clamped_to_vehicle_max_steer`に改名。モデル付属`.json`の
+`max_steer`を車両限界より大きく設定し、「モデル側ではなく車両限界でクランプされている」
+ことを区別して確認するテストに作り直した）。`raspi/tests`526件、全green
+（2026-08-28時点、3回連続実行で確認）。
+
+**★ついでに見つけた既存の問題（未修正・別件）**: `raspi/tests`をフルセットで回すと、
+`test_cam_perception_node.TestRunModelSwitchIntegration
+.test_selecting_a_model_via_cam_model_topic_starts_inference`が**たまに**失敗する
+（`hb/cam_perception` != `scan/cam`、フレーキー・実行順依存）。`git stash`で今回の
+変更を退避させても再現したので**今回の変更とは無関係の既存不具合**。`telemetry_node.py`
+の`AttributeError: 'TelemetryServer' object has no attribute 'token'`も同じ実行中に
+見えた（別スレッドの例外ログで、そのテスト自体は失敗扱いにならず）。原因未調査、
+次にこのあたりを触るセッションで拾うこと。
+
+---
+
+## ★ 2026-08-28（続き5）：`ml_lidar/app.py`——LiDAR E2E学習パネル（Tkinter GUI）を新規追加
+
+バンビの要望「学習・観戦(`watch.py`)・エクスポートをGUIから操作したい。run名を
+学習前に決めて学習出力先とモデル名を統一したい」を受けて、`ml/app.py`（カメラの
+学習パイプライン操作パネル）と対称の薄いTkinter GUIを追加した。
+
+**設計の核**: `ml/app.py`は「抽出→アノテーション→学習→エクスポート」が常に1つずつ
+直列に進む前提だったが、LiDAR E2Eは**学習(数時間)の裏でTensorBoard・観戦・
+（別runの）エクスポートを並行して動かしたい**という要件があったため、`self.proc`
+1個ではなく`self._active: dict[job_key, Popen|None]`でジョブを複数追跡する設計に
+変えた（`ml/app.py`から見た主な差分）。
+
+**run名の統一**: `train_rl.py --out`（学習出力先）と`export_onnx_rl.py --out`
+（エクスポート先）を別々に考えるのが混乱の元だったので、1つの「run名」を学習前に
+決めると`ml_lidar/runs/<run名>`が学習出力先、`models/e2e_lidar/<run名>.onnx`が
+エクスポート先の初期値になるようにした。`v1`・`v2`…の続きを自動提案する
+（`next_run_name()`）。既存run名で学習開始すると上書き確認が出る
+（`train_rl.py`は常に新規学習で、続きから学習する機能が無いことを正直に警告する）。
+
+**エクスポートの`--max-speed`/`--max-steer`は渡さない**——「続き4」で実装した
+`run_config.json`の自動読み込みにそのまま乗る設計。
+
+**テスト**: `ml_lidar/tests/test_app.py`（新規20件、ウィジェット構築のスモークテスト
+含む）。全green、既存`ml_lidar/tests`・`ml/tests/test_app.py`とも影響なし。
+
+`ml_lidar/start_app.command`（ダブルクリック起動）・`docs/development.md` §12.1にも
+使い方を追記済み。
+
+---
+
+## ★ 2026-08-28（続き4）：`--max-speed`/`--max-steer`を記録し、エクスポート時の指定を省略可能に
+
+`export_onnx_rl.py`の`--max-speed`/`--max-steer`は`train_rl.py`に渡した値と一致させる
+必要があるが、`train_rl.py`側はその値をどこにも記録していなかった。バンビとのやり取りで
+「渡した値っていつ渡した値？」と聞かれて気づいた（デフォルト同士がたまたま一致していて
+気づきにくかった）。
+
+**変更**: `train_rl.py`が学習開始時に`--out`直下へ`run_config.json`
+（`max_speed`・`max_steer`・`max_steps`・`timesteps`・`n_envs`・`seed`）を書くように
+した。`export_onnx_rl.py`の`--max-speed`/`--max-steer`は`required`をやめて省略可能にし、
+省略時は`--model`と同じディレクトリの`run_config.json`から自動で読む
+（`load_run_config_defaults()`）。どちらの値も見つからなければ明示的なエラーで止まる
+（黙って間違った値を使わない）。実際に使った値の出所（指定値/`run_config.json`）は
+実行時に標準出力へ表示する。
+
+**How to apply:** これより前に学習した`first_model`等には`run_config.json`が無いので、
+その場合は引き続き`--max-speed`/`--max-steer`を手で指定すること（`first_model`は
+デフォルト値のまま学習したので1.5・0.45）。**今後の学習からは自動で記録される**ので、
+基本的には`export_onnx_rl.py`実行時に指定不要。テストは
+`ml_lidar/tests/test_export_onnx_rl.py::TestLoadRunConfigDefaults`（新規3件）。
+`ml_lidar/tests`全ファイルgreen。
+
+---
+
+## ★ 2026-08-28（続き3）：シム車両モデルに横方向グリップ限界を追加
+
+道幅ドメインランダム化・報酬見直し（下記「続き2」）をした上で、バンビから
+「シミュレーションにグリップ限界を追加したい。車両重量とタイヤの摩擦係数の推定値
+から設計できるか」と要望があった。
+
+**設計**: `sim/vehicle.py`の自転車運動学モデルは舵角だけでヨーレートが決まり
+（`yaw_rate = v/L*tan(steer)`）、**速度に関わらず同じ半径で曲がれてしまう**ため、
+「速すぎるとコーナーを曲がりきれない」という物理的必然性が無かった（これが
+「続き2」で報酬を直しても改善が限定的になりうる根本原因として指摘していた点）。
+対策として、要求される向心加速度`v^2*tan(steer)/L`が`mu*g`（`mu`=タイヤの摩擦係数、
+`g`=重力加速度）を超えたら、達成できる曲率を頭打ちにする（アンダーステアで外に
+膨らむ）簡易グリップ限界を追加した。
+
+**★車両質量は登場しない（バンビの質問への回答）**: `F_lat_max = mu*m*g`を運動方程式
+`a = F/m`に代入すると質量`m`が消え、`a_lat_max = mu*g`だけが残る。これは急ブレーキの
+制動距離が車重に依存しないのと同じ理屈。なので今回の実装は`config/vehicle.toml`の
+`[dynamics].mu`（新規、既定`0.8`・★未実測の仮値。タイヤ材質不明のためゴム系タイヤ+
+屋内床を想定した推定値）だけを使う。車両質量`mass`は既存の縦方向（加減速・制動トルク）
+の計算では使われ続けているが、グリップ限界には無関係
+
+**実装箇所**: `sim/vehicle.py`の`VehicleModel.step()`で
+`requested_curvature = tan(steer_actual)/L`を`max_curvature = mu*g/speed^2`で
+クランプしてから`yaw_rate = speed * curvature`を計算する（低速ほど`max_curvature`が
+大きくなり実質無制限＝駐車時等の小回りには影響しない）。`VehicleSpec`に`mu`フィールドを
+追加、`config/vehicle.toml`の`[dynamics]`に`mu = 0.8`を追加。
+
+**テスト**: `ml_lidar/tests/test_vehicle_grip.py`（新規、5件）。低速では従来通りの
+運動学計算と一致すること・高速+最大舵角ではアンダーステアしてヨーレートが頭打ちに
+なること・どんな条件でも`accel_lateral`が`mu*g`を超えないこと、を確認。
+`raspi/tests`526件・`ml_lidar/tests`（他ファイル含む）とも全green（2026-08-28時点）。
+
+**How to apply:** `train_rl.py`のコード変更は不要——再学習すれば効く。`mu=0.8`は
+実測値ではないので、実車でタイヤが滑り出す速度・半径を計測できたら
+`mu = v^2/(r*g)`で逆算して`config/vehicle.toml`を更新すること（コメントに手順を
+記載済み）。今回はタイヤの横滑り自体（スリップ角・非線形特性）や、制動時との
+複合限界（friction circle）までは実装していない——「頭打ちにするだけ」の
+最小限のモデルなので、効果が薄ければそちらの拡張も検討する。
+
+---
+
+## ★ 2026-08-28（続き2）：E2E LiDARの報酬を道幅の余白付きに変更（レーシングライン阻害の解消）
+
+`first_model`（最初のPPO学習）で無衝突走行までは到達したが、**アウトインアウトの
+ライン取りやコーナー前の減速がまだ出ない**とバンビから報告があった。原因を切り分けた
+ところ2つ判明した:
+
+1. **報酬の`cross_track`ペナルティが常に中心線への張り付きを要求していた**
+   （`sim/gym_env.py`の`reward = progress_weight*progress - cross_track_weight*abs(cross_track)`）。
+   レーシングラインはコーナーで意図的に中心線から外れる技術なので、この設計では
+   **構造的に損**になっていた
+2. `sim/vehicle.py`の車両モデルにはタイヤの横滑り・グリップ限界が無い（自転車運動学
+   モデルのみ）ため、同じ舵角なら速度に関わらず同じ半径で曲がれてしまう。つまり
+   「速すぎるとコーナーを曲がりきれない」という**物理的な必然性が弱い**（唯一の
+   間接的な理由はステア操舵の`dead_time_s`+`tau_steer_s`の遅れ）。これは今回は
+   手を付けず、まず報酬側の改善で様子を見る方針
+
+**変更**: `SimE2EEnv`に`cross_track_margin_frac`（既定`0.5`）を追加。道幅の半分の
+うち、この割合ぶんはペナルティ無しで自由に使える「余白」とし、そこを超えた分だけ
+`cross_track_weight`で罰する（`sim/gym_env.py`の`step()`）。壁への接近（衝突）は
+従来通り`collision_penalty`で別途罰しているので、この変更は「壁にぶつからなければ
+コース内のどこを通ってもよい」という自由度を与えるだけ。テストは
+`ml_lidar/tests/test_env.py::test_cross_track_margin_frees_deviation_within_margin`
+で、同じ行動列でも`margin_frac=1.0`の方が`=0.0`より合計報酬が高くなることを確認。
+
+**How to apply**: `train_rl.py`は`SimE2EEnv`の既定値をそのまま使うのでコード変更は
+不要——**再学習すれば新しい報酬が効く**。`progress_weight`（進捗＝弧長方向の移動量、
+速度の代理指標として機能している）はそのまま変えていない。改善が薄ければ次は
+`progress_weight`を上げて速度への圧力を強める、それでも足りなければ車両モデルに
+簡易的な横方向グリップ限界を足す、の順で検討する（上記2番目の物理的な弱さの話）。
+
+---
+
+## ★ 2026-08-28（続き）：`ml/export_onnx.py` の `external_data` バグ修正／`cam_perception_node` を systemd 化
+
+`docs/development.md`・`docs/system_overview.md` に `e2e_lidar`／`ftg_cam` の運用手順を
+書き足した過程で見つかった2件。
+
+### `ml/export_onnx.py` に `ml_lidar/export_onnx_rl.py` と同じ罠が実在した
+
+`ml_lidar/export_onnx_rl.py`（2026-08-28 に追加）は `torch.onnx.export()` に
+`external_data=False` を明示している。既定(`True`)だと重みが `<out_path>.data` という
+別ファイルに切り出され、**`.onnx` 単体をコピー/配置すると壊れる**罠を実際に踏んで
+判明したもので、そのときのコメントに「`ml/export_onnx.py`（カメラパイプライン、
+既存コード）も同じ呼び出しパターンで `external_data` を指定していないので、同じ問題を
+抱えている可能性がある（未検証）」と書き残していた。
+
+**検証したところ実在した**: `ml/export_onnx.py` で書き出した `.onnx` を、同じ書き出し先
+ディレクトリから別ディレクトリへコピーして読み直すと
+`External data path does not exist: ".../model.onnx.data"` で `onnxruntime` の
+`InferenceSession` 初期化が失敗する（`models/` への配置運用＝`.onnx` 単体をコピーする、
+と全く同じ操作）。`ml/tests/test_export_onnx.py` の既存テストは書き出したその場の
+ディレクトリで読み直すだけだったため、`.data` が隣にあって気づかず通っていた。
+
+**修正**: `ml/export_onnx.py` の `torch.onnx.export()` に `external_data=False` を追加。
+再発防止に、書き出した `.onnx` を別ディレクトリへコピーしてから単体で読み込む回帰テスト
+（`test_onnx_file_loads_alone_without_its_export_directory`）を `ml/tests/test_export_onnx.py`
+と `ml_lidar/tests/test_export_onnx_rl.py`（元々バグが無かった側にも、将来の回帰に備えて）
+の両方に追加。**修正前の状態に戻して実際にテストが落ちることを確認済み**（`External data
+path does not exist` を再現）。
+
+### `cam_perception_node` を systemd 化した（ただし既定は無効）
+
+これまで `ftg_cam` を使うには実車で手動 SSH してプロセスを起動する必要があったが、
+`raspi/setup/install_services.sh` に `surge-cam-perception` unit を追加し、
+`--with-cam-perception` フラグ（`--with-logger` と同じパターン）で有効化できるようにした。
+
+**既定では無効のまま**（`UNITS` に入れず、unit は常に書くが `enable --now` しない）。
+理由: `cam_perception_node` は `planning_node` がどのモードを選んでいるかを一切知らない
+独立プロセスで、前方カメラのフレームが来る限り `ftg_cam` を使う気が無くても CNN 推論を
+回し続ける。他の常時起動ノード（`surge-planning` 含む）と違い「起動しているだけなら
+ほぼコスト0」ではないため、`surge-logger`（SD書き込み量が理由）と同じ「既定オフ・
+フラグで有効化」の形にした。
+
+**How to apply**: `ftg_cam` を実車で試すには
+`ssh surge-mk2 'sudo systemctl start surge-cam-perception'`
+（または `install_services.sh --with-cam-perception` で恒久化）が必要になった。
+手順は `docs/development.md` §12.2 に反映済み。`raspi/nodes/cam_perception_node.py`
+の argparse には `--quiet` が無いため、unit の `ExecStart` に `--quiet` を渡すと
+即エラー終了で再起動ループになる点に注意（他ノードとの write_unit 呼び出しをコピペ
+するときに踏みやすい）。
+
+---
+
+## ★ 2026-08-28：`steer_actual` −24°張り付き問題が解決（STM32側で判明）
+
+長らく「未解決・要相談」に残っていた `steer_actual` が指令 0° でも定常オフセット
+（−24.0°、過去記録では +22.4°）を持つ問題は、**STM32側の原因判明により解決した**。
+
+**原因**: STM32 はステアモータの中央位置にオフセットをかけて較正しているが、
+**駆動電源を切った状態ではステアモータから送られてくる角度に、そのオフセット分
+（27°程度）がそのまま定常誤差として乗っていた**（駆動電源ON時は正しく較正済みの
+値が出る）。原点ずれでも Pi/STM32 間の符号規約の食い違いでもなく、STM32側の
+較正適用がドライブ電源状態に依存していたのが正体だった。
+
+**How to apply**: この節を書いた時点で Pi 側リポジトリのコード変更は無い（原因が
+STM32 側にあったため）。今後 `steer_actual` の定常オフセットが再発したら、
+「駆動電源が入っているか」をまず確認すること。Phase 1 のアクチュエータ遅延実測
+（`steer_cmd_echo` と `steer_actual` の差分測定）はこの問題の解消によりブロックが外れた。
 
 ---
 
@@ -655,11 +1202,6 @@ Disparity Extender（非SLAM反射型）の両方をシムで試作した。**�
 
 ### ハードウェア / STM32 側と要相談
 
-- **`steer_actual` が指令 0° で −24.0° に張り付く（未解決）。**
-  「遅れ」では説明できない定常オフセット。原点ずれか、Pi/STM32間の舵角符号規約の
-  食い違いを疑っている。**Phase 1 のアクチュエータ遅延実測（`steer_cmd_echo` と
-  `steer_actual` の差を測る）の前に必ず潰すこと。** 過去記録では逆符号（+22.4°）の
-  張り付きも観測されており、単発の配線ではなく構造的な疑いがある
 - **STM32 の時刻が +3378ppm 速い（新発見・要相談）。** HSI(内蔵RC, ±1%級)で動いている
   可能性が高い。`TimeSync` の回帰補正で実害は吸収できているが、STM32側に確認する価値あり
 - **MD バスの CRC エラー率が3台とも 23〜25%（新発見・要相談）。** Pi⇄STM32 は無傷（crc=0）
@@ -719,22 +1261,21 @@ Disparity Extender（非SLAM反射型）の両方をシムで試作した。**�
 
 ## 次にやること（優先度順）
 
-1. **`steer_actual` の −24° 張り付きの原因特定**（原点ずれ or 符号規約。他の何より先）
-2. **壁に穴が残る根本原因の対処**（`_END_BACKOFF` の再チューニング or 実車 LiDAR
+1. **壁に穴が残る根本原因の対処**（`_END_BACKOFF` の再チューニング or 実車 LiDAR
    ノイズの実測。2026-08-23 の中心線の頑健化は対症療法でしかない。上の
    「2026-08-23」節参照）
-3. **中心線の急カーブ耐性のさらなる改善**（`_MAX_SHIFT_M` はテレポートを
+2. **中心線の急カーブ耐性のさらなる改善**（`_MAX_SHIFT_M` はテレポートを
    防ぐだけで、シケイン内の測定精度そのものは上がらない。`fuji` コースで
    1〜2点の残留を実測済み。法線推定の頑健化 or EDT ベースへの置き換えが
    次の一手。上の「2026-08-23」節参照）
-4. **BUILD→RACE 切り替え直後の一時的な自己位置誤差（30〜58cm）の原因調査**
+3. **BUILD→RACE 切り替え直後の一時的な自己位置誤差（30〜58cm）の原因調査**
    （2026-08-22 の `sim.bench` で oval・circuit 両方に出た。「RACE 段が壁へ接触
    して固着する」と同じ Pure Pursuit 遅延補償が疑わしい。oval/circuit は
    sim.bench で確認済みなので残るは split の再実測とこれ）
-5. **Disparity Extender を車輪を浮かせて実車検証**（`--max-speed 0.2` 程度から）
-6. GUI カメラ 14fps の切り分け
-7. `[dynamics]`（操舵のむだ時間・1次遅れなど）の実測
-8. 屋外用ルーターの SSID を研究室で登録
+4. **Disparity Extender を車輪を浮かせて実車検証**（`--max-speed 0.2` 程度から）
+5. GUI カメラ 14fps の切り分け
+6. `[dynamics]`（操舵のむだ時間・1次遅れなど）の実測
+7. 屋外用ルーターの SSID を研究室で登録
 
 SLAM 側の課題（RACE固着・oval渦巻き・split未解決）は方針により**棚上げ中**。
 再開する入口は「周回検出のたびに `close_loop()` を走らせる」変更（上記）。

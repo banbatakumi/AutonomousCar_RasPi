@@ -1,7 +1,7 @@
 # SURGE Mark.2 システム全体像
 
 **対象**: このシステムを初めて見る人／久しぶりに戻ってきた人
-**最終更新**: 2026-08-16
+**最終更新**: 2026-08-28
 
 自律走行ミニカー **SURGE Mark.2** が、**何を・どこで・どういう順番でやっているか**を
 一通り追えるようにした文書。**「なぜそう設計したか」は [`architecture.md`](architecture.md)、
@@ -283,6 +283,7 @@ flowchart LR
 
     IO["io_node<br/>最優先・実時間性重視"]
     CAM["camera_node"]
+    CAMPERC["cam_perception_node<br/>ftg_cam用・既定で無効"]
     PLAN["planning_node<br/>配線だけ。中身は raspi/auto/"]
     TELE["telemetry_node<br/>WS サーバ"]
     LOG["logger_node<br/>MCAP 記録"]
@@ -292,7 +293,9 @@ flowchart LR
     IO -->|"vehicle_state / scan / diag"| TELE
     IO --> LOG
     CAM -->|"共有メモリ<br/>image/front, image/rear"| TELE
+    CAM -->|"共有メモリ<br/>image/front"| CAMPERC
     CAM --> LOG
+    CAMPERC -->|"scan/cam"| PLAN
     PLAN -->|"auto/cmd 50Hz<br/>auto/state 10Hz"| TELE
     TELE -->|"cmd 50Hz（唯一の発行元）"| IO
     TELE -->|"auto/ctrl 5Hz"| PLAN
@@ -308,7 +311,14 @@ flowchart LR
 | `surge-telemetry` | `raspi.nodes.telemetry_node` | WS サーバ・GUI 配信 | GUI が繋がらない |
 | `surge-planning` | `raspi.nodes.planning_node` | 自動運転の判断 | 自律走行だけ止まる |
 | `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録（**既定では無効**） | — |
+| `surge-cam-perception` | `raspi.nodes.cam_perception_node` | カメラの走行可否セグメンテーション推論（`ftg_cam` 用）（**既定では無効**） | `ftg_cam` が使えなくなるだけ |
 | `surge-logclean.timer` | — | 毎時、古いログを消す（7日超／合計8GB超） | ディスクが埋まる |
+
+> **`surge-cam-perception` は他の4ノードと違い既定で無効。** `cam_perception_node` は
+> `planning_node` の選択とは無関係にカメラフレームが来るたびCNN推論を回し続ける
+> 独立プロセスなので、常時有効化すると `ftg_cam` を使う気が無くてもCPU・電力を
+> 消費し続ける。有効化の手順は
+> [`development.md` §12.2](development.md#122-カメラセグメンテーション走行ftg_cam)。
 
 **`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、
 起動していること自体が車を動かす条件にはならない。
@@ -319,6 +329,9 @@ flowchart LR
 |---|---|---|---|---|
 | `vehicle_state` | 速度・各輪周速・路面舵角・オドメトリ・IMU・温度・電源2系統・フラグ | 50Hz | io_node | LATEST |
 | `scan` | LiDAR 1周分の点群（360点＋セクタごとの時刻・受信有無） | 10Hz | io_node | LATEST |
+| `scan/cam` | カメラの走行可否セグメンテーションを`scan`と同じ形に変換した擬似点群（`ftg_cam`専用） | 実測待ち | cam_perception_node | LATEST |
+| `cam/model` | GUIが選んだセグメンテーションモデル名（`models/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
+| `e2e/model` | GUIが選んだE2E LiDARモデル名（`models/e2e_lidar/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
 | `diag/link` | リンク統計（loss / CRC / 往復 / 時刻同期 / **SIM バッジ**） | 10Hz | io_node | LATEST |
 | `image/front`, `image/rear` | 共有メモリ参照（60バイト） | 最大 30Hz | camera_node | LATEST |
 | `cmd` | 目標速度・舵角・フラグ | 50Hz | **telemetry_node（唯一）** | LATEST |
@@ -501,13 +514,15 @@ planning_node は `arm` を立てられない。engage の状態は保存され�
 3. 走ってよいか分からないときは `ready=False`。planning_node が制動に読み替える
 4. パラメータは `params` に宣言する（GUI が自動生成する）
 
-### 9.2 実装されているモードは3つ
+### 9.2 実装されているモードは5つ
 
 | id | 名前 | 地図 | 考え方 |
 |---|---|---|---|
 | `ftg` | **Follow the Gap** | 不要 | 点群の中で**最も広く空いた区間**を選び、**その真ん中**を狙う |
+| `ftg_cam` | **Follow the Gap（カメラ）** | 不要 | `ftg`と全く同じロジックを、カメラの走行可否セグメンテーションから作った擬似点群で走らせる |
 | `de` | **Disparity Extender** | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う |
 | `raceline` | **レーシングライン** | **必要** | SLAM で地図を作り、最小曲率の経路を引いて Pure Pursuit で追う |
+| `e2e_lidar` | **E2E LiDAR** | 不要 | 強化学習（PPO）で点群→ステア/速度を**直接回帰**する方策。ギャップ探索のようなアルゴリズムそのものを持たない |
 
 #### `ftg` — 最遠点ではなく「区間の真ん中」を狙う
 
@@ -534,6 +549,26 @@ planning_node は `arm` を立てられない。engage の状態は保存され�
 道幅 1.0m の走路では中央に居ても壁が 0.5m 横にあるので、正面 ±20° の扇の最小値を採ると
 **どんな直線でも見通しが 1.5m を超えない**。これが FTG が踏み切れない理由で、
 直しただけで circuit のラップが **62s → 17s** になった。
+
+#### `ftg_cam` — カメラでLiDARが見えない低い壁を補う
+
+`ftg`の`plan()`は一切上書きしない。ギャップ探索・安全バブル・速度決定はセンサを
+問わないロジックだと示すための狙った制約で、新しいのは`cam_perception_node.py`
+（前方カメラの走行可否セグメンテーションを`raspi.nav.ipm`で地面座標へ逆投影し、
+既存の`OccGrid.raycast()`で`scan`と同じ形の距離配列に変換して`scan/cam`へ流す）
+だけ。**独立プロセス**（`planning_node`の中ではない）で、カメラの実視野
+（hfov≈66°）を超えて`fov_deg`を広げても意味が無いので60°に絞ってある。
+
+#### `e2e_lidar` — 学習ベースで地図も経路も持たない
+
+`ml_lidar/train_rl.py`（Stable-Baselines3のPPO、シム上の強化学習）で学習した方策を
+ONNX化し、点群をそのままステア／速度へ回帰する。`de`のような**教師データを使う
+模倣ではない**——「コースに沿って進めたら＋報酬・衝突したら－報酬」を頼りに試行錯誤
+で最適化したもので、`de`を再現するのではなく**それを超えうる**代わりに、未知の
+点群パターンに対する挙動は原理的に保証できない。そのため`stop_dist`（正面の余裕が
+閾値を切ったらモデル出力を無視して無条件停止）という独立した安全策を必ず持つ——
+`de`の`stop_dist`と同じ「測距不能を空き扱いにしている穴を受ける最後の砦」という
+理由。学習・ONNX化・GUIでの使い方は[`development.md` §12](development.md#12-学習ベースの自動運転を動かすlidar-e2e--カメラセグメンテーション)。
 
 #### `raceline` — 3つの段を持つ状態機械
 
