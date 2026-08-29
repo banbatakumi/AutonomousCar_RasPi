@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))          # repo root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))          # ml/
 
-from extract_frames import VIZ_IMAGE_PREFIX, extract_one  # noqa: E402
+from extract_frames import VIZ_IMAGE_PREFIX, count_messages, extract_one  # noqa: E402
 from raspi.rec.mcap_log import McapLog  # noqa: E402
 
 
@@ -41,7 +41,7 @@ class TestExtractFrames(unittest.TestCase):
             with open(manifest_path, "a", newline="") as mf:
                 w = csv.writer(mf)
                 w.writerow(["file", "source_mcap", "cam", "t_capture_ns"])
-                n = extract_one(mcap_path, out_dir, {"front"}, w)
+                n, _ = extract_one(mcap_path, out_dir, {"front"}, w)
 
             self.assertEqual(n, 2, "front カメラの2枚だけを取り出すはず")
             jpg_files = sorted(out_dir.glob("*.jpg"))
@@ -67,7 +67,7 @@ class TestExtractFrames(unittest.TestCase):
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n = extract_one(mcap_path, out_dir, {"front"}, w)
+                n, _ = extract_one(mcap_path, out_dir, {"front"}, w)
             self.assertEqual(n, 0)
 
     def test_min_interval_ns_thins_out_close_frames(self):
@@ -83,7 +83,7 @@ class TestExtractFrames(unittest.TestCase):
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n = extract_one(mcap_path, out_dir, {"front"}, w, min_interval_ns=200_000_000)
+                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, min_interval_ns=200_000_000)
 
             self.assertEqual(n, 2, "0msと250msの2枚だけ採用され、100msは間引かれるはず")
 
@@ -99,10 +99,57 @@ class TestExtractFrames(unittest.TestCase):
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n = extract_one(mcap_path, out_dir, {"front", "rear"}, w,
-                                min_interval_ns=200_000_000)
+                n, _ = extract_one(mcap_path, out_dir, {"front", "rear"}, w,
+                                   min_interval_ns=200_000_000)
 
             self.assertEqual(n, 2, "別カメラなので間引きの基準時刻を共有しないはず")
+
+    def test_stride_thins_by_running_index(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                for i in range(6):
+                    log.write_viz_image(jpg, "front", t_mono_ns=i * 1_000_000)
+
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                n, scanned = extract_one(mcap_path, out_dir, {"front"}, w, stride=3)
+
+            self.assertEqual(scanned, 6)
+            self.assertEqual(n, 2, "index 0,3 の2枚だけ採用されるはず")
+
+    def test_stride_continues_across_files_via_start_index(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                for i in range(3):
+                    log.write_viz_image(jpg, "front", t_mono_ns=i * 1_000_000)
+
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                # 前のファイルで既に3件走査済みという想定で続きから始める
+                n, scanned = extract_one(mcap_path, out_dir, {"front"}, w, stride=3, start_index=3)
+
+            self.assertEqual(scanned, 3)
+            self.assertEqual(n, 1, "通し番号3,4,5のうち3の1枚だけ採用されるはず")
+
+    def test_count_messages_counts_without_writing_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            jpg = _tiny_jpeg()
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                log.write_viz_image(jpg, "front", t_mono_ns=0)
+                log.write_viz_image(jpg, "front", t_mono_ns=1_000_000)
+                log.write_viz_image(jpg, "rear", t_mono_ns=2_000_000)
+
+            self.assertEqual(count_messages(mcap_path, {"front"}), 2)
+            self.assertEqual(count_messages(mcap_path, {"front", "rear"}), 3)
 
     def test_topic_prefix_matches_mcap_log(self):
         """`VIZ_IMAGE_PREFIX` が `raspi/rec/mcap_log.py` の値とズレていないこと。"""

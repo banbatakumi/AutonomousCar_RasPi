@@ -69,9 +69,12 @@ def new_run_dir_str() -> str:
 # ── コマンド組み立て（Tkinter を一切知らない純粋関数。`ml/tests/test_app.py` の対象） ──
 
 def build_extract_cmd(python: str, mcap_files: list[str], out_dir: str, cam: str,
-                      min_interval_ms: int = 0) -> list[str]:
+                      min_interval_ms: int = 0, target_count: int = 0) -> list[str]:
+    """`min_interval_ms`・`target_count` は排他（両方>0なら `target_count` を優先）。"""
     cmd = [python, str(ML_DIR / "extract_frames.py"), *mcap_files, "--out", out_dir]
-    if min_interval_ms > 0:
+    if target_count > 0:
+        cmd += ["--target-count", str(target_count)]
+    elif min_interval_ms > 0:
         cmd += ["--min-interval-ms", str(min_interval_ms)]
     cmd += ["--cam", cam]
     return cmd
@@ -238,27 +241,52 @@ class App:
         ttk.Combobox(frame, textvariable=cam_var, values=["front", "rear", "both"],
                     state="readonly", width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
 
+        thin_mode = tk.StringVar(value="interval")
+        ttk.Label(frame, text="間引き方法:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        mode_frame = ttk.Frame(frame)
+        mode_frame.grid(row=3, column=1, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Radiobutton(mode_frame, text="間隔(ms)", variable=thin_mode,
+                        value="interval").pack(side="left")
+        ttk.Radiobutton(mode_frame, text="合計枚数", variable=thin_mode,
+                        value="count").pack(side="left", padx=(10, 0))
+
         interval_var = tk.StringVar(value="500")
-        ttk.Label(frame, text="間引き間隔(ms):").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=interval_var, width=10).grid(row=3, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="0で間引きなし。連続フレームはほぼ同じ構図なので\n"
-                             "間引くほどアノテーションの手間が減る",
-                 foreground="gray").grid(row=4, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="間引き間隔(ms):").grid(row=4, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(frame, textvariable=interval_var, width=10).grid(row=4, column=1, sticky="w", pady=(4, 0))
+
+        count_var = tk.StringVar(value="500")
+        ttk.Label(frame, text="合計枚数:").grid(row=5, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(frame, textvariable=count_var, width=10).grid(row=5, column=1, sticky="w", pady=(4, 0))
+
+        ttk.Label(frame, text="間隔(ms): 0で間引きなし。連続フレームはほぼ同じ構図なので\n"
+                             "間引くほどアノテーションの手間が減る。\n"
+                             "合計枚数: 選んだ全 .mcap・全カメラを通して、指定枚数に近づくよう\n"
+                             "均等に間引く（複数ファイルでも合計でこの枚数程度になる）",
+                 foreground="gray").grid(row=6, column=0, columnspan=3, sticky="w")
 
         def run() -> None:
             if not self._extract_files:
                 messagebox.showwarning("未選択", ".mcap ファイルを選んでください")
                 return
-            try:
-                interval = int(interval_var.get())
-            except ValueError:
-                messagebox.showerror("入力エラー", "間引き間隔は整数で入力してください")
-                return
+            interval = 0
+            count = 0
+            if thin_mode.get() == "count":
+                try:
+                    count = int(count_var.get())
+                except ValueError:
+                    messagebox.showerror("入力エラー", "合計枚数は整数で入力してください")
+                    return
+            else:
+                try:
+                    interval = int(interval_var.get())
+                except ValueError:
+                    messagebox.showerror("入力エラー", "間引き間隔は整数で入力してください")
+                    return
             cmd = build_extract_cmd(self.python, self._extract_files, out_var.get(), cam_var.get(),
-                                    interval)
+                                    interval, count)
             self._run(cmd, "フレーム抽出")
 
-        ttk.Button(frame, text="抽出実行", command=run).grid(row=5, column=0, sticky="w", pady=10)
+        ttk.Button(frame, text="抽出実行", command=run).grid(row=7, column=0, sticky="w", pady=10)
 
     def _build_annotate_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)

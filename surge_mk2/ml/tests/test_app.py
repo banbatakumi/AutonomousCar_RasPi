@@ -66,6 +66,17 @@ class TestCommandBuilders(unittest.TestCase):
         cmd = build_extract_cmd("python3", ["a.mcap"], "out_dir", "front", 0)
         self.assertNotIn("--min-interval-ms", cmd)
 
+    def test_extract_cmd_with_target_count(self):
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out_dir", "front", target_count=500)
+        self.assertEqual(cmd[cmd.index("--target-count") + 1], "500")
+        self.assertNotIn("--min-interval-ms", cmd)
+
+    def test_extract_cmd_target_count_wins_over_interval(self):
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out_dir", "front",
+                                min_interval_ms=500, target_count=100)
+        self.assertEqual(cmd[cmd.index("--target-count") + 1], "100")
+        self.assertNotIn("--min-interval-ms", cmd)
+
     def test_annotate_cmd_without_skip_labeled(self):
         cmd = build_annotate_cmd("python3", "frames", "ckpt.pth", "vit_b", "cpu", False)
         self.assertNotIn("--skip-labeled", cmd)
