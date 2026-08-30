@@ -382,6 +382,32 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
         self.assertFalse(srv._last_cmd.auto_stop)
 
+    async def test_side_brake_and_winkers_reach_drive_cmd(self):
+        """v0.13/v0.14: WS の cmd JSON の `side_brake`/`winker_left`/`winker_right`
+        が DriveCmd まで届く。**`_decode_cmd` へのフィールド追加を忘れると、
+        GUI 側は「要求中」と表示されるのに実際には一切 STM32 へ届かない**
+        （`torque_mode` と同種の取りこぼしが `side_brake` で実際に発生し、
+        2026-08-30 に実車確認で発覚した）。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(
+            a, b'{"type":"cmd","mode":1,"speed":0.0,'
+               b'"side_brake":true,"winker_left":true,"winker_right":true}')
+        self.assertTrue(srv._last_cmd.side_brake)
+        self.assertTrue(srv._last_cmd.winker_left)
+        self.assertTrue(srv._last_cmd.winker_right)
+
+    async def test_side_brake_and_winkers_default_false_for_old_gui(self):
+        """キーを送ってこない GUI で誤って有効化しない（既定 False）。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":0.5}')
+        self.assertFalse(srv._last_cmd.side_brake)
+        self.assertFalse(srv._last_cmd.winker_left)
+        self.assertFalse(srv._last_cmd.winker_right)
+
 
     # ── 自律走行の開始には操縦権が要る（レビュー 🔴1-(c)） ──
 

@@ -1,5 +1,5 @@
 /**
- * 運転中に共通の操作 — 灯火・ファン・サイドブレーキ。**ラジコンタブでも自動運転
+ * 運転中に共通の操作 — 灯火・ファン・サイドブレーキ・ウィンカー。**ラジコンタブでも自動運転
  * タブでも同じものを操作するので、タブごとに複製せずタブ行に1つだけ置く。**
  *
  * 2026-08-17: `RcBar.tsx`（ラジコンタブ）と `AuxPanel.tsx`（自動運転タブ）に
@@ -119,6 +119,52 @@ export function DriveControls({ ch }: { ch: ControlChannel | null }) {
         <span className={`pill ${vs?.side_brake_active ? 'lv-warn' : 'dim'}`}>
           {vs?.side_brake_active ? '固定中' : ui.sideBrakeRequested ? '要求中…' : '解除'}
         </span>
+      </div>
+
+      <div className="rc-ctl">
+        <span className="label">ウィンカー</span>
+        <div className="seg">
+          <button
+            className={ui.winkerLeftRequested && !ui.winkerRightRequested ? 'on' : ''}
+            onClick={() => ui.set({ winkerLeftRequested: true, winkerRightRequested: false })}
+          >
+            ← 左
+          </button>
+          <button
+            className={!ui.winkerLeftRequested && !ui.winkerRightRequested ? 'on' : ''}
+            onClick={() => ui.set({ winkerLeftRequested: false, winkerRightRequested: false })}
+          >
+            OFF
+          </button>
+          <button
+            className={!ui.winkerLeftRequested && ui.winkerRightRequested ? 'on' : ''}
+            onClick={() => ui.set({ winkerLeftRequested: false, winkerRightRequested: true })}
+          >
+            右 →
+          </button>
+          <button
+            className={ui.winkerLeftRequested && ui.winkerRightRequested ? 'on' : ''}
+            onClick={() => ui.set({ winkerLeftRequested: true, winkerRightRequested: true })}
+            title="左右同時点滅"
+          >
+            ハザード
+          </button>
+        </div>
+        {/* 点滅の実行はSTM32側。「要求している」と「実際に点滅しているか」は別物 */}
+        <span className={`pill ${(vs?.winker_left_active || vs?.winker_right_active) ? 'lv-warn' : 'dim'}`}>
+          {vs?.winker_left_active || vs?.winker_right_active
+            ? '点滅中'
+            : ui.winkerLeftRequested || ui.winkerRightRequested
+              ? '要求中…'
+              : '解除'}
+        </span>
+        {/* STM32側の安全設計: 駆動系低電圧の間は要求内容に関わらず強制ハザード。
+            これを出さないと「操作と無関係にハザードが消えない」が原因不明のバグに見える */}
+        {vs?.faults?.includes('drive_undervoltage') && (
+          <span className="pill lv-warn" title="駆動系バッテリー電圧低下（8.0V未満）のため、STM32側の安全設計でウィンカー要求の内容に関わらず強制的にハザードになっています。片側だけの点滅を試すにはバッテリーを充電し8.8V以上に回復させてください">
+            ⚠ 低電圧のため強制ハザード中
+          </span>
+        )}
       </div>
     </div>
   )

@@ -660,7 +660,8 @@ export function useDriving(ch: ControlChannel | null) {
         // 2枚目のタブや別の PC が操縦できなくなる（操縦権は同時に1人）。
         // 消灯に戻したあとは送信が止まり、`DEADMAN_MS` で io_node が DISARM_COMMAND
         //（`flags=0`）に落とすので、灯火はそのまま消える。
-        const wantAux = horn || passing || ui.lightMode !== LIGHT_OFF
+        const wantAux = horn || passing || ui.lightMode !== LIGHT_OFF ||
+          ui.winkerLeftRequested || ui.winkerRightRequested
         if (!wantAux) {
           mirrorAux(false, false, false)
           return
@@ -693,6 +694,10 @@ export function useDriving(ch: ControlChannel | null) {
           target_torque: 0,
           auto_stop: s.autoStop,
           side_brake: false,
+          // ウィンカーは純粋な灯火系（後輪モータの励磁と無関係）なので、
+          // side_brake と違い未 ARM でも送る（灯火・ホーンと同じ理由）
+          winker_left: ui.winkerLeftRequested,
+          winker_right: ui.winkerRightRequested,
         })
         return
       }
@@ -776,6 +781,8 @@ export function useDriving(ch: ControlChannel | null) {
           auto_stop: s.autoStop,
           // **人間のサイドブレーキもそのまま通す**（brake と同じ理由）
           side_brake: ui.sideBrakeRequested,
+          winker_left: ui.winkerLeftRequested,
+          winker_right: ui.winkerRightRequested,
         })
         return
       }
@@ -924,6 +931,9 @@ export function useDriving(ch: ControlChannel | null) {
         auto_stop: s.autoStop,
         // v0.13: `braking`等と違いトグル。`AuxPanel.tsx` の ON/OFF で切り替える
         side_brake: ui.sideBrakeRequested,
+        // v0.14: ウィンカーも `side_brake` と同じくトグル。灯火系なので未 ARM でも送る
+        winker_left: ui.winkerLeftRequested,
+        winker_right: ui.winkerRightRequested,
       })
     }
 

@@ -810,6 +810,14 @@ class TelemetryServer:
             # v0.7: 超音波の自動停止。**既定は False**（キーを送ってこない古い GUI に
             # 勝手な自動介入を足さない）。有効にするかは GUI の設定パネルで人間が決める
             auto_stop=bool(m.get("auto_stop", False)),
+            # v0.13: サイドブレーキ。**ここへの追加が漏れていたため、GUI 側は
+            # 「要求中」と表示されるのに実際には一切 STM32 へ届いていなかった**
+            # （2026-08-30 発覚）。DriveCmd に新しいトグル系フィールドを足したら
+            # 必ずここも直すこと——型を直しただけでは WS の JSON から拾われない
+            side_brake=bool(m.get("side_brake", False)),
+            # v0.14: ウィンカー。side_brake と同じ理由で追加
+            winker_left=bool(m.get("winker_left", False)),
+            winker_right=bool(m.get("winker_right", False)),
             source=f"gui:{self.controller_name}")
 
     def _release_control(self, why: str) -> None:

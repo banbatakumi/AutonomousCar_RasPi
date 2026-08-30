@@ -98,6 +98,8 @@ def decode_flags(flags: int) -> dict:
         "drive_power_locked": bool(flags & packets.FLG_DRIVE_POWER_LOCKED),
         "auto_stop_active": bool(flags & packets.FLG_AUTO_STOP_ACTIVE),
         "side_brake_active": bool(flags & packets.FLG_SIDE_BRAKE_ACTIVE),
+        "winker_left_active": bool(flags & packets.FLG_WINKER_LEFT_ACTIVE),
+        "winker_right_active": bool(flags & packets.FLG_WINKER_RIGHT_ACTIVE),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 
@@ -261,6 +263,11 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
     # v0.13: サイドブレーキ。速度に関わらず即座に位置制御へ切り替えて固定するため、
     # Pi 側では target_speed 等をクランプせずそのまま送る（STM32 側が brake より優先して解釈する）
     flags2 = packets.CMD_FLG2_SIDE_BRAKE if cmd.side_brake else 0
+    # v0.14: ウィンカー。両方立てればハザード。点滅そのものは STM32 側が行う
+    if cmd.winker_left:
+        flags2 |= packets.CMD_FLG2_WINKER_LEFT
+    if cmd.winker_right:
+        flags2 |= packets.CMD_FLG2_WINKER_RIGHT
 
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0

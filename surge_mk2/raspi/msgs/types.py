@@ -163,6 +163,10 @@ class VehicleState(MsgBase):
     #: サイドブレーキ（`COMMAND.flags2` bit0）が**今まさに位置制御へ切り替わり固定中**
     #: （★v0.13）。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
     side_brake_active: bool = False
+    #: 左/右ウィンカーが**今まさに点滅中**（`COMMAND.flags2` bit1/2 の要求に対する実行状態、★v0.14）。
+    #: 点滅の周期・位相は STM32 側が持つので、Pi は「要求したか」ではなく「実際に光っているか」を見る
+    winker_left_active: bool = False
+    winker_right_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
 
     # ── Pi 側で計算した派生量 ──
@@ -282,6 +286,10 @@ class DriveCmd(MsgBase):
     #: サイドブレーキ。立てている間、**速度に関わらず即座に**後輪を機械的な位置制御へ
     #: 切り替えて固定する（★v0.13）。`brake` より優先。解除は明示的に下ろすまで有効
     side_brake: bool = False
+    #: 左/右ウィンカー（★v0.14）。**両方立てるとハザード**（左右同時点滅）として扱われる。
+    #: 点滅そのものは STM32 側で行う。実際に点滅しているかは `VehicleState.winker_*_active` を見ること
+    winker_left: bool = False
+    winker_right: bool = False
     source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
 
 

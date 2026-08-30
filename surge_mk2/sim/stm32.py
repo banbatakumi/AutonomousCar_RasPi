@@ -296,7 +296,7 @@ class VirtualStm32:
 
     # ── テレメトリ ──
 
-    def _flags(self) -> int:
+    def _flags(self, t_ns: int) -> int:
         f = self.mode & packets.FLG_MODE_MASK
         if self._input.armed and not self.estop_active and not self.uart_timeout:
             f |= packets.FLG_ARMED
@@ -308,6 +308,13 @@ class VirtualStm32:
             f |= packets.FLG_AUTO_STOP_ACTIVE
         if self.side_brake_active:
             f |= packets.FLG_SIDE_BRAKE_ACTIVE
+        # v0.14: ウィンカー。点滅周期は暫定 1Hz（0.5s ON / 0.5s OFF）。
+        # **実際の周期は STM32 側の実装依存**なので、ここは GUI 配線の確認用の近似
+        blink = (t_ns // (NS // 2)) % 2 == 0
+        if blink and (self._cmd_flags2 & packets.CMD_FLG2_WINKER_LEFT):
+            f |= packets.FLG_WINKER_LEFT_ACTIVE
+        if blink and (self._cmd_flags2 & packets.CMD_FLG2_WINKER_RIGHT):
+            f |= packets.FLG_WINKER_RIGHT_ACTIVE
         f |= packets.FLG_IMU_OK | packets.FLG_STEER_CENTER_VALID
         if self.lidar is not None:
             f |= packets.FLG_LIDAR_OK
@@ -334,7 +341,7 @@ class VirtualStm32:
 
         return packets.Telemetry(
             t_us=self.stm_us(t_ns),
-            flags=self._flags(),
+            flags=self._flags(t_ns),
             speed=_q("speed", v.speed, -32768, 32767),
             yaw_rate=_q("yaw_rate", yaw_rate, -32768, 32767),
             steer_actual=_q("steer_actual", v.steer_actual, -32768, 32767),

@@ -304,4 +304,9 @@ export type CmdOut = {
    * OFF にするまで送り続ける）で扱う想定——駐車ブレーキのように「かけたら離れられる」
    * ものであって、押しっぱなしが必要な `brake`/`horn` とは性質が違う */
   side_brake: boolean
+  /** 左/右ウィンカー（v0.14）。**両方立てるとハザード**（左右同時点滅）として扱われる。
+   * 点滅そのものは STM32 側で行う。実際に点滅しているかは `VehicleState.winker_*_active` を見ること。
+   * `side_brake` と同じく**トグル**で扱う（曲がり終わったら明示的に OFF にする） */
+  winker_left: boolean
+  winker_right: boolean
 }

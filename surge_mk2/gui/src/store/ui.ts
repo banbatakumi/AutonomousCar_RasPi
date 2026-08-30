@@ -596,6 +596,18 @@ type UiState = {
   sideBrakeRequested: boolean
 
   /**
+   * 左/右ウィンカーの意思（`COMMAND.flags2` bit1/2、v0.14）。
+   *
+   * `sideBrakeRequested` と同じくトグル（押している間だけではない）で、
+   * **両方 true にするとハザード**として送られる（`command_from_cmd`）。
+   * ページ再読み込みでは false に戻す（`localStorage` に保存しない。理由は
+   * `sideBrakeRequested` と同じ——保存すると再読み込み直後に前回の状態のまま
+   * 送られてしまう）。未 ARM でも送る（灯火と同じ扱い。`useDriving.ts`）
+   */
+  winkerLeftRequested: boolean
+  winkerRightRequested: boolean
+
+  /**
    * ゲームパッドの D/R レンジ（実車のシフトレバー相当、v0.14）。
    *
    * DUALSHOCK4 の R2/L2 を実車ペダル配置（R2=アクセル固定、L2=ブレーキ固定）に
@@ -782,6 +794,8 @@ export const useUi = create<UiState>((set, get) => ({
   passing: false,
   lightMode: LIGHT_OFF,
   sideBrakeRequested: false,
+  winkerLeftRequested: false,
+  winkerRightRequested: false,
   gear: 'D',
   mtGear: 'N',
 

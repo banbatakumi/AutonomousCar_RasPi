@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xc33562d7
+export const MSGS_SCHEMA = 0xe9f79fab
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -108,6 +108,12 @@ export type VehicleState = {
    * （★v0.13）。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
    */
   side_brake_active: boolean
+  /**
+   * 左/右ウィンカーが**今まさに点滅中**（`COMMAND.flags2` bit1/2 の要求に対する実行状態、★v0.14）。
+   * 点滅の周期・位相は STM32 側が持つので、Pi は「要求したか」ではなく「実際に光っているか」を見る
+   */
+  winker_left_active: boolean
+  winker_right_active: boolean
   /** 立っている fault の名前 */
   faults: string[]
   /**

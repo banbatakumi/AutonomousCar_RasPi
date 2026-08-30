@@ -1,13 +1,30 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.13（`uart_protocol.md` **v0.13** に対応）
-**最終更新**: 2026-08-28（TC のスリップ／トルク上限を `TELEMETRY` に追加、サイドブレーキ `COMMAND.flags2` を新設）
+**バージョン**: v0.14（`uart_protocol.md` **v0.14** に対応）
+**最終更新**: 2026-08-30（ウィンカー左右を `COMMAND.flags2`/`TELEMETRY.flags` に新設）
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.14 での変更（★Pi 側発の提案。STM32 側は未実装。2026-08-30）**
+> - **背景**: 自律走行（AUTO）中に右左折・車線変更の意思表示ができない。
+>   `Lighting_SetWinker()` 相当の機能は既に `src/lighting/` にあるが、
+>   `ApplyRasCommand()` から一度も呼ばれていない実装漏れ
+> - `COMMAND` (0x10) の `flags2` に bit1=`WINKER_LEFT`・bit2=`WINKER_RIGHT` を追加。
+>   **ワイヤ形式・LEN の変更は無い**（既存の空きビットを使うだけ）
+> - `TELEMETRY` (0x02) の `flags` に bit18=`WINKER_LEFT_ACTIVE`・
+>   bit19=`WINKER_RIGHT_ACTIVE` を追加。こちらも**ワイヤ形式・LEN の変更は無い**
+> - **両方のビットを立てるとハザード**（左右同時点滅）として扱うこと。専用の
+>   ハザードビットは設けていない
+> - 点滅の周期・位相・既存の灯火系（`light_mode`/`passing`/ブレーキランプ）との
+>   調停は STM32 側に一任する（`indicator.c` 側に既存パターンがあるはず）
+> - `protocol_version` を `0x000D`→**`0x000E`** に上げる
+> - **STM32 側は未実装。** `ApplyRasCommand()` に `flags2` bit1/2 の解釈を追加し、
+>   `Lighting_SetWinker()` を呼ぶ配線と、`TELEMETRY.flags` bit18/19 の返却、
+>   `COMMAND` 途絶時の強制解除（`horn`/`passing` と同様）が必要
 
 > **v0.13 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-08-28。`pi_uart_protocol_v0.13_delta.md`）**
 > - `TELEMETRY` (0x02) の末尾（`torque_cmd[2]` の直後）に `slip[2]`・`tc_limit_nm[2]`
@@ -645,7 +662,7 @@ typedef struct {
     uint16_t steer_rate_limit;  /* 0.001 rad/s                                   */
     uint16_t brake_torque;      /* 0.0001 N·m 後輪各輪。0=未指定(最大) ★v0.5     */
     int16_t  target_torque;     /* 0.0001 N·m 駆動トルク直接指令（負=後退方向）★v0.6 */
-    uint8_t  flags2;            /* ★v0.13 追加。下表参照                          */
+    uint8_t  flags2;            /* ★v0.13 追加。v0.14 で bit1/2（ウィンカー）追加。下表参照 */
 } command_t;                    /* = 15 bytes */
 ```
 
@@ -661,12 +678,14 @@ typedef struct {
 | 6 | `torque_mode` | 立っている間 `target_speed` を無視し `target_torque` を直接掛ける ★v0.6 |
 | 7 | `auto_stop` | 立っている間、進行方向の動的停止距離 `d_stop` 未満で自動的に最大制動 ★v0.7（★v0.12で距離自体を動的化・LiDAR併用に変更） |
 
-`flags2` (u8) ★v0.13 新設:
+`flags2` (u8) ★v0.13 新設・v0.14 で bit1/2 追加:
 
 | bit | 名称 | 意味 |
 |---|---|---|
 | 0 | `side_brake` | 立っている間、**速度に関わらず即座に**後輪モータを位置制御へ切り替えて機械的に固定（`brake` より優先） |
-| 1-7 | — | 予約（0 を送ること） |
+| 1 | `winker_left` | 左ウィンカー点滅を要求 ★v0.14 |
+| 2 | `winker_right` | 右ウィンカー点滅を要求 ★v0.14 |
+| 3-7 | — | 予約（0 を送ること） |
 
 - `target_speed` は**目標速度**であり目標加速度ではない。`accel_limit` は
   「その目標速度へ向かうときの加減速の上限」
@@ -698,8 +717,27 @@ typedef struct {
   `auto_stop` > 通常指令。Pi 側が明示的に下ろすまで有効なまま。実際に固定できたかは
   `TELEMETRY.flags` bit17（`side_brake_active`）で返すこと（MDフレーム無効等で
   実際には固定できていない場合は立てず、通常の駆動系フォールバックへ委ねる）
+- **`winker_left`/`winker_right`（`flags2` bit1/2）は自律走行の右左折・車線変更の
+  意思表示のために新設**（★v0.14）。既存の `Lighting_SetWinker()` を
+  `ApplyRasCommand()` から呼び出すだけで配線できる想定。**両方立てればハザード**
+  （左右同時点滅）として扱うこと——専用のハザードビットは設けていない。
+  点滅の周期・位相・優先順位の調停（`indicator.c` 側に既存パターンがあるはず）は
+  STM32 側に一任する。**実際に点滅しているか**は `TELEMETRY.flags` bit18/19
+  （`winker_left_active`/`winker_right_active`）で返すこと（他の「介入中」ビット
+  と同じ理由——要求と実行状態を分けることで球切れ等の異常も将来表現できる）。
+  `brake`/`side_brake`/`auto_stop` のような優先順位の上書き関係は持たない、
+  独立した並行ビット。ブレーキランプ・パッシングとも独立に点滅させること
+- **【STM32 側実装済み・2026-08-30 確認】`fault_drive_undervoltage`（`flags` bit13）
+  が立っている間は、`flags2` の要求内容に関わらず強制的にハザード（両方点滅）に
+  している。** 周囲への異常告知を優先する意図的な安全設計であり、バグではない
+  （STM32 側 `pi_uart_protocol_v0.14_delta.md` に詳細あり。本書はその要約）。
+  Pi 側のドキュメントにこの挙動が抜けていたため、実機確認時に「ウィンカーが
+  要求と無関係に常時ハザードになる」という形で顕在化した。**この一文が Pi 側
+  ドキュメントにおける唯一の記載**なので、判定条件やヒステリシスを変える場合は
+  `uart_protocol.md` §5.4/§5.6.6 も一緒に更新すること
 - **`COMMAND` が 100ms 途絶したら自動ブレーキ**（v0.3 の 200ms から短縮。§8.2）。
-  ★v0.5 では最大制動トルクを直接掛け、`horn` と `passing` は強制解除する
+  ★v0.5 では最大制動トルクを直接掛け、`horn` と `passing` は強制解除する。
+  **ウィンカーも `horn`/`passing` と同様、途絶時は強制解除すること**（★v0.14）
 
 #### `CONFIG_SET` (0x11) — 6 バイト / `CONFIG_GET` (0x13) — 2 バイト
 
@@ -1176,7 +1214,9 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 #define FLG_AUTO_STOP_ACTIVE          (1u << 16)   /* ★v0.7 自動停止が今まさに介入中   */
 #define FLG_SIDE_BRAKE_ACTIVE         (1u << 17)   /* ★v0.13 サイドブレーキが位置制御へ
                                                         切り替わり固定中               */
-/* bit18-31 予約（0 を送ること） */
+#define FLG_WINKER_LEFT_ACTIVE        (1u << 18)   /* ★v0.14 左ウィンカーが今まさに点滅中 */
+#define FLG_WINKER_RIGHT_ACTIVE       (1u << 19)   /* ★v0.14 右ウィンカーが今まさに点滅中 */
+/* bit20-31 予約（0 を送ること） */
 ```
 
 - **`mode` が bit8-9 から bit0-1 へ移動した。** v0.3 からの変更点なので注意
@@ -1449,6 +1489,10 @@ Pi 側が計算する:
 - [ ] `side_brake` の優先順位が **`side_brake` > `brake` > `auto_stop` > 通常指令**になっている（★v0.13）
 - [ ] 実際に位置制御へ切り替わり固定できたときだけ `FLG_SIDE_BRAKE_ACTIVE` を立てている（★v0.13）
 - [ ] Pi が `flags2` bit0 を明示的に下ろすまで `side_brake` を維持している（単発ではない）（★v0.13）
+- [ ] **`flags2` bit1/2（`winker_left`/`winker_right`）が `Lighting_SetWinker()` に配線されている**（★v0.14）
+- [ ] 両方立っているとき**ハザード**（左右同時点滅）として扱っている（★v0.14）
+- [ ] 実際に点滅しているときだけ `FLG_WINKER_LEFT_ACTIVE`/`FLG_WINKER_RIGHT_ACTIVE` を立てている（★v0.14）
+- [ ] `COMMAND` 途絶時に `horn`/`passing` と同様、ウィンカーも強制解除している（★v0.14）
 
 ### センサ・データ
 
@@ -1618,6 +1662,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.14** | 2026-08-30 | **`uart_protocol.md` v0.14 に対応。Pi 側発の提案。STM32 側は未実装。** `COMMAND`(0x10) の `flags2` に bit1=`WINKER_LEFT`・bit2=`WINKER_RIGHT` を追加、`TELEMETRY`(0x02) の `flags` に bit18=`WINKER_LEFT_ACTIVE`・bit19=`WINKER_RIGHT_ACTIVE` を追加（**ワイヤ形式・LEN の変更は無し**）。自律走行中に右左折・車線変更の意思表示ができない実装漏れへの対応（`Lighting_SetWinker()` は既存だが `ApplyRasCommand()` から呼ばれていなかった）。両ビットを両方立てるとハザード（左右同時点滅）。点滅の周期・位相・既存灯火系との調停は STM32 側に一任。`protocol_version` を `0x000D`→`0x000E` に更新。Pi 側は `protocol.toml`/`raspi/msgs`/`sim/stm32.py`/GUI を実装済み。**STM32 側は `ApplyRasCommand()` への配線・`TELEMETRY.flags` の返却・`COMMAND` 途絶時の強制解除が未実装** |
 | **v0.13** | 2026-08-28 | **`uart_protocol.md` v0.13 に対応。STM32 側発・実装済み、実機での動作検証は未了。** `TELEMETRY`(0x02) の `torque_cmd[2]` 直後に `slip[2]`（TC用スリップ率、無次元）・`tc_limit_nm[2]`（TCが動的に決めるトルク上限）を追加（LEN 66→**74**）。TC のゲイン（`DRIVE_TC_CUT_GAIN`/`DRIVE_TC_RECOVER_RATE`）を実機で追い込むにあたり `flags` bit5（`tc_active`、介入中か否かの1bit）だけでは内部状態が分からなかった問題への対応。加えて `COMMAND`(0x10) に `flags2`（bit0=`SIDE_BRAKE`）を新設し、後輪を機械的な位置制御へ切り替えて固定するサイドブレーキを追加（LEN 14→**15**）。速度に関わらず即座に切り替わり `brake` より優先、実際に固定できたかは `TELEMETRY.flags` bit17（`SIDE_BRAKE_ACTIVE`）で返す。`protocol_version` を `0x000C`→`0x000D` に更新。**TC ゲインの実測・サイドブレーキとも実機での動作検証は未実施**（`pi_uart_protocol_v0.13_delta.md`） |
 | **v0.12** | 2026-08-25（`param_id=0x0060`の値を3段階enumからcm直接指定へ改訂） | **`uart_protocol.md` v0.12 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `auto_stop` の検知距離を固定20cmから `d_stop = v・t_delay + v²/(2・a_max) + margin`（速度に応じて伸びる）へ変更し、判定を超音波単独からLiDAR主・超音波補助（フォールバック＋5cm近接フェイルセーフ）へ刷新。`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0060`（`auto_stop_margin_cm`: cm単位の連続値、範囲0-100、既定15）で `margin` を直接指定可能に。**当初 `AutoStopLevel`（1=NEAR/2=STANDARD(既定)/3=FAR の3段階enum）として実装されていたが、実機投入前にSTM32側がcm直接指定へ変更**（`param_id`は据え置き、値の意味だけ変更）。`protocol_version` を `0x000B`→`0x000C` に更新（enumからcmへの改訂時点では再度は上げていない）。Pi 側は `io_node` に4つ目の `CONFIG_GET` 初期同期と、GUI（`SettingsPanel`のスライダー）操作に応じた `CONFIG_SET` 送信を実装（`pi_uart_protocol_v0.12_delta.md`） |
 | **v0.11** | 2026-08-22 | **`uart_protocol.md` v0.11 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** `LIMITS`(0x0A)/`LIMITS_REQ`(0x15) を新設。`LIMITS` は `max_speed_m_s`/`max_accel_m_s2`/`max_torque_nm`/`max_steer_rad`（f32×4・LEN16・読み取り専用）を返し、`VERSION` と同じく起動直後3回自発送信＋`LIMITS_REQ`応答。v0.10 で `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` の `param_id` を廃止した結果 Pi が STM32 の実際の固定上限値を知れなくなっていた問題への対応。`protocol_version` を `0x000A`→`0x000B` に更新。Pi 側は `io_node.handshake()` で `VERSION_REQ`/`LIMITS_REQ` を併せて送り未受信なら1秒おきに再送、`IoNode._send_command` が RC/AUTO 問わず `LIMITS` 受信済みなら無条件にそちらでクランプし `--max-speed`/`--max-steer` は未受信時のみのフォールバックにするよう実装（`raspi/msgs/convert.py` に `max_accel`/`max_torque` 引数を追加。GUI・`sim/stm32.py` も同じ方針で対応） |
