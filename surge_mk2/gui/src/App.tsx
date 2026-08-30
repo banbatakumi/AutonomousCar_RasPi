@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from 'react'
 import { DriveControls } from './components/DriveControls'
 import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
+import { useEngineSound } from './hooks/useEngineSound'
 import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
 import { AutoView } from './views/AutoView'
@@ -98,6 +99,8 @@ export function App() {
 
   // **タブに関係なく操縦は生きている。** 診断タブを見ている間に急に止まると事故になる
   useDriving(ch)
+  // GUI 演出のみ（車両側には無関係）。`ui.engineSoundOn` の間だけ鳴る
+  useEngineSound()
 
   return (
     <div className="app">

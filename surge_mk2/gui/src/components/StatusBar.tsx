@@ -83,14 +83,6 @@ export function StatusBar({
             arm 封印中
           </span>
         )}
-        {/* **今どこまで出るか**は握る前に知りたい。armed かどうかに関係なく出す */}
-        <span
-          className={`pill ${ui.boost ? 'lv-warn' : 'dim'}`}
-          title="Shift（パッドは R1）を押している間だけ全開。離すと低速に戻る"
-        >
-          {ui.boost ? 'BOOST' : '低速'}{' '}
-          {(ui.boost ? ui.settings.maxSpeed : ui.settings.maxSpeed * ui.settings.cruiseScale).toFixed(2)}
-        </span>
         {/* ラジコンでは TC/TV の介入をランプ（`components/rc/AssistLamps.tsx`）で出すので
             重複させない。あちらは一瞬の介入もラッチして光る */}
         {variant === 'full' && vs?.tc_active && <span className="pill lv-warn">TC</span>}

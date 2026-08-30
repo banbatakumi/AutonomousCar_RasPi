@@ -14,9 +14,13 @@
  * 円形クリップは親側（`.rc-lidar-mini`、`styles.css`）の `border-radius: 50%`
  * に任せる。ここでは正方形いっぱいに描くだけでよい。
  *
- * ズームは固定（`RADIUS_M`）。前方映像の隅に置く小さな丸にコントロール UI を
- * 足す余地がないので、常時 3m 圏を映す。詳しく見たいときは診断タブ／
- * 自動運転ビューの `LidarView`（ズーム可）を使う。
+ * ズームは既定 3m 圏（`DEFAULT_RADIUS_M`）。前方映像の隅に置く小さな丸に
+ * スライダ等の画面 UI を足す余地は無いが、ゲームパッドの右スティック上下でなら
+ * 画面を圧迫せずに調整できる（v0.15、`useDriving.ts` が `live.lidarMiniZoomM`
+ * を rAF で書き換える。React state ではなく `live` に置く理由は同ファイルの
+ * コメント参照——60Hz で変わるので zustand には入れない）。パッド操作以外に
+ * ズーム手段は無く、詳しく見たいときは診断タブ／自動運転ビューの
+ * `LidarView`（ボタンでズーム可）を使う。
  *
  * ## 極座標グリッド（2026-08-20）
  *
@@ -32,7 +36,8 @@ import { useEffect, useRef } from 'react'
 import { live, useNumbers } from '../../bus/live'
 import { useUi } from '../../store/ui'
 
-const RADIUS_M = 3
+/** パッドで触っていない間の既定値。`live.lidarMiniZoomM` の初期値と同じ（`bus/live.ts`） */
+const DEFAULT_RADIUS_M = 3
 const GRID_STEP_M = 1
 
 const BG = '#0d0b0c'
@@ -55,11 +60,12 @@ function drawGrid(
   cx: number,
   cy: number,
   px: number,
+  radiusM: number,
   expanded: boolean,
 ) {
   ctx.strokeStyle = 'rgba(255,255,255,0.12)'
   ctx.lineWidth = 1
-  for (let r = GRID_STEP_M; r <= RADIUS_M; r += GRID_STEP_M) {
+  for (let r = GRID_STEP_M; r <= radiusM; r += GRID_STEP_M) {
     ctx.beginPath()
     ctx.arc(cx, cy, r * px, 0, Math.PI * 2)
     ctx.stroke()
@@ -104,9 +110,11 @@ export function LidarMini() {
 
       const cx = w / 2
       const cy = h / 2
-      const px = Math.min(w, h) / 2 / RADIUS_M
+      // パッドの右スティックで変わる（`useDriving.ts`）。触っていなければ既定値のまま
+      const radiusM = live.lidarMiniZoomM || DEFAULT_RADIUS_M
+      const px = Math.min(w, h) / 2 / radiusM
 
-      drawGrid(ctx, w, h, cx, cy, px, useUi.getState().lidarExpanded)
+      drawGrid(ctx, w, h, cx, cy, px, radiusM, useUi.getState().lidarExpanded)
 
       const scan = live.scan
       if (scan) {
@@ -124,7 +132,7 @@ export function LidarMini() {
             ctx.fillStyle = SATURATED
             ctx.fillRect(sx - 0.5, sy - 0.5, 1, 1)
           } else {
-            const t = Math.max(0, Math.min(1, d / RADIUS_M))
+            const t = Math.max(0, Math.min(1, d / radiusM))
             const r = Math.round(lerp(NEAR[0], FAR[0], t))
             const g = Math.round(lerp(NEAR[1], FAR[1], t))
             const b = Math.round(lerp(NEAR[2], FAR[2], t))

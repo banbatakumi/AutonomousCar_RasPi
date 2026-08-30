@@ -32,7 +32,8 @@
  *
  * 以前は映像の左下に重ねていたが、**指示によりメータ行の左隣へ移動**した
  * （`.rc-cam-bottom`）。常に「今メインに出ていない方」のカメラを映し、
- * **クリックするとメインと入れ替わる**（`mainCam` state）。
+ * **クリックするとメインと入れ替わる**（`ui.mainCam`、`store/ui.ts`）。
+ * ゲームパッドの R3（右スティック押し込み）でも同じ入れ替えができる（v0.16）。
  *
  * `.rc-cam-bottom`（PIP＋メータ行の器）は**幅をメイン映像の実測幅に固定**する
  * （`videoSize.width`）。メイン映像は列の左上に詰めているので、両者の左端も
@@ -152,7 +153,9 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
   /* PIP（`rearPip`）はここに含めない（2026-08-20、コメント参照）。LiDAR・進路ガイドの
    * 2つだけをメイン映像クリックで一括切り替えする */
   const overlaysOn = ui.lidarVisible && ui.pathGuide
-  const [mainCam, setMainCam] = useState<'front' | 'rear'>('front')
+  // ★v0.16: `useState` から `ui.mainCam` へ移動（ゲームパッド R3 で切り替えるため。
+  // `store/ui.ts` の `mainCam` コメント参照）
+  const mainCam = ui.mainCam
   const [frontAspect, setFrontAspect] = useState(FALLBACK_ASPECT)
 
   /* `.rc-cams` 自身ではなく `.rc` 自体の幅を測る。`.rc-cams` を測ると、下で
@@ -232,8 +235,8 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
                * 差し引いた高さ）ではなく行の実測高さそのまま使う——じゃないと下に
                * 使われない余白が残る（指示による修正） */
               style={bottomSize ? { width: bottomSize.height * PIP_ASPECT, height: bottomSize.height } : undefined}
-              onClick={() => setMainCam(pipCam)}
-              title="クリックで前後を入れ替え"
+              onClick={() => ui.set({ mainCam: pipCam })}
+              title="クリックで前後を入れ替え（パッドの R3 でも可）"
             >
               <CameraView
                 cam={pipCam}

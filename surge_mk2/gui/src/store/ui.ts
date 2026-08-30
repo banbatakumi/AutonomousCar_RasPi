@@ -4,6 +4,7 @@
  * **20Hz で変わるものはここに入れない。** 接続状態・操縦権・設定の類だけ。
  */
 import { create } from 'zustand'
+import type { EngineSoundType } from '../audio/engineSound'
 import { live } from '../bus/live'
 import type {
   AutoStatus,
@@ -43,39 +44,103 @@ export type DrivingSettings = {
   /** RC の速度ダイヤル（速度制御モードの実際の上限）[m/s]。既定値 3.0（2026-08-22、
    * それまで手で使っていた値に更新）。範囲は `LIMITS` 受信済みならそちらが上限
    * （`effectiveRange`）。**速度メータの目盛りはこれとは独立**（`SpeedGauge.tsx` 参照、
-   * 常に `LIMITS.max_speed_m_s` 固定） */
+   * 常に `LIMITS.max_speed_m_s` 固定）。
+   *
+   * ⚠ v0.16 まではここに `cruiseScale`（既定巡航レンジ）と `boost`（Shift / パッド R1 で
+   * `maxSpeed` まで一時的に伸ばす機能）があったが、指示により削除した。今は常に
+   * `maxSpeed` そのものが上限——「全開が最高速度」というシンプルな1段仕様に戻した。
+   */
   maxSpeed: number
   /** 見た目の最大舵角 [rad]。既定値 0.785(45°)。Pi 側ハード上限（`PI_MAX_STEER_CAP`）を超えられない */
   maxSteer: number
-  /**
-   * 既定（巡航）レンジ。`maxSpeed` に対する倍率。
-   * **ブースト側は倍率を持たない** — Shift / R1 を押している間は常に `maxSpeed` そのもの。
-   * 「全開が最高速度」でないと、最高速度という名前が何を指すのか分からなくなる。
-   */
-  cruiseScale: number
   /** 押している間の加速 [m/s²] */
   accel: number
   /** キーを離したときの惰行減速 [m/s²] */
   coast: number
-  /** 逆キーを押したときのブレーキ [m/s²]（`accel` より強くすること） */
+  /** 逆キーを押したときのブレーキ [m/s²]（`accel` より強くすること）。**MT では使わない**
+   * （MT に逆キーブレーキは無い——ギアと逆のキーは何もしない、`useDriving.ts` 参照） */
   brake: number
-  /** 発進キック [m/s]。停止から押した瞬間にここまで跳ばす */
-  kickSpeed: number
   /** 押している間の切り込み [rad/s] */
   steerRate: number
   /** 離したときのセンター戻り [rad/s]（`steerRate` より速くすること） */
   steerReturn: number
   /** 逆キーでの切り戻し [rad/s] */
   steerCounter: number
+  /**
+   * ゲームパッド左スティックの舵カーブ（EXPO）[0-1]。**パッドの舵にだけ効く**
+   * （キーボードは `steerRate`/`steerReturn`/`steerCounter` のランプ方式なので無関係）。
+   * 0=リニア、1=完全3乗で中央付近をいちばん緩める。中央を大きく緩めるほど
+   * 直進・小舵角での細かい操作がしやすくなる代わり、フルロックまでの
+   * ストローク後半が敏感になる。既定 0.45（v0.14 まで `STEER_EXPO` としてコード直書きだった値）
+   */
+  gamepadSteerExpo: number
+  /**
+   * ゲームパッド左スティックのデッドゾーン（中央の遊び）[0-1]。**パッドの舵にだけ効く。**
+   * `dz()`（`useDriving.ts`）で切り落とすのではなく再スケールするので、ここを広げても
+   * 「動き始めで飛ぶ」段差は出ない。既定 0.12（v0.14 まで `STICK_DZ` としてコード直書き）
+   */
+  gamepadSteerDeadzone: number
   /** ARM を保持したまま無操作でいられる時間 [ms]。超えたら自動 DISARM */
   armIdleTimeoutMs: number
   /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
   brakeTorque: number
-  /** 駆動をトルク直接指令にするか（v0.6）。設定パネルの永続トグル。true の間、
-   * スロットル入力はすべて `target_speed` ではなく `target_torque` になる */
-  torqueMode: boolean
+  /**
+   * 制御方式（v0.6 で速度⇄トルクの2択として導入、v0.17 で MT を加えた3択に）。
+   * 'speed' ＝ 速度制御（従来どおり `maxSpeed` が上限）。
+   * 'torque' ＝ トルク直接指令（スロットル入力はすべて `target_speed` ではなく `target_torque`）。
+   * 'mt' ＝ 擬似変速（速度制御の一種。上限は `maxSpeed` ではなく専用の `mtMaxSpeed` に
+   * `mtGear1`〜`mtGear5` の倍率を掛けたもの。ワイヤプロトコルの `torque_mode` ビットは
+   * 'speed' と同じく false のまま——STM32 からは普通の速度指令にしか見えない）。
+   * 以前は `torqueMode: boolean` だった。
+   *
+   * ⚠ **2026-08-30: MT は 'speed' と一切パラメータを共有しない。** 以前は `maxSpeed`/
+   * `accel`/`coast`/`kickSpeed` を流用していたため、'speed' モードの乗り味を詰めると
+   * 意図せず MT の挙動まで変わってしまっていた。今は MT 専用の `mtMaxSpeed`/`mtAccel`/
+   * `mtCoast`/`mtEngineBrake` を独立に持つ（下記）。`brakeTorque`（実ブレーキの強さ、
+   * STM32 の N·m）だけは車両物理量なので引き続き共有——これは「乗り味」ではない。
+   */
+  driveMode: 'speed' | 'torque' | 'mt'
   /** トルクモード中にスロットル全開で出す駆動トルク [N·m]。上限 `MAX_TARGET_TORQUE_NM` */
   driveTorque: number
+  /**
+   * MT モード専用の最高速度 [m/s]（2026-08-30、`maxSpeed` から分離）。5速（倍率100%）で
+   * この値そのものが上限になる。'speed' モードの `maxSpeed` とは完全に独立——
+   * どちらかを変えてももう一方には影響しない。
+   */
+  mtMaxSpeed: number
+  /** MT モード専用の加速度 [m/s²]（2026-08-30、`accel` から分離）。押している間／
+   * トリガーを踏み込んだ方向へ近づくときのレート。'speed' モードの `accel` とは独立 */
+  mtAccel: number
+  /**
+   * MT（擬似変速）モードの D1〜D5 それぞれの上限速度 [`mtMaxSpeed` に対する倍率、0-1]（v0.17）。
+   * R はここでは持たない——`mtGear1`（D1 と同じ）を流用する。後退はどのみち
+   * 低速域でしか使わないので専用の刻みを持つ必要が薄い。
+   * `SETTINGS_RANGE`/`effectiveRange` は他の項目と違い `LIMITS` で動かさない
+   * （絶対速度ではなく倍率なので、`mtMaxSpeed` 側がすでに `LIMITS` に追従している）
+   */
+  mtGear1: number
+  mtGear2: number
+  mtGear3: number
+  mtGear4: number
+  mtGear5: number
+  /**
+   * MT モードでアクセルを離したとき、または現在のギアと逆のキー（実車に無い
+   * 「逆ペダル」相当、`useDriving.ts` 参照）を押したときの減速度 [m/s²]
+   * （実車の惰行＝慣性走行に相当）。STM32 からは緩やかに下がっていく `target_speed`
+   * にしか見えない（速度PIがそれを追従するだけ）。ニュートラル（N）でもこの値が使われる
+   * （エンジンブレーキが乗らない＝いちばん緩い減速というのが実車の感覚に近いため）。
+   */
+  mtCoast: number
+  /**
+   * MT モードでギアが下がるほど加算されるエンジンブレーキ相当の減速度 [m/s²]。
+   * 実効減速度は `mtCoast + mtEngineBrake * (1 - mtGearRatio(gear))` — 5速
+   * （比率1.0）では加算なしで `mtCoast` のみ、1速（比率0.2）ではほぼ全量が乗る。
+   * ギアごとに個別の値は持たない（既存の `mtGear1`〜`mtGear5` の比率をそのまま
+   * 重みに流用し、設定項目を増やしすぎないため）。シフトダウンでこの上限を
+   * 超えたときも、瞬間移動ではなくこのレートでなだらかに新しい上限まで落ちる
+   * （`useDriving.ts` の `tick()` 参照）。N では使われない（`mtCoast` 参照）。
+   */
+  mtEngineBrake: number
   /** 超音波の自動停止を STM32 に許可するか（v0.7）。**判定も制動も STM32 側で完結する**ので、
    * GUI は `COMMAND.flags` bit7 を立てるかどうかだけを決める。既定 ON */
   autoStop: boolean
@@ -92,10 +157,18 @@ export type DrivingSettings = {
   camHeight: number
   /** ラジコンの速度計（`SpeedGauge.tsx`）の表示単位。既定 'ms'。クリックで切替、`localStorage` に保存 */
   speedUnit: 'ms' | 'kmh'
+  /**
+   * 合成エンジン音（`audio/engineSound.ts`）の音色（2026-08-30 追加）。
+   * 'combustion' ＝ 内燃機関風（ノコギリ波の唸り）、'ev' ＝ EV/ハイブリッド風
+   * （澄んだトーン＋高い倍音のシマー）。鳴らすかどうか自体は `UiState.engineSoundOn`
+   * （こちらは意図的に非永続——起動直後に前回 ON のまま音が鳴り出すと驚くため）で、
+   * こちらは「鳴らすときにどの音色か」という嗜好なので通常どおり永続化する。
+   */
+  engineSoundType: EngineSoundType
 }
 
 /** `DrivingSettings` のうち数値項目のキーだけ。スライダのレンジは数値項目にしか無い
- * （`torqueMode` / `autoStop` は boolean なので対象外） */
+ * （`driveMode` / `autoStop` は boolean/enum なので対象外） */
 export type NumericSettingKey = {
   [K in keyof DrivingSettings]: DrivingSettings[K] extends number ? K : never
 }[keyof DrivingSettings]
@@ -181,39 +254,63 @@ export const DEFAULT_AUTO_STOP = true
 export const DEFAULT_SETTINGS: DrivingSettings = {
   maxSpeed: 3.0,
   maxSteer: 0.785,
-  cruiseScale: 0.55,
   accel: 2.0,
   coast: 2.5,
   brake: 5.0,
-  kickSpeed: 0.12,
   steerRate: 2.6,
   steerReturn: 5.2,
   steerCounter: 5.2,
+  gamepadSteerExpo: 0.45,
+  gamepadSteerDeadzone: 0.12,
   armIdleTimeoutMs: 20_000,
   brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
-  torqueMode: false,
+  driveMode: 'speed',
   driveTorque: DEFAULT_DRIVE_TORQUE_NM,
+  // 'speed' の maxSpeed/accel とは独立（2026-08-30）。まずは同じ値から始め、
+  // 実車に乗ってから設定パネルで別々に詰めること
+  mtMaxSpeed: 3.0,
+  mtAccel: 2.0,
+  // 1速ごとに最高速度の20%ずつ刻む素直な等差。詰めたい場合は設定パネルから
+  mtGear1: 0.2,
+  mtGear2: 0.4,
+  mtGear3: 0.6,
+  mtGear4: 0.8,
+  mtGear5: 1.0,
+  // 5速/Nでは0.8のみ、1速では0.8+3.0*0.8=3.2 m/s² 相当のエンジンブレーキになる暫定値。
+  // 実車に乗ってから設定パネルで詰めること
+  mtCoast: 0.8,
+  mtEngineBrake: 3.0,
   autoStop: DEFAULT_AUTO_STOP,
   camHeight: VEHICLE.camFront.height,
   speedUnit: 'ms',
+  engineSoundType: 'combustion',
 }
 
 /** 設定パネルのスライダのレンジ。`min`/`max`/`step` の3つ組。
- * **数値項目だけ。** boolean 項目（`torqueMode`）はスライダを持たないのでここに含めない */
+ * **数値項目だけ。** boolean/enum 項目（`driveMode`/`autoStop`）はスライダを持たないのでここに含めない */
 export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: number; step: number }> = {
   maxSpeed: { min: 0.1, max: PI_MAX_SPEED_CAP, step: 0.01 },
   maxSteer: { min: 0.175, max: PI_MAX_STEER_CAP, step: 0.005 }, // 0.175rad ≒ 10°
-  cruiseScale: { min: 0.1, max: 1.0, step: 0.05 },
   accel: { min: 0.5, max: 5.5, step: 0.1 },
   coast: { min: 0.5, max: 5.5, step: 0.1 },
   brake: { min: 0.5, max: 5.5, step: 0.1 },
-  kickSpeed: { min: 0, max: 0.3, step: 0.01 },
   steerRate: { min: 0.5, max: 6.5, step: 0.1 },
   steerReturn: { min: 0.5, max: 6.5, step: 0.1 },
   steerCounter: { min: 0.5, max: 6.5, step: 0.1 },
+  gamepadSteerExpo: { min: 0, max: 1, step: 0.05 },
+  gamepadSteerDeadzone: { min: 0, max: 0.3, step: 0.01 },
   armIdleTimeoutMs: { min: 5_000, max: 60_000, step: 1_000 },
   brakeTorque: { min: MIN_BRAKE_TORQUE_NM, max: MAX_BRAKE_TORQUE_NM, step: 0.001 },
   driveTorque: { min: 0.01, max: MAX_TARGET_TORQUE_NM, step: 0.001 },
+  mtMaxSpeed: { min: 0.1, max: PI_MAX_SPEED_CAP, step: 0.01 },
+  mtAccel: { min: 0.5, max: 5.5, step: 0.1 },
+  mtGear1: { min: 0.05, max: 1, step: 0.05 },
+  mtGear2: { min: 0.05, max: 1, step: 0.05 },
+  mtGear3: { min: 0.05, max: 1, step: 0.05 },
+  mtGear4: { min: 0.05, max: 1, step: 0.05 },
+  mtGear5: { min: 0.05, max: 1, step: 0.05 },
+  mtCoast: { min: 0.2, max: 5.5, step: 0.1 },
+  mtEngineBrake: { min: 0, max: 6.0, step: 0.1 },
   camHeight: { min: 0.03, max: 0.25, step: 0.005 },
 }
 
@@ -248,26 +345,30 @@ export type VehicleLimits = {
  * （`--max-speed`/`--max-steer` という Pi 側の運用上限と）別に持っており、
  * そちらは意図的に「小さい方を使う」多層防御のまま変えていない。
  *
- * - `maxSpeed` ← `max_speed_m_s`
+ * - `maxSpeed`/`mtMaxSpeed` ← `max_speed_m_s`
  * - `maxSteer` ← `max_steer_rad`
- * - `accel`/`coast`/`brake` ← `max_accel_m_s2`（GUI 側のランプ速度。実際の `COMMAND.accel_limit`
- *   はこれとは別に固定値 `ACCEL_SAFETY_LIMIT` を送っているが、STM32 側でどのみち
- *   `max_accel_m_s2` に丸められるため、ここより上に振ってもスライダが「上げても
- *   効かない」ものになるだけ。丸められる前に GUI 側で上限を揃えておく）
+ * - `accel`/`coast`/`brake`/`mtAccel`/`mtCoast` ← `max_accel_m_s2`（GUI 側のランプ速度。
+ *   実際の `COMMAND.accel_limit` はこれとは別に固定値 `ACCEL_SAFETY_LIMIT` を送っているが、
+ *   STM32 側でどのみち `max_accel_m_s2` に丸められるため、ここより上に振ってもスライダが
+ *   「上げても効かない」ものになるだけ。丸められる前に GUI 側で上限を揃えておく）
  * - `brakeTorque`/`driveTorque` ← `max_torque_nm`
  */
 export function effectiveRange(limits: VehicleLimits | null | undefined): Record<NumericSettingKey, SettingRange> {
   const withLive = (r: SettingRange, live: number | null | undefined): SettingRange =>
     typeof live === 'number' && isFinite(live) && live > 0 ? { ...r, max: live } : r
   const accelCap = withLive(SETTINGS_RANGE.accel, limits?.max_accel_m_s2)
+  const mtAccelCap = withLive(SETTINGS_RANGE.mtAccel, limits?.max_accel_m_s2)
   const torqueCap = withLive(SETTINGS_RANGE.brakeTorque, limits?.max_torque_nm)
   return {
     ...SETTINGS_RANGE,
     maxSpeed: withLive(SETTINGS_RANGE.maxSpeed, limits?.max_speed_m_s),
+    mtMaxSpeed: withLive(SETTINGS_RANGE.mtMaxSpeed, limits?.max_speed_m_s),
     maxSteer: withLive(SETTINGS_RANGE.maxSteer, limits?.max_steer_rad),
     accel: accelCap,
     coast: { ...accelCap, min: SETTINGS_RANGE.coast.min },
     brake: { ...accelCap, min: SETTINGS_RANGE.brake.min },
+    mtAccel: mtAccelCap,
+    mtCoast: { ...mtAccelCap, min: SETTINGS_RANGE.mtCoast.min },
     brakeTorque: torqueCap,
     driveTorque: withLive(SETTINGS_RANGE.driveTorque, limits?.max_torque_nm),
   }
@@ -288,12 +389,27 @@ function clampSettings(s: DrivingSettings): DrivingSettings {
     const v = out[k]
     out[k] = typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULT_SETTINGS[k]
   }
-  out.torqueMode = typeof out.torqueMode === 'boolean' ? out.torqueMode : DEFAULT_SETTINGS.torqueMode
+  out.driveMode = out.driveMode === 'torque' || out.driveMode === 'mt' ? out.driveMode : 'speed'
   // 古い localStorage（v0.6 以前）にはこのキーが無い。**既定の ON に倒す**
   out.autoStop = typeof out.autoStop === 'boolean' ? out.autoStop : DEFAULT_SETTINGS.autoStop
   // 古い localStorage にはこのキーが無い、または不正値の場合は既定（m/s）に倒す
   out.speedUnit = out.speedUnit === 'kmh' ? 'kmh' : 'ms'
+  // 古い localStorage（音色追加前）にはこのキーが無い。既定は内燃機関風に倒す
+  out.engineSoundType = out.engineSoundType === 'ev' ? 'ev' : 'combustion'
   return out
+}
+
+/**
+ * v0.17 で `torqueMode: boolean` → `driveMode`（3択）に変えた。古い localStorage
+ * （v0.6〜v0.16）は `torqueMode` だけを持ち `driveMode` が無い。**`DEFAULT_SETTINGS`
+ * とマージする前に**変換すること——マージ後だと `driveMode` はすでに既定値 'speed'
+ * で埋まっていて「未指定だったか」が区別できなくなる。
+ */
+function migrateDriveMode(raw: Record<string, unknown>): Record<string, unknown> {
+  if (raw.driveMode == null && typeof raw.torqueMode === 'boolean') {
+    raw.driveMode = raw.torqueMode ? 'torque' : 'speed'
+  }
+  return raw
 }
 
 /** 壊れた値・古いスキーマの値で走り出さないよう、読み込み時に必ずクランプする */
@@ -301,7 +417,7 @@ function loadSettings(): DrivingSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return DEFAULT_SETTINGS
-    return clampSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw) })
+    return clampSettings({ ...DEFAULT_SETTINGS, ...migrateDriveMode(JSON.parse(raw)) })
   } catch {
     return DEFAULT_SETTINGS
   }
@@ -332,7 +448,7 @@ function loadDefaultSettings(): DrivingSettings {
   try {
     const raw = localStorage.getItem(DEFAULT_OVERRIDE_KEY)
     if (!raw) return DEFAULT_SETTINGS
-    return clampSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(raw) })
+    return clampSettings({ ...DEFAULT_SETTINGS, ...migrateDriveMode(JSON.parse(raw)) })
   } catch {
     return DEFAULT_SETTINGS
   }
@@ -383,6 +499,43 @@ export const LIGHT_LABEL = ['消灯', 'DAY', 'NORMAL']
 /** `L` キー / パッド △ で回す順。**消灯を含む**（v0.4 では消灯にできなかった） */
 export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
 
+/**
+ * MT（擬似変速）モードのギア段（v0.17、v0.18 で N を追加）。R と D1 の間に N（ニュートラル）
+ * を挟んだ7段の並びで、実車のシフトと同じく「1つ隣へ」動かす前提の配列にしてある
+ * （`useDriving.ts` の L1=シフトダウン/R1=シフトアップが `mtGearIndex`/`mtGearAt` で
+ * 1段ずつ動かす）。D/R レンジ（`ui.gear`）とは独立——`driveMode==='mt'` のときだけ意味を持つ。
+ */
+export const MT_GEARS = ['R', 'N', 'D1', 'D2', 'D3', 'D4', 'D5'] as const
+export type MtGear = (typeof MT_GEARS)[number]
+
+export function mtGearIndex(g: MtGear): number {
+  return MT_GEARS.indexOf(g)
+}
+
+/** 範囲外は端で止める（クランプ）。シフトダウンし過ぎて配列外に落ちない */
+export function mtGearAt(i: number): MtGear {
+  const clamped = Math.max(0, Math.min(MT_GEARS.length - 1, i))
+  return MT_GEARS[clamped]! // clamp 済みなので必ず範囲内
+}
+
+/**
+ * そのギアでの `mtMaxSpeed` に対する倍率。R は D1 と同じ刻みを流用する
+ * （`DrivingSettings.mtGear1` 参照）。**N は 0**——上限が 0 になるので、
+ * N のときはスロットルを踏んでも指令速度は 0 へ収れんする（実車のニュートラルと同じ）。
+ * この収れんは即座のクランプではなく `mtCoast`（惰行減速）のレートでなだらかに行われる
+ * ——エンジンブレーキ（`mtEngineBrake`）は乗らない（`useDriving.ts` の `tick()` 参照）
+ */
+export function mtGearRatio(g: MtGear, s: DrivingSettings): number {
+  switch (g) {
+    case 'N': return 0
+    case 'R': case 'D1': return s.mtGear1
+    case 'D2': return s.mtGear2
+    case 'D3': return s.mtGear3
+    case 'D4': return s.mtGear4
+    case 'D5': return s.mtGear5
+  }
+}
+
 type UiState = {
   telemetryOpen: boolean
   /** `/ws/telemetry` の型定義の札が GUI 側と食い違っているか。
@@ -410,8 +563,6 @@ type UiState = {
   /** 実際に指令を送れているか（操縦権があり armRequested）。表示用 */
   deadman: boolean
   inputSource: InputSource
-  /** Shift / パッド R1 を押している間だけ true。速度レンジが上がる */
-  boost: boolean
   /** 直前に DISARM した理由。**「なぜ止まったか」が分からないのが一番消耗する** */
   disarmReason: string
   /** 直前に自律走行が解除された理由。同上（engage したときに消す） */
@@ -419,13 +570,13 @@ type UiState = {
 
   // ── 補機（v0.5） ──
   //
-  // **押している間だけ立つものは `boost` と同じ扱い**で、rAF ループが値の変化時だけ
-  // ここへ書き戻す。毎フレーム set すると 60Hz で再レンダリングが走る。
-  /** Space / パッド L1 を押している間。`brake_torque` を直接掛けている */
+  // **押している間だけ立つものは、rAF ループが値の変化時だけここへ書き戻す。**
+  // 毎フレーム set すると 60Hz で再レンダリングが走る。
+  /** Space / パッド L2（力加減） を押している間。`brake_torque` を直接掛けている */
   braking: boolean
-  /** H / パッド A を押している間。**鳴りっぱなしになる** */
+  /** H / パッド □ を押している間。**鳴りっぱなしになる** */
   horning: boolean
-  /** P / パッド X を押している間。前照灯だけが全光量 */
+  /** P / パッド ○ を押している間。前照灯だけが全光量 */
   passing: boolean
   /** 0=消灯 1=DAYTIME 2=NORMAL。**ARM 中しか反映されない**（§下） */
   lightMode: number
@@ -443,6 +594,45 @@ type UiState = {
    * 未 ARM のときは送らない（`useDriving.ts`、`brake` と同じ理由）
    */
   sideBrakeRequested: boolean
+
+  /**
+   * ゲームパッドの D/R レンジ（実車のシフトレバー相当、v0.14）。
+   *
+   * DUALSHOCK4 の R2/L2 を実車ペダル配置（R2=アクセル固定、L2=ブレーキ固定）に
+   * したことで、R2 単体では前進/後退の向きを表せなくなった。その向きをここで選ぶ
+   * （`useDriving.ts` の `gearSign`）。**キーボードの W/S は元々別キーなので影響しない。**
+   *
+   * `sideBrakeRequested` と違い、これは「今どちらへ踏み込むか」という持続的な選択
+   * （実車のシフトと同じ）なので、DISARM で自動的に 'D' へは戻さない——切り返し
+   * （バックで詰めて戻る等）の途中で毎回 D に戻ると操作が壊れる。**ページ再読み込みでは
+   * 'D' に戻る**（`localStorage` に保存しない。理由は `sideBrakeRequested` と同じ）。
+   * 走行中の誤操作を防ぐため、UI 側は停止中（`vs.stopped`）以外では切り替えを拒否する。
+   *
+   * 操作口はパッドの L1（R）/R1（D）とキーボードの←（R）/→（D）（v0.18、
+   * `useDriving.ts` の `shiftGear()`。**2026-08-30 に D/R を入れ替えた**——
+   * それまでは L1/←＝D、R1/→＝R だった）——どちらも同じ `ui.gear` を更新するので、
+   * 二重に状態を持たない。**画面ボタンは v0.18 で廃止した**（現在値は速度メータ
+   * 中央のバッジで表示だけする、`SpeedGauge.tsx`）。
+   */
+  gear: 'D' | 'R'
+
+  /**
+   * MT（擬似変速）モードのギア位置（v0.17）。`driveMode==='mt'` のときだけ意味を持つ
+   * ——速度制御・トルク制御では従来どおり `gear`（'D'|'R'）を使う。
+   *
+   * `gear` と同じ操作口（パッドの L1/R1、キーボードの←/→）だが意味が違う。**下＝
+   * シフトダウン、上＝シフトアップの相対操作**（direct-set の `gear` と違い、
+   * 押すたびに `MT_GEARS` 上を1段動く。`useDriving.ts` の `shiftGear()`）。
+   * R への出入りだけ `gear` と同じガード（走行中は拒否）を掛ける——N〜D5間は
+   * 実車の MT と同じく走行中のシフトアップ/ダウンを許可する。
+   * **既定・ページ再読み込みは N**（`localStorage` に保存しない、`gear` と同じ理由）。
+   * **速度制御/トルク制御から MT に切り替えた直後も必ず N に戻す**（`setSettings`
+   * 参照、2026-08-31 指示）——前回どのギアで MT を抜けたかを持ち越すと、
+   * 切り替えた瞬間に前のギアの上限でいきなり動き出しかねないため。
+   * 画面ボタンは無い（`gear` と同じ、v0.18 で廃止）——現在値は速度メータ中央の
+   * バッジで表示だけする
+   */
+  mtGear: MtGear
 
   /**
    * ラジコンタブの設定ドロワーが開いているか。
@@ -475,6 +665,29 @@ type UiState = {
   lidarVisible: boolean
   /** LiDAR ミニマップを拡大表示中か。false＝映像の1/3高さ、true＝82%高さ。ミニマップ自体のクリックで切り替える */
   lidarExpanded: boolean
+  /**
+   * ラジコンビューのメイン映像に出しているカメラ（`RcView.tsx`）。PIP には
+   * 常にこの逆（`pipCam`）が出る。PIP クリックで入れ替わるほか、
+   * ゲームパッドの R3（右スティック押し込み）でも切替可能（v0.16、`useDriving.ts`）——
+   * レーシングゲームの「リアビュー確認」に近い操作なので R3 を割り当てた。
+   * 以前は `RcView.tsx` のローカル `useState` だったが、パッドの rAF ループ
+   * （React ツリーの外）から切り替えられるよう store に上げた。
+   * **ページ再読み込みでは 'front' に戻る**（`localStorage` に保存しない。
+   * `lidarExpanded` 等と同じ——起動直後に予期せず後方カメラがメインの状態は避けたい）
+   */
+  mainCam: 'front' | 'rear'
+
+  /**
+   * 合成エンジン音（`audio/engineSound.ts`）を鳴らすか。**GUI 演出のみで
+   * 車両側には一切関与しない**——鳴るのはこの画面を開いているブラウザの
+   * スピーカーだけ。`AudioContext` はブラウザの自動再生制限があるため、
+   * ON トグルのクリック（ユーザー操作）の中で作る必要がある
+   * （設定ドロワーの「サウンド」タブ、`SettingsPanel.tsx`／`hooks/useEngineSound.ts` 参照）。
+   * **既定 OFF・`localStorage` には保存しない**（次回開いたときに勝手に
+   * 音が鳴り出すと驚くため、毎回明示的に ON してもらう）。音色の選択
+   * （`settings.engineSoundType`）は永続化する——こちらは驚きにつながらない嗜好のため。
+   */
+  engineSoundOn: boolean
 
   /** ラジコン操作の調整値。設定パネルで変更、`localStorage` に自動保存 */
   settings: DrivingSettings
@@ -561,7 +774,6 @@ export const useUi = create<UiState>((set, get) => ({
   armRequested: false,
   deadman: false,
   inputSource: 'none',
-  boost: false,
   disarmReason: '',
   autoOffReason: '',
 
@@ -570,6 +782,8 @@ export const useUi = create<UiState>((set, get) => ({
   passing: false,
   lightMode: LIGHT_OFF,
   sideBrakeRequested: false,
+  gear: 'D',
+  mtGear: 'N',
 
   settingsOpen: false,
   lidarZoom: 4, // 画面半径が何メートルぶんか
@@ -578,6 +792,8 @@ export const useUi = create<UiState>((set, get) => ({
   rearPip: true,
   lidarVisible: true,
   lidarExpanded: false,
+  mainCam: 'front',
+  engineSoundOn: false,
 
   settings: loadSettings(),
   settingsDefault: loadDefaultSettings(),
@@ -596,9 +812,14 @@ export const useUi = create<UiState>((set, get) => ({
 
   set: (p) => set(p),
   setSettings: (p) => {
-    const next = clampSettings({ ...get().settings, ...p })
+    const prev = get().settings
+    const next = clampSettings({ ...prev, ...p })
     saveSettings(next)
-    set({ settings: next })
+    // 速度制御/トルク制御から MT に切り替えた瞬間は必ず N から始める
+    // （`mtGear` の型コメント参照）。前回 MT を抜けたときのギアを持ち越すと、
+    // 切り替えた瞬間に前のギアの上限でいきなり動き出しかねないため
+    const enteringMt = next.driveMode === 'mt' && prev.driveMode !== 'mt'
+    set(enteringMt ? { settings: next, mtGear: 'N' } : { settings: next })
   },
   resetSettings: () => {
     const def = get().settingsDefault

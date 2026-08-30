@@ -1209,13 +1209,6 @@ button.on {
   stroke-linecap: round;
 }
 
-.arc-red {
-  fill: none;
-  stroke: #5a1f23;
-  stroke-width: 7;
-  stroke-linecap: round;
-}
-
 /* 実測の塗り。**ほんの少しだけ発光させる**（GR 風の締まり — 出しすぎると眩しいので控えめに） */
 .arc-fill {
   fill: none;
@@ -1241,6 +1234,23 @@ button.on {
   stroke-width: 2;
 }
 
+/* MT のレッドライン（v0.18）。**常時描画**して「このギアの上限はここ」を速度に
+   関わらず先に見せる——実車のタコメータの赤ゾーンと同じ発想。本体の弧（r=46）
+   ではなく外側の r=52 に描くのは、`.rc` スコープの `--accent` が既に赤系で、
+   同じ半径だと現在速度の塗り（`.arc-fill`）に埋もれて見えなくなるため */
+.arc-redline {
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+/* 実速度が帯に入ったら格上げ（`.lamp-warn.on`→`.lamp-bad.on` と同じ二段階） */
+.arc-redline.hot {
+  stroke: var(--bad);
+  filter: drop-shadow(0 0 4px rgba(242, 84, 75, .5));
+}
+
 /*
  * 針は 8Hz でしか角度が変わらないので、間を CSS で埋めて滑らかに見せる。
  * transform-box を指定しないと transform-origin が要素の bbox 基準になり、
@@ -1262,6 +1272,26 @@ button.on {
   fill: var(--fg);
   stroke: var(--accent);
   stroke-width: 1.5;
+}
+
+/* ギア/レンジ表示（v0.18）。240°スイープの下120°の空きに常時表示——速度制御・
+   トルク制御中は D/R、MT モード中は R/1〜5。`--accent`（弧の色）は使わない。
+   現在速度の表示と混同されないよう別の意味の色にしてある */
+.gear-chip {
+  fill: var(--panel2);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.gear-label {
+  fill: var(--fg);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* 後退だけ「後退」警告テキスト（.lv-warn）と同じ色にして、同じ意味だと分かるようにする */
+.gear-label.rev {
+  fill: var(--warn);
 }
 
 .meter-read {

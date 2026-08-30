@@ -6,21 +6,113 @@
  * 以前は「Space を押している間だけ送る」デッドマン方式だったが、
  * **押しながら WASD を操作するのが難しい**ため、明示的な ARM に変えた。
  *
- * | | ARM | 速度 | 舵 | ブースト | 停止 |
- * |---|---|---|---|---|---|
- * | キーボード | `Enter` または画面の ARM ボタン | W,↑ / S,↓ | A,← / D,→ | `Shift` | `Esc` |
- * | ゲームパッド | 同上 | R2 前進 / L2 後退 | 左スティック X | R1 | B/○ |
+ * | | ARM/DISARM（＋E-STOP） | 速度 | 舵 | ギア |
+ * |---|---|---|---|---|
+ * | キーボード | `Enter` または画面の ARM ボタン、`Esc` は即 DISARM | W,↑ / S,↓ | `A` / `D` | ←＝ダウン／→＝アップ |
+ * | ゲームパッド | 同上 ／ × | R2（アクセル、DUALSHOCK4） | 左スティック X | L1＝ダウン／R1＝アップ |
  *
- * 補機（v0.5 で追加）
+ * ⚠ **v0.18 で舵のキーボード割り当てから ←/→ を外した。** 元々 A/D と重複していた
+ * （どちらでも同じ舵になっていた）ので、空いた ←/→ をギアチェンジに回した——
+ * パッドの L1/R1 と方向の意味を揃えてある（`shiftGear()` 参照）。
+ *
+ * **ゲームパッドの速度は DUALSHOCK4 の実車ペダルに合わせた R2=アクセル／L2=ブレーキ
+ * にしてある（v0.14）。** 以前は `R2 - L2` の差で前進/後退を作っていたが、それだと
+ * L2 を「ブレーキ」として力加減できず（トリガーの押し込み量＝後退速度になってしまう）、
+ * ペダルらしい操作感にならなかった。R2/L2 をそれぞれ独立したアナログ量として使う
+ * 代わりに、前進/後退の向きは下の **Dレンジ/Rレンジ**（パッドの L1/R1、キーボードの
+ * ←/→、実車のシフトレバー相当）で選ぶ。キーボードは元々 W/S が別キーなので
+ * 影響なし（レンジはゲームパッドの R2 の向きだけを決める）。
+ *
+ * **× は Enter と同じ ARM/DISARM トグル（v0.15）。** それまでゲームパッドだけで
+ * ARM する手段が無く、必ず一度キーボードか画面ボタンに触る必要があった。
+ *
+ * ⚠ **v0.19 で ○ 専用の E-STOP ボタンを廃止し、× の ARM/DISARM トグルに統合した。**
+ * v0.15〜v0.18 は日本の SCE 標準（○＝決定／×＝キャンセル）に合わせ、○ を常時有効の
+ * 専用 E-STOP ボタンにしていたが、実際には E-STOP は「即 DISARM（権限も条件も
+ * 要らない）」以上のことをしていなかった——`estop_active`（車両側の物理ボタンだけが
+ * 立てられるハードウェアラッチ、`raspi/core/link_tracker.py` 参照）は GUI/パッドの
+ * どちらからも立てられず、ソフト側の「E-STOP」は実質ただの強い DISARM だったため、
+ * ボタンを分ける意味が無いと判断した。今は **× で armed→unarmed に落とすとき
+ * `ch.estop()` も呼ぶ**（下記 `tick()` の `padArm` 参照）——`ch.estop()` は
+ * 操縦権を持っていなくても通るので、他のタブ/PC が操縦している状態からでも
+ * この端末の × で強制的に止められる、という E-STOP の実用上の価値はそのまま残した。
+ * 空いた ○ はパッシングに使う（下記）。
+ *
+ * ⚠ **v0.16 でブースト機能（Shift / パッド R1 を押している間だけ `maxSpeed` まで
+ * 速度レンジが伸びる機能）を削除した。** 常に `maxSpeed` そのものが上限になる
+ * （`store/ui.ts` の `maxSpeed` 注記参照）。空いた R1 は L1 と対でギアチェンジに使う
+ * （下記）。
+ *
+ * ## 制御方式は3択：速度制御 / トルク制御 / MT（擬似変速、v0.17）
+ *
+ * `settings.driveMode`（`store/ui.ts`）で選ぶ。速度制御・トルク制御は従来どおり
+ * （設定パネルの「制御方式」）。**MT は速度制御の一種**——スロットルは相変わらず
+ * `target_speed` を出すが、そのときの上限（専用の `mtMaxSpeed`。固定値の `maxSpeed`
+ * ではない）を `ui.mtGear`（R, N, D1〜D5 の7段）に応じた倍率（`settings.mtGear1`〜
+ * `mtGear5`、N だけは 0 固定）にする。ワイヤプロトコルには `torque_mode=false` で
+ * 送るので、**STM32 から見ればただの速度指令**で MT かどうかは分からない
+ * （GUI 側だけで完結する演出）。**N（ニュートラル、v0.18）は上限が 0 になるだけ**
+ * ——スロットルを踏んでも指令速度は 0 へ収れんする（実車のニュートラルと同じ、
+ * N 専用の分岐は要らない）。
+ *
+ * ⚠ **2026-08-30: MT は 'speed'/'torque' と一切パラメータを共有しない
+ * （`mtMaxSpeed`/`mtAccel`/`mtCoast`/`mtEngineBrake`、いずれも `store/ui.ts`）。**
+ * 以前は `maxSpeed`/`accel`/`coast`/`kickSpeed` をそのまま流用していたため、
+ * 「'speed' モードの乗り味を詰めたら MT の挙動まで変わった」という混乱があった。
+ * 加えて、実車の MT に合わせて次の2点も変えた:
+ *
+ * - **アクセルオフは即ブレーキではなく惰行**。離した瞬間に 0 へスナップ／
+ *   `coast` で減速するのではなく、`mtEngineBrakeRate`（下記）でなだらかに減速する。
+ * - **逆キーブレーキと発進キックを廃止**。実車のアクセルペダルは1つしか無いので、
+ *   ギアと逆のキーは何もしない（上記「### 3」参照）。発進キックも `mtAccel` に一本化した
+ *   （下のキーボード分岐 `dir === gearSign` 参照）。
+ *
+ * ギアが下がるほど強くなる「エンジンブレーキ」相当のレート（`mtEngineBrakeRate`）を、
+ * アクセルオフの惰行と、シフトダウンで上限速度を超えたときの減速の両方に使う
+ * （`tick()` 内、瞬間移動ではなくなだらかに新しい上限まで落ちる）。
+ *
+ * ギアは実車の MT と同じ「1段ずつシフト」——パッドの L1＝シフトダウン／R1＝
+ * シフトアップ、キーボードの←/→も同じ意味（v0.18。共通ロジックは `shiftGear()`
+ * に集約してある）。既存の Dレンジ/Rレンジと同じボタンだが、MT モード中だけ
+ * 意味が相対操作に変わる。R をまたぐとき（R↔N）だけ `gear` と同じガード
+ * （走行中は拒否）を掛け、N〜D5間は走行中のシフトも許可する——実車で
+ * 加速しながらシフトアップするのと同じ操作感を狙った。
+ *
+ * ⚠ v0.18 で画面（`DriveControls.tsx`）のギア表示ボタンは廃止した。現在ギアは
+ * 速度メータ中央のバッジ（`SpeedGauge.tsx`）に表示だけする——操作はパッド/
+ * キーボードに一本化し、タッチ操作は今のところ提供していない。
+ *
+ * 補機（v0.5 で追加、v0.15/v0.16/v0.19 でボタン配置を変更）
  *
  * | | ブレーキ | クラクション | パッシング | 灯火切替 |
  * |---|---|---|---|---|
  * | キーボード | `Space` | `H` | `P` | `L`（消灯→DAY→NORMAL→…） |
- * | ゲームパッド | L1 | A/× | X/□ | Y/△ |
+ * | ゲームパッド | L2（力加減のみ、v0.16） | □ | ○（v0.19） | △ |
  *
  * **灯火切替以外はすべて「押している間だけ」。** STM32 側の意味論
  * （`horn` / `passing` は立てている間ずっと効く）に素直に対応させてある。
  * GUI 側でタイマーを持つと、DISARM やタブ切替と競合したときに消し忘れが起きる。
+ *
+ * ⚠ **パッシングのボタンは v0.14: □、v0.15〜v0.18: 十字キー右、v0.19: ○ と
+ * 移ってきた。** v0.19 で ○ 専用の E-STOP ボタンを廃止した（上記）ことで空いた
+ * ので、十字キーより押しやすい面ボタンへ寄せた。クラクションは v0.15 から
+ * 変わらず □。面ボタン（×○△□）は「安全系＋常用トグル」、十字キー（残るのは
+ * 左のみ）は「LiDAR ミニマップの拡大表示切替」という役割で整理した。
+ *
+ * ⚠ **パッドのブレーキ全開（L1、デジタル）は v0.16 で廃止した。** L1 は
+ * ギアチェンジ（当時は Dレンジ、2026-08-30 に R レンジへ変更）に譲ったので、
+ * パッドのブレーキは L2（アナログ）だけになる。
+ * L2 を奥まで踏み込めば `brakeTrig` がほぼ 1.0 になり実質フルブレーキと変わらないため、
+ * 機能としての欠落は無い。キーボードの `Space` は従来どおりフル（デジタル）のまま。
+ *
+ * ゲームパッドの右スティック（v0.15 まで未使用）は、ラジコンタブの表示調整に使う。
+ * 上下（軸3）で LiDAR ミニマップのズームイン/アウト（`live.lidarMiniZoomM`）、
+ * 十字キー左でミニマップの拡大表示切替（`ui.lidarExpanded`、画面でミニマップを
+ * クリックするのと同じ）。**R3（右スティック押し込み）は前後カメラの入れ替え**
+ * （`ui.mainCam`、`RcView.tsx` の PIP クリックと同じ、v0.16）——レーシングゲームの
+ * 「リアビュー確認」に近い操作なのでここに割り当てた（十字キー左は v0.15 まで R3
+ * だった LiDAR 拡大表示切替に譲った）。**いずれも ARM の有無に関係なく効く**——
+ * 走行の入力ではなく画面表示の調整なので、灯火切替と同じ扱い。
  *
  * **サイドブレーキ（v0.13）だけは例外でトグル。** `ui.sideBrakeRequested` を
  * `AuxPanel.tsx` の ON/OFF ボタンで切り替え、ここでは毎フレームその値をそのまま
@@ -47,7 +139,7 @@
  *
  * **残した**（ここは操作性と衝突しないので削らない）:
  *
- * - `Esc` / E-STOP ボタン / パッドの B … 即 DISARM。**権限も条件も要らない**
+ * - `Esc` / 画面の E-STOP ボタン / armed 中のパッドの × … 即 DISARM。**権限も条件も要らない**
  * - ウィンドウのフォーカス喪失・タブが背後に回る … 即 DISARM
  * - 送信が止まれば `SAFETY.cmdDeadmanMs` でサーバが DISARM、さらに io_node が同じだけで DISARM
  * - 無操作 `settings.armIdleTimeoutMs` … 自動 DISARM（放置した場合の最後の受け皿）
@@ -92,23 +184,21 @@
  * 通常走行では GUI のランプが支配的になる。STM32 側は
  * 「指令が飛んだ／GUI が壊れた」ときにメカを守る保険として残る。
  *
- * ### 3. 逆キーはブレーキ
+ * ### 3. 逆キーはブレーキ（'speed'/'torque' のみ）
  *
  * 前進中の S は「後退を積分し始める」のではなく**強い減速**。0 を跨いだら後退に移る。
  * 止めたいときに止まらないのが一番怖い。
  *
- * ### 4. 発進キック
- *
- * 停止からじわじわ指令を上げると、STM32 の速度 PI ループが動き出すまで無駄時間が出て
- * 「押した→無反応→急に出る」になる。押した瞬間に `settings.kickSpeed` へ跳ばしてから積分する。
- * **`kickSpeed` は設定パネルで、実車が実際に転がり始める指令値に合わせて調整すること**
- * （DriveBar の実測速度を見ながら詰める。低速では `wheel_speed` が使えないので
- * `speed` の生値と目視で判断する）。
+ * ⚠ **MT では逆キーブレーキを使わない（2026-08-30）。** 実車のアクセルペダルは
+ * 1つしか無く、「逆に踏むペダル」は存在しないため、MT ではギアの向き（`ui.mtGear`）と
+ * 逆のキーは**何もしない**——押していないのと同じ扱いになり、`mtEngineBrakeRate`
+ * （惰行／エンジンブレーキ）で減速する。止めたいときは Space/L2 の実ブレーキを使う。
  */
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
 import {
-  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, STEER_RATE_SAFETY_LIMIT, useUi,
+  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, STEER_RATE_SAFETY_LIMIT,
+  mtGearAt, mtGearIndex, mtGearRatio, useUi,
 } from '../store/ui'
 import { SAFETY } from '../generated/vehicle'
 import type { ControlChannel } from '../ws/control'
@@ -151,40 +241,89 @@ const ACCEL_LIMIT = ACCEL_SAFETY_LIMIT // m/s²
 const STEER_RATE_LIMIT = STEER_RATE_SAFETY_LIMIT // rad/s
 
 // ── ゲームパッド ─────────────────────────────────────────────────
-const STICK_DZ = 0.12
+// **左スティック（舵）のデッドゾーン／EXPO は設定パネルから調整する
+// （`s.gamepadSteerDeadzone`/`s.gamepadSteerExpo`、`store/ui.ts`）。** v0.14 までは
+// ここに `STICK_DZ`/`STEER_EXPO` として直書きしていたが、実車ごとに詰めたい値なので
+// 他の速度・舵パラメータと同じく設定パネル行きにした（v0.15）。
 const TRIGGER_DZ = 0.06
-/** 中央付近を緩くする度合い（0=リニア, 1=完全3乗）。舵は強め、スロットルは控えめ */
-const STEER_EXPO = 0.45
+/** 中央付近を緩くする度合い（0=リニア, 1=完全3乗）。スロットルは控えめのまま固定
+ * （左右対称なペダルではなく踏み込み量なので、舵ほど中央を緩める必要が無い） */
 const THROTTLE_EXPO = 0.25
+/** 右スティック（LiDAR ミニマップ操作用）のデッドゾーン */
+const RSTICK_DZ = 0.15
+/** 右スティック上下いっぱいで 1 秒あたり何 m ズームが変わるか */
+const MINI_ZOOM_RATE_M_S = 4
+const MINI_ZOOM_MIN_M = 1.5
+const MINI_ZOOM_MAX_M = 8
 
 const SPEED_KEYS_FWD = ['KeyW', 'ArrowUp']
 const SPEED_KEYS_REV = ['KeyS', 'ArrowDown']
-const STEER_KEYS_LEFT = ['KeyA', 'ArrowLeft']
-const STEER_KEYS_RIGHT = ['KeyD', 'ArrowRight']
-const BOOST_KEYS = ['ShiftLeft', 'ShiftRight']
+// v0.18: ←/→ はギアチェンジに譲ったので、キーボードの舵は A/D だけになった
+// （下の GEAR_KEY_DOWN/UP 参照）
+const STEER_KEYS_LEFT = ['KeyA']
+const STEER_KEYS_RIGHT = ['KeyD']
 const BRAKE_KEY = 'Space'
 const HORN_KEY = 'KeyH'
 const PASSING_KEY = 'KeyP'
 const LIGHT_KEY = 'KeyL'
+/** ギアチェンジ（v0.18）。パッドの L1/R1 と同じ役割——←＝シフトダウン、→＝シフトアップ
+ * （`shiftGear()` 参照）。灯火と同じくキーの立ち上がりエッジで1段だけ動く、押しっぱなし無効 */
+const GEAR_KEY_DOWN = 'ArrowLeft'
+const GEAR_KEY_UP = 'ArrowRight'
 const DRIVING_KEYS = [
   ...SPEED_KEYS_FWD, ...SPEED_KEYS_REV, ...STEER_KEYS_LEFT, ...STEER_KEYS_RIGHT,
   BRAKE_KEY, HORN_KEY, PASSING_KEY,
 ]
 
 // ── ゲームパッドのボタン番号（standard mapping） ──
-/** A/× — クラクション */
-const PAD_HORN = 0
-/** X/□ — パッシング */
-const PAD_PASSING = 2
-/** Y/△ — 灯火モードを1つ進める（**押した瞬間だけ**） */
+//
+// v0.15 で日本の SCE 標準（○＝決定/×＝キャンセル）に合わせて再配置した。
+// v0.19: ○ 専用の E-STOP ボタンを廃止し、× の ARM/DISARM トグルに統合した
+// （下記 `tick()` の `padArm` 参照。理由は下のブロックコメント）。空いた ○ は
+// パッシングに割り当てている。面ボタン（×○△□）は「安全系＋常用トグル」、
+// L1/R1 はギアチェンジ専任（v0.16）、十字キーは表示系の切替に役割を分けてある。
+// 標準マッピングでない実機・OS の組み合わせでは番号がズレることがあるので、
+// 繋いだら一度 GUI 上で反応を確認すること
+// （`import.meta.env.DEV` では押されたボタン番号をコンソールに出す。下記参照）。
+/** × — ARM/DISARM トグル（Enter キーと同じ）。armed→unarmed の遷移だけ `ch.estop()`
+ * も呼ぶ（v0.19、下記 `tick()` 参照） */
+const PAD_ARM_TOGGLE = 0
+/** ○ — パッシング（v0.14 までは □、v0.15〜v0.18 は十字キー右。v0.19 までは
+ * E-STOP 専用ボタンだった。廃止の経緯は上のブロックコメント参照） */
+const PAD_PASSING = 1
+/** □ — クラクション（v0.14 までは ×） */
+const PAD_HORN = 2
+/** △ — 灯火モードを1つ進める（**押した瞬間だけ**） */
 const PAD_LIGHT = 3
-/** L1 — ブレーキ */
-const PAD_BRAKE = 4
+/** L1 — Rレンジ（v0.16 まではブレーキのデジタル全開。ブースト廃止で空いた R1 と対にして
+ * ギアチェンジに寄せた。パッドのブレーキは L2（アナログ、下記）だけになる）。
+ * **2026-08-30: D/R を入れ替えた**（それまでは D レンジだった）。
+ * **MT モード（v0.17）では意味が変わり、シフトダウンになる**（下記 `tick()` 参照） */
+const PAD_GEAR_L1 = 4
+/** R1 — Dレンジ（v0.16 まではブースト。機能ごと削除したので空いた）。
+ * **2026-08-30: D/R を入れ替えた**（それまでは R レンジだった）。
+ * **MT モードではシフトアップになる**（`PAD_GEAR_L1` と同じ理由） */
+const PAD_GEAR_R1 = 5
+/** R3（右スティック押し込み） — メイン映像の前後カメラ入れ替え（v0.16）。
+ * レーシングゲームの「リアビュー確認」に近い操作なのでここに割り当てた */
+const PAD_CAM_SWAP = 11
+/** 十字キー左 — LiDAR ミニマップの拡大表示切替 */
+const PAD_LIDAR_EXPAND = 14
 
 /** 操縦権の再要求はこの間隔まで。rAF ごとに投げると 60発/秒になる */
 const TAKE_CONTROL_MS = 250
-/** E-STOP をパッドで押しっぱなしにしたときの再送間隔 */
-const ESTOP_REPEAT_MS = 100
+
+/**
+ * ボタンが押されているか。**`.pressed` だけでなく `.value` も見る**（v0.16）。
+ * Bluetooth 接続のコントローラでは、ブラウザ／OS の組み合わせによって
+ * デジタルボタンの `.pressed` が正しく反映されない個体・環境があり得るため
+ * （アナログの `.value` は生きているのに `.pressed` だけ立たない、という報告があった）、
+ * どちらか一方が閾値を超えていれば「押されている」とみなす保険を入れてある。
+ */
+function padPressed(b: GamepadButton | undefined): boolean {
+  if (!b) return false
+  return b.pressed || b.value > 0.5
+}
 
 /** デッドゾーンを**切り落とすのではなく再スケールする**。段差が出ない */
 function dz(v: number, zone: number): number {
@@ -204,6 +343,30 @@ function approach(cur: number, target: number, rate: number, dt: number): number
   return cur + Math.sign(target - cur) * d
 }
 
+/**
+ * ギアを1段シフトする（v0.18）。`delta=-1` でダウン、`+1` でアップ。
+ * MT モードでは `ui.mtGear` を `MT_GEARS` 上で1段動かし（R をまたぐときだけ
+ * 走行中は拒否）、それ以外は従来どおり `ui.gear`（D/R）を direct-set する
+ * （down=R、up=D。**2026-08-30 に D/R を入れ替えた**——それまでは down=D、up=R
+ * だった）。パッドの L1/R1（`tick()` 内）とキーボードの←/→（`down` ハンドラ）
+ * の両方から呼ぶ共通ロジック——以前は2箇所に同じ分岐を書いていたのをここへ集約した。
+ */
+function shiftGear(delta: number) {
+  const ui = useUi.getState()
+  const stopped = live.vs == null || live.vs.stopped
+  if (ui.settings.driveMode === 'mt') {
+    const next = mtGearAt(mtGearIndex(ui.mtGear) + delta)
+    if (next === ui.mtGear) return
+    const crossesReverse = next === 'R' || ui.mtGear === 'R'
+    if (crossesReverse && !stopped) return
+    ui.set({ mtGear: next })
+  } else {
+    const target = delta < 0 ? 'R' : 'D'
+    if (ui.gear === target || !stopped) return
+    ui.set({ gear: target })
+  }
+}
+
 export function useDriving(ch: ControlChannel | null) {
   const keys = useRef(new Set<string>())
   const speed = useRef(0)
@@ -219,7 +382,6 @@ export function useDriving(ch: ControlChannel | null) {
     const disarm = (why: string) => {
       keys.current.clear()
       const ui = useUi.getState()
-      if (ui.boost) ui.set({ boost: false })
       if (ui.armRequested) ui.set({ armRequested: false, disarmReason: why })
     }
 
@@ -240,15 +402,16 @@ export function useDriving(ch: ControlChannel | null) {
         }
         return
       }
-      if (BOOST_KEYS.includes(e.code)) {
-        keys.current.add(e.code)
-        return
-      }
       if (e.code === LIGHT_KEY) {
         // **押した瞬間に1つ進めるだけ。** 押しっぱなしで回り続けると
         // どのモードで手を離したのか分からなくなる（`e.repeat` は上で弾いてある）
         const i = LIGHT_CYCLE.indexOf(ui.lightMode)
         ui.set({ lightMode: LIGHT_CYCLE[(i + 1) % LIGHT_CYCLE.length] })
+        return
+      }
+      if (e.code === GEAR_KEY_DOWN || e.code === GEAR_KEY_UP) {
+        e.preventDefault() // 矢印キーでページがスクロールしないように
+        shiftGear(e.code === GEAR_KEY_DOWN ? -1 : 1)
         return
       }
       if (DRIVING_KEYS.includes(e.code)) {
@@ -284,9 +447,14 @@ export function useDriving(ch: ControlChannel | null) {
     let prevMs = performance.now()
     let lastTxMs = 0
     let lastTakeMs = 0
-    let lastEstopMs = 0
-    let padEstopWas = false
     let padLightWas = false
+    let padArmWas = false
+    let padGearL1Was = false
+    let padGearR1Was = false
+    let padLidarExpandWas = false
+    let padCamSwapWas = false
+    /** DEV 診断用（下記の `padPressed` ログ）。ボタンごとの直前の押下状態 */
+    const padDebugButtons: Record<string, boolean> = {}
 
     /**
      * 補機の押下状態を store に写す。**変化したときだけ**書く（毎フレーム書くと
@@ -312,21 +480,6 @@ export function useDriving(ch: ControlChannel | null) {
       const s = ui.settings
       const pad = navigator.getGamepads?.().find((p) => p && p.connected) ?? null
 
-      // ゲームパッドの B/○ はいつでも E-STOP（ARM していなくても効く）
-      const padEstop = pad?.buttons[1]?.pressed ?? false
-      if (padEstop) {
-        // 押した瞬間に1発、握り続けている間は 100ms ごとに再送
-        if (!padEstopWas || now - lastEstopMs >= ESTOP_REPEAT_MS) {
-          ch.estop()
-          lastEstopMs = now
-        }
-        padEstopWas = true
-        if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'パッドの B で E-STOP' })
-        mirrorAux(false, false, false)
-        return
-      }
-      padEstopWas = false
-
       // ── 入力を読む ──
       const k = keys.current
       const fwd = SPEED_KEYS_FWD.some((c) => k.has(c))
@@ -334,32 +487,129 @@ export function useDriving(ch: ControlChannel | null) {
       const left = STEER_KEYS_LEFT.some((c) => k.has(c))
       const right = STEER_KEYS_RIGHT.some((c) => k.has(c))
       const keyActive = fwd || rev || left || right
-      const keyBoost = BOOST_KEYS.some((c) => k.has(c))
 
-      const rt = dz(pad?.buttons[7]?.value ?? 0, TRIGGER_DZ)
-      const lt = dz(pad?.buttons[6]?.value ?? 0, TRIGGER_DZ)
-      const padSteer = dz(pad?.axes[0] ?? 0, STICK_DZ)
-      const padBoost = pad?.buttons[5]?.pressed ?? false
-      const padActive = rt > 0 || lt > 0 || padSteer !== 0
+      // R2＝アクセル、L2＝ブレーキ（DUALSHOCK4 の実車ペダル配置、v0.14）。
+      // 前進/後退は `ui.gear`（画面の Dレンジ/Rレンジ）が決める。R2/L2 単体では
+      // 向きを持たない——実車のアクセル/ブレーキペダルと同じ
+      const accelTrig = dz(pad?.buttons[7]?.value ?? 0, TRIGGER_DZ)
+      const brakeTrig = dz(pad?.buttons[6]?.value ?? 0, TRIGGER_DZ)
+      const padSteer = dz(pad?.axes[0] ?? 0, s.gamepadSteerDeadzone)
+      const padActive = accelTrig > 0 || brakeTrig > 0 || padSteer !== 0
 
-      const boost = keyBoost || padBoost
-      if (ui.boost !== boost) ui.set({ boost })
-      // **ブーストは「最高速度そのもの」。** 倍率は持たない（`cruiseScale` の注記参照）
-      const maxSpeed = boost ? s.maxSpeed : s.maxSpeed * s.cruiseScale
+      // v0.17: 制御方式は「速度制御 / トルク制御 / MT（擬似変速）」の3択（`driveMode`）。
+      // MT は速度制御の一種——ワイヤプロトコルには torque_mode=false（速度指令）で送る
+      const torqueModeOn = s.driveMode === 'torque'
+      const mtModeOn = s.driveMode === 'mt'
+      // MT モードでは向きも `ui.mtGear`（R, N, D1〜D5）が持つ。それ以外は従来どおり `ui.gear`
+      const gearSign = mtModeOn ? (ui.mtGear === 'R' ? -1 : 1) : (ui.gear === 'R' ? -1 : 1)
+
+      // v0.16: ブースト機能を削除した。常に `maxSpeed` そのものが上限。
+      // v0.17: MT モードだけ `mtGear` に応じた倍率（`mtGear1`〜`mtGear5`）を掛ける。
+      // 2026-08-30: MT は `maxSpeed` ではなく専用の `mtMaxSpeed` を使う（'speed' と非共有）
+      const mtRatio = mtModeOn ? mtGearRatio(ui.mtGear, s) : 0
+      const maxSpeed = mtModeOn ? s.mtMaxSpeed * mtRatio : s.maxSpeed
+      // MT モードのエンジンブレーキ相当レート（2026-08-30）。ギア比が低いほど強く、
+      // N は加算なし（`mtCoast` のみ＝いちばん緩い）。アクセルオフの惰行と、
+      // シフトダウンで上限を超えたときのなだらかな減速の両方に使う（下記 `tick()` 内）
+      const mtEngineBrakeRate = mtModeOn
+        ? (ui.mtGear === 'N' ? s.mtCoast : s.mtCoast + s.mtEngineBrake * (1 - mtRatio))
+        : 0
 
       // ── 補機（すべて「押している間だけ」） ──
-      const brake = k.has(BRAKE_KEY) || (pad?.buttons[PAD_BRAKE]?.pressed ?? false)
-      const horn = k.has(HORN_KEY) || (pad?.buttons[PAD_HORN]?.pressed ?? false)
-      const passing = k.has(PASSING_KEY) || (pad?.buttons[PAD_PASSING]?.pressed ?? false)
+      //
+      // ブレーキはキーボードの Space（フル、デジタル）と L2（力加減、アナログ）の合成。
+      // パッドの L1 は v0.16 でギアチェンジに譲ったので、パッドのブレーキは L2 のみ。
+      // **L2 は踏み込み量をそのまま `brake_torque` の倍率にする**（`s.brakeTorque` が
+      // 上限）。`_brake_torque_raw`（`msgs/convert.py`）は正の値を 0 に丸めないので、
+      // 軽く踏んだときに「未指定＝最大制動」に化けることはない
+      const brakeStrength = Math.max(k.has(BRAKE_KEY) ? 1 : 0, brakeTrig)
+      const brake = brakeStrength > 0
+      const horn = k.has(HORN_KEY) || padPressed(pad?.buttons[PAD_HORN])
+      const passing = k.has(PASSING_KEY) || padPressed(pad?.buttons[PAD_PASSING])
 
       // 灯火切替だけはトグル。**押した瞬間のエッジで1つ進める**
       // （rAF で読むので、キーの `e.repeat` に相当する処理を自前で持つ）
-      const padLight = pad?.buttons[PAD_LIGHT]?.pressed ?? false
+      const padLight = padPressed(pad?.buttons[PAD_LIGHT])
       if (padLight && !padLightWas) {
         const i = LIGHT_CYCLE.indexOf(ui.lightMode)
         ui.set({ lightMode: LIGHT_CYCLE[(i + 1) % LIGHT_CYCLE.length] })
       }
       padLightWas = padLight
+
+      // × は Enter と同じ ARM/DISARM トグル（v0.15）。**押した瞬間のエッジで反転**
+      // （灯火と同じ理由——押しっぱなしで何度も切り替わっては困る）
+      //
+      // v0.19: ○ 専用の E-STOP ボタンを廃止し、armed→unarmed の遷移にここで
+      // `ch.estop()` を吸収させた。E-STOP は元々「即 DISARM（権限も条件も要らない）」
+      // 以上のことをしていなかった（`estop_active` はハードウェアの物理ボタン専用の
+      // ラッチで、GUI/パッドからは立てられない——`raspi/core/link_tracker.py` 参照）ので、
+      // ボタンを分ける意味が無かった。`ch.estop()` は**操縦権を持っていなくても通る**
+      // ので、他のタブ/PCが操縦している状態からでもこの端末の × で止められる
+      // （ローカルの `ui.armRequested` を false にするだけの経路より強い）。
+      const padArm = padPressed(pad?.buttons[PAD_ARM_TOGGLE])
+      if (padArm && !padArmWas) {
+        if (ui.armRequested) {
+          ch.estop()
+          ui.set({ armRequested: false, disarmReason: 'パッドの × で解除' })
+        } else {
+          lastActivity.current = now
+          ui.set({ armRequested: true, disarmReason: '' })
+        }
+      }
+      padArmWas = padArm
+
+      // Rレンジ/Dレンジの切替（L1/R1、v0.16。v0.15 までは十字キー上/下だったが、
+      // ブースト廃止で空いた L1/R1 に寄せた。2026-08-30 に D/R を入れ替え、
+      // L1=R・R1=D になった）。v0.17 で MT モードでは「シフトダウン/アップ」という
+      // 相対操作に変わった。v0.18 でキーボードの←/→にも同じ操作を割り当てたため、
+      // 分岐ロジックは `shiftGear()` に共通化してある（`down` ハンドラ参照）
+      const padGearL1 = padPressed(pad?.buttons[PAD_GEAR_L1])
+      const padGearR1 = padPressed(pad?.buttons[PAD_GEAR_R1])
+      if (padGearL1 && !padGearL1Was) shiftGear(-1)
+      if (padGearR1 && !padGearR1Was) shiftGear(1)
+      padGearL1Was = padGearL1
+      padGearR1Was = padGearR1
+
+      // 右スティック＝ LiDAR ミニマップの操作（v0.15）。走行には関与しないので
+      // ARM の有無に関係なく効く。上下（軸3）でズーム、十字キー左で拡大表示切替
+      const padZoomY = dz(pad?.axes[3] ?? 0, RSTICK_DZ)
+      if (padZoomY !== 0) {
+        const z = live.lidarMiniZoomM + padZoomY * MINI_ZOOM_RATE_M_S * dt
+        live.lidarMiniZoomM = Math.max(MINI_ZOOM_MIN_M, Math.min(MINI_ZOOM_MAX_M, z))
+      }
+      const padLidarExpand = padPressed(pad?.buttons[PAD_LIDAR_EXPAND])
+      if (padLidarExpand && !padLidarExpandWas) ui.set({ lidarExpanded: !ui.lidarExpanded })
+      padLidarExpandWas = padLidarExpand
+
+      // R3＝前後カメラ入れ替え（v0.16）。`RcView.tsx` の PIP クリックと同じ
+      // `ui.mainCam` を更新するだけ。走行には関与しないので ARM の有無に関係なく効く
+      const padCamSwap = padPressed(pad?.buttons[PAD_CAM_SWAP])
+      if (padCamSwap && !padCamSwapWas) {
+        ui.set({ mainCam: ui.mainCam === 'front' ? 'rear' : 'front' })
+      }
+      padCamSwapWas = padCamSwap
+
+      // ── DEV 診断：どのボタン/軸が実際に反応しているかをコンソールに出す ──
+      //
+      // Bluetooth 接続のコントローラは OS・ブラウザの組み合わせでボタン番号が
+      // ズレることがあるので、繋いだコントローラの実際の番号を確認したいときは
+      // devtools のコンソールを開いて押し、上の `PAD_*` 定数と見比べること。
+      //
+      // ⚠ v0.16 の再配線直後に「ARM はできるが E-STOP は効かない」という報告が
+      // あったが、これはボタン番号のズレではなく、E-STOP が `estop_active`
+      // （車両側の物理ボタンだけが立てられるハードウェアラッチ）を立てるものだと
+      // 誤解していたことが原因だった（実際は単なる強い DISARM）。v0.19 で
+      // ○ 専用の E-STOP ボタン自体を廃止したので、この非対称は起こり得ない。
+      if (import.meta.env.DEV && pad) {
+        pad.buttons.forEach((b, i) => {
+          const p = padPressed(b)
+          const key = `pad-btn-${i}`
+          if (p !== padDebugButtons[key]) {
+            console.log(`[gamepad] button[${i}] ${p ? 'DOWN' : 'up'} (pressed=${b.pressed}, value=${b.value.toFixed(2)})`)
+            padDebugButtons[key] = p
+          }
+        })
+      }
 
       // **押しっぱなしも「操作中」に数える。** keydown だけを見ると、
       // W を握り続けているのにタイムアウトで切れる。
@@ -518,7 +768,8 @@ export function useDriving(ch: ControlChannel | null) {
           steer: 0,
           accel_limit: ACCEL_LIMIT,
           steer_rate_limit: STEER_RATE_LIMIT,
-          brake_torque: s.brakeTorque,
+          // L2 の踏み込み量（`brakeStrength`）で力を加減する。L1/Space はフル（=1）
+          brake_torque: s.brakeTorque * brakeStrength,
           // 自律走行はトルク直接指令を使わない。サーバ側でも落としてある
           torque_mode: false,
           target_torque: 0,
@@ -544,34 +795,61 @@ export function useDriving(ch: ControlChannel | null) {
         // 人の指がすでにランプになっているので、二重に鈍らせない。
         // 急な踏み込みは STM32 の accel_limit / steer_rate_limit が受け持つ
         // 左スティック左 (-1) が左旋回 (+steer)。反時計回りが正
-        steer.current = -expo(padSteer, STEER_EXPO) * s.maxSteer
-        if (s.torqueMode) {
+        steer.current = -expo(padSteer, s.gamepadSteerExpo) * s.maxSteer
+        // R2（アクセル）の踏み込み量に `gearSign`（Dレンジ/Rレンジ）で向きを付ける。
+        // L2 はここでは使わない——ブレーキとして `brake`/`brakeStrength` 側で処理済み
+        if (torqueModeOn) {
           // トルクモード（v0.6）も同じ理由でランプなし。速度指令は使わないので 0
-          torque.current = expo(rt - lt, THROTTLE_EXPO) * s.driveTorque
+          torque.current = expo(accelTrig, THROTTLE_EXPO) * s.driveTorque * gearSign
           speed.current = 0
+        } else if (mtModeOn) {
+          // MT（2026-08-30）: 目標（トリガー踏み込み量、離していれば0）へ
+          // `approach()` でレート制限しながら近づける。**目標へ近づく向きで
+          // レートを変える**——増える方向（加速）は `s.mtAccel`、減る方向
+          // （アクセルオフの惰行・シフトダウンで上限を超えた分の解消）は
+          // `mtEngineBrakeRate`。両方とも一つの式で表せるので分岐が要らない
+          // （以前は「アクセルON/OFF」「上限超過」を別々の分岐にしていたが、
+          // 「加速側は直接代入でランプが無い」バグが混ざっていた）。
+          // `accel` ではなく `mtAccel` を使う——'speed' モードとパラメータを共有しない
+          const mtTarget = accelTrig > 0 ? expo(accelTrig, THROTTLE_EXPO) * maxSpeed * gearSign : 0
+          const mtRate = Math.abs(mtTarget) > Math.abs(speed.current) ? s.mtAccel : mtEngineBrakeRate
+          speed.current = approach(speed.current, mtTarget, mtRate, dt)
+          torque.current = 0
         } else {
-          speed.current = expo(rt - lt, THROTTLE_EXPO) * maxSpeed
+          speed.current = expo(accelTrig, THROTTLE_EXPO) * maxSpeed * gearSign
           torque.current = 0
         }
       } else {
         const dir = fwd ? 1 : rev ? -1 : 0
-        if (s.torqueMode) {
+        if (torqueModeOn) {
           // **トルクモードはランプを挟まない。** 0.1N・m 程度と値域が小さく、
           // 速度用の加速度ランプ（m/s²）はそのままでは単位が合わない。
           // 押している間だけ `driveTorque` をそのまま出す（v0.6）
           torque.current = dir * s.driveTorque
           speed.current = 0
+        } else if (mtModeOn) {
+          // MT（2026-08-30）: 実車にアクセルペダルは1つしか無い——ギアの向きと
+          // 逆のキーを押しても何もしない（`brake` を使った強制ブレーキはしない。
+          // 押していないのと同じ扱いになり、下でエンジンブレーキ／惰行が効く）。
+          // 発進キックも廃止——`s.mtAccel` で 0 からそのままランプする
+          const effDir = dir === gearSign ? dir : 0
+          if (Math.abs(speed.current) > maxSpeed) {
+            speed.current = approach(speed.current, Math.sign(speed.current) * maxSpeed, mtEngineBrakeRate, dt)
+          } else if (effDir !== 0 && maxSpeed > 0) {
+            speed.current += effDir * s.mtAccel * dt
+          } else {
+            speed.current = approach(speed.current, 0, mtEngineBrakeRate, dt)
+          }
+          torque.current = 0
         } else {
           // ── 速度：押している間は加速、逆キーはブレーキ ──
           if (dir === 0) {
             speed.current = approach(speed.current, 0, s.coast, dt)
           } else if (speed.current * dir < 0) {
             // 進行方向と逆を押している ＝ ブレーキ。0 を行き過ぎたら 0 で受け止め、
-            // 次のフレームからキック＋加速で逆走に移る
+            // 次のフレームから加速で逆走に移る
             const next = speed.current + dir * s.brake * dt
             speed.current = next * dir > 0 ? 0 : next
-          } else if (Math.abs(speed.current) < s.kickSpeed) {
-            speed.current = dir * s.kickSpeed // 発進キック
           } else {
             speed.current += dir * s.accel * dt
           }
@@ -597,7 +875,11 @@ export function useDriving(ch: ControlChannel | null) {
         torque.current = 0
       }
 
-      speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
+      // MT は上のエンジンブレーキのランプで既に上限内へなだらかに収れんさせてある。
+      // ここで即クランプすると、シフトダウンした瞬間に速度がワープしてしまう
+      if (!mtModeOn) {
+        speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
+      }
       torque.current = Math.max(-s.driveTorque, Math.min(s.driveTorque, torque.current))
       steer.current = Math.max(-s.maxSteer, Math.min(s.maxSteer, steer.current))
 
@@ -605,7 +887,7 @@ export function useDriving(ch: ControlChannel | null) {
       cmdOut.steer = steer.current
       cmdOut.active = true
       cmdOut.auto = false
-      cmdOut.torqueMode = s.torqueMode
+      cmdOut.torqueMode = torqueModeOn
       cmdOut.torque = torque.current
       if (!ui.deadman || ui.inputSource !== source) {
         ui.set({ deadman: true, inputSource: source })
@@ -629,10 +911,13 @@ export function useDriving(ch: ControlChannel | null) {
         accel_limit: ACCEL_LIMIT,
         steer_rate_limit: STEER_RATE_LIMIT,
         // **こちらは逆に 0 を送ってはいけない。** `brake_torque` の 0 は
-        // 「未指定 ＝ STM32 の最大制動」を意味する。スライダの下限は 0 より上にしてある
-        brake_torque: s.brakeTorque,
+        // 「未指定 ＝ STM32 の最大制動」を意味する。スライダの下限は 0 より上にしてある。
+        // L2 の踏み込み量（`brakeStrength`）で力を加減する。L1/Space はフル（=1）で、
+        // `_brake_torque_raw` は正の値を 0 に丸めないので軽く踏んでも「未指定」化けはしない
+        brake_torque: s.brakeTorque * brakeStrength,
         // v0.6: 立っている間 `speed` は無視され `target_torque` が駆動トルクとして直接掛かる
-        torque_mode: s.torqueMode,
+        // v0.17: MT モードは `torqueModeOn===false` なので、ここは自動的に速度指令になる
+        torque_mode: torqueModeOn,
         target_torque: torque.current,
         // v0.7: 進行方向の超音波が 20cm 未満なら STM32 が単独で最大制動する。
         // **GUI は許可を出すだけで、判定にも制動にも関与しない**（二重制御にしない）

@@ -37,6 +37,10 @@ export const live = {
   armRemainingMs: 0,
   /** RasPi 本体の CPU 温度 ℃。実機以外（シム等）では null */
   piTempC: null as number | null,
+  /** ラジコンタブの LiDAR ミニマップの半径 [m]（`LidarMini.tsx`）。
+   * ゲームパッドの右スティック上下で rAF ごとに変わるので zustand には置かない
+   * （`useDriving.ts`）。既定 3m は元の固定値 `RADIUS_M` を踏襲 */
+  lidarMiniZoomM: 3,
 }
 
 /**

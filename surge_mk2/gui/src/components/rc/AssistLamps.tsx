@@ -19,10 +19,10 @@
 /**
  * 2026-08-17: BOOST・HORN・PASS のランプを削除（指示による）。
  * いずれも「押している間だけ光る」自分の操作の可視化で、押しっぱなしを防ぐ目的
- * ——だったが、常時ここに並んでいる価値がないと判断された。ボタン自体・
+ * ——だったが、常時ここに並んでいる価値がないと判断された。HORN・PASS のボタン自体・
  * `useDriving.ts` の入力処理は変えていない（鳴らす・光らせる機能自体は残る）。
- * BOOST は Shift / パッド R1 を押している間だけ速度レンジが `maxSpeed` まで
- * 伸びる機能（`cruiseScale` を超えられる）で、`ui.boost` はそのフラグ。
+ * BOOST（Shift / パッド R1 を押している間だけ速度レンジが `maxSpeed` まで伸びる機能）は
+ * この時点ではまだ機能自体は残っていたが、**v0.16 で機能ごと削除した**（指示による）。
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
@@ -83,7 +83,7 @@ export function AssistLamps() {
       {/* ここから下は自分の操作なのでラッチ不要。押している間だけ光ればよい。
           **ボタンではなくランプにしてある** — マウスで押しっぱなしにすると、
           カーソルが外れた瞬間に取り残されてクラクションが鳴り続ける（`AuxPanel.tsx` 参照） */}
-      <span className={`lamp lamp-warn ${ui.braking ? 'on' : ''}`} title="Space / パッド L1">
+      <span className={`lamp lamp-warn ${ui.braking ? 'on' : ''}`} title="Space / パッド L2">
         BRAKE
       </span>
     </div>

@@ -30,9 +30,10 @@
  * で完結する軽いタブ（`SETTINGS_TABS`）。項目が増えて縦に長くなりすぎたので、
  * 「走行」（制御方式・速度orトルク・舵・ブレーキ）「安全」（自動停止・TC/TV・
  * 片輪浮き対策・ARMタイムアウト）「カメラ」（capture FPS上限・後方ON/OFF・
- * GUI配信fps・進路ガイド校正）の3つに分けた。「既定値に戻す」等のヘッダは
- * タブの外に置いてある——`DrivingSettings` は1つしかなく、どのタブの値も
- * まとめて戻す/保存するので、特定のタブだけの操作ではないため。
+ * GUI配信fps・進路ガイド校正）「サウンド」（合成エンジン音のON/OFF・音色、
+ * 2026-08-30 追加）の4つに分けた。「既定値に戻す」等のヘッダはタブの外に
+ * 置いてある——`DrivingSettings` は1つしかなく、どのタブの値もまとめて戻す/
+ * 保存するので、特定のタブだけの操作ではないため。
  */
 import { useState } from 'react'
 import type { DrivingSettings, NumericSettingKey, SettingRange } from '../store/ui'
@@ -67,11 +68,9 @@ const SPEED_FIELDS: Field[] = [
       `STM32 実測（LIMITS）が届いていればそれを使う。未接続時のみ既定 ${PI_MAX_SPEED_CAP.toFixed(2)} m/s`,
     digits: 2,
   },
-  { key: 'cruiseScale', label: '巡航レンジ', unit: '×', note: '既定（低速側）。最高速度に対する倍率', digits: 2 },
   { key: 'accel', label: '加速', unit: 'm/s²', note: '押している間の加速度', digits: 1 },
   { key: 'coast', label: '惰行減速', unit: 'm/s²', note: 'キーを離したときの減速度', digits: 1 },
   { key: 'brake', label: '逆キーブレーキ', unit: 'm/s²', note: '進行方向と逆を押したときの減速度。加速より強くすること', digits: 1 },
-  { key: 'kickSpeed', label: '発進キック', unit: 'm/s', note: '停止から押した瞬間に跳ばす速度。実車が転がり始める値に合わせる', digits: 2 },
 ]
 
 const STEER_FIELDS: Field[] = [
@@ -86,9 +85,24 @@ const STEER_FIELDS: Field[] = [
     toStored: (v) => v / RAD2DEG,
     digits: 0,
   },
-  { key: 'steerRate', label: '切り込み速度', unit: 'rad/s', note: '押している間の切り込みの速さ', digits: 1 },
-  { key: 'steerReturn', label: '戻り速度', unit: 'rad/s', note: '離したときのセンター戻り。切り込みより速くすること', digits: 1 },
-  { key: 'steerCounter', label: '切り返し速度', unit: 'rad/s', note: '逆キーでの切り戻し', digits: 1 },
+  { key: 'steerRate', label: '切り込み速度', unit: 'rad/s', note: '押している間の切り込みの速さ（キーボードのみ）', digits: 1 },
+  { key: 'steerReturn', label: '戻り速度', unit: 'rad/s', note: '離したときのセンター戻り。切り込みより速くすること（キーボードのみ）', digits: 1 },
+  { key: 'steerCounter', label: '切り返し速度', unit: 'rad/s', note: '逆キーでの切り戻し（キーボードのみ）', digits: 1 },
+  {
+    key: 'gamepadSteerExpo',
+    label: 'パッド舵カーブ（EXPO）',
+    unit: '',
+    note: '左スティック中央付近の反応を緩める強さ。0=リニア、1=最大限緩める。'
+      + '上げるほど直進や小舵角の細かい操作がしやすくなる代わり、フルロック側は敏感になる（パッドのみ）',
+    digits: 2,
+  },
+  {
+    key: 'gamepadSteerDeadzone',
+    label: 'パッド舵の遊び',
+    unit: '',
+    note: '左スティック中央のデッドゾーン。ここより内側の傾きは無視する（パッドのみ）',
+    digits: 2,
+  },
 ]
 
 const BRAKE_FIELDS: Field[] = [
@@ -97,7 +111,7 @@ const BRAKE_FIELDS: Field[] = [
     label: 'ブレーキ強さ',
     unit: 'N·m/輪',
     note: (r) =>
-      `Space / パッド L1 を押している間に掛かるトルク。上限 ${r.max.toFixed(3)} N·m` +
+      `Space / パッド L2 を押している間に掛かるトルク。上限 ${r.max.toFixed(3)} N·m` +
       `（STM32 実測 max_torque_nm が届いていればそれを使う。未接続時のみ既定 ${MAX_BRAKE_TORQUE_NM} N·m。超えても丸められる）`,
     digits: 3,
   },
@@ -116,6 +130,45 @@ const TORQUE_FIELDS: Field[] = [
   // ★2026-08-22: 「速度メータの目盛り」フィールドは廃止。速度メータ（`SpeedGauge.tsx`）の
   // 目盛りは、速度制御・トルク制御どちらでも常に STM32 実測 `LIMITS.max_speed_m_s` に
   // 固定されるようになったため、`maxSpeed` を経由してユーザーが調整する意味が無くなった
+]
+
+/**
+ * MT（擬似変速）モードのギア刻み（v0.17）。表示は「MT専用の最高速度（`mtMaxSpeed`、
+ * 下の `MT_SPEED_FIELDS`）に対する％」——絶対速度にすると `mtMaxSpeed` を変えるたびに
+ * 再計算しないと意味が読めなくなるため、倍率のまま見せる（`store/ui.ts` の
+ * `mtGear1`〜`mtGear5` は元々 0-1 の倍率）。
+ */
+const MT_FIELDS: Field[] = [
+  { key: 'mtGear1', label: '1速', unit: '%', note: 'MT専用の最高速度に対する割合。後退（R）もこの値を使う。ニュートラル（N）は常に0%固定でここでは調整できない', toDisplay: (v) => v * 100, toStored: (v) => v / 100, digits: 0 },
+  { key: 'mtGear2', label: '2速', unit: '%', note: 'MT専用の最高速度に対する割合', toDisplay: (v) => v * 100, toStored: (v) => v / 100, digits: 0 },
+  { key: 'mtGear3', label: '3速', unit: '%', note: 'MT専用の最高速度に対する割合', toDisplay: (v) => v * 100, toStored: (v) => v / 100, digits: 0 },
+  { key: 'mtGear4', label: '4速', unit: '%', note: 'MT専用の最高速度に対する割合', toDisplay: (v) => v * 100, toStored: (v) => v / 100, digits: 0 },
+  { key: 'mtGear5', label: '5速', unit: '%', note: 'MT専用の最高速度に対する割合。既定は100%＝トップギアで mtMaxSpeed そのまま', toDisplay: (v) => v * 100, toStored: (v) => v / 100, digits: 0 },
+]
+
+/**
+ * MT モード専用の「速度制御」欄（2026-08-30）。'speed' モードの `SPEED_FIELDS` とは
+ * キーを一切共有しない独立した項目——`maxSpeed`/`accel` を変えても MT には影響しない。
+ * `coast`/`brake`/`kickSpeed` に相当するものは無い（MT には逆キーブレーキも発進キックも
+ * 無く、減速はすべて `MT_FEEL_FIELDS` の `mtCoast`/`mtEngineBrake` に一本化した）。
+ */
+const MT_SPEED_FIELDS: Field[] = [
+  {
+    key: 'mtMaxSpeed',
+    label: '最高速度',
+    unit: 'm/s',
+    note: (r) =>
+      `MT 専用の最高速度（5速でこの値そのもの）。上限 ${r.max.toFixed(2)} m/s を超えては設定できない。` +
+      `STM32 実測（LIMITS）が届いていればそれを使う`,
+    digits: 2,
+  },
+  { key: 'mtAccel', label: '加速', unit: 'm/s²', note: 'アクセルを踏んでいる（踏み込んでいる）間の加速度', digits: 1 },
+]
+
+/** MT のアクセルオフ時の減速フィール（2026-08-30）。実車の惰行・エンジンブレーキ相当 */
+const MT_FEEL_FIELDS: Field[] = [
+  { key: 'mtCoast', label: '惰行減速', unit: 'm/s²', note: 'アクセルを離したときの減速度（ブレーキではなく慣性）。ニュートラル（N）でもこの値が使われる', digits: 1 },
+  { key: 'mtEngineBrake', label: 'エンジンブレーキ', unit: 'm/s²', note: '低いギアほど加算される追加の減速度。1速で全量、5速では加算なし（惰行減速のみ）', digits: 1 },
 ]
 
 const MISC_FIELDS: Field[] = [
@@ -151,6 +204,7 @@ const SETTINGS_TABS = [
   { id: 'drive', label: '走行' },
   { id: 'safety', label: '安全' },
   { id: 'camera', label: 'カメラ' },
+  { id: 'sound', label: 'サウンド' },
 ] as const
 type SettingsTab = (typeof SETTINGS_TABS)[number]['id']
 
@@ -162,6 +216,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const resetSettings = useUi((s) => s.resetSettings)
   const saveCurrentAsDefault = useUi((s) => s.saveCurrentAsDefault)
   const pathGuide = useUi((s) => s.pathGuide)
+  const engineSoundOn = useUi((s) => s.engineSoundOn)
   const set = useUi((s) => s.set)
   // estop_active/drive_power_locked と同じく、これは `/ws/control` の status
   // （イベント発生時にしかbroadcastされない）ではなく `/ws/telemetry` 経由で
@@ -216,23 +271,36 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
           <section className="settings-group">
             <h3>制御方式</h3>
             <div className="seg">
-              <button
-                className={settings.torqueMode ? '' : 'on'}
-                onClick={() => setSettings({ torqueMode: false })}
-              >
-                速度制御
-              </button>
-              <button
-                className={settings.torqueMode ? 'on' : ''}
-                onClick={() => setSettings({ torqueMode: true })}
-              >
-                トルク制御
-              </button>
+              {(
+                [
+                  ['speed', '速度制御'],
+                  ['torque', 'トルク制御'],
+                  ['mt', 'MT（擬似変速）'],
+                ] as const
+              ).map(([m, label]) => (
+                <button
+                  key={m}
+                  className={settings.driveMode === m ? 'on' : ''}
+                  onClick={() => setSettings({ driveMode: m })}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </section>
 
-          {settings.torqueMode ? (
+          {settings.driveMode === 'torque' ? (
             <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+          ) : settings.driveMode === 'mt' ? (
+            <>
+              {/* MT は 'speed'/'torque' とパラメータを一切共有しない（2026-08-30）。
+                  `MT_SPEED_FIELDS`（`mtMaxSpeed`/`mtAccel`）は独立したキーで、
+                  減速は `MT_FEEL_FIELDS`（`mtCoast`/`mtEngineBrake`）に一本化した。
+                  逆キーブレーキ・発進キックに相当する項目は無い（MT には無い機能） */}
+              <SettingGroup title="速度制御" fields={MT_SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+              <SettingGroup title="MT 減速フィール（惰行・エンジンブレーキ）" fields={MT_FEEL_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+              <SettingGroup title="MT ギア比（1速〜5速。R-N-1-2-3-4-5、L1/← =シフトダウン、R1/→ =シフトアップ）" fields={MT_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+            </>
           ) : (
             <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
           )}
@@ -415,6 +483,43 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             {CAMERA_FIELDS.map((f) => (
               <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
             ))}
+          </section>
+        </>
+      )}
+
+      {tab === 'sound' && (
+        <>
+          {/* 合成エンジン音（`audio/engineSound.ts`）。**GUI 演出のみで車両側には
+              一切関与しない**——鳴るのはこの画面を開いているブラウザのスピーカーだけ。
+              ON/OFF は毎回明示的な操作が要る非永続の値（`store/ui.ts` の
+              `engineSoundOn` コメント参照）なので、他の設定と違いここだけ `set` で
+              直接読み書きする。音色（`settings.engineSoundType`）は通常どおり永続化 */}
+          <section className="settings-group">
+            <h3>エンジン音</h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={engineSoundOn}
+                onChange={(e) => set({ engineSoundOn: e.target.checked })}
+              />
+              速度・ギアに連動した合成音をこの画面のスピーカーから鳴らす（演出のみ、車両には無関係）
+            </label>
+            <div className="seg">
+              {(
+                [
+                  ['combustion', 'ガソリン車風'],
+                  ['ev', 'EV/ハイブリッド風'],
+                ] as const
+              ).map(([t, label]) => (
+                <button
+                  key={t}
+                  className={settings.engineSoundType === t ? 'on' : ''}
+                  onClick={() => setSettings({ engineSoundType: t })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </section>
         </>
       )}

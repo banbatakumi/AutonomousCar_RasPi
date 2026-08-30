@@ -20,6 +20,16 @@
  * （駐車ブレーキと同じ「かけたら手を離せる」操作感、`useDriving.ts`/`store/ui.ts`
  * 参照）。STM32 は**速度に関わらず即座に**後輪を位置制御へ切り替えて固定するため、
  * 走行中の誤操作を防ぐ目的で、停止中（`vs.stopped`）以外は ON ボタンを無効化する。
+ *
+ * ## D/R レンジ・MT ギア（v0.14〜v0.17）は画面ボタンを廃止した（v0.18）
+ *
+ * ゲームパッド（DUALSHOCK4）の R2/L2 を実車ペダル配置（R2=アクセル、L2=ブレーキ）に
+ * したことで、R2 単体では前進/後退の向きを表せなくなり、その向きを選ぶ手段として
+ * `ui.gear`/`ui.mtGear`（`useDriving.ts` の `gearSign`）を導入した。以前はここに
+ * 画面ボタン（D/R の2択、MT モード中は R,1〜5 の6択）があったが、**v0.18 で廃止し、
+ * 現在ギアの表示は速度メータ中央のバッジ（`SpeedGauge.tsx`）へ移した。** 操作は
+ * パッドの L1（ダウン）/R1（アップ）とキーボードの←（ダウン）/→（アップ）に一本化
+ * している（`useDriving.ts` の `shiftGear()`）——画面からのタップ操作は今は無い。
  */
 import { useNumbers } from '../bus/live'
 import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
