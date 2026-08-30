@@ -105,8 +105,6 @@ export function DriveControls({ ch }: { ch: ControlChannel | null }) {
         <div className="seg">
           <button
             className={ui.sideBrakeRequested ? 'on' : ''}
-            disabled={!ui.sideBrakeRequested && vs != null && !vs.stopped}
-            title={vs != null && !vs.stopped ? '走行中はONにできません（停止してから）' : ''}
             onClick={() => ui.set({ sideBrakeRequested: true })}
           >
             ON

@@ -82,22 +82,23 @@
  * 速度メータ中央のバッジ（`SpeedGauge.tsx`）に表示だけする——操作はパッド/
  * キーボードに一本化し、タッチ操作は今のところ提供していない。
  *
- * 補機（v0.5 で追加、v0.15/v0.16/v0.19 でボタン配置を変更）
+ * 補機（v0.5 で追加、v0.15/v0.16/v0.19/2026-08-30 でボタン配置を変更）
  *
  * | | ブレーキ | クラクション | パッシング | 灯火切替 |
  * |---|---|---|---|---|
  * | キーボード | `Space` | `H` | `P` | `L`（消灯→DAY→NORMAL→…） |
- * | ゲームパッド | L2（力加減のみ、v0.16） | □ | ○（v0.19） | △ |
+ * | ゲームパッド | L2（力加減のみ、v0.16） | □ | 十字キー下（2026-08-30） | 十字キー上（2026-08-30） |
  *
  * **灯火切替以外はすべて「押している間だけ」。** STM32 側の意味論
  * （`horn` / `passing` は立てている間ずっと効く）に素直に対応させてある。
  * GUI 側でタイマーを持つと、DISARM やタブ切替と競合したときに消し忘れが起きる。
  *
- * ⚠ **パッシングのボタンは v0.14: □、v0.15〜v0.18: 十字キー右、v0.19: ○ と
- * 移ってきた。** v0.19 で ○ 専用の E-STOP ボタンを廃止した（上記）ことで空いた
- * ので、十字キーより押しやすい面ボタンへ寄せた。クラクションは v0.15 から
- * 変わらず □。面ボタン（×○△□）は「安全系＋常用トグル」、十字キー（残るのは
- * 左のみ）は「LiDAR ミニマップの拡大表示切替」という役割で整理した。
+ * ⚠ **パッシング・灯火切替のボタンは何度か移ってきた。** パッシングは
+ * v0.14: □、v0.15〜v0.18: 十字キー右、v0.19〜2026-08-30: ○、現在: 十字キー下。
+ * 灯火切替は当初から △ だったが、現在は十字キー上。**2026-08-30 に十字キー
+ * 4方向すべてを「合図・灯火系」（上＝灯火、下＝パッシング、左＝左ウィンカー、
+ * 右＝右ウィンカー）にまとめ**、空いた面ボタンへ ○＝カメラ入れ替え、
+ * △＝サイドブレーキを移した（下記参照）。クラクションは v0.15 から変わらず □。
  *
  * ⚠ **パッドのブレーキ全開（L1、デジタル）は v0.16 で廃止した。** L1 は
  * ギアチェンジ（当時は Dレンジ、2026-08-30 に R レンジへ変更）に譲ったので、
@@ -107,17 +108,34 @@
  *
  * ゲームパッドの右スティック（v0.15 まで未使用）は、ラジコンタブの表示調整に使う。
  * 上下（軸3）で LiDAR ミニマップのズームイン/アウト（`live.lidarMiniZoomM`）、
- * 十字キー左でミニマップの拡大表示切替（`ui.lidarExpanded`、画面でミニマップを
- * クリックするのと同じ）。**R3（右スティック押し込み）は前後カメラの入れ替え**
- * （`ui.mainCam`、`RcView.tsx` の PIP クリックと同じ、v0.16）——レーシングゲームの
- * 「リアビュー確認」に近い操作なのでここに割り当てた（十字キー左は v0.15 まで R3
- * だった LiDAR 拡大表示切替に譲った）。**いずれも ARM の有無に関係なく効く**——
+ * **R3（右スティック押し込み）でミニマップの拡大表示切替**（`ui.lidarExpanded`、
+ * 画面でミニマップをクリックするのと同じ、2026-08-30。v0.15〜2026-08-30 は
+ * 十字キー左だったが、十字キーを合図・灯火系にまとめるため R3 へ移した）。
+ * **○ は前後カメラの入れ替え**（`ui.mainCam`、`RcView.tsx` の PIP クリックと同じ、
+ * v0.16 に新設・2026-08-30 に R3 から移設）——レーシングゲームの「リアビュー確認」
+ * に近い操作なのでここに割り当てた。**いずれも ARM の有無に関係なく効く**——
  * 走行の入力ではなく画面表示の調整なので、灯火切替と同じ扱い。
  *
- * **サイドブレーキ（v0.13）だけは例外でトグル。** `ui.sideBrakeRequested` を
- * `AuxPanel.tsx` の ON/OFF ボタンで切り替え、ここでは毎フレームその値をそのまま
- * 送るだけ（`brake`/`horn` のようにキー・パッドの押下状態からは作らない）。
- * 駐車ブレーキと同じ「かけたら手を離せる」操作感にするため。未 ARM では送らない。
+ * **サイドブレーキ（v0.13）とウィンカー（v0.14）だけは例外でトグル。**
+ * `ui.sideBrakeRequested`/`ui.winkerLeftRequested`/`ui.winkerRightRequested` を
+ * `AuxPanel.tsx` の ON/OFF ボタン、またはゲームパッドの**△（サイドブレーキ、
+ * 2026-08-30、`PAD_SIDE_BRAKE`）・十字キー左/右（ウィンカー、2026-08-30、
+ * `PAD_WINKER_LEFT`/`PAD_WINKER_RIGHT`）**で切り替え、ここでは毎フレームその値を
+ * そのまま送るだけ（`brake`/`horn` のようにキー・パッドの押下状態からは作らない）。
+ * サイドブレーキは駐車ブレーキと同じ「かけたら手を離せる」操作感にするため。
+ * ウィンカーは両方 ON でハザードになる（STM32 側の解釈、`protocol.toml` 参照）ので、
+ * 左右を独立にトグルできる方が実車のハザードスイッチに近い。
+ * サイドブレーキは未 ARM では送らない（切り替え自体は ARM の有無に関係なく効く。
+ * 画面ボタンと同じ）。ウィンカーは灯火系なので未 ARM でも送る（下記参照）。
+ * パッドはいずれも押した瞬間のエッジで反転する。
+ *
+ * ⚠ **サイドブレーキは走行中でも ON にできる（2026-08-30）。** 以前は画面ボタン・
+ * パッドとも「走行中は OFF→ON にできない」制約を課していたが外した。STM32 側は
+ * `side_brake` が立つと速度に関わらず即座に後輪を位置制御へ切り替えて固定する
+ * （`brake` より優先、`protocol.toml` flags2 参照）ので、走行中に踏むとロックして
+ * スピン/スリップし得る——それを承知の上で使う（ハンドブレーキターンのような
+ * 用途を妨げないため）。
+ * キーボードには割り当てていない（専用キーを空けるほどの頻度ではないため）。
  *
  * **灯火・ホーン・パッシングは未 ARM でも効く**（2026-08-11 に変更）。
  * ARM していない間は `mode=DISARM` / `arm=false` / 速度・舵 0 の cmd を送り、
@@ -279,22 +297,28 @@ const DRIVING_KEYS = [
 //
 // v0.15 で日本の SCE 標準（○＝決定/×＝キャンセル）に合わせて再配置した。
 // v0.19: ○ 専用の E-STOP ボタンを廃止し、× の ARM/DISARM トグルに統合した
-// （下記 `tick()` の `padArm` 参照。理由は下のブロックコメント）。空いた ○ は
-// パッシングに割り当てている。面ボタン（×○△□）は「安全系＋常用トグル」、
-// L1/R1 はギアチェンジ専任（v0.16）、十字キーは表示系の切替に役割を分けてある。
+// （下記 `tick()` の `padArm` 参照。理由は下のブロックコメント）。
+// L1/R1 はギアチェンジ専任（v0.16）。
+// **2026-08-30: 十字キー4方向をすべて使う配置に変更**——上＝灯火、下＝パッシング、
+// 左＝左ウィンカー、右＝右ウィンカーと、十字キーだけで「表示・合図系」がまとまる
+// ようにした。空いた R3 に LiDAR 拡大表示、○ にカメラ入れ替え、△ にサイドブレーキを
+// 移し、面ボタン（×○△□）は「安全系＋頻度の低いトグル」、十字キーは「合図・灯火系」
+// という役割分担にした。
 // 標準マッピングでない実機・OS の組み合わせでは番号がズレることがあるので、
 // 繋いだら一度 GUI 上で反応を確認すること
 // （`import.meta.env.DEV` では押されたボタン番号をコンソールに出す。下記参照）。
 /** × — ARM/DISARM トグル（Enter キーと同じ）。armed→unarmed の遷移だけ `ch.estop()`
  * も呼ぶ（v0.19、下記 `tick()` 参照） */
 const PAD_ARM_TOGGLE = 0
-/** ○ — パッシング（v0.14 までは □、v0.15〜v0.18 は十字キー右。v0.19 までは
- * E-STOP 専用ボタンだった。廃止の経緯は上のブロックコメント参照） */
-const PAD_PASSING = 1
+/** ○ — メイン映像の前後カメラ入れ替え（2026-08-30、旧 R3。v0.16〜: R3。
+ * v0.14 までは □、v0.15〜v0.18 は十字キー右、v0.19〜2026-08-30 はパッシングだった） */
+const PAD_CAM_SWAP = 1
 /** □ — クラクション（v0.14 までは ×） */
 const PAD_HORN = 2
-/** △ — 灯火モードを1つ進める（**押した瞬間だけ**） */
-const PAD_LIGHT = 3
+/** △ — サイドブレーキの ON/OFF トグル（2026-08-30、旧十字キー下。旧は灯火）。
+ * `AuxPanel.tsx` の ON/OFF ボタンと同じ制約（走行中は OFF→ON にできない）を課す。
+ * **押した瞬間だけ** 反転する */
+const PAD_SIDE_BRAKE = 3
 /** L1 — Rレンジ（v0.16 まではブレーキのデジタル全開。ブースト廃止で空いた R1 と対にして
  * ギアチェンジに寄せた。パッドのブレーキは L2（アナログ、下記）だけになる）。
  * **2026-08-30: D/R を入れ替えた**（それまでは D レンジだった）。
@@ -304,11 +328,19 @@ const PAD_GEAR_L1 = 4
  * **2026-08-30: D/R を入れ替えた**（それまでは R レンジだった）。
  * **MT モードではシフトアップになる**（`PAD_GEAR_L1` と同じ理由） */
 const PAD_GEAR_R1 = 5
-/** R3（右スティック押し込み） — メイン映像の前後カメラ入れ替え（v0.16）。
- * レーシングゲームの「リアビュー確認」に近い操作なのでここに割り当てた */
-const PAD_CAM_SWAP = 11
-/** 十字キー左 — LiDAR ミニマップの拡大表示切替 */
-const PAD_LIDAR_EXPAND = 14
+/** R3（右スティック押し込み） — LiDAR ミニマップの拡大表示切替（2026-08-30、旧十字キー左。
+ * 旧はカメラ入れ替え。レーシングゲームの「リアビュー確認」役はカメラ側の ○ に譲った） */
+const PAD_LIDAR_EXPAND = 11
+/** 十字キー上 — 灯火モードを1つ進める（2026-08-30、旧△）。**押した瞬間だけ** */
+const PAD_LIGHT = 12
+/** 十字キー下 — パッシング（2026-08-30、旧○） */
+const PAD_PASSING = 13
+/** 十字キー左 — 左ウィンカーの ON/OFF トグル（2026-08-30、旧 LiDAR 拡大表示）。
+ * **押した瞬間だけ** 反転する。右ウィンカーと両方 ON でハザード
+ * （`PAD_WINKER_RIGHT` 参照、STM32 側の解釈は `protocol.toml` flags2） */
+const PAD_WINKER_LEFT = 14
+/** 十字キー右 — 右ウィンカーの ON/OFF トグル（2026-08-30、新規）。**押した瞬間だけ** 反転する */
+const PAD_WINKER_RIGHT = 15
 
 /** 操縦権の再要求はこの間隔まで。rAF ごとに投げると 60発/秒になる */
 const TAKE_CONTROL_MS = 250
@@ -453,6 +485,9 @@ export function useDriving(ch: ControlChannel | null) {
     let padGearR1Was = false
     let padLidarExpandWas = false
     let padCamSwapWas = false
+    let padSideBrakeWas = false
+    let padWinkerLeftWas = false
+    let padWinkerRightWas = false
     /** DEV 診断用（下記の `padPressed` ログ）。ボタンごとの直前の押下状態 */
     const padDebugButtons: Record<string, boolean> = {}
 
@@ -571,7 +606,8 @@ export function useDriving(ch: ControlChannel | null) {
       padGearR1Was = padGearR1
 
       // 右スティック＝ LiDAR ミニマップの操作（v0.15）。走行には関与しないので
-      // ARM の有無に関係なく効く。上下（軸3）でズーム、十字キー左で拡大表示切替
+      // ARM の有無に関係なく効く。上下（軸3）でズーム、R3 で拡大表示切替
+      // （2026-08-30、旧十字キー左）
       const padZoomY = dz(pad?.axes[3] ?? 0, RSTICK_DZ)
       if (padZoomY !== 0) {
         const z = live.lidarMiniZoomM + padZoomY * MINI_ZOOM_RATE_M_S * dt
@@ -581,13 +617,40 @@ export function useDriving(ch: ControlChannel | null) {
       if (padLidarExpand && !padLidarExpandWas) ui.set({ lidarExpanded: !ui.lidarExpanded })
       padLidarExpandWas = padLidarExpand
 
-      // R3＝前後カメラ入れ替え（v0.16）。`RcView.tsx` の PIP クリックと同じ
-      // `ui.mainCam` を更新するだけ。走行には関与しないので ARM の有無に関係なく効く
+      // ○＝前後カメラ入れ替え（2026-08-30、旧 R3。v0.16 に新設）。`RcView.tsx` の
+      // PIP クリックと同じ `ui.mainCam` を更新するだけ。走行には関与しないので
+      // ARM の有無に関係なく効く
       const padCamSwap = padPressed(pad?.buttons[PAD_CAM_SWAP])
       if (padCamSwap && !padCamSwapWas) {
         ui.set({ mainCam: ui.mainCam === 'front' ? 'rear' : 'front' })
       }
       padCamSwapWas = padCamSwap
+
+      // △＝サイドブレーキの ON/OFF トグル（2026-08-30、旧十字キー下）。
+      // **走行中でも ON にできる**（2026-08-30）——`AuxPanel.tsx` の画面ボタンと
+      // 同じく、以前は停止中限定にしていたが、ハンドブレーキターンのような
+      // 走行中の使い方を妨げないよう制約を外した。STM32 側は速度に関わらず
+      // 即座に後輪を位置制御へ切り替えて固定するので（`protocol.toml` flags2）、
+      // 高速走行中に踏むとロックしてスピン/スリップする点は使う側の判断に委ねる
+      const padSideBrake = padPressed(pad?.buttons[PAD_SIDE_BRAKE])
+      if (padSideBrake && !padSideBrakeWas) {
+        ui.set({ sideBrakeRequested: !ui.sideBrakeRequested })
+      }
+      padSideBrakeWas = padSideBrake
+
+      // 十字キー左/右＝ウィンカーの ON/OFF トグル（2026-08-30、新規）。灯火系なので
+      // ARM の有無に関係なく効く（`side_brake` と違い未 ARM でも送る。下記 `cmd()` 参照）。
+      // 両方 ON にすればハザード（STM32 側の解釈、`protocol.toml` flags2 参照）
+      const padWinkerLeft = padPressed(pad?.buttons[PAD_WINKER_LEFT])
+      if (padWinkerLeft && !padWinkerLeftWas) {
+        ui.set({ winkerLeftRequested: !ui.winkerLeftRequested })
+      }
+      padWinkerLeftWas = padWinkerLeft
+      const padWinkerRight = padPressed(pad?.buttons[PAD_WINKER_RIGHT])
+      if (padWinkerRight && !padWinkerRightWas) {
+        ui.set({ winkerRightRequested: !ui.winkerRightRequested })
+      }
+      padWinkerRightWas = padWinkerRight
 
       // ── DEV 診断：どのボタン/軸が実際に反応しているかをコンソールに出す ──
       //
