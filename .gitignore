@@ -25,7 +25,8 @@ surge_mk2/config/cam_model.json
 # 選ばれているE2E LiDARモデル名。auto.json と同じ理由
 surge_mk2/config/e2e_lidar_model.json
 logs/*.jsonl
-*.sfl          # 生フレームログ（大きい・実行ごとに増える）
+# 生フレームログ（大きい・実行ごとに増える）
+*.sfl
 *.mcap
 saved_maps/*.npz
 saved_maps/*.json
