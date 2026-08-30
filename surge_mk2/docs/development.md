@@ -54,7 +54,9 @@
 
 ## 2. 変更 → 反映の対応表（最重要）
 
-**Pi 上では systemd が5つのサービスを持っている。何を直したかで、必要な操作が変わる。**
+**Pi 上では systemd が複数のサービスを持っている**（内訳は
+[`system_overview.md` §6](system_overview.md#6-raspberry-pi-の中身--プロセスとトピック)）。
+何を直したかで、必要な操作が変わる。
 
 | 直したもの | 必要な操作 | E-Stop がラッチするか |
 |---|---|---|
@@ -62,6 +64,7 @@
 | `raspi/nodes/telemetry_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera） | しない |
 | `raspi/nodes/camera_node.py` | 同上 | しない |
 | `raspi/nodes/cam_perception_node.py` | **`--restart` には入っていない**（`surge-planning`と同じ既知の穴）。`ssh surge-mk2 'sudo systemctl restart surge-cam-perception'`。**`surge-cam-perception`は既定で無効**なので、有効化していなければ何もしなくてよい | しない |
+| `raspi/nodes/line_perception_node.py` | **systemd unit がまだ無い**（`install_services.sh` に未登録。§11 の穴）。`line_trace` を実車で試すには `ssh surge-mk2 'cd surge_mk2 && .venv/bin/python -u -m raspi.nodes.line_perception_node'` で手動起動する | しない |
 | **`raspi/auto/` `raspi/nav/` `planning_node.py`** | **`ssh surge-mk2 'sudo systemctl restart surge-planning'`**（★ `--restart` に入っていない。下記） | しない |
 | `config/vehicle.toml` `config/auto.json` | 読んでいるノードを再起動（planning / io）。`vehicle.toml` は**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
 | `raspi/nodes/io_node.py` `raspi/io/` `raspi/msgs/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
@@ -113,7 +116,9 @@ cd ~/GitHub/AutonomousCar_RasPi/surge_mk2
 .venv/bin/python -m sim.bench --course circuit    # planner の数値評価
 
 # ── テスト・生成 ──
-.venv/bin/python -m unittest discover -s raspi/tests -t .
+./tools/check.sh                                  # 生成物一致・文書版番号・pytest・tsc を1コマンドで
+./tools/check.sh --fast                           # 生成物の --check だけ（数秒。コミット前向き）
+.venv/bin/python -m pytest raspi/tests -q         # テストだけ単体で回すとき
 python3 raspi/proto/generate.py                   # protocol.toml を直したら必ず
 
 # ── GUI ──
@@ -280,12 +285,16 @@ ssh surge-mk2 'systemctl is-active surge-io surge-camera surge-telemetry surge-p
 ## 6. テスト
 
 ```bash
-.venv/bin/python -m unittest discover -s raspi/tests -t .        # Mac
+./tools/check.sh                                                  # 生成物一致・文書版番号・pytest・tsc をまとめて
+.venv/bin/python -m pytest raspi/tests -q                        # テストだけ（Mac）
 tools/deploy.sh --test                                           # Pi 上でも回す
 ```
 
-**現状 414 件・約 12.5 秒・全部通る**（skip 1 件は「GPIO の無い環境」＝ Mac だから）。
+**pytest で全部通る**（skip 1 件は「GPIO の無い環境」＝ Mac だから）。
 ハードウェアもシリアルもカメラも要らない（`ipc://` はテンポラリに閉じ込めてある）。
+`raspi/tests/` 自体は標準ライブラリの `unittest.TestCase` で書かれているが、
+CI（`.github/workflows/ci.yml`）と `tools/check.sh` が pytest に統一したので、
+通常はこちらを使う（`python -m unittest discover` でも同じテストは動く）。
 
 | ファイル | 何を守っているか |
 |---|---|
@@ -303,7 +312,8 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | `test_nav.py` | SLAM の精度を**数値で縛る** |
 | `test_timesync.py` `test_camera_format.py` | u32 のアンラップ、画素の並び |
 
-- テストは **`unittest`**（標準ライブラリ）。pytest は要らない
+- テスト本体は **`unittest`**（標準ライブラリ）で書く。実行は **`pytest`**
+  （CI と `tools/check.sh` が使うのに揃えてある。`unittest discover` でも動く）
 - **実時間で回るコード（`io_node` / `framelog` / `shm_ring`）は stdlib だけで書く**方針。
   この制約のおかげで、Mac でも Pi でも同じテストが通る
 - **プロトコルを直したら `generate.py` を回してからテストする**
@@ -574,6 +584,7 @@ UI は `sim/gui.py`（pygame）側に置く。シム ↔ シム GUI の通信も
 | `telemetry_node._serve_log_file` | `.mcap`（実測 87MB の実績）を**全部メモリに載せて**返す |
 | `LinkTracker` | STM32 からの `LOG`(0x04) パケットを**受信数に数えるだけでどこにも出さない** |
 | `logger_node` の記録対象 | `auto/*` を含まないので、**自律走行の判断根拠が `.mcap` に残らない** |
+| `install_services.sh` | `line_perception_node.py` の systemd unit が**まだ無い**（`cam_perception_node` には `--with-cam-perception` がある一方、こちらは登録手段自体が無い）。実車で `line_trace` を試すには手動起動が要る（§2） |
 
 ---
 
@@ -754,7 +765,7 @@ GUI での使い方:
 
 | ディレクトリ | 中身 | 直したら |
 |---|---|---|
-| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception**）。`cam_perception_node`（`surge-cam-perception`）だけは他と違い**既定で無効**（§12.2） | ノードごとに再起動 |
+| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）は既定で無効（§12.2）。`line_perception_node` は**まだ systemd unit が無く**手動起動のみ（§2・§11） | ノードごとに再起動 |
 | `raspi/auto/` | 自動運転アルゴリズム（**バスも WS も知らない純粋な計算**。`e2e_lidar.py`/`follow_the_gap_cam.py` もここ） | surge-planning 再起動 |
 | `raspi/nav/` | SLAM・占有格子・経路（**一旦棚上げ中。消さない**）。`ipm.py`（カメラ逆投影）は `ftg_cam` が使用中 | surge-planning 再起動 |
 | `raspi/proto/` | UART 定義（**STM32 と共有する唯一の定義**） | 再生成 ＋ `--restart-io` |
@@ -762,7 +773,7 @@ GUI での使い方:
 | `raspi/io/` | `SerialLink` / GPIO（**`import serial` はここ1箇所だけ**） | `--restart-io` |
 | `raspi/rec/` | `.sfl` / MCAP の書き出し | io / logger |
 | `raspi/tools/` | 単発の検査・変換ツール | — |
-| `raspi/tests/` | unittest | — |
+| `raspi/tests/` | `unittest.TestCase` で書き、実行は pytest（`tools/check.sh`） | — |
 | `gui/` | React + TypeScript | rsync だけ |
 | `sim/` | Mac 専用シミュレータ（**Pi には運ぶが使わない**）。カメラは持たない | — |
 | `ml_cam/` | カメラセグメンテーションの学習パイプライン（Mac 専用。§12.2） | Pi には無関係 |

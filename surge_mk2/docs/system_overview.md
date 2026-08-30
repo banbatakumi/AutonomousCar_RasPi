@@ -284,6 +284,7 @@ flowchart LR
     IO["io_node<br/>最優先・実時間性重視"]
     CAM["camera_node"]
     CAMPERC["cam_perception_node<br/>ftg_cam用・既定で無効"]
+    LINEPERC["line_perception_node<br/>line_trace用・systemd未整備"]
     PLAN["planning_node<br/>配線だけ。中身は raspi/auto/"]
     TELE["telemetry_node<br/>WS サーバ"]
     LOG["logger_node<br/>MCAP 記録"]
@@ -294,8 +295,10 @@ flowchart LR
     IO --> LOG
     CAM -->|"共有メモリ<br/>image/front, image/rear"| TELE
     CAM -->|"共有メモリ<br/>image/front"| CAMPERC
+    CAM -->|"共有メモリ<br/>image/front"| LINEPERC
     CAM --> LOG
     CAMPERC -->|"scan/cam"| PLAN
+    LINEPERC -->|"line/cam"| PLAN
     PLAN -->|"auto/cmd 50Hz<br/>auto/state 10Hz"| TELE
     TELE -->|"cmd 50Hz（唯一の発行元）"| IO
     TELE -->|"auto/ctrl 5Hz"| PLAN
@@ -313,12 +316,18 @@ flowchart LR
 | `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録（**既定では無効**） | — |
 | `surge-cam-perception` | `raspi.nodes.cam_perception_node` | カメラの走行可否セグメンテーション推論（`ftg_cam` 用）（**既定では無効**） | `ftg_cam` が使えなくなるだけ |
 | `surge-logclean.timer` | — | 毎時、古いログを消す（7日超／合計8GB超） | ディスクが埋まる |
+| （unit 無し） | `raspi.nodes.line_perception_node` | 白線検出（`line_trace` 用）。**`install_services.sh` に登録手段自体が無く、常に手動起動**（development.md §2・§11） | `line_trace` が使えなくなるだけ |
 
 > **`surge-cam-perception` は他の4ノードと違い既定で無効。** `cam_perception_node` は
 > `planning_node` の選択とは無関係にカメラフレームが来るたびCNN推論を回し続ける
 > 独立プロセスなので、常時有効化すると `ftg_cam` を使う気が無くてもCPU・電力を
 > 消費し続ける。有効化の手順は
 > [`development.md` §12.2](development.md#122-カメラセグメンテーション走行ftg_cam)。
+>
+> **`line_perception_node` は既定で無効ですらなく、そもそも systemd unit が無い。**
+> `cam_perception_node` のように `--with-cam-perception` で有効化する経路自体が
+> `install_services.sh` に無いため、実車で `line_trace` を試すには
+> `ssh surge-mk2` して手動でプロセスを起動する必要がある（development.md §2）。
 
 **`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、
 起動していること自体が車を動かす条件にはならない。
@@ -330,6 +339,7 @@ flowchart LR
 | `vehicle_state` | 速度・各輪周速・路面舵角・オドメトリ・IMU・温度・電源2系統・フラグ | 50Hz | io_node | LATEST |
 | `scan` | LiDAR 1周分の点群（360点＋セクタごとの時刻・受信有無） | 10Hz | io_node | LATEST |
 | `scan/cam` | カメラの走行可否セグメンテーションを`scan`と同じ形に変換した擬似点群（`ftg_cam`専用） | 実測待ち | cam_perception_node | LATEST |
+| `line/cam` | カメラで検出した白線の近傍・遠方2点（地面座標、`line_trace`専用） | 実測待ち | line_perception_node | LATEST |
 | `cam/model` | GUIが選んだセグメンテーションモデル名（`models/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
 | `e2e/model` | GUIが選んだE2E LiDARモデル名（`models/e2e_lidar/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
 | `diag/link` | リンク統計（loss / CRC / 往復 / 時刻同期 / **SIM バッジ**） | 10Hz | io_node | LATEST |
@@ -514,14 +524,16 @@ planning_node は `arm` を立てられない。engage の状態は保存され�
 3. 走ってよいか分からないときは `ready=False`。planning_node が制動に読み替える
 4. パラメータは `params` に宣言する（GUI が自動生成する）
 
-### 9.2 実装されているモードは5つ
+### 9.2 実装されているモードは7つ
 
 | id | 名前 | 地図 | 考え方 |
 |---|---|---|---|
 | `ftg` | **Follow the Gap** | 不要 | 点群の中で**最も広く空いた区間**を選び、**その真ん中**を狙う |
 | `ftg_cam` | **Follow the Gap（カメラ）** | 不要 | `ftg`と全く同じロジックを、カメラの走行可否セグメンテーションから作った擬似点群で走らせる |
-| `de` | **Disparity Extender** | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う |
+| `de` | **Disparity Extender**（**本線**） | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う |
+| `dp` | **Disparity Pursuit** | 不要 | `de` の塗り方＋狙点選択と `ftg` の Pure Pursuit 舵角を統合し、狙点のヒステリシス・曲率ベース速度上限・TTC早期停止を追加。**実装済みだがシム・実車とも未検証** |
 | `raceline` | **レーシングライン** | **必要** | SLAM で地図を作り、最小曲率の経路を引いて Pure Pursuit で追う |
+| `line_trace` | **ライントレース（カメラ）** | 不要 | カメラで検出した白線の2点を Pure Pursuit の目標点として追う。障害物回避は一切しない最小構成 |
 | `e2e_lidar` | **E2E LiDAR** | 不要 | 強化学習（PPO）で点群→ステア/速度を**直接回帰**する方策。ギャップ探索のようなアルゴリズムそのものを持たない |
 
 #### `ftg` — 最遠点ではなく「区間の真ん中」を狙う
@@ -550,6 +562,17 @@ planning_node は `arm` を立てられない。engage の状態は保存され�
 **どんな直線でも見通しが 1.5m を超えない**。これが FTG が踏み切れない理由で、
 直しただけで circuit のラップが **62s → 17s** になった。
 
+#### `dp` — `de` と `ftg` の良いところ取り（**未検証。本線は今も `de`**）
+
+「安全マージンの取り方・狙点の選び方」は `de` が優れ、「狙点を舵角へ変換する式」は
+`ftg` の Pure Pursuit（速度比例の前方注視距離）が優れる——という、片方だけでは
+最良にならないねじれを解消するために両方から引き継いだ上で、**狙点のヒステリシス**
+（同着判定を「前回向いていた方位に近い方」に一般化し、通路湾曲時のふらつきを抑える）・
+**曲率ベースの速度上限**（`turn_slow`一律ではなく舵角から曲率を出す）・**TTCによる
+早期停止**の3つを新規に追加した。単体テストは通っているが、**シム・実車での走行
+検証はまだ無い。**GUI・シムでは選べるが、採否は `sim.bench` の数値で決めること
+（development.md §4.3）。
+
 #### `ftg_cam` — カメラでLiDARが見えない低い壁を補う
 
 `ftg`の`plan()`は一切上書きしない。ギャップ探索・安全バブル・速度決定はセンサを
@@ -558,6 +581,18 @@ planning_node は `arm` を立てられない。engage の状態は保存され�
 既存の`OccGrid.raycast()`で`scan`と同じ形の距離配列に変換して`scan/cam`へ流す）
 だけ。**独立プロセス**（`planning_node`の中ではない）で、カメラの実視野
 （hfov≈66°）を超えて`fov_deg`を広げても意味が無いので60°に絞ってある。
+
+#### `line_trace` — 白線をなぞるだけの最小構成（**`install_services.sh` 未整備**）
+
+`line_perception_node.py`（`ftg_cam`とは別の独立プロセス）が前方カメラの
+「明るく無彩色」という単純な色特徴だけで白線を検出し、地面座標の近傍・遠方
+2点を`line/cam`へ流す。`line_trace`はその遠方点（無ければ近傍点）を`ftg`と
+同じ`nav.purepursuit.steer_for_target()`に渡すだけで、学習済みモデルもLiDARも
+使わない。障害物回避は一切しないので、STM32側の超音波`auto_stop`と組み合わせる
+前提。白線を見失う（`seen=False`）と`ready=False`で必ず制動に倒す。
+
+★ **`line_perception_node`は`cam_perception_node`と違い、systemd unit がまだ
+無い。** 実車で試すには手動起動が要る（development.md §2・§11）。
 
 #### `e2e_lidar` — 学習ベースで地図も経路も持たない
 

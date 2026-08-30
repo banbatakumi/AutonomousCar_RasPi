@@ -77,8 +77,6 @@ class LineTrace(Planner):
         self._steer = 0.0
 
     def reset(self) -> None:
-        # **モード切替・disengage のたびに呼ばれる。** 残しておくと、次に engage
-        # した瞬間に前回の舵の続きから動き出す
         self._steer = 0.0
 
     def plan(self, line: LineScan, vs: VehicleState | None,

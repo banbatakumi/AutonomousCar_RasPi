@@ -64,7 +64,7 @@ cd surge_mk2
 `python -m raspi.nodes.planning_node` を別ターミナルで叩くだけでよい。
 
 ```bash
-.venv/bin/python -m sim.run --course slalom     # コース指定（名前だけでよい）
+.venv/bin/python -m sim.run --course fuji       # コース指定（名前だけでよい）
 .venv/bin/python -m sim.run --no-planning       # 自動運転ノード無し
 .venv/bin/python -m sim.run --list              # コース一覧
 .venv/bin/python -m sim.run --no-gui            # 俯瞰ビュー無し
@@ -77,10 +77,10 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 **起動時刻つきで**報告する。実際に4日前の `bus_demo --faults` が動きっぱなしで、
 その偽データが GUI に出ていたことがある。
 
-### 手で3つ起動する場合
+### 手で4つ起動する場合
 
 ```bash
-.venv/bin/python -m raspi.nodes.io_node --sim --course sim/courses/oval.png \
+.venv/bin/python -m raspi.nodes.io_node --sim --course sim/courses/circuit.json \
     --allow-arm --max-speed 3.0 --max-steer 0.524 --no-heartbeat --no-leds
 .venv/bin/python -m raspi.nodes.telemetry_node --no-camera
 .venv/bin/python -m raspi.nodes.planning_node        # 自動運転タブを使うなら
@@ -137,13 +137,14 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 ## わざと鏡像で出している
 
 実機の LD06 は裏向きに実装されていて、`ScanAssembler` が
-`車両角 = (360 − センサ角) % 360` で戻している（`raspi/msgs/convert.py:281-298`）。
+`車両角 = (360 − センサ角) % 360` で戻している（`raspi/msgs/convert.py:298-325`）。
 
 **シミュレータは反転した状態で `LIDAR_SECTOR` を出す。** 素直に車両座標で出すと、
 反転処理が壊れていても画面が正しく見えてしまい、バグを永久に検出できない。
 
-検算用に `courses/room.png` は**左右非対称**にしてある（ブロックが左だけにある）。
-`sim/courses/make_courses.py` の docstring 参照。
+検算には**左右非対称なコース**を使うこと（対称だと反転処理が壊れていても画面が
+正しく見えてしまう）。同梱の `fuji.json` は左右の旋回が混在しヘアピンも含むため、
+そのまま検算に使える。
 
 ## コースを自作する
 
@@ -213,7 +214,7 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 - **中心線そのものが Phase 3 の経路追従の正解データになる**（`course.centerline`）
 - `loop: true` にすると始点と終点のずれを検査して警告する
 
-同梱の `circuit.json`（閉ループ）と `chicane.json`（S字の連続）が例。
+同梱の `circuit.json`（単純な閉ループ）と `fuji.json`（左右混在・ヘアピン入り）が例。
 パレットの選択肢は `sim/editor.py` の `STRAIGHTS` / `RADII` / `ANGLES` を書き換えれば変わる。
 
 ### ② PNG 方式 — 好きな絵を描く
@@ -231,12 +232,11 @@ PNG を描いて、同名の JSON を隣に置く。**白 = 走行可、黒 = �
 }
 ```
 
-同梱の 3 枚は `python -m sim.courses.make_courses` で再生成できる（検証も走る）。
-
 **PNG 方式で一番やりがちな間違いはスタート姿勢が壁に埋まっていること。** 車が一切動かず、
 超音波 2cm → `auto_stop` が効き続けるという分かりにくい症状になる。
-生成器と `create_sim_link()` の両方で検出して警告を出すようにしてある。
-センターライン方式ならこの間違いは起こらない。
+`python -m sim.courses.make_courses` と `create_sim_link()` の両方で検出して警告を出す
+ようにしてあるので、新規コース追加後はこれで確認できる。センターライン方式なら
+この間違いは起こらない。
 
 ### どちらか判別する規則
 
@@ -258,7 +258,7 @@ sim/
 ├── ui.py         画面部品。**地図の描画を gui と editor で共有する**（2箇所に置くとずれる）
 ├── gui.py        pygame の俯瞰ビュー + 走行数値 + 設定ページ（P で開閉）
 ├── editor.py     コースエディタ（区間をクリックでつなぐ）
-├── run.py        3プロセスをまとめて起動するランチャ（**stdlib だけで書く**）
+├── run.py        4プロセスをまとめて起動するランチャ（**stdlib だけで書く**）
 └── courses/      *.png（＋サイドカー json）と *.json（センターライン方式）
 ```
 

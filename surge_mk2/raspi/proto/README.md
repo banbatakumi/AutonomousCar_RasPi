@@ -93,7 +93,7 @@ ser.write(enc.encode(packets.Command(mode=packets.Mode.MANUAL,
 ```
 
 `parser.stats` に `crc_error` / `len_error` / `packet_loss` / `unknown_type` などが溜まる。
-**STM32 側の `STATS` パケットと並べて GUI に出すこと。**
+**GUI では STM32 側の `STATS` パケットと並べて出している**（`DiagGrid`）。
 片方向だけ増えるのか両方向なのかで、原因の切り分けが変わる。
 
 ### 生値と SI 単位

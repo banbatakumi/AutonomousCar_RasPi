@@ -546,7 +546,6 @@ class Slam:
         self.x, self.y, self.yaw = nx, ny, _wrap(nyaw)
 
         # ── ④ 地図更新。**3つの条件を全部満たしたときだけ**（docstring 参照） ──
-        #
         if not lost and self._moved_enough():
             small = truncate(pts, self.cfg.map_range)
             self.grid.integrate(small, self.pose)

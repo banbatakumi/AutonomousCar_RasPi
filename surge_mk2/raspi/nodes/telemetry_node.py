@@ -976,7 +976,7 @@ class TelemetryServer:
         try:
             raw = _json_decode(CAMERA_CONF.read_bytes())
         except Exception:
-            return                         # 無い・壊れている → 既定のまま
+            return
         if isinstance(raw.get("rear_enabled"), bool):
             self._cam_rear_enabled = raw["rear_enabled"]
         if isinstance(raw.get("front_cap_hz"), (int, float)):
@@ -996,7 +996,7 @@ class TelemetryServer:
                 "gui_hz": self.camera_hz,
             }))
         except Exception:
-            pass                           # 保存できなくても走行は続けられるべき
+            pass
 
     # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
     #
@@ -1080,7 +1080,7 @@ class TelemetryServer:
             CAM_MODEL_CONF.parent.mkdir(parents=True, exist_ok=True)
             CAM_MODEL_CONF.write_bytes(_json_encode({"name": self._cam_model}))
         except Exception:
-            pass                           # 保存できなくても走行は続けられるべき
+            pass
 
     # ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
     #
@@ -1145,7 +1145,7 @@ class TelemetryServer:
         try:
             raw = _json_decode(E2E_MODEL_CONF.read_bytes())
         except Exception:
-            return                         # 無い・壊れている → 既定（未選択）のまま
+            return
         name = raw.get("name")
         if isinstance(name, str) and (not name or (E2E_MODELS_DIR / f"{name}.onnx").is_file()):
             self._e2e_model = name
@@ -1155,7 +1155,7 @@ class TelemetryServer:
             E2E_MODEL_CONF.parent.mkdir(parents=True, exist_ok=True)
             E2E_MODEL_CONF.write_bytes(_json_encode({"name": self._e2e_model}))
         except Exception:
-            pass                           # 保存できなくても走行は続けられるべき
+            pass
 
     # ── Wi-Fi（SSID・電波強度） ──
 

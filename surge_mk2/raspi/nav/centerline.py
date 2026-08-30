@@ -238,11 +238,9 @@ def build(grid: OccGrid, traj: np.ndarray, *, step: float = 0.10,
     nrm = normals(xy)
     left, right = measure(grid, xy, nrm, max_width)
     for _ in range(max(0, iters - 1)):
-        # 左右の壁の真ん中へ寄せる。**寄せてから測り直す**ことで法線の傾きも直る。
-        # ★ 1回で動かす量は `_MAX_SHIFT_M` に上限を掛ける——急カーブで法線が
-        # 通路の先まで抜けた1回の暴れが、そのまま1m以上のテレポートに
-        # ならないようにする（上の docstring「ヘアピン・シケインでは穴が
-        # 無くても暴れる」参照）
+        # 左右の壁の真ん中へ寄せてから測り直す（法線の傾きも直る）。1回に動かす
+        # 量は `_MAX_SHIFT_M` で頭打ちにする（急カーブでの暴れ対策。上の docstring
+        # 「ヘアピン・シケインでは穴が無くても暴れる」参照）
         shift = np.clip((left - right) / 2.0, -_MAX_SHIFT_M, _MAX_SHIFT_M)
         xy = xy + nrm * shift[:, None]
         xy = smooth_loop(resample_loop(xy, step), smooth)

@@ -11,7 +11,8 @@
 | [stm32_interface.md](stm32_interface.md) | **STM32 側 実装仕様書**。C 構造体、送受信の実装、安全要件、チェックリスト、立ち上げ手順 | STM32 ファームウェア実装者 |
 | [../sim/README.md](../sim/README.md) | **シミュレータ**（Mac 専用）。実機と同じ制御コードのまま走らせる | 自律走行を書く人 |
 | [../gui/README.md](../gui/README.md) | GUI のコード地図 | GUI を直す人 |
-| [review_2026-08-21.md](review_2026-08-21.md) | **コードレビュー**（2026-08-21）。指摘と修正案を重要度順に。**シロだった箇所の記録**も含む | 品質を上げたい人 / 次にレビューする人 |
+| [progress_archive.md](progress_archive.md) | `PROGRESS.md` から分離した詳細な実験ログ・実測値 | 過去の実測根拠を掘りたい人 |
+| [setup_credentials.md](setup_credentials.md) | Pi の SSH・Wi-Fi 等の設定値（`.gitignore` 対象・機密） | 実機に手で触る人 |
 
 > **`architecture.md` は設計時の文書で、実装が先へ進んでいる箇所がある。**
 > ズレの一覧は [development.md §11](development.md#11-文書と実装のズレ2026-08-16-時点の棚卸し) にまとめてある。

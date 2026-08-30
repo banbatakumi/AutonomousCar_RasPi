@@ -148,7 +148,6 @@ class DisparityExtender(Planner):
         self._steer = 0.0
 
     def reset(self) -> None:
-        # **モード切替・disengage のたびに呼ばれる。**（`base.py` の約束1）
         self._steer = 0.0
 
     # ── 本体 ──
@@ -232,17 +231,8 @@ class DisparityExtender(Planner):
         st.target_steer = self._steer
 
         # ── ⑥ 速度は「**進む方向**の見通し」で決める ──
-        #
-        # ★ **`ext[j_best]` をそのまま使う。扇で測り直さない。**
-        #
-        # 正面 ±`front_deg` の最小値で速度を決めると、**道幅 1.0m の走路では
-        # 側壁を測ってしまう**。中央に居ても壁は 0.5m 横にあるので、±20° の扇は
-        # 1.46m 先で必ず壁に当たり、どんな直線でも見通しが 1.5m 以上にならない。
-        # これが Follow the Gap がミニカーのコースで踏み切れない理由でもある。
-        #
-        # 塗り終わった `ext` は「車体半幅を考慮したうえで、その方向へ何 m
-        # 進めるか」なので、**扇で測り直すのは二重に安全側へ倒すこと**になる。
-        # 正面の余裕（事実）は `stop_dist` の判定で既に使っており、そちらが最後の砦
+        # ★ `ext[j_best]` をそのまま使う。扇で測り直さない
+        #   （理由はモジュール docstring「速度は『狙う方向の ext』そのままで決める」参照）
         lookahead = ext[j_best]
         slow_d = max(p["slow_dist"], stop_d + 0.01)
         v_max = p["max_speed"]

@@ -2,12 +2,13 @@
 
 React + TypeScript + Vite。`docs/architecture.md` §10 の設計に沿う。
 
-タブは4枚。**同じテレメトリを見ているが、出す物の選び方が違う。**
+タブは5枚。**同じテレメトリを見ているが、出す物の選び方が違う。**
 
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
 | **ラジコン**（既定） | 運転する人 | 速度・G・舵角をメータで。介入は数値ではなくランプ。設定は ⚙ ドロワー |
-| **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。Phase 3 で経路・地図が入る |
+| **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。経路・占有格子の重畳は Phase 3 以降 |
+| **地図生成** | 世界座標で見る人 | 自車位置・地図生成の確定操作を大きなキャンバスで（低頻度。`MapCanvas`） |
 | **診断** | 原因を追う人 | 現在値の全項目 + 時系列グラフ（uPlot・直近180秒） |
 | **ログ** | 後で見る人 | `.sfl` 記録と mcap ライブ中継 |
 
@@ -41,8 +42,8 @@ cd gui && npm install && npm run dev      # http://localhost:5173
 LiDAR にはノイズ・欠損・遅延が入り、コース上の壁が点群として見える。
 
 ```bash
-.venv/bin/python -m sim.run                  # 3つまとめて起動。Ctrl-C で全部落ちる
-.venv/bin/python -m sim.run --course slalom  # コース指定
+.venv/bin/python -m sim.run                  # 4つまとめて起動。Ctrl-C で全部落ちる
+.venv/bin/python -m sim.run --course fuji    # コース指定
 ```
 
 **この GUI にはシミュレータ用の操作を一切足していない。** 出るのは
@@ -81,8 +82,7 @@ SURGE_HOST=surge.local npm run dev     # /ws だけ Pi に中継される
 `dist/` は `.gitignore` 済み。**Pi に node は要らない**。Mac でビルドして rsync する。
 
 ```bash
-npm run build            # -> gui/dist
-# 既存の rsync（PROGRESS.md）でそのまま Pi に載る
+tools/deploy.sh          # GUI をビルドして rsync（既定）。Python だけなら --no-gui
 ```
 
 ## 操作
@@ -110,8 +110,9 @@ src/
 ├── input/useDriving.ts ゲームパッド + キーボード → 20Hz の cmd
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas
-├── views/             RcView / AutoView / DiagView / LogView（＝タブ4枚）
-├── components/        StatusBar(層B) / DriveBar(層B) / DiagStrip(層C) / DiagGrid / DiagCharts
+├── render/MapCanvas   世界座標のキャンバス（地図生成タブ・低頻度）
+├── views/             RcView / AutoView / MapView / DiagView / LogView（＝タブ5枚）
+├── components/        StatusBar(層B) / DriveBar(層B) / DiagGrid / DiagCharts
 ├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps）
 ├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）
 ├── store/ui.ts        イベント駆動の状態だけ（zustand）

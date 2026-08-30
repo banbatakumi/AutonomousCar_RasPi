@@ -164,8 +164,6 @@ class E2ELidar(Planner):
         return True
 
     def reset(self) -> None:
-        # **モード切替・disengage のたびに呼ばれる。** 残しておくと、次に engage
-        # した瞬間に前回の舵の続きから動き出す（`de`/`ftg`と同じ約束）
         self._steer = 0.0
 
     def plan(self, scan: Scan, vs: VehicleState | None,
@@ -219,9 +217,7 @@ class E2ELidar(Planner):
         max_steer, max_speed = self.vehicle.max_steer, p["max_speed"]
         target = max(-max_steer, min(max_steer, steer))
 
-        # ★舵の平滑化（時間ベースの1次遅れ、フレームレートに依存しない）。
-        # `de`/`ftg`と同じ`steer_tau`の仕組み（2026-08-29追加）。無いと、LiDARスキャンの
-        # フレーム間の微小な揺らぎがそのままステア出力の揺らぎになっていた
+        # ★舵の平滑化（時間ベースの1次遅れ）。詳細は `steer_tau` の note 参照
         # （バンビが実車で「舵角の決定が少し不安定」と気づいたのがきっかけ）
         tau = p["steer_tau"]
         alpha = 1.0 if tau <= 1e-3 or dt <= 0 else 1.0 - math.exp(-dt / tau)

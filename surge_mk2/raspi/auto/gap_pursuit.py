@@ -141,7 +141,6 @@ class DisparityPursuit(Planner):
         self._prev_front: float | None = None  # ③TTC: 前フレームの正面余裕
 
     def reset(self) -> None:
-        # **モード切替・disengage のたびに呼ばれる。**（`base.py` の約束1）
         self._steer = 0.0
         self._heading_deg = 0.0
         self._prev_front = None

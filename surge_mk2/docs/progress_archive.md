@@ -3562,3 +3562,1515 @@ planning_node は `auto/cmd` に出すだけで E-Stop に無関係なので、
 
 - ローカルテスト **414 件・12.5 秒・OK（skip 1 = GPIO の無い環境）**
 - 実機には未反映（文書だけなので `tools/deploy.sh` で運べば足りる）
+
+---
+
+## 2026-08-30 追記：PROGRESS.md 再圧縮分（2026-08-21〜2026-08-28）
+
+`PROGRESS.md` が2026-08-17の分割後も1406行まで再肥大化したため、2026-08-21〜2026-08-28の
+詳細ログをここへ移動した。**情報は削除しておらず、そのまま転記したもの。**
+上とは逆に、以下は`PROGRESS.md`にあった時と同じ**逆時系列（新しい方が先）**で並んでいる
+（この節より上のアーカイブ本体は分割前の`PROGRESS.md`をそのまま保存した順＝正時系列）。
+2026-08-14の「SLAM を一旦棚上げ」方針ブロックは現在地判断に直結するため`PROGRESS.md`側に
+残してあり、ここには重複させていない。
+
+## ★ 2026-08-28（続き9）：TensorBoardログが積み上がるバグを修正・run一覧の`max_steer`表示を削除
+
+バンビから「TensorBoardにPPO_1〜PPO_4まである。同じv1という名前に上書きしている
+つもりなのに、うまく上書きできていない箇所がある？」と報告。
+
+**原因**: SB3は`tensorboard_log`を指定すると、`reset_num_timesteps=True`
+（＝`--resume-from`無しの新規学習）で`.learn()`を呼ぶたびに、既存の
+`{アルゴリズム名}_{N}`サブフォルダを数えて`+1`した新しいフォルダ
+（`PPO_1`→`PPO_2`→…）を作る仕様になっている。`best_model.zip`・`last_model.zip`・
+`run_config.json`・`evaluations.npz`は単一ファイルへの書き込みなので毎回正しく
+上書きされていたが、**`tb/`ディレクトリだけは`--out`（run名）を使い回すたびに
+古い学習曲線がゴミとして積み上がっていた**——GUIの「上書きして新規」を選んでも
+`tb/`だけは上書きされていなかった、という不整合。
+
+**修正**: `train_rl.py`の`main()`で、`--resume-from`が無い（＝新規学習）場合は
+`--out`が既存でも`shutil.rmtree()`で一度空にしてから作り直すようにした
+（`--resume-from`がある場合は当然クリアしない——再開先の`best_model.zip`自体を
+消してしまうため）。これで「run名を使い回す＝本当に上書きする」という約束が
+`tb/`にも及ぶようになった。
+
+**ついでに対応**: run一覧の`max_steer`表示（listbox行・詳細ラベル）も削除した
+（`続き7`で最大舵角は学習ごとに変わらなくなったのに、表示だけ残っていてバンビに
+指摘された）。`run_config.json`自体には引き続き記録する（表示しないだけ）。
+
+**テスト**: `ml_lidar/tests/test_train_rl.py`に`TestTrainRlOverwriteClearsOutDir`
+（新規学習を同じ`--out`で2回実行してもTensorBoardのサブフォルダが1個のままである
+ことを確認）を追加。既存の再開テストにも「再開は同じサブフォルダを使い続け、
+新しいフォルダを増やさない」検証を追加。実際にサブプロセスで2回連続学習させて
+確認済み。`ml_lidar/tests/test_app.py`の`format_run_row`テストも
+`max_steer`を表示しないことを確認するテストに更新。全green（このファイルは
+実PPO学習を複数回走らせるため1回の実行に80秒程度かかる）。
+
+---
+
+## ★ 2026-08-28（続き8）：学習の再開機能・停止確認・観戦の窓数選択をGUIに追加
+
+`ml_lidar/app.py`を実際に使ってみたバンビからのフィードバック3件に対応した。
+
+1. **「観戦を開始」が押せない**——`best_model.zip`が無いと押せない仕様通り
+   （評価が1回でも走れば現れる）だが、run一覧タブが自動更新されないので
+   気づきにくかった。仕様自体は正しいので変更なし（「更新」ボタンを押す運用）
+2. **観戦の窓数をGUIから選べるようにしてほしい** — run一覧タブの「観戦を開始」
+   ボタン横にスピンボックス（1〜16、既定6）を追加。`build_watch_cmd()`の
+   `panels`引数にそのまま渡す
+3. **学習を「選択を停止」で誤って止めてしまいそう。再開もできるようにしたい** —
+   2点を実装:
+   - `train_rl.py`に`--resume-from <checkpoint.zip>`を追加。`PPO.load(path, env=vec_env,
+     ...)`で読み込み、`model.learn(..., reset_num_timesteps=False)`で
+     `num_timesteps`を引き継いで続きから学習する。**`--timesteps`は累計の目標値**
+     （再開後にNステップ追加したいなら「読み込み時点のnum_timesteps + N」を指定）。
+     手動でサブプロセスとして動作確認済み（200→2200stepsで正しく再開・継続を確認）
+   - `ml_lidar/app.py`の`_start_train()`: 既存run名を選ぶと
+     「続きから再開／上書きして新規／キャンセル」の3択（`askyesnocancel`を流用）。
+     再開時は`run_dir/best_model.zip`が無ければエラーで止める
+   - `_stop_selected_job()`: `job_key == "train"`のときだけ停止前に確認ダイアログを
+     出す（TensorBoard・観戦・エクスポートは実害が小さいので確認しない）
+
+**テスト**: `ml_lidar/tests/test_train_rl.py`（新規、サブプロセス経由のCLI統合テスト
+2件。実際に短時間PPO学習→再開の一連を検証。1回あたり数秒〜十数秒かかるため
+既存の軽量テスト群とは別ファイル）。`ml_lidar/tests/test_app.py`にも
+`build_train_cmd`の`resume_from`引数のテストを追加。`ml_lidar/tests`全ファイルgreen。
+
+`docs/development.md` §12.1にも再開機能・停止確認・観戦窓数について追記済み。
+
+---
+
+## ★ 2026-08-28（続き7）：E2E LiDAR訓練パイプラインからも`max_steer`を完全排除
+
+「続き6」で自動運転plannerのGUI ParamSpecから`max_steer`を消したのに続けて、
+バンビの指示「学習する時も最大舵角はtoml参照にして、他の最大舵角設定を消して」を
+受け、**訓練・エクスポート・観戦の各スクリプトが独立して持っていた`max_steer`引数を
+全部廃止**した。訓練時に使う最大舵角も常に`config/vehicle.toml`（`VehicleSpec.load()`）
+から決まる。
+
+**変更したファイル**:
+- `sim/gym_env.py`（`SimE2EEnv`）: コンストラクタの`max_steer`引数を削除。
+  `step()`のクランプは`self.spec.max_steer`を使う（`spec`は既に持っていた
+  `VehicleSpec.load()`）。別の値でテストしたいときは`spec=VehicleSpec(max_steer=...)`
+  を渡す
+- `ml_lidar/env.py`（`GymSurgeEnv`）: 同様に`max_steer`引数を削除。
+  `self._max_steer = self._env.spec.max_steer`で内部的に導出
+- `ml_lidar/train_rl.py`: `--max-steer`CLI引数を削除。`run_config.json`には
+  引き続き`max_steer`を書く（**入力ではなく、その学習で実際に使われた値の記録**
+  ——`VehicleSpec.load().max_steer`から取る）
+- `ml_lidar/export_onnx_rl.py`: `--max-steer`CLI引数を削除。常に
+  `VehicleSpec.load().max_steer`を使う。`--max-speed`は引き続き`run_config.json`
+  フォールバック付きの任意引数のまま（速度は物理限界が無い純粋な訓練ハイパラなので
+  据え置き）
+- `ml_lidar/watch.py`: `--max-steer`CLI引数と`Panel`の`max_steer`引数を削除
+- `ml_lidar/app.py`: 学習タブから`max_steer`入力欄を削除し、
+  「vehicle.tomlを常に使うのでここでは設定しない」旨のラベルに置き換え。
+  `build_train_cmd()`の`max_steer`引数も削除
+
+**★エクスポートされたモデルの`.json`の`max_steer`は消していない（意図的）**:
+`raspi/auto/e2e_lidar.py`の`self._model_max_steer`（モデル`.json`由来、
+ステア出力を物理単位へ戻す換算に使う）は今回も維持した。訓練時のmax_steerは
+常にvehicle.tomlと一致するようになったが、**将来vehicle.tomlの値を変更した後に
+古いモデルを推論する**ケースでは、そのモデルが学習された時点のmax_steerで
+デコードしないと出力が誤って解釈される。これは「重複した設定」ではなく
+学習時点のスナップショット（provenance）なので、あえて残した。
+
+**テスト**: `ml_lidar/tests`全ファイル修正（`test_env.py`は`max_steer=`の代わりに
+`spec=VehicleSpec(max_steer=...)`を使うよう変更、`test_app.py`の
+`test_train_cmd`は`--max-steer`が渡らないことを確認）。`ml_lidar/tests`全green・
+`raspi/tests`526件も無関係のまま全green（2026-08-28時点）。
+
+`docs/development.md` §12.1も実際のCLI仕様に合わせて更新済み。
+
+---
+
+## ★ 2026-08-28（続き6）：自動運転plannerの`max_steer`ParamSpecを全廃
+
+バンビの指示：「最大舵角は自動運転からは全て調整不要にして`config/vehicle.toml`を
+直接参照するようにしたい。ラジコンモードだけは操作に関わるので調整可能なまま残す」。
+
+**対象**（GUI設定パネルの`max_steer`スライダを削除し、`p["max_steer"]`の代わりに
+`self.vehicle.max_steer`——`raspi/core/vehicle.py`の`Vehicle.load()`が
+`config/vehicle.toml`から読む車両物理限界——を直接参照するよう変更）:
+`follow_the_gap.py`(`ftg`)・`gap_pursuit.py`(`dp`)・`raceline.py`・`line_trace.py`
+（既に`self.vehicle`を持っていたのでその場で差し替え）・`disparity_extender.py`(`de`)・
+`e2e_lidar.py`（この2つは`Vehicle`未importだったので`from ..core.vehicle import Vehicle`
+と`self.vehicle = Vehicle.load()`を新規に追加）。`follow_the_gap_cam.py`(`ftg_cam`)は
+`FollowTheGap`を継承しているだけなので無改修で追随。
+
+**e2e_lidarの注意点**: モデル付属`.json`の`max_steer`（`self._model_max_steer`、学習時の
+ステア出力レンジ）とGUIの`max_steer`ParamSpecは別物だった。今回削除したのは後者のみ。
+`steer = steer_norm * self._model_max_steer`（モデル固有のレンジへの変換）はそのまま残し、
+その後の最終クランプだけ`p["max_steer"]`→`self.vehicle.max_steer`に変更した。
+
+**対象外（意図的に変更していない）**: RCモードの最大舵角（`gui/src/store/ui.ts`の
+`DrivingSettings.maxSteer`・`PI_MAX_STEER_CAP`・`raspi/nodes/io_node.py`の
+`--max-steer`）はGUIから調整可能なまま。これらは自動運転のParamSpecとは完全に別系統
+（`PI_MAX_STEER_CAP`自体も同じ`vehicle.toml`由来だが、RC操作の絶対上限としてすでに
+車両限界を参照する設計になっている）。
+
+**テスト**: `raspi/tests/test_auto.py`の2件が影響を受けたので修正した——
+`test_params_are_clamped_to_the_declared_range`（`max_steer`のクランプ検証を削除、
+`max_speed`のみ検証）・`test_output_is_clamped_to_param_limits`
+（→`test_output_is_clamped_to_vehicle_max_steer`に改名。モデル付属`.json`の
+`max_steer`を車両限界より大きく設定し、「モデル側ではなく車両限界でクランプされている」
+ことを区別して確認するテストに作り直した）。`raspi/tests`526件、全green
+（2026-08-28時点、3回連続実行で確認）。
+
+**★ついでに見つけた既存の問題（未修正・別件）**: `raspi/tests`をフルセットで回すと、
+`test_cam_perception_node.TestRunModelSwitchIntegration
+.test_selecting_a_model_via_cam_model_topic_starts_inference`が**たまに**失敗する
+（`hb/cam_perception` != `scan/cam`、フレーキー・実行順依存）。`git stash`で今回の
+変更を退避させても再現したので**今回の変更とは無関係の既存不具合**。`telemetry_node.py`
+の`AttributeError: 'TelemetryServer' object has no attribute 'token'`も同じ実行中に
+見えた（別スレッドの例外ログで、そのテスト自体は失敗扱いにならず）。原因未調査、
+次にこのあたりを触るセッションで拾うこと。
+
+---
+
+## ★ 2026-08-28（続き5）：`ml_lidar/app.py`——LiDAR E2E学習パネル（Tkinter GUI）を新規追加
+
+バンビの要望「学習・観戦(`watch.py`)・エクスポートをGUIから操作したい。run名を
+学習前に決めて学習出力先とモデル名を統一したい」を受けて、`ml/app.py`（カメラの
+学習パイプライン操作パネル）と対称の薄いTkinter GUIを追加した。
+
+**設計の核**: `ml/app.py`は「抽出→アノテーション→学習→エクスポート」が常に1つずつ
+直列に進む前提だったが、LiDAR E2Eは**学習(数時間)の裏でTensorBoard・観戦・
+（別runの）エクスポートを並行して動かしたい**という要件があったため、`self.proc`
+1個ではなく`self._active: dict[job_key, Popen|None]`でジョブを複数追跡する設計に
+変えた（`ml/app.py`から見た主な差分）。
+
+**run名の統一**: `train_rl.py --out`（学習出力先）と`export_onnx_rl.py --out`
+（エクスポート先）を別々に考えるのが混乱の元だったので、1つの「run名」を学習前に
+決めると`ml_lidar/runs/<run名>`が学習出力先、`models/e2e_lidar/<run名>.onnx`が
+エクスポート先の初期値になるようにした。`v1`・`v2`…の続きを自動提案する
+（`next_run_name()`）。既存run名で学習開始すると上書き確認が出る
+（`train_rl.py`は常に新規学習で、続きから学習する機能が無いことを正直に警告する）。
+
+**エクスポートの`--max-speed`/`--max-steer`は渡さない**——「続き4」で実装した
+`run_config.json`の自動読み込みにそのまま乗る設計。
+
+**テスト**: `ml_lidar/tests/test_app.py`（新規20件、ウィジェット構築のスモークテスト
+含む）。全green、既存`ml_lidar/tests`・`ml/tests/test_app.py`とも影響なし。
+
+`ml_lidar/start_app.command`（ダブルクリック起動）・`docs/development.md` §12.1にも
+使い方を追記済み。
+
+---
+
+## ★ 2026-08-28（続き4）：`--max-speed`/`--max-steer`を記録し、エクスポート時の指定を省略可能に
+
+`export_onnx_rl.py`の`--max-speed`/`--max-steer`は`train_rl.py`に渡した値と一致させる
+必要があるが、`train_rl.py`側はその値をどこにも記録していなかった。バンビとのやり取りで
+「渡した値っていつ渡した値？」と聞かれて気づいた（デフォルト同士がたまたま一致していて
+気づきにくかった）。
+
+**変更**: `train_rl.py`が学習開始時に`--out`直下へ`run_config.json`
+（`max_speed`・`max_steer`・`max_steps`・`timesteps`・`n_envs`・`seed`）を書くように
+した。`export_onnx_rl.py`の`--max-speed`/`--max-steer`は`required`をやめて省略可能にし、
+省略時は`--model`と同じディレクトリの`run_config.json`から自動で読む
+（`load_run_config_defaults()`）。どちらの値も見つからなければ明示的なエラーで止まる
+（黙って間違った値を使わない）。実際に使った値の出所（指定値/`run_config.json`）は
+実行時に標準出力へ表示する。
+
+**How to apply:** これより前に学習した`first_model`等には`run_config.json`が無いので、
+その場合は引き続き`--max-speed`/`--max-steer`を手で指定すること（`first_model`は
+デフォルト値のまま学習したので1.5・0.45）。**今後の学習からは自動で記録される**ので、
+基本的には`export_onnx_rl.py`実行時に指定不要。テストは
+`ml_lidar/tests/test_export_onnx_rl.py::TestLoadRunConfigDefaults`（新規3件）。
+`ml_lidar/tests`全ファイルgreen。
+
+---
+
+## ★ 2026-08-28（続き3）：シム車両モデルに横方向グリップ限界を追加
+
+道幅ドメインランダム化・報酬見直し（下記「続き2」）をした上で、バンビから
+「シミュレーションにグリップ限界を追加したい。車両重量とタイヤの摩擦係数の推定値
+から設計できるか」と要望があった。
+
+**設計**: `sim/vehicle.py`の自転車運動学モデルは舵角だけでヨーレートが決まり
+（`yaw_rate = v/L*tan(steer)`）、**速度に関わらず同じ半径で曲がれてしまう**ため、
+「速すぎるとコーナーを曲がりきれない」という物理的必然性が無かった（これが
+「続き2」で報酬を直しても改善が限定的になりうる根本原因として指摘していた点）。
+対策として、要求される向心加速度`v^2*tan(steer)/L`が`mu*g`（`mu`=タイヤの摩擦係数、
+`g`=重力加速度）を超えたら、達成できる曲率を頭打ちにする（アンダーステアで外に
+膨らむ）簡易グリップ限界を追加した。
+
+**★車両質量は登場しない（バンビの質問への回答）**: `F_lat_max = mu*m*g`を運動方程式
+`a = F/m`に代入すると質量`m`が消え、`a_lat_max = mu*g`だけが残る。これは急ブレーキの
+制動距離が車重に依存しないのと同じ理屈。なので今回の実装は`config/vehicle.toml`の
+`[dynamics].mu`（新規、既定`0.8`・★未実測の仮値。タイヤ材質不明のためゴム系タイヤ+
+屋内床を想定した推定値）だけを使う。車両質量`mass`は既存の縦方向（加減速・制動トルク）
+の計算では使われ続けているが、グリップ限界には無関係
+
+**実装箇所**: `sim/vehicle.py`の`VehicleModel.step()`で
+`requested_curvature = tan(steer_actual)/L`を`max_curvature = mu*g/speed^2`で
+クランプしてから`yaw_rate = speed * curvature`を計算する（低速ほど`max_curvature`が
+大きくなり実質無制限＝駐車時等の小回りには影響しない）。`VehicleSpec`に`mu`フィールドを
+追加、`config/vehicle.toml`の`[dynamics]`に`mu = 0.8`を追加。
+
+**テスト**: `ml_lidar/tests/test_vehicle_grip.py`（新規、5件）。低速では従来通りの
+運動学計算と一致すること・高速+最大舵角ではアンダーステアしてヨーレートが頭打ちに
+なること・どんな条件でも`accel_lateral`が`mu*g`を超えないこと、を確認。
+`raspi/tests`526件・`ml_lidar/tests`（他ファイル含む）とも全green（2026-08-28時点）。
+
+**How to apply:** `train_rl.py`のコード変更は不要——再学習すれば効く。`mu=0.8`は
+実測値ではないので、実車でタイヤが滑り出す速度・半径を計測できたら
+`mu = v^2/(r*g)`で逆算して`config/vehicle.toml`を更新すること（コメントに手順を
+記載済み）。今回はタイヤの横滑り自体（スリップ角・非線形特性）や、制動時との
+複合限界（friction circle）までは実装していない——「頭打ちにするだけ」の
+最小限のモデルなので、効果が薄ければそちらの拡張も検討する。
+
+---
+
+## ★ 2026-08-28（続き2）：E2E LiDARの報酬を道幅の余白付きに変更（レーシングライン阻害の解消）
+
+`first_model`（最初のPPO学習）で無衝突走行までは到達したが、**アウトインアウトの
+ライン取りやコーナー前の減速がまだ出ない**とバンビから報告があった。原因を切り分けた
+ところ2つ判明した:
+
+1. **報酬の`cross_track`ペナルティが常に中心線への張り付きを要求していた**
+   （`sim/gym_env.py`の`reward = progress_weight*progress - cross_track_weight*abs(cross_track)`）。
+   レーシングラインはコーナーで意図的に中心線から外れる技術なので、この設計では
+   **構造的に損**になっていた
+2. `sim/vehicle.py`の車両モデルにはタイヤの横滑り・グリップ限界が無い（自転車運動学
+   モデルのみ）ため、同じ舵角なら速度に関わらず同じ半径で曲がれてしまう。つまり
+   「速すぎるとコーナーを曲がりきれない」という**物理的な必然性が弱い**（唯一の
+   間接的な理由はステア操舵の`dead_time_s`+`tau_steer_s`の遅れ）。これは今回は
+   手を付けず、まず報酬側の改善で様子を見る方針
+
+**変更**: `SimE2EEnv`に`cross_track_margin_frac`（既定`0.5`）を追加。道幅の半分の
+うち、この割合ぶんはペナルティ無しで自由に使える「余白」とし、そこを超えた分だけ
+`cross_track_weight`で罰する（`sim/gym_env.py`の`step()`）。壁への接近（衝突）は
+従来通り`collision_penalty`で別途罰しているので、この変更は「壁にぶつからなければ
+コース内のどこを通ってもよい」という自由度を与えるだけ。テストは
+`ml_lidar/tests/test_env.py::test_cross_track_margin_frees_deviation_within_margin`
+で、同じ行動列でも`margin_frac=1.0`の方が`=0.0`より合計報酬が高くなることを確認。
+
+**How to apply**: `train_rl.py`は`SimE2EEnv`の既定値をそのまま使うのでコード変更は
+不要——**再学習すれば新しい報酬が効く**。`progress_weight`（進捗＝弧長方向の移動量、
+速度の代理指標として機能している）はそのまま変えていない。改善が薄ければ次は
+`progress_weight`を上げて速度への圧力を強める、それでも足りなければ車両モデルに
+簡易的な横方向グリップ限界を足す、の順で検討する（上記2番目の物理的な弱さの話）。
+
+---
+
+## ★ 2026-08-28（続き）：`ml/export_onnx.py` の `external_data` バグ修正／`cam_perception_node` を systemd 化
+
+`docs/development.md`・`docs/system_overview.md` に `e2e_lidar`／`ftg_cam` の運用手順を
+書き足した過程で見つかった2件。
+
+### `ml/export_onnx.py` に `ml_lidar/export_onnx_rl.py` と同じ罠が実在した
+
+`ml_lidar/export_onnx_rl.py`（2026-08-28 に追加）は `torch.onnx.export()` に
+`external_data=False` を明示している。既定(`True`)だと重みが `<out_path>.data` という
+別ファイルに切り出され、**`.onnx` 単体をコピー/配置すると壊れる**罠を実際に踏んで
+判明したもので、そのときのコメントに「`ml/export_onnx.py`（カメラパイプライン、
+既存コード）も同じ呼び出しパターンで `external_data` を指定していないので、同じ問題を
+抱えている可能性がある（未検証）」と書き残していた。
+
+**検証したところ実在した**: `ml/export_onnx.py` で書き出した `.onnx` を、同じ書き出し先
+ディレクトリから別ディレクトリへコピーして読み直すと
+`External data path does not exist: ".../model.onnx.data"` で `onnxruntime` の
+`InferenceSession` 初期化が失敗する（`models/` への配置運用＝`.onnx` 単体をコピーする、
+と全く同じ操作）。`ml/tests/test_export_onnx.py` の既存テストは書き出したその場の
+ディレクトリで読み直すだけだったため、`.data` が隣にあって気づかず通っていた。
+
+**修正**: `ml/export_onnx.py` の `torch.onnx.export()` に `external_data=False` を追加。
+再発防止に、書き出した `.onnx` を別ディレクトリへコピーしてから単体で読み込む回帰テスト
+（`test_onnx_file_loads_alone_without_its_export_directory`）を `ml/tests/test_export_onnx.py`
+と `ml_lidar/tests/test_export_onnx_rl.py`（元々バグが無かった側にも、将来の回帰に備えて）
+の両方に追加。**修正前の状態に戻して実際にテストが落ちることを確認済み**（`External data
+path does not exist` を再現）。
+
+### `cam_perception_node` を systemd 化した（ただし既定は無効）
+
+これまで `ftg_cam` を使うには実車で手動 SSH してプロセスを起動する必要があったが、
+`raspi/setup/install_services.sh` に `surge-cam-perception` unit を追加し、
+`--with-cam-perception` フラグ（`--with-logger` と同じパターン）で有効化できるようにした。
+
+**既定では無効のまま**（`UNITS` に入れず、unit は常に書くが `enable --now` しない）。
+理由: `cam_perception_node` は `planning_node` がどのモードを選んでいるかを一切知らない
+独立プロセスで、前方カメラのフレームが来る限り `ftg_cam` を使う気が無くても CNN 推論を
+回し続ける。他の常時起動ノード（`surge-planning` 含む）と違い「起動しているだけなら
+ほぼコスト0」ではないため、`surge-logger`（SD書き込み量が理由）と同じ「既定オフ・
+フラグで有効化」の形にした。
+
+**How to apply**: `ftg_cam` を実車で試すには
+`ssh surge-mk2 'sudo systemctl start surge-cam-perception'`
+（または `install_services.sh --with-cam-perception` で恒久化）が必要になった。
+手順は `docs/development.md` §12.2 に反映済み。`raspi/nodes/cam_perception_node.py`
+の argparse には `--quiet` が無いため、unit の `ExecStart` に `--quiet` を渡すと
+即エラー終了で再起動ループになる点に注意（他ノードとの write_unit 呼び出しをコピペ
+するときに踏みやすい）。
+
+---
+
+## ★ 2026-08-28：`steer_actual` −24°張り付き問題が解決（STM32側で判明）
+
+長らく「未解決・要相談」に残っていた `steer_actual` が指令 0° でも定常オフセット
+（−24.0°、過去記録では +22.4°）を持つ問題は、**STM32側の原因判明により解決した**。
+
+**原因**: STM32 はステアモータの中央位置にオフセットをかけて較正しているが、
+**駆動電源を切った状態ではステアモータから送られてくる角度に、そのオフセット分
+（27°程度）がそのまま定常誤差として乗っていた**（駆動電源ON時は正しく較正済みの
+値が出る）。原点ずれでも Pi/STM32 間の符号規約の食い違いでもなく、STM32側の
+較正適用がドライブ電源状態に依存していたのが正体だった。
+
+**How to apply**: この節を書いた時点で Pi 側リポジトリのコード変更は無い（原因が
+STM32 側にあったため）。今後 `steer_actual` の定常オフセットが再発したら、
+「駆動電源が入っているか」をまず確認すること。Phase 1 のアクチュエータ遅延実測
+（`steer_cmd_echo` と `steer_actual` の差分測定）はこの問題の解消によりブロックが外れた。
+
+---
+
+## ★ 2026-08-28：UART プロトコル v0.13 対応（STM32側発の delta doc を受けて）
+
+STM32 側から `pi_uart_protocol_v0.13_delta.md` が届き、Pi 側の対応チェックリストに
+従って実装した。**STM32 側は実装済みだが実機での動作検証は未了**（TC ゲインの
+実測・サイドブレーキとも）。
+
+### 変わったこと
+
+- `TELEMETRY`（LEN 66→**74**）: `torque_cmd[2]` の直後に `slip[2]`（TC用スリップ率、
+  無次元、正=空転/負=ロック傾向）・`tc_limit_nm[2]`（TCが動的に決めるトルク上限）を
+  追加。TC のゲイン（`DRIVE_TC_CUT_GAIN`/`DRIVE_TC_RECOVER_RATE`）を実機で追い込むには
+  `flags` bit5（`tc_active`、介入中か否かの1bit）だけでは内部状態が見えなかったため
+- `COMMAND`（LEN 14→**15**）: 末尾に `flags2`（u8、bit0=`SIDE_BRAKE`）を新設。立てている
+  間、速度に関わらず即座に後輪を機械的な位置制御へ切り替えて固定する（既存の
+  `flags` bit1 `BRAKE` より優先）。実際に固定できたかは `TELEMETRY.flags` bit17
+  （`SIDE_BRAKE_ACTIVE`）で返る
+- `protocol_version` を `0x000C`→`0x000D`
+
+### 変更箇所
+
+- `raspi/proto/protocol.toml`: version bump、`TELEMETRY` に `slip`/`tc_limit_nm`、
+  `COMMAND` に `flags2`、`bits.FLG.SIDE_BRAKE_ACTIVE`（bit17）、
+  `bits.CMD_FLG2.SIDE_BRAKE`（新設）（生成物は `generate.py` で再生成済み）
+- `raspi/msgs/types.py`: `VehicleState` に `tc_slip`/`tc_limit_nm`/`side_brake_active`、
+  `DriveCmd` に `side_brake` を追加
+- `raspi/msgs/convert.py`: `StateBuilder.build()` で `slip`/`tc_limit_nm` をSI換算、
+  `decode_flags()` に `side_brake_active`、`command_from_cmd()` で
+  `cmd.side_brake` → `flags2` を組み立て
+- `sim/stm32.py`: TC/TVは未実装（タイヤモデルが無い）ため `slip=[0,0]`・
+  `tc_limit_nm=DRIVE_MAX_TORQUE_NM`固定で返す。`side_brake` は個別車輪の位置制御
+  モデルが無いため**最大制動として近似**（`_substep` で `flags2` を見て
+  `DriveInput` を上書き）。`FLG_SIDE_BRAKE_ACTIVE` を反映
+- `raspi/tests/test_proto.py`: `PROTOCOL_VERSION`/LEN/バイトオフセットの期待値を更新
+- `docs/uart_protocol.md`/`docs/stm32_interface.md`/`docs/README.md`:
+  バージョン表記・§5.3・§5.4・§5.6・§5.6.5(新設)・changelog を更新
+  （`config/check_docs.py --check` 通過）
+
+`./tools/check.sh`（生成物一致・文書版番号・pytest 513件・tsc）は全部通した。
+**実機での動作検証はまだ**（STM32側も同様）。
+
+### 追記（同日）: GUI にサイドブレーキ操作とTCグラフを追加
+
+- `gui/src/types.ts`: `CmdOut.side_brake` を追加
+- `gui/src/store/ui.ts`: `sideBrakeRequested`（ON/OFFトグル。`braking`等の
+  「押している間だけ」とは違い、駐車ブレーキと同じ「かけたら手を離せる」操作感。
+  誤操作防止のため `localStorage` には保存せず、再読み込みで必ず false に戻す）
+- `gui/src/input/useDriving.ts`: 全 `ch.cmd()` 呼び出しに `side_brake` を追加。
+  未ARM時は `brake` と同様に常に false（モータ非励磁で意味が無い）
+- `gui/src/components/DriveControls.tsx`: 灯火・ファンと同じ「タブ行に1つだけ」
+  の場所にON/OFFトグルを追加（ラジコン/自動運転どちらのタブでも共通。
+  `AuxPanel.tsx` は自動運転タブにしか出ないので複製しなかった）。走行中の誤操作
+  防止のため、`vs.stopped` が false の間は ON ボタンを無効化
+  （`title` でツールチップ表示）
+- `gui/src/bus/history.ts`/`components/DiagCharts.tsx`: `tc_slip`/`tc_limit_nm`
+  を時系列バッファ・診断タブのグラフに追加。**スリップ%とトルク上限N·mは値域が
+  全く違うので別チャートに分けた**（同じ軸に載せると片方が潰れる）
+- `gui/src/styles.css`: `.seg button:disabled` を追加（既存の `.armbtn:disabled`
+  はあったが `.seg` 系トグルには無かった）
+
+`./tools/check.sh` 再実行、`vite build` も確認。**ブラウザでの目視確認はしていない**
+（環境上ブラウザ操作ができないため）。実機・シムでの動作確認は次回に持ち越し。
+
+---
+
+## ★ 2026-08-25：UART プロトコル v0.12 対応（STM32側発の delta doc を受けて）
+
+STM32 側から `pi_uart_protocol_v0.12_delta.md` が届き、Pi 側の対応チェックリストに
+従って実装した。**STM32 側は実装済みだが実機での動作検証は未了**なので、Pi 側も
+それに合わせて未検証の前提で実装（実機で誤作動が出たら `auto_stop` を切って様子見）。
+
+### 変わったこと
+
+- `auto_stop`（`COMMAND.flags` bit7）の判定が、**固定20cm・超音波単独**から
+  **`d_stop = v・t_delay + v²/(2・a_max) + margin`（速度に応じて伸びる）・
+  LiDAR主センサ＋超音波補助（フォールバック＋5cm近接フェイルセーフ）** へ変更。
+  `t_delay`/`a_max` は STM32 固定定数、Pi から変えられるのは `margin` の3段階
+  （NEAR=5cm/STANDARD=15cm(既定)/FAR=30cm）のみ
+- `CONFIG_SET`/`CONFIG_GET` に `param_id = 0x0060`（`AutoStopLevel`）を追加。
+  `TC_ENABLE`/`TV_ENABLE`/`WHEEL_LIFT_GUARD_ENABLE` と同じ形（整数enumをf32で
+  送受信、`io_node` がハンドシェイク直後に `CONFIG_GET` で初期同期、GUI操作で
+  `CONFIG_SET`）
+- `protocol_version` を `0x000B`→`0x000C`
+
+### 変更箇所
+
+- `raspi/proto/protocol.toml`: version bump、`enums.AUTO_STOP_LEVEL`、
+  `params.AUTO_STOP_LEVEL = 0x0060`（生成物は `generate.py` で再生成済み）
+- `raspi/core/link_tracker.py`: `CONFIG_ACK_BOOL_PARAMS` は bool 専用のままにし、
+  整数enum用に `CONFIG_ACK_INT_PARAMS` を新設（`LinkState.auto_stop_level: int | None`）
+- `raspi/msgs/types.py`: `LinkDiag.auto_stop_level` 追加。`UiEvent` に `int_value`
+  フィールドを追加（既存の `value: bool` とは別枠——混ぜると0/1に丸まるため）
+- `raspi/core/bus_bridge.py`: `LinkDiag` 組み立てに `auto_stop_level` を追加
+- `raspi/nodes/io_node.py`: `ui/event` の `"auto_stop_level"` kind を処理して
+  `CONFIG_SET` 送信、ハンドシェイク後に4つ目の `CONFIG_GET` を追加
+- `raspi/nodes/telemetry_node.py`: `/ws/control` の `"auto_stop_level"` kind
+  （`{level: 1|2|3}`）を `UiEvent` にブリッジ
+- `sim/stm32.py`: `_config` の初期値に `AUTO_STOP_LEVEL: STANDARD` を追加
+  （他の bool 系パラメータと違い、未設定時の 0.0 が enum のどの値でもなく
+  不正値になってしまうため）
+- GUI: `gui/src/ws/control.ts` に `setAutoStopLevel()`、`SettingsPanel.tsx` の
+  安全タブに margin 3段階セグメント（`link.auto_stop_level` がサーバ真値）。
+  `store/ui.ts` の `AUTO_STOP_DISTANCE_M`（固定20cm前提の表示用定数）は廃止
+- `docs/uart_protocol.md`/`docs/stm32_interface.md`/`docs/README.md`:
+  バージョン表記・§5.6.4・§5.8.3・changelog を更新（`config/check_docs.py --check` 通過）
+- `raspi/tests/test_proto.py`: `PROTOCOL_VERSION` の期待値を更新
+
+`./tools/check.sh`（生成物一致・文書版番号・pytest 504件）と `gui` の `tsc -b` は
+全部通した。**実機での動作検証はまだ**（STM32側も同様）。
+
+### 実機反映で `surge-telemetry` の再起動漏れが型不一致を起こした
+
+`tools/deploy.sh --restart-io` で `surge-io` は再起動したが、`surge-telemetry` は
+再起動していなかった。`gui/src/generated/msgs.ts` の `MSGS_SCHEMA` は
+`raspi/msgs/types.py` の型構造から決定的に導かれる値（`raspi/msgs/schema.py`）で、
+`LinkDiag` にフィールドを足すと変わる。ビルド済みGUIは新スキーマだが、
+`surge-telemetry` プロセスは Python を再インポートしない限り古い型定義を
+メモリに持ったままなので、`/ws/telemetry` で送るスキーマ値が食い違ったまま
+「テレメトリの型定義が食い違っています」の警告が出続けた。
+**`raspi/msgs/types.py`（`LinkDiag`/`Scan`/`VehicleState`/`AutoState`/`AutoMap`
+のいずれか）を触ったときは `surge-io` だけでなく `surge-telemetry` も
+再起動が要る**（`tools/deploy.sh --restart` または `--restart-io` と併用）。
+
+### `param_id = 0x0060` を3段階enumからcm直接指定へ改訂（同日中に revert 相当）
+
+上記の実装・実機反映の直後、STM32側から改訂版の delta doc が届いた。**実機投入前に
+STM32側の判断で、`auto_stop` の安全マージンを `AutoStopLevel`（NEAR/STANDARD/FAR
+の3段階enum）ではなく `auto_stop_margin_cm`（0.0-100.0cmの連続値、既定15.0）を
+直接指定する方式へ変更**。`param_id`（`0x0060`）自体は変わっていないが、
+**`protocol_version` は据え置き（`0x000C`のまま）で値の意味だけが変わった**——
+ワイヤ上は区別できないので、Pi側の実装が新しい方に揃っているかは人間が確認するしかない
+（`docs/stm32_interface.md` にその旨を明記した）。
+
+Pi側は enum 関連のコードを一通り書き換えた: `link_tracker.py` の
+`CONFIG_ACK_INT_PARAMS`→`CONFIG_ACK_FLOAT_PARAMS`（`applied` をそのままfloatで
+持つ）、`LinkState`/`LinkDiag` の `auto_stop_level: int`→`auto_stop_margin_cm: float`、
+`UiEvent.int_value`→`float_value`（他に使う場所が無かったのでrename）、
+GUI の `SettingsPanel.tsx` は3段階の `.seg` ボタンから0-100cmの `<input type=range>`
+スライダーへ（`cam?.front_cap_hz` のfpsスライダーと同じパターン）。
+`sim/stm32.py` の既定値も `AutoStopLevel.STANDARD` → `15.0`(cm) に修正。
+protocol_versionは変えていないので `raspi/tests/test_proto.py` の再修正は不要だった。
+
+---
+
+## ★ 2026-08-23：zbus トピック登録漏れ／中心線の壁穴耐性／`lidar_only` 実験モード
+
+3件とも実機・sim.run 起動時のエラー報告や GUI スクリーンショットから見つかった。
+
+### zbus: `line/cam` の発行元が未登録で `planning_node` が起動時に落ちる
+
+`8ada3f0`（line tracing機能とperception nodeを追加）で `line_trace` プランナー
+（`line/cam` トピック）を `raspi/auto/registry.py` に足したが、`raspi/bus/zbus.py`
+の `TOPIC_OWNER` に登録し忘れていた。`planning_node.main()` は**登録されている
+全プランナー**の `input_topic` をまとめて購読するため、`line_trace` を選ばなくても
+起動時に `KeyError` で落ちる（`.venv/bin/python -m sim.run` で再現・報告あり）。
+
+ついでに調べたら `scan/cam`（`ftg_cam` 用、`cam_perception_node`）にも**同種だが
+気づきにくいバグ**があった。`"scan/cam"` の完全一致キーが無く、前方一致
+フォールバックが `"scan"`（io ノード）に誤って一致し、例外は出ないが
+`cam_perception_node` のデータが誰にも届かない状態だった。
+
+`raspi/bus/zbus.py` の `TOPIC_OWNER` に `"scan/cam": "cam_perception"` と
+`"line/cam": "line_perception"` を追加（`_NODE_TCP_PORT` とハートビート配信先にも）。
+再発防止に `raspi/tests/test_zbus.py::TestTopicOwner` を追加
+（登録済み全プランナーの `input_topic` が解決できることを検証）。
+
+### 中心線が壁の小さな穴で局所的に暴れる（GUI スクリーンショットで発覚）
+
+複雑なコース（ヘアピン・S字を含む）を走らせた GUI の地図で、中心線が特定の
+場所だけ激しく乱れる症状が報告された。原因は `nav/centerline.py` の
+`measure()`——法線方向のレイが、`min_hits` を満たせなかった壁の小さな穴
+（`OccGrid.raycast()` の既定 `fill=1` セルでは塞ぎきれない広さの穴）を抜けて
+**本来のレーンとは無関係な奥の壁**に当たり、その1点だけ幅が数十cm〜
+`max_width` へ跳ね上がっていた。`build()` の「幅の中間へ寄せる」反復が
+その異常値をそのまま使うので、中心線がその1点だけ大きく飛ぶ。
+
+`_declutter()`（近傍5点の移動中央値より 0.5m 以上大きい値だけをクランプ）を
+`measure()` に追加。**狭い側へは倒さない**（本当に狭い場所を誤って広げない
+ため）ので、本物の広い区間（コース出口など）は連続して広い＝中央値も高く
+保たれ、削られない。単体テスト `raspi/tests/test_centerline.py`（新設）で
+「穴は無視する」「本物の開口部は削らない」「狭い側は広げない」を確認。
+
+**注意: これは中心線側の対症療法であり、壁に穴が空くこと自体の根治ではない。**
+`_END_BACKOFF`（`nav/grid.py`）でコーナー内側の虫食いは 2026-08-14 に
+対処済みだが、実車の LiDAR ノイズ・複雑コースの狭い区間ではまだ穴が
+残りうる。本丸は引き続き `_END_BACKOFF` やコース側の走らせ方の見直し。
+
+### ★ 上の `_declutter()` だけでは足りなかった。原因は「穴」ではなく知覚エイリアシング
+
+`_declutter()` を入れた直後、バンビから同じコース（`sim.run` 実行中の GUI
+スクリーンショット）で「点線の中心線が所々破綻してる」と再報告があり、
+改善はしたが直り切っていないことが分かった。`sim.bench` に `RaceLine` の
+`centerline` を直接読みに行くスクリプトを書いて実測（`fuji` コース、急な
+0.5m 半径のシケイン区間）したところ、**壁の穴は無関係**で、隣接する
+数十点にわたって `w_left`/`w_right` が点ごとに激しく反転していた
+（`0.63/1.73 → 0.43/1.63 → 2.41/0.04 → 2.26/1.95 → …`）。`_declutter()` は
+孤立した1点の異常値にしか効かないので、近傍ごと汚染されるこの症状は
+すり抜けていた。
+
+原因は「穴」ではなく**急カーブでの法線方向の脆さ**（知覚エイリアシング）。
+中央差分（`tangents()`）で作る法線がわずかに傾くと、レイが数十cm先の
+本来の壁ではなく通路に沿って何mも先まで抜け、点ごとに拾う距離が
+無関係にばらつく。何が「正しい壁」かを区別する情報が無いので、異常値
+検出では直せない。代わりに `build()` の反復1回で動かせる量に上限
+（`_MAX_SHIFT_M = 0.15m`）を掛けた——1回の測定がどれだけ暴れても
+中心線の点が一気にテレポートしなくなり、`iters` 回の反復で緩やかに
+真ん中へ寄っていく。
+
+**効果を実測**（`sim.bench` で `fuji` コースの `centerline.w_left/w_right` を直接読む）:
+
+| | 幅が乱れた点の数 | 症状 |
+|---|---|---|
+| 修正前（`_declutter()` のみ） | シケイン区間で数十点が連続で反転 | 0.5m 前後が正常のところ、隣と点ごとに 0.04〜3.0m へ跳ね回る |
+| **修正後（`_MAX_SHIFT_M` 追加）** | **1〜2点の局所的な残留のみ** | 跳ね幅も 3.0m（上限）→ 1.9m 程度まで縮小 |
+
+なお同じコースの別区間で「30点連続して `right≈1.5〜2.0m`」という広い読みも
+出たが、こちらは**点ごとになめらかに変化する本物の道幅**（コース設計上の
+広い区間）で、`_declutter()`/`_MAX_SHIFT_M` とも正しく削らずに残していた
+（狙い通り）。
+
+**それでも残る限界**: `_MAX_SHIFT_M` は「1回のテレポート」を防ぐだけで、
+急カーブそのものの測定精度を上げるわけではない。GUI で「一直線に飛ぶ」
+症状は大幅に緩和されるはずだが、タイトなシケイン内で中心線が完全に
+滑らかになる保証はない。実測では上記の通り 1〜2点の残留があった。
+根本的に直すなら、法線推定を接ベクトルの単純な中央差分より頑健にする
+（例: より長いベースラインで平滑化する、あるいは EDT ベースの手法に
+置き換える）必要があるが、今回は着手していない。
+
+### `lidar_only` 実験パラメータを追加（IMU/オドメトリ依存の切り分け用）
+
+バンビから「今の SLAM は IMU/オドメトリを使っているのか、LiDAR だけの SLAM も
+使えるようにしてほしい」との要望。回答: **姿勢を最終的に決めるのは常に
+LiDAR のスキャンマッチ**で、ジャイロ/`speed` は探索の初期値（100ms 予測）と
+点群のデスキューにしか使っていない（`nav/slam.py` の docstring）。とはいえ
+「ジャイロ/`speed` を一切使わない」経路は無かったので、比較・切り分け用に
+`RaceLine` へパラメータ `lidar_only`（既定0）を追加した。
+
+1 にすると `Slam.update()` へ `yaw_rate=None, speed=None` を渡し（＝ジャイロ・
+`speed` を隠す）、代わりに `SlamConfig.scan_to_scan`（LiDAR のスキャン同士の
+直接照合、`nav/scan2scan.py`。既存機能だが既定オフだった）を自動で有効にする。
+`sim.bench --set lidar_only=1` で実走確認済み（circuit・自己位置平均 7.4cm・
+地図正確さ99%。ジャイロ+speed 使用時の 4.4cm より劣るが動作はする）。
+
+**この機能自体は当面の課題（GUI 画像の中心線の乱れ）を直すものではない。**
+むしろヘアピンのような近接した平行区間では、ジャイロ/`speed` という
+先行知識（prior）が無いぶん**知覚エイリアシング（違う壁に吸い寄せられる）
+のリスクは上がる**可能性がある。IMU/オドメトリへの依存を切り分けたい
+実験・比較の道具として使うこと。
+
+---
+
+## ★ 2026-08-22：SLAM の未解決3点（oval渦巻き・壁の虫食い再発懸念）に着手。**シム・実車とも未検証**
+
+バンビから「コース走行時に壁が閉じ切らない（特に旋回時）・ループが閉じない」と報告があり、
+`docs/progress_archive.md`「oval が渦巻きになる」「壁が虫食いになる」の両節を見直した。
+**この症状は 2026-08-14 に一度診断済みで、SLAM の原理的な限界ではなく実装バグと特定されていた。**
+
+- **壁の虫食い**: `OccGrid._carve()` の `_END_BACKOFF=1.5` 修正（2026-08-14）は現在も
+  コードに残っている（`raspi/nav/grid.py`）。シムでは直った実測があるが**実車では未検証**。
+  実車で再発するなら、実際の LiDAR ノイズ σ が想定（1cm + 距離の0.5%）より大きい疑いがある
+- **oval が渦巻きになる**: 原因は `raspi/auto/raceline.py` の `_lap_ready()` が
+  `laps >= explore_laps` のときしか `True` を返さず、**`close_loop()` が最終周にしか
+  呼ばれていなかった**こと（`explore_laps=2` だと1周目のループ閉じが永遠に走らない）。
+  今回 `_lap_ready()` を `_check_lap()` に分割し `(lap_done, explore_done)` を返すようにして、
+  **周回を検出するたびに `close_loop()` を呼ぶ**よう修正（診断済みの入口①、上の「一旦棚上げ」
+  節参照）
+- ついでに診断済みの②③も対応: `close_loop()` 専用の探索範囲 `LOOP_CLOSE_STAGES`
+  （`raspi/nav/slam.py`、毎周期の `RELOC_STAGES` より広く取れる。1周に1回しか呼ばないため）と、
+  マッチ補正の異方化（`SlamConfig.match_gain_fwd_ratio`・`_blend_xy()`。進行方向
+  （corridor problemで観測できない方向）への補正を弱め、横方向はそのまま寄せる）
+
+単体テストは追加済み（`test_nav.py::TestBlendXY`・`test_raceline.py::...every_lap`）で
+全459件green。
+
+**`sim.bench` でも oval・circuit を実測して効果を確認した（2026-08-22）。**
+`sim/courses/` に oval 用コースが無かった（`split` 同様、いつからか未コミットのまま
+消えていた）ため、直線+180°円弧×2の「角の無いループ」を一時ファイルで作って検証:
+
+| コース | 自己位置（平均/中央/最大） | 地図の正確さ | 周回 | 衝突 |
+|---|---|---|---|---|
+| oval（角無し・180°円弧×2） | 4.40 / 2.34 / **49.3cm** | **100%**（4cm以内） | 2周 | 8 |
+| circuit（既定） | 4.95 / 3.42 / 57.8cm | **100%**（4cm以内） | 2周 | 1 |
+
+修正前（2026-08-14）は oval で「地図が渦巻き・一致度 0.06 で見失う」だった。
+今回は **`50.9s [EXPLORE] ... 1周目のループを閉じた（残差 1cm）` とログに出て**、
+1周目で正しく閉じ、そのまま2周目も地図が壊れずに完走した。**oval が渦巻きになる
+問題はシム上では解消したとみてよい。**
+
+★ 残った疑問点（次に見るべきこと）:
+- 両コースとも **BUILD→RACE の切り替え直後に自己位置誤差が一時的に 30〜58cm へ
+  跳ね、2〜4秒かけて数cmまで戻る**現象がある。これは今回直した3点とは別物で、
+  上の「未解決・要相談」にある**「RACE 段が circuit で開始直後に壁へ接触して
+  固着する」**と同じ入口（BUILD→RACE の Pure Pursuit 遅延補償）の疑いが強い。
+  今回は「固着」まではせず数秒で回復したが、衝突が oval で8件・circuit で1件出て
+  おり、無視できる数ではない
+- `split`（分離帯コース）はコースファイル自体が無く未検証のまま
+- **これはシム。実車の LiDAR ノイズ・ジャイロ特性はシムより悪い可能性が高く、
+  実車でも同じ結果になる保証はない。** `raspi/nav/` は引き続き実車未検証
+
+---
+
+## ★ 2026-08-21：コードレビュー13項目を全修正し、実機へ反映済み
+
+当時の `docs/review_2026-08-21.md` の指摘を**全項目**片付けた（各項目に「解決済」を追記済み。
+現在は本ファイル末尾の「2026-08-21 コードレビュー全文」に移動・統合済み）。
+**中身と判断の根拠はレビュー全文側にある。** ここには実機に効く要点だけ書く。
+
+### ★★ 運用が変わった点（これだけは覚えておくこと）
+
+1. **`telemetry_node` の既定バインドが `127.0.0.1` になった。**
+   外の PC から GUI を開くには `--host 0.0.0.0` が要る。
+   `run_stack.sh` と `install_services.sh` の両方に明示済みなので通常運用は変わらないが、
+   **手で `python -m raspi.nodes.telemetry_node` と打つと Pi 自身からしか見えない**
+2. **Origin 検査が入った。** 別サイトから `/ws/*` を張ると 403。
+   判定は `Host` ヘッダとの一致なので、`surge-mk2.local` でも IP 直打ちでも通る
+3. **自律走行の `engage` に操縦権が要る**（解除は従来どおり誰でも通る）
+4. **共有トークンは既定で無効。** 使うなら `config/secret.txt`（gitignore 済み）に書き、
+   GUI を一度 `?token=…` 付きで開く
+5. **検査コマンドが1本になった**: `./tools/check.sh`（`--fast` で生成物だけ）。
+   同じものを GitHub Actions（`.github/workflows/ci.yml`）が Python 3.12/3.13 で回す
+
+### 新しく増えた「正」
+
+| 正 | 生成物 | 検査 |
+|---|---|---|
+| `raspi/msgs/types.py` | `gui/src/generated/msgs.ts` | `config/gen_msgs.py --check` |
+| `config/vehicle.toml` の `[safety]` | `gui/src/generated/vehicle.ts` の `SAFETY` | `config/generate.py --check` |
+| `raspi/proto/protocol.toml` の版番号 | （文書の見出し） | `config/check_docs.py --check` |
+
+**メッセージ型を GUI に手書きしないこと。** `types.py` を直して `gen_msgs.py` を回す。
+デッドマン 150ms も同様で、`vehicle.toml` の `[safety]` が唯一の出どころ。
+
+### 実機で確認したこと（2026-08-21・surge-mk2）
+
+- `pytest` **435 tests OK**（Pi 上・Python 3.13）
+- Origin 検査: 同一オリジン/Vite dev/Origin無し = 通す、別サイト/ポート違い/接尾辞偽装 = **403**
+- テレメトリの札 `schema=0x667639be` が Pi と手元で一致
+- デッドマンが io_node / telemetry_node / GUI の3箇所とも **150ms** で一致
+- `_fence()`（seqlock のメモリバリア）実機 Cortex-A76 で **169ns/回**。無視できる
+- 再起動後 `health=OK` / `protocol=0x0009` / `sim=False` / `estop_active=False` /
+  `hb_stalls=0` / `cmd_rtt_ms≈9.6ms` / TC・TV・片輪浮き対策すべて有効
+
+### ★ JPEG 二重エンコードは「測って、直さないと決めた」
+
+レビュー 🟡7。実測 **3.13ms/枚**（simplejpeg・実機）。二重ぶん（logger の
+`image_hz=5` × 2台）は **Pi 5 全体の 0.8%** しかない。camera_node に寄せると
+「誰が見ているか」の伝達まで作る必要があり、0.8% では割に合わない。
+計測は `status.camera_jpeg` に残してあるので、`image_hz` を上げたり
+カメラを増やしたときに再確認できる。
+
+### 副産物：`noUncheckedIndexedAccess` で実バグが1つ出た
+
+`gui/src/ws/map.ts` の `PALETTE` が3要素しかなく、圧縮データが壊れて 2bit 値 `3` が
+出ると `PALETTE[3]` が `undefined` になり、分割代入の例外で**地図の描画が止まる**
+形だった。4要素にして「壊れた1セルは未知として塗る」ようにした。
+
+---
+## 2026-08-21 コードレビュー全文（`docs/review_2026-08-21.md` から移動、2026-08-30）
+
+**独立した文書として置いていた `docs/review_2026-08-21.md` は、全13項目に「解決済」
+（一部「対応済」）が付いた時点で役目を終えたので、ここへ全文を移して削除した。**
+要約や内容の削除はしていない（原文のまま。見出しレベルだけこのアーカイブに合わせて
+1段下げた）。実機に効いた要点は上の「★ 2026-08-21：コードレビュー13項目を全修正し、
+実機へ反映済み」に既にまとめてあるので、以下はその一次資料
+（指摘の詳細・攻撃シナリオ・修正案・確認済み事項・未レビュー領域）。
+
+---
+
+## コードレビュー 2026-08-21
+
+**対象**: `surge_mk2/` 全体（約 32,000 行）
+**基準コミット**: `da4c314`（master、作業ツリーはクリーン）
+**方法**: ネットワーク公開面・安全ゲート・IPC・フレーミングは精読。アルゴリズム層は
+機械的スキャン＋要所の精読。**全行の通読はしていない**ので、未読領域が残っている
+
+---
+
+### 総評
+
+設計判断の水準は高い。批判の前に、実測で確認した事実を置く。
+
+| 検証 | 結果 |
+|---|---|
+| `pytest raspi/tests` | **424 passed, 1 skipped**（12.7s） |
+| GUI `tsc -b` | **エラーなし**（`strict: true`） |
+| `config/generate.py --check` | 生成物と `vehicle.toml` が一致 |
+| `raspi/proto/generate.py --check` | 生成物と `protocol.toml` が一致 |
+| `shell=True` / `os.system` / `eval` | **0件**（全て argv リスト形式） |
+| コミット済みの秘密情報 | 0件 |
+| TODO/FIXME | 13件のみ、いずれも「未校正」を明示した意図的なもの |
+
+特に評価すべき3点（以下の指摘を読む際の基準）:
+
+1. **多層防御が実装されている。** `raspi/msgs/convert.py:210` に
+   「STM32 側にも上限はあるが、上位が壊れたときに下位だけが守る構造にしない」と
+   あり、実際に Pi 側でも速度・舵角をクランプしている。
+   GUI が `speed: 1e9` を送っても `max_speed` で止まる（検証済み）。
+2. **「送らないこと」が停止を意味する設計。** `gui/src/ws/control.ts:5-11` —
+   デッドマンを離したら `speed=0` を送るのではなく送信自体を止める。
+   「止める指令を送る設計だと、その指令が届かない状況（＝一番止めたい状況）で
+   止まらない」。正しい failsafe の考え方。
+3. **ウォッチドッグが二重。** telemetry_node（150ms）と io_node（150ms）が
+   独立に DISARM に落とす。片方が死んでも成立する。
+
+以下は「壊れているコード」ではなく、**規模が増えたときに壊れる箇所**の指摘。
+
+---
+
+### 🔴 重要度 1：制御 API が完全に無認証（セキュリティ）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：修正案の1〜4をすべて実装した。
+>
+> | 案 | 実装 |
+> |---|---|
+> | 1. Origin 検査 | `TelemetryServer._origin_ok()`。**定数の列挙ではなく `Host` ヘッダとの一致**で判定する（`surge.local` でも IP 直打ちでも通したい実運用で、列挙は必ず取りこぼす）。Vite dev（5173）だけ例外として許す。不一致は 403 + `origin_rejects` を加算 |
+> | 2. `engage` に操縦権を要求 | `_on_control` の `auto` 分岐。**`engaged: true` のときだけ**操縦権を見て、解除・停止は従来どおり無条件で通す |
+> | 3. 共有トークン | `--token` / `$SURGE_TOKEN` / `config/secret.txt`（`.gitignore` 済み）。`take_control` にだけ掛け、**E-Stop・解放には掛けない**。GUI は `?token=…` で一度開くと `localStorage` に入る（`gui/src/ws/token.ts`。URL からは即座に消す） |
+> | 4. 既定バインドを `127.0.0.1` に | `DEFAULT_HOST`。外に出すのは `--host 0.0.0.0` を明示したときだけで、`run_stack.sh` はそれを明示的に打っている |
+>
+> 捨てた回数（`auth_rejects` / `origin_rejects`）は `/ws/control` の `status` と
+> 終了時の統計に出す。**無言で捨てる処理は、出さないと「効いていない」と
+> 「そもそも来ていない」が区別できない。**
+>
+> テスト: `test_cmd_path.py` に `TestOriginCheck`（5件）と、
+> トークン・engage 権限・「止める操作は無条件」の各テストを追加。
+
+**最も深刻。**
+
+`raspi/nodes/telemetry_node.py` の WebSocket サーバには、**認証も Origin 検査も無い**。
+
+```
+telemetry_node.py:195    host: str = "0.0.0.0"       ← 全インタフェースで待ち受け
+telemetry_node.py:1135   ap.add_argument("--host", default="0.0.0.0")
+"origin" の出現回数: 0
+```
+
+`serve()` の引数は `process_request` / `max_queue` / `ping_interval` のみ
+（`telemetry_node.py:1064-1066`）。
+
+### 攻撃シナリオ
+
+**(a) 同一ネットワーク上の第三者**
+Wi-Fi 上の任意の端末が `ws://surge.local:8080/ws/control` を開き
+`{"type":"take_control"}` を投げるだけで操縦権を取れる。`controller` は
+「先着1名」の排他制御であって認証ではない。
+
+**(b) クロスサイト WebSocket ハイジャック（こちらが厄介）**
+WebSocket は**同一オリジンポリシーの対象外**。操縦中に別タブで悪意あるページを
+開くと、そのページの JS が Pi への WebSocket を張れる。ブラウザは preflight を
+送らず、`Origin` ヘッダは送るものの**サーバが見ていない**ので素通りする。
+
+**(c) 自動運転が操縦権すら不要**
+`telemetry_node.py:479-483`:
+
+```python
+# ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
+elif kind == "auto":
+    self._on_auto(m)
+    self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
+```
+
+コメントの意図は「**解除**は誰でもできるべき」で正しい。しかし実装は `engage` も
+同じ経路を通る。つまり**未認証の第三者が自律走行を開始できる**。
+
+### 現状の緩和策（あるので即死ではない）
+
+- `run_stack.sh:56` は io_node に `--allow-arm` を渡していない。
+  `io_node.py:24`「`--allow-arm` が無ければ DISARM 固定」。走行日以外はモータが回らない
+- 速度・舵角は `convert.py` でクランプ済み
+
+**つまり「走行日だけ全開で開いている」状態。そして走行日こそが最も危険な日。**
+
+### 修正案（段階的。まず1だけでも入れる）
+
+**1. Origin 検査（10行、(b) を潰す）**
+
+```python
+# telemetry_node.py
+ALLOWED_ORIGINS = {f"http://{h}:{p}"
+                   for h in ("localhost", "127.0.0.1", "surge.local")
+                   for p in (8080, 5173)}   # 5173 は vite dev
+
+def _process_request(self, connection, request):
+    if request.path.startswith("/ws/"):
+        origin = request.headers.get("Origin")
+        # Origin 無し = ブラウザ以外（curl・自作クライアント）。
+        # ブラウザから来たなら必ず付くので、付いていて不一致なものだけ弾く
+        if origin is not None and origin not in ALLOWED_ORIGINS:
+            return _response(403, "text/plain; charset=utf-8", b"bad origin")
+        return None
+    ...
+```
+
+**2. `engage` を操縦権保持者に限定（3行、(c) を潰す）**
+
+```python
+elif kind == "auto":
+    # **解除・停止は誰でも通す。開始だけ操縦権を要求する**
+    if m.get("engage") and self.controller is not ws:
+        await self._send_json(ws, {"type": "control_denied",
+                                   "holder": self.controller_name})
+        return
+    self._on_auto(m)
+```
+
+**3. 共有トークン（(a) を潰す）**
+`--token` で起動時に受け取り、`take_control` に含めさせる。`.gitignore` 済みの
+`config/secret.txt` から読む形で十分。学内デモで攻撃者を想定するというより、
+**隣の班の PC が誤接続する事故**を防ぐ意味が大きい。
+
+**4. 既定バインドを `127.0.0.1` にする**
+`--host 0.0.0.0` を「打たないと外から見えない」側に倒す。既定が安全側であるべき。
+
+---
+
+### 🟠 重要度 2：メッセージ定義が Python / TypeScript で二重管理（保守性）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：`config/gen_msgs.py` を追加し、`raspi/msgs/types.py` を唯一の正にした。
+> `gui/src/types.ts` の手書きの写し（5型・127フィールド）は
+> `gui/src/generated/msgs.ts` からの再エクスポートに置き換えた。
+>
+> - **型**は `msgspec.inspect` から取る（アノテーションを字面で解釈しない）
+> - **`#:` コメントも移す**。単位や「`batt_current` は回生中 0 に張り付く」のような
+>   *知らないと誤読する*情報が落ちると、型だけ合っていても意味が無い。
+>   原文の行の切れ目もそのまま保つ（`sector_dur_us` の計算例が1行に潰れないように）
+> - **固定長はタプル型**で吐く（既定値の長さを測って導出。🟠3-② を同時に解決）
+> - `--check` 付き。CI（🟡5）と `tools/check.sh` が見ている
+>
+> `types.ts` に手書きで残したのは、**Python 側に対応物が無い型だけ**
+> （`Snapshot`・`ControlStatus`・`CmdOut`・`MapData` など）。
+
+`raspi/msgs/types.py` の 12 クラスと `gui/src/types.ts` の 16 型が、**手書きで
+同じ内容を持っている**。`VehicleState` だけで 45 フィールドの完全な写経。
+
+git 履歴で裏が取れる:
+
+```
+raspi/msgs/types.py の変更 10 回のうち 7 回が gui/src/types.ts と同一コミット
+  c33ecab TC/TV・片輪浮き対策の有効切り替えをGUIから可能にした
+  35b9265 地図生成とレーシングライン走行を追加、GUIに地図タブを新設
+  e308419 LiDARのFollow the Gapによる自動運転を追加…
+  db2b4ee 実機と同じ制御コードのまま走るMac用2Dシミュレータを追加
+  e89ecf2 UARTプロトコルv0.7対応…
+  dfcea6d ラジコンモードにトルク直接指令(v0.6)を追加…
+  f32bcd7 MCAP記録を追加…
+```
+
+**なぜ危険か**: 片方だけ直しても**どのツールもエラーを出さない**。`tsc` は Pi 側を
+知らず、pytest は GUI を知らない。フィールドを1つ改名すると GUI は静かに
+`undefined` を読み、画面には空欄か `NaN` が出るだけ。50Hz で流れる値なので、
+気づくのは走行後。
+
+**皮肉なのは、この問題の正解をリポジトリが既に持っていること。**
+`protocol.toml → Python/C` と `vehicle.toml → TypeScript` の生成器が2つあり、
+`--check` まで付いている。同じ型をメッセージ定義に適用していないだけ。
+
+### 修正案
+
+`raspi/msgs/types.py` を唯一の正とし、`msgspec.inspect` で型情報を吸って `.ts` を吐く:
+
+```python
+# config/gen_msgs.py（新規）
+import msgspec.inspect as mi
+from raspi.msgs import types
+
+SCALAR = {mi.IntType: "number", mi.FloatType: "number",
+          mi.BoolType: "boolean", mi.StrType: "string", mi.NoneType: "null"}
+
+def ts_type(t) -> str:
+    if isinstance(t, mi.UnionType):
+        return " | ".join(ts_type(x) for x in t.types)
+    if isinstance(t, mi.ListType):
+        return f"{ts_type(t.item_type)}[]"
+    return SCALAR[type(t)]
+
+for info in mi.multi_inspect([types.VehicleState, types.Scan, types.LinkDiag, ...]):
+    print(f"export type {info.cls.__name__} = {{")
+    for f in info.fields:
+        print(f"  {f.encode_name}: {ts_type(f.type)}")
+    print("}\n")
+```
+
+既存2つと同じく `--check` を付けて CI（🟡5）に載せれば、写経漏れがコミット時に落ちる。
+
+---
+
+### 🟠 重要度 3：WS ペイロードを未検証キャストで型に流し込んでいる（型安全性）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：修正案の1〜3をすべて実装した。
+>
+> 1. `tsconfig.app.json` に `noUncheckedIndexedAccess: true`。
+>    出た 28 件は全部潰した（`history.ts` / `DiagGrid.tsx` / `GMeter.tsx` /
+>    `MapCanvas.tsx` / `ws/map.ts`）。
+>    **`ws/map.ts` で実バグが1つ出た**——`PALETTE` が3要素しか無く、
+>    圧縮データが壊れて 2bit 値 3 が出ると `PALETTE[3]` が `undefined` になり、
+>    直後の分割代入で例外を投げてフレームごと描画が止まる形だった。4要素にした
+> 2. 固定長はタプル型（🟠2 の生成器が自動で吐く）。
+>    `DiagGrid` の「`motor_current` は3要素・`torque_cmd` は2要素を同じ `i` で引く」
+>    という範囲外アクセスがこれで露見し、添字を変数で回さない形に直した
+> 3. 境界の実行時検証。**札を1つ見るだけ**にした（`raspi/msgs/schema.py`）。
+>    `protocol_version` と違って**手で上げる版番号にしない**——同じリポジトリの
+>    中だけの話なので、上げ忘れがそのまま「版は合っているのに中身が違う」という
+>    一番たちの悪い状態になる。**型定義そのものから決定的に導く**ので、
+>    `types.py` を触れば必ず変わり、触っていなければ絶対に変わらない。
+>    食い違ったフレームは捨て、`StatusBar` に「型不一致」と出す
+>    （**「切断」と同じ表示にしない。** Wi-Fi を疑って時間を溶かす）
+>
+> `control.ts` の `let m: any` も `ServerMsg` に置き換えた。
+
+`gui/src/ws/telemetry.ts:30`:
+
+```ts
+const s = decode(new Uint8Array(ev.data)) as Snapshot
+```
+
+`gui/src/ws/control.ts:50-57` も `let m: any` → `m as ControlStatus`。
+
+`as` は TypeScript に嘘をつく操作で、実行時には何も起きない。🟠2 と組み合わさると
+効く — Pi 側がフィールドを消しても TS は `s.vs.speed` を `number` だと信じ続ける。
+
+さらに `gui/tsconfig.app.json` に **`noUncheckedIndexedAccess` が無い**。
+`wheel_speed: number[]` に対し `wheel_speed[3]` が `number` 型になるので、配列長の
+想定を型が守らない。Python 側は `[0.0] * 4` と長さを固定しているのに、その情報が
+TS に落ちていない。
+
+### 修正案（軽い順。1と2で十分）
+
+1. `tsconfig.app.json` に `"noUncheckedIndexedAccess": true` を追加
+2. 固定長はタプル型で表現（🟠2 の生成器なら自動生成できる）:
+   ```ts
+   wheel_speed: [number, number, number, number]
+   temp: [number|null, number|null, number|null, number|null]
+   ```
+3. 境界1箇所だけ実行時検証。全フィールドを舐める必要はなく、**スキーマ札を1つ
+   見るだけ**で足りる:
+   ```ts
+   const raw = decode(new Uint8Array(ev.data)) as { schema?: number }
+   if (raw.schema !== SCHEMA_VERSION) { onSchemaMismatch(raw.schema); return }
+   const s = raw as unknown as Snapshot
+   ```
+   `protocol.toml` に既にバージョン概念があるので、同じ考え方を WS にも通す形。
+
+---
+
+### 🟡 重要度 4：不正な型の `cmd` が制御チャネルを落とす（バグ）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：修正案どおり `float()`/`int()` 群を `_decode_cmd()` に閉じ、
+> 呼び元は `(TypeError, ValueError)` を捕まえて**捨てるだけ**にした（接続は維持）。
+> 捨てた数は `bad_cmds` として `/ws/control` の `status` と終了時の統計に出る。
+>
+> テスト: `test_a_malformed_cmd_is_dropped_without_killing_the_channel`。
+> `{"speed":"abc"}` と `{"mode":"x"}` を送っても操縦権が生き残り、
+> 次の正常な指令がそのまま通ることを見ている。
+
+`telemetry_node.py:456` 付近:
+
+```python
+target_speed=float(m.get("speed", 0.0)),
+```
+
+`try` は `_json_decode` にしか掛かっていない（`telemetry_node.py:423-426`）。
+
+msgspec が NaN / Infinity を弾くことは検証済み。しかし**文字列は通る**:
+
+```
+'{"speed": NaN}'   -> ERR DecodeError          ← 良い
+'{"speed": 1e400}' -> ERR ValidationError      ← 良い
+'{"speed": "abc"}' -> {'speed': 'abc'}         ← 通る
+```
+
+→ `float("abc")` が `ValueError` を送出 → `except ConnectionClosed` に該当せず
+伝播 → **制御チャネルのタスクが死んで接続が切れる**。
+
+安全側には転ぶ（`finally` で `_release_control`、150ms で DISARM）。ただし
+**GUI のバグ1つで走行中に操縦が切れる**のは望ましくない。
+
+### 修正案
+
+```python
+elif kind == "cmd":
+    if self.controller is not ws:
+        return
+    try:
+        cmd = self._decode_cmd(m)          # float() 群をこの中に閉じる
+    except (TypeError, ValueError):
+        # 壊れた指令は**捨てるだけ**。接続は維持する
+        # （切ると 150ms 後に DISARM して復帰に人手が要る）
+        self._bad_cmd += 1                 # 診断タブに出す
+        return
+    self._last_cmd, self._last_cmd_ns = cmd, time.monotonic_ns()
+```
+
+---
+
+### 🟡 重要度 5：CI が無く、せっかくの `--check` を誰も走らせない（保守性）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：`.github/workflows/ci.yml` を追加（`python` と `gui` の2ジョブ）。
+> `surge_mk2/**` が変わったときだけ走る（`robotcar/` は休眠中なので対象外）。
+>
+> 走る `--check` は**4つに増えた**:
+> `config/generate.py` / `raspi/proto/generate.py` / `config/gen_msgs.py`（🟠2）/
+> `config/check_docs.py`（🟢13 の再発防止）。
+>
+> **手元でも同じものを1コマンドで打てるようにした**（`tools/check.sh`）。
+> GitHub Actions が動くのは push 後なので、これが無いと
+> 「push してから気づく」を繰り返す。`--fast` で生成物の検査だけ数秒。
+> pre-commit にしたい場合は
+> `ln -s ../../surge_mk2/tools/check.sh .git/hooks/pre-commit`。
+
+`.github/` が無く、`pyproject.toml` / `ruff.toml` / `mypy.ini` / eslint 設定も無い。
+
+生成器の `--check` を2つ用意しているのに、**実行を人間の記憶に頼っている**。
+今日は両方一致していたが、それは運。
+
+```yaml
+# .github/workflows/ci.yml
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r surge_mk2/raspi/requirements.txt pytest
+      - working-directory: surge_mk2
+        run: |
+          python config/generate.py --check
+          python raspi/proto/generate.py --check
+          python -m pytest raspi/tests -q
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - working-directory: surge_mk2/gui
+        run: npm ci && npx tsc -b
+```
+
+GitHub Actions が重いなら `.git/hooks/pre-commit` に同じ4行でも効果は同じ。
+
+---
+
+### 🟡 重要度 6：依存バージョンが `pyserial` 以外ピン留めされていない（保守性）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：`requirements.txt` を範囲指定に変え、
+> `requirements.lock.txt` を別途コミットした（提案どおりの二段構え）。
+>
+> - **開発機**は `requirements.txt`（`pyzmq>=26,<28` 等）。
+>   完全固定にしないのは、セキュリティ修正のパッチが自動で入るようにするため
+> - **実機・大会当日**は `requirements.lock.txt`
+>
+> lock は `pip freeze` そのままではなく手で絞ってある——
+> **pytest 系・pygame・pillow は入れない**（テストは開発機で走らせるもの、
+> pygame は `sim/`（Mac 側）専用、pillow は simplejpeg が無い環境の落ち先）。
+> 作り直し方はファイル先頭に書いた。
+
+`raspi/requirements.txt` で `pyserial==3.5` だけ固定、`pyzmq` / `msgspec` /
+`websockets` / `numpy` / `mcap` は無指定。
+
+GUI は `package-lock.json` で守られているのに、**Pi 側だけ無防備**。大会当日に
+`pip install -r` し直して `msgspec` のメジャーが上がっていると、シリアライズ挙動が
+変わったまま走り出す。
+
+```
+pyzmq>=26,<27
+msgspec>=0.19,<0.20
+websockets>=13,<16
+numpy>=2.1,<3
+mcap>=1.2,<2
+```
+
+`pip freeze > requirements.lock.txt` を別途コミットし、実機は lock で入れるのが確実。
+
+---
+
+### 🟡 重要度 7：同じフレームを2プロセスが別々に JPEG エンコード（パフォーマンス）  ✅ **対応済**（2026-08-21・**実測できる形にした**）
+
+> **対応済（ただし共通化はしていない）**：本項の「**今すぐ直す必要はない。まず
+> `top` で実測し、本当にボトルネックか確認してから**」という結論に従った。
+>
+> 提案どおり camera_node で1回だけ焼いて配る形にすると、
+> **誰もカメラを見ていない間も焼き続ける**ことになる（今は telemetry_node が
+> クライアント接続時にしか焼いていない）。idle の CPU がむしろ増えうるので、
+> 需要の伝達まで作らないと素直な改善にならない。
+>
+> 代わりに、**`top` を使わずに判断できる数字**を入れた（`RingJpeg`）:
+>
+> - `encoded`（枚数）と `encode_cpu_s`（`time.process_time` で測った CPU 時間）
+> - `cpu_per_frame_ms` … 1枚あたり。`× image_hz × カメラ台数` が二重ぶんの無駄
+> - `RingJpeg.stats()` を telemetry_node の `status.camera_jpeg` と、
+>   両ノードの終了時の統計に出す
+>
+> `process_time` を使うのは、wall clock では「エンコードが重い」と
+> 「バスが詰まっている」が区別できないため。
+>
+> ### 実測（2026-08-21・surge-mk2 実機。**これで結論が出た**）
+>
+> ```
+> camera_jpeg = {'impl': 'simplejpeg', 'encoded': 8524,
+>                'cpu_per_frame_ms': 3.13, 'cpu_total_s': 26.68,
+>                'torn': 0, 'errors': 0, 'reattached': 0}
+> ```
+>
+> **1枚 3.13ms**（simplejpeg / 640×360 + 640×450）。これを負荷に直すと:
+>
+> | | 1コアあたり | Pi 5 全体（4コア） |
+> |---|---|---|
+> | logger_node（`image_hz=5` × 2台）＝**二重ぶん** | 3.1% | **0.8%** |
+> | telemetry_node（15Hz × 2台。カメラ閲覧中のみ） | 9.4% | 2.3% |
+>
+> **二重エンコードの無駄は Pi 5 全体の 0.8%。** 録画と閲覧が重なったときだけ、
+> しかも1コアの 3% でしかない。**構造を変える価値は無い**と判断する。
+>
+> camera_node に寄せると需要の伝達（誰かが見ているか）まで作る必要があり、
+> 得られるのが 0.8% では割に合わない。**本項は「測って、直さないと決めた」で閉じる。**
+> 計測は残してあるので、`image_hz` を上げたりカメラを増やしたときは
+> GUI の診断（`status.camera_jpeg`）で再確認できる。
+
+`raspi/core/jpeg.py` の `RingJpeg` を `telemetry_node.py:283` と
+`logger_node.py:128` が**独立に**生成し、`run_stack.sh:60,64` は両方を起動する。
+録画中は同一フレームに対し JPEG エンコードが **2回**走る。
+
+**なぜこうなったかは分かる** — `jpeg.py` の docstring に「同じことを2箇所に書くと
+BGR/RGB が片方だけ入れ替わる」とあり、*コードの*重複は正しく潰してある。
+潰し残しているのは*実行の*重複。
+
+**ただし今すぐ直す必要はない。** `image_hz` の既定は 5.0（`logger_node.py:97`）
+なのでカメラ2台でも毎秒10回。まず `top` で実測し、本当にボトルネックか確認して
+からで十分。早すぎる最適化はこのプロジェクトの他の良さを壊す。
+
+直す場合は、camera_node（既にフレームを持っている側）が1回だけエンコードして
+`camera_jpeg` トピックに publish し、telemetry と logger は購読するだけにする。
+
+---
+
+### 🟡 重要度 8：ログ全体をメモリに載せてから返す（パフォーマンス / DoS）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：`MAX_INLINE_LOG_BYTES = 64MB` を超えたら 413 を返し、
+> `scp` のコマンドをそのまま本文に入れて返すようにした（提案どおり）。
+> 無認証で繰り返し叩かれる経路そのものは 🔴1 で塞いである。
+
+`telemetry_node.py:323`:
+
+```python
+return _response(200, "application/octet-stream", target.read_bytes(), ...)
+```
+
+`image_hz=5` × カメラ2台 × 約30KB ≒ 300KB/s ≒ **1GB/時**。長時間走行の `.mcap` を
+ダウンロードすると全量が一度に Pi のメモリへ載る。無認証（🔴1）と組み合わさると、
+繰り返し叩くだけで OOM に持ち込める。
+
+```python
+MAX_INLINE = 64 * 1024 * 1024
+if target.stat().st_size > MAX_INLINE:
+    # 大きいログは scp で取る運用にする（GUI には理由を出す）
+    return _response(413, "text/plain; charset=utf-8",
+                     f"{target.name} は {target.stat().st_size >> 20}MB。"
+                     "scp で取得してください".encode())
+```
+
+---
+
+### 🟢 重要度 9：`_serve_static` のパス検査が前方一致（セキュリティ・軽微）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：`target.is_relative_to(self.dist.resolve())` に置き換えた（1行）。
+
+`telemetry_node.py:294`:
+
+```python
+if not str(target).startswith(str(self.dist.resolve())):
+```
+
+前方一致なので `/home/pi/gui/dist` に対し `/home/pi/gui/dist-old/secret` が通る。
+悪用には `dist` で始まる兄弟ディレクトリが必要なので実害は薄いが、正しい書き方が
+1行で済む。
+
+```python
+if not target.is_relative_to(self.dist.resolve()):
+```
+
+**なお `_resolve_log_path`（`telemetry_node.py:791-798`）は正しく実装されている** —
+`/`・`\` を弾き、`target.parent != base` で検査。こちらは問題なし。
+
+---
+
+### 🟢 重要度 10：例外の握り潰しが 17 箇所（可読性・デバッグ性）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：`raspi/core/cleanup.py` を追加し、
+> **`jpeg.py` の `last_error` 方式を GPIO とバスに広げた**（本項の提案どおり）。
+>
+> ```python
+> with quiet_close("gpiozero DigitalOutputDevice (GPIO5)"):
+>     self._dev.close()
+> ```
+>
+> `with` の名前そのものが「後始末なので捨ててよい」という主張になるので、
+> **正当なものと危険なものが構造で見分けられる**。捨てた例外は
+> `recent_failures()` に `(いつ, 何を, なぜ)` で残り、終了時の統計に出る
+> （0 なのが正常。増えているなら閉じられていない資源がある）。
+>
+> `logging` を導入しなかったのは、このリポジトリが一貫して
+> print + カウンタで来ており、そこだけ流儀を変えると読み手が増える負担のほうが
+> 大きいため。**「なぜ」を文字列で残す**という本項の要求は満たしている。
+>
+> 置き換えた 16 箇所（gpio 5・serial_link・jpeg・shm_ring・camera_node・
+> planning_node・io_node・telemetry_node 2・tools 2）。
+> **残した1つは `_send_json`** で、20Hz で回るため記録が環状バッファを
+> 埋め尽くす。こちらは docstring で「なぜ捨ててよいか」を明示した
+> （切れた接続は `_control_channel` の `finally` が片付ける）。
+
+非テストコードに `except Exception` が 53 箇所、うち **17 箇所が `pass` で完全に無言**。
+
+```
+raspi/io/gpio.py:108, 190, 274, 401, 525   ← E-Stop ハートビートを持つファイル
+raspi/nodes/telemetry_node.py:769, 828, 1089
+raspi/bus/shm_ring.py:338
+raspi/nodes/io_node.py:602
+（他8箇所）
+```
+
+多くは `close()` 系の後始末で、**そこは正当**。問題は、正当なものと危険なものが
+**見分けられない**こと。
+
+`jpeg.py` が良いお手本 — `last_error` に理由を文字列で残し、「`errors=448` だけ
+見えても『なぜ』が分からず時間を溶かす」とコメントがある。
+**この方針を GPIO とバスにも広げるべき。**
+
+```python
+except Exception:
+    pass                      # ← どちらの意味か読み手に分からない
+```
+↓
+```python
+except Exception:
+    logger.debug("close 中の例外は無視してよい", exc_info=True)
+```
+
+---
+
+### 🟢 重要度 11：デッドマン 150ms が3箇所に散っている（保守性）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：提案どおり `config/vehicle.toml` に `[safety]` を新設し、
+> 既存の生成器から配るようにした。
+>
+> | 読み手 | 経路 |
+> |---|---|
+> | `io_node.CMD_TIMEOUT_NS` | `Vehicle.load().cmd_deadman_ms` |
+> | `telemetry_node.CMD_DEADMAN_NS` / `AUTO_CMD_STALE_NS` | 同上 |
+> | `gui/src/input/useDriving.ts` | `SAFETY.cmdDeadmanMs`（`config/generate.py` の生成物） |
+>
+> **判定は今も二重に持つ**（片方が死んでも成立させるための冗長）が、
+> **数字そのものは1つ**になった。GUI 側は送信周期がデッドマンに近づいたら
+> dev ビルドで警告を出す（1発落としただけで停止する状態は設計の破綻）。
+
+```
+raspi/nodes/io_node.py:93         CMD_TIMEOUT_NS  = 150 * 1_000_000
+raspi/nodes/telemetry_node.py:163 CMD_DEADMAN_NS  = 150 * 1_000_000
+gui/src/input/useDriving.ts:47    コメントに「150ms」
+```
+
+今は一致しているが、🟠2 と同じ構造の問題。`docs/architecture.md §9.4` が正と
+されているなら、それを機械可読な TOML に移して既存の生成器から配ると一貫する。
+
+---
+
+### 🟢 重要度 12：ARM のメモリ順序と seqlock（理論上）  ✅ **解決済**（2026-08-21）
+
+> **解決済**：「純 Python では綺麗に直せない」としてあったが、**方法はあった。**
+> `threading.Lock` の acquire/release は CPython 内部で atomic 命令になり、
+> ARM64 では実際に `dmb` が出る。これを `_fence()` として
+> `shm_ring.py` の要所3箇所（書き手2・読み手1）に入れた。
+>
+> - 実測 **68ns/回**。書き込みは 30Hz、読みは検証1回につき1度なので費用は無視できる
+>   （1フレームの JPEG エンコードは ms オーダー）
+> - **言語仕様の保証ではなく CPython の実装の性質に頼っている**ので、
+>   「証明された」とは書いていない。順序が壊れる確率を実用上無視できるところまで
+>   下げるだけのもの。実効的な守りは今もリング段数
+> - `_fence()` は**意図をコードに残す役目**も持つ。消しても x86 では動いてしまい、
+>   Pi 5 でだけ再現困難な形で壊れる
+>
+> モジュール冒頭にも「将来 `torn` が説明のつかない増え方をしたらここを疑う」と
+> 明記した（本項が記録を残した目的）。
+
+`raspi/bus/shm_ring.py:263-270` の seqlock は**アルゴリズムとしては正しい**
+（奇数＝書込中 / 偶数＝安定、読み後に再検証）。
+
+ただし Pi 5 の Cortex-A76 は**弱いメモリモデル**で、プロセス間には GIL の保護が
+無い。理論上、`cur + 2`（安定を示すストア）がデータ書き込みより先に見えうる →
+読み手が `still_valid()` を通過しつつ壊れたフレームを掴む可能性がある。
+
+**正直に言うと、踏む確率は極めて低く、純 Python では綺麗に直せない。**
+記録しておく理由は、将来 `torn` カウンタが説明のつかない増え方をしたときに、
+この可能性を思い出せるようにするため。実用上の緩和（スロット数を増やして書き手が
+同じスロットに戻るまでの時間を延ばす）は既に入っている。
+
+---
+
+### 🟢 重要度 13：`docs/README.md` のプロトコル版が2版古かった（保守性・**修正済み**）  ✅ **解決済**（2026-08-21・**未修正だった分も含めて**）
+
+> **解決済**：レビュー時に「未修正で残した」とされた2件を両方片付けた。
+>
+> **(1) `stm32_interface.md` の見出しと改版履歴** — v0.9 に更新した。
+> 「推測で埋めると、正しく見える嘘が『正』の文書に入る」という懸念はもっともだが、
+> **推測は要らなかった**——`uart_protocol.md` §15 の v0.8/v0.9 の項に
+> 「STM32 側発・ワイヤ形式と LEN の変更なし・`param_id` の対応が増えただけ」
+> という中身がすでに書かれている。本項が本筋と呼んだ
+> 「`uart_protocol.md` の改版履歴を STM32 実装の言葉に落とし直す」を、
+> その記述だけを材料にして行った（新しい事実は1つも足していない）。
+> あわせて `0x0010`/`0x0020` の備考欄（空だった）に
+> 「v0.8 以前は `result=1` を返していた」を補った。
+>
+> **(2) 再発防止** — `config/check_docs.py` を追加。
+> `protocol.toml` の `protocol_version` と、各文書が**自分の版として名乗っている
+> 箇所**を突き合わせる（改版履歴には過去の版が全部並んでいるので、
+> 「どこかに v0.9 と書いてある」では判定にならない）。
+> 名乗る箇所が見つからない場合も**エラーにする**——書き方を変えたときに
+> 黙って素通りするほうが危ない。CI と `tools/check.sh` に載せた。
+>
+> 見ているのは**版番号だけ**。本文の中身が仕様と合っているかは機械には判定できない。
+> ここで潰せるのは「表紙の数字が古い」という、**版を信じて読む人ほど間違える**形の
+> 腐り方に限られる。本項が指摘した「版番号より検証状況のほうが危ない」——
+> 実機確認が取れた時点で文書を直す動線——は**依然として人間の仕事**で、
+> 走行後のチェックリストに入れるのが筋。
+
+レビュー中に発見。`docs/README.md` だけが **v0.7** を掲げていた。
+
+| 場所 | 記載 |
+|---|---|
+| `raspi/proto/protocol.toml:14` | `protocol_version = 0x0009` ← **正** |
+| `docs/uart_protocol.md:3` | v0.9 |
+| `PROGRESS.md:142` | v0.9 |
+| `docs/README.md`（2箇所） | **v0.7** ← 古い |
+
+`docs/README.md` 自身が「文書と食い違ったら toml が正しい」と書いているので、
+判定は明白。**このレビューと同時に v0.9 へ修正した。**
+
+あわせて、`uart_protocol.md` / `PROGRESS.md` が v0.8/v0.9 を「STM32 側 実機未検証」と
+書いたままだった点も修正した（**実際は 2026-08-20 に実機確認済み**。バンビの指摘による）。
+**版番号だけでなく検証状況も同じだけ腐る**——しかも後者の方が危ない。
+「未検証」と書かれた機能は使われなくなるので、腐っていても誰も気づかない。
+
+### さらに見つかったズレ：`stm32_interface.md` の見出しと本文が食い違う（**未修正**）
+
+同じ調査で発見。**本文だけが更新され、見出しと改版履歴が取り残されている。**
+
+| 場所 | 状態 |
+|---|---|
+| `docs/stm32_interface.md:3` | **「バージョン: v0.7（`uart_protocol.md` v0.7 に対応）」** |
+| `docs/stm32_interface.md:5` | 最終更新 2026-08-11 |
+| `docs/stm32_interface.md:1117` | `0x0010` TC 有効 ← **v0.8 の内容が入っている** |
+| `docs/stm32_interface.md:1124` | `0x0050` 片輪浮き対策 ← **「★v0.9 で STM32 側が実装」と明記** |
+| 改版履歴（末尾） | **v0.6 で止まっている** |
+
+本書の読者は **STM32 ファームウェア実装者**。冒頭で「v0.7 対応」と宣言している文書の
+中に v0.9 の仕様が混ざっているのは、**版を信じて読む人ほど間違える**形になっている。
+
+**未修正で残した理由**: 改版履歴に書くべき「v0.7 → v0.8 → v0.9 で STM32 側の実装が
+どう変わったか」の中身は、レビュー時点の情報からは復元できない。
+**推測で埋めると、正しく見える嘘が『正』の文書に入る**ので手を付けなかった。
+`uart_protocol.md` の v0.8/v0.9 の改版履歴を STM32 実装の言葉に落とし直すのが本筋。
+
+### 根本原因
+
+**🟠2 と同じ構造**——同じ事実が複数箇所に手書きで散っている。
+`protocol.toml` から版番号を読んで文書へ差し込む仕組みがあれば、どちらも起きなかった。
+`generate.py --check` の対象を「生成コード」だけでなく**「文書中の版番号」**まで
+広げるのが筋の良い直し方。
+
+**そして版番号より検証状況の方が危ない。**
+「未検証」と書かれた機能は使われなくなるので、**腐っていても誰も気づかない**。
+実機確認が取れた時点で文書を直す動線（走行後のチェックリストに入れる等）が要る。
+
+---
+
+### 確認したが問題が無かった箇所
+
+疑って読み、**シロだったもの**も記録しておく。同じ場所を二度疑わないため。
+
+| 箇所 | 確認内容 |
+|---|---|
+| `proto/framing.py:203-219` | `plen` は1バイト（≤255）で境界内。CRC 検証が payload 使用より前。長さは期待値と照合。バッファ無限成長も無し |
+| `msgs/convert.py:216-221` | 速度・舵角を Pi 側でもクランプ。`speed: 1e9` は `max_speed` に丸まる |
+| `auto/base.py:114-131` | `merged()` が planner 側で範囲クランプし NaN も弾く。GUI を信用していない |
+| `nav/scan2scan.py:158` | `MIN_POINTS` で空配列を事前に弾く。`np.median` on empty は起きない |
+| `nav/grid.py:151` / `nav/obstacles.py:91` | `if not live.any(): return` / `if b - a < min_points: continue` で空スライスを防いでいる |
+| `input/useDriving.ts:243-251` | `blur` と `visibilitychange` を両方購読し cleanup も完備。**スロットル張り付きは対策済み** |
+| `telemetry_node.py:721-723` | `create_subprocess_exec` を argv で呼び `shell=True` なし |
+| `telemetry_node.py:791-798` | `_resolve_log_path` のパストラバーサル対策が正しい |
+| `io/serial_link.py:42` | `read_timeout=0.005` でメインループが律速される。ビジーループではない |
+
+---
+
+### 着手順  ✅ **全項目 対応済**（2026-08-21）
+
+当初の見立ては下記のとおりだったが、**13項目すべてをこの日のうちに片付けた。**
+🟠2（`gen_msgs.py`）を先に入れると 🟠3-② と 🟢11 の受け皿が揃うので、
+「次の設計サイクル」に置いていたものを前倒しした。
+
+| 項目 | 状態 | 備考 |
+|---|---|---|
+| 🔴1 | ✅ 解決済 | Origin 検査・engage の操縦権・共有トークン・既定 loopback の4つとも |
+| 🟠2 | ✅ 解決済 | `config/gen_msgs.py`。コメントと固定長も移した |
+| 🟠3 | ✅ 解決済 | `noUncheckedIndexedAccess` で**実バグが1つ出た**（`ws/map.ts` の `PALETTE`） |
+| 🟡4 | ✅ 解決済 | `_decode_cmd()` に閉じ、捨てた数を `bad_cmds` に出す |
+| 🟡5 | ✅ 解決済 | `.github/workflows/ci.yml` + `tools/check.sh`。`--check` は4つに |
+| 🟡6 | ✅ 解決済 | 範囲指定 + `requirements.lock.txt` の二段構え |
+| 🟡7 | ✅ 対応済 | 実測したうえで**直さないと決めた**（二重ぶんは Pi 5 全体の **0.8%**） |
+| 🟡8 | ✅ 解決済 | 64MB 超は 413 + `scp` のコマンドを本文に |
+| 🟢9 | ✅ 解決済 | `is_relative_to()` |
+| 🟢10 | ✅ 解決済 | `raspi/core/cleanup.py`。`jpeg.py` の `last_error` 方式を横に広げた |
+| 🟢11 | ✅ 解決済 | `vehicle.toml` の `[safety]` から Pi と GUI の両方へ配る |
+| 🟢12 | ✅ 解決済 | `threading.Lock` の atomic をフェンスとして使う（実測 68ns） |
+| 🟢13 | ✅ 解決済 | `stm32_interface.md` を v0.9 に + `config/check_docs.py` で再発防止 |
+
+検証: `pytest raspi/tests` **434 passed, 1 skipped**（新規テスト10件）/
+`tsc -b` エラーなし（`noUncheckedIndexedAccess` 込み）/ `--check` 4つとも一致。
+
+<details><summary>当初の見立て（記録として残す）</summary>
+
+**今日中（30分）**
+1. 🔴1-①② — Origin 検査と `engage` の操縦権要求。合わせて15行程度
+2. 🟠3-① — `noUncheckedIndexedAccess: true` を1行追加し、`tsc` の指摘を潰す
+
+**今週（半日）**
+3. 🟡5 — CI。既存の `--check` が動き出すだけで 🟠2 の再発が止まる
+4. 🟡6 — 依存のピン留め。大会前日に効く
+5. 🟡4 — `cmd` デコードの例外処理
+6. 🟢13 の再発防止 — `protocol.toml` の版番号を文書へ差し込む `--check` を足す
+
+**次の設計サイクル**
+6. 🟠2 — `gen_msgs.py`。これが入ると 🟠3 と 🟢11 も自然に解ける
+7. 🟡7・🟡8 — 実測してから判断
+
+</details>
+
+---
+
+### 未レビュー領域（次回の入口）
+
+今回は手が回らなかった。次にレビューするならここから。
+
+- `raspi/nodes/telemetry_node.py` の非同期処理全体（1177行のうち、読んだのは
+  WS ハンドラ・制御ディスパッチ・静的配信・subprocess 起動のみ）。
+  遅いクライアント1台が全体をブロックしないか、`_camera_pump` の背圧
+- `raspi/io/gpio.py` の E-Stop ハートビート（525行）。`gpio.py:255` が
+  ブザー鳴動ごとにスレッドを起こしている点は要確認（連打でスレッド漏れしないか）
+- `raspi/nodes/camera_node.py` の `CameraWorker` スレッドと shm 書き込みの協調
+- `raspi/auto/` の3プランナ（gap_pursuit / disparity_extender / follow_the_gap）の
+  アルゴリズム的正しさ。今回は空配列・ゼロ除算の機械スキャンのみ
+- `sim/` 全体（実機に影響しないので優先度は低い）
+
+---
