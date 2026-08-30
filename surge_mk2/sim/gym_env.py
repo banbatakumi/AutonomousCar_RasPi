@@ -113,6 +113,7 @@ class SimE2EEnv:
                 max_speed: float = 1.5,
                 collision_penalty: float = -5.0, progress_weight: float = 1.0,
                 cross_track_weight: float = 0.5, cross_track_margin_frac: float = 0.5,
+                speed_weight: float = 0.3,
                 steer_tau: float = 0.10, steer_rate_weight: float = 0.2,
                 start_jitter_m: float = 0.03,
                 start_jitter_rad: float = math.radians(5), sim_params: SimParams | None = None,
@@ -141,6 +142,16 @@ class SimE2EEnv:
             ノーペナルティ、そこから壁（±0.5m）までの残り±0.25mだけ
             `cross_track_weight`で罰する。0にすると常に中心線への距離を罰する
             旧来の挙動に戻る
+        :param speed_weight: 毎ステップ`speed/max_speed`に掛けて加算する速度ボーナス
+            （2026-08-30、v5評価でバンビが指摘した「衝突はしないが速度・ライン取りが
+            消極的」への対応で追加）。`progress`（弧長方向の移動量）も間接的に速度と
+            相関するが、典型的な`progress`報酬（0.1〜0.15/step程度）に対して
+            `collision_penalty=-5.0`は30〜50ステップ分に相当し、方策が「速く走る
+            リスク」を過大評価して速度を抑える方向に偏りやすい。この項は`progress`
+            と独立に速度そのものへ価値を持たせ、相対的に`collision_penalty`の
+            重みを弱めて積極的な走行を後押しする狙い。**初期値0.3は未検証**——
+            `progress`の典型値と同程度のオーダーになるよう見積もっただけで、
+            v6の学習結果を見て調整が要る可能性がある
         :param steer_tau: 舵指令に掛ける一次遅れの時定数 [s]。`raspi/auto/e2e_lidar.py`
             の`steer_tau`ParamSpec（既定0.10）と同じ仕組み・同じ既定値を学習側にも
             適用する（2026-08-29、バンビの「舵が不安定」報告の診断を受けて追加）。
@@ -171,6 +182,7 @@ class SimE2EEnv:
         self.collision_penalty = collision_penalty
         self.progress_weight = progress_weight
         self.cross_track_weight = cross_track_weight
+        self.speed_weight = speed_weight
         self.steer_tau = steer_tau
         self.steer_rate_weight = steer_rate_weight
         self.start_jitter_m = start_jitter_m
@@ -285,8 +297,9 @@ class SimE2EEnv:
         margin = half_w * self.cross_track_margin_frac
         cross_excess = max(0.0, abs(cross_track) - margin)
         steer_rate = abs(self._steer - prev_steer)
+        speed_frac = float(np.clip(self.vehicle.speed, 0.0, self.max_speed)) / self.max_speed
         reward = (self.progress_weight * progress - self.cross_track_weight * cross_excess
-                 - self.steer_rate_weight * steer_rate)
+                 - self.steer_rate_weight * steer_rate + self.speed_weight * speed_frac)
 
         terminated = False
         if hit:

@@ -152,6 +152,34 @@ class TestSimE2EEnv(unittest.TestCase):
 
         self.assertGreater(run(1.0), run(0.0))
 
+    def test_speed_weight_rewards_higher_speed(self):
+        """速度ボーナス（2026-08-30追加、v5評価で速度・ライン取りが消極的だった
+        ことへの対応）: 同じ「直進・全開」行動でも`speed_weight`が大きいほど
+        合計報酬が高くなるはず。"""
+
+        def run(speed_weight: float) -> float:
+            env = _make_env(max_steps=5, speed_weight=speed_weight, randomize_lidar=False)
+            env.reset()
+            total = 0.0
+            for _ in range(5):
+                _, r, terminated, truncated, _ = env.step(np.array([0.0, 1.0]))
+                total += r
+                if terminated or truncated:
+                    break
+            return total
+
+        self.assertGreater(run(0.5), run(0.0))
+
+    def test_speed_weight_has_no_effect_when_stationary(self):
+        """静止（speed=0）なら`speed_weight`をいくつにしても速度ボーナスは0のまま。"""
+        env = _make_env(max_steps=20, cross_track_weight=0.0, speed_weight=0.5)
+        env.reset()
+        total = 0.0
+        for _ in range(20):
+            _, r, _, _, _ = env.step(np.array([0.0, 0.0]))
+            total += r
+        self.assertAlmostEqual(total, 0.0, delta=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()
