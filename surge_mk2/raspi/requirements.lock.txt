@@ -16,7 +16,7 @@
 # ## 作り直し方
 #
 #   ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/pip list --format=freeze' \
-#     | grep -iE '^(mcap|msgspec|numpy|pyserial|pyzmq|websockets|lz4|zstandard)='
+#     | grep -iE '^(mcap|msgspec|numpy|pyserial|pyzmq|websockets|lz4|zstandard|onnxruntime|flatbuffers|packaging|protobuf)='
 #
 # **pytest 系と pygame は入れない。** テストは開発機で走らせるものだし、
 # pygame はシミュレータ（`sim/`、Mac 側）専用で Pi には要らない。
@@ -35,3 +35,11 @@ websockets==17.0.1
 # ── mcap が引き込む圧縮ライブラリ（直接は import しない） ──
 lz4==4.4.5
 zstandard==0.25.0
+
+# ── Phase 5（カメラ認識・e2e_lidar 推論） ──
+onnxruntime==1.29.0
+
+# ── onnxruntime が引き込む依存（直接は import しない） ──
+flatbuffers==25.12.19
+packaging==26.3
+protobuf==7.36.0
