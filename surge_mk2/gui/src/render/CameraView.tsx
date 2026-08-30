@@ -230,8 +230,20 @@ export function CameraView({
           ctx.drawImage(maskBitmapRef.current, dx, dy, dw, dh)
           ctx.restore()
         }
-        if (guide) drawGuide(ctx, w, h, camHeightRef.current, cam)
-        if (showLineTargetRef.current) drawLineTarget(ctx, w, h, camHeightRef.current)
+        // ガイドは映像そのもの（`dx,dy,dw,dh`）を基準に投影する。**箱の w/h では
+        // 主点・焦点距離が箱基準になってしまう**——箱の形は CSS グリッドの行の
+        // 高さで決まるだけで、前後カメラそれぞれの実アスペクト比（`bottomCrop`
+        // が違うため異なる）とは一致せず、レターボックス量が前後で変わる。
+        // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
+        // ガイドがズレる（2026-08-31、後方カメラのガイドが上に大きくズレる
+        // 不具合として発見）
+        if (guide || showLineTargetRef.current) {
+          ctx.save()
+          ctx.translate(dx, dy)
+          if (guide) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
+          if (showLineTargetRef.current) drawLineTarget(ctx, dw, dh, camHeightRef.current)
+          ctx.restore()
+        }
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
