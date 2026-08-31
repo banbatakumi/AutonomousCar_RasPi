@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Callable
 
 import numpy as np
@@ -127,6 +128,7 @@ class SimE2EEnv:
                 cross_track_weight: float = 0.5, cross_track_margin_frac: float = 0.5,
                 speed_weight: float = 0.3,
                 steer_tau: float = 0.10, steer_rate_weight: float = 0.2,
+                slip_weight: float = 0.2,
                 start_jitter_m: float = 0.03,
                 start_jitter_rad: float = math.radians(5), sim_params: SimParams | None = None,
                 randomize_lidar: bool = True,
@@ -134,6 +136,12 @@ class SimE2EEnv:
                 lidar_noise_rel_range: tuple[float, float] = (0.0, 0.015),
                 lidar_drop_rate_range: tuple[float, float] = (0.0, 0.06),
                 lidar_sector_drop_rate_range: tuple[float, float] = (0.0, 0.015),
+                randomize_dynamics: bool = True,
+                mu_range: tuple[float, float] = (0.4, 1.1),
+                tau_steer_s_range: tuple[float, float] = (0.05, 0.25),
+                dead_time_s_range: tuple[float, float] = (0.0, 0.08),
+                tau_speed_s_range: tuple[float, float] = (0.15, 0.6),
+                rolling_resistance_range: tuple[float, float] = (0.15, 0.6),
                 seed: int = 0) -> None:
         """:param courses: 固定のコース群から毎エピソードランダムに選ぶ（`ml_lidar/watch.py`
             のように同じコースを繰り返し見せたいときはこちら）。
@@ -149,6 +157,18 @@ class SimE2EEnv:
             `*_range`からランダムに引き直す（訓練用。センサ条件のドメインランダム化）。
             `False`なら`sim_params`（既定`SimParams()`）を固定で使う（評価用。条件を
             揃えて比較したいので`ml_lidar/train_rl.py`の`make_eval_env`はこちらを使う）
+        :param randomize_dynamics: `True`なら毎エピソード`spec`の`[dynamics]`未実測
+            パラメータ（`mu`・`tau_steer_s`・`dead_time_s`・`tau_speed_s`・
+            `rolling_resistance`）を`*_range`からランダムに引き直す（2026-08-31追加。
+            `randomize_lidar`と同じ考え方——`config/vehicle.toml`の`[dynamics]`は
+            実車未計測の仮値なので、実測が済むまでは特定の値に過学習させず頑健性を
+            稼ぐ）。幾何・質量（実測確定済み）は変えない。`False`なら`spec`をそのまま
+            固定で使う（評価用。`make_eval_env`は`randomize_lidar`と同様こちらを使う）。
+            **`mu_range`の下限0.4は、既定`max_speed=1.5`・`spec.max_steer`条件で
+            グリップ限界クランプが実際に発動するのが`mu`≲0.58のときだけという
+            計算に基づく**——上限側だけの範囲だとランダム化が学習に何の変化も
+            もたらさない。他レンジは未実測パラメータの初期推定値±50%程度の
+            未検証の見積もり
         :param cross_track_margin_frac: 道幅の半分のうち、ペナルティ無しで自由に
             使ってよい割合。既定0.5＝道幅1.0mのコースなら中心線から±0.25mは
             ノーペナルティ、そこから壁（±0.5m）までの残り±0.25mだけ
@@ -176,6 +196,13 @@ class SimE2EEnv:
             出力を選ぶ動機にはならない（急な生出力を出しても、なまった後の見た目は
             滑らかに見えてしまう）ため、実際に車両へ伝わる舵角の変化量そのものを
             直接罰することで「滑らかに操舵した方が得」という圧力を報酬に持たせる
+        :param slip_weight: `VehicleModel.slip_frac`（要求向心加速度がグリップ限界
+            `mu*g`を超えた比率）に掛ける罰則の重み（2026-08-31、バンビの「高速旋回で
+            滑る設計になっているか」という指摘への対応で追加）。グリップ限界の
+            クランプ自体（`sim/vehicle.py`）はコーナー前の減速を学ぶ動機を与える
+            狙いで既に入っていたが、罰則が無いため衝突するまで方策が気づけなかった。
+            **初期値0.2は未検証**——`steer_rate_weight`と同程度のオーダーで見積もった
+            だけで、学習結果を見て調整が要る可能性がある
 
         最大舵角は独立した引数を持たない——**`spec.max_steer`（`config/vehicle.toml`の
         車両物理限界）をそのまま使う**（2026-08-28、バンビの指示。自動運転planner側の
@@ -197,6 +224,7 @@ class SimE2EEnv:
         self.speed_weight = speed_weight
         self.steer_tau = steer_tau
         self.steer_rate_weight = steer_rate_weight
+        self.slip_weight = slip_weight
         self.start_jitter_m = start_jitter_m
         self.start_jitter_rad = start_jitter_rad
         self.sim_params = sim_params or SimParams()
@@ -205,6 +233,12 @@ class SimE2EEnv:
         self.lidar_noise_rel_range = lidar_noise_rel_range
         self.lidar_drop_rate_range = lidar_drop_rate_range
         self.lidar_sector_drop_rate_range = lidar_sector_drop_rate_range
+        self.randomize_dynamics = randomize_dynamics
+        self.mu_range = mu_range
+        self.tau_steer_s_range = tau_steer_s_range
+        self.dead_time_s_range = dead_time_s_range
+        self.tau_speed_s_range = tau_speed_s_range
+        self.rolling_resistance_range = rolling_resistance_range
         self.rng = np.random.default_rng(seed)
 
         self.course: Course | None = None
@@ -237,8 +271,9 @@ class SimE2EEnv:
         jyaw = self.rng.normal(0.0, self.start_jitter_rad)
         start = (float(cx + jx), float(cy + jy), float(cyaw + jyaw))
 
-        self.vehicle = VehicleModel(self.spec, start)
-        self.lidar = VirtualLidar(self.course, self.spec, self._episode_sim_params(),
+        episode_spec = self._episode_spec()
+        self.vehicle = VehicleModel(episode_spec, start)
+        self.lidar = VirtualLidar(self.course, episode_spec, self._episode_sim_params(),
                                   seed=int(self.rng.integers(1 << 31)))
         self.asm = ScanAssembler()
         self._body = self.course.body_samples(self.spec.footprint)
@@ -263,6 +298,23 @@ class SimE2EEnv:
         p.lidar_drop_rate = float(self.rng.uniform(*self.lidar_drop_rate_range))
         p.lidar_sector_drop_rate = float(self.rng.uniform(*self.lidar_sector_drop_rate_range))
         return p
+
+    def _episode_spec(self) -> VehicleSpec:
+        """このエピソードで使う`VehicleSpec`。`randomize_dynamics`なら`[dynamics]`の
+        未実測パラメータ（mu・tau_steer_s・dead_time_s・tau_speed_s・
+        rolling_resistance）だけをエピソードごとに引き直す（ドメインランダム化）。
+        幾何・質量は実測確定済みなので変更しない。`_episode_sim_params`と同じ理由で
+        `self.spec`をその場で書き換えず、毎回コピーを作る。"""
+        if not self.randomize_dynamics:
+            return self.spec
+        return replace(
+            self.spec,
+            mu=float(self.rng.uniform(*self.mu_range)),
+            tau_steer_s=float(self.rng.uniform(*self.tau_steer_s_range)),
+            dead_time_s=float(self.rng.uniform(*self.dead_time_s_range)),
+            tau_speed_s=float(self.rng.uniform(*self.tau_speed_s_range)),
+            rolling_resistance=float(self.rng.uniform(*self.rolling_resistance_range)),
+        )
 
     def _start_index_away_from_obstacles(self, i: int, *, max_tries: int = 20,
                                          min_dist_m: float = 0.25) -> int:
@@ -328,8 +380,10 @@ class SimE2EEnv:
         cross_excess = max(0.0, abs(cross_track) - margin)
         steer_rate = abs(self._steer - prev_steer)
         speed_frac = float(np.clip(self.vehicle.speed, 0.0, self.max_speed)) / self.max_speed
+        slip = self.vehicle.slip_frac
         reward = (self.progress_weight * progress - self.cross_track_weight * cross_excess
-                 - self.steer_rate_weight * steer_rate + self.speed_weight * speed_frac)
+                 - self.steer_rate_weight * steer_rate + self.speed_weight * speed_frac
+                 - self.slip_weight * slip)
 
         terminated = False
         if hit:
@@ -339,7 +393,7 @@ class SimE2EEnv:
         self._steps += 1
         truncated = self._steps >= self.max_steps
 
-        info = {"cross_track": cross_track, "collided": hit, "progress": progress}
+        info = {"cross_track": cross_track, "collided": hit, "progress": progress, "slip": slip}
         return self._obs(self._last_scan), reward, terminated, truncated, info
 
     def _obs(self, scan: Scan) -> np.ndarray:

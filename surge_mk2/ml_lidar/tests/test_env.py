@@ -180,6 +180,60 @@ class TestSimE2EEnv(unittest.TestCase):
             total += r
         self.assertAlmostEqual(total, 0.0, delta=1e-6)
 
+    def test_randomize_dynamics_varies_mu_between_episodes(self):
+        """`randomize_dynamics=True`（既定、2026-08-31追加）なら毎エピソード
+        `[dynamics]`未実測パラメータ（mu等）が変わる。"""
+        env = _make_env(randomize_dynamics=True)
+        env.reset()
+        mu1 = env.vehicle.spec.mu
+        env.reset()
+        mu2 = env.vehicle.spec.mu
+        env.reset()
+        mu3 = env.vehicle.spec.mu
+        self.assertFalse(mu1 == mu2 == mu3)
+
+    def test_randomize_dynamics_false_keeps_spec_fixed(self):
+        """評価環境（`train_rl.py`の`make_eval_env`）はここを`False`にして条件を揃える。"""
+        env = _make_env(randomize_dynamics=False)
+        env.reset()
+        mu1 = env.vehicle.spec.mu
+        env.reset()
+        mu2 = env.vehicle.spec.mu
+        self.assertEqual(mu1, mu2)
+        self.assertEqual(mu1, env.spec.mu)
+
+    def test_slip_weight_penalizes_grip_limit_violation(self):
+        """slip_weight（2026-08-31追加、`VehicleModel.slip_frac`に掛ける罰則）:
+        高速で走り続けるとグリップ限界を超え続けるので、slip_weightが大きいほど
+        合計報酬が低くなるはず。壁への衝突で早期終了すると2つの`run()`が同じ
+        ステップ数しか比較できず差が出ない（＝collisionの影響が支配的になる）
+        ことがあるため、幅の広いコース（width=20m）を使って衝突を避ける。"""
+
+        def run(slip_weight: float) -> float:
+            rng = np.random.default_rng(0)
+            courses = [generate_random_course(rng, name="wide", width=20.0)]
+            env = SimE2EEnv(courses, seed=0, max_steps=10, max_speed=6.0,
+                            randomize_dynamics=False, randomize_lidar=False,
+                            slip_weight=slip_weight)
+            env.reset()
+            action = np.array([0.1, 6.0])
+            total = 0.0
+            for _ in range(10):
+                _, r, terminated, truncated, _ = env.step(action)
+                total += r
+                if terminated or truncated:
+                    break
+            return total
+
+        self.assertGreater(run(0.0), run(1.0))
+
+    def test_step_info_includes_slip(self):
+        env = _make_env(max_steps=5)
+        env.reset()
+        _, _, _, _, info = env.step(np.array([0.0, 1.0]))
+        self.assertIn("slip", info)
+        self.assertGreaterEqual(info["slip"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

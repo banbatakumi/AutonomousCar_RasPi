@@ -61,6 +61,18 @@ class TestVehicleGripLimit(unittest.TestCase):
         spec = VehicleSpec.load()
         self.assertGreater(spec.mu, 0.0)
 
+    def test_slip_frac_zero_when_within_grip_limit(self):
+        spec = VehicleSpec(mu=0.8)
+        v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=0.3, speed=0.3)
+        self.assertEqual(v.slip_frac, 0.0)
+
+    def test_slip_frac_positive_when_grip_limit_saturated(self):
+        """`test_saturated_case_reaches_exactly_the_grip_limit`と同条件——
+        頭打ちが働いているときは`slip_frac`が正になる。"""
+        spec = VehicleSpec(mu=0.8)
+        v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
+        self.assertGreater(v.slip_frac, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

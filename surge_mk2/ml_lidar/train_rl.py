@@ -77,7 +77,8 @@ def linear_schedule(initial_value: float) -> Callable[[float], float]:
 
 
 def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
-                      steer_tau: float, steer_rate_weight: float, speed_weight: float):
+                      steer_tau: float, steer_rate_weight: float, speed_weight: float,
+                      slip_weight: float):
     """ワーカープロセスの中で、**エピソードのたびに新しいランダムコースを作る**
     `GymSurgeEnv` を返す関数を作る。
 
@@ -105,27 +106,32 @@ def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
     def _make():
         env = GymSurgeEnv(course_fn=generate_diverse_course, max_steps=max_steps,
                           max_speed=max_speed, seed=seed, steer_tau=steer_tau,
-                          steer_rate_weight=steer_rate_weight, speed_weight=speed_weight)
+                          steer_rate_weight=steer_rate_weight, speed_weight=speed_weight,
+                          slip_weight=slip_weight)
         return Monitor(env)   # エピソード報酬/長さの集計を正しく取るため
 
     return _make
 
 
 def make_eval_env(*, max_steps: int, max_speed: float, steer_tau: float,
-                  steer_rate_weight: float, speed_weight: float, seed: int = 0) -> GymSurgeEnv:
+                  steer_rate_weight: float, speed_weight: float, slip_weight: float,
+                  seed: int = 0) -> GymSurgeEnv:
     """`circuit`/`fuji` ——学習に使っていない既知コースで評価する。
 
     `randomize_lidar=False`でLiDARノイズも既定値に固定する。学習側はノイズを
     ランダム化しているので、評価だけは条件を揃えないと「今回は運良く/悪くノイズが
-    軽かった」で数字がぶれてしまう。`steer_tau`/`steer_rate_weight`/`speed_weight`は
+    軽かった」で数字がぶれてしまう。`randomize_dynamics=False`も同じ理由
+    （2026-08-31追加、`[dynamics]`未実測パラメータのドメインランダム化とセット）。
+    `steer_tau`/`steer_rate_weight`/`speed_weight`/`slip_weight`は
     学習側と揃える（実運用の滑らかさ・速度の攻め方をそのまま評価スコア・
     `best_model`選定に反映させるため）。
     """
     courses = [Course.load(DEFAULT_COURSE_DIR / "circuit.json"),
               Course.load(DEFAULT_COURSE_DIR / "fuji.json")]
     return GymSurgeEnv(courses, max_steps=max_steps, max_speed=max_speed,
-                       seed=seed, randomize_lidar=False, steer_tau=steer_tau,
-                       steer_rate_weight=steer_rate_weight, speed_weight=speed_weight)
+                       seed=seed, randomize_lidar=False, randomize_dynamics=False,
+                       steer_tau=steer_tau, steer_rate_weight=steer_rate_weight,
+                       speed_weight=speed_weight, slip_weight=slip_weight)
 
 
 def main() -> int:
@@ -176,6 +182,12 @@ def main() -> int:
                          "に対して速度の効きが弱く、方策が速度・ライン取りに消極的に"
                          "なりやすかった（v5評価でバンビが指摘、2026-08-30追加）。"
                          "初期値0.3は未検証——`sim/gym_env.py`の`SimE2EEnv`docstring参照")
+    ap.add_argument("--slip-weight", type=float, default=0.2,
+                    help="要求向心加速度がグリップ限界(mu*g)を超えた比率"
+                         "（`VehicleModel.slip_frac`）に掛ける罰則の重み。滑走・"
+                         "グリップ限界超過そのものを直接罰する（2026-08-31追加、"
+                         "バンビの「高速旋回で滑る設計か」という指摘への対応）。"
+                         "初期値0.2は未検証——`sim/gym_env.py`の`SimE2EEnv`docstring参照")
     ap.add_argument("--hidden-sizes", type=int, nargs="+", default=[256, 256],
                     help="方策/価値ネットワークの隠れ層サイズ（SB3既定は[64,64]）。"
                          "★2026-08-29追加: 観測は点群361点+速度1個=362次元あるのに、"
@@ -212,14 +224,15 @@ def main() -> int:
         "n_eval_episodes": args.n_eval_episodes, "target_kl": args.target_kl,
         "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
         "steer_tau": args.steer_tau, "steer_rate_weight": args.steer_rate_weight,
-        "speed_weight": args.speed_weight,
+        "speed_weight": args.speed_weight, "slip_weight": args.slip_weight,
         "hidden_sizes": args.hidden_sizes,
     }, indent=2), encoding="utf-8")
 
     env_fns = [make_train_env_fn(args.seed + i, max_steps=args.max_steps,
                                  max_speed=args.max_speed, steer_tau=args.steer_tau,
                                  steer_rate_weight=args.steer_rate_weight,
-                                 speed_weight=args.speed_weight)
+                                 speed_weight=args.speed_weight,
+                                 slip_weight=args.slip_weight)
               for i in range(args.n_envs)]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
     vec_env = vec_cls(env_fns)
@@ -241,7 +254,7 @@ def main() -> int:
     eval_env = DummyVecEnv([lambda: Monitor(make_eval_env(
         max_steps=args.max_steps, max_speed=args.max_speed, steer_tau=args.steer_tau,
         steer_rate_weight=args.steer_rate_weight, speed_weight=args.speed_weight,
-        seed=args.seed + 999))])
+        slip_weight=args.slip_weight, seed=args.seed + 999))])
     # ★早期終了。評価スコアが`early_stop_patience`回連続で更新されなければ、
     # `--timesteps`に達していなくても学習を打ち切る（無駄な計算を続けない）。
     # `min_evals`で学習ごく初期のノイズだけで早まって打ち切らないようにしてある

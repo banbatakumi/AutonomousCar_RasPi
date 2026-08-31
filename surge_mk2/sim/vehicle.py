@@ -237,6 +237,15 @@ class VehicleModel:
     def accel_lateral(self) -> float:
         return self.speed * self.yaw_rate
 
+    @property
+    def slip_frac(self) -> float:
+        """要求向心加速度が mu*g を超えた分の比率。0=余裕あり、
+        1=ちょうど mu*g ぶん超過。グリップ限界クランプ（`step()`参照）が
+        実際に効いているかどうかを学習側に伝えるための量。"""
+        requested_a_lat = self.speed ** 2 * abs(math.tan(self.steer_actual)) / self.spec.wheelbase
+        a_lat_max = self.spec.mu * GRAVITY_MPS2
+        return max(0.0, requested_a_lat - a_lat_max) / a_lat_max
+
 
 def _toward_zero(v: float, delta: float) -> float:
     if abs(v) <= delta:
