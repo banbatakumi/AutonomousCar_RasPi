@@ -158,7 +158,11 @@
  * **残した**（ここは操作性と衝突しないので削らない）:
  *
  * - `Esc` / 画面の E-STOP ボタン / armed 中のパッドの × … 即 DISARM。**権限も条件も要らない**
- * - ウィンドウのフォーカス喪失・タブが背後に回る … 即 DISARM
+ * - タブが背後に回る（`document.hidden`）… 即 DISARM。**単なるウィンドウのフォーカス
+ *   喪失（`blur`）では DISARM しない**（2026-08-31）。iPad の Split View・OS の通知
+ *   バナー・パッド接続時のシステムオーバーレイ等で、離席していなくても `blur` は
+ *   容易に発火するため（パッドはキー押下状態を持たないので `blur` を安全網にする
+ *   理由が無い）
  * - 送信が止まれば `SAFETY.cmdDeadmanMs` でサーバが DISARM、さらに io_node が同じだけで DISARM
  * - 無操作 `settings.armIdleTimeoutMs` … 自動 DISARM（放置した場合の最後の受け皿）
  * - `settings.autoStop`（v0.7、既定 ON）… **進行方向の超音波が 20cm 未満なら STM32 が単独で
@@ -192,6 +196,8 @@
  *
  * rAF はタブが隠れると止まる ＝ 送信も止まる ＝ `DEADMAN_MS` でサーバが DISARM。
  * **止まる方向に転ぶので安全側**（`visibilitychange` の即 DISARM と二重）。
+ * ARM 中は画面ロックによる `hidden` 化を Wake Lock API で抑止するので、この経路が
+ * 意図せず頻発することはない（下記 `useDriving` 内の Wake Lock 節参照）。
  *
  * ### 2. レートリミットは「GUI で作り、STM32 は保険」に一元化
  *
@@ -453,24 +459,80 @@ export function useDriving(ch: ControlChannel | null) {
     }
     const up = (e: KeyboardEvent) => keys.current.delete(e.code)
 
-    // **フォーカスを失ったら即 DISARM。** 押しっぱなし扱いのまま裏に回ると、
-    // 戻ってきたときに突然走り出す
-    const onBlur = () => disarm('ウィンドウのフォーカスが外れた')
+    // **タブが背後に回ったら即 DISARM。** 押しっぱなし扱いのまま裏に回ると、
+    // 戻ってきたときに突然走り出す。
+    //
+    // ⚠ 単なる `blur`（ウィンドウのフォーカス喪失）では DISARM しない（2026-08-31）。
+    // iPad の Split View・OS の通知バナー・ゲームパッド接続時のシステム
+    // オーバーレイなどで、操作者が離席していなくても `blur` は容易に発火する。
+    // パッドはキー押下状態を持たない（毎フレーム `navigator.getGamepads()` を
+    // 読むだけ）ので、そもそも `blur` を安全網にする理由が無い。
     const onHide = () => {
       if (document.hidden) disarm('タブが背後に回った')
     }
 
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
-    window.addEventListener('blur', onBlur)
     document.addEventListener('visibilitychange', onHide)
     return () => {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
-      window.removeEventListener('blur', onBlur)
       document.removeEventListener('visibilitychange', onHide)
     }
   }, [ch])
+
+  // ── Wake Lock: ARM 中は画面ロックを抑止する ──
+  //
+  // `blur` DISARM を撤廃した後も、iPad の画面自動ロックは `document.hidden` を
+  // 真にするので `onHide` 経由で（正しく）DISARM される。走行中に画面が消灯して
+  // 止まるのは運用上困るので、ARM 中だけ Wake Lock で画面ロックそのものを防ぐ。
+  //
+  // 失敗（非対応ブラウザ・API 拒否）は握りつぶす。**Wake Lock は快適性のための
+  // 機能であり、取得できなくても走行の安全性には影響しない**。
+  useEffect(() => {
+    if (!('wakeLock' in navigator)) return
+
+    let sentinel: WakeLockSentinel | null = null
+    let cancelled = false
+
+    const release = () => {
+      const s = sentinel
+      sentinel = null
+      s?.release().catch(() => {})
+    }
+    const acquire = () => {
+      if (sentinel || document.hidden) return
+      navigator.wakeLock.request('screen').then((s) => {
+        if (cancelled) {
+          s.release().catch(() => {})
+          return
+        }
+        sentinel = s
+      }).catch(() => {
+        // 非対応・拒否・低バッテリー等はここに来る。ARM 自体は妨げない
+      })
+    }
+
+    const unsub = useUi.subscribe((state, prev) => {
+      if (state.armRequested === prev.armRequested) return
+      if (state.armRequested) acquire()
+      else release()
+    })
+    // Wake Lock はタブが hidden になると自動解放される。ARM したまま復帰したら取り直す
+    const onVisible = () => {
+      if (!document.hidden && useUi.getState().armRequested) acquire()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+
+    if (useUi.getState().armRequested) acquire()
+
+    return () => {
+      cancelled = true
+      unsub()
+      document.removeEventListener('visibilitychange', onVisible)
+      release()
+    }
+  }, [])
 
   // ── rAF で積分し、50Hz で送る ──
   useEffect(() => {
@@ -767,7 +829,7 @@ export function useDriving(ch: ControlChannel | null) {
 
       // ⚠ **自律走行中は無操作タイムアウトを掛けない。** 人が何も触らないのが
       // 正常な状態なので、20秒で勝手に止まったら自律走行にならない。
-      // 代わりの受け皿は従来どおり全部生きている（Esc / E-STOP / フォーカス喪失 /
+      // 代わりの受け皿は従来どおり全部生きている（Esc / E-STOP /
       // タブが背後に回る / 送信が止まれば `DEADMAN_MS` で DISARM）。
       // **画面を見ていられる間だけ走る**という前提は変わっていない
       if (engaged) lastActivity.current = now
