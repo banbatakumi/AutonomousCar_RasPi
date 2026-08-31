@@ -193,6 +193,15 @@ class PlanningNode:
         self._last_plan_ns = now_ns
 
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        # **`plan()` は engaged を知らない**（`Planner` の共通契約に含めていない
+        # ——全 planner に影響するので変えない）。時間で進むステップ列を持つ
+        # システム同定 planner（`raspi/auto/sysid_*.py`）だけがこれを必要とする
+        # ので、`_apply_e2e_model` の `reload_if_changed` と同じダックタイピング
+        # で「持っていれば呼ぶ」形にする（2026-08-31、試験開始前に勝手に進む・
+        # 中止しても止まらないという不具合の修正）
+        set_engaged_fn = getattr(self.planner, "set_engaged", None)
+        if set_engaged_fn is not None:
+            set_engaged_fn(self.ctrl.engaged)
         st = self.planner.plan(scan, vs, self._params, dt)
         st.engaged = self.ctrl.engaged
         st.scan_age_ms = (now_ns - scan.t_capture) / 1e6

@@ -22,6 +22,9 @@ from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
 from .line_trace import LineTrace
 from .raceline import RaceLine
+from .sysid_corner import SysIdCorner
+from .sysid_speed import SysIdSpeed
+from .sysid_steer import SysIdSteer
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
 
@@ -34,6 +37,11 @@ PLANNERS: dict[str, type[Planner]] = {
     RaceLine.id: RaceLine,
     LineTrace.id: LineTrace,
     E2ELidar.id: E2ELidar,
+    #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブの
+    #: モード選択には出さない（`AutoPanel.tsx` 側のフィルタ）
+    SysIdSteer.id: SysIdSteer,
+    SysIdSpeed.id: SysIdSpeed,
+    SysIdCorner.id: SysIdCorner,
 }
 
 
@@ -44,6 +52,7 @@ def catalog() -> list[dict]:
             "id": cls.id,
             "name": cls.name,
             "description": cls.description,
+            "category": cls.category,
             "params": [
                 {"key": s.key, "label": s.label, "min": s.min, "max": s.max,
                  "step": s.step, "default": s.default, "unit": s.unit, "note": s.note}

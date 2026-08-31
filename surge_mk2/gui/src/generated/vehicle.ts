@@ -24,7 +24,7 @@ export const VEHICLE = {
    * ISP が読み出し時に切り捨てる下端の割合（`camera_node.py` の `bottom_cropped`）。
    * 進路ガイドの投影はこの分だけ主点が下にずれる補正が要る（`CameraView.tsx`） */
   camFront: {
-    height: 0.09, // m 路面からの高さ
+    height: 0.085, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 1.152, // rad 水平画角
     bottomCrop: 0.25, // 下端カット率
@@ -34,7 +34,7 @@ export const VEHICLE = {
    * `yaw` は生成しない——GUI 側の進路ガイド（`CameraView.tsx`）は「後ろ向きに付いている」
    * こと自体を前提にした投影式を別に持っており、汎用の yaw 回転はしていない */
   camRear: {
-    height: 0.09, // m 路面からの高さ
+    height: 0.085, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 1.152, // rad 水平画角
     bottomCrop: 0.0625, // 下端カット率

@@ -24,17 +24,18 @@ import { DiagView } from './views/DiagView'
 import { LogView } from './views/LogView'
 import { MapView } from './views/MapView'
 import { RcView } from './views/RcView'
+import { SysIdView } from './views/SysIdView'
 import { ControlChannel } from './ws/control'
 import { connectMap } from './ws/map'
 import { connectTelemetry } from './ws/telemetry'
 
 //: **地図は自動運転の隣**。世界座標の情報（自己位置・経路・障害物）は
 //: 走行中にも見たいので、EXPLORE 専用の画面にはしない（`views/MapView.tsx`）
-const TABS = ['ラジコン', '自動運転', '地図生成', '診断', 'ログ'] as const
+const TABS = ['ラジコン', '自動運転', '地図生成', '診断', 'ログ', 'システム同定'] as const
 type Tab = (typeof TABS)[number]
 
 /** 操縦しうるタブ。ここでだけ操作ヒントを出す（診断・ログでは邪魔になる） */
-const DRIVING_TABS: Tab[] = ['ラジコン', '自動運転']
+const DRIVING_TABS: Tab[] = ['ラジコン', '自動運転', 'システム同定']
 
 export function App() {
   const [tab, setTab] = useState<Tab>('ラジコン')
@@ -133,6 +134,8 @@ export function App() {
         <MapView ch={ch} />
       ) : tab === '診断' ? (
         <DiagView />
+      ) : tab === 'システム同定' ? (
+        <SysIdView ch={ch} />
       ) : (
         <LogView ch={ch} />
       )}

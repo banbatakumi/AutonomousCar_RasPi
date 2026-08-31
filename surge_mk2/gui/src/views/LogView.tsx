@@ -21,11 +21,11 @@
  *
  * を直接叩けば足りる（そちらは別のバスで動くので実車と衝突しない）。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useMcapDownload } from '../hooks/useMcapDownload'
 import type { ControlStatus, LogFile } from '../types'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
-import { RecordChannel } from '../ws/record'
 
 function formatBytes(n: number): string {
   return n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : `${(n / 1e3).toFixed(0)}KB`
@@ -91,52 +91,8 @@ function McapSection({
 }) {
   const active = mcap?.active ?? false
   const [imageOn, setImageOn] = useState(true)
-  const [bufferedBytes, setBufferedBytes] = useState(0)
-  const recRef = useRef<RecordChannel | null>(null)
-  const chunksRef = useRef<ArrayBuffer[]>([])
-
-  const finish = () => {
-    recRef.current = null
-    if (chunksRef.current.length > 0) {
-      const blob = new Blob(chunksRef.current, { type: 'application/octet-stream' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '_').slice(0, 15)
-      a.href = url
-      a.download = `surge_${stamp}.mcap`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      URL.revokeObjectURL(url)
-    }
-    chunksRef.current = []
-    setBufferedBytes(0)
-    onFinished()
-  }
-
-  const start = () => {
-    if (!ch) return
-    chunksRef.current = []
-    setBufferedBytes(0)
-    // **サーバ側が `/ws/record` を切断した瞬間が「録画完結」の合図。**
-    // mcap の索引は最後に書かれるので、`active` が false になった時点ではなく
-    // 中継そのものが終わるまで待ってからダウンロードする
-    recRef.current = new RecordChannel(
-      (chunk) => {
-        chunksRef.current.push(chunk)
-        setBufferedBytes((b) => b + chunk.byteLength)
-      },
-      finish,
-    )
-    ch.mcapRecordStart(imageOn ? undefined : 0)
-  }
-
-  useEffect(
-    () => () => {
-      recRef.current?.close()
-    },
-    [],
-  )
+  const { bufferedBytes, start: startRecording } = useMcapDownload(ch)
+  const start = () => startRecording(imageOn, onFinished)
 
   return (
     <section className="settings-group logs-section">

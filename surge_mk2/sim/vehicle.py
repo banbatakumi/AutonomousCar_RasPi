@@ -49,6 +49,10 @@ class VehicleSpec:
     rolling_resistance: float = 0.35
     drive_ratio: float = 2.0
     mu: float = 0.8
+    #: ステアサーボの物理的な最大角速度 [rad/s]。`cmd.steer_rate_limit`
+    #: （指令側が任意で指定するレート制限、既定0=無制限）とは別物——
+    #: こちらはハードウェアの床で、指令が無指定でも常に効く（`step()`参照）
+    steer_rate_limit_rad_s: float = 6.0
 
     sensors: dict = field(default_factory=dict)
 
@@ -70,6 +74,7 @@ class VehicleSpec:
             rolling_resistance=dyn.get("rolling_resistance", 0.35),
             drive_ratio=dyn.get("drive_ratio", 2.0),
             mu=dyn.get("mu", 0.8),
+            steer_rate_limit_rad_s=dyn.get("steer_rate_limit_rad_s", 6.0),
             sensors=d.get("sensors", {}),
         )
 
@@ -138,8 +143,13 @@ class VehicleModel:
         want = self._steer_delayed
         if sp.tau_steer_s > 1e-6:
             want = self.steer_actual + (want - self.steer_actual) * (1.0 - math.exp(-dt / sp.tau_steer_s))
-        rate_cap = cmd.steer_rate_limit if cmd.steer_rate_limit > 0 else None
-        if rate_cap is not None:
+        # レート制限は「指令側の希望（0=無指定）」と「サーボの物理的な床」の
+        # うち厳しい方。物理上限は指令が無指定でも常に効く（実サーボがそれ以上
+        # 速く動けるわけではないため）
+        rate_cap = sp.steer_rate_limit_rad_s
+        if cmd.steer_rate_limit > 0:
+            rate_cap = min(rate_cap, cmd.steer_rate_limit)
+        if rate_cap > 1e-6:
             d = max(-rate_cap * dt, min(rate_cap * dt, want - self.steer_actual))
             self.steer_actual += d
         else:

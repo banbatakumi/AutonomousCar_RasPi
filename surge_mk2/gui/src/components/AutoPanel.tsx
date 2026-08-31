@@ -69,6 +69,7 @@ import { useNumbers } from '../bus/live'
 import { RAD2DEG, mps } from '../format'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
+import { ParamSliders } from './ParamSliders'
 
 /** planner の判断がこれ以上古ければ「planning_node が落ちている」と見なす */
 const AUTO_STALE_MS = 600
@@ -101,7 +102,9 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
     )
   }
 
-  const selected = auto.catalog.find((c) => c.id === auto.mode) ?? null
+  // システム同定タブ専用のモードはここには出さない（`SysIdView.tsx` が扱う）
+  const driveCatalog = auto.catalog.filter((c) => c.category !== 'sysid')
+  const selected = driveCatalog.find((c) => c.id === auto.mode) ?? null
   const modeStats = selected?.stats ?? []
   const st = n.auto
   // **「planner が黙っている」と「planner が止まれと言っている」を区別する。**
@@ -131,13 +134,13 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             onChange={(e) => setMode(e.target.value)}
           >
             <option value="">（未選択）</option>
-            {auto.catalog.map((c) => (
+            {driveCatalog.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
           </select>
-          {auto.catalog.length === 0 && (
+          {driveCatalog.length === 0 && (
             <span className="dim">planner がありません</span>
           )}
         </section>
@@ -266,32 +269,11 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
       {selected && (
         <section className="auto-params">
           <span className="label">パラメータ（{selected.params.length}）</span>
-          <div className="auto-param-grid">
-            {selected.params.map((p) => {
-              const v = auto.params[p.key] ?? p.default
-              return (
-                <label key={p.key} className="auto-param" title={p.note}>
-                  <span className="auto-param-head">
-                    {p.label}
-                    <b>
-                      {v.toFixed(decimalsFor(p.step))}
-                      {p.unit && <i> {p.unit}</i>}
-                    </b>
-                  </span>
-                  <input
-                    type="range"
-                    min={p.min}
-                    max={p.max}
-                    step={p.step}
-                    value={v}
-                    onChange={(e) =>
-                      ch?.setAuto({ params: { [p.key]: Number(e.target.value) } })
-                    }
-                  />
-                </label>
-              )
-            })}
-          </div>
+          <ParamSliders
+            params={selected.params}
+            values={auto.params}
+            onChange={(key, value) => ch?.setAuto({ params: { [key]: value } })}
+          />
         </section>
       )}
     </div>
@@ -307,10 +289,4 @@ function Stat({ value, unit }: { value: string; unit: string }) {
       <span>{unit}</span>
     </div>
   )
-}
-
-/** スライダの刻みから表示桁数を決める。0.01 なら2桁、1 なら0桁 */
-function decimalsFor(step: number): number {
-  if (step >= 1) return 0
-  return Math.min(3, Math.ceil(-Math.log10(step)))
 }

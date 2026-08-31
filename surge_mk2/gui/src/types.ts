@@ -64,6 +64,9 @@ export type AutoPlannerInfo = {
   id: string
   name: string
   description: string
+  /** GUIでの出し分け先（`raspi/auto/base.py` の `Planner.category`）。
+   * `"drive"`（既定）は自動運転タブの選択肢、`"sysid"` はシステム同定タブ専用 */
+  category: string
   params: AutoParamSpec[]
   /** GUI の「判断」欄に出す `AutoState` フィールド（`raspi/auto/base.py` の
    * `Planner.stats` 参照）。`"free_ahead"`/`"nearest"`/`"gap"`/`"valid_ratio"`
