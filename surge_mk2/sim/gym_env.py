@@ -137,10 +137,10 @@ class SimE2EEnv:
                 lidar_drop_rate_range: tuple[float, float] = (0.0, 0.06),
                 lidar_sector_drop_rate_range: tuple[float, float] = (0.0, 0.015),
                 randomize_dynamics: bool = True,
-                mu_range: tuple[float, float] = (0.4, 1.1),
-                tau_steer_s_range: tuple[float, float] = (0.05, 0.25),
+                mu_range: tuple[float, float] = (0.28, 0.65),
+                tau_steer_s_range: tuple[float, float] = (0.35, 0.75),
                 dead_time_s_range: tuple[float, float] = (0.0, 0.08),
-                tau_speed_s_range: tuple[float, float] = (0.15, 0.6),
+                tau_speed_s_range: tuple[float, float] = (0.08, 0.30),
                 rolling_resistance_range: tuple[float, float] = (0.15, 0.6),
                 seed: int = 0) -> None:
         """:param courses: 固定のコース群から毎エピソードランダムに選ぶ（`ml_lidar/watch.py`
@@ -157,18 +157,23 @@ class SimE2EEnv:
             `*_range`からランダムに引き直す（訓練用。センサ条件のドメインランダム化）。
             `False`なら`sim_params`（既定`SimParams()`）を固定で使う（評価用。条件を
             揃えて比較したいので`ml_lidar/train_rl.py`の`make_eval_env`はこちらを使う）
-        :param randomize_dynamics: `True`なら毎エピソード`spec`の`[dynamics]`未実測
+        :param randomize_dynamics: `True`なら毎エピソード`spec`の`[dynamics]`
             パラメータ（`mu`・`tau_steer_s`・`dead_time_s`・`tau_speed_s`・
             `rolling_resistance`）を`*_range`からランダムに引き直す（2026-08-31追加。
-            `randomize_lidar`と同じ考え方——`config/vehicle.toml`の`[dynamics]`は
-            実車未計測の仮値なので、実測が済むまでは特定の値に過学習させず頑健性を
-            稼ぐ）。幾何・質量（実測確定済み）は変えない。`False`なら`spec`をそのまま
+            `randomize_lidar`と同じ考え方——個体差・床面差・バッテリー電圧などの
+            条件ゆれに対して頑健にするため、特定の1点には過学習させない）。
+            幾何・質量（実測確定済み）は変えない。`False`なら`spec`をそのまま
             固定で使う（評価用。`make_eval_env`は`randomize_lidar`と同様こちらを使う）。
-            **`mu_range`の下限0.4は、既定`max_speed=1.5`・`spec.max_steer`条件で
-            グリップ限界クランプが実際に発動するのが`mu`≲0.58のときだけという
-            計算に基づく**——上限側だけの範囲だとランダム化が学習に何の変化も
-            もたらさない。他レンジは未実測パラメータの初期推定値±50%程度の
-            未検証の見積もり
+            **2026-09-01: `mu`・`tau_steer_s`・`tau_speed_s`はシステム同定タブでの
+            実測が済み（`config/vehicle.toml`参照）、各レンジは実測値を中心に
+            ±30〜50%程度取り直した**（`tau_steer_s`実測0.539は旧レンジ(0.05, 0.25)を
+            全く含んでおらず、訓練が実車より大幅に速い操舵応答を前提にしていた
+            ——旋回時の挙動が実車と乖離する主因の一つだったと見られる）。
+            `dead_time_s`・`rolling_resistance`は未実測のまま（`rolling_resistance`は
+            この学習ループが常に`armed=True`の速度指令モードで駆動するため測っても
+            反映されない）。`mu`の下限0.28は`sim/vehicle.py`の摩擦円連成
+            （2026-09-01追加。加減速中は`a_lat_max`がさらに絞られる）も踏まえた
+            見積もりで、他レンジ同様に**未検証**
         :param cross_track_margin_frac: 道幅の半分のうち、ペナルティ無しで自由に
             使ってよい割合。既定0.5＝道幅1.0mのコースなら中心線から±0.25mは
             ノーペナルティ、そこから壁（±0.5m）までの残り±0.25mだけ

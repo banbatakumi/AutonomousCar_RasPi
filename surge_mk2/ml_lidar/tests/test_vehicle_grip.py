@@ -73,6 +73,34 @@ class TestVehicleGripLimit(unittest.TestCase):
         v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
         self.assertGreater(v.slip_frac, 0.0)
 
+    def test_braking_mid_corner_reduces_available_lateral_accel(self):
+        """摩擦円によるRWD連成——駆動・制動はどちらも後輪だけが担うため
+        （`_next_speed()`参照）、定常円旋回中に急制動すると同じ後輪タイヤの
+        横方向の余力が減り、達成できる横加速度が`mu*g`単独のときより下がる。"""
+        spec = VehicleSpec(mu=0.8)
+        a_lat_max = spec.mu * GRAVITY_MPS2
+        v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
+        baseline = abs(v.accel_lateral)
+        self.assertAlmostEqual(baseline, a_lat_max, delta=0.05)
+
+        dt = 0.02
+        v.apply(DriveInput(armed=True, brake=True, target_steer=spec.max_steer))
+        v.step(dt)
+
+        expected_decel = v.MAX_BRAKE_TORQUE_NM * spec.drive_ratio / (spec.wheel_radius * spec.mass)
+        expected_a_lat_max = math.sqrt(max(0.0, a_lat_max ** 2 - expected_decel ** 2))
+        self.assertLess(abs(v.accel_lateral), baseline - 0.5)
+        self.assertAlmostEqual(abs(v.accel_lateral), expected_a_lat_max, delta=0.05)
+
+    def test_steady_cornering_a_lat_max_matches_mu_g(self):
+        """縦加速度がゼロに収束した定常円旋回では、摩擦円連成を入れても
+        従来通り`mu*g`単独の限界に一致する（`sysid_corner.py`の測定条件・
+        既存テストの前提と矛盾しないことの確認）。"""
+        spec = VehicleSpec(mu=0.8)
+        v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
+        self.assertAlmostEqual(v.accel_x, 0.0, delta=1e-3)
+        self.assertAlmostEqual(v._a_lat_max, spec.mu * GRAVITY_MPS2, delta=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

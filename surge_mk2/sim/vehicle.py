@@ -14,6 +14,14 @@ TC/TVは入れていない。実車の`[dynamics]`（操舵のむだ時間・1�
 車両質量に関わらず摩擦係数`mu`だけで決まる（同じ理由で、急ブレーキの制動距離が
 車重に依存しないのと同じ）。
 
+**摩擦円によるRWD連成（2026-09-01追加）**: この車の駆動力・制動力は`drive_ratio`
+（後輪ぶん）を通じてどちらも後輪だけが発生させる（`_next_speed()`のブレーキ・
+トルクmode参照）。実車では同じ後輪タイヤが「曲がる力」と「加減速する力」を
+同じ摩擦の予算 `mu*g` から奪い合うため（摩擦円）、コーナー立ち上がりで加速しながら
+曲がると定常円旋回より横方向の余力が減る。これを単純な摩擦円
+`a_lat_max = sqrt((mu*g)^2 - a_long^2)` で近似する（前後輪別のグリップ配分・
+荷重移動までは踏み込まない）。定常状態（`a_long≈0`）では従来通り`mu*g`に一致する。
+
 指令は SI で受ける（整数スケールの解釈は `sim/stm32.py` の仕事）。
 """
 
@@ -116,6 +124,7 @@ class VehicleModel:
         self.steer_actual = 0.0
         self.yaw_rate = 0.0
         self.accel_x = 0.0
+        self._a_lat_max = self.spec.mu * GRAVITY_MPS2   #: 摩擦円で絞った直近の横加速度上限
         self.odom_front = [0.0, 0.0]     # [FL, FR] 累積 [m]（射影なし = 前輪の実距離）
         self.collided = False
         self.collisions = 0
@@ -158,20 +167,23 @@ class VehicleModel:
         # ── 速度 ──
         prev_speed = self.speed
         self.speed = self._next_speed(dt)
+        self.accel_x = (self.speed - prev_speed) / dt if dt > 0 else 0.0
 
         # ── 運動（自転車モデル。原点は後輪車軸中心） ──
-        # 舵角だけで決まる曲率を、グリップ限界(mu*g)で頭打ちにする（アンダーステア）。
+        # 舵角だけで決まる曲率を、グリップ限界で頭打ちにする（アンダーステア）。
         # 曲率 = tan(steer)/L、向心加速度 = speed^2 * 曲率 なので、
-        # 曲率の上限は a_lat_max / speed^2（低速ほど緩い上限＝ほぼ無制限）
+        # 曲率の上限は a_lat_max / speed^2（低速ほど緩い上限＝ほぼ無制限）。
+        # a_lat_max 自体は摩擦円で縦加速度ぶん絞る（駆動・制動は後輪だけが担うため、
+        # 加減速中は同じ後輪の横方向の余力が減る。モジュールdocstring参照）
         requested_curvature = math.tan(self.steer_actual) / sp.wheelbase
-        a_lat_max = sp.mu * GRAVITY_MPS2
+        a_lat_max = math.sqrt(max(0.0, (sp.mu * GRAVITY_MPS2) ** 2 - self.accel_x ** 2))
+        self._a_lat_max = a_lat_max
         max_curvature = a_lat_max / max(abs(self.speed), 1e-6) ** 2
         curvature = math.copysign(min(abs(requested_curvature), max_curvature), requested_curvature)
         self.yaw_rate = self.speed * curvature
         self.yaw = (self.yaw + self.yaw_rate * dt + math.pi) % (2 * math.pi) - math.pi
         self.x += self.speed * math.cos(self.yaw) * dt
         self.y += self.speed * math.sin(self.yaw) * dt
-        self.accel_x = (self.speed - prev_speed) / dt if dt > 0 else 0.0
 
         # 前輪の走行距離は 1/cos(δ) 倍（`uart_protocol.md` §5.3 の射影の逆）
         d_front = abs(self.speed) * dt / max(0.1, math.cos(self.steer_actual))
@@ -249,12 +261,13 @@ class VehicleModel:
 
     @property
     def slip_frac(self) -> float:
-        """要求向心加速度が mu*g を超えた分の比率。0=余裕あり、
-        1=ちょうど mu*g ぶん超過。グリップ限界クランプ（`step()`参照）が
-        実際に効いているかどうかを学習側に伝えるための量。"""
+        """要求向心加速度が（摩擦円で絞った）横加速度上限を超えた分の比率。0=余裕あり、
+        1=ちょうど上限ぶん超過。グリップ限界クランプ（`step()`参照）が実際に効いて
+        いるかどうかを学習側に伝えるための量。`_a_lat_max`は直近の`step()`で
+        縦加速度ぶん絞った値なので、加減速中の摩擦円連成もここに反映される。"""
         requested_a_lat = self.speed ** 2 * abs(math.tan(self.steer_actual)) / self.spec.wheelbase
-        a_lat_max = self.spec.mu * GRAVITY_MPS2
-        return max(0.0, requested_a_lat - a_lat_max) / a_lat_max
+        a_lat_max = self._a_lat_max
+        return max(0.0, requested_a_lat - a_lat_max) / a_lat_max if a_lat_max > 1e-9 else 0.0
 
 
 def _toward_zero(v: float, delta: float) -> float:
