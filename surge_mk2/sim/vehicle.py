@@ -22,6 +22,17 @@ TC/TVは入れていない。実車の`[dynamics]`（操舵のむだ時間・1�
 `a_lat_max = sqrt((mu*g)^2 - a_long^2)` で近似する（前後輪別のグリップ配分・
 荷重移動までは踏み込まない）。定常状態（`a_long≈0`）では従来通り`mu*g`に一致する。
 
+**縦加速度の上限（2026-09-01追加）**: `MAX_BRAKE_TORQUE_NM`（後輪モータの
+ハードウェア仕様値）から逆算する制動減速度は、タイヤが実際に発生できる摩擦
+（`mu*g`）を無条件に超えうる——`mu`の実測値（0.454）では`mu*g≈4.46m/s²`だが
+`MAX_BRAKE_TORQUE_NM`由来の制動減速度は≈5.0m/s²で、直進急制動だけでもグリップ
+限界を超えてしまう計算になる（実際はスリップして頭打ちになるはず）。`spec`に
+`drive_accel_m_s2`/`brake_decel_m_s2`（システム同定タブ「加減速試験」の実測値、
+`tools/sysid/fit.py`の`fit_accel()`参照）を追加し、実測済み（>0）ならハードウェア
+仕様値より優先して使う——モータのトルク仕様ではなく、実際にタイヤが発生できた
+加減速度そのものを使う方が、グリップ限界を含めた実車の挙動に近い。未実測
+（既定0.0）の間は従来通りトルク仕様値から逆算する。
+
 指令は SI で受ける（整数スケールの解釈は `sim/stm32.py` の仕事）。
 """
 
@@ -57,6 +68,11 @@ class VehicleSpec:
     rolling_resistance: float = 0.35
     drive_ratio: float = 2.0
     mu: float = 0.8
+    #: 実測の最大加速度・減速度 [m/s²]。0.0＝未実測（`MAX_BRAKE_TORQUE_NM`からの
+    #: 逆算・`cmd.accel_limit`による外部指定にフォールバック）。
+    #: システム同定タブ「加減速試験」（`raspi/auto/sysid_accel.py`）で測る
+    drive_accel_m_s2: float = 0.0
+    brake_decel_m_s2: float = 0.0
     #: ステアサーボの物理的な最大角速度 [rad/s]。`cmd.steer_rate_limit`
     #: （指令側が任意で指定するレート制限、既定0=無制限）とは別物——
     #: こちらはハードウェアの床で、指令が無指定でも常に効く（`step()`参照）
@@ -82,6 +98,8 @@ class VehicleSpec:
             rolling_resistance=dyn.get("rolling_resistance", 0.35),
             drive_ratio=dyn.get("drive_ratio", 2.0),
             mu=dyn.get("mu", 0.8),
+            drive_accel_m_s2=dyn.get("drive_accel_m_s2", 0.0),
+            brake_decel_m_s2=dyn.get("brake_decel_m_s2", 0.0),
             steer_rate_limit_rad_s=dyn.get("steer_rate_limit_rad_s", 6.0),
             sensors=d.get("sensors", {}),
         )
@@ -211,8 +229,13 @@ class VehicleModel:
             return _toward_zero(v, sp.rolling_resistance * 4.0 * dt)
 
         if cmd.brake:
-            nm = cmd.brake_torque if cmd.brake_torque > 0 else self.MAX_BRAKE_TORQUE_NM
-            decel = nm * sp.drive_ratio / (sp.wheel_radius * sp.mass)
+            if cmd.brake_torque <= 0 and sp.brake_decel_m_s2 > 1e-6:
+                # 実測の減速度がある（`sysid_accel`）ならトルク仕様値からの
+                # 逆算より優先する（モジュールdocstring「縦加速度の上限」参照）
+                decel = sp.brake_decel_m_s2
+            else:
+                nm = cmd.brake_torque if cmd.brake_torque > 0 else self.MAX_BRAKE_TORQUE_NM
+                decel = nm * sp.drive_ratio / (sp.wheel_radius * sp.mass)
             return _toward_zero(v, decel * dt)
 
         if cmd.torque_mode:
@@ -222,15 +245,22 @@ class VehicleModel:
             a -= math.copysign(sp.rolling_resistance, v) if abs(v) > 1e-3 else 0.0
             return v + a * dt
 
-        # 速度指令: 1次遅れで追う。accel_limit があればその範囲で
+        # 速度指令: 1次遅れで追う。accel_limit・drive_accel_m_s2（実測）が
+        # あればその範囲で——`cmd.accel_limit`は指令側（GUI・実車のLIMITS由来）の
+        # 制約、`sp.drive_accel_m_s2`は車両自体の実測上限（RLの直結呼び出しなど
+        # `cmd.accel_limit`を経由しない呼び出し元にも一律に効かせるため。
+        # モジュールdocstring「縦加速度の上限」参照）。両方効く場合は厳しい方を採る
         target = cmd.target_speed
         if sp.tau_speed_s > 1e-6:
             want = v + (target - v) * (1.0 - math.exp(-dt / sp.tau_speed_s))
         else:
             want = target
-        if cmd.accel_limit > 0:
-            lim = cmd.accel_limit * dt
-            want = v + max(-lim, min(lim, want - v))
+        lim = cmd.accel_limit if cmd.accel_limit > 0 else math.inf
+        if sp.drive_accel_m_s2 > 1e-6:
+            lim = min(lim, sp.drive_accel_m_s2)
+        if lim < math.inf:
+            d = lim * dt
+            want = v + max(-d, min(d, want - v))
         return want
 
     # ── 衝突 ──

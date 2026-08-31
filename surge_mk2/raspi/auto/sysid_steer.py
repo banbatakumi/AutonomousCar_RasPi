@@ -59,8 +59,12 @@ class SysIdSteer(Planner):
                        "上限いっぱい(30°)まで振るのが望ましい。小さめの振幅(8〜10°程度)でも"
                        "一度録っておくとtau_steer_s/dead_time_sの確認になる"),
         ParamSpec(key="hold_s", label="保持時間", min=0.5, max=5.0, step=0.1,
-                  default=1.5, unit="s",
-                  note="1ステップぶんの保持時間。tau_steer_s（既定0.12s）の数十倍は欲しい"),
+                  default=3.0, unit="s",
+                  note="1ステップぶんの保持時間。応答がステップ振幅の98%以上まで"
+                       "収束してから次のステップへ切り替わるように十分長く取ること"
+                       "（短すぎるとtau_steer_sの回帰に使える減衰区間が削れ、"
+                       "推定値が不安定になる）。tau_steer_sの実測値が分かれば"
+                       "その5倍程度を目安に調整する"),
         ParamSpec(key="cycles", label="繰り返し回数", min=1, max=10, step=1,
                   default=4, unit="回",
                   note="+振幅→-振幅を1往復として繰り返す回数。多いほどフィッティングが安定する"),

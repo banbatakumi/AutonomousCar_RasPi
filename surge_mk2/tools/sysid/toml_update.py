@@ -19,7 +19,8 @@ __all__ = ["ALLOWED_KEYS", "apply_dynamics"]
 #: このツールが書き込んでよいキー（[dynamics]直下のみ）。
 #: `rolling_resistance`・`drive_ratio` は対象外（`docs`参照。書こうとしたら
 #: `ValueError`にして誤って上書きしないようにする）
-ALLOWED_KEYS = {"tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s", "tau_speed_s", "mu"}
+ALLOWED_KEYS = {"tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s", "tau_speed_s", "mu",
+                "drive_accel_m_s2", "brake_decel_m_s2"}
 
 
 def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]:

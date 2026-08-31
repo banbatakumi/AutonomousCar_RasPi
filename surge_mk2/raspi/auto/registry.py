@@ -22,6 +22,7 @@ from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
 from .line_trace import LineTrace
 from .raceline import RaceLine
+from .sysid_accel import SysIdAccel
 from .sysid_corner import SysIdCorner
 from .sysid_speed import SysIdSpeed
 from .sysid_steer import SysIdSteer
@@ -42,6 +43,7 @@ PLANNERS: dict[str, type[Planner]] = {
     SysIdSteer.id: SysIdSteer,
     SysIdSpeed.id: SysIdSpeed,
     SysIdCorner.id: SysIdCorner,
+    SysIdAccel.id: SysIdAccel,
 }
 
 

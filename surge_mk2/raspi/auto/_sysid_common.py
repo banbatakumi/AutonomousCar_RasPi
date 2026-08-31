@@ -1,6 +1,7 @@
-"""システム同定プランナー3つ（`sysid_steer`/`sysid_speed`/`sysid_corner`）が
-共有する小道具。**catalogには登録しない**（`_`始まりのファイル名で
-`raspi/auto/registry.py`の対象外——`Planner`のサブクラスではなくヘルパのため）。
+"""システム同定プランナー4つ（`sysid_steer`/`sysid_speed`/`sysid_corner`/
+`sysid_accel`）が共有する小道具。**catalogには登録しない**（`_`始まりの
+ファイル名で`raspi/auto/registry.py`の対象外——`Planner`のサブクラスではなく
+ヘルパのため）。
 """
 
 from __future__ import annotations

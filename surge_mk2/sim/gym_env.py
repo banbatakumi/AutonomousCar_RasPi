@@ -36,6 +36,19 @@ NS = 1_000_000_000
 _STEP_NS = int(0.1 * NS)          #: LiDAR は 10Hz 回転なので、1ステップ=1回転に揃える
 _PRIME_TRIES = 5                  #: reset() 直後にスキャンが1周完成するまで待つ最大回数
 
+#: `telemetry_node._cmd_pump`（`raspi/nodes/telemetry_node.py` `CMD_PUB_HZ=50`）+
+#: `io_node`の`COMMAND`送信タイマ（`raspi/nodes/io_node.py` `COMMAND_HZ=100`）による
+#: 平均待ち時間の見積もり（各周期の半分ずつを合算）。**この環境は`VehicleModel`を
+#: 直結しており、`telemetry_node`/`io_node`を一切経由しない**（モジュールdocstring
+#: 参照）ため、`config/vehicle.toml`の`dead_time_s`がサーボ単体の値（`tools/sysid`を
+#: `steer_cmd_echo`基準に直した後の値）になると、実運用（`raspi/auto/e2e_lidar.py`は
+#: 他のplanner同様`planning_node`経由でこのパイプライン遅延を実際に経験する）より
+#: 速い応答を前提に訓練してしまう。既知のコード定数から導出した固定値なので、
+#: 実車計測は不要
+_CMD_PUB_HZ = 50
+_COMMAND_HZ = 100
+PIPELINE_DEAD_TIME_S = 0.5 / _CMD_PUB_HZ + 0.5 / _COMMAND_HZ   # ≈0.015s
+
 #: `scan_window(scan, 360.0, ...)` が返す点数（-180°〜+180°の361点、fov=360固定の不変量）
 SCAN_DIM = 361
 #: 観測ベクトルの次元 = 点群 + 自車速度1個。**`ml_lidar/env.py`・`export_onnx_rl.py`・
@@ -173,7 +186,13 @@ class SimE2EEnv:
             この学習ループが常に`armed=True`の速度指令モードで駆動するため測っても
             反映されない）。`mu`の下限0.28は`sim/vehicle.py`の摩擦円連成
             （2026-09-01追加。加減速中は`a_lat_max`がさらに絞られる）も踏まえた
-            見積もりで、他レンジ同様に**未検証**
+            見積もりで、他レンジ同様に**未検証**。**`tau_steer_s_range`は
+            `tools/sysid/fit.py`を`steer_cmd_echo`基準（サーボ単体の遅れ）に
+            直す前の、Piパイプライン遅延混入込みの実測0.539sを中心に取った
+            レンジのまま——`fit.py`修正後に実車を録り直したら、新しい実測値を
+            中心に再度取り直すこと**。`dead_time_s_range`は`PIPELINE_DEAD_TIME_S`
+            を別途加算するため、こちらはサーボ単体のむだ時間だけを表すレンジ
+            （0を含めているのはそのため）
         :param cross_track_margin_frac: 道幅の半分のうち、ペナルティ無しで自由に
             使ってよい割合。既定0.5＝道幅1.0mのコースなら中心線から±0.25mは
             ノーペナルティ、そこから壁（±0.5m）までの残り±0.25mだけ
@@ -309,14 +328,20 @@ class SimE2EEnv:
         未実測パラメータ（mu・tau_steer_s・dead_time_s・tau_speed_s・
         rolling_resistance）だけをエピソードごとに引き直す（ドメインランダム化）。
         幾何・質量は実測確定済みなので変更しない。`_episode_sim_params`と同じ理由で
-        `self.spec`をその場で書き換えず、毎回コピーを作る。"""
+        `self.spec`をその場で書き換えず、毎回コピーを作る。
+
+        どちらの分岐でも`dead_time_s`に`PIPELINE_DEAD_TIME_S`を加算する——この
+        環境は`telemetry_node`/`io_node`を経由しないため、実運用が実際に
+        経験するPi側パイプライン遅延をここで明示的に補わないと、方策が
+        実運用より速い応答を前提に学習してしまう（モジュール定数のdocstring参照）。
+        """
         if not self.randomize_dynamics:
-            return self.spec
+            return replace(self.spec, dead_time_s=self.spec.dead_time_s + PIPELINE_DEAD_TIME_S)
         return replace(
             self.spec,
             mu=float(self.rng.uniform(*self.mu_range)),
             tau_steer_s=float(self.rng.uniform(*self.tau_steer_s_range)),
-            dead_time_s=float(self.rng.uniform(*self.dead_time_s_range)),
+            dead_time_s=float(self.rng.uniform(*self.dead_time_s_range)) + PIPELINE_DEAD_TIME_S,
             tau_speed_s=float(self.rng.uniform(*self.tau_speed_s_range)),
             rolling_resistance=float(self.rng.uniform(*self.rolling_resistance_range)),
         )

@@ -3,7 +3,8 @@
     .venv/bin/python -m tools.sysid.gui
 
 GUIの「システム同定」タブでダウンロードしたmcapファイルを開き、
-`tau_steer_s`・`dead_time_s`・`steer_rate_limit_rad_s`・`tau_speed_s`・`mu`
+`tau_steer_s`・`dead_time_s`・`steer_rate_limit_rad_s`・`tau_speed_s`・`mu`・
+`drive_accel_m_s2`・`brake_decel_m_s2`
 をフィッティングして `config/vehicle.toml` に書き戻す。
 
 ネイティブGUIにしてあるのは、ファイル選択・結果の見比べ・適用の可否判断を
@@ -27,6 +28,7 @@ TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("steer", "① ステア試験", ("tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s")),
     ("speed", "② 加速試験", ("tau_speed_s",)),
     ("corner", "③ 旋回グリップ試験", ("mu",)),
+    ("accel", "④ 加減速試験", ("drive_accel_m_s2", "brake_decel_m_s2")),
 )
 
 
@@ -107,8 +109,10 @@ class SysIdApp(tk.Tk):
                     out = fit.fit_steer(samples)
                 elif key == "speed":
                     out = fit.fit_speed(samples)
-                else:
+                elif key == "corner":
                     out = fit.fit_corner(samples)
+                else:
+                    out = fit.fit_accel(samples)
             except Exception as e:  # noqa: BLE001 - GUIでそのままエラー表示する
                 errors.append(f"{label}: {e}")
                 continue

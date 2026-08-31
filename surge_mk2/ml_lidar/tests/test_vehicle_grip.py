@@ -92,6 +92,61 @@ class TestVehicleGripLimit(unittest.TestCase):
         self.assertLess(abs(v.accel_lateral), baseline - 0.5)
         self.assertAlmostEqual(abs(v.accel_lateral), expected_a_lat_max, delta=0.05)
 
+    def test_lateral_acceleration_never_exceeds_grip_limit_at_measured_mu(self):
+        """`mu=0.8`（合成値）ではなく`config/vehicle.toml`の実測値
+        （`VehicleSpec.load()`）でも上限を超えないことを確認する——
+        `mu`は実測されたが摩擦円が組み合わせる加減速側の定数
+        （`MAX_BRAKE_TORQUE_NM`・`DRIVE_MAX_ACCEL_M_S2`）は未実測のままなので、
+        実際どこまで削られるかは合成値`mu=0.8`のテストだけでは分からない。"""
+        spec = VehicleSpec.load()
+        a_lat_max = spec.mu * GRAVITY_MPS2
+        for speed in (0.5, 1.0, 2.0, 5.0):
+            v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=speed)
+            self.assertLessEqual(abs(v.accel_lateral), a_lat_max + 1e-6)
+
+    def test_braking_mid_corner_at_measured_mu_can_zero_out_lateral_grip(self):
+        """`test_braking_mid_corner_reduces_available_lateral_accel`と同じ現象を
+        実測`mu`（`config/vehicle.toml`。約0.454）で確認する。実測`mu*g`（≈4.46m/s²）
+        は`MAX_BRAKE_TORQUE_NM`から逆算される後輪の制動減速度（≈5.0m/s²）を下回るため、
+        `mu=0.8`の合成値のテストでは緩やかに減るだけだった横方向グリップが、
+        実測値では定常円旋回中の急制動でほぼゼロまで削られる——摩擦円のRWD連成が
+        実際どの程度効くかは、`mu`だけでなく未実測の制動側の定数にも左右される
+        ことを示す回帰テスト（`docs/`のシステム同定に加減速試験を追加する動機）。"""
+        spec = VehicleSpec.load()
+        a_lat_max = spec.mu * GRAVITY_MPS2
+        decel = VehicleModel.MAX_BRAKE_TORQUE_NM * spec.drive_ratio / (spec.wheel_radius * spec.mass)
+
+        v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
+        v.apply(DriveInput(armed=True, brake=True, target_steer=spec.max_steer))
+        v.step(0.02)
+
+        expected_a_lat_max = math.sqrt(max(0.0, a_lat_max ** 2 - decel ** 2))
+        self.assertAlmostEqual(abs(v.accel_lateral), expected_a_lat_max, delta=0.05)
+        if decel >= a_lat_max:
+            self.assertLess(abs(v.accel_lateral), 0.1)
+
+    def test_measured_brake_decel_overrides_torque_derived_value(self):
+        """`brake_decel_m_s2`（`sysid_accel`の実測値）が設定されていれば、
+        `MAX_BRAKE_TORQUE_NM`からの逆算より優先される。"""
+        spec = VehicleSpec(mu=0.8, brake_decel_m_s2=2.0)
+        v = VehicleModel(spec, (0.0, 0.0, 0.0))
+        v.apply(DriveInput(armed=True, target_speed=5.0))
+        for _ in range(500):
+            v.step(0.01)
+        speed_before = v.speed
+        v.apply(DriveInput(armed=True, brake=True))
+        v.step(0.1)
+        self.assertAlmostEqual(speed_before - v.speed, 2.0 * 0.1, delta=0.01)
+
+    def test_measured_drive_accel_caps_speed_tracking(self):
+        """`drive_accel_m_s2`（`sysid_accel`の実測値）は`cmd.accel_limit`が
+        指定されていない呼び出し元（`sim/gym_env.py`のRL訓練など）でも一律に効く。"""
+        spec = VehicleSpec(mu=0.8, tau_speed_s=0.0, drive_accel_m_s2=1.0)
+        v = VehicleModel(spec, (0.0, 0.0, 0.0))
+        v.apply(DriveInput(armed=True, target_speed=10.0))
+        v.step(0.1)
+        self.assertAlmostEqual(v.speed, 0.1, delta=1e-6)
+
     def test_steady_cornering_a_lat_max_matches_mu_g(self):
         """縦加速度がゼロに収束した定常円旋回では、摩擦円連成を入れても
         従来通り`mu*g`単独の限界に一致する（`sysid_corner.py`の測定条件・
