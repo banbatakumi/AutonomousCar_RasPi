@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +55,12 @@ class Course:
     #: 孤立した円盤障害物の中心座標 (K,3): x, y, 半径[m]。
     #: `sim/random_course.py`の`obstacle`アーキタイプのみが持つ
     obstacles: np.ndarray | None = None
+    #: `raycast()`が使う、外周1pxを壁でpaddingした`grid`。`_padded()`で遅延生成する
+    #: キャッシュ（2026-09-01追加、RL訓練でのraycastのプロファイルがボトルネックの
+    #: 72%を占めていたため。範囲外座標を境界のpaddingセルにクランプするだけで
+    #: 「画像の外は壁扱い」と同じ結果になり、毎回の`inside`bool配列+`np.where`×2回が
+    #: 要らなくなる）
+    _padded_grid: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     # ── 読み込み ──
 
@@ -117,6 +123,12 @@ class Course:
 
     # ── レイキャスト ──
 
+    def _padded(self) -> np.ndarray:
+        """外周1pxを壁(True)でpaddingした`grid`。初回アクセス時に1回だけ作る。"""
+        if self._padded_grid is None:
+            self._padded_grid = np.pad(self.grid, 1, constant_values=True)
+        return self._padded_grid
+
     def raycast(self, ox: float, oy: float, angles: np.ndarray,
                 max_range: float) -> np.ndarray:
         """`angles`（世界座標の絶対角 [rad]）方向の距離 [m] を返す。
@@ -136,10 +148,9 @@ class Course:
                 + sin * t[None, :] / self.resolution).astype(np.int32)
 
         h, w = self.grid.shape
-        inside = (cols >= 0) & (cols < w) & (rows >= 0) & (rows < h)
-        # 画像外は壁扱い。np.where で添字を潰してから引くと fancy index 1回で済む
-        occ = self.grid[np.where(inside, rows, 0), np.where(inside, cols, 0)]
-        occ = np.where(inside, occ, True)
+        # 画像外は壁扱い。paddingした grid に対して範囲外座標を境界セルへ
+        # clip するだけで同じ意味になり、bool マスク+np.where×2回より速い
+        occ = self._padded()[np.clip(rows + 1, 0, h + 1), np.clip(cols + 1, 0, w + 1)]
 
         hit = occ.any(axis=1)
         first = occ.argmax(axis=1)                 # 当たらない行は 0 を返すので hit で潰す

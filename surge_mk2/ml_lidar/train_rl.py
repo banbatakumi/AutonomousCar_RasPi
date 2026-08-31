@@ -36,6 +36,18 @@
 
 from __future__ import annotations
 
+import os
+
+# ★BLAS(Accelerate/OpenBLAS)がプロセス内で勝手にマルチスレッド化すると、
+# `--n-envs`個のワーカープロセス同士でCPUコアを取り合ってしまい、かえって
+# 遅くなる（2026-09-01、M3 MacBook AirでCPU使用率が30%程度にしか上がらない
+# 問題の調査で判明。numpyをimportする前に設定する必要があるので最上部に置く）
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import argparse
 import json
 import shutil
@@ -45,6 +57,7 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # surge_mk2/
 
+import torch  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.callbacks import (  # noqa: E402
     EvalCallback,
@@ -205,6 +218,19 @@ def main() -> int:
                          "計算量を上回りやすいため既定はcpu（SB3のドキュメントの推奨と同じ）。"
                          "`--hidden-sizes`を大きく増やす場合はGPUの方が有利になりうる")
     args = ap.parse_args()
+
+    # ★CPU学習時、torchのデフォルトのマルチスレッド化は`--hidden-sizes`程度の
+    # 小さいMlpPolicyでは並列化オーバーヘッドの方が計算量を上回りやすく、かつ
+    # `--n-envs`個のワーカープロセスとCPUコアを取り合ってしまう（SB3ドキュメントの
+    # 推奨と同じ理由。2026-09-01追加、CPU使用率が上がらない問題の調査から）。
+    # ★ロールアウト収集中と勾配更新中でスレッド数を動的に切り替える案も試したが
+    # （勾配更新中はワーカーが全員アイドルで競合しないはず、という仮説）、実測では
+    # 逆にfpsが下がった（2026-09-01、M3実機でON平均502fps・OFF平均556fps）。
+    # `[256,256]`程度の小さいネットワークでは勾配更新フェーズ単体でもマルチ
+    # スレッド化のオーバーヘッドの方が計算量削減分を上回るため、常時1スレッド
+    # 固定のままにしてある
+    if args.device == "cpu":
+        torch.set_num_threads(1)
 
     # ★新規学習（再開ではない）なら、古いTensorBoardログ（PPO_1・PPO_2…）が
     # 積み上がらないよう出力先を空にしてから作り直す（上のdocstring参照）
