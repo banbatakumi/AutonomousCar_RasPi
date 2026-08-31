@@ -57,27 +57,38 @@ class _CenterlineProgress:
     横偏差の近似として使う**（真の垂線ではなく最近傍点までの直線距離）——
     中心線の点間隔が細かければ（`sim/random_course.py`・`sim/track.py` とも
     数cm〜10cm間隔）両者の差は無視できる。
+
+    :param width: `Course.width`（スカラーまたは`centerline_xyyaw`と同じ長さの
+        配列）。配列の場合は最近傍点の位置ごとに道幅が変わる（`narrow`/`obstacle`
+        アーキタイプ、`sim/random_course.py`参照）ので、`update()`が最近傍点での
+        値を返す。`None`は既定1.0m相当として扱う（旧来の挙動と同じ）
     """
 
-    def __init__(self, centerline_xyyaw: np.ndarray) -> None:
+    def __init__(self, centerline_xyyaw: np.ndarray,
+                width: float | np.ndarray | None = None) -> None:
         self._xy = centerline_xyyaw[:, :2]
         loop = np.vstack([self._xy, self._xy[:1]])
         seg_len = np.hypot(*np.diff(loop, axis=0).T)
         self._arc = np.concatenate([[0.0], np.cumsum(seg_len)])[:-1]
         self._total = float(seg_len.sum())
         self._prev = 0.0
+        if isinstance(width, np.ndarray):
+            self._half_w = width / 2.0
+        else:
+            self._half_w = (width if width is not None else 1.0) / 2.0
 
-    def _nearest(self, x: float, y: float) -> tuple[float, float]:
+    def _nearest(self, x: float, y: float) -> tuple[float, float, int]:
         d2 = (self._xy[:, 0] - x) ** 2 + (self._xy[:, 1] - y) ** 2
         i = int(np.argmin(d2))
-        return float(self._arc[i]), float(math.sqrt(d2[i]))
+        return float(self._arc[i]), float(math.sqrt(d2[i])), i
 
     def reset(self, x: float, y: float) -> None:
-        self._prev, _ = self._nearest(x, y)
+        self._prev, _, _ = self._nearest(x, y)
 
-    def update(self, x: float, y: float) -> tuple[float, float]:
-        """`(弧長方向の進捗 [m], 横偏差 [m])`。進捗は1周のラップアラウンドを展開する。"""
-        p, cross = self._nearest(x, y)
+    def update(self, x: float, y: float) -> tuple[float, float, float]:
+        """`(弧長方向の進捗 [m], 横偏差 [m], 最近傍点での道幅の半分 [m])`。
+        進捗は1周のラップアラウンドを展開する。"""
+        p, cross, i = self._nearest(x, y)
         d = p - self._prev
         if self._total > 0:
             if d > self._total / 2:
@@ -85,7 +96,8 @@ class _CenterlineProgress:
             elif d < -self._total / 2:
                 d += self._total
         self._prev = p
-        return d, cross
+        half_w = float(self._half_w[i]) if isinstance(self._half_w, np.ndarray) else self._half_w
+        return d, cross, half_w
 
 
 class SimE2EEnv:
@@ -218,6 +230,8 @@ class SimE2EEnv:
         # （domain randomization。固定スタートより少ないエピソード数で
         # コース各所の局所ジオメトリを経験できる）
         i = int(self.rng.integers(len(self.course.centerline)))
+        if self.course.obstacles is not None:
+            i = self._start_index_away_from_obstacles(i)
         cx, cy, cyaw = self.course.centerline[i]
         jx, jy = self.rng.normal(0.0, self.start_jitter_m, 2)
         jyaw = self.rng.normal(0.0, self.start_jitter_rad)
@@ -228,7 +242,7 @@ class SimE2EEnv:
                                   seed=int(self.rng.integers(1 << 31)))
         self.asm = ScanAssembler()
         self._body = self.course.body_samples(self.spec.footprint)
-        self._progress = _CenterlineProgress(self.course.centerline)
+        self._progress = _CenterlineProgress(self.course.centerline, self.course.width)
         self._progress.reset(self.vehicle.x, self.vehicle.y)
         self._t_ns = 0
         self._steps = 0
@@ -249,6 +263,23 @@ class SimE2EEnv:
         p.lidar_drop_rate = float(self.rng.uniform(*self.lidar_drop_rate_range))
         p.lidar_sector_drop_rate = float(self.rng.uniform(*self.lidar_sector_drop_rate_range))
         return p
+
+    def _start_index_away_from_obstacles(self, i: int, *, max_tries: int = 20,
+                                         min_dist_m: float = 0.25) -> int:
+        """`obstacle`アーキタイプ（`sim/random_course.py`）のコースで、抽選した
+        開始地点`i`が障害物にめり込んでいたら引き直す。障害物は数個しかなく、
+        `centerline`との重なりも局所的なので、当たらなくなるまで最大`max_tries`回
+        引き直すだけで十分（`_hairpin_polygon_xy`の再試行と同じ考え方）。
+        `min_dist_m`は障害物半径に足す余裕（ジッター・車体外形ぶん）。
+        """
+        obstacles = self.course.obstacles
+        for _ in range(max_tries):
+            cx, cy = self.course.centerline[i, :2]
+            d2 = (obstacles[:, 0] - cx) ** 2 + (obstacles[:, 1] - cy) ** 2
+            if np.all(d2 > (obstacles[:, 2] + min_dist_m) ** 2):
+                return i
+            i = int(self.rng.integers(len(self.course.centerline)))
+        return i
 
     def _prime_scan(self) -> Scan:
         """スキャンが最低1周完成するまで、車両を動かさずにLiDAR時計だけ進める。"""
@@ -292,8 +323,7 @@ class SimE2EEnv:
             if s is not None:
                 self._last_scan = s
 
-        progress, cross_track = self._progress.update(self.vehicle.x, self.vehicle.y)
-        half_w = (self.course.width or 1.0) / 2.0
+        progress, cross_track, half_w = self._progress.update(self.vehicle.x, self.vehicle.y)
         margin = half_w * self.cross_track_margin_frac
         cross_excess = max(0.0, abs(cross_track) - margin)
         steer_rate = abs(self._steer - prev_steer)

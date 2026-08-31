@@ -37,7 +37,7 @@ from ml_lidar.env import GymSurgeEnv  # noqa: E402
 from ml_lidar.export_onnx_rl import load_run_config_defaults  # noqa: E402
 from sim import ui  # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
-from sim.random_course import generate_random_course_dr  # noqa: E402
+from sim.random_course import generate_diverse_course  # noqa: E402
 
 __all__ = ["Panel", "build_panels"]
 
@@ -47,8 +47,9 @@ TRAIL_LEN = 150
 def build_panels(n: int, *, max_steps: int, max_speed: float, steer_tau: float,
                  steer_rate_weight: float, seed: int = 0) -> list["Panel"]:
     """`circuit`/`fuji`（評価に使う既知コース、幅1.0m固定）を先頭に置き、残りは
-    **`train_rl.py`の学習と全く同じ`generate_random_course_dr`**（形状だけでなく
-    道幅も0.7〜1.3mで毎エピソード引き直す）で埋める。
+    **`train_rl.py`の学習と全く同じ`generate_diverse_course`**（形状・道幅に加えて
+    アーキタイプ=organic/circuit/corridor/narrow/obstacleも毎エピソード引き直す。
+    2026-08-31、コース多様化）で埋める。
 
     以前は`generate_random_course`（幅1.0m固定）を起動時に1回だけ生成し、以後
     ずっと同じコースを使い回していたため、`circuit`/`fuji`はもちろんランダム
@@ -66,7 +67,7 @@ def build_panels(n: int, *, max_steps: int, max_speed: float, steer_tau: float,
              for i, (label, c) in enumerate(known)]
     for i in range(len(known), n):
         label = f"rand{i}"
-        panels.append(Panel(label, course_fn=partial(generate_random_course_dr, name=label),
+        panels.append(Panel(label, course_fn=partial(generate_diverse_course, name=label),
                             max_steps=max_steps, max_speed=max_speed, steer_tau=steer_tau,
                             steer_rate_weight=steer_rate_weight, seed=seed + i))
     return panels
@@ -141,6 +142,23 @@ def _draw_panel(screen: pygame.Surface, p: Panel, x0: int, y0: int, w: int, h: i
     def to_px(x: float, y: float) -> tuple[float, float]:
         return (ox_px + (x - ox) / cw * dw, oy_px + dh - (y - oy) / chh * dh)
 
+    # ★obstacle/narrowアーキタイプ（`sim/random_course.py`）は壁と同系色の
+    # グレーで焼き込まれるだけなので、このサムネイル解像度だと肉眼では
+    # ほぼ判別できない（2026-08-31、バンビの指摘）。学習環境そのもの
+    # （車体の走行ではなく「今このコースに何があるか」）が一目で分かるよう、
+    # `Course.obstacles`/`Course.width`(配列)から直接ハイライトを重ねて描く
+    if p.course.obstacles is not None:
+        for obs_x, obs_y, obs_r in p.course.obstacles:
+            ox_, oy_ = to_px(float(obs_x), float(obs_y))
+            r_px = max(3, round(float(obs_r) * px_per_m))
+            pygame.draw.circle(screen, ui.BAD, (round(ox_), round(oy_)), r_px, width=2)
+
+    if isinstance(p.course.width, np.ndarray):
+        narrow_mask = p.course.width < float(p.course.width.max()) - 1e-6
+        for nx_, ny_ in p.course.centerline[narrow_mask, :2]:
+            px_, py_ = to_px(float(nx_), float(ny_))
+            pygame.draw.circle(screen, ui.WARN, (round(px_), round(py_)), 2)
+
     if len(p.trail) > 1:
         pygame.draw.aalines(screen, ui.TRAIL, False, [to_px(x, y) for x, y in p.trail])
 
@@ -148,7 +166,10 @@ def _draw_panel(screen: pygame.Surface, p: Panel, x0: int, y0: int, w: int, h: i
     px, py = to_px(v.x, v.y)
     ui.arrow(screen, px, py, v.yaw, 10, ui.BAD if v.collided else ui.OK)
 
-    label = f"{p.label} 幅{p.course.width or 1.0:.2f}m"
+    course_width = p.course.width
+    w_txt = (f"{course_width.min():.2f}-{course_width.max():.2f}"
+             if isinstance(course_width, np.ndarray) else f"{(course_width or 1.0):.2f}")
+    label = f"{p.label} 幅{w_txt}m"
     screen.blit(font.render(label, True, ui.DIM), (x0 + pad, y0 + h - 16))
     pygame.draw.rect(screen, ui.HAIR, (x0, y0, w, h), width=1)
 

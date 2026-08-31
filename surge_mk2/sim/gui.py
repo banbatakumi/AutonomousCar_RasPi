@@ -50,6 +50,7 @@ import sys
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import pygame
 import pygame.gfxdraw
 
@@ -514,7 +515,11 @@ class Viewer:
             c = self._course(t["course_path"])
             y = self.ui.kv(self.screen, x, y, inner, "寸法", f"{c.size_m[0]:4.1f} x {c.size_m[1]:4.1f} m", DIM)
             if c.width is not None:
-                self.ui.kv(self.screen, x, y, inner, "道幅", f"{c.width:4.2f} m", DIM)
+                if isinstance(c.width, np.ndarray):
+                    w_txt = f"{c.width.min():4.2f}-{c.width.max():4.2f} m"
+                else:
+                    w_txt = f"{c.width:4.2f} m"
+                self.ui.kv(self.screen, x, y, inner, "道幅", w_txt, DIM)
         except Exception:
             pass
 

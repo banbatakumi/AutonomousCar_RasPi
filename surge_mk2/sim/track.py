@@ -36,7 +36,7 @@ import math
 
 import numpy as np
 
-__all__ = ["centerline", "rasterize", "build"]
+__all__ = ["centerline", "rasterize", "add_offset_discs", "build"]
 
 #: 中心線を刻む間隔を解像度の何倍にするか。円盤の半径より十分細かければよい
 _STEP_RATIO = 1.0
@@ -130,6 +130,56 @@ def rasterize(pts: np.ndarray, width: float, resolution: float,
             for c, rw in zip(cols[m], rows[m]):
                 grid[rw - dr:rw + dr + 1, c - dr:c + dr + 1] |= dot
     return grid, (x0, y0)
+
+
+def add_offset_discs(grid: np.ndarray, origin: tuple[float, float], resolution: float,
+                     pts: np.ndarray, spans: list[tuple[float, float, float, float]]) -> None:
+    """占有格子に、中心線から法線方向へオフセットした円盤を追加でOR演算する（in-place）。
+
+    `rasterize()`の`divider`（上の`rasterize()`docstring参照）と同じ「掘ったあとに
+    立てる」ロジックを、**中心線上に限らず任意の横オフセット位置**に置けるよう
+    一般化したもの。`sim/random_course.py`の`narrow`（両側対称にオフセットして局所的に
+    道幅を狭める）・`obstacle`（片側にオフセットした孤立円盤を浮かべる）アーキタイプの
+    土台。
+
+    :param pts: `rasterize()`に渡したのと同じ中心線点列 `(N,3)`（x, y, yaw）。
+        弧長は`rasterize()`の`divider`と同じ「始点からの累積距離」（ループを
+        閉じない）で計算するので、`spans`の`s0`/`s1`はそこと同じ基準で指定する
+    :param spans: `(s0, s1, offset_m, radius_m)` のリスト。弧長`[s0, s1]`区間に
+        含まれる各点について、その点から法線方向（`pts`のyaw列から計算、左が正）に
+        `offset_m`ずれた位置へ半径`radius_m`の円盤を置く。符号を変えれば反対側の
+        壁/障害物になる
+    """
+    xs, ys, yaws = pts[:, 0], pts[:, 1], pts[:, 2]
+    seg = np.hypot(*np.diff(pts[:, :2], axis=0).T)
+    arc = np.concatenate([[0.0], np.cumsum(seg)])
+    x0, y0 = origin
+    h, w = grid.shape
+    nx, ny = -np.sin(yaws), np.cos(yaws)          # 法線（進行方向左が正）
+
+    for s0, s1, offset_m, radius_m in spans:
+        m = (arc >= s0) & (arc <= s1)
+        if not m.any():
+            continue
+        ox = xs[m] + nx[m] * offset_m
+        oy = ys[m] + ny[m] * offset_m
+        r = max(1, int(round(radius_m / resolution)))
+        yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+        disc = (xx * xx + yy * yy) <= r * r
+        cols = np.round((ox - x0) / resolution).astype(np.int64)
+        rows = np.round((oy - y0) / resolution).astype(np.int64)
+        for c, rw in zip(cols, rows):
+            # ★narrow/obstacleのオフセットは`rasterize()`本体の壁掘りより外側に
+            # 出ることがあるため、格子外へのはみ出しはクリップする（本体の掘り/
+            # divider は margin 込みで必ず内側に収まる前提で無警戒だが、ここは
+            # 新しい・オフセットが自由な経路なので明示的に守る）
+            c0, c1 = max(0, c - r), min(w, c + r + 1)
+            rw0, rw1 = max(0, rw - r), min(h, rw + r + 1)
+            if c0 >= c1 or rw0 >= rw1:
+                continue
+            dc0, dc1 = c0 - (c - r), c1 - (c - r)
+            dr0, dr1 = rw0 - (rw - r), rw1 - (rw - r)
+            grid[rw0:rw1, c0:c1] |= disc[dr0:dr1, dc0:dc1]
 
 
 def build(meta: dict) -> dict:

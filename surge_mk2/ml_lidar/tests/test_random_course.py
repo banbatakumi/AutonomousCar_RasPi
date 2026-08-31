@@ -10,11 +10,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # surge_mk2/
 
 import numpy as np  # noqa: E402
 
+from sim.gym_env import SimE2EEnv  # noqa: E402
 from sim.random_course import (  # noqa: E402
     _hairpin_polygon_xy,
     _min_turn_radius_m,
+    _vehicle_half_width_m,
     _vehicle_min_turn_radius_m,
     _RADIUS_MARGIN,
+    generate_circuit_course,
+    generate_corridor_course,
+    generate_diverse_course,
+    generate_narrow_course,
+    generate_obstacle_course,
     generate_random_course,
     generate_random_course_dr,
 )
@@ -174,6 +181,116 @@ class TestGenerateRandomCourseChicaneRadius(unittest.TestCase):
             c = generate_random_course(rng, hairpin_prob=0.35)
             self.assertGreaterEqual(_min_turn_radius_m(c.centerline[:, :2]), r_min * 0.95,
                                     msg=f"seed={seed}")
+
+
+class TestNewArchetypes(unittest.TestCase):
+    """コース多様化（2026-08-31）で追加したcircuit/corridor/narrow/obstacleの
+    配管レベルの検証。品質そのもの（見た目の多様性）は`watch.py`の目視で確認する。"""
+
+    def _assert_basic_course(self, c, kind: str) -> None:
+        gap = np.hypot(c.centerline[-1, 0] - c.centerline[0, 0],
+                       c.centerline[-1, 1] - c.centerline[0, 1])
+        w_scalar = float(np.max(c.width)) if isinstance(c.width, np.ndarray) else c.width
+        self.assertLess(gap, w_scalar * 0.6, msg=f"{kind}: 閉じていない")
+        self.assertFalse(c.occupied(c.start[0], c.start[1]), msg=f"{kind}: スタート地点が壁")
+        r_min = _vehicle_min_turn_radius_m() * _RADIUS_MARGIN
+        self.assertGreaterEqual(_min_turn_radius_m(c.centerline[:, :2]), r_min * 0.9,
+                                msg=f"{kind}: 最小旋回半径違反")
+
+    def test_circuit_and_corridor_produce_valid_courses(self):
+        for kind, fn in [("circuit", generate_circuit_course),
+                         ("corridor", generate_corridor_course)]:
+            for seed in range(15):
+                c = fn(np.random.default_rng(seed))
+                self._assert_basic_course(c, kind)
+
+    def test_corridor_lanes_do_not_merge(self):
+        """2026-08-31発覚の回帰防止——corridorの旋回半径は`width`と無関係に
+        決めていたため、道幅が広く半径が小さい組み合わせ（実測で約6%の頻度）で
+        対向する直線同士の間の壁（島）が対向車線と繋がって消えることがあった
+        （バンビの「同じようなバグがないか」という指摘で発覚、`_corridor_turn_radius`
+        docstring参照）。壁のすぐ外側の点が常に壁のままであることを確認する。
+        """
+        for seed in range(200):
+            rng = np.random.default_rng(seed)
+            width = float(rng.uniform(0.7, 1.3))
+            c = generate_corridor_course(rng, width=width)
+            half_w = width / 2.0
+            check_r = half_w + 0.06                    # 意図した道幅のすぐ外側
+            idxs = np.linspace(0, len(c.centerline) - 1, 24).astype(int)
+            for i in idxs:
+                x, y, yaw = c.centerline[i]
+                nx, ny = -np.sin(yaw), np.cos(yaw)
+                for sign in (1.0, -1.0):
+                    px, py = x + sign * nx * check_r, y + sign * ny * check_r
+                    self.assertTrue(c.occupied(px, py),
+                                    msg=f"seed={seed}: 壁のすぐ外側が空いている"
+                                        f"（車線一体化の疑い、width={width:.2f}）")
+
+    def test_narrow_width_is_array_matching_centerline_and_actually_narrows(self):
+        found_narrow = 0
+        for seed in range(20):
+            c = generate_narrow_course(np.random.default_rng(seed))
+            self._assert_basic_course(c, "narrow")
+            self.assertIsInstance(c.width, np.ndarray)
+            self.assertEqual(c.width.shape[0], c.centerline.shape[0])
+            if float(c.width.min()) < float(c.width.max()) - 1e-6:
+                found_narrow += 1
+        self.assertGreater(found_narrow, 15)
+
+    def test_narrow_never_blocks_the_vehicle(self):
+        """2026-08-31に発覚した回帰バグの再発防止テスト——`r_disc`/`offset`の式が
+        誤っていたため、狭めた区間の左右の円盤が中心線を越えて重なり、
+        車体が物理的に通れない（クリアランスが車体全幅を下回る）コースが
+        生成されうる状態だった（バンビの「障害物や道幅で完全に通れなくなっている
+        コースは生成されていない？」という質問で発覚）。狭めた区間の中で最も
+        狭い地点で、中心線から法線方向に車体半幅ぶんだけ動いた2点がどちらも
+        壁に埋まっていない（＝車体が中心を通れば少なくとも通過できる）ことを
+        多数のseedで確認する。
+        """
+        veh_half_w = _vehicle_half_width_m()
+        n_checked = 0
+        for seed in range(300):
+            c = generate_narrow_course(np.random.default_rng(seed), width_range=(0.7, 1.3))
+            if not isinstance(c.width, np.ndarray):
+                continue
+            i_min = int(np.argmin(c.width))
+            x, y, yaw = c.centerline[i_min]
+            nx, ny = -np.sin(yaw), np.cos(yaw)
+            n_checked += 1
+            for sign in (1.0, -1.0):
+                px = x + sign * nx * veh_half_w
+                py = y + sign * ny * veh_half_w
+                self.assertFalse(c.occupied(px, py),
+                                 msg=f"seed={seed}: 最狭部で車体半幅ぶんの位置が壁に埋まっている"
+                                     f"（記録幅={float(c.width[i_min]):.3f}m）")
+        self.assertGreater(n_checked, 15)
+
+    def test_obstacle_courses_have_obstacles_and_valid_start(self):
+        found_obstacles = 0
+        for seed in range(20):
+            c = generate_obstacle_course(np.random.default_rng(seed))
+            self._assert_basic_course(c, "obstacle")
+            if c.obstacles is not None:
+                found_obstacles += 1
+        self.assertGreater(found_obstacles, 15)
+
+    def test_obstacle_course_start_never_overlaps_an_obstacle(self):
+        """`SimE2EEnv.reset()`の障害物回避（`_start_index_away_from_obstacles`）が
+        機能しているかを、実際に`reset()`を回して確認する。"""
+        for seed in range(30):
+            env = SimE2EEnv(course_fn=generate_obstacle_course, max_steps=10, seed=seed)
+            env.reset()
+            if env.course.obstacles is None:
+                continue
+            d = np.hypot(env.course.obstacles[:, 0] - env.vehicle.x,
+                        env.course.obstacles[:, 1] - env.vehicle.y)
+            self.assertTrue(np.all(d > env.course.obstacles[:, 2]), msg=f"seed={seed}")
+
+    def test_diverse_course_completes_without_exception_across_seeds(self):
+        for seed in range(60):
+            c = generate_diverse_course(np.random.default_rng(20000 + seed))
+            self._assert_basic_course(c, "diverse")
 
 
 if __name__ == "__main__":

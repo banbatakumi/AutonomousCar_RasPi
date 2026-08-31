@@ -95,6 +95,62 @@ S字（`_add_chicanes`）は、以前は`sin(pi*t)`（片側だけ膨らむC字�
 （半径`3*min_radius_m`超）にだけ**蛇行を置くよう修正済み——窓同士の重複も
 同じ理由で避けている。この教訓はヘアピン側の`_hairpin_polygon_xy`には
 適用不要（辺を共有しない独立断片のため合成が起きない）。
+
+## アーキタイプの多様化（2026-08-31、バンビの指摘）
+
+v6まで学習を進めた段階で、`watch.py`で眺めると生成コースが「似た形ばかり」に
+見えるという指摘を受けた。原因は単純で、生成器が終始1種類
+（`_filleted_polygon_xy`のランダム多角形＋ヘアピン＋シケイン）しかなく、
+パラメータの範囲内でしか多様性が出ないため。`generate_random_course`の本体
+（多角形生成→ヘアピン差し込み→シケイン→旋回半径チェック→周回方向ランダム化）を
+`_build_loop()`に切り出し、`_filleted_polygon_xy`の`n_ctrl`/`base_r`/`jaggedness`
+範囲と`_add_chicanes`の個数をプリセットとして差し替えるだけで
+**circuit**（頂点数・ヘアピン/シケイン頻度を上げた複雑なコース）・**corridor**
+（頂点数を4つ=矩形相当に固定し半径を大きく取った、直線区間が支配的なコース）
+の2アーキタイプを追加した——新しい幾何アルゴリズムは要らなかった。
+
+**narrow**（急な道幅変化）と**obstacle**（障害物）は`track.py`の`add_offset_discs()`
+（`rasterize()`の`divider`——「掘ってから立てる」——を、中心線上に限らず任意の
+横オフセット位置に一般化したもの）を共通の土台にする。narrowは中心線の
+**両側**対称に壁を追加して局所的に道幅を狭め、その狭まった実際の道幅を
+`Course.width`の配列（centerlineと同じ長さ）として持たせる——`sim/gym_env.py`の
+`_CenterlineProgress`がコース全体でスカラー1個の道幅から横偏差の余白`margin`を
+計算する設計だったため、道幅が場所によって変わるコースをそのまま入れると
+「狭い区間で罰が甘く、広い区間で罰が辛い」不整合が起きる。これを避けるため
+`_CenterlineProgress`側も最近傍点のインデックスを使って位置ごとの道幅を
+参照するよう改修した（`sim/gym_env.py`参照）。
+
+obstacleは中心線から**片側だけ**オフセットした孤立円盤（左右どちらの壁にも
+接触しない、浮いた障害物）を置く。衝突判定・LiDARは素の`grid`だけを見るので
+障害物への追加コードは不要——`add_offset_discs`で壁を足すだけで両方に効く。
+反対側には常に車両が通れる余裕（`_vehicle_half_width_m()`＋余裕）を残すよう
+オフセットの上限を計算する。**初回実装では「回避のための横偏差ペナルティ免除」は
+入れていない**——効果が不透明な割に複雑さが増すため、まずは物理障害物のみで
+学習挙動を見てから要否を判断する方針（Plan agentのレビューを踏まえた判断）。
+
+### ★ corridorの作り直し（同日、v7学習前のバンビのレビューで判明）
+
+`watch.py`で実際に眺めたバンビから「直線のコースが毎回同じ菱形にしか見えない」
+との指摘。原因は`_filleted_polygon_xy`の頂点配置が`np.linspace(0, 2π, n_ctrl,
+endpoint=False)`で**常に同じ角度**（4頂点なら0/90/180/270°）に固定されている
+ことで、半径をどれだけランダムに振っても「向き・アスペクト比が変わらない
+菱形」から抜け出せなかった（corridorはjaggedness≈0で使っていたのでなおさら
+症状が顕著だった）。
+
+`generate_corridor_course`を`_build_loop`経由から、`straight`/`arc`セグメントを
+直接組み立てる専用構築（`_stadium_path`＝直線2本+半円2つのオーバル、
+`_rectangle_path`＝直線4本+直角4つの角丸長方形、半々でランダムに選ぶ）に
+作り直した。対辺の長さ・半径をそれぞれ揃えるだけで対称性から自動的に閉じるため、
+`_build_loop`の「引き直して確認」ループが不要になった。開始向き
+（`start_yaw`）もランダム化し、同じアスペクト比でも見た目の向きが揃わない
+ようにした。「ラジコンの練習コースのような、板で仕切っただけの直線区間」という
+バンビの意図に合わせ、旋回半径は直線長に対してタイトな範囲
+（`_CORRIDOR_RADIUS_MULT`）に絞ってある。
+
+あわせて`ml_lidar/watch.py`にobstacle/narrowの可視化ハイライトを追加した
+（`Course.obstacles`を赤丸、`Course.width`配列の道幅が狭い区間の中心線点を
+オレンジ丸で上書き描画）。壁と同系色のグレーで焼き込まれるだけだと、
+サムネイル解像度では肉眼でほぼ判別できなかったため（`_draw_panel`参照）。
 """
 
 from __future__ import annotations
@@ -108,11 +164,17 @@ import numpy as np
 from raspi.nav.centerline import resample_loop
 
 from .course import Course
+from .track import add_offset_discs
 from .track import centerline as _track_centerline
 from .track import rasterize
 from .vehicle import VehicleSpec
 
-__all__ = ["generate_random_course", "generate_random_course_dr"]
+__all__ = [
+    "generate_random_course", "generate_random_course_dr",
+    "generate_circuit_course", "generate_corridor_course",
+    "generate_narrow_course", "generate_obstacle_course",
+    "generate_diverse_course",
+]
 
 #: 車両の幾何学的な最小旋回半径に掛ける安全マージン。数値誤差やLiDARノイズの
 #: 余地をゼロにしないため、ぴったり`R_min`は狙わない
@@ -176,6 +238,16 @@ def _vehicle_min_turn_radius_m() -> float:
     return spec.wheelbase / math.tan(spec.max_steer)
 
 
+@lru_cache(maxsize=1)
+def _vehicle_half_width_m() -> float:
+    """車体の全幅の半分 [m]（footprintのy座標の絶対値の最大）。`obstacle`
+    アーキタイプが浮遊障害物の反対側に残す余裕の計算に使う。
+    `_vehicle_min_turn_radius_m()`と同じ理由でキャッシュする。
+    """
+    fp = VehicleSpec.load().footprint
+    return max(abs(p[1]) for p in fp)
+
+
 def _min_turn_radius_m(xy: np.ndarray) -> float:
     """閉ループの点列から、実現されている旋回半径の最小値 [m] を測る。"""
     loop = np.vstack([xy, xy[:1]])
@@ -223,11 +295,21 @@ def _fillet_path(rng: np.random.Generator, elen: np.ndarray, delta: np.ndarray,
     return path, t
 
 
-def _filleted_polygon_xy(rng: np.random.Generator, min_turn_radius_m: float) -> np.ndarray:
-    """半径が保証されたフィレット付きの多角形の点列（x, y のみ）を1本作る。"""
-    n_ctrl = int(rng.integers(4, 9))                    # 角の数。少ないほど直線が際立つ
-    base_r = float(rng.uniform(1.8, 4.5))
-    jaggedness = float(rng.uniform(0.15, 0.5))          # 半径のばらつき（コースごとに変える）
+def _filleted_polygon_xy(rng: np.random.Generator, min_turn_radius_m: float, *,
+                         n_ctrl_range: tuple[int, int] = (4, 9),
+                         base_r_range: tuple[float, float] = (1.8, 4.5),
+                         jaggedness_range: tuple[float, float] = (0.15, 0.5)) -> np.ndarray:
+    """半径が保証されたフィレット付きの多角形の点列（x, y のみ）を1本作る。
+
+    :param n_ctrl_range: 角の数の範囲（`rng.integers`、少ないほど直線が際立つ）
+    :param base_r_range: 基準半径の範囲 [m]
+    :param jaggedness_range: 半径のばらつきの範囲（コースごとに変える）。
+        `circuit`/`corridor`アーキタイプ（モジュールdocstring参照）はここを
+        差し替えるだけで実現している
+    """
+    n_ctrl = int(rng.integers(*n_ctrl_range))            # 角の数。少ないほど直線が際立つ
+    base_r = float(rng.uniform(*base_r_range))
+    jaggedness = float(rng.uniform(*jaggedness_range))   # 半径のばらつき（コースごとに変える）
     radius_range = (base_r * (1 - jaggedness), base_r * (1 + jaggedness))
 
     angles = np.linspace(0.0, 2 * math.pi, n_ctrl, endpoint=False)
@@ -344,12 +426,17 @@ def _hairpin_polygon_xy(rng: np.random.Generator, min_turn_radius_m: float) -> n
     return None
 
 
-def generate_random_course(rng: np.random.Generator, *, name: str = "rand",
-                           width: float = 1.0, resolution: float = 0.02,
-                           final_step: float = 0.1,
-                           min_turn_radius_m: float | None = None,
-                           hairpin_prob: float = 0.35) -> Course:
-    """ランダムな閉ループの中心線から `Course` を組み立てて返す。
+def _build_loop(rng: np.random.Generator, *, min_turn_radius_m: float | None = None,
+                hairpin_prob: float = 0.35, final_step: float = 0.1,
+                n_ctrl_range: tuple[int, int] = (4, 9),
+                base_r_range: tuple[float, float] = (1.8, 4.5),
+                jaggedness_range: tuple[float, float] = (0.15, 0.5),
+                chicane_n_range: tuple[int, int] = (1, 4)) -> tuple[np.ndarray, float]:
+    """閉ループ中心線 `(N,3)`(x, y, yaw) を組み立てる本体。`generate_random_course`
+    から切り出した（2026-08-31、コース多様化）——形状パラメータのプリセットを
+    差し替えるだけで`circuit`/`corridor`アーキタイプを作れるようにするため
+    （モジュールdocstring「アーキタイプの多様化」参照）。挙動は元の
+    `generate_random_course`と完全に同一（既定値は元のハードコード値のまま）。
 
     :param min_turn_radius_m: 生成するコーナーの半径の下限 [m]。省略時は
         `config/vehicle.toml`から計算した車両の幾何学的な最小旋回半径に
@@ -360,6 +447,7 @@ def generate_random_course(rng: np.random.Generator, *, name: str = "rand",
         （閉じる/自己交差しない配置が見つからなかった場合）通常のフィレット
         多角形にフォールバックするため、実際にヘアピンが入る確率はこれより
         わずかに低い
+    :returns: `(centerline, 実際に使った最小旋回半径 [m])`
 
     最小旋回半径の**厳密な**保証はしない（頂点の方位変化が辺の長さに対して
     急峻すぎる病的なケースでは、`_MAX_GEN_ATTEMPTS`回引き直しても割り込みが
@@ -373,8 +461,11 @@ def generate_random_course(rng: np.random.Generator, *, name: str = "rand",
 
     xy = np.zeros((0, 2))
     for attempt in range(_MAX_GEN_ATTEMPTS):
-        base_xy = hairpin_xy if hairpin_xy is not None else _filleted_polygon_xy(rng, r_min)
-        chi_xy = _add_chicanes(rng, base_xy, n=int(rng.integers(1, 4)), min_radius_m=r_min)
+        base_xy = hairpin_xy if hairpin_xy is not None else _filleted_polygon_xy(
+            rng, r_min, n_ctrl_range=n_ctrl_range, base_r_range=base_r_range,
+            jaggedness_range=jaggedness_range)
+        chi_xy = _add_chicanes(rng, base_xy, n=int(rng.integers(*chicane_n_range)),
+                               min_radius_m=r_min)
         xy = resample_loop(chi_xy, final_step)
         if _min_turn_radius_m(xy) >= r_min or attempt == _MAX_GEN_ATTEMPTS - 1:
             break
@@ -391,8 +482,19 @@ def generate_random_course(rng: np.random.Generator, *, name: str = "rand",
 
     nxt = np.roll(xy, -1, axis=0)
     yaw = np.arctan2(nxt[:, 1] - xy[:, 1], nxt[:, 0] - xy[:, 0])
-    centerline = np.column_stack((xy, yaw))
+    return np.column_stack((xy, yaw)), r_min
 
+
+def generate_random_course(rng: np.random.Generator, *, name: str = "rand",
+                           width: float = 1.0, resolution: float = 0.02,
+                           final_step: float = 0.1,
+                           min_turn_radius_m: float | None = None,
+                           hairpin_prob: float = 0.35) -> Course:
+    """ランダムな閉ループの中心線から `Course` を組み立てて返す（`organic`
+    アーキタイプ。引数の意味は`_build_loop`のdocstring参照）。
+    """
+    centerline, _ = _build_loop(rng, min_turn_radius_m=min_turn_radius_m,
+                                hairpin_prob=hairpin_prob, final_step=final_step)
     grid, origin = rasterize(centerline, width, resolution)
     start = (float(centerline[0, 0]), float(centerline[0, 1]), float(centerline[0, 2]))
 
@@ -508,3 +610,343 @@ def _add_chicanes(rng: np.random.Generator, xy: np.ndarray, *, n: int,
             out[idx, 0] = base[idx, 0] + bump * nx
             out[idx, 1] = base[idx, 1] + bump * ny
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# アーキタイプの多様化（モジュールdocstring「アーキタイプの多様化」参照）
+# ══════════════════════════════════════════════════════════════════════════
+
+#: circuit アーキタイプ: 頂点数・ヘアピン/シケイン頻度を上げ、複雑に曲がりくねった
+#: コースにする
+_CIRCUIT_N_CTRL_RANGE = (8, 15)
+_CIRCUIT_BASE_R_RANGE = (3.0, 6.0)
+_CIRCUIT_JAGGEDNESS_RANGE = (0.25, 0.55)
+_CIRCUIT_CHICANE_N_RANGE = (2, 5)
+_CIRCUIT_HAIRPIN_PROB = 0.6
+
+#: corridor アーキタイプ: 直線区間の長さ [m]（ラジコンの練習コースのような、
+#: 板で仕切っただけの直線区間が主体のコースにする狙い）
+_CORRIDOR_STRAIGHT_RANGE_M = (2.5, 8.0)
+#: corridor: 曲がる場所（直線の両端だけ）の半径を`min_turn_radius_m`の何倍にするか。
+#: 直線に対してタイトな範囲に絞ることで、「大きく緩やかに曲がる」ではなく
+#: 「直線の両端で鋭く折り返す」見た目にする
+_CORRIDOR_RADIUS_MULT = (1.0, 1.8)
+#: corridor: 旋回半径は対向直線の中心線間隔の半分そのものなので、道幅の半分
+#: より小さいと内側の「島」が対向車線と合体してしまう（`_corridor_turn_radius`
+#: docstring参照）。半径の下限を`道幅の半分 + この値`まで引き上げて、島の壁の
+#: 厚みを最低でもこの2倍は確保する
+_CORRIDOR_LANE_GAP_M = 0.15
+
+#: narrow アーキタイプ: 1本あたりの狭め区間の弧長 [m]
+_NARROW_LEN_RANGE = (0.5, 1.2)
+#: narrow: 狭める先の道幅を元の道幅の何倍にするか
+_NARROW_FRAC_RANGE = (0.35, 0.6)
+#: narrow: 狭めた後の道幅がここを下回らないようにする下限 [m]。
+#: `nominal_width * frac`だけで決めると（幅0.7m×frac0.35≈0.245m）車体全幅
+#: (`2*_vehicle_half_width_m()`≈0.18m)に対して余裕が無さすぎ、方策の巧拙と無関係な
+#: 「そもそも通り抜けようがない」区間ができてしまう（`min_turn_radius_m`と同じ理由で
+#: 報酬信号にノイズを持ち込む。モジュールdocstring参照）
+_NARROW_MIN_CLEARANCE_M = 0.20
+
+#: obstacle アーキタイプ: 円盤障害物の半径 [m]
+_OBSTACLE_RADIUS_RANGE = (0.08, 0.15)
+#: obstacle: 障害物の反対側に必ず残す、車両が通れる余裕 [m]
+#: （`_vehicle_half_width_m()`≈0.09mに対する余裕）
+_OBSTACLE_CLEARANCE_M = 0.16
+
+#: `generate_diverse_course`が各アーキタイプを選ぶ重み（比率だけが意味を持つ、
+#: 正規化して使う）。学習分布のバランスを変えたいときはここを調整する
+#: （`hairpin_prob`等と同じ、モジュール定数によるチューニングの流儀）
+_ARCHETYPE_WEIGHTS = {
+    "organic": 0.35,
+    "circuit": 0.20,
+    "corridor": 0.15,
+    "narrow": 0.15,
+    "obstacle": 0.15,
+}
+
+
+def generate_circuit_course(rng: np.random.Generator, *, name: str = "rand-circuit",
+                            width: float = 1.0, resolution: float = 0.02,
+                            final_step: float = 0.1,
+                            min_turn_radius_m: float | None = None) -> Course:
+    """頂点数・ヘアピン/シケイン頻度を上げた、サーキット風の複雑なコース。
+    幾何アルゴリズム自体は`_build_loop`（`_filleted_polygon_xy`等）と同じで、
+    パラメータ範囲だけを変えたプリセット（モジュールdocstring参照）。
+    """
+    centerline, _ = _build_loop(rng, min_turn_radius_m=min_turn_radius_m,
+                                hairpin_prob=_CIRCUIT_HAIRPIN_PROB,
+                                n_ctrl_range=_CIRCUIT_N_CTRL_RANGE,
+                                base_r_range=_CIRCUIT_BASE_R_RANGE,
+                                jaggedness_range=_CIRCUIT_JAGGEDNESS_RANGE,
+                                chicane_n_range=_CIRCUIT_CHICANE_N_RANGE,
+                                final_step=final_step)
+    grid, origin = rasterize(centerline, width, resolution)
+    start = (float(centerline[0, 0]), float(centerline[0, 1]), float(centerline[0, 2]))
+    return Course(name=name, path=Path(f"<random:{name}>"), resolution=resolution,
+                 origin=origin, start=start, grid=np.ascontiguousarray(grid),
+                 centerline=centerline, width=width)
+
+
+def _corridor_turn_radius(rng: np.random.Generator, r_min: float, half_width: float) -> float:
+    """corridorの旋回半径を、`r_min`基準の範囲と「対向直線と合体しない」下限
+    （`half_width + _CORRIDOR_LANE_GAP_M`）の両方を満たすように決める。
+
+    ★2026-08-31発覚（バンビの「同じようなバグがないか」という指摘で調査して
+    判明）: 旋回半径は対向する直線同士の**中心線間隔の半分**そのもの
+    （stadiumなら直線間隔ちょうど`2r`、rectangleの角でも同じ）。ここを
+    `r_min`だけを基準に決め、`width`（道幅）と無関係にしていたため、
+    道幅が広い・半径が小さい組み合わせ（実測で半径0.52〜0.94mに対し道幅は
+    最大1.3m＝半分0.65m）だと**半径が道幅の半分を下回り、内側の「島」ごと
+    掘り取られて対向車線と合体する**（stadiumで実測約5.7%の頻度）。
+    「板で仕切ったコース」のはずが、部分的に壁の無い広場になってしまっていた。
+    """
+    lo = max(r_min * _CORRIDOR_RADIUS_MULT[0], half_width + _CORRIDOR_LANE_GAP_M)
+    hi = max(r_min * _CORRIDOR_RADIUS_MULT[1], lo * 1.3)
+    return float(rng.uniform(lo, hi))
+
+
+def _stadium_path(rng: np.random.Generator, r_min: float, half_width: float) -> list[tuple]:
+    """直線2本＋半円2つ（180°ずつ）で作る、陸上トラック型（オーバル）の経路。
+    対辺の直線・半円がそれぞれ同じ長さ/半径なので、対称性だけで必ず閉じる
+    （`_filleted_polygon_xy`のような「引き直して確かめる」検査は不要）。
+    """
+    r = _corridor_turn_radius(rng, r_min, half_width)
+    length = float(rng.uniform(*_CORRIDOR_STRAIGHT_RANGE_M))
+    return [("straight", length), ("arc", r, 180.0),
+            ("straight", length), ("arc", r, 180.0)]
+
+
+def _rectangle_path(rng: np.random.Generator, r_min: float, half_width: float) -> list[tuple]:
+    """直線4本＋直角4つ（90°ずつ）で作る、角丸長方形の経路。対辺の長さが
+    等しく半径も共通なので、標準的なレーストラック矩形の構成として必ず閉じる。
+    """
+    r = _corridor_turn_radius(rng, r_min, half_width)
+    lw = float(rng.uniform(*_CORRIDOR_STRAIGHT_RANGE_M))
+    lh = float(rng.uniform(*_CORRIDOR_STRAIGHT_RANGE_M))
+    return [("straight", lw), ("arc", r, 90.0), ("straight", lh), ("arc", r, 90.0),
+            ("straight", lw), ("arc", r, 90.0), ("straight", lh), ("arc", r, 90.0)]
+
+
+def generate_corridor_course(rng: np.random.Generator, *, name: str = "rand-corridor",
+                             width: float = 1.0, resolution: float = 0.02,
+                             final_step: float = 0.1,
+                             min_turn_radius_m: float | None = None) -> Course:
+    """直線区間が支配的な、板で仕切っただけのラジコン練習コースのようなコース
+    （オーバル型/角丸長方形型を半々でランダムに選ぶ）。
+
+    ★2026-08-31書き直し: 旧実装は`_build_loop`（`_filleted_polygon_xy`、頂点数4・
+    jaggedness≈0のプリセット）を流用していたが、`_filleted_polygon_xy`は頂点を
+    `np.linspace(0, 2π, n_ctrl, endpoint=False)`で**常に同じ角度**（4頂点なら
+    0/90/180/270°）に置く実装のため、半径をどう振っても**毎回同じ「菱形」に
+    しか見えない**——バンビの指摘で判明。曲がる場所を直線の両端だけに限定した
+    専用の経路（`_stadium_path`/`_rectangle_path`、`straight`/`arc`セグメントを
+    直接組み立てる）に作り直し、対称性だけで閉じることを保証した（`_build_loop`
+    の「引き直して確認」ループを経由しない）。
+
+    ★2026-08-31追記: 旋回半径を`width`と無関係に決めていたため、道幅が広く
+    半径が小さい組み合わせで内側の「島」が対向車線と合体するバグが別途あった
+    （`_corridor_turn_radius`docstring参照）。半径を`width`連動の下限付きで
+    選ぶよう修正済み。
+    """
+    r_min = (min_turn_radius_m if min_turn_radius_m is not None
+            else _vehicle_min_turn_radius_m() * _RADIUS_MARGIN)
+    half_width = width / 2.0
+    path_fn = _stadium_path if rng.random() < 0.5 else _rectangle_path
+    path = path_fn(rng, r_min, half_width)
+
+    start_yaw = float(rng.uniform(0.0, 2 * math.pi))     # 見た目の向きもランダム化する
+    pts = _track_centerline(path, 0.0, 0.0, start_yaw, step=_ARC_STEP)
+    xy = resample_loop(pts[:, :2], final_step)
+    if rng.random() < 0.5:
+        xy = xy[::-1].copy()
+
+    nxt = np.roll(xy, -1, axis=0)
+    yaw = np.arctan2(nxt[:, 1] - xy[:, 1], nxt[:, 0] - xy[:, 0])
+    centerline = np.column_stack((xy, yaw))
+
+    grid, origin = rasterize(centerline, width, resolution)
+    start = (float(centerline[0, 0]), float(centerline[0, 1]), float(centerline[0, 2]))
+    return Course(name=name, path=Path(f"<random:{name}>"), resolution=resolution,
+                 origin=origin, start=start, grid=np.ascontiguousarray(grid),
+                 centerline=centerline, width=width)
+
+
+def generate_narrow_course(rng: np.random.Generator, *, name: str = "rand-narrow",
+                           width_range: tuple[float, float] = (0.9, 1.3),
+                           resolution: float = 0.02, final_step: float = 0.1,
+                           min_turn_radius_m: float | None = None,
+                           n_narrow_range: tuple[int, int] = (1, 2)) -> Course:
+    """道幅が局所的に急に狭くなる区間を1〜2箇所持つコース。
+
+    物理的な壁は`add_offset_discs()`（`sim/track.py`）で中心線の両側**対称**に
+    追加する。報酬側の余白計算（`sim/gym_env.py`の`_CenterlineProgress`）に使う
+    `Course.width`は、区間ごとの実際の道幅を反映した配列にする——スカラーの
+    ままだと広い区間で過剰に罰し、狭い区間で罰が足りなくなるため
+    （モジュールdocstring「アーキタイプの多様化」参照）。
+
+    ★2026-08-31修正1: 初回実装は`r_disc`/`offset`の式が誤っており、**意図した
+    `local_width`より実際に掘る幅の方が広くなる**バグがあった（オフセットを
+    `half_nom - r_disc`（壁側基準）で決めていたため、余白ぶんの`+2*resolution`が
+    そのまま中心線側への食い込みに上乗せされていた）。極端な場合は左右の円盤が
+    中心線を越えて重なり、**道が完全に塞がる**ことがバンビの質問で判明。
+    `offset`を`half_local + r_disc`（中心線側の到達点を先に固定する）に直し、
+    実際に掘られる境界が常に`half_local`ちょうど（それより内側に食い込まない）に
+    なるようにした。あわせて`_NARROW_MIN_CLEARANCE_M`で「車体が物理的に
+    通れない」水準まで狭まることも防いでいる。
+
+    ★2026-08-31修正2: 修正1の後も、実際にgridをレイキャストして計測すると
+    記録した`local_width`より数cm狭いことがあった。原因は`_add_chicanes`が
+    docstringで書いている「曲率の合成」と同じ罠——`add_offset_discs`は中心線に
+    沿って**一定のオフセット**で円盤を置くだけなので、ベースの中心線自体が
+    （`_build_loop`のヘアピン/フィレットで）曲がっている区間に置くと、円盤が
+    描く弧の内側／外側で実際の余白が均等にならない。`_add_chicanes`と同じ
+    `straight_enough`判定（曲率が`1/(2*r_min)`未満の区間だけを候補にする）を
+    移植し、ベースが実質直線とみなせる区間だけにnarrowを置くようにした。
+    """
+    nominal_width = float(rng.uniform(*width_range))
+    min_local_width = 2 * _vehicle_half_width_m() + _NARROW_MIN_CLEARANCE_M
+    centerline, r_min = _build_loop(rng, min_turn_radius_m=min_turn_radius_m, hairpin_prob=0.35,
+                                    final_step=final_step)
+    grid, origin = rasterize(centerline, nominal_width, resolution)
+
+    xy = centerline[:, :2]
+    N = len(xy)
+    loop = np.vstack([xy, xy[:1]])
+    seg = np.hypot(*np.diff(loop, axis=0).T)
+    arc = np.concatenate([[0.0], np.cumsum(seg)])[:-1]
+    yaw = np.arctan2(np.diff(loop[:, 1]), np.diff(loop[:, 0]))
+    dyaw = np.abs(np.diff(np.unwrap(np.concatenate([yaw, yaw[:1]]))))
+    base_curv = dyaw / np.maximum(seg, 1e-6)
+    # `_add_chicanes`の`3*min_radius_m`よりは緩め——narrowは曲率が単純加算される
+    # わけではなく「均等でなくなる」だけなので、そこまで厳しくしなくても安全
+    straight_enough = base_curv < (1.0 / (2.0 * r_min))
+
+    width_profile = np.full(N, nominal_width)
+    spans: list[tuple[float, float, float, float]] = []
+    for _ in range(int(rng.integers(*n_narrow_range))):
+        frac = float(rng.uniform(*_NARROW_FRAC_RANGE))
+        local_width = max(nominal_width * frac, min(min_local_width, nominal_width))
+        length = float(rng.uniform(*_NARROW_LEN_RANGE))
+        half_win = max(2, int(round(length / 2.0 / max(final_step, 1e-6))))
+        half_win = min(half_win, N // 2 - 1)
+        if half_win < 2:
+            continue
+
+        # `add_offset_discs`（`sim/track.py`）は`s0 <= s1`の単純な区間マスクで
+        # ループの継ぎ目をまたげない前提なので、候補窓は配列の両端をまたがない
+        # 範囲だけに限定する（narrowを置ける場所が少し減るだけで実害は無い）
+        s0 = s1 = None
+        for _try in range(40):
+            cand = int(rng.integers(half_win, N - half_win))
+            window_idx = range(cand - half_win, cand + half_win + 1)
+            if np.all(straight_enough[list(window_idx)]):
+                s0, s1 = float(arc[cand - half_win]), float(arc[cand + half_win])
+                break
+        if s0 is None:
+            continue                                    # 直線区間が見つからなければこの狭め箇所は諦める
+
+        width_profile[(arc >= s0) & (arc <= s1)] = local_width
+
+        half_local = local_width / 2.0
+        depth = nominal_width / 2.0 - half_local
+        # `r_disc`の下限を余白ぶん確保しつつ、`offset`は「中心線側の到達点が
+        # ちょうど`half_local`になる」方を基準にする——`r_disc`が余白で
+        # 大きくなっても中心線側への食い込みが増えない（食い込みが増えるのは
+        # 壁側基準で決めていた旧実装のバグ）
+        r_disc = max(depth / 2.0 + resolution, resolution * 3)
+        offset = half_local + r_disc
+        spans.append((s0, s1, offset, r_disc))
+        spans.append((s0, s1, -offset, r_disc))
+
+    if spans:
+        add_offset_discs(grid, origin, resolution, centerline, spans)
+
+    start = (float(centerline[0, 0]), float(centerline[0, 1]), float(centerline[0, 2]))
+    return Course(name=name, path=Path(f"<random:{name}>"), resolution=resolution,
+                 origin=origin, start=start, grid=np.ascontiguousarray(grid),
+                 centerline=centerline, width=width_profile)
+
+
+def generate_obstacle_course(rng: np.random.Generator, *, name: str = "rand-obstacle",
+                             width_range: tuple[float, float] = (0.9, 1.3),
+                             resolution: float = 0.02, final_step: float = 0.1,
+                             min_turn_radius_m: float | None = None,
+                             n_obstacles_range: tuple[int, int] = (2, 5)) -> Course:
+    """孤立した円盤障害物を数個浮かべたコース。左右どちらの壁にも接触させず、
+    反対側に車両が通れる余裕（`_OBSTACLE_CLEARANCE_M`）を必ず残す
+    （モジュールdocstring「アーキタイプの多様化」参照）。
+
+    衝突判定・LiDARは素の`grid`だけを見るので、障害物を追加しても
+    `sim/course.py`・`sim/lidar.py`側は無改修でそのまま機能する。
+    `Course.obstacles`（(K,3): x, y, 半径）に障害物の中心を残し、
+    `sim/gym_env.py`の`reset()`がスタート地点抽選時にこれへめり込まないよう
+    避けるのに使う。
+    """
+    width = float(rng.uniform(*width_range))
+    centerline, _ = _build_loop(rng, min_turn_radius_m=min_turn_radius_m, hairpin_prob=0.2,
+                                final_step=final_step)
+    grid, origin = rasterize(centerline, width, resolution)
+
+    seg = np.hypot(*np.diff(centerline[:, :2], axis=0).T)
+    arc = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(arc[-1])
+    half_w = width / 2.0
+    veh_half_w = _vehicle_half_width_m()
+
+    xs, ys, yaws = centerline[:, 0], centerline[:, 1], centerline[:, 2]
+    spans: list[tuple[float, float, float, float]] = []
+    centers: list[tuple[float, float, float]] = []
+    for _ in range(int(rng.integers(*n_obstacles_range))):
+        r_obs = float(rng.uniform(*_OBSTACLE_RADIUS_RANGE))
+        # 反対側に veh_half_w + クリアランスぶんの余裕を残す下限、壁に接触しない上限
+        lo = veh_half_w + _OBSTACLE_CLEARANCE_M + r_obs - half_w
+        hi = half_w - r_obs - 0.03
+        if lo >= hi:
+            continue                                     # このコース幅には狭すぎる→諦める
+        d = float(rng.uniform(lo, hi)) * (1.0 if rng.random() < 0.5 else -1.0)
+        s = float(rng.uniform(0.0, total))
+        spans.append((max(0.0, s - r_obs), min(total, s + r_obs), d, r_obs))
+        i = int(np.argmin(np.abs(arc - s)))
+        nx, ny = -math.sin(yaws[i]), math.cos(yaws[i])
+        centers.append((xs[i] + nx * d, ys[i] + ny * d, r_obs))
+
+    if spans:
+        add_offset_discs(grid, origin, resolution, centerline, spans)
+
+    start = (float(centerline[0, 0]), float(centerline[0, 1]), float(centerline[0, 2]))
+    obstacles = np.asarray(centers, dtype=np.float64) if centers else None
+    return Course(name=name, path=Path(f"<random:{name}>"), resolution=resolution,
+                 origin=origin, start=start, grid=np.ascontiguousarray(grid),
+                 centerline=centerline, width=width, obstacles=obstacles)
+
+
+def generate_diverse_course(rng: np.random.Generator, *, name: str = "rand",
+                            width_range: tuple[float, float] = (0.7, 1.3),
+                            resolution: float = 0.02, final_step: float = 0.1,
+                            min_turn_radius_m: float | None = None) -> Course:
+    """学習コースのアーキタイプ（organic/circuit/corridor/narrow/obstacle）を
+    `_ARCHETYPE_WEIGHTS`の重みでエピソードごとにランダムに選ぶ、`course_fn`用の
+    エントリポイント（`ml_lidar/train_rl.py`が`course_fn=generate_diverse_course`
+    で使う）。単一の生成器だけだと似た形のコースばかりになる、というバンビの
+    指摘（2026-08-31）を受けて追加した（モジュールdocstring参照）。
+
+    `course_fn: Callable[[rng], Course]`という1引数の契約
+    （`sim/gym_env.py`の`SimE2EEnv.reset()`参照）はそのまま守っているので、
+    `ml_lidar/train_rl.py`側はこの関数へ差し替えるだけで対応できる。
+    """
+    kinds = list(_ARCHETYPE_WEIGHTS.keys())
+    p = np.array([_ARCHETYPE_WEIGHTS[k] for k in kinds])
+    kind = kinds[int(rng.choice(len(kinds), p=p / p.sum()))]
+
+    common = dict(name=name, resolution=resolution, final_step=final_step,
+                 min_turn_radius_m=min_turn_radius_m)
+    if kind == "organic":
+        return generate_random_course(rng, width=float(rng.uniform(*width_range)), **common)
+    if kind == "circuit":
+        return generate_circuit_course(rng, width=float(rng.uniform(*width_range)), **common)
+    if kind == "corridor":
+        return generate_corridor_course(rng, width=float(rng.uniform(*width_range)), **common)
+    if kind == "narrow":
+        return generate_narrow_course(rng, width_range=width_range, **common)
+    return generate_obstacle_course(rng, width_range=width_range, **common)

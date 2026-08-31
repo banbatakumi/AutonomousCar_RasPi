@@ -55,7 +55,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv  # noqa:
 
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
-from sim.random_course import generate_random_course_dr  # noqa: E402
+from sim.random_course import generate_diverse_course  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 __all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule"]
@@ -85,19 +85,25 @@ def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
     （プールを増やせば緩和はできるが、根本的には解決しない）。生成は軽い(数ms)ので、
     毎回新しく作らせて実質無限のコース多様性にする。
 
-    `course_fn=generate_random_course_dr`をそのまま渡す。`SimE2EEnv`は`self.rng`
+    `course_fn=generate_diverse_course`をそのまま渡す。`SimE2EEnv`は`self.rng`
     （`reset(seed=...)`で正しく差し替わる、環境自身の乱数状態）を渡して呼ぶ設計に
-    してあるので、外部に別のRNGを持たなくてよい（`generate_random_course_dr(rng, ...)`
-    の第一引数がそのままこの形）。
+    してあるので、外部に別のRNGを持たなくてよい（`generate_diverse_course(rng, ...)`
+    の第一引数がそのままこの形）。`generate_diverse_course`は毎エピソード
+    organic/circuit/corridor/narrow/obstacleのアーキタイプを重み付きランダムで
+    選ぶ（2026-08-31、単一の生成器だけだと似た形のコースばかりになるという
+    バンビの指摘への対応。詳細は`sim/random_course.py`モジュールdocstring
+    「アーキタイプの多様化」参照）。旧`generate_random_course_dr`（organic1種類）
+    はそのまま`sim/random_course.py`に残っており、`generate_diverse_course`内部の
+    organicアーキタイプが呼んでいる。
 
     LiDARノイズも既定で毎エピソードランダム化される（`SimE2EEnv`の`randomize_lidar`
     既定`True`）——ドメインランダム化で、シムの既定ノイズ量以外の条件にも頑健にする。
-    道幅も`generate_random_course_dr`が毎エピソード0.7〜1.3mでランダム化する
+    道幅も`generate_diverse_course`が毎エピソード0.7〜1.3mでランダム化する
     （2026-08-28、幅1.0m固定への過学習を避けるため。詳細は`sim/random_course.py`）。
     """
 
     def _make():
-        env = GymSurgeEnv(course_fn=generate_random_course_dr, max_steps=max_steps,
+        env = GymSurgeEnv(course_fn=generate_diverse_course, max_steps=max_steps,
                           max_speed=max_speed, seed=seed, steer_tau=steer_tau,
                           steer_rate_weight=steer_rate_weight, speed_weight=speed_weight)
         return Monitor(env)   # エピソード報酬/長さの集計を正しく取るため

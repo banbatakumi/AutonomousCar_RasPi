@@ -48,7 +48,13 @@ class Course:
     #: センターライン方式で作った場合の中心線 `(N,3)`（x, y, 向き）。PNG 由来なら None。
     #: **Phase 3 の経路追従の正解データとしてそのまま使える**
     centerline: np.ndarray | None = None
-    width: float | None = None        #: 道幅 [m]（センターライン方式のみ）
+    #: 道幅 [m]（センターライン方式のみ）。スカラーならコース全体で一定、
+    #: `centerline`と同じ長さの配列なら位置ごとに変わる
+    #: （`sim/random_course.py`の`narrow`/`obstacle`アーキタイプ）
+    width: float | np.ndarray | None = None
+    #: 孤立した円盤障害物の中心座標 (K,3): x, y, 半径[m]。
+    #: `sim/random_course.py`の`obstacle`アーキタイプのみが持つ
+    obstacles: np.ndarray | None = None
 
     # ── 読み込み ──
 
