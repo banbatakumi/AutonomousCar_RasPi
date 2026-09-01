@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xe9f79fab
+export const MSGS_SCHEMA = 0x0171ab6a
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -324,6 +324,16 @@ export type AutoState = {
   target_y: number
   /** 検出した動的障害物 `[x, y, r, ...]`（map フレーム）。上限あり */
   obstacles: number[]
+  /** 対象をロックして追跡できているか（`TargetTrack.tracking and not lost`） */
+  target_locked: boolean
+  /** 追跡中の対象を見失っているか（`TargetTrack.lost` のエコーバック） */
+  target_lost: boolean
+  /** 見失ってからの経過 [ms] */
+  target_lost_ms: number
+  /** 対象までの距離 [m]。**GUIは`target_locked`が立っているときだけ信じること** */
+  target_distance: number
+  /** 対象の方位 [deg] 符号付き（`nearest_deg` 等と同じ ±180 表現） */
+  target_bearing_deg: number
   /** 使った点群の古さ [ms] */
   scan_age_ms: number
   /** 実測の計画レート [Hz] */
@@ -382,4 +392,41 @@ export type LineScan = {
    * 低いのに走っているなら疑う（`follow_the_gap.py` の `valid_ratio` と同じ扱い）
    */
   coverage: number
+}
+
+/**
+ * `cam_track_node.py` が出す追跡結果（`follow_object` の `input_topic`）。
+ */
+export type TargetTrack = {
+  t_capture: number
+  t_pub: number
+  seq: number
+  /** ROIが選択され追跡中か。**False の間、他のフィールドは意味を持たない** */
+  tracking: boolean
+  /**
+   * 追跡中に対象を見失っているか。**`tracking=False` のときは常に False**
+   * （そもそも追跡していないので「見失う」という状態ではない）
+   */
+  lost: boolean
+  /** 見失ってからの経過 [ms]。見失っていない間は 0 */
+  lost_ms: number
+  /** 対象の方位 [rad]（車両座標・反時計回りが正）。`lost=True` の間は直前値を保持 */
+  bearing: number
+  /** LiDAR実測による対象までの距離 [m]。`distance_valid=False` の間は信じないこと */
+  distance: number
+  /**
+   * `distance` がLiDARの実測から得られた値か。**カメラの方位角しか無いフレームや、
+   * その方位にLiDARの実測が無い（欠測・射程外）ときは False**
+   */
+  distance_valid: boolean
+  /**
+   * 追跡中のbbox中心・幅・高さ（前カメラ映像の正規化座標、0〜1）。
+   * GUIの重畳描画用。`tracking=False` の間は意味を持たない
+   */
+  bbox_cx: number
+  bbox_cy: number
+  bbox_w: number
+  bbox_h: number
+  /** トラッカー（NanoTrack）の確信度 [0..1]。そのまま置く */
+  confidence: number
 }

@@ -47,6 +47,15 @@
 #
 # 手順・GUI での使い方は `docs/development.md` §12.2。
 #
+# ## `surge-cam-track`（`follow_object` 用）は既定で入れる
+#
+# `cam_perception_node` とは対照的に、**GUIでROIを選択する（`track/roi`の
+# `select_seq`が増える）までNanoTrackの推論を一切回さない**
+# （`raspi/nodes/cam_track_node.py`の`process_cycle()`——`IDLE`状態はフレームの
+# 共有メモリ読み取りだけで、推論コストは`TRACKING`中だけ発生する）。
+# 待機中のコストは前方カメラのフレームをもう1プロセスが読むぶんだけで、
+# `planning_node`が「常時上げてよい」のと同じ理由（2026-09-01）。
+#
 # ## ★★ 既定で `--allow-arm` が入る
 #
 # **電源を入れた状態で GUI から ARM を押せばモータが回る。**
@@ -72,8 +81,9 @@ ROOT=$(pwd)
 USER_NAME=${SUDO_USER:-pi}
 PY="$ROOT/.venv/bin/python -u"
 # **surge-logger / surge-cam-perception は既定でこの一覧に入れない**
-# （それぞれ SD 書き込み・CPU/電力の無駄を避けるため。上記）
-UNITS=(surge-io surge-camera surge-telemetry surge-planning)
+# （それぞれ SD 書き込み・CPU/電力の無駄を避けるため。上記）。
+# **surge-cam-track は入れる**（待機中は推論を回さないため。上記）
+UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track)
 WITH_LOGGER=0
 WITH_CAM_PERCEPTION=0
 
@@ -239,6 +249,10 @@ write_unit surge-telemetry "WebSocket サーバ"  "raspi.nodes.telemetry_node --
 # 起動していること自体が車を動かす条件にはならない（`--allow-arm` とは独立）
 write_unit surge-planning  "自動運転"         "raspi.nodes.planning_node --quiet" \
            "surge-io.service"
+# `follow_object` 用の対象追跡。**常時上げてよい**（上記コメント参照）。
+# `--quiet` は渡さない（`cam_perception_node.py` と同じくargparseに無いオプション）
+write_unit surge-cam-track "対象追従(follow_object用)の追跡" \
+           "raspi.nodes.cam_track_node" "surge-camera.service"
 # ロガーの unit は**常に置く**（`--with-logger` を付けたときだけ enable する）。
 # 置いておけば `sudo systemctl start surge-logger` で一時的に録れる
 write_unit surge-logger    "MCAP 記録"        "raspi.nodes.logger_node --quiet" \

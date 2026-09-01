@@ -23,12 +23,13 @@ export type {
   LineScan,
   LinkDiag,
   Scan,
+  TargetTrack,
   VehicleState,
 } from './generated/msgs'
 
 // 下の `Snapshot` が参照するので、再エクスポートとは別に取り込む
 // （`export ... from` は名前をこのモジュールのスコープには入れない）
-import type { AutoState, LineScan, LinkDiag, Scan, VehicleState } from './generated/msgs'
+import type { AutoState, LineScan, LinkDiag, Scan, TargetTrack, VehicleState } from './generated/msgs'
 
 /** 展開して描画用に焼いたあとの地図。**`live.map` に置く。** */
 export type MapData = {
@@ -106,6 +107,8 @@ export type Snapshot = {
   auto: AutoState | null
   /** `line_trace` が認識している白線の目標点。`auto` と同じく engage 不要で流れる */
   line_cam: LineScan | null
+  /** `follow_object` の追跡結果。`auto`/`line_cam` と同じく engage 不要で流れる */
+  track: TargetTrack | null
   ctl: { has_controller: boolean; controller: string }
   /** RasPi 本体（SoC）の温度 ℃。STM32側の `vs.temp` とは別枠。実機以外（シム等）では null */
   pi_temp_c: number | null

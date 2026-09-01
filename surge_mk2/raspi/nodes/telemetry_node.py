@@ -136,6 +136,7 @@ from raspi.msgs import (  # noqa: E402
     E2EModelCtrl,
     Heartbeat as HbMsg,
     LogCtrl,
+    TargetRoiCtrl,
     UiEvent,
 )
 from raspi.msgs.schema import schema_version  # noqa: E402
@@ -156,6 +157,8 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_LINE_CAM,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
+    TOPIC_TRACK_ROI,
+    TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
 )
@@ -216,8 +219,13 @@ CAM_CONFIG_HZ = 1
 #: カメラ画像を実際に使う自動運転モードの id（`raspi/auto/registry.py`）。
 #: この集合に入っているモードが engage されている間だけ、telemetry_node は
 #: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
-#: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外
-CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam"})
+#: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外。
+#: `follow_object` は `cam_track_node.py` が毎フレーム対象を追跡し続ける必要が
+#: あるので他の2つと同じ扱いにする
+CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "follow_object"})
+#: `track/roi`（★対象追従のROI選択）の再送周期。`_auto_ctrl_pump`と同じ理由
+#: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
+TRACK_ROI_HZ = 5
 #: `cam/model`（★モデル選択）の再送周期。`CAM_CONFIG_HZ` と同じ理由
 #: （cam_perception_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_MODEL_HZ = 1
@@ -327,6 +335,8 @@ class TelemetryServer:
             TOPIC_LINE_CAM: LATEST,
             #: `ftg_cam` の走行可否マスク（JPEG。GUI がカメラ映像へ重畳する。§`_mask_pump`）
             TOPIC_CAM_MASK: LATEST,
+            #: `follow_object` の追跡結果（GUI がカメラ映像へ重畳する。§`_snapshot`）
+            TOPIC_TRACK_TARGET: LATEST,
         })
         self.pub = Publisher("control")
 
@@ -407,6 +417,14 @@ class TelemetryServer:
         #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
         self._e2e_model = ""
         self._load_e2e_model_conf()
+
+        # ── 対象追従（`follow_object`）のROI選択 ──
+        #: GUIがドラッグ選択した矩形（正規化座標）。**永続化しない**
+        #: （`_auto_freeze_seq`/`_auto_clear_seq` と同じ理由——電源投入で
+        #: 前回の選択のまま追跡が始まる経路を作らない）
+        self._track_roi_box = (0.0, 0.0, 0.0, 0.0)
+        self._track_select_seq = 0
+        self._track_clear_seq = 0
 
         #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
         self._mcap_proc: asyncio.subprocess.Process | None = None
@@ -705,6 +723,15 @@ class TelemetryServer:
         elif kind == "e2e_model_select":
             self._on_e2e_model(m)
             await self._broadcast_control_status()
+
+        # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
+        #    `AutoCtrl.freeze_seq`/`clear_map` と同じ「回数」の約束） ──
+
+        elif kind == "track_roi_select":
+            self._on_track_roi_select(m)
+
+        elif kind == "track_roi_clear":
+            self._on_track_roi_clear()
 
         # ── TC/TV 有効切り替え（誰でも操作できる。★v0.8） ──
         # STM32側の適用結果は `diag/link`(tc_enabled/tv_enabled) 経由で戻ってくるので
@@ -1165,6 +1192,47 @@ class TelemetryServer:
         except Exception:
             pass
 
+    # ── 対象追従（`follow_object`）のROI選択 ──
+    #
+    # `AutoCtrl.freeze_seq`/`clear_seq` と同じ「回数」の約束（真偽値だと、
+    # このメッセージは現在の意思を繰り返し流す設計なので、選び直していないのに
+    # 再送のたびに毎回選択が発生してしまう）。`cam_track_node.py` が
+    # `select_seq`/`clear_seq` の増加だけを見て追跡の開始/終了を判断する。
+
+    def _on_track_roi_select(self, m: dict) -> None:
+        """`{"type":"track_roi_select", "x0","y0","x1","y1"}`（前方カメラ映像の
+        正規化座標、0〜1）。**選び直すたびに `follow_object` の engage を必ず落とす**
+        （`_on_cam_model`/`_on_e2e_model` の「モデルを変えたら engage を必ず落とす」
+        と同じ理由——前の対象のつもりで engage したまま追跡対象だけ入れ替わるのを防ぐ）。
+        """
+        try:
+            box = (float(m["x0"]), float(m["y0"]), float(m["x1"]), float(m["y1"]))
+        except (KeyError, TypeError, ValueError):
+            return                         # 壊れた座標は黙って捨てる
+        self._track_roi_box = box
+        self._track_select_seq += 1
+        if self._auto_engaged and self._auto_mode == "follow_object":
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+        self._publish_track_roi()          # 待たせない。cam_model 等と同じく即座に効かせる
+
+    def _on_track_roi_clear(self) -> None:
+        """「選択を解除」。**engage は落とさない**——`clear_map` と同じ形。
+        `follow_object` は対象未選択に戻れば `FollowObject.plan()` が自然に
+        `ready=False`（停止）へ倒れるので、ここで engage を強制的に落とす必要が無い。
+        """
+        self._track_clear_seq += 1
+        self._publish_track_roi()
+
+    def _track_roi_ctrl(self) -> TargetRoiCtrl:
+        x0, y0, x1, y1 = self._track_roi_box
+        return TargetRoiCtrl(x0=x0, y0=y0, x1=x1, y1=y1,
+                             select_seq=self._track_select_seq,
+                             clear_seq=self._track_clear_seq)
+
+    def _publish_track_roi(self) -> None:
+        self.pub.send(TOPIC_TRACK_ROI, self._track_roi_ctrl())
+
     # ── Wi-Fi（SSID・電波強度） ──
 
     def _wifi_status(self) -> dict:
@@ -1474,6 +1542,9 @@ class TelemetryServer:
             # `line_trace` が認識している白線の目標点。**engage していなくても流れる**
             # （`auto` と同じ理由——手動走行中でも見え方を確認できた方が良い）
             "line_cam": self.sub.latest.get(TOPIC_LINE_CAM),
+            # `follow_object` の追跡結果。**engage していなくても流れる**
+            # （`auto`/`line_cam` と同じ理由——対象を選んだだけで見え方を確認できる）
+            "track": self.sub.latest.get(TOPIC_TRACK_TARGET),
             "ctl": {"has_controller": self.controller is not None,
                     "controller": self.controller_name},
             # STM32 側の温度（`vs.temp`）とは別枠。RasPi 自体は STM32 のバスに乗らない
@@ -1605,6 +1676,16 @@ class TelemetryServer:
             await asyncio.sleep(period)
             self._publish_e2e_model()
 
+    async def _track_roi_pump(self) -> None:
+        """対象追従のROI選択（`track/roi`）を低頻度で再送する。
+        `_cam_model_pump`/`_e2e_model_pump` と同じ理由
+        （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）。
+        """
+        period = 1.0 / TRACK_ROI_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_track_roi()
+
     async def _log_ctrl_pump(self) -> None:
         """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
 
@@ -1711,7 +1792,7 @@ class TelemetryServer:
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
-                self._mask_pump)]
+                self._mask_pump, self._track_roi_pump)]
             try:
                 await stop
             finally:

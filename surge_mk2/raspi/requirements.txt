@@ -47,3 +47,9 @@ mcap>=1.2,<2           # ログ記録（logger_node / tools/sfl2mcap.py）。zst
 # `cam_perception_node.py` の走行可否セグメンテーション推論。CPU 版のみ
 # （aarch64 の公式 wheel がある）。Mac 側の学習・エクスポートは `ml_cam/requirements.txt`
 onnxruntime>=1.18,<2
+
+# ── 対象追従（`follow_object`） ──
+# `cam_track_node.py` の NanoTrack（`cv2.TrackerNano_create`）。TrackerNano は
+# OpenCV 本体（video モジュール）に入っているが、contrib 込みの headless 版を
+# 明示しておく方が Pi 上でのビルド差異に左右されにくい
+opencv-contrib-python-headless>=4.9,<6

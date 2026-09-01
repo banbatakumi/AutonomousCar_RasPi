@@ -100,10 +100,12 @@
  * 親を再レンダリングしてしまう）。
  */
 import { useEffect, useRef } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { live } from '../bus/live'
 import { useUi } from '../store/ui'
 import { wsUrl } from '../ws/url'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
+import type { ControlChannel } from '../ws/control'
 
 export function CameraView({
   cam,
@@ -111,6 +113,7 @@ export function CameraView({
   variant = 'full',
   onAspect,
   guideDisabled = false,
+  ch = null,
 }: {
   cam: 'front' | 'rear'
   label: string
@@ -121,6 +124,9 @@ export function CameraView({
    * ラジコンビューの PIP（小さい方の映像）専用——**大きい方の映像だけに
    * ガイドを出す**ため（`RcView.tsx`、指示による。2026-08-21） */
   guideDisabled?: boolean
+  /** `follow_object` のROI選択（ドラッグ矩形）に使う。前方カメラ以外・
+   * 未指定の間はポインタ操作を一切拾わない（2026-09-01） */
+  ch?: ControlChannel | null
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide) && !guideDisabled
@@ -147,6 +153,61 @@ export function CameraView({
   //: `ftg_cam` の走行可否マスク（`/ws/camera/mask`）。専用の別 `useEffect`
   //: （下記）で `showMask` の間だけ繋ぎ、`draw()` はここを読むだけ
   const maskBitmapRef = useRef<ImageBitmap | null>(null)
+
+  // ── 対象追従（`follow_object`）のROI選択（2026-09-01） ──
+  //
+  // ドラッグでROI矩形を選ぶ操作は前方カメラの `follow_object` 選択中だけ有効。
+  // `showMask`/`showLineTarget` と同じ ref 経由（draw ループの useEffect 依存に
+  // 入れない）。追跡結果のbbox重畳（`drawTrackBox()`）も同じ条件で出す
+  const trackingMode = cam === 'front' && auto?.mode === 'follow_object'
+  const trackingModeRef = useRef(trackingMode)
+  trackingModeRef.current = trackingMode
+  const chRef = useRef(ch)
+  chRef.current = ch
+  //: 直近の `draw()` が計算した映像の実描画矩形（CSS px、canvas基準）。
+  //: ポインタ座標 → 正規化画像座標（0〜1）の変換に使う
+  const imgBoxRef = useRef({ dx: 0, dy: 0, dw: 0, dh: 0 })
+  //: ドラッグ中の選択矩形（正規化画像座標）。React state を介さず
+  //: `draw()` が rAF で直接参照する（他の重畳と同じ方針）
+  const dragRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+
+  const clampNorm = (v: number) => Math.max(0, Math.min(1, v))
+  const toNorm = (cv: HTMLCanvasElement, clientX: number, clientY: number) => {
+    const rect = cv.getBoundingClientRect()
+    const { dx, dy, dw, dh } = imgBoxRef.current
+    if (dw <= 0 || dh <= 0) return null
+    return {
+      x: clampNorm((clientX - rect.left - dx) / dw),
+      y: clampNorm((clientY - rect.top - dy) / dh),
+    }
+  }
+
+  const onRoiPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!trackingModeRef.current) return
+    const p = toNorm(e.currentTarget, e.clientX, e.clientY)
+    if (!p) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragRef.current = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }
+  }
+  const onRoiPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const p = toNorm(e.currentTarget, e.clientX, e.clientY)
+    if (!p) return
+    dragRef.current = { ...drag, x1: p.x, y1: p.y }
+  }
+  const onRoiPointerUp = () => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (!drag) return
+    const x0 = Math.min(drag.x0, drag.x1)
+    const x1 = Math.max(drag.x0, drag.x1)
+    const y0 = Math.min(drag.y0, drag.y1)
+    const y1 = Math.max(drag.y0, drag.y1)
+    // 小さすぎる矩形（クリックだけ・手ぶれ）は選択として送らない
+    if (x1 - x0 < 0.02 || y1 - y0 < 0.02) return
+    chRef.current?.setTrackRoi({ x0, y0, x1, y1 })
+  }
 
   useEffect(() => {
     const cv = ref.current
@@ -219,6 +280,7 @@ export function CameraView({
         const dh = bitmap.height * s
         const dx = (w - dw) / 2
         const dy = (h - dh) / 2
+        imgBoxRef.current = { dx, dy, dw, dh }
         ctx.drawImage(bitmap, dx, dy, dw, dh)
         // 走行可否マスク（`ftg_cam`）。**元フレームと同じ画角から単純リサイズ
         // しただけ**（`cam_perception_node.py` の `_resize_nearest`）なので、
@@ -243,6 +305,12 @@ export function CameraView({
           if (guide) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
           if (showLineTargetRef.current) drawLineTarget(ctx, dw, dh, camHeightRef.current)
           ctx.restore()
+        }
+        // 対象追従（`follow_object`）のROI選択・追跡結果の重畳。
+        // **メイン映像とは独立**（ドラッグ操作もbboxもここでしか意味を持たない）
+        if (trackingModeRef.current) {
+          if (dragRef.current) drawRoiDrag(ctx, dx, dy, dw, dh, dragRef.current)
+          drawTrackBox(ctx, dx, dy, dw, dh)
         }
       } else {
         ctx.fillStyle = '#3a444e'
@@ -314,7 +382,16 @@ export function CameraView({
 
   return (
     <div className="camera" title={label}>
-      <canvas ref={ref} />
+      <canvas
+        ref={ref}
+        onPointerDown={onRoiPointerDown}
+        onPointerMove={onRoiPointerMove}
+        onPointerUp={onRoiPointerUp}
+        onPointerCancel={() => {
+          dragRef.current = null
+        }}
+        style={trackingMode ? { cursor: 'crosshair', touchAction: 'none' } : undefined}
+      />
       {variant === 'full' ? (
         <div className="camera-tag">
           {label}
@@ -463,6 +540,44 @@ function drawLineTarget(ctx: CanvasRenderingContext2D, w: number, h: number, cam
     ctx.arc(x, y, 5, 0, Math.PI * 2)
     ctx.fill()
   }
+}
+
+/** ドラッグ中のROI選択矩形（正規化画像座標）を映像に重ねる。
+ * `drag` は始点・終点で、順序（左上/右下）は問わない——描く直前に整える。 */
+function drawRoiDrag(
+  ctx: CanvasRenderingContext2D,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+  drag: { x0: number; y0: number; x1: number; y1: number },
+) {
+  const x0 = Math.min(drag.x0, drag.x1)
+  const x1 = Math.max(drag.x0, drag.x1)
+  const y0 = Math.min(drag.y0, drag.y1)
+  const y1 = Math.max(drag.y0, drag.y1)
+  ctx.save()
+  ctx.strokeStyle = 'rgba(255,210,80,0.9)'
+  ctx.lineWidth = 2
+  ctx.setLineDash([6, 4])
+  ctx.strokeRect(dx + x0 * dw, dy + y0 * dh, (x1 - x0) * dw, (y1 - y0) * dh)
+  ctx.restore()
+}
+
+/** `cam_track_node.py` の追跡結果（`live.track`）のbboxを映像に重ねる。
+ * `tracking=False`（未選択）の間は何も描かない。見失っている（`lost`）間は
+ * 色を変えて区別する——直前のbboxを保持したまま描き続けるので、
+ * 「まだ追ってはいるが自信が無い」ことが見た目で分かる。 */
+function drawTrackBox(ctx: CanvasRenderingContext2D, dx: number, dy: number, dw: number, dh: number) {
+  const t = live.track
+  if (!t || !t.tracking) return
+  const x = dx + (t.bbox_cx - t.bbox_w / 2) * dw
+  const y = dy + (t.bbox_cy - t.bbox_h / 2) * dh
+  ctx.save()
+  ctx.strokeStyle = t.lost ? 'rgba(255,90,90,0.9)' : 'rgba(80,220,255,0.9)'
+  ctx.lineWidth = 2
+  ctx.strokeRect(x, y, t.bbox_w * dw, t.bbox_h * dh)
+  ctx.restore()
 }
 
 const VEHICLE_HALF_WIDTH = Math.max(...VEHICLE_GEOM.footprint.map(([, y]) => Math.abs(y)))

@@ -233,6 +233,24 @@ export class ControlChannel {
     this.send({ type: 'e2e_model_select', name })
   }
 
+  // ── 対象追従（`follow_object`）のROI選択 ──
+
+  /**
+   * 映像上でドラッグ選択した矩形を送る。座標は前カメラ映像の正規化座標
+   * （左上原点、0〜1）。`fan`/`camera` と同じく状態はサーバが真値。
+   *
+   * ⚠ **選び直すと `follow_object` の engage は必ず落ちる**
+   * （サーバ側の約束。`camModelSelect` のモデル変更と同じ形）。
+   */
+  setTrackRoi(box: { x0: number; y0: number; x1: number; y1: number }) {
+    this.send({ type: 'track_roi_select', ...box })
+  }
+
+  /** 「選択を解除」。**engage は落ちない**（`clearMap` と同じ形）。 */
+  clearTrackRoi() {
+    this.send({ type: 'track_roi_clear' })
+  }
+
   // ── 片輪浮き対策 有効切り替え（★v0.9） ──
 
   /**

@@ -17,6 +17,7 @@ from __future__ import annotations
 from .base import Planner
 from .disparity_extender import DisparityExtender
 from .e2e_lidar import E2ELidar
+from .follow_object import FollowObject
 from .follow_the_gap import FollowTheGap
 from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
@@ -38,6 +39,7 @@ PLANNERS: dict[str, type[Planner]] = {
     RaceLine.id: RaceLine,
     LineTrace.id: LineTrace,
     E2ELidar.id: E2ELidar,
+    FollowObject.id: FollowObject,
     #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブの
     #: モード選択には出さない（`AutoPanel.tsx` 側のフィルタ）
     SysIdSteer.id: SysIdSteer,

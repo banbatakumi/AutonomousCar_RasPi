@@ -37,6 +37,7 @@ __all__ = [
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
+    "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -88,6 +89,14 @@ TOPIC_CAM_MODEL = "cam/model"
 #: `e2e_lidar`（`raspi/auto/e2e_lidar.py`）が使うモデルの選択。`cam/model`と同じ
 #: 「意思を繰り返し流す」パターン（下記 `E2EModelCtrl` 参照）
 TOPIC_E2E_MODEL = "e2e/model"
+
+#: 対象追従（`follow_object`）のROI選択の意思。GUIがドラッグ矩形で選んだ対象を
+#: telemetry_node が繰り返し流し、`cam_track_node.py` が拾って追跡を開始/終了する
+#: （`cam/model` と同じ「現在の意思を繰り返し流す」パターン。下記 `TargetRoiCtrl` 参照）
+TOPIC_TRACK_ROI = "track/roi"
+#: `cam_track_node.py` が前方カメラ＋LiDARの融合結果として出す追跡結果。
+#: `raspi/auto/follow_object.py`（`FollowObject`）の `input_topic`
+TOPIC_TRACK_TARGET = "track/target"
 
 
 class MsgBase(msgspec.Struct):
@@ -491,6 +500,18 @@ class AutoState(MsgBase):
     #: 検出した動的障害物 `[x, y, r, ...]`（map フレーム）。上限あり
     obstacles: list[float] = msgspec.field(default_factory=list)
 
+    # ── 対象追従の状態（`raspi/auto/follow_object.py`） ──
+    #: 対象をロックして追跡できているか（`TargetTrack.tracking and not lost`）
+    target_locked: bool = False
+    #: 追跡中の対象を見失っているか（`TargetTrack.lost` のエコーバック）
+    target_lost: bool = False
+    #: 見失ってからの経過 [ms]
+    target_lost_ms: float = 0.0
+    #: 対象までの距離 [m]。**GUIは`target_locked`が立っているときだけ信じること**
+    target_distance: float = 0.0
+    #: 対象の方位 [deg] 符号付き（`nearest_deg` 等と同じ ±180 表現）
+    target_bearing_deg: float = 0.0
+
     # ── 鮮度（planning_node が入れる） ──
     scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]
     plan_hz: float = 0.0                   #: 実測の計画レート [Hz]
@@ -594,6 +615,65 @@ class E2EModelCtrl(MsgBase):
     name: str = ""
 
 
+class TargetRoiCtrl(MsgBase):
+    """GUIがドラッグ矩形で選んだ追従対象の意思。**telemetry_node が送り続け、
+    `cam_track_node.py` が従う**（`AutoCtrl`/`CamModelCtrl` と同じ「現在の意思を
+    繰り返し流す」パターン——1回だけ送ると、cam_track_node の再起動や
+    取りこぼしで選択が食い違ったままになる）。
+
+    座標は前カメラ映像の正規化座標（左上原点、0〜1）。**画素そのものではない**
+    ——GUI側の描画解像度と cam_track_node 側の推論解像度が異なりうるため、
+    双方が同じ基準（映像全体を0〜1とした矩形）で解釈できるようにしてある。
+    """
+
+    x0: float = 0.0
+    y0: float = 0.0
+    x1: float = 0.0
+    y1: float = 0.0
+    #: 「対象を選択」した回数。`AutoCtrl.freeze_seq` と同じ約束（真偽値だと、
+    #: 選び直していないのに再送のたびに毎回選択が発生してしまう）。
+    #: **増えたときだけ** cam_track_node が新しい矩形で追跡を開始する
+    select_seq: int = 0
+    #: 「選択を解除」した回数。理由は `select_seq` と同じ。増えたときだけ追跡を終了する
+    clear_seq: int = 0
+
+
+class TargetTrack(MsgBase):
+    """`cam_track_node.py` が出す追跡結果（`follow_object` の `input_topic`）。
+
+    **`ready`/`brake` への変換はしない。** `tracking`/`lost`/`lost_ms` という
+    事実だけを報告し、走ってよいかの判断は全て `raspi/auto/follow_object.py`
+    の `FollowObject.plan()` の責務にする（`Planner` の約束3と同じ理由——
+    センサ側で安全判断を先取りすると、Planner を差し替えるたびに同じ安全策を
+    書き直す羽目になる）。
+
+    `bearing`/`distance` は追跡が成功している（`lost=False`）間だけ意味を持つ。
+    """
+
+    #: ROIが選択され追跡中か。**False の間、他のフィールドは意味を持たない**
+    tracking: bool = False
+    #: 追跡中に対象を見失っているか。**`tracking=False` のときは常に False**
+    #: （そもそも追跡していないので「見失う」という状態ではない）
+    lost: bool = False
+    #: 見失ってからの経過 [ms]。見失っていない間は 0
+    lost_ms: float = 0.0
+    #: 対象の方位 [rad]（車両座標・反時計回りが正）。`lost=True` の間は直前値を保持
+    bearing: float = 0.0
+    #: LiDAR実測による対象までの距離 [m]。`distance_valid=False` の間は信じないこと
+    distance: float = 0.0
+    #: `distance` がLiDARの実測から得られた値か。**カメラの方位角しか無いフレームや、
+    #: その方位にLiDARの実測が無い（欠測・射程外）ときは False**
+    distance_valid: bool = False
+    #: 追跡中のbbox中心・幅・高さ（前カメラ映像の正規化座標、0〜1）。
+    #: GUIの重畳描画用。`tracking=False` の間は意味を持たない
+    bbox_cx: float = 0.0
+    bbox_cy: float = 0.0
+    bbox_w: float = 0.0
+    bbox_h: float = 0.0
+    #: トラッカー（NanoTrack）の確信度 [0..1]。そのまま置く
+    confidence: float = 0.0
+
+
 class CamMask(MsgBase):
     """`cam_perception_node` の走行可否マスクを JPEG 化したもの（GUI 表示専用）。
 
@@ -630,6 +710,8 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_CAM_CONFIG: CamConfig,
     TOPIC_CAM_MODEL: CamModelCtrl,
     TOPIC_E2E_MODEL: E2EModelCtrl,
+    TOPIC_TRACK_ROI: TargetRoiCtrl,
+    TOPIC_TRACK_TARGET: TargetTrack,
 }
 
 

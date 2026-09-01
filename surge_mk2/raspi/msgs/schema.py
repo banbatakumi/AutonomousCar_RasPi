@@ -41,6 +41,7 @@ MIRRORED: tuple[type, ...] = (
     types.AutoState,
     types.AutoMap,
     types.LineScan,
+    types.TargetTrack,
 )
 
 

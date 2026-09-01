@@ -70,6 +70,7 @@ EXPORTS: dict[str, str] = {
     # `/ws/map` で届く生のメッセージ。展開後の描画用の型（`MapData`）とは別物
     "AutoMap": "AutoMapMsg",
     "LineScan": "LineScan",
+    "TargetTrack": "TargetTrack",
 }
 
 #: Python では `str` だが、TS では**取りうる値が決まっている**もの。

@@ -71,7 +71,8 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 #: ノードごとに1本の endpoint を bind する。**トピックごとではない。**
 #: PUB を1プロセス1本にしておくと、購読側は接続先が固定されて配線が単純になる
 _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
-                  "cam_perception": 5574, "line_perception": 5575, "test": 5579}
+                  "cam_perception": 5574, "line_perception": 5575, "cam_track": 5576,
+                  "test": 5579}
 
 #: トピック → どのノードが publish するか
 #:
@@ -98,6 +99,7 @@ TOPIC_OWNER: dict[str, str] = {
     "cam/config": "control",
     "cam/model": "control",
     "e2e/model": "control",
+    "track/roi": "control",
     "auto/cmd": "planning",
     "auto/state": "planning",
     "auto/map": "planning",
@@ -107,6 +109,7 @@ TOPIC_OWNER: dict[str, str] = {
     "scan/cam": "cam_perception",
     "cam/mask": "cam_perception",
     "line/cam": "line_perception",
+    "track/target": "cam_track",
 }
 
 
@@ -134,7 +137,7 @@ def endpoints_for_topic(topic: str) -> list[str]:
     if topic.startswith("hb/") or topic == "hb/":
         return [endpoint_for_node(n) for n in
                 ("io", "camera", "control", "planning",
-                 "cam_perception", "line_perception")]
+                 "cam_perception", "line_perception", "cam_track")]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）

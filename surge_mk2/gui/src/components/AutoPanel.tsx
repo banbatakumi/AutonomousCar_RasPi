@@ -8,10 +8,11 @@
  * このファイルは 1 行も変わらない。** モード名を GUI 側にも書くと、増やすたびに
  * 2箇所を直すことになり、いつか片方だけ古くなる。
  *
- * ⚠ 例外が2つだけある——`ftg_cam`（セグメンテーション走行）と `e2e_lidar`
- * （E2E LiDAR走行）が使うモデルの選択（下記）。この2つの id 文字列だけは
- * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/e2e_lidar.py` と直接
- * 対応させて GUI 側に書いてある。
+ * ⚠ 例外が3つだけある——`ftg_cam`（セグメンテーション走行）と `e2e_lidar`
+ * （E2E LiDAR走行）が使うモデルの選択、`follow_object`（対象追従）の
+ * ROI選択状態の表示（下記）。この3つの id 文字列だけは
+ * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/e2e_lidar.py` /
+ * `raspi/auto/follow_object.py` と直接対応させて GUI 側に書いてある。
  *
  * ## engage の状態を GUI 側で持たない
  *
@@ -219,6 +220,24 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <span className="dim">models/e2e_lidar/ に .onnx がありません</span>
           )}
           {e2eSelectedNote && <div className="auto-model-note">{e2eSelectedNote}</div>}
+        </div>
+      )}
+
+      {/* 対象追従（`follow_object`）専用UI。対象の選択自体は前方カメラの映像上で
+          ドラッグして行う（`CameraView.tsx`）——ここには選択解除ボタンと状態表示だけ置く */}
+      {selected?.id === 'follow_object' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">対象追従</span>
+          <button onClick={() => ch?.clearTrackRoi()}>選択を解除</button>
+          {st?.target_locked ? (
+            <span className="badge-live">
+              ロック中 {st.target_distance.toFixed(2)}m / {st.target_bearing_deg.toFixed(0)}°
+            </span>
+          ) : st?.target_lost ? (
+            <span className="badge-warn">見失い中（{(st.target_lost_ms / 1000).toFixed(1)}s）</span>
+          ) : (
+            <span className="dim">前方カメラの映像上でドラッグして対象を選択してください</span>
+          )}
         </div>
       )}
 

@@ -64,7 +64,7 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
       {/* 前方・後方・LiDAR を**同じ幅で横並び**にする。デバッグ用の画面なので、
           「前方が主で後方が従」ではなく3つを対等に見比べられる方が使いやすい */}
       <div className="cam-front">
-        <CameraView cam="front" label="前方" />
+        <CameraView cam="front" label="前方" ch={ch} />
         <div className="cam-controls">
           {/* 前後どちらのカメラにも同じ `pathGuide` が効く（`CameraView.tsx`）ので、
               チェックボックスは1つだけ置けば足りる */}
