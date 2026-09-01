@@ -226,27 +226,61 @@ def _step_responses(samples: list[Sample], target_attr: str, actual_attr: str,
     """各ステップの `(t_rel, y_normalized, target_delta, actual_raw)` を返す。
 
     `actual_raw`（正規化前の実測値そのもの）は最大変化率（レート上限の推定）に使う。
-    立ち上がり直後から次のステップの手前までを1本として切り出す。
+    直前の保持区間が終わった直後から、今の保持区間が終わるまでを1本として切り出す。
+
+    ## `target`自体が瞬時のステップとは限らない（2026-09-01、実機ログで発覚）
+
+    `fit_steer`が使う`steer_cmd_echo`は、`/cmd`（`target_steer`）と違って**実機では
+    瞬時に切り替わらず、新しい値に落ち着くまで数サンプル(実測で約80ms)かけて
+    なだらかにランプする**ことが実際のmcapログの調査で判明した（設計意図は
+    「STM32が受理した指令を即座に折り返す」だったが、実装は内部でさらに
+    平滑化されているらしい）。
+
+    以前の実装は`target[start]`（新しい区間の**先頭1サンプル**）をそのまま目標値
+    `tgt`として使っていたが、`_find_steps`は`target`が閾値を超えて動くたびに
+    区間を区切るナイーブな実装のため、ランプの各サンプルがそれぞれ別の（1〜2
+    サンプルしか続かない）極端に短い区間として誤検出される。この誤検出自体は
+    `min_hold_s`未満の区間を捨てることで隠れていた（ランプの破片は数十msしか
+    続かないため）が、**生き残った「本物の保持区間」の`target[start]`・
+    `actual[start-1]`も、区間の境界ぎりぎり＝まだランプ／応答の途中の値を
+    拾ってしまう**——`delta`（ステップ振幅）が実際より大幅に小さく見積もられ、
+    正規化した応答`y`が1.0に到達しないまま頭打ちになり、`tau_steer_s`が実測で
+    真値の10倍以上に水増しされる不具合を起こしていた（実測: 振幅30°の試験で
+    `delta`が本来の約29°ではなく10〜14°しか取れておらず、`tau_steer_s`が
+    0.5s台→6s台まで膨張していた）。
+
+    対策として、`tgt`/`a0`は区間の**先頭1サンプルではなく、後半（安定してから）
+    の中央値**を使う。応答区間`seg_t`/`seg_y`も、今の区間の先頭からではなく
+    **直前の保持区間が終わった直後**から切り出す——ランプ・むだ時間・一次遅れの
+    応答全体を含めることで、`_fit_first_order_with_delay`が正しい形の減衰曲線を
+    見られるようにする。`target`が瞬時のステップ（`fit_speed`の`target_speed`等）
+    でも、区間の先頭と後半の中央値は同じ値になるだけなので、この変更は
+    後方互換（他の呼び出し元の挙動は変わらない）。
     """
     t = np.array([s.t for s in samples])
     target = np.array([getattr(s, target_attr) for s in samples])
     actual = np.array([getattr(s, actual_attr) for s in samples])
 
-    steps = _find_steps(t, target, step_threshold)
+    raw_steps = _find_steps(t, target, step_threshold)
+    # ランプの破片（min_hold_s未満）をここでまとめて捨てる。本物の保持区間だけが残る
+    steps = [(s, e) for s, e in raw_steps if t[e - 1] - t[s] >= min_hold_s]
+
     out = []
-    for start, end in steps:
-        if start == 0:
-            continue                       # 直前の定常値が無い最初の区間は使わない
-        if t[end - 1] - t[start] < min_hold_s:
+    for k in range(1, len(steps)):
+        prev_start, prev_end = steps[k - 1]
+        start, end = steps[k]
+        prev_tail = actual[prev_start + (prev_end - prev_start) // 2:prev_end]
+        cur_tail = target[start + (end - start) // 2:end]
+        if len(prev_tail) == 0 or len(cur_tail) == 0:
             continue
-        a0 = actual[start - 1]             # ステップ直前の定常値
-        tgt = target[start]
+        a0 = float(np.median(prev_tail))   # 直前の保持区間、後半の中央値
+        tgt = float(np.median(cur_tail))   # 今の保持区間、後半の中央値
         delta = tgt - a0
         if abs(delta) < step_threshold:
             continue
-        seg_t = t[start:end] - t[start]
-        seg_y = (actual[start:end] - a0) / delta
-        out.append((seg_t, seg_y, delta, actual[start:end]))
+        seg_t = t[prev_end:end] - t[prev_end]
+        seg_y = (actual[prev_end:end] - a0) / delta
+        out.append((seg_t, seg_y, delta, actual[prev_end:end]))
     return out
 
 

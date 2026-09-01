@@ -30,21 +30,36 @@ DT = 0.02   # 50Hz。実機TELEMETRYと同じレート
 
 def _simulate_steer(*, dead_time_s: float, tau_steer_s: float, rate_limit_rad_s: float,
                     amplitude_rad: float, hold_s: float, cycles: int,
-                    dt: float = DT) -> list[Sample]:
+                    dt: float = DT, echo_ramp_s: float = 0.0) -> list[Sample]:
     """`sim/vehicle.py`の`VehicleModel.step()`と同じ式（むだ時間→ZOH一次遅れ→
-    レート制限）で`steer_cmd_echo`→`steer_actual`のステップ応答を合成する。"""
+    レート制限）で`steer_cmd_echo`→`steer_actual`のステップ応答を合成する。
+
+    :param echo_ramp_s: `steer_cmd_echo`自体を`target`へ一次遅れで追従させる
+        時定数 [s]。既定0は従来通り`steer_cmd_echo=target`（瞬時切り替え）。
+        実機の`steer_cmd_echo`は瞬時に切り替わらず、新しい値に落ち着くまで
+        実測で約80ms（時定数換算で20〜30ms程度）かけてなだらかにランプする
+        ことが判明した（`tools/sysid/fit.py`の`_step_responses`docstring参照）
+        ——`test_recovers_known_tau_when_echo_ramps_gradually`がこの現実的な
+        条件を再現する回帰テストに使う
+    """
     n_steps = cycles * 2 + 1   # 中立→+A→-A→+A→-A→...
     total_t = n_steps * hold_s
 
     delay_q: deque[list] = deque()
     delayed = 0.0
     actual = 0.0
+    echo = 0.0
     samples: list[Sample] = []
 
     t = 0.0
     while t < total_t:
         idx = min(int(t / hold_s), n_steps - 1)
         target = 0.0 if idx == 0 else (amplitude_rad if idx % 2 == 1 else -amplitude_rad)
+
+        if echo_ramp_s > 1e-6:
+            echo += (target - echo) * min(1.0, dt / echo_ramp_s)
+        else:
+            echo = target
 
         delay_q.append([dead_time_s, target])
         while delay_q and delay_q[0][0] <= 0.0:
@@ -62,7 +77,7 @@ def _simulate_steer(*, dead_time_s: float, tau_steer_s: float, rate_limit_rad_s:
             actual = want
 
         samples.append(Sample(t=t, target_speed=0.0, target_steer=target, brake=False,
-                              speed=0.0, steer_actual=actual, steer_cmd_echo=target,
+                              speed=0.0, steer_actual=actual, steer_cmd_echo=echo,
                               yaw_rate=0.0, accel_x=0.0, tc_active=False))
         t += dt
 
@@ -95,6 +110,24 @@ class TestFitSteer(unittest.TestCase):
         self.assertAlmostEqual(result["steer_rate_limit_rad_s"], true_rate_limit,
                                delta=true_rate_limit * 0.1)
         self.assertAlmostEqual(result["tau_steer_s"], true_tau, delta=true_tau * 0.2)
+
+    def test_recovers_known_tau_when_echo_ramps_gradually(self):
+        """`steer_cmd_echo`が瞬時に切り替わらず実機のようになだらかにランプ
+        しても（2026-09-01、実機ログで発覚。`_step_responses`docstring参照）、
+        `tau_steer_s`・`dead_time_s`を大きく崩さず復元できる回帰テスト。
+
+        修正前は、区間の先頭1サンプル(`target[start]`・`actual[start-1]`)を
+        そのまま基準点に使っていたため、ランプの途中の値を拾って`delta`
+        （ステップ振幅）を過小評価し、`tau_steer_s`が真値の10倍以上に
+        水増しされていた（実測: 振幅30°の実機ログで0.5s台→6s台）。"""
+        true_dead_time, true_tau, true_rate_limit = 0.03, 0.15, 20.0
+        samples = _simulate_steer(dead_time_s=true_dead_time, tau_steer_s=true_tau,
+                                  rate_limit_rad_s=true_rate_limit,
+                                  amplitude_rad=math.radians(30), hold_s=1.2, cycles=4,
+                                  echo_ramp_s=0.025)
+        result = fit_steer(samples)
+        self.assertAlmostEqual(result["dead_time_s"], true_dead_time, delta=0.03)
+        self.assertAlmostEqual(result["tau_steer_s"], true_tau, delta=true_tau * 0.3)
 
     def test_slow_tau_without_saturation_is_not_biased_by_plateau_heuristic(self):
         """レート制限が実質効かないほど大きい（応答が遅い）`tau_steer_s`でも、
