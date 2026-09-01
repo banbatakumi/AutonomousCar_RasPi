@@ -54,7 +54,12 @@ class TestSimE2EEnv(unittest.TestCase):
         self.assertFalse(info["collided"])
 
     def test_progress_reward_is_near_zero_when_stationary(self):
-        env = _make_env(max_steps=50, cross_track_weight=0.0)
+        # raceline_weight/speed_match_weightも0にする——理想ラインは中心線からの
+        # オフセットを持つので(sim/raceline.py)、スポーン地点がコーナー付近だと
+        # 静止していても`raceline_tolerance_m`超過の罰則が乗ってしまい、この
+        # テストが検証したい「progress_weightだけ」の話ではなくなる
+        env = _make_env(max_steps=50, cross_track_weight=0.0,
+                        raceline_weight=0.0, speed_match_weight=0.0)
         env.reset()
         total = 0.0
         for _ in range(20):
@@ -172,7 +177,9 @@ class TestSimE2EEnv(unittest.TestCase):
 
     def test_speed_weight_has_no_effect_when_stationary(self):
         """静止（speed=0）なら`speed_weight`をいくつにしても速度ボーナスは0のまま。"""
-        env = _make_env(max_steps=20, cross_track_weight=0.0, speed_weight=0.5)
+        # raceline_weightも0にする理由は上のtest_progress_reward_is_near_zero_when_stationary参照
+        env = _make_env(max_steps=20, cross_track_weight=0.0, speed_weight=0.5,
+                        raceline_weight=0.0, speed_match_weight=0.0)
         env.reset()
         total = 0.0
         for _ in range(20):
@@ -233,6 +240,61 @@ class TestSimE2EEnv(unittest.TestCase):
         _, _, _, _, info = env.step(np.array([0.0, 1.0]))
         self.assertIn("slip", info)
         self.assertGreaterEqual(info["slip"], 0.0)
+
+    def test_step_info_includes_raceline_fields(self):
+        env = _make_env(max_steps=5)
+        env.reset()
+        _, _, _, _, info = env.step(np.array([0.0, 1.0]))
+        self.assertIn("raceline_cross", info)
+        self.assertIn("target_speed", info)
+        self.assertGreaterEqual(info["raceline_cross"], 0.0)
+        self.assertGreaterEqual(info["target_speed"], 0.0)
+
+    def test_raceline_weight_penalizes_deviation_beyond_tolerance(self):
+        """raceline_weight（2026-09-01追加、`sim/raceline.py`の理想ラインからの
+        横偏差のうち`raceline_tolerance_m`を超えた分への罰則）: 同じ行動列でも
+        大きく舵を切って理想ラインから外れ続ければ、raceline_weightが大きいほど
+        合計報酬が低くなるはず。`test_cross_track_margin_frees_deviation_within_margin`
+        と同じ「舵0.15・全開」の行動で道幅を大きく使わせる。"""
+
+        def run(raceline_weight: float) -> float:
+            env = _make_env(max_steps=60, raceline_weight=raceline_weight,
+                            raceline_tolerance_m=0.08, randomize_lidar=False)
+            env.reset()
+            total = 0.0
+            for _ in range(60):
+                _, r, terminated, truncated, _ = env.step(np.array([0.15, 0.8]))
+                total += r
+                if terminated or truncated:
+                    break
+            return total
+
+        self.assertGreater(run(0.0), run(1.0))
+
+    def test_speed_match_weight_rewards_matching_target_speed(self):
+        """speed_match_weight（2026-09-01追加、理想ラインの目標速度とのズレの
+        小ささに応じたボーナス）: 曲率がほぼ0の広いコース（目標速度≈max_speed）で
+        全開走行すれば目標速度によく一致するはずなので、speed_match_weightが
+        大きいほど合計報酬が高くなるはず（`test_slip_weight_penalizes_grip_limit_violation`
+        と同じ「幅20mの広いコースで衝突を避ける」構成）。"""
+
+        def run(speed_match_weight: float) -> float:
+            rng = np.random.default_rng(0)
+            courses = [generate_random_course(rng, name="wide", width=20.0)]
+            env = SimE2EEnv(courses, seed=0, max_steps=10, max_speed=1.5,
+                            randomize_dynamics=False, randomize_lidar=False,
+                            speed_match_weight=speed_match_weight)
+            env.reset()
+            action = np.array([0.0, 1.5])
+            total = 0.0
+            for _ in range(10):
+                _, r, terminated, truncated, _ = env.step(action)
+                total += r
+                if terminated or truncated:
+                    break
+            return total
+
+        self.assertGreater(run(1.0), run(0.0))
 
 
 if __name__ == "__main__":

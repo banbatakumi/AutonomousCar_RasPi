@@ -42,6 +42,11 @@ from sim.random_course import generate_diverse_course  # noqa: E402
 __all__ = ["Panel", "build_panels"]
 
 TRAIL_LEN = 150
+#: 理想ライン（`sim/gym_env.py`の`SimE2EEnv._raceline`）の重ね描き色。中心線・
+#: 壁と被らない黄色系にして、アペックスを突けているかを目視しやすくする
+#: （2026-09-01追加、`sim/raceline.py`導入時。`sim/ui.py`の共通色ではなく
+#: ここだけで使うデバッグ用の重ね描きなので`ui.py`は変更しない）
+_RACELINE_COLOR = (224, 200, 60)
 
 
 def build_panels(n: int, *, max_steps: int, max_speed: float, steer_tau: float,
@@ -158,6 +163,14 @@ def _draw_panel(screen: pygame.Surface, p: Panel, x0: int, y0: int, w: int, h: i
         for nx_, ny_ in p.course.centerline[narrow_mask, :2]:
             px_, py_ = to_px(float(nx_), float(ny_))
             pygame.draw.circle(screen, ui.WARN, (round(px_), round(py_)), 2)
+
+    # 理想ライン（`SimE2EEnv._raceline`、`reset()`で毎エピソード計算し直す）を
+    # 中心線と別の細い黄色線で重ね描きする——アペックスを突けているか・コーナー前に
+    # 膨らんでいるかを目視で確認できるようにする（2026-09-01追加）
+    raceline = p.env.sim._raceline
+    if raceline is not None and len(raceline.xy) > 1:
+        pygame.draw.aalines(screen, _RACELINE_COLOR, True,
+                            [to_px(float(x), float(y)) for x, y in raceline.xy])
 
     if len(p.trail) > 1:
         pygame.draw.aalines(screen, ui.TRAIL, False, [to_px(x, y) for x, y in p.trail])

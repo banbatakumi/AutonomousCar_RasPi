@@ -28,6 +28,7 @@ from raspi.msgs import LIDAR_C_SATURATED_M, Scan, ScanAssembler
 from .course import Course
 from .lidar import VirtualLidar
 from .params import SimParams
+from .raceline import compute_raceline_offsets, compute_speed_profile
 from .vehicle import DriveInput, VehicleModel, VehicleSpec
 
 __all__ = ["SimE2EEnv", "SCAN_DIM", "OBS_DIM"]
@@ -99,9 +100,11 @@ class _CenterlineProgress:
     def reset(self, x: float, y: float) -> None:
         self._prev, _, _ = self._nearest(x, y)
 
-    def update(self, x: float, y: float) -> tuple[float, float, float]:
-        """`(弧長方向の進捗 [m], 横偏差 [m], 最近傍点での道幅の半分 [m])`。
-        進捗は1周のラップアラウンドを展開する。"""
+    def update(self, x: float, y: float) -> tuple[float, float, float, int]:
+        """`(弧長方向の進捗 [m], 横偏差 [m], 最近傍点での道幅の半分 [m], 最近傍点の
+        インデックス)`。進捗は1周のラップアラウンドを展開する。インデックスは
+        `_RacelineProgress`が理想ラインの参照点を引くのに流用する（同じ弧長
+        パラメータ化・同じ点間隔の配列なので、2回目のO(N)最近傍探索をせずに済む）。"""
         p, cross, i = self._nearest(x, y)
         d = p - self._prev
         if self._total > 0:
@@ -111,7 +114,28 @@ class _CenterlineProgress:
                 d += self._total
         self._prev = p
         half_w = float(self._half_w[i]) if isinstance(self._half_w, np.ndarray) else self._half_w
-        return d, cross, half_w
+        return d, cross, half_w, i
+
+
+class _RacelineProgress:
+    """理想ライン(centerlineからのオフセット+目標速度)への追従度。
+
+    `_CenterlineProgress.update()`が返す最近傍点インデックスをそのまま流用する
+    （centerlineとracelineは同じ弧長パラメータ化・同じ点間隔の配列なので、
+    `_CenterlineProgress`と同じ「最近傍点流用」の近似で2回目のO(N)最近傍探索を
+    避ける。急コーナーでオフセットが道幅いっぱいに振れる場合はこの近似の誤差が
+    無視できなくなりうる——`raceline_cross`の分布に異常値が出ないか学習評価で
+    確認すること）。"""
+
+    def __init__(self, centerline_xyyaw: np.ndarray, offsets: np.ndarray,
+                target_speed: np.ndarray) -> None:
+        yaw = centerline_xyyaw[:, 2]
+        normal = np.column_stack((-np.sin(yaw), np.cos(yaw)))
+        self.xy = centerline_xyyaw[:, :2] + offsets[:, None] * normal
+        self.target_speed = target_speed
+
+    def at(self, i: int) -> tuple[np.ndarray, float]:
+        return self.xy[i], float(self.target_speed[i])
 
 
 class SimE2EEnv:
@@ -139,7 +163,9 @@ class SimE2EEnv:
                 max_speed: float = 1.5,
                 collision_penalty: float = -5.0, progress_weight: float = 1.0,
                 cross_track_weight: float = 0.5, cross_track_margin_frac: float = 0.5,
-                speed_weight: float = 0.3,
+                speed_weight: float = 0.1,
+                raceline_weight: float = 0.3, raceline_tolerance_m: float = 0.08,
+                speed_match_weight: float = 0.3,
                 steer_tau: float = 0.10, steer_rate_weight: float = 0.2,
                 slip_weight: float = 0.2,
                 start_jitter_m: float = 0.03,
@@ -205,9 +231,29 @@ class SimE2EEnv:
             `collision_penalty=-5.0`は30〜50ステップ分に相当し、方策が「速く走る
             リスク」を過大評価して速度を抑える方向に偏りやすい。この項は`progress`
             と独立に速度そのものへ価値を持たせ、相対的に`collision_penalty`の
-            重みを弱めて積極的な走行を後押しする狙い。**初期値0.3は未検証**——
-            `progress`の典型値と同程度のオーダーになるよう見積もっただけで、
-            v6の学習結果を見て調整が要る可能性がある
+            重みを弱めて積極的な走行を後押しする狙い。**2026-09-01: 既定値を0.3→0.1に
+            下げた**——曲率を一切考慮しない一律の速度ボーナスだったため、コーナー前で
+            減速する動機を弱めていた可能性がある（v8の実車評価で「衝突はしないが
+            綺麗なライン取りができない」との指摘）。主たる速度整形は曲率考慮済みの
+            `speed_match_weight`に委譲し、これは「動きを止めない」ための小さな
+            下駄として残す
+        :param raceline_weight: 理想ライン（`sim/raceline.py`の
+            `compute_raceline_offsets`が道幅内で曲率を最小化した参照軌道）からの
+            横偏差のうち、`raceline_tolerance_m`を超えた分に掛ける罰則の重み
+            （2026-09-01追加。Trajectory-Aided Learning、Bosello et al.
+            arXiv:2306.07003に倣い、学習時の報酬にだけ理想ラインを組み込む——
+            推論はこれまで通りLiDAR+速度のみのE2Eのまま）。`cross_track_weight`
+            （道幅の余白を使い切った分への罰則、壁への安全弁）とは独立に働く。
+            **初期値0.3は未検証**
+        :param raceline_tolerance_m: 理想ラインへの追従で許容する誤差 [m]。
+            `cross_track_margin_frac`と同じ「許容帯パターン」——理想ラインぴったり
+            を要求せず、`_RacelineProgress`の最近傍点流用による近似誤差ぶんの
+            余裕を持たせる
+        :param speed_match_weight: 理想ライン上の目標速度（`compute_speed_profile`。
+            曲率に応じてグリップ限界まで減速・加速する）とのズレの小ささに応じて
+            加算するボーナス。`speed_weight`が速度の絶対値だけを見るのに対し、
+            こちらは「今の位置の曲率にふさわしい速度か」を見る——コーナー前で
+            早めに減速する動機を直接与える。**初期値0.3は未検証**
         :param steer_tau: 舵指令に掛ける一次遅れの時定数 [s]。`raspi/auto/e2e_lidar.py`
             の`steer_tau`ParamSpec（既定0.10）と同じ仕組み・同じ既定値を学習側にも
             適用する（2026-08-29、バンビの「舵が不安定」報告の診断を受けて追加）。
@@ -246,6 +292,9 @@ class SimE2EEnv:
         self.progress_weight = progress_weight
         self.cross_track_weight = cross_track_weight
         self.speed_weight = speed_weight
+        self.raceline_weight = raceline_weight
+        self.raceline_tolerance_m = raceline_tolerance_m
+        self.speed_match_weight = speed_match_weight
         self.steer_tau = steer_tau
         self.steer_rate_weight = steer_rate_weight
         self.slip_weight = slip_weight
@@ -270,6 +319,7 @@ class SimE2EEnv:
         self.lidar: VirtualLidar | None = None
         self.asm: ScanAssembler | None = None
         self._progress: _CenterlineProgress | None = None
+        self._raceline: _RacelineProgress | None = None
         self._body: np.ndarray | None = None
         self._last_scan: Scan | None = None
         self._t_ns = 0
@@ -303,6 +353,17 @@ class SimE2EEnv:
         self._body = self.course.body_samples(self.spec.footprint)
         self._progress = _CenterlineProgress(self.course.centerline, self.course.width)
         self._progress.reset(self.vehicle.x, self.vehicle.y)
+        # ★理想ラインは今エピソードの`episode_spec`（ドメインランダム化後の`mu`等）で
+        # 計算する——固定`self.spec`を使うと`randomize_dynamics=True`時に今エピソードの
+        # グリップ・応答特性と目標速度プロファイルがズレる（`raceline_weight`docstring参照）
+        vehicle_half_width_m = max(abs(p[1]) for p in self.spec.footprint)
+        offsets = compute_raceline_offsets(self.course.centerline, self.course.width,
+                                           vehicle_half_width_m=vehicle_half_width_m)
+        target_speed = compute_speed_profile(
+            self.course.centerline, offsets, mu=episode_spec.mu, max_speed=self.max_speed,
+            drive_accel_m_s2=episode_spec.drive_accel_m_s2,
+            brake_decel_m_s2=episode_spec.brake_decel_m_s2)
+        self._raceline = _RacelineProgress(self.course.centerline, offsets, target_speed)
         self._t_ns = 0
         self._steps = 0
         self._steer = 0.0
@@ -405,15 +466,22 @@ class SimE2EEnv:
             if s is not None:
                 self._last_scan = s
 
-        progress, cross_track, half_w = self._progress.update(self.vehicle.x, self.vehicle.y)
+        progress, cross_track, half_w, nearest_i = self._progress.update(self.vehicle.x, self.vehicle.y)
         margin = half_w * self.cross_track_margin_frac
         cross_excess = max(0.0, abs(cross_track) - margin)
         steer_rate = abs(self._steer - prev_steer)
         speed_frac = float(np.clip(self.vehicle.speed, 0.0, self.max_speed)) / self.max_speed
         slip = self.vehicle.slip_frac
+
+        raceline_xy, target_speed = self._raceline.at(nearest_i)
+        raceline_dev = math.hypot(self.vehicle.x - raceline_xy[0], self.vehicle.y - raceline_xy[1])
+        raceline_excess = max(0.0, raceline_dev - self.raceline_tolerance_m)
+        speed_match = max(0.0, 1.0 - abs(self.vehicle.speed - target_speed) / self.max_speed)
+
         reward = (self.progress_weight * progress - self.cross_track_weight * cross_excess
                  - self.steer_rate_weight * steer_rate + self.speed_weight * speed_frac
-                 - self.slip_weight * slip)
+                 - self.slip_weight * slip
+                 - self.raceline_weight * raceline_excess + self.speed_match_weight * speed_match)
 
         terminated = False
         if hit:
@@ -423,7 +491,8 @@ class SimE2EEnv:
         self._steps += 1
         truncated = self._steps >= self.max_steps
 
-        info = {"cross_track": cross_track, "collided": hit, "progress": progress, "slip": slip}
+        info = {"cross_track": cross_track, "collided": hit, "progress": progress, "slip": slip,
+               "raceline_cross": raceline_dev, "target_speed": target_speed}
         return self._obs(self._last_scan), reward, terminated, truncated, info
 
     def _obs(self, scan: Scan) -> np.ndarray:

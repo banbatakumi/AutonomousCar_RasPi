@@ -3,7 +3,21 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-09-01（`config/vehicle.toml`の`[dynamics]`実測値をシステム同定タブで
+最終更新: 2026-09-01（`watch.py`で理想ラインがcircuit/fujiでギザギザに見えた不具合を
+2件修正——①`sim/track.py`の閉ループ最終点重複による曲率スパイク、②Adam→L-BFGS
+（`offset=max_offset*tanh(z)`の滑らかな再パラメータ化）+ 0.1m間引き最適化。
+circuit/fuji/ランダムコースいずれも滑らかなアウトインアウトのラインに。詳細は
+下記「2026-09-01（さらに続き）」節）
+旧: 2026-09-01（v8実車評価「衝突しないがレーシングラインが綺麗でない」を受け、
+`sim/raceline.py`を新設——道幅内で曲率二乗和を最小化する理想ラインと、曲率に応じた
+目標速度プロファイルをオフラインで計算する。`sim/gym_env.py`の報酬に
+`raceline_weight`/`speed_match_weight`を追加し、`speed_weight`の既定を0.3→0.1に縮小。
+`ml_lidar/train_rl.py`に配線しTensorBoardへ`raceline/mean_cross_dev`を記録する
+コールバックを追加、`ml_lidar/watch.py`に理想ラインの重ね描きを追加。
+**v9本学習はまだ開始していない**——実車での`tau_steer_s`再測定
+（`tools/sysid/fit.py`の遅延二重計上バグ修正版で録り直す）が先。下記「2026-09-01
+（続き）」節）
+旧: 2026-09-01（`config/vehicle.toml`の`[dynamics]`実測値をシステム同定タブで
 実車確認し反映（`tau_steer_s`0.12→0.539、`mu`0.8→0.454等）。これを受けて
 `sim/vehicle.py`に摩擦円によるRWD連成（駆動・制動が後輪だけを通るため加減速中は
 コーナリングの余力が減る）を追加し、`sim/gym_env.py`のドメインランダム化レンジを
@@ -79,6 +93,172 @@ TensorBoardのサブフォルダ(`PPO_1`・`PPO_2`…)が積み上がってい�
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（`docs/progress_archive.md`の「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-09-01（続き）：理想ライン(`sim/raceline.py`)導入・v8→v9レーシングライン品質改善
+
+バンビ「v8を実車で走らせたら壁には衝突しないが綺麗なライン取りができていない。
+前提を疑い、類似プロジェクトも調査して改良案を」→ 調査の結果、(1) 報酬に理想
+レーシングラインの概念が一切無い（`cross_track_margin_frac`の余白＋一律の
+`speed_weight`だけ）、(2) `tau_steer_s=0.539`が`fit.py`の遅延二重計上バグ修正前の
+値のままドメインランダム化の中心に使われている、の2点が主要因と判断。
+F1TENTH/AWS DeepRacer/学術研究（Trajectory-Aided Learning、Bosello et al.
+arXiv:2306.07003）を調査し、E2E LiDAR方策のアーキテクチャは変えず学習時の
+報酬にだけ理想ラインを組み込む方針で合意（プラン: `~/.claude/plans/ml-lidar-v8-compressed-ember.md`）。
+
+**1. `sim/raceline.py`新設**: `compute_raceline_offsets()`（道幅内で最小曲率に
+寄せた中心線オフセット）と`compute_speed_profile()`（曲率ベースの目標速度、
+前進=加速度上限・後退=減速度上限で挟む3段パス）。
+
+**★曲率最小化の実装で複数回の手戻りを踏んだ（重要な教訓）**: 最初は
+`sim/random_course.py`の`_min_turn_radius_m`と同じ「隣接点の中点に寄せる
+反復平滑化」を試したが、これは**曲線短縮フロー（curve shortening flow）**
+そのもので曲率最小化とは逆方向に働く——閉ループ全体に一様適用すると円が一様に
+収縮し半径が小さくなる（＝曲率が悪化する）ことを数値実験で確認（生成コースで
+`sum(curvature^2)`が最悪10倍近く悪化）。次に線形近似`κ_path≈κ_ref+n''`で
+Poisson方程式を解く方式を試したが、実際のコース（道幅に対するオフセット比が
+0.3〜0.5程度）ではこの近似の前提（オフセットが曲率半径に対して小さい）が
+崩れ、非線形項`n·κ_ref²`の寄与が支配的になり同様に悪化した。最終的に**厳密な
+離散曲率をそのまま目的関数にし、`torch`の自動微分で正確な勾配を取ってbox制約
+付きAdam勾配降下（射影付き）で最小化**する方式に落ち着いた——手で導いた線形
+近似は符号や非線形項の扱いを誤りやすく実測で悪化が繰り返し確認されたため、
+正確性を優先した。`torch`はSB3が要求する既存の依存で新規追加ではない。1コース
+(200〜400点)・200ステップの最適化で実測20〜40ms（初回呼び出しのみtorchの
+ウォームアップで数百ms）——コース生成(エピソード)ごとに1回で済む設計なので
+学習速度への影響は軽微。**同じようなコード（曲率・軌道の最適化）を今後書く際は、
+必ず実データ（`sim/random_course.py`の実際の生成器）で数値検証してから採用する
+こと**——手計算の直感（「中点に寄せれば滑らかになるはず」）は円のような閉曲線
+では容易に裏切られる。
+
+**2. `sim/gym_env.py`の報酬統合**: `_CenterlineProgress.update()`が最近傍点の
+インデックスも返すよう変更（既に内部で求めていた値を活用）。`_RacelineProgress`
+クラスを追加し、そのインデックスを流用して理想ラインの参照点・目標速度を引く
+（2回目のO(N)最近傍探索を避ける近似）。`reset()`で`episode_spec`（ドメイン
+ランダム化後の`mu`等）を使って理想ラインを計算——固定`spec`を使うと今エピソード
+のグリップと目標速度がズレるため。新しい報酬項`raceline_weight`（理想ラインから
+`raceline_tolerance_m`を超えた横偏差への罰則）・`speed_match_weight`（曲率考慮の
+目標速度との整合度へのボーナス）を追加。`speed_weight`の既定を0.3→0.1に縮小し
+（曲率を考慮しない一律ボーナスがコーナー前の減速を妨げていた疑い）、主役を
+`speed_match_weight`に譲った。
+
+**3. `ml_lidar/train_rl.py`への配線**: `--raceline-weight`(既定0.3)・
+`--raceline-tolerance-m`(既定0.08)・`--speed-match-weight`(既定0.3)を追加、
+`--speed-weight`既定を0.1に変更。`make_train_env_fn`/`make_eval_env`/
+`run_config.json`にも配線。`RacelineMetricsCallback`（SB3の`BaseCallback`、
+`logger.record_mean`で`raceline/mean_cross_dev`をTensorBoardに記録）を新設し
+`model.learn(callback=[eval_callback, raceline_metrics_callback])`に変更。
+
+**4. `ml_lidar/watch.py`に理想ラインの重ね描き**（黄色の細線、`_RACELINE_COLOR`）
+を追加。目視でアペックスを突けているか確認できるように。
+
+**テスト**: `ml_lidar/tests/test_raceline.py`新設（7件: 道幅制約を破らない・
+曲率二乗和を悪化させない・ほぼ直線な大半径円ではオフセットがほぼ0・narrow
+アーキタイプで例外にならない・曲率が高いほど目標速度が下がる・max_speedで
+頭打ち・実測`drive_accel_m_s2`がデフォルトフォールバックより優先される）。
+`ml_lidar/tests/test_env.py`に4件追加（`raceline_cross`/`target_speed`が
+infoに含まれる・`raceline_weight`が許容帯超過を罰する・`speed_match_weight`が
+目標速度への一致を報酬する）。`ml_lidar/tests/`全99件green。
+`ml_lidar/train_rl.py --timesteps 500 --n-envs 1`のスモークテストで
+`raceline/mean_cross_dev`がTensorBoardログに出ることを確認済み。
+
+**未着手（次にやること）**:
+1. **実車でステア試験を録り直し`tau_steer_s`/`dead_time_s`を再測定**
+   （`tools/sysid/fit.py`の`steer_cmd_echo`基準・遅延二重計上バグ修正版で）。
+   `config/vehicle.toml`の`tau_steer_s=0.539`はまだ修正前の値のまま。
+   `sim/gym_env.py`の`tau_steer_s_range`（154行目）も新しい実測値中心に
+   更新すること（これが土台なので最優先——ここが歪んだままだと理想ラインの
+   速度プロファイルも報酬チューニングも効果を切り分けられない）
+2. v9をスクラッチ学習（`--resume-from`は使わない。報酬の形が変わるため）
+3. circuit/fuji評価スコア・`raceline/mean_cross_dev`をv8と比較し、
+   `raceline_weight`/`speed_match_weight`/`cross_track_margin_frac`を
+   必要なら再調整してから実車確認
+
+計画の全文は`~/.claude/plans/ml-lidar-v8-compressed-ember.md`参照。
+
+## ★ 2026-09-01（さらに続き）：理想ラインが circuit/fuji でギザギザだったバグ2件を修正
+
+バンビが`watch.py`の観戦画面を見て「黄色い理想ラインがcircuit/fujiで毛羽立って
+ギザギザ、ランダムコースもアペックスを突けていないように見える」と指摘。数値で
+検証し、独立した2つのバグを特定・修正した。
+
+**バグ①（circuit/fuji限定）**: `sim/track.py`の`centerline()`（`path`指定コースの
+ビルダー）が、閉ループの最後の点を始点と重複させたまま返していた（距離`1.3e-15m`＝
+浮動小数点誤差レベルで完全一致）。`sim/raceline.py`の曲率計算は`dyaw/max(seg,1e-6)`
+なのでこの1点だけセグメント長がほぼ0になり、曲率が**103万rad/m**（他のコーナーは
+1〜2rad/m）に爆発し目的関数を乗っ取っていた（実測: オフセット0での損失が`1.06e12`）。
+`raspi/nav/centerline.py`の`resample_loop`が同じ理由で最後の点を含めない設計に
+なっているのに、`track.py`側には未適用だった。`build()`でループが綺麗に閉じている
+ときだけ最後の点を落とすよう修正（`sim/track.py`）。
+
+**バグ②（全コース共通）**: 重複点を除いても、隣接点の60%以上でオフセットの符号が
+反転する高周波ノイズが残った。しかも反復回数を200→5000に増やすと悪化（境界張り付き
+点が13→468に増加）——目的関数（曲率二乗和、オフセットの2階差分を含む梁のたわみ的な
+性質）に対しAdamが各点をほぼ独立・等幅で動かすため、隣接点が逆方向に押し合う
+チェッカーボード状のノイズを減衰できていなかった。`torch.optim.LBFGS`
+（fullbatch quasi-Newton）に変更し、box制約は`clamp_`ではなく
+`offset=max_offset*tanh(z)`の滑らかな再パラメータ化で埋め込んだ。さらに、
+circuit/fuji（`track.py`由来、解像度そのまま2cm間隔=976〜1588点）は自由度が
+多すぎてL-BFGSでも収束が遅い（実測5000反復・24秒）ことが分かったため、最適化
+自体は`sim/random_course.py`と同じ0.1m間隔に間引いた点で行い、結果を弧長ベースの
+周期線形補間で密な点列に戻す（`_coarse_indices`）。
+
+**結果**: circuit/fuji/ランダムコースいずれも目視で滑らかなアウトインアウトの
+理想ラインになった（PNG出力で確認済み）。`ml_lidar/tests/test_raceline.py`の
+`test_near_straight_loop_keeps_offsets_small`は前提が誤っていたことが判明
+（直線区間の無い完全な円は、外側へ均一に膨らむのがbox制約下で数学的に正しい
+最適解——旧Adam実装が200反復で収束しきらず偶然小さい値で止まっていただけだった）
+ため`test_full_circle_loop_inflates_uniformly_to_box_limit`に書き換え。
+`ml_lidar/tests/test_env.py`の2件（`test_progress_reward_is_near_zero_when_stationary`・
+`test_speed_weight_has_no_effect_when_stationary`）は理想ラインが実際に意味のある
+オフセットを持つようになった結果、スポーン地点がコーナー付近だと静止時にも
+`raceline_weight`の罰則が乗るようになったため、`raceline_weight=0.0`/
+`speed_match_weight=0.0`を明示（`cross_track_weight=0.0`と同じ既存の流儀）。
+
+`ml_lidar/tests/`139件中138件green（残り1件`test_vehicle_grip.py`の
+`test_braking_mid_corner_at_measured_mu_can_zero_out_lateral_grip`は本修正と無関係な
+既存の未解決failure——`git stash`で本修正前でも同じ失敗を確認済み。摩擦円RWD連成の
+方の話で、`tau_steer_s`再測定と同じく別件）。
+
+**まだやっていないこと**: v9本学習はまだ開始していない（上の「2026-09-01（続き）」
+節の「未着手」1〜3がそのまま該当）。理想ラインの品質改善はその前提条件の一部が
+片付いただけで、`tau_steer_s`実測し直しは依然として最優先のまま。
+
+## ★ 2026-09-01（さらにさらに続き）：↑のL-BFGS化が原因でv9学習が実質止まっていた不具合を修正
+
+バンビが上記修正を反映した`v9`を実際に回したところ、起動直後のwarning以降ログが
+全く更新されず「学習が止まっている」状態に。`env.reset()`のたびに
+`compute_raceline_offsets()`が呼ばれる設計なので、この関数自体の実行時間を
+疑って計測したところ、**1回280ms前後**（旧Adam実装の目標20〜40msの7〜14倍）
+かかっていることが判明——`n_envs=8`の`SubprocVecEnv`で、特に学習初期はほぼ
+無作為な方策がすぐ衝突してエピソードが短く`reset()`が頻発するため、これが
+学習を事実上フリーズさせていた。
+
+原因は`_OPT_ITERATIONS=200`を`opt.step(closure)`で2回呼んでいたこと。ただし
+反復回数を減らして`step()`を1回だけにすると**別の不具合**が出た——`max_iter`を
+5〜200のどれにしても同じ(悪い)ロス値で頭打ちになり理想ラインが中心線からほぼ
+動かなくなる。実測で判明したのは、`torch.optim.LBFGS`の`strong_wolfe`直線探索は
+1回の`step()`内で「この回はもう改善できない」と判断すると`max_iter`を使い切る前に
+抜けてしまい、**quasi-Newton履歴を引き継いだまま`step()`を何度も呼び直すことで
+初めて先に進む**という、`max_iter`を増やすだけでは代替できない挙動を持つこと
+（circuitで実測: 1回目`step()`でロス50.97のまま頭打ちに見えたが、9回呼び直すと
+22.8まで下がり、そこで`max|offset|`が0.01→0.38に育ってようやくアペックスを
+突くラインになった）。`sim/raceline.py`のdocstring・コメントに詳細を残した。
+
+**修正**: `max_iter=20`の`step()`を、ロス改善が2%を下回るまで最大8回呼び直す
+方式（`_OPT_MAX_CALLS`・`_OPT_REL_TOL`）に変更。実測タイミング: ランダム
+コース(訓練用)平均約90ms・最大約100ms、circuit約140ms・fuji約100ms
+（旧280msの約2〜3倍高速化、かつ理想ラインの質は劣化させていないことをPNG
+出力と`max|offset|`の実測値で確認済み）。テストは`ml_lidar/tests/test_raceline.py`
+`test_env.py``test_gym_env.py`計33件green。
+
+**判断が必要な点（次のセッションで確認）**: 90〜140ms/resetは旧Adam実装の目安
+（20〜40ms）よりまだ2〜4倍重い。`n_envs=8`での実際のsteps/sec低下がv9の
+学習時間に許容範囲か、実際にしばらく走らせて確認すること。もし依然重すぎるなら、
+`_OPT_MAX_CALLS`を減らす（速度優先）か、理想ライン自体をエピソードごとではなく
+コース形状ごとにキャッシュする（`generate_diverse_course`は`course_fn`で
+毎エピソード新規生成するため今は使えないが、キャッシュキーを工夫する余地はある）
+などの追加最適化を検討する。
 
 ---
 

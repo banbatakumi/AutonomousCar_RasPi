@@ -60,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # surge_mk2/
 import torch  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.callbacks import (  # noqa: E402
+    BaseCallback,
     EvalCallback,
     StopTrainingOnNoModelImprovement,
 )
@@ -71,7 +72,22 @@ from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
 from sim.random_course import generate_diverse_course  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule"]
+__all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule", "RacelineMetricsCallback"]
+
+
+class RacelineMetricsCallback(BaseCallback):
+    """理想ラインからの平均横偏差（`sim/gym_env.py`の`info["raceline_cross"]`）を
+    TensorBoardに記録する（2026-09-01追加）。実車確認の前に、シムだけで
+    「アペックスを突けているか」の定量的な進捗を学習曲線として追えるようにする狙い
+    （`raceline_weight`/`speed_match_weight`導入の効果測定用）。`record_mean`は
+    SB3のLoggerが次のdumpまでの値を自動平均する機能——毎ステップ全ワーカーぶん
+    呼んでも、TensorBoard上は1ロールアウトあたり1点にまとまる。"""
+
+    def _on_step(self) -> bool:
+        for info in self.locals["infos"]:
+            if "raceline_cross" in info:
+                self.logger.record_mean("raceline/mean_cross_dev", info["raceline_cross"])
+        return True
 
 
 def linear_schedule(initial_value: float) -> Callable[[float], float]:
@@ -91,7 +107,8 @@ def linear_schedule(initial_value: float) -> Callable[[float], float]:
 
 def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
                       steer_tau: float, steer_rate_weight: float, speed_weight: float,
-                      slip_weight: float):
+                      slip_weight: float, raceline_weight: float, raceline_tolerance_m: float,
+                      speed_match_weight: float):
     """ワーカープロセスの中で、**エピソードのたびに新しいランダムコースを作る**
     `GymSurgeEnv` を返す関数を作る。
 
@@ -120,7 +137,9 @@ def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
         env = GymSurgeEnv(course_fn=generate_diverse_course, max_steps=max_steps,
                           max_speed=max_speed, seed=seed, steer_tau=steer_tau,
                           steer_rate_weight=steer_rate_weight, speed_weight=speed_weight,
-                          slip_weight=slip_weight)
+                          slip_weight=slip_weight, raceline_weight=raceline_weight,
+                          raceline_tolerance_m=raceline_tolerance_m,
+                          speed_match_weight=speed_match_weight)
         return Monitor(env)   # エピソード報酬/長さの集計を正しく取るため
 
     return _make
@@ -128,14 +147,16 @@ def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
 
 def make_eval_env(*, max_steps: int, max_speed: float, steer_tau: float,
                   steer_rate_weight: float, speed_weight: float, slip_weight: float,
-                  seed: int = 0) -> GymSurgeEnv:
+                  raceline_weight: float, raceline_tolerance_m: float,
+                  speed_match_weight: float, seed: int = 0) -> GymSurgeEnv:
     """`circuit`/`fuji` ——学習に使っていない既知コースで評価する。
 
     `randomize_lidar=False`でLiDARノイズも既定値に固定する。学習側はノイズを
     ランダム化しているので、評価だけは条件を揃えないと「今回は運良く/悪くノイズが
     軽かった」で数字がぶれてしまう。`randomize_dynamics=False`も同じ理由
     （2026-08-31追加、`[dynamics]`未実測パラメータのドメインランダム化とセット）。
-    `steer_tau`/`steer_rate_weight`/`speed_weight`/`slip_weight`は
+    `steer_tau`/`steer_rate_weight`/`speed_weight`/`slip_weight`/
+    `raceline_weight`/`raceline_tolerance_m`/`speed_match_weight`は
     学習側と揃える（実運用の滑らかさ・速度の攻め方をそのまま評価スコア・
     `best_model`選定に反映させるため）。
     """
@@ -144,7 +165,9 @@ def make_eval_env(*, max_steps: int, max_speed: float, steer_tau: float,
     return GymSurgeEnv(courses, max_steps=max_steps, max_speed=max_speed,
                        seed=seed, randomize_lidar=False, randomize_dynamics=False,
                        steer_tau=steer_tau, steer_rate_weight=steer_rate_weight,
-                       speed_weight=speed_weight, slip_weight=slip_weight)
+                       speed_weight=speed_weight, slip_weight=slip_weight,
+                       raceline_weight=raceline_weight, raceline_tolerance_m=raceline_tolerance_m,
+                       speed_match_weight=speed_match_weight)
 
 
 def main() -> int:
@@ -189,18 +212,37 @@ def main() -> int:
                     help="平滑化後の舵角の1ステップ変化量に掛ける罰則の重み。"
                          "方策自身に「滑らかな操舵の方が得」という圧力を与える"
                          "（2026-08-29追加。`sim/gym_env.py`の`SimE2EEnv`docstring参照）")
-    ap.add_argument("--speed-weight", type=float, default=0.3,
+    ap.add_argument("--speed-weight", type=float, default=0.1,
                     help="毎ステップ`speed/max_speed`に掛けて加算する速度ボーナス。"
                          "`progress`（弧長方向の移動量）だけでは`collision_penalty=-5.0`"
                          "に対して速度の効きが弱く、方策が速度・ライン取りに消極的に"
                          "なりやすかった（v5評価でバンビが指摘、2026-08-30追加）。"
-                         "初期値0.3は未検証——`sim/gym_env.py`の`SimE2EEnv`docstring参照")
+                         "2026-09-01: 曲率を考慮しない一律ボーナスがコーナー前の減速を"
+                         "妨げていた疑いがあり、既定値を0.3→0.1に下げ主役を"
+                         "--speed-match-weightに譲った——`sim/gym_env.py`の"
+                         "`SimE2EEnv`docstring参照")
     ap.add_argument("--slip-weight", type=float, default=0.2,
                     help="要求向心加速度がグリップ限界(mu*g)を超えた比率"
                          "（`VehicleModel.slip_frac`）に掛ける罰則の重み。滑走・"
                          "グリップ限界超過そのものを直接罰する（2026-08-31追加、"
                          "バンビの「高速旋回で滑る設計か」という指摘への対応）。"
                          "初期値0.2は未検証——`sim/gym_env.py`の`SimE2EEnv`docstring参照")
+    ap.add_argument("--raceline-weight", type=float, default=0.3,
+                    help="`sim/raceline.py`が道幅内で計算した理想ライン（曲率最小化・"
+                         "Trajectory-Aided Learning方式）からの横偏差のうち"
+                         "--raceline-tolerance-mを超えた分に掛ける罰則の重み"
+                         "（2026-09-01追加、v8実車評価「衝突しないが綺麗なライン取りが"
+                         "できない」への対応）。初期値0.3は未検証——`sim/gym_env.py`の"
+                         "`SimE2EEnv`docstring参照")
+    ap.add_argument("--raceline-tolerance-m", type=float, default=0.08,
+                    help="理想ラインへの追従で許容する誤差[m]。理想ラインぴったりを"
+                         "要求しない許容帯（2026-09-01追加）")
+    ap.add_argument("--speed-match-weight", type=float, default=0.3,
+                    help="理想ライン上の目標速度（曲率に応じてグリップ限界まで"
+                         "減速・加速するプロファイル）とのズレの小ささに応じて"
+                         "加算するボーナス。--speed-weightと違い曲率を考慮した"
+                         "速度整形を担う（2026-09-01追加）。初期値0.3は未検証——"
+                         "`sim/gym_env.py`の`SimE2EEnv`docstring参照")
     ap.add_argument("--hidden-sizes", type=int, nargs="+", default=[256, 256],
                     help="方策/価値ネットワークの隠れ層サイズ（SB3既定は[64,64]）。"
                          "★2026-08-29追加: 観測は点群361点+速度1個=362次元あるのに、"
@@ -251,6 +293,9 @@ def main() -> int:
         "n_epochs": args.n_epochs, "learning_rate": args.learning_rate,
         "steer_tau": args.steer_tau, "steer_rate_weight": args.steer_rate_weight,
         "speed_weight": args.speed_weight, "slip_weight": args.slip_weight,
+        "raceline_weight": args.raceline_weight,
+        "raceline_tolerance_m": args.raceline_tolerance_m,
+        "speed_match_weight": args.speed_match_weight,
         "hidden_sizes": args.hidden_sizes,
     }, indent=2), encoding="utf-8")
 
@@ -258,7 +303,10 @@ def main() -> int:
                                  max_speed=args.max_speed, steer_tau=args.steer_tau,
                                  steer_rate_weight=args.steer_rate_weight,
                                  speed_weight=args.speed_weight,
-                                 slip_weight=args.slip_weight)
+                                 slip_weight=args.slip_weight,
+                                 raceline_weight=args.raceline_weight,
+                                 raceline_tolerance_m=args.raceline_tolerance_m,
+                                 speed_match_weight=args.speed_match_weight)
               for i in range(args.n_envs)]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
     vec_env = vec_cls(env_fns)
@@ -280,7 +328,9 @@ def main() -> int:
     eval_env = DummyVecEnv([lambda: Monitor(make_eval_env(
         max_steps=args.max_steps, max_speed=args.max_speed, steer_tau=args.steer_tau,
         steer_rate_weight=args.steer_rate_weight, speed_weight=args.speed_weight,
-        slip_weight=args.slip_weight, seed=args.seed + 999))])
+        slip_weight=args.slip_weight, raceline_weight=args.raceline_weight,
+        raceline_tolerance_m=args.raceline_tolerance_m,
+        speed_match_weight=args.speed_match_weight, seed=args.seed + 999))])
     # ★早期終了。評価スコアが`early_stop_patience`回連続で更新されなければ、
     # `--timesteps`に達していなくても学習を打ち切る（無駄な計算を続けない）。
     # `min_evals`で学習ごく初期のノイズだけで早まって打ち切らないようにしてある
@@ -295,11 +345,13 @@ def main() -> int:
         eval_freq=max(1, args.eval_freq // args.n_envs),
         n_eval_episodes=args.n_eval_episodes, deterministic=True,
         callback_after_eval=stop_callback)
+    raceline_metrics_callback = RacelineMetricsCallback()
 
     # 早期終了時は StopTrainingOnNoModelImprovement 自身が理由をログに出す（verbose=1）
     # ★再開時は reset_num_timesteps=False で num_timesteps を引き継ぐ
     # （True のままだとカウンタが0に戻り、--timesteps 未達のまま即終了する）
-    model.learn(total_timesteps=args.timesteps, callback=eval_callback,
+    model.learn(total_timesteps=args.timesteps,
+               callback=[eval_callback, raceline_metrics_callback],
                reset_num_timesteps=args.resume_from is None)
     model.save(str(args.out / "last_model"))
     print(f"# 完了。最良モデル → {args.out}/best_model.zip 、最終モデル → "

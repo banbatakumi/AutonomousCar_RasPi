@@ -211,6 +211,14 @@ def build(meta: dict) -> dict:
         if gap > width * 0.25 or dth > math.radians(10):
             print(f"!! loop=true だが始点と終点が合っていない: "
                   f"位置 {gap:.2f}m / 向き {math.degrees(dth):.0f}° ずれ（{meta.get('name', '')}）")
+        elif gap < res * _STEP_RATIO * 0.5:
+            # 綺麗に閉じている周回は、最後の点が始点とほぼ重複する（浮動小数点の
+            # 誤差レベルで一致）。`raspi/nav/centerline.py`の`resample_loop`が
+            # 同じ理由で終点を含めないのと揃え、ここでも落とす——重複点を残すと
+            # 周回差分（`np.roll`）でセグメント長がほぼ0になり、`sim/raceline.py`
+            # の曲率計算（dyaw/seg）がその1点だけ爆発して理想ライン最適化全体を
+            # 汚染する（2026-09-01、実測: 103万rad/mの偽曲率スパイクを確認）
+            pts = pts[:-1]
 
     grid, origin = rasterize(pts, width, res, float(meta.get("margin", 0.4)),
                              divider=meta.get("divider"),
