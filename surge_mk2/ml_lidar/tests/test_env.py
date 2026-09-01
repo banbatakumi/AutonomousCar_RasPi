@@ -5,6 +5,7 @@
 import math
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # surge_mk2/
@@ -13,6 +14,7 @@ import numpy as np  # noqa: E402
 
 from sim.gym_env import OBS_DIM, SimE2EEnv  # noqa: E402
 from sim.random_course import generate_random_course  # noqa: E402
+from sim.raceline import compute_raceline_offsets as _real_compute_raceline_offsets  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 
@@ -28,7 +30,8 @@ class TestSimE2EEnv(unittest.TestCase):
         obs = env.reset()
         self.assertEqual(obs.shape, (OBS_DIM,))
         self.assertTrue(np.all(np.isfinite(obs)))
-        self.assertEqual(obs[-1], 0.0)     # 発進直後は速度0のはず
+        self.assertEqual(obs[-2], 0.0)     # 発進直後は速度0のはず
+        self.assertEqual(obs[-1], 0.0)     # 発進直後はステアも0のはず
 
     def test_collision_terminates_episode(self):
         env = _make_env(max_steps=500)
@@ -87,8 +90,8 @@ class TestSimE2EEnv(unittest.TestCase):
         env = _make_env(max_steps=50, max_speed=1.0)
         env.reset()
         obs, _, _, _, _ = env.step(np.array([0.0, 1.0]))     # 全開で加速
-        self.assertGreater(obs[-1], 0.0)
-        self.assertAlmostEqual(float(obs[-1]), env.vehicle.speed, places=5)
+        self.assertGreater(obs[-2], 0.0)
+        self.assertAlmostEqual(float(obs[-2]), env.vehicle.speed, places=5)
 
     def test_randomize_lidar_varies_noise_between_episodes(self):
         """改善2: `randomize_lidar=True`（既定）なら毎エピソードノイズ量が変わる。"""
@@ -295,6 +298,102 @@ class TestSimE2EEnv(unittest.TestCase):
             return total
 
         self.assertGreater(run(1.0), run(0.0))
+
+
+class TestRacelinePrefetchAndCache(unittest.TestCase):
+    """①reset()のraceline計算の高速化（2026-09-02追加）。バックグラウンド先読み
+    （手続き生成コース用）とメモ化キャッシュ（固定courses用）、双方の正しさを
+    確認する——高速化そのもの（実測fps）はこのテストでは検証しない（`docs/`の
+    実測メモ参照）、ここでは「結果が変わらないこと」だけを見る。
+    """
+
+    def test_course_fn_prefetch_gives_same_trajectory_as_two_independent_envs(self):
+        """先読みが有効（`course_fn`使用）でも、同じseedの2つの環境インスタンスが
+        複数エピソードにわたって同じコース列を生成する（決定性回帰）。"""
+
+        def course_shapes(n_episodes: int) -> list[tuple]:
+            env = SimE2EEnv(course_fn=generate_random_course, max_steps=5, seed=42)
+            shapes = []
+            for _ in range(n_episodes):
+                env.reset()
+                shapes.append(env.course.grid.shape)
+                for _ in range(5):     # 先読みスレッドが動く時間を与える
+                    env.step(np.array([0.0, 0.0]))
+            return shapes
+
+        self.assertEqual(course_shapes(4), course_shapes(4))
+
+    def test_reset_seed_reassignment_discards_stale_prefetch(self):
+        """`ml_lidar/env.py`の`GymSurgeEnv.reset(seed=...)`と同じパターン——
+        `env.rng`を丸ごと差し替えてから`reset()`を呼ぶ——を2回繰り返しても、
+        同じ結果になること（2026-09-02、先読み実装直後に踏んだ回帰の再発防止。
+        `sim/gym_env.py`の`reset()`docstring参照）。"""
+        env = SimE2EEnv(course_fn=generate_random_course, max_steps=5, seed=0)
+
+        env.rng = np.random.default_rng(7)
+        env.reset()
+        env.step(np.array([0.0, 0.0]))   # 先読みスレッドを走らせる
+        shape1 = env.course.grid.shape
+
+        env.rng = np.random.default_rng(7)   # 差し替え。先読み済みだった結果は捨てるべき
+        env.reset()
+        shape2 = env.course.grid.shape
+
+        self.assertEqual(shape1, shape2)
+
+    def test_fixed_courses_raceline_is_memoized_across_episodes(self):
+        """固定`courses`（`make_eval_env`のcircuit/fuji相当）は、同じcourse×同じ
+        dynamics（`randomize_dynamics=False`）なら`compute_raceline_offsets`を
+        エピソードごとに呼び直さない。"""
+        rng = np.random.default_rng(0)
+        courses = [generate_random_course(rng, name="c0")]
+        env = SimE2EEnv(courses, max_steps=5, seed=0, randomize_dynamics=False,
+                        randomize_lidar=False)
+
+        with unittest.mock.patch("sim.gym_env.compute_raceline_offsets",
+                                 wraps=_real_compute_raceline_offsets) as m:
+            env.reset()
+            env.reset()
+            env.reset()
+            self.assertEqual(m.call_count, 1)
+
+    def test_fixed_courses_raceline_cache_invalidates_on_mu_change(self):
+        """`randomize_dynamics=True`で`mu`がエピソードごとに変わる場合は、
+        キャッシュキーに`mu`が含まれるので毎回律儀に計算し直す（誤ってキャッシュ
+        ヒットし古い`mu`の理想ラインを使い回すことがないように）。"""
+        rng = np.random.default_rng(0)
+        courses = [generate_random_course(rng, name="c0")]
+        env = SimE2EEnv(courses, max_steps=5, seed=0, randomize_dynamics=True,
+                        randomize_lidar=False)
+
+        with unittest.mock.patch("sim.gym_env.compute_raceline_offsets",
+                                 wraps=_real_compute_raceline_offsets) as m:
+            for _ in range(5):
+                env.reset()
+            self.assertGreaterEqual(m.call_count, 2)
+
+    def test_set_curriculum_progress_propagates_to_course_fn_with_set_progress(self):
+        """`course_fn`が`set_progress()`を持つ（`CurriculumCourseFn`）場合だけ
+        伝播する。持たない素の関数（`generate_random_course`）を渡した場合は
+        単に無視される（`hasattr`ガード、例外にならないことを確認）。"""
+
+        class _FakeCourseFn:
+            def __init__(self):
+                self.progress = None
+
+            def set_progress(self, p):
+                self.progress = p
+
+            def __call__(self, rng):
+                return generate_random_course(rng)
+
+        fake = _FakeCourseFn()
+        env = SimE2EEnv(course_fn=fake, max_steps=5, seed=0)
+        env.set_curriculum_progress(0.5)
+        self.assertEqual(fake.progress, 0.5)
+
+        env2 = SimE2EEnv(course_fn=generate_random_course, max_steps=5, seed=0)
+        env2.set_curriculum_progress(0.5)   # 例外にならなければOK
 
 
 if __name__ == "__main__":

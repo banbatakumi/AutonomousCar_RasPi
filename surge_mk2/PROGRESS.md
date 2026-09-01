@@ -3,7 +3,14 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-09-01（`watch.py`で理想ラインがcircuit/fujiでギザギザに見えた不具合を
+最終更新: 2026-09-02（v9実測（早期終了3.62M/5M、`raceline/mean_cross_dev`が
+400k step以降0.16〜0.21mで頭打ち、実測fps~103）の診断を受け、ml_lidar学習の
+効率化・精度・安定性の改善5点をagy調査ベースで実装——①reset()のraceline計算の
+非同期先読み・固定コースのメモ化キャッシュ、②観測へのステア状態追加、
+③1D-CNN特徴抽出器（既定に）、④カリキュラム学習、⑤clip_range線形減衰＋
+報酬正規化(VecNormalize, norm_obs=False)。観測空間が変わった（OBS_DIM 362→363）
+ためv10はスクラッチ学習必須。詳細は下記「2026-09-02」節）
+旧: 2026-09-01（`watch.py`で理想ラインがcircuit/fujiでギザギザに見えた不具合を
 2件修正——①`sim/track.py`の閉ループ最終点重複による曲率スパイク、②Adam→L-BFGS
 （`offset=max_offset*tanh(z)`の滑らかな再パラメータ化）+ 0.1m間引き最適化。
 circuit/fuji/ランダムコースいずれも滑らかなアウトインアウトのラインに。詳細は
@@ -93,6 +100,94 @@ TensorBoardのサブフォルダ(`PPO_1`・`PPO_2`…)が積み上がってい�
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（`docs/progress_archive.md`の「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-09-02：v9実測診断→ml_lidar学習の効率化・精度・安定性 改善5点を実装
+
+バンビ「v9の学習が終わった。走行ラインも綺麗で良い感じだが、まだ完璧ではない。
+v9の正確な検証が必要であれば行って。改善案は全て実装して」→ 前回セッションで
+agyスキルを使い外部調査（F1TENTH/AWS DeepRacer/学術研究）した5つの改善提案
+（`~/.claude/plans/proud-fluttering-boot.md`）を全部実装した。
+
+**v9実測診断**: `evaluations.npz`/TensorBoardを解析。早期終了は3.62M/目標5M
+（ベストは2.6M）。`raceline/mean_cross_dev`が0.16〜0.21mで400k step以降ほぼ
+横ばい（理想ラインへの追従精度が頭打ち）。`train/explained_variance`も
+0.45〜0.65止まり（価値関数の当てはまりが甘い）。評価rewardの標準偏差が
+1.1M/2.36M/3.08M stepでだけ100超まで跳ねる（一部のコース条件でだけ大きく崩れる）。
+実測fps~103（`n_envs=8`。raceline導入前の素の環境fps 502〜556の約1/5）——
+9.69時間で3.62Mステップ。
+
+**①reset()のraceline計算の高速化**（`sim/gym_env.py`）: 固定`courses`
+（`make_eval_env`のcircuit/fuji）向けに`(id(course), mu, drive_accel, brake_decel)`
+キーのメモ化キャッシュを追加。手続き生成コース（`course_fn`、訓練用）向けには
+`course`・`episode_spec`の値だけで決まる純粋関数`_compute_raceline()`を
+バックグラウンドスレッドで次エピソード分先読みする仕組みを追加——
+`self.rng`はメインスレッドの`_draw_course()`/`_episode_spec()`だけが触るので
+競合状態は起きない設計。**実装直後に踏んだ罠**: `ml_lidar/env.py`の
+`GymSurgeEnv.reset(seed=...)`は`self._env.rng`を丸ごと差し替えてから`reset()`を
+呼ぶため、差し替え前の`rng`から先読みした結果をそのまま使うと決定性が壊れる
+（`test_course_fn_reset_with_same_seed_gives_the_same_course`で発覚）。
+先読み開始時の`rng`オブジェクト自体を`self._pending_rng`として覚えておき、
+`reset()`時に今の`self.rng`と一致するときだけ使うよう修正して解決。
+
+**②観測に「現在の平滑化後ステア角」を追加**（`OBS_DIM` 362→363）:
+`sim/gym_env.py`の`_obs()`・`ml_lidar/env.py`の`_to_obs()`・
+`raspi/auto/e2e_lidar.py`の`plan()`に同じ量（`steer_tau`一次遅れフィルタ後の
+実ステア角、`/max_steer`で[-1,1]正規化）を追加。方策が「今どれだけ舵を切って
+いる状態か」を知らないまま次の指令を出していた設計の穴への対応。
+`raspi/auto/e2e_lidar.py`は既に`self._steer`（出力側の平滑化）を持っていたので
+新規stateは不要——読み出しのタイミングを`self._steer`更新より前にするだけで
+「前回ステップの実現値」という学習側と同じ時系列関係になる。
+`ml_lidar/env.py`の`observation_space`もscalarの`Box(0,1)`から
+`Box(low,high)`（steerの1個だけ[-1,1]）に修正（範囲外警告の副次的な修正）。
+
+**③1D-CNN特徴抽出器**（新規`ml_lidar/policy.py`の`ScanCNNExtractor`、
+`--features-extractor {mlp,cnn}`既定`cnn`）: 361点のスキャンだけ3層のConv1dで
+圧縮してから速度・ステア角と結合するSB3の`BaseFeaturesExtractor`。角度順に
+並ぶ点群の空間相関を活かす狙い。ONNXエクスポート（opset18）・PyTorch/ONNXRuntime
+parityとも実測確認済み（最大差1.49e-07）。
+
+**④カリキュラム学習**（`sim/random_course.py`の`CurriculumCourseFn`、
+`sim/gym_env.py`の`SimE2EEnv.set_curriculum_progress`、`train_rl.py`の
+`CurriculumCallback`・`--curriculum-frac`既定0.3）: 評価rewardの標準偏差が
+一部の評価回だけ跳ねる傾向を受け、学習序盤は`mu_range`を実測中心値付近に絞り・
+narrow/obstacleアーキタイプを出さず・道幅下限を1.0mに絞った易しい条件から、
+`curriculum_frac * total_timesteps`かけて本来の難度分布へ線形に近づける。
+`VecEnv.env_method()`で各ワーカープロセスへ配る。`eval_env`は触らない
+（固定courses+`randomize_dynamics=False`のまま、v9との比較可能性を保つ）。
+
+**⑤`clip_range`線形減衰＋報酬正規化**: `--clip-range`（既定0.2）を`learning_rate`
+と同じ`linear_schedule()`で減衰（v2で踏んだ方策崩壊対策の追加分）。
+`VecNormalize(vec_env, norm_obs=False, norm_reward=True)`で報酬だけ正規化——
+観測は既存のmin-max正規化のまま(`raspi/auto/e2e_lidar.py`の前処理と一致させ
+続けるため、`norm_obs`はfalseのまま)。**踏んだ罠**: SB3の`EvalCallback`は
+訓練env側に`VecNormalize`があると無条件で`sync_envs_normalization()`を呼び、
+`eval_env`も`VecNormalize`でないと`AssertionError`で落ちる。`eval_env`を
+`VecNormalize(..., norm_obs=False, norm_reward=False, training=False)`で
+包み、評価スコア自体は生rewardのまま・統計量も更新されないようにして解決。
+`--resume-from`時は`vecnormalize.pkl`（`model.save()`とは別ファイル）を
+同じ流儀（run_config.json自動読み込みと同型）で復元する。
+
+**テスト**: `ml_lidar/tests/test_policy.py`新設（4件）。
+`test_env.py`/`test_gym_env.py`/`test_random_course.py`/`test_export_onnx_rl.py`/
+`test_train_rl.py`に先読み・キャッシュ・カリキュラム・CNN export・
+CurriculumCallbackのテストを追加。`raspi/tests/test_auto.py`の
+`_OBS_DIM`を362→363に更新（ダミーモデルの重み位置`w[1,-1]`→`w[1,-2]`も
+speed位置ズレに合わせて修正）、`TestE2ELidar`にステア観測のround-tripテストを
+追加。`ml_lidar/tests`・`raspi/tests`計693件中692件green（残り1件
+`test_vehicle_grip.py`の`test_braking_mid_corner_at_measured_mu_can_zero_out_lateral_grip`
+は本変更と無関係な既存の未解決failure——摩擦円RWD連成の加減速側実測待ち、
+2026-09-01セクション参照）。`./tools/check.sh`のtsc/生成物チェックも問題なし
+（protocol.tomlの版番号文書ズレは本変更と無関係の既存差分）。
+`train_rl.py --timesteps 2000 --n-envs 2`のスモークテストで
+`curriculum/progress`・`raceline/mean_cross_dev`のTensorBoard記録、
+`vecnormalize.pkl`保存、CNN構成でのONNXエクスポート+parityまで実地確認済み。
+
+**まだやっていないこと**: v10本学習はまだ開始していない（観測空間が変わった
+ため`--resume-from`は使えず、フルスクラッチ必須）。実車での`tau_steer_s`再測定
+（2026-09-01「続き」節の未着手1）も引き続き未対応のまま——v9と同じ実測待ちの
+`tau_steer_s`レンジを使っているので、v10の前提条件としては変わっていない。
 
 ---
 

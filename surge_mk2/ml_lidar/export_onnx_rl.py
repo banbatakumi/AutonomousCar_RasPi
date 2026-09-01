@@ -48,6 +48,11 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
+# ★`ml_lidar.policy`を明示import（未使用に見えるがwarningは抑制しない——`PPO.load()`が
+# `policy_kwargs["features_extractor_class"]`をモジュールパス込みで復元するため、
+# `--features-extractor cnn`で学習したcheckpointをここでimportせずに読むと
+# `ModuleNotFoundError`になる。2026-09-02追加）
+import ml_lidar.policy  # noqa: E402,F401
 from raspi.msgs import LIDAR_C_SATURATED_M  # noqa: E402
 from sim.gym_env import OBS_DIM  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
@@ -115,7 +120,8 @@ def export(model_path: Path, out_path: Path, *, max_speed: float, max_steer: flo
         "fov_deg": fov_deg,
         "max_range": max_range,
         "in_dim": OBS_DIM,
-        "input": f"先頭{OBS_DIM - 1}点はscan/max_range、末尾1個はspeed/max_speed（共に[0,1]）",
+        "input": f"先頭{OBS_DIM - 2}点はscan/max_range([0,1])、次の1個はspeed/max_speed"
+                 "([0,1])、末尾1個はsteer/max_steer([-1,1])",
         "action": "[steer_norm, speed_norm] each in [-1,1] (要クリップ)。"
                   "steer_rad = clip(a0,-1,1) * max_steer 。"
                   "speed_mps = (clip(a1,-1,1) + 1) / 2 * max_speed",

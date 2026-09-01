@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import replace
 from typing import Callable
 
@@ -52,9 +53,13 @@ PIPELINE_DEAD_TIME_S = 0.5 / _CMD_PUB_HZ + 0.5 / _COMMAND_HZ   # ≈0.015s
 
 #: `scan_window(scan, 360.0, ...)` が返す点数（-180°〜+180°の361点、fov=360固定の不変量）
 SCAN_DIM = 361
-#: 観測ベクトルの次元 = 点群 + 自車速度1個。**`ml_lidar/env.py`・`export_onnx_rl.py`・
-#: `raspi/auto/e2e_lidar.py`（暗黙に`scan_window`の出力長+1）と揃えること**
-OBS_DIM = SCAN_DIM + 1
+#: 観測ベクトルの次元 = 点群 + 自車速度1個 + 現在の平滑化後ステア角1個。
+#: **`ml_lidar/env.py`・`export_onnx_rl.py`・`raspi/auto/e2e_lidar.py`と揃えること**
+#: （2026-09-02追加、ステア角: 方策が「今どれだけ舵を切っている状態か」を知らずに
+#: 次の指令を出していた設計の穴への対応。`raspi/auto/e2e_lidar.py`の`plan()`も
+#: 同じ`self._steer`——`steer_tau`一次遅れフィルタ後の実ステア角——を持っており、
+#: 学習側の`self._steer`（下記`step()`参照）と同じ量なので新規state無しで追加できる）
+OBS_DIM = SCAN_DIM + 2
 
 
 def _stm_us(t_ns: int) -> int:
@@ -142,10 +147,12 @@ class SimE2EEnv:
     """1エピソード=1コースの周回試行。`reset()`/`step()` は gymnasium と同じ形の
     戻り値にしてあるが、このクラス自体は `gymnasium.Env` を継承しない。
 
-    観測は `(OBS_DIM,)` = 点群`SCAN_DIM`点 + 自車速度1個（末尾、[m/s]、生値）。
-    速度を混ぜているのは、点群だけでは「今どれくらいの速さで走っているか」が
-    分からず、速度依存の減速判断（例: 速いほど早めに舵を戻す）を学びにくいため
-    （2026-08-28、バンビの指摘で追加）。
+    観測は `(OBS_DIM,)` = 点群`SCAN_DIM`点 + 自車速度1個 + 現在の平滑化後ステア角1個
+    （末尾、順に[m/s]・[rad]、生値）。速度を混ぜているのは、点群だけでは「今どれくらい
+    の速さで走っているか」が分からず、速度依存の減速判断（例: 速いほど早めに舵を戻す）
+    を学びにくいため（2026-08-28、バンビの指摘で追加）。ステア角を混ぜているのは、
+    方策が「自分が今どれだけ舵を切っている状態か」を知らないまま`steer_tau`フィルタ
+    越しの応答に対して次の指令を出していた設計の穴への対応（2026-09-02追加）。
 
     ## 横偏差ペナルティは「中心線からの距離」ではなく「道幅の余白を使い切った分」
 
@@ -155,6 +162,11 @@ class SimE2EEnv:
     道幅の半分を「自由に使ってよい余白」として与え、そこを超えた分だけ罰する
     ことで、コース内のどこを通ってもよい自由度を残しつつ壁への接近だけ抑える。
     """
+
+    #: カリキュラム学習（`set_curriculum_progress`）の`progress=0`（学習序盤）で
+    #: 使う`mu_range`。実測中心値(0.454)の近傍だけに絞り、極端に低いグリップでの
+    #: 「避けようのない滑走」を序盤は経験させない（2026-09-02追加）
+    _CURRICULUM_EASY_MU_RANGE = (0.40, 0.55)
 
     def __init__(self, courses: list[Course] | None = None, *,
                 course_fn: Callable[[np.random.Generator], Course] | None = None,
@@ -283,6 +295,10 @@ class SimE2EEnv:
             raise ValueError("courses か course_fn のどちらかは要ります")
         self.courses = courses
         self.course_fn = course_fn
+        # ★カリキュラム学習用（2026-09-02追加）。`mu_range`を直接書き換えるので、
+        # コンストラクタで渡された値を「最終到達点」として別に覚えておく
+        # （`set_curriculum_progress`docstring参照）
+        self._mu_range_full = mu_range
         self.spec = spec or VehicleSpec.load()
         self.max_steps = max_steps
         self.max_range = max_range
@@ -326,13 +342,101 @@ class SimE2EEnv:
         self._steps = 0
         self._steer = 0.0
 
+        # ★raceline先読み・キャッシュ用の状態（2026-09-02追加。`reset()`docstring
+        # 参照）。`_raceline_cache`は固定`courses`（`course_fn is None`）のときだけ
+        # 使う——手続き生成コース（`course_fn`）は毎回新しいCourseオブジェクトなので
+        # キャッシュは常にミスし、無駄にメモリを積むだけになる
+        self._raceline_cache: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+        self._pending_course: Course | None = None
+        self._pending_episode_spec: VehicleSpec | None = None
+        self._pending_thread: threading.Thread | None = None
+        self._pending_result: tuple[np.ndarray, np.ndarray] | None = None
+        self._pending_rng: np.random.Generator | None = None
+
     # ── エピソード管理 ──
 
-    def reset(self) -> np.ndarray:
+    def _draw_course(self) -> Course:
         if self.course_fn is not None:
-            self.course = self.course_fn(self.rng)
+            return self.course_fn(self.rng)
+        return self.courses[int(self.rng.integers(len(self.courses)))]
+
+    def _compute_raceline(self, course: Course,
+                          episode_spec: VehicleSpec) -> tuple[np.ndarray, np.ndarray]:
+        """理想ラインのオフセット・目標速度プロファイルを計算する純粋関数
+        （`course`・`episode_spec`の値だけで決まり、`self.rng`は一切使わない）。
+        L-BFGS最適化(`compute_raceline_offsets`)が実測90〜140ms/回と重いため、
+        `reset()`はこれを次エピソード分バックグラウンドスレッドで先読みする
+        （`self.rng`に触れない純粋関数だからこそ、メインスレッド外で安全に呼べる）。
+        """
+        vehicle_half_width_m = max(abs(p[1]) for p in self.spec.footprint)
+        offsets = compute_raceline_offsets(course.centerline, course.width,
+                                           vehicle_half_width_m=vehicle_half_width_m)
+        target_speed = compute_speed_profile(
+            course.centerline, offsets, mu=episode_spec.mu, max_speed=self.max_speed,
+            drive_accel_m_s2=episode_spec.drive_accel_m_s2,
+            brake_decel_m_s2=episode_spec.brake_decel_m_s2)
+        return offsets, target_speed
+
+    def _raceline_for(self, course: Course,
+                      episode_spec: VehicleSpec) -> tuple[np.ndarray, np.ndarray]:
+        """固定`courses`向けのメモ化つき`_compute_raceline`。`make_eval_env`は
+        circuit/fujiの2コース×固定dynamics(`randomize_dynamics=False`)を評価
+        エピソードのたびに（既定30回）使い回すのに、理想ラインは常に同じ結果に
+        なるのに毎回L-BFGSを回し直していた（2026-09-02、v9評価コストの見直しで
+        発覚）。`course_fn`使用時（手続き生成、`Course`が毎回一意）はキャッシュが
+        意味を持たないのでそのまま計算する。
+        """
+        if self.course_fn is not None:
+            return self._compute_raceline(course, episode_spec)
+        key = (id(course), episode_spec.mu, episode_spec.drive_accel_m_s2,
+              episode_spec.brake_decel_m_s2)
+        cached = self._raceline_cache.get(key)
+        if cached is None:
+            cached = self._compute_raceline(course, episode_spec)
+            self._raceline_cache[key] = cached
+        return cached
+
+    def reset(self) -> np.ndarray:
+        """:実装ノート: `course_fn`使用時（手続き生成コース、`ml_lidar/train_rl.py`の
+        訓練用）は、直前の`reset()`が終わった時点で**次エピソード分の
+        `course`・`episode_spec`・理想ラインをバックグラウンドスレッドで
+        先読み済み**（`self._pending_*`）のはずなので、それをそのまま使う
+        （初回=エピソード0だけ先読みが無く同期計算になる）。`self.rng`は
+        メインスレッドの`_draw_course()`/`_episode_spec()`だけが触り、
+        バックグラウンドスレッドは`_compute_raceline()`という`course`・
+        `episode_spec`の値だけで決まる純粋関数しか呼ばないため、`self.rng`を
+        2つのスレッドが同時に触ることはない（競合状態が起きない設計）。
+
+        ★`self._pending_rng`（先読みを開始した時点の`self.rng`オブジェクト自体への
+        参照）が今の`self.rng`と一致するときだけ先読み結果を使う。`ml_lidar/env.py`の
+        `GymSurgeEnv.reset(seed=...)`は`self._env.rng = np.random.default_rng(seed)`
+        で`rng`を丸ごと差し替えてから`reset()`を呼ぶ設計（gymnasiumの決定性契約
+        `reset(seed=X)`を2回呼べば同じ結果、を満たすため）なので、差し替え後に
+        古い`rng`から先読みした結果をそのまま使うと**差し替え前の乱数列に基づく
+        コースが返り、決定性が壊れる**（2026-09-02、実装直後の回帰テストで発覚）。
+        不一致なら先読み中のスレッドは`join()`だけして結果は捨て、同期的に引き直す。
+        """
+        if self._pending_course is not None and self._pending_rng is self.rng:
+            self.course = self._pending_course
+            episode_spec = self._pending_episode_spec
+            self._pending_thread.join()
+            offsets, target_speed = self._pending_result
+            self._pending_course = None
+            self._pending_episode_spec = None
+            self._pending_thread = None
+            self._pending_result = None
+            self._pending_rng = None
         else:
-            self.course = self.courses[int(self.rng.integers(len(self.courses)))]
+            if self._pending_thread is not None:
+                self._pending_thread.join()   # rngが差し替わった等で不要になった先読みの後始末
+                self._pending_course = None
+                self._pending_episode_spec = None
+                self._pending_thread = None
+                self._pending_result = None
+                self._pending_rng = None
+            self.course = self._draw_course()
+            episode_spec = self._episode_spec()
+            offsets, target_speed = self._raceline_for(self.course, episode_spec)
 
         # コース上のランダムな地点＋小さな横ずれ/向きジッターを開始姿勢にする
         # （domain randomization。固定スタートより少ないエピソード数で
@@ -345,7 +449,6 @@ class SimE2EEnv:
         jyaw = self.rng.normal(0.0, self.start_jitter_rad)
         start = (float(cx + jx), float(cy + jy), float(cyaw + jyaw))
 
-        episode_spec = self._episode_spec()
         self.vehicle = VehicleModel(episode_spec, start)
         self.lidar = VirtualLidar(self.course, episode_spec, self._episode_sim_params(),
                                   seed=int(self.rng.integers(1 << 31)))
@@ -354,22 +457,55 @@ class SimE2EEnv:
         self._progress = _CenterlineProgress(self.course.centerline, self.course.width)
         self._progress.reset(self.vehicle.x, self.vehicle.y)
         # ★理想ラインは今エピソードの`episode_spec`（ドメインランダム化後の`mu`等）で
-        # 計算する——固定`self.spec`を使うと`randomize_dynamics=True`時に今エピソードの
-        # グリップ・応答特性と目標速度プロファイルがズレる（`raceline_weight`docstring参照）
-        vehicle_half_width_m = max(abs(p[1]) for p in self.spec.footprint)
-        offsets = compute_raceline_offsets(self.course.centerline, self.course.width,
-                                           vehicle_half_width_m=vehicle_half_width_m)
-        target_speed = compute_speed_profile(
-            self.course.centerline, offsets, mu=episode_spec.mu, max_speed=self.max_speed,
-            drive_accel_m_s2=episode_spec.drive_accel_m_s2,
-            brake_decel_m_s2=episode_spec.brake_decel_m_s2)
+        # 計算したもの（上の`_raceline_for`/`_pending_result`）を使う——固定`self.spec`
+        # を使うと`randomize_dynamics=True`時に今エピソードのグリップ・応答特性と
+        # 目標速度プロファイルがズレる（`raceline_weight`docstring参照）
         self._raceline = _RacelineProgress(self.course.centerline, offsets, target_speed)
         self._t_ns = 0
         self._steps = 0
         self._steer = 0.0
 
         self._last_scan = self._prime_scan()
+
+        # ★次エピソード分の`course`・`episode_spec`・理想ラインをバックグラウンドで
+        # 先読みしておく（`course_fn`使用時=手続き生成コースのときだけ。固定`courses`
+        # は`_raceline_for`のキャッシュで十分間に合う）。今エピソードの`step()`が
+        # 進む間（最大`max_steps`回）に完了すれば、次の`reset()`はブロックしない
+        if self.course_fn is not None:
+            self._pending_rng = self.rng
+            self._pending_course = self._draw_course()
+            self._pending_episode_spec = self._episode_spec()
+            pending_course, pending_spec = self._pending_course, self._pending_episode_spec
+
+            def _prefetch_worker() -> None:
+                self._pending_result = self._compute_raceline(pending_course, pending_spec)
+
+            self._pending_thread = threading.Thread(target=_prefetch_worker, daemon=True)
+            self._pending_thread.start()
+
         return self._obs(self._last_scan)
+
+    def set_curriculum_progress(self, progress: float) -> None:
+        """カリキュラム学習（2026-09-02追加）。`progress`（0.0〜1.0）に応じて
+        `mu_range`を`_CURRICULUM_EASY_MU_RANGE`→コンストラクタで渡された
+        `mu_range`（`self._mu_range_full`）へ線形補間する。`course_fn`が
+        `set_progress()`を持つ場合（`sim.random_course.CurriculumCourseFn`）は
+        そちらにも同じ`progress`を伝える——固定`courses`使用時（`course_fn is
+        None`、評価・観戦用）は該当メソットが無いので何もしない。
+
+        `ml_lidar/train_rl.py`の`CurriculumCallback`が`VecEnv.env_method()`経由で
+        各ワーカープロセスの`GymSurgeEnv.set_curriculum_progress()`（`ml_lidar/env.py`）
+        から呼ぶ想定。v9の実測で評価rewardの標準偏差が一部の評価回だけ跳ねる
+        （＝低グリップ・難コースの組み合わせでだけ大きく崩れる）傾向が見えたことを
+        受け、学習序盤は易しい条件に絞ってから徐々に本来の難度分布へ近づける。
+        """
+        t = max(0.0, min(1.0, progress))
+        lo = self._CURRICULUM_EASY_MU_RANGE[0] + t * (self._mu_range_full[0] - self._CURRICULUM_EASY_MU_RANGE[0])
+        hi = self._CURRICULUM_EASY_MU_RANGE[1] + t * (self._mu_range_full[1] - self._CURRICULUM_EASY_MU_RANGE[1])
+        self.mu_range = (lo, hi)
+        set_progress = getattr(self.course_fn, "set_progress", None)
+        if set_progress is not None:
+            set_progress(t)
 
     def _episode_sim_params(self) -> SimParams:
         """このエピソードで使う`SimParams`。`randomize_lidar`なら毎回引き直す
@@ -498,5 +634,7 @@ class SimE2EEnv:
     def _obs(self, scan: Scan) -> np.ndarray:
         w = scan_window(scan, 360.0, self.max_range)
         speed = float(np.clip(self.vehicle.speed, 0.0, self.max_speed))
+        # `self._steer`は`steer_tau`一次遅れフィルタ後の実ステア角[rad]
+        # （`step()`で更新済み。`raspi/auto/e2e_lidar.py`の`self._steer`と同じ量）
         return np.concatenate([np.asarray(w.dist, dtype=np.float32),
-                               np.array([speed], dtype=np.float32)])
+                               np.array([speed, self._steer], dtype=np.float32)])

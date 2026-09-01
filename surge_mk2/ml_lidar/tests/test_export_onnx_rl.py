@@ -18,6 +18,7 @@ from stable_baselines3 import PPO  # noqa: E402
 
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
 from ml_lidar.export_onnx_rl import export, load_run_config_defaults, verify_parity  # noqa: E402
+from ml_lidar.policy import ScanCNNExtractor  # noqa: E402
 from sim.gym_env import OBS_DIM  # noqa: E402
 from sim.random_course import generate_random_course  # noqa: E402
 
@@ -87,6 +88,33 @@ class TestExportOnnxRl(unittest.TestCase):
                 shutil.copy(onnx_path, lone_path)          # .json も .data も持っていかない
                 sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
                 sess.run(None, {"input": np.zeros((1, OBS_DIM), dtype=np.float32)})
+
+
+class TestExportOnnxRlWithCnnExtractor(unittest.TestCase):
+    """`--features-extractor cnn`（2026-09-02追加、既定）で学習したcheckpointの
+    エクスポート経路。`ml_lidar/policy.py`のConv1dがONNX opset18で問題なく
+    エクスポートできること・PyTorch/ONNXRuntimeの出力が一致することを確認する。
+    """
+
+    def test_export_and_parity_with_cnn_feature_extractor(self):
+        rng = np.random.default_rng(0)
+        courses = [generate_random_course(rng, name="c0")]
+        env = GymSurgeEnv(courses, max_steps=50, seed=0)
+        model = PPO("MlpPolicy", env, device="cpu", policy_kwargs=dict(
+            features_extractor_class=ScanCNNExtractor,
+            features_extractor_kwargs=dict(features_dim=32),
+            net_arch=[16, 16]))
+
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "model.zip"
+            onnx_path = Path(d) / "e2e_lidar.onnx"
+            model.save(str(model_path))
+
+            export(model_path, onnx_path, max_speed=1.5, max_steer=0.45)
+            self.assertTrue(onnx_path.exists())
+
+            diff = verify_parity(model_path, onnx_path)
+            self.assertLess(diff, 1e-4)
 
 
 class TestLoadRunConfigDefaults(unittest.TestCase):

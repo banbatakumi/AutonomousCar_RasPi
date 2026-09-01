@@ -12,11 +12,13 @@ import numpy as np  # noqa: E402
 
 from sim.gym_env import SimE2EEnv  # noqa: E402
 from sim.random_course import (  # noqa: E402
+    _ARCHETYPE_WEIGHTS,
     _hairpin_polygon_xy,
     _min_turn_radius_m,
     _vehicle_half_width_m,
     _vehicle_min_turn_radius_m,
     _RADIUS_MARGIN,
+    CurriculumCourseFn,
     generate_circuit_course,
     generate_corridor_course,
     generate_diverse_course,
@@ -291,6 +293,92 @@ class TestNewArchetypes(unittest.TestCase):
         for seed in range(60):
             c = generate_diverse_course(np.random.default_rng(20000 + seed))
             self._assert_basic_course(c, "diverse")
+
+
+class TestGenerateDiverseCourseWeights(unittest.TestCase):
+    """`generate_diverse_course`の`weights`引数（2026-09-02追加、カリキュラム学習用）。"""
+
+    def test_weights_none_uses_archetype_weights_default(self):
+        """`weights`省略時は従来通り`_ARCHETYPE_WEIGHTS`を使う——既存呼び出し元
+        （`ml_lidar/train_rl.py`は今は`CurriculumCourseFn`経由になったが、
+        `watch.py`等はまだ直接`generate_diverse_course`を渡す可能性がある）の
+        挙動を変えないための回帰テスト。"""
+        rng_a = np.random.default_rng(0)
+        rng_b = np.random.default_rng(0)
+        c_default = generate_diverse_course(rng_a)
+        c_explicit = generate_diverse_course(rng_b, weights=_ARCHETYPE_WEIGHTS)
+        self.assertEqual(c_default.grid.shape, c_explicit.grid.shape)
+
+    def test_weights_override_changes_archetype_distribution(self):
+        """narrow/obstacleの重みを0にすると、その2種は一度も選ばれない
+        （`_assert_basic_course`が通る=生成自体は壊れていないことも合わせて確認）。"""
+        weights = {"organic": 1.0, "circuit": 0.0, "corridor": 0.0, "narrow": 0.0, "obstacle": 0.0}
+        for seed in range(20):
+            c = generate_diverse_course(np.random.default_rng(seed), weights=weights)
+            self._assert_basic_course(c, "organic-only")
+
+    def _assert_basic_course(self, c, kind: str) -> None:
+        # `TestNewArchetypes`と同じ検査を軽量に再利用する
+        TestNewArchetypes._assert_basic_course(self, c, kind)
+
+
+class TestCurriculumCourseFn(unittest.TestCase):
+    """`CurriculumCourseFn`（2026-09-02追加）。`course_fn: Callable[[rng], Course]`
+    契約を満たしつつ、`progress`に応じて難度（道幅・アーキタイプ重み）を補間する。
+    """
+
+    def test_is_callable_with_single_rng_argument(self):
+        """`SimE2EEnv.reset()`が`self.course_fn(self.rng)`という1引数の形で呼ぶ契約
+        （モジュールdocstring参照）を満たすことを、実際に`SimE2EEnv`へ渡して確認する。"""
+        env = SimE2EEnv(course_fn=CurriculumCourseFn(), max_steps=10, seed=0)
+        env.reset()  # 例外を投げなければOK
+        self.assertIsNotNone(env.course)
+
+    def test_progress_zero_never_selects_narrow_or_obstacle(self):
+        fn = CurriculumCourseFn()
+        fn.set_progress(0.0)
+        for seed in range(200):
+            c = fn(np.random.default_rng(seed))
+            # narrowは道幅が配列（区間ごとに変わる）、obstacleは`obstacles`が
+            # 非Noneになる、という実装上の特徴で判別する
+            # （`sim/random_course.py`のnarrow/obstacle実装参照）
+            self.assertFalse(isinstance(c.width, np.ndarray),
+                             msg="progress=0でnarrowが選ばれてはいけない")
+            self.assertIsNone(c.obstacles, msg="progress=0でobstacleが選ばれてはいけない")
+
+    def test_progress_zero_narrows_width_range_lower_bound_to_easy_width_low(self):
+        """progress=0では道幅下限が`easy_width_low`（既定1.0m）まで持ち上がり、
+        `full_width_range`の下限0.7mより狭いコースが出ないことを、生成コースの
+        実際の`width`から確認する（organicは`width`がスカラーなので直接読める）。"""
+        fn = CurriculumCourseFn()
+        fn.set_progress(0.0)
+        weights_organic_only = {"organic": 1.0, "circuit": 0.0, "corridor": 0.0,
+                                "narrow": 0.0, "obstacle": 0.0}
+        fn._EASY_WEIGHTS = weights_organic_only  # このテストだけorganicに固定
+        for seed in range(30):
+            c = fn(np.random.default_rng(seed))
+            self.assertGreaterEqual(c.width, 1.0 - 1e-9)
+
+    def test_progress_one_matches_full_difficulty_distribution(self):
+        """progress=1.0では`generate_diverse_course`本来の`_ARCHETYPE_WEIGHTS`・
+        `width_range=(0.7,1.3)`と同じ分布になる（narrow/obstacleも出現しうる）。"""
+        fn = CurriculumCourseFn()
+        fn.set_progress(1.0)
+        saw_narrow_or_obstacle = False
+        for seed in range(200):
+            c = fn(np.random.default_rng(seed))
+            if isinstance(c.width, np.ndarray) or c.obstacles is not None:
+                saw_narrow_or_obstacle = True
+                break
+        self.assertTrue(saw_narrow_or_obstacle,
+                        msg="progress=1.0ではnarrow/obstacleが出現するはず")
+
+    def test_set_progress_clamps_to_unit_range(self):
+        fn = CurriculumCourseFn()
+        fn.set_progress(5.0)
+        self.assertEqual(fn.progress, 1.0)
+        fn.set_progress(-2.0)
+        self.assertEqual(fn.progress, 0.0)
 
 
 if __name__ == "__main__":

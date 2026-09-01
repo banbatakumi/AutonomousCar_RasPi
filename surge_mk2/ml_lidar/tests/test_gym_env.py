@@ -27,12 +27,19 @@ class TestGymSurgeEnv(unittest.TestCase):
         check_env(env, skip_render_check=True)
 
     def test_observation_is_normalized_to_unit_range(self):
+        """scan・speed（先頭`OBS_DIM-1`個）は[0,1]、末尾のsteerだけ[-1,1]
+        （2026-09-02、ステア観測追加。`observation_space`の宣言と一致すること自体は
+        `test_passes_gymnasium_env_checker`の`check_env`が検証する）。"""
         env = GymSurgeEnv(_make_courses(), max_steps=100, seed=1)
         obs, _ = env.reset()
         self.assertEqual(obs.shape, (OBS_DIM,))
-        self.assertTrue(np.all(obs >= 0.0) and np.all(obs <= 1.0))
-        obs, _, _, _, _ = env.step(np.array([0.0, 0.0], dtype=np.float32))
-        self.assertTrue(np.all(obs >= 0.0) and np.all(obs <= 1.0))
+        self.assertTrue(np.all(obs[:-1] >= 0.0) and np.all(obs[:-1] <= 1.0))
+        self.assertTrue(-1.0 <= obs[-1] <= 1.0)
+        # 左いっぱいに舵を切って、steer観測が実際に負側へ動くことを確認する
+        obs, _, _, _, _ = env.step(np.array([-1.0, 0.0], dtype=np.float32))
+        self.assertTrue(np.all(obs[:-1] >= 0.0) and np.all(obs[:-1] <= 1.0))
+        self.assertTrue(-1.0 <= obs[-1] <= 1.0)
+        self.assertLess(obs[-1], 0.0)
 
     def test_course_fn_is_accepted_and_passes_env_checker(self):
         """改善3: `GymSurgeEnv`経由でも`course_fn`（毎エピソード新規生成）が使える。
@@ -53,6 +60,17 @@ class TestGymSurgeEnv(unittest.TestCase):
         phys = env._to_physical(np.array([1.0, 1.0]))
         self.assertAlmostEqual(float(phys[1]), 1.5, places=5)
         self.assertAlmostEqual(float(phys[0]), env._max_steer, places=5)
+
+    def test_set_curriculum_progress_delegates_to_inner_sim_env(self):
+        """`GymSurgeEnv.set_curriculum_progress`は`SimE2EEnv`へ委譲するだけの薄い
+        窓口（2026-09-02追加、`CurriculumCallback`が`VecEnv.env_method()`経由で
+        呼ぶ想定）。委譲されているかを`mu_range`の変化で確認する。"""
+        env = GymSurgeEnv(_make_courses(), max_steps=100, seed=0)
+        full_range = env.sim._mu_range_full
+        env.set_curriculum_progress(0.0)
+        self.assertEqual(env.sim.mu_range, env.sim._CURRICULUM_EASY_MU_RANGE)
+        env.set_curriculum_progress(1.0)
+        self.assertEqual(env.sim.mu_range, full_range)
 
 
 if __name__ == "__main__":

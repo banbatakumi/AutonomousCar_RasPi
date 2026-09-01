@@ -50,6 +50,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -65,14 +66,20 @@ from stable_baselines3.common.callbacks import (  # noqa: E402
     StopTrainingOnNoModelImprovement,
 )
 from stable_baselines3.common.monitor import Monitor  # noqa: E402
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv  # noqa: E402
+from stable_baselines3.common.vec_env import (  # noqa: E402
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecNormalize,
+)
 
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
+from ml_lidar.policy import ScanCNNExtractor  # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
-from sim.random_course import generate_diverse_course  # noqa: E402
+from sim.random_course import CurriculumCourseFn  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule", "RacelineMetricsCallback"]
+__all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule", "RacelineMetricsCallback",
+          "CurriculumCallback"]
 
 
 class RacelineMetricsCallback(BaseCallback):
@@ -87,6 +94,46 @@ class RacelineMetricsCallback(BaseCallback):
         for info in self.locals["infos"]:
             if "raceline_cross" in info:
                 self.logger.record_mean("raceline/mean_cross_dev", info["raceline_cross"])
+        return True
+
+
+class CurriculumCallback(BaseCallback):
+    """カリキュラム学習（2026-09-02追加）。v9の実測で評価rewardの標準偏差が
+    一部の評価回だけ100超まで跳ねる（＝低グリップ・難コースの組み合わせでだけ
+    大きく崩れる）傾向が見えたことを受け、学習序盤は易しい条件（`mu_range`を
+    実測中心値付近に絞り、narrow/obstacleアーキタイプを出さない）に絞ってから、
+    `curriculum_frac * total_timesteps`ステップかけて本来の難度分布へ線形に
+    近づける。実体は`sim/gym_env.py`の`SimE2EEnv.set_curriculum_progress`と
+    `sim/random_course.py`の`CurriculumCourseFn`——このコールバックは
+    `VecEnv.env_method()`で各ワーカープロセスへ`progress`を配るだけ。
+
+    `eval_env`には触らない——固定`courses`(circuit/fuji)+`randomize_dynamics=False`
+    なのでカリキュラムの影響を受けず、学習全体を通して同じ基準で評価される
+    （`best_model`選定・v9との比較が連続的に保たれる）。
+    """
+
+    def __init__(self, *, curriculum_frac: float, total_timesteps: int, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self.curriculum_frac = curriculum_frac
+        self.total_timesteps = total_timesteps
+
+    def _progress(self) -> float:
+        if self.curriculum_frac <= 0:
+            return 1.0
+        return min(1.0, self.num_timesteps / (self.curriculum_frac * self.total_timesteps))
+
+    def _push(self) -> None:
+        progress = self._progress()
+        self.training_env.env_method("set_curriculum_progress", progress)
+        self.logger.record("curriculum/progress", progress)
+
+    def _on_training_start(self) -> None:
+        self._push()
+
+    def _on_rollout_start(self) -> None:
+        self._push()
+
+    def _on_step(self) -> bool:
         return True
 
 
@@ -131,10 +178,16 @@ def make_train_env_fn(seed: int, *, max_steps: int, max_speed: float,
     既定`True`）——ドメインランダム化で、シムの既定ノイズ量以外の条件にも頑健にする。
     道幅も`generate_diverse_course`が毎エピソード0.7〜1.3mでランダム化する
     （2026-08-28、幅1.0m固定への過学習を避けるため。詳細は`sim/random_course.py`）。
+
+    **2026-09-02: `course_fn`は`generate_diverse_course`を直接ではなく
+    `CurriculumCourseFn`インスタンスでラップする**（カリキュラム学習）。`_make()`が
+    呼ばれるたびに新規インスタンスを作るので、`SubprocVecEnv`の各ワーカープロセスが
+    独立した進捗状態を持つ——`CurriculumCallback`が`env_method()`で個別に
+    `set_progress()`を呼ぶ設計と整合する。
     """
 
     def _make():
-        env = GymSurgeEnv(course_fn=generate_diverse_course, max_steps=max_steps,
+        env = GymSurgeEnv(course_fn=CurriculumCourseFn(), max_steps=max_steps,
                           max_speed=max_speed, seed=seed, steer_tau=steer_tau,
                           steer_rate_weight=steer_rate_weight, speed_weight=speed_weight,
                           slip_weight=slip_weight, raceline_weight=raceline_weight,
@@ -187,9 +240,17 @@ def main() -> int:
     ap.add_argument("--early-stop-patience", type=int, default=10,
                     help="評価スコアがこの回数連続で更新されなかったら学習を打ち切る。"
                          "0で無効（--timesteps まで律儀に回り続ける）")
-    ap.add_argument("--early-stop-min-evals", type=int, default=10,
+    ap.add_argument("--early-stop-min-evals", type=int, default=None,
                     help="打ち切りを許可するまでの最低評価回数。学習ごく初期の"
-                         "ノイズだけで早まって打ち切らないための下駄")
+                         "ノイズだけで早まって打ち切らないための下駄。省略時は"
+                         "`max(10, ceil(--curriculum-frac * --timesteps / --eval-freq) + 10)`"
+                         "を自動算出する（2026-09-02追加）——`--curriculum-frac`の"
+                         "ランプアップ期間中は易しい条件から難しい条件へ分布が動き続け、"
+                         "評価スコアが一時的に停滞しうる。固定既定10のままだと、"
+                         "ランプアップが終わる前（`--curriculum-frac`次第では既定10回・"
+                         "200,000stepより後）に「収束した」と誤判定して早期終了しかねない。"
+                         "`ml_lidar/app.py`のGUIはこの引数を渡す手段が無いので、"
+                         "GUIから学習する場合は自動算出に頼ることになる")
     ap.add_argument("--target-kl", type=float, default=0.03,
                     help="1回の方策更新で許容するKLダイバージェンスの上限。超えたら"
                          "そのエポックの残りを打ち切る（SB3のPPOの機能）。0以下で無効。"
@@ -204,6 +265,19 @@ def main() -> int:
                     help="学習率の初期値。学習の進み具合（`--timesteps`に対する残り割合）"
                          "に比例して線形に0まで下げる（`linear_schedule()`）。学習後半の"
                          "更新を小さくして収束を安定させる（2026-08-29、方策崩壊対策）")
+    ap.add_argument("--clip-range", type=float, default=0.2,
+                    help="PPOの方策更新1回あたりの許容変化幅の初期値。`--learning-rate`と"
+                         "同じ`linear_schedule()`で学習の進み具合に比例して0まで線形に"
+                         "下げる（2026-09-02追加）。学習率減衰・`target_kl`・`n_epochs`減と"
+                         "同じ「方策崩壊対策」の一環——学習後半ほど1回の更新の破壊力を"
+                         "絞る。SB3既定は0.2で一定のまま（未減衰）だった")
+    ap.add_argument("--curriculum-frac", type=float, default=0.3,
+                    help="カリキュラム学習（`sim.random_course.CurriculumCourseFn`・"
+                         "`SimE2EEnv.set_curriculum_progress`）が易しい条件（`mu_range`を"
+                         "実測中心値付近に絞る・narrow/obstacleアーキタイプを出さない・"
+                         "道幅を1.0m以上に絞る）から本来の難度分布まで、"
+                         "`--timesteps`のこの割合をかけて線形に広げる（2026-09-02追加）。"
+                         "0以下で無効（最初から最大難度、v9までの挙動）")
     ap.add_argument("--steer-tau", type=float, default=0.10,
                     help="舵指令に掛ける一次遅れの時定数[s]。`raspi/auto/e2e_lidar.py`の"
                          "`steer_tau`ParamSpec既定と同じ値を学習側にも適用し、推論時にだけ"
@@ -250,6 +324,13 @@ def main() -> int:
                          "しまい、点群の空間的なパターン（ギャップ・壁の位置）を"
                          "表現する容量が乏しいのではという疑いがあった。CPU実測では"
                          "[256,256]でも[64,64]の約1.5倍の学習時間で収まる")
+    ap.add_argument("--features-extractor", choices=["mlp", "cnn"], default="cnn",
+                    help="`cnn`（既定、2026-09-02追加）は`ml_lidar/policy.py`の"
+                         "`ScanCNNExtractor`——点群361点だけ1D-CNNで圧縮してから"
+                         "速度・ステア角と結合し`--hidden-sizes`のpi/vfへ渡す。"
+                         "点群の角度順の空間相関（壁の角・隙間の局所形状）を"
+                         "活かす狙い。`mlp`は従来通り観測を丸ごと`--hidden-sizes`へ"
+                         "流し込む（比較用に残す）")
     ap.add_argument("--out", type=Path, default=Path("ml_lidar/runs/ppo_e2e"))
     ap.add_argument("--resume-from", type=Path, default=None,
                     help="このチェックポイント(.zip)から続きを学習する（PPO.load()。"
@@ -274,6 +355,22 @@ def main() -> int:
     if args.device == "cpu":
         torch.set_num_threads(1)
 
+    # ★`--early-stop-min-evals`省略時は、カリキュラム学習（`--curriculum-frac`）の
+    # ランプアップが終わるまでの評価回数+10回を下限に自動算出する——ランプアップ中は
+    # 易しい条件から難しい条件へ分布が動き続け評価スコアが一時的に停滞しうるため、
+    # 固定既定10のままだとランプアップ完了前に「収束した」と誤判定しかねない
+    # （`--early-stop-min-evals`のhelp参照、2026-09-02追加）。`run_config.json`に
+    # 記録するため、ここ（`vec_env`構築より前）で先に確定させる
+    if args.early_stop_min_evals is not None:
+        min_evals = args.early_stop_min_evals
+    else:
+        ramp_evals = (math.ceil(args.curriculum_frac * args.timesteps / args.eval_freq)
+                     if args.curriculum_frac > 0 else 0)
+        min_evals = max(10, ramp_evals + 10)
+        print(f"# --early-stop-min-evals省略のため自動算出: {min_evals}"
+              f"（curriculum_frac={args.curriculum_frac}のランプアップ完了まで約"
+              f"{ramp_evals}回評価 + 10回の下駄）")
+
     # ★新規学習（再開ではない）なら、古いTensorBoardログ（PPO_1・PPO_2…）が
     # 積み上がらないよう出力先を空にしてから作り直す（上のdocstring参照）
     if args.resume_from is None and args.out.exists():
@@ -296,7 +393,12 @@ def main() -> int:
         "raceline_weight": args.raceline_weight,
         "raceline_tolerance_m": args.raceline_tolerance_m,
         "speed_match_weight": args.speed_match_weight,
+        "early_stop_patience": args.early_stop_patience,
+        "early_stop_min_evals": min_evals,
         "hidden_sizes": args.hidden_sizes,
+        "clip_range": args.clip_range,
+        "curriculum_frac": args.curriculum_frac,
+        "features_extractor": args.features_extractor,
     }, indent=2), encoding="utf-8")
 
     env_fns = [make_train_env_fn(args.seed + i, max_steps=args.max_steps,
@@ -309,12 +411,35 @@ def main() -> int:
                                  speed_match_weight=args.speed_match_weight)
               for i in range(args.n_envs)]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
-    vec_env = vec_cls(env_fns)
+    raw_vec_env = vec_cls(env_fns)
+
+    # ★報酬だけ正規化する（`norm_obs=False`）。観測は既存のmin-max正規化
+    # （`ml_lidar/env.py`の`_to_obs()`）のまま——`raspi/auto/e2e_lidar.py`の推論側
+    # 前処理と一致させ続けるため、VecNormalizeの実行時統計量に依存する形にはしない
+    # （エクスポート済み`.onnx`はfeatures_extractor以降しか含まないので、報酬正規化
+    # 自体は推論側に一切影響しない）。報酬は`collision_penalty=-5.0`から
+    # `speed_match_weight`のような0.1〜0.3刻みの項まで複数のスケールが混在しており、
+    # 価値関数の学習ターゲットのスケールを安定させる狙い（2026-09-02追加）
+    vecnorm_path = args.resume_from.parent / "vecnormalize.pkl" if args.resume_from is not None else None
+    if vecnorm_path is not None and vecnorm_path.exists():
+        vec_env = VecNormalize.load(str(vecnorm_path), raw_vec_env)
+        print(f"# {vecnorm_path} から報酬正規化の統計量を復元")
+    else:
+        vec_env = VecNormalize(raw_vec_env, norm_obs=False, norm_reward=True)
+        if vecnorm_path is not None:
+            print(f"# {vecnorm_path} が無いため報酬正規化の統計量は新規から開始")
+
+    if args.features_extractor == "cnn":
+        policy_kwargs = dict(features_extractor_class=ScanCNNExtractor,
+                            features_extractor_kwargs=dict(features_dim=256),
+                            net_arch=dict(pi=args.hidden_sizes, vf=args.hidden_sizes))
+    else:
+        policy_kwargs = dict(net_arch=dict(pi=args.hidden_sizes, vf=args.hidden_sizes))
 
     if args.resume_from is not None:
-        # ★ハイパラ（target_kl/n_epochs/learning_rate等）はチェックポイントに
-        # 保存済みの値がそのまま復元される——ここで指定したCLI引数は再開時には
-        # 効かない（SB3の`PPO.load()`の仕様）。変えたい場合はゼロから学習し直すこと
+        # ★ハイパラ（target_kl/n_epochs/learning_rate/clip_range/policy_kwargs等）は
+        # チェックポイントに保存済みの値がそのまま復元される——ここで指定したCLI引数は
+        # 再開時には効かない（SB3の`PPO.load()`の仕様）。変えたい場合はゼロから学習し直すこと
         model = PPO.load(str(args.resume_from), env=vec_env, device=args.device,
                          tensorboard_log=str(args.out / "tb"))
         print(f"# {args.resume_from} から再開（既に {model.num_timesteps} ステップ学習済み）")
@@ -323,22 +448,32 @@ def main() -> int:
                    tensorboard_log=str(args.out / "tb"), n_epochs=args.n_epochs,
                    target_kl=(args.target_kl if args.target_kl > 0 else None),
                    learning_rate=linear_schedule(args.learning_rate),
-                   policy_kwargs=dict(net_arch=dict(pi=args.hidden_sizes, vf=args.hidden_sizes)))
+                   clip_range=linear_schedule(args.clip_range),
+                   policy_kwargs=policy_kwargs)
 
-    eval_env = DummyVecEnv([lambda: Monitor(make_eval_env(
+    # ★訓練側を`VecNormalize`でラップしたので、SB3の`EvalCallback`は
+    # `model.get_vec_normalize_env() is not None`のとき無条件で
+    # `sync_envs_normalization(training_env, eval_env)`を呼び、`eval_env`が
+    # 同じく`VecNormalize`でないと`AssertionError`で落ちる（SB3の仕様）。
+    # `norm_reward=False, training=False`にして、評価スコア自体は正規化なしの
+    # 生rewardのまま・統計量もeval実行で更新されないようにする——`best_model`選定・
+    # v9までとの比較可能性を保つ（`norm_obs=False`は訓練側と同じ理由）
+    eval_env = VecNormalize(DummyVecEnv([lambda: Monitor(make_eval_env(
         max_steps=args.max_steps, max_speed=args.max_speed, steer_tau=args.steer_tau,
         steer_rate_weight=args.steer_rate_weight, speed_weight=args.speed_weight,
         slip_weight=args.slip_weight, raceline_weight=args.raceline_weight,
         raceline_tolerance_m=args.raceline_tolerance_m,
-        speed_match_weight=args.speed_match_weight, seed=args.seed + 999))])
+        speed_match_weight=args.speed_match_weight, seed=args.seed + 999))]),
+        norm_obs=False, norm_reward=False, training=False)
     # ★早期終了。評価スコアが`early_stop_patience`回連続で更新されなければ、
     # `--timesteps`に達していなくても学習を打ち切る（無駄な計算を続けない）。
-    # `min_evals`で学習ごく初期のノイズだけで早まって打ち切らないようにしてある
+    # `min_evals`（上で確定済み）で学習ごく初期・カリキュラムのランプアップ中の
+    # ノイズだけで早まって打ち切らないようにしてある
     stop_callback = None
     if args.early_stop_patience > 0:
         stop_callback = StopTrainingOnNoModelImprovement(
             max_no_improvement_evals=args.early_stop_patience,
-            min_evals=args.early_stop_min_evals, verbose=1)
+            min_evals=min_evals, verbose=1)
 
     eval_callback = EvalCallback(
         eval_env, best_model_save_path=str(args.out), log_path=str(args.out),
@@ -346,14 +481,20 @@ def main() -> int:
         n_eval_episodes=args.n_eval_episodes, deterministic=True,
         callback_after_eval=stop_callback)
     raceline_metrics_callback = RacelineMetricsCallback()
+    curriculum_callback = CurriculumCallback(curriculum_frac=args.curriculum_frac,
+                                             total_timesteps=args.timesteps)
 
     # 早期終了時は StopTrainingOnNoModelImprovement 自身が理由をログに出す（verbose=1）
     # ★再開時は reset_num_timesteps=False で num_timesteps を引き継ぐ
     # （True のままだとカウンタが0に戻り、--timesteps 未達のまま即終了する）
     model.learn(total_timesteps=args.timesteps,
-               callback=[eval_callback, raceline_metrics_callback],
+               callback=[eval_callback, raceline_metrics_callback, curriculum_callback],
                reset_num_timesteps=args.resume_from is None)
     model.save(str(args.out / "last_model"))
+    # ★報酬正規化の統計量はPPOのcheckpoint(.zip)には含まれない（VecNormalizeは
+    # 環境側のラッパーのため）。`--resume-from`で再開したときに統計量を引き継げる
+    # よう別ファイルで保存しておく（無くても新規状態から始まるだけで学習は続けられる）
+    vec_env.save(str(args.out / "vecnormalize.pkl"))
     print(f"# 完了。最良モデル → {args.out}/best_model.zip 、最終モデル → "
           f"{args.out}/last_model.zip")
     return 0

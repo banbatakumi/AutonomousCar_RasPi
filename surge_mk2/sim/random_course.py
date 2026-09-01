@@ -173,7 +173,7 @@ __all__ = [
     "generate_random_course", "generate_random_course_dr",
     "generate_circuit_course", "generate_corridor_course",
     "generate_narrow_course", "generate_obstacle_course",
-    "generate_diverse_course",
+    "generate_diverse_course", "CurriculumCourseFn",
 ]
 
 #: 車両の幾何学的な最小旋回半径に掛ける安全マージン。数値誤差やLiDARノイズの
@@ -923,20 +923,27 @@ def generate_obstacle_course(rng: np.random.Generator, *, name: str = "rand-obst
 
 def generate_diverse_course(rng: np.random.Generator, *, name: str = "rand",
                             width_range: tuple[float, float] = (0.7, 1.3),
+                            weights: dict[str, float] | None = None,
                             resolution: float = 0.02, final_step: float = 0.1,
                             min_turn_radius_m: float | None = None) -> Course:
     """学習コースのアーキタイプ（organic/circuit/corridor/narrow/obstacle）を
-    `_ARCHETYPE_WEIGHTS`の重みでエピソードごとにランダムに選ぶ、`course_fn`用の
-    エントリポイント（`ml_lidar/train_rl.py`が`course_fn=generate_diverse_course`
-    で使う）。単一の生成器だけだと似た形のコースばかりになる、というバンビの
-    指摘（2026-08-31）を受けて追加した（モジュールdocstring参照）。
+    `weights`（省略時`_ARCHETYPE_WEIGHTS`）の重みでエピソードごとにランダムに
+    選ぶ、`course_fn`用のエントリポイント（`ml_lidar/train_rl.py`が
+    `course_fn=generate_diverse_course`で使う）。単一の生成器だけだと似た形の
+    コースばかりになる、というバンビの指摘（2026-08-31）を受けて追加した
+    （モジュールdocstring参照）。
 
     `course_fn: Callable[[rng], Course]`という1引数の契約
     （`sim/gym_env.py`の`SimE2EEnv.reset()`参照）はそのまま守っているので、
     `ml_lidar/train_rl.py`側はこの関数へ差し替えるだけで対応できる。
+
+    :param weights: `_ARCHETYPE_WEIGHTS`と同じキー集合の重み（比率だけが意味を
+        持つ、正規化して使う）。カリキュラム学習（`CurriculumCourseFn`）が
+        学習序盤だけ難しいアーキタイプの重みを下げるために渡す
     """
-    kinds = list(_ARCHETYPE_WEIGHTS.keys())
-    p = np.array([_ARCHETYPE_WEIGHTS[k] for k in kinds])
+    weights = weights if weights is not None else _ARCHETYPE_WEIGHTS
+    kinds = list(weights.keys())
+    p = np.array([weights[k] for k in kinds])
     kind = kinds[int(rng.choice(len(kinds), p=p / p.sum()))]
 
     common = dict(name=name, resolution=resolution, final_step=final_step,
@@ -950,3 +957,54 @@ def generate_diverse_course(rng: np.random.Generator, *, name: str = "rand",
     if kind == "narrow":
         return generate_narrow_course(rng, width_range=width_range, **common)
     return generate_obstacle_course(rng, width_range=width_range, **common)
+
+
+class CurriculumCourseFn:
+    """`generate_diverse_course`をラップし、`set_progress()`で難度を段階的に
+    引き上げる`course_fn`（`Callable[[rng], Course]`と同じ1引数契約）。
+
+    v9の実測（`docs/progress`参照）で、評価rewardの標準偏差が一部の評価回だけ
+    100超まで跳ねる＝一部のコース条件でだけ大きく崩れる傾向が見えたことを受け、
+    学習序盤は易しいアーキタイプ・広めの道幅だけを経験させ、`progress`が
+    1.0に近づくにつれ`generate_diverse_course`本来の分布（`_ARCHETYPE_WEIGHTS`・
+    `width_range`）へ線形に近づける。narrow/obstacle（最も衝突しやすい
+    アーキタイプ）は`progress=0`で重み0（一切出さない）にしてある。
+
+    `set_progress()`は`ml_lidar/train_rl.py`の`CurriculumCallback`が
+    `VecEnv.env_method()`経由で各ワーカープロセスの`SimE2EEnv.set_curriculum_progress()`
+    →`GymSurgeEnv`を通じて呼ぶ（`sim/gym_env.py`参照）。インスタンスは
+    `course_fn`と同じくワーカープロセスごとに独立して持つ（`ml_lidar/train_rl.py`
+    の`_make()`内で生成する想定）ので、他ワーカーの進捗と混ざる心配はない。
+    """
+
+    #: `progress=0`（学習序盤）で使う重み。narrow/obstacleを完全に除外し、
+    #: 残りは易しい順（organic>circuit>corridor）に厚めに配分する
+    _EASY_WEIGHTS = {"organic": 0.5, "circuit": 0.3, "corridor": 0.2,
+                     "narrow": 0.0, "obstacle": 0.0}
+
+    def __init__(self, *, full_width_range: tuple[float, float] = (0.7, 1.3),
+                easy_width_low: float = 1.0, **course_kwargs) -> None:
+        """:param full_width_range: `progress=1.0`で使う道幅レンジ（既存の
+            `generate_diverse_course`既定と同じ値にすること）
+        :param easy_width_low: `progress=0`での道幅レンジ下限。上限は
+            `full_width_range[1]`で固定（広い道幅はそもそも易しいので序盤から
+            許容し、狭い側だけを段階的に解放する）
+        :param course_kwargs: `generate_diverse_course`へそのまま渡す追加引数
+            （`resolution`・`final_step`・`min_turn_radius_m`等）
+        """
+        self.progress = 0.0
+        self._full_width_range = full_width_range
+        self._easy_width_low = easy_width_low
+        self._course_kwargs = course_kwargs
+
+    def set_progress(self, progress: float) -> None:
+        self.progress = max(0.0, min(1.0, progress))
+
+    def __call__(self, rng: np.random.Generator) -> Course:
+        t = self.progress
+        width_low = self._easy_width_low + t * (self._full_width_range[0] - self._easy_width_low)
+        weights = {k: self._EASY_WEIGHTS[k] + t * (_ARCHETYPE_WEIGHTS[k] - self._EASY_WEIGHTS[k])
+                  for k in _ARCHETYPE_WEIGHTS}
+        return generate_diverse_course(rng, weights=weights,
+                                       width_range=(width_low, self._full_width_range[1]),
+                                       **self._course_kwargs)

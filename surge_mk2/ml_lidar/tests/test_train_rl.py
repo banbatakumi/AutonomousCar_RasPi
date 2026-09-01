@@ -11,7 +11,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # surge_mk2/
+
+from ml_lidar.train_rl import CurriculumCallback  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAIN_RL = REPO_ROOT / "ml_lidar" / "train_rl.py"
@@ -79,6 +84,42 @@ class TestTrainRlOverwriteClearsOutDir(unittest.TestCase):
             self.assertEqual(r2.returncode, 0, r2.stderr)
             self.assertEqual(len(_tb_run_dirs(out)), 1,
                              "新規学習を繰り返すとTensorBoardのサブフォルダが積み上がってはいけない")
+
+
+class TestCurriculumCallback(unittest.TestCase):
+    """`CurriculumCallback`（2026-09-02追加）の進捗計算。実際のPPO学習は回さず、
+    `num_timesteps`を直接差し込んで`_progress()`の式だけを検証する
+    （軽量な単体テスト。CLI統合テストは重いので上の`TestTrainRlResume`等と分離）。
+    """
+
+    def test_progress_ramps_linearly_then_clamps_to_one(self):
+        cb = CurriculumCallback(curriculum_frac=0.5, total_timesteps=1000)
+        cb.num_timesteps = 0
+        self.assertEqual(cb._progress(), 0.0)
+        cb.num_timesteps = 250
+        self.assertAlmostEqual(cb._progress(), 0.5)
+        cb.num_timesteps = 500
+        self.assertAlmostEqual(cb._progress(), 1.0)
+        cb.num_timesteps = 900   # 500(=frac*total)を超えても1.0で頭打ち
+        self.assertAlmostEqual(cb._progress(), 1.0)
+
+    def test_curriculum_frac_zero_or_negative_disables_ramp(self):
+        for frac in (0.0, -1.0):
+            with self.subTest(curriculum_frac=frac):
+                cb = CurriculumCallback(curriculum_frac=frac, total_timesteps=1000)
+                cb.num_timesteps = 0
+                self.assertEqual(cb._progress(), 1.0)
+
+    def test_push_calls_env_method_with_current_progress(self):
+        """`training_env`はBaseCallbackの読み取り専用property（`self.model.get_env()`
+        経由）なので、`self.model`をモックして間接的に差し込む。"""
+        cb = CurriculumCallback(curriculum_frac=0.5, total_timesteps=1000)
+        cb.num_timesteps = 250
+        mock_env = unittest.mock.Mock()
+        cb.model = unittest.mock.Mock(get_env=unittest.mock.Mock(return_value=mock_env))
+        cb._push()
+        mock_env.env_method.assert_called_once_with("set_curriculum_progress", 0.5)
+        cb.model.logger.record.assert_called_once_with("curriculum/progress", 0.5)
 
 
 if __name__ == "__main__":

@@ -189,12 +189,19 @@ class E2ELidar(Planner):
             import numpy as np
 
             # 訓練側(`sim/gym_env.py`の`_obs()`・`ml_lidar/env.py`の`_to_obs()`)と
-            # 揃える: 点群のあとに自車速度を1個足す。速度が無ければ0（停止中の既定）
+            # 揃える: 点群のあとに自車速度・現在の平滑化後ステア角を1個ずつ足す。
+            # 速度が無ければ0（停止中の既定）。ステア角は`self._steer`——
+            # このメソッド内でまだ更新されていない「前回ステップの値」を使うことで、
+            # 学習側（`SimE2EEnv._obs()`が`step()`内で更新済みの`self._steer`を返す
+            # ＝次のreset()/step()呼び出し時点では「直前の指令で実現した状態」）と
+            # 同じ時系列の関係になる（2026-09-02追加）
             speed_now = 0.0 if vs is None else float(vs.speed)
             speed_norm_in = max(0.0, min(1.0, speed_now / self._model_max_speed)) \
                 if self._model_max_speed > 0 else 0.0
+            steer_norm_in = max(-1.0, min(1.0, self._steer / self._model_max_steer)) \
+                if self._model_max_steer > 0 else 0.0
             scan_n = np.asarray(w.dist, dtype=np.float32) / self._max_range
-            x = np.concatenate([scan_n, [speed_norm_in]]).astype(np.float32)[None, :]
+            x = np.concatenate([scan_n, [speed_norm_in, steer_norm_in]]).astype(np.float32)[None, :]
             out = self._session.run(None, {self._input_name: x})[0]
             steer_norm, speed_norm = float(out[0, 0]), float(out[0, 1])
         except Exception as e:                                        # noqa: BLE001

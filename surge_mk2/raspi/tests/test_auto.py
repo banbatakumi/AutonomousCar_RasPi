@@ -852,9 +852,10 @@ class TestAutoStateContract(unittest.TestCase):
         self.assertFalse(st.ready)
 
 
-#: `sim/gym_env.py` の `OBS_DIM`（点群361 + 速度1）と揃える。`raspi/tests/` は
-#: `sim/` を import しない方針なので、値をここに書き写す（変えたら両方直すこと）
-_OBS_DIM = 362
+#: `sim/gym_env.py` の `OBS_DIM`（点群361 + 速度1 + ステア1）と揃える。
+#: `raspi/tests/` は `sim/` を import しない方針なので、値をここに書き写す
+#: （変えたら両方直すこと。2026-09-02、ステア観測追加で362→363）
+_OBS_DIM = 363
 
 
 def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
@@ -863,11 +864,12 @@ def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
     `raspi/tests/` を重い依存から切り離す方針を守る）。
 
     重みは決め打ちで、テストの入力から出力を逆算しやすくしてある:
-    steer は先頭の点にだけ反応、speed は末尾の入力（正規化した自車速度）にだけ反応。
+    steer は先頭の点にだけ反応、speed は末尾から2番目の入力（正規化した自車速度。
+    2026-09-02、末尾1個はステア観測が占めるようになったため`-1`→`-2`）にだけ反応。
     """
     w = np.zeros((2, in_dim), dtype=np.float32)
     w[0, 0] = 1.0
-    w[1, -1] = 1.0
+    w[1, -2] = 1.0
     b = np.zeros(2, dtype=np.float32)
     inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, in_dim])
     out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])
@@ -892,6 +894,25 @@ def _make_constant_steer_e2e_model(path: Path, steer_norm: float, in_dim: int = 
     b_init = helper.make_tensor("B", TensorProto.FLOAT, b.shape, b.flatten())
     node = helper.make_node("Gemm", ["input", "W", "B"], ["output"], transB=1)
     graph = helper.make_graph([node], "dummy_e2e_const", [inp], [out], [w_init, b_init])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
+def _make_steer_echo_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
+    """出力steer_normが入力の末尾（ステア観測）をそのまま返す、speedは常に0の
+    ダミーモデル（2026-09-02追加）。`E2ELidar.plan()`が前回ステップの`self._steer`
+    を観測に混ぜていること（`sim/gym_env.py`の`SimE2EEnv._obs()`と揃える設計、
+    `plan()`のコメント参照）を確認するために使う。"""
+    w = np.zeros((2, in_dim), dtype=np.float32)
+    w[0, -1] = 1.0
+    b = np.zeros(2, dtype=np.float32)
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, in_dim])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2])
+    w_init = helper.make_tensor("W", TensorProto.FLOAT, w.shape, w.flatten())
+    b_init = helper.make_tensor("B", TensorProto.FLOAT, b.shape, b.flatten())
+    node = helper.make_node("Gemm", ["input", "W", "B"], ["output"], transB=1)
+    graph = helper.make_graph([node], "dummy_e2e_echo", [inp], [out], [w_init, b_init])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
@@ -922,7 +943,7 @@ class TestE2ELidar(unittest.TestCase):
         """改善1: 観測の末尾に自車速度が乗る。`vs=None`なら0として扱う。"""
         with tempfile.TemporaryDirectory() as d:
             model_path = Path(d) / "e2e_lidar.onnx"
-            _make_dummy_e2e_model(model_path)     # w[1,-1]=1.0: speed_norm = 入力の末尾
+            _make_dummy_e2e_model(model_path)     # w[1,-2]=1.0: speed_norm = 入力の末尾から2番目
             model_path.with_suffix(".json").write_text(json.dumps(
                 {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 2.0}))
 
@@ -940,6 +961,25 @@ class TestE2ELidar(unittest.TestCase):
             self.assertAlmostEqual(st_none.target_speed, st_zero.target_speed, places=4)
             # 入力速度が上がれば、モデルへの入力（=このダミーモデルの出力）も上がる
             self.assertGreater(st_half.target_speed, st_zero.target_speed)
+
+    def test_previous_steer_feeds_into_the_next_model_input(self):
+        """②観測へのステア状態追加（2026-09-02）: 観測の末尾に「現在の平滑化後
+        ステア角/max_steer」が乗る。`self._steer`はこの呼び出しではまだ更新前
+        （前回の`plan()`が残した値）なので、直接差し込んで確認する
+        （`test_vehicle_speed_feeds_into_the_model_input`と同じ直接注入の流儀）。
+        `steer_tau=0`で出力側の平滑化を無効にし、round-tripをそのまま見える形にする。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_steer_echo_e2e_model(model_path)   # w[0,-1]=1.0: steer_norm = 入力の末尾
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+
+            p = E2ELidar(model_path=model_path)
+            p._steer = 0.2   # 「前回ステップまでに実現していた実ステア角」を模する
+            scan = corridor(180, open_dist=5.0)
+            st = p.plan(scan, None, E2ELidar.merged({"steer_tau": 0.0}), 0.1)
+            self.assertAlmostEqual(st.target_steer, 0.2, places=4)
 
     def test_front_obstacle_forces_stop_regardless_of_model_output(self):
         """★独立安全策: モデルが前進を指示しても正面が詰まっていれば止める。"""
