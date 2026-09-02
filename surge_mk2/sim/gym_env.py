@@ -222,7 +222,7 @@ class SimE2EEnv:
                 lidar_sector_drop_rate_range: tuple[float, float] = (0.0, 0.015),
                 randomize_dynamics: bool = True,
                 mu_range: tuple[float, float] = (0.28, 0.65),
-                tau_steer_s_range: tuple[float, float] = (0.35, 0.75),
+                tau_steer_s_range: tuple[float, float] = (0.03, 0.10),
                 dead_time_s_range: tuple[float, float] = (0.0, 0.08),
                 tau_speed_s_range: tuple[float, float] = (0.08, 0.30),
                 rolling_resistance_range: tuple[float, float] = (0.15, 0.6),
@@ -257,11 +257,13 @@ class SimE2EEnv:
             この学習ループが常に`armed=True`の速度指令モードで駆動するため測っても
             反映されない）。`mu`の下限0.28は`sim/vehicle.py`の摩擦円連成
             （2026-09-01追加。加減速中は`a_lat_max`がさらに絞られる）も踏まえた
-            見積もりで、他レンジ同様に**未検証**。**`tau_steer_s_range`は
-            `tools/sysid/fit.py`を`steer_cmd_echo`基準（サーボ単体の遅れ）に
-            直す前の、Piパイプライン遅延混入込みの実測0.539sを中心に取った
-            レンジのまま——`fit.py`修正後に実車を録り直したら、新しい実測値を
-            中心に再度取り直すこと**。`dead_time_s_range`は`PIPELINE_DEAD_TIME_S`
+            見積もりで、他レンジ同様に**未検証**。**2026-09-02:
+            `tools/sysid/fit.py`の`steer_cmd_echo`基準（サーボ単体の遅れ）への
+            修正後に実車を録り直した結果、`tau_steer_s`実測は0.539→**0.067**へ
+            大幅更新された（旧レンジはPiパイプライン遅延混入込みの値を中心に
+            取ったもので、修正後の実測とは1桁近く乖離していた）。`tau_steer_s_range`を
+            新しい実測値を中心に±30〜50%程度で(0.03, 0.10)へ取り直した**。
+            `dead_time_s_range`は`PIPELINE_DEAD_TIME_S`
             を別途加算するため、こちらはサーボ単体のむだ時間だけを表すレンジ
             （0を含めているのはそのため）
         :param cross_track_margin_frac: 道幅の半分のうち、ペナルティ無しで自由に
