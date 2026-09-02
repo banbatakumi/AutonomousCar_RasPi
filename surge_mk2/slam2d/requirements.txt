@@ -1,0 +1,24 @@
+# slam2d/ — 車体非依存の汎用2D LiDAR SLAMライブラリの依存（Mac 専用、Pi には入れない）
+#
+#   .venv/bin/pip install -r slam2d/requirements.txt
+#
+# `ml_lidar/`・`ml_cam/` と同じく、slam2d/ の依存は raspi/ 側に持ち込まない。
+# slam2d/ 自体も raspi.* を一切 import しない一方向依存にする。
+
+numpy>=2.1
+
+# ポーズグラフ最適化のバックエンド。フロントエンド（スキャンマッチ・占有格子・
+# センサ融合・ループ検出）は自作するが、疎行列の非線形最適化は車輪の再発明を
+# 避けて借用する。
+#
+# `g2opy`（PyPI, メンテナは g2o 本家作者 RainerKuemmerle）を採用。
+# `slam2d/tools/spike_g2o.py`（Phase 0）で実際に検証した:
+#   - g2opy: macOS(arm64)・Linux aarch64(Pi 5)向けビルド済みwheelがあり、
+#     `pip install`だけで即動作。3ノードのトイポーズグラフが厳密解に収束することを確認済み
+#   - g2o-python（PyPI, miquelmassot作）: ソースビルドが必須で、Eigen3等の
+#     C++依存が無いとビルド自体が失敗する（実機確認済み）。不採用
+g2opy>=2.3.0
+
+# 開発・評価用
+pytest
+matplotlib

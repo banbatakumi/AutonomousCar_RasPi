@@ -24,7 +24,7 @@ import numpy as np  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.msgs import Scan  # noqa: E402
 from raspi.nav import OccGrid, deskew, match  # noqa: E402
-from raspi.nav.deskew import _point_times_ns, integrate_pose  # noqa: E402
+from raspi.nav.deskew import point_times_ns, integrate_pose  # noqa: E402
 from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, dilate  # noqa: E402
 from raspi.nav.slam import Slam, SlamConfig, _blend_xy  # noqa: E402
 
@@ -93,7 +93,7 @@ class TestPointTimes(unittest.TestCase):
         `deg // 30` と書くと 30 点ぶんずれ、脱スキューが歪みを増やす方向に働く。
         """
         scan = make_room_scan(3.0, 2.0, 0.0)
-        t = _point_times_ns(scan)
+        t = point_times_ns(scan)
         for deg in range(360):
             s = sector_of_deg(deg)
             lo = scan.sector_t_ns[s]
@@ -104,7 +104,7 @@ class TestPointTimes(unittest.TestCase):
     def test_time_advances_as_index_decreases(self):
         """車両角の添字が**減る**向きに時刻が進む（LD06 が裏向きのため）。"""
         scan = make_room_scan(3.0, 2.0, 0.0)
-        t = _point_times_ns(scan)
+        t = point_times_ns(scan)
         self.assertGreater(t[1], t[359])
         self.assertGreater(t[100], t[200])
 

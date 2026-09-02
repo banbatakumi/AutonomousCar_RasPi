@@ -3,7 +3,52 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-09-02（さらにさらに続き）（v12の学習結果を検証。v11・v12は
+最終更新: 2026-09-02（SLAM再着手）（バンビの指示で、2026-08-14に棚上げした
+SLAM（`raspi/nav/`）を「車体非依存の汎用2D LiDAR SLAMライブラリ」として
+`slam2d/`に一から作り直した。将来のOSS公開・学習目的を兼ねる。方針決定は
+複数回の外部調査（ROS2標準スタック・非ROS軽量ライブラリ・SLAM未解決問題への
+対策）に基づく——結論は「フロントエンド（スキャンマッチ・占有格子・センサ
+融合・ループ検出）は自作、バックエンド（ポーズグラフ最適化）は`g2opy`を借用」。
+計画は`~/.claude/plans/wiggly-doodling-moth.md`。
+
+**実装したもの**（`slam2d/`、テスト69件全green）:
+- `core/`: `types.py`（Pose2D代数）・`grid.py`（占有格子）・`scanmatch.py`
+  （相関スキャンマッチ）・`motion.py`（`MotionModel`抽象、車体依存センサ
+  構成を差し替え可能に）・`deskew.py`・`scan2scan.py`（PLICP）・
+  `confidence.py`（★新規: スキャンマッチの局所曲率を固有値分解し、oval等の
+  コーナーのないループでの回転ドリフトを動的異方性ブレンドで抑制。3周の
+  oval周回シムで実測: 固定比率ブレンドより一貫して誤差が小さいことを確認）・
+  `frontend.py`（1周期処理パイプライン、ループ閉じは持たない）
+- `backend/`: `posegraph.py`（g2opyラッパー）・`loop_detection.py`（汎用
+  ループ検出、複数回の周回・8の字コースの再訪に対応）
+- `pipeline.py`: `SlamSystem`（frontend+backend統合、`loop_batch_size`本
+  ぶん溜めてから一括最適化。逐次処理は単一〜少数のループ拘束でむしろ
+  精度が悪化することを実測で確認し、バッチ処理に変更した経緯は
+  `backend/loop_detection.py`のdocstring「既知の限界」に詳しい）
+
+**g2o-pythonではなくg2opyを採用**: 前者はEigen3等のC++依存が無いとソース
+ビルドが失敗（実機確認）、後者はmacOS/Linux aarch64向けビルド済みwheelが
+あり`pip install`だけで動く（Pi 5実機でのオンボード利用も見込める）。
+
+**既存シミュレータへの統合**: `raspi/auto/slam2d_raceline.py`（新planner
+`slam2d_raceline`）・`raspi/auto/_slam2d_nav.py`（`Scan`/`VehicleState`⇄
+slam2d型のブリッジ）を追加、`registry.py`に登録。**既存の`raspi/nav/`
+（`centerline.py`・`raceline.py`・`purepursuit.py`・`obstacles.py`)は
+`OccGrid`に対するダックタイピングでコード変更ゼロのまま流用できた**。
+`sim.run --course circuit`でGUIから「レーシングライン(slam2d)」を選択・
+ARM・engageし、EXPLORE→BUILD→RACEまで約60秒で到達、速度1.20m/s・横偏差
+-5cmで実走行することを実機シムで確認済み。ループ閉じ（`backend/`・
+`pipeline.SlamSystem`）はこのplannerでは未使用（`Frontend`単体のみ、
+`_slam2d_nav.py`のdocstring参照）。
+
+**次にやること**: ①`backend/`のループ拘束がなぜ少数だと精度を悪化させるか
+の根本原因（情報行列の異方性と実誤差分配パターンの不整合の疑い）をさらに
+追うなら`core/confidence.py`の再設計が本命。②実車ログでの検証（Phase 7、
+未着手）。③既存の`raspi/nav/`（自作SLAM、旧実装）とroom/oval等の合成
+テストで精度を横並び比較すると、車体依存の細かいチューニング差分が見える
+かもしれない（未着手）。旧SLAM実装・棚上げの経緯はそのまま下記に残す。）
+
+旧: 2026-09-02（さらにさらに続き）（v12の学習結果を検証。v11・v12は
 `reward_norm`/`curriculum_frac`が同一設定（両方OFF）にもかかわらず結果が
 食い違っており、原因は早期終了（`StopTrainingOnNoModelImprovement`）と
 `learning_rate`/`clip_range`の線形減衰スケジュール（`--timesteps`固定5,000,000に

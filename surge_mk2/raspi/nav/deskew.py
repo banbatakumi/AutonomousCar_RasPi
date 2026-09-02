@@ -48,7 +48,7 @@ import numpy as np
 
 from ..msgs.types import Scan
 
-__all__ = ["Points", "deskew", "truncate"]
+__all__ = ["Points", "deskew", "truncate", "point_times_ns"]
 
 NS = 1_000_000_000
 #: これ以下のヨーレートは直進として扱う [rad/s]。v/w が発散するのを避ける
@@ -74,7 +74,7 @@ class Points(NamedTuple):
         return int(self.x.size)
 
 
-def _point_times_ns(scan: Scan) -> np.ndarray:
+def point_times_ns(scan: Scan) -> np.ndarray:
     """車両角 0〜359 の各点の取得時刻 [ns]。時刻が無いセクタは 0。
 
     `raspi/msgs/types.py` の `Scan` docstring にある式を**そのまま**使う:
@@ -144,7 +144,7 @@ def deskew(scan: Scan, speed: float = 0.0, yaw_rate: float = 0.0, *,
     px = mount_x + r * np.cos(ang)
     py = mount_y + r * np.sin(ang)
 
-    t_pt = _point_times_ns(scan)[idx]
+    t_pt = point_times_ns(scan)[idx]
     t_ref = int(t_pt.max()) if t_pt.size and t_pt.max() > 0 else int(scan.t_capture)
 
     v, w = float(speed), float(yaw_rate)

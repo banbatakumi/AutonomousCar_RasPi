@@ -58,6 +58,10 @@ surge_mk2/models/
 # PPOのcheckpoint・TensorBoardログ。学習ごとに違い、しかも大きい
 surge_mk2/ml_lidar/runs/
 
+# slam2d/（汎用2D LiDAR SLAM）の検証用生ログ。公開データセットは各自ダウンロードする
+# 前提で、slam2d/datasets/README.md に入手手順だけ書く
+surge_mk2/slam2d/datasets/raw/
+
 # OS
 .DS_Store
 Thumbs.db
