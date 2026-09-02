@@ -37,6 +37,14 @@ __all__ = ["SimE2EEnv", "SCAN_DIM", "OBS_DIM"]
 NS = 1_000_000_000
 _STEP_NS = int(0.1 * NS)          #: LiDAR は 10Hz 回転なので、1ステップ=1回転に揃える
 _PRIME_TRIES = 5                  #: reset() 直後にスキャンが1周完成するまで待つ最大回数
+#: `vehicle.step()` を呼ぶ際のサブステップ幅 [s]。`VehicleModel._pop_delayed`
+#: （`sim/vehicle.py`）の操舵むだ時間キューは「1step=1エントリ」方式のため、
+#: `_STEP_NS`(=100ms)を1回で積分すると`dead_time_s`（ドメインランダム化で
+#: 0.015〜0.095s）の値によらず実効遅延が常に100msに量子化されてしまう
+#: （2026-09-02、コード読解＋手計算シミュレーションで確認）。10ms刻みに分割し、
+#: 遅延の解像度を上げる。**衝突判定・LiDAR生成はこのサブステップ化の対象外**
+#: （従来通り`_STEP_NS`境界でのみ行う。ここで変えるのは操舵むだ時間の精度だけ）
+_DYNAMICS_SUBSTEP_S = 0.01
 
 #: `telemetry_node._cmd_pump`（`raspi/nodes/telemetry_node.py` `CMD_PUB_HZ=50`）+
 #: `io_node`の`COMMAND`送信タイマ（`raspi/nodes/io_node.py` `COMMAND_HZ=100`）による
@@ -92,18 +100,43 @@ class _CenterlineProgress:
         self._arc = np.concatenate([[0.0], np.cumsum(seg_len)])[:-1]
         self._total = float(seg_len.sum())
         self._prev = 0.0
+        #: 直近の最近傍点インデックス（窓探索の起点。`reset()`で全探索により初期化）
+        self._prev_i = 0
         if isinstance(width, np.ndarray):
             self._half_w = width / 2.0
         else:
             self._half_w = (width if width is not None else 1.0) / 2.0
 
-    def _nearest(self, x: float, y: float) -> tuple[float, float, int]:
+    def _nearest_full(self, x: float, y: float) -> tuple[int, float]:
+        """全点 O(N) 探索。`_nearest()` の初回・フォールバック用。"""
         d2 = (self._xy[:, 0] - x) ** 2 + (self._xy[:, 1] - y) ** 2
         i = int(np.argmin(d2))
-        return float(self._arc[i]), float(math.sqrt(d2[i])), i
+        return i, float(d2[i])
+
+    def _nearest(self, x: float, y: float) -> tuple[float, float, int]:
+        """`_prev_i` 近傍の窓だけを探す（進捗はほぼ単調なので前回位置の近くに
+        あるはず）。RL訓練で毎stepの呼び出しがO(N)のままだと数百万回分の
+        コストになるため、O(1)アモータイズに落とす。**窓の端に最近傍が
+        張り付いた場合は全探索にフォールバック**——コース位置のワープ
+        （エピソード開始・急激な補正）で窓の外に真の最近傍があるケースの
+        安全策。
+        """
+        n = len(self._xy)
+        half_window = max(4, n // 20)
+        idx = (self._prev_i + np.arange(-half_window, half_window + 1)) % n
+        d2 = (self._xy[idx, 0] - x) ** 2 + (self._xy[idx, 1] - y) ** 2
+        j = int(np.argmin(d2))
+        if j == 0 or j == len(idx) - 1:
+            i, d2_i = self._nearest_full(x, y)
+        else:
+            i, d2_i = int(idx[j]), float(d2[j])
+        self._prev_i = i
+        return float(self._arc[i]), float(math.sqrt(d2_i)), i
 
     def reset(self, x: float, y: float) -> None:
-        self._prev, _, _ = self._nearest(x, y)
+        i, _ = self._nearest_full(x, y)
+        self._prev_i = i
+        self._prev = float(self._arc[i])
 
     def update(self, x: float, y: float) -> tuple[float, float, float, int]:
         """`(弧長方向の進捗 [m], 横偏差 [m], 最近傍点での道幅の半分 [m], 最近傍点の
@@ -591,7 +624,10 @@ class SimE2EEnv:
         steer = self._steer
 
         self.vehicle.apply(DriveInput(armed=True, target_speed=speed, target_steer=steer))
-        self.vehicle.step(dt)
+        n_sub = max(1, round(dt / _DYNAMICS_SUBSTEP_S))
+        dt_sub = dt / n_sub
+        for _ in range(n_sub):
+            self.vehicle.step(dt_sub)
         self._t_ns += _STEP_NS
 
         hit = self.course.collides(self.vehicle.x, self.vehicle.y, self.vehicle.yaw, self._body)

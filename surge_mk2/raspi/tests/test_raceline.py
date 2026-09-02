@@ -170,6 +170,33 @@ class TestStateMachine(unittest.TestCase):
         self.assertFalse(st.ready)
         self.assertIn("経路", st.reason)
 
+    def test_free_ahead_is_inf_when_no_obstacle(self):
+        """★ C5: 障害物が無いのに `free_ahead=0.0`（詰まっている扱い）だった
+        逆ロジックのバグ修正。GUI 表示専用で速度制御には影響しないが、
+        運用者が安全監視で誤読しないよう `math.inf` を返すこと。
+
+        `_race()` を直接呼ぶ（`plan()`経由だとSLAMの実マッチングが挟まり
+        `match_score`が安定しないため、状態機械の外側にある純粋な組み立て
+        ロジックだけを検証する）。
+        """
+        from unittest import mock
+
+        from raspi.msgs.types import AutoState
+        from raspi.nav.purepursuit import Pursuit
+
+        self.p.phase = RACE
+        self.p.path = mock.Mock(xy=np.zeros((10, 2)), length=1.0)
+        self.p.path.__len__ = mock.Mock(return_value=10)
+        st = AutoState(match_score=1.0)
+        pp = Pursuit(steer=0.0, speed=1.0, index=0, cross_track=0.0,
+                    target=(0.0, 0.0), lookahead=0.5)
+        with mock.patch("raspi.auto.raceline.follow", return_value=pp), \
+             mock.patch("raspi.auto.raceline.obs_mod.blocking",
+                        return_value=(None, math.inf)):
+            st = self.p._race(st, make_room_scan(3.0, 2.0, 0.0), vs(speed=1.0),
+                              self.params, lost=False)
+        self.assertEqual(st.free_ahead, math.inf)
+
     def test_reset_clears_everything(self):
         self.drive(14, move=0.02)
         self.p.request_freeze()

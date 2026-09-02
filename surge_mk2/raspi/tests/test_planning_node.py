@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto import E2ELidar  # noqa: E402
+from raspi.auto import E2ELidar, make_planner  # noqa: E402
 from raspi.msgs import AutoCtrl, Scan  # noqa: E402
 from raspi.msgs.types import TOPIC_E2E_MODEL, TOPIC_SCAN, TOPIC_SCAN_CAM, E2EModelCtrl  # noqa: E402
 from raspi.nodes.planning_node import PlanningNode, input_topics  # noqa: E402
@@ -115,6 +115,92 @@ class _FakeReloadablePlanner:
 
     def reload_if_changed(self, name: str) -> None:
         self.calls.append(name)
+
+
+class _FakeCrashingPlanner:
+    """`plan()` が常に例外を投げる身代わり（B3）。"""
+
+    name = "crashing"
+    input_topic = TOPIC_SCAN
+    stale_ms = 300
+
+    def plan(self, scan, vs, params, dt):
+        raise RuntimeError("planner内部のバグ")
+
+
+class TestReplanSurvivesPlannerException(unittest.TestCase):
+    """`planner.plan()` が例外を投げてもノードが継続すること（B3）。"""
+
+    def test_exception_does_not_propagate_and_state_stays_not_ready(self):
+        sub = FakeSub({TOPIC_SCAN: _scan()})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
+        node.planner = _FakeCrashingPlanner()
+
+        node._replan(1)  # 例外を外に伝播させないこと
+
+        self.assertFalse(node.state.ready)
+        self.assertIn("例外", node.state.reason)
+
+    def test_node_keeps_working_after_a_crashing_period(self):
+        """1周期壊れても、次の周期で正常なplannerに戻せば普通に動くこと。"""
+        sub = FakeSub({TOPIC_SCAN: _scan()})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
+        node.planner = _FakeCrashingPlanner()
+        node._replan(1)
+        self.assertFalse(node.state.ready)
+
+        sub.latest[TOPIC_SCAN] = Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=2)
+        node.planner = make_planner("ftg")
+        node._replan(2)
+        self.assertTrue(node.state.ready, node.state.reason)
+
+
+class _FakeFreezeClearPlanner:
+    """`request_freeze`/`request_clear` の呼び出し記録（B4）。"""
+
+    name = "freeze_clear"
+    input_topic = TOPIC_SCAN
+    stale_ms = 300
+
+    def __init__(self) -> None:
+        self.freeze_calls = 0
+        self.clear_calls = 0
+
+    def request_freeze(self) -> None:
+        self.freeze_calls += 1
+
+    def request_clear(self) -> None:
+        self.clear_calls += 1
+
+    def reset(self) -> None:
+        pass
+
+
+class TestFreezeClearWithModeChange(unittest.TestCase):
+    """`freeze_seq`/`clear_seq` の増加が、モード変更と同時に来ても握り潰されないこと（B4）。"""
+
+    def test_freeze_seq_increment_alone_still_fires(self):
+        """回帰確認: モード変更を伴わない単体のfreezeは元から動いていた。"""
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeFreezeClearPlanner()
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg", freeze_seq=1))
+        self.assertEqual(fake.freeze_calls, 1)
+
+    def test_freeze_seq_increment_with_mode_change_still_fires(self):
+        """バグ修正の本体: モード変更と同一メッセージでもfreezeが効くこと。"""
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeFreezeClearPlanner()
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg_cam", freeze_seq=1))
+        self.assertEqual(fake.freeze_calls, 1, "モード変更と同時だとfreezeが握り潰されている")
+
+    def test_clear_seq_increment_with_mode_change_still_fires(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeFreezeClearPlanner()
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg_cam", clear_seq=1))
+        self.assertEqual(fake.clear_calls, 1, "モード変更と同時だとclearが握り潰されている")
 
 
 class TestE2EModelRouting(unittest.TestCase):

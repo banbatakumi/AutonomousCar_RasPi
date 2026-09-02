@@ -47,17 +47,20 @@ def split_pairs(pairs: list, val_ratio: float = 0.15,
 
 def iou_score(pred: torch.Tensor, target: torch.Tensor, *, threshold: float = 0.5,
              eps: float = 1e-6) -> float:
-    """走行可能領域（正例）の IoU。**両方とも正例が無ければ「一致」扱い**
-    （分母0を「不一致」として罰すると、走行不可しか写っていない検証画像が
+    """走行可能領域（正例）の IoU。**画像ごとに計算してからバッチ内で平均**
+    （macro-average）。バッチ全体を一括で`.sum()`するmicro-averageだと、
+    バッチ内で走行可能領域が広い画像ほど支配的になり、画像単位の精度を
+    正しく反映しない。**両方とも正例が無ければ「一致」扱い**（分母0を
+    「不一致」として罰すると、走行不可しか写っていない検証画像が
     IoU を不当に下げる）。
     """
     p = (pred >= threshold).float()
     t = (target >= 0.5).float()
-    inter = (p * t).sum().item()
-    union = ((p + t) >= 1).float().sum().item()
-    if union == 0:
-        return 1.0
-    return inter / (union + eps)
+    dims = tuple(range(1, p.dim()))            # バッチ次元(0)以外全部で画像単位に集約
+    inter = (p * t).sum(dim=dims)
+    union = ((p + t) >= 1).float().sum(dim=dims)
+    per_image = torch.where(union == 0, torch.ones_like(union), inter / (union + eps))
+    return float(per_image.mean().item())
 
 
 def train_one_epoch(model, loader, optimizer, device) -> float:
@@ -110,7 +113,14 @@ def main() -> int:
     ap.add_argument("--val-ratio", type=float, default=0.15)
     ap.add_argument("--no-pretrained", action="store_true",
                     help="ImageNet 事前学習重みを使わない（オフライン環境・動作確認向け）")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="train/val分割と重み初期化・DataLoaderのシャッフル順を固定する")
     args = ap.parse_args()
+
+    # `split_pairs`のseedはこれで既に固定されるが、モデルの重み初期化・
+    # augmentation（`dataset.py`の`np.random.rand()`）・DataLoaderのシャッフル順は
+    # 別系統の乱数源なので、ここで明示的に固定しないと再現性が取れない
+    torch.manual_seed(args.seed)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
     pairs = list_labeled_pairs(args.frames, args.masks)
@@ -119,7 +129,7 @@ def main() -> int:
               f"先に `ml_cam/annotate.py` でラベル付けしてください", file=sys.stderr)
         return 2
 
-    train_pairs, val_pairs = split_pairs(pairs, args.val_ratio)
+    train_pairs, val_pairs = split_pairs(pairs, args.val_ratio, seed=args.seed)
     train_ds = DrivableDataset(train_pairs, size=(w, h), augment=True)
     val_ds = DrivableDataset(val_pairs, size=(w, h), augment=False)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)

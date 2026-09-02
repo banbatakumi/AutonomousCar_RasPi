@@ -159,6 +159,18 @@ class TestMcapLog(unittest.TestCase):
         (_, body), = read_back(self.path)["msgs"]["/vehicle_state"]
         self.assertEqual(body["t_capture"], t0_mono + 7)
 
+    def test_writer_start_failure_closes_the_fd(self):
+        """★ C1: `Writer()`/`start()` が例外を投げても、開いた fd をリークしないこと。"""
+        from unittest import mock
+
+        fake_file = mock.MagicMock()
+        with mock.patch("builtins.open", return_value=fake_file) as mock_open, \
+             mock.patch("raspi.rec.mcap_log.Writer", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                McapLog(self.path)
+        mock_open.assert_called_once()
+        fake_file.close.assert_called_once()
+
     def test_conversion_base_is_recorded(self):
         """後から単調時刻に戻せること。"""
         with McapLog(self.path, t0_mono_ns=11, t0_unix_ns=22) as log:

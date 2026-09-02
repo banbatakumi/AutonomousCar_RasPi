@@ -17,6 +17,7 @@ importできる必要がある）の両方から参照する。**このモジュ
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -54,6 +55,16 @@ class ScanCNNExtractor(BaseFeaturesExtractor):
             nn.Conv1d(32, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),
             nn.Flatten(),
         )
+        # stable_baselines3の`BasePolicy.init_weights`は`isinstance(module,
+        # (nn.Linear, nn.Conv2d))`だけを対象にorthogonal初期化するため、
+        # `Conv1d`はこの特徴抽出器全体への`.apply()`から素通りしてPyTorchの
+        # デフォルト初期化のまま残っていた。ここで明示的に揃える
+        # （後段の`self.linear`と同じgain=√2、SB3のfeatures_extractor慣習）
+        for m in self.conv.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.orthogonal_(m.weight, gain=math.sqrt(2))
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
         with torch.no_grad():
             conv_out_dim = self.conv(torch.zeros(1, 1, scan_dim)).shape[1]
         self.linear = nn.Sequential(

@@ -16,6 +16,42 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import raspi.nodes.telemetry_node as tn  # noqa: E402
 
 
+class TestAtomicWriteBytes(unittest.TestCase):
+    """★ C4: 設定JSONの書き込みが `os.replace()` でアトミックであること。"""
+
+    def test_writes_the_content(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sub" / "auto.json"
+            tn._atomic_write_bytes(path, b'{"mode":"ftg"}')
+            self.assertEqual(path.read_bytes(), b'{"mode":"ftg"}')
+
+    def test_failure_mid_write_does_not_corrupt_existing_file(self):
+        """途中で例外が起きても、既存ファイルの中身は古いまま保たれること。
+
+        `os.fdopen(...).write()` が例外を投げても、`os.replace()` に
+        到達しないので元ファイルは触られない——tmpファイルへの直書きだけが
+        失敗するアトミック置換の要点。
+        """
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "auto.json"
+            path.write_bytes(b'{"mode":"old"}')
+
+            with mock.patch("os.replace", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    tn._atomic_write_bytes(path, b'{"mode":"new"}')
+
+            self.assertEqual(path.read_bytes(), b'{"mode":"old"}')
+
+    def test_no_leftover_tmp_file_on_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "auto.json"
+            tn._atomic_write_bytes(path, b"{}")
+            leftovers = [p for p in Path(td).iterdir() if p.name != "auto.json"]
+            self.assertEqual(leftovers, [])
+
+
 class TestE2eModelsListNote(unittest.TestCase):
     """`_e2e_models_list()`が`<名前>.json`の`note`（`ml_lidar/export_onnx_rl.py`が
     書く自由記述の備考。2026-08-29追加）を拾って返すことを確認する。"""

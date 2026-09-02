@@ -135,9 +135,12 @@ class PlanningNode:
         # **前回の舵の続きから動き出さない**ようにするため
         released = self.ctrl.engaged and not c.engaged
         # 「地図を確定」「地図を削除」は**回数が増えたときだけ**効かせる
-        # （`AutoCtrl.freeze_seq` / `clear_seq`）
-        freeze = c.freeze_seq > self.ctrl.freeze_seq and not changed
-        clear = c.clear_seq > self.ctrl.clear_seq and not changed
+        # （`AutoCtrl.freeze_seq` / `clear_seq`）。モード変更（`changed`）と
+        # 同一メッセージに乗って来ても、意思としては両方とも有効——
+        # **切り替え前の（今の）plannerに対して**確定・削除してから、
+        # 下のmode変更分岐でplannerを作り直す（順序が重要）
+        freeze = c.freeze_seq > self.ctrl.freeze_seq
+        clear = c.clear_seq > self.ctrl.clear_seq
         self.ctrl = c
         if clear and self.planner is not None:
             self.planner.request_clear()
@@ -202,7 +205,15 @@ class PlanningNode:
         set_engaged_fn = getattr(self.planner, "set_engaged", None)
         if set_engaged_fn is not None:
             set_engaged_fn(self.ctrl.engaged)
-        st = self.planner.plan(scan, vs, self._params, dt)
+        try:
+            st = self.planner.plan(scan, vs, self._params, dt)
+        except Exception as e:
+            # planner側のバグでノード全体を巻き込んで落とさない。`ready=False`の
+            # ままにして `_cmd_from` の「ready=Falseは必ず制動」に自然に落とす
+            print(f"# {self.planner.name} の plan() が例外: {e}",
+                 file=sys.stderr, flush=True)
+            st = AutoState(mode=self.ctrl.mode, planner=self.planner.name,
+                           reason=f"plannerが例外: {e}")
         st.engaged = self.ctrl.engaged
         st.scan_age_ms = (now_ns - scan.t_capture) / 1e6
         self._plans += 1

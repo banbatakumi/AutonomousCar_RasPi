@@ -136,6 +136,11 @@ export function CameraView({
   // （下の draw ループの useEffect 依存に camHeight を入れない）
   const camHeightRef = useRef(camHeight)
   camHeightRef.current = camHeight
+  // `guide` も同じ理由で ref 経由に。進路ガイドの ON/OFF のたびに
+  // メイン映像の WS が再接続され、映像が瞬断していた（`camHeightRef` の
+  // 配慮からここだけ漏れていた）
+  const guideRef = useRef(guide)
+  guideRef.current = guide
 
   // ── モード連動のデバッグ重畳（2026-08-28） ──
   //
@@ -299,10 +304,10 @@ export function CameraView({
         // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
         // ガイドがズレる（2026-08-31、後方カメラのガイドが上に大きくズレる
         // 不具合として発見）
-        if (guide || showLineTargetRef.current) {
+        if (guideRef.current || showLineTargetRef.current) {
           ctx.save()
           ctx.translate(dx, dy)
-          if (guide) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
+          if (guideRef.current) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
           if (showLineTargetRef.current) drawLineTarget(ctx, dw, dh, camHeightRef.current)
           ctx.restore()
         }
@@ -335,7 +340,7 @@ export function CameraView({
       ws?.close()
       bitmap?.close()
     }
-  }, [cam, guide, onAspect])
+  }, [cam, onAspect])
 
   // `ftg_cam` の走行可否マスク（`/ws/camera/mask`）。**メイン映像の WS とは
   // 独立**——`showMask` が変わっても上の effect（メイン映像）は再接続しない。

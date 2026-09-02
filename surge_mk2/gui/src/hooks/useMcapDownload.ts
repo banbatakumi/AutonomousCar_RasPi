@@ -34,7 +34,9 @@ export function useMcapDownload(ch: ControlChannel | null, filenamePrefix = 'sur
       document.body.appendChild(a)
       a.click()
       a.remove()
-      URL.revokeObjectURL(url)
+      // `click()` 直後に同期で revoke すると、ダウンロード開始処理が
+      // 追いつかない環境で失敗しうる（既知のブラウザの罠）。一呼吸置く
+      window.setTimeout(() => URL.revokeObjectURL(url), 0)
     }
     chunksRef.current = []
     setBufferedBytes(0)
@@ -43,6 +45,10 @@ export function useMcapDownload(ch: ControlChannel | null, filenamePrefix = 'sur
 
   const start = (imageOn: boolean, onFinished?: () => void) => {
     if (!ch) return
+    // 前回の記録が終わらないまま再度 start() が呼ばれても、古い接続を
+    // リークさせない（多重呼び出しで WS が孤立し、未フラッシュのチャンクが
+    // 失われる事故を防ぐ）
+    recRef.current?.close()
     onFinishedRef.current = onFinished
     chunksRef.current = []
     setBufferedBytes(0)

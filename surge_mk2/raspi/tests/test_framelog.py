@@ -278,6 +278,28 @@ class TestWriterDetails(TempDirCase):
         FrameLogWriter(p).close()
         self.assertTrue(p.exists())
 
+    def test_init_failure_closes_the_fd(self):
+        """★ C2: `__init__` 中のヘッダ/META書き込みが例外を投げても、
+        開いた fd をリークしないこと（`_write` を失敗させて再現）。"""
+        from unittest import mock
+
+        p = self.tmp / "a.sfl"
+        real_open = open
+        opened: list = []
+
+        def spying_open(*a, **k):
+            f = real_open(*a, **k)
+            opened.append(f)
+            return f
+
+        with mock.patch("builtins.open", side_effect=spying_open), \
+             mock.patch.object(FrameLogWriter, "_write",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                FrameLogWriter(p)
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed, "例外後もfdが開いたまま")
+
 
 class TestJsonEncoding(TempDirCase):
     def test_japanese_not_escaped(self):

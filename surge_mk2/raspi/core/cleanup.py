@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 from contextlib import contextmanager
@@ -48,6 +49,10 @@ __all__ = ["quiet_close", "note_cleanup_failure", "recent_failures", "failure_co
 #: 長時間走行で無限に伸びるとそれ自体がメモリリークになる
 _RECENT: deque[tuple[float, str, str]] = deque(maxlen=32)
 _COUNT = 0
+#: `_COUNT` と `_RECENT` を複数スレッド（各ノードの後始末・cleanup系スレッド）
+#: から一貫して更新するためのロック。診断用カウンタなので厳密性の要求は低いが、
+#: `+=` の read-modify-write 競合で値がずれるのを防ぐ
+_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -63,8 +68,9 @@ def quiet_close(what: str) -> Iterator[None]:
     try:
         yield
     except Exception as e:
-        _COUNT += 1
-        _RECENT.append((time.monotonic(), what, f"{type(e).__name__}: {e}"))
+        with _LOCK:
+            _COUNT += 1
+            _RECENT.append((time.monotonic(), what, f"{type(e).__name__}: {e}"))
 
 
 def note_cleanup_failure(what: str, exc: BaseException) -> None:
@@ -74,8 +80,9 @@ def note_cleanup_failure(what: str, exc: BaseException) -> None:
     `shm_ring.close()` ——のための入口。**捨てる判断はあちら側に残る。**
     """
     global _COUNT
-    _COUNT += 1
-    _RECENT.append((time.monotonic(), what, f"{type(exc).__name__}: {exc}"))
+    with _LOCK:
+        _COUNT += 1
+        _RECENT.append((time.monotonic(), what, f"{type(exc).__name__}: {exc}"))
 
 
 def recent_failures() -> list[tuple[float, str, str]]:
@@ -84,9 +91,11 @@ def recent_failures() -> list[tuple[float, str, str]]:
     終了時の統計や診断から呼ぶ。**空なのが正常**で、増えているなら
     「閉じられていない資源がある」ことを示す。
     """
-    return list(_RECENT)
+    with _LOCK:
+        return list(_RECENT)
 
 
 def failure_count() -> int:
     """捨てた後始末の総数。`recent_failures()` は直近ぶんしか持たない。"""
-    return _COUNT
+    with _LOCK:
+        return _COUNT

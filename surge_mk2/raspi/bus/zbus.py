@@ -113,9 +113,17 @@ TOPIC_OWNER: dict[str, str] = {
 }
 
 
+#: `bus_dir()` が既に `mkdir` 済みのパス。**環境変数 `ENV_DIR` はテストごとに
+#: 変わりうる**（`test_zbus.py`）ので `functools.lru_cache` は使えない——
+#: パスごとに1回だけ `mkdir` する形にして、同じ場所への呼び出しの syscall だけ省く
+_mkdir_done: set[Path] = set()
+
+
 def bus_dir() -> Path:
     d = Path(os.environ.get(ENV_DIR, _DEFAULT_DIR))
-    d.mkdir(parents=True, exist_ok=True)
+    if d not in _mkdir_done:
+        d.mkdir(parents=True, exist_ok=True)
+        _mkdir_done.add(d)
     return d
 
 

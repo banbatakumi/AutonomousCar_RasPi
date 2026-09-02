@@ -8,6 +8,8 @@
 
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -253,6 +255,24 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
         finally:
             node.close()
             ring.unlink()
+
+
+class TestStop(unittest.TestCase):
+    """`stop()` で `run()` が（`duration_s`無しでも）確実に抜けること（B1）。"""
+
+    def test_stop_breaks_the_run_loop(self):
+        node = CamPerceptionNode(models_dir=Path("/nonexistent"), vehicle=Vehicle.load())
+        sub = _FakeSub({})
+        pub = _FakePub()
+
+        thread = threading.Thread(target=node.run, kwargs={"sub": sub, "pub": pub})
+        thread.start()
+        # `run()` がループへ入るまで少し待ってから止める
+        time.sleep(0.05)
+        self.assertTrue(node._running)
+        node.stop()
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive(), "stop() を呼んでも run() が終わらない")
 
 
 class TestReadFrame(unittest.TestCase):

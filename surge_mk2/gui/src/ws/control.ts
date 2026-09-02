@@ -78,7 +78,8 @@ export class ControlChannel {
       let m: ServerMsg
       try {
         m = JSON.parse(ev.data as string) as ServerMsg
-      } catch {
+      } catch (e) {
+        console.warn('control WS: JSON.parse に失敗', e, ev.data)
         return
       }
       if (m.type === 'status') this.h.onStatus(m as unknown as ControlStatus)

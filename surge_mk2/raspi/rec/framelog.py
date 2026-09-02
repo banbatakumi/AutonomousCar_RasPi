@@ -166,18 +166,24 @@ class FrameLogWriter:
         self.t0_unix_ns = time.time_ns()
 
         self._f: BinaryIO = open(self.path, "wb", buffering=buffer_size)
-        self._f.write(_S_HEADER.pack(MAGIC, FORMAT_VERSION, HEADER_SIZE,
-                                     self.t0_mono_ns, self.t0_unix_ns))
-        self.stats.bytes_written = HEADER_SIZE
+        try:
+            self._f.write(_S_HEADER.pack(MAGIC, FORMAT_VERSION, HEADER_SIZE,
+                                         self.t0_mono_ns, self.t0_unix_ns))
+            self.stats.bytes_written = HEADER_SIZE
 
-        base = {
-            "t0_unix_ns": self.t0_unix_ns,
-            "t0_mono_ns": self.t0_mono_ns,
-            "t0_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-        }
-        base.update(meta or {})
-        self._write(Kind.META, self.t0_mono_ns, 0, 0,
-                    json.dumps(base, ensure_ascii=False).encode("utf-8"))
+            base = {
+                "t0_unix_ns": self.t0_unix_ns,
+                "t0_mono_ns": self.t0_mono_ns,
+                "t0_local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            }
+            base.update(meta or {})
+            self._write(Kind.META, self.t0_mono_ns, 0, 0,
+                        json.dumps(base, ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            # ここで失敗すると呼び出し側は `self` を持てない（`close()` を
+            # 呼べない）ので、開いた fd はここで自分で閉じる
+            self._f.close()
+            raise
 
     # ── 書き込み ──
 

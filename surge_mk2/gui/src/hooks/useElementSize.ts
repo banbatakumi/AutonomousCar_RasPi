@@ -13,7 +13,13 @@ export function useElementSize<T extends HTMLElement>() {
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    const measure = () => setSize({ width: el.clientWidth, height: el.clientHeight })
+    const measure = () =>
+      setSize((prev) => {
+        const w = el.clientWidth
+        const h = el.clientHeight
+        if (prev && prev.width === w && prev.height === h) return prev
+        return { width: w, height: h }
+      })
     measure()
     const ro = new ResizeObserver(measure)
     ro.observe(el)

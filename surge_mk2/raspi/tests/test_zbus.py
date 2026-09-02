@@ -49,6 +49,33 @@ class BusCase(unittest.TestCase):
         return o
 
 
+class TestBusDir(BusCase):
+    """★ D3: `bus_dir()` が同じ場所へ何度も `mkdir` しないこと。"""
+
+    def test_mkdir_happens_once_per_path(self):
+        from unittest import mock
+
+        from raspi.bus.zbus import bus_dir
+
+        with mock.patch("pathlib.Path.mkdir") as mock_mkdir:
+            d1 = bus_dir()
+            d2 = bus_dir()
+            d3 = bus_dir()
+        self.assertEqual(d1, d2)
+        self.assertEqual(d2, d3)
+        self.assertEqual(mock_mkdir.call_count, 1)
+
+    def test_a_different_env_dir_still_gets_created(self):
+        """★ 環境変数が変わって別ディレクトリになったら、ちゃんと新たに作ること
+        （キャッシュのしすぎで新しい場所を見落とさないこと）。"""
+        from raspi.bus.zbus import bus_dir
+
+        other = Path(self._tmp.name) / "another"
+        os.environ["SURGE_BUS_DIR"] = str(other)
+        d = bus_dir()
+        self.assertTrue(d.is_dir())
+
+
 class TestWireFormat(BusCase):
     def test_round_trip(self):
         from raspi.bus.zbus import decode, encode

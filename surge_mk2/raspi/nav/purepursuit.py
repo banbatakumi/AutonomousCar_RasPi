@@ -120,7 +120,9 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     nrm = np.hypot(*tx)
     cross = float((tx[0] * to_car[1] - tx[1] * to_car[0]) / nrm) if nrm > 1e-9 else 0.0
 
-    ld = max(cfg.lookahead_min, cfg.lookahead_k * abs(v_now) + cfg.lookahead_min)
+    # `cfg.lookahead_k * abs(v_now) >= 0` なので、この式は常に既に
+    # `cfg.lookahead_min` 以上（`max()` で下限を張る必要はない）
+    ld = cfg.lookahead_k * abs(v_now) + cfg.lookahead_min
     # 経路上を弧長 `ld` ぶん進んだ点。**直線距離ではなく弧長**で取る
     # （ヘアピンでは直線距離だと「出口の点」が近くに見えてショートカットする）
     step = path.length / len(path)

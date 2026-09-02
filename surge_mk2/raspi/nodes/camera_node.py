@@ -28,6 +28,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,6 +39,14 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 
 SHM_PREFIX = "surge_cam"
+
+#: `_grab()` が連続してこの回数失敗したら、そのカメラは諦めてスレッドを終了する
+MAX_CONSECUTIVE_GRAB_FAILURES = 10
+
+
+def _should_give_up(consecutive_failures: int, max_consecutive: int) -> bool:
+    """`_grab()` の連続失敗回数が閾値に達したかどうか。picamera2非依存の純粋関数。"""
+    return consecutive_failures >= max_consecutive
 DEFAULT_SLOTS = 8
 
 #: カメラ番号 → バスのトピックと役割名。**取り付けを入れ替えたらここだけ直す**
@@ -115,6 +124,11 @@ def bottom_cropped(cam, size: tuple[int, int],
     return (size[0], out_h), (0, 0, fw, keep_h)
 
 
+#: `CamStats.gaps_ms` の保持上限。中央値・最大値の統計に十分な標本数を
+#: 残しつつ、systemd 配下の長時間稼働でメモリが際限なく増えないようにする
+_MAX_GAPS_SAMPLES = 1000
+
+
 @dataclass(slots=True)
 class CamStats:
     frames: int = 0
@@ -122,7 +136,7 @@ class CamStats:
     write_ns_max: int = 0       #: 共有メモリへの1回の書き込みにかかった最大時間
     write_ns_total: int = 0
     last_t_capture: int = 0
-    gaps_ms: list[float] = field(default_factory=list)
+    gaps_ms: deque[float] = field(default_factory=lambda: deque(maxlen=_MAX_GAPS_SAMPLES))
 
     def summary(self, elapsed: float) -> str:
         fps = self.frames / elapsed if elapsed > 0 else 0
@@ -192,6 +206,7 @@ class CameraWorker(threading.Thread):
 
     def run(self) -> None:
         self._running = True
+        consecutive_failures = 0
         try:
             while self._running:
                 self._apply_pending()
@@ -200,7 +215,17 @@ class CameraWorker(threading.Thread):
                     # 済みなので呼んでも取れない上、CPU を無駄に回さないため
                     time.sleep(0.2)
                     continue
-                self._grab()
+                try:
+                    self._grab()
+                    consecutive_failures = 0
+                except Exception as e:
+                    # 一過性のキャプチャエラー（バッファ取得タイムアウト等）1回では
+                    # 諦めない。閾値を超えて連続したときだけ本当に壊れたと判断する
+                    consecutive_failures += 1
+                    self.error = e
+                    if _should_give_up(consecutive_failures, MAX_CONSECUTIVE_GRAB_FAILURES):
+                        raise
+                    time.sleep(0.05)
         except Exception as e:                       # 1台落ちても他は回す
             self.error = e
         finally:

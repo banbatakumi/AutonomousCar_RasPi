@@ -126,8 +126,9 @@ def main() -> int:
         # 実際に画素へ触る（触らないとゼロコピーの検証にならない）
         checksum = int(arr[::64, ::64].sum())
         want_save = bool(args.save) and not saved
-        if want_save:
-            write_png(args.save, to_rgb(arr, ref.desc.fmt))
+        # 並び替えだけ（`to_rgb` はディスクI/Oをしない）。**実際のファイル書き込みは
+        # まだしない**——torn（still_valid() で壊れていたと判明）なら書かずに捨てる
+        rgb = to_rgb(arr, ref.desc.fmt) if want_save else None
 
         # **画素を使い終わってから** seqlock を再検査する
         ok = ref.still_valid()
@@ -136,6 +137,7 @@ def main() -> int:
             torn += 1
             continue
         if want_save:
+            write_png(args.save, rgb)
             print(f"  保存: {args.save}（チェックサム {checksum}）")
             saved = True
 

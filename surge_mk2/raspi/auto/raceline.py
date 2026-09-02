@@ -487,7 +487,7 @@ class RaceLine(Planner):
 
         st.ready = True
         st.target_speed = pp.speed
-        st.free_ahead = dist if hit is not None else 0.0
+        st.free_ahead = dist if hit is not None else math.inf
 
         stop_at = p["obstacle_stop"]
         if (stop_at > 0.0 and hit is not None

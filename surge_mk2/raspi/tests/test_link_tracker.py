@@ -19,6 +19,7 @@ from raspi.core.link_tracker import (  # noqa: E402
     LinkTracker,
     format_status,
 )
+from raspi.core.link_tracker import _MAX_PENDING_PINGS  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 
 MS = 1_000_000
@@ -120,6 +121,18 @@ class TestTimeSync(unittest.TestCase):
         for i in range(200):
             tr.note_ping_sent(i, i * 1000)
         self.assertIn(199, tr._pending_pings)
+
+    def test_eviction_is_by_insertion_order_not_by_id_value(self):
+        """★ C6: `ping_id` がラップアラウンドした直後でも、破棄されるのは
+        （数値最小ではなく）実際に一番古く送った PING であること。"""
+        tr = LinkTracker()
+        for i in range(_MAX_PENDING_PINGS):
+            tr.note_ping_sent(4_294_967_295 - _MAX_PENDING_PINGS + 1 + i, i * 1000)
+        # ここで最古は ping_id が最大に近い側（先に送った）。次に ID がラップして
+        # 小さい値の ping_id を送ると、数値最小基準だとこの新しい ping を
+        # 誤って即座に捨ててしまう
+        tr.note_ping_sent(0, 999_000)
+        self.assertIn(0, tr._pending_pings, "直近送った PING(id=0) が誤って破棄されている")
 
 
 class TestHealth(unittest.TestCase):

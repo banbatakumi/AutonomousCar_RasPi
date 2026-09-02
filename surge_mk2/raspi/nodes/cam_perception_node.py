@@ -173,6 +173,7 @@ class CamPerceptionNode:
         #: **`process_frame()` 自体の戻り値は `Scan` のまま変えていない**——
         #: 既存のテスト・呼び出し側の契約を壊さないための側路（`encode_mask_jpeg()` 参照）
         self._last_drivable: np.ndarray | None = None
+        self._running = False
 
     def close(self) -> None:
         self._reader.close()
@@ -288,12 +289,16 @@ class CamPerceptionNode:
 
     # ── ループ（実バス配線） ──
 
+    def stop(self) -> None:
+        self._running = False
+
     def run(self, *, sub, pub, duration_s: float | None = None,
            status_cb=None) -> None:
+        self._running = True
         seq = 0
         t_end = time.monotonic() + duration_s if duration_s else None
         next_hb = time.monotonic_ns()
-        while True:
+        while self._running:
             if t_end and time.monotonic() >= t_end:
                 break
             for _ in sub.poll(20):
@@ -369,11 +374,8 @@ def main() -> int:
 
     print(f"# cam_perception_node  publish {pub.endpoint}  scan/cam へ配信")
 
-    running = True
-
     def _shutdown(*_):
-        nonlocal running
-        running = False
+        node.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, _shutdown)

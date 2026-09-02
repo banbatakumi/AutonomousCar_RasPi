@@ -53,6 +53,35 @@ class TestScanCNNExtractor(unittest.TestCase):
         with self.assertRaises(ValueError):
             ScanCNNExtractor(space, features_dim=16)
 
+    def test_conv1d_layers_are_orthogonal_initialized(self):
+        """★ A1: `self.conv`のConv1d層が、SB3の`init_weights`が対象にしない
+        （`isinstance`が`nn.Linear`/`nn.Conv2d`限定）ため、PyTorchデフォルト
+        初期化のまま放置されていたバグの修正確認。
+
+        `nn.init.orthogonal_`が実際にConv1d層の数だけ呼ばれることを確認する
+        （呼び出し済みの重みの統計的性質から間接的に判定するより、初期化の
+        実装意図そのものを検証する方が確実で壊れにくい）。
+        """
+        import torch.nn as nn
+        from unittest import mock
+
+        space = self._space(2)
+        with mock.patch("torch.nn.init.orthogonal_",
+                        side_effect=nn.init.orthogonal_) as mock_orth:
+            ext = ScanCNNExtractor(space, features_dim=32)
+        conv_layers = [m for m in ext.conv.modules() if isinstance(m, nn.Conv1d)]
+        self.assertEqual(len(conv_layers), 3)
+        self.assertEqual(mock_orth.call_count, 3)
+
+    def test_conv1d_bias_is_zero_initialized(self):
+        import torch.nn as nn
+
+        space = self._space(2)
+        ext = ScanCNNExtractor(space, features_dim=32)
+        for m in ext.conv.modules():
+            if isinstance(m, nn.Conv1d) and m.bias is not None:
+                self.assertTrue(torch.all(m.bias == 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

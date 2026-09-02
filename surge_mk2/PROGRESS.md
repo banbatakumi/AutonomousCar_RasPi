@@ -3,7 +3,55 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-09-02（続き）（バンビの実車確認「v10は舵が大きく発散し壁に衝突する。
+最終更新: 2026-09-02（さらに続き）（6並列サブエージェントでコードベース全体の
+バグ・最適化調査→3並列で再検証→Plan agentで実装計画を設計し、大半を実装した。
+
+**v10発散問題への最有力候補（A1）を修正**: `ml_lidar/policy.py`の`ScanCNNExtractor`
+の`Conv1d`層3枚がSB3の`init_weights`（`isinstance`が`nn.Linear`/`nn.Conv2d`限定）
+によるorthogonal初期化から漏れ、PyTorchデフォルト初期化のまま学習されていた
+バグを修正（`self.conv`構築直後に明示的にorthogonal_初期化を追加）。Copilot CLIの
+セカンドオピニオンでも「PPO不安定性の寄与要因として有力」と裏付け済み。
+**効果確認には新規学習が必要**（未実施）。
+
+**A2（sim操舵むだ時間の量子化バグ）をユーザー合意の上で修正**: `sim/vehicle.py`の
+`_pop_delayed`は「1step=1エントリ」方式で、`vehicle.step(dt)`はdt=0.1sで1回しか
+呼ばれないため、`dead_time_s>0`である限り実効遅延は`dead_time_s`の値によらず
+固定値に量子化されていた（ドメインランダム化`dead_time_s_range=(0.0,0.08)`が
+実質無効化されていた）。`sim/gym_env.py`の`step()`内、`vehicle.step(dt)`の
+1回呼び出しを`_DYNAMICS_SUBSTEP_S=0.01s`刻みのサブステップ分割に変更（`vehicle.py`
+本体は無変更、衝突判定・LiDAR生成は従来通り100ms境界のまま）。**副産物の発見**:
+`_pop_delayed`はwhileチェックがfor減算より前に行われる構造のため、エントリが
+追加されたstep自身はpop対象にならず、反応時間には常に`+1 dt_sub`の系統的
+オフセットが乗る（`dead_time_s=0`の特殊ケースのみ例外）。dt_sub=0.01なら最大10ms
+のバイアスで実用上は許容範囲と判断し、`_pop_delayed`自体は今回変更していない
+（気になれば次回、時刻ベースの補間キューへの置き換えを検討）。`sim.bench`は
+`sim/stm32.py`経由で`VehicleModel`を直接使う別経路のため今回の変更の影響を
+受けないことを実行確認済み。**既存の学習済みモデル（v9・v10以前）は「常に
+固定遅延」の環境で学習されているため、この修正を適用した環境では前提が変わる
+——次回の新規学習は必ずこの修正を含めてゼロから行うこと**。
+
+**実車安全・堅牢性・最適化を多数修正**（詳細はコミット参照）: `cam_perception_node`/
+`camera_node`/`planning_node`のノード停止・リトライ・例外処理バグ4件（B1-B4）、
+`mcap_log`/`framelog`のfdリーク・`shm_view`のtorn画像保存・設定JSON非アトミック
+書き込み・`raceline.py`の`free_ahead`表示逆転・`link_tracker`のping破棄ロジック・
+`cleanup.py`のロックなし競合の7件（C1-C7）、`sim/gym_env.py`の`_CenterlineProgress`
+窓探索化・`zbus.py`の`mkdir`削減・`camera_node`の`gaps_ms`上限・`purepursuit.py`の
+死んだ分岐削除の4件（D2-D5）、GUIの`guide`依存WS再接続・`useMcapDownload`の
+リーク2件・不要な再レンダリング3件（F1,F2,F3,F5,F6,F7）、`ml_cam`の`seed`固定・
+IoU計算のmicro→macro-average化（E2,E3）。全項目、既存テスト＋新規テストで
+検証済み（`raspi/tests`・`ml_lidar/tests`・`ml_cam/tests`全パス。既存の
+`test_vehicle_grip.py`1件のみ今回の変更と無関係な既存の失敗と確認済み）。
+
+**見送り**: D1（`centerline.py`のO(N*M)、BUILD相1回きりで緊急性低）、F4
+（`makeProjector`メモ化、fps問題は環境要因で解決済みのため優先度低）、E1
+（ImageNet正規化、3ファイル同時変更+再学習必須でコスト高）。
+
+**次にやること**: ①A1+A2を反映した新規学習(v11)を実行しclip_fraction単独でなく
+`approx_kl`等で評価（A3の教訓、旧v9とはclip_range運用が違うので単純比較不可）、
+②A4の2実験（`--no-reward-norm`単独・`--curriculum-frac 0`単独）をA1+A2適用後の
+同一ベースで実行、③実車でv11のステア挙動を確認。
+
+旧: 2026-09-02（続き）（バンビの実車確認「v10は舵が大きく発散し壁に衝突する。
 v9以前のモデルはOBS_DIM不一致で実行不能」を受けて診断。①OBS_DIM不一致は
 `raspi/auto/e2e_lidar.py`のバグと確定・修正済み（ONNXグラフ自身の入力shapeを見て
 後方互換）。②性能低下は、TensorBoard実測でv10がv9より学習初期からclip_fraction

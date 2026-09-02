@@ -12,7 +12,7 @@ import numpy as np  # noqa: E402
 from gymnasium.utils.env_checker import check_env  # noqa: E402
 
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
-from sim.gym_env import OBS_DIM  # noqa: E402
+from sim.gym_env import OBS_DIM, _CenterlineProgress  # noqa: E402
 from sim.random_course import generate_random_course  # noqa: E402
 
 
@@ -71,6 +71,60 @@ class TestGymSurgeEnv(unittest.TestCase):
         self.assertEqual(env.sim.mu_range, env.sim._CURRICULUM_EASY_MU_RANGE)
         env.set_curriculum_progress(1.0)
         self.assertEqual(env.sim.mu_range, full_range)
+
+
+class TestCenterlineProgressWindowedNearest(unittest.TestCase):
+    """★ D2: `_nearest()` の窓探索が全探索と同じ結果を返すこと。
+
+    毎stepO(N)の全点探索だったのを、前回位置近傍の窓だけ探す形に変えた
+    （RL訓練で数百万回呼ばれるホットパス）。進捗がほぼ単調に進む通常の
+    走行軌跡でも、コースを1周してラップアラウンドする場合でも、全探索と
+    同じ最近傍点・横偏差・弧長進捗を返すことを確認する。
+    """
+
+    def _reference_nearest(self, cp: _CenterlineProgress, x: float, y: float):
+        """窓探索を使わない、修正前と同じ全点探索。"""
+        d2 = (cp._xy[:, 0] - x) ** 2 + (cp._xy[:, 1] - y) ** 2
+        i = int(np.argmin(d2))
+        return float(cp._arc[i]), float(np.sqrt(d2[i])), i
+
+    def test_matches_full_search_along_a_lap(self):
+        rng = np.random.default_rng(7)
+        course = generate_random_course(rng, name="progress_test")
+        # **1つのインスタンスの `_nearest()`（窓探索、`_prev_i` を書き換えて
+        # 状態遷移する）と、状態を持たない `_reference_nearest()`（全探索）を
+        # 同じ点列に対して比較する** ——2つの別インスタンスを両方とも
+        # 窓探索で回すと、比較の意味が無くなってしまうため
+        cp = _CenterlineProgress(course.centerline, width=course.width)
+
+        xy = course.centerline[:, :2]
+        # 中心線そのものをなぞる軌跡（コース1周ぶん、ラップアラウンドを含む）に
+        # 小さなノイズを足して、ちょうど中心線の点上にならないようにする
+        noise = rng.normal(scale=0.01, size=xy.shape)
+        path = xy + noise
+
+        cp.reset(*path[0])
+        for x, y in path[1:]:
+            arc, cross, i = cp._nearest(float(x), float(y))
+            arc_ref, cross_ref, i_ref = self._reference_nearest(cp, float(x), float(y))
+            self.assertEqual(i, i_ref)
+            self.assertAlmostEqual(arc, arc_ref, places=6)
+            self.assertAlmostEqual(cross, cross_ref, places=6)
+
+    def test_falls_back_to_full_search_when_teleported(self):
+        """急激なワープ（エピソード開始・大きな補正）で窓の外に真の最近傍が
+        あっても、端張り付き検出で全探索にフォールバックし正しい点を拾うこと。"""
+        rng = np.random.default_rng(11)
+        course = generate_random_course(rng, name="teleport_test")
+        xy = course.centerline[:, :2]
+        cp = _CenterlineProgress(course.centerline, width=course.width)
+
+        cp.reset(*xy[0])
+        # 窓の外（コースの反対側）へ一気にワープする
+        far_i = len(xy) // 2
+        _, cross, _, i = cp.update(*xy[far_i])
+        self.assertEqual(i, far_i)
+        self.assertLess(cross, 1e-6)
 
 
 if __name__ == "__main__":

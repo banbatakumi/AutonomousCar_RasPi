@@ -48,7 +48,10 @@ export function useContainFit<T extends HTMLElement>(aspect: number, reservePx =
         h = ch
         w = ch * aspect
       }
-      setSize({ width: Math.floor(w), height: Math.floor(h) })
+      const next = { width: Math.floor(w), height: Math.floor(h) }
+      setSize((prev) =>
+        prev && prev.width === next.width && prev.height === next.height ? prev : next,
+      )
     }
 
     measure()

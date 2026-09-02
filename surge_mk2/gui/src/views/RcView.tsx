@@ -149,13 +149,20 @@ const RC_CAMS_RATIO = 4 / 5 // `.rc { grid-template-columns: minmax(0,4fr) minma
 const CAM_LABEL: Record<'front' | 'rear', string> = { front: '前方', rear: '後方' }
 
 export function RcView({ ch }: { ch: ControlChannel | null }) {
-  const ui = useUi()
+  // `useUi()`をセレクタ無しで呼ぶと、`braking`/`horning`等パッド操作のたび
+  // 高頻度で書き変わるフィールドの更新でもこのビュー全体が再レンダリングされる。
+  // 実際に使うフィールドだけを個別に取り出す（他コンポーネントと同じ流儀）
+  const lidarVisible = useUi((s) => s.lidarVisible)
+  const pathGuide = useUi((s) => s.pathGuide)
+  const lidarExpanded = useUi((s) => s.lidarExpanded)
+  const rearPip = useUi((s) => s.rearPip)
+  const set = useUi((s) => s.set)
   /* PIP（`rearPip`）はここに含めない（2026-08-20、コメント参照）。LiDAR・進路ガイドの
    * 2つだけをメイン映像クリックで一括切り替えする */
-  const overlaysOn = ui.lidarVisible && ui.pathGuide
+  const overlaysOn = lidarVisible && pathGuide
   // ★v0.16: `useState` から `ui.mainCam` へ移動（ゲームパッド R3 で切り替えるため。
   // `store/ui.ts` の `mainCam` コメント参照）
-  const mainCam = ui.mainCam
+  const mainCam = useUi((s) => s.mainCam)
   const [frontAspect, setFrontAspect] = useState(FALLBACK_ASPECT)
 
   /* `.rc-cams` 自身ではなく `.rc` 自体の幅を測る。`.rc-cams` を測ると、下で
@@ -187,7 +194,7 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
 
   const toggleOverlays = () => {
     const next = !overlaysOn
-    ui.set({ lidarVisible: next, pathGuide: next })
+    set({ lidarVisible: next, pathGuide: next })
   }
 
   return (
@@ -208,14 +215,14 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
           />
 
           {/* LiDAR ミニマップ。ゲームのマップ表示のように丸く重ねる（車体イラスト・軌道なし） */}
-          {ui.lidarVisible && (
+          {lidarVisible && (
             <div
-              className={`rc-lidar-mini ${ui.lidarExpanded ? 'expanded' : ''}`}
+              className={`rc-lidar-mini ${lidarExpanded ? 'expanded' : ''}`}
               onClick={(e) => {
                 e.stopPropagation()
-                ui.set({ lidarExpanded: !ui.lidarExpanded })
+                set({ lidarExpanded: !lidarExpanded })
               }}
-              title={ui.lidarExpanded ? 'クリックで縮小' : 'クリックで拡大'}
+              title={lidarExpanded ? 'クリックで縮小' : 'クリックで拡大'}
             >
               <LidarMini />
             </div>
@@ -228,14 +235,14 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
           ref={bottomRef}
           style={videoSize ? { width: videoSize.width } : undefined}
         >
-          {ui.rearPip && (
+          {rearPip && (
             <div
               className="rc-pip"
               /* PIP には速度計・舵角計のような下の数字が無いので、`dialH`（テキスト分を
                * 差し引いた高さ）ではなく行の実測高さそのまま使う——じゃないと下に
                * 使われない余白が残る（指示による修正） */
               style={bottomSize ? { width: bottomSize.height * PIP_ASPECT, height: bottomSize.height } : undefined}
-              onClick={() => ui.set({ mainCam: pipCam })}
+              onClick={() => set({ mainCam: pipCam })}
               title="クリックで前後を入れ替え（パッドの R3 でも可）"
             >
               <CameraView

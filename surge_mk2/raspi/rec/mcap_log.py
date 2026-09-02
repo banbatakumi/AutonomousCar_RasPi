@@ -269,6 +269,7 @@ class McapLog:
             raise ValueError(f"未知の圧縮方式: {compression!r}（zstd/lz4/none）")
 
         self.to_stdout = str(path) == "-"
+        raw_f = None
         if self.to_stdout:
             self.path = None
             # **バイト列を書くので `sys.stdout` ではなく `.buffer`。**
@@ -277,9 +278,17 @@ class McapLog:
         else:
             self.path = Path(path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._f = _CountingWriter(open(self.path, "wb"))
-        self._w = Writer(self._f, compression=getattr(CompressionType, name))
-        self._w.start(profile="", library="surge-mk2")
+            raw_f = open(self.path, "wb")
+            self._f = _CountingWriter(raw_f)
+        try:
+            self._w = Writer(self._f, compression=getattr(CompressionType, name))
+            self._w.start(profile="", library="surge-mk2")
+        except Exception:
+            # ここで失敗すると呼び出し側は `self` を持てない（`close()` を
+            # 呼べない）ので、開いた fd はここで自分で閉じる
+            if raw_f is not None:
+                raw_f.close()
+            raise
         self._schemas: dict[str, int] = {}
         self._channels: dict[str, int] = {}
         self._seq: dict[str, int] = {}

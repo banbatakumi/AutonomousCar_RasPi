@@ -122,7 +122,11 @@ class LinkTracker:
         """PING を送った時刻 T1 を控える。PONG が来たら突き合わせる。"""
         self._pending_pings[ping_id] = t1_ns
         if len(self._pending_pings) > _MAX_PENDING_PINGS:
-            self._pending_pings.pop(min(self._pending_pings), None)
+            # dict は挿入順を保持する（Python 3.7+）ので、先頭が常に最古。
+            # `min(self._pending_pings)`（ping_id の数値最小）だと、
+            # ID がラップアラウンドした直後に直近のものを誤って破棄しうる
+            oldest = next(iter(self._pending_pings))
+            self._pending_pings.pop(oldest, None)
 
     # ── 受信 ──
 

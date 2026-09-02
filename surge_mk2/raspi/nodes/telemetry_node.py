@@ -110,6 +110,7 @@ import os
 import secrets
 import signal
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -280,6 +281,20 @@ SCHEMA_VERSION = schema_version()
 _encoder = msgspec.msgpack.Encoder()
 _json_encode = msgspec.json.encode
 _json_decode = msgspec.json.decode
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """設定ファイルを tmp ファイル + `os.replace()` でアトミックに書く。
+
+    `write_bytes()` の直書きだと、書き込み中の電源断で壊れた（中身が
+    半端な）ファイルが残りうる。`raspi/nodes/io_node.py` の
+    `_save_odometer_base` と同じパターン（このリポジトリでの初出）。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
 
 #: RasPi 本体（SoC）の温度。カーネルがミリ℃で出している
 PI_THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
@@ -919,8 +934,7 @@ class TelemetryServer:
 
     def _save_auto_conf(self) -> None:
         try:
-            AUTO_CONF.parent.mkdir(parents=True, exist_ok=True)
-            AUTO_CONF.write_bytes(_json_encode(
+            _atomic_write_bytes(AUTO_CONF, _json_encode(
                 {"mode": self._auto_mode, "params": self._auto_params}))
         except Exception:
             pass                           # 保存できなくても走行は続けられるべき
@@ -1023,8 +1037,7 @@ class TelemetryServer:
 
     def _save_camera_conf(self) -> None:
         try:
-            CAMERA_CONF.parent.mkdir(parents=True, exist_ok=True)
-            CAMERA_CONF.write_bytes(_json_encode({
+            _atomic_write_bytes(CAMERA_CONF, _json_encode({
                 "rear_enabled": self._cam_rear_enabled,
                 "front_cap_hz": self._cam_front_cap_hz,
                 "rear_cap_hz": self._cam_rear_cap_hz,
@@ -1112,8 +1125,7 @@ class TelemetryServer:
 
     def _save_cam_model_conf(self) -> None:
         try:
-            CAM_MODEL_CONF.parent.mkdir(parents=True, exist_ok=True)
-            CAM_MODEL_CONF.write_bytes(_json_encode({"name": self._cam_model}))
+            _atomic_write_bytes(CAM_MODEL_CONF, _json_encode({"name": self._cam_model}))
         except Exception:
             pass
 
@@ -1187,8 +1199,7 @@ class TelemetryServer:
 
     def _save_e2e_model_conf(self) -> None:
         try:
-            E2E_MODEL_CONF.parent.mkdir(parents=True, exist_ok=True)
-            E2E_MODEL_CONF.write_bytes(_json_encode({"name": self._e2e_model}))
+            _atomic_write_bytes(E2E_MODEL_CONF, _json_encode({"name": self._e2e_model}))
         except Exception:
             pass
 
