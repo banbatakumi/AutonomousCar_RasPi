@@ -149,10 +149,17 @@ def write_note(run_dir: Path, text: str) -> None:
 
 def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
                     max_speed: float, early_stop_patience: int,
+                    reward_norm: bool = True, curriculum_frac: float = 0.3,
                     resume_from: str | None = None) -> list[str]:
     """最大舵角は渡さない——`train_rl.py`はもう`--max-steer`を持たず、
     `config/vehicle.toml`の車両物理限界を常に使う（2026-08-28、バンビの指示）。
 
+    :param reward_norm: `False`なら`--no-reward-norm`を足す（`VecNormalize`による
+        報酬正規化を無効化。2026-09-02追加——v10の実車確認「舵が発散し壁に衝突」の
+        診断で、この機構が最有力候補に挙がったための切り分け用フラグ。GUIからは
+        ターミナルを使わず切り替えられないため、コマンドをここに露出させた）
+    :param curriculum_frac: `--curriculum-frac`（カリキュラム学習のランプアップ割合）。
+        0以下ならカリキュラムを無効化する（v9までと同じ、最初から最大難度）
     :param resume_from: 指定すると`--resume-from`を足す（既存のチェックポイントから
         続きを学習する。`train_rl.py`の`PPO.load()`経路）。省略時は従来通り新規学習。
     """
@@ -161,7 +168,10 @@ def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
           "--timesteps", str(timesteps),
           "--n-envs", str(n_envs),
           "--max-speed", str(max_speed),
-          "--early-stop-patience", str(early_stop_patience)]
+          "--early-stop-patience", str(early_stop_patience),
+          "--curriculum-frac", str(curriculum_frac)]
+    if not reward_norm:
+        cmd.append("--no-reward-norm")
     if resume_from:
         cmd += ["--resume-from", resume_from]
     return cmd
@@ -269,15 +279,35 @@ class App:
         ttk.Entry(frame, textvariable=self.early_stop_var, width=12).grid(
             row=5, column=1, sticky="w", pady=(8, 0))
 
+        # ★v10の実車確認「舵が発散し壁に衝突」の診断（2026-09-02、PROGRESS.md
+        # 「2026-09-02（続き）」節参照）で、この2つが原因候補に挙がった。
+        # ターミナルからCLIを叩けない運用なので、切り分け用のコマンドをGUIに露出
+        # させておく——バンビの指示で、原因が確定するまでは既定を「両方とも
+        # v9の設定に戻す」（reward_norm無効・curriculum_frac=0）にしてある
+        self.curriculum_frac_var = tk.StringVar(value="0")
+        ttk.Label(frame, text="curriculum_frac（0でカリキュラム学習を無効化）:").grid(
+            row=6, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.curriculum_frac_var, width=12).grid(
+            row=6, column=1, sticky="w", pady=(8, 0))
+
+        self.reward_norm_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="報酬正規化(VecNormalize)を使う",
+                        variable=self.reward_norm_var).grid(
+            row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="★v10で「舵が発散し壁に衝突」した診断中のため、両方とも既定で\n"
+                             "v9相当（カリキュラム無効・報酬正規化オフ）にしてあります。原因が\n"
+                             "確定したら既定を戻します（PROGRESS.md「2026-09-02（続き）」節参照）。",
+                 foreground="gray").grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         ttk.Label(frame, text=f"max_steer（最大舵角）は{rel(REPO_ROOT / 'config' / 'vehicle.toml')}"
                              "の車両限界を常に使うため、\nここでは設定しません。",
-                 foreground="gray").grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                 foreground="gray").grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Button(frame, text="学習開始（数時間かかります）", command=self._start_train).grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=12)
+            row=10, column=0, columnspan=2, sticky="w", pady=12)
         ttk.Label(frame, text="学習中もタブ②からTensorBoard・観戦・（別runの）\n"
                              "エクスポートを並行して動かせます。",
-                 foreground="gray").grid(row=8, column=0, columnspan=2, sticky="w")
+                 foreground="gray").grid(row=11, column=0, columnspan=2, sticky="w")
 
     def _build_runs_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
@@ -433,9 +463,11 @@ class App:
             n_envs = int(self.n_envs_var.get())
             max_speed = float(self.max_speed_var.get())
             early_stop = int(self.early_stop_var.get())
+            curriculum_frac = float(self.curriculum_frac_var.get())
         except ValueError:
             messagebox.showerror("入力エラー", "数値の項目は正しい数値で入力してください")
             return
+        reward_norm = self.reward_norm_var.get()
 
         resume_from = None
         run_dir = RUNS_DIR / name
@@ -463,6 +495,7 @@ class App:
 
         cmd = build_train_cmd(self.python, name, timesteps=timesteps, n_envs=n_envs,
                               max_speed=max_speed, early_stop_patience=early_stop,
+                              reward_norm=reward_norm, curriculum_frac=curriculum_frac,
                               resume_from=resume_from)
         self._start_job("train", cmd, f"学習({name})",
                         on_done=lambda code: self._on_train_done(code))

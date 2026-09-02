@@ -7,6 +7,7 @@
 最低1回は走るため、`--timesteps`をどれだけ小さくしても短縮しきれない）。
 """
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,22 @@ class TestTrainRlResume(unittest.TestCase):
             missing = Path(d) / "nope.zip"
             result = _run_train("--timesteps", "200", "--resume-from", str(missing), out=out)
             self.assertNotEqual(result.returncode, 0)
+
+
+class TestTrainRlRewardNorm(unittest.TestCase):
+    """`--no-reward-norm`（2026-09-02追加、v10の性能低下診断でVecNormalizeが
+    疑わしい候補に挙がったための切り分け用フラグ）。無効化しても学習が完走し、
+    `vecnormalize.pkl`を書かないことを確認する。"""
+
+    def test_no_reward_norm_completes_without_vecnormalize_pkl(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "v1"
+            result = _run_train("--timesteps", "200", "--no-reward-norm", out=out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((out / "vecnormalize.pkl").exists())
+            self.assertTrue((out / "last_model.zip").exists())
+            cfg = json.loads((out / "run_config.json").read_text())
+            self.assertFalse(cfg["reward_norm"])
 
 
 class TestTrainRlOverwriteClearsOutDir(unittest.TestCase):

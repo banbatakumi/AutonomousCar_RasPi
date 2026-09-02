@@ -189,6 +189,20 @@ class TestBuildCmds(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--resume-from") + 1],
                          "ml_lidar/runs/v2/best_model.zip")
 
+    def test_train_cmd_reward_norm_and_curriculum_frac(self):
+        """2026-09-02追加。v10「舵が発散し壁に衝突」の切り分け用にGUIから
+        `--no-reward-norm`/`--curriculum-frac`を渡せるようにした
+        （`App._build_train_tab()`のチェックボックス・入力欄と対）。"""
+        cmd = build_train_cmd("python3", "v3", timesteps=1000, n_envs=4, max_speed=2.0,
+                              early_stop_patience=5, reward_norm=False, curriculum_frac=0.0)
+        self.assertIn("--no-reward-norm", cmd)
+        self.assertEqual(cmd[cmd.index("--curriculum-frac") + 1], "0.0")
+
+    def test_train_cmd_reward_norm_true_omits_no_reward_norm_flag(self):
+        cmd = build_train_cmd("python3", "v3", timesteps=1000, n_envs=4, max_speed=2.0,
+                              early_stop_patience=5, reward_norm=True)
+        self.assertNotIn("--no-reward-norm", cmd)
+
     def test_export_cmd_does_not_pass_max_speed_or_max_steer(self):
         """run_config.json から自動で読ませるため、明示的には渡さない。"""
         cmd = build_export_cmd("python3", "v3", "my_model")

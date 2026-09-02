@@ -3,7 +3,17 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-09-02（v9実測（早期終了3.62M/5M、`raceline/mean_cross_dev`が
+最終更新: 2026-09-02（続き）（バンビの実車確認「v10は舵が大きく発散し壁に衝突する。
+v9以前のモデルはOBS_DIM不一致で実行不能」を受けて診断。①OBS_DIM不一致は
+`raspi/auto/e2e_lidar.py`のバグと確定・修正済み（ONNXグラフ自身の入力shapeを見て
+後方互換）。②性能低下は、TensorBoard実測でv10がv9より学習初期からclip_fraction
+が高くtrain/stdの収束も遅いことを確認——`VecNormalize(norm_reward=True)`が
+疑わしい候補。実際にv10モデルをシムでロールアウトさせるとステア出力が
+±1.0付近を毎ステップ行き来する激しい振動を確認、curriculum ramp開始
+（~500kステップ）と同時に評価成績が悪化し以後回復しないパターンも実測。
+切り分け用に`--no-reward-norm`を追加。次のセッションでの検証手順を含め詳細は
+下記「2026-09-02（続き）」節）
+旧: 2026-09-02（v9実測（早期終了3.62M/5M、`raceline/mean_cross_dev`が
 400k step以降0.16〜0.21mで頭打ち、実測fps~103）の診断を受け、ml_lidar学習の
 効率化・精度・安定性の改善5点をagy調査ベースで実装——①reset()のraceline計算の
 非同期先読み・固定コースのメモ化キャッシュ、②観測へのステア状態追加、
@@ -100,6 +110,88 @@ TensorBoardのサブフォルダ(`PPO_1`・`PPO_2`…)が積み上がってい�
 方針の最新は 2026-08-14 の **★ SLAM を一旦棚上げし、非SLAM の Disparity Extender で進める**（下記）。
 **2026-08-22 にバンビの指示で SLAM 側の修正を再開した**（`docs/progress_archive.md`の「2026-08-22」節）が、
 `de` を本線とする方針そのものは変わっていない。
+
+---
+
+## ★ 2026-09-02（続き）：v10の実車確認「舵が発散し壁に衝突」を診断
+
+バンビが実車でv10を確認し「舵が大きく発散し壁に衝突する。大きな性能低下が見られる」
+「v9以前のモデルが`Got invalid dimensions...Got: 363 Expected: 362`で実行できない」
+と報告。2件を切り分けて調査した。
+
+**①OBS_DIM不一致バグ（確定・修正済み）**: `raspi/auto/e2e_lidar.py`の`plan()`が
+ロード中のモデルに関係なく常に363次元（点群+速度+ステア）の観測ベクトルを組み立てて
+いたため、ステア観測追加（本節の1つ前、362→363次元化）より前にエクスポートされた
+v9以前のモデル（362次元）が全滅していた。`_load_from_path()`を、JSON側の`in_dim`
+ではなく**ONNXグラフ自身が宣言する入力shape**（`session.get_inputs()[0].shape[-1]`。
+`export_onnx_rl.py`はバッチ1固定の具体的なshapeでエクスポートしているので必ず
+具体的な整数になる）を読むように変更し、`plan()`側は`self._model_in_dim -
+len(scan_n)`で「速度のみ足すか（旧362次元）・速度+ステアを足すか（新363次元）」を
+動的に分岐するようにした。`raspi/tests/test_auto.py`に
+`test_legacy_362dim_model_still_loads_and_runs`を追加、回帰防止。
+
+**②性能低下の診断（`ml_lidar/runs/v10/evaluations.npz`・TensorBoard実測）**:
+評価reward・ep_lengthは学習序盤（~500kステップ、カリキュラム進捗~33%）までは
+v9同等以上に良好（reward500超・ep_len 1500）だったが、**それ以降は評価が悪化して
+以後回復しないパターン**（reward 130〜520の間で乱高下、ep_lengthも500〜1500で
+不安定）。`early_stop_patience=20`が2.12Mのベスト(reward522)から20回連続未更新で
+2.54Mに発火し停止。
+
+実際に`ml_lidar/runs/v10/best_model.zip`をシム上で複数エピソード走らせたところ、
+**ステア出力が毎ステップ±1.0付近を激しく行き来する**（例: +0.29,+0.16,+0.55,-0.05,
+-0.66,-1.00,-0.20,-1.00...）ことを直接確認——バンビの実車報告と一致する。観測末尾の
+ステア特徴を強制的に0固定してもこの振動自体は解消しなかった（振動の頻度は下がるが
+飽和した±1.0張り付きは残る）ため、**ステア観測フィードバックそのものが唯一の原因
+ではなく、方策の出力自体がbang-bang的に飽和しがちな、より根本的な学習不安定性**が
+疑われる。
+
+v9とのTensorBoard比較で決定的な手がかりを得た: **v10は`train/clip_fraction`が
+学習ごく初期（36万step、カリキュラムの影響がまだ小さい時点）から既にv9より高く
+（v10: 0.22 vs v9: 0.15）、学習全体を通して0.09→0.34まで単調増加し続ける
+（v9は0.11〜0.18で安定）**。`train/std`（方策のガウス分布の標準偏差）の収束も
+v10の方が明確に遅い（2.5M step時点でv10は0.66、v9は同程度のstepで0.36前後）。
+これは**カリキュラムが難しい条件を導入する前から既にPPOの最適化が不安定**で
+あることを示し、カリキュラムの難度上昇はその既存の不安定性を「衝突」という
+目に見える形で表面化させた可能性が高いと考える。`train/explained_variance`は
+逆にv10の方がv9より高め（0.6〜0.76 vs 0.45〜0.65）で価値関数自体の当てはまりは
+悪くないため、**価値推定ではなく方策更新側（advantageのスケール・clip_rangeとの
+相互作用）に問題がある**可能性が高い。
+
+**最有力候補**: 今回新規追加した`VecNormalize(norm_reward=True)`（報酬正規化）。
+学習ごく初期から症状が出ていること・PPOの方策更新の実効的な大きさに直接影響する
+唯一の新機構であることから、CNN特徴抽出器やカリキュラムより疑わしい。ただし
+確定させるには実際に無効化して再学習しないと分からない。
+
+**対策**: `train_rl.py`に`--reward-norm`/`--no-reward-norm`
+（`argparse.BooleanOptionalAction`、既定`--reward-norm`）を追加し、
+`VecNormalize`の有無をCLIから切り替えられるようにした。`run_config.json`にも
+`reward_norm`を記録。`ml_lidar/tests/test_train_rl.py`に
+`TestTrainRlRewardNorm`（無効化しても完走し`vecnormalize.pkl`を書かないことを
+確認）を追加。
+
+**次にやること（未実施）**: `--no-reward-norm --curriculum-frac 0`
+（v9のPPO力学に戻しつつCNN・ステア観測・clip_range減衰だけ残す構成）でv11を
+再学習し、v9並みの安定性（clip_fraction・std収束）が戻るか確認する。戻れば
+報酬正規化とカリキュラムのどちらか（または両方）が原因と確定し、個別に
+再度切り分ける。戻らなければCNN特徴抽出器かステア観測自体を疑う。
+
+**GUI対応（同日、バンビ「コマンドをさわれないのでGUIからその設定で学習できる
+ようにしといて」を受けて）**: `ml_lidar/app.py`の①学習タブに
+「curriculum_frac」入力欄（`ttk.Entry`）と「報酬正規化(VecNormalize)を使う」
+チェックボックス（`ttk.Checkbutton`）を追加。`build_train_cmd()`に
+`reward_norm`/`curriculum_frac`引数を追加し、`reward_norm=False`のとき
+`--no-reward-norm`を、常に`--curriculum-frac <値>`を付与する。**原因が
+確定するまでの間、GUIのウィジェット既定値そのものを診断構成
+（curriculum_frac="0"・報酬正規化チェックボックスOFF）にしてある**——
+`build_train_cmd()`関数自体のキーワード引数既定は`reward_norm=True,
+curriculum_frac=0.3`（train_rl.py本来の意図した既定と一致）のままなので、
+原因確定後はGUIのウィジェット既定だけ戻せばよい。テストは
+`ml_lidar/tests/test_app.py`に`TestBuildCmds`2件追加。
+
+**テスト**: `ml_lidar/tests`+`raspi/tests`計694件中692件green（残り2件は
+本変更と無関係な既存failure——`test_vehicle_grip.py`は2026-09-01節で既述、
+`test_cam_perception_node.py`の`hb/cam_perception != scan/cam`は既知の
+フレーキーテスト、`git stash`不要で単体再実行でも同じ失敗を確認済み）。
 
 ---
 

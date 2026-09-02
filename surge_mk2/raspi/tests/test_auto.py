@@ -939,6 +939,29 @@ class TestE2ELidar(unittest.TestCase):
             self.assertTrue(math.isfinite(st.target_steer))
             self.assertTrue(math.isfinite(st.target_speed))
 
+    def test_legacy_362dim_model_still_loads_and_runs(self):
+        """2026-09-02のステア観測追加（`_OBS_DIM`362→363）より前にエクスポートされた
+        v9以前のモデル（点群361+速度1=362次元）が引き続き動くことの回帰テスト。
+        `plan()`は`self._model_in_dim`（`_load_from_path()`がONNXグラフ自身の
+        宣言shapeから読む）を見て、362次元モデルには速度だけ・363次元モデルには
+        速度+ステアを足すよう分岐する——実装直後にバンビが実機で
+        `ONNXRuntimeError: Got invalid dimensions...Got: 363 Expected: 362`を
+        踏んで発覚した不具合の再発防止。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_dummy_e2e_model(model_path, in_dim=362)   # 旧OBS_DIM
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "in_dim": 362}))
+
+            p = E2ELidar(model_path=model_path)
+            self.assertEqual(p._model_in_dim, 362)
+            st = p.plan(corridor(180), VehicleState(speed=0.5), E2ELidar.merged({}), 0.1)
+            self.assertTrue(st.ready, st.reason)
+            self.assertTrue(math.isfinite(st.target_steer))
+            self.assertTrue(math.isfinite(st.target_speed))
+
     def test_vehicle_speed_feeds_into_the_model_input(self):
         """改善1: 観測の末尾に自車速度が乗る。`vs=None`なら0として扱う。"""
         with tempfile.TemporaryDirectory() as d:

@@ -278,6 +278,13 @@ def main() -> int:
                          "道幅を1.0m以上に絞る）から本来の難度分布まで、"
                          "`--timesteps`のこの割合をかけて線形に広げる（2026-09-02追加）。"
                          "0以下で無効（最初から最大難度、v9までの挙動）")
+    ap.add_argument("--reward-norm", action=argparse.BooleanOptionalAction, default=True,
+                    help="`VecNormalize(norm_obs=False, norm_reward=True)`で報酬だけ"
+                         "正規化する（既定で有効、2026-09-02追加）。`--no-reward-norm`で"
+                         "無効化するとv9までと同じ生rewardのままPPOを学習する。"
+                         "★v10の診断（2026-09-02）でclip_fractionがv9より学習初期から"
+                         "高く・train/stdの収束もv9より遅いことが判明し、この機能が"
+                         "疑わしい候補の一つに挙がった——切り分け用に残す")
     ap.add_argument("--steer-tau", type=float, default=0.10,
                     help="舵指令に掛ける一次遅れの時定数[s]。`raspi/auto/e2e_lidar.py`の"
                          "`steer_tau`ParamSpec既定と同じ値を学習側にも適用し、推論時にだけ"
@@ -399,6 +406,7 @@ def main() -> int:
         "clip_range": args.clip_range,
         "curriculum_frac": args.curriculum_frac,
         "features_extractor": args.features_extractor,
+        "reward_norm": args.reward_norm,
     }, indent=2), encoding="utf-8")
 
     env_fns = [make_train_env_fn(args.seed + i, max_steps=args.max_steps,
@@ -419,9 +427,12 @@ def main() -> int:
     # （エクスポート済み`.onnx`はfeatures_extractor以降しか含まないので、報酬正規化
     # 自体は推論側に一切影響しない）。報酬は`collision_penalty=-5.0`から
     # `speed_match_weight`のような0.1〜0.3刻みの項まで複数のスケールが混在しており、
-    # 価値関数の学習ターゲットのスケールを安定させる狙い（2026-09-02追加）
+    # 価値関数の学習ターゲットのスケールを安定させる狙い（2026-09-02追加）。
+    # `--no-reward-norm`で無効化できる（v10診断で疑わしい候補に挙がったための切り分け用）
     vecnorm_path = args.resume_from.parent / "vecnormalize.pkl" if args.resume_from is not None else None
-    if vecnorm_path is not None and vecnorm_path.exists():
+    if not args.reward_norm:
+        vec_env = raw_vec_env
+    elif vecnorm_path is not None and vecnorm_path.exists():
         vec_env = VecNormalize.load(str(vecnorm_path), raw_vec_env)
         print(f"# {vecnorm_path} から報酬正規化の統計量を復元")
     else:
@@ -493,8 +504,10 @@ def main() -> int:
     model.save(str(args.out / "last_model"))
     # ★報酬正規化の統計量はPPOのcheckpoint(.zip)には含まれない（VecNormalizeは
     # 環境側のラッパーのため）。`--resume-from`で再開したときに統計量を引き継げる
-    # よう別ファイルで保存しておく（無くても新規状態から始まるだけで学習は続けられる）
-    vec_env.save(str(args.out / "vecnormalize.pkl"))
+    # よう別ファイルで保存しておく（無くても新規状態から始まるだけで学習は続けられる）。
+    # `--no-reward-norm`なら`vec_env`はVecNormalizeでない生のVecEnvなので保存しない
+    if args.reward_norm:
+        vec_env.save(str(args.out / "vecnormalize.pkl"))
     print(f"# 完了。最良モデル → {args.out}/best_model.zip 、最終モデル → "
           f"{args.out}/last_model.zip")
     return 0

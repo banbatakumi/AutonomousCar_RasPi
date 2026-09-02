@@ -66,9 +66,18 @@ def _load_from_path(path: Path) -> dict:
     cfg_path = path.with_suffix(".json")
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    # ★入力次元はJSON（`in_dim`）ではなくONNXグラフ自身の宣言shapeから読む
+    # （`export_onnx_rl.py`は`dynamic_axes`無しでバッチ1固定の具体的なshapeで
+    # エクスポートしているので`shape[-1]`は必ず具体的な整数になる）。JSONの値と
+    # ズレようがない「モデル本体が持つ唯一の真実」を使うことで、観測にステア角を
+    # 追加した2026-09-02の変更（OBS_DIM 362→363）で362次元のまま学習された旧モデル
+    # （v9以前）が「常に363次元を組み立てる`plan()`」から弾かれていた不具合を修正
+    # （`ONNXRuntimeError: Got invalid dimensions...Got: 363 Expected: 362`）
+    in_dim = int(session.get_inputs()[0].shape[-1])
     return {
         "session": session,
         "input_name": session.get_inputs()[0].name,
+        "in_dim": in_dim,
         "fov_deg": float(cfg.get("fov_deg", 360.0)),
         "max_range": float(cfg.get("max_range", 5.10)),
         "max_steer": float(cfg.get("max_steer", 0.45)),
@@ -114,6 +123,7 @@ class E2ELidar(Planner):
         self._loaded_model_name = ""
         self._session = None
         self._input_name = ""
+        self._model_in_dim = 0
         self._fov_deg = 360.0
         self._max_range = 5.10
         self._model_max_steer = 0.45
@@ -137,6 +147,7 @@ class E2ELidar(Planner):
     def _commit(self, loaded: dict) -> None:
         self._session = loaded["session"]
         self._input_name = loaded["input_name"]
+        self._model_in_dim = loaded["in_dim"]
         self._fov_deg = loaded["fov_deg"]
         self._max_range = loaded["max_range"]
         self._model_max_steer = loaded["max_steer"]
@@ -194,14 +205,24 @@ class E2ELidar(Planner):
             # このメソッド内でまだ更新されていない「前回ステップの値」を使うことで、
             # 学習側（`SimE2EEnv._obs()`が`step()`内で更新済みの`self._steer`を返す
             # ＝次のreset()/step()呼び出し時点では「直前の指令で実現した状態」）と
-            # 同じ時系列の関係になる（2026-09-02追加）
+            # 同じ時系列の関係になる（2026-09-02追加）。
+            # ★`self._model_in_dim`（ONNXグラフ自身の宣言shape、`_load_from_path()`
+            # 参照）で末尾に足す個数を決める——点群+速度のみ(362次元、OBS_DIM拡張前の
+            # v9以前のモデル)なら速度だけ、点群+速度+ステア(363次元、v10以降)なら
+            # 両方足す。固定2個決め打ちだと旧モデルの入力shapeと食い違い
+            # `ONNXRuntimeError: Got invalid dimensions`で推論できなくなる
             speed_now = 0.0 if vs is None else float(vs.speed)
             speed_norm_in = max(0.0, min(1.0, speed_now / self._model_max_speed)) \
                 if self._model_max_speed > 0 else 0.0
-            steer_norm_in = max(-1.0, min(1.0, self._steer / self._model_max_steer)) \
-                if self._model_max_steer > 0 else 0.0
             scan_n = np.asarray(w.dist, dtype=np.float32) / self._max_range
-            x = np.concatenate([scan_n, [speed_norm_in, steer_norm_in]]).astype(np.float32)[None, :]
+            extra_dim = self._model_in_dim - len(scan_n)
+            if extra_dim >= 2:
+                steer_norm_in = max(-1.0, min(1.0, self._steer / self._model_max_steer)) \
+                    if self._model_max_steer > 0 else 0.0
+                extra = [speed_norm_in, steer_norm_in]
+            else:
+                extra = [speed_norm_in]
+            x = np.concatenate([scan_n, extra]).astype(np.float32)[None, :]
             out = self._session.run(None, {self._input_name: x})[0]
             steer_norm, speed_norm = float(out[0, 0]), float(out[0, 1])
         except Exception as e:                                        # noqa: BLE001
