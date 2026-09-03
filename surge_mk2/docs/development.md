@@ -576,19 +576,19 @@ UI は `sim/gui.py`（pygame）側に置く。シム ↔ シム GUI の通信も
 
 ---
 
-## 12. 学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション）
+## 12. 学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション / カメラE2E）
 
-独立した2本の学習パイプラインがある。どちらも「**Mac で学習 → ONNX 化 → `models/` に配置 →
+独立した3本の学習パイプラインがある。どれも「**Mac で学習 → ONNX 化 → `models/` に配置 →
 GUI でモデル名を選ぶ**」という流れは共通だが、中身も検証手段も別物なので混同しないこと。
 
-| | LiDAR E2E（`e2e_lidar`） | カメラセグメンテーション（`ftg_cam`） |
-|---|---|---|
-| 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） |
-| 学習コード | `ml_lidar/`（Mac 専用。Pi には運ばない使い方をする） | `ml_cam/`（同左） |
-| モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`）。**E2E とは別ディレクトリ** |
-| 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`（`FollowTheGap`をそのまま流用） |
-| シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（`sim.run` は `--no-camera` 固定でカメラを持たない） |
-| 実車で動かすのに要る追加操作 | 無し（`planning_node` が engage 中だけ推論する） | 無し（`surge-cam-perception` は常時 enable。`auto/ctrl` で `ftg_cam` 選択中だけ推論する。下記 12.2） |
+| | LiDAR E2E（`e2e_lidar`） | カメラセグメンテーション（`ftg_cam`/`cam_centerline`） | カメラE2E（`cam_e2e`） |
+|---|---|---|---|
+| 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） | 教師あり学習（人の操舵指令を直接ラベルにする模倣学習） |
+| 学習コード | `ml_lidar/`（Mac 専用。Pi には運ばない使い方をする） | `ml_cam/`（同左） | `ml_cam_e2e/`（同左） |
+| モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`）。**セグメンテーションと同じ`models/`直下だが選択トピックが別（`cam/model`ではなく`cam_e2e/model`）なので混同しない** |
+| 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。IPMなどの幾何変換を経由せず操舵を直接推論）＋ `raspi/auto/cam_e2e.py` |
+| シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（`sim.run` は `--no-camera` 固定でカメラを持たない） | **できない**（同左） |
+| 実車で動かすのに要る追加操作 | 無し（`planning_node` が engage 中だけ推論する） | 無し（`surge-cam-perception` は常時 enable。`auto/ctrl` で `ftg_cam`/`cam_centerline` 選択中だけ推論する。下記 12.2） | 無し（`surge-cam-e2e` は常時 enable。`auto/ctrl` で `cam_e2e` 選択中だけ推論する。下記 12.3） |
 
 いずれも `models/` はリポジトリの `.gitignore` 対象（機体・学習ごとに違う大容量ファイルのため）。
 配布は `tools/deploy.sh` の rsync に任せる——コミットには乗らない。
@@ -744,15 +744,81 @@ GUI での使い方:
 持たないため、`ftg_cam` を試すには実車が要る（`e2e_lidar` は LiDAR が対象なので
 `sim.run` でそのまま試せるのと対照的）。
 
+### 12.3 カメラE2E（模倣学習、`cam_e2e`）
+
+前方カメラの画像から操舵角を**直接回帰**する。`ftg_cam`/`cam_centerline`が
+セグメンテーション→`raspi.nav.ipm`（逆投影）という幾何変換を経由するのに対し、
+こちらは**幾何変換を一切経由しない**——カメラの取付高さが低く（実測8.5cm）
+IPMの深度誤差が拡大する問題を、画像から操舵を直接学習することで迂回するのが
+この方式の狙い（2026-09-04導入）。教師データはSAMの手動アノテーションが不要——
+実車の走行ログに既に記録されている前方カメラ画像と人間の操舵指令（`cmd`）を
+時刻でペアリングするだけで作れる。
+
+```bash
+# 初回だけ
+.venv/bin/pip install -r ml_cam_e2e/requirements.txt
+
+# 0. 走行を録画する（実車の GUI「ログ」タブで .mcap 記録、「画像を含める」を ON）。
+#    MANUAL（人間の手動運転）で、なるべく狙いどおりの経路を走った区間を録る
+#    ——ARM中・MANUAL中の指令だけが教師データに使われる（下記 extract_pairs.py の絞り込み）
+
+# 1. .mcap から (画像, 操舵指令) のペアを抽出
+python3 ml_cam_e2e/extract_pairs.py logs/run1.mcap --out ml_cam_e2e/runs/v1/frames --cam front
+
+# 2. 学習（毎エポック検証MAEを表示）
+python3 ml_cam_e2e/train.py --frames ml_cam_e2e/runs/v1/frames --epochs 30 --out ml_cam_e2e/runs/v1
+
+# 3. ONNX化（入力解像度・正規化・max_steerという契約を同名 .json に焼く）
+python3 ml_cam_e2e/export_onnx.py --checkpoint ml_cam_e2e/runs/v1/best.pt \
+    --size 224x224 --out models/<好きな名前>.onnx
+
+# 4. 実車に配る
+tools/deploy.sh --no-gui
+```
+
+ターミナル操作をまとめて避けたいなら `ml_cam_e2e/app.py`（または
+`ml_cam_e2e/start_app.command` をダブルクリック）が上記1〜3をボタンで操作できる
+薄い Tkinter GUI（`ml_cam/app.py`と対称。SAMアノテーションが無い分タブが1枚少ない）。
+
+★ **実車での推論プロセス（`surge-cam-e2e`）は常時 enable の systemd unit。**
+`cam_perception_node.py`と同じ設計で、`auto/ctrl`が`cam_e2e`の間だけ推論する。
+
+```bash
+ssh surge-mk2 systemctl status surge-cam-e2e   # 動いているか確認するだけならこれで十分
+```
+
+- 起動時の既定引数には `--model` を渡していないので、`cam_e2e/model` トピック
+  経由のモデル選択を待つ。**現時点ではGUI（ブラウザ）側にこのモデルを選ぶ
+  ドロップダウンが無い**——`cam_perception_node.py`の「セグメンテーションモデル」
+  欄に相当するものはまだ実装していない。当面は`raspi/setup/install_services.sh`の
+  `cam_e2e_node`起動引数に`--model <名前>`を足して固定するか、`telemetry_node.py`/GUIに
+  `cam/model`と対称の配線を追加すること（今後の課題）
+- `cam_e2e_node.py` は前方カメラに加えて **LiDAR（`scan`）も購読**し、正面付近の
+  最小距離を独立の安全策として `cam_e2e/cmd` に同梱する。`raspi/auto/cam_e2e.py`
+  の `stop_dist` がこれを見てモデル出力を無視して停止する——**低い壁には効かない**
+  （そもそもLiDARが見えない）が、それ以外の一般障害物への最後の砦
+- `auto/ctrl` で `cam_e2e` 以外が選ばれている間・推論が失敗する・モデル未選択の周期は
+  `ready=False` を出し続けるので、`cam_e2e` は自然に停止側へ倒れる（安全側）
+- `raspi/nodes/cam_e2e_node.py` を直したら `tools/deploy.sh --restart`
+  で反映できる（surge-telemetry / surge-camera と一緒に再起動する）
+
+GUI での使い方:
+
+1. 自動運転タブ → モードで「E2Eカメラ（模倣学習）」を選択（モデル選択欄は
+   上記の理由でまだ無いので、事前に `--model` で固定しておく必要がある）
+2. `Enter` で ARM → 自動運転タブの「自律走行を開始」で engage
+
+★ **シミュレータでは検証できない。**`ftg_cam`と同じ理由（`sim.run`はカメラを持たない）。
+
 ---
 
 ## 付録: ディレクトリと担当
 
 | ディレクトリ | 中身 | 直したら |
 |---|---|---|
-| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）・`line_perception_node`（`surge-line-perception`）とも常時 enable、`auto/ctrl` でそれぞれ対応モード選択中だけ推論/認識する（§12.2） | ノードごとに再起動 |
-| `raspi/auto/` | 自動運転アルゴリズム（**バスも WS も知らない純粋な計算**。`e2e_lidar.py`/`follow_the_gap_cam.py` もここ） | surge-planning 再起動 |
-| `raspi/nav/` | SLAM・占有格子・経路（**一旦棚上げ中。消さない**）。`ipm.py`（カメラ逆投影）は `ftg_cam` が使用中 | surge-planning 再起動 |
+| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **cam_e2e** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）・`cam_e2e_node`（`surge-cam-e2e`）・`line_perception_node`（`surge-line-perception`）とも常時 enable、`auto/ctrl` でそれぞれ対応モード選択中だけ推論/認識する（§12.2・§12.3） | ノードごとに再起動 |
+| `raspi/auto/` | 自動運転アルゴリズム（**バスも WS も知らない純粋な計算**。`e2e_lidar.py`/`follow_the_gap_cam.py`/`cam_e2e.py` もここ） | surge-planning 再起動 |
+| `raspi/nav/` | SLAM・占有格子・経路（**一旦棚上げ中。消さない**）。`ipm.py`（カメラ逆投影）は `ftg_cam`/`cam_centerline` が使用（`cam_e2e` は経由しない） | surge-planning 再起動 |
 | `raspi/proto/` | UART 定義（**STM32 と共有する唯一の定義**） | 再生成 ＋ `--restart-io` |
 | `raspi/bus/` `raspi/msgs/` | ZeroMQ ラッパ・共有メモリ・メッセージ型 | 関係ノード全部 |
 | `raspi/io/` | `SerialLink` / GPIO（**`import serial` はここ1箇所だけ**） | `--restart-io` |
@@ -762,7 +828,8 @@ GUI での使い方:
 | `gui/` | React + TypeScript | rsync だけ |
 | `sim/` | Mac 専用シミュレータ（**Pi には運ぶが使わない**）。カメラは持たない | — |
 | `ml_cam/` | カメラセグメンテーションの学習パイプライン（Mac 専用。§12.2） | Pi には無関係 |
+| `ml_cam_e2e/` | カメラE2E（模倣学習）の学習パイプライン（Mac 専用。§12.3） | Pi には無関係 |
 | `ml_lidar/` | LiDAR E2E 強化学習パイプライン（Mac 専用。§12.1） | Pi には無関係 |
-| `models/` | 学習済み ONNX の置き場（`models/*.onnx`=カメラ用、`models/e2e_lidar/*.onnx`=E2E用）。`.gitignore` 対象 | `tools/deploy.sh` で運ぶだけ。再起動は不要 |
+| `models/` | 学習済み ONNX の置き場（`models/*.onnx`=カメラ用・カメラE2E用、`models/e2e_lidar/*.onnx`=LiDAR E2E用）。`.gitignore` 対象 | `tools/deploy.sh` で運ぶだけ。再起動は不要 |
 | `config/` | 車両諸元・自動運転パラメータ | 読んでいるノード |
 | `tools/` | `deploy.sh` / `record.sh` | — |

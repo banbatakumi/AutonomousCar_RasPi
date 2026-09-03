@@ -10,6 +10,7 @@
 from .base import (ParamSpec, Planner, ScanWindow, min_filter, scan_window,
                    sector_of_deg, wrap_deg)
 from .cam_centerline import CamCenterline
+from .cam_e2e import CamE2E
 from .disparity_extender import DisparityExtender
 from .e2e_lidar import E2ELidar
 from .follow_the_gap import FollowTheGap
@@ -23,6 +24,6 @@ __all__ = [
     "Planner", "ParamSpec", "ScanWindow", "min_filter", "scan_window",
     "sector_of_deg", "wrap_deg",
     "DisparityExtender", "E2ELidar", "FollowTheGap", "FollowTheGapCam", "DisparityPursuit",
-    "RaceLine", "LineTrace", "CamCenterline",
+    "RaceLine", "LineTrace", "CamCenterline", "CamE2E",
     "PLANNERS", "catalog", "make_planner", "merged_params",
 ]

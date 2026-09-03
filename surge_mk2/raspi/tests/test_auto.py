@@ -20,14 +20,15 @@ import onnx  # noqa: E402
 from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.auto import (PLANNERS, CamCenterline, DisparityExtender,  # noqa: E402
+from raspi.auto import (PLANNERS, CamCenterline, CamE2E, DisparityExtender,  # noqa: E402
                         DisparityPursuit, E2ELidar, FollowTheGap, FollowTheGapCam,
                         LineTrace, catalog, make_planner)
 from raspi.auto.base import extend_disparity as _extend  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.gap_pursuit import _best_band  # noqa: E402
-from raspi.msgs import AutoState, CamPath, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
+from raspi.msgs import AutoState, CamE2ECmd, CamPath, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_PATH,
     TOPIC_LINE_CAM,
     TOPIC_SCAN,
@@ -507,6 +508,96 @@ class TestCamCenterline(unittest.TestCase):
                 self.assertTrue(st.reason)
 
 
+class TestCamE2E(unittest.TestCase):
+    """画像→操舵の直接回帰（`cam_e2e_node.py`の推論結果）を読むだけの薄いPlanner。
+
+    幾何は一切扱わない（IPMを経由しない）ので、`CamE2ECmd`から`plan()`が
+    正しい操舵・速度・安全策の判断を作ることだけを確認する。
+    """
+
+    def setUp(self):
+        self.p = CamE2E()
+        self.params = CamE2E.merged({})
+
+    def plan(self, cmd, vs=None, dt=0.1, **over):
+        p = {**self.params, **over}
+        return self.p.plan(cmd, vs, p, dt)
+
+    def test_declares_a_distinct_input_topic(self):
+        self.assertEqual(CamE2E.input_topic, TOPIC_CAM_E2E_CMD)
+        self.assertNotEqual(CamE2E.input_topic, TOPIC_SCAN)
+
+    def test_not_ready_when_model_not_ready(self):
+        st = self.plan(CamE2ECmd(ready=False))
+        self.assertFalse(st.ready)
+        self.assertTrue(st.reason)
+
+    def test_stops_when_lidar_not_seen(self):
+        """LiDARが届いていなければ「分からなければ止まる」の安全側判断。"""
+        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
+                                 lidar_seen=False))
+        self.assertTrue(st.ready)
+        self.assertTrue(st.brake)
+        self.assertEqual(st.target_speed, 0.0)
+
+    def test_stops_when_front_is_too_close(self):
+        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.5, model_max_steer=0.524,
+                                 lidar_seen=True, lidar_front_dist=0.1),
+                       stop_dist=0.35)
+        self.assertTrue(st.ready)
+        self.assertTrue(st.brake)
+        self.assertEqual(st.target_speed, 0.0)
+        self.assertIn("停止", st.reason)
+
+    def test_positive_steer_norm_steers_left(self):
+        """反時計回り正の慣例通り、正の `steer_norm` は正の舵角になる。"""
+        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.5, model_max_steer=0.524,
+                                 lidar_seen=True, lidar_front_dist=5.0),
+                       steer_tau=0.0)
+        self.assertTrue(st.ready)
+        self.assertFalse(st.brake)
+        self.assertGreater(st.target_steer, 0.0)
+        self.assertAlmostEqual(st.target_steer, 0.5 * 0.524, places=3)
+
+    def test_steer_is_clamped_to_vehicle_max_steer(self):
+        vehicle_max = self.p.vehicle.max_steer
+        st = self.plan(CamE2ECmd(ready=True, steer_norm=1.0, model_max_steer=10.0,
+                                 lidar_seen=True, lidar_front_dist=5.0),
+                       steer_tau=0.0)
+        self.assertLessEqual(abs(st.target_steer), vehicle_max + 1e-9)
+
+    def test_speed_never_exceeds_max_speed(self):
+        for steer in (-0.5, 0.0, 0.5):
+            st = self.plan(CamE2ECmd(ready=True, steer_norm=steer, model_max_steer=0.524,
+                                     lidar_seen=True, lidar_front_dist=5.0),
+                           max_speed=0.3)
+            self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+    def test_speed_ramps_down_near_stop_dist(self):
+        near = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
+                                   lidar_seen=True, lidar_front_dist=0.5),
+                         stop_dist=0.35, slow_dist=1.5)
+        far = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
+                                  lidar_seen=True, lidar_front_dist=1.5),
+                        stop_dist=0.35, slow_dist=1.5)
+        self.assertLess(near.target_speed, far.target_speed)
+
+    def test_reset_clears_the_steering_state(self):
+        cmd = CamE2ECmd(ready=True, steer_norm=0.8, model_max_steer=0.524,
+                        lidar_seen=True, lidar_front_dist=5.0)
+        for _ in range(20):
+            converged = self.plan(cmd).target_steer
+        self.assertGreater(abs(converged), 0.05)
+        self.p.reset()
+        self.assertLess(abs(self.plan(cmd).target_steer), abs(converged) * 0.8)
+
+    def test_not_ready_always_carries_a_reason(self):
+        for cmd in (CamE2ECmd(ready=False), CamE2ECmd(ready=True, lidar_seen=False)):
+            st = self.plan(cmd)
+            if not st.ready or st.brake:
+                self.assertTrue(st.reason)
+
+
 class TestDisparityExtender(unittest.TestCase):
     """**FTG と同じ安全条件を満たしたうえで、狙点が「一番遠く」になること。**"""
 
@@ -803,6 +894,10 @@ class TestRegistry(unittest.TestCase):
     def test_e2e_lidar_planner_is_registered(self):
         self.assertIn("e2e_lidar", PLANNERS)
         self.assertIsInstance(make_planner("e2e_lidar"), E2ELidar)
+
+    def test_cam_e2e_planner_is_registered(self):
+        self.assertIn("cam_e2e", PLANNERS)
+        self.assertIsInstance(make_planner("cam_e2e"), CamE2E)
 
 
 class FakeSub:

@@ -1,0 +1,26 @@
+# ml_cam_e2e/ — Mac側オフラインMLパイプラインの依存（`raspi/requirements.txt` とは別管理）
+#
+#   .venv/bin/pip install -r ml_cam_e2e/requirements.txt
+#
+# `ml_cam/requirements.txt` とほぼ同じだが、SAM（半自動アノテーション）は
+# 不要——教師データは人間の操舵指令をそのままラベルにするため
+
+torch>=2.2
+torchvision>=0.17
+
+# ONNX エクスポート・推論側との往復検証
+onnx>=1.16
+onnxruntime>=1.18,<2
+onnxscript>=0.7          # torch 2.5+ の既定エクスポータ（dynamo=True）が要求する
+
+# プレビュー（`ml_cam_e2e/preview.py`）の表示・矢印描画
+opencv-python>=4.9
+
+pillow>=10
+numpy>=2.1
+
+# `.mcap` からのペア抽出（`ml_cam_e2e/extract_pairs.py`）
+mcap>=1.2,<2
+
+# 操作パネル（`ml_cam_e2e/app.py`）— Tkinter は Python 標準ライブラリ同梱なので
+# ここに依存を追加する必要は無い
