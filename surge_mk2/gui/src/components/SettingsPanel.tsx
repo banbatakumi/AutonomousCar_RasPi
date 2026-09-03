@@ -217,6 +217,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const saveCurrentAsDefault = useUi((s) => s.saveCurrentAsDefault)
   const pathGuide = useUi((s) => s.pathGuide)
   const engineSoundOn = useUi((s) => s.engineSoundOn)
+  const fan = useUi((s) => s.fan)
   const set = useUi((s) => s.set)
   // estop_active/drive_power_locked と同じく、これは `/ws/control` の status
   // （イベント発生時にしかbroadcastされない）ではなく `/ws/telemetry` 経由で
@@ -385,6 +386,55 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             </label>
           </section>
 
+          {/* 2026-09-03: タブ行（DriveControls.tsx）から移設。運転中に頻繁に触る
+              ものではなく、走行アシストと同じ「STM32/RasPi本体の保護機構」の
+              仲間としてここに置く */}
+          <section className="settings-group">
+            <h3>ファン（RasPi5冷却）</h3>
+            <div className="seg">
+              {(['auto', 'manual'] as const).map((m) => (
+                <button
+                  key={m}
+                  className={fan?.mode === m ? 'on' : ''}
+                  disabled={fan === null || (m === 'manual' && !fan.available)}
+                  onClick={() => ch?.setFan({ mode: m })}
+                  title={
+                    m === 'manual' && fan && !fan.available
+                      ? 'この機体では手動調整に対応していません'
+                      : undefined
+                  }
+                >
+                  {m === 'auto' ? '自動' : '手動'}
+                </button>
+              ))}
+            </div>
+            {fan?.mode === 'manual' && fan.available && (
+              <div className="settings-row">
+                <div className="settings-row-head">
+                  <span className="label">デューティ</span>
+                  <b>{Math.round(fan.duty * 100)}</b>
+                  <span className="unit">%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={fan.duty}
+                  onChange={(e) => ch?.setFan({ duty: Number(e.target.value) })}
+                />
+              </div>
+            )}
+            {fan?.rpm != null && (
+              <p
+                className="dim"
+                title="実測回転数。高温で保護動作が入ると、指定値と食い違ってここだけ上がる"
+              >
+                実測 {fan.rpm}rpm
+              </p>
+            )}
+          </section>
+
           <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
         </>
       )}
@@ -393,16 +443,17 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
         <>
           {/* capture側(camera_node)のFPS上限・後方カメラON/OFF・GUI配信頻度。
               TC/TVと同じく状態はサーバ真値（`status.camera_config`）。
+              ARM中/DISARM中で別々の値を持つ（2026-09-03、駐車中の節電のため）。
               前カメラの上限は目安——カメラを使う自動運転（`line_trace`/`ftg_cam`）が
               engage 中はサーバ側が無視して最大まで引き上げる（`auto_override`） */}
           <section className="settings-group">
-            <h3>カメラ</h3>
+            <h3>カメラ（ARM中＝走行できる状態）</h3>
             <label className="settings-checkbox">
               <input
                 type="checkbox"
-                checked={cam?.rear_enabled ?? true}
+                checked={cam?.rear_enabled_armed ?? true}
                 disabled={cam === null}
-                onChange={(e) => ch?.setCamera({ rearEnabled: e.target.checked })}
+                onChange={(e) => ch?.setCamera({ rearEnabledArmed: e.target.checked })}
               />
               後方カメラの映像取得{cam === null && '（未確認）'}
             </label>
@@ -416,7 +467,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             >
               <div className="settings-row-head">
                 <span className="label">前カメラ 取得上限</span>
-                <b>{(cam?.front_cap_hz ?? 30).toFixed(0)}</b>
+                <b>{(cam?.front_fps_armed ?? 30).toFixed(0)}</b>
                 <span className="unit">fps</span>
               </div>
               <input
@@ -424,18 +475,18 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 min={1}
                 max={30}
                 step={1}
-                value={cam?.front_cap_hz ?? 30}
+                value={cam?.front_fps_armed ?? 30}
                 disabled={cam === null}
-                onChange={(e) => ch?.setCamera({ frontCapHz: Number(e.target.value) })}
+                onChange={(e) => ch?.setCamera({ frontFpsArmed: Number(e.target.value) })}
               />
-              {cam?.auto_override && (
+              {cam?.armed && cam?.auto_override && (
                 <span className="unit">実効 {cam.front_fps_effective.toFixed(0)}fps（自動運転中）</span>
               )}
             </div>
             <div className="settings-row" title="後方カメラは自動運転では使わない（GUI表示とロギング専用）ので上書きは無い">
               <div className="settings-row-head">
                 <span className="label">後カメラ 取得上限</span>
-                <b>{(cam?.rear_cap_hz ?? 10).toFixed(0)}</b>
+                <b>{(cam?.rear_fps_armed ?? 10).toFixed(0)}</b>
                 <span className="unit">fps</span>
               </div>
               <input
@@ -443,12 +494,50 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 min={1}
                 max={30}
                 step={1}
-                value={cam?.rear_cap_hz ?? 10}
-                disabled={cam === null || cam?.rear_enabled === false}
-                onChange={(e) => ch?.setCamera({ rearCapHz: Number(e.target.value) })}
+                value={cam?.rear_fps_armed ?? 10}
+                disabled={cam === null || cam?.rear_enabled_armed === false}
+                onChange={(e) => ch?.setCamera({ rearFpsArmed: Number(e.target.value) })}
               />
             </div>
-            <div className="settings-row" title="ブラウザへ送るJPEGの頻度。上げるとWi-Fi帯域を余計に使う（2026-08-24 実機で前後同時30fpsでも問題ないことを確認済み）">
+          </section>
+
+          <section className="settings-group">
+            <h3>
+              カメラ（DISARM中＝駐車中）
+              {cam !== null && (
+                <span className="unit">{cam.armed ? '　現在ARM中' : '　現在DISARM中・下記を適用中'}</span>
+              )}
+            </h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={cam?.rear_enabled_disarm ?? false}
+                disabled={cam === null}
+                onChange={(e) => ch?.setCamera({ rearEnabledDisarm: e.target.checked })}
+              />
+              後方カメラの映像取得{cam === null && '（未確認）'}
+            </label>
+            <div className="settings-row" title="駐車中は走行の応答性が要らないので、通常より低いfpsで十分">
+              <div className="settings-row-head">
+                <span className="label">前カメラ 取得上限</span>
+                <b>{(cam?.front_fps_disarm ?? 10).toFixed(0)}</b>
+                <span className="unit">fps</span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={cam?.front_fps_disarm ?? 10}
+                disabled={cam === null}
+                onChange={(e) => ch?.setCamera({ frontFpsDisarm: Number(e.target.value) })}
+              />
+            </div>
+          </section>
+
+          <section className="settings-group">
+            <h3>カメラ（共通）</h3>
+            <div className="settings-row" title="ブラウザへ送るJPEGの頻度。上げるとWi-Fi帯域を余計に使う（2026-08-24 実機で前後同時30fpsでも問題ないことを確認済み）。ARM/DISARMと無関係">
               <div className="settings-row-head">
                 <span className="label">GUIへの配信</span>
                 <b>{(cam?.gui_hz ?? 30).toFixed(0)}</b>

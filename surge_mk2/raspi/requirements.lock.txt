@@ -16,7 +16,7 @@
 # ## 作り直し方
 #
 #   ssh surge-mk2 'cd ~/surge_mk2 && .venv/bin/pip list --format=freeze' \
-#     | grep -iE '^(mcap|msgspec|numpy|pyserial|pyzmq|websockets|lz4|zstandard|onnxruntime|flatbuffers|packaging|protobuf)='
+#     | grep -iE '^(mcap|msgspec|numpy|pyserial|pyzmq|websockets|lz4|zstandard|onnxruntime|flatbuffers|packaging|protobuf|g2opy)='
 #
 # **pytest 系と pygame は入れない。** テストは開発機で走らせるものだし、
 # pygame はシミュレータ（`sim/`、Mac 側）専用で Pi には要らない。
@@ -43,3 +43,6 @@ onnxruntime==1.29.0
 flatbuffers==25.12.19
 packaging==26.3
 protobuf==7.36.0
+
+# ── slam2d バックエンド（ポーズグラフ最適化・ループ閉じ） ──
+g2opy==2.3.0

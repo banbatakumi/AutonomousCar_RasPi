@@ -166,19 +166,28 @@ export type E2EModelStatus = {
 }
 
 /** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
+ * ARM中(`_armed`)/DISARM中(`_disarm`)で別々の値を持つ（2026-09-03、駐車中の節電）。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
 export type CameraConfigStatus = {
-  /** 後方カメラの取得(capture)自体を止めるか */
-  rear_enabled: boolean
-  /** 前カメラのcapture fps上限（目安）。カメラを使う自動運転モードのengage中は無視される */
-  front_cap_hz: number
-  /** 後カメラのcapture fps上限。自動運転はrear_capture_fpsを使わないので上書きは無い */
-  rear_cap_hz: number
-  /** ブラウザへ送るJPEGの頻度。`front_cap_hz`/`rear_cap_hz` とは別物（Wi-Fi帯域が理由） */
+  /** ARM中の後方カメラ取得(capture)ON/OFF */
+  rear_enabled_armed: boolean
+  /** DISARM中（駐車中）の後方カメラ取得ON/OFF。既定OFF（監視の用途が無い） */
+  rear_enabled_disarm: boolean
+  /** ARM中の前カメラcapture fps上限（目安）。カメラを使う自動運転モードのengage中は無視される */
+  front_fps_armed: number
+  /** DISARM中（駐車中）の前カメラcapture fps上限 */
+  front_fps_disarm: number
+  /** ARM中の後カメラcapture fps上限。自動運転はrear_fpsを使わないので上書きは無い */
+  rear_fps_armed: number
+  /** ブラウザへ送るJPEGの頻度。ARM状態と無関係（Wi-Fi帯域が理由） */
   gui_hz: number
-  /** 実際にcamera_nodeへ指示している前カメラのfps（自動運転中はfront_cap_hzより優先して最大になる） */
+  /** 現在の車両ARM状態（サーバが`vehicle_state`から判定） */
+  armed: boolean
+  /** 実際にcamera_nodeへ指示している前カメラのfps（自動運転中は上限を無視して最大になる） */
   front_fps_effective: number
-  /** カメラを使う自動運転モードでengage中で、front_cap_hzを上書きしているか */
+  /** 実際にcamera_nodeへ指示している後方カメラのON/OFF */
+  rear_enabled_effective: boolean
+  /** カメラを使う自動運転モードでengage中で、front_fps_armedを上書きしているか */
   auto_override: boolean
 }
 
@@ -268,6 +277,27 @@ export type LogFile = {
 export type LogsMsg = {
   type: 'logs'
   files: LogFile[]
+}
+
+/** `saved_maps/` にある保存済み地図の1件（`maps_list`の応答、`raspi/auto/mapstore.py`）。
+ * `LogFile`と同じ形だが、地図固有のメタデータ（格子サイズ・経路長）を持つ */
+export type MapFile = {
+  name: string
+  /** UNIX epoch秒 */
+  created_at: number
+  /** [m/セル] */
+  resolution: number
+  width: number
+  height: number
+  raceline_points: number
+  /** レーシングライン1周の長さ [m] */
+  length_m: number
+}
+
+/** `/ws/control` のサーバ → GUI。`maps_list`/`maps_save`/`maps_delete` への応答。 */
+export type MapsMsg = {
+  type: 'maps'
+  map_files: MapFile[]
 }
 
 /** GUI → サーバ の走行指令。SI 単位。 */

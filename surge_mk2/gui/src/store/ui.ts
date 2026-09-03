@@ -16,6 +16,7 @@ import type {
   E2EModelStatus,
   FanStatus,
   LogFile,
+  MapFile,
 } from '../types'
 import { VEHICLE } from '../generated/vehicle'
 
@@ -760,6 +761,12 @@ type UiState = {
   /** `models/e2e_lidar/` にある `.onnx` の一覧（`e2eModelList` の応答） */
   e2eModelFiles: E2EModelFile[]
 
+  /** `saved_maps/` にある保存済み地図の一覧（`mapsList`/`mapsSave`/`mapsDelete` の応答） */
+  mapFiles: MapFile[]
+  /** 直近の `mapsSave()` の結果。表示したら呼び出し側が `null` に戻す
+   * （トースト的な一過性の通知——`sfl`/`mcap` のような継続状態ではない） */
+  mapSaveResult: { ok: boolean; error: string } | null
+
   set: (p: Partial<UiState>) => void
   /** 変更分だけ渡せば良い。クランプしてから保存＆反映する */
   setSettings: (p: Partial<DrivingSettings>) => void
@@ -823,6 +830,8 @@ export const useUi = create<UiState>((set, get) => ({
   camModelFiles: [],
   e2eModel: null,
   e2eModelFiles: [],
+  mapFiles: [],
+  mapSaveResult: null,
 
   set: (p) => set(p),
   setSettings: (p) => {

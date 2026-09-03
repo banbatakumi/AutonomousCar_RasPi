@@ -21,7 +21,7 @@ import numpy as np  # noqa: E402
 from raspi.auto import PLANNERS, make_planner  # noqa: E402
 from raspi.auto.raceline import BUILD, EXPLORE, RACE, RaceLine  # noqa: E402
 from raspi.msgs import AutoMap, VehicleState  # noqa: E402
-from raspi.nav.grid import OccGrid, pack_trinary  # noqa: E402
+from raspi.nav.grid import OccGrid, pack_trinary, unpack_trinary  # noqa: E402
 from raspi.tests.test_nav import make_room_scan  # noqa: E402
 
 
@@ -57,6 +57,31 @@ class TestPacking(unittest.TestCase):
         """**端数があっても壊れない。** 400×400 は割り切れるが、将来変わりうる。"""
         t = np.array([[2, 1, 0]], dtype=np.uint8)
         self.assertTrue(np.array_equal(unpack(pack_trinary(t), 3), t.ravel()))
+
+
+class TestUnpackTrinary(unittest.TestCase):
+    """`unpack_trinary()`（`pack_trinary()`の逆変換、地図の保存・アップロード検証に使う）。"""
+
+    def test_roundtrip(self):
+        g = OccGrid(resolution=0.05, size_m=2.0)
+        g.hits[:8, :8] = 5
+        g.misses[10:16, 10:16] = 5
+        t = g.trinary()
+        h, w = t.shape
+        self.assertTrue(np.array_equal(unpack_trinary(pack_trinary(t), w, h), t))
+
+    def test_matches_gui_decoder(self):
+        """GUI（`gui/src/ws/map.ts`）と同じ手順で戻る前提が崩れていないこと。"""
+        t = np.array([[0, 1, 2, 1, 0, 2]], dtype=np.uint8)
+        h, w = t.shape
+        self.assertTrue(np.array_equal(
+            unpack_trinary(pack_trinary(t), w, h).ravel(),
+            unpack(pack_trinary(t), t.size)))
+
+    def test_corrupted_data_raises(self):
+        """アップロード経由の壊れたバイト列を弾く境界。"""
+        with self.assertRaises(Exception):
+            unpack_trinary(b"not zlib data", 10, 10)
 
 
 class TestStateMachine(unittest.TestCase):

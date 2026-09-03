@@ -3,7 +3,220 @@
 会話が圧縮されても文脈を失わないための作業ログ。**新しいセッションではまずこれを読む。**
 設計の中身は `docs/` が正。ここには「今どこまでやったか」「なぜそう決めたか」の要約だけを書く。
 
-最終更新: 2026-09-02（SLAM再着手）（バンビの指示で、2026-08-14に棚上げした
+最終更新: 2026-09-03（slam2d: 長距離ドリフト対策のフェーズ0・2（g2opy実機検証・
+実車配線）完了）（Pi起動を確認しSSH接続、`.venv/bin/pip install g2opy`が即成功
+（Pi5 aarch64 wheel、Python 3.13.5）、`slam2d/tools/spike_g2o.py`が実機で収束
+（誤差5.51e-124）することを確認——「slam2dの依存はraspi実機に持ち込まない」
+方針を転換し`raspi/requirements.txt`・`requirements.lock.txt`に`g2opy==2.3.0`
+追加。`raspi/auto/_slam2d_nav.py`の`Slam2dNav`を`Frontend`直結から
+`slam2d.pipeline.SlamSystem`（ループ閉じ込み）へ配線、`ENABLE_LOOP_CLOSURE`
+キルスイッチ追加。**`sim.bench --course circuit`の実測で、`loop_batch_size`が
+既定(10)のままだとEXPLORE走行中（10Hz呼び出し設計）に自動でバッチ最適化・
+地図再構築が発火しplan()が最大1.2秒スパイクすると判明**——`1_000_000`（実質
+無効化）にし、最適化・地図再構築は`freeze()`（EXPLORE→BUILD遷移、車両停止
+済み）での明示的`flush()`だけに限定してスパイクを467msまで低減（残りは
+広域探索自体のコストで既知の許容範囲）。`test_slam2d_raceline.py`に回帰テスト
+3件追加——**追加の過程で既存テストヘルパーの円軌道の式に運動学的不整合
+（進行方向と機体姿勢が90°ズレ）を発見**（短距離では影響しないが長距離だと
+Frontendが早期に見失う。既存テストは変更せず、新規テストのみ正しい式に）。
+`slam2d/tests/`+`raspi/tests/`合計739件green（既知の無関係な1件skip）。
+**未実施**: フェーズ5（IMU・オドメトリのフル活用）、複雑コースでの一貫した
+改善、実機での実走行確認）
+
+旧: 2026-09-03（slam2d: 長距離ドリフト対策に着手。原因特定＋`core/confidence.py`
+の情報行列推定を作り直し、oval基準ベンチマークで史上初めてループ閉じが
+Frontend単体を上回った）（計画は
+`~/.claude/plans/slam2d-slam-slam2d-imu-slam-slam2d-imu-nifty-aurora.md`。
+ユーザー提示の「シケイン付き複雑コースで自己位置がズレる」画像を発端に着手。
+**判明した主因**: `backend/`（g2opyポーズグラフ最適化＋ループ閉じ）は実装
+済みだが、`raspi/auto/_slam2d_nav.py`が意図的に`Frontend`単体のみを使い
+backendを一切呼んでいなかった（短距離ovalシムでの旧実測でループ閉じ有りの
+方が悪化したため）。長いコースではこれが蓄積ヨードリフトを補正する手段の
+完全な欠如になっていた。**フェーズ1（評価ハーネス、完了）**: シケイン・
+ヘアピン付き複雑コースを3種`sim/courses/`に固定シード生成
+（`make_random_courses.py`、procedural生成`sim/random_course.py`を流用）、
+`sim/bench.py`に`--seed`とEXPLORE終了時点の誤差記録を追加、
+`slam2d/tests/`に複雑コース用の高速ハーネス（`make_track_from_centerline`等）
+と回帰テスト新設。**フェーズ3の診断（優先度変更）**: 当初懸念した「ループ
+閉じが1周目に発火しない」問題は再現せず（3コース×3シード×4周で毎回
+5〜7本検出）——PROGRESS.mdの当該記述は実は別実装(`raspi/nav/slam.py`)に
+ついてのものだったと判明。**フェーズ4（情報行列の構造的改善、完了・成果
+あり）**: `core/confidence.py`の旧手法（`grid.score_map()`の局所曲率、探索
+安定化用に意図的にぼかした尤度場を微分）が、実測（オーバル直線区間・独立
+ノイズ40回試行）で真の到達精度（位置ばらつき0.5cm）を約40〜50倍も過小評価
+していると特定（差分刻み幅の問題ではなく尤度場の滑らかさ自体が頭打ちの原因）。
+点対応ベースのFisher情報（点対平面＋点対点の混合、ICP共分散推定の標準手法）
+に作り直し、`core/frontend.py`で「毎周期のライブブレンド用」（旧手法のまま
+固定——新手法をそのまま使うと`info_pred`に対し`info_obs`が過大になり
+oval3周のヨー誤差が0.85°→14〜65°へ悪化する退行を実測）と「キーフレーム＝
+ポーズグラフのエッジ重み用」（新手法）を分離。結果、oval基準ベンチマーク
+（3周・seed=7）でflush後ヨー誤差0.46°（Frontend単体0.85°を初めて上回る。
+旧手法は常に1.3°前後で届かなかった）。複雑コースは3例中2例で改善・1例で
+悪化と一貫性はまだ無い。`slam2d/tests/`全77件green。**未実施**: フェーズ0
+（Pi実機でのg2opy動作検証、Piがネットワーク上に見つからず保留）、フェーズ2
+（`_slam2d_nav.py`の`SlamSystem`化・実車配線）、フェーズ5（既存IMU・
+オドメトリの追加活用）、複雑コースでの一貫した改善（パラメータチューニング
+の余地））
+
+旧: 2026-09-03（SLAM: 「レーシングライン走行」を押す前に保存済み地図を
+下見し、クリックで自己位置ヒントを置けるように）（バンビの指示。「地図を選択
+した時点で走行ボタンを押す前に地図を表示させ、自己位置を指定できるように」。
+新規`GET /maps/<name>/preview`（`telemetry_node._serve_map_preview`）が
+保存済み地図を`/ws/map`と同じ`AutoMap`msgpack形式で返す——`GUI`側
+`ws/map.ts`の`build()`（展開・着色）をそのまま再利用できるよう`export`に
+変更。新規`bus/mapPreview.ts`（`live.ts`と同じ「Reactの外の可変オブジェクトを
+rAFが直接読む」流儀）が取得・保持を担当し、`MapCanvas.tsx`は
+`mapPreview.data`が非nullの間はそちらを描き自車・軌跡・障害物は出さない
+（対応する実測が無いため）。`SlamRaceButtons`（`AutoPanel.tsx`）のドロップ
+ダウン選択・DONE段での自動選択のたびにプレビューを取得し、押した瞬間
+（地図作成/レーシングライン走行どちらでも）に消して本物のライブ地図へ譲る。
+クリックで置いた自己位置ヒントは`ch.setLocateHint()`（既存、plannerに記録
+済みで`LOCATE`で使われる）に加え`setPreviewHint()`で地図パネル上に十字
+マーカーを描画（クリックしても場所が見えないと「任意の場所から始められる」
+意味が無いため）。副次的に、`vite.config.ts`の開発サーバプロキシに`/maps`が
+無く`GET /maps/<name>`ダウンロードが開発中は404だったバグも発見・修正
+（`/logs`と同じ扱いに揃えた）。`raspi/tests`（`test_telemetry_node.py`に
+`TestServeMapPreview`追加）730件・GUI `tsc -b`/`npm run build`とも
+green確認済み（`test_cam_perception_node.py`の1件のみ失敗——`cam_perception_node`
+関連で今回のSLAM作業とは無関係、変更ファイルの差分もゼロなので触れていない）。
+**未実施**: 実機での下見表示・クリックでのヒント配置・実際のLOCATE収束の
+目視確認）
+
+旧: 2026-09-03（ml_lidar: v14(gSDE)を停止しv15方針を決定）（v14を3M中
+1.4M(47%)まで走らせて経過を追跡した結果、**gSDEは収束を大幅に遅らせるだけで
+なく頭打ちしていた**——同じ1.4Mステップ時点でv13(gSDE無し)は既にreward684・
+ep_len1500(完全収束)だったのに対し、v14は直近15回の評価でreward150〜280・
+ep_len300〜760で上昇が止まっていた（watch.pyでバンビが「発散していそう」と
+見た目視観察と一致）。残り53%のスケジュールで追いつく見込みが薄いと判断し、
+学習プロセス（PID 24534）を停止した。**v15方針**: gSDEは保留し、代わりに
+①`--curriculum-frac 0.3`を再導入（v13で判明したnarrow/obstacle汎化の弱さへの
+対策、下記「2026-09-02（さらに続き）」節で計画済みだったもの）、②`sim/gym_env.py`
+の`steer_rate_weight`（生の方策出力の振動を直接罰する既存の重み、現状0.2は
+「steer_rate_weightと同程度のオーダーで見積もっただけ」の未検証値だった）を
+0.2→1.0に引き上げ、生アクションの振動そのものを報酬側から直接抑える方向に
+切り替える。他の設定（`--early-stop-patience 0`・`--timesteps 3000000`・
+`--no-reward-norm`）はv13から変更しない。今回は2変数を同時に変える
+（curriculum・steer_rate_weight）——両者は別々の問題（コース汎化 vs
+出力の滑らかさ）に対する独立した対策で干渉しにくいと判断し、計算コスト
+（1回3M stepの学習に十数時間）を踏まえ同時投入とした。結果が曖昧なら
+次は1つずつ切り分ける）
+
+旧: 2026-09-03（SLAM: DONE段でレーシングライン走行ボタンが消える不具合を修正）
+（バンビが実機で試し、スクリーンショット付きで報告。「保存されたと出るが走行
+開始ボタンが無い、自律走行解除を押すと出てくるが地図が一覧に無い」。原因は
+`AutoPanel.tsx`の`auto-engage`セクションが`!auto.engaged`だけを条件に
+`SlamRaceButtons`（2ボタン）を出し分けていたこと——直前に追加した`DONE`段
+（バンビの指示でBUILD完了後は自動disengageせず待機するよう変更済み）は
+engage済みのまま続くため、この条件では永久に単一の「解除」ボタンしか
+出ない画面になっていた。`(!auto.engaged || st?.phase === 'DONE')`に条件を
+広げ、`DONE`中でも2ボタン＋控えめな「解除」リンクを両方出すよう修正。
+副次的に、`SlamRaceButtons`の一覧更新ロジックを「`DONE`遷移をuseRefで
+エッジ検出」から「表示されるたびに（マウント時に）`mapsList()`を呼ぶ」に
+単純化——前者は`DONE`中ずっとengage済みでコンポーネントが表示されない
+という条件不備と絡んで、disengage後に再表示されても一覧が更新されない
+（＝保存済みのはずの地図が選べない）症状の直接原因だった。ついでに
+「走行中」バッジも`DONE`中は「待機中」に出し分けた（動いていないのに
+「走行中」と出るのは紛らわしいとの指摘後の先回り修正）。GUI `tsc -b`/
+`npm run build`のみ確認（Pythonは無変更）。**未実施**: 実機での
+再現手順の再確認）
+
+旧: 2026-09-03（SLAM: 実機フィードバックによる3件の追加修正）（バンビが
+GUIで試して発覚した不具合を修正。(1)「地図名を入力しようとすると車の操縦キー
+（WASD等）に奪われる」——`useDriving.ts`の`keydown`リスナーが`window`直付けで
+フォーカス要素を一切見ていなかったのが原因。`INPUT`/`TEXTAREA`/`SELECT`/
+`contentEditable`にフォーカス中は操縦キーを無視するガードを追加（E-STOPの
+`Escape`だけは安全のため素通しのまま）。(2)「地図の保存ができない」——実は
+(1)の直接の症状だった可能性が高いと判断（保存名に`w`/`a`/`s`/`d`を含むと
+入力自体が奪われ`name.trim()`が空のまま保存ボタンが無効化され続ける）。
+念のため`_maps_save`の保存可否ゲートも`RACE`段限定から`DONE`/`RACE`両方に
+広げた（下記(3)参照）。(3)「地図作成後に自動でレーシングライン走行を
+始めず、保存してボタン待ちにしたい」——`slam2d_raceline.py`に新段`DONE`を
+追加し、BUILD完了時に自動ではRACEへ進まず`_auto_save_map()`
+（`course_%Y%m%d_%H%M%S`名）で自動保存してから停止・待機するよう変更。
+「レーシングライン走行」ボタン（既存の`request_load()`→`LOCATE`経路を
+そのまま再利用）を押すまで、その場で車を動かし直してもよい。GUI側は
+`SlamRaceButtons`が`DONE`遷移を検知して一覧を再取得し、できたばかりの
+地図を自動選択する。既存テスト（円弧軌道でBUILDまで進める
+`_drive_to_race`ヘルパ等）はRACE到達ではなくDONE到達＋
+`request_load()`でLOCATEに進むことの確認に作り直した。
+`raspi/tests`+`slam2d/tests`728件・GUI `tsc -b`/`npm run build`とも
+全green確認済み。**未実施**: 実機での地図名入力・自動保存・
+「レーシングライン走行」待機フローの目視確認）
+
+旧: 2026-09-03（SLAM: 地図削除バグ修正・GUI再設計・地図の永続化・
+グローバルローカリゼーションを実装）（バンビの指示で`slam2d_raceline`まわり
+を5項目改修。(1)「地図を削除」が反映されないバグを修正——`_slam2d_nav.py`の
+`Slam2dNav.reset()`が新gridの`seq`を0に戻し、GUI側の「古い版を上書きしない」
+ガード（`ws/map.ts`）に弾かれていた。`raspi/nav/slam.py`と同じ「seqを単調
+増加させる」パターンに直した。(2)独立タブ「地図生成」を廃止し、自動運転タブの
+車体図の左に正方形パネル（`AutoMapPanel.tsx`、地図とグリッドのみ・数値非表示・
+隅に削除ボタン）を新設。(3)地図データの永続化（`raspi/auto/mapstore.py`、
+`saved_maps/<name>.npz`+`<name>.json`、3値のtrinaryだけ保存すれば
+`OccGrid`を再現できると判明したので生のhits/missesは持たない）とMac⇔Pi間の
+GUI完結アップロード/ダウンロード（`GET /maps/<name>`・専用WS
+`/ws/map_upload/<name>`——このサーバのHTTP実装はPOSTボディを受け取れないと
+実機コードで確認したため）。(4)「地図を作成」「レーシングライン走行」を
+同一planner (`slam2d_raceline`) の2ボタンに分離（`SlamRaceButtons`）。
+(5)保存済み地図から任意の場所でレーシングライン走行を始められるよう、新規
+`LOCATE`段＋グローバルローカリゼーション（`slam2d/core/localize.py`の
+`GlobalLocalizer`、地図の空きセル×粗い角度を全探索し尤度場でスコアリング）
+を実装。左右対称コースでの誤認識対策として`ambiguous`判定を持つが、合成
+テストでの実測で候補間隔やヒント半径のチューニングが誤検出率に直結すると
+判明し、`spacing=0.2m`・`ambiguous_gap=0.1`・`hint_radius=0.4m`
+（`ambiguous_min_dist`の半分未満に固定——ヒント後は原理的に誤検出しなくなる）
+に調整した。副産物として、モノレポ直下`.gitignore`の`saved_maps/*.npz`等が
+中間スラッシュを含むため`surge_mk2/`配下に効いていなかった実バグを発見・
+修正（`surge_mk2/`prefix付きに変更、`git check-ignore`で検証済み）。
+`raspi/tests`+`slam2d/tests`727件・GUI `tsc -b`/`npm run build`とも全green
+確認済み。計画は
+`~/.claude/plans/slam-slam2d-slam-mac-mac-mac-gui-groovy-waterfall.md`。
+**未実施**: 実機（Pi5+実車）でのEXPLORE→BUILD→RACE→保存→DL→UL→選択→
+レーシングライン走行の通し確認、LOCATE所要時間の実測、対称コース相当での
+`ambiguous`検出の実地確認）
+
+旧: 2026-09-03（ml_lidar: 「v13でも舵が発散」指摘を受け再検証しv14方針を修正）
+（前回「v13でv10のbang-bang問題は解消」と判断したのは誤りだった。バンビが
+watch.py・通常のシム画面の両方で発散を目視確認したのを受け衝突エピソードの
+舵角トレースを追加確認したところ、`vehicle.steer_actual`（フィルタ後の実舵角）
+は±0.3〜0.4rad程度に収まるが、**生の方策出力自体はcircuit/fujiも含め全ての
+コースで同程度に激しく振動していた**（符号反転率37〜39%）——`steer_tau`+
+`tau_steer_s`の二段フィルタがcircuit/fujiではたまたま実害を隠していただけで、
+方策出力のノイズの荒さ自体はv10から変わっていなかった。narrow/obstacleでは
+同じ振動が衝突・発散に直結する。対策として`train_rl.py`にPPOの`use_sde`
+（gSDE、状態依存の相関探索ノイズでi.i.d.ノイズによる振動を抑える）を
+`--use-sde`/`--sde-sample-freq`として追加し`app.py`のGUIにも配線
+（テスト済み・green）。v14は`curriculum_frac`再導入より先に、v13設定+
+`--use-sde`のみを追加した単一変数切り分けに変更。詳細は下記
+「2026-09-02（さらに続き）」節の「再追記（2026-09-03、バンビ「v13でも舵が
+発散しているように見える」指摘での再検証）」を参照）
+
+旧: 2026-09-03（RasPi5節電: ARM/DISARM連動カメラ節電を実装）（バンビの
+指示でラズパイ5（LiDARの電源はSTM32側で対策済み）の消費電力削減を複数
+サブエージェントで調査。`raspi/setup/install_services.sh:180-234`の
+2026-08-10 PMIC実測（カメラ2台1.15W=28%が最大の削減余地。CPUクロック低下は
+race to idleで無効・HDMI遮断はPi5非対応（vcgencmd未実装）・Bluetooth無効化は
+効果ノイズ以下、と既に検証済みで再提案しないことが分かった）と、Web外部調査
+（WiFi power_saveはWi-Fi+BTレール計0.42Wしかなく監視用WebSocketのレイテンシ
+悪化リスクの方が大きい）を踏まえ、ユーザー判断でWiFi省電力は見送り、カメラの
+DISARM/ARM連動節電のみ実装した。既存の`cam/config`インフラ
+（`_desired_front_fps`の「自動運転engage中は上限無視」という優先度上書き
+パターン）がそのまま流用できると判明したため、`_vehicle_armed()`
+（`vs.armed`、`VehicleState`がまだ届いていない起動直後はTrue＝ARM相当を
+返す）で分岐する`_desired_front_fps`/新設`_desired_rear_enabled`に拡張。
+`config/camera.json`を`front_fps_armed`/`front_fps_disarm`・
+`rear_enabled_armed`/`rear_enabled_disarm`・`rear_fps_armed`のARM/DISARM
+専用スキーマに変更（`camera_node.py`側は無変更で完結——FPS低下と後方カメラ
+ON/OFFの既存機構をそのまま使うだけなので前方カメラの完全停止は今回スコープ
+外）。GUI`SettingsPanel.tsx`にARM用/DISARM用の節電設定を別セクションで表示、
+`ws/control.ts`/`types.ts`も新スキーマに追従。`raspi/tests/test_telemetry_node.py`に
+armed/disarm/auto_engaged優先度のユニットテストを追加（`test_cmd_path.py`の
+既存スタブも新スキーマに追従）。`raspi/tests`647件・GUI `tsc --noEmit`/
+`npm run build`とも全green確認済み。計画は
+`~/.claude/plans/5-lidar-stm32-5-5-disarm-arm-fps-ex-dis-peppy-feigenbaum.md`。
+**未実施**: 実機でのDISARM/ARM切替時の`cam/config`配信値・GUI表示追従の
+目視確認、`vcgencmd pmic_read_adc`による削減量の定量実測）
+
+旧: 2026-09-02（SLAM再着手）（バンビの指示で、2026-08-14に棚上げした
 SLAM（`raspi/nav/`）を「車体非依存の汎用2D LiDAR SLAMライブラリ」として
 `slam2d/`に一から作り直した。将来のOSS公開・学習目的を兼ねる。方針決定は
 複数回の外部調査（ROS2標準スタック・非ROS軽量ライブラリ・SLAM未解決問題への
@@ -47,6 +260,19 @@ ARM・engageし、EXPLORE→BUILD→RACEまで約60秒で到達、速度1.20m/s�
 未着手）。③既存の`raspi/nav/`（自作SLAM、旧実装）とroom/oval等の合成
 テストで精度を横並び比較すると、車体依存の細かいチューニング差分が見える
 かもしれない（未着手）。旧SLAM実装・棚上げの経緯はそのまま下記に残す。）
+
+旧: 2026-09-03（ml_lidar: v13を検証しv14方針を決定）（`--early-stop-patience 0`
+（早期終了無効化）・`--timesteps 3000000`でA1+A2+reward_norm off+curriculum off
+のv13を学習し直したところ、`clip_range`/`learning_rate`が最後まで線形減衰し切り、
+`circuit`/`fuji`評価はreward755〜760・`ep_len`1500/1500で完全収束（v9の415〜445
+から倍近い改善）。シムで`best_model`の実舵角（`vehicle.steer_actual`）を直接
+確認し、v10の±1.0 bang-bang飽和が解消していることを確認——**v10の実車発散
+問題はこの構成で解消したと判断**。**ただし**narrow/obstacle込みのフル分布から
+ランダムに40コース生成し決定論的に評価したところcollision_rate=17.5%・
+reward分散大（最悪5本は9〜48stepで即クラッシュ）——`circuit`/`fuji`固定評価
+だけでは見えない、難コースへの汎化の弱さが残っている。v14は**reward_normは
+引き続きOFF・curriculum_fracだけを0.3に戻す**単一変数の再導入とする。詳細は
+下記「2026-09-02（さらに続き）」節末尾のv13追記を参照）
 
 旧: 2026-09-02（さらにさらに続き）（v12の学習結果を検証。v11・v12は
 `reward_norm`/`curriculum_frac`が同一設定（両方OFF）にもかかわらず結果が
@@ -272,6 +498,93 @@ Exploration）を試す価値がある——現状`use_sde`は未使用（i.i.d.
 per-step Gaussianノイズが毎ステップ独立にサンプルされるため、連続制御で
 典型的なbang-bang挙動を誘発しやすいとSB3側も明記）。reward_norm/curriculum
 とは独立に効く可能性があるレバーとして並行して検討する価値がある。
+
+### 追記（2026-09-03）：v13を検証しv14方針を決定
+
+上記③の指示通り`--early-stop-patience 0`（早期終了を完全無効化）・
+`--timesteps 3000000`（v9・v10が実際に収束した範囲に合わせ、5Mより短くして
+計算時間を節約）とし、`--no-reward-norm --curriculum-frac 0`はそのまま、
+A1+A2適用済みのコードでv13を学習。
+
+**収束の質（狙い通り改善）**: `train/clip_range`・`train/learning_rate`が
+最後まで線形減衰し切り（終盤`approx_kl`はほぼ0まで低下）、`circuit`/`fuji`
+固定評価は終盤8回連続でreward755〜760・`ep_len`1500/1500（v9の415〜445・
+ep_len時々1500未達から明確に改善）。`evaluations.npz`・TensorBoardとも
+早期終了時のようなノイズの山を拾った形跡は無い。
+
+**実舵角のロールアウト確認（v10問題の解消を確認）**: `best_model.zip`を
+シムでロールアウトし、`ml_lidar/env.py`の生アクション→`SimE2EEnv._steer`
+（`steer_tau`フィルタ後）→`vehicle.steer_actual`（アクチュエータのむだ時間+
+一次遅れ後、実際に車輪を切る角度）の3段階を直接比較。生アクションだけ見ると
+符号反転が多く一見bang-bangに見えるが、これは中央付近の微小ノイズによる
+見かけ上のカウントで、**実際に車輪を切る`steer_actual`は滑らかに連続変化し、
+v10で確認されたような±1.0飽和の激しい往復は再現しなかった**——v10の実車
+発散問題はA1+A2+reward_norm off+curriculum off+早期終了スケジュール修正の
+組み合わせで解消したと判断してよい。
+
+**新たに判明した弱点（circuit/fuji評価だけでは見えなかった）**:
+`sim.random_course.generate_diverse_course`のフル分布（organic/circuit/
+corridor/narrow/obstacle、道幅0.7〜1.3m——`curriculum_frac=0`なのでv13は
+学習中この分布に最初から曝されている）から乱数40コースを生成し決定論的に
+評価したところ、**collision_rate=17.5%（7/40）・reward=586.7±286.4
+（分散が非常に大きい）・最悪5本は9〜48stepで即クラッシュ**。`circuit`/
+`fuji`という2本の固定コースだけを見ていると「ほぼ完璧」に見えるが、
+narrow/obstacle寄りの難しい条件への汎化はまだ弱いことが分かる。
+
+**v14方針（単一変数の再導入）**: `reward_norm`は引き続き**OFFのまま**
+（v13で実証済みの安定挙動・実舵角の滑らかさを崩すリスクを取ってまで
+戻す理由が無い）。**`curriculum_frac`だけを本来の既定値`0.3`に戻す**
+——`curriculum_frac=0`（v13）は学習序盤からnarrow/obstacleを含むフル難度
+分布を経験させているにもかかわらず上記の汎化の弱さが残っており、
+`CurriculumCourseFn`docstringが元々想定していた「一部のコース条件でだけ
+評価成績が大崩れする」症状とも一致する。他の設定（`--early-stop-patience 0`・
+`--timesteps 3000000`・A1+A2・reward_norm off）はv13から変更しない。
+v14完了後は、v13と同じ40ランダムコース評価（`np.random.default_rng(123)`で
+同一seed列を使うと直接比較できる）でcollision_rate・reward分散が改善したか
+を必ず確認すること——`circuit`/`fuji`評価だけでは今回の弱点を再現できない。
+
+### 再追記（2026-09-03、バンビ「v13でも舵が発散しているように見える」指摘での再検証）
+
+上の「v13でv10のbang-bang問題は解消」という判断は**誤りだった**。バンビが
+`ml_lidar/watch.py`と通常のシム画面（narrow/obstacle込みのランダムコース
+パネル）の両方で発散を目視確認したのを受け、40ランダムコース評価の**衝突
+エピソードそのものの舵角トレース**を追加確認した。
+
+`vehicle.steer_actual`（フィルタ・アクチュエータ後の実舵角）自体は衝突直前
+でも±0.3〜0.4rad程度に収まっており、v10のような±1.0飽和ではない——ここは
+前回確認の通り。**しかし生の方策出力（`action[0]`、フィルタ前）は、
+衝突コースだけでなく好成績だったcircuit/fujiでも同程度に激しく振動している**
+（mean|diff|≈0.28〜0.35、隣接ステップの符号反転が全体の37〜39%——例:
+circuit評価の実測列 `1.0, -0.23, 0.82, -0.33, 0.68, -0.44, 0.59...`）。
+**circuit/fujiでは`steer_tau`（環境側の一次遅れ、dt=tau=0.1sでα≈0.63）+
+車両の`tau_steer_s`（実測0.539s、A2修正後は正しく効く）という二段のフィルタが
+たまたまこの振動を実害の出ない範囲まで削り切れていただけで、方策自身が
+出す信号の荒さ（探索ノイズの大きさ）そのものはv10から実質変わっていない**。
+narrow/obstacleのような余裕の少ないコースでは同じ振動が姿勢を乱すのに
+十分な大きさになり、衝突および「発散して見える」挙動として顕在化する。
+つまり早期終了/スケジュール修正・A1・A2・reward_norm off・curriculum off
+はいずれも「二段フィルタが誤魔化せる程度まで実害を抑える」効果はあったが、
+**根本原因（方策出力自体のノイズの荒さ）には手を付けていなかった**。
+
+**v14方針を修正**: `curriculum_frac`の再導入より前に、**PPOの`use_sde`
+（generalized State-Dependent Exploration）を試す**——毎ステップi.i.d.に
+サンプルされる既定のガウス探索ノイズが振動の直接原因と疑われるため、状態
+依存の相関ノイズを`sde_sample_freq`ステップごとにしか再サンプルしない
+gSDEに切り替えれば、時間的に滑らかな探索軌道になり生の出力の振動そのものが
+減るとSB3側も明記している。`train_rl.py`に`--use-sde`/`--sde-sample-freq`
+（既定4）を追加し、`run_config.json`記録・`ml_lidar/app.py`のGUI
+（チェックボックス+エントリ）にも配線済み（スモークテストで疎通確認済み、
+`ml_lidar/tests`131件green・既存の`test_vehicle_grip.py`1件のみ無関係な
+既存失敗）。v14は**v13の設定（`--early-stop-patience 0`・`--timesteps
+3000000`・`--no-reward-norm`・`--curriculum-frac 0`）はそのまま**、
+`--use-sde --sde-sample-freq 4`だけを追加した単一変数の切り分けとする。
+
+v14完了後は①生アクション（`action[0]`、フィルタ前）のmean|diff|・符号反転率が
+v13より下がっているか、②同じ40ランダムコース評価でcollision_rateが下がって
+いるか、の両方を確認すること。gSDEで振動が収まらなければ、方策の出力層の
+活性化（squash_output）やreward側の`steer_rate_weight`をもっと強める方向を
+次に疑う。curriculum_fracの再導入（元々の生成の狭さ・narrow/obstacleへの
+汎化不足への対策）はgSDEの効果を見極めた後、引き続き一つずつ試す。
 
 ---
 

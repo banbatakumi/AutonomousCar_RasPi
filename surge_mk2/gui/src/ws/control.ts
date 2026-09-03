@@ -9,7 +9,7 @@
  * 同じ経路で停止する。「止める指令を送る」設計だと、その指令が届かない
  * 状況（＝一番止めたい状況）で止まらない。
  */
-import type { CamModelFile, CmdOut, ControlStatus, E2EModelFile, LogFile } from '../types'
+import type { CamModelFile, CmdOut, ControlStatus, E2EModelFile, LogFile, MapFile } from '../types'
 import { authToken } from './token'
 import { wsUrl } from './url'
 
@@ -30,6 +30,9 @@ type ServerMsg = {
   files?: LogFile[]
   cam_model_files?: CamModelFile[]
   e2e_model_files?: E2EModelFile[]
+  map_files?: MapFile[]
+  ok?: boolean
+  error?: string
   id?: number
 }
 
@@ -47,6 +50,10 @@ export type ControlHandlers = {
   onCamModels: (files: CamModelFile[]) => void
   /** `e2e_model_list` への応答（`models/e2e_lidar/` にある `.onnx` の一覧） */
   onE2EModels: (files: E2EModelFile[]) => void
+  /** `maps_list`/`maps_save`/`maps_delete` への応答（`saved_maps/` の一覧） */
+  onMaps: (files: MapFile[]) => void
+  /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
+  onMapsSaveResult: (ok: boolean, error: string) => void
 }
 
 export class ControlChannel {
@@ -87,6 +94,8 @@ export class ControlChannel {
       else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
       else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
       else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
+      else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
+      else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
@@ -155,6 +164,54 @@ export class ControlChannel {
     this.send({ type: 'auto', clear_map: true })
   }
 
+  /**
+   * 「地図を作成」。`slam2d_raceline`を選び、新規EXPLOREから走り始める。
+   * 既存の`clearMap()`をそのまま使う（新しいコードパスは要らない——
+   * `Slam2dRaceLine.request_clear()`は`reset()`を呼ぶだけで`phase=EXPLORE`
+   * に戻るため。`raspi/auto/slam2d_raceline.py`参照）。
+   */
+  startSlam2dExplore() {
+    this.send({ type: 'auto', mode: 'slam2d_raceline', clear_map: true, engaged: true })
+  }
+
+  /**
+   * 「レーシングライン走行」。保存済み地図を読み込み、地図作成（EXPLORE/BUILD）
+   * を経ずに自己位置復元（LOCATE）から走り始める。
+   *
+   * `freezeMap`/`clearMap`と同じ「回数」の約束（`AutoCtrl.race_seq`）。
+   */
+  startSlam2dRace(mapName: string) {
+    this.send({ type: 'auto', mode: 'slam2d_raceline', load_map: true, map_name: mapName, engaged: true })
+  }
+
+  /**
+   * 地図パネルのクリックで、自己位置探索（グローバルローカリゼーション）の
+   * 絞り込みヒントを送る。`freezeMap`/`clearMap`と同じ「回数」の約束
+   * （`AutoCtrl.loc_hint_seq`）。座標はmapフレーム（世界座標、`m`単位）。
+   */
+  setLocateHint(x: number, y: number) {
+    this.send({ type: 'auto', hint_map: true, hint_x: x, hint_y: y })
+  }
+
+  // ── 保存済み地図（`saved_maps/`、`raspi/auto/mapstore.py`） ──
+
+  /** 一覧を要求する。応答は `onMaps`（`logsList`と同じ流儀）。 */
+  mapsList() {
+    this.send({ type: 'maps_list' })
+  }
+
+  /**
+   * 今の地図（`slam2d_raceline`のRACE段のスナップショット）を名前を付けて
+   * 保存する。成否は`onMapsSaveResult`、続けて最新の一覧が`onMaps`に届く。
+   */
+  mapsSave(name: string) {
+    this.send({ type: 'maps_save', name })
+  }
+
+  mapsDelete(name: string) {
+    this.send({ type: 'maps_delete', name })
+  }
+
   // ── ファン（Pi5純正クーリング） ──
 
   /**
@@ -179,20 +236,27 @@ export class ControlChannel {
 
   /**
    * capture側(camera_node)のFPS上限・後方カメラの取得ON/OFF・GUIへのJPEG配信頻度。
-   * `fan`/`tc_tv` と同じく状態はサーバが真値。**4つとも省略できる**（送った項目だけ効く）。
+   * `fan`/`tc_tv` と同じく状態はサーバが真値。**どれも省略できる**（送った項目だけ効く）。
+   * ARM中/DISARM中で別々の値を持つ（2026-09-03、駐車中の節電のため）。
    *
-   * `frontCapHz` は目安の上限にすぎない——カメラを使う自動運転モード
+   * `frontFpsArmed` は目安の上限にすぎない——カメラを使う自動運転モード
    * （`line_trace`/`ftg_cam`）が engage されている間は、サーバ側がこれを無視して
    * 上限まで引き上げる（`status.camera_config.auto_override` で分かる）。
-   * `guiHz` はブラウザへ送るJPEGの頻度で、`frontCapHz`/`rearCapHz` とは別物
-   * （前者はWi-Fi帯域、後者はcamera_nodeの消費電力が理由）。
+   * `guiHz` はブラウザへ送るJPEGの頻度で、ARM状態と無関係（Wi-Fi帯域が理由）。
    */
-  setCamera(p: { frontCapHz?: number; rearCapHz?: number; rearEnabled?: boolean; guiHz?: number }) {
+  setCamera(p: {
+    frontFpsArmed?: number; frontFpsDisarm?: number
+    rearFpsArmed?: number
+    rearEnabledArmed?: boolean; rearEnabledDisarm?: boolean
+    guiHz?: number
+  }) {
     this.send({
       type: 'camera',
-      front_cap_hz: p.frontCapHz,
-      rear_cap_hz: p.rearCapHz,
-      rear_enabled: p.rearEnabled,
+      front_fps_armed: p.frontFpsArmed,
+      front_fps_disarm: p.frontFpsDisarm,
+      rear_fps_armed: p.rearFpsArmed,
+      rear_enabled_armed: p.rearEnabledArmed,
+      rear_enabled_disarm: p.rearEnabledDisarm,
       gui_hz: p.guiHz,
     })
   }

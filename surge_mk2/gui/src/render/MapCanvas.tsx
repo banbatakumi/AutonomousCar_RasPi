@@ -23,9 +23,18 @@
  *
  * 地図の枠は 24m 四方あるが、コースはその一部しか占めない。枠に合わせると
  * 豆粒になるので、`MapData.known`（未知でないセルの外接矩形）に合わせる。
+ *
+ * ## プレビュー中は地図だけ描き、自車・軌跡・障害物は出さない
+ *
+ * `bus/mapPreview.ts`の`mapPreview.data`が非nullの間はそちらを描く
+ * （「レーシングライン走行」を押す前の下見、`AutoMapPanel.tsx`参照）。
+ * プレビュー中の地図に対応する実測の自己位置は無いので、`live.auto`は
+ * 読まない——`auto`をnullのままにしておけば、下の`if (auto) {...}`群が
+ * 自然に何も描かなくなる（2026-09-03）。
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
+import { mapPreview } from '../bus/mapPreview'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 
 /** 車体の描画用寸法 [m]。`LidarView.tsx` と同じ算出方法（`config/vehicle.toml` の
@@ -48,6 +57,9 @@ const C = {
   target: '#5ef0a8',
   obstacle: '#e0574d',
   text: '#8a99a8',
+  //: 自己位置ヒント（`bus/mapPreview.ts`の`mapPreview.hint`）。自車（`bodyLine`の
+  //: 青系）・障害物（赤）・経路（速度で色分け）のどれとも被らない色にする
+  hint: '#ffc63f',
 }
 
 /** 速度 [m/s] → 色。**遅い＝赤、速い＝緑**。アウトインアウトが効いているかは
@@ -67,8 +79,11 @@ export function clearTrail() {
   trail.length = 0
 }
 
-export function MapCanvas() {
+export function MapCanvas({ onWorldClick }: { onWorldClick?: (x: number, y: number) => void }) {
   const ref = useRef<HTMLCanvasElement>(null)
+  //: 直近フレームの世界→画面変換。`onClick`は描画ループの外（Reactのイベント
+  //: ハンドラ）から呼ばれるので、`sx`/`sy`のクロージャではなく`ref`で最新値を渡す
+  const xform = useRef({ ox: 0, oy: 0, px: 1 })
 
   useEffect(() => {
     const cv = ref.current
@@ -90,8 +105,9 @@ export function MapCanvas() {
       ctx.fillStyle = C.bg
       ctx.fillRect(0, 0, w, h)
 
-      const map = live.map
-      const auto = live.auto
+      const previewing = mapPreview.data !== null
+      const map = previewing ? mapPreview.data : live.map
+      const auto = previewing ? null : live.auto
 
       // ── 表示範囲を決める。地図が無い間は自車の周り 8m ──
       let box = map?.known
@@ -109,6 +125,7 @@ export function MapCanvas() {
       // 世界 → 画面。**y を反転**（世界は上が +y、画面は下が +y）
       const sx = (x: number) => w / 2 + (x - ox) * px
       const sy = (y: number) => h / 2 - (y - oy) * px
+      xform.current = { ox, oy, px }
 
       drawGrid(ctx, w, h, sx, sy, px, box)
 
@@ -160,13 +177,24 @@ export function MapCanvas() {
         }
         drawVehicle(ctx, auto.pose_x, auto.pose_y, auto.pose_yaw, sx, sy, px)
       }
+      if (mapPreview.hint) drawHint(ctx, mapPreview.hint.x, mapPreview.hint.y, sx, sy)
       drawScale(ctx, w, h, px)
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
   }, [])
 
-  return <canvas ref={ref} className="map-canvas" />
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!onWorldClick || !ref.current) return
+    const rect = ref.current.getBoundingClientRect()
+    const { ox, oy, px } = xform.current
+    // 画面座標 → 世界座標。`sx`/`sy`の逆変換（中心基準、yは反転）
+    const wx = ox + (e.clientX - rect.left - rect.width / 2) / px
+    const wy = oy - (e.clientY - rect.top - rect.height / 2) / px
+    onWorldClick(wx, wy)
+  }
+
+  return <canvas ref={ref} className="map-canvas" onClick={onWorldClick ? handleClick : undefined} />
 }
 
 function drawGrid(
@@ -309,6 +337,32 @@ function drawVehicle(
   ctx.lineTo(front, 0)
   ctx.stroke()
   ctx.restore()
+}
+
+/** 自己位置ヒント（`bus/mapPreview.ts`）。**十字＋輪**にして、点だけより
+ *  地図上で見失いにくくする（`drawObstacles`の塗り円と紛れないよう輪だけ）。 */
+function drawHint(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  sx: (v: number) => number,
+  sy: (v: number) => number,
+) {
+  const cx = sx(x)
+  const cy = sy(y)
+  ctx.strokeStyle = C.hint
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(cx, cy, 8, 0, Math.PI * 2)
+  ctx.moveTo(cx - 12, cy)
+  ctx.lineTo(cx - 4, cy)
+  ctx.moveTo(cx + 4, cy)
+  ctx.lineTo(cx + 12, cy)
+  ctx.moveTo(cx, cy - 12)
+  ctx.lineTo(cx, cy - 4)
+  ctx.moveTo(cx, cy + 4)
+  ctx.lineTo(cx, cy + 12)
+  ctx.stroke()
 }
 
 function drawScale(ctx: CanvasRenderingContext2D, w: number, h: number, px: number) {

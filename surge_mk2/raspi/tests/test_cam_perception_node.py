@@ -21,8 +21,9 @@ from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import CamModelCtrl, ImageRef  # noqa: E402
+from raspi.msgs import AutoCtrl, CamModelCtrl, ImageRef  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_AUTO_CTRL,
     TOPIC_CAM_MODEL,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN_CAM,
@@ -234,7 +235,12 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
         self.assertEqual(st.sector_seen, [False] * 12)
 
     def test_selecting_a_model_via_cam_model_topic_starts_inference(self):
-        """`cam/model` に流れてきた名前を `run()` が実際に拾って切り替えること。"""
+        """`cam/model` に流れてきた名前を `run()` が実際に拾って切り替えること。
+
+        `ftg_cam` が選ばれていないと推論そのものをスキップする
+        （IDLE/ACTIVE、下の `TestModeGating`）ので、ここでは
+        `auto/ctrl` の `mode="ftg_cam"` も一緒に流す。
+        """
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring = FrameRing.create("surge_test_cam_perception_run", 32, 24, "RGB888", n_slots=2)
         try:
@@ -243,15 +249,194 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a")})
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
             pub = _FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             self.assertIsNotNone(node.model)
             self.assertEqual(node._loaded_model_name, "model_a")
+            # **`pub.sent[-1]` では見ない。** 間引き（`infer_hz` 既定10Hz）により
+            # `scan/cam` は推論が起きた周期しか publish されないため、この短い
+            # `duration_s` では heartbeat の方が後に送られていることがある
+            # （バスの最終メッセージ＝最新の推論結果、が成り立たなくなった）
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            self.assertTrue(scans, "scan/cam が一度も publish されていない")
+            self.assertTrue(any(scans[-1].sector_seen),
+                            "モデルが選ばれたのに推論結果が出ていない")
+        finally:
+            node.close()
+            ring.unlink()
+
+
+class TestModeGating(unittest.TestCase):
+    """`auto/ctrl` の `mode` で推論そのものの ACTIVE/IDLE を切り替える（CPU節約）。
+
+    `cam_perception_node` は常時起動（`surge-cam-perception`）が前提になった
+    ため、`ftg_cam` が選ばれていない間はフレームを読みすらしないことを
+    ここで保証する（`cam_track_node.py` の IDLE と同じ考え方）。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.models_dir = Path(self._tmp.name)
+        _make_dummy_model(self.models_dir / "model_a.onnx", 32, 32)
+        (self.models_dir / "model_a.json").write_text(
+            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "threshold": 0.5}')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _ref_with_frame(self, ring_name: str):
+        ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
+        data = np.full((24, 32, 3), 255, dtype=np.uint8)
+        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                       frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                       fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+        return ring, ref
+
+    def test_stays_idle_when_a_different_mode_is_selected(self):
+        """モデル選択済み・フレームありでも、選ばれているモードが `ftg_cam`
+        でなければ壁扱いのまま（推論を回さない）。"""
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_cam_gating_idle")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            # `reload_if_changed` はモード非依存で呼ばれ、モデル自体はロードされる
+            self.assertIsNotNone(node.model)
             topic, st = pub.sent[-1]
             self.assertEqual(topic, TOPIC_SCAN_CAM)
-            self.assertTrue(any(st.sector_seen), "モデルが選ばれたのに推論結果が出ていない")
+            self.assertEqual(st.sector_seen, [False] * 12,
+                             "ftg_cam以外が選ばれているのに推論結果が出ている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_no_auto_ctrl_at_all_stays_idle(self):
+        """`auto/ctrl` がまだ一度も届いていない起動直後も IDLE 側に倒す。"""
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_cam_gating_no_ctrl")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            topic, st = pub.sent[-1]
+            self.assertEqual(st.sector_seen, [False] * 12)
+        finally:
+            node.close()
+            ring.unlink()
+
+
+class TestInferenceRateLimiting(unittest.TestCase):
+    """省電力化: 推論（ONNX＋IPM投影＋raycast）を `infer_hz` に間引くこと。
+
+    `follow_the_gap_cam.py` の `stale_ms=500` に対し実際に必要な更新頻度は
+    カメラの実フレームレート（既定30fps）よりずっと低い。間引いた周期は
+    `failed_frame()`（壁扱い）ではなく、直前の推論結果を seq だけ更新して
+    出し続けることを確認する。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.models_dir = Path(self._tmp.name)
+        _make_dummy_model(self.models_dir / "model_a.onnx", 32, 32)
+        (self.models_dir / "model_a.json").write_text(
+            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "threshold": 0.5}')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _ref_with_frame(self, ring_name: str):
+        ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
+        data = np.full((24, 32, 3), 255, dtype=np.uint8)
+        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                       frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                       fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+        return ring, ref
+
+    def test_a_low_infer_hz_runs_inference_only_once_within_the_window(self):
+        # infer_hz=1（周期1s）＝ テストの実行時間よりずっと長いので、ループが
+        # 何周しても最初の1回しか process_frame() は走らないはず
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load(),
+                                 infer_hz=1.0)
+        ring, ref = self._ref_with_frame("surge_test_ratelim_low")
+        # ループが何周したかを `read_frame()` の呼び出し回数で数える。
+        # **`pub.sent` では数えない**——`Publisher.send()` は呼ぶたびに独自の
+        # seq を打ち直す（`bus/zbus.py`）ので、間引き中は publish 自体を
+        # 省略する仕様に変えた（`scan/cam` を毎周publishすると、内容が同じでも
+        # planning_node の重複排除が効かずFTGがフルレートで回り続けるため）
+        read_calls = 0
+        orig_read_frame = node.read_frame
+
+        def counting_read_frame(ref):
+            nonlocal read_calls
+            read_calls += 1
+            return orig_read_frame(ref)
+
+        node.read_frame = counting_read_frame
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+
+            self.assertGreater(read_calls, 1, "テストがループを複数周していない")
+            self.assertEqual(node._infer_count, 1, "間引き周期内なのに複数回推論している")
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            self.assertEqual(len(scans), 1,
+                             "間引き中も scan/cam を publish し、planning_node 側の"
+                             "重複排除を無効化している（seq は Publisher.send() が"
+                             "毎回打ち直すため、中身が同じでも「新しい周」に見える）")
+            self.assertTrue(any(scans[0].sector_seen),
+                            "唯一のpublishが壁扱い（failed_frame）になっている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_infer_hz_zero_disables_throttling(self):
+        # infer_hz=0 は「間引きなし」＝ ループが回るたびに毎回推論する
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load(),
+                                 infer_hz=0.0)
+        ring, ref = self._ref_with_frame("surge_test_ratelim_unthr")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            self.assertEqual(node._infer_count, len(scans),
+                             "infer_hz=0 なのに一部の周期が推論をスキップしている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_switching_away_from_ftg_cam_resets_the_cached_scan(self):
+        """`ftg_cam` を抜けて戻ると、古いキャッシュではなく新しく推論すること。"""
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load(),
+                                 infer_hz=1.0)
+        ring, ref = self._ref_with_frame("surge_test_ratelim_resume")
+        try:
+            latest = {TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                      TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")}
+            sub = _FakeSub(latest)
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+            self.assertEqual(node._infer_count, 1)
+
+            latest[TOPIC_AUTO_CTRL] = AutoCtrl(mode="line_trace")
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            latest[TOPIC_AUTO_CTRL] = AutoCtrl(mode="ftg_cam")
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+            self.assertEqual(node._infer_count, 2, "再選択直後にキャッシュを使い回している")
         finally:
             node.close()
             ring.unlink()

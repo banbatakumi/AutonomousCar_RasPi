@@ -110,6 +110,7 @@ import { LidarMini } from '../components/rc/LidarMini'
 import { RcBar } from '../components/rc/RcBar'
 import { SpeedGauge } from '../components/rc/SpeedGauge'
 import { SteerGauge } from '../components/rc/SteerGauge'
+import { HazardButton, WinkerButton, WinkerIndicator } from '../components/rc/WinkerHazard'
 import { SettingsDrawer } from '../components/SettingsDrawer'
 import { useContainFit } from '../hooks/useContainFit'
 import { useElementSize } from '../hooks/useElementSize'
@@ -255,10 +256,32 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
             </div>
           )}
 
+          {/* 舵角計・速度計・G メータは同じ `dialHeight` で揃える（メータ自体は
+              縮めない）。ウィンカーは舵角計の左・G メータの右にそれぞれ添える
+              `.winker-side`（点滅表示を上、矢印ボタンを下に積む）——実車の
+              ダッシュボードで速度計を挟んで左右にウィンカーランプが並ぶ配置に
+              寄せた（2026-09-03、タブ行からの移設）。速度計は元の3カラム
+              グリッド（`1fr auto 1fr`）のまま中央固定、舵角計側・G メータ側は
+              それぞれウィンカーごと1つの `.gauge-group` にまとめて左右の
+              カラムへ寄せる。ハザードはメータパネル右下に絶対配置
+              （`.hazard-btn`、`styles.css`） */}
           <div className="rc-cam-gauges">
-            <SteerGauge dialHeight={dialH} />
+            <div className="gauge-group gauge-group-left">
+              <div className="winker-side">
+                <WinkerIndicator side="left" />
+                <WinkerButton side="left" />
+              </div>
+              <SteerGauge dialHeight={dialH} />
+            </div>
             <SpeedGauge dialHeight={dialH} />
-            <GMeter dialHeight={dialH} />
+            <div className="gauge-group gauge-group-right">
+              <GMeter dialHeight={dialH} />
+              <div className="winker-side">
+                <WinkerIndicator side="right" />
+                <WinkerButton side="right" />
+              </div>
+            </div>
+            <HazardButton />
           </div>
         </div>
       </div>

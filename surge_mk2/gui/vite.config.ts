@@ -20,6 +20,9 @@ export default defineConfig({
       '/ws': { target: `ws://${host}:${port}`, ws: true, changeOrigin: true },
       // `.sfl`/`.mcap` のダウンロード（`GET /logs/<name>`）。開発中もPiから直接落とせるように
       '/logs': { target: `http://${host}:${port}`, changeOrigin: true },
+      // 保存済み地図のダウンロード（`GET /maps/<name>`）・プレビュー取得
+      // （`GET /maps/<name>/preview`）。`/logs`と同じ理由
+      '/maps': { target: `http://${host}:${port}`, changeOrigin: true },
     },
   },
 })

@@ -63,7 +63,7 @@
 | `gui/` | **rsync だけ**（`tools/deploy.sh`）。telemetry_node は毎リクエストでファイルを読む | しない |
 | `raspi/nodes/telemetry_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera） | しない |
 | `raspi/nodes/camera_node.py` | 同上 | しない |
-| `raspi/nodes/cam_perception_node.py` | **`--restart` には入っていない**（`surge-planning`と同じ既知の穴）。`ssh surge-mk2 'sudo systemctl restart surge-cam-perception'`。**`surge-cam-perception`は既定で無効**なので、有効化していなければ何もしなくてよい | しない |
+| `raspi/nodes/cam_perception_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-cam-perception） | しない |
 | `raspi/nodes/line_perception_node.py` | **systemd unit がまだ無い**（`install_services.sh` に未登録。§11 の穴）。`line_trace` を実車で試すには `ssh surge-mk2 'cd surge_mk2 && .venv/bin/python -u -m raspi.nodes.line_perception_node'` で手動起動する | しない |
 | **`raspi/auto/` `raspi/nav/` `planning_node.py`** | **`ssh surge-mk2 'sudo systemctl restart surge-planning'`**（★ `--restart` に入っていない。下記） | しない |
 | `config/vehicle.toml` `config/auto.json` | 読んでいるノードを再起動（planning / io）。`vehicle.toml` は**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
@@ -584,7 +584,7 @@ UI は `sim/gui.py`（pygame）側に置く。シム ↔ シム GUI の通信も
 | `telemetry_node._serve_log_file` | `.mcap`（実測 87MB の実績）を**全部メモリに載せて**返す |
 | `LinkTracker` | STM32 からの `LOG`(0x04) パケットを**受信数に数えるだけでどこにも出さない** |
 | `logger_node` の記録対象 | `auto/*` を含まないので、**自律走行の判断根拠が `.mcap` に残らない** |
-| `install_services.sh` | `line_perception_node.py` の systemd unit が**まだ無い**（`cam_perception_node` には `--with-cam-perception` がある一方、こちらは登録手段自体が無い）。実車で `line_trace` を試すには手動起動が要る（§2） |
+| `install_services.sh` | `line_perception_node.py` の systemd unit が**まだ無い**（`cam_perception_node` は常時 enable の unit がある一方、こちらは登録手段自体が無い）。実車で `line_trace` を試すには手動起動が要る（§2） |
 
 ---
 
@@ -600,7 +600,7 @@ GUI でモデル名を選ぶ**」という流れは共通だが、中身も検�
 | モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`）。**E2E とは別ディレクトリ** |
 | 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`（`FollowTheGap`をそのまま流用） |
 | シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（`sim.run` は `--no-camera` 固定でカメラを持たない） |
-| 実車で動かすのに要る追加操作 | 無し（`planning_node` が engage 中だけ推論する） | `surge-cam-perception` を有効化する必要あり（**既定で無効**。下記 12.2） |
+| 実車で動かすのに要る追加操作 | 無し（`planning_node` が engage 中だけ推論する） | 無し（`surge-cam-perception` は常時 enable。`auto/ctrl` で `ftg_cam` 選択中だけ推論する。下記 12.2） |
 
 いずれも `models/` はリポジトリの `.gitignore` 対象（機体・学習ごとに違う大容量ファイルのため）。
 配布は `tools/deploy.sh` の rsync に任せる——コミットには乗らない。
@@ -722,31 +722,28 @@ tools/deploy.sh --no-gui
 薄い Tkinter GUI。推論・学習のロジックは持たないので、中身のスクリプトを直せば
 こちら側は何も変えなくてよい。
 
-★ **実車での推論プロセス（`surge-cam-perception`）は systemd unit として存在するが、
-既定では無効。** `install_services.sh` は他の4ノードと違ってこの unit を
-`enable --now` しない（2026-08-28、`--with-cam-perception` を追加）。理由は
-`ftg_cam` が実験的なモードであることに加え、**`cam_perception_node` は
-`planning_node` が今どのモードを選んでいるかを一切知らない独立プロセス**で、
-前方カメラのフレームが来る限り`ftg_cam`を使う気が無くても CNN 推論を回し続ける
-——常時有効にすると CPU・電力を無条件に消費し続けるため:
+★ **実車での推論プロセス（`surge-cam-perception`）は常時 enable の systemd unit。**
+以前は「`planning_node` が今どのモードを選んでいるかを一切知らない独立プロセス」で
+前方カメラのフレームが来る限り無条件に CNN 推論を回し続けるため既定で無効にしていたが、
+`cam_perception_node.py` 自身が `auto/ctrl`（`AutoCtrl.mode`。telemetry_node が GUI の
+選択を送り続けるトピック）を見て**`ftg_cam` が選ばれている間だけ推論する**よう変更した
+（2026-09-03、`cam_track_node.py` の待機コスト設計に揃えた）。手で起動する必要はない:
 
 ```bash
-ssh surge-mk2
-sudo systemctl start surge-cam-perception          # 一時的に（このブート限り）
-sudo systemctl enable --now surge-cam-perception    # 次回起動時も自動で有効化
-# または: sudo bash ~/surge_mk2/raspi/setup/install_services.sh --with-cam-perception
+ssh surge-mk2 systemctl status surge-cam-perception   # 動いているか確認するだけならこれで十分
 ```
 
 - 起動時の既定引数には `--model` を渡していないので、GUI（設定タブ
   「セグメンテーションモデル」）で選んだモデル名を `cam/model` トピック経由で待つ
-  （プロセス再起動もSSHも要らずにモデルだけ選び直せる）
+  （プロセス再起動もSSHも要らずにモデルだけ選び直せる）。モデルのロード自体は
+  `ftg_cam` が選ばれていなくても行う（選んだ瞬間から使えるように先読みしておく）
 - 前方カメラの共有メモリ（`image/front`）を読むので、**`surge-camera` が動いていること
   が前提**（unit の `After=surge-camera.service` で順序は保証している）
-- 推論が失敗する・モデル未選択の周期は全セクタ `sector_seen=False`（＝壁）を出し続ける
-  ので、`ftg_cam` は自然に「点群の欠測が多すぎる」で止まる側に倒れる（安全側）
-- `raspi/nodes/cam_perception_node.py` を直したら、他ノードと同じく
-  `tools/deploy.sh --restart` **には入っていない**（§2 の既知の穴と同じ理由で
-  `surge-planning` も未対応）。手で `ssh surge-mk2 'sudo systemctl restart surge-cam-perception'`
+- `auto/ctrl` で `ftg_cam` 以外が選ばれている間・推論が失敗する・モデル未選択の周期は
+  全セクタ `sector_seen=False`（＝壁）を出し続けるので、`ftg_cam` は自然に
+  「点群の欠測が多すぎる」で止まる側に倒れる（安全側）
+- `raspi/nodes/cam_perception_node.py` を直したら `tools/deploy.sh --restart`
+  で反映できる（surge-telemetry / surge-camera と一緒に再起動する）
 
 GUI での使い方:
 
@@ -765,7 +762,7 @@ GUI での使い方:
 
 | ディレクトリ | 中身 | 直したら |
 |---|---|---|
-| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）は既定で無効（§12.2）。`line_perception_node` は**まだ systemd unit が無く**手動起動のみ（§2・§11） | ノードごとに再起動 |
+| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）は常時 enable、`auto/ctrl` で `ftg_cam` 選択中だけ推論する（§12.2）。`line_perception_node` は**まだ systemd unit が無く**手動起動のみ（§2・§11） | ノードごとに再起動 |
 | `raspi/auto/` | 自動運転アルゴリズム（**バスも WS も知らない純粋な計算**。`e2e_lidar.py`/`follow_the_gap_cam.py` もここ） | surge-planning 再起動 |
 | `raspi/nav/` | SLAM・占有格子・経路（**一旦棚上げ中。消さない**）。`ipm.py`（カメラ逆投影）は `ftg_cam` が使用中 | surge-planning 再起動 |
 | `raspi/proto/` | UART 定義（**STM32 と共有する唯一の定義**） | 再生成 ＋ `--restart-io` |

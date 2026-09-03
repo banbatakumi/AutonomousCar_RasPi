@@ -32,7 +32,7 @@
  * 「そのモードが使うモデル」は同じ意思決定の一部**なので分離すると迷う。
  * `ftg_cam`/`e2e_lidar` を選んだときだけ、そのモード専用のモデル選択
  * ドロップダウンをこのパネル内に出す。一覧の取得（`camModelList`/
- * `e2eModelList`）は `LogView.tsx` と同じくマウント時に一度要求しておく。
+ * `e2eModelList`）は `DiagView.tsx` の記録一覧取得と同じくマウント時に一度要求しておく。
  *
  * ## モード選択はドロップダウンに（2026-08-28）
  *
@@ -65,11 +65,13 @@
  * （指摘による）、`catalog[].stats`（`raspi/auto/base.py` の `Planner.stats`）で
  * 宣言された分だけ出す。他の宣言と同じくモード id は GUI 側に書かない。
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNumbers } from '../bus/live'
+import { clearPreview, selectPreviewMap } from '../bus/mapPreview'
 import { RAD2DEG, mps } from '../format'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
+import { MapLibrary } from './MapLibrary'
 import { ParamSliders } from './ParamSliders'
 
 /** planner の判断がこれ以上古ければ「planning_node が落ちている」と見なす */
@@ -93,6 +95,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   useEffect(() => {
     ch?.camModelList()
     ch?.e2eModelList()
+    ch?.mapsList()
   }, [ch])
 
   if (!auto) {
@@ -147,19 +150,45 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
         </section>
 
         <section className="auto-engage">
-          <button
-            className={auto.engaged ? 'engage on' : 'engage'}
-            disabled={!auto.mode}
-            onClick={toggleEngage}
-          >
-            {auto.engaged ? '自律走行を解除' : '自律走行を開始'}
-          </button>
+          {/* `slam2d_raceline`だけ、単一engageボタンの代わりに「地図の作成」/
+              「レーシングライン走行」の2ボタンを出す（`ftg_cam`等のモデル選択と
+              同じ「id直書きの例外」、`AutoPanel.tsx`冒頭docstring参照）。
+              **`DONE`（地図と経路ができて保存済み・待機中）はengage済みのまま
+              続く**——BUILD完了時にdisengageしないので（`slam2d_raceline.py`
+              の`_done()`）、「未engage」だけを条件にすると`DONE`中は選択肢が
+              一切出ない画面になってしまう（実機で発覚、2026-09-03）。
+              `DONE`中も2ボタンを出し、解除は小さいリンクボタンで別に出す */}
+          {selected?.id === 'slam2d_raceline' && (!auto.engaged || st?.phase === 'DONE') ? (
+            <>
+              <SlamRaceButtons ch={ch} />
+              {auto.engaged && (
+                <button className="engage-cancel" onClick={toggleEngage}>
+                  自律走行を解除
+                </button>
+              )}
+            </>
+          ) : (
+            <button
+              className={auto.engaged ? 'engage on' : 'engage'}
+              disabled={!auto.mode}
+              onClick={toggleEngage}
+            >
+              {auto.engaged ? '自律走行を解除' : '自律走行を開始'}
+            </button>
+          )}
           {/* **engage と ARM は別物**。どちらが欠けているかを名指しで出す */}
           {auto.engaged && !ui.armRequested && (
             <span className="badge-warn">ARM してください（Enter）</span>
           )}
-          {auto.engaged && ui.armRequested && !silent && (
+          {/* **`DONE`は「待機中」であって「走行中」ではない。** `slam2d_raceline`
+              はBUILD完了後もengage・ARMを保ったまま止まって待つ（`_done()`）
+              ので、`engaged && armed`だけで「走行中」と出すと動いていないのに
+              そう見える（実機で発覚、2026-09-03） */}
+          {auto.engaged && ui.armRequested && !silent && st?.phase !== 'DONE' && (
             <span className="badge-live">走行中</span>
+          )}
+          {auto.engaged && ui.armRequested && !silent && st?.phase === 'DONE' && (
+            <span className="dim">待機中</span>
           )}
           {!auto.engaged && ui.autoOffReason && (
             <span className="badge-warn">{ui.autoOffReason}</span>
@@ -241,6 +270,10 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
         </div>
       )}
 
+      {/* 保存済み地図の管理（保存・一覧・DL・アップロード・削除）。
+          `slam2d_raceline`選択時だけ出す（`MapLibrary.tsx`） */}
+      {selected?.id === 'slam2d_raceline' && <MapLibrary ch={ch} />}
+
       {/* ── planner の判断 ── */}
       <section className="auto-state">
         <span className="label">判断</span>
@@ -306,6 +339,84 @@ function Stat({ value, unit }: { value: string; unit: string }) {
     <div className="auto-stat">
       <b>{value}</b>
       <span>{unit}</span>
+    </div>
+  )
+}
+
+/**
+ * `slam2d_raceline`専用: 「地図を作成」/保存済み地図の選択/「レーシングライン
+ * 走行」。単一engageボタンの代わりに出す（`AutoPanel.tsx`冒頭docstring参照）。
+ *
+ * 「レーシングライン走行」は地図を選んでいないと押せない。保存済み地図の
+ * 一覧は`AutoPanel`がマウント時に一度要求済み（`mapsList()`）のものを
+ * ストアから読むだけで、ここで改めて要求しない。
+ *
+ * ## ドロップダウンで選んだ地図をその場で下見する
+ *
+ * 「レーシングライン走行」を押す前に、選んだ地図とグリッドを`AutoMapPanel`
+ * に表示し、クリックで自己位置ヒントを置けるようにする（`bus/mapPreview.ts`、
+ * バンビの指示、2026-09-03）。押した瞬間（`startSlam2dExplore`/
+ * `startSlam2dRace`）にプレビューは消し、以後は本物のライブ地図に譲る。
+ */
+function SlamRaceButtons({ ch }: { ch: ControlChannel | null }) {
+  const mapFiles = useUi((s) => s.mapFiles)
+  const [selectedMap, setSelectedMap] = useState('')
+  const phase = useNumbers().auto?.phase
+
+  // **表示されるたびに一覧を取り直し、プレビューは消す。** このコンポーネント
+  // は条件付き描画で現れたり消えたりする（`AutoPanel.tsx`の`auto-engage`
+  // セクション参照）ので、マウント時に取れば「地図を作成→保存→disengageして
+  // 選び直す」等、表示が復活するたびに最新化される。BUILD完了(`DONE`)直後も
+  // このコンポーネントが新たにマウントされるので、フェーズの遷移を別途
+  // 監視する必要はない
+  useEffect(() => {
+    ch?.mapsList()
+    clearPreview()
+    setSelectedMap('')
+  }, [ch])
+
+  useEffect(() => {
+    // 一覧が更新されたら、できたばかりの地図（最新のcreated_at）を選び直し、
+    // その場で下見も始める。**`DONE`のときだけ。** RACE中に一覧が変わっても、
+    // 走行中の選択を勝手に差し替えない
+    if (phase !== 'DONE' || mapFiles.length === 0) return
+    const newest = mapFiles.reduce((a, b) => (a.created_at > b.created_at ? a : b))
+    setSelectedMap(newest.name)
+    void selectPreviewMap(newest.name)
+  }, [phase, mapFiles])
+
+  const selectMap = (name: string) => {
+    setSelectedMap(name)
+    void selectPreviewMap(name)
+  }
+
+  return (
+    <div className="slam-race-buttons">
+      <button
+        onClick={() => {
+          clearPreview()
+          ch?.startSlam2dExplore()
+        }}
+      >
+        地図を作成
+      </button>
+      <select value={selectedMap} onChange={(e) => selectMap(e.target.value)}>
+        <option value="">（地図を選択）</option>
+        {mapFiles.map((f) => (
+          <option key={f.name} value={f.name}>
+            {f.name}
+          </option>
+        ))}
+      </select>
+      <button
+        disabled={!selectedMap}
+        onClick={() => {
+          clearPreview()
+          ch?.startSlam2dRace(selectedMap)
+        }}
+      >
+        レーシングライン走行
+      </button>
     </div>
   )
 }

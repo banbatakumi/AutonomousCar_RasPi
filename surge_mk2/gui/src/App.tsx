@@ -3,17 +3,25 @@
  *
  *   ラジコン   運転を楽しむための画面。メータ主体、設定は歯車から
  *   自動運転   自律走行の監視・デバッグ。指令と実測を数値で並べる（Phase 3 で中身が育つ）
- *   診断       現在値と時系列。走行画面から外した数字はすべてここ
- *   ログ       記録の開始・停止・ダウンロード
+ *   診断       現在値と時系列。走行画面から外した数字と記録ファイル一覧はすべてここ
+ *   システム同定  実車試験
  *
  * **既定はラジコン。** 自動運転は Phase 3 以降にならないと中身が無く、
  * 今開いて意味があるのはラジコンのため。
  *
- * 「地図」タブは削除した（プレースホルダのままだった）。SLAM を実装する
- * Phase 3 で、自動運転ビューの中に入れるか独立させるかを決め直す。
+ * 「地図生成」タブは削除した（2026-09-03）。世界座標の地図は自動運転タブの
+ * `AutoMapPanel`（車体図の左、SLAMモード選択時だけ表示）に統合し、独立タブと
+ * しては持たない——モード選択・engageの入口を1箇所に保つ（`AutoPanel.tsx`）
+ * のと同じ理由で、地図の操作もその画面に集約する。
+ *
+ * 「ログ」タブも同じ理由で廃止した（2026-09-03）。録画の開始・停止は
+ * モードタブの隣（`LogControls`）に常設し、ファイル一覧は診断タブ
+ * （`DiagLogFiles`）に統合した——録るかどうかはどのタブを見ていても
+ * 意思表示できる方が自然で、一覧はもともと診断タブと同じ「後から追う」場所のため。
  */
 import { useEffect, useRef, useState } from 'react'
 import { DriveControls } from './components/DriveControls'
+import { LogControls } from './components/LogControls'
 import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
 import { useEngineSound } from './hooks/useEngineSound'
@@ -21,20 +29,16 @@ import { useDriving } from './input/useDriving'
 import { useUi } from './store/ui'
 import { AutoView } from './views/AutoView'
 import { DiagView } from './views/DiagView'
-import { LogView } from './views/LogView'
-import { MapView } from './views/MapView'
 import { RcView } from './views/RcView'
 import { SysIdView } from './views/SysIdView'
 import { ControlChannel } from './ws/control'
 import { connectMap } from './ws/map'
 import { connectTelemetry } from './ws/telemetry'
 
-//: **地図は自動運転の隣**。世界座標の情報（自己位置・経路・障害物）は
-//: 走行中にも見たいので、EXPLORE 専用の画面にはしない（`views/MapView.tsx`）
-const TABS = ['ラジコン', '自動運転', '地図生成', '診断', 'ログ', 'システム同定'] as const
+const TABS = ['ラジコン', '自動運転', '診断', 'システム同定'] as const
 type Tab = (typeof TABS)[number]
 
-/** 操縦しうるタブ。ここでだけ操作ヒントを出す（診断・ログでは邪魔になる） */
+/** 操縦しうるタブ。ここでだけ灯火・ファン操作（`DriveControls`）を出す（診断では邪魔になる） */
 const DRIVING_TABS: Tab[] = ['ラジコン', '自動運転', 'システム同定']
 
 export function App() {
@@ -85,6 +89,8 @@ export function App() {
       onLogs: (files) => set({ logFiles: files }),
       onCamModels: (files) => set({ camModelFiles: files }),
       onE2EModels: (files) => set({ e2eModelFiles: files }),
+      onMaps: (files) => set({ mapFiles: files }),
+      onMapsSaveResult: (ok, error) => set({ mapSaveResult: { ok, error } }),
     })
     chRef.current = c
     setCh(c)
@@ -117,56 +123,19 @@ export function App() {
             {t}
           </button>
         ))}
+        <LogControls ch={ch} />
         <div className="spacer" />
-        {DRIVING_TABS.includes(tab) && (
-          <>
-            <DriveControls ch={ch} />
-            <DriveHint />
-          </>
-        )}
+        {DRIVING_TABS.includes(tab) && <DriveControls />}
       </nav>
 
       {tab === 'ラジコン' ? (
         <RcView ch={ch} />
       ) : tab === '自動運転' ? (
         <AutoView ch={ch} />
-      ) : tab === '地図生成' ? (
-        <MapView ch={ch} />
       ) : tab === '診断' ? (
-        <DiagView />
-      ) : tab === 'システム同定' ? (
-        <SysIdView ch={ch} />
+        <DiagView ch={ch} />
       ) : (
-        <LogView ch={ch} />
-      )}
-    </div>
-  )
-}
-
-/** 操縦の状態と操作方法。**ARM していないことが一目で分かる**必要がある。 */
-function DriveHint() {
-  const ui = useUi()
-  return (
-    <div className="hint">
-      {ui.deniedReason === 'bad_token' ? (
-        <span className="badge-bad">
-          トークンが違います（<code>?token=…</code> 付きの URL で開き直してください）
-        </span>
-      ) : ui.deniedReason === 'auto_engage' ? (
-        <span className="badge-bad">自律走行の開始には操縦権が要ります</span>
-      ) : ui.deniedBy ? (
-        <span className="badge-bad">操縦権は {ui.deniedBy} が保持中</span>
-      ) : null}
-      <span className={ui.deadman ? 'badge-live' : 'dim'}>
-        {!ui.deadman
-          ? 'ARM していません'
-          : ui.inputSource === 'auto'
-            ? '自律走行中'
-            : `操縦中（${ui.inputSource === 'gamepad' ? 'パッド' : 'キーボード'}）`}
-      </span>
-      {/* **なぜ止まったかを必ず出す。** 分からないのがデバッグを最も消耗させる */}
-      {!ui.armRequested && ui.disarmReason && (
-        <span className="badge-warn">{ui.disarmReason}</span>
+        <SysIdView ch={ch} />
       )}
     </div>
   )

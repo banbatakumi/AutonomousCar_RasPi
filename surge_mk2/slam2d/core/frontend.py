@@ -55,7 +55,22 @@ RELOC_STAGES: tuple[Stage, ...] = (
 class FrontendConfig:
     matcher: MatcherConfig = MatcherConfig()
     icp: IcpConfig = IcpConfig()
-    confidence: ConfidenceConfig = ConfidenceConfig()
+    #: **毎周期のライブブレンド（`fuse_gaussians`で`self.pose`を決める部分）専用**。
+    #: `core/confidence.py`の既定（`analytic=True`、点対応ベースのFisher情報）
+    #: をそのまま毎周期のブレンドに使うと、`info_pred`（運動モデルの固定・
+    #: 小さい予測共分散）に対して`info_obs`が桁違いに大きくなり、毎周期
+    #: ほぼ生の`obs_pose`（離散化された探索格子上の解）へ張り付くようになって
+    #: 平滑化が効かなくなる——実測（oval 3周）でヨー誤差が0.85〜1.4°から
+    #: 14〜65°へ悪化することを確認したため、**ここだけ明示的に旧・曲率ベース
+    #: （`analytic=False`）に固定してある**。ループ拘束・キーフレームの
+    #: エッジ重みには`keyframe_confidence`（既定`analytic=True`）を別途使う
+    confidence: ConfidenceConfig = ConfidenceConfig(analytic=False)
+    #: **キーフレームに添える情報行列（`backend/`のオドメトリ・ループ拘束の
+    #: エッジ重みになる）専用**。既定（`analytic=True`）の点対応ベースFisher
+    #: 情報を使う——ループ拘束が本来の到達精度どおりに信頼されるようにする
+    #: のが目的で、こちらは毎周期のライブブレンドには使わない（上の`confidence`
+    #: と役割を分けている理由はそちらのdocstring参照）
+    keyframe_confidence: ConfidenceConfig = ConfidenceConfig()
     #: 前の周の点群と直接合わせて推測航法を磨くか（`core/scan2scan.py`）
     use_scan_to_scan: bool = False
     #: True なら`core/confidence.py`の固有値ベース動的異方性ブレンドを使う。
@@ -174,6 +189,11 @@ class Frontend:
             lost = True
 
         info_obs: Cov3 = np.eye(3) * self.config.isotropic_keyframe_info
+        #: キーフレームに添える（＝`backend/`のオドメトリ・ループ拘束のエッジ
+        #: 重みになる）情報行列。`info_obs`（ライブブレンド専用、上の
+        #: `FrontendConfig.confidence`docstring参照）とは別に、
+        #: `keyframe_confidence`（既定`analytic=True`）で算出し直す
+        keyframe_info: Cov3 = info_obs
         if lost:
             self.lost_streak += 1
             new_pose = guess
@@ -183,6 +203,8 @@ class Frontend:
             if self.config.anisotropic:
                 info_obs = estimate_information(self.grid, pts, obs_pose,
                                                  config=self.config.confidence)
+                keyframe_info = estimate_information(self.grid, pts, obs_pose,
+                                                     config=self.config.keyframe_confidence)
                 info_pred = np.linalg.inv(cov_pred + np.eye(3) * 1e-12)
                 new_pose = fuse_gaussians(guess, info_pred, obs_pose, info_obs)
             else:
@@ -202,10 +224,25 @@ class Frontend:
             self.grid.integrate(small, self.pose)
             self.trajectory.append(self.pose)
             self._kf = self.pose
-            self.keyframes.append((self.pose, small, info_obs))
+            self.keyframes.append((self.pose, small, keyframe_info))
 
         self.updates += 1
         return FrontendUpdate(self.pose, m.score, lost, m.searched)
+
+    def load_map(self, grid: OccGrid) -> None:
+        """事前に構築済みの地図（凍結済み想定）に差し替える。
+
+        `reset()`と違い**姿勢・軌跡・キーフレームは動かさない**——呼び出し側が
+        直後にグローバルローカリゼーション（`core/localize.py`）で`pose`を
+        外部から設定する運用を想定している。捨てるのは**直近のスキャン間
+        追跡状態だけ**（`_prev_pts`のscan-to-scan初期値・`_kf`の最後に焼いた
+        場所・`lost_streak`）。古い地図との整合を前提にしたこれらの値を
+        新しい地図に持ち越すと、初回の`update()`が誤った基準で動く。
+        """
+        self.grid = grid
+        self._prev_pts = None
+        self._kf = None
+        self.lost_streak = 0
 
     def rebuild(self, *, grid: OccGrid, keyframes: list[tuple[Pose2D, ScanPoints, Cov3]],
                trajectory: list[Pose2D], pose: Pose2D) -> None:

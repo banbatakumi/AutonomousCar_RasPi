@@ -283,7 +283,7 @@ flowchart LR
 
     IO["io_node<br/>最優先・実時間性重視"]
     CAM["camera_node"]
-    CAMPERC["cam_perception_node<br/>ftg_cam用・既定で無効"]
+    CAMPERC["cam_perception_node<br/>ftg_cam用・常時起動・IDLE制御"]
     LINEPERC["line_perception_node<br/>line_trace用・systemd未整備"]
     PLAN["planning_node<br/>配線だけ。中身は raspi/auto/"]
     TELE["telemetry_node<br/>WS サーバ"]
@@ -302,6 +302,7 @@ flowchart LR
     PLAN -->|"auto/cmd 50Hz<br/>auto/state 10Hz"| TELE
     TELE -->|"cmd 50Hz（唯一の発行元）"| IO
     TELE -->|"auto/ctrl 5Hz"| PLAN
+    TELE -->|"auto/ctrl 5Hz"| CAMPERC
     TELE <-->|"WebSocket"| BROWSER(["ブラウザ"])
 ```
 
@@ -314,19 +315,18 @@ flowchart LR
 | `surge-telemetry` | `raspi.nodes.telemetry_node` | WS サーバ・GUI 配信 | GUI が繋がらない |
 | `surge-planning` | `raspi.nodes.planning_node` | 自動運転の判断 | 自律走行だけ止まる |
 | `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録（**既定では無効**） | — |
-| `surge-cam-perception` | `raspi.nodes.cam_perception_node` | カメラの走行可否セグメンテーション推論（`ftg_cam` 用）（**既定では無効**） | `ftg_cam` が使えなくなるだけ |
+| `surge-cam-perception` | `raspi.nodes.cam_perception_node` | カメラの走行可否セグメンテーション推論（`ftg_cam` 用）。`auto/ctrl` で `ftg_cam` 選択中だけ推論する | `ftg_cam` が使えなくなるだけ |
 | `surge-logclean.timer` | — | 毎時、古いログを消す（7日超／合計8GB超） | ディスクが埋まる |
 | （unit 無し） | `raspi.nodes.line_perception_node` | 白線検出（`line_trace` 用）。**`install_services.sh` に登録手段自体が無く、常に手動起動**（development.md §2・§11） | `line_trace` が使えなくなるだけ |
 
-> **`surge-cam-perception` は他の4ノードと違い既定で無効。** `cam_perception_node` は
-> `planning_node` の選択とは無関係にカメラフレームが来るたびCNN推論を回し続ける
-> 独立プロセスなので、常時有効化すると `ftg_cam` を使う気が無くてもCPU・電力を
-> 消費し続ける。有効化の手順は
-> [`development.md` §12.2](development.md#122-カメラセグメンテーション走行ftg_cam)。
+> **`surge-cam-perception` は他の4ノードと同じく常時 enable。** `cam_perception_node`
+> は `auto/ctrl`（`AutoCtrl.mode`）を見て、`ftg_cam` が選ばれている間だけ実際に
+> フレームを読んで推論する（`surge-cam-track` の待機コスト設計と同じ）ため、
+> `ftg_cam` を使う気が無い間はCPU・電力をほぼ消費しない（2026-09-03変更）。
+> 詳細は [`development.md` §12.2](development.md#122-カメラセグメンテーション走行ftg_cam)。
 >
-> **`line_perception_node` は既定で無効ですらなく、そもそも systemd unit が無い。**
-> `cam_perception_node` のように `--with-cam-perception` で有効化する経路自体が
-> `install_services.sh` に無いため、実車で `line_trace` を試すには
+> **`line_perception_node` は `cam_perception_node` と違い、そもそも systemd unit が無い。**
+> `install_services.sh` に登録手段自体が無いため、実車で `line_trace` を試すには
 > `ssh surge-mk2` して手動でプロセスを起動する必要がある（development.md §2）。
 
 **`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、

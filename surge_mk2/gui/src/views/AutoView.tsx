@@ -47,6 +47,7 @@
  * 操作しても同じ意味を持つので、ラジコンタブと同じドロワーをここにも出す。
  */
 import { useNumbers } from '../bus/live'
+import { AutoMapPanel } from '../components/AutoMapPanel'
 import { AutoPanel } from '../components/AutoPanel'
 import { DriveBar } from '../components/DriveBar'
 import { SettingsDrawer } from '../components/SettingsDrawer'
@@ -107,6 +108,10 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
           決まる幅だけを取り、余った横幅は `AutoPanel` 側（`flex:1`）に渡る */}
       <div className="auto-bottom">
         <AutoPanel ch={ch} />
+
+        {/* SLAMモード（`slam2d_raceline`）選択時だけ、車体図の左に地図パネルを
+            挟む（`AutoMapPanel.tsx`）。他モードには地図が無いので出さない */}
+        {ui.auto?.mode === 'slam2d_raceline' && <AutoMapPanel ch={ch} />}
 
         <div className="auto-car">
           <DrivePanel />

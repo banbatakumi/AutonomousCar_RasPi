@@ -53,3 +53,11 @@ onnxruntime>=1.18,<2
 # OpenCV 本体（video モジュール）に入っているが、contrib 込みの headless 版を
 # 明示しておく方が Pi 上でのビルド差異に左右されにくい
 opencv-contrib-python-headless>=4.9,<6
+
+# ── slam2d バックエンド（ポーズグラフ最適化・ループ閉じ） ──
+# 以前は「slam2d/ の依存（g2opy）は raspi/ に持ち込まない」方針だったが、
+# 長距離ドリフト対策（loop closure実車配線）のため方針転換した。
+# Pi 5(aarch64)向けビルド済みwheelがpiwheelsにあり、`pip install`だけで即動作
+# することを実機（Python 3.13.5）で確認済み（`slam2d/tools/spike_g2o.py`が
+# 収束することを確認、2026-09-03）
+g2opy==2.3.0

@@ -130,6 +130,21 @@ class Planner:
         経路として分けてある（disengage → engage し直すと ARM の保持まで巻き込む）。
         """
 
+    def request_load(self, name: str) -> None:
+        """人間が保存済み地図を選んで「レーシングライン走行」と言ってきた。
+
+        保存済み地図（占有格子・中心線・レーシングライン）を読み込んで、
+        地図作成（EXPLORE）を経ずに走り始める口。対応する planner だけ実装する
+        （既定は何もしない＝保存済み地図を持たない planner には無関係）。
+        """
+
+    def request_locate_hint(self, x: float, y: float) -> None:
+        """GUIの地図パネルをクリックして、自己位置探索の絞り込みヒントを送ってきた。
+
+        地図全体からの自己位置推定（グローバルローカリゼーション）に対応する
+        planner だけ実装する。既定は何もしない。
+        """
+
     # ── ヘルパ ──
 
     @classmethod

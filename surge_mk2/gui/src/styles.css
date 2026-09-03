@@ -215,18 +215,59 @@ button.on {
   flex: 0 0 auto;
 }
 
-.hint {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 11px;
-}
-
-/* 灯火・ファン（DriveControls.tsx）。運転できるタブのときだけ `.hint` の隣に出る */
+/* 灯火・ファン（DriveControls.tsx）。運転できるタブのときだけタブバー右側に出る */
 .drive-controls {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+/* ── 記録ボタン（`LogControls.tsx`、タブバー常設。旧ログタブ廃止 2026-09-03） ── */
+
+.log-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.recbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+
+.recbtn.recording {
+  background: #4a1410;
+  border-color: var(--bad);
+  color: #ffb4ae;
+}
+
+.recbtn.recording .rec-dot {
+  background: var(--bad);
+  animation: recpulse 1s ease-in-out infinite;
+}
+
+@keyframes recpulse {
+
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(242, 84, 75, .55);
+  }
+
+  50% {
+    opacity: .35;
+    box-shadow: 0 0 0 5px rgba(242, 84, 75, 0);
+  }
 }
 
 .badge-live {
@@ -996,17 +1037,20 @@ button.on {
  *
  * ## 速度計を常に中央に
  *
- * `1fr auto 1fr` の3カラムにして、舵角（左）と G（右）を中央カラムに
- * 寄せる（`justify-self`）。中央の速度計は auto カラムなので、左右の
- * 中身の幅が違っても常に列の中心に来る——単純な `justify-content: center`
- * だと左右の幅差でずれる。
+ * `1fr auto 1fr` の3カラムにして、舵角側・G 側を中央カラムに寄せる
+ * （`justify-self`）。中央の速度計は auto カラムなので、左右の中身の幅が
+ * 違っても常に列の中心に来る——単純な `justify-content: center` だと
+ * 左右の幅差でずれる。
  *
  * ## メータ自体も「都度最大の大きさ」にする
  *
  * `.rc-cam-bottom` の高さを、ここが `flex: 1` で丸ごと受け取る。各メータの
  * 中身（`.meter-speed .arc` など）は `flex:1` + `aspect-ratio` で「高さ
  * いっぱいに広がり、幅は比率から決まる」形にしてあるので、この行の高さが
- * 変わればメータも一緒に拡大縮小する。
+ * 変わればメータも一緒に拡大縮小する。**3つとも同じ `dialHeight` を渡すので
+ * 大きさは揃う**——舵角計・G メータだけ小さい `dialHeight` を渡して
+ * ウィンカーの分の場所を空ける方式は、実機で3つの大きさが揃わなくなる
+ * 不具合が出たため一度廃止した。
  *
  * ⚠ 3つのメータの下のテキスト量（速度計は後退警告の有無、舵角は数値のみ、
  * G は無し）が違うぶん、ダイヤルの実サイズは厳密には揃わない。以前あった
@@ -1014,6 +1058,7 @@ button.on {
  * 廃止し、**上端揃えに割り切っている**（`SpeedGauge.tsx` 冒頭のコメント）。
  */
 .rc-cam-gauges {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: grid;
@@ -1022,7 +1067,7 @@ button.on {
   gap: 4px 18px;
 }
 
-.rc-cam-gauges>.meter-steer {
+.rc-cam-gauges>.gauge-group-left {
   justify-self: end;
 }
 
@@ -1030,8 +1075,88 @@ button.on {
   justify-self: center;
 }
 
-.rc-cam-gauges>.meter-g {
+.rc-cam-gauges>.gauge-group-right {
   justify-self: start;
+}
+
+/*
+ * 舵角計・G メータに、その横のウィンカー（`.winker-side`）を並べる箱
+ * （2026-09-03、`WinkerHazard.tsx` 参照）。`align-items` は既定の `stretch`
+ * のまま——内側の `.meter` は縦並びで中身を上に詰める（`justify-content`
+ * 既定）ので、外側が行の高さいっぱいに伸びていてもダイヤルの上端位置は
+ * 変わらない（ウィンカー導入前の見た目のまま）。**`.winker-side` の方は
+ * この伸びた高さを使って点滅表示を上、ボタンを下（ハザードボタンと同じ高さ）
+ * に離す**（指示による）。
+ */
+.gauge-group {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  gap: 10px;
+}
+
+/* ウィンカーの点滅表示（上）・矢印ボタン（下）。`.gauge-group` が
+   `align-items: stretch`（既定）で行いっぱいの高さを渡してくるので、
+   `justify-content: space-between` で上下に離す——ボタンがハザードボタン
+   （`.hazard-btn`、行の右下に絶対配置）と同じ高さに来る */
+.winker-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* 点滅時だけ光る矢印。「要求している」ではなく `vs.winker_left/right_active`
+   （STM32実測）に連動——ここが実際に点滅しているかどうかの唯一の表示になった
+   （旧 `DriveControls.tsx` の「点滅中/要求中…」テキストは廃止） */
+.winker-indicator {
+  font-size: 23px;
+  line-height: 1;
+  color: var(--dim);
+  opacity: .25;
+}
+
+.winker-indicator.blink {
+  color: var(--ok);
+  animation: winkerblink 1s steps(1, start) infinite;
+}
+
+@keyframes winkerblink {
+
+  0%,
+  49% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: .15;
+  }
+}
+
+.winker-btn {
+  font-size: 20px;
+  line-height: 1;
+  padding: 5px 15px;
+}
+
+/* ハザード。メータパネル（`.rc-cam-gauges`）右下に絶対配置——実車のダッシュボード
+   中央にある赤い三角ボタンの位置を模した（指示による） */
+.hazard-btn {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-size: 23px;
+  line-height: 1;
+  padding: 5px 12px;
+  color: var(--bad);
+  border-color: #5a2320;
+}
+
+.hazard-btn.on {
+  background: #3a1512;
+  border-color: var(--bad);
+  color: #ff9b93;
 }
 
 /*
@@ -1130,7 +1255,7 @@ button.on {
   opacity: .45;
 }
 
-/* 灯火・ファン共通の操作トグル（DriveControls.tsx、タブ行）。 */
+/* 灯火・サイドブレーキ共通の操作トグル（DriveControls.tsx、タブ行）。 */
 .rc-ctl {
   display: flex;
   align-items: center;
@@ -1144,27 +1269,6 @@ button.on {
 
 .rc-ctl .seg {
   margin-top: 0;
-}
-
-.rc-fan-duty {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: 4px;
-}
-
-.rc-fan-duty b {
-  font-variant-numeric: tabular-nums;
-  min-width: 2.6em;
-  text-align: right;
-  color: var(--dim);
-}
-
-.rc-fan-rpm {
-  font-size: 11px;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-  margin-left: 4px;
 }
 
 /*
@@ -2000,26 +2104,13 @@ button.on {
   color: var(--dim);
 }
 
-/* ── ログタブ ─────────────────────────────────────────── */
-
-.logs-section .badge-bad {
-  margin-top: 6px;
-}
+/* ── 記録ファイル一覧（`DiagLogFiles.tsx`、診断タブ）───────────────────── */
 
 .logs-row {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-}
-
-.logs-checkbox {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--dim);
 }
 
 .logs-section-head {
@@ -2066,24 +2157,18 @@ button.on {
   color: var(--accent);
 }
 
-/* ── 地図生成ビュー ───────────────────────────────────────────────────────
-   キャンバスを主役にして、数値は右の細い柱に寄せる。自動運転ビューのように
-   3分割にしないのは、**地図は形を読む対象**なので面積がそのまま情報量になるため。 */
-.mapview {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 260px;
-  gap: 6px;
-  padding: 6px;
-}
-
-.map-main {
+/* ── 自動運転ビューの地図パネル（`AutoMapPanel.tsx`）─────────────────────
+   `slam2d_raceline`選択時だけ、車体図（`.auto-car`）の左に挟む正方形パネル。
+   独立タブ（旧`地図生成`、2026-09-03廃止）と違い、地図とグリッドだけを見せ
+   数値は出さない——車体図と並ぶ都合上、細い柱を割く余地が無いため。 */
+.auto-map {
   position: relative;
-  min-height: 0;
+  flex: 0 1 auto;
+  height: 100%;
+  aspect-ratio: 1 / 1;
   background: #0b0e11;
   border: 1px solid #1b2229;
-  border-radius: 4px;
+  border-radius: 5px;
   overflow: hidden;
 }
 
@@ -2093,57 +2178,109 @@ button.on {
   display: block;
 }
 
-.map-badge {
+.auto-map .map-canvas {
+  cursor: crosshair;
+}
+
+.auto-map-badge {
   position: absolute;
   left: 8px;
   top: 8px;
-  display: flex;
-  gap: 8px;
-  align-items: center;
   font-size: 11px;
   background: #000a;
   padding: 3px 8px;
   border-radius: 4px;
 }
 
-.map-panel {
-  min-height: 0;
-  overflow-y: auto;
-  background: #0e1318;
-  border: 1px solid #1b2229;
+/* **地図を削除**。数値パネルごと無くなったので、隅のアイコンボタンに畳む */
+.auto-map-clear {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
   border-radius: 4px;
-  padding: 8px 10px;
-  font-size: 12px;
 }
 
-.map-panel h3 {
-  margin: 10px 0 4px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #6c8296;
-  letter-spacing: 0.08em;
-}
-
-.map-panel h3:first-child {
-  margin-top: 0;
-}
-
-.map-row {
+/* ── `slam2d_raceline`専用: 「地図を作成」/「レーシングライン走行」の
+   2ボタンと保存済み地図の選択（`AutoPanel.tsx`、`ftg_cam`等と同じ
+   「id直書きの例外」）。単一engageボタンの代わりに出る */
+.slam-race-buttons {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 2px 0;
-  font-variant-numeric: tabular-nums;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
 }
 
-.map-actions {
+.slam-race-buttons select {
+  flex: 1;
+  min-width: 120px;
+  max-width: 220px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+/* `DONE`段（地図と経路ができて保存済み・待機中）でも自律走行を止められる
+ * 逃げ道。2ボタン（`.slam-race-buttons`）の主役を邪魔しないよう控えめに */
+.engage-cancel {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  padding: 2px 8px;
+}
+
+/* ── 保存済み地図の管理（`MapLibrary.tsx`）: 保存・一覧・DL・アップロード・削除 */
+.map-library {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.map-library-row {
   display: flex;
   gap: 6px;
-  margin-top: 12px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
-.map-actions button {
+.map-library-row input[type='text'] {
   flex: 1;
+  min-width: 100px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.map-library ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.map-library li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.map-library li span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-library li a {
+  color: var(--accent);
 }
 
 /* 起動時のみ出るエンブレム。裏の操作を邪魔しないので pointer-events は殺す */

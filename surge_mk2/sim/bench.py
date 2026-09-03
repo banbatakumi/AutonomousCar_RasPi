@@ -69,6 +69,13 @@ class Result:
         self.reason = ""
         self.lap_times: list[float] = []
         self.distance = 0.0
+        #: EXPLORE段が終わった瞬間（地図構築完了時点）の自己位置・向き誤差。
+        #: RACE段の誤差は「凍結地図に対する追跡精度」でしかなく、地図自体が
+        #: 歪んでいるかどうかはこの数字でしか直接見えない
+        #: （`/Users/banbatakumi/.claude/plans/slam2d-slam-slam2d-imu-slam-slam2d-imu-nifty-aurora.md`
+        #: フェーズ1参照）
+        self.explore_end_pose_err: float | None = None
+        self.explore_end_yaw_err: float | None = None
 
     def report(self) -> str:
         def stat(v, unit, scale=1.0):
@@ -86,6 +93,10 @@ class Result:
             f"横偏差     {stat([abs(c) for c in self.cross], 'cm', 100)}",
             f"周回       {self.laps} 周  走行 {self.distance:.1f}m  衝突 {self.collisions}",
         ]
+        if self.explore_end_pose_err is not None:
+            out.append(
+                f"EXPLORE終了時点  自己位置 {self.explore_end_pose_err * 100:.1f}cm  "
+                f"向き {self.explore_end_yaw_err:.1f}°")
         if self.lap_times:
             out.append(
                 "ラップ     " + " / ".join(f"{t:.1f}s" for t in self.lap_times))
@@ -96,7 +107,7 @@ class Result:
 class Bench:
     def __init__(self, course: str | Path, mode: str, params: dict[str, float], *,
                  max_speed: float = 3.0, max_steer: float = 0.524,
-                 model: str | None = None, quiet: bool = False) -> None:
+                 model: str | None = None, quiet: bool = False, seed: int = 0) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -104,7 +115,7 @@ class Bench:
             （2026-08-29追加。GUI/`e2e/model`トピック経由でしかモデルを選べず、
             `sim.bench`単体では検証できなかった穴を埋める）
         """
-        self.link = create_sim_link(course, with_channel=False)
+        self.link = create_sim_link(course, seed=seed, with_channel=False)
         self.sim = self.link.sim
         self.planner = make_planner(mode)
         if self.planner is None:
@@ -132,6 +143,7 @@ class Bench:
         self._origin = (v.x, v.y, v.yaw)
         self._last_lap_t = 0.0
         self._prev_laps = 0
+        self._prev_phase = ""
 
     # ── 真値 ──
 
@@ -204,6 +216,15 @@ class Bench:
             self.res.lap_times.append(t - self._last_lap_t)
             self._last_lap_t = t
             self._prev_laps = st.laps
+
+        # EXPLORE段が終わった瞬間（地図構築完了、直後の姿勢）の誤差を1回だけ残す。
+        # RACE段の誤差は凍結地図に対する追跡精度でしかないため、
+        # 「地図構築中にどれだけドリフトしたか」はここでしか直接見えない
+        if self._prev_phase == "EXPLORE" and st.phase != "EXPLORE":
+            self.res.explore_end_pose_err = self.res.pose_err[-1]
+            self.res.explore_end_yaw_err = self.res.yaw_err[-1]
+        self._prev_phase = st.phase
+
         self.res.laps = st.laps
         self.res.phase = st.phase
         self.res.reason = st.reason
@@ -268,6 +289,7 @@ def main() -> int:
     ap.add_argument("--course", default="circuit", help="コース名 or パス")
     ap.add_argument("--mode", default="raceline", choices=list(PLANNERS))
     ap.add_argument("--time", type=float, default=180.0, help="走らせる秒数")
+    ap.add_argument("--seed", type=int, default=0, help="シムの乱数シード（LiDARノイズ等）")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="planner のパラメータを上書き（複数可）")
     ap.add_argument("--max-speed", type=float, default=3.0)
@@ -293,8 +315,8 @@ def main() -> int:
         params[k.strip()] = float(v)
 
     b = Bench(course, args.mode, params, max_speed=args.max_speed,
-              max_steer=args.max_steer, model=args.model, quiet=args.quiet)
-    print(f"# {course.name} / {args.mode} / {args.time:.0f}s")
+              max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed)
+    print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)
     except KeyboardInterrupt:

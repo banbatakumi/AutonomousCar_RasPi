@@ -23,8 +23,14 @@
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
+
+from slam2d.core.frontend import RELOC_STAGES
+from slam2d.core.localize import GlobalLocalizer
+from slam2d.core.scanmatch import MatcherConfig, match
+from slam2d.core.types import Pose2D
 
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
@@ -33,13 +39,19 @@ from ..nav import obstacles as obs_mod
 from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
 from ..nav.purepursuit import PursuitConfig, follow
-from ._slam2d_nav import Slam2dNav
+from . import mapstore
+from ._slam2d_nav import Slam2dNav, occgrid_from_trinary
 from .base import ParamSpec, Planner
 from .follow_the_gap import FollowTheGap
 
 __all__ = ["Slam2dRaceLine"]
 
-EXPLORE, BUILD, RACE = "EXPLORE", "BUILD", "RACE"
+#: `DONE`は「地図と経路ができた。保存済み。人間が『レーシングライン走行』を
+#: 押すのを待っている」段。**BUILD完了後、自動ではRACEに進まない**——地図作成
+#: 直後にそのまま走り出すと、`request_load()`のLOCATE経由で手動再配置しても
+#: 走れるようにした意味が無くなる（人間が地図内の好きな場所へ車を置き直す間
+#: を作るため。バンビの指示、2026-09-03）
+EXPLORE, BUILD, DONE, LOCATE, RACE = "EXPLORE", "BUILD", "DONE", "LOCATE", "RACE"
 
 #: `raspi/auto/raceline.py`と同じ値（狭い分離帯コースを想定した刻み・広さ）
 MAP_RES = 0.025
@@ -54,6 +66,18 @@ LAP_MIN_DIST = 3.0
 LAP_NEAR_M = 0.8
 LAP_YAW_DEG = 35.0
 LAP_CONFIRM = 3
+
+
+def _polyline_length(xy: np.ndarray) -> float:
+    """閉じた経路（周回）の1周の長さ。`request_load()`が保存済みレーシングライン
+    から`RaceLine.length`を復元するのに使う（`rl_mod.optimize()`が返す値と
+    同じ定義——`raspi/nav/purepursuit.py`の`follow()`が周回長として読む）。
+    """
+    xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+    if len(xy) < 2:
+        return 0.0
+    d = np.roll(xy, -1, axis=0) - xy
+    return float(np.hypot(d[:, 0], d[:, 1]).sum())
 
 _MAP_EVERY = 10
 
@@ -157,12 +181,58 @@ class Slam2dRaceLine(Planner):
         self._map_seq = -_MAP_EVERY
         self._map_frozen = False
         self._map_dirty = True
+        #: 保存済み地図から読み込んだ中心線（`self.centerline`はEXPLORE→BUILDで
+        #: 自前生成するものだけを持つので、読み込み経路はここに置く。
+        #: `snapshot()`が両方を出し分ける）
+        self._loaded_centerline_xy: np.ndarray | None = None
+        #: 進行中のグローバルローカリゼーション（`LOCATE`段でのみ非None）
+        self._localizer: GlobalLocalizer | None = None
+        #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
+        self._loc_hint: tuple[float, float] | None = None
+        self._load_error = ""
+        #: BUILD完了時に自動保存した地図の名前（`DONE`段の表示用）
+        self._saved_map_name = ""
+        self._save_error = ""
 
     def request_freeze(self) -> None:
         self._freeze_requested = True
 
     def request_clear(self) -> None:
         self.reset()
+
+    def request_load(self, name: str) -> None:
+        """保存済み地図（`raspi/auto/mapstore.py`）を読み込み、地図作成
+        （EXPLORE/BUILD）を経ずに`LOCATE`から走り始める。
+
+        `reset()`を経由しない——地図を作り直すわけではないので、この呼び出し
+        だけで前回の`_loc_hint`（直前に押したクリック）を捨てる必要は無い
+        （むしろ「クリック→レーシングライン走行」の順で押した意思を活かす）。
+        """
+        loaded = mapstore.load_map(name)
+        if loaded is None:
+            self._load_error = f"地図『{name}』を読み込めない"
+            return
+        grid = occgrid_from_trinary(
+            loaded.trinary, resolution=loaded.resolution,
+            origin=(loaded.origin_x, loaded.origin_y), seq=self.slam.next_seq())
+        self.slam.replace_grid_for_race(grid)
+        self.path = rl_mod.RaceLine(
+            xy=loaded.raceline_xy, v=loaded.raceline_v,
+            kappa=rl_mod.curvature(loaded.raceline_xy),
+            alpha=np.zeros(len(loaded.raceline_xy)), s=np.zeros(len(loaded.raceline_xy)),
+            length=_polyline_length(loaded.raceline_xy))
+        self._loaded_centerline_xy = loaded.centerline_xy
+        self.centerline = None
+        self.phase = LOCATE
+        self._localizer = None
+        self._load_error = ""
+        self.laps = 0
+        self._hint = -1
+        self._map_dirty = True
+
+    def request_locate_hint(self, x: float, y: float) -> None:
+        self._loc_hint = (x, y)
+        self._localizer = None     # 探索中なら絞り込んでやり直す
 
     # ── 本体 ──
 
@@ -186,6 +256,10 @@ class Slam2dRaceLine(Planner):
             return self._explore(st, scan, vs, p, dt, u.lost)
         if self.phase == BUILD:
             return self._build(st, p)
+        if self.phase == DONE:
+            return self._done(st)
+        if self.phase == LOCATE:
+            return self._locate(st, scan, p)
         return self._race(st, scan, vs, p, u.lost)
 
     # ── EXPLORE ──
@@ -303,12 +377,54 @@ class Slam2dRaceLine(Planner):
             st.reason = self._build_error
             return st
 
-        self.phase = st.phase = RACE
+        self.phase = st.phase = DONE
         self._hint = -1
         self._map_dirty = True
-        st.reason = (f"経路ができた（{len(self.path)}点・"
-                     f"1周 {self.path.length:.1f}m・"
-                     f"{self.path.v.min():.2f}〜{self.path.v.max():.2f} m/s）")
+        self._saved_map_name = self._auto_save_map()
+        base = (f"経路ができた（{len(self.path)}点・"
+                f"1周 {self.path.length:.1f}m・"
+                f"{self.path.v.min():.2f}〜{self.path.v.max():.2f} m/s）。")
+        st.reason = base + (
+            f"地図を『{self._saved_map_name}』として保存した。"
+            "レーシングライン走行で開始してください"
+            if self._saved_map_name else self._save_error)
+        return st
+
+    def _auto_save_map(self) -> str:
+        """BUILD完了時に自動で地図を保存する。名前は日時から生成する。
+
+        `mapstore.save_map()`は`slam2d`を知らない純粋なファイルI/O層——
+        ここは`Slam2dRaceLine`自身が`OccGrid`/`RaceLine`を直接持っているので、
+        `telemetry_node._maps_save()`のような`AutoMap`往復（pack/unpack）を
+        経由せず呼べる。失敗しても例外は投げない（保存できなくても地図作成
+        自体は完了しているので、`DONE`段の判断は続けられるべき）。
+        """
+        name = time.strftime("course_%Y%m%d_%H%M%S")
+        assert self.path is not None
+        try:
+            g = self.slam.grid
+            mapstore.save_map(
+                name, resolution=g.resolution, origin_x=g.origin[0], origin_y=g.origin[1],
+                trinary=g.trinary(),
+                centerline_xy=(self.centerline.xy if self.centerline is not None
+                              else np.zeros((0, 2))),
+                raceline_xy=self.path.xy, raceline_v=self.path.v)
+        except Exception as e:                      # noqa: BLE001
+            self._save_error = f"地図の自動保存に失敗: {e}"
+            return ""
+        return name
+
+    # ── DONE ──
+
+    def _done(self, st: AutoState) -> AutoState:
+        """地図と経路ができて保存済み。**人間が「レーシングライン走行」を
+        押すまでここで待つ。** BUILD完了直後に自動でRACEへ進まないのは、
+        地図内の好きな場所へ車を動かし直す間を作るため——
+        「レーシングライン走行」を押すと`request_load()`が呼ばれ、
+        `LOCATE`（自己位置復元）から始まる。
+        """
+        name = f"『{self._saved_map_name}』" if self._saved_map_name else ""
+        st.reason = f"地図{name}を保存した。レーシングライン走行で開始してください（車を動かしてもよい）"
         return st
 
     def _last_lap(self) -> np.ndarray:
@@ -318,6 +434,58 @@ class Slam2dRaceLine(Planner):
             if b - a >= 20:
                 return traj[a:b]
         return traj
+
+    # ── LOCATE ──
+
+    def _locate(self, st: AutoState, scan: Scan, p: dict[str, float]) -> AutoState:
+        """保存済み地図のどこに車が居るか分からない状態から自己位置を復元する。
+
+        グローバルローカリゼーション（`slam2d.core.localize.GlobalLocalizer`）は
+        1周期に候補角度1つぶんしか進めない（計算コストを1周期に収める設計、
+        `localize.py`のモジュールdocstring参照）ので、この段の間は車両を
+        `ready=False`で静止させたまま複数周期にわたって`step()`を呼び続ける。
+        """
+        pts = self.slam.deskew_scan(scan)
+
+        if self._localizer is None:
+            self._localizer = GlobalLocalizer(self.slam.grid, hint=self._loc_hint)
+            if self._localizer.done:
+                st.reason = ("自己位置の探索範囲に空きセルが無い。"
+                             "地図の選択かクリックしたヒントを見直してください")
+                return st
+
+        if not self._localizer.step(pts):
+            st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%）"
+            return st
+
+        r = self._localizer.result
+        if r.ambiguous:
+            st.reason = ("自己位置の候補が複数あり絞り込めない"
+                         "（左右対称・繰り返し形状の疑い）。"
+                         "地図パネルをタップしておおよその位置を教えてください")
+            self._localizer = None
+            return st
+        if r.score < p["min_score"]:
+            st.reason = f"自己位置が見つからない（最良一致度 {r.score:.2f}）"
+            self._localizer = None
+            return st
+
+        # 粗探索の結果を土台に、通常の追跡型スキャンマッチと同じ物差し
+        # （`RELOC_STAGES`＝見失い時の広域再探索と同じ探索幅）で仕上げる
+        refined = match(self.slam.grid, pts, Pose2D(r.x, r.y, r.yaw),
+                        config=MatcherConfig(stages=RELOC_STAGES, prior_w=0.0))
+        self.slam.set_pose(refined.x, refined.y, refined.yaw)
+        self.phase = st.phase = RACE
+        self._hint = -1
+        self._map_dirty = True
+        # ★ `st.match_score`はこの`plan()`冒頭の`self.slam.update()`（`_locate()`
+        # 呼び出し前の古い姿勢からの追跡マッチ、当然ながら未知の領域を指して
+        # 失敗する）の値のまま残っている。ここで求め直した値に置き換えないと、
+        # RACEへ切り替わった瞬間だけ「一致度0」を報告してしまう
+        st.match_score = refined.score
+        st.pose_x, st.pose_y, st.pose_yaw = refined.x, refined.y, refined.yaw
+        st.reason = f"自己位置を復元した（一致度 {refined.score:.2f}）。走行を開始する"
+        return st
 
     # ── RACE ──
 
@@ -401,6 +569,10 @@ class Slam2dRaceLine(Planner):
                     cells=pack_trinary(g.trinary()))
         if self.centerline is not None:
             m.centerline = self.centerline.xy.reshape(-1).tolist()
+        elif self._loaded_centerline_xy is not None:
+            # 保存済み地図から読み込んだ場合、`self.centerline`はEXPLORE→BUILDの
+            # 自前生成専用なので空のまま（`request_load()`参照）
+            m.centerline = np.asarray(self._loaded_centerline_xy).reshape(-1).tolist()
         if self.path is not None:
             m.raceline = self.path.xy.reshape(-1).tolist()
             m.raceline_v = self.path.v.tolist()

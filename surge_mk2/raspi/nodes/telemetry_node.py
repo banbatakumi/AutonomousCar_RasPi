@@ -117,20 +117,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import msgspec  # noqa: E402
+import numpy as np  # noqa: E402
 import websockets  # noqa: E402
 from websockets.asyncio.server import serve  # noqa: E402
 from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
-from raspi.auto import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
+from raspi.auto import PLANNERS, catalog as auto_catalog, mapstore, merged_params  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
+from raspi.nav.grid import pack_trinary, unpack_trinary  # noqa: E402
 from raspi.msgs import (  # noqa: E402
     AutoCtrl,
+    AutoMap,
     CamConfig,
     CamModelCtrl,
     DriveCmd,
@@ -214,6 +217,11 @@ CAM_FRONT_FPS_DEFAULT = 30.0
 CAM_REAR_FPS_DEFAULT = 10.0
 CAM_FPS_MIN = 1.0
 CAM_FPS_MAX = 30.0
+#: **DISARM中**（駐車中・STM32側で`armed=False`）の既定値。カメラは28%を
+#: 占める大口の消費電力源なので、走っていない間はさらに絞る（2026-09-03）。
+#: 後方カメラは駐車監視の用途が無いので既定で止める
+CAM_FRONT_FPS_DISARM_DEFAULT = 10.0
+CAM_REAR_ENABLED_DISARM_DEFAULT = False
 #: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
 #: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_CONFIG_HZ = 1
@@ -269,6 +277,10 @@ RECORD_CHUNK = 65536
 #: `scp` 運用に倒す。**全量を一度に `read_bytes()` すると Pi のメモリが尽きる**
 #: （`image_hz=5` × カメラ2台で `.mcap` は毎時 1GB 近く育つ）
 MAX_INLINE_LOG_BYTES = 64 * 1024 * 1024
+#: `/ws/map_upload/<name>` で受け取ってよいバイト数の上限。地図は数百KB〜数MB
+#: なので `MAX_INLINE_LOG_BYTES` よりずっと小さく切る（壊れたクライアントが
+#: 無限に送り続けても Pi のメモリを使い切らないようにする境界）
+MAX_MAP_UPLOAD_BYTES = 32 * 1024 * 1024
 #: 同一オリジン以外で許すオリジン。**Vite の dev サーバだけ。**
 #: 本番（telemetry_node が GUI も配る）は Host ヘッダと突き合わせるので列挙しない
 DEV_ORIGINS = frozenset(
@@ -393,6 +405,14 @@ class TelemetryServer:
         #: なると、地図が無いのに走る段へ進んでしまう）
         self._auto_freeze_seq = 0
         self._auto_clear_seq = 0
+        #: 「レーシングライン走行」で読み込む保存済み地図の名前・押した回数。
+        #: `_auto_freeze_seq`/`_auto_clear_seq` と同じ理由で永続化しない
+        self._auto_race_map = ""
+        self._auto_race_seq = 0
+        #: 地図パネルのクリックによる自己位置探索の絞り込みヒント
+        self._auto_loc_hint_x = 0.0
+        self._auto_loc_hint_y = 0.0
+        self._auto_loc_hint_seq = 0
         #: engage したまま `auto/cmd` が途絶して制動に落とした回数
         self.auto_stalls = 0
         self._auto_was_fresh = True
@@ -414,10 +434,15 @@ class TelemetryServer:
         self._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
 
         # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
-        #: `config/camera.json` に保存され、次回起動で戻る（`auto.json` と同じ流儀）
-        self._cam_rear_enabled = True
-        self._cam_front_cap_hz = CAM_FRONT_FPS_DEFAULT
-        self._cam_rear_cap_hz = CAM_REAR_FPS_DEFAULT
+        #: `config/camera.json` に保存され、次回起動で戻る（`auto.json` と同じ流儀）。
+        #: ARM中/DISARM中で別々の値を持つ（2026-09-03、`_desired_front_fps`/
+        #: `_desired_rear_enabled` 参照）。`rear_fps` はDISARM中は使われない
+        #: （後方カメラごと止める）ので ARM 用の1本だけでよい
+        self._cam_rear_enabled_armed = True
+        self._cam_rear_enabled_disarm = CAM_REAR_ENABLED_DISARM_DEFAULT
+        self._cam_front_fps_armed = CAM_FRONT_FPS_DEFAULT
+        self._cam_front_fps_disarm = CAM_FRONT_FPS_DISARM_DEFAULT
+        self._cam_rear_fps_armed = CAM_REAR_FPS_DEFAULT
         self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
 
         # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
@@ -549,6 +574,10 @@ class TelemetryServer:
             return None                       # WebSocket として処理させる
         if request.path.startswith("/logs/"):
             return self._serve_log_file(request.path)
+        if request.path.startswith("/maps/") and request.path.split("?")[0].endswith("/preview"):
+            return self._serve_map_preview(request.path)
+        if request.path.startswith("/maps/"):
+            return self._serve_map_file(request.path)
         return self._serve_static(request.path)
 
     # ── WebSocket ──
@@ -563,6 +592,8 @@ class TelemetryServer:
             await self._camera_channel(ws, path.rsplit("/", 1)[-1])
         elif path == "/ws/map":
             await self._map_channel(ws)
+        elif path.startswith("/ws/map_upload/"):
+            await self._map_upload_channel(ws, path[len("/ws/map_upload/"):])
         elif path == "/ws/record":
             await self._record_channel(ws)
         else:
@@ -799,6 +830,22 @@ class TelemetryServer:
             self._logs_delete(str(m.get("name", "")))
             await self._send_json(ws, self._logs_list())
 
+        # ── 保存済み地図の一覧・保存・削除（誰でも操作できる。`logs_list`/
+        #    `logs_delete`と同じ流儀。アップロードとダウンロードは別経路——
+        #    §`_serve_map_file`（GET）・`_map_upload_channel`（専用WS）参照） ──
+
+        elif kind == "maps_list":
+            await self._send_json(ws, self._maps_list())
+
+        elif kind == "maps_save":
+            ok, error = self._maps_save(str(m.get("name", "")))
+            await self._send_json(ws, {"type": "maps_save_result", "ok": ok, "error": error})
+            await self._send_json(ws, self._maps_list())
+
+        elif kind == "maps_delete":
+            mapstore.delete_map(str(m.get("name", "")))
+            await self._send_json(ws, self._maps_list())
+
         # ── シャットダウン（誰でも実行できる。estop と同じく、走行の操縦権とは無関係。
         #    誤操作は GUI 側の window.confirm で防ぐ——操縦権を要求すると
         #    「操縦権が無い接続には holder="" の control_denied が返るだけで GUI に
@@ -902,6 +949,17 @@ class TelemetryServer:
             # **回数で渡す。** `auto/ctrl` は現在の意思を繰り返し流すので、
             # 真偽値だと押していないのに毎回確定してしまう（`AutoCtrl.freeze_seq`）
             self._auto_freeze_seq += 1
+        if m.get("load_map"):
+            self._auto_race_map = str(m.get("map_name") or "")
+            self._auto_race_seq += 1
+        if m.get("hint_map"):
+            try:
+                x, y = float(m["hint_x"]), float(m["hint_y"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                self._auto_loc_hint_x, self._auto_loc_hint_y = x, y
+                self._auto_loc_hint_seq += 1
         if "engaged" in m:
             want = bool(m.get("engaged"))
             # モードが無いのに engage はできない。**解除は常に通す**
@@ -915,7 +973,12 @@ class TelemetryServer:
         return AutoCtrl(mode=self._auto_mode, engaged=self._auto_engaged,
                         params=dict(self._auto_params),
                         freeze_seq=self._auto_freeze_seq,
-                        clear_seq=self._auto_clear_seq)
+                        clear_seq=self._auto_clear_seq,
+                        race_map=self._auto_race_map,
+                        race_seq=self._auto_race_seq,
+                        loc_hint_x=self._auto_loc_hint_x,
+                        loc_hint_y=self._auto_loc_hint_y,
+                        loc_hint_seq=self._auto_loc_hint_seq)
 
     def _publish_auto_ctrl(self) -> None:
         self.pub.send(TOPIC_AUTO_CTRL, self._auto_ctrl())
@@ -975,72 +1038,119 @@ class TelemetryServer:
         return max(CAM_FPS_MIN, min(CAM_FPS_MAX, v))
 
     def _on_camera(self, m: dict) -> None:
-        """`{"type":"camera", "rear_enabled"?, "front_cap_hz"?, "rear_cap_hz"?, "gui_hz"?}`。
+        """`{"type":"camera", "rear_enabled_armed"?, "rear_enabled_disarm"?,
+        "front_fps_armed"?, "front_fps_disarm"?, "rear_fps_armed"?, "gui_hz"?}`。
 
         どれも省略可。`_on_auto`/`_on_fan` と同じく**サーバ側でも必ずクランプする**。
-        `front_cap_hz`/`rear_cap_hz` は capture 側（camera_node）のFPS上限、
-        `gui_hz` はブラウザへ配信するJPEGの頻度で、**別物**（前者は電力、
-        後者はWi-Fi帯域が理由）。
+        `*_armed`/`*_disarm` は capture 側（camera_node）のFPS上限・後方ON/OFFで、
+        ARM/DISARM（`vs.armed`）ごとに別の値を持つ（2026-09-03、駐車中の節電のため）。
+        `gui_hz` はブラウザへ配信するJPEGの頻度で、ARM状態と無関係（Wi-Fi帯域が理由）。
         """
-        if "rear_enabled" in m:
-            self._cam_rear_enabled = bool(m["rear_enabled"])
-        if "front_cap_hz" in m and isinstance(m["front_cap_hz"], (int, float)):
-            self._cam_front_cap_hz = self._clamp_cam_hz(float(m["front_cap_hz"]))
-        if "rear_cap_hz" in m and isinstance(m["rear_cap_hz"], (int, float)):
-            self._cam_rear_cap_hz = self._clamp_cam_hz(float(m["rear_cap_hz"]))
+        if "rear_enabled_armed" in m:
+            self._cam_rear_enabled_armed = bool(m["rear_enabled_armed"])
+        if "rear_enabled_disarm" in m:
+            self._cam_rear_enabled_disarm = bool(m["rear_enabled_disarm"])
+        if "front_fps_armed" in m and isinstance(m["front_fps_armed"], (int, float)):
+            self._cam_front_fps_armed = self._clamp_cam_hz(float(m["front_fps_armed"]))
+        if "front_fps_disarm" in m and isinstance(m["front_fps_disarm"], (int, float)):
+            self._cam_front_fps_disarm = self._clamp_cam_hz(float(m["front_fps_disarm"]))
+        if "rear_fps_armed" in m and isinstance(m["rear_fps_armed"], (int, float)):
+            self._cam_rear_fps_armed = self._clamp_cam_hz(float(m["rear_fps_armed"]))
         if "gui_hz" in m and isinstance(m["gui_hz"], (int, float)):
             self.camera_hz = self._clamp_cam_hz(float(m["gui_hz"]))
         self._save_camera_conf()
         self._publish_cam_config()      # 待たせない。fan と同じく即座に効かせる
 
-    def _desired_front_fps(self) -> float:
-        """前カメラの capture fps。**カメラを使う自動運転が engage 中は上限を無視する。**
+    def _vehicle_armed(self) -> bool:
+        """STM32側の `armed`（DISARM=駐車中/ARM=いつでも走れる）。
 
-        `line_trace`/`ftg_cam` はライン検出・走行可能領域セグメンテーションに
-        毎フレーム新しい画を欲しがる。ユーザーの節電設定（既定15fps）より
-        走行の安全性を優先する。
+        `VehicleState` がまだ1度も届いていない起動直後は `True`
+        （＝ARM相当のFPSのまま）を返す。**`False` を既定にすると、
+        起動直後の一瞬だけ節電用の低FPSに落ちて誤解のもとになる**
+        （`_read_pi_temp_c` の None 扱いと違い、こちらは「わからない」を
+        安全側＝高FPS側に倒す）。
+        """
+        vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        return True if vs is None else bool(vs.armed)
+
+    def _desired_front_fps(self) -> float:
+        """前カメラの capture fps。優先度は上から:
+
+        1. カメラを使う自動運転が engage 中 → 上限を無視して `CAM_FPS_MAX`
+           （`line_trace`/`ftg_cam` は毎フレーム新しい画を欲しがるため）
+        2. DISARM中（駐車中）→ 節電用の低FPS（`front_fps_disarm`）
+        3. それ以外（ARM中）→ ユーザー設定の上限（`front_fps_armed`）
         """
         if self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES:
             return CAM_FPS_MAX
-        return self._cam_front_cap_hz
+        if self._vehicle_armed():
+            return self._cam_front_fps_armed
+        return self._cam_front_fps_disarm
+
+    def _desired_rear_enabled(self) -> bool:
+        """後方カメラの capture ON/OFF。DISARM中（駐車中）は監視の用途が無いので
+        既定で止める。ARM中はユーザー設定（`rear_enabled_armed`）に従う。"""
+        return self._cam_rear_enabled_armed if self._vehicle_armed() \
+            else self._cam_rear_enabled_disarm
 
     def _camera_config_status(self) -> dict:
         return {
-            "rear_enabled": self._cam_rear_enabled,
-            "front_cap_hz": self._cam_front_cap_hz,
-            "rear_cap_hz": self._cam_rear_cap_hz,
+            "rear_enabled_armed": self._cam_rear_enabled_armed,
+            "rear_enabled_disarm": self._cam_rear_enabled_disarm,
+            "front_fps_armed": self._cam_front_fps_armed,
+            "front_fps_disarm": self._cam_front_fps_disarm,
+            "rear_fps_armed": self._cam_rear_fps_armed,
             "gui_hz": self.camera_hz,
+            "armed": self._vehicle_armed(),
             "front_fps_effective": self._desired_front_fps(),
+            "rear_enabled_effective": self._desired_rear_enabled(),
             "auto_override": self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES,
         }
 
     def _publish_cam_config(self) -> None:
         self.pub.send(TOPIC_CAM_CONFIG, CamConfig(
             front_fps=self._desired_front_fps(),
-            rear_fps=self._cam_rear_cap_hz,
-            rear_enabled=self._cam_rear_enabled))
+            rear_fps=self._cam_rear_fps_armed,
+            rear_enabled=self._desired_rear_enabled()))
 
     def _load_camera_conf(self) -> None:
-        """`config/camera.json` から戻す。`_load_auto_conf` と同じ流儀。"""
+        """`config/camera.json` から戻す。`_load_auto_conf` と同じ流儀。
+
+        旧スキーマ（ARM/DISARM区別が無かった `rear_enabled`/`front_cap_hz`/
+        `rear_cap_hz`）しか無いファイルは、その値を ARM 側の初期値として引き継ぐ
+        （DISARM側はコード既定のまま）。
+        """
         try:
             raw = _json_decode(CAMERA_CONF.read_bytes())
         except Exception:
             return
-        if isinstance(raw.get("rear_enabled"), bool):
-            self._cam_rear_enabled = raw["rear_enabled"]
-        if isinstance(raw.get("front_cap_hz"), (int, float)):
-            self._cam_front_cap_hz = self._clamp_cam_hz(float(raw["front_cap_hz"]))
-        if isinstance(raw.get("rear_cap_hz"), (int, float)):
-            self._cam_rear_cap_hz = self._clamp_cam_hz(float(raw["rear_cap_hz"]))
+        if isinstance(raw.get("rear_enabled_armed"), bool):
+            self._cam_rear_enabled_armed = raw["rear_enabled_armed"]
+        elif isinstance(raw.get("rear_enabled"), bool):
+            self._cam_rear_enabled_armed = raw["rear_enabled"]
+        if isinstance(raw.get("rear_enabled_disarm"), bool):
+            self._cam_rear_enabled_disarm = raw["rear_enabled_disarm"]
+        if isinstance(raw.get("front_fps_armed"), (int, float)):
+            self._cam_front_fps_armed = self._clamp_cam_hz(float(raw["front_fps_armed"]))
+        elif isinstance(raw.get("front_cap_hz"), (int, float)):
+            self._cam_front_fps_armed = self._clamp_cam_hz(float(raw["front_cap_hz"]))
+        if isinstance(raw.get("front_fps_disarm"), (int, float)):
+            self._cam_front_fps_disarm = self._clamp_cam_hz(float(raw["front_fps_disarm"]))
+        if isinstance(raw.get("rear_fps_armed"), (int, float)):
+            self._cam_rear_fps_armed = self._clamp_cam_hz(float(raw["rear_fps_armed"]))
+        elif isinstance(raw.get("rear_cap_hz"), (int, float)):
+            self._cam_rear_fps_armed = self._clamp_cam_hz(float(raw["rear_cap_hz"]))
         if isinstance(raw.get("gui_hz"), (int, float)):
             self.camera_hz = self._clamp_cam_hz(float(raw["gui_hz"]))
 
     def _save_camera_conf(self) -> None:
         try:
             _atomic_write_bytes(CAMERA_CONF, _json_encode({
-                "rear_enabled": self._cam_rear_enabled,
-                "front_cap_hz": self._cam_front_cap_hz,
-                "rear_cap_hz": self._cam_rear_cap_hz,
+                "rear_enabled_armed": self._cam_rear_enabled_armed,
+                "rear_enabled_disarm": self._cam_rear_enabled_disarm,
+                "front_fps_armed": self._cam_front_fps_armed,
+                "front_fps_disarm": self._cam_front_fps_disarm,
+                "rear_fps_armed": self._cam_rear_fps_armed,
                 "gui_hz": self.camera_hz,
             }))
         except Exception:
@@ -1443,6 +1553,117 @@ class TelemetryServer:
         if path is None or not path.is_file():
             return
         path.unlink(missing_ok=True)
+
+    # ── `saved_maps/` の一覧・保存・削除（`raspi/auto/mapstore.py`） ──
+    #
+    # ダウンロードは `GET /maps/<name>`（§`_serve_map_file`）、アップロードは
+    # 専用の `/ws/map_upload/<name>`（§`_map_upload_channel`）——このサーバの
+    # HTTP実装は POST ボディを受け取れない（`websockets.http11.Request.parse`
+    # が `Content-Length != 0` を `ValueError` で拒否する）ため。
+
+    def _maps_list(self) -> dict:
+        return {"type": "maps", "map_files": mapstore.list_maps()}
+
+    def _maps_save(self, name: str) -> tuple[bool, str]:
+        """今の `auto/map`（経路ができている段の `AutoMap` スナップショット）をそのまま保存する。
+
+        **保存は planning_node に触らず、telemetry_node が受信済みの `AutoMap`
+        から作る。** 3値の判定結果だけあれば `OccGrid` を再現できるので
+        （`raspi/auto/mapstore.py` のモジュールdocstring参照）、planner側に
+        新しい保存コードパスを足す必要が無い。
+
+        `DONE`（BUILD完了直後、自動保存済みでレーシングライン走行を待っている
+        段）と`RACE`（実際に走行中）のどちらでも押せる——後者は別名で
+        取り直したい場合の手動保存の口として残してある。
+        """
+        if not name:
+            return False, "名前を入力してください"
+        if self._auto_mode != "slam2d_raceline":
+            return False, "slam2d_racelineモードのときだけ保存できます"
+        st = self.sub.latest.get(TOPIC_AUTO_STATE)
+        if st is None or st.phase not in ("DONE", "RACE"):
+            return False, "地図と経路ができてから（DONE/RACE段）でないと保存できません"
+        am = self.sub.latest.get(TOPIC_AUTO_MAP)
+        if am is None or not am.raceline:
+            return False, "まだ保存できる地図（レーシングライン完成後）がありません"
+        try:
+            trinary = unpack_trinary(am.cells, am.width, am.height)
+        except ValueError as e:
+            return False, f"地図データが壊れている: {e}"
+        try:
+            mapstore.save_map(
+                name, resolution=am.resolution, origin_x=am.origin_x, origin_y=am.origin_y,
+                trinary=trinary, centerline_xy=np.asarray(am.centerline, dtype=np.float64),
+                raceline_xy=np.asarray(am.raceline, dtype=np.float64),
+                raceline_v=np.asarray(am.raceline_v, dtype=np.float64))
+        except ValueError as e:
+            return False, str(e)
+        return True, ""
+
+    def _serve_map_file(self, path: str) -> Response:
+        """`GET /maps/<name>` — 保存済み地図のダウンロード。`_serve_log_file`と同じ形。"""
+        from urllib.parse import unquote
+        name = unquote(path[len("/maps/"):].split("?")[0])
+        target = mapstore.resolve_map_path(name)
+        if target is None or not target.is_file():
+            return _response(404, "text/plain; charset=utf-8", b"not found")
+        return _response(200, "application/octet-stream", target.read_bytes(),
+                         extra={"Content-Disposition": f'attachment; filename="{name}.npz"'})
+
+    def _serve_map_preview(self, path: str) -> Response:
+        """`GET /maps/<name>/preview` — 保存済み地図を`/ws/map`と同じ形
+        （`AutoMap`をmsgpackエンコードしたもの、GUI側の`ws/map.ts`の
+        デコード処理をそのまま再利用できる）で返す。
+
+        **「レーシングライン走行」を押す前に地図を見せ、自己位置ヒントを
+        クリックで指定できるようにする**ため（バンビの指示、2026-09-03）。
+        `map_seq`は常に0にしてある——プレビューは`/ws/map`の版番号の連番とは
+        無関係な一回きりの取得なので、意味を持たせない。
+        """
+        from urllib.parse import unquote
+        raw = path.split("?")[0]
+        name = unquote(raw[len("/maps/"):-len("/preview")])
+        loaded = mapstore.load_map(name)
+        if loaded is None:
+            return _response(404, "text/plain; charset=utf-8", b"not found")
+        height, width = loaded.trinary.shape
+        m = AutoMap(map_seq=0, resolution=loaded.resolution,
+                   origin_x=loaded.origin_x, origin_y=loaded.origin_y,
+                   width=width, height=height, cells=pack_trinary(loaded.trinary),
+                   centerline=loaded.centerline_xy.reshape(-1).tolist(),
+                   raceline=loaded.raceline_xy.reshape(-1).tolist(),
+                   raceline_v=loaded.raceline_v.tolist())
+        return _response(200, "application/octet-stream", _encoder.encode(m))
+
+    async def _map_upload_channel(self, ws, name: str) -> None:
+        """`/ws/map_upload/<name>` — ブラウザ→Piのバイナリ受信。**アップロード専用。**
+
+        このサーバのHTTP実装はPOSTボディを受け取れない（`_serve_map_file`の
+        コメント参照）ので、`/ws/record`（Pi→ブラウザの中継）と逆方向のWSで
+        代替する。プロトコル: バイナリフレームを任意個数（受信のたび `buf` に
+        追記）→最後にテキストフレーム（終了合図。内容は見ない）→検証して
+        書き込み、結果を1通返してから閉じる。
+        """
+        from urllib.parse import unquote
+        name = unquote(name)
+        buf = bytearray()
+        try:
+            async for raw in ws:
+                if isinstance(raw, (bytes, bytearray)):
+                    if len(buf) + len(raw) > MAX_MAP_UPLOAD_BYTES:
+                        await self._send_json(ws, {"ok": False, "error": "大きすぎます"})
+                        return
+                    buf += raw
+                    continue
+                # テキストフレーム = 終了合図
+                loaded = mapstore.save_upload(name, bytes(buf))
+                if loaded is None:
+                    await self._send_json(ws, {"ok": False, "error": "壊れた地図ファイルです"})
+                    return
+                await self._send_json(ws, {"ok": True})
+                return
+        except websockets.exceptions.ConnectionClosed:
+            pass
 
     async def _broadcast_control_status(self) -> None:
         st = self._control_status()

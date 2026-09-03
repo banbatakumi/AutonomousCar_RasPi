@@ -31,6 +31,19 @@ telemetry_node が `cam/model`（`CamModelCtrl`）で繰り返し流してくる
 LiDAR の「欠測は空きではない」（`follow_the_gap.py` の docstring）と同じ
 考え方。フレームが読めない・推論が例外を吐いた周期は「壁」として安全側に
 倒す（`Planner.plan()` 側の `ready=False`／停止に自然につながる）。
+
+## `ftg_cam` が選ばれている間だけ推論する（IDLE/ACTIVE）
+
+`cam_perception_node` はプロセスとしては常時起動（`surge-cam-perception`）
+だが、CNN 推論はカメラフレームが来るたびに回るので上げっぱなしだと CPU・
+電力を無駄に消費する。`cam_track_node.py`（`track/roi` の選択が無い間は
+NanoTrack を回さない）と同じ考え方で、`auto/ctrl`（`AutoCtrl.mode`。
+telemetry_node が GUI の選択を繰り返し流すトピック）を見て
+`mode == "ftg_cam"` の間だけ実際にフレームを読んで推論する。それ以外は
+`failed_frame()`（契約2の「壁」扱い）を出すだけで、共有メモリの読み取り
+すらしない。**`reload_if_changed()` はモード非依存で常に呼ぶ**——
+`ftg_cam` に切り替えた瞬間から推論を始められるよう、モデルだけは先に
+ロードしておいてよい（ONNXセッション生成はモデル切替時の一過性コスト）。
 """
 
 from __future__ import annotations
@@ -50,9 +63,10 @@ from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import CamMask, ImageRef, Scan, VehicleState  # noqa: E402
+from raspi.msgs import AutoCtrl, CamMask, ImageRef, Scan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_AUTO_CTRL,
     TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
     TOPIC_HB_PREFIX,
@@ -88,7 +102,18 @@ class SegmentationModel:
                 mean: float = 0.0, std: float = 255.0, threshold: float = 0.5) -> None:
         import onnxruntime as ort
 
-        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        # ★省電力化: 224x224程度の軽量モデルでは全4コアへ並列化するオーバーヘッドの
+        # 方が大きく、かつ他ノード（camera_node/planning_node等）とコアを取り合う。
+        # さらに ONNXRuntime は既定でスレッドをスピンウェイトさせ、推論の合間も
+        # CPUを回し続けて電力を無駄にする（`session.*.allow_spinning`）ので明示的に切る。
+        # 参照: https://onnxruntime.ai/docs/performance/tune-performance/threading.html
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 2
+        opts.inter_op_num_threads = 1
+        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+        self.session = ort.InferenceSession(model_path, sess_options=opts,
+                                            providers=["CPUExecutionProvider"])
         self.input_name = self.session.get_inputs()[0].name
         self.input_size = input_size           # (width, height)
         self.mean = mean
@@ -138,7 +163,8 @@ class CamPerceptionNode:
                 models_dir: Path | None = None, loaded_model_name: str = "",
                 vehicle: Vehicle | None = None,
                 fov_deg: float = 60.0, max_range: float = 3.0,
-                grid_resolution: float = 0.05, grid_size_m: float = 6.0) -> None:
+                grid_resolution: float = 0.05, grid_size_m: float = 6.0,
+                infer_hz: float = 10.0, mask_every: int = 1) -> None:
         #: **`None` は「まだモデルが選ばれていない」。** `run()` はこの間
         #: `failed_frame()` を出し続ける（契約2の「壁扱い」に自然に落ちる）
         self.model = model
@@ -155,6 +181,19 @@ class CamPerceptionNode:
         self.max_range = max_range
         self.grid_resolution = grid_resolution
         self.grid_size_m = grid_size_m
+
+        # ★省電力化: 推論（ONNX＋IPM投影＋raycast）はカメラの実フレームレート
+        # （既定30fps）ではなく `infer_hz` に間引く。`follow_the_gap_cam.py` の
+        # `stale_ms=500` に対して10Hzなら十分余裕があり、間引いた周期は
+        # `_last_scan` を seq/t_capture だけ更新して出し続ける（`failed_frame()`
+        # にはしない——欠測扱いにすると planner が「壁」と読んで不要に止まる）
+        self._infer_period_ns = int(NS / infer_hz) if infer_hz > 0 else 0
+        self._last_infer_ns = 0
+        self._last_scan: Scan | None = None
+        #: マスクJPEG（GUIプレビュー専用）のエンコード頻度。JPEGエンコード自体は
+        #: CNN推論より軽いので既定は推論と同じ毎回（1）。粗くしたければ上げる
+        self._mask_every = max(1, int(mask_every))
+        self._infer_count = 0
 
         half = int(round(fov_deg / 2))
         self._degs = np.arange(-half, half + 1)
@@ -174,6 +213,8 @@ class CamPerceptionNode:
         #: 既存のテスト・呼び出し側の契約を壊さないための側路（`encode_mask_jpeg()` 参照）
         self._last_drivable: np.ndarray | None = None
         self._running = False
+        #: 直前周期の ACTIVE/IDLE。切り替わった周期だけログを出すための記憶
+        self._active = False
 
     def close(self) -> None:
         self._reader.close()
@@ -308,30 +349,66 @@ class CamPerceptionNode:
             if model_ctrl is not None:
                 self.reload_if_changed(model_ctrl.name)
 
+            auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
+            active = auto_ctrl is not None and auto_ctrl.mode == "ftg_cam"
+            if active != self._active:
+                self._active = active
+                print(f"# ftg_cam {'選択: 推論開始' if active else '非選択: 推論停止'}",
+                     flush=True)
+
             ref = sub.latest.get(TOPIC_IMAGE_FRONT)
             vs = sub.latest.get(TOPIC_VEHICLE_STATE)
-            if self.model is None:
+            now = time.monotonic_ns()
+            #: `Publisher.send()` は呼ぶたびに独自の seq を打ち直す（`bus/zbus.py`
+            #: `Publisher._send()`）ので、中身が同じでも publish すれば
+            #: planning_node には「新しい周」に見えてしまい、`_replan()` の
+            #: 重複排除（`scan.seq == self._last_scan_seq`）が効かない。
+            #: 間引きで推論を休んだ周期は **publish 自体を省略する**——
+            #: `stale_ms=500` に対して `infer_hz`（既定10Hz=100ms間隔）の実publishで
+            #: 十分足りるので、鮮度は損なわない
+            should_publish_scan = True
+            if not active:
+                # `ftg_cam` が選ばれていない間は共有メモリすら読まない
+                # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
+                st = self.failed_frame(seq=seq)
+                self._last_scan = None
+            elif self.model is None:
                 # **契約2の入口。** まだ GUI がモデルを選んでいない（起動直後・
                 # 未選択のまま）。フレームが来ていても推論しようがない
                 st = self.failed_frame(seq=seq)
+                self._last_scan = None
             elif ref is None:
                 st = self.failed_frame(seq=seq)
+                self._last_scan = None
             else:
                 got = self.read_frame(ref)
                 if got is None:
                     st = self.failed_frame(seq=seq)
+                    self._last_scan = None
+                elif (self._last_scan is not None
+                      and now - self._last_infer_ns < self._infer_period_ns):
+                    # ★省電力化: まだ間引き周期に達していない。前回の推論結果を
+                    # そのまま維持し、publish はしない（上のコメント参照）
+                    st = self._last_scan
+                    should_publish_scan = False
                 else:
                     frame, t_capture = got
+                    self._last_infer_ns = now
                     st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
-                    # 推論に成功した周期だけマスクを配る。**failed_frame の間は送らない**
-                    # ——GUI 側は直前のマスクが静止して見えるだけで、暴走はしない
-                    mask_jpeg = self.encode_mask_jpeg()
-                    if mask_jpeg is not None:
-                        pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
-            pub.send(TOPIC_SCAN_CAM, st)
+                    self._last_scan = st
+                    self._infer_count += 1
+                    # マスクは既定で推論と同じ頻度（`mask_every=1`）で配る。GUIの
+                    # ライブプレビュー専用で走行判断には使わない。
+                    # **failed_frame・間引きの間は送らない**——GUI 側は直前の
+                    # マスクが静止して見えるだけで、暴走はしない
+                    if self._infer_count == 1 or self._infer_count % self._mask_every == 0:
+                        mask_jpeg = self.encode_mask_jpeg()
+                        if mask_jpeg is not None:
+                            pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
+            if should_publish_scan:
+                pub.send(TOPIC_SCAN_CAM, st)
             seq += 1
 
-            now = time.monotonic_ns()
             if now >= next_hb:
                 next_hb = now + NS // HB_HZ
                 pub.send(TOPIC_HB_PREFIX + "cam_perception",
@@ -355,6 +432,14 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--fov-deg", type=float, default=60.0)
     ap.add_argument("--max-range", type=float, default=3.0)
+    ap.add_argument("--infer-hz", type=float, default=10.0,
+                    help="推論（ONNX＋IPM投影＋raycast）を回す上限頻度。カメラの実"
+                         "フレームレートより低くして省電力化する。"
+                         "follow_the_gap_cam.py の stale_ms=500 に対して十分な余裕を"
+                         "残すこと（既定10Hzなら100ms間隔）")
+    ap.add_argument("--mask-every", type=int, default=1,
+                    help="cam/mask（GUIプレビュー）を配る間隔。推論N回に1回だけ配る。"
+                         "JPEGエンコード自体はCNN推論より軽いので既定は推論と同じ毎回")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
@@ -366,11 +451,12 @@ def main() -> int:
         model = SegmentationModel(args.model, input_size=(w, h), mean=args.mean,
                                  std=args.std, threshold=args.threshold)
     node = CamPerceptionNode(model=model, models_dir=Path(args.models_dir),
-                             fov_deg=args.fov_deg, max_range=args.max_range)
+                             fov_deg=args.fov_deg, max_range=args.max_range,
+                             infer_hz=args.infer_hz, mask_every=args.mask_every)
 
     pub = Publisher("cam_perception")
     sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
-                      TOPIC_CAM_MODEL: LATEST})
+                      TOPIC_CAM_MODEL: LATEST, TOPIC_AUTO_CTRL: LATEST})
 
     print(f"# cam_perception_node  publish {pub.endpoint}  scan/cam へ配信")
 

@@ -52,6 +52,13 @@ const AY_SIGN = 1
 
 /** 外周が何 G か。ミニカーの実力に対して広すぎると点が真ん中で動かない */
 const FULL_G = 0.6
+/** 舵角計・速度計の針の回転軸（`SteerGauge.tsx`/`SpeedGauge.tsx` の
+ * `CY / viewBox高さ` = 58/92）。**3つのメータは箱の上端で揃えているが、
+ * 舵角計・速度計は軸がその箱の中央よりやや下（円弧が上に開いた形のため）に
+ * あるのに対し、G メータは円全体が箱の中央にあるため、そのままだと G だけ
+ * 中心が高く見える。**この分だけ `.gmeter-wrap` を下にずらして光学中心を
+ * 揃える（2026-09-03、指示による） */
+const PIVOT_FRAC = 58 / 92
 /** 軌跡の長さ [ms]。長すぎると団子になる */
 const TRAIL_MS = 2000
 const TRAIL_MAX = 120
@@ -105,14 +112,17 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
       if (r <= 0) return
 
       // ── 目盛り（同心円と十字） ──
+      // 色は舵角計・速度計の目盛り（`.arc-tick`/`.arc-zero`、`styles.css`）と
+      // 揃えた暖色の濃いマルーン。旧色（`#241b1d`/`#3a2226`）は実機で
+      // 「グリッドが消えた」と見えるほど沈んでいたため明るくした
       ctx.lineWidth = dpr
       for (const ring of [1 / 3, 2 / 3, 1]) {
         ctx.beginPath()
         ctx.arc(cx, cy, r * ring, 0, Math.PI * 2)
-        ctx.strokeStyle = ring === 1 ? '#3a2226' : '#241b1d'
+        ctx.strokeStyle = ring === 1 ? '#59383e' : '#453036'
         ctx.stroke()
       }
-      ctx.strokeStyle = '#241b1d'
+      ctx.strokeStyle = '#453036'
       ctx.beginPath()
       ctx.moveTo(cx - r, cy)
       ctx.lineTo(cx + r, cy)
@@ -154,7 +164,14 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
 
   return (
     <div className="meter meter-g">
-      <div className="gmeter-wrap" style={dialHeight ? { width: dialHeight, height: dialHeight } : undefined}>
+      <div
+        className="gmeter-wrap"
+        style={
+          dialHeight
+            ? { width: dialHeight, height: dialHeight, marginTop: dialHeight * (PIVOT_FRAC - 0.5) }
+            : undefined
+        }
+      >
         <canvas ref={ref} className="gmeter" />
         <span className="gmeter-axis gmeter-axis-t">加速</span>
         <span className="gmeter-axis gmeter-axis-b">制動</span>

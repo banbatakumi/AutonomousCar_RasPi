@@ -440,6 +440,16 @@ class AutoCtrl(MsgBase):
     freeze_seq: int = 0
     #: 「地図を削除」を押した回数。理由は `freeze_seq` と同じ
     clear_seq: int = 0
+    #: 「レーシングライン走行」で読み込む保存済み地図の名前
+    race_map: str = ""
+    #: 「レーシングライン走行」（保存済み地図から走り始める）を押した回数。
+    #: `freeze_seq`/`clear_seq` と同じ「回数」の約束
+    race_seq: int = 0
+    #: 地図パネルのクリックによる自己位置探索の絞り込みヒント（mapフレーム座標）
+    loc_hint_x: float = 0.0
+    loc_hint_y: float = 0.0
+    #: 「地図をクリックした」回数。`freeze_seq`/`clear_seq`/`race_seq` と同じ約束
+    loc_hint_seq: int = 0
 
 
 class AutoState(MsgBase):

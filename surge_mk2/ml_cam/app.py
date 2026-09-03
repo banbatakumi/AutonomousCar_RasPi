@@ -483,6 +483,16 @@ class App:
         ttk.Button(frame, text="アノテーション開始（別ウィンドウが開きます）", command=run).grid(
             row=8, column=0, columnspan=2, sticky="w", pady=10)
 
+        ttk.Label(frame, text="操作（別ウィンドウ内）:\n"
+                             "  左クリック         走行可能（前景）の点を追加\n"
+                             "  Shift + 左クリック   除外（背景）の点を追加\n"
+                             "  z                  直前の点を取り消す\n"
+                             "  Enter              マスクを保存して次のフレームへ\n"
+                             "  n / p              保存せず次/前のフレームへ\n"
+                             "  q                  終了",
+                 foreground="gray", justify="left").grid(
+            row=9, column=0, columnspan=3, sticky="w")
+
     def _build_train_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
         nb.add(frame, text="③ 学習")

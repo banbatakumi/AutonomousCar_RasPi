@@ -28,8 +28,8 @@ logs/*.jsonl
 # 生フレームログ（大きい・実行ごとに増える）
 *.sfl
 *.mcap
-saved_maps/*.npz
-saved_maps/*.json
+surge_mk2/saved_maps/*.npz
+surge_mk2/saved_maps/*.json
 
 # ml_cam/（カメラセグメンテーションのオフライン学習パイプライン。2026-08-29に
 # ml/ から改名）の生成物・大容量ファイル

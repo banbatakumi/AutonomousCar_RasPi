@@ -431,6 +431,17 @@ export function useDriving(ch: ControlChannel | null) {
         disarm('Esc で E-STOP')
         return
       }
+      // **フォーム要素にフォーカスがある間は操縦キーを奪わない。** テキスト
+      // 入力欄（地図名の入力欄`MapLibrary.tsx`等）にフォーカスがある間、
+      // `KeyD`/`Space`等が素通りして文字が打てなくなっていた（2026-09-03、
+      // 指摘による）。`SELECT`（`SlamRaceButtons`の地図選択等）も対象に
+      // 入れないと、矢印キーでの選択がギアシフトに奪われる。
+      // E-STOP（上の`Escape`）だけは安全のためフォーカスに関係なく効かせる
+      const focused = e.target as HTMLElement | null
+      if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA'
+                     || focused.tagName === 'SELECT' || focused.isContentEditable)) {
+        return
+      }
       if (e.code === 'Enter') {
         // ARM のトグル。**入れるのも切るのも同じキー**
         if (ui.armRequested) disarm('Enter で解除')

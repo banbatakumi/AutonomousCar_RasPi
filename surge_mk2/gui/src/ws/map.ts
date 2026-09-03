@@ -53,7 +53,9 @@ async function inflate(data: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
-async function build(msg: AutoMapMsg): Promise<MapData | null> {
+/** `AutoMapMsg`（サーバのmsgpack）→`MapData`（描画用）。`/ws/map`のライブ更新と
+ * `bus/mapPreview.ts`の一回きりのプレビュー取得の両方から使う共通の変換。 */
+export async function build(msg: AutoMapMsg): Promise<MapData | null> {
   const { width, height } = msg
   if (!width || !height) return null
 

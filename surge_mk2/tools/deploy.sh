@@ -12,7 +12,7 @@
 # | 直したもの | 必要な操作 |
 # |---|---|
 # | `gui/` | **rsync だけ。** telemetry_node は毎リクエストでファイルを読む |
-# | `raspi/nodes/telemetry_node.py` | `--restart` 相当（surge-telemetry の再起動。E-Stop は無関係） |
+# | `raspi/nodes/telemetry_node.py` `raspi/nodes/cam_perception_node.py` | `--restart` 相当（surge-telemetry/camera/cam-perception の再起動。E-Stop は無関係） |
 # | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | `--services` ＋ `--restart-io` |
 # | `raspi/nodes/io_node.py` | `--restart-io` |
 #
@@ -120,8 +120,12 @@ fi
 # ── 5. 再起動 ──
 if [ "$DO_RESTART" = 1 ]; then
   echo
-  echo "# surge-telemetry / surge-camera を再起動（E-Stop には影響しない）"
-  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera' || exit 1
+  echo "# surge-telemetry / surge-camera / surge-cam-perception を再起動（E-Stop には影響しない）"
+  # surge-cam-perception: auto/ctrl・cam/model とも telemetry_node が「現在の意思」を
+  # 繰り返し流す設計（AutoCtrl/CamModelCtrl の docstring 参照）なので、再起動しても
+  # GUI 側の再選択なしに数秒で復帰する。ftg_cam 中でも scan/cam の途絶は
+  # stale_ms（500ms）超過で自然にブレーキへ倒れる（安全側）
+  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception' || exit 1
 fi
 
 if [ "$DO_RESTART_IO" = 1 ]; then

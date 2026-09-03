@@ -47,7 +47,7 @@ import numpy as np
 
 from .deskew import Points
 
-__all__ = ["OccGrid", "dilate", "pack_trinary"]
+__all__ = ["OccGrid", "dilate", "pack_trinary", "unpack_trinary"]
 
 #: レイを進める刻み幅を解像度の何倍にするか。1.0 だと斜めのレイがセルを飛ばす
 _STEP_RATIO = 0.5
@@ -300,6 +300,26 @@ def pack_trinary(t: np.ndarray) -> bytes:
         flat = np.concatenate([flat, np.zeros(pad, dtype=np.uint8)])
     packed = (flat[0::4] | (flat[1::4] << 2) | (flat[2::4] << 4) | (flat[3::4] << 6))
     return zlib.compress(packed.tobytes(), 6)
+
+
+def unpack_trinary(data: bytes, width: int, height: int) -> np.ndarray:
+    """`pack_trinary()` の逆変換。地図の保存（`raspi/auto/mapstore.py`）・
+    アップロード検証の両方で使う。
+
+    壊れた/短すぎる `data` は `ValueError`（アップロードされた任意バイト列を
+    弾くための境界。呼び出し側で潰す）。
+    """
+    raw = zlib.decompress(data)
+    packed = np.frombuffer(raw, dtype=np.uint8)
+    n = width * height
+    out = np.empty(packed.size * 4, dtype=np.uint8)
+    out[0::4] = packed & 0x3
+    out[1::4] = (packed >> 2) & 0x3
+    out[2::4] = (packed >> 4) & 0x3
+    out[3::4] = (packed >> 6) & 0x3
+    if out.size < n:
+        raise ValueError(f"packed size mismatch: got {out.size}, need {n}")
+    return out[:n].reshape(height, width)
 
 
 def dilate(mask: np.ndarray, cells: int) -> np.ndarray:

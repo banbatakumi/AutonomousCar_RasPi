@@ -80,3 +80,19 @@ export function wifiBars(dbm: number | null): 0 | 1 | 2 | 3 {
   if (dbm <= -60) return 2
   return 3
 }
+
+/** バイト数 → 人が読める表記（`LogControls`/`DiagLogFiles` 共用）。 */
+export function formatBytes(n: number): string {
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : `${(n / 1e3).toFixed(0)}KB`
+}
+
+/** 記録経過時間 [s] → `分:秒`。 */
+export function formatElapsed(s: number): string {
+  const m = Math.floor(s / 60)
+  const sec = Math.floor(s % 60)
+  return `${m}:${sec.toString().padStart(2, '0')}`
+}
+
+export function formatDateTime(unixSec: number): string {
+  return new Date(unixSec * 1000).toLocaleString()
+}

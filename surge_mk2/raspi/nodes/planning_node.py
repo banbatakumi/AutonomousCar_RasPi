@@ -141,6 +141,8 @@ class PlanningNode:
         # 下のmode変更分岐でplannerを作り直す（順序が重要）
         freeze = c.freeze_seq > self.ctrl.freeze_seq
         clear = c.clear_seq > self.ctrl.clear_seq
+        load = c.race_seq > self.ctrl.race_seq
+        hint = c.loc_hint_seq > self.ctrl.loc_hint_seq
         self.ctrl = c
         if clear and self.planner is not None:
             self.planner.request_clear()
@@ -151,6 +153,13 @@ class PlanningNode:
             self.planner.request_freeze()
             if not self.quiet:
                 print("# 地図を確定（GUI）", flush=True)
+        if load and self.planner is not None:
+            self.planner.request_load(c.race_map)
+            self._last_map_seq = -1
+            if not self.quiet:
+                print(f"# 地図を読み込み（GUI）: {c.race_map}", flush=True)
+        if hint and self.planner is not None:
+            self.planner.request_locate_hint(c.loc_hint_x, c.loc_hint_y)
         if changed:
             self.planner = make_planner(c.mode)
             self.state = AutoState(mode=c.mode)

@@ -10,7 +10,7 @@ import math
 
 import numpy as np
 
-from slam2d.core.types import RawScan, ScanPoints
+from slam2d.core.types import RawScan, ScanPoints, wrap_angle
 
 #: 部屋の壁（軸に平行な線分の集まり）。**左右非対称にしてある** — 正方形だと
 #: 90°回転しても同じ形になり、スキャンマッチが別解に落ちても気づけない
@@ -184,3 +184,83 @@ def make_raw_scan(x: float, y: float, yaw: float, *, n_angles: int = 360,
     saturated = np.zeros(n_angles, dtype=bool)
     t_point_ns_arr = np.full(n_angles, t_point_ns, dtype=np.int64)
     return RawScan(angles, ranges, valid, saturated, t_point_ns_arr)
+
+
+def make_track_from_centerline(centerline: np.ndarray,
+                               width: float) -> list[tuple[float, float, float, float]]:
+    """任意の閉じた中心線`(N,3)`(x, y, yaw)から、内壁・外壁の線分列を作る。
+
+    `make_oval_track()`と同じ発想（中心線を法線方向に`±width/2`だけオフセット
+    する）を、閉じた形状であれば任意の形（`sim/random_course.py`の procedural
+    コース等）に一般化したもの。中心線が十分細かく再標本化されている前提
+    （`sim.random_course._build_loop`は`final_step`間隔で`resample_loop`済み）
+    なので、点ごとの`yaw`をそのまま法線方向に使い、区間ごとの円弧近似はしない。
+    """
+    xs, ys, yaws = centerline[:, 0], centerline[:, 1], centerline[:, 2]
+    nx, ny = -np.sin(yaws), np.cos(yaws)
+
+    def to_segs(ox: np.ndarray, oy: np.ndarray) -> list[tuple[float, float, float, float]]:
+        n = len(ox)
+        return [(float(ox[i]), float(oy[i]), float(ox[(i + 1) % n]), float(oy[(i + 1) % n]))
+               for i in range(n)]
+
+    half = width / 2.0
+    outer = to_segs(xs + half * nx, ys + half * ny)
+    inner = to_segs(xs - half * nx, ys - half * ny)
+    return outer + inner
+
+
+def centerline_arclengths(centerline: np.ndarray) -> np.ndarray:
+    """`centerline`の各点までの累積弧長[m]（先頭は0.0）。周を閉じる最終区間は含まない。"""
+    seg = np.hypot(*np.diff(centerline[:, :2], axis=0).T)
+    return np.concatenate([[0.0], np.cumsum(seg)])
+
+
+def centerline_loop_length(centerline: np.ndarray, arc: np.ndarray | None = None) -> float:
+    """1周ぶんの弧長[m]（最後の点から最初の点に戻る区間も含む）。"""
+    if arc is None:
+        arc = centerline_arclengths(centerline)
+    close = math.hypot(centerline[0, 0] - centerline[-1, 0], centerline[0, 1] - centerline[-1, 1])
+    return float(arc[-1] + close)
+
+
+def centerline_pose_at(centerline: np.ndarray, arc: np.ndarray, total_len: float,
+                       s: float) -> tuple[float, float, float]:
+    """中心線上、弧長`s`[m]（1周を超えたら周回）における姿勢(x, y, yaw)。
+
+    `oval_centerline_pose()`の一般化版。区間内は線形補間（`yaw`は`wrap_angle`
+    で最短方向に補間）する——`final_step`間隔（既定0.1m）で十分細かいので、
+    円弧の厳密解の代わりに線形補間で足りる
+    """
+    s = s % total_len
+    n = len(centerline)
+    idx = int(np.searchsorted(arc, s, side="right")) - 1
+    idx = max(0, min(idx, n - 1))
+    nxt = (idx + 1) % n
+    seg_len = (arc[nxt] if nxt != 0 else total_len) - arc[idx]
+    t = 0.0 if seg_len <= 1e-9 else (s - arc[idx]) / seg_len
+    x = centerline[idx, 0] + t * (centerline[nxt, 0] - centerline[idx, 0])
+    y = centerline[idx, 1] + t * (centerline[nxt, 1] - centerline[idx, 1])
+    dyaw = wrap_angle(centerline[nxt, 2] - centerline[idx, 2])
+    yaw = wrap_angle(centerline[idx, 2] + t * dyaw)
+    return float(x), float(y), float(yaw)
+
+
+def centerline_twist_at(centerline: np.ndarray, arc: np.ndarray, total_len: float,
+                        s: float, v: float) -> tuple[float, float]:
+    """弧長速度`v`[m/s]で中心線を進むときの(vx, yaw_rate)。
+
+    `oval_centerline_twist()`の一般化版。区間の向き変化量を、その区間を
+    速度`v`で通過する所要時間で割って角速度とする（区間内は等角速度の近似）。
+    """
+    s = s % total_len
+    n = len(centerline)
+    idx = int(np.searchsorted(arc, s, side="right")) - 1
+    idx = max(0, min(idx, n - 1))
+    nxt = (idx + 1) % n
+    seg_len = (arc[nxt] if nxt != 0 else total_len) - arc[idx]
+    if seg_len <= 1e-9 or v <= 0.0:
+        return v, 0.0
+    dyaw = wrap_angle(centerline[nxt, 2] - centerline[idx, 2])
+    dt = seg_len / v
+    return v, dyaw / dt

@@ -1,0 +1,15 @@
+{
+  "name": "circuit_chicane_b",
+  "note": "generate_circuit_course()の固定シード出力（複雑コースSLAM評価用）",
+  "resolution": 0.02,
+  "origin": [
+    -4.402738045235,
+    -4.738956902607626
+  ],
+  "start": [
+    3.5993396106836237,
+    0.55467971494869,
+    -1.558199844374491
+  ],
+  "wall_threshold": 128
+}
