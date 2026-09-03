@@ -36,9 +36,11 @@ from __future__ import annotations
 from . import centerline, obstacles
 from .centerline import Centerline
 from .deskew import Points, deskew
+from .drivable_path import extract_centerline
 from .grid import OccGrid, dilate, pack_trinary
 from .ipm import (CameraExtrinsics, CameraIntrinsics, camera_intrinsics,
-                  ground_to_pixel, pixel_to_ground, project_mask_to_grid)
+                  ground_to_pixel, pixel_to_ground, project_mask_to_grid,
+                  project_seen_to_grid)
 from .obstacles import Obstacle
 from .purepursuit import Pursuit, PursuitConfig, follow
 from .raceline import RaceLine, optimize
@@ -63,6 +65,7 @@ __all__ = [
     "centerline",
     "deskew",
     "dilate",
+    "extract_centerline",
     "follow",
     "ground_to_pixel",
     "match",
@@ -71,4 +74,5 @@ __all__ = [
     "pack_trinary",
     "pixel_to_ground",
     "project_mask_to_grid",
+    "project_seen_to_grid",
 ]

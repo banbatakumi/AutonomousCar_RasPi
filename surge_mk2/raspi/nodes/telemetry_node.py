@@ -230,8 +230,9 @@ CAM_CONFIG_HZ = 1
 #: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
 #: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外。
 #: `follow_object` は `cam_track_node.py` が毎フレーム対象を追跡し続ける必要が
-#: あるので他の2つと同じ扱いにする
-CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "follow_object"})
+#: あるので他の2つと同じ扱いにする。`cam_centerline` は `ftg_cam` と同じ
+#: `cam_perception_node.py` の推論結果を使うので同じ扱い
+CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object"})
 #: `track/roi`（★対象追従のROI選択）の再送周期。`_auto_ctrl_pump`と同じ理由
 #: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
 TRACK_ROI_HZ = 5

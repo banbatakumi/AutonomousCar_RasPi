@@ -72,7 +72,7 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 #: PUB を1プロセス1本にしておくと、購読側は接続先が固定されて配線が単純になる
 _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
                   "cam_perception": 5574, "line_perception": 5575, "cam_track": 5576,
-                  "test": 5579}
+                  "cam_e2e": 5577, "test": 5579}
 
 #: トピック → どのノードが publish するか
 #:
@@ -99,6 +99,7 @@ TOPIC_OWNER: dict[str, str] = {
     "cam/config": "control",
     "cam/model": "control",
     "e2e/model": "control",
+    "cam_e2e/model": "control",
     "track/roi": "control",
     "auto/cmd": "planning",
     "auto/state": "planning",
@@ -108,8 +109,10 @@ TOPIC_OWNER: dict[str, str] = {
     "image/rear": "camera",
     "scan/cam": "cam_perception",
     "cam/mask": "cam_perception",
+    "path/cam": "cam_perception",
     "line/cam": "line_perception",
     "track/target": "cam_track",
+    "cam_e2e/cmd": "cam_e2e",
 }
 
 

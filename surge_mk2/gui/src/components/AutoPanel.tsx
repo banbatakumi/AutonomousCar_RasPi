@@ -8,11 +8,13 @@
  * このファイルは 1 行も変わらない。** モード名を GUI 側にも書くと、増やすたびに
  * 2箇所を直すことになり、いつか片方だけ古くなる。
  *
- * ⚠ 例外が3つだけある——`ftg_cam`（セグメンテーション走行）と `e2e_lidar`
- * （E2E LiDAR走行）が使うモデルの選択、`follow_object`（対象追従）の
- * ROI選択状態の表示（下記）。この3つの id 文字列だけは
- * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/e2e_lidar.py` /
- * `raspi/auto/follow_object.py` と直接対応させて GUI 側に書いてある。
+ * ⚠ 例外が3つだけある——`ftg_cam`/`cam_centerline`（どちらもセグメンテーション
+ * 走行。`cam_perception_node.py` の同じ推論結果を使うのでモデル選択も共通）と
+ * `e2e_lidar`（E2E LiDAR走行）が使うモデルの選択、`follow_object`（対象追従）の
+ * ROI選択状態の表示（下記）。これらの id 文字列だけは
+ * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/cam_centerline.py` /
+ * `raspi/auto/e2e_lidar.py` / `raspi/auto/follow_object.py` と直接対応させて
+ * GUI 側に書いてある。
  *
  * ## engage の状態を GUI 側で持たない
  *
@@ -201,9 +203,11 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
 
       {selected && <p className="auto-mode-desc dim">{selected.description}</p>}
 
-      {/* セグメンテーション走行（`ftg_cam`）専用のモデル選択。
+      {/* セグメンテーション走行（`ftg_cam`/`cam_centerline`）専用のモデル選択。
+          両方とも `cam_perception_node.py` の同じ推論結果（`drivable`マスク）を使うので
+          モデルの選び方も共通（`raspi/nodes/cam_perception_node.py` の `_CAM_MODES`）。
           engage 中に選び直すと `_on_auto` のモード変更と同じ理由で engage が必ず落ちる */}
-      {selected?.id === 'ftg_cam' && (
+      {(selected?.id === 'ftg_cam' || selected?.id === 'cam_centerline') && (
         <div className="auto-model-row">
           <span className="auto-model-label">セグメンテーションモデル</span>
           <select

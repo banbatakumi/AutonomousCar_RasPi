@@ -22,7 +22,7 @@
 9. [ログの取り方・見方](#9-ログの取り方見方)
 10. [新しく何かを足すときの定石](#10-新しく何かを足すときの定石)
 11. [文書と実装のズレ（棚卸し）](#11-文書と実装のズレ2026-08-16-時点の棚卸し)
-12. [学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション）](#12-学習ベースの自動運転を動かすlidar-e2e--カメラセグメンテーション)
+12. [学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション / カメラE2E）](#12-学習ベースの自動運転を動かすlidar-e2e--カメラセグメンテーション--カメラe2e)
 
 ---
 
@@ -64,30 +64,19 @@
 | `raspi/nodes/telemetry_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera） | しない |
 | `raspi/nodes/camera_node.py` | 同上 | しない |
 | `raspi/nodes/cam_perception_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-cam-perception） | しない |
-| `raspi/nodes/line_perception_node.py` | **systemd unit がまだ無い**（`install_services.sh` に未登録。§11 の穴）。`line_trace` を実車で試すには `ssh surge-mk2 'cd surge_mk2 && .venv/bin/python -u -m raspi.nodes.line_perception_node'` で手動起動する | しない |
-| **`raspi/auto/` `raspi/nav/` `planning_node.py`** | **`ssh surge-mk2 'sudo systemctl restart surge-planning'`**（★ `--restart` に入っていない。下記） | しない |
+| `raspi/nodes/cam_e2e_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-cam-e2e）。`surge-cam-e2e` は常時起動だが `cam_e2e` が選ばれている間だけ推論する（IDLE/ACTIVE、`cam_perception_node.py` と同じ設計。§12.3） | しない |
+| `raspi/nodes/line_perception_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-line-perception）。`surge-line-perception` は常時起動だが `line_trace` が選ばれている間だけ認識する（IDLE/ACTIVE、`cam_perception_node.py` と同じ） | しない |
+| **`raspi/auto/` `raspi/nav/` `planning_node.py`** | `deploy.sh --restart`（surge-planning を含む。`PLANNERS` はプロセス起動時に固定されるので必須） | しない |
 | `config/vehicle.toml` `config/auto.json` | 読んでいるノードを再起動（planning / io）。`vehicle.toml` は**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
 | `raspi/nodes/io_node.py` `raspi/io/` `raspi/msgs/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
 | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |
 | `raspi/msgs/types.py` | **`gui/src/types.ts` も手で直す**（写しなのでズレる）→ rsync ＋ `--restart-io` | **★★ する** |
-| `models/*.onnx`（カメラ用）`models/e2e_lidar/*.onnx`（E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
-| `ml_cam/` `ml_lidar/`（学習パイプライン一式） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
+| `models/*.onnx`（カメラ用・カメラE2E用とも同じ`models/`直下）`models/e2e_lidar/*.onnx`（LiDAR E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`cam_e2e_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
+| `ml_cam/` `ml_cam_e2e/` `ml_lidar/`（学習パイプライン一式） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
 
 > **`--services` は unit ファイルを書き換えるだけ。** 走っている `io_node` は古い引数のまま
 > 動き続けるので、反映には `--restart-io` が要る。
-
-### ★ 既知の穴：`--restart` に `surge-planning` が入っていない
-
-`tools/deploy.sh --restart` は `surge-telemetry surge-camera` しか再起動しない。
-**自動運転まわり（`raspi/auto/` `raspi/nav/` `planning_node.py`）を直したら手で再起動する。**
-
-```bash
-ssh surge-mk2 'sudo systemctl restart surge-planning'
-```
-
-planning_node は `auto/cmd` に出すだけで E-Stop に無関係なので、
-`--restart` の対象に足してよい（未対応のまま）。
 
 ### ★★ `--restart-io` は E-Stop をラッチさせる
 
@@ -130,7 +119,7 @@ npm run build                                     # -> gui/dist（Pi に node �
 tools/deploy.sh                                   # GUI ビルド + rsync（既定・いちばん安全）
 tools/deploy.sh --no-gui                          # Python だけ直したとき
 tools/deploy.sh --test                            # 反映後に Pi 上でテスト
-tools/deploy.sh --restart                         # telemetry / camera を再起動
+tools/deploy.sh --restart                         # telemetry / camera / cam-perception / cam-e2e / line-perception / planning を再起動
 tools/deploy.sh --services --restart-io           # unit を入れ直して io を再起動（★E-Stop）
 tools/record.sh --duration 60                     # SD に書かずに MCAP を PC へ
 
@@ -584,7 +573,6 @@ UI は `sim/gui.py`（pygame）側に置く。シム ↔ シム GUI の通信も
 | `telemetry_node._serve_log_file` | `.mcap`（実測 87MB の実績）を**全部メモリに載せて**返す |
 | `LinkTracker` | STM32 からの `LOG`(0x04) パケットを**受信数に数えるだけでどこにも出さない** |
 | `logger_node` の記録対象 | `auto/*` を含まないので、**自律走行の判断根拠が `.mcap` に残らない** |
-| `install_services.sh` | `line_perception_node.py` の systemd unit が**まだ無い**（`cam_perception_node` は常時 enable の unit がある一方、こちらは登録手段自体が無い）。実車で `line_trace` を試すには手動起動が要る（§2） |
 
 ---
 
@@ -762,7 +750,7 @@ GUI での使い方:
 
 | ディレクトリ | 中身 | 直したら |
 |---|---|---|
-| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）は常時 enable、`auto/ctrl` で `ftg_cam` 選択中だけ推論する（§12.2）。`line_perception_node` は**まだ systemd unit が無く**手動起動のみ（§2・§11） | ノードごとに再起動 |
+| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / **cam_perception** / **line_perception**）。`cam_perception_node`（`surge-cam-perception`）・`line_perception_node`（`surge-line-perception`）とも常時 enable、`auto/ctrl` でそれぞれ対応モード選択中だけ推論/認識する（§12.2） | ノードごとに再起動 |
 | `raspi/auto/` | 自動運転アルゴリズム（**バスも WS も知らない純粋な計算**。`e2e_lidar.py`/`follow_the_gap_cam.py` もここ） | surge-planning 再起動 |
 | `raspi/nav/` | SLAM・占有格子・経路（**一旦棚上げ中。消さない**）。`ipm.py`（カメラ逆投影）は `ftg_cam` が使用中 | surge-planning 再起動 |
 | `raspi/proto/` | UART 定義（**STM32 と共有する唯一の定義**） | 再生成 ＋ `--restart-io` |

@@ -12,7 +12,7 @@
 # | 直したもの | 必要な操作 |
 # |---|---|
 # | `gui/` | **rsync だけ。** telemetry_node は毎リクエストでファイルを読む |
-# | `raspi/nodes/telemetry_node.py` `raspi/nodes/cam_perception_node.py` | `--restart` 相当（surge-telemetry/camera/cam-perception の再起動。E-Stop は無関係） |
+# | `raspi/nodes/telemetry_node.py` `raspi/nodes/cam_perception_node.py` `raspi/nodes/cam_e2e_node.py` `raspi/nodes/line_perception_node.py` `raspi/nodes/planning_node.py` `raspi/auto/` `raspi/nav/` | `--restart` 相当（surge-telemetry/camera/cam-perception/cam-e2e/line-perception/planning の再起動。E-Stop は無関係） |
 # | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | `--services` ＋ `--restart-io` |
 # | `raspi/nodes/io_node.py` | `--restart-io` |
 #
@@ -120,12 +120,21 @@ fi
 # ── 5. 再起動 ──
 if [ "$DO_RESTART" = 1 ]; then
   echo
-  echo "# surge-telemetry / surge-camera / surge-cam-perception を再起動（E-Stop には影響しない）"
-  # surge-cam-perception: auto/ctrl・cam/model とも telemetry_node が「現在の意思」を
-  # 繰り返し流す設計（AutoCtrl/CamModelCtrl の docstring 参照）なので、再起動しても
-  # GUI 側の再選択なしに数秒で復帰する。ftg_cam 中でも scan/cam の途絶は
-  # stale_ms（500ms）超過で自然にブレーキへ倒れる（安全側）
-  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception' || exit 1
+  echo "# surge-telemetry / surge-camera / surge-cam-perception / surge-cam-e2e / surge-line-perception / surge-planning を再起動（E-Stop には影響しない）"
+  # surge-cam-perception / surge-cam-e2e / surge-line-perception: auto/ctrl は
+  # telemetry_node が「現在の意思」を繰り返し流す設計（AutoCtrl の docstring 参照）
+  # なので、再起動しても GUI 側の再選択なしに数秒で復帰する。ftg_cam/cam_centerline・
+  # cam_e2e・line_trace 中でも scan/cam・cam_e2e/cmd・line/cam の途絶は stale_ms
+  # （500ms）超過で自然にブレーキへ倒れる（安全側）
+  #
+  # surge-planning: `raspi/auto/registry.py` の PLANNERS はプロセス起動時に固定
+  # されるので、`raspi/auto/`（新しい planner の追加等）を直しても再起動しないと
+  # 「モードが選ばれていない」のまま反映されない。io_node とは無関係な別プロセス
+  # なので E-Stop はラッチしない（`docs/development.md` の単体コマンドでも
+  # 「自動運転だけ入れ直す（安全）」と明記）。
+  # ★ raceline/slam2d_raceline（SLAM地図生成モード）の EXPLORE/BUILD 中に
+  # 再起動すると、まだ確定（freeze）していない地図はメモリ上にしか無いため失われる
+  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception surge-cam-e2e surge-line-perception surge-planning' || exit 1
 fi
 
 if [ "$DO_RESTART_IO" = 1 ]; then

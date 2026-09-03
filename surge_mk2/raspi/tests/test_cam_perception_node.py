@@ -25,6 +25,7 @@ from raspi.msgs import AutoCtrl, CamModelCtrl, ImageRef  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_MODEL,
+    TOPIC_CAM_PATH,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN_CAM,
 )
@@ -309,10 +310,15 @@ class TestModeGating(unittest.TestCase):
 
             # `reload_if_changed` はモード非依存で呼ばれ、モデル自体はロードされる
             self.assertIsNotNone(node.model)
-            topic, st = pub.sent[-1]
-            self.assertEqual(topic, TOPIC_SCAN_CAM)
-            self.assertEqual(st.sector_seen, [False] * 12,
-                             "ftg_cam以外が選ばれているのに推論結果が出ている")
+            # **`pub.sent[-1]` では見ない。** `scan/cam`・`path/cam` の両方を
+            # 毎周期 publish するので最後の1件だけでは足りない
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
+            self.assertTrue(scans and paths)
+            self.assertEqual(scans[-1].sector_seen, [False] * 12,
+                             "ftg_cam/cam_centerline以外が選ばれているのに推論結果が出ている")
+            self.assertFalse(paths[-1].seen,
+                             "ftg_cam/cam_centerline以外が選ばれているのにpath/camが出ている")
         finally:
             node.close()
             ring.unlink()
@@ -326,8 +332,33 @@ class TestModeGating(unittest.TestCase):
             pub = _FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
-            topic, st = pub.sent[-1]
-            self.assertEqual(st.sector_seen, [False] * 12)
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
+            self.assertTrue(scans and paths)
+            self.assertEqual(scans[-1].sector_seen, [False] * 12)
+            self.assertFalse(paths[-1].seen)
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_cam_centerline_mode_also_activates_inference(self):
+        """`cam_centerline` が選ばれているときも推論が回り、`path/cam` が出ること。
+
+        `ftg_cam` 専用だった IDLE/ACTIVE ゲート（`_CAM_MODES`）が新モードの id も
+        含むようになったことの確認（`scan/cam` も同じ推論結果からついでに出る）。
+        """
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_cam_gating_cl")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_centerline")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
+            self.assertTrue(paths, "path/cam が一度も publish されていない")
+            self.assertTrue(any(p.seen for p in paths),
+                            "cam_centerline が選ばれたのに path/cam の推論結果が出ていない")
         finally:
             node.close()
             ring.unlink()

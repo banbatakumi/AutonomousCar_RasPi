@@ -17,7 +17,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # surge_mk2/
 
-from ml_lidar.train_rl import CurriculumCallback  # noqa: E402
+import numpy as np  # noqa: E402
+
+from ml_lidar.train_rl import (  # noqa: E402
+    CurriculumCallback,
+    PerCourseEvalCallback,
+    _build_eval_courses,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAIN_RL = REPO_ROOT / "ml_lidar" / "train_rl.py"
@@ -137,6 +143,54 @@ class TestCurriculumCallback(unittest.TestCase):
         cb._push()
         mock_env.env_method.assert_called_once_with("set_curriculum_progress", 0.5)
         cb.model.logger.record.assert_called_once_with("curriculum/progress", 0.5)
+
+
+class TestBuildEvalCourses(unittest.TestCase):
+    """★2026-09-03追加: `_build_eval_courses()`（`make_eval_env`/
+    `PerCourseEvalCallback`が共有する固定4コース）の非退化性。narrow衝突率
+    36〜73%・obstacle衝突率67〜100%が`circuit`/`fuji`だけのevalに一切
+    見えていなかった問題への対応（PROGRESS.md参照）。"""
+
+    def test_returns_four_kinds_without_degenerate_narrow_or_obstacle(self):
+        courses = _build_eval_courses()
+        self.assertEqual(set(courses), {"circuit", "fuji", "narrow", "obstacle"})
+        self.assertIsInstance(courses["narrow"].width, np.ndarray)
+        self.assertLess(float(courses["narrow"].width.min()), 0.8)
+        self.assertIsNotNone(courses["obstacle"].obstacles)
+        self.assertGreaterEqual(len(courses["obstacle"].obstacles), 2)
+
+
+class TestPerCourseEvalCallback(unittest.TestCase):
+    """`PerCourseEvalCallback`（2026-09-03追加）。実際のPPO学習は回さず、
+    `self.model.predict`をモックして`_on_step()`の発火境界とログキーだけ検証する
+    （`TestCurriculumCallback`と同じ軽量方式）。`max_steps`を小さくして
+    ロールアウト自体のコストも抑える。"""
+
+    def _make_callback(self, eval_freq: int) -> PerCourseEvalCallback:
+        return PerCourseEvalCallback(
+            max_steps=20, max_speed=1.5, steer_tau=0.1, steer_rate_weight=0.2,
+            speed_weight=0.1, slip_weight=0.2, raceline_weight=0.3,
+            raceline_tolerance_m=0.08, speed_match_weight=0.3,
+            eval_freq=eval_freq, n_eval_episodes=1)
+
+    def test_does_not_log_before_eval_freq_boundary(self):
+        cb = self._make_callback(eval_freq=10)
+        cb.n_calls = 5
+        cb.model = unittest.mock.Mock(predict=unittest.mock.Mock(
+            return_value=(np.array([0.0, 0.0], dtype=np.float32), None)))
+        cb._on_step()
+        cb.model.logger.record.assert_not_called()
+
+    def test_logs_reward_and_collision_rate_at_eval_freq_boundary(self):
+        cb = self._make_callback(eval_freq=10)
+        cb.n_calls = 10
+        cb.model = unittest.mock.Mock(predict=unittest.mock.Mock(
+            return_value=(np.array([0.0, 0.0], dtype=np.float32), None)))
+        cb._on_step()
+        keys = [c.args[0] for c in cb.model.logger.record.call_args_list]
+        for name in ("circuit", "fuji", "narrow", "obstacle"):
+            self.assertIn(f"eval_by_kind/{name}_reward", keys)
+            self.assertIn(f"eval_by_kind/{name}_collision_rate", keys)
 
 
 if __name__ == "__main__":

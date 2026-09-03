@@ -78,9 +78,10 @@
  * ——LiDAR ビューのギャップ重畳（`LidarView.tsx`）と同じ「見せたい情報は
  * 自動で出す」方針。
  *
- * - **`ftg_cam`**: `cam_perception_node.py` の走行可否マスクを
+ * - **`ftg_cam`/`cam_centerline`**: `cam_perception_node.py` の走行可否マスクを
  *   `/ws/camera/mask`（メイン映像とは別の専用 WS。`showMask` の間だけ繋ぐ）
- *   から受け、薄い半透明でそのまま重ねる（白＝走行可）。
+ *   から受け、薄い半透明でそのまま重ねる（白＝走行可）。どちらのモードでも
+ *   同じ推論結果を使っているので重畳も共通（`_CAM_MODES` 参照）。
  * - **`line_trace`**: `LineScan`（`/ws/telemetry` の `line_cam`）が持つ
  *   近傍・遠方の目標点を `makeProjector()`（`drawGuide` と共用）で画像へ
  *   逆投影し、シアン色のマーカーと線で重ねる。
@@ -144,12 +145,16 @@ export function CameraView({
 
   // ── モード連動のデバッグ重畳（2026-08-28） ──
   //
-  // `ftg_cam` はセグメンテーションマスク、`line_trace` は認識した白線の目標点を
-  // 前カメラにだけ重ねる。**どちらもメイン映像の WS（`open()`）とは無関係**
+  // `ftg_cam`/`cam_centerline` はセグメンテーションマスク、`line_trace` は
+  // 認識した白線の目標点を前カメラにだけ重ねる。**どちらもメイン映像の
+  // WS（`open()`）とは無関係**
   // ——モードを切り替えるたびにメイン映像まで再接続されると困るので、
   // ref 経由で `draw()` に渡す（`camHeightRef` と同じ理由）
   const auto = useUi((s) => s.auto)
-  const showMask = cam === 'front' && auto?.mode === 'ftg_cam'
+  //: `ftg_cam`/`cam_centerline` はどちらも `cam_perception_node.py` の同じ
+  //: 走行可否マスクを publish する（`cam/mask`。`_CAM_MODES` 参照）ので同じ扱い
+  const showMask = cam === 'front'
+    && (auto?.mode === 'ftg_cam' || auto?.mode === 'cam_centerline')
   const showLineTarget = cam === 'front' && auto?.mode === 'line_trace'
   const showMaskRef = useRef(showMask)
   showMaskRef.current = showMask

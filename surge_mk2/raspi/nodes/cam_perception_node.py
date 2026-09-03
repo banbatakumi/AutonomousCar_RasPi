@@ -4,11 +4,19 @@
     .venv/bin/python -m raspi.nodes.cam_perception_node --model model.onnx   # 開発用に既定モデルを直指定
 
 `camera_node.py` が書く共有メモリ（`image/front` の `ImageRef`）を読み、ONNX
-モデルで「走行可能／不可能」の2値マスクを作り、`raspi.nav.ipm` で地面座標へ
-逆投影し、`raspi.nav.grid.OccGrid.raycast()`（既存のレイキャストをそのまま
-使う）で角度ごとの距離配列に変換して `scan/cam`（`raspi/msgs/types.py`）へ
-publish する。ギャップ探索そのものは書かない——それは
-`raspi/auto/follow_the_gap_cam.py` が `FollowTheGap` をそのまま流用する。
+モデルで「走行可能／不可能」の2値マスクを作る。ここから2通りの出力を作る:
+
+- `scan/cam`: `raspi.nav.ipm` で地面座標へ逆投影し、`OccGrid.raycast()` で
+  車両原点からの角度ごとの距離配列（擬似 `Scan`）に変換したもの。
+  `raspi/auto/follow_the_gap_cam.py` が `FollowTheGap` をそのまま流用する
+- `path/cam`（`CamPath`）: 同じ占有格子から `raspi.nav.drivable_path` で前方
+  複数距離ごとの走行可能な回廊の中心線を作ったもの。`raspi/auto/cam_centerline.py`
+  が使う。`scan/cam` が車両原点1点からの角度スキャンに潰すのに対し、こちらは
+  マスクの2次元的な広がり（回廊の幅・中心が前方距離ごとにどう変わるか）を
+  残したまま渡す
+
+判断そのもの（ギャップ探索・中心線追従）はここには書かない——`raspi/auto/` の
+Planner の責務にする。
 
 ## どのモデルを使うかは `cam/model` トピックで決まる（GUI から選ぶ）
 
@@ -32,18 +40,22 @@ LiDAR の「欠測は空きではない」（`follow_the_gap.py` の docstring�
 考え方。フレームが読めない・推論が例外を吐いた周期は「壁」として安全側に
 倒す（`Planner.plan()` 側の `ready=False`／停止に自然につながる）。
 
-## `ftg_cam` が選ばれている間だけ推論する（IDLE/ACTIVE）
+## カメラ系モードが選ばれている間だけ推論する（IDLE/ACTIVE）
 
 `cam_perception_node` はプロセスとしては常時起動（`surge-cam-perception`）
 だが、CNN 推論はカメラフレームが来るたびに回るので上げっぱなしだと CPU・
 電力を無駄に消費する。`cam_track_node.py`（`track/roi` の選択が無い間は
 NanoTrack を回さない）と同じ考え方で、`auto/ctrl`（`AutoCtrl.mode`。
 telemetry_node が GUI の選択を繰り返し流すトピック）を見て
-`mode == "ftg_cam"` の間だけ実際にフレームを読んで推論する。それ以外は
-`failed_frame()`（契約2の「壁」扱い）を出すだけで、共有メモリの読み取り
-すらしない。**`reload_if_changed()` はモード非依存で常に呼ぶ**——
-`ftg_cam` に切り替えた瞬間から推論を始められるよう、モデルだけは先に
-ロードしておいてよい（ONNXセッション生成はモデル切替時の一過性コスト）。
+`mode` が `_CAM_MODES`（`ftg_cam`・`cam_centerline`）のいずれかの間だけ
+実際にフレームを読んで推論する。**どちらのモードでも同じ推論結果
+（`drivable` マスク）を使い回すだけ**なので、片方だけ選ばれていてももう片方の
+出力も一緒に計算して構わない（`scan/cam`／`path/cam` を毎回両方 publish する）。
+非アクティブの間は `failed_frame()`（契約2の「壁」扱い）／`seen=False` の
+`CamPath` を出すだけで、共有メモリの読み取りすらしない。
+**`reload_if_changed()` はモード非依存で常に呼ぶ**——カメラ系モードに
+切り替えた瞬間から推論を始められるよう、モデルだけは先にロードしておいてよい
+（ONNXセッション生成はモデル切替時の一過性コスト）。
 """
 
 from __future__ import annotations
@@ -63,19 +75,27 @@ from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamMask, ImageRef, Scan, VehicleState  # noqa: E402
+from raspi.msgs import AutoCtrl, CamMask, CamPath, ImageRef, Scan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
+    TOPIC_CAM_PATH,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN_CAM,
     TOPIC_VEHICLE_STATE,
 )
+from raspi.nav.drivable_path import extract_centerline  # noqa: E402
 from raspi.nav.grid import OccGrid  # noqa: E402
-from raspi.nav.ipm import CameraExtrinsics, camera_intrinsics, project_mask_to_grid  # noqa: E402
+from raspi.nav.ipm import (  # noqa: E402
+    CameraExtrinsics,
+    CameraIntrinsics,
+    camera_intrinsics,
+    project_mask_to_grid,
+    project_seen_to_grid,
+)
 
 __all__ = ["SegmentationModel", "CamPerceptionNode"]
 
@@ -87,6 +107,10 @@ NS = 1_000_000_000
 HB_HZ = 10
 #: `dist` に絶対に置かない値（契約1）
 _MIN_DIST = 0.01
+#: 推論（CNN＋IPM＋raycast）を必要とする自動運転モード。**両方とも同じ推論結果
+#: （`drivable` マスク）を使い回すだけ**なので、どちらが選ばれていても推論は1回で足りる
+#: （`raspi/auto/follow_the_gap_cam.py` の `id`・`raspi/auto/cam_centerline.py` の `id`）
+_CAM_MODES = ("ftg_cam", "cam_centerline")
 
 
 class SegmentationModel:
@@ -164,7 +188,8 @@ class CamPerceptionNode:
                 vehicle: Vehicle | None = None,
                 fov_deg: float = 60.0, max_range: float = 3.0,
                 grid_resolution: float = 0.05, grid_size_m: float = 6.0,
-                infer_hz: float = 10.0, mask_every: int = 1) -> None:
+                infer_hz: float = 10.0, mask_every: int = 1,
+                path_x_min: float = 0.3, path_x_step: float = 0.1) -> None:
         #: **`None` は「まだモデルが選ばれていない」。** `run()` はこの間
         #: `failed_frame()` を出し続ける（契約2の「壁扱い」に自然に落ちる）
         self.model = model
@@ -181,6 +206,11 @@ class CamPerceptionNode:
         self.max_range = max_range
         self.grid_resolution = grid_resolution
         self.grid_size_m = grid_size_m
+        #: `raspi/auto/cam_centerline.py` 用の中心線サンプリング範囲。
+        #: `path_x_min` は車両直前（真下付近・IPM誤差が大きい範囲）を避けるための
+        #: 下限。上限は `max_range` を流用する（`scan/cam` と探索範囲を揃える）
+        self.path_x_min = path_x_min
+        self.path_x_step = path_x_step
 
         # ★省電力化: 推論（ONNX＋IPM投影＋raycast）はカメラの実フレームレート
         # （既定30fps）ではなく `infer_hz` に間引く。`follow_the_gap_cam.py` の
@@ -190,6 +220,8 @@ class CamPerceptionNode:
         self._infer_period_ns = int(NS / infer_hz) if infer_hz > 0 else 0
         self._last_infer_ns = 0
         self._last_scan: Scan | None = None
+        #: `scan/cam` の `_last_scan` と同じ役割（`build_path()` の結果のキャッシュ）
+        self._last_path: CamPath | None = None
         #: マスクJPEG（GUIプレビュー専用）のエンコード頻度。JPEGエンコード自体は
         #: CNN推論より軽いので既定は推論と同じ毎回（1）。粗くしたければ上げる
         self._mask_every = max(1, int(mask_every))
@@ -212,6 +244,13 @@ class CamPerceptionNode:
         #: **`process_frame()` 自体の戻り値は `Scan` のまま変えていない**——
         #: 既存のテスト・呼び出し側の契約を壊さないための側路（`encode_mask_jpeg()` 参照）
         self._last_drivable: np.ndarray | None = None
+        #: `process_frame()` が最後に使った幾何（`build_path()` が使い回す）。
+        #: **`build_path()` はバスも共有メモリも知らない純粋関数のままにするため**、
+        #: 推論・IPM投影を2度走らせるのではなく、ここに一度だけ計算した結果を置く
+        self._last_intr: CameraIntrinsics | None = None
+        self._last_ext: CameraExtrinsics | None = None
+        self._last_grid: OccGrid | None = None
+        self._last_occ: np.ndarray | None = None
         self._running = False
         #: 直前周期の ACTIVE/IDLE。切り替わった周期だけログを出すための記憶
         self._active = False
@@ -293,6 +332,12 @@ class CamPerceptionNode:
 
         grid = OccGrid(resolution=self.grid_resolution, size_m=self.grid_size_m)
         occ = project_mask_to_grid(drivable, intr, ext, grid, stride=2)
+        #: `build_path()` が同じフレームの推論結果を使い回すための置き場
+        #: （幾何は毎フレーム変わりうる——IMU有効時は `pitch` が補正されるため）
+        self._last_intr = intr
+        self._last_ext = ext
+        self._last_grid = grid
+        self._last_occ = occ
 
         angles = np.radians(self._degs.astype(np.float64))
         dist = grid.raycast(0.0, 0.0, angles, self.max_range, mask=occ)
@@ -308,6 +353,25 @@ class CamPerceptionNode:
     def failed_frame(self, *, seq: int = 0) -> Scan:
         """フレームが読めない／推論が失敗した周期。**契約2＝全セクタ壁扱い。**"""
         return Scan(dist=[0.0] * 360, sector_seen=[False] * 12, seq=seq)
+
+    def build_path(self, *, seq: int = 0, t_capture_ns: int = 0) -> CamPath:
+        """直前の `process_frame()` の結果から走行可能領域の中心線を作る。
+
+        **`process_frame()` の直後にだけ呼ぶこと。** 幾何（`_last_grid` 等）を
+        持ち回っているので、`process_frame()` を一度も呼んでいない・直前の呼び出しが
+        `failed_frame()` だった周期に呼ぶと `seen=False` の空の `CamPath` を返す
+        （契約2と同じ「分からなければ壁／未検出扱い」）。
+        """
+        if self._last_grid is None or self._last_occ is None or self._last_intr is None:
+            return CamPath(seq=seq, t_capture=t_capture_ns)
+        seen_grid = project_seen_to_grid(self._last_drivable.shape, self._last_intr,
+                                         self._last_ext, self._last_grid, stride=2)
+        blocked = (~seen_grid) | self._last_occ
+        xs, ys, widths = extract_centerline(self._last_grid, blocked,
+                                            x_min=self.path_x_min, x_max=self.max_range,
+                                            x_step=self.path_x_step)
+        return CamPath(seen=True, xs=xs, ys=ys, widths=widths,
+                       seq=seq, t_capture=t_capture_ns)
 
     def encode_mask_jpeg(self) -> bytes | None:
         """直近の `process_frame()` が作った走行可否マスクを JPEG 化する（`cam/mask` 用）。
@@ -350,10 +414,11 @@ class CamPerceptionNode:
                 self.reload_if_changed(model_ctrl.name)
 
             auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
-            active = auto_ctrl is not None and auto_ctrl.mode == "ftg_cam"
+            active = auto_ctrl is not None and auto_ctrl.mode in _CAM_MODES
             if active != self._active:
                 self._active = active
-                print(f"# ftg_cam {'選択: 推論開始' if active else '非選択: 推論停止'}",
+                mode = auto_ctrl.mode if auto_ctrl is not None else "?"
+                print(f"# {mode} {'選択: 推論開始' if active else '非選択: 推論停止'}",
                      flush=True)
 
             ref = sub.latest.get(TOPIC_IMAGE_FRONT)
@@ -365,37 +430,47 @@ class CamPerceptionNode:
             #: 重複排除（`scan.seq == self._last_scan_seq`）が効かない。
             #: 間引きで推論を休んだ周期は **publish 自体を省略する**——
             #: `stale_ms=500` に対して `infer_hz`（既定10Hz=100ms間隔）の実publishで
-            #: 十分足りるので、鮮度は損なわない
-            should_publish_scan = True
+            #: 十分足りるので、鮮度は損なわない（`scan/cam`・`path/cam` 共通）
+            should_publish = True
+            path_msg: CamPath | None = None
             if not active:
-                # `ftg_cam` が選ばれていない間は共有メモリすら読まない
+                # どちらのカメラ系モードも選ばれていない間は共有メモリすら読まない
                 # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
+                self._last_path = None
             elif self.model is None:
                 # **契約2の入口。** まだ GUI がモデルを選んでいない（起動直後・
                 # 未選択のまま）。フレームが来ていても推論しようがない
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
+                self._last_path = None
             elif ref is None:
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
+                self._last_path = None
             else:
                 got = self.read_frame(ref)
                 if got is None:
                     st = self.failed_frame(seq=seq)
                     self._last_scan = None
+                    self._last_path = None
                 elif (self._last_scan is not None
                       and now - self._last_infer_ns < self._infer_period_ns):
                     # ★省電力化: まだ間引き周期に達していない。前回の推論結果を
                     # そのまま維持し、publish はしない（上のコメント参照）
                     st = self._last_scan
-                    should_publish_scan = False
+                    path_msg = self._last_path
+                    should_publish = False
                 else:
                     frame, t_capture = got
                     self._last_infer_ns = now
                     st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
                     self._last_scan = st
+                    #: `cam_centerline` が選ばれていなくても、同じ推論結果から
+                    #: ただで作れる（下の `_CAM_MODES` docstring参照）ので常に計算する
+                    path_msg = self.build_path(seq=seq, t_capture_ns=t_capture)
+                    self._last_path = path_msg
                     self._infer_count += 1
                     # マスクは既定で推論と同じ頻度（`mask_every=1`）で配る。GUIの
                     # ライブプレビュー専用で走行判断には使わない。
@@ -405,8 +480,10 @@ class CamPerceptionNode:
                         mask_jpeg = self.encode_mask_jpeg()
                         if mask_jpeg is not None:
                             pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
-            if should_publish_scan:
+            if should_publish:
                 pub.send(TOPIC_SCAN_CAM, st)
+                pub.send(TOPIC_CAM_PATH, path_msg if path_msg is not None
+                         else CamPath(seq=seq))
             seq += 1
 
             if now >= next_hb:
@@ -440,6 +517,11 @@ def main() -> int:
     ap.add_argument("--mask-every", type=int, default=1,
                     help="cam/mask（GUIプレビュー）を配る間隔。推論N回に1回だけ配る。"
                          "JPEGエンコード自体はCNN推論より軽いので既定は推論と同じ毎回")
+    ap.add_argument("--path-x-min", type=float, default=0.3,
+                    help="cam_centerline用の中心線サンプリングの前方下限[m]。"
+                         "車両直前（IPM誤差が大きい範囲）を避ける")
+    ap.add_argument("--path-x-step", type=float, default=0.1,
+                    help="cam_centerline用の中心線サンプリング間隔[m]")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
@@ -452,13 +534,14 @@ def main() -> int:
                                  std=args.std, threshold=args.threshold)
     node = CamPerceptionNode(model=model, models_dir=Path(args.models_dir),
                              fov_deg=args.fov_deg, max_range=args.max_range,
-                             infer_hz=args.infer_hz, mask_every=args.mask_every)
+                             infer_hz=args.infer_hz, mask_every=args.mask_every,
+                             path_x_min=args.path_x_min, path_x_step=args.path_x_step)
 
     pub = Publisher("cam_perception")
     sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
                       TOPIC_CAM_MODEL: LATEST, TOPIC_AUTO_CTRL: LATEST})
 
-    print(f"# cam_perception_node  publish {pub.endpoint}  scan/cam へ配信")
+    print(f"# cam_perception_node  publish {pub.endpoint}  scan/cam・path/cam へ配信")
 
     def _shutdown(*_):
         node.stop()

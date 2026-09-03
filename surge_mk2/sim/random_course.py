@@ -656,13 +656,19 @@ _OBSTACLE_CLEARANCE_M = 0.16
 
 #: `generate_diverse_course`が各アーキタイプを選ぶ重み（比率だけが意味を持つ、
 #: 正規化して使う）。学習分布のバランスを変えたいときはここを調整する
-#: （`hairpin_prob`等と同じ、モジュール定数によるチューニングの流儀）
+#: （`hairpin_prob`等と同じ、モジュール定数によるチューニングの流儀）。
+#:
+#: ★2026-09-03: narrow/obstacleを0.15→0.20に、organicを0.35→0.25に変更
+#: （吸収して合計1.0を維持）。`ml_lidar`のアーキタイプ別衝突率実測で
+#: narrow36〜73%・obstacle67〜100%の崩壊が判明し、この2アーキタイプへの
+#: 累積露出時間を増やす狙い（PROGRESS.md参照。`sim/raceline.py`の障害物回避
+#: 対応・`ml_lidar/train_rl.py`のeval改修と合わせた対応の一つ）
 _ARCHETYPE_WEIGHTS = {
-    "organic": 0.35,
+    "organic": 0.25,
     "circuit": 0.20,
     "corridor": 0.15,
-    "narrow": 0.15,
-    "obstacle": 0.15,
+    "narrow": 0.20,
+    "obstacle": 0.20,
 }
 
 

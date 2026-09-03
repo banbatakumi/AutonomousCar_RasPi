@@ -18,6 +18,7 @@ from sim.random_course import (  # noqa: E402
     generate_circuit_course,
     generate_corridor_course,
     generate_narrow_course,
+    generate_obstacle_course,
     generate_random_course,
 )
 from raspi.nav.centerline import resample_loop  # noqa: E402
@@ -58,14 +59,17 @@ class TestComputeRacelineOffsets(unittest.TestCase):
         （車体半幅+安全マージンを引いた分）を一度も破らないこと。"""
         for seed in range(3):
             for gen in (generate_random_course, generate_circuit_course,
-                       generate_corridor_course, generate_narrow_course):
+                       generate_corridor_course, generate_narrow_course,
+                       generate_obstacle_course):
                 rng = np.random.default_rng(seed)
                 course = gen(rng)
                 offset = compute_raceline_offsets(
-                    course.centerline, course.width, vehicle_half_width_m=0.09)
+                    course.centerline, course.width, vehicle_half_width_m=0.09,
+                    obstacles=course.obstacles)
                 max_offset = _max_offset_for(course.width, len(course.centerline))
                 self.assertTrue(np.all(np.abs(offset) <= max_offset + 1e-6),
-                                f"{gen.__name__} seed={seed} で道幅制約を破った")
+                                f"{gen.__name__} seed={seed} で道幅制約を破った"
+                                "（障害物回避ペナルティが道幅box制約と競合していないか）")
 
     def test_offsets_do_not_worsen_total_curvature(self):
         """理想ラインは中心線そのままより曲率二乗和が悪化してはいけない
@@ -130,6 +134,50 @@ class TestComputeRacelineOffsets(unittest.TestCase):
         too_tight = max_offset <= 1e-9
         if np.any(too_tight):
             self.assertTrue(np.allclose(offset[too_tight], 0.0))
+
+
+class TestComputeRacelineOffsetsAvoidsObstacles(unittest.TestCase):
+    """★2026-09-03追加: `obstacle`アーキタイプの衝突率が実測100%だった診断
+    （PROGRESS.md参照）を受け、理想ラインが障害物の真上を通らないことを確認する。
+    """
+
+    def test_ideal_line_keeps_clearance_from_obstacles(self):
+        """理想ライン上のどの点も、各障害物の除外半径
+        （半径+車体半幅+安全マージン）未満には近づかないこと。soft exclusion
+        （L-BFGSの反復回数に依存する近似解）なので、数cmの残差は許容する——
+        この理想ラインは実際の衝突判定（raycastベース）には使われない、
+        学習報酬用の参照軌道でしかないため（`sim/raceline.py`モジュール
+        docstring参照）。"""
+        TOL_M = 0.03
+        checked = 0
+        for seed in range(10):
+            rng = np.random.default_rng(seed)
+            course = generate_obstacle_course(rng)
+            if course.obstacles is None:
+                continue
+            checked += 1
+            offset = compute_raceline_offsets(
+                course.centerline, course.width, vehicle_half_width_m=0.09,
+                obstacles=course.obstacles)
+            xy, yaw = course.centerline[:, :2], course.centerline[:, 2]
+            normal = np.column_stack((-np.sin(yaw), np.cos(yaw)))
+            p = xy + offset[:, None] * normal
+            for ox, oy, r_obs in course.obstacles:
+                dist = float(np.min(np.hypot(p[:, 0] - ox, p[:, 1] - oy)))
+                r_excl = float(r_obs) + 0.09 + 0.03
+                self.assertGreaterEqual(dist, r_excl - TOL_M,
+                                        f"seed={seed}: 理想ラインが障害物へ侵入した")
+        self.assertGreater(checked, 0, "全seedで障害物が0個だった（テストの前提が崩れている）")
+
+    def test_obstacles_none_is_unchanged_behavior(self):
+        """`obstacles`省略時（既定`None`）は、この変更を入れる前と完全に同じ
+        結果になること——非obstacle系アーキタイプへの回帰が無いことの直接確認。"""
+        rng = np.random.default_rng(0)
+        course = generate_circuit_course(rng)
+        a = compute_raceline_offsets(course.centerline, course.width, vehicle_half_width_m=0.09)
+        b = compute_raceline_offsets(course.centerline, course.width, vehicle_half_width_m=0.09,
+                                     obstacles=None)
+        np.testing.assert_allclose(a, b)
 
 
 class TestComputeSpeedProfile(unittest.TestCase):

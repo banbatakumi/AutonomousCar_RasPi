@@ -79,6 +79,22 @@ _OPT_REL_TOL = 0.02
 #: 弧長ベースに間引いてから最適化し、結果を周期線形補間で密な点列に戻す
 _OPT_STEP_M = 0.1
 
+#: 障害物回避ペナルティが働く弧長方向の窓を、除外半径(`r_excl`。障害物半径+
+#: 車体半幅+安全マージン)からさらに広げる余裕 [m]。窓を`r_excl`ちょうどにすると
+#: 障害物の真横の数点しか回避に参加できず、急な進路変更（局所的に曲率が跳ね上がる
+#: 解）しかL-BFGSが選べなくなる。前後に余裕を持たせ、なだらかな回避カーブを
+#: 選べるようにする（2026-09-03追加、`ml_lidar`のobstacleアーキタイプ衝突率
+#: 100%の診断を受けて。`docs/`ではなくコミットログ・PROGRESS.md参照）
+_OBSTACLE_AVOID_MARGIN_M = 0.4
+
+#: 障害物侵入ペナルティの重み。scratchpadでのプロトタイプ実測
+#: （`generate_obstacle_course`のseed 0〜9、障害物27個）で較正済み——
+#: weight=50では14/27個で数cm〜14cmの侵入が残ったが、weight=5000では
+#: 最悪でも-2.5cm（平均+4.5cmの余裕）まで収まった。この理想ラインは実際の
+#: 衝突判定（`sim/course.py`のraycastベース）には使わない学習報酬用の参照軌道
+#: でしかないため、cm単位の残差は許容範囲と判断している
+_OBSTACLE_PENALTY_WEIGHT = 5000.0
+
 
 def _segment_lengths(xy: np.ndarray) -> np.ndarray:
     """`seg[i]` = 点`i`から点`i+1`（最後は点0に周回）までの距離 [m]。
@@ -129,8 +145,62 @@ def _curvature_sq_sum_torch(offset: "torch.Tensor", centerline_xy: "torch.Tensor
     return torch.sum(kappa * kappa)
 
 
+def _prepare_obstacle_terms(xy_c: np.ndarray, s_c: np.ndarray, total: float,
+                            obstacles: np.ndarray, *, vehicle_half_width_m: float,
+                            safety_margin_m: float
+                            ) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"] | None:
+    """障害物ごとに、間引き済み点列(`xy_c`/`s_c`、`compute_raceline_offsets`が
+    L-BFGSにかける座標系)のうちペナルティ対象になる点のマスクを作る。
+
+    障害物中心への最近傍点（投影ではなく実距離）から弧長位置`s_obs`を求め、
+    `s_obs`を中心に`±(r_excl + _OBSTACLE_AVOID_MARGIN_M)`の窓内の点だけを
+    対象にする（曲がった区間に置かれた障害物でも、法線方向オフセットの差分
+    ではなく実距離で判定するので誤差が出ない）。周回コースのラップアラウンドも
+    考慮する。該当点が1つも無い場合（窓が狭すぎる稀なケース）は、安全弁として
+    最寄りの1点を必ず含める。
+    """
+    centers, r_excls, masks = [], [], []
+    for ox, oy, r_obs in obstacles:
+        d2 = (xy_c[:, 0] - ox) ** 2 + (xy_c[:, 1] - oy) ** 2
+        s_obs = s_c[int(np.argmin(d2))]
+        r_excl = float(r_obs) + vehicle_half_width_m + safety_margin_m
+        window = r_excl + _OBSTACLE_AVOID_MARGIN_M
+        dz = np.abs(s_c - s_obs)
+        dz = np.minimum(dz, total - dz)
+        mask = dz <= window
+        if not np.any(mask):
+            mask[np.argmin(dz)] = True
+        centers.append((ox, oy))
+        r_excls.append(r_excl)
+        masks.append(mask)
+    if not centers:
+        return None
+    return (torch.tensor(centers, dtype=torch.float64),
+           torch.tensor(r_excls, dtype=torch.float64),
+           torch.from_numpy(np.stack(masks)))
+
+
+def _obstacle_penalty_torch(offset: "torch.Tensor", centerline_xy: "torch.Tensor",
+                            normal: "torch.Tensor",
+                            obstacle_terms: tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"]
+                            ) -> "torch.Tensor":
+    """soft exclusion: 理想ライン上の点`p_i`が障害物の除外半径`r_excl`より
+    近づいた分だけ`relu(...)^2`で罰する（窓内の点だけ、障害物ごとに合算）。
+    `K`（障害物数）は`generate_obstacle_course`で最大でも数個なので、
+    pythonループでも十分軽い。"""
+    centers, r_excl, mask = obstacle_terms
+    p = centerline_xy + offset.unsqueeze(1) * normal
+    total = torch.zeros((), dtype=torch.float64)
+    for k in range(centers.shape[0]):
+        sel = mask[k]
+        d = torch.linalg.norm(p[sel] - centers[k], dim=1)
+        total = total + torch.sum(torch.relu(r_excl[k] - d) ** 2)
+    return total
+
+
 def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray | None, *,
                              vehicle_half_width_m: float, safety_margin_m: float = 0.03,
+                             obstacles: np.ndarray | None = None,
                              iterations: int = _OPT_ITERATIONS, lr: float = _OPT_LR) -> np.ndarray:
     """中心線 `(N,3)`(x,y,yaw) からの法線方向オフセット `offset[i]`（符号付き、
     法線 `(-sin(yaw), cos(yaw))` の正方向）を返す。`centerline + offset*normal`が
@@ -160,6 +230,14 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
     :param vehicle_half_width_m: 車体全幅の半分 [m]。壁との安全マージンぶん、
         道幅の半分より内側にしかオフセットできないようにする
     :param safety_margin_m: `vehicle_half_width_m`に加えて残す余裕 [m]
+    :param obstacles: `Course.obstacles`と同じ（(K,3)=x,y,半径[m]、世界座標）。
+        `None`（既定、`narrow`/`organic`/`circuit`/`corridor`アーキタイプは常に
+        `None`）なら既存の挙動と完全に同一。**指定すると、曲率二乗和の損失に
+        障害物回避のsoft exclusionペナルティ（`_obstacle_penalty_torch`）が
+        加わる**——道幅内で曲率を最小化するだけだと、障害物の真上を通る
+        理想ラインが計算されてしまい、`raceline_weight`/`speed_match_weight`
+        の報酬が衝突回避と綱引きになる問題への対応（2026-09-03追加。
+        obstacleアーキタイプの衝突率が100%だった診断より）
     """
     xy = centerline[:, :2]
     yaw = centerline[:, 2]
@@ -182,12 +260,22 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
     max_offset_t = torch.from_numpy(max_offset_c).to(torch.float64)
     z_t = torch.zeros(len(idx), dtype=torch.float64, requires_grad=True)
 
+    obstacle_terms = None
+    if obstacles is not None and len(obstacles) > 0:
+        s_c = s_full[idx]
+        obstacle_terms = _prepare_obstacle_terms(
+            xy_c, s_c, total, obstacles,
+            vehicle_half_width_m=vehicle_half_width_m, safety_margin_m=safety_margin_m)
+
     opt = torch.optim.LBFGS([z_t], lr=lr, max_iter=iterations, line_search_fn="strong_wolfe")
 
     def closure() -> "torch.Tensor":
         opt.zero_grad()
         offset = max_offset_t * torch.tanh(z_t)
         loss = _curvature_sq_sum_torch(offset, centerline_t, normal_t)
+        if obstacle_terms is not None:
+            loss = loss + _OBSTACLE_PENALTY_WEIGHT * _obstacle_penalty_torch(
+                offset, centerline_t, normal_t, obstacle_terms)
         loss.backward()
         return loss
 

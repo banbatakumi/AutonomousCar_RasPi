@@ -30,13 +30,16 @@ from __future__ import annotations
 import msgspec
 
 __all__ = [
-    "MsgBase", "VehicleState", "Scan", "LineScan", "CamMask", "DriveCmd", "LinkDiag", "ImageRef",
+    "MsgBase", "VehicleState", "Scan", "LineScan", "CamMask", "CamPath", "DriveCmd", "LinkDiag",
+    "ImageRef",
     "Heartbeat", "AutoCtrl", "AutoState", "AutoMap", "UiEvent",
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM", "TOPIC_CAM_MASK",
+    "TOPIC_CAM_PATH",
     "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
+    "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
     "TOPIC_TYPES", "type_for_topic",
 ]
@@ -58,6 +61,11 @@ TOPIC_LINE_CAM = "line/cam"
 #: （GUI がカメラ映像に重畳表示する用。`scan/cam` はマスクを角度→距離配列に
 #: 変換した後の値で、マスクそのものはここにしか無い）
 TOPIC_CAM_MASK = "cam/mask"
+#: 走行可能領域の中心線（`cam_perception_node.py` が publish）。`scan/cam` が
+#: 車両原点からの角度→距離という1次元表現に潰すのに対し、こちらは前方複数距離
+#: それぞれで測った回廊の中心点列を車両座標のまま持つ。`raspi/auto/cam_centerline.py`
+#: の `input_topic`（`line/cam` と同じ「擬似スキャンを経由しない」パターン）
+TOPIC_CAM_PATH = "path/cam"
 TOPIC_CMD = "cmd"
 TOPIC_DIAG_LINK = "diag/link"
 TOPIC_IMAGE_FRONT = "image/front"
@@ -89,6 +97,16 @@ TOPIC_CAM_MODEL = "cam/model"
 #: `e2e_lidar`（`raspi/auto/e2e_lidar.py`）が使うモデルの選択。`cam/model`と同じ
 #: 「意思を繰り返し流す」パターン（下記 `E2EModelCtrl` 参照）
 TOPIC_E2E_MODEL = "e2e/model"
+
+#: `cam_e2e_node.py` が使う画像→操舵直接回帰モデルの選択。`cam/model`/`e2e/model`と
+#: 同じ「意思を繰り返し流す」パターン（下記 `CamE2EModelCtrl` 参照）。
+#: **カメラ用セグメンテーション（`cam/model`）とは別トピック**——前処理・出力の
+#: 契約が全く違うモデルを同じ選択欄に混ぜると選び間違いの温床になる
+#: （`raspi/auto/e2e_lidar.py` が `models/e2e_lidar/` をカメラ用と分けた理由と同じ）
+TOPIC_CAM_E2E_MODEL = "cam_e2e/model"
+#: `cam_e2e_node.py` が publish する推論結果（正規化した操舵角＋LiDAR前方距離）。
+#: `raspi/auto/cam_e2e.py`（id `cam_e2e`）の `input_topic`
+TOPIC_CAM_E2E_CMD = "cam_e2e/cmd"
 
 #: 対象追従（`follow_object`）のROI選択の意思。GUIがドラッグ矩形で選んだ対象を
 #: telemetry_node が繰り返し流し、`cam_track_node.py` が拾って追跡を開始/終了する
@@ -625,6 +643,36 @@ class E2EModelCtrl(MsgBase):
     name: str = ""
 
 
+class CamE2EModelCtrl(MsgBase):
+    """`cam_e2e_node.py` への「このモデルを使ってほしい」という意思。
+
+    `CamModelCtrl`/`E2EModelCtrl` と同じ設計（現在の意思を繰り返し流す）。
+    `name` は `models/<name>.onnx`（+ 同名の `.json`。`ml_cam_e2e/export_onnx.py`
+    が書く）を指す。**カメラ用セグメンテーションと同じ `models/` 直下だが、
+    選択トピックが別（`cam/model` ではなく `cam_e2e/model`）なので混同しない**
+    （`TOPIC_CAM_E2E_MODEL` のコメント参照）。空文字は「未選択」。
+    """
+
+    name: str = ""
+
+
+class CamE2ECmd(MsgBase):
+    """`cam_e2e_node.py` の推論結果。`raspi/auto/cam_e2e.py`（id `cam_e2e`）の `input_topic`。
+
+    画像→操舵の直接回帰（模倣学習）の出力に加えて、**独立の安全策のために
+    LiDAR前方距離も同梱する**（`raspi/auto/e2e_lidar.py` の `free_ahead` と同じ
+    役目）。低い壁には効かないが、それ以外の一般障害物に対する最後の砦として、
+    `cam_e2e.py` の `stop_dist`/速度則がこの値を見る——`cam_e2e_node.py` が
+    `scan`（LiDAR）も購読して算出する（推論失敗時もLiDAR側は独立に更新できる）。
+    """
+
+    ready: bool = False
+    steer_norm: float = 0.0        #: モデル出力（tanh、-1..1）。`model.json`の`max_steer`で物理量に戻す
+    model_max_steer: float = 0.0   #: [rad] エクスポート時の契約値（0ならモデル未選択）
+    lidar_front_dist: float = 0.0  #: [m] 正面付近のLiDAR最小距離（0=不明・欠測）
+    lidar_seen: bool = False       #: 上の値がLiDARの実測に基づくか
+
+
 class TargetRoiCtrl(MsgBase):
     """GUIがドラッグ矩形で選んだ追従対象の意思。**telemetry_node が送り続け、
     `cam_track_node.py` が従う**（`AutoCtrl`/`CamModelCtrl` と同じ「現在の意思を
@@ -698,6 +746,28 @@ class CamMask(MsgBase):
     jpeg: bytes = b""
 
 
+class CamPath(MsgBase):
+    """走行可能領域の中心線（`raspi/nav/drivable_path.py` の `extract_centerline()`）。
+
+    前方距離 `xs[k]` ごとに、そこで測った走行可能な回廊の中心 `ys[k]` と
+    左右合計の空き幅 `widths[k]` を持つ（`LineScan` の近傍・遠方2点と同じ
+    「車両座標系の目標点」だが、こちらは可変長の点列）。**`xs` は近→遠の昇順**。
+
+    **どこまでを「走行可能」とみなすかはここでは決めない。** `widths` は生の
+    測定値のまま渡し、閾値（車幅＋余裕）は `raspi/auto/cam_centerline.py` の
+    GUI 調整可能なパラメータ（`min_width_m`）が適用する——`Scan.dist`（生の距離
+    配列）に対して `FollowTheGap` が `gap_min`/`bubble_m` を適用するのと同じ
+    「センサ側は生値、閾値は planner 側」という役割分担（`Planner` の約束4）。
+
+    `seen=False`（推論が失敗した・まだモデル未選択）のときは `xs`/`ys`/`widths` は空。
+    """
+
+    seen: bool = False
+    xs: list[float] = msgspec.field(default_factory=list)     #: [m] base_link 座標
+    ys: list[float] = msgspec.field(default_factory=list)     #: [m] 同上
+    widths: list[float] = msgspec.field(default_factory=list)  #: [m] 左右合計の空き幅
+
+
 #: トピック → 型。`Subscriber` がデコードに使う。
 #: `image/` は前方一致で両カメラに効かせたいので接頭辞でも引けるようにしてある
 TOPIC_TYPES: dict[str, type[MsgBase]] = {
@@ -706,6 +776,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_SCAN_CAM: Scan,
     TOPIC_LINE_CAM: LineScan,
     TOPIC_CAM_MASK: CamMask,
+    TOPIC_CAM_PATH: CamPath,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,
     TOPIC_IMAGE_FRONT: ImageRef,
@@ -720,6 +791,8 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_CAM_CONFIG: CamConfig,
     TOPIC_CAM_MODEL: CamModelCtrl,
     TOPIC_E2E_MODEL: E2EModelCtrl,
+    TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl,
+    TOPIC_CAM_E2E_CMD: CamE2ECmd,
     TOPIC_TRACK_ROI: TargetRoiCtrl,
     TOPIC_TRACK_TARGET: TargetTrack,
 }

@@ -18,7 +18,7 @@ import numpy as np  # noqa: E402
 from raspi.nav.grid import OccGrid  # noqa: E402
 from raspi.nav.ipm import (CameraExtrinsics, camera_intrinsics,  # noqa: E402
                           ground_to_pixel, pixel_to_ground,
-                          project_mask_to_grid)
+                          project_mask_to_grid, project_seen_to_grid)
 
 
 class TestRoundTrip(unittest.TestCase):
@@ -119,6 +119,50 @@ class TestProjectMaskToGrid(unittest.TestCase):
         grid = OccGrid(resolution=0.05, size_m=4.0, origin=(-1.0, -2.0))
         occ = project_mask_to_grid(np.ones((height, width), dtype=bool), intr, ext, grid)
         self.assertEqual(int(occ.sum()), 0)
+
+
+class TestProjectSeenToGrid(unittest.TestCase):
+    """`raspi/nav/drivable_path.py` の `blocked = (~seen) | occ` が前提にする
+    「カメラの視野内だけが `seen=True` になる」ことを確認する。"""
+
+    def test_visible_ground_point_is_seen_far_lateral_point_is_not(self):
+        width, height = 480, 360
+        intr = camera_intrinsics(1.152, width, height, bottom_crop=0.25)
+        ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
+        grid = OccGrid(resolution=0.05, size_m=6.0, origin=(-1.0, -3.0))
+
+        seen = project_seen_to_grid((height, width), intr, ext, grid, stride=1)
+
+        near_col, near_row = grid.to_cell(1.0, 0.0)
+        self.assertTrue(bool(seen[near_row, near_col]),
+                        "画角内のはずの前方の点が観測済みになっていない")
+
+        # 大きく横に外れた点は画角外（`ground_to_pixel` が None を返す）になるはず
+        far_col, far_row = grid.to_cell(1.0, 2.5)
+        self.assertFalse(bool(seen[far_row, far_col]),
+                         "画角外のはずの点が観測済みになった")
+
+    def test_occupied_cells_are_always_a_subset_of_seen_cells(self):
+        """`project_mask_to_grid` と同じ画素座標をサンプルしているので、走行不可
+        セル（`occ`）は必ず `seen` にも含まれる（`blocked` 合成の前提）。"""
+        width, height = 480, 360
+        intr = camera_intrinsics(1.152, width, height, bottom_crop=0.25)
+        ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
+        # principal_y = height/(2*(1-0.25)) = 240。それより下（v>240）が地面に
+        # 交わる範囲なので、壁のブロックはそこに置くこと（上に置くと「空」扱いで
+        # 何も投影されず、このテストの前提が成り立たない）
+        drivable = np.ones((height, width), dtype=bool)
+        drivable[260:280, 200:220] = False   # 壁として焼き込む
+        grid = OccGrid(resolution=0.05, size_m=6.0, origin=(-1.0, -3.0))
+
+        occ = project_mask_to_grid(drivable, intr, ext, grid, stride=2)
+        seen = project_seen_to_grid((height, width), intr, ext, grid, stride=2)
+
+        occupied_cells = np.argwhere(occ)
+        self.assertGreater(len(occupied_cells), 0)
+        for row, col in occupied_cells:
+            self.assertTrue(bool(seen[row, col]),
+                            "occで占有と判定されたセルがseenでは未観測になっている")
 
 
 if __name__ == "__main__":

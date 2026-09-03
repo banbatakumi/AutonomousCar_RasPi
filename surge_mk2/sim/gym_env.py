@@ -439,7 +439,8 @@ class SimE2EEnv:
         """
         vehicle_half_width_m = max(abs(p[1]) for p in self.spec.footprint)
         offsets = compute_raceline_offsets(course.centerline, course.width,
-                                           vehicle_half_width_m=vehicle_half_width_m)
+                                           vehicle_half_width_m=vehicle_half_width_m,
+                                           obstacles=course.obstacles)
         target_speed = compute_speed_profile(
             course.centerline, offsets, mu=episode_spec.mu, max_speed=self.max_speed,
             drive_accel_m_s2=episode_spec.drive_accel_m_s2,

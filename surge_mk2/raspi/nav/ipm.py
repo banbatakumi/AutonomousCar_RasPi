@@ -32,7 +32,8 @@ import numpy as np
 from .grid import OccGrid
 
 __all__ = ["CameraIntrinsics", "CameraExtrinsics", "camera_intrinsics",
-           "pixel_to_ground", "ground_to_pixel", "project_mask_to_grid"]
+           "pixel_to_ground", "ground_to_pixel", "project_mask_to_grid",
+           "project_seen_to_grid"]
 
 #: `project()`/`pixel_to_ground()` 共通の下限。光軸方向の距離がこれ未満は
 #: 「カメラの真下・背後」とみなして解を捨てる（`CameraView.tsx` の `zc < 0.15` と同じ）
@@ -177,3 +178,41 @@ def project_mask_to_grid(drivable_mask: np.ndarray, intr: CameraIntrinsics,
     inside = grid.inside(col, row)
     occ[row[inside], col[inside]] = True
     return occ
+
+
+def project_seen_to_grid(mask_shape: tuple[int, int], intr: CameraIntrinsics,
+                          ext: CameraExtrinsics, grid: OccGrid,
+                          *, stride: int = 2) -> np.ndarray:
+    """カメラが実際に見ている範囲を occupancy grid へ投影する。**クラスは問わない。**
+
+    `project_mask_to_grid()` は「走行不可」の画素だけを壁として彫るので、
+    水平画角の外や地平線より上（そもそも `pixel_to_ground` が解を持たない範囲）は
+    暗黙に「空き」のまま残る。`follow_the_gap_cam.py` は `fov_deg` を絞ってこの穴を
+    回避しているが、車両の正面軸から離れた前方距離まで左右にレイを撃つ
+    `raspi/nav/drivable_path.py` の中心線抽出では同じ回避策が使えない
+    （そもそも角度で視野を切っていない）。
+
+    返り値は `grid` と同じ形の bool 配列（True＝観測済み）。呼び出し側で
+    `blocked = (~seen) | occ` を作り、**未観測は壁と同じ扱いにする**
+    （`scan_window()` の「欠測は壁」と同じ安全側の判断）。
+
+    `mask_shape` は `(height, width)`。中身の画素値は使わない——全画素を
+    対象に「地面座標へ投影できたか」だけを見る。`project_mask_to_grid()` と
+    同じ `stride` を渡せば、同じ画素位置の組を2回サンプルすることになり
+    座標系が完全に一致する。
+    """
+    h, w = mask_shape
+    seen = np.zeros((grid.height, grid.width), dtype=bool)
+    vs, us = np.mgrid[0:h:stride, 0:w:stride]
+    us = us.astype(np.float64).reshape(-1)
+    vs = vs.astype(np.float64).reshape(-1)
+
+    x, y, valid = _pixel_to_ground_vec(us, vs, intr, ext)
+    x, y = x[valid], y[valid]
+    if x.size == 0:
+        return seen
+
+    col, row = grid.to_cell(x, y)
+    inside = grid.inside(col, row)
+    seen[row[inside], col[inside]] = True
+    return seen

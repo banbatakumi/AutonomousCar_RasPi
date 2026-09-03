@@ -20,6 +20,34 @@
 （＝制動）に倒す。**中間的な「たぶんある」を作らない**——閾値ぎりぎりの検出を
 そのまま座標に変換すると、ノイズで目標点が暴れて舵が振動する
 （`_MIN_BAND_FRAC` 未満はその帯に「無い」扱いにする）。
+
+## 帯の重心は「細い」領域だけを使う（毛布・段ボール等の誤検出対策）
+
+実車確認（2026-09-03）で、`near_band`/`far_band` 内に毛布・カーテン・段ボール
+等の大きく明るい面があると、単純な帯内重心は白線ではなくそちらへ引っ張られる
+ことが分かった。白線は数cm幅で「細い」という物理的な制約を使い、`_thin_runs()`
+で行ごとに幅が `_MAX_LINE_WIDTH_FRAC`（画像幅比）を超える連続領域を除いてから
+重心を取る。ただし**同じ室内に他の細長い明るい構造（棚の縁・ドア枠等）が
+あると、形状フィルタだけでは区別できない**——これは実コース以外での検証が
+原理的に当たらない領域なので、最終確認は実コース上で行うこと。
+
+## `near_band` の既定値は車体の映り込みを避けてある
+
+`config/vehicle.toml` の `cam_front.bottom_crop`（ISPのScalerCropで下端を
+25%カット）だけでは車体（E-Stopボタン等）が画角の下端に残る（実車確認、
+2026-09-03）。**車体はカメラに対して固定なので、車体の姿勢（ピッチ）が
+変わっても画面内の位置はほぼ動かない**——`near_band` を車体が写らない範囲に
+静的に収めれば恒久的に有効。旧既定 `(0.80, 1.00)` は車体をほぼ丸ごと含んで
+いたため `(0.65, 0.84)` に変更した。
+
+## `line_trace` が選ばれている間だけ認識する（IDLE/ACTIVE）
+
+プロセスとしては常時起動（`surge-line-perception`）だが、`white_mask()` は
+フレームが来るたびに毎回回るので上げっぱなしだと CPU・電力を無駄に消費する。
+`cam_perception_node.py`（`auto/ctrl` の `mode` がカメラ系モードの間だけ推論する）
+と同じ考え方で、`mode == "line_trace"` の間だけ実際にフレームを読んで判定する。
+非アクティブの間は `failed_frame()`（見失った扱い）を出すだけで、共有メモリの
+読み取りすらしない。
 """
 
 from __future__ import annotations
@@ -39,6 +67,7 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import ImageRef, LineScan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_AUTO_CTRL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_LINE_CAM,
@@ -50,9 +79,15 @@ __all__ = ["LinePerceptionNode", "white_mask"]
 
 NS = 1_000_000_000
 HB_HZ = 10
-#: 帯の中で白画素がこれ未満の割合なら「その帯には無い」とみなす。
+#: 帯の中で検出できた行の割合がこれ未満なら「その帯には無い」とみなす。
 #: 0 にすると単発のノイズ画素1個でも目標点になり、舵が暴れる
 _MIN_BAND_FRAC = 0.01
+#: 白線とみなす連続白画素の最大幅（画像幅に対する割合）。これを超える幅の
+#: 連続領域は毛布・段ボール等の面とみなして除く（上のモジュールdocstring参照）。
+#: 実車確認で毛布・カーテンの塊は画像幅の9〜13%あった一方、白線は数%に収まる
+_MAX_LINE_WIDTH_FRAC = 0.08
+#: この `auto/ctrl` モードが選ばれている間だけ認識する（上のモジュールdocstring参照）
+_LINE_MODE = "line_trace"
 
 
 def white_mask(frame: np.ndarray, *, min_brightness: int = 170,
@@ -73,22 +108,45 @@ def white_mask(frame: np.ndarray, *, min_brightness: int = 170,
     return (lo >= min_brightness) & ((hi - lo) <= max_chroma)
 
 
-def _band_centroid(mask: np.ndarray, v0: int, v1: int) -> tuple[float, float, float] | None:
-    """行 `[v0, v1)` の帯における白画素の重心 `(u, v, frac)`。
+def _thin_runs(row: np.ndarray, max_width_px: int) -> list[float]:
+    """1行ぶんの bool 配列から、幅が `max_width_px` 以下の連続領域の中心列を列挙する。
 
-    帯の中で白画素の割合が `_MIN_BAND_FRAC` 未満なら `None`
-    （見えているのがノイズか、その帯には線が無い）。
+    白線は数cm幅で「細い」という制約を使った形状フィルタ——色（明るく無彩色）
+    だけでは毛布・カーテンのような大きな面と区別できないため（上のモジュール
+    docstring参照）。
+    """
+    if not row.any():
+        return []
+    padded = np.concatenate(([False], row, [False]))
+    edges = np.diff(padded.astype(np.int8))
+    starts = np.flatnonzero(edges == 1)
+    ends = np.flatnonzero(edges == -1)
+    return [float(s + e) / 2.0 for s, e in zip(starts, ends) if (e - s) <= max_width_px]
+
+
+def _band_centroid(mask: np.ndarray, v0: int, v1: int,
+                   max_width_px: int) -> tuple[float, float, float] | None:
+    """行 `[v0, v1)` の帯における細い白領域の重心 `(u, v, frac)`。
+
+    `frac` は帯の中で細い白領域を検出できた**行の割合**。`_MIN_BAND_FRAC`
+    未満なら `None`（見えているのがノイズか、その帯には線が無い）。
     """
     v0 = max(0, v0)
     v1 = min(mask.shape[0], v1)
     if v1 <= v0:
         return None
-    band = mask[v0:v1]
-    rows, cols = np.nonzero(band)
-    frac = rows.size / band.size if band.size else 0.0
+    us: list[float] = []
+    vs: list[int] = []
+    for r in range(v0, v1):
+        for u in _thin_runs(mask[r], max_width_px):
+            us.append(u)
+            vs.append(r)
+    if not vs:
+        return None
+    frac = len(set(vs)) / (v1 - v0)
     if frac < _MIN_BAND_FRAC:
         return None
-    return float(cols.mean()), float(v0 + rows.mean()), frac
+    return float(np.mean(us)), float(np.mean(vs)), frac
 
 
 class LinePerceptionNode:
@@ -102,8 +160,8 @@ class LinePerceptionNode:
 
     def __init__(self, *, vehicle: Vehicle | None = None,
                 min_brightness: int = 170, max_chroma: int = 40,
-                near_band: tuple[float, float] = (0.80, 1.00),
-                far_band: tuple[float, float] = (0.55, 0.75)) -> None:
+                near_band: tuple[float, float] = (0.65, 0.84),
+                far_band: tuple[float, float] = (0.45, 0.63)) -> None:
         self.vehicle = vehicle or Vehicle.load()
         v = self.vehicle
         #: 地面からの高さは base_link の z をそのまま使う近似（`ipm.py` docstring参照）
@@ -118,6 +176,8 @@ class LinePerceptionNode:
 
         self._reader = FrameReader()
         self._running = False
+        #: 直前周期の ACTIVE/IDLE。切り替わった周期だけログを出すための記憶
+        self._active = False
 
     def close(self) -> None:
         self._reader.close()
@@ -145,8 +205,10 @@ class LinePerceptionNode:
 
         st = LineScan(t_capture=t_capture_ns, seq=seq)
         coverages: list[float] = []
+        max_width_px = max(1, int(_MAX_LINE_WIDTH_FRAC * w))
 
-        near = _band_centroid(mask, int(self.near_band[0] * h), int(self.near_band[1] * h))
+        near = _band_centroid(mask, int(self.near_band[0] * h), int(self.near_band[1] * h),
+                              max_width_px)
         if near is not None:
             u, vpix, frac = near
             g = pixel_to_ground(u, vpix, intr, ext)
@@ -155,7 +217,8 @@ class LinePerceptionNode:
                 st.near_x, st.near_y = g
                 coverages.append(frac)
 
-        far = _band_centroid(mask, int(self.far_band[0] * h), int(self.far_band[1] * h))
+        far = _band_centroid(mask, int(self.far_band[0] * h), int(self.far_band[1] * h),
+                             max_width_px)
         if far is not None:
             u, vpix, frac = far
             g = pixel_to_ground(u, vpix, intr, ext)
@@ -193,17 +256,31 @@ class LinePerceptionNode:
                 break
             for _ in sub.poll(20):
                 pass  # `latest` を見るだけなので中身の処理は不要
-            ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-            vs = sub.latest.get(TOPIC_VEHICLE_STATE)
-            if ref is None:
+
+            auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
+            active = auto_ctrl is not None and auto_ctrl.mode == _LINE_MODE
+            if active != self._active:
+                self._active = active
+                mode = auto_ctrl.mode if auto_ctrl is not None else "?"
+                print(f"# {mode} {'選択: 認識開始' if active else '非選択: 認識停止'}",
+                     flush=True)
+
+            if not active:
+                # `line_trace` が選ばれていない間は共有メモリすら読まない
+                # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
                 st = self.failed_frame(seq=seq)
             else:
-                got = self.read_frame(ref)
-                if got is None:
+                ref = sub.latest.get(TOPIC_IMAGE_FRONT)
+                vs = sub.latest.get(TOPIC_VEHICLE_STATE)
+                if ref is None:
                     st = self.failed_frame(seq=seq)
                 else:
-                    frame, t_capture = got
-                    st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
+                    got = self.read_frame(ref)
+                    if got is None:
+                        st = self.failed_frame(seq=seq)
+                    else:
+                        frame, t_capture = got
+                        st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
             pub.send(TOPIC_LINE_CAM, st)
             seq += 1
 
@@ -228,9 +305,9 @@ def main() -> int:
                     help="RGB各chの最小値がこれ未満なら白ではない")
     ap.add_argument("--max-chroma", type=int, default=40,
                     help="RGBの最大−最小がこれを超えたら色が付いている＝白ではない")
-    ap.add_argument("--near-band", default="0.80,1.00",
-                    help="近傍帯の画面高さ割合 top,bottom")
-    ap.add_argument("--far-band", default="0.55,0.75",
+    ap.add_argument("--near-band", default="0.65,0.84",
+                    help="近傍帯の画面高さ割合 top,bottom（既定は車体の映り込みを避けた範囲）")
+    ap.add_argument("--far-band", default="0.45,0.63",
                     help="遠方帯の画面高さ割合 top,bottom")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
@@ -243,7 +320,8 @@ def main() -> int:
                               far_band=_parse_band(args.far_band))
 
     pub = Publisher("line_perception")
-    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST})
+    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
+                      TOPIC_AUTO_CTRL: LATEST})
 
     print(f"# line_perception_node  publish {pub.endpoint}  line/cam へ配信")
 

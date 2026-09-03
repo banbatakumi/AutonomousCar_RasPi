@@ -151,7 +151,7 @@ def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
                     max_speed: float, early_stop_patience: int,
                     reward_norm: bool = True, curriculum_frac: float = 0.3,
                     use_sde: bool = False, sde_sample_freq: int = 4,
-                    steer_rate_weight: float = 0.2,
+                    steer_rate_weight: float = 0.2, log_std_init: float = 0.0,
                     resume_from: str | None = None) -> list[str]:
     """最大舵角は渡さない——`train_rl.py`はもう`--max-steer`を持たず、
     `config/vehicle.toml`の車両物理限界を常に使う（2026-08-28、バンビの指示）。
@@ -173,6 +173,12 @@ def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
         変化した量への罰則の重み。2026-09-03追加——`train_rl.py`既定の0.2は
         未検証値で、v13でも生アクションの振動が残っていたため、v15でここを
         引き上げて振動を報酬側から直接抑える切り分け）
+    :param log_std_init: `--log-std-init`（方策の初期探索ノイズのlog標準偏差）。
+        既定0.0はSB3既定と同じ（std≈1.0、行動レンジ[-1,1]の半分）。2026-09-04診断:
+        curriculum_frac/steer_rate_weight/use_sdeをどう振ってもv13/v15/v16全てで
+        学習開始直後の`train/std`≈1.0・`rollout/ep_len_mean`16〜20ステップが
+        再現していた——これらはどれもこの初期値に触れていなかったため。負の値
+        （例: -1.0）で初期探索ノイズ自体を下げる切り分け用フラグ
     :param resume_from: 指定すると`--resume-from`を足す（既存のチェックポイントから
         続きを学習する。`train_rl.py`の`PPO.load()`経路）。省略時は従来通り新規学習。
     """
@@ -183,7 +189,8 @@ def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
           "--max-speed", str(max_speed),
           "--early-stop-patience", str(early_stop_patience),
           "--curriculum-frac", str(curriculum_frac),
-          "--steer-rate-weight", str(steer_rate_weight)]
+          "--steer-rate-weight", str(steer_rate_weight),
+          "--log-std-init", str(log_std_init)]
     if not reward_norm:
         cmd.append("--no-reward-norm")
     if use_sde:
@@ -348,15 +355,30 @@ class App:
                              "直接抑えられるか試す。",
                  foreground="gray").grid(row=13, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        # ★2026-09-04診断: curriculum_frac/steer_rate_weight/use_sdeをどう振っても
+        # v13/v15/v16全てで学習開始直後のtrain/std≈1.0・ep_len_mean16〜20ステップが
+        # 再現していた——これらはどれも触れていなかった、SB3のPPO既定log_std_init=0.0
+        # （行動レンジ[-1,1]の半分に相当するstd≈1.0）が原因候補
+        self.log_std_init_var = tk.StringVar(value="0.0")
+        ttk.Label(frame, text="log_std_init（方策の初期探索ノイズのlog標準偏差）:").grid(
+            row=14, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.log_std_init_var, width=12).grid(
+            row=14, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="既定0.0（std≈1.0）はSB3既定のまま。行動レンジ[-1,1]の半分もの\n"
+                             "大きさで、学習開始直後は方策がほぼ毎ステップ±1.0付近を往復する\n"
+                             "bang-bang的な挙動になる。-1.0（std≈0.37）等に下げて初期探索\n"
+                             "ノイズ自体を減らせるか試す（PROGRESS.md「2026-09-04」節参照）。",
+                 foreground="gray").grid(row=15, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         ttk.Label(frame, text=f"max_steer（最大舵角）は{rel(REPO_ROOT / 'config' / 'vehicle.toml')}"
                              "の車両限界を常に使うため、\nここでは設定しません。",
-                 foreground="gray").grid(row=14, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                 foreground="gray").grid(row=16, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Button(frame, text="学習開始（数時間かかります）", command=self._start_train).grid(
-            row=15, column=0, columnspan=2, sticky="w", pady=12)
+            row=17, column=0, columnspan=2, sticky="w", pady=12)
         ttk.Label(frame, text="学習中もタブ②からTensorBoard・観戦・（別runの）\n"
                              "エクスポートを並行して動かせます。",
-                 foreground="gray").grid(row=16, column=0, columnspan=2, sticky="w")
+                 foreground="gray").grid(row=18, column=0, columnspan=2, sticky="w")
 
     def _build_runs_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
@@ -515,6 +537,7 @@ class App:
             curriculum_frac = float(self.curriculum_frac_var.get())
             sde_sample_freq = int(self.sde_sample_freq_var.get())
             steer_rate_weight = float(self.steer_rate_weight_var.get())
+            log_std_init = float(self.log_std_init_var.get())
         except ValueError:
             messagebox.showerror("入力エラー", "数値の項目は正しい数値で入力してください")
             return
@@ -550,6 +573,7 @@ class App:
                               reward_norm=reward_norm, curriculum_frac=curriculum_frac,
                               use_sde=use_sde, sde_sample_freq=sde_sample_freq,
                               steer_rate_weight=steer_rate_weight,
+                              log_std_init=log_std_init,
                               resume_from=resume_from)
         self._start_job("train", cmd, f"学習({name})",
                         on_done=lambda code: self._on_train_done(code))

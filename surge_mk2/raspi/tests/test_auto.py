@@ -20,14 +20,19 @@ import onnx  # noqa: E402
 from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.auto import (PLANNERS, DisparityExtender, DisparityPursuit,  # noqa: E402
-                        E2ELidar, FollowTheGap, FollowTheGapCam, LineTrace,
-                        catalog, make_planner)
+from raspi.auto import (PLANNERS, CamCenterline, DisparityExtender,  # noqa: E402
+                        DisparityPursuit, E2ELidar, FollowTheGap, FollowTheGapCam,
+                        LineTrace, catalog, make_planner)
 from raspi.auto.base import extend_disparity as _extend  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.gap_pursuit import _best_band  # noqa: E402
-from raspi.msgs import AutoState, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
-from raspi.msgs.types import TOPIC_LINE_CAM, TOPIC_SCAN, TOPIC_SCAN_CAM  # noqa: E402
+from raspi.msgs import AutoState, CamPath, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
+from raspi.msgs.types import (  # noqa: E402
+    TOPIC_CAM_PATH,
+    TOPIC_LINE_CAM,
+    TOPIC_SCAN,
+    TOPIC_SCAN_CAM,
+)
 
 
 def make_scan(dist_by_deg=None, *, default=3.0, seen=True) -> Scan:
@@ -408,6 +413,100 @@ class TestLineTrace(unittest.TestCase):
                 self.assertTrue(st.reason)
 
 
+def make_cam_path(*, x_min=0.3, x_max=1.5, x_step=0.1, y=0.0, width=1.0,
+                  seen=True) -> CamPath:
+    """一定の `y`（中心）・`width`（幅）が続く走行可能領域の中心線を作る。"""
+    if not seen:
+        return CamPath(seen=False)
+    n = int(round((x_max - x_min) / x_step)) + 1
+    xs = [x_min + i * x_step for i in range(n)]
+    ys = [y] * n
+    widths = [width] * n
+    return CamPath(seen=True, xs=xs, ys=ys, widths=widths)
+
+
+class TestCamCenterline(unittest.TestCase):
+    """走行可能領域の中心線（`CamPath`）を Pure Pursuit で追う。
+
+    `raspi/nav/drivable_path.py` の幾何そのもの（占有格子から中心線を作る部分）
+    は `raspi/tests/test_drivable_path.py` で検証済み。ここでは合成した `CamPath`
+    から `plan()` が正しい方向・停止判断を作ることだけを確認する。
+    """
+
+    def setUp(self):
+        self.p = CamCenterline()
+        self.params = CamCenterline.merged({})
+
+    def plan(self, path, vs=None, dt=0.1, **over):
+        p = {**self.params, **over}
+        return self.p.plan(path, vs, p, dt)
+
+    def test_declares_a_distinct_input_topic(self):
+        self.assertEqual(CamCenterline.input_topic, TOPIC_CAM_PATH)
+        self.assertNotEqual(CamCenterline.input_topic, TOPIC_SCAN)
+
+    def test_straight_corridor_goes_straight(self):
+        st = self.plan(make_cam_path(y=0.0))
+        self.assertTrue(st.ready, st.reason)
+        self.assertFalse(st.brake)
+        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
+        self.assertGreater(st.target_speed, 0.0)
+
+    def test_corridor_centered_left_steers_left(self):
+        """中心線が左（y正）に寄っていれば正の舵角（反時計回り正）で向く。"""
+        st = self.plan(make_cam_path(y=0.3))
+        self.assertTrue(st.ready, st.reason)
+        self.assertGreater(st.target_steer, 0.0)
+
+    def test_corridor_centered_right_steers_right(self):
+        st = self.plan(make_cam_path(y=-0.3))
+        self.assertTrue(st.ready, st.reason)
+        self.assertLess(st.target_steer, 0.0)
+
+    def test_stops_when_path_is_not_seen(self):
+        st = self.plan(make_cam_path(seen=False))
+        self.assertFalse(st.ready)
+        self.assertIn("届いていない", st.reason)
+        self.assertEqual(st.target_speed, 0.0)
+
+    def test_stops_when_nearest_point_is_too_narrow(self):
+        """直前の1点目から既に `min_width_m` を下回っていれば止まる。"""
+        st = self.plan(make_cam_path(width=0.1), min_width_m=0.4)
+        self.assertFalse(st.ready)
+        self.assertIn("幅が足りない", st.reason)
+
+    def test_truncates_path_at_first_narrow_point(self):
+        """途中から幅が足りなくなったら、それ以遠は使わず free_ahead で止める。"""
+        path = make_cam_path(x_min=0.3, x_max=1.5, x_step=0.1, y=0.0, width=1.0)
+        # 5点目（x=0.7）以降を通行不可にする
+        widths = list(path.widths)
+        for i in range(4, len(widths)):
+            widths[i] = 0.1
+        path = CamPath(seen=True, xs=path.xs, ys=path.ys, widths=widths)
+
+        st = self.plan(path, min_width_m=0.4)
+        self.assertAlmostEqual(st.free_ahead, path.xs[3], places=6)
+
+    def test_speed_never_exceeds_max_speed(self):
+        for y in (-0.3, 0.0, 0.3):
+            st = self.plan(make_cam_path(y=y), max_speed=0.3)
+            self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
+
+    def test_reset_clears_the_steering_state(self):
+        path = make_cam_path(y=0.4)
+        for _ in range(20):
+            converged = self.plan(path).target_steer
+        self.assertGreater(abs(converged), 0.05)
+        self.p.reset()
+        self.assertLess(abs(self.plan(path).target_steer), abs(converged) * 0.8)
+
+    def test_not_ready_always_carries_a_reason(self):
+        for path in (make_cam_path(seen=False), make_cam_path(width=0.1)):
+            st = self.plan(path)
+            if not st.ready or st.brake:
+                self.assertTrue(st.reason)
+
+
 class TestDisparityExtender(unittest.TestCase):
     """**FTG と同じ安全条件を満たしたうえで、狙点が「一番遠く」になること。**"""
 
@@ -696,6 +795,10 @@ class TestRegistry(unittest.TestCase):
     def test_line_trace_planner_is_registered(self):
         self.assertIn("line_trace", PLANNERS)
         self.assertIsInstance(make_planner("line_trace"), LineTrace)
+
+    def test_cam_centerline_planner_is_registered(self):
+        self.assertIn("cam_centerline", PLANNERS)
+        self.assertIsInstance(make_planner("cam_centerline"), CamCenterline)
 
     def test_e2e_lidar_planner_is_registered(self):
         self.assertIn("e2e_lidar", PLANNERS)

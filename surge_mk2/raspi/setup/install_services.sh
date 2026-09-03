@@ -33,14 +33,14 @@
 #
 # ## `surge-cam-perception` は既定で入れる（2026-09-03、`auto/ctrl` 連動に変更）
 #
-# `ftg_cam`（カメラの走行可否セグメンテーションで走るモード）用の推論プロセス。
-# 以前は「`planning_node` が今どのモードを選んでいるかを一切知らない独立
-# プロセス」で、前方カメラのフレームが来る限り無条件に CNN 推論を回し続ける
-# ため既定で入れていなかった。今は `cam_perception_node.py` 自身が
-# `auto/ctrl`（`AutoCtrl.mode`）を見て **`ftg_cam` が選ばれている間だけ**
-# 推論する（IDLE/ACTIVE。`cam_track_node.py` の待機コスト設計と同じ）ため、
-# `surge-cam-track` と同様に常時起動してよい——GUI で他のモードを選んでいる
-# 間はフレームの共有メモリすら読まない。
+# `ftg_cam`／`cam_centerline`（カメラの走行可否セグメンテーションで走るモード）
+# 用の推論プロセス。以前は「`planning_node` が今どのモードを選んでいるかを
+# 一切知らない独立プロセス」で、前方カメラのフレームが来る限り無条件に CNN
+# 推論を回し続けるため既定で入れていなかった。今は `cam_perception_node.py`
+# 自身が `auto/ctrl`（`AutoCtrl.mode`）を見て **カメラ系モードのいずれかが
+# 選ばれている間だけ**推論する（IDLE/ACTIVE。`cam_track_node.py` の待機コスト
+# 設計と同じ）ため、`surge-cam-track` と同様に常時起動してよい——GUI で他の
+# モードを選んでいる間はフレームの共有メモリすら読まない。
 #
 # 手順・GUI での使い方は `docs/development.md` §12.2。
 #
@@ -78,9 +78,9 @@ ROOT=$(pwd)
 USER_NAME=${SUDO_USER:-pi}
 PY="$ROOT/.venv/bin/python -u"
 # **surge-logger は既定でこの一覧に入れない**（SD 書き込みの無駄を避けるため。上記）。
-# **surge-cam-track / surge-cam-perception は入れる**（どちらも待機中は
-# 推論を回さない設計のため。上記）
-UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception)
+# **surge-cam-track / surge-cam-perception / surge-line-perception は入れる**
+# （いずれも待機中は認識・推論を回さない設計のため。上記）
+UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-line-perception)
 WITH_LOGGER=0
 
 # ⚠ `--max-speed` / `--max-steer` は **GUI の `PI_MAX_SPEED_CAP` / `PI_MAX_STEER_CAP`
@@ -262,8 +262,19 @@ fi
 # モジュールdocstring参照）ので、`surge-cam-track` と同じく常時起動してよい。
 # **`--quiet` は渡さない**（`cam_perception_node.py` の argparse にそのオプション
 # が無い。渡すと起動時に即エラー終了して `Restart=on-failure` で再起動ループになる）
-write_unit surge-cam-perception "カメラの走行可否セグメンテーション推論(ftg_cam用)" \
+write_unit surge-cam-perception "カメラの走行可否セグメンテーション推論(ftg_cam/cam_centerline用)" \
            "raspi.nodes.cam_perception_node" "surge-camera.service"
+
+# cam_e2e も**常時 enable**（`cam_perception` と同じ IDLE/ACTIVE 設計。
+# `auto/ctrl` が `cam_e2e` の間だけ推論する。`docs/development.md` §12.3）
+write_unit surge-cam-e2e "カメラE2E(模倣学習)推論(cam_e2e用)" \
+           "raspi.nodes.cam_e2e_node" "surge-camera.service"
+
+# line_perception も**常時 enable**（`UNITS` に入っている）。`line_trace` が
+# 選ばれていない間は自身で IDLE に落ちる（`line_perception_node.py` の
+# モジュールdocstring参照）ので、`surge-cam-perception` と同じく常時起動してよい
+write_unit surge-line-perception "前方カメラの白線認識(line_trace用)" \
+           "raspi.nodes.line_perception_node" "surge-camera.service"
 
 # ── 古いログを消すタイマー（放置するとカードが埋まる） ──
 #

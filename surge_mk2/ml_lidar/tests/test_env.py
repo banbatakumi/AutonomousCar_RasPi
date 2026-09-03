@@ -372,6 +372,29 @@ class TestRacelinePrefetchAndCache(unittest.TestCase):
                 env.reset()
             self.assertGreaterEqual(m.call_count, 2)
 
+    def test_reset_passes_course_obstacles_to_compute_raceline_offsets(self):
+        """★2026-09-03追加: `course.obstacles`が`compute_raceline_offsets`へ
+        配線されていること（値の正しさ＝理想ラインが実際に障害物を避けるかは
+        `ml_lidar/tests/test_raceline.py`側で検証済み、ここは呼び出し配線だけの
+        回帰確認）。obstacleアーキタイプの衝突率100%だった診断への対応。"""
+        from sim.random_course import generate_obstacle_course
+
+        course = None
+        for seed in range(10):
+            c = generate_obstacle_course(np.random.default_rng(seed))
+            if c.obstacles is not None:
+                course = c
+                break
+        self.assertIsNotNone(course, "全seedで障害物が0個だった（テストの前提が崩れている）")
+
+        env = SimE2EEnv([course], max_steps=5, seed=0, randomize_dynamics=False,
+                        randomize_lidar=False)
+        with unittest.mock.patch("sim.gym_env.compute_raceline_offsets",
+                                 wraps=_real_compute_raceline_offsets) as m:
+            env.reset()
+            _, kwargs = m.call_args
+            self.assertIs(kwargs["obstacles"], course.obstacles)
+
     def test_set_curriculum_progress_propagates_to_course_fn_with_set_progress(self):
         """`course_fn`が`set_progress()`を持つ（`CurriculumCourseFn`）場合だけ
         伝播する。持たない素の関数（`generate_random_course`）を渡した場合は

@@ -58,6 +58,7 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # surge_mk2/
 
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.callbacks import (  # noqa: E402
@@ -75,11 +76,44 @@ from stable_baselines3.common.vec_env import (  # noqa: E402
 from ml_lidar.env import GymSurgeEnv  # noqa: E402
 from ml_lidar.policy import ScanCNNExtractor  # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
-from sim.random_course import CurriculumCourseFn  # noqa: E402
+from sim.random_course import (  # noqa: E402
+    CurriculumCourseFn,
+    generate_narrow_course,
+    generate_obstacle_course,
+)
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 __all__ = ["make_train_env_fn", "make_eval_env", "linear_schedule", "RacelineMetricsCallback",
-          "CurriculumCallback"]
+          "CurriculumCallback", "PerCourseEvalCallback"]
+
+#: `make_eval_env`/`PerCourseEvalCallback`が使う評価専用narrow/obstacleコースの
+#: 固定シード。`generate_narrow_course`/`generate_obstacle_course`は手続き生成だが、
+#: 同じ`np.random.default_rng(seed)`を渡せば常に同じコースになる——`circuit.json`/
+#: `fuji.json`と同じく「毎回同じ既知のコースで評価する」を、手書きJSON/PNGの
+#: 保存パイプライン（narrow/obstacleが必要とするwidth配列・obstaclesが失われる）
+#: を経由せずに実現する。値はscratchpadでの実測で非退化（narrow: 最狭区間
+#: 0.454m・obstacle: 障害物3個、いずれもスタート地点が壁に埋まらない）を
+#: 確認済み（2026-09-03追加。narrow衝突率36〜73%・obstacle衝突率67〜100%が
+#: `circuit`/`fuji`だけのeval・`best_model`選定に一切見えていなかった問題への対応）
+_EVAL_NARROW_SEED = 0
+_EVAL_OBSTACLE_SEED = 1
+
+
+def _build_eval_courses() -> dict[str, Course]:
+    """`make_eval_env`（混合プール）と`PerCourseEvalCallback`（コース種別ごとの
+    個別ロールアウト）が共有する、固定4コース一式。"""
+    narrow = generate_narrow_course(np.random.default_rng(_EVAL_NARROW_SEED), name="eval-narrow")
+    assert isinstance(narrow.width, np.ndarray) and float(narrow.width.min()) < 0.8, (
+        f"_EVAL_NARROW_SEED={_EVAL_NARROW_SEED}が退化したnarrowコース"
+        f"(min_width={float(narrow.width.min()):.3f}m)を生成した——シードを変更すること")
+    obstacle = generate_obstacle_course(np.random.default_rng(_EVAL_OBSTACLE_SEED),
+                                       name="eval-obstacle")
+    assert obstacle.obstacles is not None and len(obstacle.obstacles) >= 2, (
+        f"_EVAL_OBSTACLE_SEED={_EVAL_OBSTACLE_SEED}が障害物の少ないコースを生成した"
+        "——シードを変更すること")
+    return {"circuit": Course.load(DEFAULT_COURSE_DIR / "circuit.json"),
+           "fuji": Course.load(DEFAULT_COURSE_DIR / "fuji.json"),
+           "narrow": narrow, "obstacle": obstacle}
 
 
 class RacelineMetricsCallback(BaseCallback):
@@ -202,7 +236,15 @@ def make_eval_env(*, max_steps: int, max_speed: float, steer_tau: float,
                   steer_rate_weight: float, speed_weight: float, slip_weight: float,
                   raceline_weight: float, raceline_tolerance_m: float,
                   speed_match_weight: float, seed: int = 0) -> GymSurgeEnv:
-    """`circuit`/`fuji` ——学習に使っていない既知コースで評価する。
+    """`circuit`/`fuji`/固定narrow/固定obstacle ——学習に使っていない既知コースで
+    評価する。
+
+    **2026-09-03: narrow/obstacleの2本を追加**（`_build_eval_courses()`）。
+    それまでは`circuit`/`fuji`（道幅1.0m・障害物なし）の2本だけで、narrow36%・
+    obstacle100%という衝突崩壊が`EvalCallback`の評価曲線にも`best_model`選定にも
+    一切反映されていなかった——v11〜v15のPPOハイパーパラメータ調整はすべて
+    「見えている70%（organic/circuit/corridor相当）」だけを最適化していたことが
+    アーキタイプ別の衝突率実測で判明した（PROGRESS.md参照）。
 
     `randomize_lidar=False`でLiDARノイズも既定値に固定する。学習側はノイズを
     ランダム化しているので、評価だけは条件を揃えないと「今回は運良く/悪くノイズが
@@ -213,14 +255,72 @@ def make_eval_env(*, max_steps: int, max_speed: float, steer_tau: float,
     学習側と揃える（実運用の滑らかさ・速度の攻め方をそのまま評価スコア・
     `best_model`選定に反映させるため）。
     """
-    courses = [Course.load(DEFAULT_COURSE_DIR / "circuit.json"),
-              Course.load(DEFAULT_COURSE_DIR / "fuji.json")]
+    courses = list(_build_eval_courses().values())
     return GymSurgeEnv(courses, max_steps=max_steps, max_speed=max_speed,
                        seed=seed, randomize_lidar=False, randomize_dynamics=False,
                        steer_tau=steer_tau, steer_rate_weight=steer_rate_weight,
                        speed_weight=speed_weight, slip_weight=slip_weight,
                        raceline_weight=raceline_weight, raceline_tolerance_m=raceline_tolerance_m,
                        speed_match_weight=speed_match_weight)
+
+
+class PerCourseEvalCallback(BaseCallback):
+    """circuit/fuji/narrow/obstacleそれぞれ単体で少数エピソードをロールアウトし、
+    コース種別ごとの平均報酬・衝突率をTensorBoardへ`eval_by_kind/{name}_reward`・
+    `eval_by_kind/{name}_collision_rate`として記録する（2026-09-03追加）。
+
+    `make_eval_env()`は4コースを混合したプールから`n_eval_episodes`回サンプル
+    するだけなので、narrow/obstacle（他アーキタイプに比べ出現回数が少ない）の
+    崩壊がcircuit/fuji寄りの結果に埋もれ、学習曲線からもTensorBoardからも
+    見えなくなりうる。このコールバックは`EvalCallback`本体を改造せず、
+    `RacelineMetricsCallback`と同じ設計思想で独立に追加する
+    （`model.learn(callback=[...])`にリストで並べる）。
+    """
+
+    def __init__(self, *, max_steps: int, max_speed: float, steer_tau: float,
+                steer_rate_weight: float, speed_weight: float, slip_weight: float,
+                raceline_weight: float, raceline_tolerance_m: float,
+                speed_match_weight: float, eval_freq: int, n_eval_episodes: int = 5,
+                seed: int = 0, verbose: int = 0) -> None:
+        super().__init__(verbose)
+        self.eval_freq = max(1, eval_freq)
+        self.n_eval_episodes = n_eval_episodes
+        # ★各コース単体のGymSurgeEnv。make_eval_env()と同じ固定条件
+        # （randomize_lidar=False, randomize_dynamics=False）で条件を揃える
+        self._envs = {
+            name: GymSurgeEnv([course], max_steps=max_steps, max_speed=max_speed, seed=seed,
+                              randomize_lidar=False, randomize_dynamics=False,
+                              steer_tau=steer_tau, steer_rate_weight=steer_rate_weight,
+                              speed_weight=speed_weight, slip_weight=slip_weight,
+                              raceline_weight=raceline_weight,
+                              raceline_tolerance_m=raceline_tolerance_m,
+                              speed_match_weight=speed_match_weight)
+            for name, course in _build_eval_courses().items()
+        }
+
+    def _rollout_one(self, env: GymSurgeEnv) -> tuple[float, bool]:
+        obs, _ = env.reset()
+        total_reward, collided, done = 0.0, False, False
+        while not done:
+            action, _ = self.model.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, _info = env.step(action)
+            total_reward += reward
+            collided = collided or bool(terminated)
+            done = terminated or truncated
+        return total_reward, collided
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.eval_freq != 0:
+            return True
+        for name, env in self._envs.items():
+            rewards, collisions = [], []
+            for _ in range(self.n_eval_episodes):
+                r, c = self._rollout_one(env)
+                rewards.append(r)
+                collisions.append(c)
+            self.logger.record(f"eval_by_kind/{name}_reward", float(np.mean(rewards)))
+            self.logger.record(f"eval_by_kind/{name}_collision_rate", float(np.mean(collisions)))
+        return True
 
 
 def main() -> int:
@@ -350,6 +450,16 @@ def main() -> int:
                          "サンプル。値が大きいほど滑らかだが状態への追従が遅れる"
                          "トレードオフがあるため、SB3の連続制御チューニング例で"
                          "よく使われる4を既定にした）")
+    ap.add_argument("--log-std-init", type=float, default=0.0,
+                    help="方策の行動分布（対角ガウス）の初期log標準偏差。SB3の`ActorCriticPolicy`"
+                         "既定は0.0=std≈1.0。`action_space`は[-1,1]（幅2）なので、std=1.0は"
+                         "レンジの半分に相当し、学習開始直後は方策がほぼ毎ステップ±1.0付近を"
+                         "往復するbang-bang的な挙動になる（2026-09-04診断: v13/v15/v16いずれも"
+                         "最初の更新時点で`train/std`≈1.0・`rollout/ep_len_mean`が16〜20"
+                         "ステップしかなく、curriculum_frac/steer_rate_weight/use_sdeの値に"
+                         "関わらず再現していた——これらはどれもこの初期値に触れていなかった"
+                         "ため）。負の値（例: -1.0でstd≈0.37）にして初期探索ノイズをレンジに"
+                         "対して現実的な大きさまで下げる")
     ap.add_argument("--features-extractor", choices=["mlp", "cnn"], default="cnn",
                     help="`cnn`（既定、2026-09-02追加）は`ml_lidar/policy.py`の"
                          "`ScanCNNExtractor`——点群361点だけ1D-CNNで圧縮してから"
@@ -428,6 +538,7 @@ def main() -> int:
         "reward_norm": args.reward_norm,
         "use_sde": args.use_sde,
         "sde_sample_freq": args.sde_sample_freq,
+        "log_std_init": args.log_std_init,
     }, indent=2), encoding="utf-8")
 
     env_fns = [make_train_env_fn(args.seed + i, max_steps=args.max_steps,
@@ -467,6 +578,7 @@ def main() -> int:
                             net_arch=dict(pi=args.hidden_sizes, vf=args.hidden_sizes))
     else:
         policy_kwargs = dict(net_arch=dict(pi=args.hidden_sizes, vf=args.hidden_sizes))
+    policy_kwargs["log_std_init"] = args.log_std_init
 
     if args.resume_from is not None:
         # ★ハイパラ（target_kl/n_epochs/learning_rate/clip_range/policy_kwargs等）は
@@ -516,12 +628,25 @@ def main() -> int:
     raceline_metrics_callback = RacelineMetricsCallback()
     curriculum_callback = CurriculumCallback(curriculum_frac=args.curriculum_frac,
                                              total_timesteps=args.timesteps)
+    # ★`eval_callback`(circuit/fuji/narrow/obstacleの混合プール)だけだと、
+    # narrow/obstacle(出現回数が少ない)の崩壊がcircuit/fuji寄りの結果に埋もれて
+    # 見えなくなりうる——アーキタイプ別の内訳をTensorBoardへ独立に記録する
+    # （2026-09-03追加。`PerCourseEvalCallback`docstring参照）
+    per_course_callback = PerCourseEvalCallback(
+        max_steps=args.max_steps, max_speed=args.max_speed, steer_tau=args.steer_tau,
+        steer_rate_weight=args.steer_rate_weight, speed_weight=args.speed_weight,
+        slip_weight=args.slip_weight, raceline_weight=args.raceline_weight,
+        raceline_tolerance_m=args.raceline_tolerance_m,
+        speed_match_weight=args.speed_match_weight,
+        eval_freq=max(1, args.eval_freq // args.n_envs), n_eval_episodes=5,
+        seed=args.seed + 998)
 
     # 早期終了時は StopTrainingOnNoModelImprovement 自身が理由をログに出す（verbose=1）
     # ★再開時は reset_num_timesteps=False で num_timesteps を引き継ぐ
     # （True のままだとカウンタが0に戻り、--timesteps 未達のまま即終了する）
     model.learn(total_timesteps=args.timesteps,
-               callback=[eval_callback, raceline_metrics_callback, curriculum_callback],
+               callback=[eval_callback, raceline_metrics_callback, curriculum_callback,
+                        per_course_callback],
                reset_num_timesteps=args.resume_from is None)
     model.save(str(args.out / "last_model"))
     # ★報酬正規化の統計量はPPOのcheckpoint(.zip)には含まれない（VecNormalizeは
