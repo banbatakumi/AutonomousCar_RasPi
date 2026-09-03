@@ -331,6 +331,25 @@ def main() -> int:
                          "しまい、点群の空間的なパターン（ギャップ・壁の位置）を"
                          "表現する容量が乏しいのではという疑いがあった。CPU実測では"
                          "[256,256]でも[64,64]の約1.5倍の学習時間で収まる")
+    ap.add_argument("--use-sde", action=argparse.BooleanOptionalAction, default=False,
+                    help="PPOのgeneralized State-Dependent Exploration（既定は無効、"
+                         "SB3既定と同じ）。既定の探索ノイズは毎ステップi.i.d.に"
+                         "サンプルされるガウス分布で、方策の生出力が『±1.0付近を"
+                         "毎ステップ激しく往復する』bang-bang的な振動を誘発しやすい"
+                         "（2026-09-02のv10診断・2026-09-03のv13再診断で確認——"
+                         "v13はcircuit/fujiでは実舵角まで滑らかにフィルタされ収束して"
+                         "見えたが、narrow/obstacle寄りの難コースでは同じ生成ノイズの"
+                         "大きさが崩れの一因になっていた）。gSDEは状態に応じた"
+                         "相関ノイズを`--sde-sample-freq`ステップごとにしか"
+                         "再サンプルしないため、時間的に滑らかな探索軌道になり"
+                         "連続制御の暴れを抑えられるとSB3側も明記している。"
+                         "reward_norm/curriculumとは独立に効きうるレバーとして追加")
+    ap.add_argument("--sde-sample-freq", type=int, default=4,
+                    help="gSDEノイズを再サンプルする間隔[step]（`--use-sde`指定時のみ"
+                         "意味を持つ。SB3既定は-1=ロールアウト1回につき1回だけ"
+                         "サンプル。値が大きいほど滑らかだが状態への追従が遅れる"
+                         "トレードオフがあるため、SB3の連続制御チューニング例で"
+                         "よく使われる4を既定にした）")
     ap.add_argument("--features-extractor", choices=["mlp", "cnn"], default="cnn",
                     help="`cnn`（既定、2026-09-02追加）は`ml_lidar/policy.py`の"
                          "`ScanCNNExtractor`——点群361点だけ1D-CNNで圧縮してから"
@@ -407,6 +426,8 @@ def main() -> int:
         "curriculum_frac": args.curriculum_frac,
         "features_extractor": args.features_extractor,
         "reward_norm": args.reward_norm,
+        "use_sde": args.use_sde,
+        "sde_sample_freq": args.sde_sample_freq,
     }, indent=2), encoding="utf-8")
 
     env_fns = [make_train_env_fn(args.seed + i, max_steps=args.max_steps,
@@ -460,6 +481,7 @@ def main() -> int:
                    target_kl=(args.target_kl if args.target_kl > 0 else None),
                    learning_rate=linear_schedule(args.learning_rate),
                    clip_range=linear_schedule(args.clip_range),
+                   use_sde=args.use_sde, sde_sample_freq=args.sde_sample_freq,
                    policy_kwargs=policy_kwargs)
 
     # ★訓練側を`VecNormalize`でラップしたので、SB3の`EvalCallback`は

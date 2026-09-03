@@ -150,6 +150,8 @@ def write_note(run_dir: Path, text: str) -> None:
 def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
                     max_speed: float, early_stop_patience: int,
                     reward_norm: bool = True, curriculum_frac: float = 0.3,
+                    use_sde: bool = False, sde_sample_freq: int = 4,
+                    steer_rate_weight: float = 0.2,
                     resume_from: str | None = None) -> list[str]:
     """最大舵角は渡さない——`train_rl.py`はもう`--max-steer`を持たず、
     `config/vehicle.toml`の車両物理限界を常に使う（2026-08-28、バンビの指示）。
@@ -160,6 +162,17 @@ def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
         ターミナルを使わず切り替えられないため、コマンドをここに露出させた）
     :param curriculum_frac: `--curriculum-frac`（カリキュラム学習のランプアップ割合）。
         0以下ならカリキュラムを無効化する（v9までと同じ、最初から最大難度）
+    :param use_sde: `True`なら`--use-sde`を足す（PPOのgeneralized SDE。
+        2026-09-03追加——v13でreward_norm/curriculumを切ってもなお生の方策出力が
+        毎ステップ激しく振動する挙動が残っていたため、探索ノイズの生成方式自体を
+        切り替える追加の切り分けフラグ。**v14で検証したところ収束が大幅に遅れ
+        頭打ちしたため既定はOFFのまま**——PROGRESS.md「v14を停止しv15方針を決定」
+        節参照）
+    :param sde_sample_freq: `--use-sde`指定時のみ意味を持つ`--sde-sample-freq`
+    :param steer_rate_weight: `--steer-rate-weight`（生の方策出力が1ステップで
+        変化した量への罰則の重み。2026-09-03追加——`train_rl.py`既定の0.2は
+        未検証値で、v13でも生アクションの振動が残っていたため、v15でここを
+        引き上げて振動を報酬側から直接抑える切り分け）
     :param resume_from: 指定すると`--resume-from`を足す（既存のチェックポイントから
         続きを学習する。`train_rl.py`の`PPO.load()`経路）。省略時は従来通り新規学習。
     """
@@ -169,9 +182,12 @@ def build_train_cmd(python: str, name: str, *, timesteps: int, n_envs: int,
           "--n-envs", str(n_envs),
           "--max-speed", str(max_speed),
           "--early-stop-patience", str(early_stop_patience),
-          "--curriculum-frac", str(curriculum_frac)]
+          "--curriculum-frac", str(curriculum_frac),
+          "--steer-rate-weight", str(steer_rate_weight)]
     if not reward_norm:
         cmd.append("--no-reward-norm")
+    if use_sde:
+        cmd += ["--use-sde", "--sde-sample-freq", str(sde_sample_freq)]
     if resume_from:
         cmd += ["--resume-from", resume_from]
     return cmd
@@ -299,15 +315,48 @@ class App:
                              "確定したら既定を戻します（PROGRESS.md「2026-09-02（続き）」節参照）。",
                  foreground="gray").grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
+        # ★v13（reward_norm/curriculumともOFF）でも生の方策出力の振動が残っていた
+        # （2026-09-03、バンビの実指摘を受けた再診断）。PPOの探索ノイズ生成方式を
+        # 変える切り分け用フラグをGUIにも露出しておく
+        self.use_sde_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="gSDE(generalized State-Dependent Exploration)を使う",
+                        variable=self.use_sde_var).grid(
+            row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.sde_sample_freq_var = tk.StringVar(value="4")
+        ttk.Label(frame, text="sde_sample_freq（gSDE使用時のみ有効）:").grid(
+            row=10, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.sde_sample_freq_var, width=12).grid(
+            row=10, column=1, sticky="w")
+        ttk.Label(frame, text="毎ステップi.i.d.のガウスノイズだと方策出力がbang-bang的に\n"
+                             "振動しやすい。gSDEは状態依存の相関ノイズをこの間隔[step]でしか\n"
+                             "再サンプルしないため滑らかになりうる（PROGRESS.md\n"
+                             "「2026-09-02（さらに続き）」節の追記参照）。\n"
+                             "★v14で検証したところ収束が大幅に遅れ頭打ちしたため、\n"
+                             "既定はOFFのままにしてあります（「v14を停止しv15方針を\n"
+                             "決定」節参照）。",
+                 foreground="gray").grid(row=11, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        # ★v13で生アクションの振動（bang-bang）が残っていたことを受け、
+        # 罰則の重みを直接引き上げて試すためのフラグ（2026-09-03追加）
+        self.steer_rate_weight_var = tk.StringVar(value="0.2")
+        ttk.Label(frame, text="steer_rate_weight（舵の1ステップ変化量への罰則）:").grid(
+            row=12, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.steer_rate_weight_var, width=12).grid(
+            row=12, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="既定0.2は未検証値のまま据え置かれていた。v15では\n"
+                             "1.0程度に引き上げ、生の方策出力の振動を報酬側から\n"
+                             "直接抑えられるか試す。",
+                 foreground="gray").grid(row=13, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         ttk.Label(frame, text=f"max_steer（最大舵角）は{rel(REPO_ROOT / 'config' / 'vehicle.toml')}"
                              "の車両限界を常に使うため、\nここでは設定しません。",
-                 foreground="gray").grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                 foreground="gray").grid(row=14, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Button(frame, text="学習開始（数時間かかります）", command=self._start_train).grid(
-            row=10, column=0, columnspan=2, sticky="w", pady=12)
+            row=15, column=0, columnspan=2, sticky="w", pady=12)
         ttk.Label(frame, text="学習中もタブ②からTensorBoard・観戦・（別runの）\n"
                              "エクスポートを並行して動かせます。",
-                 foreground="gray").grid(row=11, column=0, columnspan=2, sticky="w")
+                 foreground="gray").grid(row=16, column=0, columnspan=2, sticky="w")
 
     def _build_runs_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
@@ -464,10 +513,13 @@ class App:
             max_speed = float(self.max_speed_var.get())
             early_stop = int(self.early_stop_var.get())
             curriculum_frac = float(self.curriculum_frac_var.get())
+            sde_sample_freq = int(self.sde_sample_freq_var.get())
+            steer_rate_weight = float(self.steer_rate_weight_var.get())
         except ValueError:
             messagebox.showerror("入力エラー", "数値の項目は正しい数値で入力してください")
             return
         reward_norm = self.reward_norm_var.get()
+        use_sde = self.use_sde_var.get()
 
         resume_from = None
         run_dir = RUNS_DIR / name
@@ -496,6 +548,8 @@ class App:
         cmd = build_train_cmd(self.python, name, timesteps=timesteps, n_envs=n_envs,
                               max_speed=max_speed, early_stop_patience=early_stop,
                               reward_norm=reward_norm, curriculum_frac=curriculum_frac,
+                              use_sde=use_sde, sde_sample_freq=sde_sample_freq,
+                              steer_rate_weight=steer_rate_weight,
                               resume_from=resume_from)
         self._start_job("train", cmd, f"学習({name})",
                         on_done=lambda code: self._on_train_done(code))

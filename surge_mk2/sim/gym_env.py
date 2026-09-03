@@ -70,6 +70,20 @@ SCAN_DIM = 361
 OBS_DIM = SCAN_DIM + 2
 
 
+#: `randomize_dynamics`の既定レンジ幅。`config/vehicle.toml`実測値を中心に
+#: ±この割合で振る（2026-09-03、ハードコードされたレンジが実測更新のたびに
+#: 手で追随しないと乖離する問題への対応。`tau_steer_s`実測が0.539→0.067へ
+#: 一桁近く動いた過去の乖離を踏まえ、レンジ自体を`VehicleSpec.load()`の
+#: 値から自動導出する）。ドキュメント上「±30〜50%程度」としてきた幅の中間値
+DYNAMICS_RANDOMIZE_FRAC = 0.4
+
+
+def _range_around(center: float, frac: float, *, lo: float = 0.0) -> tuple[float, float]:
+    """`center`を中心に`±frac`（相対）で振ったレンジ。下限は`lo`でクランプする
+    （`tau_*`のような物理量が0以下にならないようにするため）。"""
+    return (max(lo, center * (1.0 - frac)), center * (1.0 + frac))
+
+
 def _stm_us(t_ns: int) -> int:
     """`VirtualLidar.poll()` が要求する ns→us 変換。訓練では STM32 時計のドリフトは
     どうでもよいので単純な単位変換で済ませる。"""
@@ -221,11 +235,12 @@ class SimE2EEnv:
                 lidar_drop_rate_range: tuple[float, float] = (0.0, 0.06),
                 lidar_sector_drop_rate_range: tuple[float, float] = (0.0, 0.015),
                 randomize_dynamics: bool = True,
-                mu_range: tuple[float, float] = (0.28, 0.65),
-                tau_steer_s_range: tuple[float, float] = (0.03, 0.10),
-                dead_time_s_range: tuple[float, float] = (0.0, 0.08),
-                tau_speed_s_range: tuple[float, float] = (0.08, 0.30),
-                rolling_resistance_range: tuple[float, float] = (0.15, 0.6),
+                dynamics_randomize_frac: float = DYNAMICS_RANDOMIZE_FRAC,
+                mu_range: tuple[float, float] | None = None,
+                tau_steer_s_range: tuple[float, float] | None = None,
+                dead_time_s_range: tuple[float, float] | None = None,
+                tau_speed_s_range: tuple[float, float] | None = None,
+                rolling_resistance_range: tuple[float, float] | None = None,
                 seed: int = 0) -> None:
         """:param courses: 固定のコース群から毎エピソードランダムに選ぶ（`ml_lidar/watch.py`
             のように同じコースを繰り返し見せたいときはこちら）。
@@ -249,23 +264,28 @@ class SimE2EEnv:
             幾何・質量（実測確定済み）は変えない。`False`なら`spec`をそのまま
             固定で使う（評価用。`make_eval_env`は`randomize_lidar`と同様こちらを使う）。
             **2026-09-01: `mu`・`tau_steer_s`・`tau_speed_s`はシステム同定タブでの
-            実測が済み（`config/vehicle.toml`参照）、各レンジは実測値を中心に
-            ±30〜50%程度取り直した**（`tau_steer_s`実測0.539は旧レンジ(0.05, 0.25)を
-            全く含んでおらず、訓練が実車より大幅に速い操舵応答を前提にしていた
-            ——旋回時の挙動が実車と乖離する主因の一つだったと見られる）。
-            `dead_time_s`・`rolling_resistance`は未実測のまま（`rolling_resistance`は
-            この学習ループが常に`armed=True`の速度指令モードで駆動するため測っても
-            反映されない）。`mu`の下限0.28は`sim/vehicle.py`の摩擦円連成
-            （2026-09-01追加。加減速中は`a_lat_max`がさらに絞られる）も踏まえた
-            見積もりで、他レンジ同様に**未検証**。**2026-09-02:
+            実測が済み（`config/vehicle.toml`参照）**（`tau_steer_s`実測0.539は旧レンジ
+            (0.05, 0.25)を全く含んでおらず、訓練が実車より大幅に速い操舵応答を
+            前提にしていた——旋回時の挙動が実車と乖離する主因の一つだったと見られる）。
+            `rolling_resistance`は常に`armed=True`の速度指令モードで駆動するため
+            測っても学習ループに反映されない。**2026-09-02:
             `tools/sysid/fit.py`の`steer_cmd_echo`基準（サーボ単体の遅れ）への
             修正後に実車を録り直した結果、`tau_steer_s`実測は0.539→**0.067**へ
-            大幅更新された（旧レンジはPiパイプライン遅延混入込みの値を中心に
-            取ったもので、修正後の実測とは1桁近く乖離していた）。`tau_steer_s_range`を
-            新しい実測値を中心に±30〜50%程度で(0.03, 0.10)へ取り直した**。
-            `dead_time_s_range`は`PIPELINE_DEAD_TIME_S`
-            を別途加算するため、こちらはサーボ単体のむだ時間だけを表すレンジ
-            （0を含めているのはそのため）
+            大幅更新された**（旧レンジはPiパイプライン遅延混入込みの値を中心に
+            取ったもので、修正後の実測とは1桁近く乖離していた——ハードコードした
+            絶対値レンジは実測更新のたびに手で追随しないと同じ乖離を繰り返す）。
+
+            **2026-09-03: `*_range`を`None`のままにすると、`config/vehicle.toml`
+            （`self.spec = VehicleSpec.load()`の値）を中心に`dynamics_randomize_frac`
+            （既定`±40%`、`DYNAMICS_RANDOMIZE_FRAC`）で自動的にレンジを作る**
+            （`_range_around`）。実測値が更新されればレンジも自動追随するので、
+            上記のような乖離が構造的に起きなくなる。明示的に`*_range`を渡せば
+            従来通りその値で固定できる（`make_eval_env`のような用途向け）。
+            `dead_time_s`は`PIPELINE_DEAD_TIME_S`を別途加算するため、こちらは
+            サーボ単体のむだ時間だけを表すレンジ。下限は0にクランプするが、
+            旧来の「0を含む」設計とは異なり中心は`config/vehicle.toml`の実測値
+            （現状まだ★未実測）そのものになる——`rolling_resistance`同様、値の
+            信頼性はtomlの実測状況に依存する
         :param cross_track_margin_frac: 道幅の半分のうち、ペナルティ無しで自由に
             使ってよい割合。既定0.5＝道幅1.0mのコースなら中心線から±0.25mは
             ノーペナルティ、そこから壁（±0.5m）までの残り±0.25mだけ
@@ -330,11 +350,25 @@ class SimE2EEnv:
             raise ValueError("courses か course_fn のどちらかは要ります")
         self.courses = courses
         self.course_fn = course_fn
+        self.spec = spec or VehicleSpec.load()
+        # `*_range`が明示されなければ`config/vehicle.toml`（self.spec）の実測値を
+        # 中心に`dynamics_randomize_frac`で自動導出する（`randomize_dynamics`
+        # docstring参照）。`dead_time_s`のみ下限を0にクランプする
+        # （`PIPELINE_DEAD_TIME_S`と別建てのサーボ単体むだ時間のため、負値は無意味）。
+        if mu_range is None:
+            mu_range = _range_around(self.spec.mu, dynamics_randomize_frac)
+        if tau_steer_s_range is None:
+            tau_steer_s_range = _range_around(self.spec.tau_steer_s, dynamics_randomize_frac)
+        if dead_time_s_range is None:
+            dead_time_s_range = _range_around(self.spec.dead_time_s, dynamics_randomize_frac)
+        if tau_speed_s_range is None:
+            tau_speed_s_range = _range_around(self.spec.tau_speed_s, dynamics_randomize_frac)
+        if rolling_resistance_range is None:
+            rolling_resistance_range = _range_around(self.spec.rolling_resistance, dynamics_randomize_frac)
         # ★カリキュラム学習用（2026-09-02追加）。`mu_range`を直接書き換えるので、
-        # コンストラクタで渡された値を「最終到達点」として別に覚えておく
+        # 上で解決した値を「最終到達点」として別に覚えておく
         # （`set_curriculum_progress`docstring参照）
         self._mu_range_full = mu_range
-        self.spec = spec or VehicleSpec.load()
         self.max_steps = max_steps
         self.max_range = max_range
         self.max_speed = max_speed
