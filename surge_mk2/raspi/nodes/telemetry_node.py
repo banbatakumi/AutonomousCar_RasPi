@@ -1749,7 +1749,11 @@ class TelemetryServer:
             else:
                 next_tick = time.monotonic()
             for cam, clients in self.camera_clients.items():
-                if not clients:
+                # "mask" は `_mask_pump` が専用に中継する（このループの対象は
+                # `topics` にある front/rear のみ）。ここで弾かないと
+                # `topics[cam]` が KeyError になり、このタスクごと死んで
+                # front/rear の配信まで巻き添えで止まる
+                if cam == "mask" or not clients:
                     continue
                 ref = self.sub.latest.get(topics[cam])
                 if ref is None or ref.ring_seq == last_seq[cam]:
