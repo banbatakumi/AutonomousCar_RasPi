@@ -91,8 +91,7 @@ class TestGlobalLocalizerUnambiguousRoom(unittest.TestCase):
 
     def test_progress_reaches_one_when_done(self):
         pts = make_room_points(3.0, 2.0, 0.1)
-        loc = GlobalLocalizer(self.g, hint=None,
-                              config=LocalizeConfig(accept_score=2.0))  # 早期打ち切りを禁止
+        loc = GlobalLocalizer(self.g, hint=None, config=LocalizeConfig())
         _run_to_done(loc, pts)
         self.assertAlmostEqual(loc.progress, 1.0)
 

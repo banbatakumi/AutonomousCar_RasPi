@@ -168,8 +168,10 @@ def match_scans(prev: ScanPoints, cur: ScanPoints,
 
     for _ in range(config.iters):
         c, s = math.cos(th), math.sin(th)
-        qx = cx * c - cy * s + tx
-        qy = cx * s + cy * c + ty
+        rx = cx * c - cy * s           # 回転のみ（並進前）。θ列の導出に使う
+        ry = cx * s + cy * c
+        qx = rx + tx
+        qy = ry + ty
 
         # 方位で相手を引く。前後のビンも見て、いちばん近いものを選ぶ
         b = ((np.arctan2(qy, qx) / (2 * math.pi) + 1.0) * bins).astype(np.int64) % bins
@@ -199,8 +201,12 @@ def match_scans(prev: ScanPoints, cur: ScanPoints,
         residual = float(np.median(np.abs(err)))
 
         # θが小さいとして線形化: 残差 = n·t + θ(n×p) + n·(p−q)
+        # ここで p は「回転のみ適用した点」(rx, ry)（並進tx,tyを含まない）。
+        # 並進後のq(=rx+tx, ry+ty)を使うと θ列に n·(t×手前の並進) ぶんの
+        # バイアスが混入する（`core/confidence.py`の同種ヤコビアンが
+        # ローカル座標のまま微分しているのと同じ理由）
         # 変数は(dtx, dty, dth)の3つだけなので3×3を解けばよい
-        rot = nx * (-qy[use]) + ny * qx[use]
+        rot = nx * (-ry[use]) + ny * rx[use]
         a = np.column_stack([nx, ny, rot])
         ata = a.T @ a
         atb = a.T @ (-err)

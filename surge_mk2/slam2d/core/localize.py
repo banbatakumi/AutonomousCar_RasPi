@@ -53,8 +53,6 @@ class LocalizeConfig:
     spacing: float = 0.2
     angle_step: float = math.radians(15.0)  #: 候補角度の刻み
     max_points: int = 120                  #: 採点に使う点数の上限（`scanmatch.MAX_POINTS`と同じ考え方）
-    #: 最良候補の一致度がこれ以上なら、全角度を試さず打ち切ってよい
-    accept_score: float = 0.55
     #: 1位と（別の場所にある）2位の一致度差がこれ未満なら「対称の疑い」。
     #: `spacing`の量子化誤差より十分大きく取る（上のコメント参照）
     ambiguous_gap: float = 0.1
@@ -141,8 +139,13 @@ class GlobalLocalizer:
         self._best_yaw = np.where(better, yaw, self._best_yaw)
 
         self._ai += 1
-        self.done = (self._ai >= len(self._angles)
-                    or float(self._best_score.max()) >= self._config.accept_score)
+        # ★ 最良得点が十分でも打ち切らない。全候補は同じ角度列を共有しているため
+        # （上のループ参照）、ここで打ち切ると「対称な複製がまだ自分のピーク角度
+        # を試せていない」状態のまま`ambiguous`判定に使われ、回転方向にずれた
+        # 対称性（同じ位置でも向きが異なる複製等）を見逃す。1位の候補だけが早く
+        # ピークに達する場合があるため、`ambiguous`の安全性を保証するには全角度
+        # を評価し切る必要がある
+        self.done = self._ai >= len(self._angles)
         return self.done
 
     @property
