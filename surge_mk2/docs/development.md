@@ -73,7 +73,7 @@
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |
 | `raspi/msgs/types.py` | **`gui/src/types.ts` も手で直す**（写しなのでズレる）→ rsync ＋ `--restart-io` | **★★ する** |
 | `models/*.onnx`（カメラ用・カメラE2E用とも同じ`models/`直下）`models/e2e_lidar/*.onnx`（LiDAR E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`cam_e2e_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
-| `ml_cam/` `ml_cam_e2e/` `ml_lidar/`（学習パイプライン一式） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
+| `ml_cam/` `ml_cam_e2e/` `ml_lidar/`（学習パイプライン一式）`ml_common/`（3つの学習GUIが共有するTkinter部品） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
 
 > **`--services` は unit ファイルを書き換えるだけ。** 走っている `io_node` は古い引数のまま
 > 動き続けるので、反映には `--restart-io` が要る。

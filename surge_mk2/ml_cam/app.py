@@ -9,6 +9,11 @@
 子プロセスの標準出力をログ欄に流し込む配線だけ。中身のスクリプトを直接
 書き換えれば、このGUI側は何も変えなくてよい。
 
+ログ表示・サブプロセス実行基盤・run名管理・note.txt・学習曲線グラフ・
+ウィンドウクローズ処理は `ml_cam_e2e/app.py`・`ml_lidar/app.py` と共通実装のため
+`ml_common/` に切り出してある（2026-09-04）。SAMチェックポイントのダウンロードは
+Popenを使わない`urllib`ダウンロードで他2アプリに無い処理のため、共通化せずこのまま。
+
 Tkinter は Python 標準ライブラリ同梱なので、`ml_cam/requirements.txt` に
 依存を追加しなくてよい。
 
@@ -31,16 +36,27 @@ Tkinter は Python 標準ライブラリ同梱なので、`ml_cam/requirements.t
 from __future__ import annotations
 
 import queue
-import re
-import subprocess
 import sys
 import threading
 import tkinter as tk
 import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 from typing import Callable
+
+ML_CAM_DIR = Path(__file__).resolve().parent
+REPO_ROOT = ML_CAM_DIR.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from ml_common.close_handler import confirm_and_close  # noqa: E402
+from ml_common.dialogs import confirm_overwrite  # noqa: E402
+from ml_common.epoch_log import make_epoch_line_parser  # noqa: E402
+from ml_common.job_runner import JobRunner  # noqa: E402
+from ml_common.log_console import LogConsole  # noqa: E402
+from ml_common.naming import list_versioned_names, next_versioned_name  # noqa: E402
+from ml_common.notes import read_note, write_note  # noqa: E402
+from ml_common.paths import make_rel  # noqa: E402
+from ml_common.train_graph import TrainCurveCanvas  # noqa: E402
 
 __all__ = [
     "ML_CAM_DIR", "REPO_ROOT", "RUNS_DIR", "MODELS_DIR",
@@ -51,8 +67,6 @@ __all__ = [
     "default_sam_checkpoint_path", "download_file", "rel", "App",
 ]
 
-ML_CAM_DIR = Path(__file__).resolve().parent
-REPO_ROOT = ML_CAM_DIR.parent
 RUNS_DIR = ML_CAM_DIR / "runs"
 #: 実車側（`raspi/nodes/cam_perception_node.py`・`telemetry_node.py`）が
 #: `models/<name>.onnx`をフラットに探す前提に合わせる（`ml_lidar`の
@@ -62,62 +76,24 @@ DEFAULT_CHECKPOINT_DIR = ML_CAM_DIR / "checkpoints"
 #: これまでのトラブルシューティングで実際に使った SAM のチェックポイント
 SAM_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
 
-
-def rel(p: Path) -> str:
-    """`REPO_ROOT` からの相対パス文字列。画面表示を短くするためだけの整形。"""
-    try:
-        return str(p.relative_to(REPO_ROOT))
-    except ValueError:
-        return str(p)
+rel = make_rel(REPO_ROOT)
+list_model_names = list_versioned_names
+next_model_name = next_versioned_name
+parse_epoch_line = make_epoch_line_parser("val_iou")
 
 
 def default_sam_checkpoint_path() -> Path:
     return DEFAULT_CHECKPOINT_DIR / "sam_vit_b_01ec64.pth"
 
 
-# ── モデル名・モデル一覧（Tkinterを一切知らない純粋関数。`ml_cam/tests/test_app.py`の
-# 対象。`ml_lidar/app.py`の`list_run_names`/`next_run_name`と同じ考え方） ──
-
-_V_NAME_RE = re.compile(r"^v(\d+)$")
-
-
-def list_model_names(runs_dir: Path) -> list[str]:
-    if not runs_dir.exists():
-        return []
-    return sorted(p.name for p in runs_dir.iterdir() if p.is_dir())
-
-
-def next_model_name(existing: list[str]) -> str:
-    """`v1`・`v2`…のうち一番大きい番号の次を提案する。`v`始まりでない名前は無視する。
-    該当が無ければ`v1`（`ml_lidar/app.py`の`next_run_name`と同じ規則）。"""
-    nums = [int(m.group(1)) for name in existing if (m := _V_NAME_RE.match(name))]
-    return f"v{max(nums) + 1}" if nums else "v1"
-
-
 def describe_model_status(model_dir: Path) -> str:
     """モデル名フィールド脇に出す短い状態表示。フレーム枚数・ラベル付け済み枚数・
-    学習済みチェックポイントの有無を要約する（`ml_lidar/app.py`の`format_run_row`と
-    似た役目だが、こちらはドロップダウンの1項目ではなく現在選択中の1モデル分だけを表す）。
-    """
+    学習済みチェックポイントの有無を要約する。"""
     frames_dir = model_dir / "frames"
     frame_paths = sorted(frames_dir.glob("*.jpg")) if frames_dir.is_dir() else []
     labeled = sum(1 for f in frame_paths if (frames_dir / f"{f.stem}_mask.png").exists())
     mark = "✓学習済み" if (model_dir / "best.pt").exists() else "未学習"
     return f"フレーム {len(frame_paths)}枚（ラベル付け {labeled}枚）・{mark}"
-
-
-def read_note(model_dir: Path) -> str:
-    """`<model_dir>/note.txt`の中身。無ければ空文字（バンビが自由に書く備考欄。
-    `ml_lidar/app.py`の`read_note`と同じ役目）。"""
-    try:
-        return (model_dir / "note.txt").read_text(encoding="utf-8")
-    except OSError:
-        return ""
-
-
-def write_note(model_dir: Path, text: str) -> None:
-    model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "note.txt").write_text(text, encoding="utf-8")
 
 
 # ── コマンド組み立て（Tkinter を一切知らない純粋関数。`ml_cam/tests/test_app.py` の対象） ──
@@ -163,25 +139,6 @@ def build_preview_cmd(python: str, frames_dir: str, model_path: str) -> list[str
     return [python, str(ML_CAM_DIR / "preview.py"), frames_dir, "--model", model_path]
 
 
-#: `ml_cam/train.py` の1エポック分の出力行（例 "epoch   3/30  loss=0.1234  val_iou=0.567  (12s)"）
-_EPOCH_LINE_RE = re.compile(r"epoch\s+(\d+)/\d+\s+loss=([\d.]+)\s+val_iou=([\d.]+|nan)")
-
-
-def parse_epoch_line(line: str) -> tuple[int, float, float | None] | None:
-    """`ml_cam/train.py` の1エポック分のログ行から `(epoch, loss, val_iou)` を取り出す。
-
-    val_iou が "nan"（検証データが無いとき）なら `None`。該当しない行なら `None` を返す。
-    """
-    m = _EPOCH_LINE_RE.search(line)
-    if not m:
-        return None
-    epoch = int(m.group(1))
-    loss = float(m.group(2))
-    iou_s = m.group(3)
-    iou = None if iou_s == "nan" else float(iou_s)
-    return epoch, loss, iou
-
-
 def download_file(url: str, dest: Path, *, progress_cb: Callable[[int, int | None], None] | None = None,
                   chunk_size: int = 1 << 16) -> None:
     """`url` を `dest` に保存する（SAM チェックポイントのダウンロード想定）。
@@ -220,16 +177,20 @@ class App:
         root.geometry("760x680")
 
         self.python = sys.executable
-        self.proc: subprocess.Popen | None = None
-        self.busy = False
-        self.log_queue: "queue.Queue[tuple]" = queue.Queue()
-        #: 実行中のジョブが標準出力の行ごとに呼びたい追加処理（学習曲線の更新など）
-        self._current_on_line: Callable[[str], None] | None = None
+        self.jobs = JobRunner(REPO_ROOT, allow_concurrent=False, prefix_labels=False)
+        #: SAMチェックポイントのダウンロード中フラグ。`self.jobs`はPopenベースの
+        #: ジョブしか追跡できないため、排他制御だけ`_is_busy()`で合わせて見る
+        self._downloading = False
+        self.download_queue: "queue.Queue[tuple]" = queue.Queue()
         #: 直近でエクスポートしたモデル名。完了後に⑤プレビュータブへ引き継ぐために覚えておく
         self._last_exported_model_name = ""
 
         self._build_widgets()
         self.root.after(100, self._drain_log)
+        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(self.root, self.jobs))
+
+    def _is_busy(self) -> bool:
+        return self.jobs.is_busy() or self._downloading
 
     # ── 画面構築 ──
 
@@ -259,7 +220,8 @@ class App:
 
         log_frame = ttk.LabelFrame(self.root, text="ログ")
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.log_widget = ScrolledText(log_frame, height=16, state="disabled")
+        self.log_console = LogConsole(log_frame, height=16)
+        self.log_widget = self.log_console.widget
         self.log_widget.pack(fill="both", expand=True, padx=4, pady=4)
 
         bottom = ttk.Frame(self.root)
@@ -445,9 +407,9 @@ class App:
 
         def download_checkpoint() -> None:
             dest = REPO_ROOT / ckpt_var.get()
-            if dest.exists():
-                if not messagebox.askyesno("上書き確認", f"{ckpt_var.get()} は既にあります。再ダウンロードしますか？"):
-                    return
+            if dest.exists() and not messagebox.askyesno(
+                    "上書き確認", f"{ckpt_var.get()} は既にあります。再ダウンロードしますか？"):
+                return
             self._download_sam_checkpoint(dest)
 
         ttk.Button(frame, text="↓ ダウンロード（初回のみ・数百MB）", command=download_checkpoint).grid(
@@ -523,19 +485,12 @@ class App:
         ttk.Checkbutton(frame, text="事前学習重みを使わない（オフライン環境向け）",
                         variable=no_pretrained_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        self.train_epochs: list[int] = []
-        self.train_losses: list[float] = []
-        self.train_ious: list[float | None] = []
-
         def on_epoch_line(line: str) -> None:
             parsed = parse_epoch_line(line)
             if parsed is None:
                 return
             epoch, loss, iou = parsed
-            self.train_epochs.append(epoch)
-            self.train_losses.append(loss)
-            self.train_ious.append(iou)
-            self._redraw_train_graph()
+            self.train_graph.add_point(epoch, loss, iou)
 
         def run() -> None:
             model_dir = self._require_model_dir()
@@ -547,10 +502,7 @@ class App:
             except ValueError:
                 messagebox.showerror("入力エラー", "エポック数・バッチサイズは整数で入力してください")
                 return
-            self.train_epochs = []
-            self.train_losses = []
-            self.train_ious = []
-            self._redraw_train_graph()
+            self.train_graph.reset()
             cmd = build_train_cmd(self.python, str(model_dir / "frames"), str(model_dir), epochs,
                                   batch, size_var.get(), no_pretrained_var.get())
             self._run(cmd, "学習", on_line=on_epoch_line)
@@ -559,9 +511,8 @@ class App:
 
         graph_frame = ttk.LabelFrame(frame, text="学習曲線（赤=loss・青=val_iou）")
         graph_frame.grid(row=8, column=0, columnspan=3, sticky="we", pady=(4, 0))
-        self.train_canvas = tk.Canvas(graph_frame, width=520, height=150, bg="white",
-                                      highlightthickness=0)
-        self.train_canvas.pack(padx=4, pady=4)
+        self.train_graph = TrainCurveCanvas(graph_frame, metric_label="val_iou")
+        self.train_graph.widget.pack(padx=4, pady=4)
 
     def _build_export_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
@@ -590,8 +541,7 @@ class App:
                 return
             name = self.model_name_var.get().strip()
             out_path = MODELS_DIR / f"{name}.onnx"
-            if out_path.exists() and not messagebox.askyesno(
-                    "上書き確認", f"{rel(out_path)} は既にあります。上書きしますか？"):
+            if not confirm_overwrite(out_path, rel):
                 return
             self._last_exported_model_name = name
             cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path),
@@ -640,87 +590,40 @@ class App:
         ttk.Button(frame, text="プレビュー開始（別ウィンドウが開きます）", command=run).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=10)
 
-    def _redraw_train_graph(self) -> None:
-        c = self.train_canvas
-        c.delete("all")
-        n = len(self.train_epochs)
-        if n == 0:
-            return
-        width = int(c["width"])
-        height = int(c["height"])
-        pad = 24
-        plot_w = max(width - 2 * pad, 1)
-        plot_h = max(height - 2 * pad, 1)
-
-        def points(values: list[float]) -> list[tuple[float, float]]:
-            vmin, vmax = min(values), max(values)
-            span = vmax - vmin
-            pts = []
-            for i, v in enumerate(values):
-                x = pad + plot_w * i / max(n - 1, 1)
-                y = pad + plot_h * (1 - (v - vmin) / span) if span > 0 else pad + plot_h / 2
-                pts.append((x, y))
-            return pts
-
-        loss_pts = points(self.train_losses)
-        for (x1, y1), (x2, y2) in zip(loss_pts, loss_pts[1:]):
-            c.create_line(x1, y1, x2, y2, fill="#d33", width=2)
-        c.create_text(pad, 10, anchor="w", text=f"loss: {self.train_losses[-1]:.4f}", fill="#d33")
-
-        iou_values = [v for v in self.train_ious if v is not None]
-        if iou_values:
-            iou_pts_all = [(i, v) for i, v in enumerate(self.train_ious) if v is not None]
-            vmin, vmax = min(iou_values), max(iou_values)
-            span = vmax - vmin
-            for (i1, v1), (i2, v2) in zip(iou_pts_all, iou_pts_all[1:]):
-                x1 = pad + plot_w * i1 / max(n - 1, 1)
-                x2 = pad + plot_w * i2 / max(n - 1, 1)
-                y1 = pad + plot_h * (1 - (v1 - vmin) / span) if span > 0 else pad + plot_h / 2
-                y2 = pad + plot_h * (1 - (v2 - vmin) / span) if span > 0 else pad + plot_h / 2
-                c.create_line(x1, y1, x2, y2, fill="#37c", width=2)
-            c.create_text(width - pad, 10, anchor="e", text=f"val_iou: {iou_values[-1]:.3f}", fill="#37c")
-
     # ── サブプロセス実行・ログ配線 ──
 
     def _append_log(self, text: str) -> None:
-        self.log_widget.config(state="normal")
-        self.log_widget.insert("end", text)
-        self.log_widget.see("end")
-        self.log_widget.config(state="disabled")
+        self.log_console.append(text)
 
     def _run(self, cmd: list[str], label: str, *,
             on_line: Callable[[str], None] | None = None) -> None:
-        if self.busy:
+        if self._is_busy():
             messagebox.showwarning("実行中", "他の処理が終わってから実行してください")
             return
-        self.busy = True
-        self._current_on_line = on_line
         self.status_label.config(text=f"{label} 実行中…")
         self.stop_btn.config(state="normal")
         self._append_log(f"\n$ {' '.join(cmd)}\n")
+        self.jobs.start("job", cmd, label, on_line=on_line,
+                        on_done=lambda code: self._on_job_done(label, code))
 
-        def worker() -> None:
-            code = -1
-            try:
-                proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
-                self.proc = proc
-                for line in proc.stdout:                      # type: ignore[union-attr]
-                    self.log_queue.put(("log", line))
-                code = proc.wait()
-            except Exception as e:                             # noqa: BLE001 — GUIなので握って表示する
-                self.log_queue.put(("log", f"実行に失敗しました: {e}\n"))
-            finally:
-                self.proc = None
-                self.log_queue.put(("done", label, code))
-
-        threading.Thread(target=worker, daemon=True).start()
+    def _on_job_done(self, label: str, code: int) -> None:
+        ok = code == 0
+        if ok and label in ("フレーム抽出", "学習"):
+            # モデルの状態（フレーム枚数・学習済みか）が変わったので更新する
+            self.model_status_var.set(
+                describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
+        if ok and label == "エクスポート":
+            # ⑤タブのプレビュー対象に、今エクスポートしたモデルを選んでおく
+            self._refresh_exported_models()
+            self.preview_model_var.set(self._last_exported_model_name)
+        self.status_label.config(text="待機中")
+        self.stop_btn.config(state="disabled")
 
     def _download_sam_checkpoint(self, dest: Path) -> None:
-        if self.busy:
+        if self._is_busy():
             messagebox.showwarning("実行中", "他の処理が終わってから実行してください")
             return
-        self.busy = True
+        self._downloading = True
         self.status_label.config(text="SAM チェックポイントをダウンロード中…")
         self.stop_btn.config(state="disabled")           # ダウンロードは中断させない（壊れたファイルが残るため）
         self._append_log(f"\nダウンロード中: {SAM_CHECKPOINT_URL} → {rel(dest)}\n")
@@ -735,49 +638,41 @@ class App:
                     if step != last_reported:
                         last_reported = step
                         if total:
-                            self.log_queue.put(("log", f"  {mb:.0f}MB / {total / 1e6:.0f}MB\n"))
+                            self.download_queue.put(("log", f"  {mb:.0f}MB / {total / 1e6:.0f}MB\n"))
                         else:
-                            self.log_queue.put(("log", f"  {mb:.0f}MB\n"))
+                            self.download_queue.put(("log", f"  {mb:.0f}MB\n"))
 
                 download_file(SAM_CHECKPOINT_URL, dest, progress_cb=progress)
-                self.log_queue.put(("log", "ダウンロード完了\n"))
-                self.log_queue.put(("done", "SAMダウンロード", 0))
+                self.download_queue.put(("log", "ダウンロード完了\n"))
+                self.download_queue.put(("done", "SAMダウンロード", 0))
             except Exception as e:                        # noqa: BLE001
-                self.log_queue.put(("log", f"ダウンロード失敗: {e}\n"))
-                self.log_queue.put(("done", "SAMダウンロード", 1))
+                self.download_queue.put(("log", f"ダウンロード失敗: {e}\n"))
+                self.download_queue.put(("done", "SAMダウンロード", 1))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _stop(self) -> None:
-        if self.proc is not None:
-            self.proc.terminate()
+        if self.jobs.stop("job"):
             self._append_log("\n（停止を指示しました）\n")
 
-    def _drain_log(self) -> None:
+    def _drain_download_queue(self) -> None:
         try:
             while True:
-                kind, *rest = self.log_queue.get_nowait()
+                kind, *rest = self.download_queue.get_nowait()
                 if kind == "log":
                     self._append_log(rest[0])
-                    if self._current_on_line is not None:
-                        self._current_on_line(rest[0])
                 elif kind == "done":
                     label, code = rest
                     ok = code == 0
                     self._append_log(f"\n[{label}] {'完了' if ok else f'終了コード {code}'}\n")
-                    if ok and label in ("フレーム抽出", "学習"):
-                        # モデルの状態（フレーム枚数・学習済みか）が変わったので更新する
-                        self.model_status_var.set(
-                            describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
-                    if ok and label == "エクスポート":
-                        # ⑤タブのプレビュー対象に、今エクスポートしたモデルを選んでおく
-                        self._refresh_exported_models()
-                        self.preview_model_var.set(self._last_exported_model_name)
-                    self.busy = False
+                    self._downloading = False
                     self.status_label.config(text="待機中")
-                    self.stop_btn.config(state="disabled")
         except queue.Empty:
             pass
+
+    def _drain_log(self) -> None:
+        self.jobs.drain(self._append_log)
+        self._drain_download_queue()
         self.root.after(100, self._drain_log)
 
 

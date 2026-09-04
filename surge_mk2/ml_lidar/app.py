@@ -8,13 +8,19 @@
 サブプロセスとして呼び出すだけの薄い操作パネル。**学習・推論のロジックは
 一切持たない**——`ml_cam/app.py`と同じ設計方針。
 
+ログ表示・サブプロセス実行基盤・run名管理・note.txt・ウィンドウクローズ処理は
+`ml_cam/app.py`・`ml_cam_e2e/app.py`と共通実装のため`ml_common/`に切り出してある
+（2026-09-04）。学習曲線グラフは無く、複数ジョブ同時実行が必要という点だけが
+cam系と違うため、`ml_common.job_runner.JobRunner`はその両方の運用を
+`allow_concurrent`フラグで吸収する。
+
 ## `ml_cam/app.py`と違う点：複数ジョブが同時に動く
 
 カメラ版は「抽出→アノテーション→学習→エクスポート」が順番に1つずつ進む
 パイプラインだったので、常に1プロセスしか同時に動かない前提で作れた。
 LiDAR E2E は**学習が数時間かかる裏で、TensorBoard・観戦(`watch.py`)・
 （別runの）エクスポートを並行して動かしたい**（2026-08-28、バンビの要望）ので、
-ジョブをキー付きの辞書（`self._active`）で管理し、複数プロセスを同時に
+`JobRunner(allow_concurrent=True)`でジョブキーごとに複数プロセスを同時に
 追跡できるようにしてある。
 
 ## run名がそのまま学習出力先とモデル名になる
@@ -34,17 +40,24 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import re
-import subprocess
 import sys
-import threading
 import tkinter as tk
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
-from tkinter.scrolledtext import ScrolledText
 from typing import Callable
+
+ML_LIDAR_DIR = Path(__file__).resolve().parent
+REPO_ROOT = ML_LIDAR_DIR.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from ml_common.close_handler import confirm_and_close  # noqa: E402
+from ml_common.dialogs import confirm_overwrite  # noqa: E402
+from ml_common.job_runner import JobRunner  # noqa: E402
+from ml_common.log_console import LogConsole  # noqa: E402
+from ml_common.naming import list_versioned_names, next_versioned_name  # noqa: E402
+from ml_common.notes import read_note, write_note  # noqa: E402
+from ml_common.paths import make_rel  # noqa: E402
 
 __all__ = [
     "ML_LIDAR_DIR", "REPO_ROOT", "RUNS_DIR", "MODELS_DIR", "DEFAULT_N_ENVS",
@@ -53,45 +66,26 @@ __all__ = [
     "build_watch_cmd", "build_tensorboard_cmd", "App",
 ]
 
-ML_LIDAR_DIR = Path(__file__).resolve().parent
-REPO_ROOT = ML_LIDAR_DIR.parent
 RUNS_DIR = ML_LIDAR_DIR / "runs"
 MODELS_DIR = REPO_ROOT / "models" / "e2e_lidar"
 #: `train_rl.py --n-envs`の初期値。物理コア数に合わせる（コア数より増やしても
 #: 速くならず、むしろ競合で遅くなりやすい）
 DEFAULT_N_ENVS = os.cpu_count() or 8
 
+#: 学習だけワンクリックで数時間ぶんの進捗を失いかねないので、停止・終了時に
+#: 確認を挟む対象ジョブキー（TensorBoard・観戦・エクスポートはすぐ止めても
+#: 実害が小さいので確認しない）
+_CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
 
-def rel(p: Path) -> str:
-    """`REPO_ROOT`からの相対パス文字列。`ml_cam/app.py`の同名関数と同じ役目。"""
-    try:
-        return str(p.relative_to(REPO_ROOT))
-    except ValueError:
-        return str(p)
+rel = make_rel(REPO_ROOT)
+list_run_names = list_versioned_names
+next_run_name = next_versioned_name
 
 
 def venv_bin(python: str, name: str) -> str:
     """`python`（venvのpython実行ファイル）と同じ`bin/`にある別コマンドのパス。
     `tensorboard`は`ml_lidar/requirements.txt`で同じvenvに入る想定。"""
     return str(Path(python).parent / name)
-
-
-# ── run名・run一覧（Tkinterを一切知らない純粋関数。`ml_lidar/tests/test_app.py`の対象） ──
-
-_V_NAME_RE = re.compile(r"^v(\d+)$")
-
-
-def list_run_names(runs_dir: Path) -> list[str]:
-    if not runs_dir.exists():
-        return []
-    return sorted(p.name for p in runs_dir.iterdir() if p.is_dir())
-
-
-def next_run_name(existing: list[str]) -> str:
-    """`v1`・`v2`…のうち一番大きい番号の次を提案する。`v`始まりでない名前
-    （最初期の`ppo_e2e`など）は無視する。該当が無ければ`v1`。"""
-    nums = [int(m.group(1)) for name in existing if (m := _V_NAME_RE.match(name))]
-    return f"v{max(nums) + 1}" if nums else "v1"
 
 
 def discover_runs(runs_dir: Path) -> list[dict]:
@@ -130,19 +124,6 @@ def format_run_row(run: dict) -> str:
     # 最大舵角(max_steer)はもう学習ごとに変わらない（常にvehicle.toml由来）ので表示しない
     extra = f"speed={cfg.get('max_speed')}" if cfg else "run_config無し"
     return f"[{mark}] {run['name']}  ({extra})"
-
-
-def read_note(run_dir: Path) -> str:
-    """`<run_dir>/note.txt`の中身。無ければ空文字（バンビが自由に書く備考欄。
-    `run_config.json`とは別ファイル——ハイパラの自動記録と人間の自由記述を混ぜない）。"""
-    try:
-        return (run_dir / "note.txt").read_text(encoding="utf-8")
-    except OSError:
-        return ""
-
-
-def write_note(run_dir: Path, text: str) -> None:
-    (run_dir / "note.txt").write_text(text, encoding="utf-8")
 
 
 # ── コマンド組み立て ──
@@ -231,14 +212,10 @@ class App:
         root.geometry("640x640")
 
         self.python = sys.executable
-        #: job_key -> Popen（起動処理中は None）。`ml_cam/app.py`は1個の`self.proc`
-        #: だけだったが、ここは学習・TensorBoard・観戦・エクスポートが同時に
-        #: 動きうるので辞書で複数追跡する
-        self._active: dict[str, subprocess.Popen | None] = {}
-        self._job_labels: dict[str, str] = {}
-        self._on_done_cbs: dict[str, Callable[[int], None]] = {}
+        #: 学習・TensorBoard・観戦・エクスポートが同時に動きうるので
+        #: `allow_concurrent=True`。ログ各行には`[ジョブ名]`を前置する
+        self.jobs = JobRunner(REPO_ROOT, allow_concurrent=True, prefix_labels=True)
         self._jobs_listbox_keys: list[str] = []
-        self.log_queue: "queue.Queue[tuple]" = queue.Queue()
         self._runs: list[dict] = []
 
         self._build_widgets()
@@ -262,7 +239,8 @@ class App:
 
         log_frame = ttk.LabelFrame(self.root, text="ログ")
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.log_widget = ScrolledText(log_frame, height=12, state="disabled")
+        self.log_console = LogConsole(log_frame, height=12)
+        self.log_widget = self.log_console.widget
         self.log_widget.pack(fill="both", expand=True, padx=4, pady=4)
 
         self.status_label = ttk.Label(self.root, text="待機中")
@@ -276,9 +254,6 @@ class App:
         ttk.Label(frame, text="run名（学習出力先・モデル名を兼ねる）:").grid(
             row=0, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.name_var, width=20).grid(row=0, column=1, sticky="w")
-        ttk.Label(frame, text=f"{rel(RUNS_DIR)}/<run名> に出力。②のエクスポートでは\n"
-                             "同じ名前をモデル名の初期値として提案する（変更可）",
-                 foreground="gray").grid(row=1, column=0, columnspan=2, sticky="w")
 
         self.timesteps_var = tk.StringVar(value="2000000")
         ttk.Label(frame, text="timesteps:").grid(row=2, column=0, sticky="w", pady=(8, 0))
@@ -317,10 +292,6 @@ class App:
         ttk.Checkbutton(frame, text="報酬正規化(VecNormalize)を使う",
                         variable=self.reward_norm_var).grid(
             row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="★v10で「舵が発散し壁に衝突」した診断中のため、両方とも既定で\n"
-                             "v9相当（カリキュラム無効・報酬正規化オフ）にしてあります。原因が\n"
-                             "確定したら既定を戻します（PROGRESS.md「2026-09-02（続き）」節参照）。",
-                 foreground="gray").grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # ★v13（reward_norm/curriculumともOFF）でも生の方策出力の振動が残っていた
         # （2026-09-03、バンビの実指摘を受けた再診断）。PPOの探索ノイズ生成方式を
@@ -334,14 +305,6 @@ class App:
             row=10, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.sde_sample_freq_var, width=12).grid(
             row=10, column=1, sticky="w")
-        ttk.Label(frame, text="毎ステップi.i.d.のガウスノイズだと方策出力がbang-bang的に\n"
-                             "振動しやすい。gSDEは状態依存の相関ノイズをこの間隔[step]でしか\n"
-                             "再サンプルしないため滑らかになりうる（PROGRESS.md\n"
-                             "「2026-09-02（さらに続き）」節の追記参照）。\n"
-                             "★v14で検証したところ収束が大幅に遅れ頭打ちしたため、\n"
-                             "既定はOFFのままにしてあります（「v14を停止しv15方針を\n"
-                             "決定」節参照）。",
-                 foreground="gray").grid(row=11, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # ★v13で生アクションの振動（bang-bang）が残っていたことを受け、
         # 罰則の重みを直接引き上げて試すためのフラグ（2026-09-03追加）
@@ -350,10 +313,6 @@ class App:
             row=12, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.steer_rate_weight_var, width=12).grid(
             row=12, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="既定0.2は未検証値のまま据え置かれていた。v15では\n"
-                             "1.0程度に引き上げ、生の方策出力の振動を報酬側から\n"
-                             "直接抑えられるか試す。",
-                 foreground="gray").grid(row=13, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         # ★2026-09-04診断: curriculum_frac/steer_rate_weight/use_sdeをどう振っても
         # v13/v15/v16全てで学習開始直後のtrain/std≈1.0・ep_len_mean16〜20ステップが
@@ -364,21 +323,9 @@ class App:
             row=14, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.log_std_init_var, width=12).grid(
             row=14, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="既定0.0（std≈1.0）はSB3既定のまま。行動レンジ[-1,1]の半分もの\n"
-                             "大きさで、学習開始直後は方策がほぼ毎ステップ±1.0付近を往復する\n"
-                             "bang-bang的な挙動になる。-1.0（std≈0.37）等に下げて初期探索\n"
-                             "ノイズ自体を減らせるか試す（PROGRESS.md「2026-09-04」節参照）。",
-                 foreground="gray").grid(row=15, column=0, columnspan=2, sticky="w", pady=(4, 0))
-
-        ttk.Label(frame, text=f"max_steer（最大舵角）は{rel(REPO_ROOT / 'config' / 'vehicle.toml')}"
-                             "の車両限界を常に使うため、\nここでは設定しません。",
-                 foreground="gray").grid(row=16, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Button(frame, text="学習開始（数時間かかります）", command=self._start_train).grid(
             row=17, column=0, columnspan=2, sticky="w", pady=12)
-        ttk.Label(frame, text="学習中もタブ②からTensorBoard・観戦・（別runの）\n"
-                             "エクスポートを並行して動かせます。",
-                 foreground="gray").grid(row=18, column=0, columnspan=2, sticky="w")
 
     def _build_runs_tab(self, nb: ttk.Notebook) -> None:
         frame = ttk.Frame(nb, padding=10)
@@ -516,8 +463,7 @@ class App:
         if not name:
             return
         out_path = MODELS_DIR / f"{name}.onnx"
-        if out_path.exists() and not messagebox.askyesno(
-                "上書き確認", f"{rel(out_path)} は既にあります。上書きしますか？"):
+        if not confirm_overwrite(out_path, rel):
             return
         cmd = build_export_cmd(self.python, run["name"], name)
         self._start_job("export", cmd, f"エクスポート({name})")
@@ -583,62 +529,36 @@ class App:
             self._refresh_runs()
             self.name_var.set(next_run_name(list_run_names(RUNS_DIR)))
 
-    # ── サブプロセス実行・ログ配線（複数ジョブ対応） ──
+    # ── サブプロセス実行・ログ配線（複数ジョブ対応。実体は`ml_common.job_runner.JobRunner`） ──
 
     def _append_log(self, text: str) -> None:
-        self.log_widget.config(state="normal")
-        self.log_widget.insert("end", text)
-        self.log_widget.see("end")
-        self.log_widget.config(state="disabled")
+        self.log_console.append(text)
 
     def _start_job(self, job_key: str, cmd: list[str], label: str, *,
                    on_done: Callable[[int], None] | None = None) -> None:
-        if job_key in self._active:
+        ok = self.jobs.start(job_key, cmd, label, on_done=on_done)
+        if not ok:
             messagebox.showinfo("実行中", f"{label} は既に実行中です（先に停止してください）")
             return
-        self._active[job_key] = None                  # 起動処理中プレースホルダ
-        self._job_labels[job_key] = label
-        if on_done is not None:
-            self._on_done_cbs[job_key] = on_done
         self._append_log(f"\n$ {' '.join(cmd)}\n")
         self._refresh_jobs_listbox()
-
-        def worker() -> None:
-            code = -1
-            try:
-                proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True, bufsize=1)
-                self._active[job_key] = proc
-                for line in proc.stdout:                # type: ignore[union-attr]
-                    self.log_queue.put(("log", f"[{label}] {line}"))
-                code = proc.wait()
-            except Exception as e:                       # noqa: BLE001 — GUIなので握って表示する
-                self.log_queue.put(("log", f"[{label}] 実行に失敗しました: {e}\n"))
-            finally:
-                self.log_queue.put(("done", job_key, code))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _stop_selected_job(self) -> None:
         sel = self.jobs_listbox.curselection()
         if not sel or sel[0] >= len(self._jobs_listbox_keys):
             return
         job_key = self._jobs_listbox_keys[sel[0]]
-        label = self._job_labels.get(job_key, job_key)
-        # ★学習だけワンクリックで数時間ぶんの進捗を失いかねないので確認を挟む
-        # （TensorBoard・観戦・エクスポートはすぐ止めても実害が小さいので確認しない）
-        if job_key == "train" and not messagebox.askyesno(
+        label = self.jobs.label_of(job_key) or job_key
+        if job_key in _CONFIRM_STOP_JOB_KEYS and not messagebox.askyesno(
                 "学習を停止しますか？",
                 f"{label} を停止します。\n\n"
                 "直近の評価（--eval-freq分）より後の進捗は失われます。あとで①タブから"
                 "同じrun名を選べば「続きから再開」できますが、完全に同じ結果には"
                 "なりません。\n\n本当に停止しますか？"):
             return
-        proc = self._active.get(job_key)
-        if proc is None:
+        if not self.jobs.stop(job_key):
             messagebox.showinfo("起動中", "まだ起動処理中です。少し待ってから止めてください")
             return
-        proc.terminate()
         self._append_log(f"\n[{label}] 停止を指示しました\n")
 
     def _on_close(self) -> None:
@@ -646,47 +566,30 @@ class App:
 
         以前はここに何も無く、✕ボタンで`mainloop()`を抜けるだけだったため、
         `subprocess.Popen`で起動した学習・観戦・TensorBoardが孤児プロセス
-        （PPID=1）として残り続けていた（2026-08-29、バンビの指摘で判明）。
+        （PPID=1）として残り続けていた（2026-08-29、バンビの指摘で判明。
+        `ml_common.close_handler.confirm_and_close`に一般化し、`ml_cam`/
+        `ml_cam_e2e`にも同じ修正を適用した）。
         """
-        active = [(k, p) for k, p in self._active.items() if p is not None and p.poll() is None]
-        if any(k == "train" for k, _ in active):
-            label = self._job_labels.get("train", "学習")
-            if not messagebox.askyesno(
-                    "学習を停止して終了しますか？",
-                    f"{label} が実行中です。ウィンドウを閉じるとこのプロセスも終了します。\n\n"
-                    "直近の評価（--eval-freq分）より後の進捗は失われます。あとで①タブから"
-                    "同じrun名を選べば「続きから再開」できますが、完全に同じ結果には"
-                    "なりません。\n\n本当に終了しますか？"):
-                return
-        for _, p in active:
-            p.terminate()
-        self.root.destroy()
+        confirm_and_close(
+            self.root, self.jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS,
+            confirm_message=lambda label: (
+                f"{label} が実行中です。ウィンドウを閉じるとこのプロセスも終了します。\n\n"
+                "直近の評価（--eval-freq分）より後の進捗は失われます。あとで①タブから"
+                "同じrun名を選べば「続きから再開」できますが、完全に同じ結果には"
+                "なりません。\n\n本当に終了しますか？"))
 
     def _refresh_jobs_listbox(self) -> None:
         self.jobs_listbox.delete(0, "end")
-        self._jobs_listbox_keys = list(self._job_labels.keys())
-        for key in self._jobs_listbox_keys:
-            self.jobs_listbox.insert("end", self._job_labels[key])
-        self.status_label.config(
-            text=(", ".join(self._job_labels.values()) + " 実行中") if self._job_labels else "待機中")
+        active = self.jobs.active_jobs()
+        self._jobs_listbox_keys = [k for k, _ in active]
+        for _, label in active:
+            self.jobs_listbox.insert("end", label)
+        labels = [label for _, label in active]
+        self.status_label.config(text=(", ".join(labels) + " 実行中") if labels else "待機中")
 
     def _drain_log(self) -> None:
-        try:
-            while True:
-                item = self.log_queue.get_nowait()
-                if item[0] == "log":
-                    self._append_log(item[1])
-                elif item[0] == "done":
-                    _, job_key, code = item
-                    label = self._job_labels.pop(job_key, job_key)
-                    self._active.pop(job_key, None)
-                    self._append_log(f"\n[{label}] {'完了' if code == 0 else f'終了コード {code}'}\n")
-                    cb = self._on_done_cbs.pop(job_key, None)
-                    self._refresh_jobs_listbox()
-                    if cb is not None:
-                        cb(code)
-        except queue.Empty:
-            pass
+        self.jobs.drain(self._append_log)
+        self._refresh_jobs_listbox()
         self.root.after(100, self._drain_log)
 
 
