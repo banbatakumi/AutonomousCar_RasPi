@@ -132,6 +132,9 @@ def smooth_loop(xy: np.ndarray, window: int) -> np.ndarray:
 
     曲率は2階差分なので、5cm の位置ノイズが 20cm 間隔の点に乗ると曲率が
     桁で暴れる。最適化に渡す前にここで均しておく。
+
+    `xy` は `(N, 2)` に限らず `(N, k)` 全般に使える（`build()` が横シフト量
+    `(N, 1)` を均すのにも流用する）。
     """
     if window <= 1 or len(xy) < window:
         return xy
@@ -139,7 +142,7 @@ def smooth_loop(xy: np.ndarray, window: int) -> np.ndarray:
     n = len(xy)
     pad = window
     out = np.empty_like(xy)
-    for j in range(2):
+    for j in range(xy.shape[1]):
         wrapped = np.concatenate([xy[-pad:, j], xy[:, j], xy[:pad, j]])
         out[:, j] = np.convolve(wrapped, k, mode="same")[pad:pad + n]
     return out
@@ -240,8 +243,16 @@ def build(grid: OccGrid, traj: np.ndarray, *, step: float = 0.10,
     for _ in range(max(0, iters - 1)):
         # 左右の壁の真ん中へ寄せてから測り直す（法線の傾きも直る）。1回に動かす
         # 量は `_MAX_SHIFT_M` で頭打ちにする（急カーブでの暴れ対策。上の docstring
-        # 「ヘアピン・シケインでは穴が無くても暴れる」参照）
+        # 「ヘアピン・シケインでは穴が無くても暴れる」参照）。
+        #
+        # ★ shift量そのものも隣接点で均す。`_MAX_SHIFT_M`は1点の移動量の上限で
+        # しかないので、隣り合う点が上限いっぱいまで逆向きに動くと、上限内でも
+        # 局所的な小さいループ（点線がその場でよじれる）ができてしまう
+        # （直角に近い鋭角コーナーで実測: 90度ターンが連続する壁モードコースで
+        # 中心線に自己交差ループが生じた、2026-09-05）。位置と同じ`smooth`窓で
+        # 均せば、隣接点が足並みを揃えて動くようになりループが解消する
         shift = np.clip((left - right) / 2.0, -_MAX_SHIFT_M, _MAX_SHIFT_M)
+        shift = smooth_loop(shift[:, None], smooth)[:, 0]
         xy = xy + nrm * shift[:, None]
         xy = smooth_loop(resample_loop(xy, step), smooth)
         nrm = normals(xy)
