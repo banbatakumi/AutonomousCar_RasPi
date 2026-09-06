@@ -106,15 +106,19 @@ class TestVehicleGripLimit(unittest.TestCase):
 
     def test_braking_mid_corner_at_measured_mu_can_zero_out_lateral_grip(self):
         """`test_braking_mid_corner_reduces_available_lateral_accel`と同じ現象を
-        実測`mu`（`config/vehicle.toml`。約0.454）で確認する。実測`mu*g`（≈4.46m/s²）
-        は`MAX_BRAKE_TORQUE_NM`から逆算される後輪の制動減速度（≈5.0m/s²）を下回るため、
-        `mu=0.8`の合成値のテストでは緩やかに減るだけだった横方向グリップが、
-        実測値では定常円旋回中の急制動でほぼゼロまで削られる——摩擦円のRWD連成が
-        実際どの程度効くかは、`mu`だけでなく未実測の制動側の定数にも左右される
-        ことを示す回帰テスト（`docs/`のシステム同定に加減速試験を追加する動機）。"""
+        実測`mu`（`config/vehicle.toml`。約0.454）で確認する。制動減速度は
+        `brake_decel_m_s2`が実測済み（`sysid_accel`、`config/vehicle.toml`参照）なら
+        そちらを`MAX_BRAKE_TORQUE_NM`からの逆算より優先する（`sim/vehicle.py`
+        `_next_speed()`参照）ため、期待値もそれに合わせて計算する——摩擦円の
+        RWD連成が実際どの程度効くかは、`mu`だけでなく制動側の実測定数にも
+        左右されることを示す回帰テスト（`docs/`のシステム同定に加減速試験を
+        追加する動機）。"""
         spec = VehicleSpec.load()
         a_lat_max = spec.mu * GRAVITY_MPS2
-        decel = VehicleModel.MAX_BRAKE_TORQUE_NM * spec.drive_ratio / (spec.wheel_radius * spec.mass)
+        if spec.brake_decel_m_s2 > 1e-6:
+            decel = spec.brake_decel_m_s2
+        else:
+            decel = VehicleModel.MAX_BRAKE_TORQUE_NM * spec.drive_ratio / (spec.wheel_radius * spec.mass)
 
         v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
         v.apply(DriveInput(armed=True, brake=True, target_steer=spec.max_steer))
