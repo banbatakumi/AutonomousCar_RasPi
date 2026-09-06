@@ -21,13 +21,14 @@ from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamModelCtrl, ImageRef  # noqa: E402
+from raspi.msgs import AutoCtrl, CamModelCtrl, ImageRef, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_MODEL,
     TOPIC_CAM_PATH,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN_CAM,
+    TOPIC_VEHICLE_STATE,
 )
 from raspi.nodes.cam_perception_node import (  # noqa: E402
     CamPerceptionNode,
@@ -359,6 +360,50 @@ class TestModeGating(unittest.TestCase):
             self.assertTrue(paths, "path/cam が一度も publish されていない")
             self.assertTrue(any(p.seen for p in paths),
                             "cam_centerline が選ばれたのに path/cam の推論結果が出ていない")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_disarmed_stays_idle_even_when_cam_mode_selected(self):
+        """カメラ系モードが選ばれていても DISARM 中は推論を回さない（省電力バグ修正）。
+
+        GUI再読み込みで前回選択モードがそのまま復元されるため、armed/engaged を
+        見ずにモード選択だけで推論を駆動すると、駐車中の待機でも CNN 推論が
+        回り続けてしまっていた。
+        """
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_cam_gating_disarm")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam"),
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
+            self.assertTrue(scans and paths)
+            self.assertEqual(scans[-1].sector_seen, [False] * 12,
+                             "DISARM中なのに推論結果が出ている")
+            self.assertFalse(paths[-1].seen, "DISARM中なのにpath/camが出ている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_armed_with_cam_mode_selected_still_activates_inference(self):
+        """ARM中はモード選択だけで推論が回る（回帰防止・既存の利便性を維持）。"""
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_cam_gating_armed")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam"),
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
+            self.assertTrue(any(p.seen for p in paths),
+                            "ARM中にftg_camが選ばれたのに推論結果が出ていない")
         finally:
             node.close()
             ring.unlink()

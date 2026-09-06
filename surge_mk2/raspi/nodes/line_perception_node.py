@@ -45,9 +45,11 @@
 プロセスとしては常時起動（`surge-line-perception`）だが、`white_mask()` は
 フレームが来るたびに毎回回るので上げっぱなしだと CPU・電力を無駄に消費する。
 `cam_perception_node.py`（`auto/ctrl` の `mode` がカメラ系モードの間だけ推論する）
-と同じ考え方で、`mode == "line_trace"` の間だけ実際にフレームを読んで判定する。
-非アクティブの間は `failed_frame()`（見失った扱い）を出すだけで、共有メモリの
-読み取りすらしない。
+と同じ考え方で、`mode == "line_trace"` で、**かつ DISARM中（駐車中）でない**間だけ
+実際にフレームを読んで判定する（`raspi/core/auto_gate.cam_infer_active()` に集約、
+`cam_perception_node.py`・`cam_e2e_node.py` と共通）。DISARM中はモードが選ばれて
+いるだけでは判定しない（2026-09-04、省電力バグとして修正）。非アクティブの間は
+`failed_frame()`（見失った扱い）を出すだけで、共有メモリの読み取りすらしない。
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
+from raspi.core.auto_gate import cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import ImageRef, LineScan, VehicleState  # noqa: E402
@@ -258,20 +261,25 @@ class LinePerceptionNode:
                 pass  # `latest` を見るだけなので中身の処理は不要
 
             auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
-            active = auto_ctrl is not None and auto_ctrl.mode == _LINE_MODE
+            vs = sub.latest.get(TOPIC_VEHICLE_STATE)
+            active = cam_infer_active(auto_ctrl, vs, (_LINE_MODE,))
             if active != self._active:
                 self._active = active
                 mode = auto_ctrl.mode if auto_ctrl is not None else "?"
-                print(f"# {mode} {'選択: 認識開始' if active else '非選択: 認識停止'}",
-                     flush=True)
+                if active:
+                    reason = "選択: 認識開始"
+                elif auto_ctrl is None or auto_ctrl.mode != _LINE_MODE:
+                    reason = "非選択: 認識停止"
+                else:
+                    reason = "DISARM: 認識停止"
+                print(f"# {mode} {reason}", flush=True)
 
             if not active:
-                # `line_trace` が選ばれていない間は共有メモリすら読まない
+                # `line_trace` が選ばれていない、またはDISARM中は共有メモリすら読まない
                 # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
                 st = self.failed_frame(seq=seq)
             else:
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-                vs = sub.latest.get(TOPIC_VEHICLE_STATE)
                 if ref is None:
                     st = self.failed_frame(seq=seq)
                 else:

@@ -33,6 +33,21 @@ NanoTrack v2 ONNXエクスポートと同じもの。SHA1で検証済み）。**
 
 `run()`（実バス配線）とテスト（`raspi/tests/test_cam_track_node.py`）の
 両方がここを通る（`cam_perception_node.py`と同じ構成）。
+
+## ROI未選択（IDLE）の間、またはDISARM中はフレームを読まない
+
+`run()`は「ARM中」かつ「追跡中（`_state != "IDLE"`）か新規選択が来た周期
+（`roi.select_seq`が進んだ）」の間だけ`TOPIC_IMAGE_FRONT`の共有メモリを読む。
+**以前はIDLE中も毎周期無条件で読んでいた**——`cam_perception_node.py`の
+「モードが選ばれていない間は共有メモリすら読まない」節電と食い違っていた
+バグで、実車確認でIDLE中でもCPU 33%程度を消費していた（2026-09-04）。
+
+**armedを見る理由**: ROI選択（`track/roi`）はtelemetry_nodeがプロセス
+再起動まで覚えていて、GUI再読み込みでも復元・再送され続ける
+（`_track_roi_pump()`）。armedを見ないと、一度でも追跡対象を選択すると
+駐車中（DISARM）もNanoTrackが回り続ける——`cam_perception_node.py`等の
+主モードゲートと全く同じ形の省電力バグだったため、同じ設計
+（`raspi/core/auto_gate.vehicle_armed()`）で揃えた。
 """
 
 from __future__ import annotations
@@ -49,16 +64,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
+from raspi.core.auto_gate import vehicle_armed  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs import ImageRef, Scan, TargetRoiCtrl, TargetTrack  # noqa: E402
+from raspi.msgs import ImageRef, Scan, TargetRoiCtrl, TargetTrack, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN,
     TOPIC_TRACK_ROI,
     TOPIC_TRACK_TARGET,
+    TOPIC_VEHICLE_STATE,
 )
 from raspi.nav.ipm import camera_intrinsics  # noqa: E402
 
@@ -465,13 +482,27 @@ class CamTrackNode:
 
                 roi = sub.latest.get(TOPIC_TRACK_ROI)
                 scan = sub.latest.get(TOPIC_SCAN)
-                ref: ImageRef | None = sub.latest.get(TOPIC_IMAGE_FRONT)
+                vs: VehicleState | None = sub.latest.get(TOPIC_VEHICLE_STATE)
                 frame = None
                 t_capture = 0
-                if ref is not None:
-                    got = reader.read(ref)
-                    if got is not None:
-                        frame, t_capture = got
+                #: `process_cycle()` が実際に `frame` を使うのは、追跡中
+                #: （`_tracker.update()`）か新規選択が来た周期（`_try_select()`）だけ
+                #: （201-207行目・388-391行目参照）。IDLE中で新規選択も無い間は
+                #: `TOPIC_IMAGE_FRONT` の共有メモリすら読まない——`cam_perception_node.py`
+                #: と同じ「使わないものは読まない」節電（実車確認、待機時CPU 33%→数%）。
+                #: **DISARM中は選択済み/追跡中でも読まない**——ROI選択は
+                #: telemetry_node が再起動まで覚えている（`_track_roi_pump()`）ので、
+                #: armed を見ないと駐車中もNanoTrackが回り続ける
+                #: （`cam_perception_node.py`等と同じ省電力バグ、2026-09-04）
+                need_frame = vehicle_armed(vs) and (
+                    self._state != "IDLE"
+                    or (roi is not None and roi.select_seq > self._last_select_seq))
+                if need_frame:
+                    ref: ImageRef | None = sub.latest.get(TOPIC_IMAGE_FRONT)
+                    if ref is not None:
+                        got = reader.read(ref)
+                        if got is not None:
+                            frame, t_capture = got
 
                 now = time.monotonic_ns()
                 st = self.process_cycle(frame, roi=roi, scan=scan, now_ns=now)
@@ -502,7 +533,8 @@ def main() -> int:
 
     node = CamTrackNode(models_dir=args.models_dir)
     pub = Publisher("cam_track")
-    sub = Subscriber({TOPIC_TRACK_ROI: LATEST, TOPIC_SCAN: LATEST, TOPIC_IMAGE_FRONT: LATEST})
+    sub = Subscriber({TOPIC_TRACK_ROI: LATEST, TOPIC_SCAN: LATEST, TOPIC_IMAGE_FRONT: LATEST,
+                     TOPIC_VEHICLE_STATE: LATEST})
 
     print(f"# cam_track_node  publish {pub.endpoint}  track/target へ配信")
     if node._factory.available:

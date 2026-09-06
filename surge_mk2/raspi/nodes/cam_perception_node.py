@@ -25,7 +25,9 @@ telemetry_node が `cam/model`（`CamModelCtrl`）で繰り返し流してくる
 モデル名は `--models-dir`（既定 `models/`）配下の `<name>.onnx` に解決される
 （前処理設定は同名の `<name>.json`。`ml_cam/export_onnx.py` が書く）。
 `ftg_cam` を engage する前に、走行開始ボタンを押さずにモデルだけ選び直せる
-——プロセスの再起動もSSHも要らない（`reload_if_changed()`）。
+——プロセスの再起動もSSHも要らない（`reload_if_changed()`）。**ただしこれは
+ARM中（駐車中でない間）限定**——下記「カメラ系モードが選ばれている間だけ推論する」
+参照。
 
 ## 契約1: `dist` を厳密に 0.0 にしない
 
@@ -47,12 +49,17 @@ LiDAR の「欠測は空きではない」（`follow_the_gap.py` の docstring�
 電力を無駄に消費する。`cam_track_node.py`（`track/roi` の選択が無い間は
 NanoTrack を回さない）と同じ考え方で、`auto/ctrl`（`AutoCtrl.mode`。
 telemetry_node が GUI の選択を繰り返し流すトピック）を見て
-`mode` が `_CAM_MODES`（`ftg_cam`・`cam_centerline`）のいずれかの間だけ
-実際にフレームを読んで推論する。**どちらのモードでも同じ推論結果
-（`drivable` マスク）を使い回すだけ**なので、片方だけ選ばれていてももう片方の
-出力も一緒に計算して構わない（`scan/cam`／`path/cam` を毎回両方 publish する）。
-非アクティブの間は `failed_frame()`（契約2の「壁」扱い）／`seen=False` の
-`CamPath` を出すだけで、共有メモリの読み取りすらしない。
+`mode` が `_CAM_MODES`（`ftg_cam`・`cam_centerline`）のいずれかで、**かつ
+DISARM中（駐車中）でない**間だけ実際にフレームを読んで推論する
+（`raspi/core/auto_gate.cam_infer_active()` に集約、`cam_e2e_node.py`・
+`line_perception_node.py` と共通）。DISARM中はモードが選ばれているだけでは
+推論しない——GUI再読み込みで前回選択モードがそのまま復元されるため、
+armed/engaged を見ずにモード選択だけで駆動すると駐車中の待機でも推論が
+回り続けてしまう（2026-09-04、省電力バグとして修正）。**どちらのモードでも
+同じ推論結果（`drivable` マスク）を使い回すだけ**なので、片方だけ選ばれていても
+もう片方の出力も一緒に計算して構わない（`scan/cam`／`path/cam` を毎回両方
+publish する）。非アクティブの間は `failed_frame()`（契約2の「壁」扱い）／
+`seen=False` の `CamPath` を出すだけで、共有メモリの読み取りすらしない。
 **`reload_if_changed()` はモード非依存で常に呼ぶ**——カメラ系モードに
 切り替えた瞬間から推論を始められるよう、モデルだけは先にロードしておいてよい
 （ONNXセッション生成はモデル切替時の一過性コスト）。
@@ -72,6 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
+from raspi.core.auto_gate import cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -414,15 +422,20 @@ class CamPerceptionNode:
                 self.reload_if_changed(model_ctrl.name)
 
             auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
-            active = auto_ctrl is not None and auto_ctrl.mode in _CAM_MODES
+            vs = sub.latest.get(TOPIC_VEHICLE_STATE)
+            active = cam_infer_active(auto_ctrl, vs, _CAM_MODES)
             if active != self._active:
                 self._active = active
                 mode = auto_ctrl.mode if auto_ctrl is not None else "?"
-                print(f"# {mode} {'選択: 推論開始' if active else '非選択: 推論停止'}",
-                     flush=True)
+                if active:
+                    reason = "選択: 推論開始"
+                elif auto_ctrl is None or auto_ctrl.mode not in _CAM_MODES:
+                    reason = "非選択: 推論停止"
+                else:
+                    reason = "DISARM: 推論停止"
+                print(f"# {mode} {reason}", flush=True)
 
             ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-            vs = sub.latest.get(TOPIC_VEHICLE_STATE)
             now = time.monotonic_ns()
             #: `Publisher.send()` は呼ぶたびに独自の seq を打ち直す（`bus/zbus.py`
             #: `Publisher._send()`）ので、中身が同じでも publish すれば

@@ -22,13 +22,14 @@ from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, Scan  # noqa: E402
+from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, Scan, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_E2E_MODEL,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN,
+    TOPIC_VEHICLE_STATE,
 )
 from raspi.nodes.cam_e2e_node import CamE2ENode, RegressionModel  # noqa: E402
 
@@ -223,6 +224,44 @@ class TestModeGating(unittest.TestCase):
             self.assertTrue(cmds)
             self.assertTrue(any(c.ready for c in cmds),
                             "cam_e2eが選ばれたのに推論結果が出ていない")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_disarmed_stays_idle_even_when_cam_e2e_mode_selected(self):
+        """cam_e2eが選ばれていてもDISARM中は推論を回さない（省電力バグ修正）。"""
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = _ref_with_frame("surge_test_ce2e_disarm")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+            self.assertTrue(cmds)
+            self.assertFalse(cmds[-1].ready, "DISARM中なのに推論結果が出ている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_armed_with_cam_e2e_mode_selected_still_activates_inference(self):
+        """ARM中はモード選択だけで推論が回る（回帰防止）。"""
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = _ref_with_frame("surge_test_ce2e_armed")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+            self.assertTrue(any(c.ready for c in cmds),
+                            "ARM中にcam_e2eが選ばれたのに推論結果が出ていない")
         finally:
             node.close()
             ring.unlink()

@@ -16,8 +16,13 @@ import numpy as np  # noqa: E402
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, ImageRef  # noqa: E402
-from raspi.msgs.types import TOPIC_AUTO_CTRL, TOPIC_IMAGE_FRONT, TOPIC_LINE_CAM  # noqa: E402
+from raspi.msgs import AutoCtrl, ImageRef, VehicleState  # noqa: E402
+from raspi.msgs.types import (  # noqa: E402
+    TOPIC_AUTO_CTRL,
+    TOPIC_IMAGE_FRONT,
+    TOPIC_LINE_CAM,
+    TOPIC_VEHICLE_STATE,
+)
 from raspi.nodes.line_perception_node import (  # noqa: E402
     LinePerceptionNode,
     white_mask,
@@ -203,6 +208,40 @@ class TestModeGating(unittest.TestCase):
             self.assertTrue(lines)
             self.assertTrue(any(st.seen for st in lines),
                             "line_trace が選ばれたのに認識結果が出ていない")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_disarmed_stays_idle_even_when_line_trace_selected(self):
+        """`line_trace`が選ばれていてもDISARM中は認識を回さない（省電力バグ修正）。"""
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_line_gating_disarm")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace"),
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
+            self.assertTrue(lines)
+            self.assertFalse(lines[-1].seen, "DISARM中なのに認識結果が出ている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_armed_with_line_trace_selected_still_activates_recognition(self):
+        """ARM中はモード選択だけで認識が回る（回帰防止）。"""
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_line_gating_armed")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace"),
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)
+
+            lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
+            self.assertTrue(any(st.seen for st in lines),
+                            "ARM中にline_traceが選ばれたのに認識結果が出ていない")
         finally:
             node.close()
             ring.unlink()

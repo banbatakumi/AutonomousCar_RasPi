@@ -11,13 +11,22 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
+from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs.types import Scan, TargetRoiCtrl  # noqa: E402
+from raspi.msgs import ImageRef, VehicleState  # noqa: E402
+from raspi.msgs.types import (  # noqa: E402
+    TOPIC_IMAGE_FRONT,
+    TOPIC_TRACK_ROI,
+    TOPIC_VEHICLE_STATE,
+    Scan,
+    TargetRoiCtrl,
+)
 from raspi.nodes.cam_track_node import CamTrackNode  # noqa: E402
 
 
@@ -293,6 +302,127 @@ class TestLidarFusion(unittest.TestCase):
         for _ in range(5):
             got = _step(3.0)
         self.assertAlmostEqual(got, 3.0, places=6)
+
+
+class _FakeSub:
+    """`Subscriber`の身代わり。`latest`を読むだけ・`poll`は何も待たない。"""
+
+    def __init__(self, latest=None):
+        self.latest = latest or {}
+
+    def poll(self, timeout_ms):
+        return []
+
+
+class _FakePub:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, topic, msg):
+        self.sent.append((topic, msg))
+
+
+class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
+    """`run()`は省電力のため、IDLE中で新規選択も無い間は`TOPIC_IMAGE_FRONT`の
+    共有メモリを読まない（実車確認でIDLE中もCPU 33%消費していたバグの回帰防止）。
+    """
+
+    _REF = ImageRef(shm_name="does-not-matter", slot=0, ring_seq=0, frame_id=0,
+                    width=1, height=1, fmt="RGB888", stride=1, nbytes=1, cam="front")
+
+    def test_no_roi_at_all_never_reads_frame(self):
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF})
+        pub = _FakePub()
+        with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+        mock_read.assert_not_called()
+
+    def test_roi_without_new_select_seq_never_reads_frame(self):
+        """ROIメッセージ自体は流れてきていても、`select_seq`が既に処理済み
+        （進んでいない）間は読まない。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
+        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
+        pub = _FakePub()
+        with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+        mock_read.assert_not_called()
+
+    def test_new_select_seq_still_reads_frame(self):
+        """新規選択（`select_seq`が進む）が来た周期は読む（回帰防止）。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        ring = FrameRing.create("surge_test_track_gating", 32, 24, "RGB888", n_slots=2)
+        try:
+            data = np.zeros((24, 32, 3), dtype=np.uint8)
+            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                           frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                           fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+            roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+            self.assertTrue(any(st.tracking for _, st in pub.sent),
+                            "新規選択が来たのに追跡が始まっていない")
+        finally:
+            ring.unlink()
+
+
+class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
+    """省電力: DISARM中はROI選択済み/追跡中でもフレームを読まない。
+
+    ROI選択（`track/roi`）はtelemetry_nodeが再起動まで覚えていて再送し続ける
+    ので、armedを見ないと駐車中もNanoTrackが回り続ける
+    （主モードゲートと同じ形のバグの回帰防止、2026-09-04）。
+    """
+
+    _REF = ImageRef(shm_name="does-not-matter", slot=0, ring_seq=0, frame_id=0,
+                    width=1, height=1, fmt="RGB888", stride=1, nbytes=1, cam="front")
+
+    def test_disarmed_never_reads_frame_while_already_tracking(self):
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node._state = "TRACKING"                # 既に追跡中だったと仮定
+        roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
+        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
+                        TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
+        pub = _FakePub()
+        with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+        mock_read.assert_not_called()
+
+    def test_disarmed_ignores_new_select_seq(self):
+        """DISARM中に新規選択（`select_seq`が進む）が来ても読まない。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
+        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
+                        TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
+        pub = _FakePub()
+        with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+        mock_read.assert_not_called()
+
+    def test_armed_resumes_reading_after_disarm(self):
+        """回帰防止: armed=Trueなら追跡中の状態から普通に読み直す。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node._state = "TRACKING"
+        ring = FrameRing.create("surge_test_track_armed_resume", 32, 24, "RGB888", n_slots=2)
+        try:
+            data = np.zeros((24, 32, 3), dtype=np.uint8)
+            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                           frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                           fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+            roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi,
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            with patch("raspi.nodes.cam_track_node.FrameReader.read",
+                       return_value=None) as mock_read:
+                node.run(sub=sub, pub=pub, duration_s=0.05)
+            mock_read.assert_called()
+        finally:
+            ring.unlink()
 
 
 if __name__ == "__main__":
