@@ -274,11 +274,11 @@ class Viewer:
         if self._editor is not None and self._editor.poll() is None:
             self._flash("コースエディタは既に開いています")
             return
+        # **常に新規コースの状態で開く。** 以前は今のコースを開いた状態で始めて
+        # いたが、「新しいコースを作りたいのに毎回そのコースが開いてしまう」の
+        # 指摘を受けて廃止した——既存コースを直したいときは、エディタ内の
+        # 「既存を開く」（O キー）から選べばよい
         args = [sys.executable, "-m", "sim.editor"]
-        # 今のコースがセンターライン方式なら、それを開いた状態で始める
-        cur = (self.truth or {}).get("course_path", "")
-        if cur.endswith(".json"):
-            args.append(cur)
         try:
             self._editor = subprocess.Popen(args, cwd=ROOT, start_new_session=True)
             self._flash("コースエディタを開きました（保存したら N で読み直し）")

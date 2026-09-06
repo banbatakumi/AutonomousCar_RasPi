@@ -11,7 +11,9 @@
     }
 
 `["arc", 半径[m], 角度[deg]]` の角度は**反時計回りが正**（`architecture.md` §5.1 の規約。
-左旋回が正）。`["straight", 長さ[m]]`。
+左旋回が正）。`["straight", 長さ[m]]`。`["turn", 角度[deg]]` は点を打たずその場で
+向きだけ変える（`sim/sketch.py` が頂点ベースの折れ線を変換するときの、直線同士が
+鋭角に折れる継ぎ目専用。手作りの `path` では普通は使わない）。
 
 ## なぜ壁ではなく中心線を定義するのか
 
@@ -78,8 +80,12 @@ def centerline(path: list, x: float, y: float, yaw: float,
             y = cy + r * math.sin(a0 + rad)
             yaw = yaw + rad
 
+        elif kind == "turn":
+            # 点は打たない。直線同士が鋭角に折れる継ぎ目（`sim/sketch.py` 参照）
+            yaw = yaw + math.radians(float(seg[1]))
+
         else:
-            raise ValueError(f"未知の区間: {seg!r}（straight か arc）")
+            raise ValueError(f"未知の区間: {seg!r}（straight/arc/turn）")
 
     return np.asarray(pts, dtype=np.float64)
 
@@ -182,6 +188,35 @@ def add_offset_discs(grid: np.ndarray, origin: tuple[float, float], resolution: 
             grid[rw0:rw1, c0:c1] |= disc[dr0:dr1, dc0:dc1]
 
 
+def stamp_discs(grid: np.ndarray, origin: tuple[float, float], resolution: float,
+                discs: list) -> None:
+    """占有格子に、**世界座標そのものの**円盤群をOR演算で追加する（in-place）。
+
+    `add_offset_discs()` は手続き生成向けに「中心線の弧長＋法線オフセット」で
+    位置を決めるが、コースエディタが置く孤立障害物はクリックした位置が
+    そのまま絶対座標なので、弧長へ変換する理由が無い——単純にその座標へ
+    円盤を置くだけでよい。
+
+    :param discs: `(x, y, 半径[m])` のリスト（世界座標）。`Course.obstacles`
+        と同じ並び
+    """
+    x0, y0 = origin
+    h, w = grid.shape
+    for cx, cy, r in discs:
+        rr = max(1, int(round(float(r) / resolution)))
+        yy, xx = np.mgrid[-rr:rr + 1, -rr:rr + 1]
+        disc = (xx * xx + yy * yy) <= rr * rr
+        col = int(round((float(cx) - x0) / resolution))
+        row = int(round((float(cy) - y0) / resolution))
+        c0, c1 = max(0, col - rr), min(w, col + rr + 1)
+        r0, r1 = max(0, row - rr), min(h, row + rr + 1)
+        if c0 >= c1 or r0 >= r1:
+            continue                              # 格子の外（コース範囲外に置いた）
+        dc0, dc1 = c0 - (col - rr), c1 - (col - rr)
+        dr0, dr1 = r0 - (row - rr), r1 - (row - rr)
+        grid[r0:r1, c0:c1] |= disc[dr0:dr1, dc0:dc1]
+
+
 def build(meta: dict) -> dict:
     """コース JSON（`path` を持つもの）→ `Course` に渡す材料。
 
@@ -224,6 +259,12 @@ def build(meta: dict) -> dict:
                              divider=meta.get("divider"),
                              divider_width=float(meta.get("divider_width", 0.06)))
 
+    obstacles_in = meta.get("obstacles")
+    obstacles = None
+    if obstacles_in:
+        stamp_discs(grid, origin, res, obstacles_in)
+        obstacles = np.asarray(obstacles_in, dtype=np.float64)
+
     start = meta.get("start")
     if start is None:
         # **中心線の始点に置く。** 人間が決めないので壁に埋まりようがない
@@ -236,4 +277,5 @@ def build(meta: dict) -> dict:
         "start": tuple(float(v) for v in start),
         "centerline": pts,
         "width": width,
+        "obstacles": obstacles,
     }

@@ -136,7 +136,7 @@ class VirtualLidar:
             t_start_us=t_start_us,
             duration_us=SECTOR_PERIOD_NS // 1000,
             rot_speed_dps=int(ROT_SPEED_DPS + self.rng.normal(0, 8)),
-            dist=[int(v) for v in mm],
+            dist=mm.tolist(),
         )
 
     def _delay_ns(self) -> int:

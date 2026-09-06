@@ -312,8 +312,8 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--course", default="circuit",
-                    help="コース名 or PNG パス（既定 circuit）")
+    ap.add_argument("--course", default="normal",
+                    help="コース名 or PNG パス（既定 normal）")
     ap.add_argument("--list", action="store_true", help="コース一覧を出して終わる")
     ap.add_argument("--no-gui", action="store_true", help="pygame の俯瞰ビューを開かない")
     ap.add_argument("--no-planning", action="store_true",

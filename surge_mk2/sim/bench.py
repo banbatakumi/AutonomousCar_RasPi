@@ -286,7 +286,7 @@ class Bench:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--course", default="circuit", help="コース名 or パス")
+    ap.add_argument("--course", default="normal", help="コース名 or パス")
     ap.add_argument("--mode", default="raceline", choices=list(PLANNERS))
     ap.add_argument("--time", type=float, default=180.0, help="走らせる秒数")
     ap.add_argument("--seed", type=int, default=0, help="シムの乱数シード（LiDARノイズ等）")

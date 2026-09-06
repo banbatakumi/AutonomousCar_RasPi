@@ -29,12 +29,20 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["Course", "list_courses", "DEFAULT_COURSE_DIR"]
+__all__ = ["Course", "list_courses", "list_role_courses", "DEFAULT_COURSE_DIR"]
 
 DEFAULT_COURSE_DIR = Path(__file__).resolve().parent / "courses"
 
 #: レイを進める刻み幅を解像度の何倍にするか。1.0 だと斜めの壁をすり抜ける
 _STEP_RATIO = 0.5
+
+_VALID_ROLES = ("train", "eval", "both")
+
+
+def _parse_role(meta: dict) -> str:
+    """`role`未指定・不正値は後方互換で`"eval"`扱いにする。"""
+    r = str(meta.get("role", "eval"))
+    return r if r in _VALID_ROLES else "eval"
 
 
 @dataclass
@@ -55,6 +63,9 @@ class Course:
     #: 孤立した円盤障害物の中心座標 (K,3): x, y, 半径[m]。
     #: `sim/random_course.py`の`obstacle`アーキタイプのみが持つ
     obstacles: np.ndarray | None = None
+    #: 学習/評価どちらのプールで使うか（"train"|"eval"|"both"）。
+    #: 未指定（旧フォーマットのファイル）は後方互換で"eval"扱い
+    role: str = "eval"
     #: `raycast()`が使う、外周1pxを壁でpaddingした`grid`。`_padded()`で遅延生成する
     #: キャッシュ（2026-09-01追加、RL訓練でのraycastのプロファイルがボトルネックの
     #: 72%を占めていたため。範囲外座標を境界のpaddingセルにクランプするだけで
@@ -80,13 +91,23 @@ class Course:
             if side.exists():
                 meta = json.loads(side.read_text(encoding="utf-8"))
 
+        if meta.get("mode") == "wall":
+            from .wall_track import build as build_walls
+            t = build_walls(meta)
+            return cls(name=meta.get("name", p.stem), path=p,
+                       resolution=t["resolution"], origin=t["origin"],
+                       start=t["start"], grid=np.ascontiguousarray(t["grid"]),
+                       centerline=t["centerline"], width=t["width"],
+                       obstacles=t.get("obstacles"), role=_parse_role(meta))
+
         if "path" in meta:
             from .track import build
             t = build(meta)
             return cls(name=meta.get("name", p.stem), path=p,
                        resolution=t["resolution"], origin=t["origin"],
                        start=t["start"], grid=np.ascontiguousarray(t["grid"]),
-                       centerline=t["centerline"], width=t["width"])
+                       centerline=t["centerline"], width=t["width"],
+                       obstacles=t.get("obstacles"), role=_parse_role(meta))
 
         from PIL import Image
         img = Image.open(p).convert("L")
@@ -103,6 +124,7 @@ class Course:
             origin=(float(origin[0]), float(origin[1])),
             start=(float(start[0]), float(start[1]), float(start[2])),
             grid=np.ascontiguousarray(grid),
+            role=_parse_role(meta),
         )
 
     # ── 寸法 ──
@@ -159,6 +181,38 @@ class Course:
     def ray(self, ox: float, oy: float, angle: float, max_range: float) -> float:
         """レイ1本。超音波用。"""
         return float(self.raycast(ox, oy, np.array([angle]), max_range)[0])
+
+    def raycast_batch(self, origins: np.ndarray, angles: np.ndarray,
+                      max_range: float) -> np.ndarray:
+        """複数原点・各1角度のバッチレイキャスト。`raycast()`（1原点・複数角度、
+        LiDARのホットパス）とは逆の組み合わせで、`sim/raceline.py`が中心線の
+        各点から法線方向へ壁までの距離を一括で測るのに使う（`width`を持たない
+        コースの道幅推定、2026-09-05追加）。`_padded()`キャッシュは`raycast()`
+        と共有する。
+
+        :param origins: `(M, 2)` 世界座標
+        :param angles: `(M,)` 世界座標の絶対角 [rad]
+        :returns: `(M,)` 距離 [m]。当たらなかったレイは`raycast()`と同じく**0.0**
+        """
+        step = self.resolution * _STEP_RATIO
+        n_steps = max(1, int(max_range / step))
+        t = np.arange(1, n_steps + 1, dtype=np.float32) * step      # (S,)
+
+        ox = origins[:, 0].astype(np.float32)[:, None]              # (M,1)
+        oy = origins[:, 1].astype(np.float32)[:, None]
+        cos = np.cos(angles).astype(np.float32)[:, None]            # (M,1)
+        sin = np.sin(angles).astype(np.float32)[:, None]
+        cols = ((ox - self.origin[0]) / self.resolution
+                + cos * t[None, :] / self.resolution).astype(np.int32)
+        rows = ((oy - self.origin[1]) / self.resolution
+                + sin * t[None, :] / self.resolution).astype(np.int32)
+
+        h, w = self.grid.shape
+        occ = self._padded()[np.clip(rows + 1, 0, h + 1), np.clip(cols + 1, 0, w + 1)]
+
+        hit = occ.any(axis=1)
+        first = occ.argmax(axis=1)
+        return np.where(hit, t[first], 0.0).astype(np.float64)
 
     # ── 衝突判定 ──
 
@@ -236,3 +290,29 @@ def list_courses(directory: str | Path = DEFAULT_COURSE_DIR) -> list[Path]:
     stems = {p.stem for p in pngs}
     tracks = sorted(j for j in d.glob("*.json") if j.stem not in stems)
     return pngs + tracks
+
+
+def list_role_courses(target: str, directory: str | Path = DEFAULT_COURSE_DIR) -> list[Path]:
+    """`sim.editor`が編集できる centerline/wall 方式の JSON のうち、
+    `role` が `target`（"train"/"eval"）に一致するものを返す。
+
+    PNG占有格子ベース（サイドカーJSONの有無に関わらず`Course`を
+    センターラインから作り直せない）は対象外——`sim/editor.py`の
+    `_editable_course_files()`と同じ判定基準を使う。`role`未指定は
+    後方互換で"eval"扱い、"both"はどちらの`target`にもマッチする。
+    """
+    d = Path(directory)
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.glob("*.json")):
+        try:
+            m = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not ("path" in m or m.get("mode") == "wall"):
+            continue
+        role = _parse_role(m)
+        if role == target or role == "both":
+            out.append(p)
+    return out

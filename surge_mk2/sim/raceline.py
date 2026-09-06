@@ -36,9 +36,36 @@ import math
 import numpy as np
 import torch
 
+from .course import Course
 from .vehicle import GRAVITY_MPS2
 
 __all__ = ["compute_raceline_offsets", "compute_speed_profile"]
+
+#: `width=None`のコース（道幅がスカラー/配列で語れないコース全般。
+#: `sim/random_course.py`には現状該当アーキタイプは無いが、将来の手作業
+#: コースエディタが作るコース等を想定したインフラとして残してある）で、
+#: `Course.raycast_batch`により参照パス（中心線）の法線方向へ直接壁までの
+#: 距離を測るときの探索上限 [m]。狭く見積もると「壁に当たらなかった」
+#: （`raycast`系の0.0センチネル）が発生し、`_lateral_bounds`がそれを補う
+#: 救済措置（下記）に頼りきりになって道幅推定の精度が落ちる
+#: （2026-09-05追加。経緯は次の定数のdocstring参照）
+_WALL_RAYCAST_MAX_RANGE_M = 20.0
+
+#: `width=None`のコースでraycast実測した`(lo, hi)`に掛ける上限 [m]。
+#: ★2026-09-05実測で発覚: 壁境界を1個の多角形として直接生成し、参照パスは
+#: それを小さい`inset_m`(0.15〜0.30m)だけ内側へ寄せた副産物とする
+#: 「自由多角形境界のアリーナ」というコース生成方式（手続き生成の`wallseg`
+#: アーキタイプの試作版の1つ、後に不採用となり削除済み）で発生した:
+#: 壁に近い側は数cm〜数十cmで収まる一方、アリーナ内部側は開けた空間を
+#: そのまま突っ切ってしまい**実測3.6m〜12mという桁違いの非対称`box`制約**
+#: になっていた。L-BFGSはこの巨大な箱の中で曲率二乗和を最小化しようとして
+#: 参照パスから大きく・不連続に振れる理想ライン（`ml_lidar/watch.py`で
+#: 目視すると自己交差だらけの「毛玉」状態）を作ってしまう——`width`方式
+#: （道幅0.7〜1.6m程度）が暗黙に仮定
+#: していた「箱は車体規模のオーダー」が壊れることが根本原因。実測した
+#: 壁までの距離をそのまま使うのではなく、現実的な「その場でのふらつきの
+#: 許容量」程度に上限を掛けて、L-BFGSに与える探索範囲を車体規模に保つ
+_RAYCAST_LATERAL_OFFSET_CAP_M = 0.5
 
 #: `drive_accel_m_s2`が未実測(0.0)のときに使う、加速側のフォールバック値 [m/s²]。
 #: `sim/vehicle.py`の`_next_speed()`が未実測時にハードウェア仕様値へフォールバック
@@ -198,9 +225,55 @@ def _obstacle_penalty_torch(offset: "torch.Tensor", centerline_xy: "torch.Tensor
     return total
 
 
+def _lateral_bounds(xy: np.ndarray, yaw: np.ndarray, width: float | np.ndarray | None,
+                    course: "Course | None", *, vehicle_half_width_m: float,
+                    safety_margin_m: float) -> tuple[np.ndarray, np.ndarray]:
+    """密な中心線点列（間引き前）における、法線方向オフセットの許容範囲
+    `(lo, hi)`（符号付き、常に`lo <= 0 <= hi`）。
+
+    `width`が渡されれば従来通りそこから対称に求める（`compute_raceline_offsets`
+    の元の計算をそのまま移設したもの）。`width`が`None`なら`course`必須——
+    `course.raycast_batch()`で中心線の法線方向（左右）に実測した壁までの距離
+    から非対称な境界を求める。壁が非対称に配置され`Course.width`（スカラー/
+    centerlineと同じ長さの配列）では表現しきれないコース向け（2026-09-05追加）。
+    """
+    n_pts = len(xy)
+    if width is not None:
+        if isinstance(width, np.ndarray):
+            half_w = width / 2.0
+        else:
+            half_w = np.full(n_pts, width / 2.0)
+        max_offset = np.maximum(0.0, half_w - vehicle_half_width_m - safety_margin_m)
+        return -max_offset, max_offset
+
+    if course is None:
+        raise ValueError("width が None のときは course が必須です（壁までの実測に使うため）")
+
+    margin = vehicle_half_width_m + safety_margin_m
+    nx, ny = -np.sin(yaw), np.cos(yaw)                    # 法線（左が正）
+    left = course.raycast_batch(xy, np.arctan2(ny, nx), _WALL_RAYCAST_MAX_RANGE_M)
+    right = course.raycast_batch(xy, np.arctan2(-ny, -nx), _WALL_RAYCAST_MAX_RANGE_M)
+    # raycastの0.0センチネル（`_WALL_RAYCAST_MAX_RANGE_M`以内に壁が無かった）
+    # への備え。将来のwidth=Noneコースが陥りうる安全弁として残す。発生時は
+    # 「その方向には`_WALL_RAYCAST_MAX_RANGE_M`より壁が無い＝実質開けている」
+    # とみなし、探索上限をそのまま距離として採用する——例外で学習を止めるより
+    # 安全側（道幅を広めに見積もるだけで、誤って理想ラインを壁の外へ張り付か
+    # せる方向には倒れない）
+    left = np.where(left <= 0.0, _WALL_RAYCAST_MAX_RANGE_M, left)
+    right = np.where(right <= 0.0, _WALL_RAYCAST_MAX_RANGE_M, right)
+    # 実測した壁までの距離を`_RAYCAST_LATERAL_OFFSET_CAP_M`で頭打ちにする
+    # （定数のdocstring参照）——width=Noneのコースで片側だけ壁が非常に遠い
+    # 場合、その距離をそのまま箱制約に使うとL-BFGSが車体規模を大きく
+    # 超えて振れる理想ラインを作ってしまうため（定数のdocstring参照）
+    hi = np.minimum(np.maximum(0.0, left - margin), _RAYCAST_LATERAL_OFFSET_CAP_M)
+    lo = -np.minimum(np.maximum(0.0, right - margin), _RAYCAST_LATERAL_OFFSET_CAP_M)
+    return lo, hi
+
+
 def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray | None, *,
                              vehicle_half_width_m: float, safety_margin_m: float = 0.03,
                              obstacles: np.ndarray | None = None,
+                             course: "Course | None" = None,
                              iterations: int = _OPT_ITERATIONS, lr: float = _OPT_LR) -> np.ndarray:
     """中心線 `(N,3)`(x,y,yaw) からの法線方向オフセット `offset[i]`（符号付き、
     法線 `(-sin(yaw), cos(yaw))` の正方向）を返す。`centerline + offset*normal`が
@@ -226,10 +299,17 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
     挟めない（挟むとL-BFGSの2階情報の履歴と矛盾し収束が乱れる）。`tanh`なら
     無制約最適化のまま自動的に`[-max_offset, max_offset]`に収まる。
 
-    :param width: `Course.width`と同じ（スカラーまたは`centerline`と同じ長さの配列）
+    :param width: `Course.width`と同じ（スカラーまたは`centerline`と同じ長さの配列）。
+        `None`の場合は`course`が必須——`course.raycast_batch()`で中心線の法線
+        方向に実測した壁までの距離から、非対称な（左右で異なりうる）道幅制約を
+        求める（2026-09-05追加、`_lateral_bounds`参照）。`width`が渡された場合は
+        `course`の有無に関わらず従来通りの対称計算を使う（後方互換、既存呼び出し
+        は無変更で動く）
     :param vehicle_half_width_m: 車体全幅の半分 [m]。壁との安全マージンぶん、
         道幅の半分より内側にしかオフセットできないようにする
     :param safety_margin_m: `vehicle_half_width_m`に加えて残す余裕 [m]
+    :param course: `width is None`のときに壁までの実測レイキャストに使う`Course`。
+        `width`が渡されているときは無視される
     :param obstacles: `Course.obstacles`と同じ（(K,3)=x,y,半径[m]、世界座標）。
         `None`（既定、`narrow`/`organic`/`circuit`/`corridor`アーキタイプは常に
         `None`）なら既存の挙動と完全に同一。**指定すると、曲率二乗和の損失に
@@ -241,12 +321,9 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
     """
     xy = centerline[:, :2]
     yaw = centerline[:, 2]
-    n_pts = len(xy)
-    if isinstance(width, np.ndarray):
-        half_w = width / 2.0
-    else:
-        half_w = np.full(n_pts, (width if width is not None else 1.0) / 2.0)
-    max_offset = np.maximum(0.0, half_w - vehicle_half_width_m - safety_margin_m)
+    lo, hi = _lateral_bounds(xy, yaw, width, course,
+                             vehicle_half_width_m=vehicle_half_width_m,
+                             safety_margin_m=safety_margin_m)
 
     # 間引いた点だけをL-BFGSにかける（`_OPT_STEP_M`のdocstring参照）
     idx = _coarse_indices(xy, _OPT_STEP_M)
@@ -254,10 +331,17 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
     s_full = np.concatenate([[0.0], np.cumsum(seg)])[:-1]
     total = float(s_full[-1] + seg[-1])
 
-    xy_c, yaw_c, max_offset_c = xy[idx], yaw[idx], max_offset[idx]
+    xy_c, yaw_c, lo_c, hi_c = xy[idx], yaw[idx], lo[idx], hi[idx]
+    # 対称`[-max_offset, max_offset]`を非対称`[lo, hi]`に一般化した箱制約——
+    # `center + half_range*tanh(z)`という滑らかな再パラメータ化で埋め込む
+    # （`width`指定時は`lo=-hi`なので`center=0`・`half_range=max_offset`となり、
+    # 旧来の`max_offset*tanh(z)`と完全に一致する＝後方互換）
+    center_c = (lo_c + hi_c) / 2.0
+    half_range_c = (hi_c - lo_c) / 2.0
     centerline_t = torch.from_numpy(xy_c).to(torch.float64)
     normal_t = torch.from_numpy(np.column_stack((-np.sin(yaw_c), np.cos(yaw_c)))).to(torch.float64)
-    max_offset_t = torch.from_numpy(max_offset_c).to(torch.float64)
+    center_t = torch.from_numpy(center_c).to(torch.float64)
+    half_range_t = torch.from_numpy(half_range_c).to(torch.float64)
     z_t = torch.zeros(len(idx), dtype=torch.float64, requires_grad=True)
 
     obstacle_terms = None
@@ -271,7 +355,7 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
 
     def closure() -> "torch.Tensor":
         opt.zero_grad()
-        offset = max_offset_t * torch.tanh(z_t)
+        offset = center_t + half_range_t * torch.tanh(z_t)
         loss = _curvature_sq_sum_torch(offset, centerline_t, normal_t)
         if obstacle_terms is not None:
             loss = loss + _OBSTACLE_PENALTY_WEIGHT * _obstacle_penalty_torch(
@@ -288,12 +372,12 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
             break
         prev_loss = loss
 
-    offset_c = (max_offset_t * torch.tanh(z_t)).detach().numpy()
+    offset_c = (center_t + half_range_t * torch.tanh(z_t)).detach().numpy()
     # 間引いた点の弧長位置を基準に、密な点列へ周期線形補間で戻す
     offset = np.interp(s_full, s_full[idx], offset_c, period=total)
     # 補間の丸め込みで、道幅が急に変わる区間だけ僅かに制約を超えうるので
-    # 密な点列側の`max_offset`で最終的にクランプしておく
-    return np.clip(offset, -max_offset, max_offset)
+    # 密な点列側の`(lo, hi)`で最終的にクランプしておく
+    return np.clip(offset, lo, hi)
 
 
 def compute_speed_profile(centerline: np.ndarray, offsets: np.ndarray, *, mu: float,
