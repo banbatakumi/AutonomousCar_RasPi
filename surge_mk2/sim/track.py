@@ -38,7 +38,7 @@ import math
 
 import numpy as np
 
-__all__ = ["centerline", "rasterize", "add_offset_discs", "build"]
+__all__ = ["centerline", "rasterize", "add_offset_discs", "build", "build_from_points"]
 
 #: 中心線を刻む間隔を解像度の何倍にするか。円盤の半径より十分細かければよい
 _STEP_RATIO = 1.0
@@ -234,11 +234,26 @@ def build(meta: dict) -> dict:
     ここに合わせて 2.5cm にしてある。
     """
     res = float(meta.get("resolution", 0.02))
-    width = float(meta.get("width", 1.0))
     ox, oy, oyaw = (list(meta.get("origin", (0.0, 0.0, 0.0))) + [0.0, 0.0, 0.0])[:3]
 
     pts = centerline(meta["path"], float(ox), float(oy), float(oyaw),
                      res * _STEP_RATIO)
+    return build_from_points(pts, meta)
+
+
+def build_from_points(pts: np.ndarray, meta: dict) -> dict:
+    """中心線点列 `(N,3)` を直接受け取る版の `build()`。
+
+    `path`(区間DSL)を経由しない生成方式（`ml_lidar/course_gen.py`の閉スプライン等）が、
+    `build()`の「loop閉じチェック・重複点除去・ラスタライズ・start決定・障害物刻印」という
+    **点列の生成方式に依存しないロジック**をそのまま再利用するための入口。`build()`は
+    「区間DSL→点列」の変換を済ませてからここに委譲するだけの薄いラッパーになっている。
+
+    `meta["path"]`は見ない。それ以外（`resolution`/`width`/`loop`/`margin`/`divider`/
+    `divider_width`/`obstacles`/`start`）は`build()`と全く同じ意味で解釈する。
+    """
+    res = float(meta.get("resolution", 0.02))
+    width = float(meta.get("width", 1.0))
 
     if meta.get("loop"):
         gap = math.hypot(pts[-1, 0] - pts[0, 0], pts[-1, 1] - pts[0, 1])

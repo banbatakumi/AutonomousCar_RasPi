@@ -79,7 +79,7 @@ def _load_from_path(path: Path) -> dict:
         "input_name": session.get_inputs()[0].name,
         "in_dim": in_dim,
         "fov_deg": float(cfg.get("fov_deg", 360.0)),
-        "max_range": float(cfg.get("max_range", 5.10)),
+        "max_range": float(cfg.get("max_range", 10.0)),
         "max_steer": float(cfg.get("max_steer", 0.45)),
         "max_speed": float(cfg.get("max_speed", 1.5)),
     }
@@ -125,7 +125,7 @@ class E2ELidar(Planner):
         self._input_name = ""
         self._model_in_dim = 0
         self._fov_deg = 360.0
-        self._max_range = 5.10
+        self._max_range = 10.0
         self._model_max_steer = 0.45
         self._model_max_speed = 1.5
         self._load_error = "未選択"

@@ -1,0 +1,24 @@
+# ml_lidar/ — LiDAR-only E2E強化学習パイプラインの依存（`raspi/requirements.txt` とは別管理）
+#
+#   .venv/bin/pip install -r ml_lidar/requirements.txt
+
+# 強化学習本体（PPO）
+gymnasium>=1.0
+stable-baselines3>=2.3
+torch>=2.2
+
+# ONNX エクスポート・実車側(`raspi/auto/e2e_lidar.py`)との入出力パリティ検証
+onnx>=1.16
+onnxruntime>=1.18,<2
+
+numpy>=2.1
+
+# course_gen.py が閉じた極座標スプラインの周期3次補間・解析的微分（曲率計算）に
+# scipyを使うが、ここには明示しない——`sim/requirements.txt`（先にインストールする前提）が
+# `sim/wall_track.py` の都合で既に依存しており、新規の依存追加ではないため
+
+# 観戦（`ml_lidar/watch.py`）の可視化
+matplotlib>=3.8
+
+# 操作パネル（`ml_lidar/app.py`）— Tkinter は Python 標準ライブラリ同梱なので
+# ここに依存を追加する必要は無い
