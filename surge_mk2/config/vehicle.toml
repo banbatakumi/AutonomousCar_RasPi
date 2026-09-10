@@ -6,11 +6,14 @@
 # Python 3.11+ の `tomllib`（標準ライブラリ）で読めるので依存が増えず、
 # `raspi/proto/protocol.toml` と同じ流儀に揃うため。中身のスキーマは §5.3 のまま。
 #
-# ★ 実測できていないのは [dynamics]（アクチュエータの動特性）と
-#   `encoder_ticks_per_rev`（STM32 側の実測待ち）だけ。
+# ★ 実測できていないのは [dynamics] のうち `rolling_resistance` と
+#   `encoder_ticks_per_rev`（STM32 側の実測待ち）だけ。[dynamics] の残り7項目
+#   （tau_steer_s・dead_time_s・steer_rate_limit_rad_s・tau_speed_s・mu・
+#   drive_accel_m_s2・brake_decel_m_s2）は `tools/sysid/` のシステム同定機能で
+#   実測確定済み（`tools/sysid/toml_update.py`の`ALLOWED_KEYS`参照）。
 #   幾何（ホイールベース・トレッド・リンク比・車輪半径・外形・センサ取付。後輪は
 #   ダイレクトドライブでギア比の概念がない）と質量は 2026-08-20 に実測確定済み。
-#   measured = false はこの残りぶんの印。
+#   measured = false はこの残り2項目ぶんの印。
 
 measured = false
 
@@ -53,35 +56,36 @@ cmd_deadman_ms = 150
 auto_cmd_stale_ms = 200
 
 # ── アクチュエータの動特性 ──────────────────────────────────────────────
-# **すべて実測待ちの仮値。** シミュレータと、将来のフィードフォワード制御が使う。
+# `rolling_resistance`以外はシステム同定タブ（`tools/sysid/`）の実測値。
+# シミュレータと、将来のフィードフォワード制御が使う。
 # 実車で測る手順: 舵角ステップ入力 → TELEMETRY の steer_actual をログに取り、
 # 立ち上がりの遅れ（= dead_time_s）と 63.2% 到達時間（= tau_steer_s）を読む。
 
 [dynamics]
-tau_steer_s = 0.0670422628123148            # 操舵の1次遅れ時定数 [s]  ★未実測
-dead_time_s = 0.010269640133013274           # 操舵のむだ時間 [s]  ★未実測
-# ステアサーボの物理的な最大角速度 [rad/s]  ★未実測
+tau_steer_s = 0.0670422628123148            # 操舵の1次遅れ時定数 [s]（実測確定）
+dead_time_s = 0.010269640133013274           # 操舵のむだ時間 [s]（実測確定）
+# ステアサーボの物理的な最大角速度 [rad/s]（実測確定）
 # 実測手順はtau_steer_s/dead_time_sと同じステップ入力試験のログから、
 # 観測された |d(steer_actual)/dt| の最大値を読む（システム同定タブ「ステア試験」）
 steer_rate_limit_rad_s = 10.802314434752011
-tau_speed_s = 0.14957988168793218            # 速度応答の1次遅れ時定数 [s]  ★未実測
+tau_speed_s = 0.14957988168793218            # 速度応答の1次遅れ時定数 [s]（実測確定）
 rolling_resistance = 0.35     # 転がり抵抗による減速度 [m/s²]  ★未実測
 # ★対象外: sim/gym_env.py の学習ループは常に armed=True の速度指令モードで
 # シムを駆動し、rolling_resistanceが効くのはtorque_mode/unarmed(惰行)の
 # コードパスだけなので、実測してもml_lidarのシム精度には反映されない
 drive_ratio = 2.0             # 駆動輪数（後輪2輪ぶんのトルクが効く）
 # 横方向グリップ限界 a_lat_max = mu * g [m/s²]。値そのものは車両質量に依存しない
-# （F_lat_max = mu*m*g を質量mで割ると mu*g だけが残るため）。0.8は屋内床+ゴム系
-# タイヤを想定した仮の推定値 ★未実測（実測手順: 定常円旋回でタイヤが滑り出す
-# 速度と半径を計測し、mu = v^2/(r*g) で逆算する）
+# （F_lat_max = mu*m*g を質量mで割ると mu*g だけが残るため）。屋内床+ゴム系
+# タイヤでの実測値（実測手順: 定常円旋回でタイヤが滑り出す
+# 速度と半径を計測し、mu = v^2/(r*g) で逆算する）（実測確定）
 mu = 0.45437614678899085
-# 実測の最大加速度・減速度 [m/s²]。0.0 = 未実測（sim/vehicle.pyはMAX_BRAKE_TORQUE_NM
+# 実測の最大加速度・減速度 [m/s²]（sim/vehicle.pyはMAX_BRAKE_TORQUE_NM
 # からの逆算・cmd.accel_limitにフォールバック）。ハードウェアのトルク仕様値ではなく、
 # 実際にタイヤが発生できた加減速度（グリップ限界含む）を使いたいため独立に測る
 # （実測手順: システム同定タブ「加減速試験」。直進で加速→急制動を繰り返し、
-# TELEMETRYのaccel_x（縦加速度）から読む）
-drive_accel_m_s2 = 3.7329        # ★未実測
-brake_decel_m_s2 = 3.98325        # ★未実測
+# TELEMETRYのaccel_x（縦加速度）から読む）（実測確定）
+drive_accel_m_s2 = 3.7329
+brake_decel_m_s2 = 3.98325
 
 # ── センサ取付位置 ──────────────────────────────────────────────────────
 # base_link からの固定変換。実測確定（2026-08-20）。
