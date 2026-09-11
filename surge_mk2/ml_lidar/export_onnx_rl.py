@@ -3,7 +3,7 @@
     .venv/bin/python -m ml_lidar.export_onnx_rl --model ml_lidar/runs/v1/eval/best_model.zip --name v1
 
 `models/e2e_lidar/<name>.onnx` ＋ 同名`.json`（`fov_deg`/`max_range`/`max_steer`/
-`max_speed`。`raspi/auto/e2e_lidar.py`が読む契約）を書き出す。`in_dim`はJSONに
+`max_speed`/`steer_rate_max_rad_s`。`raspi/auto/e2e_lidar.py`が読む契約）を書き出す。`in_dim`はJSONに
 書かない——`e2e_lidar.py`はONNXグラフ自身のshapeから読む契約になっている
 （同ファイルの`_load_from_path()`コメント参照）。`max_steer`は`config/vehicle.toml`
 （`VehicleSpec.max_steer`）からそのまま取る——学習側が別の値を持たない設計
@@ -114,6 +114,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fov-deg", type=float, default=270.0)
     p.add_argument("--max-range", type=float, default=10.0)
     p.add_argument("--max-speed", type=float, default=2.0)
+    p.add_argument("--steer-rate-max-rad-s", type=float, default=2.0,
+                   help="[rad/s] train_rl.pyの--steer-rate-max-rad-sと同じ(v13、"
+                        "env_config.jsonが見つからない場合のフォールバック)")
     return p.parse_args(argv)
 
 
@@ -124,7 +127,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"!! {args.model} の近くにenv_config.jsonが見つからない。CLI既定値にフォールバックする",
              file=sys.stderr)
         cfg = EnvConfig(fov_deg=args.fov_deg, max_range=args.max_range,
-                        max_speed=args.max_speed)
+                        max_speed=args.max_speed,
+                        steer_rate_max_rad_s=args.steer_rate_max_rad_s)
     # 最大舵角はEnvConfigに持たせていない（`config/vehicle.toml`固定）ので、
     # モデル契約JSONへはここで直接読んで書く
     max_steer = VehicleSpec.load().max_steer
@@ -150,6 +154,7 @@ def main(argv: list[str] | None = None) -> None:
         "max_range": cfg.max_range,
         "max_steer": max_steer,
         "max_speed": cfg.max_speed,
+        "steer_rate_max_rad_s": cfg.steer_rate_max_rad_s,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"→ {final_path}\n→ {json_path}")
 

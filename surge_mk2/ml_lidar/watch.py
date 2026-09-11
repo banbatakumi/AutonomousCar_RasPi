@@ -123,6 +123,7 @@ def run(args: argparse.Namespace) -> None:
     from matplotlib.patches import Polygon
 
     set_japanese_font()
+    plt.style.use("dark_background")
 
     course = _load_course(args)
     model_path = args.models_dir / f"{args.model}.onnx"
@@ -138,7 +139,7 @@ def run(args: argparse.Namespace) -> None:
              vmin=0, vmax=1, alpha=0.6)
 
     body_poly = Polygon(np.zeros((4, 2)), closed=True, facecolor="tab:blue",
-                        edgecolor="black", zorder=5)
+                        edgecolor="white", zorder=5)
     ax.add_patch(body_poly)
     lidar_scatter = ax.scatter([], [], s=3, c="tab:red", zorder=4)
     title = ax.set_title("")

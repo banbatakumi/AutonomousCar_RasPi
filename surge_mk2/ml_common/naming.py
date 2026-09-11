@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-__all__ = ["list_versioned_names", "next_versioned_name"]
+__all__ = ["list_versioned_names", "next_versioned_name", "latest_run_name"]
 
 _V_NAME_RE = re.compile(r"^v(\d+)$")
 
@@ -14,6 +14,14 @@ def list_versioned_names(root_dir: Path) -> list[str]:
     if not root_dir.exists():
         return []
     return sorted(p.name for p in root_dir.iterdir() if p.is_dir())
+
+
+def latest_run_name(root_dir: Path) -> str | None:
+    """最終更新（mtime最大）のrunディレクトリ名を返す。無ければ`None`。"""
+    names = list_versioned_names(root_dir)
+    if not names:
+        return None
+    return max(names, key=lambda n: (root_dir / n).stat().st_mtime)
 
 
 def next_versioned_name(existing: list[str]) -> str:

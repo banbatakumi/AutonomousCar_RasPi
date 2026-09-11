@@ -3,38 +3,47 @@
 `ML_LIDAR_V2_PROMPT.md`（旧`ml_lidar`削除後にCopilot CLIの独立レビューを経て
 確定した設計方針）の仕様をそのまま実装する。要点:
 
-## 報酬（v1・最小構成 + v8: ステア変化率ペナルティ）
+## 報酬（v1・最小構成 + v16: ステア実効ペナルティ）
 
 `progress`（センターラインへの弧長射影の単調増加分、`dt`で正規化）＋
-`collision_penalty`（衝突で終端）＋`steer_rate_weight`（生アクション`a[0]`の
-隣接ステップ差分に対する罰則、既定0）。TAL項・報酬正規化は入れない。
-`progress`はラップアラウンド処理（半周を超える飛びを`±total_length`で補正）を
-最初から実装する——これが無いと周回完走判定自体が壊れる。
+`collision_penalty`（衝突で終端）＋`steer_effort_weight`（生アクション`a[0]`
+＝舵角速度指令の**絶対値そのもの**に対する罰則、既定0）。TAL項・報酬正規化は
+入れない。`progress`はラップアラウンド処理（半周を超える飛びを`±total_length`
+で補正）を最初から実装する——これが無いと周回完走判定自体が壊れる。
 
-**v8で`steer_rate_weight`を追加した経緯**: v1〜v7（最小構成のまま）で学習した
-方策は、`vehicle.steer_actual`（`steer_tau`一次遅れ後の実舵角）こそ滑らかだが、
-**生アクション`a[0]`自体は決定論的方策でも隣接ステップ符号反転率8〜11%・
-平均|Δ|0.10〜0.12（探索ノイズ込みだと21〜36%・0.33〜0.42）で常時振動**しており、
-`steer_tau`フィルタがそれをたまたま隠していただけと実測で判明した（v7検証、
-2026-09-08）。これは削除済み旧`ml_lidar`のv10〜v15で診断された「フィルタが
-誤魔化せる程度まで実害を抑えるだけで根本原因は未解決」と同じパターン。
-罰則は**フィルタ前の生アクション**に掛ける（フィルタ後に掛けると同じ穴を
-再度掘ることになる）。RCカー規模のRL経路追従（arXiv:2401.05194）やCAPS系
-（Mysore et al., arXiv:2012.06644）でも標準的な対策と確認済みだが、CAPSの
-指摘通り**罰則が強すぎると過度に保守的な（動かない・鈍い）方策に倒れる
-副作用がある**——`steer_rate_weight`は単一変数として導入し、
-`eval_stats.py`のステア滑らかさ指標と`collision_rate`/`mean_speed`を
-同時に見ながら調整すること。
+**v8〜v10で試して手詰まりと確定した`steer_rate_weight`（生アクションの隣接
+ステップ差分＝jerkへのL1罰則）は2026-09-11に撤去した**。「隣接差分の総和は
+テレスコープ和で始点と終点の差に等しくなるため、方向転換には効くが
+『一度に大きく切って据え置く』挙動には何も損しない」という構造的な問題が
+あり、重みを0.03〜0.2と振っても単調に悪化した（PROGRESS.md 2026-09-09節）。
+
+**v16の`steer_effort_weight`はこれとは別物**——v13(2026-09-11)の行動空間
+再パラメータ化により`a[0]`自体が舵角速度になったので、**その絶対値に直接
+罰則を掛けると「意味もなく切り続ける・微調整し続ける」ことそのものを
+罰し、いま向いている角度を保持する(`a[0]≈0`)限り罰則を受けない**——
+差分ではなく絶対値を見るので上記のテレスコープ和の穴に該当しない。
+バンビの「数値上は良いがライン取りが汚い（レーシングラインのような
+アウトインアウトに近い走行をしたい）」という指摘を受けて導入（PROGRESS.md
+2026-09-11「6回目の続き」節）。L1（絶対値）を選んだのは、L2（二乗）だと
+0付近の勾配がほぼ平坦で微小な補正を抑止する力が弱いため——「一定角度を
+正確に保持する」ことを積極的に奨励したいのでL1のスパース性が狙いに合う
+（CAPSの「罰則が強すぎると鈍い方策に倒れる」副作用は既知なので、単一変数
+として導入し`eval_stats.py`のステア滑らかさ指標と`collision_rate`/
+`mean_speed`を同時に見ながら調整すること）。
 
 ## 観測・行動契約（`raspi/auto/e2e_lidar.py`と完全一致させる）
 
 観測は`_to_obs()`、行動→物理量の変換は`_to_physical()`にまとめてある。
 `raspi/auto/e2e_lidar.py`の`plan()`はこの2つの関数と対になる後処理を実車側で行う
-（同ファイルのコメント参照）。**観測にステア角を含める場合は`self._steer`
-（プランナ側で舵平滑化フィルタを掛けた後の内部状態）を使う**——`VehicleModel`の
-`steer_actual`（むだ時間・1次遅れ込みの物理的な実舵角）ではない。実車の
-`E2ELidar.plan()`も自分の`self._steer`（前回まで平滑化した指令値）を観測に使って
-おり、ここを揃えないと訓練と実行で観測の意味がずれる。
+（同ファイルのコメント参照）。**観測にステア角を含める場合は`self._steer_target`
+（方策が舵角速度を積分して直接制御している内部状態、`steer_tau`フィルタ前）を
+使う**——`self._steer`（`steer_tau`フィルタ後）でも`VehicleModel`の`steer_actual`
+（むだ時間・1次遅れ込みの物理的な実舵角）でもない。方策は自分が直接動かしている
+状態を観測できて初めて「現在の積分値＋今回の舵角速度」で次の目標を一貫して
+決められる——`steer_tau`以降の物理的な平滑化・遅れは（`VehicleModel`の応答と
+同じく）方策から見えない下流の実装詳細として扱う。実車の`E2ELidar.plan()`も
+自分の`self._steer_target`（前回まで積分した指令値）を観測に使っており、
+ここを揃えないと訓練と実行で観測の意味がずれる。
 
 ## LiDARシム経路（中間案）
 
@@ -42,12 +51,33 @@
 実機と同じ鏡像反転・欠測フラグ組み立てまで通すが、`sim.link`のUART/STM32バイト
 フレーミング層は経由しない（`sim_support.stm_us()`は時刻同期なしの単純なns→us変換）。
 
-## 行動→物理量の変換
+## 行動→物理量の変換（v13: 舵角→舵角速度への再パラメータ化）
 
-`steer = a[0] * max_steer` をそのまま使わず、`e2e_lidar.py`の`steer_tau`と同じ
-一次遅れフィルタをここでも適用してから`VehicleModel`に渡す。`VehicleModel`自体も
-`dead_time_s`/`tau_steer_s`でさらに実機の物理応答を模擬するので、二段のフィルタが
-かかる（実車も「プランナの平滑化」＋「サーボの物理応答」の二段になっているのと同じ）。
+**`a[0]`は舵角そのものではなく舵角速度**（`[-1,1]`を`steer_rate_max_rad_s`
+[rad/s]倍したもの）。`self._steer_target += a[0]*steer_rate_max_rad_s*dt`で
+積分し`±max_steer`にクランプしたものを「プランナの目標舵角」として扱う
+（v1〜v12は`steer = a[0]*max_steer`という位置そのものの写像だった）。
+
+**経緯（2026-09-10〜11決定）**: v1〜v12で報酬側の罰則（`steer_rate_weight`の
+L1、weight 0.03〜0.2で単調悪化）・探索ノイズの構造変更（gSDE、tuning後も
+改善は誤差程度）の2つの間接的アプローチを尽くしたが、決定論的方策の
+生アクションの振動（隣接ステップ符号反転率8〜11%、探索ノイズ込みで21〜36%）
+は解消しなかった。文献調査（["Is Bang-Bang Control All You
+Need?"](https://arxiv.org/pdf/2111.02552)）で、ガウス方策+tanh
+squashingの連続制御は報酬・探索ノイズの設計に関わらず両極端に振れやすい
+構造的傾向があると確認——**間接的に「滑らかになることを期待する」のではなく、
+1ステップで動ける量そのものに構造的な上限をかける**方針に転換した。
+レーシングRL文献（[arXiv:2406.14934](https://arxiv.org/pdf/2406.14934)等）
+でも1step当たりの舵角変化を物理的な上限でクリップする手法が使われており、
+同じ機構。**行動空間の意味が変わるため既存モデル(v1〜v12)とは非互換
+（ゼロから再学習が必要）**。
+
+`steer_tau`一次遅れフィルタは、上記の目標舵角（`self._steer_target`、方策が
+直接制御する内部状態）に対して従来通りそのまま適用し`self._steer`
+（サーボ応答を模した状態）を作ってから`VehicleModel`に渡す——`steer_rate_max_rad_s`
+の上限は「プランナが1stepで動かせる量」を、`steer_tau`は「サーボの物理応答の遅れ」
+を表しており役割が異なるため両方残す。`VehicleModel`自体もさらに`dead_time_s`/
+`tau_steer_s`で実機の物理応答を模擬するので、都合三段のフィルタがかかる。
 `speed = (a[1]+1)/2 * max_speed`（後退は無し、`e2e_lidar.py`と同じ0〜max_speed）。
 
 **`max_steer`は`EnvConfig`に持たせず、`config/vehicle.toml`（`VehicleSpec.max_steer`）
@@ -100,6 +130,10 @@ class EnvConfig:
     fov_deg: float = 270.0
     max_range: float = 10.0           # 実機LIDAR_SECTOR(無圧縮mm)の実用レンジ。`e2e_lidar.py`既定と揃える
     max_speed: float = 2.0
+    #: `a[0]`（[-1,1]）に掛けて舵角速度[rad/s]にするスケール（v13で導入）。
+    #: 2.0rad/sは、v1〜v12で実測した振動レート(0.6〜1.6rad/s)を明確に下回りつつ、
+    #: 全舵角域(1.05rad)を約0.5秒で切れる値として選定（2026-09-11決定）
+    steer_rate_max_rad_s: float = 2.0
     steer_tau: float = 0.10           # `e2e_lidar.py`の`steer_tau`既定と同じ
     #: v3検証(2026-09-07)で-10.0だと学習後半(400k~1Mstep)にかけて速度が単調に上がる一方で
     #: 汎化コースでの衝突率も0%→10%前後まで悪化する傾向が実測された——`progress`が速度に
@@ -108,10 +142,10 @@ class EnvConfig:
     #: v4ではこの抑止力を強めて同じ傾向が緩和されるか切り分ける（他は変更しない）
     collision_penalty: float = -30.0
     lap_bonus: float = 10.0
-    #: 生アクション`a[0]`（-1..1、フィルタ前）の隣接ステップ差分に掛ける罰則の重み。
-    #: 既定0（無効）。v8で単一変数として導入する場合はCLIの`--steer-rate-weight`で
-    #: 指定する（`EnvConfig`docstring参照）
-    steer_rate_weight: float = 0.0
+    #: 生アクション`a[0]`（-1..1、フィルタ前。v13以降は舵角速度指令）の絶対値に
+    #: 掛ける罰則の重み。既定0（無効）。v16でCLIの`--steer-effort-weight`で
+    #: 指定する（`EnvConfig`docstring参照、旧`steer_rate_weight`との違いに注意）
+    steer_effort_weight: float = 0.0
     randomize_lidar: bool = True
     randomize_dynamics: bool = True
     dynamics_jitter_frac: float = 0.2
@@ -152,12 +186,12 @@ class LidarE2EEnv(gym.Env):
         self._body: np.ndarray | None = None
         self._t_ns = 0
         self._steer = 0.0
+        self._steer_target = 0.0
         self._s_prev = 0.0
         self._lap_progress_m = 0.0
         self._centerline_xy: np.ndarray | None = None
         self._centerline_arc: np.ndarray | None = None
         self._total_length = 0.0
-        self._raw_steer_prev = 0.0
 
     # ── Gym API ──
 
@@ -186,7 +220,7 @@ class LidarE2EEnv(gym.Env):
         self._scan = None
         self._t_ns = 0
         self._steer = 0.0
-        self._raw_steer_prev = 0.0
+        self._steer_target = 0.0
         self._s_prev = self._project_arc_length(self.vehicle.x, self.vehicle.y)
         self._lap_progress_m = 0.0
 
@@ -196,8 +230,7 @@ class LidarE2EEnv(gym.Env):
     def step(self, action: np.ndarray):
         steer_cmd, speed_cmd = self._to_physical(action)
         raw_steer = float(np.clip(np.asarray(action, dtype=np.float64)[0], -1.0, 1.0))
-        steer_rate_penalty = self.cfg.steer_rate_weight * abs(raw_steer - self._raw_steer_prev)
-        self._raw_steer_prev = raw_steer
+        steer_effort_penalty = self.cfg.steer_effort_weight * abs(raw_steer)
 
         alpha = 1.0 if self.cfg.steer_tau <= 1e-3 else \
             1.0 - math.exp(-self.cfg.dt / self.cfg.steer_tau)
@@ -225,7 +258,7 @@ class LidarE2EEnv(gym.Env):
         self._lap_progress_m += delta
         progress = max(0.0, delta)
 
-        reward = progress / self.cfg.dt - steer_rate_penalty
+        reward = progress / self.cfg.dt - steer_effort_penalty
         terminated = False
         if collided:
             reward += self.cfg.collision_penalty
@@ -249,16 +282,23 @@ class LidarE2EEnv(gym.Env):
         w = scan_window(self._scan, self.cfg.fov_deg, self.cfg.max_range)
         scan_n = np.asarray(w.dist, dtype=np.float32) / self.cfg.max_range
         speed_norm = float(np.clip(self.vehicle.speed / self.cfg.max_speed, 0.0, 1.0))
-        steer_norm = float(np.clip(self._steer / self.max_steer, -1.0, 1.0)) \
+        steer_norm = float(np.clip(self._steer_target / self.max_steer, -1.0, 1.0)) \
             if self.max_steer > 1e-6 else 0.0
         return np.concatenate([scan_n, [speed_norm, steer_norm]]).astype(np.float32)
 
     def _to_physical(self, action: np.ndarray) -> tuple[float, float]:
-        """モデル出力（tanh、-1..1）→ 物理量。`e2e_lidar.py`の後処理と対になる。"""
+        """モデル出力（tanh、-1..1）→ 物理量。`e2e_lidar.py`の後処理と対になる。
+
+        `a[0]`は舵角速度（`EnvConfig`docstring参照）。`self._steer_target`
+        （方策が積分で直接制御する目標舵角、`steer_tau`フィルタ前）を更新して返す
+        ——`step()`側はこれを従来通り`steer_tau`フィルタに通す。
+        """
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
-        steer = float(a[0]) * self.max_steer
+        self._steer_target = float(np.clip(
+            self._steer_target + float(a[0]) * self.cfg.steer_rate_max_rad_s * self.cfg.dt,
+            -self.max_steer, self.max_steer))
         speed = (float(a[1]) + 1.0) * 0.5 * self.cfg.max_speed
-        return steer, speed
+        return self._steer_target, speed
 
     # ── LiDAR ──
 

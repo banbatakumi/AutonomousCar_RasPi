@@ -65,6 +65,16 @@ def _load_from_path(path: Path) -> dict:
 
     cfg_path = path.with_suffix(".json")
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    # ★`steer_rate_max_rad_s`が無いjson（v13より前、行動空間が「舵角そのもの」
+    # だったv1〜v12のモデル）を許容しない。ここでフォールバック既定値を補うと、
+    # 位置として学習された出力をレートとして誤って積分してしまい、実車で
+    # 意図しない舵角（安全上のリスク）を生む——`_apply_loaded()`/`reload_if_changed()`
+    # 側で「例外→今のモデルを保持/未ロードのまま」に倒れる契約（ファイルdocstring
+    # 参照）を使い、必ず失敗させる
+    if "steer_rate_max_rad_s" not in cfg:
+        raise ValueError(
+            f"{cfg_path} に steer_rate_max_rad_s が無い（v13より前の非互換モデル）。"
+            "行動空間が舵角速度に変わったため、v13以降で再学習・再exportしたモデルのみ使える")
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
     # ★入力次元はJSON（`in_dim`）ではなくONNXグラフ自身の宣言shapeから読む
     # （`export_onnx_rl.py`は`dynamic_axes`無しでバッチ1固定の具体的なshapeで
@@ -82,6 +92,7 @@ def _load_from_path(path: Path) -> dict:
         "max_range": float(cfg.get("max_range", 10.0)),
         "max_steer": float(cfg.get("max_steer", 0.45)),
         "max_speed": float(cfg.get("max_speed", 1.5)),
+        "steer_rate_max_rad_s": float(cfg["steer_rate_max_rad_s"]),
     }
 
 
@@ -128,8 +139,10 @@ class E2ELidar(Planner):
         self._max_range = 10.0
         self._model_max_steer = 0.45
         self._model_max_speed = 1.5
+        self._model_steer_rate_max_rad_s = 2.0
         self._load_error = "未選択"
         self._steer = 0.0
+        self._steer_target = 0.0
         if model_path:
             self._apply_loaded(Path(model_path))
 
@@ -152,6 +165,7 @@ class E2ELidar(Planner):
         self._max_range = loaded["max_range"]
         self._model_max_steer = loaded["max_steer"]
         self._model_max_speed = loaded["max_speed"]
+        self._model_steer_rate_max_rad_s = loaded["steer_rate_max_rad_s"]
 
     def reload_if_changed(self, desired_name: str) -> bool:
         """GUIが選んだモデル名（`e2e/model`）が今と違えば読み込み直す。
@@ -176,6 +190,7 @@ class E2ELidar(Planner):
 
     def reset(self) -> None:
         self._steer = 0.0
+        self._steer_target = 0.0
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
@@ -200,12 +215,15 @@ class E2ELidar(Planner):
             import numpy as np
 
             # 訓練側(`sim/gym_env.py`の`_obs()`・`ml_lidar/env.py`の`_to_obs()`)と
-            # 揃える: 点群のあとに自車速度・現在の平滑化後ステア角を1個ずつ足す。
-            # 速度が無ければ0（停止中の既定）。ステア角は`self._steer`——
-            # このメソッド内でまだ更新されていない「前回ステップの値」を使うことで、
-            # 学習側（`SimE2EEnv._obs()`が`step()`内で更新済みの`self._steer`を返す
+            # 揃える: 点群のあとに自車速度・現在のステア角を1個ずつ足す。
+            # 速度が無ければ0（停止中の既定）。ステア角は`self._steer_target`
+            # （v13: 舵角速度を積分した、方策が直接制御する目標舵角。`steer_tau`
+            # フィルタより前の値）——このメソッド内でまだ更新されていない
+            # 「前回ステップの値」を使うことで、学習側（`ml_lidar/env.py`の
+            # `_to_obs()`が`step()`内で更新済みの`self._steer_target`を返す
             # ＝次のreset()/step()呼び出し時点では「直前の指令で実現した状態」）と
-            # 同じ時系列の関係になる（2026-09-02追加）。
+            # 同じ時系列の関係になる（2026-09-02追加、2026-09-11に`self._steer`から
+            # `self._steer_target`へ変更——`env.py` EnvConfig docstring参照）。
             # ★`self._model_in_dim`（ONNXグラフ自身の宣言shape、`_load_from_path()`
             # 参照）で末尾に足す個数を決める——点群+速度のみ(362次元、OBS_DIM拡張前の
             # v9以前のモデル)なら速度だけ、点群+速度+ステア(363次元、v10以降)なら
@@ -217,7 +235,7 @@ class E2ELidar(Planner):
             scan_n = np.asarray(w.dist, dtype=np.float32) / self._max_range
             extra_dim = self._model_in_dim - len(scan_n)
             if extra_dim >= 2:
-                steer_norm_in = max(-1.0, min(1.0, self._steer / self._model_max_steer)) \
+                steer_norm_in = max(-1.0, min(1.0, self._steer_target / self._model_max_steer)) \
                     if self._model_max_steer > 0 else 0.0
                 extra = [speed_norm_in, steer_norm_in]
             else:
@@ -234,16 +252,19 @@ class E2ELidar(Planner):
             return st
 
         # `ml_lidar/env.py` の `_to_physical()` と対になる後処理（[-1,1]でクリップしてから
-        # 学習時のレンジに戻す）。最大舵角は`p`（GUI）ではなく`config/vehicle.toml`の
+        # 学習時のレンジに戻す）。`steer_norm`は舵角速度（v13、`env.py` EnvConfig
+        # docstring参照）——`self._steer_target`（方策が直接制御する目標舵角）を
+        # 積分・クランプしてから使う。最大舵角は`p`（GUI）ではなく`config/vehicle.toml`の
         # 車両物理限界（`self.vehicle.max_steer`）でもう一段絞る。`max_speed`は
         # 引き続きGUIの安全側クランプ（`p["max_speed"]`）を使う
         steer_norm = max(-1.0, min(1.0, steer_norm))
         speed_norm = max(-1.0, min(1.0, speed_norm))
-        steer = steer_norm * self._model_max_steer
+        self._steer_target = max(-self._model_max_steer, min(self._model_max_steer,
+            self._steer_target + steer_norm * self._model_steer_rate_max_rad_s * dt))
         speed = (speed_norm + 1.0) * 0.5 * self._model_max_speed
 
         max_steer, max_speed = self.vehicle.max_steer, p["max_speed"]
-        target = max(-max_steer, min(max_steer, steer))
+        target = max(-max_steer, min(max_steer, self._steer_target))
 
         # ★舵の平滑化（時間ベースの1次遅れ）。詳細は `steer_tau` の note 参照
         # （バンビが実車で「舵角の決定が少し不安定」と気づいたのがきっかけ）

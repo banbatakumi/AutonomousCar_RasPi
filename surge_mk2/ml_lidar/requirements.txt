@@ -22,3 +22,6 @@ matplotlib>=3.8
 
 # 操作パネル（`ml_lidar/app.py`）— Tkinter は Python 標準ライブラリ同梱なので
 # ここに依存を追加する必要は無い
+
+# CPU/メモリ使用率表示（`ml_common/sys_monitor.py`、`ml_lidar/app.py`から使用）
+psutil>=5.9

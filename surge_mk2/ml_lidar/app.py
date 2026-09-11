@@ -41,10 +41,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from ml_common.close_handler import confirm_and_close  # noqa: E402
 from ml_common.job_runner import JobRunner  # noqa: E402
-from ml_common.log_console import LogConsole  # noqa: E402
-from ml_common.naming import list_versioned_names, next_versioned_name  # noqa: E402
+from ml_common.log_window import LogWindow  # noqa: E402
+from ml_common.naming import latest_run_name, list_versioned_names, next_versioned_name  # noqa: E402
 from ml_common.notes import read_note, write_note  # noqa: E402
 from ml_common.paths import make_rel  # noqa: E402
+from ml_common.sys_monitor import SysMonitorWindow  # noqa: E402
 from ml_lidar.run_info import has_existing_run  # noqa: E402
 
 __all__ = [
@@ -141,11 +142,13 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("SURGE Mk.2 — ml_lidar 学習・観戦・エクスポート")
-        root.geometry("820x760")
+        root.geometry("820x560")
 
         self.python = sys.executable
         self.tensorboard_bin = str(Path(self.python).parent / "tensorboard")
         self.jobs = JobRunner(REPO_ROOT, allow_concurrent=True, prefix_labels=True)
+        self._suppress_export_sync = False
+        self.sys_monitor = SysMonitorWindow(self.root)
 
         self._build_widgets()
         self.root.after(100, self._drain_log)
@@ -170,17 +173,20 @@ class App:
         self.run_name_var.trace_add("write", self._on_run_name_changed)
         self._on_run_name_changed()
 
-        log_frame = ttk.LabelFrame(self.root, text="ログ")
-        log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.log_console = LogConsole(log_frame, height=12)
-        self.log_console.widget.pack(fill="both", expand=True, padx=4, pady=4)
+        self.log_window = LogWindow(self.root, height=24)
 
         jobs_frame = ttk.LabelFrame(self.root, text="実行中のジョブ")
         jobs_frame.pack(fill="x", padx=8, pady=(0, 8))
         self.jobs_listbox = tk.Listbox(jobs_frame, height=4)
         self.jobs_listbox.pack(side="left", fill="both", expand=True, padx=4, pady=4)
-        ttk.Button(jobs_frame, text="選択を停止", command=self._stop_selected).pack(
-            side="right", padx=4, pady=4, anchor="n")
+        btns_frame = ttk.Frame(jobs_frame)
+        btns_frame.pack(side="right", fill="y", padx=4, pady=4)
+        ttk.Button(btns_frame, text="選択を停止", command=self._stop_selected).pack(
+            fill="x", pady=(0, 2))
+        ttk.Button(btns_frame, text="ログを表示", command=self.log_window.show).pack(
+            fill="x", pady=2)
+        ttk.Button(btns_frame, text="CPU/メモリを表示", command=self.sys_monitor.show).pack(
+            fill="x", pady=(2, 0))
 
     # ── run名（①③タブ・run一覧タブで共有） ──
 
@@ -216,6 +222,10 @@ class App:
         names = list_versioned_names(RUNS_DIR)
         self.run_combo["values"] = names
         self.export_run_combo["values"] = names
+        if not self.export_run_var.get().strip() and names:
+            self._suppress_export_sync = True
+            self.export_run_var.set(latest_run_name(RUNS_DIR))
+            self._suppress_export_sync = False
         self.runs_listbox_names = names
         self.runs_listbox.delete(0, "end")
         for n in names:
@@ -236,13 +246,23 @@ class App:
             row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
 
         basic = {
-            "total-timesteps": ("学習ステップ総数", "1000000"),
+            # v15(2026-09-11): steer_rate_max_rad_s=2.0のまま5M stepまで学習して
+            # 滑らかさ・衝突率とも全run中最良を達成した設定を既定にしている
+            # （PROGRESS.md参照。3.0は学習不足を疑わず上限値だけ上げたv14で試したが
+            # 不要と判明、2.0に戻した）
+            "total-timesteps": ("学習ステップ総数", "5000000"),
             "n-envs": ("並列環境数", "8"),
             "episode-s": ("1エピソードの打ち切り秒数", "30"),
             "max-speed": ("最高速度[m/s]", "2.0"),
-            "steer-rate-weight": ("ステア変化率ペナルティ重み", "0"),
+            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "2.0"),
+            # v16: ライン取りの汚さ(不要な微調整・切り続け)対策として新規導入。
+            # 生アクション(舵角速度指令)の絶対値そのものへの罰則——旧
+            # steer-rate-weight(隣接差分へのL1、手詰まり確定済み)とは別物
+            "steer-effort-weight": ("ステア実効ペナルティ重み", "0.02"),
             "sde-sample-freq": ("gSDEノイズ再サンプリング間隔[step]", "4"),
-            "log-std-init": ("探索ノイズ初期標準偏差(log)", "-3"),
+            # SB3既定(0.0)。-3はgSDE有効時専用の調整値(train_rl.pyの--log-std-init
+            # ヘルプ参照)なので、gSDEチェックボックスの状態に連動させて切り替える
+            "log-std-init": ("探索ノイズ初期標準偏差(log)", "0.0"),
             "seed": ("乱数シード", "0"),
         }
         # 最大舵角は`config/vehicle.toml`固定（`ml_lidar/env.py`のEnvConfig docstring参照）
@@ -253,29 +273,29 @@ class App:
             self._train_basic_vars[key] = var
             ttk.Label(frame, text=f"{label}:").grid(row=i, column=0, sticky="w", pady=2)
             ttk.Entry(frame, textvariable=var, width=14).grid(row=i, column=1, sticky="w", pady=2)
-            if key == "steer-rate-weight":
-                ttk.Label(frame, foreground="gray", wraplength=380, justify="left",
-                         text="0で無効。v7〜v10でL1罰則の重みを0/0.03/0.1/0.2と振ったところ"
-                              "重みを付けるほど単調に悪化した(2026-09-09実測、PROGRESS.md参照)。"
-                              "gSDEを検証する間は切り分けのため0のままにすること").grid(
-                    row=i, column=2, sticky="w", padx=(8, 0), pady=2)
-            if key == "sde-sample-freq":
-                ttk.Label(frame, foreground="gray", wraplength=380, justify="left",
-                         text="下の「gSDEを有効化」がオフなら無視される。小さいほど通常の"
-                              "毎ステップノイズに近づき、大きいほど探索が単調になる").grid(
-                    row=i, column=2, sticky="w", padx=(8, 0), pady=2)
-            if key == "log-std-init":
-                ttk.Label(frame, foreground="gray", wraplength=380, justify="left",
-                         text="gSDE有効時、実効ノイズがsqrt(方策潜在層の次元)倍に膨らむため"
-                              "既定0.0のままだとv11のように学習が崩壊する(2026-09-10実測)。"
-                              "-3前後を既定にしてある。gSDE無効なら影響小さいが変更しなくてよい").grid(
-                    row=i, column=2, sticky="w", padx=(8, 0), pady=2)
 
         use_sde_row = 2 + len(basic)
+        # 既定OFF: 現状最良のv15(2026-09-11)が実際にuse_sde=Falseで学習されていた
+        # ことをモデルファイルから確認済み(PROGRESS.md参照)。v13/v14はgSDE有効
+        # だったが、v15はそれに加えて学習ステップを3M→5Mに増やしたのと同時に
+        # gSDEも無効化しており、どちらの変更が効いたかは未分離。次のv16は
+        # v15の実際の設定(gSDE OFF)を引き継ぎ、steer-effort-weightだけを
+        # 新変数にするのが一変数ずつの原則に合う
         self.use_sde_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="gSDE(状態依存の相関探索ノイズ)を有効化",
                         variable=self.use_sde_var).grid(
             row=use_sde_row, column=0, columnspan=2, sticky="w", pady=(4, 2))
+
+        def _sync_log_std_init(*_args: object) -> None:
+            # log-std-initが既定値のまま(未手動編集)の場合だけ追従させる。
+            # -3はgSDE有効時専用の調整値なのでOFF時に残ると探索が潰れる(過去の指摘事項)
+            var = self._train_basic_vars["log-std-init"]
+            if self.use_sde_var.get() and var.get() == "0.0":
+                var.set("-3")
+            elif not self.use_sde_var.get() and var.get() == "-3":
+                var.set("0.0")
+
+        self.use_sde_var.trace_add("write", _sync_log_std_init)
 
         next_row = use_sde_row + 1
         adv_toggle_row = next_row
@@ -401,11 +421,6 @@ class App:
 
         live_frame = ttk.LabelFrame(frame, text="学習中runをライブ観戦（自動更新・複数コース並列）")
         live_frame.grid(row=0, column=0, columnspan=3, sticky="we")
-        ttk.Label(live_frame,
-                 text="学習中の`checkpoints/`を自動で追いかけて表示します（エクスポート不要）。\n"
-                      "直線主体・コーナー主体・中間の3コースを同時に表示します。\n"
-                      "学習と同時に見るとCPUを取り合うため、学習速度は多少落ちます。",
-                 foreground="gray").grid(row=0, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
 
         self.live_watch_run_var = tk.StringVar(value="")
         ttk.Label(live_frame, text="run名:").grid(row=1, column=0, sticky="w", padx=4, pady=(6, 6))
@@ -428,9 +443,6 @@ class App:
 
         final_frame = ttk.LabelFrame(frame, text="最終確認（エクスポート済みモデル）")
         final_frame.grid(row=1, column=0, columnspan=3, sticky="we", pady=(10, 0))
-        ttk.Label(final_frame, text="実車と同じ推論コード（`raspi/auto/e2e_lidar.py`）で"
-                                   "別ウィンドウに走行を表示します。",
-                 foreground="gray").grid(row=0, column=0, columnspan=3, sticky="w", padx=4, pady=(4, 0))
 
         self.watch_model_var = tk.StringVar(value="")
         ttk.Label(final_frame, text="モデル:").grid(row=1, column=0, sticky="w", padx=4, pady=(8, 0))
@@ -447,8 +459,6 @@ class App:
         self.watch_course_combo.grid(row=2, column=1, sticky="w", pady=(8, 0))
         self.watch_course_combo["postcommand"] = lambda: self.watch_course_combo.configure(
             values=["（ランダムコース）", *list_custom_course_names()])
-        ttk.Label(final_frame, text="自作コース（`sim/courses/`）は目視確認専用で、学習には使いません",
-                 foreground="gray").grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
 
         def run() -> None:
             name = self.watch_model_var.get().strip()
@@ -474,8 +484,11 @@ class App:
         self.export_run_combo = ttk.Combobox(frame, textvariable=self.export_run_var, width=20)
         self.export_run_combo.grid(row=0, column=1, sticky="w")
         self.export_run_combo["postcommand"] = self._refresh_run_names
-        self.export_run_var.trace_add("write", lambda *_: self.run_name_var.set(
-            self.export_run_var.get()))
+
+        def _sync_export_to_run(*_args) -> None:
+            if not self._suppress_export_sync:
+                self.run_name_var.set(self.export_run_var.get())
+        self.export_run_var.trace_add("write", _sync_export_to_run)
 
         self.export_source_var = tk.StringVar(value="best_model")
         ttk.Label(frame, text="元にするモデル:").grid(row=1, column=0, sticky="w", pady=(8, 0))
@@ -523,12 +536,10 @@ class App:
         ttk.Separator(frame, orient="horizontal").grid(
             row=4, column=0, columnspan=3, sticky="we", pady=8)
 
-        ttk.Label(frame, text="複数シード・複数コースでの統計評価（完走率・衝突率など）",
-                 foreground="gray").grid(row=5, column=0, columnspan=3, sticky="w")
         self.eval_episodes_var = tk.StringVar(value="60")
-        ttk.Label(frame, text="エピソード数:").grid(row=6, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="エピソード数:").grid(row=5, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(frame, textvariable=self.eval_episodes_var, width=10).grid(
-            row=6, column=1, sticky="w", pady=(4, 0))
+            row=5, column=1, sticky="w", pady=(4, 0))
 
         def run_eval_stats() -> None:
             src = source_path()
@@ -543,7 +554,7 @@ class App:
             self._run("eval_stats", cmd, "統計評価")
 
         ttk.Button(frame, text="統計評価を実行", command=run_eval_stats).grid(
-            row=7, column=0, sticky="w", pady=(6, 0))
+            row=6, column=0, sticky="w", pady=(6, 0))
 
     # ── ④ run一覧タブ ──
 
@@ -592,7 +603,7 @@ class App:
     # ── サブプロセス実行・ログ配線 ──
 
     def _append_log(self, text: str) -> None:
-        self.log_console.append(text)
+        self.log_window.append(text)
 
     def _run(self, job_key: str, cmd: list[str], label: str, *,
             on_line: Callable[[str], None] | None = None,

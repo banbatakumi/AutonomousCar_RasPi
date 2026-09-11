@@ -171,7 +171,8 @@ def build_env_config(args: argparse.Namespace) -> EnvConfig:
         max_range=args.max_range,
         max_speed=args.max_speed,
         steer_tau=args.steer_tau,
-        steer_rate_weight=args.steer_rate_weight,
+        steer_rate_max_rad_s=args.steer_rate_max_rad_s,
+        steer_effort_weight=args.steer_effort_weight,
         dynamics_jitter_frac=args.dynamics_jitter_frac,
     )
 
@@ -375,12 +376,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fov-deg", type=float, default=270.0)
     p.add_argument("--max-range", type=float, default=10.0, help="[m] LiDAR観測レンジ")
     p.add_argument("--steer-tau", type=float, default=0.10, help="[s] プランナ側の舵平滑化")
-    p.add_argument("--steer-rate-weight", type=float, default=0.0,
-                   help="生アクションa[0](-1..1、フィルタ前)の隣接ステップ差分への罰則重み。"
-                        "既定0(無効)。v8でv1〜v7の生アクション振動(env.py docstring参照)に"
-                        "対処するため導入。強すぎると過度に保守的な方策に倒れるので、"
-                        "eval_stats.pyのステア滑らかさ指標とcollision_rate/mean_speedを"
-                        "同時に見ながら調整すること")
+    p.add_argument("--steer-rate-max-rad-s", type=float, default=2.0,
+                   help="[rad/s] a[0](-1..1)を舵角速度として解釈するスケール(v13、"
+                        "env.py EnvConfig docstring参照)。既定2.0はv1〜v12で実測した"
+                        "振動レート(0.6〜1.6rad/s)を明確に下回りつつ全舵角域(1.05rad)を"
+                        "約0.5秒で切れる値")
+    p.add_argument("--steer-effort-weight", type=float, default=0.0,
+                   help="生アクションa[0](-1..1、フィルタ前。v13以降は舵角速度指令)の"
+                        "絶対値への罰則重み。既定0(無効)。v16でライン取りの汚さ"
+                        "（不要な微調整・切り続け）を抑えるため導入(env.py docstring"
+                        "参照。旧`--steer-rate-weight`は隣接差分へのL1で手詰まりが"
+                        "確定し撤去済み——これは差分ではなく絶対値を見る別物)。"
+                        "強すぎると過度に保守的な方策に倒れるので、eval_stats.pyの"
+                        "ステア滑らかさ指標とcollision_rate/mean_speedを同時に見ながら"
+                        "調整すること")
 
     # ── 評価 ──
     p.add_argument("--eval-freq", type=int, default=20_000,
@@ -420,11 +429,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "arXiv:2005.05719)を有効化。毎ステップi.i.d.なガウス探索ノイズの"
                         "代わりに、方策特徴量に依存し`--sde-sample-freq`ステップごとにしか"
                         "再サンプリングしないノイズを使う——生アクションの振動(v7〜v10で"
-                        "reward側のsteer_rate_weightを0/0.03/0.1/0.2と振っても単調悪化する"
-                        "だけだったため探索ノイズの生成過程自体を変える方向、PROGRESS.md"
-                        "2026-09-10節参照)。報酬は変えないので`--steer-rate-weight`とは"
-                        "独立——両方同時に有効化すると切り分けができなくなるので、"
-                        "gSDE単体で試す間は`--steer-rate-weight 0`のままにすること")
+                        "reward側の(撤去済み)steer_rate_weightを0/0.03/0.1/0.2と振っても"
+                        "単調悪化するだけだったため探索ノイズの生成過程自体を変える方向、"
+                        "PROGRESS.md 2026-09-10節参照)。報酬は変えないので"
+                        "`--steer-effort-weight`とは独立——両方同時に有効化すると"
+                        "切り分けができなくなるので注意すること")
     p.add_argument("--sde-sample-freq", type=int, default=4,
                    help="gSDEのノイズ再サンプリング間隔[step]。小さいほど毎ステップ独立の"
                         "通常ノイズに近づき、大きいほど探索が単調になる。論文でPPOに対して"

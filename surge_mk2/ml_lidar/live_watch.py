@@ -145,6 +145,7 @@ def run(args: argparse.Namespace) -> None:
     from matplotlib.patches import Polygon
 
     set_japanese_font()
+    plt.style.use("dark_background")
 
     run_dir = RUNS_DIR / args.run_name
     env_cfg = load_saved_env_config(run_dir)
@@ -163,13 +164,20 @@ def run(args: argparse.Namespace) -> None:
 
     footprint = np.asarray(VehicleSpec.load().footprint)
 
-    fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 5.5))
-    if len(panels) == 1:
-        axes = [axes]
+    # 5本のeval固定コースを2行3列(6分割、1枠は空き)に並べる。
+    # 1行に並べていた旧レイアウトはウィンドウを小さくするとタイトルが重なった——
+    # constrained_layoutでウィンドウリサイズの都度、余白・タイトル位置を再計算させる
+    ncols = 3
+    nrows = -(-len(panels) // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 4.2 * nrows),
+                             constrained_layout=True)
+    axes_flat = np.asarray(axes).reshape(-1)
+    for ax in axes_flat[len(panels):]:
+        ax.axis("off")
     fig.suptitle(f"ml_lidar ライブ観戦 — run={args.run_name}")
 
     artists = []
-    for ax, panel in zip(axes, panels):
+    for ax, panel in zip(axes_flat, panels):
         ax.set_aspect("equal")
         course = panel.base_env.course
         h, w = course.grid.shape
@@ -178,7 +186,7 @@ def run(args: argparse.Namespace) -> None:
         ax.imshow(course.grid, extent=extent, origin="lower", cmap="Greys",
                  vmin=0, vmax=1, alpha=0.6)
         body_poly = Polygon(np.zeros((4, 2)), closed=True, facecolor="tab:blue",
-                            edgecolor="black", zorder=5)
+                            edgecolor="white", zorder=5)
         ax.add_patch(body_poly)
         scatter = ax.scatter([], [], s=3, c="tab:red", zorder=4)
         title = ax.set_title(panel.name)

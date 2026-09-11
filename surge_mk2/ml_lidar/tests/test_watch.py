@@ -45,7 +45,8 @@ def _train_and_export_tiny_model(tmp_dir: Path) -> Path:
     onnx_path = tmp_dir / "watch_smoke.onnx"
     export_onnx_rl.export_model(model, onnx_path)
     (tmp_dir / "watch_smoke.json").write_text(
-        '{"fov_deg": 60.0, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}',
+        '{"fov_deg": 60.0, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5, '
+        '"steer_rate_max_rad_s": 2.0}',
         encoding="utf-8")
     return onnx_path
 

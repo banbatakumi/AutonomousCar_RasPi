@@ -1129,7 +1129,8 @@ class TestE2ELidar(unittest.TestCase):
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_dummy_e2e_model(model_path)
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
             st = p.plan(corridor(180), None, E2ELidar.merged({}), 0.1)
@@ -1151,7 +1152,7 @@ class TestE2ELidar(unittest.TestCase):
             _make_dummy_e2e_model(model_path, in_dim=362)   # 旧OBS_DIM
             model_path.with_suffix(".json").write_text(json.dumps(
                 {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
-                 "in_dim": 362}))
+                 "steer_rate_max_rad_s": 2.0, "in_dim": 362}))
 
             p = E2ELidar(model_path=model_path)
             self.assertEqual(p._model_in_dim, 362)
@@ -1166,7 +1167,8 @@ class TestE2ELidar(unittest.TestCase):
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_dummy_e2e_model(model_path)     # w[1,-2]=1.0: speed_norm = 入力の末尾から2番目
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 2.0}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 2.0,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
             # p["max_speed"]（GUI側の安全クランプ、既定1.0）に速度差が飲まれないよう
@@ -1184,23 +1186,28 @@ class TestE2ELidar(unittest.TestCase):
             self.assertGreater(st_half.target_speed, st_zero.target_speed)
 
     def test_previous_steer_feeds_into_the_next_model_input(self):
-        """②観測へのステア状態追加（2026-09-02）: 観測の末尾に「現在の平滑化後
-        ステア角/max_steer」が乗る。`self._steer`はこの呼び出しではまだ更新前
-        （前回の`plan()`が残した値）なので、直接差し込んで確認する
-        （`test_vehicle_speed_feeds_into_the_model_input`と同じ直接注入の流儀）。
-        `steer_tau=0`で出力側の平滑化を無効にし、round-tripをそのまま見える形にする。
+        """②観測へのステア状態追加（2026-09-02）: 観測の末尾に「方策が直接制御する
+        目標舵角(`self._steer_target`)/max_steer」が乗る。`self._steer_target`は
+        この呼び出しではまだ更新前（前回の`plan()`が残した値）なので、直接差し込んで
+        確認する（`test_vehicle_speed_feeds_into_the_model_input`と同じ直接注入の
+        流儀）。v13: `steer_norm`は舵角速度として`_steer_target`に積分されるので、
+        往復関係は「積分後の値」で確認する（`steer_tau=0`で出力側の平滑化は無効化）。
         """
         with tempfile.TemporaryDirectory() as d:
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_steer_echo_e2e_model(model_path)   # w[0,-1]=1.0: steer_norm = 入力の末尾
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
-            p._steer = 0.2   # 「前回ステップまでに実現していた実ステア角」を模する
+            p._steer_target = 0.2   # 「前回ステップまでに積分していた目標舵角」を模する
             scan = corridor(180, open_dist=5.0)
             st = p.plan(scan, None, E2ELidar.merged({"steer_tau": 0.0}), 0.1)
-            self.assertAlmostEqual(st.target_steer, 0.2, places=4)
+            # echoモデルはsteer_norm_in(=0.2/0.45)をそのまま出力し、それが舵角速度として
+            # 0.2へ積分で足し込まれる
+            expected = 0.2 + (0.2 / 0.45) * 2.0 * 0.1
+            self.assertAlmostEqual(st.target_steer, expected, places=4)
 
     def test_front_obstacle_forces_stop_regardless_of_model_output(self):
         """★独立安全策: モデルが前進を指示しても正面が詰まっていれば止める。"""
@@ -1208,7 +1215,8 @@ class TestE2ELidar(unittest.TestCase):
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_dummy_e2e_model(model_path)
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
             scan = make_scan({d: 0.1 for d in range(-15, 16)}, default=5.0)
@@ -1243,13 +1251,20 @@ class TestE2ELidar(unittest.TestCase):
             onnx.save(model, str(model_path))
             model_path.with_suffix(".json").write_text(json.dumps(
                 {"fov_deg": 360, "max_range": 5.10, "max_steer": model_max_steer,
-                 "max_speed": 1.5}))
+                 "max_speed": 1.5, "steer_rate_max_rad_s": 5.0}))
 
             p = E2ELidar(model_path=model_path)
-            st = p.plan(corridor(180, open_dist=5.0), None, E2ELidar.merged({}), 0.1)
-            # モデル側のレンジ(model_max_steerいっぱい)まで出力が出ようとしても、
+            scan = corridor(180, open_dist=5.0)
+            params = E2ELidar.merged({})
+            st = None
+            # v13: steer_normは舵角速度なので、model_max_steerいっぱいまで
+            # 積分が飽和するには複数stepかかる。steer_tau込みで収束するまで回す
+            for _ in range(30):
+                st = p.plan(scan, None, params, 0.1)
+            # モデル側のレンジ(model_max_steerいっぱい)まで積分が飽和しようとしても、
             # 車両限界で頭打ちになっているはず
             self.assertLessEqual(abs(st.target_steer), vehicle_max_steer + 1e-9)
+            self.assertGreater(st.target_steer, vehicle_max_steer - 0.05)
 
     # ── 平滑化と初期化（2026-08-29追加。`de`/`ftg`と同じ`steer_tau`の仕組み） ──
 
@@ -1261,7 +1276,8 @@ class TestE2ELidar(unittest.TestCase):
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_constant_steer_e2e_model(model_path, steer_norm=1.0)
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
             scan = corridor(180, open_dist=5.0)
@@ -1279,7 +1295,8 @@ class TestE2ELidar(unittest.TestCase):
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_constant_steer_e2e_model(model_path, steer_norm=1.0)
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
             scan = corridor(180, open_dist=5.0)
@@ -1294,15 +1311,23 @@ class TestE2ELidar(unittest.TestCase):
             self.assertLess(p.plan(scan, None, params, 0.1).target_steer, converged)
 
     def test_steer_tau_zero_disables_smoothing(self):
+        """`steer_tau=0`はサーボ応答の平滑化(steer_tau層)だけを無効化する。v13で
+        追加した舵角速度の積分(steer_rate_max_rad_s層)は別の仕組みなので、tau=0でも
+        目標舵角には瞬時に届かない——ここではレート制限層が飽和した後、tau=0なら
+        その値にラグ無く追従することを確認する。"""
         with tempfile.TemporaryDirectory() as d:
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_constant_steer_e2e_model(model_path, steer_norm=1.0)
             model_path.with_suffix(".json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(model_path=model_path)
             scan = corridor(180, open_dist=5.0)
-            st = p.plan(scan, None, E2ELidar.merged({"steer_tau": 0.0}), 0.1)
+            params = E2ELidar.merged({"steer_tau": 0.0})
+            st = None
+            for _ in range(5):   # 0.45 / (2.0*0.1) = 2.25 stepで積分が飽和するのに十分な回数
+                st = p.plan(scan, None, params, 0.1)
             self.assertAlmostEqual(st.target_steer, 0.45, places=5)
 
     def test_reload_if_changed_picks_up_a_named_model(self):
@@ -1311,7 +1336,8 @@ class TestE2ELidar(unittest.TestCase):
             models_dir = Path(d)
             _make_dummy_e2e_model(models_dir / "alpha.onnx")
             (models_dir / "alpha.json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(models_dir=models_dir)
             st = p.plan(make_scan(), None, E2ELidar.merged({}), 0.1)
@@ -1328,7 +1354,8 @@ class TestE2ELidar(unittest.TestCase):
             models_dir = Path(d)
             _make_dummy_e2e_model(models_dir / "alpha.onnx")
             (models_dir / "alpha.json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(models_dir=models_dir)
             self.assertTrue(p.reload_if_changed("alpha"))
@@ -1343,7 +1370,8 @@ class TestE2ELidar(unittest.TestCase):
             models_dir = Path(d)
             _make_dummy_e2e_model(models_dir / "alpha.onnx")
             (models_dir / "alpha.json").write_text(json.dumps(
-                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5}))
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
 
             p = E2ELidar(models_dir=models_dir)
             self.assertFalse(p.reload_if_changed(""))
