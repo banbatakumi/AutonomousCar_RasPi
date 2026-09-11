@@ -67,6 +67,11 @@ export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
         title="地図を削除"
         disabled={!ch}
         onClick={() => {
+          const msg =
+            phase === 'RACE'
+              ? '走行中です。本当に地図を削除しますか？（次の周期で制動がかかります）'
+              : '地図を削除しますか？'
+          if (!window.confirm(msg)) return
           ch?.clearMap()
           clearTrail()
         }}

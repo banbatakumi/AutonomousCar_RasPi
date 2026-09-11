@@ -427,7 +427,8 @@ CI（`.github/workflows/ci.yml`）と `tools/check.sh` が pytest に統一し�
 | 症状 | 原因 | 対処 |
 |---|---|---|
 | `.mcap` が開けない | **MCAP は `finish()` を呼んで初めて索引が書かれる。** 電源断や ssh 切断で尻切れになる | `python -m raspi.tools.mcap_repair <file> --inplace`。87MB のファイルから 10万件・画像 4869枚を救えた実績あり |
-| SD が埋まる | `.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 ＝ **1日 18GB** | `surge-logclean.timer` が毎時「7日超」と「合計 8GB 超過分」を消す。**`.mcap` は既定で SD に書かない**（GUI か `tools/record.sh` で PC に流す） |
+| SD が埋まる | `.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 ＝ **1日 18GB** | `surge-logclean.timer` が毎時「7日超」と「合計 8GB 超過分」を消す。**`.mcap` は既定で SD に書かない**（GUI か `tools/record.sh` で PC に流す）。加えて `io_node`/`logger_node` 自身が30秒ごとに空き容量[%]を見て、逼迫していれば警告・世代管理で古い順に削除する（`raspi/rec/logclean.py`。毎時タイマーより早く気づける・記録中のファイルは保護する点が異なる） |
+| それでも `.sfl`/`.mcap` の書き込み中に SD が満杯（ENOSPC） | 上の掃除が間に合わなかった・他プロセスが埋めた等 | `FrameLogWriter`/`McapLog` は `OSError` を握り潰し、以後そのファイルへの書き込みを止める（`broken`/`errors`/`last_error` に理由が残る）。**記録スレッドはクラッシュしない**——走行そのものは続く |
 | `.sfl` が途中で切れている | 追記のみ・索引なし | **前半は必ず読める。** これが `.sfl` を残している理由 |
 
 ### 8.10 点群がおかしい

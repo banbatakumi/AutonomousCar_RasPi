@@ -281,26 +281,37 @@ class Buzzer:
 
 @dataclass(slots=True)
 class HeartbeatStats:
-    """波形の実測。**Python でこれを回してよいかを判断する材料。**"""
+    """波形の実測。**Python でこれを回してよいかを判断する材料。**
+
+    `observe_late()` は専属スレッド（`Heartbeat._step`、100Hz）から、`as_dict()` は
+    `io_node._log_linkstats`（1Hz）から別スレッドで呼ばれる。`late_hist` への
+    書き込みと `as_dict()` の反復が競合すると、新規バケットキー追加中に
+    `dict(self.late_hist)` が走って `RuntimeError: dictionary changed size during
+    iteration` で落ちうる。`raspi/core/cleanup.py` の ★C7 と同じロックパターンで守る。
+    """
 
     edges: int = 0                 #: 実際に出したエッジ数
     skipped: int = 0               #: kick 途絶で止めた回数
     stalls: int = 0                #: 止め始めた回数（連続した停止は1と数える）
     max_late_ns: int = 0           #: 予定時刻からの最大遅れ
     late_hist: dict[str, int] = field(default_factory=dict)   #: 遅れの分布
+    _lock: threading.Lock = field(default_factory=threading.Lock,
+                                   repr=False, compare=False)
 
     def observe_late(self, late_ns: int) -> None:
-        if late_ns > self.max_late_ns:
-            self.max_late_ns = late_ns
-        ms = late_ns / 1e6
-        b = ("<1ms" if ms < 1 else "<2ms" if ms < 2 else "<5ms" if ms < 5
-             else "<10ms" if ms < 10 else "<50ms" if ms < 50 else ">=50ms")
-        self.late_hist[b] = self.late_hist.get(b, 0) + 1
+        with self._lock:
+            if late_ns > self.max_late_ns:
+                self.max_late_ns = late_ns
+            ms = late_ns / 1e6
+            b = ("<1ms" if ms < 1 else "<2ms" if ms < 2 else "<5ms" if ms < 5
+                 else "<10ms" if ms < 10 else "<50ms" if ms < 50 else ">=50ms")
+            self.late_hist[b] = self.late_hist.get(b, 0) + 1
 
     def as_dict(self) -> dict:
-        return {"edges": self.edges, "skipped": self.skipped, "stalls": self.stalls,
-                "max_late_ms": round(self.max_late_ns / 1e6, 2),
-                "late_hist": dict(self.late_hist)}
+        with self._lock:
+            return {"edges": self.edges, "skipped": self.skipped, "stalls": self.stalls,
+                    "max_late_ms": round(self.max_late_ns / 1e6, 2),
+                    "late_hist": dict(self.late_hist)}
 
 
 class Heartbeat:

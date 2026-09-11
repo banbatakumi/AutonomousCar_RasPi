@@ -368,6 +368,24 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         finally:
             ring.unlink()
 
+    def test_model_unavailable_with_new_select_seq_never_reads_frame(self):
+        """モデル未配置（`_factory.available=False`）の間は、新規選択
+        （`select_seq`が進む）が来ていても読まない。
+
+        `_try_select()`はモデルが無ければ`select_seq`を消費せずに`False`を
+        返し続けるので、ここを見ずに読み続けると`_state=="IDLE"`のまま
+        `need_frame`が永久に`True`になり、IDLE中CPU消費バグ
+        （2026-09-04修正）が別経路で再発する（回帰防止）。
+        """
+        node = CamTrackNode(vehicle=_vehicle_straight(),
+                            factory=_FakeFactory([], available=False))
+        roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
+        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
+        pub = _FakePub()
+        with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+        mock_read.assert_not_called()
+
 
 class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
     """省電力: DISARM中はROI選択済み/追跡中でもフレームを読まない。
@@ -421,6 +439,43 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
                        return_value=None) as mock_read:
                 node.run(sub=sub, pub=pub, duration_s=0.05)
             mock_read.assert_called()
+        finally:
+            ring.unlink()
+
+
+class TestRunSurvivesProcessCycleException(unittest.TestCase):
+    """`process_cycle()` が例外を投げてもノードが継続すること。
+
+    `planning_node._replan()` の `planner.plan()` 例外保護（B3）と同じパターンを
+    `run()` 側の呼び出しにも横展開したもの——`process_cycle()`内部のバグで
+    ノード全体を巻き込んで落とさず、`tracking=False`（未選択扱い）に自然に落とす。
+    """
+
+    def test_exception_does_not_propagate_and_falls_back_to_not_tracking(self):
+        node = CamTrackNode(vehicle=_vehicle_straight(),
+                            factory=_FakeFactory([(100, 100, 50, 50)]))
+
+        def _raise(*a, **kw):
+            raise RuntimeError("process_cycle内部のバグ")
+        node.process_cycle = _raise
+
+        ring = FrameRing.create("surge_test_track_exc", 32, 24, "RGB888", n_slots=2)
+        try:
+            data = np.zeros((24, 32, 3), dtype=np.uint8)
+            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                           frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                           fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+            roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi,
+                            TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
+
+            self.assertTrue(pub.sent, "track/target が一度も publish されていない")
+            _, last = pub.sent[-1]
+            self.assertFalse(last.tracking,
+                             "process_cycle()が例外を投げたのにtracking=Trueになっている")
         finally:
             ring.unlink()
 

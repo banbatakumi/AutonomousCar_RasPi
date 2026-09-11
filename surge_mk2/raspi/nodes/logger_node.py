@@ -74,11 +74,17 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
+from raspi.rec import logclean  # noqa: E402
 from raspi.rec.mcap_log import McapLog, default_mcap_path  # noqa: E402
 
 __all__ = ["LoggerNode", "DEFAULT_TOPICS", "IMAGE_TOPICS"]
 
 NS = 1_000_000_000
+
+#: ディスク空き容量チェックの間隔。`io_node.py` の `DISK_CHECK_INTERVAL_S` と同じ
+#: 理由（`raspi/rec/logclean.py`）。**`.mcap` は `.sfl` より書き込みが重い
+#: （実測 10.3MB/分）ので、こちらの方が早く満杯へ向かいうる**
+DISK_CHECK_INTERVAL_S = 30.0
 
 #: 記録するトピック。**`image/` は接頭辞購読**にして両カメラをまとめて取る
 DEFAULT_TOPICS = [
@@ -152,6 +158,7 @@ class LoggerNode:
         self.t_start = time.monotonic()
         end = self.t_start + duration_s if duration_s else None
         next_status = 0.0
+        next_disk_check = 0.0
 
         try:
             while self._running:
@@ -166,8 +173,37 @@ class LoggerNode:
                 if status_cb and now_wall >= next_status:
                     status_cb(self)
                     next_status = now_wall + 0.5
+
+                if now_wall >= next_disk_check:
+                    next_disk_check = now_wall + DISK_CHECK_INTERVAL_S
+                    self._check_disk_space()
         finally:
             self._running = False
+
+    def _check_disk_space(self) -> None:
+        """SD に書いている間だけ、空き容量を見て警告・世代管理で削除する。
+
+        `-o -`（標準出力へ流す。SD を一切使わない経路）のときは何もしない。
+        `io_node.py` の `IoNode._check_disk_space` と同じ理由（`raspi/rec/logclean.py`）。
+        """
+        if self.log.path is None:
+            return
+        log_dir = self.log.path.parent
+        if not log_dir.exists():
+            return
+        status = logclean.check_disk(log_dir, protect={self.log.path})
+        if status.error is not None:
+            return
+        if status.deleted:
+            names = ", ".join(status.deleted[:5])
+            if len(status.deleted) > 5:
+                names += f" 他{len(status.deleted) - 5}件"
+            sys.stderr.write(f"\n!! ディスク空き {status.free_pct:.1f}% のため "
+                             f"古いログ{len(status.deleted)}件を自動削除: {names}\n")
+        elif status.warned:
+            sys.stderr.write(f"\n!! ディスク空き {status.free_pct:.1f}%"
+                             f"（残り{status.free_bytes / 1e9:.2f}GB）"
+                             "— 記録容量が逼迫しています\n")
 
     def _on_msg(self, topic: str, msg) -> None:
         self.log.write(_mcap_topic(topic), msg)
@@ -224,7 +260,9 @@ def _status(node: LoggerNode) -> None:
         f"\r{el:6.1f}s  {node.log.size_text:>8}  "
         f"state={n.get('/vehicle_state', 0)} scan={n.get('/scan', 0)} "
         f"img={node.images_written} 計{node.log.written}件 "
-        f"({node.log.written / el:.0f}/s)    ")
+        f"({node.log.written / el:.0f}/s)"
+        + (f"  !!書き込みエラー{node.log.errors}回" if node.log.errors else "")
+        + "    ")
     sys.stderr.flush()
 
 

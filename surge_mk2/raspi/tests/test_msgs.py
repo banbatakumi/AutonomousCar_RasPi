@@ -297,6 +297,37 @@ class TestCommandGate(unittest.TestCase):
             allow_arm=True, max_accel=None)
         self.assertEqual(c.accel_limit, round(5.0 / 1e-3))
 
+    def test_accel_limit_and_steer_rate_limit_scale_follow_command_meta(self):
+        """`accel_limit`/`steer_rate_limit` は `_SPEED`/`_YAW_RATE` の流用ではなく
+        `Command.META` を直接参照すること。
+
+        偶然どちらも 0.001 で一致しているため、手書き定数の流用でも普段は
+        正しい値が出てしまう。`protocol.toml` 側でどちらか一方だけスケールが
+        変わったのを模して `Command.META` を書き換え、変換結果が追従するか
+        （＝ズレが検出できるか）を見る。追従しなければ、convert.py がどこかで
+        `_SPEED`/`_YAW_RATE` 等の無関係な定数に固定されている。
+        """
+        import importlib
+
+        from raspi.msgs import convert as convert_mod
+
+        patched_meta = dict(packets.Command.META)
+        patched_meta["accel_limit"] = (0.01, "m/s2")       # 元は 0.001
+        patched_meta["steer_rate_limit"] = (0.0005, "rad/s")  # 元は 0.001
+        original_meta = packets.Command.META
+        try:
+            packets.Command.META = patched_meta
+            importlib.reload(convert_mod)
+            c = convert_mod.command_from_cmd(
+                DriveCmd(mode=1, arm=True, target_speed=1.0,
+                         accel_limit=5.0, steer_rate_limit=2.0),
+                allow_arm=True)
+            self.assertEqual(c.accel_limit, round(5.0 / 0.01))
+            self.assertEqual(c.steer_rate_limit, round(2.0 / 0.0005))
+        finally:
+            packets.Command.META = original_meta
+            importlib.reload(convert_mod)  # 後続テストに影響しないよう元のスケールへ戻す
+
 
 class TestCommandAuxiliaries(unittest.TestCase):
     """v0.5 で増えた灯火・パッシング・制動トルク。**値の意味が変わった箇所**を押さえる。"""

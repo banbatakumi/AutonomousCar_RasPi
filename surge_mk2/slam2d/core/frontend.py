@@ -182,7 +182,7 @@ class Frontend:
                 self.lost_streak = 0
                 self.relocs += 1
 
-        lost = m.searched and m.score < self.config.min_score
+        lost = m.searched and (not math.isfinite(m.score) or m.score < self.config.min_score)
         # 照合できなかった（点が既知セルにほとんど落ちない）のも、地図が
         # 育ったあとなら見失ったのと同じ。地図が空の最初だけは通す
         if not m.searched and self.grid.wall_mask().any():

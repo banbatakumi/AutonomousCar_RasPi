@@ -55,6 +55,18 @@ class TestRasterizeWalls(unittest.TestCase):
         # 全部埋まっているわけではない(中心線モードの「掘る」方式と違い、壁は薄い)
         self.assertLess(grid.sum(), grid.size * 0.5)
 
+    def test_zero_margin_does_not_crash(self):
+        """境界クリップが無い旧実装は、marginを0（またはそれ以下）にすると
+        `pad`がちょうど円盤の半径分しかなくなり、丸め次第で境界の壁スタンプが
+        格子からわずかにはみ出して`ValueError: operands could not be
+        broadcast together`でクラッシュしていた（手書きJSONでmarginを
+        0以下にするケースの再現）。"""
+        outer = _rect_loop(0.5)
+        for margin in (0.0, -0.01, -0.02):
+            grid, origin = rasterize_walls([outer], _THICKNESS, _RESOLUTION, margin)
+            self.assertEqual(grid.dtype, np.bool_)
+            self.assertGreater(grid.size, 0)
+
 
 class TestDeriveCenterline(unittest.TestCase):
     def test_annulus_start_yields_closed_centerline(self):

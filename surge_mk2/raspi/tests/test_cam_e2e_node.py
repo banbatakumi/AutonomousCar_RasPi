@@ -320,5 +320,48 @@ class TestStop(unittest.TestCase):
         self.assertFalse(thread.is_alive(), "stop() を呼んでも run() が終わらない")
 
 
+class TestRunSurvivesProcessFrameException(unittest.TestCase):
+    """`process_frame()` が例外を投げてもノードが継続すること。
+
+    `planning_node._replan()` の `planner.plan()` 例外保護（B3）と同じパターンを
+    `run()` 側の推論呼び出しにも横展開したもの——推論側のバグでノード全体を
+    巻き込んで落とさず、契約の「ready=False」に自然に落とす。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.models_dir = Path(self._tmp.name)
+        _make_dummy_regression_model(self.models_dir / "model_a.onnx", 32, 32)
+        (self.models_dir / "model_a.json").write_text(
+            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "max_steer": 0.524}')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_exception_does_not_propagate_and_falls_back_to_not_ready(self):
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(),
+                          infer_hz=1000.0)
+        node.reload_if_changed("model_a")
+        self.assertIsNotNone(node.model)
+
+        def _raise(*a, **kw):
+            raise RuntimeError("推論側のバグ")
+        node.process_frame = _raise
+
+        ring, ref = _ref_with_frame("surge_test_ce2e_exc")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
+
+            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+            self.assertTrue(cmds, "cam_e2e/cmd が一度も publish されていない")
+            self.assertFalse(cmds[-1].ready,
+                             "process_frame()が例外を投げたのにready=Trueになっている")
+        finally:
+            node.close()
+            ring.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

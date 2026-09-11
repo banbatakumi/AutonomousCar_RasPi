@@ -42,6 +42,12 @@ _ULTRASONIC = 0.02     # m (2cm/LSB)
 _LIDAR_MM = 1e-3       # m
 _LIDAR_C = 0.02        # m (2cm/LSB、255 は飽和)
 
+# `Command.accel_limit`/`steer_rate_limit` は `_SPEED`/`_YAW_RATE` と値が同じ（1e-3）だが、
+# 意味の異なるフィールドなので流用しない。`Command.META`（= protocol.toml 由来）を直接引く。
+# こうしておけば、どちらか一方だけスケールが変わっても手書き定数とズレて検出できる
+_ACCEL_LIMIT_SCALE = packets.Command.META["accel_limit"][0]
+_STEER_RATE_LIMIT_SCALE = packets.Command.META["steer_rate_limit"][0]
+
 # センサ角 sector_idx*30+i [deg] → 車両角 (360 - センサ角) % 360 [deg] の対応表。
 # 毎セクタ (120Hz) 組み立て直す意味がないので先に引いておく
 _DEG = [[(360 - s * 30 - i) % 360 for i in range(30)] for s in range(12)]
@@ -278,8 +284,8 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         mode=mode, flags=flags,
         target_speed=_clamp(speed / _SPEED, -32768, 32767),
         target_steer=_clamp(steer / _ANGLE, -32768, 32767),
-        accel_limit=_clamp(accel_limit / _SPEED, 0, 65535),
-        steer_rate_limit=_clamp(cmd.steer_rate_limit / _YAW_RATE, 0, 65535),
+        accel_limit=_clamp(accel_limit / _ACCEL_LIMIT_SCALE, 0, 65535),
+        steer_rate_limit=_clamp(cmd.steer_rate_limit / _STEER_RATE_LIMIT_SCALE, 0, 65535),
         brake_torque=_brake_torque_raw(cmd.brake_torque, max_torque),
         target_torque=torque_raw,
         flags2=flags2,

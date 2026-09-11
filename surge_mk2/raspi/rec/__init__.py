@@ -4,6 +4,8 @@
   実時間ループから直接叩ける。UART を流れたバイトそのものが残る
 - `mcap_log` … MCAP 書き出し。`mcap` に依存するので、**io_node には入れず**
   別プロセス（`logger_node`）とオフライン変換（`tools/sfl2mcap.py`）だけが使う
+- `logclean` … 記録先パーティションの空き容量監視と、世代管理での自動削除
+  （`surge-logclean.timer` との役割分担は `logclean.py` のモジュール docstring 参照）
 
 `mcap` が入っていない環境でも `from raspi.rec import FrameLogWriter` は通る。
 """
@@ -16,6 +18,7 @@ from .framelog import (
     LogRecord,
     default_log_path,
 )
+from .logclean import DiskStatus, check_disk, disk_free_pct
 
 __all__ = [
     "FileHeader",
@@ -24,6 +27,9 @@ __all__ = [
     "Kind",
     "LogRecord",
     "default_log_path",
+    "DiskStatus",
+    "check_disk",
+    "disk_free_pct",
 ]
 
 try:                                        # mcap があるときだけ

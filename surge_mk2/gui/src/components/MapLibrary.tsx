@@ -115,7 +115,17 @@ export function MapLibrary({ ch }: { ch: ControlChannel | null }) {
             <a href={`/maps/${encodeURIComponent(f.name)}`} download={`${f.name}.npz`}>
               DL
             </a>
-            <button onClick={() => ch?.mapsDelete(f.name)}>削除</button>
+            <button
+              onClick={() => {
+                const msg =
+                  phase === 'RACE'
+                    ? `走行中です。本当に「${f.name}」を削除しますか？`
+                    : `「${f.name}」を削除しますか？`
+                if (window.confirm(msg)) ch?.mapsDelete(f.name)
+              }}
+            >
+              削除
+            </button>
           </li>
         ))}
       </ul>

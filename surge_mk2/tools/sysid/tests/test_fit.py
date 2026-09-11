@@ -19,6 +19,7 @@ import numpy as np  # noqa: E402
 
 from tools.sysid.fit import (  # noqa: E402
     Sample,
+    _check_corner_saturated,
     _fit_first_order_with_delay,
     _skip_rate_limited_plateau,
     fit_accel,
@@ -142,6 +143,26 @@ class TestFitSteer(unittest.TestCase):
         result = fit_steer(samples)
         self.assertAlmostEqual(result["tau_steer_s"], true_tau, delta=true_tau * 0.1)
 
+    def test_raises_when_step_response_never_reaches_threshold(self):
+        """`steer_actual`がステップに追従しない（配線ミス等で実測が動いていない）
+        ログでは、0.0を黙って返さず`ValueError`を送出する——`fit_speed`の
+        `if not taus: raise ValueError(...)`と対称な設計であることの回帰テスト。
+
+        修正前は`_fit_first_order_with_delay`の失敗（10%しきい値未到達）が
+        `(0.0, 0.0)`としてそのまま中央値計算に混ざり、`fit_steer`が
+        `tau_steer_s`/`dead_time_s`ともに無警告で`0.0`を返していた。"""
+        samples = _simulate_steer(dead_time_s=0.03, tau_steer_s=0.15, rate_limit_rad_s=20.0,
+                                  amplitude_rad=math.radians(30), hold_s=1.2, cycles=4)
+        # steer_cmd_echoは正常にステップするが、steer_actual（実測）だけを
+        # 配線ミスを模して固定値0.0に潰す→応答が一度も10%しきい値に到達しない
+        broken = [Sample(t=s.t, target_speed=s.target_speed, target_steer=s.target_steer,
+                         brake=s.brake, speed=s.speed, steer_actual=0.0,
+                         steer_cmd_echo=s.steer_cmd_echo, yaw_rate=s.yaw_rate,
+                         accel_x=s.accel_x, tc_active=s.tc_active)
+                 for s in samples]
+        with self.assertRaises(ValueError):
+            fit_steer(broken)
+
 
 class TestSkipRateLimitedPlateau(unittest.TestCase):
     def test_pure_exponential_decay_is_not_treated_as_plateau(self):
@@ -213,6 +234,32 @@ class TestFitAccel(unittest.TestCase):
                                          tc_active=False, rng=rng)
         with self.assertRaises(ValueError):
             fit_accel(samples)
+
+
+class TestCheckCornerSaturated(unittest.TestCase):
+    def test_raises_instead_of_silently_skipping_when_low_stage_curvature_is_zero(self):
+        """最低速の段で曲率がほぼ0（ステアが効いていない・yaw_rateが出ていない等）
+        の場合、判定不能を黙って素通りさせず`ValueError`を送出する
+        （docstring『黙って判定を諦めない』を実装で担保する回帰テスト）。
+
+        修正前は`low_curvature < 1e-6`のとき無言で`return`しており、頭打ち
+        判定を一度も行わないまま`fit_corner`が`mu`を返してしまっていた。"""
+        samples: list[Sample] = []
+        t = 0.0
+        # 低速段: yaw_rateが常に0 → 曲率がほぼ0（ステア未入力・センサ異常等を想定）
+        for _ in range(100):
+            samples.append(Sample(t=t, target_speed=0.5, target_steer=0.0, brake=False,
+                                  speed=0.5, steer_actual=0.0, steer_cmd_echo=0.0,
+                                  yaw_rate=0.0, accel_x=0.0, tc_active=False))
+            t += DT
+        # 高速段: target_speedが十分変化し、2段目として検出されればよい
+        for _ in range(100):
+            samples.append(Sample(t=t, target_speed=1.5, target_steer=0.0, brake=False,
+                                  speed=1.5, steer_actual=0.0, steer_cmd_echo=0.0,
+                                  yaw_rate=0.05, accel_x=0.0, tc_active=False))
+            t += DT
+        with self.assertRaises(ValueError):
+            _check_corner_saturated(samples)
 
 
 class TestFitFirstOrderWithDelay(unittest.TestCase):

@@ -173,6 +173,75 @@ class TestIoNodeLogging(unittest.TestCase):
         self.assertGreater(len(link.sent), 0)
 
 
+class TestIoNodeDiskCheck(unittest.TestCase):
+    """`IoNode._check_disk_space`（`raspi/rec/logclean.py` の呼び出し側）の結線。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.path = Path(self._td.name) / "run.sfl"
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_old_sfl_is_deleted_and_active_one_is_protected(self):
+        from unittest import mock
+
+        old = Path(self._td.name) / "old.sfl"
+        old.write_bytes(b"x" * 1000)
+        t = time.time() - 1000
+        os.utime(old, (t, t))
+
+        link = FakeLink()
+        log = FrameLogWriter(self.path)
+        node = IoNode(link, log=log)
+        try:
+            usages = iter([_usage(100, 2), _usage(100, 10)])
+            with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                            side_effect=lambda _p: next(usages)):
+                node._check_disk_space()
+        finally:
+            log.close()
+
+        self.assertFalse(old.exists())
+        self.assertTrue(self.path.exists())         # 記録中の自分自身は守られる
+        self.assertAlmostEqual(node._disk_free_pct, 10.0)
+
+    def test_warn_without_deleting_when_above_critical(self):
+        from unittest import mock
+
+        link = FakeLink()
+        log = FrameLogWriter(self.path)
+        node = IoNode(link, log=log)
+        try:
+            with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                            return_value=_usage(100, 10)):   # 10% free: warn だが critical ではない
+                node._check_disk_space()
+        finally:
+            log.close()
+        self.assertAlmostEqual(node._disk_free_pct, 10.0)
+        self.assertTrue(self.path.exists())
+
+    def test_run_loop_calls_the_disk_check_without_crashing(self):
+        """`run()` の定期処理に乗っていること（配線そのものの確認）。"""
+        from unittest import mock
+
+        link = FakeLink()
+        log = FrameLogWriter(self.path)
+        node = IoNode(link, log=log)
+        with mock.patch.object(IoNode, "_check_disk_space") as spy:
+            node.run(duration_s=0.05)
+        log.close()
+        self.assertGreaterEqual(spy.call_count, 1)
+
+
+def _usage(total_gb: float, free_gb: float):
+    """`shutil.disk_usage` の戻り値と同じ形。"""
+    from unittest import mock
+    total = int(total_gb * 1e9)
+    free = int(free_gb * 1e9)
+    return mock.Mock(total=total, used=total - free, free=free)
+
+
 class TestIoNodeLogToggle(unittest.TestCase):
     """`log/ctrl`（GUI の記録ボタン）によるセッション中の開始/停止。"""
 

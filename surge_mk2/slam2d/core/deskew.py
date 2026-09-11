@@ -52,7 +52,7 @@ def deskew(raw: RawScan, twist: Twist2D, *,
     ang = raw.angles[idx]
     r = raw.ranges[idx]
     sat = raw.saturated[idx]
-    over = r > max_range
+    over = ~np.isfinite(r) | (r > max_range)
     rng = np.where(over, max_range, r)
     hit = ~sat & ~over
 

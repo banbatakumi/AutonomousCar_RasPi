@@ -278,12 +278,22 @@ class CamE2ENode:
                     else:
                         frame, t_capture = got
                         self._last_infer_ns = now
-                        steer_norm = self.process_frame(frame)
-                        cmd = CamE2ECmd(ready=True, steer_norm=steer_norm,
-                                        model_max_steer=self.model.max_steer,
-                                        lidar_front_dist=lidar_dist, lidar_seen=lidar_seen,
-                                        seq=seq, t_capture=t_capture)
-                        self._last_cmd = cmd
+                        try:
+                            steer_norm = self.process_frame(frame)
+                        except Exception as e:
+                            # 推論側のバグでノード全体を巻き込んで落とさない。
+                            # 契約の「ready=False」に自然に落とす
+                            # （`planning_node._replan()` と同じパターン）
+                            print(f"# cam_e2e process_frame() が例外: {e}",
+                                 file=sys.stderr, flush=True)
+                            cmd = self.failed_cmd(seq=seq, t_capture_ns=t_capture)
+                            self._last_cmd = None
+                        else:
+                            cmd = CamE2ECmd(ready=True, steer_norm=steer_norm,
+                                            model_max_steer=self.model.max_steer,
+                                            lidar_front_dist=lidar_dist, lidar_seen=lidar_seen,
+                                            seq=seq, t_capture=t_capture)
+                            self._last_cmd = cmd
             # **`cam_perception_node.py` と違い、間引き周期中も毎回 publish する。**
             # あちらは推論結果（内容）が変わらないので重複排除に任せてよいが、
             # ここは LiDAR 前方距離（安全策）が毎周期変わりうる値で、それを

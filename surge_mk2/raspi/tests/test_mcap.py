@@ -252,6 +252,79 @@ class TestMcapLog(unittest.TestCase):
         self.assertEqual(len(msgs["/vehicle_state"]), 10)
 
 
+@requires_mcap
+class TestMcapLogEnospc(unittest.TestCase):
+    """`self._w.add_message` が OSError（ENOSPC 等）で失敗したときの挙動。
+
+    `framelog.FrameLogWriter` の ENOSPC 保護（`test_framelog.TestEnospc`）と
+    同じ形。`logger_node.py` はこれを1本しか使わないので、`write()` が
+    投げっぱなしだと記録スレッドごと落ちる——それを防ぐのが目的。
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.path = Path(self._td.name) / "t.mcap"
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_write_does_not_raise_and_counts_the_error(self):
+        from unittest import mock
+
+        log = McapLog(self.path)
+        log._w.add_message = mock.Mock(
+            side_effect=OSError(28, "No space left on device"))
+        log.write("/cmd", DriveCmd())   # 例外を投げない
+        self.assertEqual(log.errors, 1)
+        self.assertIn("OSError", log.last_error)
+        self.assertEqual(log.written, 0)   # 書けていないのでカウントしない
+        log._w.add_message = mock.Mock()
+        log._w.finish = mock.Mock()
+        log._f.flush = mock.Mock()
+        log.close()
+
+    def test_once_broken_further_writes_are_skipped(self):
+        from unittest import mock
+
+        log = McapLog(self.path)
+        log._w.add_message = mock.Mock(
+            side_effect=OSError(28, "No space left on device"))
+        log.write("/cmd", DriveCmd())
+        calls_after_break = log._w.add_message.call_count
+        for _ in range(5):
+            log.write("/cmd", DriveCmd())
+        self.assertEqual(log._w.add_message.call_count, calls_after_break)
+        self.assertEqual(log.errors, 6)
+        log._w.add_message = mock.Mock()
+        log._w.finish = mock.Mock()
+        log._f.flush = mock.Mock()
+        log.close()
+
+    def test_write_dict_also_swallows_oserror(self):
+        from unittest import mock
+
+        log = McapLog(self.path)
+        log._w.add_message = mock.Mock(
+            side_effect=OSError(28, "No space left on device"))
+        log.write_viz_image(b"\xff\xd8\xff\xd9", "front", 0)   # write_dict 経由
+        self.assertEqual(log.errors, 1)
+        log._w.add_message = mock.Mock()
+        log._w.finish = mock.Mock()
+        log._f.flush = mock.Mock()
+        log.close()
+
+    def test_close_does_not_raise_when_finish_fails(self):
+        """索引が書けなくても `close()` はクラッシュしない
+        （索引無し MCAP は `tools/mcap_repair.py` で救える）。"""
+        from unittest import mock
+
+        log = McapLog(self.path)
+        log.write("/cmd", DriveCmd())
+        log._w.finish = mock.Mock(side_effect=OSError(28, "No space left on device"))
+        log.close()   # 例外を投げないこと自体が検証
+        self.assertGreaterEqual(log.errors, 1)
+
+
 # ── .sfl → .mcap ────────────────────────────────────────────────────────
 
 @requires_mcap
@@ -609,6 +682,80 @@ class TestLoggerNode(unittest.TestCase):
         finally:
             ring.close()
             ring.unlink()
+
+
+@requires_mcap
+class TestLoggerNodeDiskCheck(unittest.TestCase):
+    """`LoggerNode._check_disk_space`（`raspi/rec/logclean.py` の呼び出し側）。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._bus = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("SURGE_BUS_DIR")
+        os.environ["SURGE_BUS_DIR"] = self._bus.name
+        self.path = Path(self._td.name) / "t.mcap"
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("SURGE_BUS_DIR", None)
+        else:
+            os.environ["SURGE_BUS_DIR"] = self._old
+        self._td.cleanup()
+        self._bus.cleanup()
+
+    def test_old_mcap_is_deleted_when_critical(self):
+        from unittest import mock
+
+        from raspi.nodes.logger_node import LoggerNode
+
+        old = Path(self._td.name) / "old.mcap"
+        old.write_bytes(b"x" * 1000)
+        t = time.time() - 1000
+        os.utime(old, (t, t))
+
+        node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
+        try:
+            usages = iter([_usage(100, 2), _usage(100, 10)])
+            with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                            side_effect=lambda _p: next(usages)):
+                node._check_disk_space()
+        finally:
+            node.close()
+
+        self.assertFalse(old.exists())
+        self.assertTrue(self.path.exists())   # 記録中の自分自身は守られる
+
+    def test_stdout_mode_skips_the_check(self):
+        """`-o -` は SD に何も書かないので、空き容量チェック自体をしないこと。"""
+        import io as _io
+        import sys as _sys
+        from unittest import mock
+
+        from raspi.nodes.logger_node import LoggerNode
+
+        class FakeStdout:
+            def __init__(self):
+                self.buffer = _io.BytesIO()
+
+        real, _sys.stdout = _sys.stdout, FakeStdout()
+        try:
+            node = LoggerNode("-", topics=["vehicle_state"], image_hz=0)
+            try:
+                with mock.patch("raspi.rec.logclean.shutil.disk_usage") as m:
+                    node._check_disk_space()
+                m.assert_not_called()
+            finally:
+                node.close()
+        finally:
+            _sys.stdout = real
+
+
+def _usage(total_gb: float, free_gb: float):
+    """`shutil.disk_usage` の戻り値と同じ形。"""
+    from unittest import mock
+    total = int(total_gb * 1e9)
+    free = int(free_gb * 1e9)
+    return mock.Mock(total=total, used=total - free, free=free)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -299,6 +300,127 @@ class TestWriterDetails(TempDirCase):
                 FrameLogWriter(p)
         self.assertEqual(len(opened), 1)
         self.assertTrue(opened[0].closed, "例外後もfdが開いたまま")
+
+
+class TestEnospc(TempDirCase):
+    """`self._f.write()`/`flush()` が OSError（ENOSPC 等）を投げたときの挙動。
+
+    `open()` した実ファイルの `write`/`flush` を直接 monkeypatch して、
+    ディスクが満杯になった状況を再現する（ハードウェア・実ディスクは不要）。
+    """
+
+    def _writer_with_broken_file(self, p: Path, **kw) -> FrameLogWriter:
+        w = FrameLogWriter(p, **kw)
+        w._f.write = mock.Mock(side_effect=OSError(28, "No space left on device"))
+        return w
+
+    def test_write_rx_does_not_raise_and_counts_the_error(self):
+        p = self.tmp / "a.sfl"
+        w = self._writer_with_broken_file(p)
+        w.write_rx(1, packets.Telemetry.TYPE, 0, b"\x01")   # 例外を投げない
+        self.assertEqual(w.stats.write_errors, 1)
+        self.assertIn("OSError", w.last_write_error)
+        self.assertTrue(w.broken)
+        # 失敗した分は rx にカウントしない（実際には書けていないので）
+        self.assertEqual(w.stats.rx, 0)
+        w._f.write = mock.Mock()   # close() が実ファイルへ触れないように戻す
+        w._closed = True           # close() を素通りさせる（後始末はテスト対象外）
+
+    def test_write_tx_and_write_event_also_swallow_oserror(self):
+        p = self.tmp / "a.sfl"
+        w = self._writer_with_broken_file(p)
+        w.write_tx(1, packets.Ping.TYPE, 0, b"")
+        w.write_event(2, "x")
+        self.assertEqual(w.stats.tx, 0)
+        self.assertEqual(w.stats.events, 0)
+        self.assertGreaterEqual(w.stats.write_errors, 2)
+        w._closed = True
+
+    def test_once_broken_further_writes_are_skipped_without_touching_the_file(self):
+        """壊れた後は `self._f.write` をもう呼ばない（無駄な syscall を重ねない）。"""
+        p = self.tmp / "a.sfl"
+        w = self._writer_with_broken_file(p)
+        w.write_rx(1, packets.Telemetry.TYPE, 0, b"\x01")
+        calls_after_break = w._f.write.call_count
+        for i in range(10):
+            w.write_rx(2 + i, packets.Telemetry.TYPE, 0, b"\x01")
+        self.assertEqual(w._f.write.call_count, calls_after_break)   # 増えていない
+        self.assertEqual(w.stats.write_errors, 11)
+        w._closed = True
+
+    def test_flush_failure_marks_broken_without_raising(self):
+        p = self.tmp / "a.sfl"
+        with FrameLogWriter(p, flush_interval_s=0.0) as w:
+            w._f.flush = mock.Mock(side_effect=OSError(28, "No space left on device"))
+            w.write_rx(1, packets.Telemetry.TYPE, 0, b"\x01")   # flush が毎回走る設定
+            self.assertTrue(w.broken)
+            self.assertEqual(w.stats.write_errors, 1)
+            w._f.flush = mock.Mock()   # __exit__/close() の後始末を安全にする
+
+    def test_close_does_not_raise_when_broken(self):
+        """`close()` は `_broken` 後も例外を投げない（後始末が主目的の場面）。"""
+        p = self.tmp / "a.sfl"
+        w = self._writer_with_broken_file(p)
+        w.write_rx(1, packets.Telemetry.TYPE, 0, b"\x01")
+        self.assertTrue(w.broken)
+        w._f.write = mock.Mock()
+        w._f.flush = mock.Mock()
+        w.close()   # 例外を投げないこと自体が検証
+
+    def test_public_flush_after_broken_is_a_noop(self):
+        p = self.tmp / "a.sfl"
+        w = self._writer_with_broken_file(p)
+        w.write_rx(1, packets.Telemetry.TYPE, 0, b"\x01")
+        self.assertTrue(w.broken)
+        real_flush = w._f.flush
+        w._f.flush = mock.Mock()
+        w.flush()
+        w._f.flush.assert_not_called()
+        w._f.flush = real_flush
+        w._f.write = mock.Mock()
+        w._closed = True
+
+    def test_init_still_raises_when_the_header_write_fails(self):
+        """記録開始そのものが失敗する場合は、これまでどおり例外で伝える
+        （呼び出し側の `io_node._set_log_active` が『開始できない』を出す前提）。"""
+        p = self.tmp / "a.sfl"
+        real_open = open
+
+        def spying_open(*a, **k):
+            f = real_open(*a, **k)
+            f.write = mock.Mock(side_effect=OSError(28, "No space left on device"))
+            return f
+
+        with mock.patch("builtins.open", side_effect=spying_open):
+            with self.assertRaises(OSError):
+                FrameLogWriter(p)
+
+    def test_init_still_raises_when_only_the_meta_write_fails(self):
+        """★ ヘッダは書けたが META（`_write` 経由）だけが失敗するケース。
+
+        `_write` は通常 OSError を握り潰すが、**起動時だけは例外に昇格させる**
+        （`FrameLogWriter.__init__` の `if self._broken: raise` 参照）。
+        これが無いと、META すら書けていないのに『記録開始できた』ことになる。
+        """
+        p = self.tmp / "a.sfl"
+        real_open = open
+        call_n = 0
+
+        def flaky_write(data):
+            nonlocal call_n
+            call_n += 1
+            if call_n == 1:      # 1回目＝ヘッダは成功させる
+                return len(data)
+            raise OSError(28, "No space left on device")   # 2回目＝META で失敗
+
+        def spying_open(*a, **k):
+            f = real_open(*a, **k)
+            f.write = flaky_write
+            return f
+
+        with mock.patch("builtins.open", side_effect=spying_open):
+            with self.assertRaises(OSError):
+                FrameLogWriter(p)
 
 
 class TestJsonEncoding(TempDirCase):

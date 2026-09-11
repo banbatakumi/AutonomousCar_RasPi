@@ -288,7 +288,15 @@ class LinePerceptionNode:
                         st = self.failed_frame(seq=seq)
                     else:
                         frame, t_capture = got
-                        st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
+                        try:
+                            st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
+                        except Exception as e:
+                            # 推論(白線検出)側のバグでノード全体を巻き込んで
+                            # 落とさない。契約の「見失った扱い」に自然に落とす
+                            # （`planning_node._replan()` と同じパターン）
+                            print(f"# line_perception process_frame() が例外: {e}",
+                                 file=sys.stderr, flush=True)
+                            st = self.failed_frame(seq=seq)
             pub.send(TOPIC_LINE_CAM, st)
             seq += 1
 

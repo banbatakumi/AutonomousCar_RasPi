@@ -60,6 +60,22 @@ class TestDeskewValidHitSaturated(unittest.TestCase):
         self.assertAlmostEqual(float(pts.x[0]), 8.0, places=9)
         self.assertFalse(bool(pts.hit[0]))
 
+    def test_nan_range_is_treated_as_over_range_not_a_hit(self):
+        """距離がNaN（IMUグリッチ等の混入）でも`r > max_range`はFalseになり素通り
+        しうる——それを塞ぐ`~np.isfinite(r)`のガードを確認する。NaNの壁ヒット点が
+        そのまま地図に焼かれてはならない。"""
+        raw = _raw([0.0], [float("nan")], t_point_ns=[NS])
+        pts = deskew(raw, Twist2D(0.0, 0.0, 0.0), max_range=8.0)
+        self.assertTrue(math.isfinite(float(pts.x[0])))
+        self.assertAlmostEqual(float(pts.x[0]), 8.0, places=9)
+        self.assertFalse(bool(pts.hit[0]))
+
+    def test_inf_range_is_treated_as_over_range_not_a_hit(self):
+        raw = _raw([0.0], [float("inf")], t_point_ns=[NS])
+        pts = deskew(raw, Twist2D(0.0, 0.0, 0.0), max_range=8.0)
+        self.assertAlmostEqual(float(pts.x[0]), 8.0, places=9)
+        self.assertFalse(bool(pts.hit[0]))
+
 
 class TestDeskewStraightLine(unittest.TestCase):
     def test_matches_theoretical_translation(self):

@@ -7,12 +7,14 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from slam2d.core.frontend import Frontend, FrontendConfig  # noqa: E402
 from slam2d.core.grid import OccGrid  # noqa: E402
 from slam2d.core.motion import ConstantVelocityModel, ExternalTwistModel  # noqa: E402
+from slam2d.core.scanmatch import MatchResult  # noqa: E402
 from slam2d.core.types import Twist2D  # noqa: E402
 from slam2d.tests.helpers import ROOM, make_raw_scan  # noqa: E402
 
@@ -87,6 +89,20 @@ class TestFrontendLostDetection(unittest.TestCase):
         fe.update(raw, 0.1)
         import numpy as np
         self.assertTrue(np.array_equal(before, fe.grid.hits))
+
+
+class TestFrontendNaNScoreIsLost(unittest.TestCase):
+    def test_nan_score_is_treated_as_lost(self):
+        """`m.score`がNaN（IMUグリッチ等でExternalTwistModelにNaN/Infが混入した
+        場合等に再現）だと`score < min_score`は常にFalseになり、lost判定が
+        素通りしてしまう——それを塞ぐ`not math.isfinite(m.score)`のガードを確認する。
+        """
+        fe = _make_frontend()
+        raw = make_raw_scan(3.0, 2.0, 0.0, segs=ROOM, max_range=8.0)
+        nan_result = MatchResult(0.0, 0.0, 0.0, float("nan"), True)
+        with mock.patch("slam2d.core.frontend.match", return_value=nan_result):
+            u = fe.update(raw, 0.1)
+        self.assertTrue(u.lost)
 
 
 class TestFrontendAnisotropicToggle(unittest.TestCase):

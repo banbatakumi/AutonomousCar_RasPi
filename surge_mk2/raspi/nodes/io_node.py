@@ -82,6 +82,7 @@ from raspi.msgs.types import (  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
+from raspi.rec import logclean  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 
@@ -123,6 +124,16 @@ ODOM_CONF = REPO_ROOT / "config" / "odometer.json"
 #: 停止中は書かない**（SDカードの消耗を避ける。バンビ指定、2026-08-25）
 ODOM_SAVE_INTERVAL_S = 30.0
 ODOM_SAVE_MIN_DELTA_M = 1.0
+
+#: 記録先パーティションの空き容量チェック間隔。`surge-logclean.timer`（毎時、
+#: `install_services.sh`）とは別に、**今まさに書いているプロセス自身**が
+#: 早期に気づけるようにする（`raspi/rec/logclean.py`）。1Hz のリンク統計ほど
+#: 頻繁である必要はない（`shutil.disk_usage` は軽いが、削除まで進むと
+#: ディレクトリ走査が絡むため）ので、`ODOM_SAVE_INTERVAL_S` と同じ間引きにする
+DISK_CHECK_INTERVAL_S = 30.0
+#: `--log` を指定していない・記録中でない間に見るディレクトリ
+#: （記録中は実際に書いている `self._log.path.parent` を優先して見る）
+DEFAULT_LOG_DIR = REPO_ROOT / "logs"
 
 
 def _load_odometer_base() -> float:
@@ -202,6 +213,8 @@ class IoNode:
         self._log = log
         self._log_meta = log_meta
         self._log_errors = 0
+        #: 直近のディスク空き容量チェックの結果 [%]。診断・終了時の要約に使う
+        self._disk_free_pct: float | None = None
         self._ping_seq = 0
         self._running = False
         self._t_start = 0
@@ -320,6 +333,45 @@ class IoNode:
                 "drift_ppm": self.sync.drift_ppm,
             },
         })
+
+    def _check_disk_space(self) -> None:
+        """記録先パーティションの空き容量を見て、危なければ警告・自動削除する。
+
+        `surge-logclean.timer`（毎時、`install_services.sh`）の隙間を埋める
+        （最大1時間の遅れがある・合計サイズではなく空き容量そのものを見る、
+        の2点。理由は `raspi/rec/logclean.py` のモジュール docstring）。
+        GUI へは（新しいバストピックを増やさず）このプロセス自身の stderr と、
+        記録中なら `.sfl` の EVENT として残す——**新しい通知経路を作るより、
+        既存の「診断は `.sfl` の EVENT に残す」パターンに素直に乗せる**方針
+        （`_log_linkstats`/`_on_latch` と同じ）。
+        """
+        log_dir = self._log.path.parent if self._log is not None else DEFAULT_LOG_DIR
+        if not log_dir.exists():
+            return
+        protect = {self._log.path} if self._log is not None else set()
+        status = logclean.check_disk(log_dir, protect=protect)
+        if status.error is not None:
+            return      # 空き容量すら取れない環境（テスト等）では何もしない
+        self._disk_free_pct = status.free_pct
+        if status.deleted:
+            names = ", ".join(status.deleted[:5])
+            if len(status.deleted) > 5:
+                names += f" 他{len(status.deleted) - 5}件"
+            print(f"\n!! ディスク空き {status.free_pct:.1f}% のため "
+                  f"古いログ{len(status.deleted)}件を自動削除: {names}", file=sys.stderr)
+            self._log_event("disk_clean", {
+                "free_pct": round(status.free_pct, 1),
+                "deleted": status.deleted,
+                "freed_bytes": status.freed_bytes,
+            })
+        elif status.warned:
+            print(f"\n!! ディスク空き {status.free_pct:.1f}%"
+                  f"（残り{status.free_bytes / 1e9:.2f}GB）— 記録容量が逼迫しています",
+                  file=sys.stderr)
+            self._log_event("disk_warn", {
+                "free_pct": round(status.free_pct, 1),
+                "free_bytes": status.free_bytes,
+            })
 
     # ── 起動時の VERSION / LIMITS 照合 ──
 
@@ -463,6 +515,7 @@ class IoNode:
         next_hb = next_cmd
         next_limits_retry = next_cmd
         next_odom_save = next_cmd + int(ODOM_SAVE_INTERVAL_S * NS)
+        next_disk_check = next_cmd
         cmd_period = NS // COMMAND_HZ
 
         while self._running:
@@ -546,6 +599,10 @@ class IoNode:
                               HbMsg(node="io", pid=os.getpid(),
                                     detail=self.state.health))
                 next_hb = now + NS // HB_HZ
+
+            if now >= next_disk_check:
+                next_disk_check = now + int(DISK_CHECK_INTERVAL_S * NS)
+                self._check_disk_space()
 
             # 総走行距離の永続化。**両方満たしたときだけ書く**——止まっている間は
             # 30秒経っても書かない（SDカードの消耗を避ける、バンビ指定）
@@ -795,9 +852,17 @@ def main() -> int:
     if node._log is not None:
         lg = node._log
         mb = lg.stats.bytes_written / 1e6
+        # `node._log_errors` は io_node 側（`_log_rx`/`_on_tx`/`_log_event`）で
+        # 捕まえた例外の数、`lg.stats.write_errors` は `FrameLogWriter._write` が
+        # OSError（ENOSPC 等）を捕まえて数えた分。前者はもう後者を含まない
+        # （`_write` が例外を投げなくなったため）ので両方出す
+        errs = node._log_errors + lg.stats.write_errors
         print(f"log: {lg.path} rx={lg.stats.rx} tx={lg.stats.tx} "
               f"events={lg.stats.events} {mb:.1f}MB"
-              + (f" !! 書き込みエラー {node._log_errors} 回" if node._log_errors else ""))
+              + (f" !! 書き込みエラー {errs} 回"
+                 f"（{lg.last_write_error or 'ディスク以外'}）" if errs else ""))
+    if node._disk_free_pct is not None:
+        print(f"disk: 空き {node._disk_free_pct:.1f}%")
     return 0
 
 

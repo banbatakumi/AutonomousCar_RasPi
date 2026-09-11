@@ -35,7 +35,7 @@ import networkx as nx
 import numpy as np
 
 from .sketch import Loop, path_to_loop, sample_loop
-from .track import stamp_discs
+from .track import _disc_slices, stamp_discs
 
 __all__ = ["WallExtractionError", "rasterize_walls", "derive_centerline", "build"]
 
@@ -81,7 +81,11 @@ def rasterize_walls(loops: list[Loop], thickness: float, resolution: float,
         cols = np.round((pts[:, 0] - x0) / resolution).astype(np.int64)
         rows = np.round((pts[:, 1] - y0) / resolution).astype(np.int64)
         for c, rw in zip(cols, rows):
-            grid[rw - r:rw + r + 1, c - r:c + r + 1] |= disc
+            sl = _disc_slices(h, w, rw, c, r)
+            if sl is None:
+                continue
+            gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
+            grid[gr0:gr1, gc0:gc1] |= disc[sr0:sr1, sc0:sc1]
     return grid, (x0, y0)
 
 

@@ -136,6 +136,9 @@ class _WriterStats:
     tx: int = 0
     events: int = 0
     bytes_written: int = 0
+    #: `self._f.write()`/`flush()` が OSError（ENOSPC 等）で失敗した回数。
+    #: `raspi/core/jpeg.py` の `RingJpeg.errors` と同じ形（2026-09-11）
+    write_errors: int = 0
 
 
 class FrameLogWriter:
@@ -145,6 +148,20 @@ class FrameLogWriter:
     「struct.pack 1回 + BufferedWriter への write 2回」に抑えてある。
     fsync はしない（コストが跳ね上がる）。代わりに一定間隔で flush して、
     電源断で失う量を `flush_interval_s` 秒ぶんに限定する。
+
+    ## SD が満杯になったとき（ENOSPC）
+
+    `write_rx`/`write_tx`/`write_event` は**例外を投げない。** `self._f.write()`/
+    `flush()` が `OSError`（`ENOSPC` 等）を投げたら `stats.write_errors` を
+    数えて `last_write_error` に理由を残し、**以後そのファイルへは一切書かない**
+    （`broken` が立つ）。件数と理由を数える形は `raspi/core/jpeg.py` の
+    `RingJpeg`（`errors`/`last_error`）と同じ。例外を投げない設計にしたのは、
+    `estop_test.py`/`arm_test.py` のように呼び出し側が例外を捕まえていない
+    ツールでも、安全マージン試験の途中で落ちないようにするため。
+    **途中で書くのをやめる**のは、レコード途中（ヘッダは書けたが payload が
+    書けない等）で止まったファイルを、`Reader` が「末尾が切れているだけ」
+    （`truncated`）として扱える形に保つため——書き続けると壊れたレコードの
+    後に正常なレコードが続いてしまい、その保証が壊れる。
 
     :param path: 出力先
     :param meta: 先頭 META に載せるセッション情報（ポート・ボーレート・fw_id など）
@@ -161,6 +178,10 @@ class FrameLogWriter:
         self._next_flush_ns = 0
         self._since_flush = 0
         self._closed = False
+        #: OSError で書き込み不能と判定したら立てる。以後 `_write` は無視する
+        self._broken = False
+        #: 直近の書き込み失敗の理由（`errors=N` だけでは分からないので文字列で残す）
+        self.last_write_error: str = ""
 
         self.t0_mono_ns = time.monotonic_ns()
         self.t0_unix_ns = time.time_ns()
@@ -179,6 +200,13 @@ class FrameLogWriter:
             base.update(meta or {})
             self._write(Kind.META, self.t0_mono_ns, 0, 0,
                         json.dumps(base, ensure_ascii=False).encode("utf-8"))
+            # **`_write` は以後 OSError を握り潰すが、ここ（起動直後）だけは別。**
+            # 記録を始められないなら `FrameLogWriter(...)` 自体を失敗させて、
+            # 呼び出し側（`io_node._set_log_active` 等）に「開始できない」を
+            # 伝えたい。握り潰したままだと、空のファイルだけ残して
+            # 「記録中のつもり」の状態が続いてしまう
+            if self._broken:
+                raise OSError(self.last_write_error)
         except Exception:
             # ここで失敗すると呼び出し側は `self` を持てない（`close()` を
             # 呼べない）ので、開いた fd はここで自分で閉じる
@@ -188,12 +216,12 @@ class FrameLogWriter:
     # ── 書き込み ──
 
     def write_rx(self, t_ns: int, pkt_type: int, seq: int, payload: bytes) -> None:
-        self._write(Kind.RX, t_ns, pkt_type, seq, payload)
-        self.stats.rx += 1
+        if self._write(Kind.RX, t_ns, pkt_type, seq, payload):
+            self.stats.rx += 1
 
     def write_tx(self, t_ns: int, pkt_type: int, seq: int, payload: bytes) -> None:
-        self._write(Kind.TX, t_ns, pkt_type, seq, payload)
-        self.stats.tx += 1
+        if self._write(Kind.TX, t_ns, pkt_type, seq, payload):
+            self.stats.tx += 1
 
     def write_event(self, t_ns: int, name: str, data: dict[str, Any] | None = None) -> None:
         """時刻付きの出来事を JSON で残す。
@@ -204,19 +232,32 @@ class FrameLogWriter:
         body = {"name": name}
         if data:
             body.update(data)
-        self._write(Kind.EVENT, t_ns, 0, 0,
-                    json.dumps(body, ensure_ascii=False, default=str).encode("utf-8"))
-        self.stats.events += 1
+        if self._write(Kind.EVENT, t_ns, 0, 0,
+                       json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")):
+            self.stats.events += 1
 
-    def _write(self, kind: int, t_ns: int, ptype: int, seq: int, payload: bytes) -> None:
+    def _write(self, kind: int, t_ns: int, ptype: int, seq: int, payload: bytes) -> bool:
+        """1レコード書く。**`OSError` は投げない**（クラス docstring 参照）。
+
+        :return: 実際に書けたら True。`ValueError`（クローズ済み・payload超過）は
+            従来どおり投げる——これらは設計上の間違いであって、ディスクの都合
+            ではないため
+        """
         if self._closed:
             raise ValueError("クローズ済みの FrameLogWriter に書き込もうとしました")
+        if self._broken:
+            self.stats.write_errors += 1
+            return False
         n = len(payload)
         if n > 0xFFFF:
             raise ValueError(f"payload が長すぎます: {n}")
-        self._f.write(_S_REC.pack(kind, ptype & 0xFF, seq & 0xFF, 0, t_ns, n))
-        if n:
-            self._f.write(payload)
+        try:
+            self._f.write(_S_REC.pack(kind, ptype & 0xFF, seq & 0xFF, 0, t_ns, n))
+            if n:
+                self._f.write(payload)
+        except OSError as e:
+            self._mark_broken(e)
+            return False
         self.stats.bytes_written += REC_HEADER_SIZE + n
 
         # flush の判定は呼び出し側の t_ns に乗る（時刻取得を増やさないため）。
@@ -225,21 +266,43 @@ class FrameLogWriter:
         self._since_flush += 1
         if (self._flush_interval_ns <= 0 or t_ns >= self._next_flush_ns
                 or self._since_flush >= _FLUSH_MAX_RECORDS):
-            self._f.flush()
+            try:
+                self._f.flush()
+            except OSError as e:
+                # レコード本体は（バッファ上は）書けているが、以後この事実を
+                # 信用しない。`_broken` にして先へ進ませない
+                self._mark_broken(e)
+                return True
             self._next_flush_ns = t_ns + self._flush_interval_ns
             self._since_flush = 0
+        return True
+
+    def _mark_broken(self, e: OSError) -> None:
+        self._broken = True
+        self.stats.write_errors += 1
+        self.last_write_error = f"{type(e).__name__}: {e}"
+
+    @property
+    def broken(self) -> bool:
+        """`True` なら以後このファイルには何も書けない（ENOSPC 等で確定済み）。"""
+        return self._broken
 
     # ── 後始末 ──
 
     def flush(self) -> None:
-        if not self._closed:
+        if self._closed or self._broken:
+            return
+        try:
             self._f.flush()
+        except OSError as e:
+            self._mark_broken(e)
 
     def close(self) -> None:
         """終了イベントを書いてから閉じる。
 
         正常終了したログには必ず `close` イベントが入るので、
-        読む側は「途中で電源が落ちたログ」かどうかを判定できる。
+        読む側は「途中で電源が落ちたログ」かどうかを判定できる
+        （`_broken` 済みなら `write_event`/`flush` は静かに何もしない）。
         """
         if self._closed:
             return
@@ -250,7 +313,11 @@ class FrameLogWriter:
                 "events": self.stats.events,
                 "duration_s": round((time.monotonic_ns() - self.t0_mono_ns) / 1e9, 3),
             })
-            self._f.flush()
+            if not self._broken:
+                try:
+                    self._f.flush()
+                except OSError as e:
+                    self._mark_broken(e)
         finally:
             self._closed = True
             self._f.close()

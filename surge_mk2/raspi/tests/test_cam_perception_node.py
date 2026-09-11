@@ -582,5 +582,57 @@ class TestReadFrame(unittest.TestCase):
             model_dir.cleanup()
 
 
+class TestRunSurvivesProcessFrameException(unittest.TestCase):
+    """`process_frame()` が例外を投げてもノードが継続すること。
+
+    `planning_node._replan()` の `planner.plan()` 例外保護（B3）と同じパターンを
+    `run()` 側の推論呼び出しにも横展開したもの——推論側のバグでノード全体を
+    巻き込んで落とさず、契約2の「壁」扱いに自然に落とす。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.models_dir = Path(self._tmp.name)
+        _make_dummy_model(self.models_dir / "model_a.onnx", 32, 32)
+        (self.models_dir / "model_a.json").write_text(
+            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "threshold": 0.5}')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_exception_does_not_propagate_and_falls_back_to_failed_frame(self):
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load(),
+                                 infer_hz=1000.0)
+        node.reload_if_changed("model_a")
+        self.assertIsNotNone(node.model)
+
+        def _raise(*a, **kw):
+            raise RuntimeError("推論側のバグ")
+        node.process_frame = _raise
+
+        ring = FrameRing.create("surge_test_cam_perception_exc", 32, 24, "RGB888", n_slots=2)
+        try:
+            data = np.full((24, 32, 3), 255, dtype=np.uint8)
+            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                           frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                           fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
+
+            scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
+            self.assertTrue(scans, "scan/cam が一度も publish されていない")
+            self.assertEqual(scans[-1].sector_seen, [False] * 12,
+                             "process_frame()が例外を投げたのに壁扱いになっていない")
+            paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
+            self.assertTrue(paths)
+            self.assertFalse(paths[-1].seen,
+                             "process_frame()が例外を投げたのにpath/camが出ている")
+        finally:
+            node.close()
+            ring.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

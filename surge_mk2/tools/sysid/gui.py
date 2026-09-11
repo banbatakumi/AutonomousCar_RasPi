@@ -31,6 +31,20 @@ TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("accel", "④ 加減速試験", ("drive_accel_m_s2", "brake_decel_m_s2")),
 )
 
+#: `[dynamics]`の全パラメータは物理的に0以下になり得ない（時定数・むだ時間・
+#: レート上限・摩擦係数・加減速度はいずれも正の量）。0.0や負値は`tools/sysid/fit.py`
+#: の測定失敗（配線ミス等）が無警告ですり抜けたサインである可能性が高いので、
+#: GUI側でも独立に検知して警告する（多層防御——fit.py側の例外送出が抜けても拾う）
+_MUST_BE_POSITIVE = {
+    "tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s",
+    "tau_speed_s", "mu", "drive_accel_m_s2", "brake_decel_m_s2",
+}
+
+
+def _is_suspicious(key: str, value: float) -> bool:
+    """0または非現実的（負値）な測定結果かどうか。"""
+    return key in _MUST_BE_POSITIVE and value <= 0.0
+
 
 def _load_current_dynamics(toml_path: str) -> dict[str, float]:
     try:
@@ -142,13 +156,18 @@ class SysIdApp(tk.Tk):
 
         for row, key in enumerate(sorted(self.results), start=1):
             new_val = self.results[key]
+            suspicious = _is_suspicious(key, new_val)
             var = tk.BooleanVar(value=True)
             self.check_vars[key] = var
             ttk.Checkbutton(self.result_frame, variable=var).grid(row=row, column=0)
             ttk.Label(self.result_frame, text=key, width=24).grid(row=row, column=1, sticky="w")
             old = current.get(key)
             old_s = f"{old:.4g}" if old is not None else "?"
-            ttk.Label(self.result_frame, text=f"{old_s} → {new_val:.4g}").grid(row=row, column=2, sticky="w")
+            value_text = f"{old_s} → {new_val:.4g}"
+            if suspicious:
+                value_text += "  ⚠ 0または異常値の疑い"
+            ttk.Label(self.result_frame, text=value_text,
+                     foreground=("red" if suspicious else "black")).grid(row=row, column=2, sticky="w")
 
     # ── 適用 ──
 
@@ -161,6 +180,19 @@ class SysIdApp(tk.Tk):
         if not chosen:
             messagebox.showinfo("適用", "適用するパラメータをチェックしてください")
             return
+
+        suspicious_keys = sorted(k for k, v in chosen.items() if _is_suspicious(k, v))
+        if suspicious_keys:
+            proceed = messagebox.askyesno(
+                "異常値の疑いがあります",
+                "以下のパラメータが0または現実的でない値（負値等）です:\n"
+                + "\n".join(f"・{k} = {chosen[k]:.4g}" for k in suspicious_keys)
+                + "\n\n配線ミス等で測定に失敗している可能性があります。"
+                  "このまま vehicle.toml に書き込みますか？",
+                icon="warning",
+            )
+            if not proceed:
+                return
         try:
             changed = toml_update.apply_dynamics(self.toml_path.get(), chosen)
         except Exception as e:  # noqa: BLE001

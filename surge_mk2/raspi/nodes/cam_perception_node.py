@@ -478,21 +478,33 @@ class CamPerceptionNode:
                 else:
                     frame, t_capture = got
                     self._last_infer_ns = now
-                    st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
-                    self._last_scan = st
-                    #: `cam_centerline` が選ばれていなくても、同じ推論結果から
-                    #: ただで作れる（下の `_CAM_MODES` docstring参照）ので常に計算する
-                    path_msg = self.build_path(seq=seq, t_capture_ns=t_capture)
-                    self._last_path = path_msg
-                    self._infer_count += 1
-                    # マスクは既定で推論と同じ頻度（`mask_every=1`）で配る。GUIの
-                    # ライブプレビュー専用で走行判断には使わない。
-                    # **failed_frame・間引きの間は送らない**——GUI 側は直前の
-                    # マスクが静止して見えるだけで、暴走はしない
-                    if self._infer_count == 1 or self._infer_count % self._mask_every == 0:
-                        mask_jpeg = self.encode_mask_jpeg()
-                        if mask_jpeg is not None:
-                            pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
+                    try:
+                        st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
+                    except Exception as e:
+                        # 推論(CNN+IPM+raycast)側のバグでノード全体を巻き込んで
+                        # 落とさない。契約2の「壁」扱いに自然に落とす
+                        # （`planning_node._replan()` と同じパターン）
+                        print(f"# cam_perception process_frame() が例外: {e}",
+                             file=sys.stderr, flush=True)
+                        st = self.failed_frame(seq=seq)
+                        self._last_scan = None
+                        self._last_path = None
+                        path_msg = None
+                    else:
+                        self._last_scan = st
+                        #: `cam_centerline` が選ばれていなくても、同じ推論結果から
+                        #: ただで作れる（下の `_CAM_MODES` docstring参照）ので常に計算する
+                        path_msg = self.build_path(seq=seq, t_capture_ns=t_capture)
+                        self._last_path = path_msg
+                        self._infer_count += 1
+                        # マスクは既定で推論と同じ頻度（`mask_every=1`）で配る。GUIの
+                        # ライブプレビュー専用で走行判断には使わない。
+                        # **failed_frame・間引きの間は送らない**——GUI 側は直前の
+                        # マスクが静止して見えるだけで、暴走はしない
+                        if self._infer_count == 1 or self._infer_count % self._mask_every == 0:
+                            mask_jpeg = self.encode_mask_jpeg()
+                            if mask_jpeg is not None:
+                                pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
             if should_publish:
                 pub.send(TOPIC_SCAN_CAM, st)
                 pub.send(TOPIC_CAM_PATH, path_msg if path_msg is not None

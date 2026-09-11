@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ from raspi.io.gpio import (  # noqa: E402
     PIN_HEARTBEAT,
     FakePin,
     Heartbeat,
+    HeartbeatStats,
     Indication,
     StatusIndicator,
     open_output,
@@ -168,6 +170,46 @@ class TestJitterAccounting(unittest.TestCase):
         clk, _pin, hb = make()
         run_steps(clk, hb, 20)
         self.assertEqual(hb.stats.max_late_ns, 0)
+
+
+class TestStatsConcurrency(unittest.TestCase):
+    """★ 専属スレッド(100Hz書き込み)と io_node(1Hz読み取り)の競合。
+
+    `late_hist` への書き込み中に `as_dict()` が `dict(self.late_hist)` で反復すると、
+    ロックが無ければ新規バケットキー追加と衝突して
+    `RuntimeError: dictionary changed size during iteration` で落ちる。
+    """
+
+    def test_as_dict_survives_concurrent_new_buckets(self):
+        stats = HeartbeatStats()
+        stop = threading.Event()
+        errors: list[BaseException] = []
+
+        def writer():
+            # 新規バケットキーを次々作らせる(既存キーの再利用だけだと再現しない)
+            i = 0
+            while not stop.is_set():
+                late_ms = (i % 6) + (i / 1000)  # 徐々にバケット境界を跨がせる
+                stats.observe_late(int(late_ms * 1e6))
+                i += 1
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    stats.as_dict()
+                except RuntimeError as e:
+                    errors.append(e)
+                    stop.set()
+
+        threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        stop.set()
+        for t in threads:
+            t.join(timeout=2.0)
+
+        self.assertEqual(errors, [])
 
 
 class TestLifecycle(unittest.TestCase):

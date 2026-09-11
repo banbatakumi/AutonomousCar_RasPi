@@ -44,6 +44,29 @@ __all__ = ["centerline", "rasterize", "add_offset_discs", "build", "build_from_p
 _STEP_RATIO = 1.0
 
 
+def _disc_slices(h: int, w: int, row: int, col: int, r: int):
+    """円盤（半径`r`、中心`(row, col)`）を `(h, w)` の格子に重ねるときの、
+    格子側とdisc配列側の対応するスライス範囲を返す（境界クリップ込み）。
+
+    中心が格子の外や端に近く円盤の一部がはみ出す場合、はみ出した分を切り捨てた
+    範囲を返す。円盤が完全に格子の外なら `None`。
+
+    `add_offset_discs()`/`stamp_discs()` はこのクリップ処理を最初から個別に
+    実装していた（オフセット位置が自由なので必須だった）。本体の壁掘り
+    ループ（`rasterize()`/`rasterize_walls()`）は「centerlineはmargin込みで
+    必ず内側に収まる」前提で無警戒だったが、`margin`を極端に小さくする・
+    半径の丸めがpadよりわずかに大きくなる等で境界付近の点が範囲外スライスを
+    起こしうるため、同じ処理に統一する。
+    """
+    gr0, gr1 = max(0, row - r), min(h, row + r + 1)
+    gc0, gc1 = max(0, col - r), min(w, col + r + 1)
+    if gr0 >= gr1 or gc0 >= gc1:
+        return None
+    sr0, sr1 = gr0 - (row - r), gr1 - (row - r)
+    sc0, sc1 = gc0 - (col - r), gc1 - (col - r)
+    return gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1
+
+
 def centerline(path: list, x: float, y: float, yaw: float,
                step: float) -> np.ndarray:
     """区間の並び → 中心線の点列 `(N, 3)`（x, y, 向き）。"""
@@ -122,7 +145,11 @@ def rasterize(pts: np.ndarray, width: float, resolution: float,
     cols = np.round((xs - x0) / resolution).astype(np.int64)
     rows = np.round((ys - y0) / resolution).astype(np.int64)
     for c, rw in zip(cols, rows):
-        grid[rw - r:rw + r + 1, c - r:c + r + 1] &= ~disc
+        sl = _disc_slices(h, w, rw, c, r)
+        if sl is None:
+            continue
+        gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
+        grid[gr0:gr1, gc0:gc1] &= ~disc[sr0:sr1, sc0:sc1]
 
     if divider:
         # 中心線に沿った弧長。**始点からの距離**で区間を指定する
@@ -134,7 +161,11 @@ def rasterize(pts: np.ndarray, width: float, resolution: float,
         for a, b in divider:
             m = (arc >= float(a)) & (arc <= float(b))
             for c, rw in zip(cols[m], rows[m]):
-                grid[rw - dr:rw + dr + 1, c - dr:c + dr + 1] |= dot
+                sl = _disc_slices(h, w, rw, c, dr)
+                if sl is None:
+                    continue
+                gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
+                grid[gr0:gr1, gc0:gc1] |= dot[sr0:sr1, sc0:sc1]
     return grid, (x0, y0)
 
 
@@ -176,16 +207,12 @@ def add_offset_discs(grid: np.ndarray, origin: tuple[float, float], resolution: 
         rows = np.round((oy - y0) / resolution).astype(np.int64)
         for c, rw in zip(cols, rows):
             # ★narrow/obstacleのオフセットは`rasterize()`本体の壁掘りより外側に
-            # 出ることがあるため、格子外へのはみ出しはクリップする（本体の掘り/
-            # divider は margin 込みで必ず内側に収まる前提で無警戒だが、ここは
-            # 新しい・オフセットが自由な経路なので明示的に守る）
-            c0, c1 = max(0, c - r), min(w, c + r + 1)
-            rw0, rw1 = max(0, rw - r), min(h, rw + r + 1)
-            if c0 >= c1 or rw0 >= rw1:
+            # 出ることがあるため、格子外へのはみ出しはクリップする
+            sl = _disc_slices(h, w, rw, c, r)
+            if sl is None:
                 continue
-            dc0, dc1 = c0 - (c - r), c1 - (c - r)
-            dr0, dr1 = rw0 - (rw - r), rw1 - (rw - r)
-            grid[rw0:rw1, c0:c1] |= disc[dr0:dr1, dc0:dc1]
+            gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
+            grid[gr0:gr1, gc0:gc1] |= disc[sr0:sr1, sc0:sc1]
 
 
 def stamp_discs(grid: np.ndarray, origin: tuple[float, float], resolution: float,
@@ -208,13 +235,11 @@ def stamp_discs(grid: np.ndarray, origin: tuple[float, float], resolution: float
         disc = (xx * xx + yy * yy) <= rr * rr
         col = int(round((float(cx) - x0) / resolution))
         row = int(round((float(cy) - y0) / resolution))
-        c0, c1 = max(0, col - rr), min(w, col + rr + 1)
-        r0, r1 = max(0, row - rr), min(h, row + rr + 1)
-        if c0 >= c1 or r0 >= r1:
+        sl = _disc_slices(h, w, row, col, rr)
+        if sl is None:
             continue                              # 格子の外（コース範囲外に置いた）
-        dc0, dc1 = c0 - (col - rr), c1 - (col - rr)
-        dr0, dr1 = r0 - (row - rr), r1 - (row - rr)
-        grid[r0:r1, c0:c1] |= disc[dr0:dr1, dc0:dc1]
+        gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
+        grid[gr0:gr1, gc0:gc1] |= disc[sr0:sr1, sc0:sc1]
 
 
 def build(meta: dict) -> dict:

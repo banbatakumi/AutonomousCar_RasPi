@@ -494,9 +494,15 @@ class CamTrackNode:
                 #: telemetry_node が再起動まで覚えている（`_track_roi_pump()`）ので、
                 #: armed を見ないと駐車中もNanoTrackが回り続ける
                 #: （`cam_perception_node.py`等と同じ省電力バグ、2026-09-04）
+                #: **モデル未配置（`_factory.available=False`）の間はROI選択の
+                #: 試行を即座に諦める。** `_try_select()`はモデルが無ければ
+                #: `select_seq`を消費せずに`False`を返し続けるので、これを
+                #: 見ずに読み続けると`_state=="IDLE"`のまま`need_frame`が
+                #: 永久に`True`になり、上と同じCPU消費バグが別経路で再発する
                 need_frame = vehicle_armed(vs) and (
                     self._state != "IDLE"
-                    or (roi is not None and roi.select_seq > self._last_select_seq))
+                    or (self._factory.available and roi is not None
+                        and roi.select_seq > self._last_select_seq))
                 if need_frame:
                     ref: ImageRef | None = sub.latest.get(TOPIC_IMAGE_FRONT)
                     if ref is not None:
@@ -505,7 +511,15 @@ class CamTrackNode:
                             frame, t_capture = got
 
                 now = time.monotonic_ns()
-                st = self.process_cycle(frame, roi=roi, scan=scan, now_ns=now)
+                try:
+                    st = self.process_cycle(frame, roi=roi, scan=scan, now_ns=now)
+                except Exception as e:
+                    # process_cycle側のバグでノード全体を巻き込んで落とさない。
+                    # `tracking=False`（未選択扱い）に自然に落とす
+                    # （`planning_node._replan()` と同じパターン）
+                    print(f"# cam_track process_cycle() が例外: {e}",
+                         file=sys.stderr, flush=True)
+                    st = TargetTrack(tracking=False)
                 st.seq = seq
                 st.t_capture = t_capture
                 pub.send(TOPIC_TRACK_TARGET, st)

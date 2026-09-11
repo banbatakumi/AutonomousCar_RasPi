@@ -34,16 +34,40 @@ MEAN = 0.0
 STD = 255.0
 
 
+def _max_steer_from_train_config(run_dir: Path) -> float | None:
+    """`run_dir/train_config.json`（`train.py`が学習時に書く）から`max_steer`を読む。
+    ファイルが無い、読めない、キーが無い場合は `None`。"""
+    cfg_path = run_dir / "train_config.json"
+    if not cfg_path.exists():
+        return None
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    return cfg.get("max_steer")
+
+
 def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *,
           max_steer: float | None = None, note: str = "") -> None:
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に契約を書く。
 
-    :param max_steer: 出力の正規化基準 [rad]。省略時は `config/vehicle.toml` を読む
-        （学習時と車両が変わっていなければ通常これで一致する）
+    :param max_steer: 出力の正規化基準 [rad]。省略時は `checkpoint` と同じディレクトリの
+        `train_config.json`（`train.py`が学習時に書く。`train.py:143-146`参照）の値を
+        優先して使う——`config/vehicle.toml`はsysidで継続更新中なので、学習後に
+        エクスポートすると現在値が学習時の値とズレる（train/inference skew の出力版）。
+        `train_config.json`が無い、または`max_steer`キーが無い場合のみ現在の
+        `config/vehicle.toml`へフォールバックし、警告ログを出す。
     :param note: `<out_path>.json`に同梱する自由記述の備考（`ml_cam/export_onnx.py`と対称）
     """
     w, h = size
-    max_steer = max_steer if max_steer is not None else Vehicle.load().max_steer
+    if max_steer is None:
+        max_steer = _max_steer_from_train_config(checkpoint.parent)
+        if max_steer is None:
+            max_steer = Vehicle.load().max_steer
+            print(f"# 警告: {checkpoint.parent}/train_config.json が無い（または "
+                  f"max_steer キーが無い）ため、現在の config/vehicle.toml の "
+                  f"max_steer={max_steer:.4f}rad にフォールバックします。学習時の "
+                  f"車両設定と異なる可能性があります", file=sys.stderr)
     model = DriveRegressionModel(pretrained=False)
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     model.eval()
@@ -98,6 +122,9 @@ def main() -> int:
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--size", default="224x224")
     ap.add_argument("--out", type=Path, default=Path("ml_cam_e2e/runs/latest/model.onnx"))
+    ap.add_argument("--max-steer", type=float, default=None,
+                    help="出力の正規化基準[rad]を手動で上書きする。省略時は "
+                         "<checkpoint>/train_config.json → config/vehicle.toml の順に決める")
     args = ap.parse_args()
 
     w, h = (int(v) for v in args.size.lower().split("x"))
@@ -106,7 +133,7 @@ def main() -> int:
     note_path = args.checkpoint.parent / "note.txt"
     note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
 
-    export(args.checkpoint, args.out, (w, h), note=note)
+    export(args.checkpoint, args.out, (w, h), max_steer=args.max_steer, note=note)
 
     model = DriveRegressionModel(pretrained=False)
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))

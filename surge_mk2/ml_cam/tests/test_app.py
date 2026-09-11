@@ -12,7 +12,7 @@ import tempfile
 import tkinter as tk
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
@@ -22,6 +22,7 @@ from app import (  # noqa: E402
     MODELS_DIR,
     REPO_ROOT,
     RUNS_DIR,
+    _CONFIRM_STOP_JOB_KEYS,
     build_annotate_cmd,
     build_export_cmd,
     build_extract_cmd,
@@ -37,6 +38,8 @@ from app import (  # noqa: E402
     rel,
     write_note,
 )
+
+from ml_common.close_handler import confirm_and_close  # noqa: E402
 
 
 def _has_display() -> bool:
@@ -310,6 +313,113 @@ class TestAppWidgetsSmoke(unittest.TestCase):
             app = App(root)
             self.assertIsNotNone(app.log_widget)
             self.assertEqual(app.status_label.cget("text"), "待機中")
+        finally:
+            root.destroy()
+
+
+class TestCloseConfirmation(unittest.TestCase):
+    """ウィンドウを閉じる際、学習中だけ確認ダイアログを出す
+    （抽出・アノテーション・エクスポート・プレビューは既存動作どおり無確認で終了）。
+
+    `ml_lidar/app.py`の`_CONFIRM_STOP_JOB_KEYS`と同じ考え方——`confirm_and_close`は
+    `JobRunner`のダックタイピング（`running_job_keys`/`label_of`/`terminate_all`）
+    しか要求しないため、Tkinterを起動せず軽量なフェイクで検証できる。
+    """
+
+    class _FakeJobs:
+        def __init__(self, running_keys, labels=None):
+            self._running = list(running_keys)
+            self._labels = labels or {}
+
+        def running_job_keys(self):
+            return list(self._running)
+
+        def label_of(self, key):
+            return self._labels.get(key, key)
+
+        def terminate_all(self):
+            stopped, self._running = self._running, []
+            return stopped
+
+    def test_confirm_stop_job_keys_is_train_only(self):
+        """他ジョブ種別（extract/annotate/export/preview）が確認対象に混ざっていないこと。"""
+        self.assertEqual(_CONFIRM_STOP_JOB_KEYS, frozenset({"train"}))
+
+    def test_train_running_asks_before_closing(self):
+        jobs = self._FakeJobs(["train"], {"train": "学習"})
+        root = MagicMock()
+        with patch("ml_common.close_handler.messagebox.askyesno", return_value=True) as mock_ask:
+            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
+        mock_ask.assert_called_once()
+        root.destroy.assert_called_once()
+
+    def test_declining_confirmation_keeps_window_open(self):
+        jobs = self._FakeJobs(["train"], {"train": "学習"})
+        root = MagicMock()
+        with patch("ml_common.close_handler.messagebox.askyesno", return_value=False):
+            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
+        root.destroy.assert_not_called()
+
+    def test_extract_running_closes_without_asking(self):
+        """学習以外のジョブは既存動作どおり、確認無しでそのまま閉じられる。"""
+        jobs = self._FakeJobs(["extract"], {"extract": "フレーム抽出"})
+        root = MagicMock()
+        with patch("ml_common.close_handler.messagebox.askyesno") as mock_ask:
+            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
+        mock_ask.assert_not_called()
+        root.destroy.assert_called_once()
+
+    def test_no_job_running_closes_without_asking(self):
+        jobs = self._FakeJobs([])
+        root = MagicMock()
+        with patch("ml_common.close_handler.messagebox.askyesno") as mock_ask:
+            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
+        mock_ask.assert_not_called()
+        root.destroy.assert_called_once()
+
+
+@unittest.skipUnless(_HAS_DISPLAY, "ディスプレイが無い環境（ヘッドレスCI等）ではスキップ")
+class TestRunJobKeys(unittest.TestCase):
+    """各タブの`_run()`呼び出しが、ジョブ種別ごとに異なる`job_key`を
+    `JobRunner.start()`へ渡していること（`_CONFIRM_STOP_JOB_KEYS`が
+    学習だけを狙い撃ちできる前提）。"""
+
+    def test_run_passes_job_key_through_to_job_runner(self):
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            app = App(root)
+            captured = {}
+
+            def fake_start(job_key, cmd, label, *, on_line=None, on_done=None):
+                captured["job_key"] = job_key
+                return True
+
+            app.jobs.start = fake_start
+            app._run("train", ["true"], "学習")
+            self.assertEqual(captured["job_key"], "train")
+
+            app._on_job_done("学習", 0)  # 状態を待機中へ戻す（次のassertのため）
+            app._run("extract", ["true"], "フレーム抽出")
+            self.assertEqual(captured["job_key"], "extract")
+        finally:
+            root.destroy()
+
+    def test_stop_stops_whichever_job_is_currently_active(self):
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            app = App(root)
+            stopped = {}
+
+            def fake_stop(key):
+                stopped["key"] = key
+                return True
+
+            app.jobs.active_jobs = lambda: [("train", "学習")]
+            app.jobs.stop = fake_stop
+            app._stop()
+            self.assertEqual(stopped["key"], "train")
         finally:
             root.destroy()
 

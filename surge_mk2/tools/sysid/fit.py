@@ -130,7 +130,7 @@ def _find_steps(t: np.ndarray, target: np.ndarray, threshold: float) -> list[tup
     return steps
 
 
-def _fit_first_order_with_delay(t: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+def _fit_first_order_with_delay(t: np.ndarray, y: np.ndarray) -> tuple[float, float] | None:
     """`y`を0→1に正規化した1本の応答から `(dead_time_s, tau_s)` を推定する。
 
     :param t: ステップ開始からの経過時間 [s]（`t[0] == 0`）
@@ -138,6 +138,9 @@ def _fit_first_order_with_delay(t: np.ndarray, y: np.ndarray) -> tuple[float, fl
 
     - `dead_time_s`: `y`が最初に10%へ達する時刻
     - `tau_s`: `dead_time_s`以降の区間を `ln(1-y)` の線形回帰（傾き=-1/tau）で推定
+    - 応答が一度も10%しきい値に到達しなかった場合（配線ミス等で実測が動いていない）は
+      測定失敗として`None`を返す。呼び出し元はこれを`(0.0, 0.0)`のような黙った既定値に
+      すり替えず、無視するか上位へエラーとして伝播させること
 
     ## 振幅が大きいステップだとレート制限で頭打ちになる区間がある
 
@@ -153,7 +156,7 @@ def _fit_first_order_with_delay(t: np.ndarray, y: np.ndarray) -> tuple[float, fl
     # 10%到達点をむだ時間とする（度数の少ない初期区間はノイズに弱いので線形補間）
     above = np.where(y >= 0.1)[0]
     if len(above) == 0:
-        return 0.0, 0.0
+        return None
     i = int(above[0])
     if i == 0:
         dead_time = 0.0
@@ -291,6 +294,15 @@ def fit_steer(samples: list[Sample]) -> dict[str, float]:
     （中央値は外れ値1本に引きずられにくい）。`steer_rate_limit_rad_s`だけは
     「観測された中で最も速く動いた瞬間」を採る——物理的な床を測りたいので、
     平均ではなく最大が正しい
+
+    `fit_speed`と対称に、有効な推定値が1本も得られなかった場合は`0.0`を
+    黙って返さず`ValueError`を送出する——配線ミス等でステア試験のログが
+    ステップ応答として成立していない（10%しきい値に一度も到達しない）場合、
+    無警告の`0.0`がそのままGUI経由で`vehicle.toml`のSTM32制御パラメータに
+    書き込まれるのを防ぐため
+
+    :raises ValueError: ステップ入力が検出できない、または全ステップが
+        10%しきい値に到達せず`dead_time_s`/`tau_steer_s`のどちらも推定できない
     """
     resp = _step_responses(samples, "steer_cmd_echo", "steer_actual",
                            step_threshold=math.radians(2.0), min_hold_s=0.3)
@@ -299,16 +311,29 @@ def fit_steer(samples: list[Sample]) -> dict[str, float]:
 
     dead_times, taus, rates = [], [], []
     for seg_t, seg_y, _delta, seg_actual in resp:
-        dt, tau = _fit_first_order_with_delay(seg_t, seg_y)
+        fit_result = _fit_first_order_with_delay(seg_t, seg_y)
+        if fit_result is None:
+            continue
+        dt, tau = fit_result
         dead_times.append(dt)
-        taus.append(tau)
+        if tau > 0:
+            taus.append(tau)
         if len(seg_t) > 1:
             rate = np.max(np.abs(np.diff(seg_actual) / np.diff(seg_t)))
             rates.append(float(rate))
 
+    if not dead_times:
+        raise ValueError(
+            "どのステップ応答も10%しきい値に到達しませんでした"
+            "（配線ミス等でステアが動いていない可能性があります。mcapが正しいか確認）")
+    if not taus:
+        raise ValueError(
+            "時定数を推定できるステップ応答がありませんでした"
+            "（応答が短すぎるか、配線ミス等の可能性があります。mcapが正しいか確認）")
+
     return {
         "dead_time_s": float(np.median(dead_times)),
-        "tau_steer_s": float(np.median([t for t in taus if t > 0]) if any(t > 0 for t in taus) else 0.0),
+        "tau_steer_s": float(np.median(taus)),
         "steer_rate_limit_rad_s": float(np.max(rates)) if rates else 0.0,
     }
 
@@ -325,7 +350,10 @@ def fit_speed(samples: list[Sample]) -> dict[str, float]:
                            step_threshold=0.05, min_hold_s=0.3)
     taus = []
     for seg_t, seg_y, _delta, _seg_actual in resp:
-        _dt, tau = _fit_first_order_with_delay(seg_t, seg_y)
+        fit_result = _fit_first_order_with_delay(seg_t, seg_y)
+        if fit_result is None:
+            continue
+        _dt, tau = fit_result
         if tau > 0:
             taus.append(tau)
     if not taus:
@@ -487,7 +515,14 @@ def _check_corner_saturated(samples: list[Sample]) -> None:
     low_curvature = stage_curvatures[0][1]
     high_curvature = stage_curvatures[-1][1]
     if low_curvature < 1e-6:
-        return
+        # **ここも黙って判定を諦めない。** 最低速の段で曲率がほぼ0（ステア操作が
+        # 反映されていない・yaw_rateが出ていない等）だと`high_curvature /
+        # low_curvature`が0除算同然になり判定自体が無意味なので、頭打ち確認を
+        # スキップしたことを黙って素通りさせず、判定不能として呼び出し元へ伝える
+        raise ValueError(
+            "最低速の段で曲率がほぼ0でした（ステアが効いていないか、yaw_rateが"
+            "出ていない可能性があります）。グリップの頭打ちに達したか判定できません。"
+            "mcapが正しいか確認してください")
     if high_curvature / low_curvature > 0.9:
         raise ValueError(
             "グリップの頭打ちに達していないようです（最高速でも曲率が"

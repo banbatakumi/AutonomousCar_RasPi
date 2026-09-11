@@ -251,6 +251,15 @@ class McapLog:
 
     MCAP は追記型なのでパイプでもそのまま成立する。**途中で ssh が切れたら
     索引が書かれない**が、`tools/mcap_repair.py` で救える。
+
+    ## SD が満杯になったとき（ENOSPC）
+
+    `write`/`write_dict`（`write_viz_scan`/`write_viz_image` も内部で経由する）は
+    **例外を投げない。** `mcap.writer.Writer` の内部書き込みが `OSError` で
+    失敗したら `errors`/`last_error` に残し、以後そのファイルには一切書かない
+    （`framelog.FrameLogWriter` の `broken` と同じ理由・同じ形）。
+    `logger_node.py` はこれを1プロセス1本しか使わないので、`_on_msg` が
+    投げっぱなしだと記録スレッドごと落ちてしまう——これを防ぐのが目的。
     """
 
     def __init__(self, path: str | Path, *, t0_mono_ns: int | None = None,
@@ -298,6 +307,14 @@ class McapLog:
         self.counts: dict[str, int] = {}
         self.written = 0
 
+        #: `self._w`（`mcap.writer.Writer`）が OSError（ENOSPC 等）で失敗した回数。
+        #: `raspi/core/jpeg.py` の `RingJpeg.errors` と同じ形（2026-09-11）
+        self.errors = 0
+        self.last_error: str = ""
+        #: True なら以後このファイルには何も書かない（`framelog.FrameLogWriter`
+        #: の `_broken` と同じ理由——壊れたレコードの後に正常な物を続けない）
+        self._broken = False
+
         meta = {"t0_mono_ns": str(self.t0_mono_ns), "t0_unix_ns": str(self.t0_unix_ns),
                 "t0_local": time.strftime("%Y-%m-%d %H:%M:%S",
                                           time.localtime(self.t0_unix_ns / 1e9))}
@@ -341,33 +358,51 @@ class McapLog:
         :param schema_name: スキーマ名。省略時は型名
         """
         self._check_open()
+        if self._broken:
+            self.errors += 1
+            return
         if t_mono_ns is None:
             t_mono_ns = getattr(msg, "t_capture", 0) or getattr(msg, "t_pub", 0) \
                 or time.monotonic_ns()
-        cid = self._channels.get(topic)
-        if cid is None:
-            # **スキーマを組むのは初出のトピックのときだけ。** 毎回作ると
-            # 50Hz × トピック数ぶん `msgspec.json.schema()` を回すことになる
-            cls = type(msg)
-            cid = self.channel(topic, schema_name or cls.__name__, json_schema(cls))
-        self._write(cid, topic, _encode(msg), t_mono_ns, getattr(msg, "seq", 0))
+        try:
+            cid = self._channels.get(topic)
+            if cid is None:
+                # **スキーマを組むのは初出のトピックのときだけ。** 毎回作ると
+                # 50Hz × トピック数ぶん `msgspec.json.schema()` を回すことになる
+                cls = type(msg)
+                cid = self.channel(topic, schema_name or cls.__name__, json_schema(cls))
+            self._write(cid, topic, _encode(msg), t_mono_ns, getattr(msg, "seq", 0))
+        except OSError as e:
+            self._mark_broken(e)
 
     def write_dict(self, topic: str, obj: dict, schema_name: str, schema: dict,
                    t_mono_ns: int) -> None:
         """スキーマを明示して dict を1件書く（Foxglove 用トピック・イベント）。"""
         self._check_open()
-        cid = self._channels.get(topic)
-        if cid is None:
-            cid = self.channel(topic, schema_name, schema)
-        self._write(cid, topic, _encode(obj), t_mono_ns, 0)
+        if self._broken:
+            self.errors += 1
+            return
+        try:
+            cid = self._channels.get(topic)
+            if cid is None:
+                cid = self.channel(topic, schema_name, schema)
+            self._write(cid, topic, _encode(obj), t_mono_ns, 0)
+        except OSError as e:
+            self._mark_broken(e)
 
     def _check_open(self) -> None:
         """**チャネル登録より先に見る。** 閉じた Writer に触ると分かりにくく壊れる。"""
         if self._closed:
             raise ValueError("クローズ済みの McapLog に書き込もうとしました")
 
+    def _mark_broken(self, e: OSError) -> None:
+        self._broken = True
+        self.errors += 1
+        self.last_error = f"{type(e).__name__}: {e}"
+
     def _write(self, cid: int, topic: str, data: bytes,
                t_mono_ns: int, seq: int) -> None:
+        """`OSError` はここでは捕まえない——`write`/`write_dict` が捕まえる。"""
         t = self.to_unix_ns(t_mono_ns)
         if not seq:
             seq = self._seq.get(topic, 0) + 1
@@ -405,6 +440,10 @@ class McapLog:
         try:
             self._w.finish()
             self._f.flush()
+        except OSError as e:
+            # 索引が書けなくても致命傷にはしない。`tools/mcap_repair.py` が
+            # 索引無しの MCAP を修復できる（クラス docstring 参照）
+            self._mark_broken(e)
         finally:
             # 標準出力は**閉じない**（呼び出し側の道具が続けて使うことがある）
             if not self.to_stdout:

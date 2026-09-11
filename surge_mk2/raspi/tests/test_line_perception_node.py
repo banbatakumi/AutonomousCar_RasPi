@@ -276,5 +276,44 @@ class TestReadFrame(unittest.TestCase):
         self.assertIsNone(node.read_frame(ref))
 
 
+class TestRunSurvivesProcessFrameException(unittest.TestCase):
+    """`process_frame()` が例外を投げてもノードが継続すること。
+
+    `planning_node._replan()` の `planner.plan()` 例外保護（B3）と同じパターンを
+    `run()` 側の認識呼び出しにも横展開したもの——認識側のバグでノード全体を
+    巻き込んで落とさず、契約の「見失った扱い」に自然に落とす。
+    """
+
+    def _ref_with_frame(self, ring_name: str):
+        ring = FrameRing.create(ring_name, 320, 240, "RGB888", n_slots=2)
+        data = _frame_with_white_column(240, 320, col=160)
+        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                       frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                       fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+        return ring, ref
+
+    def test_exception_does_not_propagate_and_falls_back_to_failed_frame(self):
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+
+        def _raise(*a, **kw):
+            raise RuntimeError("認識側のバグ")
+        node.process_frame = _raise
+
+        ring, ref = self._ref_with_frame("surge_test_line_perception_exc")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
+
+            lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
+            self.assertTrue(lines, "line/cam が一度も publish されていない")
+            self.assertFalse(lines[-1].seen,
+                             "process_frame()が例外を投げたのに見失った扱いになっていない")
+        finally:
+            node.close()
+            ring.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,10 @@ MODELS_DIR = REPO_ROOT / "models"
 DEFAULT_CHECKPOINT_DIR = ML_CAM_DIR / "checkpoints"
 #: これまでのトラブルシューティングで実際に使った SAM のチェックポイント
 SAM_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+#: 学習中でも壊れない・止めても惜しくない類のジョブは確認無しで終了時に落とす。
+#: 学習だけは数十分〜数時間かかりうるので、ウィンドウを閉じる前に一言確認する
+#: （`ml_lidar/app.py`と同じ考え方）
+_CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
 
 rel = make_rel(REPO_ROOT)
 list_model_names = list_versioned_names
@@ -187,7 +191,10 @@ class App:
 
         self._build_widgets()
         self.root.after(100, self._drain_log)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(self.root, self.jobs))
+        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(
+            self.root, self.jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS,
+            confirm_message=lambda label: f"{label}が実行中です。終了すると学習が中断されます。"
+            "\n\n本当に終了しますか？"))
 
     def _is_busy(self) -> bool:
         return self.jobs.is_busy() or self._downloading
@@ -376,7 +383,7 @@ class App:
                     return
             cmd = build_extract_cmd(self.python, self._extract_files, str(model_dir / "frames"),
                                     cam_var.get(), interval, count)
-            self._run(cmd, "フレーム抽出")
+            self._run("extract", cmd, "フレーム抽出")
 
         ttk.Button(frame, text="抽出実行", command=run).grid(row=10, column=0, sticky="w", pady=10)
 
@@ -440,7 +447,7 @@ class App:
             cmd = build_annotate_cmd(self.python, str(model_dir / "frames"), ckpt_var.get(),
                                      model_type_var.get(), device_var.get(), skip_var.get(),
                                      carry_var.get())
-            self._run(cmd, "アノテーション")
+            self._run("annotate", cmd, "アノテーション")
 
         ttk.Button(frame, text="アノテーション開始（別ウィンドウが開きます）", command=run).grid(
             row=8, column=0, columnspan=2, sticky="w", pady=10)
@@ -505,7 +512,7 @@ class App:
             self.train_graph.reset()
             cmd = build_train_cmd(self.python, str(model_dir / "frames"), str(model_dir), epochs,
                                   batch, size_var.get(), no_pretrained_var.get())
-            self._run(cmd, "学習", on_line=on_epoch_line)
+            self._run("train", cmd, "学習", on_line=on_epoch_line)
 
         ttk.Button(frame, text="学習開始", command=run).grid(row=7, column=0, sticky="w", pady=10)
 
@@ -546,7 +553,7 @@ class App:
             self._last_exported_model_name = name
             cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path),
                                    size_var.get())
-            self._run(cmd, "エクスポート")
+            self._run("export", cmd, "エクスポート")
 
         ttk.Button(frame, text="エクスポート実行", command=run).grid(row=5, column=0, sticky="w", pady=10)
 
@@ -585,7 +592,7 @@ class App:
                 return
             cmd = build_preview_cmd(self.python, self.preview_frames_var.get(),
                                     str(MODELS_DIR / f"{name}.onnx"))
-            self._run(cmd, "プレビュー")
+            self._run("preview", cmd, "プレビュー")
 
         ttk.Button(frame, text="プレビュー開始（別ウィンドウが開きます）", command=run).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=10)
@@ -595,7 +602,7 @@ class App:
     def _append_log(self, text: str) -> None:
         self.log_console.append(text)
 
-    def _run(self, cmd: list[str], label: str, *,
+    def _run(self, job_key: str, cmd: list[str], label: str, *,
             on_line: Callable[[str], None] | None = None) -> None:
         if self._is_busy():
             messagebox.showwarning("実行中", "他の処理が終わってから実行してください")
@@ -603,7 +610,7 @@ class App:
         self.status_label.config(text=f"{label} 実行中…")
         self.stop_btn.config(state="normal")
         self._append_log(f"\n$ {' '.join(cmd)}\n")
-        self.jobs.start("job", cmd, label, on_line=on_line,
+        self.jobs.start(job_key, cmd, label, on_line=on_line,
                         on_done=lambda code: self._on_job_done(label, code))
 
     def _on_job_done(self, label: str, code: int) -> None:
@@ -652,7 +659,8 @@ class App:
         threading.Thread(target=worker, daemon=True).start()
 
     def _stop(self) -> None:
-        if self.jobs.stop("job"):
+        active = self.jobs.active_jobs()
+        if active and self.jobs.stop(active[0][0]):
             self._append_log("\n（停止を指示しました）\n")
 
     def _drain_download_queue(self) -> None:

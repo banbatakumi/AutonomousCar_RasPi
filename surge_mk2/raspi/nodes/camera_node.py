@@ -302,7 +302,8 @@ class CameraWorker(threading.Thread):
         with quiet_close("picamera2 のカメラ"):
             self.cam.stop()
             self.cam.close()
-        self.ring.unlink()
+        with quiet_close(f"FrameRing {self.ring.name} の unlink"):
+            self.ring.unlink()
 
 
 def _contig(arr):
@@ -314,8 +315,17 @@ def _contig(arr):
 class CameraNode:
     def __init__(self, indices: list[int], size, fmt: str, fps, n_slots: int,
                  on_frame=None, cfg_sub=None) -> None:
-        self.workers = [CameraWorker(i, size, fmt, fps, n_slots, on_frame)
-                        for i in indices]
+        self.workers: list[CameraWorker] = []
+        try:
+            for i in indices:
+                self.workers.append(
+                    CameraWorker(i, size, fmt, fps, n_slots, on_frame))
+        except Exception:
+            # 2台目以降の構築中に落ちても、既に構築済みの1台目のカメラ・
+            # 共有メモリが後始末されず残ってしまわないようにする
+            for w in self.workers:
+                w.close()
+            raise
         self._t_start = 0.0
         #: GUI/自動運転からの capture 設定（`cam/config`）を拾うための Subscriber。
         #: `--no-bus` やバス未接続なら None（既定 fps・常時 ON のまま動く）
@@ -365,7 +375,11 @@ class CameraNode:
         while self._cfg_running:
             try:
                 events = self._cfg_sub.poll(200)
-            except Exception:
+            except Exception as e:
+                print(f"!! cam/config 受信スレッドが異常終了"
+                      f"（以後 GUI からの cam/config 変更が反映されない）: "
+                      f"{type(e).__name__}: {e}",
+                      file=sys.stderr)
                 break
             for topic, msg in events:
                 if topic != TOPIC_CAM_CONFIG:
