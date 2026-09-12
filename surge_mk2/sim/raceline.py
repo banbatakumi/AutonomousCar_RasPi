@@ -35,11 +35,12 @@ import math
 
 import numpy as np
 import torch
+from scipy.interpolate import PchipInterpolator
 
 from .course import Course
 from .vehicle import GRAVITY_MPS2
 
-__all__ = ["compute_raceline_offsets", "compute_speed_profile"]
+__all__ = ["compute_raceline_offsets", "compute_speed_profile", "compute_raceline_xy"]
 
 #: `width=None`のコース（道幅がスカラー/配列で語れないコース全般。
 #: `sim/random_course.py`には現状該当アーキタイプは無いが、将来の手作業
@@ -106,6 +107,12 @@ _OPT_REL_TOL = 0.02
 #: 弧長ベースに間引いてから最適化し、結果を周期線形補間で密な点列に戻す
 _OPT_STEP_M = 0.1
 
+#: 間引き点列から密な点列へ戻す周期PCHIP補間（`_reconstruct_dense_offset`）で、
+#: 周期境界を作るために弧長の前後へ複製する間引き点の個数。PCHIPは局所補間
+#: （評価点の近傍数点しか参照しない）なので、境界をまたぐ評価点をカバーできる
+#: だけの少数で足りる——多すぎても不要な複製が増えるだけで結果は変わらない
+_PERIODIC_PAD_POINTS = 4
+
 #: 障害物回避ペナルティが働く弧長方向の窓を、除外半径(`r_excl`。障害物半径+
 #: 車体半幅+安全マージン)からさらに広げる余裕 [m]。窓を`r_excl`ちょうどにすると
 #: 障害物の真横の数点しか回避に参加できず、急な進路変更（局所的に曲率が跳ね上がる
@@ -153,6 +160,38 @@ def _coarse_indices(xy: np.ndarray, step: float) -> np.ndarray:
     targets = np.linspace(0.0, total, n, endpoint=False)
     idx = np.clip(np.searchsorted(s, targets, side="left"), 0, len(xy) - 1)
     return np.unique(idx)
+
+
+def _reconstruct_dense_offset(s_c: np.ndarray, offset_c: np.ndarray, total: float,
+                              s_query: np.ndarray) -> np.ndarray:
+    """間引き点で最適化した`offset_c`（弧長位置`s_c`）を、密な点列の弧長位置
+    `s_query`へ戻す。**単純な区分線形補間(`np.interp`)は使わない**——線形補間は
+    間引き点(`_OPT_STEP_M`=0.1m間隔)ごとに傾きが不連続な「折れ線」になり、密な
+    点列(間引き前の間隔、狭いコースでは2〜3cm)側でその折れ目を`_discrete_curvature`
+    で見ると、傾きの不連続がそのまま曲率のスパイクとして現れる（実測: eval固定
+    コース5本で密点列側の曲率二乗和が中心線そのものの4〜13倍に悪化、理想ライン
+    が視覚的に「毛羽立ち」、かつ本来アペックスを突くべき区間で外側へ押し戻される
+    「膨らみ」となって現れた——2026-09-12、バンビが観戦画面で指摘）。
+
+    区分3次エルミート補間(PCHIP、`scipy.interpolate.PchipInterpolator`)に
+    変えることで、`offset`関数がC1連続になり折れ目由来のスパイクが消える。
+    自然3次スプライン（`CubicSpline`）も試したが、間引き点の一部でbox制約が
+    強く効いて隣接点との差が大きい区間（`corner`/`hairpin`アーキタイプ）で
+    大域的なリンギング（オーバーシュート）を起こし、密点列側の曲率二乗和が
+    線形補間よりさらに悪化する実測結果が出た。PCHIPは局所的・単調性保存
+    （隣接データ点の範囲を超えて振動しない）なため、この問題が起きない。
+
+    周期境界（コースは閉ループ）を扱うため、`PchipInterpolator`自体には
+    periodic対応が無いので、間引き点列の前後に`_PERIODIC_PAD_POINTS`個ぶん
+    弧長を`±total`ずらして複製してから素の（非周期）PCHIPを構成し、
+    元の`[0, total)`区間だけを評価する——PCHIPは局所補間なので、評価点の
+    近傍さえ周期的に繋がっていれば境界をまたいでも正しく滑らかに繋がる。
+    """
+    n = len(s_c)
+    pad = min(_PERIODIC_PAD_POINTS, n)
+    s_ext = np.concatenate([s_c[-pad:] - total, s_c, s_c[:pad] + total])
+    offset_ext = np.concatenate([offset_c[-pad:], offset_c, offset_c[:pad]])
+    return PchipInterpolator(s_ext, offset_ext)(s_query)
 
 
 def _curvature_sq_sum_torch(offset: "torch.Tensor", centerline_xy: "torch.Tensor",
@@ -373,11 +412,29 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
         prev_loss = loss
 
     offset_c = (center_t + half_range_t * torch.tanh(z_t)).detach().numpy()
-    # 間引いた点の弧長位置を基準に、密な点列へ周期線形補間で戻す
-    offset = np.interp(s_full, s_full[idx], offset_c, period=total)
+    # 間引いた点の弧長位置を基準に、密な点列へ周期PCHIP補間で戻す
+    # （区分線形補間を使わない理由は`_reconstruct_dense_offset`のdocstring参照）
+    offset = _reconstruct_dense_offset(s_full[idx], offset_c, total, s_full)
     # 補間の丸め込みで、道幅が急に変わる区間だけ僅かに制約を超えうるので
     # 密な点列側の`(lo, hi)`で最終的にクランプしておく
     return np.clip(offset, lo, hi)
+
+
+def compute_raceline_xy(centerline: np.ndarray, width: float | np.ndarray | None, *,
+                        vehicle_half_width_m: float, safety_margin_m: float = 0.03,
+                        obstacles: np.ndarray | None = None, course: "Course | None" = None,
+                        iterations: int = _OPT_ITERATIONS, lr: float = _OPT_LR) -> np.ndarray:
+    """`compute_raceline_offsets()`を呼び、理想ラインの世界座標`(N,2)`
+    （`centerline + offset*normal`）に変換したものを返す。引数は`compute_raceline_offsets`と
+    同じ——呼び出し側（`ml_lidar/env.py`の報酬計算、`ml_lidar/watch.py`・`live_watch.py`の
+    観戦描画）で同じ`offset→normal→xy`変換を重複させないための薄いラッパー。
+    """
+    offsets = compute_raceline_offsets(centerline, width, vehicle_half_width_m=vehicle_half_width_m,
+                                       safety_margin_m=safety_margin_m, obstacles=obstacles,
+                                       course=course, iterations=iterations, lr=lr)
+    yaw = centerline[:, 2]
+    normal = np.column_stack((-np.sin(yaw), np.cos(yaw)))
+    return centerline[:, :2] + offsets[:, None] * normal
 
 
 def compute_speed_profile(centerline: np.ndarray, offsets: np.ndarray, *, mu: float,

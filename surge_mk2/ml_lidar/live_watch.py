@@ -33,6 +33,12 @@
 - とはいえ学習プロセスとCPUを取り合うことに変わりはない。ラップトップ1台で
   学習と同時に見ると、学習側のfpsは多少落ちる。気になるなら`--interval-ms`を
   上げて描画頻度を下げること
+
+## 理想ラインの表示
+
+オレンジの破線は理想ライン（MCL、`sim/raceline.py`の`compute_raceline_xy`）。
+`watch.py`と同じ診断用オーバーレイで、学習には関与しない。5本のコースは
+固定なので初期化時に1回だけ計算する（毎フレーム再計算しない）。
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ import numpy as np  # noqa: E402
 from gymnasium.wrappers import TimeLimit  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
+from sim.raceline import compute_raceline_xy  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
@@ -185,6 +192,17 @@ def run(args: argparse.Namespace) -> None:
                  course.origin[1], course.origin[1] + h * course.resolution)
         ax.imshow(course.grid, extent=extent, origin="lower", cmap="Greys",
                  vmin=0, vmax=1, alpha=0.6)
+        # 理想ライン(MCL)を薄く重ねる。学習には関与しない診断用オーバーレイなので、
+        # raceline_weight=0の設定でもコースが決まれば常に描く（`watch.py`と同じ方針）。
+        # コースは固定(EVAL_COURSE_PARAMS)なので毎フレームではなく初期化時に1回だけ計算する
+        if course.centerline is not None:
+            vehicle_half_width_m = float(np.abs(footprint[:, 1]).max())
+            raceline_xy = compute_raceline_xy(course.centerline, course.width,
+                                              vehicle_half_width_m=vehicle_half_width_m,
+                                              course=course)
+            closed = np.vstack([raceline_xy, raceline_xy[:1]])
+            ax.plot(closed[:, 0], closed[:, 1], color="tab:orange", linewidth=1.0,
+                   linestyle="--", zorder=3)
         body_poly = Polygon(np.zeros((4, 2)), closed=True, facecolor="tab:blue",
                             edgecolor="white", zorder=5)
         ax.add_patch(body_poly)

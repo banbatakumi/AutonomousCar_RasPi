@@ -17,6 +17,7 @@ import numpy as np  # noqa: E402
 
 from ml_lidar.course_gen import random_walk_loop_course  # noqa: E402
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
 
 def _square_centerline(side: float = 2.0, step: float = 0.1) -> np.ndarray:
@@ -71,6 +72,59 @@ class TestCenterlineProgress(unittest.TestCase):
         delta = self.env._progress_delta(near_start)
         self.assertGreater(delta, 0.0)
         self.assertLess(delta, 0.5)
+
+
+class TestRaceline(unittest.TestCase):
+    """v18: `_prepare_raceline()`（理想ライン=MCLの追従罰則）のテスト。"""
+
+    def test_disabled_by_default_no_cost(self) -> None:
+        """`raceline_weight<=0`(既定)なら`compute_raceline_offsets()`のL-BFGSを
+        呼ばず、`_raceline_xy`はNoneのままになる（env.py `_prepare_raceline`
+        docstring参照——既存configの学習速度に負担をかけないための仕様）。"""
+        env = LidarE2EEnv(EnvConfig())
+        course = types.SimpleNamespace(centerline=_square_centerline(), width=1.0)
+        env._prepare_raceline(course, VehicleSpec.load())
+        self.assertIsNone(env._raceline_xy)
+
+    def test_enabled_moves_off_centerline_near_sharp_corners(self) -> None:
+        """一辺2mの正方形ループ(直角コーナー×4)は曲率が局所的に非常に大きいので、
+        曲率二乗和を最小化するMCLは各コーナーでセンターラインから明確に離れる
+        はず。"""
+        env = LidarE2EEnv(EnvConfig(raceline_weight=0.3))
+        course = types.SimpleNamespace(centerline=_square_centerline(), width=1.0)
+        env._prepare_raceline(course, VehicleSpec.load())
+        self.assertIsNotNone(env._raceline_xy)
+        self.assertEqual(env._raceline_xy.shape, course.centerline[:, :2].shape)
+        dev = np.hypot(*(env._raceline_xy - course.centerline[:, :2]).T)
+        self.assertGreater(dev.max(), 0.02,
+                           "曲率最小化のMCLが直角コーナーでセンターラインからほぼ動いていない")
+
+    def test_raceline_penalty_reduces_reward(self) -> None:
+        """同じコース・同じ行動列でも、raceline_weight>0の方が各ステップの報酬が
+        罰則ぶんだけ以下になる——`step()`内の`_project_centerline`インデックス
+        流用に誤りがあれば崩れる不変条件。"""
+        course = random_walk_loop_course(np.random.default_rng(3))
+        action = np.array([0.3, 0.5], dtype=np.float32)
+
+        def _make(weight: float) -> LidarE2EEnv:
+            cfg = EnvConfig(randomize_lidar=False, randomize_dynamics=False,
+                            raceline_weight=weight)
+            return LidarE2EEnv(cfg, course=course)
+
+        env_off, env_on = _make(0.0), _make(0.3)
+        env_off.reset(seed=0)
+        env_on.reset(seed=0)
+
+        saw_nonzero_dev = False
+        for _ in range(30):
+            _, r_off, term_off, trunc_off, _ = env_off.step(action)
+            _, r_on, term_on, trunc_on, info_on = env_on.step(action)
+            self.assertGreaterEqual(info_on["raceline_dev_m"], 0.0)
+            saw_nonzero_dev = saw_nonzero_dev or info_on["raceline_dev_m"] > 1e-6
+            self.assertLessEqual(r_on, r_off + 1e-9)
+            if term_off or term_on:
+                break
+        self.assertTrue(saw_nonzero_dev, "理想ラインからの偏差が一度も観測されなかった")
 
 
 class TestEnvSmoke(unittest.TestCase):

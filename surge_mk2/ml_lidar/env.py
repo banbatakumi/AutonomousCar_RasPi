@@ -3,13 +3,42 @@
 `ML_LIDAR_V2_PROMPT.md`（旧`ml_lidar`削除後にCopilot CLIの独立レビューを経て
 確定した設計方針）の仕様をそのまま実装する。要点:
 
-## 報酬（v1・最小構成 + v16: ステア実効ペナルティ）
+## 報酬（v1・最小構成 + v16: ステア実効ペナルティ + v18: 理想ライン追従）
 
 `progress`（センターラインへの弧長射影の単調増加分、`dt`で正規化）＋
 `collision_penalty`（衝突で終端）＋`steer_effort_weight`（生アクション`a[0]`
-＝舵角速度指令の**絶対値そのもの**に対する罰則、既定0）。TAL項・報酬正規化は
-入れない。`progress`はラップアラウンド処理（半周を超える飛びを`±total_length`
-で補正）を最初から実装する——これが無いと周回完走判定自体が壊れる。
+＝舵角速度指令の**絶対値そのもの**に対する罰則、既定0）＋`raceline_weight`
+（理想ラインからの横偏差への罰則、既定0）。報酬正規化は入れない。`progress`は
+ラップアラウンド処理（半周を超える飛びを`±total_length`で補正）を最初から
+実装する——これが無いと周回完走判定自体が壊れる。
+
+## v18: 理想ライン（最小曲率線=MCL）への追従
+
+バンビの実車観戦での指摘「カーブ前に内側のライン取りをしてしまい、旋回半径を
+なるべく大きく取れていない」を受けて追加（PROGRESS.md 2026-09-12節）。
+`progress`＋`collision_penalty`＋`steer_effort_weight`だけの報酬には、
+アウト・イン・アウトで旋回半径を稼ぐと得をするという信号が一切無かった。
+
+同種のE2E RLレーシング文献を調査した結果、対策には大きく2系統ある:
+①TAL（Trajectory-Aided Learning、Bosello et al. arXiv:2306.07003）——理想
+ライン上を追う古典プランナー（pure pursuit等）をオンラインで走らせ、方策の
+行動（速度・舵角）そのものをその出力に近づける。②CTH（cross-track+heading）
+報酬の参照パスをセンターラインではなく最小曲率線（MCL）にする（Evans et al.
+arXiv:2103.10098）——古典プランナーは不要で、オフラインで計算した理想ラインへの
+横方向距離だけを罰する。同論文では、参照パスをセンターラインのままにした
+cross-track罰則（TAL論文のベースラインと同種）はスリップ角30°超のドリフトに
+陥り失敗する一方、参照パスをMCLに変えるだけで比較対象中最速ラップを達成したと
+報告されている。
+
+v18では実装コストの低い②を採用する——`sim/raceline.py`の`compute_raceline_offsets()`
+（道幅内で曲率二乗和を最小化したMCLのオフセットを返す、旧ml_lidarがTALのために
+実装したまま「変更しない・そのまま使う」基盤として温存されていたもの）を
+`reset()`で1回だけ呼び、センターライン投影と同じ最近傍点インデックスを流用して
+MCL上の対応点との距離を`raceline_weight`で罰する。速度プロファイル追従
+（`compute_speed_profile`、TALの完全版に相当）は同時に入れない——「一変数ずつ」
+の原則と、指摘の焦点が速度ではなくラインそのものであることによる。v18で
+コーナー進入前の減速まで改善しなければ、v19でTAL相当（速度・舵角の行動模倣）へ
+格上げする。
 
 **v8〜v10で試して手詰まりと確定した`steer_rate_weight`（生アクションの隣接
 ステップ差分＝jerkへのL1罰則）は2026-09-11に撤去した**。「隣接差分の総和は
@@ -103,6 +132,7 @@ from raspi.msgs.types import Scan
 from sim.course import Course
 from sim.lidar import VirtualLidar
 from sim.params import SimParams
+from sim.raceline import compute_raceline_xy
 from sim.vehicle import DriveInput, VehicleModel, VehicleSpec
 
 from .course_gen import random_walk_loop_course
@@ -146,6 +176,14 @@ class EnvConfig:
     #: 掛ける罰則の重み。既定0（無効）。v16でCLIの`--steer-effort-weight`で
     #: 指定する（`EnvConfig`docstring参照、旧`steer_rate_weight`との違いに注意）
     steer_effort_weight: float = 0.0
+    #: 理想ライン（最小曲率線=MCL、`sim.raceline.compute_raceline_offsets`）からの
+    #: 横偏差（`raceline_tolerance_m`超過分）に掛ける罰則の重み。既定0（無効、
+    #: `_prepare_raceline()`が計算コストも払わない）。モジュールdocstring「v18」参照
+    raceline_weight: float = 0.0
+    #: `raceline_weight`の罰則を免除する許容誤差 [m]。センターライン投影の
+    #: 最近傍点インデックスをMCL参照点にも流用する近似（`_project_centerline`）
+    #: による誤差を吸収する
+    raceline_tolerance_m: float = 0.08
     randomize_lidar: bool = True
     randomize_dynamics: bool = True
     dynamics_jitter_frac: float = 0.2
@@ -192,6 +230,7 @@ class LidarE2EEnv(gym.Env):
         self._centerline_xy: np.ndarray | None = None
         self._centerline_arc: np.ndarray | None = None
         self._total_length = 0.0
+        self._raceline_xy: np.ndarray | None = None
 
     # ── Gym API ──
 
@@ -211,6 +250,7 @@ class LidarE2EEnv(gym.Env):
         self.course = course
         self._body = body
         self._prepare_centerline(course)
+        self._prepare_raceline(course, spec)
 
         params = self._sample_sim_params()
         self.vehicle = VehicleModel(spec, course.start)
@@ -252,13 +292,21 @@ class LidarE2EEnv(gym.Env):
                 collided = True
                 break
 
-        s_now = self._project_arc_length(self.vehicle.x, self.vehicle.y)
+        idx, s_now = self._project_centerline(self.vehicle.x, self.vehicle.y)
         delta = self._progress_delta(s_now)
         self._s_prev = s_now
         self._lap_progress_m += delta
         progress = max(0.0, delta)
 
-        reward = progress / self.cfg.dt - steer_effort_penalty
+        raceline_dev_m = 0.0
+        raceline_penalty = 0.0
+        if self._raceline_xy is not None:
+            raceline_dev_m = math.hypot(self.vehicle.x - self._raceline_xy[idx, 0],
+                                        self.vehicle.y - self._raceline_xy[idx, 1])
+            raceline_penalty = self.cfg.raceline_weight * max(
+                0.0, raceline_dev_m - self.cfg.raceline_tolerance_m)
+
+        reward = progress / self.cfg.dt - steer_effort_penalty - raceline_penalty
         terminated = False
         if collided:
             reward += self.cfg.collision_penalty
@@ -273,6 +321,7 @@ class LidarE2EEnv(gym.Env):
             "lap_progress_m": self._lap_progress_m,
             "collided": collided,
             "speed": self.vehicle.speed,
+            "raceline_dev_m": raceline_dev_m,
         }
         return obs, reward, terminated, False, info
 
@@ -332,10 +381,33 @@ class LidarE2EEnv(gym.Env):
         self._centerline_arc = arc
         self._total_length = float(arc[-1] + closing)
 
-    def _project_arc_length(self, x: float, y: float) -> float:
+    def _prepare_raceline(self, course: Course, spec: VehicleSpec) -> None:
+        """理想ライン（MCL、`sim.raceline.compute_raceline_offsets`）の世界座標を
+        centerlineと同じ点列上にキャッシュする（モジュールdocstring「v18」参照）。
+
+        `raceline_weight<=0`のときは計算しない——`compute_raceline_offsets()`の
+        L-BFGS最適化はエピソード1回につき20〜40ms（同モジュールdocstring実測）
+        かかり、この項を使わない設定（v1〜v17相当含む）の学習速度にまで
+        負担させないため。
+        """
+        if self.cfg.raceline_weight <= 0.0:
+            self._raceline_xy = None
+            return
+        vehicle_half_width_m = max(abs(p[1]) for p in spec.footprint)
+        self._raceline_xy = compute_raceline_xy(course.centerline, course.width,
+                                                vehicle_half_width_m=vehicle_half_width_m,
+                                                course=course)
+
+    def _project_centerline(self, x: float, y: float) -> tuple[int, float]:
+        """`(最近傍点インデックス, 弧長)`。理想ライン参照（`_prepare_raceline`が
+        用意するMCL点列はcenterlineと同じ点列・同じ並び）にも同じインデックスを
+        流用するため、`_project_arc_length`と分けて公開する（`step()`参照）。"""
         d2 = (self._centerline_xy[:, 0] - x) ** 2 + (self._centerline_xy[:, 1] - y) ** 2
         idx = int(np.argmin(d2))
-        return float(self._centerline_arc[idx])
+        return idx, float(self._centerline_arc[idx])
+
+    def _project_arc_length(self, x: float, y: float) -> float:
+        return self._project_centerline(x, y)[1]
 
     def _progress_delta(self, s_now: float) -> float:
         """`s_prev → s_now`の弧長差分。**半周を超える飛びは周回とみなして補正する**——

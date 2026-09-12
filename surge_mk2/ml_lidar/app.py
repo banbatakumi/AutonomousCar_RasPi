@@ -259,6 +259,17 @@ class App:
             # 生アクション(舵角速度指令)の絶対値そのものへの罰則——旧
             # steer-rate-weight(隣接差分へのL1、手詰まり確定済み)とは別物
             "steer-effort-weight": ("ステア実効ペナルティ重み", "0.02"),
+            # v18: 理想ライン(最小曲率線=MCL)からの横偏差への罰則。バンビの
+            # 「カーブ前に内側のライン取りをしてしまい旋回半径を稼げていない」
+            # 指摘を受けて導入(env.py EnvConfig docstring「v18」参照)。
+            # v17モデル(この罰則を意識せず学習済み)をこの罰則付きで再評価すると
+            # mean_dev≈15.6cm・p90≈31.8cmで、重み0.3では罰則がprogress報酬の
+            # 1.7%程度にしかならず(学習が進んで偏差が縮むほど更に薄まる)効果が
+            # 出ない恐れがある一方、1.0だと1エピソード累積でcollision_penalty(-30)を
+            # 上回りうる規模になり過度に保守的な方策に倒れるリスクがある(PROGRESS.md参照)。
+            # 中間の0.5を初期値にし、学習後にeval_stats.py/mean_raceline_dev_mを
+            # 見て要調整
+            "raceline-weight": ("理想ラインペナルティ重み", "0.5"),
             "sde-sample-freq": ("gSDEノイズ再サンプリング間隔[step]", "4"),
             # SB3既定(0.0)。-3はgSDE有効時専用の調整値(train_rl.pyの--log-std-init
             # ヘルプ参照)なので、gSDEチェックボックスの状態に連動させて切り替える
@@ -322,9 +333,10 @@ class App:
             "fov-deg": ("視野角[deg]", "270"),
             "max-range": ("LiDAR最大レンジ[m]", "10.0"),
             "steer-tau": ("舵の平滑化[s]", "0.10"),
+            "raceline-tolerance-m": ("理想ライン追従の許容誤差[m]", "0.08"),
             "dynamics-jitter-frac": ("車両動特性のランダム化幅[割合]", "0.2"),
             "eval-freq": ("eval間隔[step]", "20000"),
-            "n-eval-episodes": ("eval時のエピソード数(3の倍数推奨)", "9"),
+            "n-eval-episodes": ("eval時のエピソード数(5の倍数推奨)", "10"),
             "checkpoint-freq": ("チェックポイント間隔[step]", "100000"),
             "learning-rate": ("学習率", "0.0003"),
             "n-steps": ("ロールアウト長", "2048"),

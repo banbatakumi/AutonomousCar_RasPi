@@ -173,6 +173,8 @@ def build_env_config(args: argparse.Namespace) -> EnvConfig:
         steer_tau=args.steer_tau,
         steer_rate_max_rad_s=args.steer_rate_max_rad_s,
         steer_effort_weight=args.steer_effort_weight,
+        raceline_weight=args.raceline_weight,
+        raceline_tolerance_m=args.raceline_tolerance_m,
         dynamics_jitter_frac=args.dynamics_jitter_frac,
     )
 
@@ -390,6 +392,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "強すぎると過度に保守的な方策に倒れるので、eval_stats.pyの"
                         "ステア滑らかさ指標とcollision_rate/mean_speedを同時に見ながら"
                         "調整すること")
+    p.add_argument("--raceline-weight", type=float, default=0.0,
+                   help="理想ライン（`sim.raceline.compute_raceline_offsets`が返す"
+                        "道幅内で曲率二乗和を最小化した最小曲率線=MCL）からの横偏差"
+                        "（--raceline-tolerance-m超過分）への罰則重み。既定0（無効、"
+                        "計算コストも払わない）。v18でバンビの「カーブ前に内側の"
+                        "ライン取りをしてしまい旋回半径を稼げていない」指摘を受けて"
+                        "導入（env.py EnvConfig docstring「v18」参照）。参照パスは"
+                        "必ずMCL——文献調査で、参照パスを単純なセンターラインのままに"
+                        "したcross-track罰則はスリップ角30°超のドリフトに陥り改善しない"
+                        "と確認済み")
+    p.add_argument("--raceline-tolerance-m", type=float, default=0.08,
+                   help="[m] --raceline-weightの罰則を免除する許容誤差。センターライン"
+                        "投影の最近傍点インデックスをMCL参照点にも流用する近似の誤差を"
+                        "吸収する")
 
     # ── 評価 ──
     p.add_argument("--eval-freq", type=int, default=20_000,

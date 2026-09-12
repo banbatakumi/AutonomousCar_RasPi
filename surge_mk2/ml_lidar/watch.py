@@ -9,6 +9,11 @@
 
 `sim/courses/`の自作コース（`--course`で指定）は学習プロセスに一切関与しない確認専用
 （`ML_LIDAR_V2_PROMPT.md`）。指定しなければ`course_gen`のランダムコースを使う。
+
+オレンジの破線は理想ライン（MCL、`sim/raceline.py`の`compute_raceline_xy`）。
+学習には一切関与しない診断用オーバーレイで、`raceline_weight=0`で学習した
+モデルでも常に描く——「このモデルが理想ラインからどれだけ離れているか」を
+見る比較材料として無効時でも有益なため（PROGRESS.md 2026-09-12節）。
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from raspi.msgs.types import Scan, VehicleState  # noqa: E402
 from sim.course import Course  # noqa: E402
 from sim.lidar import VirtualLidar  # noqa: E402
 from sim.params import SimParams  # noqa: E402
+from sim.raceline import compute_raceline_xy  # noqa: E402
 from sim.vehicle import DriveInput, VehicleModel, VehicleSpec  # noqa: E402
 
 from ml_lidar.course_gen import random_walk_loop_course  # noqa: E402
@@ -137,6 +143,20 @@ def run(args: argparse.Namespace) -> None:
              course.origin[1], course.origin[1] + h * course.resolution)
     ax.imshow(course.grid, extent=extent, origin="lower", cmap="Greys",
              vmin=0, vmax=1, alpha=0.6)
+
+    # 理想ライン(MCL、道幅内で曲率二乗和を最小化した参照軌道)を薄く重ねる。
+    # 学習には一切関与しない診断用オーバーレイなので、raceline_weight=0で
+    # 学習したモデル(v1〜v17)でも常に描く——「このモデルが理想ラインから
+    # どれだけ離れているか」を見る比較材料として無効時でも有益なため
+    if course.centerline is not None:
+        vehicle_half_width_m = max(abs(p[1]) for p in VehicleSpec.load().footprint)
+        raceline_xy = compute_raceline_xy(course.centerline, course.width,
+                                          vehicle_half_width_m=vehicle_half_width_m,
+                                          course=course)
+        closed = np.vstack([raceline_xy, raceline_xy[:1]])
+        ax.plot(closed[:, 0], closed[:, 1], color="tab:orange", linewidth=1.2,
+               linestyle="--", zorder=3, label="理想ライン(MCL)")
+        ax.legend(loc="upper right", fontsize=8)
 
     body_poly = Polygon(np.zeros((4, 2)), closed=True, facecolor="tab:blue",
                         edgecolor="white", zorder=5)
