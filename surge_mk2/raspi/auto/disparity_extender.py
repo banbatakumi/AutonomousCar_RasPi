@@ -9,8 +9,14 @@ F1TENTH で広く使われている手法（Nathan Otterness, 2019）。
 |---|---|---|
 | 隙間の扱い | `gap_min`[m] 以上が続く**最長の区間**を選ぶ | **通れない隙間を塞いでから**残った所を見る |
 | 狙点 | 最長区間の真ん中 | **一番遠い帯**の真ん中 |
-| 速度 | 正面 ±`front_deg` の余裕 | **狙う方向の見通し**（下記。ここが効く） |
+| 速度の基礎 | 正面 ±`front_deg` の余裕 | **狙う方向の見通し**（下記。ここが効く） |
 | 安全バブル | 最近傍の周りを塗る | **要らない**（塗りが同じ役目を果たす） |
+
+速度の頭打ちは両方とも同じ式（実舵角から曲率 κ=tan(δ)/L を求め
+`v ≤ sqrt(a_lat_max/κ)`）を使う。**以前は DE だけ `turn_slow`（舵角いっぱいで
+一律%減速）という発見的な調整だったが、2026-09-12 に FTG と同じ曲率ベースへ
+揃えた**——緩いカーブもきついカーブも同じ割合でしか区別できない
+`turn_slow` の弱点は FTG の方の docstring（⑥）参照。
 
 FTG は「どれだけ広く空いているか」しか見ないので、**奥まで抜けているかを
 問わない**。Disparity Extender は通れない隙間を先に消したうえで奥行きで選ぶ。
@@ -63,11 +69,18 @@ FTG は「どれだけ広く空いているか」しか見ないので、**奥�
 
 実測でここが最大の足枷だった（circuit のラップ **62s → 17s**）。
 
-## 前処理と停止条件は Follow the Gap と同じ契約
+## 前処理は Follow the Gap と同じ契約
 
 欠測・飽和・測距不能の読み方は `base.scan_window()` に集約してある
 （**片方だけ直すともう片方が古い読み方のまま走る**ため）。
-`stop_dist` が「測距不能を空き扱いにしている穴」を受ける最後の砦であることも同じ。
+
+## 緊急停止は持たない（2026-09-12）
+
+`FollowTheGap` と同じ理由（`follow_the_gap.py` docstring参照）で、正面距離
+しきい値によるハード停止（旧 `stop_dist`）は撤去した。STM32 の `auto_stop`
+（速度に応じて伸びる動的停止距離）に任せる。塗った結果どこにも進めない
+（`best <= _STUCK_M`）判定は残す——これは「衝突しそう」ではなく「計画その
+ものが失敗している」ケースなので `ready=False` として残す。
 """
 
 from __future__ import annotations
@@ -86,6 +99,10 @@ MIN_SEEN_RATIO = 0.6
 #: 狙点の候補と見なす「一番遠い」の許容差 [m]。これ以内は同着として扱い、
 #: **その中で正面にいちばん近い方向**を採る
 TIE_M = 0.05
+#: 塗った結果の最遠距離がこれ以下なら「どこにも進めない」（`ready=False`）。
+#: **緊急停止のしきい値ではない**——実質ゼロ（車体が何かに接触している）を
+#: 検出するためだけの固定値。停止そのものは STM32 の `auto_stop` に任せる
+_STUCK_M = 0.05
 
 
 class DisparityExtender(Planner):
@@ -116,15 +133,11 @@ class DisparityExtender(Planner):
                   note="±この範囲の最小値を取る。障害物を太らせる方向にだけ間違える"),
         ParamSpec(key="front_deg", label="正面とみなす幅", min=5, max=45, step=1,
                   default=20, unit="°",
-                  note="正面の余裕をこの範囲の最小距離で測る。停止判定に使う"),
-        ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.5, step=0.01,
-                  default=0.35, unit="m",
-                  note="正面余裕がこれを切ったら制動する。★測距不能を空き扱いに"
-                       "している穴を受けるのはここ"),
+                  note="GUI表示用の正面の余裕をこの範囲の最小距離で測る（診断用。速度には使わない）"),
         ParamSpec(key="slow_dist", label="全開になる距離", min=0.3, max=8.0, step=0.1,
                   default=3.0, unit="m",
-                  note="見通しがこれ以上あれば最高速度。stop_dist との間を線形に結ぶ"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=2.0, step=0.05,
+                  note="見通しがこれ以上あれば最高速度。0m（接触寸前）との間を線形に結ぶ"),
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.05,
                   default=0.60, unit="m/s",
                   note="★実車で上げるのは点群の遅延を測ってから。"
                        "シムでは 1.5 まで衝突なしを確認済み（`PROGRESS.md`）"),
@@ -134,10 +147,11 @@ class DisparityExtender(Planner):
         ParamSpec(key="steer_gain", label="舵角ゲイン", min=0.1, max=2.0, step=0.05,
                   default=0.80, unit="",
                   note="狙う方位[rad]に掛けて舵角にする。上げると食いつくが振動しやすい"),
-        ParamSpec(key="turn_slow", label="旋回時の減速", min=0.0, max=1.0, step=0.05,
-                  default=0.35, unit="",
-                  note="舵角いっぱいで速度をこの割合ぶん落とす。"
-                       "★FTG より小さい既定。膨らまないぶん速度を残せる"),
+        ParamSpec(key="a_lat_max", label="旋回時の横加速度上限", min=0.5, max=8.0, step=0.1,
+                  default=3.0, unit="m/s²",
+                  note="★実車未計測の暫定値。実際に切る舵角から曲率 κ=tan(δ)/L を求め、"
+                       "v ≤ sqrt(これ/κ) で速度を抑える（`FollowTheGap` と同じ式。"
+                       "2026-09-12に`turn_slow`から置き換え）"),
         ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
                   default=0.08, unit="s",
                   note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが鈍る"),
@@ -195,21 +209,9 @@ class DisparityExtender(Planner):
         st.bubble_start_deg = 0.0
         st.bubble_end_deg = -1.0
 
-        # 正面が詰まっているときは、進める方向があっても**まず止める**。
-        # 「隙間が無い」より「正面 20cm」の方が、人が読んで原因が分かる
-        stop_d = p["stop_dist"]
-        if st.free_ahead <= stop_d:
-            st.ready = True                # 計画はできている。**意図して止めている**
-            st.brake = True
-            st.target_speed = 0.0
-            st.target_steer = self._steer   # 舵は保持（曲がりながら止まれる）
-            st.reason = (f"正面 {st.free_ahead * 100:.0f}cm で停止"
-                         f"（停止距離 {stop_d * 100:.0f}cm）")
-            return st
-
         # ── ④ 一番遠い帯の**真ん中**を狙う ──
         best = max(ext)
-        if best <= stop_d:
+        if best <= _STUCK_M:
             st.reason = (f"塞いだ結果どこにも進めない（最遠 {best * 100:.0f}cm・"
                          f"最近傍 {nearest * 100:.0f}cm）")
             return st                      # ready=False ＝ 制動
@@ -234,15 +236,18 @@ class DisparityExtender(Planner):
         # ★ `ext[j_best]` をそのまま使う。扇で測り直さない
         #   （理由はモジュール docstring「速度は『狙う方向の ext』そのままで決める」参照）
         lookahead = ext[j_best]
-        slow_d = max(p["slow_dist"], stop_d + 0.01)
+        slow_d = max(p["slow_dist"], 1e-3)
         v_max = p["max_speed"]
         v_min = min(p["min_speed"], v_max)
 
-        ratio = min(1.0, max(0.0, (lookahead - stop_d) / (slow_d - stop_d)))
+        ratio = max(0.0, min(1.0, lookahead / slow_d))
         v = v_min + (v_max - v_min) * ratio
-        turn = abs(st.target_steer) / max_steer if max_steer > 0 else 0.0
-        v *= 1.0 - p["turn_slow"] * min(1.0, turn)
-        st.target_speed = max(0.0, v)
+
+        # 曲率ベースの物理的な上限（`FollowTheGap`の⑥と同じ式）。実際に切る
+        # 舵角（クランプ後の`target`。平滑化前）から曲率を求める
+        kappa = abs(math.tan(target) / self.vehicle.wheelbase)
+        v_curve = math.sqrt(p["a_lat_max"] / kappa) if kappa > 1e-6 else math.inf
+        st.target_speed = max(v_min, min(v, v_curve, v_max))
 
         st.reason = (f"{degs[j_best]:+d}° の見通し {lookahead:.2f}m へ・"
                      f"正面 {st.free_ahead:.2f}m")

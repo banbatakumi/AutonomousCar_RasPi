@@ -14,15 +14,16 @@
 `cam_centerline.py` と同じ「前方余裕による減速＋曲率ベースの横加速度上限」
 （⑥）をそのまま踏襲する——速度則を変える理由がセンサの違いだけでは無いため。
 
-## 独立の安全策（`stop_dist`）
+## LiDAR前方距離は速度に使う。緊急停止は持たない（2026-09-12）
 
 模倣学習は「学習データに無いパターン」への挙動を原理的に保証できない
-（`e2e_lidar.py` と同じ理由）。`cam_e2e_node.py` が同梱する LiDAR 前方距離
-（`CamE2ECmd.lidar_front_dist`）を見て、**正面の余裕が閾値を切ったら
-モデル出力を無視して止める。** 低い壁には効かない（そもそもLiDARが
-見えない）が、それ以外の一般障害物への最後の砦として残す。
-`lidar_seen=False`（LiDARが届いていない）も同じ扱いにする——「分からなければ
-止まる」という他の Planner と同じ安全側の判断。
+（`e2e_lidar.py` と同じ理由）が、そこを固定距離のハード停止で受ける設計は
+STM32 の `auto_stop`（速度に応じて伸びる動的停止距離。`follow_the_gap.py`
+docstring参照）の方が高性能なため撤去した。`cam_e2e_node.py` が同梱する
+LiDAR 前方距離（`CamE2ECmd.lidar_front_dist`）は、⑥の前方減速ランプの
+入力として引き続き使う。`lidar_seen=False`（LiDARが届いていない）は
+「分からなければ止まる」という他の Planner と同じ安全側の判断で
+`ready=False` に落とす——これは緊急停止ではなく計画の失敗。
 """
 
 from __future__ import annotations
@@ -50,14 +51,11 @@ class CamE2E(Planner):
     stats = ("free_ahead", "valid_ratio")
 
     params = (
-        ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.5, step=0.01,
-                  default=0.35, unit="m",
-                  note="★独立した安全策。モデルの判断を経由せず、LiDARで見た正面の"
-                       "余裕がこれを切ったら無条件で停止する"),
         ParamSpec(key="slow_dist", label="減速を始める距離", min=0.3, max=5.0, step=0.05,
                   default=1.5, unit="m",
-                  note="前方余裕がこれ以下で最高速度から最低速度へ線形に落とす"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=1.5, step=0.01,
+                  note="前方余裕がこれ以下で最高速度から最低速度へ線形に落とす。"
+                       "0m（接触寸前）で最低速度になる"),
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.01,
                   default=0.30, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
@@ -92,18 +90,10 @@ class CamE2E(Planner):
         st.free_ahead = free_ahead
         st.valid_ratio = 1.0 if cmd.lidar_seen else 0.0
 
-        stop_d = p["stop_dist"]
-        if not cmd.lidar_seen or free_ahead <= stop_d:
-            # ★独立した安全策。モデルの判断を経由しない「事実」としての正面の余裕
-            # （またはそもそも LiDAR が届いていない）で無条件停止する
-            st.ready = True
-            st.brake = True
-            st.target_speed = 0.0
-            st.target_steer = self._steer
-            st.reason = ("LiDARが届いていない" if not cmd.lidar_seen else
-                        f"前方 {free_ahead * 100:.0f}cm で停止"
-                        f"（安全策・停止距離 {stop_d * 100:.0f}cm）")
-            return st
+        if not cmd.lidar_seen:
+            # 「分からなければ止まる」という他の Planner と同じ安全側の判断
+            st.reason = "LiDARが届いていない"
+            return st                      # ready=False ＝ 制動
 
         st.ready = True
 
@@ -123,10 +113,10 @@ class CamE2E(Planner):
         st.target_steer = self._steer
 
         # ── 速度。前方余裕による減速 ＋ 曲率ベースの横加速度上限（`cam_centerline.py`⑥と同じ式） ──
-        slow_d = max(p["slow_dist"], stop_d + 0.01)
+        slow_d = max(p["slow_dist"], 1e-3)
         v_max = p["max_speed"]
         v_min = min(p["min_speed"], v_max)
-        ratio = min(1.0, (free_ahead - stop_d) / (slow_d - stop_d))
+        ratio = max(0.0, min(1.0, free_ahead / slow_d))
         v = v_min + (v_max - v_min) * ratio
 
         kappa = abs(math.tan(target) / self.vehicle.wheelbase)

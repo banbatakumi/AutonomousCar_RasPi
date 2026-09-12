@@ -71,7 +71,7 @@ import { useEffect, useState } from 'react'
 import { useNumbers } from '../bus/live'
 import { clearPreview, selectPreviewMap } from '../bus/mapPreview'
 import { RAD2DEG, mps } from '../format'
-import { useUi } from '../store/ui'
+import { capAutoParams, useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 import { MapLibrary } from './MapLibrary'
 import { ParamSliders } from './ParamSliders'
@@ -321,12 +321,15 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
       {/* ── パラメータ ──
           2026-08-29: 常時表示に変更（指示による）。以前は `<details>` で畳んで
           いたが、車体図を横並びにした分パネルの縦の余白に余裕ができたので、
-          開閉の手間なく常に見える方が走行中の微調整に向く */}
+          開閉の手間なく常に見える方が走行中の微調整に向く。
+          2026-09-12: `max_speed`/`v_max`/`a_accel`/`a_brake`系のスライダ上限を
+          STM32の`LIMITS`実測値に同期する（`capAutoParams`、`store/ui.ts`）。
+          ラジコンタブの`effectiveRange`と同じ理由・同じ方針 */}
       {selected && (
         <section className="auto-params">
           <span className="label">パラメータ（{selected.params.length}）</span>
           <ParamSliders
-            params={selected.params}
+            params={capAutoParams(selected.params, n.link)}
             values={auto.params}
             onChange={(key, value) => ch?.setAuto({ params: { [key]: value } })}
           />

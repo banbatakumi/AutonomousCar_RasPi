@@ -60,7 +60,17 @@
 欠測・飽和・測距不能をどう読むかは**点群の読み方の契約**そのもので、
 `Disparity Extender`（`auto/disparity_extender.py`）と共有している。
 片方だけ直すともう片方が古い読み方のまま走るので、**ここには書き写さない。**
-`stop_dist` が「測距不能を空き扱いにしている穴」を受ける側であることも同様。
+
+## 緊急停止は持たない（2026-09-12）
+
+以前は `stop_dist` で「正面がこれを切ったら即ブレーキ」というハード停止を
+別途持っていたが、STM32 の `auto_stop`（★v0.12・速度に応じて伸びる動的停止
+距離 `d_stop`、LiDAR 主・超音波補助。`docs/uart_protocol.md` §5.6.4）の方が
+固定距離しきい値より高性能なため撤去した。**正面が詰まったときの減速
+（⑥）は残る**——これは緊急停止ではなく、狭い場所で自然に速度を落とす
+という走行そのものの一部なので削らない。`gap is None`（隙間そのものが
+見つからない）は引き続き `ready=False` に落として制動する——これは
+「衝突しそう」ではなく「どこへ行けばいいか分からない」という計画の失敗。
 """
 
 from __future__ import annotations
@@ -110,13 +120,11 @@ class FollowTheGap(Planner):
         ParamSpec(key="front_deg", label="正面とみなす幅", min=5, max=45, step=1,
                   default=20, unit="°",
                   note="速度を決める前方余裕をこの範囲の最小距離で測る。車幅と見る距離から決まる"),
-        ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.5, step=0.01,
-                  default=0.35, unit="m",
-                  note="正面余裕がこれを切ったら制動する。★測距不能を空き扱いにしている穴を受けるのはここ"),
         ParamSpec(key="slow_dist", label="減速を始める距離", min=0.3, max=5.0, step=0.05,
                   default=1.5, unit="m",
-                  note="正面余裕がこれ以下で最高速度から最低速度へ線形に落とす"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=1.5, step=0.01,
+                  note="正面余裕がこれ以下で最高速度から最低速度へ線形に落とす。"
+                       "0m（何かに接触寸前）で最低速度になる"),
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.01,
                   default=0.40, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
@@ -205,18 +213,6 @@ class FollowTheGap(Planner):
             st.gap_start_deg = float(degs[a])
             st.gap_end_deg = float(degs[b])
 
-        # 正面が詰まっているときは、ギャップが見つかっていても**まず止める**。
-        # 「隙間が無い」より「正面 20cm」の方が、人が読んで原因が分かる
-        stop_d = p["stop_dist"]
-        if st.free_ahead <= stop_d:
-            st.ready = True                # 計画はできている。**意図して止めている**
-            st.brake = True
-            st.target_speed = 0.0
-            st.target_steer = self._steer   # 舵は保持（曲がりながら止まれる）
-            st.reason = (f"正面 {st.free_ahead * 100:.0f}cm で停止"
-                         f"（停止距離 {stop_d * 100:.0f}cm）")
-            return st
-
         if gap is None:
             st.reason = (f"進める隙間が無い（最近傍 {nearest * 100:.0f}cm・"
                          f"下限 {p['gap_min']:.2f}m）")
@@ -242,12 +238,12 @@ class FollowTheGap(Planner):
         self._steer += (target - self._steer) * alpha
         st.target_steer = self._steer
 
-        # ── ⑥ 速度 ──
-        slow_d = max(p["slow_dist"], stop_d + 0.01)
+        # ── ⑥ 速度。正面余裕0mで最低速度、slow_dist以遠で最高速度の線形ランプ ──
+        slow_d = max(p["slow_dist"], 1e-3)
         v_max = p["max_speed"]
         v_min = min(p["min_speed"], v_max)
 
-        ratio = min(1.0, (st.free_ahead - stop_d) / (slow_d - stop_d))
+        ratio = max(0.0, min(1.0, st.free_ahead / slow_d))
         v = v_min + (v_max - v_min) * ratio
 
         # 曲率ベースの物理的な上限。実際に切る舵角（クランプ後の `target`。

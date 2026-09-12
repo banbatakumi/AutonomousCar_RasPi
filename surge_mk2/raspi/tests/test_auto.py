@@ -165,16 +165,20 @@ class TestFollowTheGap(unittest.TestCase):
 
     # ── 止まる ──
 
-    def test_stops_when_wall_is_close_ahead(self):
-        """横は抜けていても、**正面が詰まっていればまず止める。**"""
+    def test_crawls_at_min_speed_when_wall_is_close_ahead(self):
+        """横は抜けていても、**正面が詰まっていれば最低速度まで落とす。**
+
+        緊急停止は STM32 の `auto_stop` に任せているので（`follow_the_gap.py`
+        docstring参照）、Pi側はここでブレーキを掛けず、速度を最低速度まで
+        絞るだけ——舵は選んだギャップへ向け続ける。
+        """
         dist = [4.0] * 360
         for deg in range(-15, 16):                   # 正面だけ 20cm
             dist[deg % 360] = 0.2
         st = self.plan(Scan(dist=dist, sector_seen=[True] * 12))
-        self.assertTrue(st.brake)
-        self.assertEqual(st.target_speed, 0.0)
-        self.assertIn("停止", st.reason)
-        self.assertTrue(st.ready)                    # 意図した停止であって計画不能ではない
+        self.assertFalse(st.brake)
+        self.assertTrue(st.ready)
+        self.assertLess(st.target_speed, self.params["min_speed"] + 0.05)
 
     def test_slows_down_as_the_wall_approaches(self):
         far = self.plan(corridor(120, open_dist=5.0)).target_speed
@@ -185,8 +189,7 @@ class TestFollowTheGap(unittest.TestCase):
     def test_no_gap_is_not_ready(self):
         """全周 50cm の箱の中 ＝ 正面は空いているが**進める隙間が無い**。
 
-        停止距離（既定 35cm）より手前ではないので「正面で停止」には落ちず、
-        ギャップ探索が空振りする経路を通る。**惰行させない。**
+        ギャップ探索そのものが空振りする経路を通る。**惰行させない。**
         """
         st = self.plan(make_scan(default=0.5))
         self.assertFalse(st.ready)
@@ -536,18 +539,16 @@ class TestCamE2E(unittest.TestCase):
         """LiDARが届いていなければ「分からなければ止まる」の安全側判断。"""
         st = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
                                  lidar_seen=False))
-        self.assertTrue(st.ready)
-        self.assertTrue(st.brake)
-        self.assertEqual(st.target_speed, 0.0)
+        self.assertFalse(st.ready)
+        self.assertTrue(st.reason)
 
-    def test_stops_when_front_is_too_close(self):
+    def test_crawls_at_min_speed_when_front_is_too_close(self):
+        """緊急停止はSTM32の`auto_stop`に任せる（`follow_the_gap.py`docstring参照）。"""
         st = self.plan(CamE2ECmd(ready=True, steer_norm=0.5, model_max_steer=0.524,
-                                 lidar_seen=True, lidar_front_dist=0.1),
-                       stop_dist=0.35)
+                                 lidar_seen=True, lidar_front_dist=0.1))
         self.assertTrue(st.ready)
-        self.assertTrue(st.brake)
-        self.assertEqual(st.target_speed, 0.0)
-        self.assertIn("停止", st.reason)
+        self.assertFalse(st.brake)
+        self.assertLess(st.target_speed, self.params["min_speed"] + 0.05)
 
     def test_positive_steer_norm_steers_left(self):
         """反時計回り正の慣例通り、正の `steer_norm` は正の舵角になる。"""
@@ -573,13 +574,13 @@ class TestCamE2E(unittest.TestCase):
                            max_speed=0.3)
             self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
 
-    def test_speed_ramps_down_near_stop_dist(self):
+    def test_speed_ramps_down_near_the_wall(self):
         near = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
                                    lidar_seen=True, lidar_front_dist=0.5),
-                         stop_dist=0.35, slow_dist=1.5)
+                         slow_dist=1.5)
         far = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
                                   lidar_seen=True, lidar_front_dist=1.5),
-                        stop_dist=0.35, slow_dist=1.5)
+                        slow_dist=1.5)
         self.assertLess(near.target_speed, far.target_speed)
 
     def test_reset_clears_the_steering_state(self):
@@ -670,11 +671,13 @@ class TestDisparityExtender(unittest.TestCase):
 
     # ── 安全条件は FTG と同じ ──
 
-    def test_stops_when_wall_is_close_ahead(self):
+    def test_crawls_at_min_speed_when_wall_is_close_ahead(self):
+        """緊急停止はSTM32の`auto_stop`に任せる（`follow_the_gap.py`docstring参照）。
+        Pi側は最低速度まで絞るだけでブレーキは掛けない。"""
         st = self.plan(make_scan(default=0.2))
-        self.assertTrue(st.brake)
-        self.assertEqual(st.target_speed, 0.0)
-        self.assertIn("停止", st.reason)
+        self.assertFalse(st.brake)
+        self.assertTrue(st.ready)
+        self.assertLess(st.target_speed, self.params["min_speed"] + 0.05)
 
     def test_missing_sectors_are_walls_not_free_space(self):
         st = self.plan(make_scan(seen=False))
@@ -732,10 +735,10 @@ class TestDisparityExtender(unittest.TestCase):
 
 class TestDisparityPursuit(unittest.TestCase):
     """DE の安全マージン・狙点選びと FTG の Pure Pursuit 舵角を両取りし、
-    ①狙点のヒステリシス・②曲率ベースの速度上限・③TTC を追加した Planner。
+    狙点のヒステリシスを追加した Planner（速度は曲率ベースの上限。FTG/DEと共通）。
 
     基本契約（進む／止まる／欠測は壁）は DE と同じ処理経路を通るので、
-    ここでは主に③つの新規要素と、DE/FTGと共有する狙点の性質だけを厚く見る。
+    ここでは主に新規要素（ヒステリシス）と、DE/FTGと共有する狙点の性質だけを厚く見る。
     """
 
     def setUp(self):
@@ -753,11 +756,12 @@ class TestDisparityPursuit(unittest.TestCase):
         self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
         self.assertGreater(st.target_speed, 0.0)
 
-    def test_stops_when_wall_is_close_ahead(self):
+    def test_crawls_at_min_speed_when_wall_is_close_ahead(self):
+        """緊急停止はSTM32の`auto_stop`に任せる（`follow_the_gap.py`docstring参照）。"""
         st = self.plan(make_scan(default=0.2))
-        self.assertTrue(st.brake)
-        self.assertEqual(st.target_speed, 0.0)
-        self.assertIn("停止", st.reason)
+        self.assertFalse(st.brake)
+        self.assertTrue(st.ready)
+        self.assertLess(st.target_speed, self.params["min_speed"] + 0.05)
 
     def test_aims_at_the_farthest_not_the_middle(self):
         """DE と同じく、真ん中ではなく**一番遠い方向**を狙う。"""
@@ -836,27 +840,6 @@ class TestDisparityPursuit(unittest.TestCase):
         self.assertTrue(st_sharp.ready, st_sharp.reason)
         self.assertGreater(abs(st_sharp.target_steer), abs(st_gentle.target_steer))
         self.assertLess(st_sharp.target_speed, st_gentle.target_speed)
-
-    # ── ③TTC（衝突余裕時間） ──
-
-    def test_ttc_brakes_before_stop_dist_if_closing_fast(self):
-        """`stop_dist` の手前でも、**急速に接近していれば**先に止める。"""
-        far = make_scan(default=2.0)
-        near = make_scan(default=1.0)
-        self.plan(far, dt=0.1)                  # 1周目: 前フレーム値を作るだけ
-        st = self.plan(near, dt=0.1)             # 2.0m→1.0m/0.1s ＝ 接近10m/s
-        self.assertTrue(st.brake)
-        self.assertGreater(st.free_ahead, self.params["stop_dist"],
-                            "stop_dist にはまだ届いていない距離であること")
-        self.assertIn("接近", st.reason)
-
-    def test_ttc_does_not_trigger_when_closing_slowly(self):
-        far = make_scan(default=2.0)
-        near = make_scan(default=1.9)
-        self.plan(far, dt=0.1)
-        st = self.plan(near, dt=0.1)             # 2.0m→1.9m/0.1s ＝ 接近1m/s
-        self.assertFalse(st.brake)
-
 
 class TestRegistry(unittest.TestCase):
     def test_catalog_is_json_serialisable_and_complete(self):
@@ -1209,8 +1192,11 @@ class TestE2ELidar(unittest.TestCase):
             expected = 0.2 + (0.2 / 0.45) * 2.0 * 0.1
             self.assertAlmostEqual(st.target_steer, expected, places=4)
 
-    def test_front_obstacle_forces_stop_regardless_of_model_output(self):
-        """★独立安全策: モデルが前進を指示しても正面が詰まっていれば止める。"""
+    def test_front_obstacle_is_reported_but_does_not_force_a_stop(self):
+        """緊急停止はSTM32の`auto_stop`に任せる（`follow_the_gap.py`docstring参照）。
+
+        正面が詰まっていても `free_ahead`（GUI診断表示用）は正しく計算するが、
+        モデル出力を上書きするハード停止はもう持たない。"""
         with tempfile.TemporaryDirectory() as d:
             model_path = Path(d) / "e2e_lidar.onnx"
             _make_dummy_e2e_model(model_path)
@@ -1221,8 +1207,8 @@ class TestE2ELidar(unittest.TestCase):
             p = E2ELidar(model_path=model_path)
             scan = make_scan({d: 0.1 for d in range(-15, 16)}, default=5.0)
             st = p.plan(scan, None, E2ELidar.merged({}), 0.1)
-            self.assertTrue(st.brake)
-            self.assertEqual(st.target_speed, 0.0)
+            self.assertFalse(st.brake)
+            self.assertAlmostEqual(st.free_ahead, 0.1, places=3)
 
     def test_output_is_clamped_to_vehicle_max_steer(self):
         """モデルの生出力がどうであれ、`config/vehicle.toml`の車両物理限界

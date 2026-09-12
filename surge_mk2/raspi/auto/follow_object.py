@@ -77,7 +77,7 @@ class FollowObject(Planner):
                   default=1.0, unit="1/s",
                   note="v = ゲイン×(車間距離−目標車間距離)。上げるほど追従が敏感になるが"
                        "距離推定のノイズをそのまま速度に伝えやすくなる"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=2.0, step=0.05,
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.05,
                   default=1.0, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
         ParamSpec(key="look_k", label="前方注視の速度係数", min=0.0, max=2.0, step=0.05,

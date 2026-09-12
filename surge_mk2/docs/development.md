@@ -599,8 +599,10 @@ GUI でモデル名を選ぶ**」という流れは共通だが、中身も検�
 `disparity_extender.py`（`de`）のような**模倣学習ではない**。シム上で「コースに沿って
 進めたら＋報酬・衝突したら－報酬」を頼りに、Stable-Baselines3 の PPO で方策を試行錯誤
 させる。`de` を再現するのではなく**それを超えうる**代わりに、未知の点群パターンに
-対する挙動は原理的に保証できない——だから `e2e_lidar.py` は独立した `stop_dist`
-（正面がこの距離を切ったらモデル出力を無視して無条件停止）を必ず持つ。
+対する挙動は原理的に保証できない。以前は `e2e_lidar.py` が独立した `stop_dist`
+（正面がこの距離を切ったらモデル出力を無視して無条件停止）を持っていたが、
+STM32 の `auto_stop`（速度に応じて伸びる動的停止距離）の方が高性能なため
+2026-09-12 に撤去した（`architecture.md`「走る」より「止まる」を先に決める）。
 
 ```bash
 # 初回だけ（torch / gymnasium / stable-baselines3 / onnxruntime 等）
@@ -662,8 +664,8 @@ GUI での使い方:
 2. 自動運転タブ → モードで「E2E LiDAR」を選択
 3. パラメータ `max_speed` はモデル出力をこの値でクランプするだけの安全側の上限——
    学習時（`train_rl.py` の `--max-speed`）より大きくしても出力レンジがそこまで
-   届かないので意味が無い。`stop_dist` は上記の独立安全策。**最大舵角は
-   GUIパラメータではない**——`config/vehicle.toml` の車両物理限界を常に使う
+   届かないので意味が無い。**最大舵角は GUIパラメータではない**——
+   `config/vehicle.toml` の車両物理限界を常に使う
    （2026-08-28、自動運転planner全体の方針。他のplanner（`ftg`・`de`等）も同様）
 4. `Enter` で ARM → 自動運転タブの「自律走行を開始」で engage
 
@@ -795,9 +797,9 @@ ssh surge-mk2 systemctl status surge-cam-e2e   # 動いているか確認する�
   `cam_e2e_node`起動引数に`--model <名前>`を足して固定するか、`telemetry_node.py`/GUIに
   `cam/model`と対称の配線を追加すること（今後の課題）
 - `cam_e2e_node.py` は前方カメラに加えて **LiDAR（`scan`）も購読**し、正面付近の
-  最小距離を独立の安全策として `cam_e2e/cmd` に同梱する。`raspi/auto/cam_e2e.py`
-  の `stop_dist` がこれを見てモデル出力を無視して停止する——**低い壁には効かない**
-  （そもそもLiDARが見えない）が、それ以外の一般障害物への最後の砦
+  最小距離を `cam_e2e/cmd` に同梱する。`raspi/auto/cam_e2e.py` はこれを前方減速の
+  ランプ（`slow_dist`）に使う——モデル出力を無条件で上書きする独立安全策は
+  2026-09-12 に撤去した（STM32 の `auto_stop` に任せる方針。`architecture.md`参照）
 - `auto/ctrl` で `cam_e2e` 以外が選ばれている間・推論が失敗する・モデル未選択の周期は
   `ready=False` を出し続けるので、`cam_e2e` は自然に停止側へ倒れる（安全側）
 - `raspi/nodes/cam_e2e_node.py` を直したら `tools/deploy.sh --restart`

@@ -26,6 +26,12 @@
 `LineTrace` の「白線を見失ったら止まる」と同じ思想。最初の点（`path.xs[0]`）
 から既に幅が足りない、または `CamPath` 自体が届いていない（`seen=False`）
 周期は `ready=False`——直前の舵のまま惰行させず止める。
+
+## 緊急停止は持たない（2026-09-12）
+
+`follow_the_gap.py` と同じ理由で、正面距離しきい値によるハード停止（旧
+`stop_dist`）は撤去し STM32 の `auto_stop` に任せる。前方余裕による減速
+（⑥）はそのまま残る——緊急停止ではなく走行そのものの一部のため。
 """
 
 from __future__ import annotations
@@ -66,13 +72,11 @@ class CamCenterline(Planner):
         ParamSpec(key="look_min", label="前方注視の最小値", min=0.15, max=1.5, step=0.05,
                   default=0.35, unit="m",
                   note="低速時の注視距離。小さすぎると舵が振動する"),
-        ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.5, step=0.01,
-                  default=0.35, unit="m",
-                  note="確認できた前方距離（free_ahead）がこれを切ったら制動する"),
         ParamSpec(key="slow_dist", label="減速を始める距離", min=0.3, max=5.0, step=0.05,
                   default=1.5, unit="m",
-                  note="free_ahead がこれ以下で最高速度から最低速度へ線形に落とす"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=1.5, step=0.01,
+                  note="free_ahead がこれ以下で最高速度から最低速度へ線形に落とす。"
+                       "0m（接触寸前）で最低速度になる"),
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.01,
                   default=0.30, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
@@ -118,17 +122,6 @@ class CamCenterline(Planner):
         free_ahead = float(xs[-1])
         st.free_ahead = free_ahead
         st.valid_ratio = k / len(path.xs)
-
-        stop_d = p["stop_dist"]
-        if free_ahead <= stop_d:
-            # 正面が詰まっているときはまず止める（`follow_the_gap.py` と同じ判断）
-            st.ready = True
-            st.brake = True
-            st.target_speed = 0.0
-            st.target_steer = self._steer
-            st.reason = f"前方 {free_ahead * 100:.0f}cm で停止（停止距離 {stop_d * 100:.0f}cm）"
-            return st
-
         st.ready = True
 
         # ── 狙点。free_ahead で頭打ちにした Ld の位置を中心線から補間する ──
@@ -149,10 +142,10 @@ class CamCenterline(Planner):
         st.target_steer = self._steer
 
         # ── 速度。前方余裕による減速 ＋ 曲率ベースの横加速度上限（⑥と同じ式） ──
-        slow_d = max(p["slow_dist"], stop_d + 0.01)
+        slow_d = max(p["slow_dist"], 1e-3)
         v_max = p["max_speed"]
         v_min = min(p["min_speed"], v_max)
-        ratio = min(1.0, (free_ahead - stop_d) / (slow_d - stop_d))
+        ratio = max(0.0, min(1.0, free_ahead / slow_d))
         v = v_min + (v_max - v_min) * ratio
 
         kappa = abs(math.tan(target) / self.vehicle.wheelbase)

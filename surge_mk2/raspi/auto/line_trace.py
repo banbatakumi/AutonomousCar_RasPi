@@ -58,7 +58,7 @@ class LineTrace(Planner):
         ParamSpec(key="look_min", label="前方注視の最小値", min=0.15, max=1.5, step=0.05,
                   default=0.35, unit="m",
                   note="低速時の注視距離。小さすぎると舵が振動する"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=1.5, step=0.01,
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.01,
                   default=0.30, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,

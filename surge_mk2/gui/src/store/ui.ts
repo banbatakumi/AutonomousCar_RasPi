@@ -7,6 +7,7 @@ import { create } from 'zustand'
 import type { EngineSoundType } from '../audio/engineSound'
 import { live } from '../bus/live'
 import type {
+  AutoParamSpec,
   AutoStatus,
   CamModelFile,
   CamModelStatus,
@@ -373,6 +374,39 @@ export function effectiveRange(limits: VehicleLimits | null | undefined): Record
     brakeTorque: torqueCap,
     driveTorque: withLive(SETTINGS_RANGE.driveTorque, limits?.max_torque_nm),
   }
+}
+
+/**
+ * 自動運転パラメータ（`raspi/auto/*.py` の `ParamSpec`）のうち「最高速度」
+ * 「最高加速度」に当たるキーのスライダ上限。**ラジコンの`effectiveRange`と
+ * 同じ理由・同じ方針**（2026-09-12・バンビの指示）——`LIMITS`受信済みなら
+ * 静的な`ParamSpec.max`より優先して無条件にそちらを使う。各`ParamSpec`側の
+ * 静的`max`も車体の物理上限（現状3.0m/s）に合わせてあるので、通常時は
+ * このcapが実際に効くのは`LIMITS`未受信の間の初期表示くらい。
+ *
+ * `a_lat`/`a_lat_max`（旋回時の**横**加速度）はここに含めない。
+ * `LIMITS.max_accel_m_s2` は**前後**加速度の上限で物理量として別物なので、
+ * 横加速度をそれで縛るのは筋が違う。
+ *
+ * ⚠ これも`effectiveRange`と同じく**スライダの表示・入力レンジの話**。
+ * 実際にモータへ効く上限は`io_node`の`_send_command`が`LIMITS`で無条件に
+ * クランプする（`raspi/auto/`はSTM32の存在を知らない）。ここはGUI側の
+ * 表示レンジをそれに追従させているだけ。
+ */
+const AUTO_SPEED_PARAM_KEYS = new Set(['max_speed', 'v_max', 'explore_speed'])
+const AUTO_ACCEL_PARAM_KEYS = new Set(['a_accel', 'a_brake'])
+
+export function capAutoParams(
+  params: AutoParamSpec[],
+  limits: VehicleLimits | null | undefined,
+): AutoParamSpec[] {
+  const withLive = (p: AutoParamSpec, live: number | null | undefined): AutoParamSpec =>
+    typeof live === 'number' && isFinite(live) && live > 0 ? { ...p, max: live } : p
+  return params.map((p) => {
+    if (AUTO_SPEED_PARAM_KEYS.has(p.key)) return withLive(p, limits?.max_speed_m_s)
+    if (AUTO_ACCEL_PARAM_KEYS.has(p.key)) return withLive(p, limits?.max_accel_m_s2)
+    return p
+  })
 }
 
 const SETTINGS_KEY = 'surge.driveSettings.v1'

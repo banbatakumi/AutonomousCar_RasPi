@@ -128,10 +128,6 @@ class RaceLine(Planner):
                   note="★この距離以上が続く方向を「隙間」と数える。**道幅の半分より"
                        "小さくすること**。分離帯で車線が 0.42m になると、既定の 1.0m では"
                        "コーナーで隙間が1つも見つからず止まる"),
-        ParamSpec(key="explore_stop", label="停止する前方距離", min=0.05, max=1.0,
-                  default=0.20, step=0.01, unit="m",
-                  note="★正面余裕がこれを切ったら止まる。狭い車線のコーナーでは"
-                       "正面 30cm まで詰まるので、0.35m のままだと入口で止まる"),
         ParamSpec(key="explore_bubble", label="安全バブル半径", min=0.05, max=0.6,
                   default=0.12, step=0.01, unit="m",
                   note="最近傍の周りを侵入禁止にする半径。**車線の半幅より小さく**。"
@@ -314,12 +310,11 @@ class RaceLine(Planner):
                        if residual > 0 else
                        f"{self.laps}周目のループを閉じた（残差を測れず継続）")
 
-        # 走らせるのは Follow the Gap。**狭い車線に効く4つだけ差し替える**
+        # 走らせるのは Follow the Gap。**狭い車線に効く3つだけ差し替える**
         # （残りは FTG の既定値。全部をここに並べるとスライダが倍になる）
         fp = FollowTheGap.merged({
             "max_speed": p["explore_speed"],
             "gap_min": p["explore_gap_min"],
-            "stop_dist": p["explore_stop"],
             "bubble_m": p["explore_bubble"],
         })
         sub = self.ftg.plan(scan, vs, fp, dt)

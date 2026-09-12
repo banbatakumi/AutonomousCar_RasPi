@@ -1,5 +1,6 @@
 """Disparity Pursuit — Disparity Extender の安全マージンと Follow the Gap の
-Pure Pursuit 舵角を合わせ、さらに3つの弱点に手を入れた反射型プランナ。
+Pure Pursuit 舵角を合わせ、さらに狙点のヒステリシスと安全半幅の速度依存化を
+足した反射型プランナ。
 
 地図も自己位置も要らない非SLAM・O(n)のリアルタイム処理という前提は
 `FollowTheGap`／`DisparityExtender` と同じ。この2つを読み比べると、
@@ -22,10 +23,13 @@ Pure Pursuit 舵角を合わせ、さらに3つの弱点に手を入れた反射
   （DEの docstring 参照。測り直すと道幅ぶんの壁を拾って直線でも減速し続ける）
 - 舵角: `nav.purepursuit.steer_for_target()`（FTGと同じ。η=狙点方位、
   Ld=速度比例で、ギャップの奥行き＝塗り後距離を安全上限にする）
+- 曲率ベースの速度上限: Pure Pursuit が使う舵角 `δ` から実際に描く円弧の
+  曲率 `κ=tan(δ)/L` を求め、円運動の横加速度制限 `v ≤ sqrt(a_lat_max/κ)` を
+  速度の物理的な上限にする（2026-09-12 に DE 側もこの式へ揃えたので、今は
+  FTG/DE/DP の3つとも共通）。`a_lat_max`（既定 3.0 m/s²）は実車未計測のため
+  暫定値。**実測して詰めること。**
 
-## ここから新規に追加した3つ
-
-### ① 狙点のヒステリシス
+## ここから新規に追加したもの①: 狙点のヒステリシス
 
 DEの同着判定（`TIE_M`以内なら「正面に近い方」を採る）は、**前回どちらを
 向いていたか**を見ない。通路が湾曲している場面では、僅差で最遠帯が
@@ -34,29 +38,42 @@ DEの同着判定（`TIE_M`以内なら「正面に近い方」を採る）は�
 いた方位に一番近い帯」に一般化する。前回ヘディングが0付近（直進中）なら
 DEと同じ挙動に自然収束するので、直線・素直なカーブでの走りは変えない。
 
-### ② 曲率ベースの速度上限
+## ここから新規に追加したもの②: 安全半幅の速度依存化
 
-FTG/DEはどちらも「舵角いっぱいで`turn_slow`割ぶん一律減速」という発見的な
-調整で、緩いカーブもきついカーブも同じ割合でしか区別できない。ここでは
-Pure Pursuit が使う舵角 `δ` から実際に描く円弧の曲率 `κ=tan(δ)/L` を求め、
-円運動の横加速度制限 `v ≤ sqrt(a_lat_max/κ)` を速度の物理的な上限にする。
-緩い旋回は落としすぎず、きつい旋回は根拠のある分だけ確実に落とす。
-`a_lat_max`（既定 3.0 m/s²）は実車未計測のため暫定値。**実測して詰めること。**
+Pure Pursuit の前方注視距離 `Ld = look_k・v + look_min` は速度に比例して
+伸ばしているのに、`extend_disparity` の `safety_half_width` は速度に
+関わらず固定だった。しかし高速ほど「操舵の応答遅れ（`tau_steer_s` +
+`dead_time_s`、`vehicle.toml` 実測値）の間に進む距離」も「旋回時に外側へ
+膨らむ量」も大きくなるはずで、DEが既定値を車体半幅 0.09m の3倍に
+決め打ちしているのも「旋回半径ぶんの膨らみをここで飲むため」（DEの
+docstring参照）——つまり**低速前提で決めた固定マージンを高速域まで
+流用している**。
 
-### ③ TTC（衝突余裕時間）による追加の停止条件
+    有効安全半幅 = safety_half_width + safety_width_k・v
 
-`stop_dist` は固定距離のしきい値で、どれだけの速さで近づいているかを見ない。
-前フレームとの正面余裕の差分から接近速度を推定し、
-`正面余裕 / 接近速度 < ttc_min` なら `stop_dist` の手前でも即座に制動する。
-低速では効かない（`stop_dist`のほうが先に効く）が、将来 `max_speed` を
-上げていく段になるほど効いてくる安全層として先に入れておく。
+`Ld` の式と対になる形にし、`v=0` では従来（DEの実測値）と完全に一致する
+よう加算式にした（掛け算にすると低速域の実測結果まで変わってしまう）。
+`safety_width_k` は実車・シム未計測の暫定値。**小さめに倒してある** ——
+大きくしすぎると悪影響のほうが先に出る（段差の陰が塗り広がりすぎて、
+本来は通れる隙間まで塞いでしまう）ため、上げるときはシムで隙間を
+塞ぎすぎていないか確認しながら詰めること。
+
+## 緊急停止は持たない（2026-09-12）
+
+以前は固定距離 `stop_dist` によるハード停止と、接近速度から見積もる
+`ttc_min`（TTC・衝突余裕時間）の2段構えの緊急停止を持っていたが、STM32 の
+`auto_stop`（★v0.12・速度に応じて伸びる動的停止距離 `d_stop`）の方が
+高性能なため両方とも撤去した（`follow_the_gap.py` docstring参照）。
+塗った結果どこにも進めない判定（`_STUCK_M`）は残す——これは「衝突しそう」
+ではなく「計画そのものが失敗している」ケース。
 
 ## 実車・シムでの計測はまだ行っていない
 
 `disparity_m` / `safety_half_width` / `look_k` / `look_min` / `steer_tau` の
 既定値は `DisparityExtender` / `FollowTheGap` の実測値をそのまま引き継いだ
-ものだが、`a_lat_max` / `ttc_min` / `max_speed` はこの Planner 独自の値で
-未計測。FTG/DEと同じ手順（シムで衝突なしを確認 → 実車で上げる）を踏むこと。
+ものだが、`a_lat_max` / `max_speed` / `safety_width_k` はこの Planner
+独自の値で未計測。FTG/DEと同じ手順（シムで衝突なしを確認 → 実車で上げる）
+を踏むこと。
 """
 
 from __future__ import annotations
@@ -74,14 +91,17 @@ __all__ = ["DisparityPursuit"]
 #: **パラメータにしていない。**（`follow_the_gap.py` と同じ理由）
 MIN_SEEN_RATIO = 0.6
 #: 狙点の候補と見なす「一番遠い」の許容差 [m]。これ以内は同着として扱い、
-#: **その中で前回ヘディングにいちばん近い方向**を採る（①ヒステリシス）
+#: **その中で前回ヘディングにいちばん近い方向**を採る（ヒステリシス）
 TIE_M = 0.05
+#: 塗った結果の最遠距離がこれ以下なら「どこにも進めない」（`ready=False`）。
+#: **緊急停止のしきい値ではない**（`disparity_extender.py`の`_STUCK_M`と同じ）
+_STUCK_M = 0.05
 
 
 class DisparityPursuit(Planner):
     id = "dp"
     name = "Disparity Pursuit"
-    description = "段差を塞いでから最遠の帯を追う。舵はPure Pursuit、速度は旋回曲率と接近速度で決める"
+    description = "段差を塞いでから最遠の帯を追う。舵はPure Pursuit、速度は旋回曲率で決める"
 
     params = (
         ParamSpec(key="fov_deg", label="視野角", min=60, max=270, step=10,
@@ -98,19 +118,22 @@ class DisparityPursuit(Planner):
                   step=0.01, default=0.30, unit="m",
                   note="縁の陰を塗る幅。車体半幅 0.09m の3倍あるのは、"
                        "旋回半径ぶんの膨らみと点群の遅延をここで飲むため"),
+        ParamSpec(key="safety_width_k", label="安全半幅の速度係数", min=0.0, max=0.15,
+                  step=0.005, default=0.02, unit="s",
+                  note="★未計測の暫定値。有効安全半幅 = safety_half_width + これ×速度。"
+                       "Ld=look_k×v+look_minと対になる発想で、高速ほど操舵応答遅れの間に"
+                       "進む距離や旋回時の膨らみが増える分を反映する。上げすぎると"
+                       "本来通れる隙間まで塞ぐので、シムで詰まっていないか確認しながら上げること"),
         ParamSpec(key="min_filter_deg", label="最小値フィルタ幅", min=0, max=5, step=1,
                   default=2, unit="°",
                   note="±この範囲の最小値を取る。障害物を太らせる方向にだけ間違える"),
         ParamSpec(key="front_deg", label="正面とみなす幅", min=5, max=45, step=1,
                   default=20, unit="°",
-                  note="正面の余裕をこの範囲の最小距離で測る。停止判定とTTCに使う"),
-        ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.5, step=0.01,
-                  default=0.35, unit="m",
-                  note="正面余裕がこれを切ったら制動する。★測距不能を空き扱いにしている穴を受けるのはここ"),
+                  note="GUI表示用の正面の余裕をこの範囲の最小距離で測る（診断用。速度には使わない）"),
         ParamSpec(key="slow_dist", label="全開になる距離", min=0.3, max=8.0, step=0.1,
                   default=3.0, unit="m",
-                  note="見通しがこれ以上あれば最高速度。stop_dist との間を線形に結ぶ"),
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=2.0, step=0.05,
+                  note="見通しがこれ以上あれば最高速度。0m（接触寸前）との間を線形に結ぶ"),
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.05,
                   default=0.50, unit="m/s",
                   note="★この Planner は未計測。まずシムで衝突なしを確認してから上げること"),
         ParamSpec(key="min_speed", label="最低速度", min=0.0, max=1.0, step=0.01,
@@ -126,9 +149,6 @@ class DisparityPursuit(Planner):
                   default=3.0, unit="m/s²",
                   note="★未計測の暫定値。v ≤ sqrt(これ/曲率) で速度を抑える。"
                        "上げるほど旋回中に速度が残るが横滑りしやすくなる"),
-        ParamSpec(key="ttc_min", label="衝突余裕時間の下限", min=0.1, max=3.0, step=0.05,
-                  default=0.6, unit="s",
-                  note="正面余裕÷接近速度がこれを切ったら stop_dist の手前でも即座に制動する"),
         ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
                   default=0.08, unit="s",
                   note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが鈍る"),
@@ -137,19 +157,20 @@ class DisparityPursuit(Planner):
     def __init__(self) -> None:
         self.vehicle = Vehicle.load()
         self._steer = 0.0
-        self._heading_deg = 0.0            # ①ヒステリシス: 前回向いていた方位
-        self._prev_front: float | None = None  # ③TTC: 前フレームの正面余裕
+        self._heading_deg = 0.0            # ヒステリシス: 前回向いていた方位
 
     def reset(self) -> None:
         self._steer = 0.0
         self._heading_deg = 0.0
-        self._prev_front = None
 
     # ── 本体 ──
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
         st = AutoState(mode=self.id, planner=self.name)
+
+        # `extend_disparity` の安全半幅にも使うので、狙点を決める前に確定させる
+        v_now = vs.speed if vs is not None else 0.0
 
         max_range = p["max_range"]
 
@@ -161,8 +182,6 @@ class DisparityPursuit(Planner):
         if w.seen_ratio < MIN_SEEN_RATIO:
             st.reason = (f"点群の欠測が多すぎる（視野の {w.seen_ratio * 100:.0f}% しか"
                          f"受信できていない）")
-            # ★TTCの前フレーム値はここでは更新しない。信頼できない周で
-            # 「急に空いた」と誤検出して閉ループさせないため
             return st                      # ready=False のまま返す ＝ 制動
 
         # **最近傍はフィルタを掛ける前の実測点から探す**（GUI の表示用）
@@ -182,40 +201,15 @@ class DisparityPursuit(Planner):
         front = [usable[j] for j, d in enumerate(degs) if abs(d) <= fw]
         st.free_ahead = min(front) if front else 0.0
 
-        stop_d = p["stop_dist"]
-
-        # ── ③ TTC: 接近速度が速ければ stop_dist の手前でも止める ──
-        ttc_trigger = False
-        closing = 0.0
-        ttc = math.inf
-        if self._prev_front is not None and dt > 0.0:
-            closing = (self._prev_front - st.free_ahead) / dt
-            if closing > 1e-3:
-                ttc = st.free_ahead / closing
-                ttc_trigger = ttc < p["ttc_min"]
-        self._prev_front = st.free_ahead
-
-        # ── 段差を埋める（安全マージン。DEと同じ処理）──
-        ext = extend_disparity(usable, p["disparity_m"], p["safety_half_width"])
+        # ── 段差を埋める（安全マージン。DEと同じ処理＋速度で半幅を伸ばす）──
+        half_width = p["safety_half_width"] + p["safety_width_k"] * v_now
+        ext = extend_disparity(usable, p["disparity_m"], half_width)
         st.bubble_start_deg = 0.0
         st.bubble_end_deg = -1.0            # DEと同じく円形バブルは置かない
 
-        if st.free_ahead <= stop_d or ttc_trigger:
-            st.ready = True                # 計画はできている。**意図して止めている**
-            st.brake = True
-            st.target_speed = 0.0
-            st.target_steer = self._steer   # 舵は保持（曲がりながら止まれる）
-            if ttc_trigger and st.free_ahead > stop_d:
-                st.reason = (f"正面が {closing:.2f}m/s で接近中・衝突余裕 {ttc:.2f}s"
-                             f"（しきい値 {p['ttc_min']:.2f}s）で停止")
-            else:
-                st.reason = (f"正面 {st.free_ahead * 100:.0f}cm で停止"
-                             f"（停止距離 {stop_d * 100:.0f}cm）")
-            return st
-
-        # ── 一番遠い帯の真ん中を狙う（①同着はヒステリシスで解く）──
+        # ── 一番遠い帯の真ん中を狙う（同着はヒステリシスで解く）──
         best = max(ext)
-        if best <= stop_d:
+        if best <= _STUCK_M:
             st.reason = (f"塞いだ結果どこにも進めない（最遠 {best * 100:.0f}cm・"
                          f"最近傍 {nearest * 100:.0f}cm）")
             return st                      # ready=False ＝ 制動
@@ -231,7 +225,6 @@ class DisparityPursuit(Planner):
         self._heading_deg = float(degs[j_best])   # 次フレームのヒステリシス基準を更新
 
         max_steer = self.vehicle.max_steer
-        v_now = vs.speed if vs is not None else 0.0
         lookahead_cap = ext[j_best]
         ld = min(lookahead_cap, p["look_k"] * v_now + p["look_min"])
         target = steer_for_target(st.heading, ld, self.vehicle.wheelbase, max_steer)
@@ -241,15 +234,15 @@ class DisparityPursuit(Planner):
         self._steer += (target - self._steer) * alpha
         st.target_steer = self._steer
 
-        # ── ② 速度: 見通しベースと曲率ベースの小さい方を採る ──
+        # ── 速度: 見通しベースと曲率ベースの小さい方を採る ──
         #
         # 見通しベース: `ext[j_best]` をそのまま使う。DEと同じ理由で扇で測り
         # 直さない（正面 ±front_deg の最小値だと道幅ぶんの側壁を拾い、
-        # どんな直線でも見通しが頭打ちになる）
-        slow_d = max(p["slow_dist"], stop_d + 0.01)
+        # どんな直線でも見通しが頭打ちになる）。0m（接触寸前）で最低速度
+        slow_d = max(p["slow_dist"], 1e-3)
         v_max = p["max_speed"]
         v_min = min(p["min_speed"], v_max)
-        ratio = min(1.0, max(0.0, (lookahead_cap - stop_d) / (slow_d - stop_d)))
+        ratio = max(0.0, min(1.0, lookahead_cap / slow_d))
         v_range = v_min + (v_max - v_min) * ratio
 
         # 曲率ベース: 実際に切る舵角（クランプ後の `target`）から曲率を出す。

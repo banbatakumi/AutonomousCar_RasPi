@@ -24,12 +24,12 @@
 続行する方が安全側という、同じ理由）。
 未選択（`name`が空）の間は`ready=False`を返し続ける。
 
-## 独立した安全策（`stop_dist`）
+## 緊急停止は持たない（2026-09-12）
 
-回帰モデルは「学習中に見た点群パターン」の外側でどう振る舞うか原理的に保証できない。
-`disparity_extender.py` の `stop_dist`（測距不能を空き扱いにしている穴を受ける
-「最後の砦」）と同じ理由で、**正面の余裕が閾値を切ったらモデル出力を無視して止める**
-独立した判定を持つ。
+回帰モデルは「学習中に見た点群パターン」の外側でどう振る舞うか原理的に保証できない
+が、そこを固定距離のハード停止で受ける設計は STM32 の `auto_stop`（速度に応じて
+伸びる動的停止距離。`follow_the_gap.py` docstring参照）の方が高性能なため撤去した。
+`free_ahead` は引き続き GUI の診断表示用に計算する。
 """
 
 from __future__ import annotations
@@ -107,14 +107,10 @@ class E2ELidar(Planner):
     stats = ("free_ahead", "valid_ratio")
 
     params = (
-        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=2.0, step=0.05,
+        ParamSpec(key="max_speed", label="最高速度", min=0.05, max=3.0, step=0.05,
                   default=1.0, unit="m/s",
                   note="モデル出力をこの値でクランプする。学習時の上限（`train_rl.py`の"
                        "`--max-speed`）より大きくしても意味が無い（出力レンジがそこまで届かない）"),
-        ParamSpec(key="stop_dist", label="停止する前方距離", min=0.1, max=1.0, step=0.01,
-                  default=0.30, unit="m",
-                  note="★独立した安全策。モデルの判断を経由せず、正面がこれを切ったら"
-                       "無条件で停止する（`de`の`stop_dist`と同じ役目）"),
         ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
                   default=0.10, unit="s",
                   note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが反応が鈍る"
@@ -273,13 +269,6 @@ class E2ELidar(Planner):
         self._steer += (target - self._steer) * alpha
         st.target_steer = self._steer
         st.ready = True
-
-        stop_d = p["stop_dist"]
-        if st.free_ahead <= stop_d:
-            st.brake = True
-            st.target_speed = 0.0
-            st.reason = f"正面 {st.free_ahead * 100:.0f}cm で停止（モデル出力を安全側で上書き）"
-            return st
 
         st.target_speed = max(0.0, min(max_speed, speed))
         st.reason = f"モデル出力 steer={st.target_steer:+.2f}rad speed={st.target_speed:.2f}m/s"

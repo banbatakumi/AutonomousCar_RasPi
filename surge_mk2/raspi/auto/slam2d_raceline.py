@@ -98,9 +98,6 @@ class Slam2dRaceLine(Planner):
                   default=0.6, step=0.05, unit="m",
                   note="★この距離以上が続く方向を「隙間」と数える。**道幅の半分より"
                        "小さくすること**"),
-        ParamSpec(key="explore_stop", label="停止する前方距離", min=0.05, max=1.0,
-                  default=0.20, step=0.01, unit="m",
-                  note="★正面余裕がこれを切ったら止まる"),
         ParamSpec(key="explore_bubble", label="安全バブル半径", min=0.05, max=0.6,
                   default=0.12, step=0.01, unit="m",
                   note="最近傍の周りを侵入禁止にする半径。**車線の半幅より小さく**"),
@@ -283,7 +280,6 @@ class Slam2dRaceLine(Planner):
         fp = FollowTheGap.merged({
             "max_speed": p["explore_speed"],
             "gap_min": p["explore_gap_min"],
-            "stop_dist": p["explore_stop"],
             "bubble_m": p["explore_bubble"],
         })
         sub = self.ftg.plan(scan, vs, fp, dt)
