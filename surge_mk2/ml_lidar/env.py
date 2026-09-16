@@ -385,10 +385,10 @@ class LidarE2EEnv(gym.Env):
         """理想ライン（MCL、`sim.raceline.compute_raceline_offsets`）の世界座標を
         centerlineと同じ点列上にキャッシュする（モジュールdocstring「v18」参照）。
 
-        `raceline_weight<=0`のときは計算しない——`compute_raceline_offsets()`の
-        L-BFGS最適化はエピソード1回につき20〜40ms（同モジュールdocstring実測）
-        かかり、この項を使わない設定（v1〜v17相当含む）の学習速度にまで
-        負担させないため。
+        `raceline_weight<=0`のときは計算しない——`compute_raceline_offsets()`は
+        疎行列の直接解で軽い（実測1ms程度/エピソード、2026-09-16の二次計画法
+        への置き換え後）とはいえ、この項を使わない設定（v1〜v17相当含む）の
+        学習速度にまで無条件に負担させる理由が無いため。
         """
         if self.cfg.raceline_weight <= 0.0:
             self._raceline_xy = None

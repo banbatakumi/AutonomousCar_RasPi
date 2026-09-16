@@ -7,26 +7,43 @@
 生LiDAR+速度のE2Eのまま変えず、**学習時の報酬にだけ**理想ラインへの追従度を
 組み込む（Trajectory-Aided Learning、Bosello et al. arXiv:2306.07003 に倣う）。
 
-## 曲率最小化に反復平滑化(Laplacian的な手法)を使わなかった理由
+## 2026-09-16: 曲率二乗「和」の直接最小化から、centerline回帰つき二次計画へ全面置換
 
-最初は`sim/random_course.py`の`_min_turn_radius_m`と同じ「`np.roll`による
-周回差分」の流儀で、隣接点の中点に寄せる反復平滑化（離散ラプラシアン平滑化）を
-試した。だがこれは**曲率最小化とは逆方向に働く**——閉ループ全体に一様に
-適用すると「曲線短縮フロー」そのものになり、円が一様に収縮して半径が
-小さくなる（＝曲率が増える）方向に収束することが数値実験で確認できた
-（実測: 生成コースで`sum(curvature^2)`が最大10倍近く悪化した）。線形近似
-`κ_path ≈ κ_ref + n''`（オフセット`n`が曲率半径に対して十分小さい前提）で
-解いても、実際のコースの道幅に対する余裕（オフセット/半径比が0.3〜0.5程度）
-ではこの前提が崩れ、非線形項`κ_ref²`の寄与が支配的になり同様に悪化した。
+旧実装（`torch.optim.LBFGS`で厳密曲率`atan2`ベースの`Σκ²`を直接最小化）は、
+バンビが`ml_lidar/watch.py`の観戦画面で「カーブでアウトに非常に膨らんだ
+ラインになっている」と指摘した症状を、`hairpin`/`corner`固定コースで再現・
+定量検証した結果、**実装のバグではなく目的関数設計の欠陥**と判明した：
+中心線に対して引き戻す項が無いまま`Σκ²`だけを最小化すると、「ループ全体を
+一律に外側へシフトする」解（多数を占める緩やかな区間の曲率が広範囲で下がる
+一方、少数のヘアピン区間だけ悪化する——広範囲の改善の総和が上回るため
+数学的に真に最適）に収束しうる。実測（`hairpin`固定コース）でロス36.0まで
+収束済み（反復を8→30回に増やしても同じ）、逆に曲率符号に沿ってアペックスを
+切る初期値から再最適化してもロス421.6（センターラインそのものの148.4より
+悪化）にしかならず、単純な収束不足でも初期値依存の局所解でもないことを
+確認した（PROGRESS.md 2026-09-16節に検証手順の詳細）。
 
-代わりに**厳密な離散曲率（`atan2`ベース、線形近似なし）をそのまま目的関数にし、
-`torch`の自動微分で正確な勾配を取ってbox制約付き勾配降下（Adam+射影）で
-最小化する**方式にした。手で導いた線形近似・反復平滑化はいずれも符号や
-非線形項の扱いを誤りやすく実測で悪化が確認されたため、正確性を優先した。
-`torch`は`stable_baselines3`が要求する既存の依存で、学習プロセスには
-常に読み込まれているため新規依存の追加ではない。1コース(200〜400点)・
-200ステップの最適化で実測20〜40ms程度（コース生成1回=エピソード1回につき
-1回だけ計算すればよく、ステップ毎の計算コストは不要）。
+代わりに、実車ナビゲーションスタックの`raspi/nav/raceline.py`（SLAM実走で
+妥当なアウトインアウトを生成できていると確認済み）と同じ定式化に置き換える。
+これはHeilmeier et al.のQP最小曲率法（TUM autonomous racing、要点は
+[arXiv:2511.00946](https://arxiv.org/pdf/2511.00946)等の追試論文にも整理されている）
+と同じ系統——中心線からのオフセット`α_i`を変数に、位置の巡回2階差分
+`D`（= 離散ラプラシアン、曲率の2次近似）のノルム二乗に、**中心線へ引き戻す
+正則化項`λ‖α‖²`を足した二次形式**を最小化する:
+
+    J(α) = ‖D p_x‖² + ‖D p_y‖² + λ‖α‖²,   p = c + α·n
+
+`λ`項が無いと（旧実装が正にそうだった）目的関数は「どれだけループ全体を
+一律にシフトしても構わない」degenerate方向を持ちうる——`λ‖α‖²`はこの自由度に
+ペナルティを与え、必要最小限のオフセットだけを許す。二次形式なので**疎行列の
+直接解**（アクティブセット法で箱制約を扱う）で解け、`torch`・非線形最適化は
+不要になった。詳細は`_min_curvature_alpha()`のdocstring（`raspi/nav/raceline.py`の
+同名関数から移植、コメントもそちらの実測知見をそのまま引き継ぐ）を参照。
+
+## LiDARシム経路（中間案）
+
+`sim.lidar.VirtualLidar`でセクタパケットを生成し、`raspi.msgs.ScanAssembler`で
+実機と同じ鏡像反転・欠測フラグ組み立てまで通すが、`sim.link`のUART/STM32バイト
+フレーミング層は経由しない（`sim_support.stm_us()`は時刻同期なしの単純なns→us変換）。
 """
 
 from __future__ import annotations
@@ -34,8 +51,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-import torch
-from scipy.interpolate import PchipInterpolator
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 
 from .course import Course
 from .vehicle import GRAVITY_MPS2
@@ -59,13 +76,12 @@ _WALL_RAYCAST_MAX_RANGE_M = 20.0
 #: アーキタイプの試作版の1つ、後に不採用となり削除済み）で発生した:
 #: 壁に近い側は数cm〜数十cmで収まる一方、アリーナ内部側は開けた空間を
 #: そのまま突っ切ってしまい**実測3.6m〜12mという桁違いの非対称`box`制約**
-#: になっていた。L-BFGSはこの巨大な箱の中で曲率二乗和を最小化しようとして
-#: 参照パスから大きく・不連続に振れる理想ライン（`ml_lidar/watch.py`で
-#: 目視すると自己交差だらけの「毛玉」状態）を作ってしまう——`width`方式
+#: になっていた。この巨大な箱の中で曲率エネルギーを最小化しようとして
+#: 参照パスから大きく・不連続に振れる理想ラインを作ってしまう——`width`方式
 #: （道幅0.7〜1.6m程度）が暗黙に仮定
 #: していた「箱は車体規模のオーダー」が壊れることが根本原因。実測した
 #: 壁までの距離をそのまま使うのではなく、現実的な「その場でのふらつきの
-#: 許容量」程度に上限を掛けて、L-BFGSに与える探索範囲を車体規模に保つ
+#: 許容量」程度に上限を掛けて、探索範囲を車体規模に保つ
 _RAYCAST_LATERAL_OFFSET_CAP_M = 0.5
 
 #: `drive_accel_m_s2`が未実測(0.0)のときに使う、加速側のフォールバック値 [m/s²]。
@@ -78,56 +94,26 @@ DEFAULT_DRIVE_ACCEL_M_S2 = 1.5
 #: （プロファイルは速度ボーナスの目安であり、真の最適解である必要はない）
 _SPEED_PASS_LAPS = 2
 
-#: `compute_raceline_offsets`のL-BFGS最適化1回あたりの反復回数(`max_iter`)・
-#: 初期ステップ幅(`lr`。`line_search_fn="strong_wolfe"`が実際の刻み幅を決めるので
-#: ほぼ効かない)。**`env.reset()`のたびに呼ばれるので速度が重要。**
-#:
-#: `opt.step(closure)`を1回だけ呼ぶ実装にしたところ(2026-09-01)、`max_iter`を
-#: 5〜200のどれにしても**同じ(悪い)ロス値で頭打ちになり、理想ラインがほぼ
-#: 中心線のまま動かない**という新しい不具合を生んだ——実測すると、
-#: `torch.optim.LBFGS`は`strong_wolfe`の内部で「これ以上その回の直線探索では
-#: 改善できない」と判断すると`max_iter`を使い切る前に`step()`から抜けてしまい、
-#: **`step()`を続けて何度も呼び直す（quasi-Newton履歴を引き継いだまま再探索
-#: させる）ことで初めて先へ進む**という、`max_iter`を増やすだけでは代替できない
-#: 挙動があることが分かった（実測: circuitのロスが1回目`step()`で50.97のまま
-#: 頭打ちに見えたが、`step()`をさらに9回呼び直すと22.8まで下がり、そこで初めて
-#: `max|offset|`が0.01→0.38まで育った＝アペックスを突くラインになった）。
-#: そのため`compute_raceline_offsets`は`step()`を`_OPT_MAX_CALLS`回まで
-#: 呼び直し、ロスの改善が`_OPT_REL_TOL`を下回ったら早期終了する
-_OPT_ITERATIONS = 20
-_OPT_LR = 1.0
-_OPT_MAX_CALLS = 8
-_OPT_REL_TOL = 0.02
+#: 曲率エネルギー`‖Dp‖²`とセンターライン回帰`λ‖α‖²`の重み付け。大きいほど
+#: センターライン寄り、小さいほど曲率最小化（＝アウトインアウトの振れ幅）を
+#: 優先する。`raspi/nav/raceline.py`（実車SLAMナビで実測・妥当な挙動を
+#: 確認済み）と同じ値・同じ`lam*step**4`正規化式をそのまま踏襲する——
+#: 点間隔`step`を変えても（`course_gen`の`resolution`設定に依らず）同じ
+#: 「強さ」の正則化になる（`_min_curvature_alpha`docstring参照）
+_LAM_DEFAULT = 0.1
 
-#: 最適化にかける点の間引き間隔 [m]。`sim/random_course.py`の`final_step`(全アーキ
-#: タイプ共通0.1m)と同じ値——コースの曲率半径(数十cm〜)に対して十分細かく、
-#: 間引きによる形状の劣化は無視できる。`sim/track.py`の`path`指定コース
-#: (circuit/fuji)は解像度そのまま(2cm間隔)の中心線を持ち間引かれていないため、
-#: 自由度(977点)が多すぎてL-BFGSの収束が遅い(実測: 5000反復・24秒)。ここで
-#: 弧長ベースに間引いてから最適化し、結果を周期線形補間で密な点列に戻す
-_OPT_STEP_M = 0.1
+#: アクティブセット法（箱制約）の反復上限。境界に貼り付いた点をKKT条件で
+#: 解放しながら再解を繰り返す。`raspi/nav/raceline.py`の実績（実測で通常
+#: 3〜8回で収まる）を踏まえた余裕を持たせた値
+_ACTIVE_SET_MAX_ITER = 30
 
-#: 間引き点列から密な点列へ戻す周期PCHIP補間（`_reconstruct_dense_offset`）で、
-#: 周期境界を作るために弧長の前後へ複製する間引き点の個数。PCHIPは局所補間
-#: （評価点の近傍数点しか参照しない）なので、境界をまたぐ評価点をカバーできる
-#: だけの少数で足りる——多すぎても不要な複製が増えるだけで結果は変わらない
-_PERIODIC_PAD_POINTS = 4
-
-#: 障害物回避ペナルティが働く弧長方向の窓を、除外半径(`r_excl`。障害物半径+
+#: 障害物回避が箱制約[lo,hi]を狭める弧長方向の窓を、除外半径(`r_excl`。障害物半径+
 #: 車体半幅+安全マージン)からさらに広げる余裕 [m]。窓を`r_excl`ちょうどにすると
 #: 障害物の真横の数点しか回避に参加できず、急な進路変更（局所的に曲率が跳ね上がる
-#: 解）しかL-BFGSが選べなくなる。前後に余裕を持たせ、なだらかな回避カーブを
-#: 選べるようにする（2026-09-03追加、`ml_lidar`のobstacleアーキタイプ衝突率
-#: 100%の診断を受けて。`docs/`ではなくコミットログ・PROGRESS.md参照）
+#: 解）しか選べなくなる。前後に余裕を持たせ、なだらかな回避カーブを選べるようにする
+#: （2026-09-03追加、`ml_lidar`のobstacleアーキタイプ衝突率100%の診断を受けて。
+#: `docs/`ではなくコミットログ・PROGRESS.md参照）
 _OBSTACLE_AVOID_MARGIN_M = 0.4
-
-#: 障害物侵入ペナルティの重み。scratchpadでのプロトタイプ実測
-#: （`generate_obstacle_course`のseed 0〜9、障害物27個）で較正済み——
-#: weight=50では14/27個で数cm〜14cmの侵入が残ったが、weight=5000では
-#: 最悪でも-2.5cm（平均+4.5cmの余裕）まで収まった。この理想ラインは実際の
-#: 衝突判定（`sim/course.py`のraycastベース）には使わない学習報酬用の参照軌道
-#: でしかないため、cm単位の残差は許容範囲と判断している
-_OBSTACLE_PENALTY_WEIGHT = 5000.0
 
 
 def _segment_lengths(xy: np.ndarray) -> np.ndarray:
@@ -139,7 +125,11 @@ def _segment_lengths(xy: np.ndarray) -> np.ndarray:
 
 def _discrete_curvature(xy: np.ndarray) -> np.ndarray:
     """`sim/random_course.py`の`_min_turn_radius_m`と同じ離散曲率
-    （隣接セグメントのyaw差 / セグメント長）。閉ループの点`i`ごとの符号付き曲率 [1/m]。"""
+    （隣接セグメントのyaw差 / セグメント長）。閉ループの点`i`ごとの符号付き曲率 [1/m]。
+    `_min_curvature_alpha`が解くのはこれの二次近似（`‖Dp‖²`）だが、最終的な
+    「どちらの解が本当に曲率が小さいか」の判定（`compute_raceline_offsets`の
+    ★安全弁）や`compute_speed_profile`の速度プロファイルには、近似を使わず
+    このまま厳密曲率を使う。"""
     loop = np.vstack([xy, xy[:1]])
     seg = np.hypot(*np.diff(loop, axis=0).T)
     yaw = np.arctan2(np.diff(loop[:, 1]), np.diff(loop[:, 0]))
@@ -147,134 +137,104 @@ def _discrete_curvature(xy: np.ndarray) -> np.ndarray:
     return dyaw / np.maximum(seg, 1e-6)
 
 
-def _coarse_indices(xy: np.ndarray, step: float) -> np.ndarray:
-    """弧長 `step` [m] おきに最も近い既存点を選んだインデックス列（昇順・重複無し）。
-    新しい点を補間で作るのではなく既存インデックスを選ぶので、`yaw`（周期量で
-    単純補間できない）も`xy[idx]`でそのまま引ける。"""
-    seg = _segment_lengths(xy)
-    s = np.concatenate([[0.0], np.cumsum(seg)])[:-1]
-    total = float(s[-1] + seg[-1])
-    n = max(3, int(round(total / step)))
-    if n >= len(xy):
-        return np.arange(len(xy))
-    targets = np.linspace(0.0, total, n, endpoint=False)
-    idx = np.clip(np.searchsorted(s, targets, side="left"), 0, len(xy) - 1)
-    return np.unique(idx)
+def _cyclic_d2(n: int) -> "sp.csr_matrix":
+    """巡回2階差分`D`（n×n、疎行列）。閉ループの境界条件はこれだけで完結する
+    （`raspi/nav/raceline.py`の`_cyclic_d2`と同じ定義。あちらは密行列だが、
+    ここでは`course_gen`が生成する密な中心線（数百〜数千点）でも直接解ける
+    よう疎行列のまま扱う——`D`はどのみち3重対角、`D^T D`も5重対角の疎行列で、
+    密行列に展開する意味が無い）。"""
+    i = np.arange(n)
+    rows = np.concatenate([i, i, i])
+    cols = np.concatenate([i, (i - 1) % n, (i + 1) % n])
+    data = np.concatenate([np.full(n, -2.0), np.full(n, 1.0), np.full(n, 1.0)])
+    return sp.csr_matrix((data, (rows, cols)), shape=(n, n))
 
 
-def _reconstruct_dense_offset(s_c: np.ndarray, offset_c: np.ndarray, total: float,
-                              s_query: np.ndarray) -> np.ndarray:
-    """間引き点で最適化した`offset_c`（弧長位置`s_c`）を、密な点列の弧長位置
-    `s_query`へ戻す。**単純な区分線形補間(`np.interp`)は使わない**——線形補間は
-    間引き点(`_OPT_STEP_M`=0.1m間隔)ごとに傾きが不連続な「折れ線」になり、密な
-    点列(間引き前の間隔、狭いコースでは2〜3cm)側でその折れ目を`_discrete_curvature`
-    で見ると、傾きの不連続がそのまま曲率のスパイクとして現れる（実測: eval固定
-    コース5本で密点列側の曲率二乗和が中心線そのものの4〜13倍に悪化、理想ライン
-    が視覚的に「毛羽立ち」、かつ本来アペックスを突くべき区間で外側へ押し戻される
-    「膨らみ」となって現れた——2026-09-12、バンビが観戦画面で指摘）。
+def _min_curvature_alpha(c: np.ndarray, nrm: np.ndarray, lo: np.ndarray, hi: np.ndarray, *,
+                         lam: float, step_m: float, max_iter: int) -> np.ndarray:
+    """箱制約つき最小曲率問題を解いて`α`（中心線`c`からの法線`nrm`方向オフセット）を返す。
+    `raspi/nav/raceline.py`の`min_curvature_alpha()`の移植（実車SLAMナビで実測・
+    妥当な挙動を確認済みのアルゴリズムをそのまま流用する）。
 
-    区分3次エルミート補間(PCHIP、`scipy.interpolate.PchipInterpolator`)に
-    変えることで、`offset`関数がC1連続になり折れ目由来のスパイクが消える。
-    自然3次スプライン（`CubicSpline`）も試したが、間引き点の一部でbox制約が
-    強く効いて隣接点との差が大きい区間（`corner`/`hairpin`アーキタイプ）で
-    大域的なリンギング（オーバーシュート）を起こし、密点列側の曲率二乗和が
-    線形補間よりさらに悪化する実測結果が出た。PCHIPは局所的・単調性保存
-    （隣接データ点の範囲を超えて振動しない）なため、この問題が起きない。
+    :param lo: 各点の下限（右側の余裕。**負の値**）
+    :param hi: 各点の上限（左側の余裕）
+    :param lam: 中心線へ引き戻す重み（モジュール定数`_LAM_DEFAULT`docstring参照）
+    :param step_m: 点の平均間隔 [m]。`lam`の正規化に使う（下記）
 
-    周期境界（コースは閉ループ）を扱うため、`PchipInterpolator`自体には
-    periodic対応が無いので、間引き点列の前後に`_PERIODIC_PAD_POINTS`個ぶん
-    弧長を`±total`ずらして複製してから素の（非周期）PCHIPを構成し、
-    元の`[0, total)`区間だけを評価する——PCHIPは局所補間なので、評価点の
-    近傍さえ周期的に繋がっていれば境界をまたいでも正しく滑らかに繋がる。
+    ## `lam`は`step_m⁴`で正規化する
+
+    曲率エネルギー項`‖Dp‖²`は点の間隔`ds`に対して`(κ·ds²)²`で効くので、
+    刻みを変えると同じ`lam`の意味が4乗で変わる。**内部で`lam·step_m⁴`を
+    使う**ことで、`course_gen`の`resolution`設定を変えても同じ「強さ」の
+    正則化になる。
+
+    ## 一度境界に固定した点は、勾配が内側を向いたら**解放する**
+
+    固定しっぱなしにすると、最初の1回の解が大きく振れたときに全点が境界に
+    貼り付いて、そのまま answer になる——**中心線より曲がった経路が「最適解」
+    として出てくる**（`raspi/nav/raceline.py`で実測済みの失敗パターン）。
+    KKT条件（下限にいる点の勾配は0以上、上限にいる点は0以下）を見て、
+    破っている点を自由集合へ戻す。
     """
-    n = len(s_c)
-    pad = min(_PERIODIC_PAD_POINTS, n)
-    s_ext = np.concatenate([s_c[-pad:] - total, s_c, s_c[:pad] + total])
-    offset_ext = np.concatenate([offset_c[-pad:], offset_c, offset_c[:pad]])
-    return PchipInterpolator(s_ext, offset_ext)(s_query)
+    n = len(c)
+    d2 = _cyclic_d2(n)
+    dtd = (d2.T @ d2).tocsr()
+    nx, ny = nrm[:, 0], nrm[:, 1]
+    nx_d, ny_d = sp.diags(nx), sp.diags(ny)
+    lam_eff = lam * step_m ** 4
+    m = (nx_d @ dtd @ nx_d + ny_d @ dtd @ ny_d + lam_eff * sp.identity(n)).tocsr()
+    b = nx * (dtd @ c[:, 0]) + ny * (dtd @ c[:, 1])
+    tol = 1e-12 * max(1.0, float(np.abs(b).max()))
 
+    alpha = np.zeros(n)
+    at_lo = np.zeros(n, dtype=bool)
+    at_hi = np.zeros(n, dtype=bool)
+    idx_all = np.arange(n)
+    for _ in range(max(1, max_iter)):
+        fixed = at_lo | at_hi
+        free = ~fixed
+        if free.any():
+            free_idx = idx_all[free]
+            fixed_idx = idx_all[fixed]
+            sub = m[free_idx, :][:, free_idx]
+            contribution = (m[free_idx, :][:, fixed_idx] @ alpha[fixed_idx]
+                           if fixed_idx.size else np.zeros(free_idx.size))
+            rhs = -(b[free_idx] + contribution)
+            try:
+                alpha[free_idx] = spla.spsolve(sub.tocsc(), rhs)
+            except Exception:                                          # noqa: BLE001
+                # 退化した（同じ点が並んでいる等）。**例外で計算を止めない**
+                alpha[free_idx] = np.linalg.lstsq(sub.toarray(), rhs, rcond=None)[0]
 
-def _curvature_sq_sum_torch(offset: "torch.Tensor", centerline_xy: "torch.Tensor",
-                            normal: "torch.Tensor") -> "torch.Tensor":
-    """`_discrete_curvature`と同じ式をtorchで書き直したもの（自動微分用）。`np.unwrap`は
-    微分できないので、隣接差分を`[-pi,pi]`に丸め込む等価な式（`remainder`）で代用する
-    ——`np.unwrap`は元々「累積角がこの範囲を跨いだときの2πジャンプを取り除く」ためのもので、
-    隣接点間隔が細かいコースでは差分自体が`[-pi,pi]`に収まるので等価。"""
-    p = centerline_xy + offset.unsqueeze(1) * normal
-    loop = torch.cat([p, p[:1]], dim=0)
-    diff = loop[1:] - loop[:-1]
-    seg = torch.hypot(diff[:, 0], diff[:, 1]).clamp_min(1e-6)
-    yaw = torch.atan2(diff[:, 1], diff[:, 0])
-    dyaw = torch.cat([yaw[1:], yaw[:1]]) - yaw
-    dyaw = torch.remainder(dyaw + math.pi, 2 * math.pi) - math.pi
-    kappa = dyaw / seg
-    return torch.sum(kappa * kappa)
+        below = alpha < lo - 1e-12
+        above = alpha > hi + 1e-12
+        if below.any() or above.any():
+            alpha = np.clip(alpha, lo, hi)
+            at_lo |= below
+            at_hi |= above
+            continue
 
-
-def _prepare_obstacle_terms(xy_c: np.ndarray, s_c: np.ndarray, total: float,
-                            obstacles: np.ndarray, *, vehicle_half_width_m: float,
-                            safety_margin_m: float
-                            ) -> tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"] | None:
-    """障害物ごとに、間引き済み点列(`xy_c`/`s_c`、`compute_raceline_offsets`が
-    L-BFGSにかける座標系)のうちペナルティ対象になる点のマスクを作る。
-
-    障害物中心への最近傍点（投影ではなく実距離）から弧長位置`s_obs`を求め、
-    `s_obs`を中心に`±(r_excl + _OBSTACLE_AVOID_MARGIN_M)`の窓内の点だけを
-    対象にする（曲がった区間に置かれた障害物でも、法線方向オフセットの差分
-    ではなく実距離で判定するので誤差が出ない）。周回コースのラップアラウンドも
-    考慮する。該当点が1つも無い場合（窓が狭すぎる稀なケース）は、安全弁として
-    最寄りの1点を必ず含める。
-    """
-    centers, r_excls, masks = [], [], []
-    for ox, oy, r_obs in obstacles:
-        d2 = (xy_c[:, 0] - ox) ** 2 + (xy_c[:, 1] - oy) ** 2
-        s_obs = s_c[int(np.argmin(d2))]
-        r_excl = float(r_obs) + vehicle_half_width_m + safety_margin_m
-        window = r_excl + _OBSTACLE_AVOID_MARGIN_M
-        dz = np.abs(s_c - s_obs)
-        dz = np.minimum(dz, total - dz)
-        mask = dz <= window
-        if not np.any(mask):
-            mask[np.argmin(dz)] = True
-        centers.append((ox, oy))
-        r_excls.append(r_excl)
-        masks.append(mask)
-    if not centers:
-        return None
-    return (torch.tensor(centers, dtype=torch.float64),
-           torch.tensor(r_excls, dtype=torch.float64),
-           torch.from_numpy(np.stack(masks)))
-
-
-def _obstacle_penalty_torch(offset: "torch.Tensor", centerline_xy: "torch.Tensor",
-                            normal: "torch.Tensor",
-                            obstacle_terms: tuple["torch.Tensor", "torch.Tensor", "torch.Tensor"]
-                            ) -> "torch.Tensor":
-    """soft exclusion: 理想ライン上の点`p_i`が障害物の除外半径`r_excl`より
-    近づいた分だけ`relu(...)^2`で罰する（窓内の点だけ、障害物ごとに合算）。
-    `K`（障害物数）は`generate_obstacle_course`で最大でも数個なので、
-    pythonループでも十分軽い。"""
-    centers, r_excl, mask = obstacle_terms
-    p = centerline_xy + offset.unsqueeze(1) * normal
-    total = torch.zeros((), dtype=torch.float64)
-    for k in range(centers.shape[0]):
-        sel = mask[k]
-        d = torch.linalg.norm(p[sel] - centers[k], dim=1)
-        total = total + torch.sum(torch.relu(r_excl[k] - d) ** 2)
-    return total
+        # 実行可能。境界に貼り付いている点を解放できるかをKKTで見る
+        g = 2.0 * (m @ alpha + b)
+        release = (at_lo & (g < -tol)) | (at_hi & (g > tol))
+        if not release.any():
+            break
+        at_lo[release] = False
+        at_hi[release] = False
+    return np.clip(alpha, lo, hi)
 
 
 def _lateral_bounds(xy: np.ndarray, yaw: np.ndarray, width: float | np.ndarray | None,
                     course: "Course | None", *, vehicle_half_width_m: float,
                     safety_margin_m: float) -> tuple[np.ndarray, np.ndarray]:
-    """密な中心線点列（間引き前）における、法線方向オフセットの許容範囲
-    `(lo, hi)`（符号付き、常に`lo <= 0 <= hi`）。
+    """中心線点列における、法線方向オフセットの許容範囲`(lo, hi)`（符号付き、
+    常に`lo <= 0 <= hi`）。
 
-    `width`が渡されれば従来通りそこから対称に求める（`compute_raceline_offsets`
-    の元の計算をそのまま移設したもの）。`width`が`None`なら`course`必須——
-    `course.raycast_batch()`で中心線の法線方向（左右）に実測した壁までの距離
-    から非対称な境界を求める。壁が非対称に配置され`Course.width`（スカラー/
-    centerlineと同じ長さの配列）では表現しきれないコース向け（2026-09-05追加）。
+    `width`が渡されれば従来通りそこから対称に求める。`width`が`None`なら
+    `course`必須——`course.raycast_batch()`で中心線の法線方向（左右）に実測
+    した壁までの距離から非対称な境界を求める。壁が非対称に配置され
+    `Course.width`（スカラー/centerlineと同じ長さの配列）では表現しきれない
+    コース向け（2026-09-05追加）。
     """
     n_pts = len(xy)
     if width is not None:
@@ -302,10 +262,50 @@ def _lateral_bounds(xy: np.ndarray, yaw: np.ndarray, width: float | np.ndarray |
     right = np.where(right <= 0.0, _WALL_RAYCAST_MAX_RANGE_M, right)
     # 実測した壁までの距離を`_RAYCAST_LATERAL_OFFSET_CAP_M`で頭打ちにする
     # （定数のdocstring参照）——width=Noneのコースで片側だけ壁が非常に遠い
-    # 場合、その距離をそのまま箱制約に使うとL-BFGSが車体規模を大きく
-    # 超えて振れる理想ラインを作ってしまうため（定数のdocstring参照）
+    # 場合、その距離をそのまま箱制約に使うと車体規模を大きく超えて振れる
+    # 理想ラインを作ってしまうため
     hi = np.minimum(np.maximum(0.0, left - margin), _RAYCAST_LATERAL_OFFSET_CAP_M)
     lo = -np.minimum(np.maximum(0.0, right - margin), _RAYCAST_LATERAL_OFFSET_CAP_M)
+    return lo, hi
+
+
+def _narrow_bounds_for_obstacles(xy: np.ndarray, yaw: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                                 obstacles: np.ndarray, *, vehicle_half_width_m: float,
+                                 safety_margin_m: float) -> tuple[np.ndarray, np.ndarray]:
+    """障害物ごとに、その周辺の箱制約`[lo, hi]`を「障害物が無い側」へ狭める
+    （ハード除外）。旧実装（L-BFGS＋`relu`ソフトペナルティ）から、二次計画＋
+    アクティブセット法への置き換えに合わせて、箱制約の追加として実装し直した
+    ——ソフトペナルティは目的関数を非二次にしてしまい、疎行列の直接解が使えなく
+    なるため。
+
+    ★現状どの呼び出し元（`ml_lidar/env.py`・`watch.py`・`live_watch.py`）も
+    `obstacles`を渡していない（`course_gen.py`の現行アーキタイプは障害物を
+    生成しない）——将来のための未使用インフラであり、この関数自体は実運用で
+    検証されていない。使う際は改めて動作確認すること。
+    """
+    lo = lo.copy()
+    hi = hi.copy()
+    nrm = np.column_stack((-np.sin(yaw), np.cos(yaw)))
+    seg = _segment_lengths(xy)
+    s = np.concatenate([[0.0], np.cumsum(seg)])[:-1]
+    total = float(s[-1] + seg[-1])
+
+    for ox, oy, r_obs in obstacles:
+        d2 = (xy[:, 0] - ox) ** 2 + (xy[:, 1] - oy) ** 2
+        s_obs = s[int(np.argmin(d2))]
+        r_excl = float(r_obs) + vehicle_half_width_m + safety_margin_m
+        window = r_excl + _OBSTACLE_AVOID_MARGIN_M
+        dz = np.abs(s - s_obs)
+        dz = np.minimum(dz, total - dz)
+        mask = dz <= window
+        if not np.any(mask):
+            continue
+
+        d_lat = ((ox - xy[mask, 0]) * nrm[mask, 0] + (oy - xy[mask, 1]) * nrm[mask, 1])
+        left = d_lat >= 0.0
+        idx = np.where(mask)[0]
+        hi[idx[left]] = np.maximum(lo[idx[left]], np.minimum(hi[idx[left]], d_lat[left] - r_excl))
+        lo[idx[~left]] = np.minimum(hi[idx[~left]], np.maximum(lo[idx[~left]], d_lat[~left] + r_excl))
     return lo, hi
 
 
@@ -313,117 +313,61 @@ def compute_raceline_offsets(centerline: np.ndarray, width: float | np.ndarray |
                              vehicle_half_width_m: float, safety_margin_m: float = 0.03,
                              obstacles: np.ndarray | None = None,
                              course: "Course | None" = None,
-                             iterations: int = _OPT_ITERATIONS, lr: float = _OPT_LR) -> np.ndarray:
-    """中心線 `(N,3)`(x,y,yaw) からの法線方向オフセット `offset[i]`（符号付き、
-    法線 `(-sin(yaw), cos(yaw))` の正方向）を返す。`centerline + offset*normal`が
-    理想ライン（曲率二乗和を最小化した、最小曲率に寄せたレーシングライン）の
-    座標になる。
-
-    ## Adam(射影勾配法)からL-BFGSへ変更した経緯
-
-    当初はbox制約(道幅の範囲内)をAdam勾配降下→毎ステップ`clamp_`で解いていたが、
-    実測（`circuit.json`）で隣接点の60%以上がオフセットの符号を反転させる高周波の
-    ギザギザ解に陥り、しかも反復回数を200→5000に増やすと悪化する（境界張り付き点が
-    13→468に増加）ことが判明した（`watch.py`で理想ラインが「毛羽立って」見えた実例、
-    2026-09-01）。原因は、この目的関数（曲率二乗和）が`offset`の2階差分を含む
-    梁のたわみ的な（4階微分相当の）性質を持つのに対し、Adamは各点を独立に
-    ほぼ一定幅で動かすため、隣接点が逆方向に押し合うチェッカーボード状のノイズを
-    減衰できないこと。`torch.optim.LBFGS`（fullbatch・2階情報を近似するquasi-Newton）
-    に変えたところ、同程度の反復回数で目的関数値がAdamの1/3〜1/6まで下がり、
-    境界張り付きも解消した。
-
-    box制約は`clamp_`（射影）ではなく`offset = max_offset * tanh(z)`という
-    滑らかな再パラメータ化で埋め込む——L-BFGSは内部で1回の`step()`につき
-    `iterations`回まで独自に反復するため、Adamのように毎ステップ外側からclampを
-    挟めない（挟むとL-BFGSの2階情報の履歴と矛盾し収束が乱れる）。`tanh`なら
-    無制約最適化のまま自動的に`[-max_offset, max_offset]`に収まる。
+                             lam: float = _LAM_DEFAULT,
+                             max_iter: int = _ACTIVE_SET_MAX_ITER) -> np.ndarray:
+    """中心線`(N,3)`(x,y,yaw)からの法線方向オフセット`offset[i]`（符号付き、
+    法線`(-sin(yaw), cos(yaw))`の正方向）を返す。`centerline + offset*normal`が
+    理想ライン（中心線回帰つき曲率最小化で求めた、アウトインアウトのレーシング
+    ライン）の座標になる。アルゴリズムの詳細は`_min_curvature_alpha()`・
+    モジュールdocstring参照。
 
     :param width: `Course.width`と同じ（スカラーまたは`centerline`と同じ長さの配列）。
         `None`の場合は`course`が必須——`course.raycast_batch()`で中心線の法線
         方向に実測した壁までの距離から、非対称な（左右で異なりうる）道幅制約を
-        求める（2026-09-05追加、`_lateral_bounds`参照）。`width`が渡された場合は
-        `course`の有無に関わらず従来通りの対称計算を使う（後方互換、既存呼び出し
-        は無変更で動く）
+        求める（`_lateral_bounds`参照）。`width`が渡された場合は`course`の
+        有無に関わらず従来通りの対称計算を使う
     :param vehicle_half_width_m: 車体全幅の半分 [m]。壁との安全マージンぶん、
         道幅の半分より内側にしかオフセットできないようにする
     :param safety_margin_m: `vehicle_half_width_m`に加えて残す余裕 [m]
     :param course: `width is None`のときに壁までの実測レイキャストに使う`Course`。
         `width`が渡されているときは無視される
     :param obstacles: `Course.obstacles`と同じ（(K,3)=x,y,半径[m]、世界座標）。
-        `None`（既定、`narrow`/`organic`/`circuit`/`corridor`アーキタイプは常に
-        `None`）なら既存の挙動と完全に同一。**指定すると、曲率二乗和の損失に
-        障害物回避のsoft exclusionペナルティ（`_obstacle_penalty_torch`）が
-        加わる**——道幅内で曲率を最小化するだけだと、障害物の真上を通る
-        理想ラインが計算されてしまい、`raceline_weight`/`speed_match_weight`
-        の報酬が衝突回避と綱引きになる問題への対応（2026-09-03追加。
-        obstacleアーキタイプの衝突率が100%だった診断より）
+        `None`（既定）なら既存の挙動と完全に同一。指定すると障害物周辺の箱制約
+        `[lo,hi]`を障害物が無い側へ狭める（`_narrow_bounds_for_obstacles`参照。
+        ★未使用インフラ、docstring参照）
+    :param lam: `_min_curvature_alpha`にそのまま渡す正則化重み
+    :param max_iter: `_min_curvature_alpha`にそのまま渡すアクティブセット法の反復上限
     """
     xy = centerline[:, :2]
     yaw = centerline[:, 2]
     lo, hi = _lateral_bounds(xy, yaw, width, course,
                              vehicle_half_width_m=vehicle_half_width_m,
                              safety_margin_m=safety_margin_m)
-
-    # 間引いた点だけをL-BFGSにかける（`_OPT_STEP_M`のdocstring参照）
-    idx = _coarse_indices(xy, _OPT_STEP_M)
-    seg = _segment_lengths(xy)
-    s_full = np.concatenate([[0.0], np.cumsum(seg)])[:-1]
-    total = float(s_full[-1] + seg[-1])
-
-    xy_c, yaw_c, lo_c, hi_c = xy[idx], yaw[idx], lo[idx], hi[idx]
-    # 対称`[-max_offset, max_offset]`を非対称`[lo, hi]`に一般化した箱制約——
-    # `center + half_range*tanh(z)`という滑らかな再パラメータ化で埋め込む
-    # （`width`指定時は`lo=-hi`なので`center=0`・`half_range=max_offset`となり、
-    # 旧来の`max_offset*tanh(z)`と完全に一致する＝後方互換）
-    center_c = (lo_c + hi_c) / 2.0
-    half_range_c = (hi_c - lo_c) / 2.0
-    centerline_t = torch.from_numpy(xy_c).to(torch.float64)
-    normal_t = torch.from_numpy(np.column_stack((-np.sin(yaw_c), np.cos(yaw_c)))).to(torch.float64)
-    center_t = torch.from_numpy(center_c).to(torch.float64)
-    half_range_t = torch.from_numpy(half_range_c).to(torch.float64)
-    z_t = torch.zeros(len(idx), dtype=torch.float64, requires_grad=True)
-
-    obstacle_terms = None
     if obstacles is not None and len(obstacles) > 0:
-        s_c = s_full[idx]
-        obstacle_terms = _prepare_obstacle_terms(
-            xy_c, s_c, total, obstacles,
-            vehicle_half_width_m=vehicle_half_width_m, safety_margin_m=safety_margin_m)
+        lo, hi = _narrow_bounds_for_obstacles(xy, yaw, lo, hi, obstacles,
+                                              vehicle_half_width_m=vehicle_half_width_m,
+                                              safety_margin_m=safety_margin_m)
 
-    opt = torch.optim.LBFGS([z_t], lr=lr, max_iter=iterations, line_search_fn="strong_wolfe")
+    nrm = np.column_stack((-np.sin(yaw), np.cos(yaw)))
+    step_m = float(np.mean(_segment_lengths(xy)))
+    alpha = _min_curvature_alpha(xy, nrm, lo, hi, lam=lam, step_m=step_m, max_iter=max_iter)
 
-    def closure() -> "torch.Tensor":
-        opt.zero_grad()
-        offset = center_t + half_range_t * torch.tanh(z_t)
-        loss = _curvature_sq_sum_torch(offset, centerline_t, normal_t)
-        if obstacle_terms is not None:
-            loss = loss + _OBSTACLE_PENALTY_WEIGHT * _obstacle_penalty_torch(
-                offset, centerline_t, normal_t, obstacle_terms)
-        loss.backward()
-        return loss
-
-    # `_OPT_ITERATIONS`のdocstring参照——1回の`step()`では内部の直線探索が
-    # 早期に頭打ちするため、ロスの改善が鈍るまで呼び直す
-    prev_loss = None
-    for _ in range(_OPT_MAX_CALLS):
-        loss = opt.step(closure).item()
-        if prev_loss is not None and abs(prev_loss - loss) < _OPT_REL_TOL * max(prev_loss, 1e-9):
-            break
-        prev_loss = loss
-
-    offset_c = (center_t + half_range_t * torch.tanh(z_t)).detach().numpy()
-    # 間引いた点の弧長位置を基準に、密な点列へ周期PCHIP補間で戻す
-    # （区分線形補間を使わない理由は`_reconstruct_dense_offset`のdocstring参照）
-    offset = _reconstruct_dense_offset(s_full[idx], offset_c, total, s_full)
-    # 補間の丸め込みで、道幅が急に変わる区間だけ僅かに制約を超えうるので
-    # 密な点列側の`(lo, hi)`で最終的にクランプしておく
-    return np.clip(offset, lo, hi)
+    # ★悪くなった解は返さない（`raspi/nav/raceline.py`の`optimize()`と同じ安全弁）。
+    # 正則化`λ‖α‖²`があれば通常起こらないはずだが、`lam`を極端に小さくした場合や
+    # 数値的な退化への保険として、厳密曲率（近似ではない`_discrete_curvature`）の
+    # 二乗和で中心線(α=0)と比較し、改善していなければ中心線をそのまま返す
+    energy_center = float(np.sum(_discrete_curvature(xy) ** 2))
+    energy_alpha = float(np.sum(_discrete_curvature(xy + alpha[:, None] * nrm) ** 2))
+    if energy_alpha >= energy_center:
+        return np.zeros_like(alpha)
+    return alpha
 
 
 def compute_raceline_xy(centerline: np.ndarray, width: float | np.ndarray | None, *,
                         vehicle_half_width_m: float, safety_margin_m: float = 0.03,
                         obstacles: np.ndarray | None = None, course: "Course | None" = None,
-                        iterations: int = _OPT_ITERATIONS, lr: float = _OPT_LR) -> np.ndarray:
+                        lam: float = _LAM_DEFAULT,
+                        max_iter: int = _ACTIVE_SET_MAX_ITER) -> np.ndarray:
     """`compute_raceline_offsets()`を呼び、理想ラインの世界座標`(N,2)`
     （`centerline + offset*normal`）に変換したものを返す。引数は`compute_raceline_offsets`と
     同じ——呼び出し側（`ml_lidar/env.py`の報酬計算、`ml_lidar/watch.py`・`live_watch.py`の
@@ -431,7 +375,7 @@ def compute_raceline_xy(centerline: np.ndarray, width: float | np.ndarray | None
     """
     offsets = compute_raceline_offsets(centerline, width, vehicle_half_width_m=vehicle_half_width_m,
                                        safety_margin_m=safety_margin_m, obstacles=obstacles,
-                                       course=course, iterations=iterations, lr=lr)
+                                       course=course, lam=lam, max_iter=max_iter)
     yaw = centerline[:, 2]
     normal = np.column_stack((-np.sin(yaw), np.cos(yaw)))
     return centerline[:, :2] + offsets[:, None] * normal

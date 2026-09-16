@@ -13,8 +13,8 @@ onnxruntime>=1.18,<2
 
 numpy>=2.1
 
-# sim/raceline.py が間引き点列→密点列の周期PCHIP補間にscipyを使うが、ここには
-# 明示しない——`sim/requirements.txt`（先にインストールする前提）が
+# sim/raceline.py が最小曲率問題の疎行列直接解(scipy.sparse)にscipyを使うが、
+# ここには明示しない——`sim/requirements.txt`（先にインストールする前提）が
 # `sim/wall_track.py` の都合で既に依存しており、新規の依存追加ではないため
 
 # 観戦（`ml_lidar/watch.py`）の可視化

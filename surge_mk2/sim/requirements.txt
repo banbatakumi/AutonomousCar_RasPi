@@ -10,5 +10,5 @@
 pygame                 # シミュレータGUI（俯瞰ビュー＋パラメータ調整パネル）
 pillow                 # コース PNG の読み込み（raspi 側では任意扱いなのでここにも書く）
 scipy                  # sim/wall_track.py: 壁モードの自由空間の連結成分ラベル付け
-                       # sim/raceline.py: 間引き点列→密点列の周期PCHIP補間
+                       # sim/raceline.py: 最小曲率問題の疎行列直接解(scipy.sparse)
 networkx               # sim/wall_track.py: 壁モードの骨格グラフの葉刈り・ループ抽出
