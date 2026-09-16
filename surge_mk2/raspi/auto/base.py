@@ -145,6 +145,13 @@ class Planner:
         planner だけ実装する。既定は何もしない。
         """
 
+    def request_park_target(self, x: float, y: float, yaw: float) -> None:
+        """GUIのLiDAR画面をクリック+ドラッグして、駐車目標（位置+向き、
+        クリック時点の車両基準ローカル座標）を送ってきた。
+
+        対応する planner（`park_to_point.py`）だけ実装する。既定は何もしない。
+        """
+
     # ── ヘルパ ──
 
     @classmethod
@@ -198,8 +205,15 @@ class ScanWindow(NamedTuple):
     valid_ratio: float                     #: 実測点だった割合 [0..1]
 
 
-def scan_window(scan: Scan, fov_deg: float, max_range: float) -> ScanWindow:
+def scan_window(scan: Scan, fov_deg: float, max_range: float, *,
+                center_deg: float = 0.0) -> ScanWindow:
     """前方 ±`fov_deg`/2 を切り出し、**欠測・飽和・測距不能を安全側に倒す**。
+
+    `center_deg`（既定 0.0＝前方）で切り出す向きをずらせる。既存の呼び出し元は
+    全て既定のままなので挙動は変わらない。**後退の安全窓を切り出す
+    `park_to_point.py` だけが `center_deg=180.0` を渡す**——前後どちらの窓も
+    同じ「欠測=壁・飽和=空き・測距不能=空き」の契約で読めるようにするため
+    （実装を1箇所に保つ。下記★の注意はここにも当てはまる）。
 
     | 入力 | どう読むか | なぜ |
     |---|---|---|
@@ -222,11 +236,12 @@ def scan_window(scan: Scan, fov_deg: float, max_range: float) -> ScanWindow:
     """
     half = int(round(fov_deg / 2))
     degs = list(range(-half, half + 1))
+    offset = int(round(center_deg))
     dist: list[float] = []
     measured: list[bool] = []
     seen = 0
     for d in degs:
-        i = d % 360
+        i = (d + offset) % 360
         if not scan.sector_seen[sector_of_deg(i)]:
             dist.append(0.0)               # 欠測は壁。**空きではない**
             measured.append(False)

@@ -93,6 +93,16 @@ class Vehicle:
             return max(x for x, _ in self.footprint)
         return self.wheelbase
 
+    @property
+    def rear_overhang(self) -> float:
+        """base_link から後端までの距離 [m]。後退時の停止距離判定に使う。
+
+        `front_overhang` と対称（`park_to_point.py` の後退時の安全距離計算）。
+        """
+        if self.footprint:
+            return -min(x for x, _ in self.footprint)
+        return 0.0
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Vehicle":
         """読めなければ**既定値で返す**（例外にしない）。

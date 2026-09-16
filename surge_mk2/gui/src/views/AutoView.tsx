@@ -85,7 +85,7 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
       </div>
 
       <div className="lidar">
-        <LidarView />
+        <LidarView ch={ch} />
         <ScanBadge />
         <div className="lidar-controls">
           <button onClick={() => ui.set({ lidarZoom: Math.min(12, ui.lidarZoom * 1.5) })}>

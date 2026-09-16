@@ -414,6 +414,11 @@ class TelemetryServer:
         self._auto_loc_hint_x = 0.0
         self._auto_loc_hint_y = 0.0
         self._auto_loc_hint_seq = 0
+        #: LiDAR画面のクリック+ドラッグによる駐車目標（`park_to_point.py`）
+        self._auto_park_x = 0.0
+        self._auto_park_y = 0.0
+        self._auto_park_yaw = 0.0
+        self._auto_park_seq = 0
         #: engage したまま `auto/cmd` が途絶して制動に落とした回数
         self.auto_stalls = 0
         self._auto_was_fresh = True
@@ -961,6 +966,14 @@ class TelemetryServer:
             else:
                 self._auto_loc_hint_x, self._auto_loc_hint_y = x, y
                 self._auto_loc_hint_seq += 1
+        if m.get("park_target"):
+            try:
+                x, y, yaw = float(m["park_x"]), float(m["park_y"]), float(m["park_yaw"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                self._auto_park_x, self._auto_park_y, self._auto_park_yaw = x, y, yaw
+                self._auto_park_seq += 1
         if "engaged" in m:
             want = bool(m.get("engaged"))
             # モードが無いのに engage はできない。**解除は常に通す**
@@ -979,7 +992,11 @@ class TelemetryServer:
                         race_seq=self._auto_race_seq,
                         loc_hint_x=self._auto_loc_hint_x,
                         loc_hint_y=self._auto_loc_hint_y,
-                        loc_hint_seq=self._auto_loc_hint_seq)
+                        loc_hint_seq=self._auto_loc_hint_seq,
+                        park_x=self._auto_park_x,
+                        park_y=self._auto_park_y,
+                        park_yaw=self._auto_park_yaw,
+                        park_seq=self._auto_park_seq)
 
     def _publish_auto_ctrl(self) -> None:
         self.pub.send(TOPIC_AUTO_CTRL, self._auto_ctrl())

@@ -259,8 +259,31 @@ sim/
 ├── gui.py        pygame の俯瞰ビュー + 走行数値 + 設定ページ（P で開閉）
 ├── editor.py     コースエディタ（区間をクリックでつなぐ）
 ├── run.py        4プロセスをまとめて起動するランチャ（**stdlib だけで書く**）
+├── park_world.py  駐車配置（縦列/車庫入れ/斜め/袋小路）を Course として生成
+├── park_bench.py  駐車の評価ベンチ（真値の衝突判定・センサ誤差の注入）
 └── courses/      *.png（＋サイドカー json）と *.json（センターライン方式）
 ```
+
+### 駐車の評価ベンチ（`sim.park_bench`）
+
+```bash
+.venv/bin/python -m sim.park_bench --scenario all --n 12 --errors real
+.venv/bin/python -m sim.park_bench --scenario garage --n 4 --plot --verbose
+```
+
+`sim.bench`（コース周回の評価）とは評価軸が違うので別に持っている。
+**成否を「plannerの申告」ではなく真値で決める**のがこのベンチの要点:
+
+- 毎周期 `VirtualLidar` → `ScanAssembler` を通す（鏡像戻し・セクタ欠損・
+  ノイズ・遅延が入る）。**`Scan`を作り置きして使い回してはいけない**
+  ——障害物が車体ローカルに固定され、車と一緒に動いてしまう（旧実装の欠陥）
+- `Course.collides()` で**衝突を毎ステップ数える**。planner が「完了」と
+  言っても擦っていれば失敗
+- `--errors real|harsh` でジャイロバイアス・オドメトリのスケール誤差・
+  エンコーダ量子化を注入する。`VehicleModel`は誤差ゼロの真値を出すので、
+  **これが無いとデッドレコニングのドリフトを一度も測っていないことになる**
+- `推定誤差`列は planner の自己位置推定 vs 真値。成否は許容誤差の境界で
+  ばたつくので、**推定の良し悪しはこの列で見る**
 
 車両そのものの諸元は `config/vehicle.toml`（`docs/architecture.md` §5.3）。
 

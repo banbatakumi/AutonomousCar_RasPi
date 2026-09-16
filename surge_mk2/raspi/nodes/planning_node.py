@@ -143,6 +143,7 @@ class PlanningNode:
         clear = c.clear_seq > self.ctrl.clear_seq
         load = c.race_seq > self.ctrl.race_seq
         hint = c.loc_hint_seq > self.ctrl.loc_hint_seq
+        park = c.park_seq > self.ctrl.park_seq
         self.ctrl = c
         if clear and self.planner is not None:
             self.planner.request_clear()
@@ -160,6 +161,8 @@ class PlanningNode:
                 print(f"# 地図を読み込み（GUI）: {c.race_map}", flush=True)
         if hint and self.planner is not None:
             self.planner.request_locate_hint(c.loc_hint_x, c.loc_hint_y)
+        if park and self.planner is not None:
+            self.planner.request_park_target(c.park_x, c.park_y, c.park_yaw)
         if changed:
             self.planner = make_planner(c.mode)
             self.state = AutoState(mode=c.mode)

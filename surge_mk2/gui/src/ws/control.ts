@@ -193,6 +193,16 @@ export class ControlChannel {
     this.send({ type: 'auto', hint_map: true, hint_x: x, hint_y: y })
   }
 
+  /**
+   * LiDARビューをクリック+ドラッグして、駐車目標（位置+向き、車両基準
+   * ローカル座標、クリック時点）を送る。`setLocateHint`と同じ「回数」の
+   * 約束（`AutoCtrl.park_seq`）。**engageは落とさない**——走行中の目標の
+   * 再指定（軌道修正）を許すため（`park_to_point.py`のdocstring参照）。
+   */
+  setParkTarget(x: number, y: number, yaw: number) {
+    this.send({ type: 'auto', park_target: true, park_x: x, park_y: y, park_yaw: yaw })
+  }
+
   // ── 保存済み地図（`saved_maps/`、`raspi/auto/mapstore.py`） ──
 
   /** 一覧を要求する。応答は `onMaps`（`logsList`と同じ流儀）。 */

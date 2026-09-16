@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x0171ab6a
+export const MSGS_SCHEMA = 0x52b020ce
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
@@ -334,6 +334,51 @@ export type AutoState = {
   target_distance: number
   /** 対象の方位 [deg] 符号付き（`nearest_deg` 等と同じ ±180 表現） */
   target_bearing_deg: number
+  /** 目標が設定されているか */
+  park_active: boolean
+  /**
+   * 目標の位置+向き（車両基準ローカル座標）。**毎周期デッドレコニングで更新**
+   * される値——クリック時点の座標を固定描画すると車が動いた瞬間に嘘になるため、
+   * GUI はこの値を描くこと
+   */
+  park_target_x: number
+  park_target_y: number
+  /** [rad] 反時計回り正 */
+  park_target_yaw: number
+  /** 目標までの残り距離 [m] */
+  park_rho: number
+  /** 後退で接近する向きに固定したか */
+  park_reverse: boolean
+  /** 参照経路からの横偏差 [m]（左が正）。閉ループ追従の効きが見える */
+  park_cross_track: number
+  /** 参照経路との向き偏差 [rad] */
+  park_heading_err: number
+  /**
+   * 計画した経路を**車両基準ローカル座標**で間引いたもの [m]。
+   * **実機で「なぜこの経路を選んだか」を見る唯一の手段**——これが無いと、
+   * 障害物回避が効いているのか偶然なのかが画面から判断できない。
+   * `park_path_x[i]`と`park_path_y[i]`が対。空なら経路なし
+   */
+  park_path_x: number[]
+  park_path_y: number[]
+  /**
+   * 経路のどこから後退になるかの添字（`park_path_*`の添字）。
+   * これ以降が後退区間。-1 なら全区間前進
+   */
+  park_path_reverse_from: number
+  /** 経路に沿った最小クリアランス [m]（壁まで）。小さいほどぎりぎり */
+  park_clearance: number
+  /** 経路をどう見つけたか（"解析展開で接続" / "格子探索で到達" / 失敗理由） */
+  park_plan_how: string
+  /**
+   * スキャンアンカが今周期の登録を採用したか。**Falseが続くなら
+   * 推測航法だけで走っている**（ドリフトが乗る）
+   */
+  park_anchor_ok: boolean
+  /** 対応が付いた点の割合 0〜1 */
+  park_anchor_inlier: number
+  /** 推測航法からの補正量 [m] */
+  park_anchor_correction: number
   /** 使った点群の古さ [ms] */
   scan_age_ms: number
   /** 実測の計画レート [Hz] */

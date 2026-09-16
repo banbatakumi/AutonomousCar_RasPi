@@ -468,6 +468,13 @@ class AutoCtrl(MsgBase):
     loc_hint_y: float = 0.0
     #: 「地図をクリックした」回数。`freeze_seq`/`clear_seq`/`race_seq` と同じ約束
     loc_hint_seq: int = 0
+    #: LiDAR画面のクリック+ドラッグによる駐車目標（位置+向き、車両基準ローカル座標、
+    #: クリック時点）。`park_to_point.py` だけが使う
+    park_x: float = 0.0
+    park_y: float = 0.0
+    park_yaw: float = 0.0
+    #: 「駐車目標を置いた」回数。`freeze_seq`/`clear_seq`/`race_seq` と同じ約束
+    park_seq: int = 0
 
 
 class AutoState(MsgBase):
@@ -539,6 +546,38 @@ class AutoState(MsgBase):
     target_distance: float = 0.0
     #: 対象の方位 [deg] 符号付き（`nearest_deg` 等と同じ ±180 表現）
     target_bearing_deg: float = 0.0
+
+    # ── 位置+向き駐車の状態（`raspi/auto/park_to_point.py`） ──
+    park_active: bool = False              #: 目標が設定されているか
+    #: 目標の位置+向き（車両基準ローカル座標）。**毎周期デッドレコニングで更新**
+    #: される値——クリック時点の座標を固定描画すると車が動いた瞬間に嘘になるため、
+    #: GUI はこの値を描くこと
+    park_target_x: float = 0.0
+    park_target_y: float = 0.0
+    park_target_yaw: float = 0.0           #: [rad] 反時計回り正
+    park_rho: float = 0.0                  #: 目標までの残り距離 [m]
+    park_reverse: bool = False             #: 後退で接近する向きに固定したか
+    #: 参照経路からの横偏差 [m]（左が正）。閉ループ追従の効きが見える
+    park_cross_track: float = 0.0
+    park_heading_err: float = 0.0          #: 参照経路との向き偏差 [rad]
+    #: 計画した経路を**車両基準ローカル座標**で間引いたもの [m]。
+    #: **実機で「なぜこの経路を選んだか」を見る唯一の手段**——これが無いと、
+    #: 障害物回避が効いているのか偶然なのかが画面から判断できない。
+    #: `park_path_x[i]`と`park_path_y[i]`が対。空なら経路なし
+    park_path_x: list[float] = msgspec.field(default_factory=list)
+    park_path_y: list[float] = msgspec.field(default_factory=list)
+    #: 経路のどこから後退になるかの添字（`park_path_*`の添字）。
+    #: これ以降が後退区間。-1 なら全区間前進
+    park_path_reverse_from: int = -1
+    #: 経路に沿った最小クリアランス [m]（壁まで）。小さいほどぎりぎり
+    park_clearance: float = 0.0
+    #: 経路をどう見つけたか（"解析展開で接続" / "格子探索で到達" / 失敗理由）
+    park_plan_how: str = ""
+    #: スキャンアンカが今周期の登録を採用したか。**Falseが続くなら
+    #: 推測航法だけで走っている**（ドリフトが乗る）
+    park_anchor_ok: bool = False
+    park_anchor_inlier: float = 0.0         #: 対応が付いた点の割合 0〜1
+    park_anchor_correction: float = 0.0    #: 推測航法からの補正量 [m]
 
     # ── 鮮度（planning_node が入れる） ──
     scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]

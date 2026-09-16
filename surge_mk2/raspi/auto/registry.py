@@ -24,6 +24,7 @@ from .follow_the_gap import FollowTheGap
 from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
 from .line_trace import LineTrace
+from .park_to_point import ParkToPoint
 from .raceline import RaceLine
 from .slam2d_raceline import Slam2dRaceLine
 from .sysid_accel import SysIdAccel
@@ -46,6 +47,7 @@ PLANNERS: dict[str, type[Planner]] = {
     LineTrace.id: LineTrace,
     E2ELidar.id: E2ELidar,
     FollowObject.id: FollowObject,
+    ParkToPoint.id: ParkToPoint,
     #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブの
     #: モード選択には出さない（`AutoPanel.tsx` 側のフィルタ）
     SysIdSteer.id: SysIdSteer,

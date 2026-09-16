@@ -8,13 +8,14 @@
  * このファイルは 1 行も変わらない。** モード名を GUI 側にも書くと、増やすたびに
  * 2箇所を直すことになり、いつか片方だけ古くなる。
  *
- * ⚠ 例外が3つだけある——`ftg_cam`/`cam_centerline`（どちらもセグメンテーション
+ * ⚠ 例外が4つだけある——`ftg_cam`/`cam_centerline`（どちらもセグメンテーション
  * 走行。`cam_perception_node.py` の同じ推論結果を使うのでモデル選択も共通）と
  * `e2e_lidar`（E2E LiDAR走行）が使うモデルの選択、`follow_object`（対象追従）の
- * ROI選択状態の表示（下記）。これらの id 文字列だけは
+ * ROI選択状態の表示、`park_to_point`（駐車）の状態表示・`auto_stop`警告
+ * （下記）。これらの id 文字列だけは
  * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/cam_centerline.py` /
- * `raspi/auto/e2e_lidar.py` / `raspi/auto/follow_object.py` と直接対応させて
- * GUI 側に書いてある。
+ * `raspi/auto/e2e_lidar.py` / `raspi/auto/follow_object.py` /
+ * `raspi/auto/park_to_point.py` と直接対応させて GUI 側に書いてある。
  *
  * ## engage の状態を GUI 側で持たない
  *
@@ -270,6 +271,51 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <span className="badge-warn">見失い中（{(st.target_lost_ms / 1000).toFixed(1)}s）</span>
           ) : (
             <span className="dim">前方カメラの映像上でドラッグして対象を選択してください</span>
+          )}
+        </div>
+      )}
+
+      {/* 駐車（`park_to_point`）専用UI。目標の選択自体はLiDARビュー上で
+          クリック+ドラッグして行う（`LidarView.tsx`）——ここには状態表示と
+          `auto_stop`警告だけ置く。`auto_stop`（既定ON）は進行方向への意図的な
+          接近そのものを止めてしまうため、駐車動作とは原理的に競合する
+          （`park_to_point.py`のdocstring参照）。戻し忘れリスクを避けるため
+          GUIは自動でOFFにせず警告に留める */}
+      {selected?.id === 'park_to_point' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">駐車</span>
+          {st?.park_active ? (
+            <span className={st.phase === '完了' ? 'badge-live' : st.phase === '失敗' ? 'badge-bad' : 'dim'}>
+              {st.phase}・残り{st.park_rho.toFixed(2)}m
+              {st.park_reverse ? '（後退）' : '（前進）'}
+            </span>
+          ) : (
+            <span className="dim">LiDARビュー上でクリック（+ドラッグで向き指定）して目標を置いてください</span>
+          )}
+          {ui.settings.autoStop && (
+            <span className="badge-warn">
+              駐車中は自動停止(auto_stop)のOFFを推奨——目標地点手前で強制停止される場合があります
+            </span>
+          )}
+          {/* ★経路計画と自己位置の診断。**実機で「なぜこの経路なのか」
+              「推定を信じてよいのか」を判断する唯一の手段。**
+              `park_plan_how` は Hybrid A* がどう解いたか（解析展開／格子探索）
+              または失敗理由。`park_clearance` は経路の最小余裕で、小さいほど
+              ぎりぎり。アンカが採用されていない周期が続くなら推測航法だけで
+              走っている＝ドリフトが乗る */}
+          {st?.park_active && (
+            <>
+              <span className="dim">
+                経路: {st.park_plan_how || '—'}
+                {st.park_clearance > 0 && `・余裕${(st.park_clearance * 100).toFixed(0)}cm`}
+                ・横偏差{(st.park_cross_track * 100).toFixed(0)}cm
+              </span>
+              <span className={st.park_anchor_ok ? 'dim' : 'badge-warn'}>
+                自己位置: {st.park_anchor_ok
+                  ? `スキャン照合（一致${(st.park_anchor_inlier * 100).toFixed(0)}%・補正${(st.park_anchor_correction * 100).toFixed(1)}cm）`
+                  : '推測航法のみ（照合できていません＝ドリフトします）'}
+              </span>
+            </>
           )}
         </div>
       )}

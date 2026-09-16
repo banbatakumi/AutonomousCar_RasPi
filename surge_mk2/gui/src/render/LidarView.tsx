@@ -24,10 +24,13 @@
  * engage していなくても描く（planning_node は常に判断を出している）ので、
  * **手動で走らせながら planner の狙いを検分できる。**
  */
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'
 import { useUi } from '../store/ui'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
+import type { ControlChannel } from '../ws/control'
+import type { AutoState } from '../generated/msgs'
 
 /** 車体の描画用寸法 [m]。原点は base_link ＝ 後輪車軸の中心。
  * `config/vehicle.toml`（唯一の正）から生成された `footprint` ポリゴンの
@@ -54,11 +57,60 @@ const C = {
   gap: '#2bd67b',
   bubble: '#e0574d',
   heading: '#5ef0a8',
+  parkTarget: '#ff9f43',
+  parkPathFwd: '#4ad6ff',
+  parkPathRev: '#ff6b9d',
 }
 
-export function LidarView() {
+export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
   const ref = useRef<HTMLCanvasElement>(null)
   const zoom = useUi((s) => s.lidarZoom)
+  const auto = useUi((s) => s.auto)
+  //: 駐車目標のクリック+ドラッグは `park_to_point` 選択中だけ有効
+  // （`CameraView.tsx` の `trackingMode` と同じ ref 経由の方針）
+  const parkingMode = auto?.mode === 'park_to_point'
+  const parkingModeRef = useRef(parkingMode)
+  parkingModeRef.current = parkingMode
+  const chRef = useRef(ch)
+  chRef.current = ch
+  //: 直近の `draw()` が計算した画面変換（CSS px 基準）。ポインタ座標 →
+  //: 車両ローカル座標[m] の逆変換に使う（`CameraView.tsx` の `imgBoxRef` と同じ方針）
+  const xformRef = useRef({ cx: 0, cy: 0, px: 1 })
+  //: ドラッグ中の選択（車両ローカル座標[m]）。React state を介さず
+  //: `draw()` が rAF で直接参照する（`CameraView.tsx` の `dragRef` と同じ方針）
+  const dragRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
+
+  const toLocal = (cv: HTMLCanvasElement, clientX: number, clientY: number) => {
+    const rect = cv.getBoundingClientRect()
+    const { cx, cy, px } = xformRef.current
+    const sx = clientX - rect.left
+    const sy = clientY - rect.top
+    // `draw()` の順変換 `sx = cx - y*px, sy = cy - x*px` の逆
+    return { x: (cy - sy) / px, y: (cx - sx) / px }
+  }
+
+  const onParkPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!parkingModeRef.current) return
+    const p = toLocal(e.currentTarget, e.clientX, e.clientY)
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragRef.current = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }
+  }
+  const onParkPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const p = toLocal(e.currentTarget, e.clientX, e.clientY)
+    dragRef.current = { ...drag, x1: p.x, y1: p.y }
+  }
+  const onParkPointerUp = () => {
+    const drag = dragRef.current
+    dragRef.current = null
+    if (!drag) return
+    // ドラッグ量が小さい（クリックだけ・手ぶれ）なら「今の向きのまま」（yaw=0）
+    const yaw = Math.hypot(drag.x1 - drag.x0, drag.y1 - drag.y0) < 0.12
+      ? 0
+      : Math.atan2(drag.y1 - drag.y0, drag.x1 - drag.x0)
+    chRef.current?.setParkTarget(drag.x0, drag.y0, yaw)
+  }
 
   useEffect(() => {
     const cv = ref.current
@@ -85,6 +137,7 @@ export function LidarView() {
       const cy = h * 0.62 // 車体をやや下に置いて前方を広く取る
       // 画面の短辺半分が zoom [m] に対応する
       const px = Math.min(w, h) / 2 / zoom
+      xformRef.current = { cx, cy, px }
 
       // 車両座標 (x=前, y=左) → 画面
       const sx = (_x: number, y: number) => cx - y * px
@@ -126,12 +179,120 @@ export function LidarView() {
         drawPredictedPath(ctx, vs.steer_actual, vs.speed, sx, sy)
       }
       drawVehicle(ctx, cx, cy, px, vs?.steer_actual ?? 0)
+
+      if (parkingModeRef.current) {
+        //: 計画した経路。**ドラッグ中でも描く**（今の経路と新しい目標を
+        //: 見比べたいので）
+        if (live.auto?.park_active) drawParkPath(ctx, sx, sy, live.auto)
+        if (dragRef.current) {
+          drawParkArrow(ctx, sx, sy, dragRef.current.x0, dragRef.current.y0,
+            dragRef.current.x1, dragRef.current.y1, `${C.parkTarget}99`)
+        } else if (live.auto?.park_active) {
+          const a = live.auto
+          const tx = a.park_target_x + Math.cos(a.park_target_yaw) * 0.25
+          const ty = a.park_target_y + Math.sin(a.park_target_yaw) * 0.25
+          drawParkArrow(ctx, sx, sy, a.park_target_x, a.park_target_y, tx, ty, C.parkTarget)
+        }
+      }
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
   }, [zoom])
 
-  return <canvas ref={ref} className="lidar-canvas" />
+  return (
+    <canvas
+      ref={ref}
+      className="lidar-canvas"
+      onPointerDown={onParkPointerDown}
+      onPointerMove={onParkPointerMove}
+      onPointerUp={onParkPointerUp}
+      onPointerCancel={() => {
+        dragRef.current = null
+      }}
+    />
+  )
+}
+
+/**
+ * 計画した経路を折れ線で描く。**前進区間と後退区間を色で分ける。**
+ *
+ * `AutoState.park_path_*` は車両基準ローカル座標（点群と同じ系）で来るので、
+ * 画面変換をそのまま掛けられる。★これが無いと実機で「なぜこの経路を
+ * 選んだか」が読めない——障害物回避が効いているのか偶然なのかが画面から
+ * 判断できず、デバッグ手段が無くなる。
+ */
+function drawParkPath(
+  ctx: CanvasRenderingContext2D,
+  sx: (x: number, y: number) => number,
+  sy: (x: number, y: number) => number,
+  a: AutoState,
+) {
+  const n = Math.min(a.park_path_x.length, a.park_path_y.length)
+  if (n < 2) return
+  const revFrom = a.park_path_reverse_from
+  ctx.save()
+  ctx.lineWidth = 2.5
+  ctx.lineJoin = 'round'
+  for (let i = 1; i < n; i++) {
+    const x0 = a.park_path_x[i - 1] ?? 0
+    const y0 = a.park_path_y[i - 1] ?? 0
+    const x1 = a.park_path_x[i] ?? 0
+    const y1 = a.park_path_y[i] ?? 0
+    const reverse = revFrom >= 0 && i >= revFrom
+    ctx.strokeStyle = reverse ? C.parkPathRev : C.parkPathFwd
+    ctx.beginPath()
+    ctx.moveTo(sx(x0, y0), sy(x0, y0))
+    ctx.lineTo(sx(x1, y1), sy(x1, y1))
+    ctx.stroke()
+  }
+  ctx.restore()
+}
+
+/**
+ * 駐車目標（位置+向き）を十字＋矢印で描く。`(x0,y0)` が位置、`(x0,y0)→(x1,y1)`
+ * が向き。ドラッグ中はプレビュー、確定後は `AutoState.park_target_*`
+ * （毎周期デッドレコニングで更新される値）を描く——クリック時点のローカル
+ * 座標を固定描画すると車が動いた瞬間に画面上で嘘になるため。
+ */
+function drawParkArrow(
+  ctx: CanvasRenderingContext2D,
+  sx: (x: number, y: number) => number,
+  sy: (x: number, y: number) => number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  color: string,
+) {
+  const px0 = sx(x0, y0)
+  const py0 = sy(x0, y0)
+  const px1 = sx(x1, y1)
+  const py1 = sy(x1, y1)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = 2
+  // 十字（位置）
+  ctx.beginPath()
+  ctx.moveTo(px0 - 6, py0)
+  ctx.lineTo(px0 + 6, py0)
+  ctx.moveTo(px0, py0 - 6)
+  ctx.lineTo(px0, py0 + 6)
+  ctx.stroke()
+  // 矢印（向き）
+  ctx.beginPath()
+  ctx.moveTo(px0, py0)
+  ctx.lineTo(px1, py1)
+  ctx.stroke()
+  const ang = Math.atan2(py1 - py0, px1 - px0)
+  const head = 6
+  ctx.beginPath()
+  ctx.moveTo(px1, py1)
+  ctx.lineTo(px1 - head * Math.cos(ang - Math.PI / 6), py1 - head * Math.sin(ang - Math.PI / 6))
+  ctx.lineTo(px1 - head * Math.cos(ang + Math.PI / 6), py1 - head * Math.sin(ang + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
 }
 
 function drawGrid(
