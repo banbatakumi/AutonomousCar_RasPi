@@ -3,62 +3,90 @@
 `ML_LIDAR_V2_PROMPT.md`（旧`ml_lidar`削除後にCopilot CLIの独立レビューを経て
 確定した設計方針）の仕様をそのまま実装する。要点:
 
-## 報酬（v1・最小構成 + v16: ステア実効ペナルティ + v18: 理想ライン追従）
+## 報酬（v21・最小構成へ回帰）
 
 `progress`（センターラインへの弧長射影の単調増加分、`dt`で正規化）＋
-`collision_penalty`（衝突で終端）＋`steer_effort_weight`（生アクション`a[0]`
-＝舵角速度指令の**絶対値そのもの**に対する罰則、既定0）＋`raceline_weight`
-（理想ラインからの横偏差への罰則、既定0）。報酬正規化は入れない。`progress`は
-ラップアラウンド処理（半周を超える飛びを`±total_length`で補正）を最初から
-実装する——これが無いと周回完走判定自体が壊れる。
+`collision_penalty`（衝突で終端）＋`lap_bonus`（完走で終端）のみ。報酬正規化は
+入れない。`progress`はラップアラウンド処理（半周を超える飛びを`±total_length`で
+補正）を最初から実装する——これが無いと周回完走判定自体が壊れる。
 
-## v18: 理想ライン（最小曲率線=MCL）への追従
+## v21: v16〜v20で足した罰則3種をすべて撤去した（2026-09-17）
 
-バンビの実車観戦での指摘「カーブ前に内側のライン取りをしてしまい、旋回半径を
-なるべく大きく取れていない」を受けて追加（PROGRESS.md 2026-09-12節）。
-`progress`＋`collision_penalty`＋`steer_effort_weight`だけの報酬には、
-アウト・イン・アウトで旋回半径を稼ぐと得をするという信号が一切無かった。
+撤去の根拠は、この日に初めて測った「ラップタイムの分解」と文献の突き合わせ:
 
-同種のE2E RLレーシング文献を調査した結果、対策には大きく2系統ある:
-①TAL（Trajectory-Aided Learning、Bosello et al. arXiv:2306.07003）——理想
-ライン上を追う古典プランナー（pure pursuit等）をオンラインで走らせ、方策の
-行動（速度・舵角）そのものをその出力に近づける。②CTH（cross-track+heading）
-報酬の参照パスをセンターラインではなく最小曲率線（MCL）にする（Evans et al.
-arXiv:2103.10098）——古典プランナーは不要で、オフラインで計算した理想ラインへの
-横方向距離だけを罰する。同論文では、参照パスをセンターラインのままにした
-cross-track罰則（TAL論文のベースラインと同種）はスリップ角30°超のドリフトに
-陥り失敗する一方、参照パスをMCLに変えるだけで比較対象中最速ラップを達成したと
-報告されている。
+- **失っているのはラインではなく速度だった**。v17の実ラップはMCL理想ラップの
+  1.24倍だが、走行距離はMCL長の0.98〜1.04倍——欠損はほぼ全部が平均速度
+  （理想の0.80〜0.83倍）。`straight`コースでは理想速度プロファイルが99%全開
+  なのに方策の全開率は9%。`raceline_weight`(v18/v19)も`steer_angle_weight`(v20)も、
+  **タイムを失っている場所を狙っていなかった**
+- **速度が出ないのは報酬設計の産物ではなく舵の精度の帰結**。v17のスロットル
+  指令を+10%持ち上げるだけで衝突率が6%→16%になる（ランダム100本）。方策は
+  自分の舵で安全に走れる上限で既に走っている——
+  [arXiv:2401.17732](https://arxiv.org/pdf/2401.17732)の「E2Eは軌跡が滑らかで
+  ないため保守的な速度しか選べない」という記述と一致する
+- **`steer_angle_weight`(v20)の失敗は文献が実証済みだった**。Evans et al.
+  [arXiv:2103.10098](https://arxiv.org/pdf/2103.10098)はステア絶対値罰`-β|δ|`を
+  racing報酬中で最遅（10.2s、CTH(MCL基準)は8.8s）と報告し、「コーナーを非常に
+  下手に曲がる」「トラック中央に留まり、コーナーで長い経路を取る」と明記して
+  いる——v20の「あらゆるコースで壁に張り付く」はこの既知の失敗そのもの。
+  `steer_effort_weight`(v16)も同系統の罰則なので併せて撤去する
 
-v18では実装コストの低い②を採用する——`sim/raceline.py`の`compute_raceline_offsets()`
-（道幅内で曲率二乗和を最小化したMCLのオフセットを返す、旧ml_lidarがTALのために
-実装したまま「変更しない・そのまま使う」基盤として温存されていたもの）を
-`reset()`で1回だけ呼び、センターライン投影と同じ最近傍点インデックスを流用して
-MCL上の対応点との距離を`raceline_weight`で罰する。速度プロファイル追従
-（`compute_speed_profile`、TALの完全版に相当）は同時に入れない——「一変数ずつ」
-の原則と、指摘の焦点が速度ではなくラインそのものであることによる。v18で
-コーナー進入前の減速まで改善しなければ、v19でTAL相当（速度・舵角の行動模倣）へ
-格上げする。
+**撤去済みの変数（再導入するなら理由と共に）**:
 
-**v8〜v10で試して手詰まりと確定した`steer_rate_weight`（生アクションの隣接
-ステップ差分＝jerkへのL1罰則）は2026-09-11に撤去した**。「隣接差分の総和は
-テレスコープ和で始点と終点の差に等しくなるため、方向転換には効くが
-『一度に大きく切って据え置く』挙動には何も損しない」という構造的な問題が
-あり、重みを0.03〜0.2と振っても単調に悪化した（PROGRESS.md 2026-09-09節）。
+| 変数 | 版 | 罰した量 | 撤去理由 |
+|---|---|---|---|
+| `steer_rate_weight` | v8〜v10 | 生アクションの隣接差分（jerk）のL1 | テレスコープ和になるため「一度に大きく切って据え置く」を罰せない。重み0.03〜0.2で単調悪化 |
+| `steer_effort_weight` | v16〜v20 | 生アクション`a[0]`（舵角速度指令）の絶対値 | 上記の通りステア罰は文献で最遅。単独の効果を確認できないまま既定0.02で5版ぶん入りっぱなしだった |
+| `raceline_weight` | v18・v19 | MCL（最小曲率線）からの横偏差 | 重み0.5→1.0で2連敗。そもそもv17の走行距離は既にMCL長の±4%以内で、伸びしろが無い量を狙っていた |
+| `steer_angle_weight` | v20 | 目標舵角`_steer_target`の絶対値 | Evans 2021の通り。実測でもラップ比1.24→1.42倍と全版中最悪 |
 
-**v16の`steer_effort_weight`はこれとは別物**——v13(2026-09-11)の行動空間
-再パラメータ化により`a[0]`自体が舵角速度になったので、**その絶対値に直接
-罰則を掛けると「意味もなく切り続ける・微調整し続ける」ことそのものを
-罰し、いま向いている角度を保持する(`a[0]≈0`)限り罰則を受けない**——
-差分ではなく絶対値を見るので上記のテレスコープ和の穴に該当しない。
-バンビの「数値上は良いがライン取りが汚い（レーシングラインのような
-アウトインアウトに近い走行をしたい）」という指摘を受けて導入（PROGRESS.md
-2026-09-11「6回目の続き」節）。L1（絶対値）を選んだのは、L2（二乗）だと
-0付近の勾配がほぼ平坦で微小な補正を抑止する力が弱いため——「一定角度を
-正確に保持する」ことを積極的に奨励したいのでL1のスパース性が狙いに合う
-（CAPSの「罰則が強すぎると鈍い方策に倒れる」副作用は既知なので、単一変数
-として導入し`eval_stats.py`のステア滑らかさ指標と`collision_rate`/
-`mean_speed`を同時に見ながら調整すること）。
+**今後、舵の滑らかさは報酬項ではなく損失項で攻める**——CAPSのspatial smoothness
+（[arXiv:2012.06644](https://arxiv.org/pdf/2012.06644)、観測に実測ノイズ相当のσを
+乗せた`‖π(s)-π(s̄)‖`を損失に加える）やLCPの勾配罰則
+（[arXiv:2410.11825](https://arxiv.org/html/2410.11825v1)、λ=0.002）。**決定論的
+方策で振動が残る＝探索ノイズではなく方策写像そのものが粗い**ということなので、
+サンプルされた行動への報酬罰（v8〜v20で試した全部）では原理的に届かない。事後
+ローパスも不可——v17の生アクションに後付けするとτ=0.1sで衝突率44%、τ=0.2sで
+100%になり、閉ループが高周波補正に依存していることが確認できている。
+
+理想ラインを方策に与えること自体を諦めたわけではない。2025年の実車SOTA
+（[On-Board RL, RLC 2025](https://rlj.cs.umass.edu/2025/papers/RLJ_RLC_2025_90.pdf)・
+[TC-Driver](https://arxiv.org/pdf/2205.09370)・[RLPP](https://arxiv.org/pdf/2501.17311)）は
+いずれも**報酬は進捗＋衝突の2項に保ったまま、参照ラインと左右境界を観測に
+入れる**構成をとる。報酬へ戻すのではなく観測へ移すのが次の検討先（その場合
+実車側は`raspi/auto/e2e_lidar.py`が単一スキャンから局所中心線を復元する必要が
+あり、[arXiv:2401.17732](https://arxiv.org/pdf/2401.17732)の局所地図抽出が該当する）。
+
+## v21b: 制御周期をLiDARの回転周期(10Hz)へ合わせた（2026-09-17）
+
+v1〜v21aは`dt=0.05`（20Hz）だったが、**LD06は10Hz回転なのでスキャンは100msに1度しか
+更新されない**。実測すると`dt=0.05`では**54%のステップで観測のスキャン部が前ステップと
+完全に同一**で、方策は半分のステップを新しい外界情報ゼロで判断していた。
+
+決定的だったのは、振動がどちらのステップで起きているかの内訳（v17、ノイズ無効、n≈8800）:
+
+| | `|Δa[0]|` | 隣接ステップ符号反転率 |
+|---|---|---|
+| スキャン据え置きのステップ | 0.056 | **0.2%** |
+| スキャン更新のステップ | 0.139 | **13.7%** |
+
+**振動はスキャンが更新された瞬間にほぼ全部集中していた**——据え置きの間は滑らかに
+惰行し、新しいスキャンが来るたびに大きく（しばしば符号反転を伴って）舵を振り直す、
+という周期2のパターン。`dt=0.10`にすると据え置き率は54%→10%（残りは遅延ジッタぶん）。
+
+**さらにこれは訓練と実車の食い違いでもあった**。`raspi/nodes/planning_node.py:_replan()`
+は`scan.seq`が前回と同じなら計算せず戻るので、**実車の`E2ELidar.plan()`は10Hzでしか
+呼ばれない**。つまり実車は上の表の「スキャン更新のステップ」だけを、しかも学習時の2倍の
+`dt`（＝1決定あたり`steer_rate_max*dt`が2倍＝0.1rad→0.2rad）で実行していた。
+`steer_tau`の1次遅れ係数`1-exp(-dt/tau)`も0.393対0.632でずれていた。
+**実車で「舵が発散し壁に衝突」（PROGRESS.md 2026-09-02のv10診断）が出ていた理由の
+有力な説明**になっている。
+
+**観測ノイズの増幅は主因ではない**（先にこちらを疑ったが実測で否定した）。LiDARノイズを
+完全に切っても`|Δa[0]|`は0.116→0.102としか下がらず（v17、n=60エピソード）、方策の観測
+感度も増幅率4.3倍で一定＝実機ノイズ相当(σ≒1.5cm)が生む舵指令の振れは0.006
+（観測された0.116の5%）。**CAPS spatial/LCP勾配罰則が狙うのはこの5%の方**なので、
+先に`dt`を合わせてから残りを見る。
 
 ## 観測・行動契約（`raspi/auto/e2e_lidar.py`と完全一致させる）
 
@@ -132,7 +160,6 @@ from raspi.msgs.types import Scan
 from sim.course import Course
 from sim.lidar import VirtualLidar
 from sim.params import SimParams
-from sim.raceline import compute_raceline_xy
 from sim.vehicle import DriveInput, VehicleModel, VehicleSpec
 
 from .course_gen import random_walk_loop_course
@@ -150,7 +177,12 @@ _MAX_RESET_RETRY = 5
 
 @dataclass
 class EnvConfig:
-    dt: float = 0.05                  # RLステップの制御周期 [s]（20Hz）
+    #: RLステップの制御周期 [s]。**LD06の回転周期(10Hz、`sim.lidar.SCAN_HZ`)と実車の
+    #: 計画周期に一致させてある**——`raspi/nodes/planning_node.py:_replan()`は
+    #: `scan.seq`が変わったときだけ`plan()`を呼ぶので、実車の方策は10Hzでしか
+    #: 動かない。v1〜v21aの0.05(20Hz)は**訓練と実行で決定レートが2倍ずれていた**
+    #: （モジュールdocstring「v21b」参照）
+    dt: float = 0.10
     physics_substep: float = 0.005    # 物理積分の刻み [s]
     # 前方270°（左右135°ずつ）。360°にしないのは、Conv1dが観測配列の両端を
     # 「隣接した円環」として扱えないため——除外した真後ろ90°ぶんが「継ぎ目」を
@@ -161,9 +193,24 @@ class EnvConfig:
     max_range: float = 10.0           # 実機LIDAR_SECTOR(無圧縮mm)の実用レンジ。`e2e_lidar.py`既定と揃える
     max_speed: float = 2.0
     #: `a[0]`（[-1,1]）に掛けて舵角速度[rad/s]にするスケール（v13で導入）。
-    #: 2.0rad/sは、v1〜v12で実測した振動レート(0.6〜1.6rad/s)を明確に下回りつつ、
-    #: 全舵角域(1.05rad)を約0.5秒で切れる値として選定（2026-09-11決定）
-    steer_rate_max_rad_s: float = 2.0
+    #:
+    #: **v23(2026-09-22)で2.0→1.0に下げた。** v13が2.0を選んだのは`dt=0.05`の頃で、
+    #: 意図は「1決定あたり0.1rad（`max_steer`の19%）しか動かせないようにする」ことだった。
+    #: v21で`dt`を0.10へ変更した際にこの値を据え置いたため、**1決定あたり0.2rad＝当初の
+    #: 意図の2倍の権限**になっていた（見落とし）。1.0にすると`1.0*0.10=0.1rad`で
+    #: v13の意図どおりに戻る。
+    #:
+    #: 妥当性は理想ライン側から確認した——MCLを速度プロファイル通りに追従するのに
+    #: 必要な舵角速度は中央0.129・p90 0.954 rad/sで、**1.0 rad/sならp90まで賄える**
+    #: （残る約9%はヘアピン等のタイトコーナーで、ここは曲がりきれなくなるリスクがある
+    #: ——`collision_rate`と`lap_ratio`を必ず併せて見ること）。一方v22の実測は
+    #: 平均0.626 rad/sで**理想の中央値の約4.9倍**も舵を動かしていた。
+    #:
+    #: 報酬でステアを罰するアプローチ（`steer_rate_weight`/`steer_effort_weight`/
+    #: `steer_angle_weight`）は3つとも失敗し撤去済み（モジュールdocstring「v21」参照）。
+    #: **行動空間そのものに構造的な上限をかけるこの方法だけが、これまで唯一効いた**
+    #: （v13）ので、報酬を複雑化せずに滑らかさを追う手段としてここを絞る
+    steer_rate_max_rad_s: float = 1.0
     steer_tau: float = 0.10           # `e2e_lidar.py`の`steer_tau`既定と同じ
     #: v3検証(2026-09-07)で-10.0だと学習後半(400k~1Mstep)にかけて速度が単調に上がる一方で
     #: 汎化コースでの衝突率も0%→10%前後まで悪化する傾向が実測された——`progress`が速度に
@@ -172,18 +219,6 @@ class EnvConfig:
     #: v4ではこの抑止力を強めて同じ傾向が緩和されるか切り分ける（他は変更しない）
     collision_penalty: float = -30.0
     lap_bonus: float = 10.0
-    #: 生アクション`a[0]`（-1..1、フィルタ前。v13以降は舵角速度指令）の絶対値に
-    #: 掛ける罰則の重み。既定0（無効）。v16でCLIの`--steer-effort-weight`で
-    #: 指定する（`EnvConfig`docstring参照、旧`steer_rate_weight`との違いに注意）
-    steer_effort_weight: float = 0.0
-    #: 理想ライン（最小曲率線=MCL、`sim.raceline.compute_raceline_offsets`）からの
-    #: 横偏差（`raceline_tolerance_m`超過分）に掛ける罰則の重み。既定0（無効、
-    #: `_prepare_raceline()`が計算コストも払わない）。モジュールdocstring「v18」参照
-    raceline_weight: float = 0.0
-    #: `raceline_weight`の罰則を免除する許容誤差 [m]。センターライン投影の
-    #: 最近傍点インデックスをMCL参照点にも流用する近似（`_project_centerline`）
-    #: による誤差を吸収する
-    raceline_tolerance_m: float = 0.08
     randomize_lidar: bool = True
     randomize_dynamics: bool = True
     dynamics_jitter_frac: float = 0.2
@@ -230,7 +265,6 @@ class LidarE2EEnv(gym.Env):
         self._centerline_xy: np.ndarray | None = None
         self._centerline_arc: np.ndarray | None = None
         self._total_length = 0.0
-        self._raceline_xy: np.ndarray | None = None
 
     # ── Gym API ──
 
@@ -250,7 +284,6 @@ class LidarE2EEnv(gym.Env):
         self.course = course
         self._body = body
         self._prepare_centerline(course)
-        self._prepare_raceline(course, spec)
 
         params = self._sample_sim_params()
         self.vehicle = VehicleModel(spec, course.start)
@@ -269,8 +302,6 @@ class LidarE2EEnv(gym.Env):
 
     def step(self, action: np.ndarray):
         steer_cmd, speed_cmd = self._to_physical(action)
-        raw_steer = float(np.clip(np.asarray(action, dtype=np.float64)[0], -1.0, 1.0))
-        steer_effort_penalty = self.cfg.steer_effort_weight * abs(raw_steer)
 
         alpha = 1.0 if self.cfg.steer_tau <= 1e-3 else \
             1.0 - math.exp(-self.cfg.dt / self.cfg.steer_tau)
@@ -292,21 +323,13 @@ class LidarE2EEnv(gym.Env):
                 collided = True
                 break
 
-        idx, s_now = self._project_centerline(self.vehicle.x, self.vehicle.y)
+        s_now = self._project_arc_length(self.vehicle.x, self.vehicle.y)
         delta = self._progress_delta(s_now)
         self._s_prev = s_now
         self._lap_progress_m += delta
         progress = max(0.0, delta)
 
-        raceline_dev_m = 0.0
-        raceline_penalty = 0.0
-        if self._raceline_xy is not None:
-            raceline_dev_m = math.hypot(self.vehicle.x - self._raceline_xy[idx, 0],
-                                        self.vehicle.y - self._raceline_xy[idx, 1])
-            raceline_penalty = self.cfg.raceline_weight * max(
-                0.0, raceline_dev_m - self.cfg.raceline_tolerance_m)
-
-        reward = progress / self.cfg.dt - steer_effort_penalty - raceline_penalty
+        reward = progress / self.cfg.dt
         terminated = False
         if collided:
             reward += self.cfg.collision_penalty
@@ -321,7 +344,6 @@ class LidarE2EEnv(gym.Env):
             "lap_progress_m": self._lap_progress_m,
             "collided": collided,
             "speed": self.vehicle.speed,
-            "raceline_dev_m": raceline_dev_m,
         }
         return obs, reward, terminated, False, info
 
@@ -381,33 +403,10 @@ class LidarE2EEnv(gym.Env):
         self._centerline_arc = arc
         self._total_length = float(arc[-1] + closing)
 
-    def _prepare_raceline(self, course: Course, spec: VehicleSpec) -> None:
-        """理想ライン（MCL、`sim.raceline.compute_raceline_offsets`）の世界座標を
-        centerlineと同じ点列上にキャッシュする（モジュールdocstring「v18」参照）。
-
-        `raceline_weight<=0`のときは計算しない——`compute_raceline_offsets()`は
-        疎行列の直接解で軽い（実測1ms程度/エピソード、2026-09-16の二次計画法
-        への置き換え後）とはいえ、この項を使わない設定（v1〜v17相当含む）の
-        学習速度にまで無条件に負担させる理由が無いため。
-        """
-        if self.cfg.raceline_weight <= 0.0:
-            self._raceline_xy = None
-            return
-        vehicle_half_width_m = max(abs(p[1]) for p in spec.footprint)
-        self._raceline_xy = compute_raceline_xy(course.centerline, course.width,
-                                                vehicle_half_width_m=vehicle_half_width_m,
-                                                course=course)
-
-    def _project_centerline(self, x: float, y: float) -> tuple[int, float]:
-        """`(最近傍点インデックス, 弧長)`。理想ライン参照（`_prepare_raceline`が
-        用意するMCL点列はcenterlineと同じ点列・同じ並び）にも同じインデックスを
-        流用するため、`_project_arc_length`と分けて公開する（`step()`参照）。"""
-        d2 = (self._centerline_xy[:, 0] - x) ** 2 + (self._centerline_xy[:, 1] - y) ** 2
-        idx = int(np.argmin(d2))
-        return idx, float(self._centerline_arc[idx])
-
     def _project_arc_length(self, x: float, y: float) -> float:
-        return self._project_centerline(x, y)[1]
+        """車体位置をセンターラインへ最近傍射影したときの弧長 [m]。"""
+        d2 = (self._centerline_xy[:, 0] - x) ** 2 + (self._centerline_xy[:, 1] - y) ** 2
+        return float(self._centerline_arc[int(np.argmin(d2))])
 
     def _progress_delta(self, s_now: float) -> float:
         """`s_prev → s_now`の弧長差分。**半周を超える飛びは周回とみなして補正する**——

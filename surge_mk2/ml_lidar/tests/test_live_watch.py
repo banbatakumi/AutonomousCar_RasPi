@@ -20,6 +20,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv  # noqa: E402
 
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
 from ml_lidar.features import Conv1dExtractor  # noqa: E402
+from ml_lidar.train_rl import EVAL_COURSE_PARAMS  # noqa: E402
 from ml_lidar.live_watch import LiveWatcher, _build_panels  # noqa: E402
 
 
@@ -94,8 +95,11 @@ class TestLiveWatch(unittest.TestCase):
         model = _tiny_model(cfg)
         panels = _build_panels(cfg, max_episode_steps=5)  # 早期に打ち切ってreset経路を踏ませる
 
+        # パネルは`EVAL_COURSE_PARAMS`に連動する（アーキタイプを足したらパネルも増える）。
+        # 名前を直書きするとコース追加のたびにここが落ちるので、定義側から導く
         names = {p.name for p in panels}
-        self.assertEqual(names, {"straight", "corner", "medium", "hairpin", "chicane"})
+        self.assertEqual(names, {spec.name for spec in EVAL_COURSE_PARAMS})
+        self.assertIn("wide", names, "v22で追加した広いコースがパネルに出ていない")
 
         for _ in range(20):
             for panel in panels:

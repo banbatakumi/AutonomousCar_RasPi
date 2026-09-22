@@ -1,16 +1,22 @@
 """`ml_lidar/course_gen.py` のテスト。チェックポイント＋旋回率制限ウォーク方式が
 実際に厳密に閉じ、自己交差せず、車両の物理的最小旋回半径を割り込まないかを確認する。"""
 
+import contextlib
+import io
 import math
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # surge_mk2/
 
 import numpy as np  # noqa: E402
 
+import ml_lidar.course_gen as course_gen  # noqa: E402
 from ml_lidar.course_gen import (  # noqa: E402
+    _WIDTH_FEASIBLE_RATIO,
+    _WIDTH_RANGE_M,
     _sample_checkpoints,
     _self_intersects,
     _walk_checkpoints,
@@ -252,6 +258,90 @@ class TestRandomWalkLoopCourse(unittest.TestCase):
         result = _walk_checkpoints(theta, radius, step_m, max_turn_per_step,
                                    max_total_steps=2000)
         self.assertIsNone(result)
+
+
+class TestWidthDistribution(unittest.TestCase):
+    """v22: 道幅レンジ（`_WIDTH_RANGE_M`）のテスト。
+
+    v21以前は`uniform(0.8, 1.4)`で、**近い側の壁が必ず0.70m以内**という状態だった。
+    その結果、方策は広いコースを一度も見ないまま学習され、実機でtoyota型（中央1.45m）の
+    コースが不安定になった。同じ穴を再び掘らないよう、レンジと「実際に広いコースが
+    出てくること」を固定する（PROGRESS.md 2026-09-17「6回目」節）。
+    """
+
+    def test_range_covers_real_courses(self) -> None:
+        """実測した自作コースの道幅（normal 1.03m・toyota 1.45m・course1 1.95m）を覆うこと。"""
+        lo, hi = _WIDTH_RANGE_M
+        self.assertLessEqual(lo, 1.03)
+        self.assertGreaterEqual(hi, 1.95, "実機で不安定だったcourse1(1.95m)を覆えていない")
+
+    def test_sampler_actually_produces_wide_courses(self) -> None:
+        """サンプラが旧上限1.4mを超える道幅を実際に引くこと（レンジだけ広げて使われない事故を防ぐ）。"""
+        rng = np.random.default_rng(0)
+        widths = [sample_random_walk_loop_params(rng).width_m for _ in range(200)]
+        self.assertGreaterEqual(min(widths), _WIDTH_RANGE_M[0] - 1e-9)
+        self.assertLessEqual(max(widths), _WIDTH_RANGE_M[1] + 1e-9)
+        self.assertGreater(sum(w > 1.4 for w in widths) / len(widths), 0.3,
+                           "旧レンジ(1.4m)を超えるコースがほとんど出ていない")
+        self.assertGreater(sum(w <= 1.4 for w in widths) / len(widths), 0.15,
+                           "狭いコースの露出が減りすぎている（狭所での退行を招く）")
+
+    def test_wide_courses_still_generate(self) -> None:
+        """上限付近の道幅でも自己交差チェックを通って生成できること。"""
+        for seed in range(3):
+            course = walk_loop_course(8, 3.0, 0.30, 0.30, _WIDTH_RANGE_M[1],
+                                      seed=1000 + seed, role="train", name="wide")
+            self.assertIsNotNone(course.centerline)
+            self.assertAlmostEqual(float(course.width), _WIDTH_RANGE_M[1], places=6)
+
+
+class TestGenerationRobustness(unittest.TestCase):
+    """v22: 生成失敗が学習を止めないこと（2026-09-17に実際にv22の学習を1本落とした）。
+
+    `_generate_walk_centerline()`の内側リトライは**チェックポイント配置だけ**を引き直すので、
+    パラメータの組自体が実現不能だと20回とも失敗して`RuntimeError`になり、
+    `SubprocVecEnv`のワーカーごと落ちて数時間の学習が止まる。発生率は当時4000本中3本
+    (0.07%)で、**60本の事前確認では検出できなかった**——8env×3Mstepでは約25,000
+    エピソードなので19回程度起きる計算だった。
+    """
+
+    def test_width_is_capped_by_course_feature_size(self) -> None:
+        """道幅が`_WIDTH_FEASIBLE_RATIO * base_radius * (1 - radius_jitter)`を超えないこと。
+
+        実測した失敗例はいずれもこの比が3.28以上（成功例は中央1.07・p95 2.33）だった。
+        """
+        rng = np.random.default_rng(7)
+        for _ in range(2000):
+            p = sample_random_walk_loop_params(rng)
+            cap = _WIDTH_FEASIBLE_RATIO * p.base_radius_m * (1.0 - p.radius_jitter_frac)
+            # 下限0.8mは常に許す（capがそれより小さくても狭いコースは作れる）
+            self.assertLessEqual(p.width_m, max(_WIDTH_RANGE_M[0], cap) + 1e-9)
+
+    def test_resamples_params_instead_of_raising(self) -> None:
+        """1組目のパラメータで生成に失敗しても、引き直して成功したコースを返すこと。"""
+        calls = {"n": 0}
+        real = course_gen.walk_loop_course
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("テスト用の生成失敗")
+            return real(*args, **kwargs)
+
+        with mock.patch.object(course_gen, "walk_loop_course", flaky), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            course = course_gen.random_walk_loop_course(np.random.default_rng(0))
+        self.assertIsNotNone(course.centerline)
+        self.assertEqual(calls["n"], 2, "1回目の失敗後に引き直していない")
+        self.assertIn("引き直す", err.getvalue(), "引き直しが黙って行われている（分布の偏りに気づけない）")
+
+    def test_gives_up_loudly_if_every_resample_fails(self) -> None:
+        """全部失敗するなら黙って返さず例外にすること（静かに壊れるより止まる方がよい）。"""
+        with mock.patch.object(course_gen, "walk_loop_course",
+                               side_effect=RuntimeError("常に失敗")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                course_gen.random_walk_loop_course(np.random.default_rng(0))
 
 
 if __name__ == "__main__":

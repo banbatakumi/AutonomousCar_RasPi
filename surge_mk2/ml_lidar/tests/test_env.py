@@ -5,6 +5,7 @@
 スモークテストする。
 """
 
+import dataclasses
 import math
 import sys
 import types
@@ -17,7 +18,7 @@ import numpy as np  # noqa: E402
 
 from ml_lidar.course_gen import random_walk_loop_course  # noqa: E402
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
-from sim.vehicle import VehicleSpec  # noqa: E402
+from sim.lidar import SCAN_HZ  # noqa: E402
 
 
 def _square_centerline(side: float = 2.0, step: float = 0.1) -> np.ndarray:
@@ -74,57 +75,82 @@ class TestCenterlineProgress(unittest.TestCase):
         self.assertLess(delta, 0.5)
 
 
-class TestRaceline(unittest.TestCase):
-    """v18: `_prepare_raceline()`（理想ライン=MCLの追従罰則）のテスト。"""
+class TestMinimalReward(unittest.TestCase):
+    """v21: 報酬が`progress/dt`＋終端項だけであることを固定する回帰テスト。
 
-    def test_disabled_by_default_no_cost(self) -> None:
-        """`raceline_weight<=0`(既定)なら`compute_raceline_offsets()`のL-BFGSを
-        呼ばず、`_raceline_xy`はNoneのままになる（env.py `_prepare_raceline`
-        docstring参照——既存configの学習速度に負担をかけないための仕様）。"""
-        env = LidarE2EEnv(EnvConfig())
-        course = types.SimpleNamespace(centerline=_square_centerline(), width=1.0)
-        env._prepare_raceline(course, VehicleSpec.load())
-        self.assertIsNone(env._raceline_xy)
+    v16〜v20で足した罰則3種（`steer_effort_weight`・`raceline_weight`・
+    `steer_angle_weight`）は2026-09-17に全て撤去した（env.py EnvConfig
+    docstring「v21」参照）。**罰則をうっかり足し直すと静かに壊れる**類の
+    不変条件なので、値そのものを突き合わせて固定しておく。
+    """
 
-    def test_enabled_moves_off_centerline_near_sharp_corners(self) -> None:
-        """一辺2mの正方形ループ(直角コーナー×4)は曲率が局所的に非常に大きいので、
-        曲率二乗和を最小化するMCLは各コーナーでセンターラインから明確に離れる
-        はず。"""
-        env = LidarE2EEnv(EnvConfig(raceline_weight=0.3))
-        course = types.SimpleNamespace(centerline=_square_centerline(), width=1.0)
-        env._prepare_raceline(course, VehicleSpec.load())
-        self.assertIsNotNone(env._raceline_xy)
-        self.assertEqual(env._raceline_xy.shape, course.centerline[:, :2].shape)
-        dev = np.hypot(*(env._raceline_xy - course.centerline[:, :2]).T)
-        self.assertGreater(dev.max(), 0.02,
-                           "曲率最小化のMCLが直角コーナーでセンターラインからほぼ動いていない")
-
-    def test_raceline_penalty_reduces_reward(self) -> None:
-        """同じコース・同じ行動列でも、raceline_weight>0の方が各ステップの報酬が
-        罰則ぶんだけ以下になる——`step()`内の`_project_centerline`インデックス
-        流用に誤りがあれば崩れる不変条件。"""
+    def test_nonterminal_reward_is_exactly_progress_rate(self) -> None:
+        """衝突・完走していないステップの報酬は`info["progress_m"]/dt`に厳密一致する。"""
+        cfg = EnvConfig(randomize_lidar=False, randomize_dynamics=False)
         course = random_walk_loop_course(np.random.default_rng(3))
-        action = np.array([0.3, 0.5], dtype=np.float32)
+        env = LidarE2EEnv(cfg, course=course)
+        env.reset(seed=0)
 
-        def _make(weight: float) -> LidarE2EEnv:
-            cfg = EnvConfig(randomize_lidar=False, randomize_dynamics=False,
-                            raceline_weight=weight)
-            return LidarE2EEnv(cfg, course=course)
-
-        env_off, env_on = _make(0.0), _make(0.3)
-        env_off.reset(seed=0)
-        env_on.reset(seed=0)
-
-        saw_nonzero_dev = False
-        for _ in range(30):
-            _, r_off, term_off, trunc_off, _ = env_off.step(action)
-            _, r_on, term_on, trunc_on, info_on = env_on.step(action)
-            self.assertGreaterEqual(info_on["raceline_dev_m"], 0.0)
-            saw_nonzero_dev = saw_nonzero_dev or info_on["raceline_dev_m"] > 1e-6
-            self.assertLessEqual(r_on, r_off + 1e-9)
-            if term_off or term_on:
+        checked = 0
+        for a0 in (1.0, -1.0, 0.4, 0.0):          # 据え切り・切り戻しも含めて振る
+            action = np.array([a0, 0.5], dtype=np.float32)
+            for _ in range(10):
+                _, reward, terminated, _, info = env.step(action)
+                if terminated:
+                    break
+                self.assertAlmostEqual(reward, info["progress_m"] / cfg.dt, places=9)
+                checked += 1
+            if terminated:
                 break
-        self.assertTrue(saw_nonzero_dev, "理想ラインからの偏差が一度も観測されなかった")
+        self.assertGreater(checked, 0, "非終端ステップが1つも無かった")
+
+    def test_removed_reward_weights_are_gone(self) -> None:
+        """撤去した罰則の重みが`EnvConfig`に復活していないこと。"""
+        fields = {f.name for f in dataclasses.fields(EnvConfig)}
+        for name in ("steer_effort_weight", "raceline_weight", "raceline_tolerance_m",
+                     "steer_angle_weight", "steer_rate_weight"):
+            self.assertNotIn(name, fields,
+                             f"撤去済みの罰則{name}が復活している（env.py docstring「v21」参照）")
+
+
+class TestControlPeriod(unittest.TestCase):
+    """v21b: 制御周期がLiDARの回転周期＝実車の計画周期と一致していることを固定する。"""
+
+    def test_dt_matches_lidar_scan_period(self) -> None:
+        """`dt`が`sim.lidar.SCAN_HZ`の周期と一致すること。
+
+        ずれると①観測のスキャン部が更新されないステップが生まれ（`dt=0.05`では
+        実測54%）、②`raspi/nodes/planning_node.py:_replan()`が`scan.seq`単位でしか
+        `plan()`を呼ばない実車と決定レートがずれる（env.py docstring「v21b」参照）。
+        `SCAN_HZ`側が変わったらこのテストが落ちて気づけるように、値を直書きせず
+        `sim.lidar`から引く。
+        """
+        self.assertAlmostEqual(EnvConfig().dt, 1.0 / SCAN_HZ, places=9)
+
+    def test_scan_is_fresh_on_almost_every_step(self) -> None:
+        """実際に回して、観測のスキャン部が前ステップと同一になる割合が十分低いこと。
+
+        `dt`と`SCAN_HZ`が一致していても、LiDARの遅延ジッタぶんは据え置きが残る
+        （実測10〜12%）。`dt=0.05`時代の54%との差は大きいので、緩い上限で十分に
+        退行を検出できる。
+        """
+        cfg = EnvConfig(randomize_lidar=True, randomize_dynamics=False)
+        action = np.array([0.05, 0.4], dtype=np.float32)   # ゆるい旋回で壁まで走る
+        same = total = 0
+        for seed in range(11, 19):                          # 1本は早期に衝突しうるので束ねる
+            env = LidarE2EEnv(cfg, seed=seed)
+            obs, _ = env.reset(seed=seed)
+            prev = np.asarray(obs[:-2]).copy()
+            for _ in range(60):
+                obs, _, terminated, truncated, _ = env.step(action)
+                cur = np.asarray(obs[:-2])
+                same += int(np.array_equal(cur, prev))
+                total += 1
+                prev = cur.copy()
+                if terminated or truncated:
+                    break
+        self.assertGreater(total, 60)
+        self.assertLess(same / total, 0.30, "スキャンが更新されないステップが多すぎる")
 
 
 class TestEnvSmoke(unittest.TestCase):

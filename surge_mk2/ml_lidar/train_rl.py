@@ -22,25 +22,30 @@
 最低速度未満をprogress=0扱いにすることだが、**実際にこの失敗が観測されるまでは
 `env.py`に入れない**（最小構成から始める方針）。
 
-## eval用コースは5種の固定コース（best_model選定の1種類への過適合を避ける）
+## eval用コースは7種の固定コース（best_model選定の1種類への過適合を避ける）
 
 `EvalCallback`のeval環境は「直線主体」「コーナー主体」「中間」「ヘアピン主体」「連続シケイン
-主体」の5本を1つの`VecEnv`にまとめたもの（`make_eval_vec_env()`）。ヘアピン主体は、手続き生成の
+主体」「広い」「広い＋急角連続」の7本を1つの`VecEnv`にまとめたもの（`make_eval_vec_env()`）。
+末尾2本はv22(2026-09-17)で追加した——旧5本は道幅1.0〜1.1mしか無く、**実機で不安定に
+なったtoyota型（中央1.45m）の失敗がモデル選定に一切現れなかった**（`EVAL_COURSE_PARAMS`の
+コメント参照）。ヘアピン主体は、手続き生成の
 出力空間を正n角形から閉じた極座標スプラインへ置き換えた際に追加した——toyotaコース
 （急角のシケインが連続する手描きコース）で曲がりきれず衝突する、という実機投入前の
 観戦チェックで見つかった失敗パターンを、`best_model`選定の指標にも反映するため
 （`ml_lidar/course_gen.py`のモジュールdocstring参照）。連続シケイン主体は、ヘアピン主体が
 孤立1発の折り返ししか再現しておらず、toyotaの「短い直線を挟んで急角ターンが連続する」配置とは
 質的に異なると分かったため、v5着手時に追加した（`course_gen.py`の`chicane_len`参照）。
-VecEnv内の各サブ環境は常に同じ固定コースへ`reset()`するので、`--n-eval-episodes`を5の倍数に
-すれば評価が自然に5種へ均等配分される。ノイズ・ドメインランダム化は無効化する（訓練環境の
+VecEnv内の各サブ環境は常に同じ固定コースへ`reset()`するので、`--n-eval-episodes`をコース数
+（7）の倍数にすれば評価が自然に7種へ均等配分される。**決定論的方策×決定論的環境なので
+1本ずつで十分**（同じ軌道を繰り返すだけ。下の`GeneralizationEvalCallback`の節参照）。
+ノイズ・ドメインランダム化は無効化する（訓練環境の
 ランダム化込みの衝突率でモデル選定してはいけない、という過去の落とし穴）。
 
 ## `EvalCallback`だけではbest_model選定に使えない（実体は`GeneralizationEvalCallback`）
 
-`EvalCallback`は`deterministic=True`・ノイズ/DRオフの5固定コースを評価する——決定論的
-方策×決定論的環境なので、`--n-eval-episodes`を何回に増やしても同じ5本の軌道を
-繰り返すだけで、実際に得られる情報量は「5本のコースそれぞれの成否」の5ビットぶんしか
+`EvalCallback`は`deterministic=True`・ノイズ/DRオフの7固定コースを評価する——決定論的
+方策×決定論的環境なので、`--n-eval-episodes`を何回に増やしても同じ7本の軌道を
+繰り返すだけで、実際に得られる情報量は「7本のコースそれぞれの成否」の7ビットぶんしか
 ない（v1/v2検証、2026-09-07。`deterministic=False`で書いていた最初の検証スクリプトが
 たまたま探索ノイズ込みの数値を返し、一見意味のある分散に見えていたのが判明の経緯）。
 `EvalCallback`自体はresumeに必要な`eval/best_model.zip`を作り続けるためそのまま残すが、
@@ -121,7 +126,7 @@ class EvalCourseSpec(NamedTuple):
                                 chicane_offset_frac=self.chicane_offset_frac)
 
 
-#: 5種の固定評価コース。手続き生成をチェックポイント＋旋回率制限ウォーク方式へ置き換えた
+#: 7種の固定評価コース。手続き生成をチェックポイント＋旋回率制限ウォーク方式へ置き換えた
 #: 際に再構成した（`course_gen.py`のモジュールdocstring参照）——旧・極座標r(θ)方式は
 #: 「中心1点を囲む星型」にしか写像できない構造的な限界があり、直線/コーナー/中間/
 #: ヘアピン/連続シケインという5本の名前が付いていても見た目がほぼ同じ「歪んだドーナツ」に
@@ -162,19 +167,27 @@ EVAL_COURSE_PARAMS: tuple[EvalCourseSpec, ...] = (
     # 複数回(6回)出る、かつ生成が一発(リトライ無し)で成功するseedを選んである
     EvalCourseSpec("chicane", 9, 2.5, 0.15, 0.12, 1.0, seed=1011, clockwise=True,
                    chicane_len=3, chicane_offset_frac=0.40),
+    # ── v22(2026-09-17)で追加した「広い」2本 ──
+    # 旧5本は道幅1.0〜1.1mしか無く、**広いコースでの失敗がbest_model選定に一切
+    # 反映されなかった**。実機でtoyota(中央1.45m)のようなコースが不安定になった
+    # 原因が学習・評価の道幅分布の狭さだったため、両方に広いコースを入れる
+    # （`ml_lidar/course_gen.py`の`_WIDTH_RANGE_M`・PROGRESS.md 2026-09-17「6回目」節）
+    EvalCourseSpec("wide", 8, 3.0, 0.30, 0.30, 2.2, seed=1021, clockwise=False),
+    # 「広いのに急角ターンが連続する」＝toyotaに最も近い組み合わせ。道幅と
+    # コーナーの鋭さは独立なので、wideとは別のアーキタイプとして分ける
+    EvalCourseSpec("wide_hairpin", 7, 2.6, 0.20, 0.60, 1.7, seed=1045, clockwise=True,
+                   chicane_len=3, chicane_offset_frac=0.30),
 )
 
 
 def build_env_config(args: argparse.Namespace) -> EnvConfig:
     return EnvConfig(
+        dt=args.dt,
         fov_deg=args.fov_deg,
         max_range=args.max_range,
         max_speed=args.max_speed,
         steer_tau=args.steer_tau,
         steer_rate_max_rad_s=args.steer_rate_max_rad_s,
-        steer_effort_weight=args.steer_effort_weight,
-        raceline_weight=args.raceline_weight,
-        raceline_tolerance_m=args.raceline_tolerance_m,
         dynamics_jitter_frac=args.dynamics_jitter_frac,
     )
 
@@ -237,8 +250,8 @@ def make_train_env(cfg: EnvConfig, max_episode_steps: int, seed: int) -> Callabl
 
 
 def make_eval_vec_env(cfg: EnvConfig, max_episode_steps: int) -> VecEnv:
-    """直線主体・コーナー主体・中間・ヘアピン主体・連続シケイン主体の5固定コースを束ねた
-    eval用VecEnv。ノイズ・DRは無効化する。"""
+    """直線主体・コーナー主体・中間・ヘアピン主体・連続シケイン主体・広い・広い＋急角連続
+    の7固定コースを束ねたeval用VecEnv。ノイズ・DRは無効化する。"""
     eval_cfg = EnvConfig(**{**cfg.__dict__, "randomize_lidar": False, "randomize_dynamics": False})
 
     def _make_thunk(spec: EvalCourseSpec) -> Callable[[], Monitor]:
@@ -255,13 +268,31 @@ def make_eval_vec_env(cfg: EnvConfig, max_episode_steps: int) -> VecEnv:
 
 class GeneralizationEvalCallback(BaseCallback):
     """`eval_stats.py`と同じ「ランダムコース・DRあり」の統計評価を学習ループ内で定期実行し、
-    `mean_reward`が改善したときだけ`<save_dir>/best_model_generalized.zip`を更新する。
+    スコアが改善したときだけ`<save_dir>/best_model_generalized.zip`を更新する。
 
-    `EvalCallback`（5固定コース・決定論的）はresume用の`eval/best_model.zip`を作り続けるため
+    `EvalCallback`（7固定コース・決定論的）はresume用の`eval/best_model.zip`を作り続けるため
     残すが、実運用のモデル選定はこちら（モジュールdocstring参照）。呼び出しごとに
     `base_seed`を`self.num_timesteps`から作ることで、特定のseed系統に固定して評価し
     続けることによる誤判定（v1/v2検証で実際に踏んだ、単一seed系統では結論が逆転した
     落とし穴）を避ける。
+
+    ## ★ 選定基準は`mean_reward`ではない（v21で実証、2026-09-17）
+
+    **`mean_reward`はモデルの良し悪しをまったく区別できない。** `progress`の総和は
+    1周ぶんの弧長＝`total_length/dt`で経路にも所要時間にも依存しないため、報酬の
+    大半が定数になる（v21の実測値は全区間175〜187で振れただけ）。実際、v21では
+    `mean_reward`基準で選ばれた900k時点のモデル（178.76）と最終3Mモデル（179.26）は
+    報酬では区別がつかないのに、**ラップタイムは対MCL理想比で1.286倍 対 1.022倍**
+    ——26%も遅いモデルが`best_model_generalized`として保存されていた。
+
+    そこで`mean_lap_ratio / lap_rate`（小さいほど良い）を選定スコアにする。
+    「1周を完走するまでにかかる期待時間の、理想ラップに対する比」に相当する
+    ——周回率が落ちれば（衝突してやり直す前提で）比例して悪化する、という解釈。
+    1本も完走できなかった評価回はスコアを付けず、前のbestを保持する。
+
+    **`--resume`の注意**: 旧runの`generalization_evaluations.npz`には`mean_lap_ratio`/
+    `lap_rate`列が無いので過去のbestスコアを復元できない。その場合はresume後の最初の
+    評価が無条件にbestになる（既存の`best_model_generalized.zip`を上書きしうる）。
     """
 
     def __init__(self, cfg: EnvConfig, save_dir: Path, eval_freq: int, n_episodes: int,
@@ -274,25 +305,44 @@ class GeneralizationEvalCallback(BaseCallback):
         self.episode_s = episode_s
         self._log_path = save_dir / "generalization_evaluations.npz"
         (self._timesteps, self._mean_rewards, self._collision_rates, self._mean_speeds,
-         self._mean_abs_steer_diffs, self._steer_sign_flip_rates) = self._load_history()
-        self.best_mean_reward = max(self._mean_rewards) if self._mean_rewards else -np.inf
+         self._mean_abs_steer_diffs, self._steer_sign_flip_rates,
+         self._mean_lap_ratios, self._lap_rates) = self._load_history()
+        scores = [s for s in (self._score(lr, lp)
+                              for lr, lp in zip(self._mean_lap_ratios, self._lap_rates))
+                  if s is not None]
+        self.best_score = min(scores) if scores else np.inf
+
+    @staticmethod
+    def _score(mean_lap_ratio: float | None, lap_rate: float) -> float | None:
+        """選定スコア（小さいほど良い）。クラスdocstring「選定基準」参照。
+
+        `None`は「この評価回では順位づけできない（1本も完走していない）」の意。
+        """
+        if mean_lap_ratio is None or not np.isfinite(mean_lap_ratio) or lap_rate <= 0.0:
+            return None
+        return float(mean_lap_ratio / lap_rate)
 
     def _load_history(self) -> tuple[list[int], list[float], list[float], list[float],
-                                     list[float], list[float]]:
+                                     list[float], list[float], list[float], list[float]]:
         """既存の`generalization_evaluations.npz`があれば読み込む（`--resume`でも
-        `best_mean_reward`と履歴グラフが引き継がれるようにする——0からだと、resume直後に
+        bestスコアと履歴グラフが引き継がれるようにする——引き継がないと、resume直後に
         悪化したモデルでも`best_model_generalized`を上書きしてしまいかねない）。
 
-        `mean_abs_steer_diff`/`steer_sign_flip_rate`はv8で追加した列なので、
-        それより前のrunを`--resume`した場合は無い——欠損時は空のまま扱う。
+        `mean_abs_steer_diff`/`steer_sign_flip_rate`はv8で、`mean_lap_ratio`/`lap_rate`は
+        v21で追加した列なので、それより前のrunを`--resume`した場合は無い——欠損時は
+        空のまま扱う（選定スコアへの影響はクラスdocstring「--resumeの注意」参照）。
         """
         if not self._log_path.exists():
-            return [], [], [], [], [], []
+            return [], [], [], [], [], [], [], []
         data = np.load(self._log_path)
-        steer_diff = list(data["mean_abs_steer_diff"]) if "mean_abs_steer_diff" in data else []
-        sign_flip = list(data["steer_sign_flip_rate"]) if "steer_sign_flip_rate" in data else []
+
+        def col(name: str) -> list[float]:
+            return list(data[name]) if name in data else []
+
         return (list(data["timesteps"]), list(data["mean_reward"]),
-               list(data["collision_rate"]), list(data["mean_speed"]), steer_diff, sign_flip)
+               list(data["collision_rate"]), list(data["mean_speed"]),
+               col("mean_abs_steer_diff"), col("steer_sign_flip_rate"),
+               col("mean_lap_ratio"), col("lap_rate"))
 
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_freq != 0:
@@ -306,6 +356,11 @@ class GeneralizationEvalCallback(BaseCallback):
         self._mean_speeds.append(result["mean_speed"])
         self._mean_abs_steer_diffs.append(result["mean_abs_steer_diff"])
         self._steer_sign_flip_rates.append(result["steer_sign_flip_rate"])
+        # v21で追加した第一指標（対MCL理想ラップ比）。1本も周回できなかった回は
+        # `None`が返るのでnanで埋める（npzは可変長を持てないため）
+        lap_ratio = result["mean_lap_ratio"]
+        self._mean_lap_ratios.append(float("nan") if lap_ratio is None else lap_ratio)
+        self._lap_rates.append(result["lap_rate"])
         self.save_dir.mkdir(parents=True, exist_ok=True)
         np.savez(self._log_path,
                 timesteps=np.array(self._timesteps),
@@ -313,16 +368,21 @@ class GeneralizationEvalCallback(BaseCallback):
                 collision_rate=np.array(self._collision_rates),
                 mean_speed=np.array(self._mean_speeds),
                 mean_abs_steer_diff=np.array(self._mean_abs_steer_diffs),
-                steer_sign_flip_rate=np.array(self._steer_sign_flip_rates))
+                steer_sign_flip_rate=np.array(self._steer_sign_flip_rates),
+                mean_lap_ratio=np.array(self._mean_lap_ratios),
+                lap_rate=np.array(self._lap_rates))
         if self.verbose:
             print(f"[GeneralizationEval] step={self.num_timesteps} "
                  f"mean_reward={result['mean_reward']:.2f} "
                  f"collision_rate={result['collision_rate']:.1%} "
+                 f"lap_ratio={'n/a' if lap_ratio is None else format(lap_ratio, '.3f')} "
+                 f"lap_rate={result['lap_rate']:.1%} "
                  f"mean_speed={result['mean_speed']:.2f}m/s "
                  f"mean_abs_steer_diff={result['mean_abs_steer_diff']:.3f} "
                  f"steer_sign_flip_rate={result['steer_sign_flip_rate']:.1%}")
-        if result["mean_reward"] > self.best_mean_reward:
-            self.best_mean_reward = result["mean_reward"]
+        score = self._score(lap_ratio, result["lap_rate"])
+        if score is not None and score < self.best_score:
+            self.best_score = score
             self.model.save(str(self.save_dir / "best_model_generalized"))
         return True
 
@@ -375,48 +435,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # ── モデル契約（`raspi/auto/e2e_lidar.py`・`export_onnx_rl.py`と揃える） ──
     # 最大舵角は`config/vehicle.toml`（`VehicleSpec.max_steer`）をそのまま使うため、
     # ここには無い（`env.py`のEnvConfig docstring参照）
+    p.add_argument("--dt", type=float, default=0.10,
+                   help="[s] RLステップの制御周期。既定0.10はLD06の回転周期(10Hz)かつ"
+                        "実車の計画周期(planning_node._replan()はscan.seqが変わった"
+                        "ときだけplan()を呼ぶ)に一致する。v1〜v21aの0.05だと54%%のステップで"
+                        "スキャンが前ステップと同一になり、しかも実車は10Hzでしか"
+                        "動かないため訓練と実行で決定レートが2倍ずれる"
+                        "（env.py docstring「v21b」参照）")
     p.add_argument("--fov-deg", type=float, default=270.0)
     p.add_argument("--max-range", type=float, default=10.0, help="[m] LiDAR観測レンジ")
     p.add_argument("--steer-tau", type=float, default=0.10, help="[s] プランナ側の舵平滑化")
-    p.add_argument("--steer-rate-max-rad-s", type=float, default=2.0,
+    p.add_argument("--steer-rate-max-rad-s", type=float, default=1.0,
                    help="[rad/s] a[0](-1..1)を舵角速度として解釈するスケール(v13、"
-                        "env.py EnvConfig docstring参照)。既定2.0はv1〜v12で実測した"
-                        "振動レート(0.6〜1.6rad/s)を明確に下回りつつ全舵角域(1.05rad)を"
-                        "約0.5秒で切れる値")
-    p.add_argument("--steer-effort-weight", type=float, default=0.0,
-                   help="生アクションa[0](-1..1、フィルタ前。v13以降は舵角速度指令)の"
-                        "絶対値への罰則重み。既定0(無効)。v16でライン取りの汚さ"
-                        "（不要な微調整・切り続け）を抑えるため導入(env.py docstring"
-                        "参照。旧`--steer-rate-weight`は隣接差分へのL1で手詰まりが"
-                        "確定し撤去済み——これは差分ではなく絶対値を見る別物)。"
-                        "強すぎると過度に保守的な方策に倒れるので、eval_stats.pyの"
-                        "ステア滑らかさ指標とcollision_rate/mean_speedを同時に見ながら"
-                        "調整すること")
-    p.add_argument("--raceline-weight", type=float, default=0.0,
-                   help="理想ライン（`sim.raceline.compute_raceline_offsets`が返す"
-                        "道幅内で曲率二乗和を最小化した最小曲率線=MCL）からの横偏差"
-                        "（--raceline-tolerance-m超過分）への罰則重み。既定0（無効、"
-                        "計算コストも払わない）。v18でバンビの「カーブ前に内側の"
-                        "ライン取りをしてしまい旋回半径を稼げていない」指摘を受けて"
-                        "導入（env.py EnvConfig docstring「v18」参照）。参照パスは"
-                        "必ずMCL——文献調査で、参照パスを単純なセンターラインのままに"
-                        "したcross-track罰則はスリップ角30°超のドリフトに陥り改善しない"
-                        "と確認済み")
-    p.add_argument("--raceline-tolerance-m", type=float, default=0.08,
-                   help="[m] --raceline-weightの罰則を免除する許容誤差。センターライン"
-                        "投影の最近傍点インデックスをMCL参照点にも流用する近似の誤差を"
-                        "吸収する")
+                        "env.py EnvConfig docstring参照)。**既定はv23で2.0→1.0**"
+                        "——dt=0.10では1決定あたり0.1rad(max_steerの19%%)となり、v13が"
+                        "意図した権限に戻る(dtを0.05→0.10にした際に据え置いたため2倍に"
+                        "なっていた)。理想ライン追従に必要な舵角速度のp90(0.954rad/s)を"
+                        "賄える値。報酬を複雑化せずに舵の滑らかさを追うための構造的制約")
 
     # ── 評価 ──
     p.add_argument("--eval-freq", type=int, default=20_000,
                    help="学習ステップ何回ごとに評価するか（全env合算の総ステップ数基準）")
-    p.add_argument("--n-eval-episodes", type=int, default=10,
+    p.add_argument("--n-eval-episodes", type=int, default=len(EVAL_COURSE_PARAMS),
                    help="1回のeval合計エピソード数。5の倍数だと5コースへ均等配分される")
     p.add_argument("--checkpoint-freq", type=int, default=100_000,
                    help="resume用の番号付きチェックポイント間隔[step]")
     p.add_argument("--gen-eval-freq", type=int, default=100_000,
                    help="汎化性能評価(ランダムコース・DRあり、実運用のbest_model選定の実体。"
-                        "モジュールdocstring参照)の間隔[step]。--eval-freqの5固定コース評価より"
+                        "モジュールdocstring参照)の間隔[step]。--eval-freqの7固定コース評価より"
                         "1回あたり重いため既定を疎にしてある")
     p.add_argument("--gen-eval-episodes", type=int, default=200,
                    help="1回の汎化性能評価で走らせるランダムコースのエピソード数。"
@@ -436,7 +482,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--n-steps", type=int, default=2048, help="1env・1更新あたりのロールアウト長")
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--n-epochs", type=int, default=10)
-    p.add_argument("--gamma", type=float, default=0.99)
+    p.add_argument("--gamma", type=float, default=0.9801,
+                   help="割引率。既定0.9801=0.99²は、dtを0.05→0.10にしたv21で"
+                        "実効ホライズン(dt/(1-γ))を5秒のまま保つための値。0.99に"
+                        "据え置くとホライズンが10秒へ倍増し、速度への報酬勾配が"
+                        "4割弱まる（Σprogressは経路・時間に不変なので、速く走る動機は"
+                        "割引だけが作っている——γが1に近づくほどリターンが時間不変に"
+                        "近づく）。速度1.6→2.0m/s(+25%%)に対するリターン増で"
+                        "+16.6%% 対 +9.8%%")
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-range", type=float, default=0.2)
     p.add_argument("--ent-coef", type=float, default=0.0)
@@ -447,9 +500,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "再サンプリングしないノイズを使う——生アクションの振動(v7〜v10で"
                         "reward側の(撤去済み)steer_rate_weightを0/0.03/0.1/0.2と振っても"
                         "単調悪化するだけだったため探索ノイズの生成過程自体を変える方向、"
-                        "PROGRESS.md 2026-09-10節参照)。報酬は変えないので"
-                        "`--steer-effort-weight`とは独立——両方同時に有効化すると"
-                        "切り分けができなくなるので注意すること")
+                        "PROGRESS.md 2026-09-10節参照)。v11/v12で試して改善は誤差程度に"
+                        "留まっており、決定論的方策の振動は探索ノイズではなく方策写像"
+                        "そのものの粗さだと判明している(env.py docstring「v21」参照)")
     p.add_argument("--sde-sample-freq", type=int, default=4,
                    help="gSDEのノイズ再サンプリング間隔[step]。小さいほど毎ステップ独立の"
                         "通常ノイズに近づき、大きいほど探索が単調になる。論文でPPOに対して"

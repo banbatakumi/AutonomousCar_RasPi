@@ -11,9 +11,9 @@
 （`ML_LIDAR_V2_PROMPT.md`）。指定しなければ`course_gen`のランダムコースを使う。
 
 オレンジの破線は理想ライン（MCL、`sim/raceline.py`の`compute_raceline_xy`）。
-学習には一切関与しない診断用オーバーレイで、`raceline_weight=0`で学習した
-モデルでも常に描く——「このモデルが理想ラインからどれだけ離れているか」を
-見る比較材料として無効時でも有益なため（PROGRESS.md 2026-09-12節）。
+学習には一切関与しない診断用オーバーレイで、どのモデルでも常に描く——
+「このモデルが理想ラインからどれだけ離れているか」を目視する比較材料
+（PROGRESS.md 2026-09-12節）。
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from sim.raceline import compute_raceline_xy  # noqa: E402
 from sim.vehicle import DriveInput, VehicleModel, VehicleSpec  # noqa: E402
 
 from ml_lidar.course_gen import random_walk_loop_course  # noqa: E402
+from ml_lidar.env import EnvConfig  # noqa: E402
 from ml_lidar.sim_support import pump_lidar_until_scan, stm_us  # noqa: E402
 from ml_lidar.viz_support import catchup_step_count, set_japanese_font  # noqa: E402
 
@@ -56,7 +57,7 @@ class Watcher:
     （`target_steer`/`target_speed`/`brake`）をそのまま`VehicleModel`に渡す。
     """
 
-    def __init__(self, model_path: Path, course: Course, *, dt: float = 0.05,
+    def __init__(self, model_path: Path, course: Course, *, dt: float = EnvConfig().dt,
                 physics_substep: float = 0.005, params: SimParams | None = None) -> None:
         self.dt = dt
         self.physics_substep = physics_substep
@@ -145,9 +146,9 @@ def run(args: argparse.Namespace) -> None:
              vmin=0, vmax=1, alpha=0.6)
 
     # 理想ライン(MCL、道幅内で曲率二乗和を最小化した参照軌道)を薄く重ねる。
-    # 学習には一切関与しない診断用オーバーレイなので、raceline_weight=0で
-    # 学習したモデル(v1〜v17)でも常に描く——「このモデルが理想ラインから
-    # どれだけ離れているか」を見る比較材料として無効時でも有益なため
+    # 学習には一切関与しない診断用オーバーレイなので、報酬に理想ラインを使わない
+    # 現行の設定(v21以降)でも常に描く——「このモデルが理想ラインからどれだけ
+    # 離れているか」を目視する比較材料として有益なため
     if course.centerline is not None:
         vehicle_half_width_m = max(abs(p[1]) for p in VehicleSpec.load().footprint)
         raceline_xy = compute_raceline_xy(course.centerline, course.width,
@@ -212,7 +213,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--course", type=Path, default=None,
                    help="未指定なら`course_gen`のランダムコース。指定するなら`sim/courses/*.json`")
     p.add_argument("--seed", type=int, default=0, help="ランダムコース時のみ使う")
-    p.add_argument("--dt", type=float, default=0.05)
+    # 既定は`EnvConfig.dt`に追従させる（観戦だけ別の周期で回すと、
+    # 実車・学習と違う応答を見て判断してしまう）
+    p.add_argument("--dt", type=float, default=EnvConfig().dt)
     return p.parse_args(argv)
 
 

@@ -6,6 +6,8 @@
 ONNX入出力パリティ・`raspi/auto/e2e_lidar.py`側の読み込み）を検出する。
 """
 
+import contextlib
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -86,6 +88,34 @@ class TestPipelineSmoke(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = eval_stats.find_env_config(Path(tmp) / "nowhere" / "model.zip")
             self.assertIsNone(cfg)
+
+
+class TestCliHelpRenders(unittest.TestCase):
+    """`--help`が例外なく描画できること。
+
+    argparseは`help`文字列に`help % params`を掛けるので、**日本語のヘルプに素の`%`を
+    書くと`--help`だけが落ちる**（2026-09-17に`--dt`の「54%のステップで」で実際に
+    踏んだ。学習自体は動くので他のスモークテストでは気づけない）。`%%`へのエスケープ
+    漏れをここで検出する。
+    """
+
+    def _assert_help_renders(self, parse_args) -> None:
+        """`--help`はヘルプを描画してから`SystemExit(0)`で抜ける。描画に失敗すると
+        `SystemExit`ではなく`ValueError`等が飛ぶので、それをそのまま失敗にする。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                parse_args(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn("--help", buf.getvalue())
+
+    def test_train_rl_help(self) -> None:
+        from ml_lidar import train_rl
+        self._assert_help_renders(train_rl.parse_args)
+
+    def test_eval_stats_help(self) -> None:
+        from ml_lidar import eval_stats
+        self._assert_help_renders(eval_stats.parse_args)
 
 
 if __name__ == "__main__":

@@ -64,6 +64,7 @@ OpenAI Gym CarRacing・F1TENTH gym（`random_trackgen.py`）が使う手法を�
 from __future__ import annotations
 
 import math
+import sys
 from pathlib import Path
 from typing import NamedTuple
 
@@ -94,6 +95,35 @@ _MAX_COURSE_GEN_RETRY = 20
 #: は一度も発生しなかった）
 _MAX_STEPS_PERIMETER_FACTOR = 9.0
 
+#: `random_walk_loop_course()`がパラメータごと引き直す上限回数
+_MAX_PARAM_RESAMPLE = 10
+
+#: 手続き生成コースの道幅レンジ [m]（`sample_random_walk_loop_params`）。
+#: **v22(2026-09-17)で上限を1.4→2.5mへ広げた。** 旧レンジ0.8〜1.4mでは近い側の壁が
+#: 必ず0.70m以内にあり、方策は「広いところ」を一度も見たことがない状態だった
+#: （ランダム20本で、近い側の壁が1m以上離れた点は0.0%）。自作コースをこのレンジに
+#: 入る割合で並べるとシムでの成否と一致する——normal 100%(完走6/6)・course3 94.7%
+#: (衝突6/6)・toyota 2.2%(シム完走だが実機で不安定)・course1 0.0%(衝突6/6)。
+#: 決定的だったのはcourse3で、道幅が1.4mを超えるのは進行度63.8〜66.3%と67.2〜69.9%の
+#: 2区間だけ(最大2.45m)なのに、8本中7本の衝突が進行度66.9〜67.8%＝その2区間の間に
+#: 集中していた（PROGRESS.md 2026-09-17「6回目」節）。
+#: 上限2.5mは実測した自作コースの最大(course1の中央1.95m・p95 4.2m)を余裕を持って
+#: 覆う値。生成器はこのレンジのまま自己交差チェックを通る（3.0mでも30/30で成功を確認）
+_WIDTH_RANGE_M = (0.8, 2.5)
+
+#: 道幅の上限を「コースの最小フィーチャサイズ」`base_radius_m * (1 - radius_jitter_frac)`
+#: の何倍までに抑えるか。**v22の学習を1本落としてから入れた**（2026-09-17）。
+#: レンジを2.5mまで広げた直後は上限を素で引いており、`base_radius`が小さく
+#: `radius_jitter`が大きい組（ウォークが中心付近まで食い込む）と広い道幅が同時に出ると、
+#: `_self_intersects()`を満たす中心線が引けず`_generate_walk_centerline`が
+#: `RuntimeError`で落ちる。発生率は**4000本中3本(0.07%)**で、60本の事前確認では
+#: 検出できなかった——が、8env×3Mstepでは約25,000エピソード＝19回程度起きる計算で、
+#: `SubprocVecEnv`のワーカーごと落ちて学習が停止した。
+#: 実測した失敗3本はいずれもこの比が**3.28以上**（成功例は中央1.07・p95 2.33）。
+#: 2.5に制限すると成功例の95%以上を保ったまま失敗域を外せる。
+#: なお比だけに頼らず`random_walk_loop_course()`側にも取りこぼし用のリトライを入れてある
+_WIDTH_FEASIBLE_RATIO = 2.5
+
 #: シケインクラスタの半径振幅を`width_m / base_radius_m`（道幅がコース半径に対して
 #: 相対的にどれだけ太いか）で絞るための調整幅。severity=0(道幅が半径よりずっと細い)なら
 #: 振幅そのまま、severity=1(道幅が半径と同オーダー)なら半分まで絞る
@@ -101,10 +131,24 @@ _CHICANE_OFFSET_SEVERITY_SCALE = 0.5
 
 
 def vehicle_min_turn_radius_m(spec: VehicleSpec | None = None) -> float:
-    """車両が物理的に切れる最小旋回半径 [m]（`wheelbase / tan(max_steer)`）。
+    """車両が**舵角の限界で**切れる最小旋回半径 [m]（`wheelbase / tan(max_steer)`）。
 
     `config/vehicle.toml`の値を動的に読む（ハードコードしない）——実測値が
     更新されても生成コースの最小半径が自動で追従する。
+
+    ## ★これは低速でしか使えない半径（速度が上がるとグリップが律速する）
+
+    実際に曲がれる半径は`max(この値, v^2/(mu*g))`。`sim/vehicle.py`の`step()`が
+    `max_curvature = a_lat_max / speed^2`で同じ制限をかけている。実測値では
+    `mu*g = 4.46 m/s^2`・舵角限界`0.398 m`なので、**この半径を使い切れるのは
+    `sqrt(mu*g*R) = 1.33 m/s`まで**——`max_speed`既定の2.0 m/sでは最小半径は
+    `0.897 m`と倍以上になる。
+
+    つまり生成コースの最小半径0.438m相当のコーナーは、**全開では曲がれず
+    1.4 m/s程度まで減速して初めて通れる**。これは意図した設計（レーシングとして
+    自然なブレーキング）だが、**通過可能性を判定するときにこの値を速度非依存の
+    定数として使うと誤る**（2026-09-22に実際に踏んだ。`sim/courses/course3.json`の
+    ヘアピンを「2.0 m/sでも通過可能」と誤判定した。速度依存で測り直すと1.33 m/sが上限）。
     """
     spec = spec or VehicleSpec.load()
     return spec.wheelbase / math.tan(spec.max_steer)
@@ -288,7 +332,11 @@ def sample_random_walk_loop_params(rng: np.random.Generator) -> RandomWalkLoopPa
     base_radius_m = float(rng.uniform(1.5, 3.5))
     angle_jitter_frac = float(rng.uniform(0.15, 0.50))
     radius_jitter_frac = float(rng.uniform(0.10, 0.65))
-    width_m = float(rng.uniform(0.8, 1.4))
+    # 道幅は`base_radius`/`radius_jitter`と独立には引けない（`_WIDTH_FEASIBLE_RATIO`参照）。
+    # 小さく・食い込みの大きいループに広い道幅を combine すると自己交差が避けられない
+    width_lo, width_hi = _WIDTH_RANGE_M
+    feasible_hi = _WIDTH_FEASIBLE_RATIO * base_radius_m * (1.0 - radius_jitter_frac)
+    width_m = float(rng.uniform(width_lo, max(width_lo, min(width_hi, feasible_hi))))
     clockwise = bool(rng.random() < 0.5)
     # `sim/courses/toyota.json`（観戦専用）は短い直線を挟んで急角ターンが連続するが、
     # 独立ジッターだけでは「1点だけ鋭く尖る」孤立ヘアピンしか実質出現しない。一定確率で
@@ -370,11 +418,26 @@ def random_walk_loop_course(rng: np.random.Generator, *, resolution: float = 0.0
     ランダム化する（観測・行動が左右対称な設計なので、方策が左右対称に汎化する
     理由が無い——旧実装からの既知の教訓）。
     """
-    p = sample_random_walk_loop_params(rng)
-    seed = int(rng.integers(0, 2 ** 31 - 1))
-    return walk_loop_course(p.n_checkpoints, p.base_radius_m, p.angle_jitter_frac,
-                            p.radius_jitter_frac, p.width_m, seed=seed,
-                            resolution=resolution, role="train",
-                            name="random_walk_loop", clockwise=p.clockwise,
-                            chicane_len=p.chicane_len,
-                            chicane_offset_frac=p.chicane_offset_frac)
+    # ★パラメータを引き直して再挑戦する。`_generate_walk_centerline()`の内側リトライは
+    # **チェックポイント配置だけ**を引き直すので、パラメータの組自体が実現不能なとき
+    # （道幅に対してループが小さすぎる等、`_WIDTH_FEASIBLE_RATIO`参照）は20回とも失敗して
+    # `RuntimeError`になる。学習中はこれが`SubprocVecEnv`のワーカーごと落として
+    # **数時間の学習を停止させる**（2026-09-17に実際にv22の学習が1本落ちた）。
+    # `_WIDTH_FEASIBLE_RATIO`で発生率自体は下げてあるが、取りこぼしはここで吸収する
+    for attempt in range(_MAX_PARAM_RESAMPLE):
+        p = sample_random_walk_loop_params(rng)
+        seed = int(rng.integers(0, 2 ** 31 - 1))
+        try:
+            return walk_loop_course(p.n_checkpoints, p.base_radius_m, p.angle_jitter_frac,
+                                    p.radius_jitter_frac, p.width_m, seed=seed,
+                                    resolution=resolution, role="train",
+                                    name="random_walk_loop", clockwise=p.clockwise,
+                                    chicane_len=p.chicane_len,
+                                    chicane_offset_frac=p.chicane_offset_frac)
+        except RuntimeError as e:
+            # 握り潰すと「静かに分布が偏る」ので、起きたことは必ず見えるようにする
+            print(f"!! コース生成に失敗したのでパラメータを引き直す "
+                  f"({attempt + 1}/{_MAX_PARAM_RESAMPLE}): {e}", file=sys.stderr, flush=True)
+    raise RuntimeError(
+        f"random_walk_loop: パラメータを{_MAX_PARAM_RESAMPLE}組引き直しても生成できなかった。"
+        "サンプリングレンジ（_WIDTH_RANGE_M・_WIDTH_FEASIBLE_RATIO等）を見直すこと")

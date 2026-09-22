@@ -67,18 +67,34 @@ rel = make_rel(REPO_ROOT)
 
 
 def describe_run_status(run_dir: Path) -> str:
-    """`eval/evaluations.npz`（`EvalCallback`が書く）があれば、直近のbest評価を要約する。"""
+    """runの要約。**mean_rewardではなくラップ比を出す**（`eval/generalization_evaluations.npz`）。
+
+    この環境のmean_rewardは1周ぶんの弧長=`total_length/dt`でほぼ定数になり、モデルの
+    良し悪しを区別できない（v21の実測は全区間175〜187で振れただけなのに、対MCL理想
+    ラップ比は2.15→1.02まで改善していた）。run一覧にrewardを出すと**進捗が止まって
+    見える**ので、第一指標のラップ比を出す。旧runには列が無いのでrewardへフォールバックする。
+    """
+    gen_path = run_dir / "eval" / "generalization_evaluations.npz"
     npz_path = run_dir / "eval" / "evaluations.npz"
-    if not npz_path.exists():
+    if not gen_path.exists() and not npz_path.exists():
         return "未学習"
+    mark = "✓ONNX済" if (run_dir / "final_model.zip").exists() else ""
     try:
         import numpy as np
+        if gen_path.exists():
+            d = np.load(gen_path)
+            ts = int(d["timesteps"][-1])
+            if "mean_lap_ratio" in d:
+                lr = np.asarray(d["mean_lap_ratio"], dtype=float)
+                if np.any(np.isfinite(lr)):
+                    return (f"{ts:,}steps・lap比 最良={np.nanmin(lr):.3f} "
+                            f"直近={lr[-1]:.3f} {mark}").strip()
+            return f"{ts:,}steps・衝突率={float(d['collision_rate'][-1]):.1%} {mark}".strip()
         d = np.load(npz_path)
         best = float(d["results"].mean(axis=1).max())
         ts = int(d["timesteps"][-1])
     except Exception as e:                                            # noqa: BLE001
         return f"評価ログの読み込みに失敗: {e}"
-    mark = "✓ONNX済" if (run_dir / "final_model.zip").exists() else ""
     return f"{ts:,}steps・best_reward={best:.1f} {mark}".strip()
 
 
@@ -246,33 +262,30 @@ class App:
             row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
 
         basic = {
-            # v15(2026-09-11): steer_rate_max_rad_s=2.0のまま5M stepまで学習して
-            # 滑らかさ・衝突率とも全run中最良を達成した設定を既定にしている
-            # （PROGRESS.md参照。3.0は学習不足を疑わず上限値だけ上げたv14で試したが
-            # 不要と判明、2.0に戻した）
-            "total-timesteps": ("学習ステップ総数", "5000000"),
+            # v21(2026-09-17): dt=0.05→0.10にしたので1stepの意味が倍になった。
+            # 旧5M step×0.05s=250,000シム秒に対し、3M×0.10s=300,000シム秒で1.2倍。
+            # 2Mに削るのは**危険**——既存run(v13/v14/v17/v19)のmean_speedは2M時点から
+            # 最終まで+11〜26%伸び続けており、mean_rewardだけが2Mで飽和して見える
+            # （経路不変なので実質「衝突せず完走したか」しか見ていない）。
+            # 今回の第一指標はlap_ratio=速度なので、飽和していないのは速度の方
+            "total-timesteps": ("学習ステップ総数", "3000000"),
             "n-envs": ("並列環境数", "8"),
             "episode-s": ("1エピソードの打ち切り秒数", "30"),
+            # v21b: LD06の回転周期(10Hz)=実車planning_nodeの計画周期に合わせた値。
+            # 0.05(20Hz)に戻すと、スキャンが更新されないステップが54%生じるうえ
+            # 実車(10Hz)と決定レートが2倍ずれる(env.py docstring「v21b」参照)
+            "dt": ("制御周期[s]", "0.10"),
             "max-speed": ("最高速度[m/s]", "2.0"),
-            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "2.0"),
-            # v16: ライン取りの汚さ(不要な微調整・切り続け)対策として新規導入。
-            # 生アクション(舵角速度指令)の絶対値そのものへの罰則——旧
-            # steer-rate-weight(隣接差分へのL1、手詰まり確定済み)とは別物
-            "steer-effort-weight": ("ステア実効ペナルティ重み", "0.02"),
-            # v18: 理想ライン(最小曲率線=MCL)からの横偏差への罰則。バンビの
-            # 「カーブ前に内側のライン取りをしてしまい旋回半径を稼げていない」
-            # 指摘を受けて導入(env.py EnvConfig docstring「v18」参照)。
-            # ★v18(重み0.5)を検証した結果、mean_raceline_dev_mがv17(罰則無し)と
-            # ほぼ同値(17.4cm→17.7cm)でライン取りは測定可能な範囲で改善せず、
-            # 一方でmean_abs_steer_diffが0.109→0.228とほぼ倍増した——懸念して
-            # いた「弱すぎて効果が出ない」パターンが的中し、steer-effort-weightとの
-            # 綱引きでノイズだけ増えたとみられる(PROGRESS.md 2026-09-13節)。
-            # v19では引き上げて1.0を初期値にする。1エピソード累積で
-            # collision_penalty(-30)を上回りうる規模になる(過度に保守的な方策に
-            # 倒れるリスク)ため、学習後は必ずeval_stats.py/mean_raceline_dev_m・
-            # mean_abs_steer_diffの両方を確認すること
-            "raceline-weight": ("理想ラインペナルティ重み", "1.0"),
-            "sde-sample-freq": ("gSDEノイズ再サンプリング間隔[step]", "4"),
+            # v23(2026-09-22): 2.0→1.0。dt=0.10では1決定あたり最大0.1rad
+            # （max_steerの19%）で、v13が意図した権限に戻る。理想ライン追従に
+            # 必要な舵角速度のp90(0.954rad/s)を賄える値（env.py EnvConfig docstring参照）
+            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "1.0"),
+            # v16〜v20で足した報酬罰則3種(steer-effort/raceline/steer-angle)は
+            # 2026-09-17に全て撤去した。実測でタイム欠損の主因がライン取りではなく
+            # 速度だと判明し、かつステア絶対値罰は文献(Evans 2021 arXiv:2103.10098)で
+            # 「racing報酬中で最遅・コーナーを下手に曲がる」と実証済みだったため
+            # (env.py EnvConfig docstring「v21」参照)。滑らかさは報酬項ではなく
+            # 損失項(CAPS spatial / LCP勾配罰則)で攻める方針に転換している
             # SB3既定(0.0)。-3はgSDE有効時専用の調整値(train_rl.pyの--log-std-init
             # ヘルプ参照)なので、gSDEチェックボックスの状態に連動させて切り替える
             "log-std-init": ("探索ノイズ初期標準偏差(log)", "0.0"),
@@ -288,12 +301,10 @@ class App:
             ttk.Entry(frame, textvariable=var, width=14).grid(row=i, column=1, sticky="w", pady=2)
 
         use_sde_row = 2 + len(basic)
-        # 既定OFF: 現状最良のv15(2026-09-11)が実際にuse_sde=Falseで学習されていた
-        # ことをモデルファイルから確認済み(PROGRESS.md参照)。v13/v14はgSDE有効
-        # だったが、v15はそれに加えて学習ステップを3M→5Mに増やしたのと同時に
-        # gSDEも無効化しており、どちらの変更が効いたかは未分離。次のv16は
-        # v15の実際の設定(gSDE OFF)を引き継ぎ、steer-effort-weightだけを
-        # 新変数にするのが一変数ずつの原則に合う
+        # 既定OFF: v15(2026-09-11)以降の全runがuse_sde=Falseで学習されている
+        # (モデルファイルから確認済み、PROGRESS.md参照)。v11/v12で試したgSDEの
+        # 改善は誤差程度で、決定論的方策の振動は探索ノイズではなく方策写像
+        # そのものの粗さだと判明している(env.py EnvConfig docstring「v21」参照)
         self.use_sde_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="gSDE(状態依存の相関探索ノイズ)を有効化",
                         variable=self.use_sde_var).grid(
@@ -335,16 +346,25 @@ class App:
             "fov-deg": ("視野角[deg]", "270"),
             "max-range": ("LiDAR最大レンジ[m]", "10.0"),
             "steer-tau": ("舵の平滑化[s]", "0.10"),
-            "raceline-tolerance-m": ("理想ライン追従の許容誤差[m]", "0.08"),
             "dynamics-jitter-frac": ("車両動特性のランダム化幅[割合]", "0.2"),
+            # gSDE有効時しか効かないので詳細側に置く（既定はgSDE OFF）
+            "sde-sample-freq": ("gSDEノイズ再サンプリング間隔[step]", "4"),
             "eval-freq": ("eval間隔[step]", "20000"),
-            "n-eval-episodes": ("eval時のエピソード数(5の倍数推奨)", "10"),
+            # 固定コース7種を1本ずつ。決定論的方策×決定論的環境なので繰り返しても
+            # 同じ軌道が増えるだけ（train_rl.py モジュールdocstring参照）
+            "n-eval-episodes": ("eval時のエピソード数(コース数7の倍数)", "7"),
             "checkpoint-freq": ("チェックポイント間隔[step]", "100000"),
             "learning-rate": ("学習率", "0.0003"),
             "n-steps": ("ロールアウト長", "2048"),
             "batch-size": ("バッチサイズ", "256"),
             "n-epochs": ("1更新あたりのエポック数", "10"),
-            "gamma": ("割引率", "0.99"),
+            # ★0.99ではなく0.99²。dtを0.05→0.10にしたので、γを据え置くと実効
+            # ホライズンが5s→10sへ暗黙に倍増し、**速度への報酬勾配が4割弱まる**
+            # （Σprogressは経路・時間に不変で、速く走る動機は割引だけが作っている
+            # ——γが1に近づくほどリターンが時間不変に近づく）。実測換算では
+            # 速度1.6→2.0m/s(+25%)に対するリターン増が +16.6%→+9.8% になる。
+            # 0.9801なら実時間ホライズン5sが保たれ、dtだけを変えた比較にもなる
+            "gamma": ("割引率", "0.9801"),
             "gae-lambda": ("GAE lambda", "0.95"),
             "clip-range": ("PPO clip range", "0.2"),
             "ent-coef": ("エントロピー係数", "0.0"),
@@ -504,12 +524,21 @@ class App:
                 self.run_name_var.set(self.export_run_var.get())
         self.export_run_var.trace_add("write", _sync_export_to_run)
 
-        self.export_source_var = tk.StringVar(value="best_model")
+        # ★既定を`eval/best_model.zip`から変更した（2026-09-17）。SB3の`EvalCallback`は
+        # **mean_rewardで選ぶ**が、この環境のmean_rewardは1周ぶんの弧長=total_length/dtで
+        # ほぼ定数になり、モデルの良し悪しを区別できない——v21では`eval/best_model.zip`も
+        # `best_model_generalized.zip`も約900k時点で凍り、対MCL理想ラップ比が
+        # **1.286倍（final_modelは1.022倍）**という26%遅いモデルが実車へ出る状態だった。
+        # `best_model_generalized`側はlap_ratio/lap_rateで選ぶよう直してある
+        # （train_rl.py `GeneralizationEvalCallback`のdocstring参照）。
+        # `eval/best_model.zip`はresume用に残るが、エクスポート先としては選べない
+        self.export_source_var = tk.StringVar(value="best_model_generalized")
         ttk.Label(frame, text="元にするモデル:").grid(row=1, column=0, sticky="w", pady=(8, 0))
         src_frame = ttk.Frame(frame)
         src_frame.grid(row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Radiobutton(src_frame, text="best_model（eval最良）", variable=self.export_source_var,
-                        value="best_model").pack(side="left")
+        ttk.Radiobutton(src_frame, text="best_model_generalized（汎化eval最良＝ラップ比）",
+                        variable=self.export_source_var,
+                        value="best_model_generalized").pack(side="left")
         ttk.Radiobutton(src_frame, text="final_model（学習終了時点）", variable=self.export_source_var,
                         value="final_model").pack(side="left", padx=(10, 0))
 
@@ -521,8 +550,8 @@ class App:
 
         def source_path() -> Path | None:
             run_dir = RUNS_DIR / self.export_run_var.get().strip()
-            if self.export_source_var.get() == "best_model":
-                p = run_dir / "eval" / "best_model.zip"
+            if self.export_source_var.get() == "best_model_generalized":
+                p = run_dir / "eval" / "best_model_generalized.zip"
             else:
                 p = run_dir / "final_model.zip"
             if not p.exists():

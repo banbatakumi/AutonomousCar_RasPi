@@ -193,7 +193,7 @@ def run(args: argparse.Namespace) -> None:
         ax.imshow(course.grid, extent=extent, origin="lower", cmap="Greys",
                  vmin=0, vmax=1, alpha=0.6)
         # 理想ライン(MCL)を薄く重ねる。学習には関与しない診断用オーバーレイなので、
-        # raceline_weight=0の設定でもコースが決まれば常に描く（`watch.py`と同じ方針）。
+        # 報酬に理想ラインを使わない設定でも、コースが決まれば常に描く（`watch.py`と同じ方針）。
         # コースは固定(EVAL_COURSE_PARAMS)なので毎フレームではなく初期化時に1回だけ計算する
         if course.centerline is not None:
             vehicle_half_width_m = float(np.abs(footprint[:, 1]).max())

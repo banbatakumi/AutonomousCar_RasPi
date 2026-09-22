@@ -42,8 +42,14 @@ from gymnasium.wrappers import TimeLimit  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
+from sim.course import Course  # noqa: E402
+from sim.raceline import compute_raceline_offsets, compute_speed_profile  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["find_env_config", "run_episode", "evaluate", "parse_args", "main"]
+__all__ = ["find_env_config", "reference_lap", "run_episode", "evaluate", "parse_args", "main"]
+
+#: 参照ラインを壁から離す余裕 [m]（`sim.raceline`の既定と同じ）
+_RACELINE_SAFETY_MARGIN_M = 0.03
 
 _ENV_CONFIG_SEARCH_LEVELS = 3
 
@@ -65,6 +71,52 @@ def find_env_config(model_path: Path) -> EnvConfig | None:
     return None
 
 
+def reference_lap(course: Course, spec: VehicleSpec,
+                  max_speed: float) -> tuple[float, float, float]:
+    """このコース・この車両諸元で到達可能な
+    `(理想ラップタイム[s], 理想ライン長[m], 理想ラインが要する舵の総量[rad/m])`。
+
+    理想ライン＝最小曲率線（MCL、`sim.raceline.compute_raceline_offsets`）、速度は
+    `compute_speed_profile`のグリップ＋加減速の3段アルゴリズム。**学習には一切
+    関与しない評価専用の基準**で、`raceline_weight`（v18/v19で撤去済み）のように
+    報酬へ戻すものではない（`ml_lidar/env.py`のdocstring「v21」参照）。
+
+    :param spec: **そのエピソードで実際に使われた**`VehicleSpec`を渡すこと
+        （`env.vehicle.spec`）。`randomize_dynamics=True`だと`mu`がエピソード
+        ごとに振れるので、固定の`VehicleSpec.load()`を使うと理想タイムだけが
+        実際のグリップとずれて比が歪む。
+    """
+    offsets = compute_raceline_offsets(
+        course.centerline, course.width,
+        vehicle_half_width_m=max(abs(p[1]) for p in spec.footprint),
+        safety_margin_m=_RACELINE_SAFETY_MARGIN_M,
+        # ★`course`は必須。`Course.width`が`None`のコース（`sim/editor.py`製の
+        # 手描きコースはこれ）では、`_lateral_bounds()`が壁までのレイキャストに
+        # これを使う。渡し忘れるとtoyota/course1のような観戦用コースで
+        # ValueErrorになる（2026-09-22に実際に踏んだ）
+        course=course)
+    v = compute_speed_profile(course.centerline, offsets, mu=spec.mu, max_speed=max_speed,
+                              drive_accel_m_s2=spec.drive_accel_m_s2,
+                              brake_decel_m_s2=spec.brake_decel_m_s2)
+    yaw = course.centerline[:, 2]
+    xy = course.centerline[:, :2] + offsets[:, None] * np.column_stack((-np.sin(yaw), np.cos(yaw)))
+    closed = np.vstack([xy, xy[:1]])
+    seg = np.hypot(*np.diff(closed, axis=0).T)
+    v_mid = 0.5 * (v + np.roll(v, -1))          # 区間の代表速度（両端点の平均）
+    length = float(np.sum(seg))
+
+    # 理想ラインの曲率が要求する路面舵角 `atan(L*κ)` の総変化量を、走行距離で割る。
+    # 「1m進むのに何rad舵を動かす必要があるか」——方策の実測値と同じ単位なので、
+    # `steer_travel_ratio`として「どれだけ無駄に舵を動かしているか」が読める
+    d1 = np.gradient(xy, axis=0)
+    d2 = np.gradient(d1, axis=0)
+    kappa = (d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]) / np.maximum((d1 ** 2).sum(1) ** 1.5, 1e-12)
+    steer = np.arctan(spec.wheelbase * kappa)
+    travel = float(np.sum(np.abs(np.diff(np.r_[steer, steer[:1]]))))
+    return (float(np.sum(seg / np.maximum(v_mid, 1e-3))), length,
+            travel / max(length, 1e-6))
+
+
 def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int) -> dict:
     """ランダムコース1本で1エピソード走らせ、結果をまとめる。
 
@@ -73,6 +125,17 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
     `vehicle.steer_actual`だけ見ると、フィルタが振動を隠しているだけの状態を
     「滑らか」と誤判定しうる（v7検証、2026-09-08で実際に踏んだ落とし穴。
     `env.py`モジュールdocstring参照）。
+
+    ## ラップタイムは`mean_speed`では代用できない（v21で追加、2026-09-17）
+
+    `lap_time_s`とその理想比`lap_ratio`が**第一指標**。`mean_speed`は瞬間速度の
+    単純平均なので、遠回りしても上がってしまいライン取りの評価に使えない。
+    `lap_ratio`は`dist_ratio`（走行距離/理想ライン長）と`speed_ratio`（平均速度/
+    理想平均速度）へ分解して返す——`lap_ratio ≈ dist_ratio / speed_ratio`なので、
+    タイムをラインで失っているのか速度で失っているのかがそのまま読める
+    （v17の実測は dist_ratio 0.98〜1.04・speed_ratio 0.80〜0.83 で、欠損はほぼ
+    全部が速度だった。この分解が無かったためにv18〜v20はラインを3回続けて狙って
+    しまった）。周回できなかったエピソードは`lap_time_s=None`で、平均からは外す。
     """
     env = LidarE2EEnv(cfg, seed=seed)
     env = TimeLimit(env, max_episode_steps=max_episode_steps)
@@ -81,8 +144,10 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
     total_reward = 0.0
     steps = 0
     collided = False
+    steers: list[float] = [float(env.unwrapped._steer_target)]
     speeds: list[float] = []
     raw_steers: list[float] = []
+    path: list[tuple[float, float]] = [(env.unwrapped.vehicle.x, env.unwrapped.vehicle.y)]
     terminated = truncated = False
     while not (terminated or truncated):
         action, _ = model.predict(obs, deterministic=True)
@@ -91,8 +156,30 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
         total_reward += float(reward)
         steps += 1
         speeds.append(float(info["speed"]))
+        steers.append(float(env.unwrapped._steer_target))
         collided = collided or bool(info["collided"])
+        path.append((env.unwrapped.vehicle.x, env.unwrapped.vehicle.y))
+    lap_done = bool(terminated and not collided)
+    course = env.unwrapped.course
+    width_m = float(course.width) if np.isscalar(course.width) else float(np.median(course.width))
+    ideal_lap_s, ideal_len_m, ideal_travel_per_m = reference_lap(
+        course, env.unwrapped.vehicle.spec, cfg.max_speed)
     env.close()
+
+    xy = np.asarray(path, dtype=np.float64)
+    path_len_m = float(np.hypot(*np.diff(xy, axis=0).T).sum()) if len(xy) > 1 else 0.0
+    lap_time_s = steps * cfg.dt if lap_done else None
+
+    # dtに依存しない舵の指標（`_steer_target`＝方策が積分で直接動かす目標舵角[rad]）。
+    # `mean_abs_steer_diff`/`steer_sign_flip_rate`は「1ステップあたり」なので
+    # dt=0.05とdt=0.10のrunを比較できない——実時間・実距離で測り直したのがこの3つ
+    th = np.asarray(steers, dtype=np.float64)
+    dth = np.diff(th) / cfg.dt if len(th) > 1 else np.array([])
+    steer_travel_per_m = (float(np.sum(np.abs(np.diff(th))) / path_len_m)
+                          if path_len_m > 1e-3 and len(th) > 1 else 0.0)
+    steer_rate_mean = float(np.mean(np.abs(dth))) if dth.size else 0.0
+    steer_reversals_per_s = (float(np.mean(np.diff(np.sign(dth)) != 0) / cfg.dt)
+                             if dth.size > 1 else 0.0)
 
     diffs = np.diff(raw_steers) if len(raw_steers) > 1 else np.array([])
     signs = np.sign(raw_steers)
@@ -102,10 +189,23 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
         "reward": total_reward,
         "steps": steps,
         "collided": collided,
-        "lap_done": bool(terminated and not collided),
+        "width_m": width_m,
+        "lap_done": lap_done,
+        "lap_time_s": lap_time_s,
+        "ideal_lap_s": ideal_lap_s,
+        "lap_ratio": (lap_time_s / ideal_lap_s) if lap_done and ideal_lap_s > 0 else None,
+        "dist_ratio": (path_len_m / ideal_len_m) if lap_done and ideal_len_m > 0 else None,
+        "speed_ratio": ((path_len_m / lap_time_s) / (ideal_len_m / ideal_lap_s))
+                       if lap_done and lap_time_s and ideal_len_m > 0 else None,
         "mean_speed": float(np.mean(speeds)) if speeds else 0.0,
         "mean_abs_steer_diff": float(np.mean(np.abs(diffs))) if diffs.size else 0.0,
         "steer_sign_flip_rate": float(np.mean(sign_flips)) if sign_flips.size else 0.0,
+        "steer_travel_per_m": steer_travel_per_m,
+        "ideal_steer_travel_per_m": ideal_travel_per_m,
+        "steer_travel_ratio": (steer_travel_per_m / ideal_travel_per_m
+                               if ideal_travel_per_m > 1e-9 else None),
+        "steer_rate_mean": steer_rate_mean,
+        "steer_reversals_per_s": steer_reversals_per_s,
     }
 
 
@@ -115,17 +215,60 @@ def evaluate(model: PPO, cfg: EnvConfig, *, n_episodes: int, episode_s: float,
     episodes = [run_episode(model, cfg, seed=base_seed + i, max_episode_steps=max_episode_steps)
                for i in range(n_episodes)]
     n = len(episodes)
+
+    def _mean_of(key: str) -> float | None:
+        """`None`（周回できなかったエピソード）を除いた平均。1本も無ければ`None`。"""
+        vals = [e[key] for e in episodes if e[key] is not None]
+        return float(np.mean(vals)) if vals else None
+
     return {
         "n_episodes": n,
         "collision_rate": sum(e["collided"] for e in episodes) / n,
         "lap_rate": sum(e["lap_done"] for e in episodes) / n,
+        "mean_lap_time_s": _mean_of("lap_time_s"),
+        "mean_lap_ratio": _mean_of("lap_ratio"),
+        "mean_dist_ratio": _mean_of("dist_ratio"),
+        "mean_speed_ratio": _mean_of("speed_ratio"),
         "mean_reward": float(np.mean([e["reward"] for e in episodes])),
         "mean_steps": float(np.mean([e["steps"] for e in episodes])),
         "mean_speed": float(np.mean([e["mean_speed"] for e in episodes])),
         "mean_abs_steer_diff": float(np.mean([e["mean_abs_steer_diff"] for e in episodes])),
         "steer_sign_flip_rate": float(np.mean([e["steer_sign_flip_rate"] for e in episodes])),
+        "steer_travel_per_m": float(np.mean([e["steer_travel_per_m"] for e in episodes])),
+        "steer_travel_ratio": _mean_of("steer_travel_ratio"),
+        "steer_rate_mean": float(np.mean([e["steer_rate_mean"] for e in episodes])),
+        "steer_reversals_per_s": float(np.mean([e["steer_reversals_per_s"] for e in episodes])),
+        "by_width": by_width(episodes),
         "episodes": episodes,
     }
+
+
+#: `by_width()`の道幅バケット境界 [m]。v21以前の学習レンジ上限1.4mを境目に置いてある
+#: ——**v22で道幅レンジを0.8〜1.4→0.8〜2.5mへ広げた**ので、「旧レンジ内（狭い）で
+#: 退行していないか」と「新しく入れた広いコースで改善しているか」を分けて読む必要がある
+#: （`ml_lidar/course_gen.py`の`_WIDTH_RANGE_M`参照）
+_WIDTH_BUCKETS_M: tuple[float, ...] = (1.4, 2.0)
+
+
+def by_width(episodes: list[dict]) -> list[dict]:
+    """道幅バケットごとの衝突率・ラップ比。集計全体では狭いコースの退行が埋もれるため。"""
+    edges = (0.0,) + _WIDTH_BUCKETS_M + (float("inf"),)
+    out = []
+    for lo, hi in zip(edges, edges[1:]):
+        bucket = [e for e in episodes if lo <= e["width_m"] < hi]
+        if not bucket:
+            continue
+        ratios = [e["lap_ratio"] for e in bucket if e["lap_ratio"] is not None]
+        out.append({
+            "width_lo": lo,
+            "width_hi": hi,
+            "n": len(bucket),
+            "collision_rate": sum(e["collided"] for e in bucket) / len(bucket),
+            "lap_rate": sum(e["lap_done"] for e in bucket) / len(bucket),
+            "mean_lap_ratio": float(np.mean(ratios)) if ratios else None,
+            "mean_speed": float(np.mean([e["mean_speed"] for e in bucket])),
+        })
+    return out
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -162,13 +305,32 @@ def main(argv: list[str] | None = None) -> None:
     result = evaluate(model, cfg, n_episodes=args.episodes, episode_s=args.episode_s,
                       base_seed=args.seed)
 
+    def _fmt(key: str, spec: str) -> str:
+        v = result[key]
+        return "n/a" if v is None else format(v, spec)
+
     print(f"episodes={result['n_episodes']} "
          f"collision_rate={result['collision_rate']:.1%} "
-         f"lap_rate={result['lap_rate']:.1%} "
-         f"mean_reward={result['mean_reward']:.2f} "
-         f"mean_speed={result['mean_speed']:.2f}m/s "
-         f"mean_abs_steer_diff={result['mean_abs_steer_diff']:.3f} "
-         f"steer_sign_flip_rate={result['steer_sign_flip_rate']:.1%}")
+         f"lap_rate={result['lap_rate']:.1%}")
+    # ★第一指標。lap_ratio ≈ dist_ratio / speed_ratio に分解して、タイムを
+    # 「ライン（遠回り）」で失っているのか「速度」で失っているのかを読む
+    print(f"  lap_time={_fmt('mean_lap_time_s', '.2f')}s "
+         f"lap_ratio={_fmt('mean_lap_ratio', '.3f')}x(対MCL理想) "
+         f"= dist_ratio {_fmt('mean_dist_ratio', '.3f')} / "
+         f"speed_ratio {_fmt('mean_speed_ratio', '.3f')}")
+    print(f"  mean_reward={result['mean_reward']:.2f} "
+         f"mean_speed={result['mean_speed']:.2f}m/s")
+    # ★舵の滑らかさはここを見る。dtに依存しない実距離・実時間ベースの指標
+    print(f"  舵: 総量={result['steer_travel_per_m']:.3f} rad/m "
+         f"(理想比 {_fmt('steer_travel_ratio', '.2f')}x) "
+         f"|dθ/dt|={result['steer_rate_mean']:.3f} rad/s "
+         f"切返し={result['steer_reversals_per_s']:.2f} 回/s")
+    # 道幅別（v22で学習レンジを広げたので、狭いコースの退行が全体平均に埋もれないよう分けて出す）
+    for b in result["by_width"]:
+        hi = "∞" if b["width_hi"] == float("inf") else f"{b['width_hi']:.1f}"
+        lap = "n/a" if b["mean_lap_ratio"] is None else f"{b['mean_lap_ratio']:.3f}"
+        print(f"  道幅{b['width_lo']:.1f}〜{hi}m (n={b['n']:3d}): "
+             f"collision={b['collision_rate']:5.1%} lap_ratio={lap} speed={b['mean_speed']:.2f}")
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
