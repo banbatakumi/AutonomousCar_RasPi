@@ -18,7 +18,7 @@ import numpy as np  # noqa: E402
 from slam2d.core.grid import OccGrid  # noqa: E402
 from slam2d.core.localize import GlobalLocalizer, LocalizeConfig  # noqa: E402
 from slam2d.core.types import Pose2D, ScanPoints  # noqa: E402
-from slam2d.tests.helpers import ROOM, make_room_points  # noqa: E402
+from slam2d.tests.helpers import make_room_points  # noqa: E402
 
 
 def _build_room_grid() -> OccGrid:

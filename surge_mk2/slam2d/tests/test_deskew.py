@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from slam2d.core.deskew import deskew, truncate  # noqa: E402
+from slam2d.core.deskew import TwistBuffer, deskew, deskew_traj, truncate  # noqa: E402
 from slam2d.core.types import Pose2D, RawScan, ScanPoints, Twist2D, compose, inverse  # noqa: E402
 
 NS = 1_000_000_000
@@ -137,3 +137,74 @@ class TestTruncate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTwistBuffer(unittest.TestCase):
+    """時刻つき twist の履歴（点ごとの脱スキューと推測航法の予測が共有する）。"""
+
+    def _buf(self, twist, n=6, dt=0.02, t0=NS):
+        b = TwistBuffer()
+        for i in range(n):
+            b.add(t0 + int(i * dt * NS), twist)
+        return b
+
+    def test_delta_matches_the_exact_arc(self):
+        b = self._buf(Twist2D(1.0, 0.0, 1.0))
+        d = b.delta(NS, NS + int(0.1 * NS))
+        self.assertAlmostEqual(d.x, math.sin(0.1), places=6)
+        self.assertAlmostEqual(d.y, 1.0 - math.cos(0.1), places=6)
+        self.assertAlmostEqual(d.yaw, 0.1, places=6)
+
+    def test_extrapolates_past_the_last_sample(self):
+        """テレメトリは点群より少し古いので、端は最後の twist で外挿する。"""
+        b = self._buf(Twist2D(1.0, 0.0, 1.0))          # 1.00〜1.10 秒ぶん
+        d = b.delta(NS, NS + int(0.12 * NS))
+        self.assertAlmostEqual(d.yaw, 0.12, places=6)
+
+    def test_covers_allows_small_extrapolation(self):
+        b = self._buf(Twist2D(1.0, 0.0, 0.0))
+        self.assertTrue(b.covers(NS - int(0.01 * NS), NS + int(0.13 * NS)))
+        self.assertFalse(b.covers(NS - int(0.5 * NS), NS + int(0.1 * NS)))
+
+    def test_ignores_out_of_order_samples(self):
+        b = TwistBuffer()
+        b.add(NS, Twist2D(1.0, 0.0, 0.0))
+        b.add(NS - 1000, Twist2D(9.0, 0.0, 0.0))
+        self.assertEqual(len(b), 1)
+
+
+class TestDeskewTraj(unittest.TestCase):
+    """回頭が1周のあいだに変化しても、点ごとの時刻で正しく戻せる。"""
+
+    def _raw(self, t_start, dur_ns, n=360):
+        ang = np.linspace(0.0, 2 * math.pi, n, endpoint=False)
+        rng = np.full(n, 2.0)
+        t = t_start + (np.arange(n) * dur_ns // max(1, n - 1))
+        return RawScan(ang, rng, np.ones(n, dtype=bool), np.zeros(n, dtype=bool),
+                       t.astype(np.int64))
+
+    def test_recovers_points_under_changing_yaw_rate(self):
+        # ヨーレートが 0 → 2 rad/s へ立ち上がる1周（100ms）
+        t0 = NS
+        dur = int(0.1 * NS)
+        buf = TwistBuffer()
+        for i in range(11):
+            w = 2.0 * i / 10.0
+            buf.add(t0 + int(i * 0.01 * NS), Twist2D(0.0, 0.0, w))
+        raw = self._raw(t0, dur)
+        pts = deskew_traj(raw, buf, max_range=8.0)
+
+        # 真値: 各点は「測った時刻の車体」から見て距離2m・角度ang。
+        # 基準時刻(t_ref)の車体から見ると、その間の回頭ぶん戻る
+        ts, sx, sy, syaw = buf.poses(t0 + dur, t_lo=t0, t_hi=t0 + dur)
+        ang = raw.angles
+        tq = raw.t_point_ns.astype(np.float64)
+        yaw_at = np.interp(tq, ts.astype(np.float64), syaw)
+        want_x = 2.0 * np.cos(ang + yaw_at)
+        want_y = 2.0 * np.sin(ang + yaw_at)
+        self.assertLess(float(np.max(np.hypot(pts.x - want_x, pts.y - want_y))), 2e-3)
+
+    def test_falls_back_without_samples(self):
+        raw = self._raw(NS, int(0.1 * NS))
+        pts = deskew_traj(raw, TwistBuffer(), max_range=8.0)
+        self.assertEqual(len(pts), len(raw))

@@ -20,6 +20,8 @@ aarch64向けのビルド済みwheelがあり`pip install`だけで動く
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 try:
@@ -48,6 +50,8 @@ class PoseGraph:
         self._opt = g2o.SparseOptimizer()
         self._opt.set_algorithm(algo)
         self._next_id = 0
+        #: ループ拘束のエッジ（追加順）。最適化後に残差を見て外すために持つ
+        self.loop_edges: list = []
 
     @property
     def size(self) -> int:
@@ -73,25 +77,60 @@ class PoseGraph:
         self._add_edge(src, dst, delta, information)
 
     def add_loop_edge(self, src: int, dst: int, delta: Pose2D,
-                      information: Cov3) -> None:
-        """非隣接キーフレーム間（ループ閉じ）の相対姿勢拘束を追加する。
+                      information: Cov3, *, huber: float | None = 3.0) -> int:
+        """非隣接キーフレーム間（ループ閉じ）の相対姿勢拘束を追加し、その番号を返す。
 
-        API上はオドメトリエッジと同じ（`EdgeSE2`は拘束の種類を区別しない）。
-        呼び出し側の意図を名前で示すために分けてある。
+        :param huber: Huber のしきい値（残差ノルム＝√カイ二乗の単位）。
+            None なら素の二乗誤差。
+
+        **DCS（Dynamic Covariance Scaling）は使わない。** DCS は残差が大きい
+        拘束ほど重みを下げるが、ループ拘束は「最初は残差が大きい（それを直す
+        ために入れる）」ものなので、入れた瞬間に無効化されてしまう——実測で、
+        78本の正しい拘束（真値と10cm/3°以内で一致）を入れても最適化後の姿勢が
+        0.1cmしか動かず、外れ値でもないのに地図が直らなかった。Huber なら
+        残差が大きくても効き続け（影響が線形に頭打ちになるだけ）、真の外れ値は
+        最適化後の残差で判定して外す（`SlamSystem`の再最適化）。
         """
-        self._add_edge(src, dst, delta, information)
+        e = self._add_edge(src, dst, delta, information)
+        if huber is not None and huber > 0:
+            e.set_robust_kernel(g2o.RobustKernelHuber(float(huber)))
+        self.loop_edges.append(e)
+        return len(self.loop_edges) - 1
 
-    def _add_edge(self, src: int, dst: int, delta: Pose2D, information: Cov3) -> None:
+    def loop_chi2(self) -> list[float]:
+        """ループ拘束ごとの残差（カイ二乗）。`optimize()`の後に読む。
+
+        既に外した拘束（`drop_loop`）は`inf`を返す（番号は詰めない——呼び出し側の
+        候補リストと添字を対応させたままにするため）。
+        """
+        self._opt.compute_active_errors()
+        return [math.inf if e is None else float(e.chi2()) for e in self.loop_edges]
+
+    def drop_loop(self, index: int) -> None:
+        """ループ拘束を1本グラフから外す（外れ値と判定したとき）。"""
+        e = self.loop_edges[index]
+        if e is None:
+            return
+        self._opt.remove_edge(e)
+        self.loop_edges[index] = None
+
+    def _add_edge(self, src: int, dst: int, delta: Pose2D, information: Cov3):
         e = g2o.EdgeSE2()
         e.set_vertex(0, self._opt.vertex(src))
         e.set_vertex(1, self._opt.vertex(dst))
         e.set_measurement(g2o.SE2(delta.x, delta.y, delta.yaw))
-        e.set_information(np.asarray(information, dtype=np.float64))
+        info = np.asarray(information, dtype=np.float64)
+        info = 0.5 * (info + info.T)
+        e.set_information(info)
         self._opt.add_edge(e)
+        return e
 
-    def optimize(self, iterations: int = 20) -> None:
+    def optimize(self, iterations: int = 30) -> None:
         self._opt.initialize_optimization()
         self._opt.optimize(iterations)
+
+    def set_estimate(self, node_id: int, pose: Pose2D) -> None:
+        self._opt.vertex(node_id).set_estimate(g2o.SE2(pose.x, pose.y, pose.yaw))
 
     def pose(self, node_id: int) -> Pose2D:
         est = self._opt.vertex(node_id).estimate()

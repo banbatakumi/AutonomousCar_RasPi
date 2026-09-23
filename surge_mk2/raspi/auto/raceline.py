@@ -412,7 +412,9 @@ class RaceLine(Planner):
                 lam=p["line_lam"], passes=int(p["line_passes"]),
                 v_max=p["v_max"], v_min=p["v_min"], a_lat=p["a_lat"],
                 a_accel=p["a_accel"], a_brake=p["a_brake"],
-                max_width=MAX_TRACK_WIDTH)
+                max_width=MAX_TRACK_WIDTH,
+                front_overhang=self.vehicle.front_overhang,
+                rear_overhang=self.vehicle.rear_overhang)
         except Exception as e:                      # noqa: BLE001
             # **例外で planning_node を落とさない。** 落ちると理由が GUI に出ず、
             # 「engage したのに何も起きない」だけが残る

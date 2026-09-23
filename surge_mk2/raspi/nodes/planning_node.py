@@ -318,6 +318,14 @@ class PlanningNode:
                     self._apply_ctrl(msg)
                 elif topic == TOPIC_E2E_MODEL:
                     self._apply_e2e_model(msg)
+                elif topic == TOPIC_VEHICLE_STATE:
+                    # SLAM 系の planner は、点ごとの脱スキューのために
+                    # **`plan()`の周期(10Hz)ではなく届いた順の全サンプル**が要る。
+                    # `set_engaged`/`reload_if_changed`と同じダックタイピングで
+                    # 「持っていれば渡す」（持たない planner には無関係）
+                    fn = getattr(self.planner, "on_vehicle_state", None)
+                    if fn is not None:
+                        fn(msg)
 
             now = time.monotonic_ns()
             self._replan(now)

@@ -11,7 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from slam2d.core.motion import ConstantVelocityModel, ExternalTwistModel, GyroBiasEstimator  # noqa: E402
+from slam2d.core.motion import (  # noqa: E402
+    ConstantVelocityModel, ExternalTwistModel, GyroBiasEstimator, OdometryNoise,
+    SpeedScaleEstimator,
+)
 from slam2d.core.types import Twist2D, integrate_twist  # noqa: E402
 
 
@@ -72,13 +75,74 @@ class TestExternalTwistModel(unittest.TestCase):
         twist = m.current_twist()
         self.assertAlmostEqual(twist.yaw_rate, 1.0 - 0.05, places=9)
 
-    def test_update_feeds_bias_estimator(self):
+    def test_update_feeds_bias_estimator_only_against_a_fixed_map(self):
+        """走行中の学習は**凍結地図が基準のとき（`absolute=True`）だけ**。
+
+        地図を作りながらの観測は自分の推定で焼いた局所地図が基準なので、
+        ゼロ点ずれは原理的に観測できない（`core/motion.py`のZUPTの節）。
+        """
         from slam2d.core.types import Pose2D
         bias_est = GyroBiasEstimator(alpha=1.0)  # 1回で追いつく設定にして検証しやすくする
-        m = ExternalTwistModel(lambda: Twist2D(0.0, 0.0, 1.1), bias_estimator=bias_est)
-        m.current_twist()  # raw_yaw_rate=1.1 を記録
-        m.update(Pose2D(0.0, 0.0, 1.0 * 0.1), 0.1)  # 観測は yaw_rate=1.0 相当
+        m = ExternalTwistModel(lambda: Twist2D(0.5, 0.0, 1.1), bias_estimator=bias_est)
+        m.current_twist()
+        # 地図作成中（absolute=False）は学習しない
+        m.update(Pose2D(0.05, 0.0, 1.0 * 0.1), 0.1, raw_delta=Pose2D(0.05, 0.0, 1.1 * 0.1))
+        self.assertAlmostEqual(bias_est.bias, 0.0, places=9)
+        # 凍結地図に対する観測なら学習する
+        m.update(Pose2D(0.05, 0.0, 1.0 * 0.1), 0.1, raw_delta=Pose2D(0.05, 0.0, 1.1 * 0.1),
+                 absolute=True)
         self.assertAlmostEqual(bias_est.bias, 0.1, places=6)
+
+    def test_zupt_calibrates_bias_while_standing_still(self):
+        """止まっている間はヨーレートの読みがそのままゼロ点ずれ。"""
+        from slam2d.core.types import Pose2D
+        bias_est = GyroBiasEstimator(alpha_still=0.5)
+        m = ExternalTwistModel(lambda: Twist2D(0.0, 0.0, 0.02), bias_estimator=bias_est)
+        for _ in range(20):
+            m.current_twist()
+            m.update(Pose2D(0.0, 0.0, 0.0), 0.1, raw_delta=Pose2D(0.0, 0.0, 0.002))
+        self.assertAlmostEqual(bias_est.bias, 0.02, delta=0.001)
+        self.assertGreater(bias_est.still_updates, 10)
+
+    def test_correct_applies_bias_and_scale(self):
+        bias_est = GyroBiasEstimator()
+        bias_est.bias = 0.05
+        scale = SpeedScaleEstimator()
+        scale.scale = 1.1
+        m = ExternalTwistModel(lambda: Twist2D(1.0, 0.0, 1.0), bias_estimator=bias_est,
+                               scale_estimator=scale)
+        t = m.correct(Twist2D(2.0, 0.0, 0.5))
+        self.assertAlmostEqual(t.vx, 2.2, places=9)
+        self.assertAlmostEqual(t.yaw_rate, 0.45, places=9)
+
+
+class TestOdometryNoise(unittest.TestCase):
+    def test_covariance_grows_with_distance_and_time(self):
+        n = OdometryNoise()
+        slow = n.covariance(Twist2D(0.1, 0.0, 0.0), 0.1)
+        fast = n.covariance(Twist2D(3.0, 0.0, 0.0), 0.1)
+        self.assertGreater(fast[0, 0], slow[0, 0])          # 進行方向は距離に比例
+        turning = n.covariance(Twist2D(0.1, 0.0, 2.0), 0.1)
+        self.assertGreater(turning[2, 2], slow[2, 2])       # 回頭は回った角度に比例
+        longer = n.covariance(Twist2D(0.0, 0.0, 0.0), 1.0)
+        still = n.covariance(Twist2D(0.0, 0.0, 0.0), 0.1)
+        self.assertGreater(longer[2, 2], still[2, 2])       # 止まっていても時間で育つ
+
+
+class TestSpeedScaleEstimator(unittest.TestCase):
+    def test_learns_the_ratio_when_forward_is_observable(self):
+        est = SpeedScaleEstimator(alpha=0.2)
+        for _ in range(50):
+            est.update(raw_forward=0.10, measured_forward=0.098, info_xx=1e8)
+        self.assertAlmostEqual(est.scale, 0.98, delta=0.005)
+
+    def test_ignores_unobservable_directions(self):
+        """進行方向が点群で決まっていないときは学習しない（通路の中など）。"""
+        est = SpeedScaleEstimator()
+        for _ in range(50):
+            est.update(raw_forward=0.10, measured_forward=0.05, info_xx=1.0)
+        self.assertEqual(est.updates, 0)
+        self.assertAlmostEqual(est.scale, 1.0, places=9)
 
 
 class TestGyroBiasEstimator(unittest.TestCase):

@@ -27,9 +27,7 @@ import time
 
 import numpy as np
 
-from slam2d.core.frontend import RELOC_STAGES
 from slam2d.core.localize import GlobalLocalizer
-from slam2d.core.scanmatch import MatcherConfig, match
 from slam2d.core.types import Pose2D
 
 from ..core.vehicle import Vehicle
@@ -66,6 +64,10 @@ LAP_MIN_DIST = 3.0
 LAP_NEAR_M = 0.8
 LAP_YAW_DEG = 35.0
 LAP_CONFIRM = 3
+
+#: `LOCATE`で候補を絞り込めたとみなす当たり率の差。仕上げ（Gauss-Newton）後の
+#: 当たり率は正解が0.9台・不正解が0.6以下に割れるので、0.1で十分に分かれる
+LOCATE_INLIER_GAP = 0.10
 
 
 def _polyline_length(xy: np.ndarray) -> float:
@@ -127,10 +129,12 @@ class Slam2dRaceLine(Planner):
                   note="★コーナー手前の減速開始点を決める。実車で止まれる値にすること"),
 
         ParamSpec(key="look_k", label="前方注視の速度係数", min=0.0, max=2.0,
-                  default=0.7, step=0.05, unit="s",
-                  note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで内を切る"),
+                  default=0.45, step=0.05, unit="s",
+                  note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで内を切る。"
+                       "★既定0.7は狭いコースで内を切りすぎた（2m/sのtoyotaで衝突10回・"
+                       "横偏差16cm、0.45にすると衝突0・6.2cmで舵も滑らかになった）"),
         ParamSpec(key="look_min", label="前方注視の最小値", min=0.15, max=1.5,
-                  default=0.35, step=0.05, unit="m",
+                  default=0.30, step=0.05, unit="m",
                   note="低速時の注視距離。小さすぎると舵が振動する"),
         ParamSpec(key="delay_s", label="遅延補償", min=0.0, max=0.4, default=0.15,
                   step=0.01, unit="s",
@@ -186,10 +190,21 @@ class Slam2dRaceLine(Planner):
         self._localizer: GlobalLocalizer | None = None
         #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
         self._loc_hint: tuple[float, float] | None = None
+        #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
+        self._locate_seed: tuple[float, float] | None = None
         self._load_error = ""
         #: BUILD完了時に自動保存した地図の名前（`DONE`段の表示用）
         self._saved_map_name = ""
         self._save_error = ""
+
+    def on_vehicle_state(self, vs: VehicleState) -> None:
+        """`planning_node`が`vehicle_state`を受けるたびに呼ぶ（50Hz）。
+
+        点ごとの脱スキュー（`slam2d/core/deskew.py`）に使う twist の履歴を
+        SLAM へ流し込むだけ。`plan()`は10Hzでしか呼ばれないので、ここで
+        受けておかないと1周100msのあいだの回頭の変化が追えない。
+        """
+        self.slam.on_vehicle_state(vs)
 
     def request_freeze(self) -> None:
         self._freeze_requested = True
@@ -212,6 +227,12 @@ class Slam2dRaceLine(Planner):
         grid = occgrid_from_trinary(
             loaded.trinary, resolution=loaded.resolution,
             origin=(loaded.origin_x, loaded.origin_y), seq=self.slam.next_seq())
+        # ★ 作ったばかりの地図で走り出すなら、**今どこに居るかはもう分かっている**。
+        #   その姿勢を探索の種にする（車を動かされていたら外れるので、
+        #   `_locate()`が失敗したら種を捨てて全域探索に落ちる）。
+        #   保存地図は今の格子をそのまま書き出したものなので座標系も一致する
+        self._locate_seed = ((self.slam.pose.x, self.slam.pose.y)
+                             if name == self._saved_map_name else None)
         self.slam.replace_grid_for_race(grid)
         self.path = rl_mod.RaceLine(
             xy=loaded.raceline_xy, v=loaded.raceline_v,
@@ -367,7 +388,11 @@ class Slam2dRaceLine(Planner):
                 lam=p["line_lam"], passes=int(p["line_passes"]),
                 v_max=p["v_max"], v_min=p["v_min"], a_lat=p["a_lat"],
                 a_accel=p["a_accel"], a_brake=p["a_brake"],
-                max_width=MAX_TRACK_WIDTH)
+                max_width=MAX_TRACK_WIDTH,
+                # コーナーで車体の角が経路の外へ張り出すぶんを余裕に足す
+                # （`nav/raceline.body_allowance`）
+                front_overhang=self.vehicle.front_overhang,
+                rear_overhang=self.vehicle.rear_overhang)
         except Exception as e:                      # noqa: BLE001
             self._build_error = f"経路を作れなかった: {e}"
             st.reason = self._build_error
@@ -444,7 +469,8 @@ class Slam2dRaceLine(Planner):
         pts = self.slam.deskew_scan(scan)
 
         if self._localizer is None:
-            self._localizer = GlobalLocalizer(self.slam.grid, hint=self._loc_hint)
+            hint = self._loc_hint or self._locate_seed
+            self._localizer = GlobalLocalizer(self.slam.grid, hint=hint)
             if self._localizer.done:
                 st.reason = ("自己位置の探索範囲に空きセルが無い。"
                              "地図の選択かクリックしたヒントを見直してください")
@@ -454,33 +480,56 @@ class Slam2dRaceLine(Planner):
             st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%）"
             return st
 
-        r = self._localizer.result
-        if r.ambiguous:
+        cands = self._localizer.candidates(3)
+        self._localizer = None
+        seeded = self._loc_hint is None and self._locate_seed is not None
+        if not cands:
+            if seeded:
+                self._locate_seed = None      # 種の周りに候補が無い。全域で探し直す
+            st.reason = "自己位置の候補が見つからない"
+            return st
+
+        # ★ 粗探索（0.2m間隔・15°刻み）の得点だけで決めない。上位候補を
+        #   それぞれ総当たり＋Gauss-Newton で仕上げ、**当たり率**で比べる。
+        #   粗い尺度では並ぶ候補（オーバルの反対側の直線など）も、
+        #   仕上げるとはっきり差がつく（`slam2d/core/localize.py`参照）
+        scored = []
+        for c in cands:
+            ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw))
+            if ref is not None:
+                scored.append((ref.inlier, ref))
+        if not scored:
+            if seeded:
+                self._locate_seed = None
+            st.reason = "自己位置の候補を仕上げられなかった"
+            return st
+        scored.sort(key=lambda t: -t[0])
+        best = scored[0][1]
+        if len(scored) >= 2 and scored[0][0] - scored[1][0] < LOCATE_INLIER_GAP:
+            if seeded:
+                self._locate_seed = None
             st.reason = ("自己位置の候補が複数あり絞り込めない"
                          "（左右対称・繰り返し形状の疑い）。"
                          "地図パネルをタップしておおよその位置を教えてください")
-            self._localizer = None
             return st
-        if r.score < p["min_score"]:
-            st.reason = f"自己位置が見つからない（最良一致度 {r.score:.2f}）"
-            self._localizer = None
+        if best.inlier < p["min_score"]:
+            if seeded:
+                self._locate_seed = None      # 種が外れている。全域で探し直す
+            st.reason = f"自己位置が見つからない（最良の当たり率 {best.inlier:.2f}）"
             return st
-
-        # 粗探索の結果を土台に、通常の追跡型スキャンマッチと同じ物差し
-        # （`RELOC_STAGES`＝見失い時の広域再探索と同じ探索幅）で仕上げる
-        refined = match(self.slam.grid, pts, Pose2D(r.x, r.y, r.yaw),
-                        config=MatcherConfig(stages=RELOC_STAGES, prior_w=0.0))
-        self.slam.set_pose(refined.x, refined.y, refined.yaw)
+        refined = best
+        self.slam.set_pose(*refined.pose)
         self.phase = st.phase = RACE
+        self._locate_seed = None
         self._hint = -1
         self._map_dirty = True
         # ★ `st.match_score`はこの`plan()`冒頭の`self.slam.update()`（`_locate()`
         # 呼び出し前の古い姿勢からの追跡マッチ、当然ながら未知の領域を指して
         # 失敗する）の値のまま残っている。ここで求め直した値に置き換えないと、
         # RACEへ切り替わった瞬間だけ「一致度0」を報告してしまう
-        st.match_score = refined.score
-        st.pose_x, st.pose_y, st.pose_yaw = refined.x, refined.y, refined.yaw
-        st.reason = f"自己位置を復元した（一致度 {refined.score:.2f}）。走行を開始する"
+        st.match_score = refined.inlier
+        st.pose_x, st.pose_y, st.pose_yaw = refined.pose
+        st.reason = f"自己位置を復元した（一致度 {refined.inlier:.2f}）。走行を開始する"
         return st
 
     # ── RACE ──

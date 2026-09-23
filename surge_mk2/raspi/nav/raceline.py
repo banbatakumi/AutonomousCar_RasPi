@@ -176,14 +176,35 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
     return np.maximum(v, v_min)
 
 
+def body_allowance(kappa: np.ndarray, front: float, rear: float) -> np.ndarray:
+    """曲がっているときに**車体の角が経路より外へ張り出す量** [m]。
+
+    経路が守っているのは「base_link（後輪車軸中心）が壁から何m離れているか」
+    だけで、車体は長い（前オーバーハング30cm）。半径Rで曲がると前の外側の角は
+    `sqrt((R+w)² + f²) − (R+w) ≈ f²/(2R)` だけ外へ、後ろの内側の角は
+    `r²/(2R)` だけ内へ張り出す。半径0.6mのコーナーなら前だけで7.5cmで、
+    車体半幅+安全余裕（既定14cm）の半分を食う。
+
+    ★ これを見込まないと、**地図も自己位置も正しいのに車が壁を擦る**
+    （実測: `normal`コースの`slam2d_raceline`で RACE 中に111回の衝突。
+    安全余裕を5cm→12cmに上げると0回になった）。
+    """
+    k = np.abs(np.asarray(kappa, dtype=np.float64))
+    return 0.5 * (front ** 2 + rear ** 2) * k
+
+
 def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
              lam: float = 0.1, v_max: float = 1.0, v_min: float = 0.2,
              a_lat: float = 2.0, a_accel: float = 1.0, a_brake: float = 1.5,
-             passes: int = 2, max_width: float = 3.0) -> RaceLine:
+             passes: int = 2, max_width: float = 3.0,
+             front_overhang: float = 0.0, rear_overhang: float = 0.0) -> RaceLine:
     """中心線からレーシングラインを作る。
 
     :param half_width: 車体半幅 [m]。`config/vehicle.toml` の外形から取る
     :param margin: それに足す安全余裕 [m]
+    :param front_overhang: base_link から車体前端まで [m]。コーナーで車体の角が
+        経路の外へ張り出すぶんを余裕に足す（`body_allowance`）。0 なら見込まない
+    :param rear_overhang: 同 後端まで [m]
     :param passes: 「最適化 → 法線と幅を測り直す」の反復回数
 
     `passes > 1` にしているのは、最適化で経路が動くと**法線の向きも変わる**ため。
@@ -198,7 +219,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     経路**が出た（`passes=3`, `lam=0.03`）。曲率エネルギー `Σκ²` が最小だった
     パスを採る。最悪でも中心線そのものより悪くはならない。
     """
-    keep = half_width + margin
+    keep = half_width + margin + body_allowance(curvature(cl.xy), front_overhang,
+                                                rear_overhang)
     c = cl.xy
     nrm = cl.normal
     left, right = cl.w_left, cl.w_right
@@ -219,6 +241,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
         c = resample_loop(xy, cl.step)
         nrm = normals(c)
         left, right = measure(grid, c, nrm, max_width)
+        keep = half_width + margin + body_allowance(curvature(c), front_overhang,
+                                                    rear_overhang)
 
     xy = best
     # **α は最後まで「元の中心線からの横ずれ」**として返す。2周目以降の

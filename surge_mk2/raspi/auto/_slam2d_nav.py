@@ -12,29 +12,33 @@
 - `raspi/nav/slam.py`の`Slam`が持っていた`lap_progress()`（累積回頭÷360°）
   のような、slam2d本体には無い車体固有の付加機能
 
+## 50Hz の `VehicleState` は `plan()` とは別に流し込む
+
+`plan()` は点群が1周そろったとき（10Hz）しか呼ばれないが、SLAM は**点ごとの
+脱スキュー**（`slam2d/core/deskew.py`）のために1周100msのあいだのジャイロ・
+車速の変化を知る必要がある。`planning_node` が `vehicle_state` を受けるたびに
+`on_vehicle_state()` を呼ぶ（持っていれば呼ぶダックタイピング）ので、
+このクラスはそれを `Frontend.add_twist()` へ渡すだけ。
+
+**これが無いと高速のヘアピンで破綻する**——実測（`sim/slam_bench.py` course3、
+2m/s）で、1周期一定 twist の近似だと残差RMSが10〜15cmに達し、位置合わせが
+誤った姿勢に貼り付いて自己位置が5m以上ずれた。点ごとの脱スキューを入れると
+同条件で4cmに収まる。
+
 ## ループ閉じ（`slam2d/backend/`・`slam2d/pipeline.SlamSystem`）を使う
 
-以前は「単一〜少数のループ拘束では`Frontend`単体より精度が悪化することが
-ある」（`slam2d/backend/loop_detection.py`旧docstring「既知の限界」）という
-短距離ovalシムでの実測に基づき、`Frontend`単体のみを使いbackendを一切
-importしていなかった（Pi実機側の依存を増やさないための判断でもあった）。
-
-長距離ドリフト対策（`~/.claude/plans/slam2d-slam-slam2d-imu-slam-slam2d-imu-nifty-aurora.md`）
-で`core/confidence.py`の情報行列推定を点対応ベースのFisher情報に作り直した
-結果、oval基準ベンチマークでループ閉じが初めてFrontend単体を上回るように
-なった（詳細は`loop_detection.py`モジュールdocstring「追記」参照）ため、
-方針を転換して有効化する。`g2opy`はPi 5(aarch64)向けビルド済みwheelがあり、
-実機（Python 3.13.5）で動作確認済み（`slam2d/tools/spike_g2o.py`、
-`raspi/requirements.txt`参照）。
+`g2opy`はPi 5(aarch64)向けビルド済みwheelがあり、実機（Python 3.13.5）で
+動作確認済み（`slam2d/tools/spike_g2o.py`、`raspi/requirements.txt`参照）。
 
 **ループクロージャの最適化・地図再構築は、EXPLORE→BUILD遷移の瞬間にのみ
 行う**（`SlamSystem.flush()`）。`raspi/auto/slam2d_raceline.py`の`_explore()`
-はこの瞬間`ready=False`で車両を止める設計になっており、数百ms〜1秒の一時
-停止コストを安全に払える。RACE段は`Frontend`を直接叩き、追跡専用に保つ
-（走行中に最適化・地図再構築の重い処理を挟まない）。
+はこの瞬間`ready=False`で車両を止める設計になっており、0.2〜1.5秒の一時
+停止コストを安全に払える（キーフレーム数に比例。`sim/slam_bench.py`の実測）。
+RACE段は`Frontend`を直接叩き、追跡専用に保つ（走行中に最適化・地図再構築の
+重い処理を挟まない）。
 
 `ENABLE_LOOP_CLOSURE`はキルスイッチ——現場で問題が出た場合に1行で
-`Frontend`単体運用へ戻せる。
+`Frontend`単体運用へ戻せる（そのときは地図の大域的な歪みが直らなくなる）。
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ import numpy as np
 from slam2d.backend.loop_detection import LoopDetectorConfig
 from slam2d.core.frontend import Frontend, FrontendConfig, FrontendUpdate
 from slam2d.core.grid import OccGrid
-from slam2d.core.motion import ExternalTwistModel, GyroBiasEstimator
+from slam2d.core.motion import ExternalTwistModel, GyroBiasEstimator, SpeedScaleEstimator
 from slam2d.core.types import Pose2D, RawScan, Twist2D, wrap_angle
 from slam2d.pipeline import PipelineConfig, SlamSystem
 
@@ -70,14 +74,23 @@ def occgrid_from_trinary(trinary: np.ndarray, *, resolution: float,
     どれも3値の判定結果だけの関数だから（`raspi/auto/mapstore.py`のモジュール
     docstring参照）。`hits`/`misses`は「判定結果がそうなる」最小の値
     （占有は`hits=min_hits, misses=0`、空きは`hits=0, misses=min_seen`）で埋める。
+
+    ★ サブセル精度の壁の位置（`OccGrid.hit_mean()`）は3値からは戻せないので、
+    読み込んだ地図での位置合わせはセル中心基準になる（2.5cm格子で最大1.25cm
+    の量子化。走行中に地図を作った場合より少しだけ粗い）。
     """
     h, w = trinary.shape
-    if h != w:
-        raise ValueError(f"trinary must be square (got {h}x{w}); OccGrid only supports square grids")
     grid = OccGrid(resolution=resolution, size_m=w * resolution, origin=origin,
                    min_hits=min_hits, min_seen=min_seen)
-    if grid.width != w or grid.height != h:
-        raise ValueError(f"reconstructed grid size mismatch: {grid.width}x{grid.height} != {w}x{h}")
+    if (grid.height, grid.width) != (h, w):
+        # 地図は必要な方向にだけ伸びるので**正方形とは限らない**（`OccGrid.grow`）。
+        # 配列を保存時の形へ作り直す
+        grid.hits = np.zeros((h, w), dtype=np.uint16)
+        grid.misses = np.zeros((h, w), dtype=np.uint16)
+        grid.hit_sx = np.zeros((h, w), dtype=np.float32)
+        grid.hit_sy = np.zeros((h, w), dtype=np.float32)
+        grid.hit_n = np.zeros((h, w), dtype=np.float32)
+        grid.height, grid.width = h, w
 
     occ = trinary == 2
     free = trinary == 1
@@ -122,7 +135,8 @@ class Slam2dNav:
 
     def __init__(self, *, resolution: float, size_m: float,
                 lidar_x: float = 0.0, lidar_y: float = 0.0,
-                max_range: float = 12.0) -> None:
+                max_range: float = 12.0,
+                loop_closure: bool = ENABLE_LOOP_CLOSURE) -> None:
         self._resolution = resolution
         self._size_m = size_m
         self._lidar_x = lidar_x
@@ -130,34 +144,31 @@ class Slam2dNav:
         self._max_range = max_range
         self._raw_yaw_rate = 0.0
         self._raw_speed = 0.0
+        #: ループ閉じを使うか（`ENABLE_LOOP_CLOSURE`が既定。評価・切り分け用に
+        #: インスタンス単位でも切れるようにしてある）
+        self._loop_closure = bool(loop_closure)
         self.reset()
 
     def reset(self) -> None:
         grid = OccGrid(resolution=self._resolution, size_m=self._size_m,
-                       min_hits=3, min_seen=3)
+                       min_hits=3, min_seen=3, grow=True)
         grid.seq = self.next_seq()
-        bias = GyroBiasEstimator()
-        motion = ExternalTwistModel(self._current_twist, bias_estimator=bias)
+        motion = ExternalTwistModel(self._current_twist, bias_estimator=GyroBiasEstimator(),
+                                    scale_estimator=SpeedScaleEstimator())
         config = FrontendConfig(mount_x=self._lidar_x, mount_y=self._lidar_y,
                                 max_range=self._max_range)
-        if ENABLE_LOOP_CLOSURE:
+        if self._loop_closure:
+            # 最適化・地図の焼き直しは`freeze()`（EXPLORE→BUILD遷移、車両停止済み）
+            # での明示的な`flush()`だけ。走行中は拘束を溜めるだけにする
             self._system = SlamSystem(grid, motion, PipelineConfig(
-                frontend=config, loop_detector=LoopDetectorConfig(),
-                # ★ 既定(10)のままだと、長いコースのEXPLORE走行中に自動で
-                # バッチ最適化・地図再構築が発火しうる（`sim.bench --course
-                # circuit`の実測でplan()が最大1.2秒スパイクすることを確認）。
-                # `planning_node.py`はplan()を10Hzで呼ぶ設計なので、走行中の
-                # 秒単位の停止は許容できない。最適化・地図再構築は`freeze()`
-                # （EXPLORE→BUILD遷移、車両停止済み）での明示的な`flush()`
-                # だけに限定するため、自動発火の閾値を実質無効な大きさにする
-                loop_batch_size=1_000_000))
+                frontend=config, loop_detector=LoopDetectorConfig(), optimize_every=0))
             self._fe = self._system.frontend
         else:
             self._system = None
             self._fe = Frontend(grid, motion, config)
         #: EXPLORE/BUILD中はTrue（`SlamSystem`経由でループ検出する）。
         #: RACE中はFalse（`Frontend`直結、追跡専用）に切り替える
-        self._backend_active = ENABLE_LOOP_CLOSURE
+        self._backend_active = self._loop_closure
         self.heading_total = 0.0
 
     @property
@@ -180,6 +191,21 @@ class Slam2dNav:
 
     def _current_twist(self) -> Twist2D:
         return Twist2D(self._raw_speed, 0.0, self._raw_yaw_rate)
+
+    def on_vehicle_state(self, vs: VehicleState) -> None:
+        """`VehicleState`が届くたびに呼ぶ（50Hz）。点ごとの脱スキューに使う。
+
+        `plan()`は点群が1周そろったとき（10Hz）しか呼ばれないので、その中で
+        受け取った1個の`VehicleState`だけでは「1周のあいだ twist は一定」の
+        近似しか作れない。ヘアピンを高速で抜ける場面ではその近似が破綻する
+        （`slam2d/core/deskew.py`のdocstring参照）ので、**届いた順に全部**
+        SLAMへ渡しておく。`t_capture`は Pi 時刻で、点群のセクタ時刻
+        （`Scan.sector_t_ns`）と同じ時間軸に乗っている。
+        """
+        if vs is None or not vs.t_capture:
+            return
+        self._fe.add_twist(int(vs.t_capture), Twist2D(float(vs.speed), 0.0,
+                                                      float(vs.yaw_rate)))
 
     def update(self, scan: Scan, dt: float, *, yaw_rate: float | None,
                speed: float | None) -> FrontendUpdate:
@@ -278,17 +304,27 @@ class Slam2dNav:
         """
         self._fe.pose = Pose2D(x, y, yaw)
 
+    def refine(self, pts, guess: Pose2D):
+        """凍結地図の上で`guess`の周りを探し直した結果（`Frontend.refine()`）。"""
+        return self._fe.refine(pts, guess)
+
     def deskew_scan(self, scan: Scan):
-        """`scan`を現在保持しているtwistで脱スキューする（障害物検出用）。
+        """`scan`を脱スキューする（障害物検出用）。
 
         `raspi/auto/raceline.py`の`_update_obstacles()`が使う。`Frontend.update()`
         の内部でも同じ脱スキューを1回行っているが、そちらは非公開の中間状態
-        なのでここで独立に呼び直す（`raspi/nav/slam.py`の`Slam`が`speed`/
-        `yaw_rate`を露出していたのと同じ立て付け）。
+        なのでここで独立に呼び直す。**`Frontend`が持っている twist の履歴を
+        そのまま使う**ので、点ごとの補正も同じ条件になる。
         """
         from slam2d.core.deskew import deskew as slam2d_deskew
+        from slam2d.core.deskew import deskew_traj
 
         raw = scan_to_raw(scan)
+        buf = self._fe._corrected_twists()
+        t = raw.t_point_ns[raw.t_point_ns > 0]
+        if buf is not None and t.size and buf.covers(int(t.min()), int(t.max())):
+            return deskew_traj(raw, buf, mount_x=self._lidar_x, mount_y=self._lidar_y,
+                               max_range=self._max_range)
         return slam2d_deskew(raw, self._current_twist(),
                              mount_x=self._lidar_x, mount_y=self._lidar_y,
                              max_range=self._max_range)

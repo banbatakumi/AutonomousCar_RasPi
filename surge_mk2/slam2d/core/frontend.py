@@ -1,25 +1,47 @@
-"""1周ぶんの処理パイプライン — 脱スキュー→推測航法→(scan2scan)→scanmatch→地図更新。
+"""1周ぶんの処理 — 脱スキュー → 推測航法の予測 → 距離場への位置合わせ → 地図更新。
 
-`raspi/nav/slam.py`のオーケストレーション層を車体非依存の形で移植したもの。
-**ループ閉じ（弧長比例配分）はここに無い。** キーフレーム列（`keyframes`）と
-累積走行量を外部に公開するだけの責務にし、ループ検出・グラフ最適化は
-`backend/`に任せる（単一責任の分割）。
+**ループ閉じはここに無い。** キーフレーム列（`keyframes`）を外部に公開し、
+ループ検出・ポーズグラフ最適化は`backend/`・`pipeline.SlamSystem`に任せる。
+最適化の結果は`apply_correction()`で受け取り、地図と局所地図を作り直す。
+
+## 2つの動作モード
+
+| | 地図作成中（`grid.frozen == False`） | 凍結地図での走行（`True`） |
+|---|---|---|
+| 合わせる相手 | **直近のキーフレームの点群**（`core/localmap.py`） | 凍結した地図全体の距離場 |
+| 地図の更新 | キーフレームごとに`grid`へ焼く | しない |
+| ドリフト | ゆっくり溜まる（ループ閉じで直す） | 地図に対して溜まらない |
+
+地図作成中に全体の地図へ合わせない理由は`core/localmap.py`のdocstring参照
+（周回して戻ったとき古い壁と新しい壁が混ざる・走り出した直後は壁が立たない）。
+
+## 位置合わせ（`core/register.py`）
+
+推測航法の予測を事前分布にした Gauss-Newton。観測できる方向は点群が決め、
+観測できない方向（通路の進行方向）は推測航法が残る。**旧実装の相関探索＋
+情報フィルタのブレンドは、推測航法の誤差をほとんど正せていなかった**
+（`sim/slam_bench.py`: 車速の倍率誤差2%だけで ATE が6cm、MPU6050相当の誤差で
+複雑コースは見失ったまま戻らない）。
+
+## 見失いの扱い
+
+- 位置合わせの**当たり率**（照合できた点のうち壁から5cm以内の割合）が
+  `min_inlier`を切るか、照合できた点が`min_used`未満なら、その周期は
+  「合っていない」とみなして推測航法の予測を採る（地図は焼かない）
+- `reloc_after`周期続いたら、予測の周りを総当たり（`core/register.search`）で
+  探し直す
+- 地図作成中に`restart_after`周期続いたら、**局所地図を今の点群から作り直す**
+  （ずれを受け入れて走り続ける。旧実装は「見失い中は地図を更新しない」
+  ために一度見失うと永久に戻れなかった）。途切れた区間のキーフレーム間の
+  拘束は推測航法だけの弱い重みになり、ループ閉じで直る余地が残る
 
 ## 姿勢の基準時刻は「点群の時刻」であって「今」ではない
 
-`raspi/nav/slam.py`から引き継いだ設計判断: `update()`が呼ばれる時刻は、
-点群の最後の点が測られた時刻より遅れる（センサの伝送遅延+受信処理）。
-オドメトリを「今」まで進めてから「点群の時刻」の地図と照合すると、
-毎周期その遅れぶんだけ後ろへ引き戻される誤差が蓄積する。なので姿勢は
+`update()`が呼ばれる時刻は、点群の最後の点が測られた時刻より遅れる。姿勢は
 常に`ScanPoints.t_ref_ns`時点のものとして持ち、推測航法を進める区間も
 前回の`t_ref`から今回の`t_ref`までにする（呼び出し側から渡される`dt`は、
-点群の時刻が取れないときの予備でしかない）。
-
-## 見失ったら黙って走らない
-
-マッチの得点が`min_score`を下回ったら`lost=True`を返し、地図を更新しない。
-見失ったままにもしない——`reloc_after`周期続けて見失ったら、探索範囲を
-大きく広げて（事前分布も切って）1回だけ探し直す。
+点群の時刻が取れないときの予備でしかない）。**最初の周は予測しない**
+（原点＝最初の点群の時刻の姿勢）。
 """
 
 from __future__ import annotations
@@ -30,83 +52,119 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .confidence import ConfidenceConfig, estimate_information, fuse_gaussians
-from .deskew import deskew, truncate
+from .deskew import TwistBuffer, deskew, deskew_traj, truncate
+from .surfmap import SurfaceMap
 from .grid import OccGrid
+from .localmap import LocalMap, LocalMapConfig
 from .motion import MotionModel
-from .scan2scan import IcpConfig, match_scans
-from .scanmatch import MatcherConfig, Stage, match
-from .types import Cov3, Pose2D, RawScan, ScanPoints, between, compose, integrate_twist, wrap_angle
+from .register import RegisterConfig, RegisterResult, register, search
+from .types import (Cov3, Pose2D, RawScan, ScanPoints, Twist2D, between, compose,
+                    integrate_twist, wrap_angle)
 
-__all__ = ["FrontendConfig", "FrontendUpdate", "Frontend", "RELOC_STAGES"]
+__all__ = ["FrontendConfig", "FrontendUpdate", "Frontend", "Keyframe", "rotate_info",
+           "inflate_info"]
 
 NS = 1_000_000_000
-
-#: 見失ったときに1回だけ使う広い探索。通常の探索（`MatcherConfig`の既定`stages`）
-#: では、いったん大きくずれると二度と戻れない
-RELOC_STAGES: tuple[Stage, ...] = (
-    Stage(0.40, 0.10, math.radians(20.0), math.radians(5.0)),
-    Stage(0.10, 0.03, math.radians(5.0), math.radians(1.0)),
-    Stage(0.02, 0.005, math.radians(1.0), math.radians(0.2)),
-)
 
 
 @dataclass(frozen=True, slots=True)
 class FrontendConfig:
-    matcher: MatcherConfig = MatcherConfig()
-    icp: IcpConfig = IcpConfig()
-    #: **毎周期のライブブレンド（`fuse_gaussians`で`self.pose`を決める部分）専用**。
-    #: `core/confidence.py`の既定（`analytic=True`、点対応ベースのFisher情報）
-    #: をそのまま毎周期のブレンドに使うと、`info_pred`（運動モデルの固定・
-    #: 小さい予測共分散）に対して`info_obs`が桁違いに大きくなり、毎周期
-    #: ほぼ生の`obs_pose`（離散化された探索格子上の解）へ張り付くようになって
-    #: 平滑化が効かなくなる——実測（oval 3周）でヨー誤差が0.85〜1.4°から
-    #: 14〜65°へ悪化することを確認したため、**ここだけ明示的に旧・曲率ベース
-    #: （`analytic=False`）に固定してある**。ループ拘束・キーフレームの
-    #: エッジ重みには`keyframe_confidence`（既定`analytic=True`）を別途使う
-    confidence: ConfidenceConfig = ConfidenceConfig(analytic=False)
-    #: **キーフレームに添える情報行列（`backend/`のオドメトリ・ループ拘束の
-    #: エッジ重みになる）専用**。既定（`analytic=True`）の点対応ベースFisher
-    #: 情報を使う——ループ拘束が本来の到達精度どおりに信頼されるようにする
-    #: のが目的で、こちらは毎周期のライブブレンドには使わない（上の`confidence`
-    #: と役割を分けている理由はそちらのdocstring参照）
-    keyframe_confidence: ConfidenceConfig = ConfidenceConfig()
-    #: 前の周の点群と直接合わせて推測航法を磨くか（`core/scan2scan.py`）
-    use_scan_to_scan: bool = False
-    #: True なら`core/confidence.py`の固有値ベース動的異方性ブレンドを使う。
-    #: False なら固定利得の等方的ブレンド（`match_gain`）にフォールバックする。
-    #: **oval等での回転ドリフト対策として新規設計した部分であり効果は未検証**——
-    #: 退行時にすぐ戻せるよう、切替可能にしてある
-    anisotropic: bool = True
-    #: 地図に焼く点の距離の上限[m]。照合には全点を使う
-    map_range: float = 3.0
-    #: 前回焼いた場所からこれだけ動いたら焼く
-    kf_dist: float = 0.03
-    kf_yaw: float = math.radians(2.0)
-    #: マッチの得点がこれ未満なら見失ったとみなす
-    min_score: float = 0.35
-    #: これだけ連続で見失ったら探索範囲を広げて探し直す
-    reloc_after: int = 15
-    reloc_stages: tuple[Stage, ...] = RELOC_STAGES
-    #: `anisotropic=False`のときのブレンド利得（0〜1）。地図凍結前後で分ける
-    #: 理由は`raspi/nav/slam.py`と同じ——構築中に地図を汚す心配があるうちは
-    #: 弱く、凍結後は強く寄せてよい
-    match_gain: float = 0.1
-    match_gain_frozen: float = 0.5
-    #: `anisotropic=False`のときにキーフレームへ添える情報行列の大きさ。
-    #: `backend/`のオドメトリエッジがこれを使う（`anisotropic=True`では
-    #: `core/confidence.py`の実測値を使うのでこの値は参照されない）
-    isotropic_keyframe_info: float = 100.0
+    register: RegisterConfig = RegisterConfig()
+    local_map: LocalMapConfig = LocalMapConfig()
     mount_x: float = 0.0
     mount_y: float = 0.0
     max_range: float = 12.0
+    #: 位置合わせに使う点の距離の上限[m]
+    match_range: float = 8.0
+    #: 地図に焼く点の距離の上限[m]。遠い点は測距誤差が大きく、壁が太る
+    map_range: float = 3.0
+    #: 前回のキーフレームからこれだけ動いたら新しいキーフレームにする
+    kf_dist: float = 0.10
+    kf_yaw: float = math.radians(5.0)
+    #: 「合っている」の判定。当たり率だけでなく**残差の大きさ**も見る——
+    #: 当たり率が半分くらいでも残差が大きいまま採用すると、誤った姿勢に
+    #: 貼り付いたまま「合っている」と言い続ける（実測: course3 のヘアピンで
+    #: 当たり率0.5・残差15cmのまま推定がその場に固定され、5m以上ずれた）。
+    #:
+    #: ★ 残差の判定は**絶対値ではなく、直近の残差に対する比**が主。地図が
+    #: 歪んでいる・測距ノイズが大きい環境では「正常でも残差が大きい」のが
+    #: 普通で、絶対値で切ると延々と見失い扱いになって推測航法だけで走ることに
+    #: なる（実測: harsh 条件で絶対8cmの閾値を入れたら見失いが2.9%→87%に増え、
+    #: 自己位置の誤差が5m→11mへ悪化した）
+    min_used: int = 30
+    min_inlier: float = 0.4
+    max_rms: float = 0.15
+    #: 直近の残差（移動平均）の何倍までを「合っている」とみなすか
+    rms_factor: float = 3.0
+    #: 残差の移動平均の追従の速さ（1周期あたり）
+    rms_alpha: float = 0.05
+    #: 見失いからの復帰
+    reloc_after: int = 2
+    reloc_trans: float = 0.4
+    reloc_rot: float = math.radians(15.0)
+    reloc_trans_step: float = 0.04
+    reloc_rot_step: float = math.radians(1.5)
+    #: 探し直しの結果を採る条件: 離れた候補の得点がこの割合未満であること
+    reloc_ambiguity: float = 0.85
+    #: 地図作成中にこれだけ続けて合わなければ局所地図を作り直す
+    restart_after: int = 15
+    #: 凍結地図で対応を付ける距離の上限[m]
+    frozen_max_dist: float = 0.5
+    #: キーフレーム間の拘束に足す「モデル化していない誤差」（`inflate_info`）
+    edge_sigma_xy: float = 0.02
+    edge_sigma_yaw: float = math.radians(0.3)
 
 
 class FrontendUpdate(NamedTuple):
     pose: Pose2D
-    score: float                           #: マッチの得点 0〜1
-    lost: bool                             #: 見失った（地図を更新していない）
-    matched: bool                          #: 実際に探索したか
+    score: float                           #: 位置合わせの当たり率 0〜1
+    lost: bool                             #: 合っていない（予測を採った）
+    matched: bool                          #: 位置合わせを試みたか（地図が空なら False）
+
+
+class Keyframe(NamedTuple):
+    pose: Pose2D
+    #: 地図に焼く点（`map_range`で切り詰め済み、車体座標）
+    points: ScanPoints
+    #: 位置合わせ・ループ閉じに使う壁の点（`match_range`以内、車体座標）
+    hx: np.ndarray
+    hy: np.ndarray
+    #: 直前のキーフレームとの相対姿勢の情報行列（**直前のキーフレームの座標系**）。
+    #: 最初のキーフレームはゼロ行列
+    info: Cov3
+    #: 累積走行距離 [m]
+    path: float
+    stamp_ns: int
+
+
+def rotate_info(info_world: Cov3, yaw: float) -> Cov3:
+    """世界座標の情報行列を、向き`yaw`の座標系の情報行列へ直す。"""
+    c, s = math.cos(yaw), math.sin(yaw)
+    t = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return t.T @ info_world @ t
+
+
+def inflate_info(info: Cov3, *, sigma_xy: float, sigma_yaw: float) -> Cov3:
+    """情報行列に「モデル化していない誤差」を足して過信を落とす。
+
+    点群の位置合わせのヘッセ行列は「その点群が地図に対してどれだけ鋭く
+    決まるか」しか表さない。実際には**地図そのものの誤差**（焼くときの姿勢の
+    ずれ・格子の量子化・測距の系統誤差で1〜2cm）が乗るので、そのぶんを共分散に
+    足してから情報行列へ戻す。
+
+    これを省くと、ポーズグラフのエッジが桁違いに過信になり、
+    **ロバストカーネル（DCS）が正しいループ拘束まで外れ値として無効化する**
+    （実測: toyota でループ拘束78本を入れても最適化後の姿勢が0.1cmしか動かなかった）。
+    """
+    cov = np.linalg.pinv(np.asarray(info, dtype=np.float64))
+    cov = cov + np.diag([sigma_xy ** 2, sigma_xy ** 2, sigma_yaw ** 2])
+    return np.linalg.inv(cov)
+
+
+def _world_cov(cov_body: Cov3, yaw: float) -> Cov3:
+    c, s = math.cos(yaw), math.sin(yaw)
+    t = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return t @ cov_body @ t.T
 
 
 @dataclass
@@ -122,161 +180,284 @@ class Frontend:
 
     def reset(self) -> None:
         self.pose = Pose2D(0.0, 0.0, 0.0)
-        #: 通った跡。ループ検出・グラフ構築は`backend/`がこれを見て行う
+        #: キーフレームの姿勢の列（`keyframes[i].pose`と同じ）
         self.trajectory: list[Pose2D] = []
-        #: 焼いた点群と、そのときの観測情報行列。`backend/`がループ閉じ・
-        #: グラフ最適化で使う（情報行列はオドメトリエッジの信頼度になる）
-        self.keyframes: list[tuple[Pose2D, ScanPoints, Cov3]] = []
-        self._kf: Pose2D | None = None
-        self._prev_pts: ScanPoints | None = None
+        self.keyframes: list[Keyframe] = []
+        self.local = LocalMap(self.config.local_map)
+        #: 時刻つきの生の twist（ジャイロ+車速）。あれば点ごとの脱スキューと
+        #: 推測航法の予測の両方をこの履歴から作る（`core/deskew.py`）
+        self.twists = TwistBuffer()
         self._t_ref = 0
+        self._path = 0.0
+        #: 直前のキーフレームから積んだ推測航法の共分散（世界座標）
+        self._cov_since_kf = np.zeros((3, 3))
+        #: 直前のキーフレーム以降に「合っていない」周期があったか
+        self._gap_since_kf = False
+        self._frozen_field: SurfaceMap | None = None
+        self._frozen_seq = -1
         self.lost_streak = 0
         self.updates = 0
-        #: 探し直した回数。増え続けるなら地図か点群を疑う
+        #: 探し直しで復帰した回数。増え続けるなら地図か点群を疑う
         self.relocs = 0
+        #: 局所地図を作り直した回数（地図作成中に見失い続けた回数）
+        self.restarts = 0
+        #: 直近の位置合わせの診断
+        self.last: RegisterResult | None = None
+        #: 受け入れた位置合わせの残差の移動平均[m]（見失い判定の基準線）
+        self.rms_ref = self.config.register.sigma
+
+    # ── 1周期 ──
+
+    def add_twist(self, t_ns: int, twist: Twist2D) -> None:
+        """ジャイロ+車速のサンプルを**届くたびに**入れる（実機は50Hz）。
+
+        入れておくと`update()`が点ごとの脱スキュー（`deskew_traj`）と、
+        サンプル列を積んだ推測航法の予測を使う。入れなければ従来どおり
+        「1周期のあいだ twist は一定」の近似になる。
+        """
+        self.twists.add(t_ns, twist)
 
     def update(self, raw: RawScan, dt: float) -> FrontendUpdate:
         """1周ぶんの点群を取り込んで姿勢を更新する。
 
-        :param dt: 前回の`update()`からの経過[s]。点群の時刻が取れないときの
-            予備でしかない（上のモジュールdocstring参照）
+        :param dt: 前回の`update()`からの経過[s]。点群の時刻が取れないときの予備
         """
+        cfg = self.config
         twist = self.motion.current_twist()
-        pts = deskew(raw, twist, mount_x=self.config.mount_x, mount_y=self.config.mount_y,
-                    max_range=self.config.max_range)
+        buf = self._corrected_twists()
+        t_lo = int(raw.t_point_ns.min()) if raw.t_point_ns.size else 0
+        t_hi = int(raw.t_point_ns.max()) if raw.t_point_ns.size else 0
+        use_traj = (buf is not None and t_lo > 0
+                    and buf.covers(min(t_lo, self._t_ref or t_lo), t_hi))
+        if use_traj:
+            pts = deskew_traj(raw, buf, mount_x=cfg.mount_x, mount_y=cfg.mount_y,
+                              max_range=cfg.max_range)
+        else:
+            pts = deskew(raw, twist, mount_x=cfg.mount_x, mount_y=cfg.mount_y,
+                         max_range=cfg.max_range)
 
-        # **点群の時刻どうしの差**で進める。呼び出し間隔ではない
+        first = self.updates == 0
         span = dt
         if self._t_ref and pts.t_ref_ns:
             span = (pts.t_ref_ns - self._t_ref) / NS
             if not (0.0 < span < 1.0):     # 時刻が跳んだ。呼び出し間隔で代用する
                 span = dt
+        prev_t_ref = self._t_ref
         if pts.t_ref_ns:
             self._t_ref = pts.t_ref_ns
         span = max(1e-3, span)
 
-        # 推測航法の1周期ぶん（前の周の車体座標での相対移動）
-        delta_pred = integrate_twist(twist, span)
-        cov_pred = self.motion.prediction_covariance(span)
+        raw_delta: Pose2D | None = None
+        if first:
+            delta_pred = Pose2D(0.0, 0.0, 0.0)
+            cov_body = np.diag([1e-6, 1e-6, 1e-8])
+        else:
+            if use_traj and prev_t_ref > 0:
+                delta_pred = buf.delta(prev_t_ref, pts.t_ref_ns)
+                raw_delta = self.twists.delta(prev_t_ref, pts.t_ref_ns)
+            else:
+                delta_pred = integrate_twist(twist, span)
+            cov_body = self.motion.prediction_covariance(span)
+        pred = compose(self.pose, delta_pred)
+        cov_world = _world_cov(cov_body, self.pose.yaw)
+        info_pred = np.linalg.inv(cov_world + np.eye(3) * 1e-12)
 
-        # ── scan2scan。観測できる方向だけ磨かれる ──
-        if self.config.use_scan_to_scan and self._prev_pts is not None:
-            d = match_scans(self._prev_pts, pts, delta_pred, config=self.config.icp)
-            if d.ok:
-                delta_pred = d.pose
-        self._prev_pts = pts
+        d = np.hypot(pts.x, pts.y)
+        sel = pts.hit & (d <= cfg.match_range)
+        hx, hy = pts.x[sel], pts.y[sel]
 
-        guess = compose(self.pose, delta_pred)
+        field_ = self._field(pred)
+        matched = field_ is not None and not field_.empty and hx.size > 0
+        lost = False
+        score = 0.0
+        new_pose = pred
+        res: RegisterResult | None = None
+        if matched:
+            res = register(field_, hx, hy, pred, prior=pred, prior_info=info_pred,
+                           config=cfg.register)
+            good = self._good(res)
+            if not good and self.lost_streak + 1 >= cfg.reloc_after:
+                alt = self._relocalize(field_, hx, hy, pred)
+                if alt is not None and self._good(alt):
+                    res, good = alt, True
+                    self.relocs += 1
+            score = res.inlier
+            if good:
+                new_pose = res.pose
+                a = cfg.rms_alpha
+                self.rms_ref += a * (min(res.rms, cfg.max_rms) - self.rms_ref)
+            else:
+                lost = True
+        self.last = res
 
-        # ── スキャンマッチ ──
-        m = match(self.grid, pts, guess, config=self.config.matcher)
+        if not lost and res is not None and not first:
+            info_body = rotate_info(res.info / max(cfg.register.info_scale, 1e-12), new_pose.yaw)
+            self.motion.update(between(self.pose, new_pose), span, info_body, raw_delta,
+                               absolute=self.grid.frozen)
+        elif not lost and not first:
+            self.motion.update(between(self.pose, new_pose), span, None, raw_delta,
+                               absolute=self.grid.frozen)
 
-        # ── 見失ったままにしない ──
-        if (self.lost_streak >= self.config.reloc_after
-                and self.lost_streak % self.config.reloc_after == 0
-                and self.grid.wall_mask().any()):
-            wide_config = MatcherConfig(stages=self.config.reloc_stages, prior_w=0.0)
-            wide = match(self.grid, pts, guess, config=wide_config)
-            if wide.searched and wide.score > max(m.score, self.config.min_score):
-                m = wide
-                self.lost_streak = 0
-                self.relocs += 1
-
-        lost = m.searched and (not math.isfinite(m.score) or m.score < self.config.min_score)
-        # 照合できなかった（点が既知セルにほとんど落ちない）のも、地図が
-        # 育ったあとなら見失ったのと同じ。地図が空の最初だけは通す
-        if not m.searched and self.grid.wall_mask().any():
-            lost = True
-
-        info_obs: Cov3 = np.eye(3) * self.config.isotropic_keyframe_info
-        #: キーフレームに添える（＝`backend/`のオドメトリ・ループ拘束のエッジ
-        #: 重みになる）情報行列。`info_obs`（ライブブレンド専用、上の
-        #: `FrontendConfig.confidence`docstring参照）とは別に、
-        #: `keyframe_confidence`（既定`analytic=True`）で算出し直す
-        keyframe_info: Cov3 = info_obs
+        self._path += math.hypot(new_pose.x - self.pose.x, new_pose.y - self.pose.y)
+        self.pose = new_pose
+        self._cov_since_kf = self._cov_since_kf + cov_world
+        restarted = False
         if lost:
             self.lost_streak += 1
-            new_pose = guess
+            self._gap_since_kf = True
+            if (not self.grid.frozen and self.lost_streak >= cfg.restart_after):
+                # 見失ったまま走り続けない。今の点群から局所地図を作り直す
+                self.local.clear()
+                self.restarts += 1
+                self.lost_streak = 0
+                lost = False                # 下で新しいキーフレームとして採る
+                restarted = True
         else:
             self.lost_streak = 0
-            obs_pose = Pose2D(m.x, m.y, m.yaw)
-            if self.config.anisotropic:
-                info_obs = estimate_information(self.grid, pts, obs_pose,
-                                                 config=self.config.confidence)
-                keyframe_info = estimate_information(self.grid, pts, obs_pose,
-                                                     config=self.config.keyframe_confidence)
-                info_pred = np.linalg.inv(cov_pred + np.eye(3) * 1e-12)
-                new_pose = fuse_gaussians(guess, info_pred, obs_pose, info_obs)
-            else:
-                gain = (self.config.match_gain_frozen if self.grid.frozen
-                       else self.config.match_gain)
-                new_pose = _isotropic_blend(guess, obs_pose, gain)
 
-        # motionの内部状態（速度推定・バイアス等）を、実際に採用した相対姿勢で更新
-        measured_delta = between(self.pose, new_pose)
-        self.motion.update(measured_delta, span)
-
-        self.pose = new_pose
-
-        # ── 地図更新。3つの条件を全部満たしたときだけ ──
-        if not lost and self._moved_enough():
-            small = truncate(pts, self.config.map_range)
-            self.grid.integrate(small, self.pose)
-            self.trajectory.append(self.pose)
-            self._kf = self.pose
-            self.keyframes.append((self.pose, small, keyframe_info))
+        if not self.grid.frozen and not lost and (restarted or self._moved_enough()):
+            self._add_keyframe(pts, hx, hy, res)
 
         self.updates += 1
-        return FrontendUpdate(self.pose, m.score, lost, m.searched)
+        return FrontendUpdate(self.pose, score, lost, matched)
+
+    def _corrected_twists(self) -> TwistBuffer | None:
+        """生のサンプルに、学習済みのバイアス・倍率を適用した履歴を作る。"""
+        if len(self.twists) < 2:
+            return None
+        correct = getattr(self.motion, "correct", None)
+        out = TwistBuffer()
+        for t, vx, vy, w in zip(self.twists.t, self.twists.vx, self.twists.vy, self.twists.w):
+            tw = Twist2D(vx, vy, w)
+            out.add(t, correct(tw) if correct is not None else tw)
+        return out
+
+    def _good(self, r: RegisterResult) -> bool:
+        cfg = self.config
+        limit = max(cfg.max_rms, self.rms_ref * cfg.rms_factor)
+        return (r.used >= cfg.min_used and r.inlier >= cfg.min_inlier
+                and r.rms <= limit)
+
+    def _relocalize(self, field_: SurfaceMap, hx, hy, center: Pose2D) -> RegisterResult | None:
+        cfg = self.config
+        sr = search(field_, hx, hy, center, trans=cfg.reloc_trans, rot=cfg.reloc_rot,
+                    trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
+        if sr.score <= 0.0:
+            return None
+        # ★ 離れた候補が肉薄しているなら飛び移らない。似た形が並ぶコース
+        #   （平行な車線・繰り返しの通路）で、見失った拍子に隣の通路へ
+        #   移ってしまうのを防ぐ。曖昧なときは推測航法のまま進む方が安全
+        if sr.second >= cfg.reloc_ambiguity * sr.score:
+            return None
+        return register(field_, hx, hy, sr.pose, config=cfg.register)
+
+    def _field(self, around: Pose2D) -> SurfaceMap | None:
+        if self.grid.frozen:
+            if self._frozen_field is None or self._frozen_seq != self.grid.seq:
+                g = self.grid
+                mean = g.hit_mean()
+                self._frozen_field = SurfaceMap(
+                    g.wall_mask(), resolution=g.resolution, origin=g.origin,
+                    mean_x=None if mean is None else mean[0],
+                    mean_y=None if mean is None else mean[1],
+                    known=g.seen > 0, max_dist=self.config.frozen_max_dist)
+                self._frozen_seq = g.seq
+            return self._frozen_field
+        return self.local.field(around)
+
+    def _moved_enough(self) -> bool:
+        if not self.keyframes:
+            return True
+        kf = self.keyframes[-1].pose
+        if math.hypot(self.pose.x - kf.x, self.pose.y - kf.y) >= self.config.kf_dist:
+            return True
+        return abs(wrap_angle(self.pose.yaw - kf.yaw)) >= self.config.kf_yaw
+
+    def _add_keyframe(self, pts: ScanPoints, hx, hy, res: RegisterResult | None) -> None:
+        cfg = self.config
+        if self.keyframes:
+            prev = self.keyframes[-1].pose
+            # 観測できない方向の拘束は推測航法（キーフレーム間で積んだ共分散）、
+            # 観測できる方向は位置合わせの情報行列が決める
+            info_w = np.linalg.inv(self._cov_since_kf + np.eye(3) * 1e-12)
+            if res is not None and not self._gap_since_kf:
+                info_w = info_w + res.info
+            info_w = inflate_info(info_w, sigma_xy=cfg.edge_sigma_xy,
+                                  sigma_yaw=cfg.edge_sigma_yaw)
+            info = rotate_info(info_w, prev.yaw)
+        else:
+            info = np.zeros((3, 3))
+        small = truncate(pts, cfg.map_range)
+        self.grid.integrate(small, self.pose)
+        self.local.add(self.pose, hx, hy)
+        self.keyframes.append(Keyframe(self.pose, small, hx.astype(np.float32),
+                                       hy.astype(np.float32), info, self._path, self._t_ref))
+        self.trajectory.append(self.pose)
+        self._cov_since_kf = np.zeros((3, 3))
+        self._gap_since_kf = False
+
+    # ── 外からの差し替え ──
+
+    def apply_correction(self, poses: list[Pose2D]) -> None:
+        """ポーズグラフ最適化の結果（キーフレームごとの姿勢）を反映する。
+
+        地図を**新しい版の格子に焼き直し**（古い版に上書きすると、同じコースを
+        角度違いで重ね描きした形に崩れる）、局所地図を作り直し、今の姿勢を
+        最後のキーフレームとの相対関係を保ったまま移す。
+        """
+        if len(poses) != len(self.keyframes) or not poses:
+            raise ValueError("poses must match keyframes")
+        old_last = self.keyframes[-1].pose
+        rel = between(old_last, self.pose)
+        g = self.grid
+        new = OccGrid(resolution=g.resolution, size_m=1.0, origin=g.origin,
+                      min_hits=g.min_hits, min_seen=g.min_seen, grow=g.grow,
+                      grow_step_m=g.grow_step_m, max_size_m=g.max_size_m)
+        new.hits = np.zeros_like(g.hits)
+        new.misses = np.zeros_like(g.misses)
+        new.hit_sx = np.zeros_like(g.hit_sx)
+        new.hit_sy = np.zeros_like(g.hit_sy)
+        new.hit_n = np.zeros_like(g.hit_n)
+        new.height, new.width = g.hits.shape
+        new.seq = g.seq + 1
+        kfs = []
+        for p, kf in zip(poses, self.keyframes):
+            new.integrate(kf.points, p)
+            kfs.append(kf._replace(pose=p))
+        self.grid = new
+        self.keyframes = kfs
+        self.trajectory = [k.pose for k in kfs]
+        self.local.reset_to([(k.pose, k.hx, k.hy) for k in kfs[-self.config.local_map.max_keyframes:]])
+        self.pose = compose(poses[-1], rel)
 
     def load_map(self, grid: OccGrid) -> None:
         """事前に構築済みの地図（凍結済み想定）に差し替える。
 
-        `reset()`と違い**姿勢・軌跡・キーフレームは動かさない**——呼び出し側が
-        直後にグローバルローカリゼーション（`core/localize.py`）で`pose`を
-        外部から設定する運用を想定している。捨てるのは**直近のスキャン間
-        追跡状態だけ**（`_prev_pts`のscan-to-scan初期値・`_kf`の最後に焼いた
-        場所・`lost_streak`）。古い地図との整合を前提にしたこれらの値を
-        新しい地図に持ち越すと、初回の`update()`が誤った基準で動く。
+        `reset()`と違い**姿勢は動かさない**——呼び出し側が直後にグローバル
+        ローカリゼーション（`core/localize.py`）で`pose`を外部から設定する運用を
+        想定している。捨てるのは直近の追跡状態だけ。
         """
         self.grid = grid
-        self._prev_pts = None
-        self._kf = None
+        self._frozen_field = None
+        self._frozen_seq = -1
         self.lost_streak = 0
 
-    def rebuild(self, *, grid: OccGrid, keyframes: list[tuple[Pose2D, ScanPoints, Cov3]],
-               trajectory: list[Pose2D], pose: Pose2D) -> None:
-        """ループ閉じ後、`backend/`が補正した地図・キーフレーム・軌跡・姿勢で置き換える。
+    def refine(self, pts: ScanPoints, guess: Pose2D, *, trans: float | None = None,
+               rot: float | None = None) -> RegisterResult | None:
+        """凍結地図の上で`guess`の周りを探し直し、Gauss-Newton で仕上げた結果。
 
-        `pipeline.SlamSystem`がポーズグラフ最適化の結果を反映するために呼ぶ。
-        `Frontend`自身はグラフ最適化のロジックを持たない（単一責任の分割）。
+        グローバルローカリゼーションの粗い解を仕上げる用途。**姿勢は書き換えない。**
         """
-        self.grid = grid
-        self.keyframes = keyframes
-        self.trajectory = trajectory
-        self.pose = pose
-        self._kf = pose
-
-    def _moved_enough(self) -> bool:
-        """前回焼いた場所から十分動いたか。止まっている間は焼かない。"""
-        if self._kf is None:
-            return True
-        dx = self.pose.x - self._kf.x
-        dy = self.pose.y - self._kf.y
-        if math.hypot(dx, dy) >= self.config.kf_dist:
-            return True
-        return abs(wrap_angle(self.pose.yaw - self._kf.yaw)) >= self.config.kf_yaw
-
-
-def _isotropic_blend(pred: Pose2D, obs: Pose2D, gain: float) -> Pose2D:
-    """予測`pred`をマッチ結果`obs`へ等方的に`gain`だけ寄せる（`anisotropic=False`用）。
-
-    `raspi/nav/slam.py`の`match_gain`（進行方向・横方向を区別しない旧来の
-    ブレンド）と同じ考え方。固有値ベースの異方性ブレンドが効かない・退行した
-    場合の比較基準として残してある。
-    """
-    return Pose2D(
-        pred.x + gain * (obs.x - pred.x),
-        pred.y + gain * (obs.y - pred.y),
-        pred.yaw + gain * wrap_angle(obs.yaw - pred.yaw),
-    )
+        cfg = self.config
+        f = self._field(guess)
+        if f is None or f.empty:
+            return None
+        d = np.hypot(pts.x, pts.y)
+        sel = pts.hit & (d <= cfg.match_range)
+        hx, hy = pts.x[sel], pts.y[sel]
+        if hx.size == 0:
+            return None
+        sr = search(f, hx, hy, guess, trans=cfg.reloc_trans if trans is None else trans,
+                    rot=cfg.reloc_rot if rot is None else rot,
+                    trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
+        return register(f, hx, hy, sr.pose, config=cfg.register)

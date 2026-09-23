@@ -10,7 +10,9 @@
 
 地図の`known_free_mask()`（空きだと確信できるセル）の上に間隔`spacing`で
 候補位置をばら撒き、角度は`angle_step`刻みで全周を回す。各候補で今のスキャンを
-`score_map()`（尤度場）に対して採点し、最良のものを採用する。
+**面要素地図**（`core/surfmap.py`、位置合わせと同じ表現）に対して採点し、
+最良のものを採用する。得点は点ごとの`exp(-d²/2σ²)`の平均で、`core/register.py`の
+`search()`と同じ物差し——**粗い解をそのまま`Frontend.refine()`へ渡せる**。
 
 ## 1周期に1角度だけ進める
 
@@ -27,6 +29,13 @@
 で検出し、**自動では採用しない**（`core/frontend.py`の「見失ったら黙って走らない」
 と同じ哲学）。呼び出し側がGUIのクリックヒント（`hint`）で探索範囲を絞れば、
 同じ理由で解消しやすくなる。
+
+★ ただし**この粗い尺度だけで諦めてはいけない。** 候補は0.2m間隔・15°刻みで、
+尤度の幅も10cmと広いので、オーバル状のコースでは反対側の直線が僅差で並ぶ。
+`candidates()`で上位いくつかを出し、呼び出し側が`Frontend.refine()`で
+仕上げてから当たり率で比べると、粗い尺度では並んでいた候補がはっきり分かれる
+（実測: 粗い尺度では差0.03しか無かったのが、仕上げ後の当たり率では
+0.98 対 0.60 に開いた）。
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ from typing import NamedTuple
 import numpy as np
 
 from .grid import OccGrid
+from .surfmap import SurfaceMap
 from .types import ScanPoints
 
 __all__ = ["LocalizeConfig", "LocalizeResult", "GlobalLocalizer"]
@@ -52,7 +62,10 @@ class LocalizeConfig:
     #: 再チューニングが要る——`ambiguous_gap`との組で決まる）
     spacing: float = 0.2
     angle_step: float = math.radians(15.0)  #: 候補角度の刻み
-    max_points: int = 120                  #: 採点に使う点数の上限（`scanmatch.MAX_POINTS`と同じ考え方）
+    max_points: int = 120                  #: 採点に使う点数の上限（間引いても得点はほぼ変わらない）
+    #: 尤度の幅[m]。粗い候補（`spacing`間隔）でも山を捉えられるよう、
+    #: 位置合わせ（2cm）よりだいぶ広く取る
+    sigma: float = 0.10
     #: 1位と（別の場所にある）2位の一致度差がこれ未満なら「対称の疑い」。
     #: `spacing`の量子化誤差より十分大きく取る（上のコメント参照）
     ambiguous_gap: float = 0.1
@@ -78,9 +91,16 @@ class GlobalLocalizer:
     """1回の自己位置復元につき1個作る（使い捨て）。`step()`を`done`になるまで呼ぶ。"""
 
     def __init__(self, grid: OccGrid, *, hint: tuple[float, float] | None = None,
-                config: LocalizeConfig = LocalizeConfig()) -> None:
+                config: LocalizeConfig = LocalizeConfig(),
+                surfmap: SurfaceMap | None = None) -> None:
         self._grid = grid
         self._config = config
+        mean = grid.hit_mean()
+        self._map = surfmap if surfmap is not None else SurfaceMap(
+            grid.wall_mask(), resolution=grid.resolution, origin=grid.origin,
+            mean_x=None if mean is None else mean[0],
+            mean_y=None if mean is None else mean[1],
+            known=grid.seen > 0, max_dist=max(0.5, 3.0 * config.sigma))
 
         free = grid.known_free_mask()
         stride = max(1, round(config.spacing / grid.resolution))
@@ -122,17 +142,16 @@ class GlobalLocalizer:
             take = np.linspace(0, sx.size - 1, self._config.max_points).astype(np.int64)
             sx, sy = sx[take], sy[take]
 
-        score_map = self._grid.score_map()
         yaw = float(self._angles[self._ai])
         c, s = math.cos(yaw), math.sin(yaw)
         rx = sx * c - sy * s
         ry = sx * s + sy * c
-
-        fx = ((self._xs[:, None] + rx[None, :] - self._grid.origin[0])
-              / self._grid.resolution - 0.5)
-        fy = ((self._ys[:, None] + ry[None, :] - self._grid.origin[1])
-              / self._grid.resolution - 0.5)
-        totals = _bilinear_candidates(score_map, fx, fy) / sx.size
+        wx = self._xs[:, None] + rx[None, :]
+        wy = self._ys[:, None] + ry[None, :]
+        a = self._map.associate(wx, wy)
+        inv2s2 = 1.0 / (2.0 * self._config.sigma ** 2)
+        like = np.where(a.valid, np.exp(-np.minimum(a.dist, 10.0) ** 2 * inv2s2), 0.0)
+        totals = like.sum(axis=1) / sx.size
 
         better = totals > self._best_score
         self._best_score = np.where(better, totals, self._best_score)
@@ -147,6 +166,32 @@ class GlobalLocalizer:
         # を評価し切る必要がある
         self.done = self._ai >= len(self._angles)
         return self.done
+
+    def candidates(self, k: int = 3) -> list[LocalizeResult]:
+        """得点上位の候補を、**互いに`ambiguous_min_dist`以上離して**`k`個返す。
+
+        呼び出し側はこれを`Frontend.refine()`で仕上げ、当たり率で比べて選ぶ
+        （上のdocstring参照）。`ambiguous`には粗い尺度での判定をそのまま入れる。
+        """
+        if self._xs.size == 0:
+            return []
+        order = np.argsort(-self._best_score)
+        picked: list[LocalizeResult] = []
+        for i in order:
+            x, y = float(self._xs[i]), float(self._ys[i])
+            if any(math.hypot(x - p.x, y - p.y) < self._config.ambiguous_min_dist
+                   for p in picked):
+                continue
+            picked.append(LocalizeResult(x, y, float(self._best_yaw[i]),
+                                         float(self._best_score[i]), False))
+            if len(picked) >= k:
+                break
+        if len(picked) >= 2:
+            gap = picked[0].score - picked[1].score
+            amb = gap < self._config.ambiguous_gap
+            picked = [p._replace(ambiguous=amb) if j == 0 else p
+                      for j, p in enumerate(picked)]
+        return picked
 
     @property
     def result(self) -> LocalizeResult:
@@ -170,32 +215,3 @@ class GlobalLocalizer:
             ambiguous = (score0 - float(self._best_score[i])) < self._config.ambiguous_gap
             break
         return LocalizeResult(x0, y0, yaw0, score0, ambiguous)
-
-
-def _bilinear_candidates(sm: np.ndarray, fx: np.ndarray, fy: np.ndarray) -> np.ndarray:
-    """`sm`を候補ごとに独立な(x, y)でバイリニア補間し、点について合計する。
-
-    `fx`/`fy`は共に(M, N)（M候補×N点）。戻りは(M,)。`core/scanmatch.py`の
-    `_bilinear`はグリッド状(X×Y)の候補向け（`match()`の並進探索がX/Yを独立に
-    格子で振るため）だが、こちらは候補ごとに(x, y)が組で決まる点群探索なので
-    形が合わない——単純な要素ごとの補間で足りる分、こちらのほうが軽い。
-    """
-    h, w = sm.shape
-    x0 = np.floor(fx).astype(np.int32)
-    y0 = np.floor(fy).astype(np.int32)
-    tx = (fx - x0).astype(np.float32)
-    ty = (fy - y0).astype(np.float32)
-
-    okx = (x0 >= 0) & (x0 < w - 1)
-    oky = (y0 >= 0) & (y0 < h - 1)
-    ok = okx & oky
-    cc = np.where(okx, x0, 0)
-    rr = np.where(oky, y0, 0)
-
-    v00 = sm[rr, cc]
-    v01 = sm[rr, cc + 1]
-    v10 = sm[rr + 1, cc]
-    v11 = sm[rr + 1, cc + 1]
-    val = ((v00 * (1 - tx) + v01 * tx) * (1 - ty)
-           + (v10 * (1 - tx) + v11 * tx) * ty)
-    return np.where(ok, val, 0.0).sum(axis=1)

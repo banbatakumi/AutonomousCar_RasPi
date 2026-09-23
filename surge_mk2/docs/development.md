@@ -47,6 +47,7 @@
 
 - **GUI の色・配置・異常表示を直した** → モック（`--faults`）
 - **planner（`raspi/auto/`）を書いた・パラメータを詰めたい** → シミュレータ、数値で比べるなら `sim.bench`
+- **SLAM（`slam2d/`）を触った** → `sim.slam_bench`（真値比較・仮想時間・誤差注入。§4.4）
 - **点群の解釈や換算を疑っている** → ログ再生（本物のノイズが入っている）
 - **遅延・電流・温度・電波を知りたい** → 実車以外に手段は無い
 
@@ -239,6 +240,34 @@ IP を調べる作業は要らない。GUI は `http://surge-mk2.local:8000/`。
 
 > **ベンチだけが真値を読める。** シムの真値は UDP の私設チャンネルにしか出ないので、
 > SLAM の推定と真値を毎周期突き合わせられるのはここだけ（実機では絶対に手に入らない数字）。
+
+### 4.4 SLAM だけを数値で比べる（`sim.slam_bench`）
+
+```bash
+.venv/bin/python -m sim.slam_bench                                  # 全コース×real
+.venv/bin/python -m sim.slam_bench --course toyota --errors harsh --plot
+.venv/bin/python -m sim.slam_bench --course normal --seeds 3 --json out.json
+```
+
+`sim.bench` は planner 全体を実時間で回すので、**SLAM の精度だけを見たいときには
+向かない**（SLAM が制御ループの中にいるので原因の切り分けができない・コース×条件を
+振ると何十分もかかる・`VirtualStm32` は `speed` を真値のまま送る）。
+
+こちらは車を**真値の中心線に沿って真値の姿勢で**純追従させ（SLAM を制御から切り離す）、
+仮想時間で回す。LiDAR は実機と同じ `VirtualLidar → ScanAssembler` 経路を通り、
+車速・ヨーレートには `--errors ideal|real|harsh` で誤差が入る（値の根拠は
+`sim/slam_bench.py` の `SensorModel` docstring。MPU6050 と LD06 のデータシート）。
+
+測るのは2段:
+
+1. **地図作成**（EXPLORE 相当、低速2周）: 推定軌跡のずれ・見失い・1周期の処理時間・
+   ループ閉じ（`freeze()`）の前後で地図がどれだけ真の壁に乗っているか
+2. **凍結地図での追従**（RACE 相当、高速2周）: **レース中の自己位置精度はここで決まる**。
+   横方向の誤差（`rc_lat`）が走りに効く量
+
+> 地図全体の剛体回転・平行移動は planner の走りに無関係（地図の中でしか動かない）なので、
+> RACE 段の誤差は**地図を真のコースへ剛体で重ねてから**測る（`align_map`）。
+> これをやらないと「地図が1°回っている」が位置誤差として数十cmに化ける。
 
 ---
 

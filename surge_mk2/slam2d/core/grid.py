@@ -10,15 +10,28 @@
 数えるだけ。log-oddsは同じ情報を1つの実数に潰したもので、確率としては上等だが
 **「何回見たか」が消える**。今回いちばん効かせたい判断がまさにそれ:
 
-    壁として確定するのは  hits >= min_hits  かつ  hits / (hits + misses) >= 0.5
+    壁として確定するのは  hits >= min_hits  かつ  hit_weight × hits >= misses
 
 `hits >= min_hits`が**動く物を壁にしない**ための条件。1周のあいだに一度だけ
 横切った物体は`hits == 1`にしかならず、壁にならない。log-oddsだと
 「1回の強いヒット」と「3回の弱いヒット」が同じ値になりうるので区別できない。
 
+## 当たりは素通りより重い（`hit_weight`、既定3）
+
+以前は`hits / (hits + misses) >= 0.5`（当たりと素通りを同じ重み）だった。
+これだと**車線を仕切る薄い壁（厚さ2cm＝1セル弱）が消える**。薄い壁のセルは、
+壁にすれすれの角度で走るレイ（格子に量子化すると壁のセルを通過してしまう）と
+反対側の車線からのレイの両方から「素通り」を数えられ、実測（toyota、誤差なし）
+で当たり33回に対し素通り38回、壁として残ったのは32%だけだった。中心線・
+レーシングラインの生成は壁を境界に使うので、仕切りが消えると隣の車線へ
+抜ける経路を引いてしまう。Cartographer も当たり0.55/素通り0.49（log-oddsで
+約5:1）と当たりを重く扱っている。実測では重み2〜5で薄い壁は残り、
+大きくするほど雑音由来の壁が太る（実測: normal で重み5だとレース時の自己位置
+誤差が4.5cm→9.4cmへ悪化）ので既定は2にしてある。
+
 さらに`known_free`（**空きだと確信できる**セル）を`hits + misses >= min_seen`
-かつ占有率0.5未満で定義する。「未知」と「空き」を混ぜないことが、誤検出を
-出さない唯一のコツ。
+かつ壁の条件を満たさないもので定義する。「未知」と「空き」を混ぜないことが、
+誤検出を出さない唯一のコツ。
 
 ## 数えるのは「点の数」ではなく「周の数」
 
@@ -56,16 +69,21 @@ UNKNOWN, FREE, OCCUPIED = 0, 1, 2
 
 
 class OccGrid:
-    """固定サイズの占有格子。**原点はセル(0,0)の角。**
+    """占有格子。**原点はセル(0,0)の角。**
 
-    地図を広げる仕組みは持たない。走行前にコースの大きさが分かっている前提で、
-    「入らなかったら`size_m`を上げる」方が動的拡張より読みやすい。入り切ら
-    なかったことは`out_of_bounds`が数えているので気づける。
+    `grow=True`（既定）なら、レイが格子の外へ出たとき**その方向にだけ**
+    `grow_step_m`ずつ格子を広げる（原点が動く。世界座標[m]は変わらない）。
+    以前は固定サイズで、スタート地点を中心に16m四方だったため、スタートが
+    コースの端にある11m級のコースで地図がはみ出していた（`sim/slam_bench.py`の
+    circuit_chicane_a・course1・course3）。`grow=False`なら固定のまま、入り切ら
+    なかった本数を`out_of_bounds`に数える。
     """
 
     def __init__(self, *, resolution: float = 0.05, size_m: float = 20.0,
                  origin: tuple[float, float] | None = None,
-                 min_hits: int = 3, min_seen: int = 3) -> None:
+                 min_hits: int = 3, min_seen: int = 3, hit_weight: float = 2.0,
+                 grow: bool = False, grow_step_m: float = 4.0,
+                 max_size_m: float = 60.0) -> None:
         self.resolution = float(resolution)
         n = max(1, int(round(size_m / resolution)))
         self.width = self.height = n
@@ -73,17 +91,28 @@ class OccGrid:
         self.origin = origin if origin is not None else (-size_m / 2.0, -size_m / 2.0)
         self.min_hits = int(min_hits)
         self.min_seen = int(min_seen)
+        #: 当たり1回が素通り何回ぶんに相当するか（docstring「当たりは素通りより重い」）
+        self.hit_weight = float(hit_weight)
+        self.grow = bool(grow)
+        self.grow_step_m = float(grow_step_m)
+        self.max_size_m = float(max_size_m)
 
         self.hits = np.zeros((n, n), dtype=np.uint16)
         self.misses = np.zeros((n, n), dtype=np.uint16)
+        #: 壁に当たった点の位置の和と個数（**点の数**で数える）。セル内のどこに壁の
+        #: 表面があるかをサブセル精度で持つため（`core/surfmap.py`の面要素の位置）
+        self.hit_sx = np.zeros((n, n), dtype=np.float32)
+        self.hit_sy = np.zeros((n, n), dtype=np.float32)
+        self.hit_n = np.zeros((n, n), dtype=np.float32)
         #: 地図の版。変わったときだけ再描画・再配布すればよい、という用途のための番号
         self.seq = 0
         #: 格子の外に出たレイの本数（累積）。増え続けるなら`size_m`が足りない
         self.out_of_bounds = 0
         self.frozen = False
 
-        self._score: np.ndarray | None = None
-        self._score_seq = -1
+        #: `seq`ごとの読み出し結果のキャッシュ（1周期に何度も呼ばれるため）
+        self._cache: dict[str, np.ndarray] = {}
+        self._cache_seq = -1
 
     # ── 座標変換 ──
 
@@ -117,9 +146,44 @@ class OccGrid:
         wx = x0 + pts.x * c - pts.y * s
         wy = y0 + pts.x * s + pts.y * c
 
+        if self.grow:
+            self._ensure_inside(min(float(wx.min()), x0), min(float(wy.min()), y0),
+                                max(float(wx.max()), x0), max(float(wy.max()), y0))
+        # 「地図が足りない」の指標は**レイの終端が格子の外に出た本数**。
+        # レイ全体が外に出た本数だと、車が格子の中にいる限り一生増えない
+        col, row = self.to_cell(wx, wy)
+        self.out_of_bounds += int((~self.inside(col, row)).sum())
         self._carve(x0, y0, wx, wy)
         self._mark(wx[pts.hit], wy[pts.hit])
         self.seq += 1
+
+    def _ensure_inside(self, xmin: float, ymin: float, xmax: float, ymax: float) -> None:
+        """矩形`[xmin,xmax]×[ymin,ymax]`が収まるよう、足りない側にだけ格子を足す。"""
+        res = self.resolution
+        step = max(1, int(round(self.grow_step_m / res)))
+        margin = 2 * res
+        c0 = int(np.floor((xmin - margin - self.origin[0]) / res))
+        r0 = int(np.floor((ymin - margin - self.origin[1]) / res))
+        c1 = int(np.floor((xmax + margin - self.origin[0]) / res))
+        r1 = int(np.floor((ymax + margin - self.origin[1]) / res))
+        left = -(-max(0, -c0) // step) * step
+        bottom = -(-max(0, -r0) // step) * step
+        right = -(-max(0, c1 - (self.width - 1)) // step) * step
+        top = -(-max(0, r1 - (self.height - 1)) // step) * step
+        if not (left or bottom or right or top):
+            return
+        max_cells = int(round(self.max_size_m / res))
+        if (self.width + left + right > max_cells or self.height + bottom + top > max_cells):
+            return                          # 上限。はみ出しは`out_of_bounds`に数える
+        pad = ((bottom, top), (left, right))
+        self.hits = np.pad(self.hits, pad)
+        self.misses = np.pad(self.misses, pad)
+        self.hit_sx = np.pad(self.hit_sx, pad)
+        self.hit_sy = np.pad(self.hit_sy, pad)
+        self.hit_n = np.pad(self.hit_n, pad)
+        self.height, self.width = self.hits.shape
+        self.origin = (self.origin[0] - left * res, self.origin[1] - bottom * res)
+        self._cache_seq = -1
 
     def _carve(self, ox: float, oy: float,
                wx: np.ndarray, wy: np.ndarray) -> None:
@@ -140,28 +204,60 @@ class OccGrid:
         ok = self.inside(col, row)
         # 終端セルの手前まで。**終端は壁かもしれないので空きにしない**（`_END_BACKOFF`）
         ok &= t < (d[:, None] - self.resolution * _END_BACKOFF)
-
-        flat = row.astype(np.int64) * self.width + col
-        self.out_of_bounds += int((~self.inside(col, row)).all(axis=1).sum())
-        self._add(self.misses, flat[ok])
+        self._bump(self.misses, row[ok], col[ok])
 
     def _mark(self, wx: np.ndarray, wy: np.ndarray) -> None:
-        """終端に壁を打つ。"""
+        """終端に壁を打つ。位置の和も数えておく（`hit_mean`がサブセル精度の壁を作る）。"""
         if wx.size == 0:
             return
         col, row = self.to_cell(wx, wy)
         ok = self.inside(col, row)
-        self._add(self.hits, (row[ok].astype(np.int64) * self.width + col[ok]))
-
-    def _add(self, target: np.ndarray, flat: np.ndarray) -> None:
-        """該当セルを**1だけ**増やす。**1周で何点落ちても+1**（docstring参照）。"""
-        if flat.size == 0:
+        if not ok.any():
             return
-        counts = np.bincount(flat, minlength=self.width * self.height)
-        np.minimum(counts, 1, out=counts)
-        acc = target.reshape(-1).astype(np.int32) + counts.astype(np.int32)
-        np.clip(acc, 0, _COUNT_MAX, out=acc)
-        target[:] = acc.astype(np.uint16).reshape(target.shape)
+        r, c = row[ok], col[ok]
+        self._bump(self.hits, r, c)
+        r0, r1 = int(r.min()), int(r.max())
+        c0, c1 = int(c.min()), int(c.max())
+        h, w = r1 - r0 + 1, c1 - c0 + 1
+        flat = (r - r0) * w + (c - c0)
+        n = w * h
+        self.hit_n[r0:r1 + 1, c0:c1 + 1] += np.bincount(flat, minlength=n).reshape(h, w).astype(np.float32)
+        self.hit_sx[r0:r1 + 1, c0:c1 + 1] += np.bincount(
+            flat, weights=wx[ok], minlength=n).reshape(h, w).astype(np.float32)
+        self.hit_sy[r0:r1 + 1, c0:c1 + 1] += np.bincount(
+            flat, weights=wy[ok], minlength=n).reshape(h, w).astype(np.float32)
+
+    def hit_mean(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """壁セルごとの点の平均位置[m]（点が無いセルはセル中心）。無ければ None。"""
+        if not self.hit_n.any():
+            return None
+        def make():
+            n = np.maximum(self.hit_n, 1.0)
+            cx, cy = self.to_world(np.arange(self.width)[None, :], np.arange(self.height)[:, None])
+            mx = np.where(self.hit_n > 0, self.hit_sx / n, cx).astype(np.float64)
+            my = np.where(self.hit_n > 0, self.hit_sy / n, cy).astype(np.float64)
+            return np.stack([mx, my])
+        m = self._cached("hitmean", make)
+        return m[0], m[1]
+
+    def _bump(self, target: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> None:
+        """該当セルを**1だけ**増やす。**1周で何点落ちても+1**（docstring参照）。
+
+        触ったセルを囲む矩形の中だけで数える。格子全体に対する`bincount`は
+        格子の大きさに比例するコストが1周ごとに掛かり、地図が大きいほど遅く
+        なっていた（16m四方で1回3〜5ms、ループ閉じ後の焼き直し640キーフレームで
+        3秒以上）。矩形はレイ1本ぶんの広がりしかないので、実質は点の数に比例する。
+        """
+        if rows.size == 0:
+            return
+        r0, r1 = int(rows.min()), int(rows.max())
+        c0, c1 = int(cols.min()), int(cols.max())
+        h, w = r1 - r0 + 1, c1 - c0 + 1
+        flat = (rows - r0) * w + (cols - c0)
+        touched = np.bincount(flat, minlength=w * h).reshape(h, w) > 0
+        sub = target[r0:r1 + 1, c0:c1 + 1]
+        # `_COUNT_MAX`で頭打ち（uint16の飽和で「昔たくさん見た」が固まるのを防ぐ）
+        np.add(sub, touched, out=sub, where=sub < _COUNT_MAX, casting="unsafe")
 
     def freeze(self) -> None:
         """地図を確定させる。以降`integrate()`は無視される。"""
@@ -170,17 +266,31 @@ class OccGrid:
 
     # ── 読み出し ──
 
+    def _cached(self, key: str, make):
+        if self._cache_seq != self.seq:
+            self._cache = {}
+            self._cache_seq = self.seq
+        v = self._cache.get(key)
+        if v is None:
+            v = make()
+            v.setflags(write=False)          # キャッシュなので呼び出し側に書き換えさせない
+            self._cache[key] = v
+        return v
+
     @property
     def seen(self) -> np.ndarray:
         """観測回数（ヒット＋ミス）。int32に伸ばして返す（uint16の引き算は罠）。"""
-        return self.hits.astype(np.int32) + self.misses.astype(np.int32)
+        return self._cached("seen", lambda: self.hits.astype(np.int32) + self.misses.astype(np.int32))
 
     def wall_mask(self) -> np.ndarray:
-        """壁として確定したセル。**`hits >= min_hits`が動く物を弾いている。**"""
-        seen = self.seen
-        with np.errstate(invalid="ignore", divide="ignore"):
-            ratio = np.where(seen > 0, self.hits / np.maximum(seen, 1), 0.0)
-        return (self.hits >= self.min_hits) & (ratio >= 0.5)
+        """壁として確定したセル。**`hits >= min_hits`が動く物を弾いている。**
+
+        返す配列はキャッシュなので**書き換えないこと**。
+        """
+        def make():
+            h = self.hits.astype(np.float32)
+            return (self.hits >= self.min_hits) & (h * self.hit_weight >= self.misses)
+        return self._cached("wall", make)
 
     def known_free_mask(self) -> np.ndarray:
         """**空きだと確信できる**セル。未知（見ていない）とは区別する。
@@ -188,10 +298,10 @@ class OccGrid:
         動的障害物の検出はここだけを使う。未知セルを空き扱いにすると、
         まだ見ていない場所を通るたびに「障害物だ」と言い出す。
         """
-        seen = self.seen
-        with np.errstate(invalid="ignore", divide="ignore"):
-            ratio = np.where(seen > 0, self.hits / np.maximum(seen, 1), 1.0)
-        return (seen >= self.min_seen) & (ratio < 0.5)
+        def make():
+            h = self.hits.astype(np.float32)
+            return (self.seen >= self.min_seen) & (h * self.hit_weight < self.misses)
+        return self._cached("free", make)
 
     def trinary(self) -> np.ndarray:
         """3値の地図（0=未知 1=空き 2=占有）。表示・シリアライズは呼び出し側の責務。"""
@@ -199,24 +309,6 @@ class OccGrid:
         out[self.known_free_mask()] = FREE
         out[self.wall_mask()] = OCCUPIED
         return out
-
-    def score_map(self, *, radius: int = 2, decay: float = 0.6) -> np.ndarray:
-        """スキャンマッチ用の尤度場。**壁の周りをなだらかに盛った地図。**
-
-        壁ちょうどのセルだけを1点とすると、1セルずれた候補姿勢の得点がいきなり
-        0になり、探索が平坦な谷底で迷子になる。半径`radius`セルまで`decay`で
-        減衰させて裾を作ると、粗い刻みでも正しい方向へ落ちる。
-
-        `seq`が変わるまでキャッシュする（1周期に何度も呼ばれるため）。
-        """
-        if self._score is not None and self._score_seq == self.seq:
-            return self._score
-        s = self.wall_mask().astype(np.float32)
-        for _ in range(max(0, radius)):
-            s = _spread(s, s * decay, np.maximum)
-        self._score = s
-        self._score_seq = self.seq
-        return s
 
     # ── レイキャスト ──
 
