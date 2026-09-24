@@ -114,7 +114,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fov-deg", type=float, default=270.0)
     p.add_argument("--max-range", type=float, default=10.0)
     p.add_argument("--max-speed", type=float, default=2.0)
-    p.add_argument("--steer-rate-max-rad-s", type=float, default=2.0,
+    p.add_argument("--steer-rate-max-rad-s", type=float, default=1.5,
                    help="[rad/s] train_rl.pyの--steer-rate-max-rad-sと同じ(v13、"
                         "env_config.jsonが見つからない場合のフォールバック)")
     return p.parse_args(argv)

@@ -25,6 +25,10 @@
 `train_rl.py`の`EvalCallback`が使うのと同じアーキタイプ（`EVAL_COURSE_PARAMS`の全て）を
 1画面に並べる。学習の「今の実力」を、`best_model`だけに頼らず複数の形状で目視できる。
 
+並べ方はウィンドウの大きさで決める（`_best_grid()`）。起動時は画面の約9割の大きさで開き、
+リサイズのたびに「1枚が最も大きくなる行×列」を選び直す（横長なら2行×5列、縦長なら
+3行×3列など）。タイトルの文字もパネルの大きさに合わせて縮める。
+
 ## 学習を邪魔しないための配慮
 
 - 表示するコースは`EVAL_COURSE_PARAMS`の本数に連動する（増やすほどCPUを食う）
@@ -34,11 +38,17 @@
   学習と同時に見ると、学習側のfpsは多少落ちる。気になるなら`--interval-ms`を
   上げて描画頻度を下げること
 
-## 理想ラインの表示
+## 障害物パネル（障害物ありで学習したrunだけ）
 
-オレンジの破線は理想ライン（MCL、`sim/raceline.py`の`compute_raceline_xy`）。
-`watch.py`と同じ診断用オーバーレイで、学習には関与しない。5本のコースは
-固定なので初期化時に1回だけ計算する（毎フレーム再計算しない）。
+`env_config.json`の`obstacle_prob>0`なら、固定コースに静的障害物を刻んだパネルを
+`_OBSTACLE_PANELS`の本数だけ足す（`ml_lidar/obstacles.py`の`add_obstacles`、
+通過可能性を確認済みの配置）。障害物なしのパネルは残すので、回避の様子と
+障害物なしの走りを並べて見られる。配置はコースのシードで決めるので毎回同じ。
+
+理想ライン（MCL）は2026-09-24に表示をやめた。学習には一切使っておらず
+（報酬は`progress`＋衝突のみ）、しかも広いコースや障害物のあるコースでは
+理想ラインが実際に通れる経路を表せない（PROGRESS.md 2026-09-24節）ため、
+観戦画面で比較の基準に見えるのは誤解のもとになる。
 """
 
 from __future__ import annotations
@@ -56,10 +66,10 @@ import numpy as np  # noqa: E402
 from gymnasium.wrappers import TimeLimit  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
-from sim.raceline import compute_raceline_xy  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
+from ml_lidar.obstacles import add_obstacles  # noqa: E402
 from ml_lidar.train_rl import EVAL_COURSE_PARAMS, RUNS_DIR, find_watch_source, \
     load_saved_env_config  # noqa: E402
 from ml_lidar.viz_support import catchup_step_count, set_japanese_font  # noqa: E402
@@ -68,6 +78,9 @@ __all__ = ["Panel", "LiveWatcher", "parse_args", "main"]
 
 DEFAULT_POLL_INTERVAL_S = 5.0
 DEFAULT_INTERVAL_MS = 150
+#: 障害物を刻んで追加表示するeval固定コースの名前（狭い1.0mと広い2.2mを1本ずつ）。
+#: 1枚増えるごとに全パネルが小さくなるので、道幅の両端の2本に絞ってある
+_OBSTACLE_PANELS: tuple[str, ...] = ("medium", "wide")
 
 
 class Panel:
@@ -141,15 +154,83 @@ class LiveWatcher:
 
 
 def _build_panels(env_cfg: EnvConfig, max_episode_steps: int) -> list[Panel]:
-    """5本のeval固定コース（直線/コーナー/中間/ヘアピン/連続シケイン主体）ぶんのパネルを作る。"""
-    return [Panel(spec.name, spec.build_course(), env_cfg, max_episode_steps)
-           for spec in EVAL_COURSE_PARAMS]
+    """eval固定コース（`EVAL_COURSE_PARAMS`）ぶんのパネルを作る。障害物ありで学習した
+    runなら、`_OBSTACLE_PANELS`のコースに障害物を刻んだパネルを後ろに足す。
+
+    ★固定コースを渡した`LidarE2EEnv`は障害物を置かない（`obstacle_prob`を無視する）ので、
+    ここで刻んでから渡す。`build_course()`は毎回新しい`Course`を返すので、障害物なしの
+    パネルと共有して汚すことはない
+    """
+    panels = [Panel(spec.name, spec.build_course(), env_cfg, max_episode_steps)
+              for spec in EVAL_COURSE_PARAMS]
+    if env_cfg.obstacle_prob > 0.0:
+        for spec in EVAL_COURSE_PARAMS:
+            if spec.name not in _OBSTACLE_PANELS:
+                continue
+            course = spec.build_course()
+            add_obstacles(course, np.random.default_rng(spec.seed), env_cfg.max_obstacles)
+            panels.append(Panel(f"{spec.name}+障害物", course, env_cfg, max_episode_steps))
+    return panels
+
+
+#: 図全体のタイトル（suptitle）ぶんに取っておく高さ [inch]
+_SUPTITLE_H_IN = 0.45
+#: 起動時のウィンドウを画面の何割にするか（メニューバー・Dockぶん縦は控えめ）
+_SCREEN_FRAC = (0.92, 0.85)
+_FALLBACK_FIGSIZE_IN = (12.0, 8.0)
+
+
+def _best_grid(n: int, width: float, height: float, panel_aspect: float = 1.0) -> tuple[int, int]:
+    """`n`枚のパネルを`width×height`の領域に並べたとき、1枚の大きさが最大になる`(行, 列)`。
+
+    パネルは縦横比`panel_aspect`（幅/高さ）で描かれる（`set_aspect("equal")`のコースは
+    ほぼ正方形）ので、セルの幅と高さのうち律速する側で1枚の大きさが決まる。
+    同じ大きさなら空き枠の少ない方を選ぶ。
+    """
+    best: tuple[float, int, int, int] | None = None
+    for cols in range(1, n + 1):
+        rows = -(-n // cols)
+        cell_w, cell_h = width / cols, height / rows
+        scale = min(cell_w / panel_aspect, cell_h)
+        key = (round(scale, 6), -(rows * cols - n), rows, cols)
+        if best is None or key[:2] > best[:2]:
+            best = key
+    return best[2], best[3]
+
+
+def _panel_area(fig) -> tuple[float, float]:
+    """パネルに使える図の領域 [inch]（suptitleぶんを除く）。"""
+    w, h = fig.get_size_inches()
+    return float(w), max(0.1, float(h) - _SUPTITLE_H_IN)
+
+
+def _title_fontsize(fig, rows: int, cols: int) -> float:
+    """パネル1枚の大きさに比例したタイトルの文字サイズ [pt]。
+    「medium+障害物 | 走行中 | v=1.23m/s」（約30字）がセル幅に収まる程度に縮める。"""
+    w, h = _panel_area(fig)
+    cell_in = min(w / cols, h / rows)
+    # 約30字×文字幅0.6em ≒ 18em。係数3.0ならセル幅の約75%に収まる
+    return float(np.clip(cell_in * 3.0, 6.0, 12.0))
+
+
+def _initial_figsize(dpi: float) -> tuple[float, float]:
+    """画面に収まる初期ウィンドウの大きさ [inch]。画面サイズはtkinterで取る
+    （matplotlibのバックエンドに依らない。macOSの既定`macosx`にも画面サイズを問う口が無い）。"""
+    try:
+        import tkinter
+        root = tkinter.Tk()
+        root.withdraw()
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+    except Exception:                                                  # noqa: BLE001
+        return _FALLBACK_FIGSIZE_IN
+    return sw * _SCREEN_FRAC[0] / dpi, sh * _SCREEN_FRAC[1] / dpi
 
 
 def run(args: argparse.Namespace) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
-    from matplotlib.patches import Polygon
+    from matplotlib.patches import Circle, Polygon
 
     set_japanese_font()
     plt.style.use("dark_background")
@@ -171,44 +252,54 @@ def run(args: argparse.Namespace) -> None:
 
     footprint = np.asarray(VehicleSpec.load().footprint)
 
-    # 5本のeval固定コースを2行3列(6分割、1枠は空き)に並べる。
-    # 1行に並べていた旧レイアウトはウィンドウを小さくするとタイトルが重なった——
-    # constrained_layoutでウィンドウリサイズの都度、余白・タイトル位置を再計算させる
-    ncols = 3
-    nrows = -(-len(panels) // ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 4.2 * nrows),
-                             constrained_layout=True)
-    axes_flat = np.asarray(axes).reshape(-1)
-    for ax in axes_flat[len(panels):]:
-        ax.axis("off")
+    # 画面に収まる大きさで開き、ウィンドウのリサイズのたびに行×列を選び直す。
+    # 固定の3列だと9枚で縦12.6インチになり、Macの画面(高さ956pt)に収まらなかった。
+    # 余白・タイトル位置はconstrained_layoutが再計算する
+    fig = plt.figure(figsize=_initial_figsize(plt.rcParams["figure.dpi"]), layout="constrained")
+    layout = [_best_grid(len(panels), *_panel_area(fig))]
+    gs = fig.add_gridspec(*layout[0])
+    axes_flat = [fig.add_subplot(gs[i // layout[0][1], i % layout[0][1]])
+                 for i in range(len(panels))]
     fig.suptitle(f"ml_lidar ライブ観戦 — run={args.run_name}")
 
     artists = []
     for ax, panel in zip(axes_flat, panels):
         ax.set_aspect("equal")
+        # 座標の目盛りは観戦に不要。小さい画面では目盛りの余白が地図を圧迫する
+        ax.set_xticks([])
+        ax.set_yticks([])
         course = panel.base_env.course
         h, w = course.grid.shape
         extent = (course.origin[0], course.origin[0] + w * course.resolution,
                  course.origin[1], course.origin[1] + h * course.resolution)
         ax.imshow(course.grid, extent=extent, origin="lower", cmap="Greys",
                  vmin=0, vmax=1, alpha=0.6)
-        # 理想ライン(MCL)を薄く重ねる。学習には関与しない診断用オーバーレイなので、
-        # 報酬に理想ラインを使わない設定でも、コースが決まれば常に描く（`watch.py`と同じ方針）。
-        # コースは固定(EVAL_COURSE_PARAMS)なので毎フレームではなく初期化時に1回だけ計算する
-        if course.centerline is not None:
-            vehicle_half_width_m = float(np.abs(footprint[:, 1]).max())
-            raceline_xy = compute_raceline_xy(course.centerline, course.width,
-                                              vehicle_half_width_m=vehicle_half_width_m,
-                                              course=course)
-            closed = np.vstack([raceline_xy, raceline_xy[:1]])
-            ax.plot(closed[:, 0], closed[:, 1], color="tab:orange", linewidth=1.0,
-                   linestyle="--", zorder=3)
+        # 障害物は格子にも刻まれているが、半径5cm程度だと灰色の点に埋もれるので輪郭を重ねる
+        if course.obstacles is not None:
+            for ox, oy, r in course.obstacles:
+                ax.add_patch(Circle((ox, oy), r, facecolor="none", edgecolor="tab:orange",
+                                    linewidth=1.5, zorder=3))
         body_poly = Polygon(np.zeros((4, 2)), closed=True, facecolor="tab:blue",
                             edgecolor="white", zorder=5)
         ax.add_patch(body_poly)
         scatter = ax.scatter([], [], s=3, c="tab:red", zorder=4)
         title = ax.set_title(panel.name)
         artists.append((body_poly, scatter, title))
+
+    def _relayout(_event=None) -> None:
+        rows, cols = _best_grid(len(panels), *_panel_area(fig))
+        if (rows, cols) != layout[0]:
+            layout[0] = (rows, cols)
+            new_gs = fig.add_gridspec(rows, cols)
+            for i, ax in enumerate(axes_flat):
+                ax.set_subplotspec(new_gs[i // cols, i % cols])
+        size = _title_fontsize(fig, rows, cols)
+        for _, _, title in artists:
+            title.set_fontsize(size)
+        fig.canvas.draw_idle()
+
+    _relayout()
+    fig.canvas.mpl_connect("resize_event", _relayout)
 
     # 直前フレームからの実経過時間ぶんだけシムを進める（fixed-timestep-with-catchup）。
     # 「毎フレーム必ず1step」だと、描画・学習プロセスとのCPU競合でフレーム間隔が

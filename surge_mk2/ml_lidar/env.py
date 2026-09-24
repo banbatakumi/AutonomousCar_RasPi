@@ -163,6 +163,7 @@ from sim.params import SimParams
 from sim.vehicle import DriveInput, VehicleModel, VehicleSpec
 
 from .course_gen import random_walk_loop_course
+from .obstacles import add_obstacles
 from .sim_support import pump_lidar_until_scan, stm_us
 
 __all__ = ["EnvConfig", "LidarE2EEnv"]
@@ -210,7 +211,12 @@ class EnvConfig:
     #: `steer_angle_weight`）は3つとも失敗し撤去済み（モジュールdocstring「v21」参照）。
     #: **行動空間そのものに構造的な上限をかけるこの方法だけが、これまで唯一効いた**
     #: （v13）ので、報酬を複雑化せずに滑らかさを追う手段としてここを絞る
-    steer_rate_max_rad_s: float = 1.0
+    #:
+    #: **v25(2026-09-24)で1.0→1.5に上げた。** 静的障害物を入れたv24（1.0）の失敗は
+    #: 衝突・停止とも障害物の直前に集中し、衝突は減速せず1.4m/sのまま避けきれずに起きていた
+    #: ——1.0では1.4m/sで舵を0→最大まで切るのに0.73m走る計算で、回避の舵が間に合わない、
+    #: という読み。2.0（v22）へ戻すと滑らかさを失うので中間を取った（PROGRESS.md 2026-09-24節）
+    steer_rate_max_rad_s: float = 1.5
     steer_tau: float = 0.10           # `e2e_lidar.py`の`steer_tau`既定と同じ
     #: v3検証(2026-09-07)で-10.0だと学習後半(400k~1Mstep)にかけて速度が単調に上がる一方で
     #: 汎化コースでの衝突率も0%→10%前後まで悪化する傾向が実測された——`progress`が速度に
@@ -222,6 +228,13 @@ class EnvConfig:
     randomize_lidar: bool = True
     randomize_dynamics: bool = True
     dynamics_jitter_frac: float = 0.2
+    #: 静的な円柱障害物を置くコースの割合（2026-09-24）。**0なら乱数を1つも消費しない**
+    #: ——v23以前のrun・評価と同じシードで同じコース列になる。置くコースでは
+    #: 1〜`max_obstacles`個を一様に引き、`ml_lidar/obstacles.py`が1個ずつ通過可能性を
+    #: 確かめてから刻む（通れない配置は学習させない。同モジュールdocstring参照）。
+    #: 固定コース（`course=`指定、evalの使い回し）には置かない
+    obstacle_prob: float = 0.0
+    max_obstacles: int = 4
 
 
 class LidarE2EEnv(gym.Env):
@@ -281,6 +294,12 @@ class LidarE2EEnv(gym.Env):
                 break
             if self._fixed_course is not None:
                 break  # 固定コースは作り直せない。壁埋まりはコース側の不備として諦める
+        # 障害物はスタート地点の前後を避けて置く（`obstacles._START_CLEAR_*`）ので、
+        # 上のスタート姿勢の壁埋まり判定をやり直す必要はない
+        if (self._fixed_course is None and self.cfg.obstacle_prob > 0.0
+                and self._rng.random() < self.cfg.obstacle_prob):
+            n = int(self._rng.integers(1, self.cfg.max_obstacles + 1))
+            add_obstacles(course, self._rng, n, spec)
         self.course = course
         self._body = body
         self._prepare_centerline(course)

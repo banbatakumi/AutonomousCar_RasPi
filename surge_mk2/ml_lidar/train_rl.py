@@ -189,6 +189,8 @@ def build_env_config(args: argparse.Namespace) -> EnvConfig:
         steer_tau=args.steer_tau,
         steer_rate_max_rad_s=args.steer_rate_max_rad_s,
         dynamics_jitter_frac=args.dynamics_jitter_frac,
+        obstacle_prob=args.obstacle_prob,
+        max_obstacles=args.max_obstacles,
     )
 
 
@@ -445,13 +447,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fov-deg", type=float, default=270.0)
     p.add_argument("--max-range", type=float, default=10.0, help="[m] LiDAR観測レンジ")
     p.add_argument("--steer-tau", type=float, default=0.10, help="[s] プランナ側の舵平滑化")
-    p.add_argument("--steer-rate-max-rad-s", type=float, default=1.0,
+    p.add_argument("--steer-rate-max-rad-s", type=float, default=1.5,
                    help="[rad/s] a[0](-1..1)を舵角速度として解釈するスケール(v13、"
                         "env.py EnvConfig docstring参照)。**既定はv23で2.0→1.0**"
                         "——dt=0.10では1決定あたり0.1rad(max_steerの19%%)となり、v13が"
                         "意図した権限に戻る(dtを0.05→0.10にした際に据え置いたため2倍に"
                         "なっていた)。理想ライン追従に必要な舵角速度のp90(0.954rad/s)を"
-                        "賄える値。報酬を複雑化せずに舵の滑らかさを追うための構造的制約")
+                        "賄える値。報酬を複雑化せずに舵の滑らかさを追うための構造的制約。"
+                        "**v25で1.0→1.5**（障害物の回避で舵が間に合わなかったため）")
 
     # ── 評価 ──
     p.add_argument("--eval-freq", type=int, default=20_000,
@@ -474,6 +477,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # ── ドメインランダム化 ──
     p.add_argument("--dynamics-jitter-frac", type=float, default=0.2,
                    help="車両動特性(tau_steer_s等)を既定値の±何割ランダム化するか")
+    # 静的障害物（`ml_lidar/obstacles.py`）。既定0＝無効でv23以前と同じ分布
+    # ★既定はv25から0.5。`EnvConfig.obstacle_prob`の既定は0のまま——旧runの
+    # env_config.jsonにはこのキーが無く、EnvConfigの既定が使われるため
+    p.add_argument("--obstacle-prob", type=float, default=0.5,
+                   help="静的な円柱障害物を置くコースの割合（0で無効）")
+    p.add_argument("--max-obstacles", type=int, default=4,
+                   help="障害物を置くコースで1〜この個数を一様に引く")
     p.add_argument("--no-randomize-lidar", action="store_true")
     p.add_argument("--no-randomize-dynamics", action="store_true")
 

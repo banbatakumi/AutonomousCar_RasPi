@@ -279,7 +279,8 @@ class App:
             # v23(2026-09-22): 2.0→1.0。dt=0.10では1決定あたり最大0.1rad
             # （max_steerの19%）で、v13が意図した権限に戻る。理想ライン追従に
             # 必要な舵角速度のp90(0.954rad/s)を賄える値（env.py EnvConfig docstring参照）
-            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "1.0"),
+            # v25(2026-09-24): 1.0→1.5。障害物の直前で回避の舵が間に合わず衝突していたため
+            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "1.5"),
             # v16〜v20で足した報酬罰則3種(steer-effort/raceline/steer-angle)は
             # 2026-09-17に全て撤去した。実測でタイム欠損の主因がライン取りではなく
             # 速度だと判明し、かつステア絶対値罰は文献(Evans 2021 arXiv:2103.10098)で
@@ -347,6 +348,8 @@ class App:
             "max-range": ("LiDAR最大レンジ[m]", "10.0"),
             "steer-tau": ("舵の平滑化[s]", "0.10"),
             "dynamics-jitter-frac": ("車両動特性のランダム化幅[割合]", "0.2"),
+            "obstacle-prob": ("静的障害物を置くコースの割合", "0.5"),
+            "max-obstacles": ("障害物の最大個数/コース", "4"),
             # gSDE有効時しか効かないので詳細側に置く（既定はgSDE OFF）
             "sde-sample-freq": ("gSDEノイズ再サンプリング間隔[step]", "4"),
             "eval-freq": ("eval間隔[step]", "20000"),

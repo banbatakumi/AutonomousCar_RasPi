@@ -94,7 +94,12 @@ def reference_lap(course: Course, spec: VehicleSpec,
         # 手描きコースはこれ）では、`_lateral_bounds()`が壁までのレイキャストに
         # これを使う。渡し忘れるとtoyota/course1のような観戦用コースで
         # ValueErrorになる（2026-09-22に実際に踏んだ）
-        course=course)
+        course=course,
+        # 障害物のあるコースでは箱制約を障害物の無い側へ狭める（`sim.raceline`の
+        # `_narrow_bounds_for_obstacles`）。★法線オフセットで表すので、障害物をかわす
+        # 経路の表現力は2026-09-24に分かった「内側の弦を表せない」問題と同じ限界がある。
+        # 障害物ありの`lap_ratio`は目安にとどめ、衝突・完走・停止の率を主に見ること
+        obstacles=course.obstacles)
     v = compute_speed_profile(course.centerline, offsets, mu=spec.mu, max_speed=max_speed,
                               drive_accel_m_s2=spec.drive_accel_m_s2,
                               brake_decel_m_s2=spec.brake_decel_m_s2)
@@ -161,6 +166,7 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
         path.append((env.unwrapped.vehicle.x, env.unwrapped.vehicle.y))
     lap_done = bool(terminated and not collided)
     course = env.unwrapped.course
+    n_obstacles = 0 if course.obstacles is None else int(len(course.obstacles))
     width_m = float(course.width) if np.isscalar(course.width) else float(np.median(course.width))
     ideal_lap_s, ideal_len_m, ideal_travel_per_m = reference_lap(
         course, env.unwrapped.vehicle.spec, cfg.max_speed)
@@ -189,6 +195,10 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
         "reward": total_reward,
         "steps": steps,
         "collided": collided,
+        # 衝突も完走もせず打ち切り＝止まった（または極端に遅い）。障害物の前で
+        # 「止まれば安全」に縮退していないかを見る（`obstacles.py`のdocstring参照）
+        "stalled": (not collided) and (not lap_done),
+        "n_obstacles": n_obstacles,
         "width_m": width_m,
         "lap_done": lap_done,
         "lap_time_s": lap_time_s,
@@ -225,6 +235,7 @@ def evaluate(model: PPO, cfg: EnvConfig, *, n_episodes: int, episode_s: float,
         "n_episodes": n,
         "collision_rate": sum(e["collided"] for e in episodes) / n,
         "lap_rate": sum(e["lap_done"] for e in episodes) / n,
+        "stall_rate": sum(e["stalled"] for e in episodes) / n,
         "mean_lap_time_s": _mean_of("lap_time_s"),
         "mean_lap_ratio": _mean_of("lap_ratio"),
         "mean_dist_ratio": _mean_of("dist_ratio"),
@@ -239,6 +250,7 @@ def evaluate(model: PPO, cfg: EnvConfig, *, n_episodes: int, episode_s: float,
         "steer_rate_mean": float(np.mean([e["steer_rate_mean"] for e in episodes])),
         "steer_reversals_per_s": float(np.mean([e["steer_reversals_per_s"] for e in episodes])),
         "by_width": by_width(episodes),
+        "by_obstacles": by_obstacles(episodes),
         "episodes": episodes,
     }
 
@@ -271,6 +283,25 @@ def by_width(episodes: list[dict]) -> list[dict]:
     return out
 
 
+def by_obstacles(episodes: list[dict]) -> list[dict]:
+    """障害物の個数ごとの衝突・完走・停止の率。0個のバケットで「障害物に備えて
+    常に遅くなっていないか」を、1個以上で「避けられているか」を読む。"""
+    out = []
+    for k in sorted({e["n_obstacles"] for e in episodes}):
+        bucket = [e for e in episodes if e["n_obstacles"] == k]
+        ratios = [e["lap_ratio"] for e in bucket if e["lap_ratio"] is not None]
+        out.append({
+            "n_obstacles": k,
+            "n": len(bucket),
+            "collision_rate": sum(e["collided"] for e in bucket) / len(bucket),
+            "lap_rate": sum(e["lap_done"] for e in bucket) / len(bucket),
+            "stall_rate": sum(e["stalled"] for e in bucket) / len(bucket),
+            "mean_lap_ratio": float(np.mean(ratios)) if ratios else None,
+            "mean_speed": float(np.mean([e["mean_speed"] for e in bucket])),
+        })
+    return out
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ml_lidar 複数シード・複数コースの統計評価")
     p.add_argument("--model", required=True, type=Path)
@@ -286,6 +317,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-range", type=float, default=10.0)
     p.add_argument("--max-speed", type=float, default=2.0)
     p.add_argument("--steer-tau", type=float, default=0.10)
+    # 障害物はモデルの観測・行動契約ではなく評価条件なので、env_config.jsonより優先して
+    # 上書きできる（障害物を見たことのない旧モデルを障害物コースで測るため）
+    p.add_argument("--obstacle-prob", type=float, default=None,
+                   help="障害物を置くコースの割合（省略時はenv_config.jsonの値、旧runは0）")
+    p.add_argument("--max-obstacles", type=int, default=None,
+                   help="1コースあたりの障害物の上限（省略時はenv_config.jsonの値）")
     return p.parse_args(argv)
 
 
@@ -300,6 +337,10 @@ def main(argv: list[str] | None = None) -> None:
     # 統計評価は学習の汎化そのものを見るためのものなので、ランダム化は常にONにする
     # （固定・ノイズ無効のtrain_rl.py evalとは目的が違う）
     cfg = dataclasses.replace(cfg, randomize_lidar=True, randomize_dynamics=True)
+    if args.obstacle_prob is not None:
+        cfg = dataclasses.replace(cfg, obstacle_prob=args.obstacle_prob)
+    if args.max_obstacles is not None:
+        cfg = dataclasses.replace(cfg, max_obstacles=args.max_obstacles)
 
     model = PPO.load(str(args.model), device="cpu")
     result = evaluate(model, cfg, n_episodes=args.episodes, episode_s=args.episode_s,
@@ -311,7 +352,8 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"episodes={result['n_episodes']} "
          f"collision_rate={result['collision_rate']:.1%} "
-         f"lap_rate={result['lap_rate']:.1%}")
+         f"lap_rate={result['lap_rate']:.1%} "
+         f"stall_rate={result['stall_rate']:.1%}")
     # ★第一指標。lap_ratio ≈ dist_ratio / speed_ratio に分解して、タイムを
     # 「ライン（遠回り）」で失っているのか「速度」で失っているのかを読む
     print(f"  lap_time={_fmt('mean_lap_time_s', '.2f')}s "
@@ -331,6 +373,13 @@ def main(argv: list[str] | None = None) -> None:
         lap = "n/a" if b["mean_lap_ratio"] is None else f"{b['mean_lap_ratio']:.3f}"
         print(f"  道幅{b['width_lo']:.1f}〜{hi}m (n={b['n']:3d}): "
              f"collision={b['collision_rate']:5.1%} lap_ratio={lap} speed={b['mean_speed']:.2f}")
+
+    if len(result["by_obstacles"]) > 1 or result["by_obstacles"][0]["n_obstacles"] > 0:
+        for b in result["by_obstacles"]:
+            lap = "n/a" if b["mean_lap_ratio"] is None else f"{b['mean_lap_ratio']:.3f}"
+            print(f"  障害物{b['n_obstacles']}個 (n={b['n']:3d}): "
+                 f"collision={b['collision_rate']:5.1%} stall={b['stall_rate']:5.1%} "
+                 f"lap_ratio={lap} speed={b['mean_speed']:.2f}")
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

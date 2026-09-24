@@ -44,6 +44,36 @@ def _tiny_model(cfg: EnvConfig) -> PPO:
 
 
 class TestLiveWatch(unittest.TestCase):
+    def test_best_grid_follows_window_shape(self) -> None:
+        """横長なら列を増やし、縦長なら行を増やす。どの場合も全パネルが入る。"""
+        from ml_lidar.live_watch import _best_grid
+
+        self.assertEqual(_best_grid(9, 13.5, 7.7), (2, 5))   # Macの画面（横長）
+        self.assertEqual(_best_grid(9, 10.0, 10.0), (3, 3))  # 正方形
+        rows, cols = _best_grid(9, 5.0, 12.0)                # 縦長
+        self.assertGreater(rows, cols)
+        for n in range(1, 12):
+            for w, h in [(13.5, 7.7), (5.0, 12.0), (20.0, 3.0)]:
+                r, c = _best_grid(n, w, h)
+                self.assertGreaterEqual(r * c, n)
+                self.assertLess(r * c - n, c, "丸ごと空いた行がある")
+
+    def test_obstacle_panels_only_for_obstacle_runs(self) -> None:
+        """障害物ありで学習したrunだけ障害物パネルが増え、障害物なしのパネルは汚さない。"""
+        from ml_lidar.live_watch import _OBSTACLE_PANELS
+
+        clean = _build_panels(EnvConfig(fov_deg=60.0), max_episode_steps=10)
+        self.assertEqual(len(clean), len(EVAL_COURSE_PARAMS))
+        self.assertTrue(all(p.base_env.course.obstacles is None for p in clean))
+
+        panels = _build_panels(EnvConfig(fov_deg=60.0, obstacle_prob=0.5), max_episode_steps=10)
+        self.assertEqual(len(panels), len(EVAL_COURSE_PARAMS) + len(_OBSTACLE_PANELS))
+        base, extra = panels[:len(EVAL_COURSE_PARAMS)], panels[len(EVAL_COURSE_PARAMS):]
+        self.assertTrue(all(p.base_env.course.obstacles is None for p in base))
+        for p in extra:
+            self.assertIsNotNone(p.base_env.course.obstacles, p.name)
+            self.assertIn("障害物", p.name)
+
     def test_uses_checkpoints_when_no_best_model(self) -> None:
         import tempfile
 
