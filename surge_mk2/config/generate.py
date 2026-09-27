@@ -91,6 +91,10 @@ def gen_ts(spec: dict) -> str:
         f"  cmdDeadmanMs: {float(safety.get('cmd_deadman_ms', 150))},",
         "  /** `auto/cmd` がこれだけ古ければ制動に読み替える [ms] */",
         f"  autoCmdStaleMs: {float(safety.get('auto_cmd_stale_ms', 200))},",
+        "  /** COMMAND に毎回載せるレート制限（STM32 側の保険）。シム（`ml_lidar/env.py`）も",
+        "   * 同じ値を使うので、GUI 側に直書きしない */",
+        f"  cmdAccelLimit: {float(safety.get('cmd_accel_limit_m_s2', 6.0))}, // m/s²",
+        f"  cmdSteerRateLimit: {float(safety.get('cmd_steer_rate_limit_rad_s', 7.0))}, // rad/s",
         "} as const",
         "",
     ])

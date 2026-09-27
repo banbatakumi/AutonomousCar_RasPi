@@ -78,6 +78,12 @@ class TestScales(unittest.TestCase):
         self.assertTrue(st.drive_power_locked)
         self.assertEqual(st.mode, packets.Mode.MANUAL)
         self.assertEqual(st.faults, ["drive_undervoltage"])
+        self.assertFalse(st.abs_active)
+
+    def test_abs_active_flag_is_decoded(self):
+        """★v0.15: bit20 = ABS が制動を削っている最中。"""
+        st = StateBuilder().build(telem(flags=packets.FLG_ABS_ACTIVE), 0)
+        self.assertTrue(st.abs_active)
 
     def test_stopped_flag_keeps_raw_speed(self):
         """デッドバンドは生値を書き換えない。判断だけを別に持つ。"""

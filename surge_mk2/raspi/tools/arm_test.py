@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from raspi.core.link_tracker import LinkTracker  # noqa: E402
 from raspi.io.gpio import PIN_HEARTBEAT, Heartbeat, open_output  # noqa: E402
 from raspi.io.serial_link import SerialLink  # noqa: E402
+from raspi.proto import UART_BAUD  # noqa: E402
 from raspi.proto import packets as P  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
 
@@ -225,7 +226,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
     try:
-        link = SerialLink("/dev/serial0", 250_000)
+        link = SerialLink("/dev/serial0", UART_BAUD)
     except Exception as e:
         print(f"ポートを開けない: {e}", file=sys.stderr)
         pin.close()

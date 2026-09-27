@@ -91,19 +91,27 @@ class Watcher:
 
     def step(self) -> dict:
         """1制御周期ぶん進める。`E2ELidar.plan()`の戻り値をそのまま反映する。"""
-        vs = VehicleState(speed=self.vehicle.speed, steer_actual=self.vehicle.steer_actual)
+        vs = VehicleState(speed=self.vehicle.speed_measured, steer_actual=self.vehicle.steer_actual)
         params = E2ELidar.merged({})
         state = self.planner.plan(self.scan, vs, params, self.dt)
 
+        sp = self.vehicle.spec
+        # 実機のCOMMANDと同じくGUIのレート制限を載せ、制御遅延ぶん前の指令を効かせる
+        # （`ml_lidar/env.py`の`step()`と同じ扱い）
         cmd = DriveInput(armed=True, brake=state.brake,
                          target_speed=0.0 if state.brake else state.target_speed,
-                         target_steer=state.target_steer)
+                         target_steer=state.target_steer,
+                         accel_limit=sp.cmd_accel_limit_m_s2,
+                         steer_rate_limit=sp.cmd_steer_rate_limit_rad_s)
 
         n_sub = max(1, int(round(self.dt / self.physics_substep)))
         sub_dt = self.dt / n_sub
+        n_delay = min(n_sub, int(round(sp.control_latency_s / sub_dt)))
+        prev_cmd = getattr(self, "_applied_cmd", None) or cmd
+        self._applied_cmd = cmd
         collided = False
-        for _ in range(n_sub):
-            self.vehicle.apply(cmd)
+        for i in range(n_sub):
+            self.vehicle.apply(prev_cmd if i < n_delay else cmd)
             self.vehicle.step(sub_dt)
             self.t_ns += int(round(sub_dt * NS))
             hit = self.course.collides(self.vehicle.x, self.vehicle.y, self.vehicle.yaw, self.body)

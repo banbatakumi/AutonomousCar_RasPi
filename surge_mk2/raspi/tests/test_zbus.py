@@ -260,3 +260,27 @@ class TestTopicOwner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlanningVehicleStatePolicy(BusCase):
+    """planning_node は `vehicle_state` を全サンプル受ける（2026-09-27）。LATEST だと `plan()` が
+    TELEMETRY の間隔（10ms）より長い周に途中のサンプルが捨てられ、脱スキュー・`SensorGuard`・
+    `DeadReckon` の「全サンプル」の前提が崩れていた。"""
+
+    def test_all_samples_arrive_and_latest_is_the_last(self):
+        from raspi.bus import Publisher, Subscriber
+        from raspi.nodes.planning_node import VEHICLE_STATE_POLICY
+
+        pub = self.track(Publisher("io"))
+        sub = self.track(Subscriber({TOPIC_VEHICLE_STATE: VEHICLE_STATE_POLICY}))
+        # 接続が確立するまで送り続ける（slow joiner）
+        end = time.monotonic() + 2.0
+        while not sub.poll(20) and time.monotonic() < end:
+            pub.send(TOPIC_VEHICLE_STATE, VehicleState(t_capture=0))
+        # plan() が長くて 50 サンプル分読まなかった
+        for i in range(1, 51):
+            pub.send(TOPIC_VEHICLE_STATE, VehicleState(t_capture=i))
+        time.sleep(0.1)
+        got = [m.t_capture for _, m in _pump(sub, want=50) if m.t_capture > 0]
+        self.assertEqual(got, list(range(1, 51)))
+        self.assertEqual(sub.latest[TOPIC_VEHICLE_STATE].t_capture, 50)

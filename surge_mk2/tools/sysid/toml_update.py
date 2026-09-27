@@ -17,10 +17,25 @@ import tomlkit
 __all__ = ["ALLOWED_KEYS", "apply_dynamics"]
 
 #: このツールが書き込んでよいキー（[dynamics]直下のみ）。
-#: `rolling_resistance`・`drive_ratio` は対象外（`docs`参照。書こうとしたら
-#: `ValueError`にして誤って上書きしないようにする）
-ALLOWED_KEYS = {"tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s", "tau_speed_s", "mu",
-                "drive_accel_m_s2", "brake_decel_m_s2"}
+#: `drive_ratio` は対象外（書こうとしたら`ValueError`にして誤って上書きしないようにする）。
+#: `speed_filter_s`/`_order`・`speed_kp`/`speed_ki`/`speed_torque_max_nm`/`speed_ramp_max_m_s2` は
+#: ファームの定数（測るものではない）なので対象外。`tau_speed_s`（旧モデルの1次遅れ）は
+#: 2026-09-26 から測らない（速度はファームの PI、`sim/vehicle.py` の `SpeedController`）
+ALLOWED_KEYS = {"tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s", "mu",
+                "drive_accel_m_s2", "brake_decel_m_s2",
+                # 2026-09-24 追加（`tools/sysid/fit.py` の作り直し）
+                "drive_fade_speed_m_s", "drive_top_speed_m_s", "speed_decel_m_s2",
+                "steer_offset_rad", "steer_gain", "understeer_gradient", "control_latency_s",
+                # 2026-09-25 追加（舵のヒステリシス・ガタ・不感帯・非線形性）
+                "steer_gain_cubic", "steer_servo_hysteresis_rad",
+                "steer_link_hysteresis_rad", "steer_link_deadband_rad",
+                # 2026-09-25 追加（ヨーの遅れ: IMU のローパスとタイヤの緩和長）
+                "yaw_rate_filter_s", "yaw_relaxation_m",
+                # 2026-09-26 追加（第三者検証: 速度PI・ヨーの2次遅れ・サーボの定常ゲイン）
+                "speed_plant_gain", "rolling_resistance", "yaw_natural_freq_rad_s", "yaw_damping",
+                "steer_servo_gain",
+                # 2026-09-27 追加（ブレーキの強さ→減速度）
+                "brake_decel_per_nm"}
 
 
 def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]:

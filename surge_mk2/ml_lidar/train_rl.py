@@ -447,14 +447,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fov-deg", type=float, default=270.0)
     p.add_argument("--max-range", type=float, default=10.0, help="[m] LiDAR観測レンジ")
     p.add_argument("--steer-tau", type=float, default=0.10, help="[s] プランナ側の舵平滑化")
-    p.add_argument("--steer-rate-max-rad-s", type=float, default=1.5,
+    p.add_argument("--steer-rate-max-rad-s", type=float, default=1.0,
                    help="[rad/s] a[0](-1..1)を舵角速度として解釈するスケール(v13、"
                         "env.py EnvConfig docstring参照)。**既定はv23で2.0→1.0**"
                         "——dt=0.10では1決定あたり0.1rad(max_steerの19%%)となり、v13が"
                         "意図した権限に戻る(dtを0.05→0.10にした際に据え置いたため2倍に"
                         "なっていた)。理想ライン追従に必要な舵角速度のp90(0.954rad/s)を"
                         "賄える値。報酬を複雑化せずに舵の滑らかさを追うための構造的制約。"
-                        "**v25で1.0→1.5**（障害物の回避で舵が間に合わなかったため）")
+                        "v25で1.5を試したが障害物の失敗は減らず舵だけ忙しくなったので、"
+                        "**v26で1.0に戻した**")
 
     # ── 評価 ──
     p.add_argument("--eval-freq", type=int, default=20_000,
@@ -517,8 +518,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="gSDEのノイズ再サンプリング間隔[step]。小さいほど毎ステップ独立の"
                         "通常ノイズに近づき、大きいほど探索が単調になる。論文でPPOに対して"
                         "良好だった4〜8のオーダーを既定にしてある")
-    p.add_argument("--log-std-init", type=float, default=0.0,
-                   help="方策の探索ノイズ標準偏差の初期値(exp(log_std_init))。SB3既定は0.0だが、"
+    # v26(2026-09-26)で既定を0.0→-1.0（σ 1.0→0.37）。障害物ありのv24/v25は学習の最後まで
+    # σ≈0.6が残り、学習中の方策は自分のノイズで障害物コースの4割を衝突していた
+    # （PROGRESS.md 2026-09-26節）。gSDE無しで-3まで下げると探索が潰れた前歴があるので-1に留める
+    p.add_argument("--log-std-init", type=float, default=-1.0,
+                   help="方策の探索ノイズ標準偏差の初期値(exp(log_std_init))。SB3既定は0.0（v26から既定-1.0）。"
                         "gSDE有効時はノイズが方策側MLPの潜在層(net_archのpi、既定64次元。"
                         "features_dimそのものではない)ぶんの内積で作られるため、実効的な標準偏差が"
                         "理論上sqrt(latent_dim_pi)倍(既定なら8倍)に膨らむ——v11(log_std_init=0.0)で"

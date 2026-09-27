@@ -106,6 +106,7 @@ def decode_flags(flags: int) -> dict:
         "side_brake_active": bool(flags & packets.FLG_SIDE_BRAKE_ACTIVE),
         "winker_left_active": bool(flags & packets.FLG_WINKER_LEFT_ACTIVE),
         "winker_right_active": bool(flags & packets.FLG_WINKER_RIGHT_ACTIVE),
+        "abs_active": bool(flags & packets.FLG_ABS_ACTIVE),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 

@@ -60,8 +60,9 @@ _EVENT_SCHEMA: dict[str, Any] = {
     "additionalProperties": True,
 }
 
-#: `diag/link` を書く間隔。TELEMETRY 50Hz の 1/5 = 10Hz（replay_node --bus と同じ）
-_DIAG_EVERY = 5
+#: `diag/link` を書く間隔 [ns]（10Hz。replay_node --bus と同じ）。TELEMETRY の回数ではなく
+#: 記録の時刻で数える（TELEMETRY は 2026-09-26 に 50→100Hz。回数だと記録ごとに頻度が変わる）
+_DIAG_PERIOD_NS = 100_000_000
 
 
 class _McapSink:
@@ -111,13 +112,14 @@ def export(path: str | Path, out: str | Path, *, viz: bool = True,
     sink = _McapSink(log, clock=lambda: holder["node"]._cursor_ns)
     sink.viz = viz
     bridge = BusBridge(sink, clock=lambda: holder["node"]._cursor_ns)
-    n_telem = 0
+    next_diag = [0]
 
     def on_telemetry(t, t_pi_ns):
-        nonlocal n_telem
         bridge.on_telemetry(t, t_pi_ns)
-        n_telem += 1
-        if n_telem % _DIAG_EVERY == 0:
+        # 時刻同期の前（t_pi_ns が None）は STM32 の時刻で数える。逆行（ラップ・切り替え）したら数え直す
+        now = t_pi_ns if t_pi_ns is not None else t.t_us * 1000
+        if now >= next_diag[0] or now < next_diag[0] - 2 * _DIAG_PERIOD_NS:
+            next_diag[0] = now + _DIAG_PERIOD_NS
             node = holder["node"]
             bridge.publish_diag(node.state, node.sync, node.recorded_stats,
                                 arm_inhibited=True, cmd_source="replay",

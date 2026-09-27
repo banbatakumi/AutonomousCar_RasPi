@@ -65,9 +65,9 @@
 - **絶対方位が出ない。** 地磁気センサが無いため IMU の yaw は積分ドリフトする。
   `TELEMETRY` は `yaw_rate` のみを返す。**方位は SLAM（スキャンマッチング）で確定させる**
 - **車速から加速度を微分してはならない。** 前輪エンコーダは分解能が粗く、
-  STM32 側で 1〜2Hz の強いローパスを通した値が来る。加速度は IMU から取る
+  STM32 側で ADC 平均化＋1次ローパス（時定数約10ms）を通した値が来る。加速度は IMU から取る
 - **前輪は操舵輪。** 左右の回転差からヨーレートを推定するには Ackermann 幾何が要る
-- **超音波は 20Hz。** 50Hz の `TELEMETRY` に対し同じ値が連続する
+- **超音波は 20Hz。** 100Hz の `TELEMETRY` に対し同じ値が連続する
 - 詳細は [`uart_protocol.md`](uart_protocol.md) §5.3
 
 ### Raspberry Pi 5
@@ -86,7 +86,7 @@
 
 | 区間 | 方式 |
 |---|---|
-| STM32 ⇄ Pi 5 | UART **250000 bps** 8N1 + GPIO6 ハートビート |
+| STM32 ⇄ Pi 5 | UART **1000000 bps** 8N1 + GPIO6 ハートビート（2026-09-26 に 250000 bps から変更） |
 | Pi 5 ⇄ PC | Wi-Fi（AP / STA 切替）または 有線 Ethernet、WebSocket |
 
 ---
@@ -108,7 +108,7 @@
 │   認知・判断層                                            │
 │   知覚 → 自己位置推定 → 経路生成 → 行動判断                 │
 └────────────────────┬────────────────────────────────────┘
-                     │ UART 250kbps ＋ GPIO6 ハートビート
+                     │ UART 1Mbps ＋ GPIO6 ハートビート
 ┌────────────────────┴────────────────────────────────────┐
 │ STM32                                 100 Hz〜1 kHz      │
 │   リアルタイム制御層                                       │
@@ -335,14 +335,14 @@ class MsgBase(msgspec.Struct):
 | トピック | 型 | 頻度 | 発行元 |
 |---|---|---|---|
 | `scan` | LiDAR 1周分の点群（極座標 + 各点の時刻） | 10 Hz | io_node |
-| `vehicle_state` | 速度・各輪周速・路面舵角・累積オドメトリ・IMU・温度・電源2系統・フラグ | 50 Hz | io_node |
+| `vehicle_state` | 速度・各輪周速・路面舵角・累積オドメトリ・IMU・温度・電源2系統・フラグ | 100 Hz | io_node |
 | `image/front`, `image/rear` | 共有メモリ参照 | 15〜30 Hz | camera_node |
 | `grid/local` | ローカル占有格子 | 10 Hz | perception_node |
 | `pose` | 自己位置（map / odom） | 30 Hz | planning_node |
 | `path` | 生成経路 | 10 Hz | planning_node |
-| `cmd` | 目標速度・舵角 | 50 Hz | **telemetry_node（唯一の発行元。下記）** |
+| `cmd` | 目標速度・舵角 | `auto/cmd` の変化は即時＋50 Hz | **telemetry_node（唯一の発行元。下記）** |
 | `auto/ctrl` | どの自動運転モードで走るかの意思 | 5 Hz | telemetry_node |
-| `auto/cmd` | 自律走行の目標速度・舵角 | 50 Hz | planning_node |
+| `auto/cmd` | 自律走行の目標速度・舵角 | 新しい判断は即時＋50 Hz | planning_node |
 | `auto/state` | その判断の根拠（選んだギャップ等） | 10 Hz | planning_node |
 | `hb/<node>` | ハートビート | 10 Hz | 全ノード |
 | `diag` | 統計・エラーカウンタ | 1 Hz | 各ノード |

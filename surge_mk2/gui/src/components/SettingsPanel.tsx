@@ -228,6 +228,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const tcEnabled = link?.tc_enabled ?? null
   const tvEnabled = link?.tv_enabled ?? null
   const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
+  const absEnabled = link?.abs_enabled ?? null
   const autoStopMarginCm = link?.auto_stop_margin_cm ?? null
   // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
   // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
@@ -350,7 +351,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
           </section>
 
           {/* TC/TV・片輪浮き対策 も自動停止と同じく「STM32の機能を許可するかどうか」
-              （TC/TVは★v0.8、片輪浮き対策は★v0.9。片輪浮き対策はTC/TV本体とは独立した別機構）。
+              （TC/TVは★v0.8、片輪浮き対策は★v0.9、ABSは★v0.15。片輪浮き対策はTC/TV本体とは独立した別機構）。
               表示値は STM32 の CONFIG_ACK を経由したサーバ真値
               （`status.tc_enabled`/`tv_enabled`/`wheel_lift_guard_enabled`）。
               未確定（起動直後でまだ CONFIG_ACK が届いていない）間は null になる */}
@@ -383,6 +384,16 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 onChange={(e) => ch?.setWheelLiftGuard(e.target.checked)}
               />
               片輪浮き対策{wheelLiftGuardEnabled === null && '（未確認）'}
+            </label>
+            {/* ABS（★v0.15）。制動モード（ブレーキ・自動停止・フェイルセーフ）だけに効く */}
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={absEnabled ?? true}
+                disabled={absEnabled === null}
+                onChange={(e) => ch?.setAbs(e.target.checked)}
+              />
+              ABS{absEnabled === null && '（未確認）'}
             </label>
           </section>
 

@@ -10,6 +10,8 @@ import time
 import unittest
 from pathlib import Path
 
+import msgspec
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.io.serial_link import RxFrame  # noqa: E402
@@ -196,6 +198,8 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv = TelemetryServer.__new__(TelemetryServer)   # バスを開かずに中身だけ
         srv._last_cmd = None
         srv._last_cmd_ns = 0
+        srv._cmd_was_live = False
+        srv._last_auto_key = None
         srv.deadman_trips = 0
         srv.controller = None
         srv.controller_name = ""
@@ -250,6 +254,191 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(srv.deadman_trips, 1)
 
 
+class TestImmediateCmdRelay(unittest.IsolatedAsyncioTestCase):
+    """新しい `auto/cmd` はその場で `/cmd` へ中継する（2026-09-26）。**安全の判断は定期送信と
+    同じ関数を通す**ので、即時の経路からデッドマンをすり抜けた指令が出ることはない。"""
+
+    def _server(self, live: bool):
+        srv = TestWsDeadman._server(self)
+        srv._auto_engaged = True
+        srv._auto_mode = "ftg"
+        srv._auto_was_fresh = True
+        srv.auto_stalls = 0
+        if live:
+            srv._last_cmd = DriveCmd(mode=2, arm=True, accel_limit=6.0, steer_rate_limit=7.0,
+                                     source="gui:x")
+            srv._last_cmd_ns = time.monotonic_ns()
+        return srv
+
+    def _auto(self, srv, speed: float):
+        from raspi.msgs.types import TOPIC_AUTO_CMD
+        srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=speed,
+                                                  t_pub=time.monotonic_ns(), source="planning:ftg")
+
+    async def test_changed_auto_cmd_is_relayed_at_once_with_gui_settings(self):
+        srv = self._server(live=True)
+        self._auto(srv, 1.0)
+        srv._on_auto_cmd(time.monotonic_ns())
+        self.assertEqual(len(srv.published), 1)
+        m = srv.published[0][1]
+        self.assertEqual((m.mode, m.target_speed, m.steer_rate_limit), (2, 1.0, 7.0))
+        # 同じ中身（planning_node の 50Hz の繰り返し）は即時には送らない
+        self._auto(srv, 1.0)
+        srv._on_auto_cmd(time.monotonic_ns())
+        self.assertEqual(len(srv.published), 1)
+
+    async def test_deadman_still_wins_on_the_immediate_path(self):
+        """操縦者（GUI）が途絶えていれば、新しい判断が来ても DISARM しか出ない。"""
+        srv = self._server(live=False)
+        self._auto(srv, 1.5)
+        srv._on_auto_cmd(time.monotonic_ns())
+        self.assertTrue(srv.published)
+        self.assertTrue(all(m.mode == 0 and m.source == "deadman" for _, m in srv.published))
+
+
+class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
+    """自律中の加速度の上限は GUI の値と planner の値の**小さい方**（planner は締めるだけ、
+    2026-09-27）。"""
+
+    async def test_planner_can_only_tighten(self):
+        srv = TestImmediateCmdRelay._server(self, live=True)       # GUI の accel_limit は 6.0
+        from raspi.msgs.types import TOPIC_AUTO_CMD
+        for auto_lim, want in ((1.6, 1.6), (0.0, 6.0), (8.0, 6.0)):
+            srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=1.0, accel_limit=auto_lim,
+                                                      t_pub=time.monotonic_ns(), source="planning:x")
+            got = srv._merge_auto(srv._last_cmd, time.monotonic_ns())
+            self.assertEqual(got.accel_limit, want, auto_lim)
+        # GUI が 0（指定なし＝ファームの既定）なら planner の値
+        srv._last_cmd = msgspec.structs.replace(srv._last_cmd, accel_limit=0.0)
+        srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=1.0, accel_limit=1.6,
+                                                  t_pub=time.monotonic_ns(), source="planning:x")
+        self.assertEqual(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).accel_limit, 1.6)
+
+
+class TestAutoBrakeTorque(unittest.IsolatedAsyncioTestCase):
+    """自律中の制動トルク: planner の指定があればそれ、無ければ GUI の値。人（GUI）もブレーキを
+    掛けていれば強い方（0 は STM32 の最大＝一番強い）（2026-09-27）。"""
+
+    def _merge(self, gui_brake, gui_nm, auto_brake, auto_nm):
+        from raspi.msgs.types import TOPIC_AUTO_CMD
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        srv._last_cmd = msgspec.structs.replace(srv._last_cmd, brake=gui_brake, brake_torque=gui_nm)
+        srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, brake=auto_brake, brake_torque=auto_nm,
+                                                  t_pub=time.monotonic_ns(), source="planning:x")
+        m = srv._merge_auto(srv._last_cmd, time.monotonic_ns())
+        return m.brake, m.brake_torque
+
+    async def test_rules(self):
+        self.assertEqual(self._merge(False, 0.15, True, 0.04), (True, 0.04))    # planner の強さ
+        self.assertEqual(self._merge(False, 0.15, True, 0.0), (True, 0.15))     # 指定なし→GUI
+        self.assertEqual(self._merge(True, 0.10, True, 0.04), (True, 0.10))     # 人の方が強い
+        self.assertEqual(self._merge(True, 0.0, True, 0.04), (True, 0.0))       # 人は最大
+        self.assertEqual(self._merge(True, 0.05, False, 0.0), (True, 0.05))     # 人だけ
+
+
+class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
+    """人の操作（E-Stop・操縦権の解放・GUI の指令の変化）も、50Hz の定期送信を待たずに `/cmd`
+    へ出す（2026-09-27）。判断は定期送信と同じ `_publish_cmd` を通す。"""
+
+    def _server(self):
+        srv = TestWsDeadman._server(self)
+        srv._auto_engaged = False
+        srv._auto_mode = ""
+        srv._why_released = ""
+        srv.bad_cmds = 0
+
+        async def _noop(*a, **k):
+            return None
+        srv._broadcast_control_status = _noop
+        srv._send_json = _noop
+        srv.ws = object()
+        srv.controller = srv.ws
+        srv.controller_name = "x"
+        return srv
+
+    async def _send(self, srv, ws, **m):
+        import json
+        await srv._on_control(ws, json.dumps(m))
+
+    async def test_gui_cmd_is_relayed_only_when_changed(self):
+        srv = self._server()
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
+        self.assertEqual(len(srv.published), 1)
+        self.assertEqual((srv.published[0][1].mode, srv.published[0][1].target_speed), (1, 0.5))
+        # 同じ中身の繰り返しは即時には送らない（デッドマンの鮮度だけ更新）
+        t0 = srv._last_cmd_ns
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
+        self.assertEqual(len(srv.published), 1)
+        self.assertGreaterEqual(srv._last_cmd_ns, t0)
+        # 人のブレーキはその場で出る
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5, brake=True)
+        self.assertEqual(len(srv.published), 2)
+        self.assertTrue(srv.published[-1][1].brake)
+
+    async def test_same_cmd_after_deadman_is_relayed_again(self):
+        """デッドマンで DISARM を出した後に来た指令は、中身が同じでもその場で出す。"""
+        from raspi.nodes.telemetry_node import CMD_DEADMAN_NS
+        srv = self._server()
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
+        srv._last_cmd_ns -= CMD_DEADMAN_NS + 1
+        srv._publish_cmd(time.monotonic_ns())                 # 定期送信がデッドマンを出す
+        self.assertEqual(srv.published[-1][1].source, "deadman")
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
+        self.assertEqual(srv.published[-1][1].mode, 1)
+
+    async def test_estop_from_anyone_goes_out_at_once(self):
+        srv = self._server()
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=1.0)
+        await self._send(srv, object(), type="estop")        # 操縦権の無い接続からでも
+        m = srv.published[-1][1]
+        self.assertEqual((m.mode, m.source), (0, "deadman"))
+        self.assertIsNone(srv.controller)
+
+    async def test_release_goes_out_at_once(self):
+        srv = self._server()
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=1.0)
+        await self._send(srv, srv.ws, type="release_control")
+        self.assertEqual(srv.published[-1][1].mode, 0)
+
+
+class TestImmediateCommand(unittest.TestCase):
+    """io_node は `cmd` の中身が変わったらその場で COMMAND を送る（2026-09-26）。"""
+
+    def test_changed_cmd_goes_out_right_away_and_repeats_do_not_add_sends(self):
+        class TimedLink(FakeLink):
+            def send(self, packet):
+                self.sent.append((time.monotonic_ns(), packet))
+                return time.monotonic_ns()
+
+        class TimedSub(FakeSub):
+            """毎ループ同じ指令を流し、`t_change` 以降だけ速度を変える。"""
+
+            def __init__(self, t_change):
+                super().__init__()
+                self.t_change = t_change
+                self.t_seen = None
+
+            def poll(self, timeout_ms=0):
+                now = time.monotonic_ns()
+                speed = 0.5
+                if now >= self.t_change:
+                    speed = 1.0
+                    if self.t_seen is None:
+                        self.t_seen = now
+                return [("cmd", DriveCmd(mode=1, arm=True, target_speed=speed, source="gui"))]
+
+        link = TimedLink()
+        t0 = time.monotonic_ns()
+        sub = TimedSub(t0 + 104_000_000)
+        n = IoNode(link, sub=sub, allow_arm=True, max_speed=2.0)
+        n.run(duration_s=0.2)
+        cs = [(t, p) for t, p in link.sent if isinstance(p, packets.Command)]
+        first_new = next(t for t, p in cs if p.target_speed == 1000)
+        self.assertLess((first_new - sub.t_seen) / 1e6, 2.0)      # 定期送信だけなら最大10ms
+        # 同じ中身の繰り返しでは送信は増えない（100Hz の定期送信＋変化の1回ぶん）
+        self.assertLessEqual(len(cs), int(0.2 * 100) + 3)
+
+
 class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
     """操縦権は同時に1人だけ。2画面から舵を切ると再現困難な症状になる。"""
 
@@ -286,6 +475,11 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.auto_stalls = 0
         srv._publish_auto_ctrl = lambda: None      # バスに触らせない
         srv._save_auto_conf = lambda: None         # ディスクに触らせない
+        # 人の操作は `/cmd` をその場で出す（2026-09-27、`_relay_now`）。出したものは控えるだけ
+        srv._cmd_was_live = False
+        srv.cmds_published = 0
+        srv.published = []
+        srv.pub = type("P", (), {"send": lambda _s, topic, msg: srv.published.append((topic, msg))})()
         # ファン（Pi5純正クーリング）。**engage していない既定の状態**を組む
         from raspi.io.fan import FakeFan
         srv._fan = FakeFan()
@@ -545,3 +739,91 @@ class TestOriginCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIoWaitsOnLinkAndBus(unittest.TestCase):
+    """io_node は UART の受信とバスを同じ poller で待つ（2026-09-27）。以前は UART の1バイトを
+    `read_timeout`（5ms）待ってからでないと `/cmd` を読まず、即時の中継がそのぶん止まった。"""
+
+    def setUp(self):
+        import os
+        import socket
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = os.environ.get("SURGE_BUS_DIR")
+        os.environ["SURGE_BUS_DIR"] = self._tmp.name
+        self.a, self.b = socket.socketpair()
+
+    def tearDown(self):
+        import os
+        self.a.close()
+        self.b.close()
+        if self._old is None:
+            os.environ.pop("SURGE_BUS_DIR", None)
+        else:
+            os.environ["SURGE_BUS_DIR"] = self._old
+        self._tmp.cleanup()
+
+    def _node(self):
+        from raspi.bus import Publisher, Subscriber
+        from raspi.msgs.types import TOPIC_CMD
+        from raspi.nodes import io_node
+
+        sock = self.a
+
+        class FdLink(FakeLink):
+            def fileno(self):
+                return sock.fileno()
+
+            def poll(self, block=True):
+                sock.setblocking(False)
+                try:
+                    return [b"x"] if sock.recv(4096) else []
+                except BlockingIOError:
+                    return []
+
+        self.pub = Publisher("control")
+        self.sub = Subscriber([TOPIC_CMD])
+        node = io_node.IoNode(FdLink(), sub=self.sub)
+        node._poller = node._make_poller()
+        self.assertIsNotNone(node._poller)
+        # slow joiner: 購読が繋がるまで流す
+        end = time.monotonic() + 2.0
+        while not self.sub.poll(20) and time.monotonic() < end:
+            self.pub.send(TOPIC_CMD, DriveCmd(mode=0, source="warmup"))
+        return node
+
+    def _wait(self, node, trigger):
+        import threading
+        from raspi.nodes import io_node
+        th = threading.Timer(0.02, trigger)
+        th.start()
+        t0 = time.monotonic()
+        old = io_node.LINK_WAIT_S
+        io_node.LINK_WAIT_S = 1.0          # 上限では起きない長さにして、何で起きたかを見る
+        try:
+            got = node._poll_link(time.monotonic_ns(), time.monotonic_ns() + 10**9)
+        finally:
+            io_node.LINK_WAIT_S = old
+            th.join()
+        return time.monotonic() - t0, got
+
+    def test_bus_message_wakes_the_loop(self):
+        from raspi.msgs.types import TOPIC_CMD
+        node = self._node()
+        try:
+            dt, _ = self._wait(node, lambda: self.pub.send(TOPIC_CMD, DriveCmd(mode=1, source="gui")))
+            self.assertLess(dt, 0.3)
+        finally:
+            self.sub.close()
+            self.pub.close()
+
+    def test_uart_bytes_wake_the_loop_and_are_read(self):
+        node = self._node()
+        try:
+            dt, got = self._wait(node, lambda: self.b.send(b"\xaa\x55"))
+            self.assertLess(dt, 0.3)
+            self.assertTrue(got)
+        finally:
+            self.sub.close()
+            self.pub.close()

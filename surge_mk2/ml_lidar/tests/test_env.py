@@ -179,6 +179,28 @@ class TestEnvSmoke(unittest.TestCase):
         self.assertIn("progress_m", info)
         self.assertIn("collided", info)
 
+    def test_command_carries_gui_rate_limits(self) -> None:
+        """実機のCOMMANDと同じく、GUIが毎回載せるレート制限（`[safety]`）が入る。"""
+        env = self._make_env(seed=1)
+        env.reset(seed=0)
+        env.step(np.array([0.0, 0.3], dtype=np.float32))
+        sp = env.vehicle.spec
+        self.assertGreater(sp.cmd_steer_rate_limit_rad_s, 0.0)
+        self.assertEqual(env.vehicle.cmd.steer_rate_limit, sp.cmd_steer_rate_limit_rad_s)
+        self.assertEqual(env.vehicle.cmd.accel_limit, sp.cmd_accel_limit_m_s2)
+
+    def test_control_latency_delays_the_new_command(self) -> None:
+        """`control_latency_s`のあいだは前の指令が効く（発進が遅れる）。"""
+        speeds = []
+        for latency in (0.0, 0.05):
+            env = self._make_env(seed=1)
+            env.reset(seed=0)
+            env.vehicle.spec.control_latency_s = latency
+            env.step(np.array([0.0, 1.0], dtype=np.float32))
+            speeds.append(env.vehicle.speed)
+        self.assertGreater(speeds[0], 0.0)
+        self.assertLess(speeds[1], speeds[0] * 0.8)
+
     def test_collision_terminates_with_penalty(self) -> None:
         env = self._make_env(seed=2)
         env.reset(seed=0)

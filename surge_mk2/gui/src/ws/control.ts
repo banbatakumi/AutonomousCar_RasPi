@@ -337,6 +337,14 @@ export class ControlChannel {
   }
 
   /**
+   * STM32側の ABS（制動時の後輪ロック防止、★v0.15）の有効・無効を切り替える。
+   * `wheel_lift_guard` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。
+   */
+  setAbs(enabled: boolean) {
+    this.send({ type: 'abs', enabled })
+  }
+
+  /**
    * 自動停止（RC/AUTO 問わず COMMAND.flags bit7=AUTO_STOP）が使う安全マージンを
    * cm単位で直接指定する（★v0.12。範囲 0-100cm、既定15cm）。
    * `tc_tv`/`wheel_lift_guard` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。

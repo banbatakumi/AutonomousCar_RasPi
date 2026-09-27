@@ -2,10 +2,9 @@
 
     .venv/bin/python -m tools.sysid.gui
 
-GUIの「システム同定」タブでダウンロードしたmcapファイルを開き、
-`tau_steer_s`・`dead_time_s`・`steer_rate_limit_rad_s`・`tau_speed_s`・`mu`・
-`drive_accel_m_s2`・`brake_decel_m_s2`
-をフィッティングして `config/vehicle.toml` に書き戻す。
+GUIの「システム同定」タブでダウンロードしたmcapファイル（試験ごとに1つ）を開き、
+`tools/sysid/fit.py` で解析して `config/vehicle.toml` の `[dynamics]` に書き戻す。
+解析の所見（残差・測れなかった項目）も一緒に表示する。
 
 ネイティブGUIにしてあるのは、ファイル選択・結果の見比べ・適用の可否判断を
 ターミナル操作なしで完結させるため（バンビの補助ツール全般の方針）。
@@ -18,26 +17,20 @@ import tomllib
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import fit, toml_update
+from sim.vehicle import VehicleSpec
+
+from . import toml_update
+from .analyze import TESTS, analyze
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TOML = REPO_ROOT / "config" / "vehicle.toml"
 
-#: (内部キー, GUI表示名, このmcapから求めるパラメータ)
-TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("steer", "① ステア試験", ("tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s")),
-    ("speed", "② 加速試験", ("tau_speed_s",)),
-    ("corner", "③ 旋回グリップ試験", ("mu",)),
-    ("accel", "④ 加減速試験", ("drive_accel_m_s2", "brake_decel_m_s2")),
-)
-
-#: `[dynamics]`の全パラメータは物理的に0以下になり得ない（時定数・むだ時間・
-#: レート上限・摩擦係数・加減速度はいずれも正の量）。0.0や負値は`tools/sysid/fit.py`
-#: の測定失敗（配線ミス等）が無警告ですり抜けたサインである可能性が高いので、
-#: GUI側でも独立に検知して警告する（多層防御——fit.py側の例外送出が抜けても拾う）
+#: 物理的に正でなければおかしいパラメータ。0.0や負値は測定失敗（配線ミス等）が
+#: すり抜けたサインの可能性が高いので、GUI側でも独立に検知して警告する。
+#: むだ時間・物理上限・加減速の上限・減衰の速度・遅延は0（＝無し・観測できず）があり得るので含めない。
+#: 中立ずれ・アンダーステア勾配は符号つき
 _MUST_BE_POSITIVE = {
-    "tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s",
-    "tau_speed_s", "mu", "drive_accel_m_s2", "brake_decel_m_s2",
+    "tau_steer_s", "speed_plant_gain", "mu", "brake_decel_m_s2", "steer_gain", "steer_servo_gain",
 }
 
 
@@ -59,12 +52,14 @@ class SysIdApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("システム同定 — vehicle.toml 更新")
-        self.geometry("640x520")
+        self.geometry("760x720")
 
         self.toml_path = tk.StringVar(value=str(DEFAULT_TOML))
         self.file_vars: dict[str, tk.StringVar] = {}
         self.results: dict[str, float] = {}
         self.check_vars: dict[str, tk.BooleanVar] = {}
+        self.notes: dict[str, list[str]] = {}
+        self.warned: dict[str, str] = {}
 
         self._build()
 
@@ -110,33 +105,19 @@ class SysIdApp(tk.Tk):
     # ── 解析 ──
 
     def _analyze(self) -> None:
-        self.results.clear()
-        errors: list[str] = []
-
-        for key, label, params in TESTS:
-            path = self.file_vars[key].get()
-            if path in ("", "（未選択）"):
-                continue
-            try:
-                samples = fit.load_samples(path)
-                if key == "steer":
-                    out = fit.fit_steer(samples)
-                elif key == "speed":
-                    out = fit.fit_speed(samples)
-                elif key == "corner":
-                    out = fit.fit_corner(samples)
-                else:
-                    out = fit.fit_accel(samples)
-            except Exception as e:  # noqa: BLE001 - GUIでそのままエラー表示する
-                errors.append(f"{label}: {e}")
-                continue
-            for k in params:
-                if k in out:
-                    self.results[k] = out[k]
-
-        if errors:
-            messagebox.showerror("解析エラー", "\n".join(errors))
-
+        try:
+            base = VehicleSpec.load(self.toml_path.get())
+        except (OSError, ValueError) as e:
+            messagebox.showerror("vehicle.toml", str(e))
+            return
+        sources = {key: self.file_vars[key].get() for key, _, _ in TESTS
+                   if self.file_vars[key].get() not in ("", "（未選択）")}
+        res = analyze(sources, base)
+        self.results = res.results
+        self.notes = res.notes
+        self.warned = res.warned
+        if res.errors:
+            messagebox.showerror("解析エラー", "\n".join(res.errors))
         self._render_results()
 
     def _render_results(self) -> None:
@@ -157,7 +138,9 @@ class SysIdApp(tk.Tk):
         for row, key in enumerate(sorted(self.results), start=1):
             new_val = self.results[key]
             suspicious = _is_suspicious(key, new_val)
-            var = tk.BooleanVar(value=True)
+            # ★（記録がモデルの形から外れている）の出た試験の値は既定で適用しない
+            warned = self.warned.get(key)
+            var = tk.BooleanVar(value=warned is None)
             self.check_vars[key] = var
             ttk.Checkbutton(self.result_frame, variable=var).grid(row=row, column=0)
             ttk.Label(self.result_frame, text=key, width=24).grid(row=row, column=1, sticky="w")
@@ -166,8 +149,18 @@ class SysIdApp(tk.Tk):
             value_text = f"{old_s} → {new_val:.4g}"
             if suspicious:
                 value_text += "  ⚠ 0または異常値の疑い"
+            if warned is not None:
+                value_text += f"  ★{warned}の残差が大きい（既定で適用しない。所見を読んで判断）"
             ttk.Label(self.result_frame, text=value_text,
-                     foreground=("red" if suspicious else "black")).grid(row=row, column=2, sticky="w")
+                     foreground=("red" if suspicious or warned else "black")).grid(row=row, column=2, sticky="w")
+
+        # 所見（残差・測れなかった項目）。値を適用するかの判断材料
+        lines = [f"{label}: {n}" for label, ns in self.notes.items() for n in ns]
+        if lines:
+            box = tk.Text(self.result_frame, height=min(12, len(lines) + 1), wrap="word")
+            box.insert("1.0", "\n".join(lines))
+            box.configure(state="disabled")
+            box.grid(row=len(self.results) + 1, column=0, columnspan=3, sticky="we", pady=(8, 0))
 
     # ── 適用 ──
 

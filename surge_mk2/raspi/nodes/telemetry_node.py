@@ -265,8 +265,10 @@ _SAFETY = Vehicle.load()
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
-#: バスを覗きに行く間隔。20Hz 配信に対して十分細かく、CPU は無視できる
-BUS_POLL_S = 0.005
+#: バスを覗きに行く間隔。`auto/cmd` の即時中継（`_on_auto_cmd`）の待ちはこの間隔の平均半分。
+#: 2026-09-27 に 5→1ms（即時の経路に平均2.5ms・最大5ms残っていた）。poll(0) は数本の
+#: ソケットを覗くだけなので 1kHz でも負荷は小さい
+BUS_POLL_S = 0.001
 #: 操縦クライアントからの指令がこれだけ途絶したら DISARM に落とす（§9.4）。
 #: io_node の `CMD_TIMEOUT_NS` と**同じ値**（別々に判定するが数字は1つ）
 CMD_DEADMAN_NS = int(_SAFETY.cmd_deadman_ms * 1_000_000)
@@ -422,6 +424,10 @@ class TelemetryServer:
         #: engage したまま `auto/cmd` が途絶して制動に落とした回数
         self.auto_stalls = 0
         self._auto_was_fresh = True
+        #: 最後に見た `auto/cmd` の中身（速度・舵・制動・arm・mode）。変わったら `/cmd` を即送る
+        self._last_auto_key: tuple | None = None
+        #: `_publish_cmd` が前回「操縦者が居た」と判断したか（デッドマンの切れ目を数える）
+        self._cmd_was_live = False
         self._load_auto_conf()
 
         # ── ファン（Pi5純正クーリング） ──
@@ -672,6 +678,7 @@ class TelemetryServer:
             if self.controller is ws:
                 # **操縦者が消えたら即座に手放す。** タイムアウトを待たない
                 self._release_control("接続が切れた")
+                self._relay_now()
                 await self._broadcast_control_status()
 
     async def _on_control(self, ws, raw) -> None:
@@ -695,11 +702,13 @@ class TelemetryServer:
             self.controller_name = str(m.get("name", "gui"))
             self._last_cmd = None
             self._last_cmd_ns = 0
+            self._relay_now()
             await self._broadcast_control_status()
 
         elif kind == "release_control":
             if self.controller is ws:
                 self._release_control("解放")
+                self._relay_now()
                 await self._broadcast_control_status()
 
         elif kind == "cmd":
@@ -715,14 +724,23 @@ class TelemetryServer:
                 # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
                 self.bad_cmds += 1
                 return
+            # **中身が変わったらその場で `/cmd` へ**（2026-09-27）。50Hz の `_cmd_pump` を待つと
+            # GUI の 50Hz と非同期で平均10ms・最大20ms遅れ、人のブレーキも同じだけ遅れた。
+            # 同じ中身の繰り返し（スティックを保持中）は送らない——デッドマンの鮮度だけ更新し、
+            # 定期送信に任せる。Wi-Fi の詰まりでまとめて届いても、変化したものだけが順に出る
+            # （時間で間引くと、まとめて届いたブレーキが次の定期送信まで遅れる）
+            changed = cmd != self._last_cmd or not self._cmd_was_live
             self._last_cmd = cmd
             self._last_cmd_ns = time.monotonic_ns()
+            if changed:
+                self._relay_now()
 
         elif kind == "estop":
             # **誰であっても止められる。** 操縦権を持っていなくても通す
             self._last_cmd = None
             self._last_cmd_ns = 0
             self._release_control("E-Stop 要求")
+            self._relay_now()
             await self._broadcast_control_status()
 
         # ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
@@ -738,6 +756,7 @@ class TelemetryServer:
                 return
             self._on_auto(m)
             self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
+            self._relay_now()              # 解除も待たせない（GUI の速度・舵に戻す）
             # **モード・engage が変わると前カメラの capture fps の希望も変わりうる**
             # （`CAMERA_AUTO_MODES` を engage した瞬間に上限まで上げたい）
             self._publish_cam_config()
@@ -801,6 +820,12 @@ class TelemetryServer:
             if "enabled" in m:
                 self.pub.send(TOPIC_UI_EVENT,
                                UiEvent(kind="wheel_lift_guard_enable", value=bool(m["enabled"])))
+
+        # ── ABS（誰でも操作できる。★v0.15）。適用結果は `diag/link`(abs_enabled) で戻る ──
+
+        elif kind == "abs":
+            if "enabled" in m:
+                self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="abs_enable", value=bool(m["enabled"])))
 
         # ── 自動停止の安全マージン[cm]（誰でも操作できる。★v0.12） ──
         # STM32側の適用結果は tc_tv/wheel_lift_guard と同様
@@ -1728,10 +1753,30 @@ class TelemetryServer:
         `zmq.asyncio` を使わず素の poll を短周期で回している。ソケットは
         数本・メッセージは数百バイトなので、200Hz で回しても負荷は測定限界以下。
         非同期版を混ぜるより、**再生でも実機でも同じ Subscriber を使える**方を取った。
+
+        `auto/cmd` の中身が変わっていたら、`/cmd` をその場で送る（`_on_auto_cmd`）。
         """
         while self._running:
             self.sub.poll(0)
+            self._on_auto_cmd(time.monotonic_ns())
             await asyncio.sleep(BUS_POLL_S)
+
+    def _on_auto_cmd(self, now: int) -> None:
+        """新しい判断（`auto/cmd` の中身の変化）を `/cmd` へ即座に中継する（2026-09-26）。
+
+        50Hz の `_cmd_pump` を待つと平均10ms・最大20ms遅れていた。送る中身は定期送信と
+        **同じ `_publish_cmd`**（デッドマン・人間のブレーキ・`auto/cmd` の鮮度の判定を含む）
+        なので、即時と定期で判断が食い違うことはない。中身が同じ `auto/cmd`（planning_node
+        の50Hzの繰り返し）では送らない——定期送信に任せる。"""
+        auto = self.sub.latest.get(TOPIC_AUTO_CMD)
+        if auto is None:
+            return
+        key = (auto.mode, auto.arm, auto.brake, auto.target_speed, auto.target_steer)
+        if key == self._last_auto_key:
+            return
+        self._last_auto_key = key
+        if self._auto_engaged and self._auto_mode:
+            self._publish_cmd(now)
 
     async def _map_pump(self) -> None:
         """地図を `/ws/map` へ。**版が変わったときだけ。**
@@ -1808,24 +1853,33 @@ class TelemetryServer:
         途絶判定は「telemetry_node が死んだか」だけを見ればよくなる。
         """
         period = 1.0 / CMD_PUB_HZ
-        was_live = False
         while self._running:
             await asyncio.sleep(period)
-            now = time.monotonic_ns()
-            live = (self._last_cmd is not None
-                    and (now - self._last_cmd_ns) <= CMD_DEADMAN_NS)
-            if live:
-                cmd = self._last_cmd
-                if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
-                    cmd = self._merge_auto(cmd, now)
-            else:
-                if was_live:
-                    self.deadman_trips += 1
-                    asyncio.create_task(self._broadcast_control_status())
-                cmd = DriveCmd(mode=0, source="deadman")
-            was_live = live
-            self.pub.send(TOPIC_CMD, cmd)
-            self.cmds_published += 1
+            self._publish_cmd(time.monotonic_ns())
+
+    def _relay_now(self) -> None:
+        """人の操作（E-Stop・操縦権の取得と解放・自律の解除・GUI の指令の変化）を、次の定期送信
+        （50Hz、最大20ms後）を待たずに `/cmd` へ出す（2026-09-27）。自律の「走れ」は即時なのに
+        人の「止まれ」が遅れていた。判断は定期送信と同じ `_publish_cmd` を通す。"""
+        self._publish_cmd(time.monotonic_ns())
+
+    def _publish_cmd(self, now: int) -> None:
+        """今この瞬間の `/cmd` を1つ決めて送る。定期送信（`_cmd_pump`）と、新しい判断の
+        即時送信（`_on_auto_cmd`・`_relay_now`）が**この1箇所**を通る。"""
+        live = (self._last_cmd is not None
+                and (now - self._last_cmd_ns) <= CMD_DEADMAN_NS)
+        if live:
+            cmd = self._last_cmd
+            if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
+                cmd = self._merge_auto(cmd, now)
+        else:
+            if self._cmd_was_live:
+                self.deadman_trips += 1
+                asyncio.create_task(self._broadcast_control_status())
+            cmd = DriveCmd(mode=0, source="deadman")
+        self._cmd_was_live = live
+        self.pub.send(TOPIC_CMD, cmd)
+        self.cmds_published += 1
 
     def _merge_auto(self, gui: DriveCmd, now: int) -> DriveCmd:
         """GUI の `cmd` の**速度・舵・制動だけ**を `auto/cmd` で差し替える。
@@ -1850,11 +1904,23 @@ class TelemetryServer:
                 torque_mode=False, target_torque=0.0,
                 source=f"auto:{self._auto_mode}:stale")
         self._auto_was_fresh = True
+        # 加速度の上限は GUI の値と planner の値の**小さい方**（planner は締める向きにしか
+        # 効かせられない。0 は「指定なし」なので、指定のある方を採る）
+        accel = gui.accel_limit
+        if auto.accel_limit > 0:
+            accel = min(accel, auto.accel_limit) if accel > 0 else auto.accel_limit
+        # 制動トルクは planner の指定があればそれ、無ければ GUI の値。人（GUI）もブレーキを
+        # 掛けていれば**強い方**（0 は「STM32 の最大」なので一番強い）
+        brake_torque = gui.brake_torque
+        if auto.brake and auto.brake_torque > 0:
+            brake_torque = auto.brake_torque
+            if gui.brake:
+                brake_torque = 0.0 if gui.brake_torque <= 0 else max(gui.brake_torque, auto.brake_torque)
         # **人間のブレーキは自律中も必ず通る。** GUI は engage 解除も同時に投げるが、
         # その往復（数十 ms）のあいだブレーキが効かない時間を作らない
         return msgspec.structs.replace(
-            gui, mode=2, brake=gui.brake or auto.brake,
-            target_speed=auto.target_speed, target_steer=auto.target_steer,
+            gui, mode=2, brake=gui.brake or auto.brake, brake_torque=brake_torque,
+            target_speed=auto.target_speed, target_steer=auto.target_steer, accel_limit=accel,
             # 自律走行はトルク直接指令を使わない。**GUI 側の設定を持ち込まない**
             # （ラジコンのトルクモードが ON のまま engage されうる）
             torque_mode=False, target_torque=0.0,

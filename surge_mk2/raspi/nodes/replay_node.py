@@ -298,13 +298,16 @@ def main() -> int:
             print("!! --speed 0 は待たずに流すので、購読側は取りこぼす。"
                   "GUI に繋ぐなら等速で")
 
-        n_telem = 0
+        next_diag = [0]
 
         def _on_telem(t, t_pi_ns):
-            nonlocal n_telem
             bridge.on_telemetry(t, t_pi_ns)
-            n_telem += 1
-            if n_telem % 5 == 0:            # 50Hz の 1/5 = 10Hz
+            # diag/link は 10Hz。TELEMETRY の回数ではなく記録の時刻で数える（2026-09-26 に
+            # TELEMETRY が 50→100Hz になり、回数だと記録ごとに頻度が変わる）
+            # 時刻同期の前（t_pi_ns が None）は STM32 の時刻で数える。逆行したら数え直す
+            now = t_pi_ns if t_pi_ns is not None else t.t_us * 1000
+            if now >= next_diag[0] or now < next_diag[0] - 200_000_000:
+                next_diag[0] = now + 100_000_000
                 bridge.publish_diag(
                     holder["node"].state, holder["node"].sync,
                     holder["node"].recorded_stats,

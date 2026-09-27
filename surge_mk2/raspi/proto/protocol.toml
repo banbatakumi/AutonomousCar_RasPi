@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x000E      # 上位=メジャー 下位=マイナー
+protocol_version = 0x000F      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -56,7 +56,7 @@ name = "TELEMETRY"
 type = 0x02
 dir = "s2p"
 len = 74
-rate_hz = 50
+rate_hz = 100  # 2026-09-26 に 50 から変更（値の古さを平均10→5ms）
 doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm を追加"
 fields = [
   { name = "t_us",                type = "u32", unit = "us" },
@@ -287,6 +287,7 @@ AUTO_STOP_ACTIVE          = 0x00010000   # v0.7: 前後超音波の自動停止�
 SIDE_BRAKE_ACTIVE         = 0x00020000   # v0.13: サイドブレーキが実際に位置制御へ切り替わり固定中
 WINKER_LEFT_ACTIVE        = 0x00040000   # v0.14: 左ウィンカーが実際に点滅中
 WINKER_RIGHT_ACTIVE       = 0x00080000   # v0.14: 右ウィンカーが実際に点滅中
+ABS_ACTIVE                = 0x00100000   # v0.15: ABSが制動トルクを要求より削っている最中（フォールバック中は偽）
 
 [bits.MDS]
 comment = "md_status[i] (u8)"
@@ -373,3 +374,7 @@ WHEEL_LIFT_GUARD_THRESH = 0x0051  # 未実装（STM32側が UNKNOWN_ID を返す
 # 範囲 0.0-100.0、既定15.0。未送信ならSTM32側の既定15cmのまま
 # （pi_uart_protocol_v0.12_delta.md）
 AUTO_STOP_MARGIN_CM = 0x0060
+# ABS_ENABLE: v0.15でSTM32ファームウェアが実装済み（制動モード＝brake・自動停止・フェイルセーフの
+# 最大制動で後輪のロックを防ぐ。車速PIの減速・torque_modeの負トルクには掛からない）。既定は有効。
+# TC_ENABLE と同じ bool（0.0/1.0）。Pi側から実際に送信する（raspi/nodes/io_node.py）
+ABS_ENABLE = 0x0070

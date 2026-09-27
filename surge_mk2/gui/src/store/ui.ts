@@ -19,7 +19,7 @@ import type {
   LogFile,
   MapFile,
 } from '../types'
-import { VEHICLE } from '../generated/vehicle'
+import { SAFETY, VEHICLE } from '../generated/vehicle'
 
 export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
 
@@ -206,9 +206,10 @@ export const PI_MAX_SPEED_CAP = 3.0 // m/s（install_services.sh の --max-speed
 export const PI_MAX_STEER_CAP: number = VEHICLE.maxSteer // rad ≒ 30°（同 --max-steer。路面舵角の実機上限）
 
 /** STM32 に渡すレートリミット（安全側の保険）。設定パネルの `accel`/`steerRate` はこれより
- * 十分遅く保つこと。**これ自体はユーザー設定にしない**（`useDriving.ts` 参照） */
-export const ACCEL_SAFETY_LIMIT = 6.0 // m/s²
-export const STEER_RATE_SAFETY_LIMIT = 7.0 // rad/s
+ * 十分遅く保つこと。**これ自体はユーザー設定にしない**（`useDriving.ts` 参照）。
+ * 値は `config/vehicle.toml` の `[safety]`（シムも同じ値で実機の舵のランプを再現する） */
+export const ACCEL_SAFETY_LIMIT: number = SAFETY.cmdAccelLimit // m/s²
+export const STEER_RATE_SAFETY_LIMIT: number = SAFETY.cmdSteerRateLimit // rad/s
 
 /**
  * 後輪1輪あたりの制動トルクの上限 [N·m]。**STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM` と

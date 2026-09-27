@@ -1,13 +1,12 @@
-"""`sim/vehicle.py`の操舵むだ時間キュー（A2: サブステップ化での量子化バグ修正）。
+"""`sim/vehicle.py`の操舵むだ時間（A2: サブステップ化での量子化バグ修正）。
 
-`VehicleModel._pop_delayed`は「1step=1エントリ」方式で、`dead_time_s`ぶん
-寝かせてから指令を取り出す。1step=100ms（`sim/gym_env.py`の`_STEP_NS`）を
-1回で積分すると、`dead_time_s`（ドメインランダム化で0.015〜0.095s、常に
-100ms未満）の値によらず実効遅延は常にちょうど100msに量子化されてしまう
-（`dead_time_s=0`のときだけ例外的に即時反映）。`sim/gym_env.py`の`step()`を
-`_DYNAMICS_SUBSTEP_S`(0.01s)刻みのサブステップに分割することで、
-10ms単位の精度に改善した——ここではそのサブステップ分割を`VehicleModel`
-だけを使って再現し、実効遅延が指定した`dead_time_s`に近づくことを確認する。
+A2（2026-08）: 1step=100msを1回で積分すると、`dead_time_s`の値によらず実効遅延が
+100msに量子化されていた。`step()`をサブステップに分割して10ms粒度にした。
+
+2026-09-24: むだ時間を`SteerServo`の「入力が始まった時刻」の履歴引き（ステップ中点
+で遡る）に置き換えた。以前の「1step=1エントリ」のキューは常に遅れ側へ
+`ceil(d/dt)+1`stepに量子化していたが、今は四捨五入相当。ここでは`VehicleModel`だけを
+使ってサブステップ幅ごとの反応時間を確かめる。
 """
 
 from __future__ import annotations
@@ -41,15 +40,15 @@ def _time_to_react(spec: "VehicleSpec", *, dt_sub: float, total_s: float = 0.1) 
 
 
 def _expected_reaction_time(dead_time_s: float, dt_sub: float) -> float:
-    """`_pop_delayed`の構造（whileチェックがfor減算より前に行われるため、
-    エントリが追加されたstep自身はpop対象にならない）により、反応時間には
-    厳密に`dead_time_s`ちょうどではなく `+1 dt_sub` の系統的なオフセットが
-    乗る（`dead_time_s=0`の特殊ケースのみ、appendした直後のwhileでpopされ
-    即時反映される）。この関数は「今の実装が実際に持つ量子化特性」を表す
-    参照実装であり、テストはこれとの一致を見る。"""
-    if dead_time_s <= 0.0:
-        return dt_sub
-    return (math.ceil(dead_time_s / dt_sub) + 1) * dt_sub
+    """`SteerServo`（2026-09-24〜）の量子化特性の参照実装。
+
+    むだ時間は「ステップ中点 `t + dt/2 - dead`」時点で有効だった入力を引く。
+    指令を与えた直後のステップを k=0 として、`k*dt + dt/2 - dead >= 0` を満たす
+    最初の k のステップで動き始め、その終わり `(k+1)*dt` に `steer_actual` が変わる。
+    以前の「1step=1エントリ」方式は `(ceil(dead/dt)+1)*dt` と常に遅れ側に
+    量子化していた（期待値で `dt` 近く余計に遅れる）が、今は四捨五入に相当する。"""
+    k = max(0, math.ceil((dead_time_s - 0.5 * dt_sub) / dt_sub - 1e-9))
+    return (k + 1) * dt_sub
 
 
 class TestSteerDelaySubstepResolution(unittest.TestCase):

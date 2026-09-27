@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x000Eu
+#define SURGE_PROTOCOL_VERSION  0x000Fu
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -61,6 +61,7 @@
 #define FLG_SIDE_BRAKE_ACTIVE          0x00020000u
 #define FLG_WINKER_LEFT_ACTIVE         0x00040000u
 #define FLG_WINKER_RIGHT_ACTIVE        0x00080000u
+#define FLG_ABS_ACTIVE                 0x00100000u
 
 /* md_status[i] (u8) */
 #define MDS_RUNNING       0x01u
@@ -121,6 +122,7 @@
 #define PARAM_WHEEL_LIFT_GUARD_ENABLE 0x0050u
 #define PARAM_WHEEL_LIFT_GUARD_THRESH 0x0051u
 #define PARAM_AUTO_STOP_MARGIN_CM 0x0060u
+#define PARAM_ABS_ENABLE         0x0070u
 
 /* ── パケット構造体 ───────────────────────────────────────── */
 /* ペイロードはフレーム先頭から5バイト目に始まるため u32/i32 が4バイト境界に乗らない。

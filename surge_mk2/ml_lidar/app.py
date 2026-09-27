@@ -59,6 +59,9 @@ __all__ = [
 RUNS_DIR = ML_LIDAR_DIR / "runs"
 MODELS_DIR = REPO_ROOT / "models" / "e2e_lidar"
 COURSES_DIR = REPO_ROOT / "sim" / "courses"
+#: 学習タブ「探索ノイズ初期標準偏差(log)」の既定（gSDE OFF時）。gSDEのチェックで-3と
+#: 相互に切り替える判定にも使うので、表示値と同じ文字列で持つ
+_LOG_STD_INIT_DEFAULT = "-1.0"
 #: 学習中でも壊れない・止めても惜しくない類のジョブは確認無しで終了時に落とす。
 #: 学習だけは数十分〜数時間かかりうるので、ウィンドウを閉じる前に一言確認する
 _CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
@@ -279,8 +282,9 @@ class App:
             # v23(2026-09-22): 2.0→1.0。dt=0.10では1決定あたり最大0.1rad
             # （max_steerの19%）で、v13が意図した権限に戻る。理想ライン追従に
             # 必要な舵角速度のp90(0.954rad/s)を賄える値（env.py EnvConfig docstring参照）
-            # v25(2026-09-24): 1.0→1.5。障害物の直前で回避の舵が間に合わず衝突していたため
-            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "1.5"),
+            # v25(2026-09-24)で1.5を試したが障害物の失敗は減らず、舵が35%忙しくなっただけ
+            # だったのでv26(2026-09-26)で1.0に戻した
+            "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "1.0"),
             # v16〜v20で足した報酬罰則3種(steer-effort/raceline/steer-angle)は
             # 2026-09-17に全て撤去した。実測でタイム欠損の主因がライン取りではなく
             # 速度だと判明し、かつステア絶対値罰は文献(Evans 2021 arXiv:2103.10098)で
@@ -289,7 +293,8 @@ class App:
             # 損失項(CAPS spatial / LCP勾配罰則)で攻める方針に転換している
             # SB3既定(0.0)。-3はgSDE有効時専用の調整値(train_rl.pyの--log-std-init
             # ヘルプ参照)なので、gSDEチェックボックスの状態に連動させて切り替える
-            "log-std-init": ("探索ノイズ初期標準偏差(log)", "0.0"),
+            # v26(2026-09-26): 0.0→-1.0（σ 1.0→0.37。train_rl.pyの--log-std-init参照）
+            "log-std-init": ("探索ノイズ初期標準偏差(log)", _LOG_STD_INIT_DEFAULT),
             "seed": ("乱数シード", "0"),
         }
         # 最大舵角は`config/vehicle.toml`固定（`ml_lidar/env.py`のEnvConfig docstring参照）
@@ -315,10 +320,10 @@ class App:
             # log-std-initが既定値のまま(未手動編集)の場合だけ追従させる。
             # -3はgSDE有効時専用の調整値なのでOFF時に残ると探索が潰れる(過去の指摘事項)
             var = self._train_basic_vars["log-std-init"]
-            if self.use_sde_var.get() and var.get() == "0.0":
+            if self.use_sde_var.get() and var.get() == _LOG_STD_INIT_DEFAULT:
                 var.set("-3")
             elif not self.use_sde_var.get() and var.get() == "-3":
-                var.set("0.0")
+                var.set(_LOG_STD_INIT_DEFAULT)
 
         self.use_sde_var.trace_add("write", _sync_log_std_init)
 

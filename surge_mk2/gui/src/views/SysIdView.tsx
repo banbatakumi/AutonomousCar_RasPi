@@ -4,8 +4,13 @@
  * 中身は自動運転と全く同じ仕組み（`raspi/auto/sysid_*.py` も普通の `Planner`
  * サブクラスで、`category = "sysid"` が付いているだけ）に乗っている。
  * このタブが足しているのは「試験選択」の絞り込みと、**試験開始と同時に
- * mcap記録を始め、プランナーが完了合図（`AutoState.reason === "完了"`）を
- * 出したら自動で記録を止めてダウンロードする**オーケストレーションだけ。
+ * mcap記録を始め、プランナーが終了合図（`AutoState.reason` が「完了」または「中止」で
+ * 始まる）を出し、車が止まったら自動で記録を止めてダウンロードする**オーケストレーションだけ。
+ *
+ * 以前は `reason === "完了"` の完全一致だったため、「完了（後輪が滑った…）」や
+ * 「中止: …」では終わらず、手動の「試験中止」が要った。止まるまで待つのは、旋回試験が
+ * 「完了（グリップ限界…）」を出したあとも舵を保って減速するため（途中で disengage すると
+ * GUI の指令に切り替わる）。
  *
  * ## ARM は人間が保持する（省略しない）
  *
@@ -29,6 +34,8 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
   const n = useNumbers()
   const [downloaded, setDownloaded] = useState(false)
   const [canceled, setCanceled] = useState(false)
+  // 終了時の理由（「完了（後輪が滑った…）」など）。disengage すると reason が消えるので残す
+  const [endReason, setEndReason] = useState('')
   const stoppedRef = useRef(false)
   // **試験開始ボタンの多重クリック対策。** `auto.engaged`はサーバのechoを
   // 待つ必要があり、ボタンの`disabled`が実際に効くまでの往復のわずかな間に
@@ -46,15 +53,19 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
   const { bufferedBytes, start } = useMcapDownload(ch, selected?.id ?? 'sysid')
   const st = n.auto
   const silent = !isFinite(n.autoAgeMs) || n.autoAgeMs > AUTO_STALE_MS
-  const finished = !silent && st?.reason === '完了'
+  const reason = st?.reason ?? ''
+  const aborted = reason.startsWith('中止')
+  const finished = !silent && (reason.startsWith('完了') || aborted) && n.vs?.stopped === true
 
-  // ── 完了検知: プランナーが「完了」を出したら自動で disengage → 記録停止 ──
+  // ── 終了検知: プランナーが「完了」「中止」を出し車が止まったら自動で disengage → 記録停止 ──
   useEffect(() => {
     if (!auto?.engaged || !finished || stoppedRef.current) return
     stoppedRef.current = true
+    if (aborted) setCanceled(true)
+    setEndReason(reason)
     ch?.setAuto({ engaged: false })
     ch?.mcapRecordStop()
-  }, [auto?.engaged, finished, ch])
+  }, [auto?.engaged, finished, aborted, reason, ch])
 
   // サーバが engaged を echo してきたら多重クリック対策フラグを下ろす
   useEffect(() => {
@@ -73,6 +84,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
     ch?.setAuto({ mode: id })
     setDownloaded(false)
     setCanceled(false)
+    setEndReason('')
   }
 
   const beginTest = () => {
@@ -80,6 +92,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
     startingRef.current = true
     setDownloaded(false)
     setCanceled(false)
+    setEndReason('')
     stoppedRef.current = false
     start(false, () => setDownloaded(true))
     ch?.setAuto({ engaged: true })
@@ -124,13 +137,21 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
 
       {selected && (
         <section className="settings-group">
-          <span className="label">パラメータ（{selected.params.length}）</span>
-          <ParamSliders
-            params={selected.params}
-            values={auto.params}
-            onChange={(key, value) => ch?.setAuto({ params: { [key]: value } })}
-            disabled={active}
-          />
+          {/* 手順は測定に必要な条件を満たす組み合わせでプランナー側に固定してある
+              （`raspi/auto/_sysid_common.py`「手順を固定した理由」）。選べるのは旋回方向だけ */}
+          {selected.params.length > 0 ? (
+            <>
+              <span className="label">選択</span>
+              <ParamSliders
+                params={selected.params}
+                values={auto.params}
+                onChange={(key, value) => ch?.setAuto({ params: { [key]: value } })}
+                disabled={active}
+              />
+            </>
+          ) : (
+            <p className="dim">手順は固定（測定に必要な条件を満たすよう決めてある）</p>
+          )}
         </section>
       )}
 
@@ -165,6 +186,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
         {downloaded && (
           <p className="badge-live">
             {canceled ? '試験を中止しました。' : '試験が完了しました。'}
+            {endReason && endReason !== '完了' && `（${endReason}）`}
             記録をダウンロードしました。Macの解析ツール（`tools/sysid`）でこのファイルを開いてください
           </p>
         )}

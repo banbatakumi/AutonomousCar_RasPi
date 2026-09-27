@@ -87,6 +87,7 @@ export function StatusBar({
             重複させない。あちらは一瞬の介入もラッチして光る */}
         {variant === 'full' && vs?.tc_active && <span className="pill lv-warn">TC</span>}
         {variant === 'full' && vs?.tv_active && <span className="pill lv-warn">TV</span>}
+        {variant === 'full' && vs?.abs_active && <span className="pill lv-warn">ABS</span>}
         {/* v0.7 自動停止。**「許可しているか」と「今まさに効いているか」は別物**なので
             両方を1つのピルで出し分ける。効いている間は急減速の理由がこれだと即分かるように
             lv-bad まで上げる（TC/TV より強い介入で、指令が完全に無視されるため）。

@@ -38,8 +38,9 @@ telemetry_node も 50Hz で `cmd`（操縦者不在なら DISARM）を流して�
 
 ## 計画は入力が来たときだけ
 
-`scan`（LiDAR）は 10Hz、`auto/cmd` の発行は 50Hz。同じ周で 5 回計算しても
-答えは変わらないので、**新しい周が来たときだけ** planner を回して結果を
+`scan`（LiDAR）は 10Hz、`auto/cmd` の発行は 50Hz（新しい判断はその場で1回多く送る。
+telemetry_node・io_node も中身の変化をその場で中継する。2026-09-26、平均約20ms短縮）。
+同じ周で 5 回計算しても答えは変わらないので、**新しい周が来たときだけ** planner を回して結果を
 保持する（どのトピックが「入力」かは `Planner.input_topic` が決める。
 カメラ系 planner なら `scan/cam` のケイデンスがこれに当たる）。
 """
@@ -55,7 +56,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.auto import PLANNERS, make_planner, merged_params  # noqa: E402
-from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
+from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.msgs import AutoCtrl, AutoState, DriveCmd, Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
@@ -76,6 +77,15 @@ CMD_HZ = 50
 #: `auto/state` の発行レート。点群が 10Hz なのでそれ以上出しても同じ絵になる
 STATE_HZ = 10
 HB_HZ = 10
+
+
+#: `vehicle_state` の購読。SLAM 系の脱スキュー（`slam2d_raceline`・`_slam2d_nav`）と同定の
+#: `SensorGuard`・`DeadReckon` は `on_vehicle_state()` に**全サンプル**が来る前提。LATEST
+#: （CONFLATE、キュー長1）だと `plan()` が TELEMETRY の間隔（100Hz で10ms）より長い周では
+#: 途中のサンプルが捨てられる——地図作成の `plan()` は Mac で平均7ms・p99 28ms（Pi 5 は2〜3倍）
+#: なので、100Hz にした 2026-09-26 から常に落ちていた（2026-09-27 修正）。キューは約10秒分
+#: （freeze の最大1.6秒のブロックでも溢れない）。`self.sub.latest` は最後に受けた1件のまま
+VEHICLE_STATE_POLICY = Policy(conflate=False, hwm=1000)
 
 
 def input_topics() -> set[str]:
@@ -109,7 +119,7 @@ class PlanningNode:
         self.planner = make_planner(mode)
         self._params: dict[str, float] = merged_params(mode, {})
 
-        #: 最後に出した判断。`auto/cmd` は 50Hz でこれを繰り返す
+        #: 最後に出した判断。新しい判断はその場で、それ以外は 50Hz で `auto/cmd` に繰り返す
         self.state = AutoState()
         self._last_scan_seq = -1
         self._last_map_seq = -1
@@ -194,14 +204,15 @@ class PlanningNode:
 
     # ── 計画 ──
 
-    def _replan(self, now_ns: int) -> None:
+    def _replan(self, now_ns: int) -> bool:
+        """新しい周が来ていれば判断し直す。判断したら True（呼び出し側が `auto/cmd` を即送る）。"""
         if self.planner is None:
-            return
+            return False
         scan = self.sub.latest.get(self.planner.input_topic)
         if scan is None:
-            return
+            return False
         if scan.seq == self._last_scan_seq:
-            return                          # 同じ周。計算しても答えは変わらない
+            return False                    # 同じ周。計算しても答えは変わらない
         self._last_scan_seq = scan.seq
 
         dt = (now_ns - self._last_plan_ns) / NS if self._last_plan_ns else 0.0
@@ -238,6 +249,7 @@ class PlanningNode:
             self._hz_n = 0
         st.plan_hz = self._plan_hz
         self.state = st
+        return True
 
     def _current(self, now_ns: int) -> AutoState:
         """今この瞬間に有効な判断。**古い点群で走らせない。**
@@ -276,11 +288,15 @@ class PlanningNode:
             # engage していないときの指令は「見せるためだけ」の値。DISARM で出す
             return DriveCmd(mode=0, arm=False, source="planning:idle")
         if not st.ready or st.brake:
+            # 制動トルクは planner が決めた制動（ready）のときだけ載せる。「分からない」（ready=False）
+            # の制動は 0＝中継側の GUI の値
             return DriveCmd(mode=2, arm=True, brake=True,
                             target_speed=0.0, target_steer=st.target_steer,
+                            brake_torque=st.brake_torque if st.ready else 0.0,
                             source=f"planning:{self.ctrl.mode}")
         return DriveCmd(mode=2, arm=True,
                         target_speed=st.target_speed, target_steer=st.target_steer,
+                        accel_limit=st.accel_limit,
                         source=f"planning:{self.ctrl.mode}")
 
     def _publish_map(self) -> None:
@@ -328,10 +344,15 @@ class PlanningNode:
                         fn(msg)
 
             now = time.monotonic_ns()
-            self._replan(now)
+            planned = self._replan(now)
 
-            if now >= next_cmd:
-                next_cmd += cmd_period
+            # **新しい判断はその場で送る**（2026-09-26）。50Hz の定期送信を待つと平均10ms・
+            # 最大20ms遅れていた。定期送信（途絶判定の鮮度を保つ繰り返し）はそのまま残し、
+            # 送る中身は同じ `_cmd_from(_current())` を通す（判断が2通りにならない）。
+            # 即送った後は次の定期送信を1周期後ろへずらす（ほぼ同時の重複を避ける。
+            # 間隔が周期より開くことはない）
+            if planned or now >= next_cmd:
+                next_cmd = now + cmd_period if planned else next_cmd + cmd_period
                 if now - next_cmd > cmd_period * 5:
                     next_cmd = now + cmd_period      # 大きく遅れたら追いつきをやめる
                 st = self._current(now)
@@ -377,8 +398,10 @@ def main() -> int:
         return 2
 
     pub = Publisher("planning")
-    topics = {TOPIC_VEHICLE_STATE: LATEST, TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_MODEL: LATEST}
+    topics = {TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_MODEL: LATEST}
     topics.update({t: LATEST for t in input_topics()})
+    # `vehicle_state` だけは**全サンプル**を受ける（`VEHICLE_STATE_POLICY`）
+    topics[TOPIC_VEHICLE_STATE] = VEHICLE_STATE_POLICY
     sub = Subscriber(topics)
     node = PlanningNode(pub=pub, sub=sub, mode=args.mode, quiet=args.quiet)
 

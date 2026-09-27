@@ -63,7 +63,7 @@ from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.core.link_tracker import LinkTracker  # noqa: E402
 from raspi.io.gpio import PIN_HEARTBEAT, Heartbeat, open_output  # noqa: E402
 from raspi.io.serial_link import SerialLink  # noqa: E402
-from raspi.proto import packets  # noqa: E402
+from raspi.proto import UART_BAUD, packets  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
 
 NS = 1_000_000_000
@@ -226,7 +226,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default="/dev/serial0")
-    ap.add_argument("--baud", type=int, default=250_000)
+    ap.add_argument("--baud", type=int, default=UART_BAUD)
     ap.add_argument("--hold", type=float, default=3.0,
                     help="接続を確立するためにハートビートを出す秒数（既定 3.0）")
     ap.add_argument("--trip-timeout", type=float, default=3.0,

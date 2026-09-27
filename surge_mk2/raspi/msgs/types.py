@@ -130,7 +130,7 @@ class MsgBase(msgspec.Struct):
 
 
 class VehicleState(MsgBase):
-    """`TELEMETRY`(0x02) を SI に直したもの。50Hz。
+    """`TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
 
     生値と Pi 側の派生量を**同じメッセージに入れる**。別トピックに分けると
     「どの派生量がどの生値から出たか」の対応が時刻合わせの問題に化ける。
@@ -194,6 +194,9 @@ class VehicleState(MsgBase):
     #: 点滅の周期・位相は STM32 側が持つので、Pi は「要求したか」ではなく「実際に光っているか」を見る
     winker_left_active: bool = False
     winker_right_active: bool = False
+    #: ABS が**今まさに制動トルクを要求より削っている**（★v0.15）。`tc_active` と同じ「介入中」の意味。
+    #: フォールバック（前輪センサ異常とみなして ABS を止め、要求どおりに制動している間）は False
+    abs_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
 
     # ── Pi 側で計算した派生量 ──
@@ -348,6 +351,10 @@ class LinkDiag(MsgBase):
     #: （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。未確認なら None
     wheel_lift_guard_enabled: bool | None = None
 
+    #: ABS（制動時の後輪ロック防止）が STM32 側で実際に有効化されているか
+    #: （`CONFIG_ACK` から取得。★v0.15。既定は有効）。未確認なら None
+    abs_enabled: bool | None = None
+
     #: 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
     #: から取得。★v0.12。範囲0.0-100.0の連続値。未確認（起動直後でまだ `CONFIG_ACK`
     #: を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
@@ -501,6 +508,14 @@ class AutoState(MsgBase):
     target_speed: float = 0.0              #: [m/s]
     target_steer: float = 0.0              #: 路面舵角 [rad] 反時計回り正
     brake: bool = False                    #: 制動を掛けているか
+    #: [m/s²] 目標速度を変える速さの上限（`COMMAND.accel_limit`）。0 = 指定しない（GUI の値のまま）。
+    #: 中継（`telemetry_node._merge_auto`）は GUI の値との**小さい方**を採るので、緩める向きには
+    #: 効かない。システム同定の加減速試験が段ごとの加速度を指定するのに使う（2026-09-27）
+    accel_limit: float = 0.0
+    #: [N·m] `brake` のときの制動トルク（1輪あたり、`COMMAND.brake_torque`）。0 = 指定しない（GUI の値の
+    #: まま）。人（GUI）もブレーキを掛けていれば中継は**強い方**を採る（`telemetry_node._merge_auto`）。
+    #: システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う（2026-09-27）
+    brake_torque: float = 0.0
 
     # ── 判断の根拠（Follow the Gap の場合） ──
     heading: float = 0.0                   #: 狙っている方位 [rad]
@@ -623,8 +638,8 @@ class UiEvent(MsgBase):
     別途持たなくて済む。
     """
 
-    kind: str = ""                         #: 例: "gui_connect", "tc_enable", "tv_enable", "wheel_lift_guard_enable", "auto_stop_margin_cm"
-    #: `kind` が真偽値を伴うイベント（"tc_enable"/"tv_enable"/"wheel_lift_guard_enable" 等）のときだけ意味を持つ
+    kind: str = ""                         #: 例: "gui_connect", "tc_enable", "tv_enable", "wheel_lift_guard_enable", "abs_enable", "auto_stop_margin_cm"
+    #: `kind` が真偽値を伴うイベント（"tc_enable"/"tv_enable"/"wheel_lift_guard_enable"/"abs_enable"）のときだけ意味を持つ
     value: bool = False
     #: `kind` が連続値を伴うイベント（"auto_stop_margin_cm" のみ。★v0.12）のときだけ意味を持つ。
     #: `value`（bool）とは別枠にした——既存の bool イベントと混ぜると 0/1 に丸まってしまうため

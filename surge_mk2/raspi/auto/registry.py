@@ -29,7 +29,7 @@ from .raceline import RaceLine
 from .slam2d_raceline import Slam2dRaceLine
 from .sysid_accel import SysIdAccel
 from .sysid_corner import SysIdCorner
-from .sysid_speed import SysIdSpeed
+from .sysid_latency import SysIdLatency
 from .sysid_steer import SysIdSteer
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
@@ -51,9 +51,9 @@ PLANNERS: dict[str, type[Planner]] = {
     #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブの
     #: モード選択には出さない（`AutoPanel.tsx` 側のフィルタ）
     SysIdSteer.id: SysIdSteer,
-    SysIdSpeed.id: SysIdSpeed,
-    SysIdCorner.id: SysIdCorner,
     SysIdAccel.id: SysIdAccel,
+    SysIdCorner.id: SysIdCorner,
+    SysIdLatency.id: SysIdLatency,
 }
 
 

@@ -15,7 +15,7 @@
 - COMMAND を 100Hz で送る（STM32 の COMMAND タイムアウトを防ぐハートビートを兼ねる）
 - TELEMETRY / STATS / PONG / VERSION / LIDAR を受信・集計
 - リンク健全性（TELEMETRY 途絶 100ms=警告 / 200ms=FAULT）を判定
-- **バスへ配信**: `vehicle_state`(50Hz) / `scan`(10Hz) / `diag/link`(10Hz) / `hb/io`(10Hz)
+- **バスへ配信**: `vehicle_state`(100Hz) / `scan`(10Hz) / `diag/link`(10Hz) / `hb/io`(10Hz)
 - **バスから購読**: `cmd`（走行指令）、`log/ctrl`（`.sfl` 記録の開始/停止）
 - 送受信フレームを生のまま `.sfl` に記録（`--log` で起動時から、または `log/ctrl`
   でセッション中いつでも GUI から開始/停止できる。§後述）
@@ -79,7 +79,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_LOG_CTRL,
     TOPIC_UI_EVENT,
 )
-from raspi.proto import packets  # noqa: E402
+from raspi.proto import UART_BAUD, packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
 from raspi.rec import logclean  # noqa: E402
@@ -90,6 +90,9 @@ __all__ = ["IoNode", "LinkState"]
 
 NS = 1_000_000_000
 COMMAND_HZ = 100
+#: ループ1周の待ちの上限 [s]（何も来なくても起きてハートビートの kick・定期送信を回す。
+#: 以前の `SerialLink` の `read_timeout` と同じ）
+LINK_WAIT_S = 0.005
 PING_HZ = 5
 PING_WARMUP_HZ = 20
 WARMUP_S = 3.0
@@ -207,6 +210,10 @@ class IoNode:
         self.cmd: DriveCmd | None = None
         self._cmd_ns = 0
         self.cmd_stale = True
+        #: `_recv_cmd` が新しい `cmd` を受けたか（run が中身の変化を見て即座に送る）
+        self._cmd_arrived = False
+        #: 最後に送った COMMAND の中身（エンコード済み）。変化の判定に使う
+        self._last_command_bytes: bytes | None = None
         #: `cmd` 途絶で DISARM に落とした回数。1回でも起きたら GUI 側を疑う
         self.cmd_timeouts = 0
 
@@ -218,6 +225,8 @@ class IoNode:
         self._ping_seq = 0
         self._running = False
         self._t_start = 0
+        #: UART とバスをまとめて待つ poller（`run` が作る。`_make_poller`）
+        self._poller = None
         link.on_tx = self._on_tx
 
     def _on_telemetry_chain(self, extra):
@@ -430,12 +439,16 @@ class IoNode:
         t1 = self.link.send(packets.Ping(ping_id=self._ping_seq))
         self.tracker.note_ping_sent(self._ping_seq, t1)
 
-    def _send_command_disarm(self) -> None:
+    @staticmethod
+    def _disarm_command() -> packets.Command:
         """安全な停止ハートビート。mode=DISARM, arm=0, 速度・舵角ゼロ。"""
-        self.link.send(packets.Command(
+        return packets.Command(
             mode=packets.Mode.DISARM, flags=0,
             target_speed=0, target_steer=0,
-            accel_limit=0, steer_rate_limit=0, brake_torque=0))
+            accel_limit=0, steer_rate_limit=0, brake_torque=0)
+
+    def _send_command_disarm(self) -> None:
+        self.link.send(self._disarm_command())
 
     def _recv_cmd(self, now_ns: int) -> None:
         """バスから走行指令・`.sfl` 記録の意思（`log/ctrl`）・GUI イベントを取り込む。"""
@@ -444,6 +457,7 @@ class IoNode:
                 if topic == TOPIC_CMD:
                     self.cmd = msg
                     self._cmd_ns = now_ns
+                    self._cmd_arrived = True
                 elif topic == TOPIC_LOG_CTRL:
                     self._set_log_active(msg.active)
                 elif topic == TOPIC_UI_EVENT:
@@ -470,6 +484,9 @@ class IoNode:
         elif msg.kind == "wheel_lift_guard_enable":
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE, value=1.0 if msg.value else 0.0))
+        elif msg.kind == "abs_enable":
+            self.link.send(packets.ConfigSet(
+                param_id=packets.Param.ABS_ENABLE, value=1.0 if msg.value else 0.0))
         elif msg.kind == "auto_stop_margin_cm":
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.AUTO_STOP_MARGIN_CM, value=msg.float_value))
@@ -490,22 +507,56 @@ class IoNode:
         間だけ**使うフォールバック。RC（MANUAL）・自律走行（AUTO）どちらの `cmd` も
         この1箇所を通るため、モードを問わず同じ上限が効く。
         """
+        pkt = self._command_packet()
+        self._last_command_bytes = pkt.encode()
+        self.link.send(pkt)
+
+    def _command_packet(self) -> packets.Command:
+        """`_send_command` の中身（送る COMMAND を決めるだけ）。即時送信の変化の判定にも使う。"""
         if self.cmd_stale or not self.allow_arm:
-            self._send_command_disarm()
-            return
+            return self._disarm_command()
         lim = self.state.limits
         max_speed = lim.max_speed_m_s if lim else self.max_speed
         max_steer = lim.max_steer_rad if lim else self.max_steer
-        self.link.send(command_from_cmd(
+        return command_from_cmd(
             self.cmd, allow_arm=True,
             max_speed=max_speed, max_steer=max_steer,
             max_accel=lim.max_accel_m_s2 if lim else None,
-            max_torque=lim.max_torque_nm if lim else None))
+            max_torque=lim.max_torque_nm if lim else None)
 
     # ── メインループ ──
 
+    def _make_poller(self):
+        """UART の受信とバス（`/cmd` 等）を**同じ待ち**で待つ poller（2026-09-27）。
+
+        以前は `link.poll()` が UART の1バイトを `read_timeout`（5ms）まで待ってからでないと
+        `_recv_cmd` が回らず、「即時」の指令の中継が STM32 から次のバイトが来るまで（DISARM・
+        LiDAR 停止中は最大5ms）止まっていた。UART の fd とバスのソケットを1つの `zmq.Poller`
+        に載せれば、どちらが来ても起きる。fd を持たないリンク（シム・テストの偽物）とバスの
+        無い構成では None（従来どおり `link.poll()` が待つ）。"""
+        fileno = getattr(self.link, "fileno", None)
+        socks = getattr(self.sub, "socks", None)
+        if fileno is None or not socks:
+            return None
+        import zmq
+        poller = zmq.Poller()
+        poller.register(fileno(), zmq.POLLIN)
+        for sock in socks.values():
+            poller.register(sock, zmq.POLLIN)
+        return poller
+
+    def _poll_link(self, now_ns: int, due_ns: int) -> list:
+        """UART の受信を読む。poller があれば UART かバスが来るまで（上限は `LINK_WAIT_S` と
+        次の定期送信の時刻の早い方）待ってから、来ている分だけ読む。"""
+        if self._poller is None:
+            return self.link.poll()
+        wait_ms = max(0.0, min(LINK_WAIT_S * 1e3, (due_ns - now_ns) / 1e6))
+        self._poller.poll(math.ceil(wait_ms))
+        return self.link.poll(block=False)
+
     def run(self, duration_s: float | None = None, status_cb=None) -> None:
         self._running = True
+        self._poller = self._make_poller()
         self._t_start = time.monotonic()
         next_cmd = time.monotonic_ns()
         next_ping = next_cmd
@@ -528,7 +579,7 @@ class IoNode:
                 self.heartbeat.kick()
 
             had_limits = self.state.limits is not None
-            for rx in self.link.poll():
+            for rx in self._poll_link(now, min(next_cmd, next_ping)):
                 if self._log is not None:
                     self._log_rx(rx)
                 self.tracker.feed(rx.rx_ns, rx.type, rx.seq, rx.payload)
@@ -555,9 +606,17 @@ class IoNode:
 
             self._recv_cmd(now)
 
-            if now >= next_cmd:
+            # **指令の中身が変わったらその場で送る**（2026-09-26）。100Hz の定期送信を待つと
+            # 平均5ms・最大10ms遅れていた。telemetry_node は同じ中身を50Hzで繰り返すので、
+            # エンコードした中身が前回と同じなら送らない（定期送信に任せる）。送る中身は
+            # 定期送信と同じ `_command_packet()`（DISARM の判断・上限のクランプを含む）
+            changed = False
+            if self._cmd_arrived:
+                self._cmd_arrived = False
+                changed = self._command_packet().encode() != self._last_command_bytes
+            if changed or now >= next_cmd:
                 self._send_command()
-                next_cmd += cmd_period
+                next_cmd = now + cmd_period if changed else next_cmd + cmd_period
                 if now - next_cmd > cmd_period * 5:   # 大きく遅れたら追いつきをやめる
                     next_cmd = now + cmd_period
 
@@ -630,7 +689,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default="/dev/serial0")
-    ap.add_argument("--baud", type=int, default=250_000)
+    ap.add_argument("--baud", type=int, default=UART_BAUD)
     ap.add_argument("--duration", type=float, default=None, help="秒で自動終了")
     ap.add_argument("--quiet", action="store_true", help="ライブ表示なし")
     ap.add_argument("--log", nargs="?", const="logs", default=None, metavar="PATH",
@@ -764,6 +823,8 @@ def main() -> int:
         node.link.send(packets.ConfigGet(param_id=packets.Param.TC_ENABLE))
         node.link.send(packets.ConfigGet(param_id=packets.Param.TV_ENABLE))
         node.link.send(packets.ConfigGet(param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE))
+        # ★v0.15: ABS。既定は有効だが、GUI操作前でも実際の状態を出すため同様に取得する
+        node.link.send(packets.ConfigGet(param_id=packets.Param.ABS_ENABLE))
         # ★v0.12: 自動停止の安全マージン[cm]。CONFIG_SET はFlash非永続化なので、
         # GUI操作前でもSTM32起動直後の実際の値（既定15cm）をGUIに出せるようにする
         node.link.send(packets.ConfigGet(param_id=packets.Param.AUTO_STOP_MARGIN_CM))

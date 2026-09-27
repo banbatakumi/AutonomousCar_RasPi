@@ -13,7 +13,7 @@ from typing import NamedTuple
 import serial
 
 from ..core.cleanup import quiet_close
-from ..proto import FrameEncoder, FrameParser
+from ..proto import UART_BAUD, FrameEncoder, FrameParser
 from ..proto.generated.packets import HEADER_SIZE, S2P_TYPES
 
 
@@ -40,7 +40,7 @@ class SerialLink:
         見えない。記録は横断的な関心事なのでコールバックで外に出す。
     """
 
-    def __init__(self, port: str = "/dev/serial0", baud: int = 250_000,
+    def __init__(self, port: str = "/dev/serial0", baud: int = UART_BAUD,
                  read_timeout: float = 0.005) -> None:
         self._ser = serial.Serial(port, baud, timeout=read_timeout)
         self._parser = FrameParser(expect_types=S2P_TYPES)
@@ -51,19 +51,26 @@ class SerialLink:
 
     # ── 受信 ──
 
-    def poll(self) -> list[RxFrame]:
+    def poll(self, block: bool = True) -> list[RxFrame]:
         """来ているバイトを読み、復元できたフレームを返す。
 
-        read は最低1バイトを read_timeout まで待つ。データが流れている間は
-        in_waiting 分をまとめて読むので syscall 数を抑えられる。
+        `block` なら read は最低1バイトを read_timeout まで待つ。データが流れている間は
+        in_waiting 分をまとめて読むので syscall 数を抑えられる。`block=False` は来ている分
+        だけ読んで待たない（呼び側が `fileno()` を他の待ち合わせと一緒に poll する、`io_node`）。
         """
         n = self._ser.in_waiting
+        if not n and not block:
+            return []
         data = self._ser.read(n if n else 1)
         rx_ns = time.monotonic_ns()
         if not data:
             return []
         return [RxFrame(f.type, f.seq, f.payload, rx_ns)
                 for f in self._parser.feed(data)]
+
+    def fileno(self) -> int:
+        """UART のファイル記述子（受信が来たら読める。`zmq.Poller` に登録して待つ）。"""
+        return self._ser.fileno()
 
     @property
     def stats(self):

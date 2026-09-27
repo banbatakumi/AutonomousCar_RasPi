@@ -23,11 +23,11 @@ import random
 
 import numpy as np
 
-from raspi.proto import FrameEncoder, FrameParser, packets
-from raspi.proto.generated.packets import P2S_TYPES, PROTOCOL_VERSION
+from raspi.proto import UART_BAUD, FrameEncoder, FrameParser, packets
+from raspi.proto.generated.packets import FRAME_OVERHEAD, P2S_TYPES, PROTOCOL_VERSION
 
 from .params import SimParams
-from .vehicle import DriveInput, VehicleModel, VehicleSpec
+from .vehicle import DriveInput, VehicleModel, VehicleSpec, brake_decel
 
 __all__ = ["VirtualStm32", "FW_ID"]
 
@@ -36,11 +36,13 @@ NS = 1_000_000_000
 #: 仮想であることが一目で分かる fw_id。実機のファームと衝突しない値にしてある
 FW_ID = 0x51310000            # "S1M"
 
-#: 250000 bps 8N1 = 10 bit/byte。1バイトの線上時間 [ns]。
+#: `UART_BAUD`（1000000 bps）8N1 = 10 bit/byte。1バイトの線上時間 [ns]。
 #: **これを入れないと LiDAR とテレメトリが同時刻に到着し、実機より綺麗になりすぎる**
-BYTE_NS = 10 * NS // 250_000  # 40,000 ns
+BYTE_NS = 10 * NS // UART_BAUD  # 10,000 ns（250000bps の頃は 40,000 ns）
+#: TELEMETRY 1フレームの線上の時間（81B で 0.81ms）
+TELEMETRY_WIRE_NS = (packets.Telemetry.LEN + FRAME_OVERHEAD) * BYTE_NS
 
-TELEMETRY_HZ = 50
+TELEMETRY_HZ = packets.Telemetry.RATE_HZ  # 100Hz（ファームの RAS_TELEMETRY_INTERVAL_US）
 STATS_HZ = 1
 
 #: `COMMAND` がこれだけ途絶したら最大制動（`uart_protocol.md` §5.6、実機と同じ）
@@ -48,6 +50,9 @@ COMMAND_TIMEOUT_NS = 100 * 1_000_000
 
 #: `auto_stop`（v0.7）が効き始める距離 [m]
 AUTO_STOP_DISTANCE_M = 0.20
+
+#: ABS（★v0.15）が働く下限の車速 [m/s]。ファームの `DRIVE_TC_MIN_SPEED_M_S`（滑り率が定義できない）
+ABS_MIN_SPEED_M_S = 0.25
 
 #: `LIMITS`(0x0A、★v0.11) が返す値。**実機 STM32 の固定定数
 #: （`DRIVE_MAX_SPEED_M_S`/`DRIVE_MAX_ACCEL_M_S2`/`DRIVE_MAX_TORQUE_NM`）と
@@ -105,6 +110,7 @@ class VirtualStm32:
         self.estop_active = False
         self.auto_stop_active = False
         self.side_brake_active = False
+        self.abs_active = False
         self.uart_timeout = True
         self.mode = packets.Mode.DISARM
 
@@ -121,6 +127,7 @@ class VirtualStm32:
         # 未初期化のまま「マージン0cm」で動くとsimと実機の既定が食い違うので揃えておく（★v0.12）
         self._config: dict[int, float] = {
             packets.Param.AUTO_STOP_MARGIN_CM: 15.0,
+            packets.Param.ABS_ENABLE: 1.0,  # ★v0.15 実機の既定は有効
         }
         self._stats = packets.Stats()
 
@@ -191,7 +198,10 @@ class VirtualStm32:
             target_speed=c.target_speed * _CMD_SCALE["target_speed"],
             target_steer=self._steer_cmd_echo,
             accel_limit=c.accel_limit * _CMD_SCALE["accel_limit"],
-            steer_rate_limit=c.steer_rate_limit * _CMD_SCALE["steer_rate_limit"],
+            # ファームは steer_rate_limit=0 を「最大舵角/秒」（Steering_GetMaxRoadWheelAngleRad、
+            # 約0.52rad/s）と読む（`vehicle.c`）。DriveInput の 0 は「制限なし」なので読み替える
+            steer_rate_limit=(c.steer_rate_limit * _CMD_SCALE["steer_rate_limit"]
+                              if c.steer_rate_limit > 0 else self.vehicle.spec.max_steer),
             brake_torque=c.brake_torque * _CMD_SCALE["brake_torque"],
             target_torque=c.target_torque * _CMD_SCALE["target_torque"],
         )
@@ -209,9 +219,18 @@ class VirtualStm32:
         self._now = t_ns
 
         self._acc += dt_total
+        # TELEMETRY はスナップショットを取った時刻に、その時刻の中身で送る（ファームは
+        # `Telemetry_Update` が 100Hz でスナップショットを取り、その時刻を `t_us` に載せる）。
+        # 以前は `t_ns` まで積分してから過去の `_next_tlm` の時刻で送っていたので、中身が
+        # `t_us` より最大 `read_timeout`（5ms）新しく、インタラクティブシムの遅延試験が小さく
+        # 出た（2026-09-26 の第三者検証）。積分を刻むたびに、境界を過ぎたらその場で取る
+        t_state = t_ns - int(round(self._acc * NS))       # 積分済みの車両の状態の時刻
         while self._acc >= STEP_S:
+            self._emit_due_telemetry(t_state)
             self._acc -= STEP_S
             self._substep(STEP_S)
+            t_state += int(STEP_S * NS)
+        self._emit_due_telemetry(t_state)
 
         if self._boot_versions > 0:
             self._boot_versions -= 1
@@ -220,9 +239,6 @@ class VirtualStm32:
             self._boot_limits -= 1
             self._emit_limits(t_ns)
 
-        while t_ns >= self._next_tlm:
-            self._emit(self._telemetry(self._next_tlm), self._next_tlm)
-            self._next_tlm += NS // TELEMETRY_HZ
         while t_ns >= self._next_stats:
             self._stats.t_us = self.stm_us(self._next_stats)
             self._emit(self._stats, self._next_stats)
@@ -231,6 +247,12 @@ class VirtualStm32:
         if self.lidar is not None:
             for gen_ns, pkt in self.lidar.poll(t_ns, self.vehicle, self.stm_us):
                 self._emit(pkt, gen_ns)
+
+    def _emit_due_telemetry(self, t_state: int) -> None:
+        """車両の状態が `t_state` まで進んだ時点で、スナップショットの時刻を過ぎた TELEMETRY を送る。"""
+        while t_state >= self._next_tlm:
+            self._emit(self._telemetry(self._next_tlm), self._next_tlm)
+            self._next_tlm += NS // TELEMETRY_HZ
 
     def _substep(self, dt: float) -> None:
         v = self.vehicle
@@ -257,6 +279,14 @@ class VirtualStm32:
             cmd = DriveInput(armed=cmd.armed, brake=True, brake_torque=0.0,
                              target_steer=cmd.target_steer,
                              steer_rate_limit=cmd.steer_rate_limit)
+
+        # v0.15: ABS。制動の減速度がグリップで頭打ちになる場面（実機で ABS が制動を削る場面）に
+        # 旗だけ立てる。車輪の回転を持たないモデルなので、ABS を切ったときのロックは表せない
+        # （`sim/vehicle.py` の `brake_decel`）。ファーム同様 0.25m/s 未満では働かない
+        self.abs_active = (cmd.brake and cmd.armed and not self.side_brake_active
+                           and self._config.get(packets.Param.ABS_ENABLE, 1.0) != 0.0
+                           and abs(v.speed) >= ABS_MIN_SPEED_M_S
+                           and brake_decel(v.spec, cmd, v.speed)[1])
 
         v.apply(cmd)
         v.step(dt)
@@ -308,6 +338,8 @@ class VirtualStm32:
             f |= packets.FLG_AUTO_STOP_ACTIVE
         if self.side_brake_active:
             f |= packets.FLG_SIDE_BRAKE_ACTIVE
+        if self.abs_active:
+            f |= packets.FLG_ABS_ACTIVE
         # v0.14: ウィンカー。点滅周期は暫定 1Hz（0.5s ON / 0.5s OFF）。
         # **実際の周期は STM32 側の実装依存**なので、ここは GUI 配線の確認用の近似
         blink = (t_ns // (NS // 2)) % 2 == 0
@@ -329,7 +361,7 @@ class VirtualStm32:
         odom = [d * (1.0 + p.odom_scale_err)
                 + (self.rng.gauss(0.0, p.odom_noise_m) if p.odom_noise_m > 0 else 0.0)
                 for d in v.odom_front]
-        yaw_rate = v.yaw_rate + math.radians(
+        yaw_rate = v.yaw_rate_measured + math.radians(
             p.gyro_bias_dps
             + (self.rng.gauss(0.0, p.gyro_noise_dps) if p.gyro_noise_dps > 0 else 0.0))
         load = abs(v.speed) / 3.0                       # 0..1 の目安
@@ -342,11 +374,15 @@ class VirtualStm32:
         return packets.Telemetry(
             t_us=self.stm_us(t_ns),
             flags=self._flags(t_ns),
-            speed=_q("speed", v.speed, -32768, 32767),
+            # 実機の speed/wheel_speed はファームのローパス後（`VehicleSpec.speed_filter_s`、約10ms）
+            speed=_q("speed", v.speed_measured, -32768, 32767),
             yaw_rate=_q("yaw_rate", yaw_rate, -32768, 32767),
             steer_actual=_q("steer_actual", v.steer_actual, -32768, 32767),
-            steer_cmd_echo=_q("steer_cmd_echo", self._steer_cmd_echo, -32768, 32767),
-            wheel_speed=[_q("wheel_speed", w, -32768, 32767) for w in v.wheel_speed],
+            # 実機の `steer_cmd_echo` は受理した指令そのものではなく、`steer_rate_limit`
+            # でランプさせた参照舵角（`sim/vehicle.py` の `steer_ref`）。0.524rad の
+            # ステップに約75ms（=0.524/7.0rad/s）かけて追従する様子が実機ログで見えている
+            steer_cmd_echo=_q("steer_cmd_echo", v.steer_ref, -32768, 32767),
+            wheel_speed=[_q("wheel_speed", w, -32768, 32767) for w in v.wheel_speed_measured],
             odom_dist=[_q("odom_dist", d, -(1 << 31), (1 << 31) - 1) for d in odom],
             accel_x=_q("accel_x", v.accel_x, -32768, 32767),
             accel_y=_q("accel_y", v.accel_lateral, -32768, 32767),
@@ -387,8 +423,9 @@ class VirtualStm32:
     def _emit(self, packet, gen_ns: int) -> None:
         """パケットを線上に載せる。**UART の直列化時間ぶん詰まる。**
 
-        250000bps では TELEMETRY(81B) が 3.2ms、LIDAR_SECTOR(76B) が 3.0ms かかる。
-        合計 12.8kB/s ＝ 帯域の 51% を使うので、実機では実際に順番待ちが起きる。
+        1000000bps では TELEMETRY(81B) が 0.81ms、LIDAR_SECTOR(76B) が 0.76ms かかる。
+        TELEMETRY 100Hz・LiDAR 120Hz で合計約17.6kB/s ＝ 帯域の約18%（250000bps・TELEMETRY 50Hz の頃は
+        51% で、実際に順番待ちが起きていた）。
         ここを無視すると「全部が同時刻に届く」不自然に綺麗なシムになる。
         """
         frame = self._enc.encode(packet)
@@ -423,8 +460,14 @@ class VirtualStm32:
         return bytes(out)
 
     def next_due_ns(self) -> int | None:
-        """次にフレームが到着する時刻。`SimLink.poll()` が「何秒寝てよいか」に使う。"""
-        return min((a for a, _ in self._tx), default=None)
+        """次にフレームが到着する時刻。`SimLink.poll()` が「何秒寝てよいか」に使う。
+
+        まだ積んでいない次の TELEMETRY（スナップショット＋線上の時間）も含める。含めないと、
+        線上に何も無い間は `read_timeout` まるごと寝て、スナップショットの時刻を寝過ごした。"""
+        nxt = [a for a, _ in self._tx]
+        if self._next_tlm:
+            nxt.append(self._next_tlm + TELEMETRY_WIRE_NS)
+        return min(nxt, default=None)
 
     def flush_tx(self) -> None:
         """Pi 側の `reset_input_buffer()` に対応。線上のものを捨てる。"""

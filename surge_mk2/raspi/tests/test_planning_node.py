@@ -8,6 +8,7 @@
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.auto import E2ELidar, make_planner  # noqa: E402
 from raspi.msgs import AutoCtrl, Scan  # noqa: E402
-from raspi.msgs.types import TOPIC_E2E_MODEL, TOPIC_SCAN, TOPIC_SCAN_CAM, E2EModelCtrl  # noqa: E402
+from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,  # noqa: E402
+                              TOPIC_SCAN_CAM, E2EModelCtrl)
 from raspi.nodes.planning_node import PlanningNode, input_topics  # noqa: E402
 
 
@@ -79,6 +81,77 @@ class TestReplanRouting(unittest.TestCase):
         node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg_cam")
         node._replan(1)
         self.assertEqual(node._last_scan_seq, -1)
+
+
+class _TimedSub:
+    """本物の `Subscriber.poll` のように待ち、`t_new_ns` を過ぎたら新しい周の点群を出す。"""
+
+    def __init__(self, t_new_ns: int):
+        self.latest = {TOPIC_SCAN: Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=1,
+                                        t_pub=time.monotonic_ns())}
+        self.t_new_ns = t_new_ns
+        self.t_seen_ns = None
+
+    def poll(self, timeout_ms):
+        time.sleep(timeout_ms / 1000)
+        now = time.monotonic_ns()
+        if self.t_seen_ns is None and now >= self.t_new_ns:
+            self.latest[TOPIC_SCAN] = Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=2,
+                                           t_pub=now)
+            self.t_seen_ns = now
+        return []
+
+
+class _TimedPub:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, topic, msg):
+        self.sent.append((time.monotonic_ns(), topic, msg))
+
+
+class TestImmediateAutoCmd(unittest.TestCase):
+    """新しい判断は 50Hz の定期送信を待たずに `auto/cmd` へ出る（2026-09-26）。"""
+
+    def test_new_plan_is_sent_right_away_and_periodic_continues(self):
+        t0 = time.monotonic_ns()
+        sub = _TimedSub(t0 + 70_000_000)
+        pub = _TimedPub()
+        node = PlanningNode(pub=pub, sub=sub, mode="ftg")
+        node.run(duration_s=0.15)
+        cmds = [t for t, topic, _ in pub.sent if topic == TOPIC_AUTO_CMD]
+        after = [t for t in cmds if t >= sub.t_seen_ns]
+        self.assertTrue(after)
+        # 新しい周を見てから送るまで（poll の 2ms とループ1周ぶん）。定期送信だけなら最大20ms
+        self.assertLess((after[0] - sub.t_seen_ns) / 1e6, 5.0)
+        # 定期送信（途絶判定の鮮度を保つ繰り返し）は残っている: 0.15s で 50Hz なら約7回
+        self.assertGreaterEqual(len(cmds), 6)
+
+
+class TestAccelLimitPassThrough(unittest.TestCase):
+    """planner の `AutoState.accel_limit` は `auto/cmd` に載る（2026-09-27、前後運動試験が段ごとの
+    加速度を指定する）。制動・未 ready のときは載せない（制動が優先）。"""
+
+    def test_accel_limit_goes_into_auto_cmd(self):
+        from raspi.msgs.types import AutoState
+        node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        cmd = node._cmd_from(AutoState(ready=True, target_speed=1.0, accel_limit=1.6))
+        self.assertEqual(cmd.accel_limit, 1.6)
+        cmd = node._cmd_from(AutoState(ready=True, brake=True, accel_limit=1.6))
+        self.assertTrue(cmd.brake)
+        self.assertEqual(cmd.accel_limit, 0.0)
+
+    def test_brake_torque_goes_into_auto_cmd_only_for_a_decided_brake(self):
+        """planner が決めた制動（ready）の強さは載せる。「分からない」（ready=False）の制動は 0
+        （中継側の GUI の値）。"""
+        from raspi.msgs.types import AutoState
+        node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        cmd = node._cmd_from(AutoState(ready=True, brake=True, brake_torque=0.04))
+        self.assertEqual((cmd.brake, cmd.brake_torque), (True, 0.04))
+        cmd = node._cmd_from(AutoState(ready=False, brake=True, brake_torque=0.04))
+        self.assertEqual((cmd.brake, cmd.brake_torque), (True, 0.0))
 
 
 class TestCurrentStaleness(unittest.TestCase):

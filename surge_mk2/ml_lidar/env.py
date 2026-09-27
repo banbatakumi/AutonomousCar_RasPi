@@ -216,7 +216,11 @@ class EnvConfig:
     #: 衝突・停止とも障害物の直前に集中し、衝突は減速せず1.4m/sのまま避けきれずに起きていた
     #: ——1.0では1.4m/sで舵を0→最大まで切るのに0.73m走る計算で、回避の舵が間に合わない、
     #: という読み。2.0（v22）へ戻すと滑らかさを失うので中間を取った（PROGRESS.md 2026-09-24節）
-    steer_rate_max_rad_s: float = 1.5
+    #:
+    #: **v26(2026-09-26)で1.0に戻した。** v25（1.5）は障害物ありの失敗を有意に減らさず
+    #: （17〜19%→14〜15%、n=300の誤差内）、障害物なしでも舵の総量が35%増えただけだった
+    #: ——舵の間に合わなさは主因ではなかった（PROGRESS.md 2026-09-26節）
+    steer_rate_max_rad_s: float = 1.0
     steer_tau: float = 0.10           # `e2e_lidar.py`の`steer_tau`既定と同じ
     #: v3検証(2026-09-07)で-10.0だと学習後半(400k~1Mstep)にかけて速度が単調に上がる一方で
     #: 汎化コースでの衝突率も0%→10%前後まで悪化する傾向が実測された——`progress`が速度に
@@ -313,6 +317,9 @@ class LidarE2EEnv(gym.Env):
         self._t_ns = 0
         self._steer = 0.0
         self._steer_target = 0.0
+        #: 今STM32に効いている指令。`control_latency_s`のあいだは新しい指令ではなく
+        #: これが効き続ける（`step()`参照）
+        self._applied_cmd = self._drive_input(0.0, 0.0)
         self._s_prev = self._project_arc_length(self.vehicle.x, self.vehicle.y)
         self._lap_progress_m = 0.0
 
@@ -326,13 +333,18 @@ class LidarE2EEnv(gym.Env):
             1.0 - math.exp(-self.cfg.dt / self.cfg.steer_tau)
         self._steer += (steer_cmd - self._steer) * alpha
 
-        cmd = DriveInput(armed=True, target_speed=speed_cmd, target_steer=self._steer)
+        cmd = self._drive_input(speed_cmd, self._steer)
 
         n_sub = max(1, int(round(self.cfg.dt / self.cfg.physics_substep)))
         sub_dt = self.cfg.dt / n_sub
+        # 実機はスキャン完了からSTM32が指令を受理するまで`control_latency_s`かかる
+        # （Pi側の処理・中継・UART。`sysid_latency`で実測）。そのあいだは前の指令が効く。
+        # 1決定周期を超える遅れは表現しない（実測は数十msの想定）
+        n_delay = min(n_sub, int(round(self.vehicle.spec.control_latency_s / sub_dt)))
+        self._applied_cmd, prev_cmd = cmd, self._applied_cmd
         collided = False
-        for _ in range(n_sub):
-            self.vehicle.apply(cmd)
+        for i in range(n_sub):
+            self.vehicle.apply(prev_cmd if i < n_delay else cmd)
             self.vehicle.step(sub_dt)
             self._t_ns += int(round(sub_dt * NS))
             hit = self.course.collides(self.vehicle.x, self.vehicle.y, self.vehicle.yaw, self._body)
@@ -371,7 +383,9 @@ class LidarE2EEnv(gym.Env):
     def _to_obs(self) -> np.ndarray:
         w = scan_window(self._scan, self.cfg.fov_deg, self.cfg.max_range)
         scan_n = np.asarray(w.dist, dtype=np.float32) / self.cfg.max_range
-        speed_norm = float(np.clip(self.vehicle.speed / self.cfg.max_speed, 0.0, 1.0))
+        # 実機の E2E は STM32 の `speed`（ファームのローパス後）を見る。真の速度ではなく
+        # 同じローパスを通した値を入れる（`VehicleSpec.speed_filter_s`。ファームの定数で、今は約10ms）
+        speed_norm = float(np.clip(self.vehicle.speed_measured / self.cfg.max_speed, 0.0, 1.0))
         steer_norm = float(np.clip(self._steer_target / self.max_steer, -1.0, 1.0)) \
             if self.max_steer > 1e-6 else 0.0
         return np.concatenate([scan_n, [speed_norm, steer_norm]]).astype(np.float32)
@@ -466,6 +480,23 @@ class LidarE2EEnv(gym.Env):
 
         base.tau_steer_s = jitter(base.tau_steer_s)
         base.dead_time_s = jitter(base.dead_time_s)
-        base.tau_speed_s = jitter(base.tau_speed_s)
+        # 速度: ファームの PI（speed_kp>0）なら車体の利得を、旧モデルなら時定数を揺らす。
+        # どちらでも乱数は1回（既存の run と同じシードで同じ揺らぎの列になる）
+        if base.speed_kp > 0.0:
+            base.speed_plant_gain = jitter(base.speed_plant_gain)
+        else:
+            base.tau_speed_s = jitter(base.tau_speed_s)
         base.mu = jitter(base.mu)
+        # 実測済みのときだけ揺らす。**未実測(0)の間は乱数を消費しない**——
+        # 既存のrun・評価と同じシードで同じコース列・同じ揺らぎになる
+        if base.control_latency_s > 0.0:
+            base.control_latency_s = jitter(base.control_latency_s)
         return base
+
+    def _drive_input(self, speed: float, steer: float) -> DriveInput:
+        """実機のCOMMANDと同じ形の指令。GUIが毎回載せるレート制限（`[safety]`）も入れる
+        ——実機の舵は常にこの角速度でランプした参照に追従する（`sim/vehicle.py`参照）。"""
+        sp = self.vehicle.spec
+        return DriveInput(armed=True, target_speed=speed, target_steer=steer,
+                          accel_limit=sp.cmd_accel_limit_m_s2,
+                          steer_rate_limit=sp.cmd_steer_rate_limit_rad_s)

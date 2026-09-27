@@ -51,4 +51,8 @@ export const SAFETY = {
   cmdDeadmanMs: 150.0,
   /** `auto/cmd` がこれだけ古ければ制動に読み替える [ms] */
   autoCmdStaleMs: 200.0,
+  /** COMMAND に毎回載せるレート制限（STM32 側の保険）。シム（`ml_lidar/env.py`）も
+   * 同じ値を使うので、GUI 側に直書きしない */
+  cmdAccelLimit: 6.0, // m/s²
+  cmdSteerRateLimit: 7.0, // rad/s
 } as const

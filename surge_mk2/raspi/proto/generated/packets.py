@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x000E
+PROTOCOL_VERSION = 0x000F
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -35,6 +35,7 @@ FLG_AUTO_STOP_ACTIVE = 0x00010000
 FLG_SIDE_BRAKE_ACTIVE = 0x00020000
 FLG_WINKER_LEFT_ACTIVE = 0x00040000
 FLG_WINKER_RIGHT_ACTIVE = 0x00080000
+FLG_ABS_ACTIVE = 0x00100000
 
 # md_status[i] (u8)
 MDS_RUNNING = 0x01
@@ -104,6 +105,7 @@ class Param:
     WHEEL_LIFT_GUARD_ENABLE = 0x0050
     WHEEL_LIFT_GUARD_THRESH = 0x0051
     AUTO_STOP_MARGIN_CM = 0x0060
+    ABS_ENABLE = 0x0070
 
 _S_LIDAR_SECTOR = struct.Struct('<BI32H')
 
@@ -147,7 +149,7 @@ class Telemetry:
     DIR: ClassVar[str] = 's2p'
     LEN: ClassVar[int | None] = 74
     FMT: ClassVar[str] = '<2I8h2i14h14B'
-    RATE_HZ: ClassVar[float] = 50
+    RATE_HZ: ClassVar[float] = 100
     META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'slip': (0.0001, None), 'tc_limit_nm': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm')}
 
     t_us: int = 0

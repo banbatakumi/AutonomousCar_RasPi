@@ -34,16 +34,17 @@ const HOLD_MS = 300
 export function AssistLamps() {
   const tcRef = useRef<HTMLSpanElement>(null)
   const tvRef = useRef<HTMLSpanElement>(null)
+  const absRef = useRef<HTMLSpanElement>(null)
   const asRef = useRef<HTMLSpanElement>(null)
   const ui = useUi()
 
   useEffect(() => {
     let raf = 0
     // 立ち上がりの時刻。0 は「一度も点いていない」
-    const since = { tc: 0, tv: 0, as: 0 }
-    const shown = { tc: false, tv: false, as: false }
+    const since = { tc: 0, tv: 0, abs: 0, as: 0 }
+    const shown = { tc: false, tv: false, abs: false, as: false }
 
-    const apply = (el: HTMLSpanElement | null, key: 'tc' | 'tv' | 'as', on: boolean) => {
+    const apply = (el: HTMLSpanElement | null, key: 'tc' | 'tv' | 'abs' | 'as', on: boolean) => {
       const now = performance.now()
       if (on) since[key] = now
       const lit = on || now - since[key] < HOLD_MS
@@ -59,6 +60,7 @@ export function AssistLamps() {
       const fresh = vs != null && performance.now() - live.lastRxMs < 500
       apply(tcRef.current, 'tc', !!(fresh && vs?.tc_active))
       apply(tvRef.current, 'tv', !!(fresh && vs?.tv_active))
+      apply(absRef.current, 'abs', !!(fresh && vs?.abs_active))
       apply(asRef.current, 'as', !!(fresh && vs?.auto_stop_active))
     }
     raf = requestAnimationFrame(tick)
@@ -72,6 +74,9 @@ export function AssistLamps() {
       </span>
       <span ref={tvRef} className="lamp lamp-warn" title="トルクベクタリング介入中（左右輪へ配分した）">
         TV
+      </span>
+      <span ref={absRef} className="lamp lamp-warn" title="ABS介入中（後輪がロックしかけたので制動を緩めた）">
+        ABS
       </span>
       <span
         ref={asRef}

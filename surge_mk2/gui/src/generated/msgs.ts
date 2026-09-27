@@ -22,10 +22,10 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x52b020ce
+export const MSGS_SCHEMA = 0xb0ca9056
 
 /**
- * `TELEMETRY`(0x02) を SI に直したもの。50Hz。
+ * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
  */
 export type VehicleState = {
   t_capture: number
@@ -114,6 +114,11 @@ export type VehicleState = {
    */
   winker_left_active: boolean
   winker_right_active: boolean
+  /**
+   * ABS が**今まさに制動トルクを要求より削っている**（★v0.15）。`tc_active` と同じ「介入中」の意味。
+   * フォールバック（前輪センサ異常とみなして ABS を止め、要求どおりに制動している間）は False
+   */
+  abs_active: boolean
   /** 立っている fault の名前 */
   faults: string[]
   /**
@@ -208,6 +213,11 @@ export type LinkDiag = {
    */
   wheel_lift_guard_enabled: boolean | null
   /**
+   * ABS（制動時の後輪ロック防止）が STM32 側で実際に有効化されているか
+   * （`CONFIG_ACK` から取得。★v0.15。既定は有効）。未確認なら None
+   */
+  abs_enabled: boolean | null
+  /**
    * 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
    * から取得。★v0.12。範囲0.0-100.0の連続値。未確認（起動直後でまだ `CONFIG_ACK`
    * を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
@@ -284,6 +294,18 @@ export type AutoState = {
   target_steer: number
   /** 制動を掛けているか */
   brake: boolean
+  /**
+   * [m/s²] 目標速度を変える速さの上限（`COMMAND.accel_limit`）。0 = 指定しない（GUI の値のまま）。
+   * 中継（`telemetry_node._merge_auto`）は GUI の値との**小さい方**を採るので、緩める向きには
+   * 効かない。システム同定の加減速試験が段ごとの加速度を指定するのに使う（2026-09-27）
+   */
+  accel_limit: number
+  /**
+   * [N·m] `brake` のときの制動トルク（1輪あたり、`COMMAND.brake_torque`）。0 = 指定しない（GUI の値の
+   * まま）。人（GUI）もブレーキを掛けていれば中継は**強い方**を採る（`telemetry_node._merge_auto`）。
+   * システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う（2026-09-27）
+   */
+  brake_torque: number
   /** 狙っている方位 [rad] */
   heading: number
   /** 選んだギャップの右端 [deg] 符号付き */

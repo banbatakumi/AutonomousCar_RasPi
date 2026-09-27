@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 from raspi.io.serial_link import RxFrame
-from raspi.proto import FrameEncoder, FrameParser
+from raspi.proto import UART_BAUD, FrameEncoder, FrameParser
 from raspi.proto.generated.packets import HEADER_SIZE, S2P_TYPES
 
 from .course import Course
@@ -48,7 +48,7 @@ class SimLink:
         self._parser = FrameParser(expect_types=S2P_TYPES)
         self._enc = FrameEncoder()
         self.port = f"sim:{sim.course.name}"
-        self.baud = 250_000
+        self.baud = UART_BAUD
         self.on_tx = None
         sim.start(time.monotonic_ns())
 

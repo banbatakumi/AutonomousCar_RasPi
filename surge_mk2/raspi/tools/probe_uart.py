@@ -25,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.proto import FrameEncoder, FrameParser, packets  # noqa: E402
+from raspi.proto import UART_BAUD, FrameEncoder, FrameParser, packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION, S2P_TYPES  # noqa: E402
 
 try:
@@ -74,7 +74,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default="/dev/serial0")
-    ap.add_argument("--baud", type=int, default=250000)
+    ap.add_argument("--baud", type=int, default=UART_BAUD)
     ap.add_argument("--seconds", type=float, default=3.0, help="受信を聞く秒数")
     ap.add_argument("--passive", action="store_true", help="何も送信せず受信だけ")
     ap.add_argument("--ping", action="store_true", help="PING も送る")

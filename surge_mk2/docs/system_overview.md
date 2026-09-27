@@ -59,7 +59,7 @@ flowchart TB
     PLAN <--> IO
     CAM --> TELE
     IO --> LOG
-    IO <-->|"UART 250kbps<br/>＋ GPIO6 ハートビート"| CTRL
+    IO <-->|"UART 1Mbps<br/>＋ GPIO6 ハートビート"| CTRL
     CTRL <--> HW
 ```
 
@@ -83,10 +83,10 @@ PWM デューティやトルク配分は一切送らない。
 | センサ／アクチュエータ | 内容 | Pi 側の設計に効く制約 |
 |---|---|---|
 | **LiDAR LD06** | 10Hz 回転・最大約12m。専用 UART 230400bps | **裏向きに実装**されており、点群は鏡像。10Hz なので1周 100ms の間に車が動き、扇形に歪む |
-| **超音波 ×2**（前・後） | HC-SR04 系。2cm〜約4m | **実質 20Hz が上限**。50Hz の TELEMETRY に対し同じ値が連続する |
+| **超音波 ×2**（前・後） | HC-SR04 系。2cm〜約4m | **実質 20Hz が上限**。100Hz の TELEMETRY に対し同じ値が連続する |
 | **駆動モータ ×2**（後輪左右独立） | BLDC + 自作 MD。**トルクモード** | TC・トルクベクタリングは STM32 内で完結 |
 | **ステアリングモータ ×1** | BLDC + 自作 MD。**位置モード**（サーボではない） | モータ角 → 路面舵角の**リンク比は 0.5 で確定**（2026-08-20 実測）。路面舵角上限 ±30° |
-| **車速センサ** | 前輪左右の**アナログ絶対角エンコーダ**（ADC 読み） | 分解能が粗く強いローパスが掛かる。**ここから加速度を微分してはいけない**。低速では使い物にならない |
+| **車速センサ** | 前輪左右の**アナログ絶対角エンコーダ**（ADC 読み） | 分解能が粗く、STM32 で ADC 平均化＋ローパス（時定数約10ms、`vehicle.toml` `speed_filter_s`）を掛けてから送る。**ここから加速度を微分してはいけない**。低速では使い物にならない |
 | **IMU MPU6050**（6軸） | Mahony 相補フィルタ。**地磁気センサ無し** | **絶対方位が出ない**。yaw は積分ドリフトする。TELEMETRY は `yaw_rate` のみ |
 | **温度センサ ×4** | MD後左 / MD後右 / MDステア / STM32 内蔵 | 据え切りを続けると**ステア MD が過熱**する |
 | **電源 2系統** | 駆動系（過電流 5.0A）／シグナル系（同 3.0A）。8セル NiMH | **片方だけ落ちる**（駆動を切っても Pi と STM32 は生きている） |
@@ -118,7 +118,7 @@ PWM デューティやトルク配分は一切送らない。
 │ Pi 5      認知・判断                  10〜50 Hz │
 │           知覚 → 自己位置 → 経路 → 行動判断      │
 └───────────────────┬──────────────────────────┘
-                    │ UART 250kbps ＋ GPIO6 ハートビート
+                    │ UART 1Mbps ＋ GPIO6 ハートビート
 ┌───────────────────┴──────────────────────────┐
 │ STM32     リアルタイム制御         100 Hz〜1 kHz │
 │           速度/舵角ループ・TC・保護              │
@@ -155,12 +155,12 @@ sequenceDiagram
     S->>IO: LIDAR_SECTOR ×12 (120Hz, UART)
     Note over IO: ScanAssembler が12枚を<br/>1周にまとめ、鏡像を戻す
     IO->>P: scan（バス, 10Hz）
-    IO->>T: vehicle_state（バス, 50Hz）
+    IO->>T: vehicle_state（バス, 100Hz）
     Note over P: planner が<br/>「どこへ向かうか」を決める
-    P->>T: auto/cmd（50Hz）
+    P->>T: auto/cmd（新しい判断は即時＋50Hz）
     Note over T: engage 中だけ<br/>速度・舵・制動を差し替える
-    T->>IO: cmd（50Hz・唯一の発行元）
-    IO->>S: COMMAND（100Hz, UART）
+    T->>IO: cmd（変化は即時＋50Hz・唯一の発行元）
+    IO->>S: COMMAND（変化は即時＋100Hz, UART）
     S->>S: 速度PI・舵角ループ・TC
     T->>G: /ws/telemetry（20Hz, msgpack）
     G->>T: /ws/control（操縦入力・E-Stop）
@@ -172,7 +172,7 @@ sequenceDiagram
 |---|---|
 | UART 往復（`cmd_seq_echo` で実測） | **8〜12ms** |
 | GUI ↔ telemetry_node | 0.5〜1.6ms |
-| telemetry_node の周期（`auto/cmd` → `cmd` の差し替え） | 最悪 20ms |
+| planning_node → telemetry_node → io_node の中継 | 即時送信（2026-09-26〜）で数ms。以前は3段の周期待ちで平均約20ms・最悪約40ms |
 | **ステアリング機構の応答遅れ** | **50〜200ms（未実測）** |
 
 > **合計 150ms は、時速 10km/h なら 40cm 進んでから舵が効き始めるということ。**
@@ -200,7 +200,7 @@ planning_node ──auto/cmd(速度・舵)──▶     ↑ ここで差し替�
 
 | | STM32 ⇄ Pi | Pi 内部（プロセス間） | Pi ⇄ PC |
 |---|---|---|---|
-| **方式** | UART 250kbps 8N1 | ZeroMQ PUB/SUB ＋ 共有メモリ | WebSocket |
+| **方式** | UART 1Mbps 8N1 | ZeroMQ PUB/SUB ＋ 共有メモリ | WebSocket |
 | **形式** | 自作バイナリフレーム（SYNC+TYPE+SEQ+LEN+CRC16） | msgspec / msgpack | msgpack（バイナリ）と JSON |
 | **監視** | GPIO6 ハートビート・SEQ 欠番・CRC | ハートビート `hb/<node>` | 往復遅延を GUI に常時表示 |
 | **定義の場所** | **`raspi/proto/protocol.toml`（唯一の定義）** | `raspi/msgs/types.py` | 同左（GUI 側は `gui/src/types.ts` に手写し） |
@@ -219,7 +219,7 @@ planning_node ──auto/cmd(速度・舵)──▶     ↑ ここで差し替�
 | TYPE | 名称 | 方向 | 頻度 | 中身 |
 |---|---|---|---|---|
 | `0x01` | `LIDAR_SECTOR` | STM32→Pi | 120Hz（12枚/周 × 10Hz） | 30点ぶんの距離 [mm] ＋ 取得時刻 |
-| `0x02` | `TELEMETRY` | STM32→Pi | 50Hz | 速度・舵角・各輪周速・オドメトリ・IMU・電流・温度・電圧・超音波・MD状態 |
+| `0x02` | `TELEMETRY` | STM32→Pi | 100Hz（2026-09-26 に 50Hz から） | 速度・舵角・各輪周速・オドメトリ・IMU・電流・温度・電圧・超音波・MD状態 |
 | `0x08` | `STATS` | STM32→Pi | 1Hz | 累積エラーカウンタ |
 | `0x10` | `COMMAND` | Pi→STM32 | 100Hz | mode・flags・目標速度・目標舵角・レート制限・制動トルク・駆動トルク |
 | `0x12`/`0x06` | `PING`/`PONG` | 双方向 | 5Hz | 時刻同期 |
@@ -290,7 +290,7 @@ flowchart LR
     LOG["logger_node<br/>MCAP 記録"]
 
     IO -->|"scan 10Hz"| PLAN
-    IO -->|"vehicle_state 50Hz"| PLAN
+    IO -->|"vehicle_state 100Hz"| PLAN
     IO -->|"vehicle_state / scan / diag"| TELE
     IO --> LOG
     CAM -->|"共有メモリ<br/>image/front, image/rear"| TELE
@@ -299,7 +299,7 @@ flowchart LR
     CAM --> LOG
     CAMPERC -->|"scan/cam"| PLAN
     LINEPERC -->|"line/cam"| PLAN
-    PLAN -->|"auto/cmd 50Hz<br/>auto/state 10Hz"| TELE
+    PLAN -->|"auto/cmd 即時＋50Hz<br/>auto/state 10Hz"| TELE
     TELE -->|"cmd 50Hz（唯一の発行元）"| IO
     TELE -->|"auto/ctrl 5Hz"| PLAN
     TELE -->|"auto/ctrl 5Hz"| CAMPERC
@@ -336,7 +336,7 @@ flowchart LR
 
 | トピック | 中身 | 頻度 | 発行元 | 配送 |
 |---|---|---|---|---|
-| `vehicle_state` | 速度・各輪周速・路面舵角・オドメトリ・IMU・温度・電源2系統・フラグ | 50Hz | io_node | LATEST |
+| `vehicle_state` | 速度・各輪周速・路面舵角・オドメトリ・IMU・温度・電源2系統・フラグ | 100Hz | io_node | LATEST |
 | `scan` | LiDAR 1周分の点群（360点＋セクタごとの時刻・受信有無） | 10Hz | io_node | LATEST |
 | `scan/cam` | カメラの走行可否セグメンテーションを`scan`と同じ形に変換した擬似点群（`ftg_cam`専用） | 実測待ち | cam_perception_node | LATEST |
 | `line/cam` | カメラで検出した白線の近傍・遠方2点（地面座標、`line_trace`専用） | 実測待ち | line_perception_node | LATEST |
@@ -344,10 +344,10 @@ flowchart LR
 | `e2e/model` | GUIが選んだE2E LiDARモデル名（`models/e2e_lidar/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
 | `diag/link` | リンク統計（loss / CRC / 往復 / 時刻同期 / **SIM バッジ**） | 10Hz | io_node | LATEST |
 | `image/front`, `image/rear` | 共有メモリ参照（60バイト） | 最大 30Hz | camera_node | LATEST |
-| `cmd` | 目標速度・舵角・フラグ | 50Hz | **telemetry_node（唯一）** | LATEST |
+| `cmd` | 目標速度・舵角・フラグ | `auto/cmd` の変化は即時＋50Hz | **telemetry_node（唯一）** | LATEST |
 | `auto/ctrl` | どのモードで走るかの意思・パラメータ | 5Hz | telemetry_node | LATEST |
 | `log/ctrl` | `.sfl` 記録の開始/停止の意思 | 1Hz | telemetry_node | LATEST |
-| `auto/cmd` | 自律走行の目標速度・舵角 | 50Hz | planning_node | LATEST |
+| `auto/cmd` | 自律走行の目標速度・舵角 | 新しい判断は即時＋50Hz | planning_node | LATEST |
 | `auto/state` | その判断の根拠（選んだギャップ・自己位置・段） | 10Hz | planning_node | LATEST |
 | `auto/map` | 占有格子 | 版が変わったとき | planning_node | LATEST |
 | `hb/<node>` | ハートビート | 10Hz | io / control / planning | LATEST |
@@ -857,10 +857,10 @@ io_node ── link.poll/send ──┤
 |---|---|
 | 自転車モデル（後輪車軸中心） | タイヤモデル・スリップ・横滑り |
 | 操舵の**むだ時間 + 1次遅れ** + レート制限 | TC / TV の介入 |
-| 速度の1次遅れ + `accel_limit` | カメラ画像の生成 |
+| 速度は**ファームの PI**（目標ランプ→PI→加速度上限。`SpeedController`） | カメラ画像の生成 |
 | 車体外形（多角形）での衝突判定 | 路面μ・勾配 |
 | **仮想 LD06**（距離ノイズ・点欠損・**セクタ欠損**・伝送遅延・走査ゆがみ） | 電流・温度・電圧の物理的根拠 |
-| UART の線上時間（250kbps）による順番待ち | |
+| UART の線上時間（1Mbps）による順番待ち | |
 | 仮想 STM32 の独立した時計（既定 +3378ppm） | |
 
 **物理が浅くセンサが作り込んである**のは意図的。アクチュエータの動特性（`[dynamics]`）は
