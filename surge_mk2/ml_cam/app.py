@@ -1,7 +1,7 @@
 """ml_cam/app.py — アノテーション・学習をターミナル無しで操作するための最小限のGUI。
 
     .venv/bin/python ml_cam/app.py
-    （または `ml_cam/start_app.command` をダブルクリック）
+    （または `launcher.command`（surge_mk2 直下） から起動）
 
 `ml_cam/extract_frames.py`・`ml_cam/annotate.py`・`ml_cam/train.py`・`ml_cam/export_onnx.py`を
 サブプロセスとして呼び出すだけの薄い操作パネル。**推論・学習のロジックは

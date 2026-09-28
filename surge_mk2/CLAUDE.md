@@ -29,6 +29,7 @@
 | どう直して実機/シムに反映するか | [`docs/development.md`](docs/development.md) |
 | UART プロトコルの数値仕様 | [`docs/uart_protocol.md`](docs/uart_protocol.md)（唯一の定義は `raspi/proto/protocol.toml`） |
 | STM32 側の実装仕様 | [`docs/stm32_interface.md`](docs/stm32_interface.md) |
+| 補助 GUI（シム・同定・SLAM 再処理・ml 系）を起動したい | `launcher.command`（`tools/launcher.py`） |
 | シミュレータの使い方 | [`sim/README.md`](sim/README.md) |
 | GUI のコード地図 | [`gui/README.md`](gui/README.md) |
 | 車両パラメータ（幾何・質量・動特性） | `config/vehicle.toml`（全ノードがここだけを見る） |

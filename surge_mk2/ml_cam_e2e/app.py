@@ -1,7 +1,7 @@
 """ml_cam_e2e/app.py — カメラE2E（模倣学習）のペア抽出・学習をターミナル無しで操作するための最小限のGUI。
 
     .venv/bin/python ml_cam_e2e/app.py
-    （または `ml_cam_e2e/start_app.command` をダブルクリック）
+    （または `launcher.command`（surge_mk2 直下） から起動）
 
 `ml_cam_e2e/extract_pairs.py`・`train.py`・`export_onnx.py`・`preview.py` を
 サブプロセスとして呼び出すだけの薄い操作パネル。**推論・学習のロジックは

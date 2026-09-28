@@ -94,6 +94,11 @@
 
 ### Mac 側
 
+メイン GUI（Web）以外の補助 GUI（シミュレータ一式・コースエディタ・システム同定・SLAM 再処理・
+ml_lidar / ml_cam / ml_cam_e2e）は、**`launcher.command`（surge_mk2 直下）をダブルクリック**すると
+1つの窓から起動・停止できる（`tools/launcher.py`。アプリの追加は `APPS` に1行足す）。
+ランチャーを閉じると、そこから起動したアプリも終了する。
+
 ```bash
 cd ~/GitHub/AutonomousCar_RasPi/surge_mk2
 
@@ -808,8 +813,8 @@ STM32 の `auto_stop`（速度に応じて伸びる動的停止距離）の方�
 tools/deploy.sh --no-gui
 ```
 
-ターミナル操作をまとめて避けたいなら `ml_lidar/app.py`（または `ml_lidar/start_app.command`
-をダブルクリック）が上記1〜3をボタンで操作できる薄い Tkinter GUI（`ml_cam/app.py` と対称、
+ターミナル操作をまとめて避けたいなら `ml_lidar/app.py`（または `launcher.command`
+をダブルクリックして「ml_lidar」を起動）が上記1〜3をボタンで操作できる薄い Tkinter GUI（`ml_cam/app.py` と対称、
 2026-08-28追加）。学習前に「run名」を1つ決めるだけで、`ml_lidar/runs/<run名>` への
 学習出力と `models/e2e_lidar/<run名>.onnx` へのエクスポート先が自動的に紐づく
 （`v1`・`v2`…と自動採番も提案する）。学習run一覧タブから TensorBoard・観戦(`watch.py`)・
@@ -880,8 +885,8 @@ python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt \
 tools/deploy.sh --no-gui
 ```
 
-ターミナル操作をまとめて避けたいなら `ml_cam/app.py`（または `ml_cam/start_app.command` を
-ダブルクリック）が上記1〜4をボタンとファイル選択ダイアログでサブプロセス起動するだけの
+ターミナル操作をまとめて避けたいなら `ml_cam/app.py`（または `launcher.command`（surge_mk2 直下） から「ml_cam」を
+起動）が上記1〜4をボタンとファイル選択ダイアログでサブプロセス起動するだけの
 薄い Tkinter GUI。推論・学習のロジックは持たないので、中身のスクリプトを直せば
 こちら側は何も変えなくてよい。
 
@@ -952,7 +957,7 @@ tools/deploy.sh --no-gui
 ```
 
 ターミナル操作をまとめて避けたいなら `ml_cam_e2e/app.py`（または
-`ml_cam_e2e/start_app.command` をダブルクリック）が上記1〜3をボタンで操作できる
+`launcher.command`（surge_mk2 直下） から「ml_cam_e2e」を起動）が上記1〜3をボタンで操作できる
 薄い Tkinter GUI（`ml_cam/app.py`と対称。SAMアノテーションが無い分タブが1枚少ない）。
 
 ★ **実車での推論プロセス（`surge-cam-e2e`）は常時 enable の systemd unit。**
