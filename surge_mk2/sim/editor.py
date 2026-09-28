@@ -20,6 +20,22 @@
 （`sim/wall_track.py`）。壁モードでは中心線も道幅も人間が決めないので、
 **スタート地点**（位置+向き）を別途置く必要がある。
 
+### 分岐・ショートカットのあるコース
+
+中心線の自動導出（`_prune_to_single_cycle`、`sim/wall_track.py`）は「壁で
+囲まれた自由空間が単一の単純ループであること」を前提にしていて、分岐や
+交差があると `WallExtractionError` を投げる。`Course.centerline` 自体が
+「yaw付き点列1本」という単純経路のデータモデルだから、分岐のある形状を
+中心線に単純化しようがない——ここは変えていない。
+
+**ただし、これは保存を止める理由にはしない。** 壁の形をそのまま描いて
+保存すれば、中心線の導出に失敗しても `centerline: null` で保存される
+（`_save_wall()`）。中心線が無いコースが使えないのは、それを前提とする
+機能（`sim/slam_bench.py` の `TruthDriver` による pure pursuit 追従など）
+だけ。車体やLiDARから見た物理的な壁としては普通に存在するので、占有格子
+ベースの経路計画（`raspi/nav/hybrid_astar.py` 等）や手動運転では、分岐・
+交差のある壁でも実際に通り抜けたり迂回したりできる。
+
 ## どちらのモードも
 
 - クリック（ほぼ動かさずに離す）＝直線の頂点。ドラッグ＝ドラッグを始めた
@@ -115,14 +131,13 @@ class Editor:
         self.center_loop = Loop()
         self.width = DEFAULT_WIDTH
 
-        self.role = "eval"                      # "train" | "eval" | "both"
-
         self.wall_loops: list[Loop] = []
         self.wall_current = Loop()
         self.wall_thickness = DEFAULT_WALL_THICKNESS
         self.wall_start: tuple[float, float, float] | None = None
         self.placing_start = False
         self._wall_centerline_preview = None
+        self._centerline_warning = ""
 
         self.grid_snap = True
         self.grid_spacing = GRID_SPACINGS[0]        # 0.25m
@@ -356,7 +371,6 @@ class Editor:
             self.name = "new_course"
             self.width = DEFAULT_WIDTH
             self.wall_thickness = DEFAULT_WALL_THICKNESS
-            self.role = "eval"
         self._fit_view()
         self._mark_dirty()
         self.say("新規コースを作成しました" if reset_name else "全消去しました")
@@ -373,8 +387,8 @@ class Editor:
         `wall_loops` に入る。閉じていない壁が骨格化でどう扱われるかは
         `sim/wall_track.py` 参照——コース内の空間を分断しない短い壁（障害物や
         シケインの板）なら、骨格の袋小路の枝として刈り取られるだけで問題なく
-        通る。両側の壁をまたいで完全に分断する壁を置いた場合だけ、保存時に
-        「壁の形状が複雑すぎます」で弾かれる。
+        通る。両側の壁をまたいで完全に分断する壁（分岐・複数ループ）を置いた
+        場合は、保存自体は止まらないが中心線が `null` になる（`_save_wall()`）。
         """
         if self.mode != "wall":
             self.say("中心線モードでは使えません（コースにつき中心線は1本です）")
@@ -411,10 +425,6 @@ class Editor:
         if mode != self.mode:
             self.mode = mode
             self._mark_dirty()
-
-    def set_role(self, role: str) -> None:
-        if role != self.role:
-            self.role = role
 
     def begin_place_start(self) -> None:
         self.placing_start = True
@@ -540,7 +550,8 @@ class Editor:
             self.wall_loops = [path_to_loop(tuple(w["origin"]), w["path"]) for w in m["walls"]]
             self.wall_current = Loop()
             self.wall_thickness = float(m.get("wall_thickness", DEFAULT_WALL_THICKNESS))
-            start = m.get("start") or m["centerline"][0]
+            centerline = m.get("centerline")
+            start = m.get("start") or (centerline[0] if centerline else (0.0, 0.0, 0.0))
             self.wall_start = tuple(float(v) for v in start)
             self.name = p.stem
             self.say(f"{p.name} を開きました（壁 {len(self.wall_loops)} ループ）")
@@ -553,8 +564,6 @@ class Editor:
         else:
             self.say(f"{p.name} は PNG 方式なので編集できません")
             return
-        role = str(m.get("role", "eval"))
-        self.role = role if role in ("train", "eval", "both") else "eval"
         self.obstacles = [(float(x), float(y), float(r)) for x, y, r in m.get("obstacles", [])]
         self._fit_view()
         self._mark_dirty()
@@ -582,13 +591,19 @@ class Editor:
         p = DEFAULT_COURSE_DIR / f"{self.name}.json"
         m = {"name": self.name, "width": self.width, "resolution": CENTER_RESOLUTION,
             "origin": list(origin), "loop": self.center_loop.closed, "path": path,
-            "obstacles": [list(o) for o in self.obstacles], "role": self.role,
+            "obstacles": [list(o) for o in self.obstacles],
             "note": "sim.editor（頂点スケッチ、中心線モード）で作成"}
         p.write_text(json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.say(f"保存: {p.name}"
                  + ("（閉ループ）" if self.center_loop.closed else "（開いたまま）"))
 
     def _save_wall(self) -> None:
+        """壁を保存する。中心線の導出（骨格化→単一ループへ刈り込み）に失敗しても
+        **保存は止めない**——分岐・複数ループのあるコースを描く自由を優先する
+        （`sim/wall_track.py` 参照）。その場合 `centerline` は `null` で保存され、
+        `sim/slam_bench.py` の `TruthDriver` のように中心線を前提とする機能だけが
+        使えなくなる（占有格子ベースの経路計画や手動運転は影響を受けない）。
+        """
         if not self.wall_loops:
             self.say("閉じた壁ループがありません")
             return
@@ -601,8 +616,8 @@ class Editor:
             centerline = wall_track.derive_centerline(grid, origin, WALL_RESOLUTION,
                                                       self.wall_start[:2])
         except wall_track.WallExtractionError as e:
-            self.say(f"保存できません: {e}")
-            return
+            centerline = None
+            self._centerline_warning = str(e)
 
         walls_json = []
         for loop in self.wall_loops:
@@ -610,14 +625,22 @@ class Editor:
             walls_json.append({"origin": list(o), "path": path})
 
         p = DEFAULT_COURSE_DIR / f"{self.name}.json"
+        note = "sim.editor（頂点スケッチ、壁モード）で作成。centerlineは自動導出"
+        if centerline is None:
+            note = ("sim.editor（頂点スケッチ、壁モード）で作成。分岐/複数ループのため"
+                    "centerlineは導出できず null（pure pursuit等の追従には使えない）")
         m = {"name": self.name, "mode": "wall", "resolution": WALL_RESOLUTION,
             "wall_thickness": self.wall_thickness, "margin": WALL_MARGIN,
-            "walls": walls_json, "centerline": centerline.tolist(),
+            "walls": walls_json,
+            "centerline": centerline.tolist() if centerline is not None else None,
             "start": list(self.wall_start),
-            "obstacles": [list(o) for o in self.obstacles], "role": self.role,
-            "note": "sim.editor（頂点スケッチ、壁モード）で作成。centerlineは自動導出"}
+            "obstacles": [list(o) for o in self.obstacles],
+            "note": note}
         p.write_text(json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        self.say(f"保存: {p.name}（中心線を自動生成、{len(centerline)} 点）")
+        if centerline is None:
+            self.say(f"保存: {p.name}（中心線なし: {self._centerline_warning}）")
+        else:
+            self.say(f"保存: {p.name}（中心線を自動生成、{len(centerline)} 点）")
 
     # ── ループ ──
 
@@ -702,8 +725,6 @@ class Editor:
             b.value()
         elif b.kind == "mode":
             self.set_mode(b.value)
-        elif b.kind == "role":
-            self.set_role(b.value)
         elif b.kind == "grid_spacing":
             self.set_grid_spacing(b.value)
         elif b.kind == "wall_del":
@@ -902,16 +923,6 @@ class Editor:
             self.ui.button(self.screen, r, label, on=(self.mode == mode), hover=(self.hover is b))
         y += 38
 
-        y = self.ui.section(self.screen, "役割（学習プールでの扱い）", x, y + 4, inner)
-        n_role = 3
-        bw_role = (inner - 8 * (n_role - 1)) // n_role
-        for i, (role, label) in enumerate((("train", "学習"), ("eval", "評価"), ("both", "両方"))):
-            r = pygame.Rect(x + i * (bw_role + 8), y, bw_role, 28)
-            b = Btn(r, "role", role, label)
-            self.buttons.append(b)
-            self.ui.button(self.screen, r, label, on=(self.role == role), hover=(self.hover is b))
-        y += 38
-
         y = self.ui.section(self.screen, "グリッド", x, y + 4, inner)
         r = pygame.Rect(x, y, inner, 28)
         b = Btn(r, "act", None, f"グリッドにスナップ: {'ON' if self.grid_snap else 'OFF'}  (G)")
@@ -1036,7 +1047,13 @@ class Editor:
         b.value = self.generate_wall_preview
         self.buttons.append(b)
         self.ui.button(self.screen, r, b.label, hover=(self.hover is b), color=U.ACCENT)
-        y += 40
+        y += 34
+        self.screen.blit(self.ui.sm.render(
+            "分岐・複数ループの形状でも保存はできる（中心線がnullになるだけ）", True, U.FAINT), (x, y))
+        y += 16
+        self.screen.blit(self.ui.sm.render(
+            "中心線が無いと使えないのは pure pursuit 追従など一部の機能のみ", True, U.FAINT), (x, y))
+        y += 20
         return y
 
     def _draw_actions(self, x: int, inner: int) -> None:

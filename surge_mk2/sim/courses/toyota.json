@@ -2045,6 +2045,5 @@
     0.0
   ],
   "obstacles": [],
-  "role": "both",
   "note": "sim.editor（頂点スケッチ、壁モード）で作成。centerlineは自動導出"
 }

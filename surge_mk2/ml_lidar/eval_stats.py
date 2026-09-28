@@ -86,6 +86,12 @@ def reference_lap(course: Course, spec: VehicleSpec,
         ごとに振れるので、固定の`VehicleSpec.load()`を使うと理想タイムだけが
         実際のグリップとずれて比が歪む。
     """
+    if course.centerline is None:
+        # 壁モードのコースは分岐・複数ループ等で中心線を導出できないことがあり、
+        # その場合`centerline: null`のまま保存される（`sim/wall_track.py`参照）。
+        # `LidarE2EEnv`経由なら`env.py`が先にガードするが、このコースを直接
+        # 渡す呼び出しにも分かりやすいエラーを出しておく
+        raise ValueError(f"{course.name} は中心線を持たない（理想ラインを計算できない）")
     offsets = compute_raceline_offsets(
         course.centerline, course.width,
         vehicle_half_width_m=max(abs(p[1]) for p in spec.footprint),

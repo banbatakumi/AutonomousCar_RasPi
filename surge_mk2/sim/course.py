@@ -29,20 +29,12 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["Course", "list_courses", "list_role_courses", "DEFAULT_COURSE_DIR"]
+__all__ = ["Course", "list_courses", "DEFAULT_COURSE_DIR"]
 
 DEFAULT_COURSE_DIR = Path(__file__).resolve().parent / "courses"
 
 #: レイを進める刻み幅を解像度の何倍にするか。1.0 だと斜めの壁をすり抜ける
 _STEP_RATIO = 0.5
-
-_VALID_ROLES = ("train", "eval", "both")
-
-
-def _parse_role(meta: dict) -> str:
-    """`role`未指定・不正値は後方互換で`"eval"`扱いにする。"""
-    r = str(meta.get("role", "eval"))
-    return r if r in _VALID_ROLES else "eval"
 
 
 @dataclass
@@ -64,7 +56,8 @@ class Course:
     #: `sim/random_course.py`の`obstacle`アーキタイプのみが持つ
     obstacles: np.ndarray | None = None
     #: 学習/評価どちらのプールで使うか（"train"|"eval"|"both"）。
-    #: 未指定（旧フォーマットのファイル）は後方互換で"eval"扱い
+    #: `ml_lidar/course_gen.py`の手続き生成コースのみが設定する
+    #: （`sim/courses/*.json`のファイル由来コースは常にデフォルト値のまま）
     role: str = "eval"
     #: `raycast()`が使う、外周1pxを壁でpaddingした`grid`。`_padded()`で遅延生成する
     #: キャッシュ（2026-09-01追加、RL訓練でのraycastのプロファイルがボトルネックの
@@ -98,7 +91,7 @@ class Course:
                        resolution=t["resolution"], origin=t["origin"],
                        start=t["start"], grid=np.ascontiguousarray(t["grid"]),
                        centerline=t["centerline"], width=t["width"],
-                       obstacles=t.get("obstacles"), role=_parse_role(meta))
+                       obstacles=t.get("obstacles"))
 
         if "path" in meta:
             from .track import build
@@ -107,7 +100,7 @@ class Course:
                        resolution=t["resolution"], origin=t["origin"],
                        start=t["start"], grid=np.ascontiguousarray(t["grid"]),
                        centerline=t["centerline"], width=t["width"],
-                       obstacles=t.get("obstacles"), role=_parse_role(meta))
+                       obstacles=t.get("obstacles"))
 
         from PIL import Image
         img = Image.open(p).convert("L")
@@ -124,7 +117,6 @@ class Course:
             origin=(float(origin[0]), float(origin[1])),
             start=(float(start[0]), float(start[1]), float(start[2])),
             grid=np.ascontiguousarray(grid),
-            role=_parse_role(meta),
         )
 
     # ── 寸法 ──
@@ -290,29 +282,3 @@ def list_courses(directory: str | Path = DEFAULT_COURSE_DIR) -> list[Path]:
     stems = {p.stem for p in pngs}
     tracks = sorted(j for j in d.glob("*.json") if j.stem not in stems)
     return pngs + tracks
-
-
-def list_role_courses(target: str, directory: str | Path = DEFAULT_COURSE_DIR) -> list[Path]:
-    """`sim.editor`が編集できる centerline/wall 方式の JSON のうち、
-    `role` が `target`（"train"/"eval"）に一致するものを返す。
-
-    PNG占有格子ベース（サイドカーJSONの有無に関わらず`Course`を
-    センターラインから作り直せない）は対象外——`sim/editor.py`の
-    `_editable_course_files()`と同じ判定基準を使う。`role`未指定は
-    後方互換で"eval"扱い、"both"はどちらの`target`にもマッチする。
-    """
-    d = Path(directory)
-    if not d.is_dir():
-        return []
-    out = []
-    for p in sorted(d.glob("*.json")):
-        try:
-            m = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not ("path" in m or m.get("mode") == "wall"):
-            continue
-        role = _parse_role(m)
-        if role == target or role == "both":
-            out.append(p)
-    return out

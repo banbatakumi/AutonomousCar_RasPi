@@ -10,13 +10,21 @@
 `width=None` を返すことでそのままこの経路に乗る——道幅そのものを保存する必要が
 そもそも無い。
 
-## 骨格化からの中心線抽出は保存時にしか走らせない
+## 骨格化からの中心線抽出は保存時にしか走らせない（しかも失敗を許す）
 
 反復するスケルトン化＋`raspi/nav/centerline.py::build()`（「測る→真ん中へ寄せる」を
 数回反復）は数十〜数百msのオーダー。編集中は壁の形が毎フレーム変わりうるので、
 エディタは**保存時に1回だけ**これを実行して `centerline` をJSONへ焼き込む。
 `Course.load()`（→`build()`、本モジュール下部）はグリッドだけ壁ループから作り直し、
 `centerline`/`start` はJSONの値をそのまま使う（ロードのたびに反復処理を走らせない）。
+
+`_prune_to_single_cycle()` は壁で囲まれた自由空間が**単一の単純ループ**である
+ことを前提にしていて、分岐・交差・複数ループがあると `WallExtractionError` を
+投げる。これは今後の大会コースが分岐やショートカットを持つ可能性を考えて、
+**保存を止める理由にはしない**——エディタは骨格化に失敗しても `centerline` を
+`null` のまま保存する（`sim.editor._save_wall()`）。中心線が無いコースは
+`sim/slam_bench.py` の `TruthDriver`（pure pursuit で中心線を単純追従する）
+のような、中心線そのものを前提とする機能でだけ使えなくなる。
 
 ## スケルトン化は自前実装（Zhang-Suen）
 
@@ -266,9 +274,17 @@ def derive_centerline(grid: np.ndarray, origin: tuple[float, float], resolution:
 def build(meta: dict) -> dict:
     """壁モードのコースJSON（`walls` を持つもの）→ `Course` に渡す材料。
 
-    `centerline`/`start` はエディタが保存時に焼き込んだ値をそのまま使う
-    （骨格化はここでは実行しない）。グリッドだけ壁ループから毎回作り直す
-    （決定的で軽い処理なので、JSONに焼き込む必要が無い）。
+    `centerline` はエディタが保存時に焼き込んだ値をそのまま使う（骨格化は
+    ここでは実行しない）。グリッドだけ壁ループから毎回作り直す（決定的で
+    軽い処理なので、JSONに焼き込む必要が無い）。
+
+    `centerline` は**無くてもよい**（キー自体が無い、または `null`）。壁の形が
+    分岐・複数ループなどで単一ループに単純化できない場合、エディタは
+    骨格化に失敗しても保存自体は拒否しない（分岐のあるコースを描く自由を
+    優先する——`sim.editor` 参照）。中心線が無いコースは、それを前提とする
+    機能（`sim/slam_bench.py` の `TruthDriver` による pure pursuit 追従など）
+    でだけ使えない。占有格子ベースの経路計画（`raspi/nav/hybrid_astar.py` 等）
+    や手動運転は中心線と無関係に動くので、影響を受けない。
     """
     res = float(meta.get("resolution", 0.02))
     thickness = float(meta.get("wall_thickness", 0.03))
@@ -282,8 +298,10 @@ def build(meta: dict) -> dict:
         stamp_discs(grid, origin, res, obstacles_in)
         obstacles = np.asarray(obstacles_in, dtype=np.float64)
 
-    centerline = np.asarray(meta["centerline"], dtype=np.float64)
-    start = tuple(float(v) for v in meta.get("start", centerline[0]))
+    centerline_in = meta.get("centerline")
+    centerline = np.asarray(centerline_in, dtype=np.float64) if centerline_in else None
+    default_start = centerline[0] if centerline is not None else (0.0, 0.0, 0.0)
+    start = tuple(float(v) for v in meta.get("start", default_start))
 
     return {"grid": grid, "resolution": res, "origin": origin,
             "start": start, "centerline": centerline, "width": None,
