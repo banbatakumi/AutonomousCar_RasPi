@@ -503,6 +503,11 @@ class Editor:
     def generate_wall_preview(self) -> None:
         """壁モードの骨格化＋中心線導出を明示的に1回実行する（重いので自動では
         呼ばない）。保存の直前にも同じ処理を行うので、これは事前確認用。
+
+        **これが失敗しても保存は妨げない。** 分岐・複数ループの壁は中心線に
+        単純化できないので、ここで出るエラーは「中心線プレビューだけ出せない」
+        という意味で、コース自体は保存できる（`_save_wall()`は`centerline: null`
+        で保存を続ける）。
         """
         if not self.wall_loops:
             self.say("閉じた壁ループがありません")
@@ -516,7 +521,8 @@ class Editor:
             cl = wall_track.derive_centerline(grid, origin, WALL_RESOLUTION,
                                               self.wall_start[:2])
         except wall_track.WallExtractionError as e:
-            self.say(f"中心線を計算できません: {e}")
+            self.say(f"中心線プレビューのみ不可（分岐/複数ループ）: {e} "
+                     "— 保存(S)は問題なくできます")
             return
         self._wall_centerline_preview = cl
         self._dirty = True
@@ -638,7 +644,8 @@ class Editor:
             "note": note}
         p.write_text(json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if centerline is None:
-            self.say(f"保存: {p.name}（中心線なし: {self._centerline_warning}）")
+            self.say(f"保存できました: {p.name}（中心線なし: {self._centerline_warning}。"
+                     "pure pursuit等の追従以外は問題なく使えます）")
         else:
             self.say(f"保存: {p.name}（中心線を自動生成、{len(centerline)} 点）")
 
