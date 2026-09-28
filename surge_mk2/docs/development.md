@@ -127,6 +127,7 @@ tools/record.sh --duration 60                     # SD に書かずに MCAP を 
 # ── ログ ──
 .venv/bin/python -m raspi.tools.logcat logs/x.sfl          # .sfl の要約
 .venv/bin/python -m raspi.tools.sfl2mcap logs/x.sfl        # .sfl → .mcap
+.venv/bin/python -m raspi.tools.slam_replay x.mcap          # slam2d に通し直して自己位置を足す（x_slam.mcap）
 .venv/bin/python -m raspi.tools.mcap_repair x.mcap --inplace   # 尻切れ .mcap の復旧
 .venv/bin/python -m raspi.nodes.replay_node logs/x.sfl --bus --loop
 ```
@@ -661,6 +662,12 @@ python -m raspi.nodes.replay_node logs/x.sfl --bus --loop  # バスに流し直�
 ```
 
 `.mcap` は **Foxglove Studio でそのまま開ける**（自作 GUI＝ライブ用、Foxglove＝オフライン解析用）。
+
+**自己位置を見るには**: `launcher.command`（surge_mk2 直下） から「SLAM 再処理」を起動（`tools/slam_replay_gui.py`）→ 記録を
+選んで「実行」→ 終わると `<入力>_slam.mcap` が Foxglove で開く。3D パネルの設定で Display frame を `odom` にし、
+Topics の `/viz/scan` `/viz/odom/path` `/viz/slam2d/*` の目を点ける（既定では非表示のことがある）。
+点群の Decay time を伸ばすと地図のように溜まり、地図（`/viz/slam2d/map`）は Color mode を
+「RGBA (separate fields)」にする。推測航法と SLAM の差は Plot パネルで `/pose_compare.err_pos` `.err_yaw`。
 
 > **GUI からの `.sfl` 再生は実装したが撤回した。** 再生は `surge-io` と同じ ZeroMQ
 > エンドポイントを取り合うので、GUI が動いている＝`surge-io` も動いている実運用では必ず失敗する。

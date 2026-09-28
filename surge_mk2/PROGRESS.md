@@ -7,6 +7,26 @@
 実機相当のセンサ誤差では**地図の精度1.00・レース中の自己位置2〜4cm・見失い0%**まで到達。
 旧実装は同条件で見失ったまま復帰できず地図も崩れていた）
 
+## MCAP に自己位置と planner の判断を追加（2026-09-28）
+
+- logger_node の購読に `auto/state` `auto/cmd` `auto/map` `auto/ctrl`・カメラ系の知覚結果・`log/ctrl` `ui/event` を追加。
+  `auto/` を接頭辞でまとめないこと（publish 元が control と planning に分かれていて、接頭辞購読は片方にしか繋がない）
+- 推測航法 `raspi/rec/odom.py`（speed×yaw_rate の台形則、静止中に ZUPT）と Foxglove 用トピック `raspi/rec/viz.py`
+  （`/odom` `/tf` `/viz/odom/*` `/viz/slam/*` `/viz/map` `/viz/park`）。sfl2mcap にも同じものを通した
+- 精度（シムの real 条件）: 1周で 4〜8cm、3周で約0.3m。実機の sysid 記録4本（Downloads）でも軌跡の形が試験内容と一致
+  （accel＝2m の往復、corner＝半径約0.5m の旋回）。追加量は約0.55MB/分
+- ★ZUPT の落とし穴2つ: ①止まった直後はまだ転がって曲がっているので学ばない（0.5s 待つ）
+  ②`stopped` は静止付近でばたつくので、1サンプル外れただけで待ち時間を数え直すと永久に学べない（0.1s 以上続けて動いたときだけ数え直す）
+- **計画の B: `raspi/tools/slam_replay.py`**（`.sfl`/`.mcap` → slam2d を回して `/slam2d` `/pose_compare` `/viz/slam2d/*` を足す）。
+  実機 sysid 記録4本で見失い0%・一致度1.00・6〜13ms/周（Mac）。推測航法と SLAM の差（最後/最大）:
+  accel 23.8m で 0.03/0.05m、steer 40.5m で 0.08/0.09m、corner 23.0m で 0.13/0.27m・**方位 -27°**
+- ★corner（半径約0.5m で7周、累積2642°）の方位差は累積回頭にほぼ比例して増えた → **ジャイロの倍率が約1%小さい**疑い
+  （推測航法の回り方が SLAM より少ない）。直線主体の accel/steer では方位差 ±1° 程度。未確認: 逆回りでも同じ比か、
+  SLAM 側の回頭誤差ではないか（倍率なら回る向きによらず比例するはず）
+- slam_replay の GUI（`tools/slam_replay_gui.py`、`launcher.command`（surge_mk2 直下） から起動）。複数ファイルを順に処理し、
+  終わったら Foxglove で開く。Foxglove で点群・軌跡が見えることはバンビが確認済み（3D パネルのトピックは既定で非表示のことがある）
+- 未実施: Pi への反映
+
 ## ABS・TC・TV を直したファームで①〜④を録り直した（2026-09-28）
 
 - **ABS**: 設計どおり（定常は 0.055〜0.083N·m を往復、ロックしない）。減速の頭打ち 2.52→**2.75m/s²**。モデルの予測

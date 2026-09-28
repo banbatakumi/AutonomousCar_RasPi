@@ -845,8 +845,41 @@ msgpack が無いため、内部バス（msgpack）とは形を変えている�
 | `/vehicle_state` `/scan` `/diag/link` `/cmd` `/hb/*` `/image/*` | バスのメッセージそのまま |
 | `/viz/scan` | `foxglove.PointCloud`。**無効点（`dist=0`）は落とす** |
 | `/viz/image/front` `/viz/image/rear` | `foxglove.CompressedImage`（JPEG） |
+| `/auto/*` `/scan/cam` `/line/cam` `/path/cam` `/track/target` `/cam_e2e/cmd` `/log/ctrl` `/ui/event` | 同上（logger_node のみ。2026-09-28 追加） |
+| `/odom` | 推測航法の自己位置（`rec/odom.py`、100Hz） |
+| `/tf` | `foxglove.FrameTransform`（`odom`→`base_link`、50Hz） |
+| `/viz/odom/pose` `/viz/odom/path` | 推測航法の姿勢・軌跡（`foxglove.PoseInFrame` / `PosesInFrame`） |
+| `/viz/slam/pose` `/viz/slam/path` `/viz/map` `/viz/map/lines` | 地図を使う planner の姿勢・占有格子（`foxglove.Grid`）・中心線とレーシングライン（`map` フレーム。logger_node のみ） |
+| `/viz/park` | 駐車の計画経路と目標（`base_link` に固定。logger_node のみ） |
 | `/uart/tx/*` `/uart/rx/*` | UART フレームの生値（`sfl2mcap` のみ） |
 | `/events` | `.sfl` の EVENT（linkstats・health 遷移。`sfl2mcap` のみ） |
+
+#### 自己位置の可視化（2026-09-28）
+
+**planner が動いていない記録にも自己位置を残す**ため、`vehicle_state` の `speed` と
+`yaw_rate` を積分する推測航法（`rec/odom.py`）を logger_node と sfl2mcap の中で回し、
+`/tf`（odom→base_link）を書く。これで `/viz/scan`（base_link）が世界座標に並び、
+Foxglove の 3D パネルで点群の減衰時間を伸ばすと簡易的な地図になる。
+ジャイロのゼロ点ずれは静止中に学ぶ（ZUPT。止まった直後と大きな読みは除外）。
+
+- **`map` と `odom` は tf でつながない。** 推測航法と planner の SLAM は独立した2つの
+  推定で、原点も向きも一致する保証が無いため。3D パネルの表示フレームを切り替えて見る
+- 精度（シム `sim.slam_bench` の real 条件、3秒静止後に周回）: 1周（14〜28m）で 0.04〜0.08m、
+  3周で 0.27〜0.29m。**ドリフトは消えない**ので、長い記録で地図が崩れるのは仕様
+- 追加量は実機の sysid 記録で約 0.55MB/分（出力を丸めた後。丸める前は 0.8MB/分）
+
+#### 記録を slam2d に通し直す（`raspi/tools/slam_replay.py`、2026-09-28）
+
+`.sfl` か `.mcap` を入力に、slam2d（`raspi/auto/_slam2d_nav.py`、実機の `slam2d_raceline` と同じ設定）を
+オフラインで回し、元の中身を全部残したまま `/slam2d` `/pose_compare` `/viz/slam2d/*` を足した
+`<入力>_slam.mcap` を作る。
+
+- 始点合わせの `odom`→`slam2d` を最初の点群の時刻で1つ決めて固定する。Foxglove で表示フレームを
+  `odom` にすると2本の軌跡が同じ始点から描かれ、離れ方がそのままドリフトとして見える
+- `.mcap` 入力は `t_pub` の順に並べ直してから渡す（`log_time`＝`t_capture` の順だと点群が
+  その1周の車両状態より先に届き、点ごとの脱スキューが効かない）
+- 比較は推測航法が SLAM の基準時刻まで進むまで保留する（基準時刻は1周の終わり寄りで、
+  その時刻の車両状態は点群より後に届く）
 
 時刻は **UNIX epoch に直して書く**（`log_time`）。`CLOCK_MONOTONIC` のまま
 書くと Foxglove が 1970年と表示する。**メッセージ内の `t_capture` / `t_pub` は

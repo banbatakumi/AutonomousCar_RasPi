@@ -23,6 +23,7 @@
 | `/uart/tx/*` `/uart/rx/*` | UART フレームの生値（TELEMETRY と LIDAR_SECTOR を除く） |
 | `/events` | `.sfl` の EVENT レコード（linkstats・health 遷移など） |
 | `/viz/scan` | Foxglove の点群（`--no-viz` で止まる） |
+| `/odom` `/tf` `/viz/odom/*` | 推測航法の自己位置（`rec/viz.py`。`--no-viz` で止まる）。**過去の `.sfl` にも軌跡が付く** |
 
 `TELEMETRY` と `LIDAR_SECTOR` を `/uart/rx/*` に出さないのは、
 **`/vehicle_state` と `/scan` が同じ中身の解釈済みの姿**だから。両方書くと
@@ -44,6 +45,7 @@ from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.rec import FrameLogReader  # noqa: E402
 from raspi.rec.mcap_log import McapLog  # noqa: E402
+from raspi.rec.viz import VizRecorder  # noqa: E402
 
 __all__ = ["export"]
 
@@ -76,6 +78,9 @@ class _McapSink:
         self.log = log
         self.clock = clock
         self.viz = True
+        self.vizrec: VizRecorder | None = None
+        #: バスに流れるはずだったメッセージを横から見る口（`tools/slam_replay.py`）
+        self.on_bus = None
         self._seq: dict[str, int] = {}
         self.sent = 0
 
@@ -89,14 +94,25 @@ class _McapSink:
         self.log.write("/" + topic, msg)
         if self.viz and topic == "scan":
             self.log.write_viz_scan(msg)
+        elif self.vizrec is not None and topic == "vehicle_state":
+            self.vizrec.on_vehicle_state(msg)
+        if self.on_bus is not None:
+            self.on_bus(topic, msg)
         self.sent += 1
         return msg
 
 
 def export(path: str | Path, out: str | Path, *, viz: bool = True,
            compression: str = "zstd", start_s: float = 0.0,
-           end_s: float | None = None, quiet: bool = False) -> McapLog:
-    """`.sfl` 1本を `.mcap` に変換して、閉じた `McapLog` を返す（統計を見るため）。"""
+           end_s: float | None = None, quiet: bool = False,
+           on_bus=None, on_close=None) -> McapLog:
+    """`.sfl` 1本を `.mcap` に変換して、閉じた `McapLog` を返す（統計を見るため）。
+
+    :param on_bus: `(McapLog) -> callable(topic, msg)`。バスに流れるはずだった
+        メッセージを横から受け取る関数を作る。**書き込み先の `McapLog` はこの中で
+        開くので、関数ではなく「関数を作る関数」を渡す**（`tools/slam_replay.py`）
+    :param on_close: `McapLog` を閉じる直前に呼ぶ（保留中の書き込みを出すため）
+    """
     path, out = Path(path), Path(out)
 
     # 時刻の基準はログのヘッダから取る。**現在時刻で換算してはいけない**
@@ -111,6 +127,9 @@ def export(path: str | Path, out: str | Path, *, viz: bool = True,
     holder: dict[str, ReplayNode] = {}
     sink = _McapSink(log, clock=lambda: holder["node"]._cursor_ns)
     sink.viz = viz
+    sink.vizrec = VizRecorder(log) if viz else None
+    if on_bus is not None:
+        sink.on_bus = on_bus(log)
     bridge = BusBridge(sink, clock=lambda: holder["node"]._cursor_ns)
     next_diag = [0]
 
@@ -144,6 +163,10 @@ def export(path: str | Path, out: str | Path, *, viz: bool = True,
     try:
         node.run()
     finally:
+        if sink.vizrec is not None:
+            sink.vizrec.close()
+        if on_close is not None:
+            on_close()
         log.close()
 
     if not quiet:
@@ -171,7 +194,7 @@ def main() -> int:
     ap.add_argument("--end", type=float, default=None, help="終了位置 [s]")
     ap.add_argument("--compression", default="zstd", choices=["zstd", "lz4", "none"])
     ap.add_argument("--no-viz", action="store_true",
-                    help="Foxglove 用の /viz/scan を書かない")
+                    help="Foxglove 用の /viz/* と推測航法（/odom /tf）を書かない")
     args = ap.parse_args()
 
     if args.out is not None and len(args.paths) > 1:

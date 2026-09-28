@@ -66,16 +66,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from raspi.bus import RELIABLE, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
+    TOPIC_AUTO_CMD,
+    TOPIC_AUTO_CTRL,
+    TOPIC_AUTO_MAP,
+    TOPIC_AUTO_STATE,
+    TOPIC_CAM_E2E_CMD,
+    TOPIC_CAM_PATH,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_REAR,
+    TOPIC_LINE_CAM,
+    TOPIC_LOG_CTRL,
     TOPIC_SCAN,
+    TOPIC_SCAN_CAM,
+    TOPIC_TRACK_TARGET,
+    TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
 )
 from raspi.rec import logclean  # noqa: E402
 from raspi.rec.mcap_log import McapLog, default_mcap_path  # noqa: E402
+from raspi.rec.viz import VizRecorder  # noqa: E402
 
 __all__ = ["LoggerNode", "DEFAULT_TOPICS", "IMAGE_TOPICS"]
 
@@ -86,7 +98,14 @@ NS = 1_000_000_000
 #: （実測 10.3MB/分）ので、こちらの方が早く満杯へ向かいうる**
 DISK_CHECK_INTERVAL_S = 30.0
 
-#: 記録するトピック。**`image/` は接頭辞購読**にして両カメラをまとめて取る
+#: 記録するトピック。**`image/` は接頭辞購読**にして両カメラをまとめて取る。
+#:
+#: `auto/*` は接頭辞でまとめない。**接頭辞購読は publish 元を1つにしか繋がない**
+#: （`zbus.endpoints_for_topic`）が、`auto/ctrl` は control、`auto/cmd` `auto/state`
+#: `auto/map` は planning が出しているため、`auto/` だと片方が黙って届かない。
+#:
+#: `cam/mask`（GUI 表示用の JPEG）は入れない。カメラ画像と同じく重いのに、
+#: 同じ中身は `scan/cam` `path/cam` に数値で残っている
 DEFAULT_TOPICS = [
     TOPIC_VEHICLE_STATE,
     TOPIC_SCAN,
@@ -94,6 +113,20 @@ DEFAULT_TOPICS = [
     TOPIC_CMD,
     TOPIC_HB_PREFIX,
     "image/",
+    # 自動運転の判断（「なぜそう動いたか」はここにしか残らない）
+    TOPIC_AUTO_CTRL,
+    TOPIC_AUTO_CMD,
+    TOPIC_AUTO_STATE,
+    TOPIC_AUTO_MAP,
+    # カメラ系の知覚結果
+    TOPIC_SCAN_CAM,
+    TOPIC_LINE_CAM,
+    TOPIC_CAM_PATH,
+    TOPIC_TRACK_TARGET,
+    TOPIC_CAM_E2E_CMD,
+    # 操作のイベント
+    TOPIC_LOG_CTRL,
+    TOPIC_UI_EVENT,
 ]
 IMAGE_TOPICS = (TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR)
 
@@ -120,8 +153,8 @@ class LoggerNode:
     :param image_hz: JPEG に焼く頻度（カメラ1台あたり）。0 で画像を記録しない
     :param jpeg_quality: JPEG 品質
     :param compression: MCAP の圧縮（zstd / lz4 / none）
-    :param viz: Foxglove 用の `/viz/*` トピックも書くか。
-        **False にしても数値は全部残る**（Foxglove で絵にならなくなるだけ）
+    :param viz: Foxglove 用の `/viz/*` と推測航法（`/odom` `/tf`、`rec/viz.py`）も書くか。
+        **False にしてもバスの数値は全部残る**（Foxglove で絵にならなくなるだけ）
     """
 
     def __init__(self, path: str | Path, *, topics=None,
@@ -142,6 +175,7 @@ class LoggerNode:
             "jpeg": self._jpeg.impl if self._jpeg is not None else "none",
         })
         self.sub = Subscriber({t: RELIABLE for t in self.topics})
+        self.vizrec = VizRecorder(self.log) if viz else None
 
         self._running = False
         self.images_written = 0
@@ -211,8 +245,16 @@ class LoggerNode:
             # `ImageRef` 自体は全部書く（フレーム時刻の記録は軽い）。
             # 画素を焼くかどうかは `_pump_images` が別途決める
             self._last_ref[msg.cam or topic.split("/")[-1]] = msg
-        elif self.viz and topic == TOPIC_SCAN:
+        elif self.vizrec is None:
+            return
+        elif topic == TOPIC_VEHICLE_STATE:
+            self.vizrec.on_vehicle_state(msg)
+        elif topic == TOPIC_SCAN:
             self.log.write_viz_scan(msg)
+        elif topic == TOPIC_AUTO_STATE:
+            self.vizrec.on_auto_state(msg)
+        elif topic == TOPIC_AUTO_MAP:
+            self.vizrec.on_auto_map(msg)
 
     def _pump_images(self) -> None:
         """`--image-hz` の間隔で共有メモリから読んで JPEG を書く。
@@ -242,6 +284,8 @@ class LoggerNode:
         self.sub.close()
         if self._jpeg is not None:
             self._jpeg.close()
+        if self.vizrec is not None:
+            self.vizrec.close()               # 保留中の地図・最後の軌跡を書く
         self.log.close()
 
     @property
@@ -250,6 +294,13 @@ class LoggerNode:
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
+
+def _odom_text(node: LoggerNode) -> str:
+    p = node.vizrec.last_odom if node.vizrec is not None else None
+    if p is None:
+        return ""
+    return f"odom=({p.x:+.2f},{p.y:+.2f},{p.yaw * 57.2958:+.0f}°) "
+
 
 def _status(node: LoggerNode) -> None:
     el = max(node.elapsed, 1e-9)
@@ -260,7 +311,8 @@ def _status(node: LoggerNode) -> None:
         f"\r{el:6.1f}s  {node.log.size_text:>8}  "
         f"state={n.get('/vehicle_state', 0)} scan={n.get('/scan', 0)} "
         f"img={node.images_written} 計{node.log.written}件 "
-        f"({node.log.written / el:.0f}/s)"
+        f"({node.log.written / el:.0f}/s) "
+        + _odom_text(node)
         + (f"  !!書き込みエラー{node.log.errors}回" if node.log.errors else "")
         + "    ")
     sys.stderr.flush()
@@ -301,7 +353,8 @@ def main() -> int:
     say(f"# 購読: {' '.join(node.topics)}")
     say("# 画像: " + (f"{args.image_hz}Hz/台 ({node._jpeg.impl})"
                       if node._jpeg is not None else "記録しない"))
-    say("# Foxglove Studio で開ける（/viz/scan が点群、/viz/image/* が映像）\n")
+    say("# Foxglove Studio で開ける（/viz/scan が点群、/viz/image/* が映像、"
+        "/tf と /viz/odom/* が推測航法の自己位置）\n")
 
     try:
         node.run(duration_s=args.duration,

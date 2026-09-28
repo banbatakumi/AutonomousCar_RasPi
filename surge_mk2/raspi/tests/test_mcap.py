@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import os
 import struct
 import sys
@@ -436,6 +437,25 @@ class TestSflExport(unittest.TestCase):
         self.assertGreater(n, 0)
 
 
+    def test_odom_is_written_by_default(self):
+        """過去の `.sfl` にも推測航法の軌跡が付くこと。"""
+        self._write_log()
+        self._export()
+        got = read_back(self.mcap)
+        self.assertEqual(len(got["msgs"]["/odom"]), 10)
+        self.assertEqual(got["schemas"]["/tf"], "foxglove.FrameTransform")
+        self.assertIn("/viz/odom/path", got["msgs"])
+        # 車速 0〜90mm/s を 20ms 間隔で積分した分だけ前へ進んでいる
+        self.assertGreater(got["msgs"]["/odom"][-1][1]["x"], 0.0)
+
+    def test_odom_is_turned_off_with_viz(self):
+        self._write_log()
+        self._export(viz=False)
+        msgs = read_back(self.mcap)["msgs"]
+        self.assertNotIn("/odom", msgs)
+        self.assertNotIn("/tf", msgs)
+
+
 # ── 尻切れの復旧 ────────────────────────────────────────────────────────
 
 @requires_mcap
@@ -499,6 +519,132 @@ class TestRepair(unittest.TestCase):
                          "VehicleState")
 
 
+# ── 自己位置・地図の可視化（`rec/viz.py`） ─────────────────────────────
+
+@requires_mcap
+class TestVizRecorder(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.path = Path(self._td.name) / "t.mcap"
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _record(self, fn):
+        from raspi.rec.viz import VizRecorder
+
+        with McapLog(self.path, t0_mono_ns=0, t0_unix_ns=1_700_000_000 * 10**9) as log:
+            rec = VizRecorder(log)
+            fn(rec)
+            rec.close()
+        return read_back(self.path)
+
+    def _drive(self, rec, n=300, v=1.0, w=0.5):
+        for i in range(n):
+            rec.on_vehicle_state(VehicleState(t_capture=(i + 1) * 10 * MS, speed=v,
+                                              yaw_rate=w, stopped=False))
+
+    def test_foxglove_schema_names(self):
+        got = self._record(self._drive)
+        sch = got["schemas"]
+        self.assertEqual(sch["/tf"], "foxglove.FrameTransform")
+        self.assertEqual(sch["/viz/odom/pose"], "foxglove.PoseInFrame")
+        self.assertEqual(sch["/viz/odom/path"], "foxglove.PosesInFrame")
+        self.assertEqual(sch["/odom"], "OdomPose")
+
+    def test_rates_are_thinned(self):
+        """100Hz × 3秒 → /odom は全部、/tf は 50Hz、pose は 10Hz、path は 1Hz＋終了時。"""
+        msgs = self._record(self._drive)["msgs"]
+        self.assertEqual(len(msgs["/odom"]), 300)
+        self.assertAlmostEqual(len(msgs["/tf"]), 150, delta=2)
+        self.assertAlmostEqual(len(msgs["/viz/odom/pose"]), 30, delta=1)
+        self.assertAlmostEqual(len(msgs["/viz/odom/path"]), 4, delta=1)
+
+    def test_tf_matches_odom(self):
+        """`/tf` の平行移動・回転が推測航法の姿勢と一致する（odom→base_link）。"""
+        msgs = self._record(self._drive)["msgs"]
+        _, tf = msgs["/tf"][-1]
+        odom = {b["t_capture"]: b for _, b in msgs["/odom"]}
+        t_ns = tf["timestamp"]["sec"] * 10**9 + tf["timestamp"]["nsec"] - 1_700_000_000 * 10**9
+        o = odom[t_ns]
+        self.assertEqual((tf["parent_frame_id"], tf["child_frame_id"]), ("odom", "base_link"))
+        self.assertAlmostEqual(tf["translation"]["x"], o["x"])
+        self.assertAlmostEqual(tf["translation"]["y"], o["y"])
+        q = tf["rotation"]
+        self.assertAlmostEqual(2 * math.atan2(q["z"], q["w"]), o["yaw"], delta=1e-5)  # 四元数は6桁に丸めてある
+
+    def test_path_is_bounded(self):
+        """長く走っても軌跡の点数に上限がある（メッセージが際限なく育たない）。"""
+        from raspi.rec.viz import PATH_MAX_POINTS
+
+        msgs = self._record(lambda r: self._drive(r, n=20000, v=2.0, w=0.3))["msgs"]
+        _, path = msgs["/viz/odom/path"][-1]
+        self.assertLessEqual(len(path["poses"]), PATH_MAX_POINTS)
+        self.assertGreater(len(path["poses"]), PATH_MAX_POINTS // 3)
+
+    def test_slam_pose_only_when_a_map_planner_runs(self):
+        from raspi.msgs.types import AutoState
+
+        def fn(rec):
+            rec.on_auto_state(AutoState(t_capture=10 * MS, mode="ftg"))
+            rec.on_auto_state(AutoState(t_capture=200 * MS, mode="raceline",
+                                        phase="EXPLORE", pose_x=1.0, pose_y=2.0,
+                                        pose_yaw=0.5))
+        msgs = self._record(fn)["msgs"]
+        self.assertEqual(len(msgs["/viz/slam/pose"]), 1)
+        _, p = msgs["/viz/slam/pose"][0]
+        self.assertEqual(p["frame_id"], "map")
+        self.assertEqual(p["pose"]["position"]["x"], 1.0)
+
+    def test_map_grid_round_trip_and_thinning(self):
+        """`AutoMap` の3値 → RGBA の Grid。短い間隔の更新は保留し、最後の1枚は close で書く。"""
+        import numpy as np
+
+        from raspi.msgs.types import AutoMap
+        from raspi.nav.grid import pack_trinary
+
+        tri = np.zeros((4, 6), dtype=np.uint8)
+        tri[0, 0] = 2                                   # y 最小・x 最小の角が占有
+        tri[3, 5] = 1
+
+        def fn(rec):
+            for k in range(3):                          # 0.5秒おきに3回 → 1枚目と最後だけ
+                rec.on_auto_map(AutoMap(t_capture=(1 + k) * 500 * MS, map_seq=k,
+                                        resolution=0.05, origin_x=-1.0, origin_y=-2.0,
+                                        width=6, height=4, cells=pack_trinary(tri),
+                                        raceline=[0.0, 0.0, 1.0, 0.0]))
+        got = self._record(fn)
+        grids = got["msgs"]["/viz/map"]
+        self.assertEqual(len(grids), 2)
+        self.assertEqual(got["schemas"]["/viz/map"], "foxglove.Grid")
+        _, g = grids[-1]
+        self.assertEqual(g["column_count"], 6)
+        self.assertEqual(g["pose"]["position"], {"x": -1.0, "y": -2.0, "z": 0.0})
+        data = base64.b64decode(g["data"])
+        self.assertEqual(len(data), 6 * 4 * 4)
+        self.assertEqual(data[3], 255)                  # 占有は不透明
+        self.assertEqual(data[(3 * 6 + 5) * 4 + 3], 120)  # 空きは半透明
+        self.assertEqual(data[(1 * 6 + 1) * 4 + 3], 0)    # 未知は透明
+        self.assertEqual(got["schemas"]["/viz/map/lines"], "foxglove.SceneUpdate")
+
+    def test_park_path_is_locked_to_the_vehicle(self):
+        from raspi.msgs.types import AutoState
+
+        def fn(rec):
+            rec.on_auto_state(AutoState(t_capture=10 * MS, park_active=True,
+                                        park_path_x=[0.0, 0.5, 1.0, 0.8],
+                                        park_path_y=[0.0, 0.1, 0.3, 0.5],
+                                        park_path_reverse_from=2))
+            rec.on_auto_state(AutoState(t_capture=500 * MS, park_active=False))
+        msgs = self._record(fn)["msgs"]["/viz/park"]
+        self.assertEqual(len(msgs), 2)
+        ent = msgs[0][1]["entities"][0]
+        self.assertEqual(ent["frame_id"], "base_link")
+        self.assertTrue(ent["frame_locked"])
+        self.assertEqual(len(ent["lines"]), 2)          # 前進と後退で色を分ける
+        self.assertEqual(msgs[1][1]["deletions"][0]["type"], 1)   # 終わったら消す
+
+
 # ── logger_node ─────────────────────────────────────────────────────────
 
 @requires_mcap
@@ -519,6 +665,17 @@ class TestLoggerNode(unittest.TestCase):
             os.environ["SURGE_BUS_DIR"] = self._old
         self._td.cleanup()
         self._bus.cleanup()
+
+    def test_default_topics_resolve_to_publishers(self):
+        """既定の購読トピックがすべて publish 元に解決できる（接頭辞の取り違えが無い）。"""
+        from raspi.bus.zbus import endpoints_for_topic
+        from raspi.nodes.logger_node import DEFAULT_TOPICS
+
+        for t in DEFAULT_TOPICS:
+            with self.subTest(topic=t):
+                self.assertTrue(endpoints_for_topic(t))
+        self.assertNotEqual(endpoints_for_topic("auto/ctrl"),
+                            endpoints_for_topic("auto/state"))
 
     def test_bus_messages_land_in_the_file(self):
         from raspi.bus import Publisher

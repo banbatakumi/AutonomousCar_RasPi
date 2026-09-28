@@ -162,12 +162,16 @@ def _stamp(unix_ns: int) -> dict[str, int]:
     return {"sec": unix_ns // 1_000_000_000, "nsec": unix_ns % 1_000_000_000}
 
 
-def pointcloud_from_scan(scan, unix_ns: int, frame_id: str = LIDAR_FRAME_ID) -> dict:
+def pointcloud_from_scan(scan, unix_ns: int, frame_id: str = LIDAR_FRAME_ID,
+                         pose: dict | None = None) -> dict:
     """`Scan` → `foxglove.PointCloud`。**無効点は落とす。**
 
     `dist=0` は「そこに何も無い」ではなく「測れなかった」なので、
     残すと原点を囲む円状の壁として描かれる（`msgs.convert` の ScanAssembler 参照）。
     見えなかったセクタも同様に落ちる（`dist` が 0 のままのため）。
+
+    :param pose: `frame_id` の中での点群の原点（車両の姿勢）。省略時は単位姿勢。
+        **tf を使わずに別の推定の姿勢で点群を置く**ときに使う（`tools/slam_replay.py`）
     """
     buf = bytearray()
     dist = scan.dist
@@ -180,7 +184,7 @@ def pointcloud_from_scan(scan, unix_ns: int, frame_id: str = LIDAR_FRAME_ID) -> 
     return {
         "timestamp": _stamp(unix_ns),
         "frame_id": frame_id,
-        "pose": _IDENTITY_POSE,
+        "pose": pose if pose is not None else _IDENTITY_POSE,
         "point_stride": 12,
         "fields": _XYZ_FIELDS,
         "data": base64.b64encode(bytes(buf)).decode("ascii"),
@@ -412,12 +416,44 @@ class McapLog:
         self.counts[topic] = self.counts.get(topic, 0) + 1
         self.written += 1
 
+    def copy_message(self, schema, channel, message) -> None:
+        """別の MCAP のメッセージを**中身を解釈せずに**写す（`mcap.reader` の3つ組）。
+
+        既存の `.mcap` に解析結果を足した新しいファイルを作るため
+        （`tools/slam_replay.py`）。`log_time` は元の値（epoch）をそのまま使う。
+        スキーマとチャネルは元の名前・符号化のまま、初出で登録する。
+        """
+        self._check_open()
+        if self._broken:
+            self.errors += 1
+            return
+        try:
+            cid = self._channels.get(channel.topic)
+            if cid is None:
+                sid = 0
+                if schema is not None:
+                    sid = self._schemas.get(schema.name)
+                    if sid is None:
+                        sid = self._schemas[schema.name] = self._w.register_schema(
+                            name=schema.name, encoding=schema.encoding, data=schema.data)
+                cid = self._channels[channel.topic] = self._w.register_channel(
+                    topic=channel.topic, message_encoding=channel.message_encoding,
+                    schema_id=sid, metadata=dict(channel.metadata or {}))
+            self._w.add_message(channel_id=cid, log_time=message.log_time,
+                                publish_time=message.publish_time, data=message.data,
+                                sequence=message.sequence)
+            self.counts[channel.topic] = self.counts.get(channel.topic, 0) + 1
+            self.written += 1
+        except OSError as e:
+            self._mark_broken(e)
+
     # ── Foxglove 用 ──
 
     def write_viz_scan(self, scan, *, t_mono_ns: int | None = None,
-                       topic: str = VIZ_SCAN_TOPIC) -> None:
+                       topic: str = VIZ_SCAN_TOPIC, frame_id: str = LIDAR_FRAME_ID,
+                       pose: dict | None = None) -> None:
         t = t_mono_ns if t_mono_ns is not None else (scan.t_capture or scan.t_pub)
-        self.write_dict(topic, pointcloud_from_scan(scan, self.to_unix_ns(t)),
+        self.write_dict(topic, pointcloud_from_scan(scan, self.to_unix_ns(t), frame_id, pose),
                         "foxglove.PointCloud", FOXGLOVE_POINTCLOUD_SCHEMA, t)
 
     def write_viz_image(self, jpeg: bytes, cam: str, t_mono_ns: int) -> None:
