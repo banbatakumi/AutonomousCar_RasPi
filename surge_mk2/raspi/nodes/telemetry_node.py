@@ -1667,13 +1667,16 @@ class TelemetryServer:
         return True, ""
 
     def _serve_map_file(self, path: str) -> Response:
-        """`GET /maps/<name>` — 保存済み地図のダウンロード。`_serve_log_file`と同じ形。"""
+        """`GET /maps/<name>` — 保存済み地図のダウンロード。`_serve_log_file`と同じ形。
+
+        経路の設定（`.routes.json`）を npz に同梱して返す（`mapstore.export_map`）。
+        """
         from urllib.parse import unquote
         name = unquote(path[len("/maps/"):].split("?")[0])
-        target = mapstore.resolve_map_path(name)
-        if target is None or not target.is_file():
+        data = mapstore.export_map(name)
+        if data is None:
             return _response(404, "text/plain; charset=utf-8", b"not found")
-        return _response(200, "application/octet-stream", target.read_bytes(),
+        return _response(200, "application/octet-stream", data,
                          extra={"Content-Disposition": f'attachment; filename="{name}.npz"'})
 
     def _serve_map_preview(self, path: str) -> Response:
@@ -1722,9 +1725,10 @@ class TelemetryServer:
                     buf += raw
                     continue
                 # テキストフレーム = 終了合図
-                loaded = mapstore.save_upload(name, bytes(buf))
+                # 同梱の経路の設定も `.routes.json` へ（無ければ古いものを消す）
+                loaded, error = mapstore.import_upload(name, bytes(buf))
                 if loaded is None:
-                    await self._send_json(ws, {"ok": False, "error": "壊れた地図ファイルです"})
+                    await self._send_json(ws, {"ok": False, "error": error})
                     return
                 await self._send_json(ws, {"ok": True})
                 return

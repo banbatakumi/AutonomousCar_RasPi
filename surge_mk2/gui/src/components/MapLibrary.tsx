@@ -9,6 +9,10 @@
  * 専用のWebSocketチャンネル（`ws/mapUpload.ts`）——このサーバのHTTP実装は
  * POSTボディを受け取れないため（`ws/mapUpload.ts`のモジュールdocstring参照）。
  *
+ * **DL・UL は経路の設定（経由点・停止点・ミッション・地図作成の軌跡、`.routes.json`）も
+ * npz に同梱して運ぶ**（`raspi/auto/mapstore.py` の `export_map`/`import_upload`、2026-09-29）。
+ * 同梱の無い古い npz を上げると、同じ名前の古い経路の設定は消える。
+ *
  * 想定運用: Piで地図を作成→保存→ダウンロードしてMac上で検証→良ければ
  * （同じ名前のまま、または別名で）アップロードしてPiに配置→GUIの一覧から選ぶ。
  *

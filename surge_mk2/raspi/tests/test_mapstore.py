@@ -141,5 +141,69 @@ class TestMapstore(unittest.TestCase):
         self.assertEqual(mapstore.list_maps(), [])
 
 
+class TestRoutesBundle(unittest.TestCase):
+    """★ DL/UL で経路の設定（`.routes.json`）を npz に同梱して運ぶ（`export_map`/`import_upload`）。"""
+
+    ROUTES = ('{"groups": {"A": [[1.0, 2.0], [3.0, 4.0, 0.5]]}, "active": "A", '
+              '"explore_traj": [[0.0, 0.0], [0.5, 0.1]]}')
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._orig_dir = mapstore.MAPS_DIR
+        mapstore.MAPS_DIR = Path(self._td.name) / "saved_maps"
+        mapstore.save_map(
+            "src", resolution=0.05, origin_x=0.0, origin_y=0.0,
+            trinary=make_trinary(), centerline_xy=np.zeros((0, 2)),
+            raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+
+    def tearDown(self):
+        mapstore.MAPS_DIR = self._orig_dir
+        self._td.cleanup()
+
+    def _keys(self, data: bytes) -> set[str]:
+        import io
+        with np.load(io.BytesIO(data), allow_pickle=False) as z:
+            return set(z.files)
+
+    def test_export_bundles_the_current_routes(self):
+        self.assertNotIn(mapstore.ROUTES_KEY, self._keys(mapstore.export_map("src")))
+        mapstore.save_routes("src", self.ROUTES)
+        data = mapstore.export_map("src")
+        self.assertIn(mapstore.ROUTES_KEY, self._keys(data))
+        # ディスクの npz には同梱しない（経由点の編集と二重管理にしない）
+        self.assertNotIn(mapstore.ROUTES_KEY,
+                         self._keys((mapstore.MAPS_DIR / "src.npz").read_bytes()))
+        self.assertIsNone(mapstore.export_map("missing"))
+
+    def test_upload_restores_routes_and_trajectory(self):
+        import json
+        mapstore.save_routes("src", self.ROUTES)
+        loaded, err = mapstore.import_upload("dst", mapstore.export_map("src"))
+        self.assertIsNotNone(loaded, err)
+        routes = json.loads(mapstore.load_routes("dst"))
+        self.assertEqual(routes["groups"]["A"][1], [3.0, 4.0, 0.5])
+        self.assertEqual(routes["explore_traj"], [[0.0, 0.0], [0.5, 0.1]])
+        self.assertNotIn(mapstore.ROUTES_KEY,
+                         self._keys((mapstore.MAPS_DIR / "dst.npz").read_bytes()))
+
+    def test_upload_without_routes_removes_stale_routes(self):
+        """★ 同じ名前で地図を上書きしたとき、前の地図の経由点を残さない。"""
+        mapstore.save_routes("src", self.ROUTES)
+        old = (mapstore.MAPS_DIR / "src.npz").read_bytes()      # 同梱なし（旧形式）
+        loaded, _ = mapstore.import_upload("src", old)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(mapstore.load_routes("src"), "")
+
+    def test_upload_with_broken_routes_is_rejected_without_writing(self):
+        import io
+        m = mapstore.load_map("src")
+        buf = io.BytesIO()
+        mapstore._write_npz(buf, m, routes='{"groups": {"Z": [[0, 0]]}}')   # Z は無いグループ
+        loaded, err = mapstore.import_upload("bad", buf.getvalue())
+        self.assertIsNone(loaded)
+        self.assertIn("経路の設定", err)
+        self.assertFalse((mapstore.MAPS_DIR / "bad.npz").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

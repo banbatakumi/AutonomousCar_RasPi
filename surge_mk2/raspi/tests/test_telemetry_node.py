@@ -280,6 +280,19 @@ class TestServeMapFile(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.body, (mapstore.MAPS_DIR / "course_z.npz").read_bytes())
 
+    def test_download_bundles_routes(self):
+        """★ 経路の設定（`.routes.json`）を npz に同梱して返す（Pi へ上げても経由点が残る）。"""
+        import io
+        mapstore.save_map(
+            "course_r", resolution=0.05, origin_x=0.0, origin_y=0.0,
+            trinary=np.zeros((4, 4), dtype=np.uint8), centerline_xy=np.zeros((0, 2)),
+            raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+        mapstore.save_routes("course_r", '{"groups": {}, "active": "auto"}')
+        resp = tn.TelemetryServer._serve_map_file(None, "/maps/course_r")
+        self.assertEqual(resp.status_code, 200)
+        with np.load(io.BytesIO(resp.body), allow_pickle=False) as z:
+            self.assertIn('"auto"', str(z[mapstore.ROUTES_KEY]))
+
     def test_missing_map_is_404(self):
         resp = tn.TelemetryServer._serve_map_file(None, "/maps/no_such_map")
         self.assertEqual(resp.status_code, 404)

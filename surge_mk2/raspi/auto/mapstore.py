@@ -18,6 +18,21 @@ npzに、一覧表示に要る軽い情報だけjsonに分けることで、`lis
 再現できるので、生カウント配列を保存する意味が無い（読み込み側は
 `raspi/auto/_slam2d_nav.py::occgrid_from_trinary()` 参照）。
 
+## 経路の設定はダウンロードの瞬間に npz へ同梱する（`export_map` / `import_upload`）
+
+ディスク上は `<name>.npz` と `<name>.routes.json`（経由点・停止点・ミッション・地図作成の軌跡）を
+**別々に**置く（経由点は地図を保存した後も GUI で編集されるので、npz に焼き込むと二重管理になる）。
+ただし Mac⇔Pi の受け渡し（GUI の DL/UL）では1ファイルで運ぶ:
+
+- DL（`export_map`）: その時点の `.routes.json` を npz の項目 `routes_json`（0次元の文字列配列、
+  pickle 不要）として足した npz を返す
+- UL（`import_upload`）: `routes_json` があれば `route_config.RouteConfig` で検証して `.routes.json` に書く。
+  **無ければ同じ名前の古い `.routes.json` を消す**（別の地図に古い経由点が残らないように）。
+  ディスクの npz には `routes_json` を残さない
+
+以前は npz だけを運んでいたので、Pi に上げた地図には経由点も地図作成の軌跡も無く、自動経路は保存した
+線をなぞるだけ・道路グラフの逆走禁止も効かなかった（2026-09-29）。`routes_json` の無い古い npz も読める。
+
 ## `allow_pickle=False` は必須
 
 アップロード経由で任意のバイト列が `.npz` として渡ってくる。pickle 復元による
@@ -37,9 +52,14 @@ import numpy as np
 
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
            "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
-           "save_routes", "load_routes"]
+           "import_upload", "export_map", "save_routes", "load_routes", "ROUTES_KEY"]
 
 MAPS_DIR = Path(__file__).resolve().parents[2] / "saved_maps"
+
+#: DL/UL の npz に同梱する経路の設定（JSON 文字列）の項目名（モジュール docstring）
+ROUTES_KEY = "routes_json"
+#: 同梱できる経路の設定の大きさの上限（`telemetry_node` が GUI から受ける上限と同じ）
+_MAX_ROUTES_CHARS = 1_000_000
 
 _REQUIRED_KEYS = {"trinary", "resolution", "origin_x", "origin_y",
                   "centerline_xy", "raceline_xy", "raceline_v"}
@@ -152,13 +172,14 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
     _write_meta(target, loaded)
 
 
-def _write_npz(f: BinaryIO, m: LoadedMap) -> None:
+def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None) -> None:
+    extra = {} if routes is None else {ROUTES_KEY: np.array(routes)}
     np.savez_compressed(
         f, trinary=m.trinary,
         resolution=np.float64(m.resolution), origin_x=np.float64(m.origin_x),
         origin_y=np.float64(m.origin_y), centerline_xy=m.centerline_xy,
         raceline_xy=m.raceline_xy, raceline_v=m.raceline_v,
-        created_at=np.float64(m.created_at))
+        created_at=np.float64(m.created_at), **extra)
 
 
 # ── 読み込み・検証 ──
@@ -206,19 +227,74 @@ def validate_upload(data: bytes) -> LoadedMap | None:
 
 
 def save_upload(name: str, data: bytes) -> LoadedMap | None:
-    """検証してから`saved_maps/`へ書く。壊れている/名前が不正なら書かず`None`。"""
+    """検証してから`saved_maps/`へ書く。壊れている/名前が不正なら書かず`None`。
+
+    同梱の経路の設定の扱いは `import_upload`（こちらはその戻り値の地図だけを返す）。
+    """
+    return import_upload(name, data)[0]
+
+
+def _bundled_routes(data: bytes) -> str | None:
+    """npz に同梱された経路の設定（JSON 文字列）。無ければ `None`。"""
+    import io
+    with np.load(io.BytesIO(data), allow_pickle=False) as z:
+        if ROUTES_KEY not in z.files:
+            return None
+        arr = np.asarray(z[ROUTES_KEY])
+        if arr.ndim != 0 or arr.dtype.kind != "U":
+            raise ValueError("routes_json must be a 0-d string array")
+        text = str(arr)
+    if len(text) > _MAX_ROUTES_CHARS:
+        raise ValueError("routes_json is too large")
+    return text
+
+
+def import_upload(name: str, data: bytes) -> tuple[LoadedMap | None, str]:
+    """アップロードを検証して `saved_maps/` へ書く。`(地図, 誤り)`。失敗なら `(None, 理由)`。
+
+    同梱の経路の設定（`ROUTES_KEY`）は検証して `<name>.routes.json` へ。**無ければ古い
+    `<name>.routes.json` を消す**。経路の設定が壊れていれば地図ごと受け付けない
+    （地図だけ入れて経由点が黙って消えるより、やり直してもらう方がよい）。
+    """
     loaded = validate_upload(data)
     if loaded is None:
-        return None
+        return None, "壊れた地図ファイルです"
     target = resolve_map_path(name)
     if target is None:
-        return None
+        return None, "地図の名前が不正です"
+    try:
+        routes = _bundled_routes(data)
+        if routes is not None:
+            from .route_config import RouteConfig   # 遅延 import（純粋なファイル I/O 層に保つ）
+            routes = RouteConfig.from_json(routes).to_json()
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError) as e:
+        return None, f"同梱の経路の設定が不正です（{e}）"
     MAPS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
-    tmp.write_bytes(data)
+    with open(tmp, "wb") as f:
+        _write_npz(f, loaded)               # 同梱の経路の設定はディスクの npz に残さない
     os.replace(tmp, target)
     _write_meta(target, loaded)
-    return loaded
+    if routes is None:
+        _routes_path(target).unlink(missing_ok=True)
+    else:
+        save_routes(name, routes)
+    return loaded, ""
+
+
+def export_map(name: str) -> bytes | None:
+    """ダウンロード用の npz。今の `<name>.routes.json` を `ROUTES_KEY` として同梱する。
+
+    読めなければ `None`。
+    """
+    import io
+    loaded = load_map(name)
+    if loaded is None:
+        return None
+    routes = load_routes(name)
+    buf = io.BytesIO()
+    _write_npz(buf, loaded, routes=routes or None)
+    return buf.getvalue()
 
 
 # ── 削除 ──
