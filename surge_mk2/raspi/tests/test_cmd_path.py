@@ -446,6 +446,8 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         from raspi.nodes.telemetry_node import TelemetryServer
 
         srv = TelemetryServer.__new__(TelemetryServer)
+        srv._auto_presets = {}
+        srv._save_auto_presets = lambda: None      # ディスクに触らせない
         srv.controller = None
         srv.controller_name = ""
         srv._last_cmd = None

@@ -68,7 +68,8 @@
 | `raspi/nodes/cam_e2e_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-cam-e2e）。`surge-cam-e2e` は常時起動だが `cam_e2e` が選ばれている間だけ推論する（IDLE/ACTIVE、`cam_perception_node.py` と同じ設計。§12.3） | しない |
 | `raspi/nodes/line_perception_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-line-perception）。`surge-line-perception` は常時起動だが `line_trace` が選ばれている間だけ認識する（IDLE/ACTIVE、`cam_perception_node.py` と同じ） | しない |
 | **`raspi/auto/` `raspi/nav/` `planning_node.py`** | `deploy.sh --restart`（surge-planning を含む。`PLANNERS` はプロセス起動時に固定されるので必須） | しない |
-| `config/vehicle.toml` `config/auto.json` | 読んでいるノードを再起動（planning / io）。`vehicle.toml` は**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
+| `config/vehicle.toml` | 読んでいるノードを再起動（planning / io）。**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
+| `config/auto.json` `auto_presets.json` `camera.json` `cam_model.json` `e2e_lidar_model.json` `odometer.json`・`saved_maps/` | **機械ごとの状態。`deploy.sh` は運ばない**（telemetry_node / io_node が動いている機械で書き、起動時に戻す。Mac＝シム、Pi＝実機で別々）。Mac の値で Pi を上書きしていたのを 2026-09-29 に止めた。地図は GUI の DL/UL で運ぶ（経路の設定も同梱） | しない |
 | `raspi/nodes/io_node.py` `raspi/io/` `raspi/msgs/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
 | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |

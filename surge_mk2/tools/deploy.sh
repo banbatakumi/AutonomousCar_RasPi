@@ -78,6 +78,9 @@ fi
 # **`.venv` と `node_modules` は絶対に運ばない。** Pi の venv は
 # `--system-site-packages` で作られていて中身が Mac と別物。上書きすると壊れる。
 # `docs/setup_credentials.md` は機密なので運ばない（Pi 側には要らない）。
+# **機械ごとの状態も運ばない**（パラメータ・プリセット・カメラ設定・選んだモデル・総走行距離・保存した地図）。
+# Mac の値（シムで触った値）で Pi の値を上書きしていた（2026-09-29 に発覚）。地図の受け渡しは GUI の DL/UL。
+# 先頭の `/` は転送元の直下に固定する（無いと別の階層の同名ファイルまで外れる）
 # **`--info=stats1` は使わない。** macOS の rsync は 2.6.9 系（openrsync）で
 # `--info` を知らない。GNU rsync 前提のオプションを書かないこと
 echo "# rsync → $HOST:$DEST"
@@ -91,6 +94,13 @@ rsync -az --stats \
   --exclude '.DS_Store' \
   --exclude '*.mcap' \
   --exclude '*.sfl' \
+  --exclude '/config/auto.json' \
+  --exclude '/config/auto_presets.json' \
+  --exclude '/config/camera.json' \
+  --exclude '/config/cam_model.json' \
+  --exclude '/config/e2e_lidar_model.json' \
+  --exclude '/config/odometer.json' \
+  --exclude '/saved_maps/' \
   -e "ssh ${SSH_OPTS[*]}" \
   "$ROOT/" "$HOST:$DEST" || exit 1
 

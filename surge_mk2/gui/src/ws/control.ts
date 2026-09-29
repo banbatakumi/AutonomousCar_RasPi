@@ -143,6 +143,24 @@ export class ControlChannel {
     this.send({ type: 'auto', ...p })
   }
 
+  /** 今のモードのパラメータを既定値（`ParamSpec.default`）に戻す */
+  resetAutoParams() {
+    this.send({ type: 'auto', reset_params: true })
+  }
+
+  /** プリセット（`config/auto_presets.json`、モードごと）の保存・読込・削除。同じ名前の保存は上書き */
+  saveAutoPreset(name: string) {
+    this.send({ type: 'auto', preset_save: name })
+  }
+
+  loadAutoPreset(name: string) {
+    this.send({ type: 'auto', preset_load: name })
+  }
+
+  deleteAutoPreset(name: string) {
+    this.send({ type: 'auto', preset_delete: name })
+  }
+
   /**
    * 「地図を確定」。**周回の自動判定が滑ったときの逃げ道**（`nav/slam.py`）。
    *

@@ -104,6 +104,8 @@ export type AutoStatus = {
   /** 人間が engage したか。**サーバが真値**（GUI 側で持たない） */
   engaged: boolean
   params: Record<string, number>
+  /** 今のモードのプリセットの名前（`config/auto_presets.json`、GUI のドロップダウン） */
+  presets?: string[]
   catalog: AutoPlannerInfo[]
   /** engage したまま `auto/cmd` が途絶して制動に落ちた回数 */
   stalls: number

@@ -16,6 +16,7 @@ web/dist/
 # 自動運転のモードとパラメータ（telemetry_node が GUI の操作を保存する）。
 # **機体ごとに詰めた値なのでコミットしない**（別の機体に持っていくと危ない）
 surge_mk2/config/auto.json
+surge_mk2/config/auto_presets.json
 # カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps）。auto.json と同じ理由
 surge_mk2/config/camera.json
 # 総走行距離（io_node が odom_center の起点として読む）。auto.json と同じ理由

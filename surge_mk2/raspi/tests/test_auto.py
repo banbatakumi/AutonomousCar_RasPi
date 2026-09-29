@@ -984,6 +984,8 @@ class TestAutoCtrlGate(unittest.TestCase):
         self.srv._auto_was_fresh = True
         self.srv.auto_stalls = 0
         self.srv._save_auto_conf = lambda: None      # ディスクに触らせない
+        self.srv._auto_presets = {}
+        self.srv._save_auto_presets = lambda: None   # 同上
 
     def test_cannot_engage_without_a_mode(self):
         self.srv._on_auto({"engaged": True})
@@ -1015,6 +1017,47 @@ class TestAutoCtrlGate(unittest.TestCase):
         from raspi.nodes.telemetry_node import TelemetryServer
         TelemetryServer._release_control(self.srv, "接続が切れた")
         self.assertFalse(self.srv._auto_engaged)
+
+
+class TestAutoPresets(TestAutoCtrlGate):
+    """初期値に戻す・プリセットの保存/読込/削除（`_on_auto_presets`）。"""
+
+    def test_reset_restores_defaults(self):
+        self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 0.2}})
+        self.srv._on_auto({"reset_params": True})
+        self.assertEqual(self.srv._auto_params, FollowTheGap.merged({}))
+
+    def test_save_load_delete(self):
+        self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 0.3}})
+        self.srv._on_auto({"preset_save": " 遅め "})           # 前後の空白は落とす
+        self.assertIn("遅め", self.srv._auto_presets["ftg"])
+        self.srv._on_auto({"params": {"max_speed": 0.9}})
+        self.srv._on_auto({"preset_load": "遅め"})
+        self.assertAlmostEqual(self.srv._auto_params["max_speed"], 0.3)
+        self.srv._on_auto({"preset_delete": "遅め"})
+        self.assertEqual(self.srv._auto_presets["ftg"], {})
+
+    def test_load_clamps_and_fills_missing_keys(self):
+        """★ planner のパラメータが増減しても古いプリセットを読める（知らないキーは捨てる）。"""
+        self.srv._on_auto({"mode": "ftg"})
+        self.srv._auto_presets = {"ftg": {"old": {"max_speed": 99.0, "no_such_key": 1.0}}}
+        self.srv._on_auto({"preset_load": "old"})
+        spec = {s.key: s for s in FollowTheGap.params}
+        self.assertEqual(self.srv._auto_params["max_speed"], spec["max_speed"].max)
+        self.assertNotIn("no_such_key", self.srv._auto_params)
+        self.assertEqual(set(self.srv._auto_params), set(spec))
+
+    def test_presets_are_per_mode_and_names_are_checked(self):
+        self.srv._on_auto({"mode": "ftg"})
+        self.srv._on_auto({"preset_save": "a"})
+        self.srv._on_auto({"preset_save": ""})
+        self.srv._on_auto({"preset_save": "x" * 41})
+        self.srv._on_auto({"preset_save": "改行\nあり"})
+        self.assertEqual(list(self.srv._auto_presets["ftg"]), ["a"])
+        self.srv._on_auto({"mode": "slam2d_route"})
+        before = dict(self.srv._auto_params)
+        self.srv._on_auto({"preset_load": "a"})              # 別のモードのプリセットは読まない
+        self.assertEqual(self.srv._auto_params, before)
 
 
 class TestAutoStateContract(unittest.TestCase):

@@ -75,6 +75,7 @@ import { RAD2DEG, mps } from '../format'
 import { capAutoParams, useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 import { MapLibrary } from './MapLibrary'
+import { ParamPresets } from './ParamPresets'
 import { ParamSliders } from './ParamSliders'
 import { RoutePanel } from './RoutePanel'
 
@@ -378,6 +379,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
       {selected && (
         <section className="auto-params">
           <span className="label">パラメータ（{selected.params.length}）</span>
+          <ParamPresets ch={ch} presets={auto.presets ?? []} />
           <ParamSliders
             params={capAutoParams(selected.params, n.link)}
             values={auto.params}

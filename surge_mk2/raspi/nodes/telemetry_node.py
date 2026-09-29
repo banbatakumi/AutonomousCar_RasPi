@@ -182,6 +182,13 @@ LOGS_DIR = REPO_ROOT / "logs"
 #: 自動運転のモードとパラメータを覚えておく場所。**`engaged` は保存しない**
 #: （電源投入で自律走行が始まる経路を作らない）
 AUTO_CONF = REPO_ROOT / "config" / "auto.json"
+#: 名前を付けて保存したパラメータ（プリセット）。`{モード: {名前: {キー: 値}}}`。
+#: **`auto.json` と同じく telemetry_node が動く機械に置く**（実機は Pi、`sim.run` は Mac）。
+#: `.gitignore` 済みで、`tools/deploy.sh` も運ばない（Mac の値で Pi を上書きしない）
+AUTO_PRESETS_CONF = REPO_ROOT / "config" / "auto_presets.json"
+#: プリセットの名前の長さの上限と、1モードあたりの個数の上限（壊れたクライアント対策）
+PRESET_NAME_MAX = 40
+PRESETS_PER_MODE_MAX = 50
 #: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
 CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
 #: `cam_perception_node` へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場。
@@ -333,6 +340,16 @@ def _read_pi_temp_c() -> float | None:
 
 # ── サーバ ──────────────────────────────────────────────────────────
 
+def _preset_name(v) -> str:
+    """プリセットの名前として使える文字列か。使えなければ空文字。"""
+    if not isinstance(v, str):
+        return ""
+    name = v.strip()
+    if not name or len(name) > PRESET_NAME_MAX or any(ord(c) < 32 for c in name):
+        return ""
+    return name
+
+
 class TelemetryServer:
     def __init__(self, *, port: int = DEFAULT_PORT, host: str = DEFAULT_HOST,
                  dist: Path = GUI_DIST, camera: bool = True,
@@ -405,6 +422,8 @@ class TelemetryServer:
         self._auto_engaged = False
         #: planner のパラメータ。`config/auto.json` に保存され、次回起動で戻る
         self._auto_params: dict[str, float] = {}
+        #: 名前付きのパラメータ（`AUTO_PRESETS_CONF`）。`{モード: {名前: {キー: 値}}}`
+        self._auto_presets: dict[str, dict[str, dict[str, float]]] = {}
         #: 「地図を確定」を押した回数。**保存しない**（電源投入で確定済みに
         #: なると、地図が無いのに走る段へ進んでしまう）
         self._auto_freeze_seq = 0
@@ -436,6 +455,7 @@ class TelemetryServer:
         #: `_publish_cmd` が前回「操縦者が居た」と判断したか（デッドマンの切れ目を数える）
         self._cmd_was_live = False
         self._load_auto_conf()
+        self._load_auto_presets()
 
         # ── ファン（Pi5純正クーリング） ──
         #: **永続化しない。** Pi再起動をまたいで前回の手動固定値のまま
@@ -975,6 +995,7 @@ class TelemetryServer:
                 self._auto_mode = mode
                 self._auto_engaged = False
                 self._auto_params = merged_params(mode, self._auto_params)
+        self._on_auto_presets(m)
         if "params" in m and isinstance(m["params"], dict):
             raw = {k: v for k, v in m["params"].items() if isinstance(v, (int, float))}
             # **サーバ側でもクランプする。** GUI を信じて素通しにすると、
@@ -1048,6 +1069,57 @@ class TelemetryServer:
 
     def _publish_auto_ctrl(self) -> None:
         self.pub.send(TOPIC_AUTO_CTRL, self._auto_ctrl())
+
+    def _on_auto_presets(self, m: dict) -> None:
+        """初期値に戻す・プリセットの保存/読込/削除（`_on_auto` の一部。GUI のパラメータ欄）。
+
+        - `reset_params: true` — 今のモードの既定値（`ParamSpec.default`）に戻す
+        - `preset_save: 名前` — 今の値を今のモードのプリセットとして保存（同じ名前は上書き）
+        - `preset_load: 名前` — 読み込む。**クランプし直し、知らないキーは捨て、足りないキーは既定値**
+          （planner のパラメータが増減しても古いプリセットを読める）
+        - `preset_delete: 名前`
+        """
+        mode = self._auto_mode
+        if not mode:
+            return
+        if m.get("reset_params"):
+            self._auto_params = merged_params(mode, {})
+        name = _preset_name(m.get("preset_load"))
+        if name and name in self._auto_presets.get(mode, {}):
+            self._auto_params = merged_params(mode, dict(self._auto_presets[mode][name]))
+        changed = False
+        name = _preset_name(m.get("preset_save"))
+        if name:
+            presets = self._auto_presets.setdefault(mode, {})
+            if name in presets or len(presets) < PRESETS_PER_MODE_MAX:
+                presets[name] = dict(self._auto_params)
+                changed = True
+        name = _preset_name(m.get("preset_delete"))
+        if name and self._auto_presets.get(mode, {}).pop(name, None) is not None:
+            changed = True
+        if changed:
+            self._save_auto_presets()
+
+    def _load_auto_presets(self) -> None:
+        try:
+            raw = _json_decode(AUTO_PRESETS_CONF.read_bytes())
+        except Exception:
+            return                         # 無い・壊れている → プリセット無し
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        if isinstance(raw, dict):
+            for mode, presets in raw.items():
+                if mode not in PLANNERS or not isinstance(presets, dict):
+                    continue
+                out[mode] = {str(n): {k: float(v) for k, v in p.items()
+                                      if isinstance(v, (int, float))}
+                             for n, p in presets.items() if isinstance(p, dict)}
+        self._auto_presets = out
+
+    def _save_auto_presets(self) -> None:
+        try:
+            _atomic_write_bytes(AUTO_PRESETS_CONF, _json_encode(self._auto_presets))
+        except Exception:
+            pass                           # 保存できなくても走行は続けられるべき
 
     def _load_auto_conf(self) -> None:
         """`config/auto.json` からモードとパラメータを戻す。**engage は戻さない。**"""
@@ -1503,6 +1575,8 @@ class TelemetryServer:
             "mode": self._auto_mode,
             "engaged": self._auto_engaged,
             "params": self._auto_params,
+            #: 今のモードのプリセットの名前（GUI のドロップダウン）
+            "presets": sorted(self._auto_presets.get(self._auto_mode, {})),
             "catalog": auto_catalog(),
             "stalls": self.auto_stalls,
         }
