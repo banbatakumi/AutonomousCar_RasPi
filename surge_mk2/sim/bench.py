@@ -5,6 +5,15 @@
     .venv/bin/python -m sim.bench --mode ftg --set explore_speed=0.6
     .venv/bin/python -m sim.bench --course toyota2 --mode slam2d_route \
         --routes sim/routes/toyota2.json --switch 200:B
+    .venv/bin/python -m sim.bench --course toyota2 --map toyota2 --mode slam2d_route \
+        --time 120 --trace /tmp/t.csv          # 保存済み地図から走る（地図作成を飛ばす）
+
+## ラップタイム（真値のゲート）
+
+RACE で最初に走り出した真値の位置に、進行方向と直交するゲート線を置き、それを
+前向きに跨いだ時刻（100Hz で補間）でラップを計る。**プランナーの周回カウンタには
+頼らない**（`slam2d_raceline` は RACE の周回を数えない）。1周目はスタンディング
+スタートを含むので、比較には2周目以降（フライング）を使う。
 
 `io_node` と同じことを 1 プロセスの中でやる:
 
@@ -88,6 +97,16 @@ class Result:
         #: （実機では停止点を SLAM の地図の上で置くので、こちらが「狙った所に止まれたか」）
         self.stop_err_est: float | None = None
         self.notes: list[str] = []
+        #: 真値のゲートで計ったラップ [s]（先頭はスタンディングスタートを含む）
+        self.gate_laps: list[float] = []
+        self.race_vmax = 0.0                   #: RACE 中の真値の最高速度 [m/s]
+        self.race_brake_s = 0.0                #: RACE 中に制動を出していた時間 [s]
+        self.race_collisions = 0               #: RACE 中の衝突
+        #: RACE 中の車体外形と真の壁との最小距離 [m]（周回ごと・全体）。衝突の手前の余裕
+        self.race_min_clear = math.inf
+        self.lap_min_clear: list[float] = []
+        self.ideal_lap: float | None = None    #: 速度プロファイルどおりの1周 [s]
+        self.path_len: float | None = None
 
     def report(self) -> str:
         def stat(v, unit, scale=1.0):
@@ -117,6 +136,20 @@ class Result:
         if self.stop_err is not None:
             out.append(f"停止誤差   真値 {self.stop_err * 100:.1f}cm（自己位置の誤差を含む）・"
                        f"推定 {self.stop_err_est * 100:.1f}cm（止める制御の精度）")
+        if self.gate_laps:
+            fly = self.gate_laps[1:]
+            best = f"最良 {min(fly):.2f}s 平均 {statistics.fmean(fly):.2f}s" if fly else "—"
+            out.append("真値ラップ " + " / ".join(f"{t:.2f}s" for t in self.gate_laps)
+                       + f"  （2周目以降 {best}）")
+        if self.ideal_lap is not None:
+            out.append(f"理想ラップ {self.ideal_lap:.2f}s（プロファイルどおり・"
+                       f"1周 {self.path_len:.1f}m）")
+        out.append(f"RACE       最高速 {self.race_vmax:.2f}m/s  制動 {self.race_brake_s:.1f}s  "
+                   f"衝突 {self.race_collisions}  車体と壁の最小距離 "
+                   f"{self.race_min_clear * 100:.1f}cm")
+        if self.lap_min_clear:
+            out.append("周ごとの最小距離 " + " / ".join(f"{c * 100:.1f}cm"
+                                                      for c in self.lap_min_clear))
         out.extend(self.notes)
         out.append(f"最後の状態 [{self.phase}] {self.reason}")
         return "\n".join(out)
@@ -127,7 +160,9 @@ class Bench:
                  max_speed: float = 3.0, max_steer: float = 0.524,
                  model: str | None = None, quiet: bool = False, seed: int = 0,
                  routes: dict | None = None, events: list[tuple[float, str, str]] | None = None,
-                 auto_race: bool = True) -> None:
+                 auto_race: bool = True, map_name: str | None = None,
+                 trace: Path | None = None,
+                 locate_hint: tuple[float, float] | None = None) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -139,8 +174,22 @@ class Bench:
         # `saved_maps/` を bench の地図で埋めない**よう、保存先を一時ディレクトリへ
         import tempfile
 
+        import shutil
+
         from raspi.auto import mapstore
+        self._real_maps_dir = mapstore.MAPS_DIR
         mapstore.MAPS_DIR = Path(tempfile.mkdtemp(prefix="bench_maps_"))
+        #: `--map`: 保存済み地図の**写し**を一時ディレクトリへ置いて読む（経路の設定を
+        #: 保存し直しても実機の `saved_maps/` を書き換えない）
+        self._map_name = map_name
+        if map_name:
+            src = self._real_maps_dir / f"{map_name}.npz"
+            if not src.is_file():
+                raise SystemExit(f"地図が無い: {src}")
+            for suf in (".npz", ".json", ".routes.json"):
+                f = self._real_maps_dir / f"{map_name}{suf}"
+                if f.is_file():
+                    shutil.copy(f, mapstore.MAPS_DIR / f.name)
         self.link = create_sim_link(course, seed=seed, with_channel=False)
         self.sim = self.link.sim
         self.planner = make_planner(mode)
@@ -179,10 +228,33 @@ class Bench:
         self._truth_log: list[tuple[str, int, str, float, float]] = []
         self._routes_world = routes
         if routes is not None:
-            fn = getattr(self.planner, "request_routes", None)
-            if fn is None:
+            if getattr(self.planner, "request_routes", None) is None:
                 raise SystemExit(f"{mode!r} は経路の設定（--routes）に対応していない")
-            fn(json.dumps(self._to_map_frame(routes)))
+            if not map_name:
+                self.planner.request_routes(json.dumps(self._to_map_frame(routes)))
+        #: `--map` の読み込みは最初の `plan()` の後に行う（`slam2d_route` は
+        #: `plan()` で受けたパラメータで経路を作るため）
+        self._load_pending = bool(map_name)
+        self._locate_hint = locate_hint
+
+        # 真値のゲート（モジュール docstring）
+        self._gate: tuple[float, float, float, float] | None = None
+        self._gate_prev: tuple[float, float, float] | None = None   # (t, 沿う距離, 横)
+        self._gate_last_t: float | None = None
+        self._gate_odom = 0.0
+        self._race_col0: int | None = None
+        self._trace_f = open(trace, "w") if trace else None
+        if self._trace_f:
+            self._trace_f.write("t,phase,x,y,yaw,v,cmd_v,brake,prof_v,idx,cross,clear\n")
+        # 車体外形の輪郭と、真の壁からの距離場（`_clearance`）
+        from scipy.ndimage import distance_transform_edt
+
+        from .course import _outline
+        c = self.sim.course
+        self._edt = distance_transform_edt(~c.grid.astype(bool)) * c.resolution
+        self._outline = _outline(np.asarray(self.sim.spec.footprint, dtype=np.float64),
+                                 c.resolution / 2)
+        self._lap_clear = math.inf
 
     # ── 座標 ──
 
@@ -205,6 +277,7 @@ class Bench:
                 mx, my, myaw = self._to_map(p[0], p[1], p[2] if len(p) > 2 else None)
                 conv.append([mx, my] + ([] if myaw is None else [myaw]))
             out["groups"][k] = conv
+        out["avoid"] = [list(self._to_map(q[0], q[1])[:2]) for q in (out.get("avoid") or [])]
         for name, st in (out.get("stops") or {}).items():
             mx, my, myaw = self._to_map(st["x"], st["y"], st.get("yaw"))
             st["x"], st["y"], st["yaw"] = mx, my, myaw
@@ -254,12 +327,15 @@ class Bench:
                 self._record(st, t_now)
                 self._step_events(st, t_now)
 
+                # `planning_node._cmd_from` と同じ変換
                 if not st.ready or st.brake:
                     cmd = DriveCmd(mode=2, arm=True, brake=True,
-                                   target_steer=st.target_steer)
+                                   target_steer=st.target_steer,
+                                   brake_torque=st.brake_torque if st.ready else 0.0)
                 else:
                     cmd = DriveCmd(mode=2, arm=True, target_speed=st.target_speed,
-                                   target_steer=st.target_steer)
+                                   target_steer=st.target_steer,
+                                   accel_limit=st.accel_limit)
 
             now = time.monotonic_ns()
             if now >= next_cmd:
@@ -267,12 +343,106 @@ class Bench:
                 self.link.send(command_from_cmd(
                     cmd, allow_arm=True,
                     max_speed=self.max_speed, max_steer=self.max_steer))
+                self._sample(time.monotonic() - t0, cmd, cmd_period / NS)
 
         self.res.collisions = self.sim.vehicle.collisions
+        if self._race_col0 is not None:
+            self.res.race_collisions = self.sim.vehicle.collisions - self._race_col0
         self.res.distance = float(self.sim.vehicle.odom_front[0])
+        path = getattr(self.planner, "path", None)
+        if path is not None and getattr(path, "closed", False) and len(path) >= 3:
+            ds = np.hypot(*(np.roll(path.xy, -1, axis=0) - path.xy).T)
+            v = np.maximum(path.v, 1e-3)
+            self.res.ideal_lap = float(np.sum(2.0 * ds / (v + np.roll(v, -1))))
+            self.res.path_len = float(path.length)
+        if self._trace_f:
+            self._trace_f.close()
         return self.res
 
+    def _sample(self, t: float, cmd: DriveCmd, dt: float) -> None:
+        """指令周期（100Hz）で真値を見る: ゲートのラップ・最高速・制動・記録。"""
+        st = getattr(self, "_last_st", None)
+        if st is None or st.phase != "RACE":
+            return
+        v = self.sim.vehicle
+        if self._gate is None:
+            if not st.ready:
+                return
+            self._gate = (v.x, v.y, math.cos(v.yaw), math.sin(v.yaw))
+            self.res.notes.append(f"RACE 開始 地図座標 ({st.pose_x:.2f}, {st.pose_y:.2f})"
+                                  f"（--locate-hint に使える）")
+            self._gate_last_t = t
+            self._gate_odom = float(v.odom_front[0])
+            self._race_col0 = v.collisions
+        gx, gy, tx, ty = self._gate
+        along = (v.x - gx) * tx + (v.y - gy) * ty
+        lat = -(v.x - gx) * ty + (v.y - gy) * tx
+        prev = self._gate_prev
+        self._gate_prev = (t, along, lat)
+        clear = self._clearance(v.x, v.y, v.yaw)
+        self.res.race_min_clear = min(self.res.race_min_clear, clear)
+        self._lap_clear = min(self._lap_clear, clear)
+        if (prev is not None and prev[1] < 0.0 <= along and abs(lat) < 1.0
+                and float(v.odom_front[0]) - self._gate_odom > 3.0):
+            tc = prev[0] + (t - prev[0]) * (-prev[1]) / max(along - prev[1], 1e-9)
+            self.res.gate_laps.append(tc - self._gate_last_t)
+            self.res.lap_min_clear.append(self._lap_clear)
+            self._lap_clear = math.inf
+            self._gate_last_t = tc
+            self._gate_odom = float(v.odom_front[0])
+            if not self.quiet:
+                print(f"  {t:5.1f}s 真値ラップ {self.res.gate_laps[-1]:.2f}s", flush=True)
+        self.res.race_vmax = max(self.res.race_vmax, float(v.speed))
+        if cmd.brake:
+            self.res.race_brake_s += dt
+        if self._trace_f:
+            path = getattr(self.planner, "path", None)
+            i = getattr(self.planner, "_hint", -1)
+            pv = float(path.v[i]) if path is not None and 0 <= i < len(path) else float("nan")
+            self._trace_f.write(
+                f"{t:.3f},{st.phase},{v.x:.4f},{v.y:.4f},{v.yaw:.4f},{v.speed:.4f},"
+                f"{cmd.target_speed:.3f},{int(cmd.brake)},{pv:.3f},{i},{st.cross_track:.4f},"
+                f"{clear:.4f}\n")
+
+    def _clearance(self, x: float, y: float, yaw: float) -> float:
+        """車体外形（輪郭）と真の壁との最小距離 [m]。0 = 接触。"""
+        c = self.sim.course
+        co, si = math.cos(yaw), math.sin(yaw)
+        b = self._outline
+        wx = x + b[:, 0] * co - b[:, 1] * si
+        wy = y + b[:, 0] * si + b[:, 1] * co
+        cols = np.clip(((wx - c.origin[0]) / c.resolution).astype(np.int32), 0,
+                       self._edt.shape[1] - 1)
+        rows = np.clip(((wy - c.origin[1]) / c.resolution).astype(np.int32), 0,
+                       self._edt.shape[0] - 1)
+        return float(self._edt[rows, cols].min())
+
     def _step_events(self, st, t: float) -> None:
+        if self._load_pending:
+            self._load_pending = False
+            if self._routes_world is not None:
+                # 経路の設定は地図と一緒に読ませる（読み込み後に渡すと、道路グラフが
+                # できる前なので経由点のグループが作られない）
+                from raspi.auto import mapstore
+                cfg = self._to_map_frame(self._routes_world)
+                # 地図作成の軌跡（自動経路のスタートと逆走禁止の元）は地図側のものを残す
+                # （GUI の保存 `request_routes` と同じ。消すと自動経路が保存した線をなぞるだけになる）
+                try:
+                    old = json.loads(mapstore.load_routes(self._map_name) or "{}")
+                except ValueError:
+                    old = {}
+                if "explore_traj" in old and "explore_traj" not in cfg:
+                    cfg["explore_traj"] = old["explore_traj"]
+                mapstore.save_routes(self._map_name, json.dumps(cfg))
+            self.planner.request_load(self._map_name)
+            err = getattr(self.planner, "_load_error", "")
+            if err:
+                raise SystemExit(err)
+            if self._locate_hint is not None:
+                self.planner.request_locate_hint(*self._locate_hint)
+            if not self.quiet:
+                print(f"  {t:5.1f}s 保存済み地図『{self._map_name}』を読み込んだ", flush=True)
+            return
         if (self.auto_race and st.phase == "DONE"
                 and getattr(self.planner, "_saved_map_name", "")):
             name = self.planner._saved_map_name
@@ -293,10 +463,12 @@ class Bench:
         self._last_st = st
         v = self.sim.vehicle
         self._truth_log.append((st.phase, st.laps, getattr(st, "route_active", ""), v.x, v.y))
-        tx, ty, tyaw = self._truth_rel()
-        self.res.pose_err.append(math.hypot(st.pose_x - tx, st.pose_y - ty))
-        d = (st.pose_yaw - tyaw + math.pi) % (2 * math.pi) - math.pi
-        self.res.yaw_err.append(abs(math.degrees(d)))
+        if not self._map_name:
+            # 保存済み地図の map フレームは bench の起点と無関係なので比べられない
+            tx, ty, tyaw = self._truth_rel()
+            self.res.pose_err.append(math.hypot(st.pose_x - tx, st.pose_y - ty))
+            d = (st.pose_yaw - tyaw + math.pi) % (2 * math.pi) - math.pi
+            self.res.yaw_err.append(abs(math.degrees(d)))
         if st.phase == "RACE":
             self.res.cross.append(st.cross_track)
         if st.laps > self._prev_laps:
@@ -307,7 +479,7 @@ class Bench:
         # EXPLORE段が終わった瞬間（地図構築完了、直後の姿勢）の誤差を1回だけ残す。
         # RACE段の誤差は凍結地図に対する追跡精度でしかないため、
         # 「地図構築中にどれだけドリフトしたか」はここでしか直接見えない
-        if self._prev_phase == "EXPLORE" and st.phase != "EXPLORE":
+        if self._prev_phase == "EXPLORE" and st.phase != "EXPLORE" and self.res.pose_err:
             self.res.explore_end_pose_err = self.res.pose_err[-1]
             self.res.explore_end_yaw_err = self.res.yaw_err[-1]
         self._prev_phase = st.phase
@@ -317,10 +489,10 @@ class Bench:
         self.res.reason = st.reason
 
         if not self.quiet and self.res.plans % 20 == 0:
-            print(f"  {t:5.1f}s [{st.phase or '-'}] 真値({v.x:5.2f},{v.y:5.2f}) 誤差 "
-                  f"{self.res.pose_err[-1] * 100:5.1f}cm "
-                  f"{self.res.yaw_err[-1]:4.1f}°  一致度 {st.match_score:.2f}  "
-                  f"{st.reason}", flush=True)
+            err = (f"誤差 {self.res.pose_err[-1] * 100:5.1f}cm {self.res.yaw_err[-1]:4.1f}°"
+                   if self.res.pose_err else f"速度 {v.speed:4.2f}m/s")
+            print(f"  {t:5.1f}s [{st.phase or '-'}] 真値({v.x:5.2f},{v.y:5.2f}) {err}  "
+                  f"一致度 {st.match_score:.2f}  {st.reason}", flush=True)
 
     def map_quality(self) -> str:
         """出来上がった地図を**真のコースと重ねて**採点する。
@@ -411,7 +583,25 @@ class Bench:
                 st = self._last_st
                 self.res.stop_err_est = math.hypot(st.pose_x - mx, st.pose_y - my)
 
+    def save_built_map(self, name: str) -> str:
+        """bench が作った地図を実機の `saved_maps/` へ `name` で写す（`--save-map`）。"""
+        import shutil
+
+        from raspi.auto import mapstore
+        src = getattr(self.planner, "_saved_map_name", "")
+        if not src:
+            return "地図ができていないので保存しない"
+        self._real_maps_dir.mkdir(parents=True, exist_ok=True)
+        for suf in (".npz", ".json", ".routes.json"):
+            f = mapstore.MAPS_DIR / f"{src}{suf}"
+            if f.is_file():
+                shutil.copy(f, self._real_maps_dir / f"{name}{suf}")
+        return f"地図を {self._real_maps_dir / name}.npz に保存した"
+
     def close(self) -> None:
+        close = getattr(self.planner, "close", None)
+        if close is not None:
+            close()
         self.link.close()
 
 
@@ -438,6 +628,13 @@ def main() -> int:
                     help="時刻 T [s] に信号認識の値を送る（`signal_map` で読み替え、複数可）")
     ap.add_argument("--no-auto-race", action="store_true",
                     help="地図作成が終わっても走り出さない（既定は bench が「走行」を押す）")
+    ap.add_argument("--map", default=None,
+                    help="saved_maps/ の地図名。地図作成を飛ばし、読み込んで LOCATE から走る")
+    ap.add_argument("--save-map", default=None, metavar="NAME",
+                    help="bench が作った地図を saved_maps/NAME として残す")
+    ap.add_argument("--locate-hint", default=None, metavar="X,Y",
+                    help="--map のとき LOCATE に渡すおおよその位置（地図座標）。対称なコースで速く確実にする")
+    ap.add_argument("--trace", default=None, help="RACE 中の速度などを CSV で書く（100Hz）")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -464,7 +661,10 @@ def main() -> int:
 
     b = Bench(course, args.mode, params, max_speed=args.max_speed,
               max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed,
-              routes=routes, events=events, auto_race=not args.no_auto_race)
+              routes=routes, events=events, auto_race=not args.no_auto_race,
+              map_name=args.map, trace=Path(args.trace) if args.trace else None,
+              locate_hint=(tuple(float(v) for v in args.locate_hint.split(","))
+                           if args.locate_hint else None))
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)
@@ -472,6 +672,8 @@ def main() -> int:
         res = b.res
     quality = b.map_quality()
     b.route_report()
+    if args.save_map:
+        res.notes.append(b.save_built_map(args.save_map))
     b.close()
     print("\n=== 結果 ===")
     print(res.report())

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import numpy as np
 
@@ -94,6 +95,77 @@ def _heading_err(path: rl_mod.RaceLine, i: int, yaw: float) -> float:
 
 _MAP_EVERY = 10
 
+#: 最小曲率の中心線へ引き戻す重み（`rl_mod.min_curvature_alpha` の `lam`）。★以前は GUI の
+#: スライダ「中心線への寄せ」だったが、最小時間への寄せ（`LINE_TIME_ITERS`）と車体外形の検査を
+#: 入れてからは 0.02〜1.0 で見積もりラップが ±0.05s しか変わらず（toyota2）、触る理由が無いので
+#: 定数にした。壁との距離は `line_margin` で決める
+LINE_LAM = 0.1
+#: 「最適化 → 法線と幅を測り直す」の回数（`rl_mod.optimize` の `passes`）。★以前は GUI の
+#: スライダだったが、2回で足り（3回は往復して悪くなることがある）触る理由が無いので定数にした
+LINE_PASSES = 2
+#: 最小時間へ寄せる再重み付けの回数（`rl_mod.optimize` の `time_iters`）。1回で効果の大半が
+#: 出て2回以上は変わらない（toyota2 の見積もり 14.08→13.23→13.24s）。同じ理由で定数
+LINE_TIME_ITERS = 2
+
+#: GUI の組（`ParamSpec.group`）。地図作成（Follow the Gap）と本番走行を分けて見せる
+GROUP_EXPLORE = "地図作成（Follow the Gap）"
+GROUP_LINE = "経路生成"
+GROUP_SPEED = "本番走行: 速度"
+GROUP_STEER = "本番走行: 舵"
+GROUP_SAFETY = "本番走行: 安全"
+
+#: 速度プロファイルを決める設定（変わったら `_retime` で作り直す）
+SPEED_KEYS = ("v_max", "v_min", "a_lat", "a_accel", "a_brake")
+
+
+def kappa_max(vehicle) -> float:
+    """車の曲がれる限界の曲率 [1/m]（最小旋回半径の逆数）。"""
+    return math.tan(vehicle.max_steer) / vehicle.wheelbase
+
+
+def speed_key(p: dict[str, float]) -> tuple:
+    return tuple(float(p[k]) for k in SPEED_KEYS)
+
+
+def speed_kwargs(p: dict[str, float], vehicle) -> dict:
+    """`rl_mod.retime` / `optimize` へ渡す速度の設定。"""
+    return dict(v_max=p["v_max"], v_min=p["v_min"], a_lat=p["a_lat"],
+                a_accel=p["a_accel"], a_brake=p["a_brake"], kappa_max=kappa_max(vehicle))
+
+
+def line_kwargs(p: dict[str, float], vehicle) -> dict:
+    """`rl_mod.optimize` へ渡す経路と速度の設定（BUILD と地図の読み込みで共通）。"""
+    return dict(half_width=vehicle.half_width, margin=p["line_margin"], lam=LINE_LAM,
+                passes=LINE_PASSES, max_width=MAX_TRACK_WIDTH,
+                # コーナーで車体の角が経路の外へ張り出すぶんを余裕に足す
+                # （`nav/raceline.body_allowance`）
+                front_overhang=vehicle.front_overhang, rear_overhang=vehicle.rear_overhang,
+                # 薄い壁の先端を車体がかすめないか、外形で確かめる（`rl_mod._BodyCheck`）
+                footprint=vehicle.footprint or None,
+                time_iters=LINE_TIME_ITERS, **speed_kwargs(p, vehicle))
+
+
+def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
+                   cl: cl_mod.Centerline | np.ndarray, p: dict[str, float],
+                   vehicle) -> rl_mod.RaceLine:
+    """レーシングラインを引く（**ワーカースレッドで走る**。地図の写しだけを触る）。
+
+    `cl` が中心線でなく点列なら、保存済み地図の中心線として測り直してから引く。
+    ★ 最小時間への寄せと車体外形の検査で、Pi では数百ms〜1s かかる。`plan()` の中で
+    回すと指令が途切れる（`cmd_deadman_ms` 150ms）。
+    """
+    grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
+    if not isinstance(cl, cl_mod.Centerline):
+        cl = cl_mod.build(grid, cl, step=PATH_STEP, max_width=MAX_TRACK_WIDTH)
+    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle))
+
+
+def pursuit_config(p: dict[str, float], vehicle) -> PursuitConfig:
+    return PursuitConfig(
+        wheelbase=vehicle.wheelbase, max_steer=vehicle.max_steer,
+        lookahead_k=p["look_k"], lookahead_min=p["look_min"], delay_s=p["delay_s"],
+        speed_preview_s=p["speed_preview"], ff_gain=p["steer_ff"])
+
 
 class Slam2dRaceLine(Planner):
     id = "slam2d_raceline"
@@ -103,74 +175,88 @@ class Slam2dRaceLine(Planner):
     map_ui = True
 
     params = (
-        ParamSpec(key="explore_laps", label="地図を作る周回数", min=1, max=4, step=1,
+        ParamSpec(group=GROUP_EXPLORE, key="explore_laps", label="地図を作る周回数", min=1, max=4, step=1,
                   default=2, unit="周",
                   note="★1周だと動く物が地図から消えない。2周が既定"),
-        ParamSpec(key="explore_speed", label="地図作成中の速度", min=0.1, max=1.5,
+        ParamSpec(group=GROUP_EXPLORE, key="explore_speed", label="地図作成中の速度", min=0.1, max=1.5,
                   default=0.45, step=0.05, unit="m/s",
                   note="この段は Follow the Gap で走る。速いと点群が歪んで地図が荒れる"),
-        ParamSpec(key="explore_gap_min", label="通れると見なす距離", min=0.2, max=3.0,
+        ParamSpec(group=GROUP_EXPLORE, key="explore_gap_min", label="通れると見なす距離", min=0.2, max=3.0,
                   default=0.6, step=0.05, unit="m",
                   note="★この距離以上が続く方向を「隙間」と数える。**道幅の半分より"
                        "小さくすること**"),
-        ParamSpec(key="explore_bubble", label="安全バブル半径", min=0.05, max=0.6,
+        ParamSpec(group=GROUP_EXPLORE, key="explore_bubble", label="安全バブル半径", min=0.05, max=0.6,
                   default=0.12, step=0.01, unit="m",
                   note="最近傍の周りを侵入禁止にする半径。**車線の半幅より小さく**"),
 
-        ParamSpec(key="line_lam", label="中心線への寄せ", min=0.005, max=2.0,
-                  default=0.1, step=0.005, unit="",
-                  note="★アウトインアウトの強さ。下げるほど振れ幅が大きい"),
-        ParamSpec(key="line_margin", label="壁からの余裕", min=0.0, max=0.4,
-                  default=0.05, step=0.01, unit="m",
-                  note="車体半幅に足す安全代。地図の誤差と局在化の誤差をここで飲む"),
-        ParamSpec(key="line_passes", label="経路の作り直し回数", min=1, max=3,
-                  default=2, step=1, unit="回",
-                  note="経路が動くと法線の向きも変わるので測り直す"),
+        ParamSpec(group=GROUP_LINE, key="line_margin", label="壁からの余裕", min=0.0, max=0.4,
+                  default=0.08, step=0.01, unit="m",
+                  note="車体半幅に足す安全代。地図の誤差・局在化の誤差・追従の誤差をここで飲む。"
+                       "車体外形と地図の壁の距離もこれ以上に保つ。★3m/sでは追従が±10cm振れ、"
+                       "0.05では広いオーバル（normal）で衝突した。0.08で0回"),
 
-        ParamSpec(key="v_max", label="最高速度", min=0.2, max=3.0, default=1.2,
+        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=3.0, default=2.0,
                   step=0.05, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
-        ParamSpec(key="v_min", label="最低速度", min=0.1, max=1.0, default=0.35,
+        ParamSpec(group=GROUP_SPEED, key="v_min", label="最低速度", min=0.1, max=1.0, default=0.35,
                   step=0.05, unit="m/s", note="いちばんきついコーナーでもこれ以下にしない"),
-        ParamSpec(key="a_lat", label="横加速度の上限", min=0.5, max=8.0, default=2.5,
+        ParamSpec(group=GROUP_SPEED, key="a_lat", label="横加速度の上限", min=0.5, max=8.0, default=3.5,
                   step=0.1, unit="m/s²",
-                  note="コーナーの速度を決めているのはこれ"),
-        ParamSpec(key="a_accel", label="加速度の上限", min=0.2, max=5.0, default=1.2,
-                  step=0.1, unit="m/s²", note="立ち上がりでどれだけ速度を戻せるか"),
-        ParamSpec(key="a_brake", label="減速度の上限", min=0.2, max=5.0, default=1.8,
+                  note="コーナーの速度を決めているのはこれ。前後の加減速と摩擦円で分け合う。"
+                       "実測のグリップ限界は4.48（vehicle.toml の mu）。シムでは4.0まで衝突0"),
+        ParamSpec(group=GROUP_SPEED, key="a_accel", label="加速度の上限", min=0.2, max=5.0, default=2.5,
                   step=0.1, unit="m/s²",
-                  note="★コーナー手前の減速開始点を決める。実車で止まれる値にすること"),
+                  note="立ち上がりでどれだけ速度を戻せるか。ファームが目標速度を3.0m/s²で"
+                       "ランプさせるので、それより上は効かない"),
+        ParamSpec(group=GROUP_SPEED, key="a_brake", label="減速度の上限", min=0.2, max=5.0, default=2.5,
+                  step=0.1, unit="m/s²",
+                  note="★コーナー手前の減速開始点を決める。減速は速度PI（負のトルク）で、"
+                       "ファームのランプ3.0m/s²が上限。MDの制動（ABS）は2.75で頭打ちなので使わない"),
 
-        ParamSpec(key="look_k", label="前方注視の速度係数", min=0.0, max=2.0,
+        ParamSpec(group=GROUP_STEER, key="look_k", label="前方注視の速度係数", min=0.0, max=2.0,
                   default=0.45, step=0.05, unit="s",
                   note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで内を切る。"
                        "★既定0.7は狭いコースで内を切りすぎた（2m/sのtoyotaで衝突10回・"
                        "横偏差16cm、0.45にすると衝突0・6.2cmで舵も滑らかになった）"),
-        ParamSpec(key="look_min", label="前方注視の最小値", min=0.15, max=1.5,
+        ParamSpec(group=GROUP_STEER, key="look_min", label="前方注視の最小値", min=0.15, max=1.5,
                   default=0.30, step=0.05, unit="m",
                   note="低速時の注視距離。小さすぎると舵が振動する"),
-        ParamSpec(key="delay_s", label="遅延補償", min=0.0, max=0.4, default=0.15,
+        ParamSpec(group=GROUP_STEER, key="delay_s", label="遅延補償", min=0.0, max=0.4, default=0.15,
                   step=0.01, unit="s",
                   note="★舵が効き始めるまでの時間。実測して合わせること"),
-        ParamSpec(key="join_speed", label="経路に乗るまでの速度", min=0.2, max=1.5,
+        ParamSpec(group=GROUP_STEER, key="steer_ff", label="曲率フィードフォワード", min=0.0, max=1.0, default=0.8,
+                  step=0.1, unit="",
+                  note="★Pure Pursuit は注視区間で平均した曲率で曲がるので、S字で内側を切り続ける"
+                       "（3m/sで±15cm）。足元の経路の曲率に差し替える重み。0で従来どおり。"
+                       "0.5ではチケイン（circuit_chicane_a）で内を切って衝突、0.8で0回"),
+        ParamSpec(group=GROUP_SPEED, key="speed_preview", label="速度の先読み", min=0.0, max=1.0, default=0.1,
+                  step=0.05, unit="s",
+                  note="★遅延補償の位置からこの時間ぶん先の速度を指令する（速度ループの遅れを"
+                       "埋める）。以前は舵の注視点の速度で、2m/sで0.75s早く減速していた"),
+        ParamSpec(group=GROUP_SAFETY, key="join_speed", label="経路に乗るまでの速度", min=0.2, max=1.5,
                   default=0.5, step=0.05, unit="m/s",
                   note="★走り出し（自己位置の復元直後）は経路から横・向きがずれている。"
                        "乗る（横8cm・向き15°以内）まではこの速度に抑える。抑えないと最高速のまま"
                        "大回りして壁に当たった（toyota/toyota2 の sim.bench で実測、2026-09-29）"),
-        ParamSpec(key="min_score", label="自己位置の信頼下限", min=0.1, max=0.8,
+        ParamSpec(group=GROUP_SAFETY, key="min_score", label="自己位置の信頼下限", min=0.1, max=0.8,
                   default=0.35, step=0.01, unit="",
                   note="★スキャンマッチの一致度がこれを切ったら止まる"),
-        ParamSpec(key="max_cross", label="横偏差の上限", min=0.1, max=1.5, default=0.5,
+        ParamSpec(group=GROUP_SAFETY, key="max_cross", label="横偏差の上限", min=0.1, max=1.5, default=0.5,
                   step=0.05, unit="m", note="経路からこれだけ離れたら止まる"),
-        ParamSpec(key="obstacle_stop", label="障害物で止まる距離", min=0.0, max=4.0,
+        ParamSpec(group=GROUP_SAFETY, key="obstacle_stop", label="障害物で止まる距離", min=0.0, max=4.0,
                   default=0.0, step=0.1, unit="m",
                   note="★これから通る帯に動く物が居たら制動する。0で無効"),
-        ParamSpec(key="obstacle_pad", label="壁の近くを無視する幅", min=0.05, max=0.6,
+        ParamSpec(group=GROUP_SAFETY, key="obstacle_pad", label="壁の近くを無視する幅", min=0.05, max=0.6,
                   default=0.25, step=0.01, unit="m",
                   note="★壁からこの範囲に落ちた点は動的障害物と見なさない"),
     )
 
+    #: 保存済み地図を読んだとき、中心線からラインを引き直すか（`slam2d_route` は自前で作る）
+    _reline_on_load = True
+
     def __init__(self) -> None:
+        self._line_pool: ThreadPoolExecutor | None = None
+        self._last_p: dict[str, float] | None = None
         self.vehicle = Vehicle.load()
         self.ftg = FollowTheGap()
         self.slam = Slam2dNav(resolution=MAP_RES, size_m=MAP_SIZE_M,
@@ -200,6 +286,12 @@ class Slam2dRaceLine(Planner):
         self._off_t = 0.0
         self._rejoins = 0
         self._dt = 0.0
+        #: 今の経路の速度プロファイルを作った設定（`_retime`）
+        self._speed_key: tuple | None = None
+        #: 地図の読み込みで引き直しているライン（`request_load`）
+        self._line_job: Future | None = None
+        #: BUILD で引いているライン（`_build`）
+        self._build_job: Future | None = None
         self._prev_obs: list[obs_mod.Obstacle] = []
         self._obs: list[obs_mod.Obstacle] = []
         self._map: AutoMap | None = None
@@ -265,11 +357,36 @@ class Slam2dRaceLine(Planner):
             length=_polyline_length(loaded.raceline_xy))
         self._loaded_centerline_xy = loaded.centerline_xy
         self.centerline = None
+        # ★ 保存したラインの形は地図を作ったときのコードと設定のまま。中心線から今の
+        #   設定で引き直す（重いのでワーカーで。できるまでは保存したラインで走る）
+        self._line_job = None
+        if self._reline_on_load and len(loaded.centerline_xy) >= 20:
+            p = self._last_p or {s.key: s.default for s in self.params}
+            self._line_job = self._pool().submit(
+                _optimize_line, loaded.trinary.copy(), loaded.resolution,
+                (loaded.origin_x, loaded.origin_y), np.asarray(loaded.centerline_xy).copy(),
+                dict(p), self.vehicle)
+        self._speed_key = None            # 速度は今の設定で作り直す（`_retime`）
         self.phase = LOCATE
         self._localizer = None
         self._load_error = ""
         self.laps = 0
         self._hint = -1
+        self._map_dirty = True
+
+    def _poll_line(self) -> None:
+        """地図の読み込みで引き直したラインができていれば差し替える（`request_load`）。"""
+        job = self._line_job
+        if job is None or not job.done():
+            return
+        self._line_job = None
+        try:
+            self.path = job.result()
+        except Exception as e:                      # noqa: BLE001  保存したラインで走り続ける
+            self._load_error = f"ラインを引き直せなかった（保存したラインで走る）: {e}"
+            return
+        self._hint = -1
+        self._speed_key = None
         self._map_dirty = True
 
     def request_locate_hint(self, x: float, y: float) -> None:
@@ -282,6 +399,8 @@ class Slam2dRaceLine(Planner):
              p: dict[str, float], dt: float) -> AutoState:
         st = AutoState(mode=self.id, planner=self.name, phase=self.phase)
         self._dt = dt
+        self._last_p = p
+        self._poll_line()
 
         if vs is None:
             st.reason = "車両状態がまだ届いていない"
@@ -407,17 +526,17 @@ class Slam2dRaceLine(Planner):
                 return st
 
             assert self.centerline is not None
-            self.path = rl_mod.optimize(
-                self.slam.grid, self.centerline,
-                half_width=self.vehicle.half_width, margin=p["line_margin"],
-                lam=p["line_lam"], passes=int(p["line_passes"]),
-                v_max=p["v_max"], v_min=p["v_min"], a_lat=p["a_lat"],
-                a_accel=p["a_accel"], a_brake=p["a_brake"],
-                max_width=MAX_TRACK_WIDTH,
-                # コーナーで車体の角が経路の外へ張り出すぶんを余裕に足す
-                # （`nav/raceline.body_allowance`）
-                front_overhang=self.vehicle.front_overhang,
-                rear_overhang=self.vehicle.rear_overhang)
+            if self._build_job is None:
+                g = self.slam.grid
+                self._build_job = self._pool().submit(
+                    _optimize_line, g.trinary().copy(), g.resolution, tuple(g.origin),
+                    self.centerline, dict(p), self.vehicle)
+            if not self._build_job.done():
+                st.reason = "経路を作っている 2/2（レーシングライン）"
+                return st
+            job, self._build_job = self._build_job, None
+            self.path = job.result()
+            self._speed_key = speed_key(p)
         except Exception as e:                      # noqa: BLE001
             self._build_error = f"経路を作れなかった: {e}"
             st.reason = self._build_error
@@ -567,16 +686,14 @@ class Slam2dRaceLine(Planner):
         if self.path is None:
             st.reason = "経路がまだ無い"
             return st
+        self._retime(p)
 
         if lost or st.match_score < p["min_score"]:
             st.reason = (f"自己位置が信用できない（一致度 {st.match_score:.2f} < "
                          f"{p['min_score']:.2f}）")
             return st
 
-        cfg = PursuitConfig(
-            wheelbase=self.vehicle.wheelbase, max_steer=self.vehicle.max_steer,
-            lookahead_k=p["look_k"], lookahead_min=p["look_min"],
-            delay_s=p["delay_s"])
+        cfg = pursuit_config(p, self.vehicle)
         pp = follow(self.path, self.slam.pose, vs.speed, vs.steer_actual,
                     cfg, hint=self._hint)
         self._hint = pp.index
@@ -619,6 +736,19 @@ class Slam2dRaceLine(Planner):
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速"))
         return st
+
+    def _retime(self, p: dict[str, float]) -> None:
+        """速度の設定が変わっていたら、経路の速度プロファイルだけを作り直す。
+
+        ★ 保存した地図の速度は地図を作ったときの設定のまま（`rl_mod.retime`）。
+        `request_load()` の後はここで必ず1回作り直される。
+        """
+        key = speed_key(p)
+        if key == self._speed_key or self.path is None:
+            return
+        self.path = rl_mod.retime(self.path, **speed_kwargs(p, self.vehicle))
+        self._speed_key = key
+        self._map_dirty = True
 
     # ── 経路に乗る・外れたら乗り直す（`slam2d_route` と共通） ──
 
@@ -666,6 +796,15 @@ class Slam2dRaceLine(Planner):
                              wall_pad=self._obs_pad)
         self._obs = obs_mod.confirm(now, self._prev_obs)
         self._prev_obs = now
+
+    def _pool(self) -> ThreadPoolExecutor:
+        if self._line_pool is None:
+            self._line_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="line")
+        return self._line_pool
+
+    def close(self) -> None:
+        if self._line_pool is not None:
+            self._line_pool.shutdown(wait=False, cancel_futures=True)
 
     # ── GUI へ渡す重い状態 ──
 

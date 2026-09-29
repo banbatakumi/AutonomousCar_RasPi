@@ -22,7 +22,7 @@ from raspi.nav import raceline as rl_mod  # noqa: E402
 from raspi.nav.purepursuit import PursuitConfig, follow  # noqa: E402
 from raspi.nav.roadgraph import CorridorGrid, build_graph  # noqa: E402
 from raspi.nav.route import (RouteError, Waypoint, build_raceline,  # noqa: E402
-                             cap_tight_speed, plan_loop, plan_to, snap, tightest_radius,
+                             plan_loop, plan_to, snap, tightest_radius,
                              waypoints_from_traj)
 from raspi.nav.route_switch import Mission, RouteSwitcher, lap_crossed  # noqa: E402
 
@@ -289,14 +289,17 @@ class TestTightTurns(unittest.TestCase):
         r, _ = tightest_radius(rl)
         self.assertAlmostEqual(r, 0.5, delta=0.1)
 
-    def test_cap_slows_only_near_the_limit(self):
+    def test_slows_only_near_the_limit(self):
+        """限界に近いヘアピンだけ横Gを削る（一律 `v_min` にはしない）。"""
         kmax = math.tan(0.524) / 0.23                    # 約 2.5（半径 0.4m）
-        tight = cap_tight_speed(self._circle_track(0.42), kappa_max=kmax, v_cap=0.35,
-                                a_accel=1.0, a_brake=1.5)
-        self.assertAlmostEqual(float(tight.v.min()), 0.35)
-        wide = cap_tight_speed(self._circle_track(1.5), kappa_max=kmax, v_cap=0.35,
-                               a_accel=1.0, a_brake=1.5)
-        self.assertAlmostEqual(float(wide.v.min()), 2.0)   # 限界から遠ければ触らない
+        kw = dict(v_max=2.0, v_min=0.35, a_lat=2.5, a_accel=1.0, a_brake=1.5)
+        tight = rl_mod.retime(self._circle_track(0.42), kappa_max=kmax, **kw)
+        free = rl_mod.retime(self._circle_track(0.42), **kw)
+        self.assertLess(float(tight.v.min()), 0.8 * float(free.v.min()))
+        self.assertGreater(float(tight.v.min()), 0.35 + 0.1)   # 最低速度に張り付かない
+        wide = rl_mod.retime(self._circle_track(1.5), kappa_max=kmax, **kw)
+        wide_free = rl_mod.retime(self._circle_track(1.5), **kw)
+        self.assertTrue(np.allclose(wide.v, wide_free.v))      # 限界から遠ければ触らない
 
 
 def _straight(y0: float, y1: float, v=1.0, n=100):
@@ -419,11 +422,12 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             pl.request_load("m")
             self.assertEqual(pl._load_error, "")
             self._wait(pl)
-            self.assertEqual(set(pl._routes), {"A", "B"}, pl._route_err)
+            # 自動経路（auto）はグループがあっても作り、選べる
+            self.assertEqual(set(pl._routes), {"auto", "A", "B"}, pl._route_err)
             self.assertLess(pl._routes["B"].length, pl._routes["A"].length)   # B は近道
 
             m = pl.snapshot()
-            self.assertEqual(set(m.routes), {"A", "B"})
+            self.assertEqual(set(m.routes), {"auto", "A", "B"})
             self.assertGreater(len(m.graph_xy), 0)
             self.assertEqual(len(m.graph_breaks), 3)
             self.assertIn('"A"', m.routes_json)
@@ -443,6 +447,64 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             self._wait(pl)
             self.assertIn("C", pl._routes)
             self.assertGreater(pl._route_ver, ver)
+        finally:
+            pl.close()
+
+    def test_no_waypoints_means_auto_route_not_written(self):
+        # 経由点を置いていない地図: 自動経路（auto）で走るが、設定のグループには何も書かない
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_route import Slam2dRoute
+        mapstore.save_routes("m", "{}")
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            self.assertEqual(set(pl._routes), {"auto"})
+            self.assertEqual(pl._cfg.groups, {})
+            self.assertEqual(json.loads(pl.snapshot().routes_json)["groups"], {})
+
+            # 経由点を置いても自動経路は残る（走行中の経路はそのまま）。A も選べ、自動へ戻せる
+            pl._switch.set_active("auto", pl._routes["auto"])
+            pl.request_routes(json.dumps({"groups": {"A": [[2.0, 1.0, 0.0], [3.5, 2.5]]}}))
+            self._wait(pl)
+            self.assertEqual(set(pl._routes), {"auto", "A"})
+            self.assertEqual(pl._switch.active_key, "auto")
+            pl.request_route("A", "test")
+            self.assertEqual(pl._switch.pending_key, "A")
+            pl.request_route("auto", "test")
+            self.assertEqual(pl._switch.pending_key, "auto")
+
+            # 全部消すと自動経路に戻る
+            pl.request_routes(json.dumps({"groups": {}}))
+            self._wait(pl)
+            self.assertEqual(set(pl._routes), {"auto"})
+        finally:
+            pl.close()
+
+    def test_auto_route_is_fastest_loop_and_respects_avoid(self):
+        # 経由点なし＋地図作成の軌跡あり: スタートから全周回を比べて最速（近道）を選ぶ。
+        # 近道に避ける点を置くと、近道を通らない周回になる
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_route import Slam2dRoute
+        xs = np.linspace(1.5, 3.0, 20)
+        traj = np.column_stack([xs, np.full_like(xs, 1.0)]).tolist()   # 下の直線を +x 向き
+        mapstore.save_routes("m", json.dumps({"explore_traj": traj}))
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            self.assertEqual(set(pl._routes), {"auto"})
+            passage = int(pl._graph.label[int(2.5 / RES), int(3.5 / RES)])
+            self.assertIn(passage, pl._route_paths_edges("auto"))
+            self.assertIn("最速", pl._auto_note)
+            self.assertIn("2通り", pl._auto_note)
+            short = pl._routes["auto"].length
+
+            pl.request_routes(json.dumps({"avoid": [[3.5, 2.5]]}))
+            self._wait(pl)
+            self.assertNotIn(passage, pl._route_paths_edges("auto"))
+            self.assertGreater(pl._routes["auto"].length, short)
+            self.assertEqual(pl._cfg.groups, {})                  # 経由点は書かない
         finally:
             pl.close()
 

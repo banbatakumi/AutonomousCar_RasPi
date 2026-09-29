@@ -20,6 +20,25 @@
 **判断する場所を `t_delay` 秒後の予測位置へ進める。** 予測は今の速度と実舵角を
 使った自転車モデルで、`config/vehicle.toml` の `[dynamics]` が既定値を与える。
 
+## 速度は舵の注視点ではなく、すぐ先のプロファイルから読む（`speed_preview_s`）
+
+舵の注視点（遅延予測 + `k·v + min`）の速度を指令すると、2m/s で約1.5m・0.75s 先の
+速度を今出すことになり、**コーナーの手前で早く減速しすぎ、立ち上がりでは早く
+踏みすぎる**。速度は遅延予測の位置から `v·speed_preview_s` だけ先の値にする
+（速度ループの遅れを埋めるぶんだけ先を見る）。`None` なら従来どおり注視点の速度。
+
+## 曲率フィードフォワード — 注視区間で平均した曲率を、足元の曲率に差し替える（`ff_gain`）
+
+Pure Pursuit は「今の位置から注視点へ届く円弧」の曲率を出すので、経路の上に
+**ぴったり乗っていても**、注視区間（3m/s で約1.6m）で平均した曲率で曲がる。
+曲率が変わり続ける S 字では、これが**内側を切る定常的な偏り**になった（toyota2・
+3m/s で ±15cm、横G を上げると衝突）。「車が経路の点 i に経路の向きで居たら
+Pure Pursuit が出す曲率」`κ_ideal` を求め、その点の経路の曲率 `κ_path` との差を足す:
+
+    κ = κ_pp + g·(κ_path − κ_ideal)
+
+経路上にいれば `κ = κ_path`（偏りなし）で、ずれの修正は Pure Pursuit のまま残る。
+
 ## 横偏差は「評価」であって「入力」ではない
 
 `cross_track` は Pure Pursuit の計算には入らない（純粋に目標点への方位だけで
@@ -45,6 +64,12 @@ class PursuitConfig(NamedTuple):
     lookahead_k: float = 0.8               #: `Ld = k·v + min` の k [s]
     lookahead_min: float = 0.35            #: [m]
     delay_s: float = 0.15                  #: 遅延補償の時間 [s]
+    #: 速度を読む先読み時間 [s]（遅延予測の位置から）。`None` = 舵の注視点の速度
+    speed_preview_s: float | None = None
+    #: 曲率フィードフォワードの重み（0 = 従来の Pure Pursuit、モジュール docstring）
+    ff_gain: float = 0.0
+    #: フィードフォワードの曲率を測る弦 [m]
+    ff_chord: float = 0.4
 
 
 class Pursuit(NamedTuple):
@@ -85,6 +110,26 @@ def steer_for_target(eta: float, lookahead: float, wheelbase: float, max_steer: 
     """
     steer = math.atan2(2.0 * wheelbase * math.sin(eta), max(lookahead, 1e-3))
     return max(-max_steer, min(max_steer, steer))
+
+
+def _ff_correction(path: RaceLine, i: int, goal, step: float, chord: float) -> float:
+    """`κ_path − κ_ideal`（モジュール docstring「曲率フィードフォワード」）。"""
+    n = len(path)
+    h = max(1, int(round(chord / 2.0 / max(step, 1e-6))))
+
+    def pt(j):
+        return path.xy[j % n] if path.closed else path.xy[min(max(j, 0), n - 1)]
+
+    a, b, c = pt(i - h), pt(i), pt(i + h)
+    ab, bc, ca = math.dist(a, b), math.dist(b, c), math.dist(c, a)
+    cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    k_path = 2.0 * cross / (ab * bc * ca) if ab * bc * ca > 1e-9 else 0.0
+    t = pt(i + 1) - pt(i - 1)
+    yaw = math.atan2(t[1], t[0])
+    eta = math.atan2(goal[1] - b[1], goal[0] - b[0]) - yaw
+    eta = (eta + math.pi) % (2.0 * math.pi) - math.pi
+    k_ideal = 2.0 * math.sin(eta) / max(math.dist(goal, b), 1e-3)
+    return k_path - k_ideal
 
 
 def nearest_index(path: RaceLine, x: float, y: float, hint: int = -1,
@@ -155,8 +200,18 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     eta = math.atan2(dy, dx) - pyaw
     eta = (eta + math.pi) % (2.0 * math.pi) - math.pi
     dist = math.hypot(dx, dy)
-    steer = steer_for_target(eta, dist, cfg.wheelbase, cfg.max_steer)
+    if cfg.ff_gain > 0.0 and n >= 5:
+        kap = 2.0 * math.sin(eta) / max(dist, 1e-3)
+        kap += cfg.ff_gain * _ff_correction(path, i, goal, step, cfg.ff_chord)
+        steer = math.atan(cfg.wheelbase * kap)
+        steer = max(-cfg.max_steer, min(cfg.max_steer, steer))
+    else:
+        steer = steer_for_target(eta, dist, cfg.wheelbase, cfg.max_steer)
 
-    return Pursuit(steer=steer, speed=float(path.v[k]), index=i,
+    kv = k
+    if cfg.speed_preview_s is not None:
+        m = int(round(max(0.0, v_now) * cfg.speed_preview_s / max(step, 1e-6)))
+        kv = (i + m) % n if path.closed else min(n - 1, i + m)
+    return Pursuit(steer=steer, speed=float(path.v[kv]), index=i,
                    cross_track=cross, target=(float(goal[0]), float(goal[1])),
                    lookahead=ld, remaining=remaining)

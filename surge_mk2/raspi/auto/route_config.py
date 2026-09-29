@@ -10,15 +10,20 @@ GUI の経由点エディタ・`sim.bench --routes`・planner がすべてこの
   "stops": {"P1": {"x": 1.0, "y": 2.0, "yaw": 1.57, "mode": "park"}},
   "mission": {"laps": 3, "time_s": 180, "then": "P1"},
   "signal_map": {"left": "B", "right": "A"},
+  "avoid": [[x, y], ...],
   "explore_traj": [[x, y], ...]
 }
 ```
 
-- `groups` のキーは A〜D。経由点を1つも置いていないグループは存在しないのと同じ
+- `groups` のキーは A〜D。経由点を1つも置いていないグループは存在しないのと同じ。**planner は経由点を自動では書き込まない**
+  （自動経路 `auto` は planner が内部だけで作り、グループの有無にかかわらず選べる、`slam2d_route.py`）
 - 経由点の3要素目 `yaw` は「その向きで通る」指定（省略可）
 - `stops[*].mode`: `"stop"` はその場所で止まるだけ、`"park"` は手前で止まってから
   `park_to_point` へ引き継いでその姿勢（`yaw` 必須）へ入れる
-- `signal_map`: カメラの信号認識（`route/select` トピック）が送ってくる値 → グループ
+- `avoid`: 避ける点。いちばん近い道（道路グラフのエッジ）を**自動経路・経由点の経路・停止経路の
+  どれにも使わない**（ルールで通れない近道など。地図だけからは分からない）
+- `signal_map`: カメラの信号認識（`route/select` トピック）が送ってくる値 → グループ（`auto` も可）
+- `active`: 走り出す経路。A〜D か `"auto"`（自動経路、既定）
 - `explore_traj`: 地図作成の軌跡（間引き済み）。**道路グラフの「通ってよい向き」
   （逆走禁止）を保存地図から復元するのに要る**（`nav/roadgraph._directions`）
 """
@@ -33,9 +38,13 @@ import numpy as np
 
 from ..nav.route import Waypoint
 
-__all__ = ["GROUPS", "RouteConfig", "Stop"]
+__all__ = ["GROUPS", "ROUTE_KEYS", "AUTO_KEY", "RouteConfig", "Stop"]
 
 GROUPS = ("A", "B", "C", "D")
+#: 自動経路のキー（経由点は持たない。planner が地図から作る）
+AUTO_KEY = "auto"
+#: 走行中に選べる経路（`active`・`signal_map` の行き先・GUI の切替ボタン）
+ROUTE_KEYS = (AUTO_KEY,) + GROUPS
 _MAX_WAYPOINTS = 64
 _MAX_TRAJ = 5000
 
@@ -51,10 +60,11 @@ class Stop:
 @dataclass
 class RouteConfig:
     groups: dict[str, list[Waypoint]] = field(default_factory=dict)
-    active: str = "A"
+    active: str = AUTO_KEY
     stops: dict[str, Stop] = field(default_factory=dict)
     mission: dict = field(default_factory=dict)
     signal_map: dict[str, str] = field(default_factory=dict)
+    avoid: list[tuple[float, float]] = field(default_factory=list)
     explore_traj: np.ndarray | None = None
 
     # ── 変換 ──
@@ -99,12 +109,19 @@ class RouteConfig:
                    "then": then}
         sig = {}
         for k, g in (d.get("signal_map") or {}).items():
-            if g not in GROUPS:
+            if g not in ROUTE_KEYS:
                 raise ValueError(f"信号『{k}』の行き先『{g}』はグループ名ではない")
             sig[str(k)] = str(g)
-        active = str(d.get("active", "A") or "A")
-        if active not in GROUPS:
-            raise ValueError(f"グループ名『{active}』は使えない（A〜D）")
+        active = str(d.get("active", AUTO_KEY) or AUTO_KEY)
+        if active not in ROUTE_KEYS:
+            raise ValueError(f"グループ名『{active}』は使えない（auto・A〜D）")
+        avoid_raw = d.get("avoid") or []
+        if not isinstance(avoid_raw, list) or len(avoid_raw) > _MAX_WAYPOINTS:
+            raise ValueError(f"避ける点が不正（最大{_MAX_WAYPOINTS}個）")
+        avoid = []
+        for i, q in enumerate(avoid_raw):
+            w = _waypoint(q, f"避ける点{i + 1}")
+            avoid.append((w.x, w.y))
         traj = d.get("explore_traj")
         tr = None
         if traj is not None:
@@ -113,7 +130,7 @@ class RouteConfig:
                     or not np.isfinite(tr).all():
                 raise ValueError("explore_traj が不正")
         return cls(groups=groups, active=active, stops=stops, mission=mission,
-                   signal_map=sig, explore_traj=tr)
+                   signal_map=sig, avoid=avoid, explore_traj=tr)
 
     @classmethod
     def from_json(cls, s: str) -> "RouteConfig":
@@ -131,6 +148,7 @@ class RouteConfig:
                       for k, s in self.stops.items()},
             "mission": dict(self.mission),
             "signal_map": dict(self.signal_map),
+            "avoid": [[round(x, 3), round(y, 3)] for x, y in self.avoid],
         }
         if with_traj and self.explore_traj is not None:
             d["explore_traj"] = np.round(self.explore_traj, 3).tolist()
@@ -140,9 +158,9 @@ class RouteConfig:
         return json.dumps(self.to_dict(with_traj=with_traj), ensure_ascii=False)
 
     def same_groups(self, other: "RouteConfig") -> bool:
-        """経路を作り直す必要があるか（経由点が変わったか）。"""
-        return (self.to_dict(with_traj=False)["groups"]
-                == other.to_dict(with_traj=False)["groups"])
+        """経路を作り直す必要が無いか（経由点・避ける点が同じか）。"""
+        a, b = self.to_dict(with_traj=False), other.to_dict(with_traj=False)
+        return a["groups"] == b["groups"] and a["avoid"] == b["avoid"]
 
     @staticmethod
     def decimate(traj: np.ndarray, spacing: float = 0.2) -> np.ndarray:

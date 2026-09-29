@@ -69,7 +69,8 @@ def catalog() -> list[dict]:
             "category": cls.category,
             "params": [
                 {"key": s.key, "label": s.label, "min": s.min, "max": s.max,
-                 "step": s.step, "default": s.default, "unit": s.unit, "note": s.note}
+                 "step": s.step, "default": s.default, "unit": s.unit, "note": s.note,
+                 "group": s.group}
                 for s in cls.params
             ],
             "stats": list(cls.stats),

@@ -124,6 +124,7 @@ from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
 from raspi.auto import PLANNERS, catalog as auto_catalog, mapstore, merged_params  # noqa: E402
+from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -1014,7 +1015,7 @@ class TelemetryServer:
                 self._auto_routes_seq += 1
         if m.get("route_group"):
             g = str(m.get("route_group"))
-            if g in ("A", "B", "C", "D"):
+            if g in ROUTE_KEYS:                   # 自動経路（auto）と A〜D
                 self._auto_route_group = g
                 self._auto_route_seq += 1
         if "engaged" in m:

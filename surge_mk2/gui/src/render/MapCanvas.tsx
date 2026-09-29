@@ -392,6 +392,19 @@ function drawRouteCfg(
       }
     })
   }
+  // 避ける点（赤い×）
+  ctx.strokeStyle = '#e0574d'
+  ctx.lineWidth = editing === 'avoid' ? 3 : 2
+  for (const [x, y] of cfg.avoid ?? []) {
+    const cx = sx(x!)
+    const cy = sy(y!)
+    ctx.beginPath()
+    ctx.moveTo(cx - 7, cy - 7)
+    ctx.lineTo(cx + 7, cy + 7)
+    ctx.moveTo(cx + 7, cy - 7)
+    ctx.lineTo(cx - 7, cy + 7)
+    ctx.stroke()
+  }
   for (const [name, st] of Object.entries(cfg.stops)) {
     const cx = sx(st.x)
     const cy = sy(st.y)

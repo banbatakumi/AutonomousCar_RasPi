@@ -604,6 +604,10 @@ class CorridorGrid:
     def wall_mask(self) -> np.ndarray:
         return self.mask
 
+    def base_wall_mask(self) -> np.ndarray:
+        """回廊の外を含まない、本当の壁（車体の検査用、`raceline._BodyCheck`）。"""
+        return self._base.wall_mask()
+
     def raycast(self, ox, oy, angles, max_range, mask=None, fill: int = 1):
         return self._base.raycast(ox, oy, angles, max_range,
                                   mask=self.mask if mask is None else mask, fill=fill)

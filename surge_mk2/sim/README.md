@@ -284,6 +284,29 @@ sim/
   （toyota2 で約3分）。`slam_bench` は `--route <json>:<グループ>` で真値の運転手を
   好きな経路で走らせられる（中心線の無いコースでは出発点からの最短の周回が既定）
 
+### ラップタイムの評価（保存済み地図から走る）
+
+```bash
+# 地図作成から通しで走り、できた地図を saved_maps/sim_toyota として残す（約5分）
+.venv/bin/python -m sim.bench --course toyota --mode slam2d_route --time 330 --save-map sim_toyota
+# 残した地図から LOCATE → RACE だけを走る（地図作成を飛ばす。1本 約2分）
+.venv/bin/python -m sim.bench --course toyota --map sim_toyota --locate-hint 0,0 \
+    --mode slam2d_raceline --time 100 --set v_max=3.0 --trace /tmp/t.csv
+```
+
+- `--map NAME`: `saved_maps/NAME` の**写し**を一時ディレクトリに置いて読む（実機の地図は書き換えない）。
+  `--routes` を併せて渡すと、地図と一緒に経路の設定として読ませる
+- `--locate-hint X,Y`: LOCATE に渡すおおよその位置（地図座標）。★toyota2 は対称で候補を絞り込めず、
+  LOCATE が 12 秒ごとにやり直して**周回に入れない回がある**。bench が作った地図は原点が出発位置なので `0,0`
+- `--save-map NAME`: bench が作った地図を `saved_maps/NAME` に残す（`--map` で使い回す）
+- `--trace CSV`: RACE 中の 100Hz の記録（真値の位置・速度、指令速度、足元のプロファイル速度、横偏差、
+  車体と壁の距離）
+- 結果の読み方:
+  - **真値ラップ**: RACE の出発位置に置いたゲートを跨いだ時刻（プランナーの周回カウンタに頼らない）。
+    1周目は発進を含むので、比べるのは2周目以降
+  - **理想ラップ**: 速度プロファイルどおりに走った場合の1周。真値ラップとの差が「追従で失っている分」
+  - **車体と壁の最小距離**: 車体外形と真の壁の距離（周ごと）。衝突の手前の余裕で、0 = 接触
+
 ### 駐車の評価ベンチ（`sim.park_bench`）
 
 ```bash

@@ -51,6 +51,8 @@ class ParamSpec(msgspec.Struct):
     unit: str = ""
     #: なぜこの値なのか・上げ下げすると何が起きるか。GUI にそのまま出る
     note: str = ""
+    #: GUI で見出しを付けてまとめる組（例: 「地図作成」「本番走行」）。空なら組分けしない
+    group: str = ""
 
 
 class Planner:

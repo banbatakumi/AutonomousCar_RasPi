@@ -2,7 +2,10 @@
  * 経路パネル（`slam2d_route`、`catalog[].routes_ui`） — 走行中の経路グループ切替と、
  * 経由点・停止点・ミッションの編集。
  *
- * ## 切替ボタン（A〜D）は「今すぐ乗り換え」ではない
+ * ## 切替ボタン（自動・A〜D）は「今すぐ乗り換え」ではない
+ *
+ * 「自動」は planner が地図から選ぶ最速の周回（経由点は持たない）。A〜D に経由点を置いても
+ * 残るので、いつでも自動へ戻せる（2026-09-29）。
  *
  * 押すと planner は切替を**保留**し、車が新しい経路の上に乗れる地点で乗り換える
  * （`raspi/nav/route_switch.py`）。分岐の手前で押せばその分岐から、分岐を過ぎて
@@ -19,13 +22,16 @@
 import { useState } from 'react'
 import { useNumbers, live } from '../bus/live'
 import {
+  AVOID,
   GROUP_COLOR,
   GROUPS,
+  ROUTE_KEYS,
   STOPS,
   beginEdit,
   clearTarget,
   endEdit,
   routeEdit,
+  routeLabel,
   setTarget,
   undoLast,
 } from '../bus/routeEdit'
@@ -58,7 +64,7 @@ export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
     <section className="route-panel">
       <span className="label">経路</span>
       <div className="route-switch">
-        {GROUPS.map((g) => (
+        {ROUTE_KEYS.map((g) => (
           <button
             key={g}
             className={
@@ -66,15 +72,19 @@ export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
             }
             style={{ borderColor: GROUP_COLOR[g] }}
             disabled={!ready.includes(g) || !ch}
-            title={ready.includes(g) ? `経路${g}へ切り替える（乗れる地点で乗り換える）` : `経路${g}はまだ無い`}
+            title={
+              ready.includes(g)
+                ? `${routeLabel(g)}へ切り替える（乗れる地点で乗り換える）`
+                : `${routeLabel(g)}はまだ無い`
+            }
             onClick={() => ch?.selectRoute(g)}
           >
-            {g}
+            {g === 'auto' ? '自動' : g}
           </button>
         ))}
         <span className="dim">
-          {st?.route_active ? `走行 ${st.route_active}` : '—'}
-          {st?.route_pending ? ` → ${st.route_pending} 待ち` : ''}
+          {st?.route_active ? `走行 ${routeLabel(st.route_active)}` : '—'}
+          {st?.route_pending ? ` → ${routeLabel(st.route_pending)} 待ち` : ''}
           {st?.route_source ? `（${st.route_source}）` : ''}
         </span>
       </div>
@@ -102,6 +112,7 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
   const cfg = routeEdit.cfg!
   const t = routeEdit.target
   const isGroup = (GROUPS as readonly string[]).includes(t)
+  const isAvoid = t === AVOID
   const stop = cfg.stops[t]
   const stopNames = Object.keys(cfg.stops)
 
@@ -128,16 +139,29 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
             {isCount(cfg, k)}
           </button>
         ))}
+        <button
+          className={isAvoid ? 'on' : ''}
+          style={{ borderColor: '#e0574d' }}
+          title="通ってはいけない道に点を置く（自動経路・経由点の経路・停止経路のどれにも使わない）"
+          onClick={() => {
+            setTarget(AVOID)
+            rerender()
+          }}
+        >
+          ✕避ける{cfg.avoid.length ? `(${cfg.avoid.length})` : ''}
+        </button>
       </div>
       <div className="dim route-hint">
-        {isGroup
-          ? `地図をクリックして経路${t}の経由点を順に置く（点の近くをクリックで削除）。最後の点から最初の点へ戻って1周になる`
+        {isAvoid
+          ? '通ってはいけない道の上をクリック（点の近くをクリックで削除）。いちばん近い道を使わなくなる'
+          : isGroup
+          ? `地図をクリックして経路${t}の経由点を順に置く（点の近くをクリックで削除）。最後の点から最初の点へ戻って1周になる。経由点がどのグループにも無い間は、スタートから戻る周回を全部比べた最速の経路（自動）で走る`
           : routeEdit.awaitingYaw
             ? `${t} の向き: 車の前が向く方向をクリック`
             : `${t} の位置をクリック（続けて向きをクリック）`}
       </div>
       <div className="route-row">
-        {isGroup ? (
+        {isGroup || isAvoid ? (
           <button onClick={() => upd(undoLast)}>最後の点を取消</button>
         ) : (
           stop && (
@@ -152,13 +176,13 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
             </label>
           )
         )}
-        <button onClick={() => upd(clearTarget)}>{t} を消す</button>
+        <button onClick={() => upd(clearTarget)}>{isAvoid ? '避ける点を全部消す' : `${t} を消す`}</button>
         <label>
           開始
           <select value={cfg.active} onChange={(e) => upd(() => (cfg.active = e.target.value))}>
-            {GROUPS.map((g) => (
+            {ROUTE_KEYS.map((g) => (
               <option key={g} value={g}>
-                {g}
+                {g === 'auto' ? '自動' : g}
               </option>
             ))}
           </select>
@@ -213,9 +237,9 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
               }
             >
               <option value="">—</option>
-              {GROUPS.map((g) => (
+              {ROUTE_KEYS.map((g) => (
                 <option key={g} value={g}>
-                  {g}
+                  {g === 'auto' ? '自動' : g}
                 </option>
               ))}
             </select>

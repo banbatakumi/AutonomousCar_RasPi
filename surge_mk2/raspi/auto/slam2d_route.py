@@ -14,8 +14,13 @@
 | 走行中の切替 | なし | グループA〜D（GUI・信号認識、`nav/route_switch.py`） |
 | 終わり方 | 走り続ける | ミッション（n周／t秒 → 停止点で停止 or 駐車） |
 
-経由点を1つも置いていない地図では、地図作成の最後の1周から自動で経由点を
-置いたグループAを作る（**分岐の無いコースでは `slam2d_raceline` と同じ経路になる**）。
+経由点を1つも置いていない間は**自動経路**（キー `"auto"`）で走る。スタート（地図作成の
+出発点とその向き）から出て戻る**周回ルートを道路グラフ上で全部挙げ**（`route.enumerate_loops`）、
+それぞれレーシングラインを引いて**見積もりのラップタイムが最短のもの**を選ぶ（地図作成で
+走った1周には頼らない）。ルールで通れない道は経路の設定の `avoid`（避ける点）で除く。
+**自動経路の経由点は経路の設定（グループA〜D）には書き込まない**——経由点は人間が全部決める
+（バンビの指示、2026-09-29）。**自動経路は経由点のグループがあっても作り続け、A〜D と同じく
+走行中に選べる**（「自動」ボタン、`request_route("auto")`。以前はグループを置くと消えて戻せなかった）。
 
 ## 重い計算はワーカースレッドで
 
@@ -46,24 +51,30 @@ from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
 from ..nav import centerline as cl_mod
 from ..nav import obstacles as obs_mod
 from ..nav import raceline as rl_mod
-from ..nav.purepursuit import PursuitConfig, follow, nearest_index
+from ..nav.purepursuit import follow, nearest_index
 from ..nav.roadgraph import RoadGraph, build_graph
-from ..nav.route import (RouteError, RoutePath, Waypoint, build_raceline, plan_loop,
-                         plan_to, tightest_radius, waypoints_from_traj)
+from ..nav.route import (RouteError, RoutePath, Waypoint, build_raceline, enumerate_loops,
+                         lap_time, plan_loop, plan_to, tightest_radius, waypoints_from_traj)
 from ..nav.route_switch import Mission, RouteSwitcher, lap_crossed
 from . import mapstore
 from ._slam2d_nav import occgrid_from_trinary
 from .base import ParamSpec
 from .park_to_point import ParkToPoint
-from .route_config import GROUPS, RouteConfig, Stop
-from .slam2d_raceline import DONE, MAX_TRACK_WIDTH, PATH_STEP, Slam2dRaceLine
+from .route_config import AUTO_KEY, ROUTE_KEYS, RouteConfig, Stop
+from .slam2d_raceline import (DONE, GROUP_LINE, LINE_LAM, LINE_PASSES, LINE_TIME_ITERS,
+                              MAX_TRACK_WIDTH, PATH_STEP, SPEED_KEYS, Slam2dRaceLine,
+                              kappa_max, pursuit_config)
 
 __all__ = ["Slam2dRoute"]
 
+#: GUI の組（`ParamSpec.group`）
+GROUP_ROUTE = "本番走行: 経路の切替・停止"
 #: 停止点に着いて止まっている / 駐車（`ParkToPoint`）に引き継いだ
 STOPPED, PARK = "STOPPED", "PARK"
 #: 停止経路のキー（`RouteSwitcher.active_key`）
 _STOP_KEY = "stop"
+#: 経由点が1つも無いときの自動経路のキー（モジュール docstring）
+_AUTO_KEY = AUTO_KEY
 #: 駐車の停止点は道から離れている（駐車枠の中）ので、吸着の半径を広く取る
 _PARK_SNAP_M = 2.5
 
@@ -77,34 +88,49 @@ class _BuildOut:
     errors: dict[str, str] = field(default_factory=dict)
     #: 経路はできたが気をつけること（曲がり切れない恐れのある急な所など）
     warnings: dict[str, str] = field(default_factory=dict)
+    #: 自動経路をどう選んだか（候補の数とラップタイム、GUI の表示用）
+    auto_note: str = ""
 
 
-def _kappa_max(vehicle) -> float:
-    """車の曲がれる限界の曲率 [1/m]（最小旋回半径の逆数）。"""
-    return math.tan(vehicle.max_steer) / vehicle.wheelbase
+#: 経路の作り直しが要る設定（走行中に変わったら作り直す、`plan()`）
+_LINE_KEYS = SPEED_KEYS + ("line_margin",)
+
+#: 経路の切替で「新しい経路の上に居る」とみなす横ずれ [m]（`RouteSwitcher.step` の `tol`）。
+#: ★以前は GUI のスライダだったが、これは「どれだけ待つか」ではなく「別々に最適化した経路どうしの
+#: 重なりの誤差（数cm）を飲む幅」で、乗り換えは押した後の最初の乗れる周期に起きる。上げると
+#: 別の枝の上から乗り換えて経路へ斜めに突っ込む（安全弁）、下げると重なり区間でも乗れなくなるので
+#: 触る理由が無く定数にした
+SWITCH_TOL = 0.15
 
 
 def _line_kwargs(p: dict[str, float], vehicle) -> dict:
-    return dict(half_width=vehicle.half_width, margin=p["line_margin"], lam=p["line_lam"],
-                passes=int(p["line_passes"]), v_max=p["v_max"], v_min=p["v_min"],
+    return dict(half_width=vehicle.half_width, margin=p["line_margin"], lam=LINE_LAM,
+                passes=LINE_PASSES, v_max=p["v_max"], v_min=p["v_min"],
                 a_lat=p["a_lat"], a_accel=p["a_accel"], a_brake=p["a_brake"],
                 front_overhang=vehicle.front_overhang, rear_overhang=vehicle.rear_overhang,
-                step=PATH_STEP, max_width=MAX_TRACK_WIDTH, kappa_max=_kappa_max(vehicle))
+                step=PATH_STEP, max_width=MAX_TRACK_WIDTH, kappa_max=kappa_max(vehicle),
+                footprint=vehicle.footprint or None, time_iters=LINE_TIME_ITERS)
 
 
 def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                     seed, traj, groups: dict[str, list[Waypoint]], p: dict[str, float],
-                    vehicle, graph: RoadGraph | None) -> _BuildOut:
-    """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。"""
+                    vehicle, graph: RoadGraph | None, *, auto_start: Waypoint | None = None,
+                    avoid: list[tuple[float, float]] | None = None) -> _BuildOut:
+    """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。
+
+    `auto_start` があれば、グループとは別に自動経路（キー `auto`）を全周回の中の最速から選ぶ。
+    """
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     if graph is None:
         graph = build_graph(trinary, resolution=resolution, origin=origin,
                             keep=vehicle.half_width + p["graph_margin"], seed=seed, traj=traj)
     out = _BuildOut(graph=graph)
     kw = _line_kwargs(p, vehicle)
+    if auto_start is not None:
+        _fastest_loop(out, grid, graph, auto_start, avoid, p, kw, vehicle)
     for key, wps in groups.items():
         try:
-            rp = plan_loop(graph, wps, turn_max_deg=p["turn_max_deg"])
+            rp = plan_loop(graph, wps, turn_max_deg=p["turn_max_deg"], avoid=avoid)
             rl, cl = build_raceline(grid, graph, rp, **kw)
         except (RouteError, ValueError, np.linalg.LinAlgError) as e:
             out.errors[key] = str(e)
@@ -113,19 +139,86 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
             # 1つのグループの想定外の失敗で、他のグループまで作れなくしない
             out.errors[key] = f"内部エラー: {e!r}"
             continue
-        out.routes[key], out.centerlines[key], out.paths[key] = rl, cl, rp
-        r, i = tightest_radius(rl, PATH_STEP)
-        r_min = 1.0 / _kappa_max(vehicle)
-        if r < 1.1 * r_min:
-            x, y = rl.xy[i]
-            out.warnings[key] = (f"({x:.1f}, {y:.1f}) の半径{r * 100:.0f}cmは車の最小旋回半径"
-                                 f"{r_min * 100:.0f}cmに近い（最低速度で通る。外れるなら経由点を見直す）")
+        _put(out, key, rl, cl, rp, vehicle)
     return out
+
+
+def _put(out: _BuildOut, key: str, rl, cl, rp, vehicle) -> None:
+    out.routes[key], out.centerlines[key], out.paths[key] = rl, cl, rp
+    r, i = tightest_radius(rl, PATH_STEP)
+    r_min = 1.0 / kappa_max(vehicle)
+    if r < 1.1 * r_min:
+        x, y = rl.xy[i]
+        out.warnings[key] = (f"({x:.1f}, {y:.1f}) の半径{r * 100:.0f}cmは車の最小旋回半径"
+                             f"{r_min * 100:.0f}cmに近い（最低速度で通る。外れるなら経由点を見直す）")
+
+
+#: 自動経路で、見積もりの速い順に本来の設定で引き直して曲がれるか確かめる本数
+_FULL_CHECKS = 4
+#: 自動経路で比べる周回ルートの上限（Pi で1本 数百ms。これ以上はワーカーでも待たせすぎる）
+_MAX_AUTO_LOOPS = 32
+
+
+def _fastest_loop(out: _BuildOut, grid, graph: RoadGraph, start: Waypoint, avoid,
+                  p: dict[str, float], kw: dict, vehicle) -> None:
+    """スタートから出て戻る周回ルートを全部挙げ、見積もりのラップタイムが最短のものを
+    自動経路にする（モジュール docstring）。"""
+    try:
+        loops = enumerate_loops(graph, start, turn_max_deg=p["turn_max_deg"], avoid=avoid,
+                                max_loops=_MAX_AUTO_LOOPS)
+    except RouteError as e:
+        out.errors[_AUTO_KEY] = str(e)
+        return
+    if not loops:
+        out.errors[_AUTO_KEY] = "スタートから戻ってくる周回ルートが無い（避ける点・曲がり角の上限を見直す）"
+        return
+    # 候補どうしは安い設定（最小曲率・車体外形の検査なし）で並べ、速い順に本来の設定で
+    # 引き直して確かめる。**全候補を本来の設定で引くと Pi で数十秒かかる**（候補は最大
+    # 32本、最小時間への寄せと外形の検査で1本あたり10倍前後重い）ので `_FULL_CHECKS` 本まで
+    quick = {**kw, "time_iters": 0, "footprint": None}
+    ranked = []
+    for rp in loops:
+        try:
+            rl, cl = build_raceline(grid, graph, rp, **quick)
+        except Exception:                   # noqa: BLE001  1本の失敗で全部を止めない
+            continue
+        ranked.append((lap_time(rl), rl, cl, rp))
+    if not ranked:
+        out.errors[_AUTO_KEY] = "周回ルートはあるがレーシングラインを引けなかった"
+        return
+    ranked.sort(key=lambda t: t[0])
+
+    # ★ 車の最小旋回半径より急な所がある周回は、曲がれる周回がある限り選ばない。
+    # 見積もりのラップは最低速度で通る前提なので速く見えるが、実際には曲がり切れずに
+    # 経路から外れて止まる（地図作成の誤差で近道の S 字が歪んだ toyota2 の地図で、
+    # 半径34cm＜40cm の近道を「最速」に選んで外れた。sim.bench 2026-09-29）。
+    # **判定は本来の設定で引いた線で行う**——安い設定（最小曲率のみ）の線は角が急で、
+    # 曲がれる周回（本来の線で半径61cm）まで 34cm と出て全部が「曲がれない」になった
+    r_car = 1.0 / kappa_max(vehicle)
+    full = []
+    for _, rl0, cl0, rp in ranked[:_FULL_CHECKS]:
+        try:
+            rl, cl = build_raceline(grid, graph, rp, **kw)
+        except Exception:                   # noqa: BLE001  安い設定の線で比べる
+            rl, cl = rl0, cl0
+        r_tight, _ = tightest_radius(rl, PATH_STEP)
+        full.append((r_tight < r_car, lap_time(rl), rl, cl, rp))
+    full.sort(key=lambda t: (t[0], t[1]))
+    tight, t_best, rl, cl, rp = full[0]
+    _put(out, _AUTO_KEY, rl, cl, rp, vehicle)
+    others = sorted(t for bad, t, *_ in full[1:] if bad == tight)
+    n_bad = sum(1 for bad, *_ in full if bad)
+    out.auto_note = (f"自動経路: 周回ルート{len(ranked)}通りを比べて最速（見積もり{t_best:.1f}s"
+                     + (f"、次点{others[0]:.1f}s" if others else "")
+                     + ("。★確かめた周回すべてに車の最小旋回半径より急な所がある" if tight
+                        else f"。曲がり切れない周回{n_bad}通りは除いた" if n_bad else "")
+                     + "）")
 
 
 def _compute_stop(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                   graph: RoadGraph, pose: tuple[float, float, float], stop: Stop,
-                  v_now: float, p: dict[str, float], vehicle) -> rl_mod.RaceLine:
+                  v_now: float, p: dict[str, float], vehicle,
+                  avoid: list[tuple[float, float]] | None = None) -> rl_mod.RaceLine:
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     park = stop.mode == "park"
     goal = Waypoint(stop.x, stop.y, None if park else stop.yaw)
@@ -137,7 +230,7 @@ def _compute_stop(trinary: np.ndarray, resolution: float, origin: tuple[float, f
     rp = plan_to(graph, pose, goal, turn_max_deg=p["turn_max_deg"],
                  snap_radius=_PARK_SNAP_M if park else 0.6,
                  min_len=need, end_at_goal=not park,
-                 extend=p["park_lead"] if park else 0.0)
+                 extend=p["park_lead"] if park else 0.0, avoid=avoid)
     kw = _line_kwargs(p, vehicle)
     kw["v_min"] = p["creep_speed"]
     rl, _ = build_raceline(grid, graph, rp, v_start=v_now, v_end=p["creep_speed"], **kw)
@@ -152,28 +245,27 @@ class Slam2dRoute(Slam2dRaceLine):
     #: GUI が地図パネル・地図ライブラリ・経由点エディタを出す planner（`registry.catalog`）
     map_ui = True
     routes_ui = True
+    #: 経路は道路グラフから自前で作り直す（`_submit`）
+    _reline_on_load = False
 
     params = Slam2dRaceLine.params + (
-        ParamSpec(key="graph_margin", label="道路グラフの余裕", min=0.0, max=0.2,
+        ParamSpec(group=GROUP_LINE, key="graph_margin", label="道路グラフの余裕", min=0.0, max=0.2,
                   default=0.02, step=0.01, unit="m",
                   note="車体半幅にこれを足した幅が取れない道はグラフから消える（通れない扱い）"),
-        ParamSpec(key="turn_max_deg", label="分岐で曲がれる角度", min=45.0, max=150.0,
+        ParamSpec(group=GROUP_LINE, key="turn_max_deg", label="分岐で曲がれる角度", min=45.0, max=150.0,
                   default=100.0, step=5.0, unit="°",
                   note="★節点でこれより急に向きを変える経路は選ばない（Y字の枝から枝への"
                        "折り返しを禁じる）。節点から1m先までの向きで測る"),
-        ParamSpec(key="switch_tol", label="乗り換えを許す横ずれ", min=0.05, max=0.5,
-                  default=0.15, step=0.01, unit="m",
-                  note="経路の切替は、新しい経路からこれ以内に居る周期まで待つ"),
-        ParamSpec(key="creep_speed", label="停止前の這う速度", min=0.1, max=0.6,
+        ParamSpec(group=GROUP_ROUTE, key="creep_speed", label="停止前の這う速度", min=0.1, max=0.6,
                   default=0.25, step=0.05, unit="m/s", note="停止点の手前ではこれで近づく"),
-        ParamSpec(key="creep_dist", label="這い始める距離", min=0.2, max=2.0,
+        ParamSpec(group=GROUP_ROUTE, key="creep_dist", label="這い始める距離", min=0.2, max=2.0,
                   default=0.6, step=0.05, unit="m", note="停止点のこれだけ手前から這う"),
-        ParamSpec(key="park_lead", label="駐車の手前で止まる位置", min=0.0, max=2.0,
+        ParamSpec(group=GROUP_ROUTE, key="park_lead", label="駐車の手前で止まる位置", min=0.0, max=2.0,
                   default=1.0, step=0.1, unit="m",
                   note="駐車の停止点では、道の上で枠に最も近い点からこれだけ先で止まって"
                        "park_to_pointへ渡す（バック駐車は枠を通り過ぎてから後退で入れる）。"
                        "0だと枠の真横で止まり、横へずらす切り返しを繰り返した（sim.benchで実測）"),
-        ParamSpec(key="stop_tol", label="停止の余裕", min=0.0, max=0.3,
+        ParamSpec(group=GROUP_ROUTE, key="stop_tol", label="停止の余裕", min=0.0, max=0.3,
                   default=0.02, step=0.01, unit="m",
                   note="残り距離が「止まれる距離＋これ」を切ったら制動する"),
     )
@@ -209,14 +301,28 @@ class Slam2dRoute(Slam2dRaceLine):
         self._park: ParkToPoint | None = None
         self._note = ""                      #: 設定エラー等（GUI の reason に添える）
         self._p: dict[str, float] | None = None
+        #: 今の経路を作った設定（`_LINE_KEYS`）。`None` = まだ作っていない
+        self._built_key: tuple | None = None
         self._want_group = ""
+        #: 自動経路の元（**経路の設定には書かない**）。ふつうはスタート（地図作成の出発点と
+        #: 向き）から全周回を比べる。地図作成の軌跡が無い古い地図だけ、保存した
+        #: レーシングラインに沿って置いた経由点で代わりにする
+        self._auto_start: Waypoint | None = None
+        self._auto_wps: list[Waypoint] = []
+        self._auto_note = ""
 
     def close(self) -> None:
+        super().close()
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
         self._p = p
+        # ★ 速度・経路の設定が変わったら作り直す（以前は地図を読んだときの設定のまま
+        # だった）。できた版へは `_install` が乗れる場所で移る
+        if (self._graph is not None and self._built_key is not None
+                and self._line_key(p) != self._built_key):
+            self._submit(graph=self._graph)
         # 出来上がった経路は**どの段でも**取り込む（DONE で経由点を編集して保存した
         # ときも、走り出す前に GUI へ新しい経路を出すため）
         self._poll()
@@ -246,10 +352,11 @@ class Slam2dRoute(Slam2dRaceLine):
         except ValueError as e:
             self._cfg = RouteConfig()
             self._note = f"経路の設定を読めない（{e}）。既定の経路で走る"
-        if not self._cfg.groups and self.path is not None and len(self.path) >= 20:
-            # 経由点の無い地図（旧形式）: 保存済みレーシングラインを1周として経由点を置く
-            self._cfg.groups = {"A": waypoints_from_traj(self.path.xy)}
-            self._cfg.active = "A"
+        # 自動経路の元（経路の設定には書かない、モジュール docstring）
+        self._auto_start = _start_of(self._cfg.explore_traj)
+        self._auto_wps = (waypoints_from_traj(self.path.xy)
+                          if self._auto_start is None and self.path is not None
+                          and len(self.path) >= 20 else [])
         self._submit(graph=None)
 
     def request_routes(self, text: str) -> None:
@@ -289,7 +396,7 @@ class Slam2dRoute(Slam2dRaceLine):
 
         値そのものがグループ名（A〜D）なら、対応表が無くてもそのグループへ切り替える。
         """
-        group = self._cfg.signal_map.get(value) or (value if value in GROUPS else "")
+        group = self._cfg.signal_map.get(value) or (value if value in ROUTE_KEYS else "")
         if not group:
             self._switch_note = f"信号『{value}』に対応するグループが無い"
             return
@@ -302,6 +409,7 @@ class Slam2dRoute(Slam2dRaceLine):
             self._job_again = True          # 走っている計算が終わってからやり直す
             return
         p = self._p or {s.key: s.default for s in self.params}
+        self._built_key = self._line_key(p)
         g = self.slam.grid
         seed = None
         traj = self._cfg.explore_traj
@@ -309,8 +417,35 @@ class Slam2dRoute(Slam2dRaceLine):
             seed = (float(traj[0, 0]), float(traj[0, 1]))
         self._job = self._pool.submit(
             _compute_routes, g.trinary().copy(), g.resolution, tuple(g.origin), seed,
-            None if traj is None else traj.copy(), dict(self._cfg.groups), dict(p),
-            self.vehicle, graph)
+            None if traj is None else traj.copy(), self._groups_to_build(), dict(p),
+            self.vehicle, graph,
+            auto_start=self._auto_start,
+            avoid=list(self._cfg.avoid))
+
+    @staticmethod
+    def _line_key(p: dict[str, float]) -> tuple:
+        return tuple(float(p[k]) for k in _LINE_KEYS)
+
+    def _groups_to_build(self) -> dict[str, list[Waypoint]]:
+        """作る経路。経由点のグループ＋自動経路（スタートから全周回を比べる場合は
+        `_compute_routes` の `auto_start` 側で作るのでここには入れない）。"""
+        out = dict(self._cfg.groups)
+        if self._auto_start is None and self._auto_wps:
+            out[_AUTO_KEY] = list(self._auto_wps)
+        return out
+
+    def _route_paths_edges(self, key: str) -> set[int]:
+        """経路 `key` が通る道路グラフのエッジ（診断・テスト用）。"""
+        rp = getattr(self, "_route_paths", {}).get(key)
+        return set(rp.edge_ids) if rp is not None else set()
+
+    def _start_key(self) -> str:
+        """走り出す経路。設定の開始（A〜D か自動）→ 無ければ自動経路 → 最初にできた経路。"""
+        if self._cfg.active in self._routes:
+            return self._cfg.active
+        if _AUTO_KEY in self._routes:
+            return _AUTO_KEY
+        return next(iter(self._routes), "")
 
     def _poll(self) -> bool:
         """計算が終わっていれば取り込む。**まだ走っていれば False。**"""
@@ -343,13 +478,21 @@ class Slam2dRoute(Slam2dRaceLine):
     def _install(self, out: _BuildOut) -> None:
         self._graph = out.graph
         self._routes, self._route_cls, self._route_err = out.routes, out.centerlines, out.errors
+        self._route_paths = out.paths
         self._route_warn = out.warnings
+        self._auto_note = out.auto_note
         self._route_ver += 1
         self._map_dirty = True
         key = self._switch.active_key
         if key in self._routes and self._switch.active is not None:
             # 経由点の編集で今の経路が作り直された。乗れる場所で新しい版へ移る
             self._switch.request(key, self._routes[key], "編集")
+        elif (self._switch.active is not None and key != _STOP_KEY
+              and self._start_key()):
+            # 今の経路が無くなった（自動経路で走っている間に経由点を置いた等）。
+            # 開始グループへ乗れる場所で移る
+            k = self._start_key()
+            self._switch.request(k, self._routes[k], "編集")
         if self._want_group in self._routes and self._want_group != key:
             self._switch.request(self._want_group, self._routes[self._want_group],
                                  self._switch.source)
@@ -367,9 +510,9 @@ class Slam2dRoute(Slam2dRaceLine):
                 st.reason = self._build_error
                 return st
             self._cfg.explore_traj = RouteConfig.decimate(self.slam.trajectory_array())
-            if not self._cfg.groups:
-                self._cfg.groups = {"A": waypoints_from_traj(lap)}
-                self._cfg.active = "A"
+            # 自動経路の元（経由点が無い間だけ使う。経路の設定には書かない）
+            self._auto_start = _start_of(self._cfg.explore_traj)
+            self._auto_wps = [] if self._auto_start is not None else waypoints_from_traj(lap)
             self._submit(graph=None)
         if not self._poll():
             st.reason = "経路を作っている（道路グラフ → 経路 → レーシングライン）"
@@ -377,7 +520,7 @@ class Slam2dRoute(Slam2dRaceLine):
         if self._build_error:
             st.reason = self._build_error
             return st
-        key = self._cfg.active if self._cfg.active in self._routes else next(iter(self._routes), "")
+        key = self._start_key()
         if not key:
             errs = "・".join(f"{k}: {v}" for k, v in self._route_err.items())
             self._build_error = f"経路を作れなかった（{errs or '経由点が無い'}）"
@@ -394,7 +537,9 @@ class Slam2dRoute(Slam2dRaceLine):
             mapstore.save_routes(self._saved_map_name, self._cfg.to_json())
         g = self._graph
         st.reason = (f"経路ができた（道路グラフ: 分岐 {sum(1 for n in g.nodes if len(n.edges) >= 3)}・"
-                     f"区間 {len(g.edges)}、グループ {'/'.join(self._routes)}）。"
+                     f"区間 {len(g.edges)}、"
+                     + ((self._auto_note or "経由点が無いので自動経路を作った") if key == _AUTO_KEY
+                        else f"グループ {'/'.join(self._routes)}") + "）。"
                      + (f"地図を『{self._saved_map_name}』として保存した。"
                         "経由点を編集するか、走行で開始してください"
                         if self._saved_map_name else self._save_error))
@@ -419,7 +564,7 @@ class Slam2dRoute(Slam2dRaceLine):
                 st.reason = ("経路を準備中" if self._job is not None else
                              f"経路が無い（{self._build_error or self._note or '経由点を置いてください'}）")
                 return st
-            key = self._cfg.active if self._cfg.active in self._routes else next(iter(self._routes))
+            key = self._start_key()
             self._switch.set_active(key, self._routes[key])
             self._hint = -1
             self._prev_idx = -1
@@ -434,7 +579,7 @@ class Slam2dRoute(Slam2dRaceLine):
             return st
 
         pose = self.slam.pose
-        sw = self._switch.step(tuple(pose), vs.speed, tol=p["switch_tol"], a_brake=p["a_brake"])
+        sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=p["a_brake"])
         if sw.switched:
             self._hint = sw.hint
             self._prev_idx = -1
@@ -446,9 +591,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self.path = path
         self._race_t += self._dt
 
-        cfg = PursuitConfig(
-            wheelbase=self.vehicle.wheelbase, max_steer=self.vehicle.max_steer,
-            lookahead_k=p["look_k"], lookahead_min=p["look_min"], delay_s=p["delay_s"])
+        cfg = pursuit_config(p, self.vehicle)
         pp = follow(path, pose, vs.speed, vs.steer_actual, cfg, hint=self._hint)
         self._hint = pp.index
         st.target_steer = pp.steer
@@ -522,7 +665,7 @@ class Slam2dRoute(Slam2dRaceLine):
         g = self.slam.grid
         self._stop_job = self._pool.submit(
             _compute_stop, g.trinary().copy(), g.resolution, tuple(g.origin), self._graph,
-            start, stop, float(vs.speed), dict(p), self.vehicle)
+            start, stop, float(vs.speed), dict(p), self.vehicle, list(self._cfg.avoid))
 
     def _approach_stop(self, st: AutoState, path: rl_mod.RaceLine, pose, vs: VehicleState,
                        p: dict[str, float]) -> AutoState:
@@ -582,6 +725,8 @@ class Slam2dRoute(Slam2dRaceLine):
         st.route_source = self._switch.source
         st.route_groups = sorted(self._routes)
         notes = [x for x in (self._switch_note, self._note, self._stop_error) if x]
+        if _AUTO_KEY in self._routes and self._auto_note:
+            notes.append(self._auto_note)
         notes += [f"{k}: {v}" for k, v in self._route_err.items()]
         notes += [f"{k}: {v}" for k, v in self._route_warn.items()]
         st.route_note = "・".join(notes)
@@ -610,6 +755,23 @@ class Slam2dRoute(Slam2dRaceLine):
         if self._switch.active_key == _STOP_KEY and self._switch.active is not None:
             m.routes[_STOP_KEY] = np.round(self._switch.active.xy, 3).reshape(-1).tolist()
         return m
+
+
+def _start_of(traj) -> Waypoint | None:
+    """地図作成の軌跡の出発点と向き（自動経路のスタート＝スタート/フィニッシュ）。
+
+    向きは出発点から 0.5m 進んだ点への方向（出発直後の数cmは静止中のゆらぎで向きが暴れる）。
+    """
+    if traj is None or len(traj) < 2:
+        return None
+    xy = np.asarray(traj, dtype=np.float64)[:, :2]
+    d = np.hypot(xy[:, 0] - xy[0, 0], xy[:, 1] - xy[0, 1])
+    far = np.nonzero(d >= 0.5)[0]
+    if not len(far):
+        return None
+    j = int(far[0])
+    return Waypoint(float(xy[0, 0]), float(xy[0, 1]),
+                    math.atan2(xy[j, 1] - xy[0, 1], xy[j, 0] - xy[0, 0]))
 
 
 def _remaining(path: rl_mod.RaceLine, pose) -> float:
