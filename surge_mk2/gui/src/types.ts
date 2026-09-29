@@ -68,6 +68,8 @@ export type AutoParamSpec = {
   default: number
   unit: string
   note: string
+  /** 見出しを付けてまとめる組（`ParamSpec.group`）。空・無しなら組分けしない */
+  group?: string
 }
 
 /** 選べる自動運転モード1つ（`raspi/auto/registry.py` の `catalog()`）。 */

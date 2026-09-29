@@ -2192,7 +2192,20 @@ button.on {
   border-radius: 4px;
 }
 
-/* **地図を削除**。数値パネルごと無くなったので、隅のアイコンボタンに畳む */
+/* **地図を削除**。数値パネルごと無くなったので、隅のアイコンボタンに畳む。
+ * その左隣が「軌跡のみ削除」（`.auto-map-trail`） */
+.auto-map-trail {
+  position: absolute;
+  right: 36px;
+  top: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
 .auto-map-clear {
   position: absolute;
   right: 6px;
@@ -2252,35 +2265,25 @@ button.on {
   padding: 3px 6px;
 }
 
-.map-library ul {
-  list-style: none;
-  margin: 6px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 140px;
-  overflow-y: auto;
+.map-library-pick {
+  margin-top: 6px;
 }
 
-.map-library li {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font-size: 11px;
-  padding: 2px 0;
-}
-
-.map-library li span:first-child {
+.map-library-pick select {
   flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 120px;
+  font-size: 12px;
+  padding: 3px 6px;
 }
 
-.map-library li a {
+.map-library-pick a {
   color: var(--accent);
+  font-size: 12px;
+}
+
+.map-library-empty {
+  margin: 6px 0 0;
+  font-size: 11px;
 }
 
 /* 起動時のみ出るエンブレム。裏の操作を邪魔しないので pointer-events は殺す */
@@ -2380,4 +2383,46 @@ button.on {
 .route-note {
   font-size: 11px;
   color: var(--warn, #f0c05e);
+}
+
+/* パラメータの組（`ParamSpec.group`、`ParamSliders.tsx`）。地図作成と本番走行を見分ける */
+.auto-param-group + .auto-param-group {
+  margin-top: 10px;
+}
+
+.auto-param-group-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  padding-bottom: 2px;
+  border-bottom: 1px dashed var(--line);
+}
+
+/* パラメータのプリセット・初期値に戻す（`ParamPresets.tsx`） */
+.param-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0 4px;
+}
+
+.param-presets select {
+  flex: 1;
+  min-width: 120px;
+  max-width: 220px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.param-presets input[type='text'] {
+  flex: 1;
+  min-width: 100px;
+  max-width: 180px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.param-presets-reset {
+  margin-left: auto;
 }

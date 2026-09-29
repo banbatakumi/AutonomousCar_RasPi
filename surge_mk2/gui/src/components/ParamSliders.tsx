@@ -8,6 +8,22 @@
  */
 import type { AutoParamSpec } from '../types'
 
+/**
+ * `group`（`ParamSpec.group`）ごとに見出しを付けて並べる。組の順は最初に出てきた順
+ * （宣言の途中で同じ組が再び出てきても、その組の中へまとめる）。組の無い宣言は従来どおり
+ * 1つの並びで出す——地図作成（Follow the Gap）と本番走行のパラメータを見分けやすくするため
+ * （バンビの指示、2026-09-29）
+ */
+function byGroup(params: AutoParamSpec[]): [string, AutoParamSpec[]][] {
+  const out = new Map<string, AutoParamSpec[]>()
+  for (const p of params) {
+    const g = p.group ?? ''
+    if (!out.has(g)) out.set(g, [])
+    out.get(g)!.push(p)
+  }
+  return [...out.entries()]
+}
+
 export function ParamSliders({
   params,
   values,
@@ -20,6 +36,33 @@ export function ParamSliders({
   /** trueの間はスライダを操作不可にする。値は`merged_params()`で毎周期
    * 読み直されるので、途中で動かすと進行中の試験の意味が変わってしまう
    * （`SysIdView.tsx`が試験実行中に渡す）。省略時は従来通り常に操作可 */
+  disabled?: boolean
+}) {
+  const groups = byGroup(params)
+  if (groups.length > 1 || (groups.length === 1 && groups[0]?.[0])) {
+    return (
+      <div className="auto-param-groups">
+        {groups.map(([g, ps]) => (
+          <div key={g} className="auto-param-group">
+            {g && <div className="auto-param-group-head">{g}</div>}
+            <ParamGrid params={ps} values={values} onChange={onChange} disabled={disabled} />
+          </div>
+        ))}
+      </div>
+    )
+  }
+  return <ParamGrid params={params} values={values} onChange={onChange} disabled={disabled} />
+}
+
+function ParamGrid({
+  params,
+  values,
+  onChange,
+  disabled,
+}: {
+  params: AutoParamSpec[]
+  values: Record<string, number>
+  onChange: (key: string, value: number) => void
   disabled?: boolean
 }) {
   return (

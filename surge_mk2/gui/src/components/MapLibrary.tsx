@@ -19,6 +19,13 @@
  * 「保存」ボタンは、分かりやすい名前を付け直したい・走行中に別名で
  * スナップショットを取りたい、という場合のための手動操作（`DONE`/`RACE`
  * 段のどちらでも押せる）。
+ *
+ * ## 一覧はドロップダウン（2026-09-29）
+ *
+ * 地図が増えると縦の並びが場所を取るので、1つ選んで「DL」「削除」する形にした
+ * （バンビの指示）。**削除は走行する側（telemetry_node が動いている機械）の
+ * `saved_maps/` から `.npz`・`.json`・`.routes.json` を消す**（`mapstore.delete_map`）。
+ * 実機なら Pi、`sim.run` なら Mac。ダウンロード済みの写しは消えない。ごみ箱は無い。
  */
 import { useEffect, useRef, useState } from 'react'
 import { useNumbers } from '../bus/live'
@@ -34,6 +41,9 @@ export function MapLibrary({ ch }: { ch: ControlChannel | null }) {
   const phase = n.auto?.phase
 
   const [name, setName] = useState('')
+  const [picked, setPicked] = useState('')
+  // 選んでいた地図が一覧から消えたら（削除した等）選び直す
+  const current = mapFiles.find((f) => f.name === picked) ?? mapFiles[0]
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -106,29 +116,41 @@ export function MapLibrary({ ch }: { ch: ControlChannel | null }) {
           {saveResult.ok ? '保存しました' : saveResult.error || '失敗しました'}
         </p>
       )}
-      <ul>
-        {mapFiles.length === 0 && <li className="dim">保存済みの地図はありません</li>}
-        {mapFiles.map((f) => (
-          <li key={f.name}>
-            <span>{f.name}</span>
-            <span className="dim">{new Date(f.created_at * 1000).toLocaleDateString()}</span>
-            <a href={`/maps/${encodeURIComponent(f.name)}`} download={`${f.name}.npz`}>
-              DL
-            </a>
-            <button
-              onClick={() => {
-                const msg =
-                  phase === 'RACE'
-                    ? `走行中です。本当に「${f.name}」を削除しますか？`
-                    : `「${f.name}」を削除しますか？`
-                if (window.confirm(msg)) ch?.mapsDelete(f.name)
-              }}
-            >
-              削除
-            </button>
-          </li>
-        ))}
-      </ul>
+      {mapFiles.length === 0 ? (
+        <p className="dim map-library-empty">保存済みの地図はありません</p>
+      ) : (
+        <div className="map-library-row map-library-pick">
+          <select value={current?.name ?? ''} onChange={(e) => setPicked(e.target.value)}>
+            {mapFiles.map((f) => (
+              <option key={f.name} value={f.name}>
+                {f.name}（{new Date(f.created_at * 1000).toLocaleDateString()}）
+              </option>
+            ))}
+          </select>
+          {current && (
+            <>
+              <a
+                href={`/maps/${encodeURIComponent(current.name)}`}
+                download={`${current.name}.npz`}
+              >
+                DL
+              </a>
+              <button
+                title="走行する側の saved_maps/ から消す（元に戻せない）"
+                onClick={() => {
+                  const msg =
+                    phase === 'RACE'
+                      ? `走行中です。本当に「${current.name}」を削除しますか？`
+                      : `「${current.name}」を削除しますか？（元に戻せません）`
+                  if (window.confirm(msg)) ch?.mapsDelete(current.name)
+                }}
+              >
+                削除
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </section>
   )
 }

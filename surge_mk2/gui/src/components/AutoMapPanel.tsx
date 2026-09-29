@@ -29,6 +29,9 @@
  * 数値パネルが無くなったので、旧`MapPanel`の`.map-actions`のような専用の
  * ボタン列を置く場所が無い。地図に対する操作なので地図パネル自身の上に
  * 置くのが自然、という判断（ユーザー指示により配置は設計者判断）。
+ *
+ * その左隣に「軌跡のみ削除」（地図・経路・自己位置はそのまま、GUI が描いている
+ * 走行軌跡だけを消す。planner には何も送らない、バンビの指示 2026-09-29）。
  */
 import { live } from '../bus/live'
 import { useNumbers } from '../bus/live'
@@ -77,6 +80,9 @@ export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
       <div className="auto-map-badge">
         <span className={!previewing && phase === 'RACE' ? 'lv-ok' : 'dim'}>{label}</span>
       </div>
+      <button className="auto-map-trail" title="軌跡のみ削除（地図は消さない）" onClick={clearTrail}>
+        〰
+      </button>
       <button
         className="auto-map-clear"
         title="地図を削除"
