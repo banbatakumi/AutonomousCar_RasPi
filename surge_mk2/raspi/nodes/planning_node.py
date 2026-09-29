@@ -66,6 +66,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_STATE,
     TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
+    TOPIC_ROUTE_SELECT,
     TOPIC_VEHICLE_STATE,
 )
 
@@ -122,7 +123,9 @@ class PlanningNode:
         #: 最後に出した判断。新しい判断はその場で、それ以外は 50Hz で `auto/cmd` に繰り返す
         self.state = AutoState()
         self._last_scan_seq = -1
-        self._last_map_seq = -1
+        self._last_map_seq: object = -1
+        #: `route/select` で最後に反映した `(value, event_id)`
+        self._last_route_select: tuple[str, int] = ("", 0)
         self._last_plan_ns = 0
         self._plan_dt = 0.0
         self._plans = 0
@@ -154,6 +157,8 @@ class PlanningNode:
         load = c.race_seq > self.ctrl.race_seq
         hint = c.loc_hint_seq > self.ctrl.loc_hint_seq
         park = c.park_seq > self.ctrl.park_seq
+        routes = c.routes_seq > self.ctrl.routes_seq
+        route = c.route_seq > self.ctrl.route_seq
         self.ctrl = c
         if clear and self.planner is not None:
             self.planner.request_clear()
@@ -173,6 +178,16 @@ class PlanningNode:
             self.planner.request_locate_hint(c.loc_hint_x, c.loc_hint_y)
         if park and self.planner is not None:
             self.planner.request_park_target(c.park_x, c.park_y, c.park_yaw)
+        # 経由点エディタの保存・走行中の経路グループ切替（`slam2d_route`だけが持つ口。
+        # `on_vehicle_state`と同じダックタイピングで「持っていれば渡す」）
+        if routes:
+            fn = getattr(self.planner, "request_routes", None)
+            if fn is not None:
+                fn(c.routes_json)
+        if route:
+            fn = getattr(self.planner, "request_route", None)
+            if fn is not None:
+                fn(c.route_group, "gui")
         if changed:
             self.planner = make_planner(c.mode)
             self.state = AutoState(mode=c.mode)
@@ -189,6 +204,20 @@ class PlanningNode:
         if (changed or released) and self.planner is not None:
             self.planner.reset()
         self._params = merged_params(c.mode, c.params)
+
+    def _apply_route_select(self, m) -> None:
+        """信号認識（`route/select`）の切替要求。**`(value, event_id)` が変わったときだけ**
+        （`RouteSelect` の docstring 参照。同じ値を繰り返し流されても1回だけ効かせる）。
+        """
+        key = (m.value, m.event_id)
+        if not m.value or key == self._last_route_select:
+            return
+        self._last_route_select = key
+        fn = getattr(self.planner, "request_signal", None)
+        if fn is not None:
+            fn(m.value, m.source or "signal")
+            if not self.quiet:
+                print(f"# 経路の切替要求（{m.source or 'signal'}）: {m.value}", flush=True)
 
     def _apply_e2e_model(self, m) -> None:
         """`e2e/model`（GUIが選んだモデル名）を、対応できる planner にだけ伝える。
@@ -310,9 +339,14 @@ class PlanningNode:
         if self.planner is None:
             return
         m = self.planner.snapshot()
-        if m is None or m.map_seq == self._last_map_seq:
+        if m is None:
             return
-        self._last_map_seq = m.map_seq
+        # 経路の版（`AutoMap.route_seq`）も見る。地図が凍結したあとも経路は
+        # 変わる（経由点の編集・走行中の切替）
+        key = (m.map_seq, m.route_seq)
+        if key == self._last_map_seq:
+            return
+        self._last_map_seq = key
         self.pub.send(TOPIC_AUTO_MAP, m)
 
     # ── ループ ──
@@ -334,6 +368,8 @@ class PlanningNode:
                     self._apply_ctrl(msg)
                 elif topic == TOPIC_E2E_MODEL:
                     self._apply_e2e_model(msg)
+                elif topic == TOPIC_ROUTE_SELECT:
+                    self._apply_route_select(msg)
                 elif topic == TOPIC_VEHICLE_STATE:
                     # SLAM 系の planner は、点ごとの脱スキューのために
                     # **`plan()`の周期(10Hz)ではなく届いた順の全サンプル**が要る。
@@ -398,7 +434,7 @@ def main() -> int:
         return 2
 
     pub = Publisher("planning")
-    topics = {TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_MODEL: LATEST}
+    topics = {TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_MODEL: LATEST, TOPIC_ROUTE_SELECT: LATEST}
     topics.update({t: LATEST for t in input_topics()})
     # `vehicle_state` だけは**全サンプル**を受ける（`VEHICLE_STATE_POLICY`）
     topics[TOPIC_VEHICLE_STATE] = VEHICLE_STATE_POLICY

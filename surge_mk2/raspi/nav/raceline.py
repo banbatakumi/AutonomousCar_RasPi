@@ -41,7 +41,8 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .centerline import Centerline, lateral_offset, measure, normals, resample_loop
+from .centerline import (Centerline, lateral_offset, measure, normals, normals_open,
+                         resample_loop, resample_open)
 from .grid import OccGrid
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha"]
@@ -53,7 +54,9 @@ class RaceLine(NamedTuple):
     kappa: np.ndarray                      #: (N,) 曲率 [1/m]。左旋回が正
     alpha: np.ndarray                      #: (N,) 中心線からの横ずれ [m]。左が正
     s: np.ndarray                          #: (N,) 始点からの弧長 [m]
-    length: float                          #: 1周の長さ [m]
+    length: float                          #: 1周の長さ [m]（開いた経路なら始点→終点の長さ）
+    #: False なら開いた経路（今の位置→ゴール、`nav/route.py`）。**添字は巡回しない**
+    closed: bool = True
 
     def __len__(self) -> int:
         return int(self.xy.shape[0])
@@ -69,10 +72,20 @@ def _cyclic_d2(n: int) -> np.ndarray:
     return d
 
 
+def _open_d2(n: int) -> np.ndarray:
+    """開いた列の2階差分（両端の行は無い）。"""
+    d = np.zeros((max(0, n - 2), n))
+    i = np.arange(max(0, n - 2))
+    d[i, i] = 1.0
+    d[i, i + 1] = -2.0
+    d[i, i + 2] = 1.0
+    return d
+
+
 def min_curvature_alpha(c: np.ndarray, nrm: np.ndarray,
                         lo: np.ndarray, hi: np.ndarray, *,
                         lam: float = 0.1, step: float = 0.10,
-                        max_iter: int = 30) -> np.ndarray:
+                        max_iter: int = 30, closed: bool = True) -> np.ndarray:
     """箱制約つき最小曲率問題を解いて `α` を返す。
 
     :param lo: 各点の下限（右側の余裕。**負の値**）
@@ -94,7 +107,7 @@ def min_curvature_alpha(c: np.ndarray, nrm: np.ndarray,
     上限にいる点は 0 以下）を見て、破っている点を自由集合へ戻す。
     """
     n = len(c)
-    d2 = _cyclic_d2(n)
+    d2 = _cyclic_d2(n) if closed else _open_d2(n)
     dtd = d2.T @ d2
     nx, ny = nrm[:, 0], nrm[:, 1]
 
@@ -137,7 +150,7 @@ def min_curvature_alpha(c: np.ndarray, nrm: np.ndarray,
     return np.clip(alpha, lo, hi)
 
 
-def curvature(xy: np.ndarray) -> np.ndarray:
+def curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
     """3点から曲率 [1/m]。**左旋回が正**（反時計回りが正の規約に合わせる）。
 
     2階差分をそのまま使わず外接円から出すのは、点の間隔が完全には揃わない
@@ -152,14 +165,26 @@ def curvature(xy: np.ndarray) -> np.ndarray:
     cross = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) \
         - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
     den = ab * bc * ca
-    return np.where(den > 1e-9, 2.0 * cross / np.maximum(den, 1e-9), 0.0)
+    k = np.where(den > 1e-9, 2.0 * cross / np.maximum(den, 1e-9), 0.0)
+    if not closed and len(k) >= 3:
+        k[0], k[-1] = k[1], k[-2]          # 端は巡回した反対端とつながっていない
+    return k
 
 
 def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
                   v_max: float, v_min: float, a_lat: float,
-                  a_accel: float, a_brake: float) -> np.ndarray:
-    """曲率から目標速度 [m/s]。閉ループとして前後パスを2周ならす。"""
+                  a_accel: float, a_brake: float, closed: bool = True,
+                  v_start: float | None = None, v_end: float | None = None) -> np.ndarray:
+    """曲率から目標速度 [m/s]。閉ループとして前後パスを2周ならす。
+
+    `closed=False`（開いた経路）は1往復だけで、**終点は `v_end`**（既定 `v_min`、
+    止まる直前の這う速度）まで減速し、始点は `v_start`（今の速度）から加速する。
+    """
     n = len(xy)
+    if not closed:
+        return _speed_profile_open(xy, kappa, v_max=v_max, v_min=v_min, a_lat=a_lat,
+                                   a_accel=a_accel, a_brake=a_brake,
+                                   v_start=v_start, v_end=v_end)
     ds = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T)      # i → i+1 の距離
     v = np.minimum(v_max, np.sqrt(a_lat / np.maximum(np.abs(kappa), 1e-6)))
     v = np.maximum(v, v_min)
@@ -174,6 +199,25 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
             j = (i - 1) % n
             v[i] = min(v[i], float(np.sqrt(v[j] ** 2 + 2.0 * a_accel * ds[j])))
     return np.maximum(v, v_min)
+
+
+def _speed_profile_open(xy, kappa, *, v_max, v_min, a_lat, a_accel, a_brake,
+                        v_start, v_end) -> np.ndarray:
+    n = len(xy)
+    ds = np.hypot(*np.diff(xy, axis=0).T) if n >= 2 else np.zeros(0)
+    v = np.minimum(v_max, np.sqrt(a_lat / np.maximum(np.abs(kappa), 1e-6)))
+    v = np.maximum(v, v_min)
+    if n == 0:
+        return v
+    v[-1] = min(v[-1], v_min if v_end is None else v_end)
+    for i in range(n - 2, -1, -1):
+        v[i] = min(v[i], float(np.sqrt(v[i + 1] ** 2 + 2.0 * a_brake * ds[i])))
+    if v_start is not None:
+        # 今の速度より速い値から始めても、実際にはそこから加速するしかない
+        v[0] = min(v[0], max(v_start, v_min))
+        for i in range(1, n):
+            v[i] = min(v[i], float(np.sqrt(v[i - 1] ** 2 + 2.0 * a_accel * ds[i - 1])))
+    return v
 
 
 def body_allowance(kappa: np.ndarray, front: float, rear: float) -> np.ndarray:
@@ -197,7 +241,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
              lam: float = 0.1, v_max: float = 1.0, v_min: float = 0.2,
              a_lat: float = 2.0, a_accel: float = 1.0, a_brake: float = 1.5,
              passes: int = 2, max_width: float = 3.0,
-             front_overhang: float = 0.0, rear_overhang: float = 0.0) -> RaceLine:
+             front_overhang: float = 0.0, rear_overhang: float = 0.0,
+             v_start: float | None = None, v_end: float | None = None) -> RaceLine:
     """中心線からレーシングラインを作る。
 
     :param half_width: 車体半幅 [m]。`config/vehicle.toml` の外形から取る
@@ -219,38 +264,49 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     経路**が出た（`passes=3`, `lam=0.03`）。曲率エネルギー `Σκ²` が最小だった
     パスを採る。最悪でも中心線そのものより悪くはならない。
     """
-    keep = half_width + margin + body_allowance(curvature(cl.xy), front_overhang,
+    closed = cl.closed
+    keep = half_width + margin + body_allowance(curvature(cl.xy, closed), front_overhang,
                                                 rear_overhang)
     c = cl.xy
     nrm = cl.normal
     left, right = cl.w_left, cl.w_right
 
     best = cl.xy                                   # 何も改善しなければ中心線のまま
-    best_energy = float((curvature(cl.xy) ** 2).sum())
+    best_energy = float((curvature(cl.xy, closed) ** 2).sum())
 
     for k in range(max(1, passes)):
         hi = np.maximum(left - keep, 0.0)
         lo = -np.maximum(right - keep, 0.0)
-        a = min_curvature_alpha(c, nrm, lo, hi, lam=lam, step=cl.step)
+        if not closed:
+            # 始点（今の車の位置）と終点（止まる場所）は動かさない
+            lo[[0, -1]] = 0.0
+            hi[[0, -1]] = 0.0
+        a = min_curvature_alpha(c, nrm, lo, hi, lam=lam, step=cl.step, closed=closed)
         xy = c + nrm * a[:, None]
-        energy = float((curvature(xy) ** 2).sum())
+        energy = float((curvature(xy, closed) ** 2).sum())
         if energy < best_energy:
             best, best_energy = xy, energy
         if k + 1 >= max(1, passes):
             break
-        c = resample_loop(xy, cl.step)
-        nrm = normals(c)
+        c = resample_loop(xy, cl.step) if closed else resample_open(xy, cl.step)
+        nrm = normals(c) if closed else normals_open(c)
         left, right = measure(grid, c, nrm, max_width)
-        keep = half_width + margin + body_allowance(curvature(c), front_overhang,
+        keep = half_width + margin + body_allowance(curvature(c, closed), front_overhang,
                                                     rear_overhang)
 
     xy = best
     # **α は最後まで「元の中心線からの横ずれ」**として返す。2周目以降の
     # 解そのものは 1 周目の経路が基準になっており、人間が読む数字にならない
     alpha = lateral_offset(cl, xy)
-    kap = curvature(xy)
+    kap = curvature(xy, closed)
     v = speed_profile(xy, kap, v_max=v_max, v_min=v_min, a_lat=a_lat,
-                      a_accel=a_accel, a_brake=a_brake)
-    seg = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T)
-    s = np.concatenate([[0.0], np.cumsum(seg)[:-1]])
-    return RaceLine(xy=xy, v=v, kappa=kap, alpha=alpha, s=s, length=float(seg.sum()))
+                      a_accel=a_accel, a_brake=a_brake, closed=closed,
+                      v_start=v_start, v_end=v_end)
+    if closed:
+        seg = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T)
+        s = np.concatenate([[0.0], np.cumsum(seg)[:-1]])
+    else:
+        seg = np.hypot(*np.diff(xy, axis=0).T)
+        s = np.concatenate([[0.0], np.cumsum(seg)])
+    return RaceLine(xy=xy, v=v, kappa=kap, alpha=alpha, s=s, length=float(seg.sum()),
+                    closed=closed)

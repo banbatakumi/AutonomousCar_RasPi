@@ -2314,3 +2314,70 @@ button.on {
 .splash-emblem img.show {
   opacity: 1;
 }
+/* ── 経路パネル（`RoutePanel.tsx`、`slam2d_route`）: 経路グループの切替と経由点の編集 */
+.route-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.route-switch,
+.route-targets,
+.route-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.route-btn {
+  min-width: 36px;
+  border-width: 2px;
+  font-weight: 600;
+}
+
+/* 今走っている経路は塗り、乗り換え待ちは点滅させて「押したのに変わらない」を読めるようにする */
+.route-btn.on {
+  background: var(--line);
+}
+
+.route-btn.pending {
+  animation: route-pending 1s ease-in-out infinite;
+}
+
+@keyframes route-pending {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.route-targets button {
+  min-width: 40px;
+  border-width: 2px;
+}
+
+.route-targets button.on {
+  background: var(--line);
+}
+
+.route-row input[type='number'] {
+  width: 56px;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.route-row select {
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.route-hint {
+  font-size: 11px;
+}
+
+.route-note {
+  font-size: 11px;
+  color: var(--warn, #f0c05e);
+}

@@ -131,8 +131,14 @@ class SensorModel:
 
 # ── コースと真値の運転手 ───────────────────────────────────────────────────
 
-def load_course(name_or_path: str) -> Course:
-    """コースを読み、PNG コースなら隣の `<name>_centerline.npz` から中心線を補う。"""
+def load_course(name_or_path: str, route: str = "") -> Course:
+    """コースを読み、PNG コースなら隣の `<name>_centerline.npz` から中心線を補う。
+
+    中心線の無いコース（分岐のある壁モードのコース、`toyota2` など）は、真のコースから
+    道路グラフを作って周回を引き、それを中心線の代わりにする（`_route_centerline`）。
+    `route` は `<routes.json>:<グループ>`（`sim.bench --routes` と同じ形・シムの世界座標）。
+    空なら出発点の姿勢を経由点にした最短の周回。
+    """
     p = Path(name_or_path)
     if not p.exists():
         found = [q for q in list_courses() if q.stem == name_or_path]
@@ -146,9 +152,31 @@ def load_course(name_or_path: str) -> Course:
             d = np.load(npz)
             c.centerline = np.asarray(d["centerline"], dtype=np.float64)
             c.width = float(d["width"])
-    if c.centerline is None:
-        raise SystemExit(f"{p.name} は中心線を持たない（真値の運転手が走れない）")
+    if c.centerline is None or route:
+        c.centerline = _route_centerline(c, route)
     return c
+
+
+def _route_centerline(c: Course, route: str) -> np.ndarray:
+    """真のコースの道路グラフ上の周回（`raspi/nav/route.py`）。**真値の運転手の道**。"""
+    from raspi.core.vehicle import Vehicle
+    from raspi.nav.roadgraph import build_graph, trinary_from_bool
+    from raspi.nav.route import RouteError, Waypoint, plan_loop
+
+    veh = Vehicle.load()
+    try:
+        g = build_graph(trinary_from_bool(c.grid), resolution=c.resolution, origin=c.origin,
+                        keep=veh.half_width + 0.02, seed=c.start[:2])
+        if route:
+            path, _, group = route.rpartition(":")
+            pts = json.loads(Path(path).read_text())["groups"][group]
+            wps = [Waypoint(q[0], q[1], q[2] if len(q) > 2 else None) for q in pts]
+        else:
+            wps = [Waypoint(*c.start)]
+        loop = plan_loop(g, wps)
+    except (RouteError, ValueError, KeyError, OSError) as e:
+        raise SystemExit(f"{c.path.name} の周回を道路グラフから作れない: {e}") from e
+    return loop.xy
 
 
 class TruthDriver:
@@ -271,6 +299,8 @@ def default_factory(**kw) -> Callable[[], object]:
 @dataclass
 class RunConfig:
     course: str = "normal"
+    #: 中心線の代わりに走る経路（`<routes.json>:<グループ>`、`load_course` 参照）
+    route: str = ""
     seed: int = 0
     errors: str = "real"
     laps: int = 2                  #: 地図作成の周回数
@@ -409,7 +439,7 @@ def _wrap(a: float) -> float:
 def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         verbose: bool = False) -> RunResult:
     t_wall = time.perf_counter()
-    course = load_course(cfg.course)
+    course = load_course(cfg.course, cfg.route)
     sensors = SensorModel.preset(cfg.errors, course)
     spec = VehicleSpec.load()
     veh = VehicleModel(spec, course.start)
@@ -762,6 +792,9 @@ def main() -> int:
     ap.add_argument("--race-speed", type=float, default=2.0)
     ap.add_argument("--map-size", type=float, default=None, help="Slam2dNav の size_m を上書き")
     ap.add_argument("--no-loop", action="store_true", help="ループ閉じを切る（切り分け用）")
+    ap.add_argument("--route", default="",
+                    help="中心線の代わりに走る経路 `<routes.json>:<グループ>`（分岐のあるコース用。"
+                         "中心線の無いコースで省略すると出発点からの最短の周回）")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--json", default=None, help="結果の行を JSON で保存")
     ap.add_argument("--verbose", action="store_true")
@@ -778,7 +811,7 @@ def main() -> int:
             for s in range(args.seed0, args.seed0 + args.seeds):
                 cfg = RunConfig(course=name, seed=s, errors=err, laps=args.laps,
                                 explore_speed=args.explore_speed, race_laps=args.race_laps,
-                                race_speed=args.race_speed)
+                                race_speed=args.race_speed, route=args.route)
                 res = run(cfg, default_factory(**kw), verbose=args.verbose)
                 row = res.row()
                 row["wall_s"] = res.wall_time_s

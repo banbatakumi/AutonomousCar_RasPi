@@ -34,6 +34,8 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -211,11 +213,58 @@ def preflight(kill_stale: bool, port: int, want_gui: bool) -> bool:
                 f"        {C['dim']}kill {pid}   もしくは --kill-stale を付けて再実行{C['off']}")
             ok = False
 
-    if not (ROOT / "gui" / "dist" / "index.html").exists():
-        say("err", "gui/dist が無いのでブラウザに GUI が出ません")
-        print(
-            f"        {C['dim']}cd gui && npm install && npm run build{C['off']}")
+    ensure_gui_built()
     return ok
+
+
+def _gui_stale_reason() -> str:
+    """`gui/dist` が古ければ理由、新しければ空文字。
+
+    ★ **型の札（`MSGS_SCHEMA`）が食い違った GUI は受信データを全部捨てる**
+    （`gui/src/ws/telemetry.ts`、ステータスバーに「型不一致」）。`raspi/msgs/types.py` を
+    変えたのにビルドし直さないと、**サーバは動いているのに GUI とつながらないように見える**
+    （2026-09-29、`slam2d_route` で AutoMap/AutoState に項目を足した直後に発生）。
+    stdlib だけで見るため、札はサーバ側を計算せず、生成済みの `msgs.ts`
+    （`tools/check.sh` が types.py との一致を保証）とビルドした JS を比べる。
+    """
+    gui = ROOT / "gui"
+    index = gui / "dist" / "index.html"
+    if not index.exists():
+        return "gui/dist が無い"
+    built = index.stat().st_mtime
+    newer = [p for p in (gui / "src").rglob("*")
+             if p.is_file() and p.stat().st_mtime > built]
+    if newer:
+        return f"gui/src の方が新しい（{newer[0].relative_to(gui)} ほか{len(newer) - 1}件）"
+    msgs = gui / "src" / "generated" / "msgs.ts"
+    m = re.search(r"MSGS_SCHEMA = 0x([0-9a-fA-F]+)", msgs.read_text()) if msgs.exists() else None
+    if m:
+        want = int(m.group(1), 16)
+        forms = (str(want), f"0x{want:x}", f"0x{want:X}")
+        js = "".join(p.read_text(errors="ignore") for p in (gui / "dist" / "assets").glob("*.js"))
+        if not any(f in js for f in forms):
+            return "ビルドした GUI の型の札が raspi/msgs/types.py と合わない（「型不一致」でつながらない）"
+    return ""
+
+
+def ensure_gui_built() -> None:
+    """`gui/dist` が古ければビルドし直す（npm と node_modules があるときだけ）。"""
+    why = _gui_stale_reason()
+    if not why:
+        return
+    gui = ROOT / "gui"
+    npm = shutil.which("npm")
+    if npm and (gui / "node_modules").is_dir():
+        say("run", f"GUI をビルドし直します（{why}）")
+        r = subprocess.run([npm, "run", "build"], cwd=gui, capture_output=True, text=True)
+        if r.returncode == 0:
+            say("run", "GUI のビルド完了")
+            return
+        say("err", "GUI のビルドに失敗しました")
+        print((r.stdout + r.stderr)[-2000:])
+        return
+    say("err", f"GUI が古いか無いので、ブラウザでつながらない恐れがあります（{why}）")
+    print(f"        {C['dim']}cd gui && npm install && npm run build{C['off']}")
 
 
 # ── コース ──────────────────────────────────────────────────────────────

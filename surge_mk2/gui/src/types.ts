@@ -44,6 +44,16 @@ export type MapData = {
   centerline: Float64Array
   raceline: Float64Array
   racelineV: Float64Array
+  /** 道路グラフのエッジを全部つないだ `[x0, y0, ...]` と、各エッジの始まりの点の添字
+   * （`slam2d_route`。他の planner では空） */
+  graph: Float64Array
+  graphBreaks: number[]
+  /** グループごとのレーシングライン（`"stop"` は停止点へ向かう開いた経路） */
+  routes: Record<string, Float64Array>
+  /** 今走っている経路のキー。`"stop"` なら `raceline` は開いた経路（終点→始点をつながない） */
+  routeActive: string
+  /** 経路の設定 JSON（経由点・停止点・ミッション、`raspi/auto/route_config.py`） */
+  routesJson: string
   /** 観測できた範囲 [m]。**画面はここに合わせる**（地図の枠ではなく） */
   known: { x0: number; y0: number; x1: number; y1: number } | null
 }
@@ -69,6 +79,10 @@ export type AutoPlannerInfo = {
    * `"drive"`（既定）は自動運転タブの選択肢、`"sysid"` はシステム同定タブ専用 */
   category: string
   params: AutoParamSpec[]
+  /** 地図パネル・地図ライブラリを出す planner か（SLAM の地図を持つ、`registry.catalog`） */
+  map_ui?: boolean
+  /** 経由点エディタと経路の切替ボタンを出す planner か（`slam2d_route`） */
+  routes_ui?: boolean
   /** GUI の「判断」欄に出す `AutoState` フィールド（`raspi/auto/base.py` の
    * `Planner.stats` 参照）。`"free_ahead"`/`"nearest"`/`"gap"`/`"valid_ratio"`
    * の部分集合——この planner が書かないフィールド（既定値0.0のまま）を

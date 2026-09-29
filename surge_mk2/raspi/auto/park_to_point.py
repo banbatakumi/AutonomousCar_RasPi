@@ -766,7 +766,12 @@ class ParkToPoint(Planner):
                     else vs.odom_center - self._prev_odom_center)
         self._prev_odom_center = vs.odom_center
         if dt > 0:
-            self._maneuver_t += dt
+            # ★到達（完了）したあとは数えない。数え続けると、下の制限時間の判定が
+            # 到達の判定より先にあるため、止まって待っているだけで`max_maneuver_s`後に
+            # 「制限時間を超過」の失敗へ書き換わった（`slam2d_route`の駐車の引き継ぎで発覚、
+            # 2026-09-29。到達は4秒、失敗表示は40秒後）
+            if self._phase != "完了":
+                self._maneuver_t += dt
             self._park_pose = integrate_pose(*self._park_pose,
                                              d_center, vs.yaw_rate * dt)
 

@@ -112,7 +112,7 @@ def confirm(now: list[Obstacle], prev: list[Obstacle], *,
 
 def blocking(obstacles: list[Obstacle], path_xy: np.ndarray, index: int,
              *, half_width: float, ahead_m: float, step: float,
-             skip_m: float = 0.35) -> tuple[Obstacle | None, float]:
+             skip_m: float = 0.35, closed: bool = True) -> tuple[Obstacle | None, float]:
     """これから通る帯に入っている障害物と、そこまでの距離 [m]。
 
     経路上の `index` から `ahead_m` 先までの点だけを見る。**後ろや、1周先の
@@ -134,7 +134,11 @@ def blocking(obstacles: list[Obstacle], path_xy: np.ndarray, index: int,
     span = max(1, int(ahead_m / max(step, 1e-3)))
     span = min(span, n - 1)
     skip = min(span, max(0, int(skip_m / max(step, 1e-3))))
-    idx = (index + np.arange(skip, span + 1)) % n
+    idx = index + np.arange(skip, span + 1)
+    # 開いた経路は終点の先を見ない（`closed=False`、`nav/route.py`）
+    idx = idx % n if closed else idx[idx < n]
+    if len(idx) == 0:
+        return None, math.inf
     seg = path_xy[idx]
 
     best: Obstacle | None = None

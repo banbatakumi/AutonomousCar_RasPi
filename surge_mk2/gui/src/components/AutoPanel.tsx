@@ -76,6 +76,7 @@ import { capAutoParams, useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 import { MapLibrary } from './MapLibrary'
 import { ParamSliders } from './ParamSliders'
+import { RoutePanel } from './RoutePanel'
 
 /** planner の判断がこれ以上古ければ「planning_node が落ちている」と見なす */
 const AUTO_STALE_MS = 600
@@ -161,9 +162,9 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
               の`_done()`）、「未engage」だけを条件にすると`DONE`中は選択肢が
               一切出ない画面になってしまう（実機で発覚、2026-09-03）。
               `DONE`中も2ボタンを出し、解除は小さいリンクボタンで別に出す */}
-          {selected?.id === 'slam2d_raceline' && (!auto.engaged || st?.phase === 'DONE') ? (
+          {selected?.map_ui && (!auto.engaged || st?.phase === 'DONE') ? (
             <>
-              <SlamRaceButtons ch={ch} />
+              <SlamRaceButtons ch={ch} mode={selected.id} />
               {auto.engaged && (
                 <button className="engage-cancel" onClick={toggleEngage}>
                   自律走行を解除
@@ -322,7 +323,10 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
 
       {/* 保存済み地図の管理（保存・一覧・DL・アップロード・削除）。
           `slam2d_raceline`選択時だけ出す（`MapLibrary.tsx`） */}
-      {selected?.id === 'slam2d_raceline' && <MapLibrary ch={ch} />}
+      {selected?.map_ui && <MapLibrary ch={ch} />}
+
+      {/* 経路グループの切替と経由点の編集（`slam2d_route`、`RoutePanel.tsx`） */}
+      {selected?.routes_ui && <RoutePanel ch={ch} />}
 
       {/* ── planner の判断 ── */}
       <section className="auto-state">
@@ -397,8 +401,8 @@ function Stat({ value, unit }: { value: string; unit: string }) {
 }
 
 /**
- * `slam2d_raceline`専用: 「地図を作成」/保存済み地図の選択/「レーシングライン
- * 走行」。単一engageボタンの代わりに出す（`AutoPanel.tsx`冒頭docstring参照）。
+ * 地図を持つ planner（`slam2d_raceline`/`slam2d_route`、`catalog[].map_ui`）専用:
+ * 「地図を作成」/保存済み地図の選択/「レーシングライン走行」。単一engageボタンの代わりに出す（`AutoPanel.tsx`冒頭docstring参照）。
  *
  * 「レーシングライン走行」は地図を選んでいないと押せない。保存済み地図の
  * 一覧は`AutoPanel`がマウント時に一度要求済み（`mapsList()`）のものを
@@ -411,7 +415,7 @@ function Stat({ value, unit }: { value: string; unit: string }) {
  * バンビの指示、2026-09-03）。押した瞬間（`startSlam2dExplore`/
  * `startSlam2dRace`）にプレビューは消し、以後は本物のライブ地図に譲る。
  */
-function SlamRaceButtons({ ch }: { ch: ControlChannel | null }) {
+function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string }) {
   const mapFiles = useUi((s) => s.mapFiles)
   const [selectedMap, setSelectedMap] = useState('')
   const phase = useNumbers().auto?.phase
@@ -448,7 +452,7 @@ function SlamRaceButtons({ ch }: { ch: ControlChannel | null }) {
       <button
         onClick={() => {
           clearPreview()
-          ch?.startSlam2dExplore()
+          ch?.startSlam2dExplore(mode)
         }}
       >
         地図を作成
@@ -465,7 +469,7 @@ function SlamRaceButtons({ ch }: { ch: ControlChannel | null }) {
         disabled={!selectedMap}
         onClick={() => {
           clearPreview()
-          ch?.startSlam2dRace(selectedMap)
+          ch?.startSlam2dRace(mode, selectedMap)
         }}
       >
         レーシングライン走行

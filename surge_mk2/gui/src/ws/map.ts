@@ -112,6 +112,13 @@ export async function build(msg: AutoMapMsg): Promise<MapData | null> {
     centerline: Float64Array.from(msg.centerline ?? []),
     raceline: Float64Array.from(msg.raceline ?? []),
     racelineV: Float64Array.from(msg.raceline_v ?? []),
+    graph: Float64Array.from(msg.graph_xy ?? []),
+    graphBreaks: msg.graph_breaks ?? [],
+    routes: Object.fromEntries(
+      Object.entries(msg.routes ?? {}).map(([k, v]) => [k, Float64Array.from(v)]),
+    ),
+    routeActive: msg.route_active ?? '',
+    routesJson: msg.routes_json ?? '',
     known,
   }
 }

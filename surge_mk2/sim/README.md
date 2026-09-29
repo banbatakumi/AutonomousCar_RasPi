@@ -261,8 +261,28 @@ sim/
 ├── run.py        4プロセスをまとめて起動するランチャ（**stdlib だけで書く**）
 ├── park_world.py  駐車配置（縦列/車庫入れ/斜め/袋小路）を Course として生成
 ├── park_bench.py  駐車の評価ベンチ（真値の衝突判定・センサ誤差の注入）
+├── routes/       経路の設定の例（`sim.bench --routes`。**シムの世界座標**で書く）
 └── courses/      *.png（＋サイドカー json）と *.json（センターライン方式）
 ```
+
+### 分岐のあるコースの評価（`sim.bench --mode slam2d_route`）
+
+```bash
+.venv/bin/python -m sim.bench --course toyota2 --mode slam2d_route \
+    --routes sim/routes/toyota2.json --switch 200:B --signal 260:right --set explore_laps=1
+```
+
+- `--routes`: 経路の設定（`raspi/auto/route_config.py` の形）。**シムの世界座標**で書けば
+  bench が SLAM の map フレームへ直して planner に渡す
+- `--switch T:G` / `--signal T:V`: 時刻 T に経路グループの切替・信号の値を送る（GUI の A〜D
+  ボタン・`route/select` と同じ口）
+- 地図作成が終わると bench が「走行」を押す（DONE → 保存した地図を `request_load`）。
+  保存先は一時ディレクトリ（実機の `saved_maps/` を汚さない）
+- 結果に**周回ごとに真値で通った道路グラフのエッジ**（真のコースから作ったグラフの番号）と、
+  停止点に止まったときの誤差（真値／推定）が出る。**狙った枝を通れたかはエッジの列で見る**
+- ★地図作成の Follow the Gap は分岐で内側の輪に入り込み、何周か回ってから抜けることがある
+  （toyota2 で約3分）。`slam_bench` は `--route <json>:<グループ>` で真値の運転手を
+  好きな経路で走らせられる（中心線の無いコースでは出発点からの最短の周回が既定）
 
 ### 駐車の評価ベンチ（`sim.park_bench`）
 

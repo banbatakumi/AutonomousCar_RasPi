@@ -109,9 +109,10 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
       <div className="auto-bottom">
         <AutoPanel ch={ch} />
 
-        {/* SLAMモード（`slam2d_raceline`）選択時だけ、車体図の左に地図パネルを
-            挟む（`AutoMapPanel.tsx`）。他モードには地図が無いので出さない */}
-        {ui.auto?.mode === 'slam2d_raceline' && <AutoMapPanel ch={ch} />}
+        {/* 地図を持つ planner（`catalog[].map_ui`、`slam2d_raceline`/`slam2d_route`）
+            選択時だけ、車体図の左に地図パネルを挟む（`AutoMapPanel.tsx`）。
+            他モードには地図が無いので出さない */}
+        {ui.auto?.catalog.find((c) => c.id === ui.auto?.mode)?.map_ui && <AutoMapPanel ch={ch} />}
 
         <div className="auto-car">
           <DrivePanel />

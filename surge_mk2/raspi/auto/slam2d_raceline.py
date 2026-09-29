@@ -81,6 +81,17 @@ def _polyline_length(xy: np.ndarray) -> float:
     d = np.roll(xy, -1, axis=0) - xy
     return float(np.hypot(d[:, 0], d[:, 1]).sum())
 
+def _heading_err(path: rl_mod.RaceLine, i: int, yaw: float) -> float:
+    """経路の `i` 番目の接線と車の向きの差 [rad]（絶対値）。"""
+    n = len(path)
+    j = (i + 1) % n if path.closed else min(i + 1, n - 1)
+    if j == i:
+        i = max(0, i - 1)
+    t = math.atan2(path.xy[j, 1] - path.xy[i, 1], path.xy[j, 0] - path.xy[i, 0])
+    return abs((t - yaw + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+
 _MAP_EVERY = 10
 
 
@@ -88,6 +99,8 @@ class Slam2dRaceLine(Planner):
     id = "slam2d_raceline"
     name = "レーシングライン(slam2d)"
     description = "slam2d(車体非依存の汎用SLAM)で地図を作り、アウトインアウトの経路で周回する"
+    #: GUI が地図パネル・地図ライブラリを出す planner（`registry.catalog`）
+    map_ui = True
 
     params = (
         ParamSpec(key="explore_laps", label="地図を作る周回数", min=1, max=4, step=1,
@@ -139,6 +152,11 @@ class Slam2dRaceLine(Planner):
         ParamSpec(key="delay_s", label="遅延補償", min=0.0, max=0.4, default=0.15,
                   step=0.01, unit="s",
                   note="★舵が効き始めるまでの時間。実測して合わせること"),
+        ParamSpec(key="join_speed", label="経路に乗るまでの速度", min=0.2, max=1.5,
+                  default=0.5, step=0.05, unit="m/s",
+                  note="★走り出し（自己位置の復元直後）は経路から横・向きがずれている。"
+                       "乗る（横8cm・向き15°以内）まではこの速度に抑える。抑えないと最高速のまま"
+                       "大回りして壁に当たった（toyota/toyota2 の sim.bench で実測、2026-09-29）"),
         ParamSpec(key="min_score", label="自己位置の信頼下限", min=0.1, max=0.8,
                   default=0.35, step=0.01, unit="",
                   note="★スキャンマッチの一致度がこれを切ったら止まる"),
@@ -176,6 +194,12 @@ class Slam2dRaceLine(Planner):
         self._freeze_requested = False
         self._hint = -1
         self._obs_pad = 0.15
+        #: 経路に乗ったか（乗るまでは `join_speed` に抑える、`_join_cap`）
+        self._joined = False
+        #: 経路から外れて止まっている時間 [s] と、乗り直した回数（`_off_route`）
+        self._off_t = 0.0
+        self._rejoins = 0
+        self._dt = 0.0
         self._prev_obs: list[obs_mod.Obstacle] = []
         self._obs: list[obs_mod.Obstacle] = []
         self._map: AutoMap | None = None
@@ -257,6 +281,7 @@ class Slam2dRaceLine(Planner):
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
         st = AutoState(mode=self.id, planner=self.name, phase=self.phase)
+        self._dt = dt
 
         if vs is None:
             st.reason = "車両状態がまだ届いていない"
@@ -522,6 +547,9 @@ class Slam2dRaceLine(Planner):
         self.phase = st.phase = RACE
         self._locate_seed = None
         self._hint = -1
+        self._joined = False
+        self._off_t = 0.0
+        self._rejoins = 0
         self._map_dirty = True
         # ★ `st.match_score`はこの`plan()`冒頭の`self.slam.update()`（`_locate()`
         # 呼び出し前の古い姿勢からの追跡マッチ、当然ながら未知の領域を指して
@@ -557,9 +585,7 @@ class Slam2dRaceLine(Planner):
         st.cross_track = pp.cross_track
         st.target_x, st.target_y = pp.target
 
-        if abs(pp.cross_track) > p["max_cross"]:
-            st.reason = (f"経路から {abs(pp.cross_track) * 100:.0f}cm 離れた"
-                         f"（上限 {p['max_cross'] * 100:.0f}cm）")
+        if self._off_route(st, pp, vs, p):
             return st
 
         self._obs_pad = p["obstacle_pad"]
@@ -575,6 +601,7 @@ class Slam2dRaceLine(Planner):
         st.ready = True
         st.target_speed = pp.speed
         st.free_ahead = dist if hit is not None else math.inf
+        self._join_cap(st, pp, self.path, self.slam.pose, p)
 
         stop_at = p["obstacle_stop"]
         if (stop_at > 0.0 and hit is not None
@@ -588,9 +615,50 @@ class Slam2dRaceLine(Planner):
                          f"（{ang:+.0f}°）に障害物。停止")
             return st
 
-        st.reason = (f"{self.laps}周走行中・速度 {pp.speed:.2f} m/s・"
-                     f"横偏差 {pp.cross_track * 100:+.0f}cm")
+        st.reason = (f"{self.laps}周走行中・速度 {st.target_speed:.2f} m/s・"
+                     f"横偏差 {pp.cross_track * 100:+.0f}cm"
+                     + ("" if self._joined else "・経路に乗るまで減速"))
         return st
+
+    # ── 経路に乗る・外れたら乗り直す（`slam2d_route` と共通） ──
+
+    def _join_cap(self, st: AutoState, pp, path, pose, p: dict[str, float]) -> None:
+        """経路に乗る（横8cm・向き15°以内）までは `join_speed` に抑える。
+
+        ★ 走り出し（LOCATE 直後）の車は経路から横に10〜30cm・向きに25°ずれている。
+        抑えないと最高速のまま大回りして壁に当たった（toyota/toyota2 の sim.bench、
+        2026-09-29。このplannerも同じ bench で衝突・61cm 外れて0周だった）。
+        """
+        if self._joined:
+            return
+        if abs(pp.cross_track) < 0.08 and _heading_err(path, pp.index, pose[2]) < math.radians(15):
+            self._joined = True
+            return
+        st.target_speed = min(st.target_speed, p["join_speed"])
+
+    def _off_route(self, st: AutoState, pp, vs: VehicleState, p: dict[str, float]) -> bool:
+        """経路から外れすぎたら止める（True を返す）。**止まったまま終わらせない**:
+        1秒止まったら最寄り点を探し直し、`join_speed` で乗り直す（3回まで）。
+        乗り直し中は上限を 1.5 倍に広げる（乗りに行く途中で止まらないように）。
+        """
+        limit = p["max_cross"] * (1.0 if self._joined else 1.5)
+        if abs(pp.cross_track) > limit:
+            if abs(vs.speed) < 0.05:
+                self._off_t += self._dt
+            if self._off_t >= 1.0 and self._rejoins < 3:
+                self._off_t = 0.0
+                self._rejoins += 1
+                self._joined = False
+                self._hint = -1
+            st.reason = (f"経路から {abs(pp.cross_track) * 100:.0f}cm 離れた"
+                         f"（上限 {limit * 100:.0f}cm）。"
+                         + ("止まってから乗り直す" if self._rejoins < 3
+                            else "乗り直しを3回試したので止まる"))
+            return True
+        self._off_t = 0.0
+        if self._joined and self._rejoins and abs(pp.cross_track) < 0.05:
+            self._rejoins = 0                 # 経路に戻れたら数え直す
+        return False
 
     def _update_obstacles(self, scan: Scan) -> None:
         pts = self.slam.deskew_scan(scan)

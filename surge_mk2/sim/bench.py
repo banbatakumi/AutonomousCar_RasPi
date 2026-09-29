@@ -3,6 +3,8 @@
     .venv/bin/python -m sim.bench --course circuit
     .venv/bin/python -m sim.bench --course courses/1.json --mode raceline --time 240
     .venv/bin/python -m sim.bench --mode ftg --set explore_speed=0.6
+    .venv/bin/python -m sim.bench --course toyota2 --mode slam2d_route \
+        --routes sim/routes/toyota2.json --switch 200:B
 
 `io_node` と同じことを 1 プロセスの中でやる:
 
@@ -31,6 +33,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import statistics
 import sys
@@ -76,6 +79,15 @@ class Result:
         #: フェーズ1参照）
         self.explore_end_pose_err: float | None = None
         self.explore_end_yaw_err: float | None = None
+        #: 経路選択走行（`slam2d_route`）の検証。周回ごとに真値で通った道路グラフの
+        #: エッジ列（真のコースから作ったグラフの番号）と、その周に走っていた経路
+        self.lap_edges: list[tuple[str, list[int]]] = []
+        #: 停止点に止まったときの、真値の位置と停止点の距離 [m]。**自己位置の誤差を含む**
+        self.stop_err: float | None = None
+        #: 同じく推定位置（map フレーム）と停止点の距離 [m]。**止める制御の精度**
+        #: （実機では停止点を SLAM の地図の上で置くので、こちらが「狙った所に止まれたか」）
+        self.stop_err_est: float | None = None
+        self.notes: list[str] = []
 
     def report(self) -> str:
         def stat(v, unit, scale=1.0):
@@ -100,6 +112,12 @@ class Result:
         if self.lap_times:
             out.append(
                 "ラップ     " + " / ".join(f"{t:.1f}s" for t in self.lap_times))
+        for i, (key, edges) in enumerate(self.lap_edges):
+            out.append(f"周{i + 1:<2} 経路{key or '-'}  通ったエッジ {'→'.join(map(str, edges))}")
+        if self.stop_err is not None:
+            out.append(f"停止誤差   真値 {self.stop_err * 100:.1f}cm（自己位置の誤差を含む）・"
+                       f"推定 {self.stop_err_est * 100:.1f}cm（止める制御の精度）")
+        out.extend(self.notes)
         out.append(f"最後の状態 [{self.phase}] {self.reason}")
         return "\n".join(out)
 
@@ -107,7 +125,9 @@ class Result:
 class Bench:
     def __init__(self, course: str | Path, mode: str, params: dict[str, float], *,
                  max_speed: float = 3.0, max_steer: float = 0.524,
-                 model: str | None = None, quiet: bool = False, seed: int = 0) -> None:
+                 model: str | None = None, quiet: bool = False, seed: int = 0,
+                 routes: dict | None = None, events: list[tuple[float, str, str]] | None = None,
+                 auto_race: bool = True) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -115,6 +135,12 @@ class Bench:
             （2026-08-29追加。GUI/`e2e/model`トピック経由でしかモデルを選べず、
             `sim.bench`単体では検証できなかった穴を埋める）
         """
+        # 地図を作る planner は BUILD の終わりに地図を自動保存する。**実機の
+        # `saved_maps/` を bench の地図で埋めない**よう、保存先を一時ディレクトリへ
+        import tempfile
+
+        from raspi.auto import mapstore
+        mapstore.MAPS_DIR = Path(tempfile.mkdtemp(prefix="bench_maps_"))
         self.link = create_sim_link(course, seed=seed, with_channel=False)
         self.sim = self.link.sim
         self.planner = make_planner(mode)
@@ -144,6 +170,45 @@ class Bench:
         self._last_lap_t = 0.0
         self._prev_laps = 0
         self._prev_phase = ""
+
+        #: DONE（地図作成が終わって人の「走行」を待つ段）で、自動保存した地図を
+        #: 読み込ませて走り出させる（GUI の「レーシングライン走行」を押すのと同じ）
+        self.auto_race = auto_race
+        #: `(時刻, 種類, 値)`。種類は "route"（`request_route`）/"signal"（`request_signal`）
+        self.events = sorted(events or [])
+        self._truth_log: list[tuple[str, int, str, float, float]] = []
+        self._routes_world = routes
+        if routes is not None:
+            fn = getattr(self.planner, "request_routes", None)
+            if fn is None:
+                raise SystemExit(f"{mode!r} は経路の設定（--routes）に対応していない")
+            fn(json.dumps(self._to_map_frame(routes)))
+
+    # ── 座標 ──
+
+    def _to_map(self, x: float, y: float, yaw: float | None = None):
+        """シムの世界座標 → SLAM の map フレーム（起点が原点、起点の向きが +x）。"""
+        ox, oy, oyaw = self._origin
+        c, s = math.cos(-oyaw), math.sin(-oyaw)
+        dx, dy = x - ox, y - oy
+        mx, my = dx * c - dy * s, dx * s + dy * c
+        if yaw is None:
+            return mx, my, None
+        return mx, my, (yaw - oyaw + math.pi) % (2 * math.pi) - math.pi
+
+    def _to_map_frame(self, cfg: dict) -> dict:
+        """`--routes` の JSON（シムの世界座標で書く）を map フレームへ直す。"""
+        out = json.loads(json.dumps(cfg))
+        for k, pts in (out.get("groups") or {}).items():
+            conv = []
+            for p in pts:
+                mx, my, myaw = self._to_map(p[0], p[1], p[2] if len(p) > 2 else None)
+                conv.append([mx, my] + ([] if myaw is None else [myaw]))
+            out["groups"][k] = conv
+        for name, st in (out.get("stops") or {}).items():
+            mx, my, myaw = self._to_map(st["x"], st["y"], st.get("yaw"))
+            st["x"], st["y"], st["yaw"] = mx, my, myaw
+        return out
 
     # ── 真値 ──
 
@@ -185,7 +250,9 @@ class Bench:
                 st = self.planner.plan(scan, self.vs, self.params, dt)
                 self.res.plan_ms.append((time.perf_counter() - t_plan) * 1000)
                 self.res.plans += 1
-                self._record(st, time.monotonic() - t0)
+                t_now = time.monotonic() - t0
+                self._record(st, t_now)
+                self._step_events(st, t_now)
 
                 if not st.ready or st.brake:
                     cmd = DriveCmd(mode=2, arm=True, brake=True,
@@ -205,7 +272,27 @@ class Bench:
         self.res.distance = float(self.sim.vehicle.odom_front[0])
         return self.res
 
+    def _step_events(self, st, t: float) -> None:
+        if (self.auto_race and st.phase == "DONE"
+                and getattr(self.planner, "_saved_map_name", "")):
+            name = self.planner._saved_map_name
+            if not self.quiet:
+                print(f"  {t:5.1f}s 地図『{name}』で走行を開始する（bench が押す）", flush=True)
+            self.planner.request_load(name)
+        while self.events and self.events[0][0] <= t:
+            _, kind, value = self.events.pop(0)
+            fn = getattr(self.planner, "request_route" if kind == "route" else "request_signal",
+                         None)
+            if fn is not None:
+                fn(value, "bench")
+                self.res.notes.append(f"{t:5.1f}s {kind} → {value}")
+                if not self.quiet:
+                    print(f"  {t:5.1f}s 切替要求 {kind}={value}", flush=True)
+
     def _record(self, st, t: float) -> None:
+        self._last_st = st
+        v = self.sim.vehicle
+        self._truth_log.append((st.phase, st.laps, getattr(st, "route_active", ""), v.x, v.y))
         tx, ty, tyaw = self._truth_rel()
         self.res.pose_err.append(math.hypot(st.pose_x - tx, st.pose_y - ty))
         d = (st.pose_yaw - tyaw + math.pi) % (2 * math.pi) - math.pi
@@ -230,7 +317,7 @@ class Bench:
         self.res.reason = st.reason
 
         if not self.quiet and self.res.plans % 20 == 0:
-            print(f"  {t:5.1f}s [{st.phase or '-'}] 誤差 "
+            print(f"  {t:5.1f}s [{st.phase or '-'}] 真値({v.x:5.2f},{v.y:5.2f}) 誤差 "
                   f"{self.res.pose_err[-1] * 100:5.1f}cm "
                   f"{self.res.yaw_err[-1]:4.1f}°  一致度 {st.match_score:.2f}  "
                   f"{st.reason}", flush=True)
@@ -279,6 +366,51 @@ class Bench:
         return (f"壁 {int(wall.sum())} セル / 正確さ {good * 100:.0f}% "
                 f"（真の壁から {tol * course.resolution * 100:.0f}cm 以内）")
 
+    def route_report(self) -> None:
+        """走行中（RACE）に真値で通った道路グラフのエッジを周回ごとに数える。
+
+        グラフは**真のコース**から作る（SLAM の地図とは別物。番号の意味は
+        `raspi/nav/roadgraph.py` を真値に当てたもの）。停止点に止まったなら
+        停止誤差も出す。
+        """
+        from raspi.core.vehicle import Vehicle
+        from raspi.nav.roadgraph import build_graph, trinary_from_bool
+
+        course = self.sim.course
+        veh = Vehicle.load()
+        try:
+            g = build_graph(trinary_from_bool(course.grid), resolution=course.resolution,
+                            origin=course.origin, keep=veh.half_width + 0.02,
+                            seed=self._origin[:2])
+        except ValueError as e:
+            self.res.notes.append(f"真値の道路グラフを作れない: {e}")
+            return
+        h, w = g.label.shape
+        laps: dict[int, tuple[str, list[int]]] = {}
+        for phase, lap, key, x, y in self._truth_log:
+            if phase != "RACE":
+                continue
+            c, r = g.to_cell(x, y)
+            if not (0 <= c < w and 0 <= r < h):
+                continue
+            e = int(g.label[r, c])
+            if e < 0:
+                continue
+            k, seq = laps.setdefault(lap, (key, []))
+            if not seq or seq[-1] != e:
+                seq.append(e)
+            laps[lap] = (k or key, seq)
+        self.res.lap_edges = [laps[k] for k in sorted(laps)]
+        if self._routes_world is not None and self.res.phase in ("STOPPED", "PARK"):
+            then = (self._routes_world.get("mission") or {}).get("then", "")
+            stop = (self._routes_world.get("stops") or {}).get(then)
+            if stop is not None:
+                v = self.sim.vehicle
+                self.res.stop_err = math.hypot(v.x - stop["x"], v.y - stop["y"])
+                mx, my, _ = self._to_map(stop["x"], stop["y"])
+                st = self._last_st
+                self.res.stop_err_est = math.hypot(st.pose_x - mx, st.pose_y - my)
+
     def close(self) -> None:
         self.link.close()
 
@@ -297,6 +429,15 @@ def main() -> int:
     ap.add_argument("--model", default=None,
                     help="reload_if_changedに対応するplanner（e2e_lidar）へ渡すモデル名"
                          "（例: v2 → models/e2e_lidar/v2.onnx）。他のモードでは無視される")
+    ap.add_argument("--routes", default=None,
+                    help="経路の設定 JSON（`raspi/auto/route_config.py` の形、**シムの世界座標**で書く）。"
+                         "slam2d_route 用")
+    ap.add_argument("--switch", action="append", default=[], metavar="T:GROUP",
+                    help="時刻 T [s] に経路グループを切り替える（複数可）")
+    ap.add_argument("--signal", action="append", default=[], metavar="T:VALUE",
+                    help="時刻 T [s] に信号認識の値を送る（`signal_map` で読み替え、複数可）")
+    ap.add_argument("--no-auto-race", action="store_true",
+                    help="地図作成が終わっても走り出さない（既定は bench が「走行」を押す）")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -314,14 +455,23 @@ def main() -> int:
         k, _, v = kv.partition("=")
         params[k.strip()] = float(v)
 
+    routes = json.loads(Path(args.routes).read_text()) if args.routes else None
+    events: list[tuple[float, str, str]] = []
+    for kind, items in (("route", args.switch), ("signal", args.signal)):
+        for it in items:
+            t, _, v = it.partition(":")
+            events.append((float(t), kind, v))
+
     b = Bench(course, args.mode, params, max_speed=args.max_speed,
-              max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed)
+              max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed,
+              routes=routes, events=events, auto_race=not args.no_auto_race)
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)
     except KeyboardInterrupt:
         res = b.res
     quality = b.map_quality()
+    b.route_report()
     b.close()
     print("\n=== 結果 ===")
     print(res.report())

@@ -165,13 +165,14 @@ export class ControlChannel {
   }
 
   /**
-   * 「地図を作成」。`slam2d_raceline`を選び、新規EXPLOREから走り始める。
+   * 「地図を作成」。地図を持つ planner（`slam2d_raceline`/`slam2d_route`、
+   * `catalog[].map_ui`）を選び、新規EXPLOREから走り始める。
    * 既存の`clearMap()`をそのまま使う（新しいコードパスは要らない——
    * `Slam2dRaceLine.request_clear()`は`reset()`を呼ぶだけで`phase=EXPLORE`
    * に戻るため。`raspi/auto/slam2d_raceline.py`参照）。
    */
-  startSlam2dExplore() {
-    this.send({ type: 'auto', mode: 'slam2d_raceline', clear_map: true, engaged: true })
+  startSlam2dExplore(mode: string) {
+    this.send({ type: 'auto', mode, clear_map: true, engaged: true })
   }
 
   /**
@@ -180,8 +181,26 @@ export class ControlChannel {
    *
    * `freezeMap`/`clearMap`と同じ「回数」の約束（`AutoCtrl.race_seq`）。
    */
-  startSlam2dRace(mapName: string) {
-    this.send({ type: 'auto', mode: 'slam2d_raceline', load_map: true, map_name: mapName, engaged: true })
+  startSlam2dRace(mode: string, mapName: string) {
+    this.send({ type: 'auto', mode, load_map: true, map_name: mapName, engaged: true })
+  }
+
+  /**
+   * 経由点エディタの「保存」（`slam2d_route`）。経路の設定 JSON
+   * （`raspi/auto/route_config.py`）を planner へ送る。planner は検証して
+   * 地図と同じ名前の `<name>.routes.json` に保存し、経由点が変わっていれば
+   * 経路を作り直す。`freezeMap` と同じ「回数」の約束（`AutoCtrl.routes_seq`）。
+   */
+  saveRoutes(json: string) {
+    this.send({ type: 'auto', save_routes: true, routes_json: json })
+  }
+
+  /**
+   * 走行中に経路のグループ（A〜D）を切り替える。**すぐには乗り換えない**——
+   * 車が新しい経路の上に乗れる地点まで planner が待つ（`nav/route_switch.py`）。
+   */
+  selectRoute(group: string) {
+    this.send({ type: 'auto', route_group: group })
   }
 
   /**

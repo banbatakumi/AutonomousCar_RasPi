@@ -76,17 +76,23 @@ import numpy as np
 
 from .grid import OccGrid
 
-__all__ = ["Centerline", "build", "resample_loop", "smooth_loop", "close_gap"]
+__all__ = ["Centerline", "build", "build_open", "resample_loop", "resample_open",
+           "smooth_loop", "smooth_open", "close_gap"]
 
 
 class Centerline(NamedTuple):
-    """閉ループの中心線。**添字は巡回**（`i-1`, `i+1` は mod N）。"""
+    """中心線。既定は閉ループで**添字は巡回**（`i-1`, `i+1` は mod N）。
+
+    `closed=False` は開いた経路（今の位置からゴールまで、`nav/route.py`）。
+    端の点に前後の片側が無いだけで、ほかの意味は同じ。
+    """
 
     xy: np.ndarray                         #: (N, 2) [m]
     normal: np.ndarray                     #: (N, 2) 単位法線。**左が正**（y=左に合わせる）
     w_left: np.ndarray                     #: (N,) 左の壁までの余裕 [m]（車体半幅を引く前）
     w_right: np.ndarray                    #: (N,) 右の壁まで [m]
     step: float                            #: 点の間隔 [m]
+    closed: bool = True                    #: False なら開いた経路（端は巡回しない）
 
     def __len__(self) -> int:
         return int(self.xy.shape[0])
@@ -159,6 +165,49 @@ def tangents(xy: np.ndarray) -> np.ndarray:
 def normals(xy: np.ndarray) -> np.ndarray:
     """左向きの単位法線。接ベクトルを **+90° 回した**もの（y=左が正の規約）。"""
     t = tangents(xy)
+    return np.column_stack([-t[:, 1], t[:, 0]])
+
+
+def resample_open(xy: np.ndarray, step: float) -> np.ndarray:
+    """開いた折れ線を弧長 `step` [m] で等間隔に取り直す（**両端の点は残す**）。"""
+    xy = np.asarray(xy, dtype=np.float64)
+    if len(xy) < 2:
+        return xy
+    seg = np.hypot(*np.diff(xy, axis=0).T)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(s[-1])
+    n = max(2, int(round(total / step)) + 1)
+    target = np.linspace(0.0, total, n)
+    return np.column_stack([np.interp(target, s, xy[:, 0]), np.interp(target, s, xy[:, 1])])
+
+
+def smooth_open(xy: np.ndarray, window: int) -> np.ndarray:
+    """開いた列の移動平均。**両端の点は動かさない**（始点=今の位置、終点=ゴール）。
+
+    端は窓を縮めて平均する（端の値で水増しすると、端の近くが端の点へ
+    引き寄せられて曲がる）。
+    """
+    if window <= 1 or len(xy) < 3:
+        return xy
+    n = len(xy)
+    half = window // 2
+    c = np.vstack([np.zeros((1, xy.shape[1])), np.cumsum(xy, axis=0)])
+    i = np.arange(n)
+    h = np.minimum(half, np.minimum(i, n - 1 - i))
+    out = (c[i + h + 1] - c[i - h]) / (2 * h + 1)[:, None]
+    return out
+
+
+def tangents_open(xy: np.ndarray) -> np.ndarray:
+    """開いた列の単位接ベクトル（両端は片側差分）。"""
+    d = np.gradient(xy, axis=0) if len(xy) >= 2 else np.zeros_like(xy)
+    n = np.hypot(d[:, 0], d[:, 1])
+    n[n < 1e-9] = 1.0
+    return d / n[:, None]
+
+
+def normals_open(xy: np.ndarray) -> np.ndarray:
+    t = tangents_open(xy)
     return np.column_stack([-t[:, 1], t[:, 0]])
 
 
@@ -259,3 +308,30 @@ def build(grid: OccGrid, traj: np.ndarray, *, step: float = 0.10,
         left, right = measure(grid, xy, nrm, max_width)
 
     return Centerline(xy=xy, normal=nrm, w_left=left, w_right=right, step=step)
+
+
+def build_open(grid: OccGrid, xy: np.ndarray, *, step: float = 0.10,
+               max_width: float = 3.0, smooth: int = 5, iters: int = 3,
+               taper_m: float = 0.5) -> Centerline:
+    """開いた経路（今の位置からゴールまで）の中心線。`build()` の開路版。
+
+    `build()` と同じく「幅を測る → 真ん中へ寄せる」を繰り返すが、**両端から
+    `taper_m` の範囲は寄せる量を0へ絞る**。始点は今の車の位置、終点は止まりたい
+    場所なので、道の真ん中へ動かしてはいけない。
+    """
+    xy = resample_open(np.asarray(xy, dtype=np.float64)[:, :2], step)
+    xy = smooth_open(xy, smooth)
+    nrm = normals_open(xy)
+    left, right = measure(grid, xy, nrm, max_width)
+    for _ in range(max(0, iters - 1)):
+        n = len(xy)
+        i = np.arange(n)
+        edge = np.minimum(i, n - 1 - i) * step
+        w = np.clip(edge / max(taper_m, 1e-6), 0.0, 1.0)
+        shift = np.clip((left - right) / 2.0, -_MAX_SHIFT_M, _MAX_SHIFT_M) * w
+        shift = smooth_open(shift[:, None], smooth)[:, 0] * w
+        xy = xy + nrm * shift[:, None]
+        xy = smooth_open(resample_open(xy, step), smooth)
+        nrm = normals_open(xy)
+        left, right = measure(grid, xy, nrm, max_width)
+    return Centerline(xy=xy, normal=nrm, w_left=left, w_right=right, step=step, closed=False)

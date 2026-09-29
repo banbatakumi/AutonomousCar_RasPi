@@ -27,6 +27,7 @@ from .line_trace import LineTrace
 from .park_to_point import ParkToPoint
 from .raceline import RaceLine
 from .slam2d_raceline import Slam2dRaceLine
+from .slam2d_route import Slam2dRoute
 from .sysid_accel import SysIdAccel
 from .sysid_corner import SysIdCorner
 from .sysid_latency import SysIdLatency
@@ -44,6 +45,7 @@ PLANNERS: dict[str, type[Planner]] = {
     DisparityPursuit.id: DisparityPursuit,
     RaceLine.id: RaceLine,
     Slam2dRaceLine.id: Slam2dRaceLine,
+    Slam2dRoute.id: Slam2dRoute,
     LineTrace.id: LineTrace,
     E2ELidar.id: E2ELidar,
     FollowObject.id: FollowObject,
@@ -71,6 +73,10 @@ def catalog() -> list[dict]:
                 for s in cls.params
             ],
             "stats": list(cls.stats),
+            #: 地図パネル・地図ライブラリを出すか（SLAM 地図を持つ planner）、
+            #: 経由点エディタと経路切替ボタンを出すか（`slam2d_route`）
+            "map_ui": bool(getattr(cls, "map_ui", False)),
+            "routes_ui": bool(getattr(cls, "routes_ui", False)),
         }
         for cls in PLANNERS.values()
     ]

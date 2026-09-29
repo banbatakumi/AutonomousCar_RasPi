@@ -421,6 +421,12 @@ class TelemetryServer:
         self._auto_park_y = 0.0
         self._auto_park_yaw = 0.0
         self._auto_park_seq = 0
+        #: 経由点エディタが保存した経路の設定と、走行中の経路グループ切替
+        #: （`AutoCtrl.routes_*`/`route_*`、`slam2d_route`）
+        self._auto_routes_json = ""
+        self._auto_routes_seq = 0
+        self._auto_route_group = ""
+        self._auto_route_seq = 0
         #: engage したまま `auto/cmd` が途絶して制動に落とした回数
         self.auto_stalls = 0
         self._auto_was_fresh = True
@@ -999,6 +1005,18 @@ class TelemetryServer:
             else:
                 self._auto_park_x, self._auto_park_y, self._auto_park_yaw = x, y, yaw
                 self._auto_park_seq += 1
+        if m.get("save_routes"):
+            # 経由点エディタの保存（`slam2d_route`）。中身の検証は planner 側
+            # （`raspi/auto/route_config.py`）。大きすぎるものだけここで弾く
+            text = m.get("routes_json")
+            if isinstance(text, str) and len(text) <= 64_000:
+                self._auto_routes_json = text
+                self._auto_routes_seq += 1
+        if m.get("route_group"):
+            g = str(m.get("route_group"))
+            if g in ("A", "B", "C", "D"):
+                self._auto_route_group = g
+                self._auto_route_seq += 1
         if "engaged" in m:
             want = bool(m.get("engaged"))
             # モードが無いのに engage はできない。**解除は常に通す**
@@ -1021,7 +1039,11 @@ class TelemetryServer:
                         park_x=self._auto_park_x,
                         park_y=self._auto_park_y,
                         park_yaw=self._auto_park_yaw,
-                        park_seq=self._auto_park_seq)
+                        park_seq=self._auto_park_seq,
+                        routes_json=self._auto_routes_json,
+                        routes_seq=self._auto_routes_seq,
+                        route_group=self._auto_route_group,
+                        route_seq=self._auto_route_seq)
 
     def _publish_auto_ctrl(self) -> None:
         self.pub.send(TOPIC_AUTO_CTRL, self._auto_ctrl())
@@ -1788,9 +1810,10 @@ class TelemetryServer:
         while self._running:
             await asyncio.sleep(0.5)
             m = self.sub.latest.get(TOPIC_AUTO_MAP)
-            if m is None or m.map_seq == self._last_map_seq:
+            # 経路の版も見る（地図が凍結したあとも経路は変わる、`AutoMap.route_seq`）
+            if m is None or (m.map_seq, m.route_seq) == self._last_map_seq:
                 continue
-            self._last_map_seq = m.map_seq
+            self._last_map_seq = (m.map_seq, m.route_seq)
             if not self.map_clients:
                 continue
             payload = _encoder.encode(m)

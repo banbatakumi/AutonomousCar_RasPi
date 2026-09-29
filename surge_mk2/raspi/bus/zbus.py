@@ -112,6 +112,9 @@ TOPIC_OWNER: dict[str, str] = {
     "path/cam": "cam_perception",
     "line/cam": "line_perception",
     "track/target": "cam_track",
+    #: 経路グループの切替要求。**信号認識ノード（未実装）の名前を `signal` に予約**。
+    #: 試験用 CLI `raspi/tools/route_select.py` も `signal` として publish する
+    "route/select": "signal",
     "cam_e2e/cmd": "cam_e2e",
 }
 

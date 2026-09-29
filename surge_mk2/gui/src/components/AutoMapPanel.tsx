@@ -1,5 +1,6 @@
 /**
- * 自動運転ビューの地図パネル — `slam2d_raceline`選択時だけ、車体図
+ * 自動運転ビューの地図パネル — 地図を持つ planner（`slam2d_raceline`/`slam2d_route`、
+ * `catalog[].map_ui`）選択時だけ、車体図
  * （`AutoView.tsx`の`.auto-car`）の左に挟む正方形パネル（2026-09-03新設）。
  *
  * 旧・独立タブ「地図生成」（`views/MapView.tsx`、廃止）と違い、**地図と
@@ -32,6 +33,7 @@
 import { live } from '../bus/live'
 import { useNumbers } from '../bus/live'
 import { mapPreview, setPreviewHint } from '../bus/mapPreview'
+import { editClick, routeEdit } from '../bus/routeEdit'
 import { clearTrail, MapCanvas } from '../render/MapCanvas'
 import type { ControlChannel } from '../ws/control'
 
@@ -43,15 +45,28 @@ const PHASE_LABEL: Record<string, string> = {
   DONE: '保存済み・待機中',
   LOCATE: '自己位置を復元中',
   RACE: '走行中',
+  //: `slam2d_route`のミッションの終わり（停止点で止まった／駐車に引き継いだ）
+  STOPPED: '停止点で停止',
+  PARK: '駐車中',
 }
 
 export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
   useNumbers() // 8Hzで再レンダリングを起こすためだけに呼ぶ（バッジ・プレビュー名の更新用）
   const phase = live.auto?.phase || ''
   const previewing = mapPreview.data !== null
-  const label = previewing ? `下見中: ${mapPreview.name}` : (PHASE_LABEL[phase] ?? '待機')
+  const label = routeEdit.active
+    ? `経由点を編集中: ${routeEdit.target}`
+    : previewing
+      ? `下見中: ${mapPreview.name}`
+      : (PHASE_LABEL[phase] ?? '待機')
 
-  const onWorldClick = (x: number, y: number) => {
+  // 経由点を編集している間（`RoutePanel.tsx`）はクリックを経由点・停止点の配置に使う。
+  // それ以外は今までどおり自己位置探索のヒント
+  const onWorldClick = (x: number, y: number, pxPerM: number) => {
+    if (routeEdit.active) {
+      editClick(x, y, pxPerM)
+      return
+    }
     ch?.setLocateHint(x, y)
     setPreviewHint(x, y)
   }

@@ -54,6 +54,8 @@ class Pursuit(NamedTuple):
     cross_track: float                     #: 横偏差 [m]。**左にずれていれば正**
     target: tuple[float, float]            #: 目標点 [m]（GUI に描く）
     lookahead: float                       #: 使った前方注視距離 [m]
+    #: 開いた経路の終点までの残り [m]（弧長）。閉じた経路では `inf`
+    remaining: float = math.inf
 
 
 def _predict(x: float, y: float, yaw: float, v: float, steer: float,
@@ -95,7 +97,8 @@ def nearest_index(path: RaceLine, x: float, y: float, hint: int = -1,
     d2 = (path.xy[:, 0] - x) ** 2 + (path.xy[:, 1] - y) ** 2
     if hint >= 0 and window > 0:
         n = len(path)
-        idx = (hint + np.arange(-window, window + 1)) % n
+        idx = hint + np.arange(-window, window + 1)
+        idx = idx % n if path.closed else idx[(idx >= 0) & (idx < n)]
         return int(idx[np.argmin(d2[idx])])
     return int(np.argmin(d2))
 
@@ -115,7 +118,12 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     # 横偏差は**現在位置**で測る（予測位置で測ると自分の予測を評価してしまう）
     j = nearest_index(path, pose[0], pose[1], hint,
                       window=len(path) // 4 if hint >= 0 else 0)
-    tx = path.xy[(j + 1) % len(path)] - path.xy[j]
+    n = len(path)
+    if path.closed:
+        tx = path.xy[(j + 1) % n] - path.xy[j]
+    else:
+        jj = min(j, n - 2)
+        tx = path.xy[jj + 1] - path.xy[jj]
     to_car = np.array([pose[0], pose[1]]) - path.xy[j]
     nrm = np.hypot(*tx)
     cross = float((tx[0] * to_car[1] - tx[1] * to_car[0]) / nrm) if nrm > 1e-9 else 0.0
@@ -125,9 +133,23 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     ld = cfg.lookahead_k * abs(v_now) + cfg.lookahead_min
     # 経路上を弧長 `ld` ぶん進んだ点。**直線距離ではなく弧長**で取る
     # （ヘアピンでは直線距離だと「出口の点」が近くに見えてショートカットする）
-    step = path.length / len(path)
-    k = (i + max(1, int(round(ld / step)))) % len(path)
-    goal = path.xy[k]
+    if path.closed:
+        step = path.length / n
+        k = (i + max(1, int(round(ld / step)))) % n
+        goal = path.xy[k]
+        remaining = math.inf
+    else:
+        # 開いた経路: 終点の先は**終点の接線方向へ延ばした点**を狙う。終点そのものを
+        # 狙うと、近づくほど注視距離が縮んで舵が暴れる
+        step = path.length / max(1, n - 1)
+        remaining = max(0.0, (n - 1 - i) * step)
+        k = min(n - 1, i + max(1, int(round(ld / step))))
+        goal = path.xy[k]
+        over = ld - remaining
+        if over > 0.0 and n >= 2:
+            t = path.xy[-1] - path.xy[-2]
+            t = t / max(float(np.hypot(*t)), 1e-9)
+            goal = path.xy[-1] + t * over
 
     dx, dy = goal[0] - px, goal[1] - py
     eta = math.atan2(dy, dx) - pyaw
@@ -137,4 +159,4 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
 
     return Pursuit(steer=steer, speed=float(path.v[k]), index=i,
                    cross_track=cross, target=(float(goal[0]), float(goal[1])),
-                   lookahead=ld)
+                   lookahead=ld, remaining=remaining)

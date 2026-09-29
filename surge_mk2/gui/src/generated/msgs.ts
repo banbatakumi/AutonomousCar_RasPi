@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xb0ca9056
+export const MSGS_SCHEMA = 0xff5cd2de
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -346,6 +346,18 @@ export type AutoState = {
   target_y: number
   /** 検出した動的障害物 `[x, y, r, ...]`（map フレーム）。上限あり */
   obstacles: number[]
+  /** 今走っている経路（"A"〜"D"、停止経路は "stop"） */
+  route_active: string
+  /** 切替を要求されて乗り換えを待っている経路。空なら待っていない */
+  route_pending: string
+  /** 最後の切替要求の出どころ（"gui"・"signal:left" 等） */
+  route_source: string
+  /** 経路ができているグループ */
+  route_groups: string[]
+  /** 乗り換えを待っている理由・経路が作れなかった理由など */
+  route_note: string
+  /** ミッションの進み具合（"2/3周 → P1" 等）。空ならミッション無し */
+  mission: string
   /** 対象をロックして追跡できているか（`TargetTrack.tracking and not lost`） */
   target_locked: boolean
   /** 追跡中の対象を見失っているか（`TargetTrack.lost` のエコーバック） */
@@ -435,6 +447,24 @@ export type AutoMapMsg = {
   raceline: number[]
   /** 各点の目標速度 [m/s]。`raceline` の半分の要素数（点ごとに1つ） */
   raceline_v: number[]
+  /**
+   * 経路の版。**地図が凍結したあとも経路は変わる**（経由点の編集・切替）ので、
+   * planning_node は `(map_seq, route_seq)` の組が変わったときに publish する
+   */
+  route_seq: number
+  /** 道路グラフのエッジを全部つないだ `[x0, y0, x1, y1, ...]` */
+  graph_xy: number[]
+  /** 各エッジが `graph_xy` の何点目から始まるか（点の添字） */
+  graph_breaks: number[]
+  /** グループごとのレーシングライン `{"A": [x0, y0, ...], ...}`（停止経路は "stop"） */
+  routes: Record<string, number[]>
+  /** 今走っている経路のキー */
+  route_active: string
+  /**
+   * 経路の設定（経由点・停止点・ミッション、`route_config.py` の JSON）。
+   * GUI の経由点エディタはここから編集を始める
+   */
+  routes_json: string
 }
 
 /**

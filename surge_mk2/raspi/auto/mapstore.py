@@ -36,7 +36,8 @@ from typing import BinaryIO, NamedTuple
 import numpy as np
 
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
-           "save_map", "load_map", "delete_map", "validate_upload", "save_upload"]
+           "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
+           "save_routes", "load_routes"]
 
 MAPS_DIR = Path(__file__).resolve().parents[2] / "saved_maps"
 
@@ -73,6 +74,11 @@ def resolve_map_path(name: str) -> Path | None:
 
 def _meta_path(npz_path: Path) -> Path:
     return npz_path.with_suffix(".json")
+
+
+def _routes_path(npz_path: Path) -> Path:
+    """経路の設定（`raspi/auto/route_config.py`）。`<name>.routes.json`。"""
+    return npz_path.with_name(npz_path.stem + ".routes.json")
 
 
 def _polyline_length(xy: np.ndarray) -> float:
@@ -223,3 +229,32 @@ def delete_map(name: str) -> None:
         return
     target.unlink(missing_ok=True)
     _meta_path(target).unlink(missing_ok=True)
+    _routes_path(target).unlink(missing_ok=True)
+
+
+# ── 経路の設定（経由点・停止点・ミッション） ──
+
+def save_routes(name: str, text: str) -> bool:
+    """経路の設定（JSON文字列、検証は`route_config.RouteConfig`側）を書く。
+
+    地図が存在しない名前には書かない（孤立した設定ファイルを作らない）。
+    """
+    target = resolve_map_path(name)
+    if target is None or not target.is_file():
+        return False
+    p = _routes_path(target)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, p)
+    return True
+
+
+def load_routes(name: str) -> str:
+    """経路の設定の JSON 文字列。無ければ空文字。"""
+    target = resolve_map_path(name)
+    if target is None:
+        return ""
+    try:
+        return _routes_path(target).read_text()
+    except OSError:
+        return ""

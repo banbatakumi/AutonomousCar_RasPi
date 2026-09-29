@@ -38,6 +38,7 @@ __all__ = [
     "TOPIC_CMD", "TOPIC_DIAG_LINK",
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
+    "RouteSelect", "TOPIC_ROUTE_SELECT",
     "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
     "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
@@ -81,6 +82,9 @@ TOPIC_AUTO_CMD = "auto/cmd"
 TOPIC_AUTO_STATE = "auto/state"
 #: 地図と経路。**変わったときだけ**流れる（`AutoMap` の docstring）
 TOPIC_AUTO_MAP = "auto/map"
+#: 経路グループの切替要求（信号認識など、GUI 以外から）。`slam2d_route` が
+#: `signal_map` でグループに読み替える（`RouteSelect` 参照）
+TOPIC_ROUTE_SELECT = "route/select"
 
 #: GUI 側の単発イベント（例: `/ws/control` への新規接続）。telemetry_node が
 #: 出し、io_node が拾ってブザーのメロディ（起動音とは別の音形）を鳴らす
@@ -482,6 +486,15 @@ class AutoCtrl(MsgBase):
     park_yaw: float = 0.0
     #: 「駐車目標を置いた」回数。`freeze_seq`/`clear_seq`/`race_seq` と同じ約束
     park_seq: int = 0
+    #: 経由点エディタが保存した経路の設定（`raspi/auto/route_config.py` の JSON）。
+    #: `slam2d_route` だけが使う
+    routes_json: str = ""
+    #: 「経路の設定を保存した」回数。`freeze_seq` と同じ約束
+    routes_seq: int = 0
+    #: 走行中に切り替える経路のグループ（A〜D）
+    route_group: str = ""
+    #: 「グループを切り替えた」回数。`freeze_seq` と同じ約束
+    route_seq: int = 0
 
 
 class AutoState(MsgBase):
@@ -549,6 +562,17 @@ class AutoState(MsgBase):
     target_y: float = 0.0
     #: 検出した動的障害物 `[x, y, r, ...]`（map フレーム）。上限あり
     obstacles: list[float] = msgspec.field(default_factory=list)
+
+    # ── 経路選択走行の状態（`raspi/auto/slam2d_route.py`） ──
+    route_active: str = ""                 #: 今走っている経路（"A"〜"D"、停止経路は "stop"）
+    #: 切替を要求されて乗り換えを待っている経路。空なら待っていない
+    route_pending: str = ""
+    route_source: str = ""                 #: 最後の切替要求の出どころ（"gui"・"signal:left" 等）
+    route_groups: list[str] = msgspec.field(default_factory=list)   #: 経路ができているグループ
+    #: 乗り換えを待っている理由・経路が作れなかった理由など
+    route_note: str = ""
+    #: ミッションの進み具合（"2/3周 → P1" 等）。空ならミッション無し
+    mission: str = ""
 
     # ── 対象追従の状態（`raspi/auto/follow_object.py`） ──
     #: 対象をロックして追跡できているか（`TargetTrack.tracking and not lost`）
@@ -627,6 +651,38 @@ class AutoMap(MsgBase):
     raceline: list[float] = msgspec.field(default_factory=list)
     #: 各点の目標速度 [m/s]。`raceline` の半分の要素数（点ごとに1つ）
     raceline_v: list[float] = msgspec.field(default_factory=list)
+
+    # ── 経路選択走行（`raspi/auto/slam2d_route.py`） ──
+    #: 経路の版。**地図が凍結したあとも経路は変わる**（経由点の編集・切替）ので、
+    #: planning_node は `(map_seq, route_seq)` の組が変わったときに publish する
+    route_seq: int = 0
+    #: 道路グラフのエッジを全部つないだ `[x0, y0, x1, y1, ...]`
+    graph_xy: list[float] = msgspec.field(default_factory=list)
+    #: 各エッジが `graph_xy` の何点目から始まるか（点の添字）
+    graph_breaks: list[int] = msgspec.field(default_factory=list)
+    #: グループごとのレーシングライン `{"A": [x0, y0, ...], ...}`（停止経路は "stop"）
+    routes: dict[str, list[float]] = msgspec.field(default_factory=dict)
+    route_active: str = ""                 #: 今走っている経路のキー
+    #: 経路の設定（経由点・停止点・ミッション、`route_config.py` の JSON）。
+    #: GUI の経由点エディタはここから編集を始める
+    routes_json: str = ""
+
+
+class RouteSelect(MsgBase):
+    """経路グループの切替要求（`route/select`）。**信号認識ノード（`signal`）が出す。**
+
+    `value` は認識した値（例 "left"/"right"）かグループ名（"A"〜"D"）。
+    `slam2d_route` が地図ごとの `signal_map` でグループに読み替える。
+
+    送り手は同じ値を繰り返し流してよい。**`(value, event_id)` が変わったときだけ**
+    切替として扱う（`seq` は送り手のプロセスが替わると振り直されるので使わない。
+    試験用 CLI `raspi/tools/route_select.py` は起動のたびに別プロセスになる）。
+    """
+
+    value: str = ""
+    source: str = ""                       #: 表示用（"arrow_cam" 等）
+    #: 同じ値をもう一度「新しい要求」として送りたいときに変える番号
+    event_id: int = 0
 
 
 class UiEvent(MsgBase):
@@ -841,6 +897,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_AUTO_CMD: DriveCmd,
     TOPIC_AUTO_STATE: AutoState,
     TOPIC_AUTO_MAP: AutoMap,
+    TOPIC_ROUTE_SELECT: RouteSelect,
     TOPIC_UI_EVENT: UiEvent,
     TOPIC_CAM_CONFIG: CamConfig,
     TOPIC_CAM_MODEL: CamModelCtrl,
