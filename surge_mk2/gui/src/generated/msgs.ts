@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xff5cd2de
+export const MSGS_SCHEMA = 0xf338fa10
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -526,4 +526,21 @@ export type TargetTrack = {
   bbox_h: number
   /** トラッカー（NanoTrack）の確信度 [0..1]。そのまま置く */
   confidence: number
+}
+
+/**
+ * `arrow_signal_node` の直近の判定結果（`signal/status`）。
+ */
+export type ArrowSignalStatus = {
+  t_capture: number
+  t_pub: number
+  seq: number
+  enabled: boolean
+  /** "left"/"right"/"straight"/""（非該当） */
+  value: 'left' | 'right' | 'straight' | ''
+  lit_frac: number
+  /** "left"/"right"/""（未確定） */
+  confirmed_value: 'left' | 'right' | ''
+  roi_top: number
+  roi_bottom: number
 }

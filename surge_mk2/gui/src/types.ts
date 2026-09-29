@@ -18,6 +18,7 @@
  */
 
 export type {
+  ArrowSignalStatus,
   AutoMapMsg,
   AutoState,
   LineScan,
@@ -29,7 +30,7 @@ export type {
 
 // 下の `Snapshot` が参照するので、再エクスポートとは別に取り込む
 // （`export ... from` は名前をこのモジュールのスコープには入れない）
-import type { AutoState, LineScan, LinkDiag, Scan, TargetTrack, VehicleState } from './generated/msgs'
+import type { ArrowSignalStatus, AutoState, LineScan, LinkDiag, Scan, TargetTrack, VehicleState } from './generated/msgs'
 
 /** 展開して描画用に焼いたあとの地図。**`live.map` に置く。** */
 export type MapData = {
@@ -127,6 +128,9 @@ export type Snapshot = {
   line_cam: LineScan | null
   /** `follow_object` の追跡結果。`auto`/`line_cam` と同じく engage 不要で流れる */
   track: TargetTrack | null
+  /** 矢印信号認識の直近判定。`auto`/`line_cam`と同じくARM/engage不要で流れる
+   * （GUIのライブチューニング・前方カメラ映像へのオーバーレイに使う） */
+  signal: ArrowSignalStatus | null
   ctl: { has_controller: boolean; controller: string }
   /** RasPi 本体（SoC）の温度 ℃。STM32側の `vs.temp` とは別枠。実機以外（シム等）では null */
   pi_temp_c: number | null
@@ -209,6 +213,21 @@ export type CameraConfigStatus = {
   auto_override: boolean
 }
 
+/** 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値。**サーバが真値**
+ * （`ws/control.ts` の `setSignalConfig`）。 */
+export type SignalConfigStatus = {
+  /** false なら arrow_signal_node はフレーム読み取り自体を止める（CPU節電） */
+  enabled: boolean
+  /** ROI帯（画面高さに対する割合） */
+  roi_top: number
+  roi_bottom: number
+  sat_min: number
+  sat_max: number
+  val_min: number
+  /** ROI内の点灯画素がこの割合未満なら非該当（非点灯扱い） */
+  min_lit_frac: number
+}
+
 /** 接続中Wi-FiのSSID・電波強度。**サーバが真値**（`raspi/io/wifi.py`、1Hzで再取得）。 */
 export type WifiStatus = {
   /** 接続中のSSID。未接続なら null */
@@ -276,6 +295,8 @@ export type ControlStatus = {
   wifi: WifiStatus
   /** capture側のFPS上限・後方カメラON/OFF・GUI配信頻度。**サーバが真値** */
   camera_config: CameraConfigStatus
+  /** 矢印信号認識のON/OFF・HSVしきい値。**サーバが真値** */
+  signal_config: SignalConfigStatus
   /** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値** */
   cam_model: CamModelStatus
   /** e2e_lidar が使うモデルの選択。**サーバが真値** */

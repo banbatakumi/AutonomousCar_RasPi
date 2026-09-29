@@ -204,6 +204,7 @@ const SETTINGS_TABS = [
   { id: 'drive', label: '走行' },
   { id: 'safety', label: '安全' },
   { id: 'camera', label: 'カメラ' },
+  { id: 'signal', label: '矢印信号' },
   { id: 'sound', label: 'サウンド' },
 ] as const
 type SettingsTab = (typeof SETTINGS_TABS)[number]['id']
@@ -224,7 +225,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   // 継続更新される LinkDiag（8Hz、`bus/live.ts`）から読む。status から読むと
   // 実際は変わっているのにチェックボックスが更新されず、リロードするまで
   // 反映されないように見える（2026-08-19 実機で発覚）
-  const { link } = useNumbers()
+  const { link, signal: signalLive } = useNumbers()
   const tcEnabled = link?.tc_enabled ?? null
   const tvEnabled = link?.tv_enabled ?? null
   const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
@@ -233,6 +234,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
   // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
   const cam = useUi((s) => s.cameraConfig)
+  const sig = useUi((s) => s.signalConfig)
   // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、
   // `/ws/telemetry` 8Hz）から読む理由は tc_enabled 等と同じ（上のコメント参照）
   const range = effectiveRange({
@@ -583,6 +585,120 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             {CAMERA_FIELDS.map((f) => (
               <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
             ))}
+          </section>
+        </>
+      )}
+
+      {tab === 'signal' && (
+        <>
+          {/* 矢印信号認識（`arrow_signal_node`）。カメラ設定と同じく状態はサーバ真値
+              （`status.signal_config`）。会場で実物の看板を見ながらここのスライダーを
+              動かし、自動運転タブの前方カメラ映像に重なるROI枠線・ラベルを見て
+              追い込む運用（`CameraView.tsx` の drawArrowSignal） */}
+          <section className="settings-group">
+            <h3>矢印信号認識</h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={sig?.enabled ?? true}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ enabled: e.target.checked })}
+              />
+              矢印信号を認識する{sig === null && '（未確認）'}
+              <span className="unit" title="OFFにするとPi側はフレーム読み取り自体を止める（CPU節電）">
+                　OFFでCPU節電
+              </span>
+            </label>
+            {signalLive && (
+              <p className="dim">
+                判定: {signalLive.confirmed_value || signalLive.value || '(非該当)'}
+                　lit_frac {signalLive.lit_frac.toFixed(3)}
+                {signalLive.confirmed_value && '　→ route/select 送信中'}
+              </p>
+            )}
+          </section>
+
+          <section className="settings-group">
+            <h3>看板を探すROI帯（画面高さの割合）</h3>
+            <div className="settings-row">
+              <div className="settings-row-head">
+                <span className="label">上端</span>
+                <b>{((sig?.roi_top ?? 0.05) * 100).toFixed(0)}</b>
+                <span className="unit">%</span>
+              </div>
+              <input
+                type="range" min={0} max={100} step={1}
+                value={(sig?.roi_top ?? 0.05) * 100}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ roiTop: Number(e.target.value) / 100 })}
+              />
+            </div>
+            <div className="settings-row">
+              <div className="settings-row-head">
+                <span className="label">下端</span>
+                <b>{((sig?.roi_bottom ?? 0.55) * 100).toFixed(0)}</b>
+                <span className="unit">%</span>
+              </div>
+              <input
+                type="range" min={0} max={100} step={1}
+                value={(sig?.roi_bottom ?? 0.55) * 100}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ roiBottom: Number(e.target.value) / 100 })}
+              />
+            </div>
+          </section>
+
+          <section className="settings-group">
+            <h3>「薄い色」判定（HSV）</h3>
+            <div className="settings-row" title="低すぎると背景のノイズまで拾い、高すぎると濃い色の表示（別の意味）まで拾う">
+              <div className="settings-row-head">
+                <span className="label">彩度 下限</span>
+                <b>{sig?.sat_min ?? 40}</b>
+              </div>
+              <input
+                type="range" min={0} max={255} step={1}
+                value={sig?.sat_min ?? 40}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ satMin: Number(e.target.value) })}
+              />
+            </div>
+            <div className="settings-row" title="これを超える彩度は「濃い色」（別の意味）として無視する">
+              <div className="settings-row-head">
+                <span className="label">彩度 上限</span>
+                <b>{sig?.sat_max ?? 180}</b>
+              </div>
+              <input
+                type="range" min={0} max={255} step={1}
+                value={sig?.sat_max ?? 180}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ satMax: Number(e.target.value) })}
+              />
+            </div>
+            <div className="settings-row">
+              <div className="settings-row-head">
+                <span className="label">明度 下限</span>
+                <b>{sig?.val_min ?? 150}</b>
+              </div>
+              <input
+                type="range" min={0} max={255} step={1}
+                value={sig?.val_min ?? 150}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ valMin: Number(e.target.value) })}
+              />
+            </div>
+            <div className="settings-row" title="ROI内でこの割合以上の画素が点灯していないと「非点灯」扱いにする">
+              <div className="settings-row-head">
+                <span className="label">点灯とみなす最小割合</span>
+                <b>{((sig?.min_lit_frac ?? 0.02) * 100).toFixed(1)}</b>
+                <span className="unit">%</span>
+              </div>
+              <input
+                type="range" min={0} max={20} step={0.5}
+                value={(sig?.min_lit_frac ?? 0.02) * 100}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ minLitFrac: Number(e.target.value) / 100 })}
+              />
+            </div>
           </section>
         </>
       )}

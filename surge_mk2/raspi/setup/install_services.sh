@@ -276,6 +276,16 @@ write_unit surge-cam-e2e "カメラE2E(模倣学習)推論(cam_e2e用)" \
 write_unit surge-line-perception "前方カメラの白線認識(line_trace用)" \
            "raspi.nodes.line_perception_node" "surge-camera.service"
 
+# arrow_signal（矢印信号⑥、`raspi/nodes/arrow_signal_node.py`）は unit だけ置く。
+# **`UNITS` には入れず既定では enable しない**——他ノードと違い ARM 中は常時
+# 動く設計（特定の自動運転モードに紐づかない横断的な入力のため、モジュール
+# docstring参照）で、かつ HSV しきい値が実機・実会場での調整前は室内の他の
+# 色物を誤検出しうる。`raspi/tools/arrow_signal_preview.py` でチューニングし、
+# 大会前に `sudo systemctl enable --now surge-arrow-signal` で有効化する運用
+write_unit surge-arrow-signal "前方カメラの矢印信号(⑥)認識" \
+           "raspi.nodes.arrow_signal_node" "surge-camera.service"
+systemctl disable --now surge-arrow-signal 2>/dev/null || true
+
 # ── 古いログを消すタイマー（放置するとカードが埋まる） ──
 #
 # ## ★ 日付だけで消すのでは間に合わない（2026-08-08 の実測で判明）

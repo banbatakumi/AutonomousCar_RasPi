@@ -71,6 +71,7 @@ EXPORTS: dict[str, str] = {
     "AutoMap": "AutoMapMsg",
     "LineScan": "LineScan",
     "TargetTrack": "TargetTrack",
+    "ArrowSignalStatus": "ArrowSignalStatus",
 }
 
 #: Python では `str` だが、TS では**取りうる値が決まっている**もの。
@@ -78,6 +79,8 @@ EXPORTS: dict[str, str] = {
 #: **`types.py` 側の docstring と一致させること**（増やしたらここも足す）
 LITERAL_OVERRIDES: dict[tuple[str, str], str] = {
     ("LinkDiag", "health"): "'INIT' | 'OK' | 'DEGRADED' | 'FAULT'",
+    ("ArrowSignalStatus", "value"): "'left' | 'right' | 'straight' | ''",
+    ("ArrowSignalStatus", "confirmed_value"): "'left' | 'right' | ''",
 }
 
 #: タプル型で書く固定長の上限。これを超えたら普通の配列にする。

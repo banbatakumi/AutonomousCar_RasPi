@@ -501,6 +501,16 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.camera_hz = 15.0
         srv._publish_cam_config = lambda: None     # バスに触らせない
         srv._save_camera_conf = lambda: None       # ディスクに触らせない
+        # 矢印信号認識の設定（ON/OFF・HSVしきい値）。**既定値のまま**を組む
+        srv._signal_enabled = True
+        srv._signal_roi_top = 0.05
+        srv._signal_roi_bottom = 0.55
+        srv._signal_sat_min = 40
+        srv._signal_sat_max = 180
+        srv._signal_val_min = 150
+        srv._signal_min_lit_frac = 0.02
+        srv._publish_signal_config = lambda: None  # バスに触らせない
+        srv._save_signal_conf = lambda: None       # ディスクに触らせない
         # カメラセグメンテーションモデルの選択（`ftg_cam` 用）。**未選択の既定状態**を組む
         srv._cam_model = ""
         srv._publish_cam_model = lambda: None      # バスに触らせない

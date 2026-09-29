@@ -9,7 +9,7 @@
  *   3. 接続状態・設定 → イベント時だけ zustand（`store/ui.ts`）
  */
 import { useSyncExternalStore } from 'react'
-import type { AutoState, LineScan, LinkDiag, MapData, Scan, TargetTrack, VehicleState } from '../types'
+import type { ArrowSignalStatus, AutoState, LineScan, LinkDiag, MapData, Scan, TargetTrack, VehicleState } from '../types'
 
 /** 最新値。**書き換わり続けるので、React から直接読まないこと。** */
 export const live = {
@@ -22,6 +22,9 @@ export const live = {
   lineCam: null as LineScan | null,
   /** `follow_object` の追跡結果。`CameraView` が rAF で読んで重畳する */
   track: null as TargetTrack | null,
+  /** 矢印信号認識の直近判定。`CameraView` が rAF で読んで前方カメラ映像に重畳し、
+   * 設定パネルがライブチューニング用に読む */
+  signal: null as ArrowSignalStatus | null,
   /** 地図と経路（`/ws/map`）。**点群と違って変わったときだけ届く**ので、
    *  接続が切れても消さない（`clearLive` で触らない）。最後に見えていた地図が
    *  残っている方が、再接続待ちの間も状況を読める */
@@ -69,6 +72,7 @@ export function noteTelemetry(
   piTempC: number | null = null,
   lineCam: LineScan | null = null,
   track: TargetTrack | null = null,
+  signal: ArrowSignalStatus | null = null,
 ) {
   const now = performance.now()
   if (vs) live.vs = vs
@@ -84,6 +88,9 @@ export function noteTelemetry(
   // `lineCam` と同じ扱い（`cam_track_node` が動いていれば常に非 null）。
   // 未選択・見失いも現在値として届くので、それ自体は上書きしてよい
   if (track) live.track = track
+  // `lineCam`/`track` と同じ扱い（`arrow_signal_node` が動いていれば常に非 null）。
+  // 非該当・ON/OFFも現在値として届くので、それ自体は上書きしてよい
+  if (signal) live.signal = signal
   if (scan) {
     live.scan = scan
     live.lastScanMs = now
@@ -108,6 +115,7 @@ export function clearLive() {
   live.auto = null
   live.lineCam = null
   live.track = null
+  live.signal = null
   live.rxHz = 0
   live.scanHz = 0
 }
@@ -140,6 +148,8 @@ export type Numbers = {
   autoAgeMs: number
   /** RasPi 本体の CPU 温度 ℃。実機以外（シム等）では null */
   piTempC: number | null
+  /** 矢印信号認識の直近判定。設定パネルのライブチューニング用readout */
+  signal: ArrowSignalStatus | null
 }
 
 let snapshot: Numbers = {
@@ -156,6 +166,7 @@ let snapshot: Numbers = {
   auto: null,
   autoAgeMs: Infinity,
   piTempC: null,
+  signal: null,
 }
 const listeners = new Set<() => void>()
 
@@ -175,6 +186,7 @@ setInterval(() => {
     auto: live.auto,
     autoAgeMs: live.lastAutoMs ? now - live.lastAutoMs : Infinity,
     piTempC: live.piTempC,
+    signal: live.signal,
   }
   for (const l of listeners) l()
 }, 1000 / NUMBERS_HZ)

@@ -80,6 +80,7 @@ export function App() {
           auto: s.auto,
           fan: s.fan,
           cameraConfig: s.camera_config,
+          signalConfig: s.signal_config,
           camModel: s.cam_model,
           e2eModel: s.e2e_model,
         }),

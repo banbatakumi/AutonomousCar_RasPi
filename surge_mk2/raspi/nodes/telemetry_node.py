@@ -141,6 +141,7 @@ from raspi.msgs import (  # noqa: E402
     E2EModelCtrl,
     Heartbeat as HbMsg,
     LogCtrl,
+    SignalConfig,
     TargetRoiCtrl,
     UiEvent,
 )
@@ -162,6 +163,8 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_LINE_CAM,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
+    TOPIC_SIGNAL_CONFIG,
+    TOPIC_SIGNAL_STATUS,
     TOPIC_TRACK_ROI,
     TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
@@ -191,6 +194,9 @@ PRESET_NAME_MAX = 40
 PRESETS_PER_MODE_MAX = 50
 #: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
 CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
+#: 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値を覚えておく場所。
+#: `CAMERA_CONF` と同じ流儀
+SIGNAL_CONF = REPO_ROOT / "config" / "signal.json"
 #: `cam_perception_node` へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場。
 #: `ml_cam/export_onnx.py` の出力をここへ手動で配置する運用（`.gitignore` 済み）
 MODELS_DIR = REPO_ROOT / "models"
@@ -233,6 +239,9 @@ CAM_REAR_ENABLED_DISARM_DEFAULT = False
 #: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
 #: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_CONFIG_HZ = 1
+#: 矢印信号認識への意思（`signal/config`）の再送周期。`CAM_CONFIG_HZ` と同じ理由
+#: （arrow_signal_node の再起動や取りこぼしで食い違ったままにならないように）
+SIGNAL_CONFIG_HZ = 1
 #: カメラ画像を実際に使う自動運転モードの id（`raspi/auto/registry.py`）。
 #: この集合に入っているモードが engage されている間だけ、telemetry_node は
 #: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
@@ -385,6 +394,8 @@ class TelemetryServer:
             TOPIC_CAM_MASK: LATEST,
             #: `follow_object` の追跡結果（GUI がカメラ映像へ重畳する。§`_snapshot`）
             TOPIC_TRACK_TARGET: LATEST,
+            #: 矢印信号認識の直近判定（GUI がカメラ映像へ重畳・ライブチューニングに使う。§`_snapshot`）
+            TOPIC_SIGNAL_STATUS: LATEST,
         })
         self.pub = Publisher("control")
 
@@ -483,6 +494,20 @@ class TelemetryServer:
         self._cam_front_fps_disarm = CAM_FRONT_FPS_DISARM_DEFAULT
         self._cam_rear_fps_armed = CAM_REAR_FPS_DEFAULT
         self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
+
+        # ── 矢印信号認識の設定（ON/OFF・HSVしきい値） ──
+        #: `config/signal.json` に保存され、次回起動で戻る（`camera.json` と同じ流儀）。
+        #: 既定値は `arrow_signal_node.py` の `_DEFAULT_ROI_BAND`/`_DEFAULT_SAT_RANGE`/
+        #: `_DEFAULT_VAL_MIN`/`_MIN_LIT_FRAC` と同じ値（`raspi/msgs` は `raspi/nodes` に
+        #: 依存させない層分離のため import はせず、値だけ手で合わせてある）
+        self._signal_enabled = True
+        self._signal_roi_top = 0.05
+        self._signal_roi_bottom = 0.55
+        self._signal_sat_min = 40
+        self._signal_sat_max = 180
+        self._signal_val_min = 150
+        self._signal_min_lit_frac = 0.02
+        self._load_signal_conf()
 
         # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
         #: 選ばれているモデル名。**空文字 = 未選択**（`config/cam_model.json` に
@@ -799,6 +824,12 @@ class TelemetryServer:
 
         elif kind == "camera":
             self._on_camera(m)
+            await self._broadcast_control_status()
+
+        # ── 矢印信号認識の設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
+
+        elif kind == "signal":
+            self._on_signal_config(m)
             await self._broadcast_control_status()
 
         # ── カメラセグメンテーションモデルの選択（誰でも操作できる。
@@ -1294,6 +1325,86 @@ class TelemetryServer:
         except Exception:
             pass
 
+    # ── 矢印信号認識の設定（ON/OFF・HSVしきい値） ──
+
+    def _on_signal_config(self, m: dict) -> None:
+        """`{"type":"signal", "enabled"?, "roi_top"?, "roi_bottom"?,
+        "sat_min"?, "sat_max"?, "val_min"?, "min_lit_frac"?}`。
+
+        どれも省略可。`_on_camera`と同じく**サーバ側でも必ずクランプする**。
+        会場でスライダーを動かすたびに飛んでくる想定なので、`_publish_cam_config`
+        と同じく**待たせずすぐ効かせる**（次の`_signal_config_pump`周期を待たない）。
+        """
+        if "enabled" in m:
+            self._signal_enabled = bool(m["enabled"])
+        if "roi_top" in m and isinstance(m["roi_top"], (int, float)):
+            self._signal_roi_top = max(0.0, min(1.0, float(m["roi_top"])))
+        if "roi_bottom" in m and isinstance(m["roi_bottom"], (int, float)):
+            self._signal_roi_bottom = max(0.0, min(1.0, float(m["roi_bottom"])))
+        if "sat_min" in m and isinstance(m["sat_min"], (int, float)):
+            self._signal_sat_min = max(0, min(255, int(m["sat_min"])))
+        if "sat_max" in m and isinstance(m["sat_max"], (int, float)):
+            self._signal_sat_max = max(0, min(255, int(m["sat_max"])))
+        if "val_min" in m and isinstance(m["val_min"], (int, float)):
+            self._signal_val_min = max(0, min(255, int(m["val_min"])))
+        if "min_lit_frac" in m and isinstance(m["min_lit_frac"], (int, float)):
+            self._signal_min_lit_frac = max(0.0, min(1.0, float(m["min_lit_frac"])))
+        self._save_signal_conf()
+        self._publish_signal_config()   # 待たせない。cam_config と同じく即座に効かせる
+
+    def _signal_config_status(self) -> dict:
+        return {
+            "enabled": self._signal_enabled,
+            "roi_top": self._signal_roi_top,
+            "roi_bottom": self._signal_roi_bottom,
+            "sat_min": self._signal_sat_min,
+            "sat_max": self._signal_sat_max,
+            "val_min": self._signal_val_min,
+            "min_lit_frac": self._signal_min_lit_frac,
+        }
+
+    def _publish_signal_config(self) -> None:
+        self.pub.send(TOPIC_SIGNAL_CONFIG, SignalConfig(
+            enabled=self._signal_enabled,
+            roi_top=self._signal_roi_top, roi_bottom=self._signal_roi_bottom,
+            sat_min=self._signal_sat_min, sat_max=self._signal_sat_max,
+            val_min=self._signal_val_min, min_lit_frac=self._signal_min_lit_frac))
+
+    def _load_signal_conf(self) -> None:
+        """`config/signal.json` から戻す。`_load_camera_conf`と同じ流儀。"""
+        try:
+            raw = _json_decode(SIGNAL_CONF.read_bytes())
+        except Exception:
+            return
+        if isinstance(raw.get("enabled"), bool):
+            self._signal_enabled = raw["enabled"]
+        if isinstance(raw.get("roi_top"), (int, float)):
+            self._signal_roi_top = max(0.0, min(1.0, float(raw["roi_top"])))
+        if isinstance(raw.get("roi_bottom"), (int, float)):
+            self._signal_roi_bottom = max(0.0, min(1.0, float(raw["roi_bottom"])))
+        if isinstance(raw.get("sat_min"), (int, float)):
+            self._signal_sat_min = max(0, min(255, int(raw["sat_min"])))
+        if isinstance(raw.get("sat_max"), (int, float)):
+            self._signal_sat_max = max(0, min(255, int(raw["sat_max"])))
+        if isinstance(raw.get("val_min"), (int, float)):
+            self._signal_val_min = max(0, min(255, int(raw["val_min"])))
+        if isinstance(raw.get("min_lit_frac"), (int, float)):
+            self._signal_min_lit_frac = max(0.0, min(1.0, float(raw["min_lit_frac"])))
+
+    def _save_signal_conf(self) -> None:
+        try:
+            _atomic_write_bytes(SIGNAL_CONF, _json_encode({
+                "enabled": self._signal_enabled,
+                "roi_top": self._signal_roi_top,
+                "roi_bottom": self._signal_roi_bottom,
+                "sat_min": self._signal_sat_min,
+                "sat_max": self._signal_sat_max,
+                "val_min": self._signal_val_min,
+                "min_lit_frac": self._signal_min_lit_frac,
+            }))
+        except Exception:
+            pass
+
     # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
     #
     # `cam_perception_node` を再起動もSSHも無しに切り替えるための口。
@@ -1560,6 +1671,7 @@ class TelemetryServer:
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
             "camera_config": self._camera_config_status(),
+            "signal_config": self._signal_config_status(),
             "cam_model": self._cam_model_status(),
             "e2e_model": self._e2e_model_status(),
         }
@@ -1942,6 +2054,9 @@ class TelemetryServer:
             # `follow_object` の追跡結果。**engage していなくても流れる**
             # （`auto`/`line_cam` と同じ理由——対象を選んだだけで見え方を確認できる）
             "track": self.sub.latest.get(TOPIC_TRACK_TARGET),
+            # 矢印信号認識の直近判定。**ARM/engage と無関係に流れる**
+            # （`line_cam`/`track` と同じ理由——GUIのライブチューニングは駐車中にも使いたい）
+            "signal": self.sub.latest.get(TOPIC_SIGNAL_STATUS),
             "ctl": {"has_controller": self.controller is not None,
                     "controller": self.controller_name},
             # STM32 側の温度（`vs.temp`）とは別枠。RasPi 自体は STM32 のバスに乗らない
@@ -2074,6 +2189,17 @@ class TelemetryServer:
         while self._running:
             await asyncio.sleep(period)
             self._publish_cam_config()
+
+    async def _signal_config_pump(self) -> None:
+        """矢印信号認識への希望（ON/OFF・HSVしきい値）を低頻度で再送する。
+
+        `_cam_config_pump`と同じ理由：arrow_signal_nodeが再起動しても1秒以内に
+        最新の意思へ復帰させる。
+        """
+        period = 1.0 / SIGNAL_CONFIG_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_signal_config()
 
     async def _cam_model_pump(self) -> None:
         """`cam_perception_node` への希望モデル名を低頻度で再送する。
@@ -2214,7 +2340,7 @@ class TelemetryServer:
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
-                self._mask_pump, self._track_roi_pump)]
+                self._mask_pump, self._track_roi_pump, self._signal_config_pump)]
             try:
                 await stop
             finally:

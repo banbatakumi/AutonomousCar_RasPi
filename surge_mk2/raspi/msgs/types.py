@@ -39,6 +39,7 @@ __all__ = [
     "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "RouteSelect", "TOPIC_ROUTE_SELECT",
+    "SignalConfig", "TOPIC_SIGNAL_CONFIG", "ArrowSignalStatus", "TOPIC_SIGNAL_STATUS",
     "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
     "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
@@ -85,6 +86,14 @@ TOPIC_AUTO_MAP = "auto/map"
 #: 経路グループの切替要求（信号認識など、GUI 以外から）。`slam2d_route` が
 #: `signal_map` でグループに読み替える（`RouteSelect` 参照）
 TOPIC_ROUTE_SELECT = "route/select"
+
+#: GUI から `arrow_signal_node` への HSVしきい値・ON/OFFの意思。`cam/config`
+#: と同じ「現在の意思を繰り返し流す」流儀。telemetry_node が出す（`SignalConfig`参照）
+TOPIC_SIGNAL_CONFIG = "signal/config"
+#: `arrow_signal_node` の直近の判定結果（GUIのライブチューニング・映像オーバーレイ用）。
+#: `route/select`（確定後の経路切替要求）とは別トピック——役割も購読者も違う
+#: （`ArrowSignalStatus`参照）
+TOPIC_SIGNAL_STATUS = "signal/status"
 
 #: GUI 側の単発イベント（例: `/ws/control` への新規接続）。telemetry_node が
 #: 出し、io_node が拾ってブザーのメロディ（起動音とは別の音形）を鳴らす
@@ -685,6 +694,51 @@ class RouteSelect(MsgBase):
     event_id: int = 0
 
 
+class SignalConfig(MsgBase):
+    """GUI から `arrow_signal_node` への「現在の意思」（`signal/config`）。
+
+    `CamConfig` と同じく telemetry_node が繰り返し流す（ノード再起動でも
+    1秒以内に最新の意思へ復帰させるため）。`enabled=False` は
+    `raspi.core.auto_gate.vehicle_armed()` とは独立な「そもそも認識機能を
+    使うか」のトグル——OFFの間は `arrow_signal_node` がフレーム読み取り
+    自体を止める（CPU節電。`raspi/nodes/arrow_signal_node.py` 参照）。
+
+    残りのフィールドは `ArrowSignalDetector` のしきい値そのもの。会場で
+    実物の看板を見ながらGUIのスライダーで追い込む運用を想定している
+    （色相帯は対象外——色そのものに意味は無く「薄いかどうか」だけが
+    判定に効くため固定。`arrow_signal_node.py` のモジュールdocstring参照）。
+    """
+
+    enabled: bool = True
+    roi_top: float = 0.05
+    roi_bottom: float = 0.55
+    sat_min: int = 40
+    sat_max: int = 180
+    val_min: int = 150
+    min_lit_frac: float = 0.02
+
+
+class ArrowSignalStatus(MsgBase):
+    """`arrow_signal_node` の直近の判定結果（`signal/status`）。
+
+    `LineScan` と同じく「現在値を毎周期流す」軽量メッセージ——画像そのものは
+    載せない。GUI は前方カメラのJPEGに数値だけ重畳して描く
+    （`raspi/nodes/arrow_signal_node.py` のモジュールdocstring参照）。
+
+    `value`/`lit_frac` は**1フレームの生判定**（`ArrowResult`そのまま）。
+    会場チューニングでは、確定を待つより反応の速い生値を見た方が追い込み
+    やすい。`confirmed_value` は `route/select` として実際に確定・送信済み
+    の値（`ArrowSignalNode._confirmed_value`）。
+    """
+
+    enabled: bool = True
+    value: str = ""                        #: "left"/"right"/"straight"/""（非該当）
+    lit_frac: float = 0.0
+    confirmed_value: str = ""              #: "left"/"right"/""（未確定）
+    roi_top: float = 0.05
+    roi_bottom: float = 0.55
+
+
 class UiEvent(MsgBase):
     """GUI 側の単発イベント。**「現在の意思」ではなく「今起きたこと」**なので、
     `AutoCtrl` のように繰り返し流さず1回だけ publish する。
@@ -898,6 +952,8 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_AUTO_STATE: AutoState,
     TOPIC_AUTO_MAP: AutoMap,
     TOPIC_ROUTE_SELECT: RouteSelect,
+    TOPIC_SIGNAL_CONFIG: SignalConfig,
+    TOPIC_SIGNAL_STATUS: ArrowSignalStatus,
     TOPIC_UI_EVENT: UiEvent,
     TOPIC_CAM_CONFIG: CamConfig,
     TOPIC_CAM_MODEL: CamModelCtrl,

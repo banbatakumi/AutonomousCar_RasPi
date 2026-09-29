@@ -160,6 +160,12 @@ export function CameraView({
   showMaskRef.current = showMask
   const showLineTargetRef = useRef(showLineTarget)
   showLineTargetRef.current = showLineTarget
+  //: 矢印信号認識は`auto.mode`に紐づかない横断的な入力（`arrow_signal_node.py`の
+  //: モジュールdocstring参照）なので、`showMask`/`showLineTarget`と違いモード判定を
+  //: 挟まない——`drawArrowSignal()`側が`live.signal?.enabled`を見て出し分ける
+  const showSignal = cam === 'front'
+  const showSignalRef = useRef(showSignal)
+  showSignalRef.current = showSignal
   //: `ftg_cam` の走行可否マスク（`/ws/camera/mask`）。専用の別 `useEffect`
   //: （下記）で `showMask` の間だけ繋ぎ、`draw()` はここを読むだけ
   const maskBitmapRef = useRef<ImageBitmap | null>(null)
@@ -309,11 +315,12 @@ export function CameraView({
         // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
         // ガイドがズレる（2026-08-31、後方カメラのガイドが上に大きくズレる
         // 不具合として発見）
-        if (guideRef.current || showLineTargetRef.current) {
+        if (guideRef.current || showLineTargetRef.current || showSignalRef.current) {
           ctx.save()
           ctx.translate(dx, dy)
           if (guideRef.current) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
           if (showLineTargetRef.current) drawLineTarget(ctx, dw, dh, camHeightRef.current)
+          if (showSignalRef.current) drawArrowSignal(ctx, dw, dh)
           ctx.restore()
         }
         // 対象追従（`follow_object`）のROI選択・追跡結果の重畳。
@@ -550,6 +557,40 @@ function drawLineTarget(ctx: CanvasRenderingContext2D, w: number, h: number, cam
     ctx.arc(x, y, 5, 0, Math.PI * 2)
     ctx.fill()
   }
+}
+
+/**
+ * `arrow_signal_node.py` の直近判定（`live.signal`）を前方カメラ映像に重畳する。
+ * 専用スペースは使わず、ROI帯の枠線＋方向ラベルを映像へ直接描くだけ
+ * （会場でのHSVライブチューニング中に見る想定）。`enabled=false`（設定パネルで
+ * OFF）の間は何も描かない。確定（`confirmed_value`、`route/select`として実際に
+ * 送信中）していれば目立つ色・大きな文字で、confirm前の生判定（`value`）は
+ * 控えめに出す——「今まさに見えている」と「確定して経路が切り替わった」を
+ * 見た目で区別できるようにする。
+ */
+function drawArrowSignal(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const sig = live.signal
+  if (!sig || !sig.enabled) return
+  const y0 = sig.roi_top * h
+  const y1 = sig.roi_bottom * h
+  const confirmed = sig.confirmed_value
+  const lit = sig.lit_frac > 0.005
+
+  ctx.save()
+  ctx.strokeStyle = confirmed ? 'rgba(255,204,0,0.9)' : 'rgba(255,255,255,0.25)'
+  ctx.lineWidth = confirmed ? 3 : 1
+  ctx.strokeRect(0, y0, w, y1 - y0)
+
+  const label = confirmed
+    ? { left: '◀ 左折', right: '右折 ▶' }[confirmed]
+    : (lit ? (sig.value || '判定中') : '')
+  if (label) {
+    ctx.font = confirmed ? 'bold 22px sans-serif' : '13px sans-serif'
+    ctx.fillStyle = confirmed ? 'rgba(255,204,0,0.95)' : 'rgba(255,255,255,0.6)'
+    ctx.textAlign = 'center'
+    ctx.fillText(label, w / 2, Math.max(16, y0 - 8))
+  }
+  ctx.restore()
 }
 
 /** ドラッグ中のROI選択矩形（正規化画像座標）を映像に重ねる。

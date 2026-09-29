@@ -18,6 +18,7 @@ import type {
   FanStatus,
   LogFile,
   MapFile,
+  SignalConfigStatus,
 } from '../types'
 import { SAFETY, VEHICLE } from '../generated/vehicle'
 
@@ -779,6 +780,13 @@ type UiState = {
   cameraConfig: CameraConfigStatus | null
 
   /**
+   * 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値。
+   * **サーバが真値なのでここでは編集しない。** 押した結果は `status` の
+   * ブロードキャストで返ってくる（`ws/control.ts` の `setSignalConfig`）。
+   */
+  signalConfig: SignalConfigStatus | null
+
+  /**
    * cam_perception_node が使うセグメンテーションモデルの選択。
    * **サーバが真値なのでここでは編集しない。** 押した結果は `status` の
    * ブロードキャストで返ってくる（`ws/control.ts` の `camModelSelect`）。
@@ -861,6 +869,7 @@ export const useUi = create<UiState>((set, get) => ({
   auto: null,
   fan: null,
   cameraConfig: null,
+  signalConfig: null,
   camModel: null,
   camModelFiles: [],
   e2eModel: null,

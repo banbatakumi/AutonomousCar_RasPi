@@ -308,6 +308,30 @@ export class ControlChannel {
     })
   }
 
+  // ── 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値 ──
+
+  /**
+   * 矢印信号認識のON/OFF・HSVしきい値。`camera`と同じく状態はサーバが真値。
+   * **どれも省略できる**（送った項目だけ効く）。`enabled=false`にすると
+   * Pi側はフレーム読み取り自体を止める（CPU節電）。会場で実物の看板を見ながら
+   * `roiTop`/`roiBottom`/`satMin`/`satMax`/`valMin`/`minLitFrac`を動かして
+   * 前方カメラ映像のオーバーレイ（`status.signal`）を見て追い込む運用
+   */
+  setSignalConfig(p: {
+    enabled?: boolean
+    roiTop?: number; roiBottom?: number
+    satMin?: number; satMax?: number; valMin?: number
+    minLitFrac?: number
+  }) {
+    this.send({
+      type: 'signal',
+      enabled: p.enabled,
+      roi_top: p.roiTop, roi_bottom: p.roiBottom,
+      sat_min: p.satMin, sat_max: p.satMax, val_min: p.valMin,
+      min_lit_frac: p.minLitFrac,
+    })
+  }
+
   // ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
 
   /** `models/` にある `.onnx` の一覧を要求する。応答は `onCamModels`。
