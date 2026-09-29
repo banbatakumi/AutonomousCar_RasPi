@@ -106,6 +106,13 @@ class TestRoadGraph(unittest.TestCase):
         self.assertEqual(branches(g), 2)
         self.assertEqual(len(g.edges), 3)
 
+    def test_thin_on_bounding_box_matches_full_grid(self):
+        from raspi.nav.roadgraph import _thin, thin
+        for t in (oval(), shortcut()):
+            mask = t == 1
+            self.assertTrue(np.array_equal(thin(mask), _thin(mask, 500)))
+        self.assertFalse(thin(np.zeros((5, 5), dtype=bool)).any())
+
     def test_label_covers_free_space(self):
         g = graph_of(shortcut())
         free = shortcut() == 1
@@ -508,6 +515,71 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_stop_route_is_kept_and_published(self):
+        # 停止点へ向かっている間に経路が作り直されても、停止経路から乗り換えない。
+        # 停止経路は版を進めて GUI へ配る（凍結地図では map_seq が変わらないため）
+        from raspi.auto.slam2d_route import Slam2dRoute
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            pl._switch.set_active("A", pl._routes["A"])
+            pl.request_route("B", "gui")                  # 以前に B を押していた
+            ver = pl._route_ver
+            pl._stopping = "P"
+            pl._set_active("stop", pl._routes["A"])
+            self.assertGreater(pl._route_ver, ver)
+            self.assertIn("stop", pl.snapshot().routes)
+
+            pl._submit(graph=pl._graph)                   # 走行中の作り直し
+            self._wait(pl)
+            self.assertEqual(pl._switch.active_key, "stop")
+            self.assertEqual(pl._switch.pending_key, "")
+        finally:
+            pl.close()
+
+    def test_stop_failure_is_not_resubmitted(self):
+        from concurrent.futures import Future
+
+        from raspi.auto.route_config import Stop
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            pl._cfg.mission = {"laps": 1, "then": "P"}
+            pl._cfg.stops = {"P": Stop(6.0, 2.5)}
+            pl.laps = 1
+            f: Future = Future()
+            f.set_exception(RuntimeError("boom"))
+            pl._stopping, pl._stop_job = "P", f
+            pl._poll()
+            self.assertEqual(pl._stopping, "")
+            self.assertIn("boom", pl._stop_error)
+            p = {s.key: s.default for s in pl.params}
+            pl._maybe_finish((2.0, 1.0, 0.0), VehicleState(speed=1.0), p)
+            self.assertIsNone(pl._stop_job)                # 毎周期投げ直さない
+        finally:
+            pl.close()
+
+    def test_snapshot_is_reused_until_routes_change(self):
+        from raspi.auto.slam2d_route import Slam2dRoute
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            m1 = pl.snapshot()
+            m2 = pl.snapshot()
+            self.assertIs(m2, m1)
+            self.assertIs(m2.routes, m1.routes)           # 詰め直していない
+            pl._set_active("A", pl._routes["A"])
+            m3 = pl.snapshot()
+            self.assertEqual(m3.route_seq, pl._route_ver)
+            self.assertEqual(m3.route_active, "A")
+        finally:
+            pl.close()
+
     def test_bad_routes_are_reported_not_raised(self):
         from raspi.auto.slam2d_route import Slam2dRoute
         pl = Slam2dRoute()
@@ -516,6 +588,50 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             self.assertIn("Z", pl._note)
         finally:
             pl.close()
+
+
+class TestLapCount(unittest.TestCase):
+    """`Slam2dRoute._count_lap`: 最寄り点の揺れで周回を数え間違えない。"""
+
+    def setUp(self):
+        from raspi.auto.slam2d_route import Slam2dRoute
+        self.pl = Slam2dRoute()
+        th = np.linspace(0, 2 * np.pi, 100, endpoint=False)
+        xy = np.column_stack([np.cos(th), np.sin(th)])
+        self.path = rl_mod.RaceLine(xy=xy, v=np.ones(100), kappa=np.ones(100),
+                                    alpha=np.zeros(100), s=np.zeros(100),
+                                    length=2 * np.pi)
+
+    def tearDown(self):
+        self.pl.close()
+
+    def test_jitter_before_start_line_is_not_a_lap(self):
+        # 終端の直前から走り出し、最寄り点が1つ戻ってから先頭へ回る
+        for i in (97, 96, 97, 98, 99, 0, 1, 2):
+            self.pl._count_lap(self.path, i)
+        self.assertEqual(self.pl.laps, 0)
+
+    def test_full_lap_is_counted_once(self):
+        for i in list(range(0, 100, 3)) + [1, 4]:
+            self.pl._count_lap(self.path, i)
+        self.assertEqual(self.pl.laps, 1)
+
+
+class TestObstacleFreeMask(unittest.TestCase):
+    def test_cached_mask_gives_same_detection(self):
+        from raspi.nav import obstacles as obs_mod
+        from raspi.nav.deskew import Points
+        g = occgrid_from_trinary(oval(), resolution=RES, origin=(0.0, 0.0), seq=0)
+        ang = np.radians(np.arange(0, 360, 2.0))
+        r = np.full(ang.size, 3.0)
+        r[:8] = 0.5                                        # 前方の空きに物がある
+        x, y = r * np.cos(ang), r * np.sin(ang)
+        pts = Points(x=x, y=y, hit=np.ones(ang.size, dtype=bool), t_ref_ns=0, corrected=False)
+        pose = (2.0, 1.0, 0.0)
+        a = obs_mod.detect(g, pts, pose, wall_pad=0.1)
+        b = obs_mod.detect(g, pts, pose, wall_pad=0.1, free=obs_mod.free_mask(g, 0.1))
+        self.assertEqual(a, b)
+        self.assertTrue(a)
 
 
 class TestJoinAndRejoin(unittest.TestCase):

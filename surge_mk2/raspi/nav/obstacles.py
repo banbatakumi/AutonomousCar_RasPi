@@ -40,7 +40,7 @@ import numpy as np
 from .deskew import Points
 from .grid import OccGrid, dilate
 
-__all__ = ["Obstacle", "detect", "confirm", "blocking"]
+__all__ = ["Obstacle", "free_mask", "detect", "confirm", "blocking"]
 
 #: クラスタを切る点間距離 [m]。これより離れていたら別の物体
 _SPLIT_M = 0.18
@@ -53,12 +53,24 @@ class Obstacle(NamedTuple):
     n: int                                 #: 構成する点の数
 
 
+def free_mask(grid: OccGrid, wall_pad: float) -> np.ndarray:
+    """障害物の候補にしてよいセル（空きと確信している かつ 壁から `wall_pad` 以上離れている）。
+
+    格子全体の膨張なので重い（Pi で数ms）。凍結地図では変わらないので、周期ごとに
+    呼ぶ側は `grid.seq` と `wall_pad` で覚えておいて `detect(free=...)` へ渡すこと。
+    """
+    pad = max(1, int(round(wall_pad / grid.resolution)))
+    return grid.known_free_mask() & ~dilate(grid.wall_mask(), pad)
+
+
 def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
            wall_pad: float = 0.15, min_points: int = 3,
-           max_obstacles: int = 8) -> list[Obstacle]:
+           max_obstacles: int = 8, free: np.ndarray | None = None) -> list[Obstacle]:
     """凍結地図に無いものを拾う。**`grid.frozen` でなければ何も返さない。**
 
     地図を作っている最中は「地図に無い」が当たり前なので、判定に意味が無い。
+
+    :param free: `free_mask(grid, wall_pad)` の結果（省略すると毎回作る）
     """
     if not grid.frozen or len(pts) == 0:
         return []
@@ -73,8 +85,8 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
 
     col, row = grid.to_cell(wx, wy)
     ok = grid.inside(col, row)
-    pad = max(1, int(round(wall_pad / grid.resolution)))
-    free = grid.known_free_mask() & ~dilate(grid.wall_mask(), pad)
+    if free is None:
+        free = free_mask(grid, wall_pad)
     cand = np.zeros(wx.size, dtype=bool)
     cand[ok] = free[row[ok], col[ok]]
     if not cand.any():

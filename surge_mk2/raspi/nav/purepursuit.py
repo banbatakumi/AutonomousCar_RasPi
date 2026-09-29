@@ -139,13 +139,15 @@ def nearest_index(path: RaceLine, x: float, y: float, hint: int = -1,
     全探索でも 400 点なら 10μs 程度。`window` を使うのは、8の字のように
     経路が自分と交差するコースで**別の周回の点に飛び移るのを防ぎたい**とき。
     """
-    d2 = (path.xy[:, 0] - x) ** 2 + (path.xy[:, 1] - y) ** 2
+    xy = path.xy
     if hint >= 0 and window > 0:
         n = len(path)
         idx = hint + np.arange(-window, window + 1)
         idx = idx % n if path.closed else idx[(idx >= 0) & (idx < n)]
-        return int(idx[np.argmin(d2[idx])])
-    return int(np.argmin(d2))
+        if len(idx):
+            w = xy[idx]
+            return int(idx[np.argmin((w[:, 0] - x) ** 2 + (w[:, 1] - y) ** 2)])
+    return int(np.argmin((xy[:, 0] - x) ** 2 + (xy[:, 1] - y) ** 2))
 
 
 def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,

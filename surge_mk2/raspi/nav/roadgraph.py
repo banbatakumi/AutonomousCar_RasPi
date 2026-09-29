@@ -113,7 +113,22 @@ def _crossings(nb: list[np.ndarray]) -> np.ndarray:
 
 
 def thin(mask: np.ndarray, max_iter: int = 500) -> np.ndarray:
-    """Zhang-Suen の細線化（Zhang & Suen 1984）。"""
+    """Zhang-Suen の細線化（Zhang & Suen 1984）。
+
+    局所演算なので前景の外接矩形だけを回す（地図の格子は道の外側がほとんどで、
+    全体で回すと数倍遅い）。結果は全体で回した場合と同じ。
+    """
+    rows = np.flatnonzero(mask.any(axis=1))
+    if not len(rows):
+        return np.zeros(mask.shape, dtype=bool)
+    cols = np.flatnonzero(mask.any(axis=0))
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    out = np.zeros(mask.shape, dtype=bool)
+    out[r0:r1, c0:c1] = _thin(mask[r0:r1, c0:c1], max_iter)
+    return out
+
+
+def _thin(mask: np.ndarray, max_iter: int) -> np.ndarray:
     img = np.pad(mask.astype(np.uint8), 1)
     for _ in range(max_iter):
         changed = False
@@ -298,11 +313,10 @@ def build_graph(trinary: np.ndarray, *, resolution: float, origin: tuple[float, 
     n_lab, lab = cv2.connectedComponents(cspace.astype(np.uint8), connectivity=8)
     if n_lab <= 1:
         raise ValueError("通れる領域が無い（道幅が車体に対して狭すぎるか、地図が空）")
-    pick = _pick_component(lab, n_lab, seed, resolution=res, origin=origin, clear=clear,
-                           keep=keep)
+    pick = _pick_component(lab, n_lab, seed, resolution=res, origin=origin)
     cspace = lab == pick
     # 空き領域の側も、選んだ C-space を含む連結成分だけにする（壁の外の空きを除く）
-    n2, lab2 = cv2.connectedComponents(free.astype(np.uint8), connectivity=4)
+    _, lab2 = cv2.connectedComponents(free.astype(np.uint8), connectivity=4)
     rr, cc = np.nonzero(cspace)
     free = lab2 == lab2[rr[0], cc[0]]
 
@@ -357,7 +371,7 @@ def _cell_center(col, row, res: float, origin: tuple[float, float]):
 
 
 def _pick_component(lab: np.ndarray, n_lab: int, seed, *, resolution: float,
-                    origin: tuple[float, float], clear: np.ndarray, keep: float) -> int:
+                    origin: tuple[float, float]) -> int:
     if seed is not None:
         c = int(math.floor((seed[0] - origin[0]) / resolution))
         r = int(math.floor((seed[1] - origin[1]) / resolution))

@@ -228,6 +228,26 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         self.assertEqual(self.p.phase, LOCATE)
 
 
+class TestSlam2dNavDistance(unittest.TestCase):
+    """`Slam2dNav.distance` の増分計算が、軌跡を全部足し直した値と一致するか。"""
+
+    def test_incremental_matches_full_sum(self):
+        from raspi.auto._slam2d_nav import Slam2dNav
+        nav = Slam2dNav(resolution=0.05, size_m=4.0)
+        traj = nav._fe.trajectory
+        self.assertEqual(nav.distance, 0.0)
+        rng = np.random.default_rng(0)
+        for _ in range(3):
+            for _ in range(10):
+                traj.append(Pose2D(*rng.normal(size=3)))
+            arr = np.asarray(traj)[:, :2]
+            full = float(np.hypot(*np.diff(arr, axis=0).T).sum())
+            self.assertAlmostEqual(nav.distance, full)
+        # ループ閉じで軌跡のリストごと差し替わったら数え直す
+        nav._fe.trajectory = [Pose2D(0, 0, 0), Pose2D(3, 4, 0)]
+        self.assertAlmostEqual(nav.distance, 5.0)
+
+
 class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
     """保存済み地図の読み込み（`request_load`）→ `LOCATE`（自己位置復元）→
     `RACE`までの統合テスト。`raspi/auto/mapstore.py`（保存側）と

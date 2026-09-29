@@ -11,9 +11,8 @@
 
 ## `raspi/auto/raceline.py`との違い
 
-- **ループ閉じが無い。** `slam2d`側は`Frontend`単体（ループ閉じ無し）で運用
-  する方針（`_slam2d_nav.py`のモジュールdocstring参照）。周回検出はするが、
-  `close_loop()`に相当する地図の焼き直しはしない
+- **ループ閉じは EXPLORE→BUILD の瞬間に1回だけ**（`Slam2dNav.freeze()` が
+  `SlamSystem.flush()` を呼ぶ）。走行中（RACE）は`Frontend`直結の追跡専用
 - **`lidar_only`（scan_to_scanのみで走る実験モード）は未対応。** `slam2d`の
   `MotionModel`抽象は差し替え可能だが、このplannerでは`ExternalTwistModel`
   固定にしてある
@@ -90,7 +89,6 @@ def _heading_err(path: rl_mod.RaceLine, i: int, yaw: float) -> float:
         i = max(0, i - 1)
     t = math.atan2(path.xy[j, 1] - path.xy[i, 1], path.xy[j, 0] - path.xy[i, 0])
     return abs((t - yaw + math.pi) % (2.0 * math.pi) - math.pi)
-
 
 
 _MAP_EVERY = 10
@@ -279,7 +277,9 @@ class Slam2dRaceLine(Planner):
         self._build_error = ""
         self._freeze_requested = False
         self._hint = -1
-        self._obs_pad = 0.15
+        #: 障害物の候補にしてよいセル（`obs_mod.free_mask`）と、それを作った (地図の版, 幅)
+        self._obs_free: np.ndarray | None = None
+        self._obs_free_key: tuple | None = None
         #: 経路に乗ったか（乗るまでは `join_speed` に抑える、`_join_cap`）
         self._joined = False
         #: 経路から外れて止まっている時間 [s] と、乗り直した回数（`_off_route`）
@@ -304,6 +304,9 @@ class Slam2dRaceLine(Planner):
         self._loaded_centerline_xy: np.ndarray | None = None
         #: 進行中のグローバルローカリゼーション（`LOCATE`段でのみ非None）
         self._localizer: GlobalLocalizer | None = None
+        #: 粗探索の上位候補のうち、まだ仕上げていないもの（`None` = 粗探索中）と仕上げた結果
+        self._loc_cands: list | None = None
+        self._loc_scored: list = []
         #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
         self._loc_hint: tuple[float, float] | None = None
         #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
@@ -369,6 +372,7 @@ class Slam2dRaceLine(Planner):
         self._speed_key = None            # 速度は今の設定で作り直す（`_retime`）
         self.phase = LOCATE
         self._localizer = None
+        self._loc_cands = None
         self._load_error = ""
         self.laps = 0
         self._hint = -1
@@ -392,6 +396,7 @@ class Slam2dRaceLine(Planner):
     def request_locate_hint(self, x: float, y: float) -> None:
         self._loc_hint = (x, y)
         self._localizer = None     # 探索中なら絞り込んでやり直す
+        self._loc_cands = None
 
     # ── 本体 ──
 
@@ -431,9 +436,6 @@ class Slam2dRaceLine(Planner):
         lap_msg = ""
         lap_done, explore_done = self._check_lap(p)
         if lap_done:
-            # ★ `raspi/auto/raceline.py`と異なり、ここでは`close_loop()`に
-            # 相当する地図の焼き直しをしない（`_slam2d_nav.py`のモジュール
-            # docstring参照）。周回検出そのものは変わらず行う
             if explore_done:
                 self.slam.freeze()
                 self.phase = st.phase = BUILD
@@ -611,37 +613,44 @@ class Slam2dRaceLine(Planner):
         `ready=False`で静止させたまま複数周期にわたって`step()`を呼び続ける。
         """
         pts = self.slam.deskew_scan(scan)
+        seeded = self._loc_hint is None and self._locate_seed is not None
 
-        if self._localizer is None:
-            hint = self._loc_hint or self._locate_seed
-            self._localizer = GlobalLocalizer(self.slam.grid, hint=hint)
-            if self._localizer.done:
-                st.reason = ("自己位置の探索範囲に空きセルが無い。"
-                             "地図の選択かクリックしたヒントを見直してください")
+        if self._loc_cands is None:
+            if self._localizer is None:
+                hint = self._loc_hint or self._locate_seed
+                self._localizer = GlobalLocalizer(self.slam.grid, hint=hint)
+                if self._localizer.done:
+                    st.reason = ("自己位置の探索範囲に空きセルが無い。"
+                                 "地図の選択かクリックしたヒントを見直してください")
+                    return st
+
+            if not self._localizer.step(pts):
+                st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%）"
                 return st
 
-        if not self._localizer.step(pts):
-            st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%）"
-            return st
-
-        cands = self._localizer.candidates(3)
-        self._localizer = None
-        seeded = self._loc_hint is None and self._locate_seed is not None
-        if not cands:
-            if seeded:
-                self._locate_seed = None      # 種の周りに候補が無い。全域で探し直す
-            st.reason = "自己位置の候補が見つからない"
-            return st
+            cands = self._localizer.candidates(3)
+            self._localizer = None
+            if not cands:
+                if seeded:
+                    self._locate_seed = None      # 種の周りに候補が無い。全域で探し直す
+                st.reason = "自己位置の候補が見つからない"
+                return st
+            self._loc_cands, self._loc_scored = list(cands), []
 
         # ★ 粗探索（0.2m間隔・15°刻み）の得点だけで決めない。上位候補を
         #   それぞれ総当たり＋Gauss-Newton で仕上げ、**当たり率**で比べる。
         #   粗い尺度では並ぶ候補（オーバルの反対側の直線など）も、
-        #   仕上げるとはっきり差がつく（`slam2d/core/localize.py`参照）
-        scored = []
-        for c in cands:
-            ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw))
-            if ref is not None:
-                scored.append((ref.inlier, ref))
+        #   仕上げるとはっきり差がつく（`slam2d/core/localize.py`参照）。
+        #   1候補の仕上げは Pi で数十ms かかるので **1周期に1候補**（まとめると
+        #   指令が `cmd_deadman_ms` を超えて途切れる。停止中なので点群は変わらない）
+        c = self._loc_cands.pop(0)
+        ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw))
+        if ref is not None:
+            self._loc_scored.append((ref.inlier, ref))
+        if self._loc_cands:
+            st.reason = f"自己位置の候補を仕上げている（残り {len(self._loc_cands)}）"
+            return st
+        scored, self._loc_cands, self._loc_scored = self._loc_scored, None, []
         if not scored:
             if seeded:
                 self._locate_seed = None
@@ -661,8 +670,7 @@ class Slam2dRaceLine(Planner):
                 self._locate_seed = None      # 種が外れている。全域で探し直す
             st.reason = f"自己位置が見つからない（最良の当たり率 {best.inlier:.2f}）"
             return st
-        refined = best
-        self.slam.set_pose(*refined.pose)
+        self.slam.set_pose(*best.pose)
         self.phase = st.phase = RACE
         self._locate_seed = None
         self._hint = -1
@@ -674,9 +682,9 @@ class Slam2dRaceLine(Planner):
         # 呼び出し前の古い姿勢からの追跡マッチ、当然ながら未知の領域を指して
         # 失敗する）の値のまま残っている。ここで求め直した値に置き換えないと、
         # RACEへ切り替わった瞬間だけ「一致度0」を報告してしまう
-        st.match_score = refined.inlier
-        st.pose_x, st.pose_y, st.pose_yaw = refined.pose
-        st.reason = f"自己位置を復元した（一致度 {refined.inlier:.2f}）。走行を開始する"
+        st.match_score = best.inlier
+        st.pose_x, st.pose_y, st.pose_yaw = best.pose
+        st.reason = f"自己位置を復元した（一致度 {best.inlier:.2f}）。走行を開始する"
         return st
 
     # ── RACE ──
@@ -705,15 +713,7 @@ class Slam2dRaceLine(Planner):
         if self._off_route(st, pp, vs, p):
             return st
 
-        self._obs_pad = p["obstacle_pad"]
-        self._update_obstacles(scan)
-        st.obstacles = [v for o in self._obs for v in (o.x, o.y, o.r)]
-        hit, dist = obs_mod.blocking(
-            self._obs, self.path.xy, pp.index,
-            half_width=self.vehicle.half_width + p["line_margin"],
-            ahead_m=p["obstacle_stop"] + self.vehicle.front_overhang,
-            step=self.path.length / len(self.path),
-            skip_m=self.vehicle.front_overhang)
+        hit, dist = self._obstacle_ahead(st, scan, self.path, pp.index, p)
 
         st.ready = True
         st.target_speed = pp.speed
@@ -790,12 +790,28 @@ class Slam2dRaceLine(Planner):
             self._rejoins = 0                 # 経路に戻れたら数え直す
         return False
 
-    def _update_obstacles(self, scan: Scan) -> None:
-        pts = self.slam.deskew_scan(scan)
-        now = obs_mod.detect(self.slam.grid, pts, self.slam.pose,
-                             wall_pad=self._obs_pad)
+    def _obstacle_ahead(self, st: AutoState, scan: Scan, path: rl_mod.RaceLine, index: int,
+                        p: dict[str, float]) -> tuple[obs_mod.Obstacle | None, float]:
+        """障害物を検出して `st.obstacles` に載せ、経路の前方を塞ぐものとその距離を返す。"""
+        g = self.slam.grid
+        pad = p["obstacle_pad"]
+        key = (g.seq, pad)
+        if key != self._obs_free_key:
+            # 凍結地図では変わらない。毎周期作ると格子全体の膨張で数msかかる
+            self._obs_free = obs_mod.free_mask(g, pad)
+            self._obs_free_key = key
+        now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
+                             wall_pad=pad, free=self._obs_free)
         self._obs = obs_mod.confirm(now, self._prev_obs)
         self._prev_obs = now
+        st.obstacles = [v for o in self._obs for v in (o.x, o.y, o.r)]
+        n = len(path)
+        return obs_mod.blocking(
+            self._obs, path.xy, index,
+            half_width=self.vehicle.half_width + p["line_margin"],
+            ahead_m=p["obstacle_stop"] + self.vehicle.front_overhang,
+            step=path.length / (n if path.closed else max(1, n - 1)),
+            skip_m=self.vehicle.front_overhang, closed=path.closed)
 
     def _pool(self) -> ThreadPoolExecutor:
         if self._line_pool is None:

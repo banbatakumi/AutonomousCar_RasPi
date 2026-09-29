@@ -357,6 +357,8 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
         raise RouteError("ゴールへ行く経路が見つからない")
     tail = [np.array([[goal.x, goal.y]])] if end_at_goal else []
     length = best[0]
+    if end_at_goal:
+        length += math.hypot(goal.x - b.xy[0], goal.y - b.xy[1])     # 吸着点→ゴールの直線
     if not end_at_goal and extend > 0.0:
         e, d = best[1][-1]
         s_end = float(np.clip(b.s + d * extend, 0.0, geo.length(e)))

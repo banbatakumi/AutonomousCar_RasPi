@@ -1,8 +1,7 @@
 """`slam2d.core.Frontend`(車体非依存の汎用SLAM)を`raspi/auto/`のplannerから使う
 ための薄いブリッジ。
 
-`slam2d/`は`raspi.*`を一切importしない独立ライブラリとして設計してある
-（`/Users/banbatakumi/.claude/plans/wiggly-doodling-moth.md`参照）。逆方向
+`slam2d/`は`raspi.*`を一切importしない独立ライブラリとして設計してある。逆方向
 （`raspi/`側が`slam2d`を使う）はこのファイルに閉じ込め、以下の車体固有の
 変換・付加機能だけをここに置く:
 
@@ -20,15 +19,10 @@
 `on_vehicle_state()` を呼ぶ（持っていれば呼ぶダックタイピング）ので、
 このクラスはそれを `Frontend.add_twist()` へ渡すだけ。
 
-**これが無いと高速のヘアピンで破綻する**——実測（`sim/slam_bench.py` course3、
-2m/s）で、1周期一定 twist の近似だと残差RMSが10〜15cmに達し、位置合わせが
-誤った姿勢に貼り付いて自己位置が5m以上ずれた。点ごとの脱スキューを入れると
-同条件で4cmに収まる。
+**これが無いと高速のヘアピンで破綻する**（1周期一定 twist の近似では、2m/s の
+ヘアピンで自己位置が5m以上ずれた。`sim/slam_bench.py`）。
 
 ## ループ閉じ（`slam2d/backend/`・`slam2d/pipeline.SlamSystem`）を使う
-
-`g2opy`はPi 5(aarch64)向けビルド済みwheelがあり、実機（Python 3.13.5）で
-動作確認済み（`slam2d/tools/spike_g2o.py`、`raspi/requirements.txt`参照）。
 
 **ループクロージャの最適化・地図再構築は、EXPLORE→BUILD遷移の瞬間にのみ
 行う**（`SlamSystem.flush()`）。`raspi/auto/slam2d_raceline.py`の`_explore()`
@@ -48,6 +42,7 @@ import math
 import numpy as np
 
 from slam2d.backend.loop_detection import LoopDetectorConfig
+from slam2d.core.deskew import deskew, deskew_traj
 from slam2d.core.frontend import Frontend, FrontendConfig, FrontendUpdate
 from slam2d.core.grid import OccGrid
 from slam2d.core.motion import ExternalTwistModel, GyroBiasEstimator, SpeedScaleEstimator
@@ -103,6 +98,15 @@ def occgrid_from_trinary(trinary: np.ndarray, *, resolution: float,
     return grid
 
 
+#: LD06 の1周（1°刻み360点）の角度と、各点が属するセクタ（`Scan.sector_seen` の添字）
+_DEG = np.arange(360)
+_ANGLES = np.radians(_DEG.astype(np.float64))
+_SECTOR = ((_DEG - 1) % 360) // 30
+_NOT_SATURATED = np.zeros(360, dtype=bool)
+for _a in (_DEG, _ANGLES, _SECTOR, _NOT_SATURATED):
+    _a.flags.writeable = False              # 全周期で共有する。書き換えられたら例外で気づく
+
+
 def scan_to_raw(scan: Scan) -> RawScan:
     """`Scan`（raspi固有のLD06セクタ形式）を`RawScan`（slam2dの汎用形式）へ変換する。
 
@@ -111,16 +115,12 @@ def scan_to_raw(scan: Scan) -> RawScan:
     plannerだけ「空きとして彫ってはいけない場所」を彫ってしまう事故になる
     （`raspi/nav/deskew.py`冒頭docstringの「3種類の点を区別する」参照）。
     """
-    deg = np.arange(360)
     dist = np.asarray(scan.dist, dtype=np.float64)
     seen = np.asarray(scan.sector_seen, dtype=bool)
-    sector = ((deg - 1) % 360) // 30
-    valid = seen[sector] & (dist > 0.0)
+    valid = seen[_SECTOR] & (dist > 0.0)
     saturated = (np.asarray(scan.saturated, dtype=bool) if scan.saturated is not None
-                else np.zeros(360, dtype=bool))
-    angles = np.radians(deg.astype(np.float64))
-    t_point = point_times_ns(scan)
-    return RawScan(angles, dist, valid, saturated, t_point)
+                 else _NOT_SATURATED)
+    return RawScan(_ANGLES, dist, valid, saturated, point_times_ns(scan))
 
 
 class Slam2dNav:
@@ -128,9 +128,8 @@ class Slam2dNav:
     `slam2d.core.Frontend`を包む。
 
     `raspi/auto/raceline.py`が期待する最小限の面（`update`/`pose`/`grid`/
-    `trajectory`/`trajectory_array`/`lap_progress`/`distance`/`speed`/
-    `yaw_rate`/`freeze`/`reset`）だけを実装する。`close_loop()`は実装しない
-    （上のモジュールdocstring参照。呼び出し側でループ閉じ相当の処理を省く）。
+    `trajectory`/`trajectory_array`/`lap_progress`/`distance`/`freeze`/`reset`）
+    だけを実装する。ループ閉じは`freeze()`の中で1回だけ行う。
     """
 
     def __init__(self, *, resolution: float, size_m: float,
@@ -170,6 +169,10 @@ class Slam2dNav:
         #: RACE中はFalse（`Frontend`直結、追跡専用）に切り替える
         self._backend_active = self._loop_closure
         self.heading_total = 0.0
+        #: `distance` の増分計算（どの軌跡リストの何点目まで足したか）
+        self._dist = 0.0
+        self._dist_n = 0
+        self._dist_traj: list | None = None
 
     @property
     def loop_closures(self) -> int:
@@ -247,37 +250,23 @@ class Slam2dNav:
 
     @property
     def distance(self) -> float:
-        """累積走行距離[m]（軌跡の点間距離の総和で近似）。"""
+        """累積走行距離[m]（軌跡の点間距離の総和で近似）。
+
+        EXPLORE 中は毎周期読まれるので、増えた点のぶんだけ足す（ループ閉じで軌跡の
+        リストごと差し替わったら数え直す）。
+        """
         traj = self._fe.trajectory
-        if len(traj) < 2:
-            return 0.0
-        arr = np.asarray(traj, dtype=np.float64)
-        d = np.diff(arr[:, :2], axis=0)
-        return float(np.hypot(d[:, 0], d[:, 1]).sum())
+        if traj is not self._dist_traj or len(traj) < self._dist_n:
+            self._dist_traj, self._dist, self._dist_n = traj, 0.0, 0
+        for i in range(max(1, self._dist_n), len(traj)):
+            a, b = traj[i - 1], traj[i]
+            self._dist += math.hypot(b.x - a.x, b.y - a.y)
+        self._dist_n = len(traj)
+        return self._dist
 
     def lap_progress(self) -> float:
         """周回の進み具合[周]。累積回頭を360°で割ったもの（`Slam`と同じ定義）。"""
         return abs(self.heading_total) / (2.0 * math.pi)
-
-    @property
-    def speed(self) -> float:
-        return self._fe.motion.current_twist().vx
-
-    @property
-    def yaw_rate(self) -> float:
-        return self._fe.motion.current_twist().yaw_rate
-
-    @property
-    def max_range(self) -> float:
-        return self._max_range
-
-    @property
-    def lidar_x(self) -> float:
-        return self._lidar_x
-
-    @property
-    def lidar_y(self) -> float:
-        return self._lidar_y
 
     def freeze(self) -> None:
         """EXPLORE→BUILD遷移で地図構築を終える。
@@ -309,22 +298,15 @@ class Slam2dNav:
         return self._fe.refine(pts, guess)
 
     def deskew_scan(self, scan: Scan):
-        """`scan`を脱スキューする（障害物検出用）。
-
-        `raspi/auto/raceline.py`の`_update_obstacles()`が使う。`Frontend.update()`
-        の内部でも同じ脱スキューを1回行っているが、そちらは非公開の中間状態
-        なのでここで独立に呼び直す。**`Frontend`が持っている twist の履歴を
-        そのまま使う**ので、点ごとの補正も同じ条件になる。
+        """`scan`を脱スキューする（障害物検出・LOCATE用）。`Frontend`が持っている
+        twist の履歴を使うので、`Frontend.update()`内の脱スキューと同じ条件になる。
         """
-        from slam2d.core.deskew import deskew as slam2d_deskew
-        from slam2d.core.deskew import deskew_traj
-
         raw = scan_to_raw(scan)
         buf = self._fe._corrected_twists()
         t = raw.t_point_ns[raw.t_point_ns > 0]
         if buf is not None and t.size and buf.covers(int(t.min()), int(t.max())):
             return deskew_traj(raw, buf, mount_x=self._lidar_x, mount_y=self._lidar_y,
                                max_range=self._max_range)
-        return slam2d_deskew(raw, self._current_twist(),
+        return deskew(raw, self._current_twist(),
                              mount_x=self._lidar_x, mount_y=self._lidar_y,
                              max_range=self._max_range)
