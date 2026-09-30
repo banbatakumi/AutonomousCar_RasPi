@@ -329,6 +329,15 @@ class ParkToPoint(Planner):
         #: （食い違うと制動と再計画が交代して永久に進まない）
         self._plan_margin = 0.0
 
+    @property
+    def done(self) -> bool:
+        """目標の姿勢に着いた（引き継いだ側が元の走行へ戻る合図）。"""
+        return self._phase == "完了"
+
+    @property
+    def failed(self) -> bool:
+        return self._phase == "失敗"
+
     def request_park_target(self, x: float, y: float, yaw: float) -> None:
         self._park_pose = (0.0, 0.0, 0.0)
         self._target_in_park = (x, y, yaw)

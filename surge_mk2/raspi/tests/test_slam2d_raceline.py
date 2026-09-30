@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto import PLANNERS, make_planner, mapstore  # noqa: E402
-from raspi.auto.slam2d_raceline import BUILD, DONE, EXPLORE, LOCATE, RACE, Slam2dRaceLine  # noqa: E402
+from raspi.auto.slam2d_raceline import (BUILD, DONE, EXPLORE, LOCATE, RACE,  # noqa: E402
+                                        Slam2dRaceLine, forward_traj)
 from raspi.msgs import VehicleState  # noqa: E402
 from raspi.nav.grid import unpack_trinary  # noqa: E402
 from raspi.tests.test_nav import ROOM, make_room_scan  # noqa: E402
@@ -69,6 +70,46 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         self.assertEqual(st.phase, EXPLORE)
         self.assertIn("地図作成", st.reason)
         self.assertNotEqual((st.gap_start_deg, st.gap_end_deg), (0.0, 0.0))
+
+    def test_manual_explore_does_not_drive_and_still_maps(self):
+        """自動運転に入っていない EXPLORE は人のラジコンでの地図作成（指令を出さない）。"""
+        self.p.set_engaged(False)
+        st = self.drive(30, move=0.02)
+        self.assertEqual(st.phase, EXPLORE)
+        self.assertFalse(st.ready)
+        self.assertEqual((st.gap_start_deg, st.gap_end_deg), (0.0, 0.0))
+        self.assertIn("手動で地図作成", st.reason)
+        self.assertGreater(len(self.p.slam.trajectory), 3)
+
+    def test_manual_freeze_from_manual_explore_moves_to_build(self):
+        self.p.set_engaged(False)
+        self.drive(30, move=0.02)
+        self.p.request_freeze()
+        st = self.drive(1)
+        self.assertEqual(st.phase, BUILD)
+
+    def test_steering_while_stopped_warns(self):
+        self.p.set_engaged(False)
+        st = None
+        for i in range(40):
+            v = VehicleState(speed=0.0, yaw_rate=0.0, steer_actual=0.3 * (i % 2))
+            st = self.p.plan(make_room_scan(3.0, 2.0, 0.0), v, self.params, 0.1)
+        self.assertIn("据え切り", st.reason)
+
+    def test_disengage_during_explore_keeps_the_map(self):
+        self.drive(30, move=0.02)
+        n = len(self.p.slam.trajectory)
+        self.assertGreater(n, 3)
+        self.p.on_disengage()
+        self.assertEqual(self.p.phase, EXPLORE)
+        self.assertEqual(len(self.p.slam.trajectory), n)
+
+    def test_disengage_outside_explore_resets(self):
+        self.drive(30, move=0.02)
+        self.p.phase = DONE
+        self.p.on_disengage()
+        self.assertEqual(self.p.phase, EXPLORE)
+        self.assertEqual(len(self.p.slam.trajectory), 0)
 
     def test_map_grows_while_moving(self):
         """動きながら食わせると地図（占有格子）が育つ。"""
@@ -228,6 +269,23 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         self.assertEqual(self.p.phase, LOCATE)
 
 
+class TestForwardTraj(unittest.TestCase):
+    def test_reverse_and_turn_in_place_are_dropped(self):
+        # +x へ 1m 進み、0.5m 後退し、その場で向きを変え、+x へ 1.5m まで進み直す
+        fwd = [(0.1 * i, 0.0, 0.0) for i in range(11)]
+        back = [(1.0 - 0.1 * i, 0.0, 0.0) for i in range(1, 6)]
+        spin = [(0.5, 0.0, 0.1 * k) for k in range(1, 4)] + [(0.5, 0.0, 0.0)]
+        again = [(0.5 + 0.1 * i, 0.0, 0.0) for i in range(1, 11)]
+        out = forward_traj(np.array(fwd + back + spin + again))
+        self.assertTrue(np.all(np.diff(out[:, 0]) > 0))
+        self.assertAlmostEqual(out[-1, 0], 1.5)
+        self.assertEqual(len(out), 16)       # 0.0〜1.5 を 0.1 刻み（重複なし）
+
+    def test_short_input_is_returned_as_is(self):
+        one = np.array([[0.0, 0.0, 0.0]])
+        self.assertIs(forward_traj(one), one)
+
+
 class TestSlam2dNavDistance(unittest.TestCase):
     """`Slam2dNav.distance` の増分計算が、軌跡を全部足し直した値と一致するか。"""
 
@@ -321,7 +379,7 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertEqual(fresh.phase, EXPLORE)
         self.assertIn("読み込めない", fresh._load_error)
 
-    def _save_manual_map(self, name: str) -> None:
+    def _save_manual_map(self, name: str, raceline_xy=None) -> None:
         """`_drive_to_race()`（実際のEXPLORE走行によるSLAM追跡）は円弧軌道での
         追跡が本来の精度検証を意図していない合成シナリオのため、姿勢が地面
         真値から大きくずれうる（`_build_map`と違って`Frontend`が推測航法
@@ -334,11 +392,13 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
                          (2.95, 2.0, 0.0), (3.0, 1.95, 0.02)]:
             g.integrate(make_room_points(x, y, yaw), Pose2D(x, y, yaw))
         g.freeze()
+        if raceline_xy is None:
+            raceline_xy = np.array([[2.0, 1.5], [4.0, 1.5], [4.0, 2.5], [2.0, 2.5]])
         mapstore.save_map(
             name, resolution=g.resolution, origin_x=g.origin[0], origin_y=g.origin[1],
             trinary=g.trinary(), centerline_xy=np.zeros((0, 2)),
-            raceline_xy=np.array([[2.0, 1.5], [4.0, 1.5], [4.0, 2.5], [2.0, 2.5]]),
-            raceline_v=np.array([1.0, 1.0, 1.0, 1.0]))
+            raceline_xy=np.asarray(raceline_xy, dtype=np.float64),
+            raceline_v=np.ones(len(raceline_xy)))
 
     def test_locate_recovers_pose_and_reaches_race(self):
         self._save_manual_map("course_b")
@@ -361,6 +421,48 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertAlmostEqual(fresh.slam.pose.x, true_pose[0], delta=0.1)
         self.assertAlmostEqual(fresh.slam.pose.y, true_pose[1], delta=0.1)
         self.assertGreater(st.match_score, 0.5)
+
+    def _race_on_line(self, params) -> Slam2dRaceLine:
+        """車の居る (3.0, 2.0) を +x 向きに通る経路の地図で、RACE まで進めて経路に乗せる。"""
+        xy = np.array([[1.0 + 0.1 * i, 2.0] for i in range(41)]
+                      + [[5.0 - 0.1 * i, 3.0] for i in range(41)])
+        self._save_manual_map("course_line", raceline_xy=xy)
+        p = Slam2dRaceLine()
+        p.request_load("course_line")
+        p.request_locate_hint(3.0, 2.0)
+        for _ in range(30):
+            st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            if st.phase == RACE:
+                break
+        self.assertEqual(st.phase, RACE)
+        p._joined = True
+        return p
+
+    def test_lost_coasts_on_dead_reckoning_then_stops(self):
+        params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4})
+        p = self._race_on_line(params)
+        weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
+        states = [p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
+                  for _ in range(8)]
+        # 見失って 0.5s までは推測航法で経路を追い続ける（速度は上限まで）
+        self.assertTrue(states[0].ready)
+        self.assertLessEqual(states[0].target_speed, 0.4 + 1e-9)
+        self.assertIn("推測航法", states[0].reason)
+        # 超えたら止まる
+        self.assertFalse(states[-1].ready)
+        self.assertEqual(states[-1].target_speed, 0.0)
+        self.assertIn("信用できない", states[-1].reason)
+        # 自己位置が戻れば数え直して走る
+        st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+        self.assertTrue(st.ready)
+        self.assertEqual(p._coast_t, 0.0)
+
+    def test_coast_disabled_stops_immediately(self):
+        params = Slam2dRaceLine.merged({"coast_s": 0.0})
+        p = self._race_on_line(params)
+        weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
+        st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
+        self.assertFalse(st.ready)
 
     def test_locate_hint_is_recorded_and_resets_in_progress_search(self):
         p = self._drive_to_race()

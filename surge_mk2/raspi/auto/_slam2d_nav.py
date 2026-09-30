@@ -135,12 +135,15 @@ class Slam2dNav:
     def __init__(self, *, resolution: float, size_m: float,
                 lidar_x: float = 0.0, lidar_y: float = 0.0,
                 max_range: float = 12.0,
-                loop_closure: bool = ENABLE_LOOP_CLOSURE) -> None:
+                loop_closure: bool = ENABLE_LOOP_CLOSURE,
+                frontend: dict | None = None) -> None:
+        """:param frontend: `FrontendConfig`の上書き（評価・切り分け用。例 `{"gate_chi2": 16.3}`）"""
         self._resolution = resolution
         self._size_m = size_m
         self._lidar_x = lidar_x
         self._lidar_y = lidar_y
         self._max_range = max_range
+        self._frontend_kw = dict(frontend or {})
         self._raw_yaw_rate = 0.0
         self._raw_speed = 0.0
         #: ループ閉じを使うか（`ENABLE_LOOP_CLOSURE`が既定。評価・切り分け用に
@@ -155,7 +158,7 @@ class Slam2dNav:
         motion = ExternalTwistModel(self._current_twist, bias_estimator=GyroBiasEstimator(),
                                     scale_estimator=SpeedScaleEstimator())
         config = FrontendConfig(mount_x=self._lidar_x, mount_y=self._lidar_y,
-                                max_range=self._max_range)
+                                max_range=self._max_range, **self._frontend_kw)
         if self._loop_closure:
             # 最適化・地図の焼き直しは`freeze()`（EXPLORE→BUILD遷移、車両停止済み）
             # での明示的な`flush()`だけ。走行中は拘束を溜めるだけにする

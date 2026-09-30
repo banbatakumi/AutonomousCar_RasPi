@@ -54,7 +54,7 @@ import numpy as np
 
 from .deskew import TwistBuffer, deskew, deskew_traj, truncate
 from .surfmap import SurfaceMap
-from .grid import OccGrid
+from .grid import OccGrid, dilate
 from .localmap import LocalMap, LocalMapConfig
 from .motion import MotionModel
 from .register import RegisterConfig, RegisterResult, register, search
@@ -65,6 +65,8 @@ __all__ = ["FrontendConfig", "FrontendUpdate", "Frontend", "Keyframe", "rotate_i
            "inflate_info"]
 
 NS = 1_000_000_000
+#: 壁の向こうの判定で、LiDAR からこれより近い壁は無いものとして撃つ [m]（車体の上）
+_BEHIND_START = 0.2
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +112,16 @@ class FrontendConfig:
     restart_after: int = 15
     #: 凍結地図で対応を付ける距離の上限[m]
     frozen_max_dist: float = 0.5
+    #: 凍結地図で「壁の向こう」の点を位置合わせから外す余裕[m]。0で無効。
+    #: 低い壁越し・壁の切れ目越しに別の部屋を見た点は、予測姿勢から地図の壁まで
+    #: 撃ったレイの距離（期待距離）より**必ず遠い**。障害物は近くなるだけなので
+    #: 巻き込まない。★ `associate()`は既知の壁から`frozen_max_dist`以内に落ちた
+    #: 越境点を素通しする（壁に「よく合ってしまう」）ので、その前段で落とす
+    behind_margin: float = 0.3
+    #: 予測の向きのずれで正しい点を消さないよう、両隣にもレイを撃って最大を採る
+    behind_spread: float = math.radians(1.5)
+    #: 外れた割合がこれを超えたら予測の方を疑い、除去をやめて全点を使う
+    behind_max_ratio: float = 0.5
     #: キーフレーム間の拘束に足す「モデル化していない誤差」（`inflate_info`）
     edge_sigma_xy: float = 0.02
     edge_sigma_yaw: float = math.radians(0.3)
@@ -205,6 +217,10 @@ class Frontend:
         self.last: RegisterResult | None = None
         #: 受け入れた位置合わせの残差の移動平均[m]（見失い判定の基準線）
         self.rms_ref = self.config.register.sigma
+        self._behind_mask: np.ndarray | None = None
+        self._behind_seq = -1
+        #: 直近の周期に壁の向こうとして外した点の割合（診断）
+        self.behind_ratio = 0.0
 
     # ── 1周期 ──
 
@@ -265,6 +281,10 @@ class Frontend:
         d = np.hypot(pts.x, pts.y)
         sel = pts.hit & (d <= cfg.match_range)
         hx, hy = pts.x[sel], pts.y[sel]
+        self.behind_ratio = 0.0
+        if self.grid.frozen and cfg.behind_margin > 0.0 and hx.size > 0:
+            keep = self._not_behind_wall(hx, hy, pred)
+            hx, hy = hx[keep], hy[keep]
 
         field_ = self._field(pred)
         matched = field_ is not None and not field_.empty and hx.size > 0
@@ -337,6 +357,47 @@ class Frontend:
         limit = max(cfg.max_rms, self.rms_ref * cfg.rms_factor)
         return (r.used >= cfg.min_used and r.inlier >= cfg.min_inlier
                 and r.rms <= limit)
+
+    def _not_behind_wall(self, hx: np.ndarray, hy: np.ndarray, pred: Pose2D) -> np.ndarray:
+        """壁の向こうではない点（`True`）。凍結地図の壁までのレイの距離と比べる。
+
+        点は脱スキュー済みで`t_ref`時点の車体座標なので、レイも`t_ref`時点の
+        LiDAR の位置から撃つ（点との距離もそこから測るので、走行中の移動は相殺される）。
+        """
+        cfg = self.config
+        g = self.grid
+        if self._behind_mask is None or self._behind_seq != g.seq:
+            # 1セル太らせて角度分解能で壁の隙間を抜けないようにする（厚み3セル以上に
+            # なるので、レイは1セル刻みで撃ってよい）
+            self._behind_mask = dilate(g.wall_mask(), 1)
+            self._behind_seq = g.seq
+        c, s = math.cos(pred.yaw), math.sin(pred.yaw)
+        ox = pred.x + c * cfg.mount_x - s * cfg.mount_y
+        oy = pred.y + s * cfg.mount_x + c * cfg.mount_y
+        bx, by = hx - cfg.mount_x, hy - cfg.mount_y
+        r = np.hypot(bx, by)
+        ang = np.arctan2(by, bx) + pred.yaw
+        n = ang.size
+        rays = np.concatenate([ang - cfg.behind_spread, ang, ang + cfg.behind_spread])
+        # ★ レイは LiDAR から`_BEHIND_START`先から撃つ。車体の上に壁は無いが、地図には
+        #   出発前に止まっている間の自車の近くの点が壁として焼かれていることがあり、
+        #   起点から撃つと全点が「壁の向こう」になった（sim.slam_bench の course2/3）
+        t0 = _BEHIND_START
+        max_range = float(r.max()) + cfg.behind_margin + g.resolution
+        exp = g.raycast(ox + t0 * np.cos(rays), oy + t0 * np.sin(rays), rays, max_range,
+                        mask=self._behind_mask, fill=0, step=g.resolution)
+        # 太らせたぶん（1セル）壁が手前に来ているので戻す
+        expected = exp.reshape(3, n).max(axis=0) + g.resolution + t0
+        # `raycast`は格子の外を壁とみなすので、格子の外の点は判定しない
+        # （`associate()`が捨てるので無害。数えると除去率の上限を誤って超える）
+        col, row = g.to_cell(ox + r * np.cos(ang), oy + r * np.sin(ang))
+        keep = (r <= expected + cfg.behind_margin) | ~g.inside(col, row)
+        dropped = 1.0 - float(keep.mean())
+        if dropped > cfg.behind_max_ratio:
+            self.behind_ratio = dropped
+            return np.ones(n, dtype=bool)
+        self.behind_ratio = dropped
+        return keep
 
     def _relocalize(self, field_: SurfaceMap, hx, hy, center: Pose2D) -> RegisterResult | None:
         cfg = self.config
@@ -440,6 +501,8 @@ class Frontend:
         self.grid = grid
         self._frozen_field = None
         self._frozen_seq = -1
+        self._behind_mask = None
+        self._behind_seq = -1
         self.lost_streak = 0
 
     def refine(self, pts: ScanPoints, guess: Pose2D, *, trans: float | None = None,

@@ -314,7 +314,7 @@ class OccGrid:
 
     def raycast(self, ox, oy, angles: np.ndarray,
                 max_range: float, mask: np.ndarray | None = None,
-                fill: int = 1) -> np.ndarray:
+                fill: int = 1, step: float | None = None) -> np.ndarray:
         """`angles`（世界座標の絶対角[rad]）方向の壁までの距離[m]。
 
         `ox`/`oy`はスカラでも`angles`と同じ長さの配列でもよい。原点が点ごとに
@@ -326,11 +326,14 @@ class OccGrid:
         セルが粗いと穴の空いた壁ができ、レイがすり抜けて距離を過大に測る。
         太らせたぶん（`fill`セル）は距離に足して返す（穴を塞ぐのが目的で、
         壁を手前に動かすのが目的ではない）。
+
+        `step`（既定は半セル）は、太らせ済みで厚みのある`mask`なら1セルまで粗くできる。
         """
         grid = self.wall_mask() if mask is None else mask
         if fill > 0:
             grid = dilate(grid, fill)
-        step = self.resolution * _STEP_RATIO
+        if step is None:
+            step = self.resolution * _STEP_RATIO
         n_steps = max(1, int(max_range / step))
         t = np.arange(1, n_steps + 1, dtype=np.float32) * step
 

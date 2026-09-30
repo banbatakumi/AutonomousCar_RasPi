@@ -459,6 +459,18 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
       >
         地図を作成
       </button>
+      <button
+        title="自動運転に入れず、ラジコンで走らせて地図を作る。1周して出発点へ戻るか「地図を確定」で経路を作る"
+        onClick={() => {
+          clearPreview()
+          ch?.startSlam2dManualMap(mode)
+        }}
+      >
+        手動で地図作成
+      </button>
+      {phase === 'EXPLORE' && (
+        <button onClick={() => ch?.freezeMap()}>地図を確定</button>
+      )}
       <select value={selectedMap} onChange={(e) => selectMap(e.target.value)}>
         <option value="">（地図を選択）</option>
         {mapFiles.map((f) => (

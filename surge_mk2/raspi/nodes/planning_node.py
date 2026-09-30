@@ -201,8 +201,13 @@ class PlanningNode:
             m = self.sub.latest.get(TOPIC_E2E_MODEL)
             if m is not None:
                 self._apply_e2e_model(m)
-        if (changed or released) and self.planner is not None:
-            self.planner.reset()
+        if self.planner is not None:
+            # 解除だけなら、持っていれば `on_disengage`（slam2d 系は地図作成中の地図を残す）
+            on_disengage = getattr(self.planner, "on_disengage", None)
+            if released and not changed and on_disengage is not None:
+                on_disengage()
+            elif changed or released:
+                self.planner.reset()
         self._params = merged_params(c.mode, c.params)
 
     def _apply_route_select(self, m) -> None:

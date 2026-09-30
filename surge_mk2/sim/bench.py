@@ -162,7 +162,8 @@ class Bench:
                  routes: dict | None = None, events: list[tuple[float, str, str]] | None = None,
                  auto_race: bool = True, map_name: str | None = None,
                  trace: Path | None = None,
-                 locate_hint: tuple[float, float] | None = None) -> None:
+                 locate_hint: tuple[float, float] | None = None,
+                 obstacles: list[tuple[float, float, float]] | None = None) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -192,6 +193,13 @@ class Bench:
                     shutil.copy(f, mapstore.MAPS_DIR / f.name)
         self.link = create_sim_link(course, seed=seed, with_channel=False)
         self.sim = self.link.sim
+        if obstacles:
+            # 障害物はシムの世界（LiDAR と衝突判定が見る格子）にだけ刻む。`--map` と
+            # 併用すると凍結地図には無い物が経路の上に居る状況になる
+            from .track import stamp_discs
+            c = self.sim.course
+            stamp_discs(c.grid, c.origin, c.resolution, list(obstacles))
+            c._padded_grid = None
         self.planner = make_planner(mode)
         if self.planner is None:
             raise SystemExit(f"知らないモード: {mode!r}（候補 {', '.join(PLANNERS)}）")
@@ -635,6 +643,8 @@ def main() -> int:
     ap.add_argument("--locate-hint", default=None, metavar="X,Y",
                     help="--map のとき LOCATE に渡すおおよその位置（地図座標）。対称なコースで速く確実にする")
     ap.add_argument("--trace", default=None, help="RACE 中の速度などを CSV で書く（100Hz）")
+    ap.add_argument("--obstacle", action="append", default=[], metavar="X,Y,R",
+                    help="シムの世界座標に円柱の障害物を置く（繰り返し可。地図には入れないなら --map と併用）")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -664,7 +674,8 @@ def main() -> int:
               routes=routes, events=events, auto_race=not args.no_auto_race,
               map_name=args.map, trace=Path(args.trace) if args.trace else None,
               locate_hint=(tuple(float(v) for v in args.locate_hint.split(","))
-                           if args.locate_hint else None))
+                           if args.locate_hint else None),
+              obstacles=[tuple(float(v) for v in o.split(",")) for o in args.obstacle])
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)

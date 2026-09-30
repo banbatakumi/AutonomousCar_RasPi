@@ -50,7 +50,7 @@ import numpy as np
 from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
 from ..nav import centerline as cl_mod
 from ..nav import raceline as rl_mod
-from ..nav.purepursuit import follow, nearest_index
+from ..nav.purepursuit import nearest_index
 from ..nav.roadgraph import RoadGraph, build_graph
 from ..nav.route import (RouteError, RoutePath, Waypoint, build_raceline, enumerate_loops,
                          lap_time, plan_loop, plan_to, tightest_radius, waypoints_from_traj)
@@ -60,8 +60,8 @@ from ._slam2d_nav import occgrid_from_trinary
 from .base import ParamSpec
 from .park_to_point import ParkToPoint
 from .route_config import AUTO_KEY, ROUTE_KEYS, RouteConfig, Stop
-from .slam2d_raceline import (DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS, Slam2dRaceLine, kappa_max,
-                              line_kwargs, pursuit_config)
+from .slam2d_raceline import (DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS, Slam2dRaceLine,
+                              forward_traj, kappa_max, line_kwargs)
 
 __all__ = ["Slam2dRoute"]
 
@@ -519,7 +519,8 @@ class Slam2dRoute(Slam2dRaceLine):
                 self._build_error = f"経路を作れなかった: 軌跡が短すぎる（{len(lap)}点）"
                 st.reason = self._build_error
                 return st
-            self._cfg.explore_traj = RouteConfig.decimate(self.slam.trajectory_array())
+            self._cfg.explore_traj = RouteConfig.decimate(
+                forward_traj(self.slam.trajectory_array()))
             # 自動経路の元（経由点が無い間だけ使う。経路の設定には書かない）
             self._auto_start = _start_of(self._cfg.explore_traj)
             self._auto_wps = [] if self._auto_start is not None else waypoints_from_traj(lap)
@@ -559,6 +560,8 @@ class Slam2dRoute(Slam2dRaceLine):
 
     def _race(self, st: AutoState, scan: Scan, vs: VehicleState,
               p: dict[str, float], lost: bool) -> AutoState:
+        if self.phase == DETOUR:
+            return self._detour_step(st, scan, vs, p)
         if self.phase == PARK:
             return self._park_step(st, scan, vs, p)
         if self.phase == STOPPED:
@@ -580,31 +583,27 @@ class Slam2dRoute(Slam2dRaceLine):
             self._race_t = 0.0
             self.laps = 0
 
-        if lost or st.match_score < p["min_score"]:
-            st.reason = (f"自己位置が信用できない（一致度 {st.match_score:.2f} < "
-                         f"{p['min_score']:.2f}）")
+        coasting = self._localization_ok(st, lost, p)
+        if coasting is None:
             return st
 
         pose = self.slam.pose
-        sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=p["a_brake"])
-        if sw.switched:
-            self._hint = sw.hint
-            self._prev_idx = -1
-            self._map_dirty = True
-            self._route_ver += 1
-        self._switch_note = sw.reason or (self._switch_note if self._switch.pending else "")
+        if not coasting and self._avoid is None:
+            # 推測航法で続行している間は乗り換えない（乗り換え位置の判定が自己位置頼み）。
+            # 障害物を避けている間も乗り換えない（避ける経路の元が変わって外れる）
+            sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=p["a_brake"])
+            if sw.switched:
+                self._hint = sw.hint
+                self._prev_idx = -1
+                self._map_dirty = True
+                self._route_ver += 1
+            self._switch_note = sw.reason or (self._switch_note if self._switch.pending else "")
         path = self._switch.active
         assert path is not None
         self.path = path
         self._race_t += self._dt
 
-        cfg = pursuit_config(p, self.vehicle)
-        pp = follow(path, pose, vs.speed, vs.steer_actual, cfg, hint=self._hint)
-        self._hint = pp.index
-        st.target_steer = pp.steer
-        st.heading = pp.steer
-        st.cross_track = pp.cross_track
-        st.target_x, st.target_y = pp.target
+        pp, hit, dist = self._track(st, scan, vs, p, path, pose)
 
         if path.closed:
             self._count_lap(path, pp.index)
@@ -613,19 +612,14 @@ class Slam2dRoute(Slam2dRaceLine):
         if self._off_route(st, pp, vs, p):
             return st
 
-        hit, dist = self._obstacle_ahead(st, scan, path, pp.index, p)
-
         st.ready = True
         st.target_speed = pp.speed
         st.free_ahead = dist if hit is not None else math.inf
-        self._join_cap(st, pp, path, pose, p)
+        self._join_cap(st, pp, self._avoid_path or path, pose, p)
+        if coasting:
+            st.target_speed = min(st.target_speed, p["coast_speed"])
 
-        stop_at = p["obstacle_stop"]
-        if (stop_at > 0.0 and hit is not None
-                and dist - self.vehicle.front_overhang <= stop_at):
-            st.brake = True
-            st.target_speed = 0.0
-            st.reason = f"前方 {max(0.0, dist - self.vehicle.front_overhang):.1f}m に障害物。停止"
+        if self._obstacle_response(st, hit, dist, vs, p, path, pp.index):
             return st
 
         if not path.closed:
@@ -633,7 +627,8 @@ class Slam2dRoute(Slam2dRaceLine):
 
         st.reason = (f"{self._switch.active_key} {self.laps}周・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
-                     + ("" if self._joined else "・経路に乗るまで減速"))
+                     + ("" if self._joined else "・経路に乗るまで減速")
+                     + self._avoid_note() + self._coast_note(coasting, p))
         return st
 
     def _count_lap(self, path: rl_mod.RaceLine, index: int) -> None:

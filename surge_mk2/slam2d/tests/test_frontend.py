@@ -8,6 +8,7 @@
   しない→永久に見失う」の再発防止）
 - 凍結地図では地図を焼かない（追跡専用）
 - `apply_correction()`で地図・軌跡・今の姿勢がまとめて補正される
+- 凍結地図で壁の向こうに見えた点を位置合わせから外す（外しすぎたらやめる）
 """
 
 import math
@@ -135,6 +136,53 @@ class TestFrozenMap(unittest.TestCase):
         self.assertTrue(np.array_equal(hits, fe.grid.hits))
         self.assertEqual(len(fe.keyframes), n_kf)       # 凍結後はキーフレームも増えない
         self.assertAlmostEqual(fe.pose.x, 0.02 * 39, delta=0.03)
+
+
+def _frozen_tracker(**config_kwargs) -> Frontend:
+    """ROOM を20周期ぶん作って凍結した、+x へ 0.2m/s で進む追跡器。"""
+    motion = ExternalTwistModel(lambda: Twist2D(0.2, 0.0, 0.0))
+    fe = _make_frontend(motion=motion, kf_dist=0.05, **config_kwargs)
+    for i in range(20):
+        fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+    fe.grid.freeze()
+    return fe
+
+
+#: 上の壁の代わりに、その 0.4m 外側の壁（低い壁越しに見えた隣の部屋）が見えている
+GHOST_ROOM = [s for s in ROOM if s != (6.0, 4.0, 0.0, 4.0)] + [(6.0, 4.4, 0.0, 4.4)]
+
+
+class TestBehindWall(unittest.TestCase):
+    def test_clean_scan_keeps_almost_all_points(self):
+        fe = _frozen_tracker()
+        for i in range(20, 30):
+            u = fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+        self.assertFalse(u.lost)
+        self.assertLess(fe.behind_ratio, 0.03)
+
+    def test_points_seen_over_the_wall_are_dropped(self):
+        fe = _frozen_tracker()
+        for i in range(20, 30):
+            u = fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=GHOST_ROOM, max_range=8.0), 0.1)
+        self.assertFalse(u.lost)
+        self.assertGreater(fe.behind_ratio, 0.2)
+        self.assertAlmostEqual(fe.pose.x, 0.02 * 29, delta=0.02)
+        self.assertAlmostEqual(fe.pose.y, 0.0, delta=0.02)
+
+    def test_too_many_dropped_points_disable_the_filter(self):
+        # 真上（上の壁まで 2m）へ、壁の手前 1.9m の点と壁の向こう 2.4m の点
+        hx, hy = np.array([0.0, 0.0]), np.array([1.9, 2.4])
+        fe = _frozen_tracker(behind_max_ratio=0.6)
+        self.assertEqual(fe._not_behind_wall(hx, hy, fe.pose).tolist(), [True, False])
+        # 半分も外れるなら予測の方を疑い、全点を使う
+        fe = _frozen_tracker(behind_max_ratio=0.4)
+        self.assertEqual(fe._not_behind_wall(hx, hy, fe.pose).tolist(), [True, True])
+        self.assertAlmostEqual(fe.behind_ratio, 0.5)
+
+    def test_disabled_by_zero_margin(self):
+        fe = _frozen_tracker(behind_margin=0.0)
+        fe.update(make_raw_scan(3.0 + 0.02 * 20, 2.0, 0.0, segs=GHOST_ROOM, max_range=8.0), 0.1)
+        self.assertEqual(fe.behind_ratio, 0.0)
 
 
 class TestApplyCorrection(unittest.TestCase):

@@ -276,6 +276,41 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         self.assertEqual(fake.clear_calls, 1, "モード変更と同時だとclearが握り潰されている")
 
 
+class _FakeDisengagePlanner(_FakeFreezeClearPlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resets = 0
+        self.disengages = 0
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def on_disengage(self) -> None:
+        self.disengages += 1
+
+
+class TestDisengage(unittest.TestCase):
+    """自動運転の解除は `on_disengage` があればそちら（slam2d 系が地図作成中の地図を残す）。"""
+
+    def test_release_calls_on_disengage_instead_of_reset(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeDisengagePlanner()
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=False))
+        self.assertEqual((fake.disengages, fake.resets), (1, 0))
+
+    def test_planner_without_hook_is_reset(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeFreezeClearPlanner()
+        calls = []
+        fake.reset = lambda: calls.append(1)
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=False))
+        self.assertEqual(calls, [1])
+
+
 class TestE2EModelRouting(unittest.TestCase):
     """`e2e/model`（GUIが選んだモデル名）が対応する planner にだけ届くこと。"""
 

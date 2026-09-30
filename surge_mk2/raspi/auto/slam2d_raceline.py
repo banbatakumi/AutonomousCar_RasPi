@@ -32,15 +32,17 @@ from slam2d.core.types import Pose2D
 
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
+from ..nav import avoid as av_mod
 from ..nav import centerline as cl_mod
 from ..nav import obstacles as obs_mod
 from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
-from ..nav.purepursuit import PursuitConfig, follow
+from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from . import mapstore
 from ._slam2d_nav import Slam2dNav, occgrid_from_trinary
 from .base import ParamSpec, Planner
 from .follow_the_gap import FollowTheGap
+from .park_to_point import ParkToPoint
 
 __all__ = ["Slam2dRaceLine"]
 
@@ -50,6 +52,23 @@ __all__ = ["Slam2dRaceLine"]
 #: 走れるようにした意味が無くなる（人間が地図内の好きな場所へ車を置き直す間
 #: を作るため。バンビの指示、2026-09-03）
 EXPLORE, BUILD, DONE, LOCATE, RACE = "EXPLORE", "BUILD", "DONE", "LOCATE", "RACE"
+#: 横へ避けられない障害物・スタックを、Hybrid A*（`ParkToPoint`）で後退・切り返しも使って
+#: 抜けている段。抜けたら RACE へ戻る
+DETOUR = "DETOUR"
+#: 同じ所で Hybrid A* を試す回数の上限（走り出せたら数え直す）
+DETOUR_TRIES = 2
+#: 避ける経路を引くとき、検出した障害物の半径を何倍に扱うか（`_plan_avoid`）
+_OBS_GROW = 1.4
+#: 同じく半径の下限 [m]
+_OBS_MIN_R = 0.12
+#: Hybrid A* で抜けるときの到着の許容。経路に戻れればよいので駐車ほど詰めない
+#: （既定の駐車の許容だと、目標の手前で前後の切り返しを繰り返して終わらなかった）
+_DETOUR_POS_TOL = 0.10
+_DETOUR_YAW_TOL_DEG = 12.0
+#: Hybrid A* で抜ける時間の上限 [s]（超えたら失敗として止まって待つ）
+_DETOUR_MAX_S = 20.0
+#: 横へ避けられない障害物の手前で止まる距離（車体前端から）[m]
+_STOP_GAP = 0.35
 
 #: `raspi/auto/raceline.py`と同じ値（狭い分離帯コースを想定した刻み・広さ）
 MAP_RES = 0.025
@@ -81,6 +100,29 @@ def _polyline_length(xy: np.ndarray) -> float:
     d = np.roll(xy, -1, axis=0) - xy
     return float(np.hypot(d[:, 0], d[:, 1]).sum())
 
+def forward_traj(traj: np.ndarray, min_step: float = 0.02) -> np.ndarray:
+    """軌跡 (N, 3) から、直前に残した点より**車の向きに前へ**進んだ点だけを残す。
+
+    人のラジコンで地図を作ると、停止・その場の切り返し・後退が混ざる。そのまま
+    中心線や道路グラフの「通ってよい向き」に使うと、折り返しで中心線がよじれ、
+    後退の票で向きを逆に固定しかねない。後退してから前進し直した区間は、
+    後退を始めた点を追い越すまで捨てられる（同じ道の重複も消える）。
+    """
+    if len(traj) < 2:
+        return traj
+    keep = [0]
+    for i in range(1, len(traj)):
+        px, py = traj[keep[-1], 0], traj[keep[-1], 1]
+        x, y, yaw = traj[i]
+        dx, dy = x - px, y - py
+        if math.hypot(dx, dy) < min_step:
+            continue
+        if dx * math.cos(yaw) + dy * math.sin(yaw) <= 0.0:
+            continue
+        keep.append(i)
+    return traj[keep]
+
+
 def _heading_err(path: rl_mod.RaceLine, i: int, yaw: float) -> float:
     """経路の `i` 番目の接線と車の向きの差 [rad]（絶対値）。"""
     n = len(path)
@@ -111,6 +153,7 @@ GROUP_LINE = "経路生成"
 GROUP_SPEED = "本番走行: 速度"
 GROUP_STEER = "本番走行: 舵"
 GROUP_SAFETY = "本番走行: 安全"
+GROUP_AVOID = "本番走行: 障害物の回避"
 
 #: 速度プロファイルを決める設定（変わったら `_retime` で作り直す）
 SPEED_KEYS = ("v_max", "v_min", "a_lat", "a_accel", "a_brake")
@@ -238,7 +281,15 @@ class Slam2dRaceLine(Planner):
                        "大回りして壁に当たった（toyota/toyota2 の sim.bench で実測、2026-09-29）"),
         ParamSpec(group=GROUP_SAFETY, key="min_score", label="自己位置の信頼下限", min=0.1, max=0.8,
                   default=0.35, step=0.01, unit="",
-                  note="★スキャンマッチの一致度がこれを切ったら止まる"),
+                  note="★スキャンマッチの一致度がこれを切ったら（見失いが推測航法での続行の"
+                       "時間を超えたら）止まる"),
+        ParamSpec(group=GROUP_SAFETY, key="coast_s", label="推測航法で続行する時間", min=0.0, max=3.0,
+                  default=1.5, step=0.1, unit="s",
+                  note="★自己位置を見失っても（壁越しに別の部屋が見えた等）、これ以内は推測航法"
+                       "（車速+ジャイロ）の姿勢で経路を追い続ける。0で従来どおり即停止"),
+        ParamSpec(group=GROUP_SAFETY, key="coast_speed", label="推測航法中の速度上限", min=0.2, max=2.0,
+                  default=0.8, step=0.05, unit="m/s",
+                  note="推測航法で続行している間はこの速度に抑える"),
         ParamSpec(group=GROUP_SAFETY, key="max_cross", label="横偏差の上限", min=0.1, max=1.5, default=0.5,
                   step=0.05, unit="m", note="経路からこれだけ離れたら止まる"),
         ParamSpec(group=GROUP_SAFETY, key="obstacle_stop", label="障害物で止まる距離", min=0.0, max=4.0,
@@ -247,6 +298,32 @@ class Slam2dRaceLine(Planner):
         ParamSpec(group=GROUP_SAFETY, key="obstacle_pad", label="壁の近くを無視する幅", min=0.05, max=0.6,
                   default=0.25, step=0.01, unit="m",
                   note="★壁からこの範囲に落ちた点は動的障害物と見なさない"),
+        ParamSpec(group=GROUP_AVOID, key="obstacle_avoid", label="障害物を避ける", min=0, max=1, step=1,
+                  default=0, unit="",
+                  note="★1で、経路を塞ぐ障害物を横へ避ける（止まらずに済むなら止まらない）。"
+                       "避けられなければ止まり、Hybrid A* で後退・切り返しも使って抜ける。"
+                       "0 なら従来どおり（『障害物で止まる距離』だけ）"),
+        ParamSpec(group=GROUP_AVOID, key="avoid_margin", label="障害物との余裕", min=0.0, max=0.4,
+                  default=0.10, step=0.01, unit="m",
+                  note="障害物の縁から車体側面までの余裕。自己位置と障害物の位置の誤差をここで飲む"),
+        ParamSpec(group=GROUP_AVOID, key="avoid_clear", label="車体外形の合格線", min=0.0, max=0.2,
+                  default=0.05, step=0.01, unit="m",
+                  note="避ける経路で車体外形と壁・障害物の距離がこれを切ったら、その避け方は使わない"),
+        ParamSpec(group=GROUP_AVOID, key="avoid_speed", label="避ける間の速度上限", min=0.2, max=2.5,
+                  default=1.0, step=0.05, unit="m/s",
+                  note="横へずれて障害物の横を抜ける区間はこの速度に抑える（手前から減速する）"),
+        ParamSpec(group=GROUP_AVOID, key="avoid_len_min", label="避け始める長さの下限", min=0.3, max=3.0,
+                  default=0.8, step=0.1, unit="m",
+                  note="横へずれ始めてからずれ切るまでの距離の下限。速いほど・ずれが大きいほど長くなる"),
+        ParamSpec(group=GROUP_AVOID, key="stuck_s", label="スタックとみなす時間", min=0.5, max=5.0,
+                  default=1.5, step=0.1, unit="s",
+                  note="進めと言っているのに止まっている時間がこれを超えたら、Hybrid A* で抜ける"),
+        ParamSpec(group=GROUP_AVOID, key="detour_ahead", label="抜けた先の目標の距離", min=0.3, max=2.0,
+                  default=1.2, step=0.1, unit="m",
+                  note="Hybrid A* の目標を、障害物の後ろ（車体後端が抜ける位置）からこれだけ先の経路上に置く"),
+        ParamSpec(group=GROUP_AVOID, key="detour_budget_ms", label="Hybrid A* の時間予算", min=20.0,
+                  max=200.0, default=60.0, step=10.0, unit="ms",
+                  note="★1回の経路探索の上限。Pi では指令が150ms途切れると止まる（デッドマン）"),
     )
 
     #: 保存済み地図を読んだとき、中心線からラインを引き直すか（`slam2d_route` は自前で作る）
@@ -255,6 +332,10 @@ class Slam2dRaceLine(Planner):
     def __init__(self) -> None:
         self._line_pool: ThreadPoolExecutor | None = None
         self._last_p: dict[str, float] | None = None
+        #: 自動運転に入っているか（`planning_node` が毎周期 `set_engaged` で渡す）。
+        #: **入っていない EXPLORE は人のラジコンでの地図作成**として扱う。
+        #: `set_engaged` を呼ばない呼び出し元（ベンチ・テスト）では従来どおり FTG で走る
+        self._engaged = True
         self.vehicle = Vehicle.load()
         self.ftg = FollowTheGap()
         self.slam = Slam2dNav(resolution=MAP_RES, size_m=MAP_SIZE_M,
@@ -285,6 +366,26 @@ class Slam2dRaceLine(Planner):
         #: 経路から外れて止まっている時間 [s] と、乗り直した回数（`_off_route`）
         self._off_t = 0.0
         self._rejoins = 0
+        #: 自己位置を信用できない状態が続いている時間 [s]（`_localization_ok`）
+        self._coast_t = 0.0
+        #: 停車中に舵を動かしている時間 [s]（手動の地図作成での据え切りの注意）と直前の舵角
+        self._still_steer_t = 0.0
+        self._prev_steer = 0.0
+        #: 障害物を避けている一時経路（`avoid.plan_offset`）と、その元にした経路
+        self._avoid: av_mod.AvoidPlan | None = None
+        self._avoid_path: rl_mod.RaceLine | None = None
+        self._avoid_base: rl_mod.RaceLine | None = None
+        self._avoid_ms = 0.0
+        #: 壁と車体外形の余裕を測る距離場（地図の版ごとに作る、`_body_check`）
+        self._body: rl_mod._BodyCheck | None = None
+        self._body_seq = -1
+        #: 塞がれて止まっている時間・進めずに止まっている時間 [s]
+        self._blocked_t = 0.0
+        self._stuck_t = 0.0
+        #: Hybrid A* で抜けている（`DETOUR`）。同じ障害物で試した回数（失敗が続いたら止まって待つ）
+        self._detour: ParkToPoint | None = None
+        self._detour_error = ""
+        self._detour_tries = 0
         self._dt = 0.0
         #: 今の経路の速度プロファイルを作った設定（`_retime`）
         self._speed_key: tuple | None = None
@@ -324,6 +425,21 @@ class Slam2dRaceLine(Planner):
         受けておかないと1周100msのあいだの回頭の変化が追えない。
         """
         self.slam.on_vehicle_state(vs)
+
+    def set_engaged(self, engaged: bool) -> None:
+        self._engaged = bool(engaged)
+
+    def on_disengage(self) -> None:
+        """自動運転を解いた（`planning_node` が `reset()` の代わりに呼ぶ）。
+
+        地図作成中なら**地図を残して**人のラジコンでの地図作成へ移る——FTG で走らせて
+        いる途中に人が操作を奪っても、それまでの地図を捨てない。それ以外の段は
+        従来どおり作り直す（次に engage したとき前回の舵の続きから動き出さないため）。
+        """
+        if self.phase == EXPLORE and self.slam.trajectory:
+            self.ftg.reset()
+            return
+        self.reset()
 
     def request_freeze(self) -> None:
         self._freeze_requested = True
@@ -444,6 +560,9 @@ class Slam2dRaceLine(Planner):
                 return st
             lap_msg = f"{self.laps}周目を検出した"
 
+        if not self._engaged:
+            return self._explore_manual(st, vs, p, dt, lost, lap_msg)
+
         fp = FollowTheGap.merged({
             "max_speed": p["explore_speed"],
             "gap_min": p["explore_gap_min"],
@@ -475,6 +594,36 @@ class Slam2dRaceLine(Planner):
             st.reason = f"{head}・{lap_msg}"
         else:
             st.reason = f"{head}・{sub.reason}"
+        return st
+
+    def _explore_manual(self, st: AutoState, vs: VehicleState, p: dict[str, float], dt: float,
+                        lost: bool, lap_msg: str) -> AutoState:
+        """人のラジコンで地図を作っている（自動運転に入っていない EXPLORE）。
+
+        指令は出さない（`ready=False`。MANUAL の指令はそのまま STM32 へ行く）。SLAM は
+        `plan()` の冒頭で走り方に関係なく更新されているので、ここは案内を出すだけ。
+        周回の自動判定もそのまま効き、出発点へ戻れば BUILD へ進む。
+        """
+        moving = abs(vs.steer_actual - self._prev_steer) > math.radians(1.0)
+        self._prev_steer = vs.steer_actual
+        if abs(vs.speed) < 0.03 and moving:
+            self._still_steer_t += dt
+        else:
+            self._still_steer_t = max(0.0, self._still_steer_t - dt)
+
+        want = int(p["explore_laps"])
+        head = (f"手動で地図作成 {self.laps}/{want}周（{st.lap_progress:.2f}周ぶん回頭）。"
+                f"ラジコンで{want}周走って出発点へ戻るか、『地図を確定』を押す")
+        notes = []
+        if self.slam.grid.out_of_bounds > OUT_OF_BOUNDS_WARN:
+            notes.append(f"★地図からはみ出している（{self.slam.grid.out_of_bounds}本）")
+        if lost:
+            notes.append("自己位置を見失っている（ゆっくり走る）")
+        if self._still_steer_t > 2.0:
+            notes.append("★停車中の据え切りはステアMDが過熱する。走りながら切る")
+        if lap_msg:
+            notes.append(lap_msg)
+        st.reason = "・".join([head] + notes)
         return st
 
     def _check_lap(self, p: dict[str, float]) -> tuple[bool, bool]:
@@ -599,8 +748,8 @@ class Slam2dRaceLine(Planner):
         if len(self._lap_idx) >= 2:
             a, b = self._lap_idx[-2], self._lap_idx[-1]
             if b - a >= 20:
-                return traj[a:b]
-        return traj
+                return forward_traj(traj[a:b])
+        return forward_traj(traj)
 
     # ── LOCATE ──
 
@@ -691,51 +840,345 @@ class Slam2dRaceLine(Planner):
 
     def _race(self, st: AutoState, scan: Scan, vs: VehicleState,
               p: dict[str, float], lost: bool) -> AutoState:
+        if self.phase == DETOUR:
+            return self._detour_step(st, scan, vs, p)
         if self.path is None:
             st.reason = "経路がまだ無い"
             return st
         self._retime(p)
 
-        if lost or st.match_score < p["min_score"]:
-            st.reason = (f"自己位置が信用できない（一致度 {st.match_score:.2f} < "
-                         f"{p['min_score']:.2f}）")
+        coasting = self._localization_ok(st, lost, p)
+        if coasting is None:
             return st
 
+        pose = self.slam.pose
+        pp, hit, dist = self._track(st, scan, vs, p, self.path, pose)
+
+        if self._off_route(st, pp, vs, p):
+            return st
+
+        st.ready = True
+        st.target_speed = pp.speed
+        st.free_ahead = dist if hit is not None else math.inf
+        self._join_cap(st, pp, self._avoid_path or self.path, pose, p)
+        if coasting:
+            st.target_speed = min(st.target_speed, p["coast_speed"])
+
+        if self._obstacle_response(st, hit, dist, vs, p, self.path, pp.index):
+            return st
+
+        st.reason = (f"{self.laps}周走行中・速度 {st.target_speed:.2f} m/s・"
+                     f"横偏差 {pp.cross_track * 100:+.0f}cm"
+                     + ("" if self._joined else "・経路に乗るまで減速")
+                     + self._avoid_note() + self._coast_note(coasting, p))
+        return st
+
+    # ── 障害物: 検出・横へ避ける・止まる・Hybrid A* で抜ける（`slam2d_route` と共通） ──
+
+    def _track(self, st: AutoState, scan: Scan, vs: VehicleState, p: dict[str, float],
+               path: rl_mod.RaceLine, pose):
+        """経路（障害物を避けている間は一時経路）を追い、前方を塞ぐ障害物を調べる。
+
+        塞がれていて「避ける」が有効なら、その場で横へ避ける一時経路を引いて乗り換える
+        （止まらずに済むなら止まらない）。戻り値は `(追従の結果, 塞ぐ障害物, そこまでの距離)`。
+        """
         cfg = pursuit_config(p, self.vehicle)
-        pp = follow(self.path, self.slam.pose, vs.speed, vs.steer_actual,
-                    cfg, hint=self._hint)
+        self._detect_obstacles(st, scan, p)
+        if self._avoid is not None and (self._avoid_base is not path
+                                        or self._avoid_passed(self._hint)):
+            self._clear_avoid()
+        followed = self._avoid_path or path
+        pp = follow(followed, pose, vs.speed, vs.steer_actual, cfg, hint=self._hint)
+        hit, dist = self._blocking(followed, pp.index, vs, p)
+        if hit is not None and self._still_clear(hit, pp.index):
+            hit, dist = None, math.inf
+        if (hit is not None and p["obstacle_avoid"] > 0
+                and self._plan_avoid(path, pp.index, hit, vs, p, kappa_frac=0.6)):
+            followed = self._avoid_path
+            pp = follow(followed, pose, vs.speed, vs.steer_actual, cfg, hint=pp.index)
+            hit, dist = self._blocking(followed, pp.index, vs, p)
         self._hint = pp.index
         st.target_steer = pp.steer
         st.heading = pp.steer
         st.cross_track = pp.cross_track
         st.target_x, st.target_y = pp.target
+        return pp, hit, dist
 
-        if self._off_route(st, pp, vs, p):
-            return st
+    def _detect_obstacles(self, st: AutoState, scan: Scan, p: dict[str, float]) -> None:
+        """障害物を検出して `self._obs`（2周期続いたもの）と `st.obstacles` に載せる。"""
+        g = self.slam.grid
+        pad = p["obstacle_pad"]
+        key = (g.seq, pad)
+        if key != self._obs_free_key:
+            # 凍結地図では変わらない。毎周期作ると格子全体の膨張で数msかかる
+            self._obs_free = obs_mod.free_mask(g, pad)
+            self._obs_free_key = key
+        now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
+                             wall_pad=pad, free=self._obs_free)
+        self._obs = obs_mod.confirm(now, self._prev_obs)
+        self._prev_obs = now
+        st.obstacles = [v for o in self._obs for v in (o.x, o.y, o.r)]
 
-        hit, dist = self._obstacle_ahead(st, scan, self.path, pp.index, p)
+    def _blocking(self, path: rl_mod.RaceLine, index: int, vs: VehicleState,
+                  p: dict[str, float]) -> tuple[obs_mod.Obstacle | None, float]:
+        """経路の前方を塞ぐ障害物とその距離（base_link から経路に沿って）。
 
-        st.ready = True
-        st.target_speed = pp.speed
-        st.free_ahead = dist if hit is not None else math.inf
-        self._join_cap(st, pp, self.path, self.slam.pose, p)
+        避けるときは、止まれる距離に加えて**避け始める長さ**ぶん先まで見る
+        （`obstacle_stop` の距離だけでは、見つけた時にはもう横へずれる余地が無い）。
+        """
+        ahead = p["obstacle_stop"]
+        if p["obstacle_avoid"] > 0:
+            v = max(vs.speed, 0.0)
+            ahead = max(ahead, v * v / (2.0 * max(p["a_brake"], 0.1)) + 0.6 * v + 1.5)
+        n = len(path)
+        return obs_mod.blocking(
+            self._obs, path.xy, index,
+            half_width=self.vehicle.half_width + p["line_margin"],
+            ahead_m=ahead + self.vehicle.front_overhang,
+            step=path.length / (n if path.closed else max(1, n - 1)),
+            skip_m=self.vehicle.front_overhang, closed=path.closed)
 
+    def _obstacle_response(self, st: AutoState, hit: obs_mod.Obstacle | None, dist: float,
+                           vs: VehicleState, p: dict[str, float], path: rl_mod.RaceLine,
+                           index: int) -> bool:
+        """塞がれていたら止まる。止まっても避けられなければ Hybrid A* で抜ける。止めたら True。"""
+        avoid_on = p["obstacle_avoid"] > 0 and path.closed
+        if hit is None:
+            self._blocked_t = 0.0
+            # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）
+            if avoid_on and st.target_speed > 0.1 and abs(vs.speed) < 0.03:
+                self._stuck_t += self._dt
+            else:
+                self._stuck_t = 0.0
+                if abs(vs.speed) > 0.2:
+                    self._detour_tries = 0          # 走り出せたら数え直す
+            if avoid_on and self._stuck_t > p["stuck_s"] and self._detour_tries < DETOUR_TRIES:
+                self._start_detour(st, path, index, None, 0.0, p, "進めない（スタック）")
+                return True
+            return False
+
+        self._stuck_t = 0.0
+        front = self.vehicle.front_overhang
+        gap = max(0.0, dist - front)
         stop_at = p["obstacle_stop"]
-        if (stop_at > 0.0 and hit is not None
-                and dist - self.vehicle.front_overhang <= stop_at):
-            st.brake = True
-            st.target_speed = 0.0
-            ang = math.degrees(math.atan2(hit.y - st.pose_y, hit.x - st.pose_x)
-                               - st.pose_yaw)
-            ang = (ang + 180.0) % 360.0 - 180.0
-            st.reason = (f"前方 {max(0.0, dist - self.vehicle.front_overhang):.1f}m "
-                         f"（{ang:+.0f}°）に障害物。停止")
-            return st
+        if avoid_on:
+            # 横へ避けられなかった（避けていればここへは来ない）。障害物の手前
+            # `_STOP_GAP` で止まれる速度を上限にして、滑らかに減速する。★制動距離だけで
+            # 止め始めると、1.9m/s のまま 0.8m 手前まで来てから急制動した
+            a = max(p["a_brake"], 0.1)
+            room = max(0.0, gap - _STOP_GAP - max(vs.speed, 0.0) * p["delay_s"])
+            st.target_speed = min(st.target_speed, math.sqrt(2.0 * a * room))
+            stop_at = max(stop_at, _STOP_GAP + 0.05)
+        if stop_at <= 0.0 or gap > stop_at:
+            if avoid_on:
+                st.reason = f"前方 {gap:.1f}m に避けられない障害物。止まれる速度へ減速"
+                return True
+            return False
+        st.brake = True
+        st.target_speed = 0.0
+        ang = math.degrees(math.atan2(hit.y - st.pose_y, hit.x - st.pose_x) - st.pose_yaw)
+        ang = (ang + 180.0) % 360.0 - 180.0
+        st.reason = f"前方 {gap:.1f}m（{ang:+.0f}°）に障害物。停止"
+        if not avoid_on or abs(vs.speed) >= 0.05:
+            return True
+        # 止まってから: 曲がれる限界の近くまで使って横へ避け直す → だめなら Hybrid A*
+        self._blocked_t += self._dt
+        if self._blocked_t >= 0.5 and self._plan_avoid(path, index, hit, vs, p, kappa_frac=0.9):
+            st.reason += "。止まってから避ける経路を引いた"
+            self._blocked_t = 0.0
+        elif self._blocked_t >= 1.0 and self._detour_tries < DETOUR_TRIES:
+            self._start_detour(st, path, index, hit, dist, p, "横へ避けられない")
+        elif self._detour_tries >= DETOUR_TRIES:
+            st.reason += (f"。Hybrid A* でも{DETOUR_TRIES}回抜けられなかったので待つ"
+                          + (f"（{self._detour_error}）" if self._detour_error else ""))
+        return True
 
-        st.reason = (f"{self.laps}周走行中・速度 {st.target_speed:.2f} m/s・"
-                     f"横偏差 {pp.cross_track * 100:+.0f}cm"
-                     + ("" if self._joined else "・経路に乗るまで減速"))
-        return st
+    def _plan_avoid(self, path: rl_mod.RaceLine, index: int, hit: obs_mod.Obstacle,
+                    vs: VehicleState, p: dict[str, float], *, kappa_frac: float) -> bool:
+        if not path.closed:
+            return False                  # 停止点へ向かう開いた経路では止まるだけ
+        t0 = time.perf_counter()
+        v = self.vehicle
+        cfg = av_mod.AvoidConfig(
+            half_width=v.half_width, front=v.front_overhang, rear=v.rear_overhang,
+            kappa_max=kappa_max(v), footprint=tuple(v.footprint),
+            # 避けた後の経路で `_blocking` が同じ障害物を拾わないよう、経路の余裕より広く取る
+            margin=max(p["avoid_margin"], p["line_margin"]) + 0.01,
+            clear=p["avoid_clear"], len_min=p["avoid_len_min"], kappa_frac=kappa_frac)
+
+        speed = max(vs.speed, 0.0)
+        ahead = speed * speed / (2.0 * max(p["a_brake"], 0.1)) + 0.6 * speed + 3.5
+        # ★ 検出した中心は**見えている表面の点の重心**で、実物の中心より手前に寄る。円柱の
+        #   半周が見えていると、実物は重心から推定半径の約1.4倍まで広がる。そのぶん大きく
+        #   扱わないと、避けている途中で見る角度が変わるたびに「まだ塞いでいる」と判定されて
+        #   止まった（sim.bench の toyota、半径10cmの円柱）
+        #   遠くで見つけたときは点が少なく半径を大きく過小評価する（10cm の円柱が 3.6cm に
+        #   見えた）ので下限を置く
+        def grown(o: obs_mod.Obstacle) -> obs_mod.Obstacle:
+            return obs_mod.Obstacle(o.x, o.y, max(_OBS_GROW * o.r, _OBS_MIN_R), o.n)
+        grow = [grown(o) for o in self._obs]
+        target = grown(hit)
+        plan = av_mod.plan_offset(path, index, target, grow, self._body_check(), cfg,
+                                  v_now=speed, ahead_m=ahead)
+        self._avoid_ms = (time.perf_counter() - t0) * 1000.0
+        if plan is None:
+            return False
+        rl = rl_mod.retime(plan.path, **speed_kwargs(p, self.vehicle))
+        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["avoid_speed"], p["a_brake"])
+        self._avoid, self._avoid_base = plan, path
+        self._map_dirty = True
+        return True
+
+    def _blend_back(self, path: rl_mod.RaceLine, p: dict[str, float]) -> None:
+        """今の横ずれから滑らかに経路へ戻る一時経路に乗せる（`avoid.blend_in`）。"""
+        if not path.closed:
+            return
+        x, y, _ = self.slam.pose
+        j = nearest_index(path, x, y)
+        nrm = cl_mod.normals(path.xy)[j]
+        d0 = float((x - path.xy[j, 0]) * nrm[0] + (y - path.xy[j, 1]) * nrm[1])
+        plan = av_mod.blend_in(path, j, d0, max(1.5, 6.0 * abs(d0)), self._body_check())
+        rl = rl_mod.retime(plan.path, **speed_kwargs(p, self.vehicle))
+        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["join_speed"], p["a_brake"])
+        self._avoid, self._avoid_base = plan, path
+        self._hint = j
+        self._map_dirty = True
+
+    def _still_clear(self, hit: obs_mod.Obstacle, index: int) -> bool:
+        """避けている障害物が「塞いでいる」と出ても、避ける経路の残りで車体が当たらないなら True。
+
+        ★ 遠くで見つけたときは点が少なく半径を小さく見積もる。近づいて見積もりが大きく
+        なると、帯（車体半幅＋余裕＋半径）の判定では「まだ塞いでいる」と出て、避けている
+        途中で止まった（sim.bench の toyota で2周目）。当たるかどうかを今の見積もりで直接測る。
+        """
+        a = self._avoid
+        if a is None or a.obstacle is None or self._avoid_path is None:
+            return False
+        if math.hypot(hit.x - a.obstacle.x, hit.y - a.obstacle.y) > 0.35 + hit.r:
+            return False                       # 別の障害物
+        n = len(self._avoid_path)
+        end = int(a.window[-1])
+        k = (end - index) % n
+        idx = (index + np.arange(k + 2)) % n
+        clr = av_mod.clearance_along(self._avoid_path.xy[idx], self._footprint(), [hit])
+        return clr >= 0.02
+
+    def _avoid_passed(self, index: int) -> bool:
+        """車が避ける窓の終わりを過ぎたか（元の経路へ戻してよい）。"""
+        assert self._avoid is not None and self._avoid_path is not None
+        n = len(self._avoid_path)
+        d = (index - int(self._avoid.window[-1])) % n
+        return 0 < d < n // 2
+
+    def _clear_avoid(self) -> None:
+        self._avoid = self._avoid_path = self._avoid_base = None
+        self._map_dirty = True
+
+    def _avoid_note(self) -> str:
+        if self._avoid is None:
+            return ""
+        if self._avoid.obstacle is None:
+            return f"・経路へ戻っている（横ずれ {self._avoid.offset * 100:+.0f}cm から）"
+        side = "左" if self._avoid.offset > 0 else "右"
+        return (f"・★障害物を{side}へ {abs(self._avoid.offset) * 100:.0f}cm 避けている"
+                f"（余裕 {self._avoid.clearance * 100:.0f}cm・計算 {self._avoid_ms:.0f}ms）")
+
+    def _body_check(self) -> rl_mod._BodyCheck:
+        g = self.slam.grid
+        if self._body is None or self._body_seq != g.seq:
+            self._body = rl_mod._BodyCheck(g, self._footprint(), closed=False)
+            self._body_seq = g.seq
+        return self._body
+
+    def _footprint(self) -> tuple:
+        v = self.vehicle
+        if v.footprint:
+            return tuple(v.footprint)
+        return ((v.front_overhang, v.half_width), (v.front_overhang, -v.half_width),
+                (-v.rear_overhang, -v.half_width), (-v.rear_overhang, v.half_width))
+
+    def _start_detour(self, st: AutoState, path: rl_mod.RaceLine, index: int,
+                      hit: obs_mod.Obstacle | None, dist: float, p: dict[str, float],
+                      why: str) -> None:
+        """止まって、経路上の障害物の先の姿勢を目標に Hybrid A*（`ParkToPoint`）へ引き継ぐ。"""
+        order, s_fwd = av_mod.forward_order(path, index)
+        ahead = p["detour_ahead"]
+        if hit is not None:
+            ahead += dist + hit.r + self.vehicle.rear_overhang
+        k = min(int(np.searchsorted(s_fwd, ahead)), len(order) - 2)
+        j, j2 = int(order[k]), int(order[k + 1])
+        gx, gy = path.xy[j]
+        gyaw = math.atan2(path.xy[j2, 1] - gy, path.xy[j2, 0] - gx)
+        x, y, yaw = self.slam.pose
+        c, s = math.cos(-yaw), math.sin(-yaw)
+        lx, ly = c * (gx - x) - s * (gy - y), s * (gx - x) + c * (gy - y)
+        lyaw = (gyaw - yaw + math.pi) % (2.0 * math.pi) - math.pi
+        self._detour = ParkToPoint()
+        self._detour.request_park_target(lx, ly, lyaw)
+        self._detour_error = ""
+        self._detour_tries += 1
+        self._clear_avoid()
+        self._blocked_t = self._stuck_t = 0.0
+        self.phase = st.phase = DETOUR
+        st.brake = True
+        st.target_speed = 0.0
+        st.reason = f"{why}。Hybrid A* で {math.hypot(lx, ly):.1f}m 先の経路へ抜ける"
+
+    def _detour_step(self, st: AutoState, scan: Scan, vs: VehicleState,
+                     p: dict[str, float]) -> AutoState:
+        assert self._detour is not None
+        pp = {s.key: s.default for s in ParkToPoint.params}
+        pp["plan_budget_ms"] = p["detour_budget_ms"]
+        pp["pos_tol_m"] = _DETOUR_POS_TOL
+        pp["yaw_tol_deg"] = _DETOUR_YAW_TOL_DEG
+        pp["max_maneuver_s"] = _DETOUR_MAX_S
+        t0 = time.perf_counter()
+        pst = self._detour.plan(scan, vs, pp, self._dt)
+        ms = (time.perf_counter() - t0) * 1000.0
+        pst.mode, pst.planner, pst.phase = self.id, self.name, DETOUR
+        pst.pose_x, pst.pose_y, pst.pose_yaw = st.pose_x, st.pose_y, st.pose_yaw
+        pst.match_score = st.match_score
+        pst.laps = self.laps
+        self._detect_obstacles(pst, scan, p)
+        if self._detour.done or self._detour.failed:
+            ok = self._detour.done
+            self._detour_error = "" if ok else pst.reason
+            self._detour = None
+            self.phase = pst.phase = RACE
+            self._hint = -1
+            self._joined = False
+            pst.brake = True
+            pst.target_speed = 0.0
+            if ok and self.path is not None:
+                self._blend_back(self.path, p)
+            pst.reason = ("Hybrid A* で抜けた。経路に滑らかに戻る" if ok
+                          else f"Hybrid A* で抜けられなかった（{self._detour_error}）。止まって待つ")
+            return pst
+        pst.reason = f"迂回（Hybrid A*、{ms:.0f}ms）: {pst.reason}"
+        return pst
+
+    def _localization_ok(self, st: AutoState, lost: bool, p: dict[str, float]) -> bool | None:
+        """自己位置を信用して走れるか。`None` = 止まる、`True` = 推測航法で続行、`False` = 正常。
+
+        見失い（`lost`）や一致度の低下が `coast_s` 以内なら、推測航法の姿勢（見失った周期は
+        frontend が予測をそのまま採る）で経路を追い続ける。1周期でも止めると、壁越しに
+        別の部屋が一瞬見えただけで急停止する。経路に乗る前（自己位置の復元直後）は続行しない。
+        """
+        if not (lost or st.match_score < p["min_score"]):
+            self._coast_t = 0.0
+            return False
+        self._coast_t += self._dt
+        if self._joined and p["coast_s"] > 0.0 and self._coast_t <= p["coast_s"]:
+            return True
+        st.reason = (f"自己位置が信用できない（一致度 {st.match_score:.2f} < "
+                     f"{p['min_score']:.2f}"
+                     + (f"・{self._coast_t:.1f}s 続いた" if p["coast_s"] > 0.0 else "") + "）")
+        return None
+
+    def _coast_note(self, coasting: bool, p: dict[str, float]) -> str:
+        if not coasting:
+            return ""
+        return f"・★推測航法で続行 {self._coast_t:.1f}/{p['coast_s']:.1f}s"
 
     def _retime(self, p: dict[str, float]) -> None:
         """速度の設定が変わっていたら、経路の速度プロファイルだけを作り直す。
@@ -789,29 +1232,6 @@ class Slam2dRaceLine(Planner):
         if self._joined and self._rejoins and abs(pp.cross_track) < 0.05:
             self._rejoins = 0                 # 経路に戻れたら数え直す
         return False
-
-    def _obstacle_ahead(self, st: AutoState, scan: Scan, path: rl_mod.RaceLine, index: int,
-                        p: dict[str, float]) -> tuple[obs_mod.Obstacle | None, float]:
-        """障害物を検出して `st.obstacles` に載せ、経路の前方を塞ぐものとその距離を返す。"""
-        g = self.slam.grid
-        pad = p["obstacle_pad"]
-        key = (g.seq, pad)
-        if key != self._obs_free_key:
-            # 凍結地図では変わらない。毎周期作ると格子全体の膨張で数msかかる
-            self._obs_free = obs_mod.free_mask(g, pad)
-            self._obs_free_key = key
-        now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
-                             wall_pad=pad, free=self._obs_free)
-        self._obs = obs_mod.confirm(now, self._prev_obs)
-        self._prev_obs = now
-        st.obstacles = [v for o in self._obs for v in (o.x, o.y, o.r)]
-        n = len(path)
-        return obs_mod.blocking(
-            self._obs, path.xy, index,
-            half_width=self.vehicle.half_width + p["line_margin"],
-            ahead_m=p["obstacle_stop"] + self.vehicle.front_overhang,
-            step=path.length / (n if path.closed else max(1, n - 1)),
-            skip_m=self.vehicle.front_overhang, closed=path.closed)
 
     def _pool(self) -> ThreadPoolExecutor:
         if self._line_pool is None:

@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import statistics
@@ -100,6 +101,12 @@ class SensorModel:
     #: なる（低μ板で後輪が空転・前輪が滑る状況の近似）。世界座標
     slip_zones: tuple[tuple[float, float, float, float, float], ...] = ()
     lidar: SimParams = field(default_factory=SimParams)
+    #: 壁越しに別の部屋が見える区間。`(段, 開始, 秒数, deg0, deg1, offset)`:
+    #: 段（0=地図作成 1=凍結地図での走行）の進捗の割合`開始`から`秒数`のあいだ、
+    #: 車両角`deg0`〜`deg1`の点を「コースの外接矩形を`offset`m広げた部屋の壁」までの
+    #: 距離に差し替える（低い壁の上を走査面が越えた状況）。地図作成中に入れると
+    #: 壁の外が「既知の空き」になり、走行中の越境点が外壁に対応付く危険な状況を作れる
+    ghost: tuple[tuple[float, float, float, float, float, float], ...] = ()
 
     @classmethod
     def preset(cls, name: str, course: Course | None = None) -> "SensorModel":
@@ -127,6 +134,41 @@ class SensorModel:
                        gyro_bias_dps=1.5, gyro_noise_dps=1.0, gyro_scale=1.03,
                        slip_zones=zones, lidar=lid)
         raise ValueError(f"unknown preset: {name}")
+
+
+def _wall_bbox(course: Course) -> tuple[float, float, float, float]:
+    rows, cols = np.nonzero(course.grid)
+    r = course.resolution
+    return (course.origin[0] + cols.min() * r, course.origin[1] + rows.min() * r,
+            course.origin[0] + (cols.max() + 1) * r, course.origin[1] + (rows.max() + 1) * r)
+
+
+def _ray_box_exit(ox: float, oy: float, ang: np.ndarray, box) -> np.ndarray:
+    """矩形の内側の点`(ox, oy)`から`ang`方向へ撃ったレイが矩形を出るまでの距離。"""
+    x0, y0, x1, y1 = box
+    c, s = np.cos(ang), np.sin(ang)
+    with np.errstate(divide="ignore"):
+        tx = np.where(c > 0, (x1 - ox) / c, np.where(c < 0, (x0 - ox) / c, np.inf))
+        ty = np.where(s > 0, (y1 - oy) / s, np.where(s < 0, (y0 - oy) / s, np.inf))
+    return np.minimum(tx, ty)
+
+
+def inject_ghost(scan, pose_lidar: tuple[float, float, float], deg0: float, deg1: float,
+                 box, max_range: float) -> None:
+    """`scan.dist`の`deg0`〜`deg1`（車両角）を、仮想の部屋の壁`box`までの距離に書き換える。"""
+    deg = np.arange(360)
+    span = (deg - deg0) % 360
+    sel = span <= (deg1 - deg0) % 360
+    ang = pose_lidar[2] + np.radians(deg[sel])
+    d = _ray_box_exit(pose_lidar[0], pose_lidar[1], ang, box)
+    d = np.where(d <= max_range, d, 0.0)
+    dist = np.asarray(scan.dist, dtype=float)
+    dist[sel] = d
+    scan.dist = dist.tolist()
+    if scan.saturated is not None:
+        sat = np.asarray(scan.saturated, dtype=bool)
+        sat[sel] = False
+        scan.saturated = sat.tolist()
 
 
 # ── コースと真値の運転手 ───────────────────────────────────────────────────
@@ -312,6 +354,8 @@ class RunConfig:
     #: ARM→engage の操作の間ずっと止まっており、SLAM はその間にジャイロの
     #: ゼロ点ずれを較正する（`slam2d/core/motion.py`の ZUPT）
     still_s: float = 3.0
+    #: `SensorModel.ghost`（プリセットに足す）
+    ghost: tuple[tuple[float, float, float, float, float, float], ...] = ()
 
 
 @dataclass
@@ -321,6 +365,11 @@ class PhaseStats:
     fwd_err: list[float] = field(default_factory=list)   #: 同 進行方向 [m]
     yaw_err: list[float] = field(default_factory=list)   #: [deg]
     update_ms: list[float] = field(default_factory=list)
+    #: 壁の向こうとして外した点の割合（`FrontendConfig.behind_margin`）
+    behind: list[float] = field(default_factory=list)
+    #: 越境の外乱を入れた周期の数と、その間の位置誤差の最大 [m]
+    ghost_updates: int = 0
+    ghost_max_err: float = 0.0
     lost: int = 0
     updates: int = 0
     max_lost_streak: int = 0
@@ -345,6 +394,9 @@ class PhaseStats:
             ms_p99=pct(self.update_ms, 99),
             ms_max=max(self.update_ms) if self.update_ms else float("nan"),
             collisions=self.collisions,
+            behind_max=max(self.behind) if self.behind else 0.0,
+            ghost_n=self.ghost_updates,
+            ghost_max_cm=self.ghost_max_err * 100,
         )
 
 
@@ -383,6 +435,8 @@ class RunResult:
             rc_ate=r["ate_cm"], rc_max=r["max_cm"], rc_yaw=r["yaw_rms_deg"],
             rc_lat=r["lat_rms_cm"], rc_lat99=r["lat_p99_cm"], rc_fwd=r["fwd_rms_cm"],
             rc_lost=r["lost_pct"], rc_streak=r["max_lost_streak"],
+            rc_behind=r["behind_max"], ghost_n=r["ghost_n"],
+            ghost_max=r["ghost_max_cm"],
             ms_mean=statistics.fmean(self.explore.update_ms + self.race.update_ms)
             if (self.explore.update_ms or self.race.update_ms) else float("nan"),
             ms_max=max(self.explore.update_ms + self.race.update_ms, default=float("nan")),
@@ -441,7 +495,12 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
     t_wall = time.perf_counter()
     course = load_course(cfg.course, cfg.route)
     sensors = SensorModel.preset(cfg.errors, course)
+    if cfg.ghost:
+        sensors = dataclasses.replace(sensors, ghost=sensors.ghost + tuple(cfg.ghost))
     spec = VehicleSpec.load()
+    lidar_x, lidar_y, _ = spec.sensor_pose("lidar")
+    ghost_box = _wall_bbox(course)
+    ghost_t0: list[int | None] = [None] * len(sensors.ghost)
     veh = VehicleModel(spec, course.start)
     lidar = VirtualLidar(course, spec, sensors.lidar, seed=cfg.seed)
     asm = ScanAssembler()
@@ -529,12 +588,34 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         if scan is None or vs is None:
             continue
 
+        ghosted = False
+        for k, (ph, f0, dur, deg0, deg1, off) in enumerate(sensors.ghost):
+            if int(ph) != (1 if phase == "race" else 0):
+                continue
+            if phase == "race":
+                done_m, total = driver.progress - race_start_progress, race_len
+            else:
+                done_m, total = driver.progress, explore_len
+            if ghost_t0[k] is None and done_m >= f0 * total:
+                ghost_t0[k] = t_ns
+            t_start = ghost_t0[k]
+            if t_start is None or t_ns - t_start > dur * NS:
+                continue
+            c, s = math.cos(veh.yaw), math.sin(veh.yaw)
+            lp = (veh.x + c * lidar_x - s * lidar_y, veh.y + s * lidar_x + c * lidar_y, veh.yaw)
+            box = (ghost_box[0] - off, ghost_box[1] - off, ghost_box[2] + off, ghost_box[3] + off)
+            inject_ghost(scan, lp, deg0, deg1, box, sensors.lidar.lidar_max_range_m)
+            ghosted = phase == "race"
+
         dt = (t_ns - last_plan_ns) / NS if last_plan_ns else 0.1
         last_plan_ns = t_ns
         t0 = time.perf_counter()
         pose, score, lost, t_ref = slam.update(scan, vs, dt)
         stats.update_ms.append((time.perf_counter() - t0) * 1000.0)
         stats.updates += 1
+        fe = getattr(slam.nav, "_fe", None)
+        if fe is not None:
+            stats.behind.append(float(getattr(fe, "behind_ratio", 0.0)))
         if lost:
             stats.lost += 1
             lost_streak += 1
@@ -555,6 +636,9 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         stats.fwd_err.append(_c * _dx + _s * _dy)
         stats.lat_err.append(-_s * _dx + _c * _dy)
         stats.yaw_err.append(abs(math.degrees(_wrap(pose[2] - tr[2]))))
+        if ghosted:
+            stats.ghost_updates += 1
+            stats.ghost_max_err = max(stats.ghost_max_err, stats.pos_err[-1])
         traj_true.append(tr)
         traj_est.append((pose[0], pose[1], pose[2]))
 
@@ -715,7 +799,9 @@ _COLS = [
     ("map_blur_after", "{:6.1f}"), ("map_rigid_deg", "{:6.2f}"), ("freeze_ms", "{:7.0f}"),
     ("rc_ate", "{:7.1f}"), ("rc_max", "{:7.1f}"), ("rc_lat", "{:6.1f}"), ("rc_lat99", "{:6.1f}"),
     ("rc_fwd", "{:6.1f}"), ("rc_yaw", "{:6.2f}"), ("rc_lost", "{:6.1f}"),
-    ("rc_streak", "{:5d}"), ("ms_mean", "{:6.1f}"), ("ms_max", "{:7.0f}"),
+    ("rc_streak", "{:5d}"), ("rc_behind", "{:6.2f}"),
+    ("ghost_n", "{:5d}"), ("ghost_max", "{:7.1f}"),
+    ("ms_mean", "{:6.1f}"), ("ms_max", "{:7.0f}"),
     ("relocs", "{:4d}"), ("loops", "{:4d}"), ("oob", "{:6d}"),
 ]
 
@@ -795,6 +881,13 @@ def main() -> int:
     ap.add_argument("--route", default="",
                     help="中心線の代わりに走る経路 `<routes.json>:<グループ>`（分岐のあるコース用。"
                          "中心線の無いコースで省略すると出発点からの最短の周回）")
+    ap.add_argument("--ghost", action="append", default=[],
+                    help="壁越しに別の部屋が見える区間 `段:開始:秒数:deg0:deg1:offset`（繰り返し可）。"
+                         "段は explore|race。その段の進捗の割合`開始`から`秒数`のあいだ、"
+                         "車両角 deg0〜deg1 の点をコースの外接矩形を offset[m] 広げた壁までの"
+                         "距離に差し替える")
+    ap.add_argument("--behind-margin", type=float, default=None,
+                    help="FrontendConfig.behind_margin を上書き（0で壁の向こうの点の除去を切る）")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--json", default=None, help="結果の行を JSON で保存")
     ap.add_argument("--verbose", action="store_true")
@@ -805,13 +898,25 @@ def main() -> int:
         kw["size_m"] = args.map_size
     if args.no_loop:
         kw["loop_closure"] = False
+    fk = {}
+    if args.behind_margin is not None:
+        fk["behind_margin"] = args.behind_margin
+    if fk:
+        kw["frontend"] = fk
+    ghost = []
+    for g in args.ghost:
+        f = g.split(":")
+        if len(f) != 6 or f[0] not in ("explore", "race"):
+            ap.error("--ghost は 段(explore|race):開始:秒数:deg0:deg1:offset")
+        ghost.append((1.0 if f[0] == "race" else 0.0, *(float(v) for v in f[1:])))
+    ghost = tuple(ghost)
     rows = []
     for err in args.errors.split(","):
         for name in args.course.split(","):
             for s in range(args.seed0, args.seed0 + args.seeds):
                 cfg = RunConfig(course=name, seed=s, errors=err, laps=args.laps,
                                 explore_speed=args.explore_speed, race_laps=args.race_laps,
-                                race_speed=args.race_speed, route=args.route)
+                                race_speed=args.race_speed, route=args.route, ghost=ghost)
                 res = run(cfg, default_factory(**kw), verbose=args.verbose)
                 row = res.row()
                 row["wall_s"] = res.wall_time_s
