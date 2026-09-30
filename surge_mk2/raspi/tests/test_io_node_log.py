@@ -174,7 +174,12 @@ class TestIoNodeLogging(unittest.TestCase):
 
 
 class TestIoNodeDiskCheck(unittest.TestCase):
-    """`IoNode._check_disk_space`（`raspi/rec/logclean.py` の呼び出し側）の結線。"""
+    """`IoNode._check_disk_space`（`raspi/rec/logclean.py` の呼び出し側）の結線。
+
+    issue #5 の修正で実処理はワーカースレッドへ移した。テストからは
+    `_check_disk_space()` → スレッド終了待ち → `_poll_disk_check()` で
+    同期的に結果を引き取ってから検証する。
+    """
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -182,6 +187,20 @@ class TestIoNodeDiskCheck(unittest.TestCase):
 
     def tearDown(self):
         self._td.cleanup()
+
+    @staticmethod
+    def _run_disk_check_sync(node: IoNode) -> None:
+        """`_check_disk_space()` を起こし、ワーカースレッドの完了を待ってから結果を処理する。
+
+        `mock.patch` のコンテキストの**中で**スレッドが `shutil.disk_usage` を
+        呼び終える必要があるので、呼び出し側で `with mock.patch(...):` の中に
+        このメソッド呼び出しごと入れること。
+        """
+        node._check_disk_space()
+        t = node._disk_check_thread
+        if t is not None:
+            t.join(timeout=2.0)
+        node._poll_disk_check()
 
     def test_old_sfl_is_deleted_and_active_one_is_protected(self):
         from unittest import mock
@@ -198,7 +217,7 @@ class TestIoNodeDiskCheck(unittest.TestCase):
             usages = iter([_usage(100, 2), _usage(100, 10)])
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                             side_effect=lambda _p: next(usages)):
-                node._check_disk_space()
+                self._run_disk_check_sync(node)
         finally:
             log.close()
 
@@ -215,7 +234,7 @@ class TestIoNodeDiskCheck(unittest.TestCase):
         try:
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                             return_value=_usage(100, 10)):   # 10% free: warn だが critical ではない
-                node._check_disk_space()
+                self._run_disk_check_sync(node)
         finally:
             log.close()
         self.assertAlmostEqual(node._disk_free_pct, 10.0)
@@ -232,6 +251,45 @@ class TestIoNodeDiskCheck(unittest.TestCase):
             node.run(duration_s=0.05)
         log.close()
         self.assertGreaterEqual(spy.call_count, 1)
+
+    def test_slow_disk_check_does_not_stall_the_main_loop(self):
+        """issue #5 の再現: `check_disk` が遅くても kick/COMMAND 送信は止まらないこと。
+
+        `logclean.check_disk` を 150ms かかるモックに差し替え、その間も
+        ハートビートの kick が途切れず `heartbeat.stats.stalls` が増えないことを見る
+        （課題本文の検証案）。
+        """
+        from unittest import mock
+
+        from raspi.io.gpio import FakePin, Heartbeat
+        from raspi.rec.logclean import DiskStatus
+
+        link = FakeLink()
+        log = FrameLogWriter(self.path)
+        pin = FakePin()
+        heartbeat = Heartbeat(pin, kick_timeout_s=0.1)
+        node = IoNode(link, log=log, heartbeat=heartbeat)
+
+        def _slow_check_disk(*_a, **_kw):
+            time.sleep(0.15)
+            return DiskStatus(free_pct=50.0, free_bytes=50_000_000_000,
+                              total_bytes=100_000_000_000)
+
+        heartbeat.start()
+        try:
+            with mock.patch("raspi.rec.logclean.check_disk", side_effect=_slow_check_disk):
+                node._check_disk_space()   # ワーカースレッドで 150ms かかり始める
+                # メインループ本体を模して、その間ずっと kick し続ける
+                deadline = time.monotonic() + 0.3
+                while time.monotonic() < deadline:
+                    heartbeat.kick()
+                    node._poll_disk_check()
+                    time.sleep(0.005)
+        finally:
+            heartbeat.stop()
+            log.close()
+
+        self.assertEqual(heartbeat.stats.stalls, 0)
 
 
 def _usage(total_gb: float, free_gb: float):

@@ -478,7 +478,10 @@ def main() -> int:
         print(f"カメラを開けない: {e}", file=sys.stderr)
         return 2
 
-    signal.signal(signal.SIGINT, lambda *_: node.stop())
+    # SIGTERM も拾う（`systemctl stop`/`--restart` 用。拾わないと picamera2 の
+    # stop・共有メモリの unlink が走らず finally が飛ぶ。`planning_node.py` と同じパターン）
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: node.stop())
 
     for wk in node.workers:
         print(f"# cam{wk.idx} -> /dev/shm/{wk.ring.name}  "

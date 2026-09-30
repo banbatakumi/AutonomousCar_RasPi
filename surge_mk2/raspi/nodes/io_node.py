@@ -44,6 +44,7 @@ import os
 import signal
 import sys
 import tempfile
+import threading
 import time
 
 from pathlib import Path
@@ -222,6 +223,21 @@ class IoNode:
         self._log_errors = 0
         #: 直近のディスク空き容量チェックの結果 [%]。診断・終了時の要約に使う
         self._disk_free_pct: float | None = None
+        #: ディスク空き容量チェック（`logclean.check_disk`）を実行中のスレッド。
+        #: **同期削除が最大数百msかかりうる**（issue #5）ため、メインループから
+        #: 切り離して別スレッドで回す。None なら実行中のものは無い
+        self._disk_check_thread: threading.Thread | None = None
+        #: ワーカースレッドが書き込む結果置き場。`_poll_disk_check`（メインスレッド）
+        #: が引き取ってから `_log_event`/print する。**`self._log` への書き込みは
+        #: 単一スレッド専用**（`FrameLogWriter` docstring）なので、結果の処理自体は
+        #: 必ずメインスレッドで行う
+        self._disk_check_result = None
+        #: 総走行距離の非同期保存（mkstemp+replace）を実行中のスレッド
+        self._odom_save_thread: threading.Thread | None = None
+        #: 直近の `_log_linkstats` 期間内での、メインループ1周の最大所要時間 [ns]。
+        #: kick 途絶（`KICK_TIMEOUT_S`=100ms）にどれだけ近づいたかを見るための指標
+        #: （issue #5）。`_log_linkstats` の呼び出しごとにリセットする
+        self._loop_max_ns = 0
         self._ping_seq = 0
         self._running = False
         self._t_start = 0
@@ -341,24 +357,63 @@ class IoNode:
                 "best_delay_ns": self.sync.best_delay_ns,
                 "drift_ppm": self.sync.drift_ppm,
             },
+            # メインループ1周の最大所要時間（直近 `_log_linkstats` 期間内）。
+            # kick 途絶（`gpio.KICK_TIMEOUT_S`=100ms）にどれだけ近づいたかの指標
+            # （issue #5）。ここで読んだ後にリセットする
+            "loop_max_ms": round(self._loop_max_ns / 1e6, 3),
         })
+        self._loop_max_ns = 0
 
     def _check_disk_space(self) -> None:
-        """記録先パーティションの空き容量を見て、危なければ警告・自動削除する。
+        """記録先パーティションの空き容量チェックを**別スレッドで**起こす。
 
         `surge-logclean.timer`（毎時、`install_services.sh`）の隙間を埋める
         （最大1時間の遅れがある・合計サイズではなく空き容量そのものを見る、
         の2点。理由は `raspi/rec/logclean.py` のモジュール docstring）。
+
+        **issue #5: 空き容量5%未満での `.sfl`/`.mcap` 同期 unlink は、SD上の
+        ext4で巨大ファイルだと数十〜数百msかかりうる。** メインループで直接
+        呼ぶとその間 `heartbeat.kick()`/`COMMAND` 送信が止まり、E-Stop
+        ハートビートが誤ラッチしうる。削除を伴う実処理は `logclean.check_disk`
+        ごとワーカースレッドへ渡し、メインループは`_poll_disk_check`で完了を
+        拾うだけにする。**`_log_event`/print はここ（ワーカースレッド）からは
+        呼ばない**（`FrameLogWriter` は単一スレッド専用）。
+        """
+        if self._disk_check_thread is not None:
+            return  # 前回がまだ終わっていない（巨大ファイルの削除中等）。次回に回す
+        log_dir = self._log.path.parent if self._log is not None else DEFAULT_LOG_DIR
+        if not log_dir.exists():
+            return
+        protect = {self._log.path} if self._log is not None else set()
+
+        def _worker() -> None:
+            self._disk_check_result = logclean.check_disk(log_dir, protect=protect)
+
+        self._disk_check_thread = threading.Thread(
+            target=_worker, name="io-disk-check", daemon=True)
+        self._disk_check_thread.start()
+
+    def _poll_disk_check(self) -> None:
+        """`_check_disk_space` が起こしたチェックが終わっていれば、結果をメインスレッドで処理する。
+
+        毎ループ呼ぶが `Thread.is_alive()` は軽い（ロック待ちなし）ので実害は無い。
+        """
+        t = self._disk_check_thread
+        if t is None or t.is_alive():
+            return
+        t.join()
+        status, self._disk_check_result = self._disk_check_result, None
+        self._disk_check_thread = None
+        self._handle_disk_status(status)
+
+    def _handle_disk_status(self, status: logclean.DiskStatus) -> None:
+        """`check_disk` の結果を GUI/人間へ出す（**メインスレッド専用**）。
+
         GUI へは（新しいバストピックを増やさず）このプロセス自身の stderr と、
         記録中なら `.sfl` の EVENT として残す——**新しい通知経路を作るより、
         既存の「診断は `.sfl` の EVENT に残す」パターンに素直に乗せる**方針
         （`_log_linkstats`/`_on_latch` と同じ）。
         """
-        log_dir = self._log.path.parent if self._log is not None else DEFAULT_LOG_DIR
-        if not log_dir.exists():
-            return
-        protect = {self._log.path} if self._log is not None else set()
-        status = logclean.check_disk(log_dir, protect=protect)
         if status.error is not None:
             return      # 空き容量すら取れない環境（テスト等）では何もしない
         self._disk_free_pct = status.free_pct
@@ -381,6 +436,21 @@ class IoNode:
                 "free_pct": round(status.free_pct, 1),
                 "free_bytes": status.free_bytes,
             })
+
+    def _save_odometer_async(self, v: float) -> None:
+        """総走行距離の永続化を別スレッドで行う（issue #5）。
+
+        `mkstemp` + `os.replace` は通常軽いが、SD の書き込み待ちで詰まる余地を
+        メインループから排除しておく。前回の保存がまだ終わっていなければ
+        今回は諦める（30秒後にまた呼ばれる。単調増加の値なので取りこぼしても
+        安全側にしか効かない）。
+        """
+        t = self._odom_save_thread
+        if t is not None and t.is_alive():
+            return
+        self._odom_save_thread = threading.Thread(
+            target=_save_odometer_base, args=(v,), name="io-odom-save", daemon=True)
+        self._odom_save_thread.start()
 
     # ── 起動時の VERSION / LIMITS 照合 ──
 
@@ -513,7 +583,14 @@ class IoNode:
 
     def _command_packet(self) -> packets.Command:
         """`_send_command` の中身（送る COMMAND を決めるだけ）。即時送信の変化の判定にも使う。"""
-        if self.cmd_stale or not self.allow_arm:
+        # `state.health` は TELEMETRY 受信間隔だけで決まる（`LinkTracker.update_health`）。
+        # FAULT（200ms 途絶）は「受信（STM32→Pi）だけが切れている」状態を含み、この場合
+        # STM32 は Pi からの COMMAND を受け取れてしまうため UART タイムアウトが効かない
+        # （docs/uart_protocol.md §13、issue #11）。Pi がステートも LiDAR も見えていない
+        # 以上、盲目に ARM・速度指令を送り続けるべきではないので DISARM に落とす。
+        # `cmd_stale`/`allow_arm` と同じ「安全側へ倒す」判断なので、誤検知しても
+        # 起きるのは早めの DISARM だけ（危険側には振れない）
+        if self.cmd_stale or not self.allow_arm or self.state.health == "FAULT":
             return self._disarm_command()
         lim = self.state.limits
         max_speed = lim.max_speed_m_s if lim else self.max_speed
@@ -568,9 +645,15 @@ class IoNode:
         next_odom_save = next_cmd + int(ODOM_SAVE_INTERVAL_S * NS)
         next_disk_check = next_cmd
         cmd_period = NS // COMMAND_HZ
+        #: 「ループ1周」の所要時間を測る基準時刻（issue #5・`_log_linkstats` 参照）
+        prev_loop_ns = next_cmd
 
         while self._running:
             now = time.monotonic_ns()
+            loop_dt = now - prev_loop_ns
+            prev_loop_ns = now
+            if loop_dt > self._loop_max_ns:
+                self._loop_max_ns = loop_dt
             elapsed = (now - int(self._t_start * NS)) / NS
 
             # 「メインループは生きている」の申告。これが途切れるとハートビートが
@@ -659,17 +742,21 @@ class IoNode:
                                     detail=self.state.health))
                 next_hb = now + NS // HB_HZ
 
+            # 前回起こしたディスクチェックが終わっていれば結果を処理する
+            # （実処理はワーカースレッド。issue #5）
+            self._poll_disk_check()
             if now >= next_disk_check:
                 next_disk_check = now + int(DISK_CHECK_INTERVAL_S * NS)
                 self._check_disk_space()
 
             # 総走行距離の永続化。**両方満たしたときだけ書く**——止まっている間は
-            # 30秒経っても書かない（SDカードの消耗を避ける、バンビ指定）
+            # 30秒経っても書かない（SDカードの消耗を避ける、バンビ指定）。
+            # 書き込み自体はワーカースレッドに逃がす（issue #5）
             if now >= next_odom_save:
                 next_odom_save = now + int(ODOM_SAVE_INTERVAL_S * NS)
                 current_odom = self.bridge.state_builder.odom_center
                 if abs(current_odom - self._last_saved_odom) >= ODOM_SAVE_MIN_DELTA_M:
-                    _save_odometer_base(current_odom)
+                    self._save_odometer_async(current_odom)
                     self._last_saved_odom = current_odom
 
             if duration_s is not None and time.monotonic() - self._t_start >= duration_s:
@@ -807,7 +894,12 @@ def main() -> int:
     def _shutdown(*_):
         node.stop()
 
-    signal.signal(signal.SIGINT, _shutdown)
+    # SIGINT だけでなく SIGTERM も拾う（`systemctl stop`/`--restart-io` は SIGTERM を
+    # 送るため。拾わないと即死して finally が走らず、.sfl の close イベント・
+    # 直近走行距離・heartbeat_stop・終了時 DISARM が失われる。`planning_node.py`
+    # と同じパターン）
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _shutdown)
 
     print(f"# io_node port={link.port} baud={link.baud} 期待 v{PROTOCOL_VERSION:#06x}")
     ver = node.handshake()

@@ -532,6 +532,10 @@ class StatusIndicator:
     def close(self) -> None:
         for pin in (self.green, self.red, self.buzzer):
             if pin is not None:
-                with quiet_close(f"表示灯のピン {pin.name}"):
+                # `Buzzer` は `name` を持たない（GPIO ピンの薄いラッパーではなく
+                # トーンデバイスのラッパーのため）。`AttributeError` で以降の
+                # 後始末（`.sfl` close・`link.close()` 等）が飛ぶのを防ぐ
+                name = getattr(pin, "name", type(pin).__name__)
+                with quiet_close(f"表示灯のピン {name}"):
                     pin.write(False)
                     pin.close()
