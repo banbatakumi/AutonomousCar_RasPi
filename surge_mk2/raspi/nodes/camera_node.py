@@ -128,6 +128,12 @@ def bottom_cropped(cam, size: tuple[int, int],
 #: 残しつつ、systemd 配下の長時間稼働でメモリが際限なく増えないようにする
 _MAX_GAPS_SAMPLES = 1000
 
+#: `capture_request()` がブロックしたまま戻らないハングを検出するまでの猶予[秒]。
+#: **スレッド自体は`is_alive()`のままなので、生死監視だけでは検出できない**
+#: （issue #4）。`CamStats.last_grab_ns`（`_grab()`が成功するたびに更新）を
+#: 見て、これだけ進んでいなければハングとみなしてノード全体を終了させる
+_CAPTURE_HANG_S = 1.0
+
 
 @dataclass(slots=True)
 class CamStats:
@@ -136,6 +142,10 @@ class CamStats:
     write_ns_max: int = 0       #: 共有メモリへの1回の書き込みにかかった最大時間
     write_ns_total: int = 0
     last_t_capture: int = 0
+    #: `_grab()`が最後に成功した`time.monotonic_ns()`。ハング検出専用
+    #: （`last_t_capture`はセンサ時刻で、フレームが来ない間は更新されない
+    #: という点では同じだが、意味を混同しないよう別フィールドにする）
+    last_grab_ns: int = 0
     gaps_ms: deque[float] = field(default_factory=lambda: deque(maxlen=_MAX_GAPS_SAMPLES))
 
     def summary(self, elapsed: float) -> str:
@@ -285,6 +295,7 @@ class CameraWorker(threading.Thread):
         s.frames += 1
         s.write_ns_total += dt
         s.write_ns_max = max(s.write_ns_max, dt)
+        s.last_grab_ns = t0             # ハング検出用（上のCamStats参照）
         if s.last_t_capture and t_cap:
             s.gaps_ms.append((t_cap - s.last_t_capture) / 1e6)
         s.last_t_capture = t_cap
@@ -333,12 +344,15 @@ class CameraNode:
         self._cfg_thread: threading.Thread | None = None
         self._cfg_running = False
 
-    def run(self, duration_s: float | None = None, status_cb=None) -> None:
+    def run(self, duration_s: float | None = None, status_cb=None,
+           hang_s: float = _CAPTURE_HANG_S) -> None:
         for w in self.workers:
             w.start_camera()
         time.sleep(0.5)                     # AE/AWB が落ち着くまで
+        start_ns = time.monotonic_ns()
         for w in self.workers:
             w.stats = CamStats()
+            w.stats.last_grab_ns = start_ns  # 起動直後の「まだ1枚も来ていない」をハング扱いしない
             w.start()
 
         if self._cfg_sub is not None:
@@ -350,7 +364,27 @@ class CameraNode:
         self._t_start = time.monotonic()
         next_status = 0.0
         try:
-            while any(w.is_alive() for w in self.workers):
+            while True:
+                # **どちらか1台でも死んだら／ハングしたらノード全体を終了させる。**
+                # 以前は `any(is_alive())`（全滅するまで回り続ける）だったため、
+                # 前後どちらか1台だけ死んだ場合はもう1台が生きている限り
+                # プロセスが生き続け、誰も気づかなかった（issue #4）。
+                # `capture_request()` がブロックしたまま戻らないハングは
+                # スレッドが `is_alive()` のままなので、`last_grab_ns` の
+                # 停滞で別途検出する
+                dead = [w for w in self.workers if not w.is_alive()]
+                if dead:
+                    break
+                now_ns = time.monotonic_ns()
+                hung = [w for w in self.workers
+                       if now_ns - w.stats.last_grab_ns > hang_s * 1e9]
+                if hung:
+                    for w in hung:
+                        if w.error is None:
+                            w.error = TimeoutError(
+                                f"cam{w.idx}: capture_request() が{hang_s:.1f}s"
+                                f"以上応答していない（ハング）")
+                    break
                 el = time.monotonic() - self._t_start
                 if duration_s is not None and el >= duration_s:
                     break
@@ -504,6 +538,13 @@ def main() -> int:
             print(f"bus: {pub.sent} 件 publish")
             pub.close()
         node.close()
+    # **いずれかのワーカーにエラーが残っていれば exit 1。**
+    # 以前は常に `return 0` していたため、カメラが全滅・ハングしても
+    # systemd の `Restart=on-failure` が発火せず恒久停止していた（issue #4）。
+    # `--duration` を指定した正常終了（テスト・手動計測）ではどのワーカーにも
+    # エラーが立たないので、ここは 0 のまま
+    if any(wk.error for wk in node.workers):
+        return 1
     return 0
 
 

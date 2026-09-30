@@ -7,6 +7,7 @@
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -59,6 +60,58 @@ class TestWhiteMask(unittest.TestCase):
         self.assertTrue(bool(mask[0, 0]))
         self.assertFalse(bool(mask[0, 1]))
         self.assertFalse(bool(mask[0, 2]))
+
+
+def _white_mask_reference(frame: np.ndarray, *, min_brightness: int = 170,
+                          max_chroma: int = 40) -> np.ndarray:
+    """`white_mask()`の旧実装（int16へ広げてaxis=-1のmin/maxを取る素朴な形）。
+
+    issue #14の高速化（uint8のままチャネル別にmin/maxを取る）が数値的に
+    完全に一致することを確認するためだけの参照実装。ここだけに残す
+    （本体には置かない——旧実装を本体コードとして生かさない）。
+    """
+    f = frame[..., :3].astype(np.int16)
+    lo = f.min(axis=-1)
+    hi = f.max(axis=-1)
+    return (lo >= min_brightness) & ((hi - lo) <= max_chroma)
+
+
+class TestWhiteMaskMatchesReferenceImplementation(unittest.TestCase):
+    """issue #14: uint8のまま計算する高速版が、旧int16実装と完全一致すること。
+
+    **この一致確認は必須**（高速化のつもりで近似値になっていないかを保証する）。
+    乱数フレーム・境界値（明るさ/彩度の閾値ちょうど）の両方で確認する。
+    """
+
+    def test_matches_reference_on_random_frames(self):
+        rng = np.random.default_rng(12345)
+        for _ in range(20):
+            frame = rng.integers(0, 256, size=(37, 53, 3), dtype=np.uint8)
+            got = white_mask(frame)
+            want = _white_mask_reference(frame)
+            self.assertTrue(np.array_equal(got, want),
+                            "uint8版とint16参照実装の結果が一致しない")
+
+    def test_matches_reference_on_custom_thresholds(self):
+        rng = np.random.default_rng(999)
+        frame = rng.integers(0, 256, size=(20, 20, 3), dtype=np.uint8)
+        got = white_mask(frame, min_brightness=100, max_chroma=10)
+        want = _white_mask_reference(frame, min_brightness=100, max_chroma=10)
+        self.assertTrue(np.array_equal(got, want))
+
+    def test_matches_reference_on_boundary_values(self):
+        """明るさ・彩度がちょうど閾値の境界にある画素（off-by-one検出用）。"""
+        frame = np.array([[[170, 170, 170],     # ちょうどmin_brightness、彩度0
+                           [169, 169, 169],     # brightness未満
+                           [200, 200, 240],     # chroma=40ちょうど
+                           [200, 200, 241],     # chroma=41（超過）
+                           [255, 255, 255],     # 全白
+                           [0, 0, 0]]],          # 全黒
+                        dtype=np.uint8)
+        got = white_mask(frame)
+        want = _white_mask_reference(frame)
+        self.assertTrue(np.array_equal(got, want))
+        self.assertTrue(np.array_equal(got, [[True, False, True, False, True, False]]))
 
 
 class TestWideBlobDoesNotOverrideThinLine(unittest.TestCase):
@@ -155,7 +208,7 @@ class TestModeGating(unittest.TestCase):
     def _ref_with_frame(self, ring_name: str):
         ring = FrameRing.create(ring_name, 320, 240, "RGB888", n_slots=2)
         data = _frame_with_white_column(240, 320, col=160)
-        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -247,6 +300,45 @@ class TestModeGating(unittest.TestCase):
             ring.unlink()
 
 
+class TestSameFrameIsNotReprocessed(unittest.TestCase):
+    """issue #13: `ImageRef.ring_seq`が変わっていない間は`process_frame()`を
+    再実行しない（カメラ30fps・ループ約10ms周期で、同じフレームを約3回
+    処理していた無駄の解消）。
+    """
+
+    def _ref_with_frame(self, ring_name: str):
+        ring = FrameRing.create(ring_name, 320, 240, "RGB888", n_slots=2)
+        data = _frame_with_white_column(240, 320, col=160)
+        desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
+        ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                       frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                       fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+        return ring, ref
+
+    def test_unchanged_ring_seq_calls_process_frame_once(self):
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+        ring, ref = self._ref_with_frame("surge_test_line_dedup")
+        calls = []
+        orig = node.process_frame
+
+        def _counting(*a, **kw):
+            calls.append(1)
+            return orig(*a, **kw)
+        node.process_frame = _counting
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.08)   # poll=20msで複数周回る
+
+            lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
+            self.assertGreater(len(lines), 1, "複数周回っていない（テストの前提が崩れている）")
+            self.assertEqual(len(calls), 1,
+                             "同じring_seqのフレームなのにprocess_frame()が複数回呼ばれている")
+        finally:
+            node.close()
+            ring.unlink()
+
+
 class TestReadFrame(unittest.TestCase):
     """`FrameReader`（`raspi/core/frame_reader.py`）越しの読み取り。"""
 
@@ -256,7 +348,8 @@ class TestReadFrame(unittest.TestCase):
         try:
             data = np.zeros((12, 16, 3), dtype=np.uint8)
             data[..., 0] = 42
-            desc = ring.write(data, t_capture_ns=123456789, frame_id=1)
+            t_cap_written = time.monotonic_ns()
+            desc = ring.write(data, t_capture_ns=t_cap_written, frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -265,7 +358,7 @@ class TestReadFrame(unittest.TestCase):
             self.assertIsNotNone(got)
             arr, t_capture = got
             self.assertTrue(np.array_equal(arr, data))
-            self.assertEqual(t_capture, 123456789)
+            self.assertEqual(t_capture, t_cap_written)
         finally:
             node.close()
             ring.unlink()
@@ -287,7 +380,7 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
     def _ref_with_frame(self, ring_name: str):
         ring = FrameRing.create(ring_name, 320, 240, "RGB888", n_slots=2)
         data = _frame_with_white_column(240, 320, col=160)
-        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")

@@ -247,7 +247,7 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
         ring = FrameRing.create("surge_test_cam_perception_run", 32, 24, "RGB888", n_slots=2)
         try:
             data = np.full((24, 32, 3), 255, dtype=np.uint8)
-            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -292,7 +292,7 @@ class TestModeGating(unittest.TestCase):
     def _ref_with_frame(self, ring_name: str):
         ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
         data = np.full((24, 32, 3), 255, dtype=np.uint8)
-        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -431,7 +431,7 @@ class TestInferenceRateLimiting(unittest.TestCase):
     def _ref_with_frame(self, ring_name: str):
         ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
         data = np.full((24, 32, 3), 255, dtype=np.uint8)
-        desc = ring.write(data, t_capture_ns=1, frame_id=1)
+        desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -443,11 +443,15 @@ class TestInferenceRateLimiting(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load(),
                                  infer_hz=1.0)
         ring, ref = self._ref_with_frame("surge_test_ratelim_low")
-        # ループが何周したかを `read_frame()` の呼び出し回数で数える。
+        # ループが何周したかを `sub.poll()` の呼び出し回数で数える（issue #13の
+        # 修正で、間引き判定を `read_frame()` より先に行うようになったため、
+        # 間引き中は `read_frame()` 自体が呼ばれない——ループが回った証拠には
+        # `poll()` の方を数える）。
         # **`pub.sent` では数えない**——`Publisher.send()` は呼ぶたびに独自の
         # seq を打ち直す（`bus/zbus.py`）ので、間引き中は publish 自体を
         # 省略する仕様に変えた（`scan/cam` を毎周publishすると、内容が同じでも
         # planning_node の重複排除が効かずFTGがフルレートで回り続けるため）
+        poll_calls = 0
         read_calls = 0
         orig_read_frame = node.read_frame
 
@@ -460,10 +464,23 @@ class TestInferenceRateLimiting(unittest.TestCase):
         try:
             sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            orig_poll = sub.poll
+
+            def counting_poll(timeout_ms):
+                nonlocal poll_calls
+                poll_calls += 1
+                return orig_poll(timeout_ms)
+            sub.poll = counting_poll
             pub = _FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
 
-            self.assertGreater(read_calls, 1, "テストがループを複数周していない")
+            self.assertGreater(poll_calls, 1, "テストがループを複数周していない")
+            # ★issue #13の修正: 間引き判定を共有メモリの読み取りより先に行うので、
+            # 間引き周期に当たった間は `read_frame()` 自体が呼ばれない
+            # （以前は読んでから捨てていたため、無駄な `.copy()` が発生していた）
+            self.assertEqual(read_calls, 1,
+                             "間引き周期でも read_frame() が複数回呼ばれている"
+                             "（issue #13: 判定は読み取りより先に行うべき）")
             self.assertEqual(node._infer_count, 1, "間引き周期内なのに複数回推論している")
             scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
             self.assertEqual(len(scans), 1,
@@ -552,7 +569,8 @@ class TestReadFrame(unittest.TestCase):
             try:
                 data = np.zeros((12, 16, 3), dtype=np.uint8)
                 data[..., 0] = 42
-                desc = ring.write(data, t_capture_ns=123456789, frame_id=1)
+                t_cap_written = time.monotonic_ns()
+                desc = ring.write(data, t_capture_ns=t_cap_written, frame_id=1)
                 ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                                frame_id=desc.frame_id, width=desc.width,
                                height=desc.height, fmt=desc.fmt, stride=desc.stride,
@@ -562,7 +580,7 @@ class TestReadFrame(unittest.TestCase):
                 self.assertIsNotNone(got)
                 arr, t_capture = got
                 self.assertTrue(np.array_equal(arr, data))
-                self.assertEqual(t_capture, 123456789)
+                self.assertEqual(t_capture, t_cap_written)
             finally:
                 node.close()
                 ring.unlink()
@@ -613,7 +631,7 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
         ring = FrameRing.create("surge_test_cam_perception_exc", 32, 24, "RGB888", n_slots=2)
         try:
             data = np.full((24, 32, 3), 255, dtype=np.uint8)
-            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")

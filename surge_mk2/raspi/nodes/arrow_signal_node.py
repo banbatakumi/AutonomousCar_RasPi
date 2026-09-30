@@ -212,6 +212,16 @@ class ArrowSignalNode:
         #: confirmロジックとは独立に、毎周期の生値をそのまま持つ）
         self.last_result: ArrowResult | None = None
 
+        #: ★省電力化・デバウンス修正: 直近に処理した `ImageRef.ring_seq`。
+        #: カメラは30fps・このループは約10ms周期（`sub.poll(20)`）で回るので、
+        #: 間を置かずに読むと同じフレームを約3回処理してしまう（issue #13）。
+        #: **これは単なる無駄ではなく、`confirm_frames`（N連続一致で確定）が
+        #: 同じフレームの繰り返しで満たされてしまい、デバウンスが実質
+        #: `1/confirm_frames`ぶん弱まるという実害がある。** `ring_seq` が
+        #: 変わっていなければ読み取り・`process_cycle()` の両方をスキップし、
+        #: 確定状態は前回のまま据え置く
+        self._last_ring_seq: int = -1
+
         self._reader = FrameReader()
         self._running = False
 
@@ -247,16 +257,26 @@ class ArrowSignalNode:
             #: の間、映像オーバーレイが古い判定を出し続けないように）
             self.last_result = None
 
-        if self._confirmed_value is None:
-            return None
-        return RouteSelect(value=self._confirmed_value, source="arrow_signal",
-                           event_id=self._event_id)
+        return self._current_route_select()
 
     def reset(self) -> None:
         self._pending_value = None
         self._pending_count = 0
         self._confirmed_value = None
         self._event_id = 0
+
+    def _current_route_select(self) -> RouteSelect | None:
+        """`process_cycle()`を呼ばずに、今の確定状態から`RouteSelect`だけ組み立てる。
+
+        同じフレームを再処理しないスキップ経路（`run()`参照）で、confirm状態は
+        動かさずに直近の確定値をそのまま流し続けるために使う——
+        `process_cycle()`の末尾と同じ組み立て方（**書き写さない**ために
+        ここへ切り出した）。
+        """
+        if self._confirmed_value is None:
+            return None
+        return RouteSelect(value=self._confirmed_value, source="arrow_signal",
+                           event_id=self._event_id)
 
     # ── 共有メモリの読み取り（`raspi/core/frame_reader.py` に委譲） ──
 
@@ -291,24 +311,35 @@ class ArrowSignalNode:
 
             vs: VehicleState | None = sub.latest.get(TOPIC_VEHICLE_STATE)
             frame = None
+            skip_same_frame = False
             if vehicle_armed(vs) and enabled:
                 #: DISARM中・enabled=False中は共有メモリすら読まない
                 #: （モジュールdocstring参照、`cam_track_node.py`と同じ節電）
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
                 if ref is not None:
-                    got = self.read_frame(ref)
-                    if got is not None:
-                        frame, _t_capture = got
+                    if ref.ring_seq == self._last_ring_seq:
+                        # ★省電力化・デバウンス修正: 新しいカメラフレームが
+                        # まだ来ていない。読み取り・process_cycle()の両方を
+                        # スキップする（上の `_last_ring_seq` docstring参照）
+                        skip_same_frame = True
+                    else:
+                        got = self.read_frame(ref)
+                        if got is not None:
+                            frame, _t_capture = got
+                            self._last_ring_seq = ref.ring_seq
 
-            try:
-                msg = self.process_cycle(frame)
-            except Exception as e:
-                # process_cycle側のバグでノード全体を巻き込んで落とさない
-                # （`planning_node._replan()`と同じパターン）。confirm状態は
-                # 前周期のまま据え置かれる
-                print(f"# arrow_signal process_cycle() が例外: {e}",
-                     file=sys.stderr, flush=True)
-                msg = None
+            if skip_same_frame:
+                msg = self._current_route_select()
+            else:
+                try:
+                    msg = self.process_cycle(frame)
+                except Exception as e:
+                    # process_cycle側のバグでノード全体を巻き込んで落とさない
+                    # （`planning_node._replan()`と同じパターン）。confirm状態は
+                    # 前周期のまま据え置かれる
+                    print(f"# arrow_signal process_cycle() が例外: {e}",
+                         file=sys.stderr, flush=True)
+                    msg = None
             if msg is not None:
                 pub.send(TOPIC_ROUTE_SELECT, msg)
 

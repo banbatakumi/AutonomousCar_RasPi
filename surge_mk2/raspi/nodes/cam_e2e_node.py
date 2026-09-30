@@ -79,6 +79,13 @@ NS = 1_000_000_000
 HB_HZ = 10
 #: 推論（CNN）を必要とする自動運転モード
 _CAM_E2E_MODES = ("cam_e2e",)
+#: `scan`（LiDAR）がこれより古ければ融合に使わない（`cam_track_node.py` の
+#: `_SCAN_STALE_NS` と同じ値・同じ考え方——LiDAR停止・セクタ全欠け・io_node
+#: 再起動などでscanが途絶えても、鮮度チェックが無いと最後のscanの
+#: `lidar_seen=True` と距離が毎周期publishされ続けてしまう（issue #3）。
+#: 独立しているはずの安全策（LiDAR前方距離）がカメラ推論とは別経路で
+#: 無効化されたまま気づかれない、という壊れ方になる）
+_SCAN_STALE_NS = 300_000_000
 
 
 class RegressionModel:
@@ -195,7 +202,7 @@ class CamE2ENode:
         `raspi/auto/e2e_lidar.py` の `free_ahead` と同じ切り出し方
         （`scan_window()` で前方視野を切り出し、正面±`lidar_fov_deg/2` の最小値を取る）。
         """
-        if scan is None:
+        if scan is None or time.monotonic_ns() - scan.t_pub > _SCAN_STALE_NS:
             return 0.0, False
         w = scan_window(scan, self.lidar_fov_deg, self.lidar_max_range)
         if w.seen_ratio <= 0.0:

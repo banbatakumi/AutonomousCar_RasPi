@@ -103,16 +103,28 @@ class TestFrontLidarDist(unittest.TestCase):
         dist = [3.0] * 360
         dist[0] = 1.2       # 正面
         dist[10] = 0.8       # 視野内だがもっと近い
-        scan = Scan(dist=dist, sector_seen=[True] * 12)
+        scan = Scan(dist=dist, sector_seen=[True] * 12, t_pub=time.monotonic_ns())
         got, seen = self.node.front_lidar_dist(scan)
         self.assertTrue(seen)
         self.assertAlmostEqual(got, 0.8)
 
     def test_unseen_sector_in_front_fov_is_treated_as_wall(self):
         """`scan_window()` は欠測を距離0（壁）として返す（安全側）。"""
-        scan = Scan(dist=[3.0] * 360, sector_seen=[False] * 12)
+        scan = Scan(dist=[3.0] * 360, sector_seen=[False] * 12, t_pub=time.monotonic_ns())
         got, seen = self.node.front_lidar_dist(scan)
         self.assertFalse(seen)
+
+    def test_stale_scan_is_treated_as_unseen(self):
+        """`t_pub`が`_SCAN_STALE_NS`より古いscanは、内容が正常でも安全策として使わない
+        （issue #3——LiDAR停止・io_node再起動でscanが途絶えても、最後の値を
+        使い続けて`lidar_seen=True`を出し続けてしまう不具合の修正）。"""
+        dist = [3.0] * 360
+        dist[0] = 1.2
+        old_t_pub = time.monotonic_ns() - 1_000_000_000       # 1秒前 = 十分古い
+        scan = Scan(dist=dist, sector_seen=[True] * 12, t_pub=old_t_pub)
+        got, seen = self.node.front_lidar_dist(scan)
+        self.assertFalse(seen)
+        self.assertEqual(got, 0.0)
 
 
 class TestModelSelection(unittest.TestCase):
@@ -174,7 +186,7 @@ class _FakePub:
 def _ref_with_frame(ring_name: str):
     ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
     data = np.full((24, 32, 3), 200, dtype=np.uint8)
-    desc = ring.write(data, t_capture_ns=1, frame_id=1)
+    desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
     ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                    frame_id=desc.frame_id, width=desc.width, height=desc.height,
                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -289,7 +301,7 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_wscan")
         try:
-            scan = Scan(dist=[1.5] * 360, sector_seen=[True] * 12)
+            scan = Scan(dist=[1.5] * 360, sector_seen=[True] * 12, t_pub=time.monotonic_ns())
             sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_SCAN: scan,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})

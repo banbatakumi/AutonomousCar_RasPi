@@ -9,6 +9,7 @@ bbox→bearing変換・LiDAR距離融合・IDLE/TRACKING状態遷移という配
 
 import math
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -355,7 +356,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         ring = FrameRing.create("surge_test_track_gating", 32, 24, "RGB888", n_slots=2)
         try:
             data = np.zeros((24, 32, 3), dtype=np.uint8)
-            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -427,7 +428,7 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
         ring = FrameRing.create("surge_test_track_armed_resume", 32, 24, "RGB888", n_slots=2)
         try:
             data = np.zeros((24, 32, 3), dtype=np.uint8)
-            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -462,7 +463,7 @@ class TestRunSurvivesProcessCycleException(unittest.TestCase):
         ring = FrameRing.create("surge_test_track_exc", 32, 24, "RGB888", n_slots=2)
         try:
             data = np.zeros((24, 32, 3), dtype=np.uint8)
-            desc = ring.write(data, t_capture_ns=1, frame_id=1)
+            desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")

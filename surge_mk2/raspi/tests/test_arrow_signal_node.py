@@ -7,6 +7,7 @@
 """
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -168,7 +169,7 @@ class TestArmedGating(unittest.TestCase):
     def _ref_with_frame(self, ring_name: str, *, lit_col: int):
         frame = _frame_with_arrow(240, 320, lit_col=lit_col, lit_width=40)
         ring = FrameRing.create(ring_name, 320, 240, "BGR888", n_slots=2)
-        desc = ring.write(frame, t_capture_ns=1, frame_id=1)
+        desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -215,13 +216,73 @@ class TestArmedGating(unittest.TestCase):
             ring.unlink()
 
 
+class TestSameFrameIsNotDoubleCounted(unittest.TestCase):
+    """issue #13: 同じ`ImageRef.ring_seq`を複数周期にまたがって再処理しないこと。
+
+    カメラは30fps・このループは約10ms周期で回るので、`ring_seq`の重複排除が
+    無いと同じフレームを約3回processし、`confirm_frames`（N連続一致で確定）が
+    実質`1/N`のフレームで確定してしまう（デバウンスが弱まる実害）。
+    """
+
+    def _ref_with_frame(self, ring_name: str, *, lit_col: int):
+        frame = _frame_with_arrow(240, 320, lit_col=lit_col, lit_width=40)
+        ring = FrameRing.create(ring_name, 320, 240, "BGR888", n_slots=2)
+        desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
+        ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                       frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                       fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+        return ring, ref
+
+    def test_unchanged_ring_seq_never_reaches_confirm_frames(self):
+        """`ring_seq`が一度も変わらなければ、何周期回しても確定しない
+        （＝同じフレームをconfirm_frames回`process_cycle`していない証拠）。"""
+        node = ArrowSignalNode(confirm_frames=3)
+        ring, ref = self._ref_with_frame("surge_test_arrow_signal_dedup", lit_col=60)
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.12)      # 十分な周回数（poll=20ms×約6回）
+
+            routes = [m for topic, m in pub.sent if topic == TOPIC_ROUTE_SELECT]
+            self.assertFalse(routes,
+                             "同じring_seqのフレームだけでconfirm_framesに達してしまっている")
+            self.assertEqual(node._pending_count, 1,
+                             "process_cycle()が同じフレームに対して複数回呼ばれている")
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_new_ring_seq_advances_the_confirm_count(self):
+        """`ring_seq`が実際に進めば、その分だけconfirmカウントも進むこと（回帰防止）。"""
+        node = ArrowSignalNode(confirm_frames=3)
+        frame = _frame_with_arrow(240, 320, lit_col=60, lit_width=40)
+        ring = FrameRing.create("surge_test_arrow_dedup_prog", 320, 240,
+                                "BGR888", n_slots=4)
+        try:
+            sub = _FakeSub({TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = _FakePub()
+            for _ in range(3):
+                desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
+                sub.latest[TOPIC_IMAGE_FRONT] = ImageRef(
+                    shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                    frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+                node.run(sub=sub, pub=pub, duration_s=0.01)
+
+            routes = [m for topic, m in pub.sent if topic == TOPIC_ROUTE_SELECT]
+            self.assertTrue(routes, "ring_seqが進んでいるのに確定していない")
+        finally:
+            node.close()
+            ring.unlink()
+
+
 class TestSignalConfigGating(unittest.TestCase):
     """`SignalConfig`（GUIからのライブ設定）の反映とON/OFFトグル。"""
 
     def _ref_with_frame(self, ring_name: str, *, lit_col: int):
         frame = _frame_with_arrow(240, 320, lit_col=lit_col, lit_width=40)
         ring = FrameRing.create(ring_name, 320, 240, "BGR888", n_slots=2)
-        desc = ring.write(frame, t_capture_ns=1, frame_id=1)
+        desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -282,7 +343,7 @@ class TestArrowSignalStatusPublish(unittest.TestCase):
     def _ref_with_frame(self, ring_name: str, *, lit_col: int):
         frame = _frame_with_arrow(240, 320, lit_col=lit_col, lit_width=40)
         ring = FrameRing.create(ring_name, 320, 240, "BGR888", n_slots=2)
-        desc = ring.write(frame, t_capture_ns=1, frame_id=1)
+        desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
         ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
@@ -343,7 +404,7 @@ class TestRunSurvivesProcessCycleException(unittest.TestCase):
         ring = FrameRing.create("surge_test_arrow_signal_exc", 320, 240, "BGR888", n_slots=2)
         try:
             frame = _frame_with_arrow(240, 320, lit_col=60, lit_width=40)
-            desc = ring.write(frame, t_capture_ns=1, frame_id=1)
+            desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")

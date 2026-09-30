@@ -13,6 +13,8 @@ JPEG 化はしない分だけ `RingJpeg` より薄い。
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 from ..msgs import ImageRef
@@ -23,6 +25,18 @@ __all__ = ["FrameReader"]
 #: `ImageRef.ring_seq` とこちらが掴んでいる `write_seq` がこれ以上開いていたら、
 #: 掴んでいるのは作り直される前の共有メモリだと判断して attach し直す
 _STALE_GAP = 1000
+
+#: `t_capture`（センサ取得時刻、CLOCK_MONOTONIC）がこれより古いフレームは
+#: 「新鮮」として扱わない。**camera_node が死ぬ／`capture_request()` がハング
+#: しても、共有メモリの mapping 自体は生きたままなので `ring.latest()` は
+#: 同じフレームを返し続け、`still_valid()` も True のまま**——中身が全く
+#: 更新されていなくても、見た目上は正常なフレームに見えてしまう
+#: （issue #2）。知覚ノードは20msごとに同じ画像を推論・publishし続け、
+#: `planning_node` 側の鮮度判定は `t_pub`（publish時刻）しか見ていないので
+#: 「凍った画像に基づく『走れ』」が制動に化けない。ここで撮像時刻そのものの
+#: 年齢を見て弾くことで、上流（`camera_node`）が死んでいる限り必ず
+#: `failed_frame` 側に落ちるようにする
+_MAX_FRAME_AGE_NS = 200_000_000
 
 
 class FrameReader:
@@ -74,6 +88,11 @@ class FrameReader:
             t_capture = frame_ref.desc.t_capture_ns
             ok = frame_ref.still_valid()
             if not ok:
+                return None
+            if time.monotonic_ns() - t_capture > _MAX_FRAME_AGE_NS:
+                # 撮像から時間が経ちすぎている＝上流（`camera_node`）が死んでいる
+                # か固まっている。共有メモリ自体は読めてしまうので、ここで
+                # 明示的に弾かないと「凍った画像」がいつまでも新鮮に見える
                 return None
             return arr, t_capture
         except Exception:

@@ -300,8 +300,14 @@ class PlanningNode:
         if scan is None:
             return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                              engaged=self.ctrl.engaged, reason="点群がまだ届いていない")
+        # **`t_pub`（publish時刻）だけでなく `t_capture`（センサ取得時刻）も見る。**
+        # カメラ知覚ノードが同じ画像を掴み続けたまま推論し続けると（#2）、
+        # `t_pub` は毎周期新しくても中身（`t_capture`）は凍ったままになる——
+        # `t_pub` だけでは「新しい周に見えるが中身は古い」を検出できない
         age = now_ns - scan.t_pub
-        if age > self.planner.stale_ms * 1_000_000:
+        cap_age = now_ns - scan.t_capture
+        if age > self.planner.stale_ms * 1_000_000 or cap_age > self.planner.stale_ms * 1_000_000:
+            age = max(age, cap_age)
             return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                              engaged=self.ctrl.engaged,
                              scan_age_ms=age / 1e6, plan_hz=self._plan_hz,

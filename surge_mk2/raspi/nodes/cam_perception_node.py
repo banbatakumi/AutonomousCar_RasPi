@@ -462,19 +462,22 @@ class CamPerceptionNode:
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
                 self._last_path = None
+            elif (self._last_scan is not None
+                  and now - self._last_infer_ns < self._infer_period_ns):
+                # ★省電力化（issue #13）: 間引き判定を共有メモリの読み取り
+                # （`read_frame()`。224²相当のコピーを伴う）より**先に**行う。
+                # 以前は読んでから捨てていたため、間引き周期に当たった周期でも
+                # 無駄な `.copy()` が発生していた（`cam_e2e_node.py` は元々
+                # 判定→読み取りの順になっている——あちらに揃えた）
+                st = self._last_scan
+                path_msg = self._last_path
+                should_publish = False
             else:
                 got = self.read_frame(ref)
                 if got is None:
                     st = self.failed_frame(seq=seq)
                     self._last_scan = None
                     self._last_path = None
-                elif (self._last_scan is not None
-                      and now - self._last_infer_ns < self._infer_period_ns):
-                    # ★省電力化: まだ間引き周期に達していない。前回の推論結果を
-                    # そのまま維持し、publish はしない（上のコメント参照）
-                    st = self._last_scan
-                    path_msg = self._last_path
-                    should_publish = False
                 else:
                     frame, t_capture = got
                     self._last_infer_ns = now
