@@ -26,6 +26,7 @@ import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
 import { useEngineSound } from './hooks/useEngineSound'
 import { useDriving } from './input/useDriving'
+import type { DrivingSettings } from './store/ui'
 import { useUi } from './store/ui'
 import { AutoView } from './views/AutoView'
 import { DiagView } from './views/DiagView'
@@ -47,6 +48,10 @@ export function App() {
   const [ch, setCh] = useState<ControlChannel | null>(null)
   const chRef = useRef<ControlChannel | null>(null)
   const set = useUi((s) => s.set)
+  // 運転設定（driveMode/maxSpeed等）は「接続直後に届いた保存値を1回だけ取り込む」
+  // 片方向寄りの同期（`ws/control.ts` の `setDriveSettings` 参照）。毎回の `status` で
+  // 上書きすると、操作中に他クライアントのstatus echoでスライダーが巻き戻りかねない
+  const driveSettingsSynced = useRef(false)
 
   useEffect(() => {
     const stopTelemetry = connectTelemetry(
@@ -66,10 +71,15 @@ export function App() {
     const stopMap = connectMap((open) => set({ mapOpen: open }))
 
     const c: ControlChannel = new ControlChannel({
-      onOpenChange: (open) => set({ controlOpen: open, ...(open ? {} : { hasControl: false }) }),
+      onOpenChange: (open) => {
+        set({ controlOpen: open, ...(open ? {} : { hasControl: false }) })
+        // つなぎ直すたびに「まだ取り込んでいない」へ戻す（再接続で新しい保存値が
+        // 来ているかもしれないため）
+        if (open) driveSettingsSynced.current = false
+      },
       // **操縦権が自分かどうかは名前の一致で判定する。**
       // 「誰かが持っている」だけだと2枚目のタブが自分だと誤認する
-      onStatus: (s) =>
+      onStatus: (s) => {
         set({
           status: s,
           hasControl: s.has_controller && s.controller === c.id,
@@ -83,7 +93,12 @@ export function App() {
           signalConfig: s.signal_config,
           camModel: s.cam_model,
           e2eModel: s.e2e_model,
-        }),
+        })
+        if (!driveSettingsSynced.current && Object.keys(s.drive_settings ?? {}).length > 0) {
+          driveSettingsSynced.current = true
+          useUi.getState().setSettings(s.drive_settings as Partial<DrivingSettings>)
+        }
+      },
       onDenied: (holder, reason) =>
         set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false }),
       onRtt: (v) => set({ wsRttMs: v }),

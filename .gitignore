@@ -25,6 +25,10 @@ surge_mk2/config/odometer.json
 surge_mk2/config/cam_model.json
 # 選ばれているE2E LiDARモデル名。auto.json と同じ理由
 surge_mk2/config/e2e_lidar_model.json
+# GUIの運転設定（速度・制御モード等）。auto.json と同じ理由
+surge_mk2/config/drive_settings.json
+# シミュレータのチューニング値（TUNABLESパネル）。auto.json と同じ理由
+surge_mk2/config/sim_params.json
 logs/*.jsonl
 # 生フレームログ（大きい・実行ごとに増える）
 *.sfl

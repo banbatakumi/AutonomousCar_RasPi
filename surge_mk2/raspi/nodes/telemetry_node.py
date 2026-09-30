@@ -105,6 +105,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import http
+import math
 import mimetypes
 import os
 import secrets
@@ -194,6 +195,9 @@ PRESET_NAME_MAX = 40
 PRESETS_PER_MODE_MAX = 50
 #: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
 CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
+#: GUIの運転設定（速度ダイヤル・制御モード・フィール値等）を覚えておく場所。`CAMERA_CONF` と
+#: 同じ流儀。ファン（`_fan_mode`/`_fan_duty`）だけは意図的にここに含めない
+DRIVE_SETTINGS_CONF = REPO_ROOT / "config" / "drive_settings.json"
 #: 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値を覚えておく場所。
 #: `CAMERA_CONF` と同じ流儀
 SIGNAL_CONF = REPO_ROOT / "config" / "signal.json"
@@ -494,6 +498,13 @@ class TelemetryServer:
         self._cam_front_fps_disarm = CAM_FRONT_FPS_DISARM_DEFAULT
         self._cam_rear_fps_armed = CAM_REAR_FPS_DEFAULT
         self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
+
+        # ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
+        #: `config/drive_settings.json` に保存され、次回起動で戻る（`camera.json` と同じ流儀）。
+        #: 数値レンジのクランプはGUI側（`clampSettings`）の責務。ここは最後に見た値を
+        #: 保存して配るだけ（ファンと違い**意図的に永続化する**——`_on_fan` 参照）
+        self._drive_settings: dict = {}
+        self._load_drive_settings()
 
         # ── 矢印信号認識の設定（ON/OFF・HSVしきい値） ──
         #: `config/signal.json` に保存され、次回起動で戻る（`camera.json` と同じ流儀）。
@@ -824,6 +835,12 @@ class TelemetryServer:
 
         elif kind == "camera":
             self._on_camera(m)
+            await self._broadcast_control_status()
+
+        # ── GUIの運転設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
+
+        elif kind == "drive_settings":
+            self._on_drive_settings(m)
             await self._broadcast_control_status()
 
         # ── 矢印信号認識の設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
@@ -1325,6 +1342,61 @@ class TelemetryServer:
         except Exception:
             pass
 
+    # ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
+
+    #: `DrivingSettings`（GUI側 `gui/src/store/ui.ts`）のうち、車体の運転パラメータとして
+    #: Pi側に保存する項目。`speedUnit`/`engineSoundType` は表示上の好みなので対象外
+    #: （GUI側でブラウザ`localStorage`のみに残す）。値は GUI 側の `clampSettings` が
+    #: 必ずクランプするので、ここでは型だけ検査する（`_on_camera` ほど厳密なレンジの
+    #: サーバ側再現はしない——物理的に効く値ではなく、表示・演算用の値のため）
+    _DRIVE_SETTINGS_NUMERIC_KEYS = frozenset({
+        "maxSpeed", "maxSteer", "accel", "coast", "brake",
+        "steerRate", "steerReturn", "steerCounter",
+        "gamepadSteerExpo", "gamepadSteerDeadzone",
+        "armIdleTimeoutMs", "brakeTorque", "driveTorque",
+        "mtMaxSpeed", "mtAccel",
+        "mtGear1", "mtGear2", "mtGear3", "mtGear4", "mtGear5",
+        "mtCoast", "mtEngineBrake", "camHeight",
+    })
+    _DRIVE_SETTINGS_BOOL_KEYS = frozenset({"autoStop"})
+    _DRIVE_MODES = frozenset({"speed", "torque", "mt"})
+
+    def _valid_drive_settings(self, raw: dict) -> dict:
+        """既知キーだけ、型検査を通ったものだけを取り出す（`_on_drive_settings`／
+        `_load_drive_settings` 共通）。数値レンジのクランプはGUI側 `clampSettings` の責務"""
+        out: dict = {}
+        for k in self._DRIVE_SETTINGS_NUMERIC_KEYS:
+            if k in raw and isinstance(raw[k], (int, float)) and math.isfinite(raw[k]):
+                out[k] = float(raw[k])
+        for k in self._DRIVE_SETTINGS_BOOL_KEYS:
+            if k in raw and isinstance(raw[k], bool):
+                out[k] = raw[k]
+        if raw.get("driveMode") in self._DRIVE_MODES:
+            out["driveMode"] = raw["driveMode"]
+        return out
+
+    def _on_drive_settings(self, m: dict) -> None:
+        """`{"type":"drive_settings", ...}`。GUIの運転設定パネルの値。送られてきた
+        項目だけ上書きする（`_on_camera` と同じ流儀）。ファン（`_on_fan`）と違い
+        **意図的に永続化する**——Pi再起動やブラウザの`localStorage`消失をまたいで
+        引き継がれてほしい値のため"""
+        self._drive_settings.update(self._valid_drive_settings(m))
+        self._save_drive_settings()
+
+    def _load_drive_settings(self) -> None:
+        try:
+            raw = _json_decode(DRIVE_SETTINGS_CONF.read_bytes())
+        except Exception:
+            return                         # 無い・壊れている → 空のまま（GUI側の既定値を使う）
+        if isinstance(raw, dict):
+            self._drive_settings = self._valid_drive_settings(raw)
+
+    def _save_drive_settings(self) -> None:
+        try:
+            _atomic_write_bytes(DRIVE_SETTINGS_CONF, _json_encode(self._drive_settings))
+        except Exception:
+            pass                           # 保存できなくても走行は続けられるべき
+
     # ── 矢印信号認識の設定（ON/OFF・HSVしきい値） ──
 
     def _on_signal_config(self, m: dict) -> None:
@@ -1671,6 +1743,7 @@ class TelemetryServer:
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
             "camera_config": self._camera_config_status(),
+            "drive_settings": self._drive_settings,
             "signal_config": self._signal_config_status(),
             "cam_model": self._cam_model_status(),
             "e2e_model": self._e2e_model_status(),

@@ -214,7 +214,20 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const settings = useUi((s) => s.settings)
   const settingsDefault = useUi((s) => s.settingsDefault)
   const setSettings = useUi((s) => s.setSettings)
+  // `speedUnit`/`engineSoundType` を除く運転設定はPi側にも保存する（`_on_drive_settings`
+  // 参照）。ローカル反映はこれまで通り即座、サーバ側もサーバが真値の他設定
+  // （camera/signal 等）と同じく送った項目だけ即保存する
+  const setDriveSettings = (p: Partial<DrivingSettings>) => {
+    setSettings(p)
+    ch?.setDriveSettings(p)
+  }
   const resetSettings = useUi((s) => s.resetSettings)
+  // リセット後もPi側の保存値を追随させる（追随させないと、次に繋いだときの
+  // 「接続直後の1回だけ取り込む」同期で古い値に巻き戻ってしまう）
+  const handleResetSettings = () => {
+    resetSettings()
+    ch?.setDriveSettings(settingsDefault)
+  }
   const saveCurrentAsDefault = useUi((s) => s.saveCurrentAsDefault)
   const pathGuide = useUi((s) => s.pathGuide)
   const engineSoundOn = useUi((s) => s.engineSoundOn)
@@ -247,7 +260,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   return (
     <div className="settings">
       <div className="settings-head">
-        <button onClick={resetSettings}>既定値に戻す</button>
+        <button onClick={handleResetSettings}>既定値に戻す</button>
         {/* ★2026-08-22: 「既定値」はソースコードの固定値ではなく、ここで上書きできる
             （`store/ui.ts` の `settingsDefault`、`localStorage` に保存）。以前は
             「今使っている値を既定値にしたい」と言われるたびにソースを直接書き換えて
@@ -285,7 +298,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 <button
                   key={m}
                   className={settings.driveMode === m ? 'on' : ''}
-                  onClick={() => setSettings({ driveMode: m })}
+                  onClick={() => setDriveSettings({ driveMode: m })}
                 >
                   {label}
                 </button>
@@ -294,23 +307,23 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
           </section>
 
           {settings.driveMode === 'torque' ? (
-            <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+            <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
           ) : settings.driveMode === 'mt' ? (
             <>
               {/* MT は 'speed'/'torque' とパラメータを一切共有しない（2026-08-30）。
                   `MT_SPEED_FIELDS`（`mtMaxSpeed`/`mtAccel`）は独立したキーで、
                   減速は `MT_FEEL_FIELDS`（`mtCoast`/`mtEngineBrake`）に一本化した。
                   逆キーブレーキ・発進キックに相当する項目は無い（MT には無い機能） */}
-              <SettingGroup title="速度制御" fields={MT_SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
-              <SettingGroup title="MT 減速フィール（惰行・エンジンブレーキ）" fields={MT_FEEL_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
-              <SettingGroup title="MT ギア比（1速〜5速。R-N-1-2-3-4-5、L1/← =シフトダウン、R1/→ =シフトアップ）" fields={MT_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+              <SettingGroup title="速度制御" fields={MT_SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
+              <SettingGroup title="MT 減速フィール（惰行・エンジンブレーキ）" fields={MT_FEEL_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
+              <SettingGroup title="MT ギア比（1速〜5速。R-N-1-2-3-4-5、L1/← =シフトダウン、R1/→ =シフトアップ）" fields={MT_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
             </>
           ) : (
-            <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+            <SettingGroup title="速度制御" fields={SPEED_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
           )}
 
-          <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
-          <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+          <SettingGroup title="舵" fields={STEER_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
+          <SettingGroup title="ブレーキ" fields={BRAKE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
         </>
       )}
 
@@ -330,7 +343,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               <input
                 type="checkbox"
                 checked={settings.autoStop}
-                onChange={(e) => setSettings({ autoStop: e.target.checked })}
+                onChange={(e) => setDriveSettings({ autoStop: e.target.checked })}
               />
               走行速度に応じた停止距離＋余裕（margin）未満で STM32 に自動停止させる
             </label>
@@ -448,7 +461,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             )}
           </section>
 
-          <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+          <SettingGroup title="操作" fields={MISC_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
         </>
       )}
 
@@ -583,7 +596,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               前後カメラに進路ガイドを重ねる（校正前・暫定）
             </label>
             {CAMERA_FIELDS.map((f) => (
-              <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setSettings} />
+              <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
             ))}
           </section>
         </>

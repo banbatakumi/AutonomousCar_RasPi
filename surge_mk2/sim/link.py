@@ -131,7 +131,7 @@ def create_sim_link(course_path: str | Path, *, spec_path: str | Path | None = N
     """
     spec = VehicleSpec.load(spec_path) if spec_path else VehicleSpec.load()
     course = Course.load(course_path)
-    params = params or SimParams()
+    params = params or SimParams.load()
 
     lidar = None
     if with_lidar:

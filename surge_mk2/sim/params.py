@@ -8,10 +8,18 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, fields
+from pathlib import Path
 from typing import NamedTuple
 
 __all__ = ["SimParams", "TUNABLES", "Tunable"]
+
+#: `sim.run` を起動するたびの既定値リセットを避けるための保存先。`telemetry_node.py` の
+#: `config/*.json` と同じ流儀（`.gitignore` 済み）。`sim.run` は Mac のローカルチェックアウトで
+#: 動くため、実機の `config/` とは物理的に別ファイルになる
+SIM_PARAMS_CONF = Path(__file__).resolve().parents[1] / "config" / "sim_params.json"
 
 
 @dataclass
@@ -59,6 +67,33 @@ class SimParams:
 
     def copy(self) -> "SimParams":
         return SimParams(**{f.name: getattr(self, f.name) for f in fields(self)})
+
+    @classmethod
+    def load(cls) -> "SimParams":
+        """`SIM_PARAMS_CONF` から戻す。無い・壊れている・型が合わないフィールドは
+        既定値のまま（`telemetry_node._load_camera_conf` と同じ防御的スタイル。
+        フィールドの増減にも強い——古い保存値の余分なキーは単に無視される）"""
+        try:
+            raw = json.loads(SIM_PARAMS_CONF.read_bytes())
+        except Exception:
+            return cls()
+        if not isinstance(raw, dict):
+            return cls()
+        names = {f.name for f in fields(cls)}
+        kwargs = {}
+        for k, v in raw.items():
+            if k in names and isinstance(v, (int, float)):
+                kwargs[k] = float(v)
+        return cls(**kwargs)
+
+    def save(self) -> None:
+        try:
+            SIM_PARAMS_CONF.parent.mkdir(parents=True, exist_ok=True)
+            tmp = SIM_PARAMS_CONF.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({f.name: getattr(self, f.name) for f in fields(self)}))
+            os.replace(tmp, SIM_PARAMS_CONF)
+        except Exception:
+            pass                           # 保存できなくてもシムは動き続けられるべき
 
 
 class Tunable(NamedTuple):

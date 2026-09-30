@@ -295,6 +295,13 @@ export type ControlStatus = {
   wifi: WifiStatus
   /** capture側のFPS上限・後方カメラON/OFF・GUI配信頻度。**サーバが真値** */
   camera_config: CameraConfigStatus
+  /**
+   * GUIの運転設定（速度ダイヤル・制御モード・フィール値等、`DrivingSettings` の一部）。
+   * `config/drive_settings.json` に保存された最後の値。**接続直後の1回だけ**
+   * `store/ui.ts` の `settings` へ取り込む（以降はローカル操作をサーバへ流す片方向寄りの
+   * 同期。fan/camera_config のように毎回上書きはしない——理由は `ui.ts` 参照）
+   */
+  drive_settings: Record<string, number | boolean | string>
   /** 矢印信号認識のON/OFF・HSVしきい値。**サーバが真値** */
   signal_config: SignalConfigStatus
   /** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値** */

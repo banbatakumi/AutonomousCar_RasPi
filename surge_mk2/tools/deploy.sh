@@ -96,6 +96,7 @@ rsync -az --stats \
   --exclude '*.sfl' \
   --exclude '/config/auto.json' \
   --exclude '/config/auto_presets.json' \
+  --exclude '/config/drive_settings.json' \
   --exclude '/config/camera.json' \
   --exclude '/config/cam_model.json' \
   --exclude '/config/e2e_lidar_model.json' \

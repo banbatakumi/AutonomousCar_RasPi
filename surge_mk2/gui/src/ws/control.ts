@@ -194,6 +194,16 @@ export class ControlChannel {
   }
 
   /**
+   * 「手動で地図作成」。`startSlam2dExplore` と同じく新規EXPLOREから始めるが、
+   * **自動運転に入れない**——人がラジコン（MANUAL）で走らせ、planner は SLAM と
+   * 周回の判定だけを回す（`Slam2dRaceLine._explore_manual`）。`engaged:false` は
+   * 明示する（`DONE` で engage したまま押されると FTG が走り出すため）。
+   */
+  startSlam2dManualMap(mode: string) {
+    this.send({ type: 'auto', mode, clear_map: true, engaged: false })
+  }
+
+  /**
    * 「レーシングライン走行」。保存済み地図を読み込み、地図作成（EXPLORE/BUILD）
    * を経ずに自己位置復元（LOCATE）から走り始める。
    *
@@ -306,6 +316,17 @@ export class ControlChannel {
       rear_enabled_disarm: p.rearEnabledDisarm,
       gui_hz: p.guiHz,
     })
+  }
+
+  // ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
+
+  /**
+   * 運転設定パネルの値をPi側へ保存する。`camera`/`signal` と同じく状態はサーバが真値
+   * （接続直後の1回だけ`store/ui.ts`が取り込む。以降はローカル操作をここで送るだけ）。
+   * **どのキーも省略できる**（送った項目だけ上書きされる、`_on_drive_settings` 参照）
+   */
+  setDriveSettings(p: Record<string, number | boolean | string>) {
+    this.send({ type: 'drive_settings', ...p })
   }
 
   // ── 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値 ──

@@ -501,6 +501,9 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.camera_hz = 15.0
         srv._publish_cam_config = lambda: None     # バスに触らせない
         srv._save_camera_conf = lambda: None       # ディスクに触らせない
+        # GUIの運転設定（速度ダイヤル・制御モード等）。**未保存の既定状態**を組む
+        srv._drive_settings = {}
+        srv._save_drive_settings = lambda: None    # ディスクに触らせない
         # 矢印信号認識の設定（ON/OFF・HSVしきい値）。**既定値のまま**を組む
         srv._signal_enabled = True
         srv._signal_roi_top = 0.05

@@ -144,6 +144,7 @@ class SimChannel:
             key = msg.get("key")
             if any(t.key == key for t in TUNABLES):
                 setattr(sim.params, key, float(msg["value"]))
+                sim.params.save()
         elif kind == "nudge":
             # GUI から車体を少し動かす（壁に埋まったときの脱出用）
             v = sim.vehicle
