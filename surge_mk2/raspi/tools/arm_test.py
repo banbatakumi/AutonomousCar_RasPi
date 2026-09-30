@@ -38,7 +38,7 @@ from raspi.io.gpio import PIN_HEARTBEAT, Heartbeat, open_output  # noqa: E402
 from raspi.io.serial_link import SerialLink  # noqa: E402
 from raspi.proto import UART_BAUD  # noqa: E402
 from raspi.proto import packets as P  # noqa: E402
-from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
+from raspi.rec.framelog import FrameLogWriter, default_log_path  # noqa: E402
 
 CMD_PERIOD_NS = 10_000_000          # 100Hz
 
@@ -359,8 +359,8 @@ def main() -> int:
         hb.stop()
         log.close()
         link.close()
-        print(f"\nDISARM を送って終了しました。ハートビートも停止（E-Stop ラッチ）。")
-        print(f"次に走らせる前に車両のボタン2を押してください。")
+        print("\nDISARM を送って終了しました。ハートビートも停止（E-Stop ラッチ）。")
+        print("次に走らせる前に車両のボタン2を押してください。")
         print(f"記録: {log.path}")
     return rc
 

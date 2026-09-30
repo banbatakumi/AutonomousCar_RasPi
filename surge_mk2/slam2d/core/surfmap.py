@@ -49,11 +49,6 @@ import numpy as np
 
 __all__ = ["SurfaceMap", "Association"]
 
-try:                                         # pragma: no cover - 環境依存
-    import cv2 as _cv2
-except ImportError:                          # pragma: no cover
-    _cv2 = None
-
 from typing import NamedTuple
 
 
@@ -225,15 +220,17 @@ class SurfaceMap:
 
 def _nearest_occupied(occ: np.ndarray, idx_map: np.ndarray) -> np.ndarray:
     """各セルについて最寄りの壁セルの index（`idx_map`の値）。"""
-    if _cv2 is not None:
-        src = np.where(occ, 0, 1).astype(np.uint8)
-        _d, labels = _cv2.distanceTransformWithLabels(
-            src, _cv2.DIST_L2, 5, labelType=_cv2.DIST_LABEL_PIXEL)
-        zero = np.flatnonzero(occ.reshape(-1))
-        lut = np.full(int(labels.max()) + 1, -1, dtype=np.int64)
-        lut[labels.reshape(-1)[zero]] = idx_map.reshape(-1)[zero]
-        return lut[labels]
-    return _jump_flood(occ, idx_map)
+    try:                                      # pragma: no cover - 環境依存
+        import cv2 as _cv2
+    except ImportError:                        # pragma: no cover
+        return _jump_flood(occ, idx_map)
+    src = np.where(occ, 0, 1).astype(np.uint8)
+    _d, labels = _cv2.distanceTransformWithLabels(
+        src, _cv2.DIST_L2, 5, labelType=_cv2.DIST_LABEL_PIXEL)
+    zero = np.flatnonzero(occ.reshape(-1))
+    lut = np.full(int(labels.max()) + 1, -1, dtype=np.int64)
+    lut[labels.reshape(-1)[zero]] = idx_map.reshape(-1)[zero]
+    return lut[labels]
 
 
 def _jump_flood(occ: np.ndarray, idx_map: np.ndarray) -> np.ndarray:  # pragma: no cover

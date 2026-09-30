@@ -55,7 +55,7 @@ from raspi.auto.base import scan_window  # noqa: E402
 from raspi.core.auto_gate import cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamE2ECmd, ImageRef, Scan, VehicleState  # noqa: E402
+from raspi.msgs import CamE2ECmd, ImageRef, Scan  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,

@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.nav import deskew  # noqa: E402
+from raspi.nav.deskew import deskew  # noqa: E402
 from raspi.nav.hybrid_astar import (  # noqa: E402
     _DIJKSTRA_CACHE, HybridConfig, _Heuristic2D, plan,
 )

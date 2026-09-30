@@ -7,36 +7,12 @@
 - `logclean` … 記録先パーティションの空き容量監視と、世代管理での自動削除
   （`surge-logclean.timer` との役割分担は `logclean.py` のモジュール docstring 参照）
 
-`mcap` が入っていない環境でも `from raspi.rec import FrameLogWriter` は通る。
+**このパッケージの `__init__.py` はサブモジュールを再エクスポートしない**
+（issue #22）。`from raspi.rec import FrameLogWriter` のように書くと、実時間の
+`io_node` が `.mcap_log`（`mcap`/`zstandard` に依存、約23ms）まで芋づる式に
+読み込んでしまう。使う側は次のようにサブモジュールを直接 import すること::
+
+    from raspi.rec.framelog import FrameLogWriter, FrameLogReader, Kind, default_log_path
+    from raspi.rec.logclean import DiskStatus, check_disk, disk_free_pct
+    from raspi.rec.mcap_log import HAS_MCAP, McapLog, default_mcap_path  # mcap が要る側だけ
 """
-
-from .framelog import (
-    FileHeader,
-    FrameLogReader,
-    FrameLogWriter,
-    Kind,
-    LogRecord,
-    default_log_path,
-)
-from .logclean import DiskStatus, check_disk, disk_free_pct
-
-__all__ = [
-    "FileHeader",
-    "FrameLogReader",
-    "FrameLogWriter",
-    "Kind",
-    "LogRecord",
-    "default_log_path",
-    "DiskStatus",
-    "check_disk",
-    "disk_free_pct",
-]
-
-try:                                        # mcap があるときだけ
-    from .mcap_log import HAS_MCAP, McapLog, default_mcap_path  # noqa: F401
-except ImportError:                         # pragma: no cover - 環境依存
-    HAS_MCAP = False
-else:
-    __all__ += ["McapLog", "default_mcap_path"]
-
-__all__ += ["HAS_MCAP"]

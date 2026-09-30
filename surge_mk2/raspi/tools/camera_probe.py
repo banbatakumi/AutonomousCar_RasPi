@@ -165,7 +165,7 @@ def run(indices: list[int], size, fps, frames: int) -> int:
         mark = " ← これ" if k == name else ""
         print(f"    {k:16} との差: {d:>16,.1f} ms{mark}")
     ok_clock = name == "CLOCK_MONOTONIC" and 0 <= diff < 500 * 1_000_000
-    print(f"\n  判定: " + (
+    print("\n  判定: " + (
         "**CLOCK_MONOTONIC 基準**。t_capture にそのまま使える" if ok_clock
         else f"**{name} 基準**。t_capture へ変換が要る（差 {diff/1e6:.1f}ms）"))
     probes[0].samples.clear()

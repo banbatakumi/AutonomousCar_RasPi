@@ -53,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 
-from raspi.auto import PLANNERS, make_planner, merged_params  # noqa: E402
+from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
 from raspi.msgs import DriveCmd, ScanAssembler, StateBuilder, command_from_cmd  # noqa: E402
 from raspi.proto.generated import packets  # noqa: E402
 

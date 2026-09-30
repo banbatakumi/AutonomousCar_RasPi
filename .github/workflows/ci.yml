@@ -37,7 +37,7 @@ jobs:
           cache-dependency-path: surge_mk2/raspi/requirements.txt
       # gpiozero/lgpio は Pi OS 同梱で requirements.txt に無い。
       # テストは FakeGpio に落ちるので、CI では入れなくてよい
-      - run: pip install -r surge_mk2/raspi/requirements.txt pytest
+      - run: pip install -r surge_mk2/raspi/requirements.txt pytest ruff
       - name: 生成物が正と一致しているか
         working-directory: surge_mk2
         run: |
@@ -45,6 +45,9 @@ jobs:
           python raspi/proto/generate.py --check  # protocol.toml → proto/packets.py, surge_proto.h
           python config/gen_msgs.py --check       # msgs/types.py → gui/src/generated/msgs.ts
           python config/check_docs.py --check     # protocol.toml → 文書中の版番号
+      - name: ruff（未使用import・空f-string・未定義名。issue #24 の再発防止）
+        working-directory: surge_mk2
+        run: ruff check --select F401,F541,F821 --exclude raspi/proto/generated raspi slam2d config
       - name: pytest
         working-directory: surge_mk2
         run: python -m pytest raspi/tests -q

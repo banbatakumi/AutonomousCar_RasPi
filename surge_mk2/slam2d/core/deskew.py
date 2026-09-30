@@ -236,12 +236,6 @@ class TwistBuffer:
         return Pose2D(float(-(c * px[0] - s * py[0])), float(-(s * px[0] + c * py[0])),
                       float(-pyaw[0]))
 
-    def mean_twist(self, t0_ns: int, t1_ns: int) -> Twist2D:
-        """`[t0, t1]`の平均的な twist（脱スキューのフォールバック・診断用）。"""
-        dt = max((t1_ns - t0_ns) / NS, 1e-6)
-        d = self.delta(t0_ns, t1_ns)
-        return Twist2D(d.x / dt, d.y / dt, d.yaw / dt)
-
 
 def _wrap_angle_vec(a: np.ndarray) -> np.ndarray:
     """`types.wrap_angle`のnumpy版（`(-pi, pi]`へ畳む）。式は同一。"""

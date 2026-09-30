@@ -43,7 +43,7 @@ from raspi.core.bus_bridge import BusBridge  # noqa: E402
 from raspi.nodes.replay_node import ReplayNode  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
-from raspi.rec import FrameLogReader  # noqa: E402
+from raspi.rec.framelog import FrameLogReader  # noqa: E402
 from raspi.rec.mcap_log import McapLog  # noqa: E402
 from raspi.rec.viz import VizRecorder  # noqa: E402
 

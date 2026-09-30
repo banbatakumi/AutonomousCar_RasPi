@@ -20,12 +20,17 @@ import onnx  # noqa: E402
 from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.auto import (PLANNERS, CamCenterline, CamE2E, DisparityExtender,  # noqa: E402
-                        DisparityPursuit, E2ELidar, FollowTheGap, FollowTheGapCam,
-                        LineTrace, catalog, make_planner)
 from raspi.auto.base import extend_disparity as _extend  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.auto.gap_pursuit import _best_band  # noqa: E402
+from raspi.auto.cam_centerline import CamCenterline  # noqa: E402
+from raspi.auto.cam_e2e import CamE2E  # noqa: E402
+from raspi.auto.disparity_extender import DisparityExtender  # noqa: E402
+from raspi.auto.e2e_lidar import E2ELidar  # noqa: E402
+from raspi.auto.follow_the_gap import FollowTheGap  # noqa: E402
+from raspi.auto.follow_the_gap_cam import FollowTheGapCam  # noqa: E402
+from raspi.auto.gap_pursuit import DisparityPursuit, _best_band  # noqa: E402
+from raspi.auto.line_trace import LineTrace  # noqa: E402
+from raspi.auto.registry import PLANNERS, catalog, make_planner  # noqa: E402
 from raspi.msgs import AutoState, CamE2ECmd, CamPath, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_E2E_CMD,

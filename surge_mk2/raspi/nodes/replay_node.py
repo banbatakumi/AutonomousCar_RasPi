@@ -47,7 +47,7 @@ from raspi.core.link_tracker import (  # noqa: E402
 )
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.framing import RxStats  # noqa: E402
-from raspi.rec import FrameLogReader, Kind  # noqa: E402
+from raspi.rec.framelog import FrameLogReader, Kind  # noqa: E402
 
 __all__ = ["ReplayNode"]
 

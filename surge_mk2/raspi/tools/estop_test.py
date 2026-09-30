@@ -64,7 +64,7 @@ from raspi.core.link_tracker import LinkTracker  # noqa: E402
 from raspi.io.gpio import PIN_HEARTBEAT, Heartbeat, open_output  # noqa: E402
 from raspi.io.serial_link import SerialLink  # noqa: E402
 from raspi.proto import UART_BAUD, packets  # noqa: E402
-from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
+from raspi.rec.framelog import FrameLogWriter, default_log_path  # noqa: E402
 
 NS = 1_000_000_000
 CMD_PERIOD_NS = NS // 100
@@ -338,7 +338,7 @@ def main() -> int:
             hb.start()
             dt = rig.wait_for("estop_active", False, args.release_timeout)
             if dt is None:
-                print(f"\n!! 解除されませんでした。**車両は E-Stop のまま**です。",
+                print("\n!! 解除されませんでした。**車両は E-Stop のまま**です。",
                       file=sys.stderr)
                 return 2
             print(f"  ✓ {dt:.1f}s で解除を確認（{_flags(rig)}）"
@@ -432,7 +432,7 @@ def main() -> int:
                   f"最大遅れ={hb.stats.max_late_ns / 1e6:.2f}ms")
             # ここで落ちた以上、以降の段階は検査にならない。
             # E-Stop が一度も掛かっていないのに「解除を確認」と出すのは有害。
-            print(f"\n以降の段階（自動復帰しない／ラッチ中は arm できない／ボタンで解除）は、"
+            print("\n以降の段階（自動復帰しない／ラッチ中は arm できない／ボタンで解除）は、"
                   "\nE-Stop が発動していないため**実施しない**。")
             print(f"\n{'=' * 62}\n結果: **不合格** — 第1安全層が効いていない\n{'=' * 62}")
             return 1

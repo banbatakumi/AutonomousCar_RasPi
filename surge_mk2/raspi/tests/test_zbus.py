@@ -251,7 +251,7 @@ class TestTopicOwner(unittest.TestCase):
     """
 
     def test_every_registered_planner_input_topic_has_an_owner(self):
-        from raspi.auto import PLANNERS
+        from raspi.auto.registry import PLANNERS
         from raspi.bus.zbus import endpoints_for_topic
 
         for cls in PLANNERS.values():

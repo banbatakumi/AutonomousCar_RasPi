@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.proto import packets  # noqa: E402
-from raspi.rec import FrameLogReader, Kind  # noqa: E402
+from raspi.rec.framelog import FrameLogReader, Kind  # noqa: E402
 
 
 def _type_name(t: int) -> str:

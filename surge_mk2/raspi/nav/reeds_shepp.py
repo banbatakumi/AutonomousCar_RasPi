@@ -71,7 +71,10 @@ for seg in path.segments:
 from __future__ import annotations
 
 import math
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:  # 型検査専用。実行時は sample_path_array() 内で遅延 import する
+    import numpy as np
 
 __all__ = ["PathSegment", "ReedsSheppPath", "shortest_path", "candidate_paths",
           "sample_path", "sample_path_array", "integrate_path"]
@@ -379,7 +382,7 @@ def shortest_path(start: tuple[float, float, float], goal: tuple[float, float, f
 
 
 def sample_path_array(start: tuple[float, float, float], path: ReedsSheppPath,
-                      step: float = 0.05) -> "np.ndarray":
+                      step: float = 0.05) -> np.ndarray:
     """経路に沿った姿勢列を `(N, 3)` の配列で返す（`start`を含む）。
 
     ★ **区間ごとにnumpyでまとめて作る。** 点ごとにPythonで`sin`/`cos`を

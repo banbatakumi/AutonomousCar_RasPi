@@ -90,7 +90,7 @@ def main() -> int:
             sys.stdout.flush()
             next_report = now + 1.0
 
-    print(f"\n\n=== 受信 === " + " ".join(f"{k}={v}" for k, v in counts.items())
+    print("\n\n=== 受信 === " + " ".join(f"{k}={v}" for k, v in counts.items())
           + (" — 1件も来ていない。publish 側が動いているか、"
              "SURGE_BUS_DIR が食い違っていないかを確認" if not counts else ""))
     sub.close()

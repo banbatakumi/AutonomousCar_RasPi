@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from raspi.auto import PLANNERS, make_planner, mapstore  # noqa: E402
+from raspi.auto import mapstore  # noqa: E402
+from raspi.auto.registry import PLANNERS, make_planner  # noqa: E402
 from raspi.auto.slam2d_raceline import (BUILD, DONE, EXPLORE, LOCATE, RACE,  # noqa: E402
                                         Slam2dRaceLine, forward_traj)
 from raspi.msgs import VehicleState  # noqa: E402

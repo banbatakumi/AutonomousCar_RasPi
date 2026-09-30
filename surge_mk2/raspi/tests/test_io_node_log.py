@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from raspi.nodes.io_node import IoNode  # noqa: E402
 from raspi.proto import FrameEncoder, FrameParser, packets  # noqa: E402
 from raspi.proto.generated.packets import HEADER_SIZE, S2P_TYPES  # noqa: E402
-from raspi.rec import FrameLogReader, FrameLogWriter, Kind  # noqa: E402
+from raspi.rec.framelog import FrameLogReader, FrameLogWriter, Kind  # noqa: E402
 
 
 class FakeLink:

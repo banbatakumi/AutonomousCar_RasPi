@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.proto import packets  # noqa: E402
-from raspi.rec import FrameLogWriter  # noqa: E402
+from raspi.rec.framelog import FrameLogWriter  # noqa: E402
 from raspi.rec.mcap_log import HAS_MCAP  # noqa: E402
 from raspi.tests.test_mcap import read_back  # noqa: E402
 

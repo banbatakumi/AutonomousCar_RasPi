@@ -4,7 +4,6 @@
 こと（`centerline.py` の docstring「壁の小さな穴が中心線を暴れさせる」参照）。
 """
 
-import math
 import sys
 import unittest
 from pathlib import Path

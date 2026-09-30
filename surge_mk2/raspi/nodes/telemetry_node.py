@@ -124,7 +124,8 @@ from websockets.asyncio.server import serve  # noqa: E402
 from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
-from raspi.auto import PLANNERS, catalog as auto_catalog, mapstore, merged_params  # noqa: E402
+from raspi.auto import mapstore  # noqa: E402
+from raspi.auto.registry import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402

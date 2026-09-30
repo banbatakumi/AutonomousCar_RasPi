@@ -40,7 +40,8 @@ SUB の購読は**先頭バイト列の前方一致**なので、これでフィ
 
 PUB は接続が確立するまでの間、送ったものを捨てる。50Hz の連続ストリームなら
 数十msの取りこぼしなので実害は無いが、**「起動して1発だけ送って終わる」用途では
-届かない。** `Publisher.wait_ready()` で待てるようにしてある。
+届かない。** その場合は呼び出し側で `time.sleep()` してから送る（テストの
+使用例は `raspi/tests/test_zbus.py`）。
 """
 
 from __future__ import annotations
@@ -263,14 +264,6 @@ class Publisher:
             pass          # HWM 到達。制御ループを止めないため黙って捨てる
         return msg
 
-    def wait_ready(self, delay_s: float = 0.2) -> None:
-        """slow joiner の待ち。**単発 publish の前だけ使う。**
-
-        ZeroMQ には「購読者が繋がったか」を PUB から知る手軽な API が無いので、
-        素直に待つ。連続ストリームでは不要。
-        """
-        time.sleep(delay_s)
-
     def close(self) -> None:
         self.sock.close()
         if self._own_ctx:
@@ -351,11 +344,6 @@ class Subscriber:
                 self.received += 1
                 out.append((t, msg))
         return out
-
-    def recv_one(self, timeout_ms: int = 1000) -> tuple[str, MsgBase] | None:
-        """1件だけ待って返す。テストと簡易ツール向け。"""
-        got = self.poll(timeout_ms)
-        return got[0] if got else None
 
     def close(self) -> None:
         for s in self.socks.values():

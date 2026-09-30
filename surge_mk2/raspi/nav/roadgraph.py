@@ -47,8 +47,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-import cv2
 import numpy as np
+
+# cv2 はここでは import しない（issue #22）。line_perception_node 等、道路グラフを
+# 使わないノードもこのモジュールを import 経由で引き込みうるため、実際に使う
+# 関数の中で import する（cv2 は onnxruntime 等と同じ扱い）。
 
 __all__ = ["RoadGraph", "Edge", "Node", "build_graph", "CorridorGrid",
            "trinary_from_bool"]
@@ -209,6 +212,7 @@ def _trace(skel: np.ndarray) -> tuple[list[list[tuple[int, int]]], list[list[tup
     戻り値の `nodes[k]` は節点 k の画素、`chains[k]` はエッジ k の画素列
     （順序付き）。エッジの両端がどの節点に触れるかは `_attach` で決める。
     """
+    import cv2
     p = np.pad(skel.astype(np.uint8), 1)
     nb = _neighbors(p)
     count = sum(n.astype(np.int32) for n in nb)
@@ -297,6 +301,7 @@ def build_graph(trinary: np.ndarray, *, resolution: float, origin: tuple[float, 
     :param spur_len: これより短い行き止まりは細線化のひげとして消す [m]
     :param merge_dist: これより短いエッジで結ばれた節点は1つにまとめる [m]
     """
+    import cv2
     res = float(resolution)
     free = trinary == 1
     unknown = trinary == 0
@@ -515,6 +520,7 @@ class _Builder:
 def _label_cells(free: np.ndarray, edges: list[Edge], h: int, w: int, res: float,
                  origin: tuple[float, float]) -> np.ndarray:
     """空きセルを最寄りのエッジに割り当てる（空きの中だけを4近傍で膨張、docstring参照）。"""
+    import cv2
     lab = np.zeros((h, w), dtype=np.float32)        # 0=未割り当て、k+1=エッジk
     for k, e in enumerate(edges):
         pts = np.column_stack([(e.xy[:, 0] - origin[0]) / res,
@@ -590,6 +596,7 @@ class CorridorGrid:
 
     def __init__(self, base, graph: RoadGraph, edge_ids, node_ids,
                  reach: float = 0.8) -> None:
+        import cv2
         self._base = base
         allowed = np.isin(graph.label, np.asarray(sorted(set(edge_ids)), dtype=np.int32))
         free = graph.label >= 0

@@ -22,9 +22,8 @@ import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.msgs import Scan  # noqa: E402
-from raspi.nav import OccGrid, deskew  # noqa: E402
-from raspi.nav.deskew import point_times_ns, integrate_pose  # noqa: E402
-from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, dilate  # noqa: E402
+from raspi.nav.deskew import deskew, point_times_ns, integrate_pose  # noqa: E402
+from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, OccGrid, dilate  # noqa: E402
 
 NS = 1_000_000_000
 

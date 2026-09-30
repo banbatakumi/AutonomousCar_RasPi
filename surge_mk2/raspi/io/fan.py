@@ -84,10 +84,9 @@ from __future__ import annotations
 
 import glob
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["FanState", "FakeFan", "SysfsFan", "open_fan"]
+__all__ = ["FakeFan", "SysfsFan", "open_fan"]
 
 #: `pwm-fan` ドライバの hwmon 登録名。実機（Pi5）で確認済み
 FAN_HWMON_NAME = "pwmfan"
@@ -97,14 +96,6 @@ FAN_COOLING_TYPE = "pwm-fan"
 
 HWMON_GLOB = "/sys/class/hwmon/hwmon*"
 COOLING_DEVICE_GLOB = "/sys/class/thermal/cooling_device*"
-
-
-@dataclass(slots=True)
-class FanState:
-    mode: str            # "auto" | "manual"
-    duty: float           # 手動時の目標値 [0.0-1.0]
-    available: bool       # この機体で手動デューティ制御が使えるか
-    rpm: int | None       # 実測回転数。読めなければ None
 
 
 class FakeFan:

@@ -82,7 +82,7 @@ from raspi.msgs.types import (  # noqa: E402
 )
 from raspi.proto import UART_BAUD, packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
-from raspi.rec import FrameLogWriter, default_log_path  # noqa: E402
+from raspi.rec.framelog import FrameLogWriter, default_log_path  # noqa: E402
 from raspi.rec import logclean  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -585,7 +585,8 @@ class IoNode:
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.AUTO_STOP_MARGIN_CM, value=msg.float_value))
 
-    def _send_command(self) -> None:
+    def _send_command(self, pkt: packets.Command | None = None,
+                       encoded: bytes | None = None) -> None:
         """今この瞬間送るべき `COMMAND` を決めて送る。
 
         **`allow_arm` が False、または `cmd` が古ければ必ず DISARM。**
@@ -600,9 +601,16 @@ class IoNode:
         `self.max_steer`（CLI/GUI で設定した値）は **`LIMITS` をまだ受け取っていない
         間だけ**使うフォールバック。RC（MANUAL）・自律走行（AUTO）どちらの `cmd` も
         この1箇所を通るため、モードを問わず同じ上限が効く。
+
+        `pkt`/`encoded` は変化判定（呼び出し側）で `_command_packet()`/`encode()`
+        を既に済ませている場合の使い回し用（issue #21、二重エンコード回避）。
+        省略時はここで組み立てる（定期送信はこちら）。
         """
-        pkt = self._command_packet()
-        self._last_command_bytes = pkt.encode()
+        if pkt is None:
+            pkt = self._command_packet()
+        if encoded is None:
+            encoded = pkt.encode()
+        self._last_command_bytes = encoded
         self.link.send(pkt)
 
     def _command_packet(self) -> packets.Command:
@@ -718,11 +726,14 @@ class IoNode:
             # エンコードした中身が前回と同じなら送らない（定期送信に任せる）。送る中身は
             # 定期送信と同じ `_command_packet()`（DISARM の判断・上限のクランプを含む）
             changed = False
+            pkt = encoded = None
             if self._cmd_arrived:
                 self._cmd_arrived = False
-                changed = self._command_packet().encode() != self._last_command_bytes
+                pkt = self._command_packet()
+                encoded = pkt.encode()
+                changed = encoded != self._last_command_bytes
             if changed or now >= next_cmd:
-                self._send_command()
+                self._send_command(pkt, encoded)
                 next_cmd = now + cmd_period if changed else next_cmd + cmd_period
                 if now - next_cmd > cmd_period * 5:   # 大きく遅れたら追いつきをやめる
                     next_cmd = now + cmd_period

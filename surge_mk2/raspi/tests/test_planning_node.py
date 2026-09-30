@@ -15,7 +15,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto import E2ELidar, make_planner  # noqa: E402
+from raspi.auto.e2e_lidar import E2ELidar  # noqa: E402
+from raspi.auto.registry import make_planner  # noqa: E402
 from raspi.msgs import AutoCtrl, Scan  # noqa: E402
 from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,  # noqa: E402
                               TOPIC_SCAN_CAM, E2EModelCtrl)

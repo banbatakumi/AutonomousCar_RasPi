@@ -39,6 +39,17 @@ run "msgs/types.py → gui/src/generated/msgs.ts" "$PY" config/gen_msgs.py --che
 # 誰も気づかなかったことがある（2026-08-21 のレビュー 🟢13）
 run "protocol.toml → 文書中の版番号" "$PY" config/check_docs.py --check
 
+# 未使用 import・空 f-string・未定義名（issue #24 の再発防止）。
+# ruff は dev 専用（Pi の requirements には入れない）なので、無ければ黙って飛ばす
+RUFF=".venv/bin/ruff"
+[ -x "$RUFF" ] || RUFF="$(command -v ruff || true)"
+if [ -n "$RUFF" ]; then
+  run "ruff (F401/F541/F821)" "$RUFF" check --select F401,F541,F821 \
+    --exclude raspi/proto/generated raspi slam2d config
+else
+  echo "── ruff … 見つからないので飛ばす（.venv/bin/pip install ruff で有効化）"
+fi
+
 if [ "$FAST" = 0 ]; then
   run "pytest" "$PY" -m pytest raspi/tests -q
   if [ -d gui/node_modules ]; then

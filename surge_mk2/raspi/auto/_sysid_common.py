@@ -19,7 +19,6 @@ from __future__ import annotations
 import bisect
 import math
 import statistics
-from collections import deque
 
 from ..msgs.types import AutoState, VehicleState
 

@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.nodes.replay_node import ReplayNode, verify  # noqa: E402
 from raspi.proto import packets  # noqa: E402
-from raspi.rec import FrameLogWriter  # noqa: E402
+from raspi.rec.framelog import FrameLogWriter  # noqa: E402
 
 MS = 1_000_000
 

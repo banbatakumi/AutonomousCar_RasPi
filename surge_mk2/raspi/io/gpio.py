@@ -55,7 +55,7 @@ __all__ = [
     "FakePin", "GpiozeroPin", "open_output",
     "Heartbeat", "HeartbeatStats", "Indication", "StatusIndicator",
     "MELODY_BOOT", "MELODY_GUI_CONNECT",
-    "FakeTone", "GpiozeroTone", "open_tone", "Buzzer",
+    "GpiozeroTone", "open_tone", "Buzzer",
 ]
 
 PIN_HEARTBEAT = 6
@@ -142,25 +142,6 @@ MELODY_GUI_CONNECT: tuple[Note, ...] = (
     ("A5", 90, 30),
     ("C6", 220, 0),
 )
-
-
-class FakeTone:
-    """音の出ない環境（Mac・テスト）用。再生要求を記録するだけ。"""
-
-    __slots__ = ("played", "closed")
-
-    def __init__(self) -> None:
-        self.played: list[str | None] = []   # None は stop()
-        self.closed = False
-
-    def play(self, tone) -> None:
-        self.played.append(str(tone))
-
-    def stop(self) -> None:
-        self.played.append(None)
-
-    def close(self) -> None:
-        self.closed = True
 
 
 class GpiozeroTone:

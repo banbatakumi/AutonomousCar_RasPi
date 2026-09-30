@@ -5,24 +5,20 @@
 合成した点群を流し込めるのはこのため（`raspi/tests/test_auto.py`）。
 
 配線は `raspi/nodes/planning_node.py` の仕事。
+
+**このパッケージの `__init__.py` はサブモジュールを再エクスポートしない**
+（issue #22）。`from raspi.auto import sector_of_deg` のように書くだけで
+`registry` 経由で全 planner が芋づる式に読み込まれ、`slam2d_raceline`/
+`slam2d_route` を通じて `slam2d.pipeline`（`backend/posegraph.py` 経由で
+g2opy が必須）まで連鎖してしまう。`raspi.auto.base` の関数を1つ使うだけの
+カメラ系ノード（cam_perception/cam_e2e/cam_track）でも g2opy が無いと
+落ちる、という事故はこれが原因だった。使う側はサブモジュールを直接
+import すること::
+
+    from raspi.auto.base import ParamSpec, Planner, sector_of_deg, wrap_deg
+    from raspi.auto.registry import PLANNERS, catalog, make_planner, merged_params
+    from raspi.auto.e2e_lidar import E2ELidar
+    from raspi.auto import mapstore  # サブモジュールなので再エクスポート無しでも import 可
 """
 
-from .base import (ParamSpec, Planner, ScanWindow, min_filter, scan_window,
-                   sector_of_deg, wrap_deg)
-from .cam_centerline import CamCenterline
-from .cam_e2e import CamE2E
-from .disparity_extender import DisparityExtender
-from .e2e_lidar import E2ELidar
-from .follow_the_gap import FollowTheGap
-from .follow_the_gap_cam import FollowTheGapCam
-from .gap_pursuit import DisparityPursuit
-from .line_trace import LineTrace
-from .registry import PLANNERS, catalog, make_planner, merged_params
-
-__all__ = [
-    "Planner", "ParamSpec", "ScanWindow", "min_filter", "scan_window",
-    "sector_of_deg", "wrap_deg",
-    "DisparityExtender", "E2ELidar", "FollowTheGap", "FollowTheGapCam", "DisparityPursuit",
-    "LineTrace", "CamCenterline", "CamE2E",
-    "PLANNERS", "catalog", "make_planner", "merged_params",
-]
+from __future__ import annotations

@@ -43,8 +43,7 @@ import numpy as np
 from .surfmap import SurfaceMap
 from .types import Cov3, Pose2D, wrap_angle
 
-__all__ = ["RegisterConfig", "RegisterResult", "SearchResult", "register", "search",
-           "inlier_ratio"]
+__all__ = ["RegisterConfig", "RegisterResult", "SearchResult", "register", "search"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,20 +202,6 @@ def register(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, guess: Pose2D, *,
         inl, rms = 0.0, math.inf
     return RegisterResult(Pose2D(x, y, wrap_angle(yaw)), h_pts * config.info_scale,
                           inl, used, rms, it)
-
-
-def inlier_ratio(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, pose: Pose2D, *,
-                 inlier_dist: float = 0.05) -> tuple[float, int]:
-    """`pose`で既知の領域に落ちた点のうち、壁から`inlier_dist`以内の割合と、その母数。"""
-    c, s = math.cos(pose.yaw), math.sin(pose.yaw)
-    wx = pose.x + c * px - s * py
-    wy = pose.y + s * px + c * py
-    a = smap.associate(wx, wy)
-    known = smap.known_at(wx, wy)
-    n = int(known.sum())
-    if n == 0:
-        return 0.0, 0
-    return float((a.valid & (a.dist <= inlier_dist)).sum()) / n, n
 
 
 class SearchResult(NamedTuple):

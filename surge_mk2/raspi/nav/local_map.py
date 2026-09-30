@@ -69,12 +69,6 @@ from .grid import OccGrid
 
 __all__ = ["LocalMap", "footprint_circles"]
 
-try:                                          # pragma: no cover - 環境依存
-    import cv2
-    _HAVE_CV2 = True
-except ImportError:                           # pragma: no cover
-    _HAVE_CV2 = False
-
 
 def footprint_circles(footprint: list[tuple[float, float]] | tuple,
                       nx: int = 5, ny: int = 3) -> tuple[np.ndarray, float]:
@@ -110,9 +104,11 @@ def footprint_circles(footprint: list[tuple[float, float]] | tuple,
 def _edt(free: np.ndarray, resolution: float) -> np.ndarray:
     """`free`（True=空き）の各セルから最近傍の非空きセルまでの距離 [m]。"""
     src = free.astype(np.uint8)
-    if _HAVE_CV2:
-        return cv2.distanceTransform(src, cv2.DIST_L2, 5) * resolution
-    return _chamfer(src) * resolution
+    try:                                       # pragma: no cover - 環境依存
+        import cv2
+    except ImportError:                        # pragma: no cover
+        return _chamfer(src) * resolution
+    return cv2.distanceTransform(src, cv2.DIST_L2, 5) * resolution
 
 
 def _chamfer(src: np.ndarray) -> np.ndarray:

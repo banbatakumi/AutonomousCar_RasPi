@@ -40,6 +40,38 @@ class TestCrc(unittest.TestCase):
         b[30] ^= 0x01
         self.assertNotEqual(crc16_ccitt(a), crc16_ccitt(bytes(b)))
 
+    def test_matches_reference_table_implementation(self):
+        """issue #21: binascii.crc_hqx 化の前後で結果が一致することを確認する。
+
+        旧実装（テーブル引きループ）をここに再現し、境界値・ランダム値の両方で
+        新実装（crc16_ccitt、内部は binascii.crc_hqx）と突き合わせる。
+        """
+        def reference_crc16_ccitt(data: bytes) -> int:
+            table = []
+            for i in range(256):
+                crc = i << 8
+                for _ in range(8):
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+                table.append(crc)
+            crc = 0xFFFF
+            for b in data:
+                crc = ((crc << 8) & 0xFFFF) ^ table[(crc >> 8) ^ b]
+            return crc
+
+        import random
+        rng = random.Random(0)
+
+        cases = [b"", b"\x00", b"\xff", bytes([0x00, 0xFF] * 20), bytes(range(256))]
+        for n in (0, 1, 2, 3, 8, 63, 64, 65, 255, 256, 1024):
+            cases.append(bytes(rng.getrandbits(8) for _ in range(n)))
+        # 20KB 相当（TELEMETRY 100Hz + LiDAR のバースト量）もまとめて確認する
+        cases.append(bytes(rng.getrandbits(8) for _ in range(20_000)))
+
+        for data in cases:
+            self.assertEqual(
+                crc16_ccitt(data), reference_crc16_ccitt(data),
+                f"len={len(data)} で新旧CRCが不一致")
+
 
 class TestPacketDefinitions(unittest.TestCase):
     """docs/uart_protocol.md v0.6 の値を直接書いて生成物を検証する。

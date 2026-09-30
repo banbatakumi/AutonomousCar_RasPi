@@ -79,7 +79,7 @@ def main() -> int:
 
     print(f"LED 配線確認  緑=GPIO{args.green} 赤=GPIO{args.red}"
           + (f" ブザー=GPIO{args.buzzer_pin}" if b else " （ブザーは鳴らしません）")
-          + (f"  極性=アクティブLow" if args.active_low else "  極性=アクティブHigh"))
+          + ("  極性=アクティブLow" if args.active_low else "  極性=アクティブHigh"))
     print("見えたとおりを教えてください。表示と食い違ったら配線か極性が違います。\n")
 
     total = 6 if b else 5

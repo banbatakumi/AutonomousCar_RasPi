@@ -11,43 +11,18 @@
 **SLAM 本体は `slam2d/`（車体非依存ライブラリ）に統合済み。** ここにあった
 自作の `scanmatch`/`slam`（旧 `auto/raceline.py` 用）は学習用の基礎基盤で、
 現行の `slam2d_raceline`/`slam2d_route` planner には使われておらず削除した。
+
+**このパッケージの `__init__.py` はサブモジュールを再エクスポートしない**
+（issue #22）。`raspi.nav.roadgraph`（cv2使用箇所を除き軽量）や
+`raspi.nav.ipm`（単体0.3ms）だけを使うノードでも、`from raspi.nav import ...`
+と書くだけで全サブモジュールが芋づる式に読み込まれてしまうため。
+使う側はサブモジュールを直接 import すること::
+
+    from raspi.nav.grid import OccGrid, dilate, pack_trinary
+    from raspi.nav.deskew import deskew, Points
+    from raspi.nav.centerline import Centerline
+    from raspi.nav.obstacles import Obstacle
+    from raspi.nav.ipm import CameraExtrinsics, ...
 """
 
 from __future__ import annotations
-
-from . import centerline, obstacles
-from .centerline import Centerline
-from .deskew import Points, deskew
-from .drivable_path import extract_centerline
-from .grid import OccGrid, dilate, pack_trinary
-from .ipm import (CameraExtrinsics, CameraIntrinsics, camera_intrinsics,
-                  ground_to_pixel, pixel_to_ground, project_mask_to_grid,
-                  project_seen_to_grid)
-from .obstacles import Obstacle
-from .purepursuit import Pursuit, PursuitConfig, follow
-from .raceline import RaceLine, optimize
-
-__all__ = [
-    "CameraExtrinsics",
-    "CameraIntrinsics",
-    "Centerline",
-    "Obstacle",
-    "OccGrid",
-    "Points",
-    "Pursuit",
-    "PursuitConfig",
-    "RaceLine",
-    "camera_intrinsics",
-    "centerline",
-    "deskew",
-    "dilate",
-    "extract_centerline",
-    "follow",
-    "ground_to_pixel",
-    "obstacles",
-    "optimize",
-    "pack_trinary",
-    "pixel_to_ground",
-    "project_mask_to_grid",
-    "project_seen_to_grid",
-]

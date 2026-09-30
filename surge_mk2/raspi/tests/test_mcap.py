@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.msgs import DriveCmd, Scan, VehicleState  # noqa: E402
 from raspi.proto import packets  # noqa: E402
-from raspi.rec import FrameLogWriter  # noqa: E402
+from raspi.rec.framelog import FrameLogWriter  # noqa: E402
 from raspi.rec.mcap_log import (  # noqa: E402
     HAS_MCAP,
     McapLog,

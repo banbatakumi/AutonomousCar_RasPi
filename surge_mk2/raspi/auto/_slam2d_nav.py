@@ -41,13 +41,11 @@ import math
 
 import numpy as np
 
-from slam2d.backend.loop_detection import LoopDetectorConfig
 from slam2d.core.deskew import deskew, deskew_traj
 from slam2d.core.frontend import Frontend, FrontendConfig, FrontendUpdate
 from slam2d.core.grid import OccGrid
 from slam2d.core.motion import ExternalTwistModel, GyroBiasEstimator, SpeedScaleEstimator
 from slam2d.core.types import Pose2D, RawScan, Twist2D, wrap_angle
-from slam2d.pipeline import PipelineConfig, SlamSystem
 
 from ..msgs.types import Scan, VehicleState
 from ..nav.deskew import point_times_ns
@@ -162,6 +160,12 @@ class Slam2dNav:
         if self._loop_closure:
             # 最適化・地図の焼き直しは`freeze()`（EXPLORE→BUILD遷移、車両停止済み）
             # での明示的な`flush()`だけ。走行中は拘束を溜めるだけにする
+            #
+            # `slam2d.pipeline`は`backend/posegraph.py`経由でg2opyを要求する
+            # （issue #22）。ループ閉じを使わない構成やplanner一覧の表示だけの
+            # 場合にまでg2opyの依存を強制しないよう、実際に使うここでだけ import する
+            from slam2d.backend.loop_detection import LoopDetectorConfig
+            from slam2d.pipeline import PipelineConfig, SlamSystem
             self._system = SlamSystem(grid, motion, PipelineConfig(
                 frontend=config, loop_detector=LoopDetectorConfig(), optimize_every=0))
             self._fe = self._system.frontend
