@@ -42,7 +42,14 @@ class TimeSync:
     """
 
     __slots__ = ("_samples", "_ref_stm_us", "_good_factor", "_good_margin_ns",
-                 "_min_fit_span_ns")
+                 "_min_fit_span_ns", "_last_raw_u32", "resets")
+
+    #: 生値がこれ以上後退したら「STM32 が再起動した」と見なす（1秒）。
+    #: 通常運転中のジッタは μs 級なので十分大きい余裕がある
+    _RESET_BACKWARD_US = 1_000_000
+    #: 71.6分の正規のラップ（u32 μs が一周する）は、直前の生値がこの近くにある。
+    #: ここより手前からの後退はラップでは説明できず、再起動と判断する
+    _WRAP_NEAR_MARGIN_US = 2_000_000
 
     def __init__(self, window: int = 256, good_factor: float = 2.0,
                  good_margin_ns: int = 300_000,
@@ -55,6 +62,13 @@ class TimeSync:
         # 実在しない数千 ppm を出す。docs §6.3 の「30秒窓」に倣い、貯まるまでは
         # 傾き=1（オフセットのみ）にフォールバックする。
         self._min_fit_span_ns = min_fit_span_ns
+        #: 直前に見た生の u32 μs（unwrap 前）。再起動検出は unwrap 後の値では
+        #: できない——`_unwrap` は基準に最も近い周回を選ぶため、再起動で 0 付近に
+        #: 戻った生値も「ほぼ同じ時刻」として辻褄を合わせてしまう
+        self._last_raw_u32: int | None = None
+        #: 再起動を検出してリセットした回数。呼び出し側は feed 前後でこれを見て、
+        #: 変化していれば `StateBuilder`/`ScanAssembler` 等も合わせてリセットする
+        self.resets: int = 0
 
     # ── STM32 u32 μs の unwrap ──
 
@@ -63,11 +77,31 @@ class TimeSync:
 
         50Hz で来る TELEMETRY を毎回これに通しておくと基準が最新に保たれ、
         まれにしか来ない PONG の T2/T3 も正しい周回で unwrap できる。
+
+        **STM32 の再起動（ブラウンアウト等で `t_us` が 0 付近へ戻る）を検出したら
+        時刻同期を自分でリセットする。** 生値が正規のラップ（u32 が一周する
+        71.6分ごと）では説明できないほど後退したら再起動と見なす。検出しないと
+        `_unwrap` が「基準に最も近い周回」を選んでしまい、再起動後の小さい生値を
+        古い基準へ無理やり合わせて大きくずれた時刻を返し続ける
+        （`_ref_stm_us` と回帰サンプルが前の時代のまま残るため）。
         """
+        if self._last_raw_u32 is not None:
+            backward = self._last_raw_u32 - raw_u32
+            near_wrap = self._last_raw_u32 >= (U32 - self._WRAP_NEAR_MARGIN_US)
+            if backward >= self._RESET_BACKWARD_US and not near_wrap:
+                self.reset()
+        self._last_raw_u32 = raw_u32
+
         u = self._unwrap(raw_u32)
         if u > self._ref_stm_us:
             self._ref_stm_us = u
         return u
+
+    def reset(self) -> None:
+        """時刻同期をやり直す。STM32 の再起動を検出したときに呼ぶ（自動・手動どちらも可）。"""
+        self._samples.clear()
+        self._ref_stm_us = 0
+        self.resets += 1
 
     def _unwrap(self, raw_u32: int) -> int:
         """下位32bitが raw_u32 の値のうち、基準に最も近いものを選ぶ。"""

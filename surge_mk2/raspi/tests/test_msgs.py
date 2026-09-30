@@ -184,6 +184,19 @@ class TestScanAssembler(unittest.TestCase):
         self.assertEqual(scan.dist[270], 0.0)            # センサ 90° = 車両 270°、0 = 無効
         self.assertEqual(a.sectors_lost, 1)
 
+    def test_reset_discards_the_in_progress_turn(self):
+        """issue #9: STM32 の再起動で時刻同期がリセットされたら、組み立て中の周も
+        破棄すること。中途半端に混ぜて `_emit` すると新旧の時刻が同居する。"""
+        a = ScanAssembler()
+        for i in range(6):                       # 周の途中まで
+            a.feed(self.sector(i), 1000 + i)
+        a.reset()
+        for i in range(12):                      # 最初からやり直し
+            self.assertIsNone(a.feed(self.sector(i), 5000 + i))
+        scan = a.feed(self.sector(0), 6000)
+        self.assertIsNotNone(scan)
+        self.assertTrue(all(scan.sector_seen))   # 破棄前の欠けが残っていない
+
     def test_sensor_angles_are_mirrored_into_the_vehicle_frame(self):
         """LD06 は裏向き実装なので生の角度は左右が鏡像。ここで直さないと GUI が反転する。"""
         a = ScanAssembler()
@@ -277,6 +290,28 @@ class TestCommandGate(unittest.TestCase):
         self.assertEqual(c.target_speed, 32767)
         self.assertEqual(c.target_steer, -32768)
         c.encode()                       # 例外が出ないこと
+
+    def test_nan_target_speed_becomes_disarm_not_max_speed(self):
+        """issue #1: `max(-m, min(m, nan))` は Python の仕様で常に +m を返すため、
+        検査が無いと NaN の速度指令が「最大速度」に化ける。"""
+        c = command_from_cmd(
+            DriveCmd(mode=2, arm=True, target_speed=float("nan"), target_steer=0.1),
+            allow_arm=True, max_speed=3.0, max_steer=0.524)
+        self.assertEqual(c.mode, packets.Mode.DISARM)
+        self.assertEqual(c.target_speed, 0)
+        self.assertEqual(c.target_steer, 0)
+
+    def test_nan_target_steer_becomes_disarm_not_max_steer(self):
+        c = command_from_cmd(
+            DriveCmd(mode=2, arm=True, target_speed=0.5, target_steer=float("nan")),
+            allow_arm=True, max_speed=3.0, max_steer=0.524)
+        self.assertEqual(c.mode, packets.Mode.DISARM)
+
+    def test_inf_accel_limit_becomes_disarm(self):
+        c = command_from_cmd(
+            DriveCmd(mode=2, arm=True, target_speed=0.5, accel_limit=float("inf")),
+            allow_arm=True)
+        self.assertEqual(c.mode, packets.Mode.DISARM)
 
     def test_reserved_mode_3_is_never_sent(self):
         c = command_from_cmd(DriveCmd(mode=3), allow_arm=True)

@@ -154,6 +154,27 @@ class TestAccelLimitPassThrough(unittest.TestCase):
         self.assertEqual((cmd.brake, cmd.brake_torque), (True, 0.0))
 
 
+class TestNanPlannerOutputBrakes(unittest.TestCase):
+    """issue #1: planner が NaN/Inf を出したら「分からない」（制動）と同じに扱うこと。
+    `command_from_cmd`/`_merge_auto` にも同じ検査がある（多層防御）が、ここで
+    落とせば `AutoState.reason` に理由が残る。"""
+
+    def test_nan_target_speed_brakes(self):
+        from raspi.msgs.types import AutoState
+        node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        cmd = node._cmd_from(AutoState(ready=True, target_speed=float("nan"), target_steer=0.1))
+        self.assertTrue(cmd.brake)
+        self.assertEqual(cmd.target_speed, 0.0)
+
+    def test_inf_target_steer_brakes(self):
+        from raspi.msgs.types import AutoState
+        node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        cmd = node._cmd_from(AutoState(ready=True, target_speed=0.5, target_steer=float("inf")))
+        self.assertTrue(cmd.brake)
+
+
 class TestCurrentStaleness(unittest.TestCase):
     """`_current()` の鮮度判定が `planner.stale_ms` を見ること。"""
 

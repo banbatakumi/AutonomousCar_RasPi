@@ -24,6 +24,32 @@ from raspi.msgs.types import TOPIC_AUTO_MAP, TOPIC_AUTO_STATE  # noqa: E402
 from raspi.nav.grid import OccGrid, pack_trinary  # noqa: E402
 
 
+class TestDecodeCmdRejectsNonFinite(unittest.TestCase):
+    """`_decode_cmd`（issue #1）。NaN/Inf は `ValueError` として呼び元へ返し、
+    呼び元（`_on_control`）はそれを捨てて接続を維持する——ここで検査せずに
+    `command_from_cmd` まで通しても最終防衛線が動くが（多層防御）、ここで
+    早めに `bad_cmds` へ数えられた方が原因調査がしやすい。"""
+
+    def _decode(self, **m):
+        fake = SimpleNamespace(controller_name="test")
+        return tn.TelemetryServer._decode_cmd(fake, m)
+
+    def test_normal_values_pass_through(self):
+        cmd = self._decode(type="cmd", speed=1.0, steer=0.2)
+        self.assertEqual(cmd.target_speed, 1.0)
+        self.assertEqual(cmd.target_steer, 0.2)
+
+    def test_nan_speed_string_is_rejected(self):
+        """msgspec が拒むのは JSON の NaN リテラルだけで、
+        `{"speed": "nan"}` の文字列は `float()` を素通りする。"""
+        with self.assertRaises(ValueError):
+            self._decode(type="cmd", speed="nan")
+
+    def test_inf_accel_limit_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._decode(type="cmd", accel_limit=float("inf"))
+
+
 class TestAtomicWriteBytes(unittest.TestCase):
     """★ C4: 設定JSONの書き込みが `os.replace()` でアトミックであること。"""
 

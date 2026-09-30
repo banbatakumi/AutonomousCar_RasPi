@@ -235,6 +235,15 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
     if not allow_arm:
         return DISARM_COMMAND
 
+    # **NaN/Inf は最優先で弾く（issue #1）。** `max(-m, min(m, nan))` は Python の
+    # 仕様で常に +m を返す——NaN の速度・舵角が「最大速度・最大舵角」に化ける。
+    # ここを通しさえすれば、GUI の壊れた入力・planner のバグ・msgpack 往復
+    # どこ由来の NaN/Inf でも最終防衛線として止まる（多層防御の最後の1枚）
+    if not all(math.isfinite(v) for v in (
+            cmd.target_speed, cmd.target_steer, cmd.accel_limit,
+            cmd.steer_rate_limit, cmd.brake_torque, cmd.target_torque)):
+        return DISARM_COMMAND
+
     speed = cmd.target_speed
     steer = cmd.target_steer
     if max_speed is not None:
@@ -344,6 +353,16 @@ class ScanAssembler:
         #: 「たまに落ちている」はここでしか見えない
         self.sectors_lost = 0
         self.scans = 0
+
+    def reset(self) -> None:
+        """組み立て中の周を捨てて最初から始める。
+
+        STM32 の再起動など、時刻同期がリセットされた直後に呼ぶ
+        （`link_tracker.LinkTracker` の `on_time_reset`）。**組み立て中断ではなく
+        破棄。** 直前の周は別の時代の `sector_t_ns` を引きずっているので、
+        中途半端に混ぜて `_emit` すると 1 周の中に新旧の時刻が同居する。
+        """
+        self._reset()
 
     def _reset(self) -> None:
         self._dist = [0.0] * 360

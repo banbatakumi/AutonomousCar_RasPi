@@ -598,6 +598,21 @@ class TestCamE2E(unittest.TestCase):
             if not st.ready or st.brake:
                 self.assertTrue(st.reason)
 
+    def test_nan_steer_norm_brakes_instead_of_maxing_out(self):
+        """issue #1: `max(-1, min(1, nan))` は Python の仕様で +1 を返すため、
+        検査が無いと推論が壊れた瞬間に「最大舵角」へ跳ぶ。"""
+        st = self.plan(CamE2ECmd(ready=True, steer_norm=float("nan"), model_max_steer=0.524,
+                                 lidar_seen=True, lidar_front_dist=5.0))
+        self.assertFalse(st.ready)
+        self.assertTrue(st.reason)
+
+    def test_nan_lidar_front_dist_brakes_instead_of_maxing_speed(self):
+        """同じ理由で `free_ahead` が NaN だと `ratio` が 1.0（最高速度）になる。"""
+        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
+                                 lidar_seen=True, lidar_front_dist=float("nan")))
+        self.assertFalse(st.ready)
+        self.assertTrue(st.reason)
+
 
 class TestDisparityExtender(unittest.TestCase):
     """**FTG と同じ安全条件を満たしたうえで、狙点が「一番遠く」になること。**"""

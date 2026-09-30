@@ -111,14 +111,21 @@ class LinkTracker:
     :param on_frame: 全受信フレームで `(t_ns, type, seq, msg)` で呼ばれる
     :param on_latch: ラッチ系フラグが変化したとき `(名前, bool, t_ns)` で呼ばれる。
         E-Stop は人間の操作でしか戻らないので、**立った瞬間を捉えて残す**必要がある
+    :param on_time_reset: STM32 の再起動で `TimeSync` が自分をリセットしたとき
+        `(t_ns,)` で呼ばれる（★issue #9）。**呼び出し側はこれを受けて
+        `StateBuilder`/`ScanAssembler` など時刻同期に依存する状態も合わせて
+        リセットすること。** ここ（`LinkTracker`）はそれらを持たないので自分では
+        リセットできない
     """
 
-    def __init__(self, on_telemetry=None, on_frame=None, on_latch=None) -> None:
+    def __init__(self, on_telemetry=None, on_frame=None, on_latch=None,
+                 on_time_reset=None) -> None:
         self.state = LinkState()
         self.sync = TimeSync()
         self.on_telemetry = on_telemetry
         self.on_frame = on_frame
         self.on_latch = on_latch
+        self.on_time_reset = on_time_reset
         self._pending_pings: dict[int, int] = {}   # ping_id -> T1 ns
 
     # ── 送信側から教えてもらう ──
@@ -146,7 +153,7 @@ class LinkTracker:
         msg = cls.decode(payload)
 
         if isinstance(msg, packets.Telemetry):
-            self.sync.observe_stm_us(msg.t_us)
+            self._observe_time(msg.t_us, rx_ns)
             self.state.telemetry = msg
             self.state.last_telem_ns = rx_ns
             self._update_latches(msg.flags, rx_ns)
@@ -157,7 +164,7 @@ class LinkTracker:
             if t1 is not None:
                 self.sync.add_pong(t1, msg.t_ping_rx_us, msg.t_pong_tx_us, rx_ns)
         elif isinstance(msg, packets.Stats):
-            self.sync.observe_stm_us(msg.t_us)
+            self._observe_time(msg.t_us, rx_ns)
             self.state.stats = msg
         elif isinstance(msg, packets.Version):
             self.state.version = msg
@@ -172,6 +179,14 @@ class LinkTracker:
         if self.on_frame:
             self.on_frame(rx_ns, pkt_type, seq, msg)
         return msg
+
+    def _observe_time(self, t_us: int, rx_ns: int) -> None:
+        """`TimeSync.observe_stm_us` を通し、それが再起動を検出していたら
+        `on_time_reset` で外へ知らせる（★issue #9）。"""
+        before = self.sync.resets
+        self.sync.observe_stm_us(t_us)
+        if self.sync.resets != before and self.on_time_reset:
+            self.on_time_reset(rx_ns)
 
     def _update_latches(self, flags: int, t_ns: int) -> None:
         """ラッチ系フラグの立ち上がり/立ち下がりを捉える。

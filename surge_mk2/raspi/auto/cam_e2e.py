@@ -86,6 +86,15 @@ class CamE2E(Planner):
             st.reason = "モデル未選択、または推論に失敗"
             return st                      # ready=False ＝ 制動
 
+        # **NaN/Inf はここで弾く（issue #1）。** `max(-1, min(1, nan))` は Python の
+        # 仕様で常に +1 を返すため、`steer_norm`/`lidar_front_dist` が NaN だと
+        # 「最大舵角」「最高速度」に化ける——下流の `isfinite` チェックは
+        # 通過してしまう（NaN のまま伝播しないため）ので、ここで潰す必要がある
+        if not (math.isfinite(cmd.steer_norm)
+                and (not cmd.lidar_seen or math.isfinite(cmd.lidar_front_dist))):
+            st.reason = "推論結果が不正（NaN/Inf）"
+            return st                      # ready=False ＝ 制動
+
         free_ahead = cmd.lidar_front_dist if cmd.lidar_seen else 0.0
         st.free_ahead = free_ahead
         st.valid_ratio = 1.0 if cmd.lidar_seen else 0.0

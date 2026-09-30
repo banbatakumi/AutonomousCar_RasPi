@@ -48,6 +48,7 @@ telemetry_node・io_node も中身の変化をその場で中継する。2026-09
 from __future__ import annotations
 
 import argparse
+import math
 import signal
 import sys
 import time
@@ -321,6 +322,13 @@ class PlanningNode:
         if not self.ctrl.engaged:
             # engage していないときの指令は「見せるためだけ」の値。DISARM で出す
             return DriveCmd(mode=0, arm=False, source="planning:idle")
+        # **NaN/Inf を出す planner がいたら「分からない」と同じ扱いにする**（issue #1）。
+        # `e2e_lidar` 以外の planner は出力の isfinite チェックを持たない。
+        # `command_from_cmd`/`_merge_auto` にも同じ検査があるが（多層防御）、
+        # ここで落とせば `st.reason` に理由を残せる
+        if not (math.isfinite(st.target_speed) and math.isfinite(st.target_steer)):
+            st.ready = False
+            st.reason = f"{st.reason}（出力がNaN/Inf）" if st.reason else "出力がNaN/Inf"
         if not st.ready or st.brake:
             # 制動トルクは planner が決めた制動（ready）のときだけ載せる。「分からない」（ready=False）
             # の制動は 0＝中継側の GUI の値

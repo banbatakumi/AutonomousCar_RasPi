@@ -299,6 +299,9 @@ class Subscriber:
         #: トピックごとの最新値。`poll()` が更新する
         self.latest: dict[str, MsgBase] = {}
         self.received = 0
+        #: デコードに失敗して捨てたフレーム数（issue #8）。0 でなければ、
+        #: 部分デプロイ等でバスに型の合わない msgpack が混ざっている
+        self.decode_errors = 0
 
         try:
             self._open(topics)
@@ -335,7 +338,15 @@ class Subscriber:
                     raw = s.recv(zmq.NOBLOCK)
                 except zmq.Again:
                     break
-                t, msg = decode(raw)
+                try:
+                    t, msg = decode(raw)
+                except (ValueError, KeyError):
+                    # **1メッセージだけ捨てて続行する。** 部分デプロイで型定義が
+                    # ずれたノードが不正な msgpack を出しても、購読側のループ全体を
+                    # 落とさない（issue #8）。落ちると io_node は E-Stop ラッチ、
+                    # telemetry_node は `_bus_pump` が黙って死んで GUI が固まる
+                    self.decode_errors += 1
+                    continue
                 self.latest[t] = msg
                 self.received += 1
                 out.append((t, msg))

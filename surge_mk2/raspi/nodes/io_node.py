@@ -190,7 +190,8 @@ class IoNode:
         self.tracker = LinkTracker(
             on_telemetry=self._on_telemetry_chain(on_telemetry),
             on_frame=self.bridge.on_frame,
-            on_latch=self._on_latch)
+            on_latch=self._on_latch,
+            on_time_reset=self._on_time_reset)
         # 受信状態と時刻同期の実体は tracker が持つ。ここは同じ物への別名。
         self.state = self.tracker.state
         self.sync = self.tracker.sync
@@ -288,6 +289,18 @@ class IoNode:
             print("\n#  E-STOP 解除を確認", file=sys.stderr)
         elif name == "drive_power_locked" and value:
             print("\n!! 駆動電源ラッチ — 電源を入れ直すまで復帰しません", file=sys.stderr)
+
+    def _on_time_reset(self, t_ns: int) -> None:
+        """STM32 の再起動を検出（`TimeSync.observe_stm_us` が `t_us` の大きな後退を
+        見た）。**時刻同期に依存する状態を合わせてリセットする**（issue #9）。
+        しないと `StateBuilder.odom_center` が旧時代の差分から巨大なジャンプを
+        作り、`ScanAssembler` は新旧の時刻が同居した周を出す。
+        """
+        self.bridge.state_builder.reset()
+        self.bridge.scans.reset()
+        self._log_event("time_reset", {})
+        print("\n!! STM32 の再起動を検出 — 時刻同期をやり直します（オドメトリ・"
+              "LiDAR組み立てをリセット）", file=sys.stderr)
 
     # ── ログ ──
 
@@ -539,7 +552,18 @@ class IoNode:
         self.cmd_stale = stale
 
     def _on_ui_event(self, msg) -> None:
-        """`ui/event`（GUI 側の単発イベント）。`seq` が増えていなければ二重処理しない。"""
+        """`ui/event`（GUI 側の単発イベント）。`seq` が増えていなければ二重処理しない。
+
+        `seq` は `Publisher`（telemetry_node）がトピックごとに持つ連番で、
+        **発行元プロセスの再起動で 1 から振り直される。** io_node はここの
+        `_ui_event_seq` をプロセスの寿命ぶん持ち続けるので、telemetry_node を
+        再起動すると「既知の番号以下」として新しいイベントを延々と捨て続けて
+        しまう（issue #10）。`seq` が後退していたら発行元が入れ替わったと見なし、
+        基準をリセットする——このバスは ZeroMQ PUB/SUB を ipc 1本で繋いでいて
+        並べ替えは起きないので、後退は「再起動」以外に説明がつかない
+        """
+        if msg.seq < self._ui_event_seq:
+            self._ui_event_seq = 0
         if msg.seq <= self._ui_event_seq:
             return
         self._ui_event_seq = msg.seq

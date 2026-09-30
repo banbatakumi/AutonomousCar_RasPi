@@ -146,6 +146,38 @@ class TestTimeSync(unittest.TestCase):
         self.assertIn(0, tr._pending_pings, "直近送った PING(id=0) が誤って破棄されている")
 
 
+class TestTimeReset(unittest.TestCase):
+    """issue #9: STM32 の再起動を検出したら `on_time_reset` で外へ知らせること。
+    `LinkTracker` 自身は `StateBuilder`/`ScanAssembler` を持たないので、
+    リセットの実行は呼び出し側（io_node）の責務——ここではコールバックが
+    正しいタイミングで、正しい回数だけ呼ばれることだけを確認する。
+    """
+
+    def test_fires_on_backward_jump_in_t_us(self):
+        resets = []
+        tr = LinkTracker(on_time_reset=lambda t_ns: resets.append(t_ns))
+        for i in range(20):
+            feed(tr, packets.Telemetry(t_us=600_000_000 + i * 20_000), i * MS)
+        self.assertEqual(resets, [])
+        feed(tr, packets.Telemetry(t_us=1_000), 20 * MS)   # STM32 再起動を模す
+        self.assertEqual(resets, [20 * MS])
+
+    def test_does_not_fire_on_ordinary_progress(self):
+        resets = []
+        tr = LinkTracker(on_time_reset=lambda t_ns: resets.append(t_ns))
+        for i in range(20):
+            feed(tr, packets.Telemetry(t_us=1000 + i * 20_000), i * MS)
+        self.assertEqual(resets, [])
+
+    def test_stats_packets_also_observed(self):
+        """`Stats` も時刻同期に食わせる対象（`observe_stm_us` を通る）。"""
+        resets = []
+        tr = LinkTracker(on_time_reset=lambda t_ns: resets.append(t_ns))
+        feed(tr, packets.Telemetry(t_us=600_000_000), 0)
+        feed(tr, packets.Stats(t_us=1_000), MS)
+        self.assertEqual(resets, [MS])
+
+
 class TestHealth(unittest.TestCase):
     def test_init_until_first_telemetry(self):
         tr = LinkTracker()

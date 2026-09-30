@@ -207,6 +207,36 @@ class TestPubSub(BusCase):
         with self.assertRaises(KeyError):
             Subscriber(["mystery"])
 
+    def test_malformed_frame_is_skipped_not_raised(self):
+        """issue #8: 部分デプロイ等で型のずれた msgpack が混ざっても、
+        `poll()` はそのフレームだけ捨てて後続を読み続けること。
+
+        直したのは io_node の `_recv_cmd` / telemetry_node の `_bus_pump` が
+        どちらも通る `Subscriber.poll`。壊れたフレーム1個で購読ループ全体が
+        死ぬと、io_node は落ちて E-Stop ラッチ、telemetry_node は `_bus_pump`
+        が静かに死んで `sub.latest` が凍結する。
+        """
+        from raspi.bus import Publisher, Subscriber
+        from raspi.bus.zbus import RELIABLE
+
+        pub = self.track(Publisher("control"))
+        # `LATEST`（CONFLATE）だと未読のうちに後続フレームで上書きされてしまい、
+        # 壊れたフレームが読まれる前に消えることがある。ここは順番に読み切りたいので
+        # `RELIABLE` を使う
+        sub = self.track(Subscriber({TOPIC_CMD: RELIABLE}))
+        time.sleep(0.2)
+        # 型定義がずれたノードが出しうる、壊れた msgpack ペイロード。
+        # slow joiner（接続確立前の送信は届かない）を確実に越えるため何度か送る
+        # （他のテスト（`test_cmd_flows_from_control_to_io`）と同じ流儀）
+        for _ in range(5):
+            pub.sock.send(b"cmd\x00" + b"\xc1", 0)
+            time.sleep(0.01)
+        pub.send(TOPIC_CMD, DriveCmd(mode=1, target_steer=0.3, source="after-garbage"))
+        got = _pump(sub, 1)
+        self.assertTrue(got, "壊れたフレームの後も正常なフレームが届くこと")
+        self.assertEqual(got[-1][1].source, "after-garbage")
+        self.assertGreaterEqual(sub.decode_errors, 1)
+
 
 class TestTopicOwner(unittest.TestCase):
     """★ `TOPIC_OWNER` の登録漏れ・前方一致の事故を防ぐ。

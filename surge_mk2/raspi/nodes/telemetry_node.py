@@ -749,6 +749,11 @@ class TelemetryServer:
             m = _json_decode(raw)
         except Exception:
             return
+        if not isinstance(m, dict):
+            # **配列などdict以外のJSONも構文上は合法。** `m.get` が無いので
+            # ここで弾かないと `AttributeError` が `_control_channel` の
+            # `async for` から抜け、操縦者の接続なら走行中に DISARM される（issue #12）
+            return
         kind = m.get("type")
 
         if kind == "take_control":
@@ -908,8 +913,16 @@ class TelemetryServer:
 
         elif kind == "auto_stop_margin":
             if "margin_cm" in m:
-                self.pub.send(TOPIC_UI_EVENT,
-                               UiEvent(kind="auto_stop_margin_cm", float_value=float(m["margin_cm"])))
+                try:
+                    margin_cm = float(m["margin_cm"])
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    # **NaN/Inf は STM32 へ CONFIG_SET として直接飛ぶので、ここで
+                    # 弾かないと `command_from_cmd` の防御を経由せず届いてしまう**（issue #1）
+                    if math.isfinite(margin_cm):
+                        self.pub.send(TOPIC_UI_EVENT,
+                                       UiEvent(kind="auto_stop_margin_cm", float_value=margin_cm))
 
         elif kind == "ping":
             await self._send_json(ws, {"type": "pong", "id": m.get("id"),
@@ -922,7 +935,13 @@ class TelemetryServer:
             await self._broadcast_control_status()
 
         elif kind == "mcap_record_start":
-            await self._mcap_start(image_hz=float(m.get("image_hz", DEFAULT_MCAP_IMAGE_HZ)))
+            try:
+                image_hz = float(m.get("image_hz", DEFAULT_MCAP_IMAGE_HZ))
+            except (TypeError, ValueError):
+                image_hz = DEFAULT_MCAP_IMAGE_HZ
+            if not math.isfinite(image_hz):
+                image_hz = DEFAULT_MCAP_IMAGE_HZ
+            await self._mcap_start(image_hz=image_hz)
             await self._broadcast_control_status()
 
         elif kind == "mcap_record_stop":
@@ -944,7 +963,13 @@ class TelemetryServer:
             await self._send_json(ws, self._maps_list())
 
         elif kind == "maps_save":
-            ok, error = self._maps_save(str(m.get("name", "")))
+            # **同期I/O（ディスク書き込み）を制御チャネルのイベントループから逃がす。**
+            # `OSError`（ENOSPC 等）を `_maps_save` 側が捕まえていなかった上に、
+            # ブロッキングI/Oがイベントループを止めていた（issue #12）
+            try:
+                ok, error = await asyncio.to_thread(self._maps_save, str(m.get("name", "")))
+            except OSError as e:
+                ok, error = False, f"保存に失敗: {e}"
             await self._send_json(ws, {"type": "maps_save_result", "ok": ok, "error": error})
             await self._send_json(ws, self._maps_list())
 
@@ -985,6 +1010,19 @@ class TelemetryServer:
         壊れた値は `TypeError` / `ValueError` として呼び元に返す。呼び元は
         捨てるだけで接続を維持する（切ると 150ms 後に DISARM してしまう）。
         """
+        speed = float(m.get("speed", 0.0))
+        steer = float(m.get("steer", 0.0))
+        accel_limit = float(m.get("accel_limit", 0.0))
+        steer_rate_limit = float(m.get("steer_rate_limit", 0.0))
+        brake_torque = float(m.get("brake_torque", 0.0))
+        target_torque = float(m.get("target_torque", 0.0))
+        # **NaN/Inf をここで弾く（issue #1）。** msgspec が拒むのは JSON の NaN
+        # リテラルだけで、`{"speed": "nan"}` の文字列は `float()` を素通りする。
+        # `command_from_cmd` 側にも同じ検査があるが（多層防御）、ここで早めに
+        # 捨てれば `bad_cmds` にも数えられ、原因調査がしやすい
+        if not all(math.isfinite(v) for v in (
+                speed, steer, accel_limit, steer_rate_limit, brake_torque, target_torque)):
+            raise ValueError("非有限値（NaN/Inf）の走行指令")
         return DriveCmd(
             mode=int(m.get("mode", 0)),
             arm=bool(m.get("arm", False)),
@@ -992,16 +1030,16 @@ class TelemetryServer:
             horn=bool(m.get("horn", False)),
             light_mode=int(m.get("light_mode", 0)),
             passing=bool(m.get("passing", False)),
-            target_speed=float(m.get("speed", 0.0)),
-            target_steer=float(m.get("steer", 0.0)),
-            accel_limit=float(m.get("accel_limit", 0.0)),
-            steer_rate_limit=float(m.get("steer_rate_limit", 0.0)),
+            target_speed=speed,
+            target_steer=steer,
+            accel_limit=accel_limit,
+            steer_rate_limit=steer_rate_limit,
             # **既定は 0 = 未指定 = STM32 の最大制動。** 古い GUI が繋がって
             # このキーを送ってこなくても、ブレーキが弱くなる方には転ばない
-            brake_torque=float(m.get("brake_torque", 0.0)),
+            brake_torque=brake_torque,
             # v0.6: 古い GUI はこのキーを送らないので、既定 False/0.0（速度指令のまま）
             torque_mode=bool(m.get("torque_mode", False)),
-            target_torque=float(m.get("target_torque", 0.0)),
+            target_torque=target_torque,
             # v0.7: 超音波の自動停止。**既定は False**（キーを送ってこない古い GUI に
             # 勝手な自動介入を足さない）。有効にするかは GUI の設定パネルで人間が決める
             auto_stop=bool(m.get("auto_stop", False)),
@@ -1073,8 +1111,11 @@ class TelemetryServer:
             except (KeyError, TypeError, ValueError):
                 pass
             else:
-                self._auto_park_x, self._auto_park_y, self._auto_park_yaw = x, y, yaw
-                self._auto_park_seq += 1
+                # `float()` は NaN/Inf 文字列も通す（issue #1 と同じ穴）。
+                # 目標座標が NaN だと `park_to_point` の距離計算がすべて NaN になる
+                if math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw):
+                    self._auto_park_x, self._auto_park_y, self._auto_park_yaw = x, y, yaw
+                    self._auto_park_seq += 1
         if m.get("save_routes"):
             # 経由点エディタの保存（`slam2d_route`）。中身の検証は planner 側
             # （`raspi/auto/route_config.py`）。大きすぎるものだけここで弾く
@@ -1985,7 +2026,14 @@ class TelemetryServer:
                     continue
                 # テキストフレーム = 終了合図
                 # 同梱の経路の設定も `.routes.json` へ（無ければ古いものを消す）
-                loaded, error = mapstore.import_upload(name, bytes(buf))
+                # 最大32MBの書き込みを別スレッドへ逃がし、`OSError`（ENOSPC等）も
+                # 捕まえる（issue #12。`_maps_save` と同じ理由）
+                try:
+                    loaded, error = await asyncio.to_thread(
+                        mapstore.import_upload, name, bytes(buf))
+                except (OSError, ValueError) as e:
+                    await self._send_json(ws, {"ok": False, "error": f"保存に失敗: {e}"})
+                    return
                 if loaded is None:
                     await self._send_json(ws, {"ok": False, "error": error})
                     return
@@ -2183,7 +2231,12 @@ class TelemetryServer:
         `brake_torque` は GUI の値をそのまま使う（0 なら STM32 の最大制動）。
         """
         auto = self.sub.latest.get(TOPIC_AUTO_CMD)
-        fresh = auto is not None and (now - auto.t_pub) <= AUTO_CMD_STALE_NS
+        fresh = (auto is not None and (now - auto.t_pub) <= AUTO_CMD_STALE_NS
+                 # **NaN/Inf な auto/cmd は「無い」のと同じ扱いにする**（issue #1）。
+                 # `command_from_cmd` も同じ検査で弾くが（多層防御）、ここで落として
+                 # おけば壊れた planner の出力を stale と同じ経路（制動）で扱える
+                 and math.isfinite(auto.target_speed) and math.isfinite(auto.target_steer)
+                 and math.isfinite(auto.accel_limit) and math.isfinite(auto.brake_torque))
         if not fresh:
             if self._auto_was_fresh:
                 self.auto_stalls += 1

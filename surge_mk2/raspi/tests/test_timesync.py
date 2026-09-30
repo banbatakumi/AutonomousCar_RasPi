@@ -150,6 +150,40 @@ class TestWrapDuringSession(unittest.TestCase):
         self.assertAlmostEqual(pi_est, pi, delta=100_000)
 
 
+class TestStmReset(unittest.TestCase):
+    """issue #9: STM32 が再起動すると `t_us` が0付近へ戻る。検出してリセットすること。"""
+
+    def test_backward_jump_not_near_wrap_triggers_reset(self):
+        ts = TimeSync()
+        clock = Clock(offset_us=600_000_000, ratio=1.0)  # 6e8系
+        # 6e8 系列を流して基準を進めておく
+        for i in range(20):
+            ts.observe_stm_us(clock.stm_us(10_000_000_000 + i * 100_000_000))
+        self.assertGreater(ts._ref_stm_us, 0)
+        resets_before = ts.resets
+        # STM32 が再起動した想定: 生値が1e3系列（=ほぼ0）へ戻る。
+        # 直前の生値は U32 の終端付近ではないので、正規のラップでは説明できない
+        ts.observe_stm_us(1_000)
+        self.assertEqual(ts.resets, resets_before + 1)
+        self.assertEqual(ts._ref_stm_us, 1_000)     # リセット後は新しい生値が基準になる
+        self.assertEqual(ts.n_samples, 0)          # 古いサンプルは破棄される
+
+    def test_legitimate_u32_wrap_does_not_reset(self):
+        ts = TimeSync()
+        ts.observe_stm_us(U32 - 500)
+        resets_before = ts.resets
+        # 正規のラップ: 直前の生値が終端付近から小さい値へ
+        ts.observe_stm_us(500)
+        self.assertEqual(ts.resets, resets_before)
+
+    def test_small_jitter_backward_does_not_reset(self):
+        ts = TimeSync()
+        ts.observe_stm_us(5_000_000)
+        resets_before = ts.resets
+        ts.observe_stm_us(4_999_900)               # 100us の後退（ジッタ相当）
+        self.assertEqual(ts.resets, resets_before)
+
+
 class TestReadiness(unittest.TestCase):
     def test_not_ready_initially(self):
         ts = TimeSync()
