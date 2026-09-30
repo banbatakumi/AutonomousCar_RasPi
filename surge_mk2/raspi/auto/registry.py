@@ -25,7 +25,6 @@ from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
 from .line_trace import LineTrace
 from .park_to_point import ParkToPoint
-from .raceline import RaceLine
 from .slam2d_raceline import Slam2dRaceLine
 from .slam2d_route import Slam2dRoute
 from .sysid_accel import SysIdAccel
@@ -43,7 +42,6 @@ PLANNERS: dict[str, type[Planner]] = {
     CamE2E.id: CamE2E,
     DisparityExtender.id: DisparityExtender,
     DisparityPursuit.id: DisparityPursuit,
-    RaceLine.id: RaceLine,
     Slam2dRaceLine.id: Slam2dRaceLine,
     Slam2dRoute.id: Slam2dRoute,
     LineTrace.id: LineTrace,

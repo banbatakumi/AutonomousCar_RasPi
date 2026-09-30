@@ -13,7 +13,6 @@
 
 import math
 import sys
-import time
 import unittest
 from pathlib import Path
 
@@ -23,10 +22,9 @@ import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.msgs import Scan  # noqa: E402
-from raspi.nav import OccGrid, deskew, match  # noqa: E402
+from raspi.nav import OccGrid, deskew  # noqa: E402
 from raspi.nav.deskew import point_times_ns, integrate_pose  # noqa: E402
 from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, dilate  # noqa: E402
-from raspi.nav.slam import Slam, SlamConfig, _blend_xy  # noqa: E402
 
 NS = 1_000_000_000
 
@@ -267,67 +265,6 @@ class TestOccGrid(unittest.TestCase):
         self.assertEqual(int(dilate(m, 0).sum()), 1)
 
 
-class TestScanMatch(unittest.TestCase):
-    """★ 既知のずれを与えて、それを取り戻せることを数値で縛る。"""
-
-    def setUp(self):
-        # **少しずつ動かしながら焼く。** 1点に止まって焼いた地図は 1° 刻みの
-        # 点間隔（3m 先で 5.2cm）がセルより粗く、壁に穴だらけになる
-        self.g = OccGrid(resolution=0.05, size_m=12.0, origin=(-1.0, -1.0))
-        for i in range(10):
-            p = (3.0 + 0.015 * (i % 4), 2.0 + 0.015 * (i // 4), 0.0)
-            self.g.integrate(deskew(make_room_scan(*p)), p)
-
-    def _check(self, truth, guess, *, tol_xy=0.03, tol_deg=1.0, cycles=12):
-        """**数周期かけて寄る**のを許す。
-
-        1回で戻せる量は探索範囲（±8cm / ±4°）までで、それより大きなずれは
-        毎周期少しずつ縮む。実機も 10Hz で繰り返し呼ばれるので、
-        「1回で戻せること」を要求する方が実態に合わない。
-        """
-        pts = deskew(make_room_scan(*truth))
-        m = match(self.g, pts, guess)
-        for _ in range(cycles - 1):
-            m = match(self.g, pts, (m.x, m.y, m.yaw))
-        self.assertTrue(m.searched)
-        self.assertAlmostEqual(m.x, truth[0], delta=tol_xy)
-        self.assertAlmostEqual(m.y, truth[1], delta=tol_xy)
-        self.assertLess(abs(math.degrees(m.yaw - truth[2])), tol_deg)
-        self.assertGreater(m.score, 0.5)
-
-    def test_recovers_translation(self):
-        self._check((3.06, 1.95, 0.0), (3.0, 2.0, 0.0))
-
-    def test_recovers_rotation(self):
-        self._check((3.0, 2.0, math.radians(3.0)), (3.0, 2.0, 0.0))
-
-    def test_recovers_both(self):
-        self._check((3.05, 2.04, math.radians(-2.5)), (3.0, 2.0, 0.0))
-
-    def test_large_error_converges_over_time(self):
-        """★大きくずれても**時間をかけて**寄る。
-
-        1回で戻せる量は探索範囲（±8cm）まで。これを広げれば速く戻せるが、
-        代わりに毎周期そのぶん滑る余地を与えることになる（`nav/scanmatch.py`）。
-        10Hz で 2 秒かけて 15cm 戻せれば、実用上それで足りる。
-        """
-        truth = (3.15, 2.0, 0.0)
-        pts = deskew(make_room_scan(*truth))
-        guess = (3.0, 2.0, 0.0)
-        for _ in range(20):
-            m = match(self.g, pts, guess)
-            guess = (m.x, m.y, m.yaw)
-        self.assertAlmostEqual(guess[0], truth[0], delta=0.04)
-
-    def test_empty_map_does_not_search(self):
-        """地図が空なら探索しない。**全候補 0 点で原点へ吸い寄せられるのを防ぐ。**"""
-        empty = OccGrid(resolution=0.05, size_m=12.0, origin=(-1.0, -1.0))
-        pts = deskew(make_room_scan(3.0, 2.0, 0.0))
-        m = match(empty, pts, (1.0, 1.0, 0.5))
-        self.assertFalse(m.searched)
-        self.assertEqual((m.x, m.y, m.yaw), (1.0, 1.0, 0.5))
-
-
 class TestIntegratePose(unittest.TestCase):
     def test_straight(self):
         x, y, th = integrate_pose(0.0, 0.0, 0.0, 1.0, 0.0)
@@ -340,166 +277,6 @@ class TestIntegratePose(unittest.TestCase):
         self.assertAlmostEqual(x, 1.0, places=6)     # 半径 1 の 90° 旋回
         self.assertAlmostEqual(y, 1.0, places=6)
         self.assertAlmostEqual(th, math.pi / 2, places=6)
-
-
-class TestSlam(unittest.TestCase):
-    def setUp(self):
-        self.slam = Slam(SlamConfig(resolution=0.05, size_m=16.0, max_range=8.0))
-
-    @staticmethod
-    def creep(n, *, x0=3.0, y=2.0, step=0.02, yaw=0.0):
-        """じりじり前進する姿勢の並び。
-
-        **止まったままでは地図が育たない**（`nav/slam.py` のキーフレーム条件）。
-        同じ場所を何度焼いても情報は増えないので、それが正しい振る舞い。
-        """
-        return [(x0 + step * i, y, yaw) for i in range(n)]
-
-    def _drive(self, poses, *, dt=0.1, warmup=4):
-        """姿勢の並びを順に食わせる。
-
-        **実機と同じ入力を渡す**: 点群に加えてジャイロ（`yaw_rate`）と車速
-        （`speed`）。ここを渡さないと SLAM は推測航法を持たないので、
-        テストだけが実機より不利な条件になる（`nav/slam.py` の冒頭）。
-
-        先頭で `warmup` 周ぶん止まったまま食わせる（実車も engage 直後は止まっている）。
-        """
-        seq = [poses[0]] * warmup + list(poses)
-        out = []
-        prev = None
-        for p in seq:
-            if prev is None:
-                spd = rate = 0.0
-            else:
-                spd = math.hypot(p[0] - prev[0], p[1] - prev[1]) / dt
-                rate = _wrap(p[2] - prev[2]) / dt
-            out.append(self.slam.update(make_room_scan(*p), dt,
-                                        yaw_rate=rate, speed=spd))
-            prev = p
-        return out
-
-    def test_stationary_pose_does_not_drift(self):
-        """止まっていれば姿勢は動かない。
-
-        **SLAM の原点は「最初の姿勢」**（`map` フレーム）であって部屋の座標ではない。
-        真値との差ではなく、動いていないことを見る。
-        """
-        self._drive([(3.0, 2.0, 0.0)] * 12)
-        x, y, yaw = self.slam.pose
-        self.assertAlmostEqual(x, 0.0, delta=0.03)
-        self.assertAlmostEqual(y, 0.0, delta=0.03)
-        self.assertLess(abs(math.degrees(yaw)), 1.0)
-
-    def test_tracks_a_straight_run(self):
-        """★ まっすぐ 1m 走ったら、地図の中でも 1m 進んでいる。
-
-        SLAM の原点は「最初の姿勢」なので、真値との差ではなく**移動量**で比べる。
-        """
-        poses = [(3.0 - 0.5 + 0.05 * i, 2.0, 0.0) for i in range(21)]
-        self._drive(poses)
-        x, y, _ = self.slam.pose
-        self.assertAlmostEqual(x, 1.0, delta=0.08)
-        self.assertAlmostEqual(y, 0.0, delta=0.05)
-
-    def test_heading_total_accumulates_beyond_180(self):
-        """累積回頭は ±180 に畳まない。**周回の判定がこれに乗っている。**"""
-        poses = [(3.0, 2.0, math.radians(a)) for a in range(0, 300, 5)]
-        self._drive(poses)
-        self.assertGreater(self.slam.lap_progress(), 0.7)
-
-    def test_gyro_bias_is_estimated(self):
-        """★ジャイロに一定のバイアスを乗せても、推定して引けること。
-
-        引けないと方位がゆっくり流れ、**それが地図の歪みとして焼き付く**。
-        """
-        bias = math.radians(3.0)                 # 3°/s の大きめのバイアス
-        self._drive(self.creep(14))              # まず地図を作る（止まったままでは育たない）
-        for i in range(400):                     # 時定数 10 秒 × 数本ぶん
-            # まっすぐ進んでいるのに、ジャイロだけが回っていると言い続ける
-            self.slam.update(make_room_scan(3.3 + 0.002 * i, 2.0, 0.0), 0.1,
-                             yaw_rate=bias, speed=0.02)
-        self.assertAlmostEqual(math.degrees(self.slam.gyro_bias),
-                               math.degrees(bias), delta=1.0)
-        # **バイアスを引けているので姿勢は流れない**
-        self.assertLess(abs(math.degrees(self.slam.yaw)), 8.0)
-
-    def test_reset_clears_everything(self):
-        self._drive(self.creep(10))
-        self.assertTrue(self.slam.trajectory)
-        self.slam.reset()
-        self.assertEqual(self.slam.trajectory, [])
-        self.assertEqual(self.slam.pose, (0.0, 0.0, 0.0))
-        self.assertEqual(int(self.slam.grid.hits.sum()), 0)
-        self.assertEqual(self.slam.distance, 0.0)
-
-    def test_lost_scan_does_not_poison_the_map(self):
-        """★見失った周は地図を更新しない。
-
-        ずれた姿勢の壁を混ぜると、次の周期はもっと合わなくなる（一度崩れると戻らない）。
-        """
-        self._drive(self.creep(14))
-        walls = int(self.slam.grid.wall_mask().sum())
-        self.assertGreater(walls, 50)
-        # まったく形の違う部屋（細い廊下）を1周ぶん食わせる。壁が合うはずがない
-        corridor = [(-9.0, 1.7, 9.0, 1.7), (-9.0, 2.3, 9.0, 2.3),
-                    (-9.0, 1.7, -9.0, 2.3), (9.0, 1.7, 9.0, 2.3)]
-        far = make_room_scan(3.0, 2.0, 0.0, segs=corridor, max_range=8.0)
-        u = self.slam.update(far, 0.1, yaw_rate=0.0, speed=0.0)
-        self.assertTrue(u.lost)
-        self.assertEqual(int(self.slam.grid.wall_mask().sum()), walls)
-
-    def test_update_is_fast_enough(self):
-        """1周期の予算は 10Hz に対して十分小さいこと。
-
-        planning_node は 50Hz で `auto/cmd` を出しており、`plan()` が 100ms
-        掛かると中継側が制動に落とす（`test_auto.py` の `test_stale_auto_cmd_...`）。
-        """
-        self._drive([(3.0, 2.0, 0.0)] * 5)
-        scan = make_room_scan(3.05, 2.0, 0.0)
-        t0 = time.perf_counter()
-        for _ in range(5):
-            self.slam.update(scan, 0.1, yaw_rate=0.0, speed=0.5)
-        dt_ms = (time.perf_counter() - t0) / 5 * 1000
-        self.assertLess(dt_ms, 50.0, f"1周期 {dt_ms:.1f}ms は遅すぎる")
-
-
-class TestBlendXY(unittest.TestCase):
-    """★ 補正の異方性（`SlamConfig.match_gain_fwd_ratio`）。
-
-    oval が「渦巻き」になった原因は、進行方向（corridor problem で観測でき
-    ない方向）にまで横方向と同じ強さで補正を混ぜていたこと
-    （`docs/progress_archive.md`「oval が渦巻きになる」節）。**横方向は強く、
-    進行方向は弱く**寄せることを直接確かめる。
-    """
-
-    def test_lateral_residual_is_pulled_at_gain_lat(self):
-        """真横（進行方向に対して垂直）のズレは `gain_lat` で満額寄る。"""
-        # 進行方向 = +x（yaw=0）。マッチは +y 側に 1m ズレた答え → 横方向のみ
-        nx, ny = _blend_xy(0.0, 0.0, 0.0, 0.0, 1.0, gain_lat=0.5, gain_fwd=0.0)
-        self.assertAlmostEqual(nx, 0.0)
-        self.assertAlmostEqual(ny, 0.5)
-
-    def test_forward_residual_is_damped(self):
-        """真正面（進行方向）のズレは `gain_fwd` だけ寄り、`gain_lat` より弱い。"""
-        nx, ny = _blend_xy(0.0, 0.0, 0.0, 1.0, 0.0, gain_lat=0.5, gain_fwd=0.1)
-        self.assertAlmostEqual(nx, 0.1)
-        self.assertAlmostEqual(ny, 0.0)
-
-    def test_decomposition_rotates_with_heading(self):
-        """yaw=90° なら「進行方向」は世界座標の +y になる。"""
-        nx, ny = _blend_xy(0.0, 0.0, math.pi / 2, 0.0, 1.0,
-                            gain_lat=0.5, gain_fwd=0.1)
-        self.assertAlmostEqual(nx, 0.0)
-        self.assertAlmostEqual(ny, 0.1)
-
-    def test_zero_residual_does_not_move(self):
-        nx, ny = _blend_xy(1.0, 2.0, 0.3, 1.0, 2.0, gain_lat=0.5, gain_fwd=0.1)
-        self.assertAlmostEqual(nx, 1.0)
-        self.assertAlmostEqual(ny, 2.0)
-
-
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
 if __name__ == "__main__":

@@ -68,6 +68,14 @@ from .se2 import wrap_angle
 
 __all__ = ["HybridConfig", "HybridResult", "plan"]
 
+#: `_Heuristic2D`のDijkstra結果のキャッシュ。キーは
+#: `(id(lmap), lmap.edt_epoch, goal, margin)`（`_Heuristic2D.__init__`参照）。
+#: `id(lmap)`は理論上GC後に再利用されうるが、このプロジェクトの唯一の
+#: 呼び出し元（`park_to_point`）は1つの`LocalMap`をセッション中使い回すため
+#: 実質起こらない。起きても`edt_epoch`まで一致する必要がありほぼ無害
+_DIJKSTRA_CACHE: dict[tuple, np.ndarray] = {}
+_DIJKSTRA_CACHE_MAX = 8
+
 
 @dataclass
 class HybridConfig:
@@ -164,6 +172,11 @@ class _Node:
     parent: "_Node | None" = field(compare=False, default=None)
     #: 親からこのノードまでの弧長 [m]。経路の復元に使う
     ds: float = field(compare=False, default=0.0)
+    #: 自分の姿勢での壁までの余裕 [m]（`include_unknown=False`）。**`_successors`が
+    #: このノードを子として作ったときの端点サンプルの値と同一**——このノードが
+    #: 「今いる場所」になったとき`body_clearance(*pose)`を呼び直さずに済む
+    #: （`_successors`の`here`参照。展開1回あたりのnumpy呼び出しを1本減らす）
+    wall_clear: float = field(compare=False, default=math.inf)
 
 
 def _advance(x: float, y: float, yaw: float, curvature: float,
@@ -199,6 +212,19 @@ class _Heuristic2D:
         self.n = n
         self.origin = (lmap.center[0] - lmap.size_m / 2.0,
                        lmap.center[1] - lmap.size_m / 2.0)
+
+        # ★**同じ地図・同じ目標・同じ余裕なら結果は同一**なので、Dijkstra
+        # （heapqによるPython実装、60×60で実測6.9ms）を使い回す。`lmap`が
+        # 作り直されずに何度も`plan()`が呼ばれる場合（時間予算切れの再試行や
+        # `_replan_fallback`前の1回など）だけ効く——`edt_epoch`は`reset()`を
+        # またいで単調増加するので、地図の中身が変わった前後で衝突しない
+        # （`grid.seq`は`reset()`で0に戻るため、それ単独だとキーが衝突しうる）
+        key = (id(lmap), lmap.edt_epoch, goal, round(margin, 6))
+        cached = _DIJKSTRA_CACHE.get(key)
+        if cached is not None:
+            self.cost = cached
+            return
+
         cc, rr = np.meshgrid(np.arange(n), np.arange(n), indexing="xy")
         xs = self.origin[0] + (cc + 0.5) * res
         ys = self.origin[1] + (rr + 0.5) * res
@@ -206,6 +232,13 @@ class _Heuristic2D:
         clear = lmap.clearance(xs, ys)
         free = clear >= (lmap.circle_radius + self.margin)
         self.cost = self._dijkstra(free, goal)
+
+        # **直近数件だけ覚える。** 無限に溜めるとlmapや古い地図世代への参照が
+        # 残り続けメモリを圧迫する（`park_to_point`は`lmap`を使い回すが、
+        # `edt_epoch`は10Hzで増え続けるので同じキーはすぐ死蔵になる）
+        if len(_DIJKSTRA_CACHE) >= _DIJKSTRA_CACHE_MAX:
+            _DIJKSTRA_CACHE.pop(next(iter(_DIJKSTRA_CACHE)))
+        _DIJKSTRA_CACHE[key] = self.cost
 
     def _dijkstra(self, free: np.ndarray, goal: tuple[float, float]) -> np.ndarray:
         n, res = self.n, self.res
@@ -309,7 +342,8 @@ def plan(start: tuple[float, float, float], goal: tuple[float, float, float],
         return hr if math.isinf(hd) else max(hd, hr)
 
     seq = 0
-    root = _Node(f=0.0, seq=seq, g=0.0, pose=start, curvature=0.0, gear=1)
+    root = _Node(f=0.0, seq=seq, g=0.0, pose=start, curvature=0.0, gear=1,
+                wall_clear=float(lmap.body_clearance(*start)))
     root.f = h(start)
     heap = [root]
     best: dict[tuple[int, int, int], float] = {_key(start, cfg): 0.0}
@@ -400,10 +434,13 @@ def _successors(node: _Node, curvatures: list[float], lmap: LocalMap,
             samples.extend(mid)
 
     arr = np.asarray(samples, dtype=np.float64)
-    wall = lmap.body_clearance(arr[:, 0], arr[:, 1], arr[:, 2])
-    #: 今いる場所の余裕。**すでに食い込んでいる状態から脱出できるようにする**
-    here = float(lmap.body_clearance(*node.pose))
-    unk = lmap.body_clearance(arr[:, 0], arr[:, 1], arr[:, 2], include_unknown=True)
+    #: 壁のみ・壁+未知を1回のgatherで両方引く（`body_clearance`を2回呼ぶより速い、
+    #: `LocalMap.body_clearance_both()`参照）
+    wall, unk = lmap.body_clearance_both(arr[:, 0], arr[:, 1], arr[:, 2])
+    #: 今いる場所の余裕。**すでに食い込んでいる状態から脱出できるようにする**。
+    #: `node.wall_clear`は、このノードが子として作られたときの端点サンプル
+    #: （`wall[i, -1]`）と同じ値なので、ここで`body_clearance`を呼び直さない
+    here = node.wall_clear
     wall = wall.reshape(len(poses), _SAMPLES)
     unk = unk.reshape(len(poses), _SAMPLES)
 
@@ -429,7 +466,8 @@ def _successors(node: _Node, curvatures: list[float], lmap: LocalMap,
         unk_short = max(0.0, cfg.clearance_target - float(unk[i].min()))
         cost += cfg.unknown_weight * unk_short
         out.append(_Node(f=0.0, seq=0, g=node.g + cost, pose=poses[i],
-                         curvature=curv, gear=gear, parent=node, ds=cfg.step))
+                         curvature=curv, gear=gear, parent=node, ds=cfg.step,
+                         wall_clear=float(wall[i, -1])))
     return out
 
 

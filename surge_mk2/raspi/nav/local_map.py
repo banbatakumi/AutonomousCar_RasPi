@@ -164,6 +164,11 @@ class LocalMap:
         self._circles, self._circle_r = (
             footprint_circles(footprint, circles_x, circles_y) if footprint
             else (np.zeros((1, 2)), 0.1))
+        #: `refresh()`が実際にESDFを作り直すたびに増える通し番号。**`reset()`を
+        #: またいで単調増加**——`grid.seq`は`reset()`のたびに0へ戻るので、
+        #: それだけをキャッシュキーに使うと別の地図なのに同じ値になりうる
+        #: （`hybrid_astar._Heuristic2D`のキャッシュキー参照）
+        self._edt_epoch = 0
         self.reset()
 
     def configure(self, *, size_m: float, center: tuple[float, float],
@@ -193,6 +198,11 @@ class LocalMap:
                             min_hits=self._min_hits, min_seen=self._min_seen)
         self._wall_edt: np.ndarray | None = None
         self._blocked_edt: np.ndarray | None = None
+        #: `[0]=壁のみ, [1]=壁+未知`の距離場を積んだもの。`body_clearance_both()`が
+        #: 1回のgatherで両方を引けるように`refresh()`のたびに作り直す
+        #: （毎展開ごとに積むと600×600の確保・コピーがHybrid A*のボトルネックになる、
+        #: `hybrid_astar.py`のdocstring参照）
+        self._stacked_edt: np.ndarray | None = None
         self._edt_seq = -1
         #: 今周期の当たり点のセル。**累積の`min_hits`を待たない**
         self._fresh: np.ndarray | None = None
@@ -249,7 +259,19 @@ class LocalMap:
         wall_only[:, 0] = wall_only[:, -1] = True
         self._wall_edt = _edt(~wall_only, self.resolution)
         self._blocked_edt = _edt(~blocked, self.resolution)
+        self._stacked_edt = np.stack([self._wall_edt, self._blocked_edt])
         self._edt_seq = self.grid.seq
+        self._edt_epoch += 1
+
+    @property
+    def edt_epoch(self) -> int:
+        """`refresh()`が実際にESDFを作り直した回数。**`reset()`をまたいで単調増加**。
+
+        `grid.seq`は`reset()`のたびに0へ戻るため、別の地図なのに同じ値に
+        なりうる。ヒューリスティックのキャッシュキー（`hybrid_astar.py`）は
+        こちらを使う。
+        """
+        return self._edt_epoch
 
     @property
     def ready(self) -> bool:
@@ -298,6 +320,17 @@ class LocalMap:
 
     # ── 車体の余裕 ──
 
+    def _footprint_cells(self, xa: np.ndarray, ya: np.ndarray, yawa: np.ndarray
+                         ) -> tuple[np.ndarray, np.ndarray]:
+        """円被覆の各中心（(N,K)）を格子座標へ変換する。`body_clearance*`の共通部。"""
+        ox = self._circles[None, :, 0]                     # (1, K)
+        oy = self._circles[None, :, 1]
+        c = np.cos(yawa)[:, None]
+        s = np.sin(yawa)[:, None]
+        px = xa[:, None] + ox * c - oy * s                 # (N, K)
+        py = ya[:, None] + ox * s + oy * c
+        return self.grid.to_cell(px, py)
+
     def body_clearance(self, x: np.ndarray | float, y: np.ndarray | float,
                        yaw: np.ndarray | float, *,
                        include_unknown: bool = False) -> np.ndarray:
@@ -310,6 +343,9 @@ class LocalMap:
         呼ぶ実装だと、numpyの呼び出しオーバヘッド（1回20µs程度）が円の数だけ
         掛かり、Hybrid A*の1展開が0.2msを超えて探索が秒オーダーになる
         （2026-09-16の実測で探索が最大10秒かかり、ここが主因だった）。
+
+        壁版と未知込み版が両方要るなら`body_clearance_both()`を使うこと
+        ——1回のgatherで両方引けて、本関数を2回呼ぶより速い。
         """
         field = self._blocked_edt if include_unknown else self._wall_edt
         scalar = np.isscalar(x)
@@ -320,19 +356,50 @@ class LocalMap:
             out = np.zeros(xa.shape)
             return float(out[0]) if scalar else out
 
-        ox = self._circles[None, :, 0]                     # (1, K)
-        oy = self._circles[None, :, 1]
-        c = np.cos(yawa)[:, None]
-        s = np.sin(yawa)[:, None]
-        px = xa[:, None] + ox * c - oy * s                 # (N, K)
-        py = ya[:, None] + ox * s + oy * c
-        col, row = self.grid.to_cell(px, py)
+        col, row = self._footprint_cells(xa, ya, yawa)
         h, w = field.shape
         inside = (col >= 0) & (col < w) & (row >= 0) & (row < h)
         vals = field[np.clip(row, 0, h - 1), np.clip(col, 0, w - 1)]
         vals = np.where(inside, vals, 0.0)                 # 格子の外は塞がれている扱い
         out = vals.min(axis=1) - self._circle_r
         return float(out[0]) if scalar else out
+
+    def body_clearance_both(self, x: np.ndarray | float, y: np.ndarray | float,
+                            yaw: np.ndarray | float
+                            ) -> tuple[np.ndarray, np.ndarray] | tuple[float, float]:
+        """`body_clearance()`の壁版・未知込み版を**1回のgather**で両方返す。
+
+        Hybrid A*の`_successors`は展開1回ごとに両方の余裕が要る
+        （壁は硬い拘束、未知はコスト。`hybrid_astar.py`のモジュールdocstring
+        参照）。別々に呼ぶと円座標への変換（cos/sin・行列積）と格子添字への
+        変換を2回ずつ行うことになる。`refresh()`で作った`_stacked_edt`
+        （形状`(2,H,W)`）に対して1回だけ花式indexingすれば両方引ける。
+
+        戻り値は`(壁のみ, 壁+未知)`。スカラー入力ならスカラーのタプル。
+        """
+        scalar = np.isscalar(x)
+        xa = np.atleast_1d(np.asarray(x, dtype=np.float64))
+        ya = np.atleast_1d(np.asarray(y, dtype=np.float64))
+        yawa = np.atleast_1d(np.asarray(yaw, dtype=np.float64))
+        stack = self._stacked_edt
+        if stack is None:
+            out = np.zeros(xa.shape)
+            if scalar:
+                return float(out[0]), float(out[0])
+            return out, out
+
+        col, row = self._footprint_cells(xa, ya, yawa)
+        h, w = stack.shape[1], stack.shape[2]
+        inside = (col >= 0) & (col < w) & (row >= 0) & (row < h)
+        cc = np.clip(col, 0, w - 1)
+        rr = np.clip(row, 0, h - 1)
+        vals = stack[:, rr, cc]                             # (2, N, K)
+        vals = np.where(inside, vals, 0.0)                  # 格子の外は塞がれている扱い
+        out = vals.min(axis=2) - self._circle_r             # (2, N)
+        if scalar:
+            return float(out[0, 0]), float(out[1, 0])
+        return out[0], out[1]
+
     def path_clearance(self, poses, *, include_unknown: bool = False) -> float:
         """姿勢列に沿った最小余裕 [m]。`(N,3)`配列でもタプルのリストでも受ける
         （`reeds_shepp.sample_path_array()`を渡すのが速い）。"""

@@ -17,13 +17,12 @@ from .follow_the_gap import FollowTheGap
 from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
 from .line_trace import LineTrace
-from .raceline import RaceLine
 from .registry import PLANNERS, catalog, make_planner, merged_params
 
 __all__ = [
     "Planner", "ParamSpec", "ScanWindow", "min_filter", "scan_window",
     "sector_of_deg", "wrap_deg",
     "DisparityExtender", "E2ELidar", "FollowTheGap", "FollowTheGapCam", "DisparityPursuit",
-    "RaceLine", "LineTrace", "CamCenterline", "CamE2E",
+    "LineTrace", "CamCenterline", "CamE2E",
     "PLANNERS", "catalog", "make_planner", "merged_params",
 ]

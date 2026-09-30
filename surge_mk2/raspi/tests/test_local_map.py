@@ -120,6 +120,19 @@ class TestClearance(unittest.TestCase):
         sideways = float(self.lmap.body_clearance(1.6, 0.0, math.pi / 2))
         self.assertLess(facing, sideways)
 
+    def test_body_clearance_both_matches_separate_calls(self):
+        """★#16: `body_clearance_both()`が壁版・未知版それぞれの単独呼び出しと
+        数値的に一致すること（1回のgatherにまとめても結果は変えない）。"""
+        import numpy as np
+        xs = np.array([0.5, 1.6, 2.4, -1.0])
+        ys = np.array([0.2, 0.0, 0.0, 1.1])
+        yaws = np.array([0.3, 0.0, math.pi / 2, -1.2])
+        wall_ref = self.lmap.body_clearance(xs, ys, yaws)
+        unk_ref = self.lmap.body_clearance(xs, ys, yaws, include_unknown=True)
+        wall_both, unk_both = self.lmap.body_clearance_both(xs, ys, yaws)
+        np.testing.assert_allclose(wall_both, wall_ref)
+        np.testing.assert_allclose(unk_both, unk_ref)
+
     def test_body_clearance_is_negative_when_straddling_a_wall(self):
         """車体が壁セルを跨いでいれば負になること。
 

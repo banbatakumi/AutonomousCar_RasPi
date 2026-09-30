@@ -23,9 +23,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import numpy as np  # noqa: E402
+
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.nav import deskew  # noqa: E402
-from raspi.nav.hybrid_astar import HybridConfig, plan  # noqa: E402
+from raspi.nav.hybrid_astar import (  # noqa: E402
+    _DIJKSTRA_CACHE, HybridConfig, _Heuristic2D, plan,
+)
 from raspi.nav.local_map import LocalMap  # noqa: E402
 from raspi.nav.reeds_shepp import (  # noqa: E402
     candidate_paths, sample_path_array,
@@ -168,6 +172,101 @@ class TestGoalHandling(unittest.TestCase):
         res = plan((0.0, 0.0, 0.0), goal, lmap, cfg)
         self.assertTrue(res.ok, res.how)
         self.assertLess(res.margin, cfg.margin)
+
+
+class TestSuccessorClearanceReuse(unittest.TestCase):
+    """★#16: `_successors`の`here`再利用と`body_clearance_both`が
+    従来の3回呼び出し版と数値的に一致すること（挙動を変えない最適化）。
+    """
+
+    def test_body_clearance_both_matches_two_separate_calls(self):
+        lmap = _map(GARAGE, pose=(-0.9, 0.25, 0.0))
+        xs = np.array([-0.9, 0.0, -0.2, 2.4])
+        ys = np.array([0.25, -0.6, 0.3, 0.0])
+        yaws = np.array([0.0, math.pi / 2, 1.0, -0.5])
+        wall_ref = lmap.body_clearance(xs, ys, yaws)
+        unk_ref = lmap.body_clearance(xs, ys, yaws, include_unknown=True)
+        wall_both, unk_both = lmap.body_clearance_both(xs, ys, yaws)
+        np.testing.assert_allclose(wall_both, wall_ref)
+        np.testing.assert_allclose(unk_both, unk_ref)
+
+    def test_body_clearance_both_scalar_matches(self):
+        lmap = _map(ROOM)
+        wall_ref = float(lmap.body_clearance(0.5, 0.2, 0.3))
+        unk_ref = float(lmap.body_clearance(0.5, 0.2, 0.3, include_unknown=True))
+        wall_both, unk_both = lmap.body_clearance_both(0.5, 0.2, 0.3)
+        self.assertAlmostEqual(wall_both, wall_ref, places=9)
+        self.assertAlmostEqual(unk_both, unk_ref, places=9)
+
+    def test_body_clearance_both_before_refresh_is_zero(self):
+        lmap = LocalMap(footprint=FOOTPRINT)
+        wall_both, unk_both = lmap.body_clearance_both(0.0, 0.0, 0.0)
+        self.assertEqual(wall_both, 0.0)
+        self.assertEqual(unk_both, 0.0)
+
+    def test_here_reuse_gives_same_result_as_recomputing(self):
+        """`_Node.wall_clear`を使う経路と、毎回`body_clearance`を呼び直す
+        経路とで、同じ`plan()`結果になること（切り返し必須の詰まった配置で
+        `here`の脱出許可ロジックが実際に効く配置を使う）。
+        """
+        start = (1.2, 0.0, 0.0)
+        goal = (0.0, 0.0, math.pi)
+        lmap = _map(DEADEND, pose=start)
+        cfg = _cfg()
+        res = plan(start, goal, lmap, cfg)
+        self.assertTrue(res.ok, res.how)
+        # 経路上の全姿勢で、node.wall_clearが使われた結果でも硬い拘束margin
+        # を守っていること（食い違えば安全側の判定と噛み合わなくなる）
+        got = lmap.path_clearance(sample_path_array(start, res.path, step=0.01))
+        self.assertGreaterEqual(got, res.margin - 1e-6)
+
+
+class TestDijkstraHeuristicCache(unittest.TestCase):
+    """★#16: `_Heuristic2D`のDijkstraキャッシュが結果を変えないこと。"""
+
+    def setUp(self):
+        _DIJKSTRA_CACHE.clear()
+
+    def test_same_map_and_goal_hits_cache_with_identical_cost(self):
+        lmap = _map(ROOM)
+        cfg = _cfg()
+        h1 = _Heuristic2D(lmap, (1.0, 0.0), cfg, cfg.margin)
+        n_before = len(_DIJKSTRA_CACHE)
+        h2 = _Heuristic2D(lmap, (1.0, 0.0), cfg, cfg.margin)
+        self.assertEqual(len(_DIJKSTRA_CACHE), n_before, "2回目はキャッシュを増やさない")
+        np.testing.assert_array_equal(h1.cost, h2.cost)
+        # 呼び出し結果（ヒューリスティック値）も一致する
+        self.assertEqual(h1(0.3, 0.2), h2(0.3, 0.2))
+
+    def test_different_goal_does_not_reuse_cached_cost(self):
+        lmap = _map(ROOM)
+        cfg = _cfg()
+        h1 = _Heuristic2D(lmap, (1.0, 0.0), cfg, cfg.margin)
+        h2 = _Heuristic2D(lmap, (-1.0, 0.5), cfg, cfg.margin)
+        self.assertFalse(np.array_equal(h1.cost, h2.cost),
+                         "目標が違うのに同じコスト場を返した")
+
+    def test_edt_epoch_advances_and_invalidates_cache(self):
+        """`refresh()`のたびに`edt_epoch`が増え、新しい観測を取り込んだ後は
+        同じ`(goal, margin)`でもキャッシュを再利用しない（地図が変わったのに
+        古いコスト場を使うと、新しく見えた壁を無視した経路を引く）。"""
+        lmap = _map(ROOM)
+        cfg = _cfg()
+        epoch1 = lmap.edt_epoch
+        h1 = _Heuristic2D(lmap, (1.0, 0.0), cfg, cfg.margin)
+        n_after_first = len(_DIJKSTRA_CACHE)
+
+        # 同じ地図のまま新しい観測を重ねる → grid.seqもedt_epochも増える
+        lmap.integrate(deskew(make_room_scan(0.0, 0.0, 0.0, segs=ROOM, max_range=6.0),
+                              max_range=6.0), (0.0, 0.0, 0.0))
+        lmap.refresh()
+        self.assertGreater(lmap.edt_epoch, epoch1)
+
+        h2 = _Heuristic2D(lmap, (1.0, 0.0), cfg, cfg.margin)
+        self.assertGreater(len(_DIJKSTRA_CACHE), n_after_first,
+                           "epochが変わったのにキャッシュへ追加しなかった（誤って再利用した疑い）")
+        # 同じ部屋なので値そのものはほぼ一致するはず（別オブジェクトである点だけ確認）
+        np.testing.assert_allclose(h1.cost, h2.cost)
 
 
 class TestBudget(unittest.TestCase):

@@ -6,29 +6,11 @@
 
     deskew      点群のモーションスキュー補正（走りながら測った1周を1瞬に直す）
     grid        占有格子。ヒット/ミスの回数を数え、動く物を壁として確定させない
-    scanmatch   相関スキャンマッチ。地図に対して今の点群が一番合う姿勢を探す
-    slam        上3つの束ね。**SLAM エンジンを隠すのはここだけ**
+    raceline    最小曲率最適化と速度プロファイル（車体非依存の共通ライブラリ）
 
-`raspi/auto/` との分担は「1 planner = 1つの走らせ方」を保つため。planner
-（`raspi/auto/raceline.py`）はこれらを組み合わせる状態機械であって、
-アルゴリズムそのものはここに置く。
-
-## なぜ外部の SLAM ライブラリを使わないか
-
-BreezySLAM（CoreSLAM）を検討して**採らなかった**。理由は導入の手間ではなく、
-中身がこのプロジェクトの安全規約と噛み合わないこと。
-
-- 誤差勾配が取れないと `exit(1)` でプロセスを殺す。走行中に planning_node が
-  traceback も残さず消えるのは車載コードとして受け入れられない
-- `hole_width_mm/2` より近い点を捨てる仕様が、道幅 0.9m のコースと両立しない
-- **`dist == 0` を「自由空間」として彫る。** `sector_seen=False`（受信できなかった
-  30点）を渡すと、見えていない方向を「空き」として地図に書く。
-  `raspi/auto/follow_the_gap.py:19-32` で確立した規約を SLAM 層でだけ破ることになる
-- 内蔵の歪み補正が「添字が増える向きに時間が進む」前提で、こちらと逆
-  （`raspi/msgs/types.py` の `Scan` 参照）
-
-numpy で書いても 1周期 5〜15ms に収まる見込み（レイ彫り 0.5ms・スキャンマッチ 0.5ms）で、
-10Hz に対して十分。**全部読めることの方が価値が大きい**と判断した。
+**SLAM 本体は `slam2d/`（車体非依存ライブラリ）に統合済み。** ここにあった
+自作の `scanmatch`/`slam`（旧 `auto/raceline.py` 用）は学習用の基礎基盤で、
+現行の `slam2d_raceline`/`slam2d_route` planner には使われておらず削除した。
 """
 
 from __future__ import annotations
@@ -44,23 +26,17 @@ from .ipm import (CameraExtrinsics, CameraIntrinsics, camera_intrinsics,
 from .obstacles import Obstacle
 from .purepursuit import Pursuit, PursuitConfig, follow
 from .raceline import RaceLine, optimize
-from .scanmatch import MatchResult, match
-from .slam import Slam, SlamConfig, SlamUpdate
 
 __all__ = [
     "CameraExtrinsics",
     "CameraIntrinsics",
     "Centerline",
-    "MatchResult",
     "Obstacle",
     "OccGrid",
     "Points",
     "Pursuit",
     "PursuitConfig",
     "RaceLine",
-    "Slam",
-    "SlamConfig",
-    "SlamUpdate",
     "camera_intrinsics",
     "centerline",
     "deskew",
@@ -68,7 +44,6 @@ __all__ = [
     "extract_centerline",
     "follow",
     "ground_to_pixel",
-    "match",
     "obstacles",
     "optimize",
     "pack_trinary",
