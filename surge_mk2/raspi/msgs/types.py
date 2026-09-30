@@ -159,9 +159,9 @@ class VehicleState(MsgBase):
     wheel_speed: list[float] = msgspec.field(default_factory=lambda: [0.0] * 4)
     #: 前輪の累積走行距離 [m] [FL, FR]。**累積値・射影なし**
     odom_dist: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
-    accel: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [m/s²] x,y,z
-    pitch: float = 0.0                     #: [rad] 重力で補正済み。ドリフトしない
-    roll: float = 0.0                      #: [rad] 同上
+    accel: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [m/s²] x(前)・y(左)・z(上)。重力込み（2026-10-01以降。以前の記録は x/y が逆）
+    pitch: float = 0.0                     #: [rad] 機首上げが正。重力で補正済み。ドリフトしない
+    roll: float = 0.0                      #: [rad] 右傾き（右が沈む）が正。同上
     motor_current: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [A] RL,RR,ST
     #: [N·m] [RL, RR]。**指令値であって実測ではない**（Kt が未実測のため測れない）
     torque_cmd: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)

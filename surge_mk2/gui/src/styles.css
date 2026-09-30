@@ -1563,6 +1563,14 @@ button.on {
   fill: #4a3438;
 }
 
+/* 制動中だけ後輪の下に出る赤ライン。明るさ（opacity）は制動トルクに比例（`BrakeLine`） */
+.dp-brake-line {
+  stroke: var(--bad);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 2px var(--bad));
+}
+
 /* TC の動的トルク上限マーカー（`tc_limit_nm`）。`.arc-target`（指令速度マーカー）
  * と同じ `--live` 系の色で、トルクゲージ本体（`--accent`）とは意図的に見分ける。
  * 非介入時はバーの上端に張り付き、TC が効くとバーの途中まで下りてくる */

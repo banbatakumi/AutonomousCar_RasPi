@@ -66,6 +66,9 @@
  *   フローラインのアニメーション速度には引き続き使う（電流そのものが不要に
  *   なったわけではない）。
  *
+ * - 2026-09-30: 後輪タイヤの下に制動を示す赤い横ライン（`BrakeLine`）を追加（指示による）。
+ *   `torque_cmd` が負のときだけ出し、制動トルクの大きさで明るさを変える。
+ *
  * ## バー／ゲージの色の意味
  *
  * トルクゲージは単色（量だけを示す。安全上の判定は持たない）。満スケールは
@@ -199,12 +202,55 @@ export function DrivePanel() {
           slip={slipR ? slipR[1] : null}
         />
 
+        <BrakeLine cx={CX_L} cy={CY_REAR} torque={trq ? trq[0] : null} torqueMax={torqueMax} />
+        <BrakeLine cx={CX_R} cy={CY_REAR} torque={trq ? trq[1] : null} torqueMax={torqueMax} />
+
         <BatteryGauge cx={100} cy={72} letter="S" fullLabel="信号" v={bv ? bv[1] : null} a={ba ? ba[1] : null} />
         <BatteryGauge cx={100} cy={160} letter="P" fullLabel="駆動" v={bv ? bv[0] : null} a={ba ? ba[0] : null} />
 
         <ProximityRing />
       </svg>
     </div>
+  )
+}
+
+/** これ未満の制動トルク [N·m] はブレーキ中とみなさない（指令のゆらぎで点滅させない） */
+const BRAKE_MIN_NM = 0.02
+/** 制動が最弱のときの明るさ。0 だと「出ているのに見えない」ので下駄を履かせる */
+const BRAKE_OPACITY_MIN = 0.25
+
+/**
+ * 後輪タイヤの下（車体後方側）に出す赤い横ライン。制動中（`torque_cmd` が負）だけ表示し、
+ * 制動トルクが `torqueMax` に近いほど明るくする。`torque_cmd` は TC・ABS 適用後の
+ * 最終指令値（正=駆動/負=制動）なので、`brake` 指令だけでなく速度PIの負トルクによる
+ * 減速も映る。数字（電流・トルク）はこの線の下に続くので、線はタイヤの縁ぎりぎりに細く引く。
+ */
+function BrakeLine({
+  cx,
+  cy,
+  torque,
+  torqueMax,
+}: {
+  cx: number
+  cy: number
+  torque: number | null
+  torqueMax: number
+}) {
+  const brake = torque == null ? 0 : -torque
+  if (brake < BRAKE_MIN_NM) return null
+  const frac = Math.min(1, brake / (torqueMax || 1))
+  const y = cy + WHEEL_H / 2 + 2.5
+  return (
+    <line
+      className="dp-brake-line"
+      x1={cx - WHEEL_W / 2}
+      x2={cx + WHEEL_W / 2}
+      y1={y}
+      y2={y}
+      opacity={BRAKE_OPACITY_MIN + (1 - BRAKE_OPACITY_MIN) * frac}
+    >
+      <title>{`制動トルク: ${brake.toFixed(2)}N·m`}</title>
+    </line>
   )
 }
 

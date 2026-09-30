@@ -34,14 +34,14 @@
  * カメラの向きも一緒に傾く。`vs.pitch`/`vs.roll`（`TELEMETRY` の IMU 実測値。
  * 重力ベクトルで補正済みでドリフトしない）で毎フレーム補う。符号の向きは
  * 実車で確認済み（指示による）: **前が沈む（前輪側）ほど `pitch` は負**、
- * **右が沈む（右輪側）ほど `roll` は負**。
+ * **右が沈む（右輪側）ほど `roll` は正**（2026-10-01のファーム修正で反転。それ以前は負）。
  *
  * - pitch: 固定取付角に `−vs.pitch` を足す。前のめり（pitch 負）になるほど
  *   カメラも一緒に下を向く（実効的な俯角が増える）ので符号を反転して足す。
  * - roll: 画像面内の回転として扱う（ロールはカメラの光軸まわりの回転にほぼ
  *   一致するため、画像を principal point 中心に回すだけで近似できる）。
- *   カメラが右に傾く（roll 負）と、写真の一般則どおり像は反時計回りに回って
- *   見える——回転角は `−vs.roll`。**pitch/roll は独立に合成する近似**
+ *   カメラが右に傾く（roll 正）と、写真の一般則どおり像は反時計回りに回って
+ *   見える——回転角は `+vs.roll`。**pitch/roll は独立に合成する近似**
  *   （厳密な3D外部パラメータではない。もともと未校正の暫定ガイドなので、
  *   このクラスの近似で十分と判断している）。
  * - IMU が無効（`imu_ok=false`）な間は 0 として扱い、固定値だけで描く。
@@ -509,9 +509,9 @@ function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'fro
     return [cx - (y * f) / zc, principalY + (yc * f) / zc]
   }
 
-  // roll: 画像面内の回転として近似する。右が沈む（dRoll 負）とカメラも右に傾き、
+  // roll: 画像面内の回転として近似する。右が沈む（dRoll 正）とカメラも右に傾き、
   // 写真の一般則どおり像は principal point を中心に反時計回りへ回って見える
-  const rollImg = -dRoll
+  const rollImg = dRoll
   const cr = Math.cos(rollImg)
   const sr = Math.sin(rollImg)
   const rotateRoll = (p: [number, number]): [number, number] => {

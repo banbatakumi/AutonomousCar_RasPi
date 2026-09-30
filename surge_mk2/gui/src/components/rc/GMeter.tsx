@@ -46,9 +46,11 @@ import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
 import { gForce } from '../../format'
 
-/** 実機で合わせる符号。前進加速 → 上、右旋回 → 右 になるように */
+/** 前進加速 → 上、右旋回 → 右 になるように。`accel` は X=前・Y=左が正
+ * （ファームは2026-10-01以降。それ以前の実機記録は x/y が逆＝後方・右が正）。
+ * Y は左が正なので、右を正にするため反転する */
 const AX_SIGN = 1
-const AY_SIGN = 1
+const AY_SIGN = -1
 
 /** 外周が何 G か。ミニカーの実力に対して広すぎると点が真ん中で動かない */
 const FULL_G = 0.6

@@ -43,11 +43,11 @@ export type VehicleState = {
   wheel_speed: [number, number, number, number]
   /** 前輪の累積走行距離 [m] [FL, FR]。**累積値・射影なし** */
   odom_dist: [number, number]
-  /** [m/s²] x,y,z */
+  /** [m/s²] x(前)・y(左)・z(上)。重力込み（2026-10-01以降。以前の記録は x/y が逆） */
   accel: [number, number, number]
-  /** [rad] 重力で補正済み。ドリフトしない */
+  /** [rad] 機首上げが正。重力で補正済み。ドリフトしない */
   pitch: number
-  /** [rad] 同上 */
+  /** [rad] 右傾き（右が沈む）が正。同上 */
   roll: number
   /** [A] RL,RR,ST */
   motor_current: [number, number, number]

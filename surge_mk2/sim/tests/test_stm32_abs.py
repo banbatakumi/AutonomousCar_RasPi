@@ -54,5 +54,27 @@ class TestSimAbsFlag(unittest.TestCase):
         self.assertFalse(capped)
 
 
+class TestSimTorqueCmd(unittest.TestCase):
+    """テレメトリの `torque_cmd` は制動中に負になる（GUI 車体図の制動ラインの入力）。"""
+
+    def torque_after(self, nm: float, brake: bool) -> float:
+        sim = VirtualStm32(SPEC, Course.load(COURSE), SimParams())
+        t0 = 1_000_000_000
+        sim.start(t0)
+        sim._cmd_ns = t0
+        sim._input = DriveInput(armed=True, brake=brake, brake_torque=nm, target_speed=0.0)
+        sim.vehicle.speed = 2.0 if brake else 0.0
+        sim._substep(0.001)
+        return sim._telemetry(t0).torque_cmd[0] * 0.0001
+
+    def test_brake_is_negative_and_scales_with_torque(self):
+        weak, strong = self.torque_after(0.04, True), self.torque_after(0.15, True)
+        self.assertLess(strong, weak)
+        self.assertLess(weak, -0.02)
+
+    def test_standing_still_is_not_braking(self):
+        self.assertGreater(self.torque_after(0.0, False), -0.02)
+
+
 if __name__ == "__main__":
     unittest.main()

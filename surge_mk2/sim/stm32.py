@@ -365,7 +365,20 @@ class VirtualStm32:
             p.gyro_bias_dps
             + (self.rng.gauss(0.0, p.gyro_noise_dps) if p.gyro_noise_dps > 0 else 0.0))
         load = abs(v.speed) / 3.0                       # 0..1 の目安
-        torque = v.cmd.target_torque if v.cmd.torque_mode else load * 0.05
+        # 1輪あたりの指令トルク（正=駆動 / 負=制動）。実機は TC・ABS 適用後の最終指令値を返す。
+        # 縦加速度から `vehicle.brake_decel`/`next_speed` の式を逆算して求める（GUI の
+        # 制動表示・トルクゲージが実機と同じ向きで動くように。以前は常に正の見せかけ値だった）
+        if v.cmd.torque_mode:
+            torque = v.cmd.target_torque
+        else:
+            sp = self.spec
+            a = v.accel_x
+            if a < 0 and sp.brake_decel_per_nm > 1e-6:
+                # 実測の「制動トルク→減速度」（`brake_decel_per_nm`）の逆算。転がり抵抗ぶんは差し引く
+                torque = -max(0.0, -a - sp.rolling_resistance) / sp.brake_decel_per_nm
+            else:
+                torque = a * sp.mass * sp.wheel_radius / max(1e-6, sp.drive_ratio)
+            torque = max(-DRIVE_MAX_TORQUE_NM, min(DRIVE_MAX_TORQUE_NM, torque))
         cur = torque / max(1e-3, self.spec.wheel_radius) * 0.5
         vd = 11.2 - 1.6 * load - 0.05 * self.rng.random()
         vs = 8.2 - 0.1 * self.rng.random()
@@ -384,6 +397,8 @@ class VirtualStm32:
             steer_cmd_echo=_q("steer_cmd_echo", v.steer_ref, -32768, 32767),
             wheel_speed=[_q("wheel_speed", w, -32768, 32767) for w in v.wheel_speed_measured],
             odom_dist=[_q("odom_dist", d, -(1 << 31), (1 << 31) - 1) for d in odom],
+            # 機体座標系は X=前・Y=左・Z=上（前進加速で accel_x>0、左旋回で accel_y>0）。
+            # ファームは2026-10-01に `ChipToBody` を直してこの向きで出す（以前は X/Y が逆だった）
             accel_x=_q("accel_x", v.accel_x, -32768, 32767),
             accel_y=_q("accel_y", v.accel_lateral, -32768, 32767),
             accel_z=_q("accel_z", 9.81, -32768, 32767),
