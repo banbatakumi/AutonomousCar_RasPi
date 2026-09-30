@@ -219,7 +219,13 @@ class LocalMap:
         col, row = self.grid.to_cell(wx, wy)
         h, w = self.grid.height, self.grid.width
         ok = (col >= 0) & (col < w) & (row >= 0) & (row < h)
-        self._fresh = np.zeros((h, w), dtype=bool)
+        # **配列を使い回す。** 毎周期 `np.zeros((h, w))` を作り直すと、
+        # 600×600 の確保・ゼロ埋めが10Hzで発生する。形が変わらない限り
+        # 既存配列を `fill(False)` で再利用すれば確保が要らない
+        if self._fresh is None or self._fresh.shape != (h, w):
+            self._fresh = np.zeros((h, w), dtype=bool)
+        else:
+            self._fresh.fill(False)
         self._fresh[row[ok], col[ok]] = True
         self._fresh_seq = self.grid.seq
 

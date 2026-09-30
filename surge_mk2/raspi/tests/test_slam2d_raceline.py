@@ -306,6 +306,47 @@ class TestSlam2dNavDistance(unittest.TestCase):
         self.assertAlmostEqual(nav.distance, 5.0)
 
 
+class TestSlam2dNavDeskewScanCache(unittest.TestCase):
+    """Issue #19: `deskew_scan()`が`update()`の脱スキューを使い回すこと。
+
+    RACEでは`plan()`が`update()`のすぐ後に同じ`scan`を`_detect_obstacles`
+    （`deskew_scan`経由）へも渡す。二重に`deskew_traj`を走らせないための
+    キャッシュが、**同じscanでは同一の点群を返し**、**違うscanでは
+    ちゃんと別の結果を返す**（古い結果を使い回さない）ことを確認する。
+    """
+
+    def test_same_scan_reuses_update_result_identically(self):
+        from raspi.auto._slam2d_nav import Slam2dNav
+
+        nav = Slam2dNav(resolution=0.05, size_m=8.0, lidar_x=0.05, lidar_y=0.0)
+        scan = make_room_scan(1.0, 1.0, 0.0)
+        nav.on_vehicle_state(VehicleState(t_capture=scan.t_capture - 90_000_000,
+                                          speed=0.5, yaw_rate=0.1))
+        nav.on_vehicle_state(VehicleState(t_capture=scan.t_capture,
+                                          speed=0.5, yaw_rate=0.1))
+        nav.update(scan, 0.1, yaw_rate=0.1, speed=0.5)
+
+        cached = nav._fe.last_points
+        self.assertIsNotNone(cached)
+        reused = nav.deskew_scan(scan)
+        # 同一オブジェクト（コピーでなく使い回し）であること
+        self.assertIs(reused, cached)
+
+    def test_different_scan_is_not_reused(self):
+        from raspi.auto._slam2d_nav import Slam2dNav
+
+        nav = Slam2dNav(resolution=0.05, size_m=8.0)
+        scan1 = make_room_scan(1.0, 1.0, 0.0, t0=1_000_000_000)
+        scan2 = make_room_scan(1.5, 1.2, 0.3, t0=1_300_000_000)
+        nav.on_vehicle_state(VehicleState(t_capture=scan1.t_capture, speed=0.3, yaw_rate=0.0))
+        nav.update(scan1, 0.1, yaw_rate=0.0, speed=0.3)
+        after_scan1 = nav._fe.last_points
+
+        pts2 = nav.deskew_scan(scan2)
+        self.assertIsNot(pts2, after_scan1)
+        self.assertNotEqual(pts2.t_ref_ns, after_scan1.t_ref_ns)
+
+
 class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
     """保存済み地図の読み込み（`request_load`）→ `LOCATE`（自己位置復元）→
     `RACE`までの統合テスト。`raspi/auto/mapstore.py`（保存側）と

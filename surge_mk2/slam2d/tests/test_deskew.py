@@ -208,3 +208,82 @@ class TestDeskewTraj(unittest.TestCase):
         raw = self._raw(NS, int(0.1 * NS))
         pts = deskew_traj(raw, TwistBuffer(), max_range=8.0)
         self.assertEqual(len(pts), len(raw))
+
+
+def _poses_loop_reference(buf: TwistBuffer, t_ref_ns: int, *,
+                          t_lo: int | None = None, t_hi: int | None = None):
+    """`TwistBuffer.poses()`のベクトル化前の実装（Issue #19 の等価性確認用）。
+
+    1サンプルごとに`Twist2D`/`integrate_twist`/`Pose2D`を作る Python ループ。
+    現行の`poses()`（`cumsum`によるベクトル化版）と数値が一致することを
+    `TestPosesVectorizedMatchesLoop`で確認する。
+    """
+    from slam2d.core.deskew import _interp_pose
+    from slam2d.core.types import integrate_twist
+
+    lo = min(t_ref_ns, t_lo if t_lo is not None else t_ref_ns)
+    hi = max(t_ref_ns, t_hi if t_hi is not None else t_ref_ns)
+    t, vxs, vys, ws = buf._samples(lo, hi)
+    n = t.size
+    x = np.zeros(n); y = np.zeros(n); yaw = np.zeros(n)
+    for i in range(1, n):
+        dt = (t[i] - t[i - 1]) / NS
+        d = integrate_twist(Twist2D(float(vxs[i - 1]), float(vys[i - 1]), float(ws[i - 1])), dt)
+        c, s = math.cos(yaw[i - 1]), math.sin(yaw[i - 1])
+        x[i] = x[i - 1] + c * d.x - s * d.y
+        y[i] = y[i - 1] + s * d.x + c * d.y
+        yaw[i] = yaw[i - 1] + d.yaw
+    rx, ry, ryaw = _interp_pose(t, x, y, yaw, np.array([t_ref_ns], dtype=np.int64))
+    c, s = math.cos(-ryaw[0]), math.sin(-ryaw[0])
+    dx, dy = x - rx[0], y - ry[0]
+    return t, c * dx - s * dy, s * dx + c * dy, yaw - ryaw[0]
+
+
+class TestPosesVectorizedMatchesLoop(unittest.TestCase):
+    """Issue #19: `poses()`のベクトル化版とループ版の数値的等価性。
+
+    許容誤差は`float64`の丸め誤差だけを許す `1e-9`（`cumsum`と逐次加算は
+    加算順序が同じなので理論上は完全一致するが、`np.where`両辺を評価する
+    ぶんNaN/Infを経由する丸めが混ざりうるため、余裕を持たせてある）。
+    """
+
+    def _buf(self, samples, t0=NS):
+        b = TwistBuffer()
+        for i, (dt, vx, vy, w) in enumerate(samples):
+            b.add(t0 + int(dt * NS), Twist2D(vx, vy, w))
+        return b
+
+    def _assert_matches(self, buf, t_ref, t_lo=None, t_hi=None):
+        t_a, x_a, y_a, yaw_a = buf.poses(t_ref, t_lo=t_lo, t_hi=t_hi)
+        t_b, x_b, y_b, yaw_b = _poses_loop_reference(buf, t_ref, t_lo=t_lo, t_hi=t_hi)
+        np.testing.assert_array_equal(t_a, t_b)
+        self.assertLess(float(np.max(np.abs(x_a - x_b))), 1e-9)
+        self.assertLess(float(np.max(np.abs(y_a - y_b))), 1e-9)
+        self.assertLess(float(np.max(np.abs(yaw_a - yaw_b))), 1e-9)
+
+    def test_varying_yaw_rate_and_lateral_speed(self):
+        samples = [(0.00 * i, 1.5 + 0.3 * math.sin(i), 0.2 * math.cos(i * 0.5),
+                    -1.0 + 0.4 * i) for i in range(40)]
+        samples = [(i * 0.02, vx, vy, w) for i, (_, vx, vy, w) in enumerate(samples)]
+        buf = self._buf(samples)
+        t_ref = NS + int(0.78 * NS)
+        self._assert_matches(buf, t_ref, t_lo=NS, t_hi=t_ref)
+
+    def test_near_zero_yaw_rate_straight_branch(self):
+        # |w| が _ARC_EPS をまたぐ値を混ぜて分岐の境界を突く
+        samples = [(i * 0.02, 1.0, 0.0, w)
+                   for i, w in enumerate([0.0, 1e-5, -1e-5, 1e-3, 0.0, 5.0, -5.0, 0.0])]
+        buf = self._buf(samples)
+        t_ref = NS + int(0.14 * NS)
+        self._assert_matches(buf, t_ref, t_lo=NS, t_hi=t_ref)
+
+    def test_extrapolated_endpoints(self):
+        samples = [(i * 0.02, 2.0, -0.5, 1.2) for i in range(6)]
+        buf = self._buf(samples)
+        # buf の範囲外まで挟む（端を一定twistで外挿する経路を通す）
+        self._assert_matches(buf, NS + int(0.2 * NS), t_lo=NS - int(0.05 * NS),
+                             t_hi=NS + int(0.2 * NS))
+
+    def test_single_sample_range(self):
+        buf = self._buf([(0.0, 1.0, 0.0, 0.5)])
+        self._assert_matches(buf, NS, t_lo=NS, t_hi=NS)

@@ -24,7 +24,7 @@ from slam2d.core.frontend import Frontend, FrontendConfig  # noqa: E402
 from slam2d.core.grid import OccGrid  # noqa: E402
 from slam2d.core.motion import ConstantVelocityModel, ExternalTwistModel  # noqa: E402
 from slam2d.core.types import Pose2D, Twist2D, compose  # noqa: E402
-from slam2d.tests.helpers import ROOM, make_raw_scan  # noqa: E402
+from slam2d.tests.helpers import ROOM, make_raw_scan, make_room_points  # noqa: E402
 
 
 def _make_frontend(motion=None, **config_kwargs) -> Frontend:
@@ -119,6 +119,77 @@ class TestLost(unittest.TestCase):
         self.assertFalse(u.lost)
         self.assertAlmostEqual(fe.pose.x, 0.19, delta=0.05)
         self.assertAlmostEqual(fe.pose.y, 0.0, delta=0.05)
+
+
+def _relocalize_single_stage(fe: Frontend, field_, hx, hy, center: Pose2D):
+    """`Frontend._relocalize()`の粗→中→細（Issue #17）にする前の1段総当たり。
+
+    等価性テスト専用のリファレンス実装（削除・移動しないこと）。
+    """
+    from slam2d.core.register import register, search
+    cfg = fe.config
+    sr = search(field_, hx, hy, center, trans=cfg.reloc_trans, rot=cfg.reloc_rot,
+               trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
+    if sr.score <= 0.0:
+        return None
+    if sr.second >= cfg.reloc_ambiguity * sr.score:
+        return None
+    return register(field_, hx, hy, sr.pose, config=cfg.register)
+
+
+class TestRelocalizeCoarseToFine(unittest.TestCase):
+    """Issue #17: `_relocalize()`を粗→中→細の3段にした変更の安全性。
+
+    **精度は落とさず、速くなっている**ことを、凍結した部屋の地図に対して
+    複数の見失い姿勢（真の姿勢から±0.35m・±12°ずらした初期値）から探し直し、
+    旧・単段総当たり版と比べて確認する。1段版が失敗する（`None`を返す）
+    ケースで3段版が成功するのは許容する（探索範囲・曖昧さ判定は同じで、
+    段を分けたぶん実質的な刻みが細かくなる場面があるため）。逆に**1段版が
+    成功したのに3段版が失敗する、または位置誤差が明確に悪化するのは不可**。
+    """
+
+    def _frozen_grid(self) -> OccGrid:
+        grid = OccGrid(resolution=0.05, size_m=10.0, min_hits=2, min_seen=2)
+        for (x, y, yaw) in [(1.0, 1.0, 0.0), (3.0, 1.0, 0.3), (5.0, 1.0, 0.6),
+                            (5.0, 3.0, 1.2), (3.0, 3.0, 2.0), (1.0, 3.0, 2.8),
+                            (1.5, 2.0, 1.5), (4.0, 2.0, -0.5)]:
+            grid.integrate(make_room_points(x, y, yaw, segs=ROOM), Pose2D(x, y, yaw))
+        grid.freeze()
+        return grid
+
+    def test_matches_or_improves_on_single_stage_search(self):
+        grid = self._frozen_grid()
+        rng = np.random.default_rng(0)
+        true_poses = [(2.0, 1.5, 0.2), (4.5, 1.5, 1.0), (2.5, 3.3, 2.5),
+                     (1.2, 2.5, -1.0), (4.0, 2.8, 0.7)]
+
+        both_recovered_err = []
+        old_only = 0
+        for (tx, ty, tyaw) in true_poses:
+            pts = make_room_points(tx, ty, tyaw, segs=ROOM, noise_sigma=0.01, rng=rng)
+            for _ in range(3):
+                center = Pose2D(tx + rng.uniform(-0.35, 0.35), ty + rng.uniform(-0.35, 0.35),
+                               tyaw + rng.uniform(-math.radians(12), math.radians(12)))
+                fe = _make_frontend()
+                fe.grid = grid
+                field_ = fe._field(center)
+
+                old = _relocalize_single_stage(fe, field_, pts.x, pts.y, center)
+                new = fe._relocalize(field_, pts.x, pts.y, center)
+
+                if old is not None and new is None:
+                    old_only += 1
+                if old is not None and new is not None:
+                    old_err = math.hypot(old.pose.x - tx, old.pose.y - ty)
+                    new_err = math.hypot(new.pose.x - tx, new.pose.y - ty)
+                    both_recovered_err.append((old_err, new_err))
+
+        self.assertEqual(old_only, 0,
+                         "3段探索が、1段総当たりでは復帰できていたケースを落とした")
+        for old_err, new_err in both_recovered_err:
+            # 位置合わせ結果が違う局所解に収束しても数mm差までは許容する
+            self.assertLess(new_err, max(old_err * 1.5, old_err + 0.01),
+                            f"old={old_err:.4f}m new={new_err:.4f}m")
 
 
 class TestFrozenMap(unittest.TestCase):

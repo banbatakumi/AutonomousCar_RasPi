@@ -37,7 +37,8 @@ import numpy as np
 
 import math
 
-from .types import Pose2D, RawScan, ScanPoints, Twist2D, integrate_twist
+from .types import Pose2D, RawScan, ScanPoints, Twist2D
+from .types import _STRAIGHT_EPS as _ARC_EPS
 
 __all__ = ["deskew", "deskew_traj", "truncate", "TwistBuffer"]
 
@@ -189,20 +190,37 @@ class TwistBuffer:
         `t_ref`での姿勢が原点。`t < t_ref`の姿勢は「そのとき車体はここに居た
         （t_ref の車体座標で）」を表す。`t_lo`/`t_hi`を与えると、その範囲を
         挟むように端を一定 twist で外挿してから積む。
+
+        **ベクトル化版。** `x[i]`は`yaw[i-1]`での回転が挟まる非線形な漸化式
+        だが、`yaw`自体は各区間の`d.yaw`（今回の姿勢に依存しない）の単純な
+        累積和なので先に`cumsum`で作れる。そのあとは各区間の並進を
+        `yaw[i-1]`で回してから`cumsum`するだけで、1サンプルごとに
+        `Twist2D`/`integrate_twist`/`Pose2D`を作る Python ループと同じ結果
+        になる（回転の式は`integrate_twist`と同一。等価性は
+        `slam2d/tests/test_deskew.py`で新旧の最大誤差を確認している）。
         """
         lo = min(t_ref_ns, t_lo if t_lo is not None else t_ref_ns)
         hi = max(t_ref_ns, t_hi if t_hi is not None else t_ref_ns)
         t, vxs, vys, ws = self._samples(lo, hi)
         n = t.size
         x = np.zeros(n); y = np.zeros(n); yaw = np.zeros(n)
-        # 前向きに積み、最後に t_ref 時点の姿勢を引いて基準を移す
-        for i in range(1, n):
-            dt = (t[i] - t[i - 1]) / NS
-            d = integrate_twist(Twist2D(float(vxs[i - 1]), float(vys[i - 1]), float(ws[i - 1])), dt)
-            c, s = math.cos(yaw[i - 1]), math.sin(yaw[i - 1])
-            x[i] = x[i - 1] + c * d.x - s * d.y
-            y[i] = y[i - 1] + s * d.x + c * d.y
-            yaw[i] = yaw[i - 1] + d.yaw
+        if n > 1:
+            dt = np.diff(t).astype(np.float64) / NS
+            v0, vy0, w0 = vxs[:-1], vys[:-1], ws[:-1]
+            straight = np.abs(w0) < _ARC_EPS
+            wt = w0 * dt
+            s, c = np.sin(wt), np.cos(wt)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                arc_dx = (v0 * s + vy0 * (c - 1.0)) / w0
+                arc_dy = (v0 * (1.0 - c) + vy0 * s) / w0
+            ddx = np.where(straight, v0 * dt, arc_dx)
+            ddy = np.where(straight, vy0 * dt, arc_dy)
+            ddyaw = np.where(straight, 0.0, _wrap_angle_vec(wt))
+
+            yaw[1:] = np.cumsum(ddyaw)
+            cp, sp = np.cos(yaw[:-1]), np.sin(yaw[:-1])
+            x[1:] = np.cumsum(cp * ddx - sp * ddy)
+            y[1:] = np.cumsum(sp * ddx + cp * ddy)
         rx, ry, ryaw = _interp_pose(t, x, y, yaw, np.array([t_ref_ns], dtype=np.int64))
         # 基準（t_ref の姿勢）の逆変換を掛ける
         c, s = math.cos(-ryaw[0]), math.sin(-ryaw[0])
@@ -223,6 +241,11 @@ class TwistBuffer:
         dt = max((t1_ns - t0_ns) / NS, 1e-6)
         d = self.delta(t0_ns, t1_ns)
         return Twist2D(d.x / dt, d.y / dt, d.yaw / dt)
+
+
+def _wrap_angle_vec(a: np.ndarray) -> np.ndarray:
+    """`types.wrap_angle`のnumpy版（`(-pi, pi]`へ畳む）。式は同一。"""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def _interp_pose(t: np.ndarray, x: np.ndarray, y: np.ndarray, yaw: np.ndarray,

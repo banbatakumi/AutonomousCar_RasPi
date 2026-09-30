@@ -221,6 +221,11 @@ class Frontend:
         self._behind_seq = -1
         #: 直近の周期に壁の向こうとして外した点の割合（診断）
         self.behind_ratio = 0.0
+        #: 直近`update()`で脱スキューした点群と、その基準時刻。
+        #: 呼び出し側（`raspi/auto/_slam2d_nav.py`の`deskew_scan()`）が
+        #: **同じ点群**を障害物検出・LOCATE用にもう一度脱スキューしたい
+        #: だけのときに使い回せるようにする（Issue #19、二重計算の回避）
+        self.last_points: ScanPoints | None = None
 
     # ── 1周期 ──
 
@@ -251,6 +256,7 @@ class Frontend:
         else:
             pts = deskew(raw, twist, mount_x=cfg.mount_x, mount_y=cfg.mount_y,
                          max_range=cfg.max_range)
+        self.last_points = pts
 
         first = self.updates == 0
         span = dt
@@ -400,17 +406,40 @@ class Frontend:
         return keep
 
     def _relocalize(self, field_: SurfaceMap, hx, hy, center: Pose2D) -> RegisterResult | None:
+        """見失ったときの探し直し。**粗→中→細の3段探索**（Issue #17）。
+
+        以前は ±`reloc_trans`(0.4m)・±`reloc_rot`(15°) を一段で総当たりしていた
+        （21×21×21=9261候補×点数の対応付け、実測59〜65ms）。その間`plan()`は
+        `auto/cmd`の50Hz送信も止まるので`cmd_deadman_ms`(既定150ms)に掛かる。
+
+        `slam2d/backend/loop_detection.py`のループ検出が使っているのと同じ
+        パターン（粗い段は刻み・sigmaを広げて「山のふもと」だけ探し、後段で
+        絞り込む）をそのまま踏襲する。**曖昧さの判定（`reloc_ambiguity`）は
+        従来どおり全域を見る粗い段でやる**——中段・細段は粗い段が見つけた
+        峰の周りしか見ないので、そこで曖昧さを判定すると「近くに競合が無い」
+        としか言えず、離れた場所にある似た形（平行な車線など）を見落とす。
+        """
         cfg = self.config
-        sr = search(field_, hx, hy, center, trans=cfg.reloc_trans, rot=cfg.reloc_rot,
-                    trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
-        if sr.score <= 0.0:
+        coarse_trans_step = max(cfg.reloc_trans_step * 1.5, cfg.reloc_trans / 10.0)
+        coarse_rot_step = max(cfg.reloc_rot_step * 1.5, cfg.reloc_rot / 8.0)
+        coarse = search(field_, hx, hy, center, trans=cfg.reloc_trans, rot=cfg.reloc_rot,
+                        trans_step=coarse_trans_step, rot_step=coarse_rot_step,
+                        sigma=max(0.06, coarse_trans_step * 0.8), max_points=64)
+        if coarse.score <= 0.0:
             return None
-        # ★ 離れた候補が肉薄しているなら飛び移らない。似た形が並ぶコース
-        #   （平行な車線・繰り返しの通路）で、見失った拍子に隣の通路へ
-        #   移ってしまうのを防ぐ。曖昧なときは推測航法のまま進む方が安全
-        if sr.second >= cfg.reloc_ambiguity * sr.score:
+        # ★ 離れた候補が肉薄しているなら飛び移らない（曖昧さの判定は上の docstring 参照）
+        if coarse.second >= cfg.reloc_ambiguity * coarse.score:
             return None
-        return register(field_, hx, hy, sr.pose, config=cfg.register)
+
+        mid = search(field_, hx, hy, coarse.pose,
+                    trans=coarse_trans_step * 1.5, rot=coarse_rot_step * 1.5,
+                    trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step,
+                    sigma=0.05, max_points=96)
+        fine = search(field_, hx, hy, mid.pose,
+                     trans=cfg.reloc_trans_step * 2.0, rot=cfg.reloc_rot_step * 2.0,
+                     trans_step=cfg.reloc_trans_step * 0.5, rot_step=cfg.reloc_rot_step * 0.5,
+                     sigma=0.03, max_points=160)
+        return register(field_, hx, hy, fine.pose, config=cfg.register)
 
     def _field(self, around: Pose2D) -> SurfaceMap | None:
         if self.grid.frozen:

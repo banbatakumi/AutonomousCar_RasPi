@@ -303,10 +303,25 @@ class Slam2dNav:
     def deskew_scan(self, scan: Scan):
         """`scan`を脱スキューする（障害物検出・LOCATE用）。`Frontend`が持っている
         twist の履歴を使うので、`Frontend.update()`内の脱スキューと同じ条件になる。
+
+        **同じスキャンなら`Frontend.update()`の結果を使い回す。** RACEでは
+        `plan()`が`update()`（脱スキュー込み）を呼んだ直後に、同じ`scan`を
+        障害物検出（`_detect_obstacles`）や`_locate()`へも渡している。
+        `raw`の最終点時刻（`t_ref`）が一致すれば同じ点群なので、もう一度
+        `deskew_traj`を走らせない（Issue #19）。mount/max_rangeを構築後に
+        変えるコード経路は無い前提だが、`FrontendConfig`が食い違う場合
+        （評価用の`frontend`上書き等）に備えて一致も確かめる。
         """
         raw = scan_to_raw(scan)
-        buf = self._fe._corrected_twists()
         t = raw.t_point_ns[raw.t_point_ns > 0]
+        cached = self._fe.last_points
+        cfg = self._fe.config
+        if (cached is not None and cached.t_ref_ns and t.size
+                and int(t.max()) == cached.t_ref_ns
+                and cfg.mount_x == self._lidar_x and cfg.mount_y == self._lidar_y
+                and cfg.max_range == self._max_range):
+            return cached
+        buf = self._fe._corrected_twists()
         if buf is not None and t.size and buf.covers(int(t.min()), int(t.max())):
             return deskew_traj(raw, buf, mount_x=self._lidar_x, mount_y=self._lidar_y,
                                max_range=self._max_range)

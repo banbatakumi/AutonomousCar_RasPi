@@ -51,6 +51,9 @@ __all__ = ["OccGrid", "dilate", "pack_trinary", "unpack_trinary"]
 
 #: レイを進める刻み幅を解像度の何倍にするか。1.0 だと斜めのレイがセルを飛ばす
 _STEP_RATIO = 0.5
+#: `_carve` で距離順のレイを束ねる本数。小さいほど無駄なステップは減るが
+#: Python ループの回数が増える。360点程度のスキャンで数十回に収まる値
+_DIST_CHUNK = 48
 #: 回数カウンタの上限。uint16 の飽和で「昔たくさん見た」が固まるのを防ぐ
 _COUNT_MAX = 60000
 #: ★ レイの終端の**手前どれだけを彫らないか**［セル］。
@@ -105,6 +108,11 @@ class OccGrid:
         self._score: np.ndarray | None = None
         self._score_seq = -1
 
+        #: `seq` ごとの読み出し結果のキャッシュ（1周期に何度も呼ばれるため。
+        #: `slam2d/core/grid.py` の `_cached` と同じ方式）
+        self._cache: dict[str, np.ndarray] = {}
+        self._cache_seq = -1
+
     # ── 座標変換 ──
 
     def to_cell(self, x: np.ndarray | float, y: np.ndarray | float):
@@ -143,7 +151,16 @@ class OccGrid:
 
     def _carve(self, ox: float, oy: float,
                wx: np.ndarray, wy: np.ndarray) -> None:
-        """レイの手前を「素通り」として数える。**終端セルは含めない。**"""
+        """レイの手前を「素通り」として数える。**終端セルは含めない。**
+
+        レイを距離順に並べ、**近距離の束ごとに**必要なぶんだけステップを
+        伸ばす（`_DIST_CHUNK` 本ずつ）。以前は全レイを `d.max()` まで
+        一律に伸ばしていたため、近い点しかない周期でも遠い1点に引きずられて
+        巨大な一時配列（例: 360点×1000ステップ）ができていた。**結果は
+        変わらない**——チャンクを分けても各レイの `t` の範囲は同じで、
+        `ok` マスクの判定条件（`t < d - backoff`）もそのまま使うため、
+        不要な遠いステップを作らないだけ。
+        """
         dx = wx - ox
         dy = wy - oy
         d = np.hypot(dx, dy)
@@ -153,17 +170,28 @@ class OccGrid:
         dx, dy, d = dx[live] / d[live], dy[live] / d[live], d[live]
 
         step = self.resolution * _STEP_RATIO
-        n_steps = max(1, int(np.ceil(float(d.max()) / step)))
-        t = (np.arange(1, n_steps + 1, dtype=np.float32) * step)[None, :]
+        order = np.argsort(d)
+        dx, dy, d = dx[order], dy[order], d[order]
 
-        col, row = self.to_cell(ox + dx[:, None] * t, oy + dy[:, None] * t)
-        ok = self.inside(col, row)
-        # 終端セルの手前まで。**終端は壁かもしれないので空きにしない**（`_END_BACKOFF`）
-        ok &= t < (d[:, None] - self.resolution * _END_BACKOFF)
+        rows: list[np.ndarray] = []
+        cols: list[np.ndarray] = []
+        n = d.size
+        for start in range(0, n, _DIST_CHUNK):
+            end = min(start + _DIST_CHUNK, n)
+            dd = d[start:end]
+            n_steps = max(1, int(np.ceil(float(dd[-1]) / step)))
+            t = (np.arange(1, n_steps + 1, dtype=np.float32) * step)[None, :]
 
-        flat = row.astype(np.int64) * self.width + col
-        self.out_of_bounds += int((~self.inside(col, row)).all(axis=1).sum())
-        self._add(self.misses, flat[ok])
+            col, row = self.to_cell(ox + dx[start:end, None] * t,
+                                     oy + dy[start:end, None] * t)
+            ok = self.inside(col, row)
+            self.out_of_bounds += int((~ok).all(axis=1).sum())
+            # 終端セルの手前まで。**終端は壁かもしれないので空きにしない**（`_END_BACKOFF`）
+            ok &= t < (dd[:, None] - self.resolution * _END_BACKOFF)
+            rows.append(row[ok])
+            cols.append(col[ok])
+
+        self._bump(self.misses, np.concatenate(rows), np.concatenate(cols))
 
     def _mark(self, wx: np.ndarray, wy: np.ndarray) -> None:
         """終端に壁を打つ。"""
@@ -171,17 +199,26 @@ class OccGrid:
             return
         col, row = self.to_cell(wx, wy)
         ok = self.inside(col, row)
-        self._add(self.hits, (row[ok].astype(np.int64) * self.width + col[ok]))
+        self._bump(self.hits, row[ok], col[ok])
 
-    def _add(self, target: np.ndarray, flat: np.ndarray) -> None:
-        """該当セルを **1 だけ**増やす。**1周で何点落ちても +1**（docstring 参照）。"""
-        if flat.size == 0:
+    def _bump(self, target: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> None:
+        """該当セルを **1 だけ**増やす。**1周で何点落ちても +1**（docstring 参照）。
+
+        触ったセルを囲む矩形の中だけで数える（`slam2d/core/grid.py` の
+        `_bump` を移植）。格子全体に対する `bincount` は格子の大きさに
+        比例するコストが1周ごとに掛かる。矩形はレイ1本ぶんの広がりしか
+        ないので、実質は点の数に比例する。
+        """
+        if rows.size == 0:
             return
-        counts = np.bincount(flat, minlength=self.width * self.height)
-        np.minimum(counts, 1, out=counts)
-        acc = target.reshape(-1).astype(np.int32) + counts.astype(np.int32)
-        np.clip(acc, 0, _COUNT_MAX, out=acc)
-        target[:] = acc.astype(np.uint16).reshape(target.shape)
+        r0, r1 = int(rows.min()), int(rows.max())
+        c0, c1 = int(cols.min()), int(cols.max())
+        h, w = r1 - r0 + 1, c1 - c0 + 1
+        flat = (rows - r0) * w + (cols - c0)
+        touched = np.bincount(flat, minlength=w * h).reshape(h, w) > 0
+        sub = target[r0:r1 + 1, c0:c1 + 1]
+        # `_COUNT_MAX` で頭打ち（uint16 の飽和で「昔たくさん見た」が固まるのを防ぐ）
+        np.add(sub, touched, out=sub, where=sub < _COUNT_MAX, casting="unsafe")
 
     def freeze(self) -> None:
         """地図を確定させる。以降 `integrate()` は無視される。"""
@@ -190,17 +227,40 @@ class OccGrid:
 
     # ── 読み出し ──
 
+    def _cached(self, key: str, make):
+        """`seq` が変わるまで読み出し結果を使い回す（`slam2d/core/grid.py` と同じ方式）。
+
+        1周期に `wall_mask()`/`known_free_mask()` は何度も呼ばれる
+        （`score_map`・`refresh`・障害物検出など）ので、毎回全格子を
+        作り直すのは無駄。返す配列は**キャッシュなので書き換えないこと**。
+        """
+        if self._cache_seq != self.seq:
+            self._cache = {}
+            self._cache_seq = self.seq
+        v = self._cache.get(key)
+        if v is None:
+            v = make()
+            v.setflags(write=False)
+            self._cache[key] = v
+        return v
+
     @property
     def seen(self) -> np.ndarray:
         """観測回数（ヒット＋ミス）。int32 に伸ばして返す（uint16 の引き算は罠）。"""
-        return self.hits.astype(np.int32) + self.misses.astype(np.int32)
+        return self._cached(
+            "seen", lambda: self.hits.astype(np.int32) + self.misses.astype(np.int32))
 
     def wall_mask(self) -> np.ndarray:
-        """壁として確定したセル。**`hits >= min_hits` が動く物を弾いている。**"""
-        seen = self.seen
-        with np.errstate(invalid="ignore", divide="ignore"):
-            ratio = np.where(seen > 0, self.hits / np.maximum(seen, 1), 0.0)
-        return (self.hits >= self.min_hits) & (ratio >= 0.5)
+        """壁として確定したセル。**`hits >= min_hits` が動く物を弾いている。**
+
+        比の判定は `hits / seen >= 0.5` と数学的に同値な整数演算
+        `hits * 2 >= seen` にしてある（`hits >= min_hits >= 1` の下では
+        必ず `seen > 0` なので、ゼロ除算よけの分岐は要らない）。
+        """
+        def make():
+            h = self.hits.astype(np.int32)
+            return (h >= self.min_hits) & (h * 2 >= self.seen)
+        return self._cached("wall", make)
 
     def known_free_mask(self) -> np.ndarray:
         """**空きだと確信できる**セル。未知（見ていない）とは区別する。
@@ -208,10 +268,10 @@ class OccGrid:
         動的障害物の検出はここだけを使う。未知セルを空き扱いにすると、
         1周目に見えなかった場所を通るたびに「障害物だ」と言い出す。
         """
-        seen = self.seen
-        with np.errstate(invalid="ignore", divide="ignore"):
-            ratio = np.where(seen > 0, self.hits / np.maximum(seen, 1), 1.0)
-        return (seen >= self.min_seen) & (ratio < 0.5)
+        def make():
+            h = self.hits.astype(np.int32)
+            return (self.seen >= self.min_seen) & (h * 2 < self.seen)
+        return self._cached("free", make)
 
     def trinary(self) -> np.ndarray:
         """GUI へ送る 3 値の地図（0=未知 1=空き 2=占有）。"""
