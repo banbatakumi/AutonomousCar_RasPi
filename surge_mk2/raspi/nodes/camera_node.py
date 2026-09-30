@@ -223,6 +223,11 @@ class CameraWorker(threading.Thread):
                 if not self._enabled:
                     # **止めている間は capture_request を呼ばない。** `Picamera2.stop()`
                     # 済みなので呼んでも取れない上、CPU を無駄に回さないため
+                    #
+                    # **ハング検出（`CameraNode.run`）に「止めているだけ」と伝える。** これを
+                    # 更新しないと `last_grab_ns` が止まったまま `_CAPTURE_HANG_S` を過ぎ、
+                    # 後カメラを OFF にしている間（disarm 中の既定）にノード全体が落ちる
+                    self.stats.last_grab_ns = time.monotonic_ns()
                     time.sleep(0.2)
                     continue
                 try:
@@ -256,6 +261,8 @@ class CameraWorker(threading.Thread):
             self._enabled = enabled
             if enabled:
                 self.cam.start()
+                # 再開直後の最初の1枚が来るまでをハング扱いしない
+                self.stats.last_grab_ns = time.monotonic_ns()
             else:
                 self.cam.stop()
             # stop/start で picamera2 の FrameCount が 0 に戻ることがある。

@@ -155,3 +155,33 @@ class TestCameraNodeHangDetection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDisabledWorkerIsNotHung(unittest.TestCase):
+    """後カメラを OFF にしている間（disarm 中の既定）は `_grab()` が呼ばれない。
+    それを「ハング」と誤検出してノードごと落ちる不具合（2026-10-01）の回帰テスト。
+    """
+
+    def test_disabled_worker_keeps_last_grab_ns_fresh(self):
+        from raspi.nodes.camera_node import CameraWorker
+
+        w = CameraWorker.__new__(CameraWorker)
+        threading.Thread.__init__(w, daemon=True)
+        w.idx = 1
+        w.error = None
+        w.stats = CamStats()
+        w.stats.last_grab_ns = time.monotonic_ns() - int(10e9)   # 10秒止まっている扱い
+        w.fps = 10.0
+        w._cfg_lock = threading.Lock()
+        w._pending_fps = None
+        w._pending_enabled = None
+        w._enabled = False
+        w._running = False
+        w.start()
+        try:
+            time.sleep(0.5)
+            age_s = (time.monotonic_ns() - w.stats.last_grab_ns) / 1e9
+        finally:
+            w._running = False
+            w.join(timeout=2.0)
+        self.assertLess(age_s, 1.0, "OFF 中でも last_grab_ns が更新されていない")
