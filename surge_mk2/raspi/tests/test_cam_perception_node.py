@@ -108,7 +108,8 @@ class TestCamPerceptionNodeProcessFrame(unittest.TestCase):
 
         open_frame = np.full((240, 320, 3), 255, dtype=np.uint8)
         blocked_frame = open_frame.copy()
-        blocked_frame[140:200, 130:190] = 0                      # 画面下寄り中央＝正面近く
+        # 画面下端寄り中央＝正面近く。床が映るのは地平線（この画では行212付近）より下だけ
+        blocked_frame[215:239, 130:190] = 0
 
         st_open = node.process_frame(open_frame, seq=1)
         st_blocked = node.process_frame(blocked_frame, seq=2)

@@ -31,14 +31,16 @@
 あると、形状フィルタだけでは区別できない**——これは実コース以外での検証が
 原理的に当たらない領域なので、最終確認は実コース上で行うこと。
 
-## `near_band` の既定値は車体の映り込みを避けてある
+## 帯は「地面の距離」で決める（`near_range` / `far_range`）
 
-`config/vehicle.toml` の `cam_front.bottom_crop`（ISPのScalerCropで下端を
-25%カット）だけでは車体（E-Stopボタン等）が画角の下端に残る（実車確認、
-2026-09-03）。**車体はカメラに対して固定なので、車体の姿勢（ピッチ）が
-変わっても画面内の位置はほぼ動かない**——`near_band` を車体が写らない範囲に
-静的に収めれば恒久的に有効。旧既定 `(0.80, 1.00)` は車体をほぼ丸ごと含んで
-いたため `(0.65, 0.84)` に変更した。
+帯を画面高さの割合で決めると、`bottom_crop`・レンズ・取付高さ・ピッチが変わるたびに
+地面でない行（空・車体）へ当たる（160° 広角への交換で `far_band` が地平線より上になった、
+2026-10-03）。そこで既定は **base_link 前方の距離 `(手前, 奥)` [m]** で持ち、
+`ground_to_pixel()` で画像の行へ換算する（校正値・取付位置・`bottom_crop` が効く）。
+車体はカメラに対して固定でボンネットの上端より下に写るので、`near_range` の手前側を
+その行より奥（距離が大きい側）に置けば車体は入らない。
+`near_band` / `far_band`（画面高さ割合）を明示すると、距離指定より優先する。
+換算は静的な取付姿勢で行う（走行中のピッチ補正は、行→地面の逆投影側で効く）。
 
 ## `line_trace` が選ばれている間だけ認識する（IDLE/ACTIVE）
 
@@ -76,7 +78,12 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_LINE_CAM,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.ipm import CameraExtrinsics, pixel_to_ground, vehicle_camera_intrinsics  # noqa: E402
+from raspi.nav.ipm import (  # noqa: E402
+    CameraExtrinsics,
+    ground_to_pixel,
+    pixel_to_ground,
+    vehicle_camera_intrinsics,
+)
 
 __all__ = ["LinePerceptionNode", "white_mask"]
 
@@ -175,8 +182,10 @@ class LinePerceptionNode:
 
     def __init__(self, *, vehicle: Vehicle | None = None,
                 min_brightness: int = 170, max_chroma: int = 40,
-                near_band: tuple[float, float] = (0.65, 0.84),
-                far_band: tuple[float, float] = (0.45, 0.63)) -> None:
+                near_range: tuple[float, float] = (1.05, 1.5),
+                far_range: tuple[float, float] = (1.6, 3.5),
+                near_band: tuple[float, float] | None = None,
+                far_band: tuple[float, float] | None = None) -> None:
         self.vehicle = vehicle or Vehicle.load()
         v = self.vehicle
         #: 地面からの高さは base_link の z をそのまま使う近似（`ipm.py` docstring参照）
@@ -185,9 +194,14 @@ class LinePerceptionNode:
                                          yaw=v.cam_front_yaw)
         self.min_brightness = min_brightness
         self.max_chroma = max_chroma
-        #: 画面高さに対する割合 `(top, bottom)`。0=最上段、1=最下段
+        #: 帯の指定。既定は base_link 前方の距離 `(手前, 奥)` [m]（モジュール docstring 参照）
+        self.near_range = near_range
+        self.far_range = far_range
+        #: 画面高さに対する割合 `(top, bottom)`（0=最上段、1=最下段）。**明示したときだけ**
+        #: 距離指定より優先する（`None` なら距離から換算する）
         self.near_band = near_band
         self.far_band = far_band
+        self._bands_cache: dict[tuple[int, int], tuple[tuple[float, float], tuple[float, float]]] = {}
 
         self._reader = FrameReader()
         self._running = False
@@ -203,6 +217,29 @@ class LinePerceptionNode:
 
     def close(self) -> None:
         self._reader.close()
+
+    def _bands(self, w: int, h: int) -> tuple[tuple[float, float], tuple[float, float]]:
+        """`(near, far)` の帯を画面高さ割合 `(top, bottom)` で返す。`(w, h)` ごとに1回だけ換算する。"""
+        key = (w, h)
+        cached = self._bands_cache.get(key)
+        if cached is not None:
+            return cached
+        intr = vehicle_camera_intrinsics(self.vehicle, "front", w, h)
+
+        def from_range(rng: tuple[float, float]) -> tuple[float, float]:
+            rows = []
+            for d in rng:
+                uv = ground_to_pixel(d, self.base_ext.y, intr, self.base_ext)
+                rows.append(None if uv is None else uv[1])
+            if None in rows:                        # 地平線より上＝その距離は映らない
+                return (0.0, 0.0)
+            top, bottom = sorted(rows)
+            return (min(max(top / h, 0.0), 1.0), min(max(bottom / h, 0.0), 1.0))
+
+        near = self.near_band if self.near_band is not None else from_range(self.near_range)
+        far = self.far_band if self.far_band is not None else from_range(self.far_range)
+        self._bands_cache[key] = (near, far)
+        return near, far
 
     # ── 1周期ぶんの処理（純粋関数。バスを知らない） ──
 
@@ -228,7 +265,8 @@ class LinePerceptionNode:
         coverages: list[float] = []
         max_width_px = max(1, int(_MAX_LINE_WIDTH_FRAC * w))
 
-        near = _band_centroid(mask, int(self.near_band[0] * h), int(self.near_band[1] * h),
+        near_band, far_band = self._bands(w, h)
+        near = _band_centroid(mask, int(near_band[0] * h), int(near_band[1] * h),
                               max_width_px)
         if near is not None:
             u, vpix, frac = near
@@ -238,7 +276,7 @@ class LinePerceptionNode:
                 st.near_x, st.near_y = g
                 coverages.append(frac)
 
-        far = _band_centroid(mask, int(self.far_band[0] * h), int(self.far_band[1] * h),
+        far = _band_centroid(mask, int(far_band[0] * h), int(far_band[1] * h),
                              max_width_px)
         if far is not None:
             u, vpix, frac = far
@@ -350,10 +388,14 @@ def main() -> int:
                     help="RGB各chの最小値がこれ未満なら白ではない")
     ap.add_argument("--max-chroma", type=int, default=40,
                     help="RGBの最大−最小がこれを超えたら色が付いている＝白ではない")
-    ap.add_argument("--near-band", default="0.65,0.84",
-                    help="近傍帯の画面高さ割合 top,bottom（既定は車体の映り込みを避けた範囲）")
-    ap.add_argument("--far-band", default="0.45,0.63",
-                    help="遠方帯の画面高さ割合 top,bottom")
+    ap.add_argument("--near-range", default="1.05,1.5",
+                    help="近傍帯の base_link 前方距離 手前,奥 [m]（既定。車体のボンネットより奥）")
+    ap.add_argument("--far-range", default="1.6,3.5",
+                    help="遠方帯の base_link 前方距離 手前,奥 [m]")
+    ap.add_argument("--near-band", default=None,
+                    help="近傍帯の画面高さ割合 top,bottom。指定すると --near-range より優先")
+    ap.add_argument("--far-band", default=None,
+                    help="遠方帯の画面高さ割合 top,bottom。指定すると --far-range より優先")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
@@ -361,8 +403,10 @@ def main() -> int:
 
     node = LinePerceptionNode(min_brightness=args.min_brightness,
                               max_chroma=args.max_chroma,
-                              near_band=_parse_band(args.near_band),
-                              far_band=_parse_band(args.far_band))
+                              near_range=_parse_band(args.near_range),
+                              far_range=_parse_band(args.far_range),
+                              near_band=_parse_band(args.near_band) if args.near_band else None,
+                              far_band=_parse_band(args.far_band) if args.far_band else None)
 
     pub = Publisher("line_perception")
     sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,

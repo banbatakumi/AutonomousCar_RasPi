@@ -24,6 +24,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_LINE_CAM,
     TOPIC_VEHICLE_STATE,
 )
+from raspi.nav.ipm import vehicle_camera_intrinsics  # noqa: E402
 from raspi.nodes.line_perception_node import (  # noqa: E402
     LinePerceptionNode,
     white_mask,
@@ -135,6 +136,26 @@ class TestWideBlobDoesNotOverrideThinLine(unittest.TestCase):
         self.assertLess(y, 0, "太い面（左寄り）ではなく細い線（右寄り）を追うべき")
 
 
+class TestBandsFromGroundDistance(unittest.TestCase):
+    """帯は地面距離から換算する（`bottom_crop`・レンズが変わっても地面の行に当たる）。"""
+
+    def test_bands_are_on_the_ground_and_ordered(self):
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+        for w, h in ((640, 274), (320, 240)):
+            intr = vehicle_camera_intrinsics(node.vehicle, "front", w, h)
+            near, far = node._bands(w, h)
+            horizon = intr.principal_y / h
+            self.assertGreater(far[0], horizon, "遠方帯が地平線より上（空）に当たっている")
+            self.assertLess(far[1], near[1])                # 遠方帯は近傍帯より奥（上）
+            self.assertLessEqual(near[1], 1.0)              # 画像の外に出ない
+            self.assertLess(near[0], near[1])
+
+    def test_explicit_band_overrides_range(self):
+        node = LinePerceptionNode(vehicle=Vehicle.load(), near_band=(0.1, 0.2))
+        near, _ = node._bands(320, 240)
+        self.assertEqual(near, (0.1, 0.2))
+
+
 class TestLinePerceptionNodeProcessFrame(unittest.TestCase):
     def test_returns_line_scan_shaped_message(self):
         node = LinePerceptionNode(vehicle=Vehicle.load())
@@ -145,7 +166,9 @@ class TestLinePerceptionNodeProcessFrame(unittest.TestCase):
 
     def test_line_at_center_gives_near_zero_lateral_offset(self):
         node = LinePerceptionNode(vehicle=Vehicle.load())
-        frame = _frame_with_white_column(240, 320, col=160)     # 画面中央
+        # 「正面」は画像中心ではなく主点（校正で中心から数 px ずれる）
+        cx = vehicle_camera_intrinsics(node.vehicle, "front", 320, 240).cx
+        frame = _frame_with_white_column(240, 320, col=round(cx))
         st = node.process_frame(frame)
         self.assertTrue(st.near_seen or st.far_seen)
         y = st.far_y if st.far_seen else st.near_y

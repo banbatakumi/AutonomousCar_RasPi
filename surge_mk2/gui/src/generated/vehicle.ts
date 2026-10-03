@@ -42,7 +42,7 @@ export const VEHICLE = {
     height: 0.088, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
-    bottomCrop: 0.25, // 下端カット率
+    bottomCrop: 0.43, // 下端カット率
     /** 魚眼の校正値。null ＝ 未校正（`hfov` のピンホールで近似する） */
     fisheye: { fx: 307.9092, fy: 307.5942, cx: 307.4241, cy: 241.533, k: [-0.03208693, 0.00352001, -0.01074923, 0.00351499], width: 640, height: 480 } as FisheyeCalib | null,
     /** 補正映像（`telemetry_node`）の仮想ピンホールの水平画角 */
