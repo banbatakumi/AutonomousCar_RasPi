@@ -80,7 +80,7 @@ PY="$ROOT/.venv/bin/python -u"
 # **surge-logger は既定でこの一覧に入れない**（SD 書き込みの無駄を避けるため。上記）。
 # **surge-cam-track / surge-cam-perception / surge-line-perception は入れる**
 # （いずれも待機中は認識・推論を回さない設計のため。上記）
-UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-line-perception)
+UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-line-perception surge-mdns)
 WITH_LOGGER=0
 
 # ⚠ `--max-speed` / `--max-steer` は **GUI の `PI_MAX_SPEED_CAP` / `PI_MAX_STEER_CAP`
@@ -296,6 +296,14 @@ write_unit surge-line-perception "前方カメラの白線認識(line_trace用)"
 write_unit surge-arrow-signal "前方カメラの矢印信号(⑥)認識" \
            "raspi.nodes.arrow_signal_node" "surge-camera.service"
 systemctl disable --now surge-arrow-signal 2>/dev/null || true
+
+# avahi の補助（`raspi/tools/mdns_unicast.py`）。**これが無いと Wi-Fi だけで繋いだ端末
+# （iPad・iPhone）から `surge-mk2.local` が引けず、GUI が開けない**ことがある:
+# アクセスポイントが無線端末宛てのマルチキャストを中継しないと、avahi の返事が
+# 届かない（2026-10-04 に実測。IP 直打ちなら開ける）。問い合わせ元へユニキャストで
+# 返して塞ぐ。avahi は止めないし設定も変えない。バスには繋がらないので他の unit と
+# 依存関係は無い
+write_unit surge-mdns "ホスト名の mDNS 応答（ユニキャスト）" "raspi.tools.mdns_unicast"
 
 # ── 古いログを消すタイマー（放置するとカードが埋まる） ──
 #

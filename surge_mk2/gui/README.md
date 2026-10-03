@@ -68,13 +68,13 @@ python -m raspi.nodes.camera_node
 python -m raspi.nodes.telemetry_node
 ```
 
-ブラウザで `http://surge.local:8000/`。**GUI 本体も telemetry_node が配る**ので、
+ブラウザで `http://surge-mk2.local:8000/`。**GUI 本体も telemetry_node が配る**ので、
 WS と同一オリジンになり接続先の書き分けが要らない。
 
 Mac で GUI を編集しながら実車に繋ぐなら:
 
 ```bash
-SURGE_HOST=surge.local npm run dev     # /ws だけ Pi に中継される
+SURGE_HOST=surge-mk2.local npm run dev     # /ws だけ Pi に中継される
 ```
 
 ## ビルドして Pi に置く

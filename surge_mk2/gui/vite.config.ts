@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react'
 // こうすると GUI と WS が同一オリジンのままなので、
 // **本番(Pi の telemetry_node が配る)と開発で接続先の書き分けが要らない。**
 //
-//   SURGE_HOST=surge.local npm run dev     # 実車に繋ぐ
+//   SURGE_HOST=surge-mk2.local npm run dev     # 実車に繋ぐ
 //   npm run dev                            # 手元の telemetry_node (localhost:8000)
 const host = process.env.SURGE_HOST ?? 'localhost'
 const port = process.env.SURGE_PORT ?? '8000'

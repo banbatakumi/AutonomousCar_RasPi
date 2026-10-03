@@ -7,7 +7,7 @@
  *
  * ## 受け取り方
  *
- * 一度だけ `http://surge.local:8000/?token=xxxx` で開くと `localStorage` に入り、
+ * 一度だけ `http://surge-mk2.local:8000/?token=xxxx` で開くと `localStorage` に入り、
  * 以後は素の URL で繋がる。**URL からはすぐ消す**（アドレスバーに残ったまま
  * スクリーンショットや画面共有に載るのを防ぐ）。
  *
