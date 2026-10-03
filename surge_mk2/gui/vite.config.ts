@@ -23,6 +23,8 @@ export default defineConfig({
       // 保存済み地図のダウンロード（`GET /maps/<name>`）・プレビュー取得
       // （`GET /maps/<name>/preview`）。`/logs`と同じ理由
       '/maps': { target: `http://${host}:${port}`, changeOrigin: true },
+      // 📷 撮影ボタン（`GET /snapshot/<cam>.png`）。`/logs`と同じ理由
+      '/snapshot': { target: `http://${host}:${port}`, changeOrigin: true },
     },
   },
 })

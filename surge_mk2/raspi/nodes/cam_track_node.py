@@ -77,7 +77,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_TRACK_TARGET,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.ipm import camera_intrinsics  # noqa: E402
+from raspi.nav.ipm import CameraIntrinsics, pixel_ray, vehicle_camera_intrinsics  # noqa: E402
 
 __all__ = ["CamTrackNode", "TargetTracker"]
 
@@ -214,10 +214,10 @@ class CamTrackNode:
         #: `TRACKING`中に保持する直近の値（`lost=True`の間もこれを返し続ける）
         self._last_bearing = 0.0
         self._last_bbox = (0.0, 0.0, 0.0, 0.0)          # cx, cy, w, h（正規化）
-        #: 直近フレームのピンホール内部パラメータ。`lost`でフレームが読めない
+        #: 直近フレームの内部パラメータと幅。`lost`でフレームが読めない
         #: 周期でも、LiDAR融合の見込み角計算に直近値を使えるよう保持する
-        self._last_f = 0.0
-        self._last_cx = 0.0
+        self._last_intr: CameraIntrinsics | None = None
+        self._last_w = 0
 
         self._lost_since_ns: int | None = None
         #: 直近の連続`update()`失敗回数。**`_LOST_DEBOUNCE_FRAMES`回続くまでは
@@ -288,19 +288,26 @@ class CamTrackNode:
     # ── カメラの内部パラメータ・方位角 ──
 
     def _update_intrinsics(self, frame_w: int, frame_h: int) -> None:
-        intr = camera_intrinsics(self.vehicle.cam_front_hfov, frame_w, frame_h,
-                                 self.vehicle.cam_front_bottom_crop)
-        self._last_f = intr.f
-        self._last_cx = intr.cx
+        self._last_intr = vehicle_camera_intrinsics(self.vehicle, "front", frame_w, frame_h)
+        self._last_w = frame_w
+
+    def _ray_angle(self, u_px: float) -> float:
+        """画素の列 `u_px`（光軸の高さの行）が光軸から左に何 rad か。
+
+        画素を光線に戻して（`pixel_ray`、魚眼なら歪みを解いて）水平面内の角度を取る。
+        ピンホールなら従来の `atan2(cx-u, f)` と一致する。
+        """
+        intr = self._last_intr
+        x, _, z = pixel_ray(u_px, intr.principal_y, intr)
+        return math.atan2(-float(x), float(z))
 
     def _bearing_for_pixel(self, u_px: float) -> float:
         """画素→方位角。**IPMの地面投影は使わない**（ファイル冒頭の docstring 参照）。
 
-        `pixel_to_ground()`の`lateral = (cx-u)*zc/f`と`depth = zc`（pitch分の
-        投影は水平角には効かない）から`atan2(lateral, depth) = atan2(cx-u, f)`
-        が導ける——地面までの距離や取付ピッチが要らない式になる。
+        光軸の高さの行で画素を光線に戻した水平角（`_ray_angle`）を使う——
+        地面までの距離や取付ピッチが要らない式になる。
         """
-        raw = self.vehicle.cam_front_yaw + math.atan2(self._last_cx - u_px, self._last_f)
+        raw = self.vehicle.cam_front_yaw + self._ray_angle(u_px)
         return _wrap_rad(raw)
 
     # ── LiDAR融合 ──
@@ -359,15 +366,18 @@ class CamTrackNode:
         「進んでよい距離」ではなく「対象までの実測距離」が欲しいので、
         欠測・飽和・測距不能はすべて**候補から除外する**（空き扱いにしない）。
         """
-        if scan is None or self._last_f <= 0.0:
+        if scan is None or self._last_intr is None:
             return 0.0, False
         if now_ns - scan.t_pub > _SCAN_STALE_NS:
             return 0.0, False
 
-        _, _, bbox_w_norm, _ = self._last_bbox
-        frame_w_est = self._last_cx * 2.0
-        half_w_px = max(1.0, bbox_w_norm * frame_w_est / 2.0)
-        half_angle_deg = math.degrees(math.atan2(half_w_px, self._last_f))
+        bbox_cx_norm, _, bbox_w_norm, _ = self._last_bbox
+        half_w_px = max(1.0, bbox_w_norm * self._last_w / 2.0)
+        u_c = bbox_cx_norm * self._last_w
+        # 魚眼では同じ画素幅でも端ほど広い角度になるので、bbox の左右端を
+        # それぞれ光線に戻して角度差の半分を取る
+        half_angle_deg = math.degrees(
+            abs(self._ray_angle(u_c - half_w_px) - self._ray_angle(u_c + half_w_px)) / 2.0)
         half_angle_deg = max(_MIN_HALF_ANGLE_DEG, min(_MAX_HALF_ANGLE_DEG, half_angle_deg))
 
         center_deg = math.degrees(self._last_bearing)

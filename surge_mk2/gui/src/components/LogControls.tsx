@@ -8,9 +8,14 @@
  *
  * ファイル一覧・ダウンロード・削除は診断タブ（`DiagLogFiles`）に移した——
  * ここはタブバーという狭い場所なので、「録る/録らない」の意思表示に絞る。
+ *
+ * 同じ並びに **📷 撮影**（`useSnapshot`。前カメラと、取得中なら後カメラの生画像を
+ * PNG で Mac に保存。魚眼校正の写真撮りに使う）と、**配信映像の魚眼補正の切替**
+ * （`status.camera_config.undistort`、校正済みのカメラがあるときだけ出す）を置く。
  */
 import { formatBytes, formatElapsed } from '../format'
 import { useMcapDownload } from '../hooks/useMcapDownload'
+import { useSnapshot, type SnapCam } from '../hooks/useSnapshot'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
@@ -20,6 +25,11 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
   const sflActive = sfl?.active ?? false
   const mcapActive = mcap?.active ?? false
   const { bufferedBytes, start } = useMcapDownload(ch)
+  const cam = useUi((s) => s.cameraConfig)
+  const snapshot = useSnapshot()
+  // 後カメラは取得を止めている間（DISARM 中の既定）はフレームが無いので撮らない
+  const snapCams: SnapCam[] = cam?.rear_enabled_effective === false ? ['front'] : ['front', 'rear']
+  const canUndistort = !!(cam?.undistort_available?.front || cam?.undistort_available?.rear)
 
   return (
     <div className="log-controls">
@@ -42,6 +52,30 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
         MCAP{mcapActive ? ` ${formatElapsed(mcap!.elapsed_s)} / ${formatBytes(bufferedBytes)}` : ''}
       </button>
       {mcap?.error && <span className="badge-bad">{mcap.error}</span>}
+      <button
+        className={`recbtn snapbtn ${snapshot.busy ? 'busy' : ''}`}
+        disabled={!ch || snapshot.busy}
+        onClick={() => snapshot.snap(snapCams)}
+        title={
+          'カメラ映像を撮影してMacに保存する（無劣化PNG・魚眼のまま。'
+          + `${snapCams.length === 2 ? '前後' : '前'}カメラ）。`
+          + 'チェッカーボード校正はランチャーの「カメラ校正」で'
+          + (snapshot.last ? `\n直近: ${snapshot.last}` : '')
+        }
+      >
+        📷
+      </button>
+      {canUndistort && (
+        <button
+          className={`recbtn ${cam?.undistort ? 'active' : ''}`}
+          disabled={!ch}
+          onClick={() => ch?.setCamera({ undistort: !cam?.undistort })}
+          title="配信映像の魚眼補正（Pi側で仮想ピンホールに変換）。記録・撮影は常に魚眼のまま"
+        >
+          {cam?.undistort ? '補正' : '魚眼'}
+        </button>
+      )}
+      {snapshot.error && <span className="badge-bad" title={snapshot.error}>撮影失敗</span>}
     </div>
   )
 }

@@ -19,6 +19,10 @@
 | `/ws/map` | 地図・中心線・レーシングライン | msgpack バイナリ | **変わったときだけ** |
 | `/ws/record` | mcap記録の生バイト列 | バイナリ | 録画中のみ |
 
+HTTP（GET）は GUI 本体のほか `/logs/<name>`（記録のダウンロード）、`/maps/…`、
+`/snapshot/<front|rear>.png`（📷 撮影ボタン。共有メモリの最新フレームを無劣化 PNG で返す。
+魚眼の校正に使う写真なので、補正映像の設定に関わらず**常に生画像**）。
+
 点群を JSON で送ると CPU を無駄に食うのでテレメトリはバイナリにする。
 
 ## 記録は2本とも「開始/停止」だけを `/ws/control` で操作する（`docs/architecture.md` §11）
@@ -130,7 +134,8 @@ from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.core.jpeg import RingJpeg  # noqa: E402
+from raspi.core.camera_model import Undistorter  # noqa: E402
+from raspi.core.jpeg import RingJpeg, encode_png  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
 from raspi.nav.grid import pack_trinary, unpack_trinary  # noqa: E402
@@ -498,6 +503,17 @@ class TelemetryServer:
         self._cam_front_fps_armed = CAM_FRONT_FPS_DEFAULT
         self._cam_front_fps_disarm = CAM_FRONT_FPS_DISARM_DEFAULT
         self._cam_rear_fps_armed = CAM_REAR_FPS_DEFAULT
+        #: GUI へ配る映像を魚眼のままにするか、仮想ピンホールに補正するか
+        #: （`_camera_pump`）。**記録・下流ノード・撮影ボタンは常に生画像**
+        self._cam_undistort = False
+        #: カメラ（"front"/"rear"）→ 補正器。`vehicle.toml` に校正値が無いカメラは入らない
+        self._undistorters: dict[str, Undistorter] = {}
+        for cam in ("front", "rear"):
+            calib = getattr(_SAFETY, f"cam_{cam}_fisheye")
+            if calib is not None:
+                self._undistorters[cam] = Undistorter(
+                    calib, getattr(_SAFETY, f"cam_{cam}_undistort_hfov"),
+                    getattr(_SAFETY, f"cam_{cam}_bottom_crop"))
         self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
 
         # ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
@@ -611,6 +627,43 @@ class TelemetryServer:
         return _response(200, "application/octet-stream", target.read_bytes(),
                          extra={"Content-Disposition": f'attachment; filename="{target.name}"'})
 
+    def _serve_snapshot(self, path: str) -> Response:
+        """`GET /snapshot/<front|rear>.png` — 📷 撮影ボタン。最新フレームを PNG で返す。
+
+        **常に生画像（魚眼のまま・無劣化）。** 主な用途がチェッカーボード校正
+        （Mac 側 `tools/cam_calib/`）で、校正は実際にパイプラインが使う画像そのもので
+        行う必要があるため。ファイル名に解像度と下端クロップ率を入れて返す——
+        校正ツールはそこからクロップ前のフル画像の大きさを復元する
+        （`raspi/core/camera_model.py` の「座標はフル画角」の節）。
+        """
+        cam = path[len("/snapshot/"):].split("?")[0].removesuffix(".png")
+        topic = {"front": TOPIC_IMAGE_FRONT, "rear": TOPIC_IMAGE_REAR}.get(cam)
+        if topic is None:
+            return _response(404, "text/plain; charset=utf-8", b"unknown camera")
+        if self._jpeg is None:
+            return _response(503, "text/plain; charset=utf-8", b"camera disabled")
+        ref = self.sub.latest.get(topic)
+        if ref is None:
+            return _response(404, "text/plain; charset=utf-8",
+                             f"{cam} カメラのフレームが来ていない".encode())
+        got = self._jpeg.read_latest(ref.shm_name, expect_seq=ref.ring_seq)
+        if got is None:
+            return _response(503, "text/plain; charset=utf-8",
+                             f"{cam} カメラを読めない: {self._jpeg.last_error}".encode())
+        arr, colorspace, desc = got
+        try:
+            png = encode_png(arr, colorspace)
+        except Exception as e:                                 # noqa: BLE001
+            return _response(500, "text/plain; charset=utf-8",
+                             f"PNG 化に失敗: {type(e).__name__}: {e}".encode())
+        crop = getattr(_SAFETY, f"cam_{cam}_bottom_crop")
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"{int(time.time() * 1000) % 1000:03d}"
+        name = f"surge_{cam}_{desc.width}x{desc.height}_crop{crop:g}_{stamp}.png"
+        return _response(200, "image/png", png, extra={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "X-Surge-Filename": name,
+        })
+
     # ── Origin 検査（クロスサイト WebSocket ハイジャック対策） ──
 
     @staticmethod
@@ -650,6 +703,8 @@ class TelemetryServer:
             return None                       # WebSocket として処理させる
         if request.path.startswith("/logs/"):
             return self._serve_log_file(request.path)
+        if request.path.startswith("/snapshot/"):
+            return self._serve_snapshot(request.path)
         if request.path.startswith("/maps/") and request.path.split("?")[0].endswith("/preview"):
             return self._serve_map_preview(request.path)
         if request.path.startswith("/maps/"):
@@ -1273,6 +1328,7 @@ class TelemetryServer:
         `*_armed`/`*_disarm` は capture 側（camera_node）のFPS上限・後方ON/OFFで、
         ARM/DISARM（`vs.armed`）ごとに別の値を持つ（2026-09-03、駐車中の節電のため）。
         `gui_hz` はブラウザへ配信するJPEGの頻度で、ARM状態と無関係（Wi-Fi帯域が理由）。
+        `undistort` は配信映像の魚眼補正（校正済みのカメラだけに効く）。
         """
         if "rear_enabled_armed" in m:
             self._cam_rear_enabled_armed = bool(m["rear_enabled_armed"])
@@ -1286,6 +1342,8 @@ class TelemetryServer:
             self._cam_rear_fps_armed = self._clamp_cam_hz(float(m["rear_fps_armed"]))
         if "gui_hz" in m and isinstance(m["gui_hz"], (int, float)):
             self.camera_hz = self._clamp_cam_hz(float(m["gui_hz"]))
+        if "undistort" in m and isinstance(m["undistort"], bool):
+            self._cam_undistort = m["undistort"]
         self._save_camera_conf()
         self._publish_cam_config()      # 待たせない。fan と同じく即座に効かせる
 
@@ -1329,6 +1387,11 @@ class TelemetryServer:
             "front_fps_disarm": self._cam_front_fps_disarm,
             "rear_fps_armed": self._cam_rear_fps_armed,
             "gui_hz": self.camera_hz,
+            "undistort": self._cam_undistort,
+            #: 校正値があり補正映像を出せるカメラ。GUI はこれで「補正中か」を判断して
+            #: 進路ガイドの投影モデルを切り替える（未校正のカメラは魚眼のまま届く）
+            "undistort_available": {cam: cam in self._undistorters
+                                    for cam in ("front", "rear")},
             "armed": self._vehicle_armed(),
             "front_fps_effective": self._desired_front_fps(),
             "rear_enabled_effective": self._desired_rear_enabled(),
@@ -1370,6 +1433,8 @@ class TelemetryServer:
             self._cam_rear_fps_armed = self._clamp_cam_hz(float(raw["rear_cap_hz"]))
         if isinstance(raw.get("gui_hz"), (int, float)):
             self.camera_hz = self._clamp_cam_hz(float(raw["gui_hz"]))
+        if isinstance(raw.get("undistort"), bool):
+            self._cam_undistort = raw["undistort"]
 
     def _save_camera_conf(self) -> None:
         try:
@@ -1380,6 +1445,7 @@ class TelemetryServer:
                 "front_fps_disarm": self._cam_front_fps_disarm,
                 "rear_fps_armed": self._cam_rear_fps_armed,
                 "gui_hz": self.camera_hz,
+                "undistort": self._cam_undistort,
             }))
         except Exception:
             pass
@@ -2419,16 +2485,21 @@ class TelemetryServer:
                 if ref is None or ref.ring_seq == last_seq[cam]:
                     continue
                 last_seq[cam] = ref.ring_seq
-                jpg = await asyncio.to_thread(self._encode_frame, ref)
+                jpg = await asyncio.to_thread(self._encode_frame, ref, cam)
                 if jpg is None:
                     continue
                 await asyncio.gather(
                     *(self._send_or_drop(ws, jpg, clients) for ws in list(clients)),
                     return_exceptions=True)
 
-    def _encode_frame(self, ref) -> bytes | None:
-        """`ImageRef` → JPEG。共有メモリからゼロコピーで読む（`core.jpeg`）。"""
-        got = self._jpeg.encode_latest(ref.shm_name, expect_seq=ref.ring_seq)
+    def _encode_frame(self, ref, cam: str = "") -> bytes | None:
+        """`ImageRef` → JPEG。共有メモリからゼロコピーで読む（`core.jpeg`）。
+
+        補正映像が ON で、そのカメラが校正済みなら JPEG 化の前に remap する。
+        """
+        transform = self._undistorters.get(cam) if self._cam_undistort else None
+        got = self._jpeg.encode_latest(ref.shm_name, expect_seq=ref.ring_seq,
+                                       transform=transform)
         return got[0] if got else None
 
     async def _mask_pump(self) -> None:

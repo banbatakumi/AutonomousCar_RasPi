@@ -528,6 +528,26 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
           </section>
 
           <section className="settings-group">
+            <h3>映像の魚眼補正</h3>
+            <label
+              className="settings-checkbox"
+              title="Pi側で魚眼映像を仮想ピンホール（vehicle.toml の undistort_hfov）に変換して配信する。端は引き伸ばされ画角は狭くなる。記録（mcap）・📷撮影・自動運転の認識は常に魚眼のまま"
+            >
+              <input
+                type="checkbox"
+                checked={cam?.undistort ?? false}
+                disabled={cam === null || !(cam.undistort_available?.front || cam.undistort_available?.rear)}
+                onChange={(e) => ch?.setCamera({ undistort: e.target.checked })}
+              />
+              補正した映像を表示する
+              {cam !== null && !(cam.undistort_available?.front || cam.undistort_available?.rear)
+                && '（未校正。ランチャーの「カメラ校正」で校正すると使える）'}
+              {cam?.undistort_available && cam.undistort_available.front !== cam.undistort_available.rear
+                && `（${cam.undistort_available.front ? '前' : '後'}カメラのみ校正済み）`}
+            </label>
+          </section>
+
+          <section className="settings-group">
             <h3>
               カメラ（DISARM中＝駐車中）
               {cam !== null && (

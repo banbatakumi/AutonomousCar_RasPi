@@ -306,6 +306,7 @@ export class ControlChannel {
     rearFpsArmed?: number
     rearEnabledArmed?: boolean; rearEnabledDisarm?: boolean
     guiHz?: number
+    undistort?: boolean
   }) {
     this.send({
       type: 'camera',
@@ -315,6 +316,7 @@ export class ControlChannel {
       rear_enabled_armed: p.rearEnabledArmed,
       rear_enabled_disarm: p.rearEnabledDisarm,
       gui_hz: p.guiHz,
+      undistort: p.undistort,
     })
   }
 

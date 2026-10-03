@@ -412,6 +412,48 @@ COMMAND・センサのノイズ）で回して、解析が真値を復元でき�
 （`ml_lidar/env.py`）の両方に効く。学習環境は実ノードを通さないので、COMMAND の
 レート制限（`[safety]`）と `control_latency_s` を自分で再現している。
 
+### 4.6 カメラ校正（魚眼レンズ）
+
+前後カメラは IMX219 **160° 広角**。画角が広いぶん像が大きく歪むので、内部パラメータを
+チェッカーボードで校正して `config/vehicle.toml` の `[sensors.cam_*.fisheye]` に置く。
+**校正値が無い（未校正の）カメラは、従来の `hfov` ピンホールで近似する**——160° では
+端ほど大きくズレるので、レンズを替えたら必ずやる。
+
+| 使うところ | 校正値の効き方 |
+|---|---|
+| IPM（`raspi/nav/ipm.py`）→ `line_trace`・`ftg_cam`・`cam_centerline` | 画素 → 地面座標の変換が魚眼モデルになる |
+| `cam_track_node`（`follow_object`）| 画素 → 方位角 |
+| GUI の進路ガイド・認識ラインの重畳（`CameraView.tsx`）| 地面 → 画素の投影が魚眼モデルになる（`config/generate.py` 経由） |
+| GUI の「補正」映像（タブバーの「魚眼/補正」、設定パネルのカメラ）| `telemetry_node` が仮想ピンホール（`undistort_hfov`）に remap して配信 |
+
+**記録（mcap）・📷 撮影・認識ノードは常に魚眼のままの生画像**を使う（補正は GUI 表示だけ）。
+式（Kannala-Brandt、OpenCV `cv2.fisheye` と同じ）と「フル画角・下端クロップ前の画素で持つ」
+約束は `raspi/core/camera_model.py` の docstring が正。
+
+**手順**:
+
+1. 印刷用ボードを作る: ランチャーの「カメラ校正」→「印刷用ボードを作る」（または
+   `.venv/bin/python -m tools.cam_calib --make-board 9x6 --square 0.025 -o board.pdf`）。
+   **「実際のサイズ」で印刷し、平らな板に貼り、1マスを定規で測る。**
+   内側の角点は**片方を偶数・片方を奇数**（9x6 など）。両方奇数だと向きが決まらず校正が破綻する
+2. 撮る: GUI のタブバーの **📷**（sfl/mcap の隣）。押すたびに前カメラ（と、取得中なら後カメラ）の
+   生画像が無劣化 PNG で Mac の ~/Downloads に落ちる（`surge_front_640x360_crop0.25_….png`）。
+   **20 枚前後、画面の中央・四隅・左右の端に、距離と傾きを変えて**写す。魚眼は端ほど歪むので、
+   端にボードが写った写真が無いと RMS が小さくても端のガイドが曲がる（ツールの「画面カバー率」を見る）。
+   ブレないよう車もボードも止めて撮る
+3. 校正: ランチャーの「カメラ校正」でカメラ・ボード寸法・実測の1マスを入れ、「写真を読み込む」→「校正」。
+   再投影誤差 RMS が 0.5px 未満、補正後のプレビューで直線が直線に戻っていれば「vehicle.toml に書き込む」
+   （`config/generate.py` まで走る）。CLI は
+   `.venv/bin/python -m tools.cam_calib --cam front --board 9x6 --square 0.025 ~/Downloads/surge_front_*.png [--write]`
+4. 反映: `tools/deploy.sh --restart`（GUI を再ビルドして rsync し、telemetry・camera・認識ノードを
+   再起動する。校正値は起動時に読むので再起動が要る。io_node は無関係＝E-Stop はラッチしない）
+
+- 校正値はカメラ（レンズ）ごと。前後を入れ替えたり、レンズを付け直したら撮り直す
+- 解像度（`camera_node --size`）を変えても校正値はそのまま使える（幅・高さで縮尺する）。
+  `bottom_crop` を変えても同じ（クロップは「下を切っただけ」なので内部パラメータは変わらない）
+- 自動運転のカメラ学習モデル（`ml_cam`・`ml_cam_e2e`）は旧レンズの画像で学習してあるので、
+  **160° レンズで撮り直して再学習が要る**
+
 ---
 
 ## 5. 実機へ反映する

@@ -211,6 +211,10 @@ export type CameraConfigStatus = {
   rear_enabled_effective: boolean
   /** カメラを使う自動運転モードでengage中で、front_fps_armedを上書きしているか */
   auto_override: boolean
+  /** 配信映像を魚眼補正（仮想ピンホールへ remap）するか。記録・撮影は常に生画像 */
+  undistort?: boolean
+  /** 校正値があり、実際に補正映像が出るカメラ。未校正のカメラは魚眼のまま届く */
+  undistort_available?: { front: boolean; rear: boolean }
 }
 
 /** 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値。**サーバが真値**

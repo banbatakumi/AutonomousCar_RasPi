@@ -109,7 +109,8 @@ src/
 ├── ws/control.ts      /ws/control（JSON・操縦権・E-Stop）
 ├── input/useDriving.ts ゲームパッド + キーボード → 20Hz の cmd
 ├── render/LidarView   Canvas 2D。rAF で live を読む
-├── render/CameraView  JPEG → ImageBitmap → Canvas
+├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
+├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
 ├── render/MapCanvas   世界座標のキャンバス（地図生成タブ・低頻度）
 ├── views/             RcView / AutoView / MapView / DiagView / LogView（＝タブ5枚）
 ├── components/        StatusBar(層B) / DriveBar(層B) / DiagGrid / DiagCharts

@@ -251,6 +251,14 @@ button.on {
   color: #ffb4ae;
 }
 
+.recbtn.snapbtn.busy {
+  opacity: 0.5;
+}
+
+.recbtn.active {
+  border-color: var(--accent);
+}
+
 .recbtn.recording .rec-dot {
   background: var(--bad);
   animation: recpulse 1s ease-in-out infinite;

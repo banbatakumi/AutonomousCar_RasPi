@@ -499,6 +499,9 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._cam_front_fps_disarm = 15.0
         srv._cam_rear_fps_armed = 15.0
         srv.camera_hz = 15.0
+        # 配信映像の魚眼補正（2026-10-03）。未校正・OFF の既定状態
+        srv._cam_undistort = False
+        srv._undistorters = {}
         srv._publish_cam_config = lambda: None     # バスに触らせない
         srv._save_camera_conf = lambda: None       # ディスクに触らせない
         # GUIの運転設定（速度ダイヤル・制御モード等）。**未保存の既定状態**を組む

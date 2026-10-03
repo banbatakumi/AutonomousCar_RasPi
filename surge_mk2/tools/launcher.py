@@ -4,7 +4,7 @@
     （または surge_mk2 直下の launcher.command をダブルクリック）
 
 メイン GUI（Web）以外の補助 GUI（シミュレータ・コースエディタ・システム同定・
-SLAM 再処理・ml 系の操作盤）を1つの窓から起動・停止する。アプリを増やすときは
+カメラ校正・SLAM 再処理・ml 系の操作盤）を1つの窓から起動・停止する。アプリを増やすときは
 `APPS` に1行足すだけでよい。
 
 ## 1つの GUI に統合せず、別プロセスで起動する理由
@@ -78,6 +78,9 @@ APPS: list[AppSpec] = [
     AppSpec("sysid", "解析", "システム同定",
             "mcap から動特性を同定し vehicle.toml に書き戻す",
             lambda o: ["-m", "tools.sysid.gui"]),
+    AppSpec("cam_calib", "解析", "カメラ校正",
+            "📷 で撮ったチェッカーボード写真から魚眼レンズを校正し vehicle.toml に書き戻す",
+            lambda o: ["-m", "tools.cam_calib.gui"]),
     AppSpec("slam_replay", "解析", "SLAM 再処理",
             "記録を slam2d に通して _slam.mcap を作り Foxglove で開く",
             lambda o: ["-m", "tools.slam_replay_gui"]),

@@ -23,6 +23,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .camera_model import FisheyeCalib
+
 __all__ = ["Vehicle", "DEFAULT_PATH"]
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
@@ -63,6 +65,14 @@ class Vehicle:
     cam_rear_pitch: float = 0.0
     cam_rear_yaw: float = 3.14159265
     cam_rear_hfov: float = 1.152
+    #: 魚眼レンズの校正値（`[sensors.cam_*.fisheye]`、`tools/cam_calib/` が書く）。
+    #: **None ＝ 未校正**で、IPM・進路ガイドは従来どおり `hfov` のピンホールで近似する
+    cam_front_fisheye: FisheyeCalib | None = None
+    cam_rear_fisheye: FisheyeCalib | None = None
+    #: 補正映像（魚眼 → 仮想ピンホール、`telemetry_node`）の水平画角 [rad]。
+    #: 大きいほど広く写るが端が引き伸ばされる（ピンホールは 180° に届かない）
+    cam_front_undistort_hfov: float = 1.92
+    cam_rear_undistort_hfov: float = 1.92
     #: 操舵のむだ時間と1次遅れ [s]。Pure Pursuit の遅延補償の既定値になる
     dead_time_s: float = 0.030
     tau_steer_s: float = 0.12
@@ -148,6 +158,10 @@ class Vehicle:
             cam_rear_pitch=float(cam_rear.get("pitch", 0.0)),
             cam_rear_yaw=float(cam_rear.get("yaw", 3.14159265)),
             cam_rear_hfov=float(cam_rear.get("hfov", 1.152)),
+            cam_front_fisheye=FisheyeCalib.from_dict(cam_front.get("fisheye") or {}),
+            cam_rear_fisheye=FisheyeCalib.from_dict(cam_rear.get("fisheye") or {}),
+            cam_front_undistort_hfov=float(cam_front.get("undistort_hfov", 1.92)),
+            cam_rear_undistort_hfov=float(cam_rear.get("undistort_hfov", 1.92)),
             dead_time_s=float(dyn.get("dead_time_s", 0.030)),
             tau_steer_s=float(dyn.get("tau_steer_s", 0.12)),
             cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),

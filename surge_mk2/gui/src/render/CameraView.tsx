@@ -4,20 +4,26 @@
  * `createImageBitmap` でデコードして Canvas に描く。**React の state に
  * 画像を入れない**（1フレームごとに再レンダリングが走る）。
  *
- * ## 進路ガイドは「暫定」と明示する
+ * ## レンズモデルと「暫定」表示（2026-10 魚眼化）
  *
- * 画像上に予測進路を重ねるには、カメラの内部・外部パラメータ（校正）が要る。
- * **これは Phase 1 の作業でまだ済んでいない。** ここで描いているのは、
- * 平面路面と取り付け姿勢を仮定した近似であり、**実測値ではない**。
- * 校正前のガイドを信じて経路の当たり判定に使わないよう、画面にも印を出す
- * ——ただし出すのは自動運転ビュー（`variant="full"`）のみ。ラジコンビューは
+ * IMX219 160° 広角レンズに替えたので、内部パラメータはチェッカーボード校正
+ * （`tools/cam_calib/`）で求めた魚眼モデル（`VEHICLE.cam*.fisheye`、式は
+ * `cameraModel.ts` ＝ `raspi/core/camera_model.py`）を使う。**校正値が無いカメラ**は
+ * 従来どおり `hfov` のピンホールで近似するので、そのときだけ「校正前・暫定」の印を
+ * 出す——ただし出すのは自動運転ビュー（`variant="full"`）のみ。
+ *
+ * 映像は「魚眼のまま」と「補正映像」（Pi の `telemetry_node` が仮想ピンホールに
+ * remap したもの。設定パネル／タブバーで切替）の2通りが届きうる。どちらを
+ * 表示しているかはサーバ真値（`status.camera_config`）で判断し、`lensFor()` が
+ * 投影モデルを切り替える。外部パラメータ（高さ・俯角）は平面路面を仮定した近似の
+ * ままで、実測で詰めるのは別作業。ラジコンビューは
  * 運転を楽しむ画面なので文字を極力出さない方針（`RcView.tsx`）で、下記
  * `variant="minimal"` では出さない。
  *
  * 高さ（設定パネルの `camHeight`）は `config/vehicle.toml` の `sensors.cam_front.z`
  * を初期値に、実写を見ながら追い込める——定規で測れる筐体の位置とレンズ光学中心が
- * ズレうるため。**俯角（取付角度）・水平画角は調整UIを持たない**。一度ネジ止めしたら
- * 変わらない物理値で、`VEHICLE.camFront.pitch`/`hfov`（`vehicle.toml` 直）をそのまま使う
+ * ズレうるため。**俯角（取付角度）・レンズは調整UIを持たない**。一度ネジ止めしたら
+ * 変わらない物理値で、`VEHICLE.camFront.pitch`/`fisheye`/`hfov`（`vehicle.toml` 直）をそのまま使う
  * （2026-08-21、指示による——「絶対変わらないものにスライダーは要らない」）。
  *
  * ## 下端クロップぶんの主点補正
@@ -38,12 +44,11 @@
  *
  * - pitch: 固定取付角に `−vs.pitch` を足す。前のめり（pitch 負）になるほど
  *   カメラも一緒に下を向く（実効的な俯角が増える）ので符号を反転して足す。
- * - roll: 画像面内の回転として扱う（ロールはカメラの光軸まわりの回転にほぼ
- *   一致するため、画像を principal point 中心に回すだけで近似できる）。
- *   カメラが右に傾く（roll 正）と、写真の一般則どおり像は反時計回りに回って
- *   見える——回転角は `+vs.roll`。**pitch/roll は独立に合成する近似**
- *   （厳密な3D外部パラメータではない。もともと未校正の暫定ガイドなので、
- *   このクラスの近似で十分と判断している）。
+ * - roll: 光軸まわりの回転として扱う。カメラが右に傾く（roll 正）と、写真の
+ *   一般則どおり像は反時計回りに回って見える——回転角は `+vs.roll`。
+ *   魚眼では「画像を主点中心に回す」近似が成り立たないので、**カメラ座標の
+ *   光線を回してからレンズに通す**（ピンホールなら従来の画像回転と同じ結果）。
+ *   **pitch/roll は独立に合成する近似**（厳密な3D外部パラメータではない）。
  * - IMU が無効（`imu_ok=false`）な間は 0 として扱い、固定値だけで描く。
  *
  * ## 後カメラにも同じガイドを出す（2026-08-21）
@@ -106,6 +111,7 @@ import { live } from '../bus/live'
 import { useUi } from '../store/ui'
 import { wsUrl } from '../ws/url'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
+import { fisheyeLens, MIN_ZC, pinholeLens, type Lens } from './cameraModel'
 import type { ControlChannel } from '../ws/control'
 
 export function CameraView({
@@ -151,9 +157,15 @@ export function CameraView({
   // ——モードを切り替えるたびにメイン映像まで再接続されると困るので、
   // ref 経由で `draw()` に渡す（`camHeightRef` と同じ理由）
   const auto = useUi((s) => s.auto)
+  //: 補正映像（魚眼 → 仮想ピンホール、Pi 側で remap 済み）を表示中か。
+  //: マスク・追跡枠・ROI 選択は**生画像（魚眼）の座標**で作られているので、
+  //: 補正映像の上には重ねられない——その間は出さない（ROI も選ばせない）
+  const undistorted = useUi(
+    (s) => !!(s.cameraConfig?.undistort && s.cameraConfig.undistort_available?.[cam]),
+  )
   //: `ftg_cam`/`cam_centerline` はどちらも `cam_perception_node.py` の同じ
   //: 走行可否マスクを publish する（`cam/mask`。`_CAM_MODES` 参照）ので同じ扱い
-  const showMask = cam === 'front'
+  const showMask = cam === 'front' && !undistorted
     && (auto?.mode === 'ftg_cam' || auto?.mode === 'cam_centerline')
   const showLineTarget = cam === 'front' && auto?.mode === 'line_trace'
   const showMaskRef = useRef(showMask)
@@ -175,7 +187,7 @@ export function CameraView({
   // ドラッグでROI矩形を選ぶ操作は前方カメラの `follow_object` 選択中だけ有効。
   // `showMask`/`showLineTarget` と同じ ref 経由（draw ループの useEffect 依存に
   // 入れない）。追跡結果のbbox重畳（`drawTrackBox()`）も同じ条件で出す
-  const trackingMode = cam === 'front' && auto?.mode === 'follow_object'
+  const trackingMode = cam === 'front' && !undistorted && auto?.mode === 'follow_object'
   const trackingModeRef = useRef(trackingMode)
   trackingModeRef.current = trackingMode
   const chRef = useRef(ch)
@@ -413,7 +425,13 @@ export function CameraView({
         <div className="camera-tag">
           {label}
           <span ref={statusRef} className="dim" />
-          {guide && <span className="badge-warn">ガイドは校正前・暫定</span>}
+          {guide && !(cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear).fisheye && (
+            <span className="badge-warn">ガイドは校正前・暫定</span>
+          )}
+          {undistorted && cam === 'front'
+            && (auto?.mode === 'ftg_cam' || auto?.mode === 'cam_centerline' || auto?.mode === 'follow_object') && (
+            <span className="badge-warn">補正映像中はマスク/追跡枠を出さない</span>
+          )}
         </div>
       ) : (
         <div className="camera-fps">
@@ -424,10 +442,10 @@ export function CameraView({
   )
 }
 
-/** 実測舵角から予測進路を路面平面に置き、仮のピンホールで画像に落とす。
+/** 実測舵角から予測進路を路面平面に置き、カメラモデル（`lensFor()`）で画像に落とす。
  * `camHeightSetting` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`。
  * **前カメラにしか適用しない**——後カメラは高さの調整UIを持たないので
- * `VEHICLE.camRear.height` を固定で使う）。`pitch`/`hfov`/`bottomCrop` は
+ * `VEHICLE.camRear.height` を固定で使う）。`pitch`/レンズ（`fisheye`/`hfov`）/`bottomCrop` は
  * `vehicle.toml` 由来の固定値（`cam` に応じて `camFront`/`camRear` を選ぶ）。
  * `vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
  * （符号の向きはファイル冒頭コメント参照。後カメラは反転して使う）。 */
@@ -441,7 +459,7 @@ function drawGuide(
   const vs = live.vs
   if (!vs) return
   const isFront = cam === 'front'
-  const { project, rotateRoll } = makeProjector(w, h, camHeightSetting, cam)
+  const project = makeProjector(w, h, camHeightSetting, cam)
 
   // 自転車モデルの曲率式は弧長の符号によらないので、後カメラは ds を負にして
   // 「今の舵角のまま後退したら」の軌跡を積分する（ファイル冒頭コメント参照）
@@ -461,8 +479,7 @@ function drawGuide(
       // 車両座標 (x=前, y=左) → カメラ座標。後カメラは奥行き・左右とも反転する
       // （振り返った視点なので、車体の後方＝カメラの奥、車体の左＝カメラの右）
       const [depth, lateral] = isFront ? [x, y + off] : [-x, -(y + off)]
-      const projected = project(depth, lateral)
-      const p = projected && rotateRoll(projected)
+      const p = project(depth, lateral)
       if (!p) continue
       if (!started) {
         ctx.moveTo(p[0], p[1])
@@ -475,20 +492,35 @@ function drawGuide(
   }
 }
 
+/** どのレンズモデルで描くか。**補正映像を表示中なら仮想ピンホール**（Pi が remap 済み）、
+ * そうでなければ校正値があれば魚眼、無ければ `hfov` のピンホール近似。
+ * 補正映像かどうかはサーバ真値（`status.camera_config.undistort` と、そのカメラが
+ * 校正済みで実際に補正されているか `undistort_available`）で決める。 */
+export function lensFor(cam: 'front' | 'rear', w: number, h: number): Lens {
+  const geom = cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
+  const cfg = useUi.getState().cameraConfig
+  if (cfg?.undistort && cfg.undistort_available?.[cam]) {
+    return pinholeLens(w, h, geom.undistortHfov, geom.bottomCrop, 'undistorted')
+  }
+  if (geom.fisheye) return fisheyeLens(w, h, geom.fisheye, geom.bottomCrop)
+  return pinholeLens(w, h, geom.hfov, geom.bottomCrop)
+}
+
 /** 路面座標（base_link、x=前 y=左）→ 画像座標の投影器を作る（2026-08-28、
  * `drawGuide` から切り出し）。IMU による姿勢（pitch/roll）補正込み。
  * `drawGuide`（進路ガイド）と `drawLineTarget`（認識ラインの重畳）が共用する
- * ——同じカメラ内部・外部パラメータ・IMU補正を2箇所に書くと片方だけ直し忘れる。 */
+ * ——同じカメラ内部・外部パラメータ・IMU補正を2箇所に書くと片方だけ直し忘れる。
+ *
+ * レンズ（魚眼/補正映像/未校正ピンホール）は `lensFor()` が選ぶ。姿勢は
+ * **カメラ座標の光線を回してから**レンズに通す——魚眼では「画像を主点まわりに
+ * 回す」近似が成り立たない（端ほど像の回り方が違う）ため。ピンホールでは
+ * 従来の画像面回転と同じ結果になる。 */
 function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'front' | 'rear') {
   const vs = live.vs
   const isFront = cam === 'front'
   const geom = isFront ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
-  const { pitch: pitchFixed, hfov, bottomCrop } = geom
   const height = isFront ? camHeightSetting : geom.height
-  const f = w / 2 / Math.tan(hfov / 2)
-  const cx = w / 2
-  // 下端クロップぶん、光軸（センサー中心）は配信画像の中央より下にずれる
-  const principalY = h / (2 * (1 - bottomCrop))
+  const lens = lensFor(cam, w, h)
 
   // IMU が無効・未受信の間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）。
   // 後カメラは前カメラと逆向きを見ているので、姿勢補正の符号を反転する
@@ -497,30 +529,22 @@ function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'fro
   const dRoll = (vs?.imu_ok ? vs.roll : 0) * (isFront ? 1 : -1)
 
   // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す
-  const pitch = pitchFixed - dPitch
+  const pitch = geom.pitch - dPitch
   const cp = Math.cos(pitch)
   const sp = Math.sin(pitch)
+  // roll: 光軸まわりの回転。右が沈む（dRoll 正）とカメラも右に傾き、
+  // 写真の一般則どおり像は光軸を中心に反時計回りへ回って見える
+  const cr = Math.cos(dRoll)
+  const sr = Math.sin(dRoll)
 
-  const project = (x: number, y: number): [number, number] | null => {
-    // カメラ座標 (x=奥行き, y=左, z=上) → 画像。pitch だけ傾いている前提
+  return (x: number, y: number): [number, number] | null => {
+    // ヨーだけ戻したローカル座標 (x=奥行き, y=左, 下向き=height) → カメラ座標
     const zc = x * cp + height * sp // 光軸方向
+    if (zc < MIN_ZC) return null
     const yc = -x * sp + height * cp // 下向きが正
-    if (zc < 0.15) return null
-    return [cx - (y * f) / zc, principalY + (yc * f) / zc]
+    const xc = -y // 右が正
+    return lens.project(xc * cr + yc * sr, -xc * sr + yc * cr, zc)
   }
-
-  // roll: 画像面内の回転として近似する。右が沈む（dRoll 正）とカメラも右に傾き、
-  // 写真の一般則どおり像は principal point を中心に反時計回りへ回って見える
-  const rollImg = dRoll
-  const cr = Math.cos(rollImg)
-  const sr = Math.sin(rollImg)
-  const rotateRoll = (p: [number, number]): [number, number] => {
-    const dx = p[0] - cx
-    const dy = p[1] - principalY
-    return [cx + dx * cr + dy * sr, principalY - dx * sr + dy * cr]
-  }
-
-  return { project, rotateRoll }
 }
 
 /**
@@ -534,12 +558,10 @@ function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'fro
 function drawLineTarget(ctx: CanvasRenderingContext2D, w: number, h: number, camHeightSetting: number) {
   const line = live.lineCam
   if (!line || (!line.near_seen && !line.far_seen)) return
-  const { project, rotateRoll } = makeProjector(w, h, camHeightSetting, 'front')
+  const project = makeProjector(w, h, camHeightSetting, 'front')
 
-  const near = line.near_seen ? project(line.near_x, line.near_y) : null
-  const far = line.far_seen ? project(line.far_x, line.far_y) : null
-  const nearPt = near && rotateRoll(near)
-  const farPt = far && rotateRoll(far)
+  const nearPt = line.near_seen ? project(line.near_x, line.near_y) : null
+  const farPt = line.far_seen ? project(line.far_x, line.far_y) : null
   const pts = [nearPt, farPt].filter((p): p is [number, number] => p != null)
   if (pts.length === 0) return
 

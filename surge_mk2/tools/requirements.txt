@@ -1,8 +1,11 @@
-# システム同定ツール（Mac側、tools/sysid/） — Piには入れない
+# Mac 側の補助ツール（システム同定 tools/sysid/・カメラ校正 tools/cam_calib/） — Piには入れない
 #
 #   .venv/bin/pip install -r tools/requirements.txt
 #   .venv/bin/python -m tools.sysid.gui
+#   .venv/bin/python -m tools.cam_calib.gui
 
 mcap>=1.2,<2            # mcapログの読み込み（raspi/requirements.txt と同じピン留め）
 numpy                    # ステップ応答のフィッティング（raspi/requirements.txt に既に入っている想定）
 tomlkit                  # vehicle.toml のコメント・書式を保ったまま書き換える
+opencv-contrib-python-headless>=4.9,<6  # カメラ校正（cv2.fisheye）。raspi/requirements.txt と同じ配布物にする（opencv-python と併存させると cv2 が壊れる）
+pillow                   # 印刷用チェッカーボードの PDF 書き出し（tools/cam_calib/board.py）

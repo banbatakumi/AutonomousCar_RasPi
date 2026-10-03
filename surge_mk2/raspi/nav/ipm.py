@@ -2,7 +2,7 @@
 
 `gui/src/render/CameraView.tsx` の `drawGuide()`/`project()` が「地面座標 →
 画素」の順方向を実車で検証済みのまま持っている。ここではそれと**同一の
-ピンホールモデル**を使い、逆方向（画素 → 地面座標）を足す。カメラモデルを
+カメラモデル**を使い、逆方向（画素 → 地面座標）を足す。カメラモデルを
 ここで独自に再導出しないのは、`scan_window()` が LiDAR の点群の読み方の
 契約そのものであるのと同じ理由——片方だけ直すと、もう片方（GUI の進路
 ガイド）が古いモデルのまま表示され続ける。
@@ -15,6 +15,14 @@
 はずだが、その差は数cmで、遠方ほど誤差が拡大する IPM の性質を踏まえても
 初期スキャフォールドとしては許容範囲とする。実測較正は保留事項
 （`docs/plans` のカメラピッチ較正の項）。
+
+## レンズモデル（2026-10 魚眼化）
+
+IMX219 160° 広角レンズに替えたので、`vehicle.toml` に校正値
+（`[sensors.cam_*.fisheye]`）があれば Kannala-Brandt の魚眼モデル
+（`raspi/core/camera_model.py`）で、無ければ従来の `hfov` ピンホールで投影する。
+どちらも「画素 ⇄ カメラ座標の光線」の部分だけが違い、光線を取付ピッチで回して
+地面と交差させる部分は共通。呼び出し側は `vehicle_camera_intrinsics()` だけを使う。
 
 ## 座標系
 
@@ -29,11 +37,13 @@ from typing import NamedTuple
 
 import numpy as np
 
+from raspi.core.camera_model import FisheyeCalib, project_rays, unproject_pixels
+
 from .grid import OccGrid
 
 __all__ = ["CameraIntrinsics", "CameraExtrinsics", "camera_intrinsics",
-           "pixel_to_ground", "ground_to_pixel", "project_mask_to_grid",
-           "project_seen_to_grid"]
+           "vehicle_camera_intrinsics", "pixel_ray", "pixel_to_ground",
+           "ground_to_pixel", "project_mask_to_grid", "project_seen_to_grid"]
 
 #: `project()`/`pixel_to_ground()` 共通の下限。光軸方向の距離がこれ未満は
 #: 「カメラの真下・背後」とみなして解を捨てる（`CameraView.tsx` の `zc < 0.15` と同じ）
@@ -41,11 +51,23 @@ _MIN_ZC = 0.15
 
 
 class CameraIntrinsics(NamedTuple):
-    """内部パラメータ。`camera_intrinsics()` が作る。"""
+    """内部パラメータ。`camera_intrinsics()` が作る。
 
-    f: float            #: 焦点距離 [px]
+    `k` が None ならピンホール（未校正。`hfov` からの近似）、4要素なら
+    Kannala-Brandt の魚眼（`raspi/core/camera_model.py`、校正済み）。
+    """
+
+    f: float            #: 水平の焦点距離 [px]（fx）
     cx: float           #: 光軸の水平画素位置
     principal_y: float  #: 光軸の垂直画素位置（下端クロップぶん下にずれる）
+    #: 垂直の焦点距離 [px]（fy）。None なら `f` と同じ（正方画素のピンホール）
+    fy: float | None = None
+    #: 魚眼の歪み係数 (k1..k4)。None ならピンホール
+    k: tuple[float, float, float, float] | None = None
+
+    @property
+    def f_y(self) -> float:
+        return self.f if self.fy is None else self.fy
 
 
 class CameraExtrinsics(NamedTuple):
@@ -59,12 +81,38 @@ class CameraExtrinsics(NamedTuple):
 
 
 def camera_intrinsics(hfov_rad: float, width: int, height: int,
-                       bottom_crop: float = 0.0) -> CameraIntrinsics:
-    """`CameraView.tsx` の `drawGuide()` と同一の式。**独自に再導出しない。**"""
+                       bottom_crop: float = 0.0,
+                       fisheye: FisheyeCalib | None = None) -> CameraIntrinsics:
+    """内部パラメータを作る。
+
+    `fisheye`（校正値）があればそれを `width`×`height` に縮尺して使う。
+    無ければ `CameraView.tsx` の `drawGuide()` と同一のピンホールの式
+    （`hfov` から焦点距離を出す）。**独自に再導出しない。**
+    """
+    if fisheye is not None:
+        fx, fy, cx, cy = fisheye.scaled(width, height, bottom_crop)
+        return CameraIntrinsics(f=fx, cx=cx, principal_y=cy, fy=fy, k=fisheye.k)
     f = (width / 2.0) / math.tan(hfov_rad / 2.0)
     cx = width / 2.0
     principal_y = height / (2.0 * (1.0 - bottom_crop))
     return CameraIntrinsics(f=f, cx=cx, principal_y=principal_y)
+
+
+def vehicle_camera_intrinsics(vehicle, cam: str, width: int,
+                              height: int) -> CameraIntrinsics:
+    """`Vehicle` から前（`cam="front"`）/後カメラの内部パラメータを作る。
+
+    各ノードが `hfov`・`bottom_crop`・`fisheye` を個別に拾うと、どれか1つを
+    渡し忘れた（＝校正値を無視した）ノードが黙って古いモデルで動く。口を1つにする。
+    """
+    return camera_intrinsics(getattr(vehicle, f"cam_{cam}_hfov"), width, height,
+                             getattr(vehicle, f"cam_{cam}_bottom_crop"),
+                             getattr(vehicle, f"cam_{cam}_fisheye"))
+
+
+def pixel_ray(u, v, intr: CameraIntrinsics):
+    """画素 → カメラ座標の光線 `(x=右, y=下, z=光軸)`。numpy 配列・スカラ両対応。"""
+    return unproject_pixels(u, v, intr.f, intr.f_y, intr.cx, intr.principal_y, intr.k)
 
 
 def ground_to_pixel(x: float, y: float, intr: CameraIntrinsics,
@@ -80,63 +128,47 @@ def ground_to_pixel(x: float, y: float, intr: CameraIntrinsics,
     depth = dx * cy + dy * sy
     lateral = -dx * sy + dy * cy
 
-    f, cx, principal_y = intr
     cp, sp = math.cos(ext.pitch), math.sin(ext.pitch)
     zc = depth * cp + ext.height * sp          # 光軸方向
     if zc < _MIN_ZC:
         return None
     yc = -depth * sp + ext.height * cp          # 下向きが正
-    return cx - (lateral * f) / zc, principal_y + (yc * f) / zc
+    u, v = project_rays(-lateral, yc, zc, intr.f, intr.f_y, intr.cx,
+                        intr.principal_y, intr.k)
+    return float(u), float(v)
 
 
 def pixel_to_ground(u: float, v: float, intr: CameraIntrinsics,
                      ext: CameraExtrinsics) -> tuple[float, float] | None:
     """画素 `(u, v)` → base_link 座標の地面点 `(x, y)`。
 
-    地平線より上（地面との交点が無い）は `None`。`ground_to_pixel()` の式を
-    `depth` について解いたもの——導出は `raspi/tests/test_ipm.py` の往復
-    テストで検証する。
+    地平線より上（地面との交点が無い）は `None`。画素を光線に戻し
+    （`pixel_ray`）、取付ピッチで回して地面（カメラの `height` 下の平面）と
+    交差させる——導出は `raspi/tests/test_ipm.py` の往復テストで検証する。
     """
-    f, cx, principal_y = intr
-    p = ext.pitch
-    cp, sp = math.cos(p), math.sin(p)
-    k = (v - principal_y) / f
-    denom = sp + k * cp
-    if denom <= 1e-6:
-        return None                            # 地平線より上（地面と交わらない）
-    depth = ext.height * (cp - k * sp) / denom
-    if depth <= 0.0:
+    x, y, valid = _pixel_to_ground_vec(np.array([u], dtype=np.float64),
+                                       np.array([v], dtype=np.float64), intr, ext)
+    if not valid[0]:
         return None
-    zc = depth * cp + ext.height * sp
-    if zc < _MIN_ZC:
-        return None
-    lateral = (cx - u) * zc / f
-
-    cy, sy = math.cos(ext.yaw), math.sin(ext.yaw)
-    x = ext.x + depth * cy - lateral * sy
-    y = ext.y + depth * sy + lateral * cy
-    return x, y
+    return float(x[0]), float(y[0])
 
 
 def _pixel_to_ground_vec(u: np.ndarray, v: np.ndarray, intr: CameraIntrinsics,
                           ext: CameraExtrinsics
                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """`pixel_to_ground()` のベクトル化版。`(x, y, valid)` を返す。"""
-    f, cx, principal_y = intr
     cp, sp = math.cos(ext.pitch), math.sin(ext.pitch)
-    u = u.astype(np.float64)
-    v = v.astype(np.float64)
+    rx, ry, rz = pixel_ray(u.astype(np.float64), v.astype(np.float64), intr)
 
-    k = (v - principal_y) / f
-    denom = sp + k * cp
-    valid = denom > 1e-6
-    safe_denom = np.where(valid, denom, 1.0)
-    depth = ext.height * (cp - k * sp) / safe_denom
+    # カメラ座標の光線 → ヨーだけ戻したローカル座標（奥行き・下向き・左）
+    down = rz * sp + ry * cp
+    valid = down > 1e-6                         # 地平線より上は地面と交わらない
+    t = ext.height / np.where(valid, down, 1.0)
+    depth = t * (rz * cp - ry * sp)
     valid &= depth > 0.0
-
-    zc = depth * cp + ext.height * sp
+    zc = t * rz                                 # 光軸方向の距離
     valid &= zc >= _MIN_ZC
-    lateral = (cx - u) * zc / f
+    lateral = -t * rx
 
     cy, sy = math.cos(ext.yaw), math.sin(ext.yaw)
     x = ext.x + depth * cy - lateral * sy

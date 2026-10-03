@@ -37,7 +37,7 @@ import time
 
 from .cleanup import quiet_close
 
-__all__ = ["make_encoder", "RingJpeg", "STALE_GAP"]
+__all__ = ["make_encoder", "encode_png", "RingJpeg", "STALE_GAP"]
 
 #: `ImageRef.ring_seq` と手元の `write_seq` がこれ以上開いていたら、
 #: 掴んでいるのは作り直される前の共有メモリだと判断して attach し直す。
@@ -80,6 +80,33 @@ def make_encoder(quality: int):
         return enc, "pillow"
     except ImportError:
         return None, None
+
+
+def encode_png(arr, colorspace: str) -> bytes:
+    """画像配列 → PNG（無劣化）。撮影ボタン（`telemetry_node` の `/snapshot/`）用。
+
+    **校正に使う写真なので JPEG にしない。** 角点検出はブロックノイズの影響を受ける。
+    cv2 があればそれで（BGR 前提）、無ければ Pillow（RGB 前提）で書く。
+    """
+    try:
+        import cv2
+
+        if colorspace == "RGB":
+            arr = arr[:, :, ::-1]
+        ok, buf = cv2.imencode(".png", arr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        if not ok:
+            raise RuntimeError("cv2.imencode が失敗した")
+        return buf.tobytes()
+    except ImportError:
+        from io import BytesIO
+
+        from PIL import Image
+
+        if colorspace == "BGR":
+            arr = arr[:, :, ::-1]
+        out = BytesIO()
+        Image.fromarray(arr).save(out, "PNG", compress_level=1)
+        return out.getvalue()
 
 
 class RingJpeg:
@@ -142,8 +169,8 @@ class RingJpeg:
     def ok(self) -> bool:
         return self.encode is not None
 
-    def encode_latest(self, shm_name: str,
-                      expect_seq: int | None = None) -> tuple[bytes, int] | None:
+    def encode_latest(self, shm_name: str, expect_seq: int | None = None,
+                      transform=None) -> tuple[bytes, int] | None:
         """`(JPEG, t_capture_ns)`。読めなければ None。**例外は投げない。**
 
         記録や配信のために毎周叩かれるので、1枚失敗しただけでノードを
@@ -151,25 +178,13 @@ class RingJpeg:
 
         :param expect_seq: 書き手が今どこまで進んでいるか（`ImageRef.ring_seq`）。
             渡すと**共有メモリが作り直されたことを検出**して attach し直す
+        :param transform: エンコード前に画像へ掛ける関数（補正映像の remap）。
+            記録（logger_node）は常に生画像なので渡さない
         """
         if self.encode is None:
             return None
         try:
-            from ..bus import FrameRing
-
-            ring = self._rings.get(shm_name)
-            # **差の絶対値で見る。** 作り直された共有メモリは `write_seq` が 0 から
-            # 数え直すので、書き手の方が「小さい」形でズレる。片側だけ見ると
-            # 一番ありがちな再起動のケースを取りこぼす
-            if (ring is not None and expect_seq is not None
-                    and abs(expect_seq - ring.write_seq) > STALE_GAP):
-                # 掴んでいるのは作り直される前の共有メモリ。
-                # **放置すると同じ画像を延々と記録し続ける**
-                self._drop(shm_name)
-                self.reattached += 1
-                ring = None
-            if ring is None:
-                ring = self._rings[shm_name] = FrameRing.attach(shm_name)
+            ring = self._ring(shm_name, expect_seq)
             frame = ring.latest()
             if frame is None:
                 return None
@@ -177,6 +192,10 @@ class RingJpeg:
             # `fmt` は**メモリ上の実際のバイト順**。名前を信じて入れ替えない
             colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
             t0 = time.process_time()
+            if transform is not None:
+                # 補正映像（魚眼 → 仮想ピンホール）。remap は新しい配列を作るので
+                # 以降は共有メモリを読まない。検証（`still_valid`）は下で同じように効く
+                arr = transform(arr)
             jpg = self.encode(arr, colorspace)
             self.encode_cpu_s += time.process_time() - t0
             self.encoded += 1
@@ -192,6 +211,51 @@ class RingJpeg:
             # 掴み直せば直る類（共有メモリの作り直し・消失）があるので捨てておく
             self._drop(shm_name)
             return None
+
+    def read_latest(self, shm_name: str, expect_seq: int | None = None):
+        """最新フレームの**コピー**を `(配列, colorspace, FrameDesc)` で返す。読めなければ None。
+
+        撮影ボタン（`/snapshot/`）用。`encode_latest` と同じ読み方（最新スロット →
+        コピー → `still_valid` で検証）で、上書きに当たったら数回読み直す。
+        """
+        import numpy as np
+
+        try:
+            ring = self._ring(shm_name, expect_seq)
+            for _ in range(3):
+                frame = ring.latest()
+                if frame is None:
+                    return None
+                arr = np.array(frame.as_array(), copy=True)
+                if frame.still_valid():
+                    colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
+                    return arr, colorspace, frame.desc
+                self.torn += 1
+            return None
+        except Exception as e:
+            self.errors += 1
+            self.last_error = f"{type(e).__name__}: {e}"
+            self._drop(shm_name)
+            return None
+
+    def _ring(self, shm_name: str, expect_seq: int | None):
+        """名前で attach 済みのリングを返す（作り直しを検出したら attach し直す）。"""
+        from ..bus import FrameRing
+
+        ring = self._rings.get(shm_name)
+        # **差の絶対値で見る。** 作り直された共有メモリは `write_seq` が 0 から
+        # 数え直すので、書き手の方が「小さい」形でズレる。片側だけ見ると
+        # 一番ありがちな再起動のケースを取りこぼす
+        if (ring is not None and expect_seq is not None
+                and abs(expect_seq - ring.write_seq) > STALE_GAP):
+            # 掴んでいるのは作り直される前の共有メモリ。
+            # **放置すると同じ画像を延々と記録し続ける**
+            self._drop(shm_name)
+            self.reattached += 1
+            ring = None
+        if ring is None:
+            ring = self._rings[shm_name] = FrameRing.attach(shm_name)
+        return ring
 
     def _drop(self, shm_name: str) -> None:
         ring = self._rings.pop(shm_name, None)

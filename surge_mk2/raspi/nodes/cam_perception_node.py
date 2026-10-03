@@ -100,9 +100,9 @@ from raspi.nav.grid import OccGrid  # noqa: E402
 from raspi.nav.ipm import (  # noqa: E402
     CameraExtrinsics,
     CameraIntrinsics,
-    camera_intrinsics,
     project_mask_to_grid,
     project_seen_to_grid,
+    vehicle_camera_intrinsics,
 )
 
 __all__ = ["SegmentationModel", "CamPerceptionNode"]
@@ -332,11 +332,10 @@ class CamPerceptionNode:
         # **内部パラメータはマスクの実解像度から毎回作る。** モデル入力は
         # 生フレームとは別の解像度（例: 640x480 → 224x224）にリサイズされて
         # いるため、生フレーム基準の f/cx/principal_y をそのまま使うとズレる。
-        # `camera_intrinsics()` の式は幅・高さに比例するので、リサイズが
-        # アスペクト比を保っている限りこれで正しく縮尺が揃う
+        # `camera_intrinsics()` は縦横の倍率を別々に掛ける（魚眼の校正値も
+        # `FisheyeCalib.scaled()` で同じ）ので、これで正しく縮尺が揃う
         h, w = drivable.shape
-        intr = camera_intrinsics(self.vehicle.cam_front_hfov, w, h,
-                                 self.vehicle.cam_front_bottom_crop)
+        intr = vehicle_camera_intrinsics(self.vehicle, "front", w, h)
 
         grid = OccGrid(resolution=self.grid_resolution, size_m=self.grid_size_m)
         occ = project_mask_to_grid(drivable, intr, ext, grid, stride=2)

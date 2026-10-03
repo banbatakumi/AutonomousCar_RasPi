@@ -76,7 +76,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_LINE_CAM,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.ipm import CameraExtrinsics, camera_intrinsics, pixel_to_ground  # noqa: E402
+from raspi.nav.ipm import CameraExtrinsics, pixel_to_ground, vehicle_camera_intrinsics  # noqa: E402
 
 __all__ = ["LinePerceptionNode", "white_mask"]
 
@@ -222,8 +222,7 @@ class LinePerceptionNode:
         if vs is not None and vs.imu_ok:
             pitch = self.base_ext.pitch - vs.pitch
         ext = self.base_ext._replace(pitch=pitch)
-        intr = camera_intrinsics(self.vehicle.cam_front_hfov, w, h,
-                                 self.vehicle.cam_front_bottom_crop)
+        intr = vehicle_camera_intrinsics(self.vehicle, "front", w, h)
 
         st = LineScan(t_capture=t_capture_ns, seq=seq)
         coverages: list[float] = []

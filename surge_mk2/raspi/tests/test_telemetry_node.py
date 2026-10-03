@@ -401,6 +401,103 @@ def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mod
     return fake
 
 
+class TestServeSnapshot(unittest.TestCase):
+    """`GET /snapshot/<cam>.png`（📷 撮影ボタン）。共有メモリの最新フレームを PNG で返す。"""
+
+    def setUp(self):
+        from raspi.bus import FrameRing
+        from raspi.core.jpeg import RingJpeg
+
+        self.name = f"surge_test_snap_{id(self)}"
+        self.ring = FrameRing.create(self.name, 8, 6, "BGR888", n_slots=2)
+        img = np.zeros((6, 8, 3), dtype=np.uint8)
+        img[:, :, 2] = 200                       # メモリ上 BGR の R = 赤
+        desc = self.ring.write(img, t_capture_ns=1, frame_id=0)
+        self.jpeg = RingJpeg(70)
+        ref = SimpleNamespace(shm_name=self.name, ring_seq=desc.seq)
+        self.fake = SimpleNamespace(_jpeg=self.jpeg,
+                                    sub=SimpleNamespace(latest={tn.TOPIC_IMAGE_FRONT: ref}))
+
+    def tearDown(self):
+        self.jpeg.close()
+        self.ring.unlink()
+
+    def test_returns_png_with_size_and_crop_in_filename(self):
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/front.png")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.body.startswith(b"\x89PNG"))
+        name = resp.headers["X-Surge-Filename"]
+        self.assertTrue(name.startswith("surge_front_8x6_crop"), name)
+        self.assertIn(name, resp.headers["Content-Disposition"])
+
+    def test_png_keeps_colors(self):
+        """メモリ上の BGR を名前どおり扱い、PNG では赤が赤のまま残る。"""
+        try:
+            import cv2
+        except ImportError:
+            self.skipTest("cv2 が無い")
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/front.png")
+        bgr = cv2.imdecode(np.frombuffer(resp.body, np.uint8), cv2.IMREAD_COLOR)[0, 0]
+        self.assertEqual(tuple(int(v) for v in bgr), (0, 0, 200))
+
+    def test_camera_without_frames_is_404(self):
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/rear.png")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_unknown_camera_is_404(self):
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/mask.png")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_no_camera_is_503(self):
+        self.fake._jpeg = None
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/front.png")
+        self.assertEqual(resp.status_code, 503)
+
+
+class TestUndistortSetting(unittest.TestCase):
+    """配信映像の魚眼補正（`camera` メッセージの `undistort`、2026-10-03）。"""
+
+    def _fake(self):
+        calls = []
+        fake = SimpleNamespace(
+            _cam_undistort=False, camera_hz=30.0,
+            _clamp_cam_hz=tn.TelemetryServer._clamp_cam_hz,
+            _save_camera_conf=lambda: calls.append("save"),
+            _publish_cam_config=lambda: calls.append("pub"))
+        return fake, calls
+
+    def test_toggle_is_saved(self):
+        fake, calls = self._fake()
+        tn.TelemetryServer._on_camera(fake, {"type": "camera", "undistort": True})
+        self.assertTrue(fake._cam_undistort)
+        self.assertIn("save", calls)
+
+    def test_non_bool_is_ignored(self):
+        fake, _ = self._fake()
+        tn.TelemetryServer._on_camera(fake, {"type": "camera", "undistort": "yes"})
+        self.assertFalse(fake._cam_undistort)
+
+    def test_encode_uses_undistorter_only_when_on_and_calibrated(self):
+        seen = {}
+
+        class FakeJpeg:
+            def encode_latest(self, name, expect_seq=None, transform=None):
+                seen["transform"] = transform
+                return b"jpg", 0
+
+        undist = object()
+        fake = SimpleNamespace(_jpeg=FakeJpeg(), _cam_undistort=True,
+                               _undistorters={"front": undist})
+        ref = SimpleNamespace(shm_name="x", ring_seq=1)
+        tn.TelemetryServer._encode_frame(fake, ref, "front")
+        self.assertIs(seen["transform"], undist)
+        tn.TelemetryServer._encode_frame(fake, ref, "rear")       # 未校正
+        self.assertIsNone(seen["transform"])
+        fake._cam_undistort = False
+        tn.TelemetryServer._encode_frame(fake, ref, "front")
+        self.assertIsNone(seen["transform"])
+
+
 class TestVehicleArmed(unittest.TestCase):
     """`_vehicle_armed`（ARM/DISARM連動カメラ節電の判定元。2026-09-03）。"""
 
