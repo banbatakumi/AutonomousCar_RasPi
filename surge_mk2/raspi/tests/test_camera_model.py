@@ -240,6 +240,18 @@ k = [0.01, 0.0, 0.0, 0.0]
         self.assertIsNone(v.cam_front_fisheye)          # 純正は未校正 → ピンホール
         self.assertIsNone(vehicle_camera_intrinsics(v, "front", 640, 360).k)
 
+    def test_mount_pose_is_per_lens(self):
+        """取付位置・姿勢もプロファイルごと。レンズを替えても替える前の実測値が残る。"""
+        from raspi.core.vehicle import resolve_lens
+        cam = {"lens": "wide160", "lenses": {
+            "stock": {"x": 0.097, "z": 0.085, "pitch": 0.0},
+            "wide160": {"x": 0.1, "z": 0.07, "pitch": 0.2}}}
+        r = resolve_lens(cam)
+        self.assertEqual((r["x"], r["z"], r["pitch"]), (0.1, 0.07, 0.2))
+        cam["lens"] = "stock"
+        r = resolve_lens(cam)
+        self.assertEqual((r["x"], r["z"], r["pitch"]), (0.097, 0.085, 0.0))
+
     def test_unknown_lens(self):
         from raspi.core.vehicle import resolve_lens
         cam = {"x": 0.1, "lens": "nope", "lenses": {"stock": {"hfov": 1.0}}}

@@ -186,20 +186,18 @@ yaw = 0.0
 mirrored = true
 
 [sensors.cam_front]
-x = 0.097
-y = 0.0
-z = 0.085
-roll = 0.0
-pitch = 0.0                   # 下向きが正。取り付け角度そのもの＝一度決めたら変わらない
-yaw = 0.0
 # ★付いているレンズ。下の `[sensors.cam_front.lenses.<名前>]` から選ぶ。
 # **レンズを付け替えたらここだけ直して `tools/deploy.sh --restart`。**
 #   "stock"   … 純正 IMX219（水平 ≒66°）
 #   "wide160" … IMX219 160° 広角（魚眼）
-# 名前に `_` は使わない（📷 のファイル名に入る）。取付位置・姿勢（上）はレンズに依らない
+# 名前に `_` は使わない（📷 のファイル名に入る）。
+# **取付位置・姿勢（x y z roll pitch yaw）もレンズごとのプロファイルに持つ**（カメラモジュールを
+# 替えるとステーも変わるので、替える前の実測値を消さずに残すため）
 lens = "wide160"
 
 # ── レンズごとの値。項目の意味 ──
+# x y z          [m] base_link（後輪車軸中心）基準の取付位置。z は路面からの高さ（レンズ中心）
+# roll pitch yaw [rad] 取付姿勢。pitch は下向きが正。取り付け角度そのもの＝付け直さない限り変わらない
 # hfov           [rad] 水平画角。**`fisheye`（校正値）が無い間だけ**ピンホール近似に使う。
 #                ピンホールは 180° に届かないので、校正後もここは書き換えない
 #                （実測の画角は `fisheye.hfov_deg` に参考値として入る）
@@ -212,30 +210,48 @@ lens = "wide160"
 #                無ければ未校正＝`hfov` のピンホール
 
 [sensors.cam_front.lenses.stock]
+x = 0.097
+y = 0.0
+z = 0.085
+roll = 0.0
+pitch = 0.0
+yaw = 0.0
 hfov = 1.152                  # ≒66°
 bottom_crop = 0.25            # 下1/4
 undistort_hfov = 1.152        # 歪みが小さいので補正しても画角はほぼそのまま
 
 [sensors.cam_front.lenses.wide160]
+x = 0.097                     # ★仮（stock と同じ）。実測して直す
+y = 0.0
+z = 0.085                     # ★仮
+roll = 0.0
+pitch = 0.0                   # ★仮
+yaw = 0.0
 hfov = 2.23                   # ≒128°。公称（対角160°）からの概算。校正するまでの仮
 bottom_crop = 0.25            # ★仮（純正と同じ）。画角が変わりボンネットの写り方も変わるので実機で見直す
 undistort_hfov = 1.92         # ≒110°
 
 [sensors.cam_rear]
+lens = "wide160"              # 意味は cam_front と同じ（前後で別のレンズにしてよい）
+
+[sensors.cam_rear.lenses.stock]
 x = 0.044
 y = 0.0
 z = 0.085
 roll = 0.0
 pitch = 0.0
 yaw = 3.14159265
-lens = "wide160"              # 意味は cam_front と同じ（前後で別のレンズにしてよい）
-
-[sensors.cam_rear.lenses.stock]
 hfov = 1.152
 bottom_crop = 0.0625          # 下1/16
 undistort_hfov = 1.152
 
 [sensors.cam_rear.lenses.wide160]
+x = 0.044                     # ★仮（stock と同じ）。実測して直す
+y = 0.0
+z = 0.085                     # ★仮
+roll = 0.0
+pitch = 0.0                   # ★仮
+yaw = 3.14159265
 hfov = 2.23                   # 仮（cam_front と同じ）
 bottom_crop = 0.0625          # ★仮。実機で見直す
 undistort_hfov = 1.92

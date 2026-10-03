@@ -424,14 +424,15 @@ COMMAND・センサのノイズ）で回して、解析が真値を復元でき�
 
 ```toml
 [sensors.cam_front]
-x = 0.097 …                    # 取付位置・姿勢はレンズに依らない
 lens = "wide160"               # ← 付いているレンズ。"stock"（純正 ≒66°）に変えれば戻る
 
-[sensors.cam_front.lenses.stock]      # hfov・bottom_crop・undistort_hfov
+[sensors.cam_front.lenses.stock]      # x y z roll pitch yaw（取付位置・姿勢）・hfov・bottom_crop・undistort_hfov
 [sensors.cam_front.lenses.wide160]
 [sensors.cam_front.lenses.wide160.fisheye]   # 校正値（tools/cam_calib が書く）
 ```
 
+- **取付位置・姿勢もプロファイルに持つ**（モジュールを替えるとステーも変わるため。
+  替える前の実測値が残る）。`z` は路面からレンズ中心まで、`pitch` は下向きが正
 - **戻すとき**: `lens` を書き換えて `tools/deploy.sh --restart`。両方のレンズの校正値・
   `bottom_crop` が残っているので、他は触らなくてよい。前後で別のレンズにしてもよい
 - **別のレンズを足すとき**: `[sensors.cam_*.lenses.<名前>]` を足す（名前は英数字と `-`。
