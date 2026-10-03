@@ -95,7 +95,7 @@ PWM デューティやトルク配分は一切送らない。
 
 | ピン／接続 | 用途 |
 |---|---|
-| CSI ×2 | 前方 / 後方カメラ（`picamera2`）。IMX219 **160° 広角（魚眼）**。内部パラメータはチェッカーボードで校正し `config/vehicle.toml` の `[sensors.cam_*.fisheye]` に置く（[`development.md` §4.6](development.md#46-カメラ校正魚眼レンズ)） |
+| CSI ×2 | 前方 / 後方カメラ（`picamera2`）。IMX219 **160° 広角（魚眼）**。内部パラメータはチェッカーボードで校正し `config/vehicle.toml` のレンズのプロファイル（`lens = "wide160"` / `"stock"` で切替）に置く（[`development.md` §4.6](development.md#46-カメラ校正魚眼レンズ)） |
 | **GPIO6** | STM32 と接続。**緊急停止ハートビート**（100Hz 矩形波） |
 | GPIO14 / GPIO15 | UART TX / RX ← → STM32 |
 | GPIO18 / GPIO19 / GPIO13 | ブザー / LED緑 / LED赤 |

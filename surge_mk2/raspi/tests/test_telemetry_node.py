@@ -427,7 +427,8 @@ class TestServeSnapshot(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.body.startswith(b"\x89PNG"))
         name = resp.headers["X-Surge-Filename"]
-        self.assertTrue(name.startswith("surge_front_8x6_crop"), name)
+        lens = tn._SAFETY.cam_front_lens
+        self.assertTrue(name.startswith(f"surge_front_{lens + '_' if lens else ''}8x6_crop"), name)
         self.assertIn(name, resp.headers["Content-Disposition"])
 
     def test_png_keeps_colors(self):

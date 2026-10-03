@@ -2,7 +2,8 @@
 
     .venv/bin/python -m tools.cam_calib.gui
 
-1. カメラ（前/後）・ボードの寸法・写真のフォルダ（既定 ~/Downloads）を選ぶ
+1. カメラ（前/後）・レンズ（`vehicle.toml` の `lenses.<名前>`。既定は今選ばれているもの）・
+   ボードの寸法・写真のフォルダ（既定 ~/Downloads）を選ぶ
 2. 「写真を読み込む」で 📷 の写真（`surge_<cam>_…png`）を拾い、角点を検出する
 3. 一覧で使わない写真を外し（ダブルクリックで切替）、「校正」
 4. 結果（再投影誤差・画面カバー率・補正前後のプレビュー）を見て、
@@ -23,7 +24,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .calib import (DEFAULT_TOML, CalibResult, Detection, calibrate, coverage, detect,
-                    parse_name, undistort_preview, write_vehicle_toml)
+                    lens_profiles, parse_name, undistort_preview, write_vehicle_toml)
 
 #: プレビューの最大幅 [px]（元画像と補正画像を横に並べた全体）
 _PREVIEW_W = 900
@@ -36,6 +37,8 @@ class CamCalibApp(tk.Tk):
         self.geometry("980x860")
 
         self.cam = tk.StringVar(value="front")
+        #: 校正するレンズ（書き込み先のプロファイル）。"" ＝ プロファイルを使わない書き方
+        self.lens = tk.StringVar(value="")
         self.cols = tk.IntVar(value=9)
         self.rows = tk.IntVar(value=6)
         self.square_mm = tk.DoubleVar(value=25.0)
@@ -57,7 +60,16 @@ class CamCalibApp(tk.Tk):
         top.pack(fill="x")
         ttk.Label(top, text="カメラ").grid(row=0, column=0, sticky="w")
         for i, (v, t) in enumerate((("front", "前"), ("rear", "後"))):
-            ttk.Radiobutton(top, text=t, value=v, variable=self.cam).grid(row=0, column=1 + i)
+            ttk.Radiobutton(top, text=t, value=v, variable=self.cam,
+                            command=self._refresh_lenses).grid(row=0, column=1 + i)
+        lens_box = ttk.Frame(top)
+        lens_box.grid(row=1, column=0, columnspan=10, sticky="w", pady=(4, 0))
+        ttk.Label(lens_box, text="レンズ").pack(side="left")
+        self.lens_combo = ttk.Combobox(lens_box, textvariable=self.lens, width=14, state="readonly")
+        self.lens_combo.pack(side="left", padx=4)
+        self.lens_note = ttk.Label(lens_box, foreground="gray")
+        self.lens_note.pack(side="left")
+        self.lens_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_lenses(keep=True))
         ttk.Label(top, text="ボード 内側の角点").grid(row=0, column=3, padx=(16, 4))
         ttk.Spinbox(top, from_=3, to=20, width=4, textvariable=self.cols).grid(row=0, column=4)
         ttk.Label(top, text="×").grid(row=0, column=5)
@@ -108,6 +120,28 @@ class CamCalibApp(tk.Tk):
         self.preview = ttk.Label(self, anchor="center", text="（写真を選ぶと補正前後を並べて表示）")
         self.preview.pack(fill="both", expand=True, padx=8)
         ttk.Label(self, textvariable=self.status, foreground="gray").pack(fill="x", padx=8, pady=4)
+        self._refresh_lenses()
+
+    def _refresh_lenses(self, keep: bool = False) -> None:
+        """`vehicle.toml` のレンズのプロファイルを読み直して選択肢にする。
+
+        既定は今そのカメラに選ばれているレンズ（＝付いているはずのレンズ）。
+        """
+        try:
+            current, names = lens_profiles(self.cam.get(), self.toml_path.get())
+        except Exception as e:                              # noqa: BLE001
+            current, names = "", []
+            self.lens_note.config(text=f"vehicle.toml を読めない: {e}")
+        self.lens_combo.config(values=names, state="readonly" if names else "disabled")
+        if not keep or self.lens.get() not in names:
+            self.lens.set(current if current in names else (names[0] if names else ""))
+        if not names:
+            self.lens_note.config(text="（vehicle.toml にレンズのプロファイルが無い）")
+        elif self.lens.get() == current:
+            self.lens_note.config(text="今付いているレンズ（vehicle.toml の lens）")
+        else:
+            self.lens_note.config(
+                text=f"★今選ばれているのは \"{current}\"。書き込んでも lens を変えるまで使われない")
 
     # ── 操作 ──
 
@@ -139,7 +173,10 @@ class CamCalibApp(tk.Tk):
     def _load(self) -> None:
         cam = self.cam.get()
         folder = Path(self.folder.get()).expanduser()
-        paths = sorted(p for p in folder.glob(f"surge_{cam}_*.png") if parse_name(p))
+        lens = self.lens.get()
+        # 別レンズで撮った写真は除く（名前にレンズが無い古い写真は残す）
+        paths = sorted(p for p in folder.glob(f"surge_{cam}_*.png")
+                       if (n := parse_name(p)) and (not lens or n.lens in ("", lens)))
         if not paths:
             messagebox.showwarning("写真が無い",
                                    f"{folder} に surge_{cam}_*.png がありません。\n"
@@ -224,7 +261,8 @@ class CamCalibApp(tk.Tk):
         good = "良好" if res.rms < 0.5 else "やや大きい（ブレ・ピンボケ・ボードのたわみを確認）"
         self.summary.delete("1.0", "end")
         self.summary.insert("end", "\n".join([
-            f"{self.cam.get()} カメラ  {c.width}x{c.height}（クロップ前）  使用 {len(res.per_image)} 枚"
+            f"{self.cam.get()} カメラ・レンズ {self.lens.get() or '（名前なし）'}  "
+            f"{c.width}x{c.height}（クロップ前）  使用 {len(res.per_image)} 枚"
             f"  除外 {len(res.rejected)} 枚",
             f"再投影誤差 RMS {res.rms:.3f}px — {good}（目安 0.5px 未満）",
             f"fx={c.fx:.2f}  fy={c.fy:.2f}  cx={c.cx:.2f}  cy={c.cy:.2f}",
@@ -263,13 +301,15 @@ class CamCalibApp(tk.Tk):
         if self.result is None:
             return
         cam = self.cam.get()
+        lens = self.lens.get()
+        where = f"lenses.{lens}." if lens else ""
         if not messagebox.askyesno(
                 "vehicle.toml に書き込む",
-                f"[sensors.cam_{cam}.fisheye] を書き込み、config/generate.py を実行します。\n"
+                f"[sensors.cam_{cam}.{where}fisheye] を書き込み、config/generate.py を実行します。\n"
                 f"（再投影誤差 {self.result.rms:.3f}px）"):
             return
         try:
-            write_vehicle_toml(cam, self.result, self.toml_path.get())
+            write_vehicle_toml(cam, self.result, self.toml_path.get(), lens=lens or None)
         except Exception as e:                              # noqa: BLE001
             messagebox.showerror("書き込みに失敗", str(e))
             return

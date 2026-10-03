@@ -20,8 +20,8 @@ cv2 = pytest.importorskip("cv2")
 
 from raspi.core.camera_model import FisheyeCalib, project_rays, unproject_pixels  # noqa: E402
 from tools.cam_calib.board import make_board  # noqa: E402
-from tools.cam_calib.calib import (calibrate, coverage, detect, parse_name,  # noqa: E402
-                                   write_vehicle_toml)
+from tools.cam_calib.calib import (calibrate, coverage, detect, lens_profiles,  # noqa: E402
+                                   parse_name, write_vehicle_toml)
 
 BOARD = (8, 5)              # 内側の角点（偶数x奇数で向きが一意）
 SQUARE = 0.03               # [m]
@@ -117,7 +117,11 @@ def shots():
 
 
 def test_parse_name():
-    assert parse_name("surge_rear_640x450_crop0.0625_20261003_101010123.png") == ("rear", 0.0625)
+    n = parse_name("surge_rear_wide160_640x450_crop0.0625_20261003_101010123.png")
+    assert (n.cam, n.lens, n.crop) == ("rear", "wide160", 0.0625)
+    # レンズ名の無い名前（プロファイルを使わない設定・古い写真）も読める
+    n = parse_name("surge_front_640x360_crop0.25_20261003_101010123.png")
+    assert (n.cam, n.lens, n.crop) == ("front", "", 0.25)
     assert parse_name("IMG_0001.png") is None
 
 
@@ -148,26 +152,69 @@ def test_too_few_images_is_an_error(shots):
         calibrate(dets, BOARD, SQUARE)
 
 
-def test_write_vehicle_toml_keeps_comments(shots, tmp_path):
+@pytest.fixture(scope="module")
+def result(shots):
+    return calibrate([detect(p, BOARD) for p in shots], BOARD, SQUARE)
+
+
+@pytest.fixture
+def toml(tmp_path):
     from tools.cam_calib.calib import DEFAULT_TOML
+    p = tmp_path / "vehicle.toml"
+    p.write_text(DEFAULT_TOML.read_text(encoding="utf-8"), encoding="utf-8")
+    return p
+
+
+def _header_count(path, header):
+    return sum(ln.strip() == header for ln in path.read_text(encoding="utf-8").splitlines())
+
+
+def test_write_goes_into_selected_lens_profile(result, toml):
     from raspi.core.vehicle import Vehicle
 
-    dets = [detect(p, BOARD) for p in shots]
-    res = calibrate(dets, BOARD, SQUARE)
-    toml = tmp_path / "vehicle.toml"
-    toml.write_text(DEFAULT_TOML.read_text(encoding="utf-8"), encoding="utf-8")
-    write_vehicle_toml("front", res, toml, regenerate=False)
+    current, names = lens_profiles("front", toml)
+    assert current in names
+    assert write_vehicle_toml("front", result, toml, regenerate=False) == current
     text = toml.read_text(encoding="utf-8")
-    assert "下端カット率（下1/4）" in text            # 既存のコメントが残る
+    assert "下1/4" in text                                # 既存のコメントが残る
     v = Vehicle.load(toml)
+    assert v.cam_front_lens == current
     assert v.cam_front_fisheye is not None
-    assert v.cam_front_fisheye.fx == pytest.approx(res.calib.fx, abs=1e-3)
+    assert v.cam_front_fisheye.fx == pytest.approx(result.calib.fx, abs=1e-3)
     assert v.cam_rear_fisheye is None
-    assert v.cam_front_hfov == pytest.approx(1.152)   # 未校正時の近似は触らない
     # 2回書いても表が増えない（上書きされる）
-    write_vehicle_toml("front", res, toml, regenerate=False)
-    lines = toml.read_text(encoding="utf-8").splitlines()
-    assert sum(ln.strip() == "[sensors.cam_front.fisheye]" for ln in lines) == 1
+    write_vehicle_toml("front", result, toml, regenerate=False)
+    assert _header_count(toml, f"[sensors.cam_front.lenses.{current}.fisheye]") == 1
+
+
+def test_switching_lens_keeps_both_calibrations(result, toml):
+    """別のレンズに書いても選ばれているレンズの値は変わらず、`lens` を変えると切り替わる。"""
+    import tomlkit
+
+    from raspi.core.vehicle import Vehicle
+
+    current, names = lens_profiles("front", toml)
+    other = next(n for n in names if n != current)
+    write_vehicle_toml("front", result, toml, lens=other, regenerate=False)
+    assert Vehicle.load(toml).cam_front_fisheye is None      # 選ばれていないので使われない
+    doc = tomlkit.parse(toml.read_text(encoding="utf-8"))
+    doc["sensors"]["cam_front"]["lens"] = other
+    toml.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    v = Vehicle.load(toml)
+    assert v.cam_front_lens == other
+    assert v.cam_front_fisheye is not None
+
+
+def test_unknown_lens_is_refused(result, toml):
+    with pytest.raises(ValueError):
+        write_vehicle_toml("front", result, toml, lens="no-such-lens", regenerate=False)
+
+
+def test_mixed_lens_photos_are_refused(shots, tmp_path):
+    dets = [detect(p, BOARD) for p in shots]
+    dets[0].lens = "stock"
+    with pytest.raises(ValueError, match="レンズ"):
+        calibrate(dets, BOARD, SQUARE)
 
 
 def test_board_image():

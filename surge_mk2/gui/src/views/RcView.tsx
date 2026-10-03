@@ -122,7 +122,7 @@ import type { ControlChannel } from '../ws/control'
  * 配信される画像はここから `bottomCrop` 分だけ下端を切ったもの（後述）。 */
 const SENSOR_ASPECT = 4 / 3
 /** 最初のフレームが届くまでの仮の比率。前方カメラは下端 25%（`vehicle.toml`
- * `sensors.cam_front.bottom_crop`）を切って配信するため、実際の映像は 4:3 より
+ * 選ばれたレンズの `bottom_crop`）を切って配信するため、実際の映像は 4:3 より
  * 横長（≈16:9）になる。**ここを単純な 4:3 のままにしていたところ、映像を
  * 受信できていない間（起動直後・接続断中）だけ実際より縦長の箱として計算され、
  * `.rc-cams` が高さ律速に陥って幅が縮み、その分だけ車体図の列（`grid-area:

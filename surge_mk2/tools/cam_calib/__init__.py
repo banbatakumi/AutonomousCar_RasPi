@@ -8,7 +8,7 @@
 
 1. 印刷用ボードを作って印刷する（`board.py`。印刷後に1マスを定規で測る）
 2. GUI（ブラウザ）のタブバーの 📷 で 20 枚前後撮る → Mac の ~/Downloads に落ちる
-3. このツールで校正 → `config/vehicle.toml` の `[sensors.cam_*.fisheye]` に書き戻し、
+3. このツールで校正 → `config/vehicle.toml` の、写真を撮ったレンズのプロファイル `[sensors.cam_*.lenses.<レンズ>.fisheye]` に書き戻し、
    `config/generate.py`（GUI 用の定数）も再生成する
 4. `tools/deploy.sh --restart` で Pi に反映（GUI の再ビルドとノードの再起動まで入る）
 

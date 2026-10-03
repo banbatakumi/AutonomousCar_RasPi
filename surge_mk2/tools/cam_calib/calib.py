@@ -9,7 +9,14 @@
 `raspi/core/camera_model.py` の docstring のとおり、クロップは「フル画像の下を切っただけ」
 なので、**写真の画素座標はそのままフル画像の画素座標**として扱える。校正には
 クロップ前の大きさ `(幅, 高さ / (1 - crop))` を渡し、主点 `cy` もフル画像の座標で求まる。
-クロップ率はファイル名（`surge_front_640x360_crop0.25_…png`）から読む。
+クロップ率はファイル名（`surge_front_wide160_640x360_crop0.25_…png`）から読む。
+
+## 校正値はレンズのプロファイルごと
+
+`vehicle.toml` はレンズを `[sensors.cam_*.lenses.<名前>]` に分けて持ち、`lens = "<名前>"` で
+選ぶ（`raspi/core/vehicle.py` の `resolve_lens`）。校正値はその**プロファイルの中**
+（`[….lenses.<名前>.fisheye]`）に書くので、レンズを付け替えても両方の値が残る。
+書き込み先は、写真のファイル名に入っているレンズ名（📷 が撮ったときに付いていたレンズ）が既定。
 
 ただし切り落とした部分には角点が無いので、画像の下端付近の歪みは外挿になる。
 自動運転が使うのも切り落とした後の画像なので、実用上はそれで足りる。
@@ -23,6 +30,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -32,13 +40,15 @@ if str(REPO_ROOT) not in sys.path:
 
 from raspi.core.camera_model import FisheyeCalib, Undistorter, horizontal_fov  # noqa: E402
 
-__all__ = ["Detection", "CalibResult", "parse_name", "detect", "calibrate",
-           "coverage", "undistort_preview", "write_vehicle_toml", "DEFAULT_TOML"]
+__all__ = ["ShotName", "Detection", "CalibResult", "parse_name", "detect", "calibrate",
+           "coverage", "undistort_preview", "lens_profiles", "write_vehicle_toml", "DEFAULT_TOML"]
 
 DEFAULT_TOML = REPO_ROOT / "config" / "vehicle.toml"
 
-#: 📷 の保存名（`telemetry_node._serve_snapshot`）。`surge_<cam>_<W>x<H>_crop<率>_<時刻>.png`
-_NAME_RE = re.compile(r"surge_(front|rear)_(\d+)x(\d+)_crop([0-9.]+)_")
+#: 📷 の保存名（`telemetry_node._serve_snapshot`）。
+#: `surge_<cam>_<lens>_<W>x<H>_crop<率>_<時刻>.png`。`<lens>_` はレンズのプロファイルを
+#: 使わない設定のときは付かない（2026-10-03 より前の名前もこの形）
+_NAME_RE = re.compile(r"surge_(front|rear)_(?:([A-Za-z0-9-]+)_)?(\d+)x(\d+)_crop([0-9.]+)_")
 
 #: これ未満の枚数では校正しない（fisheye.calibrate は 4 パラメータの歪みを解くので
 #: 画面の広い範囲に角点が要る。少ないと端の歪みが外挿になって GUI のガイドが曲がる）
@@ -54,12 +64,18 @@ NOMINAL_DIAG_FOV_DEG = 160.0
 MAX_RMS_PX = 3.0
 
 
-def parse_name(path: str | Path) -> tuple[str, float] | None:
-    """ファイル名から `(カメラ, 下端クロップ率)`。📷 の名前でなければ None。"""
+class ShotName(NamedTuple):
+    cam: str        #: "front" / "rear"
+    lens: str       #: レンズのプロファイル名。名前に無ければ ""
+    crop: float     #: 下端クロップ率
+
+
+def parse_name(path: str | Path) -> ShotName | None:
+    """📷 のファイル名を読む。📷 の名前でなければ None。"""
     m = _NAME_RE.search(Path(path).name)
     if not m:
         return None
-    return m.group(1), float(m.group(4))
+    return ShotName(m.group(1), m.group(2) or "", float(m.group(5)))
 
 
 @dataclass
@@ -74,6 +90,8 @@ class Detection:
     size: tuple[int, int]
     crop: float
     error: str = ""
+    #: 撮ったときのレンズ（ファイル名から。不明なら ""）
+    lens: str = ""
 
     @property
     def full_size(self) -> tuple[int, int]:
@@ -90,6 +108,8 @@ class CalibResult:
     per_image: dict[Path, float]
     #: 外した写真 → 理由
     rejected: dict[Path, str] = field(default_factory=dict)
+    #: 写真のレンズ名（ファイル名から。不明なら ""）。書き込み先の既定になる
+    lens: str = ""
 
     @property
     def hfov(self) -> float:
@@ -121,12 +141,13 @@ def detect(path: str | Path, board: tuple[int, int],
     """
     cv2 = _cv2()
     path = Path(path)
+    parsed = parse_name(path)
+    lens = parsed.lens if parsed else ""
     if crop is None:
-        parsed = parse_name(path)
-        crop = parsed[1] if parsed else 0.0
+        crop = parsed.crop if parsed else 0.0
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
-        return Detection(path, False, None, (0, 0), crop, "画像を読めない")
+        return Detection(path, False, None, (0, 0), crop, "画像を読めない", lens)
     size = (img.shape[1], img.shape[0])
     # SB（セクターベース）版の方が魚眼の端で強く歪んだボードでも拾え、精度も高い
     flags = cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
@@ -139,8 +160,9 @@ def detect(path: str | Path, board: tuple[int, int],
                 img, corners, (5, 5), (-1, -1),
                 (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.01))
     if not ok:
-        return Detection(path, False, None, size, crop, "ボードが見つからない")
-    return Detection(path, True, corners.reshape(-1, 1, 2).astype(np.float64), size, crop)
+        return Detection(path, False, None, size, crop, "ボードが見つからない", lens)
+    return Detection(path, True, corners.reshape(-1, 1, 2).astype(np.float64), size, crop,
+                     lens=lens)
 
 
 def _object_points(board: tuple[int, int], square: float) -> np.ndarray:
@@ -197,6 +219,9 @@ def calibrate(detections: list[Detection], board: tuple[int, int], square: float
     if len(sizes) > 1:
         raise ValueError(f"解像度（クロップ前）が揃っていない: {sorted(sizes)}"
                          "——カメラ・解像度ごとに分けて校正する")
+    lenses = {d.lens for d in dets}
+    if len(lenses) > 1:
+        raise ValueError(f"別のレンズの写真が混ざっている: {sorted(lenses)}——レンズごとに分けて校正する")
     if len(dets) < MIN_IMAGES:
         raise ValueError(f"ボードが写っている写真が {len(dets)} 枚しかない（{MIN_IMAGES} 枚以上要る）")
     full_w, full_h = sizes.pop()
@@ -250,7 +275,8 @@ def calibrate(detections: list[Detection], board: tuple[int, int], square: float
                          cy=float(K[1, 2]), k=tuple(float(v) for v in D.ravel()),  # type: ignore[arg-type]
                          width=full_w, height=full_h, rms=float(rms))
     return CalibResult(calib=calib, rms=float(rms),
-                       per_image={d.path: e for d, e in zip(dets, errs)}, rejected=rejected)
+                       per_image={d.path: e for d, e in zip(dets, errs)}, rejected=rejected,
+                       lens=lenses.pop())
 
 
 def coverage(detections: list[Detection], grid: tuple[int, int] = (4, 3)) -> float:
@@ -283,10 +309,25 @@ def undistort_preview(path: str | Path, calib: FisheyeCalib, crop: float,
     return np.hstack([img, und])
 
 
+def lens_profiles(cam: str, toml_path: str | Path = DEFAULT_TOML) -> tuple[str, list[str]]:
+    """`(今選ばれているレンズ, プロファイル名の一覧)`。プロファイルを使わない書き方なら `("", [])`。"""
+    import tomllib
+
+    with open(toml_path, "rb") as f:
+        d = tomllib.load(f)
+    tbl = d.get("sensors", {}).get(f"cam_{cam}", {})
+    return str(tbl.get("lens", "")), sorted(tbl.get("lenses", {}) or {})
+
+
 def write_vehicle_toml(cam: str, result: CalibResult,
                        toml_path: str | Path = DEFAULT_TOML,
-                       *, regenerate: bool = True) -> None:
-    """`[sensors.cam_<cam>.fisheye]` を書く（既にあれば丸ごと置き換える）。
+                       *, lens: str | None = None, regenerate: bool = True) -> str:
+    """校正値を `[sensors.cam_<cam>.lenses.<lens>.fisheye]` に書く（既にあれば丸ごと置き換える）。
+
+    書き込み先のレンズは `lens` → 写真のレンズ（`result.lens`）→ 今選ばれている `lens` の順に決める。
+    **存在しないプロファイルには書かない**（打ち間違いで新しいプロファイルができると、
+    選ばれていないので黙って使われない）。プロファイルを使わない書き方（`lens` が無い）の
+    ときは従来どおり `[sensors.cam_<cam>.fisheye]` に書く。書いた先のレンズ名を返す（無ければ ""）。
 
     **`hfov`（未校正時のピンホール近似）は書き換えない。** 160° 級では水平画角が
     180° に迫り、ピンホールの式（tan(hfov/2)）に入れると破綻するため。校正値から
@@ -305,7 +346,21 @@ def write_vehicle_toml(cam: str, result: CalibResult,
     sensors = doc.get("sensors")
     if sensors is None or f"cam_{cam}" not in sensors:
         raise ValueError(f"{path} に [sensors.cam_{cam}] が無い")
-    tbl = sensors[f"cam_{cam}"]
+    cam_tbl = sensors[f"cam_{cam}"]
+    profiles = cam_tbl.get("lenses")
+    target_name = lens or result.lens or str(cam_tbl.get("lens", "") or "")
+    if profiles is not None:
+        if not target_name:
+            raise ValueError(f"[sensors.cam_{cam}] に lens が無く、書き込み先のレンズが決まらない")
+        if target_name not in profiles:
+            raise ValueError(f"レンズ \"{target_name}\" のプロファイルが無い（あるのは "
+                             f"{sorted(profiles)}）。[sensors.cam_{cam}.lenses.{target_name}] を"
+                             "先に vehicle.toml に足す")
+        tbl = profiles[target_name]
+    else:
+        if lens:
+            raise ValueError(f"[sensors.cam_{cam}] にレンズのプロファイル（lenses）が無い")
+        tbl, target_name = cam_tbl, ""
     c = result.calib
     fe = tomlkit.table()
     fe.add(tomlkit.comment(f"tools/cam_calib が書いた（{len(result.per_image)} 枚、"
@@ -324,3 +379,4 @@ def write_vehicle_toml(cam: str, result: CalibResult,
     if regenerate and path.resolve() == DEFAULT_TOML.resolve():
         subprocess.run([sys.executable, str(REPO_ROOT / "config" / "generate.py")],
                        check=True, cwd=REPO_ROOT)
+    return target_name

@@ -56,7 +56,7 @@ CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 #: 後方は下1/16だけ軽く除去する。**ISP の ScalerCrop で最初から読み出し範囲を
 #: 絞るので、余分な画素は main ストリームに出てこない**（後段でスライスして
 #: 捨てるより、共有メモリ書き込み・下流の処理・帯域がその分だけ軽くなる）
-#: 値は `config/vehicle.toml` の `sensors.cam_front/cam_rear.bottom_crop` が正
+#: 値は `config/vehicle.toml` の選ばれたレンズの `bottom_crop`（`[sensors.cam_*.lenses.<レンズ>]`）が正
 #: （GUI の進路ガイド `CameraView.tsx` もここを参照して主点補正する。二重管理しない）。
 _vehicle = Vehicle.load()
 CAM_BOTTOM_CROP = {0: _vehicle.cam_front_bottom_crop, 1: _vehicle.cam_rear_bottom_crop}

@@ -16,7 +16,7 @@
 - **レンズモデル** `raspi/core/camera_model.py`: OpenCV `cv2.fisheye` と同じ Kannala-Brandt（k1..k4）を
   numpy だけで実装（cv2 との一致はテストで確認）。校正値は**フル画角・下端クロップ前の画素**で持つ——
   ScalerCrop は「下を切っただけ」なので fx..cy はクロップで変わらない。`vehicle.toml` の
-  `[sensors.cam_*.fisheye]`。**無ければ従来の hfov ピンホール**（未校正の車両・既存テストはそのまま）
+  `[sensors.cam_*.lenses.<レンズ>.fisheye]`。**無ければ従来の hfov ピンホール**（未校正の車両・既存テストはそのまま）
 - **反映先**: `ipm.py`（光線を回して地面と交差する形に一本化。`vehicle_camera_intrinsics()` が口）→
   line_perception / cam_perception / cam_track（方位角も光線から）。GUI の進路ガイドは
   `render/cameraModel.ts`（同じ式）。IMU の roll は「画像を回す」近似をやめ、光線を回してからレンズに通す
@@ -31,6 +31,11 @@
 - **補正映像**: `telemetry_node` が JPEG 化の前に `cv2.remap`（マップは解像度ごとに1回）。出力は
   「hfov=`undistort_hfov`（既定110°）のピンホール」という固定式なので GUI のガイドは画角を差し替えるだけ。
   記録・撮影・認識は常に生画像。マスク・追跡枠は生画像座標なので補正映像中は出さない
+- **レンズのプロファイル**（同日、追加）: 純正に戻す可能性があるので、レンズで変わる値（hfov・
+  bottom_crop・undistort_hfov・fisheye）を `[sensors.cam_*.lenses.<名前>]` に分け、`lens = "wide160"` /
+  `"stock"` の1行で切り替える。解決は `vehicle.resolve_lens()` の1か所（生成器も使う。存在しない名前は
+  生成器が落とす）。📷 の名前にレンズ名を入れ、校正ツールはそのレンズのプロファイルに書く。
+  wide160 の `hfov`（2.23）・`bottom_crop` は校正・実機確認までの仮
 - ★**未実施（実機）**: 校正そのもの、ガイドと床のテープの一致、補正映像の CPU 負荷、`bottom_crop` の見直し
   （160° でボンネットの写り方が変わる）。カメラ学習モデル（ml_cam・ml_cam_e2e）は**要再学習**
 

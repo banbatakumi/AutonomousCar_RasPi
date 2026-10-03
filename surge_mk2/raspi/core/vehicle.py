@@ -15,19 +15,61 @@
 ドライブでギア比の概念が無いため #3 は車輪半径だけで確定）。残るは `[dynamics]`
 （操舵のむだ時間・1次遅れなど）だけ。
 **`measured` を見て「この数字を信じてよいか」を呼び出し側が判断できる**ようにしてある。
+
+## カメラのレンズは「プロファイル」を1行で選ぶ（2026-10-03）
+
+純正レンズ（≒66°）と IMX219 160° 広角を付け替えられるように、レンズで変わる値
+（`hfov`・`bottom_crop`・`undistort_hfov`・魚眼の校正値 `fisheye`）は
+`[sensors.cam_front.lenses.<名前>]` に分けて持ち、`[sensors.cam_front]` の
+`lens = "<名前>"` で選ぶ。取付位置・姿勢（x/y/z/pitch/yaw）はレンズに依らないので
+カメラの表に残す。解決は `resolve_lens()` の1か所だけ（`config/generate.py` も使う）。
 """
 
 from __future__ import annotations
 
 import tomllib
+import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .camera_model import FisheyeCalib
 
-__all__ = ["Vehicle", "DEFAULT_PATH"]
+__all__ = ["Vehicle", "DEFAULT_PATH", "resolve_lens", "LENS_NAME_RE"]
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
+
+#: レンズ名に使える文字。📷 のファイル名（`surge_front_<lens>_640x360_…png`）に
+#: 入るので `_` は使わせない（校正ツールが名前を区切れなくなる）
+LENS_NAME_RE = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def resolve_lens(cam: dict, *, strict: bool = False) -> dict:
+    """カメラの表（`[sensors.cam_front]` 等）から、選ばれたレンズの値を重ねた dict を作る。
+
+    `lens` が無ければ表をそのまま返す（レンズのプロファイルを使わない古い書き方も読める）。
+    `lens` が `lenses` に無いときは、`strict` なら `ValueError`（生成器・校正ツール用。
+    打ち間違いを黙って通さない）、そうでなければ警告してプロファイル無しで続ける
+    （ノード用。諸元が読めなくても「暫定値で走る」という `Vehicle.load` の方針に合わせる）。
+    返り値の `lens` には選ばれた名前（無ければ ""）が入る。
+    """
+    base = {k: v for k, v in cam.items() if k not in ("lens", "lenses")}
+    name = cam.get("lens")
+    if not name:
+        base["lens"] = ""
+        return base
+    lenses = cam.get("lenses") or {}
+    if name not in lenses:
+        msg = (f"vehicle.toml: lens = \"{name}\" のプロファイルが無い"
+               f"（あるのは {sorted(lenses)}）")
+        if strict:
+            raise ValueError(msg)
+        print(f"!! {msg}。レンズ固有の値は既定値で動く", file=sys.stderr)
+        base["lens"] = str(name)
+        return base
+    base.update(lenses[name])
+    base["lens"] = str(name)
+    return base
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +92,10 @@ class Vehicle:
     #: ScalerCrop が実際の読み出しに反映する）。GUI の進路ガイドの主点補正にも使う
     cam_front_bottom_crop: float = 0.0
     cam_rear_bottom_crop: float = 0.0
+    #: 付いているレンズのプロファイル名（`[sensors.cam_*] lens`）。プロファイルを
+    #: 使わない書き方なら ""。📷 のファイル名と校正ツールの書き込み先に使う
+    cam_front_lens: str = ""
+    cam_rear_lens: str = ""
     #: カメラの取付位置・姿勢・画角。**IPM（`raspi/nav/ipm.py`）と `CameraView.tsx` の
     #: 進路ガイドが同じ値を見る。** `pitch` は下向きが正（`vehicle.toml` の注記どおり）で、
     #: 取り付け角度そのもの。走行中の車体姿勢ぶんは `vs.pitch`（IMU実測）で別途補正する
@@ -65,7 +111,7 @@ class Vehicle:
     cam_rear_pitch: float = 0.0
     cam_rear_yaw: float = 3.14159265
     cam_rear_hfov: float = 1.152
-    #: 魚眼レンズの校正値（`[sensors.cam_*.fisheye]`、`tools/cam_calib/` が書く）。
+    #: 魚眼レンズの校正値（選んだレンズの `fisheye`、`tools/cam_calib/` が書く）。
     #: **None ＝ 未校正**で、IPM・進路ガイドは従来どおり `hfov` のピンホールで近似する
     cam_front_fisheye: FisheyeCalib | None = None
     cam_rear_fisheye: FisheyeCalib | None = None
@@ -131,8 +177,8 @@ class Vehicle:
         safety = d.get("safety", {})
         sensors = d.get("sensors", {})
         lidar = sensors.get("lidar", {})
-        cam_front = sensors.get("cam_front", {})
-        cam_rear = sensors.get("cam_rear", {})
+        cam_front = resolve_lens(sensors.get("cam_front", {}))
+        cam_rear = resolve_lens(sensors.get("cam_rear", {}))
         fp_raw = d.get("footprint", []) or []
         return cls(
             measured=bool(d.get("measured", False)),
@@ -146,6 +192,8 @@ class Vehicle:
             lidar_yaw=float(lidar.get("yaw", 0.0)),
             cam_front_bottom_crop=float(cam_front.get("bottom_crop", 0.0)),
             cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
+            cam_front_lens=cam_front["lens"],
+            cam_rear_lens=cam_rear["lens"],
             cam_front_x=float(cam_front.get("x", 0.097)),
             cam_front_y=float(cam_front.get("y", 0.0)),
             cam_front_z=float(cam_front.get("z", 0.09)),

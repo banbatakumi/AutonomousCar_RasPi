@@ -4,6 +4,7 @@
     .venv/bin/python -m tools.cam_calib --cam front --board 9x6 --square 0.025 ~/Downloads/surge_front_*.png
     # 問題なければ書き戻す（config/generate.py も走る）
     .venv/bin/python -m tools.cam_calib --cam front --board 9x6 --square 0.025 ~/Downloads/surge_front_*.png --write
+    # 書き込み先のレンズ（vehicle.toml の lenses.<名前>）は写真の名前から。明示するなら --lens wide160
     # 印刷用ボード
     .venv/bin/python -m tools.cam_calib --make-board 9x6 --square 0.025 -o board.pdf
 """
@@ -15,7 +16,7 @@ import math
 import sys
 from pathlib import Path
 
-from .calib import (DEFAULT_TOML, calibrate, coverage, detect, parse_name,
+from .calib import (DEFAULT_TOML, calibrate, coverage, detect, lens_profiles, parse_name,
                     undistort_preview, write_vehicle_toml)
 
 
@@ -36,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="1マスの実寸 [m]（印刷後に定規で測った値）")
     ap.add_argument("--crop", type=float, default=None,
                     help="下端クロップ率。省略時はファイル名から")
+    ap.add_argument("--lens", default=None,
+                    help="レンズのプロファイル名（vehicle.toml の lenses.<名前>）。写真を絞り込み、"
+                         "書き込み先にもなる。省略時は写真のファイル名のレンズ")
     ap.add_argument("--write", action="store_true",
                     help="結果を config/vehicle.toml に書き戻す")
     ap.add_argument("--toml", default=str(DEFAULT_TOML))
@@ -57,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     paths = [Path(p).expanduser() for p in args.images]
     if not paths:
         ap.error("写真を指定する")
-    named = {parsed[0] for parsed in map(parse_name, paths) if parsed}
+    named = {parsed.cam for parsed in map(parse_name, paths) if parsed}
     cam = args.cam or (next(iter(named)) if len(named) == 1 else None)
     if cam is None and len(named) > 1:
         ap.error(f"前後のカメラの写真が混ざっている（{sorted(named)}）。--cam で選ぶ")
@@ -65,7 +69,11 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--cam を指定する（ファイル名から決まらない）")
     if args.cam:
         # 別カメラの写真（📷 は前後を同時に保存する）は黙って除く
-        paths = [p for p in paths if (parse_name(p) or (args.cam,))[0] == args.cam]
+        paths = [p for p in paths if (n := parse_name(p)) is None or n.cam == args.cam]
+    if args.lens:
+        # 別レンズで撮った写真は除く（名前にレンズが無い古い写真は残す）
+        paths = [p for p in paths
+                 if (n := parse_name(p)) is None or n.lens in ("", args.lens)]
 
     dets = []
     for p in paths:
@@ -79,7 +87,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     c = res.calib
-    print(f"\n=== {cam or '?'} カメラ（{c.width}x{c.height}・クロップ前） ===")
+    lens = args.lens or res.lens
+    print(f"\n=== {cam or '?'} カメラ・レンズ {lens or '（名前なし）'}"
+          f"（{c.width}x{c.height}・クロップ前） ===")
     print(f"再投影誤差 RMS {res.rms:.3f}px（目安 0.5px 未満）  使用 {len(res.per_image)} 枚")
     print(f"fx={c.fx:.2f} fy={c.fy:.2f} cx={c.cx:.2f} cy={c.cy:.2f}")
     print(f"k = {', '.join(f'{v:.6f}' for v in c.k)}")
@@ -101,8 +111,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"プレビュー: {out}")
 
     if args.write:
-        write_vehicle_toml(cam, res, args.toml)
-        print(f"書き戻した: {args.toml} [sensors.cam_{cam}.fisheye]（Pi へは tools/deploy.sh --restart）")
+        try:
+            target = write_vehicle_toml(cam, res, args.toml, lens=args.lens)
+        except ValueError as e:
+            print(f"!! {e}", file=sys.stderr)
+            return 1
+        where = f"lenses.{target}." if target else ""
+        print(f"書き戻した: {args.toml} [sensors.cam_{cam}.{where}fisheye]"
+              "（Pi へは tools/deploy.sh --restart）")
+        cur, _ = lens_profiles(cam, args.toml)
+        if target and cur != target:
+            print(f"!! 今選ばれているレンズは \"{cur}\"。この校正値を使うには "
+                  f"[sensors.cam_{cam}] の lens を \"{target}\" にする")
     else:
         print("\n（--write で config/vehicle.toml に書き戻す）")
     return 0

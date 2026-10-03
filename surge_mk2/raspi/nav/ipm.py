@@ -19,7 +19,7 @@
 ## レンズモデル（2026-10 魚眼化）
 
 IMX219 160° 広角レンズに替えたので、`vehicle.toml` に校正値
-（`[sensors.cam_*.fisheye]`）があれば Kannala-Brandt の魚眼モデル
+（選ばれたレンズの `fisheye`、`[sensors.cam_*.lenses.<レンズ>.fisheye]`）があれば Kannala-Brandt の魚眼モデル
 （`raspi/core/camera_model.py`）で、無ければ従来の `hfov` ピンホールで投影する。
 どちらも「画素 ⇄ カメラ座標の光線」の部分だけが違い、光線を取付ピッチで回して
 地面と交差させる部分は共通。呼び出し側は `vehicle_camera_intrinsics()` だけを使う。

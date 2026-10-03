@@ -188,5 +188,83 @@ rms = 0.3
         self.assertIsNone(vehicle_camera_intrinsics(v, "rear", 640, 480).k)
 
 
+class TestLensProfiles(unittest.TestCase):
+    """レンズのプロファイル（`lens = "…"` で `lenses.<名前>` を選ぶ、2026-10-03）。"""
+
+    TOML = """
+[sensors.cam_front]
+x = 0.1
+pitch = 0.05
+lens = "{lens}"
+[sensors.cam_front.lenses.stock]
+hfov = 1.152
+bottom_crop = 0.25
+[sensors.cam_front.lenses.wide160]
+hfov = 2.23
+bottom_crop = 0.2
+undistort_hfov = 1.9
+[sensors.cam_front.lenses.wide160.fisheye]
+width = 640
+height = 480
+fx = 280.0
+fy = 280.0
+cx = 320.0
+cy = 240.0
+k = [0.01, 0.0, 0.0, 0.0]
+"""
+
+    def _load(self, lens: str) -> Vehicle:
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(self.TOML.format(lens=lens))
+        try:
+            return Vehicle.load(f.name)
+        finally:
+            Path(f.name).unlink()
+
+    def test_selected_profile_is_used(self):
+        v = self._load("wide160")
+        self.assertEqual(v.cam_front_lens, "wide160")
+        self.assertAlmostEqual(v.cam_front_hfov, 2.23)
+        self.assertAlmostEqual(v.cam_front_bottom_crop, 0.2)
+        self.assertAlmostEqual(v.cam_front_undistort_hfov, 1.9)
+        self.assertIsNotNone(v.cam_front_fisheye)
+        # 取付位置・姿勢はレンズに依らずカメラの表のまま
+        self.assertAlmostEqual(v.cam_front_x, 0.1)
+        self.assertAlmostEqual(v.cam_front_pitch, 0.05)
+
+    def test_switching_back_to_stock(self):
+        v = self._load("stock")
+        self.assertEqual(v.cam_front_lens, "stock")
+        self.assertAlmostEqual(v.cam_front_hfov, 1.152)
+        self.assertAlmostEqual(v.cam_front_bottom_crop, 0.25)
+        self.assertIsNone(v.cam_front_fisheye)          # 純正は未校正 → ピンホール
+        self.assertIsNone(vehicle_camera_intrinsics(v, "front", 640, 360).k)
+
+    def test_unknown_lens(self):
+        from raspi.core.vehicle import resolve_lens
+        cam = {"x": 0.1, "lens": "nope", "lenses": {"stock": {"hfov": 1.0}}}
+        with self.assertRaises(ValueError):
+            resolve_lens(cam, strict=True)
+        # ノードは止めずに、レンズ固有の値だけ既定値で動く
+        loose = resolve_lens(cam)
+        self.assertEqual(loose["x"], 0.1)
+        self.assertNotIn("hfov", loose)
+
+    def test_flat_layout_without_profiles_still_works(self):
+        from raspi.core.vehicle import resolve_lens
+        r = resolve_lens({"hfov": 1.2, "bottom_crop": 0.1})
+        self.assertEqual(r, {"hfov": 1.2, "bottom_crop": 0.1, "lens": ""})
+
+    def test_repo_vehicle_toml_resolves(self):
+        """リポジトリの `vehicle.toml` が選んでいるレンズが実在する（打ち間違い防止）。"""
+        import tomllib
+
+        from raspi.core.vehicle import DEFAULT_PATH, resolve_lens
+        with open(DEFAULT_PATH, "rb") as f:
+            d = tomllib.load(f)
+        for cam in ("cam_front", "cam_rear"):
+            resolve_lens(d["sensors"][cam], strict=True)
+
+
 if __name__ == "__main__":
     unittest.main()

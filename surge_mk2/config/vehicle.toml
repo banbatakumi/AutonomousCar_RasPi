@@ -192,19 +192,34 @@ z = 0.085
 roll = 0.0
 pitch = 0.0                   # 下向きが正。取り付け角度そのもの＝一度決めたら変わらない
 yaw = 0.0
-# [rad] 水平画角。**`fisheye` が無い（未校正）間だけ**ピンホール近似に使う（純正レンズ ≒66°）。
-# 160° 広角では校正前のガイドはどのみち端で合わない。ピンホールは 180° に届かないので、
-# 実測の水平画角は `fisheye.hfov_deg`（参考値）に入り、ここは書き換えない
-hfov = 1.152
-# ボンネット等の映り込みを除くため ISP の ScalerCrop で下端を切る
-# （`raspi/nodes/camera_node.py` の `bottom_cropped` が実際の読み出しに反映する）。
-# GUI の進路ガイド（`CameraView.tsx`）は上端基準でこの分だけ主点が下にずれる補正に使う。
-bottom_crop = 0.25             # 下端カット率（下1/4）
-# 補正映像（GUI の「魚眼補正」、`telemetry_node`）の仮想ピンホールの水平画角 [rad]。≒110°
-undistort_hfov = 1.92
-# 魚眼レンズの校正値は `[sensors.cam_front.fisheye]` に置く（無ければ未校正＝hfov のピンホール）。
-# **手で書かない。** チェッカーボード写真から `tools/cam_calib`（ランチャーの「カメラ校正」）が
-# 書き込む。値の意味は `raspi/core/camera_model.py`（Kannala-Brandt、フル画角・クロップ前の画素）
+# ★付いているレンズ。下の `[sensors.cam_front.lenses.<名前>]` から選ぶ。
+# **レンズを付け替えたらここだけ直して `tools/deploy.sh --restart`。**
+#   "stock"   … 純正 IMX219（水平 ≒66°）
+#   "wide160" … IMX219 160° 広角（魚眼）
+# 名前に `_` は使わない（📷 のファイル名に入る）。取付位置・姿勢（上）はレンズに依らない
+lens = "wide160"
+
+# ── レンズごとの値。項目の意味 ──
+# hfov           [rad] 水平画角。**`fisheye`（校正値）が無い間だけ**ピンホール近似に使う。
+#                ピンホールは 180° に届かないので、校正後もここは書き換えない
+#                （実測の画角は `fisheye.hfov_deg` に参考値として入る）
+# bottom_crop    下端カット率。ボンネット等の映り込みを ISP の ScalerCrop で読み出し時に切る
+#                （`raspi/nodes/camera_node.py` の `bottom_cropped`）。GUI の進路ガイドの主点補正にも使う
+# undistort_hfov [rad] 補正映像（GUI の「魚眼/補正」、`telemetry_node`）の仮想ピンホールの水平画角
+# fisheye        魚眼の校正値（`[….lenses.<名前>.fisheye]`）。**手で書かない。** チェッカーボード
+#                写真から `tools/cam_calib`（ランチャーの「カメラ校正」）が書く。値の意味は
+#                `raspi/core/camera_model.py`（Kannala-Brandt、フル画角・クロップ前の画素）。
+#                無ければ未校正＝`hfov` のピンホール
+
+[sensors.cam_front.lenses.stock]
+hfov = 1.152                  # ≒66°
+bottom_crop = 0.25            # 下1/4
+undistort_hfov = 1.152        # 歪みが小さいので補正しても画角はほぼそのまま
+
+[sensors.cam_front.lenses.wide160]
+hfov = 2.23                   # ≒128°。公称（対角160°）からの概算。校正するまでの仮
+bottom_crop = 0.25            # ★仮（純正と同じ）。画角が変わりボンネットの写り方も変わるので実機で見直す
+undistort_hfov = 1.92         # ≒110°
 
 [sensors.cam_rear]
 x = 0.044
@@ -213,10 +228,17 @@ z = 0.085
 roll = 0.0
 pitch = 0.0
 yaw = 3.14159265
-hfov = 1.152                  # 意味は cam_front と同じ（未校正時のピンホール近似）
-bottom_crop = 0.0625           # 下端カット率（下1/16）
+lens = "wide160"              # 意味は cam_front と同じ（前後で別のレンズにしてよい）
+
+[sensors.cam_rear.lenses.stock]
+hfov = 1.152
+bottom_crop = 0.0625          # 下1/16
+undistort_hfov = 1.152
+
+[sensors.cam_rear.lenses.wide160]
+hfov = 2.23                   # 仮（cam_front と同じ）
+bottom_crop = 0.0625          # ★仮。実機で見直す
 undistort_hfov = 1.92
-# 校正値は `[sensors.cam_rear.fisheye]`（cam_front と同じく tools/cam_calib が書く）
 
 [sensors.us_front]
 x = 0.26

@@ -632,7 +632,7 @@ class TelemetryServer:
 
         **常に生画像（魚眼のまま・無劣化）。** 主な用途がチェッカーボード校正
         （Mac 側 `tools/cam_calib/`）で、校正は実際にパイプラインが使う画像そのもので
-        行う必要があるため。ファイル名に解像度と下端クロップ率を入れて返す——
+        行う必要があるため。ファイル名にレンズ名・解像度・下端クロップ率を入れて返す——
         校正ツールはそこからクロップ前のフル画像の大きさを復元する
         （`raspi/core/camera_model.py` の「座標はフル画角」の節）。
         """
@@ -657,8 +657,12 @@ class TelemetryServer:
             return _response(500, "text/plain; charset=utf-8",
                              f"PNG 化に失敗: {type(e).__name__}: {e}".encode())
         crop = getattr(_SAFETY, f"cam_{cam}_bottom_crop")
+        # レンズ名も入れる（`vehicle.toml` の `lens`）。校正ツールは別レンズの写真を
+        # 混ぜないようにこれで振り分け、書き込み先のプロファイルも決める
+        lens = getattr(_SAFETY, f"cam_{cam}_lens")
         stamp = time.strftime("%Y%m%d_%H%M%S") + f"{int(time.time() * 1000) % 1000:03d}"
-        name = f"surge_{cam}_{desc.width}x{desc.height}_crop{crop:g}_{stamp}.png"
+        name = (f"surge_{cam}_{lens + '_' if lens else ''}{desc.width}x{desc.height}"
+                f"_crop{crop:g}_{stamp}.png")
         return _response(200, "image/png", png, extra={
             "Content-Disposition": f'attachment; filename="{name}"',
             "X-Surge-Filename": name,

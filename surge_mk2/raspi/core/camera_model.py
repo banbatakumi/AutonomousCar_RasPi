@@ -5,7 +5,7 @@
 IMX219 160° 広角レンズに替えたことで、従来の「歪みのないピンホール + `hfov`」では
 画像の端ほど大きくズレるようになった（160° はピンホールでは原理的に表せない）。
 チェッカーボード校正（Mac 側 `tools/cam_calib/`）で求めた値を `config/vehicle.toml`
-の `[sensors.cam_*.fisheye]` に置き、IPM（`raspi/nav/ipm.py`）・GUI の進路ガイド
+の `[sensors.cam_*.lenses.<レンズ>.fisheye]` に置き、IPM（`raspi/nav/ipm.py`）・GUI の進路ガイド
 （`gui/src/render/CameraView.tsx`）・補正映像（`telemetry_node`）がここの式を使う。
 
 ## モデルは OpenCV の `cv2.fisheye` と同一（Kannala-Brandt, k1..k4）
@@ -53,7 +53,7 @@ _NEWTON_ITERS = 20
 
 @dataclass(frozen=True, slots=True)
 class FisheyeCalib:
-    """魚眼レンズの校正値（`vehicle.toml` の `[sensors.cam_*.fisheye]`）。
+    """魚眼レンズの校正値（`vehicle.toml` の `[sensors.cam_*.lenses.<レンズ>.fisheye]`）。
 
     すべて**フル画角・下端クロップ前**の `width`×`height` 画像の画素単位。
     """
