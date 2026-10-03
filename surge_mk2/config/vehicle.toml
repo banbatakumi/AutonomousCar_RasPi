@@ -268,6 +268,19 @@ hfov = 2.23                   # 仮（cam_front と同じ）
 bottom_crop = 0.0625          # ★仮。実機で見直す
 undistort_hfov = 1.92
 
+[sensors.cam_rear.lenses.wide160.fisheye]
+# ★仮: cam_front の校正値（14 枚、RMS 0.193px）をそのまま流用した。同型番でも個体差
+#   （特に主点）があるので、後カメラの写真を撮って tools/cam_calib で校正し直したら上書きされる
+width = 640
+height = 480
+fx = 307.9092
+fy = 307.5942
+cx = 307.4241
+cy = 241.533
+k = [-0.03208693, 0.00352001, -0.01074923, 0.00351499]
+rms = 0.1926
+hfov_deg = 124.6
+
 [sensors.us_front]
 x = 0.26
 y = 0.0
