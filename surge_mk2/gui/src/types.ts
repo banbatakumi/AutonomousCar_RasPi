@@ -207,6 +207,9 @@ export type CameraConfigStatus = {
   armed: boolean
   /** 実際にcamera_nodeへ指示している前カメラのfps（自動運転中は上限を無視して最大になる） */
   front_fps_effective: number
+  /** 実際にcamera_nodeへ指示している前カメラのON/OFF。DISARM中は映像を使う者
+   *  （GUIの視聴者・記録）がいなければ止める（2026-10-04、省電力）。古いサーバは送らない */
+  front_enabled_effective?: boolean
   /** 実際にcamera_nodeへ指示している後方カメラのON/OFF */
   rear_enabled_effective: boolean
   /** カメラを使う自動運転モードでengage中で、front_fps_armedを上書きしているか */

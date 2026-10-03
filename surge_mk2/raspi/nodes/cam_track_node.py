@@ -64,7 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.core.auto_gate import vehicle_armed  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, vehicle_armed  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
@@ -127,6 +127,12 @@ _LOST_DEBOUNCE_FRAMES = 2
 #: この値はそれより長く取り、「戻ってくるかもしれない」猶予を残しつつ、
 #: 尽きたら安全側（選び直し必須）に倒す
 _GIVE_UP_MS = 5000.0
+#: 追跡中に新しいフレームがこれだけ来なければ、フレーム無しで1周期回す（見失いの
+#: 計時・選択解除・DISARM 中の扱いを止めないため。カメラが止まった・DISARM した等）
+_TRACK_STALL_NS = 200_000_000
+#: NanoTrack（cv2.dnn）のスレッド数。既定の4から2にすると、30Hz 追跡で制御系電流が
+#: 約11mA下がり、推論は p50 10.7→13.2ms（2026-10-04、Pi 5 実測）。1 だと 21ms に延びる
+DEFAULT_CV_THREADS = 2
 
 
 class TargetTracker:
@@ -199,8 +205,11 @@ class CamTrackNode:
 
     def __init__(self, *, vehicle: Vehicle | None = None,
                 models_dir: str | Path | None = None,
-                factory: TargetTrackerFactory | None = None) -> None:
+                factory: TargetTrackerFactory | None = None,
+                track_hz: float = 0.0) -> None:
         self.vehicle = vehicle or Vehicle.load()
+        #: 追跡（NanoTrack の update）の上限頻度。0 はカメラの新しいフレームごと
+        self._track_period_ns = int(NS / track_hz) if track_hz > 0 else 0
         self.models_dir = Path(models_dir) if models_dir else DEFAULT_MODELS_DIR
         self._factory = factory or TargetTrackerFactory(self.models_dir)
 
@@ -483,11 +492,20 @@ class CamTrackNode:
         next_hb = time.monotonic_ns()
         reader = FrameReader()
         seq = 0
+        pacer = IdlePacer()
+        #: IDLE（未選択・DISARM）判定は前周期の結果で poll の待ち方を決める
+        active = True
+        #: 最後に処理したフレームの ring_seq と、最後に処理した時刻
+        last_ring_seq = -1
+        last_processed_ns = 0
+        #: 最後に追跡したフレームの撮像時刻（`--track-hz` の間引きに使う）
+        last_tracked_capture_ns = 0
+        stall_ns = max(_TRACK_STALL_NS, 3 * self._track_period_ns)
         try:
             while self._running:
                 if t_end and time.monotonic() >= t_end:
                     break
-                for _ in sub.poll(20):
+                for _ in sub.poll(pacer.poll_timeout_ms(active)):
                     pass  # `latest` を見るだけなので中身の処理は不要
 
                 roi = sub.latest.get(TOPIC_TRACK_ROI)
@@ -513,14 +531,37 @@ class CamTrackNode:
                     self._state != "IDLE"
                     or (self._factory.available and roi is not None
                         and roi.select_seq > self._last_select_seq))
+                #: **同じフレームを2度追跡しない**（2026-10-04、省電力）。このループは
+                #: vehicle_state（100Hz）の到着でも起きるので、以前は追跡中に同じ
+                #: フレームを読み直して NanoTrack を回し続けていた（実測で約85回/s。
+                #: 新しいフレームだけにすると 30Hz 追跡で制御系電流 −138mA）
+                now = time.monotonic_ns()
+                new_select = roi is not None and roi.select_seq > self._last_select_seq
                 if need_frame:
                     ref: ImageRef | None = sub.latest.get(TOPIC_IMAGE_FRONT)
-                    if ref is not None:
+                    # 間引きはフレームの撮像時刻で判定する（処理した時刻だと起床の揺れで
+                    # 15Hz 指定が 13〜18Hz にぶれた）。0.8倍はカメラ周期の揺れの余裕
+                    cap_ns = ref.t_capture if ref is not None and ref.t_capture else now
+                    due = (self._track_period_ns == 0
+                           or cap_ns - last_tracked_capture_ns >= self._track_period_ns * 0.8)
+                    if ref is not None and (new_select
+                                            or (ref.ring_seq != last_ring_seq and due)):
                         got = reader.read(ref)
                         if got is not None:
                             frame, t_capture = got
+                            last_ring_seq = ref.ring_seq
+                            last_tracked_capture_ns = cap_ns
 
-                now = time.monotonic_ns()
+                tracking = self._state != "IDLE"
+                active = need_frame or tracking
+                if tracking and frame is None and now - last_processed_ns < stall_ns:
+                    # 追跡中で新しいフレームがまだ無い周期は何もしない（publish もしない。
+                    # 下流の planning は seq の変化で再計画するので、同じ結果の再送は無駄）
+                    if now >= next_hb:
+                        next_hb = now + NS // HB_HZ
+                        pub.send(TOPIC_HB_PREFIX + "cam_track", HbMsg(node="cam_track"))
+                    continue
+                last_processed_ns = now
                 try:
                     st = self.process_cycle(frame, roi=roi, scan=scan, now_ns=now)
                 except Exception as e:
@@ -532,12 +573,17 @@ class CamTrackNode:
                     st = TargetTrack(tracking=False)
                 st.seq = seq
                 st.t_capture = t_capture
-                pub.send(TOPIC_TRACK_TARGET, st)
+                #: 追跡中・選択の処理中は ACTIVE。IDLE（未選択か DISARM）の間は
+                #: 起床・publish を約20Hz・2Hzに落とす（`IdlePacer`。省電力、2026-10-04）
+                active = need_frame or self._state != "IDLE"
+                if pacer.should_publish(active, now):
+                    pub.send(TOPIC_TRACK_TARGET, st)
                 seq += 1
 
                 if now >= next_hb:
                     next_hb = now + NS // HB_HZ
                     pub.send(TOPIC_HB_PREFIX + "cam_track", HbMsg(node="cam_track"))
+                pacer.idle_sleep(active)
         finally:
             reader.close()
 
@@ -550,12 +596,20 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR),
                     help=f"NanoTrackのONNXを探すディレクトリ（既定 {DEFAULT_MODELS_DIR}）")
+    ap.add_argument("--track-hz", type=float, default=0.0,
+                    help="追跡の上限頻度。0 はカメラの新しいフレームごと（既定）。"
+                         "15 にすると 30fps 時より制御系電流が約35mA下がる（2026-10-04 実測）")
+    ap.add_argument("--cv-threads", type=int, default=DEFAULT_CV_THREADS,
+                    help=f"NanoTrack（cv2.dnn）のスレッド数（既定 {DEFAULT_CV_THREADS}）")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
+    import cv2
+
     from raspi.bus import LATEST, Publisher, Subscriber
 
-    node = CamTrackNode(models_dir=args.models_dir)
+    cv2.setNumThreads(args.cv_threads)
+    node = CamTrackNode(models_dir=args.models_dir, track_hz=args.track_hz)
     pub = Publisher("cam_track")
     sub = Subscriber({TOPIC_TRACK_ROI: LATEST, TOPIC_SCAN: LATEST, TOPIC_IMAGE_FRONT: LATEST,
                      TOPIC_VEHICLE_STATE: LATEST})

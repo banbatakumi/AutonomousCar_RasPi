@@ -79,6 +79,15 @@ CMD_HZ = 50
 #: `auto/state` の発行レート。点群が 10Hz なのでそれ以上出しても同じ絵になる
 STATE_HZ = 10
 HB_HZ = 10
+#: poll の最長待ち。期限計算が狂っても応答が止まらないための上限（= auto/cmd の1周期）
+POLL_MAX_MS = 1000 // CMD_HZ
+
+
+def _poll_timeout_ms(wait_ns: int) -> int:
+    """次の期限までの残り時間を ms に切り上げる（期限を過ぎていれば 0、上限は `POLL_MAX_MS`）。"""
+    if wait_ns <= 0:
+        return 0
+    return min(POLL_MAX_MS, -(-wait_ns // 1_000_000))
 
 
 #: `vehicle_state` の購読。SLAM 系の脱スキュー（`slam2d_raceline`・`_slam2d_nav`）と同定の
@@ -381,8 +390,12 @@ class PlanningNode:
         while self._running:
             if t_end and time.monotonic() >= t_end:
                 break
-            # **2ms でブロックする。** 0 にすると CPU を 1 コア食い潰す
-            for topic, msg in self.sub.poll(2):
+            # **次の定期送信（auto/cmd・ハートビート）の期限までブロックする。**
+            # 0 にすると CPU を 1 コア食い潰す。入力が届けば poll はその場で返るので
+            # 再計画の遅れは増えない。以前の固定 2ms は入力が無くても 500Hz で起きていた
+            # （planning_node を止めると制御系電流が約12mA下がる。2026-10-04 実測）
+            wait_ns = min(next_cmd, next_hb) - time.monotonic_ns()
+            for topic, msg in self.sub.poll(_poll_timeout_ms(wait_ns)):
                 if topic == TOPIC_AUTO_CTRL:
                     self._apply_ctrl(msg)
                 elif topic == TOPIC_E2E_MODEL:

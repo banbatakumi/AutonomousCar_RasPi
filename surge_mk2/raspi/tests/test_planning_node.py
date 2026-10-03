@@ -20,7 +20,8 @@ from raspi.auto.registry import make_planner  # noqa: E402
 from raspi.msgs import AutoCtrl, Scan  # noqa: E402
 from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,  # noqa: E402
                               TOPIC_SCAN_CAM, E2EModelCtrl)
-from raspi.nodes.planning_node import PlanningNode, input_topics  # noqa: E402
+from raspi.nodes.planning_node import (  # noqa: E402
+    POLL_MAX_MS, PlanningNode, _poll_timeout_ms, input_topics)
 
 
 class FakeSub:
@@ -356,6 +357,21 @@ class TestE2EModelRouting(unittest.TestCase):
         with mock.patch.object(E2ELidar, "reload_if_changed") as m:
             node._apply_ctrl(AutoCtrl(mode="e2e_lidar", engaged=False))
         m.assert_called_once_with("alpha")
+
+
+class TestPollTimeout(unittest.TestCase):
+    """poll は次の定期送信の期限まで待つ（固定2msで500Hz起床していたのを直した、2026-10-04）。"""
+
+    def test_past_deadline_does_not_block(self):
+        self.assertEqual(_poll_timeout_ms(0), 0)
+        self.assertEqual(_poll_timeout_ms(-5_000_000), 0)
+
+    def test_rounds_up_so_it_never_wakes_before_the_deadline(self):
+        self.assertEqual(_poll_timeout_ms(1), 1)
+        self.assertEqual(_poll_timeout_ms(1_000_001), 2)
+
+    def test_capped(self):
+        self.assertEqual(_poll_timeout_ms(10**9), POLL_MAX_MS)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from raspi.msgs import ImageRef, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_FRONT,
     TOPIC_TRACK_ROI,
+    TOPIC_TRACK_TARGET,
     TOPIC_VEHICLE_STATE,
     Scan,
     TargetRoiCtrl,
@@ -386,6 +387,51 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
             node.run(sub=sub, pub=pub, duration_s=0.05)
         mock_read.assert_not_called()
+
+
+class TestRunTracksEachFrameOnce(unittest.TestCase):
+    """追跡中は同じフレームを2度追跡しない（2026-10-04、省電力。以前は vehicle_state の
+    到着でも起きて同じフレームを読み直し、NanoTrack を約85回/s回していた）。"""
+
+    def _ring_and_ref(self, name):
+        ring = FrameRing.create(name, 32, 24, "RGB888", n_slots=2)
+        desc = ring.write(np.zeros((24, 32, 3), dtype=np.uint8),
+                          t_capture_ns=time.monotonic_ns(), frame_id=1)
+        ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                       frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                       fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+        return ring, ref
+
+    def test_unchanged_frame_is_tracked_once(self):
+        node = CamTrackNode(vehicle=_vehicle_straight(),
+                            factory=_FakeFactory([(10.0, 8.0, 6.0, 6.0)]))
+        ring, ref = self._ring_and_ref("surge_test_track_once")
+        try:
+            roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.1)   # 停滞判定（0.2s）より短く
+            self.assertEqual(node._tracker._i, 0, "同じフレームで update() が回った")
+            targets = [st for t, st in pub.sent if t == TOPIC_TRACK_TARGET]
+            self.assertEqual(len(targets), 1, "同じ結果を再送している")
+            self.assertTrue(targets[0].tracking)
+        finally:
+            ring.unlink()
+
+    def test_stalled_camera_still_advances_lost_timer(self):
+        """フレームが来なくなっても、停滞判定ごとにフレーム無しで回して見失いへ進む。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(),
+                            factory=_FakeFactory([(10.0, 8.0, 6.0, 6.0)]))
+        ring, ref = self._ring_and_ref("surge_test_track_stall")
+        try:
+            roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.7)
+            targets = [st for t, st in pub.sent if t == TOPIC_TRACK_TARGET]
+            self.assertTrue(targets[-1].lost, "フレームが止まったのに見失いにならない")
+        finally:
+            ring.unlink()
 
 
 class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):

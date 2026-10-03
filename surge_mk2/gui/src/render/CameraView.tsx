@@ -212,6 +212,8 @@ export function CameraView({
 
   const onRoiPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     if (!trackingModeRef.current) return
+    // DISARM 中は選択させない（cam_track_node は DISARM 中は追跡しない。サーバも断る）
+    if (!live.vs?.armed) return
     const p = toNorm(e.currentTarget, e.clientX, e.clientY)
     if (!p) return
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -340,6 +342,7 @@ export function CameraView({
         if (trackingModeRef.current) {
           if (dragRef.current) drawRoiDrag(ctx, dx, dy, dw, dh, dragRef.current)
           drawTrackBox(ctx, dx, dy, dw, dh)
+          if (!live.vs?.armed) drawRoiDisarmedHint(ctx, dx, dy)
         }
       } else {
         ctx.fillStyle = '#3a444e'
@@ -626,6 +629,19 @@ function drawRoiDrag(
   ctx.lineWidth = 2
   ctx.setLineDash([6, 4])
   ctx.strokeRect(dx + x0 * dw, dy + y0 * dh, (x1 - x0) * dw, (y1 - y0) * dh)
+  ctx.restore()
+}
+
+/** DISARM 中は対象を選べないことを映像の左上に出す（`onRoiPointerDown` が無視する理由）。 */
+function drawRoiDisarmedHint(ctx: CanvasRenderingContext2D, dx: number, dy: number) {
+  const text = 'DISARM中は対象を選べません（ARMしてから選択）'
+  ctx.save()
+  ctx.font = '12px ui-monospace, monospace'
+  const w = ctx.measureText(text).width
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
+  ctx.fillRect(dx + 8, dy + 8, w + 12, 20)
+  ctx.fillStyle = '#ffcc66'
+  ctx.fillText(text, dx + 14, dy + 22)
   ctx.restore()
 }
 

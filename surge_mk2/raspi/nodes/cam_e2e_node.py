@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.base import scan_window  # noqa: E402
-from raspi.core.auto_gate import cam_infer_active  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import CamE2ECmd, ImageRef, Scan  # noqa: E402
@@ -229,10 +229,11 @@ class CamE2ENode:
         seq = 0
         t_end = time.monotonic() + duration_s if duration_s else None
         next_hb = time.monotonic_ns()
+        pacer = IdlePacer()
         while self._running:
             if t_end and time.monotonic() >= t_end:
                 break
-            for _ in sub.poll(20):
+            for _ in sub.poll(pacer.poll_timeout_ms(self._active)):
                 pass
 
             model_ctrl = sub.latest.get(TOPIC_CAM_E2E_MODEL)
@@ -305,7 +306,9 @@ class CamE2ENode:
             # あちらは推論結果（内容）が変わらないので重複排除に任せてよいが、
             # ここは LiDAR 前方距離（安全策）が毎周期変わりうる値で、それを
             # 間引くと「安全策だけ古いまま」になりかねないため
-            pub.send(TOPIC_CAM_E2E_CMD, cmd)
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
+            if pacer.should_publish(active, now):
+                pub.send(TOPIC_CAM_E2E_CMD, cmd)
             seq += 1
 
             if now >= next_hb:
@@ -313,6 +316,7 @@ class CamE2ENode:
                 pub.send(TOPIC_HB_PREFIX + "cam_e2e", HbMsg(node="cam_e2e"))
             if status_cb:
                 status_cb(cmd)
+            pacer.idle_sleep(active)
 
 
 def main() -> int:

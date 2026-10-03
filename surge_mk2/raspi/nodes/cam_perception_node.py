@@ -79,7 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.core.auto_gate import cam_infer_active  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -410,10 +410,11 @@ class CamPerceptionNode:
         seq = 0
         t_end = time.monotonic() + duration_s if duration_s else None
         next_hb = time.monotonic_ns()
+        pacer = IdlePacer()
         while self._running:
             if t_end and time.monotonic() >= t_end:
                 break
-            for _ in sub.poll(20):
+            for _ in sub.poll(pacer.poll_timeout_ms(self._active)):
                 pass  # `latest` を見るだけなので中身の処理は不要
 
             model_ctrl = sub.latest.get(TOPIC_CAM_MODEL)
@@ -507,7 +508,8 @@ class CamPerceptionNode:
                             mask_jpeg = self.encode_mask_jpeg()
                             if mask_jpeg is not None:
                                 pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
-            if should_publish:
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
+            if should_publish and pacer.should_publish(active, now):
                 pub.send(TOPIC_SCAN_CAM, st)
                 pub.send(TOPIC_CAM_PATH, path_msg if path_msg is not None
                          else CamPath(seq=seq))
@@ -519,6 +521,7 @@ class CamPerceptionNode:
                         HbMsg(node="cam_perception"))
             if status_cb:
                 status_cb(st)
+            pacer.idle_sleep(active)
 
 
 def main() -> int:

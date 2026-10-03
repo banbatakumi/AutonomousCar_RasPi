@@ -136,6 +136,7 @@ from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # no
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.camera_model import Undistorter  # noqa: E402
 from raspi.core.jpeg import RingJpeg, encode_png  # noqa: E402
+from raspi.io.cpufreq import open_cpufreq  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
 from raspi.nav.grid import pack_trinary, unpack_trinary  # noqa: E402
@@ -282,6 +283,13 @@ AUTO_CTRL_HZ = 5
 #: `pwm1_enable=1` のままでも温度のしきい値越えで `pwm1` を書き換えてくることがあり
 #: （`raspi/io/fan.py` 参照）、GUI からの指定が 1 回きりだと巻き戻されたまま気づけない
 FAN_PUMP_HZ = 1
+#: CPU の上限周波数 [kHz]。DISARM（駐車中）は電圧の底の 1.5GHz、ARM 中は 2.0GHz
+#: （`raspi/io/cpufreq.py` の実測表。2.4GHz→2.0GHz で seg 推論 30Hz 時 −62mA・推論 +8%）
+#: 📷撮影（`/snapshot/`）で受け付けるフレームの古さの上限。capture を止めている
+#: カメラの残り1枚を撮らないため（DISARM 中の最低 fps は 1fps なので、それより長く）
+SNAPSHOT_MAX_AGE_NS = 1_500_000_000
+CPU_MAX_KHZ_ARMED = 2_000_000
+CPU_MAX_KHZ_DISARM = 1_500_000
 #: Wi-Fi(SSID・電波強度)の再取得周期。`nmcli` のサブプロセス起動が数十〜百数十msかかる
 #: ため 20Hz の `/ws/telemetry` には乗せず、`fan` と同じ低頻度ポーリングで `/ws/control` に載せる
 WIFI_PUMP_HZ = 1
@@ -487,6 +495,14 @@ class TelemetryServer:
         # 前回異常終了で手動固定のまま残っていた場合の保険
         self._fan.set_auto()
 
+        # ── CPU 上限周波数（ARM/DISARM で切り替え。`_on_armed_change`） ──
+        self._cpufreq = open_cpufreq()
+        #: 直前に見た ARM 状態。None は「まだ反映していない」（初回に必ず切り替える）
+        self._last_armed: bool | None = None
+        #: 常駐ロガー（surge-logger。画像を記録する）が動いているか。DISARM 中に
+        #: カメラを止めてよいかの判定に使う（`_cam_config_pump` が1Hzで更新）
+        self._logger_running = False
+
         # ── Wi-Fi（SSID・電波強度） ──
         self._wifi = open_wifi()
         #: `_wifi_pump` が低頻度で更新するキャッシュ。読み取り自体が `nmcli` の
@@ -646,6 +662,12 @@ class TelemetryServer:
         if ref is None:
             return _response(404, "text/plain; charset=utf-8",
                              f"{cam} カメラのフレームが来ていない".encode())
+        # **古いフレームを撮らない。** DISARM 中は映像を使う者がいなければ capture を
+        # 止めている（`_desired_front_enabled`）ので、共有メモリには止める直前の1枚が
+        # 残っている。校正用の写真が別の瞬間のものに化けないよう、新しくなければ断る
+        if time.monotonic_ns() - ref.t_pub > SNAPSHOT_MAX_AGE_NS:
+            return _response(409, "text/plain; charset=utf-8",
+                             f"{cam} カメラは停止中（GUI でその映像を表示してから撮る）".encode())
         got = self._jpeg.read_latest(ref.shm_name, expect_seq=ref.ring_seq)
         if got is None:
             return _response(503, "text/plain; charset=utf-8",
@@ -752,10 +774,14 @@ class TelemetryServer:
             await ws.close(1011, "no jpeg encoder on the pi")
             return
         self.camera_clients[cam].add(ws)
+        # DISARM 中は視聴者の有無でカメラを止めている（`_desired_front_enabled`）ので、
+        # 来た・去った瞬間に頼み直す（1Hz の `_cam_config_pump` を待たせない）
+        self._publish_cam_config()
         try:
             await ws.wait_closed()
         finally:
             self.camera_clients[cam].discard(ws)
+            self._publish_cam_config()
 
     async def _map_channel(self, ws) -> None:
         """地図と経路を見るクライアント。**繋いだ瞬間に最新の1枚を送る。**
@@ -1379,9 +1405,29 @@ class TelemetryServer:
 
     def _desired_rear_enabled(self) -> bool:
         """後方カメラの capture ON/OFF。DISARM中（駐車中）は監視の用途が無いので
-        既定で止める。ARM中はユーザー設定（`rear_enabled_armed`）に従う。"""
+        既定で止める。ARM中はユーザー設定（`rear_enabled_armed`）に従う。
+
+        前カメラと違い、DISARM中に GUI で表示していても設定（`rear_enabled_disarm`）を
+        優先する（2026-10-04、バンビ判断。駐車中に後方映像は要らない）。"""
         return self._cam_rear_enabled_armed if self._vehicle_armed() \
             else self._cam_rear_enabled_disarm
+
+    def _desired_front_enabled(self) -> bool:
+        """前カメラの capture ON/OFF（2026-10-04、省電力）。
+
+        ARM中は常に撮る（手動操縦の映像・カメラ系の自動運転）。DISARM中は映像を使う者
+        （GUI の視聴者・記録）がいる間だけ撮る。カメラ系の知覚ノードは DISARM 中は
+        推論しない（`auto_gate.cam_infer_active`）ので数に入れない。センサを止めると
+        DISARM 中の 10fps より約63mA、1fps より約45mA 少ない（docs/power_audit_2026-10.md P4）。
+        ARM した瞬間に `_on_armed_change` が即座に再開を頼む（再開まで数百ms）。"""
+        return self._vehicle_armed() or self._cam_in_use_while_disarmed("front")
+
+    def _cam_in_use_while_disarmed(self, cam: str) -> bool:
+        """DISARM 中に `cam` の映像を使う者がいるか（GUI の視聴者・mcap 記録・常駐ロガー）。
+        前カメラ専用（後カメラは DISARM 中は設定だけで決める。`_desired_rear_enabled`）。"""
+        return (bool(self.camera_clients.get(cam))
+                or self._mcap_proc is not None or self._mcap_starting
+                or self._logger_running)
 
     def _camera_config_status(self) -> dict:
         return {
@@ -1398,6 +1444,7 @@ class TelemetryServer:
                                     for cam in ("front", "rear")},
             "armed": self._vehicle_armed(),
             "front_fps_effective": self._desired_front_fps(),
+            "front_enabled_effective": self._desired_front_enabled(),
             "rear_enabled_effective": self._desired_rear_enabled(),
             "auto_override": self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES,
         }
@@ -1406,7 +1453,8 @@ class TelemetryServer:
         self.pub.send(TOPIC_CAM_CONFIG, CamConfig(
             front_fps=self._desired_front_fps(),
             rear_fps=self._cam_rear_fps_armed,
-            rear_enabled=self._desired_rear_enabled()))
+            rear_enabled=self._desired_rear_enabled(),
+            front_enabled=self._desired_front_enabled()))
 
     def _load_camera_conf(self) -> None:
         """`config/camera.json` から戻す。`_load_auto_conf` と同じ流儀。
@@ -1758,7 +1806,13 @@ class TelemetryServer:
         正規化座標、0〜1）。**選び直すたびに `follow_object` の engage を必ず落とす**
         （`_on_cam_model`/`_on_e2e_model` の「モデルを変えたら engage を必ず落とす」
         と同じ理由——前の対象のつもりで engage したまま追跡対象だけ入れ替わるのを防ぐ）。
+
+        **DISARM 中の選択は受け付けない**（2026-10-04、バンビ判断）。cam_track_node は
+        DISARM 中は追跡しない（省電力）ので、受け付けると GUI に枠が出ないまま ARM 後に
+        突然追跡が始まる。GUI もドラッグを無効にして案内を出す（`CameraView.tsx`）。
         """
+        if not self._vehicle_armed():
+            return
         try:
             box = (float(m["x0"]), float(m["y0"]), float(m["x1"]), float(m["y1"]))
         except (KeyError, TypeError, ValueError):
@@ -1894,6 +1948,8 @@ class TelemetryServer:
         # しまう（録画データの混線・先発プロセスのリーク）
         self._mcap_starting = True
         self._mcap_error = None
+        # DISARM 中に止めているカメラを記録のために起こす（`_cam_in_use_while_disarmed`）
+        self._publish_cam_config()
         cmd = [sys.executable, "-u", "-m", "raspi.nodes.logger_node",
                "--quiet", "-o", "-", "--image-hz", str(image_hz)]
         try:
@@ -2164,7 +2220,30 @@ class TelemetryServer:
         while self._running:
             self.sub.poll(0)
             self._on_auto_cmd(time.monotonic_ns())
+            self._on_armed_change()
             await asyncio.sleep(BUS_POLL_S)
+
+    def _on_armed_change(self) -> None:
+        """ARM/DISARM が変わった周に、それに連動する省電力設定を切り替える（2026-10-04）。
+
+        - CPU の上限周波数（DISARM 1.5GHz / ARM 2.0GHz。`raspi/io/cpufreq.py`）
+        - カメラの capture（DISARM 中は使う者がいなければ止める。`_desired_front_enabled`）
+
+        `vehicle_state` を受けたその周で効かせるため `_bus_pump` から呼ぶ（ARM した
+        瞬間に戻す。1Hz の `_cam_config_pump` を待たない）。`_vehicle_armed()` は
+        未受信を ARM 扱いにするので、起動直後は高い方に倒れる。"""
+        armed = self._vehicle_armed()
+        if armed == self._last_armed:
+            return
+        self._last_armed = armed
+        self._apply_cpu_cap()
+        self._publish_cam_config()
+
+    def _apply_cpu_cap(self) -> None:
+        """今の ARM 状態の上限周波数にする（今の値と同じなら書かない）。`_cam_config_pump`
+        からも1Hzで呼び、外から書き換えられても戻す。"""
+        self._cpufreq.set_max_khz(CPU_MAX_KHZ_ARMED if self._vehicle_armed()
+                                  else CPU_MAX_KHZ_DISARM)
 
     def _on_auto_cmd(self, now: int) -> None:
         """新しい判断（`auto/cmd` の中身の変化）を `/cmd` へ即座に中継する（2026-09-26）。
@@ -2372,7 +2451,8 @@ class TelemetryServer:
             if self._fan_mode == "manual":
                 self._fan.set_manual(self._fan_duty)
             else:
-                self._fan.set_auto()
+                # 毎秒 kick すると低温時にファンが毎秒回っては止まる（fan.py `ensure_auto`）
+                self._fan.ensure_auto()
 
     async def _cam_config_pump(self) -> None:
         """capture側(camera_node)への希望（FPS上限・後方ON/OFF）を低頻度で再送する。
@@ -2385,7 +2465,9 @@ class TelemetryServer:
         period = 1.0 / CAM_CONFIG_HZ
         while self._running:
             await asyncio.sleep(period)
+            self._logger_running = _logger_process_running()
             self._publish_cam_config()
+            self._apply_cpu_cap()
 
     async def _signal_config_pump(self) -> None:
         """矢印信号認識への希望（ON/OFF・HSVしきい値）を低頻度で再送する。
@@ -2561,6 +2643,7 @@ class TelemetryServer:
             self._publish_auto_ctrl()
             self.pub.send(TOPIC_CMD, DriveCmd(mode=0, source="shutdown"))
             self._fan.set_auto()   # プロセスが消えても手動固定を残さない
+            self._cpufreq.restore()   # 上限を絞ったまま残さない
         # mcap 中継のサブプロセスも道連れにする（ベストエフォート。
         # systemd 配下なら KillMode=control-group で既に片付いているはず）
         if self._mcap_proc is not None:
@@ -2573,6 +2656,21 @@ class TelemetryServer:
 
 
 # ── HTTP ヘルパ ─────────────────────────────────────────────────────
+
+#: systemd が unit の動作中だけ置くファイル（止まると消える。実機で確認、2026-10-04）
+LOGGER_UNIT_MARKER = "/run/systemd/units/invocation:surge-logger.service"
+
+
+def _logger_process_running() -> bool:
+    """常駐ロガー（surge-logger.service）が動いているか。
+
+    常駐ロガーはバスに何も publish しないので、systemd の目印で見る。DISARM 中に
+    カメラを止めると画像の無い記録になるため、動いている間は止めない
+    （`_cam_in_use_while_disarmed`）。GUI の mcap 記録は `_mcap_proc` で別に見ている。
+    `/proc` を毎秒走査する案は telemetry_node の Python 側の負荷の上位に出たのでやめた。
+    手で `python -m raspi.nodes.logger_node` を起動した場合は検出できない。"""
+    return os.path.lexists(LOGGER_UNIT_MARKER)
+
 
 def _response(status: int, ctype: str, body: bytes, *, extra: dict[str, str] | None = None) -> Response:
     h = {

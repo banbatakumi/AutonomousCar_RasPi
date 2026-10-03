@@ -429,6 +429,7 @@ class CameraNode:
                     role = role_of[w.idx]
                     if role == "front":
                         w.request_fps(msg.front_fps)
+                        w.request_enabled(msg.front_enabled)
                     elif role == "rear":
                         w.request_fps(msg.rear_fps)
                         w.request_enabled(msg.rear_enabled)

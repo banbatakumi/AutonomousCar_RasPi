@@ -42,6 +42,11 @@ export function useSnapshot() {
   /** `cams` を順に撮って保存する。1台失敗しても残りは撮る */
   const snap = async (cams: SnapCam[]) => {
     if (busy) return
+    if (!cams.length) {
+      // DISARM 中は映像を表示していないカメラの取得を止めている（省電力）
+      setError('撮れるカメラが無い（停止中。映像を表示してから撮る）')
+      return
+    }
     setBusy(true)
     setError(null)
     const errors: string[] = []

@@ -772,6 +772,10 @@ class CamConfig(MsgBase):
     rear_fps: float = 30.0
     #: False なら camera_node が該当カメラの `Picamera2.stop()` を呼び、実際に撮像を止める
     rear_enabled: bool = True
+    #: 前カメラの同上。DISARM中に映像を使う者（GUIの視聴者・記録）がいない間だけ
+    #: telemetry_node が False にする（2026-10-04、省電力。センサを止めると
+    #: 1fps に落とすより約45mA少ない）。ARM中は常に True
+    front_enabled: bool = True
 
 
 class CamModelCtrl(MsgBase):

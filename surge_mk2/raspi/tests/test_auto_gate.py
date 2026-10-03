@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.auto_gate import cam_infer_active, vehicle_armed  # noqa: E402
+from raspi.core.auto_gate import (  # noqa: E402
+    IDLE_PUBLISH_PERIOD_NS, IdlePacer, cam_infer_active, vehicle_armed)
 from raspi.msgs import AutoCtrl, VehicleState  # noqa: E402
 
 _MODES = ("ftg_cam", "cam_centerline")
@@ -48,6 +49,29 @@ class TestCamInferActive(unittest.TestCase):
                                          VehicleState(armed=True), ("line_trace",)))
         self.assertFalse(cam_infer_active(AutoCtrl(mode="race"),
                                           VehicleState(armed=True), ("line_trace",)))
+
+
+class TestIdlePacer(unittest.TestCase):
+    """IDLE中の publish を間引き、ACTIVE中と IDLE へ入った瞬間は必ず送る（2026-10-04）。"""
+
+    def test_active_always_publishes(self):
+        p = IdlePacer()
+        self.assertTrue(all(p.should_publish(True, t) for t in range(0, 10**9, 10**7)))
+
+    def test_idle_publishes_at_most_once_per_period(self):
+        p = IdlePacer()
+        sent = [t for t in range(0, 2 * 10**9, 10**7) if p.should_publish(False, t)]
+        self.assertEqual(len(sent), 2 * 10**9 // IDLE_PUBLISH_PERIOD_NS)
+
+    def test_entering_idle_publishes_immediately(self):
+        p = IdlePacer()
+        p.should_publish(False, 0)
+        p.should_publish(True, 10**7)          # ACTIVE を挟む
+        self.assertTrue(p.should_publish(False, 2 * 10**7))
+
+    def test_poll_timeout(self):
+        self.assertEqual(IdlePacer.poll_timeout_ms(True), 20)
+        self.assertEqual(IdlePacer.poll_timeout_ms(False), 0)
 
 
 if __name__ == "__main__":

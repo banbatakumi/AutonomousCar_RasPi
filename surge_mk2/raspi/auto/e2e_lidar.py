@@ -75,7 +75,17 @@ def _load_from_path(path: Path) -> dict:
         raise ValueError(
             f"{cfg_path} に steer_rate_max_rad_s が無い（v13より前の非互換モデル）。"
             "行動空間が舵角速度に変わったため、v13以降で再学習・再exportしたモデルのみ使える")
-    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    # ★省電力化（2026-10-04実測）: 既定のSessionOptionsは全4コア＋スピンウェイトで、
+    # 0.3msで終わる推論の後も全コアを回し続ける。10Hz推論で制御系電流が+100mA・
+    # CPU31%だったのが、1スレッド・スピン無効で+3mAになり推論時間も変わらなかった。
+    # 観測273次元のMLPなのでスレッド並列化の恩恵が無い（`cam_perception_node.py`と同じ流儀）
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 1
+    opts.inter_op_num_threads = 1
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    session = ort.InferenceSession(str(path), sess_options=opts,
+                                   providers=["CPUExecutionProvider"])
     # ★入力次元はJSON（`in_dim`）ではなくONNXグラフ自身の宣言shapeから読む
     # （`export_onnx_rl.py`は`dynamic_axes`無しでバッチ1固定の具体的なshapeで
     # エクスポートしているので`shape[-1]`は必ず具体的な整数になる）。JSONの値と

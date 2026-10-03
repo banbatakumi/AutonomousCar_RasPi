@@ -109,6 +109,7 @@ case "${1:-}" in
   --remove)
     systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service
+    rm -rf /etc/systemd/system/surge-telemetry.service.d
     rm -f /etc/udev/rules.d/99-surge-fan.rules
     rm -f /etc/sudoers.d/surge-shutdown
     systemctl daemon-reload
@@ -239,6 +240,16 @@ write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quie
 # **この引数を消すと Pi 自身からしか GUI が見えなくなる**（症状は「繋がらない」だけで
 # 原因が分かりにくいので、消す前にこのコメントを読むこと）
 write_unit surge-telemetry "WebSocket サーバ"  "raspi.nodes.telemetry_node --host 0.0.0.0" "surge-io.service"
+# CPU の上限周波数（`raspi/io/cpufreq.py`。DISARM 中 1.5GHz・ARM 中 2.0GHz）を
+# pi ユーザーの telemetry_node から書けるようにする。`scaling_max_freq` は既定
+# root:root 644。cpufreq の policy は udev のイベントで扱いにくいので、起動の
+# たびに `ExecStartPre=+`（root 権限で実行）で gpio グループに書き込み権限だけ渡す
+# （`99-surge-fan.rules` と同じ思想）。write_unit が上書きしない drop-in に置く
+mkdir -p /etc/systemd/system/surge-telemetry.service.d
+cat > /etc/systemd/system/surge-telemetry.service.d/10-cpufreq.conf <<'EOF'
+[Service]
+ExecStartPre=+/bin/sh -c 'f=/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq; [ -e "$f" ] && chgrp gpio "$f" && chmod 664 "$f" || true'
+EOF
 # **常時上げてよい。** planning_node は `auto/cmd` に出すだけで、`cmd` には
 # 一切 publish しない。engage するのは GUI の自動運転タブから人間が行うので、
 # 起動していること自体が車を動かす条件にはならない（`--allow-arm` とは独立）

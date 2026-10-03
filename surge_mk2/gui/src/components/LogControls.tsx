@@ -27,8 +27,9 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
   const { bufferedBytes, start } = useMcapDownload(ch)
   const cam = useUi((s) => s.cameraConfig)
   const snapshot = useSnapshot()
-  // 後カメラは取得を止めている間（DISARM 中の既定）はフレームが無いので撮らない
-  const snapCams: SnapCam[] = cam?.rear_enabled_effective === false ? ['front'] : ['front', 'rear']
+  // 取得を止めているカメラ（DISARM 中で映像を表示していない等）はフレームが無いので撮らない
+  const snapCams: SnapCam[] = (['front', 'rear'] as SnapCam[]).filter((c) =>
+    (c === 'front' ? cam?.front_enabled_effective : cam?.rear_enabled_effective) !== false)
   const canUndistort = !!(cam?.undistort_available?.front || cam?.undistort_available?.rear)
 
   return (

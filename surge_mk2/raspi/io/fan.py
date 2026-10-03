@@ -109,6 +109,9 @@ class FakeFan:
     def set_auto(self) -> bool:
         return True
 
+    def ensure_auto(self) -> bool:
+        return True
+
     def set_manual(self, duty: float) -> bool:
         return True
 
@@ -200,6 +203,25 @@ class SysfsFan:
             return False
         self._kick_governor()
         return True
+
+    def ensure_auto(self) -> bool:
+        """auto を**保つ**ための定期呼び出し用（`_fan_pump` の1Hz）。
+
+        `pwm1_enable` が 2 から外れているときだけ `set_auto()`（kick 付き）で戻す。
+        ★2026-10-04: 以前は1Hzで `set_auto()` を呼んでいたため、低温時に
+        `_kick_governor()` が `cur_state` を毎秒 0→1 に書き換え、ファンが毎秒
+        回っては止まっていた（実機で pwm1 が 0↔75、回転数 0↔2600rpm を確認。
+        制御系電流で約7mA）。kick は governor 停止への対処なので、auto へ
+        切り替えた瞬間（`set_auto()`）だけで足りる。
+        """
+        if not self.available:
+            return False
+        try:
+            if self._pwm1_enable.read_text().strip() == "2":
+                return True
+        except OSError:
+            return False
+        return self.set_auto()
 
     def set_manual(self, duty: float) -> bool:
         if not self.available:

@@ -9,6 +9,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -396,8 +397,12 @@ def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mod
         sub=SimpleNamespace(latest=latest),
         _auto_engaged=auto_engaged, _auto_mode=auto_mode,
         _cam_front_fps_armed=30.0, _cam_front_fps_disarm=10.0,
-        _cam_rear_enabled_armed=True, _cam_rear_enabled_disarm=False)
+        _cam_rear_enabled_armed=True, _cam_rear_enabled_disarm=False,
+        camera_clients={"front": set(), "rear": set(), "mask": set()},
+        _mcap_proc=None, _mcap_starting=False, _logger_running=False)
     fake._vehicle_armed = lambda: tn.TelemetryServer._vehicle_armed(fake)
+    fake._cam_in_use_while_disarmed = \
+        lambda cam: tn.TelemetryServer._cam_in_use_while_disarmed(fake, cam)
     return fake
 
 
@@ -414,7 +419,8 @@ class TestServeSnapshot(unittest.TestCase):
         img[:, :, 2] = 200                       # メモリ上 BGR の R = 赤
         desc = self.ring.write(img, t_capture_ns=1, frame_id=0)
         self.jpeg = RingJpeg(70)
-        ref = SimpleNamespace(shm_name=self.name, ring_seq=desc.seq)
+        ref = SimpleNamespace(shm_name=self.name, ring_seq=desc.seq,
+                              t_pub=time.monotonic_ns())
         self.fake = SimpleNamespace(_jpeg=self.jpeg,
                                     sub=SimpleNamespace(latest={tn.TOPIC_IMAGE_FRONT: ref}))
 
@@ -453,6 +459,13 @@ class TestServeSnapshot(unittest.TestCase):
         self.fake._jpeg = None
         resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/front.png")
         self.assertEqual(resp.status_code, 503)
+
+    def test_stale_frame_of_stopped_camera_is_409(self):
+        """capture を止めたカメラの残り1枚を撮らない（DISARM 中の省電力停止、2026-10-04）。"""
+        ref = self.fake.sub.latest[tn.TOPIC_IMAGE_FRONT]
+        ref.t_pub = time.monotonic_ns() - tn.SNAPSHOT_MAX_AGE_NS - 1
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/front.png")
+        self.assertEqual(resp.status_code, 409)
 
 
 class TestUndistortSetting(unittest.TestCase):
@@ -550,6 +563,43 @@ class TestDesiredRearEnabled(unittest.TestCase):
         fake = _fake_cam_server(armed=False)
         self.assertFalse(tn.TelemetryServer._desired_rear_enabled(fake))
 
+    def test_disarmed_viewer_does_not_override_setting(self):
+        """DISARM中は GUI で後方映像を表示していても設定どおり止める（2026-10-04、バンビ判断）。"""
+        fake = _fake_cam_server(armed=False)
+        fake.camera_clients["rear"].add(object())
+        fake._mcap_proc = object()
+        self.assertFalse(tn.TelemetryServer._desired_rear_enabled(fake))
+
+
+class TestDesiredFrontEnabled(unittest.TestCase):
+    """`_desired_front_enabled`（DISARM中は使う者がいなければ前カメラを止める。2026-10-04）。"""
+
+    def _front(self, fake):
+        return tn.TelemetryServer._desired_front_enabled(fake)
+
+    def test_armed_always_enabled(self):
+        self.assertTrue(self._front(_fake_cam_server(armed=True)))
+
+    def test_before_first_vehicle_state_is_enabled(self):
+        self.assertTrue(self._front(_fake_cam_server(armed=None)))
+
+    def test_disarmed_and_unused_is_stopped(self):
+        self.assertFalse(self._front(_fake_cam_server(armed=False)))
+
+    def test_disarmed_but_used_is_enabled(self):
+        for attr, val in (("camera_clients", {"front": {object()}, "rear": set()}),
+                          ("_mcap_proc", object()), ("_mcap_starting", True),
+                          ("_logger_running", True)):
+            with self.subTest(attr):
+                fake = _fake_cam_server(armed=False)
+                setattr(fake, attr, val)
+                self.assertTrue(self._front(fake))
+
+    def test_rear_viewer_does_not_wake_front(self):
+        fake = _fake_cam_server(armed=False)
+        fake.camera_clients["rear"].add(object())
+        self.assertFalse(self._front(fake))
+
 
 class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
     """`_camera_pump`（実機で発覚: `/ws/camera/mask`にクライアントが1人でも繋がると
@@ -574,6 +624,35 @@ class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
         stopper = asyncio.create_task(stop_soon())
         await tn.TelemetryServer._camera_pump(fake)   # KeyErrorなら例外でテスト失敗
         await stopper
+
+
+class TestTrackRoiSelectNeedsArm(unittest.TestCase):
+    """DISARM 中の対象選択は受け付けない（2026-10-04。cam_track_node は DISARM 中は
+    追跡しないので、受け付けると枠が出ないまま ARM 後に突然追跡が始まる）。"""
+
+    def _fake(self, armed):
+        calls = []
+        fake = _fake_cam_server(armed=armed)
+        fake._track_roi_box = (0.0, 0.0, 0.0, 0.0)
+        fake._track_select_seq = 0
+        fake._publish_auto_ctrl = lambda: calls.append("auto")
+        fake._publish_track_roi = lambda: calls.append("roi")
+        return fake, calls
+
+    _BOX = {"x0": 0.4, "y0": 0.4, "x1": 0.6, "y1": 0.6}
+
+    def test_disarmed_is_ignored(self):
+        fake, calls = self._fake(armed=False)
+        tn.TelemetryServer._on_track_roi_select(fake, dict(self._BOX))
+        self.assertEqual(fake._track_select_seq, 0)
+        self.assertEqual(calls, [])
+
+    def test_armed_is_accepted(self):
+        fake, calls = self._fake(armed=True)
+        tn.TelemetryServer._on_track_roi_select(fake, dict(self._BOX))
+        self.assertEqual(fake._track_select_seq, 1)
+        self.assertEqual(fake._track_roi_box, (0.4, 0.4, 0.6, 0.6))
+        self.assertIn("roi", calls)
 
 
 if __name__ == "__main__":

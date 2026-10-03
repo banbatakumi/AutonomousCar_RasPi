@@ -66,7 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from raspi.core.auto_gate import cam_infer_active  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import ImageRef, LineScan, VehicleState  # noqa: E402
@@ -310,10 +310,11 @@ class LinePerceptionNode:
         seq = 0
         t_end = time.monotonic() + duration_s if duration_s else None
         next_hb = time.monotonic_ns()
+        pacer = IdlePacer()
         while self._running:
             if t_end and time.monotonic() >= t_end:
                 break
-            for _ in sub.poll(20):
+            for _ in sub.poll(pacer.poll_timeout_ms(self._active)):
                 pass  # `latest` を見るだけなので中身の処理は不要
 
             auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
@@ -364,16 +365,19 @@ class LinePerceptionNode:
                             self._last_scan = None
                         else:
                             self._last_scan = st
-            pub.send(TOPIC_LINE_CAM, st)
+            now = time.monotonic_ns()
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
+            if pacer.should_publish(active, now):
+                pub.send(TOPIC_LINE_CAM, st)
             seq += 1
 
-            now = time.monotonic_ns()
             if now >= next_hb:
                 next_hb = now + NS // HB_HZ
                 pub.send(TOPIC_HB_PREFIX + "line_perception",
                         HbMsg(node="line_perception"))
             if status_cb:
                 status_cb(st)
+            pacer.idle_sleep(active)
 
 
 def _parse_band(s: str) -> tuple[float, float]:
