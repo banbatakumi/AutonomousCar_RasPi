@@ -39,6 +39,8 @@ export const VEHICLE = {
    * `hfov`/`bottomCrop`/`fisheye`/`undistortHfov` は選ばれたレンズ（`lens`）の値 */
   camFront: {
     lens: "wide160", // 付いているレンズ（`lens`。"" ＝ プロファイル無し）
+    x: 0.1, // m base_link（後輪車軸中心）から前方。地面点→カメラ奥行きの換算に要る
+    y: 0.0, // m 左が正
     height: 0.088, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
@@ -54,10 +56,12 @@ export const VEHICLE = {
    * こと自体を前提にした投影式を別に持っており、汎用の yaw 回転はしていない */
   camRear: {
     lens: "wide160",
+    x: 0.039, // m 意味は camFront と同じ（後ろ向きに付いている）
+    y: 0.0, // m
     height: 0.088, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
-    bottomCrop: 0.0625, // 下端カット率
+    bottomCrop: 0.2, // 下端カット率
     fisheye: { fx: 307.9092, fy: 307.5942, cx: 307.4241, cy: 241.533, k: [-0.03208693, 0.00352001, -0.01074923, 0.00351499], width: 640, height: 480 } as FisheyeCalib | null,
     undistortHfov: 1.92, // rad
   },

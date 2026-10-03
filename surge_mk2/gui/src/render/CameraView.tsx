@@ -111,7 +111,7 @@ import { live } from '../bus/live'
 import { useUi } from '../store/ui'
 import { wsUrl } from '../ws/url'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
-import { fisheyeLens, MIN_ZC, pinholeLens, type Lens } from './cameraModel'
+import { fisheyeLens, groundProjector, pinholeLens, type Lens } from './cameraModel'
 import type { ControlChannel } from '../ws/control'
 
 export function CameraView({
@@ -476,10 +476,8 @@ function drawGuide(
       th += (ds / VEHICLE_GEOM.wheelbase) * Math.tan(vs.steer_actual)
       x += ds * Math.cos(th)
       y += ds * Math.sin(th)
-      // 車両座標 (x=前, y=左) → カメラ座標。後カメラは奥行き・左右とも反転する
-      // （振り返った視点なので、車体の後方＝カメラの奥、車体の左＝カメラの右）
-      const [depth, lateral] = isFront ? [x, y + off] : [-x, -(y + off)]
-      const p = project(depth, lateral)
+      // 車両座標 (x=前, y=左) をそのまま渡す（後カメラの反転は投影器の中）
+      const p = project(x, y + off)
       if (!p) continue
       if (!started) {
         ctx.moveTo(p[0], p[1])
@@ -528,23 +526,17 @@ function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'fro
   const dPitch = (vs?.imu_ok ? vs.pitch : 0) * (isFront ? 1 : -1)
   const dRoll = (vs?.imu_ok ? vs.roll : 0) * (isFront ? 1 : -1)
 
-  // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す
-  const pitch = geom.pitch - dPitch
-  const cp = Math.cos(pitch)
-  const sp = Math.sin(pitch)
+  // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す。
   // roll: 光軸まわりの回転。右が沈む（dRoll 正）とカメラも右に傾き、
-  // 写真の一般則どおり像は光軸を中心に反時計回りへ回って見える
-  const cr = Math.cos(dRoll)
-  const sr = Math.sin(dRoll)
-
-  return (x: number, y: number): [number, number] | null => {
-    // ヨーだけ戻したローカル座標 (x=奥行き, y=左, 下向き=height) → カメラ座標
-    const zc = x * cp + height * sp // 光軸方向
-    if (zc < MIN_ZC) return null
-    const yc = -x * sp + height * cp // 下向きが正
-    const xc = -y // 右が正
-    return lens.project(xc * cr + yc * sr, -xc * sr + yc * cr, zc)
-  }
+  // 写真の一般則どおり像は光軸を中心に反時計回りへ回って見える。
+  // **返す関数は base_link 基準の地面点 `(x=前, y=左)` を受け取る**（カメラ取付位置の
+  // 差し引き・後カメラの反転は `groundProjector` がやる）
+  return groundProjector(
+    lens,
+    { x: geom.x, y: geom.y, height, pitch: geom.pitch - dPitch },
+    cam,
+    dRoll,
+  )
 }
 
 /**

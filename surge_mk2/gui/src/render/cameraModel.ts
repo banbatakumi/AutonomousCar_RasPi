@@ -70,3 +70,43 @@ export function fisheyeLens(w: number, h: number, calib: FisheyeCalib, bottomCro
     },
   }
 }
+
+/** カメラの取付（base_link 基準）。`pitch` は下向きが正で、車体姿勢（IMU）の補正込みの値 */
+export interface MountPose {
+  /** base_link（後輪車軸中心）から前方 [m] */
+  x: number
+  /** 左が正 [m] */
+  y: number
+  /** 路面からレンズ中心まで [m] */
+  height: number
+  pitch: number
+}
+
+/** 路面の点（base_link の `(x=前, y=左)`）→ 表示画像の画素。`ipm.ground_to_pixel()` と同じ式
+ * （片方だけ直すと進路ガイドと IPM が別の場所を指す。`test_gui_projection.py` が突き合わせる）。
+ *
+ * **地面の点は base_link 基準で受け取り、ここでカメラの取付位置 `x, y` を引く。**
+ * 呼び出し側が「カメラからの奥行き」に直して渡す必要は無い（以前は引き忘れて
+ * 前 0.1m・後 0.04m ずれていた）。`facing` が `'rear'` なら後ろ向き（yaw=π）で、
+ * 奥行き・左右とも反転する。`roll` は光軸まわりの回転 [rad]（IMU、カメラ座標の光線を回す）。 */
+export function groundProjector(
+  lens: Lens,
+  pose: MountPose,
+  facing: 'front' | 'rear',
+  roll = 0,
+): (gx: number, gy: number) => [number, number] | null {
+  const sign = facing === 'front' ? 1 : -1
+  const cp = Math.cos(pose.pitch)
+  const sp = Math.sin(pose.pitch)
+  const cr = Math.cos(roll)
+  const sr = Math.sin(roll)
+  return (gx, gy) => {
+    const depth = sign * (gx - pose.x)
+    const lateral = sign * (gy - pose.y) // 左が正
+    const zc = depth * cp + pose.height * sp // 光軸方向
+    if (zc < MIN_ZC) return null
+    const yc = -depth * sp + pose.height * cp // 下向きが正
+    const xc = -lateral // 右が正
+    return lens.project(xc * cr + yc * sr, -xc * sr + yc * cr, zc)
+  }
+}

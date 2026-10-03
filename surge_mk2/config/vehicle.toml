@@ -265,7 +265,7 @@ roll = 0.0
 pitch = 0.0                   # 実測（2026-10-03）水平
 yaw = 3.14159265
 hfov = 2.23                   # 仮（cam_front と同じ）
-bottom_crop = 0.0625          # ★仮。実機で見直す
+bottom_crop = 0.2          # ★仮。実機で見直す
 undistort_hfov = 1.92
 
 [sensors.cam_rear.lenses.wide160.fisheye]
