@@ -231,6 +231,18 @@ hfov = 2.23                   # ≒128°。公称（対角160°）からの概�
 bottom_crop = 0.25            # ★仮（純正と同じ）。画角が変わりボンネットの写り方も変わるので実機で見直す
 undistort_hfov = 1.92         # ≒110°
 
+[sensors.cam_front.lenses.wide160.fisheye]
+# tools/cam_calib が書いた（14 枚、再投影誤差 0.193px）。手で書き換えない
+width = 640
+height = 480
+fx = 307.9092
+fy = 307.5942
+cx = 307.4241
+cy = 241.533
+k = [-0.03208693, 0.00352001, -0.01074923, 0.00351499]
+rms = 0.1926
+hfov_deg = 124.6
+
 [sensors.cam_rear]
 lens = "wide160"              # 意味は cam_front と同じ（前後で別のレンズにしてよい）
 
