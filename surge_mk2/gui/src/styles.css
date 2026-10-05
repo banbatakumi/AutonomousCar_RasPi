@@ -917,27 +917,6 @@ button.on {
   cursor: not-allowed;
 }
 
-/* ── 診断（現在値グリッド。診断タブ `DiagView` から使う） ─────────── */
-
-.diag-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px 18px;
-  padding: 6px 0 2px;
-}
-
-.diag-grid h4 {
-  margin: 0 0 4px;
-  font-size: 11px;
-  color: var(--dim);
-  font-weight: 600;
-}
-
-.diag-grid section {
-  border-left: 2px solid var(--line);
-  padding-left: 8px;
-}
-
 /* ── ラジコンビュー ───────────────────────────────────── */
 
 /*
@@ -1907,109 +1886,650 @@ button.on {
   height: auto;
 }
 
-/* ── 診断タブ ─────────────────────────────────────────── */
+/* ── 診断タブ（`views/DiagView.tsx`・`components/diag/`）─────────────────
+ *
+ * 上段（サブページ切替・常設サマリ・イベント帯）は固定、下段のサブページだけがスクロールする。
+ * 状態色は `is-ok / is-warn / is-bad / is-na` で付ける（`na` = この機体では判定しない）。
+ * 正常のときは色を付けない——全部が緑だと、どこが正常かではなく画面が緑に見えるだけになる。
+ */
 
 .diagview {
-  padding: 16px 22px 40px;
-  overflow-y: auto;
-  height: 100%;
-}
-
-.diagview-head {
   display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  --dg-gap: 10px;
+}
+
+.dg-top {
+  flex: 0 0 auto;
+  padding: 10px 18px 0;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(var(--panel), var(--bg));
+}
+
+.dg-bar {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
-.diagview-head h2 {
-  margin: 0;
+.dg-bar .seg {
+  margin-top: 0;
 }
 
-.diagview-head p {
-  margin: 0;
-  flex: 1 1 100%;
+.dg-bar .seg button {
+  padding: 4px 12px;
   font-size: 12px;
 }
 
-/* 診断タブでは畳まないので、区切りをはっきりさせる */
-.diagview .diag-grid {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
+.dg-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 18px 40px;
 }
 
-.charts {
+.dg-empty {
+  margin: 6px 0;
+}
+
+.dg-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  white-space: normal;
+  word-break: break-all;
+}
+
+/* 常設サマリ */
+
+.dg-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 6px;
 }
 
-.chart {
-  background: var(--panel);
+.dg-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 6px 10px 7px;
+  text-align: left;
+  background: var(--panel2);
   border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 8px 12px 10px;
+  border-left: 3px solid var(--line);
+  border-radius: 4px;
   min-width: 0;
 }
 
-.chart-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 4px;
+.dg-tile-title {
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: .04em;
 }
 
-.chart-head h4 {
+.dg-tile-value {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dg-tile-value small {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--dim);
+  margin-left: 2px;
+}
+
+.dg-tile-sub {
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.dg-tile.is-ok {
+  border-left-color: var(--ok);
+}
+
+.dg-tile.is-warn {
+  border-left-color: var(--warn);
+  border-color: #6b5210;
+}
+
+.dg-tile.is-warn .dg-tile-value {
+  color: var(--warn);
+}
+
+.dg-tile.is-bad {
+  border-left-color: var(--bad);
+  border-color: #6e2b27;
+  background: #23130f;
+}
+
+.dg-tile.is-bad .dg-tile-value {
+  color: var(--bad);
+}
+
+.dg-tile.is-na .dg-tile-value {
+  color: var(--dim);
+}
+
+/* イベント帯 */
+
+.dg-timeline {
+  position: relative;
+  margin-top: 6px;
+}
+
+.dg-timeline .dg-when {
+  position: absolute;
+  right: 4px;
+  top: 0;
+  z-index: 1;
+}
+
+.dg-when {
+  font-size: 10px;
+  color: var(--live);
+  font-variant-numeric: tabular-nums;
+}
+
+/* カード */
+
+/* **どのページも4列の格子に載せる**（カード1枚 = 1枠、`wide` = 2枠）。
+   列数を幅から自動で決めると、ページごと・行ごとに箱の幅が変わって揃わない。
+   同じ行のカードは高さも揃える（中身の行数が違っても箱は同じ大きさ） */
+.dg-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--dg-gap);
+  margin-bottom: var(--dg-gap);
+  align-items: stretch;
+}
+
+@media (max-width: 1100px) {
+  .dg-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .dg-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dg-card.wide {
+    grid-column: auto;
+  }
+}
+
+.dg-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 5px;
+  padding: 9px 12px 10px;
+  min-width: 0;
+}
+
+.dg-card.wide {
+  grid-column: span 2;
+}
+
+.dg-card h4 {
+  margin: 0 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dim);
+  letter-spacing: .05em;
+}
+
+.dg-card.is-warn {
+  border-left-color: var(--warn);
+}
+
+.dg-card.is-bad {
+  border-left-color: var(--bad);
+}
+
+.dg-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2px 0;
+  border-top: 1px solid #1a2028;
+}
+
+.dg-row span {
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.dg-row b {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  /* 値は折り返さない（折り返すとそのカードだけ行が増えて高さが揃わなくなる）。入らなければ … */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.dg-row b.lv-na {
+  color: var(--dim);
+  font-weight: 400;
+}
+
+.dg-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line);
+  flex: 0 0 auto;
+}
+
+.dg-dot.is-ok {
+  background: var(--ok);
+}
+
+.dg-dot.is-warn {
+  background: var(--warn);
+}
+
+.dg-dot.is-bad {
+  background: var(--bad);
+  box-shadow: 0 0 5px 0 color-mix(in srgb, var(--bad) 80%, transparent);
+}
+
+/* 走行前チェック */
+
+.dg-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 6px 18px;
+}
+
+.dg-check-group h5 {
+  margin: 0 0 2px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+}
+
+.dg-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 2px 4px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  text-align: left;
+}
+
+.dg-check:hover {
+  background: var(--panel2);
+}
+
+.dg-check span {
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.dg-check b {
+  margin-left: auto;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dg-check.is-warn b {
+  color: var(--warn);
+}
+
+.dg-check.is-bad b {
+  color: var(--bad);
+}
+
+.dg-check.is-na b {
+  color: var(--dim);
+  font-weight: 400;
+}
+
+/* イベントログ */
+
+.dg-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 232px;
+  overflow-y: auto;
+}
+
+.dg-log li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border-top: 1px solid #1a2028;
+}
+
+.dg-log time {
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+}
+
+.dg-log li.is-warn span {
+  color: var(--warn);
+}
+
+.dg-log li.is-bad span {
+  color: var(--bad);
+}
+
+/* 経路図（通信・電源。`components/diag/Route.tsx`） */
+
+.dg-flows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--dg-gap);
+}
+
+.dg-flows .dg-route {
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+
+@media (max-width: 1100px) {
+  .dg-flows {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.dg-node-value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.dg-node-value small {
+  font-size: 11px;
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+.dg-node.is-warn .dg-node-value {
+  color: var(--warn);
+}
+
+.dg-node.is-bad .dg-node-value {
+  color: var(--bad);
+}
+
+.dg-route {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: var(--dg-gap);
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow-x: auto;
+}
+
+.dg-node {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  background: var(--panel2);
+  border: 1px solid #3a4652;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.dg-node small {
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.dg-node.is-warn {
+  border-color: var(--warn);
+}
+
+.dg-node.is-bad {
+  border-color: var(--bad);
+}
+
+.dg-node.is-bad small {
+  color: var(--bad);
+}
+
+.dg-node.is-warn small {
+  color: var(--warn);
+}
+
+.dg-hop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: 1 1 130px;
+  min-width: 130px;
+  min-height: 14px;
+  padding: 0 8px;
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+  /* 上下2行の文字の間に、区間を表す線を1本通す */
+  background: linear-gradient(var(--ok), var(--ok)) center / 100% 2px no-repeat;
+}
+
+.dg-hop span {
+  background: var(--panel);
+  padding: 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dg-hop span:first-child {
+  transform: translateY(-7px);
+}
+
+.dg-hop span:last-child:not(:first-child) {
+  transform: translateY(7px);
+}
+
+.dg-hop.is-warn {
+  background-image: linear-gradient(var(--warn), var(--warn));
+  color: var(--warn);
+}
+
+.dg-hop.is-bad {
+  background-image: linear-gradient(var(--bad), var(--bad));
+  color: var(--bad);
+}
+
+.dg-hop.is-na {
+  background-image: linear-gradient(var(--line), var(--line));
+}
+
+.dg-fan {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1 1 260px;
+}
+
+.dg-fan-row {
+  display: flex;
+  align-items: center;
+}
+
+/* 枝の先の箱は同じ幅に固定する（中の文字数で幅が変わると、縦に並んだ箱の左端が揃わない） */
+.dg-fan-row .dg-node {
+  padding: 3px 10px;
+  flex: 0 0 14em;
+  width: 14em;
+  overflow: hidden;
+}
+
+.dg-fan-row .dg-node small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 表（ノード一覧） */
+
+.dg-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.dg-table th {
+  text-align: left;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+  padding: 2px 8px 4px 0;
+}
+
+.dg-table td {
+  padding: 3px 8px 3px 0;
+  border-top: 1px solid #1a2028;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* グラフ */
+
+/* グラフは3列（カードの4列とは別。横軸を読むのに幅が要る） */
+.dg-charts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--dg-gap);
+  align-items: stretch;
+}
+
+@media (max-width: 1100px) {
+  .dg-charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .dg-charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.dg-chart {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px 10px 6px;
+  min-width: 0;
+}
+
+/* 見出しは常に2行ぶんの高さを取る（凡例が1行で済むグラフと2行になるグラフで、描画領域の位置を揃える） */
+.dg-chart header {
+  display: flex;
+  align-items: baseline;
+  align-content: flex-start;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-bottom: 2px;
+  min-height: 36px;
+}
+
+.dg-chart h4 {
   margin: 0;
   font-size: 12px;
   font-weight: 600;
 }
 
-.chart-head .unit {
+.dg-unit {
+  font-size: 10px;
   color: var(--dim);
-  font-size: 10px;
 }
 
-.chart-head .dim {
-  font-size: 10px;
-  margin-left: auto;
-}
-
-.chart-legend {
+.dg-legend {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin-left: auto;
   font-size: 10px;
   color: var(--dim);
 }
 
-.chart-legend span {
+.dg-legend span {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  white-space: nowrap;
 }
 
-.chart-legend i {
-  width: 9px;
-  height: 2px;
+.dg-legend b {
+  min-width: 3.6em;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.dg-swatch {
   display: inline-block;
+  width: 12px;
+  height: 0;
+  border-top: 2px solid currentColor;
 }
 
-.chart-host {
+.dg-swatch.dash {
+  border-top-style: dashed;
+}
+
+.dg-swatch.tone-accent { color: var(--accent); }
+.dg-swatch.tone-live { color: var(--live); }
+.dg-swatch.tone-ok { color: var(--ok); }
+.dg-swatch.tone-warn { color: var(--warn); }
+.dg-swatch.tone-bad { color: var(--bad); }
+.dg-swatch.tone-dim { color: var(--dim); }
+.dg-swatch.tone-fg { color: var(--fg); }
+
+.dg-chart-host {
   width: 100%;
 }
 
-/* uPlot は明るいテーマ前提の既定値なので、暗い計器盤に合わせて上書きする */
-.chart .u-legend {
-  display: none;
+/* uPlot の既定は明るいテーマ向け。カーソルの縦線と点を暗い計器盤に合わせる */
+.dg-chart-host .u-cursor-x {
+  border-right: 1px dashed var(--live);
 }
 
-.chart .u-select {
-  background: #4aa8ff22;
+.dg-chart-host .u-cursor-pt {
+  border-width: 1px !important;
+}
+
+/* 状態色の文字（`lv-na` は「判定しない」） */
+.lv-na {
+  color: var(--dim);
 }
 
 /* ── 設定パネル（ドロワーの中身） ─────────────────────── */
@@ -2120,7 +2640,7 @@ button.on {
   color: var(--dim);
 }
 
-/* ── 記録ファイル一覧（`DiagLogFiles.tsx`、診断タブ）───────────────────── */
+/* ── 記録ファイル一覧（`components/diag/pages/LogsPage.tsx`、診断タブ）───────────────────── */
 
 .logs-row {
   display: flex;

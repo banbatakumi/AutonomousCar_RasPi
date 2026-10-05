@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x3b7e84fd
+export const MSGS_SCHEMA = 0x6645a3f5
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -281,6 +281,23 @@ export type LinkDiag = {
   hb_stalls: number
   lidar_scans: number
   lidar_sectors_lost: number
+  /**
+   * io_node のメインループ1周の最大所要時間 [ms]（直近1〜2秒の最大）。kick 途絶
+   * （100ms でハートビートが止まり E-Stop）にどれだけ近づいたかの指標
+   */
+  loop_max_ms: number | null
+  /** `cmd` 途絶で DISARM に落とした回数（累積） */
+  cmd_timeouts: number
+  /** STM32 の再起動を検出した回数（`TimeSync.resets`。累積） */
+  stm_resets: number
+  /** オドメトリの跳びを捨てた回数（`StateBuilder.odom_jumps`。累積） */
+  odom_jumps: number
+  /** ログを置くディスクの空き [%]。まだ測っていなければ None（30秒ごとに更新） */
+  disk_free_pct: number | null
+  /** `.sfl` への書き込みに失敗した回数（累積） */
+  log_errors: number
+  /** ファームのビルド時刻（`VERSION.build_epoch`、UNIX 秒）。未受信なら None */
+  fw_build_epoch: number | null
   /**
    * **このリンクの相手が実 STM32 ではなくシミュレータか。**
    * 利便性ではなく安全のために出す。シムと実機の画面が見分けられないと

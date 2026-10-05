@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -133,6 +134,43 @@ _MAX_GAPS_SAMPLES = 1000
 #: （issue #4）。`CamStats.last_grab_ns`（`_grab()`が成功するたびに更新）を
 #: 見て、これだけ進んでいなければハングとみなしてノード全体を終了させる
 _CAPTURE_HANG_S = 1.0
+
+
+#: `hb/camera`（生存申告。`detail` に実 fps と落ち数）を出す周期。撮像は別スレッドなので
+#: 申告が遅くても困らず、待機中の消費を増やさないよう他ノード（10Hz）より低くしてある
+HB_HZ = 2
+#: `hb/camera` に載せる実 fps を測り直す間隔 [s]（短いと 10fps 時に ±1枚の粗さが出る）
+HB_FPS_WINDOW_S = 2.0
+
+
+def make_hb_detail():
+    """`hb/camera` の `detail` を作る関数を返す（例 `front=29.9fps drop=0 rear=off`）。
+
+    fps は `HB_FPS_WINDOW_S` ごとの `CamStats.frames` の増分から出す。"""
+    last: dict[int, tuple[float, int]] = {}
+    fps: dict[int, float] = {}
+
+    def detail(node) -> str:
+        now = time.monotonic()
+        parts = []
+        for wk in node.workers:
+            role = CAM_TOPIC.get(wk.idx, ("", f"cam{wk.idx}"))[1]
+            frames = wk.stats.frames
+            t0, f0 = last.get(wk.idx, (now, frames))
+            if wk.idx not in last or frames < f0:
+                last[wk.idx] = (now, frames)
+            elif now - t0 >= HB_FPS_WINDOW_S:
+                fps[wk.idx] = (frames - f0) / (now - t0)
+                last[wk.idx] = (now, frames)
+            if not wk._enabled:
+                parts.append(f"{role}=off")
+            elif wk.idx in fps:
+                parts.append(f"{role}={fps[wk.idx]:.1f}fps drop={wk.stats.dropped}")
+            else:
+                parts.append(f"{role}=-")
+        return " ".join(parts)
+
+    return detail
 
 
 @dataclass(slots=True)
@@ -352,7 +390,7 @@ class CameraNode:
         self._cfg_running = False
 
     def run(self, duration_s: float | None = None, status_cb=None,
-           hang_s: float = _CAPTURE_HANG_S) -> None:
+           hang_s: float = _CAPTURE_HANG_S, hb_cb=None) -> None:
         for w in self.workers:
             w.start_camera()
         time.sleep(0.5)                     # AE/AWB が落ち着くまで
@@ -370,6 +408,7 @@ class CameraNode:
 
         self._t_start = time.monotonic()
         next_status = 0.0
+        next_hb = 0.0
         try:
             while True:
                 # **どちらか1台でも死んだら／ハングしたらノード全体を終了させる。**
@@ -398,6 +437,9 @@ class CameraNode:
                 if status_cb and el >= next_status:
                     status_cb(self)
                     next_status = el + 1.0
+                if hb_cb and el >= next_hb:
+                    hb_cb(self)
+                    next_hb = el + 1.0 / HB_HZ
                 time.sleep(0.05)
         finally:
             self.stop()
@@ -483,10 +525,11 @@ def main() -> int:
     pub = None
     on_frame = None
     cfg_sub = None
+    hb_cb = None
     if not args.no_bus:
         try:
             from raspi.bus import LATEST, Publisher, Subscriber
-            from raspi.msgs import ImageRef, TOPIC_CAM_CONFIG
+            from raspi.msgs import Heartbeat, ImageRef, TOPIC_CAM_CONFIG, TOPIC_HB_PREFIX
 
             # **カメラごとに別スレッドから publish するので thread_safe が必須。**
             # ZeroMQ のソケットはスレッドセーフではない
@@ -501,6 +544,12 @@ def main() -> int:
                     shm_name=desc.name, slot=desc.slot, ring_seq=desc.seq,
                     frame_id=desc.frame_id, width=desc.width, height=desc.height,
                     fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes))
+
+            hb_detail = make_hb_detail()
+
+            def hb_cb(node):                                 # noqa: F811
+                pub.send(TOPIC_HB_PREFIX + "camera",
+                         Heartbeat(node="camera", pid=os.getpid(), detail=hb_detail(node)))
 
             print(f"# バス配信 {pub.endpoint} "
                   + " ".join(CAM_TOPIC.get(i, (f'image/cam{i}',))[0] for i in indices))
@@ -534,7 +583,7 @@ def main() -> int:
 
     try:
         node.run(duration_s=args.duration,
-                 status_cb=None if args.quiet else _status)
+                 status_cb=None if args.quiet else _status, hb_cb=hb_cb)
     finally:
         el = node.elapsed
         print("\n\n=== 終了時の統計 ===")

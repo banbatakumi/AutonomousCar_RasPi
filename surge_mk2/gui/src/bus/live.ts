@@ -136,6 +136,8 @@ export type Numbers = {
   scanAgeMs: number
   /** **直近の1周**で欠けていたセクタ数。累積ではない（累積は link 側にある） */
   scanMissing: number
+  /** LiDAR の回転数 [°/s]（直近の1周）。未受信なら null */
+  scanRotDps: number | null
   out: {
     speed: number; steer: number; active: boolean
     torqueMode: boolean; torque: number; auto: boolean
@@ -161,6 +163,7 @@ let snapshot: Numbers = {
   scanHz: 0,
   scanAgeMs: Infinity,
   scanMissing: 0,
+  scanRotDps: null,
   out: { speed: 0, steer: 0, active: false, torqueMode: false, torque: 0, auto: false },
   armRemainingMs: 0,
   auto: null,
@@ -181,6 +184,7 @@ setInterval(() => {
     scanHz: live.scanHz,
     scanAgeMs: live.lastScanMs ? now - live.lastScanMs : Infinity,
     scanMissing: live.scan ? live.scan.sector_seen.filter((s) => !s).length : 0,
+    scanRotDps: live.scan ? live.scan.rot_speed_dps : null,
     out: { ...cmdOut },
     armRemainingMs: live.armRemainingMs,
     auto: live.auto,

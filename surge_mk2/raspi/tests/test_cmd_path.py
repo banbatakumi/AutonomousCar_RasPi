@@ -491,6 +491,9 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         from raspi.io.wifi import FakeWifi, WifiState
         srv._wifi = FakeWifi()
         srv._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
+        from raspi.io.pihealth import PiHealth
+        srv._pi_state = PiHealth(available=False)
+        srv._node_hb = {}
         # カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps）。**既定値のまま**を組む。
         # ARM/DISARMそれぞれの値を持つ（2026-09-03）
         srv._cam_rear_enabled_armed = True

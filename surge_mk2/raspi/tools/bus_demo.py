@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import random
 import signal
 import sys
@@ -31,11 +32,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
-from raspi.msgs import LinkDiag, Scan, VehicleState  # noqa: E402
+from raspi.msgs import Heartbeat, LinkDiag, Scan, VehicleState  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
+    TOPIC_HB_PREFIX,
     TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
@@ -224,15 +226,24 @@ def main() -> int:
                     "reordered": 0, "duplicate": 0, "resync_bytes": 0,
                     "len_error": 0, "unknown_type": 0, "wrong_direction": 0},
                 stm_rx={"rx_frame_ok": n_state * 2, "rx_crc_error": 0,
-                        "rx_len_error": 0, "rx_unknown_type": 0, "tx_drop": 0,
-                        "md_rx_count": n_state * 6, "md_rx_error": 0},
+                        "rx_len_error": 0, "rx_unknown_type": 0, "tx_drop": 0},
+                md_rx_count=[n_state * 2] * 3, md_rx_error=[0, 0, n_state // 400],
                 counts={"TELEMETRY": n_state, "LIDAR_SECTOR": n_scan * 12},
                 sync_offset_ns=-1_234_567, sync_delay_ns=180_000,
                 sync_drift_ppm=-12.4, sync_n=50,
                 cmd_rtt_ms=11.0 + random.gauss(0, 1.5),
                 protocol_version=PROTOCOL_VERSION, fw_id=0xDEADBEEF, protocol_match=True,
                 hb_alive=True, hb_max_late_ms=0.46, hb_stalls=0,
-                lidar_scans=n_scan, lidar_sectors_lost=n_scan // 7))
+                lidar_scans=n_scan, lidar_sectors_lost=n_scan // 7,
+                loop_max_ms=1.2 + abs(random.gauss(0, 0.6)), cmd_timeouts=0,
+                stm_resets=0, odom_jumps=0, disk_free_pct=62.5, log_errors=0,
+                fw_build_epoch=1_790_000_000,
+                max_speed_m_s=5.0, max_accel_m_s2=6.0, max_torque_nm=0.15,
+                max_steer_rad=0.52))
+            # 診断タブのノード表に io が載るように、実物と同じ生存申告も出す
+            pub.send(TOPIC_HB_PREFIX + "io",
+                     Heartbeat(node="io", pid=os.getpid(),
+                               detail="FAULT" if estop else "OK"))
             next_diag = now + 1.0 / DIAG_HZ
 
         time.sleep(0.002)

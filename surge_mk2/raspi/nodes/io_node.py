@@ -246,6 +246,12 @@ class IoNode:
         #: kick 途絶（`KICK_TIMEOUT_S`=100ms）にどれだけ近づいたかを見るための指標
         #: （issue #5）。`_log_linkstats` の呼び出しごとにリセットする
         self._loop_max_ns = 0
+        #: 診断（`LinkDiag.loop_max_ms`）用の同じ指標。**上とは別に持つ**（あちらは `.sfl` の
+        #: 記録が読むたびに消す）。1秒の窓で最大を取り、直前の窓と今の窓の大きい方を出す
+        #: ——10Hz の `diag/link` を GUI がさらに間引いても、跳ねた1周を取りこぼさない
+        self._diag_loop_max_ns = 0
+        self._diag_loop_prev_ns = 0
+        self._diag_loop_window_end_ns = 0
         self._ping_seq = 0
         self._running = False
         self._t_start = 0
@@ -700,6 +706,8 @@ class IoNode:
             prev_loop_ns = now
             if loop_dt > self._loop_max_ns:
                 self._loop_max_ns = loop_dt
+            if loop_dt > self._diag_loop_max_ns:
+                self._diag_loop_max_ns = loop_dt
             elapsed = (now - int(self._t_start * NS)) / NS
 
             # 「メインループは生きている」の申告。これが途切れるとハートビートが
@@ -783,6 +791,10 @@ class IoNode:
                 next_status = now + NS // 2      # 2Hz 更新
 
             if now >= next_diag:
+                if now >= self._diag_loop_window_end_ns:
+                    self._diag_loop_prev_ns = self._diag_loop_max_ns
+                    self._diag_loop_max_ns = 0
+                    self._diag_loop_window_end_ns = now + NS
                 self.bridge.publish_diag(
                     self.state, self.sync, self.link.stats,
                     heartbeat=self.heartbeat,
@@ -792,6 +804,11 @@ class IoNode:
                     expected_version=PROTOCOL_VERSION,
                     control_sync=self.control_sync,
                     control_params_error=self.control_params_error,
+                    loop_max_ms=max(self._diag_loop_max_ns,
+                                    self._diag_loop_prev_ns) / 1e6,
+                    cmd_timeouts=self.cmd_timeouts,
+                    disk_free_pct=self._disk_free_pct,
+                    log_errors=self._log_errors,
                     # シミュレータの link だけがこれを持つ（`sim/link.py`）。
                     # GUI に SIM バッジを出す唯一の根拠。**実機の link には何も足さない**
                     sim=getattr(self.link, "is_sim", False))

@@ -1,18 +1,23 @@
 /**
- * 記録ファイル一覧 — 診断タブに常設（旧「ログ」タブの `FilesSection` を移設、2026-09-03）。
+ * 記録 — `logs/` にある `.sfl`/`.mcap` の一覧・ダウンロード・削除。
  *
- * 録画の開始・停止はタブバーの `LogControls` に移った。ここは `logs/` にある
- * `.sfl`/`.mcap` の一覧・ダウンロード・削除だけを扱う。
+ * 録画の開始・停止はタブバーの `LogControls` にある（どのタブからでも押せるように）。
+ * 一覧はこのページを開いたときと、録画が終わるたびに取り直す。
  */
-import { formatBytes, formatDateTime } from '../format'
-import type { LogFile } from '../types'
-import type { ControlChannel } from '../ws/control'
+import { useEffect } from 'react'
+import { formatBytes, formatDateTime } from '../../../format'
+import { useUi } from '../../../store/ui'
+import type { ControlChannel } from '../../../ws/control'
 
-export function DiagLogFiles({ ch, files }: { ch: ControlChannel | null; files: LogFile[] }) {
+export function LogsPage({ ch }: { ch: ControlChannel | null }) {
+  const files = useUi((s) => s.logFiles)
+  useEffect(() => {
+    ch?.logsList()
+  }, [ch])
   return (
-    <section className="settings-group">
+    <section className="dg-card wide">
       <div className="logs-section-head">
-        <h3>記録ファイル</h3>
+        <h4>記録ファイル</h4>
         <button disabled={!ch} onClick={() => ch?.logsList()}>
           更新
         </button>

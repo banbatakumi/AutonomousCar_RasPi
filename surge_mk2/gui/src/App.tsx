@@ -16,7 +16,7 @@
  *
  * 「ログ」タブも同じ理由で廃止した（2026-09-03）。録画の開始・停止は
  * モードタブの隣（`LogControls`）に常設し、ファイル一覧は診断タブ
- * （`DiagLogFiles`）に統合した——録るかどうかはどのタブを見ていても
+ * （`components/diag/pages/LogsPage.tsx`）に統合した——録るかどうかはどのタブを見ていても
  * 意思表示できる方が自然で、一覧はもともと診断タブと同じ「後から追う」場所のため。
  */
 import { useEffect, useRef, useState } from 'react'

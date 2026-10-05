@@ -245,6 +245,31 @@ export type WifiStatus = {
   available: boolean
 }
 
+/** Pi 本体の健全性（`raspi/io/pihealth.py` の `PiHealth`）。読めない項目は null */
+export type PiHealth = {
+  /** この機体で読めるか（Mac のシム等では false） */
+  available: boolean
+  cpu_pct: number | null
+  /** いちばん忙しいコアの使用率 [%] */
+  cpu_max_pct: number | null
+  load1: number | null
+  mem_used_pct: number | null
+  mem_total_mb: number | null
+  cpu_khz: number | null
+  cpu_max_khz: number | null
+  /** `get_throttled` の生値（bit0=今 低電圧 / bit2=今 スロットリング / bit16〜=起動後に発生） */
+  throttled: number | null
+}
+
+/** ノードの生存申告（`hb/<node>`）。生死の判定は GUI がする（`format.ts` の `nodeLevel`） */
+export type NodeAlive = {
+  node: string
+  /** 最後の申告からの経過 [ms]（status を作った時点） */
+  age_ms: number
+  pid: number
+  detail: string
+}
+
 /** `/ws/control` のサーバ → GUI。 */
 export type ControlStatus = {
   type: 'status'
@@ -300,6 +325,10 @@ export type ControlStatus = {
   fan: FanStatus
   /** 接続中Wi-FiのSSID・電波強度。**サーバが真値** */
   wifi: WifiStatus
+  /** Pi 本体の健全性（`raspi/io/pihealth.py`、1Hz）。**古い Pi 側では無い** */
+  pi?: PiHealth
+  /** `hb/<node>` を一度でも出したノードの一覧。**古い Pi 側では無い** */
+  nodes?: NodeAlive[]
   /** capture側のFPS上限・後方カメラON/OFF・GUI配信頻度。**サーバが真値** */
   camera_config: CameraConfigStatus
   /**

@@ -102,7 +102,10 @@ class BusBridge:
                    arm_inhibited: bool = True, cmd_source: str = "",
                    cmd_stale: bool = True, expected_version: int | None = None,
                    sim: bool = False, control_sync=None,
-                   control_params_error: str = "") -> LinkDiag:
+                   control_params_error: str = "",
+                   loop_max_ms: float | None = None, cmd_timeouts: int = 0,
+                   disk_free_pct: float | None = None,
+                   log_errors: int = 0) -> LinkDiag:
         """`diag/link` の中身を組み立てる。
 
         **Pi 側の受信統計（`rx`）と STM32 側の `STATS`（`stm_rx`）を並べて出す。**
@@ -140,6 +143,13 @@ class BusBridge:
             cmd_rtt_ms=self.cmd_rtt_ms,
             lidar_scans=self.scans.scans,
             lidar_sectors_lost=self.scans.sectors_lost,
+            loop_max_ms=loop_max_ms,
+            cmd_timeouts=cmd_timeouts,
+            # 記録の再生（`replay_node`）では同期器が別物のことがある
+            stm_resets=getattr(sync, "resets", 0),
+            odom_jumps=self.state_builder.odom_jumps,
+            disk_free_pct=disk_free_pct,
+            log_errors=log_errors,
             sim=sim,
         )
         if s is not None:
@@ -154,6 +164,7 @@ class BusBridge:
         if ver is not None:
             d.protocol_version = ver.protocol_version
             d.fw_id = ver.fw_id
+            d.fw_build_epoch = ver.build_epoch
             if expected_version is not None:
                 d.protocol_match = ver.protocol_version == expected_version
         if heartbeat is not None:

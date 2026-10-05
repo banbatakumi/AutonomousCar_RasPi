@@ -157,7 +157,8 @@ def endpoints_for_topic(topic: str) -> list[str]:
     if topic.startswith("hb/") or topic == "hb/":
         return [endpoint_for_node(n) for n in
                 ("io", "camera", "control", "planning",
-                 "cam_perception", "line_perception", "cam_track", "signal")]
+                 "cam_perception", "line_perception", "cam_track", "cam_e2e",
+                 "signal")]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）

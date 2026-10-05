@@ -2,15 +2,16 @@
 
 React + TypeScript + Vite。`docs/architecture.md` §10 の設計に沿う。
 
-タブは5枚。**同じテレメトリを見ているが、出す物の選び方が違う。**
+タブは4枚。**同じテレメトリを見ているが、出す物の選び方が違う。**
 
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
 | **ラジコン**（既定） | 運転する人 | 速度・G・舵角をメータで。介入は数値ではなくランプ。設定は ⚙ ドロワー |
 | **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。経路・占有格子の重畳は Phase 3 以降 |
-| **地図生成** | 世界座標で見る人 | 自車位置・地図生成の確定操作を大きなキャンバスで（低頻度。`MapCanvas`） |
-| **診断** | 原因を追う人 | 現在値の全項目 + 時系列グラフ（uPlot・直近180秒） |
-| **ログ** | 後で見る人 | `.sfl` 記録と mcap ライブ中継 |
+| **診断** | 点検する人・原因を追う人 | 常設サマリ＋イベント帯＋サブページ6枚（下の「診断タブ」） |
+| **システム同定** | 車両パラメータを測る人 | 試験の実行と結果の確認 |
+
+記録（`.sfl`・mcap）の開始・停止はタブバーの `LogControls` に常設、ファイル一覧は診断タブの「記録」ページ。
 
 ## 動かす
 
@@ -104,7 +105,7 @@ E-Stop だけは誰でも押せる。
 ```
 src/
 ├── bus/live.ts        20Hz のデータ置き場。**React の state には入れない**
-├── bus/history.ts     診断グラフ用リングバッファ（10Hz × 180秒・常時記録）
+├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
 ├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・20Hz）
 ├── ws/control.ts      /ws/control（JSON・操縦権・E-Stop）
 ├── input/useDriving.ts ゲームパッド + キーボード → 20Hz の cmd
@@ -112,13 +113,45 @@ src/
 ├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
 ├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
 ├── render/MapCanvas   世界座標のキャンバス（地図生成タブ・低頻度）
-├── views/             RcView / AutoView / MapView / DiagView / LogView（＝タブ5枚）
-├── components/        StatusBar(層B) / DriveBar(層B) / DiagGrid / DiagCharts
+├── views/             RcView / AutoView / DiagView / SysIdView（＝タブ4枚）
+├── components/        StatusBar(層B) / DriveBar(層B) / LogControls ほか
+├── components/diag/   診断タブの部品（下の「診断タブ」）
 ├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps）
 ├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）
 ├── store/ui.ts        イベント駆動の状態だけ（zustand）
 └── format.ts          SI → 表示単位。**ここ以外で単位を変えない**
 ```
+
+### 診断タブ
+
+用途は3つ: **走行前の点検・異常の原因追跡・電源と熱の監視**（2026-10-05 に作り直した）。
+
+```
+上段（常設）  [概要][電源・熱][駆動・制御][通信][センサ・Pi][記録]   ⏸  30秒|60秒|180秒
+              常設サマリ（走行可否・電源2系統・温度・リンク・STM32/MD・センサ・RasPi・ノード）
+              イベント帯（ARM・AUTO・E-STOP・フォルト・通信・TC・ABS・TV・自動停止）
+下段          サブページ。**開いているページのグラフだけ描く**
+```
+
+| ファイル（`components/diag/`） | 役割 |
+|---|---|
+| `view.ts` | サブページ・時間幅・一時停止の状態と、**全グラフ共通の再描画の刻み（4Hz・1本）** |
+| `checks.ts` | 走行前チェックの判定（**判定はここだけ**。サマリと一覧が同じ結果を使う） |
+| `chartDefs.ts` | グラフ定義。**1枚に載せる単位は1つ**（V と A、ms と Hz を混ぜない） |
+| `Chart.tsx` / `EventTimeline.tsx` / `uplotBase.ts` | uPlot。窓とカーソルを全グラフで共有、フラグの帯としきい値線を重ねる |
+| `HealthStrip.tsx` / `Card.tsx` | 常設サマリのタイルとカード部品 |
+| `Route.tsx` / `PowerFlow.tsx` | 経路図（箱を線でつなぎ、区間の数字と状態色を線に出す）。通信ページと電源ページで使う |
+| `pages/` | サブページ6枚 |
+
+- **グラフを足す**: `bus/history.ts` の `SERIES` と `pushHistory` に系列を足し、`chartDefs.ts` に定義を足して、
+  ページの `CHARTS` に並べる
+- **チェック項目を足す**: `checks.ts` の `runChecks` に1行。しきい値は `format.ts`
+- **カードは4列の格子に載せる**（1枚 = 1枠、`wide` = 2枠。同じ行は高さも揃う）。ページのカードは
+  枠の合計が4の倍数になるように並べる。値は折り返さない（折り返すとそのカードだけ高くなる）
+- **一時停止しても記録は止まらない**（履歴は常時貯める。止めるのは表示の窓だけ）
+- 色は `uplotBase.ts` の `tones()` が CSS 変数から引く。**グラフ側に色の値を書かない**
+- `status.pi`（CPU・メモリ・スロットリング）と `status.nodes`（ノードの生存申告）は `/ws/control` で 1Hz。
+  Pi 以外（シム・`bus_demo`）では `pi.available=false` で「取得不可」になる
 
 ### メータの更新頻度は3種類ある
 

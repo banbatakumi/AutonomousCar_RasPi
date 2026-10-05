@@ -131,13 +131,14 @@ from websockets.http11 import Response  # noqa: E402
 from raspi.auto import mapstore  # noqa: E402
 from raspi.auto.registry import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
-from raspi.bus import LATEST, Publisher, Subscriber  # noqa: E402
+from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.camera_model import Undistorter  # noqa: E402
 from raspi.core.jpeg import RingJpeg, encode_png  # noqa: E402
 from raspi.io.cpufreq import open_cpufreq  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
+from raspi.io.pihealth import PiHealth, PiHealthReader  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
 from raspi.nav.grid import pack_trinary, unpack_trinary  # noqa: E402
 from raspi.msgs import (  # noqa: E402
@@ -293,6 +294,11 @@ CPU_MAX_KHZ_DISARM = 1_500_000
 #: Wi-Fi(SSID・電波強度)の再取得周期。`nmcli` のサブプロセス起動が数十〜百数十msかかる
 #: ため 20Hz の `/ws/telemetry` には乗せず、`fan` と同じ低頻度ポーリングで `/ws/control` に載せる
 WIFI_PUMP_HZ = 1
+#: Pi 本体の健全性（CPU・メモリ・スロットリング。`raspi/io/pihealth.py`）の再取得周期
+PI_HEALTH_PUMP_HZ = 1
+#: `hb/<node>` の受信ポリシー。**CONFLATE にしない**——1本のソケットで全ノードぶんを
+#: 受けるので、最新1件だけ残すと他のノードの生存申告を捨ててしまう
+HB_POLICY = Policy(conflate=False, hwm=200)
 #: 安全タイマの正。**`config/vehicle.toml` の `[safety]` が唯一の出どころ**で、
 #: io_node は同じファイルから、GUI は `config/generate.py` の生成物から読む
 #: （2026-08-21 のレビュー 🟢11）
@@ -417,8 +423,12 @@ class TelemetryServer:
             TOPIC_TRACK_TARGET: LATEST,
             #: 矢印信号認識の直近判定（GUI がカメラ映像へ重畳・ライブチューニングに使う。§`_snapshot`）
             TOPIC_SIGNAL_STATUS: LATEST,
+            #: 各ノードの生存申告（診断タブのノード表。§`_nodes_status`）
+            TOPIC_HB_PREFIX: HB_POLICY,
         })
         self.pub = Publisher("control")
+        #: ノード名 → (最後に `hb/<node>` を受けた monotonic_ns, pid, detail)
+        self._node_hb: dict[str, tuple[int, int, str]] = {}
 
         self.telemetry_clients: set = set()
         self.control_clients: set = set()
@@ -511,6 +521,11 @@ class TelemetryServer:
         #: `_wifi_pump` が低頻度で更新するキャッシュ。読み取り自体が `nmcli` の
         #: サブプロセス起動を伴うため、`_control_status()` から毎回同期で呼ばない
         self._wifi_state = WifiState(ssid=None, rssi_dbm=None, available=False)
+
+        # ── Pi 本体の健全性（診断タブ） ──
+        self._pi_health = PiHealthReader()
+        #: `_pi_health_pump` が更新するキャッシュ
+        self._pi_state = PiHealth(available=False)
 
         # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
         #: `config/camera.json` に保存され、次回起動で戻る（`auto.json` と同じ流儀）。
@@ -1868,6 +1883,31 @@ class TelemetryServer:
             self._wifi_state = await asyncio.to_thread(self._wifi.read)
             await self._broadcast_control_status()
 
+    async def _pi_health_pump(self) -> None:
+        """Pi 本体の健全性を低頻度で読み直す（診断タブ）。**誰も見ていなければ読まない。**
+
+        `vcgencmd` を使う機体ではサブプロセス起動を挟むので `to_thread` に逃がす
+        （`_wifi_pump` と同じ理由）。GUI への送出は `_wifi_pump` の毎秒の broadcast に
+        相乗りし、Wi-Fi を読めない機体（そちらが送らない）でだけ自分で送る。
+        """
+        period = 1.0 / PI_HEALTH_PUMP_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            if not self._pi_health.available or not self.control_clients:
+                continue
+            self._pi_state = await asyncio.to_thread(self._pi_health.read)
+            if not self._wifi.available:
+                await self._broadcast_control_status()
+
+    def _nodes_status(self) -> list[dict]:
+        """`hb/<node>` を一度でも受けたノードの一覧（名前順）。`age_ms` は最後の申告からの経過。
+
+        **生死の判定はここでしない**（GUI がしきい値を持つ）。カメラ系ノードは IDLE 中に
+        申告を間引くので、周期はノードごとに違う。"""
+        now = time.monotonic_ns()
+        return [{"node": name, "age_ms": round((now - t_ns) / 1e6), "pid": pid, "detail": detail}
+                for name, (t_ns, pid, detail) in sorted(self._node_hb.items())]
+
     def _control_status(self) -> dict:
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
         return {
@@ -1911,6 +1951,8 @@ class TelemetryServer:
             "auto": self._auto_status(),
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
+            "pi": self._pi_state.as_dict(),
+            "nodes": self._nodes_status(),
             "camera_config": self._camera_config_status(),
             "drive_settings": self._drive_settings,
             "signal_config": self._signal_config_status(),
@@ -2236,7 +2278,9 @@ class TelemetryServer:
         `auto/cmd` の中身が変わっていたら、`/cmd` をその場で送る（`_on_auto_cmd`）。
         """
         while self._running:
-            self.sub.poll(0)
+            for topic, msg in self.sub.poll(0):
+                if topic.startswith(TOPIC_HB_PREFIX):
+                    self._node_hb[msg.node] = (time.monotonic_ns(), msg.pid, msg.detail)
             self._on_auto_cmd(time.monotonic_ns())
             self._on_armed_change()
             await asyncio.sleep(BUS_POLL_S)
@@ -2645,7 +2689,7 @@ class TelemetryServer:
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
-                self._auto_ctrl_pump, self._fan_pump, self._wifi_pump,
+                self._auto_ctrl_pump, self._fan_pump, self._wifi_pump, self._pi_health_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
                 self._mask_pump, self._track_roi_pump, self._signal_config_pump)]
             try:

@@ -432,6 +432,23 @@ class LinkDiag(MsgBase):
     lidar_scans: int = 0
     lidar_sectors_lost: int = 0
 
+    # ── io_node が内部で数えている値（診断タブ用。数えるのは元からで、ここへ写すだけ） ──
+    #: io_node のメインループ1周の最大所要時間 [ms]（直近1〜2秒の最大）。kick 途絶
+    #: （100ms でハートビートが止まり E-Stop）にどれだけ近づいたかの指標
+    loop_max_ms: float | None = None
+    #: `cmd` 途絶で DISARM に落とした回数（累積）
+    cmd_timeouts: int = 0
+    #: STM32 の再起動を検出した回数（`TimeSync.resets`。累積）
+    stm_resets: int = 0
+    #: オドメトリの跳びを捨てた回数（`StateBuilder.odom_jumps`。累積）
+    odom_jumps: int = 0
+    #: ログを置くディスクの空き [%]。まだ測っていなければ None（30秒ごとに更新）
+    disk_free_pct: float | None = None
+    #: `.sfl` への書き込みに失敗した回数（累積）
+    log_errors: int = 0
+    #: ファームのビルド時刻（`VERSION.build_epoch`、UNIX 秒）。未受信なら None
+    fw_build_epoch: int | None = None
+
     #: **このリンクの相手が実 STM32 ではなくシミュレータか。**
     #: 利便性ではなく安全のために出す。シムと実機の画面が見分けられないと
     #: 「シムのつもりで --allow-arm した実車が動く」が起きる（GUI が SIM バッジを出す）
