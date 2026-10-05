@@ -51,7 +51,8 @@ COMMAND_TIMEOUT_NS = 100 * 1_000_000
 #: `auto_stop`（v0.7）が効き始める距離 [m]
 AUTO_STOP_DISTANCE_M = 0.20
 
-#: ABS（★v0.15）が働く下限の車速 [m/s]。ファームの `DRIVE_TC_MIN_SPEED_M_S`（滑り率が定義できない）
+#: ABS の旗を立てる下限の車速 [m/s]。v0.16 のファームはスリップ率の分母に下限を置いて低速でも働くが、
+#: MD の制動が車輪の止まる手前で抜ける（約0.6m/s から）ので、低速で ABS が削る場面はほとんど無い
 ABS_MIN_SPEED_M_S = 0.25
 
 #: `LIMITS`(0x0A、★v0.11) が返す値。**実機 STM32 の固定定数
@@ -282,7 +283,7 @@ class VirtualStm32:
 
         # v0.15: ABS。制動の減速度がグリップで頭打ちになる場面（実機で ABS が制動を削る場面）に
         # 旗だけ立てる。車輪の回転を持たないモデルなので、ABS を切ったときのロックは表せない
-        # （`sim/vehicle.py` の `brake_decel`）。ファーム同様 0.25m/s 未満では働かない
+        # （`sim/vehicle.py` の `brake_decel`）。低速（`ABS_MIN_SPEED_M_S` 未満）では立てない
         self.abs_active = (cmd.brake and cmd.armed and not self.side_brake_active
                            and self._config.get(packets.Param.ABS_ENABLE, 1.0) != 0.0
                            and abs(v.speed) >= ABS_MIN_SPEED_M_S
@@ -410,6 +411,10 @@ class VirtualStm32:
             # TC/TV 未実装（タイヤモデルが無い）なので、スリップは常に0・上限は常に全開で返す
             slip=[0, 0],
             tc_limit_nm=[_q("tc_limit_nm", DRIVE_MAX_TORQUE_NM, -32768, 32767)] * 2,
+            # ★v0.16: 絞る前の要求＝指令（絞らない）、ABS の上限は全開、TV は無い
+            torque_req=[_q("torque_req", torque, -32768, 32767)] * 2,
+            abs_limit_nm=_q("abs_limit_nm", DRIVE_MAX_TORQUE_NM, -32768, 32767),
+            yaw_rate_target=0, tv_moment_nm=0,
             temp=[temp, temp, 25 + int(10 * abs(v.steer_actual)), 40],
             batt_voltage_drive=_q("batt_voltage_drive", vd, 0, 255),
             batt_voltage_signal=_q("batt_voltage_signal", vs, 0, 255),

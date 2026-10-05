@@ -31,6 +31,9 @@ from .sysid_accel import SysIdAccel
 from .sysid_corner import SysIdCorner
 from .sysid_latency import SysIdLatency
 from .sysid_steer import SysIdSteer
+from .sysid_tyre import SysIdTyre
+from .sysid_wheel import SysIdWheel
+from .sysid_yawmoment import SysIdYawMoment
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
 
@@ -54,6 +57,10 @@ PLANNERS: dict[str, type[Planner]] = {
     SysIdAccel.id: SysIdAccel,
     SysIdCorner.id: SysIdCorner,
     SysIdLatency.id: SysIdLatency,
+    #: 足回りの制御（TC・ABS・TV）の車両モデルの同定（解析は `tools/ctrl_tune`）
+    SysIdWheel.id: SysIdWheel,
+    SysIdTyre.id: SysIdTyre,
+    SysIdYawMoment.id: SysIdYawMoment,
 }
 
 

@@ -107,6 +107,7 @@ def decode_flags(flags: int) -> dict:
         "winker_left_active": bool(flags & packets.FLG_WINKER_LEFT_ACTIVE),
         "winker_right_active": bool(flags & packets.FLG_WINKER_RIGHT_ACTIVE),
         "abs_active": bool(flags & packets.FLG_ABS_ACTIVE),
+        "wheel_lift_active": bool(flags & packets.FLG_WHEEL_LIFT_ACTIVE),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 
@@ -179,6 +180,10 @@ class StateBuilder:
             torque_cmd=[v * _TORQUE for v in t.torque_cmd],
             tc_slip=[v * _SLIP for v in t.slip],
             tc_limit_nm=[v * _TORQUE for v in t.tc_limit_nm],
+            torque_req=[v * _TORQUE for v in t.torque_req],
+            abs_limit_nm=t.abs_limit_nm * _TORQUE,
+            yaw_rate_target=t.yaw_rate_target * _YAW_RATE,
+            tv_moment_nm=t.tv_moment_nm * _TORQUE,
             temp=temp,
             batt_voltage=[t.batt_voltage_drive * _BATT_V, t.batt_voltage_signal * _BATT_V],
             batt_current=[t.batt_current_drive * _BATT_A_DRIVE,

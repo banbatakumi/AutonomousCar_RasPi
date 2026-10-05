@@ -172,6 +172,16 @@ class VehicleState(MsgBase):
     #: TC が動的に決めているトルク上限 [N·m] [RL, RR]。介入していなければ
     #: `LinkDiag.max_torque_nm` と同じ値になる（★v0.13）
     tc_limit_nm: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    # ── ★v0.16: 制御がどれだけ介入しているかを見るための値（GUI の診断タブ・mcap）──
+    #: [N·m] [RL, RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の
+    #: 左右差を載せた後、制動は要求の制動トルク（負）。**`torque_cmd` との差が「絞った量」**
+    torque_req: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
+    #: [N·m] ABS が決めている制動トルクの上限（左右共通）。働いていなければ最大トルクと同じ
+    abs_limit_nm: float = 0.0
+    #: [rad/s] TV の規範ヨーレート（舵角と車速から作った「本来出るはずのヨーレート」）。`yaw_rate` との差が偏差
+    yaw_rate_target: float = 0.0
+    #: [N·m] TV の PI が要求したヨーモーメント（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド
+    tv_moment_nm: float = 0.0
     #: [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None
     temp: list[int | None] = msgspec.field(default_factory=lambda: [None] * 4)
     batt_voltage: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)  #: [V] 駆動,信号
@@ -210,6 +220,8 @@ class VehicleState(MsgBase):
     #: ABS が**今まさに制動トルクを要求より削っている**（★v0.15）。`tc_active` と同じ「介入中」の意味。
     #: フォールバック（前輪センサ異常とみなして ABS を止め、要求どおりに制動している間）は False
     abs_active: bool = False
+    #: 片輪浮き対策が**今まさにトルクを削っている**（★v0.16）。このとき `tc_active` は立たない
+    wheel_lift_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
 
     # ── Pi 側で計算した派生量 ──
@@ -333,6 +345,11 @@ class DriveCmd(MsgBase):
     #: 点滅そのものは STM32 側で行う。実際に点滅しているかは `VehicleState.winker_*_active` を見ること
     winker_left: bool = False
     winker_right: bool = False
+    #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（名前 → 値。★v0.16）。同定の試験
+    #: （`raspi/auto/sysid_*.py`）が TC・ABS を切る・ヨーモーメントを入れるのに使う。io_node は
+    #: **この指令が届いている間だけ**入れ、届かなくなったら元へ戻す（`raspi/core/control_params.py`
+    #: の `OVERRIDABLE`）。GUI からの指令では常に空
+    fw_overrides: dict[str, float] = msgspec.field(default_factory=dict)
     source: str = ""                       #: 誰が出したか（"gui" / "planning" / "safety"）
 
 
@@ -372,6 +389,18 @@ class LinkDiag(MsgBase):
     #: から取得。★v0.12。範囲0.0-100.0の連続値。未確認（起動直後でまだ `CONFIG_ACK`
     #: を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
     auto_stop_margin_cm: float | None = None
+
+    #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）が STM32 に入っているか（★v0.16）。
+    #: `none`（送るものが無い）/`pending`（送信中）/`ok`（全項目が STM32 の答えと一致）/
+    #: `mismatch`（STM32 が範囲へ丸めた）/`unsupported`（STM32 のファームが古い）/
+    #: `invalid`（`[control]` が読めない）。`raspi/core/control_params.py`
+    control_params_status: str = "none"
+    #: STM32 が `CONFIG_ACK` で答えた値（名前 → 値。機能の ON/OFF も 0/1 で入る）
+    control_params: dict[str, float] = msgspec.field(default_factory=dict)
+    #: `mismatch`・`unsupported`・`invalid` の内容（人が読む文）
+    control_params_problems: list[str] = msgspec.field(default_factory=list)
+    #: 一致を確かめた後の読み戻しで食い違いを見つけて送り直した回数（STM32 だけの再起動など）
+    control_params_drift: int = 0
 
     rx: dict[str, int] = msgspec.field(default_factory=dict)      #: Pi 側 RxStats
     stm_rx: dict[str, int] | None = None   #: STM32 の STATS（**累積値**）
@@ -538,6 +567,13 @@ class AutoState(MsgBase):
     #: まま）。人（GUI）もブレーキを掛けていれば中継は**強い方**を採る（`telemetry_node._merge_auto`）。
     #: システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う（2026-09-27）
     brake_torque: float = 0.0
+    #: 立っている間 `target_speed` の代わりに `target_torque` [N·m]（1輪あたり）を直接掛ける
+    #: （`COMMAND.torque_mode`。車速PIを通さない）。**同定の試験だけが使う**——タイヤの限界まで
+    #: トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない（2026-10-05）
+    torque_mode: bool = False
+    target_torque: float = 0.0
+    #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（`DriveCmd.fw_overrides` へそのまま載る）
+    fw_overrides: dict[str, float] = msgspec.field(default_factory=dict)
 
     # ── 判断の根拠（Follow the Gap の場合） ──
     heading: float = 0.0                   #: 狙っている方位 [rad]

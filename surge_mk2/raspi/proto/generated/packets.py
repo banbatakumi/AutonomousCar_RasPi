@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x000F
+PROTOCOL_VERSION = 0x0010
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -36,6 +36,7 @@ FLG_SIDE_BRAKE_ACTIVE = 0x00020000
 FLG_WINKER_LEFT_ACTIVE = 0x00040000
 FLG_WINKER_RIGHT_ACTIVE = 0x00080000
 FLG_ABS_ACTIVE = 0x00100000
+FLG_WHEEL_LIFT_ACTIVE = 0x00200000
 
 # md_status[i] (u8)
 MDS_RUNNING = 0x01
@@ -96,16 +97,32 @@ class Param:
     MAX_ACCEL = 0x0002
     MAX_STEER = 0x0003
     TC_ENABLE = 0x0010
-    TC_SLIP_THRESH = 0x0011
+    TC_SLIP_TARGET = 0x0011
+    TC_KP_NM_PER_M_S = 0x0012
+    TC_KI_NM_PER_M = 0x0013
+    TC_MIN_TORQUE_NM = 0x0014
+    SLIP_SPEED_FLOOR_M_S = 0x0015
     TV_ENABLE = 0x0020
-    TV_GAIN = 0x0021
+    TV_KP_NM_PER_RAD_S = 0x0021
+    TV_KI_NM_PER_RAD = 0x0022
+    TV_DEADBAND_RAD_S = 0x0023
+    TV_MAX_YAW_MOMENT_NM = 0x0024
+    TV_MAX_LATERAL_ACCEL_M_S2 = 0x0025
+    TV_STEER_GAIN = 0x0026
+    TV_STEER_GAIN_CUBIC = 0x0027
+    TV_STABILITY_FACTOR = 0x0028
+    TV_REF_LAG_S = 0x0029
+    TV_TEST_MOMENT_NM = 0x002A
     SPEED_KP = 0x0030
     SPEED_KI = 0x0031
     LIDAR_FORMAT = 0x0040
     WHEEL_LIFT_GUARD_ENABLE = 0x0050
-    WHEEL_LIFT_GUARD_THRESH = 0x0051
+    WHEEL_LIFT_DIFF_THRESHOLD_M_S = 0x0051
     AUTO_STOP_MARGIN_CM = 0x0060
     ABS_ENABLE = 0x0070
+    ABS_SLIP_TARGET = 0x0071
+    ABS_KP_NM_PER_M_S = 0x0072
+    ABS_KI_NM_PER_M = 0x0073
 
 _S_LIDAR_SECTOR = struct.Struct('<BI32H')
 
@@ -137,20 +154,20 @@ class LidarSector:
         return _S_LIDAR_SECTOR.pack(self.sector_idx, self.t_start_us, self.duration_us, self.rot_speed_dps, *self.dist)
 
 
-_S_TELEMETRY = struct.Struct('<2I8h2i14h14B')
+_S_TELEMETRY = struct.Struct('<2I8h2i19h14B')
 
 
 @dataclass(slots=True)
 class Telemetry:
-    """0x02 s2p — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm を追加"""
+    """0x02 s2p — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加"""
 
     TYPE: ClassVar[int] = 0x02
     NAME: ClassVar[str] = 'TELEMETRY'
     DIR: ClassVar[str] = 's2p'
-    LEN: ClassVar[int | None] = 74
-    FMT: ClassVar[str] = '<2I8h2i14h14B'
+    LEN: ClassVar[int | None] = 84
+    FMT: ClassVar[str] = '<2I8h2i19h14B'
     RATE_HZ: ClassVar[float] = 100
-    META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'slip': (0.0001, None), 'tc_limit_nm': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm')}
+    META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'slip': (0.0001, None), 'tc_limit_nm': (0.0001, 'N.m'), 'torque_req': (0.0001, 'N.m'), 'abs_limit_nm': (0.0001, 'N.m'), 'yaw_rate_target': (0.001, 'rad/s'), 'tv_moment_nm': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm')}
 
     t_us: int = 0
     flags: int = 0  # FLG_* 参照
@@ -169,6 +186,10 @@ class Telemetry:
     torque_cmd: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] 指令値
     slip: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13
     tc_limit_nm: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13
+    torque_req: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16
+    abs_limit_nm: int = 0  # ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16
+    yaw_rate_target: int = 0  # TV の規範ヨーレート（舵角と車速から。IMU が使えない間は 0）★v0.16
+    tv_moment_nm: int = 0  # TV の PI が要求したヨーモーメント（左旋回が正。上限で丸めた後）。実際に付いた左右差は torque_cmd ★v0.16
     temp: list[int] = field(default_factory=lambda: [0] * 4)  # [RL,RR,ST,MCU]
     batt_voltage_drive: int = 0
     batt_voltage_signal: int = 0
@@ -182,10 +203,10 @@ class Telemetry:
     @classmethod
     def decode(cls, payload: bytes) -> 'Telemetry':
         v = _S_TELEMETRY.unpack(payload)
-        return cls(t_us=v[0], flags=v[1], speed=v[2], yaw_rate=v[3], steer_actual=v[4], steer_cmd_echo=v[5], wheel_speed=list(v[6:10]), odom_dist=list(v[10:12]), accel_x=v[12], accel_y=v[13], accel_z=v[14], pitch=v[15], roll=v[16], motor_current=list(v[17:20]), torque_cmd=list(v[20:22]), slip=list(v[22:24]), tc_limit_nm=list(v[24:26]), temp=list(v[26:30]), batt_voltage_drive=v[30], batt_voltage_signal=v[31], batt_current_drive=v[32], batt_current_signal=v[33], us_front=v[34], us_rear=v[35], md_status=list(v[36:39]), cmd_seq_echo=v[39])
+        return cls(t_us=v[0], flags=v[1], speed=v[2], yaw_rate=v[3], steer_actual=v[4], steer_cmd_echo=v[5], wheel_speed=list(v[6:10]), odom_dist=list(v[10:12]), accel_x=v[12], accel_y=v[13], accel_z=v[14], pitch=v[15], roll=v[16], motor_current=list(v[17:20]), torque_cmd=list(v[20:22]), slip=list(v[22:24]), tc_limit_nm=list(v[24:26]), torque_req=list(v[26:28]), abs_limit_nm=v[28], yaw_rate_target=v[29], tv_moment_nm=v[30], temp=list(v[31:35]), batt_voltage_drive=v[35], batt_voltage_signal=v[36], batt_current_drive=v[37], batt_current_signal=v[38], us_front=v[39], us_rear=v[40], md_status=list(v[41:44]), cmd_seq_echo=v[44])
 
     def encode(self) -> bytes:
-        return _S_TELEMETRY.pack(self.t_us, self.flags, self.speed, self.yaw_rate, self.steer_actual, self.steer_cmd_echo, *self.wheel_speed, *self.odom_dist, self.accel_x, self.accel_y, self.accel_z, self.pitch, self.roll, *self.motor_current, *self.torque_cmd, *self.slip, *self.tc_limit_nm, *self.temp, self.batt_voltage_drive, self.batt_voltage_signal, self.batt_current_drive, self.batt_current_signal, self.us_front, self.us_rear, *self.md_status, self.cmd_seq_echo)
+        return _S_TELEMETRY.pack(self.t_us, self.flags, self.speed, self.yaw_rate, self.steer_actual, self.steer_cmd_echo, *self.wheel_speed, *self.odom_dist, self.accel_x, self.accel_y, self.accel_z, self.pitch, self.roll, *self.motor_current, *self.torque_cmd, *self.slip, *self.tc_limit_nm, *self.torque_req, self.abs_limit_nm, self.yaw_rate_target, self.tv_moment_nm, *self.temp, self.batt_voltage_drive, self.batt_voltage_signal, self.batt_current_drive, self.batt_current_signal, self.us_front, self.us_rear, *self.md_status, self.cmd_seq_echo)
 
 
 _S_CONFIG_ACK = struct.Struct('<HfB')

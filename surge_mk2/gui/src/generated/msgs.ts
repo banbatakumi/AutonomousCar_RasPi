@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xf338fa10
+export const MSGS_SCHEMA = 0x3b7e84fd
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -64,6 +64,17 @@ export type VehicleState = {
    * `LinkDiag.max_torque_nm` と同じ値になる（★v0.13）
    */
   tc_limit_nm: [number, number]
+  /**
+   * [N·m] [RL, RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の
+   * 左右差を載せた後、制動は要求の制動トルク（負）。**`torque_cmd` との差が「絞った量」**
+   */
+  torque_req: [number, number]
+  /** [N·m] ABS が決めている制動トルクの上限（左右共通）。働いていなければ最大トルクと同じ */
+  abs_limit_nm: number
+  /** [rad/s] TV の規範ヨーレート（舵角と車速から作った「本来出るはずのヨーレート」）。`yaw_rate` との差が偏差 */
+  yaw_rate_target: number
+  /** [N·m] TV の PI が要求したヨーモーメント（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド */
+  tv_moment_nm: number
   /** [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None */
   temp: [number | null, number | null, number | null, number | null]
   /** [V] 駆動,信号 */
@@ -119,6 +130,8 @@ export type VehicleState = {
    * フォールバック（前輪センサ異常とみなして ABS を止め、要求どおりに制動している間）は False
    */
   abs_active: boolean
+  /** 片輪浮き対策が**今まさにトルクを削っている**（★v0.16）。このとき `tc_active` は立たない */
+  wheel_lift_active: boolean
   /** 立っている fault の名前 */
   faults: string[]
   /**
@@ -223,6 +236,19 @@ export type LinkDiag = {
    * を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
    */
   auto_stop_margin_cm: number | null
+  /**
+   * 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）が STM32 に入っているか（★v0.16）。
+   * `none`（送るものが無い）/`pending`（送信中）/`ok`（全項目が STM32 の答えと一致）/
+   * `mismatch`（STM32 が範囲へ丸めた）/`unsupported`（STM32 のファームが古い）/
+   * `invalid`（`[control]` が読めない）。`raspi/core/control_params.py`
+   */
+  control_params_status: string
+  /** STM32 が `CONFIG_ACK` で答えた値（名前 → 値。機能の ON/OFF も 0/1 で入る） */
+  control_params: Record<string, number>
+  /** `mismatch`・`unsupported`・`invalid` の内容（人が読む文） */
+  control_params_problems: string[]
+  /** 一致を確かめた後の読み戻しで食い違いを見つけて送り直した回数（STM32 だけの再起動など） */
+  control_params_drift: number
   /** Pi 側 RxStats */
   rx: Record<string, number>
   /** STM32 の STATS（**累積値**） */
@@ -306,6 +332,15 @@ export type AutoState = {
    * システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う（2026-09-27）
    */
   brake_torque: number
+  /**
+   * 立っている間 `target_speed` の代わりに `target_torque` [N·m]（1輪あたり）を直接掛ける
+   * （`COMMAND.torque_mode`。車速PIを通さない）。**同定の試験だけが使う**——タイヤの限界まで
+   * トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない（2026-10-05）
+   */
+  torque_mode: boolean
+  target_torque: number
+  /** STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（`DriveCmd.fw_overrides` へそのまま載る） */
+  fw_overrides: Record<string, number>
   /** 狙っている方位 [rad] */
   heading: number
   /** 選んだギャップの右端 [deg] 符号付き */

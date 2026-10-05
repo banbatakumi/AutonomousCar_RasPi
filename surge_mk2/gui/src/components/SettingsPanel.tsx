@@ -209,6 +209,26 @@ const SETTINGS_TABS = [
 ] as const
 type SettingsTab = (typeof SETTINGS_TABS)[number]['id']
 
+/** `LinkDiag.control_params_status`（`raspi/core/control_params.py`）の表示。 */
+function controlParamsLabel(status: string | undefined): string {
+  switch (status) {
+    case 'ok':
+      return 'STM32 に適用済み ✓'
+    case 'pending':
+      return '送信中…'
+    case 'mismatch':
+      return '⚠ STM32 が範囲外として丸めた値があります'
+    case 'unsupported':
+      return '⚠ STM32 のファームが古く、対応していません'
+    case 'invalid':
+      return '⚠ vehicle.toml の [control] を読めません（STM32 の既定値で走行中）'
+    case 'none':
+      return '未設定（STM32 の既定値）'
+    default:
+      return '未確認'
+  }
+}
+
 export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const [tab, setTab] = useState<SettingsTab>('drive')
   const settings = useUi((s) => s.settings)
@@ -410,6 +430,18 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               />
               ABS{absEnabled === null && '（未確認）'}
             </label>
+            {/* ★v0.16: TC・ABS・TV の調整パラメータ（vehicle.toml [control]）が STM32 に入っているか。
+                io_node が CONFIG_ACK の「実際に入った値」と突き合わせた結果をそのまま出す */}
+            <p className="dim">
+              制御パラメータ: {controlParamsLabel(link?.control_params_status)}
+              {(link?.control_params_drift ?? 0) > 0 && `（送り直し ${link?.control_params_drift}回）`}
+              {link?.control_params_problems?.map((t) => (
+                <span key={t} className="badge-bad">
+                  <br />
+                  {t}
+                </span>
+              ))}
+            </p>
           </section>
 
           {/* 2026-09-03: タブ行（DriveControls.tsx）から移設。運転中に頻繁に触る

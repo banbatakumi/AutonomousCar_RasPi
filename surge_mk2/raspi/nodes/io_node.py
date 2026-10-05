@@ -52,6 +52,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.bus_bridge import BusBridge  # noqa: E402
+from raspi.core.control_params import ControlParamSync, load_control_params  # noqa: E402
 from raspi.core.link_tracker import (  # noqa: E402
     LinkState,
     LinkTracker,
@@ -182,14 +183,20 @@ class IoNode:
                  pub=None, sub=None, *,
                  allow_arm: bool = False,
                  max_speed: float = DEFAULT_MAX_SPEED,
-                 max_steer: float = DEFAULT_MAX_STEER) -> None:
+                 max_steer: float = DEFAULT_MAX_STEER,
+                 control_params: dict[str, float] | None = None,
+                 control_params_error: str = "") -> None:
         self.link = link
+        #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）を STM32 に入れて保つ（★v0.16）
+        self.control_sync = ControlParamSync(control_params or {}, link.send)
+        #: `[control]` が読めなかった理由（空 = 読めた）。`LinkDiag` に出す
+        self.control_params_error = control_params_error
         self.bridge = BusBridge(pub, base_m=_load_odometer_base())
         #: 直近に保存した総走行距離。周期保存の間引き判定（1m以上動いたか）に使う
         self._last_saved_odom = self.bridge.state_builder.odom_center
         self.tracker = LinkTracker(
             on_telemetry=self._on_telemetry_chain(on_telemetry),
-            on_frame=self.bridge.on_frame,
+            on_frame=self._on_frame,
             on_latch=self._on_latch,
             on_time_reset=self._on_time_reset)
         # 受信状態と時刻同期の実体は tracker が持つ。ここは同じ物への別名。
@@ -290,6 +297,11 @@ class IoNode:
         elif name == "drive_power_locked" and value:
             print("\n!! 駆動電源ラッチ — 電源を入れ直すまで復帰しません", file=sys.stderr)
 
+    def _on_frame(self, rx_ns: int, pkt_type: int, seq: int, msg) -> None:
+        if isinstance(msg, packets.ConfigAck):
+            self.control_sync.on_ack(msg)
+        self.bridge.on_frame(rx_ns, pkt_type, seq, msg)
+
     def _on_time_reset(self, t_ns: int) -> None:
         """STM32 の再起動を検出（`TimeSync.observe_stm_us` が `t_us` の大きな後退を
         見た）。**時刻同期に依存する状態を合わせてリセットする**（issue #9）。
@@ -298,6 +310,8 @@ class IoNode:
         """
         self.bridge.state_builder.reset()
         self.bridge.scans.reset()
+        # STM32 は調整パラメータを Flash に持たない。再起動で既定値に戻ったので送り直す
+        self.control_sync.reset()
         self._log_event("time_reset", {})
         print("\n!! STM32 の再起動を検出 — 時刻同期をやり直します（オドメトリ・"
               "LiDAR組み立てをリセット）", file=sys.stderr)
@@ -721,6 +735,16 @@ class IoNode:
 
             self._recv_cmd(now)
 
+            # 調整パラメータの送信・読み戻し。同定の試験が指令に載せた一時的な上書き
+            # （`DriveCmd.fw_overrides`）は、指令が届いている間だけ入れる（途絶えたら元へ戻す）
+            self.control_sync.set_overrides(
+                self.cmd.fw_overrides if (self.cmd is not None and not self.cmd_stale) else {})
+            prev_ctrl = self.control_sync.status
+            self.control_sync.tick(now)
+            if self.control_sync.status != prev_ctrl:
+                self._log_event("control_params", {"status": self.control_sync.status,
+                                                   "problems": self.control_sync.problems})
+
             # **指令の中身が変わったらその場で送る**（2026-09-26）。100Hz の定期送信を待つと
             # 平均5ms・最大10ms遅れていた。telemetry_node は同じ中身を50Hzで繰り返すので、
             # エンコードした中身が前回と同じなら送らない（定期送信に任せる）。送る中身は
@@ -766,6 +790,8 @@ class IoNode:
                     cmd_source=self.cmd.source if self.cmd else "",
                     cmd_stale=self.cmd_stale,
                     expected_version=PROTOCOL_VERSION,
+                    control_sync=self.control_sync,
+                    control_params_error=self.control_params_error,
                     # シミュレータの link だけがこれを持つ（`sim/link.py`）。
                     # GUI に SIM バッジを出す唯一の根拠。**実機の link には何も足さない**
                     sim=getattr(self.link, "is_sim", False))
@@ -922,9 +948,20 @@ def main() -> int:
             buzzer.play(MELODY_BOOT)
             print(f"# 起動音 GPIO{PIN_BUZZER}")
 
+    # 足回りの制御の調整パラメータ（★v0.16）。読めなくても io_node は止めない（STM32 の既定値で
+    # 走れる）が、黙って無視もしない——`LinkDiag.control_params_status` が `invalid` になる
+    control_params: dict[str, float] = {}
+    control_params_error = ""
+    try:
+        control_params = load_control_params()
+    except (OSError, ValueError) as e:
+        control_params_error = f"vehicle.toml の [control] を読めません: {e}"
+        print(f"!! {control_params_error}（STM32 の既定値のまま走ります）", file=sys.stderr)
+
     node = IoNode(link, log=log, log_meta=log_meta, heartbeat=heartbeat,
                   indicator=indicator, buzzer=buzzer, pub=pub, sub=sub, allow_arm=args.allow_arm,
-                  max_speed=args.max_speed, max_steer=args.max_steer)
+                  max_speed=args.max_speed, max_steer=args.max_steer,
+                  control_params=control_params, control_params_error=control_params_error)
 
     def _shutdown(*_):
         node.stop()

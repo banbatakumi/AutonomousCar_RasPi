@@ -107,12 +107,48 @@ const CHARTS: ChartDef[] = [
     minSpan: 10,
   },
   {
-    title: 'TC トルク上限',
-    keys: ['tcLimitRL', 'tcLimitRR'],
+    title: 'TC・ABS トルク上限',
+    keys: ['tcLimitRL', 'tcLimitRR', 'absLimit'],
+    labels: ['TC 後左', 'TC 後右', 'ABS（左右共通）'],
+    colors: [C.accent, C.live, C.warn],
+    unit: 'N·m（非介入時は最大トルクに張り付く。TC は片輪浮き対策の絞りも含む）',
+    minSpan: 0.02,
+  },
+  // ── ★v0.16: 制御がどれだけ介入しているか（`VehicleState.torque_req` ほか）──
+  {
+    // 要求と指令が離れている区間が「絞っている」区間。制動は負
+    title: '後輪トルク（要求と実際）',
+    keys: ['trqReqRL', 'trqCmdRL', 'trqReqRR', 'trqCmdRR'],
+    labels: ['後左 要求', '後左 実際', '後右 要求', '後右 実際'],
+    colors: [C.dim, C.accent, C.warn, C.live],
+    unit: 'N·m（正=駆動 負=制動。要求は絞る前）',
+    minSpan: 0.05,
+  },
+  {
+    title: 'TC・ABS が絞った量',
+    keys: ['cutRL', 'cutRR'],
     labels: ['後左', '後右'],
     colors: [C.accent, C.live],
-    unit: 'N·m（非介入時は最大トルクに張り付く）',
+    unit: 'N·m（|要求|−|実際|。0 = 介入なし）',
     minSpan: 0.02,
+  },
+  {
+    title: 'TV ヨーレート',
+    keys: ['yawRate', 'yawTarget'],
+    labels: ['実測', '規範（目標）'],
+    colors: [C.accent, C.warn],
+    unit: 'rad/s（左旋回が正）',
+    minSpan: 0.4,
+  },
+  {
+    // 「要求」は TV の PI の出力、「実際」は送ったトルクの左右差。TC が片輪を絞ると
+    // TV が要求していなくても「実際」が動く
+    title: 'TV ヨーモーメント',
+    keys: ['tvMoment', 'tvApplied'],
+    labels: ['TV の要求', '実際の左右差'],
+    colors: [C.warn, C.accent],
+    unit: 'N·m（左旋回が正）',
+    minSpan: 0.05,
   },
   {
     title: '加速度',

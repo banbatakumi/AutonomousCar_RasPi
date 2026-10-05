@@ -34,6 +34,7 @@
 | シミュレータの使い方 | [`sim/README.md`](sim/README.md) |
 | GUI のコード地図 | [`gui/README.md`](gui/README.md) |
 | 車両パラメータ（幾何・質量・動特性） | `config/vehicle.toml`（全ノードがここだけを見る） |
+| STM32 の TC・ABS・TV の値を決めたい | `config/vehicle.toml` の `[control]`（io_node が STM32 へ送る）。決め方は [`docs/development.md`](docs/development.md) §4.7（`tools/ctrl_tune`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
 
 ## 新規開発方針

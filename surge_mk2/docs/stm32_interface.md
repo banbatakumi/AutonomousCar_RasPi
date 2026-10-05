@@ -1,13 +1,26 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.15（`uart_protocol.md` **v0.15** に対応）
-**最終更新**: 2026-09-27（ABS を追加。`param_id = 0x0070`、`TELEMETRY.flags` bit20）
+**バージョン**: v0.16（`uart_protocol.md` **v0.16** に対応）
+**最終更新**: 2026-10-05（足回りの制御の調整パラメータを `CONFIG_SET`/`CONFIG_GET` に追加、TC・ABS・片輪浮き対策・TV を見直し）
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.16 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-05。`pi_uart_protocol_v0.16_delta.md`）**
+> - 足回りの制御の調整パラメータを `CONFIG_SET`/`CONFIG_GET` で読み書きする（`param_id` `0x0011`-`0x0015`・
+>   `0x0021`-`0x002A`・`0x0051`・`0x0071`-`0x0073`）。**表（名前・ID・既定値・範囲）は
+>   `src/control/control_params.h` が唯一の定義**。範囲外は丸めて `result = 2`、Flash には保存しない
+> - TC・ABS: スリップ率を目標に保つ連続の PI（`SlipLimiter`、`src/control/drive.c`）。分母に下限を置いた
+>   スリップ率で低速でも働く。TC は車速PIの減速にも掛かる。片輪浮き対策は TC と同じ上限を共有する
+> - 片輪を絞った分を反対の輪へ載せない。TV は左右差を保つ配分・規範の1次遅れ・同定用のヨーモーメント注入
+> - `host/`（`host_sim.c`＋`shim/`）で `src/control` をホストでコンパイルできる（Pi 側 `tools/ctrl_tune` が
+>   車両モデルと閉ループにして比較・最適化に使う）
+> - `TELEMETRY` (0x02) の `tc_limit_nm[2]` の直後に `torque_req[2]`・`abs_limit_nm`・`yaw_rate_target`・
+>   `tv_moment_nm`（いずれも i16）を追加。LEN 74→**84**。`flags` に bit21=`WHEEL_LIFT_ACTIVE`
+> - `protocol_version` を `0x000F`→**`0x0010`** に上げる
 
 > **v0.15 での変更（★STM32 側発・実装済み。実機での動作検証は未了。2026-09-27。`pi_uart_protocol_v0.15_delta.md`）**
 > - 制動時の後輪ロックを防ぐ ABS（`ApplyAbs()`、`src/control/drive.c`）。制動モード（brake・自動停止・
@@ -359,7 +372,7 @@ bool frame_send(uint8_t type, const void *payload, uint8_t len)
 ```c
 /* STM32 → Pi */
 #define PKT_LIDAR_SECTOR    0x01   /* LEN = 69                              */
-#define PKT_TELEMETRY       0x02   /* LEN = 74  ★v0.4 で 53→66、v0.13 で 66→74 */
+#define PKT_TELEMETRY       0x02   /* LEN = 84  ★v0.4 で 53→66、v0.13 で 66→74、v0.16 で 74→84 */
 #define PKT_CONFIG_ACK      0x03   /* LEN = 7                               */
 #define PKT_LOG             0x04   /* LEN = 可変 (2-255)  ★severity 追加    */
 #define PKT_LIDAR_SECTOR_I  0x05   /* LEN = 99  （強度付き・既定OFF）        */
@@ -449,7 +462,7 @@ static inline uint8_t compress_dist(uint16_t mm)
 
 **`mm != 0` なのに変換結果が 0 になると「無効」と誤解される**ため、1 にクリップする。
 
-#### `TELEMETRY` (0x02) — 74 バイト ★v0.13 で末尾2フィールド追加
+#### `TELEMETRY` (0x02) — 84 バイト ★v0.13 で slip/tc_limit_nm、v0.16 で制御の介入量を追加
 
 ```c
 typedef struct {
@@ -473,6 +486,11 @@ typedef struct {
                                        正=空転 負=ロック傾向。基準速度未満は0        */
     int16_t  tc_limit_nm[2];       /* ★v0.13。0.0001 N·m [RL, RR] TCが動的に決める
                                        トルク上限。非介入時は最大トルクと同値        */
+    int16_t  torque_req[2];        /* ★v0.16。0.0001 N·m [RL, RR] スリップ制限が絞る前の
+                                       要求（制動は負）。torque_cmd との差が絞った量   */
+    int16_t  abs_limit_nm;         /* ★v0.16。0.0001 N·m ABS の制動トルクの上限       */
+    int16_t  yaw_rate_target;      /* ★v0.16。0.001 rad/s TV の規範ヨーレート         */
+    int16_t  tv_moment_nm;         /* ★v0.16。0.0001 N·m TV が要求したヨーモーメント   */
     uint8_t  temp[4];              /* 1 degC [RL, RR, ST, MCU] ★符号なし          */
     uint8_t  batt_voltage_drive;   /* 0.05 V/LSB  駆動系                          */
     uint8_t  batt_voltage_signal;  /* 0.05 V/LSB  シグナル系                      */
@@ -482,7 +500,7 @@ typedef struct {
     uint8_t  us_rear;              /* 2 cm/LSB。0 = 無効                          */
     uint8_t  md_status[3];         /* §8.6 参照 [RL, RR, ST]                      */
     uint8_t  cmd_seq_echo;         /* 最後に受理した COMMAND の SEQ                */
-} telemetry_t;                     /* = 74 bytes */
+} telemetry_t;                     /* = 84 bytes */
 ```
 
 ##### 配列インデックスの規約
@@ -790,7 +808,7 @@ typedef struct {
 _Static_assert(sizeof(lidar_sector_t)   == 69, "lidar_sector_t size mismatch");
 _Static_assert(sizeof(lidar_sector_i_t) == 99, "lidar_sector_i_t size mismatch");
 _Static_assert(sizeof(lidar_sector_c_t) == 39, "lidar_sector_c_t size mismatch");
-_Static_assert(sizeof(telemetry_t)      == 74, "telemetry_t size mismatch");
+_Static_assert(sizeof(telemetry_t)      == 84, "telemetry_t size mismatch");
 _Static_assert(sizeof(pong_t)           == 12, "pong_t size mismatch");
 _Static_assert(sizeof(limits_t)         == 16, "limits_t size mismatch");
 _Static_assert(sizeof(version_t)        == 10, "version_t size mismatch");
@@ -1228,6 +1246,7 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 #define FLG_WINKER_LEFT_ACTIVE        (1u << 18)   /* ★v0.14 左ウィンカーが今まさに点滅中 */
 #define FLG_WINKER_RIGHT_ACTIVE       (1u << 19)   /* ★v0.14 右ウィンカーが今まさに点滅中 */
 #define FLG_ABS_ACTIVE                (1u << 20)   /* ★v0.15 ABS が制動トルクを削っている最中 */
+#define FLG_WHEEL_LIFT_ACTIVE         (1u << 21)   /* ★v0.16 片輪浮き対策がトルクを削っている最中 */
 /* bit21-31 予約（0 を送ること） */
 ```
 
@@ -1458,7 +1477,7 @@ Pi 側が計算する:
 - [ ] UART 1000000 bps 8N1（USART1、APB2 90MHz で USARTDIV = 5.625、誤差 0%）
 - [ ] `crc16_ccitt("123456789")` が **`0x29B1`** を返す
 - [ ] 全構造体に `#pragma pack(push,1)` を付けた
-- [ ] `_Static_assert` で全構造体サイズを検証している（**`telemetry_t` == 74**、**`command_t` == 15**、★v0.13）
+- [ ] `_Static_assert` で全構造体サイズを検証している（**`telemetry_t` == 84**（★v0.16）、**`command_t` == 15**、★v0.13）
 - [ ] TX は **送信キュー付き DMA**（**現行の `Serial_Write` を使っていない**）
 - [ ] 送信中の DMA フレームを途中で中断していない
 - [ ] RX は DMA + IDLE 検出
@@ -1677,6 +1696,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.16** | 2026-10-05 | **`uart_protocol.md` v0.16 に対応。実装済み・ビルド済み、未書き込み。`TELEMETRY` の LEN 74→84（制御の介入量を追加）。** 足回りの制御の調整パラメータ（`src/control/control_params.h` の表）を `CONFIG_SET`/`CONFIG_GET` に追加。TC・ABS をスリップ率の連続 PI へ、片輪を絞った分を反対輪へ載せない、TV の配分・規範の1次遅れ・同定用のヨーモーメント注入。`host/` でホスト実行。`protocol_version` を `0x000F`→`0x0010` に更新 |
 | **v0.15** | 2026-09-27 | **`uart_protocol.md` v0.15 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** ABS（制動時の後輪ロック防止）を追加。`param_id = 0x0070`（`ABS_ENABLE`、既定は有効）、`TELEMETRY.flags` bit20=`ABS_ACTIVE`。`protocol_version` を `0x000E`→`0x000F` に更新。Pi 側も対応済み |
 | **v0.14** | 2026-08-30 | **`uart_protocol.md` v0.14 に対応。Pi 側発の提案。STM32 側は未実装。** `COMMAND`(0x10) の `flags2` に bit1=`WINKER_LEFT`・bit2=`WINKER_RIGHT` を追加、`TELEMETRY`(0x02) の `flags` に bit18=`WINKER_LEFT_ACTIVE`・bit19=`WINKER_RIGHT_ACTIVE` を追加（**ワイヤ形式・LEN の変更は無し**）。自律走行中に右左折・車線変更の意思表示ができない実装漏れへの対応（`Lighting_SetWinker()` は既存だが `ApplyRasCommand()` から呼ばれていなかった）。両ビットを両方立てるとハザード（左右同時点滅）。点滅の周期・位相・既存灯火系との調停は STM32 側に一任。`protocol_version` を `0x000D`→`0x000E` に更新。Pi 側は `protocol.toml`/`raspi/msgs`/`sim/stm32.py`/GUI を実装済み。**STM32 側は `ApplyRasCommand()` への配線・`TELEMETRY.flags` の返却・`COMMAND` 途絶時の強制解除が未実装** |
 | **v0.13** | 2026-08-28 | **`uart_protocol.md` v0.13 に対応。STM32 側発・実装済み、実機での動作検証は未了。** `TELEMETRY`(0x02) の `torque_cmd[2]` 直後に `slip[2]`（TC用スリップ率、無次元）・`tc_limit_nm[2]`（TCが動的に決めるトルク上限）を追加（LEN 66→**74**）。TC のゲイン（`DRIVE_TC_CUT_GAIN`/`DRIVE_TC_RECOVER_RATE`）を実機で追い込むにあたり `flags` bit5（`tc_active`、介入中か否かの1bit）だけでは内部状態が分からなかった問題への対応。加えて `COMMAND`(0x10) に `flags2`（bit0=`SIDE_BRAKE`）を新設し、後輪を機械的な位置制御へ切り替えて固定するサイドブレーキを追加（LEN 14→**15**）。速度に関わらず即座に切り替わり `brake` より優先、実際に固定できたかは `TELEMETRY.flags` bit17（`SIDE_BRAKE_ACTIVE`）で返す。`protocol_version` を `0x000C`→`0x000D` に更新。**TC ゲインの実測・サイドブレーキとも実機での動作検証は未実施**（`pi_uart_protocol_v0.13_delta.md`） |

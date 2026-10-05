@@ -101,7 +101,8 @@ class BusBridge:
     def build_diag(self, state, sync, rx_stats=None, *, heartbeat=None,
                    arm_inhibited: bool = True, cmd_source: str = "",
                    cmd_stale: bool = True, expected_version: int | None = None,
-                   sim: bool = False) -> LinkDiag:
+                   sim: bool = False, control_sync=None,
+                   control_params_error: str = "") -> LinkDiag:
         """`diag/link` の中身を組み立てる。
 
         **Pi 側の受信統計（`rx`）と STM32 側の `STATS`（`stm_rx`）を並べて出す。**
@@ -120,6 +121,12 @@ class BusBridge:
             wheel_lift_guard_enabled=state.wheel_lift_guard_enabled,
             abs_enabled=state.abs_enabled,
             auto_stop_margin_cm=state.auto_stop_margin_cm,
+            control_params_status=("invalid" if control_params_error
+                                   else control_sync.status if control_sync is not None else "none"),
+            control_params=control_sync.applied if control_sync is not None else {},
+            control_params_problems=([control_params_error] if control_params_error
+                                     else control_sync.problems if control_sync is not None else []),
+            control_params_drift=control_sync.drift_count if control_sync is not None else 0,
             arm_inhibited=arm_inhibited,
             cmd_source=cmd_source,
             cmd_stale=cmd_stale,

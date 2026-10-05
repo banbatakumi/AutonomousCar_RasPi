@@ -187,7 +187,8 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
           <p className="badge-live">
             {canceled ? '試験を中止しました。' : '試験が完了しました。'}
             {endReason && endReason !== '完了' && `（${endReason}）`}
-            記録をダウンロードしました。Macの解析ツール（`tools/sysid`）でこのファイルを開いてください
+            記録をダウンロードしました。Macの解析ツール（launcher の「システム同定」。「制御の同定」の3試験は
+            「制御の調整」）でこのファイルを開いてください
           </p>
         )}
       </section>

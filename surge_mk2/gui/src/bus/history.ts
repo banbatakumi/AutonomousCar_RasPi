@@ -19,7 +19,11 @@
  */
 import type { LinkDiag, VehicleState } from '../types'
 import { RAD2DEG } from '../format'
+import { VEHICLE } from '../generated/vehicle'
 import { cmdOut, live } from './live'
+
+/** 左右のトルク差（右−左）[N·m] → ヨーモーメント [N·m]（駆動力の差 × トレッドの半分） */
+const DIFF_TORQUE_TO_MOMENT = VEHICLE.track / (2 * VEHICLE.wheelRadius)
 
 /** 保持時間 [s]。180秒あれば「走り1本ぶん」を振り返れる */
 export const HISTORY_SPAN_S = 180
@@ -50,6 +54,18 @@ export const SERIES = [
   'slipRR', // %
   'tcLimitRL', // N·m TCが動的に決めるトルク上限（v0.13）
   'tcLimitRR', // N·m
+  // ── v0.16: 制御がどれだけ介入しているか ──
+  'trqReqRL', // N·m スリップ制限が絞る前に掛けたかったトルク（制動は負）
+  'trqReqRR', // N·m
+  'trqCmdRL', // N·m 実際に送ったトルク指令
+  'trqCmdRR', // N·m
+  'cutRL', // N·m 絞った量（|要求| − |指令|。TC・片輪浮き対策・ABS の合計）
+  'cutRR', // N·m
+  'absLimit', // N·m ABS が決める制動トルクの上限
+  'yawRate', // rad/s 実測
+  'yawTarget', // rad/s TV の規範ヨーレート
+  'tvMoment', // N·m TV の PI が要求したヨーモーメント
+  'tvApplied', // N·m 実際に付いた左右差をヨーモーメントに直したもの（TC の片輪絞りぶんも含む）
   'accelX', // m/s² 前後
   'accelY', // m/s² 左右
   'rttMs', // ms UART 往復
@@ -112,6 +128,19 @@ export function pushHistory(vs: VehicleState | null, link: LinkDiag | null): voi
   data.slipRR[i] = vs.tc_slip[1] * 100
   data.tcLimitRL[i] = vs.tc_limit_nm[0]
   data.tcLimitRR[i] = vs.tc_limit_nm[1]
+  // v0.16 より前のファーム・古い記録の再生ではこれらのキーが無い。0 の線を引かず欠測にする
+  const req = vs.torque_req
+  data.trqReqRL[i] = nz(req?.[0])
+  data.trqReqRR[i] = nz(req?.[1])
+  data.trqCmdRL[i] = vs.torque_cmd[0]
+  data.trqCmdRR[i] = vs.torque_cmd[1]
+  data.cutRL[i] = req ? Math.max(0, Math.abs(req[0]) - Math.abs(vs.torque_cmd[0])) : NaN
+  data.cutRR[i] = req ? Math.max(0, Math.abs(req[1]) - Math.abs(vs.torque_cmd[1])) : NaN
+  data.absLimit[i] = nz(vs.abs_limit_nm)
+  data.yawRate[i] = vs.yaw_rate
+  data.yawTarget[i] = nz(vs.yaw_rate_target)
+  data.tvMoment[i] = nz(vs.tv_moment_nm)
+  data.tvApplied[i] = (vs.torque_cmd[1] - vs.torque_cmd[0]) * DIFF_TORQUE_TO_MOMENT
   data.accelX[i] = vs.accel[0]
   data.accelY[i] = vs.accel[1]
   data.rttMs[i] = nz(l?.cmd_rtt_ms)

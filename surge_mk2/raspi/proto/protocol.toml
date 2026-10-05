@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x000F      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0010      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -55,9 +55,9 @@ fields = [
 name = "TELEMETRY"
 type = 0x02
 dir = "s2p"
-len = 74
+len = 84
 rate_hz = 100  # 2026-09-26 に 50 から変更（値の古さを平均10→5ms）
-doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm を追加"
+doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加"
 fields = [
   { name = "t_us",                type = "u32", unit = "us" },
   { name = "flags",               type = "u32", note = "FLG_* 参照" },
@@ -76,6 +76,10 @@ fields = [
   { name = "torque_cmd",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] 指令値" },
   { name = "slip",                type = "i16", count = 2, scale = 0.0001, note = "[RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13" },
   { name = "tc_limit_nm",         type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13" },
+  { name = "torque_req",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16" },
+  { name = "abs_limit_nm",        type = "i16", scale = 0.0001, unit = "N.m", note = "ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16" },
+  { name = "yaw_rate_target",     type = "i16", scale = 0.001,  unit = "rad/s", note = "TV の規範ヨーレート（舵角と車速から。IMU が使えない間は 0）★v0.16" },
+  { name = "tv_moment_nm",        type = "i16", scale = 0.0001, unit = "N.m", note = "TV の PI が要求したヨーモーメント（左旋回が正。上限で丸めた後）。実際に付いた左右差は torque_cmd ★v0.16" },
   { name = "temp",                type = "u8",  count = 4, scale = 1.0, unit = "degC", note = "[RL,RR,ST,MCU]" },
   { name = "batt_voltage_drive",  type = "u8",  scale = 0.05, unit = "V" },
   { name = "batt_voltage_signal", type = "u8",  scale = 0.05, unit = "V" },
@@ -288,6 +292,7 @@ SIDE_BRAKE_ACTIVE         = 0x00020000   # v0.13: サイドブレーキが実際
 WINKER_LEFT_ACTIVE        = 0x00040000   # v0.14: 左ウィンカーが実際に点滅中
 WINKER_RIGHT_ACTIVE       = 0x00080000   # v0.14: 右ウィンカーが実際に点滅中
 ABS_ACTIVE                = 0x00100000   # v0.15: ABSが制動トルクを要求より削っている最中（フォールバック中は偽）
+WHEEL_LIFT_ACTIVE         = 0x00200000   # v0.16: 片輪浮き対策がトルクを削っている最中（このとき TC_ACTIVE は立たない）
 
 [bits.MDS]
 comment = "md_status[i] (u8)"
@@ -357,9 +362,28 @@ MAX_STEER      = 0x0003  # 廃止（同上）
 # TC_ENABLE/TV_ENABLE: v0.8でSTM32ファームウェアが実装済み（以前は未実装で
 # RAS_CONFIG_UNKNOWN_PARAM を返していた）。Pi側から実際に送信する（raspi/nodes/io_node.py）。
 TC_ENABLE      = 0x0010
-TC_SLIP_THRESH = 0x0011  # 未実装（STM32側が UNKNOWN_ID を返す）
+# ── 足回りの制御の調整パラメータ（★v0.16。TC・ABS・片輪浮き対策・TV）──
+# **名前・範囲・既定値の唯一の定義は STM32 側 `src/control/control_params.h` の表。** ここは
+# param_id だけを写したもので、名前は表のフィールド名の大文字（`config/vehicle.toml` の `[control]`
+# のキーは小文字）。値は `[control]` に書き、io_node が接続のたびに送って `CONFIG_ACK.applied`
+# と突き合わせる（`raspi/core/control_params.py`。Flash には保存されない）。
+# 値を決める手順は `tools/ctrl_tune`。0x0011 は v0.15 まで未実装の TC_SLIP_THRESH だった
+TC_SLIP_TARGET       = 0x0011
+TC_KP_NM_PER_M_S     = 0x0012
+TC_KI_NM_PER_M       = 0x0013
+TC_MIN_TORQUE_NM     = 0x0014
+SLIP_SPEED_FLOOR_M_S = 0x0015
 TV_ENABLE      = 0x0020
-TV_GAIN        = 0x0021  # 未実装（STM32側が UNKNOWN_ID を返す）
+TV_KP_NM_PER_RAD_S        = 0x0021  # v0.15 まで未実装の TV_GAIN
+TV_KI_NM_PER_RAD          = 0x0022
+TV_DEADBAND_RAD_S         = 0x0023
+TV_MAX_YAW_MOMENT_NM      = 0x0024
+TV_MAX_LATERAL_ACCEL_M_S2 = 0x0025
+TV_STEER_GAIN             = 0x0026
+TV_STEER_GAIN_CUBIC       = 0x0027
+TV_STABILITY_FACTOR       = 0x0028
+TV_REF_LAG_S              = 0x0029
+TV_TEST_MOMENT_NM         = 0x002A  # 同定用。0 以外の間は TV の PI を止めてこのヨーモーメントだけを出す
 SPEED_KP       = 0x0030  # 未実装（STM32側が UNKNOWN_ID を返す）
 SPEED_KI       = 0x0031  # 未実装（STM32側が UNKNOWN_ID を返す）
 LIDAR_FORMAT   = 0x0040
@@ -367,7 +391,7 @@ LIDAR_FORMAT   = 0x0040
 # トルク遮断）。TC_ENABLE/TV_ENABLE本体とは独立に動く別機構。Pi側から実際に送信する
 # （raspi/nodes/io_node.py）。
 WHEEL_LIFT_GUARD_ENABLE = 0x0050
-WHEEL_LIFT_GUARD_THRESH = 0x0051  # 未実装（STM32側が UNKNOWN_ID を返す）
+WHEEL_LIFT_DIFF_THRESHOLD_M_S = 0x0051  # ★v0.16（調整パラメータ。v0.15 まで未実装の WHEEL_LIFT_GUARD_THRESH）
 # AUTO_STOP_MARGIN_CM: v0.12でSTM32ファームウェアが実装済み。自動停止（COMMAND.flags
 # bit7=AUTO_STOP）が使う安全マージンをcm単位の連続値で直接指定する（段階enumではない。
 # 当初案は3段階enumだったが実機投入前にSTM32側がcm直接指定へ変更した）。
@@ -378,3 +402,6 @@ AUTO_STOP_MARGIN_CM = 0x0060
 # 最大制動で後輪のロックを防ぐ。車速PIの減速・torque_modeの負トルクには掛からない）。既定は有効。
 # TC_ENABLE と同じ bool（0.0/1.0）。Pi側から実際に送信する（raspi/nodes/io_node.py）
 ABS_ENABLE = 0x0070
+ABS_SLIP_TARGET   = 0x0071  # ★v0.16（調整パラメータ）
+ABS_KP_NM_PER_M_S = 0x0072
+ABS_KI_NM_PER_M   = 0x0073

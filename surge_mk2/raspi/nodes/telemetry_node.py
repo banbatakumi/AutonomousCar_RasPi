@@ -2255,7 +2255,8 @@ class TelemetryServer:
         auto = self.sub.latest.get(TOPIC_AUTO_CMD)
         if auto is None:
             return
-        key = (auto.mode, auto.arm, auto.brake, auto.target_speed, auto.target_steer)
+        key = (auto.mode, auto.arm, auto.brake, auto.target_speed, auto.target_steer,
+               auto.torque_mode, auto.target_torque, tuple(sorted(auto.fw_overrides.items())))
         if key == self._last_auto_key:
             return
         self._last_auto_key = key
@@ -2394,7 +2395,7 @@ class TelemetryServer:
             self._auto_was_fresh = False
             return msgspec.structs.replace(
                 gui, mode=2, brake=True, target_speed=0.0, target_steer=0.0,
-                torque_mode=False, target_torque=0.0,
+                torque_mode=False, target_torque=0.0, fw_overrides={},
                 source=f"auto:{self._auto_mode}:stale")
         self._auto_was_fresh = True
         # 加速度の上限は GUI の値と planner の値の**小さい方**（planner は締める向きにしか
@@ -2414,9 +2415,13 @@ class TelemetryServer:
         return msgspec.structs.replace(
             gui, mode=2, brake=gui.brake or auto.brake, brake_torque=brake_torque,
             target_speed=auto.target_speed, target_steer=auto.target_steer, accel_limit=accel,
-            # 自律走行はトルク直接指令を使わない。**GUI 側の設定を持ち込まない**
-            # （ラジコンのトルクモードが ON のまま engage されうる）
-            torque_mode=False, target_torque=0.0,
+            # トルク直接指令は planner が自分で指定したときだけ（同定の試験）。**GUI 側の設定は
+            # 持ち込まない**（ラジコンのトルクモードが ON のまま engage されうる）
+            torque_mode=auto.torque_mode,
+            target_torque=auto.target_torque if (auto.torque_mode
+                                                 and math.isfinite(auto.target_torque)) else 0.0,
+            # STM32 の設定の一時的な上書きも planner の指定だけ（GUI の指令では常に空）
+            fw_overrides=auto.fw_overrides,
             source=f"auto:{self._auto_mode}")
 
     async def _hb_pump(self) -> None:
