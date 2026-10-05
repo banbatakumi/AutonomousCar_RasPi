@@ -364,7 +364,7 @@ def analyze(sources: dict[str, str | Path | Rec], base: Plant) -> Analysis:
             continue
         vals = {k: v for k, v in r.values.items() if k in params}
         out.results.update(vals)
-        out.notes[label] = r.notes
+        out.notes[label] = list(rec.notes) + r.notes
         if r.warnings:
             out.warned.update({k: label for k in vals})
         plant = replace(plant, **vals)

@@ -89,7 +89,7 @@ class Result:
         return self.out[:, OUT[name]]
 
 
-def _metrics(sc: Scenario, out: np.ndarray) -> dict[str, float]:
+def _metrics(sc: Scenario, out: np.ndarray, slip_target: float = 0.1) -> dict[str, float]:
     w = sc.window()
     o = out[w]
     c = lambda name: o[:, OUT[name]]            # noqa: E731
@@ -111,6 +111,10 @@ def _metrics(sc: Scenario, out: np.ndarray) -> dict[str, float]:
         m["speed_end"] = float(c("speed")[-1])
         o_end = len(o)
     m["slipping"] = float(np.mean(kappa > 0.3))
+    # 目標のスリップ率からの行き過ぎ（目標に対する比の時間平均。0 = 一度も目標を超えていない、
+    # 1 = 平均して目標の2倍で滑っていた）。「目標より上に居座る」ゲインを見分ける物差し
+    m["slip_over"] = float(np.mean(np.maximum(0.0, kappa - slip_target)) / slip_target)
+    m["slip_mean"] = float(np.mean(kappa))
     m["slip_peak"] = float(np.max(kappa))
     m["lateral_keep"] = float(np.mean(1.0 / np.sqrt(1.0 + (kappa / 0.1) ** 2)))
     cmd = (c("cmd_left")[:o_end] + c("cmd_right")[:o_end]) * 0.5
@@ -130,7 +134,10 @@ def run(fw: Firmware, plant: Plant, sc: Scenario, params: dict[str, float] | Non
                      wheel_lift_guard_enabled=int(sc.lift), tv_enabled=int(sc.tv), imu_ready=1,
                      initial_speed_m_s=sc.initial_speed)
     out = fw.run(plant.to_c(), cfg, sc.inputs(), params)
-    return Result(sc, out, _metrics(sc, out))
+    # その場面を受け持つ制御の目標（制動モードは ABS、それ以外は TC）
+    key = "abs_slip_target" if sc.segs[sc.measure].mode == MODE_BRAKE else "tc_slip_target"
+    target = (params or {}).get(key, fw.params[key].default if key in fw.params else 0.1)
+    return Result(sc, out, _metrics(sc, out, target))
 
 
 def oracle(fw: Firmware, plant: Plant, sc: Scenario) -> float:

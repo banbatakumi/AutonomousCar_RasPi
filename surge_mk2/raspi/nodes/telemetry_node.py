@@ -311,6 +311,9 @@ CMD_DEADMAN_NS = int(_SAFETY.cmd_deadman_ms * 1_000_000)
 DEFAULT_MCAP_IMAGE_HZ = 5.0
 #: 中継の読み取り単位
 RECORD_CHUNK = 65536
+#: 最初の視聴者（`/ws/record`）が繋がるまで取っておく量の上限 [B]（`_mcap_pump`）。
+#: 接続は数十msで済むので、ふつうは先頭の数百バイトしか溜まらない
+RECORD_BACKLOG_MAX = 8 * 1024 * 1024
 #: `GET /logs/<name>` でメモリに載せてよい上限。これを超えたら 413 を返して
 #: `scp` 運用に倒す。**全量を一度に `read_bytes()` すると Pi のメモリが尽きる**
 #: （`image_hz=5` × カメラ2台で `.mcap` は毎時 1GB 近く育つ）
@@ -1972,13 +1975,28 @@ class TelemetryServer:
         書き込みがブロックしてしまう（Piには保存しないので読んだ分は捨てるだけ）。
         """
         assert proc.stdout is not None
+        # **最初の視聴者が繋がるまでの分は捨てずに取っておく**（2026-10-05）。ブラウザは `/ws/record` を
+        # 開くのと同時に記録開始を送るので、logger_node の最初の出力（MCAP のマジック・ヘッダ）が
+        # `/ws/record` の接続より先に届くことがある。捨てると先頭の欠けた mcap になり、普通の
+        # リーダでは開けない（実機で `sysid_wheel` の記録がこうなった: "invalid magic"）。
+        # 一度でも視聴者が付いた後は従来どおり捨てる（視聴者が去った＝もう要らない）
+        backlog: list[bytes] = []
+        backlog_bytes = 0
+        had_client = False
         try:
             while True:
                 chunk = await proc.stdout.read(RECORD_CHUNK)
                 if not chunk:
                     break
                 if not self.record_clients:
+                    if not had_client and backlog_bytes < RECORD_BACKLOG_MAX:
+                        backlog.append(chunk)
+                        backlog_bytes += len(chunk)
                     continue
+                had_client = True
+                if backlog:
+                    chunk = b"".join(backlog) + chunk
+                    backlog.clear()
                 await asyncio.gather(
                     *(self._send_or_drop(ws, chunk, self.record_clients)
                       for ws in list(self.record_clients)),

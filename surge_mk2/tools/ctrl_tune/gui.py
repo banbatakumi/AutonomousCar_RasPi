@@ -100,11 +100,21 @@ class CtrlTuneApp(tk.Tk):
             ttk.Checkbutton(row, text=make().label, variable=var).pack(side="left", padx=(0, 12))
         row = ttk.Frame(tab, padding=(0, 6))
         row.pack(fill="x")
-        ttk.Label(row, text="横グリップの優先度:").pack(side="left")
-        self.lateral = tk.StringVar(value=f"{optimize.Weights().lateral:g}")
-        ttk.Entry(row, textvariable=self.lateral, width=6).pack(side="left", padx=4)
-        ttk.Label(row, text="（0 = 直線の加速・制動だけ、大きいほど滑らせない。既定 0.3）",
+        # スリップ率の目標は最適化しない（前後の力と横グリップのどちらを取るかの方針。`optimize.py` 冒頭）。
+        # 下の表を見て人が決め、最適化はその目標を保つゲインだけを決める
+        current = _current(self.toml_path.get(), ("control",))
+        self.targets: dict[str, tk.StringVar] = {}
+        for key, label in (("tc_slip_target", "スリップ率の目標  TC:"), ("abs_slip_target", "ABS:")):
+            ttk.Label(row, text=label).pack(side="left")
+            var = tk.StringVar(value=f"{current.get(key, 0.1):g}")
+            self.targets[key] = var
+            ttk.Entry(row, textvariable=var, width=6).pack(side="left", padx=(4, 12))
+        lo, hi = optimize.SLIP_TARGET_RANGE
+        ttk.Label(row, text=f"（{lo:g}〜{hi:g}。小さいほど横グリップが残り、前後の力は減る。下の表）",
                   foreground="gray").pack(side="left")
+        self.tradeoff_label = ttk.Label(tab, text="", foreground="gray", justify="left")
+        self.tradeoff_label.pack(anchor="w", pady=(0, 6))
+        self._show_tradeoff()
         row = ttk.Frame(tab)
         row.pack(fill="x")
         self.run_button = ttk.Button(row, text="最適化（数分）", command=self._optimise)
@@ -115,6 +125,15 @@ class CtrlTuneApp(tk.Tk):
         self.tune_frame = ttk.Frame(tab)
         self.tune_frame.pack(fill="both", expand=True)
         ttk.Button(tab, text="[control] に適用", command=self._apply_control).pack(anchor="e")
+
+    def _show_tradeoff(self) -> None:
+        try:
+            rows = optimize.tradeoff(Plant.load(self.toml_path.get()))
+        except Exception:  # noqa: BLE001 - toml が読めないときは表を出さないだけ
+            return
+        self.tradeoff_label.configure(text=(
+            "同定したタイヤでの目安（スリップ率の目標 → 前後力 / 残る横グリップ）:  "
+            + "   ".join(f"{t:g} → {f * 100:.0f}% / {lat * 100:.0f}%" for t, f, lat in rows)))
 
     def _pick_toml(self) -> None:
         p = filedialog.askopenfilename(title="vehicle.toml", filetypes=[("TOML", "*.toml")])
@@ -194,10 +213,17 @@ class CtrlTuneApp(tk.Tk):
             messagebox.showinfo("最適化", "調整する制御を選んでください")
             return
         try:
-            weights = optimize.Weights(lateral=float(self.lateral.get()))
+            weights = optimize.Weights()
             plant = Plant.load(self.toml_path.get())
             fw = Firmware()
             start = tuning.load_params(fw, self.toml_path.get())
+            lo, hi = optimize.SLIP_TARGET_RANGE
+            for key, var in self.targets.items():
+                start[key] = float(var.get())
+                if not (lo <= start[key] <= hi):
+                    raise ValueError(f"スリップ率の目標は {lo:g}〜{hi:g} にしてください（{key} = {start[key]:g}）")
+            self._chosen_targets = {key: start[key] for key in self.targets}
+            self._show_tradeoff()
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("最適化", str(e))
             return
@@ -249,6 +275,21 @@ class CtrlTuneApp(tk.Tk):
             ttk.Label(self.tune_frame, text=text).grid(row=0, column=col, sticky="w")
         r = 1
         lines: list[str] = []
+        # 人が選んだスリップ率の目標（その制御を最適化したときだけ。ゲインはこの目標に合わせてある）
+        current = _current(self.toml_path.get(), ("control",))
+        ran = {t.problem.key for t in tunings}
+        for key, value in getattr(self, "_chosen_targets", {}).items():
+            if key.split("_")[0] not in ran:
+                continue
+            self.tune_results[key] = value
+            var = tk.BooleanVar(value=True)
+            self.tune_checks[key] = var
+            ttk.Checkbutton(self.tune_frame, variable=var).grid(row=r, column=0)
+            ttk.Label(self.tune_frame, text=key, width=30).grid(row=r, column=1, sticky="w")
+            old = current.get(key)
+            ttk.Label(self.tune_frame, text=f"{old:.4g} → {value:.4g}  （選んだ値）" if old is not None
+                      else f"{value:.4g}  （選んだ値）").grid(row=r, column=2, sticky="w")
+            r += 1
         for t in tunings:
             held = _NOT_BY_DEFAULT.get(t.problem.key)
             better = t.cost < t.baseline_cost
@@ -275,7 +316,7 @@ class CtrlTuneApp(tk.Tk):
                 if "efficiency" in a:
                     parts.append(f"効率 {a['efficiency']:.2f}→{b['efficiency']:.2f}")
                 parts.append(f"滑り {a['slipping']:.2f}→{b['slipping']:.2f}")
-                parts.append(f"横グリップ {a['lateral_keep']:.2f}→{b['lateral_keep']:.2f}")
+                parts.append(f"平均スリップ率 {a['slip_mean']:.2f}→{b['slip_mean']:.2f}")
                 if sc.kind == "yaw":
                     parts.append(f"ヨー偏差 {a['yaw_err_rms']:.3f}→{b['yaw_err_rms']:.3f}")
                     parts.append(f"左右差 {a['torque_diff_rms']:.3f}→{b['torque_diff_rms']:.3f}N·m")

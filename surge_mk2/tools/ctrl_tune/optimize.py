@@ -4,12 +4,24 @@
 （`plant.variants()`）すべてで場面を回して、**平均と最悪の中間**が最小になる値を探す
 （平均だけだと、ある1つの条件で破綻する値が選ばれる）。
 
+## スリップ率の目標は最適化しない（2026-10-05、実機の同定を受けて）
+
+TC・ABS で調整するのは**ゲイン（kp・ki）だけ**。スリップ率の目標（`tc_slip_target`・`abs_slip_target`）は
+「前後の力」と「横グリップ」のどちらを取るかという**方針**で、最適な値というものが無い——人が
+`tradeoff()` の表（同定したタイヤの曲線から、目標ごとに前後力と残る横グリップ）を見て決める。
+最初は目標も一緒に探し、横グリップの損に重みを掛けて釣り合わせていた。実機のタイヤは滑らせても
+前後力が落ちない形（`tyre_c`≈1.0）で、その重みでは「ABS のゲインを下げてロックさせた方が止まる」が
+最適になった（効率 0.91→0.97 と引き換えに、滑っていた割合 0.03→0.58）。後輪だけで制動する車で
+後輪をロックさせるとスピンするが、このモデルは横滑りを表せず、その損をコストに入れられない。
+
 ## コスト（小さいほど良い。場面×車 1つぶん）
 
-- 効率の損: 一定トルクの最良（`scenarios.oracle()`）に対して何割遠回りしたか
-- 横グリップの損: 1 − 横グリップの残り × `lateral_weight`（**横グリップをどれだけ優先するか**。
-  スリップ率の目標はほぼこれで決まる——タイヤの前後力は目標 0.1〜0.3 でほとんど変わらないが、
-  横力は滑るほど落ちる）
+- **目標からの行き過ぎ**（`slip_over`: 目標を超えた分の時間平均 ÷ 目標）と、深く滑っていた時間の割合
+  （スリップ率の絶対値 > 0.3。**目標は 0.25 以下の前提**）× `overshoot`。これが主
+- 効率の損 × `efficiency`（小さい重み）: 一定トルクの最良（`scenarios.oracle()`）に対して何割遠回り
+  したか。目標より下に留まりすぎないための項で、主にしてはいけない——**効率を主にすると、積分を
+  弱くして目標より上に居座るゲインが選ばれる**（目標 0.1 に対して平均 0.19 で滑り、そのぶん止まる距離が
+  縮む。2026-10-05 に実際に出た）
 - トルクの暴れ × 小さい重み（同じ性能なら滑らかな方を選ぶ）
 - してはいけないこと（定速・定常旋回での介入、浮いた輪の吹け上がり、ABS のフォールバック）は大きな罰
 
@@ -32,13 +44,15 @@ from .fw import Firmware
 from .plant import Plant, variants
 
 __all__ = ["Problem", "Tuning", "evaluate", "optimise", "tc_problem", "abs_problem", "tv_problem",
-           "PROBLEMS", "Weights"]
+           "PROBLEMS", "Weights", "tradeoff", "SLIP_TARGET_RANGE"]
 
 
 @dataclass(frozen=True)
 class Weights:
-    #: 横グリップの損の重み（効率の損 1 に対して）。大きいほど滑らせない値が選ばれる
-    lateral: float = 0.3
+    #: 目標からの行き過ぎ（`slip_over`）と、深く滑っていた時間の割合の重み
+    overshoot: float = 1.0
+    #: 効率の損の重み。行き過ぎより十分小さくする（冒頭の説明）
+    efficiency: float = 0.3
     #: トルクの暴れ [N·m/s] の重み
     chatter: float = 0.01
     #: してはいけないことの罰の倍率
@@ -229,10 +243,24 @@ def _pick(*keys: str) -> tuple[S.Scenario, ...]:
     return tuple(by[k] for k in keys)
 
 
-#: スリップ率の目標の下限。前輪の読みの誤差（タイヤ径・1回転周期の誤差で合わせて数%）より
-#: 十分上に置く。モデルに入れた誤差で定速の誤介入は罰しているが、実機の誤差の方が大きいと
-#: 誤介入になるので、探索の範囲でも下を切る
-_SLIP_TARGET_MIN = 0.08
+#: 人が選ぶスリップ率の目標の範囲。下は前輪の読みの誤差（タイヤ径・1回転周期の誤差で合わせて数%。
+#: これより下だと定速で誤介入する）、上は「深く滑っていた」の物差し（0.3）より十分下
+SLIP_TARGET_RANGE = (0.08, 0.25)
+
+
+def tradeoff(plant: Plant, targets: tuple[float, ...] = (0.08, 0.10, 0.15, 0.20, 0.25, 0.40)):
+    """スリップ率の目標 → (前後力が上限の何割出るか, 摩擦円で残る横グリップの割合)。
+
+    同定したタイヤの曲線 `sin(C·atan(B·κ))` から。前後力を f 割使うと、横に残るのは √(1−f²)。
+    """
+    kappa = np.linspace(0.0, 1.5, 1501)
+    curve = np.sin(plant.tyre_c * np.arctan(plant.tyre_b * kappa))
+    peak = float(curve.max())
+    out = []
+    for t in targets:
+        f = min(1.0, math.sin(plant.tyre_c * math.atan(plant.tyre_b * t)) / peak)
+        out.append((t, f, math.sqrt(max(0.0, 1.0 - f * f))))
+    return out
 
 #: 浮いた輪の周速がこれを超えた分を罰する [m/s]
 _LIFT_WHEEL_OK_M_S = 1.0
@@ -244,9 +272,9 @@ def _slip_cost(sc: S.Scenario, m: dict[str, float], orc: float, w: Weights) -> f
         return c + w.penalty * (m["tc_active"] + m["abs_active"] + m["lift_active"])
     if sc.key == "lift":
         return c + w.penalty * max(0.0, m["wheel_peak"] - _LIFT_WHEEL_OK_M_S) / _LIFT_WHEEL_OK_M_S
-    c += w.lateral * (1.0 - m["lateral_keep"])
+    c += w.overshoot * (m["slip_over"] + m["slipping"])
     if "efficiency" in m:
-        c += max(0.0, 1.0 - m["efficiency"])
+        c += w.efficiency * max(0.0, 1.0 - m["efficiency"])
     if sc.kind == "brake" and not m.get("stopped", 1.0):
         c += w.penalty
     return c
@@ -255,7 +283,7 @@ def _slip_cost(sc: S.Scenario, m: dict[str, float], orc: float, w: Weights) -> f
 def tc_problem() -> Problem:
     return Problem(
         "tc", "TC・片輪浮き対策",
-        {"tc_slip_target": (_SLIP_TARGET_MIN, 0.4), "tc_kp_nm_per_m_s": (0.005, 1.0), "tc_ki_nm_per_m": (0.1, 50.0)},
+        {"tc_kp_nm_per_m_s": (0.005, 1.0), "tc_ki_nm_per_m": (0.1, 50.0)},
         _pick("launch", "launch_pi", "roll", "accel_mu_drop", "accel_split", "lift", "corner_exit",
               "decel_pi", "decel_pi_corner", "cruise", "cruise_turn"),
         _slip_cost, frozenset({"launch", "roll", "accel_mu_drop", "corner_exit"}))
@@ -264,7 +292,7 @@ def tc_problem() -> Problem:
 def abs_problem() -> Problem:
     return Problem(
         "abs", "ABS",
-        {"abs_slip_target": (_SLIP_TARGET_MIN, 0.4), "abs_kp_nm_per_m_s": (0.005, 1.0), "abs_ki_nm_per_m": (0.1, 50.0)},
+        {"abs_kp_nm_per_m_s": (0.005, 1.0), "abs_ki_nm_per_m": (0.1, 50.0)},
         _pick("brake", "brake_soft", "brake_mu_drop", "brake_split"),
         _slip_cost, frozenset({"brake", "brake_soft", "brake_mu_drop"}))
 

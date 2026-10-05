@@ -94,12 +94,54 @@ def _build(vs_rows: list[tuple[float, dict]], cmd_rows: list[tuple[float, dict]]
     return Rec(**{k: np.asarray(v) for k, v in cols.items()})
 
 
+#: MCAP の先頭（マジック＋ヘッダレコード: profile ""・library "surge-mk2"）。先頭の欠けた記録を
+#: 読むときに補う。ヘッダの中身は読み出しに使われない
+_MCAP_HEAD = (b"\x89MCAP0\r\n" + b"\x01" + (17).to_bytes(8, "little")
+              + (0).to_bytes(4, "little") + (9).to_bytes(4, "little") + b"surge-mk2")
+
+
+def _read_headless(path: str | Path) -> tuple[list[tuple[float, dict]], list[tuple[float, dict]]]:
+    """先頭の欠けた mcap（マジック・ヘッダと最初のスキーマ・チャンネルが無い）を読む。
+
+    2026-10-05 まで、ブラウザが `/ws/record` を繋ぐより先に logger_node が書き出した先頭の塊が
+    捨てられることがあった（`telemetry_node._mcap_pump`）。メッセージ本体は残っていて、スキーマ・
+    チャンネルはファイル末尾の要約にもあるので、2回舐めれば読める（1回目でチャンネル、2回目でメッセージ）。
+    """
+    import io
+
+    from mcap.records import Channel, Message
+    from mcap.stream_reader import StreamReader
+
+    data = _MCAP_HEAD + Path(path).read_bytes()
+    channels = {r.id: r.topic for r in StreamReader(io.BytesIO(data)).records if isinstance(r, Channel)}
+    vs_rows: list[tuple[float, dict]] = []
+    cmd_rows: list[tuple[float, dict]] = []
+    for r in StreamReader(io.BytesIO(data)).records:
+        if not isinstance(r, Message):
+            continue
+        topic = channels.get(r.channel_id)
+        if topic == "/vehicle_state":
+            obj = json.loads(r.data)
+            vs_rows.append(((obj.get("t_capture") or r.log_time) / NS, obj))
+        elif topic == "/cmd":
+            obj = json.loads(r.data)
+            cmd_rows.append(((obj.get("t_pub") or r.log_time) / NS, obj))
+    return vs_rows, cmd_rows
+
+
 def load_mcap(path: str | Path) -> Rec:
     """GUI の「システム同定」タブで録った mcap → `Rec`。時刻はメッセージの中の単調時刻。"""
     from mcap.reader import make_reader
 
-    vs_rows: list[tuple[float, dict]] = []
-    cmd_rows: list[tuple[float, dict]] = []
+    with open(path, "rb") as f:
+        headless = f.read(8) != _MCAP_HEAD[:8]
+    if headless:
+        vs_rows, cmd_rows = _read_headless(path)
+        rec = _build(vs_rows, cmd_rows)
+        rec.notes.append("記録の先頭（MCAP のヘッダ）が欠けていたので、残りから読み出しました")
+        return rec
+    vs_rows = []
+    cmd_rows = []
     with open(path, "rb") as f:
         for _schema, channel, message in make_reader(f).iter_messages(topics=["/cmd", "/vehicle_state"]):
             obj = json.loads(message.data)
