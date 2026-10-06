@@ -351,12 +351,16 @@ class TestSameFrameIsNotReprocessed(unittest.TestCase):
         try:
             sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
             pub = _FakePub()
-            node.run(sub=sub, pub=pub, duration_s=0.08)   # poll=20msで複数周回る
+            loops = []
+            node.run(sub=sub, pub=pub, duration_s=0.08,   # poll=20msで複数周回る
+                     status_cb=loops.append)
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
-            self.assertGreater(len(lines), 1, "複数周回っていない（テストの前提が崩れている）")
+            self.assertGreater(len(loops), 1, "複数周回っていない（テストの前提が崩れている）")
             self.assertEqual(len(calls), 1,
                              "同じring_seqのフレームなのにprocess_frame()が複数回呼ばれている")
+            # 同じ結果を送り直さない（planning_node が「新しい周」と見て判断し直すため）
+            self.assertEqual(len(lines), 1)
         finally:
             node.close()
             ring.unlink()

@@ -218,7 +218,14 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv._mcap_error = None
 
         class _P:
+            """本物の `Publisher.send` と同じく、渡された msg に `seq`/`t_pub` を押す。
+            押さない偽物だと「送った指令と次の指令を比べる」処理の不一致を見逃す"""
+            seq = 0
+
             def send(self, topic, msg):
+                self.seq += 1
+                msg.seq = self.seq
+                msg.t_pub = time.monotonic_ns()
                 srv.published.append((topic, msg))
         srv.pub = _P()
         return srv
@@ -294,6 +301,69 @@ class TestImmediateCmdRelay(unittest.IsolatedAsyncioTestCase):
         srv._on_auto_cmd(time.monotonic_ns())
         self.assertTrue(srv.published)
         self.assertTrue(all(m.mode == 0 and m.source == "deadman" for _, m in srv.published))
+
+
+class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
+    """`_bus_pump` は本物のバスでは `auto/cmd` の到着で起きる（2026-10-06）。1ms ごとに
+    覗いていた頃は、それだけで実機の CPU を約8%使っていた。"""
+
+    async def test_relays_at_once_without_polling_at_1khz(self):
+        import os
+        import tempfile
+
+        from raspi.bus import LATEST, Publisher, Subscriber
+        from raspi.msgs.types import TOPIC_AUTO_CMD
+
+        tmp = tempfile.TemporaryDirectory()
+        old = os.environ.get("SURGE_BUS_DIR")
+        os.environ["SURGE_BUS_DIR"] = tmp.name
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        srv._on_armed_change = lambda: None
+        planning = Publisher("planning")
+        sub = Subscriber({TOPIC_AUTO_CMD: LATEST})
+        polls = []
+        real_poll = sub.poll
+        sub.poll = lambda timeout_ms=0: (polls.append(1), real_poll(timeout_ms))[1]
+        srv.sub = sub
+        pump = asyncio.create_task(srv._bus_pump())
+        try:
+            await asyncio.sleep(0.2)                      # 接続が張られるのを待つ
+            srv._last_cmd_ns = time.monotonic_ns()
+            n0 = len(polls)
+            t0 = time.monotonic_ns()
+            planning.send(TOPIC_AUTO_CMD, DriveCmd(mode=2, arm=True, target_speed=1.0,
+                                                   source="planning:ftg"))
+            while not srv.published and time.monotonic_ns() - t0 < 500_000_000:
+                await asyncio.sleep(0.0005)
+            waited_ms = (time.monotonic_ns() - t0) / 1e6
+            self.assertTrue(srv.published, "auto/cmd が中継されていない")
+            self.assertEqual(srv.published[0][1].target_speed, 1.0)
+            # 時間切れ（10ms）を待たずに出ている。CI の揺れを見込んで緩めに取る
+            self.assertLess(waited_ms, 8.0)
+            await asyncio.sleep(0.3)
+            # 何も届かない 0.3秒で覗く回数は 10ms ごと（約30回）。1kHz なら約300回
+            self.assertLess(len(polls) - n0, 80)
+        finally:
+            srv._running = False
+            await asyncio.wait_for(pump, 1.0)
+            sub.close()
+            planning.close()
+            if old is None:
+                os.environ.pop("SURGE_BUS_DIR", None)
+            else:
+                os.environ["SURGE_BUS_DIR"] = old
+            tmp.cleanup()
+
+    async def test_fake_sub_without_sockets_still_polls(self):
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        srv._on_armed_change = lambda: None
+        srv.sub.poll = lambda timeout_ms=0: []
+        pump = asyncio.create_task(srv._bus_pump())
+        TestImmediateCmdRelay._auto(self, srv, 1.0)
+        await asyncio.sleep(0.05)
+        srv._running = False
+        await asyncio.wait_for(pump, 1.0)
+        self.assertEqual(len(srv.published), 1)
 
 
 class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
@@ -386,6 +456,63 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
         await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
         self.assertEqual(srv.published[-1][1].mode, 1)
 
+    async def test_late_drive_cmds_are_dropped_but_late_stops_pass(self):
+        """Wi-Fi の詰まりで溜まっていた「走れ」は、復帰してまとめて届いてもデッドマンを
+        生き返らせない（2026-10-06）。止める指令は遅れていても通す。"""
+        srv = self._server()
+        now_ms = time.monotonic_ns() / 1e6
+        off = 12345.0                                      # GUI の時計は Pi と無関係に進む
+        await self._send(srv, srv.ws, type="cmd", t=now_ms - off, mode=1, arm=True, speed=0.5)
+        self.assertEqual(srv.published[-1][1].mode, 1)
+        srv._last_cmd_ns = 0                               # 途絶でデッドマンが働いた後
+        srv._publish_cmd(time.monotonic_ns())
+        n = len(srv.published)
+        # 30秒前に送られた指令が今届く
+        await self._send(srv, srv.ws, type="cmd", t=now_ms - off - 30_000, mode=1, arm=True,
+                         speed=0.5)
+        self.assertEqual(len(srv.published), n)
+        self.assertEqual(srv.stale_cmds, 1)
+        self.assertEqual(srv._last_cmd_ns, 0)
+        # 同じだけ遅れた DISARM は通す
+        await self._send(srv, srv.ws, type="cmd", t=now_ms - off - 30_000, mode=0, arm=False)
+        self.assertGreater(srv._last_cmd_ns, 0)
+        # 今送られた指令は通る。`t` を載せない古い GUI も通る
+        await self._send(srv, srv.ws, type="cmd", t=time.monotonic_ns() / 1e6 - off, mode=1,
+                         arm=True, speed=0.5)
+        self.assertEqual(srv.published[-1][1].mode, 1)
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.7)
+        self.assertEqual(srv.published[-1][1].target_speed, 0.7)
+        self.assertEqual(srv.stale_cmds, 1)
+
+    async def test_auto_rides_through_a_short_link_gap(self):
+        """自律走行中は GUI の指令が `auto_link_grace_ms` 途絶えるまで DISARM しない。
+        手動操縦は `cmd_deadman_ms` のまま（2026-10-06）。"""
+        from raspi.nodes.telemetry_node import AUTO_LINK_GRACE_NS, CMD_DEADMAN_NS
+        self.assertGreater(AUTO_LINK_GRACE_NS, CMD_DEADMAN_NS)
+        srv = self._server()
+        srv._merge_auto = lambda gui, now: gui             # planner 側の合成はここでは見ない
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        gap = CMD_DEADMAN_NS * 4
+        # 自律に入っていなければ、モードが AUTO でも従来どおり落ちる
+        srv._publish_cmd(srv._last_cmd_ns + gap)
+        self.assertEqual(srv.published[-1][1].source, "deadman")
+        srv._auto_engaged, srv._auto_mode = True, "slam2d_route"
+        srv._publish_cmd(srv._last_cmd_ns + gap)
+        self.assertEqual((srv.published[-1][1].mode, srv.published[-1][1].arm), (2, True))
+        srv._publish_cmd(srv._last_cmd_ns + AUTO_LINK_GRACE_NS + 1)
+        self.assertEqual(srv.published[-1][1].source, "deadman")
+        # **人が DISARM したら猶予は使わない。** GUI は ARM を切った瞬間に DISARM を1発送って
+        # 送信を止める（`ControlChannel.disarm`）。その1発でその場で止まる
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        await self._send(srv, srv.ws, type="cmd", mode=0, arm=False, light_mode=1)
+        self.assertEqual((srv.published[-1][1].mode, srv.published[-1][1].arm), (0, False))
+        srv._publish_cmd(srv._last_cmd_ns + gap)
+        self.assertEqual(srv.published[-1][1].source, "deadman")
+        # 手動操縦（mode=1）は自律の設定が残っていても短いまま
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
+        srv._publish_cmd(srv._last_cmd_ns + gap)
+        self.assertEqual(srv.published[-1][1].source, "deadman")
+
     async def test_estop_from_anyone_goes_out_at_once(self):
         srv = self._server()
         await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=1.0)
@@ -473,6 +600,7 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._auto_mode = ""
         srv._auto_engaged = False
         srv._auto_params = {}
+        srv._auto_params_by_mode = {}
         srv._auto_was_fresh = True
         srv.auto_stalls = 0
         srv._publish_auto_ctrl = lambda: None      # バスに触らせない
@@ -528,6 +656,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._e2e_model = ""
         srv._publish_e2e_model = lambda: None      # バスに触らせない
         srv._save_e2e_model_conf = lambda: None    # ディスクに触らせない
+        # カメラE2Eモデルの選択（`cam_e2e` 用）。同じ形
+        srv._cam_e2e_model = ""
+        srv._publish_cam_e2e_model = lambda: None  # バスに触らせない
+        srv._save_cam_e2e_model_conf = lambda: None  # ディスクに触らせない
         srv.sent = []
 
         async def _send_json(ws, obj):

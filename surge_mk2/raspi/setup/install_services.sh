@@ -229,6 +229,17 @@ systemctl restart systemd-logind || true
 #    切り離す副作用で `/dev/serial0` の割り当てを動かすので、STM32 との UART が壊れる
 systemctl disable --now bluetooth 2>/dev/null || true
 
+# Wi-Fi の省電力を**切る**（2026-10-06）。Raspberry Pi OS の既定は有効で、無線が眠っている間の
+# 受信はルーターが溜めて次のビーコン（約100ms周期）で渡すので、GUI の指令の到着が揺れる
+# （手動操縦のデッドマン 150ms の余裕を削る）。得は小さい——`docs/power_audit_2026-10.md` の実測を参照。
+# NetworkManager の全接続の既定にする（`2` = 無効。接続ごとの設定が無ければこれが効く）
+mkdir -p /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/10-surge-wifi-powersave.conf <<'EOF'
+# raspi/setup/install_services.sh が生成。
+[connection]
+wifi.powersave = 2
+EOF
+
 # **`--log` は付けない。** `.sfl` の記録は GUI の「ログ」タブ（`log/ctrl`）で
 # セッション中に開始/停止する運用にしたため、既定では記録なしで起動する
 write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet $ARM"

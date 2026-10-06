@@ -128,6 +128,11 @@ export function connectMap(onOpenChange: (open: boolean) => void): () => void {
   let timer: number | undefined
   let backoff = RECONNECT_MIN_MS
   let closed = false
+  // 受信の通し番号と、画面に出した1枚の番号。**`map_seq` では比べない。**
+  // planner を作り直す（モードの切り替え・planning_node の再起動）と `map_seq` は
+  // 0 に戻るので、前の地図より小さい版が弾かれてリロードするまで地図が出なくなる
+  let arrived = 0
+  let shown = 0
 
   const open = () => {
     ws = new WebSocket(wsUrl('/ws/map'))
@@ -138,15 +143,20 @@ export function connectMap(onOpenChange: (open: boolean) => void): () => void {
     }
     ws.onmessage = async (ev) => {
       if (!(ev.data instanceof ArrayBuffer)) return
+      const n = ++arrived
       try {
         const msg = decode(new Uint8Array(ev.data)) as AutoMapMsg
         const built = await build(msg)
-        // **古い版で新しい版を上書きしない。** 展開は非同期なので、続けて
-        // 届いた2枚の完成順が入れ替わりうる
-        if (built && (!live.map || built.seq >= live.map.seq)) {
-          live.map?.bitmap?.close()
-          live.map = built
+        if (!built) return
+        // **先に届いた1枚で後に届いた1枚を上書きしない。** 展開は非同期なので、
+        // 続けて届いた2枚の完成順が入れ替わりうる
+        if (n < shown) {
+          built.bitmap?.close()
+          return
         }
+        shown = n
+        live.map?.bitmap?.close()
+        live.map = built
       } catch {
         // 壊れた1枚は捨てる。**次の版が来れば直る**ので接続は切らない
       }

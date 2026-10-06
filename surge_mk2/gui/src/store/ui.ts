@@ -13,6 +13,8 @@ import type {
   CamModelStatus,
   CameraConfigStatus,
   ControlStatus,
+  CamE2EModelFile,
+  CamE2EModelStatus,
   E2EModelFile,
   E2EModelStatus,
   FanStatus,
@@ -804,6 +806,15 @@ type UiState = {
   /** `models/e2e_lidar/` にある `.onnx` の一覧（`e2eModelList` の応答） */
   e2eModelFiles: E2EModelFile[]
 
+  /**
+   * cam_e2e（カメラE2E・模倣学習）が使うモデルの選択。**サーバが真値なのでここでは
+   * 編集しない。** 押した結果は `status` のブロードキャストで返ってくる
+   * （`ws/control.ts` の `camE2eModelSelect`）。
+   */
+  camE2eModel: CamE2EModelStatus | null
+  /** `models/cam_e2e/` にある `.onnx` の一覧（`camE2eModelList` の応答） */
+  camE2eModelFiles: CamE2EModelFile[]
+
   /** `saved_maps/` にある保存済み地図の一覧（`mapsList`/`mapsSave`/`mapsDelete` の応答） */
   mapFiles: MapFile[]
   /** 直近の `mapsSave()` の結果。表示したら呼び出し側が `null` に戻す
@@ -874,6 +885,8 @@ export const useUi = create<UiState>((set, get) => ({
   camModelFiles: [],
   e2eModel: null,
   e2eModelFiles: [],
+  camE2eModel: null,
+  camE2eModelFiles: [],
   mapFiles: [],
   mapSaveResult: null,
 

@@ -9,7 +9,15 @@
  * 同じ経路で停止する。「止める指令を送る」設計だと、その指令が届かない
  * 状況（＝一番止めたい状況）で止まらない。
  */
-import type { CamModelFile, CmdOut, ControlStatus, E2EModelFile, LogFile, MapFile } from '../types'
+import type {
+  CamE2EModelFile,
+  CamModelFile,
+  CmdOut,
+  ControlStatus,
+  E2EModelFile,
+  LogFile,
+  MapFile,
+} from '../types'
 import { authToken } from './token'
 import { wsUrl } from './url'
 
@@ -30,6 +38,7 @@ type ServerMsg = {
   files?: LogFile[]
   cam_model_files?: CamModelFile[]
   e2e_model_files?: E2EModelFile[]
+  cam_e2e_model_files?: CamE2EModelFile[]
   map_files?: MapFile[]
   ok?: boolean
   error?: string
@@ -50,6 +59,8 @@ export type ControlHandlers = {
   onCamModels: (files: CamModelFile[]) => void
   /** `e2e_model_list` への応答（`models/e2e_lidar/` にある `.onnx` の一覧） */
   onE2EModels: (files: E2EModelFile[]) => void
+  /** `cam_e2e_model_list` への応答（`models/cam_e2e/` にある `.onnx` の一覧） */
+  onCamE2EModels: (files: CamE2EModelFile[]) => void
   /** `maps_list`/`maps_save`/`maps_delete` への応答（`saved_maps/` の一覧） */
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
@@ -94,6 +105,7 @@ export class ControlChannel {
       else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
       else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
       else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
+      else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
       else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
       else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
       else if (m.type === 'pong' && m.id === this.pingId) {
@@ -124,8 +136,23 @@ export class ControlChannel {
     this.send({ type: 'estop' })
   }
 
+  /**
+   * **DISARM を1発、明示的に送る**（ARM を切った瞬間に呼ぶ。2026-10-06）。
+   *
+   * ARM を切った後の GUI は、灯火などが無ければ送信を止めてデッドマンに任せていた。
+   * 自律走行中はデッドマンが `autoLinkGraceMs`（Wi-Fi の瞬断を乗り切るための猶予）まで
+   * 待つので、**止めたつもりの車がその間走り続けた**。送信が止まることではなく、
+   * 「止める」という指令そのもので止める。灯火はそのまま（未指定のキーは Pi 側で 0/false）。
+   */
+  disarm(lightMode: number) {
+    this.send({ type: 'cmd', t: performance.now(), mode: 0, arm: false, light_mode: lightMode })
+  }
+
   cmd(c: Omit<CmdOut, 'type'>) {
-    this.send({ type: 'cmd', ...c })
+    // `t` は**送った時刻**（このページの時計）。Pi はこれで「いつもよりどれだけ遅れて
+    // 届いたか」を測り、Wi-Fi の詰まりで溜まっていた古い「走れ」を捨てる
+    // （`telemetry_node._cmd_lateness_ms`）
+    this.send({ type: 'cmd', t: performance.now(), ...c })
   }
 
   // ── 自動運転 ──
@@ -390,6 +417,24 @@ export class ControlChannel {
    */
   e2eModelSelect(name: string) {
     this.send({ type: 'e2e_model_select', name })
+  }
+
+  // ── カメラE2E モデルの選択（`cam_e2e` 用） ──
+  // `camModelList`/`camModelSelect` と全く同じ形。
+
+  /** `models/cam_e2e/` にある `.onnx` の一覧を要求する。応答は `onCamE2EModels`。 */
+  camE2eModelList() {
+    this.send({ type: 'cam_e2e_model_list' })
+  }
+
+  /**
+   * `cam_e2e`（カメラE2E・模倣学習）が使うモデルを選ぶ。空文字で「未選択」に戻せる。
+   *
+   * ⚠ **`cam_e2e` を engage 中に選び直すと engage は必ず落ちる**
+   * （サーバ側の約束。`camModelSelect` と同じ形）。
+   */
+  camE2eModelSelect(name: string) {
+    this.send({ type: 'cam_e2e_model_select', name })
   }
 
   // ── 対象追従（`follow_object`）のROI選択 ──

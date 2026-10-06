@@ -173,7 +173,20 @@ def endpoints_for_topic(topic: str) -> list[str]:
 
 # ── ワイヤ形式 ────────────────────────────────────────────────────────
 
-_encoder = msgspec.msgpack.Encoder()
+def _enc_hook(obj):
+    """numpy のスカラ（`np.float64` 等）を Python の値に直す。
+
+    planner が numpy の計算結果をそのままメッセージに入れると、msgspec は
+    `TypeError` を出し、送信箇所でノードごと落ちる（2026-10-06、実機の planning_node が
+    `auto/state` の送信で4回落ちていた）。numpy を import せずに済むよう `item()` の有無で見る。
+    配列は直さない（メッセージの型が list なので、入れた側の誤り）。"""
+    item = getattr(obj, "item", None)
+    if callable(item) and getattr(obj, "ndim", None) == 0:
+        return item()
+    raise NotImplementedError(f"Encoding objects of type {type(obj).__name__} is unsupported")
+
+
+_encoder = msgspec.msgpack.Encoder(enc_hook=_enc_hook)
 _decoders: dict[type, msgspec.msgpack.Decoder] = {}
 
 

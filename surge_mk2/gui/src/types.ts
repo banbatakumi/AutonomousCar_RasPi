@@ -187,6 +187,27 @@ export type E2EModelStatus = {
   name: string
 }
 
+/** `models/cam_e2e/` にある `.onnx` の1件（`cam_e2e_model_list` の応答）。
+ * 他のモデル一覧と同じ形だが、混ざらないよう別の型にしてある */
+export type CamE2EModelFile = {
+  name: string
+  size: number
+  /** UNIX epoch秒 */
+  mtime: number
+  /** 契約（`ml_cam_e2e/export_onnx.py` が書く `<name>.json`）が同梱されているか。
+   * **無いモデルは `cam_e2e_node` が読み込まない**（出力の並びと正規化の基準が分からないため） */
+  has_config: boolean
+  /** 自由記述の備考（`ml_cam_e2e/app.py` の備考欄→`note.txt`→エクスポート時に
+   * `<name>.json` へ同梱される）。無ければ空文字 */
+  note: string
+}
+
+/** `cam_e2e`（カメラE2E・模倣学習）が使うモデルの選択。**サーバが真値**
+ * （`ws/control.ts` の `camE2eModelSelect`）。空文字は未選択 */
+export type CamE2EModelStatus = {
+  name: string
+}
+
 /** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
  * ARM中(`_armed`)/DISARM中(`_disarm`)で別々の値を持つ（2026-09-03、駐車中の節電）。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
@@ -305,6 +326,8 @@ export type ControlStatus = {
     last_error: string
   } | null
   deadman_trips: number
+  /** 遅れて届いたので捨てた「走れ」の指令の数 */
+  stale_cmds?: number
   /** サーバが共有トークンを要求しているか（`--token`）。**要求されていて手元に
    * トークンが無ければ操縦権が取れない** ので、GUI はその旨を出す */
   auth_required: boolean
@@ -344,6 +367,8 @@ export type ControlStatus = {
   cam_model: CamModelStatus
   /** e2e_lidar が使うモデルの選択。**サーバが真値** */
   e2e_model: E2EModelStatus
+  /** cam_e2e が使うモデルの選択。**サーバが真値** */
+  cam_e2e_model: CamE2EModelStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */

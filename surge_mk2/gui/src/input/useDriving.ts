@@ -492,6 +492,18 @@ export function useDriving(ch: ControlChannel | null) {
     }
   }, [ch])
 
+  // ── ARM を切った瞬間に DISARM を明示的に送る ──
+  //
+  // 切り方（Enter・パッドの ×・無操作・タブが背後に回った…）によらず、**状態の変化そのもの**に
+  // 掛ける。送信ループ（rAF）はタブが背後に回ると止まるので、そこには置けない。
+  // 理由は `ControlChannel.disarm` を参照
+  useEffect(() => {
+    if (!ch) return
+    return useUi.subscribe((state, prev) => {
+      if (prev.armRequested && !state.armRequested) ch.disarm(state.lightMode)
+    })
+  }, [ch])
+
   // ── Wake Lock: ARM 中は画面ロックを抑止する ──
   //
   // `blur` DISARM を撤廃した後も、iPad の画面自動ロックは `document.hidden` を

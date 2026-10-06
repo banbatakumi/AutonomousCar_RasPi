@@ -100,6 +100,8 @@ rsync -az --stats \
   --exclude '/config/camera.json' \
   --exclude '/config/cam_model.json' \
   --exclude '/config/e2e_lidar_model.json' \
+  --exclude '/config/cam_e2e_model.json' \
+  --exclude '/ml_cam_e2e/runs/' \
   --exclude '/config/odometer.json' \
   --exclude '/saved_maps/' \
   -e "ssh ${SSH_OPTS[*]}" \

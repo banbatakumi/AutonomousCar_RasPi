@@ -331,6 +331,7 @@ class LinePerceptionNode:
                     reason = "DISARM: 認識停止"
                 print(f"# {mode} {reason}", flush=True)
 
+            reused = False
             if not active:
                 # `line_trace` が選ばれていない、またはDISARM中は共有メモリすら読まない
                 # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
@@ -343,8 +344,14 @@ class LinePerceptionNode:
                 elif ref.ring_seq == self._last_ring_seq and self._last_scan is not None:
                     # ★省電力化: カメラの新しいフレームがまだ来ていない
                     # （上の `_last_ring_seq` docstring参照）。共有メモリの
-                    # 読み取り自体をスキップし、前回の結果を使い回す
+                    # 読み取り自体をスキップし、前回の結果を使い回す。**publish もしない**
+                    # （2026-10-06）。同じ結果を送り直すと `Publisher` が `seq` を振り直すので、
+                    # planning_node が「新しい周」と見て判断し直し、`auto/cmd` まで増える
+                    # （実機で `line/cam` 130Hz・`auto/cmd` 128Hz。カメラは 30fps）。
+                    # 鮮度は planning_node が `t_capture` で見ているので、送らなくても
+                    # カメラが止まれば制動に落ちる
                     st = self._last_scan
+                    reused = True
                 else:
                     got = self.read_frame(ref)
                     if got is None:
@@ -367,7 +374,7 @@ class LinePerceptionNode:
                             self._last_scan = st
             now = time.monotonic_ns()
             # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
-            if pacer.should_publish(active, now):
+            if not reused and pacer.should_publish(active, now):
                 pub.send(TOPIC_LINE_CAM, st)
             seq += 1
 

@@ -93,6 +93,7 @@ export function App() {
           signalConfig: s.signal_config,
           camModel: s.cam_model,
           e2eModel: s.e2e_model,
+          camE2eModel: s.cam_e2e_model,
         })
         if (!driveSettingsSynced.current && Object.keys(s.drive_settings ?? {}).length > 0) {
           driveSettingsSynced.current = true
@@ -105,6 +106,7 @@ export function App() {
       onLogs: (files) => set({ logFiles: files }),
       onCamModels: (files) => set({ camModelFiles: files }),
       onE2EModels: (files) => set({ e2eModelFiles: files }),
+      onCamE2EModels: (files) => set({ camE2eModelFiles: files }),
       onMaps: (files) => set({ mapFiles: files }),
       onMapsSaveResult: (ok, error) => set({ mapSaveResult: { ok, error } }),
     })

@@ -91,15 +91,20 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const camModelFiles = useUi((s) => s.camModelFiles)
   const e2eModel = useUi((s) => s.e2eModel)
   const e2eModelFiles = useUi((s) => s.e2eModelFiles)
+  const camE2eModel = useUi((s) => s.camE2eModel)
+  const camE2eModelFiles = useUi((s) => s.camE2eModelFiles)
   // 選択中のカメラセグメンテーションモデルの備考（`ml_cam/app.py`の備考欄→エクスポート時に
   // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称、2026-08-29追加）
   const camSelectedNote = camModelFiles.find((f) => f.name === camModel?.name)?.note
   // 選択中のE2E LiDARモデルの備考（`ml_lidar/app.py`の備考欄→エクスポート時に
   // `<name>.json`へ同梱されたもの。2026-08-29追加）
   const e2eSelectedNote = e2eModelFiles.find((f) => f.name === e2eModel?.name)?.note
+  // 選択中のカメラE2Eモデルの備考（`ml_cam_e2e/app.py`の備考欄→エクスポート時に同梱されたもの）
+  const camE2eSelectedNote = camE2eModelFiles.find((f) => f.name === camE2eModel?.name)?.note
   useEffect(() => {
     ch?.camModelList()
     ch?.e2eModelList()
+    ch?.camE2eModelList()
     ch?.mapsList()
   }, [ch])
 
@@ -256,6 +261,32 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <span className="dim">models/e2e_lidar/ に .onnx がありません</span>
           )}
           {e2eSelectedNote && <div className="auto-model-note">{e2eSelectedNote}</div>}
+        </div>
+      )}
+
+      {/* カメラE2E走行（`cam_e2e`、模倣学習）専用のモデル選択。上と全く同じ形。
+          契約ファイルの無いモデルは `cam_e2e_node` が読み込まないので選ばせない */}
+      {selected?.id === 'cam_e2e' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">カメラE2Eモデル</span>
+          <select
+            value={camE2eModel?.name ?? ''}
+            disabled={camE2eModel === null}
+            onChange={(e) => ch?.camE2eModelSelect(e.target.value)}
+          >
+            <option value="">（未選択）</option>
+            {camE2eModelFiles.map((f) => (
+              <option key={f.name} value={f.name} disabled={!f.has_config}>
+                {f.name}
+                {!f.has_config && '（契約ファイルなし・使用不可）'}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => ch?.camE2eModelList()}>更新</button>
+          {camE2eModelFiles.length === 0 && (
+            <span className="dim">models/cam_e2e/ に .onnx がありません</span>
+          )}
+          {camE2eSelectedNote && <div className="auto-model-note">{camE2eSelectedNote}</div>}
         </div>
       )}
 
@@ -425,14 +456,20 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
   // **表示されるたびに一覧を取り直し、プレビューは消す。** このコンポーネント
   // は条件付き描画で現れたり消えたりする（`AutoPanel.tsx`の`auto-engage`
   // セクション参照）ので、マウント時に取れば「地図を作成→保存→disengageして
-  // 選び直す」等、表示が復活するたびに最新化される。BUILD完了(`DONE`)直後も
-  // このコンポーネントが新たにマウントされるので、フェーズの遷移を別途
-  // 監視する必要はない
+  // 選び直す」等、表示が復活するたびに最新化される
   useEffect(() => {
     ch?.mapsList()
     clearPreview()
     setSelectedMap('')
   }, [ch])
+
+  // **`DONE`に入ったら一覧を取り直す。** 自動保存は planner 側（`_auto_save_map`）で
+  // 起きるので、こちらから聞かない限り新しい地図は一覧に載らない。「手動で地図作成」は
+  // engage しないため、このコンポーネントは EXPLORE→BUILD→DONE のあいだ出たままで、
+  // 上のマウント時の取得は走らない（リロードするまで地図が出なかった、2026-10-06）
+  useEffect(() => {
+    if (phase === 'DONE') ch?.mapsList()
+  }, [ch, phase])
 
   useEffect(() => {
     // 一覧が更新されたら、できたばかりの地図（最新のcreated_at）を選び直し、

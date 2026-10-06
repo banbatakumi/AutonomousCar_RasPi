@@ -131,6 +131,7 @@ export function LinkPage({ n, st }: PageProps) {
           </Row>
           <Count label="cmd 途絶の回数" value={link?.cmd_timeouts} />
           <Count label="デッドマン発動" value={st?.deadman_trips} />
+          <Count label="遅れて捨てた cmd" value={st?.stale_cmds} />
           <Count label="自律指令の途絶" value={st?.auto.stalls} />
           <Count label="壊れた cmd" value={st?.bad_cmds} />
           <Count label="認証で拒否" value={(st?.auth_rejects ?? 0) + (st?.origin_rejects ?? 0)} />

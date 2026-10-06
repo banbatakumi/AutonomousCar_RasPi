@@ -105,6 +105,25 @@ class TestWireFormat(BusCase):
             decode(b"no separator here")
 
 
+class TestNumpyScalars(unittest.TestCase):
+    """numpy のスカラが混じったメッセージでも落ちない（planning_node が実機で落ちた件）。"""
+
+    def test_numpy_scalars_are_sent_as_plain_numbers(self):
+        import numpy as np
+
+        from raspi.bus.zbus import decode, encode
+        msg = DriveCmd(target_speed=np.float64(1.25), mode=np.int64(2), arm=np.bool_(True))
+        _, got = decode(encode(TOPIC_CMD, msg))
+        self.assertEqual((got.target_speed, got.mode, got.arm), (1.25, 2, True))
+
+    def test_arrays_are_still_rejected(self):
+        import numpy as np
+
+        from raspi.bus.zbus import encode
+        with self.assertRaises((TypeError, NotImplementedError)):
+            encode(TOPIC_CMD, DriveCmd(target_speed=np.zeros(3)))
+
+
 class TestPubSub(BusCase):
     def test_publisher_stamps_seq_and_t_pub(self):
         from raspi.bus import Publisher, Subscriber

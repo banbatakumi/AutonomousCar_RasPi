@@ -147,6 +147,7 @@ from raspi.msgs import (  # noqa: E402
     CamConfig,
     CamModelCtrl,
     DriveCmd,
+    CamE2EModelCtrl,
     E2EModelCtrl,
     Heartbeat as HbMsg,
     LogCtrl,
@@ -165,6 +166,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_MODEL,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
+    TOPIC_CAM_E2E_MODEL,
     TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
@@ -220,6 +222,12 @@ CAM_MODEL_CONF = REPO_ROOT / "config" / "cam_model.json"
 E2E_MODELS_DIR = MODELS_DIR / "e2e_lidar"
 #: 選ばれている E2E LiDAR モデル名。`CAM_MODEL_CONF` と同じ流儀
 E2E_MODEL_CONF = REPO_ROOT / "config" / "e2e_lidar_model.json"
+#: `cam_e2e`（カメラE2E・模倣学習）へ渡す ONNX モデルの置き場。`E2E_MODELS_DIR` と
+#: 同じ理由でセグメンテーション用（`MODELS_DIR`直下）と分ける
+#: （`raspi/nodes/cam_e2e_node.py` の `DEFAULT_MODELS_DIR` と同じ場所）
+CAM_E2E_MODELS_DIR = MODELS_DIR / "cam_e2e"
+#: 選ばれているカメラE2Eモデル名。`CAM_MODEL_CONF` と同じ流儀
+CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝従来どおり誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
@@ -260,8 +268,10 @@ SIGNAL_CONFIG_HZ = 1
 #: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外。
 #: `follow_object` は `cam_track_node.py` が毎フレーム対象を追跡し続ける必要が
 #: あるので他の2つと同じ扱いにする。`cam_centerline` は `ftg_cam` と同じ
-#: `cam_perception_node.py` の推論結果を使うので同じ扱い
-CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object"})
+#: `cam_perception_node.py` の推論結果を使うので同じ扱い。`cam_e2e` は前カメラの
+#: 絵だけで舵と速度を決めるので、古い絵で走らせないために同じく上限まで上げる
+CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object",
+                               "cam_e2e"})
 #: `track/roi`（★対象追従のROI選択）の再送周期。`_auto_ctrl_pump`と同じ理由
 #: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
 TRACK_ROI_HZ = 5
@@ -270,6 +280,8 @@ TRACK_ROI_HZ = 5
 CAM_MODEL_HZ = 1
 #: `e2e/model`（★モデル選択）の再送周期。`CAM_MODEL_HZ` と同じ理由
 E2E_MODEL_HZ = 1
+#: `cam_e2e/model`（★モデル選択）の再送周期。`CAM_MODEL_HZ` と同じ理由
+CAM_E2E_MODEL_HZ = 1
 #: `cam/mask`（`ftg_cam` の走行可否マスク）を中継するポーリング周期。
 #: カメラ本編（`CAMERA_HZ`）ほどの滑らかさは要らないデバッグ表示用途なので、
 #: 低めに抑えて CPU/帯域を節約する
@@ -306,13 +318,22 @@ _SAFETY = Vehicle.load()
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
-#: バスを覗きに行く間隔。`auto/cmd` の即時中継（`_on_auto_cmd`）の待ちはこの間隔の平均半分。
-#: 2026-09-27 に 5→1ms（即時の経路に平均2.5ms・最大5ms残っていた）。poll(0) は数本の
-#: ソケットを覗くだけなので 1kHz でも負荷は小さい
+#: バスを覗きに行く間隔（`auto/cmd` の到着で起きられない構成＝テストの偽物の `sub` だけ）。
+#: 2026-09-27 に 5→1ms（即時の経路に平均2.5ms・最大5ms残っていた）
 BUS_POLL_S = 0.001
+#: `auto/cmd` が来ない間にバスを覗きに行く間隔（2026-10-06）。実機では `auto/cmd` の到着で
+#: 起きるので（`_bus_pump`）、これは他のトピック（`vehicle_state`・ハートビート等）を
+#: `sub.latest` へ取り込む周期。ARM/DISARM の切り替え（`_on_armed_change`）の遅れもこの値まで
+BUS_IDLE_POLL_S = 0.01
 #: 操縦クライアントからの指令がこれだけ途絶したら DISARM に落とす（§9.4）。
 #: io_node の `CMD_TIMEOUT_NS` と**同じ値**（別々に判定するが数字は1つ）
 CMD_DEADMAN_NS = int(_SAFETY.cmd_deadman_ms * 1_000_000)
+#: **自律走行中だけ**、GUI の指令の途絶をここまで待つ（`vehicle.toml` の `auto_link_grace_ms`）。
+#: `CMD_DEADMAN_NS` より短くはしない
+AUTO_LINK_GRACE_NS = max(CMD_DEADMAN_NS, int(_SAFETY.auto_link_grace_ms * 1_000_000))
+#: GUI の時計と Pi の時計の進みの差として見込む量 [ms/s]（`_cmd_lateness_ms`）。
+#: 水晶のずれ（0.1ms/s 未満）より十分大きく、溜まっていた指令の遅れ（秒単位）より十分小さい
+CMD_CLOCK_DRIFT_MS_PER_S = 1.0
 #: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` と同じ値）
 DEFAULT_MCAP_IMAGE_HZ = 5.0
 #: 中継の読み取り単位
@@ -386,7 +407,38 @@ def _preset_name(v) -> str:
     return name
 
 
+def _onnx_model_files(models_dir: Path) -> list[dict]:
+    """`models_dir` にある `.onnx` の一覧（GUI のモデル選択欄に並べる形）。
+
+    `note` は同名 `.json` の自由記述の備考（エクスポート時に書かれる）——どんな
+    変更・どのコースのモデルかを選ぶときに確認できるようにするため。
+    `.json` が壊れていても一覧自体は壊さない（空文字で返す）。
+    """
+    files = []
+    if models_dir.is_dir():
+        for p in sorted(models_dir.iterdir()):
+            if not p.is_file() or p.suffix != ".onnx":
+                continue
+            st = p.stat()
+            cfg_path = p.with_suffix(".json")
+            note = ""
+            if cfg_path.exists():
+                try:
+                    note = str(_json_decode(cfg_path.read_bytes()).get("note", ""))
+                except Exception:                                    # noqa: BLE001
+                    pass
+            files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
+                         "has_config": cfg_path.exists(), "note": note})
+    return files
+
+
 class TelemetryServer:
+    #: 遅れて届いたので捨てた「走れ」の指令の数（`_cmd_lateness_ms`）
+    stale_cmds = 0
+    #: GUI の時刻 → Pi の受信時刻の差の最小値 [ms] と、それを更新した時刻。操縦権ごとに測り直す
+    _cmd_clock_base_ms: float | None = None
+    _cmd_clock_base_ns = 0
+
     def __init__(self, *, port: int = DEFAULT_PORT, host: str = DEFAULT_HOST,
                  dist: Path = GUI_DIST, camera: bool = True,
                  jpeg_quality: int = 70, camera_hz: float = CAMERA_HZ,
@@ -464,6 +516,11 @@ class TelemetryServer:
         self._auto_engaged = False
         #: planner のパラメータ。`config/auto.json` に保存され、次回起動で戻る
         self._auto_params: dict[str, float] = {}
+        #: 今のモード以外のパラメータ。`{モード: {キー: 値}}`。**モードを切り替えても
+        #: 元のモードの値を失わないため**（以前は今のモードの分しか持たず、別のモードや
+        #: システム同定タブへ行って戻ると既定値に戻っていた、2026-10-06）。
+        #: 今のモードの値は `_auto_params` が正で、ここへは切替・保存のときに写す
+        self._auto_params_by_mode: dict[str, dict[str, float]] = {}
         #: 名前付きのパラメータ（`AUTO_PRESETS_CONF`）。`{モード: {名前: {キー: 値}}}`
         self._auto_presets: dict[str, dict[str, dict[str, float]]] = {}
         #: 「地図を確定」を押した回数。**保存しない**（電源投入で確定済みに
@@ -583,6 +640,12 @@ class TelemetryServer:
         #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
         self._e2e_model = ""
         self._load_e2e_model_conf()
+
+        # ── カメラE2E モデルの選択（`cam_e2e` 用） ──
+        #: 選ばれているモデル名。**空文字 = 未選択**（`config/cam_e2e_model.json`に
+        #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
+        self._cam_e2e_model = ""
+        self._load_cam_e2e_model_conf()
 
         # ── 対象追従（`follow_object`）のROI選択 ──
         #: GUIがドラッグ選択した矩形（正規化座標）。**永続化しない**
@@ -874,6 +937,7 @@ class TelemetryServer:
             self.controller_name = str(m.get("name", "gui"))
             self._last_cmd = None
             self._last_cmd_ns = 0
+            self._cmd_clock_base_ms = None    # 遅れの基準は操縦権を取るたびに測り直す
             self._relay_now()
             await self._broadcast_control_status()
 
@@ -895,6 +959,14 @@ class TelemetryServer:
                 # 切ると 150ms 後に DISARM して復帰に人手が要るので、
                 # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
                 self.bad_cmds += 1
+                return
+            # **遅れて届いた「走れ」は捨てる**（2026-10-06）。Wi-Fi が詰まると GUI の指令は
+            # ブラウザと TCP に溜まり、復帰した瞬間にまとめて届く。受信時刻だけで鮮度を
+            # 見ると、何十秒も前の ARM でデッドマンが「生きている」に戻り、人の操作なしに
+            # 走り出す。**止める指令（DISARM・`arm=false`）は遅れていても通す**
+            late_ms = self._cmd_lateness_ms(m.get("t"), time.monotonic_ns())
+            if late_ms > _SAFETY.cmd_deadman_ms and cmd.arm and cmd.mode != 0:
+                self.stale_cmds += 1
                 return
             # **中身が変わったらその場で `/cmd` へ**（2026-09-27）。50Hz の `_cmd_pump` を待つと
             # GUI の 50Hz と非同期で平均10ms・最大20ms遅れ、人のブレーキも同じだけ遅れた。
@@ -977,6 +1049,15 @@ class TelemetryServer:
 
         elif kind == "e2e_model_select":
             self._on_e2e_model(m)
+            await self._broadcast_control_status()
+
+        # ── カメラE2E モデルの選択（同じ形。`cam_e2e` を engage する前に選び直す想定） ──
+
+        elif kind == "cam_e2e_model_list":
+            await self._send_json(ws, self._cam_e2e_models_list())
+
+        elif kind == "cam_e2e_model_select":
+            self._on_cam_e2e_model(m)
             await self._broadcast_control_status()
 
         # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
@@ -1108,6 +1189,29 @@ class TelemetryServer:
             return True
         return secrets.compare_digest(str(m.get("token", "")), self.token)
 
+    def _cmd_lateness_ms(self, t_client, now_ns: int) -> float:
+        """この指令が**いつもよりどれだけ遅れて届いたか** [ms]。時計合わせは要らない。
+
+        GUI は指令に自分の時計（`performance.now()` [ms]）を載せる。「Pi の受信時刻 −
+        GUI の時刻」は「時計の差 ＋ 届くまでの時間」で、**その最小値がいちばん速く届いた
+        ときの値**。今回の値がそこからどれだけ大きいかが遅れになる。2つの時計の進みの差で
+        基準がずれないよう、最小値は `CMD_CLOCK_DRIFT_MS_PER_S` ずつ緩めていく。
+
+        `t` を載せない古い GUI は 0（判定しない）。
+        """
+        if not isinstance(t_client, (int, float)) or isinstance(t_client, bool) \
+                or not math.isfinite(t_client):
+            return 0.0
+        sample = now_ns / 1e6 - float(t_client)
+        base = self._cmd_clock_base_ms
+        if base is not None:
+            base += (now_ns - self._cmd_clock_base_ns) / 1e9 * CMD_CLOCK_DRIFT_MS_PER_S
+        if base is None or sample < base:
+            base = sample
+        self._cmd_clock_base_ms = base
+        self._cmd_clock_base_ns = now_ns
+        return sample - base
+
     def _decode_cmd(self, m: dict) -> DriveCmd:
         """`{"type":"cmd", ...}` → `DriveCmd`。**`float()`/`int()` をここに閉じる。**
 
@@ -1158,6 +1262,7 @@ class TelemetryServer:
             source=f"gui:{self.controller_name}")
 
     def _release_control(self, why: str) -> None:
+        self._cmd_clock_base_ms = None
         self.controller = None
         self.controller_name = ""
         self._last_cmd = None
@@ -1182,9 +1287,14 @@ class TelemetryServer:
             if mode and mode not in PLANNERS:
                 return                     # 知らないモードは黙って捨てる
             if mode != self._auto_mode:
+                # **元のモードの値は取っておき、行き先のモードは前回の値で開く。**
+                # 初めて開くモードは既定値（別の planner の値を引き継がない）
+                if self._auto_mode:
+                    self._auto_params_by_mode[self._auto_mode] = dict(self._auto_params)
                 self._auto_mode = mode
                 self._auto_engaged = False
-                self._auto_params = merged_params(mode, self._auto_params)
+                self._auto_params = merged_params(
+                    mode, self._auto_params_by_mode.get(mode, {}))
         self._on_auto_presets(m)
         if "params" in m and isinstance(m["params"], dict):
             raw = {k: v for k, v in m["params"].items() if isinstance(v, (int, float))}
@@ -1320,16 +1430,31 @@ class TelemetryServer:
             raw = _json_decode(AUTO_CONF.read_bytes())
         except Exception:
             return                         # 無い・壊れている → 既定のまま
+        if not isinstance(raw, dict):
+            return
         mode = str(raw.get("mode") or "")
-        self._auto_mode = mode if mode in PLANNERS else ""
+        # **知らないモードの分も捨てずに持ち続ける。** planner の読み込みに失敗した
+        # 起動が1回あっただけで、そのモードの値が次の保存で消えるのを防ぐ
+        by_mode = raw.get("params_by_mode")
+        self._auto_params_by_mode = {
+            str(k): {pk: float(pv) for pk, pv in v.items() if isinstance(pv, (int, float))}
+            for k, v in (by_mode.items() if isinstance(by_mode, dict) else ())
+            if isinstance(v, dict)}
         params = raw.get("params")
+        if mode and isinstance(params, dict):          # `params` は今のモードの値（旧形式はこれだけ）
+            self._auto_params_by_mode[mode] = {
+                k: float(v) for k, v in params.items() if isinstance(v, (int, float))}
+        self._auto_mode = mode if mode in PLANNERS else ""
         self._auto_params = merged_params(
-            self._auto_mode, params if isinstance(params, dict) else {})
+            self._auto_mode, self._auto_params_by_mode.get(self._auto_mode, {}))
 
     def _save_auto_conf(self) -> None:
+        if self._auto_mode:
+            self._auto_params_by_mode[self._auto_mode] = dict(self._auto_params)
         try:
             _atomic_write_bytes(AUTO_CONF, _json_encode(
-                {"mode": self._auto_mode, "params": self._auto_params}))
+                {"mode": self._auto_mode, "params": self._auto_params,
+                 "params_by_mode": self._auto_params_by_mode}))
         except Exception:
             pass                           # 保存できなくても走行は続けられるべき
 
@@ -1753,22 +1878,7 @@ class TelemetryServer:
         2026-08-29追加）も一緒に返す——GUIのモデル選択でどんな変更・どのコースかを
         確認できるようにするため。`.json`が壊れていても一覧自体は壊さない（空文字で返す）。
         """
-        files = []
-        if E2E_MODELS_DIR.is_dir():
-            for p in sorted(E2E_MODELS_DIR.iterdir()):
-                if not p.is_file() or p.suffix != ".onnx":
-                    continue
-                st = p.stat()
-                cfg_path = p.with_suffix(".json")
-                note = ""
-                if cfg_path.exists():
-                    try:
-                        note = str(_json_decode(cfg_path.read_bytes()).get("note", ""))
-                    except Exception:                                    # noqa: BLE001
-                        pass
-                files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
-                             "has_config": cfg_path.exists(), "note": note})
-        return {"type": "e2e_models", "e2e_model_files": files}
+        return {"type": "e2e_models", "e2e_model_files": _onnx_model_files(E2E_MODELS_DIR)}
 
     def _on_e2e_model(self, m: dict) -> None:
         """`{"type":"e2e_model_select", "name": str}`。
@@ -1809,6 +1919,64 @@ class TelemetryServer:
     def _save_e2e_model_conf(self) -> None:
         try:
             _atomic_write_bytes(E2E_MODEL_CONF, _json_encode({"name": self._e2e_model}))
+        except Exception:
+            pass
+
+    # ── カメラE2E モデルの選択（`cam_e2e` 用） ──
+    #
+    # `_e2e_model*` と全く同じ構造。受け手は `cam_e2e_node`（`cam_e2e/model` を
+    # 購読し、名前が変わったら読み直す）。これが無かった間は
+    # `cam_e2e_node --model` で起動時に固定するしかなく、GUI から選べなかった。
+
+    def _cam_e2e_models_list(self) -> dict:
+        """`models/cam_e2e/` にある `.onnx` の一覧。**キー名は `cam_e2e_model_files`**
+        （他のモデル一覧と GUI 側の受け皿で混ざらないよう分ける）。
+        `note` は `ml_cam_e2e/export_onnx.py` が同梱 JSON に書く備考。"""
+        return {"type": "cam_e2e_models",
+                "cam_e2e_model_files": _onnx_model_files(CAM_E2E_MODELS_DIR)}
+
+    def _on_cam_e2e_model(self, m: dict) -> None:
+        """`{"type":"cam_e2e_model_select", "name": str}`。
+
+        `name` が `models/cam_e2e/` に実在する `.onnx` と一致しなければ黙って捨てる
+        （`_on_cam_model` と同じ理由）。
+        """
+        name = str(m.get("name") or "")
+        if name and not (CAM_E2E_MODELS_DIR / f"{name}.onnx").is_file():
+            return
+        if name == self._cam_e2e_model:
+            return
+        self._cam_e2e_model = name
+        # **モデルを変えたら cam_e2e の engage は必ず落とす。**
+        # 走行中に別の手本で学んだモデルへ切り替わると挙動が急変する
+        # （`_on_cam_model`/`_on_e2e_model` と同じ理由）
+        if self._auto_engaged and self._auto_mode == "cam_e2e":
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+        self._save_cam_e2e_model_conf()
+        self._publish_cam_e2e_model()      # 待たせない。cam_model と同じく即座に効かせる
+
+    def _cam_e2e_model_status(self) -> dict:
+        return {"name": self._cam_e2e_model}
+
+    def _publish_cam_e2e_model(self) -> None:
+        self.pub.send(TOPIC_CAM_E2E_MODEL, CamE2EModelCtrl(name=self._cam_e2e_model))
+
+    def _load_cam_e2e_model_conf(self) -> None:
+        """`config/cam_e2e_model.json` から戻す。`_load_cam_model_conf` と同じ流儀。"""
+        try:
+            raw = _json_decode(CAM_E2E_MODEL_CONF.read_bytes())
+        except Exception:
+            return
+        name = raw.get("name")
+        if isinstance(name, str) and (
+                not name or (CAM_E2E_MODELS_DIR / f"{name}.onnx").is_file()):
+            self._cam_e2e_model = name
+
+    def _save_cam_e2e_model_conf(self) -> None:
+        try:
+            _atomic_write_bytes(CAM_E2E_MODEL_CONF,
+                                _json_encode({"name": self._cam_e2e_model}))
         except Exception:
             pass
 
@@ -1940,6 +2108,7 @@ class TelemetryServer:
             # 悪化するので、まず本当にボトルネックかをここで見えるようにした
             "camera_jpeg": self._jpeg.stats() if self._jpeg is not None else None,
             "deadman_trips": self.deadman_trips,
+            "stale_cmds": self.stale_cmds,
             # **無言で捨てた回数を必ず表に出す。** 捨てるだけの処理は、
             # 出さないと「効いていない」と「そもそも来ていない」が区別できない
             "auth_required": bool(self.token),
@@ -1958,6 +2127,7 @@ class TelemetryServer:
             "signal_config": self._signal_config_status(),
             "cam_model": self._cam_model_status(),
             "e2e_model": self._e2e_model_status(),
+            "cam_e2e_model": self._cam_e2e_model_status(),
         }
 
     def _auto_status(self) -> dict:
@@ -2271,19 +2441,52 @@ class TelemetryServer:
     async def _bus_pump(self) -> None:
         """バスを吸い上げて `sub.latest` を新しく保つ。
 
-        `zmq.asyncio` を使わず素の poll を短周期で回している。ソケットは
-        数本・メッセージは数百バイトなので、200Hz で回しても負荷は測定限界以下。
-        非同期版を混ぜるより、**再生でも実機でも同じ Subscriber を使える**方を取った。
+        `zmq.asyncio` は使わず、素の `poll(0)` を回す（**再生でも実機でも同じ Subscriber を
+        使える**方を取った）。`auto/cmd` の中身が変わっていたら、`/cmd` をその場で送る
+        （`_on_auto_cmd`）。
 
-        `auto/cmd` の中身が変わっていたら、`/cmd` をその場で送る（`_on_auto_cmd`）。
+        **`auto/cmd` のソケットに届いたら起きる。届かない間は `BUS_IDLE_POLL_S` ごと**
+        （2026-10-06）。以前は 1ms ごとに13本のソケットを覗いていて、それだけで CPU を
+        約8%使っていた（Pi 5・1.5GHz で実測。この形で約4%）。即時中継の待ちも 1ms 周期の
+        平均 0.8ms から 0.35ms に縮む。
         """
-        while self._running:
-            for topic, msg in self.sub.poll(0):
-                if topic.startswith(TOPIC_HB_PREFIX):
-                    self._node_hb[msg.node] = (time.monotonic_ns(), msg.pid, msg.detail)
-            self._on_auto_cmd(time.monotonic_ns())
-            self._on_armed_change()
-            await asyncio.sleep(BUS_POLL_S)
+        wake, fd = self._watch_auto_cmd()
+        try:
+            while self._running:
+                for topic, msg in self.sub.poll(0):
+                    if topic.startswith(TOPIC_HB_PREFIX):
+                        self._node_hb[msg.node] = (time.monotonic_ns(), msg.pid, msg.detail)
+                self._on_auto_cmd(time.monotonic_ns())
+                self._on_armed_change()
+                if wake is None:
+                    await asyncio.sleep(BUS_POLL_S)
+                    continue
+                # 上の `poll(0)` より後に届いた分は fd が知らせる（`poll(0)` が zmq の内部状態を
+                # 読み切るので、取りこぼしても次の到着か時間切れで拾う）
+                try:
+                    await asyncio.wait_for(wake.wait(), BUS_IDLE_POLL_S)
+                except asyncio.TimeoutError:
+                    pass
+                wake.clear()
+        finally:
+            if fd is not None:
+                asyncio.get_running_loop().remove_reader(fd)
+
+    def _watch_auto_cmd(self) -> tuple[asyncio.Event | None, int | None]:
+        """`auto/cmd` のソケットに届いたら立つ Event と、監視している fd。
+
+        zmq のソケットを持たない `sub`（テストの偽物）では `(None, None)`
+        ——`_bus_pump` は `BUS_POLL_S` ごとに覗く形へ戻る。"""
+        sock = getattr(self.sub, "socks", {}).get(TOPIC_AUTO_CMD)
+        if sock is None:
+            return None, None
+        try:
+            fd = sock.fileno()
+            wake = asyncio.Event()
+            asyncio.get_running_loop().add_reader(fd, wake.set)
+        except (AttributeError, OSError, NotImplementedError):
+            return None, None
+        return wake, fd
 
     def _on_armed_change(self) -> None:
         """ARM/DISARM が変わった周に、それに連動する省電力設定を切り替える（2026-10-04）。
@@ -2417,12 +2620,24 @@ class TelemetryServer:
     def _publish_cmd(self, now: int) -> None:
         """今この瞬間の `/cmd` を1つ決めて送る。定期送信（`_cmd_pump`）と、新しい判断の
         即時送信（`_on_auto_cmd`・`_relay_now`）が**この1箇所**を通る。"""
-        live = (self._last_cmd is not None
-                and (now - self._last_cmd_ns) <= CMD_DEADMAN_NS)
+        last = self._last_cmd
+        # **自律走行中は GUI の指令の途絶を長く待つ**（2026-10-06）。走らせているのは planner で、
+        # GUI の指令は「人が ARM したまま」を伝えているだけ。Wi-Fi の瞬断で止める理由が無い。
+        # planner の指令が古くなれば `_merge_auto` が制動に読み替えるのは変わらない
+        riding_auto = (last is not None and last.mode == 2 and last.arm
+                       and self._auto_engaged and bool(self._auto_mode))
+        limit = AUTO_LINK_GRACE_NS if riding_auto else CMD_DEADMAN_NS
+        live = last is not None and (now - self._last_cmd_ns) <= limit
         if live:
             cmd = self._last_cmd
             if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
                 cmd = self._merge_auto(cmd, now)
+            else:
+                # **`_last_cmd` そのものを送らない**（2026-10-06）。`pub.send` は渡した msg に
+                # `seq`/`t_pub` を押すので、`_on_control` の「前回と同じ中身か」の比較が
+                # 常に不一致になり、手動操縦中は GUI の指令を毎回その場で中継していた
+                # （実機で `/cmd` が 50Hz のはずが 97Hz。定期送信と合わせて2倍）
+                cmd = msgspec.structs.replace(cmd)
         else:
             if self._cmd_was_live:
                 self.deadman_trips += 1
@@ -2566,6 +2781,13 @@ class TelemetryServer:
             await asyncio.sleep(period)
             self._publish_e2e_model()
 
+    async def _cam_e2e_model_pump(self) -> None:
+        """`cam_e2e_node` への希望モデル名を低頻度で再送する。`_cam_model_pump` と同じ理由。"""
+        period = 1.0 / CAM_E2E_MODEL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_cam_e2e_model()
+
     async def _track_roi_pump(self) -> None:
         """対象追従のROI選択（`track/roi`）を低頻度で再送する。
         `_cam_model_pump`/`_e2e_model_pump` と同じ理由
@@ -2691,6 +2913,7 @@ class TelemetryServer:
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump, self._pi_health_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
+                self._cam_e2e_model_pump,
                 self._mask_pump, self._track_roi_pump, self._signal_config_pump)]
             try:
                 await stop

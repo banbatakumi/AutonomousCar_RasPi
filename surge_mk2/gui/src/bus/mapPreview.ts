@@ -45,7 +45,7 @@ export async function selectPreviewMap(name: string): Promise<void> {
     const msg = decode(buf) as AutoMapMsg
     const built = await build(msg)
     // **古い選択の応答が新しい選択を上書きしないように。** 連続してドロップダウンを
-    // 変えると fetch の完了順が入れ替わりうる（`ws/map.ts`のseqガードと同じ理由）
+    // 変えると fetch の完了順が入れ替わりうる（`ws/map.ts`の受信順ガードと同じ理由）
     if (gen !== requestGen) {
       built?.bitmap?.close()
       return

@@ -143,6 +143,102 @@ class TestE2eModelsListNote(unittest.TestCase):
         self.assertEqual(files["v4"]["note"], "")
 
 
+
+class TestCamE2eModelSelection(unittest.TestCase):
+    """カメラE2E（`cam_e2e`）のモデル選択。一覧・選択・保存・engage の解除。
+
+    以前は `cam_e2e/model` を publish するコードが無く、GUI から選べなかった。
+    """
+
+    def setUp(self) -> None:
+        self._orig = (tn.CAM_E2E_MODELS_DIR, tn.CAM_E2E_MODEL_CONF)
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        tn.CAM_E2E_MODELS_DIR = root / "models" / "cam_e2e"
+        tn.CAM_E2E_MODELS_DIR.mkdir(parents=True)
+        tn.CAM_E2E_MODEL_CONF = root / "cam_e2e_model.json"
+        for name in ("v1", "v2"):
+            (tn.CAM_E2E_MODELS_DIR / f"{name}.onnx").write_bytes(b"dummy")
+        (tn.CAM_E2E_MODELS_DIR / "v1.json").write_text(json.dumps({"note": "屋内コース"}))
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self) -> None:
+        tn.CAM_E2E_MODELS_DIR, tn.CAM_E2E_MODEL_CONF = self._orig
+        self._tmp.cleanup()
+
+    def _server(self, *, mode="cam_e2e", engaged=True):
+        class Pub:
+            def __init__(self):
+                self.sent = []
+
+            def send(self, topic, msg):
+                self.sent.append((topic, msg))
+
+        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        srv.pub = Pub()
+        srv._cam_e2e_model = ""
+        srv._auto_engaged = engaged
+        srv._auto_mode = mode
+        srv.auto_ctrl_published = 0
+
+        def _publish_auto_ctrl():
+            srv.auto_ctrl_published += 1
+        srv._publish_auto_ctrl = _publish_auto_ctrl
+        return srv
+
+    def test_list_uses_its_own_key_and_carries_the_note(self) -> None:
+        result = tn.TelemetryServer._cam_e2e_models_list(None)
+        self.assertEqual(result["type"], "cam_e2e_models")
+        files = {f["name"]: f for f in result["cam_e2e_model_files"]}
+        self.assertEqual(sorted(files), ["v1", "v2"])
+        self.assertEqual(files["v1"]["note"], "屋内コース")
+        self.assertFalse(files["v2"]["has_config"])
+
+    def test_select_publishes_saves_and_drops_engage(self) -> None:
+        srv = self._server()
+        srv._on_cam_e2e_model({"name": "v1"})
+
+        self.assertEqual(srv._cam_e2e_model, "v1")
+        self.assertEqual(srv._cam_e2e_model_status(), {"name": "v1"})
+        sent = [m for t, m in srv.pub.sent if t == tn.TOPIC_CAM_E2E_MODEL]
+        self.assertEqual([m.name for m in sent], ["v1"])
+        self.assertFalse(srv._auto_engaged, "モデルを変えたのに engage が残っている")
+        self.assertEqual(srv.auto_ctrl_published, 1)
+        self.assertEqual(json.loads(tn.CAM_E2E_MODEL_CONF.read_text()), {"name": "v1"})
+
+    def test_other_modes_keep_their_engage(self) -> None:
+        srv = self._server(mode="slam2d")
+        srv._on_cam_e2e_model({"name": "v1"})
+        self.assertTrue(srv._auto_engaged)
+
+    def test_unknown_name_is_ignored(self) -> None:
+        srv = self._server()
+        srv._on_cam_e2e_model({"name": "../../etc/passwd"})
+        srv._on_cam_e2e_model({"name": "no-such"})
+        self.assertEqual(srv._cam_e2e_model, "")
+        self.assertEqual(srv.pub.sent, [])
+        self.assertTrue(srv._auto_engaged)
+
+    def test_saved_selection_comes_back_only_if_the_file_still_exists(self) -> None:
+        srv = self._server()
+        tn.CAM_E2E_MODEL_CONF.write_text(json.dumps({"name": "v2"}))
+        srv._load_cam_e2e_model_conf()
+        self.assertEqual(srv._cam_e2e_model, "v2")
+
+        srv._cam_e2e_model = ""
+        tn.CAM_E2E_MODEL_CONF.write_text(json.dumps({"name": "deleted"}))
+        srv._load_cam_e2e_model_conf()
+        self.assertEqual(srv._cam_e2e_model, "")
+
+    def test_engaging_cam_e2e_raises_the_front_camera_rate(self) -> None:
+        self.assertIn("cam_e2e", tn.CAMERA_AUTO_MODES)
+
+    def test_models_dir_matches_the_node(self) -> None:
+        """一覧を出す場所と、ノードが読みに行く場所が同じであること。"""
+        from raspi.nodes import cam_e2e_node
+        self.assertEqual(self._orig[0], cam_e2e_node.DEFAULT_MODELS_DIR)
+
+
 class TestCamModelsListNote(unittest.TestCase):
     """`_cam_models_list()`が`<名前>.json`の`note`（`ml_cam/export_onnx.py`が
     書く自由記述の備考。`TestE2eModelsListNote`と対称、2026-08-29追加）を拾って
