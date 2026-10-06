@@ -160,8 +160,8 @@ SPEED_KEYS = ("v_max", "v_min", "a_lat", "a_accel", "a_brake")
 
 
 def kappa_max(vehicle) -> float:
-    """車の曲がれる限界の曲率 [1/m]（最小旋回半径の逆数）。"""
-    return math.tan(vehicle.max_steer) / vehicle.wheelbase
+    """車の曲がれる限界の曲率 [1/m]（最小旋回半径の逆数。`Vehicle.kappa_max`）。"""
+    return vehicle.kappa_max
 
 
 def speed_key(p: dict[str, float]) -> tuple:

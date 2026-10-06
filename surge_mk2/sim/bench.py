@@ -335,15 +335,23 @@ class Bench:
                 self._record(st, t_now)
                 self._step_events(st, t_now)
 
-                # `planning_node._cmd_from` と同じ変換
+                # `planning_node._cmd_from` と同じ変換に、実機で `telemetry_node._merge_auto` が
+                # 載せる GUI のレート制限（`[safety] cmd_*_limit`）を足す。★ 載せないと
+                # `steer_rate_limit=0` をファームが「最大舵角/秒」（0.52rad/s、実機の 7.0 の
+                # 1/13）と読み、切り返しに舵が間に合わず経路から外れた（2026-10-06）
+                sp = self.sim.spec
+                accel = sp.cmd_accel_limit_m_s2
+                if st.accel_limit > 0:
+                    accel = min(accel, st.accel_limit) if accel > 0 else st.accel_limit
                 if not st.ready or st.brake:
                     cmd = DriveCmd(mode=2, arm=True, brake=True,
                                    target_steer=st.target_steer,
+                                   steer_rate_limit=sp.cmd_steer_rate_limit_rad_s,
                                    brake_torque=st.brake_torque if st.ready else 0.0)
                 else:
                     cmd = DriveCmd(mode=2, arm=True, target_speed=st.target_speed,
-                                   target_steer=st.target_steer,
-                                   accel_limit=st.accel_limit)
+                                   target_steer=st.target_steer, accel_limit=accel,
+                                   steer_rate_limit=sp.cmd_steer_rate_limit_rad_s)
 
             now = time.monotonic_ns()
             if now >= next_cmd:

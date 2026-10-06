@@ -139,6 +139,8 @@ def gen_ts(spec: dict) -> str:
         "  /** 指令が途絶してから DISARM に落とすまで [ms]。**GUI はこれより速く",
         "   * 送り続けなければならない**（`useDriving.ts` の送信周期の根拠） */",
         f"  cmdDeadmanMs: {float(safety.get('cmd_deadman_ms', 150))},",
+        "  /** 自律走行中だけ、GUI の指令の途絶をここまで待つ [ms] */",
+        f"  autoLinkGraceMs: {float(safety.get('auto_link_grace_ms', 5000))},",
         "  /** `auto/cmd` がこれだけ古ければ制動に読み替える [ms] */",
         f"  autoCmdStaleMs: {float(safety.get('auto_cmd_stale_ms', 200))},",
         "  /** COMMAND に毎回載せるレート制限（STM32 側の保険）。シム（`ml_lidar/env.py`）も",

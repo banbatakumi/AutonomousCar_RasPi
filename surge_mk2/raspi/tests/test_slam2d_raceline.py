@@ -270,6 +270,27 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         self.assertEqual(self.p.phase, LOCATE)
 
 
+class TestKappaMax(unittest.TestCase):
+    """最小旋回半径は幾何だけでなく、同定した舵の効きを通して決める。"""
+
+    def test_default_is_geometric(self):
+        from raspi.core.vehicle import Vehicle
+        v = Vehicle()
+        self.assertAlmostEqual(v.kappa_max, math.tan(v.max_steer) / v.wheelbase, places=6)
+
+    def test_identified_steer_widens_min_radius(self):
+        from dataclasses import replace
+
+        from raspi.core.vehicle import Vehicle
+        v = replace(Vehicle(), steer_gain=0.993, steer_gain_cubic=-0.392)
+        self.assertAlmostEqual(1.0 / v.kappa_max, 0.46, delta=0.01)
+        # 実舵角が指令に届かないぶんと、オフセットの不利な側も半径を広げる
+        self.assertGreater(1.0 / replace(v, steer_servo_gain=0.87).kappa_max, 0.52)
+        self.assertLess(replace(v, steer_offset_rad=0.01).kappa_max, v.kappa_max)
+        self.assertEqual(replace(v, steer_offset_rad=-0.01).kappa_max,
+                         replace(v, steer_offset_rad=0.01).kappa_max)
+
+
 class TestForwardTraj(unittest.TestCase):
     def test_reverse_and_turn_in_place_are_dropped(self):
         # +x へ 1m 進み、0.5m 後退し、その場で向きを変え、+x へ 1.5m まで進み直す

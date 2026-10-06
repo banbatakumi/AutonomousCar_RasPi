@@ -77,8 +77,11 @@ __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_
 SPEED_CHORD_M = 0.4
 #: 曲がれる限界に対するこの割合から横Gの余裕を削り始める（モジュール docstring）
 TIGHT_RATIO = 0.6
-#: 曲がれる限界ちょうどで使う横Gの割合
-TIGHT_FLOOR = 0.3
+#: 曲がれる限界ちょうどで使う横Gの割合。★ 0.3 は限界を幾何の 40cm と見ていた頃の値。限界を
+#: 同定値（46cm）から出し、経路の半径もそこまで開くようにしたので 0.6 に上げた（2026-10-06。
+#: sim.bench の toyota・toyota2・実コースの再現で衝突0、ラップは変更前の ±1%。1.0 は実コースの
+#: 再現でヘアピン出口の壁に当たった）
+TIGHT_FLOOR = 0.6
 
 
 class RaceLine(NamedTuple):
@@ -368,6 +371,8 @@ def body_allowance(kappa: np.ndarray, front: float, rear: float) -> np.ndarray:
 
 #: 車体外形の検査で制約を締め直す回数の上限（`_BodyCheck`）
 BODY_ITERS = 8
+#: 車が曲がり切れない所（`kappa_max` 超え）の曲率の重みを上げて解き直す回数の上限（`optimize`）
+KAPPA_ITERS = 8
 
 
 class _BodyCheck:
@@ -469,6 +474,14 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     **どの反復の解も見積もりのラップタイムで比べ、最短のものを採る**ので、最小曲率の
     解より遅くはならない。toyota2 では、曲がれる限界に近いヘアピンの半径が開いて
     最低速度が 0.66→1.5m/s になり、見積もりが 13.68→12.9s（−5%）になった。
+
+    ## ★ 車が曲がり切れる半径に開く（`kappa_max`、`KAPPA_ITERS`）
+
+    速度は `v_min` で下支えされるので、見積もりの時間には「曲がり切れない」ことの損が
+    出ない。壁の先端を回るヘアピンで半径 37cm（車の限界 46cm）の線が最短として選ばれ、
+    実車は舵が張り付いたまま出口で 14〜20cm 膨らんで壁まで 0〜2cm だった（2026-10-06）。
+    最小時間の反復の後、`kappa_max` を超えた所の重みを上げて解き直し、超えた量の
+    小さい解を優先して採る。道幅が足りず開けない所は、いちばん緩い解になる。
     """
     closed = cl.closed
     keep = half_width + margin + body_allowance(curvature(cl.xy, closed), front_overhang,
@@ -486,10 +499,14 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
         """小さいほど良い。★ 車体外形の余裕が足りない解は、足りる解より必ず後ろ。
         そのうえで `time_iters` なら見積もりの走行時間、そうでなければ Σκ²。"""
         short = int(body is not None and float(body.clearance(xy).min()) < margin - 0.01)
+        ks = speed_kappa(xy, closed)
+        # ★ 車が曲がり切れない解は、曲がり切れる解より必ず後ろ（超えた量の小さい順）。
+        # 速度は `v_min` で下支えされるので、時間だけで比べると超えた分が見えない
+        over = max(0.0, float(ks.max()) - kappa_max) if kappa_max and len(ks) else 0.0
         if time_iters > 0:
-            t = _travel_time(xy, speed_profile(xy, speed_kappa(xy, closed), **spd), closed)
-            return short, t
-        return short, float((curvature(xy, closed) ** 2).sum())
+            t = _travel_time(xy, speed_profile(xy, ks, **spd), closed)
+            return short, over, t
+        return short, over, float((curvature(xy, closed) ** 2).sum())
 
     best = cl.xy                                   # 何も改善しなければ中心線のまま
     best_energy = score(cl.xy)
@@ -503,7 +520,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
             hi[[0, -1]] = 0.0
         w = None
         a = None
-        for it in range(1 + max(0, time_iters)):
+        for it in range(1 + max(0, time_iters) + (KAPPA_ITERS if kappa_max else 0)):
             a = min_curvature_alpha(c, nrm, lo, hi, lam=lam, step=cl.step, closed=closed,
                                     weights=w, warm=a)
             if body is not None:
@@ -521,6 +538,14 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
                 w_new = float(v.max()) / np.maximum(v, 0.1)
                 w_new /= w_new.mean()
                 w = w_new if w is None else 0.5 * (w + w_new)
+                continue
+            # 曲がり切れない所が残っていれば、そこの曲率の重みを超えた割合の2乗で上げて
+            # 解き直す（道幅が許すぶんだけ外へ膨らんで半径が開く）。無ければ終わり
+            ks = speed_kappa(xy, closed)
+            if not kappa_max or float(ks.max()) <= kappa_max:
+                break
+            w = (np.ones(len(c)) if w is None else w) * np.maximum(1.0, ks / kappa_max) ** 2
+            w = w / w.mean()
         if k + 1 >= max(1, passes):
             break
         c = resample_loop(xy, cl.step) if closed else resample_open(xy, cl.step)

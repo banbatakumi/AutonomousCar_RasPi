@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 import re
 import sys
@@ -96,6 +97,10 @@ class Vehicle:
     #: 使わない書き方なら ""。📷 のファイル名と校正ツールの書き込み先に使う
     cam_front_lens: str = ""
     cam_rear_lens: str = ""
+    #: レンズ用の ISP チューニングの差分（`config/cam_tuning/` のファイル名、プロファイルの
+    #: `isp_tuning`）。"" ＝ センサー標準のまま。`raspi/core/cam_tuning.py` が標準へ重ねる
+    cam_front_isp_tuning: str = ""
+    cam_rear_isp_tuning: str = ""
     #: カメラの取付位置・姿勢・画角。**IPM（`raspi/nav/ipm.py`）と `CameraView.tsx` の
     #: 進路ガイドが同じ値を見る。** `pitch` は下向きが正（`vehicle.toml` の注記どおり）で、
     #: 取り付け角度そのもの。走行中の車体姿勢ぶんは `vs.pitch`（IMU実測）で別途補正する
@@ -122,9 +127,18 @@ class Vehicle:
     #: 操舵のむだ時間と1次遅れ [s]。Pure Pursuit の遅延補償の既定値になる
     dead_time_s: float = 0.030
     tau_steer_s: float = 0.12
+    #: 舵の効き（`[dynamics]`、システム同定の値）。実舵角 = `steer_servo_gain`×指令、
+    #: 実効舵角 = `steer_gain`·d + `steer_gain_cubic`·d³ + `steer_offset_rad`（d = 実舵角）。
+    #: **`kappa_max` がここから最小旋回半径を出す**（`sim/vehicle.py` の曲率と同じ式）
+    steer_servo_gain: float = 1.0
+    steer_gain: float = 1.0
+    steer_gain_cubic: float = 0.0
+    steer_offset_rad: float = 0.0
     #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/architecture.md` §9.4）。
     #: **telemetry_node と io_node が独立に持つが、値はここ 1 つ**
     cmd_deadman_ms: float = 150.0
+    #: 自律走行中だけ、GUI からの `cmd` の途絶をここまで待つ [ms]（`vehicle.toml` の説明を参照）
+    auto_link_grace_ms: float = 5000.0
     #: `auto/cmd` がこれだけ古ければ中継せず制動に読み替える [ms]
     auto_cmd_stale_ms: float = 200.0
     _path: Path | None = field(default=None, compare=False)
@@ -158,6 +172,18 @@ class Vehicle:
         if self.footprint:
             return -min(x for x, _ in self.footprint)
         return 0.0
+
+    @property
+    def kappa_max(self) -> float:
+        """車の曲がれる限界の曲率 [1/m]（最小旋回半径の逆数）。
+
+        `tan(max_steer)/wheelbase` ではなく、**同定した舵の効きを通す**: 指令 `max_steer` で
+        届く実舵角 → 実効舵角 → 曲率。オフセットは左右で不利な側に取る。幾何だけだと 40cm、
+        同定値では 46cm で、40cm のつもりで引いた経路は曲がり切れなかった（2026-10-06 の実車）。
+        """
+        d = self.steer_servo_gain * self.max_steer
+        delta = self.steer_gain * d + self.steer_gain_cubic * d ** 3 - abs(self.steer_offset_rad)
+        return math.tan(max(delta, 1e-3)) / self.wheelbase
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Vehicle":
@@ -194,6 +220,8 @@ class Vehicle:
             cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
             cam_front_lens=cam_front["lens"],
             cam_rear_lens=cam_rear["lens"],
+            cam_front_isp_tuning=str(cam_front.get("isp_tuning", "")),
+            cam_rear_isp_tuning=str(cam_rear.get("isp_tuning", "")),
             cam_front_x=float(cam_front.get("x", 0.097)),
             cam_front_y=float(cam_front.get("y", 0.0)),
             cam_front_z=float(cam_front.get("z", 0.09)),
@@ -212,7 +240,12 @@ class Vehicle:
             cam_rear_undistort_hfov=float(cam_rear.get("undistort_hfov", 1.92)),
             dead_time_s=float(dyn.get("dead_time_s", 0.030)),
             tau_steer_s=float(dyn.get("tau_steer_s", 0.12)),
+            steer_servo_gain=float(dyn.get("steer_servo_gain", 1.0)),
+            steer_gain=float(dyn.get("steer_gain", 1.0)),
+            steer_gain_cubic=float(dyn.get("steer_gain_cubic", 0.0)),
+            steer_offset_rad=float(dyn.get("steer_offset_rad", 0.0)),
             cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),
+            auto_link_grace_ms=float(safety.get("auto_link_grace_ms", 5000.0)),
             auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),
             _path=p,
         )

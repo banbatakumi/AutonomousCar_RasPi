@@ -54,6 +54,12 @@ footprint = [
 #   - io_node:        バスの `cmd` が途絶     → STM32 へ DISARM を送る
 # 片方が死んでも成立させるための冗長なので、**値そのものは1つに保つ**。
 cmd_deadman_ms = 150
+# **自律走行中だけ**、GUI からの `cmd` の途絶をここまで待つ [ms]（telemetry_node）。
+# 車は planner の指令で走っているので、Wi-Fi が瞬断しただけで止める理由が無い
+# （2026-10-06、メッシュ Wi-Fi の中継機の切り替えで走行中に DISARM した）。
+# **この間は GUI から止められない**——止まるのは planner 自身の判断（見失い等）と
+# `auto_cmd_stale_ms`・物理の電源遮断だけ。手動操縦は `cmd_deadman_ms` のまま
+auto_link_grace_ms = 5000
 # `auto/cmd` がこれだけ古ければ中継せず制動に読み替える [ms]。
 # planning_node は 50Hz で出しているので 10 発ぶんの猶予
 auto_cmd_stale_ms = 200
@@ -269,6 +275,11 @@ lens = "wide160"
 # bottom_crop    下端カット率。ボンネット等の映り込みを ISP の ScalerCrop で読み出し時に切る
 #                （`raspi/nodes/camera_node.py` の `bottom_cropped`）。GUI の進路ガイドの主点補正にも使う
 # undistort_hfov [rad] 補正映像（GUI の「魚眼/補正」、`telemetry_node`）の仮想ピンホールの水平画角
+# isp_tuning     色むら補正の差分（`config/cam_tuning/` のファイル名）。**書かなければセンサー標準のまま**
+#                （純正レンズは標準が合っているので書かない）。標準の補正は純正レンズ用で、広角レンズに
+#                そのまま当てると周辺がピンクに写る。白い壁を撮って `raspi/tools/alsc_calib.py` で作る。
+#                ★libcamera の制約でプロセスに1つしか効かない。前後で違う値にすると前カメラのものが
+#                両方に当たる（`raspi/core/cam_tuning.py`）
 # fisheye        魚眼の校正値（`[….lenses.<名前>.fisheye]`）。**手で書かない。** チェッカーボード
 #                写真から `tools/cam_calib`（ランチャーの「カメラ校正」）が書く。値の意味は
 #                `raspi/core/camera_model.py`（Kannala-Brandt、フル画角・クロップ前の画素）。
@@ -293,6 +304,7 @@ roll = 0.0
 pitch = 0.0                   # 実測（2026-10-03）水平
 yaw = 0.0
 hfov = 2.23                   # ≒128°。公称（対角160°）からの概算。校正するまでの仮
+isp_tuning = "imx219_wide160.json"   # 白壁の RAW から作成（2026-10-06）
 bottom_crop = 0.25            # 操縦用に車体（ボンネット・タイヤ）を下に残す。深く切る(0.43)と車幅・距離感がつかめず運転しにくかった（2026-10-03）。認識の帯は地面距離指定なのでクロップに依らない
 undistort_hfov = 1.92         # ≒110°
 
@@ -330,6 +342,7 @@ roll = 0.0
 pitch = 0.0                   # 実測（2026-10-03）水平
 yaw = 3.14159265
 hfov = 2.23                   # 仮（cam_front と同じ）
+isp_tuning = "imx219_wide160.json"   # 前カメラで作った表を流用（同じレンズ。後カメラでは未確認）
 bottom_crop = 0.2          # ★仮。実機で見直す
 undistort_hfov = 1.92
 

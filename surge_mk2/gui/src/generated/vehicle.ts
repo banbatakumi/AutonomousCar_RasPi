@@ -75,6 +75,8 @@ export const SAFETY = {
   /** 指令が途絶してから DISARM に落とすまで [ms]。**GUI はこれより速く
    * 送り続けなければならない**（`useDriving.ts` の送信周期の根拠） */
   cmdDeadmanMs: 150.0,
+  /** 自律走行中だけ、GUI の指令の途絶をここまで待つ [ms] */
+  autoLinkGraceMs: 5000.0,
   /** `auto/cmd` がこれだけ古ければ制動に読み替える [ms] */
   autoCmdStaleMs: 200.0,
   /** COMMAND に毎回載せるレート制限（STM32 側の保険）。シム（`ml_lidar/env.py`）も
