@@ -25,6 +25,8 @@ surge_mk2/config/odometer.json
 surge_mk2/config/cam_model.json
 # 選ばれているE2E LiDARモデル名。auto.json と同じ理由
 surge_mk2/config/e2e_lidar_model.json
+# 選ばれているカメラE2Eモデル名。auto.json と同じ理由
+surge_mk2/config/cam_e2e_model.json
 # GUIの運転設定（速度・制御モード等）。auto.json と同じ理由
 surge_mk2/config/drive_settings.json
 # シミュレータのチューニング値（TUNABLESパネル）。auto.json と同じ理由
@@ -62,6 +64,10 @@ surge_mk2/models/
 # ml_lidar/（LiDAR E2E強化学習パイプライン）の生成物・大容量ファイル
 # PPOのcheckpoint・TensorBoardログ。学習ごとに違い、しかも大きい
 surge_mk2/ml_lidar/runs/
+
+# ml_cam_e2e/（カメラE2E模倣学習パイプライン）の生成物。抽出フレーム（JPEG数千枚）・
+# チェックポイント・評価結果。学習ごとに違い、しかも大きい
+surge_mk2/ml_cam_e2e/runs/
 
 # slam2d/（汎用2D LiDAR SLAM）の検証用生ログ。公開データセットは各自ダウンロードする
 # 前提で、slam2d/datasets/README.md に入手手順だけ書く

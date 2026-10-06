@@ -75,7 +75,7 @@
 | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |
 | `raspi/msgs/types.py` | **`gui/src/types.ts` も手で直す**（写しなのでズレる）→ rsync ＋ `--restart-io` | **★★ する** |
-| `models/*.onnx`（カメラ用・カメラE2E用とも同じ`models/`直下）`models/e2e_lidar/*.onnx`（LiDAR E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`cam_e2e_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
+| `models/*.onnx`（カメラセグメンテーション用）`models/cam_e2e/*.onnx`（カメラE2E用）`models/e2e_lidar/*.onnx`（LiDAR E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`cam_e2e_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
 | `ml_cam/` `ml_cam_e2e/` `ml_lidar/`（学習パイプライン一式）`ml_common/`（3つの学習GUIが共有するTkinter部品） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
 
 > **`--services` は unit ファイルを書き換えるだけ。** 走っている `io_node` は古い引数のまま
@@ -96,7 +96,7 @@
 
 ### Mac 側
 
-メイン GUI（Web）以外の補助 GUI（シミュレータ一式・コースエディタ・システム同定・SLAM 再処理・
+メイン GUI（Web）以外の補助 GUI（シミュレータ一式・コースエディタ・システム同定・SLAM 再処理・動画の書き出し・
 ml_lidar / ml_cam / ml_cam_e2e）は、**`launcher.command`（surge_mk2 直下）をダブルクリック**すると
 1つの窓から起動・停止できる（`tools/launcher.py`。アプリの追加は `APPS` に1行足す）。
 ランチャーを閉じると、そこから起動したアプリも終了する。
@@ -478,6 +478,38 @@ lens = "wide160"               # ← 付いているレンズ。"stock"（純正
 - 自動運転のカメラ学習モデル（`ml_cam`・`ml_cam_e2e`）は旧レンズの画像で学習してあるので、
   **160° レンズで撮り直して再学習が要る**
 
+#### 色むら補正（レンズごとの ISP チューニング）
+
+libcamera の標準のチューニング（`imx219.json`）の色むら補正（ALSC）は**純正レンズ用**。160° 広角に
+そのまま当てると、白い壁が「中央は緑・周辺はピンク」に写る（センサーの生の色むらは ±5〜8% しか
+無いのに、標準の表が約 ±20% 掛ける。2026-10-06 実測: 白壁の R/G が 0.84〜1.45 → 補正後 1.05〜1.12）。
+
+レンズのプロファイルに `isp_tuning = "<ファイル名>"` を書くと、`config/cam_tuning/` の**差分**
+（ALSC の表だけ）を標準のチューニングへ重ねて開く（`raspi/core/cam_tuning.py`）。
+**書いていないレンズは標準のまま**なので、`lens = "stock"` に戻せば色も元どおりになる。
+
+作り方（レンズを替えた・別のレンズを足したとき）:
+
+1. 白い無地の壁にカメラを向ける。壁が**画面の中心と上の両隅**まで入ること。明るさのむらは構わないが、
+   色の違う光（窓と電球）が混ざらないこと
+2. Pi の上で（カメラを掴むので配信を止める）:
+   ```
+   sudo systemctl stop surge-camera
+   .venv/bin/python -m raspi.tools.alsc_calib --cam 0 --rows 0,0.54 --out config/cam_tuning/imx219_<レンズ>.json
+   sudo systemctl start surge-camera
+   ```
+   `--rows` は使う行の範囲（車体が写り込む下側を外す）。`残差σ` が数%なら良い。できたファイルは
+   Mac へ持ち帰ってコミットする（`deploy.sh` は Mac → Pi の一方向）
+3. プロファイルに `isp_tuning` を書いて `tools/deploy.sh --restart`
+
+- **チューニングはプロセスに1つしか効かない**（libcamera が最初にカメラを数えた時点で全カメラ分を
+  決める）。前後で `isp_tuning` が違うと、前カメラのものが両方に当たり、起動時に警告が出る。
+  `camera_node` でカメラを開く前に `Picamera2.global_camera_info()` を呼ぶと標準に固定されて
+  黙って効かなくなる（実機で確認済み）
+- 表は中心からの距離だけの関数（車体で壁が隠れていても作れる・壁の光の色の偏りを焼き込まない）。
+  周辺減光と、色温度ごとの表は作っていない（標準のまま・ALSC の適応補正まかせ）
+- 色が変わるので、色を見る処理（矢印信号の HSV しきい値・カメラ学習モデル）は撮り直し・再調整が要る
+
 ---
 
 ### 4.7 足回りの制御を調整する（TC・ABS・片輪浮き対策・TV）
@@ -788,6 +820,10 @@ python -m raspi.nodes.replay_node logs/x.sfl --bus --loop  # バスに流し直�
 
 `.mcap` は **Foxglove Studio でそのまま開ける**（自作 GUI＝ライブ用、Foxglove＝オフライン解析用）。
 
+**カメラ画像を動画にするには**: `launcher.command` から「動画の書き出し」を起動（`tools/mcap_video_gui.py`）→ 記録を
+選んで「書き出す」→ 前後それぞれの `<入力>_front.mp4` / `<入力>_rear.mp4` ができる（Foxglove の動画書き出しは
+Enterprise 限定のため自前。前後は同じ時間軸なので並べて再生すれば同期する）。CLI は `python -m tools.mcap_video`。
+
 **自己位置を見るには**: `launcher.command`（surge_mk2 直下） から「SLAM 再処理」を起動（`tools/slam_replay_gui.py`）→ 記録を
 選んで「実行」→ 終わると `<入力>_slam.mcap` が Foxglove で開く。3D パネルの設定で Display frame を `odom` にし、
 Topics の `/viz/scan` `/viz/odom/path` `/viz/slam2d/*` の目を点ける（既定では非表示のことがある）。
@@ -881,10 +917,10 @@ GUI でモデル名を選ぶ**」という流れは共通だが、中身も検�
 
 | | LiDAR E2E（`e2e_lidar`） | カメラセグメンテーション（`ftg_cam`/`cam_centerline`） | カメラE2E（`cam_e2e`） |
 |---|---|---|---|
-| 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） | 教師あり学習（人の操舵指令を直接ラベルにする模倣学習） |
+| 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） | 教師あり学習（人の操舵・速度指令を直接ラベルにする模倣学習） |
 | 学習コード | `ml_lidar/`（Mac 専用。Pi には運ばない使い方をする） | `ml_cam/`（同左） | `ml_cam_e2e/`（同左） |
-| モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`）。**セグメンテーションと同じ`models/`直下だが選択トピックが別（`cam/model`ではなく`cam_e2e/model`）なので混同しない** |
-| 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。IPMなどの幾何変換を経由せず操舵を直接推論）＋ `raspi/auto/cam_e2e.py` |
+| モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`） | `models/cam_e2e/<名前>.onnx`（＋同名 `.json`。**`.json` の無いモデルは読み込まれない**） |
+| 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。IPMなどの幾何変換もLiDARも使わず、操舵と速度を直接推論）＋ `raspi/auto/cam_e2e.py` |
 | シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（`sim.run` は `--no-camera` 固定でカメラを持たない） | **できない**（同左） |
 | 実車で動かすのに要る追加操作 | 無し（`planning_node` が engage 中だけ推論する） | 無し（`surge-cam-perception` は常時 enable。`auto/ctrl` で `ftg_cam`/`cam_centerline` 選択中だけ推論する。下記 12.2） | 無し（`surge-cam-e2e` は常時 enable。`auto/ctrl` で `cam_e2e` 選択中だけ推論する。下記 12.3） |
 
@@ -1046,69 +1082,104 @@ GUI での使い方:
 
 ### 12.3 カメラE2E（模倣学習、`cam_e2e`）
 
-前方カメラの画像から操舵角を**直接回帰**する。`ftg_cam`/`cam_centerline`が
+**前方カメラの画像だけ**から操舵と速度を直接回帰する。`ftg_cam`/`cam_centerline`が
 セグメンテーション→`raspi.nav.ipm`（逆投影）という幾何変換を経由するのに対し、
-こちらは**幾何変換を一切経由しない**——カメラの取付高さが低く（実測8.5cm）
-IPMの深度誤差が拡大する問題を、画像から操舵を直接学習することで迂回するのが
-この方式の狙い（2026-09-04導入）。教師データはSAMの手動アノテーションが不要——
-実車の走行ログに既に記録されている前方カメラ画像と人間の操舵指令（`cmd`）を
-時刻でペアリングするだけで作れる。
+こちらは**幾何変換もLiDARも使わない**——カメラの取付高さが低く（実測8.5cm）
+IPMの深度誤差が拡大する問題を、画像から操作を直接学習することで迂回するのが
+この方式の狙い（2026-09-04導入、2026-10-06に操舵＋速度・カメラのみへ作り直し）。
+教師データはSAMの手動アノテーションが不要——走行記録に入っている前方カメラ画像と
+人の指令（`cmd`）を時刻で組にするだけで作れる。**その代わり、悪い手本を外す作業が
+モデルの出来を決める。**
+
+#### 手順（操作パネル）
+
+`launcher.command`（surge_mk2 直下）から「ml_cam_e2e」を起動する（`ml_cam_e2e/app.py`）。
+タブは作業の順に並んでいる。
+
+| タブ | すること |
+|---|---|
+| ① ペア抽出 | 録った `.mcap` を選んで (画像, 人の操作) の組を取り出す。モデル名を決める（以降のタブはその名前を使う） |
+| ② 確認・選別 | 映像と舵・速度の時系列を見て、手本にしない区間（コースアウト・やり直し等）を範囲で除外する。`←/→` 1枚送り、`space` 再生、`[` `]` で範囲、`x` で除外 |
+| ③ 偏り | 学習に使うコマの舵・速度の分布と、記録ごとの内訳。直進が大半なら「直進過多の補正」を上げる |
+| ④ 学習 | 学習曲線の青（`val_mae`）は検証データでの舵の誤差 |
+| ⑤ エクスポート | `models/cam_e2e/<名前>.onnx` と契約 `.json` を書く。解像度と正規化の基準は学習時の値を自動で使う |
+| ⑥ 評価 | 予測と手本の時系列、検証データでの誤差、誤差の大きい場面の一覧。場面から「選別タブで開く」で②へ飛べる |
+
+**②と⑥を往復するのが基本の使い方。** 誤差の大きい場面は、モデルが悪いのではなく
+手本が悪い（そこだけ人が違う操作をした）ことが多い。除外して学習し直す。
+
+#### 走行の録り方（★ここで出来が決まる）
+
+- **画像つき・高めのレートで録る。** `tools/record.sh --image-hz 15`（Mac の `logs/` に落ちる）。
+  実機GUIの MCAP ボタンは 5Hz 固定なので枚数が稼げない
+- **手本は人の手動運転か、うまく走れている自動運転。** 既定は手動運転だけを使う。
+  `slam2d_route` などの自動運転の走行を手本にする（LiDAR の走りをカメラで真似させる）なら、
+  ①の「自動運転中の走行も手本にする」にチェックを入れる（コマンドでは `--include-auto`）。
+  入れ忘れると自動運転の記録は全部落ちて0枚になる（理由はダイアログに出る）。
+  `cam_e2e` 自身の走行は、チェックを入れても手本にしない
+- **速度モードで運転する。** トルクモードの記録は `target_speed` が 0 のままで速度の手本に
+  ならず、抽出で全部落ちる（落ちた理由と枚数は①のログに出る）
+- **手本どおりの走行だけでなく、壁際から戻る操作も録る。** きれいな走行だけで学習すると、
+  少しずれたときにどう戻すかを知らないモデルになる（ずれが積み上がってコースアウトする）
+- **両方向を走る。** 片回りだけだと左右どちらかの舵しか学ばない（③で左右の枚数を確認）。
+  左右反転の水増しは既定で有効だが、コースが左右対称でない（片側通行の標識など）なら④で切る
+- **止まって待つ・後退する**区間は自動で学習から外れる（`ml_cam_e2e/samples.py`）。
+  わざわざ切り取らなくてよい
+- レンズや取付角度を変えたら**録り直して再学習**（§4.6）
+
+#### 手順（コマンド）
 
 ```bash
-# 初回だけ
-.venv/bin/pip install -r ml_cam_e2e/requirements.txt
+.venv/bin/pip install -r ml_cam_e2e/requirements.txt       # 初回だけ
 
-# 0. 走行を録画する（実車の GUI「ログ」タブで .mcap 記録、「画像を含める」を ON）。
-#    MANUAL（人間の手動運転）で、なるべく狙いどおりの経路を走った区間を録る
-#    ——ARM中・MANUAL中の指令だけが教師データに使われる（下記 extract_pairs.py の絞り込み）
-
-# 1. .mcap から (画像, 操舵指令) のペアを抽出
-python3 ml_cam_e2e/extract_pairs.py logs/run1.mcap --out ml_cam_e2e/runs/v1/frames --cam front
-
-# 2. 学習（毎エポック検証MAEを表示）
-python3 ml_cam_e2e/train.py --frames ml_cam_e2e/runs/v1/frames --epochs 30 --out ml_cam_e2e/runs/v1
-
-# 3. ONNX化（入力解像度・正規化・max_steerという契約を同名 .json に焼く）
-python3 ml_cam_e2e/export_onnx.py --checkpoint ml_cam_e2e/runs/v1/best.pt \
-    --size 224x224 --out models/<好きな名前>.onnx
-
-# 4. 実車に配る
-tools/deploy.sh --no-gui
+python3 ml_cam_e2e/extract_pairs.py logs/run1.mcap --out ml_cam_e2e/runs/v1/frames
+python3 ml_cam_e2e/train.py --frames ml_cam_e2e/runs/v1/frames --out ml_cam_e2e/runs/v1 --epochs 30
+python3 ml_cam_e2e/export_onnx.py --checkpoint ml_cam_e2e/runs/v1/best.pt --out models/cam_e2e/v1.onnx
+python3 ml_cam_e2e/eval_model.py --frames ml_cam_e2e/runs/v1/frames --run ml_cam_e2e/runs/v1 \
+    --model models/cam_e2e/v1.onnx                          # → runs/v1/eval.csv
+tools/deploy.sh --no-gui                                    # 実車に配る
 ```
 
-ターミナル操作をまとめて避けたいなら `ml_cam_e2e/app.py`（または
-`launcher.command`（surge_mk2 直下） から「ml_cam_e2e」を起動）が上記1〜3をボタンで操作できる
-薄い Tkinter GUI（`ml_cam/app.py`と対称。SAMアノテーションが無い分タブが1枚少ない）。
+#### 実車で走らせる
 
-★ **実車での推論プロセス（`surge-cam-e2e`）は常時 enable の systemd unit。**
-`cam_perception_node.py`と同じ設計で、`auto/ctrl`が`cam_e2e`の間だけ推論する。
+1. 自動運転タブ → モードで「E2Eカメラ（模倣学習）」→ **「カメラE2Eモデル」欄でモデルを選ぶ**
+   （選択は `config/cam_e2e_model.json` に残る。engage 中に選び直すと engage は落ちる）
+2. `Enter` で ARM → 「自律走行を開始」で engage
 
-```bash
-ssh surge-mk2 systemctl status surge-cam-e2e   # 動いているか確認するだけならこれで十分
-```
+パラメータ（`raspi/auto/cam_e2e.py`）:
 
-- 起動時の既定引数には `--model` を渡していないので、`cam_e2e/model` トピック
-  経由のモデル選択を待つ。**現時点ではGUI（ブラウザ）側にこのモデルを選ぶ
-  ドロップダウンが無い**——`cam_perception_node.py`の「セグメンテーションモデル」
-  欄に相当するものはまだ実装していない。当面は`raspi/setup/install_services.sh`の
-  `cam_e2e_node`起動引数に`--model <名前>`を足して固定するか、`telemetry_node.py`/GUIに
-  `cam/model`と対称の配線を追加すること（今後の課題）
-- `cam_e2e_node.py` は前方カメラに加えて **LiDAR（`scan`）も購読**し、正面付近の
-  最小距離を `cam_e2e/cmd` に同梱する。`raspi/auto/cam_e2e.py` はこれを前方減速の
-  ランプ（`slow_dist`）に使う——モデル出力を無条件で上書きする独立安全策は
-  2026-09-12 に撤去した（STM32 の `auto_stop` に任せる方針。`architecture.md`参照）
-- `auto/ctrl` で `cam_e2e` 以外が選ばれている間・推論が失敗する・モデル未選択の周期は
-  `ready=False` を出し続けるので、`cam_e2e` は自然に停止側へ倒れる（安全側）
+| 名前 | 既定 | 意味 |
+|---|---|---|
+| 最高速度 | 0.30 m/s | モデルが出した速度の頭打ち。**初めてのモデルはここを低くして試す** |
+| 速度の倍率 | 1.0 | モデルが出した速度に掛ける |
+| 最低速度 | 0.10 m/s | これ未満でもここまでは出す（止まった絵に速度0を出すモデルが発進できるように） |
+| 舵の倍率 | 1.0 | 回帰は平均へ寄って舵が浅くなりがち。コーナーで膨らむなら上げる |
+| 舵の平滑化 | 0.10 s | 1次遅れの時定数 |
+
+★ **このモードは自分では止まらない。** LiDAR を見ないので、前に物があっても
+モデルが「進め」と出せば進む。止める根拠は planner の外にある——GUI の
+**自動停止（STM32 の `auto_stop`）を ON** にしておくこと、人が舵・スロットル・
+ブレーキに触れれば即座に解除されること、通信が切れればデッドマンで止まること。
+
+#### 仕組みの要点
+
+- **学習と推論の前処理は同じ関数**（`raspi/core/cam_e2e_preproc.py`、numpy のみ）。色順（RGB）・
+  縮小（面積平均）・正規化を1箇所で定義し、Pi の推論・学習・評価・操作パネルが全部これを通る。
+  処理を変えたら `PREPROC_VERSION` を上げる——版の違うモデルは `cam_e2e_node` が読み込みを拒否する
+  （2026-10-06 以前は、学習が RGB・推論が BGR、縮小方式も別という食い違いがあった）
+- **モデルの出力は2個**（`steer_norm` -1..1、`speed_norm` 0..1。前進のみ）。物理量へ戻す基準
+  （`max_steer`・`speed_ref`）は同梱 `.json` に書く。`speed_ref` は学習に使った手本の最高速度
+- **検証データは5秒のかたまり単位で分ける**（隣のコマはほぼ同じ絵なので、1枚ずつ無作為に
+  分けると誤差が実力より小さく出る）
+- `surge-cam-e2e` は常時 enable の systemd unit。`auto/ctrl` が `cam_e2e` で、かつ ARM 中の間だけ
+  推論する（既定 10Hz、`--infer-hz`）。engage 中は前カメラの fps が上限まで上がる
+- モデル未選択・推論失敗・カメラ途絶の周期は `ready=False` を出すので、停止側へ倒れる
 - `raspi/nodes/cam_e2e_node.py` を直したら `tools/deploy.sh --restart`
-  で反映できる（surge-telemetry / surge-camera と一緒に再起動する）
 
-GUI での使い方:
-
-1. 自動運転タブ → モードで「E2Eカメラ（模倣学習）」を選択（モデル選択欄は
-   上記の理由でまだ無いので、事前に `--model` で固定しておく必要がある）
-2. `Enter` で ARM → 自動運転タブの「自律走行を開始」で engage
-
-★ **シミュレータでは検証できない。**`ftg_cam`と同じ理由（`sim.run`はカメラを持たない）。
+★ **シミュレータでは走行を検証できない。**`ftg_cam`と同じ理由（`sim.run`はカメラを持たない。
+`sim.bench --mode cam_e2e` も対象外）。代わりに `ml_cam_e2e/tests/test_pipeline.py` が、合成した記録で
+抽出→学習→エクスポート→実車側の読み込み→評価までを通し、学習したモデルが手本の向きと速度を
+再現することを確かめる（`.venv/bin/python -m pytest ml_cam_e2e/tests -q`）。
 
 ---
 
@@ -1130,6 +1201,6 @@ GUI での使い方:
 | `ml_cam/` | カメラセグメンテーションの学習パイプライン（Mac 専用。§12.2） | Pi には無関係 |
 | `ml_cam_e2e/` | カメラE2E（模倣学習）の学習パイプライン（Mac 専用。§12.3） | Pi には無関係 |
 | `ml_lidar/` | LiDAR E2E 強化学習パイプライン（Mac 専用。§12.1） | Pi には無関係 |
-| `models/` | 学習済み ONNX の置き場（`models/*.onnx`=カメラ用・カメラE2E用、`models/e2e_lidar/*.onnx`=LiDAR E2E用）。`.gitignore` 対象 | `tools/deploy.sh` で運ぶだけ。再起動は不要 |
+| `models/` | 学習済み ONNX の置き場（`models/*.onnx`=カメラセグメンテーション用、`models/cam_e2e/*.onnx`=カメラE2E用、`models/e2e_lidar/*.onnx`=LiDAR E2E用）。`.gitignore` 対象 | `tools/deploy.sh` で運ぶだけ。再起動は不要 |
 | `config/` | 車両諸元・自動運転パラメータ | 読んでいるノード |
 | `tools/` | `deploy.sh` / `record.sh` | — |
