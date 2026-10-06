@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import FrameRing  # noqa: E402
+from raspi.core.cam_tuning import check_sensor, lens_tuning, pick_name  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 
@@ -61,6 +62,26 @@ CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 #: （GUI の進路ガイド `CameraView.tsx` もここを参照して主点補正する。二重管理しない）。
 _vehicle = Vehicle.load()
 CAM_BOTTOM_CROP = {0: _vehicle.cam_front_bottom_crop, 1: _vehicle.cam_rear_bottom_crop}
+
+#: カメラごとの ISP チューニングの差分（選ばれたレンズの `isp_tuning`。"" ＝ センサー標準のまま）。
+#: 標準の色むら補正は純正レンズ用で、広角レンズでは周辺がピンクに写る（`raspi/core/cam_tuning.py`）。
+#: **プロセスに1つしか効かない**ので、`main` が最初のカメラを開く前に `prepare_isp_tuning` で1つ選ぶ
+CAM_ISP_TUNING = {0: _vehicle.cam_front_isp_tuning, 1: _vehicle.cam_rear_isp_tuning}
+
+#: このプロセスの全カメラに渡す (チューニング, そのセンサー名)。`(None, "")` ＝ センサー標準
+_isp_tuning: tuple[dict | None, str] = (None, "")
+
+
+def prepare_isp_tuning(indices: list[int]) -> None:
+    """開くカメラのレンズから ISP チューニングを1つ選ぶ。**最初のカメラを開く前に呼ぶ。**
+
+    無い・読めないときは標準のまま（`lens_tuning` が理由を stderr に出す）。
+    """
+    global _isp_tuning
+    from picamera2 import Picamera2
+
+    _isp_tuning = lens_tuning(pick_name([CAM_ISP_TUNING.get(i, "") for i in indices]),
+                              Picamera2.load_tuning_file)
 
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの
@@ -224,7 +245,11 @@ class CameraWorker(threading.Thread):
 
         from picamera2 import Picamera2
 
-        self.cam = Picamera2(idx)
+        # チューニングは全カメラで同じもの（None ＝ 標準）。**ここより前に picamera2 でカメラを
+        # 数えない**——`global_camera_info()` を呼ぶだけで標準に固定される（`cam_tuning.py`）
+        tuning, tuning_sensor = _isp_tuning
+        self.cam = Picamera2(idx, tuning=tuning)
+        check_sensor(tuning_sensor, str(self.cam.camera_properties.get("Model", "")), idx)
         ctrl = {}
         if fps:
             us = int(1e6 / fps)
@@ -563,6 +588,7 @@ def main() -> int:
             print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
 
     try:
+        prepare_isp_tuning(indices)
         node = CameraNode(indices, (w, h), args.fmt, args.fps, args.slots,
                           on_frame=on_frame, cfg_sub=cfg_sub)
     except Exception as e:

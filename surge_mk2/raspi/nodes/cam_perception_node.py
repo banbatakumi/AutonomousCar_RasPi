@@ -80,6 +80,7 @@ import numpy as np  # noqa: E402
 
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
+from raspi.core.cam_e2e_preproc import resize_area, to_rgb  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -152,28 +153,37 @@ class SegmentationModel:
         self.std = std
         self.threshold = threshold
 
-    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        """`(H, W, C)` uint8 → モデル入力 `(1, C, h, w)` float32。"""
-        w, h = self.input_size
-        resized = _resize_nearest(frame[..., :3], w, h)
-        x = (resized.astype(np.float32) - self.mean) / self.std
-        return np.transpose(x, (2, 0, 1))[None, ...]
+    def _preprocess(self, rgb: np.ndarray) -> np.ndarray:
+        """**RGB** の `(H, W, C)` uint8 → モデル入力 `(1, C, h, w)` float32。
 
-    def infer(self, frame: np.ndarray) -> np.ndarray:
-        """`frame` (H, W, C) → 走行可能マスク（モデル入力解像度の bool 配列、True=走行可能）。"""
-        x = self._preprocess(frame)
+        縮小は面積平均（`raspi/core/cam_e2e_preproc.resize_area`）。学習側
+        （`ml_cam/dataset.py`）と同じ関数を通す——以前はここが最近傍、学習が
+        PIL の BILINEAR で、モデルに入る絵が学習時と違っていた。
+        """
+        w, h = self.input_size
+        resized = resize_area(rgb[..., :3], w, h)
+        x = (resized.astype(np.float32) - self.mean) / self.std
+        return np.ascontiguousarray(np.transpose(x, (2, 0, 1))[None, ...])
+
+    def infer(self, rgb: np.ndarray) -> np.ndarray:
+        """**RGB** の (H, W, C) → 走行可能マスク（モデル入力解像度の bool 配列、True=走行可能）。
+
+        色順を直すのは呼び出し側（`CamPerceptionNode.process_frame()` が
+        `ImageRef.fmt` を見て `to_rgb()` を通す）。`ml_cam/preview.py` は
+        ファイルから読んだ RGB をそのまま渡す。
+        """
+        x = self._preprocess(rgb)
         out = self.session.run(None, {self.input_name: x})[0]
         prob = np.squeeze(out)
         return prob >= self.threshold
 
 
 def _resize_nearest(frame: np.ndarray, width: int, height: int) -> np.ndarray:
-    """最近傍法の縮小・拡大。**依存を増やさないための最小実装。**
+    """最近傍法の縮小・拡大。**マスクを元の解像度へ戻す用**（`ml_cam/preview.py`）。
 
-    `cv2.resize`（双線形）より画質は劣るが、走行可否という粗いセグメンテー
-    ションでは支障になりにくい想定。実データで画質不足が分かれば
-    `raspi/requirements.txt` の `opencv-python-headless`（プレースホルダ済み）
-    に切り替える。
+    モデル入力の縮小にはもう使わない（`SegmentationModel._preprocess()` 参照。
+    学習側と揃えて面積平均にした）。0/1 のマスクは補間すると中間値が出るので、
+    こちらは最近傍のままでよい。
     """
     src_h, src_w = frame.shape[:2]
     col = (np.arange(width) * src_w / width).astype(np.int32)
@@ -313,15 +323,22 @@ class CamPerceptionNode:
 
     # ── 1周期ぶんの処理（純粋関数。バスを知らない） ──
 
-    def process_frame(self, frame: np.ndarray, *, vs: VehicleState | None = None,
+    def process_frame(self, frame: np.ndarray, *, fmt: str = "RGB888",
+                      vs: VehicleState | None = None,
                       t_capture_ns: int = 0, seq: int = 0) -> Scan:
-        """1枚のフレーム → `Scan`。
+        """1枚の生フレーム → `Scan`。
+
+        `fmt` は `ImageRef.fmt`（メモリ上の実際のバイト順）。**リングの既定は
+        BGR888 で、モデルは RGB で学習している**ので、ここで RGB に直してから
+        推論する。以前は入れ替えずに渡しており、実車だけ赤と青が逆の絵を
+        モデルに見せていた（2026-10-06 修正。プレビューは RGB を渡すので
+        Mac 上では気づけなかった）。
 
         IMU が有効なら `pitch` を実測ぶん補正する（`gui/src/render/CameraView.tsx`
         の `drawGuide()` と同じ式・同じ理由——車体の加減速でピッチが動くと、
         地平線付近の投影誤差が発散するため）。
         """
-        drivable = self.model.infer(frame)
+        drivable = self.model.infer(to_rgb(frame, fmt))
         self._last_drivable = drivable
 
         pitch = self.base_ext.pitch
@@ -482,7 +499,8 @@ class CamPerceptionNode:
                     frame, t_capture = got
                     self._last_infer_ns = now
                     try:
-                        st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)
+                        st = self.process_frame(frame, fmt=ref.fmt, vs=vs,
+                                                t_capture_ns=t_capture, seq=seq)
                     except Exception as e:
                         # 推論(CNN+IPM+raycast)側のバグでノード全体を巻き込んで
                         # 落とさない。契約2の「壁」扱いに自然に落とす

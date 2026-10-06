@@ -52,6 +52,80 @@ def _make_dummy_model(path: Path, h: int, w: int) -> None:
     onnx.save(model, str(path))
 
 
+def _make_red_only_model(path: Path, h: int, w: int) -> None:
+    """入力の ch0（RGB なら赤）だけを確率マップとして返す ONNX モデル。
+    モデルに届いた色順を確かめるのに使う。"""
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, h, w])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, h, w])
+    idx = helper.make_tensor("idx", TensorProto.INT64, [1], [0])
+    node = helper.make_node("Gather", ["input", "idx"], ["output"], axis=1)
+    graph = helper.make_graph([node], "red", [inp], [out], initializer=[idx])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+
+
+class TestColorOrder(unittest.TestCase):
+    """実機のリングは BGR888、モデルは RGB で学習している（`ml_cam/dataset.py`）。
+
+    以前は入れ替えずに渡していて、実車だけ赤と青が逆の絵で推論していた。
+    プレビュー（`ml_cam/preview.py`）は RGB を渡すので Mac では気づけなかった。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        path = Path(self._tmp.name) / "red.onnx"
+        _make_red_only_model(path, 32, 32)
+        self.model = SegmentationModel(str(path), input_size=(32, 32), threshold=0.5)
+        self.node = CamPerceptionNode(model=self.model, vehicle=Vehicle.load())
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_infer_takes_rgb(self):
+        red = np.zeros((240, 320, 3), dtype=np.uint8)
+        red[..., 0] = 255
+        self.assertTrue(self.model.infer(red).all())
+        blue = np.zeros((240, 320, 3), dtype=np.uint8)
+        blue[..., 2] = 255
+        self.assertFalse(self.model.infer(blue).any())
+
+    def test_bgr_ring_frame_reaches_the_model_as_rgb(self):
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        frame[..., 2] = 255                       # BGR888 の赤
+        self.node.process_frame(frame, fmt="BGR888")
+        self.assertTrue(self.node._last_drivable.all(), "赤がモデルの R に届いていない")
+
+    def test_rgb_ring_frame_is_not_swapped(self):
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        frame[..., 2] = 255                       # RGB888 の青
+        self.node.process_frame(frame, fmt="RGB888")
+        self.assertFalse(self.node._last_drivable.any())
+
+    def test_run_passes_the_ring_format_through(self):
+        """`run()` が `ImageRef.fmt` を `process_frame()` に渡していること。"""
+        models_dir = Path(self._tmp.name)
+        (models_dir / "red.json").write_text(
+            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "threshold": 0.5}')
+        node = CamPerceptionNode(models_dir=models_dir, vehicle=Vehicle.load())
+        ring = FrameRing.create("surge_test_cam_perception_bgr", 32, 24, "BGR888", n_slots=2)
+        try:
+            data = np.zeros((24, 32, 3), dtype=np.uint8)
+            data[..., 2] = 255                    # BGR888 の赤
+            desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
+            ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                           frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                           fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="red"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            node.run(sub=sub, pub=_FakePub(), duration_s=0.02)
+            self.assertIsNotNone(node._last_drivable)
+            self.assertTrue(node._last_drivable.all())
+        finally:
+            node.close()
+            ring.unlink()
+
+
 class TestSegmentationModel(unittest.TestCase):
     def test_bright_region_is_drivable_dark_region_is_not(self):
         with tempfile.TemporaryDirectory() as d:
