@@ -66,13 +66,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ref", default="HEAD", help="比べる相手のコミット（既定 HEAD）")
     ap.add_argument("--seeds", type=int, default=1)
     ap.add_argument("--variants", action="store_true", help="車ごとの内訳も出す")
-    ap.add_argument("--yaw", action="store_true", help="TV の場面も回す")
     args = ap.parse_args(argv)
 
     plant = Plant.load()
     new = Firmware()
     fws = {f"{args.ref}": (Firmware(args.ref), None), "作業ツリー": (new, load_params(new))}
-    scs = S.SLIP + (S.YAW if args.yaw else ())
+    scs = S.SLIP
     res = compare(fws, plant, scs, args.seeds)
     cols = (("効率", "efficiency", False), ("滑っていた割合", "slipping", True),
             ("横グリップの残り", "lateral_keep", False), ("トルクの暴れ", "chatter", True),

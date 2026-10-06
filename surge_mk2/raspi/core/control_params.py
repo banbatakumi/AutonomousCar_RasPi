@@ -24,7 +24,7 @@ STM32 は値を Flash に保存しないので、電源を入れ直すと既定�
 
 ## 一時的な上書き（`set_overrides()`）
 
-同定の試験（`raspi/auto/sysid_*.py`）は TC・ABS を切ったり、ヨーモーメントを入れたりする。
+同定の試験（`raspi/auto/sysid_wheel.py`・`sysid_tyre.py`）は TC・ABS を切る。
 planner が `AutoState.fw_overrides` に書いた値を、指令（`DriveCmd.fw_overrides`）が届いている間だけ
 入れ、届かなくなったら元の値へ戻す（試験が中断・異常終了しても TC を切ったままにならない）。
 """

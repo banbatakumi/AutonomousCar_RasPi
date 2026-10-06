@@ -2,9 +2,9 @@
 
     .venv/bin/python -m tools.ctrl_tune.gui
 
-1. **車両モデルの同定**: GUI の「システム同定」タブで録った「制御の同定」3試験の mcap を開き、
+1. **車両モデルの同定**: GUI の「システム同定」タブで録った「制御の同定」2試験の mcap を開き、
    `fit.py` で解析して `config/vehicle.toml` の `[control.plant]` に書く
-2. **パラメータの最適化**: その車両モデルと、ホストでコンパイルした STM32 の制御を閉ループにして
+2. **パラメータの最適化**（TC・ABS。TV は対象外——`fit.py` 冒頭）: その車両モデルと、ホストでコンパイルした STM32 の制御を閉ループにして
    `optimize.py` で調整し、`[control]` に書く（Pi へ反映すると io_node が STM32 へ送る）
 
 `tools/sysid/gui.py` と同じ作り（ファイル選択・結果の見比べ・適用の可否判断をターミナルなしで）。
@@ -22,12 +22,6 @@ from . import optimize, tuning
 from .fit import TESTS, analyze
 from .fw import FW_DIR, Firmware
 from .plant import DEFAULT_TOML, Plant
-
-#: 最適化の結果を既定で適用しない制御 → 理由
-_NOT_BY_DEFAULT = {
-    "tv": "この車両モデルは限界での挙動（後輪の横滑り）を表せないので、TV の値は実機で確かめてから",
-}
-
 
 def _current(toml_path: str, table: tuple[str, ...]) -> dict[str, float]:
     try:
@@ -95,7 +89,7 @@ class CtrlTuneApp(tk.Tk):
         row.pack(fill="x")
         self.problem_vars: dict[str, tk.BooleanVar] = {}
         for key, make in optimize.PROBLEMS.items():
-            var = tk.BooleanVar(value=key != "tv")
+            var = tk.BooleanVar(value=True)
             self.problem_vars[key] = var
             ttk.Checkbutton(row, text=make().label, variable=var).pack(side="left", padx=(0, 12))
         row = ttk.Frame(tab, padding=(0, 6))
@@ -291,12 +285,11 @@ class CtrlTuneApp(tk.Tk):
                       else f"{value:.4g}  （選んだ値）").grid(row=r, column=2, sticky="w")
             r += 1
         for t in tunings:
-            held = _NOT_BY_DEFAULT.get(t.problem.key)
             better = t.cost < t.baseline_cost
             for key, value in t.values.items():
                 at_bound = any(abs(value - b) <= 1e-6 * max(1.0, abs(b)) for b in t.problem.bounds[key])
                 self.tune_results[key] = value
-                var = tk.BooleanVar(value=better and held is None and key not in tuning.DERIVED)
+                var = tk.BooleanVar(value=better and key not in tuning.DERIVED)
                 self.tune_checks[key] = var
                 ttk.Checkbutton(self.tune_frame, variable=var).grid(row=r, column=0)
                 ttk.Label(self.tune_frame, text=key, width=30).grid(row=r, column=1, sticky="w")
@@ -308,8 +301,6 @@ class CtrlTuneApp(tk.Tk):
                 r += 1
             lines.append(f"■ {t.problem.label}: コスト {t.baseline_cost:.4f} → {t.cost:.4f}"
                          f"（{t.evaluations}回評価）" + ("" if better else "  今の値より良くならなかった"))
-            if held:
-                lines.append(f"  ★既定で適用しない: {held}")
             for sc in t.problem.scenarios:
                 a, b = t.table[sc.key]
                 parts = []
@@ -317,9 +308,6 @@ class CtrlTuneApp(tk.Tk):
                     parts.append(f"効率 {a['efficiency']:.2f}→{b['efficiency']:.2f}")
                 parts.append(f"滑り {a['slipping']:.2f}→{b['slipping']:.2f}")
                 parts.append(f"平均スリップ率 {a['slip_mean']:.2f}→{b['slip_mean']:.2f}")
-                if sc.kind == "yaw":
-                    parts.append(f"ヨー偏差 {a['yaw_err_rms']:.3f}→{b['yaw_err_rms']:.3f}")
-                    parts.append(f"左右差 {a['torque_diff_rms']:.3f}→{b['torque_diff_rms']:.3f}N·m")
                 lines.append(f"  {sc.label}: " + "・".join(parts))
             worst = max(t.by_variant.items(), key=lambda kv: kv[1][1])
             lines.append(f"  いちばん悪い車: {worst[0]}（コスト {worst[1][0]:.3f}→{worst[1][1]:.3f}）")

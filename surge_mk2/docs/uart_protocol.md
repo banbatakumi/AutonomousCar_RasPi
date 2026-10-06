@@ -1085,7 +1085,8 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
   `DriveCmd.fw_overrides` に名前と値を書く（調整パラメータ全部と `tc_enable`/`tv_enable`/
   `wheel_lift_guard_enable`/`abs_enable`）。io_node は**その指令が届いている間だけ**入れ、届かなくなったら
   元の値へ戻す（試験が中断しても TC を切ったままにならない）
-- `0x002A`（`TV_TEST_MOMENT_NM`）は同定用: 0 以外の間、STM32 は TV の PI を止めてこのヨーモーメント
+- `0x002A`（`TV_TEST_MOMENT_NM`）は同定用（**今これを使う試験は無い**——TV の同定は 2026-10-05 に外した。
+  STM32 側の機能は残っている）: 0 以外の間、STM32 は TV の PI を止めてこのヨーモーメント
   だけを出す。`[control]` には書かない（上書きでだけ使う）
 - TV の規範の3項目（`TV_STEER_GAIN`/`TV_STEER_GAIN_CUBIC`/`TV_MAX_LATERAL_ACCEL_M_S2`）は `[control]` に
   書かず、`[dynamics]` の同定結果（`steer_gain`/`steer_gain_cubic`/`mu`×g×`tv_lateral_accel_ratio`）から作る

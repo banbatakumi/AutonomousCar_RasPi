@@ -43,7 +43,7 @@ from . import scenarios as S
 from .fw import Firmware
 from .plant import Plant, variants
 
-__all__ = ["Problem", "Tuning", "evaluate", "optimise", "tc_problem", "abs_problem", "tv_problem",
+__all__ = ["Problem", "Tuning", "evaluate", "optimise", "tc_problem", "abs_problem",
            "PROBLEMS", "Weights", "tradeoff", "SLIP_TARGET_RANGE"]
 
 
@@ -297,43 +297,6 @@ def abs_problem() -> Problem:
         _slip_cost, frozenset({"brake", "brake_soft", "brake_mu_drop"}))
 
 
-def _yaw_variants(base: Plant) -> list[tuple[str, Plant]]:
-    from dataclasses import replace
-    return [("基準", base),
-            ("ヨーの減衰×0.5", replace(base, yaw_damping=base.yaw_damping * 0.5)),
-            ("ヨーの減衰×2", replace(base, yaw_damping=base.yaw_damping * 2.0)),
-            ("ヨー慣性×2", replace(base, yaw_inertia_kgm2=base.yaw_inertia_kgm2 * 2.0)),
-            # 規範（同定した舵の効き）が実際と5%ずれている: 定常旋回で偏差が残り続ける
-            ("舵の効き−5%", replace(base, steer_gain=base.steer_gain * 0.95)),
-            ("舵の効き＋5%", replace(base, steer_gain=base.steer_gain * 1.05)),
-            ("ジャイロのノイズ×3・バイアス", replace(base, gyro_noise_rad_s=base.gyro_noise_rad_s * 3.0,
-                                                  gyro_bias_rad_s=0.03)),
-            ("MDが遅い", replace(base, md_delay_s=base.md_delay_s + 0.004, md_tau_s=base.md_tau_s * 3.0))]
-
-
-def _yaw_cost(sc: S.Scenario, m: dict[str, float], orc: float, w: Weights) -> float:
-    # 左右のトルク差の大きさ（1輪の最大トルクに対する比）。外乱が無いのに差を付け続けるのは
-    # 左右の輪の押し合い＝電力の無駄で、規範のずれ・ノイズ・バイアスを追っているだけ
-    push = m["torque_diff_rms"] / S.MAX_TORQUE_NM
-    if sc.key == "tv_accel_split":
-        # 片輪が滑る路面での加速: ヨーレートの乱れを抑える（駆動力は譲ってよい）。TV が役に立つ
-        # 場面はこれだけなので重くする（軽いと「TV を切る」が最適になる）
-        return 2.0 * m["yaw_err_rms"] + w.chatter * m["chatter"]
-    if sc.key == "tv_straight":
-        return w.penalty * push
-    return push + 0.3 * m["yaw_err_rms"]
-
-
-def tv_problem() -> Problem:
-    return Problem(
-        "tv", "TV",
-        # 不感帯の上限・ゲインの下限は「TV を実質切る」解を除くため。このモデルは限界での挙動
-        # （後輪の横滑り）を表せないので、切った方が良いという結論はここからは出せない
-        {"tv_kp_nm_per_rad_s": (0.03, 1.0), "tv_ki_nm_per_rad": (0.03, 10.0),
-         "tv_deadband_rad_s": (0.02, 0.15), "tv_ref_lag_s": (0.0, 0.06),
-         "tv_max_yaw_moment_nm": (0.1, 0.35)},
-        _pick("tv_accel_split", "tv_step", "tv_turn", "tv_straight"),
-        _yaw_cost, frozenset(), _yaw_variants)
-
-
-PROBLEMS: dict[str, Callable[[], Problem]] = {"tc": tc_problem, "abs": abs_problem, "tv": tv_problem}
+#: TV は入れていない（効きが小さく、限界での挙動をこの車両モデルが表せないので最適化できない。
+#: `fit.py` 冒頭）。TV のゲインは `vehicle.toml` の `[control]` を手で決める
+PROBLEMS: dict[str, Callable[[], Problem]] = {"tc": tc_problem, "abs": abs_problem}

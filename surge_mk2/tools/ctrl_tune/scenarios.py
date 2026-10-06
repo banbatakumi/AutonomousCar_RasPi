@@ -24,7 +24,7 @@ from .fw import (FLAG_ABS, FLAG_LIFT, FLAG_TC, FLAG_TV, IN, MODE_BRAKE, MODE_DIS
                  MODE_TORQUE, OUT, Firmware, HostConfig)
 from .plant import Plant
 
-__all__ = ["Seg", "Scenario", "Result", "run", "oracle", "SLIP", "YAW", "ALL", "DT"]
+__all__ = ["Seg", "Scenario", "Result", "run", "oracle", "SLIP", "ALL", "DT"]
 
 DT = 0.0005          # ファームの制御周期
 SUBSTEPS = 20
@@ -58,7 +58,7 @@ class Scenario:
     tv: bool = True
     #: 物差しを取る区間の番号（その区間の始まりから終わりまで）
     measure: int = 0
-    #: "accel"（進んだ距離が長いほど良い）/ "brake"（止まるまでが短いほど良い）/ "yaw"
+    #: "accel"（進んだ距離が長いほど良い）/ "brake"（止まるまでが短いほど良い）
     kind: str = "accel"
 
     def inputs(self) -> np.ndarray:
@@ -209,17 +209,4 @@ SLIP: tuple[Scenario, ...] = (
              (Seg(1.0, MODE_SPEED, 1.2, 3.0, steer=0.35),), 1.2),
 )
 
-#: TV の場面
-YAW: tuple[Scenario, ...] = (
-    Scenario("tv_accel_split", "全開・左だけ路面μが0.4倍（TC が片輪を絞ってヨーが出る）",
-             (Seg(0.8, MODE_TORQUE, _FULL, mu_left=0.4),), 0.8, kind="yaw"),
-    Scenario("tv_step", "1.5m/s で舵を0→0.2rad", (Seg(0.3, MODE_SPEED, 1.5, 3.0),
-                                                  Seg(0.6, MODE_SPEED, 1.5, 3.0, steer=0.2)), 1.5,
-             measure=1, kind="yaw"),
-    Scenario("tv_turn", "1.2m/s・舵0.3rad の定常旋回（押し合わないこと）",
-             (Seg(1.0, MODE_SPEED, 1.2, 3.0, steer=0.3),), 1.2, kind="yaw"),
-    Scenario("tv_straight", "2m/s の直進（押し合わないこと）", (Seg(1.0, MODE_SPEED, 2.0, 3.0),), 2.0,
-             kind="yaw"),
-)
-
-ALL = SLIP + YAW
+ALL = SLIP

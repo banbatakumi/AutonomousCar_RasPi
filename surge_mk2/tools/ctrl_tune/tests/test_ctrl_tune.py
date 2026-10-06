@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from raspi.auto.sysid_tyre import SysIdTyre  # noqa: E402
 from raspi.auto.sysid_wheel import SysIdWheel  # noqa: E402
-from raspi.auto.sysid_yawmoment import MOMENT_NM, SysIdYawMoment  # noqa: E402
 from raspi.core.control_params import CONTROL_PARAM_IDS, load_control_params  # noqa: E402
 from tools.ctrl_tune import fit, optimize, record, tuning  # noqa: E402
 from tools.ctrl_tune import scenarios as S  # noqa: E402
@@ -25,6 +24,8 @@ from tools.ctrl_tune.fw import FW_DIR, MODE_SPEED, MODE_TORQUE, OUT, firmware  #
 from tools.ctrl_tune.plant import DEFAULT_TOML, NOMINAL, Plant  # noqa: E402
 
 HAVE_FW = (FW_DIR / "host" / "host_sim.c").exists() and shutil.which("cc") is not None
+#: ファームの同定用ヨーモーメント注入（`tv_test_moment_nm`）の確認に使う値 [N·m]
+MOMENT_NM = 0.12
 QUIET = replace(NOMINAL, front_noise_rad_s=0.0, rear_noise_rad_s=0.0, gyro_noise_rad_s=0.0)
 
 
@@ -113,23 +114,20 @@ class TestLogic(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_FW, "ファームがありません")
 class TestIdentification(unittest.TestCase):
-    """真値の分かっている車で3つの試験を回し、解析が真値を復元する。"""
+    """真値の分かっている車で2つの試験を回し、解析が真値を復元する。"""
 
     TRUTH = replace(NOMINAL, wheel_inertia_kgm2=2.6e-5, wheel_friction_nm=0.0035, md_tau_s=0.006,
-                    mu=0.52, load_transfer=0.22, tyre_b=14.0, tyre_c=1.45,
-                    yaw_inertia_kgm2=0.03, yaw_damping=2.4)
+                    mu=0.52, load_transfer=0.22, tyre_b=14.0, tyre_c=1.45)
     #: 相対の許容誤差（`None` は ABS の絶対誤差）
     REL = {"wheel_inertia_kgm2": 0.1, "wheel_friction_nm": None, "md_tau_s": 0.3, "mu": 0.08,
-           "load_transfer": None, "tyre_b": 0.3, "tyre_c": None, "yaw_inertia_kgm2": 0.3,
-           "yaw_damping": 0.1}
+           "load_transfer": None, "tyre_b": 0.3, "tyre_c": None}
     ABS = {"wheel_friction_nm": 0.001, "load_transfer": 0.06, "tyre_c": 0.15}
 
     @classmethod
     def setUpClass(cls):
         fw = firmware()
         cls.recs = {"wheel": record.simulate(fw, cls.TRUTH, SysIdWheel(), lifted=True),
-                    "tyre": record.simulate(fw, cls.TRUTH, SysIdTyre()),
-                    "yaw": record.simulate(fw, cls.TRUTH, SysIdYawMoment())}
+                    "tyre": record.simulate(fw, cls.TRUTH, SysIdTyre())}
         cls.analysis = fit.analyze(cls.recs, NOMINAL)
 
     def test_planners_finish_within_the_straight(self):

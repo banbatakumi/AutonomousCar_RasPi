@@ -48,7 +48,6 @@ class Rec:
     steer: np.ndarray
     brake: np.ndarray           # 指令（bool）
     torque_mode: np.ndarray
-    test_moment: np.ndarray     # 指令の fw_overrides["tv_test_moment_nm"]（無ければ 0）
     tc_active: np.ndarray
     abs_active: np.ndarray
     #: その時刻の指令が TC・ABS を切っていたか（fw_overrides）
@@ -86,7 +85,6 @@ def _build(vs_rows: list[tuple[float, dict]], cmd_rows: list[tuple[float, dict]]
         cols["steer"].append(float(vs.get("steer_actual", 0.0)))
         cols["brake"].append(bool(c.get("brake", False)))
         cols["torque_mode"].append(bool(c.get("torque_mode", False)))
-        cols["test_moment"].append(float(ov.get("tv_test_moment_nm", 0.0)))
         cols["tc_active"].append(bool(vs.get("tc_active", False)))
         cols["abs_active"].append(bool(vs.get("abs_active", False)))
         cols["tc_off"].append(ov.get("tc_enable", 1.0) == 0.0)
@@ -208,7 +206,6 @@ def simulate(fw: Firmware, plant: Plant, planner, params: dict[str, float] | Non
             new[IN["accel_limit"]] = st.accel_limit
             new[IN["steer"]] = st.target_steer
             ov = dict(st.fw_overrides) if st.ready else {}
-            new[IN["test_moment"]] = ov.get("tv_test_moment_nm", 0.0)
             pending.append((k + lat, new, ov))
             cmd_rows.append((t, {"brake": bool(new[IN["mode"]] == MODE_BRAKE),
                                  "torque_mode": bool(st.torque_mode and not st.brake),

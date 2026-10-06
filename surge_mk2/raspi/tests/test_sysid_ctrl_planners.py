@@ -1,4 +1,4 @@
-"""制御の同定の planner（`sysid_wheel`・`sysid_tyre`・`sysid_yawmoment`）の約束。
+"""制御の同定の planner（`sysid_wheel`・`sysid_tyre`）の約束。
 
 試験→解析が真値を復元できるかは `tools/ctrl_tune/tests`（車両モデルとの閉ループ）が見る。
 ここは車両モデル無しで言える約束だけ。
@@ -14,7 +14,6 @@ from raspi.auto._sysid_common import SETTLE_S  # noqa: E402
 from raspi.auto.registry import PLANNERS  # noqa: E402
 from raspi.auto.sysid_tyre import SysIdTyre  # noqa: E402
 from raspi.auto.sysid_wheel import SysIdWheel  # noqa: E402
-from raspi.auto.sysid_yawmoment import MOMENT_NM, SysIdYawMoment  # noqa: E402
 from raspi.core.control_params import OVERRIDABLE  # noqa: E402
 from raspi.msgs.types import AutoState, DriveCmd, VehicleState  # noqa: E402
 
@@ -36,7 +35,7 @@ def start(planner, state):
 
 
 class TestCommon(unittest.TestCase):
-    CLASSES = (SysIdWheel, SysIdTyre, SysIdYawMoment)
+    CLASSES = (SysIdWheel, SysIdTyre)
 
     def test_registered_as_sysid(self):
         for cls in self.CLASSES:
@@ -144,28 +143,6 @@ class TestTyre(unittest.TestCase):
         p._enter(p._BRAKE)
         p.on_vehicle_state(vs(speed=1.5, rear=0.2))
         self.assertTrue(p._locked)
-
-
-class TestYawMoment(unittest.TestCase):
-    def test_moment_alternates_and_is_cleared(self):
-        """ヨーモーメントは左右へ同じだけ入れ、その区間を出たら上書きから消す（0 に戻る）。"""
-        p = SysIdYawMoment()
-        start(p, vs())
-        moments = []
-        speed, odom = 0.0, 0.0
-        for _ in range(60):
-            st = p.plan(None, vs(speed=speed, rear=speed, odom=odom), {}, DT)
-            speed = st.target_speed if not st.brake else 0.0
-            odom += max(speed, 0.0) * DT
-            m = st.fw_overrides.get("tv_test_moment_nm")
-            if m is not None:
-                moments.append(m)
-            elif moments:
-                break
-        self.assertEqual(len(moments), 8)
-        self.assertAlmostEqual(sum(moments), 0.0)
-        self.assertAlmostEqual(max(moments), MOMENT_NM)
-        self.assertEqual(st.fw_overrides, {"tv_enable": 1.0})
 
 
 if __name__ == "__main__":

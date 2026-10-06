@@ -4,16 +4,18 @@
 |---|---|---|
 | `sysid_wheel`（後輪を浮かせて回す） | 車輪の慣性・回転の摩擦・MD のトルクの遅れ | `fit_wheel()` |
 | `sysid_tyre`（TC・ABS を切って滑らせる） | タイヤの前後力の曲線（μ・荷重移動・傾き・形） | `fit_tyre()` |
-| `sysid_yawmoment`（左右のトルク差を入れる） | ヨーの慣性・減衰 | `fit_yaw()` |
+
+TV（ヨー）の同定は持たない（2026-10-05 に一度作って外した。実測でヨーモーメント 0.1N·m →
+0.056rad/s、上限 0.15N·m でも旋回中のヨーレートの約3%しか動かせず、同定して最適化する効きが無い。
+限界での効きを測るには定常円の試験と横力が飽和するモデルが要る——`PROGRESS.md` 2026-10-05 節）。
 
 `analyze()` がこの順に解析し、前の結果を次に使う（タイヤの力の計算に車輪の慣性が要る）。
 求めた値は `config/vehicle.toml` の `[control.plant]` に入れる（`tuning.apply_plant()`）。
 
 ## 考え方
 
-どれも**出力誤差**で当てはめる: 記録のトルク指令を車両モデルと同じ式に入れて後輪の回転・
-ヨーレートを計算し、記録との差が最小になるパラメータを探す（`tools/sysid/fit.py` と同じ方針）。
-TELEMETRY は 100Hz で、後輪の周速・ヨーレートにはファームのローパスが掛かっている。その遅れは
+どれも**出力誤差**で当てはめる: 記録のトルク指令を車両モデルと同じ式に入れて後輪の回転を計算し、記録との差が最小になるパラメータを探す（`tools/sysid/fit.py` と同じ方針）。
+TELEMETRY は 100Hz で、後輪の周速にはファームのローパスが掛かっている。その遅れは
 ファームの定数として既知なので、モデル側の出力に同じ遅れを掛けてから比べる。
 
 ## ★（警告）
@@ -35,7 +37,7 @@ from scipy.signal import savgol_filter
 from .plant import Plant
 from .record import Rec, load_mcap
 
-__all__ = ["FitResult", "Analysis", "fit_wheel", "fit_tyre", "fit_yaw", "analyze", "TESTS"]
+__all__ = ["FitResult", "Analysis", "fit_wheel", "fit_tyre", "analyze", "TESTS"]
 
 WHEEL_RADIUS_M = 0.030          # ファームの DRIVE_REAR_WHEEL_RADIUS_M
 REAR_TRACK_M = 0.155            # 同 DRIVE_REAR_TRACK_M
@@ -50,7 +52,6 @@ _SUB = 20                       # 1件（10ms）を刻む数
 TESTS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     ("wheel", "Ⓐ 後輪の空転試験", "sysid_wheel", ("wheel_inertia_kgm2", "wheel_friction_nm", "md_tau_s")),
     ("tyre", "Ⓑ タイヤの前後力試験", "sysid_tyre", ("mu", "load_transfer", "tyre_b", "tyre_c")),
-    ("yaw", "Ⓒ ヨーモーメント試験", "sysid_yawmoment", ("yaw_inertia_kgm2", "yaw_damping")),
 )
 
 
@@ -243,98 +244,9 @@ def fit_tyre(rec: Rec, base: Plant) -> FitResult:
     return out
 
 
-# ── Ⓒ ヨーモーメント ──────────────────────────────────────────────────────
-
-def _yaw_windows(rec: Rec, dt: float) -> list[slice]:
-    """ヨーモーメントを入れている区間（前後 0.15s を含む）。"""
-    on = np.nonzero(rec.test_moment != 0.0)[0]
-    if len(on) == 0:
-        return []
-    pad = int(round(0.15 / dt))
-    out, start, prev = [], int(on[0]), int(on[0])
-    for i in on[1:]:
-        if i - prev > pad:
-            out.append(slice(max(0, start - pad), min(len(rec), prev + pad)))
-            start = int(i)
-        prev = int(i)
-    out.append(slice(max(0, start - pad), min(len(rec), prev + pad)))
-    return out
-
-
-def _yaw_sim(diff_cmd: np.ndarray, v: np.ndarray, r0: float, dt: float, inertia: float, damping: float,
-             gyro_tau: float, md_tau: float, md_delay: float) -> np.ndarray:
-    """左右のトルク指令の差 → 記録に出るはずのヨーレート（ジャイロのローパス後）。"""
-    h = dt / _SUB
-    n_delay = int(round(md_delay / h))
-    buf = [diff_cmd[0]] * (n_delay + 1)
-    yaw = obs = r0
-    diff = diff_cmd[0]
-    out = np.empty(len(diff_cmd))
-    k_obs = h / (gyro_tau + h)
-    k_md = h / (md_tau + h)
-    arm = REAR_TRACK_M * 0.5 / WHEEL_RADIUS_M
-    for i in range(len(diff_cmd)):
-        speed = max(abs(v[i]), 0.3)
-        for _ in range(_SUB):
-            buf.append(diff_cmd[i])
-            diff += (buf.pop(0) - diff) * k_md
-            yaw += (diff * arm - damping * (yaw - r0) / speed) / inertia * h
-            obs += (yaw - obs) * k_obs
-        out[i] = obs
-    return out
-
-
-def fit_yaw(rec: Rec, base: Plant) -> FitResult:
-    out = FitResult({})
-    dt = _dt(rec)
-    windows = _yaw_windows(rec, dt)
-    if not windows:
-        out.warn("ヨーモーメントを入れた区間がありません")
-        return out
-    pad = int(round(0.15 / dt))
-    segs = []
-    for w in windows:
-        r0 = float(np.mean(rec.yaw_rate[w][:max(pad - 2, 1)]))
-        segs.append((rec.torque_right[w] - rec.torque_left[w], rec.speed[w], r0, rec.yaw_rate[w]))
-
-    def resid(x):
-        return np.concatenate([_yaw_sim(d, v, r0, dt, math.exp(x[0]), math.exp(x[1]), base.gyro_tau_s,
-                                        base.md_tau_s, base.md_delay_s) - y
-                               for d, v, r0, y in segs])
-
-    r = least_squares(resid, [math.log(base.yaw_inertia_kgm2), math.log(base.yaw_damping)],
-                      bounds=([math.log(1e-3), math.log(0.05)], [math.log(0.5), math.log(50.0)]))
-    inertia, damping = math.exp(r.x[0]), math.exp(r.x[1])
-    rms = float(np.sqrt(np.mean(r.fun ** 2)))
-    # 対数パラメータの標準偏差（ヤコビアンから）。慣性は過渡（10〜20ms）でしか決まらず、
-    # 100Hz の記録では確かさが低い
-    try:
-        cov = np.linalg.inv(r.jac.T @ r.jac) * (2.0 * r.cost / max(len(r.fun) - 2, 1))
-        std_inertia, std_damping = math.sqrt(cov[0, 0]), math.sqrt(cov[1, 1])
-    except np.linalg.LinAlgError:
-        std_inertia = std_damping = float("inf")
-    speeds = sorted({round(float(np.median(v)), 1) for _, v, _, _ in segs})
-    gain = float(np.median(np.abs(rec.speed[np.nonzero(rec.test_moment != 0.0)[0]]))) / damping
-    out.notes.append(f"ヨーの減衰 {damping:.2f}（±{std_damping * 100:.0f}%）・ヨー慣性 {inertia:.4f}kg·m²"
-                     f"（±{std_inertia * 100:.0f}%）、残差 {rms:.3f}rad/s、{len(segs)}区間・速度 {speeds}m/s")
-    out.notes.append(f"ヨーモーメント 0.1N·m で付くヨーレートは約 {gain * 0.1:.3f}rad/s、"
-                     f"時定数 約{inertia / damping * 1e3:.0f}ms×車速[m/s]")
-    out.values = {"yaw_damping": float(damping)}
-    if std_inertia < 0.5:
-        out.values["yaw_inertia_kgm2"] = float(inertia)
-    else:
-        out.notes.append("ヨー慣性は記録から決まらない（応答が記録の刻みより速い）ので机上値のまま")
-    if std_damping > 0.3:
-        out.warn(f"ヨーの減衰の確かさが低い（±{std_damping * 100:.0f}%）——ヨーレートの変化がノイズに埋もれています")
-    peak = float(np.max(np.abs(np.concatenate([y - r0 for _, _, r0, y in segs]))))
-    if peak < 0.03:
-        out.warn(f"ヨーレートがほとんど変わっていません（最大 {peak:.3f}rad/s）——TV が有効か確認")
-    return out
-
-
 # ── まとめて ──────────────────────────────────────────────────────────────
 
-_FNS = {"wheel": fit_wheel, "tyre": fit_tyre, "yaw": fit_yaw}
+_FNS = {"wheel": fit_wheel, "tyre": fit_tyre}
 
 
 @dataclass

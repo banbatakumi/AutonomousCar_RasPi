@@ -33,8 +33,7 @@ DEFAULT_TOML = REPO_ROOT / "config" / "vehicle.toml"
 
 #: 実機の記録から同定する項目（`[control.plant]` に書くキー）
 IDENTIFIED_KEYS = ("wheel_inertia_kgm2", "wheel_friction_nm", "md_delay_s", "md_tau_s",
-                   "mu", "fz_static_n", "load_transfer", "tyre_b", "tyre_c",
-                   "yaw_inertia_kgm2", "yaw_damping")
+                   "mu", "fz_static_n", "load_transfer", "tyre_b", "tyre_c")
 
 
 @dataclass(frozen=True)
