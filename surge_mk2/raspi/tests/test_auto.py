@@ -517,10 +517,10 @@ class TestCamCenterline(unittest.TestCase):
 
 
 class TestCamE2E(unittest.TestCase):
-    """画像→操舵の直接回帰（`cam_e2e_node.py`の推論結果）を読むだけの薄いPlanner。
+    """画像→操舵・速度の直接回帰（`cam_e2e_node.py`の推論結果）を読むだけの薄いPlanner。
 
-    幾何は一切扱わない（IPMを経由しない）ので、`CamE2ECmd`から`plan()`が
-    正しい操舵・速度・安全策の判断を作ることだけを確認する。
+    幾何もLiDARも扱わないので、`CamE2ECmd`から`plan()`が正しい操舵・速度を
+    作ること、分からないときに制動へ倒れることだけを確認する。
     """
 
     def setUp(self):
@@ -531,6 +531,13 @@ class TestCamE2E(unittest.TestCase):
         p = {**self.params, **over}
         return self.p.plan(cmd, vs, p, dt)
 
+    @staticmethod
+    def cmd(steer=0.0, speed=0.5, **over):
+        kw = dict(ready=True, steer_norm=steer, speed_norm=speed,
+                  model_max_steer=0.524, model_speed_ref=2.0)
+        kw.update(over)
+        return CamE2ECmd(**kw)
+
     def test_declares_a_distinct_input_topic(self):
         self.assertEqual(CamE2E.input_topic, TOPIC_CAM_E2E_CMD)
         self.assertNotEqual(CamE2E.input_topic, TOPIC_SCAN)
@@ -540,57 +547,60 @@ class TestCamE2E(unittest.TestCase):
         self.assertFalse(st.ready)
         self.assertTrue(st.reason)
 
-    def test_stops_when_lidar_not_seen(self):
-        """LiDARが届いていなければ「分からなければ止まる」の安全側判断。"""
-        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
-                                 lidar_seen=False))
-        self.assertFalse(st.ready)
-        self.assertTrue(st.reason)
-
-    def test_crawls_at_min_speed_when_front_is_too_close(self):
-        """緊急停止はSTM32の`auto_stop`に任せる（`follow_the_gap.py`docstring参照）。"""
-        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.5, model_max_steer=0.524,
-                                 lidar_seen=True, lidar_front_dist=0.1))
+    def test_runs_without_any_lidar_input(self):
+        """カメラだけで完結する。LiDAR 由来の値が無くても ready になる。"""
+        st = self.plan(self.cmd())
         self.assertTrue(st.ready)
         self.assertFalse(st.brake)
-        self.assertLess(st.target_speed, self.params["min_speed"] + 0.05)
+        self.assertGreater(st.target_speed, 0.0)
 
     def test_positive_steer_norm_steers_left(self):
         """反時計回り正の慣例通り、正の `steer_norm` は正の舵角になる。"""
-        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.5, model_max_steer=0.524,
-                                 lidar_seen=True, lidar_front_dist=5.0),
-                       steer_tau=0.0)
+        st = self.plan(self.cmd(steer=0.5), steer_tau=0.0)
         self.assertTrue(st.ready)
-        self.assertFalse(st.brake)
-        self.assertGreater(st.target_steer, 0.0)
         self.assertAlmostEqual(st.target_steer, 0.5 * 0.524, places=3)
+
+    def test_steer_gain_scales_the_model_output(self):
+        st = self.plan(self.cmd(steer=0.4), steer_tau=0.0, steer_gain=1.5)
+        self.assertAlmostEqual(st.target_steer, 0.4 * 0.524 * 1.5, places=3)
 
     def test_steer_is_clamped_to_vehicle_max_steer(self):
         vehicle_max = self.p.vehicle.max_steer
-        st = self.plan(CamE2ECmd(ready=True, steer_norm=1.0, model_max_steer=10.0,
-                                 lidar_seen=True, lidar_front_dist=5.0),
-                       steer_tau=0.0)
-        self.assertLessEqual(abs(st.target_steer), vehicle_max + 1e-9)
+        for cmd, over in ((self.cmd(steer=1.0, model_max_steer=10.0), {}),
+                          (self.cmd(steer=1.0), {"steer_gain": 2.0})):
+            self.p.reset()
+            st = self.plan(cmd, steer_tau=0.0, **over)
+            self.assertLessEqual(abs(st.target_steer), vehicle_max + 1e-9)
+
+    def test_speed_follows_the_model_output(self):
+        st = self.plan(self.cmd(speed=0.25), max_speed=3.0, min_speed=0.0)
+        self.assertAlmostEqual(st.target_speed, 0.25 * 2.0, places=6)
+
+    def test_speed_scale_multiplies_the_model_output(self):
+        st = self.plan(self.cmd(speed=0.25), max_speed=3.0, min_speed=0.0, speed_scale=0.5)
+        self.assertAlmostEqual(st.target_speed, 0.25, places=6)
 
     def test_speed_never_exceeds_max_speed(self):
-        for steer in (-0.5, 0.0, 0.5):
-            st = self.plan(CamE2ECmd(ready=True, steer_norm=steer, model_max_steer=0.524,
-                                     lidar_seen=True, lidar_front_dist=5.0),
-                           max_speed=0.3)
+        for speed in (0.0, 0.5, 1.0, 7.0):
+            st = self.plan(self.cmd(speed=speed), max_speed=0.3, speed_scale=1.5)
             self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
 
-    def test_speed_ramps_down_near_the_wall(self):
-        near = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
-                                   lidar_seen=True, lidar_front_dist=0.5),
-                         slow_dist=1.5)
-        far = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
-                                  lidar_seen=True, lidar_front_dist=1.5),
-                        slow_dist=1.5)
-        self.assertLess(near.target_speed, far.target_speed)
+    def test_zero_model_speed_still_moves_at_min_speed(self):
+        """止まった絵に速度0を出すモデルでも発進できる。"""
+        st = self.plan(self.cmd(speed=0.0), min_speed=0.1)
+        self.assertTrue(st.ready)
+        self.assertAlmostEqual(st.target_speed, 0.1, places=6)
+
+    def test_min_speed_does_not_override_max_speed(self):
+        st = self.plan(self.cmd(speed=0.0), min_speed=0.5, max_speed=0.2)
+        self.assertLessEqual(st.target_speed, 0.2 + 1e-9)
+
+    def test_negative_speed_norm_is_not_reverse(self):
+        st = self.plan(self.cmd(speed=-0.5), min_speed=0.0)
+        self.assertEqual(st.target_speed, 0.0)
 
     def test_reset_clears_the_steering_state(self):
-        cmd = CamE2ECmd(ready=True, steer_norm=0.8, model_max_steer=0.524,
-                        lidar_seen=True, lidar_front_dist=5.0)
+        cmd = self.cmd(steer=0.8)
         for _ in range(20):
             converged = self.plan(cmd).target_steer
         self.assertGreater(abs(converged), 0.05)
@@ -598,25 +608,25 @@ class TestCamE2E(unittest.TestCase):
         self.assertLess(abs(self.plan(cmd).target_steer), abs(converged) * 0.8)
 
     def test_not_ready_always_carries_a_reason(self):
-        for cmd in (CamE2ECmd(ready=False), CamE2ECmd(ready=True, lidar_seen=False)):
+        for cmd in (CamE2ECmd(ready=False), self.cmd(model_speed_ref=0.0),
+                    self.cmd(model_max_steer=0.0)):
             st = self.plan(cmd)
-            if not st.ready or st.brake:
-                self.assertTrue(st.reason)
+            self.assertFalse(st.ready)
+            self.assertTrue(st.reason)
 
-    def test_nan_steer_norm_brakes_instead_of_maxing_out(self):
+    def test_nan_outputs_brake_instead_of_maxing_out(self):
         """issue #1: `max(-1, min(1, nan))` は Python の仕様で +1 を返すため、
-        検査が無いと推論が壊れた瞬間に「最大舵角」へ跳ぶ。"""
-        st = self.plan(CamE2ECmd(ready=True, steer_norm=float("nan"), model_max_steer=0.524,
-                                 lidar_seen=True, lidar_front_dist=5.0))
-        self.assertFalse(st.ready)
-        self.assertTrue(st.reason)
+        検査が無いと推論が壊れた瞬間に「最大舵角」「最高速度」へ跳ぶ。"""
+        nan = float("nan")
+        for cmd in (self.cmd(steer=nan), self.cmd(speed=nan), self.cmd(speed=float("inf")),
+                    self.cmd(model_speed_ref=nan), self.cmd(model_max_steer=nan)):
+            st = self.plan(cmd)
+            self.assertFalse(st.ready)
+            self.assertTrue(st.reason)
 
-    def test_nan_lidar_front_dist_brakes_instead_of_maxing_speed(self):
-        """同じ理由で `free_ahead` が NaN だと `ratio` が 1.0（最高速度）になる。"""
-        st = self.plan(CamE2ECmd(ready=True, steer_norm=0.0, model_max_steer=0.524,
-                                 lidar_seen=True, lidar_front_dist=float("nan")))
-        self.assertFalse(st.ready)
-        self.assertTrue(st.reason)
+    def test_declares_no_stats(self):
+        """距離もギャップも持たない。宣言していない数値を GUI に並べない。"""
+        self.assertEqual(CamE2E.stats, ())
 
 
 class TestDisparityExtender(unittest.TestCase):
@@ -1001,6 +1011,7 @@ class TestAutoCtrlGate(unittest.TestCase):
         self.srv._auto_mode = ""
         self.srv._auto_engaged = False
         self.srv._auto_params = {}
+        self.srv._auto_params_by_mode = {}
         self.srv._auto_was_fresh = True
         self.srv.auto_stalls = 0
         self.srv._save_auto_conf = lambda: None      # ディスクに触らせない
@@ -1028,6 +1039,46 @@ class TestAutoCtrlGate(unittest.TestCase):
         self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 99.0}})
         spec = {s.key: s for s in FollowTheGap.params}
         self.assertEqual(self.srv._auto_params["max_speed"], spec["max_speed"].max)
+
+    def test_params_survive_a_mode_round_trip(self):
+        """★ 別のモード（システム同定を含む）へ行って戻っても、元のモードの値が残る。
+
+        以前は今のモードの分しか持たず、戻ると既定値になっていた（2026-10-06）。"""
+        self.srv._on_auto({"mode": "slam2d_route", "params": {"v_max": 1.2}})
+        self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 0.3}})
+        self.srv._on_auto({"mode": "sysid_steer"})
+        self.srv._on_auto({"mode": ""})
+        self.srv._on_auto({"mode": "slam2d_route"})
+        self.assertAlmostEqual(self.srv._auto_params["v_max"], 1.2)
+        self.srv._on_auto({"mode": "ftg"})
+        self.assertAlmostEqual(self.srv._auto_params["max_speed"], 0.3)
+
+    def test_first_visit_to_a_mode_uses_its_defaults(self):
+        self.srv._on_auto({"mode": "slam2d_route", "params": {"v_max": 1.2}})
+        self.srv._on_auto({"mode": "slam2d_raceline"})       # `v_max` を共有する planner
+        from raspi.auto.registry import merged_params
+        self.assertEqual(self.srv._auto_params, merged_params("slam2d_raceline", {}))
+
+    def test_conf_file_keeps_every_mode_across_restart(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from raspi.nodes import telemetry_node as tn
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(tn, "AUTO_CONF", Path(td) / "auto.json"):
+            del self.srv._save_auto_conf                     # 本物の保存を使う
+            self.srv._on_auto({"mode": "slam2d_route", "params": {"v_max": 1.2}})
+            self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 0.3}})
+            srv2 = tn.TelemetryServer.__new__(tn.TelemetryServer)
+            srv2._auto_mode, srv2._auto_params, srv2._auto_params_by_mode = "", {}, {}
+            srv2._load_auto_conf()
+            self.assertEqual(srv2._auto_mode, "ftg")
+            self.assertAlmostEqual(srv2._auto_params["max_speed"], 0.3)
+            self.assertAlmostEqual(srv2._auto_params_by_mode["slam2d_route"]["v_max"], 1.2)
+            # 旧形式（今のモードの分だけ）も読める
+            tn.AUTO_CONF.write_bytes(b'{"mode":"ftg","params":{"max_speed":0.4}}')
+            srv2._load_auto_conf()
+            self.assertAlmostEqual(srv2._auto_params["max_speed"], 0.4)
 
     def test_releasing_control_disengages(self):
         self.srv._on_auto({"mode": "ftg", "engaged": True})

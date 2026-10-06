@@ -1,12 +1,13 @@
 """`raspi/nodes/cam_e2e_node.py` の配線テスト。
 
-**実モデル・実カメラは要らない。** ダミーの ONNX モデル（画像の平均輝度から
-1個のスカラーを作るだけの回帰モデル）で、フレーム読み取り→前処理→推論→
+**実モデル・実カメラは要らない。** ダミーの ONNX モデル（R・G チャンネルの
+平均を2個の出力にするだけ）で、フレーム読み取り→色順の修正→前処理→推論→
 `CamE2ECmd` 化という配管全体が壊れずに流れることだけを確認する
 （`test_cam_perception_node.py` と同じ方針）。推論の精度は問わない
 ——それは実データが要る領域（`ml_cam_e2e/`）の仕事。
 """
 
+import json
 import sys
 import tempfile
 import threading
@@ -21,122 +22,158 @@ import onnx  # noqa: E402
 from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.bus import FrameRing  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, Scan, VehicleState  # noqa: E402
+from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_E2E_MODEL,
     TOPIC_IMAGE_FRONT,
-    TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nodes.cam_e2e_node import CamE2ENode, RegressionModel  # noqa: E402
+from raspi.nodes.cam_e2e_node import (  # noqa: E402
+    MODEL_OUTPUTS,
+    CamE2ENode,
+    RegressionModel,
+    load_model,
+)
 
 
-def _make_dummy_regression_model(path: Path, h: int, w: int) -> None:
-    """画素の平均から `[1,1,1,1]` のスカラーを作るだけの ONNX モデル。
+def _make_dummy_regression_model(path: Path, h: int, w: int, n_out: int = 2) -> None:
+    """R・G（先頭 `n_out` チャンネル）の平均を `[1, n_out]` で返すだけの ONNX モデル。
 
-    前処理で `(pixel - mean) / std` に正規化した入力（0..1）を渡すので、
-    出力は「明るいほど大きい」値になる——推論そのものの正しさは問わず、
-    配管が通ることと「入力が変われば出力も変わる」ことだけを確認したいので十分。
+    前処理で 0..1 に正規化した RGB を渡すので、出力は `(赤の明るさ, 緑の明るさ)`。
+    推論そのものの正しさは問わず、配管が通ることと**色順が RGB で届くこと**を
+    確かめるのに使う。
     """
     inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, h, w])
-    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 1, 1, 1])
-    node = helper.make_node("ReduceMean", ["input"], ["output"],
-                            axes=[1, 2, 3], keepdims=1)
-    graph = helper.make_graph([node], "dummy", [inp], [out])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, n_out])
+    idx = helper.make_tensor("idx", TensorProto.INT64, [n_out], list(range(n_out)))
+    nodes = [
+        helper.make_node("ReduceMean", ["input"], ["chan"], axes=[2, 3], keepdims=0),
+        helper.make_node("Gather", ["chan", "idx"], ["output"], axis=1),
+    ]
+    graph = helper.make_graph(nodes, "dummy", [inp], [out], initializer=[idx])
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
     onnx.checker.check_model(model)
     onnx.save(model, str(path))
 
 
+def _write_contract(path: Path, w: int, h: int, **over) -> None:
+    cfg = {"input_size": [w, h], "mean": 0.0, "std": 255.0, "max_steer": 0.524,
+           "speed_ref": 1.5, "outputs": list(MODEL_OUTPUTS),
+           "preproc_version": PREPROC_VERSION}
+    cfg.update(over)
+    path.write_text(json.dumps(cfg))
+
+
+def _make_model_files(models_dir: Path, name: str, w: int, h: int, **over) -> None:
+    _make_dummy_regression_model(models_dir / f"{name}.onnx", h, w)
+    _write_contract(models_dir / f"{name}.json", w, h, **over)
+
+
 class TestRegressionModel(unittest.TestCase):
-    def test_brighter_frame_gives_a_larger_output(self):
-        with tempfile.TemporaryDirectory() as d:
-            model_path = Path(d) / "dummy.onnx"
-            _make_dummy_regression_model(model_path, 32, 32)
-            model = RegressionModel(str(model_path), input_size=(32, 32),
-                                    mean=0.0, std=255.0, max_steer=0.524)
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.model_path = Path(self._tmp.name) / "dummy.onnx"
+        _make_dummy_regression_model(self.model_path, 32, 32)
+        self.model = RegressionModel(str(self.model_path), input_size=(32, 32),
+                                     mean=0.0, std=255.0, max_steer=0.524, speed_ref=1.5)
 
-            dark = np.zeros((240, 320, 3), dtype=np.uint8)
-            bright = np.full((240, 320, 3), 255, dtype=np.uint8)
-            self.assertLess(model.infer(dark), model.infer(bright))
+    def tearDown(self):
+        self._tmp.cleanup()
 
-    def test_infer_returns_a_python_float(self):
-        with tempfile.TemporaryDirectory() as d:
-            model_path = Path(d) / "dummy.onnx"
-            _make_dummy_regression_model(model_path, 16, 16)
-            model = RegressionModel(str(model_path), input_size=(16, 16))
-            out = model.infer(np.zeros((64, 64, 3), dtype=np.uint8))
-            self.assertIsInstance(out, float)
+    def test_returns_two_python_floats(self):
+        out = self.model.infer(np.zeros((64, 64, 3), dtype=np.uint8))
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[0], float)
+        self.assertIsInstance(out[1], float)
+
+    def test_input_is_taken_as_rgb(self):
+        red = np.zeros((240, 320, 3), dtype=np.uint8)
+        red[..., 0] = 255
+        steer, speed = self.model.infer(red)
+        self.assertAlmostEqual(steer, 1.0, places=5)
+        self.assertAlmostEqual(speed, 0.0, places=5)
+
+    def test_single_output_model_is_rejected(self):
+        """操舵だけの旧モデルを置いたまま走らせない。"""
+        one = Path(self._tmp.name) / "one.onnx"
+        _make_dummy_regression_model(one, 32, 32, n_out=1)
+        model = RegressionModel(str(one), input_size=(32, 32))
+        with self.assertRaises(ValueError):
+            model.infer(np.zeros((64, 64, 3), dtype=np.uint8))
+
+
+class TestLoadModel(unittest.TestCase):
+    """契約（同梱JSON）が合わないモデルは読み込みで弾く。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_reads_the_contract(self):
+        _make_model_files(self.dir, "ok", 32, 16)
+        model = load_model(self.dir / "ok.onnx")
+        self.assertEqual(model.input_size, (32, 16))
+        self.assertAlmostEqual(model.max_steer, 0.524)
+        self.assertAlmostEqual(model.speed_ref, 1.5)
+
+    def test_rejects_bad_contracts(self):
+        cases = {
+            "old_outputs": {"outputs": ["steer_norm"]},
+            "old_preproc": {"preproc_version": PREPROC_VERSION + 1},
+            "no_speed_ref": {"speed_ref": 0.0},
+            "no_max_steer": {"max_steer": 0.0},
+        }
+        for name, over in cases.items():
+            _make_model_files(self.dir, name, 32, 32, **over)
+            with self.assertRaises(ValueError, msg=name):
+                load_model(self.dir / f"{name}.onnx")
+
+    def test_missing_contract_file_is_rejected(self):
+        """セグメンテーション用など、同梱JSONの無い .onnx を読まない。"""
+        _make_dummy_regression_model(self.dir / "bare.onnx", 32, 32)
+        with self.assertRaises(FileNotFoundError):
+            load_model(self.dir / "bare.onnx")
 
 
 class TestProcessFrame(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
-        self.model_path = Path(self._tmp.name) / "dummy.onnx"
-        _make_dummy_regression_model(self.model_path, 32, 32)
+        _make_model_files(Path(self._tmp.name), "m", 32, 32)
+        self.node = CamE2ENode(model=load_model(Path(self._tmp.name) / "m.onnx"),
+                               vehicle=Vehicle.load())
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_process_frame_returns_the_model_output(self):
-        model = RegressionModel(str(self.model_path), input_size=(32, 32),
-                                mean=0.0, std=255.0, max_steer=0.524)
-        node = CamE2ENode(model=model, vehicle=Vehicle.load())
-        frame = np.full((240, 320, 3), 128, dtype=np.uint8)
-        steer_norm = node.process_frame(frame)
-        self.assertIsInstance(steer_norm, float)
+    def test_bgr_ring_frame_reaches_the_model_as_rgb(self):
+        """実機のリングは BGR888。赤い物（ch2）がモデルの R 入力に届くこと
+        ——以前は入れ替えずに渡していて、学習（RGB）と色が逆だった。"""
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        frame[..., 2] = 255
+        steer, speed = self.node.process_frame(frame, "BGR888")
+        self.assertAlmostEqual(steer, 1.0, places=5)
+        self.assertAlmostEqual(speed, 0.0, places=5)
 
-
-class TestFrontLidarDist(unittest.TestCase):
-    def setUp(self):
-        self.node = CamE2ENode(vehicle=Vehicle.load(), lidar_fov_deg=40.0, lidar_max_range=3.0)
-
-    def test_none_scan_is_unseen(self):
-        dist, seen = self.node.front_lidar_dist(None)
-        self.assertEqual(dist, 0.0)
-        self.assertFalse(seen)
-
-    def test_reports_the_minimum_distance_in_front_fov(self):
-        dist = [3.0] * 360
-        dist[0] = 1.2       # 正面
-        dist[10] = 0.8       # 視野内だがもっと近い
-        scan = Scan(dist=dist, sector_seen=[True] * 12, t_pub=time.monotonic_ns())
-        got, seen = self.node.front_lidar_dist(scan)
-        self.assertTrue(seen)
-        self.assertAlmostEqual(got, 0.8)
-
-    def test_unseen_sector_in_front_fov_is_treated_as_wall(self):
-        """`scan_window()` は欠測を距離0（壁）として返す（安全側）。"""
-        scan = Scan(dist=[3.0] * 360, sector_seen=[False] * 12, t_pub=time.monotonic_ns())
-        got, seen = self.node.front_lidar_dist(scan)
-        self.assertFalse(seen)
-
-    def test_stale_scan_is_treated_as_unseen(self):
-        """`t_pub`が`_SCAN_STALE_NS`より古いscanは、内容が正常でも安全策として使わない
-        （issue #3——LiDAR停止・io_node再起動でscanが途絶えても、最後の値を
-        使い続けて`lidar_seen=True`を出し続けてしまう不具合の修正）。"""
-        dist = [3.0] * 360
-        dist[0] = 1.2
-        old_t_pub = time.monotonic_ns() - 1_000_000_000       # 1秒前 = 十分古い
-        scan = Scan(dist=dist, sector_seen=[True] * 12, t_pub=old_t_pub)
-        got, seen = self.node.front_lidar_dist(scan)
-        self.assertFalse(seen)
-        self.assertEqual(got, 0.0)
+    def test_rgb_ring_frame_is_not_swapped(self):
+        frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        frame[..., 2] = 255
+        steer, _speed = self.node.process_frame(frame, "RGB888")
+        self.assertAlmostEqual(steer, 0.0, places=5)
 
 
 class TestModelSelection(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.models_dir = Path(self._tmp.name)
-        _make_dummy_regression_model(self.models_dir / "model_a.onnx", 32, 32)
-        (self.models_dir / "model_a.json").write_text(
-            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "max_steer": 0.524}')
-        _make_dummy_regression_model(self.models_dir / "model_b.onnx", 16, 16)
-        (self.models_dir / "model_b.json").write_text(
-            '{"input_size": [16, 16], "mean": 0.0, "std": 255.0, "max_steer": 0.3}')
+        _make_model_files(self.models_dir, "model_a", 32, 32)
+        _make_model_files(self.models_dir, "model_b", 16, 16, max_steer=0.3)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -197,9 +234,7 @@ class TestModeGating(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.models_dir = Path(self._tmp.name)
-        _make_dummy_regression_model(self.models_dir / "model_a.onnx", 32, 32)
-        (self.models_dir / "model_a.json").write_text(
-            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "max_steer": 0.524}')
+        _make_model_files(self.models_dir, "model_a", 32, 32)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -278,11 +313,9 @@ class TestModeGating(unittest.TestCase):
             node.close()
             ring.unlink()
 
-    def test_lidar_front_dist_is_included_even_without_a_scan(self):
-        """`scan` がまだ届いていなくても `ready` な推論結果自体は出ること
-        （`lidar_seen=False` になるだけ）。"""
+    def test_ready_cmd_carries_both_outputs_and_the_contract(self):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_noscan")
+        ring, ref = _ref_with_frame("surge_test_ce2e_out")
         try:
             sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
@@ -290,28 +323,51 @@ class TestModeGating(unittest.TestCase):
             pub = _FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
-            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
-            self.assertTrue(any(c.ready for c in cmds))
-            self.assertTrue(any(not c.lidar_seen for c in cmds))
+            ready = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD and c.ready]
+            self.assertTrue(ready)
+            cmd = ready[-1]
+            # ダミーモデルは (R平均, G平均)。リングは一様な 200 なので両方 200/255
+            self.assertAlmostEqual(cmd.steer_norm, 200 / 255, places=3)
+            self.assertAlmostEqual(cmd.speed_norm, 200 / 255, places=3)
+            self.assertAlmostEqual(cmd.model_max_steer, 0.524)
+            self.assertAlmostEqual(cmd.model_speed_ref, 1.5)
+            self.assertGreater(cmd.t_capture, 0)
         finally:
             node.close()
             ring.unlink()
 
-    def test_scan_updates_lidar_front_dist(self):
-        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_wscan")
+    def test_publishes_only_once_per_inference_period(self):
+        """`Publisher` は送るたびに seq を振るので、再送すると planning_node の
+        `plan()` が無駄に回る。推論を試みた周期だけ publish すること。"""
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
+        ring, ref = _ref_with_frame("surge_test_ce2e_rate")
         try:
-            scan = Scan(dist=[1.5] * 360, sector_seen=[True] * 12, t_pub=time.monotonic_ns())
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_SCAN: scan,
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.05)      # 10Hz の1周期（100ms）未満
+
+            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+            self.assertEqual(len(cmds), 1)
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_no_model_reports_not_ready_with_a_fresh_timestamp(self):
+        """`t_capture=0` だと planning_node が「入力が古い」で先に止めてしまい、
+        planner の「モデル未選択」が GUI に出ない。"""
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        ring, ref = _ref_with_frame("surge_test_ce2e_nomodel")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = _FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
-            ready_cmds = [c for c in cmds if c.ready]
-            self.assertTrue(ready_cmds)
-            self.assertTrue(all(c.lidar_seen and c.lidar_front_dist > 0 for c in ready_cmds))
+            self.assertTrue(cmds)
+            self.assertFalse(cmds[-1].ready)
+            self.assertLess(time.monotonic_ns() - cmds[-1].t_capture, 1_000_000_000)
         finally:
             node.close()
             ring.unlink()
@@ -343,9 +399,7 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.models_dir = Path(self._tmp.name)
-        _make_dummy_regression_model(self.models_dir / "model_a.onnx", 32, 32)
-        (self.models_dir / "model_a.json").write_text(
-            '{"input_size": [32, 32], "mean": 0.0, "std": 255.0, "max_steer": 0.524}')
+        _make_model_files(self.models_dir, "model_a", 32, 32)
 
     def tearDown(self):
         self._tmp.cleanup()

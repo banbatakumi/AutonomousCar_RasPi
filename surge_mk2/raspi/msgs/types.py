@@ -117,7 +117,7 @@ TOPIC_E2E_MODEL = "e2e/model"
 #: 契約が全く違うモデルを同じ選択欄に混ぜると選び間違いの温床になる
 #: （`raspi/auto/e2e_lidar.py` が `models/e2e_lidar/` をカメラ用と分けた理由と同じ）
 TOPIC_CAM_E2E_MODEL = "cam_e2e/model"
-#: `cam_e2e_node.py` が publish する推論結果（正規化した操舵角＋LiDAR前方距離）。
+#: `cam_e2e_node.py` が publish する推論結果（正規化した操舵と速度）。
 #: `raspi/auto/cam_e2e.py`（id `cam_e2e`）の `input_topic`
 TOPIC_CAM_E2E_CMD = "cam_e2e/cmd"
 
@@ -868,10 +868,11 @@ class CamE2EModelCtrl(MsgBase):
     """`cam_e2e_node.py` への「このモデルを使ってほしい」という意思。
 
     `CamModelCtrl`/`E2EModelCtrl` と同じ設計（現在の意思を繰り返し流す）。
-    `name` は `models/<name>.onnx`（+ 同名の `.json`。`ml_cam_e2e/export_onnx.py`
-    が書く）を指す。**カメラ用セグメンテーションと同じ `models/` 直下だが、
-    選択トピックが別（`cam/model` ではなく `cam_e2e/model`）なので混同しない**
-    （`TOPIC_CAM_E2E_MODEL` のコメント参照）。空文字は「未選択」。
+    `name` は `models/cam_e2e/<name>.onnx`（+ 同名の `.json`。
+    `ml_cam_e2e/export_onnx.py` が書く）を指す。**セグメンテーション用
+    （`models/` 直下）とは置き場を分ける**——前処理契約も出力も違うので、
+    同じ一覧に並ぶと選び間違えたときに壊れた入力を渡すことになる
+    （`E2EModelCtrl` と同じ理由）。空文字は「未選択」。
     """
 
     name: str = ""
@@ -880,18 +881,17 @@ class CamE2EModelCtrl(MsgBase):
 class CamE2ECmd(MsgBase):
     """`cam_e2e_node.py` の推論結果。`raspi/auto/cam_e2e.py`（id `cam_e2e`）の `input_topic`。
 
-    画像→操舵の直接回帰（模倣学習）の出力に加えて、**独立の安全策のために
-    LiDAR前方距離も同梱する**（`raspi/auto/e2e_lidar.py` の `free_ahead` と同じ
-    役目）。低い壁には効かないが、それ以外の一般障害物に対する最後の砦として、
-    `cam_e2e.py` の `stop_dist`/速度則がこの値を見る——`cam_e2e_node.py` が
-    `scan`（LiDAR）も購読して算出する（推論失敗時もLiDAR側は独立に更新できる）。
+    前方カメラの画像1枚から操舵と速度を直接回帰した値（模倣学習）。
+    **カメラだけで完結する**——LiDAR は見ない。物理量へ戻すための契約値
+    （`model_max_steer`・`model_speed_ref`）を同梱するので、planner は
+    モデルのファイルを知らなくてよい。
     """
 
     ready: bool = False
-    steer_norm: float = 0.0        #: モデル出力（tanh、-1..1）。`model.json`の`max_steer`で物理量に戻す
+    steer_norm: float = 0.0        #: モデル出力（tanh、-1..1）。`model_max_steer` を掛けて舵角にする
+    speed_norm: float = 0.0        #: モデル出力（sigmoid、0..1）。`model_speed_ref` を掛けて速度にする
     model_max_steer: float = 0.0   #: [rad] エクスポート時の契約値（0ならモデル未選択）
-    lidar_front_dist: float = 0.0  #: [m] 正面付近のLiDAR最小距離（0=不明・欠測）
-    lidar_seen: bool = False       #: 上の値がLiDARの実測に基づくか
+    model_speed_ref: float = 0.0   #: [m/s] 同上。`speed_norm=1` が表す速度
 
 
 class TargetRoiCtrl(MsgBase):

@@ -1,30 +1,39 @@
-"""cam_e2e_node — 前方カメラの画像から操舵角を直接回帰する（模倣学習、幾何変換を経由しない）。
+"""cam_e2e_node — 前方カメラの画像から操舵と速度を直接回帰する（模倣学習、幾何変換を経由しない）。
 
     .venv/bin/python -m raspi.nodes.cam_e2e_node
     .venv/bin/python -m raspi.nodes.cam_e2e_node --model model.onnx   # 開発用に既定モデルを直指定
 
 `camera_node.py` が書く共有メモリ（`image/front` の `ImageRef`）を読み、ONNX
-モデルで正規化した操舵角（`steer_norm`、-1..1）を直接推論する。
-`cam_perception_node.py`（走行可否セグメンテーション→IPM→擬似`Scan`）と違い、
-**幾何変換（IPM）を一切経由しない**——低いカメラ高さでIPMの深度誤差が
-拡大する問題を、画像から操舵を直接学習することで迂回するのがこのノードの
-存在理由（`docs/development.md` §12.3）。
+モデルで正規化した操舵（`steer_norm`、-1..1）と速度（`speed_norm`、0..1）を
+直接推論する。`cam_perception_node.py`（走行可否セグメンテーション→IPM→
+擬似`Scan`）と違い、**幾何変換（IPM）を一切経由しない**——低いカメラ高さで
+IPMの深度誤差が拡大する問題を、画像から操作を直接学習することで迂回するのが
+このノードの存在理由（`docs/development.md` §12.3）。
 
-## 独立の安全策として LiDAR 前方距離も同梱する
+## カメラだけで完結する（2026-10-06）
 
-模倣学習は「学習データに無い状況」でどう振る舞うか原理的に保証できない
-（`raspi/auto/e2e_lidar.py` と同じ理由）。カメラだけに徹すると、正面が
-詰まったときに止める根拠が丸ごとモデル出力任せになってしまうので、
-**`scan`（LiDAR）も購読して正面付近の最小距離を一緒に publish する。**
-低い壁には効かないが（そもそもLiDARが見えない）、それ以外の一般障害物
-（人・パイロン・普通の高さの壁）への最後の砦として `raspi/auto/cam_e2e.py`
-の `stop_dist` 判定がこの値を使う。
+以前は LiDAR の前方距離を同梱して速度則に使っていたが、「カメラの映像だけで
+走る」というモードの目的に合わないので外した。速度もモデルが出す。
+模倣学習は学習データに無い状況での挙動を保証できない点は変わらないので、
+止める根拠は planner の外にある層に任せる——STM32 の `auto_stop`
+（GUI の設定がそのまま通る）、デッドマン、人の操作による解除、そして
+`raspi/auto/cam_e2e.py` の速度上限。
+
+## 前処理は `raspi/core/cam_e2e_preproc.py` だけ
+
+学習（`ml_cam_e2e/`）と同じ関数を通す。色順（リングは BGR が既定）は
+`ImageRef.fmt` を見てここで RGB に直す——`fmt` が分かるのはこのノードだけ。
 
 ## 契約: 推論が失敗した／モデル未選択のフレームは `ready=False`
 
-`cam_perception_node.py` の契約2（欠測は壁扱い）と同じ考え方。カメラ側が
-死んでいても LiDAR 側は独立に更新し続ける——`ready=False` はあくまで
-「操舵をこの周期のモデル出力に任せてよいか」の判定であって、安全策の可否とは別。
+`cam_perception_node.py` の契約2（欠測は壁扱い）と同じ考え方。
+
+## publish するのは「推論を試みた周期」だけ
+
+`Publisher.send()` は呼ぶたびに seq を打ち直すので、同じ中身を再送すると
+planning_node には新しい入力に見えて `plan()` が回る。推論は `--infer-hz`
+（既定10Hz）に間引いているので、publish もその周期に合わせる
+（`cam_perception_node.py` と同じ。`stale_ms=500` に対して十分な鮮度）。
 
 ## カメラ系モードが選ばれている間だけ推論する
 
@@ -51,11 +60,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from raspi.auto.base import scan_window  # noqa: E402
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION, preprocess, to_rgb  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import CamE2ECmd, ImageRef, Scan  # noqa: E402
+from raspi.msgs import CamE2ECmd, ImageRef  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
@@ -63,41 +72,36 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
-    TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nodes.cam_perception_node import _resize_nearest  # noqa: E402
 
-__all__ = ["RegressionModel", "CamE2ENode"]
+__all__ = ["MODEL_OUTPUTS", "RegressionModel", "load_model", "CamE2ENode"]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: カメラ用セグメンテーションモデルと同じ `models/` 直下（`cam_e2e/model` という
-#: 別トピックで選ぶので混同しない。`raspi/msgs/types.py` の `TOPIC_CAM_E2E_MODEL` 参照）
-DEFAULT_MODELS_DIR = REPO_ROOT / "models"
+#: セグメンテーション用（`models/` 直下）とは分ける。telemetry_node の
+#: `_cam_models_list` は直下の .onnx を全部セグメンテーション用として並べるので、
+#: 同じ場所に置くと `ftg_cam` の選択肢に出てしまう（`models/e2e_lidar/` と同じ理由）
+DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
 
 NS = 1_000_000_000
 HB_HZ = 10
 #: 推論（CNN）を必要とする自動運転モード
 _CAM_E2E_MODES = ("cam_e2e",)
-#: `scan`（LiDAR）がこれより古ければ融合に使わない（`cam_track_node.py` の
-#: `_SCAN_STALE_NS` と同じ値・同じ考え方——LiDAR停止・セクタ全欠け・io_node
-#: 再起動などでscanが途絶えても、鮮度チェックが無いと最後のscanの
-#: `lidar_seen=True` と距離が毎周期publishされ続けてしまう（issue #3）。
-#: 独立しているはずの安全策（LiDAR前方距離）がカメラ推論とは別経路で
-#: 無効化されたまま気づかれない、という壊れ方になる）
-_SCAN_STALE_NS = 300_000_000
+#: モデル出力の並び。同梱 JSON の `outputs` と照合する（`ml_cam_e2e/export_onnx.py` が書く）
+MODEL_OUTPUTS = ("steer_norm", "speed_norm")
 
 
 class RegressionModel:
-    """ONNX 推論の薄いラッパ。出力は `steer_norm`（tanh、-1..1）1個。
+    """ONNX 推論の薄いラッパ。出力は `(steer_norm, speed_norm)` の2個。
 
-    前処理契約（入力解像度・平均/分散）と出力契約（`max_steer`）はモデルに
-    同梱する（`ml_cam_e2e/export_onnx.py` が `<name>.json` に書く）。
+    前処理契約（入力解像度・平均/分散）と出力契約（`max_steer`・`speed_ref`）は
+    モデルに同梱する（`ml_cam_e2e/export_onnx.py` が `<name>.json` に書く）。
     `raspi/nodes/cam_perception_node.py` の `SegmentationModel` と同じ設計。
     """
 
-    def __init__(self, model_path: str, *, input_size: tuple[int, int] = (224, 224),
-                mean: float = 0.0, std: float = 255.0, max_steer: float = 0.0) -> None:
+    def __init__(self, model_path: str, *, input_size: tuple[int, int] = (224, 128),
+                mean: float = 0.0, std: float = 255.0, max_steer: float = 0.0,
+                speed_ref: float = 0.0) -> None:
         import onnxruntime as ort
 
         # `cam_perception_node.SegmentationModel` と同じ省電力設定
@@ -113,45 +117,71 @@ class RegressionModel:
         self.mean = mean
         self.std = std
         self.max_steer = max_steer
+        self.speed_ref = speed_ref
 
-    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        w, h = self.input_size
-        resized = _resize_nearest(frame[..., :3], w, h)
-        x = (resized.astype(np.float32) - self.mean) / self.std
-        return np.transpose(x, (2, 0, 1))[None, ...]
+    def infer(self, rgb: np.ndarray) -> tuple[float, float]:
+        """**RGB** の `(H, W, 3)` uint8 → `(steer_norm, speed_norm)`。
 
-    def infer(self, frame: np.ndarray) -> float:
-        """`frame` (H, W, C) → `steer_norm`（-1..1。既にモデル側で `tanh` 済み）。"""
-        x = self._preprocess(frame)
-        out = self.session.run(None, {self.input_name: x})[0]
-        return float(np.squeeze(out))
+        色順を直すのは呼び出し側の責任（`to_rgb()`）。ここで `fmt` を知らずに
+        推測すると、学習側（JPEG をデコードした RGB）とまた食い違う。
+        """
+        x = preprocess(rgb, self.input_size, self.mean, self.std)
+        out = np.asarray(self.session.run(None, {self.input_name: x})[0]).reshape(-1)
+        if out.size != len(MODEL_OUTPUTS):
+            raise ValueError(f"モデル出力が{out.size}個（{len(MODEL_OUTPUTS)}個のはず）")
+        return float(out[0]), float(out[1])
+
+
+def load_model(onnx_path: Path) -> RegressionModel:
+    """`<name>.onnx` と同梱の `<name>.json` から `RegressionModel` を作る。
+
+    **契約が合わないモデルは読まない。** 出力が2個でない（操舵だけの旧モデル、
+    セグメンテーション用を置き間違えた等）、前処理の版が違う、物理量へ戻す
+    基準が無い——どれも「読めてしまうが走りがおかしい」になるので例外にする。
+    `ml_cam_e2e/eval.py` も同じ関数で読む（実車と同じ経路で評価するため）。
+    """
+    if not onnx_path.exists():
+        raise FileNotFoundError(f"モデルが見つかりません: {onnx_path}")
+    cfg_path = onnx_path.with_suffix(".json")
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"契約ファイルがありません: {cfg_path}")
+    cfg = json.loads(cfg_path.read_text())
+    if tuple(cfg.get("outputs", ())) != MODEL_OUTPUTS:
+        raise ValueError(f"outputs が {list(MODEL_OUTPUTS)} ではない: {cfg.get('outputs')}")
+    if cfg.get("preproc_version") != PREPROC_VERSION:
+        raise ValueError(f"前処理の版が違う（モデル {cfg.get('preproc_version')}・"
+                         f"ノード {PREPROC_VERSION}）。再エクスポートが必要")
+    max_steer = float(cfg.get("max_steer", 0.0))
+    speed_ref = float(cfg.get("speed_ref", 0.0))
+    if max_steer <= 0 or speed_ref <= 0:
+        raise ValueError(f"max_steer/speed_ref が正でない: {max_steer}/{speed_ref}")
+    w, h = cfg["input_size"]
+    return RegressionModel(str(onnx_path), input_size=(int(w), int(h)),
+                           mean=float(cfg.get("mean", 0.0)),
+                           std=float(cfg.get("std", 255.0)),
+                           max_steer=max_steer, speed_ref=speed_ref)
 
 
 class CamE2ENode:
-    """1台の前方カメラ → 操舵の直接回帰 ＋ LiDAR前方距離（安全策）。
+    """1台の前方カメラ → 操舵と速度の直接回帰。
 
-    **`process_frame()`/`front_lidar_dist()` はバス・共有メモリを一切知らない
-    純粋関数。** `run()`（実バス配線）とテストの両方がここを通る
+    **`process_frame()` はバス・共有メモリを一切知らない純粋関数。**
+    `run()`（実バス配線）とテストの両方がここを通る
     （`cam_perception_node.py` と同じ設計方針）。
     """
 
     def __init__(self, *, model: RegressionModel | None = None,
                 models_dir: Path | None = None, loaded_model_name: str = "",
-                vehicle: Vehicle | None = None,
-                lidar_fov_deg: float = 40.0, lidar_max_range: float = 3.0,
-                infer_hz: float = 10.0) -> None:
+                vehicle: Vehicle | None = None, infer_hz: float = 10.0) -> None:
         #: **`None` は「まだモデルが選ばれていない」。** `run()` はこの間 `ready=False` を出し続ける
         self.model = model
         self.models_dir = models_dir or DEFAULT_MODELS_DIR
         self._loaded_model_name = loaded_model_name
         self.vehicle = vehicle or Vehicle.load()
-        self.lidar_fov_deg = lidar_fov_deg
-        self.lidar_max_range = lidar_max_range
 
         # ★省電力化: `cam_perception_node.py` と同じ理由で推論を間引く
         self._infer_period_ns = int(NS / infer_hz) if infer_hz > 0 else 0
-        self._last_infer_ns = 0
-        self._last_cmd: CamE2ECmd | None = None
+        self._last_attempt_ns = 0
         self._running = False
         self._active = False
         self._reader = FrameReader()
@@ -161,27 +191,13 @@ class CamE2ENode:
 
     # ── モデルの切替 ──
 
-    def _load_model_by_name(self, name: str) -> RegressionModel:
-        onnx_path = self.models_dir / f"{name}.onnx"
-        if not onnx_path.exists():
-            raise FileNotFoundError(f"モデルが見つかりません: {onnx_path}")
-        cfg = {}
-        cfg_path = onnx_path.with_suffix(".json")
-        if cfg_path.exists():
-            cfg = json.loads(cfg_path.read_text())
-        w, h = cfg.get("input_size", [224, 224])
-        return RegressionModel(str(onnx_path), input_size=(int(w), int(h)),
-                               mean=float(cfg.get("mean", 0.0)),
-                               std=float(cfg.get("std", 255.0)),
-                               max_steer=float(cfg.get("max_steer", 0.0)))
-
     def reload_if_changed(self, desired_name: str) -> bool:
         """`cam_perception_node.CamPerceptionNode.reload_if_changed()` と同じ契約
         （失敗しても今のモデルを保持する）。"""
         if not desired_name or desired_name == self._loaded_model_name:
             return False
         try:
-            self.model = self._load_model_by_name(desired_name)
+            self.model = load_model(self.models_dir / f"{desired_name}.onnx")
             self._loaded_model_name = desired_name
             print(f"# モデル切替: {desired_name}", flush=True)
             return True
@@ -192,31 +208,45 @@ class CamE2ENode:
 
     # ── 1周期ぶんの処理（純粋関数） ──
 
-    def process_frame(self, frame: np.ndarray) -> float:
-        """1枚のフレーム → `steer_norm`（-1..1）。`self.model` が必須（呼び出し側が保証）。"""
-        return self.model.infer(frame)
-
-    def front_lidar_dist(self, scan: Scan | None) -> tuple[float, bool]:
-        """`(前方最小距離[m], 実測に基づくか)`。`scan` が無ければ `(0.0, False)`。
-
-        `raspi/auto/e2e_lidar.py` の `free_ahead` と同じ切り出し方
-        （`scan_window()` で前方視野を切り出し、正面±`lidar_fov_deg/2` の最小値を取る）。
-        """
-        if scan is None or time.monotonic_ns() - scan.t_pub > _SCAN_STALE_NS:
-            return 0.0, False
-        w = scan_window(scan, self.lidar_fov_deg, self.lidar_max_range)
-        if w.seen_ratio <= 0.0:
-            return 0.0, False
-        return min(w.dist) if w.dist else 0.0, True
+    def process_frame(self, frame: np.ndarray, fmt: str = "RGB888") -> tuple[float, float]:
+        """1枚の生フレーム → `(steer_norm, speed_norm)`。`self.model` が必須（呼び出し側が保証）。"""
+        return self.model.infer(to_rgb(frame, fmt))
 
     def failed_cmd(self, *, seq: int = 0, t_capture_ns: int = 0) -> CamE2ECmd:
-        """フレームが読めない／モデル未選択の周期。**`ready=False`。**"""
-        return CamE2ECmd(ready=False, seq=seq, t_capture=t_capture_ns)
+        """フレームが読めない／モデル未選択の周期。**`ready=False`。**
+
+        `t_capture` は省略時「いま」にする。0 のままだと planning_node の鮮度判定
+        （`_current()`）が先に「入力が古い」で止めてしまい、planner の
+        「モデル未選択」という本当の理由が GUI に出ない。
+        """
+        return CamE2ECmd(ready=False, seq=seq,
+                         t_capture=t_capture_ns or time.monotonic_ns())
 
     # ── 共有メモリの読み取り ──
 
     def read_frame(self, ref: ImageRef) -> tuple[np.ndarray, int] | None:
         return self._reader.read(ref)
+
+    def _attempt(self, ref: ImageRef | None, seq: int) -> CamE2ECmd:
+        """推論を1回試みる。どこで失敗しても `ready=False` の `CamE2ECmd` を返す。"""
+        if self.model is None or ref is None:
+            return self.failed_cmd(seq=seq)
+        got = self.read_frame(ref)
+        if got is None:
+            return self.failed_cmd(seq=seq)
+        frame, t_capture = got
+        try:
+            steer_norm, speed_norm = self.process_frame(frame, ref.fmt)
+        except Exception as e:
+            # 推論側のバグでノード全体を巻き込んで落とさない。
+            # 契約の「ready=False」に自然に落とす
+            # （`planning_node._replan()` と同じパターン）
+            print(f"# cam_e2e process_frame() が例外: {e}", file=sys.stderr, flush=True)
+            return self.failed_cmd(seq=seq, t_capture_ns=t_capture)
+        return CamE2ECmd(ready=True, steer_norm=steer_norm, speed_norm=speed_norm,
+                         model_max_steer=self.model.max_steer,
+                         model_speed_ref=self.model.speed_ref,
+                         seq=seq, t_capture=t_capture)
 
     # ── ループ（実バス配線） ──
 
@@ -255,67 +285,28 @@ class CamE2ENode:
                 print(f"# {mode} {reason}", flush=True)
 
             now = time.monotonic_ns()
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）。
+            # ACTIVE中は常に True が返るので、下の推論周期で間引く
+            idle_publish = pacer.should_publish(active, now)
+            cmd: CamE2ECmd | None = None
             if not active:
-                cmd = self.failed_cmd(seq=seq)
-                self._last_cmd = None
-            elif self.model is None:
-                cmd = self.failed_cmd(seq=seq)
-                self._last_cmd = None
-            else:
-                ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-                scan = sub.latest.get(TOPIC_SCAN)
-                lidar_dist, lidar_seen = self.front_lidar_dist(scan)
-                if ref is None:
+                self._last_attempt_ns = 0          # ACTIVE に戻った瞬間にすぐ推論する
+                if idle_publish:
                     cmd = self.failed_cmd(seq=seq)
-                    self._last_cmd = None
-                elif (self._last_cmd is not None
-                      and now - self._last_infer_ns < self._infer_period_ns):
-                    # ★省電力化: 間引き周期内。前回の推論結果（steer）はそのまま
-                    # 使い回すが、LiDAR前方距離は安全策なので毎周期更新する
-                    prev = self._last_cmd
-                    cmd = CamE2ECmd(ready=prev.ready, steer_norm=prev.steer_norm,
-                                    model_max_steer=prev.model_max_steer,
-                                    lidar_front_dist=lidar_dist, lidar_seen=lidar_seen,
-                                    seq=seq, t_capture=prev.t_capture)
-                    self._last_cmd = cmd
-                else:
-                    got = self.read_frame(ref)
-                    if got is None:
-                        cmd = self.failed_cmd(seq=seq)
-                        self._last_cmd = None
-                    else:
-                        frame, t_capture = got
-                        self._last_infer_ns = now
-                        try:
-                            steer_norm = self.process_frame(frame)
-                        except Exception as e:
-                            # 推論側のバグでノード全体を巻き込んで落とさない。
-                            # 契約の「ready=False」に自然に落とす
-                            # （`planning_node._replan()` と同じパターン）
-                            print(f"# cam_e2e process_frame() が例外: {e}",
-                                 file=sys.stderr, flush=True)
-                            cmd = self.failed_cmd(seq=seq, t_capture_ns=t_capture)
-                            self._last_cmd = None
-                        else:
-                            cmd = CamE2ECmd(ready=True, steer_norm=steer_norm,
-                                            model_max_steer=self.model.max_steer,
-                                            lidar_front_dist=lidar_dist, lidar_seen=lidar_seen,
-                                            seq=seq, t_capture=t_capture)
-                            self._last_cmd = cmd
-            # **`cam_perception_node.py` と違い、間引き周期中も毎回 publish する。**
-            # あちらは推論結果（内容）が変わらないので重複排除に任せてよいが、
-            # ここは LiDAR 前方距離（安全策）が毎周期変わりうる値で、それを
-            # 間引くと「安全策だけ古いまま」になりかねないため
-            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
-            if pacer.should_publish(active, now):
+            elif now - self._last_attempt_ns >= self._infer_period_ns:
+                # 成功・失敗どちらでも1周期に1回だけ publish する
+                # （モジュールdocstring「publish するのは推論を試みた周期だけ」）
+                self._last_attempt_ns = now
+                cmd = self._attempt(sub.latest.get(TOPIC_IMAGE_FRONT), seq)
+            if cmd is not None:
                 pub.send(TOPIC_CAM_E2E_CMD, cmd)
-            seq += 1
+                seq += 1
+                if status_cb:
+                    status_cb(cmd)
 
             if now >= next_hb:
                 next_hb = now + NS // HB_HZ
                 pub.send(TOPIC_HB_PREFIX + "cam_e2e", HbMsg(node="cam_e2e"))
-            if status_cb:
-                status_cb(cmd)
             pacer.idle_sleep(active)
 
 
@@ -323,38 +314,22 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None,
-                    help="起動時の既定モデル（ONNXパス。省略時は cam_e2e/model トピック"
-                         "経由のGUI選択を待つ）")
+                    help="起動時の既定モデル（ONNXパス。同名の .json が必要。省略時は "
+                         "cam_e2e/model トピック経由のGUI選択を待つ）")
     ap.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
-    ap.add_argument("--input-size", default="224x224",
-                    help="--model 直指定のときだけ使う入力解像度")
-    ap.add_argument("--mean", type=float, default=0.0)
-    ap.add_argument("--std", type=float, default=255.0)
-    ap.add_argument("--max-steer", type=float, default=0.0,
-                    help="--model 直指定のときだけ使う出力契約（0ならvehicle.tomlを使う）")
-    ap.add_argument("--lidar-fov-deg", type=float, default=40.0)
-    ap.add_argument("--lidar-max-range", type=float, default=3.0)
     ap.add_argument("--infer-hz", type=float, default=10.0)
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
     from raspi.bus import LATEST, Publisher, Subscriber
 
-    vehicle = Vehicle.load()
-    model = None
-    if args.model:
-        w, h = (int(v) for v in args.input_size.lower().split("x"))
-        max_steer = args.max_steer if args.max_steer > 0 else vehicle.max_steer
-        model = RegressionModel(args.model, input_size=(w, h), mean=args.mean,
-                                std=args.std, max_steer=max_steer)
-    node = CamE2ENode(model=model, models_dir=Path(args.models_dir), vehicle=vehicle,
-                      lidar_fov_deg=args.lidar_fov_deg, lidar_max_range=args.lidar_max_range,
-                      infer_hz=args.infer_hz)
+    model = load_model(Path(args.model)) if args.model else None
+    node = CamE2ENode(model=model, models_dir=Path(args.models_dir),
+                      vehicle=Vehicle.load(), infer_hz=args.infer_hz)
 
     pub = Publisher("cam_e2e")
-    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_SCAN: LATEST,
-                      TOPIC_VEHICLE_STATE: LATEST, TOPIC_CAM_E2E_MODEL: LATEST,
-                      TOPIC_AUTO_CTRL: LATEST})
+    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
+                      TOPIC_CAM_E2E_MODEL: LATEST, TOPIC_AUTO_CTRL: LATEST})
 
     print(f"# cam_e2e_node  publish {pub.endpoint}  cam_e2e/cmd へ配信")
 
