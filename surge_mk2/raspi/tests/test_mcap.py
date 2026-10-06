@@ -252,6 +252,43 @@ class TestMcapLog(unittest.TestCase):
         msgs = read_back(self.path)["msgs"]
         self.assertEqual(len(msgs["/vehicle_state"]), 10)
 
+    def test_stdout_mode_survives_short_writes(self):
+        """`python -u` の標準出力は `FileIO` で、シグナルが来ると**途中までしか書かずに戻る**。
+        残りを捨てるとチャンクが切れて読めなくなる（2026-10-06、実機の記録で発生）。"""
+        import sys as _sys
+
+        class ShortRaw:
+            """1回に最大 100B しか引き受けない書き込み先。"""
+
+            def __init__(self):
+                self.data = bytearray()
+
+            def write(self, b):
+                part = bytes(b[:100])
+                self.data += part
+                return len(part)
+
+            def flush(self):
+                pass
+
+        class FakeStdout:
+            def __init__(self):
+                self.buffer = ShortRaw()
+
+        real, _sys.stdout = _sys.stdout, FakeStdout()
+        try:
+            with McapLog("-", t0_mono_ns=0, t0_unix_ns=0) as log:
+                for i in range(50):
+                    log.write("/vehicle_state", VehicleState(speed=i * 0.1),
+                              t_mono_ns=i)
+            blob = bytes(_sys.stdout.buffer.data)
+        finally:
+            _sys.stdout = real
+
+        self.assertEqual(log.size_bytes, len(blob))
+        self.path.write_bytes(blob)
+        self.assertEqual(len(read_back(self.path)["msgs"]["/vehicle_state"]), 50)
+
 
 @requires_mcap
 class TestMcapLogEnospc(unittest.TestCase):

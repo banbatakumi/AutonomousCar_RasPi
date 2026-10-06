@@ -380,6 +380,24 @@ _DECODE = {TOPIC_VEHICLE_STATE: VehicleState, TOPIC_SCAN: Scan,
            TOPIC_AUTO_STATE: AutoState, TOPIC_AUTO_MAP: AutoMap}
 
 
+def _decode(data: bytes, cls):
+    """記録の JSON を型へ戻す。**`null` になった実数は NaN として読む。**
+
+    JSON には無限大・NaN が無く、書くときに `null` になる（`slam2d_route` の
+    `free_ahead = math.inf`＝前方に障害物なし、など）。そのまま型へ戻すと
+    `Expected float, got null` で記録全体が読めなくなる。
+    """
+    try:
+        return msgspec.json.decode(data, type=cls)
+    except msgspec.ValidationError:
+        obj = msgspec.json.decode(data)
+        floats = {f.name for f in msgspec.structs.fields(cls) if f.type is float}
+        for k in floats:
+            if obj.get(k, 0.0) is None:
+                obj[k] = math.nan
+        return msgspec.convert(obj, type=cls)
+
+
 def _replay_mcap(src: Path, out: Path, *, loop_closure: bool, compression: str,
                  start_s: float, end_s: float | None,
                  progress=None) -> tuple[McapLog, SlamReplay]:
@@ -433,7 +451,7 @@ def _replay_mcap(src: Path, out: Path, *, loop_closure: bool, compression: str,
                 cls = _DECODE.get(bus_topic)
                 if cls is None:
                     continue
-                msg = msgspec.json.decode(message.data, type=cls)
+                msg = _decode(message.data, cls)
                 heapq.heappush(heap, (msg.t_pub or msg.t_capture, next(tie), bus_topic, msg))
                 now_mono = message.log_time - t0_unix + t0_mono
                 while heap and heap[0][0] <= now_mono - window:

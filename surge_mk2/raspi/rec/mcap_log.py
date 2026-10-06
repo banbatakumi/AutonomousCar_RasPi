@@ -218,9 +218,20 @@ class _CountingWriter:
         self.count = 0
 
     def write(self, b) -> int:
-        n = self._raw.write(b)
-        self.count += len(b) if n is None else n
-        return n
+        # **全部書けるまで繰り返す**（2026-10-06）。`python -u` の `sys.stdout.buffer` は
+        # バッファ無しの `FileIO` で、`write()` は1回のシステムコールしかしない。パイプが
+        # 詰まって待っている間にシグナル（記録停止の SIGTERM）が来ると**途中までで戻る**。
+        # 残りを捨てるとチャンクが途中で切れ、以降のオフセットも合わなくなる（実機で、
+        # 停止の瞬間に書いていたチャンク 335KB のうち 164KB しか出ず、普通のリーダで開けなかった）
+        view = memoryview(b).cast("B")
+        done = 0
+        while done < len(view):
+            n = self._raw.write(view[done:])
+            if n is None:                     # バッファ付きの書き込み先は全量を引き受ける
+                n = len(view) - done
+            done += n
+            self.count += n
+        return done
 
     def tell(self) -> int:
         return self.count

@@ -87,6 +87,9 @@ APPS: list[AppSpec] = [
     AppSpec("slam_replay", "解析", "SLAM 再処理",
             "記録を slam2d に通して _slam.mcap を作り Foxglove で開く",
             lambda o: ["-m", "tools.slam_replay_gui"]),
+    AppSpec("mcap_video", "解析", "動画の書き出し",
+            "mcap のカメラ画像を前後それぞれの mp4 に書き出す",
+            lambda o: ["-m", "tools.mcap_video_gui"]),
     AppSpec("ml_lidar", "学習", "ml_lidar",
             "LiDAR 強化学習の学習・観戦・エクスポート",
             lambda o: ["ml_lidar/app.py"]),
@@ -94,7 +97,7 @@ APPS: list[AppSpec] = [
             "カメラのセグメンテーション（抽出・アノテーション・学習・エクスポート）",
             lambda o: ["ml_cam/app.py"]),
     AppSpec("ml_cam_e2e", "学習", "ml_cam_e2e",
-            "カメラ E2E（抽出・学習・エクスポート・プレビュー）",
+            "カメラ E2E 模倣学習（抽出・選別・偏り・学習・エクスポート・評価）",
             lambda o: ["ml_cam_e2e/app.py"]),
 ]
 

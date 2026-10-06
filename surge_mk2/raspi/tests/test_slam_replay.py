@@ -130,6 +130,22 @@ class TestSlamReplay(unittest.TestCase):
         with self.assertRaises(ValueError):
             replay(src, self.out)
 
+    def test_null_floats_in_recording_are_read_as_nan(self):
+        """`free_ahead = inf`（前方に障害物なし）は JSON で `null` になる。
+        レース走行の記録がこれで丸ごと読めなかった（2026-10-06）。"""
+        import math
+
+        import msgspec
+
+        from raspi.msgs.types import AutoState
+        from raspi.tools.slam_replay import _decode
+
+        data = msgspec.json.encode(AutoState(free_ahead=math.inf, pose_x=1.5))
+        self.assertIn(b'"free_ahead":null', data)
+        st = _decode(data, AutoState)
+        self.assertTrue(math.isnan(st.free_ahead))
+        self.assertEqual(st.pose_x, 1.5)
+
 
 if __name__ == "__main__":
     unittest.main()
