@@ -15,12 +15,17 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 
-import numpy as np
-import torch
-from PIL import Image
-from torch.utils.data import Dataset
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+from PIL import Image  # noqa: E402
+from torch.utils.data import Dataset  # noqa: E402
+
+from raspi.core.cam_e2e_preproc import resize_area  # noqa: E402
 
 __all__ = ["DrivableDataset", "list_labeled_pairs"]
 
@@ -75,10 +80,13 @@ class DrivableDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         frame_path, mask_path = self.pairs[idx]
         w, h = self.size
-        img = Image.open(frame_path).convert("RGB").resize((w, h), Image.BILINEAR)
+        # **画像の縮小は実車と同じ関数**（`cam_perception_node.SegmentationModel` も
+        # `resize_area` を通す）。以前はここが PIL の BILINEAR、実車が最近傍だった
+        with Image.open(frame_path) as f:
+            rgb = np.asarray(f.convert("RGB"), dtype=np.uint8)
         msk = Image.open(mask_path).convert("L").resize((w, h), Image.NEAREST)
 
-        img_arr = np.asarray(img, dtype=np.float32) / 255.0
+        img_arr = resize_area(rgb, w, h).astype(np.float32) / 255.0
         msk_arr = (np.asarray(msk, dtype=np.float32) > 127).astype(np.float32)
 
         if self.augment and np.random.rand() < 0.5:

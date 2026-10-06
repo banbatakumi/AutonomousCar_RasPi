@@ -13,9 +13,7 @@ onnx>=1.16
 onnxruntime>=1.18,<2
 onnxscript>=0.7          # torch 2.5+ の既定エクスポータ（dynamo=True）が要求する
 
-# プレビュー（`ml_cam_e2e/preview.py`）の表示・矢印描画
-opencv-python>=4.9
-
+# JPEG の読み込み（学習・評価・操作パネル）
 pillow>=10
 numpy>=2.1
 

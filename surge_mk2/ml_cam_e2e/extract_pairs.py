@@ -1,26 +1,45 @@
-"""ml_cam_e2e/extract_pairs.py — `.mcap` から (前方カメラ画像, 人間の操舵指令) のペアを取り出す。
+"""ml_cam_e2e/extract_pairs.py — `.mcap` から (前方カメラ画像, 人間の操舵・速度指令) のペアを取り出す。
 
     python3 ml_cam_e2e/extract_pairs.py logs/run1.mcap logs/run2.mcap \\
         --out ml_cam_e2e/runs/v1/frames
 
-`ml_cam/extract_frames.py` と同じく、GUI の「ログ」タブ（画像を含める設定で
-録画した `.mcap`）に既に入っている `/viz/image/front`（JPEG）を読む。
-**それに加えて `/cmd`（`DriveCmd`。50Hzで流れる人間の操舵指令）も読み、
+画像つきで録った `.mcap`（`tools/record.sh --image-hz 15` や実機 GUI の MCAP
+ボタン）に入っている `/viz/image/front`（JPEG）を読む。
+**それに加えて `/cmd`（`DriveCmd`。50Hzで流れる人間の指令）も読み、
 画像フレームごとに時刻最近傍の指令をペアリングする。** Pi 側に新しい記録
 コードは不要——`raspi/nodes/logger_node.py` が `cmd` を既に mcap へ記録している。
+`/vehicle_state` の実速度も一緒に書く（学習時に「止まったままの待機」を
+見分けるため。`samples.py` 参照）。
 
 ## セグメンテーション（`ml_cam/`）と違い、手作業のアノテーションが要らない
 
-ラベルは人間がその瞬間に実際に切っていた舵角そのもの。**その代わり、
+ラベルは人間がその瞬間に実際に出していた指令そのもの。**その代わり、
 質の悪いペアを機械的に弾く責任がここに集まる**:
 
 - **`arm=False` のフレームは除外。** ARM していない待機中のデータは
   「常に舵0」という無意味な信号を混ぜるだけで、学習を悪化させる
-- **`mode != MANUAL` のフレームは除外。** `mode=AUTO` 中の `cmd` は
-  planning_node（何らかの既存 planner）の出力であって人間の操作ではない。
-  ここを弾かないと「模倣学習のはずが別の planner を模倣する」事故になる
+- **`mode=AUTO` のフレームは既定で除外。** 自動運転中の `cmd` は planning_node
+  （何らかの既存 planner）の出力であって人間の操作ではない。黙って混ぜると
+  「人を真似たつもりが別の planner を真似ていた」になる。
+  **`--include-auto` を付けると手本にする**——LiDAR で走る `slam2d_route` などの
+  走行をカメラだけで真似させたいときに使う（うまく走れている planner は、
+  人より滑らかで量も稼げる手本になる）。`cam_e2e` 自身の走行は付けても除外する
+  （自分の出力を手本にすると誤差を増幅するだけ）
+- **`torque_mode` のフレームは除外。** トルク直接指令で運転している間は
+  `target_speed` が 0 のまま（スロットルは `target_torque` に入る）。
+  速度の手本にならないので、**学習用の走行は速度モードで録ること**
 - **画像とペアリングした `cmd` の時刻差が `--max-gap-ms` を超えたら破棄。**
   録画が途切れていた区間などで、無関係な指令と画像が対応付けられるのを防ぐ
+
+何枚がどの理由で落ちたかは最後に表示する——トルクモードで録ってしまって
+全滅、というのを黙って 0 枚にしない。
+
+## `--label-shift-ms`（既定 0）
+
+人は見てから操作するまでに 0.1〜0.2 秒かかる。絵と「同じ瞬間の指令」を
+組にすると、モデルは人と同じだけ遅れた操作を覚える。正の値を入れると
+「絵の少し後の指令」を手本にする。最初は 0 で学習し、評価タブで予測が
+実操舵より一貫して遅れて見えたら試す。
 """
 
 from __future__ import annotations
@@ -31,8 +50,10 @@ import bisect
 import csv
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 try:
@@ -42,41 +63,56 @@ except ImportError:
           file=sys.stderr)
     raise
 
-from raspi.msgs.types import TOPIC_CMD  # noqa: E402
+from raspi.msgs.types import TOPIC_CMD, TOPIC_VEHICLE_STATE  # noqa: E402
+from samples import MANIFEST_COLUMNS  # noqa: E402
 
-__all__ = ["VIZ_IMAGE_PREFIX", "CMD_MCAP_TOPIC", "MODE_MANUAL",
-           "load_cmd_series", "nearest_cmd", "iter_valid_pairs",
-           "count_valid_pairs", "extract_one"]
+__all__ = ["VIZ_IMAGE_PREFIX", "CMD_MCAP_TOPIC", "STATE_MCAP_TOPIC", "MODE_MANUAL", "MODE_AUTO",
+           "REASON_AUTO",
+           "load_series", "load_cmd_series", "nearest_cmd", "reject_reason",
+           "iter_valid_pairs", "count_valid_pairs", "extract_one", "check_manifest_header"]
 
 #: `raspi/rec/mcap_log.py` の `VIZ_IMAGE_PREFIX` と同じ値（`ml_cam/extract_frames.py` 参照）
 VIZ_IMAGE_PREFIX = "/viz/image/"
 #: `raspi/rec/mcap_log.py` の `_mcap_topic()`（バスのトピック名の先頭に `/` を付けるだけ）
 #: と同じ変換を `TOPIC_CMD`（`raspi/msgs/types.py`）に適用したもの。
 CMD_MCAP_TOPIC = "/" + TOPIC_CMD
+STATE_MCAP_TOPIC = "/" + TOPIC_VEHICLE_STATE
 #: `raspi/msgs/types.py` の `DriveCmd.mode` の値（`0=DISARM 1=MANUAL 2=AUTO`）
 MODE_MANUAL = 1
+MODE_AUTO = 2
+#: 自動運転中の `cmd` に telemetry_node が付ける `source` の接頭辞（`auto:<planner id>`）
+_AUTO_SOURCE_PREFIX = "auto:"
+#: 自分自身（このモデルで走った記録）は手本にしない
+_SELF_SOURCE = _AUTO_SOURCE_PREFIX + "cam_e2e"
+#: 自動運転中だから除外した、という理由の文字列。操作パネルが「自動運転も手本にする」を
+#: 案内するのに使う
+REASON_AUTO = "自動運転中"
 
 
-def load_cmd_series(mcap_path: Path) -> tuple[list[int], list[dict]]:
-    """`/cmd` を全部読み、時刻昇順の `(時刻の一覧, 中身の一覧)` に分けて返す。
+def load_series(mcap_path: Path, topic: str) -> tuple[list[int], list[dict]]:
+    """`topic` を全部読み、時刻昇順の `(時刻の一覧, 中身の一覧)` に分けて返す。
 
     2本の並行リストにしておくと `bisect` で時刻探索できる（`nearest_cmd()` 参照）。
     録画は概ね時系列順に書かれるが、**保証はしないので明示的にソートする。**
     """
     times: list[int] = []
-    cmds: list[dict] = []
+    items: list[dict] = []
     with open(mcap_path, "rb") as f:
         reader = make_reader(f)
-        for _schema, _channel, message in reader.iter_messages(topics=[CMD_MCAP_TOPIC]):
+        for _schema, _channel, message in reader.iter_messages(topics=[topic]):
             times.append(message.log_time)
-            cmds.append(json.loads(message.data))
+            items.append(json.loads(message.data))
     order = sorted(range(len(times)), key=lambda i: times[i])
-    return [times[i] for i in order], [cmds[i] for i in order]
+    return [times[i] for i in order], [items[i] for i in order]
+
+
+def load_cmd_series(mcap_path: Path) -> tuple[list[int], list[dict]]:
+    return load_series(mcap_path, CMD_MCAP_TOPIC)
 
 
 def nearest_cmd(cmd_times: list[int], cmd_series: list[dict], t_ns: int,
                 max_gap_ns: int) -> dict | None:
-    """`t_ns` に最も近い `cmd` を返す。`max_gap_ns` を超えて離れていたら `None`。"""
+    """`t_ns` に最も近い要素を返す。`max_gap_ns` を超えて離れていたら `None`。"""
     if not cmd_times:
         return None
     i = bisect.bisect_left(cmd_times, t_ns)
@@ -87,17 +123,32 @@ def nearest_cmd(cmd_times: list[int], cmd_series: list[dict], t_ns: int,
     return cmd_series[best]
 
 
-def _is_valid_cmd(cmd: dict) -> bool:
-    """ARM中・MANUAL中の指令だけを教師データとして使ってよいと判断する
+def reject_reason(cmd: dict | None, *, include_auto: bool = False) -> str | None:
+    """このフレームを教師データにしない理由。使ってよければ `None`
     （モジュールdocstring参照）。"""
-    return bool(cmd.get("arm")) and int(cmd.get("mode", 0)) == MODE_MANUAL
+    if cmd is None:
+        return "近い指令が無い"
+    if not cmd.get("arm"):
+        return "DISARM中"
+    mode = int(cmd.get("mode", 0))
+    if mode == MODE_AUTO:
+        if str(cmd.get("source", "")) == _SELF_SOURCE:
+            return "カメラE2E自身の走行"
+        if not include_auto:
+            return REASON_AUTO
+    elif mode != MODE_MANUAL:
+        return "手動運転でない"
+    if cmd.get("torque_mode"):
+        return "トルクモード"
+    return None
 
 
 def iter_valid_pairs(mcap_path: Path, cams: set[str], cmd_times: list[int],
-                     cmd_series: list[dict], *, max_gap_ns: int):
-    """`(cam, t_ns, jpeg_bytes, target_steer, target_speed)` を時系列に生成する。
+                     cmd_series: list[dict], *, max_gap_ns: int, label_shift_ns: int = 0,
+                     rejects: Counter | None = None, include_auto: bool = False):
+    """`(cam, t_ns, jpeg_bytes, cmd)` を時系列に生成する。
 
-    フィルタ（ARM・MANUAL・時刻差）を通らないフレームは黙って読み飛ばす。
+    フィルタを通らないフレームは読み飛ばし、理由を `rejects` に数える。
     """
     topics = [VIZ_IMAGE_PREFIX + c for c in cams]
     with open(mcap_path, "rb") as f:
@@ -105,33 +156,37 @@ def iter_valid_pairs(mcap_path: Path, cams: set[str], cmd_times: list[int],
         for _schema, channel, message in reader.iter_messages(topics=topics):
             cam = channel.topic[len(VIZ_IMAGE_PREFIX):]
             t_ns = message.log_time
-            cmd = nearest_cmd(cmd_times, cmd_series, t_ns, max_gap_ns)
-            if cmd is None or not _is_valid_cmd(cmd):
+            cmd = nearest_cmd(cmd_times, cmd_series, t_ns + label_shift_ns, max_gap_ns)
+            reason = reject_reason(cmd, include_auto=include_auto)
+            if reason is not None:
+                if rejects is not None:
+                    rejects[reason] += 1
                 continue
             obj = json.loads(message.data)
-            jpg = base64.b64decode(obj["data"])
-            yield cam, t_ns, jpg, float(cmd.get("target_steer", 0.0)), \
-                float(cmd.get("target_speed", 0.0))
+            yield cam, t_ns, base64.b64decode(obj["data"]), cmd
 
 
 def count_valid_pairs(mcap_path: Path, cams: set[str], cmd_times: list[int],
-                      cmd_series: list[dict], *, max_gap_ns: int) -> int:
+                      cmd_series: list[dict], *, max_gap_ns: int,
+                      label_shift_ns: int = 0, include_auto: bool = False) -> int:
     """`--target-count` の間引き幅を決めるための下見（JPEGデコードはしない軽い走査）。"""
     topics = [VIZ_IMAGE_PREFIX + c for c in cams]
     n = 0
     with open(mcap_path, "rb") as f:
         reader = make_reader(f)
         for _schema, _channel, message in reader.iter_messages(topics=topics):
-            cmd = nearest_cmd(cmd_times, cmd_series, message.log_time, max_gap_ns)
-            if cmd is not None and _is_valid_cmd(cmd):
+            cmd = nearest_cmd(cmd_times, cmd_series, message.log_time + label_shift_ns,
+                              max_gap_ns)
+            if reject_reason(cmd, include_auto=include_auto) is None:
                 n += 1
     return n
 
 
 def extract_one(mcap_path: Path, out_dir: Path, cams: set[str], writer: csv.writer, *,
                 max_gap_ns: int, min_interval_ns: int = 0, keep_ratio: float = 1.0,
-                acc_by_cam: dict[str, float] | None = None,
-                ) -> tuple[int, dict[str, float]]:
+                acc_by_cam: dict[str, float] | None = None, label_shift_ns: int = 0,
+                rejects: Counter | None = None,
+                include_auto: bool = False) -> tuple[int, dict[str, float]]:
     """1つの `.mcap` からペアを書き出す。`(書いた枚数, 更新後の acc_by_cam)` を返す。
 
     間引きの2方式（誤差蓄積法 `keep_ratio` / 時間間隔 `min_interval_ns`）は
@@ -144,8 +199,10 @@ def extract_one(mcap_path: Path, out_dir: Path, cams: set[str], writer: csv.writ
     acc_by_cam = dict(acc_by_cam) if acc_by_cam else {}
     last_t_by_cam: dict[str, int] = {}
     cmd_times, cmd_series = load_cmd_series(mcap_path)
-    for cam, t_ns, jpg, steer, speed in iter_valid_pairs(
-            mcap_path, cams, cmd_times, cmd_series, max_gap_ns=max_gap_ns):
+    state_times, state_series = load_series(mcap_path, STATE_MCAP_TOPIC)
+    for cam, t_ns, jpg, cmd in iter_valid_pairs(
+            mcap_path, cams, cmd_times, cmd_series, max_gap_ns=max_gap_ns,
+            label_shift_ns=label_shift_ns, rejects=rejects, include_auto=include_auto):
         if keep_ratio < 1.0:
             acc = acc_by_cam.get(cam, 0.0) + keep_ratio
             take = acc >= 1.0
@@ -155,12 +212,26 @@ def extract_one(mcap_path: Path, out_dir: Path, cams: set[str], writer: csv.writ
             take = last_t is None or t_ns - last_t >= min_interval_ns
         if not take:
             continue
+        # 実速度は絵と同じ瞬間のもの（ラベルではなく「止まっていたか」の判定用なので
+        # `label_shift_ns` は掛けない）。記録に無ければ空欄
+        state = nearest_cmd(state_times, state_series, t_ns, max_gap_ns)
+        speed_actual = "" if state is None else float(state.get("speed", 0.0))
         name = f"{mcap_path.stem}_{cam}_{t_ns}.jpg"
         (out_dir / name).write_bytes(jpg)
-        writer.writerow([name, mcap_path.name, cam, t_ns, steer, speed])
+        writer.writerow([name, mcap_path.name, cam, t_ns,
+                         float(cmd.get("target_steer", 0.0)),
+                         float(cmd.get("target_speed", 0.0)),
+                         speed_actual, int(bool(cmd.get("brake")))])
         last_t_by_cam[cam] = t_ns
         n += 1
     return n, acc_by_cam
+
+
+def check_manifest_header(manifest_path: Path) -> bool:
+    """既存の manifest が今の列構成か。違えば追記すると列がずれるので使わせない。"""
+    with open(manifest_path, newline="") as f:
+        header = next(csv.reader(f), None)
+    return header == MANIFEST_COLUMNS
 
 
 def main() -> int:
@@ -173,6 +244,10 @@ def main() -> int:
     ap.add_argument("--max-gap-ms", type=int, default=100,
                     help="画像フレームと `cmd` の時刻差の許容上限[ms]。"
                          "これを超えて近い指令が無ければそのフレームは捨てる")
+    ap.add_argument("--label-shift-ms", type=int, default=0,
+                    help="絵よりこの時間だけ後の指令を手本にする（人の反応遅れの補正。既定 0）")
+    ap.add_argument("--include-auto", action="store_true",
+                    help="自動運転中（slam2d_route 等）の走行も手本にする。既定は人の手動運転だけ")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--min-interval-ms", type=int, default=0,
                        help="この間隔未満のフレームは間引く（既定 0 = 全件出力）")
@@ -184,38 +259,67 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.csv"
     is_new = not manifest_path.exists()
+    if not is_new and not check_manifest_header(manifest_path):
+        print(f"{manifest_path} の列構成が古い形式です。追記すると列がずれるので中止します。"
+              f"新しいモデル名で抽出し直してください", file=sys.stderr)
+        return 2
 
-    existing = [p for p in args.mcap_files if p.exists()]
+    existing = []
     for p in args.mcap_files:
-        if p not in existing:
+        if not p.exists():
             print(f"# skip: {p}（見つからない）", file=sys.stderr)
+            continue
+        # **壊れた記録で全体を止めない。** 記録の停止が間に合わず末尾が切れた .mcap は
+        # 読み出しの途中で例外になる。先に指令だけ読んで確かめ、だめなものは飛ばす
+        try:
+            load_cmd_series(p)
+        except Exception as e:                              # noqa: BLE001
+            print(f"# skip: {p.name}（読めない: {type(e).__name__}）。"
+                  f"`python -m raspi.tools.mcap_repair {p} --inplace` で修復してから"
+                  f"選び直してください", file=sys.stderr)
+            continue
+        existing.append(p)
 
     max_gap_ns = args.max_gap_ms * 1_000_000
+    label_shift_ns = args.label_shift_ms * 1_000_000
     keep_ratio = 1.0
     if args.target_count > 0:
         total = 0
         for p in existing:
             cmd_times, cmd_series = load_cmd_series(p)
-            total += count_valid_pairs(p, cams, cmd_times, cmd_series, max_gap_ns=max_gap_ns)
+            total += count_valid_pairs(p, cams, cmd_times, cmd_series, max_gap_ns=max_gap_ns,
+                                       label_shift_ns=label_shift_ns,
+                                       include_auto=args.include_auto)
         keep_ratio = min(1.0, args.target_count / total) if total else 1.0
-        print(f"# ARM中・MANUAL中の有効フレーム: 合計{total}枚 → keep_ratio={keep_ratio:.4f}")
+        print(f"# 手本に使えるフレーム: 合計{total}枚 → keep_ratio={keep_ratio:.4f}")
 
     min_interval_ns = args.min_interval_ms * 1_000_000
     total_written = 0
     acc_by_cam: dict[str, float] = {}
+    rejects: Counter = Counter()
     with open(manifest_path, "a", newline="") as mf:
         w = csv.writer(mf)
         if is_new:
-            w.writerow(["file", "source_mcap", "cam", "t_capture_ns",
-                       "target_steer", "target_speed"])
+            w.writerow(MANIFEST_COLUMNS)
         for p in existing:
             n, acc_by_cam = extract_one(p, args.out, cams, w, max_gap_ns=max_gap_ns,
                                         min_interval_ns=min_interval_ns,
-                                        keep_ratio=keep_ratio, acc_by_cam=acc_by_cam)
+                                        keep_ratio=keep_ratio, acc_by_cam=acc_by_cam,
+                                        label_shift_ns=label_shift_ns, rejects=rejects,
+                                        include_auto=args.include_auto)
             print(f"# {p.name}: {n}枚")
             total_written += n
 
     print(f"# 合計 {total_written}枚 → {args.out}/manifest.csv に追記")
+    if rejects:
+        detail = "・".join(f"{reason} {n}枚" for reason, n in rejects.most_common())
+        print(f"# 手本にしなかったフレーム: {detail}")
+    if rejects.get(REASON_AUTO):
+        print(f"# ★自動運転中の走行 {rejects[REASON_AUTO]}枚は手本にしていません。"
+              f"手本にするなら --include-auto（操作パネルでは「自動運転中の走行も手本にする」）")
+    if total_written == 0 and rejects.get("トルクモード"):
+        print("# ★トルクモードで録った走行は速度の手本になりません。"
+              "速度モードで録り直してください", file=sys.stderr)
     return 0
 
 

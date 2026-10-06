@@ -1,13 +1,17 @@
 """ml_cam_e2e/export_onnx.py — 学習済み回帰モデルを ONNX にエクスポートし、Pi側の契約を固定する。
 
     python3 ml_cam_e2e/export_onnx.py --checkpoint ml_cam_e2e/runs/v1/best.pt \\
-        --size 224x224 --out models/v1.onnx
+        --out models/cam_e2e/v1.onnx
 
 `ml_cam/export_onnx.py` と同じ構成（opset 18・`external_data=False`・
-PyTorch/ONNXRuntime往復検証）。**前処理契約（入力解像度・平均/分散）に加えて
-出力契約（`max_steer`）も `<out>.json` に書く**——`raspi/nodes/cam_e2e_node.py`
-がこの値で正規化出力を実際の舵角[rad]へ戻す。ここがズレるとモデルの
-学習時の意味と実車での解釈がズレる（train/inference skew の出力版）。
+PyTorch/ONNXRuntime往復検証）。**前処理契約（入力解像度・色順・縮小方式・
+平均/分散）と出力契約（`max_steer`・`speed_ref`・出力の並び）を `<out>.json`
+に書く**——`raspi/nodes/cam_e2e_node.py` の `load_model()` がこれを照合し、
+合わないモデルは読み込まない。
+
+解像度と正規化の基準は、チェックポイントと同じ場所の `train_config.json`
+（`train.py` が書く）から取る。学習時の値をそのまま使うので、学習タブと
+エクスポートタブで同じ値を2回入力させない。
 """
 
 from __future__ import annotations
@@ -24,50 +28,57 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
+from raspi.nodes.cam_e2e_node import MODEL_OUTPUTS  # noqa: E402
 
-__all__ = ["export", "verify_parity", "MEAN", "STD"]
+__all__ = ["export", "verify_parity", "read_train_config", "MEAN", "STD"]
 
-#: `ml_cam_e2e/dataset.py` の正規化（0-1 = mean 0 / std 255）と
-#: `raspi/nodes/cam_e2e_node.py` の既定値に揃えてある。**変えたら両方直すこと。**
+#: `ml_cam_e2e/dataset.py` の正規化（0-1 = mean 0 / std 255）と揃えてある。
+#: **変えたら両方直すこと。**
 MEAN = 0.0
 STD = 255.0
 
 
-def _max_steer_from_train_config(run_dir: Path) -> float | None:
-    """`run_dir/train_config.json`（`train.py`が学習時に書く）から`max_steer`を読む。
-    ファイルが無い、読めない、キーが無い場合は `None`。"""
+def read_train_config(run_dir: Path) -> dict:
+    """`run_dir/train_config.json`。無い・読めないなら空の dict。"""
     cfg_path = run_dir / "train_config.json"
     if not cfg_path.exists():
-        return None
+        return {}
     try:
-        cfg = json.loads(cfg_path.read_text())
+        return json.loads(cfg_path.read_text())
     except (json.JSONDecodeError, OSError):
-        return None
-    return cfg.get("max_steer")
+        return {}
 
 
-def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *,
-          max_steer: float | None = None, note: str = "") -> None:
+def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None, *,
+          max_steer: float | None = None, speed_ref: float | None = None,
+          note: str = "") -> tuple[int, int]:
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に契約を書く。
 
-    :param max_steer: 出力の正規化基準 [rad]。省略時は `checkpoint` と同じディレクトリの
-        `train_config.json`（`train.py`が学習時に書く。`train.py:143-146`参照）の値を
-        優先して使う——`config/vehicle.toml`はsysidで継続更新中なので、学習後に
-        エクスポートすると現在値が学習時の値とズレる（train/inference skew の出力版）。
-        `train_config.json`が無い、または`max_steer`キーが無い場合のみ現在の
-        `config/vehicle.toml`へフォールバックし、警告ログを出す。
+    `size`・`max_steer`・`speed_ref` を省略すると `train_config.json` の値を使う。
+    **どちらにも無ければ例外にする**——以前は `config/vehicle.toml` の現在値へ
+    落としていたが、学習後に同定で値が変わると学習時と違う基準で舵角へ戻す
+    ことになる（train/inference skew の出力版）。黙って違う値を書くより止める。
+
+    :return: 実際に使った入力解像度 `(width, height)`
     :param note: `<out_path>.json`に同梱する自由記述の備考（`ml_cam/export_onnx.py`と対称）
     """
-    w, h = size
+    cfg = read_train_config(checkpoint.parent)
+    if size is None:
+        if "input_size" not in cfg:
+            raise ValueError(f"{checkpoint.parent}/train_config.json に input_size が無い。"
+                             f"--size で指定してください")
+        size = (int(cfg["input_size"][0]), int(cfg["input_size"][1]))
     if max_steer is None:
-        max_steer = _max_steer_from_train_config(checkpoint.parent)
-        if max_steer is None:
-            max_steer = Vehicle.load().max_steer
-            print(f"# 警告: {checkpoint.parent}/train_config.json が無い（または "
-                  f"max_steer キーが無い）ため、現在の config/vehicle.toml の "
-                  f"max_steer={max_steer:.4f}rad にフォールバックします。学習時の "
-                  f"車両設定と異なる可能性があります", file=sys.stderr)
+        max_steer = cfg.get("max_steer")
+    if speed_ref is None:
+        speed_ref = cfg.get("speed_ref")
+    if not max_steer or not speed_ref or max_steer <= 0 or speed_ref <= 0:
+        raise ValueError(f"max_steer/speed_ref が決まらない（{max_steer}/{speed_ref}）。"
+                         f"{checkpoint.parent}/train_config.json が無ければ "
+                         f"--max-steer と --speed-ref で指定してください")
+
+    w, h = size
     model = DriveRegressionModel(pretrained=False)
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     model.eval()
@@ -80,16 +91,20 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *,
         external_data=False,       # 同上。重みを別ファイルに切り出させない
     )
 
-    cfg = {
+    out_path.with_suffix(".json").write_text(json.dumps({
         "input_size": [w, h],           # [width, height]
         "input_layout": "NCHW",
+        "color": "RGB",
+        "resize": "area",
+        "preproc_version": PREPROC_VERSION,
         "mean": MEAN,
         "std": STD,
-        "max_steer": max_steer,
-        "output": "steer_norm (tanh, -1..1); steer_rad = steer_norm * max_steer",
+        "outputs": list(MODEL_OUTPUTS),
+        "max_steer": float(max_steer),  # [rad] steer = steer_norm * max_steer
+        "speed_ref": float(speed_ref),  # [m/s] speed = speed_norm * speed_ref
         "note": note,
-    }
-    out_path.with_suffix(".json").write_text(json.dumps(cfg, indent=2))
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return size
 
 
 def verify_parity(onnx_path: Path, model, size: tuple[int, int], *,
@@ -120,27 +135,34 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, required=True)
-    ap.add_argument("--size", default="224x224")
     ap.add_argument("--out", type=Path, default=Path("ml_cam_e2e/runs/latest/model.onnx"))
+    ap.add_argument("--size", default=None,
+                    help="入力解像度 幅x高さ。省略時は train_config.json の値（通常は省略）")
     ap.add_argument("--max-steer", type=float, default=None,
-                    help="出力の正規化基準[rad]を手動で上書きする。省略時は "
-                         "<checkpoint>/train_config.json → config/vehicle.toml の順に決める")
+                    help="操舵の正規化基準[rad]。省略時は train_config.json の値")
+    ap.add_argument("--speed-ref", type=float, default=None,
+                    help="速度の正規化基準[m/s]。省略時は train_config.json の値")
     args = ap.parse_args()
 
-    w, h = (int(v) for v in args.size.lower().split("x"))
+    size = tuple(int(v) for v in args.size.lower().split("x")) if args.size else None
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     note_path = args.checkpoint.parent / "note.txt"
     note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
 
-    export(args.checkpoint, args.out, (w, h), max_steer=args.max_steer, note=note)
+    try:
+        size = export(args.checkpoint, args.out, size, max_steer=args.max_steer,
+                      speed_ref=args.speed_ref, note=note)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
 
     model = DriveRegressionModel(pretrained=False)
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))
-    err = verify_parity(args.out, model, (w, h))
+    err = verify_parity(args.out, model, size)
     print(f"# 書き出し完了: {args.out}（PyTorch比 最大誤差 {err:.2e}）")
     print(f"# 契約: {args.out.with_suffix('.json')}")
-    print(f"# Pi 側: raspi/nodes/cam_e2e_node.py --model {args.out.name} --input-size {w}x{h}")
+    print("# 実車へは tools/deploy.sh で運び、GUI の自動運転タブでこのモデルを選ぶ")
     return 0
 
 
