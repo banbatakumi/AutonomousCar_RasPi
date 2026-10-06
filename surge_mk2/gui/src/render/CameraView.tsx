@@ -477,11 +477,20 @@ function drawGuide(
     let started = false
     for (let i = 0; i < 45; i++) {
       th += (ds / VEHICLE_GEOM.wheelbase) * Math.tan(vs.steer_actual)
+      // 舵いっぱいだと弧が横〜後ろへ回り込み、カメラに映らない上に魚眼で暴れる。
+      // 進行方向が90°を超えた先は進路ガイドとして意味が無いので打ち切る
+      if (Math.abs(th) > Math.PI / 2) break
       x += ds * Math.cos(th)
       y += ds * Math.sin(th)
+      // 車体端は進行方向の法線（左）へ off ずらす。車両座標の y 方向へずらすと、
+      // 旋回して車体が向きを変えたぶん幅が潰れて（または広がって）崩れる。
       // 車両座標 (x=前, y=左) をそのまま渡す（後カメラの反転は投影器の中）
-      const p = project(x, y + off)
-      if (!p) continue
+      const p = project(x - off * Math.sin(th), y + off * Math.cos(th))
+      // 写らない点は線を繋がずに分断する（繋ぐと画面を横切る長い直線になる）
+      if (!p) {
+        started = false
+        continue
+      }
       if (!started) {
         ctx.moveTo(p[0], p[1])
         started = true
