@@ -517,10 +517,10 @@ class TestCamCenterline(unittest.TestCase):
 
 
 class TestCamE2E(unittest.TestCase):
-    """画像→操舵・速度の直接回帰（`cam_e2e_node.py`の推論結果）を読むだけの薄いPlanner。
+    """画像→操舵の直接回帰（`cam_e2e_node.py`の推論結果）を読むだけの薄いPlanner。
 
-    幾何もLiDARも扱わないので、`CamE2ECmd`から`plan()`が正しい操舵・速度を
-    作ること、分からないときに制動へ倒れることだけを確認する。
+    幾何もLiDARも扱わないので、`CamE2ECmd`から`plan()`が正しい操舵を作ること、
+    速度を舵の曲率から決めること、分からないときに制動へ倒れることだけを確認する。
     """
 
     def setUp(self):
@@ -572,32 +572,66 @@ class TestCamE2E(unittest.TestCase):
             st = self.plan(cmd, steer_tau=0.0, **over)
             self.assertLessEqual(abs(st.target_steer), vehicle_max + 1e-9)
 
-    def test_speed_follows_the_model_output(self):
-        st = self.plan(self.cmd(speed=0.25), max_speed=3.0, min_speed=0.0)
-        self.assertAlmostEqual(st.target_speed, 0.25 * 2.0, places=6)
+    def test_straight_runs_at_max_speed(self):
+        st = self.plan(self.cmd(steer=0.0), max_speed=2.0)
+        self.assertAlmostEqual(st.target_speed, 2.0, places=6)
 
-    def test_speed_scale_multiplies_the_model_output(self):
-        st = self.plan(self.cmd(speed=0.25), max_speed=3.0, min_speed=0.0, speed_scale=0.5)
-        self.assertAlmostEqual(st.target_speed, 0.25, places=6)
+    def test_speed_ignores_the_model_speed_output(self):
+        """速度は舵から決める。手本が遅くても速くても、モデルの `speed_norm` は効かない。"""
+        speeds = set()
+        for speed, ref in ((0.0, 2.0), (1.0, 2.0), (0.5, 0.0)):
+            self.p.reset()
+            speeds.add(self.plan(self.cmd(steer=0.3, speed=speed, model_speed_ref=ref),
+                                 steer_tau=0.0, max_speed=3.0, a_lat_max=1.0).target_speed)
+        self.assertEqual(len(speeds), 1)
+
+    def test_steering_slows_down_by_the_lateral_accel_limit(self):
+        """`v = sqrt(a_lat_max/κ)`、κ=tan(δ)/L。"""
+        st = self.plan(self.cmd(steer=1.0), steer_tau=0.0, max_speed=3.0, min_speed=0.0,
+                       a_lat_max=1.0)
+        delta = min(0.524, self.p.vehicle.max_steer)
+        kappa = math.tan(delta) / self.p.vehicle.wheelbase
+        self.assertAlmostEqual(st.target_speed, math.sqrt(1.0 / kappa), places=6)
+        self.assertLess(st.target_speed, 3.0)
+
+    def test_more_steer_is_never_faster(self):
+        prev = math.inf
+        for steer in (0.0, 0.2, 0.5, 0.8, 1.0):
+            self.p.reset()
+            v = self.plan(self.cmd(steer=steer), steer_tau=0.0, max_speed=3.0,
+                          a_lat_max=1.0).target_speed
+            self.assertLessEqual(v, prev + 1e-9)
+            prev = v
+        self.assertLess(prev, 3.0)
+
+    def test_left_and_right_slow_down_equally(self):
+        left = self.plan(self.cmd(steer=0.7), steer_tau=0.0, max_speed=3.0, a_lat_max=1.0)
+        self.p.reset()
+        right = self.plan(self.cmd(steer=-0.7), steer_tau=0.0, max_speed=3.0, a_lat_max=1.0)
+        self.assertLess(left.target_speed, 3.0)
+        self.assertAlmostEqual(left.target_speed, right.target_speed, places=6)
+
+    def test_slowdown_reacts_before_the_smoothed_steer(self):
+        """減速は平滑化前の舵で決める。切り始めの1周期目から効く。"""
+        st = self.plan(self.cmd(steer=1.0), steer_tau=0.5, dt=0.01, max_speed=3.0,
+                       min_speed=0.0, a_lat_max=1.0)
+        self.assertLess(abs(st.target_steer), 0.05)
+        self.assertLess(st.target_speed, 3.0)
 
     def test_speed_never_exceeds_max_speed(self):
-        for speed in (0.0, 0.5, 1.0, 7.0):
-            st = self.plan(self.cmd(speed=speed), max_speed=0.3, speed_scale=1.5)
+        for steer in (0.0, 0.5, 1.0):
+            st = self.plan(self.cmd(steer=steer, speed=7.0), max_speed=0.3)
             self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
 
-    def test_zero_model_speed_still_moves_at_min_speed(self):
-        """止まった絵に速度0を出すモデルでも発進できる。"""
-        st = self.plan(self.cmd(speed=0.0), min_speed=0.1)
+    def test_full_steer_still_moves_at_min_speed(self):
+        st = self.plan(self.cmd(steer=1.0), steer_tau=0.0, min_speed=0.6, max_speed=3.0,
+                       a_lat_max=0.5)
         self.assertTrue(st.ready)
-        self.assertAlmostEqual(st.target_speed, 0.1, places=6)
+        self.assertAlmostEqual(st.target_speed, 0.6, places=6)
 
     def test_min_speed_does_not_override_max_speed(self):
-        st = self.plan(self.cmd(speed=0.0), min_speed=0.5, max_speed=0.2)
+        st = self.plan(self.cmd(steer=1.0), min_speed=0.5, max_speed=0.2)
         self.assertLessEqual(st.target_speed, 0.2 + 1e-9)
-
-    def test_negative_speed_norm_is_not_reverse(self):
-        st = self.plan(self.cmd(speed=-0.5), min_speed=0.0)
-        self.assertEqual(st.target_speed, 0.0)
 
     def test_reset_clears_the_steering_state(self):
         cmd = self.cmd(steer=0.8)
@@ -608,18 +642,17 @@ class TestCamE2E(unittest.TestCase):
         self.assertLess(abs(self.plan(cmd).target_steer), abs(converged) * 0.8)
 
     def test_not_ready_always_carries_a_reason(self):
-        for cmd in (CamE2ECmd(ready=False), self.cmd(model_speed_ref=0.0),
-                    self.cmd(model_max_steer=0.0)):
+        for cmd in (CamE2ECmd(ready=False), self.cmd(model_max_steer=0.0)):
             st = self.plan(cmd)
             self.assertFalse(st.ready)
             self.assertTrue(st.reason)
 
     def test_nan_outputs_brake_instead_of_maxing_out(self):
         """issue #1: `max(-1, min(1, nan))` は Python の仕様で +1 を返すため、
-        検査が無いと推論が壊れた瞬間に「最大舵角」「最高速度」へ跳ぶ。"""
+        検査が無いと推論が壊れた瞬間に「最大舵角」へ跳ぶ。"""
         nan = float("nan")
         for cmd in (self.cmd(steer=nan), self.cmd(speed=nan), self.cmd(speed=float("inf")),
-                    self.cmd(model_speed_ref=nan), self.cmd(model_max_steer=nan)):
+                    self.cmd(model_max_steer=nan)):
             st = self.plan(cmd)
             self.assertFalse(st.ready)
             self.assertTrue(st.reason)

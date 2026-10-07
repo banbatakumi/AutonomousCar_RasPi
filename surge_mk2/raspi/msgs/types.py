@@ -885,6 +885,9 @@ class CamE2ECmd(MsgBase):
     **カメラだけで完結する**——LiDAR は見ない。物理量へ戻すための契約値
     （`model_max_steer`・`model_speed_ref`）を同梱するので、planner は
     モデルのファイルを知らなくてよい。
+
+    ★ planner は速度を舵から決めるので `speed_norm`・`model_speed_ref` を
+    使わない（2026-10-07）。記録と評価のために流し続けている。
     """
 
     ready: bool = False

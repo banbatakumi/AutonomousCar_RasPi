@@ -8,6 +8,9 @@
   ①の「手本を遅らせる」を試す。カーブで予測が浅いなら実車の「舵の倍率」を上げる
 - **誤差の大きい場面**。モデルが悪いのではなく手本が悪い（コースアウト等）
   ことが多い——そのまま「選別タブで開く」で除外できる
+
+速度の重み 0 で学習したモデル（既定）は速度の出力が学習されていないので、
+速度のグラフ・誤差・予測値を出さない（`eval_model.speed_trained()`）。
 """
 
 from __future__ import annotations
@@ -29,7 +32,16 @@ from charts import (
     nearest_index,
     runs,
 )
-from eval_model import SPLIT_TRAIN, SPLIT_UNUSED, SPLIT_VAL, read_eval, summarize, worst_segments
+from eval_model import (
+    SPLIT_TRAIN,
+    SPLIT_UNUSED,
+    SPLIT_VAL,
+    load_train_config,
+    read_eval,
+    speed_trained,
+    summarize,
+    worst_segments,
+)
 
 __all__ = ["EvalTab"]
 
@@ -55,6 +67,7 @@ class EvalTab:
         self._times: list[float] = []
         self._idx = 0
         self._worst: list[dict] = []
+        self._with_speed = True
         self._build()
 
     def _build(self) -> None:
@@ -140,6 +153,12 @@ class EvalTab:
 
     def load_results(self) -> None:
         path = self._eval_path()
+        self._with_speed = path is None or speed_trained(load_train_config(path.parent))
+        # 学習していない速度のグラフは出さない（枠ごと畳む）
+        if self._with_speed:
+            self.speed_plot.widget.pack(pady=(4, 0))
+        else:
+            self.speed_plot.widget.pack_forget()
         if path is None or not path.exists():
             self._rows = []
             self.summary_var.set("評価結果がまだありません（「評価実行」を押してください）")
@@ -147,9 +166,15 @@ class EvalTab:
             self._rows = read_eval(path)
             s = summarize(self._rows)
             v, t = s[SPLIT_VAL], s[SPLIT_TRAIN]
-            self.summary_var.set(
-                f"検証 {v['n']}枚: 舵 {v['steer_mae_deg']:.1f}°・速度 {v['speed_mae']:.2f}m/s　"
-                f"｜ 学習 {t['n']}枚: 舵 {t['steer_mae_deg']:.1f}°・速度 {t['speed_mae']:.2f}m/s")
+            if self._with_speed:
+                self.summary_var.set(
+                    f"検証 {v['n']}枚: 舵 {v['steer_mae_deg']:.1f}°・速度 {v['speed_mae']:.2f}m/s　"
+                    f"｜ 学習 {t['n']}枚: 舵 {t['steer_mae_deg']:.1f}°・"
+                    f"速度 {t['speed_mae']:.2f}m/s")
+            else:
+                self.summary_var.set(
+                    f"検証 {v['n']}枚: 舵 {v['steer_mae_deg']:.1f}°　"
+                    f"｜ 学習 {t['n']}枚: 舵 {t['steer_mae_deg']:.1f}°　（速度は学習していない）")
         self._keys = list(dict.fromkeys((r["source_mcap"], r["cam"]) for r in self._rows))
         labels = [self._label(k) for k in self._keys]
         self.record_combo["values"] = labels
@@ -220,8 +245,8 @@ class EvalTab:
                                         (r["steer_pred"], COLOR_PRED)], lines=[
                 (f"手本 舵 {math.degrees(r['steer_true']):+.1f}°  "
                  f"速度 {r['speed_true']:.2f}", "#9cc4ff"),
-                (f"予測 舵 {math.degrees(r['steer_pred']):+.1f}°  "
-                 f"速度 {r['speed_pred']:.2f}", "#ffc27a"),
+                (f"予測 舵 {math.degrees(r['steer_pred']):+.1f}°"
+                 + (f"  速度 {r['speed_pred']:.2f}" if self._with_speed else ""), "#ffc27a"),
                 (f"舵の差 {err:+.1f}°  [{_SPLIT_LABEL[r['split']]}]", "white"),
             ])
         t = self._times[self._idx]

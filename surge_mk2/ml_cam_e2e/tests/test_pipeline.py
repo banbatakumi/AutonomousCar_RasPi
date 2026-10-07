@@ -192,10 +192,11 @@ class TestLearnsTheDemonstration(unittest.TestCase):
             onnx_path = tmp / "models" / "cam_e2e" / "v1.onnx"
 
             _run(str(ML_DIR / "extract_pairs.py"), *map(str, mcaps), "--out", str(frames))
-            # 手本の速度は左右で違う（0.8/0.4）ので、左右反転の拡張は切る
+            # 手本の速度は左右で違う（0.8/0.4）ので、左右反転の拡張は切る。
+            # 速度の重みは既定が 0（舵だけ）なので、速度の出力も見るここでは明示する
             _run(str(ML_DIR / "train.py"), "--frames", str(frames), "--out", str(run_dir),
                  "--epochs", "12", "--size", "64x32", "--no-pretrained", "--no-flip",
-                 "--block-s", "1", "--val-ratio", "0.3")
+                 "--block-s", "1", "--val-ratio", "0.3", "--speed-weight", "0.5")
             _run(str(ML_DIR / "export_onnx.py"), "--checkpoint", str(run_dir / "best.pt"),
                  "--out", str(onnx_path))
             _run(str(ML_DIR / "eval_model.py"), "--frames", str(frames), "--run", str(run_dir),

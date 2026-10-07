@@ -117,8 +117,9 @@ def main() -> int:
                     help="検証データを切り出す時間のかたまり[s]（samples.py 参照）")
     ap.add_argument("--balance", type=float, default=0.5,
                     help="直進過多の補正 0〜1。0=補正なし、1=舵の全区間を同じ確率で選ぶ")
-    ap.add_argument("--speed-weight", type=float, default=0.5,
-                    help="損失での速度の重み（操舵=1 に対して）")
+    ap.add_argument("--speed-weight", type=float, default=0.0,
+                    help="損失での速度の重み（操舵=1 に対して）。既定の 0 は舵だけを学習する"
+                         "——実車の planner は速度を舵から決め、モデルの速度出力を使わない")
     ap.add_argument("--speed-ref", type=float, default=0.0,
                     help="速度の正規化基準[m/s]。0 なら学習データの最高速度")
     ap.add_argument("--no-flip", action="store_true",

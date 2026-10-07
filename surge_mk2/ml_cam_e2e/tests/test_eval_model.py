@@ -17,6 +17,8 @@ from eval_model import (  # noqa: E402
     SPLIT_VAL,
     read_eval,
     split_of,
+    load_train_config,
+    speed_trained,
     summarize,
     worst_segments,
 )
@@ -29,6 +31,24 @@ def _row(t_s, err_deg, *, split=SPLIT_VAL, source="a.mcap", speed_err=0.0):
             "t_capture_ns": int(t_s * NS), "split": split,
             "steer_true": 0.0, "steer_pred": math.radians(err_deg),
             "speed_true": 1.0, "speed_pred": 1.0 + speed_err}
+
+
+class TestSpeedTrained(unittest.TestCase):
+    def test_zero_weight_means_the_speed_output_is_untrained(self):
+        self.assertFalse(speed_trained({"speed_weight": 0.0}))
+        self.assertTrue(speed_trained({"speed_weight": 0.5}))
+
+    def test_old_config_without_the_key_counts_as_trained(self):
+        """`speed_weight` を書いていなかった頃の既定は 0.5。"""
+        self.assertTrue(speed_trained({}))
+
+    def test_missing_or_broken_config_is_an_empty_dict(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(load_train_config(Path(d)), {})
+            (Path(d) / "train_config.json").write_text("{broken")
+            self.assertEqual(load_train_config(Path(d)), {})
+            (Path(d) / "train_config.json").write_text('{"speed_weight": 0.0}')
+            self.assertFalse(speed_trained(load_train_config(Path(d))))
 
 
 class TestSummarize(unittest.TestCase):

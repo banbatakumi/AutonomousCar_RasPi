@@ -141,7 +141,7 @@ def extract_warning(lines: list[str]) -> str | None:
 
 def build_train_cmd(python: str, frames_dir: str, out_dir: str, epochs: int,
                     batch_size: int, size: str, no_pretrained: bool, *,
-                    balance: float = 0.5, speed_weight: float = 0.5,
+                    balance: float = 0.5, speed_weight: float = 0.0,
                     no_flip: bool = False) -> list[str]:
     cmd = [python, str(ML_CAM_E2E_DIR / "train.py"), "--frames", frames_dir, "--out", out_dir,
           "--epochs", str(epochs), "--batch-size", str(batch_size), "--size", size,
@@ -513,11 +513,11 @@ class App:
         self.balance_var.trace_add("write", show_balance)
         show_balance()
 
-        speed_weight_var = tk.StringVar(value="0.5")
+        speed_weight_var = tk.StringVar(value="0")
         ttk.Label(frame, text="速度の重み:").grid(row=7, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=speed_weight_var, width=10).grid(
             row=7, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="損失での速度の比重（舵=1）。舵を優先したいなら下げる",
+        ttk.Label(frame, text="損失での速度の比重（舵=1）。0 で舵だけを学習（実車は速度出力を使わない）",
                  foreground="gray").grid(row=7, column=2, sticky="w", pady=(8, 0))
 
         no_flip_var = tk.BooleanVar(value=False)

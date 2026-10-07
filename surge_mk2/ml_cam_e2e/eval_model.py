@@ -34,7 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 import samples as S  # noqa: E402
 
 __all__ = ["EVAL_COLUMNS", "SPLIT_TRAIN", "SPLIT_VAL", "SPLIT_UNUSED",
-           "split_of", "read_eval", "summarize", "worst_segments"]
+           "split_of", "speed_trained", "load_train_config", "read_eval", "summarize",
+           "worst_segments"]
 
 EVAL_COLUMNS = ["file", "source_mcap", "cam", "t_capture_ns", "split",
                 "steer_true", "steer_pred", "speed_true", "speed_pred"]
@@ -54,6 +55,25 @@ def split_of(sample: S.Sample, exclusions: list[S.Exclusion], train_cfg: dict) -
                       val_ratio=float(train_cfg.get("val_ratio", 0.15)),
                       seed=int(train_cfg.get("seed", 0)))
     return SPLIT_VAL if is_val else SPLIT_TRAIN
+
+
+def load_train_config(run_dir: Path) -> dict:
+    """`<run>/train_config.json`。無い・読めないなら空の dict。"""
+    try:
+        return json.loads((run_dir / "train_config.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def speed_trained(train_cfg: dict) -> bool:
+    """速度の出力を学習したモデルか。
+
+    `--speed-weight 0`（既定）で学習したモデルの `speed_norm` は、最終層が
+    初期値のままの学習されていない値——舵の特徴が写り込んで絵に応じて動くので
+    それらしく見えるが、意味は無い。評価に出すと誤解のもとなので隠す。
+    `speed_weight` が書かれていない古い設定は「学習した」とみなす（当時の既定は 0.5）。
+    """
+    return float(train_cfg.get("speed_weight", 0.5)) > 0
 
 
 def read_eval(csv_path: Path) -> list[dict]:
@@ -138,10 +158,10 @@ def main() -> int:
         print(f"モデルを読めません: {e}", file=sys.stderr)
         return 2
 
-    cfg_path = args.run / "train_config.json"
-    train_cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    train_cfg = load_train_config(args.run)
     if not train_cfg:
-        print(f"# 警告: {cfg_path} が無いので、既定の振り分けで val/train を決めます",
+        print(f"# 警告: {args.run / 'train_config.json'} が無いので、"
+              "既定の振り分けで val/train を決めます",
               file=sys.stderr)
     exclusions = S.load_exclusions(args.frames)
 
@@ -169,10 +189,13 @@ def main() -> int:
                 print(f"# {i}/{len(samples)}", flush=True)
 
     summary = summarize(rows)
+    with_speed = speed_trained(train_cfg)
     for name, label in ((SPLIT_VAL, "検証"), (SPLIT_TRAIN, "学習")):
         s = summary[name]
-        print(f"# {label} {s['n']}件  操舵MAE {s['steer_mae_deg']:.2f}deg  "
-              f"速度MAE {s['speed_mae']:.3f}m/s")
+        print(f"# {label} {s['n']}件  操舵MAE {s['steer_mae_deg']:.2f}deg"
+              + (f"  速度MAE {s['speed_mae']:.3f}m/s" if with_speed else ""))
+    if not with_speed:
+        print("# 速度は学習していないモデル（速度の重み 0）なので、速度の誤差は出しません")
     print(f"# 書き出し完了: {out_path}")
     return 0
 
