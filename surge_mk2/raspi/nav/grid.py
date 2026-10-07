@@ -23,7 +23,7 @@
 落ちる**。点の数で数えると、目の前を横切った人の脚が1周で `hits = 10` に達し、
 「3 回見た壁」と区別がつかなくなる。
 
-実装は `bincount` の結果を 1 で頭打ちにするだけ（`_add(..., once=True)`）。
+実装は `bincount` の結果を 1 で頭打ちにするだけ（`_bump`）。
 `np.unique` で潰すより速く、レイが同じセルを 2 回踏む問題も同時に消える。
 
 ## レイ彫りは `np.bincount`
@@ -104,9 +104,6 @@ class OccGrid:
         #: 格子の外に出たレイの本数（累積）。増え続けるなら `size_m` が足りない
         self.out_of_bounds = 0
         self.frozen = False
-
-        self._score: np.ndarray | None = None
-        self._score_seq = -1
 
         #: `seq` ごとの読み出し結果のキャッシュ（1周期に何度も呼ばれるため。
         #: `slam2d/core/grid.py` の `_cached` と同じ方式）
@@ -231,7 +228,7 @@ class OccGrid:
         """`seq` が変わるまで読み出し結果を使い回す（`slam2d/core/grid.py` と同じ方式）。
 
         1周期に `wall_mask()`/`known_free_mask()` は何度も呼ばれる
-        （`score_map`・`refresh`・障害物検出など）ので、毎回全格子を
+        （`refresh`・障害物検出など）ので、毎回全格子を
         作り直すのは無駄。返す配列は**キャッシュなので書き換えないこと**。
         """
         if self._cache_seq != self.seq:
@@ -279,26 +276,6 @@ class OccGrid:
         out[self.known_free_mask()] = FREE
         out[self.wall_mask()] = OCCUPIED
         return out
-
-    def score_map(self, *, radius: int = 2, decay: float = 0.6) -> np.ndarray:
-        """スキャンマッチ用の尤度場。**壁の周りをなだらかに盛った地図。**
-
-        壁ちょうどのセルだけを 1 点とすると、1 セル（5cm）ずれた候補姿勢の得点が
-        いきなり 0 になり、探索が平坦な谷底で迷子になる。半径 `radius` セルまで
-        `decay` で減衰させて裾を作ると、粗い刻みでも正しい方向へ落ちる。
-
-        `seq` が変わるまでキャッシュする（1周期に何度も呼ばれるため）。
-        """
-        if self._score is not None and self._score_seq == self.seq:
-            return self._score
-        s = self.wall_mask().astype(np.float32)
-        for _ in range(max(0, radius)):
-            s = _spread(s, s * decay, np.maximum)
-        self._score = s
-        self._score_seq = self.seq
-        return s
-
-    # ── レイキャスト（中心線の道幅測定に使う） ──
 
     def raycast(self, ox, oy, angles: np.ndarray,
                 max_range: float, mask: np.ndarray | None = None,

@@ -57,7 +57,7 @@ from .surfmap import SurfaceMap
 from .grid import OccGrid, dilate
 from .localmap import LocalMap, LocalMapConfig
 from .motion import MotionModel
-from .register import RegisterConfig, RegisterResult, register, search
+from .register import ANCHOR_INFO, RegisterConfig, RegisterResult, register, search
 from .types import (Cov3, Pose2D, RawScan, ScanPoints, Twist2D, between, compose,
                     integrate_twist, wrap_angle)
 
@@ -67,6 +67,8 @@ __all__ = ["FrontendConfig", "FrontendUpdate", "Frontend", "Keyframe", "rotate_i
 NS = 1_000_000_000
 #: 壁の向こうの判定で、LiDAR からこれより近い壁は無いものとして撃つ [m]（車体の上）
 _BEHIND_START = 0.2
+#: 壁の向こうの判定で、レイを距離の順に何束に分けて撃つか（`_not_behind_wall`）
+_BEHIND_BUCKETS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +143,7 @@ class Keyframe(NamedTuple):
     #: 位置合わせ・ループ閉じに使う壁の点（`match_range`以内、車体座標）
     hx: np.ndarray
     hy: np.ndarray
-    #: 直前のキーフレームとの相対姿勢の情報行列（**直前のキーフレームの座標系**）。
+    #: 直前のキーフレームとの相対姿勢の情報行列（**このキーフレームの向きの座標系**。g2o の `EdgeSE2` が誤差を読む向き）。
     #: 最初のキーフレームはゼロ行列
     info: Cov3
     #: 累積走行距離 [m]
@@ -230,7 +232,7 @@ class Frontend:
     # ── 1周期 ──
 
     def add_twist(self, t_ns: int, twist: Twist2D) -> None:
-        """ジャイロ+車速のサンプルを**届くたびに**入れる（実機は50Hz）。
+        """ジャイロ+車速のサンプルを**届くたびに**入れる（実機は100Hz）。
 
         入れておくと`update()`が点ごとの脱スキュー（`deskew_traj`）と、
         サンプル列を積んだ推測航法の予測を使う。入れなければ従来どおり
@@ -246,8 +248,12 @@ class Frontend:
         cfg = self.config
         twist = self.motion.current_twist()
         buf = self._corrected_twists()
-        t_lo = int(raw.t_point_ns.min()) if raw.t_point_ns.size else 0
-        t_hi = int(raw.t_point_ns.max()) if raw.t_point_ns.size else 0
+        # ★ 時刻の範囲は**有効で時刻のある点だけ**で取る。欠けたセクタの点は時刻 0 で届く
+        #   （`raspi/nav/deskew.point_times_ns`）ので、全点の最小を取ると1セクタ欠けただけで
+        #   `t_lo == 0` になり、その周は点ごとの脱スキューを丸ごと諦めていた
+        tv = raw.t_point_ns[raw.valid & (raw.t_point_ns > 0)]
+        t_lo = int(tv.min()) if tv.size else 0
+        t_hi = int(tv.max()) if tv.size else 0
         use_traj = (buf is not None and t_lo > 0
                     and buf.covers(min(t_lo, self._t_ref or t_lo), t_hi))
         if use_traj:
@@ -298,6 +304,10 @@ class Frontend:
         score = 0.0
         new_pose = pred
         res: RegisterResult | None = None
+        # ★ 見失いから戻る周期の姿勢の差には、見失っていた間の推測航法のずれが全部入っている。
+        #   それを1周期ぶんの回頭・前進として学習させない（15°の探し直しでジャイロのゼロ点が
+        #   1.5°/s 動いた。時定数は約10秒なので、直後の推測航法での続行がそのぶん曲がる）
+        recovering = self.lost_streak > 0
         if matched:
             res = register(field_, hx, hy, pred, prior=pred, prior_info=info_pred,
                            config=cfg.register)
@@ -307,6 +317,7 @@ class Frontend:
                 if alt is not None and self._good(alt):
                     res, good = alt, True
                     self.relocs += 1
+                    recovering = True
             score = res.inlier
             if good:
                 new_pose = res.pose
@@ -316,11 +327,13 @@ class Frontend:
                 lost = True
         self.last = res
 
-        if not lost and res is not None and not first:
+        if lost or first or recovering:
+            pass
+        elif res is not None:
             info_body = rotate_info(res.info / max(cfg.register.info_scale, 1e-12), new_pose.yaw)
             self.motion.update(between(self.pose, new_pose), span, info_body, raw_delta,
                                absolute=self.grid.frozen)
-        elif not lost and not first:
+        else:
             self.motion.update(between(self.pose, new_pose), span, None, raw_delta,
                                absolute=self.grid.frozen)
 
@@ -389,11 +402,20 @@ class Frontend:
         #   出発前に止まっている間の自車の近くの点が壁として焼かれていることがあり、
         #   起点から撃つと全点が「壁の向こう」になった（sim.slam_bench の course2/3）
         t0 = _BEHIND_START
-        max_range = float(r.max()) + cfg.behind_margin + g.resolution
-        exp = g.raycast(ox + t0 * np.cos(rays), oy + t0 * np.sin(rays), rays, max_range,
-                        mask=self._behind_mask, fill=0, step=g.resolution)
+        # レイは**その点の距離＋余裕**まで進めば足りる（それより先に壁があっても判定は同じ）。
+        # 全点をその周の最遠点まで撃つと、点の距離の中央値 0.7m に対して 5.6m 進めていた
+        # （`update()` の時間の7割）。距離の順に束ねて、束ごとに束の中の最遠点まで撃つ
+        exp = np.empty((3, n))
+        for part in np.array_split(np.argsort(r), _BEHIND_BUCKETS):
+            if part.size == 0:
+                continue
+            a = rays.reshape(3, n)[:, part].reshape(-1)
+            reach = float(r[part].max()) + cfg.behind_margin + g.resolution
+            exp[:, part] = g.raycast(ox + t0 * np.cos(a), oy + t0 * np.sin(a), a, reach,
+                                     mask=self._behind_mask, fill=0,
+                                     step=g.resolution).reshape(3, part.size)
         # 太らせたぶん（1セル）壁が手前に来ているので戻す
-        expected = exp.reshape(3, n).max(axis=0) + g.resolution + t0
+        expected = exp.max(axis=0) + g.resolution + t0
         # `raycast`は格子の外を壁とみなすので、格子の外の点は判定しない
         # （`associate()`が捨てるので無害。数えると除去率の上限を誤って超える）
         col, row = g.to_cell(ox + r * np.cos(ang), oy + r * np.sin(ang))
@@ -439,7 +461,8 @@ class Frontend:
                      trans=cfg.reloc_trans_step * 2.0, rot=cfg.reloc_rot_step * 2.0,
                      trans_step=cfg.reloc_trans_step * 0.5, rot_step=cfg.reloc_rot_step * 0.5,
                      sigma=0.03, max_points=160)
-        return register(field_, hx, hy, fine.pose, config=cfg.register)
+        return register(field_, hx, hy, fine.pose, prior=fine.pose, prior_info=ANCHOR_INFO,
+                        config=cfg.register)
 
     def _field(self, around: Pose2D) -> SurfaceMap | None:
         if self.grid.frozen:
@@ -466,7 +489,6 @@ class Frontend:
     def _add_keyframe(self, pts: ScanPoints, hx, hy, res: RegisterResult | None) -> None:
         cfg = self.config
         if self.keyframes:
-            prev = self.keyframes[-1].pose
             # 観測できない方向の拘束は推測航法（キーフレーム間で積んだ共分散）、
             # 観測できる方向は位置合わせの情報行列が決める
             info_w = np.linalg.inv(self._cov_since_kf + np.eye(3) * 1e-12)
@@ -474,7 +496,9 @@ class Frontend:
                 info_w = info_w + res.info
             info_w = inflate_info(info_w, sigma_xy=cfg.edge_sigma_xy,
                                   sigma_yaw=cfg.edge_sigma_yaw)
-            info = rotate_info(info_w, prev.yaw)
+            # g2o の `EdgeSE2` は誤差を dst（このキーフレーム）の向きで読む
+            # （`backend/loop_detection.py` の同じ箇所を参照）
+            info = rotate_info(info_w, self.pose.yaw)
         else:
             info = np.zeros((3, 3))
         small = truncate(pts, cfg.map_range)
@@ -501,8 +525,8 @@ class Frontend:
         rel = between(old_last, self.pose)
         g = self.grid
         new = OccGrid(resolution=g.resolution, size_m=1.0, origin=g.origin,
-                      min_hits=g.min_hits, min_seen=g.min_seen, grow=g.grow,
-                      grow_step_m=g.grow_step_m, max_size_m=g.max_size_m)
+                      min_hits=g.min_hits, min_seen=g.min_seen, hit_weight=g.hit_weight,
+                      grow=g.grow, grow_step_m=g.grow_step_m, max_size_m=g.max_size_m)
         new.hits = np.zeros_like(g.hits)
         new.misses = np.zeros_like(g.misses)
         new.hit_sx = np.zeros_like(g.hit_sx)
@@ -552,4 +576,5 @@ class Frontend:
         sr = search(f, hx, hy, guess, trans=cfg.reloc_trans if trans is None else trans,
                     rot=cfg.reloc_rot if rot is None else rot,
                     trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
-        return register(f, hx, hy, sr.pose, config=cfg.register)
+        return register(f, hx, hy, sr.pose, prior=sr.pose, prior_info=ANCHOR_INFO,
+                        config=cfg.register)

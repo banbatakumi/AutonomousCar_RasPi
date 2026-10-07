@@ -137,6 +137,7 @@ class TestAccelLimitPassThrough(unittest.TestCase):
     def test_accel_limit_goes_into_auto_cmd(self):
         from raspi.msgs.types import AutoState
         node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
         cmd = node._cmd_from(AutoState(ready=True, target_speed=1.0, accel_limit=1.6))
         self.assertEqual(cmd.accel_limit, 1.6)
@@ -149,6 +150,7 @@ class TestAccelLimitPassThrough(unittest.TestCase):
         （中継側の GUI の値）。"""
         from raspi.msgs.types import AutoState
         node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
         cmd = node._cmd_from(AutoState(ready=True, brake=True, brake_torque=0.04))
         self.assertEqual((cmd.brake, cmd.brake_torque), (True, 0.04))
@@ -164,6 +166,7 @@ class TestNanPlannerOutputBrakes(unittest.TestCase):
     def test_nan_target_speed_brakes(self):
         from raspi.msgs.types import AutoState
         node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
         cmd = node._cmd_from(AutoState(ready=True, target_speed=float("nan"), target_steer=0.1))
         self.assertTrue(cmd.brake)
@@ -172,6 +175,7 @@ class TestNanPlannerOutputBrakes(unittest.TestCase):
     def test_inf_target_steer_brakes(self):
         from raspi.msgs.types import AutoState
         node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
         cmd = node._cmd_from(AutoState(ready=True, target_speed=0.5, target_steer=float("inf")))
         self.assertTrue(cmd.brake)
@@ -280,6 +284,7 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
         fake = _FakeFreezeClearPlanner()
         node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", freeze_seq=1))
         self.assertEqual(fake.freeze_calls, 1)
 
@@ -288,6 +293,7 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
         fake = _FakeFreezeClearPlanner()
         node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg_cam", freeze_seq=1))
         self.assertEqual(fake.freeze_calls, 1, "モード変更と同時だとfreezeが握り潰されている")
 
@@ -295,6 +301,7 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
         fake = _FakeFreezeClearPlanner()
         node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg_cam", clear_seq=1))
         self.assertEqual(fake.clear_calls, 1, "モード変更と同時だとclearが握り潰されている")
 
@@ -319,6 +326,7 @@ class TestDisengage(unittest.TestCase):
         node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
         fake = _FakeDisengagePlanner()
         node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=False))
         self.assertEqual((fake.disengages, fake.resets), (1, 0))
@@ -329,9 +337,55 @@ class TestDisengage(unittest.TestCase):
         calls = []
         fake.reset = lambda: calls.append(1)
         node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
         node._apply_ctrl(AutoCtrl(mode="ftg", engaged=False))
         self.assertEqual(calls, [1])
+
+
+class TestRestartWhileEngaged(unittest.TestCase):
+    """走行中にこのノードが起動し直したとき、engaged のまま走り出さないこと。"""
+
+    def _node(self):
+        sub = FakeSub({TOPIC_SCAN: _scan()})
+        return PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
+
+    def test_first_ctrl_already_engaged_is_not_accepted(self):
+        node = self._node()
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        self.assertFalse(node.ctrl.engaged)
+        node._replan(1)
+        st = node._current(1)
+        self.assertFalse(st.engaged)
+        self.assertIn("起動し直した", st.reason)
+        cmd = node._cmd_from(st)
+        self.assertEqual((cmd.mode, cmd.arm), (0, False))
+        # 同じ意思が繰り返し届いても受けない
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        self.assertFalse(node.ctrl.engaged)
+
+    def test_engage_is_accepted_after_a_release(self):
+        node = self._node()
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=False))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        self.assertTrue(node.ctrl.engaged)
+        node._replan(1)
+        self.assertNotIn("起動し直した", node._current(1).reason)
+
+    def test_counters_in_the_first_ctrl_are_history(self):
+        """最初の1通に載っている回数（読み込み・駐車の目標など）は起動前の出来事。実行しない。"""
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeFreezeClearPlanner()
+        loads = []
+        fake.request_load = loads.append
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True, freeze_seq=3, clear_seq=2,
+                                  race_seq=5, race_map="m"))
+        self.assertEqual((fake.freeze_calls, fake.clear_calls, loads), (0, 0, []))
+        # その後に増えたぶんは効く
+        node._apply_ctrl(AutoCtrl(mode="ftg", freeze_seq=4, clear_seq=2, race_seq=6, race_map="m"))
+        self.assertEqual((fake.freeze_calls, fake.clear_calls, loads), (1, 0, ["m"]))
 
 
 class TestE2EModelRouting(unittest.TestCase):

@@ -137,6 +137,50 @@ class TestMapstore(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse((mapstore.MAPS_DIR / "bad.npz").exists())
 
+    def _save(self, name: str, **over) -> None:
+        kw = dict(resolution=0.025, origin_x=-1.0, origin_y=-1.0, trinary=make_trinary(),
+                  centerline_xy=np.zeros((4, 2)),
+                  raceline_xy=np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+                  raceline_v=np.ones(4))
+        mapstore.save_map(name, **{**kw, **over})
+
+    def test_name_ending_with_routes_is_rejected(self):
+        """`foo.routes` のメタデータは `foo.routes.json`＝地図 `foo` の経路の設定と同じファイル。"""
+        self._save("foo")
+        self.assertTrue(mapstore.save_routes("foo", '{"groups": {}}'))
+        self.assertIsNone(mapstore.resolve_map_path("foo.routes"))
+        with self.assertRaises(ValueError):
+            self._save("foo.routes")
+        self.assertEqual(mapstore.load_routes("foo"), '{"groups": {}}')
+
+    def test_overwriting_a_map_that_has_routes_is_refused(self):
+        """経由点は地図の座標で書かれている。別の地図を同名で書いて古い経由点を付けない。"""
+        self._save("foo")
+        self._save("foo")                                   # 経路の設定が無ければ上書きできる
+        mapstore.save_routes("foo", '{"groups": {}}')
+        with self.assertRaises(ValueError):
+            self._save("foo")
+        self.assertEqual(mapstore.load_routes("foo"), '{"groups": {}}')
+
+    def test_non_finite_line_is_rejected(self):
+        self._save("nan", raceline_xy=np.array([[0.0, 0.0], [np.nan, 0.0], [1.0, 1.0]]),
+                   raceline_v=np.ones(3))
+        self.assertIsNone(mapstore.load_map("nan"))
+        self._save("zero_res", resolution=0.0)
+        self.assertIsNone(mapstore.load_map("zero_res"))
+
+    def test_empty_line_is_loadable(self):
+        """ラインが空の地図は有効（経路を道路グラフから作り直す planner が読む）。"""
+        self._save("empty", raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+        m = mapstore.load_map("empty")
+        self.assertIsNotNone(m)
+        self.assertEqual(len(m.raceline_xy), 0)
+
+    def test_meta_is_written_atomically(self):
+        self._save("foo")
+        self.assertEqual([p.name for p in mapstore.MAPS_DIR.glob("*.tmp")], [])
+        self.assertEqual([m["name"] for m in mapstore.list_maps()], ["foo"])
+
     def test_list_maps_empty_when_dir_missing(self):
         self.assertEqual(mapstore.list_maps(), [])
 

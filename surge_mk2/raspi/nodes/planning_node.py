@@ -54,6 +54,8 @@ import sys
 import time
 from pathlib import Path
 
+import msgspec
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
@@ -99,6 +101,10 @@ def _poll_timeout_ms(wait_ns: int) -> int:
 VEHICLE_STATE_POLICY = Policy(conflate=False, hwm=1000)
 
 
+#: 走行中に起動し直したとき `auto/state` の理由に出す文言（`PlanningNode._apply_ctrl`）
+_RESTART_NOTE = "★planning_node が起動し直した。自動運転を一度解除して入れ直してください"
+
+
 def input_topics() -> set[str]:
     """登録されている全 planner が使う `input_topic` の和集合。
 
@@ -129,6 +135,12 @@ class PlanningNode:
         self.ctrl = AutoCtrl(mode=mode, engaged=False)
         self.planner = make_planner(mode)
         self._params: dict[str, float] = merged_params(mode, {})
+        #: `auto/ctrl` を受けたことがあるか・**engaged=False を見たことがあるか**（`_apply_ctrl`）
+        self._ctrl_seen = False
+        self._engage_ok = False
+        #: 起動した時点で既に engage されていた（＝走行中にこのノードが起動し直した）。
+        #: 人が入れ直すまで engage を受けない
+        self._engage_blocked = False
 
         #: 最後に出した判断。新しい判断はその場で、それ以外は 50Hz で `auto/cmd` に繰り返す
         self.state = AutoState()
@@ -153,6 +165,22 @@ class PlanningNode:
         パラメータだけの変更で作り直すと、スライダを動かすたびに舵の平滑化が
         リセットされて走りがカクつく。`reset()` はモードが変わったときだけ。
         """
+        # ★ **起動後、engaged=False を一度見るまで engage を受けない。** 走行中にこのノードが
+        #   落ちて起動し直すと（systemd の `Restart=on-failure`）、最初に届く `auto/ctrl` は
+        #   engaged=True のままで、planner は作り直された初期状態——slam2d 系なら地図も
+        #   経路も無い EXPLORE。そのまま受けると、人が ARM を握っている車が FTG の
+        #   地図作成走行を始める。人が自動運転を入れ直すまで待つ
+        if not c.engaged:
+            self._engage_ok = True
+        self._engage_blocked = c.engaged and not self._engage_ok
+        if self._engage_blocked:
+            c = msgspec.structs.replace(c, engaged=False)
+        if not self._ctrl_seen:
+            # 最初の1通に載っている回数（地図の読み込み・駐車の目標など）は、起動する前の
+            # 出来事。今の planner への要求として読まない（古い駐車目標へ走り出さない）
+            self._ctrl_seen = True
+            self.ctrl = msgspec.structs.replace(c, mode=self.ctrl.mode, engaged=self.ctrl.engaged,
+                                                params=self.ctrl.params)
         changed = c.mode != self.ctrl.mode
         # disengage も状態を捨てる契機にする。次に engage したときに、
         # **前回の舵の続きから動き出さない**ようにするため
@@ -199,6 +227,9 @@ class PlanningNode:
             if fn is not None:
                 fn(c.route_group, "gui")
         if changed:
+            close = getattr(self.planner, "close", None)
+            if close is not None:
+                close()                     # 経路計算のワーカーを残さない
             self.planner = make_planner(c.mode)
             self.state = AutoState(mode=c.mode)
             self._last_scan_seq = -1
@@ -322,6 +353,8 @@ class PlanningNode:
                              scan_age_ms=age / 1e6, plan_hz=self._plan_hz,
                              reason=f"点群が {age / 1e6:.0f}ms 古い")
         st.engaged = self.ctrl.engaged
+        if self._engage_blocked and not st.reason.startswith(_RESTART_NOTE):
+            st.reason = f"{_RESTART_NOTE}（{st.reason}）" if st.reason else _RESTART_NOTE
         return st
 
     def _cmd_from(self, st: AutoState) -> DriveCmd:

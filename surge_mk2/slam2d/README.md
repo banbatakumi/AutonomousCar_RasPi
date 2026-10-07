@@ -53,7 +53,7 @@ pipeline.py    SlamSystem（フロントエンド＋ループ閉じの公開API�
 
 ## 検証
 
-- 合成データの単体テスト: `pytest slam2d/tests -q`（105件、15秒程度）
+- 合成データの単体テスト: `pytest slam2d/tests -q`（15秒程度）
 - **シミュレータでの通し評価**: `.venv/bin/python -m sim.slam_bench`
   （`sim/slam_bench.py`。実機と同じ `VirtualLidar → ScanAssembler` 経路を通し、
   車速・ジャイロに誤差を注入して真値と突き合わせる。地図作成と凍結地図での

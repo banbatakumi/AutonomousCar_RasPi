@@ -15,15 +15,18 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
+from slam2d.core import frontend as frontend_mod  # noqa: E402
 from slam2d.core.frontend import Frontend, FrontendConfig  # noqa: E402
 from slam2d.core.grid import OccGrid  # noqa: E402
-from slam2d.core.motion import ConstantVelocityModel, ExternalTwistModel  # noqa: E402
-from slam2d.core.types import Pose2D, Twist2D, compose  # noqa: E402
+from slam2d.core.motion import (ConstantVelocityModel, ExternalTwistModel,  # noqa: E402
+                                GyroBiasEstimator)
+from slam2d.core.types import Pose2D, RawScan, Twist2D, compose  # noqa: E402
 from slam2d.tests.helpers import ROOM, make_raw_scan, make_room_points  # noqa: E402
 
 
@@ -283,6 +286,88 @@ class TestApplyCorrection(unittest.TestCase):
         fe.update(make_raw_scan(3.0, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
         with self.assertRaises(ValueError):
             fe.apply_correction([])
+
+
+NS = 1_000_000_000
+
+
+def _timed_scan(x: float, t_ns: int, *, drop: slice | None = None) -> RawScan:
+    """`t_ns` に終わる 0.1s の1周。点ごとに時刻を振る。`drop` のセクタは欠測（無効・時刻 0）。"""
+    raw = make_raw_scan(3.0 + x, 2.0, 0.0, segs=ROOM, max_range=8.0)
+    tp = (t_ns - NS // 10 + np.arange(360) * (NS // 10 // 360)).astype(np.int64)
+    valid = raw.valid.copy()
+    if drop is not None:
+        valid[drop] = False
+        tp[drop] = 0
+    return RawScan(raw.angles, raw.ranges, valid, raw.saturated, tp)
+
+
+class TestTwistHistory(unittest.TestCase):
+    """`add_twist()` で履歴を入れたとき、点ごとの脱スキュー（`deskew_traj`）が使われる。"""
+
+    def _run(self, drop: slice | None) -> tuple[int, Frontend]:
+        tw = Twist2D(0.2, 0.0, 0.0)
+        fe = _make_frontend(motion=ExternalTwistModel(lambda: tw), kf_dist=0.05)
+        t = NS
+        with mock.patch.object(frontend_mod, "deskew_traj",
+                               wraps=frontend_mod.deskew_traj) as traj:
+            for i in range(20):
+                for k in range(1, 11):
+                    fe.add_twist(t - NS // 10 + k * NS // 100, tw)
+                fe.update(_timed_scan(0.02 * i, t, drop=drop), 0.1)
+                t += NS // 10
+            return traj.call_count, fe
+
+    def test_per_point_deskew_is_used(self):
+        n, fe = self._run(None)
+        self.assertEqual(n, 20)
+        self.assertAlmostEqual(fe.pose.x, 0.02 * 19, delta=0.03)
+
+    def test_a_missing_sector_does_not_disable_it(self):
+        """欠けたセクタの点は時刻 0 で届く。1つ欠けただけで全周の脱スキューを諦めない。"""
+        n, fe = self._run(slice(30, 60))
+        self.assertEqual(n, 20)
+        self.assertAlmostEqual(fe.pose.x, 0.02 * 19, delta=0.03)
+
+
+class TestRecoveryDoesNotTeach(unittest.TestCase):
+    def test_bias_is_not_learned_from_the_jump_back(self):
+        """見失いから戻る周期の姿勢の差（溜まったずれ）を、1周期ぶんの回頭として学習しない。"""
+        bias = GyroBiasEstimator()
+        motion = ExternalTwistModel(lambda: Twist2D(0.2, 0.0, 0.0), bias_estimator=bias)
+        fe = _make_frontend(motion=motion, kf_dist=0.05)
+        for i in range(20):
+            fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+        fe.grid.freeze()
+        for i in range(20, 25):
+            fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+        before = bias.bias
+        # 見失っている間に 20cm・10° ずれた、という状態から探し直しで戻る
+        fe.lost_streak = fe.config.reloc_after
+        relocs = fe.relocs
+        fe.pose = Pose2D(fe.pose.x + 0.2, fe.pose.y, fe.pose.yaw + math.radians(10.0))
+        u = fe.update(make_raw_scan(3.0 + 0.02 * 25, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+        self.assertFalse(u.lost)
+        self.assertEqual(fe.relocs, relocs + 1)
+        self.assertAlmostEqual(math.degrees(fe.pose.yaw), 0.0, delta=0.5)
+        self.assertEqual(bias.bias, before)
+        # 次の周期からは学習に戻る（止めたままにしない）
+        self.assertEqual(fe.lost_streak, 0)
+
+
+class TestBehindWallRays(unittest.TestCase):
+    def test_bucketed_rays_match_full_length_rays(self):
+        """レイを距離の順に束ねて撃っても、全点を最遠点まで撃つのと判定は同じ。"""
+        fe = _frozen_tracker(behind_max_ratio=1.0)
+        raw = make_raw_scan(3.4, 2.0, 0.3, segs=GHOST_ROOM, max_range=8.0)
+        ang, r = raw.angles[raw.valid], raw.ranges[raw.valid]
+        hx, hy = r * np.cos(ang), r * np.sin(ang)
+        pose = Pose2D(0.4, 0.0, 0.3)
+        got = fe._not_behind_wall(hx, hy, pose)
+        with mock.patch.object(frontend_mod, "_BEHIND_BUCKETS", 1):
+            want = fe._not_behind_wall(hx, hy, pose)
+        self.assertTrue(np.array_equal(got, want))
+        self.assertGreater(int((~got).sum()), 10)       # 壁の向こうの点を実際に外している
 
 
 if __name__ == "__main__":

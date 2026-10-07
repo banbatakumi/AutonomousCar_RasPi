@@ -38,7 +38,8 @@ from typing import NamedTuple
 import numpy as np
 
 from .deskew import Points
-from .grid import OccGrid, dilate
+from .grid import OccGrid
+from .local_map import _edt
 
 __all__ = ["Obstacle", "free_mask", "detect", "confirm", "blocking"]
 
@@ -59,8 +60,11 @@ def free_mask(grid: OccGrid, wall_pad: float) -> np.ndarray:
     格子全体の膨張なので重い（Pi で数ms）。凍結地図では変わらないので、周期ごとに
     呼ぶ側は `grid.seq` と `wall_pad` で覚えておいて `detect(free=...)` へ渡すこと。
     """
-    pad = max(1, int(round(wall_pad / grid.resolution)))
-    return grid.known_free_mask() & ~dilate(grid.wall_mask(), pad)
+    # ★ 壁からの**ユークリッド距離**で切る。4近傍の膨張（`dilate`）はひし形に太るので、
+    #   格子に対して斜めの壁は指定の 71% しか除外されず（0.15m に対して 10.6cm）、自己位置が
+    #   その幅を超えてずれると斜めの壁の点が障害物の候補になった
+    pad = max(1, int(round(wall_pad / grid.resolution))) * grid.resolution
+    return grid.known_free_mask() & (_edt(~grid.wall_mask(), grid.resolution) > pad + 1e-6)
 
 
 def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
@@ -96,6 +100,13 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
     px, py = wx[idx], wy[idx]
     # 点は方位順に並んでいるので、隣同士の距離が開いたところで切ればよい
     gap = np.hypot(np.diff(px), np.diff(py)) > _SPLIT_M
+    # ★ 方位 0°（**真正面**）が配列の継ぎ目。末尾と先頭がつながっているなら、最初の切れ目が
+    #   先頭に来るよう回してから切る。回さないと、他に候補点があるだけで正面の障害物が
+    #   2つに割れ（中心が横へ寄り、半径は半分以下）、遠くでは点数が足りず検出されなかった
+    if gap.any() and math.hypot(px[0] - px[-1], py[0] - py[-1]) <= _SPLIT_M:
+        k = int(np.flatnonzero(gap)[0]) + 1
+        px, py = np.roll(px, -k), np.roll(py, -k)
+        gap = np.hypot(np.diff(px), np.diff(py)) > _SPLIT_M
     starts = np.concatenate([[0], np.flatnonzero(gap) + 1, [idx.size]])
 
     out: list[Obstacle] = []

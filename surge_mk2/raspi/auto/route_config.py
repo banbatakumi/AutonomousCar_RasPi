@@ -76,7 +76,7 @@ class RouteConfig:
         if not isinstance(d, dict):
             raise ValueError("経路の設定がオブジェクトではない")
         groups: dict[str, list[Waypoint]] = {}
-        for k, pts in (d.get("groups") or {}).items():
+        for k, pts in _obj(d.get("groups"), "groups").items():
             if k not in GROUPS:
                 raise ValueError(f"グループ名『{k}』は使えない（A〜D）")
             if not isinstance(pts, list) or len(pts) > _MAX_WAYPOINTS:
@@ -85,7 +85,7 @@ class RouteConfig:
             if wps:
                 groups[k] = wps
         stops = {}
-        for name, s in (d.get("stops") or {}).items():
+        for name, s in _obj(d.get("stops"), "stops").items():
             if not isinstance(name, str) or not name or len(name) > 16:
                 raise ValueError("停止点の名前が不正（1〜16文字）")
             if not isinstance(s, dict):
@@ -104,12 +104,12 @@ class RouteConfig:
         then = str(mission.get("then", "") or "")
         if then and then not in stops:
             raise ValueError(f"ミッションの行き先『{then}』という停止点が無い")
-        mission = {"laps": max(0, int(mission.get("laps", 0) or 0)),
-                   "time_s": max(0.0, float(mission.get("time_s", 0.0) or 0.0)),
+        mission = {"laps": max(0, int(_num(mission.get("laps") or 0, "ミッションの周回数"))),
+                   "time_s": max(0.0, _num(mission.get("time_s") or 0.0, "ミッションの時間")),
                    "then": then}
         sig = {}
-        for k, g in (d.get("signal_map") or {}).items():
-            if g not in ROUTE_KEYS:
+        for k, g in _obj(d.get("signal_map"), "signal_map").items():
+            if not isinstance(g, str) or g not in ROUTE_KEYS:
                 raise ValueError(f"信号『{k}』の行き先『{g}』はグループ名ではない")
             sig[str(k)] = str(g)
         active = str(d.get("active", AUTO_KEY) or AUTO_KEY)
@@ -125,7 +125,10 @@ class RouteConfig:
         traj = d.get("explore_traj")
         tr = None
         if traj is not None:
-            tr = np.asarray(traj, dtype=np.float64)
+            try:
+                tr = np.asarray(traj, dtype=np.float64)
+            except (TypeError, ValueError) as e:
+                raise ValueError("explore_traj が不正") from e
             if tr.ndim != 2 or tr.shape[1] != 2 or len(tr) > _MAX_TRAJ \
                     or not np.isfinite(tr).all():
                 raise ValueError("explore_traj が不正")
@@ -138,7 +141,12 @@ class RouteConfig:
             d = json.loads(s) if s else {}
         except ValueError as e:
             raise ValueError(f"経路の設定が JSON として読めない: {e}") from e
-        return cls.from_dict(d)
+        try:
+            return cls.from_dict(d)
+        except (TypeError, AttributeError, OverflowError) as e:
+            # 型の食い違いは `from_dict` が個別に `ValueError` にしているが、取りこぼしが
+            # あっても呼び出し側（`except ValueError`）を抜けて planning_node まで届かせない
+            raise ValueError(f"経路の設定の形式が不正: {e!r}") from e
 
     def to_dict(self, *, with_traj: bool = True) -> dict:
         d: dict = {
@@ -172,6 +180,15 @@ class RouteConfig:
             if math.hypot(*(p - out[-1])) >= spacing:
                 out.append(p)
         return np.array(out[-_MAX_TRAJ:])
+
+
+def _obj(v, where: str) -> dict:
+    """無指定（`None`・空）は空として読む。それ以外でオブジェクトでなければ不正。"""
+    if not v:
+        return {}
+    if not isinstance(v, dict):
+        raise ValueError(f"{where} がオブジェクトではない")
+    return v
 
 
 def _num(v, where: str) -> float:

@@ -47,8 +47,7 @@ def _ring_path(v=2.0) -> RaceLine:
     n = int(2 * math.pi * R / 0.1)
     a = np.arange(n) * 2 * math.pi / n
     xy = np.column_stack([R * np.cos(a), R * np.sin(a)])      # 反時計回り
-    return RaceLine(xy=xy, v=np.full(n, v), kappa=curvature(xy), alpha=np.zeros(n),
-                    s=np.zeros(n), length=2 * math.pi * R)
+    return RaceLine(xy=xy, v=np.full(n, v), kappa=curvature(xy), length=2 * math.pi * R)
 
 
 def _cfg(**kw) -> av.AvoidConfig:
@@ -124,6 +123,18 @@ class TestCapSpeed(unittest.TestCase):
         d = (50 - np.arange(30, 50)) * (2 * math.pi * R / len(path))
         self.assertTrue(np.all(out.v[30:50] <= np.sqrt(1.0 + 2 * 2.0 * d) + 1e-9))
         self.assertEqual(out.v[0], 2.0)
+
+    def test_exit_accelerates_within_the_limit(self):
+        """`a_accel` を渡すと、窓の出口でも1点で元の速度へ跳ばない。"""
+        path = _ring_path(v=2.0)
+        window = np.arange(50, 70)
+        step = 2 * math.pi * R / len(path)
+        self.assertEqual(av.cap_speed(path, window, 1.0, a_brake=2.0).v[70], 2.0)
+        out = av.cap_speed(path, window, 1.0, a_brake=2.0, a_accel=1.5)
+        d = (np.arange(70, 100) - 69) * step
+        self.assertTrue(np.all(out.v[70:100] <= np.sqrt(1.0 + 2 * 1.5 * d) + 1e-9))
+        self.assertLess(out.v[70], 1.2)
+        self.assertEqual(out.v[200], 2.0)
 
 
 if __name__ == "__main__":

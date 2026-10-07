@@ -85,7 +85,7 @@ class ScanPoints(NamedTuple):
 
 
 def wrap_angle(a: float) -> float:
-    """角度を (-pi, pi] へ畳む。"""
+    """角度を [-pi, pi) へ畳む（`wrap_angle(pi) == -pi`）。"""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 

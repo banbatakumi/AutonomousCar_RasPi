@@ -65,7 +65,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .centerline import (Centerline, lateral_offset, measure, normals, normals_open,
+from .centerline import (Centerline, measure, normals, normals_open,
                          resample_loop, resample_open, tangents, tangents_open)
 from .grid import OccGrid
 from .local_map import _edt, footprint_circles
@@ -88,8 +88,6 @@ class RaceLine(NamedTuple):
     xy: np.ndarray                         #: (N, 2) [m]
     v: np.ndarray                          #: (N,) 目標速度 [m/s]
     kappa: np.ndarray                      #: (N,) 曲率 [1/m]。左旋回が正
-    alpha: np.ndarray                      #: (N,) 中心線からの横ずれ [m]。左が正
-    s: np.ndarray                          #: (N,) 始点からの弧長 [m]
     length: float                          #: 1周の長さ [m]（開いた経路なら始点→終点の長さ）
     #: False なら開いた経路（今の位置→ゴール、`nav/route.py`）。**添字は巡回しない**
     closed: bool = True
@@ -413,10 +411,18 @@ class _BodyCheck:
 
     def tighten(self, c: np.ndarray, nrm: np.ndarray, a: np.ndarray,
                 lo: np.ndarray, hi: np.ndarray, margin: float) -> bool:
-        """余裕が `margin` に足りない点の箱制約を、壁から離れる側へ締める。締めたら True。"""
+        """余裕が `margin` に足りない点の箱制約を、壁から離れる側へ締める。締めたら True。
+
+        ★ 開いた経路の両端（今の車の位置・止まる場所）は動かさない。締めると `lo > hi` に
+        なって「真ん中で諦める」に落ち、壁際から走り出す・壁際に止まる経路で、始点が車の
+        位置から（終点が停止点から）数cm ずれた。
+        """
         xy = c + nrm * a[:, None]
         clr = self.clearance(xy)
-        bad = np.nonzero(clr < margin - 1e-3)[0]
+        short = clr < margin - 1e-3
+        if not self.closed:
+            short[[0, -1]] = False
+        bad = np.nonzero(short)[0]
         if not len(bad):
             return False
         d = 0.02
@@ -495,7 +501,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
 
     body = _BodyCheck(grid, footprint, closed) if footprint is not None else None
 
-    def score(xy: np.ndarray) -> tuple[int, float]:
+    def score(xy: np.ndarray) -> tuple[int, float, float]:
         """小さいほど良い。★ 車体外形の余裕が足りない解は、足りる解より必ず後ろ。
         そのうえで `time_iters` なら見積もりの走行時間、そうでなければ Σκ²。"""
         short = int(body is not None and float(body.clearance(xy).min()) < margin - 0.01)
@@ -555,18 +561,9 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
                                                     rear_overhang)
 
     xy = best
-    # **α は最後まで「元の中心線からの横ずれ」**として返す。2周目以降の
-    # 解そのものは 1 周目の経路が基準になっており、人間が読む数字にならない
-    alpha = lateral_offset(cl, xy)
     kap = curvature(xy, closed)
     v = speed_profile(xy, speed_kappa(xy, closed), v_max=v_max, v_min=v_min, a_lat=a_lat,
                       a_accel=a_accel, a_brake=a_brake, closed=closed,
                       v_start=v_start, v_end=v_end, kappa_max=kappa_max)
-    if closed:
-        seg = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T)
-        s = np.concatenate([[0.0], np.cumsum(seg)[:-1]])
-    else:
-        seg = np.hypot(*np.diff(xy, axis=0).T)
-        s = np.concatenate([[0.0], np.cumsum(seg)])
-    return RaceLine(xy=xy, v=v, kappa=kap, alpha=alpha, s=s, length=float(seg.sum()),
-                    closed=closed)
+    seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
+    return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed)

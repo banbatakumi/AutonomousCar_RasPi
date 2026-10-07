@@ -118,5 +118,31 @@ class TestNearestLookup(unittest.TestCase):
             self.assertLess(abs(float(a.dist[i]) - d_true), 0.05)
 
 
+class TestCroppedGrid(unittest.TestCase):
+    def test_grid_is_cropped_to_the_points(self):
+        """格子は点のある範囲＋`max_dist`に切り詰める。対応付けは切り詰めても変わらない。"""
+        t = np.linspace(0.0, 1.0, 200)
+        xs, ys = 1.0 + t, np.full(t.size, 0.5)              # 長さ1mの壁1枚
+        m = SurfaceMap.from_points(xs, ys, center=(0.0, 0.0), radius=8.5, resolution=0.025,
+                                   max_dist=0.4)
+        self.assertLess(m.width * m.height, 0.05 * 680 * 680)
+        # 壁の近くは対応が付き、距離は壁までの距離
+        a = m.associate(np.array([1.5, 1.5, 1.5]), np.array([0.6, 0.2, 0.85]))
+        self.assertEqual(a.valid.tolist(), [True, True, True])
+        np.testing.assert_allclose(a.dist, [0.1, 0.3, 0.35], atol=0.02)
+        # `max_dist` より遠い点・格子の外の点は対応なし（切り詰める前と同じ扱い）
+        far = m.associate(np.array([1.5, 1.5, -6.0]), np.array([0.95, 3.0, -6.0]))
+        self.assertEqual(far.valid.tolist(), [False, False, False])
+
+    def test_points_outside_the_square_are_ignored(self):
+        m = SurfaceMap.from_points(np.array([20.0, 0.5]), np.array([0.0, 0.5]),
+                                   center=(0.0, 0.0), radius=2.0, resolution=0.05)
+        self.assertFalse(m.empty)
+        self.assertLessEqual(m.width, 80)
+        self.assertTrue(SurfaceMap.from_points(np.array([20.0]), np.array([0.0]),
+                                               center=(0.0, 0.0), radius=2.0,
+                                               resolution=0.05).empty)
+
+
 if __name__ == "__main__":
     unittest.main()

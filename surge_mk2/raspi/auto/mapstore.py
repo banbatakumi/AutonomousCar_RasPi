@@ -42,6 +42,7 @@ npzに、一覧表示に要る軽い情報だけjsonに分けることで、`lis
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import zipfile
@@ -52,7 +53,8 @@ import numpy as np
 
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
            "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
-           "import_upload", "export_map", "save_routes", "load_routes", "ROUTES_KEY"]
+           "import_upload", "export_map", "save_routes", "load_routes", "ROUTES_KEY",
+           "polyline_length"]
 
 MAPS_DIR = Path(__file__).resolve().parents[2] / "saved_maps"
 
@@ -85,6 +87,10 @@ def resolve_map_path(name: str) -> Path | None:
     """
     if not name or "/" in name or "\\" in name or name in (".", ".."):
         return None
+    if name.endswith(".routes"):
+        # `<名前>.routes` のメタデータ（`<名前>.routes.json`）は、地図 `<名前>` の経路の設定と
+        # 同じファイルになり、保存しただけで相手の経由点を上書きする
+        return None
     base = MAPS_DIR.resolve()
     target = (base / f"{name}.npz").resolve()
     if target.parent != base:
@@ -101,7 +107,8 @@ def _routes_path(npz_path: Path) -> Path:
     return npz_path.with_name(npz_path.stem + ".routes.json")
 
 
-def _polyline_length(xy: np.ndarray) -> float:
+def polyline_length(xy: np.ndarray) -> float:
+    """閉じた点列（周回）の1周の長さ [m]（`RaceLine.length` と同じ定義）。"""
     xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
     if len(xy) < 2:
         return 0.0
@@ -117,9 +124,13 @@ def _write_meta(target: Path, loaded: LoadedMap) -> None:
         "width": int(width),
         "height": int(height),
         "raceline_points": int(len(loaded.raceline_xy)),
-        "length_m": _polyline_length(loaded.raceline_xy),
+        "length_m": polyline_length(loaded.raceline_xy),
     }
-    _meta_path(target).write_text(json.dumps(meta))
+    # 途中で落ちても壊れた JSON を残さない（壊れると `list_maps` がその地図を黙って飛ばす）
+    p = _meta_path(target)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(meta))
+    os.replace(tmp, p)
 
 
 # ── 一覧 ──
@@ -146,11 +157,16 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
             created_at: float | None = None) -> None:
     """今の地図（3値＋中心線＋レーシングライン）を`<name>.npz`＋`<name>.json`として書く。
 
-    `raise ValueError`: 名前が不正（`resolve_map_path`参照）。
+    `raise ValueError`: 名前が不正（`resolve_map_path`参照）、または**経路の設定を持つ
+    既存の地図への上書き**。経路の設定（経由点・停止点）は地図の座標で書かれているので、
+    別の地図を同じ名前で書くと古い経由点がそのまま付いてくる。黙って消すと人の作業が
+    失われるので、どちらもせずに断る（別名で保存するか、先に削除してもらう）。
     """
     target = resolve_map_path(name)
     if target is None:
         raise ValueError(f"invalid map name: {name!r}")
+    if target.is_file() and _routes_path(target).is_file():
+        raise ValueError(f"地図『{name}』には経路の設定がある。別の名前で保存するか、先に削除してください")
     MAPS_DIR.mkdir(parents=True, exist_ok=True)
     created_at = time.time() if created_at is None else created_at
 
@@ -197,13 +213,23 @@ def _load_npz(file) -> LoadedMap:
             raise ValueError("trinary must be a 2D uint8 array")
         if not np.isin(trinary, (0, 1, 2)).all():
             raise ValueError("trinary must contain only 0/1/2")
-        return LoadedMap(
+        m = LoadedMap(
             resolution=float(z["resolution"]), origin_x=float(z["origin_x"]),
             origin_y=float(z["origin_y"]), trinary=np.ascontiguousarray(trinary),
             centerline_xy=np.asarray(z["centerline_xy"], dtype=np.float64).reshape(-1, 2),
             raceline_xy=np.asarray(z["raceline_xy"], dtype=np.float64).reshape(-1, 2),
             raceline_v=np.asarray(z["raceline_v"], dtype=np.float64).reshape(-1),
             created_at=float(z["created_at"]) if "created_at" in z.files else 0.0)
+    # 数値として使えない中身を走行まで持ち込まない（NaN の経路は RACE に入ってから毎周期
+    # 例外になる）。**点の数はここでは見ない**——ラインが空の地図（経路を道路グラフから
+    # 作り直す `slam2d_route` 用）は有効で、足りるかは読む側が決める
+    if not (math.isfinite(m.resolution) and m.resolution > 0.0
+            and math.isfinite(m.origin_x) and math.isfinite(m.origin_y)):
+        raise ValueError("resolution/origin must be finite and resolution > 0")
+    for key in ("centerline_xy", "raceline_xy", "raceline_v"):
+        if not np.isfinite(getattr(m, key)).all():
+            raise ValueError(f"{key} contains NaN/Inf")
+    return m
 
 
 def load_map(name: str) -> LoadedMap | None:

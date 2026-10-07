@@ -134,12 +134,22 @@ def plan_offset(path: RaceLine, index: int, target: Obstacle, obstacles: list[Ob
     for offset, _side in cands:
         if abs(offset) < 1e-3:
             continue
-        lo, hi = hold_a - 3.0, hold_b + 3.0
-        span = (s_fwd >= lo) & (s_fwd <= hi)
-        k_allow = cfg.kappa_frac * cfg.kappa_max - (float(kap[order[span]].max()) if span.any() else 0.0)
+        # 曲率の余りは**ずらす区間**の元の曲率で決める。まず前後 3m で見積もり、進入長が
+        # それより長くなったら（余りが小さいと 6m を超える）その長さで測り直す
+        reach = 3.0
+        for _ in range(2):
+            span = (s_fwd >= hold_a - reach) & (s_fwd <= hold_b + reach)
+            k_allow = cfg.kappa_frac * cfg.kappa_max - (float(kap[order[span]].max())
+                                                        if span.any() else 0.0)
+            if k_allow <= 0.05:
+                break
+            length = max(cfg.len_min, 0.6 * max(v_now, 0.0),
+                         math.sqrt(_SMOOTH_D2 * abs(offset) / k_allow))
+            if length <= reach:
+                break
+            reach = length
         if k_allow <= 0.05:
             continue
-        length = max(cfg.len_min, 0.6 * max(v_now, 0.0), math.sqrt(_SMOOTH_D2 * abs(offset) / k_allow))
         s_in = hold_a - length
         if s_in < 0.0:
             # もう進入に使える距離が足りない（止まってから `kappa_frac` を上げて引き直す）
@@ -164,8 +174,12 @@ def plan_offset(path: RaceLine, index: int, target: Obstacle, obstacles: list[Ob
         if clr < cfg.clear:
             continue
         kappa = curvature(xy, path.closed)
-        rl = RaceLine(xy=xy, v=path.v.copy(), kappa=kappa, alpha=path.alpha, s=path.s,
-                      length=path.length, closed=path.closed)
+        # カーブの内側へずらすと元の曲率そのものが `κ/(1−κd)` に増える。余りの見積もりは
+        # 元の曲率で引いているので、できた線が車の曲がれる限界を超えていないかは直接確かめる
+        if float(np.abs(kappa[ext]).max()) > cfg.kappa_max:
+            continue
+        rl = RaceLine(xy=xy, v=path.v.copy(), kappa=kappa, length=path.length,
+                      closed=path.closed)
         best = AvoidPlan(rl, idx, offset, target, clr)
         break
     return best
@@ -184,13 +198,18 @@ def blend_in(path: RaceLine, index: int, d0: float, length: float, body=None) ->
     xy = path.xy.copy()
     xy[idx] += nrm[idx] * (d0 * _smooth((length - s_fwd[win]) / length))[:, None]
     clr = float(body.clearance(xy[idx]).min()) if body is not None and len(idx) >= 2 else math.inf
-    rl = RaceLine(xy=xy, v=path.v.copy(), kappa=curvature(xy, path.closed), alpha=path.alpha,
-                  s=path.s, length=path.length, closed=path.closed)
+    rl = RaceLine(xy=xy, v=path.v.copy(), kappa=curvature(xy, path.closed),
+                  length=path.length, closed=path.closed)
     return AvoidPlan(rl, idx, d0, None, clr)
 
 
-def cap_speed(path: RaceLine, window: np.ndarray, v_cap: float, a_brake: float) -> RaceLine:
-    """窓の中の速度を `v_cap` に抑え、窓の手前は `a_brake` で減速し切れるように下げる。"""
+def cap_speed(path: RaceLine, window: np.ndarray, v_cap: float, a_brake: float,
+              a_accel: float | None = None) -> RaceLine:
+    """窓の中の速度を `v_cap` に抑え、窓の手前は `a_brake` で減速し切れるように下げる。
+
+    `a_accel` を与えると、窓の後ろも `a_accel` で加速し切れる速度に抑える（与えないと窓の
+    出口の1点で元の速度へ跳び、摩擦円で見込んだ加速度を超える指令になる）。
+    """
     v = path.v.copy()
     v[window] = np.minimum(v[window], v_cap)
     n = len(path)
@@ -207,4 +226,17 @@ def cap_speed(path: RaceLine, window: np.ndarray, v_cap: float, a_brake: float) 
             break
         v[j] = lim
         vi, i = lim, j
+    if a_accel is not None:
+        i = int(window[-1])
+        vi = float(v[i])
+        for _ in range(n - len(window)):
+            j = (i + 1) % n if path.closed else i + 1
+            if j >= n:
+                break
+            ds = float(np.hypot(*(path.xy[j] - path.xy[i])))
+            lim = math.sqrt(vi * vi + 2.0 * a_accel * ds)
+            if v[j] <= lim:
+                break
+            v[j] = lim
+            vi, i = lim, j
     return RaceLine(**{**path._asdict(), "v": v})

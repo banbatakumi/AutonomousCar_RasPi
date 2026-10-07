@@ -29,7 +29,7 @@ def _line(xy: np.ndarray, closed: bool = True, v: float = 1.0) -> rl_mod.RaceLin
     seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
     n = len(xy)
     return rl_mod.RaceLine(xy=xy, v=np.full(n, v), kappa=rl_mod.curvature(xy, closed),
-                           alpha=np.zeros(n), s=np.zeros(n), length=float(seg.sum()),
+                           length=float(seg.sum()),
                            closed=closed)
 
 
@@ -127,6 +127,29 @@ class TestPathGeneration(unittest.TestCase):
         _, checked = self._optimize(footprint=FOOTPRINT)
         self.assertLess(plain, 0.04)
         self.assertGreaterEqual(checked, 0.05 - 0.01)
+
+    def test_open_path_keeps_its_end_points(self):
+        """★ 開いた経路の始点（車の位置）と終点（止まる場所）は、壁際でも動かさない。
+
+        幅1mの通路で、始点が壁から 14cm。車体の余裕が足りないので外形の検査が締めに行き、
+        直す前は始点が 5.7cm 動いた（経路が車の居ない所から始まる）。
+        """
+        from slam2d.core.grid import OccGrid
+        g = OccGrid(resolution=0.025, size_m=10.0)
+        g.misses[:] = 5
+        for y in (0.5, -0.5):
+            xs = np.linspace(-1.0, 4.0, 501)
+            c, r = g.to_cell(xs, np.full(xs.size, y))
+            g.hits[r, c], g.misses[r, c] = 10, 0
+        g.frozen = True
+        xy = np.c_[np.linspace(0.0, 3.0, 31), np.linspace(0.36, 0.0, 31)]
+        cl = cl_mod.build_open(g, xy, step=0.1, max_width=3.0)
+        rl = rl_mod.optimize(g, cl, half_width=0.09, margin=0.08, lam=0.1, passes=2,
+                             front_overhang=0.30, rear_overhang=0.07, footprint=FOOTPRINT,
+                             time_iters=2, v_start=0.5, **SPEED)
+        self.assertFalse(rl.closed)
+        np.testing.assert_allclose(rl.xy[0], cl.xy[0], atol=1e-6)
+        np.testing.assert_allclose(rl.xy[-1], cl.xy[-1], atol=1e-6)
 
     def test_time_iters_is_never_slower(self):
         base, _ = self._optimize(footprint=FOOTPRINT)

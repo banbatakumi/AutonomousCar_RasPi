@@ -55,7 +55,42 @@ import numpy as np
 
 from .raceline import RaceLine
 
-__all__ = ["Pursuit", "PursuitConfig", "follow", "steer_for_target"]
+__all__ = ["Pursuit", "PursuitConfig", "SteerMap", "follow", "steer_for_target"]
+
+
+class SteerMap(NamedTuple):
+    """同定した舵の効き（`config/vehicle.toml` の `[dynamics]`、`Vehicle.steer_map`）。
+
+        実舵角 d = servo_gain × 指令
+        実効舵角 δ = gain·d + cubic·d³ + offset        （曲率 κ = tan(δ)/L）
+
+    既定値は幾何どおりの車（指令 = 実効舵角）。★経路側は `Vehicle.kappa_max` でこの効きを
+    通した限界まで半径を使うのに、追従が `atan(L·κ)` をそのまま指令すると、経路の上に
+    乗っていても曲率が足りない（同定値で κ=2.0 のとき 91%。半径0.5mで外へ 1.5〜6.6cm）。
+    """
+
+    gain: float = 1.0
+    cubic: float = 0.0
+    servo_gain: float = 1.0
+    offset: float = 0.0
+
+    def effective(self, steer_actual: float) -> float:
+        """実舵角 → 実効舵角 [rad]。"""
+        return self.gain * steer_actual + self.cubic * steer_actual ** 3 + self.offset
+
+    def command(self, delta: float, max_steer: float) -> float:
+        """欲しい実効舵角 → 指令舵角 [rad]（`±max_steer` で頭打ち）。"""
+        t = delta - self.offset
+        d = t / self.gain if abs(self.gain) > 1e-6 else t
+        if self.cubic != 0.0:
+            lim = max_steer * max(abs(self.servo_gain), 1e-6)
+            for _ in range(4):                     # ニュートン法（3次は単調な範囲で使う）
+                slope = self.gain + 3.0 * self.cubic * d * d
+                if slope < 0.2:
+                    break                          # 効きが寝る所より先は解かない（頭打ちにする）
+                d = max(-lim, min(lim, d - (self.gain * d + self.cubic * d ** 3 - t) / slope))
+        cmd = d / self.servo_gain if abs(self.servo_gain) > 1e-6 else d
+        return max(-max_steer, min(max_steer, cmd))
 
 
 class PursuitConfig(NamedTuple):
@@ -70,6 +105,8 @@ class PursuitConfig(NamedTuple):
     ff_gain: float = 0.0
     #: フィードフォワードの曲率を測る弦 [m]
     ff_chord: float = 0.4
+    #: 舵の効き（曲率 ⇄ 指令舵角の変換に使う）
+    steer_map: SteerMap = SteerMap()
 
 
 class Pursuit(NamedTuple):
@@ -158,7 +195,8 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     :param v_now: 現在の車速 [m/s]。lookahead と遅延補償に使う
     :param steer_now: 現在の**実**舵角 [rad]（指令値ではない）
     """
-    px, py, pyaw = _predict(*pose, v_now, steer_now, cfg.wheelbase, cfg.delay_s)
+    sm = cfg.steer_map
+    px, py, pyaw = _predict(*pose, v_now, sm.effective(steer_now), cfg.wheelbase, cfg.delay_s)
 
     i = nearest_index(path, px, py, hint, window=len(path) // 4 if hint >= 0 else 0)
 
@@ -181,14 +219,14 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     # 経路上を弧長 `ld` ぶん進んだ点。**直線距離ではなく弧長**で取る
     # （ヘアピンでは直線距離だと「出口の点」が近くに見えてショートカットする）
     if path.closed:
-        step = path.length / n
+        step = max(path.length / n, 1e-6)          # 長さ0（点が1つ）の経路でも落ちない
         k = (i + max(1, int(round(ld / step)))) % n
         goal = path.xy[k]
         remaining = math.inf
     else:
         # 開いた経路: 終点の先は**終点の接線方向へ延ばした点**を狙う。終点そのものを
         # 狙うと、近づくほど注視距離が縮んで舵が暴れる
-        step = path.length / max(1, n - 1)
+        step = max(path.length / max(1, n - 1), 1e-6)
         remaining = max(0.0, (n - 1 - i) * step)
         k = min(n - 1, i + max(1, int(round(ld / step))))
         goal = path.xy[k]
@@ -205,10 +243,10 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     if cfg.ff_gain > 0.0 and n >= 5:
         kap = 2.0 * math.sin(eta) / max(dist, 1e-3)
         kap += cfg.ff_gain * _ff_correction(path, i, goal, step, cfg.ff_chord)
-        steer = math.atan(cfg.wheelbase * kap)
-        steer = max(-cfg.max_steer, min(cfg.max_steer, steer))
+        delta = math.atan(cfg.wheelbase * kap)
     else:
-        steer = steer_for_target(eta, dist, cfg.wheelbase, cfg.max_steer)
+        delta = steer_for_target(eta, dist, cfg.wheelbase, math.pi / 2.0)
+    steer = sm.command(delta, cfg.max_steer)
 
     kv = k
     if cfg.speed_preview_s is not None:

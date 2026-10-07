@@ -70,7 +70,6 @@ class Edge:
     v: int                                 #: 終点の節点
     xy: np.ndarray                         #: (N, 2) u→v の折れ線 [m]
     length: float                          #: [m]
-    min_clear: float                       #: 折れ線に沿った壁までの最小距離 [m]
     #: 通ってよい向き。+1 = u→v のみ、-1 = v→u のみ、0 = どちらでも。
     #: 地図作成で走った向きから決める（逆走禁止、`_directions`）
     dir_allowed: int = 0
@@ -91,12 +90,6 @@ class RoadGraph:
         col = np.floor((np.asarray(x) - self.origin[0]) / self.resolution).astype(np.int64)
         row = np.floor((np.asarray(y) - self.origin[1]) / self.resolution).astype(np.int64)
         return col, row
-
-    def polylines(self) -> list[np.ndarray]:
-        return [e.xy for e in self.edges]
-
-    def degree(self, n: int) -> int:
-        return len(self.nodes[n].edges)
 
 
 # ── 細線化 ──
@@ -277,7 +270,10 @@ def _attach(chain: list[tuple[int, int]], node_of: np.ndarray) -> tuple[int, int
         return best
 
     a = touch(*chain[0])
-    b = touch(*chain[-1], avoid=a if len(chain) > 1 else -2)
+    # 1画素の鎖でも、もう一方の端は**別の節点**を優先する（同じ節点を返すと長さ0の
+    # 自己ループとして捨てられ、1画素の橋でつながる2つの節点が切れる）。他に節点が
+    # 無ければ `a` が返る
+    b = touch(*chain[-1], avoid=a)
     return a, b
 
 
@@ -507,10 +503,7 @@ class _Builder:
             xy = xy[keep]
             if len(xy) < 2:
                 continue
-            col = np.clip(((xy[:, 0] - origin[0]) / res).astype(int), 0, w - 1)
-            row = np.clip(((xy[:, 1] - origin[1]) / res).astype(int), 0, h - 1)
-            e = Edge(u=remap[a], v=remap[b], xy=xy, length=self._len(xy),
-                     min_clear=float(clear[row, col].min()))
+            e = Edge(u=remap[a], v=remap[b], xy=xy, length=self._len(xy))
             nodes[e.u].edges.append(len(edges))
             nodes[e.v].edges.append(len(edges))
             edges.append(e)

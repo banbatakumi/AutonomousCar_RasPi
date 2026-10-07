@@ -198,5 +198,21 @@ class TestSamplePath(unittest.TestCase):
         self.assertEqual(first, (0.3, -0.2, 0.5))
 
 
+class TestReversalSymmetry(unittest.TestCase):
+    def test_shortest_length_is_the_same_in_both_directions(self):
+        """最短長は始点と終点を入れ替えても変わらない（経路を逆にたどれば同じ長さで戻れる）。
+
+        ★ 9語族に time-flip と reflect を掛けただけ（36語）だと成り立たず、29% の配置で
+        最短でない経路を返していた。逆順の変換を足して 48 語にしたことの検査。
+        """
+        import random
+        rng = random.Random(7)
+        for _ in range(300):
+            a = (rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(-math.pi, math.pi))
+            b = (rng.uniform(-2, 2), rng.uniform(-2, 2), rng.uniform(-math.pi, math.pi))
+            self.assertAlmostEqual(shortest_path(a, b, R).length,
+                                   shortest_path(b, a, R).length, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

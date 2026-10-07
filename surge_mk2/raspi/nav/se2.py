@@ -31,7 +31,7 @@ Pose = tuple[float, float, float]
 
 
 def wrap_angle(a: float) -> float:
-    """角度を `(-π, π]` へ畳む。"""
+    """角度を `[-π, π)` へ畳む（`wrap_angle(π) == -π`）。"""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 

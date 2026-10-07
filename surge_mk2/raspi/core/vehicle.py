@@ -185,6 +185,13 @@ class Vehicle:
         delta = self.steer_gain * d + self.steer_gain_cubic * d ** 3 - abs(self.steer_offset_rad)
         return math.tan(max(delta, 1e-3)) / self.wheelbase
 
+    @property
+    def steer_map(self):
+        """曲率 ⇄ 指令舵角の変換に使う舵の効き（`nav.purepursuit.SteerMap`）。"""
+        from ..nav.purepursuit import SteerMap
+        return SteerMap(gain=self.steer_gain, cubic=self.steer_gain_cubic,
+                        servo_gain=self.steer_servo_gain, offset=self.steer_offset_rad)
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Vehicle":
         """読めなければ**既定値で返す**（例外にしない）。

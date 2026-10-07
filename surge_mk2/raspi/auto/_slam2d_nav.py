@@ -8,10 +8,10 @@
 - `Scan`（raspi固有のLD06セクタ形式）→`RawScan`（slam2d、点ごとの時刻を持つ
   汎用形式）の変換
 - `VehicleState`（ジャイロ+速度）→`Twist2D`の橋渡し
-- `raspi/nav/slam.py`の`Slam`が持っていた`lap_progress()`（累積回頭÷360°）
+- `lap_progress()`（累積回頭÷360°）
   のような、slam2d本体には無い車体固有の付加機能
 
-## 50Hz の `VehicleState` は `plan()` とは別に流し込む
+## 100Hz の `VehicleState` は `plan()` とは別に流し込む
 
 `plan()` は点群が1周そろったとき（10Hz）しか呼ばれないが、SLAM は**点ごとの
 脱スキュー**（`slam2d/core/deskew.py`）のために1周100msのあいだのジャイロ・
@@ -60,7 +60,7 @@ def occgrid_from_trinary(trinary: np.ndarray, *, resolution: float,
                          origin: tuple[float, float], seq: int,
                          min_hits: int = 3, min_seen: int = 3) -> OccGrid:
     """保存済みの3値地図（`raspi/auto/mapstore.py`）から、走行時に読まれる判定
-    （`wall_mask`/`known_free_mask`/`score_map`/`raycast`）を完全に再現する
+    （`wall_mask`/`known_free_mask`/`trinary`/`raycast`）を完全に再現する
     凍結済み`OccGrid`を作る。
 
     **生のhits/missesは要らない。** 凍結後の地図はこの4関数からしか読まれず、
@@ -122,12 +122,10 @@ def scan_to_raw(scan: Scan) -> RawScan:
 
 
 class Slam2dNav:
-    """`raspi/nav/slam.py`の`Slam`と部分的に互換なインターフェースで
-    `slam2d.core.Frontend`を包む。
-
-    `raspi/auto/raceline.py`が期待する最小限の面（`update`/`pose`/`grid`/
-    `trajectory`/`trajectory_array`/`lap_progress`/`distance`/`freeze`/`reset`）
-    だけを実装する。ループ閉じは`freeze()`の中で1回だけ行う。
+    """`slam2d.core.Frontend`を包み、planner（`slam2d_raceline`・`slam2d_route`）が使う
+    最小限の面（`update`/`idle`/`pose`/`grid`/`trajectory`/`trajectory_array`/
+    `lap_progress`/`distance`/`freeze`/`reset`）だけを出す。ループ閉じは`freeze()`の中で
+    1回だけ行う。
     """
 
     def __init__(self, *, resolution: float, size_m: float,
@@ -135,7 +133,7 @@ class Slam2dNav:
                 max_range: float = 12.0,
                 loop_closure: bool = ENABLE_LOOP_CLOSURE,
                 frontend: dict | None = None) -> None:
-        """:param frontend: `FrontendConfig`の上書き（評価・切り分け用。例 `{"gate_chi2": 16.3}`）"""
+        """:param frontend: `FrontendConfig`の上書き（評価・切り分け用。例 `{"behind_margin": 0.0}`）"""
         self._resolution = resolution
         self._size_m = size_m
         self._lidar_x = lidar_x
@@ -188,7 +186,7 @@ class Slam2dNav:
 
     def next_seq(self) -> int:
         """次に使う版番号。**直前の地図の`seq`より必ず大きい値を返す**
-        （`raspi/nav/slam.py`の`_new_grid()`と同じパターン）。
+        。
 
         `OccGrid.integrate()`は取り込むたびに`seq`を進めるので、resetの
         たびに0へ戻すと**育った地図より小さい版番号**になる。GUI側の
@@ -203,7 +201,7 @@ class Slam2dNav:
         return Twist2D(self._raw_speed, 0.0, self._raw_yaw_rate)
 
     def on_vehicle_state(self, vs: VehicleState) -> None:
-        """`VehicleState`が届くたびに呼ぶ（50Hz）。点ごとの脱スキューに使う。
+        """`VehicleState`が届くたびに呼ぶ（100Hz）。点ごとの脱スキューに使う。
 
         `plan()`は点群が1周そろったとき（10Hz）しか呼ばれないので、その中で
         受け取った1個の`VehicleState`だけでは「1周のあいだ twist は一定」の
@@ -221,10 +219,8 @@ class Slam2dNav:
                speed: float | None) -> FrontendUpdate:
         """1周ぶんの点群を取り込んで姿勢を更新する。
 
-        `raspi/nav/slam.py`の`Slam.update()`と同じ引数（`yaw_rate`/`speed`が
-        `None`なら`ExternalTwistModel`に0を渡す——`slam2d`側に等速度モデルへの
-        自動フォールバックは無いため、`raspi/auto/raceline.py`の`lidar_only`
-        オプションはこのブリッジでは未対応）。
+        `yaw_rate`/`speed`が`None`なら 0 として扱う（`slam2d`側に等速度モデルへの自動
+        フォールバックは無い。推測航法は常にジャイロ＋車速）。
         """
         self._raw_yaw_rate = 0.0 if yaw_rate is None else float(yaw_rate)
         self._raw_speed = 0.0 if speed is None else float(speed)
@@ -236,6 +232,15 @@ class Slam2dNav:
             u = self._fe.update(raw, dt)
         self.heading_total += wrap_angle(u.pose.yaw - prev_yaw)
         return u
+
+    def idle(self, *, yaw_rate: float | None, speed: float | None) -> None:
+        """点群を取り込まずに、車速・ヨーレートの読みだけを更新する。
+
+        姿勢がまだ分からない間（保存地図を読んだ直後の LOCATE）に `update()` の代わりに呼ぶ。
+        `deskew_scan()` が履歴の足りないときに使う twist を最新に保つ。
+        """
+        self._raw_yaw_rate = 0.0 if yaw_rate is None else float(yaw_rate)
+        self._raw_speed = 0.0 if speed is None else float(speed)
 
     @property
     def pose(self) -> Pose2D:
@@ -250,7 +255,7 @@ class Slam2dNav:
         return self._fe.trajectory
 
     def trajectory_array(self) -> np.ndarray:
-        """軌跡を`(N, 3)`の配列で。空なら`(0, 3)`（`raspi/nav/slam.py`と同じ約束）。"""
+        """軌跡を`(N, 3)`の配列で。空なら`(0, 3)`。"""
         if not self._fe.trajectory:
             return np.zeros((0, 3), dtype=np.float64)
         return np.asarray(self._fe.trajectory, dtype=np.float64)

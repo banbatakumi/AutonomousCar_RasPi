@@ -19,7 +19,7 @@
 10〜15cmに達し、位置合わせが誤った姿勢に貼り付いた）。
 
 `deskew_traj()`は**ジャイロ・車速の時系列**（`TwistBuffer`）から各点の時刻の
-姿勢を作って補正する。サンプル間（実機は50Hz＝20ms）は姿勢を線形補間する
+姿勢を作って補正する。サンプル間（実機は100Hz＝10ms）は姿勢を線形補間する
 （2.2rad/sでも区間内の弦と弧の差は0.1mm未満）。
 
 ## 3種類の点を区別する
@@ -38,13 +38,12 @@ import numpy as np
 import math
 
 from .types import Pose2D, RawScan, ScanPoints, Twist2D
-from .types import _STRAIGHT_EPS as _ARC_EPS
+from .types import _STRAIGHT_EPS
 
 __all__ = ["deskew", "deskew_traj", "truncate", "TwistBuffer"]
 
 NS = 1_000_000_000
-#: これ以下のヨーレート・速度は「動いていない」として扱う
-_STRAIGHT_EPS = 1e-4
+#: これ以下の速度は「動いていない」として扱う（ヨーレートは `types._STRAIGHT_EPS`）
 _STILL_SPEED_EPS = 1e-3
 
 
@@ -129,7 +128,7 @@ def truncate(pts: ScanPoints, r: float) -> ScanPoints:
 class TwistBuffer:
     """時刻つきの twist の履歴。**`deskew_traj()`と推測航法の予測が共有する。**
 
-    実機の`VehicleState`（ジャイロ+車速、50Hz）を届いた順に`add()`する。
+    実機の`VehicleState`（ジャイロ+車速、100Hz）を届いた順に`add()`する。
     保持するのは直近`window_s`秒ぶんだけ（1周の点群は最大でも1回転ぶん過去）。
     """
 
@@ -166,7 +165,7 @@ class TwistBuffer:
     def covers(self, t0_ns: int, t1_ns: int, *, max_extrap_s: float = 0.06) -> bool:
         """`[t0, t1]`をだいたい挟んでいるか（端の外挿が`max_extrap_s`以内か）。
 
-        テレメトリ（50Hz）は点群より少し古いところまでしか無いのが普通なので、
+        テレメトリ（100Hz）は点群より少し古いところまでしか無いのが普通なので、
         **端は最後のサンプルの twist で外挿する**ことを前提に、その外挿量が
         小さいことだけを確かめる。
         """
@@ -207,7 +206,7 @@ class TwistBuffer:
         if n > 1:
             dt = np.diff(t).astype(np.float64) / NS
             v0, vy0, w0 = vxs[:-1], vys[:-1], ws[:-1]
-            straight = np.abs(w0) < _ARC_EPS
+            straight = np.abs(w0) < _STRAIGHT_EPS
             wt = w0 * dt
             s, c = np.sin(wt), np.cos(wt)
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -238,7 +237,7 @@ class TwistBuffer:
 
 
 def _wrap_angle_vec(a: np.ndarray) -> np.ndarray:
-    """`types.wrap_angle`のnumpy版（`(-pi, pi]`へ畳む）。式は同一。"""
+    """`types.wrap_angle`のnumpy版（`[-pi, pi)`へ畳む）。式は同一。"""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
@@ -254,8 +253,8 @@ def deskew_traj(raw: RawScan, buf: TwistBuffer, *, mount_x: float = 0.0, mount_y
                 max_range: float = float("inf")) -> ScanPoints:
     """点ごとの時刻の姿勢（`TwistBuffer`）で脱スキューする。
 
-    サンプルが足りない（点群の時刻を挟んでいない）場合は、その区間の平均 twist を
-    使った`deskew()`と同じ扱いになる（`_interp_pose`が端で止まるため）。
+    サンプルが2つ未満・点の時刻が無い場合は補正しない（twist 0 の`deskew()`）。サンプルが
+    点群の時刻を挟んでいない端では、最後のサンプルの twist で外挿する（`TwistBuffer.poses`）。
     """
     valid = raw.valid
     idx = np.flatnonzero(valid)

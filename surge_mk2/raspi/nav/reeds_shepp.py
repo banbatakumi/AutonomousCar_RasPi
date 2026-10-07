@@ -9,7 +9,7 @@ and backwards", Pacific J. Math., 1990。非ホロノミック拘束（最小旋
 その場での真横移動が物理的に不可能なため）ことを実測で確認しており、
 これを解くには本モジュールのような明示的な経路計画が必要になる。
 
-## 実装方針: 9つの語族 + time-flip/reflect変換 ＝ 原論文の48語
+## 実装方針: 9つの語族 + time-flip/reflect/逆順の変換 ＝ 原論文の48語
 
 Reeds-Sheppの原論文は48通りの経路（語, word）を列挙するが、少数の「語族」に
 対称性変換を掛けることで全パターンを覆える:
@@ -18,6 +18,8 @@ Reeds-Sheppの原論文は48通りの経路（語, word）を列挙するが、�
   L(左旋回)とR(右旋回)を入れ替えた経路が得られる
 - **time-flip（前後反転）**: 目標の`x`と`φ`の符号を反転して式に渡し、
   得た語の長さを全て反転すると、前進と後退を入れ替えた経路が得られる
+- **逆順**: 終点から始点への問題を解き、区間の順とギアを反転すると、語を逆から読んだ
+  経路が得られる（`candidate_paths`。これが無いと 36 語で、CC|C と CSC|C が欠ける）
 
 実装した語族は9つ:
 
@@ -49,7 +51,7 @@ for seg in path.segments:
     ...  # seg.gear（+1前進/-1後退）、seg.curvature（0=直進、±1/R=左右）、seg.length
 ```
 
-`turning_radius`は`wheelbase / tan(max_steer)`（最小旋回半径）を渡す想定。
+`turning_radius`は最小旋回半径（`1 / Vehicle.kappa_max`。同定した舵の効き込み）以上を渡す想定。
 
 ## 障害物回避での使い方
 
@@ -280,8 +282,8 @@ def _lrslr(x: float, y: float, phi: float) -> _Word | None:
     return None
 
 
-#: 9つの語族。原論文の48語は、これらに time-flip / reflect の対称変換を
-#: 掛けて得られる（下の`_candidates`）
+#: 9つの語族。原論文の48語は、これらに time-flip / reflect（下の`_candidates`）と
+#: 逆順（`candidate_paths`）の対称変換を掛けて得られる
 _GENERATORS = (_lsl, _lsr, _lrl_fwd, _lrl_back, _lrlr_a, _lrlr_b,
                _lrsl, _lrsr, _lrslr)
 
@@ -359,21 +361,35 @@ def candidate_paths(start: tuple[float, float, float], goal: tuple[float, float,
     lphi = _mod2pi(gyaw - syaw)
 
     raw = [p for p in _candidates(lx, ly, lphi, turning_radius=1.0) if p.segments]
-    raw.sort(key=lambda p: p.length)
-    # 正規化(半径1)で求めた長さを実スケールへ戻す
-    return [
+    # ★ **逆向きの問題（goal→start）の解を逆順にたどったもの**も候補に足す。9語族に
+    #   time-flip と reflect を掛けただけでは 36 語で、経路を逆順にたどる変換で得る 12 語
+    #   （`L+R+L-` 型の CC|C、`C S C(π/2)|C`）が出ない。足さないと始点と終点を入れ替えただけで
+    #   最短長が変わり（2000 配置中 1195 件）、29% の配置で最短でない経路を返していた。
+    #   同じ弧を逆にたどるので、区間の順とギアだけが反転し、曲がる向きはそのまま
+    cg, sg = math.cos(gyaw), math.sin(gyaw)
+    back = _candidates(-(cg * dx + sg * dy) / turning_radius,
+                       -(-sg * dx + cg * dy) / turning_radius,
+                       _mod2pi(syaw - gyaw), turning_radius=1.0)
+    raw += [ReedsSheppPath(segments=tuple(PathSegment(-s.gear, s.curvature, s.length)
+                                          for s in reversed(p.segments)))
+            for p in back if p.segments]
+    # 正規化(半径1)で求めた長さを実スケールへ戻してから並べる（同じ経路が順向きと逆向きの
+    # 両方から出るので、戻す前に並べると丸めの最後の1桁で順序が入れ替わる）
+    out = [
         ReedsSheppPath(segments=tuple(
             PathSegment(s.gear, s.curvature / turning_radius, s.length * turning_radius)
             for s in p.segments))
         for p in raw
     ]
+    out.sort(key=lambda p: p.length)
+    return out
 
 
 def shortest_path(start: tuple[float, float, float], goal: tuple[float, float, float],
                   turning_radius: float) -> ReedsSheppPath:
     """`start`から`goal`への最短経路。座標は共通の平面座標系、姿勢は`(x,y,yaw)`。
 
-    `turning_radius`は正の値（最小旋回半径 `wheelbase/tan(max_steer)`）。
+    `turning_radius`は正の値（最小旋回半径 `1 / Vehicle.kappa_max` 以上）。
     候補が1つも見つからない場合（数値的に稀）は空の`ReedsSheppPath`を返す
     ——呼び出し側は`length==0`かつ`start!=goal`ならこれを検知できる。
     """

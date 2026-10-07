@@ -31,6 +31,39 @@ def vs(speed=0.0, yaw_rate=0.0) -> VehicleState:
     return VehicleState(speed=speed, yaw_rate=yaw_rate, steer_actual=0.0)
 
 
+#: 部屋の中を1周する合成軌道（中心 (4.0, 2.0)・半径 1.2m。中の板を避け、壁から 0.8m 以上）
+_LAP_R = 1.2
+_LAP_SPEED = 0.3
+_LAP_START = (4.0, 0.8, 0.0)
+
+
+def drive_one_lap_and_build(p: Slam2dRaceLine, params: dict, *, steps: int = 265,
+                            dt: float = 0.1):
+    """EXPLORE で1周強走って地図を確定し、BUILD が終わるまで回す。最後の `AutoState` を返す。
+
+    車は**進む向きを向いて**走る（`forward_traj` は車の向きに前へ進んだ点だけを残す。
+    以前の軌道は向きが 90° ずれていて真横に進んでおり、全点が落ちて BUILD が必ず失敗していた）。
+    レーシングラインはワーカーで引くので、計算が終わるのを待ってから次の `plan()` を呼ぶ。
+    """
+    w = _LAP_SPEED / _LAP_R
+    x0, y0, _ = _LAP_START
+    for i in range(steps):
+        a = w * i * dt
+        pose = (x0 + _LAP_R * math.sin(a), y0 + _LAP_R * (1.0 - math.cos(a)), a)
+        p.plan(make_room_scan(*pose, segs=ROOM), vs(speed=_LAP_SPEED, yaw_rate=w), params, dt)
+    a = w * (steps - 1) * dt
+    stop = (x0 + _LAP_R * math.sin(a), y0 + _LAP_R * (1.0 - math.cos(a)), a)
+    p.request_freeze()
+    st = p.plan(make_room_scan(*stop, segs=ROOM), vs(), params, dt)
+    for _ in range(10):
+        if st.phase != BUILD:
+            break
+        if p._build_job is not None:
+            p._build_job.result(timeout=60)
+        st = p.plan(make_room_scan(*stop, segs=ROOM), vs(), params, dt)
+    return st
+
+
 class TestSlam2dRaceLineStateMachine(unittest.TestCase):
     def setUp(self):
         # BUILD完了で`_auto_save_map()`が実際の`saved_maps/`へ書き込まないよう、
@@ -228,37 +261,10 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         精度検証を意図したものではないため（十分な距離を動かして地図を
         育てるためだけの軌道）。
         """
-        # 部屋の中を大きく周回する円弧軌道で地図を育てる(半径2m、中心(3,2))
-        dt = 0.1
-        speed = 0.3
-        radius = 2.0
-        yaw_rate = speed / radius
-        n_steps = 200
-        for i in range(n_steps):
-            t = i * dt
-            yaw = yaw_rate * t + math.pi / 2  # 円周上を進む向き
-            x = 3.0 + radius * math.sin(yaw_rate * t)
-            y = 2.0 + radius * (1 - math.cos(yaw_rate * t))
-            self.p.plan(make_room_scan(x, y, yaw, segs=ROOM),
-                       vs(speed=speed, yaw_rate=yaw_rate), self.params, dt)
-        self.assertGreater(self.p.slam.lap_progress(), 0.3)
-
-        self.p.request_freeze()
-        st = self.p.plan(make_room_scan(3.0, 2.0, math.pi / 2, segs=ROOM),
-                         vs(speed=0.0, yaw_rate=0.0), self.params, dt)
-        self.assertEqual(st.phase, BUILD)
-
-        # BUILDは2周期で完了する設計(1/2:中心線、2/2:レーシングライン)
-        for _ in range(3):
-            st = self.p.plan(make_room_scan(3.0, 2.0, math.pi / 2, segs=ROOM),
-                             vs(speed=0.0, yaw_rate=0.0), self.params, dt)
-            if st.phase != BUILD:
-                break
-
-        if st.phase == BUILD:
-            self.skipTest(f"経路生成が完了しなかった(reason={st.reason})。"
-                          "円弧軌道が短すぎる可能性がある")
-        self.assertEqual(st.phase, DONE)
+        self.assertEqual(self.p.phase, EXPLORE)
+        st = drive_one_lap_and_build(self.p, self.params)
+        self.assertGreater(self.p.slam.lap_progress(), 0.9)
+        self.assertEqual(st.phase, DONE, st.reason)
         self.assertIsNotNone(self.p.path)
 
         # 地図が自動保存されていること
@@ -386,30 +392,12 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self._td.cleanup()
 
     def _drive_to_race(self) -> Slam2dRaceLine:
-        """`test_full_state_machine_builds_saves_and_waits_in_done`と同じ円弧軌道で
+        """`test_full_state_machine_builds_saves_and_waits_in_done`と同じ軌道で
         `DONE`（BUILD完了・自動保存済み・レーシングライン走行待ち）まで到達させる。
         """
         p = Slam2dRaceLine()
-        params = Slam2dRaceLine.merged({})
-        dt = 0.1
-        speed = 0.3
-        radius = 2.0
-        yaw_rate = speed / radius
-        for i in range(200):
-            t = i * dt
-            yaw = yaw_rate * t + math.pi / 2
-            x = 3.0 + radius * math.sin(yaw_rate * t)
-            y = 2.0 + radius * (1 - math.cos(yaw_rate * t))
-            p.plan(make_room_scan(x, y, yaw, segs=ROOM), vs(speed=speed, yaw_rate=yaw_rate), params, dt)
-
-        p.request_freeze()
-        st = p.plan(make_room_scan(3.0, 2.0, math.pi / 2, segs=ROOM), vs(), params, dt)
-        for _ in range(3):
-            if st.phase != BUILD:
-                break
-            st = p.plan(make_room_scan(3.0, 2.0, math.pi / 2, segs=ROOM), vs(), params, dt)
-        if st.phase != DONE:
-            self.skipTest(f"経路生成が完了しなかった(reason={st.reason})")
+        st = drive_one_lap_and_build(p, Slam2dRaceLine.merged({}))
+        self.assertEqual(st.phase, DONE, st.reason)
         return p
 
     def _save_current_map(self, p: Slam2dRaceLine, name: str) -> None:
@@ -441,6 +429,133 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         fresh.request_load("no_such_map")
         self.assertEqual(fresh.phase, EXPLORE)
         self.assertIn("読み込めない", fresh._load_error)
+
+    def test_failed_load_does_not_start_driving(self):
+        """★ 読めない地図を指定しても、engage 済みの EXPLORE（FTG の地図作成走行）を始めない。
+
+        GUI の「レーシングライン走行」は読み込みと engage を同じメッセージで送る。
+        """
+        params = Slam2dRaceLine.merged({})
+        scan = make_room_scan(3.0, 2.0, 0.0, segs=ROOM)
+        p = Slam2dRaceLine()
+        p.set_engaged(True)
+        self.assertTrue(p.plan(scan, vs(), params, 0.1).ready)      # 素の EXPLORE は FTG で走る
+        p.request_load("no_such_map")
+        st = p.plan(scan, vs(), params, 0.1)
+        self.assertFalse(st.ready)
+        self.assertIn("読み込めない", st.reason)
+        # 自動運転を解けば、人の手での地図作成に戻れる
+        p.on_disengage()
+        p.set_engaged(False)
+        self.assertNotIn("読み込めない", p.plan(scan, vs(), params, 0.1).reason)
+
+    def test_map_without_a_line_is_refused(self):
+        self._save_manual_map("no_line", raceline_xy=np.zeros((0, 2)))
+        p = Slam2dRaceLine()
+        p.request_load("no_line")
+        self.assertEqual(p.phase, EXPLORE)
+        self.assertIn("レーシングラインが無い", p._load_error)
+        st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), Slam2dRaceLine.merged({}), 0.1)
+        self.assertFalse(st.ready)
+
+    def test_path_changes_are_published_on_a_frozen_map(self):
+        """★ 地図が凍結した後に経路だけ変わっても `(map_seq, route_seq)` が変わる。
+
+        `planning_node`・`telemetry_node` はこの組が変わったときだけ `auto/map` を流す。
+        以前は BUILD でできたラインも、設定を変えて作り直した速度も配られなかった。
+        """
+        params = Slam2dRaceLine.merged({})
+        p = Slam2dRaceLine()
+        keys, lines = [], []
+        orig = p.plan
+
+        def plan(*a, **k):
+            st = orig(*a, **k)
+            m = p.snapshot()
+            if (m.map_seq, m.route_seq) not in keys:
+                keys.append((m.map_seq, m.route_seq))
+                lines.append((st.phase, len(m.centerline) // 2, len(m.raceline) // 2))
+            return st
+
+        p.plan = plan
+        st = drive_one_lap_and_build(p, params)
+        self.assertEqual(st.phase, DONE, st.reason)
+        # 最後に配られた版に、中心線とラインが載っている
+        self.assertEqual(lines[-1][0], DONE)
+        self.assertGreater(lines[-1][1], 20)
+        self.assertGreater(lines[-1][2], 20)
+        # 走行中に速度の設定を変えると、作り直した速度が配り直される
+        name = p._saved_map_name
+        p.request_load(name)
+        p._line_job.result(timeout=60)
+        st = None
+        for _ in range(40):
+            st = p.plan(make_room_scan(*_LAP_START, segs=ROOM), vs(), params, 0.1)
+            if st.phase == RACE:
+                break
+        self.assertEqual(st.phase, RACE, st.reason)
+        n = len(keys)
+        p.plan(make_room_scan(*_LAP_START, segs=ROOM), vs(), {**params, "v_max": 0.8}, 0.1)
+        self.assertGreater(len(keys), n)
+        self.assertLessEqual(max(p.snapshot().raceline_v), 0.8 + 1e-9)
+
+    def test_line_margin_change_redraws_the_line(self):
+        """★ RACE 中に `line_margin` を変えたら、速度だけでなくラインの形も引き直す。"""
+        params = Slam2dRaceLine.merged({})
+        p = Slam2dRaceLine()
+        st = drive_one_lap_and_build(p, params)
+        self.assertEqual(st.phase, DONE, st.reason)
+        p.request_load(p._saved_map_name)
+        p._line_job.result(timeout=60)
+        scan = make_room_scan(*_LAP_START, segs=ROOM)
+        for _ in range(40):
+            if p.plan(scan, vs(), params, 0.1).phase == RACE:
+                break
+        self.assertEqual(p.phase, RACE)
+        before = p.path
+        p.plan(scan, vs(), params, 0.1)
+        self.assertIsNone(p._line_job)                     # 変えていなければ引き直さない
+        wide = {**params, "line_margin": 0.35}
+        p.plan(scan, vs(), wide, 0.1)
+        self.assertIsNotNone(p._line_job)
+        self.assertEqual(p._line_margin, 0.35)
+        p._line_job.result(timeout=60)
+        p.plan(scan, vs(), wide, 0.1)
+        self.assertIsNone(p._line_job)                     # 同じ値では投げ直さない
+        self.assertIsNot(p.path, before)                   # 引き直したラインに差し替わった
+
+    def test_locate_does_not_run_the_tracker(self):
+        """LOCATE の間は追跡（`slam.update`）を回さない。ヒントは RACE に入ったら使い切る。"""
+        self._save_manual_map("course_b")
+        p = Slam2dRaceLine()
+        p.request_load("course_b")
+        p.request_locate_hint(3.0, 2.0)
+        updates = []
+        orig = p.slam.update
+        p.slam.update = lambda *a, **k: (updates.append(p.phase), orig(*a, **k))[1]
+        params = Slam2dRaceLine.merged({})
+        for _ in range(30):
+            st = p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(), params, 0.1)
+            if st.phase == RACE:
+                break
+        self.assertEqual(st.phase, RACE)
+        self.assertEqual(updates, [])
+        self.assertIsNone(p._loc_hint)
+        st = p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(), params, 0.1)
+        self.assertEqual(updates, [RACE])
+        self.assertGreater(st.match_score, 0.5)
+
+    def test_failed_auto_save_is_reported_in_done(self):
+        params = Slam2dRaceLine.merged({})
+        p = Slam2dRaceLine()
+        blocker = Path(self._td.name) / "blocked"
+        blocker.write_text("")                              # ファイルなので下にディレクトリを作れない
+        mapstore.MAPS_DIR = blocker / "saved_maps"
+        st = drive_one_lap_and_build(p, params)
+        self.assertEqual(st.phase, DONE, st.reason)
+        st = p.plan(make_room_scan(*_LAP_START, segs=ROOM), vs(), params, 0.1)
+        self.assertNotIn("保存した", st.reason)
+        self.assertIn("保存に失敗", st.reason)
 
     def _save_manual_map(self, name: str, raceline_xy=None) -> None:
         """`_drive_to_race()`（実際のEXPLORE走行によるSLAM追跡）は円弧軌道での

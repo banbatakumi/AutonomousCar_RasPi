@@ -43,7 +43,15 @@ import numpy as np
 from .surfmap import SurfaceMap
 from .types import Cov3, Pose2D, wrap_angle
 
-__all__ = ["RegisterConfig", "RegisterResult", "SearchResult", "register", "search"]
+__all__ = ["ANCHOR_INFO", "RegisterConfig", "RegisterResult", "SearchResult", "register",
+           "search"]
+
+#: 推測航法の予測が無い位置合わせ（探し直し・LOCATE の仕上げ・ループ閉じ）で、**総当たりの
+#: 探索が出した姿勢へ弱く留める**事前分布（σ = 2cm・0.5°）。★事前分布が無いと、通路のように
+#: 進行方向が点群から決まらない場所で、その方向の解が測距のノイズで決まる（平行な壁2枚・
+#: ノイズ1cm で進行方向に最大 6.5cm 流れ、反復も上限まで回った）。決まる方向は点群の情報が
+#: 桁違いに大きいので、この弱さなら動かない
+ANCHOR_INFO = np.diag([1.0 / 0.02 ** 2, 1.0 / 0.02 ** 2, 1.0 / math.radians(0.5) ** 2])
 
 
 @dataclass(frozen=True, slots=True)

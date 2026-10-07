@@ -79,7 +79,8 @@ class SlamSystem:
 
     @property
     def loop_closures(self) -> int:
-        return len(self.loops)
+        """グラフに残っているループ拘束の本数（外れ値として外したものは数えない）。"""
+        return len(self.loops) - len(self.rejected)
 
     def update(self, raw: RawScan, dt: float) -> FrontendUpdate:
         u = self.frontend.update(raw, dt)

@@ -86,5 +86,27 @@ class TestPoseGraphLoopClosure(unittest.TestCase):
         self.assertLess(dist_with_loop, dist_no_loop)
 
 
+class TestInformationFrame(unittest.TestCase):
+    def test_edge_information_is_read_in_the_dst_frame(self):
+        """`EdgeSE2` は並進の誤差を**測定ぶん回した座標系（dst の向き）**で読む。
+
+        `rotate_info()` に渡す向きを決めている前提（`frontend._add_keyframe`・
+        `loop_detection.find_loop_closure`）。src=(0,0,0)、測定=(1,0,90°)、情報は x だけ強い。
+        dst の x 軸は src の y 軸なので、src の y 方向にずらしたときだけ残差が大きい。
+        """
+        def chi2(dst: Pose2D) -> float:
+            g = PoseGraph()
+            a = g.add_node(Pose2D(0.0, 0.0, 0.0))
+            g.fix(a)
+            b = g.add_node(dst)
+            g.add_loop_edge(a, b, Pose2D(1.0, 0.0, math.pi / 2), np.diag([1e4, 1.0, 1.0]),
+                            huber=None)
+            g._opt.initialize_optimization()
+            return g.loop_chi2()[0]
+
+        self.assertAlmostEqual(chi2(Pose2D(1.1, 0.0, math.pi / 2)), 0.01, places=4)
+        self.assertAlmostEqual(chi2(Pose2D(1.0, 0.1, math.pi / 2)), 100.0, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,29 +1,26 @@
 """レーシングライン走行（`slam2d`版）— 地図を作り、アウトインアウトの経路を
 引いて周回する。
 
-`raspi/auto/raceline.py`（自作SLAM`raspi/nav/slam.py`ベース）と同じ3段状態
-機械（EXPLORE/BUILD/RACE）だが、自己位置推定のエンジンだけを`slam2d/`（車体
-非依存の汎用SLAMライブラリ、`_slam2d_nav.Slam2dNav`経由）に差し替えてある。
-経路生成（`nav/centerline.py`・`nav/raceline.py`）・追従（`nav/purepursuit.py`）・
-障害物検出（`nav/obstacles.py`）はそのまま流用する——これらは`OccGrid`に対して
-ダックタイピングで動作する設計になっており、`slam2d.core.grid.OccGrid`の
-インスタンスを渡してもそのまま動く。
+状態機械は6段: `EXPLORE`（地図作成。engage 中は Follow the Gap、していなければ人の
+ラジコン）→ `BUILD`（中心線とレーシングライン）→ `DONE`（保存して人を待つ）→
+`LOCATE`（保存地図の上で自己位置を復元）→ `RACE`（周回）、障害物で進めないときだけ
+`DETOUR`（Hybrid A* で抜ける）。保存済みの地図を読めば `LOCATE` から始まる。
 
-## `raspi/auto/raceline.py`との違い
+自己位置推定は`slam2d/`（車体非依存の汎用SLAMライブラリ、`_slam2d_nav.Slam2dNav`経由）。
+経路生成（`nav/centerline.py`・`nav/raceline.py`）・追従（`nav/purepursuit.py`）・
+障害物検出（`nav/obstacles.py`）は`OccGrid`に対してダックタイピングで動くので、
+`slam2d.core.grid.OccGrid`のインスタンスをそのまま渡している。
 
 - **ループ閉じは EXPLORE→BUILD の瞬間に1回だけ**（`Slam2dNav.freeze()` が
   `SlamSystem.flush()` を呼ぶ）。走行中（RACE）は`Frontend`直結の追跡専用
-- **`lidar_only`（scan_to_scanのみで走る実験モード）は未対応。** `slam2d`の
-  `MotionModel`抽象は差し替え可能だが、このplannerでは`ExternalTwistModel`
-  固定にしてある
-- `id`/`name`を分けてあるので、GUIで両方を選んで比較できる
+- 推測航法は`ExternalTwistModel`固定（ジャイロ＋車速。LiDAR だけで走るモードは無い）
 """
 
 from __future__ import annotations
 
 import math
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -38,6 +35,7 @@ from ..nav import obstacles as obs_mod
 from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
+from ..nav.route_switch import lap_crossed
 from . import mapstore
 from ._slam2d_nav import Slam2dNav, occgrid_from_trinary
 from .base import ParamSpec, Planner
@@ -70,7 +68,7 @@ _DETOUR_MAX_S = 20.0
 #: 横へ避けられない障害物の手前で止まる距離（車体前端から）[m]
 _STOP_GAP = 0.35
 
-#: `raspi/auto/raceline.py`と同じ値（狭い分離帯コースを想定した刻み・広さ）
+#: 地図と経路の刻み・広さ（狭い分離帯コースを想定）
 MAP_RES = 0.025
 MAP_SIZE_M = 16.0
 MAP_MAX_RANGE = 8.0
@@ -88,17 +86,6 @@ LAP_CONFIRM = 3
 #: 当たり率は正解が0.9台・不正解が0.6以下に割れるので、0.1で十分に分かれる
 LOCATE_INLIER_GAP = 0.10
 
-
-def _polyline_length(xy: np.ndarray) -> float:
-    """閉じた経路（周回）の1周の長さ。`request_load()`が保存済みレーシングライン
-    から`RaceLine.length`を復元するのに使う（`rl_mod.optimize()`が返す値と
-    同じ定義——`raspi/nav/purepursuit.py`の`follow()`が周回長として読む）。
-    """
-    xy = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
-    if len(xy) < 2:
-        return 0.0
-    d = np.roll(xy, -1, axis=0) - xy
-    return float(np.hypot(d[:, 0], d[:, 1]).sum())
 
 def forward_traj(traj: np.ndarray, min_step: float = 0.02) -> np.ndarray:
     """軌跡 (N, 3) から、直前に残した点より**車の向きに前へ**進んだ点だけを残す。
@@ -159,11 +146,6 @@ GROUP_AVOID = "本番走行: 障害物の回避"
 SPEED_KEYS = ("v_max", "v_min", "a_lat", "a_accel", "a_brake")
 
 
-def kappa_max(vehicle) -> float:
-    """車の曲がれる限界の曲率 [1/m]（最小旋回半径の逆数。`Vehicle.kappa_max`）。"""
-    return vehicle.kappa_max
-
-
 def speed_key(p: dict[str, float]) -> tuple:
     return tuple(float(p[k]) for k in SPEED_KEYS)
 
@@ -171,7 +153,7 @@ def speed_key(p: dict[str, float]) -> tuple:
 def speed_kwargs(p: dict[str, float], vehicle) -> dict:
     """`rl_mod.retime` / `optimize` へ渡す速度の設定。"""
     return dict(v_max=p["v_max"], v_min=p["v_min"], a_lat=p["a_lat"],
-                a_accel=p["a_accel"], a_brake=p["a_brake"], kappa_max=kappa_max(vehicle))
+                a_accel=p["a_accel"], a_brake=p["a_brake"], kappa_max=vehicle.kappa_max)
 
 
 def line_kwargs(p: dict[str, float], vehicle) -> dict:
@@ -205,7 +187,8 @@ def pursuit_config(p: dict[str, float], vehicle) -> PursuitConfig:
     return PursuitConfig(
         wheelbase=vehicle.wheelbase, max_steer=vehicle.max_steer,
         lookahead_k=p["look_k"], lookahead_min=p["look_min"], delay_s=p["delay_s"],
-        speed_preview_s=p["speed_preview"], ff_gain=p["steer_ff"])
+        speed_preview_s=p["speed_preview"], ff_gain=p["steer_ff"],
+        steer_map=vehicle.steer_map)
 
 
 class Slam2dRaceLine(Planner):
@@ -358,6 +341,10 @@ class Slam2dRaceLine(Planner):
         self._build_error = ""
         self._freeze_requested = False
         self._hint = -1
+        #: 周回の数え上げ（`_count_lap`）。前の周期の最寄り点の添字と、前回数えてから経路に
+        #: 沿って進んだ距離 [m]
+        self._prev_idx = -1
+        self._lap_s = 0.0
         #: 障害物の候補にしてよいセル（`obs_mod.free_mask`）と、それを作った (地図の版, 幅)
         self._obs_free: np.ndarray | None = None
         self._obs_free_key: tuple | None = None
@@ -389,16 +376,20 @@ class Slam2dRaceLine(Planner):
         self._dt = 0.0
         #: 今の経路の速度プロファイルを作った設定（`_retime`）
         self._speed_key: tuple | None = None
-        #: 地図の読み込みで引き直しているライン（`request_load`）
-        self._line_job: Future | None = None
+        #: 地図の読み込み・`line_margin` の変更で引き直しているライン（`_submit_line`）と、
+        #: 今のライン（引き直し中ならその計算）の `line_margin`。`None` = 引き直さない
+        self._drop_job("_line_job")
+        self._line_margin: float | None = None
         #: BUILD で引いているライン（`_build`）
-        self._build_job: Future | None = None
+        self._drop_job("_build_job")
         self._prev_obs: list[obs_mod.Obstacle] = []
         self._obs: list[obs_mod.Obstacle] = []
         self._map: AutoMap | None = None
         self._map_seq = -_MAP_EVERY
         self._map_frozen = False
         self._map_dirty = True
+        #: `snapshot()` で `AutoMap` を詰め直した回数（`AutoMap.route_seq` に載せる。版は戻さない）
+        self._map_ver = getattr(self, "_map_ver", 0)
         #: 保存済み地図から読み込んだ中心線（`self.centerline`はEXPLORE→BUILDで
         #: 自前生成するものだけを持つので、読み込み経路はここに置く。
         #: `snapshot()`が両方を出し分ける）
@@ -413,12 +404,14 @@ class Slam2dRaceLine(Planner):
         #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
         self._locate_seed: tuple[float, float] | None = None
         self._load_error = ""
+        #: 地図の読み込みに失敗した（`request_load`）。解くまで指令を出さない
+        self._load_failed = False
         #: BUILD完了時に自動保存した地図の名前（`DONE`段の表示用）
         self._saved_map_name = ""
         self._save_error = ""
 
     def on_vehicle_state(self, vs: VehicleState) -> None:
-        """`planning_node`が`vehicle_state`を受けるたびに呼ぶ（50Hz）。
+        """`planning_node`が`vehicle_state`を受けるたびに呼ぶ（100Hz）。
 
         点ごとの脱スキュー（`slam2d/core/deskew.py`）に使う twist の履歴を
         SLAM へ流し込むだけ。`plan()`は10Hzでしか呼ばれないので、ここで
@@ -436,6 +429,7 @@ class Slam2dRaceLine(Planner):
         いる途中に人が操作を奪っても、それまでの地図を捨てない。それ以外の段は
         従来どおり作り直す（次に engage したとき前回の舵の続きから動き出さないため）。
         """
+        self._load_failed = False
         if self.phase == EXPLORE and self.slam.trajectory:
             self.ftg.reset()
             return
@@ -456,9 +450,18 @@ class Slam2dRaceLine(Planner):
         （むしろ「クリック→レーシングライン走行」の順で押した意思を活かす）。
         """
         loaded = mapstore.load_map(name)
-        if loaded is None:
-            self._load_error = f"地図『{name}』を読み込めない"
+        if (loaded is not None and self._reline_on_load and len(loaded.raceline_xy) < 3):
+            self._load_error = f"地図『{name}』にはレーシングラインが無い"
+            self._load_failed = True
             return
+        if loaded is None:
+            # ★ 走らせない。GUI の「レーシングライン走行」は読み込みと engage を同じ
+            #   メッセージで送るので、黙って今の段（EXPLORE）に残ると、読めない地図を
+            #   指定しただけで FTG の地図作成走行が始まった
+            self._load_error = f"地図『{name}』を読み込めない"
+            self._load_failed = True
+            return
+        self._load_failed = False
         grid = occgrid_from_trinary(
             loaded.trinary, resolution=loaded.resolution,
             origin=(loaded.origin_x, loaded.origin_y), seq=self.slam.next_seq())
@@ -469,22 +472,23 @@ class Slam2dRaceLine(Planner):
         self._locate_seed = ((self.slam.pose.x, self.slam.pose.y)
                              if name == self._saved_map_name else None)
         self.slam.replace_grid_for_race(grid)
-        self.path = rl_mod.RaceLine(
-            xy=loaded.raceline_xy, v=loaded.raceline_v,
-            kappa=rl_mod.curvature(loaded.raceline_xy),
-            alpha=np.zeros(len(loaded.raceline_xy)), s=np.zeros(len(loaded.raceline_xy)),
-            length=_polyline_length(loaded.raceline_xy))
+        # ラインが無い地図（経路を作れないまま保存した地図）は、経路を自前で作る planner
+        # （`slam2d_route`）でだけ走れる
+        self.path = None
+        if len(loaded.raceline_xy) >= 3:
+            v = loaded.raceline_v
+            if len(v) != len(loaded.raceline_xy):   # 速度はどのみち `_retime` が作り直す
+                v = np.zeros(len(loaded.raceline_xy))
+            self.path = rl_mod.RaceLine(
+                xy=loaded.raceline_xy, v=v, kappa=rl_mod.curvature(loaded.raceline_xy),
+                length=mapstore.polyline_length(loaded.raceline_xy))
         self._loaded_centerline_xy = loaded.centerline_xy
         self.centerline = None
         # ★ 保存したラインの形は地図を作ったときのコードと設定のまま。中心線から今の
         #   設定で引き直す（重いのでワーカーで。できるまでは保存したラインで走る）
-        self._line_job = None
-        if self._reline_on_load and len(loaded.centerline_xy) >= 20:
-            p = self._last_p or {s.key: s.default for s in self.params}
-            self._line_job = self._pool().submit(
-                _optimize_line, loaded.trinary.copy(), loaded.resolution,
-                (loaded.origin_x, loaded.origin_y), np.asarray(loaded.centerline_xy).copy(),
-                dict(p), self.vehicle)
+        self._drop_job("_line_job")
+        self._line_margin = None
+        self._submit_line(self._last_p or {s.key: s.default for s in self.params})
         self._speed_key = None            # 速度は今の設定で作り直す（`_retime`）
         self.phase = LOCATE
         self._localizer = None
@@ -494,6 +498,26 @@ class Slam2dRaceLine(Planner):
         self._hint = -1
         self._map_dirty = True
 
+    def _submit_line(self, p: dict[str, float]) -> None:
+        """読み込んだ地図の中心線から、今の設定でラインを引き直す（ワーカーへ投げる）。"""
+        cl = self._loaded_centerline_xy
+        if not self._reline_on_load or cl is None or len(cl) < 20:
+            return
+        g = self.slam.grid
+        self._drop_job("_line_job")
+        self._line_job = self._pool().submit(
+            _optimize_line, g.trinary().copy(), g.resolution, tuple(g.origin),
+            np.asarray(cl).copy(), dict(p), self.vehicle)
+        self._line_margin = float(p["line_margin"])
+
+    def _drop_job(self, name: str) -> None:
+        """ワーカーの計算の結果を捨てる。まだ始まっていなければ取り消す（ワーカーは1本なので、
+        古い計算が列に残っていると新しい計算がそのぶん待たされる）。"""
+        job = getattr(self, name, None)
+        if job is not None:
+            job.cancel()
+        setattr(self, name, None)
+
     def _poll_line(self) -> None:
         """地図の読み込みで引き直したラインができていれば差し替える（`request_load`）。"""
         job = self._line_job
@@ -502,10 +526,12 @@ class Slam2dRaceLine(Planner):
         self._line_job = None
         try:
             self.path = job.result()
-        except Exception as e:                      # noqa: BLE001  保存したラインで走り続ける
-            self._load_error = f"ラインを引き直せなかった（保存したラインで走る）: {e}"
+        except Exception as e:                      # noqa: BLE001  今のラインで走り続ける
+            self._load_error = f"ラインを引き直せなかった（今のラインで走る）: {e}"
             return
+        self._load_error = ""
         self._hint = -1
+        self._prev_idx = -1
         self._speed_key = None
         self._map_dirty = True
 
@@ -527,22 +553,32 @@ class Slam2dRaceLine(Planner):
             st.reason = "車両状態がまだ届いていない"
             return st
 
+        if self.phase == LOCATE and not self._load_failed:
+            # ★ 姿勢が分かるまで追跡（`slam.update`）は回さない。回しても毎周期「見失い」で、
+            #   3周期目からは探し直しの総当たりまで走って結果は捨てられる（LOCATE の
+            #   `plan()` の6割）。姿勢は `_locate` が `set_pose` で入れる
+            self.slam.idle(yaw_rate=vs.yaw_rate, speed=vs.speed)
+            st.pose_x, st.pose_y, st.pose_yaw = self.slam.pose
+            st.laps = self.laps
+            return self._locate(st, scan, p)
+
         # ★ 回頭はジャイロ、前進は`speed`（射影済み・ローパス済みの値）。
-        #   `wheel_speed[]`は低速でばたつくので渡してはいけない（`raspi/auto/raceline.py`と同じ規約）
+        #   `wheel_speed[]`は低速でばたつくので渡してはいけない
         u = self.slam.update(scan, dt, yaw_rate=vs.yaw_rate, speed=vs.speed)
         st.pose_x, st.pose_y, st.pose_yaw = u.pose.x, u.pose.y, u.pose.yaw
         st.match_score = u.score
         st.lap_progress = self.slam.lap_progress()
         st.laps = self.laps
 
+        if self._load_failed:
+            st.reason = f"{self._load_error}。地図を選び直すか、自動運転を解除してください"
+            return st
         if self.phase == EXPLORE:
             return self._explore(st, scan, vs, p, dt, u.lost)
         if self.phase == BUILD:
             return self._build(st, p)
         if self.phase == DONE:
             return self._done(st)
-        if self.phase == LOCATE:
-            return self._locate(st, scan, p)
         return self._race(st, scan, vs, p, u.lost)
 
     # ── EXPLORE ──
@@ -716,15 +752,17 @@ class Slam2dRaceLine(Planner):
         自体は完了しているので、`DONE`段の判断は続けられるべき）。
         """
         name = time.strftime("course_%Y%m%d_%H%M%S")
-        assert self.path is not None
         try:
             g = self.slam.grid
+            # 経路が無くても地図は保存する（`slam2d_route` が経路を作れなかったとき。
+            # ラインが空の地図は `slam2d_route` でだけ読める）
             mapstore.save_map(
                 name, resolution=g.resolution, origin_x=g.origin[0], origin_y=g.origin[1],
                 trinary=g.trinary(),
                 centerline_xy=(self.centerline.xy if self.centerline is not None
                               else np.zeros((0, 2))),
-                raceline_xy=self.path.xy, raceline_v=self.path.v)
+                raceline_xy=self.path.xy if self.path is not None else np.zeros((0, 2)),
+                raceline_v=self.path.v if self.path is not None else np.zeros(0))
         except Exception as e:                      # noqa: BLE001
             self._save_error = f"地図の自動保存に失敗: {e}"
             return ""
@@ -739,8 +777,12 @@ class Slam2dRaceLine(Planner):
         「レーシングライン走行」を押すと`request_load()`が呼ばれ、
         `LOCATE`（自己位置復元）から始まる。
         """
-        name = f"『{self._saved_map_name}』" if self._saved_map_name else ""
-        st.reason = f"地図{name}を保存した。レーシングライン走行で開始してください（車を動かしてもよい）"
+        if not self._saved_map_name:
+            st.reason = (f"経路はできたが、{self._save_error or '地図を保存できていない'}。"
+                         "地図パネルから手動で保存してください")
+            return st
+        st.reason = (f"地図『{self._saved_map_name}』を保存した。"
+                     "レーシングライン走行で開始してください（車を動かしてもよい）")
         return st
 
     def _last_lap(self) -> np.ndarray:
@@ -822,6 +864,10 @@ class Slam2dRaceLine(Planner):
         self.slam.set_pose(*best.pose)
         self.phase = st.phase = RACE
         self._locate_seed = None
+        # クリックのヒントは使い切り（残すと、次に読む別の地図の探索までその周りに絞る）
+        self._loc_hint = None
+        self._prev_idx = -1
+        self._lap_s = 0.0
         self._hint = -1
         self._joined = False
         self._off_t = 0.0
@@ -845,6 +891,12 @@ class Slam2dRaceLine(Planner):
         if self.path is None:
             st.reason = "経路がまだ無い"
             return st
+        # ★ `line_margin` はラインの形を決める。走行中に変えたら引き直す（以前は速度だけ
+        #   作り直し、線は地図を読んだときの値のまま。障害物の帯と回避の余裕は新しい値を
+        #   すぐ使うので、表示・線・判定が食い違った）。できるまでは今のラインで走る
+        if (self._line_margin is not None and self._line_job is None
+                and float(p["line_margin"]) != self._line_margin):
+            self._submit_line(p)
         self._retime(p)
 
         coasting = self._localization_ok(st, lost, p)
@@ -853,6 +905,8 @@ class Slam2dRaceLine(Planner):
 
         pose = self.slam.pose
         pp, hit, dist = self._track(st, scan, vs, p, self.path, pose)
+        self._count_lap(self.path, pp.index)
+        st.laps = self.laps
 
         if self._off_route(st, pp, vs, p):
             return st
@@ -870,8 +924,26 @@ class Slam2dRaceLine(Planner):
         st.reason = (f"{self.laps}周走行中・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
-                     + self._avoid_note() + self._coast_note(coasting, p))
+                     + self._avoid_note() + self._coast_note(coasting, p)
+                     + (f"・★{self._load_error}" if self._load_error else ""))
         return st
+
+    def _count_lap(self, path: rl_mod.RaceLine, index: int) -> None:
+        """閉じた経路の最寄り点の添字から周回を数える（`slam2d_route` と共通）。
+
+        添字が末尾→先頭へ回っても、半周も進んでいなければ数えない（走り出しの位置が
+        経路の終端の直前だと、動いた瞬間に「1周」と数えてしまう）。進んだ距離は
+        **符号付きの巡回差**で積む——`(−1) % n` のように足すと、最寄り点が1つ戻った
+        だけでほぼ1周ぶん進んだことになり、この歯止めが効かなくなる。
+        """
+        n = len(path)
+        if self._prev_idx >= 0:
+            di = (index - self._prev_idx + n // 2) % n - n // 2
+            self._lap_s += di * path.length / n
+        if lap_crossed(self._prev_idx, index, n) and self._lap_s > 0.5 * path.length:
+            self.laps += 1
+            self._lap_s = 0.0
+        self._prev_idx = index
 
     # ── 障害物: 検出・横へ避ける・止まる・Hybrid A* で抜ける（`slam2d_route` と共通） ──
 
@@ -941,12 +1013,22 @@ class Slam2dRaceLine(Planner):
     def _obstacle_response(self, st: AutoState, hit: obs_mod.Obstacle | None, dist: float,
                            vs: VehicleState, p: dict[str, float], path: rl_mod.RaceLine,
                            index: int) -> bool:
-        """塞がれていたら止まる。止まっても避けられなければ Hybrid A* で抜ける。止めたら True。"""
-        avoid_on = p["obstacle_avoid"] > 0 and path.closed
+        """塞がれていたら止まる。止まっても避けられなければ Hybrid A* で抜ける。止めたら True。
+
+        「避ける」が有効なら、**減速して止まるのは開いた経路（停止点へ向かう経路）でも同じ**。
+        横へ避ける・Hybrid A* で抜けるのは閉じた経路だけ（`_plan_avoid`）。★以前は開いた経路で
+        両方とも切れていて、`obstacle_stop` が 0（既定）だと障害物に減速も制動もしなかった。
+        """
+        slow_on = p["obstacle_avoid"] > 0
+        avoid_on = slow_on and path.closed
+        # ★ 駆動が入っていない間（engage 済みで人が ARM を押す前）の静止は、スタックでも
+        #   「止まってから避け直す」待ちでもない。数えると ARM 前に Hybrid A* へ入り、ARM した
+        #   瞬間に後退を含む操縦から始まった
+        driving = bool(vs.armed)
         if hit is None:
             self._blocked_t = 0.0
             # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）
-            if avoid_on and st.target_speed > 0.1 and abs(vs.speed) < 0.03:
+            if avoid_on and driving and st.target_speed > 0.1 and abs(vs.speed) < 0.03:
                 self._stuck_t += self._dt
             else:
                 self._stuck_t = 0.0
@@ -961,7 +1043,7 @@ class Slam2dRaceLine(Planner):
         front = self.vehicle.front_overhang
         gap = max(0.0, dist - front)
         stop_at = p["obstacle_stop"]
-        if avoid_on:
+        if slow_on:
             # 横へ避けられなかった（避けていればここへは来ない）。障害物の手前
             # `_STOP_GAP` で止まれる速度を上限にして、滑らかに減速する。★制動距離だけで
             # 止め始めると、1.9m/s のまま 0.8m 手前まで来てから急制動した
@@ -970,7 +1052,7 @@ class Slam2dRaceLine(Planner):
             st.target_speed = min(st.target_speed, math.sqrt(2.0 * a * room))
             stop_at = max(stop_at, _STOP_GAP + 0.05)
         if stop_at <= 0.0 or gap > stop_at:
-            if avoid_on:
+            if slow_on:
                 st.reason = f"前方 {gap:.1f}m に避けられない障害物。止まれる速度へ減速"
                 return True
             return False
@@ -979,7 +1061,9 @@ class Slam2dRaceLine(Planner):
         ang = math.degrees(math.atan2(hit.y - st.pose_y, hit.x - st.pose_x) - st.pose_yaw)
         ang = (ang + 180.0) % 360.0 - 180.0
         st.reason = f"前方 {gap:.1f}m（{ang:+.0f}°）に障害物。停止"
-        if not avoid_on or abs(vs.speed) >= 0.05:
+        if slow_on and not avoid_on:
+            st.reason += "（停止点へ向かう経路では避けない。どくまで待つ）"
+        if not avoid_on or not driving or abs(vs.speed) >= 0.05:
             return True
         # 止まってから: 曲がれる限界の近くまで使って横へ避け直す → だめなら Hybrid A*
         self._blocked_t += self._dt
@@ -1001,7 +1085,7 @@ class Slam2dRaceLine(Planner):
         v = self.vehicle
         cfg = av_mod.AvoidConfig(
             half_width=v.half_width, front=v.front_overhang, rear=v.rear_overhang,
-            kappa_max=kappa_max(v), footprint=tuple(v.footprint),
+            kappa_max=v.kappa_max, footprint=tuple(v.footprint),
             # 避けた後の経路で `_blocking` が同じ障害物を拾わないよう、経路の余裕より広く取る
             margin=max(p["avoid_margin"], p["line_margin"]) + 0.01,
             clear=p["avoid_clear"], len_min=p["avoid_len_min"], kappa_frac=kappa_frac)
@@ -1024,9 +1108,9 @@ class Slam2dRaceLine(Planner):
         if plan is None:
             return False
         rl = rl_mod.retime(plan.path, **speed_kwargs(p, self.vehicle))
-        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["avoid_speed"], p["a_brake"])
+        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["avoid_speed"], p["a_brake"],
+                                            p["a_accel"])
         self._avoid, self._avoid_base = plan, path
-        self._map_dirty = True
         return True
 
     def _blend_back(self, path: rl_mod.RaceLine, p: dict[str, float]) -> None:
@@ -1039,10 +1123,10 @@ class Slam2dRaceLine(Planner):
         d0 = float((x - path.xy[j, 0]) * nrm[0] + (y - path.xy[j, 1]) * nrm[1])
         plan = av_mod.blend_in(path, j, d0, max(1.5, 6.0 * abs(d0)), self._body_check())
         rl = rl_mod.retime(plan.path, **speed_kwargs(p, self.vehicle))
-        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["join_speed"], p["a_brake"])
+        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["join_speed"], p["a_brake"],
+                                            p["a_accel"])
         self._avoid, self._avoid_base = plan, path
         self._hint = j
-        self._map_dirty = True
 
     def _still_clear(self, hit: obs_mod.Obstacle, index: int) -> bool:
         """避けている障害物が「塞いでいる」と出ても、避ける経路の残りで車体が当たらないなら True。
@@ -1072,7 +1156,6 @@ class Slam2dRaceLine(Planner):
 
     def _clear_avoid(self) -> None:
         self._avoid = self._avoid_path = self._avoid_base = None
-        self._map_dirty = True
 
     def _avoid_note(self) -> str:
         if self._avoid is None:
@@ -1107,8 +1190,8 @@ class Slam2dRaceLine(Planner):
             ahead += dist + hit.r + self.vehicle.rear_overhang
         k = min(int(np.searchsorted(s_fwd, ahead)), len(order) - 2)
         j, j2 = int(order[k]), int(order[k + 1])
-        gx, gy = path.xy[j]
-        gyaw = math.atan2(path.xy[j2, 1] - gy, path.xy[j2, 0] - gx)
+        gx, gy = float(path.xy[j, 0]), float(path.xy[j, 1])
+        gyaw = math.atan2(float(path.xy[j2, 1]) - gy, float(path.xy[j2, 0]) - gx)
         x, y, yaw = self.slam.pose
         c, s = math.cos(-yaw), math.sin(-yaw)
         lx, ly = c * (gx - x) - s * (gy - y), s * (gx - x) + c * (gy - y)
@@ -1264,6 +1347,13 @@ class Slam2dRaceLine(Planner):
         if self.path is not None:
             m.raceline = self.path.xy.reshape(-1).tolist()
             m.raceline_v = self.path.v.tolist()
+        # ★ 詰め直したら経路の版を進める。`planning_node`・`telemetry_node` は
+        #   `(map_seq, route_seq)` が変わったときだけ流すので、凍結した地図（`map_seq` が
+        #   動かない）の上で経路だけ変わると配られなかった——BUILD でできた中心線とライン、
+        #   読み込み後に引き直したライン、設定を変えて作り直した速度が GUI に届かず、
+        #   DONE での手動保存も「保存できる地図が無い」になった
+        self._map_ver += 1
+        m.route_seq = self._map_ver
         self._map = m
         self._map_seq = g.seq
         self._map_frozen = g.frozen

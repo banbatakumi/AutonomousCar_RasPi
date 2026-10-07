@@ -262,20 +262,6 @@ def measure(grid: OccGrid, xy: np.ndarray, nrm: np.ndarray,
     return _declutter(both[:n]), _declutter(both[n:])
 
 
-def lateral_offset(cl: Centerline, xy: np.ndarray) -> np.ndarray:
-    """`xy` の各点が中心線からどれだけ横にずれているか [m]。**左が正。**
-
-    最適化を複数回まわすと、2回目以降の `α` は「1回目の経路からのずれ」に
-    なってしまう。**人間が読む数字は最後まで中心線基準**でないと、
-    「アウト側に振っているか」が判断できない。
-    """
-    d2 = ((xy[:, None, 0] - cl.xy[None, :, 0]) ** 2
-          + (xy[:, None, 1] - cl.xy[None, :, 1]) ** 2)
-    j = np.argmin(d2, axis=1)
-    d = xy - cl.xy[j]
-    return d[:, 0] * cl.normal[j, 0] + d[:, 1] * cl.normal[j, 1]
-
-
 def build(grid: OccGrid, traj: np.ndarray, *, step: float = 0.10,
           max_width: float = 3.0, smooth: int = 5, iters: int = 3) -> Centerline:
     """軌跡と地図から中心線を作る。

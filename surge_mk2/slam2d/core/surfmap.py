@@ -87,7 +87,6 @@ class SurfaceMap:
         self.height, self.width = occ.shape
         self.known = known
         self.empty = not bool(occ.any())
-        self.cells = int(occ.sum())
         if self.empty:
             return
 
@@ -184,17 +183,6 @@ class SurfaceMap:
         valid = ok & ~far & ~beyond & (d < self.max_dist)
         return Association(qx, qy, nx, ny, planar, valid, np.where(valid, d, np.inf))
 
-    def known_at(self, wx: np.ndarray, wy: np.ndarray) -> np.ndarray:
-        res = self.resolution
-        c = np.floor((np.asarray(wx) - self.origin[0]) / res).astype(np.int64)
-        r = np.floor((np.asarray(wy) - self.origin[1]) / res).astype(np.int64)
-        ok = (c >= 0) & (c < self.width) & (r >= 0) & (r < self.height)
-        if self.known is None:
-            return ok
-        out = np.zeros(ok.shape, dtype=bool)
-        out[ok] = self.known[r[ok], c[ok]]
-        return out
-
     # ── 作り方 ──
 
     @classmethod
@@ -208,10 +196,21 @@ class SurfaceMap:
         c = np.floor((xs - ox) / resolution).astype(np.int64)
         r = np.floor((ys - oy) / resolution).astype(np.int64)
         ok = (c >= 0) & (c < n) & (r >= 0) & (r < n)
-        flat = r[ok] * n + c[ok]
-        cnt = np.bincount(flat, minlength=n * n).reshape(n, n)
-        sx = np.bincount(flat, weights=xs[ok], minlength=n * n).reshape(n, n)
-        sy = np.bincount(flat, weights=ys[ok], minlength=n * n).reshape(n, n)
+        c, r, xs, ys = c[ok], r[ok], xs[ok], ys[ok]
+        w = h = n
+        if c.size:
+            # ★ 格子は**点のある範囲＋`max_dist`**に切り詰める。その外のセルは最寄りの壁まで
+            #   `max_dist` を超えるので、どのみち対応が付かない。正方形（半径 8.5m・46万セル）
+            #   全体で距離変換までやると、キーフレームごと（1m/s 以上ではほぼ毎周期）に 7ms かかった
+            pad = int(math.ceil(max_dist / resolution)) + 2
+            c0, r0 = max(0, int(c.min()) - pad), max(0, int(r.min()) - pad)
+            w, h = min(n, int(c.max()) + pad + 1) - c0, min(n, int(r.max()) + pad + 1) - r0
+            c, r = c - c0, r - r0
+            ox, oy = ox + c0 * resolution, oy + r0 * resolution
+        flat = r * w + c
+        cnt = np.bincount(flat, minlength=h * w).reshape(h, w)
+        sx = np.bincount(flat, weights=xs, minlength=h * w).reshape(h, w)
+        sy = np.bincount(flat, weights=ys, minlength=h * w).reshape(h, w)
         occ = cnt >= min_count
         m = np.maximum(cnt, 1)
         return cls(occ, resolution=resolution, origin=(ox, oy), mean_x=sx / m, mean_y=sy / m,

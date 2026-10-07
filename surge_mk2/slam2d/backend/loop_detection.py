@@ -38,7 +38,7 @@ import numpy as np
 
 from ..core.surfmap import SurfaceMap
 from ..core.frontend import Keyframe, inflate_info, rotate_info
-from ..core.register import RegisterConfig, register, search
+from ..core.register import ANCHOR_INFO, RegisterConfig, register, search
 from ..core.types import Cov3, Pose2D, between, wrap_angle
 
 __all__ = ["LoopDetectorConfig", "LoopCandidate", "find_loop_closure", "build_submap"]
@@ -93,7 +93,7 @@ class LoopCandidate(NamedTuple):
     dst: int                               #: 現在のキーフレームindex
     delta: Pose2D                          #: srcから見たdstの相対姿勢
     score: float
-    #: `delta`の情報行列（**srcの座標系**）
+    #: `delta`の情報行列（**dstの向きの座標系**。g2o の `EdgeSE2` が誤差を読む向き）
     information: Cov3
     inlier: float
     #: 照合で動いた量（今の推定からの補正量）[m]。ドリフトの大きさの目安
@@ -118,8 +118,8 @@ def build_submap(keyframes: Sequence[Keyframe], indices: Sequence[int], center: 
 
 
 def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
-                      config: LoopDetectorConfig = LoopDetectorConfig(),
-                      exclude: set[int] | None = None) -> LoopCandidate | None:
+                      config: LoopDetectorConfig = LoopDetectorConfig()
+                      ) -> LoopCandidate | None:
     """`keyframes[new_index]`が過去のキーフレームの近くに戻ってきたかを調べる。"""
     cur = keyframes[new_index]
     if cur.hx.size < config.min_used:
@@ -130,8 +130,6 @@ def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
         gap = cur.path - kf.path
         if gap < config.min_path_gap:
             break                              # path は単調増加
-        if exclude and i in exclude:
-            continue
         if abs(wrap_angle(kf.pose.yaw - cur.pose.yaw)) > config.yaw_tolerance:
             continue
         d = math.hypot(kf.pose.x - cur.pose.x, kf.pose.y - cur.pose.y)
@@ -173,7 +171,8 @@ def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
                   trans_step=0.015, rot_step=math.radians(0.4), sigma=0.03, max_points=160)
     if fine.score < config.min_score:
         return None
-    r = register(field, cur.hx, cur.hy, fine.pose, config=config.register)
+    r = register(field, cur.hx, cur.hy, fine.pose, prior=fine.pose, prior_info=ANCHOR_INFO,
+                 config=config.register)
     if r.used < config.min_used or r.inlier < config.min_inlier or r.rms > config.max_rms:
         return None
 
@@ -182,6 +181,9 @@ def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
     if corr > config.max_correction + config.max_correction_per_m * gap:
         return None                     # ドリフトの見積もりに対して動かしすぎ
     delta = between(src.pose, r.pose)
+    # ★ g2o の `EdgeSE2` の誤差は `Z⁻¹·(X₁⁻¹X₂)`——並進の誤差は**測定ぶん回した座標系
+    #   （dst 側）**で表される。src の向きで回すと、通路のような「横だけ強い」拘束が
+    #   src と dst の向きの差だけ回って進行方向へ漏れる（ループは 60° 違いまで通す）
     info = rotate_info(inflate_info(r.info, sigma_xy=config.sigma_xy,
-                                    sigma_yaw=config.sigma_yaw), src.pose.yaw)
+                                    sigma_yaw=config.sigma_yaw), r.pose.yaw)
     return LoopCandidate(best_i, new_index, delta, fine.score, info, r.inlier, corr)

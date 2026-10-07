@@ -142,6 +142,45 @@ class TestRoute(unittest.TestCase):
     #: 置くとどのエッジに吸着するかが決まらない）
     START = Waypoint(2.0, 1.0, 0.0)
 
+    def test_duplicate_waypoint_does_not_add_a_lap(self):
+        """同じ場所の経由点（二度押し・数cm手前）で、1周余計に回る経路にならない。"""
+        base = plan_loop(self.g, [self.START, Waypoint(6.0, 2.5)])
+        twice = plan_loop(self.g, [self.START, Waypoint(2.0, 1.0), Waypoint(6.0, 2.5)])
+        behind = plan_loop(self.g, [self.START, Waypoint(1.98, 1.0), Waypoint(6.0, 2.5)])
+        self.assertAlmostEqual(twice.length, base.length, delta=0.05)
+        self.assertAlmostEqual(behind.length, base.length, delta=0.05)
+
+    def test_too_close_goal_is_reached_after_a_lap_across_a_junction(self):
+        """★ 止まり切れないほど近い停止点へは1周回ってから着く——**分岐をまたいでも**。
+
+        車は分岐（3.5, 1.0）の手前、停止点はその先の別のエッジ。以前は「今のエッジを
+        `min_len` 先まで進んだ点」を経由していて、その点がエッジの端で頭打ちになり、
+        1.2m しかない経路がそのまま返っていた。
+        """
+        pose = (3.0, 1.0, 0.0)
+        near = plan_to(self.g, pose, Waypoint(4.2, 1.0))
+        self.assertLess(near.length, 1.5)
+        # 向きを指定しない停止点: 止まり切れる長さの経路になる（反対側から着いてもよい）
+        any_dir = plan_to(self.g, pose, Waypoint(4.2, 1.0), min_len=2.5)
+        self.assertGreaterEqual(any_dir.length, 2.5)
+        np.testing.assert_allclose(any_dir.xy[-1], [4.2, 1.0], atol=0.05)
+        # 向き（+x）を指定した停止点: いったん通り過ぎて、1周してから同じ向きで着く
+        far = plan_to(self.g, pose, Waypoint(4.2, 1.0, 0.0), min_len=2.5)
+        self.assertGreater(far.length, near.length + 8.0)
+        np.testing.assert_allclose(far.xy[-1], [4.2, 1.0], atol=0.05)
+        d = np.hypot(far.xy[:, 0] - 4.2, far.xy[:, 1] - 1.0)
+        self.assertLess(int(np.argmax(d < 0.1)), len(far.xy) // 4)
+
+    def test_start_snaps_to_the_given_edges(self):
+        """始点の吸着を今走っている経路のエッジに限れる（分岐の近くで別の枝を拾わない）。"""
+        from raspi.nav.route import snap
+        passage = self._edges_near(3.5, 2.5)
+        bottom = self._edges_near(2.0, 1.0)
+        self.assertEqual(snap(self.g, 3.5, 1.6).edge, passage)
+        self.assertEqual(snap(self.g, 3.5, 1.6, edges={bottom}).edge, bottom)
+        rp = plan_to(self.g, (3.45, 1.3, 0.0), Waypoint(6.0, 2.5), start_edges={bottom})
+        self.assertEqual(rp.steps[0][0], bottom)
+
     def test_waypoint_selects_branch(self):
         start = self.START
         via_short = plan_loop(self.g, [start, Waypoint(3.5, 2.5)])
@@ -233,8 +272,7 @@ class TestOpenPath(unittest.TestCase):
         v = rl_mod.speed_profile(xy, k, v_max=2.0, v_min=0.25, a_lat=2.5, a_accel=1.0,
                                  a_brake=1.5, closed=closed, v_start=0.0, v_end=0.25)
         seg = np.hypot(*np.diff(xy, axis=0).T)
-        return rl_mod.RaceLine(xy=xy, v=v, kappa=k, alpha=np.zeros(n),
-                               s=np.concatenate([[0], np.cumsum(seg)]),
+        return rl_mod.RaceLine(xy=xy, v=v, kappa=k,
                                length=float(seg.sum()), closed=closed)
 
     def test_open_speed_profile_brakes_to_end(self):
@@ -288,8 +326,7 @@ class TestTightTurns(unittest.TestCase):
         xy = np.array(pts)
         k = rl_mod.curvature(xy)
         v = np.full(len(xy), 2.0)
-        return rl_mod.RaceLine(xy=xy, v=v, kappa=k, alpha=np.zeros(len(xy)),
-                               s=np.zeros(len(xy)), length=float(len(xy) * 0.1))
+        return rl_mod.RaceLine(xy=xy, v=v, kappa=k, length=float(len(xy) * 0.1))
 
     def test_tightest_radius_measures_over_a_chord(self):
         rl = self._circle_track(0.5)
@@ -315,8 +352,7 @@ def _straight(y0: float, y1: float, v=1.0, n=100):
     ys = np.where(xs < 5, y0, y0 + (y1 - y0) * np.clip((xs - 5) / 2, 0, 1))
     xy = np.column_stack([xs, ys])
     seg = np.hypot(*np.diff(xy, axis=0).T)
-    return rl_mod.RaceLine(xy=xy, v=np.full(n, v), kappa=np.zeros(n), alpha=np.zeros(n),
-                           s=np.concatenate([[0], np.cumsum(seg)]), length=float(seg.sum()),
+    return rl_mod.RaceLine(xy=xy, v=np.full(n, v), kappa=np.zeros(n), length=float(seg.sum()),
                            closed=False)
 
 
@@ -389,6 +425,21 @@ class TestRouteConfig(unittest.TestCase):
                     {"groups": {"A": [[float("nan"), 0]]}}):
             with self.assertRaises(ValueError, msg=str(bad)):
                 RouteConfig.from_dict(bad)
+
+
+    def test_wrong_types_are_value_errors(self):
+        """型の違う設定（手で編集した routes.json 等）も `ValueError` に揃える。
+
+        呼び出し側は `except ValueError` だけなので、`AttributeError`・`TypeError`・
+        `OverflowError` で抜けると planning_node まで届いていた。
+        """
+        for text in ('{"groups": [1]}', '{"stops": [1]}', '{"signal_map": [1]}',
+                     '{"mission": {"laps": [1]}}', '{"mission": {"laps": 1e400}}',
+                     '{"mission": {"time_s": "x"}}', '{"signal_map": {"a": ["A"]}}',
+                     '{"explore_traj": [[1, 2], [3]]}', '[1, 2]'):
+            with self.assertRaises(ValueError, msg=text):
+                RouteConfig.from_json(text)
+        self.assertEqual(RouteConfig.from_json('{"groups": null, "mission": null}').groups, {})
 
 
 class TestSlam2dRoutePlanner(unittest.TestCase):
@@ -538,6 +589,153 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_edit_during_the_first_build_is_not_lost(self):
+        """★ 地図を読んだ直後（最初の計算中）に経由点を保存しても、経路に反映される。"""
+        from raspi.auto.slam2d_route import Slam2dRoute
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self.assertIsNotNone(pl._job)
+            self.assertIsNone(pl._graph)
+            cfg = json.loads(pl._cfg.to_json(with_traj=False))
+            cfg["groups"]["C"] = [[2.0, 1.0, 0.0]]
+            pl.request_routes(json.dumps(cfg))
+            self._wait(pl)
+            self.assertIn("C", pl._routes, pl._route_err)
+        finally:
+            pl.close()
+
+    def test_broken_routes_file_does_not_raise(self):
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_route import Slam2dRoute
+        mapstore.save_routes("m", '{"groups": [1]}')
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")                           # 例外にしない
+            self.assertIn("経路の設定を読めない", pl._note)
+            self._wait(pl)
+            self.assertIn("auto", pl._routes)
+        finally:
+            pl.close()
+
+    def test_stop_route_is_followed_from_its_start(self):
+        """★ 1周回ってから止まる経路は、始めと終わりが同じ場所を通る。始点から追う。"""
+        from concurrent.futures import Future
+
+        from raspi.auto.slam2d_route import Slam2dRoute, _remaining
+        th = np.linspace(0.0, 2.0 * np.pi * 1.15, 300)        # 1.15 周（終わりが始めに重なる）
+        xy = 2.0 * np.column_stack([np.cos(th), np.sin(th)])
+        seg = np.hypot(*np.diff(xy, axis=0).T)
+        line = rl_mod.RaceLine(xy=xy, v=np.ones(300), kappa=np.full(300, 0.5),
+                               length=float(seg.sum()), closed=False)
+        # 走り出した直後の車は、終わりの区間の点（ここでは 270 番目）の上にも居る
+        pose = (float(xy[270, 0]), float(xy[270, 1]), 0.0)
+        self.assertLess(_remaining(line, pose), 2.0)           # 全体から探すと「残りわずか」
+        self.assertGreater(_remaining(line, pose, 0), 12.0)    # 始点から追えば1周強
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            f: Future = Future()
+            f.set_result((line, "注意"))
+            pl._stopping, pl._stop_job = "P", f
+            pl._poll()
+            self.assertEqual(pl._switch.active_key, "stop")
+            self.assertEqual(pl._hint, 0)
+            self.assertEqual(pl._stop_error, "注意")
+        finally:
+            pl.close()
+
+    def test_stop_route_is_retried_later(self):
+        """停止経路を作れなくても、少し進んだらもう一度試す（毎周期は投げない）。"""
+        from concurrent.futures import Future
+
+        from raspi.auto.route_config import Stop
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            pl._switch.set_active("A", pl._routes["A"])
+            pl._hint = 0
+            pl._cfg.mission = {"laps": 1, "then": "P"}
+            pl._cfg.stops = {"P": Stop(6.0, 2.5)}
+            pl.laps = 1
+            pl._race_t = 10.0
+            f: Future = Future()
+            f.set_exception(RuntimeError("boom"))
+            pl._stopping, pl._stop_job = "P", f
+            pl._poll()
+            p = {s.key: s.default for s in pl.params}
+            pose = tuple(pl._routes["A"].xy[0]) + (0.0,)
+            pl._maybe_finish(pose, VehicleState(speed=1.0), p)
+            self.assertIsNone(pl._stop_job)
+            pl._race_t = 11.5
+            pl._maybe_finish(pose, VehicleState(speed=1.0), p)
+            self.assertIsNotNone(pl._stop_job)
+            line, _warn = pl._stop_job.result(timeout=30)
+            self.assertFalse(line.closed)
+        finally:
+            pl.close()
+
+    def test_build_without_any_route_still_saves_the_map(self):
+        """★ 経路が1本も作れなくても、地図は保存して DONE へ進む（BUILD で固まらない）。"""
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_raceline import BUILD, DONE
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import AutoState
+        pl = Slam2dRoute()
+        try:
+            pl.phase = BUILD
+            pl._graph = graph_of(oval())
+            pl._route_err = {"auto": "スタートから戻ってくる周回ルートが無い"}
+            p = {s.key: s.default for s in pl.params}
+            st = pl._build(AutoState(), p)
+            self.assertEqual(pl.phase, DONE)
+            self.assertIn("周回ルートが無い", st.reason)
+            self.assertTrue(pl._saved_map_name)
+            saved = mapstore.load_map(pl._saved_map_name)
+            self.assertIsNotNone(saved)
+            self.assertEqual(len(saved.raceline_xy), 0)
+            self.assertIn("経路が無い", pl._done(AutoState()).reason)
+            # ラインの無い地図も、経路を自前で作るこの planner なら読める
+            pl.request_load(pl._saved_map_name)
+            self.assertEqual(pl._load_error, "")
+            self.assertIsNone(pl.path)
+        finally:
+            pl.close()
+
+    def test_race_start_is_initialised_even_if_a_route_was_chosen_in_locate(self):
+        """★ LOCATE の間に切替ボタン・信号が来ても、走り出しの初期化を飛ばさない。"""
+        from raspi.auto.slam2d_raceline import RACE
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import AutoState, Scan, VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            pl.request_route("B", "gui")                   # まだ走り出していない
+            self.assertEqual(pl._switch.active_key, "B")
+            pl._race_t, pl._lap_s, pl._prev_idx, pl.laps = 123.0, 7.0, 80, 3   # 前回の残り
+            ver = pl._route_ver
+            x, y = pl._routes["B"].xy[0]
+            pl.slam.set_pose(float(x), float(y), 0.0)
+            pl.phase = RACE
+            pl._dt = 0.1
+            st = AutoState(match_score=1.0)
+            p = {s.key: s.default for s in pl.params}
+            pl._race(st, Scan(dist=[3.0] * 360, sector_seen=[True] * 12),
+                     VehicleState(speed=0.0), p, False)
+            self.assertTrue(pl._race_started)
+            self.assertEqual(pl._switch.active_key, "B")
+            self.assertLess(pl._race_t, 1.0)
+            self.assertEqual(pl.laps, 0)
+            self.assertLess(abs(pl._lap_s), 1.0)
+            self.assertGreater(pl._route_ver, ver)          # GUI へ今の経路を配り直す
+        finally:
+            pl.close()
+
     def test_stop_failure_is_not_resubmitted(self):
         from concurrent.futures import Future
 
@@ -573,9 +771,10 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             m2 = pl.snapshot()
             self.assertIs(m2, m1)
             self.assertIs(m2.routes, m1.routes)           # 詰め直していない
+            seq1 = m1.route_seq
             pl._set_active("A", pl._routes["A"])
             m3 = pl.snapshot()
-            self.assertEqual(m3.route_seq, pl._route_ver)
+            self.assertGreater(m3.route_seq, seq1)        # 版が進む（配り直される）
             self.assertEqual(m3.route_active, "A")
         finally:
             pl.close()
@@ -599,7 +798,6 @@ class TestLapCount(unittest.TestCase):
         th = np.linspace(0, 2 * np.pi, 100, endpoint=False)
         xy = np.column_stack([np.cos(th), np.sin(th)])
         self.path = rl_mod.RaceLine(xy=xy, v=np.ones(100), kappa=np.ones(100),
-                                    alpha=np.zeros(100), s=np.zeros(100),
                                     length=2 * np.pi)
 
     def tearDown(self):
@@ -729,6 +927,75 @@ class TestRouteSelectBus(unittest.TestCase):
         PlanningNode._apply_route_select(node, RouteSelect(value="left", event_id=2))
         PlanningNode._apply_route_select(node, RouteSelect(value="right", event_id=2))
         self.assertEqual([v for v, _ in calls], ["left", "left", "right"])
+
+
+class TestObstacleResponse(unittest.TestCase):
+    """障害物への反応（`Slam2dRaceLine._obstacle_response`、`slam2d_route` と共通）。"""
+
+    def setUp(self):
+        from raspi.auto.slam2d_raceline import Slam2dRaceLine
+        from raspi.nav.obstacles import Obstacle
+        self.pl = Slam2dRaceLine()
+        self.pl._dt = 0.1
+        self.p = {s.key: s.default for s in self.pl.params}
+        self.hit = Obstacle(1.3, 0.0, 0.1, 5)
+        th = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+        ring = 3.0 * np.column_stack([np.cos(th), np.sin(th)])
+        self.closed = rl_mod.RaceLine(xy=ring, v=np.full(200, 1.5), kappa=np.full(200, 1 / 3),
+                                      length=2 * np.pi * 3.0)
+
+    def tearDown(self):
+        self.pl.close()
+
+    def _respond(self, path, hit, dist, *, speed, armed=True, target=1.5, **over):
+        from raspi.msgs import AutoState, VehicleState
+        st = AutoState(target_speed=target, ready=True)
+        vs = VehicleState(speed=speed, armed=armed)
+        return self.pl._obstacle_response(st, hit, dist, vs, {**self.p, **over}, path, 10), st
+
+    def test_open_path_slows_for_an_obstacle(self):
+        """★ 停止点へ向かう開いた経路でも、「避ける」が有効なら止まれる速度へ落とす。
+
+        以前は開いた経路で減速も制動もしなかった（`obstacle_stop` が 0 のとき素通し）。
+        """
+        handled, st = self._respond(_straight(0, 0), self.hit, 1.3, speed=1.5, obstacle_avoid=1)
+        self.assertTrue(handled)
+        self.assertLess(st.target_speed, 1.5)
+        self.assertFalse(st.brake)
+        # 目の前まで来たら制動する。横へは避けず、Hybrid A* にも入らない
+        for _ in range(30):
+            handled, st = self._respond(_straight(0, 0), self.hit, 0.55, speed=0.0,
+                                        obstacle_avoid=1)
+        self.assertTrue(handled)
+        self.assertTrue(st.brake)
+        self.assertEqual(self.pl.phase, "EXPLORE")          # DETOUR へ移っていない
+
+    def test_open_path_is_untouched_when_avoidance_is_off(self):
+        handled, st = self._respond(_straight(0, 0), self.hit, 1.3, speed=1.5, obstacle_avoid=0)
+        self.assertFalse(handled)
+        self.assertEqual(st.target_speed, 1.5)
+
+    def test_standing_still_before_arm_is_not_stuck(self):
+        """★ engage 済みで ARM 前の静止を「進めない」と数えない（数えると ARM 前に DETOUR）。"""
+        for _ in range(40):
+            handled, _ = self._respond(self.closed, None, np.inf, speed=0.0, armed=False,
+                                       obstacle_avoid=1)
+        self.assertFalse(handled)
+        self.assertEqual(self.pl._stuck_t, 0.0)
+        self.assertEqual(self.pl._detour_tries, 0)
+
+    def test_standing_still_while_armed_is_stuck(self):
+        handled = False
+        for _ in range(40):
+            if handled:
+                break
+            handled, st = self._respond(self.closed, None, np.inf, speed=0.0, armed=True,
+                                        obstacle_avoid=1)
+        self.assertTrue(handled)
+        self.assertEqual(self.pl.phase, "DETOUR")
+        # numpy のスカラを `AutoState` へ流さない（バスのエンコーダが落ちた実績がある）
+        tgt = self.pl._detour._target_in_park
+        self.assertTrue(all(type(v) is float for v in tgt), tgt)
 
 
 if __name__ == "__main__":

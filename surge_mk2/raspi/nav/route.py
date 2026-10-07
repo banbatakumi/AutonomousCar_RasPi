@@ -140,12 +140,21 @@ def _wrap(a: float) -> float:
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
+#: 経由点どうしを「同じ場所」とみなす距離 [m]（`plan_loop`）
+_SAME_SPOT_M = 0.10
+
 # ── 吸着 ──
 
-def snap(graph: RoadGraph, x: float, y: float, radius: float = 0.6) -> _Snap:
-    """いちばん近いエッジ上の点。`radius` より遠ければ RouteError。"""
+def snap(graph: RoadGraph, x: float, y: float, radius: float = 0.6,
+         edges: set[int] | frozenset[int] | None = None) -> _Snap:
+    """いちばん近いエッジ上の点。`radius` より遠ければ RouteError。
+
+    :param edges: 与えると、そのエッジの中からだけ探す（今走っている経路のエッジなど）
+    """
     best = (math.inf, -1, -1)
     for k, e in enumerate(graph.edges):
+        if edges is not None and k not in edges:
+            continue
         d2 = (e.xy[:, 0] - x) ** 2 + (e.xy[:, 1] - y) ** 2
         j = int(np.argmin(d2))
         if d2[j] < best[0]:
@@ -277,6 +286,20 @@ def plan_loop(graph: RoadGraph, waypoints: list[Waypoint], *, turn_max_deg: floa
     for i, sp in enumerate(snaps):
         if sp.edge in forbidden:
             raise RouteError(f"経由点{i + 1}が避ける道の上にある")
+    # ★ 直前の経由点と**同じ場所**（同じエッジ・10cm 以内）の経由点は読み飛ばす。GUI の
+    #   二度押しや数cm手前に置いた点を「順に通る」と読むと、その間で1周余計に回る
+    #   約2倍の周回路ができ、周回も2周で1回しか数えなかった
+    keep = [0]
+    for i in range(1, len(snaps)):
+        p = snaps[keep[-1]]
+        if snaps[i].edge == p.edge and abs(snaps[i].s - p.s) < _SAME_SPOT_M:
+            continue
+        keep.append(i)
+    if (len(keep) > 1 and snaps[keep[-1]].edge == snaps[keep[0]].edge
+            and abs(snaps[keep[-1]].s - snaps[keep[0]].s) < _SAME_SPOT_M):
+        keep.pop()
+    snaps = [snaps[i] for i in keep]
+    waypoints = [waypoints[i] for i in keep]
     dirs = [_dirs(graph, sp, w.yaw) for sp, w in zip(snaps, waypoints)]
     for i, ds in enumerate(dirs):
         if not ds:
@@ -325,7 +348,8 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
             turn_max_deg: float = 100.0, snap_radius: float = 0.6,
             min_len: float = 0.0, end_at_goal: bool = True,
             extend: float = 0.0,
-            avoid: list[tuple[float, float]] | None = None) -> RoutePath:
+            avoid: list[tuple[float, float]] | None = None,
+            start_edges: set[int] | frozenset[int] | None = None) -> RoutePath:
     """今の位置（今の向きで進む）からゴールまでの開いた経路。
 
     :param min_len: ゴールがこれより近い（すぐ後ろにある等）なら1周回ってでも
@@ -335,11 +359,14 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
     :param extend: `end_at_goal=False` のとき、最寄り点からさらに進行方向へこれだけ
         進んだ所で終わる [m]（バック駐車は枠を通り過ぎてから後退で入れるため）。
         エッジの端で頭打ち
+    :param start_edges: 今の位置を吸着させるエッジ（今走っている経路のエッジ）。★与えないと
+        グラフ全体の最寄りエッジに吸着するので、分岐の近くでは走っていない枝（行き止まり等）を
+        始点にして「経路が見つからない」「逆走になる」で失敗した
     """
     turn_max = math.radians(turn_max_deg)
     geo = _Geom(graph)
     forbidden = avoid_edges(graph, avoid)
-    a = snap(graph, pose[0], pose[1], snap_radius)
+    a = snap(graph, pose[0], pose[1], snap_radius, edges=start_edges or None)
     da_list = _dirs(graph, a, pose[2])
     if not da_list:
         raise RouteError("今の向きでは今いる道を進めない（逆走になる）")
@@ -349,8 +376,7 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
         leg = _leg(graph, geo, a, da_list[0], b, db, turn_max, forbidden)
         if leg is not None and leg[0] < min_len:
             # 近すぎる: いったん先へ進んでから戻ってくる経路（1周）を探す
-            leg = _leg_via_loop(graph, geo, a, da_list[0], b, db, turn_max, min_len,
-                                forbidden)
+            leg = _leg_via_loop(graph, geo, leg, b, db, turn_max, forbidden)
         if leg is not None and (best is None or leg[0] < best[0]):
             best = leg
     if best is None:
@@ -369,16 +395,18 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
     return RoutePath(xy=xy, closed=False, steps=best[1], length=length)
 
 
-def _leg_via_loop(graph, geo, a, da, b, db, turn_max, min_len, forbidden=frozenset()):
-    """`a` から先へ `min_len` 以上進んだ点を経由して `b` へ。"""
-    ahead = min(geo.length(a.edge), a.s + min_len) if da > 0 else max(0.0, a.s - min_len)
-    mid = _Snap(edge=a.edge, s=ahead, xy=tuple(geo.at(a.edge, ahead)), tangent=a.tangent)
-    first = _leg(graph, geo, a, da, mid, da, turn_max, forbidden)
-    second = _leg(graph, geo, mid, da, b, db, turn_max, forbidden)
-    if first is None or second is None:
-        return None
-    steps = first[1][:-1] + second[1]
-    return first[0] + second[0], steps
+def _leg_via_loop(graph, geo, direct, b, db, turn_max, forbidden=frozenset()):
+    """近すぎる `b` へ、**そのまま `b` を通り過ぎて1周してから**着く経路。
+
+    `direct`（今の位置→`b`）に「`b` を出て `b` へ戻る1周」をつなぐ。★以前は「今のエッジを
+    `min_len` 先まで進んだ点」を経由していたが、その点はエッジの端で頭打ちになるので、
+    停止点が次のエッジにあると1周にならず、止まり切れない短い経路がそのまま返っていた。
+    1周できる道が無ければ（行き止まりの先など）`direct` のまま返す。
+    """
+    loop = _leg(graph, geo, b, db, b, db, turn_max, forbidden)
+    if loop is None:
+        return direct
+    return direct[0] + loop[0], direct[1] + loop[1][1:]
 
 
 # ── 避ける道・全周回の数え上げ ──
@@ -506,7 +534,8 @@ _TIGHT_WINDOW_M = 0.5
 
 
 def tightest_radius(rl: rl_mod.RaceLine, step: float = 0.10) -> tuple[float, int]:
-    """レーシングラインのいちばん急な所の半径 [m] と、その添字（弦 0.5m で測る）。"""
+    """レーシングラインのいちばん急な所の半径 [m] と、その添字（弦 約0.5m で測る。
+    点の刻みに丸めるので、刻み 0.1m では 0.4m）。"""
     k = max(1, int(round(_TIGHT_WINDOW_M / 2 / step)))
     kap = rl_mod.chord_curvature(rl.xy, k, rl.closed)
     i = int(np.argmax(kap))
@@ -525,7 +554,7 @@ def build_raceline(base_grid, graph: RoadGraph, route: RoutePath, *, half_width:
                    time_iters: int = 0) -> tuple[rl_mod.RaceLine, cl_mod.Centerline]:
     """経路 → 中心線 → レーシングライン（回廊の上で、モジュール docstring 参照）。
 
-    :param kappa_max: 車の曲がれる限界の曲率 [1/m]（`tan(最大舵角)/ホイールベース`）。
+    :param kappa_max: 車の曲がれる限界の曲率 [1/m]（`Vehicle.kappa_max`。同定した舵の効き込み）。
         与えると、限界に近い区間で横Gの余裕を削る（`raceline.speed_profile`）
     """
     corridor = CorridorGrid(base_grid, graph, route.edge_ids, route.node_ids(graph))

@@ -129,9 +129,6 @@ class PoseGraph:
         self._opt.initialize_optimization()
         self._opt.optimize(iterations)
 
-    def set_estimate(self, node_id: int, pose: Pose2D) -> None:
-        self._opt.vertex(node_id).set_estimate(g2o.SE2(pose.x, pose.y, pose.yaw))
-
     def pose(self, node_id: int) -> Pose2D:
         est = self._opt.vertex(node_id).estimate()
         return Pose2D(float(est[0]), float(est[1]), float(est[2]))

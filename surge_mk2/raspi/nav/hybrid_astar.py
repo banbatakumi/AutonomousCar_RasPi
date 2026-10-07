@@ -82,7 +82,7 @@ class HybridConfig:
     """探索の設定。**`turning_radius`は最小旋回半径に余裕を持たせた値を渡す。**
 
     実舵角の限界ぴったりで計画すると追従誤差を舵で詰める余地が無くなる
-    （`park_to_point`が既定で`0.9 * max_steer`相当を渡す）。
+    （`park_to_point`が既定で、車の曲がれる限界の曲率の 0.95 倍にあたる半径を渡す）。
     """
 
     turning_radius: float

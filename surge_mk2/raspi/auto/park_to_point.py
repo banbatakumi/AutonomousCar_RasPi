@@ -80,8 +80,8 @@ Reeds-Shepp（`raspi/nav/reeds_shepp.py`）は捨てずに、解析展開と
 `docs/system_overview.md`§2の「据え切りでステアMDが過熱する」制約は、
 切り替えごとの単発動作なら連続据え切りとは切り分けられると判断した。
 
-計画は`0.9 * max_steer`相当の旋回半径で行う（`steer_reserve`）——実舵角の
-限界ぴったりで計画すると追従誤差を舵で詰める余地が無くなる。
+計画は車の曲がれる限界の曲率（`Vehicle.kappa_max`、同定した舵の効き込み）の 0.95 倍で行う
+（`steer_reserve`）——限界ぴったりで計画すると追従誤差を舵で詰める余地が無くなる。
 
 ## 安全: 掃引ベースの停止（`_safety_brake`）
 
@@ -257,11 +257,12 @@ class ParkToPoint(Planner):
                        "ここを`cmd_deadman_ms`(150ms)より大きくすると指令が途絶えて"
                        "DISARMに落ちる。実測では120msで96%・500msで99%なので、"
                        "伸ばす価値は小さい"),
-        ParamSpec(key="steer_reserve", label="計画に使う舵角の割合", min=0.5, max=1.0,
-                  step=0.05, default=0.9, unit="",
-                  note="最小旋回半径を`wheelbase/tan(この割合*max_steer)`で決める。"
-                       "★1.0（限界ぴったり）で計画すると追従誤差を舵で詰める余地が"
-                       "無くなる。0.9なら舵角3°ぶんの補正余地が残る"),
+        ParamSpec(key="steer_reserve", label="計画に使う曲率の割合", min=0.5, max=1.0,
+                  step=0.05, default=0.95, unit="",
+                  note="計画の最小旋回半径を「車の最小旋回半径（同定した舵の効き込み、46cm）"
+                       "÷この割合」で決める。★1.0（限界ぴったり）で計画すると追従誤差を舵で"
+                       "詰める余地が無くなる。0.95で49cm。0.9（51cm）まで広げると、狭い行き止まり"
+                       "で経路が見つからない配置が増えた（sim.park_bench で 81→74/96）"),
         ParamSpec(key="clearance_target_m", label="望ましい壁との余裕", min=0.05, max=0.40,
                   step=0.01, default=0.15, unit="m",
                   note="これより壁に近い区間に罰則を掛ける（避けられるなら避ける）。"
@@ -340,6 +341,8 @@ class ParkToPoint(Planner):
 
     def request_park_target(self, x: float, y: float, yaw: float) -> None:
         self._park_pose = (0.0, 0.0, 0.0)
+        # `float()` で受ける（numpy のスカラが `AutoState.park_target_*` までそのまま流れる）
+        x, y, yaw = float(x), float(y), float(yaw)
         self._target_in_park = (x, y, yaw)
         self._prev_odom_center = None
         self._maneuver_t = 0.0
@@ -367,9 +370,10 @@ class ParkToPoint(Planner):
         """計画に使う最小旋回半径。**実舵角の限界ぴったりでは計画しない。**
 
         限界で計画すると追従誤差を舵で詰める余地が無くなる（`steer_reserve`）。
+        ★ 限界は**同定した舵の効きを通した曲率**（`Vehicle.kappa_max`、46cm）で測る。幾何の
+        `wheelbase/tan(0.9·max_steer)` は 45cm で、車の曲がれる限界より小さかった（余地が負）。
         """
-        return self.vehicle.wheelbase / math.tan(
-            max(0.05, p["steer_reserve"]) * self.vehicle.max_steer)
+        return 1.0 / (max(0.05, p["steer_reserve"]) * self.vehicle.kappa_max)
 
     def _replan(self, p: dict[str, float]) -> None:
         """今の推定姿勢から目標までの経路を、**障害物を避けつつ**作り直す。
@@ -507,9 +511,9 @@ class ParkToPoint(Planner):
     # ── 参照経路の追従に使う小物 ──
 
     def _steer_for(self, curvature: float) -> float:
-        """曲率 → 路面舵角（自転車モデル `κ = tan(δ)/L` の逆関数）。"""
-        steer = math.atan(curvature * self.vehicle.wheelbase)
-        return max(-self.vehicle.max_steer, min(self.vehicle.max_steer, steer))
+        """曲率 → 指令舵角（`κ = tan(δ)/L` と、同定した舵の効き `Vehicle.steer_map` の逆）。"""
+        return self.vehicle.steer_map.command(math.atan(curvature * self.vehicle.wheelbase),
+                                              self.vehicle.max_steer)
 
     def _ref_index(self, pose_map: Pose) -> int | None:
         """今追うべき参照点の添字。**前へしか進まない**（後戻りさせない）。
@@ -865,7 +869,8 @@ class ParkToPoint(Planner):
         v_cmd = math.copysign(speed_mag, gear)
 
         # ── 曲率ベースの速度上限（follow_the_gap.pyと同じ式） ──
-        k_abs = abs(math.tan(self._steer) / self.vehicle.wheelbase)
+        sm = self.vehicle.steer_map
+        k_abs = abs(math.tan(sm.effective(sm.servo_gain * self._steer)) / self.vehicle.wheelbase)
         if k_abs > 1e-6:
             v_cmd = math.copysign(min(abs(v_cmd),
                                       math.sqrt(p["a_lat_max"] / k_abs)), v_cmd)
