@@ -680,6 +680,9 @@ class Slam2dRoute(Slam2dRaceLine):
         self._join_cap(st, pp, self._avoid_path or path, pose, p)
         if coasting:
             st.target_speed = min(st.target_speed, p["coast_speed"])
+        md_note = self._md_fault(st, vs, p)
+        if md_note is None:
+            return st
 
         if self._obstacle_response(st, hit, dist, vs, p, path, pp.index):
             return st
@@ -690,7 +693,7 @@ class Slam2dRoute(Slam2dRaceLine):
         st.reason = (f"{self._switch.active_key} {self.laps}周・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
-                     + self._avoid_note() + self._coast_note(coasting, p))
+                     + self._avoid_note() + self._coast_note(coasting, p) + md_note)
         return st
 
     def _maybe_finish(self, pose, vs: VehicleState, p: dict[str, float]) -> None:

@@ -99,11 +99,11 @@ class TestPlanOffset(unittest.TestCase):
         self.assertIsNone(av.plan_offset(self.path, 0, obs, [obs], body, _cfg(), v_now=1.0))
 
     def test_too_close_has_no_plan_until_allowed_to_turn_harder(self):
-        # 1.4m 先。進入に使える距離は 1.4−0.08(半径)−0.30(前端) ≈ 1.02m
-        obs = _obstacle_on_path(self.path, 14)
-        # 曲がれる曲率の6割では約1.09m要るので足りない
+        # 1.3m 先。進入に使える距離は 1.3−0.08(半径)−0.30(前端) ≈ 0.92m
+        obs = _obstacle_on_path(self.path, 13)
+        # 曲がれる曲率の6割では約1.02m要るので足りない
         self.assertIsNone(av.plan_offset(self.path, 0, obs, [obs], self.body, _cfg(), v_now=0.0))
-        # 止まってから9割まで使えば約0.87mで足りる（`_obstacle_response` の引き直し）
+        # 止まってから9割まで使えば約0.83mで足りる（`_obstacle_response` の引き直し）
         plan = av.plan_offset(self.path, 0, obs, [obs], self.body,
                               _cfg(len_min=0.5, kappa_frac=0.9), v_now=0.0)
         self.assertIsNotNone(plan)
@@ -111,6 +111,52 @@ class TestPlanOffset(unittest.TestCase):
         obs = _obstacle_on_path(self.path, 11)
         self.assertIsNone(av.plan_offset(self.path, 0, obs, [obs], self.body,
                                          _cfg(len_min=0.5, kappa_frac=0.9), v_now=0.0))
+
+
+class TestCurvatureMargin(unittest.TestCase):
+    """曲率は見積もりではなく、できた線で確かめる。
+
+    実機（2026-10-08、1周 12m）と sim.bench の toyota では、障害物の前後 3m の元の曲率の最大で
+    枠の残りを見積もっていたせいで、横へ避ける経路が1度も引けなかった。
+    """
+
+    def setUp(self):
+        self.base = _ring_path()
+        self.body = _BodyCheck(_RingGrid(1.4), FOOT, closed=False)
+        self.obs = _obstacle_on_path(self.base, 40)             # 4m 先
+
+    def _with_corner(self, lo: int, hi: int, k: float) -> RaceLine:
+        kappa = self.base.kappa.copy()
+        kappa[lo:hi] = k                                        # この区間だけ急なコーナー扱い
+        return RaceLine(**{**self.base._asdict(), "kappa": kappa})
+
+    def test_sharp_corner_nearby_does_not_block(self):
+        cfg = _cfg()
+        for lo in (62, 30):                                     # 戻り切った後／進入の途中
+            path = self._with_corner(lo, lo + 5, 0.95 * cfg.kappa_max)
+            plan = av.plan_offset(path, 0, self.obs, [self.obs], self.body, cfg, v_now=2.0)
+            self.assertIsNotNone(plan, lo)
+
+    def test_built_line_stays_within_the_budget(self):
+        cfg = _cfg()
+        plan = av.plan_offset(self.base, 0, self.obs, [self.obs], self.body, cfg, v_now=2.0)
+        self.assertIsNotNone(plan)
+        k = np.abs(curvature(plan.path.xy))[plan.window]
+        self.assertLessEqual(float(k.max()), cfg.kappa_frac * cfg.kappa_max + 1e-6)
+
+    def test_inner_side_of_a_tight_bend_is_rejected(self):
+        """半径 0.6m のコース（曲率 1.67）で内側へずらすと、車の限界（2.5）を超える。"""
+        r = 0.6
+        n = int(2 * math.pi * r / 0.05)
+        a = np.arange(n) * 2 * math.pi / n
+        xy = np.column_stack([r * np.cos(a), r * np.sin(a)])
+        path = RaceLine(xy=xy, v=np.full(n, 1.0), kappa=curvature(xy), length=2 * math.pi * r)
+        x, y = xy[n // 3]
+        obs = Obstacle(x * 1.2, y * 1.2, 0.05, 10)              # 外側寄り → 内側（左）へ避けたい
+        plan = av.plan_offset(path, 0, obs, [obs], None, _cfg(len_min=0.3), v_now=0.0)
+        if plan is not None:
+            k = np.abs(curvature(plan.path.xy))[plan.window]
+            self.assertLessEqual(float(k.max()), _cfg().kappa_max + 1e-6)
 
 
 class TestCapSpeed(unittest.TestCase):

@@ -41,10 +41,14 @@ from .deskew import Points
 from .grid import OccGrid
 from .local_map import _edt
 
-__all__ = ["Obstacle", "free_mask", "detect", "confirm", "blocking"]
+__all__ = ["Obstacle", "free_mask", "near_pad", "detect", "confirm", "blocking"]
 
 #: クラスタを切る点間距離 [m]。これより離れていたら別の物体
 _SPLIT_M = 0.18
+#: 障害物の点として数える帯を、`wall_pad` よりどれだけ壁へ寄せるか [m]（`near_pad`）
+_NEAR_M = 0.10
+#: 同じく帯の下限 [m]（これより壁に近い点は数えない）
+_NEAR_MIN_M = 0.10
 
 
 class Obstacle(NamedTuple):
@@ -52,6 +56,10 @@ class Obstacle(NamedTuple):
     y: float
     r: float                               #: 半径 [m]。点群の広がりから出す
     n: int                                 #: 構成する点の数
+    #: 構成する点 (N, 2) [m]（map フレーム）。`detect` が入れる。手で作った物は None
+    #: （重心と半径は見えている面だけから出すので、見る角度で 10cm 近く動く。車体が当たるか
+    #: どうかはこの点で直接測る — `avoid.clearance_to_points`）
+    pts: np.ndarray | None = None
 
 
 def free_mask(grid: OccGrid, wall_pad: float) -> np.ndarray:
@@ -67,14 +75,29 @@ def free_mask(grid: OccGrid, wall_pad: float) -> np.ndarray:
     return grid.known_free_mask() & (_edt(~grid.wall_mask(), grid.resolution) > pad + 1e-6)
 
 
+def near_pad(wall_pad: float) -> float:
+    """障害物の点として**数える**帯の、壁からの距離 [m]（`detect` の `near`）。
+
+    実機（2026-10-08、道幅 約0.6m）で `wall_pad=0.25` だと、壁から 25cm に置いた障害物は
+    毎周期 1〜2 点しか `wall_pad` の外に落ちず、`min_points` に届かないまま 2.3m/s で当たった。
+    道の半幅が 30cm だと `wall_pad` の外は中央の 10cm しか無い。そこで「`wall_pad` の外に
+    1点でもある塊」に限って、もう 10cm 壁寄りの点まで数える。壁の点だけでできた塊は
+    `wall_pad` の外に点を持たないので、誤検出は `wall_pad` で決まるまま。
+    """
+    return min(wall_pad, max(_NEAR_MIN_M, wall_pad - _NEAR_M))
+
+
 def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
            wall_pad: float = 0.15, min_points: int = 3,
-           max_obstacles: int = 8, free: np.ndarray | None = None) -> list[Obstacle]:
+           max_obstacles: int = 8, free: np.ndarray | None = None,
+           near: np.ndarray | None = None) -> list[Obstacle]:
     """凍結地図に無いものを拾う。**`grid.frozen` でなければ何も返さない。**
 
     地図を作っている最中は「地図に無い」が当たり前なので、判定に意味が無い。
 
     :param free: `free_mask(grid, wall_pad)` の結果（省略すると毎回作る）
+    :param near: `free_mask(grid, near_pad(wall_pad))` の結果。渡すと、`free` に1点でも落ちた
+        塊はこの帯の点まで数える（省略すると `free` の点だけで数える）
     """
     if not grid.frozen or len(pts) == 0:
         return []
@@ -91,13 +114,19 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
     ok = grid.inside(col, row)
     if free is None:
         free = free_mask(grid, wall_pad)
-    cand = np.zeros(wx.size, dtype=bool)
-    cand[ok] = free[row[ok], col[ok]]
-    if not cand.any():
+    core = np.zeros(wx.size, dtype=bool)
+    core[ok] = free[row[ok], col[ok]]
+    if not core.any():
         return []
+    cand = core
+    if near is not None:
+        cand = np.zeros(wx.size, dtype=bool)
+        cand[ok] = near[row[ok], col[ok]]
+        cand |= core
 
     idx = np.flatnonzero(cand)
     px, py = wx[idx], wy[idx]
+    strict = core[idx]
     # 点は方位順に並んでいるので、隣同士の距離が開いたところで切ればよい
     gap = np.hypot(np.diff(px), np.diff(py)) > _SPLIT_M
     # ★ 方位 0°（**真正面**）が配列の継ぎ目。末尾と先頭がつながっているなら、最初の切れ目が
@@ -105,17 +134,18 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
     #   2つに割れ（中心が横へ寄り、半径は半分以下）、遠くでは点数が足りず検出されなかった
     if gap.any() and math.hypot(px[0] - px[-1], py[0] - py[-1]) <= _SPLIT_M:
         k = int(np.flatnonzero(gap)[0]) + 1
-        px, py = np.roll(px, -k), np.roll(py, -k)
+        px, py, strict = np.roll(px, -k), np.roll(py, -k), np.roll(strict, -k)
         gap = np.hypot(np.diff(px), np.diff(py)) > _SPLIT_M
     starts = np.concatenate([[0], np.flatnonzero(gap) + 1, [idx.size]])
 
     out: list[Obstacle] = []
     for a, b in zip(starts[:-1], starts[1:]):
-        if b - a < min_points:
+        if b - a < min_points or not strict[a:b].any():
             continue
         cx, cy = float(px[a:b].mean()), float(py[a:b].mean())
         r = float(np.hypot(px[a:b] - cx, py[a:b] - cy).max())
-        out.append(Obstacle(cx, cy, max(r, grid.resolution), int(b - a)))
+        out.append(Obstacle(cx, cy, max(r, grid.resolution), int(b - a),
+                            np.column_stack([px[a:b], py[a:b]])))
 
     out.sort(key=lambda o: -o.n)
     return out[:max_obstacles]

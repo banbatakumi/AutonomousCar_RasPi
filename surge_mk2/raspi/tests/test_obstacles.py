@@ -5,6 +5,8 @@
 - **真正面の障害物が、点群の継ぎ目（方位 0°）で割れない。** 他に候補点があっても1つのまま、
   遠くて点が少なくても検出される
 - 壁の近くの除外は**距離**で効く（格子に対して斜めの壁でも指定の幅だけ除外する）
+- 壁寄りの障害物は、`wall_pad` の外に1点でもあれば 10cm 壁寄りの点まで数える。
+  `wall_pad` の外に点が無い塊（壁の点のずれ）は数えない
 """
 
 import math
@@ -97,6 +99,41 @@ class TestWallPad(unittest.TestCase):
         self.assertFalse(free[94:107, 60:240].any())      # ±6 セル（0.15m）は除外
         self.assertTrue(free[93, 60:240].all())
         self.assertTrue(free[107, 60:240].all())
+
+
+class TestNearBand(unittest.TestCase):
+    """実機（2026-10-08、道幅 約0.6m）: 壁から 25cm の障害物が `wall_pad=0.25` で見つからず当たった。"""
+
+    POSE = (0.0, 0.0, 0.0)
+    PAD = 0.25
+
+    def _grid(self) -> OccGrid:
+        g = _open_grid()
+        col, row = g.to_cell(np.array([0.0]), np.array([-0.26]))
+        g.hits[int(row[0]), :] = 20                 # 車の右 26cm に、進行方向と平行な壁
+        return g
+
+    def _detect(self, pts, *, near: bool):
+        g = self._grid()
+        return obs_mod.detect(g, pts, self.POSE, wall_pad=self.PAD,
+                              free=obs_mod.free_mask(g, self.PAD),
+                              near=obs_mod.free_mask(g, obs_mod.near_pad(self.PAD)) if near else None)
+
+    def test_obstacle_beside_wall_is_counted_with_near_band(self):
+        pts = _scan((2.0, 0.0, 0.06))               # 壁から 20〜32cm にまたがる
+        self.assertEqual(self._detect(pts, near=False), [])
+        out = self._detect(pts, near=True)
+        self.assertEqual(len(out), 1)
+        self.assertGreaterEqual(out[0].n, 3)
+
+    def test_cluster_without_a_point_outside_wall_pad_is_ignored(self):
+        pts = _scan((2.0, -0.07, 0.05))             # 全点が壁から 25cm 未満（壁の点のずれに相当）
+        self.assertEqual(self._detect(pts, near=True), [])
+
+    def test_near_pad_never_exceeds_wall_pad(self):
+        self.assertAlmostEqual(obs_mod.near_pad(0.25), 0.15)
+        self.assertAlmostEqual(obs_mod.near_pad(0.15), 0.10)
+        self.assertAlmostEqual(obs_mod.near_pad(0.05), 0.05)
 
 
 if __name__ == "__main__":

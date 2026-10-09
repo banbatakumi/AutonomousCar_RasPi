@@ -10,7 +10,7 @@
          = D · smoothstep((s_out − s) / L)      戻り（D → 0）
 
 smoothstep は5次（端で1階・2階微分が0）で、足す曲率の最大は `5.77·|D|/L²`。
-進入長 `L` はこれが「曲がれる曲率の余り」に収まるように決める。
+進入長 `L` はこれが `kappa_frac` の枠に収まる長さから始め、できた線の曲率を直接確かめる。
 
 ★ 地図に障害物を書き込んで `route.build_raceline` で引き直す方法は採らない。
 中心線の初期値が道路グラフの骨格なので障害物の真上を通り、1回に動かせる量も
@@ -32,10 +32,14 @@ from .obstacles import Obstacle
 from .raceline import RaceLine, curvature
 
 __all__ = ["AvoidConfig", "AvoidPlan", "plan_offset", "cap_speed", "forward_order",
-           "clearance_along", "blend_in"]
+           "clearance_along", "clearance_to_points", "blend_in"]
 
 #: 5次 smoothstep の2階微分の最大 `max|f''| = 10/√3`
 _SMOOTH_D2 = 10.0 / math.sqrt(3.0)
+#: 進入長を伸ばして試す倍率（曲率が収まらなければ次を試す）
+_LEN_STEPS = (1.0, 1.4, 2.0)
+#: 元の経路がすでに `kappa_frac` の枠を超えている所で、さらに急にしてよい量（車の限界に対する割合）
+_KAPPA_SLACK = 0.1
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,23 @@ def clearance_along(xy: np.ndarray, footprint, obstacles: list[Obstacle]) -> flo
     return _body_obstacle_clearance(xy, circles, rc, obstacles)
 
 
+def clearance_to_points(xy: np.ndarray, footprint, pts: np.ndarray) -> float:
+    """経路の点列 `xy` に車体を置いたときの、点群 `pts` (N, 2) との最小余裕 [m]（負 = 当たる）。
+
+    障害物の重心と半径（`Obstacle.x/y/r`）は見えている面だけから出すので、近づいて見る角度が
+    変わると 10cm 近く動く。避けている途中の「まだ当たるか」は、今見えている点で直接測る。
+    """
+    if len(xy) == 0 or len(pts) == 0:
+        return math.inf
+    circles, rc = footprint_circles(footprint)
+    t = tangents_open(xy)
+    c, s = t[:, 0:1], t[:, 1:2]
+    px = xy[:, 0:1] + circles[None, :, 0] * c - circles[None, :, 1] * s
+    py = xy[:, 1:2] + circles[None, :, 0] * s + circles[None, :, 1] * c
+    d = np.hypot(px[:, :, None] - pts[None, None, :, 0], py[:, :, None] - pts[None, None, :, 1])
+    return float(d.min()) - rc
+
+
 def plan_offset(path: RaceLine, index: int, target: Obstacle, obstacles: list[Obstacle],
                 body, cfg: AvoidConfig, *, v_now: float,
                 ahead_m: float = 8.0) -> AvoidPlan | None:
@@ -131,57 +152,60 @@ def plan_offset(path: RaceLine, index: int, target: Obstacle, obstacles: list[Ob
     cands.sort(key=lambda c: abs(c[0]))
     kap = np.abs(path.kappa) if len(path.kappa) == len(path) else np.abs(curvature(path.xy, path.closed))
     best: AvoidPlan | None = None
+    k_soft = cfg.kappa_frac * cfg.kappa_max
     for offset, _side in cands:
         if abs(offset) < 1e-3:
             continue
-        # 曲率の余りは**ずらす区間**の元の曲率で決める。まず前後 3m で見積もり、進入長が
-        # それより長くなったら（余りが小さいと 6m を超える）その長さで測り直す
-        reach = 3.0
-        for _ in range(2):
-            span = (s_fwd >= hold_a - reach) & (s_fwd <= hold_b + reach)
-            k_allow = cfg.kappa_frac * cfg.kappa_max - (float(kap[order[span]].max())
-                                                        if span.any() else 0.0)
-            if k_allow <= 0.05:
+        # 進入長は「まっすぐな道なら足す曲率が `kappa_frac` の枠に収まる長さ」から始め、できた線の
+        # 曲率を直接確かめて、だめなら長くして試す。
+        # ★ 以前は「障害物の前後 3m の元の曲率の最大」＋「足す曲率の最大」が枠に収まるかで
+        #   見積もっていた。ラインは曲がれる限界まで使って引くので、コーナーの多いコースでは
+        #   どこでも枠が残らず、横へ避ける経路が1度も引けなかった（実機 2026-10-08・1周 12m、
+        #   sim.bench の toyota も同じ）。元の曲率と足す曲率は同じ場所・同じ向きに重なるとは限らない
+        base_len = max(cfg.len_min, 0.6 * max(v_now, 0.0),
+                       math.sqrt(_SMOOTH_D2 * abs(offset) / max(k_soft, 1e-6)))
+        for mul in _LEN_STEPS:
+            length = base_len * mul
+            s_in = hold_a - length
+            if s_in < 0.0:
+                # もう進入に使える距離が足りない（止まってから `kappa_frac` を上げて引き直す）
                 break
-            length = max(cfg.len_min, 0.6 * max(v_now, 0.0),
-                         math.sqrt(_SMOOTH_D2 * abs(offset) / k_allow))
-            if length <= reach:
+            s_out = hold_b + length
+            if path.closed and s_out >= 0.9 * path.length:
                 break
-            reach = length
-        if k_allow <= 0.05:
-            continue
-        s_in = hold_a - length
-        if s_in < 0.0:
-            # もう進入に使える距離が足りない（止まってから `kappa_frac` を上げて引き直す）
-            continue
-        s_out = hold_b + length
-        if path.closed and s_out >= 0.9 * path.length:
-            continue
-        if not path.closed and s_out > s_fwd[-1]:
-            continue
-        win = (s_fwd >= s_in) & (s_fwd <= s_out)
-        sw = s_fwd[win]
-        d = np.where(sw < hold_a, _smooth((sw - s_in) / length),
-                     np.where(sw > hold_b, _smooth((s_out - sw) / length), 1.0)) * offset
-        idx = order[win]
-        xy = path.xy.copy()
-        xy[idx] += nrm[idx] * d[:, None]
-        # 窓の前後1点を足して、継ぎ目の向きも含めて車体を確かめる
-        ext = order[max(0, int(np.argmax(win)) - 1): min(len(order), int(np.nonzero(win)[0][-1]) + 2)]
-        wxy = xy[ext]
-        clr = min(float(body.clearance(wxy).min()) if body is not None else math.inf,
-                  _body_obstacle_clearance(wxy, circles, rc, obstacles))
-        if clr < cfg.clear:
-            continue
-        kappa = curvature(xy, path.closed)
-        # カーブの内側へずらすと元の曲率そのものが `κ/(1−κd)` に増える。余りの見積もりは
-        # 元の曲率で引いているので、できた線が車の曲がれる限界を超えていないかは直接確かめる
-        if float(np.abs(kappa[ext]).max()) > cfg.kappa_max:
-            continue
-        rl = RaceLine(xy=xy, v=path.v.copy(), kappa=kappa, length=path.length,
-                      closed=path.closed)
-        best = AvoidPlan(rl, idx, offset, target, clr)
-        break
+            if not path.closed and s_out > s_fwd[-1]:
+                break
+            win = (s_fwd >= s_in) & (s_fwd <= s_out)
+            sw = s_fwd[win]
+            d = np.where(sw < hold_a, _smooth((sw - s_in) / length),
+                         np.where(sw > hold_b, _smooth((s_out - sw) / length), 1.0)) * offset
+            idx = order[win]
+            xy = path.xy.copy()
+            xy[idx] += nrm[idx] * d[:, None]
+            # 窓の前後1点を足して、継ぎ目の向きも含めて車体を確かめる
+            ext = order[max(0, int(np.argmax(win)) - 1):
+                        min(len(order), int(np.nonzero(win)[0][-1]) + 2)]
+            wxy = xy[ext]
+            clr = min(float(body.clearance(wxy).min()) if body is not None else math.inf,
+                      _body_obstacle_clearance(wxy, circles, rc, obstacles))
+            if clr < cfg.clear:
+                break                      # 長くしても横の余裕は変わらない
+            kappa = curvature(xy, path.closed)
+            # 枠（`kappa_frac`）を超えてよいのは元の経路がすでに超えている所だけで、そこでも
+            # 元より `_KAPPA_SLACK` までしか急にしない。車の限界は、元が超えている所（最低速度で
+            # 通す所）を除いて超えない。カーブの内側へずらすと元の曲率そのものが `κ/(1−κd)` に
+            # 増えるので、ここは見積もりではなくできた線で見る
+            k_new, k_old = np.abs(kappa[ext]), kap[ext]
+            limit = np.minimum(np.maximum(k_soft, k_old + _KAPPA_SLACK * cfg.kappa_max),
+                               np.maximum(cfg.kappa_max, k_old + 1e-6))
+            if bool((k_new > limit).any()):
+                continue
+            rl = RaceLine(xy=xy, v=path.v.copy(), kappa=kappa, length=path.length,
+                          closed=path.closed)
+            best = AvoidPlan(rl, idx, offset, target, clr)
+            break
+        if best is not None:
+            break
     return best
 
 

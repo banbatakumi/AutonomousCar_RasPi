@@ -29,6 +29,10 @@
 大きくするほど雑音由来の壁が太る（実測: normal で重み5だとレース時の自己位置
 誤差が4.5cm→9.4cmへ悪化）ので既定は2にしてある。
 
+**実機ではさらに重くしている。** 実機の点群では重み2でも壁に数十cmの穴が残ったので、
+`raspi/auto/_slam2d_nav.py`は既定で8を渡す（`WALL_HIT_WEIGHT`、根拠もそちら）。重みは
+`set_hit_weight()`で後から替えられる（回数は変わらないので、判定を作り直すだけ）。
+
 さらに`known_free`（**空きだと確信できる**セル）を`hits + misses >= min_seen`
 かつ壁の条件を満たさないもので定義する。「未知」と「空き」を混ぜないことが、
 誤検出を出さない唯一のコツ。
@@ -258,6 +262,13 @@ class OccGrid:
         sub = target[r0:r1 + 1, c0:c1 + 1]
         # `_COUNT_MAX`で頭打ち（uint16の飽和で「昔たくさん見た」が固まるのを防ぐ）
         np.add(sub, touched, out=sub, where=sub < _COUNT_MAX, casting="unsafe")
+
+    def set_hit_weight(self, hit_weight: float) -> None:
+        """当たりの重みを替える。回数はそのままで、壁・空きの判定だけが変わる。"""
+        w = float(hit_weight)
+        if w != self.hit_weight:
+            self.hit_weight = w
+            self.seq += 1                       # 判定のキャッシュを捨てさせる
 
     def freeze(self) -> None:
         """地図を確定させる。以降`integrate()`は無視される。"""

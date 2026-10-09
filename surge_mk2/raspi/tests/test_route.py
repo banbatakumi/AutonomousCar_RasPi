@@ -828,7 +828,8 @@ class TestObstacleFreeMask(unittest.TestCase):
         pose = (2.0, 1.0, 0.0)
         a = obs_mod.detect(g, pts, pose, wall_pad=0.1)
         b = obs_mod.detect(g, pts, pose, wall_pad=0.1, free=obs_mod.free_mask(g, 0.1))
-        self.assertEqual(a, b)
+        # 点の配列（`Obstacle.pts`）を持つので、タプルの `==` では比べられない
+        self.assertEqual([o[:4] for o in a], [o[:4] for o in b])
         self.assertTrue(a)
 
 

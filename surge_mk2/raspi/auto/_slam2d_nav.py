@@ -50,10 +50,21 @@ from slam2d.core.types import Pose2D, RawScan, Twist2D, wrap_angle
 from ..msgs.types import Scan, VehicleState
 from ..nav.deskew import point_times_ns
 
-__all__ = ["Slam2dNav", "occgrid_from_trinary", "scan_to_raw"]
+__all__ = ["Slam2dNav", "WALL_HIT_WEIGHT", "occgrid_from_trinary", "scan_to_raw"]
 
 #: キルスイッチ。Falseにすると`Frontend`単体運用（ループ閉じ無し）に戻る
 ENABLE_LOOP_CLOSURE = True
+
+#: 壁の判定に使う「当たりの重み」の既定（`OccGrid.hit_weight`。壁 = 当たり×重み ≧ 素通り）。
+#: planner は `wall_weight`（GUI のスライダ）で上書きする。
+#:
+#: 実機（2026-10-07、道幅 0.7〜0.9m・板の仕切り）では `OccGrid` の既定の 2 だと壁が点線になり、
+#: 経路生成が仕切りを抜ける道を拾った。壁に沿って走る間、壁すれすれのレイが壁のセルを
+#: 素通りとして数え続け、当たりの 2 倍を超えた区間が丸ごと消える（長く走っても比は
+#: 変わらないので直らない）。その走行の点群で地図を作り直すと、道路グラフに余計な
+#: エッジが出たのは 重み2 で 20/21・4 で 7/21・8 で 1/21・12 で 0/21。
+#: `sim.slam_bench` real（8コース×2シード）の走行中の自己位置は 2 で 2.65cm・8 で 2.69cm
+WALL_HIT_WEIGHT = 8.0
 
 
 def occgrid_from_trinary(trinary: np.ndarray, *, resolution: float,
@@ -132,7 +143,8 @@ class Slam2dNav:
                 lidar_x: float = 0.0, lidar_y: float = 0.0,
                 max_range: float = 12.0,
                 loop_closure: bool = ENABLE_LOOP_CLOSURE,
-                frontend: dict | None = None) -> None:
+                frontend: dict | None = None,
+                hit_weight: float = WALL_HIT_WEIGHT) -> None:
         """:param frontend: `FrontendConfig`の上書き（評価・切り分け用。例 `{"behind_margin": 0.0}`）"""
         self._resolution = resolution
         self._size_m = size_m
@@ -140,6 +152,7 @@ class Slam2dNav:
         self._lidar_y = lidar_y
         self._max_range = max_range
         self._frontend_kw = dict(frontend or {})
+        self._hit_weight = float(hit_weight)
         self._raw_yaw_rate = 0.0
         self._raw_speed = 0.0
         #: ループ閉じを使うか（`ENABLE_LOOP_CLOSURE`が既定。評価・切り分け用に
@@ -149,7 +162,7 @@ class Slam2dNav:
 
     def reset(self) -> None:
         grid = OccGrid(resolution=self._resolution, size_m=self._size_m,
-                       min_hits=3, min_seen=3, grow=True)
+                       min_hits=3, min_seen=3, hit_weight=self._hit_weight, grow=True)
         grid.seq = self.next_seq()
         motion = ExternalTwistModel(self._current_twist, bias_estimator=GyroBiasEstimator(),
                                     scale_estimator=SpeedScaleEstimator())
@@ -279,6 +292,11 @@ class Slam2dNav:
     def lap_progress(self) -> float:
         """周回の進み具合[周]。累積回頭を360°で割ったもの（`Slam`と同じ定義）。"""
         return abs(self.heading_total) / (2.0 * math.pi)
+
+    def set_wall_weight(self, hit_weight: float) -> None:
+        """壁の判定の重みを替える（作っている地図にその場で効く。`reset()` 後も引き継ぐ）。"""
+        self._hit_weight = float(hit_weight)
+        self._fe.grid.set_hit_weight(self._hit_weight)
 
     def freeze(self) -> None:
         """EXPLORE→BUILD遷移で地図構築を終える。

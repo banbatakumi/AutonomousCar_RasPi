@@ -91,6 +91,21 @@ class TestThinWalls(unittest.TestCase):
     def test_default_weight_keeps_the_wall(self):
         self.assertTrue(self._counts(2.0))
 
+    def test_weight_can_be_changed_later(self):
+        """重みは後から替えられる（回数はそのまま、判定だけ作り直す）。"""
+        g = OccGrid(resolution=0.025, size_m=4.0, origin=(-2.0, -2.0))
+        col, row = g.to_cell(0.0, 0.0)
+        g.hits[row, col] = 10
+        g.misses[row, col] = 60               # 重み2では壁にならない
+        self.assertFalse(bool(g.wall_mask()[row, col]))
+        seq = g.seq
+        g.set_hit_weight(8.0)
+        self.assertGreater(g.seq, seq)
+        self.assertTrue(bool(g.wall_mask()[row, col]))
+        self.assertFalse(bool(g.known_free_mask()[row, col]))
+        g.set_hit_weight(8.0)                 # 同じ値なら版を進めない
+        self.assertEqual(g.seq, seq + 1)
+
     def test_moving_object_is_still_rejected(self):
         """当たりを重くしても、1〜2回しか見ていないものは壁にしない。"""
         g = OccGrid(resolution=0.025, size_m=4.0, origin=(-2.0, -2.0))

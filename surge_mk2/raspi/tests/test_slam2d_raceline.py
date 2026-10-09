@@ -276,6 +276,90 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         self.assertEqual(self.p.phase, LOCATE)
 
 
+class TestObstacleBrakeAndMdFault(unittest.TestCase):
+    """障害物で始めた制動を足元で解かない／駆動 MD が無応答のときの抑え（実機 2026-10-08）。"""
+
+    def setUp(self):
+        from raspi.msgs.types import AutoState
+        from raspi.nav import obstacles as obs_mod
+        from raspi.nav.raceline import RaceLine, curvature
+        from raspi.proto.generated import packets
+
+        self.AutoState, self.Obstacle, self.packets = AutoState, obs_mod.Obstacle, packets
+        self.p = Slam2dRaceLine()
+        self.params = Slam2dRaceLine.merged({"obstacle_avoid": 1})
+        n = 200
+        a = np.arange(n) * 2 * math.pi / n
+        xy = np.column_stack([5.0 * np.cos(a), 5.0 * np.sin(a)])       # 半径5m・点間 約16cm
+        self.path = RaceLine(xy=xy, v=np.full(n, 2.0), kappa=curvature(xy),
+                             length=2 * math.pi * 5.0)
+        self.p._dt = 0.1
+
+    def _vs(self, speed, md=(17, 17, 49)):
+        return VehicleState(speed=speed, armed=True, md_status=list(md))
+
+    def test_obstacle_under_the_nose_still_blocks(self):
+        """base_link の 20cm 先・横 5cm（`blocking` が飛ばす足元の帯）でも塞がれ扱いになる。"""
+        self.p._obs = [self.Obstacle(5.0 - 0.05, 0.20, 0.05, 5)]
+        hit, dist = self.p._blocking(self.path, 0, self._vs(1.0), self.params)
+        self.assertIsNotNone(hit)
+        st = self.AutoState(target_speed=2.0)
+        self.assertTrue(self.p._obstacle_response(st, hit, dist, self._vs(1.0), self.params,
+                                                  self.path, 0))
+        self.assertTrue(st.brake)
+        self.assertEqual(st.target_speed, 0.0)
+
+    def test_visible_points_decide_instead_of_the_fitted_circle(self):
+        """重心と半径の円では当たるが、見えている点は車体から 10cm 以上離れている。"""
+        xy = self.path.xy[1:4]
+        pts = np.array([[5.0 - 0.20, 0.20], [5.0 - 0.21, 0.24], [5.0 - 0.22, 0.28]])
+        self.assertGreater(self.p._clear_of(xy, self.Obstacle(4.90, 0.22, 0.12, 3, pts)), 0.05)
+        self.assertLess(self.p._clear_of(xy, self.Obstacle(4.90, 0.22, 0.12, 3)), 0.0)
+
+    def test_obstacle_beside_the_body_does_not_block(self):
+        self.p._obs = [self.Obstacle(5.0 - 0.30, 0.20, 0.05, 5)]       # 横 30cm（当たらない）
+        hit, _ = self.p._blocking(self.path, 0, self._vs(1.0), self.params)
+        self.assertIsNone(hit)
+
+    def test_brake_is_held_when_detection_drops_out(self):
+        o = self.Obstacle(5.0, 0.6, 0.05, 5)
+        st = self.AutoState(target_speed=2.0)
+        self.p._obstacle_response(st, o, 0.6, self._vs(1.5), self.params, self.path, 0)
+        self.assertTrue(st.brake)
+        st = self.AutoState(target_speed=2.0)                          # 次の周期: 検出が消えた
+        self.assertTrue(self.p._obstacle_response(st, None, math.inf, self._vs(1.2), self.params,
+                                                  self.path, 0))
+        self.assertTrue(st.brake)
+        st = self.AutoState(target_speed=2.0)                          # 止まったら解く
+        self.assertFalse(self.p._obstacle_response(st, None, math.inf, self._vs(0.0), self.params,
+                                                   self.path, 0))
+        self.assertFalse(st.brake)
+
+    def test_one_md_down_caps_speed_and_both_down_stops(self):
+        run = self.packets.MDS_RUNNING
+        st = self.AutoState(target_speed=2.5)
+        note = self.p._md_fault(st, self._vs(2.0, (17, run, 49)), self.params)
+        self.assertIn("右後輪", note)
+        self.assertEqual(st.target_speed, self.params["md_fault_speed"])
+        st = self.AutoState(target_speed=2.5)
+        self.assertIsNone(self.p._md_fault(st, self._vs(2.0, (run, run, 49)), self.params))
+        self.assertEqual(st.target_speed, 0.0)
+        st = self.AutoState(target_speed=2.5)                          # 戻れば元どおり
+        self.assertEqual(self.p._md_fault(st, self._vs(2.0), self.params), "")
+        self.assertEqual(st.target_speed, 2.5)
+
+    def test_one_md_down_too_long_stops(self):
+        run = self.packets.MDS_RUNNING
+        self.p._md_t = self.params["md_fault_s"]
+        st = self.AutoState(target_speed=2.5)
+        self.assertIsNone(self.p._md_fault(st, self._vs(2.0, (run, 17, 49)), self.params))
+        self.assertTrue(st.brake)
+
+    def test_unreported_md_status_is_not_a_fault(self):
+        st = self.AutoState(target_speed=2.5)
+        self.assertEqual(self.p._md_fault(st, self._vs(2.0, (0, 0, 0)), self.params), "")
+
+
 class TestKappaMax(unittest.TestCase):
     """最小旋回半径は幾何だけでなく、同定した舵の効きを通して決める。"""
 
