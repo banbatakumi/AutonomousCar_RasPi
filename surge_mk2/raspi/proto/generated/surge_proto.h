@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x0010u
+#define SURGE_PROTOCOL_VERSION  0x0012u
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -120,16 +120,11 @@
 #define PARAM_TC_MIN_TORQUE_NM   0x0014u
 #define PARAM_SLIP_SPEED_FLOOR_M_S 0x0015u
 #define PARAM_TV_ENABLE          0x0020u
-#define PARAM_TV_KP_NM_PER_RAD_S 0x0021u
-#define PARAM_TV_KI_NM_PER_RAD   0x0022u
-#define PARAM_TV_DEADBAND_RAD_S  0x0023u
-#define PARAM_TV_MAX_YAW_MOMENT_NM 0x0024u
-#define PARAM_TV_MAX_LATERAL_ACCEL_M_S2 0x0025u
-#define PARAM_TV_STEER_GAIN      0x0026u
-#define PARAM_TV_STEER_GAIN_CUBIC 0x0027u
-#define PARAM_TV_STABILITY_FACTOR 0x0028u
-#define PARAM_TV_REF_LAG_S       0x0029u
 #define PARAM_TV_TEST_MOMENT_NM  0x002Au
+#define PARAM_TV_LOAD_GAIN_S2_PER_M 0x002Bu
+#define PARAM_TV_MAX_RATIO       0x002Cu
+#define PARAM_STEER_LINK_GAIN    0x0081u
+#define PARAM_STEER_LINK_CUBIC   0x0082u
 #define PARAM_SPEED_KP           0x0030u
 #define PARAM_SPEED_KI           0x0031u
 #define PARAM_LIDAR_FORMAT       0x0040u
@@ -155,7 +150,7 @@ typedef struct {
     uint16_t dist[30];       /* 0.001 m  0=無効 */
 } surge_lidar_sector_t;
 
-/* TELEMETRY (0x02) — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加 */
+/* TELEMETRY (0x02) — 車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加、★v0.17で yaw_rate_target を tv_ratio に置き換え（オフセット・LEN は同じ） */
 typedef struct {
     uint32_t t_us;                 /* us */
     uint32_t flags;                /* FLG_* 参照 */
@@ -176,8 +171,8 @@ typedef struct {
     int16_t  tc_limit_nm[2];       /* 0.0001 N.m  [RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13 */
     int16_t  torque_req[2];        /* 0.0001 N.m  [RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16 */
     int16_t  abs_limit_nm;         /* 0.0001 N.m  ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16 */
-    int16_t  yaw_rate_target;      /* 0.001 rad/s  TV の規範ヨーレート（舵角と車速から。IMU が使えない間は 0）★v0.16 */
-    int16_t  tv_moment_nm;         /* 0.0001 N.m  TV の PI が要求したヨーモーメント（左旋回が正。上限で丸めた後）。実際に付いた左右差は torque_cmd ★v0.16 */
+    int16_t  tv_ratio;             /* 0.0001  TV の配分の比率 = 左右の荷重差/荷重和 の見積り（左旋回で正 = 右輪が多い。上限で丸めた後）。左右差 = 総駆動トルク × これ。IMU が使えない間・駆動していない間は 0 ★v0.17（v0.16 はこの位置に yaw_rate_target、0.001 rad/s） */
+    int16_t  tv_moment_nm;         /* 0.0001 N.m  TV が要求した左右トルク差をヨーモーメントに換算した値（左旋回が正）。実際に付いた左右差は torque_cmd ★v0.16 */
     uint8_t  temp[4];              /* 1 degC  [RL,RR,ST,MCU] */
     uint8_t  batt_voltage_drive;   /* 0.05 V */
     uint8_t  batt_voltage_signal;  /* 0.05 V */

@@ -35,6 +35,7 @@ import torch as th  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 from torch import nn  # noqa: E402
 
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.env import EnvConfig  # noqa: E402
@@ -117,6 +118,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--steer-rate-max-rad-s", type=float, default=1.0,
                    help="[rad/s] train_rl.pyの--steer-rate-max-rad-sと同じ(v13、"
                         "env_config.jsonが見つからない場合のフォールバック)")
+    p.add_argument("--steer-link", type=float, nargs=2, default=None, metavar=("GAIN", "CUBIC"),
+                   help="学習したときの STM32 のステアのリンクの換算（契約 JSON の steer_link）。省略は今の "
+                        "config/vehicle.toml の [control]。★2026-10-08 より前の vehicle.toml（max_steer "
+                        "0.524）で学習したモデルを今から書き出すなら `--steer-link 1 0` を付けること★")
     return p.parse_args(argv)
 
 
@@ -132,6 +137,8 @@ def main(argv: list[str] | None = None) -> None:
     # 最大舵角はEnvConfigに持たせていない（`config/vehicle.toml`固定）ので、
     # モデル契約JSONへはここで直接読んで書く
     max_steer = VehicleSpec.load().max_steer
+    # 舵角の数値の意味（`raspi/auto/e2e_lidar.py` が今の車の路面舵角へ直すのに使う）
+    steer_link = list(args.steer_link) if args.steer_link else list(Vehicle.load().steer_link)
 
     model = PPO.load(str(args.model), device="cpu")
 
@@ -155,6 +162,7 @@ def main(argv: list[str] | None = None) -> None:
         "max_steer": max_steer,
         "max_speed": cfg.max_speed,
         "steer_rate_max_rad_s": cfg.steer_rate_max_rad_s,
+        "steer_link": steer_link,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"→ {final_path}\n→ {json_path}")
 

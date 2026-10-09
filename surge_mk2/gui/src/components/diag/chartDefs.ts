@@ -178,9 +178,17 @@ export const CH = {
     unit: 'rad/s',
     series: [
       { key: 'yawRate', label: '実測', tone: 'accent' },
-      { key: 'yawTarget', label: '規範', tone: 'live', dash: true },
     ],
     minSpan: 0.4,
+    bands: EV.TV,
+  },
+  tvRatio: {
+    title: 'TV 配分の比率',
+    unit: '%',
+    series: [{ key: 'tvRatio', label: '右輪が多い＝正', tone: 'live' }],
+    minSpan: 10,
+    digits: 1,
+    include: [0],
     bands: EV.TV,
   },
   yawMoment: {

@@ -20,7 +20,7 @@ export interface FisheyeCalib {
 export const VEHICLE = {
   wheelbase: 0.23, // m
   track: 0.155, // m
-  maxSteer: 0.524, // rad（路面舵角上限）
+  maxSteer: 0.4636100056642349, // rad（路面舵角上限）
   wheelRadius: 0.03, // m
   /** 車体外形ポリゴン [m]。反時計回り */
   footprint: [[0.3, 0.09], [0.3, -0.09], [-0.07, -0.09], [-0.07, 0.09]] as const,

@@ -182,7 +182,7 @@ class StateBuilder:
             tc_limit_nm=[v * _TORQUE for v in t.tc_limit_nm],
             torque_req=[v * _TORQUE for v in t.torque_req],
             abs_limit_nm=t.abs_limit_nm * _TORQUE,
-            yaw_rate_target=t.yaw_rate_target * _YAW_RATE,
+            tv_ratio=t.tv_ratio * _TORQUE,
             tv_moment_nm=t.tv_moment_nm * _TORQUE,
             temp=temp,
             batt_voltage=[t.batt_voltage_drive * _BATT_V, t.batt_voltage_signal * _BATT_V],

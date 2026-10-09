@@ -17,15 +17,14 @@ from .plant import DEFAULT_TOML, IDENTIFIED_KEYS
 
 __all__ = ["load_params", "apply_control", "apply_plant", "DERIVED"]
 
-#: `[control]` には書かず `[dynamics]` から作る項目（`raspi/core/control_params.py`）と、同定用の項目
-DERIVED = frozenset({"tv_steer_gain", "tv_steer_gain_cubic", "tv_max_lateral_accel_m_s2",
-                     "tv_test_moment_nm"})
+#: `[control]` に書けない項目（同定用。`raspi/core/control_params.py`）
+DERIVED = frozenset({"tv_test_moment_nm"})
 
 
 def load_params(fw: Firmware, toml_path: str | Path = DEFAULT_TOML) -> dict[str, float]:
     """今の調整パラメータ（名前 → 値）。`[control]` に無い項目はファームの既定値。
 
-    Pi の io_node が STM32 へ送るのと同じ値になる（`[dynamics]` から作る3項目を含む）。
+    Pi の io_node が STM32 へ送るのと同じ値になる。
     """
     values = {k: spec.default for k, spec in fw.params.items()}
     values.update({k: v for k, v in load_control_params(toml_path).items() if k in values})
@@ -56,7 +55,7 @@ def _write(toml_path: str | Path, table_path: tuple[str, ...], values: dict[str,
 def apply_control(toml_path: str | Path, values: dict[str, float], fw: Firmware) -> list[str]:
     """調整パラメータを `[control]` に書き、実際に変えたキーを返す。
 
-    :raises ValueError: ファームの表に無いキー・`[dynamics]` から作る項目・範囲外の値
+    :raises ValueError: ファームの表に無いキー・同定用の項目・範囲外の値
     """
     for key, value in values.items():
         spec = fw.params.get(key)

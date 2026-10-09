@@ -78,8 +78,8 @@ export const SERIES = [
   'trqCmdRR', // N·m
   'absLimit', // N·m ABS が決める制動トルクの上限
   'yawRate', // rad/s 実測
-  'yawTarget', // rad/s TV の規範ヨーレート
-  'tvMoment', // N·m TV の PI が要求したヨーモーメント
+  'tvRatio', // % TV の配分の比率（左右の荷重差÷荷重和 の見積り。左旋回で正＝右輪が多い）
+  'tvMoment', // N·m TV が要求した左右差のヨーモーメント換算
   'tvApplied', // N·m 実際に付いた左右差をヨーモーメントに直したもの（TC の片輪絞りぶんも含む）
   'accelX', // m/s² 前後
   'accelY', // m/s² 左右
@@ -335,7 +335,7 @@ export function pushHistory(vs: VehicleState | null, link: LinkDiag | null): voi
   data.trqCmdRR[i] = vs.torque_cmd[1]
   data.absLimit[i] = nz(vs.abs_limit_nm)
   data.yawRate[i] = vs.yaw_rate
-  data.yawTarget[i] = nz(vs.yaw_rate_target)
+  data.tvRatio[i] = nz(vs.tv_ratio) * 100
   data.tvMoment[i] = nz(vs.tv_moment_nm)
   data.tvApplied[i] = (vs.torque_cmd[1] - vs.torque_cmd[0]) * DIFF_TORQUE_TO_MOMENT
   data.accelX[i] = vs.accel[0]

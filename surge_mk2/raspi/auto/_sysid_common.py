@@ -21,12 +21,25 @@ import math
 import statistics
 
 from ..msgs.types import AutoState, VehicleState
+from ..proto.generated.packets import MDS_COMM_OK, MDS_VOLTAGE_OOR
 
 __all__ = ["TestGate", "lateral_saturated", "SATURATION_GROWTH_FRAC", "SETTLE_S",
            "first_saturated", "corner_windows", "SATURATION_DV_M_S", "CORNER_WINDOW_S",
-           "REAR_SLIP_LIMIT", "rear_slip", "corner_limit", "ABORT_BRAKE_TORQUE_NM",
+           "REAR_SLIP_LIMIT", "rear_slip", "corner_limit", "first_oversteer",
+           "OVERSTEER_CURVATURE_RATIO", "md_down", "MD_NAMES", "ABORT_BRAKE_TORQUE_NM",
            "stop_distance", "brake_decel_guess", "OdomRun", "settle_state", "DeadReckon",
            "SensorGuard", "abort_state"]
+
+
+#: `md_status` の並び（`uart_protocol.md` §5.5）
+MD_NAMES = ("左後輪", "右後輪", "ステア")
+
+
+def md_down(md_status: list[int]) -> list[str]:
+    """無応答のモータドライバの名前（`MD_NAMES`）。STM32 が直近100ms の受信で立てる `MDS_COMM_OK` を見る。
+    `md_status` が 0（一度も状態が来ていない・古い記録・テストの既定値）は故障と見なさない
+    （`slam2d_raceline._md_fault` と同じ扱い）。プランナー（中止）と解析（記録を使わない）が共用する。"""
+    return [MD_NAMES[i] for i, s in enumerate(md_status[:3]) if s and not (s & MDS_COMM_OK)]
 
 
 class SensorGuard:
@@ -45,6 +58,14 @@ class SensorGuard:
     前輪が多めに読む方向の不調は、止まる判定が早まるだけで安全側。全開加速の空転（TCが
     許す滑り）で誤って止めないよう、許容差は 0.2m/s ＋前輪の速さの30%。
     `planning_node` が全サンプルで `on_vehicle_state()` を呼び、それをここへ渡す。
+
+    ## モータドライバの無応答も見る（2026-10-08）
+
+    MD が黙ると、STM32 はその車輪の速度・電流を**最後の値のまま**送り続ける。実機の前後運動試験で、
+    駆動バッテリーが垂れて右後輪の MD が電圧異常で止まり（MD は異常の表示中 約0.8s 黙る）、右後輪の
+    周速が 1.60→1.04m/s に固まった。車が止まると後輪の平均 0.54m/s・前輪 0.05m/s になり、上の照合が
+    「前輪エンコーダの不調？」と**逆の原因**を表示して中止した。止まった MD は駆動も制動もしないので、
+    その間の記録は同定に使えない。`MDS_COMM_OK` が落ちた時点で、原因を正しく言って中止する。
     """
 
     TOLERANCE_M_S = 0.2
@@ -60,7 +81,15 @@ class SensorGuard:
         self._bad_since_ns = None
 
     def update(self, vs: VehicleState) -> None:
-        if self.fault is not None or len(vs.wheel_speed) < 4:
+        if self.fault is not None:
+            return
+        down = md_down(vs.md_status)
+        if down:
+            volt = any(s & MDS_VOLTAGE_OOR for s in vs.md_status[:3])
+            self.fault = (f"{'・'.join(down)}のモータドライバが無応答（車輪の値が古いまま固まる"
+                          f"{'。電圧異常' if volt else ''}）。駆動バッテリーの残量と MD の電源を確かめる")
+            return
+        if len(vs.wheel_speed) < 4:
             return
         front = vs.speed
         rear = 0.5 * (vs.wheel_speed[2] + vs.wheel_speed[3])
@@ -337,9 +366,8 @@ def first_saturated(points: list[tuple[float, float]]) -> int | None:
     return None
 
 
-#: 旋回の限界とみなす後輪の滑り率（後輪2輪の周速の平均と車速の差 ÷ 車速、`CORNER_WINDOW_S` の区間の
-#: 中央値）。実機の記録（2026-09-27）で、限界の手前は 0.01〜0.06、横加速度が最大になった区間で 0.16、
-#: 次の区間で 0.30 と跳ねた。後輪駆動なので限界では後輪が先に滑る（前輪の横加速度の頭打ちより先）
+#: 加速中に後輪が滑ったとみなす滑り率（後輪2輪の周速の平均と車速の差 ÷ 車速）。前後運動試験
+#: （`sysid_accel`）と解析が使う。旋回試験の限界の判定には使わない（`corner_limit`）
 REAR_SLIP_LIMIT = 0.10
 
 
@@ -355,15 +383,45 @@ def rear_slip(vs_speed: float, rear_speed: float) -> float:
     return (rear_speed - vs_speed) / max(abs(vs_speed), _SLIP_SPEED_FLOOR_M_S)
 
 
-def corner_limit(points: list[tuple[float, float, float]]) -> tuple[int | None, str]:
-    """`(速さ, 横加速度, 後輪の滑り率)` の区間の並びで、グリップの限界に達した最初の添字と理由。
-    後輪が滑った（`REAR_SLIP_LIMIT`）か、横加速度が頭打ちになった（`first_saturated`）の早い方。
-    TC の旗（ファームが滑り率20%で立てる）は見ない——限界そのものは滑りで決まり、TC の設定に
-    左右されない。プランナー（打ち切り）と解析（`mu` を読む区間）が同じ判定を使う。"""
-    k_slip = next((k for k, (_, _, sl) in enumerate(points) if sl > REAR_SLIP_LIMIT), None)
-    k_sat = first_saturated([(v, a) for v, a, _ in points])
-    if k_slip is not None and (k_sat is None or k_slip <= k_sat):
-        return k_slip, "後輪が滑った"
+#: 旋回試験で、曲率（ヨーレート÷速さ）が余裕のある区間の何倍になったら「後輪が流れた」とみなすか。
+#: 実機の記録2本（2026-09-27・10-08）で、限界より下の区間の曲率は基準の 0.96〜1.02 倍に収まる
+OVERSTEER_CURVATURE_RATIO = 1.15
+#: 曲率の基準に使う区間の数の下限と、判定する区間からどれだけ手前までを基準にするか（区間の数。
+#: 区間は `CORNER_WINDOW_STEP_S` 刻みなので 4 = 1s 前まで）
+_OVERSTEER_MIN_REF = 4
+_OVERSTEER_GAP = 4
+
+
+def first_oversteer(points: list[tuple[float, float]]) -> int | None:
+    """`(速さ, 横加速度)` の並びで、後輪が流れた（オーバーステア）最初の添字。
+
+    後輪が横に流れると車は内側へ巻き込み、舵が同じでも曲率（横加速度÷速さ²＝ヨーレート÷速さ）が
+    増える。横加速度は伸び続けるので `first_saturated` には掛からない。曲率は舵の非線形・
+    アンダーステア勾配では速度とともに**減る**だけなので、増えたら滑りと見てよい。基準は
+    1s 以上手前の区間すべての中央値。"""
+    kappa = [a / (v * v) if v > 1e-3 else 0.0 for v, a in points]
+    for k in range(_OVERSTEER_GAP + _OVERSTEER_MIN_REF, len(points)):
+        ref = statistics.median(kappa[:k - _OVERSTEER_GAP])
+        if ref > 1e-6 and kappa[k] > OVERSTEER_CURVATURE_RATIO * ref:
+            return k
+    return None
+
+
+def corner_limit(points: list[tuple[float, float]]) -> tuple[int | None, str]:
+    """`(速さ, 横加速度)` の区間の並びで、グリップの限界に達した最初の添字と理由。プランナー
+    （打ち切り）と解析（`mu` を読む区間）が同じ判定を使う。
+
+    **車体が滑ったことを IMU（ジャイロ）で見る**: 横加速度（速さ×ヨーレート）が頭打ちになった
+    （前が逃げる、`first_saturated`）か、曲率が跳ねた（後ろが流れる、`first_oversteer`）の早い方。
+
+    後輪の空転（滑り率）は見ない（2026-10-08、バンビ「空転は検知しなくてもいい」）。以前は後輪2輪の
+    平均の滑り率が 0.10 を超えたら限界としていたが、実機で横加速度が速さの2乗どおりに伸び、曲率も
+    変わらない（＝車体は滑っていない）うちに、荷重の抜けた内輪だけが空転して（内 0.15・外 0.07）
+    1.42m/s・4.4m/s² で打ち切った。空転が抑えきれないときは `SensorGuard` が止める。"""
+    k_sat = first_saturated(points)
+    k_over = first_oversteer(points)
+    if k_over is not None and (k_sat is None or k_over < k_sat):
+        return k_over, "後輪が流れた"
     if k_sat is not None:
         return k_sat, "横加速度が頭打ち"
     return None, ""

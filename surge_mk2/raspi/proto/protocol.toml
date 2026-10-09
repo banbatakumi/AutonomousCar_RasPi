@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0010      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0012      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -57,7 +57,7 @@ type = 0x02
 dir = "s2p"
 len = 84
 rate_hz = 100  # 2026-09-26 に 50 から変更（値の古さを平均10→5ms）
-doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加"
+doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加、★v0.17で yaw_rate_target を tv_ratio に置き換え（オフセット・LEN は同じ）"
 fields = [
   { name = "t_us",                type = "u32", unit = "us" },
   { name = "flags",               type = "u32", note = "FLG_* 参照" },
@@ -78,8 +78,8 @@ fields = [
   { name = "tc_limit_nm",         type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13" },
   { name = "torque_req",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16" },
   { name = "abs_limit_nm",        type = "i16", scale = 0.0001, unit = "N.m", note = "ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16" },
-  { name = "yaw_rate_target",     type = "i16", scale = 0.001,  unit = "rad/s", note = "TV の規範ヨーレート（舵角と車速から。IMU が使えない間は 0）★v0.16" },
-  { name = "tv_moment_nm",        type = "i16", scale = 0.0001, unit = "N.m", note = "TV の PI が要求したヨーモーメント（左旋回が正。上限で丸めた後）。実際に付いた左右差は torque_cmd ★v0.16" },
+  { name = "tv_ratio",            type = "i16", scale = 0.0001, note = "TV の配分の比率 = 左右の荷重差/荷重和 の見積り（左旋回で正 = 右輪が多い。上限で丸めた後）。左右差 = 総駆動トルク × これ。IMU が使えない間・駆動していない間は 0 ★v0.17（v0.16 はこの位置に yaw_rate_target、0.001 rad/s）" },
+  { name = "tv_moment_nm",        type = "i16", scale = 0.0001, unit = "N.m", note = "TV が要求した左右トルク差をヨーモーメントに換算した値（左旋回が正）。実際に付いた左右差は torque_cmd ★v0.16" },
   { name = "temp",                type = "u8",  count = 4, scale = 1.0, unit = "degC", note = "[RL,RR,ST,MCU]" },
   { name = "batt_voltage_drive",  type = "u8",  scale = 0.05, unit = "V" },
   { name = "batt_voltage_signal", type = "u8",  scale = 0.05, unit = "V" },
@@ -374,16 +374,15 @@ TC_KI_NM_PER_M       = 0x0013
 TC_MIN_TORQUE_NM     = 0x0014
 SLIP_SPEED_FLOOR_M_S = 0x0015
 TV_ENABLE      = 0x0020
-TV_KP_NM_PER_RAD_S        = 0x0021  # v0.15 まで未実装の TV_GAIN
-TV_KI_NM_PER_RAD          = 0x0022
-TV_DEADBAND_RAD_S         = 0x0023
-TV_MAX_YAW_MOMENT_NM      = 0x0024
-TV_MAX_LATERAL_ACCEL_M_S2 = 0x0025
-TV_STEER_GAIN             = 0x0026
-TV_STEER_GAIN_CUBIC       = 0x0027
-TV_STABILITY_FACTOR       = 0x0028
-TV_REF_LAG_S              = 0x0029
-TV_TEST_MOMENT_NM         = 0x002A  # 同定用。0 以外の間は TV の PI を止めてこのヨーモーメントだけを出す
+# 0x0021〜0x0029 は欠番（v0.16 のヨーレート PI の調整パラメータ。★v0.17 で TV を荷重比例の配分に
+# 置き換えて廃止。STM32 は UNKNOWN_ID を返す）
+TV_TEST_MOMENT_NM         = 0x002A  # 同定用。0 以外の間は TV の配分を止めてこのヨーモーメントだけを出す
+TV_LOAD_GAIN_S2_PER_M     = 0x002B  # ★v0.17。配分の比率 = これ × 横加速度（車速×ヨーレート）
+TV_MAX_RATIO              = 0x002C  # ★v0.17。比率の上限（1 で内輪のトルクが 0）
+# ステアのリンクの換算（★v0.18）: 路面舵角 = gain·x + cubic·x³、x = モータ角×0.5。STM32 は入れた瞬間に
+# 反映し、LIMITS（max_steer_rad）を送り直す。値はシステム同定が `[control]` に書く
+STEER_LINK_GAIN           = 0x0081
+STEER_LINK_CUBIC          = 0x0082
 SPEED_KP       = 0x0030  # 未実装（STM32側が UNKNOWN_ID を返す）
 SPEED_KI       = 0x0031  # 未実装（STM32側が UNKNOWN_ID を返す）
 LIDAR_FORMAT   = 0x0040

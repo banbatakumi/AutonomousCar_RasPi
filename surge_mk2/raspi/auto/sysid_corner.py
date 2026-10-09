@@ -21,12 +21,14 @@ LiDARで見ながら速度を上げる**（`scan_window()`を流用）。
 
 ## 限界に達したら、舵を保ったままゆっくり止める（2026-09-27、実機の記録を受けて）
 
-速度・横加速度・後輪の滑り率を `CORNER_WINDOW_S` の区間ごとにまとめ、`corner_limit()`
-（`_sysid_common.py`。解析側と同じ判定）が限界を示したらすぐ終える。限界は **後輪が滑った**
-（滑り率が `REAR_SLIP_LIMIT` を超えた）か **横加速度が頭打ち**の早い方。この車は後輪駆動なので、
-実機では前輪の頭打ちより先に後輪が滑った（1.45m/s・約5.0m/s²、同時に曲率が増えた＝オーバー
-ステア）。以前は頭打ちの判定だけで、しかも検出後も1秒速度を上げ続けたので、後輪が空転して
-`SensorGuard` が中止し、最大制動＋舵0で**旋回中に後輪がロック**した。
+速度・横加速度を `CORNER_WINDOW_S` の区間ごとにまとめ、`corner_limit()`（`_sysid_common.py`。
+解析側と同じ判定）が限界を示したらすぐ終える。限界は **車体が滑った**こと——横加速度（速さ×
+ヨーレート）が頭打ちになった（前が逃げる）か、曲率が跳ねた（後ろが流れる）の早い方。以前は
+頭打ちの判定だけで、しかも検出後も1秒速度を上げ続けたので、後輪が空転して `SensorGuard` が
+中止し、最大制動＋舵0で**旋回中に後輪がロック**した。
+
+後輪の空転（滑り率）では打ち切らない（2026-10-08）。車体が滑っていないのに、荷重の抜けた内輪の
+空転だけで 1.42m/s・4.4m/s² で終わり、`mu` が低く出た（`corner_limit` の docstring）。
 
 止め方: 舵はそのまま、目標速度0を `accel_limit` 1.0m/s² でゆっくり（制動は後輪がロックする）。
 周囲クリアランスでの停止・中止も、舵を保ってロックしない強さ（`ABORT_BRAKE_TORQUE_NM`）で制動する。
@@ -50,7 +52,7 @@ import math
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from ._sysid_common import (ABORT_BRAKE_TORQUE_NM, SensorGuard, TestGate, abort_state, corner_limit,
-                            corner_windows, rear_slip, settle_state)
+                            corner_windows, settle_state)
 from .base import ParamSpec, Planner, scan_window
 
 __all__ = ["SysIdCorner"]
@@ -59,14 +61,15 @@ __all__ = ["SysIdCorner"]
 class SysIdCorner(Planner):
     id = "sysid_corner"
     name = "システム同定: 旋回グリップ"
-    description = "舵30°の円を0.3m/sから一定の割合で速くしながら回り、滑り出したら止まる。約2m四方が要る。約30〜45秒"
+    description = "舵いっぱいの円を0.3m/sから一定の割合で速くしながら回り、車体が滑り出したら止まる。約2m四方が要る。約30〜45秒"
     category = "sysid"
     stats = ("nearest",)
 
     #: 試験の手順。**GUIからは変えられない**（`_sysid_common.py`「手順を固定した理由」）。
     #: 旋回方向だけは左右差を見るために選べる（`params`）
     SETTINGS: dict[str, float] = {
-        # 30°（最大舵角）: 半径が最小で、低い速度（mu=0.45なら約1.33m/s）で限界に届く
+        # 舵いっぱい（`max_steer` で頭打ちになる。リンクの換算後は約 26.6°）: 半径が最小で、低い速度
+        # （mu=0.45なら約1.33m/s）で限界に届く
         "steer_deg": 30.0,
         # 0.3m/sから0.06m/s²で上げ続ける（段の頃の平均 0.11m/s÷2.5s≒0.045m/s² とほぼ同じ）。
         # 限界を検出したら confirm_s だけ続けて止める。3.0m/s（io_node の上限）は「そこまでに
@@ -99,11 +102,10 @@ class SysIdCorner(Planner):
     def _reset_state(self) -> None:
         self._t = 0.0
         self._done_reason = ""
-        #: 走り出してからの (経過時間, 速さ, 横加速度, 後輪の滑り率)。`on_vehicle_state` が全サンプルで足す
+        #: 走り出してからの (経過時間, 速さ, 横加速度)。`on_vehicle_state` が全サンプルで足す
         self._t_s: list[float] = []
         self._v_s: list[float] = []
         self._a_s: list[float] = []
-        self._slip_s: list[float] = []
         self._t0_ns: int | None = None
         self._running = False
         #: 限界を検出したか
@@ -126,8 +128,6 @@ class SysIdCorner(Planner):
         self._t_s.append((vs.t_capture - self._t0_ns) / 1e9)
         self._v_s.append(abs(vs.speed))
         self._a_s.append(abs(vs.speed * vs.yaw_rate))
-        rear = 0.5 * (vs.wheel_speed[2] + vs.wheel_speed[3]) if len(vs.wheel_speed) >= 4 else vs.speed
-        self._slip_s.append(rear_slip(vs.speed, rear))
 
     def set_engaged(self, engaged: bool) -> None:
         """`planning_node.py`がplan()の直前に呼ぶ（ダックタイピング）。"""
@@ -141,9 +141,7 @@ class SysIdCorner(Planner):
         self._checked_until = self._t_s[-1] + 0.25
         i0 = next((i for i, t in enumerate(self._t_s) if t >= p["warmup_s"]), len(self._t_s))
         t, v = self._t_s[i0:], self._v_s[i0:]
-        wa = corner_windows(t, v, self._a_s[i0:])
-        ws = corner_windows(t, v, self._slip_s[i0:])
-        k, why = corner_limit([(v_, a, sl) for (v_, a, _, _), (_, sl, _, _) in zip(wa, ws)])
+        k, why = corner_limit([(v_, a) for v_, a, _, _ in corner_windows(t, v, self._a_s[i0:])])
         if k is not None:
             self._at_limit = True
             self._done_reason = f"完了（グリップ限界: {why}）"

@@ -45,7 +45,10 @@ def _load_current_dynamics(toml_path: str) -> dict[str, float]:
             d = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError):
         return {}
-    return {k: float(v) for k, v in d.get("dynamics", {}).items() if isinstance(v, (int, float))}
+    out = {k: float(v) for k, v in d.get("dynamics", {}).items() if isinstance(v, (int, float))}
+    # ステアのリンクの換算は [control] にある（`toml_update.LINK_KEYS`）
+    out.update({k: float(d["control"][k]) for k in toml_update.LINK_KEYS if k in d.get("control", {})})
+    return out
 
 
 class SysIdApp(tk.Tk):

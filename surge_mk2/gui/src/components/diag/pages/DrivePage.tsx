@@ -20,6 +20,7 @@ const CHARTS = [
   CH.torqueRR,
   CH.torqueLimit,
   CH.yawRate,
+  CH.tvRatio,
   CH.yawMoment,
   CH.accel,
 ]

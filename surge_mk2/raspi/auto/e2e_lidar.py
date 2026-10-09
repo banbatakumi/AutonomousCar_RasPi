@@ -38,6 +38,7 @@ import json
 import math
 from pathlib import Path
 
+from ..core.control_params import steer_relink
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from .base import ParamSpec, Planner, scan_window
@@ -103,6 +104,9 @@ def _load_from_path(path: Path) -> dict:
         "max_steer": float(cfg.get("max_steer", 0.45)),
         "max_speed": float(cfg.get("max_speed", 1.5)),
         "steer_rate_max_rad_s": float(cfg["steer_rate_max_rad_s"]),
+        # 学習したときの STM32 のステアのリンクの換算。無い JSON（2026-10-08 より前のモデル）は
+        # 換算なし＝舵角の数値が「モータ角×0.5」だった頃のもの（`plan()` で今の路面舵角へ直す）
+        "steer_link": tuple(float(v) for v in cfg.get("steer_link", (1.0, 0.0))),
     }
 
 
@@ -144,6 +148,7 @@ class E2ELidar(Planner):
         self._fov_deg = 360.0
         self._max_range = 10.0
         self._model_max_steer = 0.45
+        self._model_steer_link = (1.0, 0.0)
         self._model_max_speed = 1.5
         self._model_steer_rate_max_rad_s = 2.0
         self._load_error = "未選択"
@@ -170,6 +175,7 @@ class E2ELidar(Planner):
         self._fov_deg = loaded["fov_deg"]
         self._max_range = loaded["max_range"]
         self._model_max_steer = loaded["max_steer"]
+        self._model_steer_link = loaded["steer_link"]
         self._model_max_speed = loaded["max_speed"]
         self._model_steer_rate_max_rad_s = loaded["steer_rate_max_rad_s"]
 
@@ -270,7 +276,10 @@ class E2ELidar(Planner):
         speed = (speed_norm + 1.0) * 0.5 * self._model_max_speed
 
         max_steer, max_speed = self.vehicle.max_steer, p["max_speed"]
-        target = max(-max_steer, min(max_steer, self._steer_target))
+        # モデルの舵角は学習したときのリンクの換算のもとでの数値。今の車で同じ切れ角になる
+        # 路面舵角へ直す（同じ換算で学習したモデルなら何もしない）
+        target = steer_relink(self._steer_target, self._model_steer_link, self.vehicle.steer_link)
+        target = max(-max_steer, min(max_steer, target))
 
         # ★舵の平滑化（時間ベースの1次遅れ）。詳細は `steer_tau` の note 参照
         # （バンビが実車で「舵角の決定が少し不安定」と気づいたのがきっかけ）

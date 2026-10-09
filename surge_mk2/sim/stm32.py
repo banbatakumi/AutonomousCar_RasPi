@@ -414,7 +414,7 @@ class VirtualStm32:
             # ★v0.16: 絞る前の要求＝指令（絞らない）、ABS の上限は全開、TV は無い
             torque_req=[_q("torque_req", torque, -32768, 32767)] * 2,
             abs_limit_nm=_q("abs_limit_nm", DRIVE_MAX_TORQUE_NM, -32768, 32767),
-            yaw_rate_target=0, tv_moment_nm=0,
+            tv_ratio=0, tv_moment_nm=0,
             temp=[temp, temp, 25 + int(10 * abs(v.steer_actual)), 40],
             batt_voltage_drive=_q("batt_voltage_drive", vd, 0, 255),
             batt_voltage_signal=_q("batt_voltage_signal", vs, 0, 255),

@@ -1,9 +1,37 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.16
-**最終更新**: 2026-10-05（足回りの制御の調整パラメータを `CONFIG_SET`/`CONFIG_GET` で読み書きできるようにし、TC・ABS・片輪浮き対策・TV の中身を見直した）
+**バージョン**: v0.18
+**最終更新**: 2026-10-08（ステアのリンクの換算を STM32 に入れ、舵角を実際の路面舵角にした。同日 v0.17: TV を荷重比例の配分へ置き換え）
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: v0.16 は Pi・STM32 とも実装済み（`pi_uart_protocol_v0.16_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了**
+**状態**: v0.18 は Pi・STM32 とも実装済み（`pi_uart_protocol_v0.18_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了**
+
+> **v0.18 で変わったのは舵角の意味。ワイヤ形式（LEN・オフセット）は同じ。**
+>
+> - **舵角（`COMMAND.target_steer`・`TELEMETRY.steer_actual`/`steer_cmd_echo`・`LIMITS.max_steer_rad`）は
+>   実際の路面舵角になった。** v0.17 までは「ステアモータの角度×0.5」で、リンクが線形でないため大舵角で
+>   実際より大きかった（29.1° と報告しているとき前輪は約 26.5°）。STM32 が
+>   `路面舵角 = STEER_LINK_GAIN·x + STEER_LINK_CUBIC·x³`（x = モータ角×0.5）で指令と報告を換算する
+> - **`param_id` `0x0081`（`STEER_LINK_GAIN`、既定 1）・`0x0082`（`STEER_LINK_CUBIC`、既定 0）を新設**（§5.8.4）。
+>   値は Pi のシステム同定が `[control]` に書き、io_node が接続のたびに送る。STM32 は入れた瞬間に反映し、
+>   **`LIMITS` を送り直す**（`max_steer_rad` が変わる。今の同定値では 30° → 26.56°）
+> - **STM32 の車速（`TELEMETRY.speed`）も変わる**: 前輪の速度×cos(路面舵角) なので、v0.17 までは舵いっぱいで
+>   2〜6% 小さく出ていた（TC のスリップ率・オドメトリ・同定の曲率に波及していた）
+> - `protocol_version` を `0x0011`→`0x0012` に上げる。**本書が最終版**。**v0.17 以前のファームと v0.18 の Pi を
+>   つなぐと、Pi は舵角を路面舵角のつもりで送るが STM32 は「モータ角×0.5」と解釈する**（大舵角で切れ足りない
+>   向きに最大約 2.4° ずれる——26.56° の指令で前輪は約 24.1°。`control_params_status` が `unsupported` になるので、その間は走らせないこと）
+
+> **v0.17 で変わったのは TV（トルクベクタリング）だけ。ワイヤ形式（LEN・オフセット）は同じ。**
+>
+> - **TV の中身**: ヨーレートの PI（規範ヨーレートとの偏差を左右差で埋める）をやめ、**総駆動トルクを
+>   左右の荷重の比で配る**フィードフォワードにした。左右差 = 総駆動トルク × clamp(`TV_LOAD_GAIN_S2_PER_M`
+>   × 車速 × ヨーレート, ±`TV_MAX_RATIO`)。理由は §5.8.4
+> - **`param_id`**: `0x0021`-`0x0029`（PI の調整パラメータ）を廃止（STM32 は `UNKNOWN_ID` を返す）。
+>   `0x002B`（`TV_LOAD_GAIN_S2_PER_M`）・`0x002C`（`TV_MAX_RATIO`）を新設。`0x002A` は残る
+> - **`TELEMETRY`**: オフセット 66 の `yaw_rate_target`（0.001 rad/s）を **`tv_ratio`**（0.0001、配分の比率）に
+>   置き換えた。`tv_moment_nm` は「TV が要求した左右差のヨーモーメント換算」
+> - v0.17 で `protocol_version` を `0x0010`→`0x0011` に上げた。`protocol_version = 0x0011` は
+>   その内容を指す。v0.16 のファームと v0.17 の Pi（またはその逆）をつなぐと、`control_params_status` が
+>   `unsupported` になり、TV の調整値が入らない（走行はできる）
 
 > **v0.16 で変わったのは `CONFIG_SET`/`CONFIG_GET` の `param_id` の追加（§5.8・§5.8.4）と、`TELEMETRY` の
 > LEN 74→**84**・`flags` bit21（§5.3・§5.4）。** STM32 側の制御（TC・ABS・片輪浮き対策・TV）の中身も変わった。
@@ -26,8 +54,7 @@
 > - `TELEMETRY` の `slip[2]` は低速でも 0 にならない（分母の下限つきのスリップ率）。`tc_limit_nm[2]` は
 >   片輪浮き対策の絞りも含む
 >
-> `protocol_version` を `0x000F`→`0x0010` に上げる。**本書が最終版**であり、
-> `protocol_version = 0x0010` はこの内容を指す。
+> v0.16 で `protocol_version` を `0x000F`→`0x0010` に上げた。
 
 ---
 
@@ -443,8 +470,8 @@ off  size  type    field                 単位 / 備考
  56    4   i16×2   tc_limit_nm[2]        0.0001 N·m [RL, RR] ★v0.13 TCが動的に決めるトルク上限（★v0.16: 片輪浮き対策の絞りも含む）。非介入時は最大トルクと同値
  60    4   i16×2   torque_req[2]         0.0001 N·m [RL, RR] ★v0.16 スリップ制限（TC・片輪浮き対策・ABS）が絞る前の要求。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量
  64    2   i16     abs_limit_nm          0.0001 N·m ★v0.16 ABS が決める制動トルクの上限（左右共通）。非介入時は最大トルクと同値
- 66    2   i16     yaw_rate_target       0.001 rad/s ★v0.16 TV の規範ヨーレート
- 68    2   i16     tv_moment_nm          0.0001 N·m ★v0.16 TV の PI が要求したヨーモーメント（左旋回が正）
+ 66    2   i16     tv_ratio              0.0001 (無次元) ★v0.17 TV の配分の比率（左右の荷重差÷荷重和 の見積り。左旋回で正＝右輪が多い）。左右差＝総駆動トルク×これ（v0.16 はここに yaw_rate_target、0.001 rad/s）
+ 68    2   i16     tv_moment_nm          0.0001 N·m ★v0.16 TV が要求した左右トルク差のヨーモーメント換算（左旋回が正）
  70    4   u8×4    temp[4]               1 degC [RL, RR, ST, MCU] 符号なし
  74    1   u8      batt_voltage_drive    0.05 V/LSB  (0〜12.75V)
  75    1   u8      batt_voltage_signal   0.05 V/LSB  (0〜12.75V)
@@ -985,7 +1012,9 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 | `0x0010` | TC 有効 | 0/1 | ★v0.8 で STM32 ファームウェアが実装。Pi 側 `io_node` が GUI のトグルに応じて送信 |
 | `0x0011`-`0x0015` | **TC の調整パラメータ・スリップの測り方** | f32 | ★v0.16。§5.8.4。`TC_SLIP_TARGET`/`TC_KP_NM_PER_M_S`/`TC_KI_NM_PER_M`/`TC_MIN_TORQUE_NM`/`SLIP_SPEED_FLOOR_M_S` |
 | `0x0020` | トルクベクタリング 有効 | 0/1 | ★v0.8 で STM32 ファームウェアが実装。Pi 側 `io_node` が GUI のトグルに応じて送信 |
-| `0x0021`-`0x002A` | **TV の調整パラメータ** | f32 | ★v0.16。§5.8.4。`TV_KP_NM_PER_RAD_S`/`TV_KI_NM_PER_RAD`/`TV_DEADBAND_RAD_S`/`TV_MAX_YAW_MOMENT_NM`/`TV_MAX_LATERAL_ACCEL_M_S2`/`TV_STEER_GAIN`/`TV_STEER_GAIN_CUBIC`/`TV_STABILITY_FACTOR`/`TV_REF_LAG_S`/`TV_TEST_MOMENT_NM` |
+| ~~`0x0021`-`0x0029`~~ | ~~TV（ヨーレート PI）の調整パラメータ~~ | — | **v0.17 で廃止**（v0.16 で新設。STM32 は `UNKNOWN_ID` を返す） |
+| `0x002A`-`0x002C` | **TV の調整パラメータ** | f32 | §5.8.4。`TV_TEST_MOMENT_NM`（★v0.16、同定用）/`TV_LOAD_GAIN_S2_PER_M`/`TV_MAX_RATIO`（★v0.17） |
+| `0x0081`-`0x0082` | **ステアのリンクの換算** | f32 | ★v0.18。§5.8.4。`STEER_LINK_GAIN`/`STEER_LINK_CUBIC`。調整値ではなくシステム同定の結果 |
 | `0x0030` | 速度制御 Kp | f32 | STM32 側未実装（`RAS_CONFIG_UNKNOWN_PARAM` を返す） |
 | `0x0031` | 速度制御 Ki | f32 | STM32 側未実装（`RAS_CONFIG_UNKNOWN_PARAM` を返す） |
 | `0x0040` | **LiDAR 出力フォーマット** | **enum** | 下表。★v0.4 で bool から変更 |
@@ -1067,7 +1096,7 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
   未作動が起きた場合は一旦 `auto_stop` を切って STM32 側に一報すること
   （`pi_uart_protocol_v0.12_delta.md`）
 
-#### 5.8.4 足回りの制御の調整パラメータ（★v0.16）
+#### 5.8.4 足回りの制御の調整パラメータ（★v0.16、TV は★v0.17）
 
 TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読み書きする。**ON/OFF（`0x0010`/`0x0020`/
 `0x0050`/`0x0070`）とは別**で、こちらは連続値。
@@ -1089,11 +1118,25 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
   `wheel_lift_guard_enable`/`abs_enable`）。io_node は**その指令が届いている間だけ**入れ、届かなくなったら
   元の値へ戻す（試験が中断しても TC を切ったままにならない）
 - `0x002A`（`TV_TEST_MOMENT_NM`）は同定用（**今これを使う試験は無い**——TV の同定は 2026-10-05 に外した。
-  STM32 側の機能は残っている）: 0 以外の間、STM32 は TV の PI を止めてこのヨーモーメント
+  STM32 側の機能は残っている）: 0 以外の間、STM32 は TV の配分を止めてこのヨーモーメント
   だけを出す。`[control]` には書かない（上書きでだけ使う）
-- TV の規範の3項目（`TV_STEER_GAIN`/`TV_STEER_GAIN_CUBIC`/`TV_MAX_LATERAL_ACCEL_M_S2`）は `[control]` に
-  書かず、`[dynamics]` の同定結果（`steer_gain`/`steer_gain_cubic`/`mu`×g×`tv_lateral_accel_ratio`）から作る
+- **TV（★v0.17）は荷重比例の配分**: `左右差 (右−左) = 総駆動トルク × clamp(TV_LOAD_GAIN_S2_PER_M × 車速 ×
+  ヨーレート, ±TV_MAX_RATIO)`。旋回で荷重の乗る外輪へ多く配り、荷重の抜けた内輪を空転させない。
+  車速指令の減速（総トルクが負）では外輪が多く制動する（旋回を戻す向き）。定速の旋回（総トルクがほぼ 0）
+  では何もしない。積分を持たず、TC はその後段で各輪を絞るだけ。
+  v0.16 のヨーレート PI をやめた理由: 規範に実機の舵の効きの同定値を入れていたので偏差が最初からほぼ 0、
+  ヨーモーメント→ヨーレートの効きが小さく（0.1N·m で 0.056rad/s）ループゲインが 0.05 しかない、定常の
+  ヨーレートは舵の方が約30倍動かせる、回り過ぎの修正は空転している内輪へトルクを足す向きで TC に
+  打ち消された（PROGRESS.md 2026-10-08「TV の作り直し」）
 - 値を決める手順は `tools/ctrl_tune`（[`development.md`](development.md)「足回りの制御を調整する」）
+- **ステアのリンクの換算（★v0.18、`0x0081`/`0x0082`）も同じ仕組みで送る**が、調整値ではなくシステム同定の
+  結果: `路面舵角 = gain·x + cubic·x³`、x = ステアモータの角度×0.5（可動範囲 ±30°）。STM32 は指令
+  （路面舵角→モータ角、ニュートン法）・報告・`LIMITS.max_steer_rad`・車速の射影のすべてに使う。可動範囲の
+  端での傾き `gain + 3·cubic·x²` が 0.3 を下回る `cubic` は STM32 が下回らない値へ丸める（逆変換が一意に
+  決まらなくなるため）。`tools/sysid` が舵角ごとの曲率から求め、`[control]` の2つ・`[dynamics]` の
+  `steer_gain`=1/`steer_gain_cubic`=0・最上位の `max_steer` を**そろえて**書く（`toml_update.apply_dynamics`）。
+  記録（mcap）の舵角の意味は、そのとき STM32 に入っていた換算で決まる（`/diag/link` の `control_params` に残る。
+  解析は記録時の換算の上に重ねる、`analyze.fold_steer_link`）
 
 #### 設計意図
 
@@ -1669,6 +1712,8 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.14** | 2026-08-30 | **Pi 側発の提案。`COMMAND.flags2` bit1/2（`WINKER_LEFT`/`WINKER_RIGHT`）、`TELEMETRY.flags` bit18/19（`WINKER_LEFT_ACTIVE`/`WINKER_RIGHT_ACTIVE`）を新設（ワイヤ形式・LEN の変更は無し。§5.6.6/§5.4）。** STM32 側に `Lighting_SetWinker()` 相当の実装があるのに `ApplyRasCommand()` から呼ばれておらず、自律走行中に右左折の意思表示ができない実装漏れへの対応。両ビットを両方立てるとハザード（左右同時点滅）。点滅の周期・位相は STM32 側の責務、Pi は点灯要求を送るだけ。`side_brake` と同じくトグルで送り、`brake`/`side_brake` と違って灯火系なので未 ARM でも効く。`protocol_version` を `0x000D`→`0x000E` に上げる。Pi 側は `protocol.toml`/`raspi/msgs`/`sim/stm32.py`/GUI（`DriveControls.tsx` に操作パネルを追加、キー・パッド割り当ては無し）を実装済み。**STM32 側は未実装**（§14 #11） |
 | **v0.15** | 2026-09-27 | **STM32 側発。`CONFIG_SET`/`CONFIG_GET` の `param_id = 0x0070`（`ABS_ENABLE`）と `TELEMETRY.flags` bit20（`ABS_ACTIVE`）を新設（ワイヤ形式・LEN の変更なし）。** 制動時の後輪ロックを防ぐ ABS（スリップ率 -0.2 で制動トルクを削る select-low、0.25m/s 未満は無効、要求の20%以下に0.2s張り付いたらブレーキ解除までフォールバック）。`protocol_version` を `0x000E`→`0x000F` に上げる。Pi 側は `protocol.toml`・`VehicleState.abs_active`・`LinkDiag.abs_enabled`・`io_node` の起動時 `CONFIG_GET` と GUI トグル・介入ランプ・`sim/stm32.py`（制動がグリップで頭打ちのとき旗だけ立てる）・同定の解析（ABS の介入を制動の頭打ちの証拠に使う）を対応。**実機での動作検証は未了**（`pi_uart_protocol_v0.15_delta.md`） |
 | **v0.16** | 2026-10-05 | **`CONFIG_SET`/`CONFIG_GET` の `param_id` を追加、`TELEMETRY` に制御の介入量を追加（LEN 74→**84**: `torque_req[2]`・`abs_limit_nm`・`yaw_rate_target`・`tv_moment_nm`、`flags` bit21=`WHEEL_LIFT_ACTIVE`。§5.3）。** 足回りの制御（TC・ABS・片輪浮き対策・TV）の調整パラメータ `0x0011`-`0x0015`・`0x0021`-`0x002A`・`0x0051`・`0x0071`-`0x0073`（§5.8.4。定義は STM32 側 `control_params.h` の表、値は Pi 側 `vehicle.toml` の `[control]`）。STM32 の制御は TC・ABS をスリップ率の連続 PI へ（低速でも働く、TC は車速指令の減速にも掛かる、片輪を絞った分を反対輪へ載せない）、TV は左右差を保つ配分・規範の1次遅れ・同定用のヨーモーメント注入。`protocol_version` を `0x000F`→`0x0010` に上げる。Pi 側は `protocol.toml`・`raspi/core/control_params.py`（送信・照合・読み戻し・一時上書き）・`LinkDiag.control_params_*`・`DriveCmd.fw_overrides`・GUI・`tools/ctrl_tune`（同定と最適化）を対応。**STM32 は未書き込み、実機での動作検証は未了**（`pi_uart_protocol_v0.16_delta.md`） |
+| **v0.17** | 2026-10-08 | **TV をヨーレートの PI から、後輪左右の荷重に比例した配分（フィードフォワード）へ置き換えた（ワイヤ形式・LEN の変更なし）。** `param_id` `0x0021`-`0x0029` を廃止、`0x002B`（`TV_LOAD_GAIN_S2_PER_M`）・`0x002C`（`TV_MAX_RATIO`）を新設。`TELEMETRY` のオフセット 66 を `yaw_rate_target` → `tv_ratio`（0.0001）に置き換え。`protocol_version` `0x0010`→`0x0011`（`pi_uart_protocol_v0.17_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了** |
+| **v0.18** | 2026-10-08 | **舵角を実際の路面舵角にした（ワイヤ形式・LEN の変更なし）。** STM32 がステアのリンクの換算（`路面舵角 = gain·x + cubic·x³`、x = モータ角×0.5）で指令・報告・`LIMITS.max_steer_rad`・車速の射影を行う。`param_id` `0x0081`（`STEER_LINK_GAIN`）・`0x0082`（`STEER_LINK_CUBIC`）を新設、設定時に `LIMITS` を送り直す。`protocol_version` `0x0011`→`0x0012`（`pi_uart_protocol_v0.18_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了** |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）
 

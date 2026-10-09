@@ -104,6 +104,39 @@ class TestLogic(unittest.TestCase):
         self.assertAlmostEqual(float(np.median(diff[700:950])), expect, places=4)
         self.assertGreater(float(np.mean(r.col("yaw_rate")[800:1000])), 0.02)     # 左へ回る
 
+    def test_tv_splits_torque_by_lateral_load(self):
+        """TV（2026-10-08 に荷重比例の配分へ置き換えた）: 旋回しながらの駆動で外輪が多くなり、
+        比率は ゲイン×車速×ヨーレート、内外輪の滑り率の差が TV なしより小さい。"""
+        gain = self.fw.params["tv_load_gain_s2_per_m"].default
+        segs = (S.Seg(0.5, MODE_SPEED, 1.5, 3.0, steer=0.2), S.Seg(0.5, MODE_TORQUE, 0.04, steer=0.2))
+        on = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 1.5, tc=False, lift=False, measure=1))
+        off = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 1.5, tc=False, lift=False, tv=False, measure=1))
+        w = slice(-400, None)                              # 最後の 0.2s（左旋回 = 右が外輪）
+        left, right = on.col("cmd_left")[w], on.col("cmd_right")[w]
+        ratio = (right - left) / (right + left)
+        expect = gain * on.col("fw_speed")[w] * on.col("fw_yaw_rate")[w]
+        self.assertGreater(float(np.mean(ratio)), 0.05)
+        np.testing.assert_allclose(ratio, expect, atol=2e-3)
+        np.testing.assert_allclose(right + left, 0.08, atol=1e-6)        # 総和は変えない
+        np.testing.assert_allclose(off.col("cmd_left")[w], off.col("cmd_right")[w], atol=1e-9)
+        gap = lambda r: abs(float(np.mean(r.col("kappa_left")[w] - r.col("kappa_right")[w])))
+        self.assertLess(gap(on), gap(off))
+
+    def test_tv_brakes_outer_wheel_more_when_decelerating(self):
+        """車速指令の減速（総トルクが負）では外輪が多く制動する = 旋回を戻す向き。"""
+        segs = (S.Seg(0.3, MODE_SPEED, 1.5, 3.0, steer=0.25), S.Seg(0.3, MODE_SPEED, 0.0, 2.0, steer=0.25))
+        r = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 1.5, tc=False, lift=False, measure=1))
+        w = slice(-400, -100)
+        self.assertLess(float(np.mean(r.col("cmd_left")[w])), 0.0)
+        self.assertLess(float(np.mean(r.col("cmd_right")[w] - r.col("cmd_left")[w])), -1e-3)
+
+    def test_tv_does_nothing_when_straight_or_gain_zero(self):
+        straight = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.5, MODE_TORQUE, 0.05),), 1.0, tc=False))
+        self.assertLess(float(np.max(np.abs(straight.col("cmd_right") - straight.col("cmd_left")))), 1e-4)
+        turn = S.Scenario("t", "t", (S.Seg(0.5, MODE_TORQUE, 0.04, steer=0.2),), 1.5, tc=False, lift=False)
+        zero = S.run(self.fw, QUIET, turn, {"tv_load_gain_s2_per_m": 0.0})
+        np.testing.assert_allclose(zero.col("cmd_left"), zero.col("cmd_right"), atol=1e-9)
+
     def test_dead_front_encoder_does_not_runaway(self):
         """前輪エンコーダが途中で 0 を読み始めても、後輪が吹け上がらない。"""
         sc = S.Scenario("t", "t", (S.Seg(0.3, MODE_SPEED, 1.5, 3.0),
@@ -199,7 +232,7 @@ class TestTomlRoundTrip(unittest.TestCase):
         with self.assertRaises(ValueError):
             tuning.apply_control(self.path, {"tc_slip_target": 5.0}, firmware())
         with self.assertRaises(ValueError):
-            tuning.apply_control(self.path, {"tv_steer_gain": 1.0}, firmware())
+            tuning.apply_control(self.path, {"tv_test_moment_nm": 0.1}, firmware())
 
     def test_apply_plant_is_read_back(self):
         tuning.apply_plant(self.path, {"wheel_inertia_kgm2": 3.3e-5, "mu": 0.55})

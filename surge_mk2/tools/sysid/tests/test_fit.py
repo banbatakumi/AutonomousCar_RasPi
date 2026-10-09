@@ -414,6 +414,24 @@ class TestGeometry(unittest.TestCase):
 
 
 class TestRejectsUnmeasured(unittest.TestCase):
+    def test_md_dropout_is_found_and_the_record_is_rejected(self):
+        """MD が黙った記録は解析しない（止まった MD は駆動も制動もせず、車輪の値は古いまま固まる。
+        2026-10-08、右後輪の MD が落ちた記録で制動の頭打ちが 2.75→1.91 と出た）。"""
+        from tools.sysid import analyze
+        ok, lost = [0x11, 0x11, 0x31], [0x11, 0x03, 0x31]
+        msgs = [(0.01 * i, {"md_status": lost if 50 <= i < 130 else ok}) for i in range(200)]
+        drops = fit.md_dropouts(msgs)
+        self.assertEqual([n for _, _, n in drops], ["右後輪"])
+        self.assertAlmostEqual(drops[0][0], 0.50)
+        self.assertAlmostEqual(drops[0][1], 1.30)
+        self.assertEqual(fit.md_dropouts([(0.0, {}), (0.1, {"md_status": [0, 0, 0]})]), [])  # 古い記録
+
+        log, _, _ = run_test("sysid_corner", TRUTH, seed=1)
+        self.assertEqual(log.md_dropouts, [])
+        r = analyze.analyze({"corner": replace(log, md_dropouts=drops)}, TRUTH)
+        self.assertNotIn("mu", r.results)
+        self.assertRegex(r.errors[0], "右後輪のモータドライバ")
+
     def test_corner_without_reaching_the_limit_raises(self):
         log, _, _ = run_test("sysid_corner", TRUTH, params={"v_max": 1.0}, seed=1)
         with self.assertRaisesRegex(ValueError, "頭打ち"):

@@ -8,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.control_params import (CONTROL_PARAM_IDS, DEFAULT_TOML, OVERRIDABLE,  # noqa: E402
-                                       ControlParamSync, load_control_params)
+                                       STEER_LINK_X_MAX_RAD, ControlParamSync, load_control_params,
+                                       steer_link_road, steer_link_x, steer_relink)
 from raspi.proto.generated import packets  # noqa: E402
 
 P = packets.Param
@@ -61,18 +62,16 @@ def run(sync, start_ms=0, ms=3000):
 
 
 class TestLoad(unittest.TestCase):
-    def test_repo_toml_loads_and_derives_tv_reference(self):
-        """リポジトリの vehicle.toml が読め、TV の規範の3項目が [dynamics] から作られる。"""
+    def test_repo_toml_loads(self):
+        """リポジトリの vehicle.toml が読め、[control] の値がそのまま出る（同定用の項目は出ない）。"""
         v = load_control_params(DEFAULT_TOML)
         self.assertTrue(set(v) <= set(CONTROL_PARAM_IDS))
         self.assertNotIn("tv_test_moment_nm", v)
         import tomllib
         with open(DEFAULT_TOML, "rb") as f:
             d = tomllib.load(f)
-        self.assertAlmostEqual(v["tv_steer_gain"], d["dynamics"]["steer_gain"])
-        self.assertAlmostEqual(v["tv_steer_gain_cubic"], d["dynamics"]["steer_gain_cubic"])
-        self.assertAlmostEqual(v["tv_max_lateral_accel_m_s2"],
-                               d["dynamics"]["mu"] * 9.80665 * d["control"]["tv_lateral_accel_ratio"])
+        self.assertEqual(v, {k: float(x) for k, x in d["control"].items() if not isinstance(x, dict)})
+        self.assertIn("tv_load_gain_s2_per_m", v)
 
     def _toml(self, body: str) -> Path:
         f = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False, encoding="utf-8")
@@ -93,8 +92,30 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(v, {"tc_slip_target": 0.1})
 
 
+class TestSteerLink(unittest.TestCase):
+    """ステアのリンクの換算（STM32 の `steering.c` と同じ式）と、別の換算のもとでの舵角の読み替え。"""
+
+    LINK = (0.9928, -0.3917)
+
+    def test_inverse_round_trips_over_the_range(self):
+        for i in range(-20, 21):
+            x = STEER_LINK_X_MAX_RAD * i / 20
+            road = steer_link_road(x, *self.LINK)
+            self.assertAlmostEqual(steer_link_x(road, *self.LINK), x, places=7)
+        # 可動範囲の外は端で止まる
+        self.assertAlmostEqual(steer_link_x(1.0, *self.LINK), STEER_LINK_X_MAX_RAD, places=9)
+
+    def test_relink_keeps_the_motor_angle(self):
+        """換算なしの頃の舵角（モータ角×0.5）は、今の換算のもとでは実際の向きの数値になる。"""
+        self.assertEqual(steer_relink(0.3, self.LINK, self.LINK), 0.3)
+        self.assertAlmostEqual(steer_relink(STEER_LINK_X_MAX_RAD, (1.0, 0.0), self.LINK),
+                               steer_link_road(STEER_LINK_X_MAX_RAD, *self.LINK), places=9)
+        back = steer_relink(steer_relink(0.25, (1.0, 0.0), self.LINK), self.LINK, (1.0, 0.0))
+        self.assertAlmostEqual(back, 0.25, places=7)
+
+
 class TestSync(unittest.TestCase):
-    WANT = {"tc_slip_target": 0.12, "abs_kp_nm_per_m_s": 0.2, "tv_ref_lag_s": 0.03}
+    WANT = {"tc_slip_target": 0.12, "abs_kp_nm_per_m_s": 0.2, "tv_max_ratio": 0.4}
 
     def test_sends_everything_and_confirms(self):
         sync, stm = make(self.WANT)

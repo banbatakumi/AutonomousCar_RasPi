@@ -134,6 +134,10 @@ class Vehicle:
     steer_gain: float = 1.0
     steer_gain_cubic: float = 0.0
     steer_offset_rad: float = 0.0
+    #: STM32 のステアのリンクの換算 `(steer_link_gain, steer_link_cubic)`（`[control]`、★プロトコル v0.18）。
+    #: 路面舵角 = gain·x + cubic·x³、x = モータ角×0.5。**舵角の数値の意味はこれで決まる**——
+    #: 別の換算のもとで学習したモデルの舵角は `control_params.steer_relink` で直す
+    steer_link: tuple[float, float] = (1.0, 0.0)
     #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/architecture.md` §9.4）。
     #: **telemetry_node と io_node が独立に持つが、値はここ 1 つ**
     cmd_deadman_ms: float = 150.0
@@ -251,6 +255,8 @@ class Vehicle:
             steer_gain=float(dyn.get("steer_gain", 1.0)),
             steer_gain_cubic=float(dyn.get("steer_gain_cubic", 0.0)),
             steer_offset_rad=float(dyn.get("steer_offset_rad", 0.0)),
+            steer_link=(float(d.get("control", {}).get("steer_link_gain", 1.0)),
+                        float(d.get("control", {}).get("steer_link_cubic", 0.0))),
             cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),
             auto_link_grace_ms=float(safety.get("auto_link_grace_ms", 5000.0)),
             auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),

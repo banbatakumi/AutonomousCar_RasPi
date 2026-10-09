@@ -3,11 +3,11 @@
 ## 値の出どころ
 
 `config/vehicle.toml` の `[control]` が唯一の定義（キーは STM32 側 `control_params.h` のフィールド名）。
-TV の規範に使う3つは `[dynamics]` の同定結果から作る（以前はファームの定数へ手で写していて、
-同定し直すたびに食い違った）:
+同定用の `tv_test_moment_nm` だけは `[control]` に書けない（一時的な上書きでだけ入れる）。
 
-- `tv_steer_gain`・`tv_steer_gain_cubic` ← `[dynamics]` の `steer_gain`・`steer_gain_cubic`
-- `tv_max_lateral_accel_m_s2` ← `mu`×g×`[control] tv_lateral_accel_ratio`
+`steer_link_gain`・`steer_link_cubic`（ステアのリンクの換算、モータ角→路面舵角）もここを通る。
+調整値ではなくシステム同定の結果で、`tools/sysid` が `[control]` に書く。STM32 に入っていないと
+舵角の指令・報告・`max_steer` の意味が食い違うので、`control_params_status` が `ok` でない間は走らせないこと。
 
 ## 入ったことの確かめ方（`ControlParamSync`）
 
@@ -39,10 +39,9 @@ from typing import Callable
 from ..proto.generated import packets
 
 __all__ = ["CONTROL_PARAM_IDS", "OVERRIDABLE", "load_control_params", "ControlParamSync",
-           "DEFAULT_TOML"]
+           "DEFAULT_TOML", "STEER_LINK_X_MAX_RAD", "steer_link_road", "steer_link_x", "steer_relink"]
 
 DEFAULT_TOML = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
-GRAVITY_M_S2 = 9.80665
 
 #: `[control]` のキー → `param_id`（`protocol.toml` の `[params]`。名前は大文字にしたもの）
 CONTROL_PARAM_IDS: dict[str, int] = {
@@ -50,9 +49,38 @@ CONTROL_PARAM_IDS: dict[str, int] = {
         "SLIP_SPEED_FLOOR_M_S", "TC_SLIP_TARGET", "TC_KP_NM_PER_M_S", "TC_KI_NM_PER_M",
         "TC_MIN_TORQUE_NM", "WHEEL_LIFT_DIFF_THRESHOLD_M_S",
         "ABS_SLIP_TARGET", "ABS_KP_NM_PER_M_S", "ABS_KI_NM_PER_M",
-        "TV_KP_NM_PER_RAD_S", "TV_KI_NM_PER_RAD", "TV_DEADBAND_RAD_S", "TV_MAX_YAW_MOMENT_NM",
-        "TV_MAX_LATERAL_ACCEL_M_S2", "TV_STEER_GAIN", "TV_STEER_GAIN_CUBIC", "TV_STABILITY_FACTOR",
-        "TV_REF_LAG_S", "TV_TEST_MOMENT_NM")}
+        "TV_LOAD_GAIN_S2_PER_M", "TV_MAX_RATIO", "TV_TEST_MOMENT_NM",
+        "STEER_LINK_GAIN", "STEER_LINK_CUBIC")}
+
+#: ステアのリンクの換算（`steer_link_gain`・`steer_link_cubic`）の入力 x = モータ角×リンク比 の
+#: 可動範囲 [rad]。STM32 側 `steering.h` の STEERING_MAX_ANGLE_RAD × STEERING_LINKAGE_RATIO
+STEER_LINK_X_MAX_RAD = math.radians(30.0)
+
+
+def steer_link_road(x_rad: float, gain: float, cubic: float) -> float:
+    """リンクの換算（STM32 の `steering.c` と同じ式）: x = モータ角×リンク比 → 路面舵角 [rad]。"""
+    return gain * x_rad + cubic * x_rad ** 3
+
+
+def steer_link_x(road_rad: float, gain: float, cubic: float) -> float:
+    """`steer_link_road` の逆（路面舵角 → x）。可動範囲の外は端で止める（STM32 と同じニュートン法）。"""
+    x = road_rad
+    for _ in range(6):
+        slope = max(gain + 3.0 * cubic * x * x, 0.3)
+        x -= (steer_link_road(x, gain, cubic) - road_rad) / slope
+        x = max(-STEER_LINK_X_MAX_RAD, min(STEER_LINK_X_MAX_RAD, x))
+    return x
+
+
+def steer_relink(angle_rad: float, link_from: tuple[float, float], link_to: tuple[float, float]) -> float:
+    """リンクの換算 `link_from` のもとでの舵角を、同じモータ角になる `link_to` のもとでの舵角へ直す。
+
+    舵角の数値の意味は STM32 に入っている換算で変わる（v0.17 以前は換算なし＝`(1, 0)` で、数値は
+    「モータ角×0.5」だった）。別の換算のもとで学習・記録された舵角を今の車で同じ切れ角にするのに使う。
+    """
+    if tuple(link_from) == tuple(link_to):
+        return angle_rad
+    return steer_link_road(steer_link_x(angle_rad, *link_from), *link_to)
 
 #: 一時的に上書きできる項目（調整パラメータ全部＋機能の ON/OFF）→ `param_id`
 OVERRIDABLE: dict[str, int] = {
@@ -81,27 +109,16 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML) -> dict[str, float
     control = d.get("control")
     if control is None:
         return {}
-    dyn = d.get("dynamics", {})
     out: dict[str, float] = {}
-    ratio = 0.0
     for key, value in control.items():
         if isinstance(value, dict):          # [control.plant] など（Pi は使わない）
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError(f"[control] {key} が数ではありません: {value!r}")
-        if key == "tv_lateral_accel_ratio":
-            ratio = float(value)
-        elif key in CONTROL_PARAM_IDS and key != "tv_test_moment_nm":
+        if key in CONTROL_PARAM_IDS and key != "tv_test_moment_nm":
             out[key] = float(value)
         else:
             raise ValueError(f"[control] に知らないキーがあります: {key}")
-    # [dynamics] の同定結果から作る（[control] に直接書いてあればそちらを使う）
-    if "steer_gain" in dyn:
-        out.setdefault("tv_steer_gain", float(dyn["steer_gain"]))
-    if "steer_gain_cubic" in dyn:
-        out.setdefault("tv_steer_gain_cubic", float(dyn["steer_gain_cubic"]))
-    if ratio > 0.0 and dyn.get("mu", 0.0) > 0.0:
-        out.setdefault("tv_max_lateral_accel_m_s2", float(dyn["mu"]) * GRAVITY_M_S2 * ratio)
     return out
 
 

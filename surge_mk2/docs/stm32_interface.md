@@ -1,13 +1,30 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.16（`uart_protocol.md` **v0.16** に対応）
-**最終更新**: 2026-10-05（足回りの制御の調整パラメータを `CONFIG_SET`/`CONFIG_GET` に追加、TC・ABS・片輪浮き対策・TV を見直し）
+**バージョン**: v0.18（`uart_protocol.md` **v0.18** に対応）
+**最終更新**: 2026-10-08（ステアのリンクの換算を追加。同日 v0.17: TV を荷重比例の配分へ置き換え）
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.18 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-08。`pi_uart_protocol_v0.18_delta.md`）**
+> - ステアのリンクの換算（`src/control/steering.c`）: `路面舵角 = steer_link_gain·x + steer_link_cubic·x³`、
+>   x = モータ角×`STEERING_LINKAGE_RATIO`(0.5)。`Steering_SetRoadWheelAngleRad()`（逆変換はニュートン法）・
+>   `Steering_GetRoadWheelAngleRad()`・`Steering_GetMaxRoadWheelAngleRad()` のすべてに効く。既定は 1 と 0
+> - `param_id` `0x0081`・`0x0082` を `control_params.h` の表に追加。`CONFIG_SET` で入れた瞬間に
+>   `Steering_SetLinkage()` へ渡し、`LIMITS` を送り直す（`src/comm/ras_link.c` の `ApplyConfig`）
+> - 舵角を使う箇所（車速の射影 → TC のスリップ・TV の横加速度、舵角のレート制限）は路面舵角のまま変更なし
+> - `protocol_version` を `0x0011`→**`0x0012`** に上げる
+
+> **v0.17 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-08。`pi_uart_protocol_v0.17_delta.md`）**
+> - TV（`src/control/torque_vectoring.c`）: ヨーレートの PI をやめ、総駆動トルクを左右の荷重の比で配る。
+>   `左右差 = 総駆動トルク × clamp(tv_load_gain_s2_per_m × 車速 × 実測ヨーレート, ±tv_max_ratio)`。
+>   各輪は個別に ±最大トルクへ収める（外輪が上限でも内輪へ載せない）。積分・規範モデルは無い
+> - `param_id` `0x0021`-`0x0029` を廃止（`UNKNOWN_ID`）、`0x002B`・`0x002C` を新設。`0x002A` は残る
+> - `TELEMETRY` のオフセット 66 を `yaw_rate_target` → `tv_ratio`（i16、0.0001）に置き換え（LEN 84 のまま）
+> - `protocol_version` を `0x0010`→**`0x0011`** に上げる
 
 > **v0.16 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-05。`pi_uart_protocol_v0.16_delta.md`）**
 > - 足回りの制御の調整パラメータを `CONFIG_SET`/`CONFIG_GET` で読み書きする（`param_id` `0x0011`-`0x0015`・
@@ -489,8 +506,10 @@ typedef struct {
     int16_t  torque_req[2];        /* ★v0.16。0.0001 N·m [RL, RR] スリップ制限が絞る前の
                                        要求（制動は負）。torque_cmd との差が絞った量   */
     int16_t  abs_limit_nm;         /* ★v0.16。0.0001 N·m ABS の制動トルクの上限       */
-    int16_t  yaw_rate_target;      /* ★v0.16。0.001 rad/s TV の規範ヨーレート         */
-    int16_t  tv_moment_nm;         /* ★v0.16。0.0001 N·m TV が要求したヨーモーメント   */
+    int16_t  tv_ratio;             /* ★v0.17。0.0001 TV の配分の比率（左旋回で正＝右輪が
+                                       多い。v0.16 はここに yaw_rate_target）       */
+    int16_t  tv_moment_nm;         /* ★v0.16。0.0001 N·m TV が要求した左右差のヨー
+                                       モーメント換算                              */
     uint8_t  temp[4];              /* 1 degC [RL, RR, ST, MCU] ★符号なし          */
     uint8_t  batt_voltage_drive;   /* 0.05 V/LSB  駆動系                          */
     uint8_t  batt_voltage_signal;  /* 0.05 V/LSB  シグナル系                      */
@@ -1337,7 +1356,9 @@ MD が返す status バイトをそのまま転送し、上位ビットを STM32
 | `0x0010` | TC 有効 | 0/1 | ★v0.8 で STM32 側が実装。それ以前は `result=1`（不明な param_id） |
 | `0x0011` | TC スリップ率しきい値 | float | |
 | `0x0020` | トルクベクタリング 有効 | 0/1 | ★v0.8 で STM32 側が実装。それ以前は `result=1` |
-| `0x0021` | TV ゲイン | float | |
+| ~~`0x0021`-`0x0029`~~ | ~~TV（ヨーレート PI）~~ | — | **v0.17 で廃止**（`result=1`） |
+| `0x002A`-`0x002C` | TV: 同定用のヨーモーメント / 配分の比率のゲイン / 比率の上限 | float | ★v0.17。表は `src/control/control_params.h` |
+| `0x0081`-`0x0082` | ステアのリンクの換算（gain / cubic） | float | ★v0.18。同上。設定時に `LIMITS` を送り直す |
 | `0x0030` | 速度制御 Kp | float | |
 | `0x0031` | 速度制御 Ki | float | |
 | `0x0040` | **LiDAR 出力フォーマット** | **enum** | 下表。★v0.4 で bool から変更 |
@@ -1696,6 +1717,8 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.18** | 2026-10-08 | **`uart_protocol.md` v0.18 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** ステアのリンクの換算（モータ角→路面舵角の3次式、`param_id` `0x0081`・`0x0082`、設定時に `LIMITS` を再送）。舵角の指令・報告・最大舵角が実際の路面舵角になる |
+| **v0.17** | 2026-10-08 | **`uart_protocol.md` v0.17 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** TV をヨーレートの PI から荷重比例の配分へ置き換え（`param_id` `0x0021`-`0x0029` 廃止、`0x002B`・`0x002C` 新設、`TELEMETRY` オフセット 66 を `tv_ratio` に） |
 | **v0.16** | 2026-10-05 | **`uart_protocol.md` v0.16 に対応。実装済み・ビルド済み、未書き込み。`TELEMETRY` の LEN 74→84（制御の介入量を追加）。** 足回りの制御の調整パラメータ（`src/control/control_params.h` の表）を `CONFIG_SET`/`CONFIG_GET` に追加。TC・ABS をスリップ率の連続 PI へ、片輪を絞った分を反対輪へ載せない、TV の配分・規範の1次遅れ・同定用のヨーモーメント注入。`host/` でホスト実行。`protocol_version` を `0x000F`→`0x0010` に更新 |
 | **v0.15** | 2026-09-27 | **`uart_protocol.md` v0.15 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** ABS（制動時の後輪ロック防止）を追加。`param_id = 0x0070`（`ABS_ENABLE`、既定は有効）、`TELEMETRY.flags` bit20=`ABS_ACTIVE`。`protocol_version` を `0x000E`→`0x000F` に更新。Pi 側も対応済み |
 | **v0.14** | 2026-08-30 | **`uart_protocol.md` v0.14 に対応。Pi 側発の提案。STM32 側は未実装。** `COMMAND`(0x10) の `flags2` に bit1=`WINKER_LEFT`・bit2=`WINKER_RIGHT` を追加、`TELEMETRY`(0x02) の `flags` に bit18=`WINKER_LEFT_ACTIVE`・bit19=`WINKER_RIGHT_ACTIVE` を追加（**ワイヤ形式・LEN の変更は無し**）。自律走行中に右左折・車線変更の意思表示ができない実装漏れへの対応（`Lighting_SetWinker()` は既存だが `ApplyRasCommand()` から呼ばれていなかった）。両ビットを両方立てるとハザード（左右同時点滅）。点滅の周期・位相・既存灯火系との調停は STM32 側に一任。`protocol_version` を `0x000D`→`0x000E` に更新。Pi 側は `protocol.toml`/`raspi/msgs`/`sim/stm32.py`/GUI を実装済み。**STM32 側は `ApplyRasCommand()` への配線・`TELEMETRY.flags` の返却・`COMMAND` 途絶時の強制解除が未実装** |

@@ -45,7 +45,9 @@ class TestEndToEnd(unittest.TestCase):
                 # COMMAND）が実際に生んだ遅れ。`TRUTH.control_latency_s`（0）ではない
                 cls.truth = replace(TRUTH, control_latency_s=float(np.median(lat)))
         cls.before = VehicleSpec.load(cls.toml)
-        cls.res = analyze(paths, cls.before)
+        # 当てはめ→toml→シムの再現を見るので、舵の効きは畳み込まずそのまま書く（シムの STM32 は
+        # リンクの換算を持たない。畳み込みは test_fit.py の TestFoldSteerLink）
+        cls.res = analyze(paths, cls.before, fold_link=False)
         toml_update.apply_dynamics(cls.toml, cls.res.results)
         cls.after = VehicleSpec.load(cls.toml)
 

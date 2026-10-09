@@ -13,6 +13,7 @@ from raspi.auto._sysid_common import TestGate as Gate  # noqa: E402
 from raspi.auto.registry import PLANNERS  # noqa: E402
 from raspi.auto.sysid_corner import SysIdCorner  # noqa: E402
 from raspi.auto.sysid_steer import SysIdSteer  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs.types import VehicleState  # noqa: E402
 
 
@@ -68,10 +69,11 @@ class TestSteerStair(unittest.TestCase):
 
 
 class TestCornerRamp(unittest.TestCase):
-    """旋回試験は速度を一定の割合で上げ、限界（後輪が滑った・横加速度が頭打ち）に達したら、舵を
+    """旋回試験は速度を一定の割合で上げ、限界（横加速度が頭打ち・後輪が流れた）に達したら、舵を
     保ったまま目標速度0へゆっくり止める（2026-09-27）。"""
 
-    def _run(self, a_lat_cap: float | None, slip_above: float | None = None):
+    def _run(self, a_lat_cap: float | None, slip_above: float | None = None,
+             oversteer_above: float | None = None):
         from raspi.msgs.types import Scan
         pl = SysIdCorner()
         prm = {s.key: s.default for s in SysIdCorner.params}
@@ -88,6 +90,8 @@ class TestCornerRamp(unittest.TestCase):
             for _k in range(10):             # 100Hz の全サンプル
                 t_ns += 10_000_000
                 a = v * v * kappa if a_lat_cap is None else min(v * v * kappa, a_lat_cap)
+                if oversteer_above is not None and v > oversteer_above:
+                    a *= 1.3                 # 後輪が流れて内側へ巻き込む（曲率が増える）
                 rear = v * 1.2 if slip_above is not None and v > slip_above else v
                 pl.on_vehicle_state(VehicleState(t_capture=t_ns, speed=v, yaw_rate=a / max(v, 1e-3),
                                                  wheel_speed=[v, v, rear, rear], armed=True))
@@ -103,10 +107,16 @@ class TestCornerRamp(unittest.TestCase):
         self.assertGreater(max(speeds), v_limit)
         self.assertLess(max(speeds), v_limit + 0.2)        # 限界の直後で止まる
 
-    def test_rear_slip_is_the_limit(self):
-        """後輪が滑ったら（横加速度がまだ伸びていても）限界。"""
+    def test_wheelspin_alone_is_not_the_limit(self):
+        """後輪が空転しても、車体が滑っていなければ（横加速度が伸び、曲率も変わらない）続ける。
+        実機で内輪の空転だけで打ち切り、mu が低く出た（2026-10-08）。"""
         st, speeds = self._run(a_lat_cap=None, slip_above=1.2)
-        self.assertEqual(st.reason, "完了（グリップ限界: 後輪が滑った）")
+        self.assertTrue(st.reason.startswith("完了（上限速度まで"), st.reason)
+
+    def test_rear_sliding_out_is_the_limit(self):
+        """後輪が流れて曲率が跳ねたら（横加速度は伸び続けていても）限界。"""
+        st, speeds = self._run(a_lat_cap=None, oversteer_above=1.2)
+        self.assertEqual(st.reason, "完了（グリップ限界: 後輪が流れた）")
         self.assertLess(max(speeds), 1.2 + 0.15)
 
     def test_stops_gently_holding_the_steer(self):
@@ -115,7 +125,9 @@ class TestCornerRamp(unittest.TestCase):
         self.assertTrue(st.ready)
         self.assertFalse(st.brake)
         self.assertEqual(st.target_speed, 0.0)
-        self.assertAlmostEqual(abs(st.target_steer), math.radians(SysIdCorner.SETTINGS["steer_deg"]), places=6)
+        # 舵いっぱい（設定の 30° は、リンクの換算後の最大舵角 `max_steer` で頭打ちになる）
+        want = min(math.radians(SysIdCorner.SETTINGS["steer_deg"]), Vehicle.load().max_steer)
+        self.assertAlmostEqual(abs(st.target_steer), want, places=6)
         self.assertEqual(st.accel_limit, SysIdCorner.SETTINGS["stop_decel_m_s2"])
 
     def test_without_saturation_runs_to_v_max(self):
@@ -209,6 +221,25 @@ class TestSensorGuard(unittest.TestCase):
         self._feed(g, 2.0, 2.6, 1.0)           # 全開加速の空転（30%）
         self._feed(g, 1.5, 0.0, 1.0)           # 制動で後輪がロック（前輪の方が速い）
         self._feed(g, 0.0, 0.1, 1.0)           # 静止付近の小さな食い違い
+        self.assertIsNone(g.fault)
+
+    def test_silent_motor_driver_trips_with_its_own_cause(self):
+        """MD が黙ると車輪の値が古いまま固まる。前後輪の食い違いより先に、原因を正しく言って止める
+        （2026-10-08、右後輪の MD が電圧異常で止まり「前輪エンコーダの不調？」と表示した）。"""
+        ok, lost = 0x11, 0x03                  # 運転中＋通信OK / 運転中＋電圧異常（通信OK なし）
+        g = SensorGuard()
+        g.update(VehicleState(t_capture=1, speed=1.3, wheel_speed=[1.3, 1.3, 1.3, 1.6],
+                              md_status=[ok, ok, 0x31], armed=True))
+        self.assertIsNone(g.fault)
+        g.update(VehicleState(t_capture=2, speed=1.3, wheel_speed=[1.3, 1.3, 1.3, 1.6],
+                              md_status=[ok, lost, 0x31], armed=True))
+        self.assertIn("右後輪のモータドライバが無応答", g.fault)
+        self.assertIn("電圧異常", g.fault)
+        self.assertNotIn("エンコーダ", g.fault)
+
+    def test_unreported_md_status_is_not_a_fault(self):
+        g = SensorGuard()
+        self._feed(g, 1.0, 1.0, 0.5)           # md_status は既定の 0（状態が来ていない）
         self.assertIsNone(g.fault)
 
     def test_cause_distinguishes_wheelspin_from_frozen_encoder(self):

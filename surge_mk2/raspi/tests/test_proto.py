@@ -124,7 +124,7 @@ class TestPacketDefinitions(unittest.TestCase):
                 self.assertEqual(cls.DIR, "s2p" if cls.TYPE < 0x10 else "p2s")
 
     def test_protocol_version(self):
-        self.assertEqual(packets.PROTOCOL_VERSION, 0x0010)
+        self.assertEqual(packets.PROTOCOL_VERSION, 0x0012)
 
     def test_generated_files_up_to_date(self):
         """protocol.toml を編集して再生成し忘れていないか。"""
@@ -158,7 +158,7 @@ class TestTelemetryWireLayout(unittest.TestCase):
             torque_cmd=[81, 82],
             slip=[91, -92],
             tc_limit_nm=[101, 102],
-            torque_req=[111, -112], abs_limit_nm=121, yaw_rate_target=-131, tv_moment_nm=141,
+            torque_req=[111, -112], abs_limit_nm=121, tv_ratio=-131, tv_moment_nm=141,
             temp=[11, 22, 33, 44],
             batt_voltage_drive=201, batt_voltage_signal=202,
             batt_current_drive=203, batt_current_signal=204,
@@ -199,7 +199,7 @@ class TestTelemetryWireLayout(unittest.TestCase):
         self.assertEqual(i16(60), 111, "torque_req[0] @60")
         self.assertEqual(i16(62), -112, "torque_req[1] @62")
         self.assertEqual(i16(64), 121, "abs_limit_nm @64")
-        self.assertEqual(i16(66), -131, "yaw_rate_target @66")
+        self.assertEqual(i16(66), -131, "tv_ratio @66")
         self.assertEqual(i16(68), 141, "tv_moment_nm @68")
         self.assertEqual(buf[70], 11, "temp[0] @70")
         self.assertEqual(buf[74], 201, "batt_voltage_drive @74")

@@ -60,7 +60,8 @@ from mcap.reader import make_reader
 from scipy.optimize import least_squares, minimize, minimize_scalar
 from scipy.signal import cont2discrete, lfilter
 
-from raspi.auto._sysid_common import REAR_SLIP_LIMIT, corner_limit, corner_windows, first_saturated, rear_slip
+from raspi.auto._sysid_common import (REAR_SLIP_LIMIT, corner_limit, corner_windows, first_saturated,
+                                      md_down, rear_slip)
 from raspi.auto.sysid_latency import LATENCY_CODE_MOD, LATENCY_CODE_STEP_RAD
 from sim.vehicle import (DriveInput, SpeedController, SteerLink, SteerServo, VehicleSpec, backlash,
                          brake_speed_factor, next_speed)
@@ -143,6 +144,13 @@ class Log:
     sensor_notes: list[str] = field(default_factory=list)
     #: 記録したときの STM32 のファームの ID（`/diag/link` の `fw_id`。無い記録は None）
     fw_id: int | None = None
+    #: 記録したときに STM32 に入っていたステアのリンクの換算 `(steer_link_gain, steer_link_cubic)`
+    #: （`/diag/link` の `control_params`。無い記録＝プロトコル v0.17 以前は換算なし＝`(1, 0)`）。
+    #: 記録の舵角（`steer_actual`・指令）はこの換算を通した後の路面舵角
+    steer_link: tuple[float, float] = (1.0, 0.0)
+    #: モータドライバが無応答だった区間 `(始まり [s], 終わり [s], 名前)`（`md_dropouts`）。その間、
+    #: STM32 はその車輪の速度・電流を最後の値のまま送り、止まった MD は駆動も制動もしない
+    md_dropouts: list[tuple[float, float, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -165,6 +173,22 @@ def _cmd_from_json(t: float, o: dict) -> Cmd:
                accel_limit=float(o.get("accel_limit", 0.0)),
                steer_rate_limit=float(o.get("steer_rate_limit", 0.0)),
                brake_torque=float(o.get("brake_torque", 0.0)))
+
+
+def md_dropouts(vs_msgs: list[tuple[float, dict]]) -> list[tuple[float, float, str]]:
+    """モータドライバが無応答だった区間 `(始まり, 終わり, 名前)`（`vs_msgs` と同じ時間軸、時刻順）。
+    判定はプランナーの `SensorGuard` と同じ（`_sysid_common.md_down`）。"""
+    out: list[tuple[float, float, str]] = []
+    open_: dict[str, float] = {}
+    t = 0.0
+    for t, vs in vs_msgs:
+        down = md_down(vs.get("md_status") or [])
+        for name in down:
+            open_.setdefault(name, t)
+        for name in [n for n in open_ if n not in down]:
+            out.append((open_.pop(name), t, name))
+    out.extend((t0, t, name) for name, t0 in open_.items())
+    return sorted(out)
 
 
 def build_log(vs_msgs: list[tuple[float, dict]], cmds: list[Cmd],
@@ -206,7 +230,8 @@ def build_log(vs_msgs: list[tuple[float, dict]], cmds: list[Cmd],
     return Log(samples=samples,
                cmds=[replace(c, t=c.t - t0) for c in cmds],
                scans=[ScanStamp(s.t_done - t0, s.t_pub - t0, s.seq) for s in scans],
-               sensor_notes=sensor_notes)
+               sensor_notes=sensor_notes,
+               md_dropouts=[(a - t0, b - t0, name) for a, b, name in md_dropouts(vs_msgs)])
 
 
 # ── 統計 ──────────────────────────────────────────────────────────────────
@@ -425,6 +450,7 @@ def load_log(path: str | Path) -> Log:
     cmd_raw: list[tuple[int, int, dict]] = []
     scan_raw: list[tuple[int, int, dict]] = []
     fw_id = None
+    link: dict[str, float] = {}
     with open(path, "rb") as f:
         reader = make_reader(f)
         for _schema, channel, message in reader.iter_messages(
@@ -432,6 +458,9 @@ def load_log(path: str | Path) -> Log:
             obj = json.loads(message.data)
             if channel.topic == "/diag/link":
                 fw_id = fw_id if fw_id is not None else obj.get("fw_id")
+                # STM32 が答えた値（接続直後は空。最後に見えた値を採る）
+                link.update({k: float(v) for k, v in (obj.get("control_params") or {}).items()
+                             if k in ("steer_link_gain", "steer_link_cubic")})
             elif channel.topic == "/vehicle_state":
                 vs_raw.append((int(obj.get("t_capture", 0)), message.log_time, obj))
             elif channel.topic == "/cmd":
@@ -453,6 +482,7 @@ def load_log(path: str | Path) -> Log:
                                        int(o.get("seq", 0))))
     log = build_log(vs_msgs, cmds, scans)
     log.fw_id = fw_id
+    log.steer_link = (link.get("steer_link_gain", 1.0), link.get("steer_link_cubic", 0.0))
     return log
 
 
@@ -1691,15 +1721,15 @@ _CORNER_ENOUGH_M_S = 2.2
 
 
 def _corner_split(log: Log) -> tuple[list[_Stage], int | None, list[str], str]:
-    """旋回の区間と、限界に達した区間の番号（無ければ None）と所見と限界の理由。限界は後輪が
-    滑った・横加速度が頭打ちの早い方（`_sysid_common.corner_limit`、プランナーと同じ判定）。"""
+    """旋回の区間と、限界に達した区間の番号（無ければ None）と所見と限界の理由。限界は横加速度が
+    頭打ち・後輪が流れた（曲率が跳ねた）の早い方（`_sysid_common.corner_limit`、プランナーと同じ判定）。"""
     s = log.samples
     bias, n_still = _gyro_bias(s)
     notes = []
     if n_still < 20:
         notes.append("停止区間が短く、ジャイロのバイアスを補正していない")
     stages = _corner_stages(s, bias)
-    first, why = corner_limit([(st.v, st.a_lat, st.slip) for st in stages])
+    first, why = corner_limit([(st.v, st.a_lat) for st in stages])
     return stages, first, notes, why
 
 
@@ -1710,9 +1740,10 @@ def fit_corner(log: Log, base: VehicleSpec | None = None) -> FitResult:
     限界に達した区間と、その手前の余裕のある区間に分け、限界までに出た最大の横加速度 / g。余裕の
     ある区間は舵の効き・アンダーステア勾配の材料として `fit_geometry()` が使う。
 
-    限界は**後輪が滑った**（滑り率）か**横加速度が頭打ち**の早い方（2026-09-27、実機で後輪駆動の
-    この車は後輪が先に滑った）。シムは横の限界を前輪側の頭打ち（`mu`）でしか表現しないので、
-    後輪が先に滑るときは所見で知らせる（限界付近の挙動は再現されない）。
+    限界は車体が滑ったこと——**横加速度が頭打ち**か**後輪が流れた**（曲率が跳ねた）の早い方。後輪の
+    空転（滑り率）では区切らない（2026-10-08、内輪の空転だけで限界と読んで `mu` が低く出た）。シムは
+    横の限界を前輪側の頭打ち（`mu`）でしか表現しないので、後輪が先に流れるときは所見で知らせる
+    （限界付近の挙動は再現されない）。
     """
     stages, first_sat, notes, why = _corner_split(log)
     n_sat = sum(1 for x in log.samples if abs(x.yaw_rate) >= _GYRO_SAT)
@@ -1744,8 +1775,8 @@ def fit_corner(log: Log, base: VehicleSpec | None = None) -> FitResult:
     notes.append(f"限界 {a_sat:.2f}m/s²（{why}、{lim.v:.2f}m/s・後輪の滑り率 {lim.slip:.2f}）")
     early = [st for st in stages[:max(1, first_sat - 3)]]
     k_ref = float(np.median([abs(st.kappa) for st in early])) if early else abs(lim.kappa)
-    if why == "後輪が滑った" or any(abs(st.kappa) > 1.08 * k_ref for st in stages[first_sat - 1:first_sat + 1]):
-        notes.append("限界では後輪が先に滑った（後輪駆動のオーバーステア寄り）。シムは横の限界を前輪側の"
+    if why == "後輪が流れた" or any(abs(st.kappa) > 1.08 * k_ref for st in stages[first_sat - 1:first_sat + 1]):
+        notes.append("限界では後輪が先に流れた（後輪駆動のオーバーステア寄り）。シムは横の限界を前輪側の"
                      "頭打ち（mu）で表すので、mu は限界の横加速度として合うが、限界を超えたときの挙動"
                      "（後輪が流れる）は再現されない")
     return FitResult({"mu": a_sat / GRAVITY_MPS2}, notes)

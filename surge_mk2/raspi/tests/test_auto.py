@@ -20,6 +20,7 @@ import onnx  # noqa: E402
 from onnx import TensorProto, helper  # noqa: E402
 
 from raspi.core.vehicle import Vehicle  # noqa: E402
+from raspi.core.control_params import steer_relink  # noqa: E402
 from raspi.auto.base import extend_disparity as _extend  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.auto.cam_centerline import CamCenterline  # noqa: E402
@@ -1337,6 +1338,8 @@ class TestE2ELidar(unittest.TestCase):
             # echoモデルはsteer_norm_in(=0.2/0.45)をそのまま出力し、それが舵角速度として
             # 0.2へ積分で足し込まれる
             expected = 0.2 + (0.2 / 0.45) * 2.0 * 0.1
+            # 契約に `steer_link` の無いモデル＝リンクの換算なしの頃の舵角。今の路面舵角へ直って出る
+            expected = steer_relink(expected, (1.0, 0.0), Vehicle.load().steer_link)
             self.assertAlmostEqual(st.target_steer, expected, places=4)
 
     def test_front_obstacle_is_reported_but_does_not_force_a_stop(self):
@@ -1460,6 +1463,17 @@ class TestE2ELidar(unittest.TestCase):
             params = E2ELidar.merged({"steer_tau": 0.0})
             st = None
             for _ in range(5):   # 0.45 / (2.0*0.1) = 2.25 stepで積分が飽和するのに十分な回数
+                st = p.plan(scan, None, params, 0.1)
+            # 契約に `steer_link` の無いモデルの 0.45 は「モータ角×0.5」。今の路面舵角へ直って出る
+            link = Vehicle.load().steer_link
+            self.assertAlmostEqual(st.target_steer, steer_relink(0.45, (1.0, 0.0), link), places=5)
+
+            # 今の換算で学習したモデル（契約に同じ `steer_link`）はそのまま出る
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0, "steer_link": list(link)}))
+            p = E2ELidar(model_path=model_path)
+            for _ in range(5):
                 st = p.plan(scan, None, params, 0.1)
             self.assertAlmostEqual(st.target_steer, 0.45, places=5)
 

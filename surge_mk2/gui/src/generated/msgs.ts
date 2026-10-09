@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x6645a3f5
+export const MSGS_SCHEMA = 0x42d933f4
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -71,9 +71,12 @@ export type VehicleState = {
   torque_req: [number, number]
   /** [N·m] ABS が決めている制動トルクの上限（左右共通）。働いていなければ最大トルクと同じ */
   abs_limit_nm: number
-  /** [rad/s] TV の規範ヨーレート（舵角と車速から作った「本来出るはずのヨーレート」）。`yaw_rate` との差が偏差 */
-  yaw_rate_target: number
-  /** [N·m] TV の PI が要求したヨーモーメント（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド */
+  /**
+   * TV の配分の比率（左右の荷重差÷荷重和 の見積り。左旋回で正＝右輪が多い）。左右のトルク差＝総駆動
+   * トルク×これ。★v0.17（v0.16 の記録にはこの代わりに `yaw_rate_target`＝TV の規範ヨーレートが入っている）
+   */
+  tv_ratio: number
+  /** [N·m] TV が要求した左右トルク差のヨーモーメント換算（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド */
   tv_moment_nm: number
   /** [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None */
   temp: [number | null, number | null, number | null, number | null]
