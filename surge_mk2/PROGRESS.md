@@ -26,7 +26,12 @@
   telemetry_node は `auto/cmd` 途絶時の制動を最大にし、舵を保持。`tools/ctrl_tune/plant.py` が `steer_gain_cubic = 0.0` を
   読み飛ばしていたのを修正（机上値 -0.39 が残り、舵の非線形を二重に掛けていた。bench は旋回の場面だけ数値が少し動く）。
   シム（`sim/stm32.py`）も ARM が外れたあとの制動と新しいフラグを再現する。
-- **確認したこと**: 3リポジトリともビルド／テスト成功（Pi: `./tools/check.sh` すべて通過・pytest 1349 件、
+- **同日の追加（バンビの指示）**: ①**ブレーキホールド**——位置保持は実機で検証済みとのことで、フェイルセーフだけでなく
+  すべての制動（brake・自動停止・強制制動）で、止まったら後輪の位置保持へ移るようにした。`param_id` 0x0090
+  （`BRAKE_HOLD_ENABLE`、既定は有効）で ON/OFF、GUI の設定パネルにチェックボックス。移る条件（0.2m/s 未満が 0.3 秒）は机上値。
+  ②**LiDAR セクタの時刻**を受信時刻から STM32 の `t_start_us` の換算値へ（`BusBridge._sector_start_ns`。シムで約 9ms 早い）。
+  同定は全部取り直す前提で、**`control_latency_s` は取り直すこと**（`vehicle.toml` に注記）。③ステアの不感帯はそのまま。
+- **確認したこと**: 3リポジトリともビルド／テスト成功（Pi: `./tools/check.sh` すべて通過・pytest 1353 件、
   STM32: `tools/ctrl_tune` の bench が `src/control` の変更前後で一致・pytest 23 件、MD: `make -C tests`）。シムの STM32 と
   io_node を実際の UART フレームでつなぎ、デッドマン → 制動 → 停止後 DISARM、走行中の DISARM → STM32 が停車まで制動、を確認。
 - **実機でまだ確かめていないこと（書き込んだら最初に見る）**: ①ARM から `armed` が立つまでの時間（MD の起動待ち。

@@ -17,6 +17,10 @@
 >   ARM ビットがそのまま駆動電源で、Pi が通信途絶・デッドマンで DISARM を送ると MD ごと電源が落ちて惰行していた。
 >   **Pi（io_node）も、異常系ではまず `arm`+`brake`（最大）を送り、停止を確認してから DISARM に落とす**
 > - **ステア中心が未較正の間、STM32 は ARM されても駆動電源を入れない**
+> - **ブレーキホールドを追加**（`param_id` `0x0090` `BRAKE_HOLD_ENABLE`、既定は有効。GUI の設定から ON/OFF）:
+>   制動して止まったら後輪の位置保持へ自動で移る。brake・自動停止・フェイルセーフのどの制動でも働く
+> - **LiDAR スキャンのセクタ時刻（`Scan.sector_t_ns`）は、受信時刻ではなく STM32 の `t_start_us` を時刻同期で
+>   換算した値になった**（Pi 側だけの変更。約 9ms 早くなる。`control_latency_s` は取り直すこと）
 > - **io_node は `protocol_version` が一致し、`[control]` が STM32 に入るまで ARM を通さない**
 >   （`diag/link` の `arm_inhibited`・`arm_inhibit_reason`）
 > - `steer_rate_limit` = 0 のときの STM32 の既定は 0.5 rad/s（値はほぼ同じ。専用の定数にしただけ）
@@ -1043,6 +1047,7 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 | `0x0051` | **片輪浮き対策の左右速度差のしきい値** [m/s] | f32 | ★v0.16。§5.8.4。`WHEEL_LIFT_DIFF_THRESHOLD_M_S` |
 | `0x0060` | **自動停止の安全マージン** [cm] | f32 | ★v0.12 で STM32 ファームウェアが実装。§5.8.3。範囲 0.0-100.0、既定15.0。Pi 側 `io_node` が GUI の操作に応じて送信 |
 | `0x0070` | ABS 有効 | 0/1 | ★v0.15 で STM32 ファームウェアが実装。制動モード（brake・自動停止・フェイルセーフ）だけに効く。Pi 側 `io_node` が起動時に取得し、GUI のトグルに応じて送信。既定値は有効 |
+| `0x0090` | ブレーキホールド 有効 | 0/1 | ★v0.19。制動（brake・自動停止・フェイルセーフ）して止まったら、後輪の位置保持（サイドブレーキと同じ仕組み）へ自動で移る。坂でも動かない。保持中は `flags` bit17 `side_brake_active`。Pi 側 `io_node` が起動時に取得し、GUI の設定のトグルに応じて送信。既定値は有効 |
 | `0x0071`-`0x0073` | **ABS の調整パラメータ** | f32 | ★v0.16。§5.8.4。`ABS_SLIP_TARGET`/`ABS_KP_NM_PER_M_S`/`ABS_KI_NM_PER_M` |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
 
@@ -1735,7 +1740,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.16** | 2026-10-05 | **`CONFIG_SET`/`CONFIG_GET` の `param_id` を追加、`TELEMETRY` に制御の介入量を追加（LEN 74→**84**: `torque_req[2]`・`abs_limit_nm`・`yaw_rate_target`・`tv_moment_nm`、`flags` bit21=`WHEEL_LIFT_ACTIVE`。§5.3）。** 足回りの制御（TC・ABS・片輪浮き対策・TV）の調整パラメータ `0x0011`-`0x0015`・`0x0021`-`0x002A`・`0x0051`・`0x0071`-`0x0073`（§5.8.4。定義は STM32 側 `control_params.h` の表、値は Pi 側 `vehicle.toml` の `[control]`）。STM32 の制御は TC・ABS をスリップ率の連続 PI へ（低速でも働く、TC は車速指令の減速にも掛かる、片輪を絞った分を反対輪へ載せない）、TV は左右差を保つ配分・規範の1次遅れ・同定用のヨーモーメント注入。`protocol_version` を `0x000F`→`0x0010` に上げる。Pi 側は `protocol.toml`・`raspi/core/control_params.py`（送信・照合・読み戻し・一時上書き）・`LinkDiag.control_params_*`・`DriveCmd.fw_overrides`・GUI・`tools/ctrl_tune`（同定と最適化）を対応。**STM32 は未書き込み、実機での動作検証は未了**（`pi_uart_protocol_v0.16_delta.md`） |
 | **v0.17** | 2026-10-08 | **TV をヨーレートの PI から、後輪左右の荷重に比例した配分（フィードフォワード）へ置き換えた（ワイヤ形式・LEN の変更なし）。** `param_id` `0x0021`-`0x0029` を廃止、`0x002B`（`TV_LOAD_GAIN_S2_PER_M`）・`0x002C`（`TV_MAX_RATIO`）を新設。`TELEMETRY` のオフセット 66 を `yaw_rate_target` → `tv_ratio`（0.0001）に置き換え。`protocol_version` `0x0010`→`0x0011`（`pi_uart_protocol_v0.17_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了** |
 | **v0.18** | 2026-10-08 | **舵角を実際の路面舵角にした（ワイヤ形式・LEN の変更なし）。** STM32 がステアのリンクの換算（`路面舵角 = gain·x + cubic·x³`、x = モータ角×0.5）で指令・報告・`LIMITS.max_steer_rad`・車速の射影を行う。`param_id` `0x0081`（`STEER_LINK_GAIN`）・`0x0082`（`STEER_LINK_CUBIC`）を新設、設定時に `LIMITS` を送り直す。`protocol_version` `0x0011`→`0x0012`（`pi_uart_protocol_v0.18_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了** |
-| **v0.19** | 2026-10-09 | **「止める」の意味を Pi・STM32・MD で揃えた（ワイヤ形式・LEN の変更なし）。** `TELEMETRY.flags` bit2 `armed` を「駆動電源 ON」から「上位の指令で走れる状態」へ変更し、bit22 `drive_power_on`・bit23 `md_fault` を新設。`md_status` bit6 `uncalibrated` を新設。STM32: 惰行は送信停止ではなくトルク 0 を送る／走行中に ARM が外れても停車まで駆動電源を切らず最大制動（上限3秒）／3台の MD が揃うまで `armed` にせず、走行中に崩れたら両後輪を最大制動してラッチ／ステア未較正の間は駆動電源を入れない／フェイルセーフは停止後に後輪の位置保持へ移る／`steer_rate_limit`=0 の既定を 0.5 rad/s の定数に。Pi: 異常系（`cmd` 途絶・`TELEMETRY` 途絶・デッドマン）は制動してから DISARM／`protocol_version` の一致と `[control]` の同期が済むまで ARM を通さない／`auto/cmd` 途絶時の制動を最大にし舵を保持。`protocol_version` を `0x0012`→`0x0013` に上げる。**STM32・MD は未書き込み、実機での動作検証は未了**（`pi_uart_protocol_v0.19_delta.md`、`cross_project_audit_2026-10.md`） |
+| **v0.19** | 2026-10-09 | **「止める」の意味を Pi・STM32・MD で揃えた（ワイヤ形式・LEN の変更なし）。** `TELEMETRY.flags` bit2 `armed` を「駆動電源 ON」から「上位の指令で走れる状態」へ変更し、bit22 `drive_power_on`・bit23 `md_fault` を新設。`md_status` bit6 `uncalibrated` を新設。STM32: 惰行は送信停止ではなくトルク 0 を送る／走行中に ARM が外れても停車まで駆動電源を切らず最大制動（上限3秒）／3台の MD が揃うまで `armed` にせず、走行中に崩れたら両後輪を最大制動してラッチ／ステア未較正の間は駆動電源を入れない／フェイルセーフは停止後に後輪の位置保持へ移る／`steer_rate_limit`=0 の既定を 0.5 rad/s の定数に／ブレーキホールド（`param_id` `0x0090`、既定は有効）を新設。Pi: LiDAR セクタの時刻を STM32 の `t_start_us` から換算／異常系（`cmd` 途絶・`TELEMETRY` 途絶・デッドマン）は制動してから DISARM／`protocol_version` の一致と `[control]` の同期が済むまで ARM を通さない／`auto/cmd` 途絶時の制動を最大にし舵を保持。`protocol_version` を `0x0012`→`0x0013` に上げる。**STM32・MD は未書き込み、実機での動作検証は未了**（`pi_uart_protocol_v0.19_delta.md`、`cross_project_audit_2026-10.md`） |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）
 
