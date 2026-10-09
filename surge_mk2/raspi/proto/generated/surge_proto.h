@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x0012u
+#define SURGE_PROTOCOL_VERSION  0x0013u
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -63,6 +63,8 @@
 #define FLG_WINKER_RIGHT_ACTIVE        0x00080000u
 #define FLG_ABS_ACTIVE                 0x00100000u
 #define FLG_WHEEL_LIFT_ACTIVE          0x00200000u
+#define FLG_DRIVE_POWER_ON             0x00400000u
+#define FLG_MD_FAULT                   0x00800000u
 
 /* md_status[i] (u8) */
 #define MDS_RUNNING       0x01u
@@ -71,6 +73,7 @@
 #define MDS_OVERCURRENT   0x08u
 #define MDS_COMM_OK       0x10u
 #define MDS_LIMIT_SYNCED  0x20u
+#define MDS_UNCALIBRATED  0x40u
 
 /* COMMAND.flags (u8)。light_mode は bit3-4 の2ビット幅 = (mode << LIGHT_SHIFT) & LIGHT_MASK */
 #define CMD_FLG_ARM          0x01u

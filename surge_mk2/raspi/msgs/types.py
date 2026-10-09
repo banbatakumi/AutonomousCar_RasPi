@@ -197,7 +197,12 @@ class VehicleState(MsgBase):
 
     # ── flags を解いたもの（GUI と安全判定が毎回ビット演算するのを避ける） ──
     mode: int = 0                          #: 0=DISARM 1=MANUAL 2=AUTO
+    #: STM32 が上位の指令で走れる状態（★v0.19。それまでは「駆動電源が入っている」だった）。
+    #: ARM を要求しても、MD の起動待ち（約1秒）・ステア未較正・E-Stop の間は False
     armed: bool = False
+    #: 駆動電源が入っている（★v0.19）。`armed` でなくても、ARM が外れたあと STM32 が停車を
+    #: 待って制動している間は True
+    drive_power_on: bool = False
     estop_active: bool = False
     uart_timeout: bool = False
     tc_active: bool = False                #: 今まさに TC が介入中
@@ -366,8 +371,11 @@ class LinkDiag(MsgBase):
     estop_active: bool = False
     #: 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない**
     drive_power_locked: bool = False
-    #: io_node が `arm` を封印しているか（`--allow-arm` が無い状態）
+    #: io_node が `arm` を封印しているか（`--allow-arm` が無い・STM32 と版が合わない・
+    #: `[control]` が STM32 に入っていない）。理由は `arm_inhibit_reason`
     arm_inhibited: bool = True
+    #: 封印している理由（人が読む文。封印していなければ ""）
+    arm_inhibit_reason: str = ""
     #: 直近に受理した `cmd` の発行元。誰も出していなければ ""
     cmd_source: str = ""
     #: `cmd` が途絶して DISARM にフォールバックしているか

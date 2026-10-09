@@ -1,13 +1,25 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.18（`uart_protocol.md` **v0.18** に対応）
-**最終更新**: 2026-10-08（ステアのリンクの換算を追加。同日 v0.17: TV を荷重比例の配分へ置き換え）
+**バージョン**: v0.19（`uart_protocol.md` **v0.19** に対応）
+**最終更新**: 2026-10-09（v0.19:「止める」の意味を上位・MD と揃えた。2026-10-08 v0.18: ステアのリンクの換算、v0.17: TV を荷重比例の配分へ）
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.19 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-09。`pi_uart_protocol_v0.19_delta.md`）**
+> - `flags` bit2 `ARMED` = `Vehicle_IsArmed()`（以前は `Power_IsDriveOn()`）。bit22 `DRIVE_POWER_ON`・bit23 `MD_FAULT` を新設。
+>   `md_status` bit6 `UNCALIBRATED` を新設
+> - `Coast()`（`src/control/drive.c`）は送信を止めず、トルク 0 を送り続ける（MD は無通信 0.5 秒まで直前のトルクを出す）
+> - 走行中に ARM が外れたら、停車するまで駆動電源を切らず最大制動する（`UpdateDisarmBraking`、上限 3 秒）
+> - 3台の MD の健全性を毎周期見る（`UpdateMdHealth`・`Motors_NotReadyReason`）。揃うまで `armed` にせず、走行中に
+>   崩れたら両後輪を最大制動して駆動電源が切れるまでラッチする
+> - ステア中心が未較正の間は駆動電源を入れず、ステアへ何も指令しない
+> - フェイルセーフ（E-Stop・`COMMAND` 途絶）は最大制動で止めたあと、後輪の位置保持へ移る
+> - IMU の I2C 復旧をブロッキングしないステートマシンに、ジャイロのレンジを ±500 deg/s に
+> - `protocol_version` を `0x0012`→**`0x0013`** に上げる
 
 > **v0.18 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-08。`pi_uart_protocol_v0.18_delta.md`）**
 > - ステアのリンクの換算（`src/control/steering.c`）: `路面舵角 = steer_link_gain·x + steer_link_cubic·x³`、
@@ -1266,7 +1278,9 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 #define FLG_WINKER_RIGHT_ACTIVE       (1u << 19)   /* ★v0.14 右ウィンカーが今まさに点滅中 */
 #define FLG_ABS_ACTIVE                (1u << 20)   /* ★v0.15 ABS が制動トルクを削っている最中 */
 #define FLG_WHEEL_LIFT_ACTIVE         (1u << 21)   /* ★v0.16 片輪浮き対策がトルクを削っている最中 */
-/* bit21-31 予約（0 を送ること） */
+#define FLG_DRIVE_POWER_ON            (1u << 22)   /* ★v0.19 駆動電源が入っている */
+#define FLG_MD_FAULT                  (1u << 23)   /* ★v0.19 MD が使えず走行を止めている（電源が切れるまでラッチ） */
+/* bit24-31 予約（0 を送ること） */
 ```
 
 - **`mode` が bit8-9 から bit0-1 へ移動した。** v0.3 からの変更点なので注意
@@ -1283,13 +1297,14 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 MD が返す status バイトをそのまま転送し、上位ビットを STM32 が付加する。
 
 ```c
-#define MDS_RUNNING          (1u << 0)   /* MD 由来: 停止モードでない            */
+#define MDS_RUNNING          (1u << 0)   /* MD 由来: 受理済みの指令を実行中（回転中ではない） */
 #define MDS_VOLTAGE_OOR      (1u << 1)   /* MD 由来: 電源電圧異常                */
 #define MDS_OVERHEAT         (1u << 2)   /* MD 由来: 過熱                        */
 #define MDS_OVERCURRENT      (1u << 3)   /* MD 由来: 過電流                      */
 #define MDS_COMM_OK          (1u << 4)   /* ★STM32 が付加: 直近100ms 受信あり    */
 #define MDS_LIMIT_SYNCED     (1u << 5)   /* ★STM32 が付加: トルク上限が指令と一致 */
-/* bit6-7 予約 */
+#define MDS_UNCALIBRATED     (1u << 6)   /* ★v0.19 MD 由来: エンコーダ未校正     */
+/* bit7 予約 */
 ```
 
 ---
@@ -1718,6 +1733,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | バージョン | 日付 | 内容 |
 |---|---|---|
 | **v0.18** | 2026-10-08 | **`uart_protocol.md` v0.18 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** ステアのリンクの換算（モータ角→路面舵角の3次式、`param_id` `0x0081`・`0x0082`、設定時に `LIMITS` を再送）。舵角の指令・報告・最大舵角が実際の路面舵角になる |
+| **v0.19** | 2026-10-09 | **`uart_protocol.md` v0.19 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** `flags` bit2 `ARMED` の意味を `Vehicle_IsArmed()` へ変更、bit22 `DRIVE_POWER_ON`・bit23 `MD_FAULT`・`md_status` bit6 `UNCALIBRATED` を新設。惰行はトルク 0 を送る、ARM が外れても停車まで制動、MD の健全性監視と起動待ち、ステア未較正のガード、フェイルセーフの位置保持、IMU 復旧の非ブロッキング化、ジャイロ ±500 deg/s。`protocol_version` を `0x0012`→`0x0013` に更新（`pi_uart_protocol_v0.19_delta.md`） |
 | **v0.17** | 2026-10-08 | **`uart_protocol.md` v0.17 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** TV をヨーレートの PI から荷重比例の配分へ置き換え（`param_id` `0x0021`-`0x0029` 廃止、`0x002B`・`0x002C` 新設、`TELEMETRY` オフセット 66 を `tv_ratio` に） |
 | **v0.16** | 2026-10-05 | **`uart_protocol.md` v0.16 に対応。実装済み・ビルド済み、未書き込み。`TELEMETRY` の LEN 74→84（制御の介入量を追加）。** 足回りの制御の調整パラメータ（`src/control/control_params.h` の表）を `CONFIG_SET`/`CONFIG_GET` に追加。TC・ABS をスリップ率の連続 PI へ、片輪を絞った分を反対輪へ載せない、TV の配分・規範の1次遅れ・同定用のヨーモーメント注入。`host/` でホスト実行。`protocol_version` を `0x000F`→`0x0010` に更新 |
 | **v0.15** | 2026-09-27 | **`uart_protocol.md` v0.15 に対応。STM32 側発・実装済み、実機での動作検証は未了。ワイヤ形式・LEN の変更なし。** ABS（制動時の後輪ロック防止）を追加。`param_id = 0x0070`（`ABS_ENABLE`、既定は有効）、`TELEMETRY.flags` bit20=`ABS_ACTIVE`。`protocol_version` を `0x000E`→`0x000F` に更新。Pi 側も対応済み |

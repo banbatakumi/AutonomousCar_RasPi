@@ -99,7 +99,8 @@ class BusBridge:
     # ── 診断 ──
 
     def build_diag(self, state, sync, rx_stats=None, *, heartbeat=None,
-                   arm_inhibited: bool = True, cmd_source: str = "",
+                   arm_inhibited: bool = True, arm_inhibit_reason: str = "",
+                   cmd_source: str = "",
                    cmd_stale: bool = True, expected_version: int | None = None,
                    sim: bool = False, control_sync=None,
                    control_params_error: str = "",
@@ -131,6 +132,7 @@ class BusBridge:
                                      else control_sync.problems if control_sync is not None else []),
             control_params_drift=control_sync.drift_count if control_sync is not None else 0,
             arm_inhibited=arm_inhibited,
+            arm_inhibit_reason=arm_inhibit_reason,
             cmd_source=cmd_source,
             cmd_stale=cmd_stale,
             rx=rx_stats.as_dict() if rx_stats is not None else {},

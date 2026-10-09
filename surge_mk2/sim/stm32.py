@@ -47,6 +47,12 @@ STATS_HZ = 1
 
 #: `COMMAND` がこれだけ途絶したら最大制動（`uart_protocol.md` §5.6、実機と同じ）
 COMMAND_TIMEOUT_NS = 100 * 1_000_000
+#: ★v0.19: 走行中に ARM が外れたとき、停車を待って制動を続ける上限と、停車とみなす車速
+#: （ファームの `VEHICLE_DISARM_BRAKE_TIMEOUT_S`・`DRIVE_STANDSTILL_SPEED_M_S`）
+DISARM_BRAKE_TIMEOUT_NS = 3 * NS
+DISARM_BRAKE_STANDSTILL_M_S = 0.05
+#: `COMMAND.steer_rate_limit` = 0 のときの既定 [rad/s]（ファームの `VEHICLE_DEFAULT_STEER_RATE_RAD_S`）
+DEFAULT_STEER_RATE_RAD_S = 0.5
 
 #: `auto_stop`（v0.7）が効き始める距離 [m]
 AUTO_STOP_DISTANCE_M = 0.20
@@ -107,6 +113,9 @@ class VirtualStm32:
         self._cmd_flags2 = 0
         self._steer_cmd_echo = 0.0
         self._input = DriveInput()
+        #: ARM が外れたあと、停車を待って最大制動を続ける期限（★v0.19。0 = 制動していない）
+        self._arm_requested = False
+        self._disarm_brake_until = 0
 
         self.estop_active = False
         self.auto_stop_active = False
@@ -187,9 +196,17 @@ class VirtualStm32:
         self._cmd_flags2 = c.flags2
         self.mode = c.mode if c.mode in (0, 1, 2) else packets.Mode.DISARM
 
-        armed = bool(c.flags & packets.CMD_FLG_ARM) and self.mode != packets.Mode.DISARM
+        arm_requested = bool(c.flags & packets.CMD_FLG_ARM)
+        armed = arm_requested and self.mode != packets.Mode.DISARM
         if self.estop_active:
             armed = False       # E-Stop 中は COMMAND が一切効かない（実機と同じ）
+        # ★v0.19: 走行中に ARM が外れたら、止まるまで駆動電源を切らず最大制動する
+        # （`vehicle.c` の `UpdateDisarmBraking`）
+        if arm_requested:
+            self._disarm_brake_until = 0
+        elif self._arm_requested:
+            self._disarm_brake_until = t_ns + DISARM_BRAKE_TIMEOUT_NS
+        self._arm_requested = arm_requested
 
         self._steer_cmd_echo = c.target_steer * _CMD_SCALE["target_steer"]
         self._input = DriveInput(
@@ -199,10 +216,10 @@ class VirtualStm32:
             target_speed=c.target_speed * _CMD_SCALE["target_speed"],
             target_steer=self._steer_cmd_echo,
             accel_limit=c.accel_limit * _CMD_SCALE["accel_limit"],
-            # ファームは steer_rate_limit=0 を「最大舵角/秒」（Steering_GetMaxRoadWheelAngleRad、
-            # 約0.52rad/s）と読む（`vehicle.c`）。DriveInput の 0 は「制限なし」なので読み替える
+            # ファームは steer_rate_limit=0 を既定の 0.5rad/s と読む（`vehicle.h` の
+            # VEHICLE_DEFAULT_STEER_RATE_RAD_S）。DriveInput の 0 は「制限なし」なので読み替える
             steer_rate_limit=(c.steer_rate_limit * _CMD_SCALE["steer_rate_limit"]
-                              if c.steer_rate_limit > 0 else self.vehicle.spec.max_steer),
+                              if c.steer_rate_limit > 0 else DEFAULT_STEER_RATE_RAD_S),
             brake_torque=c.brake_torque * _CMD_SCALE["brake_torque"],
             target_torque=c.target_torque * _CMD_SCALE["target_torque"],
         )
@@ -262,7 +279,18 @@ class VirtualStm32:
         # COMMAND 途絶 → 最大制動（舵角は最後の値を保持する）
         self.uart_timeout = (self._now - self._cmd_ns) > COMMAND_TIMEOUT_NS
         if self.uart_timeout or self.estop_active:
-            cmd = DriveInput(armed=False, target_steer=v.steer_actual)
+            # 駆動電源が入っていれば最大制動（ファームのフェイルセーフは電源を切らない）。
+            # 入っていなければ（一度も ARM していない・DISARM 済み）制動する手段が無い
+            powered = self._arm_requested or bool(self._disarm_brake_until)
+            cmd = DriveInput(armed=powered, brake=powered, brake_torque=0.0,
+                             target_steer=v.steer_actual)
+        elif self._disarm_brake_until:
+            # ★v0.19: ARM が外れたあとの停止待ち。止まるか時間切れで駆動電源を切る
+            if abs(v.speed) < DISARM_BRAKE_STANDSTILL_M_S or self._now >= self._disarm_brake_until:
+                self._disarm_brake_until = 0
+            else:
+                cmd = DriveInput(armed=True, brake=True, brake_torque=0.0,
+                                 target_steer=v.steer_actual)
 
         # v0.13: サイドブレーキ。**個別車輪の位置制御モデルを持たないため、
         # 最大制動として近似する**（実車は速度に関わらず後輪を機械的に位置固定するが、
@@ -331,6 +359,9 @@ class VirtualStm32:
         f = self.mode & packets.FLG_MODE_MASK
         if self._input.armed and not self.estop_active and not self.uart_timeout:
             f |= packets.FLG_ARMED
+        # ★v0.19: 駆動電源。ARM を要求している間と、外れたあと停車を待って制動している間
+        if self._arm_requested or self._disarm_brake_until:
+            f |= packets.FLG_DRIVE_POWER_ON
         if self.estop_active:
             f |= packets.FLG_ESTOP_ACTIVE
         if self.uart_timeout:

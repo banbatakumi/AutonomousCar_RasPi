@@ -9,7 +9,7 @@
     .venv/bin/python -m raspi.nodes.io_node --sim          # Mac 上のシミュレータに繋ぐ（`sim/`）
 
 やること:
-- 起動時に VERSION_REQ → VERSION を照合（protocol_version 不一致は警告）、
+- 起動時に VERSION_REQ → VERSION を照合（protocol_version が一致するまで ARM しない）、
   LIMITS_REQ → LIMITS で車両の物理的な上限値を取得（★v0.11。速度・舵角クランプに使う）
 - PING を 5Hz（最初の3秒は 20Hz）で送り、PONG から時刻同期を推定
 - COMMAND を 100Hz で送る（STM32 の COMMAND タイムアウトを防ぐハートビートを兼ねる）
@@ -20,12 +20,19 @@
 - 送受信フレームを生のまま `.sfl` に記録（`--log` で起動時から、または `log/ctrl`
   でセッション中いつでも GUI から開始/停止できる。§後述）
 
-## COMMAND の安全設計 — 3つの独立した条件が全部そろわないとモータは回らない
+## COMMAND の安全設計 — 独立した条件が全部そろわないとモータは回らない
 
 1. **`--allow-arm` が無ければ DISARM 固定。** GUI・WS・バスに何が流れていようと
-   ここで断つ。判断を1箇所に閉じないと「どこかで解禁されていた」が起きる
-2. **`cmd` が 150ms 途絶したら DISARM に落とす。** publish 側（GUI や
-   planning_node）が死んだ＝上位が落ちた、なので止めるのが正しい
+   ここで断つ。判断を1箇所に閉じないと「どこかで解禁されていた」が起きる。
+   **STM32 と話が合っていない間も同じく DISARM 固定**（`_arm_block_reason`）:
+   `protocol_version` が一致しない・未確認、`vehicle.toml` の `[control]`（ステアのリンクの
+   換算を含む）が STM32 に入っていない
+2. **`cmd` が 150ms 途絶したら止める。** publish 側（GUI や planning_node）が死んだ＝
+   上位が落ちた。**走っていたなら、まず最大制動を送り、止まってから DISARM に落とす**
+   （`_failsafe_packet`）。いきなり DISARM を送ると STM32 は駆動電源を切り、モータドライバごと
+   落ちて制動できずに惰行する（v0.19 の STM32 は自分でも止まるまで電源を切らないが、
+   上位が壊れたときに下位だけが守る構造にしない）。`TELEMETRY` の途絶・telemetry_node の
+   デッドマンも同じ扱い
 3. **Pi 側でも速度・舵角を上限でクランプする。** STM32 にも上限はあるが、
    下位だけが守る構造にしない。上限は STM32 から取得した `LIMITS`（★v0.11・
    車両の物理的な上限）を受信済みならそちらを使う。`--max-speed`/`--max-steer`
@@ -74,7 +81,7 @@ from raspi.io.gpio import (  # noqa: E402
     open_tone,
 )
 from raspi.io.serial_link import SerialLink  # noqa: E402
-from raspi.msgs import DriveCmd, Heartbeat as HbMsg, command_from_cmd  # noqa: E402
+from raspi.msgs import SPEED_DEADBAND_MPS, DriveCmd, Heartbeat as HbMsg, command_from_cmd  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_HB_PREFIX,
@@ -101,6 +108,15 @@ WARMUP_S = 3.0
 LINKSTATS_HZ = 1
 DIAG_HZ = 10
 HB_HZ = 10
+
+#: 異常系（`cmd` 途絶・`TELEMETRY` 途絶・デッドマン）で、DISARM に落とす前に最大制動を続ける
+#: 時間の上限。最高速からでも止まり切れる長さ（STM32 側 `VEHICLE_DISARM_BRAKE_TIMEOUT_S` と同じ）。
+#: `TELEMETRY` が見えていれば停止を確認した時点で切り上げる。見えていなければここまで続ける
+FAILSAFE_BRAKE_MAX_NS = 3 * NS
+#: 停止（|車速| < `SPEED_DEADBAND_MPS`）がこれだけ続いたら「止まった」とみなして DISARM に落とす
+FAILSAFE_STOPPED_NS = 300_000_000
+#: telemetry_node がデッドマン（GUI の指令の途絶）で流す `cmd` の発行元
+DEADMAN_SOURCE = "deadman"
 
 #: `handshake()` で `LIMITS` を取り損ねた場合（STM32 の起動burstを取り逃した、
 #: 応答が1回ノイズで落ちた等）に `LIMITS_REQ` を再送する間隔（★v0.11）。
@@ -225,6 +241,18 @@ class IoNode:
         self._last_command_bytes: bytes | None = None
         #: `cmd` 途絶で DISARM に落とした回数。1回でも起きたら GUI 側を疑う
         self.cmd_timeouts = 0
+        #: 最後に送った「ARM している通常の COMMAND」。異常系で制動に切り替えるとき、モードと
+        #: 舵角を引き継ぐ。ARM していなかった／制動を終えて DISARM に落とした後は None
+        self._last_armed_pkt: packets.Command | None = None
+        #: 異常系の制動を始めた時刻と、停止が続いている起点（どちらも制動していなければ None）
+        self._failsafe_since_ns: int | None = None
+        self._failsafe_still_ns: int | None = None
+        #: 異常系で制動に入った回数（統計・テスト用）
+        self.failsafe_brakes = 0
+        #: `[control]` が STM32 に入ったことを一度確かめたか。同定の試験が一時的な上書きを
+        #: 入れ替える間は `control_sync.status` が `pending` に戻るので、状態そのものではなく
+        #: 「STM32 の起動以来、一度そろったか」を覚える（STM32 の再起動で落とす）
+        self._control_synced = False
 
         self._log = log
         self._log_meta = log_meta
@@ -317,7 +345,9 @@ class IoNode:
         self.bridge.state_builder.reset()
         self.bridge.scans.reset()
         # STM32 は調整パラメータを Flash に持たない。再起動で既定値に戻ったので送り直す
+        # （入り直すまで ARM も通さない）
         self.control_sync.reset()
+        self._control_synced = False
         self._log_event("time_reset", {})
         print("\n!! STM32 の再起動を検出 — 時刻同期をやり直します（オドメトリ・"
               "LiDAR組み立てをリセット）", file=sys.stderr)
@@ -544,11 +574,43 @@ class IoNode:
 
     @staticmethod
     def _disarm_command() -> packets.Command:
-        """安全な停止ハートビート。mode=DISARM, arm=0, 速度・舵角ゼロ。"""
+        """DISARM。mode=DISARM, arm=0, 速度・舵角ゼロ。
+
+        **走行中に送ると制動にならない**（STM32 は ARM が外れると駆動電源を切る。v0.19 からは
+        止まるまで自分で制動してから切る）。走っていたかもしれない異常系では、先に
+        `_failsafe_packet` の制動を通すこと。
+        """
         return packets.Command(
             mode=packets.Mode.DISARM, flags=0,
             target_speed=0, target_steer=0,
             accel_limit=0, steer_rate_limit=0, brake_torque=0)
+
+    def _arm_block_reason(self) -> str:
+        """ARM を通してよくない理由（空なら通してよい）。`diag/link` にも出す。
+
+        `--allow-arm` に加えて、**STM32 と話が合っていること**を条件にする。`protocol_version` が
+        違えば舵角・フラグの意味が食い違う（v0.18 で舵角が「モータ角×0.5」から路面舵角に変わった
+        ときは、片側だけ入れ替えると最大約 2.4° ずれた）。`[control]` が入っていなければ、ステアの
+        リンクの換算・TC・ABS が STM32 の既定値のまま走ることになる。
+        """
+        if not self.allow_arm:
+            return "--allow-arm が付いていません"
+        ver = self.state.version
+        if ver is None:
+            return "STM32 の protocol_version を確認できていません"
+        if ver.protocol_version != PROTOCOL_VERSION:
+            return (f"protocol_version が違います（STM32 0x{ver.protocol_version:04X} / "
+                    f"Pi 0x{PROTOCOL_VERSION:04X}）。両方を同じ版に入れ替えてください")
+        if self.control_params_error:
+            return self.control_params_error
+        status = self.control_sync.status
+        if status == "unsupported":
+            return "STM32 が [control] の項目に対応していません（ファームが古い）"
+        if not self._control_synced:
+            if status == "mismatch":
+                return "[control] の値が STM32 の範囲外で丸められました"
+            return "[control] を STM32 へ送っている途中です"
+        return ""
 
     def _send_command_disarm(self) -> None:
         self.link.send(self._disarm_command())
@@ -609,7 +671,8 @@ class IoNode:
                        encoded: bytes | None = None) -> None:
         """今この瞬間送るべき `COMMAND` を決めて送る。
 
-        **`allow_arm` が False、または `cmd` が古ければ必ず DISARM。**
+        **ARM を通せない条件（`_arm_block_reason`）があれば必ず DISARM。`cmd` が古ければ
+        制動してから DISARM（`_failsafe_packet`）。**
         分岐をここ1箇所に集めてある（判断が散ると、どこかで解禁されていたが起きる）。
 
         速度・舵角・加速度・トルクの上限は、STM32 から受け取った `LIMITS`（★v0.11。
@@ -639,19 +702,76 @@ class IoNode:
         # FAULT（200ms 途絶）は「受信（STM32→Pi）だけが切れている」状態を含み、この場合
         # STM32 は Pi からの COMMAND を受け取れてしまうため UART タイムアウトが効かない
         # （docs/uart_protocol.md §13、issue #11）。Pi がステートも LiDAR も見えていない
-        # 以上、盲目に ARM・速度指令を送り続けるべきではないので DISARM に落とす。
-        # `cmd_stale`/`allow_arm` と同じ「安全側へ倒す」判断なので、誤検知しても
-        # 起きるのは早めの DISARM だけ（危険側には振れない）
-        if self.cmd_stale or not self.allow_arm or self.state.health == "FAULT":
+        # 以上、盲目に速度指令を送り続けるべきではないので止める。
+        # `cmd_stale` と同じ「安全側へ倒す」判断なので、誤検知しても起きるのは早めの停止だけ
+        # （危険側には振れない）
+        if self._arm_block_reason():
+            self._last_armed_pkt = None
+            self._failsafe_since_ns = None
             return self._disarm_command()
+        # 同じ「安全側へ倒す」でも、走っていたかもしれないので DISARM の前に制動を通す。
+        # telemetry_node のデッドマン（GUI の指令の途絶）は `cmd` 自体は届き続けるので、
+        # 発行元で見分ける
+        if (self.cmd_stale or self.state.health == "FAULT"
+                or self.cmd.source == DEADMAN_SOURCE):
+            return self._failsafe_packet(time.monotonic_ns())
+        self._failsafe_since_ns = None
         lim = self.state.limits
         max_speed = lim.max_speed_m_s if lim else self.max_speed
         max_steer = lim.max_steer_rad if lim else self.max_steer
-        return command_from_cmd(
+        pkt = command_from_cmd(
             self.cmd, allow_arm=True,
             max_speed=max_speed, max_steer=max_steer,
             max_accel=lim.max_accel_m_s2 if lim else None,
             max_torque=lim.max_torque_nm if lim else None)
+        armed = bool(pkt.flags & packets.CMD_FLG_ARM) and pkt.mode != packets.Mode.DISARM
+        self._last_armed_pkt = pkt if armed else None
+        return pkt
+
+    def _failsafe_packet(self, now_ns: int) -> packets.Command:
+        """異常系で送る COMMAND。**ARM していたなら最大制動、止まったら（または時間切れで）DISARM。**
+
+        制動中は ARM を立てたまま `brake`・`brake_torque=0`（STM32 の最大）を送る。モードと舵角は
+        最後の通常の指令のまま（直進へ戻すと車体が予期しない方向へ動く。STM32 のフェイルセーフと
+        同じ方針）。止まったかは `TELEMETRY` の車速で見る。`TELEMETRY` 自体が途絶している
+        （`health == "FAULT"`）ときは見えないので、`FAILSAFE_BRAKE_MAX_NS` いっぱい制動する。
+        """
+        last = self._last_armed_pkt
+        if last is None:
+            return self._disarm_command()
+        if self._failsafe_since_ns is None:
+            self._failsafe_since_ns = now_ns
+            self._failsafe_still_ns = None
+            self.failsafe_brakes += 1
+            self._log_event("failsafe_brake", {
+                "cmd_stale": self.cmd_stale, "health": self.state.health,
+                "source": self.cmd.source if self.cmd else ""})
+
+        t = self.state.telemetry
+        stopped = False
+        if (t is not None and self.state.health != "FAULT"
+                and abs(t.speed * packets.Telemetry.META["speed"][0]) < SPEED_DEADBAND_MPS):
+            if self._failsafe_still_ns is None:
+                self._failsafe_still_ns = now_ns
+            stopped = now_ns - self._failsafe_still_ns >= FAILSAFE_STOPPED_NS
+        else:
+            self._failsafe_still_ns = None
+
+        if stopped or now_ns - self._failsafe_since_ns >= FAILSAFE_BRAKE_MAX_NS:
+            # 以後は指令が戻るまで DISARM（`_last_armed_pkt` を消すので制動へは戻らない）
+            self._log_event("failsafe_disarm", {
+                "stopped": stopped,
+                "brake_ms": round((now_ns - self._failsafe_since_ns) / 1e6)})
+            self._last_armed_pkt = None
+            self._failsafe_since_ns = None
+            return self._disarm_command()
+
+        return packets.Command(
+            mode=last.mode,
+            flags=(packets.CMD_FLG_ARM | packets.CMD_FLG_BRAKE
+                   | (last.flags & packets.CMD_FLG_LIGHT_MASK)),
+            target_speed=0, target_steer=last.target_steer,
+            accel_limit=0, steer_rate_limit=last.steer_rate_limit, brake_torque=0)
 
     # ── メインループ ──
 
@@ -734,11 +854,16 @@ class IoNode:
                     "via": "retry",
                 })
 
-            # `handshake()` が LIMITS を取り損ねていたら定期的に再送する（★v0.11）。
+            # `handshake()` が LIMITS・VERSION を取り損ねていたら定期的に再送する（★v0.11）。
             # STM32 起動時の3回burstを取り逃した／応答が1回落ちた場合の保険。
-            # 一度受け取れば `state.limits` が埋まるので、以降は送らなくなる
-            if self.state.limits is None and now >= next_limits_retry:
-                self.link.send(packets.LimitsReq())
+            # 一度受け取れば `state.limits`/`state.version` が埋まるので、以降は送らなくなる。
+            # **VERSION が無い間は ARM を通さない**（`_arm_block_reason`）ので、取り直せないと走れない
+            if now >= next_limits_retry and (self.state.limits is None
+                                              or self.state.version is None):
+                if self.state.limits is None:
+                    self.link.send(packets.LimitsReq())
+                if self.state.version is None:
+                    self.link.send(packets.VersionReq())
                 next_limits_retry = now + int(LIMITS_RETRY_S * NS)
 
             self._recv_cmd(now)
@@ -749,6 +874,8 @@ class IoNode:
                 self.cmd.fw_overrides if (self.cmd is not None and not self.cmd_stale) else {})
             prev_ctrl = self.control_sync.status
             self.control_sync.tick(now)
+            if self.control_sync.status in ("ok", "none"):
+                self._control_synced = True
             if self.control_sync.status != prev_ctrl:
                 self._log_event("control_params", {"status": self.control_sync.status,
                                                    "problems": self.control_sync.problems})
@@ -798,7 +925,8 @@ class IoNode:
                 self.bridge.publish_diag(
                     self.state, self.sync, self.link.stats,
                     heartbeat=self.heartbeat,
-                    arm_inhibited=not self.allow_arm,
+                    arm_inhibited=bool(self._arm_block_reason()),
+                    arm_inhibit_reason=self._arm_block_reason(),
                     cmd_source=self.cmd.source if self.cmd else "",
                     cmd_stale=self.cmd_stale,
                     expected_version=PROTOCOL_VERSION,
@@ -995,7 +1123,7 @@ def main() -> int:
     if ver is None:
         print("!! VERSION 応答なし。STM32 が繋がっていない可能性。受信は続行する。")
     else:
-        ok = "✓" if ver.protocol_version == PROTOCOL_VERSION else "✗ 不一致!"
+        ok = "✓" if ver.protocol_version == PROTOCOL_VERSION else "✗ 不一致! ARM を通しません"
         print(f"# STM32 protocol_version=0x{ver.protocol_version:04X} "
               f"fw=0x{ver.fw_id:08X} {ok}")
         # ★v0.8: TC/TV、★v0.9: 片輪浮き対策の有効/無効はGUI操作を待たず、接続確立直後に
@@ -1028,7 +1156,8 @@ def main() -> int:
         source = "LIMITS" if lim else f"--max-speed={args.max_speed}/--max-steer={args.max_steer}（未受信のフォールバック）"
         print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")
         print(f"#     実効クランプ: 速度 ±{eff_speed:.3f} m/s / 舵角 ±{eff_steer:.3f} rad（出所: {source}）")
-        print(f"#     cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら DISARM に落ちる")
+        print(f"#     cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら最大制動 → 停止後に DISARM")
+        print("#     protocol_version の一致と [control] の同期が済むまで ARM は通らない")
         print("#     車輪を浮かせるか、周囲に人と物が無いことを確認すること\n")
     else:
         print("# COMMAND は常に DISARM（安全）。--allow-arm で解禁。Ctrl-C で停止。\n")

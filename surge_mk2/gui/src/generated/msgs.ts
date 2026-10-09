@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x42d933f4
+export const MSGS_SCHEMA = 0xaa32994e
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -98,7 +98,16 @@ export type VehicleState = {
   t_stm_us: number
   /** 0=DISARM 1=MANUAL 2=AUTO */
   mode: number
+  /**
+   * STM32 が上位の指令で走れる状態（★v0.19。それまでは「駆動電源が入っている」だった）。
+   * ARM を要求しても、MD の起動待ち（約1秒）・ステア未較正・E-Stop の間は False
+   */
   armed: boolean
+  /**
+   * 駆動電源が入っている（★v0.19）。`armed` でなくても、ARM が外れたあと STM32 が停車を
+   * 待って制動している間は True
+   */
+  drive_power_on: boolean
   estop_active: boolean
   uart_timeout: boolean
   /** 今まさに TC が介入中 */
@@ -211,8 +220,13 @@ export type LinkDiag = {
   estop_active: boolean
   /** 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない** */
   drive_power_locked: boolean
-  /** io_node が `arm` を封印しているか（`--allow-arm` が無い状態） */
+  /**
+   * io_node が `arm` を封印しているか（`--allow-arm` が無い・STM32 と版が合わない・
+   * `[control]` が STM32 に入っていない）。理由は `arm_inhibit_reason`
+   */
   arm_inhibited: boolean
+  /** 封印している理由（人が読む文。封印していなければ ""） */
+  arm_inhibit_reason: string
   /** 直近に受理した `cmd` の発行元。誰も出していなければ "" */
   cmd_source: string
   /** `cmd` が途絶して DISARM にフォールバックしているか */

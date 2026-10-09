@@ -67,7 +67,8 @@ _I32_SPAN = 1 << 32
 MAX_BRAKE_TORQUE_NM = 0.15
 
 #: `target_torque`（駆動トルク直接指令）の上限 [N·m]（v0.6）。
-#: （モータ物理上限 0.1557 N·m 未満）。STM32 側の対応クランプ値・GUI の
+#: STM32 の `DRIVE_MAX_TORQUE_NM`（MD 側の実効上限 = Kt×10A ≒ 0.194 N·m より小さい。Kt は MD の
+#: 校正値で決まり、個体・校正ごとに変わる）。STM32 側の対応クランプ値・GUI の
 #: `store/ui.ts` の `MAX_TARGET_TORQUE_NM` と合わせること
 MAX_TARGET_TORQUE_NM = 0.15
 
@@ -77,6 +78,8 @@ FAULT_FLAGS = {
     "signal_overcurrent": packets.FLG_FAULT_SIGNAL_OVERCURRENT,
     "drive_undervoltage": packets.FLG_FAULT_DRIVE_UNDERVOLTAGE,
     "signal_undervoltage": packets.FLG_FAULT_SIGNAL_UNDERVOLTAGE,
+    # v0.19: MD（3台のいずれか）が使えず STM32 が走行を止めている。どれかは `md_status`
+    "md_fault": packets.FLG_MD_FAULT,
 }
 
 
@@ -108,6 +111,7 @@ def decode_flags(flags: int) -> dict:
         "winker_right_active": bool(flags & packets.FLG_WINKER_RIGHT_ACTIVE),
         "abs_active": bool(flags & packets.FLG_ABS_ACTIVE),
         "wheel_lift_active": bool(flags & packets.FLG_WHEEL_LIFT_ACTIVE),
+        "drive_power_on": bool(flags & packets.FLG_DRIVE_POWER_ON),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 

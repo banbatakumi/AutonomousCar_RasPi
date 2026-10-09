@@ -16,7 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.io.serial_link import RxFrame  # noqa: E402
 from raspi.msgs import DriveCmd  # noqa: E402
-from raspi.nodes.io_node import CMD_TIMEOUT_NS, IoNode  # noqa: E402
+from raspi.nodes.io_node import (  # noqa: E402
+    CMD_TIMEOUT_NS,
+    FAILSAFE_BRAKE_MAX_NS,
+    FAILSAFE_STOPPED_NS,
+    IoNode,
+)
 from raspi.proto import packets  # noqa: E402
 from raspi.proto.framing import RxStats  # noqa: E402
 
@@ -71,15 +76,147 @@ def commands(link) -> list:
     return [p for p in link.sent if isinstance(p, packets.Command)]
 
 
+def mark_handshaken(node: IoNode) -> IoNode:
+    """`handshake()` で STM32 の `VERSION` が一致したことにする（一致するまで ARM は通らない）。"""
+    node.state.version = packets.Version(protocol_version=packets.PROTOCOL_VERSION)
+    return node
+
+
 class TestIoNodeArmGate(unittest.TestCase):
-    """モータが回るのに必要な3条件。**どれか1つでも欠けたら DISARM。**"""
+    """モータが回るのに必要な条件。**どれか1つでも欠けたら DISARM。**"""
 
     def setUp(self):
         self.link = FakeLink()
         self.sub = FakeSub()
 
-    def node(self, **kw) -> IoNode:
-        return IoNode(self.link, sub=self.sub, **kw)
+    def node(self, *, handshaken: bool = True, **kw) -> IoNode:
+        n = IoNode(self.link, sub=self.sub, **kw)
+        return mark_handshaken(n) if handshaken else n
+
+    def assert_all_disarm(self):
+        cs = commands(self.link)
+        self.assertTrue(cs)
+        self.assertTrue(all(c.mode == packets.Mode.DISARM and c.flags == 0 for c in cs))
+
+    def test_without_a_version_from_the_stm32_arm_is_blocked(self):
+        """STM32 の版を確認できていない間は、`--allow-arm` があっても通さない。"""
+        n = self.node(allow_arm=True, handshaken=False)
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.1)
+        self.assert_all_disarm()
+        self.assertTrue(n._arm_block_reason())
+        # 取り直しを試みている（`handshake()` で取り損ねても走れなくならないように）
+        self.assertTrue(any(isinstance(p, packets.VersionReq) for p in self.link.sent))
+
+    def test_a_protocol_version_mismatch_blocks_arm(self):
+        """片側だけ入れ替えると舵角・フラグの意味が食い違う。表示するだけでなく走らせない。"""
+        n = self.node(allow_arm=True, handshaken=False)
+        n.state.version = packets.Version(protocol_version=packets.PROTOCOL_VERSION - 1)
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.1)
+        self.assert_all_disarm()
+        self.assertIn("protocol_version", n._arm_block_reason())
+
+    def test_arm_waits_until_the_control_params_are_in_the_stm32(self):
+        """`[control]`（ステアのリンクの換算を含む）が STM32 に入るまでは走らせない。"""
+        n = self.node(allow_arm=True, control_params={"tc_slip_target": 0.1})
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.1)
+        self.assert_all_disarm()
+        sets = [p for p in self.link.sent if isinstance(p, packets.ConfigSet)]
+        self.assertTrue(sets)
+
+        self.link.sent.clear()
+        n.control_sync.on_ack(packets.ConfigAck(
+            param_id=sets[0].param_id, applied=sets[0].value, result=packets.ConfigResult.OK))
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.1)
+        self.assertEqual(n._arm_block_reason(), "")
+        self.assertTrue(any(c.flags & packets.CMD_FLG_ARM for c in commands(self.link)))
+
+    def test_an_unreadable_control_section_blocks_arm(self):
+        n = self.node(allow_arm=True, control_params_error="vehicle.toml の [control] を読めません")
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.1)
+        self.assert_all_disarm()
+
+    # ── 異常系: 走っていたなら、DISARM の前に制動する ──
+
+    def _armed_then(self, n: IoNode, **cmd) -> None:
+        """ARM した通常の指令を1つ通してから、`cmd` の状況にする。"""
+        self.sub.push(DriveCmd(mode=2, arm=True, target_speed=1.0, target_steer=0.2,
+                               steer_rate_limit=7.0, source="gui"))
+        n.run(duration_s=0.05)
+        self.assertIsNotNone(n._last_armed_pkt)
+        self.link.sent.clear()
+
+    def test_a_stale_cmd_brakes_before_disarming(self):
+        """`cmd` が途絶えたら、ARM を立てたまま最大制動を送る（いきなり DISARM だと STM32 は
+        駆動電源を切り、モータドライバごと落ちて惰行する）。モードと舵角は最後の指令のまま。"""
+        n = self.node(allow_arm=True, max_speed=2.0, max_steer=0.5)
+        self._armed_then(n)
+        n._cmd_ns -= CMD_TIMEOUT_NS + 1
+        n.run(duration_s=0.1)
+        cs = commands(self.link)
+        self.assertTrue(cs)
+        for c in cs:
+            self.assertEqual(c.mode, packets.Mode.AUTO)
+            self.assertTrue(c.flags & packets.CMD_FLG_ARM)
+            self.assertTrue(c.flags & packets.CMD_FLG_BRAKE)
+            self.assertEqual(c.target_speed, 0)
+            self.assertEqual(c.brake_torque, 0)          # 0 = STM32 の最大
+            self.assertEqual(c.target_steer, 2000)       # 直進へ戻さない
+        self.assertEqual(n.failsafe_brakes, 1)
+
+    def test_the_ws_deadman_brakes_before_disarming(self):
+        """telemetry_node のデッドマンは `cmd` 自体は届き続ける（mode=0）。発行元で見分ける。"""
+        n = self.node(allow_arm=True, max_speed=2.0, max_steer=0.5)
+        self._armed_then(n)
+        self.sub.push(DriveCmd(mode=0, source="deadman"))
+        n.run(duration_s=0.1)
+        cs = commands(self.link)
+        self.assertTrue(cs)
+        self.assertTrue(all(c.flags & packets.CMD_FLG_BRAKE and c.flags & packets.CMD_FLG_ARM
+                            for c in cs))
+
+    def test_an_explicit_disarm_from_the_operator_is_passed_through(self):
+        """人が DISARM を押したのは異常系ではない（止まるまでの制動は STM32 が受け持つ）。"""
+        n = self.node(allow_arm=True, max_speed=2.0, max_steer=0.5)
+        self._armed_then(n)
+        self.sub.push(DriveCmd(mode=0, arm=False, source="gui"))
+        n.run(duration_s=0.1)
+        self.assert_all_disarm()
+
+    def test_failsafe_braking_ends_once_the_vehicle_has_stopped(self):
+        n = self.node(allow_arm=True, max_speed=2.0, max_steer=0.5)
+        self._armed_then(n)
+        n.cmd_stale = True
+        n.state.health = "OK"
+        t0 = time.monotonic_ns()
+        n.state.telemetry = packets.Telemetry(speed=800)            # 0.8 m/s
+        self.assertTrue(n._failsafe_packet(t0).flags & packets.CMD_FLG_BRAKE)
+        n.state.telemetry = packets.Telemetry(speed=10)             # 0.01 m/s = 停止
+        self.assertTrue(n._failsafe_packet(t0 + 1).flags & packets.CMD_FLG_BRAKE)
+        self.assertTrue(n._failsafe_packet(t0 + FAILSAFE_STOPPED_NS // 2).flags
+                        & packets.CMD_FLG_BRAKE)
+        done = n._failsafe_packet(t0 + 2 + FAILSAFE_STOPPED_NS)
+        self.assertEqual((done.mode, done.flags), (packets.Mode.DISARM, 0))
+        # 以後は指令が戻るまで DISARM のまま（制動へ戻らない）
+        again = n._failsafe_packet(t0 + 3 + FAILSAFE_STOPPED_NS)
+        self.assertEqual((again.mode, again.flags), (packets.Mode.DISARM, 0))
+
+    def test_failsafe_braking_times_out_when_telemetry_is_lost(self):
+        """`TELEMETRY` が見えなければ停止を確認できない。上限まで制動してから DISARM。"""
+        n = self.node(allow_arm=True, max_speed=2.0, max_steer=0.5)
+        self._armed_then(n)
+        n.state.health = "FAULT"
+        n.state.telemetry = packets.Telemetry(speed=0)              # 古い値は信じない
+        t0 = time.monotonic_ns()
+        self.assertTrue(n._failsafe_packet(t0).flags & packets.CMD_FLG_BRAKE)
+        self.assertTrue(n._failsafe_packet(t0 + FAILSAFE_BRAKE_MAX_NS - 1).flags
+                        & packets.CMD_FLG_BRAKE)
+        done = n._failsafe_packet(t0 + FAILSAFE_BRAKE_MAX_NS)
+        self.assertEqual((done.mode, done.flags), (packets.Mode.DISARM, 0))
 
     def test_without_allow_arm_a_live_cmd_is_still_disarmed(self):
         n = self.node(allow_arm=False)
@@ -270,6 +407,7 @@ class TestImmediateCmdRelay(unittest.IsolatedAsyncioTestCase):
         srv._auto_engaged = True
         srv._auto_mode = "ftg"
         srv._auto_was_fresh = True
+        srv._auto_last_steer = 0.0
         srv.auto_stalls = 0
         if live:
             srv._last_cmd = DriveCmd(mode=2, arm=True, accel_limit=6.0, steer_rate_limit=7.0,
@@ -557,7 +695,7 @@ class TestImmediateCommand(unittest.TestCase):
         link = TimedLink()
         t0 = time.monotonic_ns()
         sub = TimedSub(t0 + 104_000_000)
-        n = IoNode(link, sub=sub, allow_arm=True, max_speed=2.0)
+        n = mark_handshaken(IoNode(link, sub=sub, allow_arm=True, max_speed=2.0))
         n.run(duration_s=0.2)
         cs = [(t, p) for t, p in link.sent if isinstance(p, packets.Command)]
         first_new = next(t for t, p in cs if p.target_speed == 1000)
@@ -602,6 +740,7 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._auto_params = {}
         srv._auto_params_by_mode = {}
         srv._auto_was_fresh = True
+        srv._auto_last_steer = 0.0
         srv.auto_stalls = 0
         srv._publish_auto_ctrl = lambda: None      # バスに触らせない
         srv._save_auto_conf = lambda: None         # ディスクに触らせない

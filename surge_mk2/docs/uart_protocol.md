@@ -1,9 +1,26 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.18
-**最終更新**: 2026-10-08（ステアのリンクの換算を STM32 に入れ、舵角を実際の路面舵角にした。同日 v0.17: TV を荷重比例の配分へ置き換え）
+**バージョン**: v0.19
+**最終更新**: 2026-10-09（v0.19:「止める」の意味を Pi・STM32・MD で揃えた。`flags` bit2 の意味の変更と bit22/23・`md_status` bit6 の追加。2026-10-08 v0.18: 舵角を実際の路面舵角に、v0.17: TV を荷重比例の配分へ）
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
-**状態**: v0.18 は Pi・STM32 とも実装済み（`pi_uart_protocol_v0.18_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了**
+**状態**: v0.19 は Pi・STM32・MD とも実装済み（`pi_uart_protocol_v0.19_delta.md`）。**STM32・MD は未書き込み、実機での動作検証は未了**
+
+> **v0.19 で変わったのは「止める」の振る舞いと、`flags`・`md_status` のビット。ワイヤ形式（LEN・オフセット）は同じ。**
+> （2026-10-09。3リポジトリ横断の調査 `cross_project_audit_2026-10.md` への対応。STM32 側 `pi_uart_protocol_v0.19_delta.md`）
+>
+> - **`flags` bit2 `armed` は「駆動電源 ON」から「STM32 が上位の指令で走れる状態」になった。** 駆動電源は
+>   新設の bit22 `drive_power_on`。ARM を要求しても MD の起動待ち（約1秒）の間は `armed` = 0
+> - **bit23 `md_fault` を新設**: MD（3台のいずれか）が無応答・異常・トルク上限の不一致で使えず、STM32 が
+>   両後輪を最大制動して走行を止めている。駆動電源が切れる（ARM を外す）まで立ち続ける。理由は `LOG`
+> - **`md_status` bit6 `uncalibrated` を新設**（MD のエンコーダ未校正。MD は動かない）
+> - **走行中に ARM が外れても、STM32 は停車するまで駆動電源を切らず最大制動する**（上限 3 秒）。v0.18 までは
+>   ARM ビットがそのまま駆動電源で、Pi が通信途絶・デッドマンで DISARM を送ると MD ごと電源が落ちて惰行していた。
+>   **Pi（io_node）も、異常系ではまず `arm`+`brake`（最大）を送り、停止を確認してから DISARM に落とす**
+> - **ステア中心が未較正の間、STM32 は ARM されても駆動電源を入れない**
+> - **io_node は `protocol_version` が一致し、`[control]` が STM32 に入るまで ARM を通さない**
+>   （`diag/link` の `arm_inhibited`・`arm_inhibit_reason`）
+> - `steer_rate_limit` = 0 のときの STM32 の既定は 0.5 rad/s（値はほぼ同じ。専用の定数にしただけ）
+> - `protocol_version` を `0x0012`→`0x0013` に上げる。**Pi・STM32・MD を一緒に入れ替えること**
 
 > **v0.18 で変わったのは舵角の意味。ワイヤ形式（LEN・オフセット）は同じ。**
 >
@@ -665,7 +682,7 @@ v0.3 の u16 では足りないため **u32 に拡張**した。
 | bit | 名称 | 意味 |
 |---|---|---|
 | 0-1 | `mode` | STM32 が**実際に採用している**モード（0=DISARM / 1=MANUAL / 2=AUTO / **3=予約**） |
-| 2 | `armed` | DRIVE_POWER 投入済み（モータ出力可能）。**v0.5 以降、起動から Pi が `arm` するまで一度も立たない**（v0.4 は Setup 中のステア原点読み込みで一瞬立った。ボタン1を押しながらの原点較正時を除く） |
+| 2 | `armed` | **STM32 が上位の指令で走れる状態**（★v0.19。この間だけ車速・舵角の指令が効く）。ARM を要求しても、MD の起動待ち（約1秒）・ステア未較正・`mode` が MANUAL/AUTO 以外・E-Stop・`COMMAND` 途絶・ARM が外れたあとの停止待ちの間は 0。**v0.18 までは「DRIVE_POWER 投入済み」だった**（今は bit22） |
 | 3 | `estop_active` | ハートビート断で発動中 |
 | 4 | `uart_timeout` | `COMMAND` 途絶で自動ブレーキ中 |
 | 5 | `tc_active` | **トラクションコントロールが今まさに介入中** |
@@ -685,7 +702,9 @@ v0.3 の u16 では足りないため **u32 に拡張**した。
 | 19 | `winker_right_active` | **右ウィンカーが今まさに点滅中**（★v0.14・§5.6.6） |
 | 20 | `abs_active` | **ABS が今まさに制動トルクを要求より削っている**（★v0.15。フォールバック中は偽） |
 | 21 | `wheel_lift_active` | **片輪浮き対策が今まさにトルクを削っている**（★v0.16。このとき `tc_active` は立たない——どちらの判定が効いたかを分ける） |
-| 21-31 | — | 予約（0 を送ること） |
+| 22 | `drive_power_on` | **駆動電源（DRIVE_POWER）が入っている**（★v0.19）。`armed` なら必ず 1。ARM が外れたあと停車を待って制動している間（最大3秒）も 1 |
+| 23 | `md_fault` | **MD（3台のいずれか）が使えず、STM32 が走行を止めている**（★v0.19）。駆動電源を入れて 5 秒待っても揃わない、または走行中に無応答（100ms）・異常ビット・トルク上限の不一致。走行中なら両後輪を最大制動する。**駆動電源が切れるまでラッチ**。どの MD かは `md_status`、理由は `LOG` |
+| 24-31 | — | 予約（0 を送ること） |
 
 - **bit5/6/16/17/18/19/20 は「有効/無効」ではなく「今まさに介入・動作しているか」**を返す。
   GUI で介入タイミングが見えると TC/TV のチューニングが劇的に楽になる。
@@ -707,13 +726,14 @@ MD が返す status バイトをそのまま転送し、STM32 側で上位ビッ
 
 | bit | 名称 | 出所 |
 |---|---|---|
-| 0 | `running` | MD が停止モードでない |
+| 0 | `running` | MD が**受理済みの指令を実行中**（停止モードでない）。「回転中」ではない |
 | 1 | `voltage_out_of_range` | MD 側で電源電圧異常を検知 |
 | 2 | `overheat` | MD 側で過熱を検知 |
 | 3 | `overcurrent` | MD 側で過電流を検知 |
 | 4 | `comm_ok` | **STM32 が付加**。直近 100ms で MD からの状態フレームを受信できている |
 | 5 | `limit_synced` | **STM32 が付加**。MD が適用中のトルク上限が指令値と一致 |
-| 6-7 | — | 予約 |
+| 6 | `uncalibrated` | MD のエンコーダが未校正（★v0.19）。MD は制限値を受け付けず動かない |
+| 7 | — | 予約 |
 
 **`comm_ok = 0` のとき、そのモータに関する `temp` / `motor_current` / `wheel_speed` /
 `torque_cmd` の値を信用してはならない。**
@@ -916,7 +936,8 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **`COMMAND` が 100ms 途絶したら STM32 は自動ブレーキ。**（v0.3 の 200ms から短縮）
   100Hz 送信に対して 200ms は 20発の取りこぼしを許すことになり緩すぎる。
   3 m/s なら 60cm 進んでからブレーキがかかる計算になる。100ms（10発）とする。
-  **v0.5 では緊急停止時・途絶時とも最大制動トルク（0.125 N·m/輪）を直接掛ける**
+  **v0.5 では緊急停止時・途絶時とも最大制動トルク（現在は 0.15 N·m/輪。STM32 の
+  `DRIVE_MAX_BRAKE_TORQUE_NM`）を直接掛ける**
   （v0.4 は「目標車速 0」を与えるだけで減速は速度 PI 任せだった）。**停止距離が短くなる。**
   舵角は最後の指令値のまま保持される（直進に戻すと車体が予期しない方向へ動くため）。
 
@@ -1714,6 +1735,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 | **v0.16** | 2026-10-05 | **`CONFIG_SET`/`CONFIG_GET` の `param_id` を追加、`TELEMETRY` に制御の介入量を追加（LEN 74→**84**: `torque_req[2]`・`abs_limit_nm`・`yaw_rate_target`・`tv_moment_nm`、`flags` bit21=`WHEEL_LIFT_ACTIVE`。§5.3）。** 足回りの制御（TC・ABS・片輪浮き対策・TV）の調整パラメータ `0x0011`-`0x0015`・`0x0021`-`0x002A`・`0x0051`・`0x0071`-`0x0073`（§5.8.4。定義は STM32 側 `control_params.h` の表、値は Pi 側 `vehicle.toml` の `[control]`）。STM32 の制御は TC・ABS をスリップ率の連続 PI へ（低速でも働く、TC は車速指令の減速にも掛かる、片輪を絞った分を反対輪へ載せない）、TV は左右差を保つ配分・規範の1次遅れ・同定用のヨーモーメント注入。`protocol_version` を `0x000F`→`0x0010` に上げる。Pi 側は `protocol.toml`・`raspi/core/control_params.py`（送信・照合・読み戻し・一時上書き）・`LinkDiag.control_params_*`・`DriveCmd.fw_overrides`・GUI・`tools/ctrl_tune`（同定と最適化）を対応。**STM32 は未書き込み、実機での動作検証は未了**（`pi_uart_protocol_v0.16_delta.md`） |
 | **v0.17** | 2026-10-08 | **TV をヨーレートの PI から、後輪左右の荷重に比例した配分（フィードフォワード）へ置き換えた（ワイヤ形式・LEN の変更なし）。** `param_id` `0x0021`-`0x0029` を廃止、`0x002B`（`TV_LOAD_GAIN_S2_PER_M`）・`0x002C`（`TV_MAX_RATIO`）を新設。`TELEMETRY` のオフセット 66 を `yaw_rate_target` → `tv_ratio`（0.0001）に置き換え。`protocol_version` `0x0010`→`0x0011`（`pi_uart_protocol_v0.17_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了** |
 | **v0.18** | 2026-10-08 | **舵角を実際の路面舵角にした（ワイヤ形式・LEN の変更なし）。** STM32 がステアのリンクの換算（`路面舵角 = gain·x + cubic·x³`、x = モータ角×0.5）で指令・報告・`LIMITS.max_steer_rad`・車速の射影を行う。`param_id` `0x0081`（`STEER_LINK_GAIN`）・`0x0082`（`STEER_LINK_CUBIC`）を新設、設定時に `LIMITS` を送り直す。`protocol_version` `0x0011`→`0x0012`（`pi_uart_protocol_v0.18_delta.md`）。**STM32 は未書き込み、実機での動作検証は未了** |
+| **v0.19** | 2026-10-09 | **「止める」の意味を Pi・STM32・MD で揃えた（ワイヤ形式・LEN の変更なし）。** `TELEMETRY.flags` bit2 `armed` を「駆動電源 ON」から「上位の指令で走れる状態」へ変更し、bit22 `drive_power_on`・bit23 `md_fault` を新設。`md_status` bit6 `uncalibrated` を新設。STM32: 惰行は送信停止ではなくトルク 0 を送る／走行中に ARM が外れても停車まで駆動電源を切らず最大制動（上限3秒）／3台の MD が揃うまで `armed` にせず、走行中に崩れたら両後輪を最大制動してラッチ／ステア未較正の間は駆動電源を入れない／フェイルセーフは停止後に後輪の位置保持へ移る／`steer_rate_limit`=0 の既定を 0.5 rad/s の定数に。Pi: 異常系（`cmd` 途絶・`TELEMETRY` 途絶・デッドマン）は制動してから DISARM／`protocol_version` の一致と `[control]` の同期が済むまで ARM を通さない／`auto/cmd` 途絶時の制動を最大にし舵を保持。`protocol_version` を `0x0012`→`0x0013` に上げる。**STM32・MD は未書き込み、実機での動作検証は未了**（`pi_uart_protocol_v0.19_delta.md`、`cross_project_audit_2026-10.md`） |
 
 ### v0.4 内での差分（初回ドラフト → 確定版）
 

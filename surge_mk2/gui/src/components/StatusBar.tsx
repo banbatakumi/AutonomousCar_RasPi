@@ -79,7 +79,7 @@ export function StatusBar({
           {vs?.armed ? 'ARMED' : 'DISARM'}
         </span>
         {link?.arm_inhibited && (
-          <span className="pill dim" title="io_node に --allow-arm が無い。GUI からは解禁できない">
+          <span className="pill dim" title={link.arm_inhibit_reason || 'io_node が ARM を通さない。GUI からは解禁できない'}>
             arm 封印中
           </span>
         )}

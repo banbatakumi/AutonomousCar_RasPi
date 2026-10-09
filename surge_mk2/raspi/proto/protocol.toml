@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0012      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0013      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -273,7 +273,7 @@ fields = []
 [bits.FLG]
 comment = "TELEMETRY.flags (u32)"
 MODE_MASK                 = 0x00000003   # bit0-1
-ARMED                     = 0x00000004
+ARMED                     = 0x00000004   # 上位の指令で走れる状態。v0.18 までは「駆動電源 ON」だった（v0.19）
 ESTOP_ACTIVE              = 0x00000008
 UART_TIMEOUT              = 0x00000010
 TC_ACTIVE                 = 0x00000020
@@ -293,15 +293,18 @@ WINKER_LEFT_ACTIVE        = 0x00040000   # v0.14: 左ウィンカーが実際に
 WINKER_RIGHT_ACTIVE       = 0x00080000   # v0.14: 右ウィンカーが実際に点滅中
 ABS_ACTIVE                = 0x00100000   # v0.15: ABSが制動トルクを要求より削っている最中（フォールバック中は偽）
 WHEEL_LIFT_ACTIVE         = 0x00200000   # v0.16: 片輪浮き対策がトルクを削っている最中（このとき TC_ACTIVE は立たない）
+DRIVE_POWER_ON            = 0x00400000   # v0.19: 駆動電源が入っている（ARM が外れたあと停車を待つ制動中も立つ）
+MD_FAULT                  = 0x00800000   # v0.19: MD のいずれかが使えず走行を止めている（駆動電源が切れるまでラッチ）
 
 [bits.MDS]
 comment = "md_status[i] (u8)"
-RUNNING          = 0x01
+RUNNING          = 0x01   # MD が受理済みの指令を実行中（停止モードでない）。「回転中」ではない
 VOLTAGE_OOR      = 0x02
 OVERHEAT         = 0x04
 OVERCURRENT      = 0x08
 COMM_OK          = 0x10
 LIMIT_SYNCED     = 0x20
+UNCALIBRATED     = 0x40   # v0.19: MD のエンコーダが未校正（MD は動かない）
 
 [bits.CMD_FLG]
 comment = "COMMAND.flags (u8)。light_mode は bit3-4 の2ビット幅 = (mode << LIGHT_SHIFT) & LIGHT_MASK"

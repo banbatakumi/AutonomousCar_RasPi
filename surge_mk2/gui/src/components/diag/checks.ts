@@ -60,6 +60,7 @@ const FAULT_TEXT: Record<string, string> = {
   drive_overcurrent: '駆動 過電流',
   signal_overcurrent: '信号 過電流',
   drive_undervoltage: '駆動 低電圧',
+  md_fault: 'MD 異常で停止',
   signal_undervoltage: '信号 低電圧',
 }
 
