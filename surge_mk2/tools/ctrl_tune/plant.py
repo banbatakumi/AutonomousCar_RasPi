@@ -85,7 +85,9 @@ class Plant:
             over["mass_kg"] = float(d["mass"])
         for src, dst in (("rolling_resistance", "rolling_decel_m_s2"), ("steer_gain", "steer_gain"),
                          ("steer_gain_cubic", "steer_gain_cubic"), ("yaw_rate_filter_s", "gyro_tau_s")):
-            if dyn.get(src):
+            # 値の真偽ではなくキーの有無で見る。`steer_gain_cubic = 0.0`（舵の非線形を STM32 の
+            # リンクの換算へ移した後の正しい値）を読み飛ばすと、机上値の -0.39 が残って二重に掛かる
+            if src in dyn:
                 over[dst] = float(dyn[src])
         if dyn.get("mu"):
             over["lateral_accel_max_m_s2"] = float(dyn["mu"]) * 9.80665

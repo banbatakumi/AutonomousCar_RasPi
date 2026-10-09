@@ -81,7 +81,10 @@ class Vehicle:
     measured: bool = False
     wheelbase: float = 0.23                #: L [m]（実測確定）
     track: float = 0.155                   #: トレッド [m]（実測確定）
-    max_steer: float = 0.524               #: 最大路面舵角 [rad] = 30°（リンク比 0.5 実測確定）
+    #: 最大路面舵角 [rad]。**正は `vehicle.toml` の `max_steer`**（★v0.18 から、同定したリンクの
+    #: 換算を通した値で現在 0.4636 = 26.6°。STM32 の `LIMITS.max_steer_rad` と同じ）。
+    #: この既定 0.524 は toml にキーが無いときの値で、換算なし（モータ角 ±60° × リンク比 0.5 = 30°）
+    max_steer: float = 0.524
     wheel_radius: float = 0.03             #: [m]（実測確定）
     #: 車体外形ポリゴン [m]。base_link 基準
     footprint: tuple[tuple[float, float], ...] = ()
