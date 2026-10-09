@@ -51,6 +51,7 @@ CONFIG_ACK_BOOL_PARAMS = {
     packets.Param.TV_ENABLE: "tv_enabled",
     packets.Param.WHEEL_LIFT_GUARD_ENABLE: "wheel_lift_guard_enabled",
     packets.Param.ABS_ENABLE: "abs_enabled",  # ★v0.15
+    packets.Param.BRAKE_HOLD_ENABLE: "brake_hold_enabled",  # ★v0.19
 }
 
 #: `CONFIG_ACK` の `param_id` のうち、`LinkState` に連続値（float）として持たせるもの
@@ -96,6 +97,10 @@ class LinkState:
     #: ABS が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.15）。
     #: まだ `CONFIG_ACK` を受け取っていなければ None
     abs_enabled: bool | None = None
+
+    #: ブレーキホールドが STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.19）。
+    #: まだ `CONFIG_ACK` を受け取っていなければ None
+    brake_hold_enabled: bool | None = None
 
     #: 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
     #: から取得。★v0.12。範囲0.0-100.0の連続値。未送信ならSTM32側の既定15cmで

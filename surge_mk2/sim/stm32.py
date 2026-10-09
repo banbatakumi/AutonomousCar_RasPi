@@ -138,6 +138,9 @@ class VirtualStm32:
         self._config: dict[int, float] = {
             packets.Param.AUTO_STOP_MARGIN_CM: 15.0,
             packets.Param.ABS_ENABLE: 1.0,  # ★v0.15 実機の既定は有効
+            # ★v0.19 実機の既定は有効。位置保持のモデルは持たないので、シムでは ON/OFF の
+            # 設定が往復するだけ（止まった車は制動だけで動かない）
+            packets.Param.BRAKE_HOLD_ENABLE: 1.0,
         }
         self._stats = packets.Stats()
 

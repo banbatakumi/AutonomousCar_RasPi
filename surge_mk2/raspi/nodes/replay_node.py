@@ -293,6 +293,8 @@ def main() -> int:
         pub = Publisher("io")
         # **時刻はログのカーソル**。壁時計を使うと記録時と時刻の座標系がずれる
         bridge = BusBridge(pub, clock=lambda: holder["node"]._cursor_ns)
+        # LiDAR セクタの時刻も実機（io_node）と同じく STM32 の時刻から換算する（記録に PONG があれば）
+        bridge.to_pi_ns = lambda t_us: holder["node"].sync.to_pi_ns(t_us)
         print(f"# バス配信 {pub.endpoint}（io_node のふり）")
         if args.speed == 0:
             print("!! --speed 0 は待たずに流すので、購読側は取りこぼす。"

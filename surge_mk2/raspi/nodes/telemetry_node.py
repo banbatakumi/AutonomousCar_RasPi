@@ -1094,6 +1094,13 @@ class TelemetryServer:
             if "enabled" in m:
                 self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="abs_enable", value=bool(m["enabled"])))
 
+        # ── ブレーキホールド（誰でも操作できる。★v0.19）。適用結果は `diag/link`(brake_hold_enabled) で戻る ──
+
+        elif kind == "brake_hold":
+            if "enabled" in m:
+                self.pub.send(TOPIC_UI_EVENT,
+                               UiEvent(kind="brake_hold_enable", value=bool(m["enabled"])))
+
         # ── 自動停止の安全マージン[cm]（誰でも操作できる。★v0.12） ──
         # STM32側の適用結果は tc_tv/wheel_lift_guard と同様
         # `diag/link`(auto_stop_margin_cm) 経由で戻ってくるのでここでは broadcast しない

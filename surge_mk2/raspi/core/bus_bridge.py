@@ -27,6 +27,9 @@ __all__ = ["BusBridge"]
 #: `cmd_seq_echo` の突き合わせで、これを超える往復は「SEQ が一周した別物」と見なす。
 #: SEQ は u8 なので 100Hz では 2.56 秒で一周する
 _MAX_PLAUSIBLE_RTT_NS = 500_000_000
+#: LiDAR セクタの先頭点の時刻（換算後）が受信よりこれ以上古ければ、時刻同期が外れていると見て
+#: 受信時刻で代用する。正常なら 1セクタ（約 8.3ms）＋送信待ちで 10〜20ms
+_MAX_SECTOR_AGE_NS = 200_000_000
 
 
 class BusBridge:
@@ -44,6 +47,9 @@ class BusBridge:
     def __init__(self, pub=None, clock=time.monotonic_ns, base_m: float = 0.0) -> None:
         self.pub = pub
         self.clock = clock
+        #: STM32 の生 `t_us` → Pi の単調時刻 [ns]（`TimeSync.to_pi_ns`）。LiDAR セクタの時刻に使う。
+        #: 持ち主（io_node・replay）が `LinkTracker` を作ったあとで差す。None なら受信時刻で代用
+        self.to_pi_ns = None
         self.state_builder = StateBuilder(base_m=base_m)
         self.scans = ScanAssembler()
 
@@ -89,12 +95,28 @@ class BusBridge:
         if not isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
                                 packets.LidarSectorC)):
             return
-        scan = self.scans.feed(msg, t_ns)
+        scan = self.scans.feed(msg, self._sector_start_ns(msg, t_ns))
         if scan is None:
             return
         self.published_scans += 1
         if self.pub is not None:
             self.pub.send(TOPIC_SCAN, scan)
+
+    def _sector_start_ns(self, msg, rx_ns: int) -> int:
+        """セクタ先頭点を測った時刻（Pi 時刻）。STM32 が付けた `t_start_us` を時刻同期で換算する。
+
+        以前は受信時刻をそのまま入れていた。受信はセクタを測り終えて送り切ったあとなので、
+        1セクタぶん（約 8.3ms）＋送信待ちだけ遅く、`VehicleState.t_capture`（こちらは換算済み）と
+        時間軸がずれていた（3m/s で約 3cm。点ごとの脱スキューが `sector_t_ns` を「先頭点の時刻」
+        として使う）。換算できない（同期が未収束）・受信より後・古すぎる（同期の外れ）ときは
+        受信時刻で代用する。
+        """
+        if self.to_pi_ns is None:
+            return rx_ns
+        t = self.to_pi_ns(msg.t_start_us)
+        if t is None or t > rx_ns or rx_ns - t > _MAX_SECTOR_AGE_NS:
+            return rx_ns
+        return t
 
     # ── 診断 ──
 
@@ -124,6 +146,7 @@ class BusBridge:
             tv_enabled=state.tv_enabled,
             wheel_lift_guard_enabled=state.wheel_lift_guard_enabled,
             abs_enabled=state.abs_enabled,
+            brake_hold_enabled=state.brake_hold_enabled,
             auto_stop_margin_cm=state.auto_stop_margin_cm,
             control_params_status=("invalid" if control_params_error
                                    else control_sync.status if control_sync is not None else "none"),

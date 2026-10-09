@@ -409,7 +409,8 @@ class ScanAssembler:
         """セクタを1個取り込む。1周が完成したらその `Scan` を返す。
 
         :param msg: `LidarSector` / `LidarSectorI` / `LidarSectorC`
-        :param t_rx_ns: このセクタ先頭点の Pi 時刻。時刻同期が未収束なら受信時刻でよい
+        :param t_rx_ns: このセクタ先頭点の Pi 時刻（`BusBridge._sector_start_ns` が STM32 の
+            `t_start_us` から換算する）。時刻同期が未収束なら受信時刻でよい
         """
         idx = msg.sector_idx
         if not (0 <= idx < 12):

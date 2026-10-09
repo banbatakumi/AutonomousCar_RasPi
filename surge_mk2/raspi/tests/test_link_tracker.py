@@ -51,6 +51,17 @@ class TestDispatch(unittest.TestCase):
             feed(tr, packets.LidarSector(sector_idx=idx), 1)
         self.assertEqual(tr.state.lidar_sectors, {0, 5, 11})
 
+    def test_brake_hold_enable_config_ack(self):
+        """★v0.19: BRAKE_HOLD_ENABLE の CONFIG_ACK は `brake_hold_enabled`（bool）に入る。"""
+        tr = LinkTracker()
+        self.assertIsNone(tr.state.brake_hold_enabled)
+        feed(tr, packets.ConfigAck(param_id=packets.Param.BRAKE_HOLD_ENABLE, applied=0.0,
+                                   result=packets.ConfigResult.OK), 1)
+        self.assertFalse(tr.state.brake_hold_enabled)
+        feed(tr, packets.ConfigAck(param_id=packets.Param.BRAKE_HOLD_ENABLE, applied=1.0,
+                                   result=packets.ConfigResult.OK), 2)
+        self.assertTrue(tr.state.brake_hold_enabled)
+
     def test_abs_enable_config_ack(self):
         """★v0.15: ABS_ENABLE の CONFIG_ACK は `abs_enabled`（bool）に入る。"""
         tr = LinkTracker()

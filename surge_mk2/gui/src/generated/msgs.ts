@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xaa32994e
+export const MSGS_SCHEMA = 0xf17bf10e
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -247,6 +247,11 @@ export type LinkDiag = {
    * （`CONFIG_ACK` から取得。★v0.15。既定は有効）。未確認なら None
    */
   abs_enabled: boolean | null
+  /**
+   * ブレーキホールド（制動して止まったら後輪の位置保持へ自動で移る）が STM32 側で実際に
+   * 有効化されているか（`CONFIG_ACK` から取得。★v0.19。既定は有効）。未確認なら None
+   */
+  brake_hold_enabled: boolean | null
   /**
    * 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
    * から取得。★v0.12。範囲0.0-100.0の連続値。未確認（起動直後でまだ `CONFIG_ACK`

@@ -36,7 +36,8 @@ STM32の上限3.0m/s²を超える3.73m/s²と読まれていた）。今は：
 ## 時刻はメッセージの中の単調時刻を使う
 
 `/vehicle_state` は `t_capture`（STM32の時刻をPi時刻へ換算済み）、`/cmd` は `t_pub`、
-`/scan` は最終セクタの受信時刻（`sector_t_ns` の最大）。mcapヘッダの `log_time` は
+`/scan` は最後の点を測り終えた時刻（`sector_t_ns` ＋ `sector_dur_us` の最大。`sector_t_ns` は
+セクタ先頭点の時刻で、2026-10-09 から STM32 の時刻を換算した値。それ以前の記録は受信時刻）。mcapヘッダの `log_time` は
 epochへ換算した値なので混ぜない。
 
 ## `steer_cmd_echo` の意味（2026-09-24に判明）
@@ -128,7 +129,7 @@ class Cmd:
 
 @dataclass
 class ScanStamp:
-    """`/scan` 1件の時刻。`t_done` は最終セクタの受信時刻（Pi時刻）。"""
+    """`/scan` 1件の時刻。`t_done` は最後の点を測り終えた時刻（Pi時刻）。"""
 
     t_done: float
     t_pub: float
@@ -466,7 +467,10 @@ def load_log(path: str | Path) -> Log:
             elif channel.topic == "/cmd":
                 cmd_raw.append((int(obj.get("t_pub", 0)), message.log_time, obj))
             else:
-                t_done = max((int(x) for x in obj.get("sector_t_ns", []) if x), default=0)
+                # スキャン完了 = 最後のセクタの先頭点の時刻 ＋ そのセクタの所要時間
+                durs = obj.get("sector_dur_us") or []
+                t_done = max((int(x) + (int(durs[i]) * 1000 if i < len(durs) else 0)
+                              for i, x in enumerate(obj.get("sector_t_ns", [])) if x), default=0)
                 scan_raw.append((t_done, message.log_time, obj))
 
     # 単調時刻が欠けたログ（古い形式）はヘッダの log_time で揃える（混ぜない）

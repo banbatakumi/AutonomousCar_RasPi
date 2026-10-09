@@ -218,6 +218,8 @@ class IoNode:
         # 受信状態と時刻同期の実体は tracker が持つ。ここは同じ物への別名。
         self.state = self.tracker.state
         self.sync = self.tracker.sync
+        # LiDAR セクタの時刻を STM32 の `t_start_us` から換算する（`BusBridge._sector_start_ns`）
+        self.bridge.to_pi_ns = self.sync.to_pi_ns
         self.heartbeat = heartbeat
         self.indicator = indicator
         #: GUI 接続音などのメロディ再生に使う。`indicator` の内部（`StatusIndicator.buzzer`）
@@ -663,6 +665,9 @@ class IoNode:
         elif msg.kind == "abs_enable":
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.ABS_ENABLE, value=1.0 if msg.value else 0.0))
+        elif msg.kind == "brake_hold_enable":
+            self.link.send(packets.ConfigSet(
+                param_id=packets.Param.BRAKE_HOLD_ENABLE, value=1.0 if msg.value else 0.0))
         elif msg.kind == "auto_stop_margin_cm":
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.AUTO_STOP_MARGIN_CM, value=msg.float_value))
@@ -1134,6 +1139,8 @@ def main() -> int:
         node.link.send(packets.ConfigGet(param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE))
         # ★v0.15: ABS。既定は有効だが、GUI操作前でも実際の状態を出すため同様に取得する
         node.link.send(packets.ConfigGet(param_id=packets.Param.ABS_ENABLE))
+        # ★v0.19: ブレーキホールド（既定は有効）
+        node.link.send(packets.ConfigGet(param_id=packets.Param.BRAKE_HOLD_ENABLE))
         # ★v0.12: 自動停止の安全マージン[cm]。CONFIG_SET はFlash非永続化なので、
         # GUI操作前でもSTM32起動直後の実際の値（既定15cm）をGUIに出せるようにする
         node.link.send(packets.ConfigGet(param_id=packets.Param.AUTO_STOP_MARGIN_CM))

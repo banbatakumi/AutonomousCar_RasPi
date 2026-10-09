@@ -131,6 +131,8 @@ def export(path: str | Path, out: str | Path, *, viz: bool = True,
     if on_bus is not None:
         sink.on_bus = on_bus(log)
     bridge = BusBridge(sink, clock=lambda: holder["node"]._cursor_ns)
+    # LiDAR セクタの時刻も実機（io_node）と同じく STM32 の時刻から換算する（記録に PONG があれば）
+    bridge.to_pi_ns = lambda t_us: holder["node"].sync.to_pi_ns(t_us)
     next_diag = [0]
 
     def on_telemetry(t, t_pi_ns):

@@ -263,6 +263,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const tvEnabled = link?.tv_enabled ?? null
   const wheelLiftGuardEnabled = link?.wheel_lift_guard_enabled ?? null
   const absEnabled = link?.abs_enabled ?? null
+  const brakeHoldEnabled = link?.brake_hold_enabled ?? null
   const autoStopMarginCm = link?.auto_stop_margin_cm ?? null
   // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
   // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
@@ -429,6 +430,17 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 onChange={(e) => ch?.setAbs(e.target.checked)}
               />
               ABS{absEnabled === null && '（未確認）'}
+            </label>
+            {/* ブレーキホールド（★v0.19）。制動して止まったら後輪の位置保持へ移り、坂でも動かない。
+                ブレーキ・自動停止・フェイルセーフのどの制動でも働く */}
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={brakeHoldEnabled ?? true}
+                disabled={brakeHoldEnabled === null}
+                onChange={(e) => ch?.setBrakeHold(e.target.checked)}
+              />
+              ブレーキホールド（停止後に後輪を位置保持）{brakeHoldEnabled === null && '（未確認）'}
             </label>
             {/* ★v0.16: TC・ABS・TV の調整パラメータ（vehicle.toml [control]）が STM32 に入っているか。
                 io_node が CONFIG_ACK の「実際に入った値」と突き合わせた結果をそのまま出す */}

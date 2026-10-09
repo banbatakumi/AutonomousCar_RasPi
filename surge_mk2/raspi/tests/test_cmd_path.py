@@ -326,6 +326,43 @@ class TestEndToEndLatency(unittest.TestCase):
         self.assertIsNone(b.cmd_rtt_ms)
 
 
+class TestLidarSectorTime(unittest.TestCase):
+    """LiDAR セクタの時刻は受信時刻ではなく、STM32 が付けた `t_start_us` を換算した値。"""
+
+    def _bridge(self, offset_ns):
+        from raspi.core.bus_bridge import BusBridge
+
+        b = BusBridge(None)
+        b.to_pi_ns = (lambda t_us: None) if offset_ns is None else (lambda t_us: t_us * 1000 + offset_ns)
+        seen = []
+        b.scans.feed = lambda msg, t: seen.append(t)
+        return b, seen
+
+    def test_the_sector_is_stamped_with_the_converted_stm32_time(self):
+        b, seen = self._bridge(offset_ns=5_000_000_000)
+        rx = 5_000_000_000 + 1_000_000 * 1000 + 12_000_000     # 測り始めの 12ms 後に受信
+        b.on_frame(rx, packets.LidarSector.TYPE, 0, packets.LidarSector(t_start_us=1_000_000))
+        self.assertEqual(seen, [rx - 12_000_000])
+
+    def test_it_falls_back_to_the_rx_time_when_the_conversion_is_not_usable(self):
+        rx = 9_000_000_000
+        for offset in (None,                       # 時刻同期が未収束
+                       rx,                         # 換算後が受信より後
+                       rx - 1_000_000_000 - 1_000_000_000):   # 1秒も古い（同期の外れ）
+            b, seen = self._bridge(offset_ns=offset)
+            b.on_frame(rx, packets.LidarSector.TYPE, 0, packets.LidarSector(t_start_us=1_000_000))
+            self.assertEqual(seen, [rx])
+
+    def test_without_a_time_sync_the_rx_time_is_used(self):
+        from raspi.core.bus_bridge import BusBridge
+
+        b = BusBridge(None)
+        seen = []
+        b.scans.feed = lambda msg, t: seen.append(t)
+        b.on_frame(123, packets.LidarSector.TYPE, 0, packets.LidarSector(t_start_us=1))
+        self.assertEqual(seen, [123])
+
+
 class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
     """WS 層のデッドマン。**誰も操縦していなければ明示的な DISARM を流し続ける。**"""
 

@@ -404,6 +404,10 @@ AUTO_STOP_MARGIN_CM = 0x0060
 # 最大制動で後輪のロックを防ぐ。車速PIの減速・torque_modeの負トルクには掛からない）。既定は有効。
 # TC_ENABLE と同じ bool（0.0/1.0）。Pi側から実際に送信する（raspi/nodes/io_node.py）
 ABS_ENABLE = 0x0070
+# BRAKE_HOLD_ENABLE: ★v0.19。ブレーキホールド（制動して止まったら後輪の位置保持へ自動で移る。
+# 実車のブレーキホールドに当たる）。brake・自動停止・フェイルセーフのどの制動でも働く。既定は有効。
+# TC_ENABLE と同じ bool（0.0/1.0）
+BRAKE_HOLD_ENABLE = 0x0090
 ABS_SLIP_TARGET   = 0x0071  # ★v0.16（調整パラメータ）
 ABS_KP_NM_PER_M_S = 0x0072
 ABS_KI_NM_PER_M   = 0x0073

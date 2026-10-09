@@ -394,6 +394,10 @@ class LinkDiag(MsgBase):
     #: （`CONFIG_ACK` から取得。★v0.15。既定は有効）。未確認なら None
     abs_enabled: bool | None = None
 
+    #: ブレーキホールド（制動して止まったら後輪の位置保持へ自動で移る）が STM32 側で実際に
+    #: 有効化されているか（`CONFIG_ACK` から取得。★v0.19。既定は有効）。未確認なら None
+    brake_hold_enabled: bool | None = None
+
     #: 自動停止（`COMMAND.flags` bit7=AUTO_STOP）の安全マージン [cm]（`CONFIG_ACK`
     #: から取得。★v0.12。範囲0.0-100.0の連続値。未確認（起動直後でまだ `CONFIG_ACK`
     #: を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
@@ -810,8 +814,8 @@ class UiEvent(MsgBase):
     別途持たなくて済む。
     """
 
-    kind: str = ""                         #: 例: "gui_connect", "tc_enable", "tv_enable", "wheel_lift_guard_enable", "abs_enable", "auto_stop_margin_cm"
-    #: `kind` が真偽値を伴うイベント（"tc_enable"/"tv_enable"/"wheel_lift_guard_enable"/"abs_enable"）のときだけ意味を持つ
+    kind: str = ""                         #: 例: "gui_connect", "tc_enable", "tv_enable", "wheel_lift_guard_enable", "abs_enable", "brake_hold_enable", "auto_stop_margin_cm"
+    #: `kind` が真偽値を伴うイベント（"tc_enable"/"tv_enable"/"wheel_lift_guard_enable"/"abs_enable"/"brake_hold_enable"）のときだけ意味を持つ
     value: bool = False
     #: `kind` が連続値を伴うイベント（"auto_stop_margin_cm" のみ。★v0.12）のときだけ意味を持つ。
     #: `value`（bool）とは別枠にした——既存の bool イベントと混ぜると 0/1 に丸まってしまうため

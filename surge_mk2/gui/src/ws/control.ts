@@ -474,6 +474,14 @@ export class ControlChannel {
   }
 
   /**
+   * STM32側のブレーキホールド（制動して止まったら後輪の位置保持へ自動で移る、★v0.19）の
+   * 有効・無効を切り替える。`abs` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。
+   */
+  setBrakeHold(enabled: boolean) {
+    this.send({ type: 'brake_hold', enabled })
+  }
+
+  /**
    * 自動停止（RC/AUTO 問わず COMMAND.flags bit7=AUTO_STOP）が使う安全マージンを
    * cm単位で直接指定する（★v0.12。範囲 0-100cm、既定15cm）。
    * `tc_tv`/`wheel_lift_guard` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。
