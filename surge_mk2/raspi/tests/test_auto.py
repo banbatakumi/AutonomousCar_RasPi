@@ -975,6 +975,7 @@ class TestAutoRelay(unittest.IsolatedAsyncioTestCase):
         self.srv._auto_mode = "ftg"
         self.srv._auto_engaged = True
         self.srv._auto_was_fresh = True
+        self.srv._auto_last_steer = 0.0
         self.srv.auto_stalls = 0
         self.srv.control_clients = set()
         self.srv._broadcast_control_status = _noop
@@ -1029,6 +1030,20 @@ class TestAutoRelay(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out.brake)
         self.assertEqual(out.target_speed, 0.0)
 
+    async def test_the_stale_brake_is_full_strength_whatever_the_gui_slider_says(self):
+        """GUI のスライダ（ここでは 0.125）を弱くしたまま自律走行していても、planner が
+        止まったときの制動は最大（0 = STM32 の最大）。"""
+        out = self.merge(DriveCmd(target_speed=0.9), age_ns=500_000_000)
+        self.assertTrue(out.brake)
+        self.assertEqual(out.brake_torque, 0.0)
+
+    async def test_the_stale_brake_holds_the_last_steer_from_the_planner(self):
+        """直進へ戻さない（旋回中なら外へ飛び出す）。planner が最後に出した舵のまま止める。"""
+        self.merge(DriveCmd(target_speed=0.9, target_steer=0.31))
+        out = self.merge(DriveCmd(target_speed=0.9, target_steer=-0.2), age_ns=500_000_000)
+        self.assertTrue(out.brake)
+        self.assertAlmostEqual(out.target_steer, 0.31)
+
     async def test_planner_brake_is_passed_through(self):
         out = self.merge(DriveCmd(brake=True, target_speed=0.0, target_steer=0.2))
         self.assertTrue(out.brake)
@@ -1047,6 +1062,7 @@ class TestAutoCtrlGate(unittest.TestCase):
         self.srv._auto_params = {}
         self.srv._auto_params_by_mode = {}
         self.srv._auto_was_fresh = True
+        self.srv._auto_last_steer = 0.0
         self.srv.auto_stalls = 0
         self.srv._save_auto_conf = lambda: None      # ディスクに触らせない
         self.srv._auto_presets = {}

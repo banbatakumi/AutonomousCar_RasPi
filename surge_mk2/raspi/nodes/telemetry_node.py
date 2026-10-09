@@ -549,6 +549,8 @@ class TelemetryServer:
         #: engage したまま `auto/cmd` が途絶して制動に落とした回数
         self.auto_stalls = 0
         self._auto_was_fresh = True
+        #: planner が最後に出した舵角 [rad]。`auto/cmd` が途絶えて制動に落とす間、これを保持する
+        self._auto_last_steer = 0.0
         #: 最後に見た `auto/cmd` の中身（速度・舵・制動・arm・mode）。変わったら `/cmd` を即送る
         self._last_auto_key: tuple | None = None
         #: `_publish_cmd` が前回「操縦者が居た」と判断したか（デッドマンの切れ目を数える）
@@ -1349,6 +1351,7 @@ class TelemetryServer:
             if self._auto_engaged:
                 self.auto_stalls = 0
                 self._auto_was_fresh = True
+                self._auto_last_steer = 0.0     # 前の走行の舵を持ち越さない
         self._save_auto_conf()
 
     def _auto_ctrl(self) -> AutoCtrl:
@@ -2654,9 +2657,12 @@ class TelemetryServer:
         レートリミット・`arm`）は GUI の値のまま通す。**自律走行中に前照灯の
         操作だけ効かなくなる理由が無い**し、`arm` は人間しか立てられない。
 
-        `auto/cmd` が古ければ**制動**に落とす。engage したまま planning_node が
+        `auto/cmd` が古ければ**最大制動**に落とす。engage したまま planning_node が
         死んだときに、最後の「走れ」が 150ms 残って壁に向かうのを防ぐ。
-        `brake_torque` は GUI の値をそのまま使う（0 なら STM32 の最大制動）。
+        `brake_torque` は GUI のスライダの値を使わず 0（= STM32 の最大）にする——弱く設定した
+        まま自律走行していると、planner が止まったときの制動まで弱くなる。舵は最後に planner が
+        出した値のまま保持する（直進へ戻すと、旋回中なら外へ飛び出す。STM32 のフェイルセーフが
+        舵角を保持するのと同じ方針）。
         """
         auto = self.sub.latest.get(TOPIC_AUTO_CMD)
         fresh = (auto is not None and (now - auto.t_pub) <= AUTO_CMD_STALE_NS
@@ -2671,10 +2677,12 @@ class TelemetryServer:
                 asyncio.create_task(self._broadcast_control_status())
             self._auto_was_fresh = False
             return msgspec.structs.replace(
-                gui, mode=2, brake=True, target_speed=0.0, target_steer=0.0,
+                gui, mode=2, brake=True, brake_torque=0.0, target_speed=0.0,
+                target_steer=self._auto_last_steer,
                 torque_mode=False, target_torque=0.0, fw_overrides={},
                 source=f"auto:{self._auto_mode}:stale")
         self._auto_was_fresh = True
+        self._auto_last_steer = auto.target_steer
         # 加速度の上限は GUI の値と planner の値の**小さい方**（planner は締める向きにしか
         # 効かせられない。0 は「指定なし」なので、指定のある方を採る）
         accel = gui.accel_limit
