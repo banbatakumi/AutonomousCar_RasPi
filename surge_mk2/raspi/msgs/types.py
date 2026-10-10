@@ -388,6 +388,10 @@ class LinkDiag(MsgBase):
     arm_inhibited: bool = True
     #: 封印している理由（人が読む文。封印していなければ ""）
     arm_inhibit_reason: str = ""
+    #: STM32 が `LOG` で送ってきた直近の警告・エラー（新しい順に最大4件。"12:34:56 E 本文"）。
+    #: **STM32 が自分の判断で止めた理由はここにしか出ない**（例: `MD rear-left stopped: overcurrent`
+    #: ＝走行中に MD が使えなくなって `md_fault` をラッチした。2026-10-10 まで io_node は捨てていた）
+    stm_log: list[str] = msgspec.field(default_factory=list)
     #: 直近に受理した `cmd` の発行元。誰も出していなければ ""
     cmd_source: str = ""
     #: `cmd` が途絶して DISARM にフォールバックしているか

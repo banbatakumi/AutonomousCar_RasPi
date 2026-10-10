@@ -198,7 +198,7 @@ def simulate(fw: Firmware, plant: Plant, planner, params: dict[str, float] | Non
             new = row.copy()
             if not st.ready or st.brake:
                 new[IN["mode"]] = MODE_BRAKE
-                new[IN["value"]] = st.brake_torque if (st.ready and st.brake_torque > 0) else 0.15
+                new[IN["value"]] = st.brake_torque if (st.ready and st.brake_torque > 0) else 0.13
             elif st.torque_mode:
                 new[IN["mode"]], new[IN["value"]] = MODE_TORQUE, st.target_torque
             else:

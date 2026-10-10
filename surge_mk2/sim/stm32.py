@@ -66,7 +66,7 @@ ABS_MIN_SPEED_M_S = 0.25
 #: 一致させること。** `docs/uart_protocol.md` §5.12 に記載の値が正
 DRIVE_MAX_SPEED_M_S = 5.0
 DRIVE_MAX_ACCEL_M_S2 = 3.0
-DRIVE_MAX_TORQUE_NM = 0.15   # VehicleModel.MAX_BRAKE_TORQUE_NM と同値
+DRIVE_MAX_TORQUE_NM = 0.13   # VehicleModel.MAX_BRAKE_TORQUE_NM と同値
 
 #: 積分の刻み。細かくしても運動学モデルでは意味が薄く、粗いと舵の遅れが崩れる
 STEP_S = 0.001

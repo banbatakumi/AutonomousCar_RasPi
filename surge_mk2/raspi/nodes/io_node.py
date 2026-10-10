@@ -205,6 +205,8 @@ class IoNode:
         self.link = link
         #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）を STM32 に入れて保つ（★v0.16）
         self.control_sync = ControlParamSync(control_params or {}, link.send)
+        #: STM32 の `LOG` の直近の警告・エラー（新しい順。`diag/link` に載せる）
+        self.stm_log: list[str] = []
         #: `[control]` が読めなかった理由（空 = 読めた）。`LinkDiag` に出す
         self.control_params_error = control_params_error
         self.bridge = BusBridge(pub, base_m=_load_odometer_base())
@@ -333,9 +335,26 @@ class IoNode:
         elif name == "drive_power_locked" and value:
             print("\n!! 駆動電源ラッチ — 電源を入れ直すまで復帰しません", file=sys.stderr)
 
+    def _on_stm_log(self, msg: packets.Log) -> None:
+        """STM32 の `LOG`。**STM32 が自分の判断で止めた理由はここにしか載らない**ので必ず見せる。
+
+        例: `MD rear-left stopped: overcurrent`（走行中に MD が使えなくなり、STM32 が両後輪を制動して
+        ラッチした。ARM を外すまで戻らない）。2026-10-10 まで受け取っても捨てていて、「固定されて
+        動かない」の原因が Pi からは分からなかった。警告・エラーは `diag/link` の `stm_log` にも残す。
+        """
+        text = msg.message.decode("ascii", errors="replace").strip()
+        level = "DIWE"[msg.severity] if 0 <= msg.severity <= 3 else "?"
+        self._log_event("stm32_log", {"severity": msg.severity, "message": text})
+        print(f"\n# STM32 LOG [{level}] {text}", file=sys.stderr, flush=True)
+        if msg.severity >= packets.LogSeverity.WARN:
+            self.stm_log.insert(0, f"{time.strftime('%H:%M:%S')} {level} {text}")
+            del self.stm_log[4:]
+
     def _on_frame(self, rx_ns: int, pkt_type: int, seq: int, msg) -> None:
         if isinstance(msg, packets.ConfigAck):
             self.control_sync.on_ack(msg)
+        elif isinstance(msg, packets.Log):
+            self._on_stm_log(msg)
         self.bridge.on_frame(rx_ns, pkt_type, seq, msg)
 
     def _on_time_reset(self, t_ns: int) -> None:
@@ -932,6 +951,7 @@ class IoNode:
                     heartbeat=self.heartbeat,
                     arm_inhibited=bool(self._arm_block_reason()),
                     arm_inhibit_reason=self._arm_block_reason(),
+                    stm_log=self.stm_log,
                     cmd_source=self.cmd.source if self.cmd else "",
                     cmd_stale=self.cmd_stale,
                     expected_version=PROTOCOL_VERSION,

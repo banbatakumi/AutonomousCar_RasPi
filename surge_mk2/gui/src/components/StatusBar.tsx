@@ -54,6 +54,11 @@ export function StatusBar({
   if (link?.drive_power_locked) latches.push('駆動電源ラッチ — 電源を入れ直してください')
   if (vs && !vs.steer_center_valid) latches.push('ステア原点が未保存 — 走行禁止')
   if (link?.protocol_match === false) latches.push('プロトコル版数が不一致')
+  // STM32 が MD の異常で走行を止めている（後輪を制動→位置保持「固定中」。ARM を外すまで戻らない）。
+  // どの MD がなぜ、は STM32 の LOG（`link.stm_log`）にしか出ない
+  if (vs?.faults.includes('md_fault')) {
+    latches.push(`MD 異常で停止中 — ARM し直すまで解除されません${link?.stm_log?.length ? `（${link.stm_log.join(' / ')}）` : ''}`)
+  }
 
   return (
     <>

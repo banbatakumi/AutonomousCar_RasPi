@@ -188,7 +188,10 @@
  * - 終わるのは、アクセルを離す・ブレーキを踏む・車速が目標の手前に届く、のどれか。終われば普段の操作に戻る
  *   （目標速度は上限のまま引き継ぐので、踏み続けていればそのまま走る）
  * - **手順を踏まなければ何も変わらない。** 設定が ON でも、普通にアクセルを踏むだけの発進は従来どおり
- * - トルク制御は対象外（元からランプが無く、ブレーキを離せば全開がそのまま出て TC が絞る）
+ * - **トルク制御**でも同じ手順で使える。発進中は設定の `driveTorque`・踏み込み量に関わらず最大トルク
+ *   （`MAX_TARGET_TORQUE_NM`）を出し、空転は TC が絞る。目標速度が無いので、終わるのはアクセルを離すか
+ *   ブレーキを踏んだとき。`cmd.launch` は立てない（STM32 のローンチは速度指令のランプと PI を飛ばす
+ *   もので、トルク指令には元からそれが無い）
  * - 自律走行（AUTO）では GUI は立てない（planner が自分で決める）
  * - 状態はラジコン画面のランプ（`AssistLamps.tsx` の LC／LAUNCH）に出る
  * 弱くなったのは**人間が意図して手を離した場合だけ**。
@@ -242,7 +245,7 @@
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
 import {
-  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, STEER_RATE_SAFETY_LIMIT,
+  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, MAX_TARGET_TORQUE_NM, STEER_RATE_SAFETY_LIMIT,
   mtGearAt, mtGearIndex, mtGearRatio, useUi,
 } from '../store/ui'
 import type { LaunchPhase } from '../store/ui'
@@ -1064,11 +1067,14 @@ export function useDriving(ch: ControlChannel | null) {
       // アクセルの向き（踏んでいなければ 0）。パッドは「ほぼ全開」だけを発進の意思と見なす
       const kdir = fwd ? 1 : rev ? -1 : 0
       const launchDir =
-        !s.launchControl || torqueModeOn || maxSpeed <= 0
+        !s.launchControl || (!torqueModeOn && maxSpeed <= 0)
           ? 0
           : source === 'gamepad'
             ? (accelTrig >= (launchPhase.current === 'go' ? LAUNCH_HOLD_TRIG : LAUNCH_TRIG) ? gearSign : 0)
             : (mtModeOn ? (kdir === gearSign ? kdir : 0) : kdir)
+      // トルク制御の発進は、設定の `driveTorque`・踏み込み量に関わらず STM32 の最大トルクを出す
+      // （空転は TC が絞る）。目標速度が無いので、終わるのはアクセルを離すかブレーキを踏んだとき
+      const launchTorque = launchDir * MAX_TARGET_TORQUE_NM
       const launchTarget =
         launchDir * maxSpeed * (source === 'gamepad' ? expo(accelTrig, THROTTLE_EXPO) : 1)
       const vNow = live.vs?.speed ?? 0
@@ -1087,12 +1093,16 @@ export function useDriving(ch: ControlChannel | null) {
         // ことがあり、そのときは GUI の目標には届かない）
         const active = live.vs?.launch_active ?? false
         if (active) launchSeen.current = true
-        const done = vNow * launchDir >= Math.abs(launchTarget) - LAUNCH_DONE_GAP
-        if (brake || done || (launchSeen.current && !active)) launch = 'idle'
+        const done = !torqueModeOn && vNow * launchDir >= Math.abs(launchTarget) - LAUNCH_DONE_GAP
+        if (brake || done || (!torqueModeOn && launchSeen.current && !active)) launch = 'idle'
       }
       launchPhase.current = launch
-      // 発進中は GUI 側のランプを飛ばして目標を上限へ置く（STM32 が目標との差を見て全開にする）
-      if (launch === 'go') speed.current = launchTarget
+      // 発進中は GUI 側のランプを飛ばして目標を上限へ置く（STM32 が目標との差を見て全開にする）。
+      // トルク制御は最大トルクをそのまま出す
+      if (launch === 'go') {
+        if (torqueModeOn) torque.current = launchTorque
+        else speed.current = launchTarget
+      }
 
       // **ブレーキ中は速度・トルク指令を 0 に落とす。**
       // STM32 は `brake` の間 `target_speed`/`target_torque` を無視し、離すと 0 から
@@ -1109,7 +1119,9 @@ export function useDriving(ch: ControlChannel | null) {
       if (!mtModeOn) {
         speed.current = Math.max(-maxSpeed, Math.min(maxSpeed, speed.current))
       }
-      torque.current = Math.max(-s.driveTorque, Math.min(s.driveTorque, torque.current))
+      // トルク制御のローンチ中だけは設定の `driveTorque` を超えて最大トルクまで出す
+      const torqueCap = launch === 'go' && torqueModeOn ? MAX_TARGET_TORQUE_NM : s.driveTorque
+      torque.current = Math.max(-torqueCap, Math.min(torqueCap, torque.current))
       steer.current = Math.max(-s.maxSteer, Math.min(s.maxSteer, steer.current))
 
       cmdOut.speed = speed.current
@@ -1157,7 +1169,7 @@ export function useDriving(ch: ControlChannel | null) {
         winker_left: ui.winkerLeftRequested,
         winker_right: ui.winkerRightRequested,
         // v0.20: ローンチコントロール。手順を踏んだ発進の間だけ立つ
-        launch: launch === 'go',
+        launch: launch === 'go' && !torqueModeOn,
       })
     }
 

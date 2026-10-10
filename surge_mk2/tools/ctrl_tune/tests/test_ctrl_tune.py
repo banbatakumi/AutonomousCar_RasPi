@@ -100,10 +100,10 @@ class TestLogic(unittest.TestCase):
         lc = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED_LAUNCH, 1.5, 3.0),), 0.0),
                    params)
         pi = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED, 1.5, 3.0),), 0.0), params)
-        full = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.4, MODE_TORQUE, 0.15),), 0.0), params)
+        full = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.4, MODE_TORQUE, S.MAX_TORQUE_NM),), 0.0), params)
         on = self._launching(lc)
         self.assertTrue(on[0])
-        self.assertAlmostEqual(float(lc.col("cmd_left")[0]), 0.15, places=4)
+        self.assertAlmostEqual(float(lc.col("cmd_left")[0]), S.MAX_TORQUE_NM, places=4)
         end = int(np.nonzero(on)[0][-1])
         self.assertFalse(on[end + 1:].any())                           # 1回で終わる
         self.assertAlmostEqual(float(lc.col("distance")[799]), float(full.col("distance")[799]), delta=0.005)

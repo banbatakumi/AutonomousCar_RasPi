@@ -152,7 +152,7 @@ class VehicleSpec:
     #: 同定するのは車体の側（`speed_plant_gain`・`rolling_resistance`、`SpeedController`参照）
     speed_kp: float = 0.0            # [N·m/(m/s)]
     speed_ki: float = 0.0            # [N·m/(m/s)/s]
-    speed_torque_max_nm: float = 0.30  # PI 出力の上限（後輪2輪の合計）[N·m]
+    speed_torque_max_nm: float = 0.26  # PI 出力の上限（後輪2輪の合計）[N·m]
     speed_ramp_max_m_s2: float = 3.0   # 目標速度のランプの上限（COMMAND の accel_limit はこれで切られる）
     #: 車体の加速度 / 後輪合計トルク [(m/s²)/(N·m)]。名目は 1/(車輪半径×質量)
     speed_plant_gain: float = 1.0 / (0.03 * 2.0)
@@ -231,7 +231,7 @@ class VehicleSpec:
             steer_servo_gain=dyn.get("steer_servo_gain", 1.0),
             speed_kp=dyn.get("speed_kp", 0.0),
             speed_ki=dyn.get("speed_ki", 0.0),
-            speed_torque_max_nm=dyn.get("speed_torque_max_nm", 0.30),
+            speed_torque_max_nm=dyn.get("speed_torque_max_nm", 0.26),
             speed_ramp_max_m_s2=dyn.get("speed_ramp_max_m_s2", 3.0),
             speed_plant_gain=dyn.get("speed_plant_gain", dflt.speed_plant_gain),
             cmd_accel_limit_m_s2=safety.get("cmd_accel_limit_m_s2", 0.0),
@@ -616,7 +616,7 @@ class VehicleModel:
 
     #: `brake_torque = 0`（未指定）のときに使う最大制動トルク [N·m]。
     #: `convert.py` の MAX_BRAKE_TORQUE_NM と同値
-    MAX_BRAKE_TORQUE_NM = 0.15
+    MAX_BRAKE_TORQUE_NM = 0.13
 
     def __init__(self, spec: VehicleSpec, start: tuple[float, float, float]) -> None:
         self.spec = spec

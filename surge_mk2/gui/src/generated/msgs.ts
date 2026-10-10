@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x7f198a22
+export const MSGS_SCHEMA = 0xda584af5
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -232,6 +232,12 @@ export type LinkDiag = {
   arm_inhibited: boolean
   /** 封印している理由（人が読む文。封印していなければ ""） */
   arm_inhibit_reason: string
+  /**
+   * STM32 が `LOG` で送ってきた直近の警告・エラー（新しい順に最大4件。"12:34:56 E 本文"）。
+   * **STM32 が自分の判断で止めた理由はここにしか出ない**（例: `MD rear-left stopped: overcurrent`
+   * ＝走行中に MD が使えなくなって `md_fault` をラッチした。2026-10-10 まで io_node は捨てていた）
+   */
+  stm_log: string[]
   /** 直近に受理した `cmd` の発行元。誰も出していなければ "" */
   cmd_source: string
   /** `cmd` が途絶して DISARM にフォールバックしているか */

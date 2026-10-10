@@ -122,6 +122,7 @@ class BusBridge:
 
     def build_diag(self, state, sync, rx_stats=None, *, heartbeat=None,
                    arm_inhibited: bool = True, arm_inhibit_reason: str = "",
+                   stm_log: list[str] | None = None,
                    cmd_source: str = "",
                    cmd_stale: bool = True, expected_version: int | None = None,
                    sim: bool = False, control_sync=None,
@@ -156,6 +157,7 @@ class BusBridge:
             control_params_drift=control_sync.drift_count if control_sync is not None else 0,
             arm_inhibited=arm_inhibited,
             arm_inhibit_reason=arm_inhibit_reason,
+            stm_log=list(stm_log or ()),
             cmd_source=cmd_source,
             cmd_stale=cmd_stale,
             rx=rx_stats.as_dict() if rx_stats is not None else {},

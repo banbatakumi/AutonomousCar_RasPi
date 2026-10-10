@@ -64,13 +64,15 @@ _I32_SPAN = 1 << 32
 #: 後輪1輪あたりの制動トルクの上限 [N·m]（STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM`）。
 #: **STM32 側でもクランプされるが、GUI のスライダ上限をここから引くために持つ。**
 #: 超えた値を送ると黙って丸められ、「スライダを上げても効きが変わらない」に見える
-MAX_BRAKE_TORQUE_NM = 0.15
+MAX_BRAKE_TORQUE_NM = 0.13
 
 #: `target_torque`（駆動トルク直接指令）の上限 [N·m]（v0.6）。
-#: STM32 の `DRIVE_MAX_TORQUE_NM`（MD 側の実効上限 = Kt×10A ≒ 0.194 N·m より小さい。Kt は MD の
-#: 校正値で決まり、個体・校正ごとに変わる）。STM32 側の対応クランプ値・GUI の
-#: `store/ui.ts` の `MAX_TARGET_TORQUE_NM` と合わせること
-MAX_TARGET_TORQUE_NM = 0.15
+#: STM32 の `DRIVE_MAX_TORQUE_NM`。**MD 側の絶対上限（Kt×10A。Kt は MD の校正値で個体ごとに違う）を
+#: 超えないこと**——2026-10-10 まで 0.15 だったが、後輪 MD の絶対上限は約 0.148・0.144 N·m で届かず、
+#: STM32 の MD の健全性監視（v0.19）が「上限が一致しない」として走らせなかった。実行時の上限は
+#: STM32 が送る `LIMITS` を使う（`command_from_cmd` の `max_torque`）。ここは `LIMITS` が届くまでの値と
+#: GUI のスライダの上限。STM32 側の定数・GUI の `store/ui.ts` の `MAX_TARGET_TORQUE_NM` と合わせること
+MAX_TARGET_TORQUE_NM = 0.13
 
 #: 立っていたら名前で持ち回る fault。ビットのまま流すと GUI 側で意味を再定義する羽目になる
 FAULT_FLAGS = {

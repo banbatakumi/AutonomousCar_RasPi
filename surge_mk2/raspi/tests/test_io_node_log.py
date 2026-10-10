@@ -173,6 +173,25 @@ class TestIoNodeLogging(unittest.TestCase):
         self.assertGreater(len(link.sent), 0)
 
 
+class TestIoNodeStm32Log(unittest.TestCase):
+    """STM32 の `LOG` は捨てずに残す（2026-10-10。STM32 が自分で止めた理由はここにしか出ない）。"""
+
+    def test_warnings_and_errors_reach_the_link_diag(self):
+        node = IoNode(FakeLink())
+        P = packets
+        node._on_frame(0, P.Log.TYPE, 0, P.Log(severity=P.LogSeverity.INFO, message=b"boot"))
+        node._on_frame(0, P.Log.TYPE, 1, P.Log(severity=P.LogSeverity.ERROR,
+                                                message=b"MD rear-left stopped: overcurrent"))
+        self.assertEqual(len(node.stm_log), 1)                          # INFO は載せない
+        self.assertIn("MD rear-left stopped: overcurrent", node.stm_log[0])
+        diag = node.bridge.build_diag(node.state, node.sync, stm_log=node.stm_log)
+        self.assertEqual(diag.stm_log, node.stm_log)
+        for i in range(6):                                              # 直近4件だけ持つ
+            node._on_frame(0, P.Log.TYPE, i, P.Log(severity=P.LogSeverity.WARN, message=b"w%d" % i))
+        self.assertEqual(len(node.stm_log), 4)
+        self.assertIn("w5", node.stm_log[0])
+
+
 class TestIoNodeDiskCheck(unittest.TestCase):
     """`IoNode._check_disk_space`（`raspi/rec/logclean.py` の呼び出し側）の結線。
 

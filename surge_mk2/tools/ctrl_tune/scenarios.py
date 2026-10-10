@@ -28,7 +28,7 @@ __all__ = ["Seg", "Scenario", "Result", "run", "oracle", "SLIP", "ALL", "DT"]
 
 DT = 0.0005          # ファームの制御周期
 SUBSTEPS = 20
-MAX_TORQUE_NM = 0.15
+MAX_TORQUE_NM = 0.13
 
 
 @dataclass(frozen=True)

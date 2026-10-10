@@ -42,7 +42,7 @@ from .base import Planner
 __all__ = ["SysIdTyre", "OVERRIDES"]
 
 OVERRIDES = {"tc_enable": 0.0, "abs_enable": 0.0, "tv_enable": 0.0}
-_MAX_TORQUE_NM = 0.15
+_MAX_TORQUE_NM = 0.13
 
 
 #: 経過時間の比較の余裕 [s]（0.1s の足し算の丸め誤差で判断が1周期ずれないように）

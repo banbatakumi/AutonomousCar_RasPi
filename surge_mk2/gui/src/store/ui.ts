@@ -151,8 +151,8 @@ export type DrivingSettings = {
   autoStop: boolean
   /** 手動操作のローンチコントロール（★プロトコル v0.20）を使うか。止まった状態でブレーキとアクセルを
    * 両方踏むと準備、ブレーキを離すと発進——目標速度をいきなり上限まで上げ、`COMMAND.flags2` の
-   * `launch` を立てる（STM32 がランプと速度PIを迂回して全開＋TC で加速する）。速度制御と MT で働く
-   * （トルク制御は元から全開をそのまま出せるので対象外）。手順は `useDriving.ts` */
+   * `launch` を立てる（STM32 がランプと速度PIを迂回して全開＋TC で加速する）。トルク制御では
+   * 設定の駆動トルクに関わらず最大トルクを出す。手順は `useDriving.ts` */
   launchControl: boolean
   /**
    * 前カメラの進路ガイド（`CameraView.tsx` の `drawGuide`）が使う取付高さ [m]。
@@ -224,7 +224,7 @@ export const STEER_RATE_SAFETY_LIMIT: number = SAFETY.cmdSteerRateLimit // rad/s
  * `raspi/msgs/convert.py` の `MAX_BRAKE_TORQUE_NM` に合わせること。**
  * 超えた値を送っても黙って丸められ、「スライダを上げても効きが変わらない」に見える。
  */
-export const MAX_BRAKE_TORQUE_NM = 0.15
+export const MAX_BRAKE_TORQUE_NM = 0.13
 /** スライダの最小。**0 は「未指定 ＝ 最大制動」を意味するので選ばせない** */
 export const MIN_BRAKE_TORQUE_NM = 0.005
 /**
@@ -238,7 +238,7 @@ export const DEFAULT_BRAKE_TORQUE_NM = MAX_BRAKE_TORQUE_NM
  * 駆動トルク直接指令の上限 [N·m]（v0.6）。**`raspi/msgs/convert.py` の
  * `MAX_TARGET_TORQUE_NM` と合わせること。** 超えた値を送っても黙って丸められる。
  */
-export const MAX_TARGET_TORQUE_NM = 0.15
+export const MAX_TARGET_TORQUE_NM = 0.13
 /**
  * トルクモードの既定の強さ。**上限より控えめにしてある。**
  * ブレーキと違い「強すぎて空転・飛び出す」方が「弱くて動かない」より危険なため、
