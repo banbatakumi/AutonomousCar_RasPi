@@ -226,6 +226,33 @@ class TestSpinDetection(unittest.TestCase):
         self.assertIsNone(fit._spin_accel(back))
 
 
+class TestSlipLimitedAccel(unittest.TestCase):
+    @staticmethod
+    def _stage(t0, level, accel, slip=0.15, n=40):
+        """`level` の段を `accel` で加速しながら後輪が `slip` だけ滑っている区間（100Hz）。"""
+        return [fit.Sample(t=t0 + k * 0.01, target_speed=2.0, target_steer=0.0, brake=False,
+                           speed=0.5 + accel * k * 0.01, steer_actual=0.0, steer_cmd_echo=0.0,
+                           yaw_rate=0.0, accel_x=0.0, tc_active=True, accel_limit=level,
+                           speed_filtered=0.5 + accel * k * 0.01,
+                           wheel_speed_rear=0.5 + accel * k * 0.01 + slip) for k in range(n)]
+
+    def test_takes_the_stage_with_the_largest_accel(self):
+        """TC は滑りを保つので、限界より下の段でも滑り率は0.10を超える。その段の加速度（指令どおり）
+        ではなく、いちばん加速できた段を限界として返す（全開の段の `accel_limit` は 0 か GUI の上限）。"""
+        def gap(t0):       # 段の間（滑っていない）
+            return self._stage(t0, 0.8, 0.0, slip=0.0, n=5)
+        s = self._stage(0.0, 1.6, 1.55) + gap(0.5) + self._stage(1.0, 2.4, 2.1) + gap(1.5) \
+            + self._stage(2.0, 0.0, 2.2) + gap(2.5) + self._stage(3.0, 6.0, 2.2)
+        a, lv = fit._slip_limited_accel(s)
+        self.assertAlmostEqual(a, 2.2, delta=0.02)
+        self.assertEqual(lv, 3.0)
+        self.assertEqual(fit._slip_accel(s), 1.6)
+        self.assertEqual(fit._top_accel_level(s), 3.0)
+
+    def test_none_without_slip(self):
+        self.assertIsNone(fit._slip_limited_accel(self._stage(0.0, 1.6, 1.55, slip=0.02)))
+
+
 class TestNoFalseTopSpeed(unittest.TestCase):
     def test_uncapped_truth_gives_no_fade(self):
         """加減速の上限が無い車に、存在しない最高速（減衰）を読まない。実測の速度はオドメトリを

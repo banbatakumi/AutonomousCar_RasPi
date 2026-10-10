@@ -43,18 +43,25 @@
 だった（自律走行で任意の強さのブレーキを使うには、この傾きが要る）。止まりきれなくなる
 地点の見積もりも、その強さの保守的な減速度で行う（`brake_decel_guess()`）。
 
-## 後輪が滑ったら上の段へ進まない（2026-09-27）
+## 後輪が滑っても全段を走る（2026-10-10）
 
-TC の旗（ファームが滑り率20%で立てる）ではなく、後輪の滑り率そのもの（`rear_slip`）で判断する。
-実機の最初の記録では、TC の旗が30〜50msだけ立った（トルクもほぼ削っていない）のを「介入」と
-数えて、全開の段と最大ブレーキの段を飛ばした。
+以前（2026-09-27）は、加速中に後輪の滑り率が `REAR_SLIP_LIMIT`（0.10）を超えた状態が 0.1s 続いたら
+その段までで終え、上の段を走らなかった。TC を「スリップ率を目標に保つ PI」に作り直してから
+（`[control]` の `tc_slip_target`、今は 0.2）は、**TC が正常に働いているだけで滑り率が 0.10 を超える**
+ので、TC が働いた最初の段で必ず打ち切られた（2026-10-10 の実機の記録: 1.6m/s² の段で終了）。
+上の段を走らないと、
 
-- **滑った**（加速中に滑り率が `REAR_SLIP_LIMIT` を超えた状態が 0.1s 続く）: その段は最後まで走り、
-  上の段へは進まない（「完了（後輪が滑った…）」）。滑りながら（TC が効きながら）出る加速度こそが
-  この車の出せる加速度（シム・学習に要る値）なので、止めずに測る
-- **抑えきれない空転**（後輪の周速が前輪より 0.2m/s＋30% 以上速い状態が 0.1s 続く）: その段で
-  すぐ制動し、戻ってから試験を終える（「完了（空転を検出…）」）。`SensorGuard`（0.3s、前輪
-  エンコーダの不調で中止）より先に効く。制動はロックしない強さ（`ABORT_BRAKE_TORQUE_NM`）
+- その段の加速度は指令（1.6m/s²）より上には出ないので、「滑りながら出た加速度」がグリップの限界
+  なのか指令どおりなのかを区別できない（全開の段で初めて分かる）
+- ブレーキの強い方（0.12・最大）を踏まないので、制動の頭打ち（`brake_decel_m_s2`）が決まらない
+
+TC が空転を抑えるので、滑っていても全段を走り、滑ったかどうか・どの加速度が限界かは解析
+（`tools/sysid/fit.py`）が記録から読む。
+
+- **抑えきれない空転**（後輪の周速が前輪より 0.2m/s＋30% 以上速い状態が 0.1s 続く。TC が保つ
+  滑りの2倍以上＝TC が切れている・効いていない）だけは、その段ですぐ制動し、戻ってから試験を
+  終える（「完了（空転を検出…）」）。`SensorGuard`（0.3s、前輪エンコーダの不調で中止）より先に
+  効く。制動はロックしない強さ（`ABORT_BRAKE_TORQUE_NM`）
 
 ## 使える直線の長さに収める
 
@@ -76,8 +83,8 @@ TC の旗（ファームが滑り率20%で立てる）ではなく、後輪の�
 from __future__ import annotations
 
 from ..msgs.types import AutoState, Scan, VehicleState
-from ._sysid_common import (ABORT_BRAKE_TORQUE_NM, REAR_SLIP_LIMIT, OdomRun, SensorGuard, TestGate,
-                            abort_state, brake_decel_guess, rear_slip, settle_state, stop_distance)
+from ._sysid_common import (ABORT_BRAKE_TORQUE_NM, OdomRun, SensorGuard, TestGate, abort_state,
+                            brake_decel_guess, settle_state, stop_distance)
 from .base import Planner
 
 __all__ = ["SysIdAccel", "STAGES"]
@@ -92,7 +99,7 @@ _ACCEL_FOR_STOP_M_S2 = 3.0
 #: 段の並び `(加速度 [m/s²], 定速にする速度 [m/s], ブレーキのサイクルの制動トルク [N·m])`。
 #: 加速度 0 は全開（GUI の上限＝ファームのランプ3.0で、目標は `v_max+1.0`、定速にしない）。速度は
 #: 「加速→`hold_s`の定速→停止」が2mの直線に収まる値（収まらなければ定速を切り上げる）。
-#: 制動トルクの最大（0.15）は STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM`
+#: 最後の段の制動トルク 0.15 は「最大」の意味（STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM` = 0.13 に丸められる）
 STAGES: tuple[tuple[float, float, float], ...] = (
     (0.8, 1.0, 0.04), (1.6, 1.3, 0.08), (2.4, 1.5, 0.12), (0.0, 2.0, 0.15))
 
@@ -102,7 +109,7 @@ class SysIdAccel(Planner):
     name = "システム同定: 前後運動"
     description = ("直線で、加速度を0.8→1.6→2.4m/s²→全開と段階的に上げながら「加速→定速→減速"
                    "（ブレーキと速度指令0を交互。ブレーキの強さも段ごとに上げる）→後退で戻る」を8回。"
-                   "後輪が滑ったらその段まで、抑えきれない空転ならすぐ止める。直線2m＋車長が要る。約40秒")
+                   "後輪が滑っても（TC が効いても）全段を走る。抑えきれない空転だけすぐ止める。直線2m＋車長が要る。約40秒")
     category = "sysid"
     stats = ()
 
@@ -153,10 +160,6 @@ class SysIdAccel(Planner):
         #: 抑えきれない空転の疑いが続いている時刻 [ns] と、それを検出した段（None＝未検出）
         self._spin_since_ns: int | None = None
         self.spin_stage: int | None = None
-        #: 加速中に後輪が滑った（`REAR_SLIP_LIMIT`）段（None＝滑っていない）。その段は最後まで走り、
-        #: 上の段へは進まない
-        self.slip_stage: int | None = None
-        self._slip_since_ns: int | None = None
         self._guard.reset()
 
     def reset(self) -> None:
@@ -172,13 +175,6 @@ class SysIdAccel(Planner):
             return
         front = vs.speed
         rear = 0.5 * (vs.wheel_speed[2] + vs.wheel_speed[3])
-        if self.slip_stage is None:
-            if rear > 0.1 and rear_slip(front, rear) > REAR_SLIP_LIMIT:
-                self._slip_since_ns = self._slip_since_ns if self._slip_since_ns is not None else vs.t_capture
-                if vs.t_capture - self._slip_since_ns >= self._SPIN_PERSIST_S * 1e9:
-                    self.slip_stage = self.stage_of(self._cycle_i)
-            else:
-                self._slip_since_ns = None
         # 後輪が前進方向に回っているときだけ（加速の段の頭はまだ後退中）
         spinning = rear > 0.1 and rear - front > self._SPIN_TOL_M_S + self._SPIN_TOL_FRAC * abs(front)
         if not spinning:
@@ -214,8 +210,6 @@ class SysIdAccel(Planner):
         st.target_speed = 0.0
         if self.spin_stage is not None:
             st.reason = f"完了（空転を検出: {self._stage_label(self.spin_stage)}。上の段は走らない）"
-        elif self.slip_stage is not None and self.slip_stage < len(self.stages) - 1:
-            st.reason = f"完了（後輪が滑った: {self._stage_label(self.slip_stage)}。上の段は走らない）"
         else:
             st.reason = "完了"
         return st
@@ -298,10 +292,7 @@ class SysIdAccel(Planner):
                     self._cycle_i = n_cycles
                     return self._done(st)
                 self._cycle_i += 1
-                # 後輪が滑った段は最後まで走り、上の段へは進まない
-                if self._cycle_i >= n_cycles or (self.slip_stage is not None
-                                                 and self.stage_of(self._cycle_i) > self.slip_stage):
-                    self._cycle_i = n_cycles
+                if self._cycle_i >= n_cycles:
                     return self._done(st)
                 brake = self.uses_brake(self._cycle_i)
                 a, v_hold, brake_nm = self.stages[self.stage_of(self._cycle_i)]

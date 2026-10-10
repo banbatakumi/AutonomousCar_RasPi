@@ -1304,28 +1304,50 @@ def _traction_event(s: list[Sample], idx: list[int]) -> bool:
     return any(i in ids for r in _slip_runs(s) for i in r)
 
 
-def _slip_limited_accel(s: list[Sample]) -> float | None:
-    """加速中に後輪が滑っていた区間の車の加速度 [m/s²]（速度の傾きの中央値）。滑りながら（TC が
-    効きながら）この車が実際に出せた加速度（グリップで決まる）。0.15s 未満しか無ければ None。"""
-    slopes = []
-    for run in _slip_runs(s):
-        t = np.array([s[i].t for i in run])
-        if len(run) >= 5 and t[-1] - t[0] >= 0.15:
-            slopes.append(float(np.polyfit(t, [s[i].speed for i in run], 1)[0]))
-    return float(np.median(slopes)) if slopes else None
-
-
-def _slip_accel(s: list[Sample]) -> float | None:
-    """後輪が滑った最初の区間の、指令の加速度（`accel_limit`。0＝全開は3.0とみなす）。無ければ None。"""
-    runs = _slip_runs(s)
-    if not runs:
-        return None
-    x = s[runs[0][0]]
+def _accel_level(x: Sample) -> float:
+    """そのサンプルの段の指令の加速度（`accel_limit`。0＝全開は3.0とみなす）。"""
     return x.accel_limit if 0.0 < x.accel_limit < 3.0 else 3.0
 
 
+def _slip_limited_accel(s: list[Sample]) -> tuple[float, float] | None:
+    """加速中に後輪が滑っていた区間の車の加速度 [m/s²] と、それが出た段の指令の加速度。滑りながら
+    （TC が効きながら）この車が実際に出せた加速度（グリップで決まる）。0.15s 以上の区間が無ければ None。
+
+    段ごとに速度の傾きの中央値を取り、**いちばん大きい段**を返す。TC はスリップ率を目標（0.2）に
+    保つので、限界より下の段でも滑り率は `REAR_SLIP_LIMIT` を超える。その段の加速度は指令どおり
+    （限界より低い）で、全段をまとめた中央値だと限界を低く読む（2026-10-10、全段を走るようにした）。"""
+    levels: dict[float, list[float]] = {}
+    for run in _slip_runs(s):
+        t = np.array([s[i].t for i in run])
+        if len(run) >= 5 and t[-1] - t[0] >= 0.15:
+            levels.setdefault(_accel_level(s[run[0]]), []).append(
+                float(np.polyfit(t, [s[i].speed for i in run], 1)[0]))
+    if not levels:
+        return None
+    a, lv = max((float(np.median(v)), k) for k, v in levels.items())
+    return a, lv
+
+
+def _slip_accel(s: list[Sample]) -> float | None:
+    """後輪が滑った最初の区間の、指令の加速度（`_accel_level`）。無ければ None。"""
+    runs = _slip_runs(s)
+    return _accel_level(s[runs[0][0]]) if runs else None
+
+
+def _top_accel_level(s: list[Sample]) -> float:
+    """記録の中でいちばん上の段の指令の加速度（前進の加速の指令が出ているサンプルから）。"""
+    return max((_accel_level(x) for x in s if not x.brake and x.target_speed > 0.0), default=0.0)
+
+
 #: STM32 の最大制動トルク [N·m]（`brake_torque` 0 ＝未指定のとき。`DRIVE_MAX_BRAKE_TORQUE_NM`）
-_MAX_BRAKE_TORQUE_NM = 0.15
+_MAX_BRAKE_TORQUE_NM = 0.13
+
+
+def _brake_nm(x: Sample) -> float:
+    """そのサンプルで実際に掛かる制動トルク [N·m]。未指定（0）は最大、最大より上の指令は STM32 が
+    最大に丸める（前後運動試験の最後の段は 0.15 を指令する＝「最大」の意味）。丸めずに読むと、止まった
+    後の保持（未指定）が別の強さ 0.13 として混ざり、0.15 の段の傾きも実際より小さく読む。"""
+    return min(x.brake_torque, _MAX_BRAKE_TORQUE_NM) if x.brake_torque > 0 else _MAX_BRAKE_TORQUE_NM
 
 
 def _fit_brake(levels: dict[float, float], rr: float, base: VehicleSpec) -> tuple[dict[str, float], list[str]]:
@@ -1384,7 +1406,7 @@ def _brake_runs(log: Log) -> list[_BrakeRun]:
     for run in _phase_runs(s, lambda x: x.brake and x.speed > 0.02):
         if run[0] == 0:
             continue
-        nm = s[run[0]].brake_torque if s[run[0]].brake_torque > 0 else _MAX_BRAKE_TORQUE_NM
+        nm = _brake_nm(s[run[0]])
         # 制動の指令が出た時刻（/cmd）。効き始めるまでの遅れは `_fit_brake_runs` が一緒に推定する
         k = int(np.searchsorted(cmd_t, s[run[0] - 1].t, side="right"))
         while k < len(log.cmds) and not log.cmds[k].brake:
@@ -1448,12 +1470,17 @@ def _fit_brake_runs(log: Log, base: VehicleSpec, rr: float) -> tuple[dict[str, f
     r1 = least_squares(lambda p: resid_with(p[0], 0.0, p[1], p[2:]), [g0, 0.01] + [0.0] * n,
                        bounds=([1.0, 0.0] + lo_dv, [500.0, 0.08] + hi_dv), diff_step=1e-3)
     best = None
-    for cap0 in (2.5, 4.0, 6.0):
-        r2 = least_squares(lambda p: resid_with(p[0], p[1], p[2], p[3:]),
-                           [r1.x[0], cap0] + list(r1.x[1:]),
-                           bounds=([1.0, 0.3, 0.0] + lo_dv, [500.0, 20.0, 0.08] + hi_dv), diff_step=1e-3)
-        if best is None or r2.cost < best.cost:
-            best = r2
+    # 頭打ちの初期値は低い方（1.0・1.75）からも、傾きは名目からも試す。頭打ちなしの当てはめ `r1` は、
+    # 強さのほとんどが頭打ちしている記録では傾きを小さくして辻褄を合わせる（2026-10-10 の実機:
+    # グリップが低く 0.08N·m 以上がすべて約1.7m/s² → 傾き 11、名目 33）。その傾きから始めると
+    # 最大の強さでも減速度が 2.5 に届かず、頭打ちが効かないまま動かなかった（頭打ち 0 と読んだ）
+    for g_start in (float(r1.x[0]), g0):
+        for cap0 in (1.0, 1.75, 2.5, 4.0, 6.0):
+            r2 = least_squares(lambda p: resid_with(p[0], p[1], p[2], p[3:]),
+                               [g_start, cap0] + list(r1.x[1:]),
+                               bounds=([1.0, 0.3, 0.0] + lo_dv, [500.0, 20.0, 0.08] + hi_dv), diff_step=1e-3)
+            if best is None or r2.cost < best.cost:
+                best = r2
     e1, e2 = float(np.mean(r1.fun ** 2)), float(np.mean(best.fun ** 2))
     g, cap = float(best.x[0]), float(best.x[1])
     peak = max(g * r.nm * brake_speed_factor(spec0, r.v0 + d) + rr for r, d in zip(runs, best.x[3:]))
@@ -1530,7 +1557,7 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
     # 決まってから（下の `_fit_brake`）
     brake_levels: dict[float, list[float]] = {}
     for run in _phase_runs(s, lambda x: x.brake and x.speed > 0.1):
-        nm = s[run[0]].brake_torque if s[run[0]].brake_torque > 0 else _MAX_BRAKE_TORQUE_NM
+        nm = _brake_nm(s[run[0]])
         brake_levels.setdefault(round(nm, 4), []).extend(
             -a for vm, a, _ in _window_slopes(s, run) if vm > 0.15)
     brake_levels = {nm: float(np.median(d)) for nm, d in brake_levels.items() if len(d) >= 1}
@@ -1592,13 +1619,22 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
             f"加速度から {spin:.1f}m/s² の間——加速の上限は上から抑えて {spin:.1f}m/s² にした。シムは空転を"
             "表現しない。TC の定数（DRIVE_TC_*）も確かめる")
     elif slip_a is not None:
-        a_sl = _slip_limited_accel(s)
+        sl = _slip_limited_accel(s)
+        a_sl, lv = sl if sl is not None else (None, 0.0)
         a_grip = a_sl if a_sl is not None and a_sl > 0.1 else None
         traction_notes.append(
-            f"加速中に後輪が滑った（段の加速度 {slip_a:.1f}m/s²。その段は最後まで走り、上の段は走らない）。"
-            + (f"滑っていた間の加速度 {a_sl:.2f}m/s² を加速の上限にした（グリップで決まる）。"
+            f"加速中に後輪が滑った（{slip_a:.1f}m/s² の段から）。"
+            + (f"滑っていた間の加速度は{'全開' if lv >= 3.0 else f' {lv:.1f}m/s² '}の段の {a_sl:.2f}m/s² が最大で、"
+               "これを加速の上限にした（グリップで決まる）。"
                if a_grip is not None else "滑っていた時間が短く、その加速度は読めなかった。")
             + "滑った区間は速度制御（車体の利得・転がり抵抗）の当てはめから外した")
+        if a_grip is not None and lv < 3.0 and lv >= _top_accel_level(s) and a_grip >= 0.9 * lv:
+            # 段の指令より上の加速度は出ないので、指令どおりに加速できていれば限界はもっと上かもしれない
+            traction_notes.append(
+                f"★この加速度は段の指令（{lv:.1f}m/s²）とほぼ同じで、それより上の段を走っていない。"
+                "グリップの限界ではなく指令どおりに加速しただけかもしれない（限界はこれ以上、としか"
+                "言えない）。全段を走った記録で測り直すこと（2026-10-10 より前のプランナーは、滑った段で"
+                "打ち切っていた）")
     if a_grip is not None and (not use_up or a_grip < pb["drive_accel_m_s2"]):
         use_up = use["up"] = True
         fixed3 = {**fixed, "drive_accel_m_s2": a_grip}

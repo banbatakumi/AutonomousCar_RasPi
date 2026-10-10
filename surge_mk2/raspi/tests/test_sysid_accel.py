@@ -152,18 +152,16 @@ class TestSysIdAccel(unittest.TestCase):
         self.assertEqual(trace[-1][0].reason, "完了")
         self.assertTrue(any(st.reason.endswith(f" {N_CYCLES}/{N_CYCLES}") for st, _, _ in trace))
 
-    def test_rear_slip_finishes_the_stage_but_not_higher_ones(self):
-        """後輪が滑った（滑り率0.15、抑えきれない空転ほどではない）: その段は2サイクルとも走り、
-        上の段へは進まない（止めずに滑りながら出る加速度を測る）。"""
+    def test_rear_slip_does_not_stop_the_escalation(self):
+        """後輪が滑っても（滑り率0.15＝TC が保つ程度、抑えきれない空転ほどではない）全段を走る。
+        TC の目標スリップ率（0.2）のもとでは TC が働くだけで滑り率0.10を超えるので、滑りで打ち切ると
+        全開の段と強いブレーキの段を必ず飛ばす（2026-10-10 の実機の記録）。"""
         p = SysIdAccel()
         p.set_engaged(True)
         trace = _run(p, P, spin_from=(1, 0.3), mode="slip")
-        self.assertTrue(trace[-1][0].reason.startswith("完了（後輪が滑った"), trace[-1][0].reason)
+        self.assertEqual(trace[-1][0].reason, "完了")
         self.assertIsNone(p.spin_stage)
-        self.assertEqual(p.slip_stage, 1)
-        reasons = [st.reason for st, _, _ in trace]
-        self.assertTrue(any(r.startswith("加速") and r.endswith(f" 4/{N_CYCLES}") for r in reasons))
-        self.assertFalse(any(r.endswith(f" 5/{N_CYCLES}") for r in reasons))
+        self.assertTrue(any(st.reason.endswith(f" {N_CYCLES}/{N_CYCLES}") for st, _, _ in trace))
 
     def test_wheelspin_ends_the_test_without_going_to_higher_stages(self):
         """加速中に抑えきれない空転（後輪が前輪より大きく速い）が続いたら、その段で制動し、
