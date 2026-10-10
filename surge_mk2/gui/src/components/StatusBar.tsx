@@ -88,6 +88,7 @@ export function StatusBar({
         {variant === 'full' && vs?.tc_active && <span className="pill lv-warn">TC</span>}
         {variant === 'full' && vs?.tv_active && <span className="pill lv-warn">TV</span>}
         {variant === 'full' && vs?.abs_active && <span className="pill lv-warn">ABS</span>}
+        {variant === 'full' && vs?.launch_active && <span className="pill lv-warn">LAUNCH</span>}
         {variant === 'full' && vs?.wheel_lift_active && <span className="pill lv-warn">片輪浮き</span>}
         {/* v0.7 自動停止。**「許可しているか」と「今まさに効いているか」は別物**なので
             両方を1つのピルで出し分ける。効いている間は急減速の理由がこれだと即分かるように

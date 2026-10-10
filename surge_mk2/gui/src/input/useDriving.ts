@@ -170,6 +170,27 @@
  *   離れれば自動的に解除されて再び走れる（**停止手段ではなく衝突緩和**として数えること）
  *
  * つまり「ブラウザが固まる」「Wi-Fi が切れる」「PC を閉じる」は従来どおり停止する。
+ *
+ * ## ローンチコントロール（`settings.launchControl`、★プロトコル v0.20）
+ *
+ * 実車と同じ手順で使う: **止まった状態でブレーキとアクセルを両方踏む（準備）→ ブレーキを離す（発進）**。
+ *
+ * | | 準備 | 発進 |
+ * |---|---|---|
+ * | キーボード | `Space` ＋ W/S（MT はギアの向きのキー） | `Space` を離す |
+ * | ゲームパッド | L2 ＋ R2 を 9 割以上 | L2 を離す |
+ *
+ * 発進中は GUI 側のランプ（`accel`・`mtAccel`・発進キック）を飛ばして目標速度を上限（`maxSpeed`、MT は
+ * そのギアの上限）へ直接置き、`cmd.launch` を立てる。STM32 は目標が車速より 0.5m/s 以上速い加速を、
+ * 目標速度のランプ（3.0m/s²）と速度PIを迂回して全開のトルク＋TC で行う（PIは偏差が溜まるまでトルクが
+ * 出ず、グリップの限界に届くまで約0.3秒かかる。`docs/uart_protocol.md` §5.6.7）。
+ *
+ * - 終わるのは、アクセルを離す・ブレーキを踏む・車速が目標の手前に届く、のどれか。終われば普段の操作に戻る
+ *   （目標速度は上限のまま引き継ぐので、踏み続けていればそのまま走る）
+ * - **手順を踏まなければ何も変わらない。** 設定が ON でも、普通にアクセルを踏むだけの発進は従来どおり
+ * - トルク制御は対象外（元からランプが無く、ブレーキを離せば全開がそのまま出て TC が絞る）
+ * - 自律走行（AUTO）では GUI は立てない（planner が自分で決める）
+ * - 状態はラジコン画面のランプ（`AssistLamps.tsx` の LC／LAUNCH）に出る
  * 弱くなったのは**人間が意図して手を離した場合だけ**。
  *
  * ## 自律走行（AUTO）でも、このループが車を生かしている
@@ -224,6 +245,7 @@ import {
   ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, STEER_RATE_SAFETY_LIMIT,
   mtGearAt, mtGearIndex, mtGearRatio, useUi,
 } from '../store/ui'
+import type { LaunchPhase } from '../store/ui'
 import { SAFETY } from '../generated/vehicle'
 import type { ControlChannel } from '../ws/control'
 
@@ -273,6 +295,15 @@ const TRIGGER_DZ = 0.06
 /** 中央付近を緩くする度合い（0=リニア, 1=完全3乗）。スロットルは控えめのまま固定
  * （左右対称なペダルではなく踏み込み量なので、舵ほど中央を緩める必要が無い） */
 const THROTTLE_EXPO = 0.25
+// ── ローンチコントロール（手動操作、★プロトコル v0.20。手順はファイル冒頭の「ローンチコントロール」）──
+/** パッドのアクセル（R2）をこれ以上踏んでいれば「全開のつもり」と見なして準備に入る */
+const LAUNCH_TRIG = 0.9
+/** 発進してからは、これを下回るまで続ける（踏み直しの揺れで切れないように） */
+const LAUNCH_HOLD_TRIG = 0.5
+/** 準備に入れるのは車速がこれ未満（止まっている）ときだけ [m/s] */
+const LAUNCH_ARM_SPEED = 0.3
+/** 車速が目標のこれだけ手前に届いたら発進は終わり [m/s] */
+const LAUNCH_DONE_GAP = 0.1
 /** 右スティック（LiDAR ミニマップ操作用）のデッドゾーン */
 const RSTICK_DZ = 0.15
 /** 右スティック上下いっぱいで 1 秒あたり何 m ズームが変わるか */
@@ -412,6 +443,9 @@ export function useDriving(ch: ControlChannel | null) {
   const torque = useRef(0)
   const lastActivity = useRef(0)
   const sourceRef = useRef<'keyboard' | 'gamepad'>('keyboard')
+  const launchPhase = useRef<LaunchPhase>('idle')
+  /** 発進してから STM32 の `launch_active` を一度でも見たか（下りたら発進は終わり） */
+  const launchSeen = useRef(false)
   /** 自律解除を投げた時刻。rAF ごとに投げると 60発/秒になる（`TAKE_CONTROL_MS` と同じ理由） */
   const lastAutoCancel = useRef(0)
 
@@ -581,10 +615,12 @@ export function useDriving(ch: ControlChannel | null) {
      * 60Hz で再レンダリングが走る）。指令を送らない経路では必ず false を写すこと。
      * **画面に「鳴っている」と出したまま実際は送っていない**のが一番混乱する。
      */
-    const mirrorAux = (brake: boolean, horn: boolean, passing: boolean) => {
+    // `launch` を渡さない経路（未 ARM・操縦権なし・自律走行）では、ローンチの状態も一緒に捨てる
+    const mirrorAux = (brake: boolean, horn: boolean, passing: boolean, launch: LaunchPhase = 'idle') => {
+      launchPhase.current = launch
       const u = useUi.getState()
-      if (u.braking !== brake || u.horning !== horn || u.passing !== passing) {
-        u.set({ braking: brake, horning: horn, passing })
+      if (u.braking !== brake || u.horning !== horn || u.passing !== passing || u.launchPhase !== launch) {
+        u.set({ braking: brake, horning: horn, passing, launchPhase: launch })
       }
     }
 
@@ -846,6 +882,7 @@ export function useDriving(ch: ControlChannel | null) {
           // side_brake と違い未 ARM でも送る（灯火・ホーンと同じ理由）
           winker_left: ui.winkerLeftRequested,
           winker_right: ui.winkerRightRequested,
+          launch: false,
         })
         return
       }
@@ -931,6 +968,8 @@ export function useDriving(ch: ControlChannel | null) {
           side_brake: ui.sideBrakeRequested,
           winker_left: ui.winkerLeftRequested,
           winker_right: ui.winkerRightRequested,
+          // 自律走行のローンチは planner が決める（サーバ側も GUI の値を使わない）
+          launch: false,
         })
         return
       }
@@ -1020,6 +1059,41 @@ export function useDriving(ch: ControlChannel | null) {
           steer.current = approach(steer.current, sdir * s.maxSteer, rate, dt)
         }
       }
+      // ── ローンチコントロール（手順はファイル冒頭）──
+      //
+      // アクセルの向き（踏んでいなければ 0）。パッドは「ほぼ全開」だけを発進の意思と見なす
+      const kdir = fwd ? 1 : rev ? -1 : 0
+      const launchDir =
+        !s.launchControl || torqueModeOn || maxSpeed <= 0
+          ? 0
+          : source === 'gamepad'
+            ? (accelTrig >= (launchPhase.current === 'go' ? LAUNCH_HOLD_TRIG : LAUNCH_TRIG) ? gearSign : 0)
+            : (mtModeOn ? (kdir === gearSign ? kdir : 0) : kdir)
+      const launchTarget =
+        launchDir * maxSpeed * (source === 'gamepad' ? expo(accelTrig, THROTTLE_EXPO) : 1)
+      const vNow = live.vs?.speed ?? 0
+      let launch = launchPhase.current
+      if (launchDir === 0) {
+        launch = 'idle'
+      } else if (launch === 'idle') {
+        if (brake && Math.abs(vNow) < LAUNCH_ARM_SPEED) launch = 'ready'
+      } else if (launch === 'ready') {
+        if (!brake) {
+          launch = 'go'
+          launchSeen.current = false
+        }
+      } else {
+        // 車速が目標に届いたか、STM32 が発進を終えた（目標は io_node の `--max-speed` で切り詰められる
+        // ことがあり、そのときは GUI の目標には届かない）
+        const active = live.vs?.launch_active ?? false
+        if (active) launchSeen.current = true
+        const done = vNow * launchDir >= Math.abs(launchTarget) - LAUNCH_DONE_GAP
+        if (brake || done || (launchSeen.current && !active)) launch = 'idle'
+      }
+      launchPhase.current = launch
+      // 発進中は GUI 側のランプを飛ばして目標を上限へ置く（STM32 が目標との差を見て全開にする）
+      if (launch === 'go') speed.current = launchTarget
+
       // **ブレーキ中は速度・トルク指令を 0 に落とす。**
       // STM32 は `brake` の間 `target_speed`/`target_torque` を無視し、離すと 0 から
       // `accel_limit` に従って加速し直す。GUI 側のランプを走らせたままにすると、
@@ -1051,7 +1125,7 @@ export function useDriving(ch: ControlChannel | null) {
       // ── 送信は 50Hz に間引く ──
       if (now - lastTxMs < TX_INTERVAL_MS) return
       lastTxMs = now
-      mirrorAux(brake, horn, passing)
+      mirrorAux(brake, horn, passing, launch)
       ch.cmd({
         mode: 1, // MANUAL
         arm: true,
@@ -1082,6 +1156,8 @@ export function useDriving(ch: ControlChannel | null) {
         // v0.14: ウィンカーも `side_brake` と同じくトグル。灯火系なので未 ARM でも送る
         winker_left: ui.winkerLeftRequested,
         winker_right: ui.winkerRightRequested,
+        // v0.20: ローンチコントロール。手順を踏んだ発進の間だけ立つ
+        launch: launch === 'go',
       })
     }
 

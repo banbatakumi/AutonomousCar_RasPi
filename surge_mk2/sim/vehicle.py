@@ -306,6 +306,7 @@ class DriveInput:
     steer_rate_limit: float = 0.0    # rad/s。0 = 制限なし
     brake_torque: float = 0.0        # N·m（後輪各輪）。0 = 未指定 = 最大制動
     target_torque: float = 0.0       # N·m（駆動トルク直接指令、v0.6）
+    launch: bool = False             # ローンチコントロールの要求（v0.20。`SpeedController` が見る）
 
 
 class SteerServo:
@@ -468,19 +469,50 @@ class SpeedController:
     以前の「1次遅れ＋加速度上限」は、ファームのこの構造（ランプ→2次応答・行き過ぎ）を
     表現できず、同定で時定数が下限に張り付いた（検証: 2026-09-26、PROGRESS.md）。
     `VehicleModel`（`speed_kp>0` のとき）と `tools/sysid/fit.py` が同じ実装を使う。
+
+    **ローンチコントロール**（`cmd.launch`、★v0.20。`drive.c` の `UpdateLaunch`）: 目標が測定速度より
+    `LAUNCH_MIN_STEP_M_S` 以上速い加速では、ランプとPIを迂回して出せる最大のトルクを要求し
+    （加速度の上限 `drive_accel_limit()` が TC の代わり）、目標の `LAUNCH_END_MARGIN_M_S` 手前で
+    PI へ戻す。1回の要求で1回（下ろす・制動する・止まる、でまた使える）。発進中かは `launching`。
     """
 
     STANDSTILL_M_S = 0.05
     ANTIWINDUP_TT_S = 0.10
+    LAUNCH_REVERSE_M_S = 0.3
+    LAUNCH_MIN_STEP_M_S = 0.5
+    LAUNCH_END_MARGIN_M_S = 0.05
+    LAUNCH_TIMEOUT_S = 3.0
 
-    def __init__(self, spec: VehicleSpec) -> None:
+    def __init__(self, spec: VehicleSpec, launch_exit_torque_nm: float = 0.0) -> None:
         self.spec = spec
+        #: 発進を終えて PI へ戻すときの積分の初期値 [N·m、1輪あたり]（`[control]` の同名の値）
+        self.launch_exit_torque_nm = launch_exit_torque_nm
         self.reset()
 
     def reset(self, v: float = 0.0, ref: float = 0.0, integral: float = 0.0) -> None:
         self.ref = ref
         self.integral = integral
         self.v_meas = v
+        self.launching = False
+        self._launch_spent = False
+        self._launch_t = 0.0
+
+    def _update_launch(self, cmd: DriveInput, dt: float) -> bool:
+        if not cmd.launch:
+            self.launching = self._launch_spent = False
+            return False
+        sign = 1.0 if cmd.target_speed >= 0.0 else -1.0
+        target, v = cmd.target_speed * sign, self.v_meas * sign
+        if not self.launching:
+            if (self._launch_spent or v <= -self.LAUNCH_REVERSE_M_S
+                    or target - v < self.LAUNCH_MIN_STEP_M_S):
+                return False
+            self.launching = self._launch_spent = True
+            self._launch_t = 0.0
+        self._launch_t += dt
+        if v >= target - self.LAUNCH_END_MARGIN_M_S or self._launch_t >= self.LAUNCH_TIMEOUT_S:
+            self.launching = False
+        return self.launching
 
     def step(self, cmd: DriveInput, v: float, dt: float) -> float:
         sp = self.spec
@@ -491,24 +523,35 @@ class SpeedController:
         if not cmd.armed or cmd.brake or cmd.torque_mode:
             self.ref = 0.0
             self.integral = 0.0
+            self.launching = self._launch_spent = False
             return next_speed(sp, cmd, v, dt)
-        lim = sp.speed_ramp_max_m_s2
-        if cmd.accel_limit > 0:
-            lim = min(lim, max(0.01, cmd.accel_limit))
-        self.ref += max(-lim * dt, min(lim * dt, cmd.target_speed - self.ref))
         rr = sp.rolling_resistance
-        if abs(self.ref) < self.STANDSTILL_M_S and abs(self.v_meas) < self.STANDSTILL_M_S:
-            self.integral = 0.0
-            return _toward_zero(v, rr * dt)
-        e = self.ref - self.v_meas
-        self.integral += e * dt
-        t_req = sp.speed_kp * e + sp.speed_ki * self.integral
         t_max = sp.speed_torque_max_nm
-        if t_req > t_max or t_req < -t_max:
-            # PIDライブラリの出力制限と条件付き積分（`pid.h`）
-            if (t_req > 0) == (e > 0):
-                self.integral -= e * dt
-            t_req = max(-t_max, min(t_max, t_req))
+        launching = self._update_launch(cmd, dt)
+        if launching:
+            # 全開を要求する。目標を測定速度に合わせ続け、積分は「その車速を保つトルク」から始める
+            sign = 1.0 if cmd.target_speed >= 0.0 else -1.0
+            self.ref = self.v_meas
+            self.integral = (sign * 2.0 * self.launch_exit_torque_nm / sp.speed_ki
+                             if sp.speed_ki > 1e-9 else 0.0)
+            t_req = sign * t_max
+        else:
+            lim = sp.speed_ramp_max_m_s2
+            if cmd.accel_limit > 0:
+                lim = min(lim, max(0.01, cmd.accel_limit))
+            self.ref += max(-lim * dt, min(lim * dt, cmd.target_speed - self.ref))
+            if abs(self.ref) < self.STANDSTILL_M_S and abs(self.v_meas) < self.STANDSTILL_M_S:
+                self.integral = 0.0
+                self._launch_spent = False
+                return _toward_zero(v, rr * dt)
+            e = self.ref - self.v_meas
+            self.integral += e * dt
+            t_req = sp.speed_kp * e + sp.speed_ki * self.integral
+            if t_req > t_max or t_req < -t_max:
+                # PIDライブラリの出力制限と条件付き積分（`pid.h`）
+                if (t_req > 0) == (e > 0):
+                    self.integral -= e * dt
+                t_req = max(-t_max, min(t_max, t_req))
         g = sp.speed_plant_gain
         a_req = g * t_req
         # 外側の加速度上限（モータ・TCで出せる分）。進む向きに押すなら駆動、逆なら減速
@@ -516,7 +559,7 @@ class SpeedController:
         a_lim = drive_accel_limit(sp, v) if driving else (
             sp.speed_decel_m_s2 if sp.speed_decel_m_s2 > 1e-6 else math.inf)
         a = max(-a_lim, min(a_lim, a_req))
-        if a != a_req and sp.speed_ki > 1e-9 and g > 1e-9:
+        if a != a_req and not launching and sp.speed_ki > 1e-9 and g > 1e-9:
             self.integral += (a - a_req) / g / sp.speed_ki * (dt / self.ANTIWINDUP_TT_S)
         v_new = v + a * dt
         # 転がり抵抗は速度を0の向きへ（0をまたいで逆走させない）
@@ -611,6 +654,16 @@ class VehicleModel:
         #: 曲率の2次遅れ（`yaw_natural_freq_rad_s>0` のとき）
         self._yaw2 = SecondOrder(sp.yaw_natural_freq_rad_s, sp.yaw_damping) \
             if sp.yaw_natural_freq_rad_s > 1e-6 else None
+
+    @property
+    def launching(self) -> bool:
+        """ローンチコントロールで発進している最中か（`TELEMETRY.flags` の LAUNCH_ACTIVE）。"""
+        return self._speed_ctl is not None and self._speed_ctl.launching
+
+    def set_launch_exit_torque(self, nm: float) -> None:
+        """`[control]` の `launch_exit_torque_nm`（STM32 へ `CONFIG_SET` で入る値）。"""
+        if self._speed_ctl is not None:
+            self._speed_ctl.launch_exit_torque_nm = nm
 
     # ── 指令 ──
 

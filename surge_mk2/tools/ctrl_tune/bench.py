@@ -30,7 +30,7 @@ from .tuning import load_params
 __all__ = ["compare", "main"]
 
 #: 効率を出す場面（一定トルクの最良が定義できる＝路面が途中で変わっても同じ条件で比べられる）
-_ORACLE = frozenset({"launch", "roll", "accel_mu_drop", "corner_exit", "brake", "brake_soft",
+_ORACLE = frozenset({"launch", "launch_pi", "launch_lc", "roll", "accel_mu_drop", "corner_exit", "brake", "brake_soft",
                      "brake_mu_drop"})
 
 

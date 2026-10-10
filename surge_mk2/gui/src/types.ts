@@ -452,4 +452,8 @@ export type CmdOut = {
    * `side_brake` と同じく**トグル**で扱う（曲がり終わったら明示的に OFF にする） */
   winker_left: boolean
   winker_right: boolean
+  /** ローンチコントロール（v0.20）。立っている間、`speed` が車速より 0.5m/s 以上速い加速を、STM32 が
+   * 目標速度のランプと速度PIを迂回して全開＋TC で行う（1回の要求で1回）。`torque_mode`・`brake` の間は
+   * 意味を持たない。**立てるのは `useDriving.ts` のローンチの手順を踏んだ発進だけ** */
+  launch: boolean
 }

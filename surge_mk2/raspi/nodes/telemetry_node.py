@@ -1265,6 +1265,9 @@ class TelemetryServer:
             # （2026-08-30 発覚）。DriveCmd に新しいトグル系フィールドを足したら
             # 必ずここも直すこと——型を直しただけでは WS の JSON から拾われない
             side_brake=bool(m.get("side_brake", False)),
+            # v0.20: ローンチコントロール（手動操作。GUI がブレーキ＋アクセル→ブレーキを離す、の手順を
+            # 踏んだ発進の間だけ立てる）。自律走行では `_merge_auto` が planner の値に差し替える
+            launch=bool(m.get("launch", False)),
             # v0.14: ウィンカー。side_brake と同じ理由で追加
             winker_left=bool(m.get("winker_left", False)),
             winker_right=bool(m.get("winker_right", False)),
@@ -2686,7 +2689,7 @@ class TelemetryServer:
             return msgspec.structs.replace(
                 gui, mode=2, brake=True, brake_torque=0.0, target_speed=0.0,
                 target_steer=self._auto_last_steer,
-                torque_mode=False, target_torque=0.0, fw_overrides={},
+                torque_mode=False, target_torque=0.0, launch=False, fw_overrides={},
                 source=f"auto:{self._auto_mode}:stale")
         self._auto_was_fresh = True
         self._auto_last_steer = auto.target_steer
@@ -2712,6 +2715,8 @@ class TelemetryServer:
             torque_mode=auto.torque_mode,
             target_torque=auto.target_torque if (auto.torque_mode
                                                  and math.isfinite(auto.target_torque)) else 0.0,
+            # ローンチコントロールも planner の指定だけ（★v0.20。手動操作では GUI の値がそのまま通る）
+            launch=auto.launch,
             # STM32 の設定の一時的な上書きも planner の指定だけ（GUI の指令では常に空）
             fw_overrides=auto.fw_overrides,
             source=f"auto:{self._auto_mode}")

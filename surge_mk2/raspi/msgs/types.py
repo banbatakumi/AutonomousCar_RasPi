@@ -228,6 +228,9 @@ class VehicleState(MsgBase):
     abs_active: bool = False
     #: 片輪浮き対策が**今まさにトルクを削っている**（★v0.16）。このとき `tc_active` は立たない
     wheel_lift_active: bool = False
+    #: ローンチコントロールで**今まさに発進している**（★v0.20）。`DriveCmd.launch` を立てていても、
+    #: 条件を満たさず始まらなかった・目標車速に届いて終わった、なら False
+    launch_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
 
     # ── Pi 側で計算した派生量 ──
@@ -351,6 +354,15 @@ class DriveCmd(MsgBase):
     #: 点滅そのものは STM32 側で行う。実際に点滅しているかは `VehicleState.winker_*_active` を見ること
     winker_left: bool = False
     winker_right: bool = False
+    #: ローンチコントロール（★v0.20）。立っている間、**車速指令の `target_speed` が車速より 0.5m/s 以上
+    #: 速い加速（発進）**で、STM32 が目標車速のランプ（3.0m/s²）と車速PIを迂回し、全開のトルク＋TC で
+    #: `target_speed` まで加速する（PIは偏差が溜まるまでトルクが出ず、グリップの限界に届くまで
+    #: 約0.3秒かかる）。届いたら車速PIへ戻る。1回の要求で1回（下ろす・制動する・止まる、でまた
+    #: 使える）。車速は問わないので、**いつ立てるかは出す側が決める**: 手動操作は GUI が「止まった状態で
+    #: ブレーキ＋アクセル → ブレーキを離す」の手順を踏んだ発進の間だけ（`gui/src/input/useDriving.ts`）、
+    #: 自律走行は planner（`slam2d_raceline` の `launch`、既定は無効）。`brake`・`torque_mode`・
+    #: `side_brake` の間は意味を持たない。実際に発進中かは `VehicleState.launch_active`
+    launch: bool = False
     #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（名前 → 値。★v0.16）。同定の試験
     #: （`raspi/auto/sysid_*.py`）が TC・ABS を切る・ヨーモーメントを入れるのに使う。io_node は
     #: **この指令が届いている間だけ**入れ、届かなくなったら元へ戻す（`raspi/core/control_params.py`
@@ -602,6 +614,10 @@ class AutoState(MsgBase):
     #: トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない（2026-10-05）
     torque_mode: bool = False
     target_torque: float = 0.0
+    #: ローンチコントロールを要求する（`DriveCmd.launch`、★v0.20）。`target_speed` が車速より 0.5m/s
+    #: 以上速い間、STM32 がグリップの限界で `target_speed` まで加速する。**`target_speed` は「そこまで
+    #: 全開で加速してよい速度」になる**ので、立てるのは進路が開けている発進だけにすること
+    launch: bool = False
     #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（`DriveCmd.fw_overrides` へそのまま載る）
     fw_overrides: dict[str, float] = msgspec.field(default_factory=dict)
 

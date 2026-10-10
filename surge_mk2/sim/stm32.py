@@ -184,6 +184,8 @@ class VirtualStm32:
         elif isinstance(msg, packets.ConfigSet):
             self._config[msg.param_id] = msg.value
             known = msg.param_id in vars(packets.Param).values()
+            if msg.param_id == packets.Param.LAUNCH_EXIT_TORQUE_NM:
+                self.vehicle.set_launch_exit_torque(msg.value)
             self._emit(packets.ConfigAck(
                 param_id=msg.param_id, applied=msg.value,
                 result=packets.ConfigResult.OK if known else packets.ConfigResult.UNKNOWN_ID), t_ns)
@@ -225,6 +227,7 @@ class VirtualStm32:
                               if c.steer_rate_limit > 0 else DEFAULT_STEER_RATE_RAD_S),
             brake_torque=c.brake_torque * _CMD_SCALE["brake_torque"],
             target_torque=c.target_torque * _CMD_SCALE["target_torque"],
+            launch=armed and bool(c.flags2 & packets.CMD_FLG2_LAUNCH),
         )
 
     # ── 進行 ──
@@ -375,6 +378,8 @@ class VirtualStm32:
             f |= packets.FLG_SIDE_BRAKE_ACTIVE
         if self.abs_active:
             f |= packets.FLG_ABS_ACTIVE
+        if self.vehicle.launching:
+            f |= packets.FLG_LAUNCH_ACTIVE
         # v0.14: ウィンカー。点滅周期は暫定 1Hz（0.5s ON / 0.5s OFF）。
         # **実際の周期は STM32 側の実装依存**なので、ここは GUI 配線の確認用の近似
         blink = (t_ns // (NS // 2)) % 2 == 0

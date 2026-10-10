@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xf17bf10e
+export const MSGS_SCHEMA = 0x7f198a22
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -144,6 +144,11 @@ export type VehicleState = {
   abs_active: boolean
   /** 片輪浮き対策が**今まさにトルクを削っている**（★v0.16）。このとき `tc_active` は立たない */
   wheel_lift_active: boolean
+  /**
+   * ローンチコントロールで**今まさに発進している**（★v0.20）。`DriveCmd.launch` を立てていても、
+   * 条件を満たさず始まらなかった・目標車速に届いて終わった、なら False
+   */
+  launch_active: boolean
   /** 立っている fault の名前 */
   faults: string[]
   /**
@@ -378,6 +383,12 @@ export type AutoState = {
    */
   torque_mode: boolean
   target_torque: number
+  /**
+   * ローンチコントロールを要求する（`DriveCmd.launch`、★v0.20）。`target_speed` が車速より 0.5m/s
+   * 以上速い間、STM32 がグリップの限界で `target_speed` まで加速する。**`target_speed` は「そこまで
+   * 全開で加速してよい速度」になる**ので、立てるのは進路が開けている発進だけにすること
+   */
+  launch: boolean
   /** STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（`DriveCmd.fw_overrides` へそのまま載る） */
   fw_overrides: Record<string, number>
   /** 狙っている方位 [rad] */

@@ -20,7 +20,8 @@ from raspi.auto.sysid_wheel import SysIdWheel  # noqa: E402
 from raspi.core.control_params import CONTROL_PARAM_IDS, load_control_params  # noqa: E402
 from tools.ctrl_tune import fit, optimize, record, tuning  # noqa: E402
 from tools.ctrl_tune import scenarios as S  # noqa: E402
-from tools.ctrl_tune.fw import FW_DIR, MODE_SPEED, MODE_TORQUE, OUT, firmware  # noqa: E402
+from tools.ctrl_tune.fw import (FLAG_LAUNCH, FW_DIR, MODE_BRAKE, MODE_SPEED, MODE_SPEED_LAUNCH,  # noqa: E402
+                                MODE_TORQUE, OUT, firmware)
 from tools.ctrl_tune.plant import DEFAULT_TOML, NOMINAL, Plant  # noqa: E402
 
 HAVE_FW = (FW_DIR / "host" / "host_sim.c").exists() and shutil.which("cc") is not None
@@ -86,6 +87,63 @@ class TestLogic(unittest.TestCase):
         """車速指令の減速（ランプ3.0m/s²は後輪だけの制動の限界を超える）でも後輪がロックしない。"""
         m = S.run(self.fw, NOMINAL, scenario("decel_pi")).metrics
         self.assertLess(m["slipping"], 0.05)
+
+    # ── ローンチコントロール（v0.20。`drive.h` の同名の節）──
+
+    def _launching(self, r) -> np.ndarray:
+        return (r.col("flags").astype(int) & FLAG_LAUNCH) != 0
+
+    def test_launch_accelerates_like_full_torque_and_hands_over_at_target(self):
+        """車速指令＋ローンチは、最初の周期から全開を要求してトルク指令の全開と同じだけ進み、
+        目標に届いたら車速PIへ戻って行き過ぎない。"""
+        params = {"launch_exit_torque_nm": 0.012}
+        lc = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED_LAUNCH, 1.5, 3.0),), 0.0),
+                   params)
+        pi = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED, 1.5, 3.0),), 0.0), params)
+        full = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.4, MODE_TORQUE, 0.15),), 0.0), params)
+        on = self._launching(lc)
+        self.assertTrue(on[0])
+        self.assertAlmostEqual(float(lc.col("cmd_left")[0]), 0.15, places=4)
+        end = int(np.nonzero(on)[0][-1])
+        self.assertFalse(on[end + 1:].any())                           # 1回で終わる
+        self.assertAlmostEqual(float(lc.col("distance")[799]), float(full.col("distance")[799]), delta=0.005)
+        t95 = lambda r: float(r.col("t")[np.nonzero(r.col("speed") >= 0.95 * 1.5)[0][0]])   # noqa: E731
+        self.assertLess(t95(lc), t95(pi) - 0.1)
+        after = lc.col("speed")[end:]
+        self.assertLess(float(after.max()), 1.5 + 0.08)
+        self.assertGreater(float(after.min()), 1.5 - 0.08)
+        self.assertGreater(float(pi.col("speed").max()), float(after.max()))   # PI の方が行き過ぎる
+
+    def test_launch_needs_a_large_step_but_not_a_standstill(self):
+        """徐行の指令（目標との差が 0.5m/s 未満）では始めない。低速で走っている途中からは始める
+        （上位は経路に乗るまで低速で走り、乗ってから要求する）。"""
+        slow = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.5, MODE_SPEED_LAUNCH, 0.4, 3.0),), 0.0))
+        self.assertFalse(self._launching(slow).any())
+        segs = (S.Seg(0.6, MODE_SPEED, 0.5, 3.0), S.Seg(0.8, MODE_SPEED_LAUNCH, 2.0, 3.0))
+        lc = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 0.5, measure=1))
+        pi = S.run(self.fw, QUIET, S.Scenario(
+            "t", "t", (segs[0], S.Seg(0.8, MODE_SPEED, 2.0, 3.0)), 0.5, measure=1))
+        on = self._launching(lc)
+        self.assertFalse(on[:1200].any())
+        self.assertTrue(on[1200])
+        self.assertGreater(lc.metrics["distance"], pi.metrics["distance"] + 0.05)
+        near = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.5, MODE_SPEED_LAUNCH, 1.9, 3.0),), 1.5))
+        self.assertFalse(self._launching(near).any())                  # 差が小さい加速は PI のまま
+
+    def test_launch_is_rearmed_by_braking_to_a_stop(self):
+        """1回の要求で1回。制動して止まれば、次の発進でまた働く。"""
+        segs = (S.Seg(0.6, MODE_SPEED_LAUNCH, 1.0, 3.0), S.Seg(1.2, MODE_BRAKE, 0.15),
+                S.Seg(0.6, MODE_SPEED_LAUNCH, 1.0, 3.0))
+        r = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 0.0))
+        on = self._launching(r)
+        self.assertTrue(on[:1200].any())
+        self.assertFalse(on[1200:3600].any())                          # 制動中は働かない
+        self.assertTrue(on[3600:].any())
+
+    def test_launch_needs_traction_control(self):
+        """空転を抑えるのは TC だけなので、TC が無効なら始めない。"""
+        sc = S.Scenario("t", "t", (S.Seg(0.5, MODE_SPEED_LAUNCH, 3.0, 3.0),), 0.0, tc=False)
+        self.assertFalse(self._launching(S.run(self.fw, QUIET, sc)).any())
 
     def test_cut_wheel_torque_is_not_moved_to_the_other_wheel(self):
         """片輪を絞った分を反対の輪へ載せない（以前は総和を保つために押し増していた）。"""

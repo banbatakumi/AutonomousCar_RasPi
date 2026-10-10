@@ -559,6 +559,21 @@ class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
                                                   t_pub=time.monotonic_ns(), source="planning:x")
         self.assertEqual(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).accel_limit, 1.6)
 
+    async def test_launch_comes_only_from_the_planner(self):
+        """ローンチコントロール（v0.20）は planner の指定だけが通る。`auto/cmd` が途絶えたら下ろす。"""
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        from raspi.msgs.types import TOPIC_AUTO_CMD
+        srv._last_cmd = msgspec.structs.replace(srv._last_cmd, launch=True)      # GUI 側の値は使わない
+        srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=2.0,
+                                                  t_pub=time.monotonic_ns(), source="planning:x")
+        self.assertFalse(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).launch)
+        srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=2.0, launch=True,
+                                                  t_pub=time.monotonic_ns(), source="planning:x")
+        self.assertTrue(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).launch)
+        stale = srv._merge_auto(srv._last_cmd, time.monotonic_ns() + 10_000_000_000)
+        self.assertTrue(stale.brake)
+        self.assertFalse(stale.launch)
+
 
 class TestAutoBrakeTorque(unittest.IsolatedAsyncioTestCase):
     """自律中の制動トルク: planner の指定があればそれ、無ければ GUI の値。人（GUI）もブレーキを
@@ -923,6 +938,17 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(srv._last_cmd.side_brake)
         self.assertTrue(srv._last_cmd.winker_left)
         self.assertTrue(srv._last_cmd.winker_right)
+
+    async def test_launch_reaches_drive_cmd_and_defaults_false(self):
+        """v0.20: 手動操作のローンチコントロール。WS の cmd JSON の `launch` が `DriveCmd` に届き、
+        キーを送らない古い GUI では False のまま。"""
+        srv = self._server()
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":2.0,"launch":true}')
+        self.assertTrue(srv._last_cmd.launch)
+        await srv._on_control(a, b'{"type":"cmd","mode":1,"speed":2.0}')
+        self.assertFalse(srv._last_cmd.launch)
 
     async def test_side_brake_and_winkers_default_false_for_old_gui(self):
         """キーを送ってこない GUI で誤って有効化しない（既定 False）。"""

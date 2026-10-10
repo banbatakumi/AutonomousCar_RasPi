@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.proto import packets  # noqa: E402
+from raspi.proto.framing import FrameEncoder  # noqa: E402
 from sim.course import Course  # noqa: E402
 from sim.params import SimParams  # noqa: E402
 from sim.stm32 import VirtualStm32  # noqa: E402
@@ -74,6 +75,44 @@ class TestSimTorqueCmd(unittest.TestCase):
 
     def test_standing_still_is_not_braking(self):
         self.assertGreater(self.torque_after(0.0, False), -0.02)
+
+
+class TestSimLaunch(unittest.TestCase):
+    """ローンチコントロール（★v0.20）: `COMMAND.flags2` の LAUNCH → 発進中は `flags` の LAUNCH_ACTIVE。"""
+
+    def _sim(self) -> VirtualStm32:
+        sim = VirtualStm32(SPEC, Course.load(COURSE), SimParams())
+        sim.start(1_000_000_000)
+        return sim
+
+    def _command(self, sim: VirtualStm32, launch: bool) -> None:
+        flags2 = packets.CMD_FLG2_LAUNCH if launch else 0
+        sim._on_command(packets.Command(mode=2, flags=packets.CMD_FLG_ARM, target_speed=2000,
+                                        flags2=flags2), 0, 1_000_000_000)
+
+    def test_flag_follows_the_launch(self):
+        sim = self._sim()
+        self._command(sim, launch=True)
+        self.assertTrue(sim._input.launch)
+        sim._substep(0.001)
+        self.assertTrue(sim._flags(1_000_000_000) & packets.FLG_LAUNCH_ACTIVE)
+        for _ in range(900):                                           # 目標に届けば終わる（壁に着く前）
+            sim._cmd_ns = sim._now                                     # COMMAND は届き続けている
+            sim._substep(0.001)
+        self.assertFalse(sim._flags(1_000_000_000) & packets.FLG_LAUNCH_ACTIVE)
+        self.assertAlmostEqual(sim.vehicle.speed, 2.0, delta=0.15)
+
+    def test_no_flag_without_the_request(self):
+        sim = self._sim()
+        self._command(sim, launch=False)
+        sim._substep(0.001)
+        self.assertFalse(sim._flags(1_000_000_000) & packets.FLG_LAUNCH_ACTIVE)
+
+    def test_exit_torque_comes_from_config_set(self):
+        sim = self._sim()
+        sim.rx_bytes(FrameEncoder().encode(
+            packets.ConfigSet(param_id=packets.Param.LAUNCH_EXIT_TORQUE_NM, value=0.009)), 1_000_000_000)
+        self.assertAlmostEqual(sim.vehicle._speed_ctl.launch_exit_torque_nm, 0.009)
 
 
 if __name__ == "__main__":

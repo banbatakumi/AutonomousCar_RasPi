@@ -253,7 +253,7 @@ class Bench:
         self._race_col0: int | None = None
         self._trace_f = open(trace, "w") if trace else None
         if self._trace_f:
-            self._trace_f.write("t,phase,x,y,yaw,v,cmd_v,brake,prof_v,idx,cross,clear\n")
+            self._trace_f.write("t,phase,x,y,yaw,v,cmd_v,brake,prof_v,idx,cross,clear,launch\n")
         # 車体外形の輪郭と、真の壁からの距離場（`_clearance`）
         from scipy.ndimage import distance_transform_edt
 
@@ -351,7 +351,8 @@ class Bench:
                 else:
                     cmd = DriveCmd(mode=2, arm=True, target_speed=st.target_speed,
                                    target_steer=st.target_steer, accel_limit=accel,
-                                   steer_rate_limit=sp.cmd_steer_rate_limit_rad_s)
+                                   steer_rate_limit=sp.cmd_steer_rate_limit_rad_s,
+                                   launch=st.launch)
 
             now = time.monotonic_ns()
             if now >= next_cmd:
@@ -418,7 +419,7 @@ class Bench:
             self._trace_f.write(
                 f"{t:.3f},{st.phase},{v.x:.4f},{v.y:.4f},{v.yaw:.4f},{v.speed:.4f},"
                 f"{cmd.target_speed:.3f},{int(cmd.brake)},{pv:.3f},{i},{st.cross_track:.4f},"
-                f"{clear:.4f}\n")
+                f"{clear:.4f},{int(v.launching)}\n")
 
     def _clearance(self, x: float, y: float, yaw: float) -> float:
         """車体外形（輪郭）と真の壁との最小距離 [m]。0 = 接触。"""

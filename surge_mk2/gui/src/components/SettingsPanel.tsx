@@ -359,6 +359,22 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               表示値は STM32 の CONFIG_ACK 経由のサーバ真値（`link.auto_stop_margin_cm`）。
               未確定（起動直後でまだ CONFIG_ACK が届いていない）間は null になる */}
           <section className="settings-group">
+            <h3>ローンチコントロール</h3>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={settings.launchControl}
+                onChange={(e) => setDriveSettings({ launchControl: e.target.checked })}
+              />
+              止まった状態でブレーキとアクセルを両方踏み、ブレーキを離すと全開で発進する
+            </label>
+            <p className="dim">
+              速度制御・MT で働く（トルク制御は対象外）。キーボードは Space＋W/S、パッドは L2＋R2（9割以上）。
+              目標速度をいきなり上限まで上げ、STM32 が速度制御の立ち上がりを待たずに全開＋TC で加速する。
+              アクセルを離す・ブレーキを踏む・上限速度に届く、で終わる
+            </p>
+          </section>
+          <section className="settings-group">
             <h3>自動停止（超音波+LiDAR）</h3>
             <label className="settings-checkbox">
               <input

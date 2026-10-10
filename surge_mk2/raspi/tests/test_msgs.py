@@ -434,6 +434,14 @@ class TestTorqueMode(unittest.TestCase):
     def test_target_torque_scale(self):
         self.assertEqual(self._cmd(target_torque=0.05).target_torque, 500)
 
+    def test_launch_occupies_flags2_bit3(self):
+        """v0.20: ローンチコントロールの要求は `flags2` bit3、発進中は `flags` bit24。"""
+        self.assertEqual(self._cmd(launch=True).flags2, packets.CMD_FLG2_LAUNCH)
+        self.assertEqual(packets.CMD_FLG2_LAUNCH, 0x08)
+        self.assertEqual(self._cmd().flags2, 0)
+        self.assertTrue(decode_flags(packets.FLG_LAUNCH_ACTIVE)["launch_active"])
+        self.assertFalse(decode_flags(0)["launch_active"])
+
     def test_target_torque_zero_is_just_zero(self):
         """`brake_torque` の 0 とは違い「未指定」の特別扱いはない。"""
         self.assertEqual(self._cmd(target_torque=0.0).target_torque, 0)

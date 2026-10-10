@@ -47,6 +47,7 @@ export function DrivePage({ n }: PageProps) {
           <Assist label="ABS" enabled={link?.abs_enabled} active={vs.abs_active} />
           <Assist label="TV" enabled={link?.tv_enabled} active={vs.tv_active} />
           <Assist label="片輪浮き対策" enabled={link?.wheel_lift_guard_enabled} active={vs.wheel_lift_active} />
+          <Row label="ローンチコントロール">{vs.launch_active ? '発進中' : '—'}</Row>
           <Row label="自動停止" level={vs.auto_stop_active ? 'bad' : link?.auto_stop_margin_cm == null ? 'na' : undefined}>
             {vs.auto_stop_active ? '作動中' : link?.auto_stop_margin_cm == null ? '未確認' : `余裕 ${num(link.auto_stop_margin_cm, 0)} cm`}
           </Row>

@@ -20,8 +20,8 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from .fw import (FLAG_ABS, FLAG_LIFT, FLAG_TC, FLAG_TV, IN, MODE_BRAKE, MODE_DISARM, MODE_SPEED,
-                 MODE_TORQUE, OUT, Firmware, HostConfig)
+from .fw import (FLAG_ABS, FLAG_LAUNCH, FLAG_LIFT, FLAG_TC, FLAG_TV, IN, MODE_BRAKE, MODE_DISARM,
+                 MODE_SPEED, MODE_SPEED_LAUNCH, MODE_TORQUE, OUT, Firmware, HostConfig)
 from .plant import Plant
 
 __all__ = ["Seg", "Scenario", "Result", "run", "oracle", "SLIP", "ALL", "DT"]
@@ -96,7 +96,8 @@ def _metrics(sc: Scenario, out: np.ndarray, slip_target: float = 0.1) -> dict[st
     kappa = np.maximum(np.abs(c("kappa_left")), np.abs(c("kappa_right")))
     m: dict[str, float] = {}
     flags = c("flags").astype(int)
-    for name, bit in (("tc", FLAG_TC), ("abs", FLAG_ABS), ("tv", FLAG_TV), ("lift", FLAG_LIFT)):
+    for name, bit in (("tc", FLAG_TC), ("abs", FLAG_ABS), ("tv", FLAG_TV), ("lift", FLAG_LIFT),
+                      ("launch", FLAG_LAUNCH)):
         m[f"{name}_active"] = float(np.mean((flags & bit) != 0))
     if sc.kind == "brake":
         # 止まる = 0.3m/s を下回る（それより下は MD の制動が抜けていくので制御の差が出ない）
@@ -176,6 +177,8 @@ _COAST = Seg(0.05, MODE_DISARM)
 SLIP: tuple[Scenario, ...] = (
     Scenario("launch", "停止から全開（トルク指令）", (Seg(1.0, MODE_TORQUE, _FULL),), 0.0),
     Scenario("launch_pi", "停止から車速指令 3m/s（ランプ3.0）", (Seg(1.0, MODE_SPEED, 3.0, 3.0),), 0.0),
+    Scenario("launch_lc", "停止から車速指令 3m/s＋ローンチコントロール",
+             (Seg(1.0, MODE_SPEED_LAUNCH, 3.0, 3.0),), 0.0),
     Scenario("roll", "0.5m/s から全開", (Seg(0.8, MODE_TORQUE, _FULL),), 0.5),
     Scenario("accel_mu_drop", "全開の途中で路面μが0.4倍（0.2s）",
              (Seg(0.25, MODE_TORQUE, _FULL), Seg(0.2, MODE_TORQUE, _FULL, mu_left=0.4, mu_right=0.4),

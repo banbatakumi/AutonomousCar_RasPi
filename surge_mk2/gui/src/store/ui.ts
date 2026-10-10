@@ -149,6 +149,11 @@ export type DrivingSettings = {
   /** 超音波の自動停止を STM32 に許可するか（v0.7）。**判定も制動も STM32 側で完結する**ので、
    * GUI は `COMMAND.flags` bit7 を立てるかどうかだけを決める。既定 ON */
   autoStop: boolean
+  /** 手動操作のローンチコントロール（★プロトコル v0.20）を使うか。止まった状態でブレーキとアクセルを
+   * 両方踏むと準備、ブレーキを離すと発進——目標速度をいきなり上限まで上げ、`COMMAND.flags2` の
+   * `launch` を立てる（STM32 がランプと速度PIを迂回して全開＋TC で加速する）。速度制御と MT で働く
+   * （トルク制御は元から全開をそのまま出せるので対象外）。手順は `useDriving.ts` */
+  launchControl: boolean
   /**
    * 前カメラの進路ガイド（`CameraView.tsx` の `drawGuide`）が使う取付高さ [m]。
    * 既定値は `config/vehicle.toml` の `sensors.cam_front.z`（実測済みのセンサ位置）だが、
@@ -256,6 +261,13 @@ export const DEFAULT_DRIVE_TORQUE_NM = 0.05
  * 効いたり切れたりする（チャタリング）。低速で壁に詰める作業では設定パネルで切ること。
  */
 export const DEFAULT_AUTO_STOP = true
+/**
+ * ローンチコントロール（手動操作）の既定。**ON にしてある**——働くのは「止まった状態でブレーキと
+ * アクセルを両方踏み、ブレーキを離す」という手順を踏んだときだけで、普通に走り出すぶんには何も変わらない。
+ */
+export const DEFAULT_LAUNCH_CONTROL = true
+/** 手動のローンチコントロールの状態（`useDriving.ts`）。ready = ブレーキ＋アクセルで準備中、go = 発進中 */
+export type LaunchPhase = 'idle' | 'ready' | 'go'
 
 export const DEFAULT_SETTINGS: DrivingSettings = {
   maxSpeed: 3.0,
@@ -287,6 +299,7 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   mtCoast: 0.8,
   mtEngineBrake: 3.0,
   autoStop: DEFAULT_AUTO_STOP,
+  launchControl: DEFAULT_LAUNCH_CONTROL,
   camHeight: VEHICLE.camFront.height,
   speedUnit: 'ms',
   engineSoundType: 'combustion',
@@ -431,6 +444,7 @@ function clampSettings(s: DrivingSettings): DrivingSettings {
   out.driveMode = out.driveMode === 'torque' || out.driveMode === 'mt' ? out.driveMode : 'speed'
   // 古い localStorage（v0.6 以前）にはこのキーが無い。**既定の ON に倒す**
   out.autoStop = typeof out.autoStop === 'boolean' ? out.autoStop : DEFAULT_SETTINGS.autoStop
+  out.launchControl = typeof out.launchControl === 'boolean' ? out.launchControl : DEFAULT_SETTINGS.launchControl
   // 古い localStorage にはこのキーが無い、または不正値の場合は既定（m/s）に倒す
   out.speedUnit = out.speedUnit === 'kmh' ? 'kmh' : 'ms'
   // 古い localStorage（音色追加前）にはこのキーが無い。既定は内燃機関風に倒す
@@ -617,6 +631,8 @@ type UiState = {
   horning: boolean
   /** P / パッド ○ を押している間。前照灯だけが全光量 */
   passing: boolean
+  /** 手動のローンチコントロールの状態（ランプの表示用。`useDriving.ts` が変化時だけ書く） */
+  launchPhase: LaunchPhase
   /** 0=消灯 1=DAYTIME 2=NORMAL。**ARM 中しか反映されない**（§下） */
   lightMode: number
 
@@ -853,6 +869,7 @@ export const useUi = create<UiState>((set, get) => ({
   braking: false,
   horning: false,
   passing: false,
+  launchPhase: 'idle',
   lightMode: LIGHT_OFF,
   sideBrakeRequested: false,
   winkerLeftRequested: false,

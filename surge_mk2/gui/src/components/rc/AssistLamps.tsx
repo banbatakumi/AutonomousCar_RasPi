@@ -91,6 +91,13 @@ export function AssistLamps() {
       <span className={`lamp lamp-warn ${ui.braking ? 'on' : ''}`} title="Space / パッド L2">
         BRAKE
       </span>
+      {/* 手動のローンチコントロール（`useDriving.ts`）。準備中（ブレーキ＋アクセル）と発進中に光る */}
+      <span
+        className={`lamp lamp-warn ${ui.launchPhase !== 'idle' ? 'on' : ''}`}
+        title="ローンチコントロール。止まった状態でブレーキとアクセルを両方踏むと点灯（準備）、ブレーキを離すと発進"
+      >
+        {ui.launchPhase === 'go' ? 'LAUNCH' : 'LC'}
+      </span>
     </div>
   )
 }

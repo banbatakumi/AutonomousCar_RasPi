@@ -30,7 +30,7 @@ FW_DIR = Path(os.environ.get("SURGE_FW_DIR",
                              REPO_ROOT.parent.parent / "AutonomousCar" / "Program" / "MainF446RE_V3"))
 
 #: `host/host_sim.c` の HOST_SIM_ABI
-ABI = 3
+ABI = 4
 
 #: 入力の列（`host_sim.c` の enum と同じ並び）
 IN = {name: i for i, name in enumerate(
@@ -44,7 +44,10 @@ OUT = {name: i for i, name in enumerate(
      "front_odom"))}
 
 MODE_SPEED, MODE_TORQUE, MODE_BRAKE, MODE_DISARM = 0, 1, 2, 3
-FLAG_TC, FLAG_ABS, FLAG_TV, FLAG_LIFT = 1, 2, 4, 8
+#: 車速指令＋ローンチコントロールの要求（`COMMAND.flags2` の LAUNCH）。持たない古いファームでは
+#: ただの車速指令
+MODE_SPEED_LAUNCH = 4
+FLAG_TC, FLAG_ABS, FLAG_TV, FLAG_LIFT, FLAG_LAUNCH = 1, 2, 4, 8, 16
 
 
 class HostPlant(ctypes.Structure):
@@ -133,6 +136,7 @@ def _build(tree: Path) -> Path:
     host = FW_DIR / "host"
     srcs = [host / "host_sim.c"] + [tree / s for s in _SOURCES if (tree / s).exists()]
     has_params = (tree / "src/control/control_params.c").exists()
+    has_launch = "Drive_SetLaunch" in (tree / "src/control/drive.h").read_text(encoding="utf-8")
     files = srcs + sorted((host / "shim").glob("*.h")) + sorted((tree / "src/control").glob("*.h"))
     digest = hashlib.sha256()
     for f in files:
@@ -143,6 +147,7 @@ def _build(tree: Path) -> Path:
         cmd = ["cc", "-O2", "-shared", "-fPIC", f"-I{host / 'shim'}",
                *[f"-I{tree / inc}" for inc in _INCLUDES],
                *(["-DHOST_FW_HAS_CONTROL_PARAMS"] if has_params else []),
+               *(["-DHOST_FW_HAS_LAUNCH"] if has_launch else []),
                *map(str, srcs), "-lm", "-o", str(lib)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:

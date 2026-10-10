@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x0013
+PROTOCOL_VERSION = 0x0014
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -39,6 +39,7 @@ FLG_ABS_ACTIVE = 0x00100000
 FLG_WHEEL_LIFT_ACTIVE = 0x00200000
 FLG_DRIVE_POWER_ON = 0x00400000
 FLG_MD_FAULT = 0x00800000
+FLG_LAUNCH_ACTIVE = 0x01000000
 
 # md_status[i] (u8)
 MDS_RUNNING = 0x01
@@ -63,6 +64,7 @@ CMD_FLG_AUTO_STOP = 0x80
 CMD_FLG2_SIDE_BRAKE = 0x01
 CMD_FLG2_WINKER_LEFT = 0x02
 CMD_FLG2_WINKER_RIGHT = 0x04
+CMD_FLG2_LAUNCH = 0x08
 
 class Mode:
     """COMMAND.mode / TELEMETRY.flags bit0-1"""
@@ -111,6 +113,7 @@ class Param:
     TV_MAX_RATIO = 0x002C
     STEER_LINK_GAIN = 0x0081
     STEER_LINK_CUBIC = 0x0082
+    LAUNCH_EXIT_TORQUE_NM = 0x00A1
     SPEED_KP = 0x0030
     SPEED_KI = 0x0031
     LIDAR_FORMAT = 0x0040
@@ -458,7 +461,7 @@ class Command:
     steer_rate_limit: int = 0
     brake_torque: int = 0  # 後輪各輪。0=未指定(最大で制動)
     target_torque: int = 0  # 駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6
-    flags2: int = 0  # bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先）★v0.13 bit1=winker_left bit2=winker_right（両方立てばハザード）★v0.14
+    flags2: int = 0  # bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先）★v0.13 bit1=winker_left bit2=winker_right（両方立てばハザード）★v0.14 bit3=launch（車速指令の、目標が車速より大きく離れた加速＝発進を、ランプと車速PIを迂回して全開＋TCで行う）★v0.20
 
     @classmethod
     def decode(cls, payload: bytes) -> 'Command':

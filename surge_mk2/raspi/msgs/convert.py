@@ -112,6 +112,7 @@ def decode_flags(flags: int) -> dict:
         "abs_active": bool(flags & packets.FLG_ABS_ACTIVE),
         "wheel_lift_active": bool(flags & packets.FLG_WHEEL_LIFT_ACTIVE),
         "drive_power_on": bool(flags & packets.FLG_DRIVE_POWER_ON),
+        "launch_active": bool(flags & packets.FLG_LAUNCH_ACTIVE),
         "faults": [n for n, b in FAULT_FLAGS.items() if flags & b],
     }
 
@@ -293,6 +294,9 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
         flags2 |= packets.CMD_FLG2_WINKER_LEFT
     if cmd.winker_right:
         flags2 |= packets.CMD_FLG2_WINKER_RIGHT
+    # v0.20: ローンチコントロール。始める・終える判定は STM32 側（立てるだけでよい）
+    if cmd.launch:
+        flags2 |= packets.CMD_FLG2_LAUNCH
 
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0

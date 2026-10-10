@@ -393,6 +393,7 @@ class PlanningNode:
                         target_speed=st.target_speed, target_steer=st.target_steer,
                         accel_limit=st.accel_limit,
                         torque_mode=st.torque_mode, target_torque=st.target_torque,
+                        launch=st.launch,
                         fw_overrides=st.fw_overrides,
                         source=f"planning:{self.ctrl.mode}")
 

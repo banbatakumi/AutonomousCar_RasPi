@@ -74,6 +74,12 @@ _NEAR_CLEAR = 0.02
 _BRAKE_HOLD_S = 0.3
 #: Hybrid A* で抜けた後、経路からの横ずれがこれ未満なら戻り経路を作らない [m]
 _BLEND_MIN = 0.03
+#: ローンチコントロールを要求する舵角の上限 [rad]（約7°。これより切っている発進は速度PIに任せる）
+_LAUNCH_STEER_MAX = 0.12
+#: 車速がこれ未満になったら「発進」と見なし、次に経路の速度へ届くまでローンチコントロールを要求する [m/s]
+_LAUNCH_ARM_SPEED = 0.3
+#: 車速が経路の速度のこれだけ手前に届いたら発進は終わり [m/s]
+_LAUNCH_DONE_GAP = 0.1
 
 #: 地図と経路の刻み・広さ（狭い分離帯コースを想定）
 MAP_RES = 0.025
@@ -250,6 +256,13 @@ class Slam2dRaceLine(Planner):
                   note="★コーナー手前の減速開始点を決める。減速は速度PI（負のトルク）で、"
                        "ファームのランプ3.0m/s²が上限。MDの制動（ABS）は2.75で頭打ちなので使わない"),
 
+        ParamSpec(group=GROUP_SPEED, key="launch", label="ローンチコントロール", min=0, max=1, step=1,
+                  default=0, unit="",
+                  note="★1で、発進（止まってから経路の速度に届くまで）を STM32 のローンチコントロールで行う"
+                       "（目標速度のランプと速度PIを迂回し、全開＋TCで経路の速度まで加速。PIの立ち上がり"
+                       "ぶん約0.2秒早い）。経路に乗っていて、前が空いていて、舵がほぼ真っすぐのときだけ"
+                       "要求する。既定は 0（速度PIで発進）——今は手動操作でだけ使う方針（2026-10-10）"),
+
         ParamSpec(group=GROUP_STEER, key="look_k", label="前方注視の速度係数", min=0.0, max=2.0,
                   default=0.45, step=0.05, unit="s",
                   note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで内を切る。"
@@ -404,6 +417,8 @@ class Slam2dRaceLine(Planner):
         self._brake_hold: float | None = None
         #: 駆動 MD が片輪だけ無応答の状態が続いている時間 [s]（`_md_fault`）
         self._md_t = 0.0
+        #: 止まってから経路の速度に届くまで（＝発進の間）True（`_launch_ok`）
+        self._launch_armed = False
         #: Hybrid A* で抜けている（`DETOUR`）。同じ障害物で試した回数（失敗が続いたら止まって待つ）
         self._detour: ParkToPoint | None = None
         self._detour_error = ""
@@ -962,12 +977,36 @@ class Slam2dRaceLine(Planner):
         if self._obstacle_response(st, hit, dist, vs, p, self.path, pp.index):
             return st
 
+        st.launch = self._launch_ok(st, vs, hit, coasting, md_note, p)
         st.reason = (f"{self.laps}周走行中・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
                      + self._avoid_note() + self._coast_note(coasting, p) + md_note
                      + (f"・★{self._load_error}" if self._load_error else ""))
         return st
+
+    def _launch_ok(self, st: AutoState, vs: VehicleState, hit, coasting: bool, md_note: str,
+                   p: dict[str, float]) -> bool:
+        """ローンチコントロール（`AutoState.launch`）を要求してよいか。
+
+        要求している間、STM32 は `target_speed` が車速より 0.5m/s 以上速い加速を、目標速度のランプと
+        速度PIを迂回して全開＋TC で行う（1回の要求で1回。始める・終える判定は STM32）。
+
+        要求するのは**発進だけ**: 止まった（`_LAUNCH_ARM_SPEED` 未満）あと、経路の速度に届くまで。
+        周回中のコーナーの立ち上がりでは要求しない。全開で加速してよいのは、`target_speed` が経路の
+        速度そのもの（乗り直し・推測航法・障害物・MD の異常で抑えていない）で、舵がほぼ真っすぐの
+        ときだけ——TC が保つスリップ率では横グリップが4割しか残らない。走り出しは経路から外れていて
+        `join_speed` で乗りに行くので、実際に全開になるのは経路に乗った後（STM32 は車速を問わない）。
+        途中で条件が外れれば要求を下ろし、STM32 はその場で速度PIへ戻る。
+        """
+        if abs(vs.speed) < _LAUNCH_ARM_SPEED:
+            self._launch_armed = True
+        if not (p["launch"] > 0 and self._joined and not coasting and hit is None
+                and self._avoid is None and not md_note):
+            return False
+        if vs.speed >= st.target_speed - _LAUNCH_DONE_GAP:
+            self._launch_armed = False
+        return self._launch_armed and abs(st.target_steer) < _LAUNCH_STEER_MAX
 
     def _count_lap(self, path: rl_mod.RaceLine, index: int) -> None:
         """閉じた経路の最寄り点の添字から周回を数える（`slam2d_route` と共通）。

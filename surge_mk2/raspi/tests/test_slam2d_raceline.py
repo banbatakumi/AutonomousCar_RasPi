@@ -355,6 +355,46 @@ class TestObstacleBrakeAndMdFault(unittest.TestCase):
         self.assertIsNone(self.p._md_fault(st, self._vs(2.0, (run, 17, 49)), self.params))
         self.assertTrue(st.brake)
 
+    def _launch(self, st, speed, **kw):
+        return self.p._launch_ok(st, self._vs(speed), kw.get("hit"), kw.get("coasting", False),
+                                 kw.get("md", ""), kw.get("params", {**self.params, "launch": 1}))
+
+    def test_launch_is_off_by_default(self):
+        """既定は無効（2026-10-10: 今は手動操作でだけ使う）。"""
+        self.p._joined = True
+        st = self.AutoState(target_speed=2.0, target_steer=0.02)
+        self.assertFalse(self._launch(st, 0.0, params=self.params))
+
+    def test_launch_is_requested_from_a_stop_until_the_path_speed(self):
+        """ローンチコントロール（v0.20）: 止まってから経路の速度に届くまでの間だけ要求する。"""
+        st = self.AutoState(target_speed=2.0, target_steer=0.02)
+        self.p._joined = True
+        self.assertFalse(self._launch(st, 1.0))                         # 周回中（止まっていない）
+        self.assertTrue(self._launch(st, 0.0))                          # 止まった → 発進
+        self.assertTrue(self._launch(st, 0.5))                          # 加速中も要求し続ける
+        self.assertTrue(self._launch(st, 1.5))
+        self.assertFalse(self._launch(st, 1.95))                        # 経路の速度に届いた
+        self.assertFalse(self._launch(st, 1.2))                         # 次のコーナーの立ち上がりでは出さない
+
+    def test_launch_waits_for_the_join_and_then_starts_while_moving(self):
+        """走り出しは経路から外れていて `join_speed` で乗りに行く。乗った後に要求する。"""
+        self.p._joined = False
+        self.assertFalse(self._launch(self.AutoState(target_speed=0.5), 0.0))
+        self.assertFalse(self._launch(self.AutoState(target_speed=0.5), 0.5))   # 抑えた速度に届いても終わらない
+        self.p._joined = True
+        self.assertTrue(self._launch(self.AutoState(target_speed=2.0), 0.5))
+
+    def test_launch_is_requested_only_when_clear_and_straight(self):
+        st = self.AutoState(target_speed=2.0, target_steer=0.02)
+        self.p._joined = True
+        self.assertTrue(self._launch(st, 0.0))
+        self.assertFalse(self._launch(st, 0.0, hit=self.Obstacle(5.0, 0.6, 0.05, 5)))
+        self.assertFalse(self._launch(st, 0.0, coasting=True))
+        self.assertFalse(self._launch(st, 0.0, md="・★右後輪の MD が無応答"))
+        self.assertFalse(self._launch(st, 0.0, params={**self.params, "launch": 0}))
+        self.assertFalse(self._launch(self.AutoState(target_speed=2.0, target_steer=0.2), 0.0))
+        self.assertTrue(self._launch(st, 0.6))                          # 条件が戻れば続きから
+
     def test_unreported_md_status_is_not_a_fault(self):
         st = self.AutoState(target_speed=2.5)
         self.assertEqual(self.p._md_fault(st, self._vs(2.0, (0, 0, 0)), self.params), "")

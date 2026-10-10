@@ -690,6 +690,7 @@ class Slam2dRoute(Slam2dRaceLine):
         if not path.closed:
             return self._approach_stop(st, path, pose, vs, p)
 
+        st.launch = self._launch_ok(st, vs, hit, coasting, md_note, p)
         st.reason = (f"{self._switch.active_key} {self.laps}周・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")

@@ -50,6 +50,49 @@ class TestSpeedController(unittest.TestCase):
         _run(ctl, DriveInput(armed=True, brake=True), 1.0, 0.01)
         self.assertEqual((ctl.ref, ctl.integral), (0.0, 0.0))
 
+    def test_launch_bypasses_the_ramp_and_hands_over_at_target(self):
+        """ローンチコントロール（v0.20）: 停止からの発進はランプとPIを迂回し、目標の手前でPIへ戻る。"""
+        spec = replace(SPEC, speed_torque_max_nm=0.30, drive_accel_m_s2=2.5)
+        cmd = DriveInput(armed=True, target_speed=1.5, accel_limit=3.0)
+        _, plain = _run(SpeedController(spec), cmd, 0.0, 2.0)
+        ctl = SpeedController(spec, launch_exit_torque_nm=0.006)
+        v, flags = 0.0, []
+        out = []
+        for _ in range(2000):
+            v = ctl.step(replace(cmd, launch=True), v, 0.001)
+            out.append(v)
+            flags.append(ctl.launching)
+        self.assertTrue(flags[0])
+        end = max(i for i, f in enumerate(flags) if f)
+        self.assertFalse(any(flags[end + 1:]))                          # 1回で終わる
+        t95 = lambda o: next(i for i, x in enumerate(o) if x >= 0.95 * 1.5)   # noqa: E731
+        self.assertLess(t95(out), t95(plain) - 100)                     # 0.1s 以上早い
+        self.assertLess(max(out), 1.5 + 0.08)
+        self.assertGreater(min(out[end:]), 1.5 - 0.08)
+
+    def test_launch_needs_a_large_step_but_not_a_standstill(self):
+        ctl = SpeedController(SPEC)
+        _run(ctl, DriveInput(armed=True, target_speed=0.4, launch=True), 0.0, 0.2)
+        self.assertFalse(ctl.launching)
+        ctl = SpeedController(SPEC)                                     # 低速で走っている途中からは始める
+        ctl.reset(v=0.5, ref=0.5)
+        ctl.step(DriveInput(armed=True, target_speed=2.0, launch=True), 0.5, 0.001)
+        self.assertTrue(ctl.launching)
+        ctl = SpeedController(SPEC)                                     # 目標と逆向きに動いている間は始めない
+        ctl.reset(v=-0.6, ref=-0.6)
+        ctl.step(DriveInput(armed=True, target_speed=2.0, launch=True), -0.6, 0.001)
+        self.assertFalse(ctl.launching)
+
+    def test_launch_is_rearmed_by_braking(self):
+        ctl = SpeedController(SPEC)
+        go = DriveInput(armed=True, target_speed=1.0, launch=True)
+        v, _ = _run(ctl, go, 0.0, 1.0)
+        self.assertFalse(ctl.launching)
+        v, _ = _run(ctl, DriveInput(armed=True, brake=True), v, 2.0)
+        self.assertLess(abs(v), 0.05)
+        ctl.step(go, v, 0.001)
+        self.assertTrue(ctl.launching)
+
     def test_overshoot_is_second_order(self):
         """ファームの PI は2次の応答で行き過ぎる（1次遅れでは表せない。第三者検証の件）。"""
         ctl = SpeedController(replace(SPEC, rolling_resistance=0.0))

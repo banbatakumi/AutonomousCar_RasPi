@@ -50,7 +50,7 @@ CONTROL_PARAM_IDS: dict[str, int] = {
         "TC_MIN_TORQUE_NM", "WHEEL_LIFT_DIFF_THRESHOLD_M_S",
         "ABS_SLIP_TARGET", "ABS_KP_NM_PER_M_S", "ABS_KI_NM_PER_M",
         "TV_LOAD_GAIN_S2_PER_M", "TV_MAX_RATIO", "TV_TEST_MOMENT_NM",
-        "STEER_LINK_GAIN", "STEER_LINK_CUBIC")}
+        "STEER_LINK_GAIN", "STEER_LINK_CUBIC", "LAUNCH_EXIT_TORQUE_NM")}
 
 #: ステアのリンクの換算（`steer_link_gain`・`steer_link_cubic`）の入力 x = モータ角×リンク比 の
 #: 可動範囲 [rad]。STM32 側 `steering.h` の STEERING_MAX_ANGLE_RAD × STEERING_LINKAGE_RATIO
