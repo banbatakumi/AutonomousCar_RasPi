@@ -1,13 +1,23 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.19（`uart_protocol.md` **v0.19** に対応）
-**最終更新**: 2026-10-09（v0.19:「止める」の意味を上位・MD と揃えた。2026-10-08 v0.18: ステアのリンクの換算、v0.17: TV を荷重比例の配分へ）
+**バージョン**: v0.20（`uart_protocol.md` **v0.20** に対応）
+**最終更新**: 2026-10-09（v0.20: ローンチコントロール。v0.19:「止める」の意味を上位・MD と揃えた。2026-10-08 v0.18: ステアのリンクの換算、v0.17: TV を荷重比例の配分へ）
 **対象読者**: STM32 ファームウェアを実装する人
 **関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
 
 > **本書の位置づけ**
 > `uart_protocol.md` が仕様の**正**。本書はそれを「STM32 側で何を実装すればよいか」の形に
 > 落とし込んだもの。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
+
+> **v0.20 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-09。`pi_uart_protocol_v0.20_delta.md`）**
+> - ローンチコントロール（`src/control/drive.c` の `UpdateLaunch`、条件と定数は `drive.h` の同名の節）:
+>   `COMMAND.flags2` bit3 `LAUNCH` が立っている間、車速指令の目標車速が車速より 0.5m/s 以上速い加速（発進。
+>   車速は問わない）で、目標車速のランプと車速PIを迂回して全開のトルクを要求し、TC に絞らせる。目標の 0.05m/s 手前で
+>   PIへ戻す（目標車速は発進中ずっと実車速に合わせてあり、積分は `launch_exit_torque_nm` から始める）。
+>   1回の要求で1回、TC が無効なら始めない、3秒で打ち切る
+> - `flags` bit24 `LAUNCH_ACTIVE` = `Drive_IsLaunchActive()`、`param_id = 0x00A1`（`launch_exit_torque_nm`、
+>   `control_params.h` の表。0〜0.05、既定 0）
+> - `protocol_version` を `0x0013`→**`0x0014`** に上げる
 
 > **v0.19 での変更（★実装済み・ビルド済み。未書き込み、実機での動作検証は未了。2026-10-09。`pi_uart_protocol_v0.19_delta.md`）**
 > - `flags` bit2 `ARMED` = `Vehicle_IsArmed()`（以前は `Power_IsDriveOn()`）。bit22 `DRIVE_POWER_ON`・bit23 `MD_FAULT` を新設。
@@ -746,7 +756,8 @@ typedef struct {
 | 0 | `side_brake` | 立っている間、**速度に関わらず即座に**後輪モータを位置制御へ切り替えて機械的に固定（`brake` より優先） |
 | 1 | `winker_left` | 左ウィンカー点滅を要求 ★v0.14 |
 | 2 | `winker_right` | 右ウィンカー点滅を要求 ★v0.14 |
-| 3-7 | — | 予約（0 を送ること） |
+| 3 | `launch` | 車速指令の、目標が車速より 0.5m/s 以上速い加速（発進）を、目標車速のランプと車速PIを迂回して全開＋TC で行う（ローンチコントロール。`brake`・`torque_mode`・`side_brake` の間は無視） ★v0.20 |
+| 4-7 | — | 予約（0 を送ること） |
 
 - `target_speed` は**目標速度**であり目標加速度ではない。`accel_limit` は
   「その目標速度へ向かうときの加減速の上限」
@@ -1281,6 +1292,7 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 #define FLG_WHEEL_LIFT_ACTIVE         (1u << 21)   /* ★v0.16 片輪浮き対策がトルクを削っている最中 */
 #define FLG_DRIVE_POWER_ON            (1u << 22)   /* ★v0.19 駆動電源が入っている */
 #define FLG_MD_FAULT                  (1u << 23)   /* ★v0.19 MD が使えず走行を止めている（電源が切れるまでラッチ） */
+#define FLG_LAUNCH_ACTIVE             (1u << 24)   /* ★v0.20 ローンチコントロールで発進している最中 */
 /* bit24-31 予約（0 を送ること） */
 ```
 
@@ -1383,6 +1395,7 @@ MD が返す status バイトをそのまま転送し、上位ビットを STM32
 | `0x0060` | **自動停止 安全マージン（`auto_stop_margin_cm`）** [cm] | float | ★v0.12 で実装。下表。範囲0.0-100.0、既定15.0 |
 | `0x0070` | ABS 有効 | 0/1 | ★v0.15 で STM32 側が実装。制動モードだけに効く。既定は有効 |
 | `0x0090` | ブレーキホールド 有効 | 0/1 | ★v0.19。制動して止まったら後輪の位置保持へ移る（`UpdateBrakeHold`）。既定は有効 |
+| `0x00A1` | ローンチコントロールを終えるときの積分の初期値（`launch_exit_torque_nm`）[N·m、1輪あたり] | float | ★v0.20。`control_params.h` の表。0〜0.05、既定 0 |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
 
 **`param_id 0x0060` — 自動停止 安全マージン（★v0.12。2026-08-25、enumからcm直接指定へ改訂）**
@@ -1564,6 +1577,7 @@ Pi 側が計算する:
 - [ ] 実際に点滅しているときだけ `FLG_WINKER_LEFT_ACTIVE`/`FLG_WINKER_RIGHT_ACTIVE` を立てている（★v0.14）
 - [ ] `COMMAND` 途絶時に `horn`/`passing` と同様、ウィンカーも強制解除している（★v0.14）
 - [ ] ABS が制動トルクを削っている間だけ `FLG_ABS_ACTIVE` を立てている（フォールバック中は立てない）（★v0.15）
+- [ ] **`flags2` bit3（`launch`）が `Drive_SetLaunch()` に配線されている**。発進している間だけ `FLG_LAUNCH_ACTIVE` を立てている（★v0.20）
 - [ ] `param_id = 0x0070` の `CONFIG_SET`/`CONFIG_GET` に 0.0/1.0 で応答する（★v0.15）
 
 ### センサ・データ
@@ -1734,6 +1748,7 @@ Pi 側は「何 m 進んだか」「舵を何 rad 切ったか」を正しく知
 
 | バージョン | 日付 | 内容 |
 |---|---|---|
+| **v0.20** | 2026-10-09 | **`uart_protocol.md` v0.20 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** ローンチコントロール（`COMMAND.flags2` bit3 `LAUNCH`、`flags` bit24 `LAUNCH_ACTIVE`、`param_id` `0x00A1` `launch_exit_torque_nm`）。`protocol_version` `0x0014` |
 | **v0.18** | 2026-10-08 | **`uart_protocol.md` v0.18 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** ステアのリンクの換算（モータ角→路面舵角の3次式、`param_id` `0x0081`・`0x0082`、設定時に `LIMITS` を再送）。舵角の指令・報告・最大舵角が実際の路面舵角になる |
 | **v0.19** | 2026-10-09 | **`uart_protocol.md` v0.19 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** `flags` bit2 `ARMED` の意味を `Vehicle_IsArmed()` へ変更、bit22 `DRIVE_POWER_ON`・bit23 `MD_FAULT`・`md_status` bit6 `UNCALIBRATED` を新設。惰行はトルク 0 を送る、ARM が外れても停車まで制動、MD の健全性監視と起動待ち、ステア未較正のガード、フェイルセーフの位置保持、IMU 復旧の非ブロッキング化、ジャイロ ±500 deg/s。`protocol_version` を `0x0012`→`0x0013` に更新（`pi_uart_protocol_v0.19_delta.md`） |
 | **v0.17** | 2026-10-08 | **`uart_protocol.md` v0.17 に対応。実装済み・ビルド済み、未書き込み。ワイヤ形式・LEN の変更なし。** TV をヨーレートの PI から荷重比例の配分へ置き換え（`param_id` `0x0021`-`0x0029` 廃止、`0x002B`・`0x002C` 新設、`TELEMETRY` オフセット 66 を `tv_ratio` に） |

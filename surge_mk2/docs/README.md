@@ -7,7 +7,7 @@
 | [system_overview.md](system_overview.md) | **システム全体像**。何をどこでやっているかを図と表で一通り。**まずこれ** | はじめて触る人 / 久しぶりに戻ってきた人 |
 | [development.md](development.md) | **開発ガイド**。何を直したら何を再起動するか、コマンド集、**トラブルシューティング** | 手を動かす人。困ったらここ |
 | [architecture.md](architecture.md) | **ソフトウェア設計書**。**「なぜそう設計したか」の正** | 設計の意図を知りたい人 |
-| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.19**）。仕様の説明の**正** | STM32 / RasPi 双方の実装者 |
+| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.20**）。仕様の説明の**正** | STM32 / RasPi 双方の実装者 |
 | [stm32_interface.md](stm32_interface.md) | **STM32 側 実装仕様書**。C 構造体、送受信の実装、安全要件、チェックリスト、立ち上げ手順 | STM32 ファームウェア実装者 |
 | [../sim/README.md](../sim/README.md) | **シミュレータ**（Mac 専用）。実機と同じ制御コードのまま走らせる | 自律走行を書く人 |
 | [../gui/README.md](../gui/README.md) | GUI のコード地図 | GUI を直す人 |
@@ -51,8 +51,9 @@ system_overview.md       システム全体像（何がどう動いているか�
   Pi 側の実装は `raspi/`、GUI は `gui/`（React 5タブ）
 - **シミュレータあり**（`sim/`、Mac 専用）。`io_node --sim` で実機と同じ制御コードのまま
   コース上を走らせられる。実車が無いときの自律走行開発はこちら
-- **プロトコルは v0.19**（`protocol.toml` の `protocol_version = 0x0013` が正）。
-  v0.19（2026-10-09）は「止める」の意味を Pi・STM32・MD で揃えた版（`cross_project_audit_2026-10.md` への対応。
+- **プロトコルは v0.20**（`protocol.toml` の `protocol_version = 0x0014` が正）。
+  v0.20（2026-10-09）はローンチコントロール（手動操作でブレーキ＋アクセル→ブレーキを離す、の手順を踏んだ発進を、STM32 が全開＋TC で行う）の追加。
+  v0.19（同日）は「止める」の意味を Pi・STM32・MD で揃えた版（`cross_project_audit_2026-10.md` への対応。
   ARM が外れても停車まで制動、MD の健全性監視、`flags` の `armed` の意味の変更ほか）。**Pi・STM32・MD を一緒に
   入れ替える**（io_node は `protocol_version` が一致するまで ARM を通さない）。STM32・MD は未書き込み。
   v0.17（TV を荷重比例の配分へ置き換え）・v0.18（ステアのリンクの換算を STM32 に入れ、舵角を実際の路面舵角に。
