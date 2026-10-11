@@ -9,7 +9,7 @@
  * 「走らせて → 加速が鈍い → 直す → また走らせる」の往復でタブを切り替えるのは
  * 手間でしかない。走行タブの中に畳んで、走りながら開けるようにした。
  *
- * 自動運転タブでも中身は同じもの（2026-08-20）——engage 中でも人間がキーボードで
+ * 自動運転タブでも中身は同じもの——engage 中でも人間がキーボードで
  * 位置を微調整する場面があり、そこで効く速度・舵の調整値はラジコンタブと共通
  * （`store/ui.ts` の `DrivingSettings` は1つしかなく、タブごとに分かれていない）。
  *
@@ -24,14 +24,13 @@
  * 設計は部分的にしか実現していない）。他はすべて GUI が指令を作る
  * ときのランプ・上限だけ。
  *
- * ## 中身のタブ分け（2026-08-24）
+ * ## 中身のタブ分け
  *
  * 上の「独立したページタブをやめた」話とは別物——ここは**このドロワーの中だけ**
  * で完結する軽いタブ（`SETTINGS_TABS`）。項目が増えて縦に長くなりすぎたので、
  * 「走行」（制御方式・速度orトルク・舵・ブレーキ）「安全」（自動停止・TC/TV・
  * 片輪浮き対策・ARMタイムアウト）「カメラ」（capture FPS上限・後方ON/OFF・
- * GUI配信fps・進路ガイド校正）「サウンド」（合成エンジン音のON/OFF・音色、
- * 2026-08-30 追加）の4つに分けた。「既定値に戻す」等のヘッダはタブの外に
+ * GUI配信fps・進路ガイド校正）「サウンド」（合成エンジン音のON/OFF・音色）の4つに分けてある。「既定値に戻す」等のヘッダはタブの外に
  * 置いてある——`DrivingSettings` は1つしかなく、どのタブの値もまとめて戻す/
  * 保存するので、特定のタブだけの操作ではないため。
  */
@@ -127,9 +126,8 @@ const TORQUE_FIELDS: Field[] = [
       `（STM32 実測 max_torque_nm が届いていればそれを使う。未接続時のみ既定 ${MAX_TARGET_TORQUE_NM} N·m。超えても丸められる）`,
     digits: 3,
   },
-  // ★2026-08-22: 「速度メータの目盛り」フィールドは廃止。速度メータ（`SpeedGauge.tsx`）の
-  // 目盛りは、速度制御・トルク制御どちらでも常に STM32 実測 `LIMITS.max_speed_m_s` に
-  // 固定されるようになったため、`maxSpeed` を経由してユーザーが調整する意味が無くなった
+  // 速度メータ（`SpeedGauge.tsx`）の目盛りは、速度制御・トルク制御どちらでも常に
+  // STM32 実測 `LIMITS.max_speed_m_s` に固定なので、ここに目盛りの調整項目は無い
 ]
 
 /**
@@ -147,7 +145,7 @@ const MT_FIELDS: Field[] = [
 ]
 
 /**
- * MT モード専用の「速度制御」欄（2026-08-30）。'speed' モードの `SPEED_FIELDS` とは
+ * MT モード専用の「速度制御」欄。'speed' モードの `SPEED_FIELDS` とは
  * キーを一切共有しない独立した項目——`maxSpeed`/`accel` を変えても MT には影響しない。
  * `coast`/`brake`/`kickSpeed` に相当するものは無い（MT には逆キーブレーキも発進キックも
  * 無く、減速はすべて `MT_FEEL_FIELDS` の `mtCoast`/`mtEngineBrake` に一本化した）。
@@ -165,7 +163,7 @@ const MT_SPEED_FIELDS: Field[] = [
   { key: 'mtAccel', label: '加速', unit: 'm/s²', note: 'アクセルを踏んでいる（踏み込んでいる）間の加速度', digits: 1 },
 ]
 
-/** MT のアクセルオフ時の減速フィール（2026-08-30）。実車の惰行・エンジンブレーキ相当 */
+/** MT のアクセルオフ時の減速フィール。実車の惰行・エンジンブレーキ相当 */
 const MT_FEEL_FIELDS: Field[] = [
   { key: 'mtCoast', label: '惰行減速', unit: 'm/s²', note: 'アクセルを離したときの減速度（ブレーキではなく慣性）。ニュートラル（N）でもこの値が使われる', digits: 1 },
   { key: 'mtEngineBrake', label: 'エンジンブレーキ', unit: 'm/s²', note: '低いギアほど加算される追加の減速度。1速で全量、5速では加算なし（惰行減速のみ）', digits: 1 },
@@ -196,7 +194,7 @@ const CAMERA_FIELDS: Field[] = [
 ]
 
 /**
- * 項目が増えて縦に長くなりすぎたので、テーマごとにタブで分けてある（2026-08-24）。
+ * 項目が増えて縦に長くなりすぎたので、テーマごとにタブで分けてある。
  * 「既定値に戻す」等のヘッダはタブの外——`DrivingSettings` 全体（走行・安全・
  * カメラ校正のどのタブの値も含む）に効くので、特定のタブだけの操作ではない。
  */
@@ -257,7 +255,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   // （イベント発生時にしかbroadcastされない）ではなく `/ws/telemetry` 経由で
   // 継続更新される LinkDiag（8Hz、`bus/live.ts`）から読む。status から読むと
   // 実際は変わっているのにチェックボックスが更新されず、リロードするまで
-  // 反映されないように見える（2026-08-19 実機で発覚）
+  // 反映されないように見える
   const { link, signal: signalLive } = useNumbers()
   const tcEnabled = link?.tc_enabled ?? null
   const tvEnabled = link?.tv_enabled ?? null
@@ -282,10 +280,8 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
     <div className="settings">
       <div className="settings-head">
         <button onClick={handleResetSettings}>既定値に戻す</button>
-        {/* ★2026-08-22: 「既定値」はソースコードの固定値ではなく、ここで上書きできる
-            （`store/ui.ts` の `settingsDefault`、`localStorage` に保存）。以前は
-            「今使っている値を既定値にしたい」と言われるたびにソースを直接書き換えて
-            いたが、実機の現在値を見られないまま推測することになっていた */}
+        {/* 「既定値」はソースコードの固定値ではなく、ここで上書きできる
+            （`store/ui.ts` の `settingsDefault`、`localStorage` に保存）。 */}
         <button onClick={saveCurrentAsDefault} title="今の設定値を「既定値に戻す」の戻り先として保存する">
           現在の値を既定値として保存
         </button>
@@ -331,7 +327,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             <SettingGroup title="トルク制御" fields={TORQUE_FIELDS} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
           ) : settings.driveMode === 'mt' ? (
             <>
-              {/* MT は 'speed'/'torque' とパラメータを一切共有しない（2026-08-30）。
+              {/* MT は 'speed'/'torque' とパラメータを一切共有しない。
                   `MT_SPEED_FIELDS`（`mtMaxSpeed`/`mtAccel`）は独立したキーで、
                   減速は `MT_FEEL_FIELDS`（`mtCoast`/`mtEngineBrake`）に一本化した。
                   逆キーブレーキ・発進キックに相当する項目は無い（MT には無い機能） */}
@@ -472,7 +468,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             </p>
           </section>
 
-          {/* 2026-09-03: タブ行（DriveControls.tsx）から移設。運転中に頻繁に触る
+          {/* 運転中に頻繁に触る
               ものではなく、走行アシストと同じ「STM32/RasPi本体の保護機構」の
               仲間としてここに置く */}
           <section className="settings-group">
@@ -529,7 +525,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
         <>
           {/* capture側(camera_node)のFPS上限・後方カメラON/OFF・GUI配信頻度。
               TC/TVと同じく状態はサーバ真値（`status.camera_config`）。
-              ARM中/DISARM中で別々の値を持つ（2026-09-03、駐車中の節電のため）。
+              ARM中/DISARM中で別々の値を持つ（駐車中の節電のため）。
               前カメラの上限は目安——カメラを使う自動運転（`line_trace`/`ftg_cam`）が
               engage 中はサーバ側が無視して最大まで引き上げる（`auto_override`） */}
           <section className="settings-group">
@@ -662,13 +658,13 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
           </section>
 
           {/* セグメンテーションモデル（`ftg_cam`）・E2E LiDARモデル（`e2e_lidar`）の
-              選択は自動運転タブの `AutoPanel` へ移した（2026-08-28）——「どのモードで
+              選択は自動運転タブの `AutoPanel` にある——「どのモードで
               走るか」と「そのモードが使うモデル」は同じ意思決定の一部なので、ここには置かない */}
 
           {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
               height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
               高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ——後カメラは
-              固定値（VEHICLE.camRear.height）を使い調整UIを持たない（2026-08-21） */}
+              固定値（VEHICLE.camRear.height）を使い調整UIを持たない */}
           <section className="settings-group">
             <h3>進路ガイド校正</h3>
             <label className="settings-checkbox">

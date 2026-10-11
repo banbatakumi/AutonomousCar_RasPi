@@ -20,7 +20,7 @@ export interface FisheyeCalib {
 export const VEHICLE = {
   wheelbase: 0.23, // m
   track: 0.155, // m
-  maxSteer: 0.4636100056642349, // rad（路面舵角上限）
+  maxSteer: 0.4617551884201365, // rad（路面舵角上限）
   wheelRadius: 0.03, // m
   /** 車体外形ポリゴン [m]。反時計回り */
   footprint: [[0.3, 0.09], [0.3, -0.09], [-0.07, -0.09], [-0.07, 0.09]] as const,
@@ -81,6 +81,6 @@ export const SAFETY = {
   autoCmdStaleMs: 200.0,
   /** COMMAND に毎回載せるレート制限（STM32 側の保険）。シム（`ml_lidar/env.py`）も
    * 同じ値を使うので、GUI 側に直書きしない */
-  cmdAccelLimit: 6.0, // m/s²
+  cmdAccelLimit: 3.0, // m/s²
   cmdSteerRateLimit: 7.0, // rad/s
 } as const

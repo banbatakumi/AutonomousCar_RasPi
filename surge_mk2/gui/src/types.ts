@@ -6,7 +6,7 @@
  * `raspi/msgs/types.py` が唯一の正で、`python3 config/gen_msgs.py` が吐く。
  * 以前はここに手で写していたが、45 フィールドの写経は片方だけ直しても
  * どのツールもエラーを出さず、**画面に静かに `undefined` が出る**形だった
- * （2026-08-21 のレビュー 🟠2）。
+ *。
  *
  * ここに手書きで残してあるのは、**Python 側に対応物が無い型だけ**——
  * WS の制御 JSON（`ControlStatus`・`CmdOut`）、複数メッセージを束ねた
@@ -157,7 +157,7 @@ export type CamModelFile = {
    * 無ければ既定値（0-1正規化・224x224）で読まれる */
   has_config: boolean
   /** 自由記述の備考（`ml_cam/app.py` の備考欄→`note.txt`→エクスポート時に`<name>.json`
-   * へ同梱される）。無ければ空文字（2026-08-29追加、`E2EModelFile.note` と対称） */
+   * へ同梱される）。無ければ空文字（`E2EModelFile.note` と対称） */
   note: string
 }
 
@@ -177,7 +177,7 @@ export type E2EModelFile = {
   /** 前処理契約（`ml_lidar/export_onnx_rl.py` が書く `<name>.json`）が同梱されているか */
   has_config: boolean
   /** 自由記述の備考（`ml_lidar/app.py` の備考欄→`note.txt`→エクスポート時に`<name>.json`
-   * へ同梱される）。無ければ空文字（2026-08-29追加） */
+   * へ同梱される）。無ければ空文字 */
   note: string
 }
 
@@ -209,7 +209,7 @@ export type CamE2EModelStatus = {
 }
 
 /** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
- * ARM中(`_armed`)/DISARM中(`_disarm`)で別々の値を持つ（2026-09-03、駐車中の節電）。
+ * ARM中(`_armed`)/DISARM中(`_disarm`)で別々の値を持つ。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
 export type CameraConfigStatus = {
   /** ARM中の後方カメラ取得(capture)ON/OFF */
@@ -229,7 +229,7 @@ export type CameraConfigStatus = {
   /** 実際にcamera_nodeへ指示している前カメラのfps（自動運転中は上限を無視して最大になる） */
   front_fps_effective: number
   /** 実際にcamera_nodeへ指示している前カメラのON/OFF。DISARM中は映像を使う者
-   *  （GUIの視聴者・記録）がいなければ止める（2026-10-04、省電力）。古いサーバは送らない */
+   *  （GUIの視聴者・記録）がいなければ止める。古いサーバは送らない */
   front_enabled_effective?: boolean
   /** 実際にcamera_nodeへ指示している後方カメラのON/OFF */
   rear_enabled_effective: boolean
@@ -310,7 +310,7 @@ export type ControlStatus = {
   camera_encoder: string | null
   /** JPEG エンコードの実測。**telemetry_node と logger_node が同じフレームを
    * 別々に焼いている**ので、共通化する価値があるかをここの数字で判断する
-   * （2026-08-21 のレビュー 🟡7）。カメラ配信が無効なら null */
+   *。カメラ配信が無効なら null */
   camera_jpeg: {
     impl: string | null
     encoded: number

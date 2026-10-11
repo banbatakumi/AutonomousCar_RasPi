@@ -5,7 +5,7 @@
  * 冒頭のコメント参照）。React state 経由だと 8Hz に間引かれ音がカクつく。
  *
  * 回転数相当（`rpmFrac`）の作り方は**内燃機関と EV で別ロジック**にしてある
- * （2026-08-30）——エンジン音と EV/モータ音は本質的に別物で、単に周波数や
+ *——エンジン音と EV/モータ音は本質的に別物で、単に周波数や
  * ゲインの数値を変えるだけでは片方の演出（レブリミット、シフトブリップ）が
  * もう片方にも意味もなく残ってしまうため。
  *
@@ -24,7 +24,7 @@
  * （`Profile.hasIgnitionCutLimiter`、`audio/engineSound.ts` 参照）——EV は
  * `frac` がどれだけ上がっても点火カットのような断続は起きない。
  *
- * 音色（`settings.engineSoundType`、2026-08-30 追加）は `EngineSound.setType()` で
+ * 音色は `EngineSound.setType()` で
  * **鳴っている最中でも `AudioContext` を作り直さずに**切り替える。ON/OFF
  * （`on`）と音色（`type`）を別の `useEffect` に分けているのはそのため——
  * 音色を変えるたびに rAF ループや `AudioContext` を作り直す必要は無い。

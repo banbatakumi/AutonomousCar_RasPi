@@ -8,7 +8,7 @@
  *
  * 今の値そのもの（スライダを動かした結果）は、これとは別に `config/auto.json` へ毎回保存され、
  * 次の起動で戻る。プリセットは「覚えておきたい組み合わせ」を名前で呼び戻すためのもの
- * （バンビの指示、2026-09-29）。
+ *。
  */
 import { useState } from 'react'
 import type { ControlChannel } from '../ws/control'

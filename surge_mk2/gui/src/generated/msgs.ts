@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xda584af5
+export const MSGS_SCHEMA = 0xa66f791b
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
@@ -508,6 +508,12 @@ export type AutoState = {
   scan_age_ms: number
   /** 実測の計画レート [Hz] */
   plan_hz: number
+  /**
+   * `plan()` 1回の処理時間 [ms] と、直近1秒の最大。**Pi で実測する手段はこれだけ**
+   * （デッドマン `cmd_deadman_ms` に対する余裕を見る。2026-10-10）
+   */
+  plan_ms: number
+  plan_ms_max: number
 }
 
 /**

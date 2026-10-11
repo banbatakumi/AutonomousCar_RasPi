@@ -31,7 +31,7 @@
  * （「レーシングライン走行」を押す前の下見、`AutoMapPanel.tsx`参照）。
  * プレビュー中の地図に対応する実測の自己位置は無いので、`live.auto`は
  * 読まない——`auto`をnullのままにしておけば、下の`if (auto) {...}`群が
- * 自然に何も描かなくなる（2026-09-03）。
+ * 自然に何も描かなくなる。
  */
 import { useEffect, useRef } from 'react'
 import { live } from '../bus/live'

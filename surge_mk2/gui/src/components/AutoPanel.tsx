@@ -29,26 +29,25 @@
  * ARM を保持している**必要がある（`Enter` または ARM ボタン）。この2つを1つの
  * ボタンにまとめないのは、自律走行の停止手段を人間側に残しておくため。
  *
- * ## モデル選択もここに置く（2026-08-28）
+ * ## モデル選択もここに置く
  *
- * 以前は設定ドロワーのカメラタブに置いていたが、**「どのモードで走るか」と
- * 「そのモードが使うモデル」は同じ意思決定の一部**なので分離すると迷う。
+ * **「どのモードで走るか」と「そのモードが使うモデル」は同じ意思決定の一部**なので
+ * 設定ドロワーとは分離せずここに置く。
  * `ftg_cam`/`e2e_lidar` を選んだときだけ、そのモード専用のモデル選択
  * ドロップダウンをこのパネル内に出す。一覧の取得（`camModelList`/
  * `e2eModelList`）は `DiagView.tsx` の記録一覧取得と同じくマウント時に一度要求しておく。
  *
- * ## モード選択はドロップダウンに（2026-08-28）
+ * ## モード選択はドロップダウンに
  *
  * planner の数が増えてボタン行が窮屈になったため、1つ選べば足りるボタン行
  * ではなく `<select>` にした。未選択に戻す操作もボタンのトグルではなく
  * 「（未選択）」を選ぶ形になる。
  *
- * ## 構造を作り直した（2026-08-28、指摘による2回目の改訂）
+ * ## 構造
  *
- * 車体図と横並びになって幅が2/3に減ったところ、旧来の「3列固定グリッド」
- * （走らせ方／engage／判断を横に3分割）が窮屈になり、判断の数値
- * （`auto-metrics`）が幅の途中で折り返して**数値と単位が別の行に分離する**
- * 崩れ方をした。**縦積みの1カラム構成**に作り直し、数値は「ラベル＋値」を
+ * 車体図と横並びで幅が狭いため、横3分割だと判断の数値
+ * （`auto-metrics`）が折り返して**数値と単位が別の行に分離する**。
+ * **縦積みの1カラム構成**にし、数値は「ラベル＋値」を
  * 1つのグリッドセルにまとめて絶対に分離しないようにした（`.auto-stat`）。
  * パラメータも `minmax(220px,1fr)` だと2列で頭打ちになっていたので
  * `minmax(150px,1fr)` に詰め、無理に2列に揃えず幅なりに流れるようにした。
@@ -60,7 +59,7 @@
  * 縦に伸びても、上段カメラ帯の高さやこの行全体を押し広げず**パネル内だけで
  * スクロール**する。
  *
- * ## 「判断」欄も planner ごとに出し分ける（2026-08-29）
+ * ## 「判断」欄も planner ごとに出し分ける
  *
  * `gap_start_deg`/`gap_end_deg`/`nearest` はギャップ探索系 planner の判断根拠で、
  * `e2e_lidar`/`line_trace` はそもそも書かない（`AutoState` の既定値0.0のまま）。
@@ -94,10 +93,10 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const camE2eModel = useUi((s) => s.camE2eModel)
   const camE2eModelFiles = useUi((s) => s.camE2eModelFiles)
   // 選択中のカメラセグメンテーションモデルの備考（`ml_cam/app.py`の備考欄→エクスポート時に
-  // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称、2026-08-29追加）
+  // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称）
   const camSelectedNote = camModelFiles.find((f) => f.name === camModel?.name)?.note
   // 選択中のE2E LiDARモデルの備考（`ml_lidar/app.py`の備考欄→エクスポート時に
-  // `<name>.json`へ同梱されたもの。2026-08-29追加）
+  // `<name>.json`へ同梱されたもの）
   const e2eSelectedNote = e2eModelFiles.find((f) => f.name === e2eModel?.name)?.note
   // 選択中のカメラE2Eモデルの備考（`ml_cam_e2e/app.py`の備考欄→エクスポート時に同梱されたもの）
   const camE2eSelectedNote = camE2eModelFiles.find((f) => f.name === camE2eModel?.name)?.note
@@ -166,7 +165,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
               **`DONE`（地図と経路ができて保存済み・待機中）はengage済みのまま
               続く**——BUILD完了時にdisengageしないので（`slam2d_raceline.py`
               の`_done()`）、「未engage」だけを条件にすると`DONE`中は選択肢が
-              一切出ない画面になってしまう（実機で発覚、2026-09-03）。
+              一切出ない画面になってしまう（実機で発覚）。
               `DONE`中も2ボタンを出し、解除は小さいリンクボタンで別に出す */}
           {selected?.map_ui && (!auto.engaged || st?.phase === 'DONE') ? (
             <>
@@ -193,7 +192,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
           {/* **`DONE`は「待機中」であって「走行中」ではない。** `slam2d_raceline`
               はBUILD完了後もengage・ARMを保ったまま止まって待つ（`_done()`）
               ので、`engaged && armed`だけで「走行中」と出すと動いていないのに
-              そう見える（実機で発覚、2026-09-03） */}
+              そう見える（実機で発覚） */}
           {auto.engaged && ui.armRequested && !silent && st?.phase !== 'DONE' && (
             <span className="badge-live">走行中</span>
           )}
@@ -395,16 +394,15 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
                 <Stat value={((st?.valid_ratio ?? 0) * 100).toFixed(0)} unit="% 有効点" />
               )}
               <Stat value={(st?.plan_hz ?? 0).toFixed(1)} unit="Hz 計画" />
+              <Stat value={(st?.plan_ms_max ?? 0).toFixed(0)} unit="ms 計画(最大)" />
             </div>
           </>
         )}
       </section>
 
       {/* ── パラメータ ──
-          2026-08-29: 常時表示に変更（指示による）。以前は `<details>` で畳んで
-          いたが、車体図を横並びにした分パネルの縦の余白に余裕ができたので、
-          開閉の手間なく常に見える方が走行中の微調整に向く。
-          2026-09-12: `max_speed`/`v_max`/`a_accel`/`a_brake`系のスライダ上限を
+          常時表示（開閉の手間なく見える方が走行中の微調整に向く）。
+          `max_speed`/`v_max`/`a_accel`/`a_brake`系のスライダ上限を
           STM32の`LIMITS`実測値に同期する（`capAutoParams`、`store/ui.ts`）。
           ラジコンタブの`effectiveRange`と同じ理由・同じ方針 */}
       {selected && (
@@ -444,8 +442,7 @@ function Stat({ value, unit }: { value: string; unit: string }) {
  * ## ドロップダウンで選んだ地図をその場で下見する
  *
  * 「レーシングライン走行」を押す前に、選んだ地図とグリッドを`AutoMapPanel`
- * に表示し、クリックで自己位置ヒントを置けるようにする（`bus/mapPreview.ts`、
- * バンビの指示、2026-09-03）。押した瞬間（`startSlam2dExplore`/
+ * に表示し、クリックで自己位置ヒントを置けるようにする（`bus/mapPreview.ts`）。押した瞬間（`startSlam2dExplore`/
  * `startSlam2dRace`）にプレビューは消し、以後は本物のライブ地図に譲る。
  */
 function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string }) {
@@ -466,7 +463,7 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
   // **`DONE`に入ったら一覧を取り直す。** 自動保存は planner 側（`_auto_save_map`）で
   // 起きるので、こちらから聞かない限り新しい地図は一覧に載らない。「手動で地図作成」は
   // engage しないため、このコンポーネントは EXPLORE→BUILD→DONE のあいだ出たままで、
-  // 上のマウント時の取得は走らない（リロードするまで地図が出なかった、2026-10-06）
+  // 上のマウント時の取得は走らない
   useEffect(() => {
     if (phase === 'DONE') ch?.mapsList()
   }, [ch, phase])

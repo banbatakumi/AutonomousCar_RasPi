@@ -24,7 +24,7 @@
  * を初期値に、実写を見ながら追い込める——定規で測れる筐体の位置とレンズ光学中心が
  * ズレうるため。**俯角（取付角度）・レンズは調整UIを持たない**。一度ネジ止めしたら
  * 変わらない物理値で、`VEHICLE.camFront.pitch`/`fisheye`/`hfov`（`vehicle.toml` 直）をそのまま使う
- * （2026-08-21、指示による——「絶対変わらないものにスライダーは要らない」）。
+ * （変わらない物理値にスライダーは要らない）。
  *
  * ## 下端クロップぶんの主点補正
  *
@@ -34,7 +34,7 @@
  * 位置**にある（下1/4カットなら 66.7%）。ここを画像中央（h/2）のまま投影すると、
  * ガイド線が実際より上に描かれる。`VEHICLE.camFront.bottomCrop` で補正する。
  *
- * ## 走行中の車体姿勢（IMU）でも補正する（2026-08-21）
+ * ## 走行中の車体姿勢（IMU）でも補正する
  *
  * カメラは車体に固定されているので、走行中に車体が pitch/roll すると
  * カメラの向きも一緒に傾く。`vs.pitch`/`vs.roll`（`TELEMETRY` の IMU 実測値。
@@ -51,7 +51,7 @@
  *   **pitch/roll は独立に合成する近似**（厳密な3D外部パラメータではない）。
  * - IMU が無効（`imu_ok=false`）な間は 0 として扱い、固定値だけで描く。
  *
- * ## 後カメラにも同じガイドを出す（2026-08-21）
+ * ## 後カメラにも同じガイドを出す
  *
  * 後カメラは車体に対し180°反対向きに付いている（`vehicle.toml` の
  * `sensors.cam_rear.yaw`）。そのため前カメラ用にそのまま流用できない点が3つある：
@@ -68,14 +68,14 @@
  *
  * ここも校正前の近似であることに変わりはない（冒頭コメント参照）。
  *
- * ## `variant`：ラジコンビューは文字を出さない（2026-08-17）
+ * ## `variant`：ラジコンビューは文字を出さない
  *
  * `full`（既定・自動運転ビュー）は左上に「前方/後方」ラベルと fps を
  * 並べたタグを出し、校正前バッジも出す。`minimal`（ラジコンビュー）は
  * ラベルもバッジも出さず、fps だけを右下に小さく残す。**fps だけは
  * 消さない** — 配信が生きているかを判断する最後の手がかりのため。
  *
- * ## モード連動のデバッグ重畳（2026-08-28）
+ * ## モード連動のデバッグ重畳
  *
  * 前カメラだけ、選ばれている自動運転モードに応じて2種類の重畳が自動で出る
  * （バンビの「セグメンテーションマスクを見たい」「ライントレースがどの線を
@@ -94,7 +94,7 @@
  * どちらも**メイン映像の WebSocket 接続とは独立**させてある——モードを
  * 切り替えるたびにメイン映像まで再接続されるのを避けるため。
  *
- * ## `onAspect`：実際に届いた画像の縦横比を親へ返す（2026-08-17）
+ * ## `onAspect`：実際に届いた画像の縦横比を親へ返す
  *
  * `RcView.tsx` は映像の箱を「取得したサイズのまま」表示したい（指示による）。
  * `camera_node.py --size` の既定値から比率を決め打ちしていたら、実機では
@@ -129,10 +129,10 @@ export function CameraView({
   onAspect?: (aspect: number) => void
   /** true の間は `pathGuide` が ON でもこのインスタンスには描かない。
    * ラジコンビューの PIP（小さい方の映像）専用——**大きい方の映像だけに
-   * ガイドを出す**ため（`RcView.tsx`、指示による。2026-08-21） */
+   * ガイドを出す**ため */
   guideDisabled?: boolean
   /** `follow_object` のROI選択（ドラッグ矩形）に使う。前方カメラ以外・
-   * 未指定の間はポインタ操作を一切拾わない（2026-09-01） */
+   * 未指定の間はポインタ操作を一切拾わない */
   ch?: ControlChannel | null
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
@@ -149,7 +149,7 @@ export function CameraView({
   const guideRef = useRef(guide)
   guideRef.current = guide
 
-  // ── モード連動のデバッグ重畳（2026-08-28） ──
+  // ── モード連動のデバッグ重畳 ──
   //
   // `ftg_cam`/`cam_centerline` はセグメンテーションマスク、`line_trace` は
   // 認識した白線の目標点を前カメラにだけ重ねる。**どちらもメイン映像の
@@ -182,7 +182,7 @@ export function CameraView({
   //: （下記）で `showMask` の間だけ繋ぎ、`draw()` はここを読むだけ
   const maskBitmapRef = useRef<ImageBitmap | null>(null)
 
-  // ── 対象追従（`follow_object`）のROI選択（2026-09-01） ──
+  // ── 対象追従（`follow_object`）のROI選択 ──
   //
   // ドラッグでROI矩形を選ぶ操作は前方カメラの `follow_object` 選択中だけ有効。
   // `showMask`/`showLineTarget` と同じ ref 経由（draw ループの useEffect 依存に
@@ -327,8 +327,7 @@ export function CameraView({
         // 高さで決まるだけで、前後カメラそれぞれの実アスペクト比（`bottomCrop`
         // が違うため異なる）とは一致せず、レターボックス量が前後で変わる。
         // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
-        // ガイドがズレる（2026-08-31、後方カメラのガイドが上に大きくズレる
-        // 不具合として発見）
+        // ガイドがズレる（後方カメラのガイドが上に大きくズレる不具合になる）
         if (guideRef.current || showLineTargetRef.current || showSignalRef.current) {
           ctx.save()
           ctx.translate(dx, dy)
@@ -516,8 +515,7 @@ export function lensFor(cam: 'front' | 'rear', w: number, h: number): Lens {
   return pinholeLens(w, h, geom.hfov, geom.bottomCrop)
 }
 
-/** 路面座標（base_link、x=前 y=左）→ 画像座標の投影器を作る（2026-08-28、
- * `drawGuide` から切り出し）。IMU による姿勢（pitch/roll）補正込み。
+/** 路面座標（base_link、x=前 y=左）→ 画像座標の投影器を作る。IMU による姿勢（pitch/roll）補正込み。
  * `drawGuide`（進路ガイド）と `drawLineTarget`（認識ラインの重畳）が共用する
  * ——同じカメラ内部・外部パラメータ・IMU補正を2箇所に書くと片方だけ直し忘れる。
  *

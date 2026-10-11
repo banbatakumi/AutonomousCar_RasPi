@@ -137,7 +137,7 @@ export class ControlChannel {
   }
 
   /**
-   * **DISARM を1発、明示的に送る**（ARM を切った瞬間に呼ぶ。2026-10-06）。
+   * **DISARM を1発、明示的に送る**。
    *
    * ARM を切った後の GUI は、灯火などが無ければ送信を止めてデッドマンに任せていた。
    * 自律走行中はデッドマンが `autoLinkGraceMs`（Wi-Fi の瞬断を乗り切るための猶予）まで
@@ -321,7 +321,7 @@ export class ControlChannel {
   /**
    * capture側(camera_node)のFPS上限・後方カメラの取得ON/OFF・GUIへのJPEG配信頻度。
    * `fan`/`tc_tv` と同じく状態はサーバが真値。**どれも省略できる**（送った項目だけ効く）。
-   * ARM中/DISARM中で別々の値を持つ（2026-09-03、駐車中の節電のため）。
+   * ARM中/DISARM中で別々の値を持つ。
    *
    * `frontFpsArmed` は目安の上限にすぎない——カメラを使う自動運転モード
    * （`line_trace`/`ftg_cam`）が engage されている間は、サーバ側がこれを無視して

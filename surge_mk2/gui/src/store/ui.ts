@@ -30,7 +30,7 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
  * ラジコン操作の調整値。**設定パネルから変更でき、`localStorage` に保存される。**
  *
  * ⚠ `maxSpeed` / `maxSteer` のスライダ上限は `effectiveRange()` が動的に決める
- * （★v0.11。STM32/仮想STM32の `LIMITS` を受信済みならそれを使う。§`effectiveRange` 参照）。
+ * （STM32/仮想STM32の `LIMITS` を受信済みならそれを使う。§`effectiveRange` 参照）。
  * 超えた分は `io_node` の `_send_command`（`--max-speed`/`--max-steer` と `LIMITS` の
  * 小さい方でクランプ）で黙って切り捨てられるので、GUI 側のレンジが実際の上限より
  * 緩いと「表示上は出せるはずなのに実際は出ない」食い違いが起きる
@@ -40,20 +40,16 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
  * ⚠ **速度の上限は今も2段ある。**
  *
  *   1. io_node `--max-speed` …………… Pi 側の運用上限。超えた分を黙って切り捨てる
- *   2. STM32 の物理的な上限 …………… ★v0.11 `LIMITS` で Pi/GUI が取得できるようになった
+ *   2. STM32 の物理的な上限 …………… `LIMITS` で Pi/GUI が取得できる
  *
- * 以前は 2 がこのリポジトリから分からず、GUI 側の `PI_MAX_SPEED_CAP` を手で
- * 静的に書いていたが、**今は `LIMITS` を受信済みならそちらを使う**（`effectiveRange`）。
+ * **`LIMITS` を受信済みならそちらを使う**（`effectiveRange`）。`PI_MAX_SPEED_CAP` は未受信時の仮値。
  */
 export type DrivingSettings = {
-  /** RC の速度ダイヤル（速度制御モードの実際の上限）[m/s]。既定値 3.0（2026-08-22、
-   * それまで手で使っていた値に更新）。範囲は `LIMITS` 受信済みならそちらが上限
+  /** RC の速度ダイヤル（速度制御モードの実際の上限）[m/s]。既定値 3.0。範囲は `LIMITS` 受信済みならそちらが上限
    * （`effectiveRange`）。**速度メータの目盛りはこれとは独立**（`SpeedGauge.tsx` 参照、
    * 常に `LIMITS.max_speed_m_s` 固定）。
    *
-   * ⚠ v0.16 まではここに `cruiseScale`（既定巡航レンジ）と `boost`（Shift / パッド R1 で
-   * `maxSpeed` まで一時的に伸ばす機能）があったが、指示により削除した。今は常に
-   * `maxSpeed` そのものが上限——「全開が最高速度」というシンプルな1段仕様に戻した。
+   * 常に `maxSpeed` そのものが上限（「全開が最高速度」。巡航レンジやブーストは無い）。
    */
   maxSpeed: number
   /** 見た目の最大舵角 [rad]。既定値 0.785(45°)。Pi 側ハード上限（`PI_MAX_STEER_CAP`）を超えられない */
@@ -76,13 +72,13 @@ export type DrivingSettings = {
    * （キーボードは `steerRate`/`steerReturn`/`steerCounter` のランプ方式なので無関係）。
    * 0=リニア、1=完全3乗で中央付近をいちばん緩める。中央を大きく緩めるほど
    * 直進・小舵角での細かい操作がしやすくなる代わり、フルロックまでの
-   * ストローク後半が敏感になる。既定 0.45（v0.14 まで `STEER_EXPO` としてコード直書きだった値）
+   * ストローク後半が敏感になる。既定 0.45
    */
   gamepadSteerExpo: number
   /**
    * ゲームパッド左スティックのデッドゾーン（中央の遊び）[0-1]。**パッドの舵にだけ効く。**
    * `dz()`（`useDriving.ts`）で切り落とすのではなく再スケールするので、ここを広げても
-   * 「動き始めで飛ぶ」段差は出ない。既定 0.12（v0.14 まで `STICK_DZ` としてコード直書き）
+   * 「動き始めで飛ぶ」段差は出ない。既定 0.12
    */
   gamepadSteerDeadzone: number
   /** ARM を保持したまま無操作でいられる時間 [ms]。超えたら自動 DISARM */
@@ -90,34 +86,32 @@ export type DrivingSettings = {
   /** ブレーキの強さ [N·m/輪]。0 は送らない（未指定＝最大制動になってしまう） */
   brakeTorque: number
   /**
-   * 制御方式（v0.6 で速度⇄トルクの2択として導入、v0.17 で MT を加えた3択に）。
-   * 'speed' ＝ 速度制御（従来どおり `maxSpeed` が上限）。
+   * 制御方式（速度 / トルク / MT の3択）。
+   * 'speed' ＝ 速度制御（`maxSpeed` が上限）。
    * 'torque' ＝ トルク直接指令（スロットル入力はすべて `target_speed` ではなく `target_torque`）。
    * 'mt' ＝ 擬似変速（速度制御の一種。上限は `maxSpeed` ではなく専用の `mtMaxSpeed` に
    * `mtGear1`〜`mtGear5` の倍率を掛けたもの。ワイヤプロトコルの `torque_mode` ビットは
    * 'speed' と同じく false のまま——STM32 からは普通の速度指令にしか見えない）。
-   * 以前は `torqueMode: boolean` だった。
    *
-   * ⚠ **2026-08-30: MT は 'speed' と一切パラメータを共有しない。** 以前は `maxSpeed`/
-   * `accel`/`coast`/`kickSpeed` を流用していたため、'speed' モードの乗り味を詰めると
-   * 意図せず MT の挙動まで変わってしまっていた。今は MT 専用の `mtMaxSpeed`/`mtAccel`/
-   * `mtCoast`/`mtEngineBrake` を独立に持つ（下記）。`brakeTorque`（実ブレーキの強さ、
-   * STM32 の N·m）だけは車両物理量なので引き続き共有——これは「乗り味」ではない。
+   * ⚠ **MT は 'speed' と一切パラメータを共有しない**（共有すると 'speed' の乗り味の
+   * 調整が MT に波及する）。MT 専用の `mtMaxSpeed`/`mtAccel`/`mtCoast`/`mtEngineBrake` を
+   * 独立に持つ（下記）。`brakeTorque`（実ブレーキの強さ、STM32 の N·m）だけは車両物理量
+   * なので共有する。
    */
   driveMode: 'speed' | 'torque' | 'mt'
   /** トルクモード中にスロットル全開で出す駆動トルク [N·m]。上限 `MAX_TARGET_TORQUE_NM` */
   driveTorque: number
   /**
-   * MT モード専用の最高速度 [m/s]（2026-08-30、`maxSpeed` から分離）。5速（倍率100%）で
+   * MT モード専用の最高速度 [m/s]。5速（倍率100%）で
    * この値そのものが上限になる。'speed' モードの `maxSpeed` とは完全に独立——
    * どちらかを変えてももう一方には影響しない。
    */
   mtMaxSpeed: number
-  /** MT モード専用の加速度 [m/s²]（2026-08-30、`accel` から分離）。押している間／
+  /** MT モード専用の加速度 [m/s²]。押している間／
    * トリガーを踏み込んだ方向へ近づくときのレート。'speed' モードの `accel` とは独立 */
   mtAccel: number
   /**
-   * MT（擬似変速）モードの D1〜D5 それぞれの上限速度 [`mtMaxSpeed` に対する倍率、0-1]（v0.17）。
+   * MT（擬似変速）モードの D1〜D5 それぞれの上限速度 [`mtMaxSpeed` に対する倍率、0-1]。
    * R はここでは持たない——`mtGear1`（D1 と同じ）を流用する。後退はどのみち
    * 低速域でしか使わないので専用の刻みを持つ必要が薄い。
    * `SETTINGS_RANGE`/`effectiveRange` は他の項目と違い `LIMITS` で動かさない
@@ -168,7 +162,7 @@ export type DrivingSettings = {
   /** ラジコンの速度計（`SpeedGauge.tsx`）の表示単位。既定 'ms'。クリックで切替、`localStorage` に保存 */
   speedUnit: 'ms' | 'kmh'
   /**
-   * 合成エンジン音（`audio/engineSound.ts`）の音色（2026-08-30 追加）。
+   * 合成エンジン音（`audio/engineSound.ts`）の音色。
    * 'combustion' ＝ 内燃機関風（ノコギリ波の唸り）、'ev' ＝ EV/ハイブリッド風
    * （澄んだトーン＋高い倍音のシマー）。鳴らすかどうか自体は `UiState.engineSoundOn`
    * （こちらは意図的に非永続——起動直後に前回 ON のまま音が鳴り出すと驚くため）で、
@@ -186,20 +180,16 @@ export type NumericSettingKey = {
 /**
  * **`LIMITS` 未受信の間だけ使う起動時プレースホルダ。** WS 接続前や STM32/仮想STM32が
  * まだ `LIMITS` を返していない一瞬だけこの値でスライダを描き、届き次第
- * {@link effectiveRange} が実測値に置き換える（★v0.11。届いた後はこの値は使われない
+ * {@link effectiveRange} が実測値に置き換える（届いた後はこの値は使われない
  * ——`SETTINGS_RANGE` の「小さい方」ではなく実測値をそのまま採用する）。
  *
- * ⚠ 60°（1.047 rad）は一度 45° に落とした値を戻したもの（2026-08-10、指示による）が、
- * これは**モータ機械角の可動域**であって路面舵角ではなかった。リンク比 0.5
- * （2026-08-20 実測確定）によりタイヤは半分しか切れないため、路面舵角の上限は
- * **30°（0.524 rad）**に修正した。据え切りを続けるとステア MD が過熱するので
+ * ⚠ 路面舵角の上限は **30°（0.524 rad）**。60°（1.047 rad）は**モータ機械角の可動域**で
+ * あって路面舵角ではない（リンク比 0.5 によりタイヤは半分しか切れない）。据え切りを続けるとステア MD が過熱するので
  * `temp[2]` を見ておくこと。**`PI_MAX_STEER_CAP` は手で書かず `config/vehicle.toml` の
  * `max_steer` から生成する**（`config/generate.py`）。値を直すには toml を直して
  * 再生成すること。
  *
- * ⚠ 速度は 2.0 → **3.0 m/s ＝ 10.8 km/h** に引き上げた（2026-08-11、指示による）。
- * **`DEFAULT_SETTINGS.maxSpeed` も 2026-08-22 に 0.6 → 3.0（当時この上限いっぱいで
- * 使っていた値）へ更新した**ので、この2つは今は同じ 3.0 m/s。速度は `vehicle.toml`
+ * ⚠ 速度上限は **3.0 m/s ＝ 10.8 km/h**。`DEFAULT_SETTINGS.maxSpeed` も同じ 3.0 m/s。速度は `vehicle.toml`
  * に持たせる値ではない（運用上の速度制限であって車両の物理諸元ではない）ため、
  * こちらは引き続き直書き。
  *
@@ -207,8 +197,7 @@ export type NumericSettingKey = {
  * 実際にモータへ効く安全側のクランプは別（`io_node._send_command` 参照）。
  *
  *   1. io_node `--max-speed` …………… Pi 側の運用上限。超えた分を黙って切り捨てる
- *   2. STM32 の物理的な上限 …………… ★v0.11 `LIMITS` パケットで Pi/GUI が取得できる
- *      ようになった。以前はこのリポジトリから分からなかった
+ *   2. STM32 の物理的な上限 …………… `LIMITS` パケットで Pi/GUI が取得できる
  */
 export const PI_MAX_SPEED_CAP = 3.0 // m/s（install_services.sh の --max-speed と一致させてある）
 export const PI_MAX_STEER_CAP: number = VEHICLE.maxSteer // rad ≒ 30°（同 --max-steer。路面舵角の実機上限）
@@ -247,15 +236,6 @@ export const MAX_TARGET_TORQUE_NM = 0.13
 export const DEFAULT_DRIVE_TORQUE_NM = 0.05
 
 /**
- * ★v0.12 で廃止。STM32 の自動停止距離は固定20cmではなく
- * `v・t_delay + v²/(2・a_max) + margin`（速度に応じて伸びる）に変わった。
- * `margin` だけが `CONFIG_SET`（`param_id=0x0060`, `AUTO_STOP_MARGIN_CM`）で
- * cm単位の連続値として直接指定できる（範囲0-100cm、既定15cm。当初は3段階enumの
- * 予定だったが実機投入前にSTM32側がcm直接指定へ変更した）。表示は
- * `link.auto_stop_margin_cm`（STM32 の `CONFIG_ACK` 由来のサーバ真値）を使うこと。
- * `pi_uart_protocol_v0.12_delta.md` 参照
- */
-/**
  * 自動停止の既定。**ON にしてある。** 「効きすぎて止まる」より「気づかず当てる」方が
  * 損害が大きいため。⚠ STM32 側にヒステリシスが無いので、20cm 前後では
  * 効いたり切れたりする（チャタリング）。低速で壁に詰める作業では設定パネルで切ること。
@@ -284,7 +264,7 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   brakeTorque: DEFAULT_BRAKE_TORQUE_NM,
   driveMode: 'speed',
   driveTorque: DEFAULT_DRIVE_TORQUE_NM,
-  // 'speed' の maxSpeed/accel とは独立（2026-08-30）。まずは同じ値から始め、
+  // 'speed' の maxSpeed/accel とは独立。まずは同じ値から始め、
   // 実車に乗ってから設定パネルで別々に詰めること
   mtMaxSpeed: 3.0,
   mtAccel: 2.0,
@@ -394,16 +374,17 @@ export function effectiveRange(limits: VehicleLimits | null | undefined): Record
 }
 
 /**
- * 自動運転パラメータ（`raspi/auto/*.py` の `ParamSpec`）のうち「最高速度」
- * 「最高加速度」に当たるキーのスライダ上限。**ラジコンの`effectiveRange`と
- * 同じ理由・同じ方針**（2026-09-12・バンビの指示）——`LIMITS`受信済みなら
+ * 自動運転パラメータ（`raspi/auto/*.py` の `ParamSpec`）のうち「最高速度」に当たるキーの
+ * スライダ上限。**ラジコンの`effectiveRange`と
+ * 同じ理由・同じ方針**——`LIMITS`受信済みなら
  * 静的な`ParamSpec.max`より優先して無条件にそちらを使う。各`ParamSpec`側の
  * 静的`max`も車体の物理上限（現状3.0m/s）に合わせてあるので、通常時は
  * このcapが実際に効くのは`LIMITS`未受信の間の初期表示くらい。
  *
- * `a_lat`/`a_lat_max`（旋回時の**横**加速度）はここに含めない。
- * `LIMITS.max_accel_m_s2` は**前後**加速度の上限で物理量として別物なので、
- * 横加速度をそれで縛るのは筋が違う。
+ * 加速度は対象にしていない。slam2d 系の `a_accel`/`a_brake`（絶対値）は
+ * 同定値に対する利用率 `accel_use`/`brake_use`（0〜1）になり、`LIMITS.max_accel_m_s2` で
+ * 縛るキーが無くなった。絶対値の前後加速度を設定に持つ planner を足すならここへ戻す。
+ * 横加速度（`a_lat_max` 等）は物理量として別物なので、元から対象外。
  *
  * ⚠ これも`effectiveRange`と同じく**スライダの表示・入力レンジの話**。
  * 実際にモータへ効く上限は`io_node`の`_send_command`が`LIMITS`で無条件に
@@ -411,7 +392,6 @@ export function effectiveRange(limits: VehicleLimits | null | undefined): Record
  * 表示レンジをそれに追従させているだけ。
  */
 const AUTO_SPEED_PARAM_KEYS = new Set(['max_speed', 'v_max', 'explore_speed'])
-const AUTO_ACCEL_PARAM_KEYS = new Set(['a_accel', 'a_brake'])
 
 export function capAutoParams(
   params: AutoParamSpec[],
@@ -421,7 +401,6 @@ export function capAutoParams(
     typeof live === 'number' && isFinite(live) && live > 0 ? { ...p, max: live } : p
   return params.map((p) => {
     if (AUTO_SPEED_PARAM_KEYS.has(p.key)) return withLive(p, limits?.max_speed_m_s)
-    if (AUTO_ACCEL_PARAM_KEYS.has(p.key)) return withLive(p, limits?.max_accel_m_s2)
     return p
   })
 }
@@ -432,7 +411,7 @@ function clampSettings(s: DrivingSettings): DrivingSettings {
   // **`SETTINGS_RANGE`（静的）ではなく `effectiveRange`（`LIMITS` 受信済みならそちら
   // 優先）で必ずクランプすること。** ここを静的値のままにすると、スライダの DOM 要素
   // 自体は動的な `max` まで動くのに、`setSettings` を呼んだ瞬間ここで静的値まで
-  // 巻き戻され「ドラッグしても弾かれる」バグになる（2026-08-22、実機で発覚）。
+  // 巻き戻され「ドラッグしても弾かれる」バグになる。
   // `live` はフックではない素の可変オブジェクトなので、コンポーネント外のここからでも読める
   const range = effectiveRange(live.link)
   const out = { ...s }
@@ -488,10 +467,8 @@ function saveSettings(s: DrivingSettings) {
  * 「既定値に戻す」ボタン・各行の「既定値 X」ボタンが指す先。**`DEFAULT_SETTINGS`
  * （ソースコードに焼き込まれた工場出荷値）とは別に、`localStorage` に持つ。
  *
- * 2026-08-22: 「今使っている値を既定値にしたい」という要望への対応。以前は
- * `DEFAULT_SETTINGS` をソースコードで直接書き換えるしかなく、**Claude が実機の
- * 現在値を見られないまま数値を推測して書く**という壊れ方をした（スクリーンショットの
- * 値が古くなっていた）。設定パネルの「現在の値を既定値として保存」ボタン
+ * 「今使っている値を既定値にしたい」ときにソースを書き換えると、
+ * 実機の現在値を見られないまま数値を推測することになるため、設定パネルの「現在の値を既定値として保存」ボタン
  * （`saveCurrentAsDefault`）で、ユーザー自身がいつでも更新できるようにする。
  */
 const DEFAULT_OVERRIDE_KEY = 'surge.driveSettingsDefault.v1'
@@ -675,16 +652,14 @@ type UiState = {
    * 'D' に戻る**（`localStorage` に保存しない。理由は `sideBrakeRequested` と同じ）。
    * 走行中の誤操作を防ぐため、UI 側は停止中（`vs.stopped`）以外では切り替えを拒否する。
    *
-   * 操作口はパッドの L1（R）/R1（D）とキーボードの←（R）/→（D）（v0.18、
-   * `useDriving.ts` の `shiftGear()`。**2026-08-30 に D/R を入れ替えた**——
-   * それまでは L1/←＝D、R1/→＝R だった）——どちらも同じ `ui.gear` を更新するので、
-   * 二重に状態を持たない。**画面ボタンは v0.18 で廃止した**（現在値は速度メータ
+   * 操作口はパッドの L1（R）/R1（D）とキーボードの←（R）/→（D）（`useDriving.ts` の `shiftGear()`）——どちらも同じ `ui.gear` を更新するので、
+   * 二重に状態を持たない。**画面ボタンは無い**（現在値は速度メータ
    * 中央のバッジで表示だけする、`SpeedGauge.tsx`）。
    */
   gear: 'D' | 'R'
 
   /**
-   * MT（擬似変速）モードのギア位置（v0.17）。`driveMode==='mt'` のときだけ意味を持つ
+   * MT（擬似変速）モードのギア位置。`driveMode==='mt'` のときだけ意味を持つ
    * ——速度制御・トルク制御では従来どおり `gear`（'D'|'R'）を使う。
    *
    * `gear` と同じ操作口（パッドの L1/R1、キーボードの←/→）だが意味が違う。**下＝
@@ -694,9 +669,9 @@ type UiState = {
    * 実車の MT と同じく走行中のシフトアップ/ダウンを許可する。
    * **既定・ページ再読み込みは N**（`localStorage` に保存しない、`gear` と同じ理由）。
    * **速度制御/トルク制御から MT に切り替えた直後も必ず N に戻す**（`setSettings`
-   * 参照、2026-08-31 指示）——前回どのギアで MT を抜けたかを持ち越すと、
+   * 参照）——前回どのギアで MT を抜けたかを持ち越すと、
    * 切り替えた瞬間に前のギアの上限でいきなり動き出しかねないため。
-   * 画面ボタンは無い（`gear` と同じ、v0.18 で廃止）——現在値は速度メータ中央の
+   * 画面ボタンは無い（`gear` と同じ）——現在値は速度メータ中央の
    * バッジで表示だけする
    */
   mtGear: MtGear
@@ -719,26 +694,21 @@ type UiState = {
    * **切ると PIP 側の `CameraView` が外れて WS が閉じる。** 流れなくなった分、
    * メイン映像のフレームレートに回せる（カメラ2台ぶんの帯域が効いている環境向け）。
    *
-   * 2026-08-17: 個別ボタンは廃止し、メイン映像の空いた場所のクリックで
-   * `lidarVisible`/`pathGuide` と一緒に切り替える方式にした。しかし
-   * **2026-08-20 に外した**——LiDAR を消したいだけのクリックで小さい映像
-   * まで一緒に消えるのが紛らわしいと指摘されたため。今は常時 true のまま
-   * （切り替える操作が無い）。PIP 自体のクリックは表示/非表示ではなく
+   * 今は常時 true で切り替える操作は無い（LiDAR を消したいだけのクリックで小さい映像
+   * まで消えるのが紛らわしいため、`lidarVisible`/`pathGuide` とは連動させない）。PIP 自体のクリックは表示/非表示ではなく
    * 「メインと入れ替え」（`RcView.tsx` の `mainCam`）。
    */
   rearPip: boolean
   /** ラジコンビューで LiDAR ミニマップ（映像右上の丸）を出すか。メイン映像クリックで `pathGuide` と連動する
-   * （2026-08-20: `rearPip` はこの連動から外した） */
+   * */
   lidarVisible: boolean
   /** LiDAR ミニマップを拡大表示中か。false＝映像の1/3高さ、true＝82%高さ。ミニマップ自体のクリックで切り替える */
   lidarExpanded: boolean
   /**
    * ラジコンビューのメイン映像に出しているカメラ（`RcView.tsx`）。PIP には
    * 常にこの逆（`pipCam`）が出る。PIP クリックで入れ替わるほか、
-   * ゲームパッドの R3（右スティック押し込み）でも切替可能（v0.16、`useDriving.ts`）——
-   * レーシングゲームの「リアビュー確認」に近い操作なので R3 を割り当てた。
-   * 以前は `RcView.tsx` のローカル `useState` だったが、パッドの rAF ループ
-   * （React ツリーの外）から切り替えられるよう store に上げた。
+   * ゲームパッドの ○ でも切替可能（`useDriving.ts`）。
+   * パッドの rAF ループ（React ツリーの外）から切り替えるため store に持つ。
    * **ページ再読み込みでは 'front' に戻る**（`localStorage` に保存しない。
    * `lidarExpanded` 等と同じ——起動直後に予期せず後方カメラがメインの状態は避けたい）
    */
@@ -759,7 +729,7 @@ type UiState = {
   /** ラジコン操作の調整値。設定パネルで変更、`localStorage` に自動保存 */
   settings: DrivingSettings
   /** 「既定値に戻す」の戻り先。既定はソースコードの `DEFAULT_SETTINGS` だが、
-   * `saveCurrentAsDefault` で `settings` の現在値に上書きできる（★2026-08-22） */
+   * `saveCurrentAsDefault` で `settings` の現在値に上書きできる */
   settingsDefault: DrivingSettings
 
   /** 「リセット間走行距離」の起点（`vs.odom_center` の値）。`resetTripOdom` で更新、
@@ -842,7 +812,7 @@ type UiState = {
   setSettings: (p: Partial<DrivingSettings>) => void
   /** `settingsDefault`（＝「既定値に戻す」の戻り先）へ戻す。値そのものは変えない */
   resetSettings: () => void
-  /** 今の `settings` を新しい既定値として保存する（★2026-08-22）。
+  /** 今の `settings` を新しい既定値として保存する。
    * 以後の「既定値に戻す」・各行の「既定値 X」表示はこの値を指す */
   saveCurrentAsDefault: () => void
   /** 「リセット間走行距離」を今の `vs.odom_center` で 0 に踏み直す */

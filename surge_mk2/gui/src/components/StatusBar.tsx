@@ -5,12 +5,9 @@
  * 「状態が変わったら即座に気づきたいもの」に限る。
  *
  * 通信の生の数字（UART/WS の RTT、受信 Hz、CRC/loss）は**平常時はどのタブでも畳む**
- * （2026-08-21: 以前はフル表示タブ側では常時4つ並べていたが、診断タブに同じ数字が
- * 全部あって重複なだけだった）。リンクが劣化したときだけ1つのピルにまとめて出す。
+ * （診断タブに同じ数字が全部あるので重複させない）。リンクが劣化したときだけ1つのピルにまとめて出す。
  *
- * health（OK/DEGRADED等）は**variantに関係なく常に出す**（2026-08-21変更。以前は
- * ラジコンタブでは正常時に隠していたが、正常なことも一目で分かる方が良いという
- * 判断で常時表示にした）。
+ * health（OK/DEGRADED等）は**variantに関係なく常に出す**（正常なことも一目で分かる方が良い）。
  *
  * ## variant='rc'（ラジコンタブ）でも残っている違い
  *
@@ -18,7 +15,7 @@
  * `AssistLamps`（映像下のランプ）が別の見た目で常時出しているので、ピルまで出すと重複する。
  *
  * E-STOP・ARM・ラッチ警告・接続断・Wi-Fi・health・自動停止 は variant に関係なく必ず出す
- * （2026-08-21: 自動停止はラジコンだけ場所が違って分かりにくいという指摘で統一した）。
+ * （自動停止はタブごとに場所が違うと分かりにくいので統一している）。
  */
 import { useNumbers } from '../bus/live'
 import { MODE_NAME, healthLevel, ms, rttLevel } from '../format'
@@ -95,12 +92,10 @@ export function StatusBar({
         {variant === 'full' && vs?.abs_active && <span className="pill lv-warn">ABS</span>}
         {variant === 'full' && vs?.launch_active && <span className="pill lv-warn">LAUNCH</span>}
         {variant === 'full' && vs?.wheel_lift_active && <span className="pill lv-warn">片輪浮き</span>}
-        {/* v0.7 自動停止。**「許可しているか」と「今まさに効いているか」は別物**なので
+        {/* 自動停止。**「許可しているか」と「今まさに効いているか」は別物**なので
             両方を1つのピルで出し分ける。効いている間は急減速の理由がこれだと即分かるように
             lv-bad まで上げる（TC/TV より強い介入で、指令が完全に無視されるため）。
-            **variantに関係なく常に出す**（2026-08-21: 以前はフル表示タブだけで、ラジコン側は
-            `AssistLamps` の「自動停止 OFF」ランプが同じ情報を別の場所に出していたが、
-            場所が揃っていない方が分かりにくいという指摘で、こちらに一本化した） */}
+            **variantに関係なく常に出す**（`AssistLamps` ではなくこちらに一本化している） */}
         <span
           className={`pill ${vs?.auto_stop_active ? 'lv-bad' : 'dim'}`}
           title={

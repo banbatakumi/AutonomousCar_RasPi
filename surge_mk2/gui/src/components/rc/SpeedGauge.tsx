@@ -18,8 +18,7 @@ import { mtGearRatio, PI_MAX_SPEED_CAP, useUi } from '../../store/ui'
 
 /**
  * 目盛りの円弧。**真上（0°）を直進側の基準に、-120°〜120°の240°**
- * （2026-08-17、指示により明示的なパラメータへ変更。sweep 量は従来と同じ240°で、
- * 真下120°分が空く＝実車のメータと同じ配置）。`polar()` は時計回りが正なので、
+ * （真下120°分が空く＝実車のメータと同じ配置）。`polar()` は時計回りが正なので、
  * 0 が真上、-120 が左下寄り（8時方向）、120 が右下寄り（4時方向）になる。
  */
 const MIN_DEG = -120
@@ -71,11 +70,10 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
 
   // 停止判定中は 0 に落とす（`DriveBar` と同じ扱い。デッドバンド内の生値を速度に見せない）
   const speed = vs ? (vs.stopped ? 0 : Math.abs(vs.speed)) : 0
-  // ★2026-08-22: 目盛りは常に STM32 実測の物理上限（`LIMITS.max_speed_m_s`）に固定する。
-  // 速度制御・トルク制御どちらでも同じ扱い。以前は RC の速度ダイヤル（`settings.maxSpeed`）
-  // を目盛りにも流用していたため、ダイヤルを下げるとメータの目盛りまで一緒に縮み、
-  // 「実際に出せる速度」とメータの見え方が一致しなくなっていた（トルク制御は特に、
-  // 速度指令自体を送らないのでダイヤルとメータを結びつける理由が無い）。
+  // 目盛りは常に STM32 実測の物理上限（`LIMITS.max_speed_m_s`）に固定する。
+  // 速度制御・トルク制御どちらでも同じ扱い。RC の速度ダイヤル（`settings.maxSpeed`）
+  // は目盛りに流用しない（ダイヤルを下げると目盛りまで縮み、「実際に出せる速度」と
+  // メータの見え方が一致しなくなる。トルク制御は速度指令自体を送らない）。
   // `LIMITS` 未受信の間は `PI_MAX_SPEED_CAP` にフォールバックする
   const full = Math.max(0.1, n.link?.max_speed_m_s ?? PI_MAX_SPEED_CAP)
   const frac = Math.min(1, speed / full)
@@ -115,9 +113,8 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   return (
     <div className={`meter meter-speed ${n.stale ? 'stale' : ''}`}>
       {/*
-        2026-08-17: 映像下のメータ行が可変高さになったため（`RcView.tsx` の
-        `useElementSize`）、G メータとの光学中心を揃える固定 margin-top の
-        ハックは廃止した。3つのメータは上端揃え（top-align）に割り切っている。
+        映像下のメータ行は可変高さ（`RcView.tsx` の `useElementSize`）なので、
+        3つのメータは上端揃え（top-align）にしている。
 
         `dialHeight` は `RcView.tsx` がメータ行の実測高さから逆算して渡す px。
         **CSS の `flex`/`aspect-ratio` だけに任せなかった理由**——`<svg>` は

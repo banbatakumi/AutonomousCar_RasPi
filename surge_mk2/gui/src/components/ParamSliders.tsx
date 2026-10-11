@@ -12,7 +12,7 @@ import type { AutoParamSpec } from '../types'
  * `group`（`ParamSpec.group`）ごとに見出しを付けて並べる。組の順は最初に出てきた順
  * （宣言の途中で同じ組が再び出てきても、その組の中へまとめる）。組の無い宣言は従来どおり
  * 1つの並びで出す——地図作成（Follow the Gap）と本番走行のパラメータを見分けやすくするため
- * （バンビの指示、2026-09-29）
+ *
  */
 function byGroup(params: AutoParamSpec[]): [string, AutoParamSpec[]][] {
   const out = new Map<string, AutoParamSpec[]>()
