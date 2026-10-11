@@ -1,68 +1,23 @@
 # SURGE Mark.2 ドキュメント
 
-自律走行ミニカー **SURGE Mark.2** の設計文書。
+| 文書 | 内容 |
+|---|---|
+| [system_overview.md](system_overview.md) | システム全体像。**まずこれ** |
+| [development.md](development.md) | 開発ガイド。何を直したら何を再起動するか、コマンド集、トラブルシューティング |
+| [architecture.md](architecture.md) | ソフトウェア設計書。「なぜそう設計したか」 |
+| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.22**）の説明 |
+| [stm32_interface.md](stm32_interface.md) | STM32 側の実装仕様（C 構造体・安全要件・立ち上げ手順） |
+| [competition_plan.md](competition_plan.md) | 大会に向けた計画 |
+| [../sim/README.md](../sim/README.md) | シミュレータ（Mac 専用） |
+| [../gui/README.md](../gui/README.md) | GUI のコード地図 |
+| [setup_credentials.md](setup_credentials.md) | Pi の SSH・Wi-Fi 等の設定値（`.gitignore` 対象・機密） |
+| [archive/](archive/README.md) | **過去の記録。陳腐化しており、指示がない限り読まない** |
 
-| 文書 | 内容 | 読む人 |
-|---|---|---|
-| [system_overview.md](system_overview.md) | **システム全体像**。何をどこでやっているかを図と表で一通り。**まずこれ** | はじめて触る人 / 久しぶりに戻ってきた人 |
-| [development.md](development.md) | **開発ガイド**。何を直したら何を再起動するか、コマンド集、**トラブルシューティング** | 手を動かす人。困ったらここ |
-| [architecture.md](architecture.md) | **ソフトウェア設計書**。**「なぜそう設計したか」の正** | 設計の意図を知りたい人 |
-| [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.20**）。仕様の説明の**正** | STM32 / RasPi 双方の実装者 |
-| [stm32_interface.md](stm32_interface.md) | **STM32 側 実装仕様書**。C 構造体、送受信の実装、安全要件、チェックリスト、立ち上げ手順 | STM32 ファームウェア実装者 |
-| [../sim/README.md](../sim/README.md) | **シミュレータ**（Mac 専用）。実機と同じ制御コードのまま走らせる | 自律走行を書く人 |
-| [../gui/README.md](../gui/README.md) | GUI のコード地図 | GUI を直す人 |
-| [progress_archive.md](progress_archive.md) | `PROGRESS.md` から分離した詳細な実験ログ・実測値 | 過去の実測根拠を掘りたい人 |
-| [setup_credentials.md](setup_credentials.md) | Pi の SSH・Wi-Fi 等の設定値（`.gitignore` 対象・機密） | 実機に手で触る人 |
+現在地・実測値は [`../PROGRESS.md`](../PROGRESS.md)。**プロトコルは v0.22**（`protocol.toml` の `protocol_version` が正）。
 
-> **`architecture.md` は設計時の文書で、実装が先へ進んでいる箇所がある。**
-> ズレの一覧は [development.md §11](development.md#11-文書と実装のズレ2026-08-16-時点の棚卸し) にまとめてある。
+## 正の優先順位
 
-**数値の正は `raspi/proto/protocol.toml`。** そこから Python パーサと C ヘッダの両方を
-生成する（`python3 raspi/proto/generate.py`）。文書と食い違ったら toml が正しい。
-
-## 文書間の関係
-
-```
-system_overview.md       システム全体像（何がどう動いているか）   ← 入口
-      │
-      ├── architecture.md       設計の理由【なぜそうしたかの正】
-      │         │
-      │         ├── uart_protocol.md      STM32 ⇄ Pi のプロトコル仕様【正】
-      │         │         │
-      │         │         └── stm32_interface.md   ↑を STM32 実装の形に落としたもの
-      │         │
-      │         └── sim/README.md / gui/README.md   各サブシステムの詳細
-      │
-      └── development.md        変更の反映方法・トラブルシューティング
-                │
-                └── PROGRESS.md   開発の経緯と実測値【現在地の正】
-                          │
-                          └── progress_archive.md   詳細な実験ログ・実測値（PROGRESS.mdから分離）
-```
-
-**`uart_protocol.md` と `stm32_interface.md` が食い違った場合は `uart_protocol.md` を優先し、
-`stm32_interface.md` を修正すること。**
-
-## 現在の状態
-
-**この節は腐りやすい。詳しい現在地は `PROGRESS.md` を見ること**（そちらが正）。
-
-- **Phase 0（通信基盤・ログ記録再生・GUI 骨格）完了。実車で走行実績あり。**
-  Pi 側の実装は `raspi/`、GUI は `gui/`（React 5タブ）
-- **シミュレータあり**（`sim/`、Mac 専用）。`io_node --sim` で実機と同じ制御コードのまま
-  コース上を走らせられる。実車が無いときの自律走行開発はこちら
-- **プロトコルは v0.20**（`protocol.toml` の `protocol_version = 0x0014` が正）。
-  v0.20（2026-10-09）はローンチコントロール（手動操作でブレーキ＋アクセル→ブレーキを離す、の手順を踏んだ発進を、STM32 が全開＋TC で行う）の追加。
-  v0.19（同日）は「止める」の意味を Pi・STM32・MD で揃えた版（`cross_project_audit_2026-10.md` への対応。
-  ARM が外れても停車まで制動、MD の健全性監視、`flags` の `armed` の意味の変更ほか）。**Pi・STM32・MD を一緒に
-  入れ替える**（io_node は `protocol_version` が一致するまで ARM を通さない）。STM32・MD は未書き込み。
-  v0.17（TV を荷重比例の配分へ置き換え）・v0.18（ステアのリンクの換算を STM32 に入れ、舵角を実際の路面舵角に。
-  `pi_uart_protocol_v0.18_delta.md`）は Pi・STM32 とも実装済みだが、STM32 は未書き込み（2026-10-08）。
-  **v0.18 は Pi と STM32 を必ず一緒に入れ替える**（片方だけだと舵角の意味が食い違う）。
-  v0.16（足回りの制御の調整パラメータ・TC/ABS/TV の見直し、`pi_uart_protocol_v0.16_delta.md`）は
-  Pi・STM32 とも実装済みだが、STM32 は未書き込みで実機での動作検証は未了（2026-10-05）。
-- SLAM / 自己位置推定の方式は **Phase 3 着手時に決定**する方針
-- `config/vehicle.toml` は `[dynamics]`（アクチュエータの動特性）を除き実測確定済み
-  （2026-08-20。後輪はダイレクトドライブでギア比の概念が無い）。車輪半径 0.03m・
-  リンク比 0.5 は STM32 ファームウェアの換算定数にも反映済みで、残るクリティカルパスは
-  `[dynamics]` の実測のみ
+1. **数値・バイト配置の正は `raspi/proto/protocol.toml`**（Python パーサと C ヘッダを生成: `python3 raspi/proto/generate.py`）。文書と食い違ったら toml が正しい
+2. 車両パラメータの正は `config/vehicle.toml`
+3. `uart_protocol.md` と `stm32_interface.md` が食い違ったら `uart_protocol.md` を優先
+4. `architecture.md` は設計意図の文書。実装が先へ進んでいる箇所はコードを正とする
