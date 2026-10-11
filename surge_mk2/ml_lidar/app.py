@@ -16,7 +16,7 @@
 設計（「1つのrun名で学習出力先・エクスポート先・観戦対象を自動的に紐付ける」
 「学習中でもTensorBoard・観戦・エクスポートを並行実行できる」「run一覧タブ」
 「備考(note)機能」）は報酬・カリキュラムの複雑化とは別軸の話で、それ自体に
-問題は無かったため踏襲する（`ML_LIDAR_V2_PROMPT.md`）。
+問題は無かったため踏襲する。
 
 ## 学習タブが縦に長大化しないための方針
 
@@ -108,7 +108,7 @@ def list_exported_model_names() -> list[str]:
 def list_custom_course_names() -> list[str]:
     """`sim/courses/`のうち手作業エディタ製の実コース（PNG占有格子ではない）だけを挙げる。
 
-    学習には一切使わない観戦専用（`ML_LIDAR_V2_PROMPT.md`）——ここに並ぶのは目視確認用。
+    学習には一切使わない観戦専用——ここに並ぶのは目視確認用。
     """
     if not COURSES_DIR.is_dir():
         return []

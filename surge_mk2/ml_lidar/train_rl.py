@@ -2,7 +2,7 @@
 
     .venv/bin/python -m ml_lidar.train_rl --run-name v1 --total-timesteps 1000000
 
-設計方針・確定した仕様は `ML_LIDAR_V2_PROMPT.md` を参照。報酬は`progress + collision_penalty`
+報酬は`progress + collision_penalty`
 の最小構成（`ml_lidar/env.py`）。TAL項・報酬正規化・カリキュラム学習は入れない。
 
 ## 同じrun名で再実行するとき
@@ -64,7 +64,7 @@ VecEnv内の各サブ環境は常に同じ固定コースへ`reset()`するの�
 
 学習・eval双方とも手続き生成コース（`ml_lidar/course_gen.py`）のみを使う。
 自作コース（`course1.json`等）は学習プロセスに一切関与しない観戦専用
-（`ml_lidar/watch.py`）に限定する方針（`ML_LIDAR_V2_PROMPT.md`）。
+（`ml_lidar/watch.py`）に限定する方針。
 """
 
 from __future__ import annotations

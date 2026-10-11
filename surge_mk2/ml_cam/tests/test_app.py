@@ -225,7 +225,7 @@ class TestDescribeModelStatus(unittest.TestCase):
 
 class TestNote(unittest.TestCase):
     """モデルごとの備考（`<model_dir>/note.txt`）。`ml_lidar/app.py`の同名機能と
-    対称（2026-08-29追加）。"""
+    対称。"""
 
     def test_read_note_returns_empty_string_when_missing(self):
         with tempfile.TemporaryDirectory() as d:

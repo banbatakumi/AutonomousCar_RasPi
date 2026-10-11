@@ -1,9 +1,7 @@
 """ml_lidar/course_gen.py — 手続きコース生成。チェックポイント＋旋回率制限ウォーク方式。
 
 `sim.track` の低レベル関数（`build_from_points()`）は再利用するが、生成ポリシー
-自体はここに閉じる。旧`sim/random_course.py`がSLAM評価（`sim/courses/make_random_courses.py`
-経由）からも依存されて削除時の依存関係の洗い出しに手間取った反省を踏まえ、`sim/`直下の
-共有モジュールからは独立させてある（`ML_LIDAR_V2_PROMPT.md`）。
+自体はここに閉じる。`sim/`直下の共有モジュール（SLAM評価等と共用）からは独立させてある。
 
 `sim/courses/`の固定資産（自作コース・SLAM評価用`circuit_chicane_*`）とは無関係。
 

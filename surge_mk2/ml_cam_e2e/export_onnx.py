@@ -56,8 +56,8 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に契約を書く。
 
     `size`・`max_steer`・`speed_ref` を省略すると `train_config.json` の値を使う。
-    **どちらにも無ければ例外にする**——以前は `config/vehicle.toml` の現在値へ
-    落としていたが、学習後に同定で値が変わると学習時と違う基準で舵角へ戻す
+    **どちらにも無ければ例外にする**——`config/vehicle.toml` の現在値へ
+    落とすと、学習後に同定で値が変わったとき学習時と違う基準で舵角へ戻す
     ことになる（train/inference skew の出力版）。黙って違う値を書くより止める。
 
     :return: 実際に使った入力解像度 `(width, height)`

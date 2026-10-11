@@ -5,7 +5,7 @@
 
 **前処理は `raspi/core/cam_e2e_preproc.py` を通す。** 実車の推論
 （`raspi/nodes/cam_e2e_node.py`）と同じ関数なので、学習した絵と実車で
-モデルに入る絵が食い違わない（以前は PIL の BILINEAR とここだけ別実装だった）。
+モデルに入る絵が食い違わない。
 """
 
 from __future__ import annotations

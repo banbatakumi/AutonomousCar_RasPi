@@ -81,7 +81,7 @@ class DrivableDataset(Dataset):
         frame_path, mask_path = self.pairs[idx]
         w, h = self.size
         # **画像の縮小は実車と同じ関数**（`cam_perception_node.SegmentationModel` も
-        # `resize_area` を通す）。以前はここが PIL の BILINEAR、実車が最近傍だった
+        # `resize_area` を通す）
         with Image.open(frame_path) as f:
             rgb = np.asarray(f.convert("RGB"), dtype=np.uint8)
         msk = Image.open(mask_path).convert("L").resize((w, h), Image.NEAREST)

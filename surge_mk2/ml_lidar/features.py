@@ -2,7 +2,7 @@
 
 LiDAR点群（角度方向に隣接する1次元系列）から局所的な壁・コーナー形状を畳み込みで
 拾う。RL文献ではMLPが標準だが、模倣学習系（TinyLidarNet等）では1D-CNNが明確に
-優位という調査結果（`ML_LIDAR_V2_PROMPT.md`）を踏まえ、1D-CNNから始める。
+優位という調査結果を踏まえ、1D-CNNから始める。
 
 ## Conv1d はSB3のデフォルトorthogonal初期化から漏れる
 

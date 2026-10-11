@@ -43,7 +43,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *, note: str
 
     :param note: `<out_path>.json`に同梱する自由記述の備考（どんな変更をしたか・
         どのコースか等）。GUIのモデル選択に表示される（`ml_lidar/export_onnx_rl.py`
-        の`note`と対称、2026-08-29追加。`--checkpoint`と同じディレクトリの
+        の`note`と対称。`--checkpoint`と同じディレクトリの
         `note.txt`から`main()`が拾う）。
     """
     w, h = size

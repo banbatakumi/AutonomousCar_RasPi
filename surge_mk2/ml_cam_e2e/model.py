@@ -43,7 +43,7 @@ class DriveRegressionModel(nn.Module):
         # momentum=0.01（ImageNet の長い学習向け）で、数百イテレーションの
         # 微調整では推論用の統計が重みの変化に追いつかない——学習中の損失は
         # 下がるのに、検証・ONNX（どちらも移動平均を使う）では直進しか出さない
-        # モデルになる（2026-10-06、合成データで確認。左右を見分けるだけの
+        # モデルになる（合成データで確認。左右を見分けるだけの
         # 課題で検証誤差が 17° のまま動かなかった）。PyTorch 既定の 0.1 に戻す
         for m in self.encoder.modules():
             if isinstance(m, nn.BatchNorm2d):

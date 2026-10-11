@@ -1,7 +1,6 @@
 """ml_lidar/env.py — LiDAR-only E2E強化学習のGymnasium環境。
 
-`ML_LIDAR_V2_PROMPT.md`（旧`ml_lidar`削除後にCopilot CLIの独立レビューを経て
-確定した設計方針）の仕様をそのまま実装する。要点:
+設計の要点:
 
 ## 報酬（v21・最小構成へ回帰）
 

@@ -40,12 +40,12 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["mean"], MEAN)
             self.assertEqual(cfg["std"], STD)
             self.assertEqual(cfg["threshold"], THRESHOLD)
-            self.assertEqual(cfg["note"], "")   # 省略時は空文字（2026-08-29追加）
+            self.assertEqual(cfg["note"], "")   # 省略時は空文字
 
     def test_note_is_embedded_in_the_exported_json(self):
         """`ml_cam/app.py`の備考欄→`note.txt`→エクスポート、という経路で
         `<名前>.json`に書き込まれる自由記述の備考（`ml_lidar/export_onnx_rl.py`
-        の同名テストと対称、2026-08-29追加）。GUIのモデル選択（`AutoPanel.tsx`）
+        の同名テストと対称）。GUIのモデル選択（`AutoPanel.tsx`）
         が表示するので、`note`キーの往復を確認する。"""
         with tempfile.TemporaryDirectory() as d:
             ckpt_path = Path(d) / "model.pt"

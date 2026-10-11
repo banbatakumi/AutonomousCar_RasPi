@@ -63,8 +63,7 @@ class TestDriveDataset(unittest.TestCase):
         self.assertEqual(float(target[1]), 0.0)
 
     def test_image_is_exactly_what_the_vehicle_side_preprocess_produces(self):
-        """学習で見る絵＝実車でモデルに入る絵。同じ関数を通っていること
-        （以前は PIL の BILINEAR と最近傍で食い違っていた）。"""
+        """学習で見る絵＝実車でモデルに入る絵。同じ関数を通っていること"""
         img, _ = self.ds(_sample(self.frame), augment=False)[0]
         want = preprocess(load_rgb(self.frame), (32, 24), 0.0, 255.0)[0]
         self.assertTrue(np.array_equal(img.numpy(), want))
