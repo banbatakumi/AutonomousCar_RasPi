@@ -137,7 +137,7 @@ class _WriterStats:
     events: int = 0
     bytes_written: int = 0
     #: `self._f.write()`/`flush()` が OSError（ENOSPC 等）で失敗した回数。
-    #: `raspi/core/jpeg.py` の `RingJpeg.errors` と同じ形（2026-09-11）
+    #: `raspi/core/jpeg.py` の `RingJpeg.errors` と同じ形
     write_errors: int = 0
 
 
@@ -240,7 +240,7 @@ class FrameLogWriter:
         """1レコード書く。**`OSError` は投げない**（クラス docstring 参照）。
 
         :return: 実際に書けたら True。`ValueError`（クローズ済み・payload超過）は
-            従来どおり投げる——これらは設計上の間違いであって、ディスクの都合
+            投げる——これらは設計上の間違いであって、ディスクの都合
             ではないため
         """
         if self._closed:

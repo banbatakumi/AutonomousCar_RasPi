@@ -368,7 +368,7 @@ def main() -> int:
             say(f"  {topic:22} {n:8}  ({n / max(el, 1e-9):6.1f}/s)")
         jp = node._jpeg
         if jp is not None and jp.encoded:
-            # **二重エンコードを測るための数字**（2026-08-21 のレビュー 🟡7）。
+            # **二重エンコードを測るための数字**。
             # 同じフレームを telemetry_node も焼いている。ここの
             # `CPU/枚 × image_hz × カメラ台数` が無視できない大きさなら、
             # camera_node で1回だけ焼いて配る形に変える価値がある。

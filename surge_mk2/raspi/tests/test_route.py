@@ -332,20 +332,6 @@ class TestTightTurns(unittest.TestCase):
         rl = self._circle_track(0.5)
         r, _ = tightest_radius(rl)
         self.assertAlmostEqual(r, 0.5, delta=0.1)
-
-    def test_slows_only_near_the_limit(self):
-        """限界に近いヘアピンだけ横Gを削る（一律 `v_min` にはしない）。"""
-        kmax = math.tan(0.524) / 0.23                    # 約 2.5（半径 0.4m）
-        kw = dict(v_max=2.0, v_min=0.35, a_lat=2.5, a_accel=1.0, a_brake=1.5)
-        tight = rl_mod.retime(self._circle_track(0.42), kappa_max=kmax, **kw)
-        free = rl_mod.retime(self._circle_track(0.42), **kw)
-        self.assertLess(float(tight.v.min()), 0.8 * float(free.v.min()))
-        self.assertGreater(float(tight.v.min()), 0.35 + 0.1)   # 最低速度に張り付かない
-        wide = rl_mod.retime(self._circle_track(1.5), kappa_max=kmax, **kw)
-        wide_free = rl_mod.retime(self._circle_track(1.5), **kw)
-        self.assertTrue(np.allclose(wide.v, wide_free.v))      # 限界から遠ければ触らない
-
-
 def _straight(y0: float, y1: float, v=1.0, n=100):
     """x=0..10 の直線。前半は y=y0、後半は y=y1 へ移る。"""
     xs = np.linspace(0, 10, n)
@@ -354,6 +340,7 @@ def _straight(y0: float, y1: float, v=1.0, n=100):
     seg = np.hypot(*np.diff(xy, axis=0).T)
     return rl_mod.RaceLine(xy=xy, v=np.full(n, v), kappa=np.zeros(n), length=float(seg.sum()),
                            closed=False)
+
 
 
 class TestSwitch(unittest.TestCase):
@@ -667,7 +654,7 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             f.set_exception(RuntimeError("boom"))
             pl._stopping, pl._stop_job = "P", f
             pl._poll()
-            p = {s.key: s.default for s in pl.params}
+            p = pl.merged({})
             pose = tuple(pl._routes["A"].xy[0]) + (0.0,)
             pl._maybe_finish(pose, VehicleState(speed=1.0), p)
             self.assertIsNone(pl._stop_job)
@@ -690,7 +677,7 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             pl.phase = BUILD
             pl._graph = graph_of(oval())
             pl._route_err = {"auto": "スタートから戻ってくる周回ルートが無い"}
-            p = {s.key: s.default for s in pl.params}
+            p = pl.merged({})
             st = pl._build(AutoState(), p)
             self.assertEqual(pl.phase, DONE)
             self.assertIn("周回ルートが無い", st.reason)
@@ -724,7 +711,7 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             pl.phase = RACE
             pl._dt = 0.1
             st = AutoState(match_score=1.0)
-            p = {s.key: s.default for s in pl.params}
+            p = pl.merged({})
             pl._race(st, Scan(dist=[3.0] * 360, sector_seen=[True] * 12),
                      VehicleState(speed=0.0), p, False)
             self.assertTrue(pl._race_started)
@@ -755,7 +742,7 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             pl._poll()
             self.assertEqual(pl._stopping, "")
             self.assertIn("boom", pl._stop_error)
-            p = {s.key: s.default for s in pl.params}
+            p = pl.merged({})
             pl._maybe_finish((2.0, 1.0, 0.0), VehicleState(speed=1.0), p)
             self.assertIsNone(pl._stop_job)                # 毎周期投げ直さない
         finally:

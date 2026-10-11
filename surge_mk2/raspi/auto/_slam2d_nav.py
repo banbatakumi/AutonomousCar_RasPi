@@ -45,7 +45,7 @@ from slam2d.core.deskew import deskew, deskew_traj
 from slam2d.core.frontend import Frontend, FrontendConfig, FrontendUpdate
 from slam2d.core.grid import OccGrid
 from slam2d.core.motion import ExternalTwistModel, GyroBiasEstimator, SpeedScaleEstimator
-from slam2d.core.types import Pose2D, RawScan, Twist2D, wrap_angle
+from slam2d.core.types import Pose2D, RawScan, Twist2D, compose, wrap_angle
 
 from ..msgs.types import Scan, VehicleState
 from ..nav.deskew import point_times_ns
@@ -58,7 +58,7 @@ ENABLE_LOOP_CLOSURE = True
 #: 壁の判定に使う「当たりの重み」の既定（`OccGrid.hit_weight`。壁 = 当たり×重み ≧ 素通り）。
 #: planner は `wall_weight`（GUI のスライダ）で上書きする。
 #:
-#: 実機（2026-10-07、道幅 0.7〜0.9m・板の仕切り）では `OccGrid` の既定の 2 だと壁が点線になり、
+#: 実機（道幅 0.7〜0.9m・板の仕切り）では `OccGrid` の既定の 2 だと壁が点線になり、
 #: 経路生成が仕切りを抜ける道を拾った。壁に沿って走る間、壁すれすれのレイが壁のセルを
 #: 素通りとして数え続け、当たりの 2 倍を超えた区間が丸ごと消える（長く走っても比は
 #: 変わらないので直らない）。その走行の点群で地図を作り直すと、道路グラフに余計な
@@ -258,6 +258,20 @@ class Slam2dNav:
     @property
     def pose(self) -> Pose2D:
         return self._fe.pose
+
+    def pose_now(self, vs: VehicleState | None) -> Pose2D:
+        """`pose`（点群の基準時刻のもの）を、車速とジャイロで `vs` の時刻まで進めた姿勢。
+
+        `plan()` が走る時点で `pose` は数十ms 古く、点群の合間（次の周まで 100ms）はさらに古く
+        なる。経路の追従はこれを使う（`slam2d_raceline.tick`）。twist の履歴が無い・時刻が
+        食い違う（0.5s 以上）ときは `pose` をそのまま返す。
+        """
+        fe = self._fe
+        t0 = int(fe._t_ref)
+        t1 = int(vs.t_capture) if vs is not None else 0
+        if not t0 or t1 <= t0 or t1 - t0 > 500_000_000 or len(fe.twists) < 2:
+            return fe.pose
+        return compose(fe.pose, fe.twists.delta(t0, t1))
 
     @property
     def grid(self) -> OccGrid:

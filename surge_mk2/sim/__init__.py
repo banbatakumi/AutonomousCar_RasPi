@@ -16,7 +16,7 @@
 
 ## 動かす
 
-    python -m raspi.nodes.io_node --sim --course sim/courses/oval.png \\
+    python -m raspi.nodes.io_node --sim --course sim/courses/normal.json \\
         --allow-arm --no-heartbeat --no-leds
     python -m raspi.nodes.telemetry_node --no-camera
     python -m sim.gui

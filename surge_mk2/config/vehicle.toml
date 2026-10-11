@@ -28,7 +28,7 @@ track = 0.155                  # トレッド [m]
 # 最大路面舵角 [rad] = 26.56°。**ステアのリンクの換算（[control] の steer_link_*）を、モータの可動範囲
 # （モータ角×0.5 で ±30°）に通した値**。システム同定が steer_link_* と一緒に書く（手で変えない）。
 # 2026-10-08 までは 0.524（30°）で、これは「モータ角×0.5」の見かけの舵角だった
-max_steer = 0.46175407182716116
+max_steer = 0.4617551884201365
 # ステアモータの可動域は機構上 ±60°（1.047 rad）だが、リンク比 0.5（2026-08-20 実測確定）
 # によりタイヤ側は半分しか切れない。上の値はタイヤ側（路面舵角）基準。
 wheel_radius = 0.03          # [m]
@@ -67,11 +67,16 @@ auto_link_grace_ms = 5000
 # planning_node は 50Hz で出しているので 10 発ぶんの猶予
 auto_cmd_stale_ms = 200
 # GUI が COMMAND に**毎回**載せるレート制限（`accel_limit`/`steer_rate_limit`）。
-# STM32 側の保険で、自律走行中も `telemetry_node._merge_auto` が GUI の値をそのまま通す。
+# 自律走行中も `telemetry_node._merge_auto` が GUI の値との小さい方を通す。
+# ★`cmd_accel_limit_m_s2` は**目標車速を動かす傾きの上限そのもの**（v0.22〜）。v0.21 までは STM32 が
+#   固定の 3.0（DRIVE_MAX_ACCEL_M_S2）で頭打ちにしていたので、ここが 6.0 でも実効は 3.0 だった。
+#   STM32 の上限を無くしたので、同じ動きになるよう 3.0 にしてある。planner の加減速の上限
+#   （`Vehicle.a_accel_max`・`a_decel_max`）・シム・同定のモデルもこの値を読む。
+#   上げるのは、その路面で前後運動試験を録って、グリップで出せる加減速がこれを超えてから
 # **実機の舵は常にこの角速度でランプした参照に追従する**（`steer_cmd_echo` がそれ）ので、
 # 実ノードを通さないシム（`ml_lidar/env.py`）も同じ値を `DriveInput` に入れる。
 # GUI は `config/generate.py` の生成物（`SAFETY.cmdSteerRateLimit` 等）経由で読む
-cmd_accel_limit_m_s2 = 6.0
+cmd_accel_limit_m_s2 = 3.0
 cmd_steer_rate_limit_rad_s = 7.0
 
 # ── アクチュエータの動特性 ──────────────────────────────────────────────
@@ -96,18 +101,19 @@ steer_servo_hysteresis_rad = 0.015899999999999997
 steer_servo_gain = 0.9739876830514631
 # ── ② 前後運動試験（`sysid_accel`、直線。加速度を段階的に上げる）: 速度制御の形と車体 ──
 # シムの速度はファームの速度制御そのもの（`sim/vehicle.py` の `SpeedController`、2026-09-26〜）:
-# 目標速度を speed_ramp_max_m_s2 でランプ → PI（speed_kp・speed_ki、出力 ±speed_torque_max_nm）→
+# 目標速度を COMMAND の accel_limit でランプ → PI（speed_kp・speed_ki、出力 ±speed_torque_max_nm）→
 # 車体（加速度 = speed_plant_gain × トルク − rolling_resistance）。
-# **次の4つはファームの定数で同定しない**（MainF446RE_V3 `src/control/drive.h` の DRIVE_SPEED_KP・
-# DRIVE_SPEED_KI・DRIVE_MAX_TORQUE_NM×2輪・DRIVE_MAX_ACCEL_M_S2）。ファームを変えたらここも直すこと
-speed_kp = 0.25
-speed_ki = 0.5
+# **次の3つはファームの定数で同定しない**（MainF446RE_V3 `src/control/drive.h` の DRIVE_SPEED_KP・
+# DRIVE_SPEED_KI・DRIVE_MAX_TORQUE_NM×2輪）。ファームを変えたらここも直すこと。
+# ★ランプの上限（旧 speed_ramp_max_m_s2 = 3.0、ファームの DRIVE_MAX_ACCEL_M_S2）は v0.22 で STM32 から
+#   無くなった。上限は Pi が送る値で決まり、その値は [safety] の cmd_accel_limit_m_s2（1か所だけ）
+speed_kp = 0.3
+speed_ki = 0.6
 speed_torque_max_nm = 0.26
-speed_ramp_max_m_s2 = 3.0
 # 車体の利得 [(m/s²)/(N·m)]（名目 1/(車輪半径×質量) = 16.7）。2026-09-28 実測（前後運動試験）
-speed_plant_gain = 25.415398421666016
+speed_plant_gain = 21.52488872326685
 # 転がり抵抗による減速度 [m/s²]（前後運動試験で利得と一緒に当てはめる）。2026-09-28 実測
-rolling_resistance = 0.28895387962888003
+rolling_resistance = 0.27320845610211264
 # 旧モデル（1次遅れ）の時定数 [s]。speed_kp > 0 の間は使わない（テスト・旧設定との互換のため残す）
 tau_speed_s = 0.14957988168793218
 # STM32 が speed/wheel_speed に掛けているローパス（1次遅れ×段数、各段の時定数 [s]）。
@@ -142,33 +148,35 @@ steer_gain_cubic = 0.0
 # STM32 が yaw_rate に掛けているローパスの時定数 [s]（観測だけに効く）。走行中1.0m/sと低速0.2m/sの
 # 舵のステップの過渡から切り分ける。0 = 無し
 yaw_relaxation_m = 0.0
-yaw_rate_filter_s = 0.008716294652505644
+yaw_rate_filter_s = 0.00875536712801091
 # 曲率の2次遅れ（振動的なヨー応答。緩和長の後に時間で掛ける。車の動きに効く）の
 # 固有角振動数 [rad/s] と減衰比。1次の遅れより有意に合うときだけ入る。0 = 無し
-yaw_natural_freq_rad_s = 58.411685014246174
-yaw_damping = 0.9340681805474993
+yaw_natural_freq_rad_s = 58.506059827017495
+yaw_damping = 0.9344515681542731
 # 実効舵角のオフセット [rad]。正 = 左へ曲がる（直線の定速区間から）
-steer_offset_rad = 0.0027839362509939417
+steer_offset_rad = 0.0027838586092050234
 # アンダーステア勾配 K [rad/(m/s²)]。δ = L/R + K·a_y（旋回の限界より下の区間から）。0 = 限界まで狙いどおり
 understeer_gradient = 0.0
 # ── ② 前後運動試験（`sysid_accel`）の続き: 加減速の上限。`SpeedController` の出力誤差（制動だけは速度の傾き）──
 # 駆動加速度の上限 [m/s²]（モータ・TC で出せる上限）。0 = ランプと PI の出力上限のほかに上限なし。
-# ファームは目標を speed_ramp_max_m_s2 でランプさせるので、それより高い上限は観測できず 0 になる。
+# 目標は [safety] の cmd_accel_limit_m_s2 までの傾きでしかランプしないので、それより高い上限は観測できず 0 になる。
 # 旧手順は IMU の |accel_x| の95パーセンタイルで、振動・傾き・バイアスで上振れしていた。
-# 2026-09-28 実測（TC 込み）。ランプ 3.0 より高いので PI が目標に追いつく瞬間しか効かず、値の確かさは低いが
-# 学習環境の挙動への影響も小さい
-drive_accel_m_s2 = 2.7961017278483533
+# **転がり抵抗を引く前の値**（`SpeedController` はこれで頭打ちにしてから rolling_resistance を引く。
+# 車の正味の加速度の上限はこの値−rolling_resistance で、プランナーの `Vehicle.a_accel_max` もそう読む）。
+# 2026-10-10 実測（TC 込み）: 全開の段で後輪が滑りながら出た正味 2.80m/s² ＋転がり抵抗 0.27。
+# ★2026-10-11 まで解析は正味の 2.80 をそのまま書いていて、シムとプランナーが約1割低く見ていた
+drive_accel_m_s2 = 3.0699
 # 駆動加速度の上限が落ち始める速度・0になる速度 [m/s]（間は線形）。0 = 減衰なし。
 # 2m の直線で出せるのは約2m/sまでなので、それより上は外挿
 drive_fade_speed_m_s = 0.0
 drive_top_speed_m_s = 0.0
 # 制動（brake）の減速度の頭打ち [m/s²]。**ABS が保つグリップの上限**（2026-09-28 実測、ABS を作り直した
 # ファーム）。ABS の定数を変えたら測り直すこと。学習環境は brake を使わないので影響しない
-brake_decel_m_s2 = 2.4717199501219365
+brake_decel_m_s2 = 2.4743645729434935
 # 制動トルク（1輪あたり、COMMAND.brake_torque）→ 減速度の傾き [(m/s²)/(N·m)]。減速度 = この値×トルク
 # ＋rolling_resistance（brake_decel_m_s2 で頭打ち）。前後運動試験のブレーキを3段の強さで掛けて測る。
 # 0 = 未実測（シムは名目の式 トルク×drive_ratio/(車輪半径×質量) ≒ 33/N·m）。2026-09-28 実測（4段の強さ）
-brake_decel_per_nm = 36.847250216401854
+brake_decel_per_nm = 37.55321111712028
 # MD の制動の境界層と不感帯 [m/s]。**同定しない。MD のファームの定数**（BLDC/ProgramV4 src/app/config.h の
 # BRAKE_BOUNDARY_SPEED_RAD_S 20・BRAKE_DEADBAND_SPEED_RAD_S 2 [rad/s] × 後輪半径0.03m）。MD は制動の電流を
 # 「強さ × tanh(車輪の角速度 ÷ 境界層)」にし、不感帯より遅いと0にする。MD を変えたらここも直すこと
@@ -176,7 +184,7 @@ brake_boundary_speed_m_s = 0.6
 brake_deadband_speed_m_s = 0.06
 # 速度指令を下げたときの減速度上限 [m/s²]（brake とは別）。0 = ランプと PI の出力上限のほかに上限なし
 # （speed_kp = 0 の旧モデルでは drive_accel_m_s2 と同じ）
-speed_decel_m_s2 = 2.2637889048273867
+speed_decel_m_s2 = 2.2680561093986737
 # ── ④ 遅延試験（`sysid_latency`）──
 # LiDAR スキャン完了 → STM32 が COMMAND を受理するまで [s]。実ノードを通さない
 # 学習環境（ml_lidar/env.py）が指令をこれだけ遅らせる。0 = 遅延なし。2026-09-28 実測（中央値）
@@ -234,14 +242,26 @@ tv_max_ratio = 0.5            # 比率の上限。1 で内輪のトルクが 0
 # これで決まる。リンクが複雑で設計から式を出せないため、舵角ごとの曲率から同定する。
 # `tools/sysid` が [dynamics] の steer_gain=1・steer_gain_cubic=0 と最上位の max_steer と一緒に書く
 # （**3つがそろって初めて意味が合う。片方だけ手で変えない**）。値は 2026-09-28 の同定値を移したもの
-steer_link_gain = 1.0460265529761201
-steer_link_cubic = -0.5987154378827694
+steer_link_gain = 1.046035151705881
+steer_link_cubic = -0.5987390237312006
 # ── ローンチコントロール（★プロトコル v0.20。手動操作の発進（GUI）・planner が `launch` を立てた発進で、STM32 が目標車速の
 #    ランプと車速PIを迂回して全開＋TC で加速する。空転を抑えるのは上の TC の値。`slam2d_raceline` の `launch`）──
 # 発進を終えて車速PIへ戻すときの積分の初期値 [N·m、1輪あたり] = その車速を保つのに要るトルク。
 # 0 だと積分が溜まるまで車速が目標より落ち込む（この値×2÷speed_kp [m/s]、戻るのに約0.5秒）。
 # 決め方: [dynamics] の rolling_resistance ÷ speed_plant_gain ÷ 2（0.366÷20.3÷2）。同定し直したら直す
 launch_exit_torque_nm = 0.009
+
+# ── 車速PIの加速度フィードフォワード（★プロトコル v0.21。後輪2輪の合計トルク [N·m]）──
+# STM32 は車速PIの出力に「speed_ff_nm_per_m_s2 × 目標車速の傾き [m/s²] ＋ speed_ff_rr_nm × 進む向き」を足す。
+# PI は偏差が溜まらないとトルクを出せず、車速が目標に約0.15s 遅れる（＝1÷(speed_plant_gain×speed_kp)）。
+# 加速に要るトルクを先に足せば、PI は残ったずれだけを直せばよい。目標車速の傾きは COMMAND の accel_limit で
+# 決まり、slam2d 系の planner はそこへ経路の速度プロファイルの加速度を入れる（`raspi/nav/speedctl.py`）。
+# 決め方: speed_ff_nm_per_m_s2 = 1 ÷ [dynamics] speed_plant_gain、speed_ff_rr_nm = rolling_resistance ÷ speed_plant_gain。
+# **同定を適用すると `tools/sysid` が書き直す**（ここが 0 より大きいときだけ）。0 にすると無効で、planner は
+# Pi 側で遅れを見込む旧方式に戻る。★v0.21 のファームを書き込む前は 0 にしておくこと（古いファームは
+# この項目を知らず、planner だけが「ファームが先に足してくれる」前提の指令を出してしまう）
+speed_ff_nm_per_m_s2 = 0.046458
+speed_ff_rr_nm = 0.012693
 
 # 車両モデル（後輪＋タイヤ＋ヨー）の同定結果。`tools/ctrl_tune` が実機の記録
 # （GUI「システム同定」タブの「制御の同定」3試験）から求めて書き込み、最適化に使う。

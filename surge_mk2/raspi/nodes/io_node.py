@@ -100,7 +100,7 @@ __all__ = ["IoNode", "LinkState"]
 NS = 1_000_000_000
 COMMAND_HZ = 100
 #: ループ1周の待ちの上限 [s]（何も来なくても起きてハートビートの kick・定期送信を回す。
-#: 以前の `SerialLink` の `read_timeout` と同じ）
+#: `SerialLink` の `read_timeout` と同じ）
 LINK_WAIT_S = 0.005
 PING_HZ = 5
 PING_WARMUP_HZ = 20
@@ -119,21 +119,20 @@ FAILSAFE_STOPPED_NS = 300_000_000
 DEADMAN_SOURCE = "deadman"
 
 #: `handshake()` で `LIMITS` を取り損ねた場合（STM32 の起動burstを取り逃した、
-#: 応答が1回ノイズで落ちた等）に `LIMITS_REQ` を再送する間隔（★v0.11）。
+#: 応答が1回ノイズで落ちた等）に `LIMITS_REQ` を再送する間隔。
 #: `state.limits` が一度埋まれば以降は送らない（実行時に変化しない値のため）
 LIMITS_RETRY_S = 1.0
 
 #: `cmd` がこれだけ途絶したら DISARM に落とす。
 #: **値は `config/vehicle.toml` の `[safety]` が正**（`docs/architecture.md` §9.4）。
 #: telemetry_node も同じ判定を独立に持つ（片方が死んでも成立させるための冗長）が、
-#: **数字そのものは1箇所**にしてある。以前は3箇所に手書きされていた
-#: （2026-08-21 のレビュー 🟢11）
+#: **数字そのものは1箇所**にしてある。
 CMD_TIMEOUT_NS = int(Vehicle.load().cmd_deadman_ms * 1_000_000)
 
 #: Pi 側のクランプ既定値。**STM32 から `LIMITS`（★v0.11・車両の物理的な上限）を
 #: まだ受信していない間だけ使うフォールバック。** 受信済みならそちらを無条件に使う
 #: ので、実車の挙動を変えたいときはここではなく STM32 側の固定定数を直すこと
-#: （`IoNode._send_command` 参照。2026-08-22、GUI 側の `effectiveRange()` と方針統一）
+#: （`IoNode._send_command` 参照。GUI 側の `effectiveRange()` と方針統一）
 DEFAULT_MAX_SPEED = 1.0        # m/s
 DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
 
@@ -142,7 +141,7 @@ DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ODOM_CONF = REPO_ROOT / "config" / "odometer.json"
 #: 保存の間引き条件（両方満たしたときだけ書く）。**単調増加の値なので
-#: 停止中は書かない**（SDカードの消耗を避ける。バンビ指定、2026-08-25）
+#: 停止中は書かない**（SDカードの消耗を避ける）
 ODOM_SAVE_INTERVAL_S = 30.0
 ODOM_SAVE_MIN_DELTA_M = 1.0
 
@@ -203,7 +202,7 @@ class IoNode:
                  control_params: dict[str, float] | None = None,
                  control_params_error: str = "") -> None:
         self.link = link
-        #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）を STM32 に入れて保つ（★v0.16）
+        #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）を STM32 に入れて保つ
         self.control_sync = ControlParamSync(control_params or {}, link.send)
         #: STM32 の `LOG` の直近の警告・エラー（新しい順。`diag/link` に載せる）
         self.stm_log: list[str] = []
@@ -339,8 +338,8 @@ class IoNode:
         """STM32 の `LOG`。**STM32 が自分の判断で止めた理由はここにしか載らない**ので必ず見せる。
 
         例: `MD rear-left stopped: overcurrent`（走行中に MD が使えなくなり、STM32 が両後輪を制動して
-        ラッチした。ARM を外すまで戻らない）。2026-10-10 まで受け取っても捨てていて、「固定されて
-        動かない」の原因が Pi からは分からなかった。警告・エラーは `diag/link` の `stm_log` にも残す。
+        ラッチした。ARM を外すまで戻らない）。「固定されて動かない」の原因が Pi から分かるよう、
+        警告・エラーは `diag/link` の `stm_log` にも残す。
         """
         text = msg.message.decode("ascii", errors="replace").strip()
         level = "DIWE"[msg.severity] if 0 <= msg.severity <= 3 else "?"
@@ -700,7 +699,7 @@ class IoNode:
         分岐をここ1箇所に集めてある（判断が散ると、どこかで解禁されていたが起きる）。
 
         速度・舵角・加速度・トルクの上限は、STM32 から受け取った `LIMITS`（★v0.11。
-        車両の物理的な上限）を**受信済みなら無条件にそちらを使う**（2026-08-22、GUI
+        車両の物理的な上限）を**受信済みなら無条件にそちらを使う**（GUI
         側の `effectiveRange()` と方針を合わせた。それまでは `self.max_speed`/
         `self.max_steer` との小さい方だったが、それだと LIMITS の方が緩い場合に
         `--max-speed`/`--max-steer` の古い値で頭打ちのままになり、GUI 側が実測値
@@ -800,13 +799,12 @@ class IoNode:
     # ── メインループ ──
 
     def _make_poller(self):
-        """UART の受信とバス（`/cmd` 等）を**同じ待ち**で待つ poller（2026-09-27）。
+        """UART の受信とバス（`/cmd` 等）を**同じ待ち**で待つ poller。
 
-        以前は `link.poll()` が UART の1バイトを `read_timeout`（5ms）まで待ってからでないと
-        `_recv_cmd` が回らず、「即時」の指令の中継が STM32 から次のバイトが来るまで（DISARM・
-        LiDAR 停止中は最大5ms）止まっていた。UART の fd とバスのソケットを1つの `zmq.Poller`
+        `link.poll()` だけで待つと UART の1バイトを `read_timeout`（5ms）まで待たないと
+        `_recv_cmd` が回らず、「即時」の指令の中継が最大5ms（DISARM・LiDAR 停止中）止まる。UART の fd とバスのソケットを1つの `zmq.Poller`
         に載せれば、どちらが来ても起きる。fd を持たないリンク（シム・テストの偽物）とバスの
-        無い構成では None（従来どおり `link.poll()` が待つ）。"""
+        無い構成では None（`link.poll()` が待つ）。"""
         fileno = getattr(self.link, "fileno", None)
         socks = getattr(self.sub, "socks", None)
         if fileno is None or not socks:
@@ -878,7 +876,7 @@ class IoNode:
                     "via": "retry",
                 })
 
-            # `handshake()` が LIMITS・VERSION を取り損ねていたら定期的に再送する（★v0.11）。
+            # `handshake()` が LIMITS・VERSION を取り損ねていたら定期的に再送する。
             # STM32 起動時の3回burstを取り逃した／応答が1回落ちた場合の保険。
             # 一度受け取れば `state.limits`/`state.version` が埋まるので、以降は送らなくなる。
             # **VERSION が無い間は ARM を通さない**（`_arm_block_reason`）ので、取り直せないと走れない
@@ -904,7 +902,7 @@ class IoNode:
                 self._log_event("control_params", {"status": self.control_sync.status,
                                                    "problems": self.control_sync.problems})
 
-            # **指令の中身が変わったらその場で送る**（2026-09-26）。100Hz の定期送信を待つと
+            # **指令の中身が変わったらその場で送る**。100Hz の定期送信を待つと
             # 平均5ms・最大10ms遅れていた。telemetry_node は同じ中身を50Hzで繰り返すので、
             # エンコードした中身が前回と同じなら送らない（定期送信に任せる）。送る中身は
             # 定期送信と同じ `_command_packet()`（DISARM の判断・上限のクランプを含む）
@@ -1059,7 +1057,7 @@ def main() -> int:
             # UiEvent は「今起きた単発イベント」の列であって「現在の状態」ではない
             # （`msgs/types.py` の UiEvent docstring参照）。LATEST(CONFLATE=1) だと、
             # 例えば tc_enable と tv_enable を短時間に連続 publish したとき片方が
-            # 消費前に上書きされて消える（2026-08-19、TC/TVトグルの実装で発覚）。
+            # 消費前に上書きされて消える。
             # 取りこぼしてはいけないので RELIABLE にする
             sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST,
                                TOPIC_UI_EVENT: RELIABLE})
@@ -1118,7 +1116,7 @@ def main() -> int:
             buzzer.play(MELODY_BOOT)
             print(f"# 起動音 GPIO{PIN_BUZZER}")
 
-    # 足回りの制御の調整パラメータ（★v0.16）。読めなくても io_node は止めない（STM32 の既定値で
+    # 足回りの制御の調整パラメータ。読めなくても io_node は止めない（STM32 の既定値で
     # 走れる）が、黙って無視もしない——`LinkDiag.control_params_status` が `invalid` になる
     control_params: dict[str, float] = {}
     control_params_error = ""
@@ -1166,7 +1164,7 @@ def main() -> int:
         node.link.send(packets.ConfigGet(param_id=packets.Param.AUTO_STOP_MARGIN_CM))
 
     # ★v0.11: 車両の物理的な上限値。RC/AUTO 問わず _send_command が毎回これで
-    # クランプする。受信済みなら無条件にこちらを使う（2026-08-22、--max-speed/
+    # クランプする。受信済みなら無条件にこちらを使う（--max-speed/
     # --max-steer との「小さい方」から変更。詳細は _send_command）
     lim = node.state.limits
     if lim is not None:

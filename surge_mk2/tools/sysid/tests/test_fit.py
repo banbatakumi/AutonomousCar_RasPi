@@ -253,6 +253,27 @@ class TestSlipLimitedAccel(unittest.TestCase):
         self.assertIsNone(fit._slip_limited_accel(self._stage(0.0, 1.6, 1.55, slip=0.02)))
 
 
+class TestSlipLimitedCapIsGross(unittest.TestCase):
+    def test_cap_from_slipping_rear_reproduces_the_truth(self):
+        """加速がグリップで頭打ちになり後輪が滑る車（実機の見え方）で、同定値を入れたシムが真値と
+        同じ加速をする。滑った区間の速度の傾きは転がり抵抗を引いた後の正味で、`drive_accel_m_s2` は
+        引く前の上限——そのまま入れると、シムとプランナーがもう一度引いて約1割低くなる
+        （2026-10-11、実機の記録で正味 2.8 に対して 2.5。シムの車両は滑らないので、後輪を滑らせる
+        `bench.SLIPPING` を足すまでベンチはこの経路を通っていなかった）。"""
+        base = replace(TRUTH, steer_gain=1.0, steer_offset_rad=0.0)
+        truth = bench.TRUTH_SLIP
+        for seed in (0, 1):
+            log, _, _ = run_test("sysid_accel", truth, seed=seed, noise=bench.SLIPPING)
+            r = fit.fit_accel(log, base)
+            self.assertTrue(any("後輪が滑った" in n for n in r.notes), (seed, r.notes))
+            v = r.values
+            self.assertAlmostEqual(v["drive_accel_m_s2"], truth.drive_accel_m_s2,
+                                   delta=bench.REL_TOL["drive_accel_m_s2"] * truth.drive_accel_m_s2)
+            got = replace(truth, **{k: v[k] for k in bench._SPEED_KEYS})
+            self.assertLess(bench._speed_step_err(truth, got), bench._SPEED_STEP_TOL, seed)
+            self.assertLess(bench._speed_top_err(truth, got), bench._SPEED_TOP_TOL, seed)
+
+
 class TestNoFalseTopSpeed(unittest.TestCase):
     def test_uncapped_truth_gives_no_fade(self):
         """加減速の上限が無い車に、存在しない最高速（減衰）を読まない。実測の速度はオドメトリを

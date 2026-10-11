@@ -2,17 +2,14 @@
 
 Pi の推論（`raspi/nodes/cam_e2e_node.py`）と Mac の学習・評価
 （`ml_cam_e2e/dataset.py`・`eval.py`）の両方がここを import する。
-以前は学習が PIL の BILINEAR・RGB、推論が最近傍・BGR（リングの並びのまま）と
-食い違っており、学習したとおりの絵が実車のモデルに入っていなかった
-（2026-10-06 に発覚。誰も学習していなかったので実害は出ていない）。
+学習と推論で処理（リサイズ方式・色順）が食い違うと、学習したとおりの絵が実車のモデルに入らない。
 **同じ処理を2箇所に書かない**ことでこの種の事故を構造的に防ぐ。
 
 numpy だけで書く——Pi には opencv も Pillow も入れていない
 （`raspi/requirements.lock.txt`）。
 
 `to_rgb()`・`resize_area()` は `raspi/nodes/cam_perception_node.py`
-（セグメンテーション）と `ml_cam/dataset.py` も使う。あちらにも同じ食い違い
-（色順が逆・縮小方式が別）があり、同じ関数に寄せて直した（2026-10-06）。
+（セグメンテーション）と `ml_cam/dataset.py` も使う。同じ関数に揃えてある。
 
 `PREPROC_VERSION` はモデル同梱の `<name>.json` に書かれ、ノードが読み込み時に
 照合する。ここの処理（色順・リサイズ方式・正規化）を変えたら必ず上げること。

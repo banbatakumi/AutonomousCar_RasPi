@@ -284,7 +284,7 @@ def build(grid: OccGrid, traj: np.ndarray, *, step: float = 0.10,
         # しかないので、隣り合う点が上限いっぱいまで逆向きに動くと、上限内でも
         # 局所的な小さいループ（点線がその場でよじれる）ができてしまう
         # （直角に近い鋭角コーナーで実測: 90度ターンが連続する壁モードコースで
-        # 中心線に自己交差ループが生じた、2026-09-05）。位置と同じ`smooth`窓で
+        # 中心線に自己交差ループが生じた）。位置と同じ`smooth`窓で
         # 均せば、隣接点が足並みを揃えて動くようになりループが解消する
         shift = np.clip((left - right) / 2.0, -_MAX_SHIFT_M, _MAX_SHIFT_M)
         shift = smooth_loop(shift[:, None], smooth)[:, 0]

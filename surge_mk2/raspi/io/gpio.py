@@ -424,7 +424,7 @@ class Indication:
 class StatusIndicator:
     """LED 2個で「生存と可動性」「異常の重さ」を示す。
 
-    **配線は実機で確認済み**（2026-08-08）: GPIO19=緑 / GPIO13=赤、アクティブ High。
+    **配線は実機で確認済み**: GPIO19=緑 / GPIO13=赤、アクティブ High。
 
     ## 緑 — 生存と可動性
 

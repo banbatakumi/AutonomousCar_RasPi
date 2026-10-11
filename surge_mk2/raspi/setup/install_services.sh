@@ -10,7 +10,7 @@
 #   `docs/development.md` §11）。`--safe --with-logger` のように併用したいときは
 #   このスクリプトを一度読んでから手で `systemctl enable --now` すること。
 #
-# ## ★ 記録は GUI の「ログ」タブから操作する（2026-08-10 に運用変更）
+# ## ★ 記録は GUI の「ログ」タブから操作する
 #
 # `.sfl`（UART生ログ）・`.mcap`（画像込み）とも、既定では**何も自動記録しない**。
 # 走行中に GUI の「ログ」タブで開始/停止する:
@@ -31,12 +31,10 @@
 #     tools/record.sh                 # Mac で実行。ssh 越しに MCAP を PC へ流す
 #                                      # （GUI を開けないときの代替経路）
 #
-# ## `surge-cam-perception` は既定で入れる（2026-09-03、`auto/ctrl` 連動に変更）
+# ## `surge-cam-perception` は既定で入れる（`auto/ctrl` 連動）
 #
 # `ftg_cam`／`cam_centerline`（カメラの走行可否セグメンテーションで走るモード）
-# 用の推論プロセス。以前は「`planning_node` が今どのモードを選んでいるかを
-# 一切知らない独立プロセス」で、前方カメラのフレームが来る限り無条件に CNN
-# 推論を回し続けるため既定で入れていなかった。今は `cam_perception_node.py`
+# 用の推論プロセス。`cam_perception_node.py`
 # 自身が `auto/ctrl`（`AutoCtrl.mode`）を見て **カメラ系モードのいずれかが
 # 選ばれている間だけ**推論する（IDLE/ACTIVE。`cam_track_node.py` の待機コスト
 # 設計と同じ）ため、`surge-cam-track` と同様に常時起動してよい——GUI で他の
@@ -51,7 +49,7 @@
 # （`raspi/nodes/cam_track_node.py`の`process_cycle()`——`IDLE`状態はフレームの
 # 共有メモリ読み取りだけで、推論コストは`TRACKING`中だけ発生する）。
 # 待機中のコストは前方カメラのフレームをもう1プロセスが読むぶんだけで、
-# `planning_node`が「常時上げてよい」のと同じ理由（2026-09-01）。
+# `planning_node`が「常時上げてよい」のと同じ理由。
 #
 # ## ★★ 既定で `--allow-arm` が入る
 #
@@ -86,12 +84,9 @@ WITH_LOGGER=0
 # ⚠ `--max-speed` / `--max-steer` は **GUI の `PI_MAX_SPEED_CAP` / `PI_MAX_STEER_CAP`
 # （gui/src/store/ui.ts）と一致させること。** ずれると、GUI の設定パネルでは
 # 上限まで上げられるのに Pi 側で黙って切り捨てられる、という分かりにくい状態になる。
-# 0.3 → 0.6 に変更（2026-08-09）。0.3 では加速ランプもブレーキも体感できなかったため。
-# 0.6 → 2.0 / 45° → 60° に変更（2026-08-10、指示による）。
-# 2.0 → 3.0 に変更（2026-08-11、指示による）。
-# ⚠ 60°（1.047 rad）はモータ機械角の可動域であって路面舵角ではなかった。
-#    リンク比 0.5（2026-08-20 実測確定）によりタイヤは半分しか切れないため、
-#    路面舵角の上限は 30°（0.524 rad）に修正した。据え切りを続けるとステア MD が
+# ⚠ 60°（1.047 rad）はモータ機械角の可動域であって路面舵角ではない。
+#    リンク比 0.5（実測確定）によりタイヤは半分しか切れないため、
+#    路面舵角の上限は 30°（0.524 rad）。据え切りを続けるとステア MD が
 #    過熱するので `temp[2]` を見ておくこと。速度 3.0 m/s ＝ 10.8 km/h は既定の GUI 設定
 #    （0.6 m/s）の5倍で、ミニカーの大きさに対してはかなり速い。上げて走らせるときは周囲との距離に注意。
 #
@@ -154,7 +149,7 @@ EOF
 mkdir -p "$ROOT/logs"
 chown "$USER_NAME" "$ROOT/logs"
 
-# ── ★★ RemoveIPC を止める（2026-08-08 に踏んだ罠） ──
+# ── ★★ RemoveIPC を止める（踏んだ罠） ──
 #
 # systemd-logind の既定 `RemoveIPC=yes` は、**そのユーザーの最後のセッションが
 # 終わった時点で uid 所有の POSIX 共有メモリを全部消す。** User=pi で動く
@@ -173,7 +168,7 @@ RemoveIPC=no
 EOF
 systemctl restart systemd-logind || true
 
-# ── ★ 節電（2026-08-10 の PMIC 実測にもとづく） ──
+# ── ★ 節電（PMIC 実測にもとづく） ──
 #
 # `vcgencmd pmic_read_adc` で全レールを実測して切り分けた結果（3ノード稼働・
 # GUI 未接続 = 走行相当で **合計 4.06W**）:
@@ -200,7 +195,7 @@ systemctl restart systemd-logind || true
 #
 # ここで削るのは「仕事をしていないのに消えている分」だけにする。
 #
-# ## ★★ HDMI を落とす案は**採用できなかった**（2026-08-10）
+# ## ★★ HDMI を落とす案は**採用できなかった**
 #
 # `vcgencmd display_power 0` を oneshot unit で叩く案を入れかけたが、
 # **Pi 5 では動かない**:
@@ -229,9 +224,9 @@ systemctl restart systemd-logind || true
 #    切り離す副作用で `/dev/serial0` の割り当てを動かすので、STM32 との UART が壊れる
 systemctl disable --now bluetooth 2>/dev/null || true
 
-# Wi-Fi の省電力を**切る**（2026-10-06）。Raspberry Pi OS の既定は有効で、無線が眠っている間の
+# Wi-Fi の省電力を**切る**。Raspberry Pi OS の既定は有効で、無線が眠っている間の
 # 受信はルーターが溜めて次のビーコン（約100ms周期）で渡すので、GUI の指令の到着が揺れる
-# （手動操縦のデッドマン 150ms の余裕を削る）。得は小さい——`docs/power_audit_2026-10.md` の実測を参照。
+# （手動操縦のデッドマン 150ms の余裕を削る）。得は小さい——`docs/archive/power_audit_2026-10.md` の実測を参照。
 # NetworkManager の全接続の既定にする（`2` = 無効。接続ごとの設定が無ければこれが効く）
 mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/10-surge-wifi-powersave.conf <<'EOF'
@@ -246,7 +241,7 @@ write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet $A
 write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quiet"
 # **`--host 0.0.0.0` を明示する。** telemetry_node の既定は loopback にしてある
 # （制御 API を持つサーバの既定が全インタフェースだと、「打ち忘れ」ではなく
-# 「打たなかった日」が危険側に転ぶ。2026-08-21 のレビュー 🔴1-④）。
+# 「打たなかった日」が危険側に転ぶ）。
 # 手元の PC から GUI を開くのがこのシステムの前提なので、ここでは開ける。
 # **この引数を消すと Pi 自身からしか GUI が見えなくなる**（症状は「繋がらない」だけで
 # 原因が分かりにくいので、消す前にこのコメントを読むこと）
@@ -311,23 +306,23 @@ systemctl disable --now surge-arrow-signal 2>/dev/null || true
 # avahi の補助（`raspi/tools/mdns_unicast.py`）。**これが無いと Wi-Fi だけで繋いだ端末
 # （iPad・iPhone）から `surge-mk2.local` が引けず、GUI が開けない**ことがある:
 # アクセスポイントが無線端末宛てのマルチキャストを中継しないと、avahi の返事が
-# 届かない（2026-10-04 に実測。IP 直打ちなら開ける）。問い合わせ元へユニキャストで
+# 届かない（実測。IP 直打ちなら開ける）。問い合わせ元へユニキャストで
 # 返して塞ぐ。avahi は止めないし設定も変えない。バスには繋がらないので他の unit と
 # 依存関係は無い
 write_unit surge-mdns "ホスト名の mDNS 応答（ユニキャスト）" "raspi.tools.mdns_unicast"
 
 # ── 古いログを消すタイマー（放置するとカードが埋まる） ──
 #
-# ## ★ 日付だけで消すのでは間に合わない（2026-08-08 の実測で判明）
+# ## ★ 日付だけで消すのでは間に合わない
 #
 # 実測は **`.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 = 約 12.8MB/分**。
 # 電源を入れっぱなしにすると **1日で 18GB** 増える。空きは 22GB しかないので、
 # 「毎日・7日より古いものを消す」では**掃除が来る前にカードが埋まる**。
 #
 # そこで2本立てにする:
-#   ① 7日より古いものを消す（従来どおり。普段はこれで足りる）
+#   ① 7日より古いものを消す（普段はこれで足りる）
 #   ② 合計が MAX_LOG_MB を超えている間、**古い順に消す**（連続運転の保険）
-# タイマーも毎日ではなく**毎時**に変更した。
+# タイマーは毎日ではなく**毎時**。
 MAX_LOG_MB=8000
 
 cat > /etc/systemd/system/surge-logclean.service <<EOF
@@ -357,7 +352,7 @@ WantedBy=timers.target
 EOF
 
 # Pi5純正ファン（`raspi/io/fan.py`）を pi ユーザーから書けるようにする udev ルール。
-# 既定では root:root 644 で書けない（実機で確認済み、2026-08-17）。`--safe` でも要る
+# 既定では root:root 644 で書けない（実機で確認済み）。`--safe` でも要る
 # （ファンの手動制御と ARM 封印は無関係なため）
 cp "$ROOT/raspi/setup/99-surge-fan.rules" /etc/udev/rules.d/99-surge-fan.rules
 udevadm control --reload-rules

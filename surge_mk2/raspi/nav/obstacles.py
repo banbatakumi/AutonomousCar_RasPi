@@ -41,7 +41,7 @@ from .deskew import Points
 from .grid import OccGrid
 from .local_map import _edt
 
-__all__ = ["Obstacle", "free_mask", "near_pad", "detect", "confirm", "blocking"]
+__all__ = ["Obstacle", "free_mask", "wall_distance", "near_pad", "detect", "confirm", "blocking"]
 
 #: クラスタを切る点間距離 [m]。これより離れていたら別の物体
 _SPLIT_M = 0.18
@@ -72,13 +72,18 @@ def free_mask(grid: OccGrid, wall_pad: float) -> np.ndarray:
     #   格子に対して斜めの壁は指定の 71% しか除外されず（0.15m に対して 10.6cm）、自己位置が
     #   その幅を超えてずれると斜めの壁の点が障害物の候補になった
     pad = max(1, int(round(wall_pad / grid.resolution))) * grid.resolution
-    return grid.known_free_mask() & (_edt(~grid.wall_mask(), grid.resolution) > pad + 1e-6)
+    return grid.known_free_mask() & (wall_distance(grid) > pad + 1e-6)
+
+
+def wall_distance(grid: OccGrid) -> np.ndarray:
+    """各セルから最寄りの壁までのユークリッド距離 [m]（格子と同じ形）。"""
+    return _edt(~grid.wall_mask(), grid.resolution)
 
 
 def near_pad(wall_pad: float) -> float:
     """障害物の点として**数える**帯の、壁からの距離 [m]（`detect` の `near`）。
 
-    実機（2026-10-08、道幅 約0.6m）で `wall_pad=0.25` だと、壁から 25cm に置いた障害物は
+    実機（道幅 約0.6m）で `wall_pad=0.25` だと、壁から 25cm に置いた障害物は
     毎周期 1〜2 点しか `wall_pad` の外に落ちず、`min_points` に届かないまま 2.3m/s で当たった。
     道の半幅が 30cm だと `wall_pad` の外は中央の 10cm しか無い。そこで「`wall_pad` の外に
     1点でもある塊」に限って、もう 10cm 壁寄りの点まで数える。壁の点だけでできた塊は

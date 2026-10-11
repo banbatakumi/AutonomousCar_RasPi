@@ -12,6 +12,8 @@ GUIの「システム同定」タブでダウンロードしたmcapファイル�
 
 from __future__ import annotations
 
+import queue
+import threading
 import tkinter as tk
 import tomllib
 from pathlib import Path
@@ -85,7 +87,14 @@ class SysIdApp(tk.Tk):
                 side="left", padx=4, fill="x", expand=True)
             ttk.Button(row, text="mcapを選ぶ", command=lambda k=key: self._pick_mcap(k)).pack(side="right")
 
-        ttk.Button(self, text="解析", command=self._analyze).pack(pady=6)
+        self.analyze_btn = ttk.Button(self, text="解析", command=self._analyze)
+        self.analyze_btn.pack(pady=6)
+        prog = ttk.Frame(self, padding=(8, 0))
+        prog.pack(fill="x")
+        self.progress = ttk.Progressbar(prog, maximum=100.0)
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.progress_text = tk.StringVar(value="")
+        ttk.Label(prog, textvariable=self.progress_text, width=34, anchor="w").pack(side="left", padx=6)
 
         ttk.Separator(self).pack(fill="x", padx=8)
         self.result_frame = ttk.Frame(self, padding=8)
@@ -115,7 +124,43 @@ class SysIdApp(tk.Tk):
             return
         sources = {key: self.file_vars[key].get() for key, _, _ in TESTS
                    if self.file_vars[key].get() not in ("", "（未選択）")}
-        res = analyze(sources, base)
+        # 解析は数秒〜数十秒かかるので別スレッドで走らせ、画面は進捗バーを更新し続ける
+        self.analyze_btn.configure(state="disabled")
+        self.progress.configure(value=0.0)
+        self.progress_text.set("開始…")
+        self._events: queue.Queue = queue.Queue()
+
+        def work() -> None:
+            try:
+                res = analyze(sources, base, progress=lambda f, t: self._events.put(("p", f, t)))
+                self._events.put(("done", res))
+            except Exception as e:  # noqa: BLE001
+                self._events.put(("fail", e))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(50, self._poll_analysis)
+
+    def _poll_analysis(self) -> None:
+        finished = None
+        try:
+            while True:
+                ev = self._events.get_nowait()
+                if ev[0] == "p":
+                    self.progress.configure(value=ev[1] * 100.0)
+                    self.progress_text.set(f"{ev[1] * 100:.0f}%  {ev[2]}")
+                else:
+                    finished = ev
+        except queue.Empty:
+            pass
+        if finished is None:
+            self.after(50, self._poll_analysis)
+            return
+        self.analyze_btn.configure(state="normal")
+        if finished[0] == "fail":
+            self.progress_text.set("失敗")
+            messagebox.showerror("解析エラー", str(finished[1]))
+            return
+        res = finished[1]
         self.results = res.results
         self.notes = res.notes
         self.warned = res.warned

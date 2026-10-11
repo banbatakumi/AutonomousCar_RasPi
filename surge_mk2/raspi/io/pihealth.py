@@ -26,7 +26,7 @@ PROC_MEMINFO = Path("/proc/meminfo")
 PROC_LOADAVG = Path("/proc/loadavg")
 CPUFREQ_DIR = Path("/sys/devices/system/cpu/cpufreq/policy0")
 #: ファームウェアのスロットリング状態を sysfs に出す機体での置き場所（無ければ `vcgencmd`）。
-#: ★ Pi 5 実機でこのパスがあるかは未確認（2026-10-05）。無くても `vcgencmd` へ落ちるだけ
+#: ★ Pi 5 実機でこのパスがあるかは未確認。無くても `vcgencmd` へ落ちるだけ
 THROTTLED_SYSFS = (
     Path("/sys/devices/platform/soc/soc:firmware/get_throttled"),
 )

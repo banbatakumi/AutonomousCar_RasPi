@@ -8,9 +8,7 @@
     grid        占有格子。ヒット/ミスの回数を数え、動く物を壁として確定させない
     raceline    最小曲率最適化と速度プロファイル（車体非依存の共通ライブラリ）
 
-**SLAM 本体は `slam2d/`（車体非依存ライブラリ）に統合済み。** ここにあった
-自作の `scanmatch`/`slam`（旧 `auto/raceline.py` 用）は学習用の基礎基盤で、
-現行の `slam2d_raceline`/`slam2d_route` planner には使われておらず削除した。
+**SLAM 本体は `slam2d/`（車体非依存ライブラリ）にある。** このパッケージには SLAM は無い。
 
 **このパッケージの `__init__.py` はサブモジュールを再エクスポートしない**
 （issue #22）。`raspi.nav.roadgraph`（cv2使用箇所を除き軽量）や

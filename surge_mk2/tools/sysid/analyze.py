@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -24,8 +25,8 @@ LINK_KEYS = toml_update.LINK_KEYS
 #: (内部キー, 表示名, この記録から求めるパラメータ)。**並び順が解析の順序**——
 #: 後ろの試験は前の試験の結果を使う。舵の効き・中立ずれ・アンダーステア勾配・リンクのガタ・
 #: ヨーの遅れは1つの試験では決まらないので、最後にステア・前後運動・旋回の記録をまとめて
-#: 当てはめる（`GEOMETRY`）。2026-09-27 に速度応答試験と加減速試験を前後運動試験（加速度を
-#: 段階的に上げる）1つにまとめた
+#: 当てはめる（`GEOMETRY`）。速度応答と加減速は前後運動試験（加速度を
+#: 段階的に上げる）1つで測る
 TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("steer", "① ステア試験", ("tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s",
                               "steer_servo_hysteresis_rad", "steer_servo_gain")),
@@ -85,8 +86,13 @@ class Analysis:
     warned: dict[str, str] = field(default_factory=dict)
 
 
+#: 進捗の重み。試験1つ（読み込み＋当てはめ）を1として、残りは経験的な見積り
+_W_TEST, _W_SENSOR, _W_GEOMETRY = 1.0, 0.3, 2.0
+
+
 def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
-            fold_link: bool = True) -> Analysis:
+            fold_link: bool = True,
+            progress: Callable[[float, str], None] | None = None) -> Analysis:
     """`sources` は試験キー（`TESTS` の内部キー）→ mcap のパス（または読み込み済みの `Log`）。
 
     `base` は今の `vehicle.toml`。前の試験で求めた値で順に上書きしながら次の試験を解析する。
@@ -95,24 +101,39 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
     （`LINK_KEYS`）へ畳み込んで返す（★プロトコル v0.18。`fold_steer_link`）。結果には `steer_gain`・
     `steer_gain_cubic` の代わりに `LINK_KEYS` が入り、`toml_update.apply_dynamics` がそれを `[control]` に
     書いて `[dynamics]` の2つを 1 と 0 に戻す。False は当てはめの結果そのまま（解析の検証用）。
+
+    `progress(割合 0〜1, 今やっていること)`: 進捗の通知。解析を走らせたスレッドから呼ばれる。
     """
+    total = (_W_TEST * sum(k in sources for k, _, _ in TESTS) + (_W_SENSOR if "accel" in sources else 0.0)
+             + (_W_GEOMETRY if any(k in sources for k in GEOMETRY[2]) else 0.0)) or 1.0
+    done = 0.0
+
+    def report(text: str, weight: float = 0.0) -> None:
+        nonlocal done
+        done += weight
+        if progress:
+            progress(min(done / total, 1.0), text)
+
     out = Analysis()
     logs: dict[str, fit.Log] = {}
     for key, label, params in TESTS:
         src = sources.get(key)
         if src is None:
             continue
+        report(f"{label} を解析中…")
         try:
             lg = src if isinstance(src, fit.Log) else fit.load_log(src)
             if lg.md_dropouts:
                 # 止まった MD は駆動も制動もせず、車輪の値は古いまま固まる。その記録から読んだ値は
-                # 車の特性ではない（2026-10-08、右後輪の MD が落ちた記録で制動の頭打ちが 2.75→1.91）
+                # 車の特性ではない（右後輪の MD が落ちた記録で制動の頭打ちが 2.75→1.91 と出た）
                 raise ValueError(_md_dropout_text(lg.md_dropouts))
             logs[key] = lg
             r = _FNS[key](lg, base)
         except Exception as e:  # noqa: BLE001 - 画面にそのまま出す
             out.errors.append(f"{label}: {e}")
+            report(f"{label} 失敗", _W_TEST)
             continue
+        report(f"{label} 完了", _W_TEST)
         vals = {k: v for k, v in r.values.items() if k in params}
         out.results.update(vals)
         out.notes[label] = r.notes
@@ -126,7 +147,9 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
     # 速度センサの自己点検（速度が大きく変わる記録で。値は変えない）と、前輪エンコーダの
     # 周期誤差（各記録を読むときに推定・補正した結果）
     if "accel" in logs:
+        report("速度センサを自己点検中…")
         out.notes["速度センサの自己点検"] = fit.sensor_check(logs["accel"], base).notes
+        report("速度センサの自己点検 完了", _W_SENSOR)
     for key, label, _ in TESTS:
         if key in logs and key != "accel" and logs[key].sensor_notes:
             out.notes.setdefault(label, [])
@@ -135,6 +158,7 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
     geo_label, geo_params, geo_src = GEOMETRY
     geo_logs = {k: logs[k] for k in geo_src if k in logs}
     if geo_logs:
+        report(f"{geo_label} を解析中…")
         try:
             r = fit.fit_geometry(geo_logs, base)
             vals = {k: v for k, v in r.values.items() if k in geo_params}
@@ -163,4 +187,6 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
                 out.warned.update({k: geo_label for k in vals})
         except Exception as e:  # noqa: BLE001
             out.errors.append(f"{geo_label}: {e}")
+        report(f"{geo_label} 完了", _W_GEOMETRY)
+    report("解析完了", total)
     return out

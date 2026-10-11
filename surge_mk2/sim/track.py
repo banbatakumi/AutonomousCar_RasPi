@@ -292,7 +292,7 @@ def build_from_points(pts: np.ndarray, meta: dict) -> dict:
             # 同じ理由で終点を含めないのと揃え、ここでも落とす——重複点を残すと
             # 周回差分（`np.roll`）でセグメント長がほぼ0になり、`sim/raceline.py`
             # の曲率計算（dyaw/seg）がその1点だけ爆発して理想ライン最適化全体を
-            # 汚染する（2026-09-01、実測: 103万rad/mの偽曲率スパイクを確認）
+            # 汚染する（103万rad/mの偽曲率スパイクを実測）
             pts = pts[:-1]
 
     grid, origin = rasterize(pts, width, res, float(meta.get("margin", 0.4)),

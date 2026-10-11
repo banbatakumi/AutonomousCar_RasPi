@@ -21,30 +21,40 @@ import tomlkit
 
 from raspi.core.control_params import STEER_LINK_X_MAX_RAD, steer_link_road
 
-__all__ = ["ALLOWED_KEYS", "LINK_KEYS", "apply_dynamics"]
+__all__ = ["ALLOWED_KEYS", "LINK_KEYS", "FF_KEYS", "speed_ff_values", "apply_dynamics"]
 
 #: `[control]` に書くステアのリンクの換算。**必ず2つ一緒に**渡す
 LINK_KEYS = ("steer_link_gain", "steer_link_cubic")
+#: `[control]` の車速PIの加速度フィードフォワード（STM32 へ送る値、後輪2輪の合計トルク）
+FF_KEYS = ("speed_ff_nm_per_m_s2", "speed_ff_rr_nm")
+
+
+def speed_ff_values(speed_plant_gain: float, rolling_resistance: float) -> dict[str, float]:
+    """`[dynamics]` の車体の利得 [(m/s²)/N·m] と転がり抵抗 [m/s²] → `FF_KEYS` の値。
+
+    加速度 a を出すのに要るトルクは (a + 転がり抵抗) ÷ 利得。STM32 は
+    `speed_ff_nm_per_m_s2`×目標車速の傾き ＋ `speed_ff_rr_nm`×進む向き を車速PIの出力に足す。
+    """
+    return {FF_KEYS[0]: round(1.0 / speed_plant_gain, 6),
+            FF_KEYS[1]: round(max(rolling_resistance, 0.0) / speed_plant_gain, 6)}
 
 #: このツールが書き込んでよいキー（[dynamics]直下のみ）。
 #: `drive_ratio` は対象外（書こうとしたら`ValueError`にして誤って上書きしないようにする）。
-#: `speed_filter_s`/`_order`・`speed_kp`/`speed_ki`/`speed_torque_max_nm`/`speed_ramp_max_m_s2` は
-#: ファームの定数（測るものではない）なので対象外。`tau_speed_s`（旧モデルの1次遅れ）は
-#: 2026-09-26 から測らない（速度はファームの PI、`sim/vehicle.py` の `SpeedController`）
+#: `speed_filter_s`/`_order`・`speed_kp`/`speed_ki`/`speed_torque_max_nm` は
+#: ファームの定数（測るものではない）なので対象外。`tau_speed_s`（1次遅れ）は測らない（速度はファームの PI、`sim/vehicle.py` の `SpeedController`）
 ALLOWED_KEYS = {"tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s", "mu",
                 "drive_accel_m_s2", "brake_decel_m_s2",
-                # 2026-09-24 追加（`tools/sysid/fit.py` の作り直し）
                 "drive_fade_speed_m_s", "drive_top_speed_m_s", "speed_decel_m_s2",
                 "steer_offset_rad", "steer_gain", "understeer_gradient", "control_latency_s",
-                # 2026-09-25 追加（舵のヒステリシス・ガタ・不感帯・非線形性）
+                # 舵のヒステリシス・ガタ・不感帯・非線形性
                 "steer_gain_cubic", "steer_servo_hysteresis_rad",
                 "steer_link_hysteresis_rad", "steer_link_deadband_rad",
-                # 2026-09-25 追加（ヨーの遅れ: IMU のローパスとタイヤの緩和長）
+                # ヨーの遅れ: IMU のローパスとタイヤの緩和長
                 "yaw_rate_filter_s", "yaw_relaxation_m",
-                # 2026-09-26 追加（第三者検証: 速度PI・ヨーの2次遅れ・サーボの定常ゲイン）
+                # 速度PI・ヨーの2次遅れ・サーボの定常ゲイン
                 "speed_plant_gain", "rolling_resistance", "yaw_natural_freq_rad_s", "yaw_damping",
                 "steer_servo_gain",
-                # 2026-09-27 追加（ブレーキの強さ→減速度）
+                # ブレーキの強さ→減速度
                 "brake_decel_per_nm"}
 
 
@@ -96,6 +106,14 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
         put(dynamics, "steer_gain", 1.0)
         put(dynamics, "steer_gain_cubic", 0.0)
         put(doc, "max_steer", steer_link_road(STEER_LINK_X_MAX_RAD, *(link[k] for k in LINK_KEYS)))
+    # 車速PIの加速度フィードフォワード（★v0.21）は車体の利得と転がり抵抗から決まる。`[control]` に
+    # 有効な値（> 0）が書いてあれば、同定し直した値に合わせて書き直す（0・未記入なら無効のまま）
+    control = doc.get("control")
+    gain = float(dynamics.get("speed_plant_gain", 0.0) or 0.0)
+    if control is not None and gain > 1e-6 and float(control.get(FF_KEYS[0], 0.0) or 0.0) > 0.0:
+        ff = speed_ff_values(gain, float(dynamics.get("rolling_resistance", 0.0) or 0.0))
+        for key in FF_KEYS:
+            put(control, key, ff[key])
 
     if changed:
         path.write_text(tomlkit.dumps(doc), encoding="utf-8")

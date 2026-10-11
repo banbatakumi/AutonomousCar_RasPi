@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x0014u
+#define SURGE_PROTOCOL_VERSION  0x0016u
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -131,6 +131,8 @@
 #define PARAM_STEER_LINK_GAIN    0x0081u
 #define PARAM_STEER_LINK_CUBIC   0x0082u
 #define PARAM_LAUNCH_EXIT_TORQUE_NM 0x00A1u
+#define PARAM_SPEED_FF_NM_PER_M_S2 0x00B1u
+#define PARAM_SPEED_FF_RR_NM     0x00B2u
 #define PARAM_SPEED_KP           0x0030u
 #define PARAM_SPEED_KI           0x0031u
 #define PARAM_LIDAR_FORMAT       0x0040u
@@ -239,7 +241,7 @@ typedef struct {
 /* LIMITS (0x0A) — 車両の物理的な上限値（読み取り専用・実行時に変化しない）。★v0.11 新設。起動直後に VERSION と同じタイミングで自動送信（100ms間隔×3回）、任意タイミングでも LIMITS_REQ で再取得可 */
 typedef struct {
     float max_speed_m_s;   /* m/s  COMMAND.target_speed の上限（DRIVE_MAX_SPEED_M_S）。超えると STM32 側でクランプされる */
-    float max_accel_m_s2;  /* m/s2  COMMAND.accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2） */
+    float max_accel_m_s2;  /* m/s2  COMMAND.accel_limit に指定できる上限。★v0.22 から STM32 は上限を掛けず、ワイヤで表せる最大 65.535 を返す（上限は Pi の [safety] cmd_accel_limit_m_s2） */
     float max_torque_nm;   /* N.m  1輪あたり。target_torque/brake_torque 共通（DRIVE_MAX_TORQUE_NM） */
     float max_steer_rad;   /* rad  路面舵角。原点(直進)からの片側振れ幅（Steering_GetMaxRoadWheelAngleRad()） */
 } surge_limits_t;

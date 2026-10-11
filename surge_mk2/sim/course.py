@@ -3,8 +3,8 @@
 PNG と同名の JSON がペアになる。PNG は「見た目」ではなく**占有格子そのもの**で、
 輝度が `wall_threshold` 未満のピクセルが壁。
 
-    sim/courses/oval.png
-    sim/courses/oval.json   {"resolution": 0.02, "origin": [0,0],
+    sim/courses/<名前>.png
+    sim/courses/<名前>.json {"resolution": 0.02, "origin": [0,0],
                              "start": [1.0, 1.0, 0.0], "wall_threshold": 128}
 
 ## 座標系
@@ -60,8 +60,7 @@ class Course:
     #: （`sim/courses/*.json`のファイル由来コースは常にデフォルト値のまま）
     role: str = "eval"
     #: `raycast()`が使う、外周1pxを壁でpaddingした`grid`。`_padded()`で遅延生成する
-    #: キャッシュ（2026-09-01追加、RL訓練でのraycastのプロファイルがボトルネックの
-    #: 72%を占めていたため。範囲外座標を境界のpaddingセルにクランプするだけで
+    #: キャッシュ（範囲外座標を境界のpaddingセルにクランプするだけで
     #: 「画像の外は壁扱い」と同じ結果になり、毎回の`inside`bool配列+`np.where`×2回が
     #: 要らなくなる）
     _padded_grid: np.ndarray | None = field(default=None, repr=False, compare=False)
@@ -179,7 +178,7 @@ class Course:
         """複数原点・各1角度のバッチレイキャスト。`raycast()`（1原点・複数角度、
         LiDARのホットパス）とは逆の組み合わせで、`sim/raceline.py`が中心線の
         各点から法線方向へ壁までの距離を一括で測るのに使う（`width`を持たない
-        コースの道幅推定、2026-09-05追加）。`_padded()`キャッシュは`raycast()`
+        コースの道幅推定）。`_padded()`キャッシュは`raycast()`
         と共有する。
 
         :param origins: `(M, 2)` 世界座標

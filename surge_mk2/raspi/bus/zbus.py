@@ -86,7 +86,7 @@ _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
 #: ★ **完全一致で先に引けるキーを持たせること。** 前方一致フォールバック
 #: （`endpoints_for_topic()` 参照）は辞書の並び順に依存する上、
 #: `"scan/cam"` が `"scan"` の前方一致に誤って拾われ `cam_perception` ではなく
-#: `io` に解決される、という事故が実際に起きた（2026-08-23、`scan/cam` が
+#: `io` に解決される、という事故が実際に起きた（`scan/cam` が
 #: 常に空のまま `ftg_cam` が動かなかった）。新しいトピックを足すときは、
 #: 既存キーの前方一致に誤って拾われないか必ず確認すること
 TOPIC_OWNER: dict[str, str] = {
@@ -177,7 +177,7 @@ def _enc_hook(obj):
     """numpy のスカラ（`np.float64` 等）を Python の値に直す。
 
     planner が numpy の計算結果をそのままメッセージに入れると、msgspec は
-    `TypeError` を出し、送信箇所でノードごと落ちる（2026-10-06、実機の planning_node が
+    `TypeError` を出し、送信箇所でノードごと落ちる（実機の planning_node が
     `auto/state` の送信で4回落ちていた）。numpy を import せずに済むよう `item()` の有無で見る。
     配列は直さない（メッセージの型が list なので、入れた側の誤り）。"""
     item = getattr(obj, "item", None)

@@ -19,14 +19,14 @@
 それぞれレーシングラインを引いて**見積もりのラップタイムが最短のもの**を選ぶ（地図作成で
 走った1周には頼らない）。ルールで通れない道は経路の設定の `avoid`（避ける点）で除く。
 **自動経路の経由点は経路の設定（グループA〜D）には書き込まない**——経由点は人間が全部決める
-（バンビの指示、2026-09-29）。**自動経路は経由点のグループがあっても作り続け、A〜D と同じく
-走行中に選べる**（「自動」ボタン、`request_route("auto")`。以前はグループを置くと消えて戻せなかった）。
+。**自動経路は経由点のグループがあっても作り続け、A〜D と同じく
+走行中に選べる**（「自動」ボタン、`request_route("auto")`）。
 
-## 重い計算はワーカースレッドで
+## 重い計算は別プロセスのワーカーで
 
 道路グラフ（Pi で数百ms）と経路ごとのレーシングライン（1本 数十〜数百ms）は
 `plan()`（10Hz）の中で回すと指令が途切れる（`cmd_deadman_ms` 150ms で DISARM）。
-ワーカースレッド1本に投げ、`plan()` は毎周期出来上がりを覗くだけにする。
+ワーカー1本（`slam2d_raceline.submit_job`。プロセスを作れない環境ではスレッド）に投げ、`plan()` は毎周期出来上がりを覗くだけにする。
 ワーカーは地図の**写し**（3値から作り直した `OccGrid`）だけを触る。
 
 ## 停止と駐車
@@ -60,7 +60,7 @@ from .base import ParamSpec
 from .park_to_point import ParkToPoint
 from .route_config import AUTO_KEY, ROUTE_KEYS, RouteConfig, Stop
 from .slam2d_raceline import (DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS, Slam2dRaceLine,
-                              forward_traj, line_kwargs)
+                              forward_traj, limits, line_kwargs, submit_job)
 
 __all__ = ["Slam2dRoute"]
 
@@ -96,21 +96,21 @@ class _BuildOut:
 _LINE_KEYS = SPEED_KEYS + ("line_margin", "turn_max_deg", "graph_margin")
 
 #: 経路の切替で「新しい経路の上に居る」とみなす横ずれ [m]（`RouteSwitcher.step` の `tol`）。
-#: ★以前は GUI のスライダだったが、これは「どれだけ待つか」ではなく「別々に最適化した経路どうしの
-#: 重なりの誤差（数cm）を飲む幅」で、乗り換えは押した後の最初の乗れる周期に起きる。上げると
-#: 別の枝の上から乗り換えて経路へ斜めに突っ込む（安全弁）、下げると重なり区間でも乗れなくなるので
-#: 触る理由が無く定数にした
+#: 「どれだけ待つか」ではなく「別々に最適化した経路どうしの重なりの誤差（数cm）を飲む幅」で、
+#: 乗り換えは押した後の最初の乗れる周期に起きる。上げると別の枝の上から乗り換えて経路へ斜めに
+#: 突っ込む（安全弁）、下げると重なり区間でも乗れなくなる
 SWITCH_TOL = 0.15
 
 
-def _line_kwargs(p: dict[str, float], vehicle) -> dict:
-    return dict(line_kwargs(p, vehicle), step=PATH_STEP)
+def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True) -> dict:
+    return dict(line_kwargs(p, vehicle, refine), step=PATH_STEP)
 
 
 def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                     seed, traj, groups: dict[str, list[Waypoint]], p: dict[str, float],
                     vehicle, graph: RoadGraph | None, *, auto_start: Waypoint | None = None,
-                    avoid: list[tuple[float, float]] | None = None) -> _BuildOut:
+                    avoid: list[tuple[float, float]] | None = None,
+                    refine: bool = True) -> _BuildOut:
     """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。
 
     `auto_start` があれば、グループとは別に自動経路（キー `auto`）を全周回の中の最速から選ぶ。
@@ -120,7 +120,7 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
         graph = build_graph(trinary, resolution=resolution, origin=origin,
                             keep=vehicle.half_width + p["graph_margin"], seed=seed, traj=traj)
     out = _BuildOut(graph=graph)
-    kw = _line_kwargs(p, vehicle)
+    kw = _line_kwargs(p, vehicle, refine)
     if auto_start is not None:
         _fastest_loop(out, grid, graph, auto_start, avoid, p, kw, vehicle)
     for key, wps in groups.items():
@@ -188,14 +188,19 @@ def _fastest_loop(out: _BuildOut, grid, graph: RoadGraph, start: Waypoint, avoid
     # ★ 車の最小旋回半径より急な所がある周回は、曲がれる周回がある限り選ばない。
     # 見積もりのラップは最低速度で通る前提なので速く見えるが、実際には曲がり切れずに
     # 経路から外れて止まる（地図作成の誤差で近道の S 字が歪んだ toyota2 の地図で、
-    # 半径34cm＜40cm の近道を「最速」に選んで外れた。sim.bench 2026-09-29）。
+    # 半径34cm＜40cm の近道を「最速」に選んで外れた。sim.bench）。
     # **判定は本来の設定で引いた線で行う**——安い設定（最小曲率のみ）の線は角が急で、
     # 曲がれる周回（本来の線で半径61cm）まで 34cm と出て全部が「曲がれない」になった
+    # ★ ここでは見積もりラップの仕上げ（`refine_time`）はしない。候補を確かめるたびに仕上げると
+    #   1本 1〜4 秒（Mac）× `_FULL_CHECKS` 本かかる（自動経路に約10秒）。仕上げは選んだ
+    #   1本にだけ掛ける。順位は仕上げの前の線で決まるが、仕上げで縮むのはどの周回も数%〜1割で、
+    #   周回どうしの差（通る道が違う）より小さい
     r_car = 1.0 / vehicle.kappa_max
+    check = {**kw, "refine_evals": 0}
     full = []
     for *_, rp in ranked[:_FULL_CHECKS]:
         try:
-            rl, cl = build_raceline(grid, graph, rp, **kw)
+            rl, cl = build_raceline(grid, graph, rp, **check)
         except Exception as e:              # noqa: BLE001
             # 安い線は車体外形を検査していないので走らせない。この候補は除く
             last_err = repr(e)
@@ -208,6 +213,12 @@ def _fastest_loop(out: _BuildOut, grid, graph: RoadGraph, start: Waypoint, avoid
         return
     full.sort(key=lambda t: (t[0], t[1]))
     tight, t_best, rl, cl, rp = full[0]
+    if kw.get("refine_evals", 0) > 0:
+        try:
+            rl, cl = build_raceline(grid, graph, rp, **kw)
+            t_best = lap_time(rl)
+        except Exception:                   # noqa: BLE001  仕上げる前の線で走る
+            pass
     _put(out, AUTO_KEY, rl, cl, rp, vehicle)
     others = sorted(t for bad, t, *_ in full[1:] if bad == tight)
     n_bad = sum(1 for bad, *_ in full if bad)
@@ -229,10 +240,10 @@ def _compute_stop(trinary: np.ndarray, resolution: float, origin: tuple[float, f
     goal = Waypoint(stop.x, stop.y, None if park else stop.yaw)
     # 停止点が近すぎる（今の速度から止まり切れない）なら1周回ってから止まる。
     # ★固定 1.2m だと、周回を数えた直後（2m/s）に 1.2m 先の停止点へ向かって減速し切れず、
-    # 止まる位置が 18cm ずれた（toyota2 の sim.bench、2026-09-29）
+    # 止まる位置が 18cm ずれた（toyota2 の sim.bench）
     v = max(0.0, v_now)
     # 計算している間（数百ms）に進むぶん（`_STOP_LEAD_S`）も足す。経路は今の位置から引く
-    need = (v * v / (2.0 * max(p["a_brake"], 0.1)) + p["creep_dist"] + 0.5
+    need = (v * v / (2.0 * max(limits(p, vehicle).a_brake, 0.1)) + p["creep_dist"] + 0.5
             + _STOP_LEAD_S * v)
     rp = plan_to(graph, pose, goal, turn_max_deg=p["turn_max_deg"],
                  snap_radius=_PARK_SNAP_M if park else 0.6,
@@ -299,6 +310,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self._route_warn: dict[str, str] = {}
         self._drop_job("_job")
         self._job_again = False
+        self._refine_next = False
         #: やり直しの計算で道路グラフから作り直すか（`_submit`）
         self._regraph = False
         self._drop_job("_stop_job")
@@ -334,8 +346,7 @@ class Slam2dRoute(Slam2dRaceLine):
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
         self._p = p
-        # ★ 速度・経路の設定が変わったら作り直す（以前は地図を読んだときの設定のまま
-        # だった）。できた版へは `_install` が乗れる場所で移る
+        # ★ 速度・経路の設定が変わったら作り直す。できた版へは `_install` が乗れる場所で移る
         if (self._graph is not None and self._built_key is not None
                 and self._line_key(p) != self._built_key):
             # `graph_margin` が変わったら道路グラフから作り直す（通れる道そのものが変わる）
@@ -361,6 +372,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self._graph = None
         self._drop_job("_job")               # 前の地図の計算は結果を捨てる
         self._job_again = False
+        self._refine_next = False
         self._drop_job("_stop_job")
         self._stop_retry_t = 0.0
         self._stop_error = self._build_error = self._auto_note = ""
@@ -432,7 +444,13 @@ class Slam2dRoute(Slam2dRaceLine):
 
     # ── ワーカー ──
 
-    def _submit(self, *, graph: RoadGraph | None) -> None:
+    def _submit(self, *, graph: RoadGraph | None, refine: bool | None = None) -> None:
+        """経路を（作り直して）ワーカーへ投げる。
+
+        :param refine: 見積もりラップの仕上げをするか。`None` なら、**走れる経路がまだ無いときは
+            しない**（0.5 秒前後で「まず走れる線」を出す）。その経路を取り込んだら、同じ道路グラフで
+            仕上げ込みをもう一度投げる（`_poll`。Mac で 6〜8 秒）。できた版へは乗れる場所で移る
+        """
         if self._job is not None:
             self._job_again = True          # 走っている計算が終わってからやり直す
             self._regraph = self._regraph or graph is None
@@ -445,12 +463,15 @@ class Slam2dRoute(Slam2dRaceLine):
         traj = self._cfg.explore_traj
         if traj is not None and len(traj):
             seed = (float(traj[0, 0]), float(traj[0, 1]))
-        self._job = self._pool().submit(
+        if refine is None:
+            refine = bool(self._routes)
+        self._refine_next = not refine
+        self._job = submit_job(
             _compute_routes, g.trinary().copy(), g.resolution, tuple(g.origin), seed,
             None if traj is None else traj.copy(), self._groups_to_build(), dict(p),
             self.vehicle, graph,
             auto_start=self._auto_start,
-            avoid=list(self._cfg.avoid))
+            avoid=list(self._cfg.avoid), refine=refine)
 
     @staticmethod
     def _line_key(p: dict[str, float]) -> tuple:
@@ -497,6 +518,8 @@ class Slam2dRoute(Slam2dRaceLine):
             if self._job_again:
                 self._job_again = False
                 self._submit(graph=None if self._regraph else self._graph)
+            elif self._refine_next and self._routes and self._graph is not None:
+                self._submit(graph=self._graph, refine=True)     # まず走れる線ができた。次は仕上げ
         if self._stop_job is not None and self._stop_job.done():
             job, self._stop_job = self._stop_job, None
             try:
@@ -575,9 +598,8 @@ class Slam2dRoute(Slam2dRaceLine):
         if not key and not self._build_error:
             errs = "・".join(f"{k}: {v}" for k, v in self._route_err.items())
             self._build_error = f"経路を作れなかった（{errs or '経由点が無い'}）"
-        # ★ **経路が1本も作れなくても、地図は保存して DONE へ進む。** 以前は BUILD のまま
-        #   固まり、地図は未保存で、経由点を置き直しても進まなかった（数分かけた地図作成が
-        #   無駄になる）。経路は DONE で経由点・避ける点を直せば作り直される
+        # ★ **経路が1本も作れなくても、地図は保存して DONE へ進む。** BUILD のままだと
+        #   地図は未保存で、経由点を置き直しても進まない（数分かけた地図作成が無駄になる）。経路は DONE で経由点・避ける点を直せば作り直される
         self.path = self._routes.get(key)
         self.centerline = self._route_cls.get(key)
         self.phase = st.phase = DONE
@@ -652,7 +674,7 @@ class Slam2dRoute(Slam2dRaceLine):
         if not coasting and self._avoid is None:
             # 推測航法で続行している間は乗り換えない（乗り換え位置の判定が自己位置頼み）。
             # 障害物を避けている間も乗り換えない（避ける経路の元が変わって外れる）
-            sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=p["a_brake"])
+            sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=limits(p, self.vehicle).a_brake)
             if sw.switched:
                 self._hint = sw.hint
                 self._prev_idx = -1
@@ -694,7 +716,8 @@ class Slam2dRoute(Slam2dRaceLine):
         st.reason = (f"{self._switch.active_key} {self.laps}周・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
-                     + self._avoid_note() + self._coast_note(coasting, p) + md_note)
+                     + self._avoid_note() + self._coast_note(coasting, p) + md_note
+                     + self._sight_note(path, p) + self._tight_note(path, p))
         return st
 
     def _maybe_finish(self, pose, vs: VehicleState, p: dict[str, float]) -> None:
@@ -712,7 +735,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self._stop_error = ""
         self._switch.pending, self._switch.pending_key = None, ""
         g = self.slam.grid
-        self._stop_job = self._pool().submit(
+        self._stop_job = submit_job(
             _compute_stop, g.trinary().copy(), g.resolution, tuple(g.origin), self._graph,
             self._stop_start(pose, vs), stop, float(vs.speed), dict(p), self.vehicle,
             list(self._cfg.avoid),
@@ -721,8 +744,8 @@ class Slam2dRoute(Slam2dRaceLine):
     def _stop_start(self, pose, vs: VehicleState) -> tuple[float, float, float]:
         """停止経路を引き始める姿勢: **今の位置**と、今の経路のその場所の向き。
 
-        ★ 計算している間に進むぶん先の点から引かない。以前は今の向きのまま直線で外挿した
-        点から引いていて、ヘアピンでは向かい側の道に乗り、そこへ吸着して「逆走になる」で
+        ★ 計算している間に進むぶん先の点から引かない。今の向きのまま直線で外挿した
+        点から引くと、ヘアピンでは向かい側の道に乗り、そこへ吸着して「逆走になる」で
         失敗した。経路が届くころ車は始点より少し先に居るが、始点から前へ探す（`_poll`）ので
         追える。進むぶんは「近すぎる」の判定の側に足してある（`_compute_stop`）。
         """
@@ -740,7 +763,7 @@ class Slam2dRoute(Slam2dRaceLine):
         rem = _remaining(path, pose, self._hint)
         v = max(0.0, vs.speed)
         # 今の速度で止まれる距離（遅延のあいだに進むぶん＋減速）
-        brake_d = v * p["delay_s"] + v * v / (2.0 * max(p["a_brake"], 0.1))
+        brake_d = v * limits(p, self.vehicle).react_s + v * v / (2.0 * max(limits(p, self.vehicle).a_brake, 0.1))
         if rem <= brake_d + p["stop_tol"]:
             st.brake = True
             st.target_speed = 0.0

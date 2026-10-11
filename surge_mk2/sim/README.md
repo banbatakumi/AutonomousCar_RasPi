@@ -64,7 +64,7 @@ cd surge_mk2
 `python -m raspi.nodes.planning_node` を別ターミナルで叩くだけでよい。
 
 ```bash
-.venv/bin/python -m sim.run --course fuji       # コース指定（名前だけでよい）
+.venv/bin/python -m sim.run --course toyota2    # コース指定（名前だけでよい）
 .venv/bin/python -m sim.run --no-planning       # 自動運転ノード無し
 .venv/bin/python -m sim.run --list              # コース一覧
 .venv/bin/python -m sim.run --no-gui            # 俯瞰ビュー無し
@@ -74,13 +74,12 @@ cd surge_mk2
 
 `sim.run` は起動前に**詰まりどころを潰す**（`PROGRESS.md`「Mac で起動できないときに疑う2つ」）:
 Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint を掴んでいる古いプロセスを
-**起動時刻つきで**報告する。実際に4日前の `bus_demo --faults` が動きっぱなしで、
-その偽データが GUI に出ていたことがある。
+**起動時刻つきで**報告する。古い `bus_demo --faults` が動きっぱなしだと偽データが GUI に出る。
 
 ### 手で4つ起動する場合
 
 ```bash
-.venv/bin/python -m raspi.nodes.io_node --sim --course sim/courses/circuit.json \
+.venv/bin/python -m raspi.nodes.io_node --sim --course sim/courses/normal.json \
     --allow-arm --max-speed 3.0 --max-steer 0.524 --no-heartbeat --no-leds
 .venv/bin/python -m raspi.nodes.telemetry_node --no-camera
 .venv/bin/python -m raspi.nodes.planning_node        # 自動運転タブを使うなら
@@ -104,7 +103,7 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 | | |
 |---|---|
 | `P` | シムの設定ページ（コース一覧・LiDAR・LINK）を開閉 |
-| `M` | **コースエディタを別ウィンドウで開く**（今のコースを開いた状態で始まる） |
+| `M` | **コースエディタを別ウィンドウで開く**（常に新規コースで始まる。既存は `O` で開く） |
 | コース名をクリック / `N` | コース切替（車両はそのコースのスタート姿勢へ） |
 | `↑` `↓` | 行の選択（閉じているときは設定ページを開く） |
 | `←` `→` | 選択中のパラメータを増減（`Shift` で 10 倍） |
@@ -117,10 +116,10 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 
 | 入れてある | 入れていない |
 |---|---|
-| 自転車モデル（後輪車軸中心） | タイヤモデル・スリップ・横滑り |
-| 操舵の**むだ時間 + 1次遅れ** + レート制限 | TC / TV の介入 |
-| 速度の 1 次遅れ + `accel_limit` | カメラ画像の生成 |
-| `brake_torque` / `torque_mode`(v0.6) / `auto_stop`(v0.7) | 路面μ・勾配 |
+| 自転車モデル（後輪車軸中心） | タイヤのスリップ角・横滑りの動力学 |
+| 操舵の**むだ時間 + 1次遅れ** + レート制限 + 舵リンクのガタ・不感帯 + 簡易グリップ限界（摩擦円） | TC / TV の介入（ABS は旗だけ） |
+| 速度はファームの PI を写した `SpeedController`（`speed_kp=0` なら1次遅れ）+ `accel_limit` | カメラ画像の生成 |
+| `brake_torque` / `torque_mode` / `auto_stop` / ローンチコントロール | 路面の勾配 |
 | 車体外形（多角形）を使った衝突判定 | 電流・温度・電圧の物理的な根拠 |
 | 仮想 LD06（ノイズ・点欠損・**セクタ欠損**・伝送遅延・走査ゆがみ） | |
 | UART の線上時間（1Mbps）による順番待ち | |
@@ -130,9 +129,8 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 **E-Stop は自動発動しない。** GPIO6 ハートビートが Mac に無いため（`--no-heartbeat` と
 同じ扱い）。シミュレータGUI の `E` で手動発動できる。
 
-物理の合わせ込みが浅いのは意図的で、実車の `[dynamics]`（アクチュエータの動特性）が
-未実測＝**合わせる相手がまだ無い**ため。実測後に `config/vehicle.toml` を直せば
-全部が追随する（幾何・質量は実測確定済み）。
+車両パラメータは `config/vehicle.toml` の `[dynamics]`（`tools/sysid` で同定）だけを見る。
+直せば全部が追随する。
 
 ## わざと鏡像で出している
 
@@ -143,7 +141,7 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 反転処理が壊れていても画面が正しく見えてしまい、バグを永久に検出できない。
 
 検算には**左右非対称なコース**を使うこと（対称だと反転処理が壊れていても画面が
-正しく見えてしまう）。同梱の `fuji.json` は左右の旋回が混在しヘアピンも含むため、
+正しく見えてしまう）。同梱の `toyota2.json` や `circuit_chicane_*.json` は左右の旋回が混在するので、
 そのまま検算に使える。
 
 ## コースを自作する
@@ -154,10 +152,10 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 
 ```bash
 .venv/bin/python -m sim.editor            # 新規
-.venv/bin/python -m sim.editor circuit    # 既存を開いて編集
+.venv/bin/python -m sim.editor normal     # 既存を開いて編集
 ```
 
-**シミュレータGUI の `M` からも開ける**（今走っているコースを開いた状態で始まる）。
+**シミュレータGUI の `M` からも開ける**（常に新規コースで始まる）。
 画面に組み込まず別プロセスにしてあるのは、俯瞰ビューが「走っている物を見る画面」で
 エディタが「未保存の状態を持つ作成ツール」だから。同じプロセスに入れると
 シムを止めた瞬間に作りかけのコースが消えるし、走らせながら編集もできない。
@@ -211,10 +209,10 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 
 - 左右の壁が**常に平行**（手で置くと道幅がばらつき、継ぎ目に隙間ができる）
 - スタート姿勢は中心線上に自動で置かれるので、**壁に埋まりようがない**
-- **中心線そのものが Phase 3 の経路追従の正解データになる**（`course.centerline`）
+- **中心線そのものが経路追従の正解データになる**（`course.centerline`）
 - `loop: true` にすると始点と終点のずれを検査して警告する
 
-同梱の `circuit.json`（単純な閉ループ）と `fuji.json`（左右混在・ヘアピン入り）が例。
+同梱の `normal.json`（センターライン方式の例）が見本。
 パレットの選択肢は `sim/editor.py` の `STRAIGHTS` / `RADII` / `ANGLES` を書き換えれば変わる。
 
 ### ② PNG 方式 — 好きな絵を描く
@@ -249,7 +247,7 @@ PNG を描いて、同名の JSON を隣に置く。**白 = 走行可、黒 = �
 sim/
 ├── link.py       SimLink — SerialLink と同じ顔をした偽リンク（**7つの約束だけ**）
 ├── stm32.py      仮想 STM32 ファーム（パケット解釈・生成・状態機械・送信キュー）
-├── vehicle.py    自転車モデル + むだ時間 + 1次遅れ
+├── vehicle.py    自転車モデル + 操舵むだ時間/遅れ + グリップ限界 + 速度PI（`SpeedController`）
 ├── lidar.py      仮想 LD06（**センサ座標系＝鏡像で出す**）
 ├── course.py     コース読み込み → 占有格子・numpy ベクトル化レイキャスト・外形衝突判定
 ├── track.py      センターライン方式（直線＋円弧 → 道幅から壁を自動生成）
@@ -259,6 +257,10 @@ sim/
 ├── gui.py        pygame の俯瞰ビュー + 走行数値 + 設定ページ（P で開閉）
 ├── editor.py     コースエディタ（区間をクリックでつなぐ）
 ├── run.py        4プロセスをまとめて起動するランチャ（**stdlib だけで書く**）
+├── raceline.py   理想レーシングライン（最小曲率QP）と速度プロファイル（RL 報酬・評価用）
+├── sketch.py / wall_track.py  エディタの頂点→中心線 / 壁モードの中心線導出
+├── bench.py      planner の閉ループ評価（バス・GUI・プロセス無し）
+├── slam_bench.py slam2d の通し評価（誤差注入・真値比較）
 ├── park_world.py  駐車配置（縦列/車庫入れ/斜め/袋小路）を Course として生成
 ├── park_bench.py  駐車の評価ベンチ（真値の衝突判定・センサ誤差の注入）
 ├── routes/       経路の設定の例（`sim.bench --routes`。**シムの世界座標**で書く）
@@ -301,6 +303,16 @@ sim/
 - `--save-map NAME`: bench が作った地図を `saved_maps/NAME` に残す（`--map` で使い回す）
 - `--trace CSV`: RACE 中の 100Hz の記録（真値の位置・速度、指令速度、足元のプロファイル速度、横偏差、
   車体と壁の距離）
+- `--vehicle KEY=VALUE`: **真値の車だけ**諸元を変える（`sim.vehicle.VehicleSpec` の欄名。例 `mu=0.3755`・
+  `steer_servo_gain=0.877`・`speed_kp=0.3`）。planner は `config/vehicle.toml` のまま——同定値が外れて
+  いたときに走りが壊れないかを見る
+- `--control KEY=VALUE`: **シムの STM32 だけ** `[control]` の値を変える（今は車速PIの加速度フィードフォワード
+  `speed_ff_nm_per_m_s2`・`speed_ff_rr_nm`）。planner は `config/vehicle.toml` のまま——「Pi は新しいのに
+  ファームに値が入っていない」場合の走りを見られる
+- `--obs-log`: 障害物まわりの判断（reason の移り変わり、横へ避けられなかった理由つき）を時刻つきで出す
+- 結果の「車の使い方」: 舵の張り付き・横G p99・要求中の実加減速・経路の速度からの出過ぎ・`plan()` の p99。
+  「回避」: 横ずらしの回数と計算時間、Hybrid A* の回数と時間
+- 保存地図は `saved_maps/`（gitignore）。無ければ `--save-map NAME` で作る
 - 結果の読み方:
   - **真値ラップ**: RACE の出発位置に置いたゲートを跨いだ時刻（プランナーの周回カウンタに頼らない）。
     1周目は発進を含むので、比べるのは2周目以降
@@ -319,7 +331,7 @@ sim/
 
 - 毎周期 `VirtualLidar` → `ScanAssembler` を通す（鏡像戻し・セクタ欠損・
   ノイズ・遅延が入る）。**`Scan`を作り置きして使い回してはいけない**
-  ——障害物が車体ローカルに固定され、車と一緒に動いてしまう（旧実装の欠陥）
+  ——障害物が車体ローカルに固定され、車と一緒に動いてしまう
 - `Course.collides()` で**衝突を毎ステップ数える**。planner が「完了」と
   言っても擦っていれば失敗
 - `--errors real|harsh` でジャイロバイアス・オドメトリのスケール誤差・

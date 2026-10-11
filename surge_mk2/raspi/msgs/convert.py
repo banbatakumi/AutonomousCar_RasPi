@@ -68,8 +68,8 @@ MAX_BRAKE_TORQUE_NM = 0.13
 
 #: `target_torque`（駆動トルク直接指令）の上限 [N·m]（v0.6）。
 #: STM32 の `DRIVE_MAX_TORQUE_NM`。**MD 側の絶対上限（Kt×10A。Kt は MD の校正値で個体ごとに違う）を
-#: 超えないこと**——2026-10-10 まで 0.15 だったが、後輪 MD の絶対上限は約 0.148・0.144 N·m で届かず、
-#: STM32 の MD の健全性監視（v0.19）が「上限が一致しない」として走らせなかった。実行時の上限は
+#: 超えないこと**——後輪 MD の絶対上限は約 0.148・0.144 N·m なので 0.15 では届かず、
+#: STM32 の MD の健全性監視（v0.19）が「上限が一致しない」として走らせない。実行時の上限は
 #: STM32 が送る `LIMITS` を使う（`command_from_cmd` の `max_torque`）。ここは `LIMITS` が届くまでの値と
 #: GUI のスライダの上限。STM32 側の定数・GUI の `store/ui.ts` の `MAX_TARGET_TORQUE_NM` と合わせること
 MAX_TARGET_TORQUE_NM = 0.13
@@ -325,7 +325,7 @@ def _brake_torque_raw(nm: float, max_torque: float | None = None) -> int:
     操作と挙動が正反対になる壊れ方をする。上限は STM32 でもクランプされるが、
     **どこで頭打ちになったか分からなくなる**ので Pi 側でも掛けておく。
 
-    :param max_torque: `LIMITS.max_torque_nm`（★v0.11）。None なら `MAX_BRAKE_TORQUE_NM` を使う
+    :param max_torque: `LIMITS.max_torque_nm`。None なら `MAX_BRAKE_TORQUE_NM` を使う
     """
     if nm <= 0.0:
         return 0

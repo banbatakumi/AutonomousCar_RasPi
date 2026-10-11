@@ -88,6 +88,50 @@ class TestLogic(unittest.TestCase):
         m = S.run(self.fw, NOMINAL, scenario("decel_pi")).metrics
         self.assertLess(m["slipping"], 0.05)
 
+    # ── 車速PIの加速度フィードフォワード（v0.21。`drive.h` の同名の節）──
+
+    def _plant_gain(self) -> tuple[float, float]:
+        """車両モデルの `(車体の利得 [(m/s²)/N·m、後輪合計], 転がり抵抗 [m/s²])`（滑らない弱いトルク2段から）。"""
+        acc = []
+        for nm in (0.02, 0.04):
+            r = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.6, MODE_TORQUE, nm),), 0.5), {})
+            t, v = r.col("t"), r.col("speed")
+            m = (t > 0.2) & (t < 0.55)
+            acc.append(float(np.polyfit(t[m], v[m], 1)[0]))
+        gain = (acc[1] - acc[0]) / (2.0 * (0.04 - 0.02))
+        return gain, gain * 2.0 * 0.02 - acc[0]
+
+    def test_speed_feedforward_removes_the_ramp_lag(self):
+        """目標車速を一定の傾きで上げる間、車速はほぼ遅れない（無しだと偏差が溜まるまで遅れる）。
+        足す値が 0（既定）なら、足す前のファームと同じ動き。"""
+        gain, rr = self._plant_gain()
+        self.assertGreater(gain, 5.0)
+        sc = S.Scenario("t", "t", (S.Seg(1.0, MODE_SPEED, 2.4, 2.0),), 0.0)   # 停止から 2.0m/s² で
+        off = S.run(self.fw, QUIET, sc, {})
+        zero = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0})
+        on = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 1.0 / gain,
+                                        "speed_ff_rr_nm": max(rr, 0.0) / gain})
+        np.testing.assert_allclose(zero.col("speed"), off.col("speed"))
+
+        def lag(r) -> float:
+            t, v = r.col("t"), r.col("speed")
+            m = (t > 0.5) & (t < 0.9)
+            return float(np.mean(2.0 * t[m] - v[m]))
+        # 残る遅れは、目標車速の傾きに掛けるローパス（20ms）ぶん: 0.02s × 2.0m/s² = 0.04m/s
+        self.assertGreater(lag(off), 0.08)
+        self.assertLess(abs(lag(on)), 0.06)
+        self.assertLess(abs(lag(on)), 0.5 * lag(off))
+        self.assertLess(float(on.col("speed").max()), 2.4 + 0.08)        # 行き過ぎない
+
+    def test_speed_feedforward_is_off_while_braking(self):
+        """制動に入ったら傾きの記憶を捨てる（解いた直後に古い傾きのトルクを出さない）。"""
+        gain, rr = self._plant_gain()
+        params = {"speed_ff_nm_per_m_s2": 1.0 / gain, "speed_ff_rr_nm": max(rr, 0.0) / gain}
+        r = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(0.5, MODE_SPEED, 2.0, 2.0),
+                                                        S.Seg(0.6, MODE_BRAKE, 0.08)), 1.0), params)
+        self.assertLess(float(r.col("speed")[-1]), 0.6)
+        self.assertTrue(np.all(np.isfinite(r.col("speed"))))
+
     # ── ローンチコントロール（v0.20。`drive.h` の同名の節）──
 
     def _launching(self, r) -> np.ndarray:

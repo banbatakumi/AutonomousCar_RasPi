@@ -39,7 +39,7 @@ telemetry_node も 50Hz で `cmd`（操縦者不在なら DISARM）を流して�
 ## 計画は入力が来たときだけ
 
 `scan`（LiDAR）は 10Hz、`auto/cmd` の発行は 50Hz（新しい判断はその場で1回多く送る。
-telemetry_node・io_node も中身の変化をその場で中継する。2026-09-26、平均約20ms短縮）。
+telemetry_node・io_node も中身の変化をその場で中継する。平均約20ms短縮）。
 同じ周で 5 回計算しても答えは変わらないので、**新しい周が来たときだけ** planner を回して結果を
 保持する（どのトピックが「入力」かは `Planner.input_topic` が決める。
 カメラ系 planner なら `scan/cam` のケイデンスがこれに当たる）。
@@ -96,7 +96,7 @@ def _poll_timeout_ms(wait_ns: int) -> int:
 #: `SensorGuard`・`DeadReckon` は `on_vehicle_state()` に**全サンプル**が来る前提。LATEST
 #: （CONFLATE、キュー長1）だと `plan()` が TELEMETRY の間隔（100Hz で10ms）より長い周では
 #: 途中のサンプルが捨てられる——地図作成の `plan()` は Mac で平均7ms・p99 28ms（Pi 5 は2〜3倍）
-#: なので、100Hz にした 2026-09-26 から常に落ちていた（2026-09-27 修正）。キューは約10秒分
+#: なので、100Hz なので常に落ちる。キューは約10秒分
 #: （freeze の最大1.6秒のブロックでも溢れない）。`self.sub.latest` は最後に受けた1件のまま
 VEHICLE_STATE_POLICY = Policy(conflate=False, hwm=1000)
 
@@ -152,6 +152,8 @@ class PlanningNode:
         self._plan_dt = 0.0
         self._plans = 0
         self._plan_hz = 0.0
+        self._plan_ms_max = 0.0             #: 直近1秒の `plan()` の最大 [ms]
+        self._ms_peak = 0.0
         self._hz_t0 = 0
         self._hz_n = 0
 
@@ -298,11 +300,12 @@ class PlanningNode:
         # ——全 planner に影響するので変えない）。時間で進むステップ列を持つ
         # システム同定 planner（`raspi/auto/sysid_*.py`）だけがこれを必要とする
         # ので、`_apply_e2e_model` の `reload_if_changed` と同じダックタイピング
-        # で「持っていれば呼ぶ」形にする（2026-08-31、試験開始前に勝手に進む・
+        # で「持っていれば呼ぶ」形にする（試験開始前に勝手に進む・
         # 中止しても止まらないという不具合の修正）
         set_engaged_fn = getattr(self.planner, "set_engaged", None)
         if set_engaged_fn is not None:
             set_engaged_fn(self.ctrl.engaged)
+        t_plan = time.perf_counter()
         try:
             st = self.planner.plan(scan, vs, self._params, dt)
         except Exception as e:
@@ -314,6 +317,8 @@ class PlanningNode:
                            reason=f"plannerが例外: {e}")
         st.engaged = self.ctrl.engaged
         st.scan_age_ms = (now_ns - scan.t_capture) / 1e6
+        st.plan_ms = (time.perf_counter() - t_plan) * 1000.0
+        self._ms_peak = max(self._ms_peak, st.plan_ms)
         self._plans += 1
         self._hz_n += 1
         if self._hz_t0 == 0:
@@ -322,9 +327,37 @@ class PlanningNode:
             self._plan_hz = self._hz_n * NS / (now_ns - self._hz_t0)
             self._hz_t0 = now_ns
             self._hz_n = 0
+            self._plan_ms_max, self._ms_peak = self._ms_peak, 0.0
         st.plan_hz = self._plan_hz
+        st.plan_ms_max = max(self._plan_ms_max, self._ms_peak)
         self.state = st
         return True
+
+    def _tick(self) -> None:
+        """点群の合間に、planner が持っていれば追従だけを計算し直す（`tick`、ダックタイピング）。
+
+        `plan()` は新しい周が来たとき（10Hz）しか走らない。その間も 50Hz で `auto/cmd` を
+        送っているが、中身は同じ値の繰り返しだった——3m/s では次の周までに 30cm 進む。
+        planner が「経路を追っているだけ」と判断した周期に限り、舵と速度を今の車両状態で
+        更新する（判断そのもの——止まる・避ける——は `plan()` のまま）。
+        """
+        fn = getattr(self.planner, "tick", None)
+        st = self.state
+        if fn is None or not st.ready or st.brake:
+            return
+        try:
+            out = fn(self.sub.latest.get(TOPIC_VEHICLE_STATE))
+        except Exception as e:                      # noqa: BLE001  直前の判断のまま送る
+            print(f"# {self.planner.name} の tick() が例外: {e}", file=sys.stderr, flush=True)
+            return
+        if out is None:
+            return
+        steer, speed, ramp = out
+        if steer is not None:
+            st.target_steer = st.heading = float(steer)
+        if speed is not None:
+            st.target_speed = float(speed)
+            st.accel_limit = float(ramp)
 
     def _current(self, now_ns: int) -> AutoState:
         """今この瞬間に有効な判断。**古い点群で走らせない。**
@@ -434,7 +467,7 @@ class PlanningNode:
             # **次の定期送信（auto/cmd・ハートビート）の期限までブロックする。**
             # 0 にすると CPU を 1 コア食い潰す。入力が届けば poll はその場で返るので
             # 再計画の遅れは増えない。以前の固定 2ms は入力が無くても 500Hz で起きていた
-            # （planning_node を止めると制御系電流が約12mA下がる。2026-10-04 実測）
+            # （planning_node を止めると制御系電流が約12mA下がる実測）
             wait_ns = min(next_cmd, next_hb) - time.monotonic_ns()
             for topic, msg in self.sub.poll(_poll_timeout_ms(wait_ns)):
                 if topic == TOPIC_AUTO_CTRL:
@@ -454,8 +487,10 @@ class PlanningNode:
 
             now = time.monotonic_ns()
             planned = self._replan(now)
+            if not planned and now >= next_cmd:
+                self._tick()
 
-            # **新しい判断はその場で送る**（2026-09-26）。50Hz の定期送信を待つと平均10ms・
+            # **新しい判断はその場で送る**。50Hz の定期送信を待つと平均10ms・
             # 最大20ms遅れていた。定期送信（途絶判定の鮮度を保つ繰り返し）はそのまま残し、
             # 送る中身は同じ `_cmd_from(_current())` を通す（判断が2通りにならない）。
             # 即送った後は次の定期送信を1周期後ろへずらす（ほぼ同時の重複を避ける。

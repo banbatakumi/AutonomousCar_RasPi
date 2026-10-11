@@ -218,7 +218,7 @@ class _CountingWriter:
         self.count = 0
 
     def write(self, b) -> int:
-        # **全部書けるまで繰り返す**（2026-10-06）。`python -u` の `sys.stdout.buffer` は
+        # **全部書けるまで繰り返す**。`python -u` の `sys.stdout.buffer` は
         # バッファ無しの `FileIO` で、`write()` は1回のシステムコールしかしない。パイプが
         # 詰まって待っている間にシグナル（記録停止の SIGTERM）が来ると**途中までで戻る**。
         # 残りを捨てるとチャンクが途中で切れ、以降のオフセットも合わなくなる（実機で、
@@ -323,7 +323,7 @@ class McapLog:
         self.written = 0
 
         #: `self._w`（`mcap.writer.Writer`）が OSError（ENOSPC 等）で失敗した回数。
-        #: `raspi/core/jpeg.py` の `RingJpeg.errors` と同じ形（2026-09-11）
+        #: `raspi/core/jpeg.py` の `RingJpeg.errors` と同じ形
         self.errors = 0
         self.last_error: str = ""
         #: True なら以後このファイルには何も書かない（`framelog.FrameLogWriter`

@@ -82,7 +82,7 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
 `auto_stop`・`brake_torque`・レートリミットは**GUI が送ってきた値のまま**通す。
 自律走行中に前照灯の操作だけ効かなくなる理由が無いため。
 
-## 公開面の守り方（2026-08-21 のレビュー指摘）
+## 公開面の守り方
 
 制御 API を持つサーバなので、**既定は安全側**に倒してある。
 
@@ -229,20 +229,19 @@ CAM_E2E_MODELS_DIR = MODELS_DIR / "cam_e2e"
 #: 選ばれているカメラE2Eモデル名。`CAM_MODEL_CONF` と同じ流儀
 CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
-#: 無ければここを読む。無ければトークン無し（＝従来どおり誰でも操縦権を取れる）
+#: 無ければここを読む。無ければトークン無し（＝誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
 
 TELEMETRY_HZ = 20
 CMD_PUB_HZ = 50
-#: GUIへ配信する既定のJPEG頻度。当初は`docs/architecture.md` §9の帯域見積もり
-#: （640×480 JPEG q70 @15fps ≒ 7Mbps）を理由に15で始めたが、2026-08-24に実機で
-#: 前後カメラ同時30fps配信を検証——**帯域自体は問題なかった**。ただし当時の
-#: `_camera_pump` は相対 `sleep` でドリフトしており実測22fps止まりだったのを
-#: 絶対時刻スケジューリングに直して解消済み（同日）。以後は既定30
+#: GUIへ配信する既定のJPEG頻度。`docs/architecture.md` §9の帯域見積もり
+#: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で前後カメラ同時30fps配信を
+#: 検証して帯域は問題なかったので既定30。`_camera_pump` は絶対時刻スケジューリング
+#: （相対 `sleep` だとドリフトして実測22fps止まりになる）
 CAMERA_HZ = 30
 HB_HZ = 10
 #: capture側(camera_node)のFPS上限の許容範囲、および前後カメラそれぞれの既定値。
-#: 2026-08-24の実機計測で「30→10fpsで全体消費電力が約13〜15%下がる・
+#: 実機計測で「30→10fpsで全体消費電力が約13〜15%下がる・
 #: 10→5fpsはほぼ横ばい」と分かった一方、GUI配信を30fpsにしても問題ないことも
 #: 実機で確認できたため、**前カメラは自動運転の応答性を優先して既定30**（ほぼ
 #: 常に画角内の変化を追う）、**後カメラはGUI表示とロギング専用**（駐車・後退の
@@ -252,7 +251,7 @@ CAM_REAR_FPS_DEFAULT = 10.0
 CAM_FPS_MIN = 1.0
 CAM_FPS_MAX = 30.0
 #: **DISARM中**（駐車中・STM32側で`armed=False`）の既定値。カメラは28%を
-#: 占める大口の消費電力源なので、走っていない間はさらに絞る（2026-09-03）。
+#: 占める大口の消費電力源なので、走っていない間はさらに絞る。
 #: 後方カメラは駐車監視の用途が無いので既定で止める
 CAM_FRONT_FPS_DISARM_DEFAULT = 10.0
 CAM_REAR_ENABLED_DISARM_DEFAULT = False
@@ -313,15 +312,15 @@ PI_HEALTH_PUMP_HZ = 1
 HB_POLICY = Policy(conflate=False, hwm=200)
 #: 安全タイマの正。**`config/vehicle.toml` の `[safety]` が唯一の出どころ**で、
 #: io_node は同じファイルから、GUI は `config/generate.py` の生成物から読む
-#: （2026-08-21 のレビュー 🟢11）
+#: 
 _SAFETY = Vehicle.load()
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
 #: バスを覗きに行く間隔（`auto/cmd` の到着で起きられない構成＝テストの偽物の `sub` だけ）。
-#: 2026-09-27 に 5→1ms（即時の経路に平均2.5ms・最大5ms残っていた）
+#: 1ms（長いと即時の経路に平均2.5ms・最大5ms残る）
 BUS_POLL_S = 0.001
-#: `auto/cmd` が来ない間にバスを覗きに行く間隔（2026-10-06）。実機では `auto/cmd` の到着で
+#: `auto/cmd` が来ない間にバスを覗きに行く間隔。実機では `auto/cmd` の到着で
 #: 起きるので（`_bus_pump`）、これは他のトピック（`vehicle_state`・ハートビート等）を
 #: `sub.latest` へ取り込む周期。ARM/DISARM の切り替え（`_on_armed_change`）の遅れもこの値まで
 BUS_IDLE_POLL_S = 0.01
@@ -381,7 +380,7 @@ PI_THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
 
 
 def _read_pi_temp_c() -> float | None:
-    """RasPi 本体の CPU 温度。GUI のラジコンビュー温度計に出す（2026-08-17）。
+    """RasPi 本体の CPU 温度。GUI のラジコンビュー温度計に出す。
 
     `vcgencmd` はサブプロセス起動を挟む分だけ重く環境依存も増えるので使わない。
     このパスは Pi 5 / Debian Trixie でも変わらず、20Hz で毎回開いても軽いので
@@ -517,8 +516,8 @@ class TelemetryServer:
         #: planner のパラメータ。`config/auto.json` に保存され、次回起動で戻る
         self._auto_params: dict[str, float] = {}
         #: 今のモード以外のパラメータ。`{モード: {キー: 値}}`。**モードを切り替えても
-        #: 元のモードの値を失わないため**（以前は今のモードの分しか持たず、別のモードや
-        #: システム同定タブへ行って戻ると既定値に戻っていた、2026-10-06）。
+        #: 元のモードの値を失わないため**（持たないと、別のモードや
+        #: システム同定タブへ行って戻ると既定値に戻る）。
         #: 今のモードの値は `_auto_params` が正で、ここへは切替・保存のときに写す
         self._auto_params_by_mode: dict[str, dict[str, float]] = {}
         #: 名前付きのパラメータ（`AUTO_PRESETS_CONF`）。`{モード: {名前: {キー: 値}}}`
@@ -588,7 +587,7 @@ class TelemetryServer:
 
         # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
         #: `config/camera.json` に保存され、次回起動で戻る（`auto.json` と同じ流儀）。
-        #: ARM中/DISARM中で別々の値を持つ（2026-09-03、`_desired_front_fps`/
+        #: ARM中/DISARM中で別々の値を持つ（`_desired_front_fps`/
         #: `_desired_rear_enabled` 参照）。`rear_fps` はDISARM中は使われない
         #: （後方カメラごと止める）ので ARM 用の1本だけでよい
         self._cam_rear_enabled_armed = True
@@ -962,7 +961,7 @@ class TelemetryServer:
                 # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
                 self.bad_cmds += 1
                 return
-            # **遅れて届いた「走れ」は捨てる**（2026-10-06）。Wi-Fi が詰まると GUI の指令は
+            # **遅れて届いた「走れ」は捨てる**。Wi-Fi が詰まると GUI の指令は
             # ブラウザと TCP に溜まり、復帰した瞬間にまとめて届く。受信時刻だけで鮮度を
             # 見ると、何十秒も前の ARM でデッドマンが「生きている」に戻り、人の操作なしに
             # 走り出す。**止める指令（DISARM・`arm=false`）は遅れていても通す**
@@ -970,7 +969,7 @@ class TelemetryServer:
             if late_ms > _SAFETY.cmd_deadman_ms and cmd.arm and cmd.mode != 0:
                 self.stale_cmds += 1
                 return
-            # **中身が変わったらその場で `/cmd` へ**（2026-09-27）。50Hz の `_cmd_pump` を待つと
+            # **中身が変わったらその場で `/cmd` へ**。50Hz の `_cmd_pump` を待つと
             # GUI の 50Hz と非同期で平均10ms・最大20ms遅れ、人のブレーキも同じだけ遅れた。
             # 同じ中身の繰り返し（スティックを保持中）は送らない——デッドマンの鮮度だけ更新し、
             # 定期送信に任せる。Wi-Fi の詰まりでまとめて届いても、変化したものだけが順に出る
@@ -1071,7 +1070,7 @@ class TelemetryServer:
         elif kind == "track_roi_clear":
             self._on_track_roi_clear()
 
-        # ── TC/TV 有効切り替え（誰でも操作できる。★v0.8） ──
+        # ── TC/TV 有効切り替え（誰でも操作できる） ──
         # STM32側の適用結果は `diag/link`(tc_enabled/tv_enabled) 経由で戻ってくるので
         # ここでは broadcast しない（fan と違いサーバ内で完結する状態を持たないため）
 
@@ -1081,27 +1080,27 @@ class TelemetryServer:
             if "tv" in m:
                 self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tv_enable", value=bool(m["tv"])))
 
-        # ── 片輪浮き対策（誰でも操作できる。TC/TV本体とは独立した別機構。★v0.9） ──
+        # ── 片輪浮き対策（誰でも操作できる。TC/TV本体とは独立した別機構） ──
 
         elif kind == "wheel_lift_guard":
             if "enabled" in m:
                 self.pub.send(TOPIC_UI_EVENT,
                                UiEvent(kind="wheel_lift_guard_enable", value=bool(m["enabled"])))
 
-        # ── ABS（誰でも操作できる。★v0.15）。適用結果は `diag/link`(abs_enabled) で戻る ──
+        # ── ABS（誰でも操作できる）。適用結果は `diag/link`(abs_enabled) で戻る ──
 
         elif kind == "abs":
             if "enabled" in m:
                 self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="abs_enable", value=bool(m["enabled"])))
 
-        # ── ブレーキホールド（誰でも操作できる。★v0.19）。適用結果は `diag/link`(brake_hold_enabled) で戻る ──
+        # ── ブレーキホールド（誰でも操作できる）。適用結果は `diag/link`(brake_hold_enabled) で戻る ──
 
         elif kind == "brake_hold":
             if "enabled" in m:
                 self.pub.send(TOPIC_UI_EVENT,
                                UiEvent(kind="brake_hold_enable", value=bool(m["enabled"])))
 
-        # ── 自動停止の安全マージン[cm]（誰でも操作できる。★v0.12） ──
+        # ── 自動停止の安全マージン[cm]（誰でも操作できる） ──
         # STM32側の適用結果は tc_tv/wheel_lift_guard と同様
         # `diag/link`(auto_stop_margin_cm) 経由で戻ってくるのでここでは broadcast しない
 
@@ -1174,7 +1173,7 @@ class TelemetryServer:
         # ── シャットダウン（誰でも実行できる。estop と同じく、走行の操縦権とは無関係。
         #    誤操作は GUI 側の window.confirm で防ぐ——操縦権を要求すると
         #    「操縦権が無い接続には holder="" の control_denied が返るだけで GUI に
-        #    何も表示されない」という無反応バグになる。2026-08-25 実機で発覚） ──
+        #    何も表示されない」という無反応バグになる。実機で発覚） ──
 
         elif kind == "shutdown":
             await self._shutdown_pi()
@@ -1188,7 +1187,7 @@ class TelemetryServer:
             pass  # sudoers 未設定等。GUI 側は反応が無ければ気付ける
 
     def _token_ok(self, m: dict) -> bool:
-        """共有トークンの照合。**未設定なら常に通す**（従来どおりの挙動）。
+        """共有トークンの照合。**未設定なら常に通す**。
 
         学内デモで攻撃者を想定するというより、**隣の班の PC が誤接続する事故**を
         防ぐ意味が大きい。だから掛けるのは「操縦権を取る」ときだけで、
@@ -1262,7 +1261,7 @@ class TelemetryServer:
             auto_stop=bool(m.get("auto_stop", False)),
             # v0.13: サイドブレーキ。**ここへの追加が漏れていたため、GUI 側は
             # 「要求中」と表示されるのに実際には一切 STM32 へ届いていなかった**
-            # （2026-08-30 発覚）。DriveCmd に新しいトグル系フィールドを足したら
+            # 。DriveCmd に新しいトグル系フィールドを足したら
             # 必ずここも直すこと——型を直しただけでは WS の JSON から拾われない
             side_brake=bool(m.get("side_brake", False)),
             # v0.20: ローンチコントロール（手動操作。GUI がブレーキ＋アクセル→ブレーキを離す、の手順を
@@ -1512,7 +1511,7 @@ class TelemetryServer:
 
         どれも省略可。`_on_auto`/`_on_fan` と同じく**サーバ側でも必ずクランプする**。
         `*_armed`/`*_disarm` は capture 側（camera_node）のFPS上限・後方ON/OFFで、
-        ARM/DISARM（`vs.armed`）ごとに別の値を持つ（2026-09-03、駐車中の節電のため）。
+        ARM/DISARM（`vs.armed`）ごとに別の値を持つ。
         `gui_hz` はブラウザへ配信するJPEGの頻度で、ARM状態と無関係（Wi-Fi帯域が理由）。
         `undistort` は配信映像の魚眼補正（校正済みのカメラだけに効く）。
         """
@@ -1564,17 +1563,17 @@ class TelemetryServer:
         既定で止める。ARM中はユーザー設定（`rear_enabled_armed`）に従う。
 
         前カメラと違い、DISARM中に GUI で表示していても設定（`rear_enabled_disarm`）を
-        優先する（2026-10-04、バンビ判断。駐車中に後方映像は要らない）。"""
+        優先する。"""
         return self._cam_rear_enabled_armed if self._vehicle_armed() \
             else self._cam_rear_enabled_disarm
 
     def _desired_front_enabled(self) -> bool:
-        """前カメラの capture ON/OFF（2026-10-04、省電力）。
+        """前カメラの capture ON/OFF。
 
         ARM中は常に撮る（手動操縦の映像・カメラ系の自動運転）。DISARM中は映像を使う者
         （GUI の視聴者・記録）がいる間だけ撮る。カメラ系の知覚ノードは DISARM 中は
         推論しない（`auto_gate.cam_infer_active`）ので数に入れない。センサを止めると
-        DISARM 中の 10fps より約63mA、1fps より約45mA 少ない（docs/power_audit_2026-10.md P4）。
+        DISARM 中の 10fps より約63mA、1fps より約45mA 少ない（docs/archive/power_audit_2026-10.md P4）。
         ARM した瞬間に `_on_armed_change` が即座に再開を頼む（再開まで数百ms）。"""
         return self._vehicle_armed() or self._cam_in_use_while_disarmed("front")
 
@@ -1811,7 +1810,7 @@ class TelemetryServer:
         振り分けられない1つの受け皿）で混ざらないよう分けてある。
 
         `note`（`ml_cam/export_onnx.py`が`<名前>.json`に書く自由記述の備考。
-        `_e2e_models_list()`と同じ流儀。2026-08-29追加）も一緒に返す。
+        `_e2e_models_list()`と同じ流儀）も一緒に返す。
         `.json`が壊れていても一覧自体は壊さない（空文字で返す）。
         """
         files = []
@@ -1887,8 +1886,7 @@ class TelemetryServer:
         （要求したクライアントにだけ返す）。**キー名は `e2e_model_files`**
         （`cam_model_files` と型は同じだが、GUI側の受け皿で混ざらないよう分ける）。
 
-        `note`（`ml_lidar/export_onnx_rl.py`が`<名前>.json`に書く自由記述の備考。
-        2026-08-29追加）も一緒に返す——GUIのモデル選択でどんな変更・どのコースかを
+        `note`（`ml_lidar/export_onnx_rl.py`が`<名前>.json`に書く自由記述の備考）も一緒に返す——GUIのモデル選択でどんな変更・どのコースかを
         確認できるようにするため。`.json`が壊れていても一覧自体は壊さない（空文字で返す）。
         """
         return {"type": "e2e_models", "e2e_model_files": _onnx_model_files(E2E_MODELS_DIR)}
@@ -2006,7 +2004,7 @@ class TelemetryServer:
         （`_on_cam_model`/`_on_e2e_model` の「モデルを変えたら engage を必ず落とす」
         と同じ理由——前の対象のつもりで engage したまま追跡対象だけ入れ替わるのを防ぐ）。
 
-        **DISARM 中の選択は受け付けない**（2026-10-04、バンビ判断）。cam_track_node は
+        **DISARM 中の選択は受け付けない**。cam_track_node は
         DISARM 中は追跡しない（省電力）ので、受け付けると GUI に枠が出ないまま ARM 後に
         突然追跡が始まる。GUI もドラッグを無効にして案内を出す（`CameraView.tsx`）。
         """
@@ -2105,17 +2103,17 @@ class TelemetryServer:
             "tc_enabled": link.tc_enabled if link else None,
             "tv_enabled": link.tv_enabled if link else None,
             "wheel_lift_guard_enabled": link.wheel_lift_guard_enabled if link else None,
-            # 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）は、ここ（`status`、
+            # 車両の物理的な上限値（`LIMITS` パケット由来）は、ここ（`status`、
             # イベント発生時にしかbroadcastされない）ではなく `LinkDiag`（`/ws/telemetry`
             # 8Hz、`bus/live.ts`）から出す。`tc_enabled`/`wheel_lift_guard_enabled` と
-            # 同じ理由（2026-08-19 実機で発覚）: status から読むと、受信が status の
+            # 同じ理由: status から読むと、受信が status の
             # 最後のbroadcastより後になった場合に GUI が更新されずリロードするまで
             # 気づかない
             "clients": {"telemetry": len(self.telemetry_clients),
                         "control": len(self.control_clients),
                         "camera": {k: len(v) for k, v in self.camera_clients.items()}},
             "camera_encoder": self._jpeg_impl,
-            # JPEG エンコードの実測（2026-08-21 のレビュー 🟡7）。
+            # JPEG エンコードの実測。
             # **同じフレームを logger_node も焼いている。** 素朴な共通化は
             # 「誰も見ていない間も camera_node が焼き続ける」形になって idle が
             # 悪化するので、まず本当にボトルネックかをここで見えるようにした
@@ -2200,11 +2198,11 @@ class TelemetryServer:
         書き込みがブロックしてしまう（Piには保存しないので読んだ分は捨てるだけ）。
         """
         assert proc.stdout is not None
-        # **最初の視聴者が繋がるまでの分は捨てずに取っておく**（2026-10-05）。ブラウザは `/ws/record` を
+        # **最初の視聴者が繋がるまでの分は捨てずに取っておく**。ブラウザは `/ws/record` を
         # 開くのと同時に記録開始を送るので、logger_node の最初の出力（MCAP のマジック・ヘッダ）が
         # `/ws/record` の接続より先に届くことがある。捨てると先頭の欠けた mcap になり、普通の
         # リーダでは開けない（実機で `sysid_wheel` の記録がこうなった: "invalid magic"）。
-        # 一度でも視聴者が付いた後は従来どおり捨てる（視聴者が去った＝もう要らない）
+        # 一度でも視聴者が付いた後は捨てる（視聴者が去った＝もう要らない）
         backlog: list[bytes] = []
         backlog_bytes = 0
         had_client = False
@@ -2355,7 +2353,7 @@ class TelemetryServer:
         デコード処理をそのまま再利用できる）で返す。
 
         **「レーシングライン走行」を押す前に地図を見せ、自己位置ヒントを
-        クリックで指定できるようにする**ため（バンビの指示、2026-09-03）。
+        クリックで指定できるようにする**ため（バンビの指示）。
         `map_seq`は常に0にしてある——プレビューは`/ws/map`の版番号の連番とは
         無関係な一回きりの取得なので、意味を持たせない。
         """
@@ -2459,8 +2457,8 @@ class TelemetryServer:
         （`_on_auto_cmd`）。
 
         **`auto/cmd` のソケットに届いたら起きる。届かない間は `BUS_IDLE_POLL_S` ごと**
-        （2026-10-06）。以前は 1ms ごとに13本のソケットを覗いていて、それだけで CPU を
-        約8%使っていた（Pi 5・1.5GHz で実測。この形で約4%）。即時中継の待ちも 1ms 周期の
+        1ms ごとに13本のソケットを覗くと、それだけで CPU を
+        約8%使う（Pi 5・1.5GHz で実測。この形で約4%）。即時中継の待ちも 1ms 周期の
         平均 0.8ms から 0.35ms に縮む。
         """
         wake, fd = self._watch_auto_cmd()
@@ -2502,7 +2500,7 @@ class TelemetryServer:
         return wake, fd
 
     def _on_armed_change(self) -> None:
-        """ARM/DISARM が変わった周に、それに連動する省電力設定を切り替える（2026-10-04）。
+        """ARM/DISARM が変わった周に、それに連動する省電力設定を切り替える。
 
         - CPU の上限周波数（DISARM 1.5GHz / ARM 2.0GHz。`raspi/io/cpufreq.py`）
         - カメラの capture（DISARM 中は使う者がいなければ止める。`_desired_front_enabled`）
@@ -2524,7 +2522,7 @@ class TelemetryServer:
                                   else CPU_MAX_KHZ_DISARM)
 
     def _on_auto_cmd(self, now: int) -> None:
-        """新しい判断（`auto/cmd` の中身の変化）を `/cmd` へ即座に中継する（2026-09-26）。
+        """新しい判断（`auto/cmd` の中身の変化）を `/cmd` へ即座に中継する。
 
         50Hz の `_cmd_pump` を待つと平均10ms・最大20ms遅れていた。送る中身は定期送信と
         **同じ `_publish_cmd`**（デッドマン・人間のブレーキ・`auto/cmd` の鮮度の判定を含む）
@@ -2626,7 +2624,7 @@ class TelemetryServer:
 
     def _relay_now(self) -> None:
         """人の操作（E-Stop・操縦権の取得と解放・自律の解除・GUI の指令の変化）を、次の定期送信
-        （50Hz、最大20ms後）を待たずに `/cmd` へ出す（2026-09-27）。自律の「走れ」は即時なのに
+        （50Hz、最大20ms後）を待たずに `/cmd` へ出す。自律の「走れ」は即時なのに
         人の「止まれ」が遅れていた。判断は定期送信と同じ `_publish_cmd` を通す。"""
         self._publish_cmd(time.monotonic_ns())
 
@@ -2634,7 +2632,7 @@ class TelemetryServer:
         """今この瞬間の `/cmd` を1つ決めて送る。定期送信（`_cmd_pump`）と、新しい判断の
         即時送信（`_on_auto_cmd`・`_relay_now`）が**この1箇所**を通る。"""
         last = self._last_cmd
-        # **自律走行中は GUI の指令の途絶を長く待つ**（2026-10-06）。走らせているのは planner で、
+        # **自律走行中は GUI の指令の途絶を長く待つ**。走らせているのは planner で、
         # GUI の指令は「人が ARM したまま」を伝えているだけ。Wi-Fi の瞬断で止める理由が無い。
         # planner の指令が古くなれば `_merge_auto` が制動に読み替えるのは変わらない
         riding_auto = (last is not None and last.mode == 2 and last.arm
@@ -2646,7 +2644,7 @@ class TelemetryServer:
             if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
                 cmd = self._merge_auto(cmd, now)
             else:
-                # **`_last_cmd` そのものを送らない**（2026-10-06）。`pub.send` は渡した msg に
+                # **`_last_cmd` そのものを送らない**。`pub.send` は渡した msg に
                 # `seq`/`t_pub` を押すので、`_on_control` の「前回と同じ中身か」の比較が
                 # 常に不一致になり、手動操縦中は GUI の指令を毎回その場で中継していた
                 # （実機で `/cmd` が 50Hz のはずが 97Hz。定期送信と合わせて2倍）
@@ -2856,7 +2854,7 @@ class TelemetryServer:
         last_seq = {"front": -1, "rear": -1}
         #: **相対 `sleep(period)` ではなく絶対時刻で刻む。** 前後カメラ2台ぶんの
         #: エンコード＋送信（数ms）が毎周期そのまま次の待ちに積み増しされると、
-        #: 目標30fpsのつもりが実測22fps止まりになる（2026-08-24 実機で発覚）。
+        #: 目標30fpsのつもりが実測22fps止まりになる。
         #: 遅れが大きすぎるとき（クライアント遅延等）は基準を今に取り直し、
         #: 積み残しを一気に消化しようとして詰まるのを防ぐ
         next_tick = time.monotonic()
@@ -2967,7 +2965,7 @@ class TelemetryServer:
 
 # ── HTTP ヘルパ ─────────────────────────────────────────────────────
 
-#: systemd が unit の動作中だけ置くファイル（止まると消える。実機で確認、2026-10-04）
+#: systemd が unit の動作中だけ置くファイル（止まると消える。実機で確認）
 LOGGER_UNIT_MARKER = "/run/systemd/units/invocation:surge-logger.service"
 
 

@@ -437,9 +437,9 @@ class CameraNode:
         try:
             while True:
                 # **どちらか1台でも死んだら／ハングしたらノード全体を終了させる。**
-                # 以前は `any(is_alive())`（全滅するまで回り続ける）だったため、
-                # 前後どちらか1台だけ死んだ場合はもう1台が生きている限り
-                # プロセスが生き続け、誰も気づかなかった（issue #4）。
+                # `any(is_alive())`（全滅するまで回り続ける）だと、
+                # 前後どちらか1台だけ死んでももう1台が生きている限り
+                # プロセスが生き続け、誰も気づかない（issue #4）。
                 # `capture_request()` がブロックしたまま戻らないハングは
                 # スレッドが `is_alive()` のままなので、`last_grab_ns` の
                 # 停滞で別途検出する
@@ -622,8 +622,8 @@ def main() -> int:
             pub.close()
         node.close()
     # **いずれかのワーカーにエラーが残っていれば exit 1。**
-    # 以前は常に `return 0` していたため、カメラが全滅・ハングしても
-    # systemd の `Restart=on-failure` が発火せず恒久停止していた（issue #4）。
+    # 常に `return 0` だと、カメラが全滅・ハングしても
+    # systemd の `Restart=on-failure` が発火せず恒久停止する（issue #4）。
     # `--duration` を指定した正常終了（テスト・手動計測）ではどのワーカーにも
     # エラーが立たないので、ここは 0 のまま
     if any(wk.error for wk in node.workers):

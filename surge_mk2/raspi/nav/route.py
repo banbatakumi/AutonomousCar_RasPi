@@ -398,9 +398,9 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
 def _leg_via_loop(graph, geo, direct, b, db, turn_max, forbidden=frozenset()):
     """近すぎる `b` へ、**そのまま `b` を通り過ぎて1周してから**着く経路。
 
-    `direct`（今の位置→`b`）に「`b` を出て `b` へ戻る1周」をつなぐ。★以前は「今のエッジを
-    `min_len` 先まで進んだ点」を経由していたが、その点はエッジの端で頭打ちになるので、
-    停止点が次のエッジにあると1周にならず、止まり切れない短い経路がそのまま返っていた。
+    `direct`（今の位置→`b`）に「`b` を出て `b` へ戻る1周」をつなぐ。「今のエッジを
+    `min_len` 先まで進んだ点」を経由する方式は、その点がエッジの端で頭打ちになり、
+    停止点が次のエッジにあると1周にならない（止まり切れない短い経路になる）ので使わない。
     1周できる道が無ければ（行き止まりの先など）`direct` のまま返す。
     """
     loop = _leg(graph, geo, b, db, b, db, turn_max, forbidden)
@@ -551,11 +551,12 @@ def build_raceline(base_grid, graph: RoadGraph, route: RoutePath, *, half_width:
                    step: float = 0.10, max_width: float = 3.0,
                    v_start: float | None = None, v_end: float | None = None,
                    kappa_max: float | None = None, footprint=None,
-                   time_iters: int = 0) -> tuple[rl_mod.RaceLine, cl_mod.Centerline]:
+                   time_iters: int = 0, a_grip: float | None = None,
+                   refine_evals: int = 0, refine_starts: int = 1,
+                   ) -> tuple[rl_mod.RaceLine, cl_mod.Centerline]:
     """経路 → 中心線 → レーシングライン（回廊の上で、モジュール docstring 参照）。
 
-    :param kappa_max: 車の曲がれる限界の曲率 [1/m]（`Vehicle.kappa_max`。同定した舵の効き込み）。
-        与えると、限界に近い区間で横Gの余裕を削る（`raceline.speed_profile`）
+    :param kappa_max: 経路に許す曲率の上限 [1/m]（車の曲がれる限界 × 余裕、`raceline.optimize`）
     """
     corridor = CorridorGrid(base_grid, graph, route.edge_ids, route.node_ids(graph))
     if route.closed:
@@ -569,5 +570,6 @@ def build_raceline(base_grid, graph: RoadGraph, route: RoutePath, *, half_width:
                          a_accel=a_accel, a_brake=a_brake, max_width=max_width,
                          front_overhang=front_overhang, rear_overhang=rear_overhang,
                          v_start=v_start, v_end=v_end, kappa_max=kappa_max,
-                         footprint=footprint, time_iters=time_iters)
+                         footprint=footprint, time_iters=time_iters, a_grip=a_grip,
+                         refine_evals=refine_evals, refine_starts=refine_starts)
     return rl, cl

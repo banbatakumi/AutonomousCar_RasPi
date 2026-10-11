@@ -51,7 +51,7 @@ class FollowObject(Planner):
 
     #: `cam_track_node.py` が publish する追跡結果を使う（`Scan` ではない）
     input_topic = TOPIC_TRACK_TARGET
-    #: `cam_track_node`の実測ループ周期（2026-09-01、実車計測：待機/追跡とも
+    #: `cam_track_node`の実測ループ周期（実車計測：待機/追跡とも
     #: 中央値約20ms・p90約30ms、NanoTrack推論はボトルネックにならない）の
     #: 10倍以上の余裕を見つつ、`ftg_cam`/`line_trace`（500ms、CPU推論を前提に
     #: 大きめ）より十分短くして、cam_track_nodeが落ちたときの検出を速くする

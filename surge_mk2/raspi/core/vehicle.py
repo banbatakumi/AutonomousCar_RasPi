@@ -11,12 +11,12 @@
 ## ★ 実測が残っているのはアクチュエータの動特性だけ
 
 `wheelbase`・`track`・ステアのリンク比（`max_steer` に反映済み）・`wheel_radius`・
-車体外形・センサ取付は 2026-08-20 に実測確定済み（§15 #2〜#4。後輪はダイレクト
-ドライブでギア比の概念が無いため #3 は車輪半径だけで確定）。残るは `[dynamics]`
+車体外形・センサ取付は実測確定済み（後輪はダイレクト
+ドライブでギア比の概念が無く、車輪半径だけで確定）。残るは `[dynamics]`
 （操舵のむだ時間・1次遅れなど）だけ。
 **`measured` を見て「この数字を信じてよいか」を呼び出し側が判断できる**ようにしてある。
 
-## カメラのレンズは「プロファイル」を1行で選ぶ（2026-10-03）
+## カメラのレンズは「プロファイル」を1行で選ぶ
 
 純正レンズ（≒66°）と IMX219 160° 広角を付け替えられるように、レンズで変わる値
 （`hfov`・`bottom_crop`・`undistort_hfov`・魚眼の校正値 `fisheye`）は
@@ -39,6 +39,7 @@ from .camera_model import FisheyeCalib
 __all__ = ["Vehicle", "DEFAULT_PATH", "resolve_lens", "LENS_NAME_RE"]
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
+GRAVITY = 9.81
 
 #: レンズ名に使える文字。📷 のファイル名（`surge_front_<lens>_640x360_…png`）に
 #: 入るので `_` は使わせない（校正ツールが名前を区切れなくなる）
@@ -72,6 +73,18 @@ def resolve_lens(cam: dict, *, strict: bool = False) -> dict:
     base["lens"] = str(name)
     return base
 
+
+
+def _ramp_max(dyn: dict, safety: dict) -> float:
+    """目標速度のランプの上限 [m/s²]。`[safety] cmd_accel_limit_m_s2`（v0.22〜、Pi が送る上限）。
+
+    旧キー `[dynamics] speed_ramp_max_m_s2`（STM32 の固定上限だった頃の値）が残っている toml は
+    そちらを読む。どちらも無ければ 3.0（STM32 が `accel_limit=0` のときに使う既定の傾き）。
+    """
+    if "speed_ramp_max_m_s2" in dyn:
+        return float(dyn["speed_ramp_max_m_s2"])
+    v = float(safety.get("cmd_accel_limit_m_s2", 0.0))
+    return v if v > 0.0 else 3.0
 
 @dataclass(frozen=True, slots=True)
 class Vehicle:
@@ -141,6 +154,33 @@ class Vehicle:
     #: 路面舵角 = gain·x + cubic·x³、x = モータ角×0.5。**舵角の数値の意味はこれで決まる**——
     #: 別の換算のもとで学習したモデルの舵角は `control_params.steer_relink` で直す
     steer_link: tuple[float, float] = (1.0, 0.0)
+    # ── 走りの限界（`[dynamics]` の同定値。**経路の速度と減速開始点はここから決める**）──
+    #: 横方向グリップ係数（限界の横加速度 = mu·g）。0 = 未同定
+    mu: float = 0.0
+    #: 速度PIが出せる駆動・減速の加速度の上限 [m/s²]（転がり抵抗を引く前。0 = 未同定）
+    drive_accel_m_s2: float = 0.0
+    speed_decel_m_s2: float = 0.0
+    #: 駆動の上限が落ち始める速度と 0 になる速度 [m/s]（0 = 減衰なし）
+    drive_fade_speed_m_s: float = 0.0
+    drive_top_speed_m_s: float = 0.0
+    rolling_resistance: float = 0.0        #: 転がり抵抗による減速度 [m/s²]
+    #: STM32 の速度PI（ファームの定数）と車体の利得 [(m/s²)/(N·m)]。**速度指令の前倒しに使う**
+    speed_kp: float = 0.0
+    speed_ki: float = 0.0
+    speed_plant_gain: float = 0.0
+    #: 目標速度をならす傾きの上限 [m/s²]。**`[safety] cmd_accel_limit_m_s2`**（Pi が COMMAND に載せる
+    #: 上限。v0.22 で STM32 の固定上限 3.0 が無くなり、これが実効の上限になった）
+    speed_ramp_max_m_s2: float = 3.0
+    #: LiDAR の周の終わり → STM32 が COMMAND を受理するまで [s]
+    control_latency_s: float = 0.0
+    #: 曲率の2次遅れ（ヨー応答）の固有角振動数 [rad/s] と減衰比。0 = 無し
+    yaw_natural_freq_rad_s: float = 0.0
+    yaw_damping: float = 1.0
+    #: COMMAND に載る舵のレート制限 [rad/s]（`[safety]`。実機の舵は常にこの角速度でランプする）
+    cmd_steer_rate_limit_rad_s: float = 0.0
+    #: STM32 の車速PIの加速度フィードフォワードが有効か（`[control]` の `speed_ff_nm_per_m_s2` > 0、
+    #: ★v0.21）。有効なら速度指令は「プロファイルの速度＋その傾き」を渡すだけにする（`nav/speedctl.py`）
+    speed_ff_firmware: bool = False
     #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/architecture.md` §9.4）。
     #: **telemetry_node と io_node が独立に持つが、値はここ 1 つ**
     cmd_deadman_ms: float = 150.0
@@ -186,11 +226,59 @@ class Vehicle:
 
         `tan(max_steer)/wheelbase` ではなく、**同定した舵の効きを通す**: 指令 `max_steer` で
         届く実舵角 → 実効舵角 → 曲率。オフセットは左右で不利な側に取る。幾何だけだと 40cm、
-        同定値では 46cm で、40cm のつもりで引いた経路は曲がり切れなかった（2026-10-06 の実車）。
+        同定値では 46cm で、40cm のつもりで引いた経路は曲がり切れなかった（実車）。
         """
         d = self.steer_servo_gain * self.max_steer
         delta = self.steer_gain * d + self.steer_gain_cubic * d ** 3 - abs(self.steer_offset_rad)
         return math.tan(max(delta, 1e-3)) / self.wheelbase
+
+    # ── 走りの限界（同定値から。未同定の値は控えめな既定で埋める）──
+
+    @property
+    def a_lat_max(self) -> float:
+        """横加速度の限界 [m/s²]（`mu`·g）。未同定なら 3.5。"""
+        return self.mu * GRAVITY if self.mu > 1e-6 else 3.5
+
+    def a_accel_max(self, v: float = 0.0) -> float:
+        """速度 `v` で直線を加速できる上限 [m/s²]（転がり抵抗を引いた正味）。
+
+        `sim/vehicle.py` の `drive_accel_limit` と同じ形（`drive_fade_speed_m_s` から線形に落ちる）。
+        目標速度は `speed_ramp_max_m_s2`（Pi が送る `accel_limit` の上限）でならすので、それより上は出ない。"""
+        a = self.drive_accel_m_s2 if self.drive_accel_m_s2 > 1e-6 else 2.5 + self.rolling_resistance
+        vk, vt = self.drive_fade_speed_m_s, self.drive_top_speed_m_s
+        if vt > 1e-6 and vt > vk and abs(v) > vk:
+            a *= max(0.0, (vt - abs(v)) / (vt - vk))
+        return max(0.05, min(a - self.rolling_resistance, self.speed_ramp_max_m_s2))
+
+    @property
+    def a_decel_max(self) -> float:
+        """速度指令を下げたときの減速度の上限 [m/s²]（転がり抵抗を足した正味。`brake` は使わない）。"""
+        a = self.speed_decel_m_s2 if self.speed_decel_m_s2 > 1e-6 else 2.5 - self.rolling_resistance
+        return max(0.05, min(a + self.rolling_resistance, self.speed_ramp_max_m_s2))
+
+    @property
+    def speed_loop_tau_s(self) -> float:
+        """速度PIの比例項だけで見た時定数 [s]（= 1/(車体の利得×kp)）。
+
+        加速度 `a` を出すには目標を車速より `a`×この値だけ先へ置く必要がある——**目標速度を
+        そのまま送ると、車速はこの時間だけ遅れる**（実車の「約0.2s 遅れる」）。
+        未同定なら 0（前倒ししない）。"""
+        g = self.speed_plant_gain * self.speed_kp
+        return 1.0 / g if g > 1e-6 else 0.0
+
+    @property
+    def speed_loop_reset_s(self) -> float:
+        """速度PIの積分が比例項を引き継ぐ時定数 [s]（= kp/ki）。0 = 積分なし。"""
+        return self.speed_kp / self.speed_ki if self.speed_ki > 1e-9 and self.speed_kp > 1e-9 else 0.0
+
+    @property
+    def steer_delay_s(self) -> float:
+        """舵の指令が曲率に効くまでの遅れ [s]: 舵のむだ時間＋1次遅れ＋ヨーの2次遅れ（2ζ/ωn）。
+
+        **指令を送ってからの遅れだけ**（姿勢の古さ・通信は含まない。それは呼び出し側が足す）。"""
+        yaw = (2.0 * self.yaw_damping / self.yaw_natural_freq_rad_s
+               if self.yaw_natural_freq_rad_s > 1e-6 else 0.0)
+        return self.dead_time_s + self.tau_steer_s + yaw
 
     @property
     def steer_map(self):
@@ -260,6 +348,21 @@ class Vehicle:
             steer_offset_rad=float(dyn.get("steer_offset_rad", 0.0)),
             steer_link=(float(d.get("control", {}).get("steer_link_gain", 1.0)),
                         float(d.get("control", {}).get("steer_link_cubic", 0.0))),
+            mu=float(dyn.get("mu", 0.0)),
+            drive_accel_m_s2=float(dyn.get("drive_accel_m_s2", 0.0)),
+            speed_decel_m_s2=float(dyn.get("speed_decel_m_s2", 0.0)),
+            drive_fade_speed_m_s=float(dyn.get("drive_fade_speed_m_s", 0.0)),
+            drive_top_speed_m_s=float(dyn.get("drive_top_speed_m_s", 0.0)),
+            rolling_resistance=float(dyn.get("rolling_resistance", 0.0)),
+            speed_kp=float(dyn.get("speed_kp", 0.0)),
+            speed_ki=float(dyn.get("speed_ki", 0.0)),
+            speed_plant_gain=float(dyn.get("speed_plant_gain", 0.0)),
+            speed_ramp_max_m_s2=_ramp_max(dyn, safety),
+            control_latency_s=float(dyn.get("control_latency_s", 0.0)),
+            yaw_natural_freq_rad_s=float(dyn.get("yaw_natural_freq_rad_s", 0.0)),
+            yaw_damping=float(dyn.get("yaw_damping", 1.0)),
+            cmd_steer_rate_limit_rad_s=float(safety.get("cmd_steer_rate_limit_rad_s", 0.0)),
+            speed_ff_firmware=float(d.get("control", {}).get("speed_ff_nm_per_m_s2", 0.0)) > 0.0,
             cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),
             auto_link_grace_ms=float(safety.get("auto_link_grace_ms", 5000.0)),
             auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),

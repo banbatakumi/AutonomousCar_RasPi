@@ -400,6 +400,41 @@ class TestObstacleBrakeAndMdFault(unittest.TestCase):
         self.assertEqual(self.p._md_fault(st, self._vs(2.0, (0, 0, 0)), self.params), "")
 
 
+class TestObstaclePadFollowsPath(unittest.TestCase):
+    """`obstacle_pad` は、経路が壁にいちばん寄る所の壁までの距離まで詰める（実機 2026-10-11:
+    壁から 19cm の脚が、経路から壁まで 15〜17cm のラインの上で 0.4m 手前まで見つからなかった）。"""
+
+    RES = 0.025
+
+    def _planner(self, wall_y: float) -> Slam2dRaceLine:
+        from raspi.auto._slam2d_nav import occgrid_from_trinary
+        from raspi.nav.raceline import RaceLine
+
+        tri = np.ones((160, 200), dtype=np.uint8)                  # 4m×5m、全部空き
+        tri[int(round((wall_y + 2.0) / self.RES)), :] = 2          # 経路と平行な壁
+        p = Slam2dRaceLine()
+        p.slam.replace_grid_for_race(occgrid_from_trinary(
+            tri, resolution=self.RES, origin=(-1.0, -2.0), seq=1))
+        xy = np.column_stack([np.linspace(0.0, 3.0, 31), np.zeros(31)])
+        p.path = RaceLine(xy=xy, v=np.full(31, 1.0), kappa=np.zeros(31), length=3.0, closed=False)
+        return p
+
+    def _pad(self, wall_y: float, pad: float = 0.25) -> float:
+        return self._planner(wall_y)._obstacle_pad(Slam2dRaceLine.merged({"obstacle_pad": pad}))
+
+    def test_narrowed_to_the_wall_clearance_of_the_path(self):
+        self.assertAlmostEqual(self._pad(-0.20), 0.20, delta=0.03)
+
+    def test_not_narrowed_below_the_floor(self):
+        self.assertAlmostEqual(self._pad(-0.08), 0.15)
+
+    def test_unchanged_when_the_path_keeps_away_from_walls(self):
+        self.assertAlmostEqual(self._pad(-0.60), 0.25)
+
+    def test_a_smaller_setting_is_kept(self):
+        self.assertAlmostEqual(self._pad(-0.20, pad=0.10), 0.10)
+
+
 class TestKappaMax(unittest.TestCase):
     """最小旋回半径は幾何だけでなく、同定した舵の効きを通して決める。"""
 
@@ -642,7 +677,7 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         wide = {**params, "line_margin": 0.35}
         p.plan(scan, vs(), wide, 0.1)
         self.assertIsNotNone(p._line_job)
-        self.assertEqual(p._line_margin, 0.35)
+        self.assertEqual(p._line_built[0], 0.35)
         p._line_job.result(timeout=60)
         p.plan(scan, vs(), wide, 0.1)
         self.assertIsNone(p._line_job)                     # 同じ値では投げ直さない

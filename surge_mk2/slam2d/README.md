@@ -1,7 +1,6 @@
 # slam2d/ — 車体非依存の汎用2D LiDAR SLAM
 
-`raspi/nav/`（このリポジトリの自律走行ミニカー専用SLAM、2026-08-14に一旦棚上げ）を土台に、
-車体・センサ構成に依存しない汎用2D LiDAR SLAMライブラリとして一から設計し直したもの。
+車体・センサ構成に依存しない汎用2D LiDAR SLAMライブラリ。
 将来的にOSSとして単独公開できる品質を目指す。
 
 ## スコープ
@@ -17,7 +16,7 @@ Ackermanステア固有のロジック。これらは `core/motion.py` の `Moti
 `slam2d/` は `raspi.*` を一切 import しない。逆に `raspi/` 側が `slam2d/` を薄いアダプタ
 （`raspi/auto/_slam2d_nav.py`）越しに使う。
 
-## 構成（2026-09-23 の作り直し後）
+## 構成
 
 ```
 core/
@@ -58,7 +57,7 @@ pipeline.py    SlamSystem（フロントエンド＋ループ閉じの公開API�
   （`sim/slam_bench.py`。実機と同じ `VirtualLidar → ScanAssembler` 経路を通し、
   車速・ジャイロに誤差を注入して真値と突き合わせる。地図作成と凍結地図での
   追従を分けて測る）
-- 公開データセット（CARMEN log形式、`datasets/README.md`）は未着手
+- 公開データセット（CARMEN log形式、`datasets/README.md`）での検証は未着手（`adapters/` は空）
 
 ## 開発方針
 

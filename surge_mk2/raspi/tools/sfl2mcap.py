@@ -63,7 +63,7 @@ _EVENT_SCHEMA: dict[str, Any] = {
 }
 
 #: `diag/link` を書く間隔 [ns]（10Hz。replay_node --bus と同じ）。TELEMETRY の回数ではなく
-#: 記録の時刻で数える（TELEMETRY は 2026-09-26 に 50→100Hz。回数だと記録ごとに頻度が変わる）
+#: 記録の時刻で数える（TELEMETRY は 100Hz。回数だと記録ごとに頻度が変わる）
 _DIAG_PERIOD_NS = 100_000_000
 
 

@@ -4,12 +4,11 @@ GUIの「システム同定」タブが録ったmcapには `raspi/nodes/logger_n
 `DEFAULT_TOPICS` がそのまま入っている：`/cmd`（`DriveCmd`。telemetry_node が
 STM32 へ流した指令）・`/vehicle_state`（`VehicleState`。50Hz）・`/scan`（`Scan`。10Hz）。
 
-## 方針: シムのモデルそのものを当てはめる（2026-09-24、全面的に作り直し）
+## 方針: シムのモデルそのものを当てはめる
 
-以前は「10%到達時刻をむだ時間とする」「IMUの|accel_x|の95パーセンタイル」の
-ような、モデルとは別の特徴量から値を読んでいた。これだと**読んだ値をシムに入れても
-実機の応答を再現する保証が無い**（実際、加速度はIMUのノイズ・傾き・バイアスで
-STM32の上限3.0m/s²を超える3.73m/s²と読まれていた）。今は：
+モデルとは別の特徴量（10%到達時刻、IMUの|accel_x|の95パーセンタイル等）から値を読むと、
+**読んだ値をシムに入れても実機の応答を再現する保証が無い**（IMUのノイズ・傾き・バイアスで
+加速度が STM32 の上限3.0m/s²を超えて読まれる）。そこで：
 
 - 舵: `sim/vehicle.py` の `SteerServo`（むだ時間→定常ゲイン→1次遅れ→角速度上限→
   ヒステリシス）に実機の `steer_cmd_echo` を入れ、出てくる舵角が実機の `steer_actual` に
@@ -17,17 +16,14 @@ STM32の上限3.0m/s²を超える3.73m/s²と読まれていた）。今は：
 - 速度・加減速: 同じく `SpeedController`（ファームの目標ランプ→PI→加速度の上限→車体）に
   実機の `/cmd` を入れて、オドメトリ由来の車速に合わせる（制動の減速度だけは速度の傾き）
 - グリップ: 各速度段の定常旋回の横加速度の頭打ち
-
-## 第三者検証を受けた変更（2026-09-26）
-
-モデルと違う形の真値をベンチに入れると、黙って誤った値を返す箇所があった。いずれも直した:
-速度は1次遅れ→ファームの PI（時定数が下限に張り付いていた）、有効自由度を残差の自己相関から
-（`n_eff`。決め打ちだと存在しないガタ・ヒステリシスを採った）、前輪エンコーダの周期誤差の
-推定と補正（`correct_encoder_ripple`。ガタと不感帯を取り違えた）、ヨーの2次遅れ・サーボの
-定常ゲインをモデルに追加、残差をノイズの床と比べて「モデルの形から外れている」と警告する。
 - 舵の効き・中立ずれ・アンダーステア勾配: 1つの試験では決まらないので、ステア試験
   （走行中の小舵角・低速の階段）・前後運動試験（直線の定速区間）・旋回試験（限界より下の区間）の
   観測をまとめて `VehicleSpec.curvature()` に当てはめる（`fit_geometry()`）
+
+モデルと違う形の真値でも黙って誤った値を返さないための仕組み: 有効自由度を残差の自己相関から
+決める（`n_eff`。決め打ちだと存在しないガタ・ヒステリシスを採る）、前輪エンコーダの周期誤差の
+推定と補正（`correct_encoder_ripple`。ガタと不感帯を取り違える）、ヨーの2次遅れ・サーボの
+定常ゲインをモデルに持つ、残差をノイズの床と比べて「モデルの形から外れている」と警告する。
 
 こうしておけば、ここで出た値を `vehicle.toml` に入れたシムは、同じ指令に対して
 実機と同じ応答を返す（残差は `FitResult.notes` に出す）。検証は `tools/sysid/bench.py`
@@ -40,13 +36,12 @@ STM32の上限3.0m/s²を超える3.73m/s²と読まれていた）。今は：
 セクタ先頭点の時刻で、2026-10-09 から STM32 の時刻を換算した値。それ以前の記録は受信時刻）。mcapヘッダの `log_time` は
 epochへ換算した値なので混ぜない。
 
-## `steer_cmd_echo` の意味（2026-09-24に判明）
+## `steer_cmd_echo` の意味
 
 実機のエコーは受理した指令そのものではなく、COMMAND の `steer_rate_limit`
-（GUIが毎回載せる 7.0rad/s）でランプさせた**参照舵角**だった（0.524radのステップに
-約75ms＝0.524/7.0）。以前はこのランプを「エコーの平滑化」とみなして、ランプの
-遅れをシムに入れていなかった（シムの舵が実機より速かった）。今は `sim/vehicle.py`
-がこのランプを再現し、ここではランプ後の参照→実舵角だけを当てはめる。
+（GUIが毎回載せる 7.0rad/s）でランプさせた**参照舵角**（0.524radのステップに
+約75ms＝0.524/7.0）。`sim/vehicle.py` がこのランプを再現し、ここではランプ後の
+参照→実舵角だけを当てはめる。
 """
 
 from __future__ import annotations
@@ -161,8 +156,8 @@ class FitResult:
     values: dict[str, float]
     notes: list[str] = field(default_factory=list)
     #: 値をそのまま使うべきでない警告（★「残差がノイズの何倍」＝記録がシムのモデルの形から外れている）。
-    #: 同じ文は `notes` にも入る。GUI はこれがある試験の項目を既定で適用しない（2026-09-27、以前は
-    #: 所見の文字列でしか分からず、★が出ても全項目が既定でチェックされていた）
+    #: 同じ文は `notes` にも入る。GUI はこれがある試験の項目を既定で適用しない（所見の文字列だけでは
+    #: 判別できないため、この一覧で持つ）
     warnings: list[str] = field(default_factory=list)
 
 
@@ -238,14 +233,13 @@ def build_log(vs_msgs: list[tuple[float, dict]], cmds: list[Cmd],
 # ── 統計 ──────────────────────────────────────────────────────────────────
 
 def n_eff(resid: np.ndarray) -> float:
-    """残差の系列の有効な独立サンプル数 `n / τ_int`（積分自己相関時間、2026-09-26）。
+    """残差の系列の有効な独立サンプル数 `n / τ_int`（積分自己相関時間）。
 
-    尤度比の検定は残差が独立だと仮定する。以前は「全サンプル独立」（`fit_steer`）や
-    「50Hzの5サンプルで1自由度」（`fit_geometry`）と決め打ちしていたが、モデルで表せない
+    尤度比の検定は残差が独立だと仮定する。「全サンプル独立」や「5サンプルで1自由度」と決め打ちすると、モデルで表せない
     ゆっくりした誤差（エンコーダの周期誤差・ヨーの振動）が残差に乗ると隣り合う残差が
     強く相関し、自由度を水増しして**存在しない要素（ガタ・ヒステリシス）を採用した**。
     ここでは残差そのものの自己相関から見積もる（ρ_k が 0.05 を下回った所で打ち切り）。
-    5点の移動平均を通した白色ノイズなら τ_int=5 で、以前の決め打ちと一致する。"""
+    5点の移動平均を通した白色ノイズなら τ_int=5 で、決め打ちの「5サンプルで1自由度」と一致する。"""
     r = np.asarray(resid, dtype=float)
     n = len(r)
     if n < 10:
@@ -269,7 +263,7 @@ def _lr_significant(n: float, err_small: float, err_big: float) -> bool:
     return n * math.log(max(err_big, 1e-15) / max(err_small, 1e-15)) > _CAP_LR_THRESHOLD
 
 
-# ── 前輪エンコーダの周期誤差（2026-09-26） ─────────────────────────────────
+# ── 前輪エンコーダの周期誤差 ─────────────────────────────────
 
 #: ファームが累積回転角を距離に直すときの車輪半径（`DRIVE_FRONT_WHEEL_RADIUS_M`）
 _FRONT_WHEEL_RADIUS_M = 0.030
@@ -405,8 +399,8 @@ def odom_speed(samples: list[Sample]) -> np.ndarray:
 
     `odom_dist` は 0.1mm 単位（STM32 内部は 1mrad≈0.03mm で積算し端数も繰り越す）なので、
     20ms で1カウントも進まないのは 5mm/s 未満のときだけ。50Hz・5点の当てはめで量子化の誤差は
-    約0.5mm/s（`docs/development.md` §4.5）。窓は**時間**で決める（TELEMETRY は 2026-09-26 に
-    50→100Hz。サンプル数で決めると頻度で窓の幅が変わる）。
+    約0.5mm/s（`docs/development.md` §4.5）。窓は**時間**で決める（TELEMETRY の周期は記録で
+    50Hz と 100Hz がある。サンプル数で決めると窓の幅が変わる）。
     """
     t = np.array([x.t for x in samples])
     od = np.array([x.odom for x in samples])
@@ -649,7 +643,7 @@ def _stair_hysteresis(s: list[Sample]) -> tuple[float, int] | None:
     （`steer_servo_hysteresis_rad`、`sim/vehicle.py` の `SteerServo` のヒステリシス）を直接読む。
 
     段ごとに前進区間の後半の実舵角と参照（エコー）の差を、段が動いた向きで符号を揃えて「手前に
-    止まった量」にし、その中央値の2倍を幅とする。実機（2026-09-27）のサーボは大きな段差では目標を
+    止まった量」にし、その中央値の2倍を幅とする。実機のサーボは大きな段差では目標を
     行き過ぎてから止まり（15°→17.9°→13.7°）、1次遅れ＋ヒステリシスのモデルに全体を当てはめると
     幅を 1.6° と読んだが、小さな段差では同じ0°指令で上り−1.34°・下り+1.48°（幅約2.8°）に止まる。
     学習中の車の舵はゆっくり動くので、効くのは小さな段差の方。返り値 (幅, 使った段の数)、段が
@@ -714,7 +708,7 @@ def fit_steer(log: Log) -> FitResult:
       ノイズ以上に縮まらなければ 0（制限なし）を返す。大振幅のステップが要る
     - サーボの定常ゲイン（位置ループの定常偏差）・ヒステリシス・物理上限は、それぞれ
       入れると残差が有意に縮むときだけ採る（尤度比。自由度は残差の自己相関から、`n_eff`）。
-      定常ゲインを持たないと、定常偏差がヒステリシスとむだ時間の偏りに化けた（2026-09-26）
+      定常ゲインを持たないと、定常偏差がヒステリシスとむだ時間の偏りに化けた
     - むだ時間・時定数は、**走行中（`_ROLLING_M_S`以上）のステップ**が4回以上あれば
       そこだけで当てはめ直した値を返す（学習中の車は走りながら舵を切るため）。低速部の
       値は所見に並べる——大きく違えばサーボの応答が速度（負荷）に依存している
@@ -975,8 +969,7 @@ def _simulate_speed(spec: VehicleSpec, cmds: list[Cmd], delay: float, run: _Spee
     実測の速度は前後 `_ODOM_DIFF_HALF_S` の窓で微分したものなので、加速度が急に変わる所では
     窓の幅だけ鈍る。区間の末尾（全開加速→制動）では窓の後ろ半分が制動に掛かり、区間の最後の
     サンプルで 5cm/s ほど低く読む。シムの速度をそのまま比べるとこの差を「最高速付近で加速度が
-    落ちる」が説明してしまい、上限の無い真値で約2.3m/sの最高速を返した（2026-09-26 の第三者検証、
-    8シード中3例）。そこで区間の中はシムの速度を積分した位置、区間の外は実測のオドメトリの
+    落ちる」が説明してしまい、上限の無い真値で約2.3m/sの最高速を返した（検証で8シード中3例）。そこで区間の中はシムの速度を積分した位置、区間の外は実測のオドメトリの
     増分をつないだ位置に、実測と同じ窓の当てはめを掛けてから比べる。"""
     if run.win_t is None:
         return _simulate_speed_raw(spec, cmds, delay, run, run.t, dt)
@@ -1051,8 +1044,8 @@ def _speed_noise_moving(s: list[Sample]) -> float:
 
 
 def _speed_floor(s: list[Sample]) -> tuple[float, str]:
-    """残差と比べる速度のノイズ [m/s] と説明。静止中と走っている間の大きい方（2026-09-27。静止中
-    だけを基準にしていたので、実機の記録で残差がノイズ程度でも★「7倍」と出た）。"""
+    """残差と比べる速度のノイズ [m/s] と説明。静止中と走っている間の大きい方（静止中
+    だけを基準にすると、残差がノイズ程度でも★「7倍」と出る）。"""
     still, moving = _speed_noise(s), _speed_noise_moving(s)
     return max(still, moving), f"速度のノイズ 静止中 {still * 100:.1f}・走行中 {moving * 100:.1f}cm/s"
 
@@ -1122,9 +1115,8 @@ def fit_speed(log: Log, base: VehicleSpec | None = None) -> FitResult:
     それを前進の区間ごとに実測速度（オドメトリ由来）へ当てはめる。加速度の上限と
     `/cmd`→STM32 の遅れも一緒に動かす（上限は加減速試験で、遅れは遅延試験で決める）。
 
-    以前は1次遅れ（`tau_speed_s`）を当てはめていた。ファームの形（ランプ→2次応答）の真値に
-    対しては時定数が探索範囲の下限に張り付き、残差を見ても判定が無いので気づけなかった
-    （2026-09-26 の第三者検証）。今は残差を静止中のノイズと比べて警告する。
+    1次遅れ（`tau_speed_s`）を当てはめるとファームの形（ランプ→2次応答）の真値に対して
+    時定数が探索範囲の下限に張り付く。残差を静止中のノイズと比べて警告する。
     """
     base = base or VehicleSpec.load()
     _require_pi(base)
@@ -1191,7 +1183,7 @@ def sensor_check(log: Log, base: VehicleSpec | None = None) -> FitResult:
     - オドメトリ由来の速度（同定に使う値）に `vehicle.toml` のローパス（ファームの定数）を
       掛けたものが、記録の `speed` と合うか。合わなければ、ファームのローパスが `vehicle.toml` と
       違う（＝シムの観測の遅れ、学習の入力が実機と食い違う）
-    ファームの ADC 平均化・ローパスの変更（2026-09-25）で、ノイズがどれだけ残ったかは
+    ファームの ADC 平均化・ローパスの変更で、ノイズがどれだけ残ったかは
     実機で未確認なので、最初の記録で必ず見る。
     """
     base = base or VehicleSpec.load()
@@ -1279,15 +1271,15 @@ _SPIN_PERSIST_S = 0.05
 def _spinning(x: Sample) -> bool:
     """後輪が前進方向に回っていて、前輪より大きく速い（TC で抑えきれない空転）。前進を条件に
     するのは、加速の段の頭（まだ後退中）で後輪の値が無い記録（後輪0）を空転と取り違えないため
-    （ベンチの mcap で 0.8m/s² の段を空転と読んだ、2026-09-27）。"""
+    （ベンチの mcap で 0.8m/s² の段を空転と読んだ）。"""
     return x.wheel_speed_rear > 0.1 and \
         x.wheel_speed_rear - x.speed > _SPIN_TOL_M_S + _SPIN_TOL_FRAC * abs(x.speed)
 
 
 def _slipping(x: Sample) -> bool:
     """加速中（制動なし・前進の指令）に後輪が滑っている（滑り率が `REAR_SLIP_LIMIT` を超える）か、
-    抑えきれない空転。プランナー（`sysid_accel`）と同じ判定。TC の旗は見ない（2026-09-27、実機で
-    TC の旗が30〜50msだけ立ったのを「介入」と数えて上の段を飛ばした）。"""
+    抑えきれない空転。プランナー（`sysid_accel`）と同じ判定。TC の旗は見ない（実機で
+    TC の旗が30〜50msだけ立つのを「介入」と数えると上の段を飛ばす）。"""
     if x.brake or x.target_speed <= 0.0 or x.wheel_speed_rear <= 0.1:
         return False
     return rear_slip(x.speed_filtered, x.wheel_speed_rear) > REAR_SLIP_LIMIT or _spinning(x)
@@ -1315,7 +1307,7 @@ def _slip_limited_accel(s: list[Sample]) -> tuple[float, float] | None:
 
     段ごとに速度の傾きの中央値を取り、**いちばん大きい段**を返す。TC はスリップ率を目標（0.2）に
     保つので、限界より下の段でも滑り率は `REAR_SLIP_LIMIT` を超える。その段の加速度は指令どおり
-    （限界より低い）で、全段をまとめた中央値だと限界を低く読む（2026-10-10、全段を走るようにした）。"""
+    （限界より低い）で、全段をまとめた中央値だと限界を低く読む。"""
     levels: dict[float, list[float]] = {}
     for run in _slip_runs(s):
         t = np.array([s[i].t for i in run])
@@ -1379,7 +1371,7 @@ class _BrakeRun:
 
 #: 後輪がロックしたとみなす、後輪の周速が前輪の6割未満の状態の継続時間 [s]。ABS（★v0.15）は
 #: 滑り始めを検知してから制動を抜くので、1〜2サンプル（10〜20ms）だけ6割を切る。これをロックと
-#: 数えると、ABS が効いている記録すべてに「ロックした」の★が出た（2026-09-27 の実機の記録）
+#: 数えると、ABS が効いている記録すべてに「ロックした」の★が出た（実機の記録）
 _LOCK_PERSIST_S = 0.03
 
 
@@ -1471,7 +1463,7 @@ def _fit_brake_runs(log: Log, base: VehicleSpec, rr: float) -> tuple[dict[str, f
                        bounds=([1.0, 0.0] + lo_dv, [500.0, 0.08] + hi_dv), diff_step=1e-3)
     best = None
     # 頭打ちの初期値は低い方（1.0・1.75）からも、傾きは名目からも試す。頭打ちなしの当てはめ `r1` は、
-    # 強さのほとんどが頭打ちしている記録では傾きを小さくして辻褄を合わせる（2026-10-10 の実機:
+    # 強さのほとんどが頭打ちしている記録では傾きを小さくして辻褄を合わせる（実機の例:
     # グリップが低く 0.08N·m 以上がすべて約1.7m/s² → 傾き 11、名目 33）。その傾きから始めると
     # 最大の強さでも減速度が 2.5 に届かず、頭打ちが効かないまま動かなかった（頭打ち 0 と読んだ）
     for g_start in (float(r1.x[0]), g0):
@@ -1616,7 +1608,7 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
         traction_notes.append(
             f"★加速中に TC で抑えきれない後輪の空転を検出（段の加速度 {spin:.1f}m/s²。プランナーはそこで"
             "止めて上の段を走らない）。空転の直後に制動するのでデータが短く、実際の上限は空転しなかった段の"
-            f"加速度から {spin:.1f}m/s² の間——加速の上限は上から抑えて {spin:.1f}m/s² にした。シムは空転を"
+            f"加速度から {spin:.1f}m/s² の間——正味の加速の上限は上から抑えて {spin:.1f}m/s² にした。シムは空転を"
             "表現しない。TC の定数（DRIVE_TC_*）も確かめる")
     elif slip_a is not None:
         sl = _slip_limited_accel(s)
@@ -1625,7 +1617,7 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
         traction_notes.append(
             f"加速中に後輪が滑った（{slip_a:.1f}m/s² の段から）。"
             + (f"滑っていた間の加速度は{'全開' if lv >= 3.0 else f' {lv:.1f}m/s² '}の段の {a_sl:.2f}m/s² が最大で、"
-               "これを加速の上限にした（グリップで決まる）。"
+               "これを正味の加速の上限にした（グリップで決まる）。"
                if a_grip is not None else "滑っていた時間が短く、その加速度は読めなかった。")
             + "滑った区間は速度制御（車体の利得・転がり抵抗）の当てはめから外した")
         if a_grip is not None and lv < 3.0 and lv >= _top_accel_level(s) and a_grip >= 0.9 * lv:
@@ -1635,13 +1627,24 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
                 "グリップの限界ではなく指令どおりに加速しただけかもしれない（限界はこれ以上、としか"
                 "言えない）。全段を走った記録で測り直すこと（2026-10-10 より前のプランナーは、滑った段で"
                 "打ち切っていた）")
-    if a_grip is not None and (not use_up or a_grip < pb["drive_accel_m_s2"]):
-        use_up = use["up"] = True
-        fixed3 = {**fixed, "drive_accel_m_s2": a_grip}
-        if not use["fade"]:
-            fixed3.update(drive_fade_speed_m_s=0.0, drive_top_speed_m_s=0.0)
-        free3 = {k: (pb[k], *full[k][1:]) if k in pb else v for k, v in full.items() if k not in fixed3}
-        pb, eb, rb = _fit_speed_model(logs, base, free3, fixed3)
+    # `a_grip` は速度の傾き＝転がり抵抗を引いた後の正味。`drive_accel_m_s2` は `SpeedController` が
+    # 転がり抵抗を引く前に掛ける上限なので、転がり抵抗を足して入れる（足さないと、シムとプランナー
+    # （`Vehicle.a_accel_max`）がもう一度引いて約1割低くなる。実機の記録で正味 2.8 に
+    # 対して 2.5）。転がり抵抗は当てはめ直すと動くので、上限と合うまで繰り返す
+    grip_cap = False
+    if a_grip is not None and (not use_up or a_grip + pb["rolling_resistance"] < pb["drive_accel_m_s2"]):
+        use_up = use["up"] = grip_cap = True
+        cap = a_grip + float(pb["rolling_resistance"])
+        for _ in range(4):
+            fixed3 = {**fixed, "drive_accel_m_s2": cap}
+            if not use["fade"]:
+                fixed3.update(drive_fade_speed_m_s=0.0, drive_top_speed_m_s=0.0)
+            free3 = {k: (pb[k], *full[k][1:]) if k in pb else v for k, v in full.items() if k not in fixed3}
+            pb, eb, rb = _fit_speed_model(logs, base, free3, fixed3)
+            cap_next = a_grip + float(pb["rolling_resistance"])
+            if abs(cap_next - cap) < 0.005:
+                break
+            cap = cap_next
     if use_up:
         if use["fade"] and pb["drive_top_speed_m_s"] > pb["drive_fade_speed_m_s"] + 0.05 \
                 and pb["drive_fade_speed_m_s"] < v_top:
@@ -1651,8 +1654,10 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
         else:
             use["fade"] = False
             notes.append("速度による加速度の上限の低下は見られない（測った範囲で一定）")
-        if a_grip is not None and pb["drive_accel_m_s2"] == a_grip:
-            pass                                 # 所見は下（TC・空転）
+        if grip_cap:
+            notes.append(f"駆動加速度の上限 {pb['drive_accel_m_s2']:.2f}m/s²（グリップで決まる正味の加速度 "
+                         f"{a_grip:.2f}m/s² ＋転がり抵抗 {pb['rolling_resistance']:.2f}m/s²。"
+                         "`drive_accel_m_s2` は転がり抵抗を引く前の値）")
         elif pb["drive_accel_m_s2"] < base.speed_ramp_max_m_s2:
             notes.append(f"駆動加速度の上限 {pb['drive_accel_m_s2']:.2f}m/s²（ファームの目標ランプ "
                          f"{base.speed_ramp_max_m_s2:.1f}m/s² より低いので見えた）")
@@ -1781,7 +1786,7 @@ def fit_corner(log: Log, base: VehicleSpec | None = None) -> FitResult:
     ある区間は舵の効き・アンダーステア勾配の材料として `fit_geometry()` が使う。
 
     限界は車体が滑ったこと——**横加速度が頭打ち**か**後輪が流れた**（曲率が跳ねた）の早い方。後輪の
-    空転（滑り率）では区切らない（2026-10-08、内輪の空転だけで限界と読んで `mu` が低く出た）。シムは
+    空転（滑り率）では区切らない（内輪の空転だけで限界と読むと `mu` が低く出る）。シムは
     横の限界を前輪側の頭打ち（`mu`）でしか表現しないので、後輪が先に流れるときは所見で知らせる
     （限界付近の挙動は再現されない）。
     """
@@ -1849,7 +1854,7 @@ class _GeoSeries:
     j2: np.ndarray | None = None
 
 
-#: `fit_geometry` に渡す系列の刻み [s]。100Hz の記録は 50Hz 相当に間引く（2026-09-26）。舵の効き・
+#: `fit_geometry` に渡す系列の刻み [s]。100Hz の記録は 50Hz 相当に間引く。舵の効き・
 #: ガタ・ヨーの遅れは0.1s以上の現象で、50Hz で精度を確かめてある。間引かないと当てはめの残差の
 #: 計算（全サンプル×遅れの重み）が2万回以上回り、解析1回が約2.5分かかった。舵角の平滑化と
 #: オドメトリの速度は間引く前の全サンプルで作ってから間引く
@@ -1900,7 +1905,7 @@ def _lpf_weights(t: np.ndarray, at: np.ndarray, tau: np.ndarray,
 
     重みは単精度で返す（和が1に正規化された重みなので精度は足りる）。添字の表 `Jc` は遅れの
     値によらないので、呼び出し側が1度作って渡せる（`_lag_index`）。100Hz の記録では1組が数MB
-    になり、遅れの格子探索で溜め込むと1回の解析で8GBを超えた（2026-09-26）。
+    になり、遅れの格子探索で溜め込むと1回の解析で8GBを超えた。
     """
     n = len(t)
     dt = np.diff(t, prepend=t[0] - 0.02).clip(1e-3, 0.1)
@@ -1986,10 +1991,10 @@ def _smooth(x: np.ndarray, t: np.ndarray, noise: float = 0.0) -> np.ndarray:
     ただし**舵のステップの角（折れ曲がり）では均さない**（窓の半幅で取った2階差分から見た
     傾きの変化が `_SMOOTH_KINK_SLOPE` を超える所は生の値）。移動平均は傾きが一定の所では遅れないが、角を丸めて前後0.05sに
     ずらす。振動的なヨー応答（曲率の2次遅れ）があると、その丸めた角が振動として続き、
-    3次の項が偏った（2026-09-26）。
+    3次の項が偏った。
 
     角のしきい値は、舵角のノイズ `noise`（静止中の標準偏差、`_steer_noise`）の2階差分の
-    `_SMOOTH_KINK_NOISE_K` 倍を下回らない（2026-09-27）。100Hz ではしきい値（2階差分1.25°）が
+    `_SMOOTH_KINK_NOISE_K` 倍を下回らない。100Hz ではしきい値（2階差分1.25°）が
     ノイズ3倍（0.26°）の2階差分のばらつき（約0.63°）の2倍しかなく、サンプルの約4割がノイズで
     「角」とみなされて均されず、ガタを 0.8°→1.6° と読んだ。本物のステップの角（7rad/s の
     ランプの折れ目で約20°）は桁違いに大きいので、しきい値を上げても角は見落とさない。"""
@@ -2101,7 +2106,7 @@ def _yaw2_filter(t: np.ndarray, wn: float, zeta: float):
 
     記録は取りこぼしで刻みが不揃いなので、入力を等間隔の格子へ直線補間してから掛け、
     記録の時刻へ補間して戻す（`_apply_yaw2`）。一定の刻みとみなして掛けると、取りこぼしの
-    後の振動の位相が20msずれ、振動的なヨー応答の真値で3次の項が偏った（2026-09-26）。"""
+    後の振動の位相が20msずれ、振動的なヨー応答の真値で3次の項が偏った。"""
     if wn <= 1e-6:
         return None
     num, den, _ = cont2discrete(([wn * wn], [1.0, 2.0 * zeta * wn, wn * wn]), _YAW2_DT, method="foh")
@@ -2144,7 +2149,7 @@ def _geo_moving_noise(series: list, L: float, v_bar: float) -> float:
 
     曲率 = ヨーレート÷速度 のノイズは走っている間の方がずっと大きい（振動・ジャイロ・前輪の
     オドメトリ）。実機の記録で一定の舵で前進している間のばらつきは舵角換算で0.5〜1.0°あり、
-    静止中の値（0.02°）だけを基準にしていたので、残差がノイズ程度でも★「40倍」と出た（2026-09-27）。"""
+    静止中の値（0.02°）だけを基準にしていたので、残差がノイズ程度でも★「40倍」と出た。"""
     out = []
     for g in series:
         pos = np.asarray(g.idx)
@@ -2219,7 +2224,7 @@ def fit_geometry(logs: dict[str, Log], base: VehicleSpec | None = None) -> FitRe
     hi = {"steer_gain": 1.5, "steer_gain_cubic": 2.0, "steer_offset_rad": 0.1,
           "understeer_gradient": 0.3}
 
-    # 途中結果は上限つきで持つ（100Hz の記録で溜め込むと1回の解析で8GBを超えた、2026-09-26）。
+    # 途中結果は上限つきで持つ（100Hz の記録で溜め込むと1回の解析で8GBを超えた）。
     # 緩和長の格子（17通り）・ガタの格子が回っている間は捨てずに済む大きさ
     link_cache = _LRU(64)
     w1_cache = _LRU(24)
@@ -2384,7 +2389,7 @@ def fit_geometry(logs: dict[str, Log], base: VehicleSpec | None = None) -> FitRe
                      lag_: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
         """舵の効きとヨーの遅れを、全系列（定常＋過渡）で同時に詰め直す。交互に回すだけだと、
         遅れの4つ（IMU・緩和長・ω・ζ）が互いに入れ替わった解に止まり、それを舵の効きと3次の
-        項が補った（ランダムな真値の検証で効き6%・3次の項+0.2、2026-09-26）。遅れの重みは
+        項が補った（ランダムな真値の検証で効き6%・3次の項+0.2）。遅れの重みは
         値ごとに作り直す（キャッシュすると連続値の探索で膨れる）。"""
         act = [i for i in (0, 1) if lag_[i] > 0]
         use2 = lag_[2] > 0
@@ -2507,7 +2512,7 @@ def fit_geometry(logs: dict[str, Log], base: VehicleSpec | None = None) -> FitRe
 # ── ④ 遅延 ───────────────────────────────────────────────────────────────
 
 #: TELEMETRY の `t_us` がスナップショットの時刻になったファームの ID（MainF446RE_V3 の
-#: `RAS_FIRMWARE_ID`、2026-09-27）。それより前は送信時刻で、中身は最大1周期古かった
+#: `RAS_FIRMWARE_ID`）。それより前は送信時刻で、中身は最大1周期古かった
 FW_ID_TELEMETRY_SNAPSHOT_TIME = 0x4D463304
 
 

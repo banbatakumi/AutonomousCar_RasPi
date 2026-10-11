@@ -6,7 +6,7 @@
     python3 -m raspi.nodes.replay_node logs/run.sfl --start 12 --end 18
     python3 -m raspi.nodes.replay_node logs/run.sfl --verify     # 記録と突き合わせる
 
-**旧シミュレータを削除した今、これが事実上のシミュレータ代わり**
+**これが事実上のシミュレータ代わり**
 （`docs/architecture.md` §11）。実車・STM32・シリアルが無くても、知覚・経路生成・
 GUI を本物のセンサノイズ入りのデータで開発できる。pyserial にも依存しない。
 
@@ -304,8 +304,8 @@ def main() -> int:
 
         def _on_telem(t, t_pi_ns):
             bridge.on_telemetry(t, t_pi_ns)
-            # diag/link は 10Hz。TELEMETRY の回数ではなく記録の時刻で数える（2026-09-26 に
-            # TELEMETRY が 50→100Hz になり、回数だと記録ごとに頻度が変わる）
+            # diag/link は 10Hz。TELEMETRY の回数ではなく記録の時刻で数える（回数だと
+            # TELEMETRY の周波数が違う記録で頻度が変わる）
             # 時刻同期の前（t_pi_ns が None）は STM32 の時刻で数える。逆行したら数え直す
             now = t_pi_ns if t_pi_ns is not None else t.t_us * 1000
             if now >= next_diag[0] or now < next_diag[0] - 200_000_000:

@@ -24,7 +24,7 @@ Mac で試すときは Pillow に落ちる（カメラが無いので速度は�
 そこで `ImageRef.ring_seq`（書き手が進めている番号）と、こちらが掴んでいるリングの
 `write_seq` を比べ、開きすぎていたら attach し直す。
 
-**同じことが `RemoveIPC` でも起きる**（2026-08-08 に実際に踏んだ）。
+**同じことが `RemoveIPC` でも起きる**（実際に起きた）。
 systemd-logind の既定 `RemoveIPC=yes` は、そのユーザーの最後のセッションが
 終わると uid 所有の共有メモリを全消しするため、`User=pi` の systemd サービスが
 使っている `/dev/shm/surge_cam*` まで消える。Pi 側は
@@ -134,10 +134,9 @@ class RingJpeg:
         self.last_error: str = ""
         #: 実際にエンコードした枚数と、それに使った CPU 時間 [s]。
         #:
-        #: **telemetry_node と logger_node が同じフレームを別々にエンコードしている**
-        #: （2026-08-21 のレビュー 🟡7）。素朴に共通化すると
-        #: 「誰も見ていない間も camera_node が焼き続ける」形になって idle の CPU が
-        #: むしろ増えるので、**まず本当にボトルネックかを測れるようにした。**
+        #: **telemetry_node と logger_node が同じフレームを別々にエンコードしている。**
+        #: 素朴に共通化すると「誰も見ていない間も camera_node が焼き続ける」形になって
+        #: idle の CPU がむしろ増えるので、**まず本当にボトルネックかを測れるようにしてある。**
         #: `process_time` を使うのは、待ちを含む wall clock では
         #: 「エンコードが重い」と「バスが詰まっている」が区別できないため
         self.encoded = 0

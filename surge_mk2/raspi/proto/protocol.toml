@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0014      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0016      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -56,7 +56,7 @@ name = "TELEMETRY"
 type = 0x02
 dir = "s2p"
 len = 84
-rate_hz = 100  # 2026-09-26 に 50 から変更（値の古さを平均10→5ms）
+rate_hz = 100  # 値の古さは平均5ms
 doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加、★v0.17で yaw_rate_target を tv_ratio に置き換え（オフセット・LEN は同じ）"
 fields = [
   { name = "t_us",                type = "u32", unit = "us" },
@@ -177,7 +177,7 @@ len = 16
 doc = "車両の物理的な上限値（読み取り専用・実行時に変化しない）。★v0.11 新設。起動直後に VERSION と同じタイミングで自動送信（100ms間隔×3回）、任意タイミングでも LIMITS_REQ で再取得可"
 fields = [
   { name = "max_speed_m_s",  type = "f32", unit = "m/s",  note = "COMMAND.target_speed の上限（DRIVE_MAX_SPEED_M_S）。超えると STM32 側でクランプされる" },
-  { name = "max_accel_m_s2", type = "f32", unit = "m/s2", note = "COMMAND.accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2）" },
+  { name = "max_accel_m_s2", type = "f32", unit = "m/s2", note = "COMMAND.accel_limit に指定できる上限。★v0.22 から STM32 は上限を掛けず、ワイヤで表せる最大 65.535 を返す（上限は Pi の [safety] cmd_accel_limit_m_s2）" },
   { name = "max_torque_nm",  type = "f32", unit = "N.m",  note = "1輪あたり。target_torque/brake_torque 共通（DRIVE_MAX_TORQUE_NM）" },
   { name = "max_steer_rad",  type = "f32", unit = "rad",  note = "路面舵角。原点(直進)からの片側振れ幅（Steering_GetMaxRoadWheelAngleRad()）" },
 ]
@@ -391,6 +391,13 @@ STEER_LINK_CUBIC          = 0x0082
 # ローンチコントロール（★v0.20。`COMMAND.flags2` の LAUNCH）: 発進を終えて車速PIへ戻すときの積分の初期値
 # [N·m、1輪あたり] = その車速を保つのに要るトルク。値は `[control]`（`[dynamics]` の同定値から決める）
 LAUNCH_EXIT_TORQUE_NM     = 0x00A1
+# 車速PIの加速度フィードフォワード（★v0.21）: 車速PIの出力に
+#   SPEED_FF_NM_PER_M_S2 × 目標車速の傾き [m/s²] ＋ SPEED_FF_RR_NM × 進む向き
+# を足す（どちらも後輪2輪の合計トルク [N·m]）。0 で無し（既定）。値は `[control]`——`[dynamics]` の同定値から
+#   SPEED_FF_NM_PER_M_S2 = 1 ÷ speed_plant_gain、SPEED_FF_RR_NM = rolling_resistance ÷ speed_plant_gain
+# （`tools/sysid` が同定のたびに書く）。目標車速の傾きは COMMAND の accel_limit で決まる
+SPEED_FF_NM_PER_M_S2      = 0x00B1
+SPEED_FF_RR_NM            = 0x00B2
 SPEED_KP       = 0x0030  # 未実装（STM32側が UNKNOWN_ID を返す）
 SPEED_KI       = 0x0031  # 未実装（STM32側が UNKNOWN_ID を返す）
 LIDAR_FORMAT   = 0x0040

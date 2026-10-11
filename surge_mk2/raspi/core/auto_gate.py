@@ -45,12 +45,12 @@ def cam_infer_active(auto_ctrl: AutoCtrl | None, vs: VehicleState | None,
 
 
 class IdlePacer:
-    """カメラ系ノードの IDLE 中の起床・publish 頻度を落とす（2026-10-04、省電力）。
+    """カメラ系ノードの IDLE 中の起床・publish 頻度を落とす（省電力）。
 
-    以前は IDLE 中も約130Hzで起き、中身の無い結果（failed_frame 等）を毎回
-    publish していた。購読側（planning_node は全 planner の入力を購読している）も
+    抑えないと IDLE 中も約130Hzで起き、中身の無い結果（failed_frame 等）を毎回
+    publish する。購読側（planning_node は全 planner の入力を購読している）も
     同じ回数だけ受けて捨てる。4ノードを止めると制御系電流が約19mA下がることを
-    実測した（docs/power_audit_2026-10.md P6）。
+    実測した（docs/archive/power_audit_2026-10.md P6）。
 
     使い方（各ノードの `run()`）::
 

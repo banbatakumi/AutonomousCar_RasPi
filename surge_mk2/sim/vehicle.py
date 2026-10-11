@@ -1,28 +1,25 @@
 """車両モデル — 自転車モデル + 操舵のむだ時間 + 1次遅れ + 横方向グリップ限界。
 
-**運動学と遅れ、それに簡易グリップ限界だけ。** スリップ角・タイヤの非線形特性・
-TC/TVは入れていない。実車の`[dynamics]`（操舵のむだ時間・1次遅れなど）が
-未実測の仮値で、合わせ込む相手がまだ無いため。詳細なタイヤモデルを入れるなら実測後。
+**運動学と遅れ、それに簡易グリップ限界。** スリップ角・タイヤの非線形特性・TC/TVの
+内部モデルは持たない（`[dynamics]` の実測値に合わせ込める範囲だけを表現する）。
 
-**グリップ限界（2026-08-28追加）**: 自転車運動学モデルは舵角だけでヨーレートが
-決まり、速度に関わらず同じ半径で曲がれてしまう（＝速すぎてコーナーを曲がりきれない
-という物理的な必然性が無い）。これは E2E LiDAR の強化学習がコーナー前の減速を
-学習する動機を弱めていた（`docs/progress_archive.md`「2026-08-28（続き2）」節）。対策として、
-要求される向心加速度 `v^2 * |tan(steer)| / L` が `mu * g` を超えたら、達成できる
+**グリップ限界**: 自転車運動学モデルは舵角だけでヨーレートが決まり、速度に関わらず
+同じ半径で曲がれてしまう（速すぎるとコーナーを曲がりきれない、が表現されない）。
+そこで要求される向心加速度 `v^2 * |tan(steer)| / L` が `mu * g` を超えたら、達成できる
 曲率を頭打ちにする（＝アンダーステアで外に膨らむ）。**質量は登場しない**——
 `F_lat_max = mu*m*g` を運動方程式 `a = F/m` に代入すると質量が消えるため、
 車両質量に関わらず摩擦係数`mu`だけで決まる（同じ理由で、急ブレーキの制動距離が
 車重に依存しないのと同じ）。
 
-**摩擦円によるRWD連成（2026-09-01追加）**: この車の駆動力・制動力は`drive_ratio`
+**摩擦円によるRWD連成**: この車の駆動力・制動力は`drive_ratio`
 （後輪ぶん）を通じてどちらも後輪だけが発生させる（`_next_speed()`のブレーキ・
 トルクmode参照）。実車では同じ後輪タイヤが「曲がる力」と「加減速する力」を
 同じ摩擦の予算 `mu*g` から奪い合うため（摩擦円）、コーナー立ち上がりで加速しながら
 曲がると定常円旋回より横方向の余力が減る。これを単純な摩擦円
 `a_lat_max = sqrt((mu*g)^2 - a_long^2)` で近似する（前後輪別のグリップ配分・
-荷重移動までは踏み込まない）。定常状態（`a_long≈0`）では従来通り`mu*g`に一致する。
+荷重移動までは踏み込まない）。定常状態（`a_long≈0`）では`mu*g`に一致する。
 
-**縦加速度の上限（2026-09-01追加）**: `MAX_BRAKE_TORQUE_NM`（後輪モータの
+**縦加速度の上限**: `MAX_BRAKE_TORQUE_NM`（後輪モータの
 ハードウェア仕様値）から逆算する制動減速度は、タイヤが実際に発生できる摩擦
 （`mu*g`）を無条件に超えうる——`mu`の実測値（0.454）では`mu*g≈4.46m/s²`だが
 `MAX_BRAKE_TORQUE_NM`由来の制動減速度は≈5.0m/s²で、直進急制動だけでもグリップ
@@ -31,36 +28,33 @@ TC/TVは入れていない。実車の`[dynamics]`（操舵のむだ時間・1�
 `tools/sysid/fit.py`の`fit_accel()`参照）を追加し、実測済み（>0）ならハードウェア
 仕様値より優先して使う——モータのトルク仕様ではなく、実際にタイヤが発生できた
 加減速度そのものを使う方が、グリップ限界を含めた実車の挙動に近い。未実測
-（既定0.0）の間は従来通りトルク仕様値から逆算する。
+（既定0.0）の間はトルク仕様値から逆算する。
 
-**システム同定の作り直しに合わせた拡張（2026-09-24）**: 同定で測る量をすべてここで
-表現できるようにした。いずれも既定値は「従来と同じ挙動」になる（未実測のまま
-読み込んでも既存のシム・学習の結果は変わらない）。
+**システム同定で測る量の表現**: 同定で測る量をすべてここで表現する。
+いずれも既定値は「無効」で、未実測のまま読み込んでも挙動は変わらない。
 
-- **操舵の順序を実機に合わせた**: 指令 →（`COMMAND.steer_rate_limit`による参照ランプ。
+- **操舵の順序**（実機に合わせる）: 指令 →（`COMMAND.steer_rate_limit`による参照ランプ。
   **これが`steer_cmd_echo`**）→ むだ時間 → 1次遅れ → サーボの物理的な角速度上限。
-  以前は指令のレート制限を1次遅れの**後**に掛けていたが、実機の`steer_cmd_echo`が
-  0.524rad/7.0rad/s≈75msかけてランプすることから、STM32は参照側をランプさせてから
-  サーボに渡していると分かった（`tools/sysid/fit.py`の`fit_steer`参照）
-- **むだ時間は時刻で引く**（`SteerServo`）。以前の「1step=1エントリ」のキューは
-  サブステップ幅`dt`ぶん常に遅れ側へ量子化され（`ceil(d/dt)+1`step）、同定値を
-  入れても`dt`によって実効遅延が変わっていた
+  実機の`steer_cmd_echo`が0.524rad/7.0rad/s≈75msかけてランプするので、
+  STM32は参照側をランプさせてからサーボに渡している。レート制限は1次遅れの**前**（`tools/sysid/fit.py`の`fit_steer`参照）
+- **むだ時間は時刻で引く**（`SteerServo`）。ステップ数のキューだとサブステップ幅`dt`
+  ぶん遅れ側へ量子化され、`dt`で実効遅延が変わる
 - **実効舵角**（`SteerLink`）: 報告される舵角（モータ角から換算）と、実際に車が曲がる
   角度の差。リンクのガタ（どちらから切ったかで効きがずれる）→不感帯→
   `steer_gain*d + steer_gain_cubic*d³ + steer_offset_rad`。曲率の計算にだけ使う
 - **サーボのヒステリシス**（`SteerServo`）: 実舵角が、どちらから近づいたかで指令の
-  少し手前に止まる幅。`steer_actual` に見える（2026-09-25追加）
+  少し手前に止まる幅。`steer_actual` に見える
 - **アンダーステア勾配** `understeer_gradient` [rad/(m/s²)]: `δ = L/R + K·a_y`。
   限界まで狙いどおりに曲がって急に頭打ちになる、ではなく速度とともに徐々に膨らむ
 - **速度に依存する駆動加速度上限**（`drive_fade_speed_m_s`〜`drive_top_speed_m_s`で
   線形に0へ）と、**速度指令で減速するときの上限**`speed_decel_m_s2`（`brake`とは別物）
 
-**第三者検証を受けた拡張（2026-09-26）**: モデルと違う形の真値で解析を試したところ、黙って
-誤った値を返す箇所が見つかったので、実機の構造に寄せた（いずれも既定値は従来と同じ挙動）。
+**実機の構造に寄せた要素**（いずれも既定値は無効。同定が黙って誤った値を返さないよう、
+モデルと違う形の真値でも解析できる構造にしてある）:
 
 - **速度はファームの PI**（`SpeedController`。`speed_kp>0` のとき）: 目標のランプ→PI→トルク
-  上限→車体。以前の1次遅れでは、ファームの形の真値に対して時定数が下限に張り付き、加速度が
-  ファームの上限3.0m/s²を超えて読まれ、速度の再現誤差が0.13〜0.27m/sになった
+  上限→車体。1次遅れで代用すると、ファームの形の真値に対して時定数が下限に張り付き、
+  加速度がファームの上限3.0m/s²を超えて読まれる
 - **曲率の2次遅れ**（`yaw_natural_freq_rad_s`・`yaw_damping`。振動的なヨー応答）: 1次の遅れ
   で表すと、舵の効きが13%ずれ、ガタと不感帯が入れ替わった。ヨーレートそのものではなく曲率に
   掛ける（ヨーレート＝車速×曲率なので、止まった車は回らない）
@@ -115,7 +109,7 @@ class VehicleSpec:
     brake_decel_m_s2: float = 0.0
     #: 制動トルク（1輪あたり、`COMMAND.brake_torque`）→ 減速度の傾き [(m/s²)/(N·m)]。減速度 =
     #: この値×トルク＋転がり抵抗（`brake_decel_m_s2` で頭打ち）。前後運動試験のブレーキを3段の
-    #: 強さで掛けて測る（2026-09-27）。0.0＝未実測（名目の式 トルク×drive_ratio/(車輪半径×質量)）
+    #: 強さで掛けて測る。0.0＝未実測（名目の式 トルク×drive_ratio/(車輪半径×質量)）
     brake_decel_per_nm: float = 0.0
     #: MD の制動の境界層と不感帯 [m/s]（**同定しない。MD のファームの定数**。`BLDC/ProgramV4`
     #: `src/app/config.h` の BRAKE_BOUNDARY_SPEED_RAD_S・BRAKE_DEADBAND_SPEED_RAD_S × 後輪半径）。MD は
@@ -146,18 +140,19 @@ class VehicleSpec:
     #: 間は線形。`drive_top_speed_m_s`が0なら減衰なし
     drive_fade_speed_m_s: float = 0.0
     drive_top_speed_m_s: float = 0.0
-    #: STM32 の速度PI（`drive.c`、2026-09-26〜）。`speed_kp` が0なら従来の1次遅れ（`tau_speed_s`）。
-    #: `speed_kp`・`speed_ki`・`speed_torque_max_nm`・`speed_ramp_max_m_s2` は**ファームの定数**
-    #: （`DRIVE_SPEED_KP/KI`・`DRIVE_MAX_TORQUE_NM`×2・`DRIVE_MAX_ACCEL_M_S2`）で同定しない。
+    #: STM32 の速度PI（`drive.c`）。`speed_kp` が0なら1次遅れ（`tau_speed_s`）。
+    #: `speed_kp`・`speed_ki`・`speed_torque_max_nm` は**ファームの定数**
+    #: （`DRIVE_SPEED_KP/KI`・`DRIVE_MAX_TORQUE_NM`×2）で同定しない。`speed_ramp_max_m_s2` は
+    #: `[safety] cmd_accel_limit_m_s2`（Pi が送る上限。v0.22 で STM32 の固定上限は無くなった）。
     #: 同定するのは車体の側（`speed_plant_gain`・`rolling_resistance`、`SpeedController`参照）
     speed_kp: float = 0.0            # [N·m/(m/s)]
     speed_ki: float = 0.0            # [N·m/(m/s)/s]
     speed_torque_max_nm: float = 0.26  # PI 出力の上限（後輪2輪の合計）[N·m]
-    speed_ramp_max_m_s2: float = 3.0   # 目標速度のランプの上限（COMMAND の accel_limit はこれで切られる）
+    speed_ramp_max_m_s2: float = 3.0   # 目標速度のランプの上限（Pi が COMMAND の accel_limit に載せる上限）
     #: 車体の加速度 / 後輪合計トルク [(m/s²)/(N·m)]。名目は 1/(車輪半径×質量)
     speed_plant_gain: float = 1.0 / (0.03 * 2.0)
     #: STM32 が `speed`/`wheel_speed` に掛けているローパス（1次遅れを `speed_filter_order`
-    #: 段つないだもの）の1段あたりの時定数 [s]。0＝無し。**ファームの定数**（2026-09-25〜 1段・
+    #: 段つないだもの）の1段あたりの時定数 [s]。0＝無し。**ファームの定数**（1段・
     #: 9.95ms。`docs/uart_protocol.md`「更新レート」）で、同定はしない。
     #: **観測（テレメトリ・学習の入力）だけに効き、車の動きには効かない**
     speed_filter_s: float = 0.0
@@ -168,11 +163,11 @@ class VehicleSpec:
     #: STM32 が `yaw_rate` に掛けているローパス（IMUのDLPF等）の時定数 [s]。観測専用。0＝無し
     yaw_rate_filter_s: float = 0.0
     #: 曲率の2次遅れ（車体の慣性とタイヤの横力による振動的なヨー応答）の固有角振動数 [rad/s]と
-    #: 減衰比。タイヤの緩和長の後に時間で掛ける。**車の動きに効く**。0＝無し（2026-09-26追加）
+    #: 減衰比。タイヤの緩和長の後に時間で掛ける。**車の動きに効く**。0＝無し
     yaw_natural_freq_rad_s: float = 0.0
     yaw_damping: float = 1.0
     #: サーボの位置ループの定常ゲイン（実舵角 / 参照舵角）。負荷で押し戻される位置制御の
-    #: 定常偏差。1.0＝偏差なし（2026-09-26追加）
+    #: 定常偏差。1.0＝偏差なし
     steer_servo_gain: float = 1.0
     #: LiDARスキャン完了→STM32がCOMMANDを受理するまでの遅れ [s]（Pi側の処理・中継・UART）。
     #: 実ノードを通すインタラクティブシムには不要（パイプライン自体が遅れを作る）。
@@ -232,7 +227,9 @@ class VehicleSpec:
             speed_kp=dyn.get("speed_kp", 0.0),
             speed_ki=dyn.get("speed_ki", 0.0),
             speed_torque_max_nm=dyn.get("speed_torque_max_nm", 0.26),
-            speed_ramp_max_m_s2=dyn.get("speed_ramp_max_m_s2", 3.0),
+            # 旧キー（[dynamics] speed_ramp_max_m_s2）が残っている toml はそちらを読む
+            speed_ramp_max_m_s2=dyn.get("speed_ramp_max_m_s2",
+                                        safety.get("cmd_accel_limit_m_s2", 0.0) or 3.0),
             speed_plant_gain=dyn.get("speed_plant_gain", dflt.speed_plant_gain),
             cmd_accel_limit_m_s2=safety.get("cmd_accel_limit_m_s2", 0.0),
             cmd_steer_rate_limit_rad_s=safety.get("cmd_steer_rate_limit_rad_s", 0.0),
@@ -317,7 +314,7 @@ class SteerServo:
 
     むだ時間は「入力が始まった時刻」を記録しておき、ステップ中点 `t + dt/2 - dead`
     時点で有効だった入力を引く（ZOH）。サブステップ幅によらず実効遅延の期待値が
-    `dead_time_s`に一致する（以前の1step=1エントリ方式は常に遅れ側へ量子化していた）。
+    `dead_time_s`に一致する（1step=1エントリ方式だと常に遅れ側へ量子化される）。
     """
 
     def __init__(self, dead_time_s: float, tau_s: float, rate_cap: float,
@@ -378,7 +375,7 @@ def drive_accel_limit(spec: VehicleSpec, v: float) -> float:
 
 def brake_speed_factor(spec: VehicleSpec, v: float) -> float:
     """MD の制動の効き（0〜1）: tanh(|v| ÷ 境界層)、不感帯より遅ければ0（`brake_boundary_speed_m_s`）。
-    実機の記録（2026-09-27、4段の強さ）で、境界層なしだと制動中の位置が5〜11mmずれ、あると
+    実機の記録（4段の強さ）で、境界層なしだと制動中の位置が5〜11mmずれ、あると
     0.9〜2.1mm（強さ→減速度の傾きも強さによらず35〜39にそろった）。"""
     s = abs(v)
     if spec.brake_boundary_speed_m_s <= 1e-6:
@@ -399,7 +396,7 @@ def brake_decel(spec: VehicleSpec, cmd: DriveInput, v: float) -> tuple[float, bo
     sp = spec
     nm = cmd.brake_torque if cmd.brake_torque > 0 else VehicleModel.MAX_BRAKE_TORQUE_NM
     if sp.brake_decel_per_nm > 1e-6:
-        # 実測の「トルク→減速度」（`sysid_accel` のブレーキ4段、2026-09-27）× MD の境界層。
+        # 実測の「トルク→減速度」（`sysid_accel` のブレーキ4段）× MD の境界層。
         # タイヤのグリップで頭打ち（`brake_decel_m_s2`、0＝頭打ちなし）
         want = sp.brake_decel_per_nm * nm * brake_speed_factor(sp, v) + sp.rolling_resistance
     else:
@@ -419,7 +416,7 @@ def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float
     if not cmd.armed:
         # ARM されていなければ惰行して止まる（駆動は切れているが慣性はある）。
         # ★×4 に根拠は無い（ファームの DISARM は `Coast`＝モータを放すだけで、減速は転がり抵抗）。
-        # 学習環境は DISARM を使わないので、挙動を変えずに残している（2026-09-27）
+        # 学習環境は DISARM を使わないので、挙動を変えずに残している
         return _toward_zero(v, sp.rolling_resistance * 4.0 * dt)
 
     if cmd.brake:
@@ -433,7 +430,7 @@ def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float
         return v + a * dt
 
     # 速度指令: 1次遅れで追う。加速側は`drive_accel_limit()`（実測・速度依存）、
-    # 減速側は`speed_decel_m_s2`（未実測なら`drive_accel_m_s2`＝従来の対称な上限）。
+    # 減速側は`speed_decel_m_s2`（未実測なら`drive_accel_m_s2`＝対称な上限）。
     # `cmd.accel_limit`（COMMANDのレート制限）も効く場合は厳しい方を採る
     target = cmd.target_speed
     if sp.tau_speed_s > 1e-6:
@@ -457,17 +454,18 @@ def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float
 
 
 class SpeedController:
-    """STM32 の速度制御（`MainF446RE_V3/src/control/drive.c`）を写したもの（2026-09-26）。
+    """STM32 の速度制御（`MainF446RE_V3/src/control/drive.c`）を写したもの。
 
-    目標速度を `min(cmd.accel_limit, speed_ramp_max_m_s2)` でランプ → PI（帰還は前輪速度の
+    目標速度を `min(cmd.accel_limit, speed_ramp_max_m_s2)` でランプ（★v0.22 からファームに上限は無い。
+    `speed_ramp_max_m_s2` は Pi が載せる上限 `[safety] cmd_accel_limit_m_s2` と同じ値）→ PI（帰還は前輪速度の
     ローパス後 `speed_filter_s`。出力 ±`speed_torque_max_nm` で条件付き積分）→ 加速度の
     上限（`drive_accel_limit()`・`speed_decel_m_s2`。外側の制限なので積分を back-calculation で
     戻す、`UnwindIntegral` と同じ時定数0.1s）→ 車体（加速度 = `speed_plant_gain`×トルク −
     転がり抵抗）。目標と測定速度がどちらも 0.05m/s 未満なら惰行して積分を捨てる
     （`IsStandstill`）。ブレーキ・トルク指令・DISARM の間は目標を0・積分を0に戻す。
 
-    以前の「1次遅れ＋加速度上限」は、ファームのこの構造（ランプ→2次応答・行き過ぎ）を
-    表現できず、同定で時定数が下限に張り付いた（検証: 2026-09-26、PROGRESS.md）。
+    「1次遅れ＋加速度上限」ではファームのこの構造（ランプ→2次応答・行き過ぎ）を
+    表現できず、同定で時定数が下限に張り付く。
     `VehicleModel`（`speed_kp>0` のとき）と `tools/sysid/fit.py` が同じ実装を使う。
 
     **ローンチコントロール**（`cmd.launch`、★v0.20。`drive.c` の `UpdateLaunch`）: 目標が測定速度より
@@ -483,10 +481,17 @@ class SpeedController:
     LAUNCH_END_MARGIN_M_S = 0.05
     LAUNCH_TIMEOUT_S = 3.0
 
+    #: 加速度フィードフォワードに使う目標車速の傾きのローパス [s]（`drive.h` の DRIVE_SPEED_FF_TAU_S）
+    FF_TAU_S = 0.02
+
     def __init__(self, spec: VehicleSpec, launch_exit_torque_nm: float = 0.0) -> None:
         self.spec = spec
         #: 発進を終えて PI へ戻すときの積分の初期値 [N·m、1輪あたり]（`[control]` の同名の値）
         self.launch_exit_torque_nm = launch_exit_torque_nm
+        #: 加速度フィードフォワード（★v0.21、`[control]` の同名の値。後輪2輪の合計トルク）:
+        #: トルク = `speed_ff_nm_per_m_s2`×目標車速の傾き ＋ `speed_ff_rr_nm`×進む向き。0 = 無し
+        self.speed_ff_nm_per_m_s2 = 0.0
+        self.speed_ff_rr_nm = 0.0
         self.reset()
 
     def reset(self, v: float = 0.0, ref: float = 0.0, integral: float = 0.0) -> None:
@@ -496,6 +501,7 @@ class SpeedController:
         self.launching = False
         self._launch_spent = False
         self._launch_t = 0.0
+        self.ff_accel = 0.0                #: 目標車速の傾き（ローパス後）[m/s²]
 
     def _update_launch(self, cmd: DriveInput, dt: float) -> bool:
         if not cmd.launch:
@@ -514,7 +520,9 @@ class SpeedController:
             self.launching = False
         return self.launching
 
-    def step(self, cmd: DriveInput, v: float, dt: float) -> float:
+    def step(self, cmd: DriveInput, v: float, dt: float, grip: float = 1.0) -> float:
+        """:param grip: 加速度の上限に掛ける割合（0〜1）。旋回で横に使っているぶんだけ前後に
+            出せる力が減る（`VehicleModel.step` が渡す）。1.0 = 直進（同定の解析はこのまま）"""
         sp = self.spec
         if sp.speed_filter_s > 1e-6:
             self.v_meas += (v - self.v_meas) * (1.0 - math.exp(-dt / sp.speed_filter_s))
@@ -523,6 +531,7 @@ class SpeedController:
         if not cmd.armed or cmd.brake or cmd.torque_mode:
             self.ref = 0.0
             self.integral = 0.0
+            self.ff_accel = 0.0
             self.launching = self._launch_spent = False
             return next_speed(sp, cmd, v, dt)
         rr = sp.rolling_resistance
@@ -534,16 +543,22 @@ class SpeedController:
             self.ref = self.v_meas
             self.integral = (sign * 2.0 * self.launch_exit_torque_nm / sp.speed_ki
                              if sp.speed_ki > 1e-9 else 0.0)
+            self.ff_accel = 0.0
             t_req = sign * t_max
         else:
             lim = sp.speed_ramp_max_m_s2
             if cmd.accel_limit > 0:
                 lim = min(lim, max(0.01, cmd.accel_limit))
-            self.ref += max(-lim * dt, min(lim * dt, cmd.target_speed - self.ref))
+            step = max(-lim * dt, min(lim * dt, cmd.target_speed - self.ref))
+            self.ref += step
             if abs(self.ref) < self.STANDSTILL_M_S and abs(self.v_meas) < self.STANDSTILL_M_S:
                 self.integral = 0.0
+                self.ff_accel = 0.0
                 self._launch_spent = False
                 return _toward_zero(v, rr * dt)
+            # 加速度フィードフォワード: 目標車速の傾きをならして、その加速に要るトルクを先に足す
+            if dt > 0.0:
+                self.ff_accel += (step / dt - self.ff_accel) * (dt / (self.FF_TAU_S + dt))
             e = self.ref - self.v_meas
             self.integral += e * dt
             t_req = sp.speed_kp * e + sp.speed_ki * self.integral
@@ -552,12 +567,18 @@ class SpeedController:
                 if (t_req > 0) == (e > 0):
                     self.integral -= e * dt
                 t_req = max(-t_max, min(t_max, t_req))
+            if self.speed_ff_nm_per_m_s2 > 0.0 or self.speed_ff_rr_nm > 0.0:
+                t_req += self.speed_ff_nm_per_m_s2 * self.ff_accel
+                if abs(self.ref) >= self.STANDSTILL_M_S:
+                    t_req += math.copysign(self.speed_ff_rr_nm, self.ref)
+                t_req = max(-t_max, min(t_max, t_req))
         g = sp.speed_plant_gain
         a_req = g * t_req
         # 外側の加速度上限（モータ・TCで出せる分）。進む向きに押すなら駆動、逆なら減速
         driving = (a_req >= 0.0) == (v >= 0.0) or abs(v) < 1e-3
         a_lim = drive_accel_limit(sp, v) if driving else (
             sp.speed_decel_m_s2 if sp.speed_decel_m_s2 > 1e-6 else math.inf)
+        a_lim *= grip
         a = max(-a_lim, min(a_lim, a_req))
         if a != a_req and not launching and sp.speed_ki > 1e-9 and g > 1e-9:
             self.integral += (a - a_req) / g / sp.speed_ki * (dt / self.ANTIWINDUP_TT_S)
@@ -636,6 +657,8 @@ class VehicleModel:
         self.yaw_rate_measured = 0.0
         #: タイヤの緩和長ぶん遅れて追従している曲率（グリップで頭打ちにする前）
         self._curv_state = 0.0
+        #: 舵が要求している曲率（遅れを通した後・グリップで頭打ちにする前）。前後の摩擦円に使う
+        self._curv_req = 0.0
         self.accel_x = 0.0
         self._a_lat_max = self.spec.mu * GRAVITY_MPS2   #: 摩擦円で絞った直近の横加速度上限
         self.odom_front = [0.0, 0.0]     # [FL, FR] 累積 [m]（射影なし = 前輪の実距離）
@@ -649,7 +672,7 @@ class VehicleModel:
         self._link = SteerLink(sp.steer_link_hysteresis_rad, sp.steer_link_deadband_rad)
         #: リンクを通した後のタイヤ角（曲率はこれで決まる）
         self.steer_wheel = 0.0
-        #: STM32 の速度PI（`speed_kp>0` のとき。0なら従来の1次遅れ `next_speed()`）
+        #: STM32 の速度PI（`speed_kp>0` のとき。0なら1次遅れ `next_speed()`）
         self._speed_ctl = SpeedController(sp) if sp.speed_kp > 1e-9 else None
         #: 曲率の2次遅れ（`yaw_natural_freq_rad_s>0` のとき）
         self._yaw2 = SecondOrder(sp.yaw_natural_freq_rad_s, sp.yaw_damping) \
@@ -659,6 +682,14 @@ class VehicleModel:
     def launching(self) -> bool:
         """ローンチコントロールで発進している最中か（`TELEMETRY.flags` の LAUNCH_ACTIVE）。"""
         return self._speed_ctl is not None and self._speed_ctl.launching
+
+    def set_speed_ff(self, nm_per_m_s2: float | None = None, rr_nm: float | None = None) -> None:
+        """`[control]` の `speed_ff_nm_per_m_s2`・`speed_ff_rr_nm`（STM32 へ `CONFIG_SET` で入る値）。"""
+        if self._speed_ctl is not None:
+            if nm_per_m_s2 is not None:
+                self._speed_ctl.speed_ff_nm_per_m_s2 = float(nm_per_m_s2)
+            if rr_nm is not None:
+                self._speed_ctl.speed_ff_rr_nm = float(rr_nm)
 
     def set_launch_exit_torque(self, nm: float) -> None:
         """`[control]` の `launch_exit_torque_nm`（STM32 へ `CONFIG_SET` で入る値）。"""
@@ -689,7 +720,14 @@ class VehicleModel:
         # ── 速度 ──
         prev_speed = self.speed
         if self._speed_ctl is not None:
-            self.speed = self._speed_ctl.step(cmd, self.speed, dt)
+            # ★ 前後の力も摩擦円で絞る（横だけだと旋回中でも直線と同じ加減速が出て、
+            # コーナー出口の加速が実車より楽観的になる）。駆動も減速も後輪だけが担うので、舵が要求して
+            # いる横加速度 `u_y`（グリップ限界に対する割合）に対し、前後の上限を `1/sqrt(1+u_y²)` 倍に
+            # する（前後・横の要求が円からはみ出すとき、両方を同じ割合で縮めた形。横の側は下で
+            # `accel_x` のぶんを引く）。横が限界に張り付いても 0 にはならない（止まれなくならない）
+            u_y = self.speed ** 2 * abs(self._curv_req) / max(sp.mu * GRAVITY_MPS2, 1e-6)
+            self.speed = self._speed_ctl.step(cmd, self.speed, dt,
+                                              grip=1.0 / math.sqrt(1.0 + u_y * u_y))
         else:
             self.speed = next_speed(sp, cmd, self.speed, dt)
         self.accel_x = (self.speed - prev_speed) / dt if dt > 0 else 0.0
@@ -719,6 +757,7 @@ class VehicleModel:
             # 曲率の2次遅れ（振動的なヨー応答）。ヨーレート＝車速×曲率なので、止まった車は回らない
             # （ヨーレートそのものに掛けると、停止後もヨーが振動し続けた）
             requested_curvature = self._yaw2.step(requested_curvature, dt)
+        self._curv_req = requested_curvature
         a_lat_max = math.sqrt(max(0.0, (sp.mu * GRAVITY_MPS2) ** 2 - self.accel_x ** 2))
         self._a_lat_max = a_lat_max
         max_curvature = a_lat_max / max(abs(self.speed), 1e-6) ** 2

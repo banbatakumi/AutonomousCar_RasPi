@@ -38,9 +38,8 @@ NanoTrack v2 ONNXエクスポートと同じもの。SHA1で検証済み）。**
 
 `run()`は「ARM中」かつ「追跡中（`_state != "IDLE"`）か新規選択が来た周期
 （`roi.select_seq`が進んだ）」の間だけ`TOPIC_IMAGE_FRONT`の共有メモリを読む。
-**以前はIDLE中も毎周期無条件で読んでいた**——`cam_perception_node.py`の
-「モードが選ばれていない間は共有メモリすら読まない」節電と食い違っていた
-バグで、実車確認でIDLE中でもCPU 33%程度を消費していた（2026-09-04）。
+IDLE中に毎周期読むと実車でCPU 33%程度を消費するので、`cam_perception_node.py`の
+「モードが選ばれていない間は共有メモリすら読まない」節電に揃えている。
 
 **armedを見る理由**: ROI選択（`track/roi`）はtelemetry_nodeがプロセス
 再起動まで覚えていて、GUI再読み込みでも復元・再送され続ける
@@ -96,7 +95,7 @@ _SCAN_STALE_NS = 300_000_000
 _MIN_HALF_ANGLE_DEG = 2.0
 _MAX_HALF_ANGLE_DEG = 15.0
 #: 「遠のく方向へ大きく飛んだ」とみなす変化速度の上限[m/s]（Phase 2で実測調整）。
-#: 実車測定（2026-09-01）でLiDAR距離融合の呼び出し間隔は中央値約20ms・p90約30ms
+#: 実車測定でLiDAR距離融合の呼び出し間隔は中央値約20ms・p90約30ms
 #: だった。**固定の距離差ではなく実際の経過時間`dt`に対する速度で見る**——
 #: 呼び出し間隔が伸びたとき（見失いからの復帰直後等）に固定閾値だと過敏/鈍感の
 #: どちらにも振れうるため。5m/sは走行速度（〜数m/s）+対象自身の動きを見込んだ余裕
@@ -131,7 +130,7 @@ _GIVE_UP_MS = 5000.0
 #: 計時・選択解除・DISARM 中の扱いを止めないため。カメラが止まった・DISARM した等）
 _TRACK_STALL_NS = 200_000_000
 #: NanoTrack（cv2.dnn）のスレッド数。既定の4から2にすると、30Hz 追跡で制御系電流が
-#: 約11mA下がり、推論は p50 10.7→13.2ms（2026-10-04、Pi 5 実測）。1 だと 21ms に延びる
+#: 約11mA下がり、推論は p50 10.7→13.2ms。1 だと 21ms に延びる
 DEFAULT_CV_THREADS = 2
 
 
@@ -304,7 +303,7 @@ class CamTrackNode:
         """画素の列 `u_px`（光軸の高さの行）が光軸から左に何 rad か。
 
         画素を光線に戻して（`pixel_ray`、魚眼なら歪みを解いて）水平面内の角度を取る。
-        ピンホールなら従来の `atan2(cx-u, f)` と一致する。
+        ピンホールなら `atan2(cx-u, f)` と一致する。
         """
         intr = self._last_intr
         x, _, z = pixel_ray(u_px, intr.principal_y, intr)
@@ -334,7 +333,7 @@ class CamTrackNode:
         待機/追跡中でほぼ変わらないが、見失いからの復帰直後など`dt`が伸びる
         場面で固定距離閾値だと過敏（dtが短いのに大きく動いたと誤検知）・
         鈍感（dtが長いのに小さな変化を見逃す）のどちらにも振れうるため
-        （Phase 2、2026-09-01の実測で発見）。
+        （Phase 2の実測で発見）。
         """
         if self._last_distance is None or self._last_distance_ns is None:
             self._last_distance = raw
@@ -521,7 +520,7 @@ class CamTrackNode:
                 #: **DISARM中は選択済み/追跡中でも読まない**——ROI選択は
                 #: telemetry_node が再起動まで覚えている（`_track_roi_pump()`）ので、
                 #: armed を見ないと駐車中もNanoTrackが回り続ける
-                #: （`cam_perception_node.py`等と同じ省電力バグ、2026-09-04）
+                #: （`cam_perception_node.py`等と同じ省電力バグ）
                 #: **モデル未配置（`_factory.available=False`）の間はROI選択の
                 #: 試行を即座に諦める。** `_try_select()`はモデルが無ければ
                 #: `select_seq`を消費せずに`False`を返し続けるので、これを
@@ -531,10 +530,9 @@ class CamTrackNode:
                     self._state != "IDLE"
                     or (self._factory.available and roi is not None
                         and roi.select_seq > self._last_select_seq))
-                #: **同じフレームを2度追跡しない**（2026-10-04、省電力）。このループは
-                #: vehicle_state（100Hz）の到着でも起きるので、以前は追跡中に同じ
-                #: フレームを読み直して NanoTrack を回し続けていた（実測で約85回/s。
-                #: 新しいフレームだけにすると 30Hz 追跡で制御系電流 −138mA）
+                #: **同じフレームを2度追跡しない**。このループは
+                #: vehicle_state（100Hz）の到着でも起きるので、同じフレームを読み直すと
+                #: NanoTrack が回り続ける（実測で約85回/s。新しいフレームだけにすると 30Hz 追跡で制御系電流 −138mA）
                 now = time.monotonic_ns()
                 new_select = roi is not None and roi.select_seq > self._last_select_seq
                 if need_frame:
@@ -574,7 +572,7 @@ class CamTrackNode:
                 st.seq = seq
                 st.t_capture = t_capture
                 #: 追跡中・選択の処理中は ACTIVE。IDLE（未選択か DISARM）の間は
-                #: 起床・publish を約20Hz・2Hzに落とす（`IdlePacer`。省電力、2026-10-04）
+                #: 起床・publish を約20Hz・2Hzに落とす（`IdlePacer`。省電力）
                 active = need_frame or self._state != "IDLE"
                 if pacer.should_publish(active, now):
                     pub.send(TOPIC_TRACK_TARGET, st)

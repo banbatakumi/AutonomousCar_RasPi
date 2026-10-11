@@ -143,7 +143,7 @@ class MsgBase(msgspec.Struct):
 
 
 class VehicleState(MsgBase):
-    """`TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
+    """`TELEMETRY`(0x02) を SI に直したもの。100Hz。
 
     生値と Pi 側の派生量を**同じメッセージに入れる**。別トピックに分けると
     「どの派生量がどの生値から出たか」の対応が時刻合わせの問題に化ける。
@@ -159,18 +159,18 @@ class VehicleState(MsgBase):
     wheel_speed: list[float] = msgspec.field(default_factory=lambda: [0.0] * 4)
     #: 前輪の累積走行距離 [m] [FL, FR]。**累積値・射影なし**
     odom_dist: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
-    accel: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [m/s²] x(前)・y(左)・z(上)。重力込み（2026-10-01以降。以前の記録は x/y が逆）
+    accel: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [m/s²] x(前)・y(左)・z(上)。重力込み
     pitch: float = 0.0                     #: [rad] 機首上げが正。重力で補正済み。ドリフトしない
     roll: float = 0.0                      #: [rad] 右傾き（右が沈む）が正。同上
     motor_current: list[float] = msgspec.field(default_factory=lambda: [0.0] * 3)  #: [A] RL,RR,ST
     #: [N·m] [RL, RR]。**指令値であって実測ではない**（Kt が未実測のため測れない）
     torque_cmd: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
     #: STM32 の TC が内部で見ているスリップ率 [RL, RR]（無次元。正=空転 負=ロック傾向）。
-    #: 基準速度が低い区間は STM32 側で 0 を送ってくる（★v0.13）。`slip_rear` とは別物——
+    #: 基準速度が低い区間は STM32 側で 0 を送ってくる。`slip_rear` とは別物——
     #: こちらは STM32 自身の推定値、`slip_rear` は Pi 側が `wheel_speed`/`speed` から計算する値
     tc_slip: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
     #: TC が動的に決めているトルク上限 [N·m] [RL, RR]。介入していなければ
-    #: `LinkDiag.max_torque_nm` と同じ値になる（★v0.13）
+    #: `LinkDiag.max_torque_nm` と同じ値になる
     tc_limit_nm: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)
     # ── ★v0.16: 制御がどれだけ介入しているかを見るための値（GUI の診断タブ・mcap）──
     #: [N·m] [RL, RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の
@@ -200,7 +200,7 @@ class VehicleState(MsgBase):
     #: STM32 が上位の指令で走れる状態（★v0.19。それまでは「駆動電源が入っている」だった）。
     #: ARM を要求しても、MD の起動待ち（約1秒）・ステア未較正・E-Stop の間は False
     armed: bool = False
-    #: 駆動電源が入っている（★v0.19）。`armed` でなくても、ARM が外れたあと STM32 が停車を
+    #: 駆動電源が入っている。`armed` でなくても、ARM が外れたあと STM32 が停車を
     #: 待って制動している間は True
     drive_power_on: bool = False
     estop_active: bool = False
@@ -217,18 +217,18 @@ class VehicleState(MsgBase):
     #: **急に減速した理由がこれかどうかを後から説明できるようにするため**に持つ
     auto_stop_active: bool = False
     #: サイドブレーキ（`COMMAND.flags2` bit0）が**今まさに位置制御へ切り替わり固定中**
-    #: （★v0.13）。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
+    #: 。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
     side_brake_active: bool = False
-    #: 左/右ウィンカーが**今まさに点滅中**（`COMMAND.flags2` bit1/2 の要求に対する実行状態、★v0.14）。
+    #: 左/右ウィンカーが**今まさに点滅中**（`COMMAND.flags2` bit1/2 の要求に対する実行状態）。
     #: 点滅の周期・位相は STM32 側が持つので、Pi は「要求したか」ではなく「実際に光っているか」を見る
     winker_left_active: bool = False
     winker_right_active: bool = False
-    #: ABS が**今まさに制動トルクを要求より削っている**（★v0.15）。`tc_active` と同じ「介入中」の意味。
+    #: ABS が**今まさに制動トルクを要求より削っている**。`tc_active` と同じ「介入中」の意味。
     #: フォールバック（前輪センサ異常とみなして ABS を止め、要求どおりに制動している間）は False
     abs_active: bool = False
-    #: 片輪浮き対策が**今まさにトルクを削っている**（★v0.16）。このとき `tc_active` は立たない
+    #: 片輪浮き対策が**今まさにトルクを削っている**。このとき `tc_active` は立たない
     wheel_lift_active: bool = False
-    #: ローンチコントロールで**今まさに発進している**（★v0.20）。`DriveCmd.launch` を立てていても、
+    #: ローンチコントロールで**今まさに発進している**。`DriveCmd.launch` を立てていても、
     #: 条件を満たさず始まらなかった・目標車速に届いて終わった、なら False
     launch_active: bool = False
     faults: list[str] = msgspec.field(default_factory=list)  #: 立っている fault の名前
@@ -348,13 +348,13 @@ class DriveCmd(MsgBase):
     #: 優先順位は `brake` > `auto_stop` > 通常指令。**Pi 側で二重に制御する必要はない**
     auto_stop: bool = False
     #: サイドブレーキ。立てている間、**速度に関わらず即座に**後輪を機械的な位置制御へ
-    #: 切り替えて固定する（★v0.13）。`brake` より優先。解除は明示的に下ろすまで有効
+    #: 切り替えて固定する。`brake` より優先。解除は明示的に下ろすまで有効
     side_brake: bool = False
-    #: 左/右ウィンカー（★v0.14）。**両方立てるとハザード**（左右同時点滅）として扱われる。
+    #: 左/右ウィンカー。**両方立てるとハザード**（左右同時点滅）として扱われる。
     #: 点滅そのものは STM32 側で行う。実際に点滅しているかは `VehicleState.winker_*_active` を見ること
     winker_left: bool = False
     winker_right: bool = False
-    #: ローンチコントロール（★v0.20）。立っている間、**車速指令の `target_speed` が車速より 0.5m/s 以上
+    #: ローンチコントロール。立っている間、**車速指令の `target_speed` が車速より 0.5m/s 以上
     #: 速い加速（発進）**で、STM32 が目標車速のランプ（3.0m/s²）と車速PIを迂回し、全開のトルク＋TC で
     #: `target_speed` まで加速する（PIは偏差が溜まるまでトルクが出ず、グリップの限界に届くまで
     #: 約0.3秒かかる）。届いたら車速PIへ戻る。1回の要求で1回（下ろす・制動する・止まる、でまた
@@ -363,7 +363,7 @@ class DriveCmd(MsgBase):
     #: 自律走行は planner（`slam2d_raceline` の `launch`、既定は無効）。`brake`・`torque_mode`・
     #: `side_brake` の間は意味を持たない。実際に発進中かは `VehicleState.launch_active`
     launch: bool = False
-    #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（名前 → 値。★v0.16）。同定の試験
+    #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（名前 → 値）。同定の試験
     #: （`raspi/auto/sysid_*.py`）が TC・ABS を切る・ヨーモーメントを入れるのに使う。io_node は
     #: **この指令が届いている間だけ**入れ、届かなくなったら元へ戻す（`raspi/core/control_params.py`
     #: の `OVERRIDABLE`）。GUI からの指令では常に空
@@ -390,20 +390,20 @@ class LinkDiag(MsgBase):
     arm_inhibit_reason: str = ""
     #: STM32 が `LOG` で送ってきた直近の警告・エラー（新しい順に最大4件。"12:34:56 E 本文"）。
     #: **STM32 が自分の判断で止めた理由はここにしか出ない**（例: `MD rear-left stopped: overcurrent`
-    #: ＝走行中に MD が使えなくなって `md_fault` をラッチした。2026-10-10 まで io_node は捨てていた）
+    #: ＝走行中に MD が使えなくなって `md_fault` をラッチした）
     stm_log: list[str] = msgspec.field(default_factory=list)
     #: 直近に受理した `cmd` の発行元。誰も出していなければ ""
     cmd_source: str = ""
     #: `cmd` が途絶して DISARM にフォールバックしているか
     cmd_stale: bool = True
 
-    #: TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.8）。
+    #: TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得）。
     #: 未確認（起動直後でまだ `CONFIG_ACK` を受け取っていない）なら None
     tc_enabled: bool | None = None
     tv_enabled: bool | None = None
 
     #: 片輪浮き対策（Wheel Lift Guard）が STM32 側で実際に有効化されているか
-    #: （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。未確認なら None
+    #: （`CONFIG_ACK` から取得）。TC/TV本体とは独立した別機構。未確認なら None
     wheel_lift_guard_enabled: bool | None = None
 
     #: ABS（制動時の後輪ロック防止）が STM32 側で実際に有効化されているか
@@ -419,7 +419,7 @@ class LinkDiag(MsgBase):
     #: を受け取っていない）なら None（None の間もSTM32側は既定15cmで動いている）
     auto_stop_margin_cm: float | None = None
 
-    #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）が STM32 に入っているか（★v0.16）。
+    #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）が STM32 に入っているか。
     #: `none`（送るものが無い）/`pending`（送信中）/`ok`（全項目が STM32 の答えと一致）/
     #: `mismatch`（STM32 が範囲へ丸めた）/`unsupported`（STM32 のファームが古い）/
     #: `invalid`（`[control]` が読めない）。`raspi/core/control_params.py`
@@ -436,7 +436,7 @@ class LinkDiag(MsgBase):
 
     #: STM32 ⇄ MD 間の受信数とエラー数 [RL, RR, ST]。**合計にしないこと。**
     #: 合計にすると「1台だけ起動が遅れている」「1台だけ配線が悪い」が
-    #: 他の2台に埋もれて見えなくなる（2026-08-08 に実際に誤診した）
+    #: 他の2台に埋もれて見えなくなる
     md_rx_count: list[int] | None = None
     md_rx_error: list[int] | None = None
     counts: dict[str, int] = msgspec.field(default_factory=dict)  #: TYPE 名 → 受信数
@@ -483,7 +483,7 @@ class LinkDiag(MsgBase):
     #: 「シムのつもりで --allow-arm した実車が動く」が起きる（GUI が SIM バッジを出す）
     sim: bool = False
 
-    #: 車両の物理的な上限値（`LIMITS` パケットから取得。★v0.11）。
+    #: 車両の物理的な上限値（`LIMITS` パケットから取得）。
     #: 読み取り専用・実行時に変化しない。まだ受け取っていなければ None
     max_speed_m_s: float | None = None
     max_accel_m_s2: float | None = None
@@ -607,18 +607,18 @@ class AutoState(MsgBase):
     brake: bool = False                    #: 制動を掛けているか
     #: [m/s²] 目標速度を変える速さの上限（`COMMAND.accel_limit`）。0 = 指定しない（GUI の値のまま）。
     #: 中継（`telemetry_node._merge_auto`）は GUI の値との**小さい方**を採るので、緩める向きには
-    #: 効かない。システム同定の加減速試験が段ごとの加速度を指定するのに使う（2026-09-27）
+    #: 効かない。システム同定の加減速試験が段ごとの加速度を指定するのに使う
     accel_limit: float = 0.0
     #: [N·m] `brake` のときの制動トルク（1輪あたり、`COMMAND.brake_torque`）。0 = 指定しない（GUI の値の
     #: まま）。人（GUI）もブレーキを掛けていれば中継は**強い方**を採る（`telemetry_node._merge_auto`）。
-    #: システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う（2026-09-27）
+    #: システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う
     brake_torque: float = 0.0
     #: 立っている間 `target_speed` の代わりに `target_torque` [N·m]（1輪あたり）を直接掛ける
     #: （`COMMAND.torque_mode`。車速PIを通さない）。**同定の試験だけが使う**——タイヤの限界まで
-    #: トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない（2026-10-05）
+    #: トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない
     torque_mode: bool = False
     target_torque: float = 0.0
-    #: ローンチコントロールを要求する（`DriveCmd.launch`、★v0.20）。`target_speed` が車速より 0.5m/s
+    #: ローンチコントロールを要求する（`DriveCmd.launch`）。`target_speed` が車速より 0.5m/s
     #: 以上速い間、STM32 がグリップの限界で `target_speed` まで加速する。**`target_speed` は「そこまで
     #: 全開で加速してよい速度」になる**ので、立てるのは進路が開けている発進だけにすること
     launch: bool = False
@@ -716,6 +716,10 @@ class AutoState(MsgBase):
     # ── 鮮度（planning_node が入れる） ──
     scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]
     plan_hz: float = 0.0                   #: 実測の計画レート [Hz]
+    #: `plan()` 1回の処理時間 [ms] と、直近1秒の最大。**Pi で実測する手段はこれだけ**
+    #: （デッドマン `cmd_deadman_ms` に対する余裕を見る）
+    plan_ms: float = 0.0
+    plan_ms_max: float = 0.0
 
 
 class AutoMap(MsgBase):
@@ -837,7 +841,7 @@ class UiEvent(MsgBase):
     kind: str = ""                         #: 例: "gui_connect", "tc_enable", "tv_enable", "wheel_lift_guard_enable", "abs_enable", "brake_hold_enable", "auto_stop_margin_cm"
     #: `kind` が真偽値を伴うイベント（"tc_enable"/"tv_enable"/"wheel_lift_guard_enable"/"abs_enable"/"brake_hold_enable"）のときだけ意味を持つ
     value: bool = False
-    #: `kind` が連続値を伴うイベント（"auto_stop_margin_cm" のみ。★v0.12）のときだけ意味を持つ。
+    #: `kind` が連続値を伴うイベント（"auto_stop_margin_cm" のみ）のときだけ意味を持つ。
     #: `value`（bool）とは別枠にした——既存の bool イベントと混ぜると 0/1 に丸まってしまうため
     float_value: float = 0.0
 
@@ -859,7 +863,7 @@ class CamConfig(MsgBase):
     #: False なら camera_node が該当カメラの `Picamera2.stop()` を呼び、実際に撮像を止める
     rear_enabled: bool = True
     #: 前カメラの同上。DISARM中に映像を使う者（GUIの視聴者・記録）がいない間だけ
-    #: telemetry_node が False にする（2026-10-04、省電力。センサを止めると
+    #: telemetry_node が False にする（省電力。センサを止めると
     #: 1fps に落とすより約45mA少ない）。ARM中は常に True
     front_enabled: bool = True
 
@@ -920,7 +924,7 @@ class CamE2ECmd(MsgBase):
     モデルのファイルを知らなくてよい。
 
     ★ planner は速度を舵から決めるので `speed_norm`・`model_speed_ref` を
-    使わない（2026-10-07）。記録と評価のために流し続けている。
+    使わない。記録と評価のために流し続けている。
     """
 
     ready: bool = False

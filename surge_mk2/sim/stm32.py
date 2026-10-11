@@ -65,7 +65,8 @@ ABS_MIN_SPEED_M_S = 0.25
 #: （`DRIVE_MAX_SPEED_M_S`/`DRIVE_MAX_ACCEL_M_S2`/`DRIVE_MAX_TORQUE_NM`）と
 #: 一致させること。** `docs/uart_protocol.md` §5.12 に記載の値が正
 DRIVE_MAX_SPEED_M_S = 5.0
-DRIVE_MAX_ACCEL_M_S2 = 3.0
+#: ★v0.22: STM32 は `accel_limit` に上限を掛けない。ワイヤ（u16×0.001）で表せる最大を返す
+DRIVE_MAX_ACCEL_M_S2 = 65.535
 DRIVE_MAX_TORQUE_NM = 0.13   # VehicleModel.MAX_BRAKE_TORQUE_NM と同値
 
 #: 積分の刻み。細かくしても運動学モデルでは意味が薄く、粗いと舵の遅れが崩れる
@@ -186,6 +187,10 @@ class VirtualStm32:
             known = msg.param_id in vars(packets.Param).values()
             if msg.param_id == packets.Param.LAUNCH_EXIT_TORQUE_NM:
                 self.vehicle.set_launch_exit_torque(msg.value)
+            elif msg.param_id == packets.Param.SPEED_FF_NM_PER_M_S2:
+                self.vehicle.set_speed_ff(nm_per_m_s2=msg.value)
+            elif msg.param_id == packets.Param.SPEED_FF_RR_NM:
+                self.vehicle.set_speed_ff(rr_nm=msg.value)
             self._emit(packets.ConfigAck(
                 param_id=msg.param_id, applied=msg.value,
                 result=packets.ConfigResult.OK if known else packets.ConfigResult.UNKNOWN_ID), t_ns)
@@ -245,9 +250,9 @@ class VirtualStm32:
         self._acc += dt_total
         # TELEMETRY はスナップショットを取った時刻に、その時刻の中身で送る（ファームは
         # `Telemetry_Update` が 100Hz でスナップショットを取り、その時刻を `t_us` に載せる）。
-        # 以前は `t_ns` まで積分してから過去の `_next_tlm` の時刻で送っていたので、中身が
-        # `t_us` より最大 `read_timeout`（5ms）新しく、インタラクティブシムの遅延試験が小さく
-        # 出た（2026-09-26 の第三者検証）。積分を刻むたびに、境界を過ぎたらその場で取る
+        # `t_ns` まで積分してから過去の時刻で送ると、中身が `t_us` より最大
+        # `read_timeout`（5ms）新しくなり、遅延試験が小さく出る。積分を刻むたびに、
+        # 境界を過ぎたらその場で取る
         t_state = t_ns - int(round(self._acc * NS))       # 積分済みの車両の状態の時刻
         while self._acc >= STEP_S:
             self._emit_due_telemetry(t_state)
@@ -407,7 +412,7 @@ class VirtualStm32:
         load = abs(v.speed) / 3.0                       # 0..1 の目安
         # 1輪あたりの指令トルク（正=駆動 / 負=制動）。実機は TC・ABS 適用後の最終指令値を返す。
         # 縦加速度から `vehicle.brake_decel`/`next_speed` の式を逆算して求める（GUI の
-        # 制動表示・トルクゲージが実機と同じ向きで動くように。以前は常に正の見せかけ値だった）
+        # 制動表示・トルクゲージが実機と同じ向きで動くように）
         if v.cmd.torque_mode:
             torque = v.cmd.target_torque
         else:
@@ -438,7 +443,7 @@ class VirtualStm32:
             wheel_speed=[_q("wheel_speed", w, -32768, 32767) for w in v.wheel_speed_measured],
             odom_dist=[_q("odom_dist", d, -(1 << 31), (1 << 31) - 1) for d in odom],
             # 機体座標系は X=前・Y=左・Z=上（前進加速で accel_x>0、左旋回で accel_y>0）。
-            # ファームは2026-10-01に `ChipToBody` を直してこの向きで出す（以前は X/Y が逆だった）
+            # ファームは `ChipToBody` でこの向きに直して出す
             accel_x=_q("accel_x", v.accel_x, -32768, 32767),
             accel_y=_q("accel_y", v.accel_lateral, -32768, 32767),
             accel_z=_q("accel_z", 9.81, -32768, 32767),

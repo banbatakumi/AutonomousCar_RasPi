@@ -5,7 +5,7 @@ Pi 5 の純正ファンコネクタは `gpiozero` で触れる普通の GPIO ピ
 sysfs に公開している（`/sys/class/hwmon/hwmonN/pwm1` 系）。`raspi/io/gpio.py`
 の GPIO6/13/18/19 とは別経路なので、`io_node` を経由せず本モジュールで完結する。
 
-## `pwm1_enable` の意味（実機で確認済み、2026-08-17）
+## `pwm1_enable` の意味
 
 `hwmon2`（`name`=`pwmfan`）に対し、以下を実機（Pi5, kernel既定の `pwm-fan` ドライバ）で確認した:
 
@@ -30,7 +30,7 @@ sysfs に公開している（`/sys/class/hwmon/hwmonN/pwm1` 系）。`raspi/io/
 （実機で確認済み）。`raspi/setup/99-surge-fan.rules`（`install_services.sh` が
 適用する）で `gpio` グループに `g+w` を付与している。
 
-## ★ 高温になると手動指定はハードウェアに上書きされる（実機で確認済み、2026-08-17）
+## ★ 高温になると手動指定はハードウェアに上書きされる
 
 `pwm1_enable=1`（手動）のままでも、**温度が危険域（実機で約75°C付近を確認、
 既定カーブの最終段に相当）を超えた瞬間、`pwm1` の値がハードウェア/ファーム
@@ -47,7 +47,7 @@ sysfs に公開している（`/sys/class/hwmon/hwmonN/pwm1` 系）。`raspi/io/
 と `rpm`（実際の回転数）が食い違って見える。GUI側は `rpm` を表示し、
 「指定通りに動いていない」ことが分かるようにしてある（`DriveControls.tsx`）。
 
-## governor による巻き戻しは高温時に限らない（GUI操作で再現、2026-08-19）
+## governor による巻き戻しは高温時に限らない（GUI操作で再現）
 
 上の「★高温になると〜」は約75°C付近での確認だが、GUIから手動デューティを
 1回送っただけだとその後に体感できる頻度（1/3程度）で回転数が落ちる不具合が
@@ -60,7 +60,7 @@ sysfs に公開している（`/sys/class/hwmon/hwmonN/pwm1` 系）。`raspi/io/
 指定値へ復帰する。
 
 ## ★★ auto に戻しても governor 自体が停止して pwm1 が下がらないことがある
-（実機で確認済み、2026-08-19、kernel 6.18.34+rpt-rpi-2712）
+（実機で確認済み、kernel 6.18.34+rpt-rpi-2712）
 
 manual → auto と切り替えたあと、`pwm1_enable=2` は正しく書けているのに
 `cooling_device0/cur_state` が一切更新されず、`pwm1` が manual 時の高い値の
@@ -77,7 +77,7 @@ manual → auto と切り替えたあと、`pwm1_enable=2` は正しく書けて
 `pwm1` 系と同じく既定 `root:root 644` で `pi` からは書けないため、
 `99-surge-fan.rules` 側でも `gpio` グループに書き込み権限を付与している。
 書き込めない環境（権限未適用・非対応カーネル）では黙ってスキップし、
-`pwm1_enable=2` の書き込みだけで従来どおり動く。
+`pwm1_enable=2` の書き込みだけで動く。
 """
 
 from __future__ import annotations
@@ -208,9 +208,9 @@ class SysfsFan:
         """auto を**保つ**ための定期呼び出し用（`_fan_pump` の1Hz）。
 
         `pwm1_enable` が 2 から外れているときだけ `set_auto()`（kick 付き）で戻す。
-        ★2026-10-04: 以前は1Hzで `set_auto()` を呼んでいたため、低温時に
+        毎秒 `set_auto()` を呼ぶと、低温時に
         `_kick_governor()` が `cur_state` を毎秒 0→1 に書き換え、ファンが毎秒
-        回っては止まっていた（実機で pwm1 が 0↔75、回転数 0↔2600rpm を確認。
+        回っては止まる（実機で pwm1 が 0↔75、回転数 0↔2600rpm を確認。
         制御系電流で約7mA）。kick は governor 停止への対処なので、auto へ
         切り替えた瞬間（`set_auto()`）だけで足りる。
         """

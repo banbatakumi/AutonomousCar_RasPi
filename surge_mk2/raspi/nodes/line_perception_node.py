@@ -23,7 +23,7 @@
 
 ## 帯の重心は「細い」領域だけを使う（毛布・段ボール等の誤検出対策）
 
-実車確認（2026-09-03）で、`near_band`/`far_band` 内に毛布・カーテン・段ボール
+実車確認で、`near_band`/`far_band` 内に毛布・カーテン・段ボール
 等の大きく明るい面があると、単純な帯内重心は白線ではなくそちらへ引っ張られる
 ことが分かった。白線は数cm幅で「細い」という物理的な制約を使い、`_thin_runs()`
 で行ごとに幅が `_MAX_LINE_WIDTH_FRAC`（画像幅比）を超える連続領域を除いてから
@@ -34,8 +34,7 @@
 ## 帯は「地面の距離」で決める（`near_range` / `far_range`）
 
 帯を画面高さの割合で決めると、`bottom_crop`・レンズ・取付高さ・ピッチが変わるたびに
-地面でない行（空・車体）へ当たる（160° 広角への交換で `far_band` が地平線より上になった、
-2026-10-03）。そこで既定は **base_link 前方の距離 `(手前, 奥)` [m]** で持ち、
+地面でない行（空・車体）へ当たる（160° 広角への交換で `far_band` が地平線より上になった）。そこで既定は **base_link 前方の距離 `(手前, 奥)` [m]** で持ち、
 `ground_to_pixel()` で画像の行へ換算する（校正値・取付位置・`bottom_crop` が効く）。
 車体はカメラに対して固定でボンネットの上端より下に写るので、`near_range` の手前側を
 その行より奥（距離が大きい側）に置けば車体は入らない。
@@ -50,7 +49,7 @@
 と同じ考え方で、`mode == "line_trace"` で、**かつ DISARM中（駐車中）でない**間だけ
 実際にフレームを読んで判定する（`raspi/core/auto_gate.cam_infer_active()` に集約、
 `cam_perception_node.py`・`cam_e2e_node.py` と共通）。DISARM中はモードが選ばれて
-いるだけでは判定しない（2026-09-04、省電力バグとして修正）。非アクティブの間は
+いるだけでは判定しない。非アクティブの間は
 `failed_frame()`（見失った扱い）を出すだけで、共有メモリの読み取りすらしない。
 """
 
@@ -114,12 +113,12 @@ def white_mask(frame: np.ndarray, *, min_brightness: int = 170,
 
     ## なぜ `int16` へ拡げず uint8 のまま計算するか（issue #14）
 
-    以前は `frame[..., :3].astype(np.int16)` で640x360x3を一旦 int16
-    （1.4MB）に広げてから、長さ3の最終軸に対して `min`/`max`（`axis=-1`）を
-    取っていた——これは numpy 的に遅い形で、実測 12.8ms/枚（x86）かかっていた。
+    `frame[..., :3].astype(np.int16)` で640x360x3を一旦 int16
+    （1.4MB）に広げ、長さ3の最終軸に `min`/`max`（`axis=-1`）を取る形は
+    numpy 的に遅く、実測 12.8ms/枚（x86）かかる。
     ここでは **チャネルごとに** `minimum`/`maximum` を取る（`hi >= lo` が
     常に成り立つので `hi - lo` を uint8 のまま引いても溢れない）。実測
-    0.42ms（約30倍）。**乱数フレームで旧実装と `np.array_equal` の完全一致を
+    0.42ms（約30倍）。**乱数フレームでint16 版と `np.array_equal` の完全一致を
     確認済み**（`raspi/tests/test_line_perception_node.py`）——数値が変わると
     白線検出の閾値が事実上変わってしまうため、単なる高速化のつもりで
     近似値になっていないことをテストで保証している。
@@ -345,7 +344,7 @@ class LinePerceptionNode:
                     # ★省電力化: カメラの新しいフレームがまだ来ていない
                     # （上の `_last_ring_seq` docstring参照）。共有メモリの
                     # 読み取り自体をスキップし、前回の結果を使い回す。**publish もしない**
-                    # （2026-10-06）。同じ結果を送り直すと `Publisher` が `seq` を振り直すので、
+                    # 。同じ結果を送り直すと `Publisher` が `seq` を振り直すので、
                     # planning_node が「新しい周」と見て判断し直し、`auto/cmd` まで増える
                     # （実機で `line/cam` 130Hz・`auto/cmd` 128Hz。カメラは 30fps）。
                     # 鮮度は planning_node が `t_capture` で見ているので、送らなくても
@@ -373,7 +372,7 @@ class LinePerceptionNode:
                         else:
                             self._last_scan = st
             now = time.monotonic_ns()
-            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力）
             if not reused and pacer.should_publish(active, now):
                 pub.send(TOPIC_LINE_CAM, st)
             seq += 1

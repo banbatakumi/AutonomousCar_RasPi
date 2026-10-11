@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x0014
+PROTOCOL_VERSION = 0x0016
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -114,6 +114,8 @@ class Param:
     STEER_LINK_GAIN = 0x0081
     STEER_LINK_CUBIC = 0x0082
     LAUNCH_EXIT_TORQUE_NM = 0x00A1
+    SPEED_FF_NM_PER_M_S2 = 0x00B1
+    SPEED_FF_RR_NM = 0x00B2
     SPEED_KP = 0x0030
     SPEED_KI = 0x0031
     LIDAR_FORMAT = 0x0040
@@ -395,7 +397,7 @@ class Limits:
     META: ClassVar[dict] = {'max_speed_m_s': (None, 'm/s'), 'max_accel_m_s2': (None, 'm/s2'), 'max_torque_nm': (None, 'N.m'), 'max_steer_rad': (None, 'rad')}
 
     max_speed_m_s: float = 0.0  # COMMAND.target_speed の上限（DRIVE_MAX_SPEED_M_S）。超えると STM32 側でクランプされる
-    max_accel_m_s2: float = 0.0  # COMMAND.accel_limit に指定できる上限（DRIVE_MAX_ACCEL_M_S2）
+    max_accel_m_s2: float = 0.0  # COMMAND.accel_limit に指定できる上限。★v0.22 から STM32 は上限を掛けず、ワイヤで表せる最大 65.535 を返す（上限は Pi の [safety] cmd_accel_limit_m_s2）
     max_torque_nm: float = 0.0  # 1輪あたり。target_torque/brake_torque 共通（DRIVE_MAX_TORQUE_NM）
     max_steer_rad: float = 0.0  # 路面舵角。原点(直進)からの片側振れ幅（Steering_GetMaxRoadWheelAngleRad()）
 

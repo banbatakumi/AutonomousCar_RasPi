@@ -185,3 +185,70 @@ class TestCapSpeed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _hug_path(width: float, gap: float = 0.18, v: float = 2.0) -> RaceLine:
+    """円周コースで、点 60 の前後だけ内側の壁から `gap` まで寄る線（コーナーの頂点の代わり）。"""
+    n = int(2 * math.pi * R / 0.1)
+    a = np.arange(n) * 2 * math.pi / n
+    r = R - (width / 2 - gap) * np.exp(-0.5 * ((np.arange(n) - 60) / 8.0) ** 2)
+    xy = np.column_stack([r * np.cos(a), r * np.sin(a)])
+    length = float(np.hypot(*(np.roll(xy, -1, axis=0) - xy).T).sum())
+    return RaceLine(xy=xy, v=np.full(n, v), kappa=curvature(xy), length=length)
+
+
+class TestPlanElastic(unittest.TestCase):
+    """窓の中の線を引き直す回避（`plan_elastic`）。決まった形（`plan_offset`）が通らない所で使う。"""
+
+    SPEED = dict(v_max=3.0, v_min=0.3, a_lat=3.7, a_accel=2.4, a_brake=2.3, a_grip=4.1)
+
+    def setUp(self):
+        self.width = 1.2
+        self.body = _BodyCheck(_RingGrid(self.width), FOOT, closed=False)
+        self.path = _hug_path(self.width)
+
+    def _elastic(self, ob, **kw):
+        return av.plan_elastic(self.path, 10, ob, [ob], self.body, _cfg(), v_now=2.0, room=None,
+                               speed=self.SPEED, v_tight=1.0, **kw)
+
+    def test_succeeds_where_the_fixed_shape_hits_the_wall(self):
+        """壁沿いの頂点の手前の障害物: 進入・戻りの途中に頂点があり、決まった形は壁に掛かる。"""
+        ob = _obstacle_on_path(self.path, 45, r=0.10)
+        self.assertIsNone(av.plan_offset(self.path, 10, ob, [ob], self.body, _cfg(), v_now=2.0))
+        plan = self._elastic(ob)
+        self.assertIsNotNone(plan)
+        q = plan.path.xy[plan.window]
+        self.assertGreaterEqual(av.clearance_along(q, FOOT, [ob]), 0.05 - 1e-6)
+        base = self.body.clearance(self.path.xy[plan.window])
+        self.assertTrue(np.all(self.body.clearance(q) >= np.minimum(0.05, base - 0.02) - 1e-6))
+        self.assertLessEqual(float(np.abs(curvature(plan.path.xy)[plan.window]).max()),
+                             _cfg().kappa_max + 1e-6)
+        self.assertGreaterEqual(plan.clearance, 0.05)
+
+    def test_outside_the_window_is_untouched(self):
+        ob = _obstacle_on_path(self.path, 60, r=0.10)
+        plan = self._elastic(ob)
+        self.assertIsNotNone(plan)
+        moved = np.hypot(*(plan.path.xy - self.path.xy).T) > 1e-9
+        self.assertTrue(set(np.nonzero(moved)[0]) <= set(plan.window.tolist()))
+        self.assertEqual(len(plan.path), len(self.path))
+        # 窓の両端は元の経路のまま（継ぎ目で折れない）
+        for i in (plan.window[0], plan.window[-1]):
+            self.assertFalse(moved[i])
+
+    def test_none_when_too_close_or_too_narrow(self):
+        ob = _obstacle_on_path(self.path, 16, r=0.10)             # 車の 0.6m 先
+        self.assertIsNone(self._elastic(ob))
+        narrow = _BodyCheck(_RingGrid(0.5), FOOT, closed=False)
+        path = _ring_path()
+        ob = _obstacle_on_path(path, 60, r=0.10)
+        self.assertIsNone(av.plan_elastic(path, 10, ob, [ob], narrow, _cfg(), v_now=2.0,
+                                          room=None, speed=self.SPEED, v_tight=1.0))
+
+    def test_result_is_picklable(self):
+        """別プロセスで回して結果を受け取る（`slam2d_raceline.submit_job`）。"""
+        import pickle
+        ob = _obstacle_on_path(self.path, 60, r=0.10)
+        plan = self._elastic(ob)
+        back = pickle.loads(pickle.dumps((plan, self.body, _cfg())))
+        np.testing.assert_allclose(back[0].path.xy, plan.path.xy)

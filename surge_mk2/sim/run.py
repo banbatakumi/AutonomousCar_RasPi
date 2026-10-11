@@ -223,7 +223,6 @@ def _gui_stale_reason() -> str:
     ★ **型の札（`MSGS_SCHEMA`）が食い違った GUI は受信データを全部捨てる**
     （`gui/src/ws/telemetry.ts`、ステータスバーに「型不一致」）。`raspi/msgs/types.py` を
     変えたのにビルドし直さないと、**サーバは動いているのに GUI とつながらないように見える**
-    （2026-09-29、`slam2d_route` で AutoMap/AutoState に項目を足した直後に発生）。
     stdlib だけで見るため、札はサーバ側を計算せず、生成済みの `msgs.ts`
     （`tools/check.sh` が types.py との一致を保証）とビルドした JS を比べる。
     """
@@ -277,7 +276,7 @@ def _course_files() -> list[Path]:
 
 
 def resolve_course(name: str) -> Path:
-    """`circuit` でも `sim/courses/circuit.json` でも受ける。"""
+    """`normal` でも `sim/courses/normal.json` でも受ける。"""
     p = Path(name)
     if p.suffix in (".png", ".json") and p.exists():
         return p

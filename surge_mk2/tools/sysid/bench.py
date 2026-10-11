@@ -41,11 +41,12 @@ import numpy as np
 from raspi.auto.registry import PLANNERS
 from raspi.msgs.types import Scan, VehicleState
 from sim.stm32 import ABS_MIN_SPEED_M_S
-from sim.vehicle import GRAVITY_MPS2, DriveInput, SteerServo, VehicleModel, VehicleSpec, brake_decel
+from sim.vehicle import (GRAVITY_MPS2, DriveInput, SteerServo, VehicleModel, VehicleSpec, brake_decel,
+                         drive_accel_limit)
 from tools.sysid import fit
 from tools.sysid.fit import Cmd, Log, ScanStamp, build_log
 
-__all__ = ["TRUTH", "Pipeline", "Noise", "REALISTIC", "run_test", "run_all", "Space",
+__all__ = ["TRUTH", "TRUTH_SLIP", "Pipeline", "Noise", "REALISTIC", "SLIPPING", "run_test", "run_all", "Space",
            "write_mcap", "reproduction_error"]
 
 #: 既定の真値。`vehicle.toml` の旧手順の値とは**わざとずらしてある**（既定値に
@@ -56,7 +57,10 @@ TRUTH = replace(
     # 速度はファームの PI（`SpeedController`）。Kp/Ki・出力上限・ランプはファームの定数、
     # 車体の利得・転がり抵抗・加減速の上限が同定の対象。加速の上限2.8・減速の上限2.5は
     # ファームのランプ3.0より低い＝観測できる側（観測できない真値は `test_fit` で別に見る）
-    speed_kp=0.25, speed_ki=0.5, speed_torque_max_nm=0.30, speed_ramp_max_m_s2=3.0,
+    # ★ Kp/Ki はここで決め打ちしない（`vehicle.toml` の値＝ファームの定数をそのまま使う）。解析は
+    #   toml の Kp/Ki を既知として当てはめるので、真値だけ別の値だと車体の利得が Kp の比だけ
+    #   ずれて出る（0.25/0.5 を決め打ちすると 0.3/0.6 のとき利得 22 → 18.4 と出た）
+    speed_torque_max_nm=0.30, speed_ramp_max_m_s2=3.0,
     speed_plant_gain=22.0, rolling_resistance=0.3,
     drive_accel_m_s2=2.8, drive_fade_speed_m_s=1.3, drive_top_speed_m_s=4.5,
     brake_decel_m_s2=3.9, speed_decel_m_s2=2.5,
@@ -77,7 +81,9 @@ TRUTH = replace(
 #: 加減速の上限が無い真値（ランプとPIだけで加速が決まる）。上限・減衰を誤って検出しないかを見る
 TRUTH_NOCAP = replace(TRUTH, drive_accel_m_s2=0.0, drive_fade_speed_m_s=0.0, drive_top_speed_m_s=0.0,
                       speed_decel_m_s2=0.0)
-TRUTHS = {"default": TRUTH, "nocap": TRUTH_NOCAP}
+#: 加速の上限がグリップで決まる真値（速度による低下なし）。`SLIPPING`（後輪が滑る）と組で使う
+TRUTH_SLIP = replace(TRUTH, drive_fade_speed_m_s=0.0, drive_top_speed_m_s=0.0)
+TRUTHS = {"default": TRUTH, "nocap": TRUTH_NOCAP, "slip": TRUTH_SLIP}
 
 #: 比べるときの許容誤差（相対。`None` は絶対誤差 `ABS_TOL`）
 REL_TOL = {
@@ -116,14 +122,13 @@ class Pipeline:
     uart_s: float = 0.0008               # COMMAND / TELEMETRY の片道（1Mbps で TELEMETRY 81B が 0.81ms）
     gui_brake_torque: float = 0.15       # GUI 既定（DEFAULT_BRAKE_TORQUE_NM）
     pi_max_speed: float = 3.0            # io_node --max-speed
-    pi_max_accel: float = 3.0            # io_node が STM32 の LIMITS（DRIVE_MAX_ACCEL_M_S2）で切る
-    #: 新しい判断を各段がその場で中継する（2026-09-26〜の実装）。False で以前の定期送信だけ
+    pi_max_accel: float = 3.0            # 中継が載せる上限（`[safety] cmd_accel_limit_m_s2`。v0.21 までは STM32 の固定上限）
+    #: 新しい判断を各段がその場で中継する。False で定期送信だけ
     immediate: bool = True
-    bus_poll_s: float = 0.001            # telemetry_node がバスを見る周期（`BUS_POLL_S`、2026-09-27 に 5→1ms）
-    #: io_node が `/cmd` に気づくまで（UART とバスを同じ poller で待つので、届けばすぐ起きる。
-    #: 2026-09-27 までは UART の1バイトを最大5ms待ってからバスを見ていた）
+    bus_poll_s: float = 0.001            # telemetry_node がバスを見る周期（`BUS_POLL_S`）
+    #: io_node が `/cmd` に気づくまで（UART とバスを同じ poller で待つので、届けばすぐ起きる）
     io_loop_s: float = 0.0005
-    telemetry_ms: int = 10               # TELEMETRY の周期 [ms]（100Hz。2026-09-25 までのファームは 20）
+    telemetry_ms: int = 10               # TELEMETRY の周期 [ms]（100Hz）
 
 
 @dataclass
@@ -141,12 +146,22 @@ class Noise:
     #: 以下は「実機らしさ」（既定0＝理想）。`REALISTIC` 参照
     drop_prob: float = 0.0          # TELEMETRY の取りこぼし
     clock_offset_s: float = 0.0     # STM32→Pi の時刻換算のずれ（t_capture が遅れる向き）
+    #: 加速が上限（`drive_accel_m_s2`）に張り付いている間、後輪の周速に載せる滑り率（実機の TC が
+    #: 保つ目標 0.2）。0 = 後輪は滑らない。シムの車両は滑りを持たないので、0 のままだと解析の
+    #: 「後輪が滑った区間の速度の傾きを加速の上限にする」経路を通らない（その経路は
+    #: 転がり抵抗を二重に引きやすく、実機の記録でしか露見しなかった）
+    tc_slip: float = 0.0
+    tc_slip_tau_s: float = 0.03     # 滑りが立ち上がる・収まる時定数
 
 
 #: 実機でありそうな記録の不完全さ: 取りこぼし2%、時刻同期のずれ3ms。
 #: yaw_rate のローパスとタイヤの緩和長は**真値（`VehicleSpec`）の側で持つ**。speed は
 #: エンコーダの角度からファームと同じ計算で作る（ローパスの時定数は真値の `speed_filter_s`）
 REALISTIC = Noise(drop_prob=0.02, clock_offset_s=0.003)
+#: 加速がグリップで頭打ちになると後輪が滑る車（実機と同じ見え方）。`TRUTH_SLIP` と組で使う
+SLIPPING = Noise(tc_slip=0.2)
+#: `[control]` の `slip_speed_floor_m_s`（スリップ率の分母の下限）
+_TC_SLIP_FLOOR_M_S = 0.5
 
 
 @dataclass
@@ -228,6 +243,7 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
     enc_accum = 0.0                     # 累積角（= odom_dist / 車輪半径）
     omega_f = 0.0                       # ローパス後の角速度
     a_spd = 1.0 - math.exp(-ms / truth.speed_filter_s) if truth.speed_filter_s > 0 else 1.0
+    rear_slip = 0.0                     # 後輪の滑り率（`Noise.tc_slip`）
 
     for k in range(int(max_s / ms)):
         now = k * ms
@@ -242,6 +258,11 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
             last_applied_steer = di.target_steer
             veh.apply(di)
         veh.step(ms)
+        if noise.tc_slip > 0.0:
+            # 前進の加速が上限に張り付いている（＝グリップで頭打ち）間だけ、後輪が目標の滑り率まで滑る
+            limited = (not veh.cmd.brake and veh.cmd.target_speed > 0.0 and veh.speed > 0.0
+                       and veh.accel_x >= drive_accel_limit(truth, veh.speed) - truth.rolling_resistance - 1e-3)
+            rear_slip += ((noise.tc_slip if limited else 0.0) - rear_slip) * (ms / (noise.tc_slip_tau_s + ms))
         enc = (veh.odom_front[0] + veh.odom_front[1]) / 2.0 / r_w + rng.gauss(0, noise.enc_angle_sigma)
         gap = enc - enc_prev
         enc_prev = enc
@@ -265,7 +286,8 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
                 "steer_cmd_echo": _q(veh.steer_ref, 0.0001),
                 "odom_dist": [_q(enc_accum * r_w, 0.0001)] * 2,
                 # 後輪モータの周速（前輪と独立。真の車速にノイズ）
-                "wheel_speed": [0.0, 0.0] + [_q(veh.speed + rng.gauss(0, noise.rear_sigma), 0.001)] * 2,
+                "wheel_speed": [0.0, 0.0] + [_q(veh.speed + rear_slip * max(abs(veh.speed), _TC_SLIP_FLOOR_M_S)
+                                                + rng.gauss(0, noise.rear_sigma), 0.001)] * 2,
                 "accel": [veh.accel_x, 0.0, 0.0],
                 # ABS（★v0.15）: 制動がグリップで頭打ちになっている間（`sim/stm32.py` と同じ判定）
                 "abs_active": bool(veh.cmd.brake and abs(veh.speed) >= ABS_MIN_SPEED_M_S
@@ -542,7 +564,7 @@ def _speed_top_err(truth: VehicleSpec, got: VehicleSpec) -> float:
 
     `_speed_step_err` は約2m/sまでしか走らないので、最高速付近の加速度の減衰（2mの直線で出せる
     速度より上への外挿）の誤検出を見逃した: 上限の無い真値で解析が約2.3m/sで0になる減衰を返し、
-    それが学習・シムの車速を黙って頭打ちにするところだった（2026-09-26 の第三者検証）。
+    それが学習・シムの車速を黙って頭打ちにするところだった。
     `max_speed` を上げる計画の範囲（3.0m/s）で挙動が一致するかを見る。"""
     vms = [VehicleModel(sp, (0, 0, 0)) for sp in (truth, got)]
     for vm in vms:
@@ -655,11 +677,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--seeds", type=int, default=1)
     ap.add_argument("--truth", choices=sorted(TRUTHS), default="default",
-                    help="真値（nocap: 加減速の上限なし＝ランプとPIだけで決まる車）")
+                    help="真値（nocap: 加減速の上限なし＝ランプとPIだけで決まる車、"
+                         "slip: 加速がグリップで頭打ちになり後輪が滑る車）")
     args = ap.parse_args()
     n_bad = 0
     for sd in range(args.seeds):
-        r = run_all(truth=TRUTHS[args.truth], seed=sd)
+        r = run_all(truth=TRUTHS[args.truth], seed=sd, noise=SLIPPING if args.truth == "slip" else None)
         n_bad += sum(not _within(k, tv, gv) for k, (tv, gv) in r["values"].items())
     print(f"許容誤差外: {n_bad}")
     return 1 if n_bad else 0

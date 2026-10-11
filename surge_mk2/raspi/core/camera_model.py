@@ -2,8 +2,8 @@
 
     from raspi.core.camera_model import FisheyeCalib, project_rays, unproject_pixels
 
-IMX219 160° 広角レンズに替えたことで、従来の「歪みのないピンホール + `hfov`」では
-画像の端ほど大きくズレるようになった（160° はピンホールでは原理的に表せない）。
+IMX219 160° 広角レンズでは、「歪みのないピンホール + `hfov`」だと
+画像の端ほど大きくズレる（160° はピンホールでは原理的に表せない）。
 チェッカーボード校正（Mac 側 `tools/cam_calib/`）で求めた値を `config/vehicle.toml`
 の `[sensors.cam_*.lenses.<レンズ>.fisheye]` に置き、IPM（`raspi/nav/ipm.py`）・GUI の進路ガイド
 （`gui/src/render/CameraView.tsx`）・補正映像（`telemetry_node`）がここの式を使う。

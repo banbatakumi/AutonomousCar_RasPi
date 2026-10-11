@@ -24,11 +24,11 @@
 続行する方が安全側という、同じ理由）。
 未選択（`name`が空）の間は`ready=False`を返し続ける。
 
-## 緊急停止は持たない（2026-09-12）
+## 緊急停止は持たない
 
-回帰モデルは「学習中に見た点群パターン」の外側でどう振る舞うか原理的に保証できない
-が、そこを固定距離のハード停止で受ける設計は STM32 の `auto_stop`（速度に応じて
-伸びる動的停止距離。`follow_the_gap.py` docstring参照）の方が高性能なため撤去した。
+回帰モデルは「学習中に見た点群パターン」の外側でどう振る舞うか原理的に保証できないが、
+そこは固定距離のハード停止ではなく STM32 の `auto_stop`（速度に応じて伸びる動的停止距離。
+`follow_the_gap.py` docstring参照）で受ける。
 `free_ahead` は引き続き GUI の診断表示用に計算する。
 """
 
@@ -76,7 +76,7 @@ def _load_from_path(path: Path) -> dict:
         raise ValueError(
             f"{cfg_path} に steer_rate_max_rad_s が無い（v13より前の非互換モデル）。"
             "行動空間が舵角速度に変わったため、v13以降で再学習・再exportしたモデルのみ使える")
-    # ★省電力化（2026-10-04実測）: 既定のSessionOptionsは全4コア＋スピンウェイトで、
+    # ★省電力化: 既定のSessionOptionsは全4コア＋スピンウェイトで、
     # 0.3msで終わる推論の後も全コアを回し続ける。10Hz推論で制御系電流が+100mA・
     # CPU31%だったのが、1スレッド・スピン無効で+3mAになり推論時間も変わらなかった。
     # 観測273次元のMLPなのでスレッド並列化の恩恵が無い（`cam_perception_node.py`と同じ流儀）
@@ -89,11 +89,8 @@ def _load_from_path(path: Path) -> dict:
                                    providers=["CPUExecutionProvider"])
     # ★入力次元はJSON（`in_dim`）ではなくONNXグラフ自身の宣言shapeから読む
     # （`export_onnx_rl.py`は`dynamic_axes`無しでバッチ1固定の具体的なshapeで
-    # エクスポートしているので`shape[-1]`は必ず具体的な整数になる）。JSONの値と
-    # ズレようがない「モデル本体が持つ唯一の真実」を使うことで、観測にステア角を
-    # 追加した2026-09-02の変更（OBS_DIM 362→363）で362次元のまま学習された旧モデル
-    # （v9以前）が「常に363次元を組み立てる`plan()`」から弾かれていた不具合を修正
-    # （`ONNXRuntimeError: Got invalid dimensions...Got: 363 Expected: 362`）
+    # エクスポートしているので`shape[-1]`は必ず具体的な整数になる）。JSONの値とズレようがない
+    # 「モデル本体が持つ唯一の真実」。旧モデル（v9以前、362次元）と現行（363次元）の両方を扱う
     in_dim = int(session.get_inputs()[0].shape[-1])
     return {
         "session": session,
@@ -234,8 +231,7 @@ class E2ELidar(Planner):
             # 「前回ステップの値」を使うことで、学習側（`ml_lidar/env.py`の
             # `_to_obs()`が`step()`内で更新済みの`self._steer_target`を返す
             # ＝次のreset()/step()呼び出し時点では「直前の指令で実現した状態」）と
-            # 同じ時系列の関係になる（2026-09-02追加、2026-09-11に`self._steer`から
-            # `self._steer_target`へ変更——`env.py` EnvConfig docstring参照）。
+            # 同じ時系列の関係になる（`env.py` EnvConfig docstring参照）。
             # ★`self._model_in_dim`（ONNXグラフ自身の宣言shape、`_load_from_path()`
             # 参照）で末尾に足す個数を決める——点群+速度のみ(362次元、OBS_DIM拡張前の
             # v9以前のモデル)なら速度だけ、点群+速度+ステア(363次元、v10以降)なら

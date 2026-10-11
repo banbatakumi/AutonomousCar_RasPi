@@ -55,7 +55,7 @@ DISARM中（駐車中）でない**間だけ実際にフレームを読んで推
 `line_perception_node.py` と共通）。DISARM中はモードが選ばれているだけでは
 推論しない——GUI再読み込みで前回選択モードがそのまま復元されるため、
 armed/engaged を見ずにモード選択だけで駆動すると駐車中の待機でも推論が
-回り続けてしまう（2026-09-04、省電力バグとして修正）。**どちらのモードでも
+回り続けてしまう。**どちらのモードでも
 同じ推論結果（`drivable` マスク）を使い回すだけ**なので、片方だけ選ばれていても
 もう片方の出力も一緒に計算して構わない（`scan/cam`／`path/cam` を毎回両方
 publish する）。非アクティブの間は `failed_frame()`（契約2の「壁」扱い）／
@@ -157,8 +157,7 @@ class SegmentationModel:
         """**RGB** の `(H, W, C)` uint8 → モデル入力 `(1, C, h, w)` float32。
 
         縮小は面積平均（`raspi/core/cam_e2e_preproc.resize_area`）。学習側
-        （`ml_cam/dataset.py`）と同じ関数を通す——以前はここが最近傍、学習が
-        PIL の BILINEAR で、モデルに入る絵が学習時と違っていた。
+        （`ml_cam/dataset.py`）と同じ関数を通す（実装が違うとモデルに入る絵が学習時と変わる）。
         """
         w, h = self.input_size
         resized = resize_area(rgb[..., :3], w, h)
@@ -330,9 +329,8 @@ class CamPerceptionNode:
 
         `fmt` は `ImageRef.fmt`（メモリ上の実際のバイト順）。**リングの既定は
         BGR888 で、モデルは RGB で学習している**ので、ここで RGB に直してから
-        推論する。以前は入れ替えずに渡しており、実車だけ赤と青が逆の絵を
-        モデルに見せていた（2026-10-06 修正。プレビューは RGB を渡すので
-        Mac 上では気づけなかった）。
+        推論する（入れ替えないと実車だけ赤と青が逆の絵になる。プレビューは
+        RGB を渡すので Mac 上では気づけない）。
 
         IMU が有効なら `pitch` を実測ぶん補正する（`gui/src/render/CameraView.tsx`
         の `drawGuide()` と同じ式・同じ理由——車体の加減速でピッチが動くと、
@@ -483,9 +481,8 @@ class CamPerceptionNode:
                   and now - self._last_infer_ns < self._infer_period_ns):
                 # ★省電力化（issue #13）: 間引き判定を共有メモリの読み取り
                 # （`read_frame()`。224²相当のコピーを伴う）より**先に**行う。
-                # 以前は読んでから捨てていたため、間引き周期に当たった周期でも
-                # 無駄な `.copy()` が発生していた（`cam_e2e_node.py` は元々
-                # 判定→読み取りの順になっている——あちらに揃えた）
+                # 読んでから捨てると、間引き周期に当たった周期でも
+                # 無駄な `.copy()` が発生する（`cam_e2e_node.py` と同じ判定→読み取りの順）
                 st = self._last_scan
                 path_msg = self._last_path
                 should_publish = False
@@ -526,7 +523,7 @@ class CamPerceptionNode:
                             mask_jpeg = self.encode_mask_jpeg()
                             if mask_jpeg is not None:
                                 pub.send(TOPIC_CAM_MASK, CamMask(jpeg=mask_jpeg, seq=seq))
-            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力）
             if should_publish and pacer.should_publish(active, now):
                 pub.send(TOPIC_SCAN_CAM, st)
                 pub.send(TOPIC_CAM_PATH, path_msg if path_msg is not None

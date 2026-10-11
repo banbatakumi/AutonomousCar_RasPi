@@ -122,6 +122,7 @@ class SimLink:
 
 
 def create_sim_link(course_path: str | Path, *, spec_path: str | Path | None = None,
+                    spec: VehicleSpec | None = None,
                     params: SimParams | None = None, seed: int = 0,
                     with_lidar: bool = True, with_channel: bool = True) -> SimLink:
     """コースを読み、仮想 STM32 を組み立てて SimLink を返す。
@@ -129,7 +130,8 @@ def create_sim_link(course_path: str | Path, *, spec_path: str | Path | None = N
     :param with_channel: シミュレータGUI 向けの UDP 私設チャンネルを開くか。
         GUI が起動していなくても支障はない（送信先が居なければ黙って捨てる）
     """
-    spec = VehicleSpec.load(spec_path) if spec_path else VehicleSpec.load()
+    if spec is None:
+        spec = VehicleSpec.load(spec_path) if spec_path else VehicleSpec.load()
     course = Course.load(course_path)
     params = params or SimParams.load()
 

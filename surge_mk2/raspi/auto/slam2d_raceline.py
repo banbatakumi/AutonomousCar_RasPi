@@ -18,9 +18,14 @@
 
 from __future__ import annotations
 
+import atexit
 import math
+import multiprocessing
+import os
+import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from typing import NamedTuple
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 
@@ -34,8 +39,10 @@ from ..nav import centerline as cl_mod
 from ..nav import obstacles as obs_mod
 from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
+from ..nav.mpc import MPCConfig, MPCFollower
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from ..nav.route_switch import lap_crossed
+from ..nav import speedctl
 from ..proto.generated.packets import MDS_COMM_OK
 from . import mapstore
 from ._slam2d_nav import WALL_HIT_WEIGHT, Slam2dNav, occgrid_from_trinary
@@ -49,7 +56,7 @@ __all__ = ["Slam2dRaceLine"]
 #: 押すのを待っている」段。**BUILD完了後、自動ではRACEに進まない**——地図作成
 #: 直後にそのまま走り出すと、`request_load()`のLOCATE経由で手動再配置しても
 #: 走れるようにした意味が無くなる（人間が地図内の好きな場所へ車を置き直す間
-#: を作るため。バンビの指示、2026-09-03）
+#: を作るため）
 EXPLORE, BUILD, DONE, LOCATE, RACE = "EXPLORE", "BUILD", "DONE", "LOCATE", "RACE"
 #: 横へ避けられない障害物・スタックを、Hybrid A*（`ParkToPoint`）で後退・切り返しも使って
 #: 抜けている段。抜けたら RACE へ戻る
@@ -68,12 +75,24 @@ _DETOUR_YAW_TOL_DEG = 12.0
 _DETOUR_MAX_S = 20.0
 #: 横へ避けられない障害物の手前で止まる距離（車体前端から）[m]
 _STOP_GAP = 0.35
+#: 車速が経路の速度よりこれ以上低ければ「追いつく途中」として扱う [m/s]（`_speed_cmd`）
+_CATCH_UP_GAP = 0.3
+#: 見通しの中で止まるとき、障害物の手前に残す間隔 [m]（`_sight_cap`）
+_SIGHT_GAP = 0.05
+#: 見通しの上限で 1 周がこの倍率を超えて遅くなったら reason に出す（`_sight_note`）
+_SIGHT_NOTE_RATIO = 1.03
+#: 障害物検出で「壁の近くを無視する幅」を経路に合わせて詰めるときの下限 [m]（`_obstacle_pad`。
+#: 実機の自己位置のずれは p95 2〜3cm・最大 7cm。壁の点が隣の空きセルへ落ちるぶんは残す）
+_OBS_PAD_MIN = 0.15
 #: 車体のすぐ前（`blocking` が飛ばす足元の帯）で、車体外形と障害物の余裕がこれを切ったら止まる [m]
 _NEAR_CLEAR = 0.02
 #: 障害物で制動している途中に検出が途切れても、制動を保つ時間 [s]
 _BRAKE_HOLD_S = 0.3
 #: Hybrid A* で抜けた後、経路からの横ずれがこれ未満なら戻り経路を作らない [m]
 _BLEND_MIN = 0.03
+#: 引き直したラインへ乗り移ってよい、今の姿勢とのずれ（横 [m]・向き [rad]、`_try_adopt_line`）
+_ADOPT_DIST = 0.04
+_ADOPT_YAW = math.radians(6.0)
 #: ローンチコントロールを要求する舵角の上限 [rad]（約7°。これより切っている発進は速度PIに任せる）
 _LAUNCH_STEER_MAX = 0.12
 #: 車速がこれ未満になったら「発進」と見なし、次に経路の速度へ届くまでローンチコントロールを要求する [m/s]
@@ -135,17 +154,19 @@ def _heading_err(path: rl_mod.RaceLine, i: int, yaw: float) -> float:
 
 _MAP_EVERY = 10
 
-#: 最小曲率の中心線へ引き戻す重み（`rl_mod.min_curvature_alpha` の `lam`）。★以前は GUI の
-#: スライダ「中心線への寄せ」だったが、最小時間への寄せ（`LINE_TIME_ITERS`）と車体外形の検査を
-#: 入れてからは 0.02〜1.0 で見積もりラップが ±0.05s しか変わらず（toyota2）、触る理由が無いので
-#: 定数にした。壁との距離は `line_margin` で決める
+#: 最小曲率の中心線へ引き戻す重み（`rl_mod.min_curvature_alpha` の `lam`）。0.02〜1.0 で
+#: 見積もりラップが ±0.05s しか変わらない（toyota2）ので定数。壁との距離は `line_margin` で決める
 LINE_LAM = 0.1
-#: 「最適化 → 法線と幅を測り直す」の回数（`rl_mod.optimize` の `passes`）。★以前は GUI の
-#: スライダだったが、2回で足り（3回は往復して悪くなることがある）触る理由が無いので定数にした
+#: 「最適化 → 法線と幅を測り直す」の回数（`rl_mod.optimize` の `passes`）。2回で足り
+#: （3回は往復して悪くなることがある）ので定数
 LINE_PASSES = 2
 #: 最小時間へ寄せる再重み付けの回数（`rl_mod.optimize` の `time_iters`）。1回で効果の大半が
 #: 出て2回以上は変わらない（toyota2 の見積もり 14.08→13.23→13.24s）。同じ理由で定数
 LINE_TIME_ITERS = 2
+#: 見積もりのラップ時間を直接下げる仕上げ（`rl_mod.refine_time`）の評価回数の上限。
+#: ワーカースレッドで回る。幅の巡回は最大4回で、1巡の縮みが 0.2% を切ったら終わる
+#: （`rl_mod.REFINE_STOP`）ので、上限まで使うのは S 字の多いコースだけ。Mac で 2〜4 秒
+LINE_REFINE_EVALS = 15000
 
 #: GUI の組（`ParamSpec.group`）。地図作成（Follow the Gap）と本番走行を分けて見せる
 GROUP_EXPLORE = "地図作成（Follow the Gap）"
@@ -156,7 +177,53 @@ GROUP_SAFETY = "本番走行: 安全"
 GROUP_AVOID = "本番走行: 障害物の回避"
 
 #: 速度プロファイルを決める設定（変わったら `_retime` で作り直す）
-SPEED_KEYS = ("v_max", "v_min", "a_lat", "a_accel", "a_brake")
+SPEED_KEYS = ("v_max", "v_min", "lat_use", "accel_use", "brake_use")
+#: ラインの形を決める設定（変わったら引き直す）。ラインは見積もりのラップ時間を最小にするので、
+#: 速度の設定も形に効く
+LINE_KEYS = ("line_margin", "kappa_use") + SPEED_KEYS
+
+
+def line_key(p: dict[str, float]) -> tuple:
+    return tuple(float(p[k]) for k in LINE_KEYS)
+
+
+def kappa_limit(p: dict[str, float], vehicle) -> float:
+    """経路に許す曲率の上限 [1/m] = 車の曲がれる限界 × `kappa_use`。"""
+    return vehicle.kappa_max * float(p.get("kappa_use", 1.0))
+
+#: LiDAR の 1 周の時間 [s]（LD06 は 10Hz。障害物は最悪この時間だけ遅れて見える）
+SCAN_PERIOD_S = 0.1
+
+
+class Limits(NamedTuple):
+    """走りの上限。**`Vehicle`（`config/vehicle.toml` の同定値）× 設定の「使う割合」**（`limits`）。"""
+
+    a_lat: float                           #: 横加速度 [m/s²]
+    a_accel: float                         #: 加速度 [m/s²]
+    a_brake: float                         #: 減速度 [m/s²]（速度指令を下げて出す。`brake` ではない）
+    #: 障害物・停止点に対して、気づいてから減速が効き始めるまでの空走時間 [s]
+    react_s: float
+
+
+def limits(p: dict[str, float], vehicle) -> Limits:
+    """設定 `p` と車から走りの上限を出す。
+
+    `a_lat`・`a_accel`・`a_brake` は同定値（`mu`・`drive_accel_m_s2`・`speed_decel_m_s2`）から出す。
+    設定は「車の限界の何割を使うか」（`lat_use`・`accel_use`・`brake_use`）だけ。
+
+    空走時間は、点群の周期（最悪そのぶん遅れて見える）＋指令が STM32 に届くまで（同定の
+    `control_latency_s`）＋減速が立ち上がるまで（速度PIの時定数の半分）。
+    """
+    return Limits(
+        a_lat=float(p.get("lat_use", 1.0)) * vehicle.a_lat_max,
+        a_accel=float(p.get("accel_use", 1.0)) * vehicle.a_accel_max(0.0),
+        a_brake=float(p.get("brake_use", 1.0)) * vehicle.a_decel_max,
+        react_s=SCAN_PERIOD_S + cmd_latency(vehicle) + 0.5 * vehicle.speed_loop_tau_s)
+
+
+def cmd_latency(vehicle) -> float:
+    """指令を決めてから STM32 が受理するまでの遅れ [s]（同定の遅延試験の値。未同定なら 0.02）。"""
+    return vehicle.control_latency_s if vehicle.control_latency_s > 1e-4 else 0.02
 
 
 def speed_key(p: dict[str, float]) -> tuple:
@@ -165,12 +232,27 @@ def speed_key(p: dict[str, float]) -> tuple:
 
 def speed_kwargs(p: dict[str, float], vehicle) -> dict:
     """`rl_mod.retime` / `optimize` へ渡す速度の設定。"""
-    return dict(v_max=p["v_max"], v_min=p["v_min"], a_lat=p["a_lat"],
-                a_accel=p["a_accel"], a_brake=p["a_brake"], kappa_max=vehicle.kappa_max)
+    lim = limits(p, vehicle)
+    return dict(v_max=p["v_max"], v_min=p["v_min"], a_lat=lim.a_lat,
+                a_accel=lim.a_accel, a_brake=lim.a_brake,
+                # 摩擦円は「使う割合」ではなく車の限界で引く（横を 9 割使う設定でも、頂点で
+                # 前後に使える力が 0 になるわけではない）
+                a_grip=vehicle.a_lat_max)
 
 
-def line_kwargs(p: dict[str, float], vehicle) -> dict:
-    """`rl_mod.optimize` へ渡す経路と速度の設定（BUILD と地図の読み込みで共通）。"""
+#: 仕上げを始める出発点の数（`rl_mod.optimize` の `refine_starts`）。1 だと出発点の中心線の
+#: わずかな違いで別の線に止まることがある（toyota2 の地図で見積もりが 6 通り中 1 通りだけ +7%）。
+#: 2 でばらつきが 7.0→2.0%・1.3→0.2%（実機の地図）、3 にしても変わらない。時間は 2 倍
+LINE_REFINE_STARTS = 2
+
+
+def line_kwargs(p: dict[str, float], vehicle, refine: bool = True) -> dict:
+    """`rl_mod.optimize` へ渡す経路と速度の設定（BUILD と地図の読み込みで共通）。
+
+    :param refine: False なら見積もりラップの仕上げをしない（0.1〜0.6 秒で引ける「まず走れる線」）。
+        仕上げ込みは Mac で 6〜8 秒かかるので、**先に仕上げなしの線で走り出し、裏で仕上げて
+        できたら差し替える**（`Slam2dRaceLine._adopt_line`、`Slam2dRoute._poll`）
+    """
     return dict(half_width=vehicle.half_width, margin=p["line_margin"], lam=LINE_LAM,
                 passes=LINE_PASSES, max_width=MAX_TRACK_WIDTH,
                 # コーナーで車体の角が経路の外へ張り出すぶんを余裕に足す
@@ -178,12 +260,15 @@ def line_kwargs(p: dict[str, float], vehicle) -> dict:
                 front_overhang=vehicle.front_overhang, rear_overhang=vehicle.rear_overhang,
                 # 薄い壁の先端を車体がかすめないか、外形で確かめる（`rl_mod._BodyCheck`）
                 footprint=vehicle.footprint or None,
-                time_iters=LINE_TIME_ITERS, **speed_kwargs(p, vehicle))
+                time_iters=LINE_TIME_ITERS, kappa_max=kappa_limit(p, vehicle),
+                refine_evals=LINE_REFINE_EVALS if refine else 0,
+                refine_starts=LINE_REFINE_STARTS,
+                **speed_kwargs(p, vehicle))
 
 
 def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                    cl: cl_mod.Centerline | np.ndarray, p: dict[str, float],
-                   vehicle) -> rl_mod.RaceLine:
+                   vehicle, refine: bool = True) -> rl_mod.RaceLine:
     """レーシングラインを引く（**ワーカースレッドで走る**。地図の写しだけを触る）。
 
     `cl` が中心線でなく点列なら、保存済み地図の中心線として測り直してから引く。
@@ -193,15 +278,91 @@ def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, 
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     if not isinstance(cl, cl_mod.Centerline):
         cl = cl_mod.build(grid, cl, step=PATH_STEP, max_width=MAX_TRACK_WIDTH)
-    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle))
+    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle, refine))
 
 
 def pursuit_config(p: dict[str, float], vehicle) -> PursuitConfig:
     return PursuitConfig(
         wheelbase=vehicle.wheelbase, max_steer=vehicle.max_steer,
-        lookahead_k=p["look_k"], lookahead_min=p["look_min"], delay_s=p["delay_s"],
+        lookahead_k=p["look_k"], lookahead_min=p["look_min"], delay_s=steer_delay(p, vehicle),
         speed_preview_s=p["speed_preview"], ff_gain=p["steer_ff"],
         steer_map=vehicle.steer_map)
+
+
+def steer_delay(p: dict[str, float], vehicle) -> float:
+    """舵の遅延補償の時間 [s] = 同定した舵・ヨーの遅れ ＋ 指令が届くまで ＋ 手の補正 `delay_trim`。
+
+    追従に使う姿勢は車速とジャイロで「今」へ進めてある（`Slam2dNav.pose_now`）ので、
+    姿勢の古さの手当ては要らず、指令を出してから曲率に効くまでの遅れだけを見込む。
+    """
+    return max(0.0, vehicle.steer_delay_s + cmd_latency(vehicle) + p["delay_trim"])
+
+
+def mpc_config(p: dict[str, float], vehicle) -> MPCConfig:
+    return MPCConfig(
+        wheelbase=vehicle.wheelbase, max_steer=vehicle.max_steer,
+        horizon=int(p["mpc_horizon"]), dt=p["mpc_dt"], delay_s=p["mpc_delay_s"],
+        q_y=p["mpc_q_y"], q_psi=p["mpc_q_psi"], r_d=p["mpc_r_d"],
+        steer_map=vehicle.steer_map, servo_gain=vehicle.steer_servo_gain,
+        speed_preview_s=p["speed_preview"])
+
+
+# ── 重い計算（ライン・道路グラフ）を回す別プロセス ──
+#
+# ★ ワーカーはスレッドではなく**別プロセス**。ライン生成は Python のループと numpy の長い1回の
+#   呼び出し（距離場など）でできていて、その間 GIL を離さない。スレッドだと `plan()` が待たされ、
+#   Mac の sim.bench でも 1 周期の最大が 74ms → 140〜170ms に伸びた。デッドマンは 150ms で、
+#   Pi は 2〜3 倍遅い。別プロセスなら GIL を共有しないので `plan()` は止まらない（Pi 5 は 4 コア）。
+#   - 起動は `spawn`（`fork` は ZeroMQ のソケットやスレッドを持ったまま複製してしまう）
+#   - 子は優先度を下げる（計画と SLAM のコアを奪わない）
+#   - プロセスを作れない環境ではスレッドに落ちる（走れないよりは遅い方がよい）
+#   - planner ごとに作らず 1 つを使い回す（起動に約 1 秒かかる。同時に走る planner は 1 つ）
+_WORKER: Executor | None = None
+_WORKER_IS_PROCESS = False
+
+
+def _worker_init() -> None:
+    try:
+        os.nice(5)
+    except OSError:
+        pass
+
+
+def _shutdown_worker() -> None:
+    global _WORKER
+    if _WORKER is not None:
+        _WORKER.shutdown(wait=False, cancel_futures=True)
+        _WORKER = None
+
+
+def worker_pool() -> Executor:
+    """重い計算を投げる先（1 つを使い回す。上のコメント）。"""
+    global _WORKER, _WORKER_IS_PROCESS
+    if _WORKER is None:
+        try:
+            if os.environ.get("SURGE_LINE_WORKER", "process") != "process":
+                raise OSError("SURGE_LINE_WORKER でスレッドを指定")
+            _WORKER = ProcessPoolExecutor(max_workers=1,
+                                          mp_context=multiprocessing.get_context("spawn"),
+                                          initializer=_worker_init)
+            _WORKER_IS_PROCESS = True
+        except (OSError, ValueError, ImportError) as e:
+            print(f"# ライン生成を別プロセスで回せない（{e}）。スレッドで回す——計算中は plan() が"
+                  "待たされる", file=sys.stderr, flush=True)
+            _WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="line")
+            _WORKER_IS_PROCESS = False
+        atexit.register(_shutdown_worker)
+    return _WORKER
+
+
+def submit_job(fn, *args, **kwargs):
+    """`fn(*args)` を別プロセスへ投げて `Future` を返す。プロセスが落ちていたら作り直して投げ直す。"""
+    global _WORKER
+    try:
+        return worker_pool().submit(fn, *args, **kwargs)
+    except Exception:                               # noqa: BLE001  BrokenProcessPool など
+        _shutdown_worker()
+        return worker_pool().submit(fn, *args, **kwargs)
 
 
 class Slam2dRaceLine(Planner):
@@ -238,23 +399,40 @@ class Slam2dRaceLine(Planner):
                        "車体外形と地図の壁の距離もこれ以上に保つ。★3m/sでは追従が±10cm振れ、"
                        "0.05では広いオーバル（normal）で衝突した。0.08で0回"),
 
-        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=3.0, default=2.0,
+        ParamSpec(group=GROUP_LINE, key="kappa_use", label="最小回転半径の余裕", min=0.6, max=1.0,
+                  default=0.9, step=0.01, unit="",
+                  note="★経路に許す曲率 = 車の曲がれる限界（同定した舵の効きから。現在 半径 約48cm）× この値。"
+                       "0.9 なら半径 53cm より小さく曲がる経路を引かない。1.0 だと舵が上限に張り付き、"
+                       "経路からのずれを直す舵が残らない。道幅が足りず開けない所は、いちばん緩い線になり、"
+                       "走行中の表示に『曲がり切れない区間』と出る"),
+        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=4.0, default=2.0,
                   step=0.05, unit="m/s",
-                  note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ"),
+                  note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ。"
+                       "★3m/s より上は実機で未検証（駆動の同定は約 2m/s まで・実走の記録は 3.2m/s まで。"
+                       "STM32 の上限は 5m/s）。長い直線の無いコースでは上げても縮まない"),
         ParamSpec(group=GROUP_SPEED, key="v_min", label="最低速度", min=0.1, max=1.0, default=0.35,
                   step=0.05, unit="m/s", note="いちばんきついコーナーでもこれ以下にしない"),
-        ParamSpec(group=GROUP_SPEED, key="a_lat", label="横加速度の上限", min=0.5, max=8.0, default=3.5,
-                  step=0.1, unit="m/s²",
-                  note="コーナーの速度を決めているのはこれ。前後の加減速と摩擦円で分け合う。"
-                       "実測のグリップ限界は4.48（vehicle.toml の mu）。シムでは4.0まで衝突0"),
-        ParamSpec(group=GROUP_SPEED, key="a_accel", label="加速度の上限", min=0.2, max=5.0, default=2.5,
-                  step=0.1, unit="m/s²",
-                  note="立ち上がりでどれだけ速度を戻せるか。ファームが目標速度を3.0m/s²で"
-                       "ランプさせるので、それより上は効かない"),
-        ParamSpec(group=GROUP_SPEED, key="a_brake", label="減速度の上限", min=0.2, max=5.0, default=2.5,
-                  step=0.1, unit="m/s²",
-                  note="★コーナー手前の減速開始点を決める。減速は速度PI（負のトルク）で、"
-                       "ファームのランプ3.0m/s²が上限。MDの制動（ABS）は2.75で頭打ちなので使わない"),
+        ParamSpec(group=GROUP_SPEED, key="lat_use", label="横グリップを使う割合", min=0.3, max=1.2,
+                  default=0.9, step=0.01, unit="",
+                  note="★コーナーの速度を決める。同定した横加速度の限界（vehicle.toml の mu×g）の"
+                       "何割で曲がるか。1.0 が限界ちょうどで、追従のずれを直す余力が無くなる。"
+                       "路面が変わったら、ここではなく旋回グリップ試験で mu を測り直す"),
+        ParamSpec(group=GROUP_SPEED, key="accel_use", label="加速を使う割合", min=0.2, max=1.0,
+                  default=0.95, step=0.01, unit="",
+                  note="立ち上がりの加速。同定した駆動加速度の上限（drive_accel_m_s2−転がり抵抗）の何割か"),
+        ParamSpec(group=GROUP_SPEED, key="brake_use", label="減速を使う割合", min=0.2, max=1.0,
+                  default=0.9, step=0.01, unit="",
+                  note="★コーナー手前の減速開始点を決める。同定した減速度の上限（speed_decel_m_s2＋"
+                       "転がり抵抗）の何割で減速する前提にするか。下げるほど手前から減速する。"
+                       "減速は速度PI（負のトルク）で行い、MDの制動は使わない"),
+        ParamSpec(group=GROUP_SPEED, key="speed_ff", label="速度指令の前倒し", min=0, max=1, step=1,
+                  default=1, unit="",
+                  note="★1で、STM32 の速度PIの遅れ（同定値から約0.16s）を見込んで目標速度を前倒しする"
+                       "（`nav/speedctl.py`）。0 だと経路の速度をそのまま送り、コーナーへ 0.3〜0.5m/s"
+                       "速く入る（『速度の先読み』だけが効く）"),
+        ParamSpec(group=GROUP_SPEED, key="speed_fb", label="速度のずれの戻し", min=0.0, max=2.0,
+                  default=1.0, step=0.1, unit="",
+                  note="車速が経路の速度から外れたぶんを、この倍率で目標へ足し戻す（前倒しが 1 のとき）"),
 
         ParamSpec(group=GROUP_SPEED, key="launch", label="ローンチコントロール", min=0, max=1, step=1,
                   default=0, unit="",
@@ -263,6 +441,26 @@ class Slam2dRaceLine(Planner):
                        "ぶん約0.2秒早い）。経路に乗っていて、前が空いていて、舵がほぼ真っすぐのときだけ"
                        "要求する。既定は 0（速度PIで発進）——今は手動操作でだけ使う方針（2026-10-10）"),
 
+        ParamSpec(group=GROUP_STEER, key="ctrl_mode", label="追従方式(0=Pure Pursuit,1=MPC)", min=0, max=1,
+                  step=1, default=0, unit="",
+                  note="★1で舵をMPC（経路座標の線形化自転車モデル＋舵レート制約、`nav/mpc.py`）で決める。"
+                       "速度は経路のプロファイルのまま。既定は0（Pure Pursuit）。MPCは実機未検証"),
+        ParamSpec(group=GROUP_STEER, key="mpc_delay_s", label="MPC 遅延補償", min=0.0, max=0.3, step=0.01,
+                  default=0.06, unit="s",
+                  note="★MPC専用（Pure Pursuitの遅延補償とは別）。指令が効くまでの時間。大きすぎると逆に"
+                       "振動する（3m/sのtoyota2で0.15は毎周期±全舵の振動で衝突、0.05〜0.07で衝突0。★シムの実効遅れはLiDAR周期＋姿勢の古さで決まる）"),
+        ParamSpec(group=GROUP_STEER, key="mpc_horizon", label="MPC 予測ステップ数", min=5, max=40, step=1,
+                  default=20, unit="",
+                  note="予測区間 = ステップ数×刻み。長いほど先のコーナーに備えるが重い"),
+        ParamSpec(group=GROUP_STEER, key="mpc_dt", label="MPC 刻み", min=0.03, max=0.2, step=0.01,
+                  default=0.1, unit="s", note="1ステップの時間"),
+        ParamSpec(group=GROUP_STEER, key="mpc_q_y", label="MPC 横偏差の重み", min=1, max=1000, step=10,
+                  default=100, unit="", note="上げると経路に寄るが舵が忙しくなる"),
+        ParamSpec(group=GROUP_STEER, key="mpc_q_psi", label="MPC 向き偏差の重み", min=0, max=200, step=1,
+                  default=30, unit="",
+                  note="経路の向きからのずれの重み。上げると進入で向きを早く揃える"),
+        ParamSpec(group=GROUP_STEER, key="mpc_r_d", label="MPC 舵の変化の重み", min=0.01, max=20, step=0.1,
+                  default=5.0, unit="", note="上げると舵が滑らかで遅れる"),
         ParamSpec(group=GROUP_STEER, key="look_k", label="前方注視の速度係数", min=0.0, max=2.0,
                   default=0.45, step=0.05, unit="s",
                   note="Ld = 係数×速度 + 最小値。上げると滑らかだがコーナーで内を切る。"
@@ -271,18 +469,25 @@ class Slam2dRaceLine(Planner):
         ParamSpec(group=GROUP_STEER, key="look_min", label="前方注視の最小値", min=0.15, max=1.5,
                   default=0.30, step=0.05, unit="m",
                   note="低速時の注視距離。小さすぎると舵が振動する"),
-        ParamSpec(group=GROUP_STEER, key="delay_s", label="遅延補償", min=0.0, max=0.4, default=0.15,
-                  step=0.01, unit="s",
-                  note="★舵が効き始めるまでの時間。実測して合わせること"),
+        ParamSpec(group=GROUP_STEER, key="delay_trim", label="遅延補償の補正", min=-0.05, max=0.3,
+                  default=0.0, step=0.01, unit="s",
+                  note="★舵の遅延補償は同定値（舵のむだ時間＋ヨーの遅れ＋通信、約0.06s）から決まる。"
+                       "ここはそれに足す補正。追従に使う姿勢は車速とジャイロで『今』へ進めてあるので、"
+                       "以前の『遅延補償』（`delay_s`、0.15 前後。姿勢の古さの手当て込み）とは意味が違うので、"
+                       "キーを変えてある（保存済みの `delay_s` は読まない）"),
+        ParamSpec(group=GROUP_STEER, key="tick", label="点群の合間も追従を更新", min=0, max=1, step=1,
+                  default=1, unit="",
+                  note="★1で、点群（10Hz）の合間も 50Hz で舵と速度を計算し直す（姿勢は車速とジャイロで"
+                       "進める）。0 だと 10Hz——3m/s では 1 周期に 30cm 進む間、同じ舵のまま"),
         ParamSpec(group=GROUP_STEER, key="steer_ff", label="曲率フィードフォワード", min=0.0, max=1.0, default=0.8,
                   step=0.1, unit="",
                   note="★Pure Pursuit は注視区間で平均した曲率で曲がるので、S字で内側を切り続ける"
                        "（3m/sで±15cm）。足元の経路の曲率に差し替える重み。0で従来どおり。"
                        "0.5ではチケイン（circuit_chicane_a）で内を切って衝突、0.8で0回"),
-        ParamSpec(group=GROUP_SPEED, key="speed_preview", label="速度の先読み", min=0.0, max=1.0, default=0.1,
-                  step=0.05, unit="s",
-                  note="★遅延補償の位置からこの時間ぶん先の速度を指令する（速度ループの遅れを"
-                       "埋める）。以前は舵の注視点の速度で、2m/sで0.75s早く減速していた"),
+        ParamSpec(group=GROUP_SPEED, key="speed_preview", label="速度の先読み（前倒し 0 のとき）", min=0.0,
+                  max=1.0, default=0.1, step=0.05, unit="s",
+                  note="『速度指令の前倒し』が 0 のときだけ効く。遅延補償の位置からこの時間ぶん先の"
+                       "速度をそのまま指令する（旧方式）"),
         ParamSpec(group=GROUP_SAFETY, key="join_speed", label="経路に乗るまでの速度", min=0.2, max=1.5,
                   default=0.5, step=0.05, unit="m/s",
                   note="★走り出し（自己位置の復元直後）は経路から横・向きがずれている。"
@@ -306,23 +511,32 @@ class Slam2dRaceLine(Planner):
                   note="★これから通る帯に動く物が居たら制動する。0で無効"),
         ParamSpec(group=GROUP_SAFETY, key="obstacle_pad", label="壁の近くを無視する幅", min=0.05, max=0.6,
                   default=0.25, step=0.01, unit="m",
-                  note="★壁からこの範囲に落ちた点は動的障害物と見なさない。**道の半幅より 10cm 以上"
-                       "小さく**（道幅 0.6m なら 0.20 以下）。大きいと壁寄りの障害物を見つけるのが遅れる"
-                       "（この外に1点でも落ちた塊は、10cm 壁寄りの点まで数える）"),
+                  note="★壁からこの範囲に落ちた点は動的障害物と見なさない。**経路が壁にいちばん寄る所の"
+                       "壁までの距離より大きければ、そこまで自動で詰める**（下限 0.15。経路の上の物が"
+                       "見えなくなるため）。この外に1点でも落ちた塊は、10cm 壁寄りの点まで数える"),
         ParamSpec(group=GROUP_AVOID, key="obstacle_avoid", label="障害物を避ける", min=0, max=1, step=1,
                   default=0, unit="",
                   note="★1で、経路を塞ぐ障害物を横へ避ける（止まらずに済むなら止まらない）。"
                        "避けられなければ止まり、Hybrid A* で後退・切り返しも使って抜ける。"
                        "0 なら従来どおり（『障害物で止まる距離』だけ）"),
+        ParamSpec(group=GROUP_AVOID, key="sight_use", label="見通しの中で止まれる速度に抑える", min=0.0,
+                  max=1.0, default=1.0, step=0.05, unit="",
+                  note="★『障害物を避ける』か『障害物で止まる距離』が有効なときだけ効く。1.0 で、経路の先が"
+                       "見えている距離の中で止まれる速度に抑える（壁の先端を回るヘアピンは 0.6m 先までしか"
+                       "見えない）。費用は 1 周 +10〜25%（シム）。0.5 なら『見えている距離の 2 倍で止まれる』"
+                       "速度で +0〜8%——陰に障害物が居れば、減速はするが当たる（シムで 0.6m/s で接触）。"
+                       "0 で抑えない。★見ているのは経路の線上だけ。内側の壁に寄った障害物は 1.0 でも"
+                       "見えるのが遅れて当たりうる"),
         ParamSpec(group=GROUP_AVOID, key="avoid_margin", label="障害物との余裕", min=0.0, max=0.4,
                   default=0.10, step=0.01, unit="m",
                   note="障害物の縁から車体側面までの余裕。自己位置と障害物の位置の誤差をここで飲む"),
         ParamSpec(group=GROUP_AVOID, key="avoid_clear", label="車体外形の合格線", min=0.0, max=0.2,
                   default=0.05, step=0.01, unit="m",
                   note="避ける経路で車体外形と壁・障害物の距離がこれを切ったら、その避け方は使わない"),
-        ParamSpec(group=GROUP_AVOID, key="avoid_speed", label="避ける間の速度上限", min=0.2, max=2.5,
+        ParamSpec(group=GROUP_AVOID, key="avoid_speed", label="余裕ぎりぎりで避ける速度", min=0.2, max=2.5,
                   default=1.0, step=0.05, unit="m/s",
-                  note="横へずれて障害物の横を抜ける区間はこの速度に抑える（手前から減速する）"),
+                  note="★障害物・壁との余裕が『車体外形の合格線』ちょうどのときの速度。余裕がそれより"
+                       "15cm 以上広ければ抑えず（曲率で決まる速度のまま）、その間は余裕に比例して上げる"),
         ParamSpec(group=GROUP_AVOID, key="avoid_len_min", label="避け始める長さの下限", min=0.3, max=3.0,
                   default=0.8, step=0.1, unit="m",
                   note="横へずれ始めてからずれ切るまでの距離の下限。速いほど・ずれが大きいほど長くなる"),
@@ -336,11 +550,11 @@ class Slam2dRaceLine(Planner):
                   max=200.0, default=60.0, step=10.0, unit="ms",
                   note="★1回の経路探索の上限。Pi では指令が150ms途切れると止まる（デッドマン）"),
         ParamSpec(group=GROUP_AVOID, key="detour_speed", label="Hybrid A* で抜ける速度", min=0.15,
-                  max=0.8, default=0.3, step=0.05, unit="m/s",
+                  max=0.8, default=0.5, step=0.05, unit="m/s",
                   note="止まってから Hybrid A* で障害物の先へ抜ける間の巡航速度。上げるほど早く抜けるが、"
                        "壁・障害物すれすれを通るので追従の誤差も増える"),
         ParamSpec(group=GROUP_AVOID, key="avoid_wait", label="止まってから抜け始めるまで", min=0.2,
-                  max=3.0, default=0.5, step=0.1, unit="s",
+                  max=3.0, default=0.3, step=0.1, unit="s",
                   note="塞がれて止まってから Hybrid A* に入るまでの待ち。その半分の時点で、横へ避ける"
                        "経路をもう一度引いてみる。短いほど早く動き出すが、どく物（人・他車）も待たずに迂回する"),
         ParamSpec(group=GROUP_SAFETY, key="md_fault_speed", label="駆動MD無応答中の速度上限", min=0.2,
@@ -356,12 +570,17 @@ class Slam2dRaceLine(Planner):
     _reline_on_load = True
 
     def __init__(self) -> None:
-        self._line_pool: ThreadPoolExecutor | None = None
         self._last_p: dict[str, float] | None = None
         #: 自動運転に入っているか（`planning_node` が毎周期 `set_engaged` で渡す）。
         #: **入っていない EXPLORE は人のラジコンでの地図作成**として扱う。
         #: `set_engaged` を呼ばない呼び出し元（ベンチ・テスト）では従来どおり FTG で走る
         self._engaged = True
+        self._mpc = MPCFollower()
+        self._sff = speedctl.SpeedFF()
+        self._sff_catch = speedctl.SpeedFF()        # 追いつく間の速度指令（経路を毎回作るので別に持つ）
+        #: `speedctl.ref_command` に渡すプロファイルの加速度と、それを作った `path.v`
+        self._ref_acc: np.ndarray | None = None
+        self._ref_acc_src: np.ndarray | None = None
         self.vehicle = Vehicle.load()
         self.ftg = FollowTheGap()
         self.slam = Slam2dNav(resolution=MAP_RES, size_m=MAP_SIZE_M,
@@ -384,6 +603,15 @@ class Slam2dRaceLine(Planner):
         self._build_error = ""
         self._freeze_requested = False
         self._hint = -1
+        self._mpc.reset()
+        self._sff.reset()
+        #: 速度指令を前回計算した時刻 [ns]（`VehicleState.t_capture`）
+        self._sff_t = 0
+        #: 点群の合間の追従（`tick`）に使う、直近の `plan()` の結果:
+        #: (追っている経路, 設定, 速度の上限, 追従の起点の添字)。`None` = 合間は更新しない
+        self._tick_ctx: tuple | None = None
+        self._tick_raw = math.inf
+        self._tick_path: rl_mod.RaceLine | None = None
         #: 周回の数え上げ（`_count_lap`）。前の周期の最寄り点の添字と、前回数えてから経路に
         #: 沿って進んだ距離 [m]
         self._prev_idx = -1
@@ -392,6 +620,9 @@ class Slam2dRaceLine(Planner):
         self._obs_free: np.ndarray | None = None
         self._obs_near: np.ndarray | None = None
         self._obs_free_key: tuple | None = None
+        #: 実際に使っている無視幅（`_obstacle_pad`）と、それを決めた経路
+        self._obs_pad = 0.0
+        self._obs_pad_ref: np.ndarray | None = None
         #: 経路に乗ったか（乗るまでは `join_speed` に抑える、`_join_cap`）
         self._joined = False
         #: 経路から外れて止まっている時間 [s] と、乗り直した回数（`_off_route`）
@@ -407,6 +638,34 @@ class Slam2dRaceLine(Planner):
         self._avoid_path: rl_mod.RaceLine | None = None
         self._avoid_base: rl_mod.RaceLine | None = None
         self._avoid_ms = 0.0
+        #: 横へ避ける経路を引けなかったときの (障害物と条件のキー, 車の添字, 経路)。`_plan_avoid` 参照
+        self._avoid_fail: tuple | None = None
+        #: 直近に横へ避ける経路を引けなかった理由（表示用）
+        self._avoid_why = ""
+        #: 今の避ける経路の作り方（"横ずらし" = 決まった形、"引き直し" = `avoid.plan_elastic`）
+        self._avoid_how = ""
+        #: 見通しの距離（`_sight_cap`）と、それを掛けた経路（`_with_sight`）のキャッシュ
+        self._sight: np.ndarray | None = None
+        self._sight_ref: np.ndarray | None = None
+        self._sight_seq = -1
+        self._sighted: rl_mod.RaceLine | None = None
+        self._sighted_src: rl_mod.RaceLine | None = None
+        self._sighted_key: tuple | None = None
+        self._sight_msg = ""
+        #: 今の避ける経路の元にした経路（見通しの上限をそこから取る）
+        self._avoid_room_path: rl_mod.RaceLine | None = None
+        #: 別プロセスで引き直している避ける経路（`avoid.plan_elastic`）と、その元の経路
+        self._drop_job("_elastic_job")
+        self._elastic_base: np.ndarray | None = None
+        self._v_now = 0.0                  #: 直近の車速（障害物の「近い」の範囲に使う）
+        #: 「曲がり切れない区間」の注記と、それを測った (経路, `kappa_use`)（`_tight_note`）
+        self._tight_key: tuple | None = None
+        self._tight_ref: np.ndarray | None = None
+        self._tight_msg = ""
+        #: 経路の各点から左右へずらせる量（`_avoid_room`）と、それを作った (経路, 地図の版, 合格線)
+        self._room: tuple | None = None
+        self._room_key: tuple | None = None
+        self._room_ref: np.ndarray | None = None
         #: 壁と車体外形の余裕を測る距離場（地図の版ごとに作る、`_body_check`）
         self._body: rl_mod._BodyCheck | None = None
         self._body_seq = -1
@@ -426,10 +685,13 @@ class Slam2dRaceLine(Planner):
         self._dt = 0.0
         #: 今の経路の速度プロファイルを作った設定（`_retime`）
         self._speed_key: tuple | None = None
-        #: 地図の読み込み・`line_margin` の変更で引き直しているライン（`_submit_line`）と、
-        #: 今のライン（引き直し中ならその計算）の `line_margin`。`None` = 引き直さない
+        #: 地図の読み込み・ラインの形を決める設定（`LINE_KEYS`）の変更で引き直しているライン
+        #: （`_submit_line`）と、今のライン（引き直し中ならその計算）の設定。`None` = 引き直さない
         self._drop_job("_line_job")
-        self._line_margin: float | None = None
+        self._line_built: tuple | None = None
+        #: 引き直しが済んで、乗り移れる場所を待っているライン（`_try_adopt_line`）
+        self._line_next: rl_mod.RaceLine | None = None
+        self._line_next_key: tuple | None = None
         #: BUILD で引いているライン（`_build`）
         self._drop_job("_build_job")
         self._prev_obs: list[obs_mod.Obstacle] = []
@@ -537,7 +799,8 @@ class Slam2dRaceLine(Planner):
         # ★ 保存したラインの形は地図を作ったときのコードと設定のまま。中心線から今の
         #   設定で引き直す（重いのでワーカーで。できるまでは保存したラインで走る）
         self._drop_job("_line_job")
-        self._line_margin = None
+        self._line_built = None
+        self._line_next = None
         self._submit_line(self._last_p or {s.key: s.default for s in self.params})
         self._speed_key = None            # 速度は今の設定で作り直す（`_retime`）
         self.phase = LOCATE
@@ -555,10 +818,10 @@ class Slam2dRaceLine(Planner):
             return
         g = self.slam.grid
         self._drop_job("_line_job")
-        self._line_job = self._pool().submit(
+        self._line_job = submit_job(
             _optimize_line, g.trinary().copy(), g.resolution, tuple(g.origin),
             np.asarray(cl).copy(), dict(p), self.vehicle)
-        self._line_margin = float(p["line_margin"])
+        self._line_built = line_key(p)
 
     def _drop_job(self, name: str) -> None:
         """ワーカーの計算の結果を捨てる。まだ始まっていなければ取り消す（ワーカーは1本なので、
@@ -575,15 +838,50 @@ class Slam2dRaceLine(Planner):
             return
         self._line_job = None
         try:
-            self.path = job.result()
+            self._line_next = job.result()
         except Exception as e:                      # noqa: BLE001  今のラインで走り続ける
             self._load_error = f"ラインを引き直せなかった（今のラインで走る）: {e}"
             return
         self._load_error = ""
+        if self.phase != RACE or self.path is None:
+            self._adopt_line()                      # まだ走っていない。その場で差し替える
+
+    def _adopt_line(self) -> None:
+        new, self._line_next = self._line_next, None
+        if new is None:
+            return
+        self.path = new
         self._hint = -1
         self._prev_idx = -1
         self._speed_key = None
         self._map_dirty = True
+
+    def _try_adopt_line(self, vs: VehicleState, p: dict[str, float]) -> None:
+        """裏で引き直したラインへ、**乗り移れる場所に来たら**差し替える（RACE 中）。
+
+        ★ できた瞬間には差し替えない。新旧の線は数十cm 離れている所があり、3m/s で走って
+        いる途中に足元の経路が横へ跳ぶ（sim.bench で横偏差の最大 26〜33cm が出ていたのはこれ）。
+        新しい線が今の姿勢のすぐそばを同じ向きで通り、そこでの速度が今の車速から無理なく
+        つながる所（新旧の線は1周に何度か交わる）まで待つ。止まっていればすぐ差し替える。
+        """
+        new = self._line_next
+        if new is None or self._avoid is not None:
+            return
+        if abs(vs.speed) > 0.1:
+            if new.v is None or self._line_next_key != speed_key(p):
+                new = self._line_next = rl_mod.retime(new, **speed_kwargs(p, self.vehicle))
+                self._line_next_key = speed_key(p)
+            x, y, yaw = self.slam.pose_now(vs)
+            j = nearest_index(new, x, y)
+            if (math.hypot(new.xy[j, 0] - x, new.xy[j, 1] - y) > _ADOPT_DIST
+                    or _heading_err(new, j, yaw) > _ADOPT_YAW
+                    or vs.speed > float(new.v[j]) + 0.3):
+                return
+            self._adopt_line()
+            self._hint = j
+            self._retime(p)
+            return
+        self._adopt_line()
 
     def request_locate_hint(self, x: float, y: float) -> None:
         self._loc_hint = (x, y)
@@ -597,6 +895,7 @@ class Slam2dRaceLine(Planner):
         st = AutoState(mode=self.id, planner=self.name, phase=self.phase)
         self._dt = dt
         self._last_p = p
+        self._tick_ctx = self._tick_path = None
         self._poll_line()
 
         if vs is None:
@@ -632,7 +931,89 @@ class Slam2dRaceLine(Planner):
             return self._build(st, p)
         if self.phase == DONE:
             return self._done(st)
-        return self._race(st, scan, vs, p, u.lost)
+        st = self._race(st, scan, vs, p, u.lost)
+        # 速度を追従の値より抑えた（障害物・推測航法など）・制動するなら、目標車速のランプは
+        # 指定しない（＝STM32 の上限で動かす。プロファイルの緩い傾きのままだと減速が遅れる）
+        if st.brake or not st.ready or st.target_speed < self._tick_raw - 1e-6:
+            st.accel_limit = 0.0
+        self._arm_tick(st, p)
+        return st
+
+    # ── 点群の合間の追従 ──
+
+    def _arm_tick(self, st: AutoState, p: dict[str, float]) -> None:
+        """この周期の判断が「経路を追っているだけ」なら、点群の合間も追従を更新できるようにする。
+
+        制動・停止・Hybrid A*・経路に乗る前の判断は 10Hz のまま（`_tick_ctx` が `None`）。
+        速度を抑えた理由（推測航法・MD の異常・障害物の手前）は、抑えた値を上限として持ち越す。
+        """
+        path = self._tick_path
+        if (path is None or p["tick"] <= 0 or not st.ready or st.brake or st.launch
+                or self.phase != RACE):
+            return
+        cap = st.target_speed if st.target_speed < self._tick_raw - 1e-6 else math.inf
+        self._tick_ctx = (path, p, cap, self._hint)
+
+    def tick(self, vs: VehicleState | None) -> tuple[float, float | None, float] | None:
+        """点群の合間（`planning_node` の 50Hz の定期送信）に舵と速度を計算し直す。
+
+        姿勢は直近の SLAM の結果を車速とジャイロで今へ進めたもの。**追従だけ**をやり直す
+        （障害物・自己位置の判断は `plan()` のまま）。戻り値は `(舵角, 目標速度, 目標車速のランプ)`、
+        更新しないなら `None`。目標速度が `None` なら速度は `plan()` の値のまま。ランプ 0 は指定なし。
+        """
+        ctx = self._tick_ctx
+        if ctx is None or vs is None:
+            return None
+        path, p, cap, hint = ctx
+        pose = self.slam.pose_now(vs)
+        pp = self._follow(path, pose, vs, p, pursuit_config(p, self.vehicle), hint)
+        if not path.closed or p["speed_ff"] <= 0:
+            return pp.steer, None, 0.0             # 停止点へ向かう経路の速度は `plan()` が決める
+        speed, ramp = self._speed_cmd(path, pp.index, pose, vs, p)
+        if speed > cap:
+            return pp.steer, cap, 0.0              # 抑えた値へは STM32 の上限で向かう
+        return pp.steer, speed, ramp
+
+    def _speed_cmd(self, path: rl_mod.RaceLine, index: int, pose, vs: VehicleState,
+                   p: dict[str, float]) -> tuple[float, float]:
+        """`(目標速度 [m/s], 目標車速のランプ [m/s²])`（`nav/speedctl.py`）。ランプ 0 は指定なし。
+
+        STM32 の加速度フィードフォワードが有効（`Vehicle.speed_ff_firmware`、★v0.21）なら、
+        プロファイルの速度とその傾きをそのまま渡す（`speedctl.ref_command`）。無効なら、速度PIの
+        遅れを Pi 側で見込んで前倒しした目標速度（`speedctl.SpeedFF`、ランプは指定しない）。
+        """
+        j = nearest_index(path, pose[0], pose[1], index, window=8)
+        pos = speedctl.arc_index(path, j, pose[0], pose[1])
+        t = int(vs.t_capture)
+        dt = (t - self._sff_t) / 1e9 if self._sff_t and t else 0.0
+        self._sff_t = t
+        cfg = speedctl.config_from_vehicle(self.vehicle, k_fb=p["speed_fb"])
+        # 今ここで前へ使ってよい加速度（摩擦円の残り）
+        n = len(path)
+        kap = float(np.abs(path.kappa[j])) if len(path.kappa) == n else 0.0
+        lim = limits(p, self.vehicle)
+        u = max(vs.speed, 0.0) ** 2 * kap / max(self.vehicle.a_lat_max, 1e-6)
+        a_room = lim.a_accel * math.sqrt(max(0.0, 1.0 - u * u))
+        if vs.speed < float(path.v[j]) - _CATCH_UP_GAP:
+            # 車速がプロファイルよりずっと低い（迂回の後・走り出し・減速の後）。今の車速から
+            # 摩擦円の中で追いつく速度へ置き換えてから前倒しする（`speedctl.catch_up`）
+            local = speedctl.catch_up(path, j, vs.speed, a_accel=lim.a_accel,
+                                      a_grip=self.vehicle.a_lat_max)
+            if self.vehicle.speed_ff_firmware:
+                return speedctl.ref_command(local, pos, vs.speed, lead_s=self._ref_lead())
+            return self._sff_catch.command(local, pos, vs.speed, dt, cfg, a_room=a_room), 0.0
+        if self.vehicle.speed_ff_firmware:
+            if self._ref_acc_src is not path.v:
+                self._ref_acc, self._ref_acc_src = speedctl.path_accel(path), path.v
+            return speedctl.ref_command(path, pos, vs.speed, lead_s=self._ref_lead(),
+                                        acc=self._ref_acc)
+        return self._sff.command(path, pos, vs.speed, dt, cfg, a_room=a_room), 0.0
+
+    def _ref_lead(self) -> float:
+        """指令を決めてからフィードフォワードのトルクに効くまでの時間 [s]:
+        次の指令までの半周期（50Hz）＋通信（同定の遅延試験）＋STM32 が目標車速の傾きに掛ける
+        ローパスの時定数。どれも実測か既知の定数で、合わせ込む係数は無い。"""
+        return 0.01 + cmd_latency(self.vehicle) + speedctl.FW_FF_TAU_S
 
     # ── EXPLORE ──
 
@@ -768,9 +1149,9 @@ class Slam2dRaceLine(Planner):
             assert self.centerline is not None
             if self._build_job is None:
                 g = self.slam.grid
-                self._build_job = self._pool().submit(
+                self._build_job = submit_job(
                     _optimize_line, g.trinary().copy(), g.resolution, tuple(g.origin),
-                    self.centerline, dict(p), self.vehicle)
+                    self.centerline, dict(p), self.vehicle, False)   # 仕上げは走り出してから
             if not self._build_job.done():
                 st.reason = "経路を作っている 2/2（レーシングライン）"
                 return st
@@ -944,12 +1325,13 @@ class Slam2dRaceLine(Planner):
         if self.path is None:
             st.reason = "経路がまだ無い"
             return st
-        # ★ `line_margin` はラインの形を決める。走行中に変えたら引き直す（以前は速度だけ
-        #   作り直し、線は地図を読んだときの値のまま。障害物の帯と回避の余裕は新しい値を
-        #   すぐ使うので、表示・線・判定が食い違った）。できるまでは今のラインで走る
-        if (self._line_margin is not None and self._line_job is None
-                and float(p["line_margin"]) != self._line_margin):
+        # ★ `line_margin` はラインの形を決める。走行中に変えたら引き直す（速度だけ作り直すと、
+        #   障害物の帯と回避の余裕は新しい値をすぐ使うので表示・線・判定が食い違う）。
+        #   できるまでは今のラインで走る
+        if (self._line_built is not None and self._line_job is None
+                and line_key(p) != self._line_built):
             self._submit_line(p)
+        self._try_adopt_line(vs, p)
         self._retime(p)
 
         coasting = self._localization_ok(st, lost, p)
@@ -982,8 +1364,27 @@ class Slam2dRaceLine(Planner):
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
                      + self._avoid_note() + self._coast_note(coasting, p) + md_note
+                     + self._sight_note(self.path, p) + self._tight_note(self.path, p)
                      + (f"・★{self._load_error}" if self._load_error else ""))
         return st
+
+    def _tight_note(self, path: rl_mod.RaceLine, p: dict[str, float]) -> str:
+        """経路に「車が曲がり切れない区間」が残っていれば、その注記（経路ごとに1回だけ測る）。
+
+        道幅が足りず、半径を `kappa_use`×限界まで開けなかった所。そこは舵が上限に張り付き、
+        出口で外へ膨らむ（実車で確認）。`line_margin` を詰めるか、コースを広げるしかない。
+        """
+        # ★ 経路は `id()` ではなく**物そのもの**で見分ける（`is`）。`id()` は、差し替えで古い配列が
+        #   解放された直後に新しい配列へ使い回されることがあり、古い結果を出してしまう
+        key = (p["kappa_use"],)
+        if self._tight_ref is not path.xy or self._tight_key != key:
+            self._tight_ref = path.xy
+            lim = kappa_limit(p, self.vehicle)
+            length, ratio = rl_mod.tight_sections(path.xy, path.closed, lim)
+            self._tight_key = key
+            self._tight_msg = (f"・★曲がり切れない区間 {length:.1f}m（曲率が上限の {ratio * 100:.0f}%、"
+                               f"半径 {1.0 / max(ratio * lim, 1e-6) * 100:.0f}cm）" if length > 0.0 else "")
+        return self._tight_msg
 
     def _launch_ok(self, st: AutoState, vs: VehicleState, hit, coasting: bool, md_note: str,
                    p: dict[str, float]) -> bool:
@@ -1035,20 +1436,29 @@ class Slam2dRaceLine(Planner):
         （止まらずに済むなら止まらない）。戻り値は `(追従の結果, 塞ぐ障害物, そこまでの距離)`。
         """
         cfg = pursuit_config(p, self.vehicle)
+        self._v_now = float(vs.speed)
         self._detect_obstacles(st, scan, p)
         if self._avoid is not None and (self._avoid_base is not path
                                         or self._avoid_passed(self._hint)):
             self._clear_avoid()
-        followed = self._avoid_path or path
-        pp = follow(followed, pose, vs.speed, vs.steer_actual, cfg, hint=self._hint)
+        self._poll_elastic(path, self._hint, vs, p)
+        followed = self._avoid_path or self._with_sight(path, p)
+        # ★ 追従に使う姿勢は「今」へ進めたもの（`pose` は点群の基準時刻のもので、計画の時点で
+        #   数十ms 古い。3m/s なら 10cm 前後）。障害物の判定は地図の上の話なので `pose` のまま
+        now = self.slam.pose_now(vs)
+        pp = self._follow(followed, now, vs, p, cfg, self._hint)
         hit, dist = self._blocking(followed, pp.index, vs, p)
         if hit is not None and self._still_clear(hit, pp.index):
             hit, dist = None, math.inf
         if (hit is not None and p["obstacle_avoid"] > 0
                 and self._plan_avoid(path, pp.index, hit, vs, p, kappa_frac=0.6)):
             followed = self._avoid_path
-            pp = follow(followed, pose, vs.speed, vs.steer_actual, cfg, hint=pp.index)
+            pp = self._follow(followed, now, vs, p, cfg, pp.index)
             hit, dist = self._blocking(followed, pp.index, vs, p)
+        if p["speed_ff"] > 0 and followed.closed:
+            speed, st.accel_limit = self._speed_cmd(followed, pp.index, now, vs, p)
+            pp = pp._replace(speed=speed)
+        self._tick_path, self._tick_raw = followed, pp.speed
         self._hint = pp.index
         st.target_steer = pp.steer
         st.heading = pp.steer
@@ -1056,21 +1466,66 @@ class Slam2dRaceLine(Planner):
         st.target_x, st.target_y = pp.target
         return pp, hit, dist
 
+    def _follow(self, path, pose, vs, p, cfg, hint):
+        """舵を決める。`ctrl_mode` 1 なら MPC、0 なら Pure Pursuit。"""
+        if p["ctrl_mode"] >= 0.5:
+            return self._mpc.follow(path, pose, vs.speed, vs.steer_actual,
+                                    mpc_config(p, self.vehicle), hint=hint,
+                                    now=vs.t_capture / 1e9 if vs.t_capture else None)
+        return follow(path, pose, vs.speed, vs.steer_actual, cfg, hint=hint)
+
     def _detect_obstacles(self, st: AutoState, scan: Scan, p: dict[str, float]) -> None:
         """障害物を検出して `self._obs`（2周期続いたもの）と `st.obstacles` に載せる。"""
         g = self.slam.grid
-        pad = p["obstacle_pad"]
-        key = (g.seq, pad)
-        if key != self._obs_free_key:
+        base = self.path.xy if self.path is not None else None
+        key = (g.seq, p["obstacle_pad"])
+        if key != self._obs_free_key or base is not self._obs_pad_ref:
             # 凍結地図では変わらない。毎周期作ると格子全体の膨張で数msかかる
+            self._obs_pad = pad = self._obstacle_pad(p)
             self._obs_free = obs_mod.free_mask(g, pad)
             self._obs_near = obs_mod.free_mask(g, obs_mod.near_pad(pad))
-            self._obs_free_key = key
+            self._obs_free_key, self._obs_pad_ref = key, base
+        pad = self._obs_pad
         now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
                              wall_pad=pad, free=self._obs_free, near=self._obs_near)
         self._obs = obs_mod.confirm(now, self._prev_obs)
+        # ★ すぐ近く（今の速度で止まれる距離＋0.6m 以内）に出た物は、2周期目を待たずに扱う。
+        #   見通しの悪いコーナーの先の障害物は、見えた時点でもう 1m も無い。確認を待つ 0.1s の間に
+        #   1.8m/s で 18cm 進み、止まり切れずに当たった（sim.bench の toyota）。
+        #   近い物は点が多く（`min_points` は距離によらない）、単発のノイズで出ることは少ない
+        if p["obstacle_avoid"] > 0 or p["obstacle_stop"] > 0:
+            v = abs(self._v_now)
+            near = v * v / (2.0 * max(limits(p, self.vehicle).a_brake, 0.1)) + v * limits(p, self.vehicle).react_s \
+                + self.vehicle.front_overhang + 0.6
+            px, py = self.slam.pose.x, self.slam.pose.y
+            for o in now:
+                if (math.hypot(o.x - px, o.y - py) - o.r <= near
+                        and not any(o is c for c in self._obs)):
+                    self._obs.append(o)
         self._prev_obs = now
         st.obstacles = [v for o in self._obs for v in (o.x, o.y, o.r)]
+
+    def _obstacle_pad(self, p: dict[str, float]) -> float:
+        """実際に使う「壁の近くを無視する幅」[m]: 設定 `obstacle_pad` を、経路が壁にいちばん寄る所の
+        壁までの距離まで詰めたもの（`_OBS_PAD_MIN` より下へは詰めない）。
+
+        ★ ラインは頂点で壁から「車体半幅＋`line_margin`」（0.08 なら 17cm）を通る。無視する幅が
+        それより大きいと、**経路の真上に置かれた物**の点がすべて無視する帯に落ち、足元の帯へ入る
+        まで見つからない。実機（`obstacle_pad` 0.25・経路から壁まで 最小 15cm）で、
+        壁から 19cm に立った人の脚が 1.7m 手前から毎周 4〜9 点写っていたのに候補にならず、
+        2.3m/s のまま 0.4m 手前まで来た。同じ記録を通し直すと、0.15 なら 1.8m 手前で見つかる
+        （障害物の無い 654 周期の誤検出は 0 のまま）。
+        """
+        pad = float(p["obstacle_pad"])
+        if self.path is None or pad <= _OBS_PAD_MIN:
+            return pad
+        g = self.slam.grid
+        col, row = g.to_cell(self.path.xy[:, 0], self.path.xy[:, 1])
+        ok = g.inside(col, row)
+        if not ok.any():
+            return pad
+        dist = obs_mod.wall_distance(g)
+        return min(pad, max(_OBS_PAD_MIN, float(dist[row[ok], col[ok]].min())))
 
     def _blocking(self, path: rl_mod.RaceLine, index: int, vs: VehicleState,
                   p: dict[str, float]) -> tuple[obs_mod.Obstacle | None, float]:
@@ -1082,7 +1537,7 @@ class Slam2dRaceLine(Planner):
         ahead = p["obstacle_stop"]
         if p["obstacle_avoid"] > 0:
             v = max(vs.speed, 0.0)
-            ahead = max(ahead, v * v / (2.0 * max(p["a_brake"], 0.1)) + 0.6 * v + 1.5)
+            ahead = max(ahead, v * v / (2.0 * max(limits(p, self.vehicle).a_brake, 0.1)) + 0.6 * v + 1.5)
         n = len(path)
         step = path.length / (n if path.closed else max(1, n - 1))
         hit, dist = obs_mod.blocking(
@@ -1102,7 +1557,7 @@ class Slam2dRaceLine(Planner):
         ★ `blocking` は base_link から前オーバーハングぶんを見ない（真横の壁の誤検出で止まらない
         ため）。そのせいで、制動している途中に障害物がこの帯へ入った周期に「塞いでいない」
         扱いになり、まだ 0.5〜1.8m/s で動いているのに制動を解いて加速指令へ戻っていた
-        （実機 2026-10-08 の 285.5s・314.4s・342.5s）。帯（車体半幅＋余裕）ではなく、
+        （実機で確認）。帯（車体半幅＋余裕）ではなく、
         これから通る経路の点に車体外形を置いて当たるかどうかで見る。
         """
         n = len(path)
@@ -1123,8 +1578,8 @@ class Slam2dRaceLine(Planner):
         """塞がれていたら止まる。止まっても避けられなければ Hybrid A* で抜ける。止めたら True。
 
         「避ける」が有効なら、**減速して止まるのは開いた経路（停止点へ向かう経路）でも同じ**。
-        横へ避ける・Hybrid A* で抜けるのは閉じた経路だけ（`_plan_avoid`）。★以前は開いた経路で
-        両方とも切れていて、`obstacle_stop` が 0（既定）だと障害物に減速も制動もしなかった。
+        横へ避ける・Hybrid A* で抜けるのは閉じた経路だけ（`_plan_avoid`）。開いた経路で
+        両方とも切ると、`obstacle_stop` が 0（既定）のとき障害物に減速も制動もしない。
         """
         slow_on = p["obstacle_avoid"] > 0
         avoid_on = slow_on and path.closed
@@ -1163,14 +1618,15 @@ class Slam2dRaceLine(Planner):
             # 横へ避けられなかった（避けていればここへは来ない）。障害物の手前
             # `_STOP_GAP` で止まれる速度を上限にして、滑らかに減速する。★制動距離だけで
             # 止め始めると、1.9m/s のまま 0.8m 手前まで来てから急制動した
-            a = max(p["a_brake"], 0.1)
-            room = max(0.0, gap - _STOP_GAP - max(vs.speed, 0.0) * p["delay_s"])
+            a = max(limits(p, self.vehicle).a_brake, 0.1)
+            room = max(0.0, gap - _STOP_GAP - max(vs.speed, 0.0) * limits(p, self.vehicle).react_s)
             st.target_speed = min(st.target_speed, math.sqrt(2.0 * a * room))
             stop_at = max(stop_at, _STOP_GAP + 0.05)
         if stop_at <= 0.0 or gap > stop_at:
             self._brake_hold = None
             if slow_on:
-                st.reason = f"前方 {gap:.1f}m に避けられない障害物。止まれる速度へ減速"
+                st.reason = (f"前方 {gap:.1f}m に避けられない障害物。止まれる速度へ減速"
+                             + (f"（{self._avoid_why}）" if self._avoid_why else ""))
                 return True
             return False
         st.brake = True
@@ -1201,6 +1657,7 @@ class Slam2dRaceLine(Planner):
                     vs: VehicleState, p: dict[str, float], *, kappa_frac: float) -> bool:
         if not path.closed:
             return False                  # 停止点へ向かう開いた経路では止まるだけ
+        self._avoid_room_path = path
         t0 = time.perf_counter()
         v = self.vehicle
         cfg = av_mod.AvoidConfig(
@@ -1211,7 +1668,7 @@ class Slam2dRaceLine(Planner):
             clear=p["avoid_clear"], len_min=p["avoid_len_min"], kappa_frac=kappa_frac)
 
         speed = max(vs.speed, 0.0)
-        ahead = speed * speed / (2.0 * max(p["a_brake"], 0.1)) + 0.6 * speed + 3.5
+        ahead = speed * speed / (2.0 * max(limits(p, self.vehicle).a_brake, 0.1)) + 0.6 * speed + 3.5
         # ★ 検出した中心は**見えている表面の点の重心**で、実物の中心より手前に寄る。円柱の
         #   半周が見えていると、実物は重心から推定半径の約1.4倍まで広がる。そのぶん大きく
         #   扱わないと、避けている途中で見る角度が変わるたびに「まだ塞いでいる」と判定されて
@@ -1222,16 +1679,170 @@ class Slam2dRaceLine(Planner):
             return obs_mod.Obstacle(o.x, o.y, max(_OBS_GROW * o.r, _OBS_MIN_R), o.n)
         grow = [grown(o) for o in self._obs]
         target = grown(hit)
+        # ★ 引けなかった直後は、車か障害物が動く（または使ってよい曲率が変わる）まで引き直さない。
+        #   （見えている間、毎周期 10Hz で同じ計算をやり直さないため）
+        key = (round(hit.x, 1), round(hit.y, 1), kappa_frac)
+        if (self._avoid_fail is not None and self._avoid_fail[0] == key
+                and self._avoid_fail[2] is path.xy):
+            n = len(path)
+            moved = abs((index - self._avoid_fail[1] + n // 2) % n - n // 2) * path.length / n
+            if moved < 0.2:
+                return False
+        timed: list[tuple[av_mod.AvoidPlan, rl_mod.RaceLine]] = []   # 使える避け方と、その速度つきの経路
+        why: list[str] = []
+
+        def lap_time(plan: av_mod.AvoidPlan) -> float:
+            """この避け方で1周する時間（速度を付けて測る。速い避け方を選ぶ）。"""
+            rl = self._avoid_timed(plan, p)
+            # ★ 今の速度から、この避け方の速度まで落とせないなら使わない（1m/s まで落とす避け方を
+            #   3m/s・2.6m 手前で採ると、速すぎるまま横へ振って外れる）。止まれる速度へ減速を続け、
+            #   遅くなってから引き直す
+            if speed > float(rl.v[index]) + 0.3:
+                why.append(f"{'左' if plan.offset > 0 else '右'}{abs(plan.offset) * 100:.0f}cm:"
+                           f"減速が間に合わない({float(rl.v[index]):.1f}m/s)")
+                return math.inf
+            timed.append((plan, rl))
+            return rl_mod._travel_time(rl.xy, rl.v, rl.closed)
+
         plan = av_mod.plan_offset(path, index, target, grow, self._body_check(), cfg,
-                                  v_now=speed, ahead_m=ahead)
+                                  v_now=speed, ahead_m=ahead, score=lap_time, diag=why,
+                                  room=self._avoid_room(path, p))
         self._avoid_ms = (time.perf_counter() - t0) * 1000.0
+        chosen = next((rl for q, rl in timed if q is plan), None)
+        if chosen is None:
+            plan = None                    # 通れる避け方はあったが、どれも減速が間に合わない
         if plan is None:
+            self._avoid_fail = (key, index, path.xy)
+            self._avoid_why = "・".join(why[:6])
+            # 決まった形では通らない。窓の中の線を引き直す計算を別プロセスへ投げる（結果は
+            # `_poll_elastic` が次の周期以降に受け取る。それまでは止まれる速度へ減速を続ける）
+            if self._elastic_job is None:
+                self._elastic_base = path.xy
+                self._elastic_job = submit_job(
+                    av_mod.plan_elastic, path, index, target, grow, self._body_check(), cfg,
+                    v_now=speed, room=self._avoid_room(path, p),
+                    speed=speed_kwargs(p, self.vehicle), v_tight=p["avoid_speed"], ahead_m=ahead)
             return False
-        rl = rl_mod.retime(plan.path, **speed_kwargs(p, self.vehicle))
-        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["avoid_speed"], p["a_brake"],
-                                            p["a_accel"])
+        self._avoid_fail = None
+        self._avoid_path = chosen
         self._avoid, self._avoid_base = plan, path
+        self._avoid_how = "横ずらし"
         return True
+
+    def _poll_elastic(self, path: rl_mod.RaceLine, index: int, vs: VehicleState,
+                      p: dict[str, float]) -> None:
+        """別プロセスで引き直した避ける経路（`avoid.plan_elastic`）ができていれば、使えるか確かめて乗る。
+
+        計算の間に状況が変わっていたら捨てる: 経路が差し替わった・もう別の避け方に乗っている・
+        車がずらし始めの点を過ぎた・今の速度からその経路の速度まで落とせない。
+        """
+        job = self._elastic_job
+        if job is None or not job.done():
+            return
+        self._elastic_job = None
+        try:
+            plan = job.result()
+        except Exception as e:                      # noqa: BLE001  避けられなかった扱い（止まる側）
+            self._avoid_why = f"引き直しに失敗: {e!r}"[:80]
+            return
+        if plan is None:
+            self._avoid_why = (self._avoid_why + "・引き直しても通れない")[:160]
+            return
+        if self._elastic_base is not path.xy or self._avoid is not None or index < 0:
+            return
+        n = len(path)
+        if (int(plan.window[0]) - index) % n > n // 2:
+            return                                  # もうずらし始めを過ぎた
+        self._avoid_room_path = path
+        rl = self._avoid_timed(plan, p)
+        if max(vs.speed, 0.0) > float(rl.v[index]) + 0.3:
+            return
+        self._avoid_path = rl
+        self._avoid, self._avoid_base = plan, path
+        self._avoid_fail = None
+        self._avoid_how = "引き直し"
+
+    def _avoid_room(self, path: rl_mod.RaceLine, p: dict[str, float]):
+        """経路の各点から左・右へずらせる量 [m]（`avoid.plan_offset` の `room`）。経路と地図ごとに1回作る。
+
+        道幅（法線方向のレイ）から、車体半幅・合格線・コーナーで車体の角が張り出すぶんを引く。
+        """
+        g = self.slam.grid
+        key = (g.seq, p["avoid_clear"])
+        if self._room_ref is not path.xy or self._room_key != key:
+            self._room_ref = path.xy
+            nrm = cl_mod.normals(path.xy)
+            left, right = cl_mod.measure(g, path.xy, nrm, MAX_TRACK_WIDTH)
+            v = self.vehicle
+            keep = (v.half_width + p["avoid_clear"]
+                    + rl_mod.body_allowance(rl_mod.curvature(path.xy, True), v.front_overhang,
+                                            v.rear_overhang))
+            self._room = (np.maximum(left - keep, 0.0), np.maximum(right - keep, 0.0))
+            self._room_key = key
+        return self._room
+
+    def _sight_cap(self, path: rl_mod.RaceLine, p: dict[str, float]) -> np.ndarray | None:
+        """見通しで決まる速度の上限（点ごと）。障害物に対応しない設定なら `None`（抑えない）。
+
+        ★ 壁の先端を回るヘアピンでは、頂点の先が 0.6m 手前まで見えない。そこへ 1.6m/s で入ると、
+        先に障害物が居ても止まり切れない（sim.bench の toyota で衝突）。「見えている
+        距離の中で止まれる速度」を上限にする。障害物に対応しない（`obstacle_avoid`・`obstacle_stop`
+        とも 0）なら掛けない——何も居ない前提のコースで遅くする理由が無い。
+        """
+        use = float(p["sight_use"])
+        if use <= 0.0 or (p["obstacle_avoid"] <= 0 and p["obstacle_stop"] <= 0):
+            return None
+        g = self.slam.grid
+        if self._sight_ref is not path.xy or self._sight_seq != g.seq:
+            # ★ 経路の点が見えるかだけを見る（`half_width` は渡さない）。車体が通る帯の両端まで
+            #   求めると、凸の角では内側の端が必ず壁の陰になり、どの頂点も這う速度になる
+            #   （toyota で 1 周 13.2→25.7s）。内側の壁に寄った障害物は見えるのが遅れる——残る危険
+            self._sight = rl_mod.sight_distance(g, path.xy, path.closed)
+            self._sight_ref, self._sight_seq = path.xy, g.seq
+        lim = limits(p, self.vehicle)
+        # `use` < 1 は「見えている距離の 1/use 倍までなら止まれる」＝当たるとしても減速しきる
+        # 手前まで、という緩めた保証。車体前端が届く手前 `_SIGHT_GAP` で止まる前提
+        # 空走時間には、障害物を確かめる 1 周ぶんを足す。★「近い物は 2 周期目を待たずに扱う
+        #   （`_detect_obstacles`）ので二重」と見て外すと、頂点の先の障害物に 0.9m/s で当たった
+        #   （sim.bench の toyota。外す前は 0.2m 手前で止まる）。内側の壁の陰の物は
+        #   経路の点より遅れて見え、点群 1 周の取得にも 0.1s かかるぶんを、この項が吸っている
+        return rl_mod.sight_speed(self._sight / use, a_brake=lim.a_brake,
+                                  react_s=lim.react_s + SCAN_PERIOD_S,
+                                  reserve=(self.vehicle.front_overhang + _SIGHT_GAP) / use)
+
+    def _with_sight(self, path: rl_mod.RaceLine, p: dict[str, float]) -> rl_mod.RaceLine:
+        """経路の速度に見通しの上限を掛けたもの（`_sight_cap`。掛けないなら `path` そのまま）。"""
+        cap = self._sight_cap(path, p)
+        if cap is None:
+            return path
+        key = (speed_key(p), p["obstacle_avoid"] > 0, p["obstacle_stop"] > 0, p["sight_use"],
+               self.slam.grid.seq)
+        if self._sighted_src is not path or self._sighted_key != key:
+            self._sighted = rl_mod.retime(path, v_cap=cap, **speed_kwargs(p, self.vehicle))
+            self._sighted_src, self._sighted_key = path, key
+            # 追う速度での 1 周と、上限が無いときの 1 周（`_sight_note`）
+            t_free = rl_mod._travel_time(path.xy, path.v, path.closed)
+            t_cap = rl_mod._travel_time(self._sighted.xy, self._sighted.v, path.closed)
+            self._sight_msg = (f"・★見通しの上限で 1周 {t_cap:.1f}s（上限なし {t_free:.1f}s）"
+                               if path.closed and t_cap > t_free * _SIGHT_NOTE_RATIO else "")
+        return self._sighted
+
+    def _sight_note(self, path: rl_mod.RaceLine, p: dict[str, float]) -> str:
+        """見通しの上限で 1 周が目立って遅くなっていれば、その注記（追う速度での見積もり）。
+
+        経路選択の「見積もり」は上限を掛ける前の線のもの。障害物対応が有効だと実際に追う速度は
+        それより遅く、実機では表示 6.2s に対して 8.1s の速度を追っていた。
+        """
+        return self._sight_msg if self._with_sight(path, p) is not path else ""
+
+    def _avoid_timed(self, plan: av_mod.AvoidPlan, p: dict[str, float]) -> rl_mod.RaceLine:
+        """避ける経路に速度を付ける: 曲率で決まる速度（`retime`）と、余裕で決まる上限（`speed_cap`）。
+        見通しの上限は元の経路のものを使う（避ける経路は元の経路と同じ添字で、形もほぼ同じ）。"""
+        base = self._avoid_room_path if self._avoid_room_path is not None else plan.path
+        rl = rl_mod.retime(plan.path, v_cap=self._sight_cap(base, p),
+                           **speed_kwargs(p, self.vehicle))
+        cap = av_mod.speed_cap(plan.clearance, p["avoid_clear"], p["avoid_speed"], p["v_max"])
+        return av_mod.cap_speed(rl, plan.window, cap, limits(p, self.vehicle).a_brake, limits(p, self.vehicle).a_accel)
 
     def _blend_back(self, path: rl_mod.RaceLine, p: dict[str, float]) -> None:
         """今の横ずれから滑らかに経路へ戻る一時経路に乗せる（`avoid.blend_in`）。"""
@@ -1243,13 +1854,13 @@ class Slam2dRaceLine(Planner):
         d0 = float((x - path.xy[j, 0]) * nrm[0] + (y - path.xy[j, 1]) * nrm[1])
         self._hint = j
         if abs(d0) < _BLEND_MIN:
-            # ★ ほぼ経路の上に抜けたなら戻り経路は要らない。以前は横ずれ 0cm でも 1.5m を
-            #   `join_speed` で走っていた（実機 2026-10-08 の 336.0〜337.4s）
+            # ★ ほぼ経路の上に抜けたなら戻り経路は要らない（横ずれ 0cm でも 1.5m を
+            #   `join_speed` で走ってしまう）
             return
         plan = av_mod.blend_in(path, j, d0, max(0.8, 6.0 * abs(d0)), self._body_check())
         rl = rl_mod.retime(plan.path, **speed_kwargs(p, self.vehicle))
-        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["join_speed"], p["a_brake"],
-                                            p["a_accel"])
+        self._avoid_path = av_mod.cap_speed(rl, plan.window, p["join_speed"], limits(p, self.vehicle).a_brake,
+                                            limits(p, self.vehicle).a_accel)
         self._avoid, self._avoid_base = plan, path
 
     def _still_clear(self, hit: obs_mod.Obstacle, index: int) -> bool:
@@ -1298,7 +1909,7 @@ class Slam2dRaceLine(Planner):
             return f"・経路へ戻っている（横ずれ {self._avoid.offset * 100:+.0f}cm から）"
         side = "左" if self._avoid.offset > 0 else "右"
         return (f"・★障害物を{side}へ {abs(self._avoid.offset) * 100:.0f}cm 避けている"
-                f"（余裕 {self._avoid.clearance * 100:.0f}cm・計算 {self._avoid_ms:.0f}ms）")
+                f"（{self._avoid_how}・余裕 {self._avoid.clearance * 100:.0f}cm）")
 
     def _body_check(self) -> rl_mod._BodyCheck:
         g = self.slam.grid
@@ -1396,7 +2007,7 @@ class Slam2dRaceLine(Planner):
     def _md_fault(self, st: AutoState, vs: VehicleState, p: dict[str, float]) -> str | None:
         """後輪のモータドライバが無応答のときの抑え。戻り値は reason に足す注記、止めたら `None`。
 
-        実機（2026-10-08）で駆動バッテリーが垂れ、加速のたびに右後輪の MD が約5秒落ちた。その間の
+        実機で駆動バッテリーが垂れ、加速のたびに右後輪の MD が約5秒落ちた。その間の
         加速は 1.7→0.6 m/s²、制動は −2.5→−1.4 m/s²。**約5秒で戻るので止めずに速度を抑える**
         （DISARM は人が解くまで戻らない。両輪とも落ちると制動も効かないので、0 を指令して
         舵だけ経路を追い、戻るのを待つ）。
@@ -1448,7 +2059,7 @@ class Slam2dRaceLine(Planner):
 
         ★ 走り出し（LOCATE 直後）の車は経路から横に10〜30cm・向きに25°ずれている。
         抑えないと最高速のまま大回りして壁に当たった（toyota/toyota2 の sim.bench、
-        2026-09-29。このplannerも同じ bench で衝突・61cm 外れて0周だった）。
+        このplannerも同じ bench で衝突・61cm 外れて0周だった）。
         """
         if self._joined:
             return
@@ -1481,14 +2092,11 @@ class Slam2dRaceLine(Planner):
             self._rejoins = 0                 # 経路に戻れたら数え直す
         return False
 
-    def _pool(self) -> ThreadPoolExecutor:
-        if self._line_pool is None:
-            self._line_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="line")
-        return self._line_pool
-
     def close(self) -> None:
-        if self._line_pool is not None:
-            self._line_pool.shutdown(wait=False, cancel_futures=True)
+        """この planner が投げた計算を捨てる（プロセスは使い回すので止めない）。"""
+        # `_job`・`_stop_job` は `slam2d_route`
+        for name in ("_line_job", "_build_job", "_elastic_job", "_job", "_stop_job"):
+            self._drop_job(name)
 
     # ── GUI へ渡す重い状態 ──
 

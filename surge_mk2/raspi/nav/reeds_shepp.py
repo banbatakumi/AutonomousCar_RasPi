@@ -31,8 +31,7 @@ Reeds-Sheppの原論文は48通りの経路（語, word）を列挙するが、�
 | CCSC | L+R-S-L- / L+R-S-R- | **後退の直線を挟む。車庫入れで頻出** |
 | CCSCC | L+R-S-L-R+ | 5区間。原論文で最も長い形 |
 
-当初はCSC+CCCの**6語だけ**の実装だった。9語族へ拡張した効果（2026-09-16実測、
-ランダム400配置）:
+CSC+CCCの6語だけにしない理由（9語族と6語の比較、ランダム400配置の実測）:
 
 - **ユニークな候補数 6.5本 → 13.8本**（障害物回避で選べる選択肢が倍増）
 - 最短経路長が **206/400 の配置で短縮**（中央値0.1%・最大87.6%）
@@ -64,9 +63,7 @@ for seg in path.segments:
    最短から順に衝突しない候補を選ぶ
 
 衝突判定はこのモジュールには持たない——`raspi/nav/local_map.py`の
-`LocalMap.path_clearance()`（ESDF＋円被覆）が受け持つ。以前は点群に対する
-掃引（`path_collides()`、軸並行矩形の近似）も持っていたが、ESDF方式に
-置き換わって使われなくなったので撤去した（2026-09-17）。
+`LocalMap.path_clearance()`（ESDF＋円被覆）が受け持つ。
 
 """
 
@@ -158,7 +155,7 @@ def _tau_omega(u: float, v: float, xi: float, eta: float, phi: float, *,
 # 距離。文字は L=左旋回・R=右旋回・S=直進。
 #
 # 9つの語族すべてについて、生成した経路を`integrate_path()`で実際に積分して
-# 目標へ到達することを確認済み（`raspi/tests/test_reeds_shepp.py`。2026-09-16の
+# 目標へ到達することを確認済み（`raspi/tests/test_reeds_shepp.py`。の
 # 実装時に600配置×全対称変換=約9000件で到達率100%を確認）。
 
 _Word = list[tuple[str, float]]
@@ -403,7 +400,7 @@ def sample_path_array(start: tuple[float, float, float], path: ReedsSheppPath,
 
     ★ **区間ごとにnumpyでまとめて作る。** 点ごとにPythonで`sin`/`cos`を
     呼ぶ実装だと、Hybrid A*の解析展開（1回の探索で数万回サンプルする）が
-    探索時間の8割を食う（2026-09-16実測で12秒のうち10秒）。
+    探索時間の8割を食う（実測）。
     """
     import numpy as np
 

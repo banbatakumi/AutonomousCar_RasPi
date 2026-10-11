@@ -47,15 +47,14 @@ N=400 なら稠密 `np.linalg.solve` が 1ms 以下で終わるので、素直�
 これを見込まないと、コーナーの中で加減速する速度を出してしまい、`a_lat` を
 グリップの限界より大きく下げておくしかなかった。
 
-### ★ 曲がれる限界に近い所は横Gの余裕を削る（`kappa_max`）
+### 曲がれる限界の近くでも横Gは削らない
 
-舵が限界近くに張り付くと、経路からのずれを直す余地が無い。半径 0.38m
-（限界 0.40m）のヘアピンを横Gだけで決めた 0.7m/s で入ったら、遅延のぶん外へ膨らんで
-58cm 外れた（toyota2 の近道、2026-09-29）。以前は曲率が `0.6×κmax` を超えた区間を
-一律 `v_min` にしていたが、それだと半径 0.66m 以下のコーナーがすべて最低速度になる
-（toyota2 のコーナーはほとんどこれに当たり、0.35m/s まで落ちていた）。
-今は `κ/κmax` が `tight_ratio` を超えた所から、横Gを限界で `tight_floor` 倍まで
-連続に下げる。
+曲率が車の限界に近い所の横Gを経験則で削る方式は使わない。次の3つで足りるため
+（sim.bench でグリップを −10% にした車でも衝突 0）:
+①経路そのものを限界の `kappa_use` 倍までしか曲げない（`optimize` の `kappa_max`）
+②追従の姿勢を「今」へ進めて 50Hz で舵を更新する
+③速度指令を前倒ししてコーナーへ速すぎる速度で入らない。
+削ると舵が上限に張り付いたとき経路からのずれを直せず、遅延のぶん外へ膨らむ（toyota2 の近道）。
 """
 
 from __future__ import annotations
@@ -67,22 +66,15 @@ import numpy as np
 
 from .centerline import (Centerline, measure, normals, normals_open,
                          resample_loop, resample_open, tangents, tangents_open)
-from .grid import OccGrid
+from .grid import OccGrid, dilate
 from .local_map import _edt, footprint_circles
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha",
-           "chord_curvature", "speed_kappa", "retime"]
+           "sight_distance", "sight_speed",
+           "chord_curvature", "speed_kappa", "retime", "refine_time", "tight_sections"]
 
 #: 速度を決める曲率を測る弦の長さ [m]（モジュール docstring）
 SPEED_CHORD_M = 0.4
-#: 曲がれる限界に対するこの割合から横Gの余裕を削り始める（モジュール docstring）
-TIGHT_RATIO = 0.6
-#: 曲がれる限界ちょうどで使う横Gの割合。★ 0.3 は限界を幾何の 40cm と見ていた頃の値。限界を
-#: 同定値（46cm）から出し、経路の半径もそこまで開くようにしたので 0.6 に上げた（2026-10-06。
-#: sim.bench の toyota・toyota2・実コースの再現で衝突0、ラップは変更前の ±1%。1.0 は実コースの
-#: 再現でヘアピン出口の壁に当たった）
-TIGHT_FLOOR = 0.6
-
 
 class RaceLine(NamedTuple):
     xy: np.ndarray                         #: (N, 2) [m]
@@ -258,15 +250,9 @@ def speed_kappa(xy: np.ndarray, closed: bool = True,
     return kap
 
 
-def _lateral_limit(kappa: np.ndarray, *, v_max: float, a_lat: float,
-                   kappa_max: float | None) -> np.ndarray:
-    """横Gで決まる速度の上限（曲がれる限界の近くは横Gを削る、モジュール docstring）。"""
-    k = np.abs(kappa)
-    a = np.full(len(k), a_lat)
-    if kappa_max:
-        r = k / kappa_max
-        a = a * np.clip((1.0 - r) / (1.0 - TIGHT_RATIO), TIGHT_FLOOR, 1.0)
-    return np.minimum(v_max, np.sqrt(a / np.maximum(k, 1e-6)))
+def _lateral_limit(kappa: np.ndarray, *, v_max: float, a_lat: float) -> np.ndarray:
+    """横Gで決まる速度の上限 `min(v_max, sqrt(a_lat/|κ|))`。"""
+    return np.minimum(v_max, np.sqrt(a_lat / np.maximum(np.abs(kappa), 1e-6)))
 
 
 def _next_v(v: float, a_x: float, kappa: float, a_lat: float, ds: float,
@@ -282,45 +268,77 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
                   v_max: float, v_min: float, a_lat: float,
                   a_accel: float, a_brake: float, closed: bool = True,
                   v_start: float | None = None, v_end: float | None = None,
-                  kappa_max: float | None = None,
-                  friction_circle: bool = True) -> np.ndarray:
+                  friction_circle: bool = True, a_grip: float | None = None,
+                  v_cap: np.ndarray | None = None) -> np.ndarray:
     """曲率から目標速度 [m/s]。閉ループとして前後パスを2周ならす。
 
     :param kappa: **速度を決める曲率**（ふつうは `speed_kappa(xy)`）
-    :param kappa_max: 車の曲がれる限界の曲率 [1/m]。与えると限界の近くで横Gを削る
+    :param v_cap: 点ごとの速度の上限 [m/s]（見通しで決まる上限など、`sight_speed`）。前後のパスの
+        前に掛けるので、そこへ向けた減速・そこからの加速もプロファイルに入る
+    :param a_grip: 摩擦円の半径 [m/s²]（車の横グリップの限界）。`None` なら `a_lat`。
+        `a_lat` を限界より下げて走る設定（「横グリップを使う割合」）でも、前後に残る力は
+        限界に対する割合で決まる——`a_lat` で円を引くと頂点で前後が 0 になり、
+        コーナーの中で加減速できない前提のプロファイルになる
 
     `closed=False`（開いた経路）は1往復だけで、**終点は `v_end`**（既定 `v_min`、
     止まる直前の這う速度）まで減速し、始点は `v_start`（今の速度）から加速する。
     """
     n = len(xy)
     k = np.abs(np.asarray(kappa, dtype=np.float64))
-    v = np.maximum(_lateral_limit(k, v_max=v_max, a_lat=a_lat, kappa_max=kappa_max), v_min)
+    v = np.maximum(_lateral_limit(k, v_max=v_max, a_lat=a_lat), v_min)
     if n == 0:
         return v
-    fc = friction_circle
+    if v_cap is not None:
+        v = np.minimum(v, np.maximum(np.asarray(v_cap, dtype=np.float64), 0.05))
+        v_min = min(v_min, float(v.min()))             # 上限の方が低い所は `v_min` で持ち上げない
+    # ここから下の `a_lat` は摩擦円の半径としてだけ使う
+    grip = max(a_lat, a_grip) if a_grip else a_lat
+    inv_grip2 = 1.0 / (grip * grip) if friction_circle and grip > 1e-9 else 0.0
+    sqrt = math.sqrt
+    # ★ numpy の配列を1点ずつ読むと遅い（要素の取り出しが 1 回 100ns 前後）。この関数は
+    #   ラインの仕上げ（`refine_time`）が数千回呼ぶので、リストに直して回す（約5倍）
+    vl = v.tolist()
+    kl = k.tolist()
+
+    def reach(vj: float, kj: float, a_x: float, d: float) -> float:
+        """速度 `vj`（曲率 `kj`）の点から距離 `d` だけ加速（減速）したときに届く速度。"""
+        if inv_grip2:
+            ay = vj * vj * kj
+            r = 1.0 - ay * ay * inv_grip2
+            a_x = a_x * sqrt(r) if r > 0.0 else 0.0
+        return sqrt(vj * vj + 2.0 * a_x * d)
+
     if not closed:
-        ds = np.hypot(*np.diff(xy, axis=0).T) if n >= 2 else np.zeros(0)
-        v[-1] = min(v[-1], v_min if v_end is None else v_end)
+        ds = np.hypot(*np.diff(xy, axis=0).T).tolist() if n >= 2 else []
+        vl[-1] = min(vl[-1], v_min if v_end is None else v_end)
         for i in range(n - 2, -1, -1):
-            v[i] = min(v[i], _next_v(v[i + 1], a_brake, k[i + 1], a_lat, ds[i], fc))
+            lim = reach(vl[i + 1], kl[i + 1], a_brake, ds[i])
+            if lim < vl[i]:
+                vl[i] = lim
         if v_start is not None:
             # 今の速度より速い値から始めても、実際にはそこから加速するしかない
-            v[0] = min(v[0], max(v_start, v_min))
+            vl[0] = min(vl[0], max(v_start, v_min))
             for i in range(1, n):
-                v[i] = min(v[i], _next_v(v[i - 1], a_accel, k[i - 1], a_lat, ds[i - 1], fc))
-        return v
+                lim = reach(vl[i - 1], kl[i - 1], a_accel, ds[i - 1])
+                if lim < vl[i]:
+                    vl[i] = lim
+        return np.asarray(vl)
 
-    ds = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T)      # i → i+1 の距離
+    ds = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T).tolist()      # i → i+1 の距離
     for _ in range(2):
         # ② 後ろ向き（i の速度は i+1 で止まれる範囲に抑える）
         for i in range(n - 1, -1, -1):
-            j = (i + 1) % n
-            v[i] = min(v[i], _next_v(v[j], a_brake, k[j], a_lat, ds[i], fc))
+            j = i + 1 if i + 1 < n else 0
+            lim = reach(vl[j], kl[j], a_brake, ds[i])
+            if lim < vl[i]:
+                vl[i] = lim
         # ③ 前向き（i の速度は i-1 から加速できる範囲に抑える）
         for i in range(n):
-            j = (i - 1) % n
-            v[i] = min(v[i], _next_v(v[j], a_accel, k[j], a_lat, ds[j], fc))
-    return np.maximum(v, v_min)
+            j = i - 1 if i > 0 else n - 1
+            lim = reach(vl[j], kl[j], a_accel, ds[j])
+            if lim < vl[i]:
+                vl[i] = lim
+    return np.maximum(np.asarray(vl), v_min)
 
 
 def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:
@@ -334,8 +352,8 @@ def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:
 
 
 def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat: float, a_accel: float,
-           a_brake: float, kappa_max: float | None = None,
-           v_start: float | None = None, v_end: float | None = None) -> RaceLine:
+           a_brake: float, v_start: float | None = None, v_end: float | None = None,
+           a_grip: float | None = None, v_cap: np.ndarray | None = None) -> RaceLine:
     """経路の形はそのままで、速度プロファイルだけを今の設定で作り直す。
 
     ★ 速度は地図を作ったとき（BUILD）の設定で焼き込まれ、保存した地図から走ると
@@ -344,10 +362,83 @@ def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat: float, a_accel: f
     """
     v = speed_profile(rl.xy, speed_kappa(rl.xy, rl.closed), v_max=v_max, v_min=v_min,
                       a_lat=a_lat, a_accel=a_accel, a_brake=a_brake, closed=rl.closed,
-                      v_start=v_start, v_end=v_end, kappa_max=kappa_max)
+                      v_start=v_start, v_end=v_end, a_grip=a_grip, v_cap=v_cap)
     # `_replace` は使えない（`RaceLine.__len__` が点の数を返すので、NamedTuple の
     # 要素数の検査に引っかかる）
     return RaceLine(**{**rl._asdict(), "v": v})
+
+
+#: 見通しを測る間隔と上限 [m]（`sight_distance`）
+SIGHT_STRIDE_M = 0.15
+#: ★ 最高速度 4m/s を「見えている距離の中で止まれる」には 5.0m 要る（3.6 のままだと、見通しが
+#:   どれだけ利いていても 3.4m/s で頭打ちになる）
+SIGHT_MAX_M = 5.2
+
+
+def sight_distance(grid, xy: np.ndarray, closed: bool = True, *, max_m: float = SIGHT_MAX_M,
+                   stride: float = SIGHT_STRIDE_M, half_width: float = 0.0) -> np.ndarray:
+    """経路の各点から、**経路の先がどこまで見えているか** [m]（経路に沿った長さ、`max_m` で頭打ち）。
+
+    点 i から、経路上を `stride` ずつ先の点へ向けてレイを撃ち、壁に遮られずに届いた最も遠い点
+    までの弧長。壁の先端を回るヘアピンでは、頂点の手前で 1m を切る。LiDAR は経路の上に居る
+    とみなす（取付位置のずれ 数cm は見ない）。地図ごと・経路ごとに 1 回測れば足りる
+    （点 350 × 24 本 × 3 で、Mac で 20ms 前後）。
+
+    :param half_width: これが正なら、先の点の**左右 `half_width` の点も**見えていることを求める
+        （車体が通る帯の両端）。経路の点そのものは見えていても、内側の壁の陰に帯の端が隠れて
+        いることがある——そこに居る障害物は、帯の端が見えるまで見えない（sim.bench の toyota で、
+        経路の点は 1.6m 手前から見えるのに、内側へ 14cm 寄った障害物は 1.4m 手前まで見えなかった）。
+        壁の中に落ちる端は見えなくてよい（そこに物は居ない）
+    """
+    n = len(xy)
+    if n < 3:
+        return np.full(n, max_m)
+    seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
+    step = max(float(np.median(seg)), 1e-3)
+    k_stride = max(1, int(round(stride / step)))
+    res = float(grid.resolution)
+    sight = np.zeros(n)
+    alive = np.ones(n, dtype=bool)
+    idx = np.arange(n)
+    offsets = (0.0, half_width, -half_width) if half_width > 0.0 else (0.0,)
+    nrm = normals(xy) if closed else normals_open(xy)
+    ox, oy = float(grid.origin[0]), float(grid.origin[1])
+    # 壁を 2 セル太らせた版で「端が壁の中か」を見る（壁際の端は、壁すれすれのレイが届かない）
+    wall = dilate(grid.wall_mask(), 2)
+    for m in range(1, max(1, int(round(max_m / stride))) + 1):
+        j = idx + m * k_stride
+        if closed:
+            j = j % n
+        else:
+            alive &= j < n
+            j = np.minimum(j, n - 1)
+        if not alive.any():
+            break
+        for o in offsets:
+            tgt = xy[j] + nrm[j] * o
+            d = tgt - xy
+            dist = np.hypot(d[:, 0], d[:, 1])
+            ang = np.arctan2(d[:, 1], d[:, 0])
+            hit = grid.raycast(xy[:, 0], xy[:, 1], ang, float(dist.max()) + 2.0 * res, step=res)
+            seen = hit >= dist - 1.5 * res
+            if o != 0.0:
+                col = np.clip(((tgt[:, 0] - ox) / res).astype(np.int64), 0, wall.shape[1] - 1)
+                row = np.clip(((tgt[:, 1] - oy) / res).astype(np.int64), 0, wall.shape[0] - 1)
+                seen |= wall[row, col]                 # 帯の端が壁の中。そこに物は居ない
+            alive &= seen
+        sight[alive] = m * k_stride * step
+    return np.minimum(sight, max_m)
+
+
+def sight_speed(sight: np.ndarray, *, a_brake: float, react_s: float, reserve: float) -> np.ndarray:
+    """見えている距離の中で止まれる速度 [m/s]: `v·react_s + v²/(2·a_brake) ≤ sight − reserve`。
+
+    見通しの利かないコーナーの先に障害物が居ても、見えた時点で止まり切れる速度。`reserve` は
+    車体前端までの距離と、障害物の手前に残す間隔。
+    """
+    d = np.maximum(np.asarray(sight, dtype=np.float64) - reserve, 0.0)
+    a = max(a_brake, 1e-3)
+    return -a * react_s + np.sqrt((a * react_s) ** 2 + 2.0 * a * d)
 
 
 def body_allowance(kappa: np.ndarray, front: float, rear: float) -> np.ndarray:
@@ -367,6 +458,166 @@ def body_allowance(kappa: np.ndarray, front: float, rear: float) -> np.ndarray:
     return 0.5 * (front ** 2 + rear ** 2) * k
 
 
+def tight_sections(xy: np.ndarray, closed: bool, kappa_limit: float) -> tuple[float, float]:
+    """車が曲がり切れない区間の `(長さ [m], いちばんきつい所の 曲率/上限)`。無ければ `(0, ≤1)`。
+
+    道幅が足りず半径を開けなかった所が残っていないかを人に知らせるのに使う（速度と同じ
+    弦 `SPEED_CHORD_M` の曲率で測る）。
+    """
+    if len(xy) < 3 or kappa_limit <= 0.0:
+        return 0.0, 0.0
+    ks = speed_kappa(xy, closed)
+    seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
+    step = float(np.median(seg)) if len(seg) else 0.0
+    over = ks > kappa_limit * 1.01
+    return float(over.sum()) * step, float(ks.max()) / kappa_limit
+
+
+#: `refine_time` が試すこぶの幅（標準偏差、点の数）。粗い方から細かい方へ
+REFINE_WIDTHS = (32, 16, 8, 4)
+#: 同じく、こぶの高さの初期値と、これを下回ったら次の幅へ移る値 [m]
+REFINE_AMP0 = 0.08
+REFINE_AMP_MIN = 0.006
+#: `refine_time` が幅を1巡して縮んだ割合がこれ未満なら、次の巡回をしない
+REFINE_STOP = 0.002
+#: 仕上げの間、3点で測った曲率（0.1m 刻みの折れ）は上限のこの倍まで（弦の曲率だけを見ると、
+#: 弦より細かい折れを作って速度を稼ぐ線が出る）
+REFINE_KINK = 1.15
+
+
+def _loop_mean(xy: np.ndarray, w: int) -> np.ndarray:
+    """閉じた点列の、前後 `w` 点の移動平均（`refine_time` の「引き締める」動きの行き先）。"""
+    k = 2 * w + 1
+    pad = np.concatenate([xy[-w:], xy, xy[:w]])
+    c = np.cumsum(np.vstack([np.zeros((1, 2)), pad]), axis=0)
+    return (c[k:] - c[:-k]) / k
+
+
+def refine_time(xy: np.ndarray, cost, *, step: float, max_evals: int = 6000,
+                widths: tuple[int, ...] = REFINE_WIDTHS, cycles: int = 1,
+                tighten: bool = True) -> np.ndarray:
+    """閉じた経路を、`cost`（小さいほど良い）が下がる向きへ**直接**動かす（決定的なパターン探索）。
+
+    ## なぜ要るか
+
+    最小曲率の解は「曲がりの総量」を減らすので、コーナーでは必ず道幅いっぱいに大回りする。
+    しかし速度が最高速度で頭打ちの所（3m/s・横加速度 3.7m/s² なら半径 2.4m より緩い所）では、
+    半径をそれ以上開いても速くならず、**遠回りしたぶんだけ遅い**。重みを変えて解き直す
+    （`optimize` の `time_iters`）のは曲率の配分を変えるだけで、この損は消えない。
+    見積もりのラップ時間そのものを目的にすると、同じ制約のまま toyota2 で −14%・toyota −7.5%・
+    チケイン −4%（経路は 2〜6% 短くなる。`kappa_max` を限界の 0.9 倍にした比較）。
+
+    ## やり方
+
+    経路の法線方向へ、幅 `w` 点・高さ `amp` のガウス形のこぶを足して `cost` が下がれば採る。
+    中心を `w` 点おきに1周ずらし、±の両方を試す。1周して1つも採れなければ高さを半分にし、
+    `REFINE_AMP_MIN` を切ったら幅を半分にする。こぶは滑らかなので折れた線にはならない。
+    制約（車体と壁の余裕・曲率の上限）は `cost` の側が「破った解は必ず後ろ」にして守らせる
+    （`optimize` の `score`）ので、**破った解は1度も採らない**。乱数は使わない。
+
+    幅を変えるたびに点を等間隔に打ち直す（動かすと間隔が崩れ、弦の曲率の意味が変わる）。
+
+    ## ★ こぶだけでは S 字で止まる → 「引き締める」動きと、幅の巡回（`tighten`・`cycles`）
+
+    こぶは1か所を法線方向へ押すだけなので、S 字の2つの頂点を**同時に**内へ寄せて真っすぐ抜ける
+    線には届かない（片方だけ動かすと、もう片方の曲率が上限を超えて採れない）。出発点の中心線が
+    少し違うだけで別の線に止まり、実機の地図では見積もりが 10.2s にも 8.7s にもなった
+    （`graph_margin` を変えると経路が変わる、とバンビが気づいた現象）。
+    そこで各中心で、こぶの前に「その周り `w` 点を移動平均へ寄せる」（＝たるみを取って短くする）
+    動きも試す。細かい幅まで終えたら粗い幅へ戻ってもう一巡する（細かい幅で空いた余地を使う）。
+
+    :param cost: `cost(xy) -> 比較できる値`（タプルなら辞書式）
+    :param max_evals: `cost` を呼ぶ回数の上限（計算時間の上限。1回 約0.4ms、Pi で約1ms）
+    :param cycles: 幅の列を粗い方からやり直す回数の上限（1巡して何も採れなければそこで終わる）
+    """
+    n = len(xy)
+    if n < 16:
+        return xy
+    best = cost(xy)
+    evals = 1
+    usable = [w for w in widths if w * 4 <= n]
+    mark = best                                # この巡回を始めたときの最良
+    for k, w in enumerate([w for _ in range(max(1, cycles)) for w in usable]):
+        if k and k % len(usable) == 0:
+            # 1巡終えた。縮みが 0.2% に届かなければ収束したとみなして終わる（時間の節約）
+            t0, t1 = mark[-1], best[-1]
+            if best[:-1] == mark[:-1] and t1 > t0 * (1.0 - REFINE_STOP):
+                break
+            mark = best
+        idx = np.arange(n)
+        amp = REFINE_AMP0
+        while amp >= REFINE_AMP_MIN and evals < max_evals:
+            improved = False
+            nrm = normals(xy)
+            for c in range(0, n, w):
+                d = (idx - c + n // 2) % n - n // 2
+                g = np.exp(-0.5 * (d / w) ** 2)[:, None]
+                bump = amp * g * nrm
+                cands = [xy + bump, xy - bump]
+                if tighten:
+                    # 引き締め: 寄せる割合は高さ `amp` に合わせて小さくしていく
+                    cands.insert(0, xy + (amp / REFINE_AMP0) * g * (_loop_mean(xy, w) - xy))
+                for q in cands:
+                    cq = cost(q)
+                    evals += 1
+                    if cq < best:
+                        xy, best, improved = q, cq, True
+                        break
+                if evals >= max_evals:
+                    break
+            if not improved:
+                amp *= 0.5
+        q = resample_loop(xy, step)
+        cq = cost(q)
+        evals += 1
+        # 打ち直しで見積もりがわずかに動く。制約を破らず、悪化が小さければ採る
+        if cq[:-1] <= best[:-1] and cq[-1] <= best[-1] * 1.002:
+            xy, best = q, cq
+            n = len(xy)
+        if evals >= max_evals:
+            break
+    return xy
+
+
+class _Band:
+    """経路が通ってよい帯（中心線の各点から法線方向に `lo`〜`hi`）を格子に塗ったもの。
+
+    ★ `refine_time` の仕上げは車体と**本当の壁**の距離しか見ない。それだけだと、壁に当たらない
+    限りどこへでも線を動かせるので、分岐のあるコースでは**選んだ周回の回廊を出て隣の枝・近道へ
+    ずれ込む**（実機の地図で、探索を長く回すと見積もり 10.06→8.69s の「別の周回」になった。
+    経由点で選んだ道から外れる）。最小曲率の段階が使ったのと同じ帯——道幅は
+    回廊（`CorridorGrid`）のレイで測ってある——の外へ出た線は採らない。
+    """
+
+    def __init__(self, grid, c: np.ndarray, nrm: np.ndarray, lo: np.ndarray, hi: np.ndarray,
+                 closed: bool, pad: float = 0.05) -> None:
+        import cv2
+        self.res = float(grid.resolution)
+        self.origin = (float(grid.origin[0]), float(grid.origin[1]))
+        h, w = grid.wall_mask().shape
+        a = c + nrm * (lo - pad)[:, None]
+        b = c + nrm * (hi + pad)[:, None]
+
+        def cell(p: np.ndarray) -> np.ndarray:
+            return np.floor((p - np.asarray(self.origin)) / self.res).astype(np.int32)
+
+        mask = np.zeros((h, w), dtype=np.uint8)
+        n = len(c)
+        ca, cb = cell(a), cell(b)
+        for i in range(n if closed else n - 1):
+            j = (i + 1) % n
+            cv2.fillPoly(mask, [np.array([ca[i], cb[i], cb[j], ca[j]], dtype=np.int32)], 1)
+        self.mask = cv2.dilate(mask, np.ones((3, 3), np.uint8)).astype(bool)
+
+    def inside(self, xy: np.ndarray) -> bool:
+        col = np.floor((xy[:, 0] - self.origin[0]) / self.res).astype(np.int64)
+        row = np.floor((xy[:, 1] - self.origin[1]) / self.res).astype(np.int64)
+        h, w = self.mask.shape
+        if bool(((col < 0) | (col >= w) | (row < 0) | (row >= h)).any()):
+            return False
+        return bool(self.mask[row, col].all())
+
+
 #: 車体外形の検査で制約を締め直す回数の上限（`_BodyCheck`）
 BODY_ITERS = 8
 #: 車が曲がり切れない所（`kappa_max` 超え）の曲率の重みを上げて解き直す回数の上限（`optimize`）
@@ -379,7 +630,7 @@ class _BodyCheck:
     ★ 道幅は中心線の法線方向へ撃ったレイで測るので、**薄い仕切り壁の先端**が
     見えない（レイは先端の横を素通りする）。そこを後輪軸の余裕だけで通ると、
     30cm 前に張り出した車体の前端が先端をかすめる。toyota2 の上の仕切りの先端で
-    2m/s・横偏差数cmで毎回ぶつかった（sim.bench、2026-09-29）。車体を円で覆い
+    2m/s・横偏差数cmで毎回ぶつかった（sim.bench）。車体を円で覆い
     （`local_map.footprint_circles`）、壁の距離場で直接確かめる。
     """
 
@@ -446,7 +697,9 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
              front_overhang: float = 0.0, rear_overhang: float = 0.0,
              v_start: float | None = None, v_end: float | None = None,
              kappa_max: float | None = None, footprint=None,
-             time_iters: int = 0) -> RaceLine:
+             time_iters: int = 0, a_grip: float | None = None,
+             refine_evals: int = 0, refine_cycles: int = 4,
+             refine_starts: int = 1) -> RaceLine:
     """中心線からレーシングラインを作る。
 
     :param half_width: 車体半幅 [m]。`config/vehicle.toml` の外形から取る
@@ -455,10 +708,15 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
         経路の外へ張り出すぶんを余裕に足す（`body_allowance`）。0 なら見込まない
     :param rear_overhang: 同 後端まで [m]
     :param passes: 「最適化 → 法線と幅を測り直す」の反復回数
-    :param kappa_max: 車の曲がれる限界の曲率 [1/m]。限界の近くで横Gを削る（`speed_profile`）
+    :param kappa_max: 経路に許す曲率の上限 [1/m]（車の曲がれる限界 × 余裕。下の「車が曲がり
+        切れる半径に開く」）。これを超える線は、超えない線より必ず後ろに並べる
     :param footprint: 車体外形（`config/vehicle.toml` の `footprint`）。与えると、車体と
         地図の壁の距離が `margin` を切る点の制約を締めて解き直す（`_BodyCheck`）
     :param time_iters: 最小時間へ寄せる再重み付けの回数（0 = 最小曲率のまま、下記）
+    :param refine_evals: 見積もりのラップ時間を直接下げる仕上げの評価回数の上限（0 = しない、
+        `refine_time`）。閉じた経路で `time_iters > 0` のときだけ。出発点1つあたりの上限
+    :param refine_starts: 仕上げを始める出発点の数（下の「出発点を変えて仕上げる」）。時間は
+        この数に比例する
 
     `passes > 1` にしているのは、最適化で経路が動くと**法線の向きも変わる**ため。
     斜めに当たる法線は道幅を過大に測り、**壁にめり込む解が実行可能に見える**。
@@ -485,7 +743,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
 
     速度は `v_min` で下支えされるので、見積もりの時間には「曲がり切れない」ことの損が
     出ない。壁の先端を回るヘアピンで半径 37cm（車の限界 46cm）の線が最短として選ばれ、
-    実車は舵が張り付いたまま出口で 14〜20cm 膨らんで壁まで 0〜2cm だった（2026-10-06）。
+    実車は舵が張り付いたまま出口で 14〜20cm 膨らんで壁まで 0〜2cm だった。
     最小時間の反復の後、`kappa_max` を超えた所の重みを上げて解き直し、超えた量の
     小さい解を優先して採る。道幅が足りず開けない所は、いちばん緩い解になる。
     """
@@ -497,7 +755,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     left, right = cl.w_left, cl.w_right
 
     spd = dict(v_max=v_max, v_min=v_min, a_lat=a_lat, a_accel=a_accel, a_brake=a_brake,
-               closed=closed, v_start=v_start, v_end=v_end, kappa_max=kappa_max)
+               closed=closed, v_start=v_start, v_end=v_end, a_grip=a_grip)
 
     body = _BodyCheck(grid, footprint, closed) if footprint is not None else None
 
@@ -516,6 +774,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
 
     best = cl.xy                                   # 何も改善しなければ中心線のまま
     best_energy = score(cl.xy)
+    #: 制約を満たした解すべて（仕上げの出発点の候補、`refine_starts`）
+    feasible: list[np.ndarray] = []
 
     for k in range(max(1, passes)):
         hi = np.maximum(left - keep, 0.0)
@@ -539,6 +799,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
             energy = score(xy)
             if energy < best_energy:
                 best, best_energy = xy, energy
+            if energy[0] == 0:
+                feasible.append(xy)
             if it < time_iters:
                 v = speed_profile(xy, speed_kappa(xy, closed), **spd)
                 w_new = float(v.max()) / np.maximum(v, 0.1)
@@ -561,9 +823,59 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
                                                     rear_overhang)
 
     xy = best
+    # ★ 車体外形の余裕が足りない線（道が狭くて QP が諦めた所がある）は仕上げない。仕上げは
+    #   「制約を破る解は必ず後ろ」の辞書式で比べるので、始めから破っていると破ったままの中で
+    #   時間だけを縮めにいく（＝壁を無視して近道する）
+    if (refine_evals > 0 and time_iters > 0 and closed and len(xy) >= 16
+            and best_energy[0] == 0):
+        kink = REFINE_KINK * kappa_max if kappa_max else math.inf
+        # 最後のパスの中心線と道幅（車体外形で締める前の幅）から、通ってよい帯を作る
+        band = _Band(grid, c, nrm, -np.maximum(right - keep, 0.0), np.maximum(left - keep, 0.0),
+                     closed)
+        seen: list[tuple[int, float, float]] = []      # これまでの最良（`refine_time` の `best` と同じ）
+
+        def cost(q: np.ndarray) -> tuple[int, float, float]:
+            """`score` と同じ並び。**安い検査から順に**行い、最良に負けると分かった時点でやめる
+            （曲率 0.03ms → 車体外形 0.1ms → 速度プロファイル 0.2ms。試す解の半分以上は制約で落ちる）。"""
+            ref = seen[0] if seen else None
+            ks = speed_kappa(q, True)
+            over = max(0.0, float(ks.max()) - kappa_max) if kappa_max else 0.0
+            over = round(max(over, float(np.abs(curvature(q, True)).max()) - kink, 0.0), 4)
+            if ref is not None and over > ref[1]:
+                return 0, over, math.inf               # 余裕が足りていても、曲率で負ける
+            if not band.inside(q):
+                return 1, over, math.inf               # 選んだ道の帯を出た
+            if float(body.clearance(q).min()) < margin - 0.01 if body is not None else False:
+                return 1, over, math.inf
+            out = 0, over, _travel_time(q, speed_profile(q, ks, **spd), True)
+            if ref is None or out < ref:
+                seen[:] = [out]
+            return out
+
+        # ★ 出発点を変えて仕上げ、いちばん良いものを採る（`refine_starts`）。局所探索なので
+        #   出発点で止まる線が変わる。2本目以降は「最良の解から形がいちばん離れた」解——
+        #   ふつうは最小時間へ寄せる前の最小曲率の線（大回り）——から始める
+        def apart(a: np.ndarray, b: np.ndarray) -> float:
+            """線 `a` の点から線 `b` までの距離の最大 [m]（点の数が違ってもよい）。"""
+            d = np.hypot(a[::4, None, 0] - b[None, :, 0], a[::4, None, 1] - b[None, :, 1])
+            return float(d.min(axis=1).max())
+
+        starts = [xy]
+        pool = [f for f in feasible if f is not xy]
+        while len(starts) < max(1, refine_starts) and pool:
+            far = max(pool, key=lambda f: min(apart(f, s) for s in starts))
+            if min(apart(far, s) for s in starts) < 0.03:
+                break                                  # どれも同じような線
+            starts.append(far)
+            pool = [f for f in pool if f is not far]
+        results = []
+        for s0 in starts:
+            seen.clear()
+            q = refine_time(s0, cost, step=cl.step, max_evals=refine_evals, cycles=refine_cycles)
+            seen.clear()
+            results.append((cost(q), len(results), q))
+        xy = min(results)[2]
     kap = curvature(xy, closed)
-    v = speed_profile(xy, speed_kappa(xy, closed), v_max=v_max, v_min=v_min, a_lat=a_lat,
-                      a_accel=a_accel, a_brake=a_brake, closed=closed,
-                      v_start=v_start, v_end=v_end, kappa_max=kappa_max)
+    v = speed_profile(xy, speed_kappa(xy, closed), **spd)
     seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
     return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed)

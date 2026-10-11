@@ -10,10 +10,10 @@
 IPMの深度誤差が拡大する問題を、画像から操作を直接学習することで迂回するのが
 このノードの存在理由（`docs/development.md` §12.3）。
 
-## カメラだけで完結する（2026-10-06）
+## カメラだけで完結する
 
-以前は LiDAR の前方距離を同梱して速度則に使っていたが、「カメラの映像だけで
-走る」というモードの目的に合わないので外した。速度もモデルが出す。
+LiDAR の前方距離は使わない（「カメラの映像だけで走る」モードの目的に合わせる）。
+速度もモデルが出す。
 模倣学習は学習データに無い状況での挙動を保証できない点は変わらないので、
 止める根拠は planner の外にある層に任せる——STM32 の `auto_stop`
 （GUI の設定がそのまま通る）、デッドマン、人の操作による解除、そして
@@ -44,7 +44,7 @@ DISARM中（駐車中）でない**間だけ実際にフレームを読んで推
 `line_perception_node.py` と共通）。DISARM中はモードが選ばれているだけでは
 推論しない——GUI再読み込みで前回選択モードがそのまま復元されるため、
 armed/engaged を見ずにモード選択だけで駆動すると駐車中の待機でも推論が
-回り続けてしまう（2026-09-04、省電力バグとして修正）。
+回り続けてしまう。
 """
 
 from __future__ import annotations
@@ -285,7 +285,7 @@ class CamE2ENode:
                 print(f"# {mode} {reason}", flush=True)
 
             now = time.monotonic_ns()
-            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力、2026-10-04）。
+            # IDLE中は約2Hzに間引く（`IdlePacer`。省電力）。
             # ACTIVE中は常に True が返るので、下の推論周期で間引く
             idle_publish = pacer.should_publish(active, now)
             cmd: CamE2ECmd | None = None
