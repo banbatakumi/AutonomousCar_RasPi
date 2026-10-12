@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.control_params import (CONTROL_PARAM_IDS, DEFAULT_TOML, OVERRIDABLE,  # noqa: E402
+from raspi.core.control_params import (CONTROL_PARAM_IDS, DEFAULT_TOML, ENABLE_KEYS, FROM_DYNAMICS, OVERRIDABLE, REQUIRED,  # noqa: E402
                                        STEER_LINK_X_MAX_RAD, ControlParamSync, load_control_params,
                                        steer_link_road, steer_link_x, steer_relink)
 from raspi.proto.generated import packets  # noqa: E402
@@ -22,7 +22,7 @@ class FakeStm:
     """`CONFIG_SET`/`CONFIG_GET` に実機と同じ形で答える。"""
 
     def __init__(self, sync_holder: list, known=None, clamp=None) -> None:
-        self.values: dict[int, float] = {P.TC_ENABLE: 1.0, P.ABS_ENABLE: 1.0, P.TV_ENABLE: 1.0,
+        self.values: dict[int, float] = {P.TC_ENABLE: 0.0, P.ABS_ENABLE: 1.0, P.TV_ENABLE: 0.0,
                                          P.WHEEL_LIFT_GUARD_ENABLE: 1.0}
         self.sent: list = []
         self._holder = sync_holder
@@ -65,13 +65,16 @@ class TestLoad(unittest.TestCase):
     def test_repo_toml_loads(self):
         """リポジトリの vehicle.toml が読め、[control] の値がそのまま出る（同定用の項目は出ない）。"""
         v = load_control_params(DEFAULT_TOML)
-        self.assertTrue(set(v) <= set(CONTROL_PARAM_IDS))
+        self.assertTrue(set(v) <= set(CONTROL_PARAM_IDS) | set(ENABLE_KEYS))
         self.assertNotIn("tv_test_moment_nm", v)
         import tomllib
         with open(DEFAULT_TOML, "rb") as f:
             d = tomllib.load(f)
-        self.assertEqual(v, {k: float(x) for k, x in d["control"].items() if not isinstance(x, dict)})
+        expect = {k: float(x) for k, x in d["control"].items() if not isinstance(x, dict)}
+        expect.update({k: float(d["dynamics"][k]) for k in FROM_DYNAMICS})
+        self.assertEqual(v, expect)
         self.assertIn("tv_load_gain_s2_per_m", v)
+        self.assertEqual(set(REQUIRED) - set(v), set())       # STM32 は値を持たないので全項目が要る
 
     def _toml(self, body: str) -> Path:
         f = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False, encoding="utf-8")
@@ -81,14 +84,41 @@ class TestLoad(unittest.TestCase):
         return Path(f.name)
 
     def test_missing_table_sends_nothing(self):
-        self.assertEqual(load_control_params(self._toml("[dynamics]\nmu = 0.5\n")), {})
+        self.assertEqual(load_control_params(self._toml("[dynamics]\nmu = 0.5\n"), strict=False), {})
 
     def test_unknown_key_is_an_error(self):
         with self.assertRaises(ValueError):
-            load_control_params(self._toml("[control]\ntc_slip_targett = 0.1\n"))
+            load_control_params(self._toml("[control]\ntc_slip_targett = 0.1\n"), strict=False)
+
+    def test_missing_item_is_an_error_when_strict(self):
+        """STM32 は値を持たない: 足りなければ読めない（io_node は ARM を通さない）。"""
+        with self.assertRaises(ValueError) as cm:
+            load_control_params(self._toml("[control]\ntc_slip_target = 0.1\n"))
+        self.assertIn("tc_kp_nm_per_m_s", str(cm.exception))
+        with self.assertRaises(ValueError):
+            load_control_params(self._toml("[dynamics]\nmu = 0.5\n"))      # [control] が無い
+
+    def test_speed_pi_gains_come_from_dynamics_only(self):
+        v = load_control_params(self._toml("[dynamics]\nspeed_kp = 0.3\nspeed_ki = 0.6\n"), strict=False)
+        self.assertEqual(v, {"speed_kp": 0.3, "speed_ki": 0.6})
+        with self.assertRaises(ValueError):
+            load_control_params(self._toml("[control]\nspeed_kp = 0.3\n"), strict=False)
+
+    def test_enable_keys_accept_bool_and_01(self):
+        v = load_control_params(self._toml("[control]\ntc_enable = true\ntv_enable = 0\n"), strict=False)
+        self.assertEqual(v, {"tc_enable": 1.0, "tv_enable": 0.0})
+
+    def test_enable_key_rejects_other_numbers(self):
+        with self.assertRaises(ValueError):
+            load_control_params(self._toml("[control]\ntc_enable = 0.5\n"), strict=False)
+
+    def test_repo_toml_turns_tc_and_tv_on(self):
+        """STM32 の既定は TC・TV とも無効。使うなら toml が有効にする。"""
+        v = load_control_params(DEFAULT_TOML)
+        self.assertEqual((v["tc_enable"], v["tv_enable"]), (1.0, 1.0))
 
     def test_plant_subtable_is_ignored(self):
-        v = load_control_params(self._toml("[control]\ntc_slip_target = 0.1\n[control.plant]\nmu = 0.6\n"))
+        v = load_control_params(self._toml("[control]\ntc_slip_target = 0.1\n[control.plant]\nmu = 0.6\n"), strict=False)
         self.assertEqual(v, {"tc_slip_target": 0.1})
 
 
@@ -243,3 +273,37 @@ class TestOverrides(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEnableKeys(unittest.TestCase):
+    """機能の ON/OFF も他の項目と同じく送り、GUI の切り替えは送る値ごと差し替える。"""
+
+    def test_enable_is_sent_and_confirmed(self):
+        sync, stm = make({"tc_enable": 1.0, "tv_enable": 1.0})
+        run(sync)
+        self.assertEqual(sync.status, "ok")
+        self.assertEqual((stm.values[P.TC_ENABLE], stm.values[P.TV_ENABLE]), (1.0, 1.0))
+
+    def test_gui_toggle_is_not_reverted_by_readback(self):
+        sync, stm = make({"tc_enable": 1.0})
+        run(sync)
+        sync.set_wanted("tc_enable", 0.0)
+        run(sync, start_ms=3000, ms=5000)
+        self.assertEqual(stm.values[P.TC_ENABLE], 0.0)
+        self.assertEqual(sync.status, "ok")
+
+    def test_set_wanted_ignores_items_not_in_toml(self):
+        sync, stm = make({"tc_enable": 1.0})
+        run(sync)
+        n = len(stm.sent)
+        sync.set_wanted("abs_enable", 0.0)
+        run(sync, start_ms=3000, ms=2000)
+        self.assertNotIn(P.ABS_ENABLE, {p.param_id for p in stm.sent[n:] if isinstance(p, packets.ConfigSet)})
+
+    def test_restart_sends_enable_again(self):
+        sync, stm = make({"tv_enable": 1.0})
+        run(sync)
+        stm.values[P.TV_ENABLE] = 0.0       # STM32 が再起動して既定（無効）へ戻った
+        sync.reset()
+        run(sync, start_ms=3000)
+        self.assertEqual(stm.values[P.TV_ENABLE], 1.0)

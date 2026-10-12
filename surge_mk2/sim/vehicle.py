@@ -89,6 +89,7 @@ class VehicleSpec:
     track: float = 0.155
     max_steer: float = 0.524
     wheel_radius: float = 0.03
+    wheel_width: float = 0.025
     mass: float = 2.0
     footprint: list = field(default_factory=lambda: [
         [0.30, 0.09], [0.30, -0.09], [-0.07, -0.09], [-0.07, 0.09]])
@@ -192,6 +193,7 @@ class VehicleSpec:
             track=d.get("track", 0.155),
             max_steer=d.get("max_steer", 0.524),
             wheel_radius=d.get("wheel_radius", 0.03),
+            wheel_width=d.get("wheel_width", 0.025),
             mass=d.get("mass", 2.0),
             footprint=d.get("footprint", dflt.footprint),
             tau_steer_s=dyn.get("tau_steer_s", 0.12),
@@ -502,6 +504,9 @@ class SpeedController:
         self._launch_spent = False
         self._launch_t = 0.0
         self.ff_accel = 0.0                #: 目標車速の傾き（ローパス後）[m/s²]
+        #: 直近の周期に、要求した駆動の加速度がグリップの上限（`drive_accel_limit`）で頭打ちに
+        #: なったか。実機ならここで TC が介入する（`sim/stm32.py` が `tc_active` に写す）
+        self.accel_capped = False
 
     def _update_launch(self, cmd: DriveInput, dt: float) -> bool:
         if not cmd.launch:
@@ -520,10 +525,14 @@ class SpeedController:
             self.launching = False
         return self.launching
 
-    def step(self, cmd: DriveInput, v: float, dt: float, grip: float = 1.0) -> float:
+    def step(self, cmd: DriveInput, v: float, dt: float, grip: float = 1.0,
+             accel_scale: float = 1.0) -> float:
         """:param grip: 加速度の上限に掛ける割合（0〜1）。旋回で横に使っているぶんだけ前後に
-            出せる力が減る（`VehicleModel.step` が渡す）。1.0 = 直進（同定の解析はこのまま）"""
+            出せる力が減る（`VehicleModel.step` が渡す）。1.0 = 直進（同定の解析はこのまま）
+        :param accel_scale: 前後の加速度の上限（駆動も減速も）に掛ける路面の倍率（`sim/surface.py`。
+            1.0 = 同定値）"""
         sp = self.spec
+        self.accel_capped = False
         if sp.speed_filter_s > 1e-6:
             self.v_meas += (v - self.v_meas) * (1.0 - math.exp(-dt / sp.speed_filter_s))
         else:
@@ -576,10 +585,11 @@ class SpeedController:
         a_req = g * t_req
         # 外側の加速度上限（モータ・TCで出せる分）。進む向きに押すなら駆動、逆なら減速
         driving = (a_req >= 0.0) == (v >= 0.0) or abs(v) < 1e-3
-        a_lim = drive_accel_limit(sp, v) if driving else (
-            sp.speed_decel_m_s2 if sp.speed_decel_m_s2 > 1e-6 else math.inf)
+        a_lim = (drive_accel_limit(sp, v) if driving else (
+            sp.speed_decel_m_s2 if sp.speed_decel_m_s2 > 1e-6 else math.inf)) * accel_scale
         a_lim *= grip
         a = max(-a_lim, min(a_lim, a_req))
+        self.accel_capped = driving and abs(a_req) > a_lim and abs(v) > self.STANDSTILL_M_S
         if a != a_req and not launching and sp.speed_ki > 1e-9 and g > 1e-9:
             self.integral += (a - a_req) / g / sp.speed_ki * (dt / self.ANTIWINDUP_TT_S)
         v_new = v + a * dt
@@ -661,6 +671,10 @@ class VehicleModel:
         self._curv_req = 0.0
         self.accel_x = 0.0
         self._a_lat_max = self.spec.mu * GRAVITY_MPS2   #: 摩擦円で絞った直近の横加速度上限
+        #: 路面の摩擦の倍率（横 `mu`・前後の加速の上限）。`sim/surface.py` を使うときだけ
+        #: `VirtualStm32` が毎ステップ書く。1.0 = `VehicleSpec` の値のまま
+        self.grip_lat = getattr(self, "grip_lat", 1.0)
+        self.grip_long = getattr(self, "grip_long", 1.0)
         self.odom_front = [0.0, 0.0]     # [FL, FR] 累積 [m]（射影なし = 前輪の実距離）
         self.collided = False
         self.collisions = 0
@@ -682,6 +696,11 @@ class VehicleModel:
     def launching(self) -> bool:
         """ローンチコントロールで発進している最中か（`TELEMETRY.flags` の LAUNCH_ACTIVE）。"""
         return self._speed_ctl is not None and self._speed_ctl.launching
+
+    @property
+    def accel_capped(self) -> bool:
+        """駆動の加速度がグリップの上限で頭打ちになっているか（`SpeedController.accel_capped`）。"""
+        return self._speed_ctl is not None and self._speed_ctl.accel_capped
 
     def set_speed_ff(self, nm_per_m_s2: float | None = None, rr_nm: float | None = None) -> None:
         """`[control]` の `speed_ff_nm_per_m_s2`・`speed_ff_rr_nm`（STM32 へ `CONFIG_SET` で入る値）。"""
@@ -725,9 +744,11 @@ class VehicleModel:
             # いる横加速度 `u_y`（グリップ限界に対する割合）に対し、前後の上限を `1/sqrt(1+u_y²)` 倍に
             # する（前後・横の要求が円からはみ出すとき、両方を同じ割合で縮めた形。横の側は下で
             # `accel_x` のぶんを引く）。横が限界に張り付いても 0 にはならない（止まれなくならない）
-            u_y = self.speed ** 2 * abs(self._curv_req) / max(sp.mu * GRAVITY_MPS2, 1e-6)
+            u_y = self.speed ** 2 * abs(self._curv_req) / max(
+                sp.mu * self.grip_lat * GRAVITY_MPS2, 1e-6)
             self.speed = self._speed_ctl.step(cmd, self.speed, dt,
-                                              grip=1.0 / math.sqrt(1.0 + u_y * u_y))
+                                              grip=1.0 / math.sqrt(1.0 + u_y * u_y),
+                                              accel_scale=self.grip_long)
         else:
             self.speed = next_speed(sp, cmd, self.speed, dt)
         self.accel_x = (self.speed - prev_speed) / dt if dt > 0 else 0.0
@@ -758,7 +779,8 @@ class VehicleModel:
             # （ヨーレートそのものに掛けると、停止後もヨーが振動し続けた）
             requested_curvature = self._yaw2.step(requested_curvature, dt)
         self._curv_req = requested_curvature
-        a_lat_max = math.sqrt(max(0.0, (sp.mu * GRAVITY_MPS2) ** 2 - self.accel_x ** 2))
+        a_lat_max = math.sqrt(max(0.0, (sp.mu * self.grip_lat * GRAVITY_MPS2) ** 2
+                                  - self.accel_x ** 2))
         self._a_lat_max = a_lat_max
         max_curvature = a_lat_max / max(abs(self.speed), 1e-6) ** 2
         curvature = math.copysign(min(abs(requested_curvature), max_curvature), requested_curvature)

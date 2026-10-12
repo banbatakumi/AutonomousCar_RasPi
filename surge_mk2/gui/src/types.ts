@@ -112,7 +112,7 @@ export type AutoStatus = {
   stalls: number
 }
 
-/** `/ws/telemetry` が 20Hz で送ってくるスナップショット。 */
+/** `/ws/telemetry` が 50Hz で送ってくるスナップショット。 */
 export type Snapshot = {
   /** 型定義そのものから決まる札（`generated/msgs.ts` の `MSGS_SCHEMA`）。
    * **食い違ったらこのフレームを信じてはいけない**（`ws/telemetry.ts` が捨てる） */

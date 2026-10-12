@@ -70,7 +70,7 @@ class TestApply(unittest.TestCase):
         want = steer_link_road(STEER_LINK_X_MAX_RAD, 0.95, -0.3)
         self.assertAlmostEqual(d["max_steer"], want, places=12)
         # io_node が STM32 へ送る値・Pi とシムの車両諸元の両方に出る
-        self.assertEqual(load_control_params(self.toml)["steer_link_cubic"], -0.3)
+        self.assertEqual(load_control_params(self.toml, strict=False)["steer_link_cubic"], -0.3)
         self.assertAlmostEqual(Vehicle.load(self.toml).max_steer, want, places=12)
         self.assertAlmostEqual(VehicleSpec.load(self.toml).max_steer, want, places=12)
 

@@ -1,5 +1,5 @@
 /**
- * `/ws/telemetry` — 20Hz のバイナリ(msgpack)を受けて `live` に書く。
+ * `/ws/telemetry` — 50Hz のバイナリ(msgpack)を受けて `live` に書く。
  *
  * **React には触れない。** 描画は Canvas 側が rAF で `live` を読む。
  */

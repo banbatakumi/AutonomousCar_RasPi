@@ -59,7 +59,8 @@ from ._slam2d_nav import occgrid_from_trinary
 from .base import ParamSpec
 from .park_to_point import ParkToPoint
 from .route_config import AUTO_KEY, ROUTE_KEYS, RouteConfig, Stop
-from .slam2d_raceline import (DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS, Slam2dRaceLine,
+from .slam2d_raceline import (_GRIP_SWITCH_QUIET_S, DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS,
+                              Slam2dRaceLine,
                               forward_traj, limits, line_kwargs, submit_job)
 
 __all__ = ["Slam2dRoute"]
@@ -102,15 +103,15 @@ _LINE_KEYS = SPEED_KEYS + ("line_margin", "turn_max_deg", "graph_margin")
 SWITCH_TOL = 0.15
 
 
-def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True) -> dict:
-    return dict(line_kwargs(p, vehicle, refine), step=PATH_STEP)
+def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None) -> dict:
+    return dict(line_kwargs(p, vehicle, refine, grip), step=PATH_STEP)
 
 
 def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                     seed, traj, groups: dict[str, list[Waypoint]], p: dict[str, float],
                     vehicle, graph: RoadGraph | None, *, auto_start: Waypoint | None = None,
                     avoid: list[tuple[float, float]] | None = None,
-                    refine: bool = True) -> _BuildOut:
+                    refine: bool = True, grip: dict | None = None) -> _BuildOut:
     """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。
 
     `auto_start` があれば、グループとは別に自動経路（キー `auto`）を全周回の中の最速から選ぶ。
@@ -120,7 +121,7 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
         graph = build_graph(trinary, resolution=resolution, origin=origin,
                             keep=vehicle.half_width + p["graph_margin"], seed=seed, traj=traj)
     out = _BuildOut(graph=graph)
-    kw = _line_kwargs(p, vehicle, refine)
+    kw = _line_kwargs(p, vehicle, refine, grip)     # `grip`: 走行中に学習した限界（`nav/grip.py`）
     if auto_start is not None:
         _fastest_loop(out, grid, graph, auto_start, avoid, p, kw, vehicle)
     for key, wps in groups.items():
@@ -272,6 +273,7 @@ class Slam2dRoute(Slam2dRaceLine):
     #: GUI が地図パネル・地図ライブラリ・経由点エディタを出す planner（`registry.catalog`）
     map_ui = True
     routes_ui = True
+    listed = True                       # 土台の `Slam2dRaceLine` は GUI に出さない。こちらは出す
     #: 経路は道路グラフから自前で作り直す（`_submit`）
     _reline_on_load = False
 
@@ -328,6 +330,10 @@ class Slam2dRoute(Slam2dRaceLine):
         self._snap_map: AutoMap | None = None
         self._snap_ver = -1
         self._race_t = 0.0
+        #: 学習した横の限界で速度を付け直した経路（`_grip_timed`）と、その元
+        self._grip_src: rl_mod.RaceLine | None = None
+        self._grip_src_key: tuple | None = None
+        self._grip_out: rl_mod.RaceLine | None = None
         self._stopping = ""                  #: 向かっている停止点の名前
         self._stop: Stop | None = None
         self._park: ParkToPoint | None = None
@@ -348,7 +354,8 @@ class Slam2dRoute(Slam2dRaceLine):
         self._p = p
         # ★ 速度・経路の設定が変わったら作り直す。できた版へは `_install` が乗れる場所で移る
         if (self._graph is not None and self._built_key is not None
-                and self._line_key(p) != self._built_key):
+                and (self._line_key(p) != self._built_key
+                     or (self._job is None and self._race_started and self._grip_line_stale()))):
             # `graph_margin` が変わったら道路グラフから作り直す（通れる道そのものが変わる）
             same_graph = float(p["graph_margin"]) == self._built_key[-1]
             self._submit(graph=self._graph if same_graph else None)
@@ -471,7 +478,8 @@ class Slam2dRoute(Slam2dRaceLine):
             None if traj is None else traj.copy(), self._groups_to_build(), dict(p),
             self.vehicle, graph,
             auto_start=self._auto_start,
-            avoid=list(self._cfg.avoid), refine=refine)
+            avoid=list(self._cfg.avoid), refine=refine, grip=self._grip_line_kw())
+        self._grip_line = self._grip_learned() if self._grip_line_kw() is not None else None
 
     @staticmethod
     def _line_key(p: dict[str, float]) -> tuple:
@@ -548,6 +556,15 @@ class Slam2dRoute(Slam2dRaceLine):
         self._route_ver += 1
 
     def _install(self, out: _BuildOut) -> None:
+        if self._grip_line is not None:
+            # 学習値で引き直した版。曲がり切れない区間が増えた経路は、今の版のまま使う（`_grip_worse`）
+            for k, line in list(out.routes.items()):
+                old = self._routes.get(k)
+                if old is not None and self._grip_worse(old, line):
+                    out.routes[k] = old
+                    for src, dst in ((self._route_cls, out.centerlines), (self._route_paths, out.paths)):
+                        if k in src:
+                            dst[k] = src[k]
         self._graph = out.graph
         self._routes, self._route_cls, self._route_err = out.routes, out.centerlines, out.errors
         self._route_paths = out.paths
@@ -674,8 +691,9 @@ class Slam2dRoute(Slam2dRaceLine):
         if not coasting and self._avoid is None:
             # 推測航法で続行している間は乗り換えない（乗り換え位置の判定が自己位置頼み）。
             # 障害物を避けている間も乗り換えない（避ける経路の元が変わって外れる）
-            sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=limits(p, self.vehicle).a_brake)
+            sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=self._lim(p).a_brake)
             if sw.switched:
+                self._grip_quiet_ns = int(vs.t_capture) + int(_GRIP_SWITCH_QUIET_S * 1e9)
                 self._hint = sw.hint
                 self._prev_idx = -1
                 self._map_dirty = True
@@ -683,6 +701,9 @@ class Slam2dRoute(Slam2dRaceLine):
             self._switch_note = sw.reason or (self._switch_note if self._switch.pending else "")
         path = self._switch.active
         assert path is not None
+        # 横グリップを学習している間は、学習した限界で速度を付け直した版を追う（`_grip_timed`）
+        self._grip_begin(vs, p)
+        path = self._grip_timed(path, p)
         self.path = path
         self._race_t += self._dt
 
@@ -713,12 +734,27 @@ class Slam2dRoute(Slam2dRaceLine):
             return self._approach_stop(st, path, pose, vs, p)
 
         st.launch = self._launch_ok(st, vs, hit, coasting, md_note, p)
+        grip_note = self._grip_end(st, vs, p, path, pp, hit, coasting, md_note)
         st.reason = (f"{self._switch.active_key} {self.laps}周・速度 {st.target_speed:.2f} m/s・"
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
                      + self._avoid_note() + self._coast_note(coasting, p) + md_note
-                     + self._sight_note(path, p) + self._tight_note(path, p))
+                     + self._sight_note(path, p) + self._tight_note(path, p) + grip_note)
         return st
+
+    def _grip_timed(self, path: rl_mod.RaceLine, p: dict[str, float]) -> rl_mod.RaceLine:
+        """周回の経路に、学習した横の限界で速度を付け直したもの（学習していなければ `path` のまま）。
+
+        経路の速度はワーカーが同定値で付けている（`_compute_routes`）。形は変えない。停止点へ
+        向かう開いた経路は、始点・終点の速度の条件があるので付け直さない。
+        """
+        if not self._grip_on or not path.closed:
+            return path
+        key = self._skey(p)
+        if self._grip_src is not path or self._grip_src_key != key:
+            self._grip_src, self._grip_src_key = path, key
+            self._grip_out = self._timed(path, p, self._grip_hold(path))
+        return self._grip_out
 
     def _maybe_finish(self, pose, vs: VehicleState, p: dict[str, float]) -> None:
         """ミッションが終わったら停止点への経路を（ワーカーで）作り始める。"""
@@ -763,7 +799,7 @@ class Slam2dRoute(Slam2dRaceLine):
         rem = _remaining(path, pose, self._hint)
         v = max(0.0, vs.speed)
         # 今の速度で止まれる距離（遅延のあいだに進むぶん＋減速）
-        brake_d = v * limits(p, self.vehicle).react_s + v * v / (2.0 * max(limits(p, self.vehicle).a_brake, 0.1))
+        brake_d = v * self._lim(p).react_s + v * v / (2.0 * max(self._lim(p).a_brake, 0.1))
         if rem <= brake_d + p["stop_tol"]:
             st.brake = True
             st.target_speed = 0.0

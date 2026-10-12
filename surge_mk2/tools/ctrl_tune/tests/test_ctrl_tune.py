@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from raspi.auto.sysid_tyre import SysIdTyre  # noqa: E402
 from raspi.auto.sysid_wheel import SysIdWheel  # noqa: E402
-from raspi.core.control_params import CONTROL_PARAM_IDS, load_control_params  # noqa: E402
+from raspi.core.control_params import CONTROL_PARAM_IDS, ENABLE_KEYS, load_control_params  # noqa: E402
 from tools.ctrl_tune import fit, optimize, record, tuning  # noqa: E402
 from tools.ctrl_tune import scenarios as S  # noqa: E402
 from tools.ctrl_tune.fw import (FLAG_LAUNCH, FW_DIR, MODE_BRAKE, MODE_SPEED, MODE_SPEED_LAUNCH,  # noqa: E402
@@ -44,6 +44,8 @@ class TestParamTable(unittest.TestCase):
     def test_vehicle_toml_is_within_firmware_range(self):
         table = firmware().params
         for key, value in load_control_params(DEFAULT_TOML).items():
+            if key in ENABLE_KEYS:      # 機能の ON/OFF はファームの調整表に無い
+                continue
             self.assertLessEqual(table[key].lo, value, key)
             self.assertLessEqual(value, table[key].hi, key)
 
@@ -103,15 +105,13 @@ class TestLogic(unittest.TestCase):
 
     def test_speed_feedforward_removes_the_ramp_lag(self):
         """目標車速を一定の傾きで上げる間、車速はほぼ遅れない（無しだと偏差が溜まるまで遅れる）。
-        足す値が 0（既定）なら、足す前のファームと同じ動き。"""
+        足す値が 0 なら、足す前のファームと同じ動き。"""
         gain, rr = self._plant_gain()
         self.assertGreater(gain, 5.0)
         sc = S.Scenario("t", "t", (S.Seg(1.0, MODE_SPEED, 2.4, 2.0),), 0.0)   # 停止から 2.0m/s² で
-        off = S.run(self.fw, QUIET, sc, {})
-        zero = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0})
+        off = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0})
         on = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 1.0 / gain,
                                         "speed_ff_rr_nm": max(rr, 0.0) / gain})
-        np.testing.assert_allclose(zero.col("speed"), off.col("speed"))
 
         def lag(r) -> float:
             t, v = r.col("t"), r.col("speed")
@@ -140,7 +140,7 @@ class TestLogic(unittest.TestCase):
     def test_launch_accelerates_like_full_torque_and_hands_over_at_target(self):
         """車速指令＋ローンチは、最初の周期から全開を要求してトルク指令の全開と同じだけ進み、
         目標に届いたら車速PIへ戻って行き過ぎない。"""
-        params = {"launch_exit_torque_nm": 0.012}
+        params = {"launch_exit_torque_nm": 0.012, "speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0}   # FF なしの車速PIと比べる
         lc = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED_LAUNCH, 1.5, 3.0),), 0.0),
                    params)
         pi = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED, 1.5, 3.0),), 0.0), params)
@@ -209,7 +209,7 @@ class TestLogic(unittest.TestCase):
     def test_tv_splits_torque_by_lateral_load(self):
         """TV（2026-10-08 に荷重比例の配分へ置き換えた）: 旋回しながらの駆動で外輪が多くなり、
         比率は ゲイン×車速×ヨーレート、内外輪の滑り率の差が TV なしより小さい。"""
-        gain = self.fw.params["tv_load_gain_s2_per_m"].default
+        gain = self.fw.base_params()["tv_load_gain_s2_per_m"]     # vehicle.toml の値
         segs = (S.Seg(0.5, MODE_SPEED, 1.5, 3.0, steer=0.2), S.Seg(0.5, MODE_TORQUE, 0.04, steer=0.2))
         on = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 1.5, tc=False, lift=False, measure=1))
         off = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 1.5, tc=False, lift=False, tv=False, measure=1))

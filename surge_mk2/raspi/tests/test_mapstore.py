@@ -249,5 +249,82 @@ class TestRoutesBundle(unittest.TestCase):
         self.assertFalse((mapstore.MAPS_DIR / "bad.npz").exists())
 
 
+class TestGripBundle(unittest.TestCase):
+    """学習した横グリップ（`.grip.json`、`raspi/nav/grip.py`）を地図の横に置き、DL/UL で同梱して運ぶ。"""
+
+    GRIP = ('{"format": 1, "cell_m": 0.25, "level": 4.5, "ok": 4.4, "bad": 4.6, '
+            '"cells": [[3, -2, 4.2, 4.6, 0.01, 5]]}')
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._orig_dir = mapstore.MAPS_DIR
+        mapstore.MAPS_DIR = Path(self._td.name) / "saved_maps"
+        self._save("src")
+
+    def tearDown(self):
+        mapstore.MAPS_DIR = self._orig_dir
+        self._td.cleanup()
+
+    def _save(self, name):
+        mapstore.save_map(
+            name, resolution=0.05, origin_x=0.0, origin_y=0.0,
+            trinary=make_trinary(), centerline_xy=np.zeros((0, 2)),
+            raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+
+    def test_save_and_load(self):
+        self.assertEqual(mapstore.load_grip("src"), "")
+        self.assertTrue(mapstore.save_grip("src", self.GRIP))
+        self.assertEqual(mapstore.load_grip("src"), self.GRIP)
+        self.assertFalse(mapstore.save_grip("missing", self.GRIP))   # 地図が無い名前には書かない
+        self.assertEqual([m["name"] for m in mapstore.list_maps()], ["src"])
+
+    def test_export_and_upload_carry_grip(self):
+        import json
+        mapstore.save_grip("src", self.GRIP)
+        loaded, err = mapstore.import_upload("dst", mapstore.export_map("src"))
+        self.assertIsNotNone(loaded, err)
+        self.assertEqual(json.loads(mapstore.load_grip("dst"))["cells"][0][:4], [3, -2, 4.2, 4.6])
+        with np.load(mapstore.MAPS_DIR / "dst.npz", allow_pickle=False) as z:
+            self.assertNotIn(mapstore.GRIP_KEY, z.files)
+
+    def test_upload_clamps_values(self):
+        """★ 壊れた値・大きすぎる値で速度が跳ね上がらない（読み込み時に範囲へ丸める）。"""
+        import io
+        import json
+        buf = io.BytesIO()
+        mapstore._write_npz(buf, mapstore.load_map("src"),
+                            grip=self.GRIP.replace('"level": 4.5', '"level": 80.0'))
+        self.assertIsNotNone(mapstore.import_upload("big", buf.getvalue())[0])
+        self.assertLessEqual(json.loads(mapstore.load_grip("big"))["level"], 9.0)
+
+    def test_upload_with_broken_grip_keeps_the_map_and_drops_grip(self):
+        import io
+        mapstore.save_grip("src", self.GRIP)
+        buf = io.BytesIO()
+        mapstore._write_npz(buf, mapstore.load_map("src"), grip='{"format": 99}')
+        loaded, err = mapstore.import_upload("src", buf.getvalue())
+        self.assertIsNotNone(loaded, err)
+        self.assertEqual(mapstore.load_grip("src"), "")          # 古い値も残さない
+
+    def test_new_map_under_the_same_name_drops_grip(self):
+        """学習値は地図の座標で持つ。別の地図を同じ名前で保存したら古い値は使えない。"""
+        mapstore.save_grip("src", self.GRIP)
+        self._save("src")
+        self.assertEqual(mapstore.load_grip("src"), "")
+
+    def test_delete_removes_grip(self):
+        mapstore.save_grip("src", self.GRIP)
+        mapstore.delete_map("src")
+        self.assertFalse((mapstore.MAPS_DIR / "src.grip.json").exists())
+
+    def test_vehicle_ratio(self):
+        self.assertEqual(mapstore.load_grip_vehicle(), 0.0)
+        mapstore.save_grip_vehicle(1.46)
+        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.46)
+        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"launch_ratio": 40}')
+        self.assertEqual(mapstore.load_grip_vehicle(), 0.0)      # 範囲外は使わない
+        self.assertEqual([m["name"] for m in mapstore.list_maps()], ["src"])
+
+
 if __name__ == "__main__":
     unittest.main()

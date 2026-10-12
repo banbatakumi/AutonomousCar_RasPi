@@ -110,22 +110,33 @@ class MPCFollower:
     # ── 経路の切り出し ──
 
     @staticmethod
-    def _horizon(path: RaceLine, i: int, speeds: np.ndarray, cfg: MPCConfig):
-        """各ステップの（経路の添字, 速度, 曲率, 経路の向き）。弧長 `v·dt` ずつ進める。"""
+    def _horizon(path: RaceLine, i: int, speeds: np.ndarray, cfg: MPCConfig, s0: float = 0.0):
+        """各ステップの（経路の添字, 曲率）。弧長 `v·dt` ずつ進める。
+
+        :param s0: 点 `i` から経路に沿って測った今の位置 [m]（点と点の間のどこに居るか）。曲率は
+            隣の点との間を線形に補間して読む（点へ丸めると、点をまたぐたびに参照が 1 点ぶん跳ぶ）
+        """
         n = len(path)
         step = max(path.length / (n if path.closed else max(1, n - 1)), 1e-6)
         idx = np.empty(cfg.horizon, dtype=int)
-        past_end = np.zeros(cfg.horizon, dtype=bool)
-        s = 0.0
+        kap = np.empty(cfg.horizon)
+        s = s0
         for k in range(cfg.horizon):
-            j = i + int(round(s / step))
-            idx[k] = j % n if path.closed else min(j, n - 1)
-            past_end[k] = (not path.closed) and j > n - 1
+            f = i + s / step
+            j = int(math.floor(f))
+            w = f - j
+            j1 = j + 1
+            if path.closed:
+                a, b = j % n, j1 % n
+                kap[k] = (1.0 - w) * path.kappa[a] + w * path.kappa[b]
+            else:
+                a, b = min(max(j, 0), n - 1), min(max(j1, 0), n - 1)
+                # 開経路の終点の先は直進（`follow` と同じ）
+                kap[k] = 0.0 if j > n - 1 else (1.0 - w) * path.kappa[a] + w * path.kappa[b]
+            idx[k] = b if w >= 0.5 else a
             v = max(float(path.v[idx[k]]), V_FLOOR)
             speeds[k] = v
             s += v * cfg.dt
-        kap = path.kappa[idx].astype(float)
-        kap = np.where(past_end, 0.0, kap)        # 開経路の終点の先は直進（`follow` と同じ）
         return idx, kap
 
     def follow(self, path: RaceLine, pose: tuple[float, float, float], v_now: float,
@@ -156,12 +167,26 @@ class MPCFollower:
             return base
         ty = math.atan2(t[1], t[0])
         e_y = (t[0] * (py - path.xy[i, 1]) - t[1] * (px - path.xy[i, 0])) / tn
-        e_psi = (pyaw - ty + math.pi) % (2.0 * math.pi) - math.pi
+        # ★ 偏差は「最寄りの点」ではなく、**経路上へ射影した位置**で測る。点 `i` から経路に沿って
+        #   `s_off` 進んだ所では、経路の向きは `κ·s_off` だけ回っている。最寄りの点の接線のまま測ると、
+        #   点と点の間（10cm）を進む間に向きの偏差が `κ·刻み`（κ 1.85 で 0.1rad）だけ直線的に増え、
+        #   次の点へ移った瞬間に跳ね戻る**のこぎり波**になる。10Hz で回していた間は 1 周期に 1 点以上
+        #   進むので隠れていたが、50Hz では 1 点を 2〜5 周期かけて通るので舵指令がそのまま振れた
+        #   （実機の記録、ヘアピン 1.1m/s で約 11Hz・±0.05rad。走行中の学習の誤検出の元にもなった）
+        dx, dy = px - path.xy[i, 0], py - path.xy[i, 1]
+        s_off = (t[0] * dx + t[1] * dy) / tn
+        k_i = float(path.kappa[i]) if len(path.kappa) == n else 0.0
+        if not path.closed and (i == 0 or i == n - 1):
+            s_off = 0.0                           # 端点の外側へは延ばさない
+        s_lim = path.length / max(1, n)           # 射影が隣の点を大きく越えることは無い（保険）
+        s_off = max(-s_lim, min(s_lim, s_off))
+        e_y -= 0.5 * k_i * s_off * s_off          # 円弧は接線から κ·s²/2 だけ内側にある
+        e_psi = (pyaw - (ty + k_i * s_off) + math.pi) % (2.0 * math.pi) - math.pi
         e_psi = max(-1.2, min(1.2, e_psi))        # 線形化の範囲外へ飛ばさない
 
         N = cfg.horizon
         v = np.empty(N)
-        idx, kap = self._horizon(path, i, v, cfg)
+        idx, kap = self._horizon(path, i, v, cfg, s_off)
         L = cfg.wheelbase
         d_ref = np.arctan(L * kap)
         sec2 = 1.0 + (L * kap) ** 2

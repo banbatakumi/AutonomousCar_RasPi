@@ -134,6 +134,7 @@ tools/record.sh --duration 60                     # SD に書かずに MCAP を 
 .venv/bin/python -m raspi.tools.logcat logs/x.sfl          # .sfl の要約
 .venv/bin/python -m raspi.tools.sfl2mcap logs/x.sfl        # .sfl → .mcap
 .venv/bin/python -m raspi.tools.slam_replay x.mcap          # slam2d に通し直して自己位置を足す（x_slam.mcap）
+.venv/bin/python -m raspi.tools.grip_replay x.mcap          # 走行中の学習（nav/grip.py）に流し直して前兆の判定を見る
 .venv/bin/python -m raspi.tools.mcap_repair x.mcap --inplace   # 尻切れ .mcap の復旧
 .venv/bin/python -m raspi.nodes.replay_node logs/x.sfl --bus --loop
 ```
@@ -237,6 +238,97 @@ IP を調べる作業は要らない。GUI は `http://surge-mk2.local:8000/`。
 
 > **ベンチだけが真値を読める。** シムの真値は UDP の私設チャンネルにしか出ないので、
 > SLAM の推定と真値を毎周期突き合わせられるのはここだけ（実機では絶対に手に入らない数字）。
+
+#### 路面を変えて走らせる（走行中の学習の検証）
+
+`slam2d_route` の `grip_learn`（`raspi/nav/grip.py`。横・加速・減速の上限を走行中に決める）は、真値の
+路面を変えた車で確かめる。路面を変えるオプションは**真値の車だけ**に効く（planner は `config/vehicle.toml` のまま）。
+
+```bash
+B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --set v_max=4.0"
+.venv/bin/python -m sim.bench $B --time 150 --mu 0.55 --set grip_learn=1          # 一様に 0.55
+.venv/bin/python -m sim.bench $B --time 170 --mu 0.55 --surface 4.38,5.68,1.0,0.30 --set grip_learn=1
+.venv/bin/python -m sim.bench $B --time 190 --mu 0.55 --mu-at 90:0.44 --set grip_learn=1   # 90 秒後に下がる
+.venv/bin/python -m sim.bench $B --time 80                                        # 学習なし（同定値で固定）
+```
+
+| オプション | 中身 |
+|---|---|
+| `--mu MU[:MU_LONG]` | 真値の摩擦係数（一様）。横の限界と、**前後（加速・速度指令での減速）の上限**を同じ割合で変える。`MU_LONG` を付けると前後だけ別の値 |
+| `--surface X,Y,R,MU[,MU_LONG]` | シムの世界座標の円の中だけ変える（繰り返し可） |
+| `--mu-at T:MU[:MU_LONG]` | bench の時刻 `T` 秒から一様の値を変える |
+| `--assume KEY=VALUE` | **planner が信じている車**の諸元だけ変える（`--vehicle` の逆） |
+| `--grip FILE` / `--save-grip FILE` | 学習した値を読んでから走る / 走り終えた値を書く（保存値からの再開） |
+| `--launch-ratio R` | 横の限界÷発進の加速度を知っている状態から始める |
+| `--grip-per-lap` | 横を周の境目でだけ上げる（収束の速さを比べる基準版） |
+| `--grip-set KEY=VALUE` | 横の学習の定数（`grip.GripConfig`）を上書き |
+| `--sim KEY=VALUE` | センサ誤差（`sim.params.SimParams`）を上書き |
+| `--real-noise` | **実機で測った走行中の揺れ**（ヨーレート・車速・実舵角。約 11Hz）をテレメトリに足す（`sim.params.REAL_VIBRATION`）。★学習のしきい値・上げ幅を変えたら、これ有り・無しの両方で走らせる |
+| `--set KEY=VALUE` | planner の設定。**GUI から隠した項目（`ParamSpec.hidden`）も bench からは上書きできる** |
+
+結果の「横G学習」の行に、終わったときの値と真値・収束した時刻・前兆の回数と**誤検出**・前兆のあと
+1.5 秒の横偏差の最大と壁との余裕の最小が出る。その下に加速・減速の値と真値、値を下げた測定の一覧、
+窓ごとの判定の集計（「限界」と測った値の真値との誤差・**取り違え**の数）、評価しなかった窓の理由が出る。
+`--trace` の CSV には `slip`（真値の超過率）・`g_level`・`g_excess`・`g_cap`・`g_gate` が入り、あわせて
+`<trace>.long.csv`（加速・減速の学習へ渡した値と、その瞬間の真値）・`<trace>.path.csv`（終わったときに
+追っていた経路と速度）を書く。
+
+★ベンチは**実時間**で回る。並列は 2 本まで。1 行目の「計画 … 最大」が 90ms を超えた走行と、
+「指令の間隔 最大」が 150ms を超えた走行（★が付く）は捨てて走らせ直す。後者はホストが詰まって仮想 STM32 の
+デッドマン（`cmd_deadman_ms`）が車を止めた走行で、直線の途中で止まり、走り直す所で壁に当たることがある
+（2026-10-12 に「衝突」として 3 回見えたのはこれだった。走りの問題ではない）。
+
+シムの路面（`sim/surface.py`）と TC の旗は**作り物**: 車は限界で曲率がいきなり頭打ちになり
+（実機のタイヤは徐々に逃げる）、後輪が巻き込む動き・後輪のロックは無い。TC の旗は駆動の加速度が
+上限で頭打ちの間に立てているだけ（`sim/stm32.py`）。
+
+★**シムの既定の雑音は実機よりずっと小さい**（ジャイロ σ 0.3°/s。実機の走行中は高周波だけで 4.5〜8°/s、
+舵も σ 0.016rad でばたつく）。既定のシムだけで決めたしきい値を実機に入れたら、滑っていない車で前兆が
+46 回出て、横の上限が下限まで落ちた（2026-10-12、1 周 5.7s → 13.1s）。`--real-noise` を付けた走行と、
+下の「実機の記録を流し直す」の両方で確かめること。
+
+#### 実機の記録を学習に流し直す（`raspi/tools/grip_replay.py`）
+
+横の前兆の判定は 100Hz の車両状態（車速・ヨーレート・実舵角）だけで決まるので、記録をそのまま
+流せば実機で何が前兆と判定されたかが手元で再現できる。**滑っていない記録では前兆 0 が合格。**
+
+```bash
+.venv/bin/python -m raspi.tools.grip_replay ~/Downloads/surge_xxx.mcap            # 学習を入れて走った記録
+.venv/bin/python -m raspi.tools.grip_replay ~/Downloads/surge_xxx.mcap --pin 4.9  # 学習なしの記録: 上限を固定して流す
+.venv/bin/python -m raspi.tools.grip_replay x.mcap --set noise_k=8                # GripConfig を変えて比べる
+.venv/bin/python -m raspi.tools.grip_replay x.mcap --end 100 --export x.npz       # テスト用の小さな記録に抜く
+```
+
+- 流し直しは開ループ（前兆で目標速度を落としても、記録の車速は変わらない）。**学習なしで走った記録を
+  `--pin` なしで流すと、上限だけ上がって車が付いて来ないので「頭打ち」が出る**——`--pin` を使う
+- 回帰テスト（`raspi/tests/test_grip.py` の `TestRealNoise`）は `raspi/tests/data/grip_real_*.npz`
+  （2026-10-11・12 の実機の記録）を流す。実機で誤検出した記録が増えたら、ここへ足す
+- 学習を入れて走った記録には `auto/state.grip`（学習値・不足としきい値・測った雑音の幅・試行の
+  平均の不足・横偏差の増え・加速と減速の学習へ渡した計画の速度と加速度）が 10Hz で入る
+
+#### 走行中の学習を実機で初めて試すとき
+
+シムで決めたしきい値・上げ幅をそのまま使わない。安全側から順に:
+
+1. **記録だけ取る**（`grip_learn` = 0 のまま普段どおり周回）。記録を `grip_replay --pin <走っていた
+   横加速度>` に流し、前兆が 0 であることを見る（上の節）。しきい値は測った雑音の幅から自動で決まる
+   （`GripConfig.noise_k`）が、車・路面・センサが変わって雑音の形が変われば誤検出しうる
+2. **下げるだけ**: `grip_learn` 1・`grip_down_only` 1。出発点は同定値の 0.85 倍（横）・0.95 倍（加速）・
+   0.75 倍（減速）で、そこから上げない（減速を強く求めて測ることもしない）。前兆が誤って出ないか
+   （reason の「前兆 n回」が何もない所で増えないか、加速・減速の値が下がり続けないか）を見る。
+   ★加速・減速は「車速の傾き」で測る。実機の前輪エンコーダは粗いので、記録（MCAP）から 0.15〜0.4 秒の
+   窓の傾きがどれだけばらつくかを先に見ておく（シムの車速には雑音が無い。単体テストは σ 0.02m/s で 6% 以内）
+3. **上げる**: `grip_down_only` 0・`grip_max` を今走れている値＋0.5m/s² 程度（例 5.0）・`v_max` は
+   普段より下げる。壁の外側に緩衝材を置く。★横は**限界の見積もりそのものまで出す**。出してよい
+   上限は `grip_max` で決める。上げ幅（既定 6%）は隠した設定 `grip_step` で、実機で小さくしたいときは
+   `raspi/auto/slam2d_raceline.py` の既定値を変える
+   ★加速・減速も同時に学習される（切り離す設定は無い）。減速は、制動区間の初めの 0.35 秒だけ確かめた
+   値の 1.15 倍を求めて測る——その間、車は目標より速いまま残る。最初は長い直線の後の制動だけで働くよう、
+   `v_max` を下げすぎない。実機に入れる前に `PROGRESS.md` の「届いていない所」を読むこと。
+   ★実機の車速の雑音では、加速・減速は窓をいくつも溜めてから決めるので**上がるのが遅い**（シムで
+   真値 2.56 に対して 170 秒で 1.91 → 2.2）。出発点（同定値の 0.75 倍）のまま走る周が続く
+4. 値が落ち着いたら `grip_max` を上げる。本番の計測走行は、練習で収束した値を保存したうえで
+   `grip_down_only` 1（保存した値の 0.92 倍から始まり、上げない）
 
 ### 4.4 SLAM だけを数値で比べる（`sim.slam_bench`）
 
@@ -683,6 +775,7 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | ssh が IPv6 に行ってしまう | avahi は IPv6 リンクローカルも広告し、ssh は IPv6 を優先する | `~/.ssh/config` に **`AddressFamily inet`**（設定済み）。curl は `-4` |
 | 素の `ping 169.254.55.2` が通らない | `169.254/16` のルートが複数 IF に重複して載っている | **これで「直結が死んだ」と誤診したことがある。** IF 明示で見る |
 | どうしても IP が要る | — | `arp -an \| grep -i 2c:cf:67`（Raspberry Pi Ltd の MAC prefix） |
+| Wi-Fi 経由で、数分おきに数秒だけ遅延が 20〜125ms に跳ねる（操縦のデッドマンは 150ms） | **NetworkManager が wpa_supplicant に定期スキャンをさせている**（`bgscan simple:30:-65:300`＝−65dBm より強ければ 5分ごと、弱ければ **30秒ごと**。1回 約3.6秒、全チャンネル） | **接続先の AP（BSSID）を固定する**と止まる: `sudo nmcli con mod <接続名> 802-11-wireless.bssid <BSSID>` → `sudo nmcli con up <接続名>`。確認は `sudo wpa_cli -i wlan0 get_network 0 bgscan`（`FAIL` なら無し）と `iw event -t`。**固定すると他の AP（メッシュの別の子機）へ移らない**。戻すのは BSSID に `""`。接続ごとの設定なので、会場の AP でもやり直す |
 
 ### 8.2 GUI が古い・表示がコードと合わない
 

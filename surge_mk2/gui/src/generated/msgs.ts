@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x1d3e6cd9
+export const MSGS_SCHEMA = 0x3a144ac0
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -511,6 +511,15 @@ export type AutoState = {
   park_anchor_inlier: number
   /** 推測航法からの補正量 [m] */
   park_anchor_correction: number
+  /**
+   * 走行中の学習（`raspi/nav/grip.py`、`grip_learn` が 1 の間だけ入る）の中身。**記録（MCAP）から
+   * 学習の判定を追うためのもの**で、GUI は使わない。`lat`・`acc`・`dec`＝学習値 [m/s²]、`lat_here`＝
+   * 今の場所の横の上限、`v_plan`・`a_plan`＝加速・減速の学習へ渡した計画の速度・加速度、
+   * `excess`・`thr`＝直近の不足としきい値（上限に対する割合）、`noise`＝測った雑音の幅 [1/m]、
+   * `mean`・`mean_thr`＝直近の試行の平均の不足としきい値、`cross_gain`＝同じく横偏差の増え [m]、
+   * `events`・`trials`・`passes`＝前兆・試行・通過の数、`win`・`win_noisy`＝加速・減速の窓の数
+   */
+  grip: Record<string, number>
   /** 使った点群の古さ [ms] */
   scan_age_ms: number
   /** 実測の計画レート [Hz] */

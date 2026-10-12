@@ -108,7 +108,7 @@ class TestSpeedProfile(unittest.TestCase):
         self.assertAlmostEqual(float(pl.path.v.max()), 1.5)
         pl._retime({**p, "v_max": 2.5})
         self.assertGreater(float(pl.path.v.max()), 2.0)
-        self.assertEqual(len(SPEED_KEYS), 5)
+        self.assertEqual(SPEED_KEYS, ("v_max", "v_min"))        # 人が決める「使う割合」は無い
 
 
 class TestPathGeneration(unittest.TestCase):

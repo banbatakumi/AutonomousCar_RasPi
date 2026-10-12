@@ -4,6 +4,9 @@
 
 `config/vehicle.toml` の `[control]` が唯一の定義（キーは STM32 側 `control_params.h` のフィールド名）。
 同定用の `tv_test_moment_nm` だけは `[control]` に書けない（一時的な上書きでだけ入れる）。
+車速PIのゲイン `speed_kp`・`speed_ki` だけは `[dynamics]` に書く（同定・シム・Pi の計算と共通の値）。
+**STM32 は値を持たない**（起動直後は仮置き）ので、全項目が揃っていなければ `load_control_params` は
+エラーにし、io_node は ARM を通さない。
 
 `steer_link_gain`・`steer_link_cubic`（ステアのリンクの換算、モータ角→路面舵角）もここを通る。
 調整値ではなくシステム同定の結果で、`tools/sysid` が `[control]` に書く。STM32 に入っていないと
@@ -38,7 +41,7 @@ from typing import Callable
 
 from ..proto.generated import packets
 
-__all__ = ["CONTROL_PARAM_IDS", "OVERRIDABLE", "load_control_params", "ControlParamSync",
+__all__ = ["CONTROL_PARAM_IDS", "ENABLE_KEYS", "FROM_DYNAMICS", "REQUIRED", "OVERRIDABLE", "load_control_params", "ControlParamSync",
            "DEFAULT_TOML", "STEER_LINK_X_MAX_RAD", "steer_link_road", "steer_link_x", "steer_relink"]
 
 DEFAULT_TOML = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
@@ -51,7 +54,23 @@ CONTROL_PARAM_IDS: dict[str, int] = {
         "ABS_SLIP_TARGET", "ABS_KP_NM_PER_M_S", "ABS_KI_NM_PER_M",
         "TV_LOAD_GAIN_S2_PER_M", "TV_MAX_RATIO", "TV_TEST_MOMENT_NM",
         "STEER_LINK_GAIN", "STEER_LINK_CUBIC", "LAUNCH_EXIT_TORQUE_NM",
-        "SPEED_FF_NM_PER_M_S2", "SPEED_FF_RR_NM")}
+        "SPEED_FF_NM_PER_M_S2", "SPEED_FF_RR_NM", "SPEED_KP", "SPEED_KI")}
+
+#: `[control]` ではなく `[dynamics]` から読む項目（同定・シム・Pi の計算と共通の値。2か所に持たない）
+FROM_DYNAMICS = ("speed_kp", "speed_ki")
+
+#: `load_control_params` が揃っていることを求める数値項目（STM32 は値を持たず、上位が送るまで仮置き）
+REQUIRED = tuple(k for k in CONTROL_PARAM_IDS if k != "tv_test_moment_nm")
+
+#: `[control]` に書ける機能の ON/OFF（0/1 か true/false）。STM32 の既定は**無効**で、ここに書いた値を
+#: 接続のたびに送って有効にする（書かなければ無効のまま走る）。GUI の「走行アシスト」で切り替えたら
+#: `ControlParamSync.set_wanted()` で送る値も差し替える（そうしないと読み戻しが元へ戻してしまう）
+ENABLE_KEYS: dict[str, int] = {
+    "tc_enable": packets.Param.TC_ENABLE,
+    "tv_enable": packets.Param.TV_ENABLE,
+    "wheel_lift_guard_enable": packets.Param.WHEEL_LIFT_GUARD_ENABLE,
+    "abs_enable": packets.Param.ABS_ENABLE,
+}
 
 #: ステアのリンクの換算（`steer_link_gain`・`steer_link_cubic`）の入力 x = モータ角×リンク比 の
 #: 可動範囲 [rad]。STM32 側 `steering.h` の STEERING_MAX_ANGLE_RAD × STEERING_LINKAGE_RATIO
@@ -84,42 +103,54 @@ def steer_relink(angle_rad: float, link_from: tuple[float, float], link_to: tupl
     return steer_link_road(steer_link_x(angle_rad, *link_from), *link_to)
 
 #: 一時的に上書きできる項目（調整パラメータ全部＋機能の ON/OFF）→ `param_id`
-OVERRIDABLE: dict[str, int] = {
-    **CONTROL_PARAM_IDS,
-    "tc_enable": packets.Param.TC_ENABLE,
-    "tv_enable": packets.Param.TV_ENABLE,
-    "wheel_lift_guard_enable": packets.Param.WHEEL_LIFT_GUARD_ENABLE,
-    "abs_enable": packets.Param.ABS_ENABLE,
-}
-_ENABLE_IDS = frozenset(OVERRIDABLE[k] for k in ("tc_enable", "tv_enable", "wheel_lift_guard_enable",
-                                                 "abs_enable"))
+OVERRIDABLE: dict[str, int] = {**CONTROL_PARAM_IDS, **ENABLE_KEYS}
+_ENABLE_IDS = frozenset(ENABLE_KEYS.values())
 
 #: 送った値と `applied` の一致の許容（STM32 は float32 で持つ）
 _REL_TOL = 1e-5
 _ABS_TOL = 1e-7
 
 
-def load_control_params(toml_path: str | Path = DEFAULT_TOML) -> dict[str, float]:
-    """`vehicle.toml` → STM32 へ送る値（キーは `CONTROL_PARAM_IDS` の名前）。
+def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = True) -> dict[str, float]:
+    """`vehicle.toml` → STM32 へ送る値（キーは `CONTROL_PARAM_IDS`・`ENABLE_KEYS` の名前）。
 
-    `[control]` が無ければ空（＝何も送らず、STM32 の既定値のまま走る）。
-    :raises ValueError: `[control]` に知らないキー・数でない値がある
+    `strict`（既定）: STM32 は値を持たないので、`REQUIRED` の項目が1つでも欠けていればエラー。
+    `[control]` が無い場合も同じ。`tc_enable` などの ON/OFF は書かなければ送らない（STM32 の既定＝無効）。
+    :raises ValueError: 知らないキー・数でない値・（strict のとき）足りない項目
     """
     with open(toml_path, "rb") as f:
         d = tomllib.load(f)
     control = d.get("control")
-    if control is None:
-        return {}
     out: dict[str, float] = {}
-    for key, value in control.items():
+    for key, value in (control or {}).items():
         if isinstance(value, dict):          # [control.plant] など（Pi は使わない）
             continue
+        if key in ENABLE_KEYS:
+            if isinstance(value, bool) or value in (0, 1):
+                out[key] = 1.0 if value else 0.0
+                continue
+            raise ValueError(f"[control] {key} は 0/1 か true/false です: {value!r}")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError(f"[control] {key} が数ではありません: {value!r}")
+        if key in FROM_DYNAMICS:
+            raise ValueError(f"[control] {key} は [dynamics] に書いてください（そちらが唯一の定義）")
         if key in CONTROL_PARAM_IDS and key != "tv_test_moment_nm":
             out[key] = float(value)
         else:
             raise ValueError(f"[control] に知らないキーがあります: {key}")
+    dyn = d.get("dynamics") or {}
+    for key in FROM_DYNAMICS:
+        if key in dyn:
+            v = dyn[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"[dynamics] {key} が数ではありません: {v!r}")
+            out[key] = float(v)
+    if strict:
+        missing = [k for k in REQUIRED if k not in out]
+        if missing:
+            raise ValueError("STM32 は調整パラメータの値を持たないので vehicle.toml に全項目が要ります。"
+                             f"足りない項目: {', '.join(missing)}"
+                             "（speed_kp・speed_ki は [dynamics]、ほかは [control]）")
     return out
 
 
@@ -138,11 +169,11 @@ class ControlParamSync:
     BURST = 4                       #: 1回の `tick()` で送る数の上限（UART を埋めない）
 
     def __init__(self, wanted: dict[str, float], send: Callable[[object], None]) -> None:
-        unknown = set(wanted) - set(CONTROL_PARAM_IDS)
+        unknown = set(wanted) - set(CONTROL_PARAM_IDS) - set(ENABLE_KEYS)
         if unknown:
             raise ValueError(f"知らない調整パラメータ: {sorted(unknown)}")
         self._send = send
-        self._base: dict[int, float] = {CONTROL_PARAM_IDS[k]: float(v) for k, v in wanted.items()}
+        self._base: dict[int, float] = {OVERRIDABLE[k]: float(v) for k, v in wanted.items()}
         self._names: dict[int, str] = {v: k for k, v in OVERRIDABLE.items()}
         self._overrides: dict[int, float] = {}
         #: 上書きを外すときに戻す値（ON/OFF は上書きの直前に STM32 が答えていた値）
@@ -166,6 +197,18 @@ class ControlParamSync:
         self._unsupported.clear()
         self._clamped.clear()
         self._last_tx.clear()
+
+    def set_wanted(self, name: str, value: float) -> None:
+        """送る値（`[control]` 由来）を差し替える。GUI の ON/OFF が変えた機能が、読み戻しで元へ戻らないように。
+
+        `[control]` に無い項目は何もしない（GUI は STM32 へ直接送り、ここは関与しない）。
+        """
+        pid = OVERRIDABLE.get(name)
+        if pid is None or pid not in self._base or self._base[pid] == float(value):
+            return
+        self._base[pid] = float(value)
+        self._confirmed.discard(pid)
+        self._last_tx.pop(pid, None)
 
     def set_overrides(self, overrides: dict[str, float]) -> None:
         """一時的な上書きを差し替える（空にすれば元へ戻す）。知らない名前・数でない値は無視する。"""

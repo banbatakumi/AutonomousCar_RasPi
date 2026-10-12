@@ -22,6 +22,9 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from raspi.core.control_params import DEFAULT_TOML, load_control_params  # noqa: E402
+
 __all__ = ["FW_DIR", "ParamSpec", "param_table", "Firmware", "Session", "HostPlant", "HostConfig",
            "IN", "OUT", "ABI"]
 
@@ -180,14 +183,28 @@ class Firmware:
         self.has_params = bool(self._lib.host_sim_has_params())
         self.params = param_table(tree) if self.has_params else {}
 
+    def base_params(self) -> dict[str, float]:
+        """`vehicle.toml` の値（Pi が STM32 へ送るのと同じもの）。ファームは既定値を持たず、これが唯一の出どころ。
+
+        ファームの表にあって toml に無い項目はエラー。古いコミットのファームに無い項目は捨てる。
+        """
+        wanted = load_control_params(DEFAULT_TOML, strict=False)
+        base = {k: v for k, v in wanted.items() if k in self.params}
+        missing = [k for k in self.params if k not in base and k != "tv_test_moment_nm"]
+        if missing:
+            raise ValueError(f"vehicle.toml に調整パラメータが足りません: {', '.join(missing)}")
+        return base
+
     def _kv(self, params: dict[str, float] | None):
-        if not params or not self.has_params:
+        """`params`（省略可）を toml の値の上に重ねて、ファームへ渡す列にする。"""
+        if not self.has_params:
             return (_HostParam * 0)()
-        unknown = set(params) - set(self.params)
+        merged = {**self.base_params(), **(params or {})}
+        unknown = set(merged) - set(self.params)
         if unknown:
             raise KeyError(f"ファームに無いパラメータ: {sorted(unknown)}")
-        return (_HostParam * len(params))(*[_HostParam(self.params[k].id, float(v))
-                                            for k, v in params.items()])
+        return (_HostParam * len(merged))(*[_HostParam(self.params[k].id, float(v))
+                                            for k, v in merged.items()])
 
     def session(self, plant: HostPlant, config: HostConfig,
                 params: dict[str, float] | None = None) -> "Session":
@@ -196,7 +213,7 @@ class Firmware:
 
     def run(self, plant: HostPlant, config: HostConfig, inputs: np.ndarray,
             params: dict[str, float] | None = None) -> np.ndarray:
-        """`inputs`（n×len(IN)）を入れて n×len(OUT) を返す。`params` は名前 → 値（省略は既定値）。"""
+        """`inputs`（n×len(IN)）を入れて n×len(OUT) を返す。`params` は名前 → 値（`vehicle.toml` の値の上に重ねる。省略は toml のまま）。"""
         u = np.ascontiguousarray(inputs, dtype=np.float64)
         if u.ndim != 2 or u.shape[1] != len(IN):
             raise ValueError("inputs の形が違います")

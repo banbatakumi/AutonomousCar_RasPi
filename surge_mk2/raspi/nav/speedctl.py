@@ -125,7 +125,7 @@ def ref_command(path: RaceLine, pos: float, v_now: float, *, lead_s: float,
 CATCH_UP_M = 6.0
 
 
-def catch_up(path: RaceLine, index: int, v_now: float, *, a_accel: float, a_grip: float,
+def catch_up(path: RaceLine, index: int, v_now: float, *, a_accel: float, a_grip,
              ahead_m: float = CATCH_UP_M) -> RaceLine:
     """今の車速から**摩擦円の中で加速して**プロファイルに追いつくまでの速度を付けた経路。
 
@@ -146,7 +146,8 @@ def catch_up(path: RaceLine, index: int, v_now: float, *, a_accel: float, a_grip
     step = max(path.length / (n if closed else max(1, n - 1)), 1e-6)
     kap = np.abs(path.kappa) if len(path.kappa) == n else np.zeros(n)
     v = np.array(path.v, dtype=np.float64, copy=True)
-    inv2 = 1.0 / (a_grip * a_grip) if a_grip > 1e-9 else 0.0
+    # `a_grip` は点ごとの配列でもよい（走行中に学習した横グリップ、`nav/grip.py`）
+    grip = np.broadcast_to(np.asarray(a_grip, dtype=np.float64), (n,))
     vi = max(float(v_now), 0.05)
     i = index % n if closed else min(max(index, 0), n - 1)
     for _ in range(max(1, int(ahead_m / step))):
@@ -154,7 +155,8 @@ def catch_up(path: RaceLine, index: int, v_now: float, *, a_accel: float, a_grip
             break                              # プロファイルに追いついた
         v[i] = vi
         ay = vi * vi * float(kap[i])
-        r = 1.0 - ay * ay * inv2
+        g = float(grip[i])
+        r = 1.0 - ay * ay / (g * g) if g > 1e-9 else 1.0
         vi = math.sqrt(vi * vi + 2.0 * (a_accel * math.sqrt(r) if r > 0.0 else 0.0) * step)
         i += 1
         if closed:

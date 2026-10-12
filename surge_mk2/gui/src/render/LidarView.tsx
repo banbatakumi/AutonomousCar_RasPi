@@ -40,6 +40,12 @@ const VEHICLE = {
   front: Math.max(...VEHICLE_GEOM.footprint.map(([x]) => x)), // 原点より前に出ている量
   back: -Math.min(...VEHICLE_GEOM.footprint.map(([x]) => x)), // 原点より後ろに出ている量
   width: 2 * Math.max(...VEHICLE_GEOM.footprint.map(([, y]) => Math.abs(y))),
+  track: VEHICLE_GEOM.track,
+  wheelLen: 2 * VEHICLE_GEOM.wheelRadius,
+  wheelWidth: VEHICLE_GEOM.wheelWidth,
+  // LiDAR は base_link の (x, y)。画面の中心は LiDAR なので、車体はその分ずらして描く
+  lidarX: VEHICLE_GEOM.lidar.x,
+  lidarY: VEHICLE_GEOM.lidar.y,
 }
 
 const C = {
@@ -143,6 +149,12 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
       const sx = (_x: number, y: number) => cx - y * px
       const sy = (x: number, _y: number) => cy - x * px
 
+      // base_link（後輪車軸中心）の画面位置。LiDAR が (cx, cy) に来るよう取付位置ぶんずらす
+      const bx = cx + VEHICLE.lidarY * px
+      const by = cy + VEHICLE.lidarX * px
+      const sbx = (_x: number, y: number) => bx - y * px
+      const sby = (x: number, _y: number) => by - x * px
+
       drawGrid(ctx, w, h, cx, cy, px, zoom)
 
       const scan = live.scan
@@ -175,10 +187,10 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
 
       const vs = live.vs
       if (vs) {
-        drawUltrasonic(ctx, vs.us_front, vs.us_rear, sx, sy, px)
-        drawPredictedPath(ctx, vs.steer_actual, vs.speed, sx, sy)
+        drawUltrasonic(ctx, vs.us_front, vs.us_rear, sbx, sby, px)
+        drawPredictedPath(ctx, vs.steer_actual, vs.speed, sbx, sby)
       }
-      drawVehicle(ctx, cx, cy, px, vs?.steer_actual ?? 0)
+      drawVehicle(ctx, bx, by, px, vs?.steer_actual ?? 0)
 
       if (parkingModeRef.current) {
         //: 計画した経路。**ドラッグ中でも描く**（今の経路と新しい目標を
@@ -423,24 +435,22 @@ function drawVehicle(
   ctx.lineWidth = 1.5
   ctx.stroke()
 
-  // 後輪車軸（原点）を示す線
-  ctx.beginPath()
-  ctx.moveTo(-W / 2, 0)
-  ctx.lineTo(W / 2, 0)
-  ctx.stroke()
-
-  // 前輪の向き（**実測舵角**）。指令との差がステアリングの遅れそのもの
-  ctx.strokeStyle = C.path
-  ctx.lineWidth = 3
-  for (const side of [-1, 1]) {
-    ctx.save()
-    ctx.translate((side * W) / 2, -VEHICLE.wheelbase * px)
-    ctx.rotate(-steer) // 反時計回りが正。画面は y 反転なので符号を返す
-    ctx.beginPath()
-    ctx.moveTo(0, -7)
-    ctx.lineTo(0, 7)
-    ctx.stroke()
-    ctx.restore()
+  // 車輪。後輪は車軸（原点）、前輪は `wheelbase` 前方。前輪は**実測舵角**で回す
+  // （指令との差がステアリングの遅れそのもの）
+  const wl = VEHICLE.wheelLen * px
+  const ww = VEHICLE.wheelWidth * px
+  for (const [ax, rot, col] of [
+    [0, 0, C.bodyLine],
+    [VEHICLE.wheelbase, steer, C.path],
+  ] as const) {
+    for (const side of [-1, 1]) {
+      ctx.save()
+      ctx.translate((side * VEHICLE.track * px) / 2, -ax * px)
+      ctx.rotate(-rot) // 反時計回りが正。画面は y 反転なので符号を返す
+      ctx.fillStyle = col
+      ctx.fillRect(-ww / 2, -wl / 2, ww, wl)
+      ctx.restore()
+    }
   }
   ctx.restore()
 }

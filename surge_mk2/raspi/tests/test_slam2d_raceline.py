@@ -420,7 +420,7 @@ class TestObstaclePadFollowsPath(unittest.TestCase):
         return p
 
     def _pad(self, wall_y: float, pad: float = 0.25) -> float:
-        return self._planner(wall_y)._obstacle_pad(Slam2dRaceLine.merged({"obstacle_pad": pad}))
+        return self._planner(wall_y)._obstacle_pad(Slam2dRaceLine.merged({"obstacle_pad": pad}, hidden=True))
 
     def test_narrowed_to_the_wall_clearance_of_the_path(self):
         self.assertAlmostEqual(self._pad(-0.20), 0.20, delta=0.03)
@@ -776,7 +776,7 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         return p
 
     def test_lost_coasts_on_dead_reckoning_then_stops(self):
-        params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4})
+        params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4}, hidden=True)
         p = self._race_on_line(params)
         weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
         states = [p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
@@ -795,7 +795,7 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertEqual(p._coast_t, 0.0)
 
     def test_coast_disabled_stops_immediately(self):
-        params = Slam2dRaceLine.merged({"coast_s": 0.0})
+        params = Slam2dRaceLine.merged({"coast_s": 0.0}, hidden=True)
         p = self._race_on_line(params)
         weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
         st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)

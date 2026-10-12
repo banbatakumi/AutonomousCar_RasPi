@@ -14,7 +14,14 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import NamedTuple
 
-__all__ = ["SimParams", "TUNABLES", "Tunable"]
+__all__ = ["SimParams", "TUNABLES", "Tunable", "REAL_VIBRATION"]
+
+#: 実機の走行中の雑音（`SimParams.vib_*`）。2026-10-11・12 の実機の記録 2 本（`raspi/tests/data/
+#: grip_real_*.npz`、車速 0.8m/s 以上）から、150ms の移動平均を引いた残りの標準偏差を測った値:
+#: ヨーレート 0.144・0.085rad/s（平均車速 2.26・1.25m/s）、車速 0.046・0.029m/s、実舵角 0.016rad。
+#: 隣の標本との相関は 0.4〜0.8 で 3〜5 標本先は負＝約 11Hz で揺れている（舵指令のばたつきに
+#: 車が応えているぶんを含む）。`sim.bench --real-noise` で入る
+REAL_VIBRATION = {"vib_gyro_dps_per_m_s": 3.8, "vib_speed_ratio": 0.021, "vib_steer_rad": 0.016}
 
 #: `sim.run` を起動するたびの既定値リセットを避けるための保存先。`telemetry_node.py` の
 #: `config/*.json` と同じ流儀（`.gitignore` 済み）。`sim.run` は Mac のローカルチェックアウトで
@@ -56,6 +63,14 @@ class SimParams:
     #: 既定 0.02°/s ≒ 1.2°/min
     gyro_bias_dps: float = 0.02
     gyro_noise_dps: float = 0.3            #: ヨーレートのランダムノイズ σ [°/s]
+    #: **走行中の揺れ**（車体の振動・舵のばたつき）。白色ではなく `vib_hz` あたりで揺れる雑音を、
+    #: テレメトリのヨーレート・車速・実舵角に足す（車の運動は変えない）。既定 0 = 足さない。
+    #: 実機の値は `REAL_VIBRATION`。★これが 0 のシムで決めたしきい値は実機で通用しない
+    #: （横グリップの学習の前兆が、滑っていない実機で 46 回出た。`PROGRESS.md` 2026-10-12）
+    vib_gyro_dps_per_m_s: float = 0.0      #: ヨーレートの揺れ σ [°/s]（車速 1m/s あたり）
+    vib_speed_ratio: float = 0.0           #: 車速の揺れ σ（車速に対する割合）
+    vib_steer_rad: float = 0.0             #: 実舵角の揺れ σ [rad]（走行中だけ）
+    vib_hz: float = 11.0                   #: 揺れの中心の周波数 [Hz]
 
     # ── リンク ──
     #: フレームのバイトを化けさせる確率（1バイトあたり）。CRC エラーの表示確認用。

@@ -718,6 +718,14 @@ class AutoState(MsgBase):
     park_anchor_inlier: float = 0.0         #: 対応が付いた点の割合 0〜1
     park_anchor_correction: float = 0.0    #: 推測航法からの補正量 [m]
 
+    #: 走行中の学習（`raspi/nav/grip.py`、`grip_learn` が 1 の間だけ入る）の中身。**記録（MCAP）から
+    #: 学習の判定を追うためのもの**で、GUI は使わない。`lat`・`acc`・`dec`＝学習値 [m/s²]、`lat_here`＝
+    #: 今の場所の横の上限、`v_plan`・`a_plan`＝加速・減速の学習へ渡した計画の速度・加速度、
+    #: `excess`・`thr`＝直近の不足としきい値（上限に対する割合）、`noise`＝測った雑音の幅 [1/m]、
+    #: `mean`・`mean_thr`＝直近の試行の平均の不足としきい値、`cross_gain`＝同じく横偏差の増え [m]、
+    #: `events`・`trials`・`passes`＝前兆・試行・通過の数、`win`・`win_noisy`＝加速・減速の窓の数
+    grip: dict[str, float] = msgspec.field(default_factory=dict)
+
     # ── 鮮度（planning_node が入れる） ──
     scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]
     plan_hz: float = 0.0                   #: 実測の計画レート [Hz]

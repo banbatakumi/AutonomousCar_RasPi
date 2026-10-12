@@ -672,15 +672,19 @@ class IoNode:
         if msg.kind == "gui_connect" and self.buzzer is not None:
             self.buzzer.play(MELODY_GUI_CONNECT)
         elif msg.kind == "tc_enable":
+            self.control_sync.set_wanted("tc_enable", 1.0 if msg.value else 0.0)
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.TC_ENABLE, value=1.0 if msg.value else 0.0))
         elif msg.kind == "tv_enable":
+            self.control_sync.set_wanted("tv_enable", 1.0 if msg.value else 0.0)
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.TV_ENABLE, value=1.0 if msg.value else 0.0))
         elif msg.kind == "wheel_lift_guard_enable":
+            self.control_sync.set_wanted("wheel_lift_guard_enable", 1.0 if msg.value else 0.0)
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE, value=1.0 if msg.value else 0.0))
         elif msg.kind == "abs_enable":
+            self.control_sync.set_wanted("abs_enable", 1.0 if msg.value else 0.0)
             self.link.send(packets.ConfigSet(
                 param_id=packets.Param.ABS_ENABLE, value=1.0 if msg.value else 0.0))
         elif msg.kind == "brake_hold_enable":

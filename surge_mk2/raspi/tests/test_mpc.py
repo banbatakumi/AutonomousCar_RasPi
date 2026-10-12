@@ -127,6 +127,31 @@ class TestMPC(unittest.TestCase):
             yaw += 2.0 / L * math.tan(steer) * 0.02
         self.assertLess(abs(y), 0.02)
 
+    def test_経路の点の間を進んでも舵が振れない(self):
+        """★ 経路の上をぴったり走る車には、点と点の間のどこに居ても同じ舵を返す。
+
+        偏差を「最寄りの点」の接線で測ると、点の間（10cm）を進む間に向きの偏差が κ·刻み だけ
+        増えて次の点で跳ね戻り、50Hz では舵指令がのこぎり波になる（実機の記録: ヘアピンで
+        約 11Hz・±0.05rad。半径 0.55m の円では指令の幅 0.16rad）。経路上へ射影した位置で測る。
+        """
+        from raspi.nav import raceline as rl
+        r = 0.55
+        n = int(round(2.0 * math.pi * r / 0.1))
+        th = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+        xy = np.c_[r * np.cos(th), r * np.sin(th)]
+        path = rl.RaceLine(xy=xy, v=np.full(n, 1.2), kappa=rl.curvature(xy), length=2.0 * math.pi * r)
+        cfg = MPCConfig()
+        steer = math.atan(cfg.wheelbase / r)
+        m = MPCFollower()
+        out = []
+        for k in range(60):
+            a = 0.3 + k * (1.2 * 0.02) / r             # 円の上を 1.2m/s・50Hz で進む（偏差 0）
+            pose = (r * math.cos(a), r * math.sin(a), a + math.pi / 2.0)
+            out.append(m.follow(path, pose, 1.2, steer, cfg, now=k * 0.02).steer)
+        out = np.asarray(out[5:])
+        self.assertLess(out.max() - out.min(), 0.005)
+        self.assertAlmostEqual(float(out.mean()), steer, delta=0.02)
+
     def test_plannerの切替パラメータ(self):
         keys = {s.key for s in PLANNERS["slam2d_raceline"].params}
         self.assertTrue({"ctrl_mode", "mpc_horizon", "mpc_dt", "mpc_q_y", "mpc_q_psi",

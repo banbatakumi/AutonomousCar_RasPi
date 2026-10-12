@@ -59,6 +59,7 @@ from raspi.proto.generated import packets  # noqa: E402
 
 from .course import list_courses  # noqa: E402
 from .link import create_sim_link  # noqa: E402
+from .params import REAL_VIBRATION  # noqa: E402
 
 __all__ = ["Bench", "Result"]
 
@@ -121,6 +122,27 @@ class Result:
         self.detour_starts = 0                 #: Hybrid A* の迂回に入った回数
         self.detour_s = 0.0                    #: 迂回していた時間 [s]
         self.stop_s = 0.0                      #: RACE 中に止まっていた時間 [s]（車速 < 0.05）
+        # 横グリップの学習（`raspi/nav/grip.py`。planner の内部状態と真値を突き合わせる）
+        self.grip_on = False
+        #: 前兆ごとの記録: RACE 開始からの時刻・学習側の値・真値の超過率（0 = 限界より下＝誤検出）・
+        #: その後 1.5 秒の横偏差の最大と壁との余裕の最小
+        self.grip_events: list[dict] = []
+        self.grip_conv_t: float | None = None  #: 収束した時刻（RACE 開始から）[s]
+        self.grip_conv_laps: int | None = None #: そのとき走り終えていた周の数
+        self.grip_level = 0.0                  #: 終わったときの全体の値 [m/s²]
+        self.grip_bad = 0.0
+        self.grip_state = ""
+        self.grip_trials = (0, 0)              #: (試行, 通った数)
+        self.grip_launch: float | None = None  #: 発進の加速度の見積もり [m/s²]
+        self.grip_ratio = 0.0
+        self.grip_true = 0.0                   #: 終わったときの真値の横の限界 [m/s²]
+        #: 限界より下で走っている間の、前兆の量（`dev − base`）の最大と p99.9（しきい値の余裕）
+        self.grip_excess: list[float] = []
+        self.grip_levels: list[tuple[float, float]] = []   #: (RACE 開始からの時刻, 全体の値) の移り変わり
+        #: 加速・減速の学習（終わりの値・真値・出なかった窓・移り変わり）
+        self.grip_long: dict = {}
+        self.cmd_gap_ms = 0.0                  #: 指令を送る間隔の最大 [ms]
+        self.slow_ms: dict[str, float] = {}
 
     def report(self) -> str:
         def stat(v, unit, scale=1.0):
@@ -131,8 +153,13 @@ class Result:
                     f"中央 {statistics.median(a):.2f}{unit} "
                     f"最大 {max(a):.2f}{unit}")
 
+        gap = (f"  指令の間隔 最大 {self.cmd_gap_ms:.0f}ms"
+               + ("（★150ms を超えた。デッドマンで止まった走行。捨てて走らせ直す）"
+                  if self.cmd_gap_ms > 150.0 else ""))
+        if self.cmd_gap_ms > 100.0:
+            gap += "  各部の最大 " + "・".join(f"{k} {v:.0f}ms" for k, v in self.slow_ms.items())
         out = [
-            f"計画       {self.plans} 回  1周期 {stat(self.plan_ms, 'ms')}",
+            f"計画       {self.plans} 回  1周期 {stat(self.plan_ms, 'ms')}{gap}",
             f"自己位置   {stat(self.pose_err, 'cm', 100)}",
             f"向き       {stat(self.yaw_err, '°')}",
             f"横偏差     {stat([abs(c) for c in self.cross], 'cm', 100)}",
@@ -177,6 +204,71 @@ class Result:
                   if self.avoid_ms else "")
             out.append(f"回避       止まらず避けた {self.avoid_starts} 回（うち引き直し {self.avoid_elastic}） {ms}  "
                        f"迂回(Hybrid A*) {self.detour_starts} 回・{self.detour_s:.1f}s")
+        if self.grip_on:
+            ev = self.grip_events
+            # 頭打ち（区間を抜けてから分かる前兆）は、その瞬間の真値と突き合わせられないので別に数える
+            flat = sum(1 for e in ev if e["kind"] == "頭打ち")
+            false = sum(1 for e in ev if e["over"] <= 0.0 and e["kind"] != "頭打ち")
+            conv = (f"収束 {self.grip_conv_t:.1f}s・{self.grip_conv_laps}周" if self.grip_conv_t is not None
+                    else "収束せず")
+            out.append(f"横G学習    全体 {self.grip_level:.2f}m/s²（真値 {self.grip_true:.2f}・"
+                       f"前兆の値 {self.grip_bad:.2f}・{self.grip_state}）  {conv}  "
+                       f"試行 {self.grip_trials[0]}（通過 {self.grip_trials[1]}）  "
+                       f"前兆 {len(ev)} 回（うち頭打ち {flat}・誤検出 {false}）")
+            if self.grip_conv_t is not None and self.gate_laps:
+                k = self.grip_conv_laps or 0
+                after = self.gate_laps[max(k, 1):]
+                if after:
+                    ref = statistics.fmean(after)
+                    lost = sum(t - ref for t in self.gate_laps[1:max(k, 1)])
+                    out.append(f"           収束後のラップ 平均 {ref:.2f}s（{len(after)} 周）・"
+                               f"収束までに失った時間 {lost:+.2f}s（2周目から）")
+            if ev:
+                out.append("           前兆のあと 1.5s: 横偏差 最大 "
+                           f"{max(e['cross'] for e in ev) * 100:.1f}cm・壁との余裕 最小 "
+                           f"{min(e['clear'] for e in ev) * 100:.1f}cm・真値の超過 最大 "
+                           f"{max(e['over'] for e in ev) * 100:.1f}%")
+                for e in ev[:40]:
+                    out.append(f"             {e['t']:6.1f}s {e['kind']} 値 {e['b']:.2f}（上限 "
+                               f"{e['applied']:.2f}{'・想定外' if e['surprise'] else ''}）真値の超過 "
+                               f"{e['over'] * 100:+.1f}% → 横偏差 {e['cross'] * 100:.1f}cm・"
+                               f"余裕 {e['clear'] * 100:.1f}cm")
+            if self.grip_long:
+                lg = self.grip_long
+                out.append(f"           加速 {lg['acc']:.2f}m/s²（真値 {lg['acc_true']:.2f}）・減速 "
+                           f"{lg['dec']:.2f}m/s²（真値 {lg['dec_true']:.2f}）  窓 {lg['windows']}・"
+                           f"下げた {len(lg['events'])} 回"
+                           + "".join(f"\n             {e['t']:6.1f}s {e['kind']} 求めた {e['ask']:.2f}・"
+                                     f"出た {e['got']:.2f}" for e in lg["events"][:12]))
+                for name, sg in (("加速", 1), ("減速", -1)):
+                    ms = [x for x in lg["meas"] if x[1] == sg]
+                    lim = [100.0 * (x[3] / x[5] - 1.0) for x in ms if x[4] == "限界"]
+                    # 「限界」と測ったのに真値はそれより 5% 以上高い＝取り違え
+                    wrong = sum(1 for e in lim if e < -5.0)
+                    # 「出た」としたのに真値より 3% 以上高い値を求めていた＝取り違え
+                    over = sum(1 for x in ms if x[4] == "出た" and x[2] > 1.03 * x[5])
+                    if ms:
+                        err = (f"誤差 中央 {np.median(lim):+.1f}%・範囲 {min(lim):+.1f}〜{max(lim):+.1f}%"
+                               if lim else "—")
+                        out.append(f"           {name}の窓 {len(ms)}: 出た "
+                                   f"{sum(1 for x in ms if x[4] == '出た')}・限界 {len(lim)}（{err}・"
+                                   f"取り違え {wrong}）・出たの取り違え {over}")
+                if lg.get("skips"):
+                    out.append("           評価しなかった窓 " + "・".join(
+                        f"{k} {n}" for k, n in sorted(lg["skips"].items())))
+                if lg["trail"]:
+                    out.append("           加速/減速の移り変わり " + " ".join(
+                        f"{t:.0f}s:{a:.2f}/{d:.2f}" for t, a, d in lg["trail"][:40]))
+            if self.grip_launch is not None:
+                out.append(f"           発進の加速度 {self.grip_launch:.2f}m/s²・比 {self.grip_ratio:.2f}")
+            if self.grip_excess:
+                ex = np.asarray(self.grip_excess)
+                out.append(f"           限界より下での前兆の量 最大 {ex.max():.3f}・p99.9 "
+                           f"{float(np.percentile(ex, 99.9)):.3f}（しきい値 "
+                           f"{self.grip_thr:.3f}）")
+            if self.grip_levels:
+                out.append("           値の移り変わり " + " ".join(
+                    f"{t:.0f}s:{lv:.2f}" for t, lv in self.grip_levels[:60]))
         if self.lap_min_clear:
             out.append("周ごとの最小距離 " + " / ".join(f"{c * 100:.1f}cm"
                                                       for c in self.lap_min_clear))
@@ -195,7 +287,11 @@ class Bench:
                  locate_hint: tuple[float, float] | None = None,
                  obstacles: list[tuple[float, float, float]] | None = None,
                  vehicle: dict[str, float] | None = None,
-                 control: dict[str, float] | None = None) -> None:
+                 control: dict[str, float] | None = None,
+                 surface: dict | None = None, assume: dict[str, float] | None = None,
+                 grip_file: Path | None = None, grip_cfg: dict[str, float] | None = None,
+                 sim_params: dict[str, float] | None = None,
+                 launch_ratio: float = 0.0) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -223,6 +319,13 @@ class Bench:
                 f = self._real_maps_dir / f"{map_name}{suf}"
                 if f.is_file():
                     shutil.copy(f, mapstore.MAPS_DIR / f.name)
+            # 学習した横グリップは、実機の `saved_maps/` のものは使わず `--grip` で渡したものだけ読む
+            # （bench の路面は実機と別物）
+            if grip_file is not None:
+                shutil.copy(grip_file, mapstore.MAPS_DIR / f"{map_name}.grip.json")
+        if launch_ratio > 0.0:
+            # `--launch-ratio`: 車に固有の「横の限界 ÷ 発進の加速度」を知っている状態から始める
+            mapstore.save_grip_vehicle(launch_ratio)
         # `--vehicle`: **真値の車だけ**諸元を変える（planner は `config/vehicle.toml` のまま）。
         # 同定値が外れていたとき（グリップが低い・舵が届かない等）に走りが壊れないかを見る
         spec = None
@@ -235,7 +338,29 @@ class Bench:
             if bad:
                 raise SystemExit(f"--vehicle: 知らない諸元 {', '.join(bad)}")
             spec = replace(VehicleSpec.load(), **vehicle)
-        self.link = create_sim_link(course, seed=seed, with_channel=False, spec=spec)
+        params_sim = None
+        if sim_params:
+            from dataclasses import fields as _fields, replace as _replace
+
+            from .params import SimParams
+            bad = sorted(set(sim_params) - {f.name for f in _fields(SimParams)})
+            if bad:
+                raise SystemExit(f"--sim: 知らない項目 {', '.join(bad)}")
+            params_sim = _replace(SimParams.load(), **sim_params)
+        self.link = create_sim_link(course, seed=seed, with_channel=False, spec=spec,
+                                    params=params_sim)
+        # `--mu`・`--surface`・`--mu-at`: 真値の路面を場所と時刻で変える（`sim/surface.py`）
+        self.surface = None
+        if surface:
+            from .surface import Surface
+            sf = self.surface = Surface(self.link.sim.spec.mu)
+            if surface.get("base"):
+                sf.set_base(*surface["base"])
+            for d in surface.get("discs", []):
+                sf.add_disc(*d)
+            for c in surface.get("changes", []):
+                sf.add_change(*c)
+            self.link.sim.surface = sf
         # 実機では io_node が `[control]` を CONFIG_SET で STM32 へ入れる。bench は io_node を
         # 通さないので、車速PIの加速度フィードフォワード（★v0.21）だけ直に入れる
         from raspi.core.control_params import load_control_params
@@ -259,8 +384,31 @@ class Bench:
                 raise SystemExit(f"{mode!r} はモデル選択に対応していない"
                                  f"（reload_if_changedを持たない）")
             reload_fn(model)
+        if assume:
+            # `--assume`: **planner が信じている車**の諸元だけ変える（真値の車はそのまま）。
+            # 「真値を知っている固定設定」の基準を作るのに使う
+            from dataclasses import replace as _rep
+            try:
+                self.planner.vehicle = _rep(self.planner.vehicle, **assume)
+            except TypeError as e:
+                raise SystemExit(f"--assume: {e}")
+        learner = getattr(self.planner, "_grip", None)
+        if grip_cfg and learner is not None:
+            for k, val in grip_cfg.items():
+                if not hasattr(learner.cfg, k):
+                    raise SystemExit(f"--grip-set: 知らない項目 {k}")
+                setattr(learner.cfg, k, type(getattr(learner.cfg, k))(val))
+            learner.cfg.fixed_step = "step_up" in grip_cfg
+        self._grip_n = 0
+        self._grip_open: list[dict] = []
+        self._grip_slip: list[tuple[float, float]] = []    # 直近の (時刻, 真値の超過率)
+        self._grip_lv = -1.0
+        self._long_n = 0
+        self._last_cmd_ns = 0
+        self._grip_t0: float | None = None
+        self._race_t0: float | None = None
         self.mode = mode
-        self.params = merged_params(mode, params)
+        self.params = merged_params(mode, params, hidden=True)
         self.max_speed = max_speed
         self.max_steer = max_steer
         self.quiet = quiet
@@ -304,7 +452,25 @@ class Bench:
         self._trace_f = open(trace, "w") if trace else None
         if self._trace_f:
             self._trace_f.write("t,phase,x,y,yaw,v,cmd_v,brake,prof_v,idx,cross,clear,launch,"
-                                "steer_cmd,steer,a_lat,a_x,kappa\n")
+                                "steer_cmd,steer,a_lat,a_x,kappa,slip,g_level,g_excess,g_cap,g_gate\n")
+            # 加速・減速の学習（`nav/grip.LongLearner`）へ渡した値と、その瞬間の真値（`<trace>.long.csv`）
+            lg = getattr(getattr(self.planner, "_grip", None), "long", None)
+            if lg is not None:
+                self._long_f = open(str(trace) + ".long.csv", "w")
+                self._long_f.write("t,v,a_plan,lat_frac,gate,v_plan,v_true,ax_true,grip_long,u_y,"
+                                   "cmd_v,accel,decel,probe\n")
+                inner = lg.observe
+
+                def observe(t, v, a_plan, lat_frac, gate, v_plan=None, tc=False, _in=inner, _lg=lg):
+                    tv, sp = self.sim.vehicle, self.sim.spec
+                    u = tv.speed ** 2 * abs(tv._curv_req) / max(sp.mu * tv.grip_lat * 9.81, 1e-6)
+                    self._long_f.write(
+                        f"{t:.4f},{v:.4f},{a_plan:.4f},{lat_frac:.4f},{gate},"
+                        f"{float('nan') if v_plan is None else v_plan:.4f},{tv.speed:.4f},"
+                        f"{tv.accel_x:.4f},{tv.grip_long:.4f},{u:.4f},{tv.cmd.target_speed:.4f},"
+                        f"{_lg.map.accel:.4f},{_lg.map.decel:.4f},{_lg.probe:.4f}\n")
+                    return _in(t, v, a_plan, lat_frac, gate, v_plan, tc)
+                lg.observe = observe
         # 車体外形の輪郭と、真の壁からの距離場（`_clearance`）
         from scipy.ndimage import distance_transform_edt
 
@@ -370,8 +536,17 @@ class Bench:
         last_plan_ns = 0
         next_tick = next_cmd
 
+        slow = self.res.slow_ms                  # ループの各部の最大 [ms]（どこで詰まったかを見る）
+
+        def took(key: str, t_start: float) -> None:
+            if self._gate is not None:
+                slow[key] = max(slow.get(key, 0.0), (time.perf_counter() - t_start) * 1000)
+
         while time.monotonic() - t0 < duration_s:
-            for f in self.link.poll():
+            t_poll = time.perf_counter()
+            frames = self.link.poll()
+            took("シム", t_poll)
+            for f in frames:
                 msg = f.decode()
                 if isinstance(msg, packets.Telemetry):
                     self.vs = self.state.build(msg, f.rx_ns)
@@ -379,7 +554,9 @@ class Bench:
                     # 点群の合間の姿勢の前進に使う。渡さないと SLAM は
                     # 「1周のあいだ twist は一定」の近似になる）
                     if self._feed_vs is not None:
+                        t_vs = time.perf_counter()
                         self._feed_vs(self.vs)
+                        took("車両状態", t_vs)
                     continue
                 if not isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
                                         packets.LidarSectorC)):
@@ -395,9 +572,12 @@ class Bench:
                 st = self.planner.plan(scan, self.vs, self.params, dt)
                 self.res.plan_ms.append((time.perf_counter() - t_plan) * 1000)
                 self.res.plans += 1
+                took("計画", t_plan)
                 t_now = time.monotonic() - t0
+                t_rec = time.perf_counter()
                 self._record(st, t_now)
                 self._step_events(st, t_now)
+                took("記録", t_rec)
 
                 # `planning_node._cmd_from` と同じ変換に、実機で `telemetry_node._merge_auto` が
                 # 載せる GUI のレート制限（`[safety] cmd_*_limit`）を足す。★ 載せないと
@@ -425,7 +605,9 @@ class Bench:
                 st_last = getattr(self, "_last_st", None)
                 if (self._tick_fn is not None and st_last is not None and st_last.ready
                         and not cmd.brake and cmd.mode == 2):
+                    t_tick = time.perf_counter()
                     out = self._tick_fn(self.vs)
+                    took("追従", t_tick)
                     if out is not None:
                         steer, speed, ramp = out
                         if steer is not None:
@@ -436,11 +618,19 @@ class Bench:
                             cmd.accel_limit = (min(lim, ramp) if lim > 0 else ramp) if ramp > 0 \
                                 else lim
             if now >= next_cmd:
+                # 指令の間隔（ホストが詰まって `cmd_deadman_ms` を超えると、仮想 STM32 が車を止める。
+                # その走行は捨てる——走りの問題ではない）
+                # （走っている間だけ数える。地図の読み込み・ラインの計算で止まっている間は関係ない）
+                if self._last_cmd_ns and self._gate is not None and abs(self.sim.vehicle.speed) > 0.3:
+                    self.res.cmd_gap_ms = max(self.res.cmd_gap_ms, (now - self._last_cmd_ns) / 1e6)
+                self._last_cmd_ns = now
                 next_cmd = now + cmd_period
                 self.link.send(command_from_cmd(
                     cmd, allow_arm=True,
                     max_speed=self.max_speed, max_steer=self.max_steer))
+                t_smp = time.perf_counter()
                 self._sample(time.monotonic() - t0, cmd, cmd_period / NS)
+                took("集計", t_smp)
 
         self.res.collisions = self.sim.vehicle.collisions
         if self._race_col0 is not None:
@@ -454,6 +644,17 @@ class Bench:
             self.res.path_len = float(path.length)
         if self._trace_f:
             self._trace_f.close()
+            if path is not None and len(path) >= 3:
+                # 終わったときに追っていた経路（`<trace>.path.csv`）
+                from raspi.nav.raceline import speed_kappa
+                kap = speed_kappa(path.xy, path.closed)
+                with open(self._trace_f.name + ".path.csv", "w") as f:
+                    f.write("idx,x,y,v,kappa\n")
+                    for i in range(len(path)):
+                        f.write(f"{i},{path.xy[i, 0]:.4f},{path.xy[i, 1]:.4f},{path.v[i]:.4f},"
+                                f"{kap[i]:.5f}\n")
+        if getattr(self, "_long_f", None):
+            self._long_f.close()
         return self.res
 
     def _sample(self, t: float, cmd: DriveCmd, dt: float) -> None:
@@ -471,6 +672,8 @@ class Bench:
             self._gate_last_t = t
             self._gate_odom = float(v.odom_front[0])
             self._race_col0 = v.collisions
+            self._race_t0 = t
+        self._sample_grip(t, st, v)
         gx, gy, tx, ty = self._gate
         along = (v.x - gx) * tx + (v.y - gy) * ty
         lat = -(v.x - gx) * ty + (v.y - gy) * tx
@@ -529,7 +732,88 @@ class Bench:
                 f"{cmd.target_speed:.3f},{int(cmd.brake)},{pv:.3f},{i},{st.cross_track:.4f},"
                 f"{clear:.4f},{int(v.launching)},{cmd.target_steer:.4f},{v.steer_actual:.4f},"
                 f"{v.accel_lateral:.3f},{v.accel_x:.3f},"
-                f"{(v.yaw_rate / v.speed if abs(v.speed) > 0.05 else 0.0):.4f}\n")
+                f"{(v.yaw_rate / v.speed if abs(v.speed) > 0.05 else 0.0):.4f},"
+                f"{v.slip_frac:.4f},{self._trace_grip()}\n")
+
+    def _trace_grip(self) -> str:
+        g = getattr(self.planner, "_grip", None)
+        if g is None or not getattr(self.planner, "_grip_on", False):
+            return "0,0,0,"
+        return (f"{g.level_at(*self.planner.slam.pose[:2]):.3f},{g.last_excess:.4f},"
+                f"{g.cap if g.cap is not None else 0.0:.3f},{self.planner._grip_gate}")
+
+    def _sample_grip(self, t: float, st, v) -> None:
+        """横グリップの学習の状態を真値と突き合わせる（100Hz）。"""
+        pl = self.planner
+        g = getattr(pl, "_grip", None)
+        if g is None or not getattr(pl, "_grip_on", False):
+            return
+        r = self.res
+        r.grip_on = True
+        r.grip_thr = g.cfg.dev_thr
+        tr = t - (self._race_t0 or t)
+        if self._grip_t0 is None:
+            # 学習側の時刻（車両状態の時刻）と bench の時刻のずれ
+            self._grip_t0 = (self.vs.t_capture / 1e9 - tr) if self.vs is not None else 0.0
+        slip = float(v.slip_frac)
+        self._grip_slip.append((t, slip))
+        while self._grip_slip and self._grip_slip[0][0] < t - 0.4:
+            self._grip_slip.pop(0)
+        if slip <= 0.0 and not pl._grip_gate and g.last_excess != 0.0 and g.cap is None:
+            r.grip_excess.append(g.last_excess)
+        clear = self._clearance(v.x, v.y, v.yaw)
+        for e in self._grip_open:
+            e["cross"] = max(e["cross"], abs(st.cross_track))
+            e["clear"] = min(e["clear"], clear)
+            e["over"] = max(e["over"], slip)
+        self._grip_open = [e for e in self._grip_open if t - e["_t"] < 1.5]
+        while self._grip_n < len(g.events):
+            src = g.events[self._grip_n]
+            self._grip_n += 1
+            e = {"t": tr, "_t": t, "kind": src["kind"], "b": src["b"],
+                 "applied": src["applied"], "surprise": src["surprise"],
+                 "over": max(s for _, s in self._grip_slip), "cross": abs(st.cross_track),
+                 "clear": clear}
+            r.grip_events.append(e)
+            self._grip_open.append(e)
+            if not self.quiet:
+                print(f"  {t:5.1f}s ★横Gの前兆 {src['kind']} 値 {src['b']:.2f}（上限 "
+                      f"{src['applied']:.2f}）真値の超過 {e['over'] * 100:+.1f}%", flush=True)
+        if g.converged and r.grip_conv_t is None:
+            r.grip_conv_t, r.grip_conv_laps = tr, len(r.gate_laps)
+        elif not g.converged and r.grip_conv_t is not None and not g.down_only:
+            r.grip_conv_t = r.grip_conv_laps = None      # 収束が解けた（路面が変わった等）
+        if abs(g.map.level - self._grip_lv) > 1e-6:
+            self._grip_lv = g.map.level
+            r.grip_levels.append((tr, g.map.level))
+        r.grip_level, r.grip_bad = g.map.level, g.map.bad
+        r.grip_state = g.state(pl._grip_gate)
+        r.grip_trials = (g.trials, g.passes)
+        r.grip_launch, r.grip_ratio = g.launch.value, g.launch_ratio
+        r.grip_true = float(v.spec.mu * v.grip_lat * 9.81)
+        lg, sp = g.long, v.spec
+        ev = [{**e, "t": e["t"] - self._grip_t0} for e in lg.events]
+        trail = r.grip_long.get("trail", [])
+        if not trail or abs(trail[-1][1] - g.map.accel) + abs(trail[-1][2] - g.map.decel) > 1e-6:
+            trail.append((tr, g.map.accel, g.map.decel))
+        # 真値: 路面で決まる上限と、目標車速を動かす傾きの上限の小さい方
+        acc_true = min(sp.drive_accel_m_s2 * v.grip_long - sp.rolling_resistance,
+                       sp.cmd_accel_limit_m_s2)
+        dec_true = min(sp.speed_decel_m_s2 * v.grip_long + sp.rolling_resistance,
+                       sp.cmd_accel_limit_m_s2)
+        # 窓ごとの判定に、その瞬間の真値を添える（「限界」と測った値の誤差を出す）
+        meas = r.grip_long.get("meas", [])
+        if lg.windows < self._long_n:
+            self._long_n = 0                    # 学習をやり直した
+        new = lg.windows - self._long_n
+        if new > 0:
+            self._long_n = lg.windows
+            for _, sign, ask, got, verdict in lg.log[-new:]:
+                meas.append((tr, sign, ask, got, verdict, acc_true if sign > 0 else dec_true))
+        r.grip_long = {"acc": g.map.accel, "dec": g.map.decel, "windows": lg.windows, "events": ev,
+                       "trail": trail, "meas": meas, "acc_true": acc_true, "dec_true": dec_true,
+                       "skips": dict(lg.skips),
+                       "done": (lg.acc_done, lg.dec_done)}
 
     def _clearance(self, x: float, y: float, yaw: float) -> float:
         """車体外形（輪郭）と真の壁との最小距離 [m]。0 = 接触。"""
@@ -714,6 +998,21 @@ class Bench:
                 st = self._last_st
                 self.res.stop_err_est = math.hypot(st.pose_x - mx, st.pose_y - my)
 
+    def save_grip(self, dst: Path) -> str:
+        """学習した横グリップ（一時ディレクトリの `<地図>.grip.json`）を `dst` へ写す（`--save-grip`）。"""
+        import shutil
+
+        from raspi.auto import mapstore
+        save = getattr(self.planner, "_grip_save", None)
+        if save is not None:
+            save()
+        name = getattr(self.planner, "_grip_name", "")
+        src = mapstore.MAPS_DIR / f"{name}.grip.json"
+        if not name or not src.is_file():
+            return "学習した横グリップが無いので保存しない"
+        shutil.copy(src, dst)
+        return f"学習した横グリップを {dst} に保存した"
+
     def save_built_map(self, name: str) -> str:
         """bench が作った地図を実機の `saved_maps/` へ `name` で写す（`--save-map`）。"""
         import shutil
@@ -775,6 +1074,32 @@ def main() -> int:
     ap.add_argument("--control", action="append", default=[], metavar="KEY=VALUE",
                     help="**シムの STM32 だけ** `[control]` の値を上書き（今は speed_ff_nm_per_m_s2・"
                          "speed_ff_rr_nm）。planner は config/vehicle.toml のまま")
+    ap.add_argument("--mu", default=None, metavar="MU[:MU_LONG]",
+                    help="真値の路面の摩擦係数（一様）。`--vehicle mu=` と違い、加速の上限も同じ割合で変える。"
+                         "MU_LONG を付けると前後だけ別の値（前後と横で摩擦が違う路面）")
+    ap.add_argument("--surface", action="append", default=[], metavar="X,Y,R,MU[,MU_LONG]",
+                    help="シムの世界座標 (X, Y) の半径 R の円の中だけ摩擦を変える（繰り返し可）")
+    ap.add_argument("--mu-at", action="append", default=[], metavar="T:MU[:MU_LONG]",
+                    help="bench の時刻 T [s] から一様の摩擦を変える（繰り返し可）")
+    ap.add_argument("--assume", action="append", default=[], metavar="KEY=VALUE",
+                    help="**planner が信じている車**の諸元だけ上書き（`raspi.core.vehicle.Vehicle` の欄名。"
+                         "例 mu=0.55）。真値の車はそのまま")
+    ap.add_argument("--grip", default=None, metavar="FILE",
+                    help="学習した横グリップの JSON を --map の地図の横へ置いてから走る（保存値からの再開）")
+    ap.add_argument("--save-grip", default=None, metavar="FILE",
+                    help="走り終えたときの学習した横グリップを FILE へ書く")
+    ap.add_argument("--launch-ratio", type=float, default=0.0,
+                    help="横の限界 ÷ 発進の加速度（前の走行で収束したときに保存される値）を与えて始める。"
+                         "発進の加速度から横グリップの初期値を出す経路の確認用")
+    ap.add_argument("--grip-per-lap", action="store_true",
+                    help="横グリップを周の境目でだけ上げる（収束の速さを比べる基準版）")
+    ap.add_argument("--grip-set", action="append", default=[], metavar="KEY=VALUE",
+                    help="学習の定数を上書き（`raspi.nav.grip.GripConfig` の欄名。上げ幅の実測用）")
+    ap.add_argument("--sim", action="append", default=[], metavar="KEY=VALUE",
+                    help="センサ誤差などシムの設定を上書き（`sim.params.SimParams` の欄名）")
+    ap.add_argument("--real-noise", action="store_true",
+                    help="実機で測った走行中の揺れ（ヨーレート・車速・実舵角）をテレメトリに足す"
+                         "（`sim.params.REAL_VIBRATION`。`--sim` の指定が優先）")
     ap.add_argument("--obs-log", action="store_true",
                     help="障害物まわりの判断（reason の移り変わり）を時刻つきで出す")
     ap.add_argument("--quiet", action="store_true")
@@ -801,6 +1126,23 @@ def main() -> int:
             t, _, v = it.partition(":")
             events.append((float(t), kind, v))
 
+    def pairs(items):
+        return {k.strip(): float(v) for k, _, v in (it.partition("=") for it in items)}
+
+    def nums(text, sep):
+        return tuple(float(x) for x in text.split(sep))
+
+    surface: dict = {}
+    if args.mu:
+        surface["base"] = nums(args.mu, ":")
+    if args.surface:
+        surface["discs"] = [nums(d, ",") for d in args.surface]
+    if args.mu_at:
+        surface["changes"] = [nums(c, ":") for c in args.mu_at]
+    grip_cfg = pairs(args.grip_set)
+    if args.grip_per_lap:
+        grip_cfg["per_lap"] = 1.0
+
     b = Bench(course, args.mode, params, max_speed=args.max_speed,
               max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed,
               routes=routes, events=events, auto_race=not args.no_auto_race,
@@ -811,7 +1153,12 @@ def main() -> int:
               vehicle={k.strip(): float(v) for k, _, v in
                        (kv.partition("=") for kv in args.vehicle)},
               control={k.strip(): float(v) for k, _, v in
-                       (kv.partition("=") for kv in args.control)})
+                       (kv.partition("=") for kv in args.control)},
+              surface=surface or None, assume=pairs(args.assume),
+              grip_file=Path(args.grip) if args.grip else None, grip_cfg=grip_cfg,
+              sim_params=({**REAL_VIBRATION, **pairs(args.sim)} if args.real_noise
+                          else pairs(args.sim)),
+              launch_ratio=args.launch_ratio)
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)
@@ -821,6 +1168,8 @@ def main() -> int:
     b.route_report()
     if args.save_map:
         res.notes.append(b.save_built_map(args.save_map))
+    if args.save_grip:
+        res.notes.append(b.save_grip(Path(args.save_grip)))
     b.close()
     if args.obs_log:
         print("\n=== 障害物まわりの判断 ===")

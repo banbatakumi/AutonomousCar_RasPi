@@ -30,6 +30,9 @@ npzに、一覧表示に要る軽い情報だけjsonに分けることで、`lis
   **無ければ同じ名前の古い `.routes.json` を消す**（別の地図に古い経由点が残らないように）。
   ディスクの npz には `routes_json` を残さない
 
+学習した横グリップ（`raspi/nav/grip.py`、`<name>.grip.json`）も同じ流儀で `grip_json` として同梱する。
+こちらは壊れていても地図は受け付け、値だけ捨てる（無くても走れる。読み込む側が範囲を検査して丸める）。
+
 `routes_json` が無いと、Pi に上げた地図には経由点も地図作成の軌跡も無く、自動経路は保存した
 線をなぞるだけ・道路グラフの逆走禁止も効かない。`routes_json` の無い古い npz も読める。
 
@@ -54,12 +57,17 @@ import numpy as np
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
            "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
            "import_upload", "export_map", "save_routes", "load_routes", "ROUTES_KEY",
+           "save_grip", "load_grip", "save_grip_vehicle", "load_grip_vehicle", "GRIP_KEY",
            "polyline_length"]
 
 MAPS_DIR = Path(__file__).resolve().parents[2] / "saved_maps"
 
 #: DL/UL の npz に同梱する経路の設定（JSON 文字列）の項目名（モジュール docstring）
 ROUTES_KEY = "routes_json"
+#: npz に同梱する学習した横グリップの項目名（`nav/grip.GripMap` の JSON）
+GRIP_KEY = "grip_json"
+#: 車に固有の値（横の限界 ÷ 発進の加速度）を置くファイル。地図ではないので `*.npz` の一覧に出ない
+_GRIP_VEHICLE = "_grip_vehicle.json"
 #: 同梱できる経路の設定の大きさの上限（`telemetry_node` が GUI から受ける上限と同じ）
 _MAX_ROUTES_CHARS = 1_000_000
 
@@ -105,6 +113,11 @@ def _meta_path(npz_path: Path) -> Path:
 def _routes_path(npz_path: Path) -> Path:
     """経路の設定（`raspi/auto/route_config.py`）。`<name>.routes.json`。"""
     return npz_path.with_name(npz_path.stem + ".routes.json")
+
+
+def _grip_path(npz_path: Path) -> Path:
+    """学習した横グリップ（`raspi/nav/grip.py`）。`<name>.grip.json`。"""
+    return npz_path.with_name(npz_path.stem + ".grip.json")
 
 
 def polyline_length(xy: np.ndarray) -> float:
@@ -168,6 +181,9 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
     if target.is_file() and _routes_path(target).is_file():
         raise ValueError(f"地図『{name}』には経路の設定がある。別の名前で保存するか、先に削除してください")
     MAPS_DIR.mkdir(parents=True, exist_ok=True)
+    # 学習した横グリップは地図の座標で持つ。別の地図を同じ名前で書くなら古い値は使えない
+    # （経路の設定と違って人の作業ではないので、断らずに消す）
+    _grip_path(target).unlink(missing_ok=True)
     created_at = time.time() if created_at is None else created_at
 
     loaded = LoadedMap(
@@ -188,8 +204,11 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
     _write_meta(target, loaded)
 
 
-def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None) -> None:
+def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None,
+               grip: str | None = None) -> None:
     extra = {} if routes is None else {ROUTES_KEY: np.array(routes)}
+    if grip:
+        extra[GRIP_KEY] = np.array(grip)
     np.savez_compressed(
         f, trinary=m.trinary,
         resolution=np.float64(m.resolution), origin_x=np.float64(m.origin_x),
@@ -260,19 +279,36 @@ def save_upload(name: str, data: bytes) -> LoadedMap | None:
     return import_upload(name, data)[0]
 
 
-def _bundled_routes(data: bytes) -> str | None:
-    """npz に同梱された経路の設定（JSON 文字列）。無ければ `None`。"""
+def _bundled_text(data: bytes, key: str) -> str | None:
+    """npz に同梱された JSON 文字列（項目 `key`）。無ければ `None`。"""
     import io
     with np.load(io.BytesIO(data), allow_pickle=False) as z:
-        if ROUTES_KEY not in z.files:
+        if key not in z.files:
             return None
-        arr = np.asarray(z[ROUTES_KEY])
+        arr = np.asarray(z[key])
         if arr.ndim != 0 or arr.dtype.kind != "U":
-            raise ValueError("routes_json must be a 0-d string array")
+            raise ValueError(f"{key} must be a 0-d string array")
         text = str(arr)
     if len(text) > _MAX_ROUTES_CHARS:
-        raise ValueError("routes_json is too large")
+        raise ValueError(f"{key} is too large")
     return text
+
+
+def _bundled_routes(data: bytes) -> str | None:
+    """npz に同梱された経路の設定（JSON 文字列）。無ければ `None`。"""
+    return _bundled_text(data, ROUTES_KEY)
+
+
+def _bundled_grip(data: bytes) -> str | None:
+    """npz に同梱された横グリップを検査して書き直したもの。無い・壊れているなら `None`。"""
+    try:
+        text = _bundled_text(data, GRIP_KEY)
+        if text is None:
+            return None
+        from ..nav.grip import GripMap             # 遅延 import（純粋なファイル I/O 層に保つ）
+        return GripMap.from_json(text).to_json()
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, EOFError):
+        return None
 
 
 def import_upload(name: str, data: bytes) -> tuple[LoadedMap | None, str]:
@@ -305,11 +341,18 @@ def import_upload(name: str, data: bytes) -> tuple[LoadedMap | None, str]:
         _routes_path(target).unlink(missing_ok=True)
     else:
         save_routes(name, routes)
+    # 学習した横グリップも同じ扱い（同梱が無ければ古い値を消す）
+    grip = _bundled_grip(data)
+    if grip is None:
+        _grip_path(target).unlink(missing_ok=True)
+    else:
+        save_grip(name, grip)
     return loaded, ""
 
 
 def export_map(name: str) -> bytes | None:
-    """ダウンロード用の npz。今の `<name>.routes.json` を `ROUTES_KEY` として同梱する。
+    """ダウンロード用の npz。今の `<name>.routes.json` を `ROUTES_KEY` として、
+    `<name>.grip.json` を `GRIP_KEY` として同梱する。
 
     読めなければ `None`。
     """
@@ -319,7 +362,7 @@ def export_map(name: str) -> bytes | None:
         return None
     routes = load_routes(name)
     buf = io.BytesIO()
-    _write_npz(buf, loaded, routes=routes or None)
+    _write_npz(buf, loaded, routes=routes or None, grip=load_grip(name) or None)
     return buf.getvalue()
 
 
@@ -332,6 +375,7 @@ def delete_map(name: str) -> None:
     target.unlink(missing_ok=True)
     _meta_path(target).unlink(missing_ok=True)
     _routes_path(target).unlink(missing_ok=True)
+    _grip_path(target).unlink(missing_ok=True)
 
 
 # ── 経路の設定（経由点・停止点・ミッション） ──
@@ -360,3 +404,49 @@ def load_routes(name: str) -> str:
         return _routes_path(target).read_text()
     except OSError:
         return ""
+
+
+# ── 学習した横グリップ（`raspi/nav/grip.py`） ──
+
+def save_grip(name: str, text: str) -> bool:
+    """学習した横グリップ（JSON文字列）を書く。地図が存在しない名前には書かない。"""
+    target = resolve_map_path(name)
+    if target is None or not target.is_file():
+        return False
+    p = _grip_path(target)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, p)
+    return True
+
+
+def load_grip(name: str) -> str:
+    """学習した横グリップの JSON 文字列。無ければ空文字（検査は `nav.grip.GripMap.from_json`）。"""
+    target = resolve_map_path(name)
+    if target is None:
+        return ""
+    try:
+        return _grip_path(target).read_text()
+    except OSError:
+        return ""
+
+
+def save_grip_vehicle(launch_ratio: float) -> None:
+    """車に固有の「横の限界 ÷ 発進の加速度」を書く（地図によらない。`vehicle.toml` には書かない）。"""
+    try:
+        MAPS_DIR.mkdir(parents=True, exist_ok=True)
+        p = MAPS_DIR / _GRIP_VEHICLE
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"launch_ratio": round(float(launch_ratio), 4)}))
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def load_grip_vehicle() -> float:
+    """保存した比。無い・壊れている・範囲外（0.5〜4）なら 0。"""
+    try:
+        r = float(json.loads((MAPS_DIR / _GRIP_VEHICLE).read_text()).get("launch_ratio", 0.0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+    return r if math.isfinite(r) and 0.5 <= r <= 4.0 else 0.0

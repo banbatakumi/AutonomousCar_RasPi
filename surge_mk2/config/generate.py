@@ -86,6 +86,7 @@ def gen_ts(spec: dict) -> str:
         f"  track: {float(spec.get('track', 0))}, // m",
         f"  maxSteer: {float(spec.get('max_steer', 0))}, // rad（路面舵角上限）",
         f"  wheelRadius: {float(spec.get('wheel_radius', 0))}, // m",
+        f"  wheelWidth: {float(spec.get('wheel_width', 0.025))}, // m（タイヤ幅。イラスト用）",
         "  /** 車体外形ポリゴン [m]。反時計回り */",
         f"  footprint: [{pts}] as const,",
         "  /** LiDAR 取付位置。base_link 基準・水平面のみ（`z`/`yaw` は2D俯瞰表示では不要）。",

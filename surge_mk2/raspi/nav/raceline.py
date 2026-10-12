@@ -71,7 +71,8 @@ from .local_map import _edt, footprint_circles
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha",
            "sight_distance", "sight_speed",
-           "chord_curvature", "speed_kappa", "retime", "refine_time", "tight_sections"]
+           "chord_curvature", "speed_kappa", "retime", "refine_time", "tight_sections",
+           "probe_brake"]
 
 #: 速度を決める曲率を測る弦の長さ [m]（モジュール docstring）
 SPEED_CHORD_M = 0.4
@@ -265,17 +266,18 @@ def _next_v(v: float, a_x: float, kappa: float, a_lat: float, ds: float,
 
 
 def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
-                  v_max: float, v_min: float, a_lat: float,
+                  v_max: float, v_min: float, a_lat,
                   a_accel: float, a_brake: float, closed: bool = True,
                   v_start: float | None = None, v_end: float | None = None,
-                  friction_circle: bool = True, a_grip: float | None = None,
+                  friction_circle: bool = True, a_grip=None,
                   v_cap: np.ndarray | None = None) -> np.ndarray:
     """曲率から目標速度 [m/s]。閉ループとして前後パスを2周ならす。
 
     :param kappa: **速度を決める曲率**（ふつうは `speed_kappa(xy)`）
     :param v_cap: 点ごとの速度の上限 [m/s]（見通しで決まる上限など、`sight_speed`）。前後のパスの
         前に掛けるので、そこへ向けた減速・そこからの加速もプロファイルに入る
-    :param a_grip: 摩擦円の半径 [m/s²]（車の横グリップの限界）。`None` なら `a_lat`。
+    :param a_lat: 横加速度の上限 [m/s²]。スカラーか、点ごとの配列（`nav/grip.py` の学習値）
+    :param a_grip: 摩擦円の半径 [m/s²]（車の横グリップの限界）。`None` なら `a_lat`。配列も可。
         `a_lat` を限界より下げて走る設定（「横グリップを使う割合」）でも、前後に残る力は
         限界に対する割合で決まる——`a_lat` で円を引くと頂点で前後が 0 になり、
         コーナーの中で加減速できない前提のプロファイルになる
@@ -283,6 +285,13 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
     `closed=False`（開いた経路）は1往復だけで、**終点は `v_end`**（既定 `v_min`、
     止まる直前の這う速度）まで減速し、始点は `v_start`（今の速度）から加速する。
     """
+    if np.ndim(a_lat) or (a_grip is not None and np.ndim(a_grip)):
+        # 点ごとの上限（走行中に学習した横グリップ、`nav/grip.py`）。スカラーの経路は下のまま
+        # （`refine_time` が数千回呼ぶので、そちらに分岐や配列の読み出しを足さない）
+        return _speed_profile_var(xy, kappa, v_max=v_max, v_min=v_min, a_lat=a_lat,
+                                  a_accel=a_accel, a_brake=a_brake, closed=closed,
+                                  v_start=v_start, v_end=v_end, friction_circle=friction_circle,
+                                  a_grip=a_grip, v_cap=v_cap)
     n = len(xy)
     k = np.abs(np.asarray(kappa, dtype=np.float64))
     v = np.maximum(_lateral_limit(k, v_max=v_max, a_lat=a_lat), v_min)
@@ -341,6 +350,145 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
     return np.maximum(np.asarray(vl), v_min)
 
 
+def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min: float,
+                       a_lat, a_accel: float, a_brake: float, closed: bool,
+                       v_start: float | None, v_end: float | None, friction_circle: bool,
+                       a_grip, v_cap: np.ndarray | None) -> np.ndarray:
+    """`speed_profile` の、横の上限 `a_lat`・摩擦円の半径 `a_grip` が**点ごとの配列**の版。
+
+    式は `speed_profile` と同じで、点 `j` から出る加減速の摩擦円にその点の半径を使う。
+    """
+    n = len(xy)
+    k = np.abs(np.asarray(kappa, dtype=np.float64))
+    lat = np.maximum(np.broadcast_to(np.asarray(a_lat, dtype=np.float64), (n,)), 1e-6)
+    v = np.maximum(np.minimum(v_max, np.sqrt(lat / np.maximum(k, 1e-6))), v_min)
+    if n == 0:
+        return v
+    if v_cap is not None:
+        v = np.minimum(v, np.maximum(np.asarray(v_cap, dtype=np.float64), 0.05))
+        v_min = min(v_min, float(v.min()))
+    grip = lat if a_grip is None else np.maximum(
+        lat, np.broadcast_to(np.asarray(a_grip, dtype=np.float64), (n,)))
+    ig = (1.0 / (grip * grip) if friction_circle else np.zeros(n)).tolist()
+    sqrt = math.sqrt
+    vl = v.tolist()
+    kl = k.tolist()
+
+    def reach(j: int, a_x: float, d: float) -> float:
+        vj = vl[j]
+        g = ig[j]
+        if g:
+            ay = vj * vj * kl[j]
+            r = 1.0 - ay * ay * g
+            a_x = a_x * sqrt(r) if r > 0.0 else 0.0
+        return sqrt(vj * vj + 2.0 * a_x * d)
+
+    if not closed:
+        ds = np.hypot(*np.diff(xy, axis=0).T).tolist() if n >= 2 else []
+        vl[-1] = min(vl[-1], v_min if v_end is None else v_end)
+        for i in range(n - 2, -1, -1):
+            lim = reach(i + 1, a_brake, ds[i])
+            if lim < vl[i]:
+                vl[i] = lim
+        if v_start is not None:
+            vl[0] = min(vl[0], max(v_start, v_min))
+            for i in range(1, n):
+                lim = reach(i - 1, a_accel, ds[i - 1])
+                if lim < vl[i]:
+                    vl[i] = lim
+        return np.asarray(vl)
+
+    ds = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T).tolist()
+    for _ in range(2):
+        for i in range(n - 1, -1, -1):
+            lim = reach(i + 1 if i + 1 < n else 0, a_brake, ds[i])
+            if lim < vl[i]:
+                vl[i] = lim
+        for i in range(n):
+            j = i - 1 if i > 0 else n - 1
+            lim = reach(j, a_accel, ds[j])
+            if lim < vl[i]:
+                vl[i] = lim
+    return np.maximum(np.asarray(vl), v_min)
+
+
+def probe_brake(rl: RaceLine, a_probe: float, a_grip, lat_max: float = 0.5,
+                part: float = 0.6, min_s: float = 0.0, max_s: float = math.inf,
+                ease_m: float = 1.2) -> RaceLine:
+    """制動を始める位置はそのままで、制動区間の初めだけ求める減速度を `a_probe` に上げた速度プロファイル。
+
+    減速の上限を走行中に測るためのもの（`nav/grip.LongLearner`）: **出ない減速を求めて、出た値を測る**。
+    速度が下がり続ける区間ごとに、始まりの点から `a_probe` で落とし、落とす速度²の `part` まで（か
+    `max_s` 秒たつまで）来たら、そこから先は元のプロファイルとの差（速度²）を距離 `ease_m` の
+    時定数で詰めながら元へ戻す。**どの点でも元の速度以下**なので、`a_probe` が出なくても
+    元のプロファイルより速くコーナーへ入ることはない。
+
+    ★ 強く求めた直後に元のプロファイルへ戻す形（途中の速度で保つ形）にはしない。出ない減速を
+    求めると車は試す形より速いまま残り（頭打ちの間に車速PIの積分が戻され、遅れが 0.3 秒ほど残る）、
+    保つ区間が短いとコーナーの入口まで遅れを持ち込んで外へ出た（sim.bench、真値 0.42 で毎周 前兆）。
+    元より低い速度を `ease_m` の間は求め続ければ、遅れはその間に消える。差を区間の終わりまで保つ形
+    （元より手前で落ち切る）も安全だが、1 区間で 0.2 秒失う。
+    横を使っている所では摩擦円のぶん（`sqrt(1 − (横÷限界)²)`）だけ弱く求め、横加速度が限界の
+    `lat_max` を超える点から先は強く求めるのをやめる。
+
+    :param a_grip: 横の限界 [m/s²]（スカラーか点ごとの配列）
+    :param min_s: 強く求める時間がこれより短い区間は、元のままにする [s]（測れない）
+    :param max_s: 強く求める時間の上限 [s]
+    :param ease_m: 強く求めた後、元のプロファイルへ戻す距離の時定数 [m]
+    """
+    n = len(rl)
+    if n < 3 or a_probe <= 0.0:
+        return rl
+    v = np.asarray(rl.v, dtype=np.float64)
+    kap = speed_kappa(rl.xy, rl.closed)
+    grip = np.maximum(np.broadcast_to(np.asarray(a_grip, dtype=np.float64), (n,)), 1e-6)
+    lat = (v * v * kap / grip).tolist()
+    kl, gl = kap.tolist(), grip.tolist()
+    if rl.closed:
+        ds = np.hypot(*(np.roll(rl.xy, -1, axis=0) - rl.xy).T).tolist()
+        start = int(np.argmax(v))               # いちばん速い点は制動の途中ではない
+        order = [(start + k) % n for k in range(n)]
+    else:
+        ds = np.hypot(*np.diff(rl.xy, axis=0).T).tolist() + [0.0]
+        order = list(range(n))
+    vl = v.tolist()
+    out = list(vl)
+    k = 0
+    while k < n - 1:
+        i = order[k]
+        if vl[order[k + 1]] >= vl[i] - 1e-9:
+            k += 1
+            continue
+        end = k + 1                             # 速度が下がり続ける区間 [k, end]
+        while end < n - 1 and vl[order[end + 1]] < vl[order[end]] - 1e-9:
+            end += 1
+        low = vl[order[end]]
+        floor = math.sqrt(vl[i] * vl[i] - part * (vl[i] * vl[i] - low * low))
+        cur, hard, t_hard, gap = vl[i], True, 0.0, 0.0
+        seg = []
+        for q in range(k + 1, end + 1):
+            j, prev = order[q], order[q - 1]
+            u = cur * cur * kl[prev] / gl[prev]                # 今の速度での 横 ÷ 限界
+            hard = (hard and lat[j] < lat_max and u < lat_max and cur > floor + 1e-9
+                    and t_hard < max_s)
+            if hard:
+                a = a_probe * math.sqrt(1.0 - u * u)
+                nxt = min(vl[j], math.sqrt(max(floor * floor, cur * cur - 2.0 * a * ds[prev])))
+                t_hard += 2.0 * ds[prev] / max(cur + nxt, 1e-6)
+                cur = nxt
+                gap = vl[j] * vl[j] - cur * cur                # 元との速度²の差
+            else:
+                # 元との差を少しずつ詰める。区間のいちばん低い速度より下へは落とさない
+                gap *= math.exp(-ds[prev] / ease_m) if ease_m > 1e-6 else 0.0
+                cur = math.sqrt(max(low * low, vl[j] * vl[j] - gap))
+            seg.append((j, cur))
+        if t_hard >= min_s:
+            for j, c in seg:
+                out[j] = c
+        k = end
+    return RaceLine(**{**rl._asdict(), "v": np.asarray(out)})
+
+
 def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:
     """速度プロファイルどおりに走ったときの時間 [s]（閉路なら1周）。"""
     v = np.maximum(v, 1e-3)
@@ -351,9 +499,9 @@ def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:
     return float(np.sum(2.0 * ds / (v[:-1] + v[1:])))
 
 
-def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat: float, a_accel: float,
+def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat, a_accel: float,
            a_brake: float, v_start: float | None = None, v_end: float | None = None,
-           a_grip: float | None = None, v_cap: np.ndarray | None = None) -> RaceLine:
+           a_grip=None, v_cap: np.ndarray | None = None) -> RaceLine:
     """経路の形はそのままで、速度プロファイルだけを今の設定で作り直す。
 
     ★ 速度は地図を作ったとき（BUILD）の設定で焼き込まれ、保存した地図から走ると

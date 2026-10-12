@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.22（`uart_protocol.md` v0.22 に対応。`protocol_version = 0x0016`）
+**バージョン**: v0.23（`uart_protocol.md` v0.23 に対応。`protocol_version = 0x0017`）
 **最終更新**: 2026-10-11
 **状態**: 実装済み・ビルド済み。**STM32・MD は未書き込み、実機での動作検証は未了**
 **対象読者**: STM32 ファームウェアを実装する人
@@ -421,7 +421,7 @@ typedef struct {
 
 ```c
 typedef struct {
-    uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。現行 0x0016 */
+    uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。現行 0x0017 */
     uint32_t fw_id;             /* git short hash 等                        */
     uint32_t build_epoch;       /* ビルド時刻（UNIX epoch 秒）               */
 } version_t;                    /* = 10 bytes */

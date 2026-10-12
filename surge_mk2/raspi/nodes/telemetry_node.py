@@ -13,8 +13,8 @@
 
 | パス | 内容 | 形式 | 頻度 |
 |---|---|---|---|
-| `/ws/telemetry` | 車両状態・点群・リンク診断 | msgpack バイナリ | 20Hz |
-| `/ws/camera/front`, `/ws/camera/rear` | JPEG | バイナリ | 最大15Hz |
+| `/ws/telemetry` | 車両状態・点群・リンク診断 | msgpack バイナリ | 50Hz |
+| `/ws/camera/front`, `/ws/camera/rear` | JPEG | バイナリ | フレームが届くたび（上限 `gui_hz`） |
 | `/ws/control` | ラジコン入力・操縦権・E-Stop・記録の操作 | JSON | イベント + 20Hz |
 | `/ws/map` | 地図・中心線・レーシングライン | msgpack バイナリ | **変わったときだけ** |
 | `/ws/record` | mcap記録の生バイト列 | バイナリ | 録画中のみ |
@@ -232,13 +232,19 @@ CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
 #: 無ければここを読む。無ければトークン無し（＝誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
 
-TELEMETRY_HZ = 20
+#: `/ws/telemetry` の頻度。**表示の遅れは平均でこの周期の半分**（20Hz で 25ms、50Hz で 10ms）。
+#: 50Hz にしても制御系電流は +1.6mA（525.2→526.8mA、ばらつきの範囲）・CPU +1.2pt（実機 DISARM・
+#: 2026-10-12、20/30/50Hz を行き来して計測）。`vehicle_state` は 100Hz、点群は 10Hz（同じ周は送らない）
+TELEMETRY_HZ = 50
 CMD_PUB_HZ = 50
 #: GUIへ配信する既定のJPEG頻度。`docs/architecture.md` §9の帯域見積もり
 #: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で前後カメラ同時30fps配信を
-#: 検証して帯域は問題なかったので既定30。`_camera_pump` は絶対時刻スケジューリング
-#: （相対 `sleep` だとドリフトして実測22fps止まりになる）
+#: 検証して帯域は問題なかったので既定30。**送る頻度の上限**で、刻みではない
+#: （`_camera_pump` はフレームが届いた周に送る）
 CAMERA_HZ = 30
+#: 配信の周期に対して、次のフレームをこの割合まで早く出してよい。カメラの fps と `gui_hz` が
+#: 同じとき、フレームの到着は周期の前後に数ms揺れる。少し早く来た分を次の刻みまで待たせない
+CAMERA_DUE_SLACK = 0.15
 HB_HZ = 10
 #: capture側(camera_node)のFPS上限の許容範囲、および前後カメラそれぞれの既定値。
 #: 実機計測で「30→10fpsで全体消費電力が約13〜15%下がる・
@@ -303,7 +309,7 @@ SNAPSHOT_MAX_AGE_NS = 1_500_000_000
 CPU_MAX_KHZ_ARMED = 2_000_000
 CPU_MAX_KHZ_DISARM = 1_500_000
 #: Wi-Fi(SSID・電波強度)の再取得周期。`nmcli` のサブプロセス起動が数十〜百数十msかかる
-#: ため 20Hz の `/ws/telemetry` には乗せず、`fan` と同じ低頻度ポーリングで `/ws/control` に載せる
+#: ため 50Hz の `/ws/telemetry` には乗せず、`fan` と同じ低頻度ポーリングで `/ws/control` に載せる
 WIFI_PUMP_HZ = 1
 #: Pi 本体の健全性（CPU・メモリ・スロットリング。`raspi/io/pihealth.py`）の再取得周期
 PI_HEALTH_PUMP_HZ = 1
@@ -354,7 +360,7 @@ DEV_ORIGINS = frozenset(
     f"http://{h}:5173" for h in ("localhost", "127.0.0.1", "surge.local"))
 
 #: `/ws/telemetry` の各フレームに載せる型定義の札（`raspi/msgs/schema.py`）。
-#: **起動時に1回だけ計算する**（20Hz のホットパスで毎回ハッシュを取らない）
+#: **起動時に1回だけ計算する**（50Hz のホットパスで毎回ハッシュを取らない）
 SCHEMA_VERSION = schema_version()
 
 _encoder = msgspec.msgpack.Encoder()
@@ -383,7 +389,7 @@ def _read_pi_temp_c() -> float | None:
     """RasPi 本体の CPU 温度。GUI のラジコンビュー温度計に出す。
 
     `vcgencmd` はサブプロセス起動を挟む分だけ重く環境依存も増えるので使わない。
-    このパスは Pi 5 / Debian Trixie でも変わらず、20Hz で毎回開いても軽いので
+    このパスは Pi 5 / Debian Trixie でも変わらず、50Hz で毎回開いても軽いので
     キャッシュしない。**Pi 実機以外（Mac上のシムなど）ではファイルが無く None**
     になる——STM32 側の `vs.temp` が `null = MD が無言で信用できない` を示すのと
     同じ扱いにして、GUI 側のしきい値判定（`tempLevel()`）を1本にまとめている。
@@ -552,6 +558,8 @@ class TelemetryServer:
         self._auto_last_steer = 0.0
         #: 最後に見た `auto/cmd` の中身（速度・舵・制動・arm・mode）。変わったら `/cmd` を即送る
         self._last_auto_key: tuple | None = None
+        #: カメラの新しいフレームがバスに届いたら立つ（`_bus_pump` → `_camera_pump`）
+        self._cam_wake = asyncio.Event()
         #: `_publish_cmd` が前回「操縦者が居た」と判断したか（デッドマンの切れ目を数える）
         self._cmd_was_live = False
         self._load_auto_conf()
@@ -2312,8 +2320,8 @@ class TelemetryServer:
         """
         if not name:
             return False, "名前を入力してください"
-        if self._auto_mode != "slam2d_raceline":
-            return False, "slam2d_racelineモードのときだけ保存できます"
+        if self._auto_mode not in ("slam2d_raceline", "slam2d_route"):
+            return False, "地図を作る自動運転モード（経路選択走行）のときだけ保存できます"
         st = self.sub.latest.get(TOPIC_AUTO_STATE)
         if st is None or st.phase not in ("DONE", "RACE"):
             return False, "地図と経路ができてから（DONE/RACE段）でないと保存できません"
@@ -2456,17 +2464,20 @@ class TelemetryServer:
         使える**方を取った）。`auto/cmd` の中身が変わっていたら、`/cmd` をその場で送る
         （`_on_auto_cmd`）。
 
-        **`auto/cmd` のソケットに届いたら起きる。届かない間は `BUS_IDLE_POLL_S` ごと**
+        **`auto/cmd` かカメラ画像のソケットに届いたら起きる。届かない間は `BUS_IDLE_POLL_S` ごと**
         1ms ごとに13本のソケットを覗くと、それだけで CPU を
         約8%使う（Pi 5・1.5GHz で実測。この形で約4%）。即時中継の待ちも 1ms 周期の
-        平均 0.8ms から 0.35ms に縮む。
+        平均 0.8ms から 0.35ms に縮む。画像は届いた周に `_camera_pump` を起こす
+        （刻みで見に行くと、撮ってから送るまでに配信周期ぶんの待ちが乗る）。
         """
-        wake, fd = self._watch_auto_cmd()
+        wake, fds = self._watch_bus()
         try:
             while self._running:
                 for topic, msg in self.sub.poll(0):
                     if topic.startswith(TOPIC_HB_PREFIX):
                         self._node_hb[msg.node] = (time.monotonic_ns(), msg.pid, msg.detail)
+                    elif topic in (TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR):
+                        self._cam_wake.set()
                 self._on_auto_cmd(time.monotonic_ns())
                 self._on_armed_change()
                 if wake is None:
@@ -2480,24 +2491,34 @@ class TelemetryServer:
                     pass
                 wake.clear()
         finally:
-            if fd is not None:
+            for fd in fds:
                 asyncio.get_running_loop().remove_reader(fd)
 
-    def _watch_auto_cmd(self) -> tuple[asyncio.Event | None, int | None]:
-        """`auto/cmd` のソケットに届いたら立つ Event と、監視している fd。
+    def _watch_bus(self) -> tuple[asyncio.Event | None, list[int]]:
+        """`auto/cmd`・カメラ画像のソケットに届いたら立つ Event と、監視している fd。
 
-        zmq のソケットを持たない `sub`（テストの偽物）では `(None, None)`
-        ——`_bus_pump` は `BUS_POLL_S` ごとに覗く形へ戻る。"""
-        sock = getattr(self.sub, "socks", {}).get(TOPIC_AUTO_CMD)
-        if sock is None:
-            return None, None
-        try:
-            fd = sock.fileno()
-            wake = asyncio.Event()
-            asyncio.get_running_loop().add_reader(fd, wake.set)
-        except (AttributeError, OSError, NotImplementedError):
-            return None, None
-        return wake, fd
+        zmq のソケットを持たない `sub`（テストの偽物）では `(None, [])`
+        ——`_bus_pump` は `BUS_POLL_S` ごとに覗く形へ戻る。`auto/cmd` を見張れなければ
+        画像も見張らない（即時中継が `BUS_IDLE_POLL_S` 待ちになるのを避ける）。"""
+        socks = getattr(self.sub, "socks", {})
+        wake = asyncio.Event()
+        fds: list[int] = []
+        loop = asyncio.get_running_loop()
+        for topic in (TOPIC_AUTO_CMD, TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR):
+            sock = socks.get(topic)
+            if sock is None:
+                if topic == TOPIC_AUTO_CMD:
+                    return None, []
+                continue
+            try:
+                fd = sock.fileno()
+                loop.add_reader(fd, wake.set)
+            except (AttributeError, OSError, NotImplementedError):
+                if topic == TOPIC_AUTO_CMD:
+                    return None, []
+                continue
+            fds.append(fd)
+        return wake, fds
 
     def _on_armed_change(self) -> None:
         """ARM/DISARM が変わった周に、それに連動する省電力設定を切り替える。
@@ -2542,7 +2563,7 @@ class TelemetryServer:
     async def _map_pump(self) -> None:
         """地図を `/ws/map` へ。**版が変わったときだけ。**
 
-        `_telemetry_pump`（20Hz）に相乗りさせない。地図は 400×400 あって、
+        `_telemetry_pump`（50Hz）に相乗りさせない。地図は 400×400 あって、
         しかも凍結したら二度と変わらない。同じ頻度で流す理由が無い
         （`docs/architecture.md` §6.2 の「画像を流してはいけない」の趣旨）。
         """
@@ -2563,8 +2584,17 @@ class TelemetryServer:
 
     async def _telemetry_pump(self) -> None:
         period = 1.0 / TELEMETRY_HZ
+        #: 絶対時刻で刻む（相対 `sleep(period)` だと組み立てと送信のぶん毎周期遅れ、
+        #: 実機で 50ms のつもりが 51.4ms になっていた）
+        next_tick = time.monotonic()
         while self._running:
-            await asyncio.sleep(period)
+            next_tick += period
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            else:
+                next_tick = time.monotonic()
+                await asyncio.sleep(0)
             if not self.telemetry_clients:
                 continue
             payload = self._snapshot()
@@ -2578,7 +2608,7 @@ class TelemetryServer:
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
         scan = self.sub.latest.get(TOPIC_SCAN)
-        # 点群は 10Hz なので、20Hz の配信では半分が同じもの。**同じ周を2回送らない**
+        # 点群は 10Hz なので、50Hz の配信では大半が同じもの。**同じ周を2回送らない**
         if scan is not None and scan.seq == self._last_scan_seq:
             scan = None
         elif scan is not None:
@@ -2851,27 +2881,33 @@ class TelemetryServer:
         """共有メモリから読んで JPEG にして送る。**購読者がいないときは何もしない。**
 
         エンコードは CPU を食うので別スレッド（`to_thread`）に出す。
-        イベントループを塞ぐと 20Hz のテレメトリまで遅れる。
+        イベントループを塞ぐと 50Hz のテレメトリまで遅れる。
+
+        **フレームが届いた周に送る。** 刻み（`1/gui_hz`）で見に行くと、カメラと刻みの位相が
+        合わないぶん、撮ってから送るまでに最大1周期の待ちが乗る（実機 10fps・`gui_hz` 30 で
+        37ms。届いた周に送る形で JPEG 化の時間だけになる）。`gui_hz` は送る頻度の上限。
         """
         if self._jpeg is None:
             return
         topics = {"front": TOPIC_IMAGE_FRONT, "rear": TOPIC_IMAGE_REAR}
         last_seq = {"front": -1, "rear": -1}
-        #: **相対 `sleep(period)` ではなく絶対時刻で刻む。** 前後カメラ2台ぶんの
-        #: エンコード＋送信（数ms）が毎周期そのまま次の待ちに積み増しされると、
-        #: 目標30fpsのつもりが実測22fps止まりになる。
-        #: 遅れが大きすぎるとき（クライアント遅延等）は基準を今に取り直し、
-        #: 積み残しを一気に消化しようとして詰まるのを防ぐ
-        next_tick = time.monotonic()
+        #: カメラごとの「次に送ってよい時刻」。`gui_hz` は上限で、刻みではない
+        next_due = {"front": 0.0, "rear": 0.0}
+        #: 上限に当たって見送ったフレームを送れるようになる時刻（無ければ None）
+        pending: float | None = None
         while self._running:
             # `camera_hz` は設定パネルの `gui_hz`（`setCamera`）で実行中に変わりうる
             # ので、周期はループの中で毎回読む
-            next_tick += 1.0 / self.camera_hz
-            delay = next_tick - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            else:
-                next_tick = time.monotonic()
+            period = 1.0 / self.camera_hz
+            # **新しいフレームが届いたら起きる**（`_bus_pump` が立てる）。届いたことを
+            # 知らされない構成（テストの偽物の `sub`）でも周期ごとには見に行く
+            timeout = period if pending is None else max(0.0, pending - time.monotonic())
+            try:
+                await asyncio.wait_for(self._cam_wake.wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+            self._cam_wake.clear()
+            pending = None
             for cam, clients in self.camera_clients.items():
                 # "mask" は `_mask_pump` が専用に中継する（このループの対象は
                 # `topics` にある front/rear のみ）。ここで弾かないと
@@ -2882,7 +2918,14 @@ class TelemetryServer:
                 ref = self.sub.latest.get(topics[cam])
                 if ref is None or ref.ring_seq == last_seq[cam]:
                     continue
+                now = time.monotonic()
+                due = next_due[cam]
+                if now < due - CAMERA_DUE_SLACK * period:
+                    # カメラの fps が `gui_hz` より高い。送れる時刻に、そのとき最新の1枚を送る
+                    pending = due if pending is None else min(pending, due)
+                    continue
                 last_seq[cam] = ref.ring_seq
+                next_due[cam] = now + period
                 jpg = await asyncio.to_thread(self._encode_frame, ref, cam)
                 if jpg is None:
                     continue
@@ -2930,7 +2973,10 @@ class TelemetryServer:
         self._running = True
         async with serve(self._handler, self.host, self.port,
                          process_request=self._process_request,
-                         max_queue=8, ping_interval=20) as server:  # noqa: F841
+                         max_queue=8, ping_interval=20,
+                         # permessage-deflate は切る。JPEG は縮まないのに1枚あたり約2ms
+                         # （Pi 5・1.5GHz、44kB）イベントループを塞ぎ、その間 `cmd` の中継も待つ
+                         compression=None) as server:  # noqa: F841
             tasks = [asyncio.create_task(t()) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,

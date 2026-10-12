@@ -22,6 +22,7 @@ export const VEHICLE = {
   track: 0.155, // m
   maxSteer: 0.4617551884201365, // rad（路面舵角上限）
   wheelRadius: 0.03, // m
+  wheelWidth: 0.025, // m（タイヤ幅。イラスト用）
   /** 車体外形ポリゴン [m]。反時計回り */
   footprint: [[0.3, 0.09], [0.3, -0.09], [-0.07, -0.09], [-0.07, 0.09]] as const,
   /** LiDAR 取付位置。base_link 基準・水平面のみ（`z`/`yaw` は2D俯瞰表示では不要）。

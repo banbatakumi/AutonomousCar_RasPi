@@ -340,7 +340,10 @@ class TestMapsSave(unittest.TestCase):
         fake = _fake_server(mode="follow_the_gap", phase="RACE", auto_map=_sample_auto_map())
         ok, err = tn.TelemetryServer._maps_save(fake, "course")
         self.assertFalse(ok)
-        self.assertIn("slam2d_raceline", err)
+        self.assertIn("経路選択走行", err)
+        # 地図を作る planner は 2 つとも保存できる（GUI に出るのは `slam2d_route` だけ）
+        fake = _fake_server(mode="slam2d_route", phase="RACE", auto_map=_sample_auto_map())
+        self.assertTrue(tn.TelemetryServer._maps_save(fake, "course")[0])
 
     def test_rejects_phase_before_path_exists(self):
         fake = _fake_server(mode="slam2d_raceline", phase="EXPLORE", auto_map=_sample_auto_map())
@@ -711,6 +714,7 @@ class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
             camera_hz=1000.0,       # 待たずに何周かループを回す
             camera_clients={"front": set(), "rear": set(), "mask": {object()}},
             sub=SimpleNamespace(latest={}),
+            _cam_wake=asyncio.Event(),
         )
 
         async def stop_soon():
@@ -720,6 +724,75 @@ class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
         stopper = asyncio.create_task(stop_soon())
         await tn.TelemetryServer._camera_pump(fake)   # KeyErrorなら例外でテスト失敗
         await stopper
+
+
+class TestCameraPumpOnArrival(unittest.IsolatedAsyncioTestCase):
+    """`_camera_pump` はフレームが届いた周に送る（2026-10-12。刻みで見に行くと、撮ってから
+    送るまでに配信周期ぶんの待ちが乗っていた）。`gui_hz` は送る頻度の上限として残る。"""
+
+    def _fake(self, hz):
+        sent = []
+
+        async def send_or_drop(ws, payload, clients):
+            sent.append((time.monotonic(), payload))
+            return True
+
+        fake = SimpleNamespace(
+            _running=True, _jpeg=object(), camera_hz=hz,
+            camera_clients={"front": {object()}, "rear": set(), "mask": set()},
+            sub=SimpleNamespace(latest={}), _cam_wake=asyncio.Event(),
+            _encode_frame=lambda ref, cam="": b"jpg%d" % ref.ring_seq,
+            _send_or_drop=send_or_drop)
+        return fake, sent
+
+    @staticmethod
+    def _frame(fake, seq):
+        fake.sub.latest[tn.TOPIC_IMAGE_FRONT] = SimpleNamespace(ring_seq=seq)
+        fake._cam_wake.set()
+
+    async def _stop(self, fake, pump):
+        fake._running = False
+        fake._cam_wake.set()
+        await asyncio.wait_for(pump, 1.0)
+
+    async def test_frame_is_sent_without_waiting_for_the_period(self):
+        fake, sent = self._fake(hz=2.0)                # 周期 500ms
+        pump = asyncio.create_task(tn.TelemetryServer._camera_pump(fake))
+        await asyncio.sleep(0.05)
+        t0 = time.monotonic()
+        self._frame(fake, 1)
+        await asyncio.sleep(0.05)
+        await self._stop(fake, pump)
+        self.assertEqual([p for _, p in sent], [b"jpg1"])
+        self.assertLess(sent[0][0] - t0, 0.03)
+
+    async def test_gui_hz_caps_the_rate_and_sends_the_newest(self):
+        fake, sent = self._fake(hz=10.0)               # 周期 100ms
+        pump = asyncio.create_task(tn.TelemetryServer._camera_pump(fake))
+        await asyncio.sleep(0.01)
+        self._frame(fake, 1)
+        await asyncio.sleep(0.03)
+        self._frame(fake, 2)                           # 上限に当たる
+        await asyncio.sleep(0.03)
+        self._frame(fake, 3)                           # 同上。送れる時刻には 3 が最新
+        await asyncio.sleep(0.12)
+        await self._stop(fake, pump)
+        self.assertEqual([p for _, p in sent], [b"jpg1", b"jpg3"])
+        self.assertGreater(sent[1][0] - sent[0][0], 0.08)
+
+    async def test_same_rate_frames_are_not_delayed_by_jitter(self):
+        """カメラと `gui_hz` が同じ fps のとき、少し早く届いたフレームを次の刻みまで待たせない。"""
+        fake, sent = self._fake(hz=10.0)
+        pump = asyncio.create_task(tn.TelemetryServer._camera_pump(fake))
+        await asyncio.sleep(0.01)
+        self._frame(fake, 1)
+        await asyncio.sleep(0.088)                     # 周期より 12ms 早い
+        t1 = time.monotonic()
+        self._frame(fake, 2)
+        await asyncio.sleep(0.03)
+        await self._stop(fake, pump)
+        self.assertEqual([p for _, p in sent], [b"jpg1", b"jpg2"])
+        self.assertLess(sent[1][0] - t1, 0.008)
 
 
 class TestTrackRoiSelectNeedsArm(unittest.TestCase):

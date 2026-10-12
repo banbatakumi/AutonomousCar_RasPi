@@ -64,12 +64,17 @@ class TestVehicleEnvelope(unittest.TestCase):
         self.assertGreater(v.a_decel_max, 0.5)
         self.assertEqual(v.speed_loop_tau_s, 0.0)                 # 前倒ししない
 
-    def test_limits_scale_by_use(self):
-        p = {"lat_use": 0.5, "accel_use": 0.8, "brake_use": 0.9}
-        lim = limits(p, self.v)
-        self.assertAlmostEqual(lim.a_lat, 0.5 * self.v.a_lat_max)
-        self.assertAlmostEqual(lim.a_accel, 0.8 * 2.5)
-        self.assertAlmostEqual(lim.a_brake, 0.9 * 2.5)
+    def test_limits_fixed_or_learned(self):
+        """学習しないときは同定値に決まった余裕を掛ける（人が決める「使う割合」は無い）。
+        学習した値があればそれをそのまま使う。"""
+        from raspi.auto import slam2d_raceline as sr
+        lim = limits({}, self.v)
+        self.assertAlmostEqual(lim.a_lat, sr.FIXED_LAT_USE * self.v.a_lat_max)
+        self.assertAlmostEqual(lim.a_accel, sr.FIXED_ACCEL_USE * 2.5)
+        self.assertAlmostEqual(lim.a_brake, sr.FIXED_BRAKE_USE * 2.5)
+        got = limits({}, self.v, (5.0, 2.9, 2.7))
+        self.assertEqual((got.a_lat, got.a_accel, got.a_brake), (5.0, 2.9, 2.7))
+        self.assertEqual(got.react_s, lim.react_s)
         # 空走時間 = 点群の周期 + 指令が届くまで + 減速の立ち上がり（速度PIの時定数の半分）
         self.assertAlmostEqual(lim.react_s, 0.1 + 0.02 + 0.5 * self.v.speed_loop_tau_s)
 
@@ -80,7 +85,10 @@ class TestVehicleEnvelope(unittest.TestCase):
             self.assertNotIn(k, p)
         veh = Vehicle.load()
         kw = speed_kwargs(p, veh)
-        self.assertAlmostEqual(kw["a_lat"], p["lat_use"] * veh.a_lat_max)
+        for k in ("lat_use", "accel_use", "brake_use"):
+            self.assertNotIn(k, p)
+        from raspi.auto.slam2d_raceline import FIXED_LAT_USE
+        self.assertAlmostEqual(kw["a_lat"], FIXED_LAT_USE * veh.a_lat_max)
         self.assertAlmostEqual(kw["a_grip"], veh.a_lat_max)
         self.assertLess(kappa_limit(p, veh), veh.kappa_max)       # 既定は限界より内側
         # 舵の遅延補償は同定値＋通信ぶん。姿勢の古さ（旧 0.15s）は含めない

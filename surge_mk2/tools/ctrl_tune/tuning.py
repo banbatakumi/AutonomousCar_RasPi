@@ -22,12 +22,16 @@ DERIVED = frozenset({"tv_test_moment_nm"})
 
 
 def load_params(fw: Firmware, toml_path: str | Path = DEFAULT_TOML) -> dict[str, float]:
-    """今の調整パラメータ（名前 → 値）。`[control]` に無い項目はファームの既定値。
+    """今の調整パラメータ（名前 → 値）。Pi の io_node が STM32 へ送るのと同じ値になる。
 
-    Pi の io_node が STM32 へ送るのと同じ値になる。
+    ファームは既定値を持たない（仮置きの値）ので、`vehicle.toml` が唯一の出どころ。ファームの表にあって
+    toml に無い項目があればエラー（古いコミットのファームの比較では、ファームに無い項目は捨てる）。
     """
-    values = {k: spec.default for k, spec in fw.params.items()}
-    values.update({k: v for k, v in load_control_params(toml_path).items() if k in values})
+    wanted = load_control_params(toml_path, strict=False)
+    values = {k: v for k, v in wanted.items() if k in fw.params}
+    missing = [k for k in fw.params if k not in values and k != "tv_test_moment_nm"]
+    if missing:
+        raise ValueError(f"vehicle.toml に調整パラメータが足りません: {', '.join(missing)}")
     values["tv_test_moment_nm"] = 0.0
     return values
 

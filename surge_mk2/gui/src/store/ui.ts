@@ -381,9 +381,9 @@ export function effectiveRange(limits: VehicleLimits | null | undefined): Record
  * 静的`max`も車体の物理上限（現状3.0m/s）に合わせてあるので、通常時は
  * このcapが実際に効くのは`LIMITS`未受信の間の初期表示くらい。
  *
- * 加速度は対象にしていない。slam2d 系の `a_accel`/`a_brake`（絶対値）は
- * 同定値に対する利用率 `accel_use`/`brake_use`（0〜1）になり、`LIMITS.max_accel_m_s2` で
- * 縛るキーが無くなった。絶対値の前後加速度を設定に持つ planner を足すならここへ戻す。
+ * 加速度は対象にしていない。slam2d 系の前後の加速度は設定項目ではなくなり（同定値か走行中の
+ * 学習で決まる。`raspi/nav/grip.py`）、`LIMITS.max_accel_m_s2` で縛るキーが無い。
+ * 絶対値の前後加速度を設定に持つ planner を足すならここへ戻す。
  * 横加速度（`a_lat_max` 等）は物理量として別物なので、元から対象外。
  *
  * ⚠ これも`effectiveRange`と同じく**スライダの表示・入力レンジの話**。

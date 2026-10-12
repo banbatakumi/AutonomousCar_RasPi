@@ -74,7 +74,7 @@ def catalog() -> list[dict]:
                 {"key": s.key, "label": s.label, "min": s.min, "max": s.max,
                  "step": s.step, "default": s.default, "unit": s.unit, "note": s.note,
                  "group": s.group}
-                for s in cls.params
+                for s in cls.params if not s.hidden
             ],
             "stats": list(cls.stats),
             #: 地図パネル・地図ライブラリを出すか（SLAM 地図を持つ planner）、
@@ -82,7 +82,7 @@ def catalog() -> list[dict]:
             "map_ui": bool(getattr(cls, "map_ui", False)),
             "routes_ui": bool(getattr(cls, "routes_ui", False)),
         }
-        for cls in PLANNERS.values()
+        for cls in PLANNERS.values() if cls.listed
     ]
 
 
@@ -96,7 +96,9 @@ def make_planner(mode: str) -> Planner | None:
     return cls() if cls is not None else None
 
 
-def merged_params(mode: str, user: dict[str, float]) -> dict[str, float]:
-    """既定値にユーザー設定を重ねてクランプしたもの。知らない id なら空 dict。"""
+def merged_params(mode: str, user: dict[str, float], hidden: bool = False) -> dict[str, float]:
+    """既定値にユーザー設定を重ねてクランプしたもの。知らない id なら空 dict。
+
+    `hidden` は `Planner.merged` を参照（GUI から隠した項目も上書きするか。`sim.bench` 用）。"""
     cls = PLANNERS.get(mode)
-    return cls.merged(user) if cls is not None else {}
+    return cls.merged(user, hidden) if cls is not None else {}

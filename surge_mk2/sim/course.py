@@ -109,6 +109,13 @@ class Course:
 
         origin = tuple(meta.get("origin", (0.0, 0.0)))
         start = tuple(meta.get("start", (0.0, 0.0, 0.0)))
+        obstacles = None
+        if meta.get("obstacles"):
+            # 写真由来のコース等: 壁とは別に孤立障害物を JSON で持てる（壁モードと同じ形式）
+            from .track import stamp_discs
+            stamp_discs(grid, (float(origin[0]), float(origin[1])),
+                        float(meta.get("resolution", 0.02)), meta["obstacles"])
+            obstacles = np.asarray(meta["obstacles"], dtype=np.float64)
         return cls(
             name=meta.get("name", p.stem),
             path=p,
@@ -116,6 +123,7 @@ class Course:
             origin=(float(origin[0]), float(origin[1])),
             start=(float(start[0]), float(start[1]), float(start[2])),
             grid=np.ascontiguousarray(grid),
+            obstacles=obstacles,
         )
 
     # ── 寸法 ──

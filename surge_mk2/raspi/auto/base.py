@@ -53,6 +53,10 @@ class ParamSpec(msgspec.Struct):
     note: str = ""
     #: GUI で見出しを付けてまとめる組（例: 「地図作成」「本番走行」）。空なら組分けしない
     group: str = ""
+    #: True なら GUI に出さず、保存済みの設定・GUI から来た値も読まない（＝いつも `default`）。
+    #: 人が決める必要のない値（同定値や走行中の学習から決まるはずの値・一度決めたら触らない値）を、
+    #: コードから消す前の段階として定数にしておくための印。`sim.bench --set` だけは上書きできる
+    hidden: bool = False
 
 
 class Planner:
@@ -85,6 +89,8 @@ class Planner:
     #: `"free_ahead"`/`"nearest"`/`"gap"`/`"valid_ratio"` の部分集合。
     #: **既定はギャップ探索系（FTG/DE/gap_pursuit/raceline）が使う全部**——
     #: `plan()` で書かないフィールドは `AutoState` の既定値（0.0）のまま残り、
+    #: GUI のモード選択に出すか。False でも planner としては作れる（`sim.bench`・派生クラスの土台）
+    listed: bool = True
     #: 意味の無い数値（例: gapを持たない planner で「0〜0° ギャップ」）が
     #: GUI に出てしまうため、書くフィールドだけをここで宣言する
     #: （`LineTrace`/`E2ELidar` が上書きしている）。`target_speed`/
@@ -161,16 +167,19 @@ class Planner:
         return {s.key: s.default for s in cls.params}
 
     @classmethod
-    def merged(cls, user: dict[str, float]) -> dict[str, float]:
+    def merged(cls, user: dict[str, float], hidden: bool = False) -> dict[str, float]:
         """既定値にユーザー設定を重ね、**宣言した範囲へクランプする**。
 
         GUI を信用してクランプを省くと、古い `config/auto.json` や手書きの値が
         そのまま planner に入る。範囲外の値で走り出す方が、無視されるより危ない。
+
+        :param hidden: True なら `ParamSpec.hidden` の項目もユーザー設定で上書きする（`sim.bench` 用）。
+            既定は上書きしない——GUI から隠した項目に、古い保存値が黙って効き続けないように
         """
         out = cls.defaults()
         for s in cls.params:
             v = user.get(s.key)
-            if v is None:
+            if v is None or (s.hidden and not hidden):
                 continue
             try:
                 v = float(v)

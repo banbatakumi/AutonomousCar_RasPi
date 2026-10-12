@@ -67,6 +67,11 @@ ABS_MIN_SPEED_M_S = 0.25
 DRIVE_MAX_SPEED_M_S = 5.0
 #: ★v0.22: STM32 は `accel_limit` に上限を掛けない。ワイヤ（u16×0.001）で表せる最大を返す
 DRIVE_MAX_ACCEL_M_S2 = 65.535
+#: 走行中の揺れ（`_vibration`）の減衰の時定数 [s]（100Hz で極の半径 0.75。実機の自己相関に合わせた）
+_VIB_TAU_S = 0.035
+#: 同じく車速の揺れ（100Hz で極の半径 0.5・中心 17Hz → 隣との相関 0.39・2 つ先 −0.07）
+_VIB_SPEED_TAU_S = 0.0144
+_VIB_SPEED_HZ = 17.0
 DRIVE_MAX_TORQUE_NM = 0.13   # VehicleModel.MAX_BRAKE_TORQUE_NM と同値
 
 #: 積分の刻み。細かくしても運動学モデルでは意味が薄く、粗いと舵の遅れが崩れる
@@ -94,6 +99,9 @@ class VirtualStm32:
         self.lidar = lidar
         self.rng = random.Random(seed)
         self._np_rng = np.random.default_rng(seed)
+        #: 走行中の揺れ（`_vibration`）。乱数は別に持つ（揺れを入れても LiDAR などの乱数列は変わらない）
+        self._vib_rng = random.Random(seed + 7919)
+        self._vib = {"t": 0, "x": [[0.0, 0.0] for _ in range(3)]}
 
         self.vehicle = VehicleModel(spec, course.start)
         self._body = course.body_samples(spec.footprint)
@@ -120,6 +128,8 @@ class VirtualStm32:
         self._arm_requested = False
         self._disarm_brake_until = 0
 
+        #: 路面の摩擦を場所と時刻で変える（`sim/surface.py`。`None` = `VehicleSpec` の値のまま）
+        self.surface = None
         self.estop_active = False
         self.auto_stop_active = False
         self.side_brake_active = False
@@ -356,6 +366,8 @@ class VirtualStm32:
                            and abs(v.speed) >= ABS_MIN_SPEED_M_S
                            and brake_decel(v.spec, cmd, v.speed)[1])
 
+        if self.surface is not None:
+            v.grip_lat, v.grip_long = self.surface.scale(v.x, v.y, (self._now - self._t0) / NS)
         v.apply(cmd)
         v.step(dt)
 
@@ -413,6 +425,11 @@ class VirtualStm32:
             f |= packets.FLG_ABS_ACTIVE
         if self.vehicle.launching:
             f |= packets.FLG_LAUNCH_ACTIVE
+        # ★ 作り物: このモデルは後輪の回転を持たないので TC そのものは無い。駆動の加速度が
+        #   グリップの上限で頭打ちになっている間（実機なら TC が介入する場面）に旗だけ立てる。
+        #   発進の加速度から横グリップの初期値を出す処理（`raspi/nav/grip.LaunchFit`）の検証用
+        if self.vehicle.accel_capped and self._input.armed:
+            f |= packets.FLG_TC_ACTIVE
         # v0.14: ウィンカー。点滅周期は暫定 1Hz（0.5s ON / 0.5s OFF）。
         # **実際の周期は STM32 側の実装依存**なので、ここは GUI 配線の確認用の近似
         blink = (t_ns // (NS // 2)) % 2 == 0
@@ -424,6 +441,32 @@ class VirtualStm32:
         if self.lidar is not None:
             f |= packets.FLG_LIDAR_OK
         return f
+
+    def _vibration(self, t_ns: int) -> list[float]:
+        """走行中の揺れ 3 本（ヨーレート・車速・実舵角。それぞれ分散 1）。
+
+        白色雑音を 2 次の共振（中心 `vib_hz`、減衰の時定数 `_VIB_TAU_S`）に通したもの。実機の
+        雑音は隣の標本と 0.4〜0.8 の相関があり、3〜5 標本先で負になる（`sim/params.py` の
+        `REAL_VIBRATION`）。白色のままだと、学習側の 30〜50ms のローパスでほとんど消えてしまう。
+        """
+        st = self._vib
+        dt = (t_ns - st["t"]) / NS if st["t"] else 0.01
+        st["t"] = t_ns
+        if not 1e-4 < dt < 0.1:
+            dt = 0.01
+        out = []
+        for k, x in enumerate(st["x"]):
+            # 車速（k = 1）は相関が短い（実機: 隣 0.4〜0.6・2 つ先はほぼ 0）
+            tau, hz = (_VIB_SPEED_TAU_S, _VIB_SPEED_HZ) if k == 1 else (_VIB_TAU_S, self.params.vib_hz)
+            r = math.exp(-dt / tau)
+            a1 = 2.0 * r * math.cos(2.0 * math.pi * hz * dt)
+            a2 = -r * r
+            # 出力の分散が 1 になる入力の大きさ（AR(2) の定常分散）
+            gain = math.sqrt(max(1e-9, (1.0 + a2) * ((1.0 - a2) ** 2 - a1 * a1) / (1.0 - a2)))
+            y = a1 * x[0] + a2 * x[1] + gain * self._vib_rng.gauss(0.0, 1.0)
+            x[1], x[0] = x[0], y
+            out.append(y)
+        return out
 
     def _telemetry(self, t_ns: int) -> packets.Telemetry:
         v = self.vehicle
@@ -437,6 +480,14 @@ class VirtualStm32:
         yaw_rate = v.yaw_rate_measured + math.radians(
             p.gyro_bias_dps
             + (self.rng.gauss(0.0, p.gyro_noise_dps) if p.gyro_noise_dps > 0 else 0.0))
+        # 走行中の揺れ（`SimParams.vib_*`。既定 0 なら乱数も引かない＝今までと同じ結果）
+        speed_meas, steer_meas = v.speed_measured, v.steer_actual
+        if p.vib_gyro_dps_per_m_s > 0 or p.vib_speed_ratio > 0 or p.vib_steer_rad > 0:
+            vib = self._vibration(t_ns)
+            sp = abs(v.speed)
+            yaw_rate += math.radians(p.vib_gyro_dps_per_m_s) * sp * vib[0]
+            speed_meas += p.vib_speed_ratio * sp * vib[1]
+            steer_meas += p.vib_steer_rad * min(1.0, sp / 0.5) * vib[2]
         load = abs(v.speed) / 3.0                       # 0..1 の目安
         # 1輪あたりの指令トルク（正=駆動 / 負=制動）。実機は TC・ABS 適用後の最終指令値を返す。
         # 縦加速度から `vehicle.brake_decel`/`next_speed` の式を逆算して求める（GUI の
@@ -461,9 +512,9 @@ class VirtualStm32:
             t_us=self.stm_us(t_ns),
             flags=self._flags(t_ns),
             # 実機の speed/wheel_speed はファームのローパス後（`VehicleSpec.speed_filter_s`、約10ms）
-            speed=_q("speed", v.speed_measured, -32768, 32767),
+            speed=_q("speed", speed_meas, -32768, 32767),
             yaw_rate=_q("yaw_rate", yaw_rate, -32768, 32767),
-            steer_actual=_q("steer_actual", v.steer_actual, -32768, 32767),
+            steer_actual=_q("steer_actual", steer_meas, -32768, 32767),
             # 実機の `steer_cmd_echo` は受理した指令そのものではなく、`steer_rate_limit`
             # でランプさせた参照舵角（`sim/vehicle.py` の `steer_ref`）。0.524rad の
             # ステップに約75ms（=0.524/7.0rad/s）かけて追従する様子が実機ログで見えている

@@ -183,12 +183,12 @@
  *
  * ## 応答設計
  *
- * ### 1. ループは rAF、送信は 50Hz
+ * ### 1. ループは rAF、変化した指令はそのフレームで送る
  *
- * 下流は telemetry_node が 50Hz、io_node が 100Hz で回っているので、
- * GUI が低レートだとそこがボトルネックになる。積分は rAF（≈60Hz、実 dt）で回し、
- * 送信は 50Hz に間引く（telemetry_node の publish レートに合わせる。それ以上出しても
- * 途中で捨てられるだけ）。パッドのスティックも rAF で読むのでカクつかない。
+ * 積分は rAF（≈60Hz、実 dt）で回し、**中身が変わった指令はそのフレームで送る**（`txDue`）。
+ * 下流（telemetry_node → io_node → STM32）は中身が変わった指令をその場で中継するので、
+ * GUI が間引くとそこがそのまま遅れになる。同じ中身の繰り返し（デッドマンを生かすだけ）は
+ * 50Hz 以下に間引く。パッドのスティックも rAF で読むのでカクつかない。
  *
  * rAF はタブが隠れると止まる ＝ 送信も止まる ＝ `DEADMAN_MS` でサーバが DISARM。
  * **止まる方向に転ぶので安全側**（`visibilitychange` の即 DISARM と二重）。
@@ -222,11 +222,16 @@ import {
 } from '../store/ui'
 import type { LaunchPhase } from '../store/ui'
 import { SAFETY } from '../generated/vehicle'
+import type { CmdOut } from '../types'
 import type { ControlChannel } from '../ws/control'
 
-/** 送信レート。telemetry_node の `CMD_PUB_HZ` に合わせる */
+/** **同じ中身を繰り返すとき**の送信レート。telemetry_node の `CMD_PUB_HZ` に合わせる
+ * （rAF の刻みに丸められるので、60Hz の画面では実際は 30Hz。デッドマンには十分） */
 const TX_HZ = 50
 const TX_INTERVAL_MS = 1000 / TX_HZ
+/** 中身が変わった指令を続けて送るときの最短間隔 [ms]。rAF ごと（60Hz で 16.7ms、120Hz で 8.3ms）に
+ * 送れるようにしつつ、それより速い画面で Pi へ流し込みすぎない */
+const TX_MIN_INTERVAL_MS = 7
 
 /**
  * 送信が途絶えてから車が止まるまで [ms]。
@@ -548,7 +553,7 @@ export function useDriving(ch: ControlChannel | null) {
     }
   }, [])
 
-  // ── rAF で積分し、50Hz で送る ──
+  // ── rAF で積分し、変化した指令はそのフレームで送る ──
   useEffect(() => {
     if (!ch) return
     let raf = 0
@@ -579,6 +584,24 @@ export function useDriving(ch: ControlChannel | null) {
       if (u.braking !== brake || u.horning !== horn || u.passing !== passing || u.launchPhase !== launch) {
         u.set({ braking: brake, horning: horn, passing, launchPhase: launch })
       }
+    }
+
+    /**
+     * いま送るか。**中身が変わっていれば次のフレームで送り、同じ中身の繰り返しは
+     * `TX_INTERVAL_MS` に間引く**（デッドマンを生かしておくだけなので）。
+     *
+     * 一律に `TX_INTERVAL_MS`（20ms）で間引いていた頃は、60Hz の画面では rAF の 16.7ms が
+     * 20ms に届かず**1フレームおきにしか送れなかった**（実効 30Hz。操作が指令に載るまで
+     * 最大 33ms）。
+     */
+    let lastTxKey = ''
+    const txDue = (now: number, c: Omit<CmdOut, 'type'>): boolean => {
+      const key = JSON.stringify(c)
+      const minMs = key !== lastTxKey ? TX_MIN_INTERVAL_MS : TX_INTERVAL_MS
+      if (now - lastTxMs < minMs) return false
+      lastTxMs = now
+      lastTxKey = key
+      return true
     }
 
     const tick = () => {
@@ -801,11 +824,7 @@ export function useDriving(ch: ControlChannel | null) {
           mirrorAux(false, false, false)
           return
         }
-        if (now - lastTxMs < TX_INTERVAL_MS) return
-        lastTxMs = now
-        // ブレーキ・サイドブレーキは未 ARM では意味を持たない（モータが励磁されていない）
-        mirrorAux(false, horn, passing)
-        ch.cmd({
+        const c: Omit<CmdOut, 'type'> = {
           mode: 0, // DISARM
           arm: false,
           brake: false,
@@ -826,7 +845,11 @@ export function useDriving(ch: ControlChannel | null) {
           winker_left: ui.winkerLeftRequested,
           winker_right: ui.winkerRightRequested,
           launch: false,
-        })
+        }
+        if (!txDue(now, c)) return
+        // ブレーキ・サイドブレーキは未 ARM では意味を持たない（モータが励磁されていない）
+        mirrorAux(false, horn, passing)
+        ch.cmd(c)
         return
       }
 
@@ -886,10 +909,7 @@ export function useDriving(ch: ControlChannel | null) {
           ui.set({ deadman: true, inputSource: 'auto' })
         }
 
-        if (now - lastTxMs < TX_INTERVAL_MS) return
-        lastTxMs = now
-        mirrorAux(brake, horn, passing)
-        ch.cmd({
+        const c: Omit<CmdOut, 'type'> = {
           mode: 2, // AUTO
           arm: true,
           // **人間のブレーキはそのまま通す**（解除の往復を待たない）
@@ -913,7 +933,10 @@ export function useDriving(ch: ControlChannel | null) {
           winker_right: ui.winkerRightRequested,
           // 自律走行のローンチは planner が決める（サーバ側も GUI の値を使わない）
           launch: false,
-        })
+        }
+        if (!txDue(now, c)) return
+        mirrorAux(brake, horn, passing)
+        ch.cmd(c)
         return
       }
 
@@ -1077,11 +1100,8 @@ export function useDriving(ch: ControlChannel | null) {
         ui.set({ deadman: true, inputSource: source })
       }
 
-      // ── 送信は 50Hz に間引く ──
-      if (now - lastTxMs < TX_INTERVAL_MS) return
-      lastTxMs = now
-      mirrorAux(brake, horn, passing, launch)
-      ch.cmd({
+      // ── 送信（変化していればこのフレームで。同じ中身は間引く。`txDue`）──
+      const c: Omit<CmdOut, 'type'> = {
         mode: 1, // MANUAL
         arm: true,
         brake,
@@ -1113,7 +1133,10 @@ export function useDriving(ch: ControlChannel | null) {
         winker_right: ui.winkerRightRequested,
         // ローンチコントロール。手順を踏んだ発進の間だけ立つ
         launch: launch === 'go' && !torqueModeOn,
-      })
+      }
+      if (!txDue(now, c)) return
+      mirrorAux(brake, horn, passing, launch)
+      ch.cmd(c)
     }
 
     raf = requestAnimationFrame(tick)

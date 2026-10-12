@@ -106,7 +106,7 @@ E-Stop だけは誰でも押せる。
 src/
 ├── bus/live.ts        20Hz のデータ置き場。**React の state には入れない**
 ├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
-├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・20Hz）
+├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・50Hz）
 ├── ws/control.ts      /ws/control（JSON・操縦権・E-Stop）
 ├── input/useDriving.ts ゲームパッド + キーボード → 20Hz の cmd
 ├── render/LidarView   Canvas 2D。rAF で live を読む

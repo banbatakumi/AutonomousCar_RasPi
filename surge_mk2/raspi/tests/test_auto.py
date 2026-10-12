@@ -909,7 +909,10 @@ class TestRegistry(unittest.TestCase):
     def test_catalog_is_json_serialisable_and_complete(self):
         raw = msgspec.json.encode(catalog())
         got = msgspec.json.decode(raw)
-        self.assertEqual([e["id"] for e in got], list(PLANNERS))
+        # GUI のモード選択に出さない planner（`Planner.listed` が False）は入らない
+        self.assertEqual([e["id"] for e in got], [k for k, c in PLANNERS.items() if c.listed])
+        self.assertNotIn("slam2d_raceline", [e["id"] for e in got])
+        self.assertIn("slam2d_route", [e["id"] for e in got])
         for entry in got:
             self.assertTrue(entry["name"] and entry["description"])
             for s in entry["params"]:

@@ -529,6 +529,48 @@ class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
                 os.environ["SURGE_BUS_DIR"] = old
             tmp.cleanup()
 
+    async def test_image_arrival_wakes_the_camera_pump(self):
+        """画像が届いたら `BUS_IDLE_POLL_S` を待たずに `_cam_wake` が立つ（2026-10-12）。"""
+        import os
+        import tempfile
+
+        from raspi.bus import LATEST, Publisher, Subscriber
+        from raspi.msgs.types import TOPIC_AUTO_CMD, TOPIC_IMAGE_FRONT, ImageRef
+
+        tmp = tempfile.TemporaryDirectory()
+        old = os.environ.get("SURGE_BUS_DIR")
+        os.environ["SURGE_BUS_DIR"] = tmp.name
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        srv._on_armed_change = lambda: None
+        srv._cam_wake = asyncio.Event()
+        camera = Publisher("camera")
+        planning = Publisher("planning")
+        sub = Subscriber({TOPIC_AUTO_CMD: LATEST, TOPIC_IMAGE_FRONT: LATEST})
+        srv.sub = sub
+        pump = asyncio.create_task(srv._bus_pump())
+        try:
+            await asyncio.sleep(0.2)
+            waits = []
+            for seq in range(1, 6):
+                srv._cam_wake.clear()
+                await asyncio.sleep(0.013)                # 位相をずらす
+                t0 = time.monotonic_ns()
+                camera.send(TOPIC_IMAGE_FRONT, ImageRef(cam="front", ring_seq=seq))
+                await asyncio.wait_for(srv._cam_wake.wait(), 0.5)
+                waits.append((time.monotonic_ns() - t0) / 1e6)
+            self.assertLess(sorted(waits)[len(waits) // 2], 5.0, waits)
+        finally:
+            srv._running = False
+            await asyncio.wait_for(pump, 1.0)
+            sub.close()
+            camera.close()
+            planning.close()
+            if old is None:
+                os.environ.pop("SURGE_BUS_DIR", None)
+            else:
+                os.environ["SURGE_BUS_DIR"] = old
+            tmp.cleanup()
+
     async def test_fake_sub_without_sockets_still_polls(self):
         srv = TestImmediateCmdRelay._server(self, live=True)
         srv._on_armed_change = lambda: None

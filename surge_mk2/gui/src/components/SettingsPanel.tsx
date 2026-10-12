@@ -264,7 +264,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const brakeHoldEnabled = link?.brake_hold_enabled ?? null
   const autoStopMarginCm = link?.auto_stop_margin_cm ?? null
   // fan と違い `/ws/control` の status（イベント発生時のブロードキャスト）から読む。
-  // 20Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
+  // 50Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
   const cam = useUi((s) => s.cameraConfig)
   const sig = useUi((s) => s.signalConfig)
   // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、

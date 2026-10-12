@@ -36,6 +36,23 @@
 ベースの経路計画（`raspi/nav/hybrid_astar.py` 等）や手動運転では、分岐・
 交差のある壁でも実際に通り抜けたり迂回したりできる。
 
+## 画像モード
+
+コースの写真・図・PNG から占有格子コースを自動で作る（`sim/image_course.py`）。
+画像ファイルをウィンドウへ**ドロップ**するか、`python -m sim.editor 画像.png`、
+パネルの「画像を開く」（I）で読み込む。既存の PNG コース（`O` で巡回、または名前指定）
+も同じモードで開いて、ノイズ消しや障害物の整理ができる。
+
+1. 壁の色を自動で推定する。外れたら「スポイト」で壁をクリックして指定し直す
+2. 色の許容・穴埋め・最小サイズで自動のノイズ除去を調整する
+3. 残った不要物は手で消す: 「消す(塊)」は壁の塊を1クリックで、「消す(矩形)」は範囲ドラッグで
+   消し、「塗る(矩形)」は欠けた壁を埋める。手動の編集は画像のピクセル座標で記録するので、
+   色の許容などを後から変えても消したものは消えたまま。`⌫` で1つずつ戻せる
+4. 「外形の幅」で実寸に合わせる（壁の外接矩形の幅 [m]）
+5. スタート地点（必須）と障害物を置いて保存 → `sim/courses/<名前>.png` + `.json`
+
+`V` で元画像（拾った壁を赤く重ねて表示）と結果を切り替えられる。
+
 ## どちらのモードも
 
 - クリック（ほぼ動かさずに離す）＝直線の頂点。ドラッグ＝ドラッグを始めた
@@ -52,6 +69,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -62,6 +80,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sim import track                          # noqa: E402
 from sim import ui as U                         # noqa: E402
+from sim import image_course as IC              # noqa: E402
 from sim import wall_track                      # noqa: E402
 from sim.course import Course, DEFAULT_COURSE_DIR  # noqa: E402
 from sim.sketch import (                        # noqa: E402
@@ -92,6 +111,12 @@ DEFAULT_WALL_THICKNESS = 0.03
 WALL_THICKNESS_STEP = 0.01
 WALL_RESOLUTION = 0.02
 WALL_MARGIN = 0.4
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif")
+#: 画像モードの既定値。壁の外形の幅 [m]（読み込み直後の仮の縮尺。実寸は人が合わせる）
+IMG_DEFAULT_WIDTH_M = 10.0
+IMG_TOOLS = (("eyedrop", "スポイト"), ("blob", "消す(塊)"),
+             ("erase", "消す(矩形)"), ("fill", "塗る(矩形)"))
 
 #: 障害物の直径の選択肢 [m]
 OBSTACLE_DIAMETERS = (0.1, 0.2, 0.3, 0.5)
@@ -147,6 +172,23 @@ class Editor:
         self.obstacles: list[tuple[float, float, float]] = []
         self.obstacle_diameter = OBSTACLE_DIAMETERS[1]  # 0.2m
         self.placing_obstacle = False
+
+        # 画像モード。座標は `sim/image_course.py` の約束（画像の左下 = img_origin）
+        self.img_rgb: np.ndarray | None = None
+        self.img_path: Path | None = None
+        self.img_ref: tuple[int, int, int] = (0, 0, 0)
+        self.img_tol = 30
+        self.img_close = 2
+        self.img_min_area = 0.03                  #: 捨てる塊の最小面積 [m²]
+        self.img_scale = 100.0                    #: [px/m]
+        self.img_origin: tuple[float, float] = (0.0, 0.0)
+        self.img_ops: list[tuple] = []
+        self.img_tool = "blob"
+        self.img_show_src = False
+        self._img_mask: np.ndarray | None = None
+        self._img_mask_key: tuple | None = None
+        self._src_surf = None
+        self._src_cache: dict = {}
 
         self.name = "new_course"
         self.buttons: list[Btn] = []
@@ -204,6 +246,12 @@ class Editor:
 
     def _content_bounds(self) -> tuple[float, float, float, float]:
         pts: list[tuple[float, float]] = []
+        if self.mode == "image":
+            if self.img_rgb is None:
+                return _EMPTY_BOUNDS
+            h, w = self.img_rgb.shape[:2]
+            ox, oy = self.img_origin
+            return (ox, oy, ox + w / self.img_scale, oy + h / self.img_scale)
         if self.mode == "centerline":
             pts.extend(self.center_loop.vertices)
         else:
@@ -334,6 +382,11 @@ class Editor:
             self.obstacles.pop()
             self._mark_dirty()
             return
+        if self.mode == "image":
+            if self.img_ops:
+                self.img_ops.pop()
+                self._mark_dirty()
+            return
         if self.mode == "centerline":
             self.center_loop.undo()
         elif self.wall_current.vertices:
@@ -350,7 +403,8 @@ class Editor:
         """
         empty = (not self.center_loop.vertices and not self.wall_loops
                 and not self.wall_current.vertices and self.wall_start is None
-                and not self.obstacles)
+                and not self.obstacles and not self.img_ops
+                and (self.img_rgb is None or not reset_name))
         if empty and not reset_name:
             return
         if not empty:
@@ -367,7 +421,11 @@ class Editor:
         self.wall_start = None
         self.obstacles = []
         self.placing_obstacle = False
+        self.img_ops = []
         if reset_name:
+            self.img_rgb = None
+            self.img_path = None
+            self._img_mask = None
             self.name = "new_course"
             self.width = DEFAULT_WIDTH
             self.wall_thickness = DEFAULT_WALL_THICKNESS
@@ -449,6 +507,8 @@ class Editor:
     # ── プレビュー用コース ──
 
     def preview_course(self) -> Course | None:
+        if self.mode == "image":
+            return self._preview_image()
         if self.mode == "centerline":
             return self._preview_centerline()
         return self._preview_wall()
@@ -500,6 +560,234 @@ class Editor:
             self._dirty = False
         return self._cached_course
 
+    # ── 画像モード ──
+
+    def _min_area_px(self) -> float:
+        return self.img_min_area * self.img_scale ** 2
+
+    def _wall_mask(self) -> np.ndarray | None:
+        """現在のパラメータでの壁マスク。パラメータが変わったときだけ作り直す。"""
+        if self.img_rgb is None:
+            return None
+        key = (self.img_ref, self.img_tol, self.img_close, round(self._min_area_px(), 1),
+               tuple(self.img_ops))
+        if key != self._img_mask_key or self._img_mask is None:
+            self._img_mask = IC.build_mask(self.img_rgb, self.img_ref, self.img_tol,
+                                           self.img_close, self._min_area_px(), self.img_ops)
+            self._img_mask_key = key
+        return self._img_mask
+
+    def _preview_image(self) -> Course | None:
+        mask = self._wall_mask()
+        if mask is None:
+            return None
+        if self._dirty or self._cached_course is None:
+            samp = IC.sample_grid(mask, self.img_scale, self.img_origin)
+            grid = samp.grid
+            obstacles = None
+            if self.obstacles:
+                track.stamp_discs(grid, samp.origin, IC.RES, self.obstacles)
+                obstacles = np.asarray(self.obstacles, dtype=np.float64)
+            self._cached_course = Course(
+                name=self.name, path=Path(f"<editor>/{self.name}"),
+                resolution=IC.RES, origin=samp.origin,
+                start=self.wall_start or (0.0, 0.0, 0.0), grid=grid, obstacles=obstacles)
+            self._dirty = False
+        return self._cached_course
+
+    def _img_bbox_px(self) -> tuple[int, int, int, int] | None:
+        mask = self._wall_mask()
+        if mask is None:
+            return None
+        ys, xs = np.nonzero(mask)
+        if ys.size == 0:
+            return None
+        return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+    def _install_image(self, rgb: np.ndarray, path: Path) -> None:
+        self.img_rgb = rgb
+        self.img_path = path
+        self.img_ref = IC.guess_wall_color(rgb)
+        self.img_tol = 100 if self.img_ref == (0, 0, 0) else 30
+        self.img_close = 0 if self.img_ref == (0, 0, 0) else 2
+        self.img_min_area = 0.0 if self.img_ref == (0, 0, 0) else 0.03
+        self.img_ops = []
+        self.img_origin = (0.0, 0.0)
+        self.img_scale = max(1.0, rgb.shape[1] / IMG_DEFAULT_WIDTH_M)
+        self.img_tool = "blob"
+        self._src_surf = None
+        self._src_cache = {}
+        self._img_mask_key = None
+        self.wall_start = None
+        self.obstacles = []
+        self.mode = "image"
+
+    def load_image(self, path: str | Path) -> None:
+        """写真・図を読み込んで画像モードを始める。縮尺は仮（壁の幅が
+        `IMG_DEFAULT_WIDTH_M` になる値）なので、実寸は「外形の幅」で合わせる。"""
+        p = Path(path)
+        try:
+            rgb = IC.load_rgb(p)
+        except Exception as e:
+            self.say(f"画像を開けません: {e}")
+            return
+        self._install_image(rgb, p)
+        bb = self._img_bbox_px()
+        if bb is not None:
+            self.img_scale = max(1.0, (bb[2] - bb[0] + 1) / IMG_DEFAULT_WIDTH_M)
+        self.name = re.sub(r"[^A-Za-z0-9_-]", "", p.stem)[:32] or "new_course"
+        self._fit_view()
+        self._mark_dirty()
+        self.say(f"{p.name} を読み込みました。壁の色を確認し、外形の幅を実寸に合わせてください")
+
+    def _open_png_course(self, png: Path, meta: dict) -> None:
+        """既存の PNG コースを画像モードで開く（ノイズ・障害物の整理用）。"""
+        rgb = IC.load_rgb(png)
+        self._install_image(rgb, png)
+        res = float(meta.get("resolution", 0.02))
+        self.img_scale = 1.0 / res
+        self.img_origin = tuple(float(v) for v in meta.get("origin", (0.0, 0.0)))
+        self.img_ref, self.img_tol, self.img_close, self.img_min_area = (0, 0, 0), 100, 0, 0.0
+        if meta.get("start"):
+            self.wall_start = tuple(float(v) for v in meta["start"])
+        self.obstacles = [(float(x), float(y), float(r)) for x, y, r in meta.get("obstacles", [])]
+        self.name = png.stem
+        self._fit_view()
+        self._mark_dirty()
+        self.say(f"{png.name} を開きました（PNG コース）")
+
+    def pick_image_file(self) -> None:
+        """macOS のファイル選択ダイアログ（osascript）。Tk は pygame と同居できない。"""
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose file with prompt "コース画像を選択" '
+                 'of type {"public.image"})'], capture_output=True, text=True, timeout=300)
+        except Exception as e:
+            self.say(f"ダイアログを開けません: {e}（画像をウィンドウにドロップしてください）")
+            return
+        path = out.stdout.strip()
+        if out.returncode == 0 and path:
+            self.load_image(path)
+
+    def set_img_wall_color(self, rgb: tuple[int, int, int]) -> None:
+        self.img_ref = rgb
+        self._mark_dirty()
+        self.say(f"壁の色を {rgb} にしました")
+
+    def adj_img(self, what: str, d: float) -> None:
+        if self.img_rgb is None:
+            return
+        if what == "tol":
+            self.img_tol = int(max(0, min(100, self.img_tol + d)))
+        elif what == "close":
+            self.img_close = int(max(0, min(12, self.img_close + d)))
+        elif what == "area":
+            self.img_min_area = max(0.0, round(self.img_min_area + d, 4))
+        elif what == "width":
+            self._set_img_width(d)
+        self._mark_dirty()
+
+    def _set_img_width(self, d: float) -> None:
+        """壁の外接矩形の幅を `d` [m] 増減する＝縮尺を変える。スタートと障害物の位置は
+        画像に対して動かさない（世界座標を縮尺ぶん引き伸ばす。半径は実寸なのでそのまま）。"""
+        bb = self._img_bbox_px()
+        if bb is None:
+            self.say("壁が見つかりません（色の許容を上げるかスポイトで指定してください）")
+            return
+        wpx = bb[2] - bb[0] + 1
+        new_w = max(0.5, wpx / self.img_scale + d)
+        new_scale = wpx / new_w
+        f = self.img_scale / new_scale
+        ox, oy = self.img_origin
+        if self.wall_start is not None:
+            x, y, yaw = self.wall_start
+            self.wall_start = (ox + (x - ox) * f, oy + (y - oy) * f, yaw)
+        self.obstacles = [(ox + (x - ox) * f, oy + (y - oy) * f, r) for x, y, r in self.obstacles]
+        self.img_scale = new_scale
+
+    def _img_width_m(self) -> float | None:
+        bb = self._img_bbox_px()
+        return None if bb is None else (bb[2] - bb[0] + 1) / self.img_scale
+
+    def set_img_tool(self, tool: str) -> None:
+        self.img_tool = tool
+        self.placing_start = False
+        self.placing_obstacle = False
+        self.say({"eyedrop": "壁の上をクリックして壁の色を指定",
+                  "blob": "消したい壁の塊をクリック",
+                  "erase": "消したい範囲をドラッグ",
+                  "fill": "壁にしたい範囲をドラッグ"}[tool])
+
+    def toggle_img_src(self) -> None:
+        self.img_show_src = not self.img_show_src
+
+    def _world_to_img(self, x: float, y: float) -> tuple[float, float]:
+        h = self.img_rgb.shape[0]
+        ox, oy = self.img_origin
+        return (x - ox) * self.img_scale, h - 1 - (y - oy) * self.img_scale
+
+    def _img_canvas_up(self) -> None:
+        """画像モードのツール操作（スタート・障害物の配置は共通処理が先に取る）。"""
+        if self.img_rgb is None:
+            return
+        h, w = self.img_rgb.shape[:2]
+        ax, ay = self._world_to_img(*self.press_world)
+        if self.img_tool in ("eyedrop", "blob"):
+            if not (0 <= ax < w and 0 <= ay < h):
+                return
+            if self.img_tool == "eyedrop":
+                x, y = int(ax), int(ay)
+                patch = self.img_rgb[max(0, y - 1):y + 2, max(0, x - 1):x + 2].reshape(-1, 3)
+                self.set_img_wall_color(tuple(int(v) for v in patch.mean(axis=0)))
+            else:
+                self.img_ops.append(("blob", ax, ay))
+                self._mark_dirty()
+        else:
+            bx, by = self._world_to_img(*self.to_world(*self.mouse_screen))
+            if abs(bx - ax) < 1 and abs(by - ay) < 1:
+                return
+            self.img_ops.append((self.img_tool, min(ax, bx), min(ay, by),
+                                 max(ax, bx), max(ay, by)))
+            self._mark_dirty()
+
+    def _save_image(self) -> None:
+        mask = self._wall_mask()
+        if mask is None:
+            self.say("画像がありません。画像ファイルをドロップしてください")
+            return
+        if self.wall_start is None:
+            self.say("スタート地点を配置してください")
+            return
+        samp = IC.sample_grid(mask, self.img_scale, self.img_origin)
+        try:
+            grid, shift = IC.crop_for_save(samp.grid, samp.origin)
+        except ValueError as e:
+            self.say(str(e))
+            return
+        sx, sy, syaw = self.wall_start
+        start = [round(sx - shift[0], 3), round(sy - shift[1], 3), round(syaw, 4)]
+        obstacles = [[round(x - shift[0], 3), round(y - shift[1], 3), round(r, 3)]
+                     for x, y, r in self.obstacles]
+        col, row = int(start[0] / IC.RES), int(start[1] / IC.RES)
+        gh, gw = grid.shape
+        if not (0 <= row < gh and 0 <= col < gw) or grid[row, col]:
+            self.say("スタート地点が壁の中（または範囲外）です。置き直してください")
+            return
+
+        from PIL import Image
+        png = DEFAULT_COURSE_DIR / f"{self.name}.png"
+        Image.fromarray((np.flipud(~grid).astype(np.uint8)) * 255, "L").save(png)
+        m = {"name": self.name, "resolution": IC.RES, "origin": [0.0, 0.0], "start": start,
+             "wall_threshold": 128,
+             "note": f"sim.editor（画像モード）で {self.img_path.name if self.img_path else '画像'} "
+                     f"から作成。縮尺 {self.img_scale:.1f}px/m"}
+        if obstacles:
+            m["obstacles"] = obstacles
+        (DEFAULT_COURSE_DIR / f"{self.name}.json").write_text(
+            json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.say(f"保存: {png.name} + .json（{gw * IC.RES:.1f} x {gh * IC.RES:.1f} m）")
+
     def generate_wall_preview(self) -> None:
         """壁モードの骨格化＋中心線導出を明示的に1回実行する（重いので自動では
         呼ばない）。保存の直前にも同じ処理を行うので、これは事前確認用。
@@ -539,10 +827,18 @@ class Editor:
                 continue
             if "path" in m or m.get("mode") == "wall":
                 out.append(p)
+        out.extend(sorted(DEFAULT_COURSE_DIR.glob("*.png")))
         return out
 
     def open(self, name: str) -> None:
         p = Path(name)
+        if p.exists() and p.suffix.lower() in IMAGE_SUFFIXES:
+            side = p.with_suffix(".json")
+            if p.parent.resolve() == DEFAULT_COURSE_DIR.resolve() and side.exists():
+                self._open_png_course(p, json.loads(side.read_text(encoding="utf-8")))
+            else:
+                self.load_image(p)
+            return
         if not p.exists():
             p = DEFAULT_COURSE_DIR / f"{Path(name).stem}.json"
         try:
@@ -568,7 +864,11 @@ class Editor:
             self.name = p.stem
             self.say(f"{p.name} を開きました（{len(self.center_loop.vertices)} 頂点）")
         else:
-            self.say(f"{p.name} は PNG 方式なので編集できません")
+            png = p.with_suffix(".png")
+            if png.exists():
+                self._open_png_course(png, m)
+            else:
+                self.say(f"{p.name} は開けない形式です")
             return
         self.obstacles = [(float(x), float(y), float(r)) for x, y, r in m.get("obstacles", [])]
         self._fit_view()
@@ -584,7 +884,9 @@ class Editor:
         self.open(str(files[i % len(files)]))
 
     def save(self) -> None:
-        if self.mode == "centerline":
+        if self.mode == "image":
+            self._save_image()
+        elif self.mode == "centerline":
             self._save_centerline()
         else:
             self._save_wall()
@@ -670,6 +972,11 @@ class Editor:
                 self.screen = pygame.display.set_mode(
                     (max(MIN_W, e.w), max(MIN_H, e.h)), pygame.RESIZABLE)
                 self._resize(e.w, e.h)
+            elif e.type == pygame.DROPFILE:
+                if Path(e.file).suffix.lower() in IMAGE_SUFFIXES:
+                    self.load_image(e.file)
+                else:
+                    self.say("画像ファイル（png/jpg など）をドロップしてください")
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                 if self.hover:
                     self._press(self.hover)
@@ -693,7 +1000,12 @@ class Editor:
         world = self.to_world(*self.mouse_screen)
         if self.placing_start or self.placing_obstacle:
             self.press_screen = self.mouse_screen
-            self.press_world = snap_to_grid(world, self.grid_spacing) if self.grid_snap else world
+            self.press_world = (snap_to_grid(world, self.grid_spacing)
+                                if self.grid_snap and self.mode != "image" else world)
+            return
+        if self.mode == "image":
+            self.press_screen = self.mouse_screen
+            self.press_world = world
             return
         loop = self._active_loop()
         snapped, _idx = self._snap(world, loop)
@@ -719,6 +1031,8 @@ class Editor:
             self.obstacles.append((x, y, self.obstacle_diameter / 2.0))
             self._mark_dirty()
             self.say(f"障害物を配置しました（計 {len(self.obstacles)} 個）")
+        elif self.mode == "image":
+            self._img_canvas_up()
         else:
             loop = self._active_loop()
             end, idx = self._snap(self.to_world(*self.mouse_screen), loop)
@@ -732,6 +1046,8 @@ class Editor:
             b.value()
         elif b.kind == "mode":
             self.set_mode(b.value)
+        elif b.kind == "img_tool":
+            self.set_img_tool(b.value)
         elif b.kind == "grid_spacing":
             self.set_grid_spacing(b.value)
         elif b.kind == "wall_del":
@@ -763,6 +1079,10 @@ class Editor:
             self.toggle_grid_snap()
         elif k == pygame.K_b:
             self.toggle_placing_obstacle()
+        elif k == pygame.K_i:
+            self.pick_image_file()
+        elif k == pygame.K_v and self.mode == "image":
+            self.toggle_img_src()
         elif k == pygame.K_RETURN:
             self.finish_current_line()
         elif k == pygame.K_TAB:
@@ -829,19 +1149,28 @@ class Editor:
 
     def _draw_preview(self) -> None:
         course = self.preview_course()
-        if course is None:
+        if self.mode == "image" and course is not None and self.img_show_src:
+            self._draw_image_source()
+            course = None
+            msg = ""
+        elif course is None:
             msg = ("右下のパネルでモードを選び、キャンバスをクリックして"
                    "頂点を置いてください")
+            if self.mode == "image":
+                msg = "コースの画像ファイルをこのウィンドウにドロップしてください（または I）"
             g = self.ui.hd.render(msg, True, U.DIM)
             self.screen.blit(g, (self.view.centerx - g.get_width() // 2,
                                  self.view.centery - 10))
-        else:
+        if course is not None:
             dw = max(1, int(course.size_m[0] * self.view_scale))
             dh = max(1, int(course.size_m[1] * self.view_scale))
             ox, oy = self.to_px(course.origin[0], course.origin[1] + course.size_m[1])
             key = (f"edit:{self.mode}:{self.center_loop.vertices}:{self.center_loop.edges}:"
                   f"{[(l.vertices, l.edges) for l in self._all_wall_loops()]}:"
                   f"{self.width}:{self.wall_thickness}:{self.view_scale:.3f}:{self.obstacles}")
+            if self.mode == "image":
+                key = f"edit:image:{hash(self._img_mask_key)}:{self.img_scale:.3f}:" \
+                      f"{self.view_scale:.3f}:{self.obstacles}"
             self.screen.blit(U.map_surface(course, dw, dh, key=key), (int(ox), int(oy)))
             pygame.draw.rect(self.screen, U.LINE,
                              pygame.Rect(int(ox) - 1, int(oy) - 1, dw + 2, dh + 2), 1)
@@ -863,7 +1192,7 @@ class Editor:
         **今見えている範囲**に合わせて引き直す——コースの内容に合わせた範囲では
         なく、ビュー（`view_center`/`view_scale`）が唯一の基準。
         """
-        if not self.grid_snap:
+        if not self.grid_snap or self.mode == "image":
             return
         spacing = self.grid_spacing
         if spacing <= 0:
@@ -902,7 +1231,38 @@ class Editor:
             pr = max(3, r * self.view_scale)
             pygame.draw.circle(self.screen, U.BAD, (int(px), int(py)), int(pr), 2)
 
+    def _draw_image_source(self) -> None:
+        """元画像に、壁として拾った所を赤く重ねて見せる（`V`）。"""
+        h, w = self.img_rgb.shape[:2]
+        dw = max(1, int(w / self.img_scale * self.view_scale))
+        dh = max(1, int(h / self.img_scale * self.view_scale))
+        ox, oy = self.to_px(self.img_origin[0], self.img_origin[1] + h / self.img_scale)
+        if self._src_surf is None:
+            self._src_surf = pygame.surfarray.make_surface(np.transpose(self.img_rgb, (1, 0, 2)))
+        ck = (dw, dh)
+        if ck not in self._src_cache:
+            if len(self._src_cache) > 6:
+                self._src_cache.clear()
+            self._src_cache[ck] = pygame.transform.smoothscale(self._src_surf, ck)
+        self.screen.blit(self._src_cache[ck], (int(ox), int(oy)))
+        mk = ("mask", ck, hash(self._img_mask_key))
+        if mk not in self._src_cache:
+            m = self._wall_mask()
+            rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            rgba[m] = (255, 40, 40, 140)
+            surf = pygame.image.frombuffer(rgba.tobytes(), (w, h), "RGBA")
+            self._src_cache[mk] = pygame.transform.smoothscale(surf, ck)
+        self.screen.blit(self._src_cache[mk], (int(ox), int(oy)))
+
     def _draw_live_gesture(self) -> None:
+        if (self.mode == "image" and self.press_screen is not None
+                and self.img_tool in ("erase", "fill")
+                and not (self.placing_start or self.placing_obstacle)):
+            x0, y0 = self.press_screen
+            x1, y1 = self.mouse_screen
+            r = pygame.Rect(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+            pygame.draw.rect(self.screen, U.BAD if self.img_tool == "erase" else U.OK, r, 2)
+            return
         pts = self._live_gesture_points()
         if pts is None or len(pts) < 2:
             return
@@ -922,15 +1282,33 @@ class Editor:
         y = U.PAD + 52
 
         y = self.ui.section(self.screen, "モード", x, y, inner)
-        bw = (inner - 8) // 2
-        for i, (mode, label) in enumerate((("centerline", "中心線"), ("wall", "壁"))):
+        modes = (("centerline", "中心線"), ("wall", "壁"), ("image", "画像"))
+        bw = (inner - 8 * (len(modes) - 1)) // len(modes)
+        for i, (mode, label) in enumerate(modes):
             r = pygame.Rect(x + i * (bw + 8), y, bw, 28)
             b = Btn(r, "mode", mode, label)
             self.buttons.append(b)
             self.ui.button(self.screen, r, label, on=(self.mode == mode), hover=(self.hover is b))
         y += 38
 
-        y = self.ui.section(self.screen, "グリッド", x, y + 4, inner)
+        if self.mode == "image":
+            y = self._draw_image_panel(x, y + 4, inner)
+        else:
+            y = self._draw_grid_panel(x, y + 4, inner)
+
+        y = self._draw_obstacle_panel(x, y + 8, inner)
+
+        if self.mode == "image":
+            pass
+        elif self.mode == "centerline":
+            y = self._draw_centerline_panel(x, y + 8, inner)
+        else:
+            y = self._draw_wall_panel(x, y + 8, inner)
+
+        self._draw_actions(x, inner)
+
+    def _draw_grid_panel(self, x: int, y: int, inner: int) -> int:
+        y = self.ui.section(self.screen, "グリッド", x, y, inner)
         r = pygame.Rect(x, y, inner, 28)
         b = Btn(r, "act", None, f"グリッドにスナップ: {'ON' if self.grid_snap else 'OFF'}  (G)")
         b.value = self.toggle_grid_snap
@@ -950,16 +1328,82 @@ class Editor:
                            hover=(self.hover is b))
         y += 34
         self.screen.blit(self.ui.sm.render("頂点への吸着は常時ON", True, U.FAINT), (x, y))
-        y += 20
+        return y + 20
 
-        y = self._draw_obstacle_panel(x, y + 8, inner)
+    def _adj_row(self, x: int, y: int, inner: int, label: str, value: str,
+                 buttons: list[tuple[str, object]]) -> int:
+        """ラベルと値を左に、小さな増減ボタンを右に並べた1行。"""
+        bw, gap = 34, 4
+        total = len(buttons) * bw + (len(buttons) - 1) * gap
+        self.screen.blit(self.ui.lbl.render(label, True, U.DIM), (x, y + 4))
+        g = self.ui.num.render(value, True, U.FG)
+        self.screen.blit(g, (x + inner - total - 10 - g.get_width(), y + 3))
+        for i, (text, fn) in enumerate(buttons):
+            r = pygame.Rect(x + inner - total + i * (bw + gap), y, bw, 24)
+            b = Btn(r, "act", fn, text)
+            self.buttons.append(b)
+            self.ui.button(self.screen, r, text, hover=(self.hover is b))
+        return y + 28
 
-        if self.mode == "centerline":
-            y = self._draw_centerline_panel(x, y + 8, inner)
-        else:
-            y = self._draw_wall_panel(x, y + 8, inner)
+    def _draw_image_panel(self, x: int, y: int, inner: int) -> int:
+        y = self.ui.section(self.screen, "画像から作成", x, y, inner)
+        if self.img_rgb is None:
+            self.screen.blit(self.ui.lbl.render("画像をウィンドウにドロップ", True, U.WARN), (x, y))
+            y += 24
+            r = pygame.Rect(x, y, inner, 28)
+            b = Btn(r, "act", self.pick_image_file, "画像を開く  I")
+            self.buttons.append(b)
+            self.ui.button(self.screen, r, b.label, hover=(self.hover is b), color=U.ACCENT)
+            return y + 36
+        y = self.ui.kv(self.screen, x, y, inner, "画像",
+                       (self.img_path.name if self.img_path else "")[-22:], U.DIM, mono=False)
+        # 壁の色（見本つき）
+        pygame.draw.rect(self.screen, self.img_ref, pygame.Rect(x, y + 2, 18, 18), border_radius=3)
+        pygame.draw.rect(self.screen, U.LINE, pygame.Rect(x, y + 2, 18, 18), 1, border_radius=3)
+        self.screen.blit(self.ui.lbl.render(f"壁の色 {self.img_ref}", True, U.DIM), (x + 26, y + 3))
+        y += 26
 
-        self._draw_actions(x, inner)
+        a = lambda what, d: (lambda: self.adj_img(what, d))          # noqa: E731
+        y = self._adj_row(x, y, inner, "色の許容", f"{self.img_tol}",
+                          [("−5", a("tol", -5)), ("+5", a("tol", 5))])
+        y = self._adj_row(x, y, inner, "穴埋め [px]", f"{self.img_close}",
+                          [("−", a("close", -1)), ("+", a("close", 1))])
+        y = self._adj_row(x, y, inner, "最小サイズ [cm²]", f"{self.img_min_area * 1e4:.0f}",
+                          [("−50", a("area", -0.005)), ("+50", a("area", 0.005))])
+        wm = self._img_width_m()
+        y = self._adj_row(x, y, inner, "外形の幅 [m]", "—" if wm is None else f"{wm:.2f}",
+                          [("−1", a("width", -1.0)), ("−.1", a("width", -0.1)),
+                           ("+.1", a("width", 0.1)), ("+1", a("width", 1.0))])
+
+        n = len(IMG_TOOLS)
+        bw = (inner - 6 * (n - 1)) // n
+        for i, (tool, label) in enumerate(IMG_TOOLS):
+            r = pygame.Rect(x + i * (bw + 6), y, bw, 26)
+            b = Btn(r, "img_tool", tool, label)
+            self.buttons.append(b)
+            self.ui.button(self.screen, r, label,
+                           on=(self.img_tool == tool and not (self.placing_start or self.placing_obstacle)),
+                           hover=(self.hover is b))
+        y += 32
+        r = pygame.Rect(x, y, inner, 26)
+        label = f"表示: {'元画像（拾った壁=赤）' if self.img_show_src else '結果'}  V"
+        b = Btn(r, "act", self.toggle_img_src, label)
+        self.buttons.append(b)
+        self.ui.button(self.screen, r, label, on=self.img_show_src, hover=(self.hover is b))
+        y += 32
+        r = pygame.Rect(x, y, inner, 26)
+        b = Btn(r, "act", self.begin_place_start, "スタート地点を配置")
+        self.buttons.append(b)
+        self.ui.button(self.screen, r, b.label, on=self.placing_start, hover=(self.hover is b))
+        y += 30
+        ok = self.wall_start is not None
+        y = self.ui.kv(self.screen, x, y, inner, "スタート地点", "配置済み" if ok else "未配置",
+                       U.OK if ok else U.WARN, mono=False)
+        r = pygame.Rect(x, y, inner, 26)
+        b = Btn(r, "act", self.pick_image_file, "別の画像を開く  I")
+        self.buttons.append(b)
+        self.ui.button(self.screen, r, b.label, hover=(self.hover is b))
+        return y + 32
 
     def _draw_obstacle_panel(self, x: int, y: int, inner: int) -> int:
         y = self.ui.section(self.screen, "障害物", x, y, inner)
@@ -1071,6 +1515,8 @@ class Editor:
                 ("保存  S", lambda: setattr(self, "naming", True), U.ACCENT)]
         hint = ("クリック=直線頂点 / ドラッグ=円弧    Enter 壁を確定    B 障害物    "
                "スクロール ズーム    Tab モード切替    Q 終了")
+        if self.mode == "image":
+            hint = "画像をドロップ / I で開く    V 元画像    B 障害物    ⌫ 戻す    Q 終了"
         show_msg = self.message and pygame.time.get_ticks() < self.msg_until
         rows = (len(acts) + 1) // 2
         h = rows * 32 + 18 + (22 if show_msg else 0)

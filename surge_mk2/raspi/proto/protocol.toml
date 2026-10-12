@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0016      # 上位=メジャー 下位=マイナー
+protocol_version = 0x0017      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -398,8 +398,9 @@ LAUNCH_EXIT_TORQUE_NM     = 0x00A1
 # （`tools/sysid` が同定のたびに書く）。目標車速の傾きは COMMAND の accel_limit で決まる
 SPEED_FF_NM_PER_M_S2      = 0x00B1
 SPEED_FF_RR_NM            = 0x00B2
-SPEED_KP       = 0x0030  # 未実装（STM32側が UNKNOWN_ID を返す）
-SPEED_KI       = 0x0031  # 未実装（STM32側が UNKNOWN_ID を返す）
+# 車速PIのゲイン（★v0.23）。値は `vehicle.toml` の `[dynamics]` speed_kp / speed_ki（同定・シム・Pi の計算と共通）
+SPEED_KP       = 0x0030  # 比例 [N·m/(m/s)]
+SPEED_KI       = 0x0031  # 積分 [N·m/(m/s)/s]
 LIDAR_FORMAT   = 0x0040
 # WHEEL_LIFT_GUARD_ENABLE: v0.9でSTM32ファームウェアが実装済み（後輪片浮きの検知・
 # トルク遮断）。TC_ENABLE/TV_ENABLE本体とは独立に動く別機構。Pi側から実際に送信する

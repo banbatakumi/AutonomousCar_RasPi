@@ -468,6 +468,15 @@ function drawVehicle(
   ctx.strokeStyle = C.bodyLine
   ctx.lineWidth = 1.5
   ctx.stroke()
+  // 車輪（後輪は車軸＝原点、前輪は wheelbase 前方）
+  const wl = 2 * VEHICLE_GEOM.wheelRadius * px
+  const ww = VEHICLE_GEOM.wheelWidth * px
+  ctx.fillStyle = C.bodyLine
+  for (const ax of [0, VEHICLE.wheelbase]) {
+    for (const side of [-1, 1]) {
+      ctx.fillRect(ax * px - wl / 2, (side * VEHICLE_GEOM.track * px) / 2 - ww / 2, wl, ww)
+    }
+  }
   // 前を示す線
   ctx.beginPath()
   ctx.moveTo(0, 0)

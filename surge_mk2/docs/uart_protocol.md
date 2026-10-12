@@ -1,6 +1,6 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.22（`protocol_version = 0x0016`。唯一の定義は `raspi/proto/protocol.toml`）
+**バージョン**: v0.23（`protocol_version = 0x0017`。唯一の定義は `raspi/proto/protocol.toml`）
 **最終更新**: 2026-10-11
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
 **状態**: Pi・STM32 とも実装済み。**STM32・MD は未書き込み、実機での動作検証は未了**。
@@ -894,14 +894,14 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 | ~~`0x0001`~~ | ~~最大速度~~ | — | **廃止**（`RAS_CONFIG_UNKNOWN_PARAM` を返す）。STM32 側固定定数 `DRIVE_MAX_SPEED_M_S`（5.0 m/s）に一本化。**Pi からは元々未送信**（§5.8.1） |
 | ~~`0x0002`~~ | ~~最大加速度~~ | — | **廃止**（同上）。STM32 側の上限そのものが無い（`accel_limit` は Pi が決める。上限は `vehicle.toml` `[safety] cmd_accel_limit_m_s2`） |
 | ~~`0x0003`~~ | ~~最大舵角（路面舵角）~~ | — | **廃止**（同上）。路面舵角 ±30° に一本化 |
-| `0x0010` | TC 有効 | 0/1 | Pi 側 `io_node` が GUI のトグルに応じて送信 |
+| `0x0010` | TC 有効 | 0/1 | **STM32 の既定は無効。** Pi 側 `io_node` が `vehicle.toml` `[control]` の `tc_enable` を接続のたびに送り、GUI のトグルでも送る |
 | `0x0011`-`0x0015` | **TC の調整パラメータ・スリップの測り方** | f32 | §5.8.4。`TC_SLIP_TARGET`/`TC_KP_NM_PER_M_S`/`TC_KI_NM_PER_M`/`TC_MIN_TORQUE_NM`/`SLIP_SPEED_FLOOR_M_S` |
-| `0x0020` | トルクベクタリング 有効 | 0/1 | Pi 側 `io_node` が GUI のトグルに応じて送信 |
+| `0x0020` | トルクベクタリング 有効 | 0/1 | **STM32 の既定は無効。** Pi 側 `io_node` が `[control]` の `tv_enable` を接続のたびに送り、GUI のトグルでも送る |
 | ~~`0x0021`-`0x0029`~~ | ~~TV（ヨーレート PI）の調整パラメータ~~ | — | **廃止**（STM32 は `UNKNOWN_ID` を返す） |
 | `0x002A`-`0x002C` | **TV の調整パラメータ** | f32 | §5.8.4。`TV_TEST_MOMENT_NM`（同定用）/`TV_LOAD_GAIN_S2_PER_M`/`TV_MAX_RATIO` |
 | `0x0081`-`0x0082` | **ステアのリンクの換算** | f32 | §5.8.4。`STEER_LINK_GAIN`/`STEER_LINK_CUBIC`。調整値ではなくシステム同定の結果 |
-| `0x0030` | 速度制御 Kp | f32 | STM32 側未実装（`RAS_CONFIG_UNKNOWN_PARAM` を返す） |
-| `0x0031` | 速度制御 Ki | f32 | STM32 側未実装（`RAS_CONFIG_UNKNOWN_PARAM` を返す） |
+| `0x0030` | **車速PI の比例ゲイン** [N·m/(m/s)] | f32 | ★v0.23。`SPEED_KP`。範囲 0〜2。値は `vehicle.toml` の `[dynamics]` speed_kp |
+| `0x0031` | **車速PI の積分ゲイン** [N·m/(m/s)/s] | f32 | ★v0.23。`SPEED_KI`。範囲 0〜10。値は `[dynamics]` speed_ki |
 | `0x0040` | **LiDAR 出力フォーマット** | **enum** | 下表（bool ではなく enum） |
 | `0x0050` | 片輪浮き対策 有効 | 0/1 | TC/TV 本体とは独立。Pi 側 `io_node` が GUI のトグルに応じて送信。既定値は有効 |
 | `0x0051` | **片輪浮き対策の左右速度差のしきい値** [m/s] | f32 | §5.8.4。`WHEEL_LIFT_DIFF_THRESHOLD_M_S` |
@@ -984,11 +984,14 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読み書きする。**ON/OFF（`0x0010`/`0x0020`/
 `0x0050`/`0x0070`）とは別**で、こちらは連続値。
 
-- **名前・`param_id`・範囲・既定値の唯一の定義は STM32 側 `src/control/control_params.h` の表。**
+- **名前・`param_id`・範囲の唯一の定義は STM32 側 `src/control/control_params.h` の表。** 表の「既定値」列は
+  **上位が送るまでの仮置き**（各範囲の下限＝何もしない値。ステアのリンクだけ恒等の 1・0）で、本物の値ではない（★v0.23）
   `protocol.toml` の `[params]` はその `param_id` を写したもの（食い違いは `tools/ctrl_tune/tests` が検出）
 - 範囲外の値は STM32 が範囲内へ丸め、`CONFIG_ACK.result = 2`（範囲外）・`applied` = 丸めた後の値を返す。
-  非数は既定値になる
-- **Flash には保存しない。** 値の唯一の定義は Pi 側 `config/vehicle.toml` の `[control]`
+  非数は仮置きの値になる
+- **Flash には保存しない。** 値の唯一の定義は Pi 側 `config/vehicle.toml`（`[control]`。車速PI の `speed_kp`・`speed_ki` だけ
+  `[dynamics]`）。**全項目が揃っていなければ io_node は読み込みをエラーにして ARM を通さない**（STM32 に値が無いため）。
+  TC・TV などの ON/OFF（`tc_enable`・`tv_enable`）も `[control]` に書いて送る（STM32 の既定は無効）
 - **Pi 側の手順**（`raspi/core/control_params.py` の `ControlParamSync`）:
   1. 接続したら全項目を `CONFIG_SET` で送り、`CONFIG_ACK.applied` が送った値と一致するまで 0.3s ごとに再送
   2. 一致した後も、0.5s ごとに1項目ずつ順番に `CONFIG_GET` で読み戻す。食い違えば送り直す
