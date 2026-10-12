@@ -112,6 +112,8 @@ class VirtualStm32:
         self._cmd_ns = -COMMAND_TIMEOUT_NS
         self._cmd_flags = 0
         self._cmd_flags2 = 0
+        self._brake_lamp_on = False
+        self._brake_lamp_until_ns = 0
         self._steer_cmd_echo = 0.0
         self._input = DriveInput()
         #: ARM が外れたあと、停車を待って最大制動を続ける期限（★v0.19。0 = 制動していない）
@@ -198,6 +200,32 @@ class VirtualStm32:
             self._emit(packets.ConfigAck(
                 param_id=msg.param_id, applied=self._config.get(msg.param_id, 0.0),
                 result=packets.ConfigResult.OK), t_ns)
+
+    def lamps(self, t_ns: int) -> dict:
+        """灯火の状態（シムの描画用）。`docs/uart_protocol.md` §5.6.1 の表に合わせる。
+
+        前照灯・尾灯は明るさ 0..1。ブレーキランプは `brake` が立っている間、または実際の減速度が
+        1.5m/s² を超えてから 0.5m/s² を下回るまで（最短 0.3s）。ウィンカーは `_flags` と同じ点滅。
+        """
+        mode = (self._cmd_flags & packets.CMD_FLG_LIGHT_MASK) >> packets.CMD_FLG_LIGHT_SHIFT
+        head = {0: 0.0, 1: 0.1, 2: 1.0}.get(mode, 0.0)
+        if self._cmd_flags & packets.CMD_FLG_PASSING:
+            head = 1.0
+        tail = 0.1 if mode in (1, 2) else 0.0
+        decel = -self.vehicle.accel_x
+        if decel > 1.5:
+            self._brake_lamp_until_ns = max(self._brake_lamp_until_ns, t_ns + 300_000_000)
+            self._brake_lamp_on = True
+        elif decel < 0.5 and t_ns >= self._brake_lamp_until_ns:
+            self._brake_lamp_on = False
+        if (self._cmd_flags & packets.CMD_FLG_BRAKE) or self._brake_lamp_on:
+            tail = 1.0
+        blink = (t_ns // (NS // 2)) % 2 == 0
+        return {"head": head, "tail": tail,
+                "winker_left": blink and bool(self._cmd_flags2 & packets.CMD_FLG2_WINKER_LEFT),
+                "winker_right": blink and bool(self._cmd_flags2 & packets.CMD_FLG2_WINKER_RIGHT),
+                "winker_left_req": bool(self._cmd_flags2 & packets.CMD_FLG2_WINKER_LEFT),
+                "winker_right_req": bool(self._cmd_flags2 & packets.CMD_FLG2_WINKER_RIGHT)}
 
     def _on_command(self, c: packets.Command, seq: int, t_ns: int) -> None:
         self._cmd_ns = t_ns

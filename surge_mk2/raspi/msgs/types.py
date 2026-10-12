@@ -622,6 +622,11 @@ class AutoState(MsgBase):
     #: 以上速い間、STM32 がグリップの限界で `target_speed` まで加速する。**`target_speed` は「そこまで
     #: 全開で加速してよい速度」になる**ので、立てるのは進路が開けている発進だけにすること
     launch: bool = False
+    #: 灯火（`DriveCmd.passing`/`winker_*` へ載る。中継は GUI の値との OR）。障害物を見つけたら
+    #: パッシング→避ける側のウィンカー、駐車完了でハザード（両方 True）。`raspi/nav/signals.py`
+    passing: bool = False
+    winker_left: bool = False
+    winker_right: bool = False
     #: STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（`DriveCmd.fw_overrides` へそのまま載る）
     fw_overrides: dict[str, float] = msgspec.field(default_factory=dict)
 

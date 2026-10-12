@@ -416,16 +416,65 @@ class Viewer:
         pygame.gfxdraw.filled_polygon(self.screen, ipts, (*col, 55))
         pygame.gfxdraw.aapolygon(self.screen, ipts, (*col, 235))
 
-        # 車輪。**前輪は実舵角、後輪は車体向き。** 1本だけ描くと車体を貫く槍に見えるので、
-        # 左右2本ずつ出す。指令ではなく「実際に切れている角」を見せるのが要点
-        half = max(abs(py) for _, py in t["footprint"]) * 0.85
-        wl = 0.055 * scale
-        for ax, ang, colw in ((0.25, yaw + t["steer_actual"], ACCENT), (0.0, yaw, FAINT)):
+        self._draw_lamps(t, to_px, scale, c, s)
+
+        # 車輪。**前輪は実舵角、後輪は車体向き。** 車体の矩形に前後輪の矩形を重ねる。
+        # 寸法は vehicle.toml（wheelbase・track・wheel_radius・wheel_width）。
+        # 指令ではなく「実際に切れている角」を見せるのが要点
+        wh = t.get("wheels")
+        if not wh:
+            return
+        hl, hw = wh["radius"], wh["width"] / 2
+        for ax, ang, colw in ((wh["wheelbase"], yaw + t["steer_actual"], ACCENT), (0.0, yaw, FAINT)):
+            ca, sa = math.cos(ang), math.sin(ang)
             for side in (+1, -1):
-                wx, wy = to_px(t["x"] + ax * c - side * half * s,
-                               t["y"] + ax * s + side * half * c)
-                dx, dy = wl * math.cos(ang), -wl * math.sin(ang)
-                pygame.draw.aaline(self.screen, colw, (wx - dx, wy - dy), (wx + dx, wy + dy))
+                wx = t["x"] + ax * c - side * wh["track"] / 2 * s
+                wy = t["y"] + ax * s + side * wh["track"] / 2 * c
+                quad = [to_px(wx + u * ca - v * sa, wy + u * sa + v * ca)
+                        for u, v in ((hl, hw), (hl, -hw), (-hl, -hw), (-hl, hw))]
+                q = [(int(x), int(y)) for x, y in quad]
+                pygame.gfxdraw.filled_polygon(self.screen, q, (*colw, 200))
+                pygame.gfxdraw.aapolygon(self.screen, q, (*colw, 255))
+
+    def _draw_lamps(self, t: dict, to_px, scale: float, c: float, s: float) -> None:
+        """前照灯・尾灯（ブレーキ）・ウィンカーを描く。点灯の仕様は `Stm32Sim.lamps`。
+
+        最近の車に合わせ、前照灯と尾灯は左右が繋がった**一文字の線**（車体の前縁・後縁）。
+        ウィンカーはその線の左右の端に、少し外へずらした線で重ねる。
+        """
+        lamps = t.get("lamps")
+        if not lamps:
+            return
+        xs = [p[0] for p in t["footprint"]]
+        ys = [p[1] for p in t["footprint"]]
+        xf, xr, hy = max(xs), min(xs), max(abs(y) for y in ys)
+        w = max(3, int(0.022 * scale))
+        k = 0.88                                     # 線が車体の幅に占める割合
+
+        def px(lx: float, ly: float) -> tuple[int, int]:
+            x, y = to_px(t["x"] + lx * c - ly * s, t["y"] + lx * s + ly * c)
+            return int(x), int(y)
+
+        def bar(lx: float, y0: float, y1: float, col, alpha: float, width: int) -> None:
+            pygame.draw.line(self.screen, (*col, 255)[:3] if alpha >= 255 else
+                             tuple(int(bg + (cc - bg) * alpha / 255) for cc, bg in zip(col, BG)),
+                             px(lx, y0), px(lx, y1), width)
+
+        head, tail = lamps["head"], lamps["tail"]
+        if head > 0:
+            if head >= 0.99:                         # 全光量（NORMAL・パッシング）は光を前へ伸ばす
+                beam = [px(xf, -hy * k), px(xf, hy * k), px(xf + 0.45, hy * 1.15), px(xf + 0.45, -hy * 1.15)]
+                pygame.gfxdraw.filled_polygon(self.screen, beam, (255, 245, 190, 45))
+            bar(xf, -hy * k, hy * k, (255, 245, 190), 70 + 185 * head, w)
+        if tail > 0:
+            bar(xr, -hy * k, hy * k, (255, 40, 40), 50 + 205 * tail, w)
+        # ウィンカー: 前縁・後縁の左右の端（幅の外側 55%）に、線の外側へ少しずらして重ねる
+        amber = (255, 170, 0)
+        for key, side in (("winker_left", +1), ("winker_right", -1)):
+            if lamps.get(key):
+                y0, y1 = side * hy * k, side * hy * k * 0.45
+                bar(xf + 0.012, y0, y1, amber, 255, w + 1)
+                bar(xr - 0.012, y0, y1, amber, 255, w + 1)
 
     def _scalebar(self, x: int, y: int, scale: float) -> None:
         w = int(scale)                      # 1 m

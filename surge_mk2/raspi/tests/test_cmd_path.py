@@ -559,6 +559,25 @@ class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
                                                   t_pub=time.monotonic_ns(), source="planning:x")
         self.assertEqual(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).accel_limit, 1.6)
 
+    async def test_lights_are_ored_with_the_gui(self):
+        """パッシング・ウィンカーは planner の要求と GUI の値の OR（どちらも相手を消さない）。"""
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        from raspi.msgs.types import TOPIC_AUTO_CMD
+
+        def merged(gui: dict, auto: dict) -> DriveCmd:
+            srv._last_cmd = msgspec.structs.replace(
+                srv._last_cmd, **{"passing": False, "winker_left": False, "winker_right": False, **gui})
+            srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=1.0, **auto,
+                                                      t_pub=time.monotonic_ns(), source="planning:x")
+            return srv._merge_auto(srv._last_cmd, time.monotonic_ns())
+
+        got = merged({}, {"passing": True, "winker_right": True})
+        self.assertTrue(got.passing and got.winker_right and not got.winker_left)
+        got = merged({"winker_left": True}, {"winker_right": True})
+        self.assertTrue(got.winker_left and got.winker_right)           # ハザード
+        got = merged({"winker_left": True}, {})
+        self.assertTrue(got.winker_left and not got.passing)            # 人の操作は消さない
+
     async def test_launch_comes_only_from_the_planner(self):
         """ローンチコントロール（v0.20）は planner の指定だけが通る。`auto/cmd` が途絶えたら下ろす。"""
         srv = TestImmediateCmdRelay._server(self, live=True)

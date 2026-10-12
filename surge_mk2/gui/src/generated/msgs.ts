@@ -22,10 +22,10 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xa66f791b
+export const MSGS_SCHEMA = 0x1d3e6cd9
 
 /**
- * `TELEMETRY`(0x02) を SI に直したもの。100Hz（2026-09-26 に 50Hz から）。
+ * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
  */
 export type VehicleState = {
   t_capture: number
@@ -43,7 +43,7 @@ export type VehicleState = {
   wheel_speed: [number, number, number, number]
   /** 前輪の累積走行距離 [m] [FL, FR]。**累積値・射影なし** */
   odom_dist: [number, number]
-  /** [m/s²] x(前)・y(左)・z(上)。重力込み（2026-10-01以降。以前の記録は x/y が逆） */
+  /** [m/s²] x(前)・y(左)・z(上)。重力込み */
   accel: [number, number, number]
   /** [rad] 機首上げが正。重力で補正済み。ドリフトしない */
   pitch: number
@@ -55,13 +55,13 @@ export type VehicleState = {
   torque_cmd: [number, number]
   /**
    * STM32 の TC が内部で見ているスリップ率 [RL, RR]（無次元。正=空転 負=ロック傾向）。
-   * 基準速度が低い区間は STM32 側で 0 を送ってくる（★v0.13）。`slip_rear` とは別物——
+   * 基準速度が低い区間は STM32 側で 0 を送ってくる。`slip_rear` とは別物——
    * こちらは STM32 自身の推定値、`slip_rear` は Pi 側が `wheel_speed`/`speed` から計算する値
    */
   tc_slip: [number, number]
   /**
    * TC が動的に決めているトルク上限 [N·m] [RL, RR]。介入していなければ
-   * `LinkDiag.max_torque_nm` と同じ値になる（★v0.13）
+   * `LinkDiag.max_torque_nm` と同じ値になる
    */
   tc_limit_nm: [number, number]
   /**
@@ -104,7 +104,7 @@ export type VehicleState = {
    */
   armed: boolean
   /**
-   * 駆動電源が入っている（★v0.19）。`armed` でなくても、ARM が外れたあと STM32 が停車を
+   * 駆動電源が入っている。`armed` でなくても、ARM が外れたあと STM32 が停車を
    * 待って制動している間は True
    */
   drive_power_on: boolean
@@ -128,24 +128,24 @@ export type VehicleState = {
   auto_stop_active: boolean
   /**
    * サイドブレーキ（`COMMAND.flags2` bit0）が**今まさに位置制御へ切り替わり固定中**
-   * （★v0.13）。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
+   * 。`auto_stop_active` と同じ「介入中」の意味で、有効かどうかそのものではない
    */
   side_brake_active: boolean
   /**
-   * 左/右ウィンカーが**今まさに点滅中**（`COMMAND.flags2` bit1/2 の要求に対する実行状態、★v0.14）。
+   * 左/右ウィンカーが**今まさに点滅中**（`COMMAND.flags2` bit1/2 の要求に対する実行状態）。
    * 点滅の周期・位相は STM32 側が持つので、Pi は「要求したか」ではなく「実際に光っているか」を見る
    */
   winker_left_active: boolean
   winker_right_active: boolean
   /**
-   * ABS が**今まさに制動トルクを要求より削っている**（★v0.15）。`tc_active` と同じ「介入中」の意味。
+   * ABS が**今まさに制動トルクを要求より削っている**。`tc_active` と同じ「介入中」の意味。
    * フォールバック（前輪センサ異常とみなして ABS を止め、要求どおりに制動している間）は False
    */
   abs_active: boolean
-  /** 片輪浮き対策が**今まさにトルクを削っている**（★v0.16）。このとき `tc_active` は立たない */
+  /** 片輪浮き対策が**今まさにトルクを削っている**。このとき `tc_active` は立たない */
   wheel_lift_active: boolean
   /**
-   * ローンチコントロールで**今まさに発進している**（★v0.20）。`DriveCmd.launch` を立てていても、
+   * ローンチコントロールで**今まさに発進している**。`DriveCmd.launch` を立てていても、
    * 条件を満たさず始まらなかった・目標車速に届いて終わった、なら False
    */
   launch_active: boolean
@@ -235,7 +235,7 @@ export type LinkDiag = {
   /**
    * STM32 が `LOG` で送ってきた直近の警告・エラー（新しい順に最大4件。"12:34:56 E 本文"）。
    * **STM32 が自分の判断で止めた理由はここにしか出ない**（例: `MD rear-left stopped: overcurrent`
-   * ＝走行中に MD が使えなくなって `md_fault` をラッチした。2026-10-10 まで io_node は捨てていた）
+   * ＝走行中に MD が使えなくなって `md_fault` をラッチした）
    */
   stm_log: string[]
   /** 直近に受理した `cmd` の発行元。誰も出していなければ "" */
@@ -243,14 +243,14 @@ export type LinkDiag = {
   /** `cmd` が途絶して DISARM にフォールバックしているか */
   cmd_stale: boolean
   /**
-   * TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.8）。
+   * TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得）。
    * 未確認（起動直後でまだ `CONFIG_ACK` を受け取っていない）なら None
    */
   tc_enabled: boolean | null
   tv_enabled: boolean | null
   /**
    * 片輪浮き対策（Wheel Lift Guard）が STM32 側で実際に有効化されているか
-   * （`CONFIG_ACK` から取得。★v0.9）。TC/TV本体とは独立した別機構。未確認なら None
+   * （`CONFIG_ACK` から取得）。TC/TV本体とは独立した別機構。未確認なら None
    */
   wheel_lift_guard_enabled: boolean | null
   /**
@@ -270,7 +270,7 @@ export type LinkDiag = {
    */
   auto_stop_margin_cm: number | null
   /**
-   * 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）が STM32 に入っているか（★v0.16）。
+   * 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）が STM32 に入っているか。
    * `none`（送るものが無い）/`pending`（送信中）/`ok`（全項目が STM32 の答えと一致）/
    * `mismatch`（STM32 が範囲へ丸めた）/`unsupported`（STM32 のファームが古い）/
    * `invalid`（`[control]` が読めない）。`raspi/core/control_params.py`
@@ -289,7 +289,7 @@ export type LinkDiag = {
   /**
    * STM32 ⇄ MD 間の受信数とエラー数 [RL, RR, ST]。**合計にしないこと。**
    * 合計にすると「1台だけ起動が遅れている」「1台だけ配線が悪い」が
-   * 他の2台に埋もれて見えなくなる（2026-08-08 に実際に誤診した）
+   * 他の2台に埋もれて見えなくなる
    */
   md_rx_count: number[] | null
   md_rx_error: number[] | null
@@ -338,7 +338,7 @@ export type LinkDiag = {
    */
   sim: boolean
   /**
-   * 車両の物理的な上限値（`LIMITS` パケットから取得。★v0.11）。
+   * 車両の物理的な上限値（`LIMITS` パケットから取得）。
    * 読み取り専用・実行時に変化しない。まだ受け取っていなければ None
    */
   max_speed_m_s: number | null
@@ -373,28 +373,35 @@ export type AutoState = {
   /**
    * [m/s²] 目標速度を変える速さの上限（`COMMAND.accel_limit`）。0 = 指定しない（GUI の値のまま）。
    * 中継（`telemetry_node._merge_auto`）は GUI の値との**小さい方**を採るので、緩める向きには
-   * 効かない。システム同定の加減速試験が段ごとの加速度を指定するのに使う（2026-09-27）
+   * 効かない。システム同定の加減速試験が段ごとの加速度を指定するのに使う
    */
   accel_limit: number
   /**
    * [N·m] `brake` のときの制動トルク（1輪あたり、`COMMAND.brake_torque`）。0 = 指定しない（GUI の値の
    * まま）。人（GUI）もブレーキを掛けていれば中継は**強い方**を採る（`telemetry_node._merge_auto`）。
-   * システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う（2026-09-27）
+   * システム同定の前後運動試験がブレーキの強さ→減速度を測るのに使う
    */
   brake_torque: number
   /**
    * 立っている間 `target_speed` の代わりに `target_torque` [N·m]（1輪あたり）を直接掛ける
    * （`COMMAND.torque_mode`。車速PIを通さない）。**同定の試験だけが使う**——タイヤの限界まで
-   * トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない（2026-10-05）
+   * トルクを上げるには、目標車速のランプ（3.0m/s²）で頭打ちになる車速指令では足りない
    */
   torque_mode: boolean
   target_torque: number
   /**
-   * ローンチコントロールを要求する（`DriveCmd.launch`、★v0.20）。`target_speed` が車速より 0.5m/s
+   * ローンチコントロールを要求する（`DriveCmd.launch`）。`target_speed` が車速より 0.5m/s
    * 以上速い間、STM32 がグリップの限界で `target_speed` まで加速する。**`target_speed` は「そこまで
    * 全開で加速してよい速度」になる**ので、立てるのは進路が開けている発進だけにすること
    */
   launch: boolean
+  /**
+   * 灯火（`DriveCmd.passing`/`winker_*` へ載る。中継は GUI の値との OR）。障害物を見つけたら
+   * パッシング→避ける側のウィンカー、駐車完了でハザード（両方 True）。`raspi/nav/signals.py`
+   */
+  passing: boolean
+  winker_left: boolean
+  winker_right: boolean
   /** STM32 の調整パラメータ・機能の ON/OFF の一時的な上書き（`DriveCmd.fw_overrides` へそのまま載る） */
   fw_overrides: Record<string, number>
   /** 狙っている方位 [rad] */
@@ -510,7 +517,7 @@ export type AutoState = {
   plan_hz: number
   /**
    * `plan()` 1回の処理時間 [ms] と、直近1秒の最大。**Pi で実測する手段はこれだけ**
-   * （デッドマン `cmd_deadman_ms` に対する余裕を見る。2026-10-10）
+   * （デッドマン `cmd_deadman_ms` に対する余裕を見る）
    */
   plan_ms: number
   plan_ms_max: number

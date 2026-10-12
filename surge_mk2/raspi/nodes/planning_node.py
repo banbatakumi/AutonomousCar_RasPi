@@ -417,6 +417,8 @@ class PlanningNode:
                             target_speed=0.0, target_steer=st.target_steer,
                             brake_torque=st.brake_torque if st.ready else 0.0,
                             fw_overrides=st.fw_overrides if st.ready else {},
+                            passing=st.passing, winker_left=st.winker_left,
+                            winker_right=st.winker_right,
                             source=f"planning:{self.ctrl.mode}")
         if st.torque_mode and not math.isfinite(st.target_torque):
             st.ready = False
@@ -427,6 +429,8 @@ class PlanningNode:
                         accel_limit=st.accel_limit,
                         torque_mode=st.torque_mode, target_torque=st.target_torque,
                         launch=st.launch,
+                        passing=st.passing, winker_left=st.winker_left,
+                        winker_right=st.winker_right,
                         fw_overrides=st.fw_overrides,
                         source=f"planning:{self.ctrl.mode}")
 

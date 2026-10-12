@@ -784,6 +784,10 @@ class Slam2dRoute(Slam2dRaceLine):
         st.reason = f"停止点『{self._stopping}』へ向かっている（残り {rem:.2f}m）"
         return st
 
+    def _hazard_now(self) -> bool:
+        """駐車が終わったらハザード。"""
+        return self.phase == PARK and self._park is not None and self._park.done
+
     def _start_park(self) -> None:
         """道の上で止まった。停止点の姿勢を車体基準に直して `ParkToPoint` へ渡す。"""
         assert self._stop is not None and self._stop.yaw is not None

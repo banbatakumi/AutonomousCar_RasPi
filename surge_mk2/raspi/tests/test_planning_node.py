@@ -156,6 +156,17 @@ class TestAccelLimitPassThrough(unittest.TestCase):
         self.assertFalse(node._cmd_from(AutoState(ready=True, brake=True, launch=True)).launch)
         self.assertFalse(node._cmd_from(AutoState(ready=False, target_speed=2.0, launch=True)).launch)
 
+    def test_lights_go_into_auto_cmd_even_while_braking(self):
+        """灯火（障害物でのパッシング・ウィンカー、駐車完了のハザード）は制動中の指令にも載る。"""
+        from raspi.msgs.types import AutoState
+        node = PlanningNode(pub=_TimedPub(), sub=_TimedSub(0), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        run = node._cmd_from(AutoState(ready=True, target_speed=2.0, passing=True, winker_left=True))
+        self.assertTrue(run.passing and run.winker_left and not run.winker_right)
+        park = node._cmd_from(AutoState(ready=True, brake=True, winker_left=True, winker_right=True))
+        self.assertTrue(park.brake and park.winker_left and park.winker_right)
+
     def test_brake_torque_goes_into_auto_cmd_only_for_a_decided_brake(self):
         """planner が決めた制動（ready）の強さは載せる。「分からない」（ready=False）の制動は 0
         （中継側の GUI の値）。"""

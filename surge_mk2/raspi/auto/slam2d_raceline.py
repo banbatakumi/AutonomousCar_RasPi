@@ -43,6 +43,7 @@ from ..nav.mpc import MPCConfig, MPCFollower
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from ..nav.route_switch import lap_crossed
 from ..nav import speedctl
+from ..nav.signals import SignalLights
 from ..proto.generated.packets import MDS_COMM_OK
 from . import mapstore
 from ._slam2d_nav import WALL_HIT_WEIGHT, Slam2dNav, occgrid_from_trinary
@@ -633,6 +634,10 @@ class Slam2dRaceLine(Planner):
         #: 停車中に舵を動かしている時間 [s]（手動の地図作成での据え切りの注意）と直前の舵角
         self._still_steer_t = 0.0
         self._prev_steer = 0.0
+        #: 灯火（パッシング→ウィンカー）。`_signal_step` が毎周期 `st` へ書く
+        self._signals = SignalLights()
+        self._hit_now = False             #: この周期、前方を塞ぐ障害物を見ているか（`_track`）
+        self._detour_side = 0             #: Hybrid A* の迂回先の向き（+1=左 -1=右 0=不明）
         #: 障害物を避けている一時経路（`avoid.plan_offset`）と、その元にした経路
         self._avoid: av_mod.AvoidPlan | None = None
         self._avoid_path: rl_mod.RaceLine | None = None
@@ -931,7 +936,9 @@ class Slam2dRaceLine(Planner):
             return self._build(st, p)
         if self.phase == DONE:
             return self._done(st)
+        self._hit_now = False
         st = self._race(st, scan, vs, p, u.lost)
+        self._signal_step(st)
         # 速度を追従の値より抑えた（障害物・推測航法など）・制動するなら、目標車速のランプは
         # 指定しない（＝STM32 の上限で動かす。プロファイルの緩い傾きのままだと減速が遅れる）
         if st.brake or not st.ready or st.target_speed < self._tick_raw - 1e-6:
@@ -1450,6 +1457,7 @@ class Slam2dRaceLine(Planner):
         hit, dist = self._blocking(followed, pp.index, vs, p)
         if hit is not None and self._still_clear(hit, pp.index):
             hit, dist = None, math.inf
+        self._hit_now = hit is not None
         if (hit is not None and p["obstacle_avoid"] > 0
                 and self._plan_avoid(path, pp.index, hit, vs, p, kappa_frac=0.6)):
             followed = self._avoid_path
@@ -1899,6 +1907,24 @@ class Slam2dRaceLine(Planner):
         d = (index - int(self._avoid.window[-1])) % n
         return 0 < d < n // 2
 
+    def _hazard_now(self) -> bool:
+        """ハザードを出す状況か。ここでは出さない（駐車を持つ `Slam2dRoute` が上書きする）。"""
+        return False
+
+    def _signal_step(self, st: AutoState) -> None:
+        """灯火を `st` へ書く。障害物に対応している間は パッシング → 避ける側のウィンカー。"""
+        a = self._avoid
+        avoiding = a is not None and a.obstacle is not None
+        obstacle = (self._hit_now or avoiding or self.phase == DETOUR
+                    or self._brake_hold is not None)
+        side = 0
+        if avoiding:
+            side = 1 if a.offset > 0 else -1
+        elif self.phase == DETOUR:
+            side = self._detour_side
+        st.passing, st.winker_left, st.winker_right = self._signals.update(
+            self._dt, obstacle=obstacle, side=side, hazard=self._hazard_now())
+
     def _clear_avoid(self) -> None:
         self._avoid = self._avoid_path = self._avoid_base = None
 
@@ -1943,6 +1969,7 @@ class Slam2dRaceLine(Planner):
         lyaw = (gyaw - yaw + math.pi) % (2.0 * math.pi) - math.pi
         self._detour = ParkToPoint()
         self._detour.request_park_target(lx, ly, lyaw)
+        self._detour_side = 0 if abs(ly) < 0.15 else (1 if ly > 0 else -1)
         self._detour_error = ""
         self._detour_tries += 1
         self._clear_avoid()

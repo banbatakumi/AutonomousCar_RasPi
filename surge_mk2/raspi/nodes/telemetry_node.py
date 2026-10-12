@@ -2661,9 +2661,10 @@ class TelemetryServer:
     def _merge_auto(self, gui: DriveCmd, now: int) -> DriveCmd:
         """GUI の `cmd` の**速度・舵・制動だけ**を `auto/cmd` で差し替える。
 
-        差し替えないもの（灯火・ホーン・パッシング・`auto_stop`・`brake_torque`・
+        差し替えないもの（前照灯のモード・ホーン・`auto_stop`・`brake_torque`・
         レートリミット・`arm`）は GUI の値のまま通す。**自律走行中に前照灯の
         操作だけ効かなくなる理由が無い**し、`arm` は人間しか立てられない。
+        パッシング・ウィンカーは planner の要求（障害物・駐車完了）と GUI の値の OR。
 
         `auto/cmd` が古ければ**最大制動**に落とす。engage したまま planning_node が
         死んだときに、最後の「走れ」が 150ms 残って壁に向かうのを防ぐ。
@@ -2715,6 +2716,10 @@ class TelemetryServer:
                                                  and math.isfinite(auto.target_torque)) else 0.0,
             # ローンチコントロールも planner の指定だけ（★v0.20。手動操作では GUI の値がそのまま通る）
             launch=auto.launch,
+            # 灯火は人（GUI）の操作と planner の要求の OR（人が消せない・planner が人の操作を消さない）
+            passing=gui.passing or auto.passing,
+            winker_left=gui.winker_left or auto.winker_left,
+            winker_right=gui.winker_right or auto.winker_right,
             # STM32 の設定の一時的な上書きも planner の指定だけ（GUI の指令では常に空）
             fw_overrides=auto.fw_overrides,
             source=f"auto:{self._auto_mode}")

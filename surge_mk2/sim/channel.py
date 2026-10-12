@@ -99,6 +99,9 @@ class SimChannel:
             "course_path": str(sim.course.path),
             "courses": [str(p) for p in self._list()],
             "footprint": sim.spec.footprint,
+            "lamps": sim.lamps(t_ns),
+            "wheels": {"wheelbase": sim.spec.wheelbase, "track": sim.spec.track,
+                       "radius": sim.spec.wheel_radius, "width": sim.spec.wheel_width},
             "lidar_mount": sim.spec.sensor_pose("lidar")[:2],
             # mm の整数にして送る。float 360 個より小さく、描画には十分
             "scan_mm": [int(d * 1000) for d in scan] if scan is not None else [],

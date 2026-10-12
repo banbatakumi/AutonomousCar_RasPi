@@ -297,6 +297,9 @@ class ParkToPoint(Planner):
                           min(y for _, y in fp), max(y for _, y in fp))
         self.reset()
 
+    #: 到達したらハザードを出す（単独の駐車。迂回・経路上の駐車は呼び出し側が灯火を決める）
+    hazard_on_done = True
+
     def reset(self) -> None:
         self._park_pose: Pose | None = None
         self._target_in_park: Pose | None = None
@@ -745,6 +748,8 @@ class ParkToPoint(Planner):
 
         if rho < p["pos_tol_m"] and yaw_err_deg < p["yaw_tol_deg"]:
             self._phase = "完了"
+            if self.hazard_on_done:
+                st.winker_left = st.winker_right = True      # 駐車完了はハザード
             return self._hold(st, self._phase,
                               f"到達（残り{rho * 100:.1f}cm・向き誤差{yaw_err_deg:.1f}°）")
 
