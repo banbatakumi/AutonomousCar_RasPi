@@ -907,6 +907,13 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
         t = time.time() - 1000
         os.utime(old, (t, t))
 
+        # 新しい順に数本は残す決まりなので、消える側が「古い方」になるだけの本数を置く
+        for i in range(3):
+            p = Path(self._td.name) / f"recent{i}.mcap"
+            p.write_bytes(b"x")
+            t = time.time() - 200 + i
+            os.utime(p, (t, t))
+
         node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
         try:
             usages = iter([_usage(100, 2), _usage(100, 10)])
@@ -918,6 +925,79 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
 
         self.assertFalse(old.exists())
         self.assertTrue(self.path.exists())   # 記録中の自分自身は守られる
+
+    def test_broken_log_is_reopened_once_space_is_back(self):
+        """書けなくなったら、空きが戻った時点で新しいファイルに切り替えて記録を続けること。"""
+        from unittest import mock
+
+        from raspi.msgs import VehicleState
+        from raspi.nodes.logger_node import LoggerNode
+
+        node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
+        try:
+            node.log._mark_broken(OSError(28, "No space left on device"))
+            node._on_msg("vehicle_state", VehicleState(t_capture=time.monotonic_ns()))
+            self.assertEqual(node.log.written, 0)
+            # まだ空きが無い間は開き直さない
+            with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                            return_value=_usage(100, 1)):
+                node._check_disk_space()
+            self.assertEqual(node.reopened, 0)
+            with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                            return_value=_usage(100, 50)), \
+                    mock.patch("raspi.nodes.logger_node.default_mcap_path",
+                               return_value=Path(self._td.name) / "next.mcap"):
+                node._check_disk_space()
+            self.assertEqual(node.reopened, 1)
+            self.assertFalse(node.log.broken)
+            node._on_msg("vehicle_state", VehicleState(t_capture=time.monotonic_ns()))
+            self.assertEqual(node.log.counts["/vehicle_state"], 1)
+        finally:
+            node.close()
+        self.assertEqual(len(read_back(Path(self._td.name) / "next.mcap")["msgs"]["/vehicle_state"]), 1)
+
+    def test_same_frame_is_not_encoded_twice(self):
+        """カメラが止まって新しいフレームが来ない間、最後の1枚を焼き直し続けないこと。"""
+        from types import SimpleNamespace
+
+        from raspi.nodes.logger_node import LoggerNode
+
+        node = LoggerNode(self.path, topics=["image/"], image_hz=5)
+        try:
+            calls = []
+
+            def _encode(shm_name, expect_seq=None):
+                calls.append(expect_seq)
+                return b"\xff\xd8jpg", time.monotonic_ns()
+            node._jpeg = SimpleNamespace(encode_latest=_encode, close=lambda: None,
+                                         encoded=0, torn=0, errors=0, reattached=0)
+            node._last_ref["rear"] = SimpleNamespace(shm_name="r", ring_seq=7)
+            for _ in range(3):
+                node._next_image_ns.clear()               # 間引きの時刻は来たことにする
+                node._pump_images()
+            self.assertEqual(calls, [7])
+            node._last_ref["rear"] = SimpleNamespace(shm_name="r", ring_seq=8)
+            node._next_image_ns.clear()
+            node._pump_images()
+            self.assertEqual(calls, [7, 8])
+            self.assertEqual(node.images_written, 2)
+        finally:
+            node.close()
+
+    def test_stdout_with_a_dead_reader_ends_the_run_as_failed(self):
+        from raspi.nodes.logger_node import LoggerNode
+
+        node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
+        try:
+            node.log.path = None                          # 標準出力へ流している扱い
+            node.log._mark_broken(BrokenPipeError(32, "Broken pipe"))
+            t0 = time.monotonic()
+            node.run(duration_s=5)
+            self.assertLess(time.monotonic() - t0, 1.0)
+            self.assertTrue(node.failed)
+        finally:
+            node.log.path = self.path
+            node.close()
 
     def test_stdout_mode_skips_the_check(self):
         """`-o -` は SD に何も書かないので、空き容量チェック自体をしないこと。"""

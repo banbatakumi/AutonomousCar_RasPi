@@ -83,9 +83,13 @@ class ReplayNode:
         self.on_tx = on_tx
         self.on_event = on_event
 
+        self._on_telemetry = on_telemetry
+        self._on_frame = on_frame
         self.tracker = LinkTracker(on_telemetry=on_telemetry, on_frame=on_frame)
         self.state = self.tracker.state
         self.sync = self.tracker.sync
+        #: 解釈できずに飛ばしたレコードの数（壊れた TX フレーム・JSON でない EVENT）
+        self.bad_records = 0
 
         #: linkstats イベントから復元した受信統計（再生側では数え直せない）
         self.recorded_stats = RxStats()
@@ -105,6 +109,17 @@ class ReplayNode:
         self._wall0 = 0.0
         self._next_status_wall = 0.0
         self._paced = False       # start_s に到達したか
+
+    def rewind(self) -> None:
+        """先頭からもう一度流す準備（`--loop`）。**リンクの状態と時刻同期を作り直す。**
+
+        前の周の状態を持ったまま先頭へ戻ると、時刻が巻き戻った PING/PONG を時刻同期が
+        食い、health の判定も「最後の受信が未来」のまま動く。
+        """
+        self.tracker = LinkTracker(on_telemetry=self._on_telemetry, on_frame=self._on_frame)
+        self.state = self.tracker.state
+        self.sync = self.tracker.sync
+        self._paced = False
 
     # ── 時刻 ──
 
@@ -180,7 +195,12 @@ class ReplayNode:
             self.tracker.feed(rec.t_ns, rec.type, rec.seq, rec.payload)
         elif rec.kind == Kind.TX:
             self.tx_counts[rec.type] = self.tx_counts.get(rec.type, 0) + 1
-            msg = rec.decode()
+            try:
+                msg = rec.decode()
+            except Exception:              # noqa: BLE001  長さの合わない payload など
+                # 壊れた1レコードで再生全体を止めない（RX 側は `LinkTracker.feed` が同じ扱い）
+                self.bad_records += 1
+                msg = None
             if isinstance(msg, packets.Ping):
                 # 記録された送信時刻がそのまま T1。PONG と突き合わせれば
                 # 時刻同期は記録時と同じ入力で動く
@@ -191,7 +211,14 @@ class ReplayNode:
             self._handle_event(rec)
 
     def _handle_event(self, rec) -> None:
-        body = rec.json()
+        try:
+            body = rec.json()
+        except ValueError:                 # JSON として読めない（途中で切れた等）
+            self.bad_records += 1
+            return
+        if not isinstance(body, dict):
+            self.bad_records += 1
+            return
         name = body.get("name")
         if name == "linkstats":
             for k, v in body.get("rx", {}).items():
@@ -274,7 +301,8 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="ライブ表示なし")
     ap.add_argument("--verify", action="store_true", help="記録内容と突き合わせる")
     ap.add_argument("--bus", action="store_true",
-                    help="バスに配信する（io_node のふりをする＝実車なしで GUI を動かせる）")
+                    help="バスに配信する（io_node のふりをする＝実車なしで GUI を動かせる）。"
+                         "**io_node が動いているバスでは使わない**（同じ口を取り合う）")
     ap.add_argument("--loop", action="store_true", help="終端まで行ったら先頭から繰り返す")
     args = ap.parse_args()
 
@@ -290,7 +318,15 @@ def main() -> int:
         from raspi.proto.generated.packets import PROTOCOL_VERSION
 
         holder: dict = {}
-        pub = Publisher("io")
+        try:
+            pub = Publisher("io")
+        except Exception as e:             # noqa: BLE001  バスの `io` を既に誰かが持っている等
+            # `--bus` は io_node と同じ口を名乗る。本物の io_node が動いているバスでは使えない
+            print(f"!! バスの io を開けません: {e}\n"
+                  "   io_node（surge-io）が動いているバスでは --bus は使えません。"
+                  "実車と別のマシンで実行するか、SURGE_BUS_DIR で別のバスを指定してください",
+                  file=sys.stderr)
+            return 2
         # **時刻はログのカーソル**。壁時計を使うと記録時と時刻の座標系がずれる
         bridge = BusBridge(pub, clock=lambda: holder["node"]._cursor_ns)
         # LiDAR セクタの時刻も実機（io_node）と同じく STM32 の時刻から換算する（記録に PONG があれば）
@@ -346,6 +382,7 @@ def main() -> int:
         # 巨大な負の差分を作らないため
         if bridge is not None:
             bridge.state_builder.reset()
+        node.rewind()
         print(f"\n# --loop: {loops} 周目を終えて先頭へ戻る")
     t_wall = time.monotonic() - t_wall
 
@@ -366,6 +403,8 @@ def main() -> int:
         print(f"lidar sectors seen: {len(node.state.lidar_sectors)}/12")
     if getattr(node, "truncated", False):
         print("!! ログの末尾が切れている（記録中に落ちた可能性）")
+    if node.bad_records:
+        print(f"!! 解釈できずに飛ばしたレコード: {node.bad_records}件")
 
     if bridge is not None:
         print(f"bus: vehicle_state={bridge.vehicle_states} scan={bridge.published_scans} "

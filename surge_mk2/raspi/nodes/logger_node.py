@@ -168,12 +168,18 @@ class LoggerNode:
         if self._jpeg is not None and not self._jpeg.ok:
             self._jpeg = None                 # エンコーダ無し＝画像なしで続行
 
-        self.log = McapLog(path, compression=compression, metadata={
+        self._compression = compression
+        self._metadata = {
             "node": "logger_node",
             "topics": ",".join(self.topics),
             "image_hz": image_hz if self._jpeg is not None else 0,
             "jpeg": self._jpeg.impl if self._jpeg is not None else "none",
-        })
+        }
+        self.log = McapLog(path, compression=compression, metadata=self._metadata)
+        #: 書けなくなって記録を続けられずに終わった（標準出力の相手が消えた等）。終了コードに出す
+        self.failed = False
+        #: 書けなくなったファイルを閉じて、新しいファイルで記録を再開した回数
+        self.reopened = 0
         self.sub = Subscriber({t: RELIABLE for t in self.topics})
         self.vizrec = VizRecorder(self.log) if viz else None
 
@@ -184,6 +190,8 @@ class LoggerNode:
         self._next_image_ns: dict[str, int] = {}
         #: カメラ役割名 → 最後に見た `ImageRef`
         self._last_ref: dict[str, object] = {}
+        #: カメラ役割名 → 最後に JPEG にしたフレーム `(shm_name, ring_seq)`
+        self._last_image: dict[str, tuple[str, int]] = {}
 
     # ── 本体 ──
 
@@ -203,6 +211,11 @@ class LoggerNode:
                 for topic, msg in self.sub.poll(POLL_MS):
                     self._on_msg(topic, msg)
                 self._pump_images()
+
+                if self.log.broken and self.log.path is None:
+                    # 標準出力の相手（telemetry_node・ssh）が消えた。書く先が無いので終わる
+                    self.failed = True
+                    break
 
                 if status_cb and now_wall >= next_status:
                     status_cb(self)
@@ -228,16 +241,42 @@ class LoggerNode:
         status = logclean.check_disk(log_dir, protect={self.log.path})
         if status.error is not None:
             return
+        self._reopen_if_broken(status.free_pct)
         if status.deleted:
             names = ", ".join(status.deleted[:5])
             if len(status.deleted) > 5:
                 names += f" 他{len(status.deleted) - 5}件"
             sys.stderr.write(f"\n!! ディスク空き {status.free_pct:.1f}% のため "
                              f"古いログ{len(status.deleted)}件を自動削除: {names}\n")
-        elif status.warned:
+        if status.stalled:
+            sys.stderr.write("\n!! 古いログを消しても空きが増えない（空きを食っているのは"
+                             "ログ以外）。これ以上は消さない\n")
+        elif not status.deleted and status.warned:
             sys.stderr.write(f"\n!! ディスク空き {status.free_pct:.1f}%"
                              f"（残り{status.free_bytes / 1e9:.2f}GB）"
                              "— 記録容量が逼迫しています\n")
+
+    def _reopen_if_broken(self, free_pct: float) -> None:
+        """書けなくなった記録を、**空きが戻ったら新しいファイルで再開する**。
+
+        `McapLog` は一度書き込みに失敗すると、以後そのファイルには書かない（壊れた
+        レコードの後ろに続けないため）。そのままだとプロセスは動いているのに何も
+        残らない状態が、気づかれないまま続く。空きがまだ無い間は開き直さない
+        （開いてもすぐまた失敗し、空のファイルだけが増える）。
+        """
+        if not self.log.broken or free_pct < logclean.DEFAULT_CRITICAL_FREE_PCT:
+            return
+        old = self.log
+        sys.stderr.write(f"\n!! {old.path.name} に書けなくなった（{old.last_error}）。"
+                         "新しいファイルで記録を再開する\n")
+        if self.vizrec is not None:
+            self.vizrec.close()
+        old.close()
+        self.log = McapLog(default_mcap_path(old.path.parent), compression=self._compression,
+                           metadata=self._metadata)
+        # 推測航法と軌跡は新しいファイルの先頭から数え直す（前のファイルとは別の記録）
+        self.vizrec = VizRecorder(self.log) if self.viz else None
+        self.reopened += 1
 
     def _on_msg(self, topic: str, msg) -> None:
         self.log.write(_mcap_topic(topic), msg)
@@ -261,6 +300,10 @@ class LoggerNode:
 
         **`ImageRef` のスロットではなくリングの最新を読む**（`core.jpeg`）。
         間引いている以上、キューに溜まった古い参照を掘り返す意味がない。
+
+        **前に焼いたのと同じフレームは焼かない。** カメラが止まっている間（DISARM 中の
+        後方カメラなど）も共有メモリには最後の1枚が残るので、見ずに焼くと同じ絵を
+        `image_hz` で書き続ける。
         """
         if self._jpeg is None:
             return
@@ -269,10 +312,14 @@ class LoggerNode:
         for cam, ref in self._last_ref.items():
             if now < self._next_image_ns.get(cam, 0):
                 continue
+            key = (ref.shm_name, ref.ring_seq)
+            if self._last_image.get(cam) == key:
+                continue                      # 新しいフレームが来ていない
             got = self._jpeg.encode_latest(ref.shm_name, expect_seq=ref.ring_seq)
             self._next_image_ns[cam] = now + period
             if got is None:
                 continue
+            self._last_image[cam] = key
             jpg, t_capture = got
             self.log.write_viz_image(jpg, cam, t_capture)
             self.images_written += 1
@@ -376,13 +423,19 @@ def main() -> int:
             say(f"  JPEG: {jp.encoded}枚  {jp.cpu_per_frame_ms:.1f}ms/枚 "
                 f"(CPU 計 {jp.encode_cpu_s:.1f}s = 実時間の "
                 f"{100 * jp.encode_cpu_s / max(el, 1e-9):.1f}%)  [{jp.impl}]")
+        if node.reopened:
+            say(f"  書き込み失敗でファイルを切り替えた: {node.reopened}回（最後は {node.log.path}）")
+        if node.log.errors:
+            say(f"  !! 書けなかった: {node.log.errors}件  {node.log.last_error}")
         if jp is not None and (jp.torn or jp.errors or jp.reattached):
             say(f"  画像の取りこぼし: 上書き {jp.torn} / エラー {jp.errors}"
                 f" / 掴み直し {jp.reattached}")
             # **数だけでは原因が分からない。** 理由をそのまま出す
             if jp.last_error:
                 say(f"  直近の理由: {jp.last_error}")
-    return 0
+    # 書く先を失って終わったら異常終了にする（systemd の `Restart=on-failure` と、
+    # 中継している telemetry_node の「異常終了」表示に伝える）
+    return 1 if node.failed else 0
 
 
 if __name__ == "__main__":

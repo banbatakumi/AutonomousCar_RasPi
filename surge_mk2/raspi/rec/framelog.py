@@ -146,8 +146,10 @@ class FrameLogWriter:
 
     io_node の実時間ループから叩かれるので、1レコードあたりの仕事は
     「struct.pack 1回 + BufferedWriter への write 2回」に抑えてある。
-    fsync はしない（コストが跳ね上がる）。代わりに一定間隔で flush して、
-    電源断で失う量を `flush_interval_s` 秒ぶんに限定する。
+    fsync はしない（コストが跳ね上がる）。代わりに一定間隔で flush する。
+    **flush は OS のページキャッシュへ渡すだけ**なので、これで守れるのはプロセスが
+    落ちた場合（失うのは `flush_interval_s` 秒ぶん）。電源が落ちた場合は、カーネルが
+    SD へ書き出すまでの時間ぶん（既定の設定で数秒〜30秒程度）を失いうる。
 
     ## SD が満杯になったとき（ENOSPC）
 

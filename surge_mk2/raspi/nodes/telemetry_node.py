@@ -7,7 +7,7 @@
 ブラウザから http://surge.local:8000/ を開けば GUI（`gui/dist`）が出る。
 `gui/dist` が無ければビルド方法を書いたページを返す。
 
-## チャンネルを4本に分ける（§9.2）
+## チャンネルを用途ごとに分ける（§9.2）
 
 **1本にまとめない。** カメラのフレームが詰まった瞬間にラジコン入力まで遅延する。
 
@@ -15,9 +15,16 @@
 |---|---|---|---|
 | `/ws/telemetry` | 車両状態・点群・リンク診断 | msgpack バイナリ | 50Hz |
 | `/ws/camera/front`, `/ws/camera/rear` | JPEG | バイナリ | フレームが届くたび（上限 `gui_hz`） |
-| `/ws/control` | ラジコン入力・操縦権・E-Stop・記録の操作 | JSON | イベント + 20Hz |
+| `/ws/control` | ラジコン入力・操縦権・E-Stop・記録の操作 | JSON | イベント + 50Hz |
 | `/ws/map` | 地図・中心線・レーシングライン | msgpack バイナリ | **変わったときだけ** |
 | `/ws/record` | mcap記録の生バイト列 | バイナリ | 録画中のみ |
+
+このほか `/ws/map_upload/<name>` が地図のアップロード（ブラウザ→Pi）を受ける。
+
+**受信が止まった相手は切る。** どのチャンネルも1回の送信を `SEND_TIMEOUT_S` で見切り、
+超えた接続は落として配信先から外す。待ち続けると、スリープした PC 1台のせいで他の
+クライアントへの配信と操縦者の操作の処理まで止まる。`/ws/control` の `status` は
+配り終わるのを待たずに次のメッセージへ進む（`_status_soon`）。
 
 HTTP（GET）は GUI 本体のほか `/logs/<name>`（記録のダウンロード）、`/maps/…`、
 `/snapshot/<front|rear>.png`（📷 撮影ボタン。共有メモリの最新フレームを無劣化 PNG で返す。
@@ -74,8 +81,11 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
 この形にすると、自律走行中も人間の安全網がそのまま生きる:
 
 - **ARM は人間が GUI で保持する。** planning_node は arm を立てられない
-- GUI が 50Hz で送り続けている限りだけ走る（150ms 途絶 → DISARM）
-- E-Stop・操縦権の解放・接続断は、いずれも **engage も同時に落とす**
+- GUI が 50Hz で送り続けている限りだけ走る（150ms 途絶 → DISARM。自律走行中だけは
+  `auto_link_grace_ms` まで待つ）
+- E-Stop（GUI・STM32 のどちらでも）・操縦権の解放・接続断・自律走行中のデッドマンは、
+  いずれも **engage も同時に落とす**。再開は人の engage から
+- GUI の E-Stop のあとは、操縦者が ARM を入れ直す（`arm=False` を一度送る）まで ARM を通さない
 - `auto/cmd` が 200ms 途絶したら、engage したままでも**制動**に読み替える
 
 差し替えるのは `target_speed` / `target_steer` / `brake` だけ。灯火・ホーン・
@@ -92,6 +102,9 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
 | Origin 検査（`_origin_ok`） | **クロスサイト WebSocket ハイジャック**。操縦中に別タブで開いた悪意あるページが `/ws/control` を張るのを弾く |
 | 共有トークン（`--token`） | 同一ネットワーク上の第三者。実際には**隣の班の PC の誤接続**を止める意味が大きい |
 | `engage` に操縦権を要求 | 操縦権を持たない接続が自律走行を**開始**するのを止める |
+
+engage している間は、操縦者以外の接続は自律走行の設定（パラメータ・駐車目標・経路・地図）を
+変えられない（解除だけできる）。ARM 中のシャットダウンも受け付けない。
 
 **止める操作には条件をつけない。** E-Stop・操縦権の解放・engage の解除は
 トークンも操縦権も要求しない。止める指令に条件を足すと、
@@ -360,12 +373,30 @@ RECORD_CHUNK = 65536
 RECORD_BACKLOG_MAX = 8 * 1024 * 1024
 #: `GET /logs/<name>` でメモリに載せてよい上限。これを超えたら 413 を返して
 #: `scp` 運用に倒す。**全量を一度に `read_bytes()` すると Pi のメモリが尽きる**
-#: （`image_hz=5` × カメラ2台で `.mcap` は毎時 1GB 近く育つ）
-MAX_INLINE_LOG_BYTES = 64 * 1024 * 1024
+#: （`image_hz=5` × カメラ2台で `.mcap` は毎時 1GB 近く育つ）。読むのは別スレッドだが、
+#: 応答を送信バッファへ積むのはイベントループなので、そこが長く止まらない大きさにする
+MAX_INLINE_LOG_BYTES = 32 * 1024 * 1024
 #: `/ws/map_upload/<name>` で受け取ってよいバイト数の上限。地図は数百KB〜数MB
-#: なので `MAX_INLINE_LOG_BYTES` よりずっと小さく切る（壊れたクライアントが
-#: 無限に送り続けても Pi のメモリを使い切らないようにする境界）
+#: なので余裕は十分ある（壊れたクライアントが無限に送り続けても Pi のメモリを
+#: 使い切らないようにする境界）
 MAX_MAP_UPLOAD_BYTES = 32 * 1024 * 1024
+#: `logs_delete` は、最後の書き込みからこの秒数以内のファイルを消さない（記録中）。開いたままの
+#: ファイルを消すと、書き手は消えた実体へ書き続け、「記録中」の表示のまま何も残らない
+LOG_ACTIVE_GUARD_S = 30.0
+#: 操縦者の名前の長さの上限（`cmd` の `source` として 50Hz でバスに載る）
+CONTROLLER_NAME_MAX = 40
+#: `config/auto.json` を書くまでの待ち [s]。スライダを動かしている間は1目盛りごとに
+#: メッセージが来るので、最後の値だけを1回書く（終了時は待たずに書く）
+AUTO_CONF_SAVE_DELAY_S = 0.5
+#: 1クライアントへの1回の送信に許す時間 [s]。受信が止まった相手（スリープした PC・圏外に出た
+#: 端末）は TCP が切れないまま送信バッファだけが埋まり、`ws.send()` が戻らなくなる。これを
+#: 超えたら**その接続を切って配信先から外す**——待ち続けると、同じ `gather` に入っている
+#: 健全なクライアントへの配信まで止まる
+SEND_TIMEOUT_S = 0.5
+#: WebSocket の生存確認（ping の間隔と、返事を待つ時間）[s]。送るものが無い接続
+#: （`/ws/control` で黙っている相手）が死んだことは、これでしか分からない
+WS_PING_INTERVAL_S = 5.0
+WS_PING_TIMEOUT_S = 5.0
 #: 同一オリジン以外で許すオリジン。**Vite の dev サーバだけ。**
 #: 本番（telemetry_node が GUI も配る）は Host ヘッダと突き合わせるので列挙しない
 DEV_ORIGINS = frozenset(
@@ -389,9 +420,15 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-")
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        # 書けなかった（満杯など）tmp を残さない。残すと失敗のたびに増えていく
+        with quiet_close("設定の一時ファイルの削除"):
+            os.unlink(tmp)
+        raise
 
 #: RasPi 本体（SoC）の温度。カーネルがミリ℃で出している
 PI_THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
@@ -452,9 +489,17 @@ def _onnx_model_files(models_dir: Path) -> list[dict]:
 class TelemetryServer:
     #: 遅れて届いたので捨てた「走れ」の指令の数（`_cmd_lateness_ms`）
     stale_cmds = 0
+    #: 壊れていて捨てた `/ws/control` のメッセージの数（`_on_control`）
+    bad_cmds = 0
     #: GUI の時刻 → Pi の受信時刻の差の最小値 [ms] と、それを更新した時刻。操縦権ごとに測り直す
     _cmd_clock_base_ms: float | None = None
     _cmd_clock_base_ns = 0
+    #: GUI の E-Stop を受けたあと、**操縦者から `arm=False` の指令が一度届くまで True**。
+    #: その間は ARM 付きの指令を通さない（`_publish_cmd`）。止めた直後に、ARM を保持したままの
+    #: GUI が操縦権を取り直しただけで走り出すのを防ぐ（人が ARM を入れ直すことを求める）
+    _estop_hold = False
+    #: 直前に見た `diag/link.estop_active`（立ち上がりで engage を落とす。`_on_estop_change`）
+    _last_estop_active = False
 
     def __init__(self, *, port: int = DEFAULT_PORT, host: str = DEFAULT_HOST,
                  dist: Path = GUI_DIST, camera: bool = True,
@@ -472,8 +517,6 @@ class TelemetryServer:
         self.auth_rejects = 0
         #: Origin 不一致で弾いた回数
         self.origin_rejects = 0
-        #: 型が壊れた `cmd` を捨てた回数
-        self.bad_cmds = 0
 
         self.sub = Subscriber({
             TOPIC_VEHICLE_STATE: LATEST,
@@ -821,27 +864,35 @@ class TelemetryServer:
         host = request.headers.get("Host") or ""
         return origin in (f"http://{host}", f"https://{host}") or origin in DEV_ORIGINS
 
-    def _process_request(self, connection, request):
+    async def _process_request(self, connection, request):
         """WebSocket 以外のリクエストは静的ファイルまたはログのダウンロードとして返す。
 
         HTTP サーバを別プロセスに分けないのは、**GUI と WS を同一オリジンに
         載せるため**。別ポートにすると「開発中は動くのに Pi では繋がらない」
         という接続先の食い違いを毎回踏む。
+
+        **中身を作るのは別スレッド。** ファイルの読み出し・地図の展開・PNG 化を
+        イベントループ上でやると、その間 `cmd` の定期送信も止まり、io_node が途絶と見て
+        走行中に DISARM する（誰かがログを落としただけで）。
         """
         if request.path.startswith("/ws/"):
             if not self._origin_ok(request):
                 self.origin_rejects += 1
                 return _response(403, "text/plain; charset=utf-8", b"bad origin")
             return None                       # WebSocket として処理させる
-        if request.path.startswith("/logs/"):
-            return self._serve_log_file(request.path)
-        if request.path.startswith("/snapshot/"):
-            return self._serve_snapshot(request.path)
-        if request.path.startswith("/maps/") and request.path.split("?")[0].endswith("/preview"):
-            return self._serve_map_preview(request.path)
-        if request.path.startswith("/maps/"):
-            return self._serve_map_file(request.path)
-        return self._serve_static(request.path)
+        return await asyncio.to_thread(self._serve_http, request.path)
+
+    def _serve_http(self, path: str) -> Response:
+        """GET の中身を作る（`_process_request` が別スレッドで呼ぶ）。"""
+        if path.startswith("/logs/"):
+            return self._serve_log_file(path)
+        if path.startswith("/snapshot/"):
+            return self._serve_snapshot(path)
+        if path.startswith("/maps/") and path.split("?")[0].endswith("/preview"):
+            return self._serve_map_preview(path)
+        if path.startswith("/maps/"):
+            return self._serve_map_file(path)
+        return self._serve_static(path)
 
     # ── WebSocket ──
 
@@ -939,6 +990,18 @@ class TelemetryServer:
                 await self._broadcast_control_status()
 
     async def _on_control(self, ws, raw) -> None:
+        """`/ws/control` の1メッセージを処理する。**壊れた1通で接続を落とさない。**
+
+        ここから例外が漏れると `_control_channel` の `async for` が終わり、操縦者の接続なら
+        操縦権を手放して走行中に DISARM する。想定していない形の入力（桁の多すぎる数・
+        型違い）は数えて捨て、次のメッセージを待つ。
+        """
+        try:
+            await self._handle_control(ws, raw)
+        except Exception:
+            self.bad_cmds += 1
+
+    async def _handle_control(self, ws, raw) -> None:
         try:
             m = _json_decode(raw)
         except Exception:
@@ -961,32 +1024,35 @@ class TelemetryServer:
                                            "holder": self.controller_name})
                 return
             self.controller = ws
-            self.controller_name = str(m.get("name", "gui"))
+            self.controller_name = str(m.get("name", "gui"))[:CONTROLLER_NAME_MAX]
             self._last_cmd = None
             self._last_cmd_ns = 0
             self._cmd_clock_base_ms = None    # 遅れの基準は操縦権を取るたびに測り直す
             self._relay_now()
-            await self._broadcast_control_status()
+            self._status_soon()
 
         elif kind == "release_control":
             if self.controller is ws:
                 self._release_control("解放")
                 self._relay_now()
-                await self._broadcast_control_status()
+                self._status_soon()
 
         elif kind == "cmd":
             if self.controller is not ws:
                 return                        # 操縦権が無い接続の指令は捨てる
             try:
                 cmd = self._decode_cmd(m)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 # **壊れた指令は捨てるだけ。接続は維持する。**
-                # msgspec は NaN / 1e400 を弾くが `{"speed": "abc"}` は素通りし、
-                # `float("abc")` が伝播すると制御チャネルのタスクごと死ぬ。
+                # msgspec は NaN / 1e400 を弾くが、`{"speed": "abc"}` や桁の多すぎる整数は
+                # 素通りする（`float()` が `ValueError`／`OverflowError`）。
                 # 切ると 150ms 後に DISARM して復帰に人手が要るので、
                 # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
                 self.bad_cmds += 1
                 return
+            if not cmd.arm:
+                # 人が ARM を外した。E-Stop 後の「ARM を入れ直すまで通さない」をここで解く
+                self._estop_hold = False
             # **遅れて届いた「走れ」は捨てる**。Wi-Fi が詰まると GUI の指令は
             # ブラウザと TCP に溜まり、復帰した瞬間にまとめて届く。受信時刻だけで鮮度を
             # 見ると、何十秒も前の ARM でデッドマンが「生きている」に戻り、人の操作なしに
@@ -1010,9 +1076,11 @@ class TelemetryServer:
             # **誰であっても止められる。** 操縦権を持っていなくても通す
             self._last_cmd = None
             self._last_cmd_ns = 0
+            # 次の操縦者が ARM を入れ直す（`arm=False` を一度送る）まで ARM を通さない
+            self._estop_hold = True
             self._release_control("E-Stop 要求")
             self._relay_now()
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
 
@@ -1025,37 +1093,47 @@ class TelemetryServer:
                                            "holder": self.controller_name,
                                            "reason": "auto_engage"})
                 return
+            if self._auto_engaged and self.controller is not ws:
+                # **走っている最中の自律走行を、操縦者以外が書き換えない**（パラメータ・駐車目標・
+                # 経路・地図の操作は、走っている車の速度と行き先を変える）。解除だけは通す
+                if "engaged" in m and not m["engaged"]:
+                    m = {"engaged": False}
+                else:
+                    await self._send_json(ws, {"type": "control_denied",
+                                               "holder": self.controller_name,
+                                               "reason": "auto_busy"})
+                    return
             self._on_auto(m)
             self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
             self._relay_now()              # 解除も待たせない（GUI の速度・舵に戻す）
             # **モード・engage が変わると前カメラの capture fps の希望も変わりうる**
             # （`CAMERA_AUTO_MODES` を engage した瞬間に上限まで上げたい）
             self._publish_cam_config()
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── ファン（誰でも操作できる。灯火と同じ「状態」トグル） ──
 
         elif kind == "fan":
             self._on_fan(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── カメラ capture 設定（誰でも操作できる。ファンと同じ「状態」トグル） ──
 
         elif kind == "camera":
             self._on_camera(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── GUIの運転設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
 
         elif kind == "drive_settings":
             self._on_drive_settings(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── 矢印信号認識の設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
 
         elif kind == "signal":
             self._on_signal_config(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── カメラセグメンテーションモデルの選択（誰でも操作できる。
         #    `ftg_cam` を engage する前に選び直す想定——一覧は要求があった
@@ -1066,7 +1144,7 @@ class TelemetryServer:
 
         elif kind == "cam_model_select":
             self._on_cam_model(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── E2E LiDAR モデルの選択（誰でも操作できる。`cam_model_list`/`select`
         #    と全く同じ形。`e2e_lidar` を engage する前に選び直す想定） ──
@@ -1076,7 +1154,7 @@ class TelemetryServer:
 
         elif kind == "e2e_model_select":
             self._on_e2e_model(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── カメラE2E モデルの選択（同じ形。`cam_e2e` を engage する前に選び直す想定） ──
 
@@ -1085,7 +1163,7 @@ class TelemetryServer:
 
         elif kind == "cam_e2e_model_select":
             self._on_cam_e2e_model(m)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
         #    `AutoCtrl.freeze_seq`/`clear_map` と同じ「回数」の約束） ──
@@ -1151,7 +1229,7 @@ class TelemetryServer:
 
         elif kind == "sfl_record":
             self._sfl_active = bool(m.get("active", False))
-            await self._broadcast_control_status()
+            self._status_soon()
 
         elif kind == "mcap_record_start":
             try:
@@ -1161,17 +1239,20 @@ class TelemetryServer:
             if not math.isfinite(image_hz):
                 image_hz = DEFAULT_MCAP_IMAGE_HZ
             await self._mcap_start(image_hz=image_hz)
-            await self._broadcast_control_status()
+            self._status_soon()
 
         elif kind == "mcap_record_stop":
             await self._mcap_stop()
-            await self._broadcast_control_status()
+            self._status_soon()
 
         elif kind == "logs_list":
             await self._send_json(ws, self._logs_list())
 
         elif kind == "logs_delete":
-            self._logs_delete(str(m.get("name", "")))
+            error = self._logs_delete(str(m.get("name", "")))
+            if error:
+                await self._send_json(ws, {"type": "logs_delete_result", "ok": False,
+                                           "error": error})
             await self._send_json(ws, self._logs_list())
 
         # ── 保存済み地図の一覧・保存・削除（誰でも操作できる。`logs_list`/
@@ -1202,6 +1283,12 @@ class TelemetryServer:
         #    何も表示されない」という無反応バグになる。実機で発覚） ──
 
         elif kind == "shutdown":
+            vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+            if vs is not None and vs.armed:
+                # **ARM 中は受け付けない。** 走っている車の計算機を、見ているだけの画面から
+                # 落とせないようにする。止めたいなら E-Stop（誰でも押せる）が先
+                await self._send_json(ws, {"type": "shutdown_denied", "reason": "armed"})
+                return
             await self._shutdown_pi()
 
     async def _shutdown_pi(self) -> None:
@@ -1221,7 +1308,8 @@ class TelemetryServer:
         """
         if not self.token:
             return True
-        return secrets.compare_digest(str(m.get("token", "")), self.token)
+        # バイト列で比べる（`compare_digest` は ASCII 以外の str を受け付けない）
+        return secrets.compare_digest(str(m.get("token", "")).encode(), self.token.encode())
 
     def _cmd_lateness_ms(self, t_client, now_ns: int) -> float:
         """この指令が**いつもよりどれだけ遅れて届いたか** [ms]。時計合わせは要らない。
@@ -1249,7 +1337,7 @@ class TelemetryServer:
     def _decode_cmd(self, m: dict) -> DriveCmd:
         """`{"type":"cmd", ...}` → `DriveCmd`。**`float()`/`int()` をここに閉じる。**
 
-        壊れた値は `TypeError` / `ValueError` として呼び元に返す。呼び元は
+        壊れた値は `TypeError` / `ValueError` / `OverflowError` として呼び元に返す。呼び元は
         捨てるだけで接続を維持する（切ると 150ms 後に DISARM してしまう）。
         """
         speed = float(m.get("speed", 0.0))
@@ -1265,12 +1353,18 @@ class TelemetryServer:
         if not all(math.isfinite(v) for v in (
                 speed, steer, accel_limit, steer_rate_limit, brake_torque, target_torque)):
             raise ValueError("非有限値（NaN/Inf）の走行指令")
+        # 範囲外の整数はここで捨てる。素通しにすると、バスへ載せる msgpack 化が
+        # `OverflowError` で落ちる（64bit に収まらない値）か、UART のビット幅からはみ出す
+        mode = int(m.get("mode", 0))
+        light_mode = int(m.get("light_mode", 0))
+        if mode not in (0, 1, 2) or light_mode not in (0, 1, 2):
+            raise ValueError("範囲外の mode / light_mode")
         return DriveCmd(
-            mode=int(m.get("mode", 0)),
+            mode=mode,
             arm=bool(m.get("arm", False)),
             brake=bool(m.get("brake", False)),
             horn=bool(m.get("horn", False)),
-            light_mode=int(m.get("light_mode", 0)),
+            light_mode=light_mode,
             passing=bool(m.get("passing", False)),
             target_speed=speed,
             target_steer=steer,
@@ -1354,8 +1448,9 @@ class TelemetryServer:
             except (KeyError, TypeError, ValueError):
                 pass
             else:
-                self._auto_loc_hint_x, self._auto_loc_hint_y = x, y
-                self._auto_loc_hint_seq += 1
+                if math.isfinite(x) and math.isfinite(y):      # `float("nan")` は通る
+                    self._auto_loc_hint_x, self._auto_loc_hint_y = x, y
+                    self._auto_loc_hint_seq += 1
         if m.get("park_target"):
             try:
                 x, y, yaw = float(m["park_x"]), float(m["park_y"]), float(m["park_yaw"])
@@ -1387,7 +1482,7 @@ class TelemetryServer:
                 self.auto_stalls = 0
                 self._auto_was_fresh = True
                 self._auto_last_steer = 0.0     # 前の走行の舵を持ち越さない
-        self._save_auto_conf()
+        self._save_auto_conf_soon()
 
     def _auto_ctrl(self) -> AutoCtrl:
         return AutoCtrl(mode=self._auto_mode, engaged=self._auto_engaged,
@@ -1485,6 +1580,25 @@ class TelemetryServer:
         self._auto_mode = mode if mode in PLANNERS else ""
         self._auto_params = merged_params(
             self._auto_mode, self._auto_params_by_mode.get(self._auto_mode, {}))
+
+    def _save_auto_conf_soon(self) -> None:
+        """`config/auto.json` を少し後で1回だけ書く（`AUTO_CONF_SAVE_DELAY_S`）。
+
+        スライダを動かしている間、1目盛りごとにイベントループ上で同期書き込みをしない。
+        イベントループの外（テスト・起動時）から呼ばれたらその場で書く。
+        """
+        if getattr(self, "_auto_conf_timer", None) is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._save_auto_conf()
+            return
+
+        def _flush() -> None:
+            self._auto_conf_timer = None
+            self._save_auto_conf()
+        self._auto_conf_timer = loop.call_later(AUTO_CONF_SAVE_DELAY_S, _flush)
 
     def _save_auto_conf(self) -> None:
         if self._auto_mode:
@@ -1648,6 +1762,8 @@ class TelemetryServer:
             raw = _json_decode(CAMERA_CONF.read_bytes())
         except Exception:
             return
+        if not isinstance(raw, dict):
+            return                         # 配列など → 無いのと同じ扱い
         if isinstance(raw.get("rear_enabled_armed"), bool):
             self._cam_rear_enabled_armed = raw["rear_enabled_armed"]
         elif isinstance(raw.get("rear_enabled"), bool):
@@ -1789,6 +1905,8 @@ class TelemetryServer:
             raw = _json_decode(SIGNAL_CONF.read_bytes())
         except Exception:
             return
+        if not isinstance(raw, dict):
+            return                         # 配列など → 無いのと同じ扱い
         if isinstance(raw.get("enabled"), bool):
             self._signal_enabled = raw["enabled"]
         if isinstance(raw.get("roi_top"), (int, float)):
@@ -1891,6 +2009,8 @@ class TelemetryServer:
             raw = _json_decode(CAM_MODEL_CONF.read_bytes())
         except Exception:
             return                         # 無い・壊れている → 既定（未選択）のまま
+        if not isinstance(raw, dict):
+            return                         # 配列など → 無いのと同じ扱い
         name = raw.get("name")
         if isinstance(name, str) and (not name or (MODELS_DIR / f"{name}.onnx").is_file()):
             self._cam_model = name
@@ -1949,6 +2069,8 @@ class TelemetryServer:
             raw = _json_decode(E2E_MODEL_CONF.read_bytes())
         except Exception:
             return
+        if not isinstance(raw, dict):
+            return                         # 配列など → 無いのと同じ扱い
         name = raw.get("name")
         if isinstance(name, str) and (not name or (E2E_MODELS_DIR / f"{name}.onnx").is_file()):
             self._e2e_model = name
@@ -2005,6 +2127,8 @@ class TelemetryServer:
             raw = _json_decode(CAM_E2E_MODEL_CONF.read_bytes())
         except Exception:
             return
+        if not isinstance(raw, dict):
+            return                         # 配列など → 無いのと同じ扱い
         name = raw.get("name")
         if isinstance(name, str) and (
                 not name or (CAM_E2E_MODELS_DIR / f"{name}.onnx").is_file()):
@@ -2038,8 +2162,10 @@ class TelemetryServer:
             return
         try:
             box = (float(m["x0"]), float(m["y0"]), float(m["x1"]), float(m["y1"]))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return                         # 壊れた座標は黙って捨てる
+        if not all(math.isfinite(v) for v in box):
+            return                         # `float("nan")` は通るのでここで捨てる
         self._track_roi_box = box
         self._track_select_seq += 1
         if self._auto_engaged and self._auto_mode == "follow_object":
@@ -2117,6 +2243,9 @@ class TelemetryServer:
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
         return {
             "type": "status",
+            # `/ws/telemetry` と同じ型定義の札。GUI が Pi と版の合わない画面のまま
+            # 動いていることを、こちらのチャンネルでも見分けられるようにする
+            "schema": SCHEMA_VERSION,
             "has_controller": self.controller is not None,
             "controller": self.controller_name,
             # **io_node が封印しているかどうか。ここでは覆せない**
@@ -2194,6 +2323,12 @@ class TelemetryServer:
     async def _mcap_start(self, *, image_hz: float) -> None:
         if self._mcap_proc is not None or self._mcap_starting:
             return                            # 既に録画中、または起動処理の途中
+        prev = getattr(self, "_mcap_pump_task", None)
+        if prev is not None and not prev.done():
+            # 止めた直後の記録は、末尾（索引）の中継がまだ続いている。ここで次を始めると、
+            # 前の記録の末尾が新しい視聴者へ混ざり、前の中継の終了が新しい `/ws/record` を切る
+            self._mcap_error = "前の記録の終了処理中です。少し待ってからもう一度"
+            return
         # **`await create_subprocess_exec` の間だけこのフラグで再入を防ぐ。**
         # `self._mcap_proc is not None` のチェックと代入の間には中断点（await）
         # があり、素通しだと短時間の二重呼び出しで logger_node を二重起動して
@@ -2215,7 +2350,7 @@ class TelemetryServer:
             self._mcap_starting = False
         self._mcap_proc = proc
         self._mcap_started_ns = time.monotonic_ns()
-        asyncio.create_task(self._mcap_pump(proc))
+        self._mcap_pump_task = asyncio.create_task(self._mcap_pump(proc))
 
     async def _mcap_pump(self, proc: asyncio.subprocess.Process) -> None:
         """`logger_node -o -` の標準出力を `/ws/record` へ生中継する。
@@ -2258,7 +2393,7 @@ class TelemetryServer:
                 if rc != 0:
                     self._mcap_error = f"logger_node が異常終了しました（rc={rc}）"
                 self._mcap_proc = None
-                asyncio.create_task(self._broadcast_control_status())
+                self._status_soon()
             # **中継が完全に終わった合図として `/ws/record` を切る。** MCAP の索引は
             # 最後に書かれるので、GUI 側はこの切断イベントを「もう来ない」の目印にして
             # ダウンロードを発火する（`record.ts` の `onClose`）
@@ -2308,11 +2443,28 @@ class TelemetryServer:
                               "size": st.st_size, "mtime": st.st_mtime})
         return {"type": "logs", "files": files}
 
-    def _logs_delete(self, name: str) -> None:
+    def _logs_delete(self, name: str) -> str:
+        """`logs/` のファイルを1つ消す。消さなかった理由があれば返す（消せたら空文字）。
+
+        **記録中のファイルは消さない。** 書き込みが続いているもの（mtime が新しい）と、
+        `.sfl` の記録を頼んでいる間のいちばん新しい `.sfl`（io_node が書いている1本）。
+        """
         path = self._resolve_log_path(name)
         if path is None or not path.is_file():
-            return
+            return ""
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return ""
+        busy = time.time() - mtime < LOG_ACTIVE_GUARD_S
+        if not busy and path.suffix == ".sfl" and self._sfl_active:
+            newest = max((p.stat().st_mtime for p in self.logs_dir.glob("*.sfl")),
+                         default=mtime)
+            busy = mtime >= newest
+        if busy:
+            return f"{path.name} は記録中なので削除しない（記録を止めてから）"
         path.unlink(missing_ok=True)
+        return ""
 
     # ── `saved_maps/` の一覧・保存・削除（`raspi/auto/mapstore.py`） ──
     #
@@ -2437,41 +2589,85 @@ class TelemetryServer:
             pass
 
     async def _broadcast_control_status(self) -> None:
-        st = self._control_status()
-        await asyncio.gather(*(self._send_json(c, st) for c in list(self.control_clients)),
+        if not self.control_clients:
+            return
+        # 全員に同じ物を送るので、JSON 化は1回だけ（`catalog` を含み数十 kB ある）
+        text = _json_encode(self._control_status()).decode()
+        await asyncio.gather(*(self._send_text(c, text) for c in list(self.control_clients)),
                              return_exceptions=True)
+
+    def _status_soon(self) -> None:
+        """`status` を全員へ配る。**呼んだ側は待たない。**
+
+        `_on_control` の中で配り終わるのを待つと、受信が止まった視聴者1台のぶんだけ、
+        操縦者の次のメッセージ（`cmd`・`estop`・engage の解除）の処理が後ろへずれる。
+        まだ送り始めていない配信が残っていれば足さない（中身は送る瞬間に組むので、
+        1回で最新の状態が届く）。
+        """
+        if getattr(self, "_status_queued", False):
+            return
+        self._status_queued = True
+
+        async def _run() -> None:
+            self._status_queued = False
+            await self._broadcast_control_status()
+        self._spawn(_run())
+
+    def _spawn(self, coro) -> None:
+        """待たないタスクを起こす。**参照を持っておく**（持たないと実行中に GC されうる）。"""
+        tasks = self.__dict__.setdefault("_bg_tasks", set())
+        t = asyncio.ensure_future(coro)
+        tasks.add(t)
+        t.add_done_callback(tasks.discard)
+
+    @staticmethod
+    def _kick(ws) -> None:
+        """送れなかった接続を**待たずに**切る。
+
+        `ws.close()` は閉じる合図を送ろうとするが、相手が受け取らないから切るので、
+        それを待つと同じ所で止まる。下の TCP を落とす（`_control_channel` などの
+        `finally` が後始末をする）。偽物の接続（テスト）には何もしない。
+        """
+        transport = getattr(ws, "transport", None)
+        if transport is not None:
+            with quiet_close("送信が詰まった WebSocket の切断"):
+                transport.abort()
 
     @staticmethod
     async def _send_or_drop(ws, payload, clients: set) -> bool:
-        """1クライアントへバイト列を1本送る。**失敗したら即座に `clients` から外す。**
+        """1クライアントへバイト列を1本送る。**失敗・時間切れなら切って `clients` から外す。**
 
         呼び出し側が `asyncio.gather` でクライアントぶん並行に呼ぶための単位。
-        直列に `await` すると、1台の送信が詰まった（TCP輻輳・受信停止）ぶんだけ
-        同じループ内の他クライアントへの配信も足止めされる（`websockets` の
-        `send()` にタイムアウトが無いため）。1タスクずつ独立させれば、
-        詰まったクライアントだけが取り残される。
+        `websockets` の `send()` は相手が受け取らないと戻らないので、`SEND_TIMEOUT_S` で
+        見切る。見切らないと `gather` が全員ぶんを待ち、詰まった1台のせいで健全な
+        クライアントへの配信まで止まる。
         """
         try:
-            await ws.send(payload)
+            await asyncio.wait_for(ws.send(payload), SEND_TIMEOUT_S)
             return True
         except Exception:
             clients.discard(ws)
+            TelemetryServer._kick(ws)
             return False
 
     @staticmethod
-    async def _send_json(ws, obj) -> None:
-        """1クライアントへ JSON を1本送る。**送れなくても黙って捨てる。**
+    async def _send_text(ws, text: str) -> None:
+        """1クライアントへ JSON 化済みの文字列を1本送る。**送れなくても黙って捨てる。**
 
-        ここで例外が漏れると `_broadcast_control_status()` の
-        `asyncio.gather` が全クライアントぶん巻き添えになる。切れた接続は
-        `_control_channel` の `finally` が片付けるので、ここでは何もしない
-        （後始末ではないが「捨ててよい」根拠が別にある形。`quiet_close` は
-        使わない——20Hz で回るので記録が環状バッファを埋め尽くす）。
+        ここで例外が漏れると `_broadcast_control_status()` の `asyncio.gather` が
+        全クライアントぶん巻き添えになる。時間切れの相手は切る（`_send_or_drop` と同じ理由）。
+        切れた接続は `_control_channel` の `finally` が片付けるので、ここでは集合に触らない
+        （`quiet_close` に記録もしない——毎秒回るので環状バッファを埋め尽くす）。
         """
         try:
-            await ws.send(_json_encode(obj).decode())
+            await asyncio.wait_for(ws.send(text), SEND_TIMEOUT_S)
         except Exception:
-            pass
+            TelemetryServer._kick(ws)
+
+    @staticmethod
+    async def _send_json(ws, obj) -> None:
+        """1クライアントへ JSON を1本送る（`_send_text` と同じ扱い）。"""
+        await TelemetryServer._send_text(ws, _json_encode(obj).decode())
 
     # ── 定期タスク ──
 
@@ -2502,6 +2698,7 @@ class TelemetryServer:
                         self._tel_wake.set()
                 self._on_auto_cmd(time.monotonic_ns())
                 self._on_armed_change()
+                self._on_estop_change()
                 if wake is None:
                     await asyncio.sleep(BUS_POLL_S)
                     continue
@@ -2557,6 +2754,21 @@ class TelemetryServer:
         self._last_armed = armed
         self._apply_cpu_cap()
         self._publish_cam_config()
+
+    def _on_estop_change(self) -> None:
+        """STM32 が E-Stop に入った周に、自律走行の engage を落とす。
+
+        物理ボタンや STM32 側の判断で止まったときも、GUI の E-Stop と同じ扱いにする。
+        engage を残すと、E-Stop を解除して ARM し直した瞬間に、人が engage していないのに
+        planner の指令で走り出す。
+        """
+        link = self.sub.latest.get(TOPIC_DIAG_LINK)
+        active = bool(link.estop_active) if link is not None else False
+        if active and not self._last_estop_active and self._auto_engaged:
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+            self._status_soon()
+        self._last_estop_active = active
 
     def _apply_cpu_cap(self) -> None:
         """今の ARM 状態の上限周波数にする（今の値と同じなら書かない）。`_cam_config_pump`
@@ -2706,7 +2918,13 @@ class TelemetryServer:
                        and self._auto_engaged and bool(self._auto_mode))
         limit = AUTO_LINK_GRACE_NS if riding_auto else CMD_DEADMAN_NS
         live = last is not None and (now - self._last_cmd_ns) <= limit
-        if live:
+        if live and self._estop_hold and last.arm:
+            # E-Stop のあと、人が ARM を入れ直していない。**ARM を落として中継する**
+            # （灯火などはそのまま通す。自律の指令も混ぜない）
+            cmd = msgspec.structs.replace(
+                last, arm=False, target_speed=0.0, target_torque=0.0, launch=False,
+                source="estop_hold")
+        elif live:
             cmd = self._last_cmd
             if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
                 cmd = self._merge_auto(cmd, now)
@@ -2719,7 +2937,13 @@ class TelemetryServer:
         else:
             if self._cmd_was_live:
                 self.deadman_trips += 1
-                asyncio.create_task(self._broadcast_control_status())
+                if riding_auto:
+                    # **自律走行中に GUI の指令が途絶えた。engage も落とす。** 残すと、回線が
+                    # 戻って GUI の ARM が届いた瞬間に、人の操作なしでまた走り出す
+                    # （止まった車を取りに行っている最中かもしれない）。再開は人の engage から
+                    self._auto_engaged = False
+                    self._publish_auto_ctrl()
+                self._status_soon()
             cmd = DriveCmd(mode=0, source="deadman")
         self._cmd_was_live = live
         self.pub.send(TOPIC_CMD, cmd)
@@ -2750,7 +2974,7 @@ class TelemetryServer:
         if not fresh:
             if self._auto_was_fresh:
                 self.auto_stalls += 1
-                asyncio.create_task(self._broadcast_control_status())
+                self._status_soon()
             self._auto_was_fresh = False
             return msgspec.structs.replace(
                 gui, mode=2, brake=True, brake_torque=0.0, target_speed=0.0,
@@ -3010,17 +3234,20 @@ class TelemetryServer:
         self._running = True
         async with serve(self._handler, self.host, self.port,
                          process_request=self._process_request,
-                         max_queue=8, ping_interval=20,
+                         max_queue=8, ping_interval=WS_PING_INTERVAL_S,
+                         ping_timeout=WS_PING_TIMEOUT_S,
                          # permessage-deflate は切る。JPEG は縮まないのに1枚あたり約2ms
                          # （Pi 5・1.5GHz、44kB）イベントループを塞ぎ、その間 `cmd` の中継も待つ
                          compression=None) as server:  # noqa: F841
-            tasks = [asyncio.create_task(t()) for t in (
+            tasks = [asyncio.create_task(t(), name=t.__name__) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump, self._pi_health_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
                 self._cam_e2e_model_pump,
                 self._mask_pump, self._track_roi_pump, self._signal_config_pump)]
+            for t in tasks:
+                t.add_done_callback(lambda t: self._on_pump_done(t, stop))
             try:
                 await stop
             finally:
@@ -3029,11 +3256,30 @@ class TelemetryServer:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    @staticmethod
+    def _on_pump_done(task: asyncio.Task, stop: asyncio.Future) -> None:
+        """定期タスクが**例外で**終わったら、サーバごと止める（`stop` に例外を入れる）。
+
+        1本だけ死んで残りが動き続けると、プロセスも `hb/control` も生きたまま、バスの
+        取り込みや `cmd` の定期送信だけが止まった状態になり、外からは気づけない。
+        異常終了にして systemd（`Restart=on-failure`）に上げ直させる。正常に戻った
+        タスク（エンコーダの無い `_camera_pump` など）とキャンセルは何もしない。
+        """
+        if task.cancelled() or stop.done():
+            return
+        exc = task.exception()
+        if exc is not None:
+            err = RuntimeError(f"{task.get_name()} が例外で終了: {type(exc).__name__}: {exc}")
+            err.__cause__ = exc
+            stop.set_exception(err)
+
     def close(self) -> None:
         # 終了時に一発 DISARM を置いてから消える。**自律走行の engage も落とす**
         # （planning_node だけが生き残っても、走れの意思が残らないように）
         # バスが既に閉じていれば送れないが、**その場合 io_node 側は
         # `cmd` の途絶を 150ms で検出して自力で DISARM に落ちる**
+        if getattr(self, "_auto_conf_timer", None) is not None:
+            self._save_auto_conf()            # 書くのを待っていた設定を失わない
         with quiet_close("終了時の DISARM / engage 解除 / ファン自動化"):
             self._auto_engaged = False
             self._publish_auto_ctrl()

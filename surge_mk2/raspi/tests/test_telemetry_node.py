@@ -895,3 +895,343 @@ class TestSnapshotSendsSlowPartsOnlyOnChange(unittest.TestCase):
         s = snap()
         self.assertIsNotNone(s["link"])
         self.assertIsNotNone(s["auto"])
+
+
+# ── 止める側の安全条件（`/ws/control` と送信） ──────────────────────────────
+
+import raspi.tests.test_cmd_path as _cp  # noqa: E402  （`TelemetryServer` の組み立てを借りる）
+
+
+class _StuckWs:
+    """受信が止まった相手。`send()` が戻らない。"""
+
+    def __init__(self):
+        self.aborted = False
+        self.transport = SimpleNamespace(abort=self._abort)
+
+    def _abort(self):
+        self.aborted = True
+
+    async def send(self, payload):
+        await asyncio.Event().wait()
+
+
+class _GoodWs:
+    def __init__(self):
+        self.got = []
+
+    async def send(self, payload):
+        self.got.append(payload)
+
+
+class TestStalledClient(unittest.IsolatedAsyncioTestCase):
+    """受信が止まった1台が、他のクライアントと操縦者の操作を止めないこと。"""
+
+    def setUp(self):
+        self._orig = tn.SEND_TIMEOUT_S
+        tn.SEND_TIMEOUT_S = 0.05
+        self.addCleanup(setattr, tn, "SEND_TIMEOUT_S", self._orig)
+
+    async def test_send_gives_up_and_cuts_the_stuck_client(self):
+        stuck, good = _StuckWs(), _GoodWs()
+        clients = {stuck, good}
+        t0 = time.monotonic()
+        res = await asyncio.gather(*(tn.TelemetryServer._send_or_drop(ws, b"x", clients)
+                                     for ws in (stuck, good)))
+        self.assertLess(time.monotonic() - t0, 0.5)
+        self.assertEqual(res, [False, True])
+        self.assertEqual(clients, {good})
+        self.assertTrue(stuck.aborted)
+        self.assertEqual(good.got, [b"x"])
+
+    async def test_status_broadcast_reaches_the_others(self):
+        srv = _cp.TestControlOwnership._server(self)
+        del srv._send_json                              # 本物の送信を使う
+        stuck, good = _StuckWs(), _GoodWs()
+        srv.control_clients = {stuck, good}
+        await asyncio.wait_for(srv._broadcast_control_status(), 0.5)
+        self.assertEqual(len(good.got), 1)
+        self.assertTrue(stuck.aborted)
+
+    async def test_control_handler_does_not_wait_for_the_broadcast(self):
+        """status の配信が終わらなくても、操縦者の次のメッセージ（E-Stop）は処理される。"""
+        srv = _cp.TestControlOwnership._server(self)
+        started = asyncio.Event()
+
+        async def _never():
+            started.set()
+            await asyncio.Event().wait()
+        srv._broadcast_control_status = _never
+        a = object()
+        await asyncio.wait_for(srv._on_control(a, b'{"type":"take_control","name":"A"}'), 0.2)
+        await asyncio.wait_for(srv._on_control(a, b'{"type":"cmd","mode":1,"arm":true,"speed":0.5}'), 0.2)
+        self.assertTrue(srv.published[-1][1].arm)
+        await asyncio.wait_for(srv._on_control(a, b'{"type":"estop"}'), 0.2)
+        self.assertEqual(srv.published[-1][1].mode, 0)
+        await asyncio.wait_for(started.wait(), 0.2)     # 配信そのものは裏で始まっている
+        for t in list(srv._bg_tasks):
+            t.cancel()
+
+
+class TestEstopHold(unittest.IsolatedAsyncioTestCase):
+    """GUI の E-Stop のあとは、操縦者が ARM を入れ直すまで ARM を通さない。"""
+
+    async def test_arm_is_dropped_until_the_operator_sends_arm_false(self):
+        srv = _cp.TestControlOwnership._server(self)
+        a = object()
+        send = lambda **m: srv._on_control(a, json.dumps(m))   # noqa: E731
+        await send(type="take_control", name="A")
+        await send(type="cmd", mode=1, arm=True, speed=0.5)
+        self.assertTrue(srv.published[-1][1].arm)
+        await send(type="estop")
+        # ARM を保持したままの GUI が操縦権を取り直しても走らない
+        await send(type="take_control", name="A")
+        await send(type="cmd", mode=1, arm=True, speed=0.5, light_mode=2)
+        m = srv.published[-1][1]
+        self.assertEqual((m.arm, m.target_speed, m.source), (False, 0.0, "estop_hold"))
+        self.assertEqual(m.light_mode, 2)               # 灯火は通す
+        srv._publish_cmd(time.monotonic_ns())           # 定期送信でも同じ
+        self.assertFalse(srv.published[-1][1].arm)
+        # ARM を外してから入れ直せば通る
+        await send(type="cmd", mode=0, arm=False)
+        await send(type="cmd", mode=1, arm=True, speed=0.5)
+        m = srv.published[-1][1]
+        self.assertEqual((m.arm, m.target_speed), (True, 0.5))
+
+    async def test_stm32_estop_drops_engage(self):
+        from raspi.msgs.types import TOPIC_DIAG_LINK
+        srv = _cp.TestControlOwnership._server(self)
+        sent = []
+        srv._publish_auto_ctrl = lambda: sent.append(srv._auto_engaged)
+        srv._auto_mode, srv._auto_engaged = "ftg", True
+        srv.sub.latest[TOPIC_DIAG_LINK] = SimpleNamespace(estop_active=False)
+        srv._on_estop_change()
+        self.assertTrue(srv._auto_engaged)
+        srv.sub.latest[TOPIC_DIAG_LINK] = SimpleNamespace(estop_active=True)
+        srv._on_estop_change()
+        self.assertFalse(srv._auto_engaged)
+        self.assertEqual(sent, [False])
+        # 立ち上がりだけ。E-Stop が立ったままでも、後から人が engage したものは落とさない
+        srv._auto_engaged = True
+        srv._on_estop_change()
+        self.assertTrue(srv._auto_engaged)
+        for t in list(srv.__dict__.get("_bg_tasks", ())):
+            t.cancel()
+
+
+class TestControlInputGuards(unittest.IsolatedAsyncioTestCase):
+    """壊れた入力で制御チャネルが落ちないこと、操縦者以外が走行中の自律を変えられないこと。"""
+
+    async def test_out_of_range_numbers_are_dropped_not_raised(self):
+        srv = _cp.TestControlOwnership._server(self)
+        a = object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        for body in ('"speed":1' + "0" * 400, '"mode":1e30', '"mode":7',
+                     '"light_mode":1180591620717411303424', '"steer":[1]'):
+            before = srv.bad_cmds
+            await srv._on_control(a, ('{"type":"cmd","arm":true,' + body + "}").encode())
+            self.assertEqual(srv.bad_cmds, before + 1, body)
+        self.assertIsNone(srv._last_cmd)
+        self.assertIs(srv.controller, a)                # 操縦権は持ったまま
+
+    async def test_unexpected_exception_is_counted_not_raised(self):
+        srv = _cp.TestControlOwnership._server(self)
+
+        def _boom(m):
+            raise RuntimeError("boom")
+        srv._on_fan = _boom
+        await srv._on_control(object(), b'{"type":"fan","mode":"auto"}')
+        self.assertEqual(srv.bad_cmds, 1)
+
+    async def test_non_ascii_token_is_just_rejected(self):
+        srv = _cp.TestControlOwnership._server(self)
+        srv.token = "secret"
+        a = object()
+        await srv._on_control(a, '{"type":"take_control","token":"あいう"}'.encode())
+        self.assertIsNone(srv.controller)
+        self.assertEqual((srv.auth_rejects, srv.bad_cmds), (1, 0))
+        await srv._on_control(a, b'{"type":"take_control","token":"secret"}')
+        self.assertIs(srv.controller, a)
+
+    async def test_only_the_operator_changes_an_engaged_run(self):
+        srv = _cp.TestControlOwnership._server(self)
+        a, b = object(), object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        await srv._on_control(a, b'{"type":"auto","mode":"ftg","engaged":true}')
+        self.assertTrue(srv._auto_engaged)
+        params = dict(srv._auto_params)
+        key = next(iter(params))
+        await srv._on_control(b, json.dumps({"type": "auto", "params": {key: 0.0},
+                                             "park_target": True, "park_x": 1, "park_y": 1,
+                                             "park_yaw": 0, "clear_map": True}).encode())
+        self.assertEqual(srv._auto_params, params)
+        self.assertTrue(srv._auto_engaged)
+        self.assertTrue(any(o.get("reason") == "auto_busy" for w, o in srv.sent if w is b))
+        # 解除は誰でもできる（一緒に送ってきた他の項目は捨てる）
+        await srv._on_control(b, json.dumps({"type": "auto", "engaged": False,
+                                             "params": {key: 0.0}}).encode())
+        self.assertFalse(srv._auto_engaged)
+        self.assertEqual(srv._auto_params, params)
+        # engage していなければ従来どおり誰でも触れる
+        await srv._on_control(b, b'{"type":"auto","mode":""}')
+        self.assertEqual(srv._auto_mode, "")
+        for t in list(srv.__dict__.get("_bg_tasks", ())):
+            t.cancel()
+
+    async def test_shutdown_is_refused_while_armed(self):
+        from raspi.msgs.types import TOPIC_VEHICLE_STATE
+        srv = _cp.TestControlOwnership._server(self)
+        calls = []
+
+        async def _shutdown():
+            calls.append(1)
+        srv._shutdown_pi = _shutdown
+        srv.sub.latest[TOPIC_VEHICLE_STATE] = VehicleState(armed=True)
+        await srv._on_control(object(), b'{"type":"shutdown"}')
+        self.assertEqual(calls, [])
+        self.assertTrue(any(o.get("type") == "shutdown_denied" for _, o in srv.sent))
+        srv.sub.latest[TOPIC_VEHICLE_STATE] = VehicleState(armed=False)
+        await srv._on_control(object(), b'{"type":"shutdown"}')
+        self.assertEqual(calls, [1])
+
+
+class TestPumpSupervision(unittest.IsolatedAsyncioTestCase):
+    """定期タスクが例外で終わったら、サーバを止めて異常終了にする（systemd が上げ直す）。"""
+
+    async def _stop_after(self, coro):
+        stop = asyncio.get_running_loop().create_future()
+        t = asyncio.create_task(coro, name="_bus_pump")
+        t.add_done_callback(lambda t: tn.TelemetryServer._on_pump_done(t, stop))
+        await asyncio.sleep(0.01)
+        return stop, t
+
+    async def test_exception_stops_the_server(self):
+        async def _boom():
+            raise ValueError("bad")
+        stop, _ = await self._stop_after(_boom())
+        self.assertTrue(stop.done())
+        with self.assertRaisesRegex(RuntimeError, "_bus_pump.*ValueError"):
+            stop.result()
+
+    async def test_normal_return_and_cancel_do_not(self):
+        async def _ok():
+            return None
+        stop, _ = await self._stop_after(_ok())
+        self.assertFalse(stop.done())
+        stop, t = await self._stop_after(asyncio.sleep(10))
+        t.cancel()
+        await asyncio.sleep(0.01)
+        self.assertFalse(stop.done())
+
+
+class TestLogsDeleteGuard(unittest.TestCase):
+    """`logs_delete` は記録中のファイルを消さない（消すと書き手は消えた実体へ書き続ける）。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        self.srv.logs_dir = Path(self._td.name)
+        self.srv._sfl_active = False
+
+    def _touch(self, name, age_s):
+        import os
+        p = self.srv.logs_dir / name
+        p.write_bytes(b"x")
+        t = time.time() - age_s
+        os.utime(p, (t, t))
+        return p
+
+    def test_old_file_is_deleted(self):
+        p = self._touch("old.mcap", 600)
+        self.assertEqual(self.srv._logs_delete("old.mcap"), "")
+        self.assertFalse(p.exists())
+
+    def test_file_being_written_is_kept(self):
+        p = self._touch("now.mcap", 1)
+        self.assertIn("記録中", self.srv._logs_delete("now.mcap"))
+        self.assertTrue(p.exists())
+
+    def test_newest_sfl_is_kept_while_sfl_recording_is_requested(self):
+        """flush の間が空いて mtime が古く見えても、記録を頼んでいる間の最新の `.sfl` は消さない。"""
+        old = self._touch("a.sfl", 900)
+        cur = self._touch("b.sfl", 120)
+        self.srv._sfl_active = True
+        self.assertIn("記録中", self.srv._logs_delete("b.sfl"))
+        self.assertEqual(self.srv._logs_delete("a.sfl"), "")
+        self.assertTrue(cur.exists())
+        self.assertFalse(old.exists())
+        self.srv._sfl_active = False
+        self.assertEqual(self.srv._logs_delete("b.sfl"), "")
+
+    def test_path_escape_is_ignored(self):
+        self.assertEqual(self.srv._logs_delete("../x"), "")
+
+
+class TestConfLoadersTolerateNonDict(unittest.TestCase):
+    """設定ファイルが dict 以外の JSON（`[]`・`null`）でも起動を落とさない。"""
+
+    def test_all_loaders(self):
+        from unittest import mock
+        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        with tempfile.TemporaryDirectory() as td:
+            for const, loader in (("CAMERA_CONF", "_load_camera_conf"),
+                                  ("SIGNAL_CONF", "_load_signal_conf"),
+                                  ("CAM_MODEL_CONF", "_load_cam_model_conf"),
+                                  ("E2E_MODEL_CONF", "_load_e2e_model_conf"),
+                                  ("CAM_E2E_MODEL_CONF", "_load_cam_e2e_model_conf"),
+                                  ("AUTO_CONF", "_load_auto_conf"),
+                                  ("DRIVE_SETTINGS_CONF", "_load_drive_settings")):
+                for text in ("[]", "null", "3"):
+                    f = Path(td) / f"{const}.json"
+                    f.write_text(text)
+                    with mock.patch.object(tn, const, f):
+                        getattr(srv, loader)()          # 例外にならなければよい
+
+
+class TestAutoConfDeferredSave(unittest.IsolatedAsyncioTestCase):
+    """スライダの連打で `auto.json` を毎回は書かない。最後の値を1回、終了時は待たずに書く。"""
+
+    def _server(self):
+        srv = _cp.TestControlOwnership._server(self)
+        self.saves = []
+        srv._save_auto_conf = lambda: self.saves.append(dict(srv._auto_params))
+        return srv
+
+    async def test_burst_is_written_once_with_the_last_value(self):
+        from unittest import mock
+        srv = self._server()
+        srv._on_auto({"mode": "ftg"})
+        key = next(iter(srv._auto_params))
+        with mock.patch.object(tn, "AUTO_CONF_SAVE_DELAY_S", 0.03):
+            srv._auto_conf_timer.cancel()
+            srv._auto_conf_timer = None
+            for _ in range(20):
+                srv._on_auto({"params": {key: srv._auto_params[key]}})
+            self.assertEqual(self.saves, [])
+            await asyncio.sleep(0.08)
+        self.assertEqual(len(self.saves), 1)
+        self.assertEqual(self.saves[0], srv._auto_params)
+
+    async def test_close_flushes_a_pending_save(self):
+        srv = self._server()
+        srv._on_auto({"mode": "ftg"})
+        self.assertEqual(self.saves, [])
+        srv._fan = SimpleNamespace(set_auto=lambda: None)
+        srv._cpufreq = SimpleNamespace(restore=lambda: None)
+        srv.sub.close = lambda: None
+        srv.pub.close = lambda: None
+        srv.close()
+        self.assertEqual(len(self.saves), 1)
+        srv._auto_conf_timer.cancel()
+
+
+class TestMcapRestartWaitsForThePreviousRelay(unittest.IsolatedAsyncioTestCase):
+    async def test_start_is_refused_while_the_old_pump_is_draining(self):
+        srv = _cp.TestControlOwnership._server(self)
+        srv._mcap_starting = False
+        srv._mcap_pump_task = asyncio.create_task(asyncio.sleep(10))
+        await srv._mcap_start(image_hz=5.0)
+        self.assertIsNone(srv._mcap_proc)
+        self.assertIn("終了処理中", srv._mcap_error)
+        srv._mcap_pump_task.cancel()

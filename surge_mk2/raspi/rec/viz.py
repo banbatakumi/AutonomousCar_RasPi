@@ -28,7 +28,8 @@
 Foxglove はシークすると各トピックの最新1件から描き直すので、軌跡は毎回
 先頭からの全点を持たせる必要がある（差分だけ送るとシークで消える）。
 そのかわり**点の間隔を空け、点数が上限を超えたら間隔を倍にして間引き直す**。
-メッセージの大きさに上限を設けるため。
+メッセージの大きさに上限を設けるため。**点が増えていない間は書かない**（停車中に
+同じ全点を毎秒書き直すと、動いていないのに記録だけが育つ）。
 
 ## 地図の書き込みは間引く
 
@@ -273,6 +274,8 @@ class _Path:
         self.step = step
         self.cap = cap
         self.pts: list[tuple[float, float, float]] = []
+        #: 点列が変わった回数。**書き出し済みかどうかの判定に使う**（止まっている間は増えない）
+        self.rev = 0
 
     def add(self, x: float, y: float, yaw: float) -> None:
         if self.pts:
@@ -280,6 +283,7 @@ class _Path:
             if math.hypot(x - px, y - py) < self.step:
                 return
         self.pts.append((x, y, yaw))
+        self.rev += 1
         if len(self.pts) > self.cap:
             self.step *= 2.0
             thinned = [self.pts[0]]
@@ -312,6 +316,8 @@ class VizRecorder:
         self._map_pending = None
         self._map_last_s: float | None = None
         self._park_drawn = False
+        #: 軌跡ごとの、最後に書き出したときの `_Path.rev`
+        self._path_written: dict[str, tuple[int, int]] = {}
 
     def _due(self, key: str, t_ns: int, period_ns: int) -> bool:
         """`key` の書き込み時刻が来たか。**記録の時刻で数える**（sfl2mcap は実時間より速い）。"""
@@ -320,6 +326,10 @@ class VizRecorder:
             return False
         self._next[key] = t_ns + period_ns
         return True
+
+    def _path_changed(self, key: str, path: "_Path") -> bool:
+        """`path` が最後に書き出してから変わったか（作り直された場合も含む）。"""
+        return bool(path.pts) and self._path_written.get(key) != (id(path), path.rev)
 
     # ── 推測航法 ──
 
@@ -341,7 +351,8 @@ class VizRecorder:
             self.log.write_dict("/viz/odom/pose",
                                 pose_in_frame(ODOM_FRAME_ID, p.x, p.y, p.yaw, u),
                                 "foxglove.PoseInFrame", FOXGLOVE_POSE_IN_FRAME_SCHEMA, t)
-        if self._due("odom_path", t, PATH_PERIOD_NS):
+        if self._path_changed("odom", self._odom_path) and self._due("odom_path", t, PATH_PERIOD_NS):
+            self._path_written["odom"] = (id(self._odom_path), self._odom_path.rev)
             self.log.write_dict("/viz/odom/path",
                                 poses_in_frame(ODOM_FRAME_ID, self._odom_path.pts, u),
                                 "foxglove.PosesInFrame", FOXGLOVE_POSES_IN_FRAME_SCHEMA, t)
@@ -362,7 +373,9 @@ class VizRecorder:
                                                   s.pose_yaw, u),
                                     "foxglove.PoseInFrame",
                                     FOXGLOVE_POSE_IN_FRAME_SCHEMA, t)
-            if self._due("slam_path", t, PATH_PERIOD_NS):
+            if self._path_changed("slam", self._slam_path) \
+                    and self._due("slam_path", t, PATH_PERIOD_NS):
+                self._path_written["slam"] = (id(self._slam_path), self._slam_path.rev)
                 self.log.write_dict("/viz/slam/path",
                                     poses_in_frame(MAP_FRAME_ID, self._slam_path.pts, u),
                                     "foxglove.PosesInFrame",
@@ -448,7 +461,7 @@ class VizRecorder:
         if self._map_pending is not None:
             m = self._map_pending
             self._flush_map(m.t_capture or m.t_pub, force=True)
-        if self.last_odom is not None and self._odom_path.pts:
+        if self.last_odom is not None and self._path_changed("odom", self._odom_path):
             t = self.last_odom.t_capture
             self.log.write_dict("/viz/odom/path",
                                 poses_in_frame(ODOM_FRAME_ID, self._odom_path.pts,

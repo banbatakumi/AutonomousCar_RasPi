@@ -95,13 +95,13 @@ class TestCheckDiskGenerationalDelete(TempDirCase):
         # 削除のたびに再計算し、2回消した時点で 6% に回復したことにする
         usages = iter([
             _usage(100, 3),     # 開始判定
-            _usage(100, 3),     # old.sfl 削除後もまだ足りない
+            _usage(100, 4),     # old.sfl 削除後もまだ足りない
             _usage(100, 6),     # mid.sfl 削除後に critical を上回る
         ])
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                         side_effect=lambda _p: next(usages)):
             status = logclean.check_disk(self.tmp, warn_free_pct=15.0,
-                                         critical_free_pct=5.0)
+                                         critical_free_pct=5.0, keep_newest=0)
 
         self.assertTrue(status.warned)
         self.assertEqual(status.deleted, ["old.sfl", "mid.sfl"])
@@ -119,7 +119,7 @@ class TestCheckDiskGenerationalDelete(TempDirCase):
         usages = iter([_usage(100, 2), _usage(100, 6)])
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                         side_effect=lambda _p: next(usages)):
-            status = logclean.check_disk(self.tmp, critical_free_pct=5.0,
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0,
                                          protect={active})
 
         self.assertEqual(status.deleted, ["mid.sfl"])
@@ -130,13 +130,49 @@ class TestCheckDiskGenerationalDelete(TempDirCase):
         for i in range(5):
             self._touch(f"f{i}.sfl", age_s=100 - i)
 
-        # 空き容量は最後まで回復しない設定（常に critical のまま）
+        # 消すたびに少しずつ空くが、最後まで critical のまま
+        usages = iter(_usage(100, 1 + 0.1 * i) for i in range(10))
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",
-                        return_value=_usage(100, 1)):
-            status = logclean.check_disk(self.tmp, critical_free_pct=5.0,
+                        side_effect=lambda _p: next(usages)):
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0,
                                          max_delete=2)
 
         self.assertEqual(len(status.deleted), 2)
+        self.assertFalse(status.stalled)
+
+    def test_stops_when_deleting_does_not_free_space(self):
+        """消しても空きが増えない（原因がログ以外）なら、1本で打ち切ること。
+        30秒ごとに呼ばれるので、打ち切らないと数分で全ログを消し切る。"""
+        for i in range(5):
+            self._touch(f"f{i}.sfl", age_s=500 - i)
+        with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                        return_value=_usage(100, 1)):
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
+        self.assertEqual(status.deleted, ["f0.sfl"])
+        self.assertTrue(status.stalled)
+
+    def test_newest_files_are_kept(self):
+        """新しい順に `keep_newest` 本は、空きが戻らなくても消さないこと。"""
+        for i in range(5):
+            self._touch(f"f{i}.sfl", age_s=500 - i)
+        usages = iter(_usage(100, 1 + 0.1 * i) for i in range(10))
+        with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                        side_effect=lambda _p: next(usages)):
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=3)
+        self.assertEqual(status.deleted, ["f0.sfl", "f1.sfl"])
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir()),
+                         ["f2.sfl", "f3.sfl", "f4.sfl"])
+
+    def test_recently_written_file_is_not_deleted(self):
+        """他のプロセスが記録中のファイル（mtime が新しい）は、`protect` に無くても消さないこと。"""
+        self._touch("old.sfl", age_s=500)
+        self._touch("being_written.mcap", age_s=2)
+        usages = iter(_usage(100, 1 + 0.1 * i) for i in range(10))
+        with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                        side_effect=lambda _p: next(usages)):
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
+        self.assertEqual(status.deleted, ["old.sfl"])
+        self.assertTrue((self.tmp / "being_written.mcap").exists())
 
     def test_only_sfl_and_mcap_are_candidates(self):
         """記録以外のファイル（設定等）には触らないこと。"""
@@ -146,7 +182,7 @@ class TestCheckDiskGenerationalDelete(TempDirCase):
         usages = iter([_usage(100, 2), _usage(100, 10)])
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                         side_effect=lambda _p: next(usages)):
-            status = logclean.check_disk(self.tmp, critical_free_pct=5.0)
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
 
         self.assertEqual(status.deleted, ["a.sfl"])
         self.assertFalse(sfl.exists())
@@ -157,14 +193,14 @@ class TestCheckDiskGenerationalDelete(TempDirCase):
         usages = iter([_usage(100, 2), _usage(100, 10)])
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                         side_effect=lambda _p: next(usages)):
-            status = logclean.check_disk(self.tmp, critical_free_pct=5.0)
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
         self.assertEqual(status.deleted, ["old.mcap"])
 
     def test_no_candidates_left_still_reports_warned(self):
         """消せるものが無くても crash せず、warned だけ立てて終わること。"""
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                         return_value=_usage(100, 1)):
-            status = logclean.check_disk(self.tmp, critical_free_pct=5.0)
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
         self.assertTrue(status.warned)
         self.assertEqual(status.deleted, [])
 

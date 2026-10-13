@@ -273,8 +273,9 @@ class McapLog:
     **例外を投げない。** `mcap.writer.Writer` の内部書き込みが `OSError` で
     失敗したら `errors`/`last_error` に残し、以後そのファイルには一切書かない
     （`framelog.FrameLogWriter` の `broken` と同じ理由・同じ形）。
-    `logger_node.py` はこれを1プロセス1本しか使わないので、`_on_msg` が
-    投げっぱなしだと記録スレッドごと落ちてしまう——これを防ぐのが目的。
+    **書けなくなったことは `broken` で分かる。** 黙って捨て続けないよう、呼び出し側が
+    見て対処する（`logger_node` は空きが戻ったら新しいファイルで記録を再開し、
+    標準出力へ流しているときは終了する）。
     """
 
     def __init__(self, path: str | Path, *, t0_mono_ns: int | None = None,
@@ -409,6 +410,11 @@ class McapLog:
         """**チャネル登録より先に見る。** 閉じた Writer に触ると分かりにくく壊れる。"""
         if self._closed:
             raise ValueError("クローズ済みの McapLog に書き込もうとしました")
+
+    @property
+    def broken(self) -> bool:
+        """`True` なら以後このファイルには何も書けない（ENOSPC・パイプの切断などで確定済み）。"""
+        return self._broken
 
     def _mark_broken(self, e: OSError) -> None:
         self._broken = True

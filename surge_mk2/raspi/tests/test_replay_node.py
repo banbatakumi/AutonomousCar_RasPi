@@ -342,3 +342,50 @@ class TestRobustness(ReplayCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBrokenRecordsAndRewind(unittest.TestCase):
+    """壊れた1レコードで再生を止めないこと、`--loop` で状態を作り直すこと。"""
+
+    def test_bad_tx_payload_and_bad_event_are_skipped(self):
+        import tempfile
+
+        from raspi.nodes.replay_node import ReplayNode
+        from raspi.proto import packets
+        from raspi.rec.framelog import FrameLogWriter, Kind
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "bad.sfl"
+            w = FrameLogWriter(path)
+            t = w.t0_mono_ns
+            w.write_tx(t + 1_000_000, packets.Ping.TYPE, 1, b"\x01")       # 長さが合わない
+            w._write(Kind.EVENT, t + 2_000_000, 0, 0, b"{not json")
+            w._write(Kind.EVENT, t + 3_000_000, 0, 0, b"[1, 2]")
+            w.write_event(t + 4_000_000, "health", {"from": "INIT", "to": "OK"})
+            w.close()
+            seen = []
+            node = ReplayNode(path, speed=0.0, on_tx=lambda *a: seen.append(a))
+            node.run()
+            self.assertEqual(node.bad_records, 3)
+            self.assertEqual(len(seen), 1)
+            self.assertIsNone(seen[0][3])                 # 解釈できなかった TX も数には入る
+            self.assertEqual(len(node.logged_health), 1)
+
+    def test_rewind_rebuilds_the_link_state(self):
+        import tempfile
+
+        from raspi.nodes.replay_node import ReplayNode
+        from raspi.rec.framelog import FrameLogWriter
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "e.sfl"
+            FrameLogWriter(path).close()
+            node = ReplayNode(path, speed=0.0)
+            node.run()
+            old_tracker, old_sync = node.tracker, node.sync
+            node._paced = True
+            node.rewind()
+            self.assertIsNot(node.tracker, old_tracker)
+            self.assertIsNot(node.sync, old_sync)
+            self.assertIs(node.state, node.tracker.state)
+            self.assertFalse(node._paced)

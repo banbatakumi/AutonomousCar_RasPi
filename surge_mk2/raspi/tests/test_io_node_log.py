@@ -228,6 +228,11 @@ class TestIoNodeDiskCheck(unittest.TestCase):
         old.write_bytes(b"x" * 1000)
         t = time.time() - 1000
         os.utime(old, (t, t))
+        # `check_disk` は新しい順に3本を残す（記録中の1本を含む）。それより古いものだけが消える
+        for i, age in enumerate((500, 400)):
+            keep = Path(self._td.name) / f"keep{i}.sfl"
+            keep.write_bytes(b"x" * 1000)
+            os.utime(keep, (time.time() - age,) * 2)
 
         link = FakeLink()
         log = FrameLogWriter(self.path)

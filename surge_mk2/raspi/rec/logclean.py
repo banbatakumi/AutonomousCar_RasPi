@@ -35,6 +35,8 @@ __all__ = [
     "DEFAULT_WARN_FREE_PCT",
     "DEFAULT_CRITICAL_FREE_PCT",
     "DEFAULT_MAX_DELETE_PER_CALL",
+    "DEFAULT_KEEP_NEWEST",
+    "ACTIVE_GUARD_S",
 ]
 
 #: 世代管理の削除候補にする拡張子。`.sfl`（UART生ログ）と `.mcap`（オフライン
@@ -49,10 +51,19 @@ DEFAULT_WARN_FREE_PCT = 15.0
 #: 空き容量がこれを下回ったら、古い順に消して確保する
 DEFAULT_CRITICAL_FREE_PCT = 5.0
 
-#: 1回の呼び出しで削除するファイル数の上限。**暴走防止**（何らかの理由で
-#: 空き容量計算が壊れていても、ログを全部消し切ってしまわないようにする）。
-#: 定期的に何度も呼ばれる前提なので、1回で足りなくても次回また削る
+#: 1回の呼び出しで削除するファイル数の上限。定期的に何度も呼ばれる前提なので、
+#: 1回で足りなくても次回また削る。**これだけでは暴走は止まらない**（30秒ごとに呼ばれれば
+#: 数分で全部消える）ので、下の2つと「消しても空きが増えなければやめる」を併置している
 DEFAULT_MAX_DELETE_PER_CALL = 50
+
+#: 新しい順にこの本数は消さない。空きを食っているのがログ以外（OS のジャーナル・記録中の
+#: 1本の肥大など）のとき、消しても回復しないのに直近の走行記録まで失うのを防ぐ
+DEFAULT_KEEP_NEWEST = 3
+
+#: 最後の書き込みからこの秒数以内のファイルは消さない（誰かが記録中）。`protect` で守れるのは
+#: 呼んだプロセス自身のファイルだけで、io_node の `.sfl` と logger_node の `.mcap` は互いを
+#: 知らない。開いたままのファイルを消しても空きは戻らず、記録だけが失われる
+ACTIVE_GUARD_S = 60.0
 
 
 def disk_free_pct(path: str | Path) -> float:
@@ -75,6 +86,8 @@ class DiskStatus:
     #: 実際に削除したファイル名（古い順）
     deleted: list[str] = field(default_factory=list)
     freed_bytes: int = 0
+    #: 消したのに空きが増えなかったので打ち切った（原因はログ以外にある）
+    stalled: bool = False
     #: 空き容量そのものが取得できなかった場合の理由。非 None なら他のフィールドは無意味
     error: str | None = None
 
@@ -84,7 +97,9 @@ def check_disk(log_dir: str | Path, *,
                 critical_free_pct: float = DEFAULT_CRITICAL_FREE_PCT,
                 patterns: tuple[str, ...] = LOG_PATTERNS,
                 protect: set[Path] | None = None,
-                max_delete: int = DEFAULT_MAX_DELETE_PER_CALL) -> DiskStatus:
+                max_delete: int = DEFAULT_MAX_DELETE_PER_CALL,
+                keep_newest: int = DEFAULT_KEEP_NEWEST,
+                active_guard_s: float = ACTIVE_GUARD_S) -> DiskStatus:
     """空き容量を調べ、`critical_free_pct` を下回っていれば古いログから消す。
 
     :param log_dir: 空き容量を見るパーティション兼、削除候補を探すディレクトリ
@@ -94,6 +109,8 @@ def check_disk(log_dir: str | Path, *,
         世代管理は古い順に消すので通常は最新のファイルまで届かないが、
         「他に消せるものが無い」極限状態で記録中ファイルまで巻き込まないための保険
     :param max_delete: 1回の呼び出しで削除する上限
+    :param keep_newest: 新しい順にこの本数は候補から外す
+    :param active_guard_s: 最後の書き込みからこの秒数以内のものは候補から外す
 
     :return: 呼び出し後の状態。`shutil.disk_usage` 自体が失敗する環境
         （パス不在等）では `error` を立てて `free_pct=100.0` を返す
@@ -122,12 +139,17 @@ def check_disk(log_dir: str | Path, *,
     candidates: list[Path] = []
     for pat in patterns:
         candidates.extend(log_dir.glob(pat))
-    candidates = [p for p in candidates if p not in protect_set]
     candidates.sort(key=_safe_mtime)
+    if keep_newest > 0:
+        candidates = candidates[:-keep_newest]
+    newest_ok = time.time() - active_guard_s
+    candidates = [p for p in candidates
+                  if p not in protect_set and _safe_mtime(p) <= newest_ok]
 
     for p in candidates:
         if len(status.deleted) >= max_delete:
             break
+        prev_free = usage.free
         try:
             size = p.stat().st_size
             p.unlink()
@@ -139,6 +161,12 @@ def check_disk(log_dir: str | Path, *,
         try:
             usage = shutil.disk_usage(log_dir)
         except OSError:
+            break
+        if size > 0 and usage.free <= prev_free:
+            # 消したのに空きが増えていない。空きを食っているのはログではない（または
+            # 誰かが開いたままのファイルだった）ので、これ以上消しても記録を失うだけ
+            status.stalled = True
+            status.free_bytes = usage.free
             break
         status.free_bytes = usage.free
         status.total_bytes = usage.total
