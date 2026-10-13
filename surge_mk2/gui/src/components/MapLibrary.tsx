@@ -36,6 +36,7 @@ import { useNumbers } from '../bus/live'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 import { uploadMap } from '../ws/mapUpload'
+import { askConfirm } from './ConfirmDialog'
 
 export function MapLibrary({ ch }: { ch: ControlChannel | null }) {
   const mapFiles = useUi((s) => s.mapFiles)
@@ -146,7 +147,7 @@ export function MapLibrary({ ch }: { ch: ControlChannel | null }) {
                     phase === 'RACE'
                       ? `走行中です。本当に「${current.name}」を削除しますか？`
                       : `「${current.name}」を削除しますか？（元に戻せません）`
-                  if (window.confirm(msg)) ch?.mapsDelete(current.name)
+                  void askConfirm(msg).then((ok) => ok && ch?.mapsDelete(current.name))
                 }}
               >
                 削除

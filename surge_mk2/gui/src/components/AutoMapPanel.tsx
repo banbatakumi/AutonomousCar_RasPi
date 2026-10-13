@@ -13,9 +13,8 @@
  *
  * `LOCATE`段（保存済み地図から自己位置を復元中）でパネルをクリックすると、
  * その近傍だけに探索を絞り込める（`slam2d.core.localize.GlobalLocalizer`の
- * `hint`）。他の段でクリックしても`ch.setLocateHint()`は送られるが、
- * plannerが`LOCATE`段でないときは`request_locate_hint`が記録するだけで
- * 実害は無い（次回`LOCATE`に入ったときに使われる）。
+ * `hint`）。**他の段（地図作成中・走行中）のクリックは送らない**——planner は
+ * 受けたヒントを次の`LOCATE`まで持つので、古いクリックが後の探索を誤った場所へ絞る。
  *
  * **「レーシングライン走行」を押す前（`SlamRaceButtons`でドロップダウンから
  * 地図を選んだだけの状態）でもクリックできる。** この場合`ch.setLocateHint()`
@@ -34,6 +33,7 @@
  * 走行軌跡だけを消す。planner には何も送らない）。
  */
 import { live } from '../bus/live'
+import { askConfirm } from './ConfirmDialog'
 import { useNumbers } from '../bus/live'
 import { mapPreview, setPreviewHint } from '../bus/mapPreview'
 import { editClick, routeEdit } from '../bus/routeEdit'
@@ -70,6 +70,10 @@ export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
       editClick(x, y, pxPerM)
       return
     }
+    // **ヒントを送るのは、下見中か自己位置を復元中（LOCATE）のときだけ。** planner は受けた
+    // ヒントを次の LOCATE まで持つので、走行中の何気ないクリックまで送ると、後で別の場所から
+    // 走り始めたときに探索がそのクリックの周りへ絞られる
+    if (!previewing && phase !== 'LOCATE') return
     ch?.setLocateHint(x, y)
     setPreviewHint(x, y)
   }
@@ -92,9 +96,11 @@ export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
             phase === 'RACE'
               ? '走行中です。本当に地図を削除しますか？（次の周期で制動がかかります）'
               : '地図を削除しますか？'
-          if (!window.confirm(msg)) return
-          ch?.clearMap()
-          clearTrail()
+          void askConfirm(msg).then((ok) => {
+            if (!ok) return
+            ch?.clearMap()
+            clearTrail()
+          })
         }}
       >
         🗑

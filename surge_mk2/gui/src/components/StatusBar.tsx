@@ -20,6 +20,7 @@
 import { useNumbers } from '../bus/live'
 import { MODE_NAME, healthLevel, ms, rttLevel } from '../format'
 import { useUi } from '../store/ui'
+import { askConfirm } from './ConfirmDialog'
 import { WifiIcon } from './WifiIcon'
 
 export type StatusVariant = 'full' | 'rc'
@@ -148,13 +149,20 @@ export function StatusBar({
         >
           {ui.schemaMismatch ? '型不一致' : ui.telemetryOpen ? '接続' : '切断'}
         </span>
+        {/* 直前に ARM が下りた理由（E-STOP・操縦権の喪失・無操作など）。**なぜ止まったかを
+            必ず見せる**——出さないと、押していないのに ARM が外れた理由が分からない */}
+        {!ui.armRequested && ui.disarmReason && (
+          <span className="pill lv-warn" title="直前に ARM が解除された理由">
+            {ui.disarmReason}
+          </span>
+        )}
         <ArmButton />
         <button className="estop" onClick={onEstop} title="Esc キーでも同じ">
           E-STOP
         </button>
         <button
           onClick={() => {
-            if (window.confirm('ラズパイをシャットダウンしますか？')) onShutdown()
+            void askConfirm('ラズパイをシャットダウンしますか？').then((ok) => ok && onShutdown())
           }}
           title="Pi を安全にシャットダウンする"
         >
@@ -182,6 +190,8 @@ function ArmButton() {
   const ui = useUi()
   const inhibited = n.link?.arm_inhibited ?? true
   const left = n.armRemainingMs
+  // **解除はいつでも押せる。** 封印中・テレメトリ未受信で止めるのは「入れる」方だけ
+  const blocked = inhibited && !ui.armRequested
 
   const toggle = () => {
     if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'ボタンで解除' })
@@ -192,10 +202,10 @@ function ArmButton() {
     <button
       className={`armbtn ${ui.armRequested ? 'on' : ''}`}
       onClick={toggle}
-      disabled={inhibited}
+      disabled={blocked}
       title={
-        inhibited
-          ? 'io_node に --allow-arm が無い。GUI からは解禁できない'
+        blocked
+          ? n.link?.arm_inhibit_reason || 'io_node が ARM を通さない（テレメトリ未受信・--allow-arm が無い等）。GUI からは解禁できない'
           : 'Enter キーでも同じ。無操作で自動解除される'
       }
     >

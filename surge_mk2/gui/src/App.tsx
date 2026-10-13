@@ -20,7 +20,9 @@
  * 意思表示できる方が自然で、一覧はもともと診断タブと同じ「後から追う」場所のため。
  */
 import { useEffect, useRef, useState } from 'react'
+import { ConfirmHost } from './components/ConfirmDialog'
 import { DriveControls } from './components/DriveControls'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { LogControls } from './components/LogControls'
 import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
@@ -127,11 +129,26 @@ export function App() {
   // GUI 演出のみ（車両側には無関係）。`ui.engineSoundOn` の間だけ鳴る
   useEngineSound()
 
+  // タブの中身の描画が落ちたとき（`ErrorBoundary`）。何が表示できていないか分からないまま
+  // 走らせないよう、車を止める。`StatusBar` と `useDriving` は境界の外なので生きている
+  const stopOnRenderError = () => {
+    ch?.estop()
+    const ui = useUi.getState()
+    if (ui.armRequested) ui.set({ armRequested: false, disarmReason: '画面の表示エラーで停止' })
+  }
+
   return (
     <div className="app">
       {showSplash && <SplashEmblem onDone={() => setShowSplash(false)} />}
+      <ConfirmHost />
       <StatusBar
-        onEstop={() => ch?.estop()}
+        // **ARM も下ろす。** サーバの E-Stop は操縦権を外すだけなので、ARM を保持したままだと
+        // すぐに取り直して走り続ける（Esc・パッドの × と同じ扱いにする）
+        onEstop={() => {
+          ch?.estop()
+          const ui = useUi.getState()
+          if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'E-STOP ボタン' })
+        }}
         onShutdown={() => ch?.shutdown()}
         variant={tab === 'ラジコン' ? 'rc' : 'full'}
       />
@@ -141,20 +158,37 @@ export function App() {
             {t}
           </button>
         ))}
-        <LogControls ch={ch} />
+        <ErrorBoundary name="記録" compact>
+          <LogControls ch={ch} />
+        </ErrorBoundary>
         <div className="spacer" />
-        {DRIVING_TABS.includes(tab) && <DriveControls />}
+        {DRIVING_TABS.includes(tab) && (
+          <ErrorBoundary name="灯火" compact>
+            <DriveControls />
+          </ErrorBoundary>
+        )}
       </nav>
 
-      {tab === 'ラジコン' ? (
-        <RcView ch={ch} />
-      ) : tab === '自動運転' ? (
-        <AutoView ch={ch} />
-      ) : tab === '診断' ? (
-        <DiagView ch={ch} />
-      ) : (
-        <SysIdView ch={ch} />
+      {/* `key` をタブにしてあるので、タブを替えれば落ちた表示は作り直される */}
+      {tab !== 'システム同定' && (
+        <ErrorBoundary key={tab} name={tab} onError={stopOnRenderError}>
+          {tab === 'ラジコン' ? (
+            <RcView ch={ch} />
+          ) : tab === '自動運転' ? (
+            <AutoView ch={ch} />
+          ) : (
+            <DiagView ch={ch} />
+          )}
+        </ErrorBoundary>
       )}
+      {/* **システム同定だけは外さずに隠す。** 試験の進行（終了の検知→解除→記録の停止）と
+          記録のバッファをこのビューが持っているので、試験中に他のタブを見に行って外すと、
+          記録が捨てられ、試験も終わりを検知されないまま残る */}
+      <div style={{ display: tab === 'システム同定' ? 'contents' : 'none' }}>
+        <ErrorBoundary name="システム同定" onError={stopOnRenderError}>
+          <SysIdView ch={ch} />
+        </ErrorBoundary>
+      </div>
     </div>
   )
 }

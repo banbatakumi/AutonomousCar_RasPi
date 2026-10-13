@@ -244,7 +244,8 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   // 「接続直後の1回だけ取り込む」同期で古い値に巻き戻ってしまう）
   const handleResetSettings = () => {
     resetSettings()
-    ch?.setDriveSettings(settingsDefault)
+    // 送るのは**クランプ後の値**（`resetSettings` が今の車両の上限で切り直したもの）
+    ch?.setDriveSettings(useUi.getState().settings)
   }
   const saveCurrentAsDefault = useUi((s) => s.saveCurrentAsDefault)
   const pathGuide = useUi((s) => s.pathGuide)

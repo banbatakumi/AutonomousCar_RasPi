@@ -37,12 +37,9 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
  * （`architecture.md` §10.5）。**GUI 側の `--max-speed` 相当の運用上限
  * （`raspi/setup/install_services.sh` の deploy 引数）を上げ忘れていないか確認すること。**
  *
- * ⚠ **速度の上限は今も2段ある。**
- *
- *   1. io_node `--max-speed` …………… Pi 側の運用上限。超えた分を黙って切り捨てる
- *   2. STM32 の物理的な上限 …………… `LIMITS` で Pi/GUI が取得できる
- *
- * **`LIMITS` を受信済みならそちらを使う**（`effectiveRange`）。`PI_MAX_SPEED_CAP` は未受信時の仮値。
+ * ⚠ **実際に効く上限は `LIMITS`（STM32 の物理的な上限）。** io_node は `LIMITS` を受け取った後は
+ * それだけでクランプし、`--max-speed`/`--max-steer` は受け取るまでの仮の上限でしかない。GUI も同じで、
+ * `LIMITS` を受信済みならそちらを使う（`effectiveRange`）。`PI_MAX_SPEED_CAP` は未受信時の仮値。
  */
 export type DrivingSettings = {
   /** RC の速度ダイヤル（速度制御モードの実際の上限）[m/s]。既定値 3.0。範囲は `LIMITS` 受信済みならそちらが上限
@@ -52,7 +49,7 @@ export type DrivingSettings = {
    * 常に `maxSpeed` そのものが上限（「全開が最高速度」。巡航レンジやブーストは無い）。
    */
   maxSpeed: number
-  /** 見た目の最大舵角 [rad]。既定値 0.785(45°)。Pi 側ハード上限（`PI_MAX_STEER_CAP`）を超えられない */
+  /** 手動操作で切る最大の舵角 [rad]（路面舵角）。既定値は車両の上限（`PI_MAX_STEER_CAP`）で、それを超えられない */
   maxSteer: number
   /** 押している間の加速 [m/s²] */
   accel: number
@@ -183,24 +180,20 @@ export type NumericSettingKey = {
  * {@link effectiveRange} が実測値に置き換える（届いた後はこの値は使われない
  * ——`SETTINGS_RANGE` の「小さい方」ではなく実測値をそのまま採用する）。
  *
- * ⚠ 路面舵角の上限は **30°（0.524 rad）**。60°（1.047 rad）は**モータ機械角の可動域**で
- * あって路面舵角ではない（リンク比 0.5 によりタイヤは半分しか切れない）。据え切りを続けるとステア MD が過熱するので
- * `temp[2]` を見ておくこと。**`PI_MAX_STEER_CAP` は手で書かず `config/vehicle.toml` の
- * `max_steer` から生成する**（`config/generate.py`）。値を直すには toml を直して
- * 再生成すること。
+ * ⚠ 舵角の上限は**路面舵角**（`config/vehicle.toml` の `max_steer`）。モータ機械角の可動域では
+ * ない（STM32 がリンクの換算を掛ける）。据え切りを続けるとステア MD が過熱するので `temp[2]` を
+ * 見ておくこと。**`PI_MAX_STEER_CAP` は手で書かず `max_steer` から生成する**（`config/generate.py`）。
+ * 値を直すには toml を直して再生成すること。
  *
- * ⚠ 速度上限は **3.0 m/s ＝ 10.8 km/h**。`DEFAULT_SETTINGS.maxSpeed` も同じ 3.0 m/s。速度は `vehicle.toml`
- * に持たせる値ではない（運用上の速度制限であって車両の物理諸元ではない）ため、
- * こちらは引き続き直書き。
+ * ⚠ 速度の仮値は **3.0 m/s**（`DEFAULT_SETTINGS.maxSpeed` と同じ）。`LIMITS` の上限はこれより
+ * 高いことがある。**保存してある最高速度をこの仮値で切り詰めてはいけない**——`LIMITS` が届く前に
+ * 読み込んだ値は上を切らずに持ち、届いた時点で `LIMITS` でクランプする（`clampSettings`）。
  *
- * ⚠ **速度の上限は今も2段ある。** `effectiveRange` はスライダの見た目の話でしかなく、
- * 実際にモータへ効く安全側のクランプは別（`io_node._send_command` 参照）。
- *
- *   1. io_node `--max-speed` …………… Pi 側の運用上限。超えた分を黙って切り捨てる
- *   2. STM32 の物理的な上限 …………… `LIMITS` パケットで Pi/GUI が取得できる
+ * ⚠ `effectiveRange` はスライダの見た目の話でしかなく、実際にモータへ効く安全側のクランプは
+ * io_node（`_send_command`。`LIMITS` を受け取るまでは `--max-speed`/`--max-steer`）と STM32 が持つ。
  */
 export const PI_MAX_SPEED_CAP = 3.0 // m/s（install_services.sh の --max-speed と一致させてある）
-export const PI_MAX_STEER_CAP: number = VEHICLE.maxSteer // rad ≒ 30°（同 --max-steer。路面舵角の実機上限）
+export const PI_MAX_STEER_CAP: number = VEHICLE.maxSteer // rad（同 --max-steer。路面舵角の実機上限）
 
 /** STM32 に渡すレートリミット（安全側の保険）。設定パネルの `accel`/`steerRate` はこれより
  * 十分遅く保つこと。**これ自体はユーザー設定にしない**（`useDriving.ts` 参照）。
@@ -251,7 +244,9 @@ export type LaunchPhase = 'idle' | 'ready' | 'go'
 
 export const DEFAULT_SETTINGS: DrivingSettings = {
   maxSpeed: 3.0,
-  maxSteer: 0.785,
+  // 車両の上限そのもの（路面舵角）。これより大きい値は io_node が切り捨てるだけで、
+  // スティックの後半・キーの切り終わりが不感帯になる
+  maxSteer: PI_MAX_STEER_CAP,
   accel: 2.0,
   coast: 2.5,
   brake: 5.0,
@@ -414,11 +409,16 @@ function clampSettings(s: DrivingSettings): DrivingSettings {
   // 巻き戻され「ドラッグしても弾かれる」バグになる。
   // `live` はフックではない素の可変オブジェクトなので、コンポーネント外のここからでも読める
   const range = effectiveRange(live.link)
+  // **`LIMITS` が届く前は、最高速度の上を切らない。** 届く前のレンジは仮値（`PI_MAX_SPEED_CAP`）で、
+  // そこで切ると、`LIMITS` の範囲で設定して保存した値がリロードのたびに仮値へ巻き戻る。
+  // 届いた時点で `ws/telemetry.ts` が `setSettings({})` を呼び、ここをもう一度通す
+  const speedCapKnown = typeof live.link?.max_speed_m_s === 'number'
   const out = { ...s }
   for (const k of Object.keys(range) as NumericSettingKey[]) {
     const { min, max } = range[k]
     const v = out[k]
-    out[k] = typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : DEFAULT_SETTINGS[k]
+    const upper = !speedCapKnown && (k === 'maxSpeed' || k === 'mtMaxSpeed') ? Infinity : max
+    out[k] = typeof v === 'number' && isFinite(v) ? Math.min(upper, Math.max(min, v)) : DEFAULT_SETTINGS[k]
   }
   out.driveMode = out.driveMode === 'torque' || out.driveMode === 'mt' ? out.driveMode : 'speed'
   // 古い localStorage（v0.6 以前）にはこのキーが無い。**既定の ON に倒す**
@@ -448,10 +448,10 @@ function migrateDriveMode(raw: Record<string, unknown>): Record<string, unknown>
 function loadSettings(): DrivingSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
-    if (!raw) return DEFAULT_SETTINGS
+    if (!raw) return clampSettings(DEFAULT_SETTINGS)
     return clampSettings({ ...DEFAULT_SETTINGS, ...migrateDriveMode(JSON.parse(raw)) })
   } catch {
-    return DEFAULT_SETTINGS
+    return clampSettings(DEFAULT_SETTINGS)
   }
 }
 
@@ -477,10 +477,10 @@ const DEFAULT_OVERRIDE_KEY = 'surge.driveSettingsDefault.v1'
 function loadDefaultSettings(): DrivingSettings {
   try {
     const raw = localStorage.getItem(DEFAULT_OVERRIDE_KEY)
-    if (!raw) return DEFAULT_SETTINGS
+    if (!raw) return clampSettings(DEFAULT_SETTINGS)
     return clampSettings({ ...DEFAULT_SETTINGS, ...migrateDriveMode(JSON.parse(raw)) })
   } catch {
-    return DEFAULT_SETTINGS
+    return clampSettings(DEFAULT_SETTINGS)
   }
 }
 
@@ -619,9 +619,9 @@ type UiState = {
    * **`braking`/`horning`/`passing` とは性質が違い、押しっぱなしではなく
    * トグル。** ON にしたら明示的に OFF にするまで送り続ける——駐車ブレーキと
    * 同じ操作感（かけたらハンドルから手を離せる）にしてある。STM32 は
-   * **速度に関わらず即座に**後輪を位置制御へ切り替えて固定するため、走行中に
-   * 誤って ON にしないよう、UI 側は停止中（`vs.stopped`）以外では ON を拒否する
-   * （`AuxPanel.tsx`）。ページ再読み込みでは false に戻す（`localStorage` に
+   * **速度に関わらず即座に**後輪を位置制御へ切り替えて固定する。**走行中でも ON にできる**
+   * （ハンドブレーキターンのような使い方を妨げない。`DriveControls.tsx`・`useDriving.ts`）。
+   * ページ再読み込みでは false に戻す（`localStorage` に
    * 保存しない）——保存すると再読み込み直後に前回の状態のまま送られてしまう。
    * 未 ARM のときは送らない（`useDriving.ts`、`brake` と同じ理由）
    */
@@ -889,7 +889,8 @@ export const useUi = create<UiState>((set, get) => ({
     set(enteringMt ? { settings: next, mtGear: 'N' } : { settings: next })
   },
   resetSettings: () => {
-    const def = get().settingsDefault
+    // 既定値も必ずクランプを通す（保存してある既定値が今の車両の上限を超えていることがある）
+    const def = clampSettings(get().settingsDefault)
     saveSettings(def)
     set({ settings: def })
   },

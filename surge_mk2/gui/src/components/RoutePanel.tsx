@@ -19,7 +19,7 @@
  * 経由点が変わっていれば経路を作り直す（走行中でもよい。作り直した経路へは
  * 切替と同じく乗れる地点で移る）。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNumbers, live } from '../bus/live'
 import {
   AVOID,
@@ -30,12 +30,14 @@ import {
   beginEdit,
   clearTarget,
   endEdit,
+  mapReplaced,
   routeEdit,
   routeLabel,
   setTarget,
   undoLast,
 } from '../bus/routeEdit'
 import type { ControlChannel } from '../ws/control'
+import { askConfirm, notify } from './ConfirmDialog'
 
 /** `signal_map` で編集できる信号の値。矢印信号（大会⑥）の左右 */
 const SIGNALS = ['left', 'right'] as const
@@ -47,11 +49,19 @@ export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
   const ready = st?.route_groups ?? []
   const cfg = routeEdit.cfg
 
+  // このパネルが消えたら（モードの切り替え等）編集も終える。残すと、地図パネルのクリックが
+  // 見えない編集に吸われ続ける
+  useEffect(() => endEdit, [])
+
   const save = () => {
     if (!cfg) return
+    if (mapReplaced()) {
+      notify('編集を始めてから地図が替わりました。経由点の座標は前の地図のものなので保存しません。「やめる」で閉じて、今の地図で編集し直してください')
+      return
+    }
     for (const [name, s] of Object.entries(cfg.stops)) {
       if (s.mode === 'park' && s.yaw === null) {
-        window.alert(`停止点 ${name} は駐車なので向きが要ります（位置のあとにもう1回クリック）`)
+        notify(`停止点 ${name} は駐車なので向きが要ります（位置のあとにもう1回クリック）`)
         return
       }
     }
@@ -252,9 +262,12 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
         </button>
         <button
           onClick={() => {
-            if (routeEdit.dirty && !window.confirm('変更を捨てますか？')) return
-            endEdit()
-            rerender()
+            const close = () => {
+              endEdit()
+              rerender()
+            }
+            if (!routeEdit.dirty) close()
+            else void askConfirm('変更を捨てますか？').then((ok) => ok && close())
           }}
         >
           やめる

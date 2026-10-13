@@ -22,6 +22,10 @@ import { authToken } from './token'
 import { wsUrl } from './url'
 
 const RECONNECT_MS = 500
+/** スライダの操作で送る設定系メッセージの最短間隔 [ms]。range の `onChange` は1動きごとに
+ * 発火し、Pi は受けるたびに設定ファイルを書いて全クライアントへ status を配るので、
+ * ドラッグ中は間引いて最後の値を必ず送る（`sendCoalesced`） */
+const SETTING_TX_INTERVAL_MS = 150
 
 /**
  * `/ws/control` でサーバから降ってくる JSON の**振り分けに要る分だけ**の形。
@@ -65,6 +69,13 @@ export type ControlHandlers = {
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
   onMapsSaveResult: (ok: boolean, error: string) => void
+}
+
+/** 後勝ちの浅いマージ。`undefined` は「このキーは送らない」なので、前の値を消さない */
+function shallowMerge(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...a }
+  for (const [k, v] of Object.entries(b)) if (v !== undefined) out[k] = v
+  return out
 }
 
 export class ControlChannel {
@@ -123,6 +134,47 @@ export class ControlChannel {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj))
   }
 
+  /** `sendCoalesced` の種類ごとの状態（最後に送った時刻・まだ送っていない分・予約したタイマ） */
+  private coalesce = new Map<string, { last: number; pending: Record<string, unknown> | null; timer?: number }>()
+
+  /**
+   * 設定系のメッセージを `SETTING_TX_INTERVAL_MS` に間引いて送る。間引いた分は**捨てずに1つへ
+   * まとめ**、間隔が明けたら送る（指を離した時点の値は必ず届く）。`merge` は同じ種類の
+   * 未送信分へ重ねる方法（既定は後勝ちの浅いマージ。`undefined` のキーは「送らない」なので重ねない）。
+   */
+  private sendCoalesced(
+    key: string,
+    obj: Record<string, unknown>,
+    merge: (a: Record<string, unknown>, b: Record<string, unknown>) => Record<string, unknown> = shallowMerge,
+  ) {
+    const st = this.coalesce.get(key) ?? { last: -Infinity, pending: null }
+    this.coalesce.set(key, st)
+    const now = performance.now()
+    if (st.pending == null && now - st.last >= SETTING_TX_INTERVAL_MS) {
+      st.last = now
+      this.send(obj)
+      return
+    }
+    st.pending = st.pending ? merge(st.pending, obj) : obj
+    if (st.timer === undefined) {
+      st.timer = window.setTimeout(() => this.flushCoalesced(key), Math.max(0, SETTING_TX_INTERVAL_MS - (now - st.last)))
+    }
+  }
+
+  /** 間引いて持っている分を今すぐ送る（同じ種類の別のメッセージと順序を入れ替えないため） */
+  private flushCoalesced(key: string) {
+    const st = this.coalesce.get(key)
+    if (!st) return
+    window.clearTimeout(st.timer)
+    st.timer = undefined
+    if (st.pending) {
+      const obj = st.pending
+      st.pending = null
+      st.last = performance.now()
+      this.send(obj)
+    }
+  }
+
   takeControl() {
     this.send({ type: 'take_control', name: this.id, token: authToken() })
   }
@@ -167,20 +219,33 @@ export class ControlChannel {
    * ⚠ **モードを変えると engage は必ず落ちる**（サーバ側の約束）。
    */
   setAuto(p: { mode?: string; engaged?: boolean; params?: Record<string, number> }) {
+    // パラメータだけの変更（スライダ）は間引く。モード・engage は待たせず、先に溜まっている
+    // パラメータを出してから送る（順序を保つ）
+    if (p.params && p.mode === undefined && p.engaged === undefined) {
+      this.sendCoalesced('auto', { type: 'auto', params: p.params }, (a, b) => ({
+        type: 'auto',
+        params: { ...(a.params as Record<string, number>), ...(b.params as Record<string, number>) },
+      }))
+      return
+    }
+    this.flushCoalesced('auto')
     this.send({ type: 'auto', ...p })
   }
 
   /** 今のモードのパラメータを既定値（`ParamSpec.default`）に戻す */
   resetAutoParams() {
+    this.flushCoalesced('auto')
     this.send({ type: 'auto', reset_params: true })
   }
 
   /** プリセット（`config/auto_presets.json`、モードごと）の保存・読込・削除。同じ名前の保存は上書き */
   saveAutoPreset(name: string) {
+    this.flushCoalesced('auto')
     this.send({ type: 'auto', preset_save: name })
   }
 
   loadAutoPreset(name: string) {
+    this.flushCoalesced('auto')
     this.send({ type: 'auto', preset_load: name })
   }
 
@@ -303,7 +368,7 @@ export class ControlChannel {
    * `auto` と同じく、状態はサーバが真値。GUI側では持たない。
    */
   setFan(p: { mode?: 'auto' | 'manual'; duty?: number }) {
-    this.send({ type: 'fan', ...p })
+    this.sendCoalesced('fan', { type: 'fan', ...p })
   }
 
   // ── TC/TV 有効切り替え（★v0.8） ──
@@ -335,7 +400,7 @@ export class ControlChannel {
     guiHz?: number
     undistort?: boolean
   }) {
-    this.send({
+    this.sendCoalesced('camera', {
       type: 'camera',
       front_fps_armed: p.frontFpsArmed,
       front_fps_disarm: p.frontFpsDisarm,
@@ -355,7 +420,7 @@ export class ControlChannel {
    * **どのキーも省略できる**（送った項目だけ上書きされる、`_on_drive_settings` 参照）
    */
   setDriveSettings(p: Record<string, number | boolean | string>) {
-    this.send({ type: 'drive_settings', ...p })
+    this.sendCoalesced('drive_settings', { type: 'drive_settings', ...p })
   }
 
   // ── 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値 ──
@@ -373,7 +438,7 @@ export class ControlChannel {
     satMin?: number; satMax?: number; valMin?: number
     minLitFrac?: number
   }) {
-    this.send({
+    this.sendCoalesced('signal', {
       type: 'signal',
       enabled: p.enabled,
       roi_top: p.roiTop, roi_bottom: p.roiBottom,
@@ -487,7 +552,7 @@ export class ControlChannel {
    * `tc_tv`/`wheel_lift_guard` と同じく状態はサーバ（STM32の`CONFIG_ACK`）が真値。
    */
   setAutoStopMargin(marginCm: number) {
-    this.send({ type: 'auto_stop_margin', margin_cm: marginCm })
+    this.sendCoalesced('auto_stop_margin', { type: 'auto_stop_margin', margin_cm: marginCm })
   }
 
   // ── 記録・再生 ──
@@ -529,6 +594,7 @@ export class ControlChannel {
   close() {
     this.closed = true
     window.clearTimeout(this.timer)
+    for (const st of this.coalesce.values()) window.clearTimeout(st.timer)
     this.ws?.close()
   }
 }

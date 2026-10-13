@@ -88,17 +88,34 @@ tools/deploy.sh          # GUI をビルドして rsync（既定）。Python だ
 
 ## 操作
 
-| | デッドマン | 速度 | 舵 | 停止 |
-|---|---|---|---|---|
-| ゲームパッド | R2 を踏む | R2 前進 / L2 後退 | 左スティック X | B/○ |
-| キーボード | **Space 長押し** | W,↑ / S,↓ | A,← / D,→ | Esc |
+**ARM を保持している間だけ走る。**（詳細と割り当ての全部は `src/input/useDriving.ts` の冒頭）
 
-**離した瞬間に指令の送信そのものが止まる。** `speed=0` を送るのではない。
-サーバは 150ms 無音で DISARM に落とし、io_node も 150ms で DISARM に落とす。
-「止める指令を送る」設計だと、その指令が届かない状況（＝一番止めたい状況）で止まらない。
+| | ARM / DISARM | 速度 | 舵 | ブレーキ | ギア | 即停止 |
+|---|---|---|---|---|---|---|
+| キーボード | `Enter`（トグル）・画面の ARM ボタン | W,↑ / S,↓ | `A` / `D` | `Space` | ← ダウン / → アップ | `Esc` |
+| ゲームパッド | ×（トグル） | R2（アクセル） | 左スティック X | L2（力加減） | L1 ダウン / R1 アップ | ×（ARM 中） |
 
-操縦権は**同時に1人**。2枚目のタブでデッドマンを握ると拒否される。
-E-Stop だけは誰でも押せる。
+補機: 灯火 `L`／十字キー上、クラクション `H`／□、パッシング `P`／十字キー下、ウィンカー 十字キー左右、
+サイドブレーキ △、前後カメラ入れ替え ○。
+
+- **止める手段**: `Esc`・画面の E-STOP ボタン・ARM 中のパッドの ×。どれも ARM を下ろし、
+  もう一度走らせるには人が ARM し直す（E-STOP は誰でも押せる。操縦権は要らない）
+- **ARM が自動で下りるとき**: タブが背後に回った／操縦権を失った（他の端末の E-STOP・接続の切断）／
+  車が E-STOP 中・ARM 封印中／無操作が続いた。理由は ARM ボタンの左に出る
+- ウィンドウのフォーカスを失っただけ（`blur`）では DISARM しないが、**キーの押下状態は捨てる**
+  （押していたキーが残って走り続けないように）
+- 文字を打つ欄にフォーカスがある間だけ、操縦キーは効かない（`Esc` は常に効く）。スライダや
+  ボタンにフォーカスが残っていても操縦キーは効く
+
+送信は画面の描画（rAF）に合わせ、**中身が変わった指令はそのフレームで、同じ中身の繰り返しは
+50Hz 以下**で送る。ARM を下ろした瞬間に DISARM を1発送り、あとは送信そのものを止める。
+サーバは `config/vehicle.toml` の `[safety] cmd_deadman_ms`（150ms）無音で DISARM に落とし、
+io_node も同じだけで落とす（自律走行中だけ、Wi-Fi の瞬断を `auto_link_grace_ms` まで待つ）。
+
+操縦権は**同時に1人**。2枚目のタブで ARM すると拒否される。
+
+確認のダイアログは `window.confirm` を使わない（`components/ConfirmDialog.tsx`）。ブラウザの
+ダイアログは開いている間 JavaScript を止めるので、その間 E-STOP も送信も効かなくなる。
 
 ## コードの地図
 
@@ -108,13 +125,14 @@ src/
 ├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
 ├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・50Hz）
 ├── ws/control.ts      /ws/control（JSON・操縦権・E-Stop）
-├── input/useDriving.ts ゲームパッド + キーボード → 20Hz の cmd
+├── input/useDriving.ts ゲームパッド + キーボード → cmd（rAF。変化はそのフレームで、繰り返しは 50Hz 以下）
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
 ├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
 ├── render/MapCanvas   世界座標のキャンバス（地図生成タブ・低頻度）
 ├── views/             RcView / AutoView / DiagView / SysIdView（＝タブ4枚）
 ├── components/        StatusBar(層B) / DriveBar(層B) / LogControls ほか
+├── components/ErrorBoundary / ConfirmDialog  タブごとの例外の受け皿 / 止まらない確認ダイアログ
 ├── components/diag/   診断タブの部品（下の「診断タブ」）
 ├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps）
 ├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）

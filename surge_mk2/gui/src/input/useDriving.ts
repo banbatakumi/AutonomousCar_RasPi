@@ -134,8 +134,10 @@
  * - タブが背後に回る（`document.hidden`）… 即 DISARM。**単なるウィンドウのフォーカス
  *   喪失（`blur`）では DISARM しない**。iPad の Split View・OS の通知
  *   バナー・パッド接続時のシステムオーバーレイ等で、離席していなくても `blur` は
- *   容易に発火するため（パッドはキー押下状態を持たないので `blur` を安全網にする
- *   理由が無い）
+ *   容易に発火するため。代わりに**キーの押下状態だけ捨てる**（keyup が別のウィンドウへ
+ *   行って「押されたまま」残るのを防ぐ。惰行で止まる）
+ * - 操縦権を失った（他の端末の E-STOP・接続の切断）／車が E-STOP 中・ARM 封印中 … ARM を
+ *   下ろす。**自動では取り直さない**——もう一度走らせるには人が ARM し直す
  * - 送信が止まれば `SAFETY.cmdDeadmanMs` でサーバが DISARM、さらに io_node が同じだけで DISARM
  * - 無操作 `settings.armIdleTimeoutMs` … 自動 DISARM（放置した場合の最後の受け皿）
  * - `settings.autoStop`（既定 ON）… **進行方向の超音波が 20cm 未満なら STM32 が単独で
@@ -383,9 +385,24 @@ function approach(cur: number, target: number, rate: number, dt: number): number
  * （down=R、up=D）。パッドの L1/R1（`tick()` 内）とキーボードの←/→（`down` ハンドラ）
  * の両方から呼ぶ共通ロジック。
  */
+/** `<input>` のうち文字を打たないもの。ここにフォーカスがあっても操縦キーは効かせる */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'color', 'image',
+])
+
+/** 文字を打つ欄か（テキスト・数値の入力欄、TEXTAREA、contentEditable） */
+function isTextEntry(el: HTMLElement): boolean {
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') return true
+  return el.tagName === 'INPUT' && !NON_TEXT_INPUT_TYPES.has((el as HTMLInputElement).type)
+}
+
 function shiftGear(delta: number) {
   const ui = useUi.getState()
-  const stopped = live.vs == null || live.vs.stopped
+  // テレメトリが届いていない間は車速が分からない。**指令を出していないときだけ**停止とみなす
+  // （届いていないことを「止まっている」と読むと、走行中に D↔R を切り替えられる）
+  const stopped = live.vs != null
+    ? live.vs.stopped
+    : !cmdOut.active || (cmdOut.speed === 0 && cmdOut.torque === 0)
   if (ui.settings.driveMode === 'mt') {
     const next = mtGearAt(mtGearIndex(ui.mtGear) + delta)
     if (next === ui.mtGear) return
@@ -428,23 +445,39 @@ export function useDriving(ch: ControlChannel | null) {
         disarm('Esc で E-STOP')
         return
       }
-      // **フォーム要素にフォーカスがある間は操縦キーを奪わない。** テキスト
-      // 入力欄（地図名の入力欄`MapLibrary.tsx`等）にフォーカスがある間、
-      // `KeyD`/`Space`等が素通りして文字が打てなくなる。`SELECT`（`SlamRaceButtons`の地図選択等）も対象に
-      // 入れないと、矢印キーでの選択がギアシフトに奪われる。
-      // E-STOP（上の`Escape`）だけは安全のためフォーカスに関係なく効かせる
-      const focused = e.target as HTMLElement | null
-      if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA'
-                     || focused.tagName === 'SELECT' || focused.isContentEditable)) {
+      // **Cmd（Meta）を押している間のキーは操縦に使わない。** macOS は Cmd を押している間、
+      // 他のキーの keyup を配らない（Cmd+Tab で別アプリへ移ると W が押されたまま残る）。
+      // Cmd が下りた時点で押下状態を捨て、Cmd 付きのキーは集合に入れない
+      if (e.metaKey || e.code === 'MetaLeft' || e.code === 'MetaRight') {
+        keys.current.clear()
         return
+      }
+      // **文字を打つ欄にフォーカスがある間は操縦キーを奪わない。** 地図名の入力欄
+      // （`MapLibrary.tsx`）等で `KeyD`/`Space` が打てなくなるため。`SELECT` は矢印キーでの
+      // 選択がギアシフトに奪われるので同じ扱い（ただしブレーキの Space だけは通す）。
+      //
+      // ⚠ **スライダ・チェックボックス・ボタンは除外しない。** 設定ドロワーのスライダを
+      // 触った後もフォーカスはそこに残るので、除外すると走行中に Space（ブレーキ）も逆キーも
+      // 効かなくなる。E-STOP（上の`Escape`）はフォーカスに関係なく効く
+      const focused = e.target instanceof HTMLElement ? e.target : null
+      if (focused && isTextEntry(focused)) return
+      if (focused && focused.tagName === 'SELECT') {
+        if (e.code === BRAKE_KEY) keys.current.add(e.code)
+        return
+      }
+      // 操縦キーを押した時点で、フォーカスの残っている操作部品（ボタン・スライダ等）から
+      // フォーカスを外す。残したままだと Enter/Space がその部品も動かす（ARM したのに
+      // 「自律走行を開始」がもう一度押されて解除される、矢印キーでスライダが動く、など）
+      const isDrivingKey = e.code === 'Enter' || e.code === LIGHT_KEY || e.code === GEAR_KEY_DOWN
+        || e.code === GEAR_KEY_UP || DRIVING_KEYS.includes(e.code)
+      if (isDrivingKey && focused && focused !== document.body) {
+        e.preventDefault()
+        focused.blur()
       }
       if (e.code === 'Enter') {
         // ARM のトグル。**入れるのも切るのも同じキー**
         if (ui.armRequested) disarm('Enter で解除')
-        else {
-          lastActivity.current = performance.now()
-          ui.set({ armRequested: true, disarmReason: '' })
-        }
+        else ui.set({ armRequested: true, disarmReason: '' })
         return
       }
       if (e.code === LIGHT_KEY) {
@@ -472,31 +505,56 @@ export function useDriving(ch: ControlChannel | null) {
     // ⚠ 単なる `blur`（ウィンドウのフォーカス喪失）では DISARM しない。
     // iPad の Split View・OS の通知バナー・ゲームパッド接続時のシステム
     // オーバーレイなどで、操作者が離席していなくても `blur` は容易に発火する。
-    // パッドはキー押下状態を持たない（毎フレーム `navigator.getGamepads()` を
-    // 読むだけ）ので、そもそも `blur` を安全網にする理由が無い。
+    //
+    // **ただしキーの押下状態は捨てる。** フォーカスを失うと keyup は別のウィンドウへ行き、
+    // 押していたキーが「押されたまま」残る（ウィンドウは見えているので `hidden` にもならず、
+    // 加速し続ける）。捨てれば惰行で止まり、戻ってきて押し直せば続きから操作できる。
+    // パッドは毎フレーム読むだけで押下状態を持たないので影響しない
+    const onBlur = () => keys.current.clear()
     const onHide = () => {
       if (document.hidden) disarm('タブが背後に回った')
     }
 
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
+    window.addEventListener('blur', onBlur)
     document.addEventListener('visibilitychange', onHide)
     return () => {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', onBlur)
       document.removeEventListener('visibilitychange', onHide)
     }
   }, [ch])
 
-  // ── ARM を切った瞬間に DISARM を明示的に送る ──
+  // ── ARM と操縦権の変化に掛ける処理 ──
   //
-  // 切り方（Enter・パッドの ×・無操作・タブが背後に回った…）によらず、**状態の変化そのもの**に
-  // 掛ける。送信ループ（rAF）はタブが背後に回ると止まるので、そこには置けない。
-  // 理由は `ControlChannel.disarm` を参照
+  // 切り方・入れ方（Enter・画面のボタン・パッドの ×・無操作・タブが背後に回った…）によらず、
+  // **状態の変化そのもの**に掛ける。送信ループ（rAF）はタブが背後に回ると止まるので、
+  // そこには置けない。
+  //
+  // - ARM を切った瞬間に DISARM を1発送る（理由は `ControlChannel.disarm`）
+  // - ARM を入れた瞬間を「最後の操作」に数える（数えないと、画面のボタンで ARM しても
+  //   直近に操作が無ければ次のフレームで無操作タイムアウトに掛かる）
+  // - **操縦権を失ったら ARM を下ろす。** 失うのは他の端末の E-STOP・接続の切断のときで、
+  //   ARM を保持したままだと 250ms 後に操縦権を取り直して走り続ける（E-STOP が一瞬しか
+  //   効かない）。もう一度走らせるには人が ARM し直す
+  // - 操縦権を取った瞬間に DISARM を1発送る。Pi 側は E-STOP の後、操縦者から `arm=false` が
+  //   届くまで ARM を通さないので、取り直した直後の最初の指令は必ず `arm=false` にする
   useEffect(() => {
     if (!ch) return
     return useUi.subscribe((state, prev) => {
       if (prev.armRequested && !state.armRequested) ch.disarm(state.lightMode)
+      if (!prev.armRequested && state.armRequested) lastActivity.current = performance.now()
+      if (!prev.hasControl && state.hasControl) ch.disarm(state.lightMode)
+      if (prev.hasControl && !state.hasControl && state.armRequested) {
+        state.set({
+          armRequested: false,
+          disarmReason: state.controlOpen
+            ? '操縦権を失った（他の端末の E-STOP・操縦権の移動）'
+            : 'Pi との接続が切れた',
+        })
+      }
     })
   }, [ch])
 
@@ -614,7 +672,11 @@ export function useDriving(ch: ControlChannel | null) {
 
       const ui = useUi.getState()
       const s = ui.settings
-      const pad = navigator.getGamepads?.().find((p) => p && p.connected) ?? null
+      // 標準マッピングのパッドを優先する（ボタン番号が `PAD_*` と合うのはそれだけ。ヘッドセット等が
+      // ゲームパッドとして先に列挙される環境がある）。無ければ従来どおり最初の1台
+      const pads = navigator.getGamepads?.() ?? []
+      const pad = pads.find((p) => p && p.connected && p.mapping === 'standard')
+        ?? pads.find((p) => p && p.connected) ?? null
 
       // ── 入力を読む ──
       const k = keys.current
@@ -685,7 +747,6 @@ export function useDriving(ch: ControlChannel | null) {
           ch.estop()
           ui.set({ armRequested: false, disarmReason: 'パッドの × で解除' })
         } else {
-          lastActivity.current = now
           ui.set({ armRequested: true, disarmReason: '' })
         }
       }
@@ -775,6 +836,24 @@ export function useDriving(ch: ControlChannel | null) {
       // ⚠ ブレーキは解除の往復を待たずに**そのまま送り続ける**。サーバ側の
       // 中継も `gui.brake or auto.brake` にしてあるので、解除が届くまでの
       // 数十 ms にブレーキが効かない時間は生まれない。
+      // ── 車が ARM を受け付けない間は ARM を保持しない ──
+      //
+      // E-STOP（車両の物理ボタン・ハートビート途絶）や io_node の封印（`arm_inhibited`。STM32 の
+      // 再起動・版の不一致など）の間、ARM を保持し続けても車は動かない。Pi 側は解除後も
+      // `arm=false` を一度受けるまで ARM を通さないので、ここで下ろして DISARM を送り
+      // （上の subscribe）、理由を出す。走らせるには原因を解いてから人が ARM し直す
+      const link = live.link
+      if (ui.armRequested && link && (link.estop_active || link.arm_inhibited)) {
+        ui.set({
+          armRequested: false,
+          disarmReason: link.estop_active
+            ? 'E-STOP 発動中（車両のボタンで解除してから ARM）'
+            : `ARM できない: ${link.arm_inhibit_reason || 'io_node が封印中'}`,
+        })
+        mirrorAux(false, false, false)
+        return
+      }
+
       const engaged = ui.auto?.engaged ?? false
       if (engaged && (keyActive || padActive || brake)) {
         if (now - lastAutoCancel.current >= TAKE_CONTROL_MS) {
@@ -871,12 +950,22 @@ export function useDriving(ch: ControlChannel | null) {
       }
       live.armRemainingMs = s.armIdleTimeoutMs - idle
 
-      // 操縦権が無ければ取りに行く（サーバが拒否したら denied が来る）
+      // 操縦権が無ければ取りに行く（サーバが拒否したら denied が来る）。
+      // **その間、手動側の積分は 0 に戻す。** 残すと、取れた瞬間に前の速度・舵から再開する
       if (!ui.hasControl) {
         if (now - lastTakeMs >= TAKE_CONTROL_MS) {
           ch.takeControl()
           lastTakeMs = now
         }
+        speed.current = 0
+        steer.current = 0
+        torque.current = 0
+        cmdOut.speed = 0
+        cmdOut.steer = 0
+        cmdOut.torque = 0
+        cmdOut.active = false
+        cmdOut.auto = false
+        if (ui.deadman) ui.set({ deadman: false, inputSource: 'none' })
         mirrorAux(false, false, false)
         return
       }
@@ -999,7 +1088,8 @@ export function useDriving(ch: ControlChannel | null) {
           if (Math.abs(speed.current) > maxSpeed) {
             speed.current = approach(speed.current, Math.sign(speed.current) * maxSpeed, mtEngineBrakeRate, dt)
           } else if (effDir !== 0 && maxSpeed > 0) {
-            speed.current += effDir * s.mtAccel * dt
+            // 上限ちょうどで止める（足すだけだと上限を1刻み越えては戻すのを毎フレーム繰り返す）
+            speed.current = approach(speed.current, effDir * maxSpeed, s.mtAccel, dt)
           } else {
             speed.current = approach(speed.current, 0, mtEngineBrakeRate, dt)
           }

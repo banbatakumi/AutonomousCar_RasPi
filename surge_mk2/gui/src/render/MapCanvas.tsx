@@ -117,9 +117,13 @@ export function MapCanvas({
       const dpr = window.devicePixelRatio || 1
       const w = cv.clientWidth
       const h = cv.clientHeight
-      if (cv.width !== w * dpr || cv.height !== h * dpr) {
-        cv.width = w * dpr
-        cv.height = h * dpr
+      // 画素数は整数に丸めて比べる（拡大率が整数でないと `w * dpr` が小数になり、
+      // 毎フレーム「違う」と判定してバッキングストアを作り直してしまう）
+      const pw = Math.round(w * dpr)
+      const ph = Math.round(h * dpr)
+      if (cv.width !== pw || cv.height !== ph) {
+        cv.width = pw
+        cv.height = ph
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.fillStyle = C.bg

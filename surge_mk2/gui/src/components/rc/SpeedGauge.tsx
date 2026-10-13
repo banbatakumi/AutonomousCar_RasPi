@@ -99,14 +99,14 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
 
   // ── MT モードのレッドライン（v0.18） ────────────────────────────────
   //
-  // 「このギアの上限（`maxSpeed × mtGearRatio`）が近い＝そろそろシフトアップ」を、
+  // 「このギアの上限（`mtMaxSpeed × mtGearRatio`。MT は `maxSpeed` を使わない）が近い＝そろそろシフトアップ」を、
   // 現在速度に関わらず常時見える静的な帯として弧の外側（r=52）に描く。
   // R では上限が変わらず（`mtGearRatio('R', …)` は D1 と同じ）、N は上限そのものが
   // 0（`mtGearRatio('N', …)`）、D5 はこれ以上上のギアが無いので、
   // どれも「シフトアップを促す」意味が成立せず出さない
   const redlineFrac =
     mtMode && mtGear !== 'R' && mtGear !== 'N' && mtGear !== 'D5'
-      ? Math.min(1, Math.max(0, (settings.maxSpeed * mtGearRatio(mtGear, settings)) / full))
+      ? Math.min(1, Math.max(0, (settings.mtMaxSpeed * mtGearRatio(mtGear, settings)) / full))
       : null
   const redlineFrom = redlineFrac != null ? Math.max(0, redlineFrac - REDLINE_BAND) : null
 

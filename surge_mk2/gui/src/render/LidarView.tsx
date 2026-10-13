@@ -80,19 +80,22 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
   const chRef = useRef(ch)
   chRef.current = ch
   //: 直近の `draw()` が計算した画面変換（CSS px 基準）。ポインタ座標 →
-  //: 車両ローカル座標[m] の逆変換に使う（`CameraView.tsx` の `imgBoxRef` と同じ方針）
-  const xformRef = useRef({ cx: 0, cy: 0, px: 1 })
+  //: 車両ローカル座標[m] の逆変換に使う（`CameraView.tsx` の `imgBoxRef` と同じ方針）。
+  //: **原点は base_link（後輪車軸中心）の画面位置**——駐車の目標・経路は planner が base_link
+  //: 基準で扱う（点群は取付位置を補正してから使う）。画面の中心は LiDAR なので、そこを原点に
+  //: すると取付位置ぶん（前へ 7cm）ずれる
+  const xformRef = useRef({ bx: 0, by: 0, px: 1 })
   //: ドラッグ中の選択（車両ローカル座標[m]）。React state を介さず
   //: `draw()` が rAF で直接参照する（`CameraView.tsx` の `dragRef` と同じ方針）
   const dragRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null)
 
   const toLocal = (cv: HTMLCanvasElement, clientX: number, clientY: number) => {
     const rect = cv.getBoundingClientRect()
-    const { cx, cy, px } = xformRef.current
+    const { bx, by, px } = xformRef.current
     const sx = clientX - rect.left
     const sy = clientY - rect.top
-    // `draw()` の順変換 `sx = cx - y*px, sy = cy - x*px` の逆
-    return { x: (cy - sy) / px, y: (cx - sx) / px }
+    // `draw()` の順変換 `sbx = bx - y*px, sby = by - x*px` の逆
+    return { x: (by - sy) / px, y: (bx - sx) / px }
   }
 
   const onParkPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -130,9 +133,13 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
       const dpr = window.devicePixelRatio || 1
       const w = cv.clientWidth
       const h = cv.clientHeight
-      if (cv.width !== w * dpr || cv.height !== h * dpr) {
-        cv.width = w * dpr
-        cv.height = h * dpr
+      // 画素数は整数に丸めて比べる（拡大率が整数でないと `w * dpr` が小数になり、
+      // 毎フレーム「違う」と判定してバッキングストアを作り直してしまう）
+      const pw = Math.round(w * dpr)
+      const ph = Math.round(h * dpr)
+      if (cv.width !== pw || cv.height !== ph) {
+        cv.width = pw
+        cv.height = ph
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, w, h)
@@ -143,7 +150,6 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
       const cy = h * 0.62 // 車体をやや下に置いて前方を広く取る
       // 画面の短辺半分が zoom [m] に対応する
       const px = Math.min(w, h) / 2 / zoom
-      xformRef.current = { cx, cy, px }
 
       // 車両座標 (x=前, y=左) → 画面
       const sx = (_x: number, y: number) => cx - y * px
@@ -154,6 +160,7 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
       const by = cy + VEHICLE.lidarX * px
       const sbx = (_x: number, y: number) => bx - y * px
       const sby = (x: number, _y: number) => by - x * px
+      xformRef.current = { bx, by, px }
 
       drawGrid(ctx, w, h, cx, cy, px, zoom)
 
@@ -195,15 +202,16 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
       if (parkingModeRef.current) {
         //: 計画した経路。**ドラッグ中でも描く**（今の経路と新しい目標を
         //: 見比べたいので）
-        if (live.auto?.park_active) drawParkPath(ctx, sx, sy, live.auto)
+        // 目標・経路・ドラッグ中の矢印はどれも base_link 基準なので `sbx`/`sby` で描く
+        if (live.auto?.park_active) drawParkPath(ctx, sbx, sby, live.auto)
         if (dragRef.current) {
-          drawParkArrow(ctx, sx, sy, dragRef.current.x0, dragRef.current.y0,
+          drawParkArrow(ctx, sbx, sby, dragRef.current.x0, dragRef.current.y0,
             dragRef.current.x1, dragRef.current.y1, `${C.parkTarget}99`)
         } else if (live.auto?.park_active) {
           const a = live.auto
           const tx = a.park_target_x + Math.cos(a.park_target_yaw) * 0.25
           const ty = a.park_target_y + Math.sin(a.park_target_yaw) * 0.25
-          drawParkArrow(ctx, sx, sy, a.park_target_x, a.park_target_y, tx, ty, C.parkTarget)
+          drawParkArrow(ctx, sbx, sby, a.park_target_x, a.park_target_y, tx, ty, C.parkTarget)
         }
       }
     }
@@ -228,8 +236,8 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
 /**
  * 計画した経路を折れ線で描く。**前進区間と後退区間を色で分ける。**
  *
- * `AutoState.park_path_*` は車両基準ローカル座標（点群と同じ系）で来るので、
- * 画面変換をそのまま掛けられる。★これが無いと実機で「なぜこの経路を
+ * `AutoState.park_path_*` は車両基準ローカル座標（base_link が原点）で来るので、
+ * base_link 基準の画面変換（`sbx`/`sby`）を掛ける。★これが無いと実機で「なぜこの経路を
  * 選んだか」が読めない——障害物回避が効いているのか偶然なのかが画面から
  * 判断できず、デバッグ手段が無くなる。
  */
@@ -459,7 +467,8 @@ function drawVehicle(
  * 自転車モデルによる予測進路（`architecture.md` §5.2 の式）。
  *
  * 舵角の実測値から描く。**指令値ではない**ので、ステアリングの遅れが
- * そのまま見える。速度が 0 のときは向きだけを短く描く。
+ * そのまま見える。速度が 0 のときは向きだけを短く描く。後退中は後ろへ描く
+ * （曲率の式は弧長の符号によらないので、刻みを負にするだけでよい）。
  */
 function drawPredictedPath(
   ctx: CanvasRenderingContext2D,
@@ -474,7 +483,7 @@ function drawPredictedPath(
   let x = 0
   let y = 0
   let th = 0
-  const ds = horizon / n
+  const ds = (speed < -0.05 ? -1 : 1) * (horizon / n)
   for (let i = 0; i <= n; i++) {
     if (i === 0) ctx.moveTo(sx(x, y), sy(x, y))
     else ctx.lineTo(sx(x, y), sy(x, y))

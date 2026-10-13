@@ -17,6 +17,7 @@
  * - 「避ける」を編集中: 避ける点を足す（近くをクリックで消す）。いちばん近い道を
  *   自動経路・経由点の経路・停止経路のどれにも使わない（ルールで通れない近道など）
  */
+import type { MapData } from '../types'
 import { live } from './live'
 
 export const GROUPS = ['A', 'B', 'C', 'D'] as const
@@ -55,6 +56,9 @@ export const routeEdit = {
   cfg: null as RouteCfg | null,
   /** 保存していない変更があるか */
   dirty: false,
+  /** 編集を始めたときの地図（`MapData` そのもの。地図が届くたびに作り直される）。
+   *  **座標はこの地図のもの**なので、保存のときに今の地図と同じ格子かを確かめる */
+  baseMap: null as MapData | null,
   /** 停止点の編集で、位置を置いて向き待ちか */
   awaitingYaw: false,
 }
@@ -98,6 +102,7 @@ export function parseCfg(text: string): RouteCfg {
 /** 編集を始める。今の地図に載っている設定を写し取る。 */
 export function beginEdit(): void {
   routeEdit.cfg = parseCfg(live.map?.routesJson ?? '')
+  routeEdit.baseMap = live.map
   routeEdit.active = true
   routeEdit.dirty = false
   routeEdit.awaitingYaw = false
@@ -106,8 +111,22 @@ export function beginEdit(): void {
 export function endEdit(): void {
   routeEdit.active = false
   routeEdit.cfg = null
+  routeEdit.baseMap = null
   routeEdit.dirty = false
   routeEdit.awaitingYaw = false
+}
+
+/**
+ * 編集を始めてから地図が別物に替わったか（別の地図を読み込んだ・作り直した）。
+ * 経路だけの更新や地図の成長では原点・解像度は変わらないので、**格子の置き方**で見分ける
+ * （替わっていたら、編集中の座標は今の地図のものではない）。
+ */
+export function mapReplaced(): boolean {
+  const a = routeEdit.baseMap
+  const b = live.map
+  if (!a || !b) return a !== b
+  return a.res !== b.res || a.originX !== b.originX || a.originY !== b.originY
+    || a.width !== b.width || a.height !== b.height
 }
 
 export function setTarget(t: string): void {

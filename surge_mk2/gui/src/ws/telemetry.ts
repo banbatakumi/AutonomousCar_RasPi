@@ -7,6 +7,7 @@ import { decode } from '@msgpack/msgpack'
 import { markHistoryGap, pushHistory } from '../bus/history'
 import { clearLive, noteTelemetry } from '../bus/live'
 import { MSGS_SCHEMA } from '../generated/msgs'
+import { useUi } from '../store/ui'
 import type { Snapshot } from '../types'
 import { wsUrl } from './url'
 
@@ -25,6 +26,9 @@ export function connectTelemetry(
   // 型が食い違っていることを既に伝えたか。**再接続しても直らない**ので、
   // 繋ぎ直すたびに鳴らしても意味が無い（GUI を再ビルドするまで続く）
   let mismatched = false
+  // 直近に見た `LIMITS` の最高速度。**変わったとき（＝初めて届いたとき）に運転設定をクランプし直す**
+  // （届く前は最高速度の上を切らずに持っている。`store/ui.ts` の `clampSettings`）
+  let seenSpeedCap: number | null = null
 
   const open = () => {
     ws = new WebSocket(wsUrl('/ws/telemetry'))
@@ -50,10 +54,16 @@ export function connectTelemetry(
       noteTelemetry(s.vs, s.link, s.scan, s.auto, s.pi_temp_c, s.line_cam, s.track, s.signal)
       // 診断タブ用の時系列。**タブを開いていなくても常時貯める**（`bus/history.ts`）
       pushHistory(s.vs, s.link)
+      const cap = s.link?.max_speed_m_s ?? null
+      if (cap != null && cap !== seenSpeedCap) {
+        seenSpeedCap = cap
+        useUi.getState().setSettings({})
+      }
     }
     ws.onclose = () => {
       onOpenChange(false)
       clearLive()
+      seenSpeedCap = null
       // 履歴は残したまま線だけ断つ。**切れたこと自体が後から見たい事象**
       markHistoryGap()
       if (closed) return

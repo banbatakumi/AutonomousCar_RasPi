@@ -12,6 +12,7 @@
  */
 import { useState } from 'react'
 import type { ControlChannel } from '../ws/control'
+import { askConfirm } from './ConfirmDialog'
 
 export function ParamPresets({ ch, presets }: { ch: ControlChannel | null; presets: string[] }) {
   const [picked, setPicked] = useState('')
@@ -19,10 +20,10 @@ export function ParamPresets({ ch, presets }: { ch: ControlChannel | null; prese
   // 選んでいたプリセットが消えたら（削除した等）未選択に戻す
   const current = presets.includes(picked) ? picked : ''
 
-  const save = () => {
+  const save = async () => {
     const n = name.trim()
     if (!n || !ch) return
-    if (presets.includes(n) && !window.confirm(`「${n}」を今の値で上書きしますか？`)) return
+    if (presets.includes(n) && !(await askConfirm(`「${n}」を今の値で上書きしますか？`))) return
     ch.saveAutoPreset(n)
     setPicked(n)
     setName('')
@@ -41,9 +42,8 @@ export function ParamPresets({ ch, presets }: { ch: ControlChannel | null; prese
       <button
         disabled={!ch || !current}
         onClick={() => {
-          if (window.confirm(`「${current}」を読み込みますか？（今の値は置き換わります）`)) {
-            ch?.loadAutoPreset(current)
-          }
+          void askConfirm(`「${current}」を読み込みますか？（今の値は置き換わります）`)
+            .then((ok) => ok && ch?.loadAutoPreset(current))
         }}
       >
         読込
@@ -51,7 +51,8 @@ export function ParamPresets({ ch, presets }: { ch: ControlChannel | null; prese
       <button
         disabled={!ch || !current}
         onClick={() => {
-          if (window.confirm(`プリセット「${current}」を削除しますか？`)) ch?.deleteAutoPreset(current)
+          void askConfirm(`プリセット「${current}」を削除しますか？`)
+            .then((ok) => ok && ch?.deleteAutoPreset(current))
         }}
       >
         削除
@@ -63,17 +64,18 @@ export function ParamPresets({ ch, presets }: { ch: ControlChannel | null; prese
         value={name}
         onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') save()
+          if (e.key === 'Enter') void save()
         }}
       />
-      <button disabled={!ch || !name.trim()} onClick={save}>
+      <button disabled={!ch || !name.trim()} onClick={() => void save()}>
         保存
       </button>
       <button
         className="param-presets-reset"
         disabled={!ch}
         onClick={() => {
-          if (window.confirm('このモードのパラメータを初期値に戻しますか？')) ch?.resetAutoParams()
+          void askConfirm('このモードのパラメータを初期値に戻しますか？')
+            .then((ok) => ok && ch?.resetAutoParams())
         }}
       >
         初期値に戻す

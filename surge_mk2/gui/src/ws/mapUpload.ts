@@ -22,10 +22,18 @@ const CHUNK_BYTES = 256 * 1024
 export function uploadMap(
   name: string,
   file: File,
-  onDone: (ok: boolean, error?: string) => void,
+  report: (ok: boolean, error?: string) => void,
 ): void {
   const ws = new WebSocket(wsUrl(`/ws/map_upload/${encodeURIComponent(name)}`))
   ws.binaryType = 'arraybuffer'
+  // 結果は1回だけ伝える（エラーの後に close が来る、応答なしで閉じられる、のどれでも
+  // 呼び出し側が「アップロード中…」のまま残らないように）
+  let reported = false
+  const onDone = (ok: boolean, error?: string) => {
+    if (reported) return
+    reported = true
+    report(ok, error)
+  }
 
   ws.onopen = async () => {
     try {
@@ -52,4 +60,5 @@ export function uploadMap(
     ws.close()
   }
   ws.onerror = () => onDone(false, '接続エラー')
+  ws.onclose = () => onDone(false, 'サーバが応答せずに接続を閉じました')
 }

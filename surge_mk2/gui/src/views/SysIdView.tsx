@@ -36,7 +36,13 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
   const [canceled, setCanceled] = useState(false)
   // 終了時の理由（「完了（後輪が滑った…）」など）。disengage すると reason が消えるので残す
   const [endReason, setEndReason] = useState('')
-  const stoppedRef = useRef(false)
+  // このビューが始めた試験が進行中でないか。**試験を始めるまでは true**——このビューはタブを
+  // 替えても外されない（`App.tsx`）ので、自動運転タブで走らせている planner の「完了」を
+  // 試験の終わりと取り違えて解除しないようにする
+  const stoppedRef = useRef(true)
+  // 試験を始めてから、サーバの engaged を一度でも見たか（外から解除されたことを見分ける）
+  const sawEngagedRef = useRef(false)
+  const startTimerRef = useRef<number | undefined>(undefined)
   // **試験開始ボタンの多重クリック対策。** `auto.engaged`はサーバのechoを
   // 待つ必要があり、ボタンの`disabled`が実際に効くまでの往復のわずかな間に
   // 連打されると`start()`（=RecordChannel）とengageが二重に走ってしまう。
@@ -67,10 +73,26 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
     ch?.mcapRecordStop()
   }, [auto?.engaged, finished, aborted, reason, ch])
 
-  // サーバが engaged を echo してきたら多重クリック対策フラグを下ろす
+  // サーバが engaged を echo してきたら多重クリック対策フラグを下ろす。
+  // **試験中に外から解除されたら（人の操作・E-STOP・操縦権の喪失）、記録も止める**——
+  // 止めないと「試験中止」も押せないまま記録だけが続く。録れた分は中止と同じくダウンロードする
   useEffect(() => {
-    if (auto?.engaged) startingRef.current = false
-  }, [auto?.engaged])
+    if (auto?.engaged) {
+      if (startingRef.current) {
+        startingRef.current = false
+        sawEngagedRef.current = true
+        window.clearTimeout(startTimerRef.current)
+      }
+      return
+    }
+    if (stoppedRef.current || !sawEngagedRef.current) return
+    stoppedRef.current = true
+    setCanceled(true)
+    setEndReason('自律走行が解除された')
+    ch?.mcapRecordStop()
+  }, [auto?.engaged, ch])
+
+  useEffect(() => () => window.clearTimeout(startTimerRef.current), [])
 
   if (!auto) {
     return (
@@ -94,15 +116,31 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
     setCanceled(false)
     setEndReason('')
     stoppedRef.current = false
+    sawEngagedRef.current = false
     start(false, () => setDownloaded(true))
     ch?.setAuto({ engaged: true })
+    // engage は操縦権が無いと断られる（先に ARM して操縦権を取っておく必要がある）。
+    // 断られたまま待ち続けると、記録だけが回り「試験開始」も押せなくなるので打ち切る
+    window.clearTimeout(startTimerRef.current)
+    startTimerRef.current = window.setTimeout(() => {
+      if (!startingRef.current) return
+      startingRef.current = false
+      stoppedRef.current = true
+      setCanceled(true)
+      setEndReason('自律走行を開始できなかった（先に ARM して操縦権を取る）')
+      ch?.mcapRecordStop()
+    }, 3000)
   }
 
   // **中止も「記録を止めてダウンロード」までは正常終了と同じ経路を通す。**
   // 録れた範囲のログはフィッティングには使えなくても、何が起きたかを
   // 後から見返す手がかりになるので捨てない
   const cancelTest = () => {
-    if (stoppedRef.current) return
+    if (stoppedRef.current) {
+      // このビューの試験ではない engage（リロード後など）。解除だけする
+      ch?.setAuto({ engaged: false })
+      return
+    }
     stoppedRef.current = true
     setDownloaded(false)
     setCanceled(true)

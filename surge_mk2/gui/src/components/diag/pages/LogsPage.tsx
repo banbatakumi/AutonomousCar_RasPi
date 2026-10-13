@@ -8,6 +8,7 @@ import { useEffect } from 'react'
 import { formatBytes, formatDateTime } from '../../../format'
 import { useUi } from '../../../store/ui'
 import type { ControlChannel } from '../../../ws/control'
+import { askConfirm } from '../../ConfirmDialog'
 
 export function LogsPage({ ch }: { ch: ControlChannel | null }) {
   const files = useUi((s) => s.logFiles)
@@ -52,7 +53,7 @@ export function LogsPage({ ch }: { ch: ControlChannel | null }) {
                     <button
                       disabled={!ch}
                       onClick={() => {
-                        if (window.confirm(`${f.name} を削除しますか？`)) ch?.logsDelete(f.name)
+                        void askConfirm(`${f.name} を削除しますか？`).then((ok) => ok && ch?.logsDelete(f.name))
                       }}
                     >
                       削除

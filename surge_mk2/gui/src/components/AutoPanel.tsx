@@ -68,11 +68,12 @@
  * 宣言された分だけ出す。他の宣言と同じくモード id は GUI 側に書かない。
  */
 import { useEffect, useState } from 'react'
-import { useNumbers } from '../bus/live'
+import { live, useNumbers } from '../bus/live'
 import { clearPreview, selectPreviewMap } from '../bus/mapPreview'
 import { RAD2DEG, mps } from '../format'
 import { capAutoParams, useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
+import { askConfirm } from './ConfirmDialog'
 import { MapLibrary } from './MapLibrary'
 import { ParamPresets } from './ParamPresets'
 import { ParamSliders } from './ParamSliders'
@@ -482,6 +483,13 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
     void selectPreviewMap(newest.name)
   }, [phase, mapFiles])
 
+  // 「地図を作成」「手動で地図作成」は今の地図を捨てて作り直す。**地図があるときだけ確かめる**
+  // （押し間違い1回で、作りかけ・走行中の地図が消えて走り出す）。保存済みの地図は消えない
+  const confirmDiscard = async (): Promise<boolean> => {
+    if (!live.map?.known) return true
+    return askConfirm('今の地図を捨てて作り直しますか？（保存済みの地図は残ります）')
+  }
+
   const selectMap = (name: string) => {
     setSelectedMap(name)
     void selectPreviewMap(name)
@@ -491,8 +499,11 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
     <div className="slam-race-buttons">
       <button
         onClick={() => {
-          clearPreview()
-          ch?.startSlam2dExplore(mode)
+          void confirmDiscard().then((ok) => {
+            if (!ok) return
+            clearPreview()
+            ch?.startSlam2dExplore(mode)
+          })
         }}
       >
         地図を作成
@@ -504,9 +515,12 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
             ch?.freezeMap()
             return
           }
-          clearPreview()
-          ch?.startSlam2dManualMap(mode)
-          setManual('wait')
+          void confirmDiscard().then((ok) => {
+            if (!ok) return
+            clearPreview()
+            ch?.startSlam2dManualMap(mode)
+            setManual('wait')
+          })
         }}
       >
         {manual === 'on' ? '地図を確定' : '手動で地図作成'}
