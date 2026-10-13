@@ -117,8 +117,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
       <div className="settings-head">
         <h2>システム同定</h2>
         <p className="dim">
-          {'config/vehicle.toml の [dynamics]（実測待ちのパラメータ）を測るための試験。'}
-          {'試験ごとにラズパイが自動で指令を出し、開始と同時にmcap記録を始める。'}
+          {'vehicle.toml の [dynamics] を測る試験（開始と同時に mcap 記録）'}
         </p>
       </div>
 

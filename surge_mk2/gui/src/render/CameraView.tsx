@@ -328,10 +328,10 @@ export function CameraView({
         // が違うため異なる）とは一致せず、レターボックス量が前後で変わる。
         // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
         // ガイドがズレる（後方カメラのガイドが上に大きくズレる不具合になる）
-        if (guideRef.current || showLineTargetRef.current || showSignalRef.current) {
+        if ((guideRef.current && guideFacing(cam)) || showLineTargetRef.current || showSignalRef.current) {
           ctx.save()
           ctx.translate(dx, dy)
-          if (guideRef.current) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
+          if (guideRef.current && guideFacing(cam)) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
           if (showLineTargetRef.current) drawLineTarget(ctx, dw, dh, camHeightRef.current)
           if (showSignalRef.current) drawArrowSignal(ctx, dw, dh)
           ctx.restore()
@@ -346,7 +346,7 @@ export function CameraView({
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
-        ctx.fillText('映像なし（camera_node が動いているか確認）', 12, h / 2)
+        ctx.fillText('映像なし', 12, h / 2)
       }
 
       const now = performance.now()
@@ -427,7 +427,7 @@ export function CameraView({
         <div className="camera-tag">
           {label}
           <span ref={statusRef} className="dim" />
-          {guide && !(cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear).fisheye && (
+          {guide && guideFacing(cam) && !(cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear).fisheye && (
             <span className="badge-warn">ガイドは校正前・暫定</span>
           )}
           {undistorted && cam === 'front'
@@ -442,6 +442,14 @@ export function CameraView({
       )}
     </div>
   )
+}
+
+/** 進路ガイドを出すカメラか。進行方向（走行中は実測速度の符号、停止中は D/R レンジ）と
+ * 同じ向きのカメラにだけ出す（前進中に後方カメラへ出しても意味が無い） */
+function guideFacing(cam: 'front' | 'rear'): boolean {
+  const speed = live.vs?.speed ?? 0
+  const reverse = Math.abs(speed) > 0.05 ? speed < 0 : useUi.getState().gear === 'R'
+  return (cam === 'rear') === reverse
 }
 
 /** 実測舵角から予測進路を路面平面に置き、カメラモデル（`lensFor()`）で画像に落とす。

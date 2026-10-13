@@ -59,28 +59,21 @@ import type { ControlChannel } from '../ws/control'
 
 export function AutoView({ ch }: { ch: ControlChannel | null }) {
   const ui = useUi()
+  // 前後どちらのカメラにも同じ `pathGuide` が効く。対象追従はドラッグでROIを選ぶので奪わない
+  const toggleGuide = () => {
+    if (ui.auto?.mode === 'follow_object') return
+    ui.set({ pathGuide: !ui.pathGuide })
+  }
 
   return (
     <div className="drive">
       {/* 前方・後方・LiDAR を**同じ幅で横並び**にする。デバッグ用の画面なので、
           「前方が主で後方が従」ではなく3つを対等に見比べられる方が使いやすい */}
-      <div className="cam-front">
+      <div className="cam-front" onClick={toggleGuide} title="クリックで進路ガイドの表示/非表示">
         <CameraView cam="front" label="前方" ch={ch} />
-        <div className="cam-controls">
-          {/* 前後どちらのカメラにも同じ `pathGuide` が効く（`CameraView.tsx`）ので、
-              チェックボックスは1つだけ置けば足りる */}
-          <label>
-            <input
-              type="checkbox"
-              checked={ui.pathGuide}
-              onChange={(e) => ui.set({ pathGuide: e.target.checked })}
-            />
-            進路ガイド（前後）
-          </label>
-        </div>
       </div>
 
-      <div className="cam-rear">
+      <div className="cam-rear" onClick={toggleGuide} title="クリックで進路ガイドの表示/非表示">
         <CameraView cam="rear" label="後方" />
       </div>
 

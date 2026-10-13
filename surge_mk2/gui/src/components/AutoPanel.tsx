@@ -208,8 +208,6 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
         </section>
       </div>
 
-      {selected && <p className="auto-mode-desc dim">{selected.description}</p>}
-
       {/* セグメンテーション走行（`ftg_cam`/`cam_centerline`）専用のモデル選択。
           両方とも `cam_perception_node.py` の同じ推論結果（`drivable`マスク）を使うので
           モデルの選び方も共通（`raspi/nodes/cam_perception_node.py` の `_CAM_MODES`）。
@@ -449,6 +447,12 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
   const mapFiles = useUi((s) => s.mapFiles)
   const [selectedMap, setSelectedMap] = useState('')
   const phase = useNumbers().auto?.phase
+  // 手動で地図作成中か。'wait'=押した直後で phase がまだ EXPLORE に変わっていない
+  const [manual, setManual] = useState<'off' | 'wait' | 'on'>('off')
+  useEffect(() => {
+    if (manual === 'wait' && phase === 'EXPLORE') setManual('on')
+    else if (manual === 'on' && phase !== 'EXPLORE') setManual('off')
+  }, [manual, phase])
 
   // **表示されるたびに一覧を取り直し、プレビューは消す。** このコンポーネント
   // は条件付き描画で現れたり消えたりする（`AutoPanel.tsx`の`auto-engage`
@@ -494,17 +498,19 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
         地図を作成
       </button>
       <button
-        title="自動運転に入れず、ラジコンで走らせて地図を作る。1周して出発点へ戻るか「地図を確定」で経路を作る"
+        className={manual === 'on' ? 'engage on' : undefined}
         onClick={() => {
+          if (manual === 'on') {
+            ch?.freezeMap()
+            return
+          }
           clearPreview()
           ch?.startSlam2dManualMap(mode)
+          setManual('wait')
         }}
       >
-        手動で地図作成
+        {manual === 'on' ? '地図を確定' : '手動で地図作成'}
       </button>
-      {phase === 'EXPLORE' && (
-        <button onClick={() => ch?.freezeMap()}>地図を確定</button>
-      )}
       <select value={selectedMap} onChange={(e) => selectMap(e.target.value)}>
         <option value="">（地図を選択）</option>
         {mapFiles.map((f) => (
