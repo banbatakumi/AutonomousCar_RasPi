@@ -253,6 +253,43 @@ class TestLifecycle(unittest.TestCase):
         self.assertFalse(hb.alive)
 
 
+class TestThreadDeath(unittest.TestCase):
+    """スレッドが例外で死んだら波形は出ていない。`alive` がそれを言うこと。"""
+
+    def test_alive_is_false_after_the_thread_dies(self):
+        class BrokenPin(FakePin):
+            def write(self, value):
+                raise OSError("lgpio が書けない")
+
+        old = threading.excepthook
+        threading.excepthook = lambda *_: None            # 死ぬのが狙いなので表示しない
+        try:
+            hb = Heartbeat(BrokenPin(), kick_timeout_s=None)
+            hb.start()
+            hb._thread.join(timeout=2.0)
+            self.assertFalse(hb._thread.is_alive())
+            self.assertFalse(hb.alive)
+        finally:
+            threading.excepthook = old
+            hb._running = False
+
+
+class TestIndicatorWrites(unittest.TestCase):
+    """`update()` はメインループの毎周呼ばれる。ピンへ書くのは変わったときだけ。"""
+
+    def test_unchanged_state_is_not_rewritten(self):
+        t = [100.0]
+        green, red = FakePin("g"), FakePin("r")
+        ind = StatusIndicator(green, red, clock=lambda: t[0])
+        for _ in range(50):
+            ind.update(Indication(health="OK", armed=True))
+        self.assertEqual((green.writes, red.writes), (1, 1))
+        self.assertTrue(green.level)
+        ind.update(Indication(health="OK", armed=True, estop=True))
+        self.assertEqual(red.writes, 2)
+        self.assertTrue(red.level)
+
+
 class TestOpenOutput(unittest.TestCase):
     """`open_output` は環境で結果が変わる。**実機とそれ以外の両方を書く。**
 

@@ -215,8 +215,11 @@ def _clamp(v: float, lo: int, hi: int) -> int:
     `struct.pack` は範囲外で例外を投げるので、クランプを忘れると
     「舵を切りすぎた瞬間に送信が例外で止まり、STM32 が COMMAND 途絶で
     自動ブレーキに入る」という分かりにくい壊れ方をする。
+
+    **丸める前に float のまま飽和させる。** 有限でも桁外れの値（1e305 など）はスケールで割ると
+    inf になり、`round(inf)` が `OverflowError` を投げる。
     """
-    return max(lo, min(hi, int(round(v))))
+    return int(round(max(float(lo), min(float(hi), v))))
 
 
 #: 何を送ればよいか分からないときに送るもの。**停止が既定値。**

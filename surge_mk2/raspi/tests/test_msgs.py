@@ -307,6 +307,20 @@ class TestCommandGate(unittest.TestCase):
             allow_arm=True, max_speed=3.0, max_steer=0.524)
         self.assertEqual(c.mode, packets.Mode.DISARM)
 
+    def test_huge_finite_values_saturate_instead_of_raising(self):
+        """有限でも桁外れの値はスケールで割ると inf になる。例外で io_node を落とさず飽和させる。"""
+        for field, attr, want in (("steer_rate_limit", "steer_rate_limit", 65535),
+                                  ("accel_limit", "accel_limit", 65535),
+                                  ("target_torque", "target_torque", 1300),
+                                  ("brake_torque", "brake_torque", 1300)):
+            with self.subTest(field=field):
+                c = command_from_cmd(DriveCmd(mode=1, arm=True, **{field: 1e306}),
+                                     allow_arm=True, max_speed=3.0, max_steer=0.5)
+                self.assertEqual(getattr(c, attr), want)
+        c = command_from_cmd(DriveCmd(mode=1, arm=True, target_torque=-1e306),
+                             allow_arm=True, max_speed=3.0, max_steer=0.5)
+        self.assertEqual(c.target_torque, -1300)
+
     def test_inf_accel_limit_becomes_disarm(self):
         c = command_from_cmd(
             DriveCmd(mode=2, arm=True, target_speed=0.5, accel_limit=float("inf")),

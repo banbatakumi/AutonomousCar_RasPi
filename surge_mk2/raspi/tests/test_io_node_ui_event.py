@@ -55,6 +55,38 @@ class TestUiEventSeqReset(unittest.TestCase):
         node._on_ui_event(UiEvent(kind="tc_enable", value=True, seq=2))
         self.assertEqual(node._ui_event_seq, 2)
 
+    def test_first_event_after_a_restart_is_not_dropped_when_the_seq_repeats(self):
+        """再起動の前に1件だけ処理していると、再起動後の最初の1件も `seq=1`。時刻が違えば別物。"""
+        link = FakeLink()
+        node = IoNode(link)
+        node._on_ui_event(UiEvent(kind="gui_connect", seq=1, t_pub=1_000))
+        before = len(link.sent)
+        node._on_ui_event(UiEvent(kind="abs_enable", value=False, seq=1, t_pub=9_000))
+        self.assertEqual(len(link.sent) - before, 1, "CONFIG_SET が送られていない＝捨てられた")
+        # まったく同じもの（同じ seq・同じ時刻）は二重処理しない
+        node._on_ui_event(UiEvent(kind="abs_enable", value=False, seq=1, t_pub=9_000))
+        self.assertEqual(len(link.sent) - before, 1)
+
+
+class TestQuietStream(unittest.TestCase):
+    """出力先（`logs/surge-io.out`）に書けなくても、`print` で io_node を落とさない。"""
+
+    def test_print_survives_a_full_disk(self):
+        from raspi.nodes.io_node import _QuietStream
+
+        class Full:
+            encoding = "utf-8"
+
+            def write(self, text):
+                raise OSError(28, "No space left on device")
+
+            def flush(self):
+                raise OSError(28, "No space left on device")
+
+        out = _QuietStream(Full())
+        print("!! ディスク空き 0.0%", file=out, flush=True)
+        self.assertEqual(out.encoding, "utf-8")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

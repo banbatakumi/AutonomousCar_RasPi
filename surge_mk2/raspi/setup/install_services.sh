@@ -56,10 +56,14 @@
 # **電源を入れた状態で GUI から ARM を押せばモータが回る。**
 # 車輪を浮かせるか、周囲を確認してから電源を入れること。
 #
-# ただし電源投入だけでは動かない。`cmd` が 150ms 来なければ io_node は DISARM を送るので、
+# ただし電源投入だけでは動かない。`cmd` が届いていない間 io_node は DISARM を送るので、
 # **誰かが GUI で明示的に ARM を押すまでモータは励磁されない。**
+# （走行中に `cmd` が 150ms 途絶したときは、最大制動で止めてから DISARM に落とす）
 #
 # 封印したいときは `--safe` で入れ直すか、`sudo systemctl stop surge-io` して手で起動する。
+# **`--safe` で入れ直しても、動いている surge-io は古い引数のまま**（unit を書き換えるだけで
+# 再起動はしない。再起動すると E-Stop がラッチするため）。このスクリプトは最後にそれを警告する。
+# 反映するには `sudo systemctl restart surge-io`（または `tools/deploy.sh --restart-io`）。
 #
 # ## GPIO6 ハートビートについて
 #
@@ -81,22 +85,13 @@ PY="$ROOT/.venv/bin/python -u"
 UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-line-perception surge-mdns)
 WITH_LOGGER=0
 
-# ⚠ `--max-speed` / `--max-steer` は **GUI の `PI_MAX_SPEED_CAP` / `PI_MAX_STEER_CAP`
-# （gui/src/store/ui.ts）と一致させること。** ずれると、GUI の設定パネルでは
-# 上限まで上げられるのに Pi 側で黙って切り捨てられる、という分かりにくい状態になる。
-# ⚠ 60°（1.047 rad）はモータ機械角の可動域であって路面舵角ではない。
-#    リンク比 0.5（実測確定）によりタイヤは半分しか切れないため、
-#    路面舵角の上限は 30°（0.524 rad）。据え切りを続けるとステア MD が
-#    過熱するので `temp[2]` を見ておくこと。速度 3.0 m/s ＝ 10.8 km/h は既定の GUI 設定
-#    （0.6 m/s）の5倍で、ミニカーの大きさに対してはかなり速い。上げて走らせるときは周囲との距離に注意。
-#
-# ⚠ **速度の上限は3段ある。ここを上げても他が低いままなら、そちらで頭打ちになる。**
-#    1. GUI  `PI_MAX_SPEED_CAP`（gui/src/store/ui.ts）… スライダの上限
-#    2. Pi   この `--max-speed`               … `command_from_cmd` で黙って切り捨てる
-#    3. STM32 `PARAM_MAX_SPEED`（CONFIG_SET 0x0001）… **Pi 側が未実装で読み書きできない**
-#    3 の既定値はこのリポジトリからは分からない。3.0 m/s まで上げても実車がそこまで
-#    出ないなら、STM32 のファームウェア側で頭打ちになっている可能性を先に疑うこと。
-ARM="--allow-arm --max-speed 3.0 --max-steer 0.524"   # 0.524 rad ≒ 30°（路面舵角の実機上限）
+# `--max-speed` / `--max-steer` は **STM32 から `LIMITS`（車両の物理的な上限）を受け取るまでの
+# フォールバック**。受け取った後は io_node が `LIMITS` の値で丸める（`io_node._send_command`）ので、
+# 実車の上限を変えたいときはここではなく STM32 側の定数を直すこと。
+# `--max-steer` は路面舵角 [rad]。`vehicle.toml` の `max_steer`（ステアのリンクの換算を通した
+# 最大路面舵角）より大きい値を渡しても、io_node がそこで頭打ちにする。
+# 据え切りを続けるとステア MD が過熱するので `temp[2]` を見ておくこと。
+ARM="--allow-arm --max-speed 3.0 --max-steer 0.524"
 MODE="arm 有効"
 case "${1:-}" in
   --safe)   ARM=""; MODE="arm 封印（DISARM 固定）" ;;
@@ -104,7 +99,7 @@ case "${1:-}" in
   --remove)
     systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service
-    rm -rf /etc/systemd/system/surge-telemetry.service.d
+    rm -rf /etc/systemd/system/surge-telemetry.service.d /etc/systemd/system/surge-io.service.d
     rm -f /etc/udev/rules.d/99-surge-fan.rules
     rm -f /etc/sudoers.d/surge-shutdown
     systemctl daemon-reload
@@ -237,7 +232,17 @@ EOF
 
 # **`--log` は付けない。** `.sfl` の記録は GUI の「ログ」タブ（`log/ctrl`）で
 # セッション中に開始/停止する運用にしたため、既定では記録なしで起動する
-write_unit surge-io        "UART/GPIO ノード" "raspi.nodes.io_node --quiet $ARM"
+IO_ARGS="raspi.nodes.io_node --quiet $ARM"
+write_unit surge-io        "UART/GPIO ノード" "$IO_ARGS"
+# io_node は GPIO6 のハートビート（5ms ごとのトグル）を自分で出している。カメラの推論・SLAM と
+# CPU を取り合って 50ms 途切れると STM32 が E-Stop をラッチするので、取り合いになったときに
+# 先に走らせる（nice だけ。実時間クラスにはしない——io_node が空回りしても他を止めない）。
+# write_unit が上書きしない drop-in に置く
+mkdir -p /etc/systemd/system/surge-io.service.d
+cat > /etc/systemd/system/surge-io.service.d/10-priority.conf <<'EOF'
+[Service]
+Nice=-10
+EOF
 write_unit surge-camera    "カメラ"           "raspi.nodes.camera_node --quiet"
 # **`--host 0.0.0.0` を明示する。** telemetry_node の既定は loopback にしてある
 # （制御 API を持つサーバの既定が全インタフェースだと、「打ち忘れ」ではなく
@@ -368,11 +373,35 @@ EOF
 chmod 0440 /etc/sudoers.d/surge-shutdown
 visudo -cf /etc/sudoers.d/surge-shutdown
 
+# 動いている surge-io の引数（unit を書き換える前に起動したもの）を控えておく。
+# `enable --now` は動いている unit を再起動しないので、書き換えた引数は次に起動するまで効かない
+IO_RUNNING=""
+IO_PID=$(systemctl show -p MainPID --value surge-io 2>/dev/null || echo 0)
+if [ "${IO_PID:-0}" -gt 0 ] && [ -r "/proc/$IO_PID/cmdline" ]; then
+  IO_RUNNING=$(tr '\0' ' ' < "/proc/$IO_PID/cmdline" | xargs)
+fi
+IO_WANT=$(echo "$PY -m $IO_ARGS" | xargs)
+
 systemctl daemon-reload
 systemctl enable --now "${UNITS[@]}" surge-logclean.timer
 
+IO_STALE=0
+if [ -n "$IO_RUNNING" ] && [ "$IO_RUNNING" != "$IO_WANT" ]; then
+  IO_STALE=1
+fi
+
 echo
-echo "=== 入れた（$MODE） ==="
+if [ "$IO_STALE" = 1 ]; then
+  echo "=== unit を書き換えた（$MODE）。★ ただし surge-io はまだ古い引数で動いている ==="
+  echo "  今: $IO_RUNNING"
+  echo "  次: $IO_WANT"
+  case "$IO_RUNNING" in
+    *--allow-arm*) [ -n "$ARM" ] || echo "  ★★ 今の surge-io は --allow-arm 付き。封印はまだ効いていない" ;;
+  esac
+  echo "  反映: sudo systemctl restart surge-io （★ E-Stop がラッチする。車両のボタン2で解除）"
+else
+  echo "=== 入れた（$MODE） ==="
+fi
 systemctl --no-pager --plain list-units 'surge-*' | head -10
 echo
 echo "  状態  : systemctl status surge-io"
@@ -394,7 +423,7 @@ echo "  surge-cam-perception 有効（常時）。GUI で ftg_cam 以外を選�
 echo "  推論そのものを回さない（IDLE）ので、無駄な CPU/電力消費にはならない"
 if [ -n "$ARM" ]; then
   echo
-  # 上限は `$ARM` から拾って出す。**数字をここに直書きすると必ず腐る**（実際に腐った）
-  echo "  ★★ arm 有効。GUI で ARM を押せばモータが回る（上限 $ARM）"
+  # 引数は `$ARM` から拾って出す。**数字をここに直書きすると必ず腐る**（実際に腐った）
+  echo "  ★★ arm 有効。GUI で ARM を押せばモータが回る（$ARM。上限は STM32 の LIMITS が優先）"
   echo "  ★  surge-io を止めた時点で STM32 が E-Stop をラッチする（車両のボタン2で解除）"
 fi

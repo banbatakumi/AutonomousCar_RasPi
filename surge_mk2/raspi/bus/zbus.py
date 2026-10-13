@@ -42,10 +42,20 @@ PUB は接続が確立するまでの間、送ったものを捨てる。50Hz �
 数十msの取りこぼしなので実害は無いが、**「起動して1発だけ送って終わる」用途では
 届かない。** その場合は呼び出し側で `time.sleep()` してから送る（テストの
 使用例は `raspi/tests/test_zbus.py`）。
+
+## endpoint の持ち主は1つ
+
+ZeroMQ の ipc は、**既に誰かが bind している経路にもう一度 bind してもエラーにならない**
+（ソケットファイルを消して作り直す）。2つ目が黙って endpoint を奪い、既に繋がっている購読者は
+1つ目に、以後に繋ぐ購読者は2つ目に繋がる。2つ目が終了した後は、新しく起動した購読者に
+1つ目の publish が一切届かない——「動いているのにデータが来ない」になり、直すには1つ目
+（io_node なら E-Stop がラッチする）の再起動が要る。`Publisher` は bind の前に
+`<ソケットファイル>.lock` を排他ロックし、取れなければ起動を拒否する（`_lock_endpoint`）。
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import threading
 import time
@@ -231,6 +241,29 @@ RELIABLE = Policy(conflate=False, hwm=100_000)
 
 # ── Publisher ────────────────────────────────────────────────────────
 
+def _lock_endpoint(endpoint: str, node: str):
+    """ipc の endpoint を排他ロックし、ロックを持つファイルを返す（ipc 以外は None）。
+
+    `flock` はファイルを閉じる・プロセスが終わる（異常終了を含む）と外れるので、前回の
+    残骸のロックファイルで起動できなくなることは無い。同じプロセスの中の2つ目も拒否する。
+    tcp は bind 自体が「使用中」で失敗するので要らない。
+
+    :raises RuntimeError: 既に別の Publisher がこの endpoint を持っている
+    """
+    if not endpoint.startswith("ipc://"):
+        return None
+    f = open(endpoint[len("ipc://"):] + ".lock", "a")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise RuntimeError(
+            f"バスの endpoint {endpoint} は既に別のプロセスが publish しています"
+            f"（ノード名 {node!r} の二重起動）。同じ名前で立てると相手の endpoint を黙って奪うので"
+            "起動しません。動いている方を止めるか、別のバス（SURGE_BUS_DIR）を使ってください") from None
+    return f
+
+
 class Publisher:
     """1ノードにつき1本。`t_pub` と `seq` はここで押す。
 
@@ -249,10 +282,17 @@ class Publisher:
         self.endpoint = endpoint or endpoint_for_node(node)
         self._own_ctx = ctx is None
         self.ctx = ctx or zmq.Context.instance()
-        self.sock = self.ctx.socket(zmq.PUB)
-        self.sock.setsockopt(zmq.SNDHWM, hwm)
-        self.sock.setsockopt(zmq.LINGER, 0)
-        self.sock.bind(self.endpoint)
+        #: endpoint の排他ロックを持つファイル（開いている間だけ持ち主。`close()` で手放す）
+        self._lock_file = _lock_endpoint(self.endpoint, node)
+        try:
+            self.sock = self.ctx.socket(zmq.PUB)
+            self.sock.setsockopt(zmq.SNDHWM, hwm)
+            self.sock.setsockopt(zmq.LINGER, 0)
+            self.sock.bind(self.endpoint)
+        except Exception:
+            if self._lock_file is not None:
+                self._lock_file.close()
+            raise
         self._seq: dict[str, int] = {}
         self._lock = threading.Lock() if thread_safe else None
         self.sent = 0
@@ -280,6 +320,9 @@ class Publisher:
 
     def close(self) -> None:
         self.sock.close()
+        if self._lock_file is not None:
+            self._lock_file.close()
+            self._lock_file = None
         if self._own_ctx:
             pass          # Context.instance() は共有物なので term しない
 

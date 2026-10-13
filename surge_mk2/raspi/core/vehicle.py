@@ -86,6 +86,27 @@ def _ramp_max(dyn: dict, safety: dict) -> float:
     v = float(safety.get("cmd_accel_limit_m_s2", 0.0))
     return v if v > 0.0 else 3.0
 
+
+#: `cmd_deadman_ms` として受け付ける範囲 [ms]。下は指令の周期（50Hz = 20ms）、上は「途絶してから
+#: 止め始めるまで」として意味のある長さ
+_DEADMAN_MS_RANGE = (20.0, 1000.0)
+
+
+def _deadman_ms(value) -> float:
+    """`[safety] cmd_deadman_ms`。範囲の外・数でない値は既定の 150ms にする。
+
+    0 や負では指令が常に途絶扱いになって走れず、桁を間違えた大きな値（150000 など）では
+    デッドマンが実質無くなる。どちらも黙って採らない。
+    """
+    v = float(value)
+    lo, hi = _DEADMAN_MS_RANGE
+    if not (lo <= v <= hi):          # NaN もここで落ちる
+        print(f"!! vehicle.toml: cmd_deadman_ms = {value!r} は範囲外（{lo:g}〜{hi:g}ms）。"
+              "150ms で動く", file=sys.stderr)
+        return 150.0
+    return v
+
+
 @dataclass(frozen=True, slots=True)
 class Vehicle:
     """車両諸元のうち、制御と知覚が使うぶん。すべて SI・base_link 基準。"""
@@ -293,6 +314,8 @@ class Vehicle:
 
         諸元が読めないことは「走ってはいけない」ではなく「暫定値で走る」。
         暫定値であることは `measured=False` が伝えるので、判断は呼び出し側に任せる。
+        値の型が違う（数のはずが文字列、表のはずが数）ときも同じ扱いにする——io_node は
+        import の時点でこれを読むので、例外にすると起動できずに再起動を繰り返す。
         """
         p = Path(path) if path else DEFAULT_PATH
         try:
@@ -300,6 +323,14 @@ class Vehicle:
                 d = tomllib.load(fp)
         except (OSError, tomllib.TOMLDecodeError):
             return cls()
+        try:
+            return cls._from_dict(d, p)
+        except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+            print(f"!! {p} の値を読めない（{type(e).__name__}: {e}）。既定値で動く", file=sys.stderr)
+            return cls()
+
+    @classmethod
+    def _from_dict(cls, d: dict, p: Path) -> "Vehicle":
 
         dyn = d.get("dynamics", {})
         safety = d.get("safety", {})
@@ -363,7 +394,7 @@ class Vehicle:
             yaw_damping=float(dyn.get("yaw_damping", 1.0)),
             cmd_steer_rate_limit_rad_s=float(safety.get("cmd_steer_rate_limit_rad_s", 0.0)),
             speed_ff_firmware=float(d.get("control", {}).get("speed_ff_nm_per_m_s2", 0.0)) > 0.0,
-            cmd_deadman_ms=float(safety.get("cmd_deadman_ms", 150.0)),
+            cmd_deadman_ms=_deadman_ms(safety.get("cmd_deadman_ms", 150.0)),
             auto_link_grace_ms=float(safety.get("auto_link_grace_ms", 5000.0)),
             auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),
             _path=p,

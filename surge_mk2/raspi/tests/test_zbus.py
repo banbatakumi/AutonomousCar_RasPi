@@ -124,6 +124,73 @@ class TestNumpyScalars(unittest.TestCase):
             encode(TOPIC_CMD, DriveCmd(target_speed=np.zeros(3)))
 
 
+class TestSingleOwner(BusCase):
+    """同じノード名の Publisher は1つだけ。2つ目は endpoint を黙って奪うので起動させない。"""
+
+    def test_a_second_publisher_with_the_same_name_is_refused(self):
+        from raspi.bus import Publisher
+
+        self.track(Publisher("io"))
+        with self.assertRaises(RuntimeError) as cm:
+            Publisher("io")
+        self.assertIn("io", str(cm.exception))
+
+    def test_the_first_publisher_keeps_its_subscribers_after_a_refused_start(self):
+        from raspi.bus import Publisher, Subscriber
+
+        pub = self.track(Publisher("io"))
+        with self.assertRaises(RuntimeError):
+            Publisher("io")
+        sub = self.track(Subscriber([TOPIC_VEHICLE_STATE]))      # 拒否の後に繋いだ購読者
+        time.sleep(0.2)
+        for _ in range(5):
+            pub.send(TOPIC_VEHICLE_STATE, VehicleState(speed=1.0))
+            time.sleep(0.01)
+        self.assertTrue(sub.poll(200))
+
+    def test_closing_releases_the_name(self):
+        from raspi.bus import Publisher
+
+        Publisher("io").close()
+        self.track(Publisher("io"))
+
+    def test_another_process_is_refused_and_a_dead_one_leaves_no_lock(self):
+        import subprocess
+
+        code = ("import sys, time\n"
+                "from raspi.bus import Publisher\n"
+                "try:\n"
+                "    pub = Publisher('io')\n"
+                "except RuntimeError:\n"
+                "    sys.exit(7)\n"
+                "print('up', flush=True)\n"
+                "time.sleep(30)\n")
+        root = str(Path(__file__).resolve().parents[2])
+
+        def start():
+            return subprocess.Popen([sys.executable, "-c", code], cwd=root,
+                                    stdout=subprocess.PIPE, text=True)
+
+        first = start()
+        try:
+            self.assertEqual(first.stdout.readline().strip(), "up")
+            self.assertEqual(start().wait(timeout=20), 7)        # 持ち主がいる間は拒否
+            with self.assertRaises(RuntimeError):
+                __import__("raspi.bus", fromlist=["Publisher"]).Publisher("io")
+        finally:
+            first.kill()                                        # 異常終了（close を通らない）
+            first.wait()
+            first.stdout.close()
+        from raspi.bus import Publisher
+        self.track(Publisher("io"))                             # 残骸のロックファイルで詰まらない
+
+    def test_different_names_do_not_collide(self):
+        from raspi.bus import Publisher
+
+        self.track(Publisher("io"))
+        self.track(Publisher("control"))
+
+
 class TestPubSub(BusCase):
     def test_publisher_stamps_seq_and_t_pub(self):
         from raspi.bus import Publisher, Subscriber

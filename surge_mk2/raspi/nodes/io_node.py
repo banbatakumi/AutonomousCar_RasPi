@@ -27,6 +27,9 @@
    **STM32 と話が合っていない間も同じく DISARM 固定**（`_arm_block_reason`）:
    `protocol_version` が一致しない・未確認、`vehicle.toml` の `[control]`（ステアのリンクの
    換算を含む）が STM32 に入っていない
+   **E-Stop・駆動電源ラッチ・STM32 の再起動の後は、人が ARM を入れ直すまで DISARM 固定**
+   （`_update_rearm_latch`）。STM32 は E-Stop を解除した次の周期から指令をそのまま実行するので、
+   ARM 付きの指令を流し続けていると、車のそばでボタン2を押した瞬間に走り出す
 2. **`cmd` が 150ms 途絶したら止める。** publish 側（GUI や planning_node）が死んだ＝
    上位が落ちた。**走っていたなら、まず最大制動を送り、止まってから DISARM に落とす**
    （`_failsafe_packet`）。いきなり DISARM を送ると STM32 は駆動電源を切り、モータドライバごと
@@ -135,6 +138,9 @@ CMD_TIMEOUT_NS = int(Vehicle.load().cmd_deadman_ms * 1_000_000)
 #: （`IoNode._send_command` 参照。GUI 側の `effectiveRange()` と方針統一）
 DEFAULT_MAX_SPEED = 1.0        # m/s
 DEFAULT_MAX_STEER = 0.35       # rad（約 20°）
+#: `--max-steer` に掛ける上限: `vehicle.toml` の最大路面舵角。`LIMITS` を受け取る前の
+#: フォールバックが、車の切れる角度より大きい値で丸めないように
+VEHICLE_MAX_STEER = Vehicle.load().max_steer
 
 #: 総走行距離（`odom_center` の起点）を永続化する場所。**`.gitignore` 済み**
 #: （機体ごとの実測値なのでコミットしない、`config/auto.json` 等と同じ理由）
@@ -177,6 +183,34 @@ def _save_odometer_base(v: float) -> None:
         os.replace(tmp, ODOM_CONF)
     except Exception:
         pass  # 保存できなくても走行は続けられるべき
+
+
+class _QuietStream:
+    """書けなくても例外を出さない stdout/stderr。
+
+    unit の出力先は `logs/surge-io.out`（ディスク上のファイル）なので、ディスクが埋まると
+    `print` が `OSError(ENOSPC)` を投げる。メインループの中の `print`（E-Stop・STM32 の LOG・
+    ディスクの警告）でそれが出ると io_node ごと落ち、ハートビートが止まって E-Stop がラッチする。
+    表示が出ないことより、走行を続けることを取る。
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def write(self, text) -> int:
+        try:
+            return self._stream.write(text)
+        except OSError:
+            return len(text)
+
+    def flush(self) -> None:
+        try:
+            self._stream.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
 
 
 class IoNode:
@@ -231,8 +265,9 @@ class IoNode:
         self.allow_arm = allow_arm
         self.max_speed = max_speed
         self.max_steer = max_steer
-        #: `ui/event` の既知の `seq`。これより大きければ「新しいイベント」
+        #: 直前に処理した `ui/event` の `seq` と `t_pub`。同じ組なら二重処理しない
         self._ui_event_seq = 0
+        self._ui_event_t_pub = 0
 
         #: 直近に受け取った走行指令と、その受信時刻。**古くなったら使わない**
         self.cmd: DriveCmd | None = None
@@ -256,6 +291,14 @@ class IoNode:
         #: 入れ替える間は `control_sync.status` が `pending` に戻るので、状態そのものではなく
         #: 「STM32 の起動以来、一度そろったか」を覚える（STM32 の再起動で落とす）
         self._control_synced = False
+        #: `control_sync.drift_count` の既知の値。増えたら STM32 の値が勝手に変わっている
+        self._control_drift_seen = 0
+        #: 「止まった後は ARM を入れ直させる」ラッチの理由（空 = 掛かっていない）。E-Stop・駆動電源
+        #: ラッチ・STM32 の再起動で立ち、**それが収まった後に `cmd.arm` が一度 False になるまで**
+        #: ARM を通さない（`_update_rearm_latch`）。STM32 は E-Stop を解除した次の周期から指令を
+        #: そのまま実行するので、ARM 付きの指令が流れ続けていると、車のそばでボタン2を押した
+        #: 瞬間に走り出す
+        self._rearm_reason = ""
 
         self._log = log
         self._log_meta = log_meta
@@ -369,6 +412,9 @@ class IoNode:
         # （入り直すまで ARM も通さない）
         self.control_sync.reset()
         self._control_synced = False
+        # 再起動の前に入っていた ARM をそのまま引き継がせない（人が入れ直す）
+        self._rearm_reason = "STM32 が再起動しました"
+        self._requery_config()
         self._log_event("time_reset", {})
         print("\n!! STM32 の再起動を検出 — 時刻同期をやり直します（オドメトリ・"
               "LiDAR組み立てをリセット）", file=sys.stderr)
@@ -613,9 +659,15 @@ class IoNode:
         違えば舵角・フラグの意味が食い違う（v0.18 で舵角が「モータ角×0.5」から路面舵角に変わった
         ときは、片側だけ入れ替えると最大約 2.4° ずれた）。`[control]` が入っていなければ、ステアの
         リンクの換算・TC・ABS が STM32 の既定値のまま走ることになる。
+
+        E-Stop・駆動電源ラッチ・STM32 の再起動の後は、人が ARM を入れ直すまで通さない
+        （`_update_rearm_latch`）。
         """
         if not self.allow_arm:
             return "--allow-arm が付いていません"
+        rearm = self._update_rearm_latch()
+        if rearm:
+            return rearm
         ver = self.state.version
         if ver is None:
             return "STM32 の protocol_version を確認できていません"
@@ -633,8 +685,47 @@ class IoNode:
             return "[control] を STM32 へ送っている途中です"
         return ""
 
+    def _update_rearm_latch(self) -> str:
+        """E-Stop・駆動電源ラッチ・STM32 の再起動の後は、ARM を入れ直すまで通さない。理由を返す。
+
+        ラッチが立っている間はもちろん、**収まった後も `cmd.arm` が一度 False になるまで**続ける。
+        収まる前に外した ARM は数えない（E-Stop 中に外して入れ直してあると、解除した瞬間に走る）。
+        `cmd` が届いていない間（途絶）も外したことにはしない——誰も「外す」と言っていない。
+        `cmd` 途絶のデッドマンそのものはここでラッチしない（指令が戻れば元どおり通る）。
+        """
+        if self.state.estop_active:
+            self._rearm_reason = "E-Stop"
+            return "E-Stop が発動中です（車両のボタン2で解除）"
+        if self.state.drive_power_locked:
+            self._rearm_reason = "駆動電源ラッチ"
+            return "駆動電源がラッチ中です（電源を入れ直してください）"
+        if not self._rearm_reason:
+            return ""
+        if self.cmd is not None and not self.cmd_stale and not self.cmd.arm:
+            self._rearm_reason = ""
+            return ""
+        if self._rearm_reason == "STM32 が再起動しました":
+            return "STM32 が再起動しました。ARM を一度外してから入れ直してください"
+        return f"{self._rearm_reason} は解除されました。ARM を一度外してから入れ直してください"
+
     def _send_command_disarm(self) -> None:
         self.link.send(self._disarm_command())
+
+    def _requery_config(self) -> None:
+        """`ControlParamSync` が管理しない設定（機能の ON/OFF・自動停止のマージン）を STM32 に聞き直す。
+
+        どれも STM32 は Flash に持たず、再起動で既定値へ戻る。聞き直すまでは「分からない」
+        （None）に戻しておく——前の値を出し続けると、GUI は 30cm と表示しているのに実際は
+        既定の 15cm で動く、という食い違いになる。
+        """
+        st = self.state
+        st.tc_enabled = st.tv_enabled = st.wheel_lift_guard_enabled = None
+        st.abs_enabled = st.brake_hold_enabled = None
+        st.auto_stop_margin_cm = None
+        for param in (packets.Param.TC_ENABLE, packets.Param.TV_ENABLE,
+                      packets.Param.WHEEL_LIFT_GUARD_ENABLE, packets.Param.ABS_ENABLE,
+                      packets.Param.BRAKE_HOLD_ENABLE, packets.Param.AUTO_STOP_MARGIN_CM):
+            self.link.send(packets.ConfigGet(param_id=param))
 
     def _recv_cmd(self, now_ns: int) -> None:
         """バスから走行指令・`.sfl` 記録の意思（`log/ctrl`）・GUI イベントを取り込む。"""
@@ -655,21 +746,18 @@ class IoNode:
         self.cmd_stale = stale
 
     def _on_ui_event(self, msg) -> None:
-        """`ui/event`（GUI 側の単発イベント）。`seq` が増えていなければ二重処理しない。
+        """`ui/event`（GUI 側の単発イベント）。直前に処理したものと同じなら二重処理しない。
 
-        `seq` は `Publisher`（telemetry_node）がトピックごとに持つ連番で、
-        **発行元プロセスの再起動で 1 から振り直される。** io_node はここの
-        `_ui_event_seq` をプロセスの寿命ぶん持ち続けるので、telemetry_node を
-        再起動すると「既知の番号以下」として新しいイベントを延々と捨て続けて
-        しまう（issue #10）。`seq` が後退していたら発行元が入れ替わったと見なし、
-        基準をリセットする——このバスは ZeroMQ PUB/SUB を ipc 1本で繋いでいて
-        並べ替えは起きないので、後退は「再起動」以外に説明がつかない
+        同じかどうかは `seq` と `t_pub` の組で見る。`seq` は `Publisher`（telemetry_node）が
+        トピックごとに持つ連番で、**発行元の再起動で 1 から振り直される**ので、「既知の番号より
+        大きいか」では見ない: 大小で見ると再起動後のイベントを捨て続け、後退だけを再起動と
+        みなしても、再起動の前に1件だけ処理していた場合の最初の1件（`seq` がどちらも 1）を落とす。
+        `t_pub` は同じ Pi の単調時刻なので、再起動をまたいでも重ならない
         """
-        if msg.seq < self._ui_event_seq:
-            self._ui_event_seq = 0
-        if msg.seq <= self._ui_event_seq:
+        if msg.seq == self._ui_event_seq and msg.t_pub == self._ui_event_t_pub:
             return
         self._ui_event_seq = msg.seq
+        self._ui_event_t_pub = msg.t_pub
         if msg.kind == "gui_connect" and self.buzzer is not None:
             self.buzzer.play(MELODY_GUI_CONNECT)
         elif msg.kind == "tc_enable":
@@ -918,6 +1006,11 @@ class IoNode:
                 self.cmd.fw_overrides if (self.cmd is not None and not self.cmd_stale) else {})
             prev_ctrl = self.control_sync.status
             self.control_sync.tick(now)
+            if self.control_sync.drift_count != self._control_drift_seen:
+                # 読み戻しが食い違った＝STM32 の値が勝手に変わった（気づけなかった再起動など）。
+                # 入り直すまで ARM を通さない
+                self._control_drift_seen = self.control_sync.drift_count
+                self._control_synced = False
             if self.control_sync.status in ("ok", "none"):
                 self._control_synced = True
             if self.control_sync.status != prev_ctrl:
@@ -1050,13 +1143,16 @@ def main() -> int:
                          "実質的には未接続時のフォールバックにしかならない")
     ap.add_argument("--max-steer", type=float, default=DEFAULT_MAX_STEER,
                     help=f"Pi 側の舵角クランプ [rad]（既定 {DEFAULT_MAX_STEER}）。"
-                         "同上、LIMITS 受信後はそちらが優先される")
+                         "同上、LIMITS 受信後はそちらが優先される。"
+                         "vehicle.toml の max_steer より大きい値はそこで頭打ち")
     ap.add_argument("--sim", action="store_true",
                     help="UART の相手を Mac 上のシミュレータにする（`sim/` 参照）。"
                          "実機では使わない")
     ap.add_argument("--course", default="sim/courses/oval.png",
                     help="--sim のときのコース PNG")
     args = ap.parse_args()
+
+    sys.stdout, sys.stderr = _QuietStream(sys.stdout), _QuietStream(sys.stderr)
 
     try:
         if args.sim:
@@ -1087,6 +1183,12 @@ def main() -> int:
                   f"(vehicle_state / scan / diag/link / hb/io)")
         except ImportError as e:
             print(f"!! pyzmq/msgspec が無いのでバス無しで動く: {e}")
+        except RuntimeError as e:
+            # 同じ名前の Publisher が既にいる＝io_node の二重起動（`zbus._lock_endpoint`）。バス無しで
+            # 続けると、1本の UART に2つの io_node が COMMAND を書き込むことになる
+            print(f"!! {e}", file=sys.stderr)
+            link.close()
+            return 2
         except Exception as e:
             print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
 
@@ -1150,7 +1252,8 @@ def main() -> int:
 
     node = IoNode(link, log=log, log_meta=log_meta, heartbeat=heartbeat,
                   indicator=indicator, buzzer=buzzer, pub=pub, sub=sub, allow_arm=args.allow_arm,
-                  max_speed=args.max_speed, max_steer=args.max_steer,
+                  max_speed=args.max_speed,
+                  max_steer=min(args.max_steer, VEHICLE_MAX_STEER),
                   control_params=control_params, control_params_error=control_params_error)
 
     def _shutdown(*_):
@@ -1171,19 +1274,9 @@ def main() -> int:
         ok = "✓" if ver.protocol_version == PROTOCOL_VERSION else "✗ 不一致! ARM を通しません"
         print(f"# STM32 protocol_version=0x{ver.protocol_version:04X} "
               f"fw=0x{ver.fw_id:08X} {ok}")
-        # ★v0.8: TC/TV、★v0.9: 片輪浮き対策の有効/無効はGUI操作を待たず、接続確立直後に
-        # 一度だけ現在値を取得しておく（`CONFIG_SET` はFlash永続化されないので、GUI操作前でも
-        # STM32起動直後の実際の状態をGUIに出せるようにするため）
-        node.link.send(packets.ConfigGet(param_id=packets.Param.TC_ENABLE))
-        node.link.send(packets.ConfigGet(param_id=packets.Param.TV_ENABLE))
-        node.link.send(packets.ConfigGet(param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE))
-        # ★v0.15: ABS。既定は有効だが、GUI操作前でも実際の状態を出すため同様に取得する
-        node.link.send(packets.ConfigGet(param_id=packets.Param.ABS_ENABLE))
-        # ★v0.19: ブレーキホールド（既定は有効）
-        node.link.send(packets.ConfigGet(param_id=packets.Param.BRAKE_HOLD_ENABLE))
-        # ★v0.12: 自動停止の安全マージン[cm]。CONFIG_SET はFlash非永続化なので、
-        # GUI操作前でもSTM32起動直後の実際の値（既定15cm）をGUIに出せるようにする
-        node.link.send(packets.ConfigGet(param_id=packets.Param.AUTO_STOP_MARGIN_CM))
+        # 機能の ON/OFF・自動停止のマージンは GUI の操作を待たずに一度聞いておく（STM32 は Flash に
+        # 持たないので、GUI を触る前でも STM32 の実際の状態を出せるように）
+        node._requery_config()
 
     # ★v0.11: 車両の物理的な上限値。RC/AUTO 問わず _send_command が毎回これで
     # クランプする。受信済みなら無条件にこちらを使う（--max-speed/
@@ -1199,7 +1292,7 @@ def main() -> int:
 
     if args.allow_arm:
         eff_speed = lim.max_speed_m_s if lim else args.max_speed
-        eff_steer = lim.max_steer_rad if lim else args.max_steer
+        eff_steer = lim.max_steer_rad if lim else node.max_steer
         source = "LIMITS" if lim else f"--max-speed={args.max_speed}/--max-steer={args.max_steer}（未受信のフォールバック）"
         print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")
         print(f"#     実効クランプ: 速度 ±{eff_speed:.3f} m/s / 舵角 ±{eff_steer:.3f} rad（出所: {source}）")

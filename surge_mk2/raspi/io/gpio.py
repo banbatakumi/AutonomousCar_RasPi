@@ -21,7 +21,8 @@ High（正常）に戻ってしまうため。矩形波を出し続け、STM32 �
 ハードウェア PWM に矩形波を任せると、**Python プロセスが死んでも波形が出続ける**。
 STM32 は「Pi は生きている」と誤認し、安全機構が丸ごと無効になる。
 波形を出すのは必ずプロセス自身の仕事にする。プロセスが止まれば波形も止まる。
-（プロセスが死ねば OS が GPIO を解放し、プルアップで High に張り付いてエッジが消える。）
+（プロセスが死ねばトグルする者がいなくなり、ピンがどの電位で止まってもエッジが消える。
+STM32 が見ているのは電位ではなくエッジ。）
 
 ### スレッドが生きているだけでは不十分 — `kick()`
 
@@ -335,8 +336,9 @@ class Heartbeat:
 
     @property
     def alive(self) -> bool:
-        """今この瞬間、波形が出ているか。"""
-        return self._running and not self._stalled
+        """今この瞬間、波形が出ているか。スレッドが例外で死んでいれば出ていない。"""
+        return (self._running and not self._stalled
+                and (self._thread is None or self._thread.is_alive()))
 
     # ── 1回分の処理（テストから直接叩ける） ──
 
@@ -465,6 +467,9 @@ class StatusIndicator:
         self._clock = clock
         self._prev: Indication | None = None
         self._beep_until = 0.0
+        #: ピンごとの直前に書いた値。`update()` はメインループの毎周（毎秒数百回）呼ばれるので、
+        #: 変わったときだけ書く（gpiozero の書き込みは1回ごとにシステムコールになる）
+        self._written: dict[int, bool] = {}
 
     def update(self, ind: Indication) -> None:
         now = self._clock()
@@ -505,9 +510,9 @@ class StatusIndicator:
         elif ind.health == "FAULT" and p.health != "FAULT":
             self._beep_until = now + self.BEEP_S
 
-    @staticmethod
-    def _set(pin, value: bool) -> None:
-        if pin is not None:
+    def _set(self, pin, value: bool) -> None:
+        if pin is not None and self._written.get(id(pin)) != value:
+            self._written[id(pin)] = value
             pin.write(value)
 
     def close(self) -> None:

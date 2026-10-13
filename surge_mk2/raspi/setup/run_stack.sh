@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Pi 上で Phase 0 のノード一式を起動/停止する。systemd unit を書くまでの繋ぎ。
 #
+# ★ **systemd の unit（`install_services.sh`）が入っている Pi では使わない。** `start` は
+#   `raspi.nodes.*` を全部 pkill してから立て直すので、surge-io を止めて E-Stop をラッチさせる。
+#   unit が再起動したノードと二重になった場合は、バスの endpoint の排他（`raspi/bus/zbus.py`）で
+#   後から来た方が起動を拒否される。cam_track・cam_e2e・line_perception はここからは上がらない。
+#
 #   ./raspi/setup/run_stack.sh start          # io + camera + telemetry + planning + cam_perception + logger
 #   ./raspi/setup/run_stack.sh start --heartbeat   # ★ GPIO6 ハートビートも出す
 #   ./raspi/setup/run_stack.sh start --no-logger   # MCAP 記録を止める（ディスク節約）

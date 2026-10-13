@@ -134,6 +134,32 @@ class TestIoNodeArmGate(unittest.TestCase):
         self.assertEqual(n._arm_block_reason(), "")
         self.assertTrue(any(c.flags & packets.CMD_FLG_ARM for c in commands(self.link)))
 
+    def test_a_drifted_control_param_blocks_arm_until_it_is_back(self):
+        """読み戻しが食い違った＝STM32 の値が勝手に変わった（気づけなかった再起動など）。"""
+        n = self.node(allow_arm=True, control_params={"tc_slip_target": 0.1})
+        n.run(duration_s=0.05)
+        sent = [p for p in self.link.sent if isinstance(p, packets.ConfigSet)][0]
+        ok = packets.ConfigAck(param_id=sent.param_id, applied=sent.value,
+                               result=packets.ConfigResult.OK)
+        n.control_sync.on_ack(ok)
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.05)
+        self.assertEqual(n._arm_block_reason(), "")
+
+        n.control_sync.on_ack(packets.ConfigAck(param_id=sent.param_id, applied=0.0,
+                                                result=packets.ConfigResult.OK))
+        self.link.sent.clear()
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.05)
+        self.assert_all_disarm()
+        self.assertTrue(n._arm_block_reason())
+
+        n.control_sync.on_ack(ok)                 # 送り直しが入った
+        self.link.sent.clear()
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.05)
+        self.assertTrue(any(c.flags & packets.CMD_FLG_ARM for c in commands(self.link)))
+
     def test_an_unreadable_control_section_blocks_arm(self):
         n = self.node(allow_arm=True, control_params_error="vehicle.toml の [control] を読めません")
         self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
@@ -826,10 +852,20 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
         srv._publish_cmd(srv._last_cmd_ns + gap)
         self.assertEqual(srv.published[-1][1].source, "deadman")
         srv._auto_engaged, srv._auto_mode = True, "slam2d_route"
+        ctrl = []
+        srv._publish_auto_ctrl = lambda: ctrl.append(srv._auto_engaged)
         srv._publish_cmd(srv._last_cmd_ns + gap)
         self.assertEqual((srv.published[-1][1].mode, srv.published[-1][1].arm), (2, True))
+        self.assertTrue(srv._auto_engaged)
         srv._publish_cmd(srv._last_cmd_ns + AUTO_LINK_GRACE_NS + 1)
         self.assertEqual(srv.published[-1][1].source, "deadman")
+        # **猶予を使い切ったら engage も落とす。** 残すと、回線が戻って GUI の ARM が届いた
+        # 瞬間に人の操作なしで再発進する
+        self.assertFalse(srv._auto_engaged)
+        self.assertEqual(ctrl, [False])
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        self.assertNotIn("auto:", srv.published[-1][1].source)
+        srv._auto_engaged = True
         # **人が DISARM したら猶予は使わない。** GUI は ARM を切った瞬間に DISARM を1発送って
         # 送信を止める（`ControlChannel.disarm`）。その1発でその場で止まる
         await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
@@ -1229,6 +1265,110 @@ class TestOriginCheck(unittest.TestCase):
         第三者を止めるのは Origin ではなくトークン。
         """
         self.assertTrue(self._ok(None))
+
+
+class TestIoNodeRearmAfterStop(unittest.TestCase):
+    """E-Stop・駆動電源ラッチ・STM32 の再起動の後は、人が ARM を入れ直すまで通さない。
+
+    STM32 は E-Stop を解除した次の周期から指令をそのまま実行する。ARM 付きの指令が流れ続けて
+    いると、車のそばでボタン2を押した瞬間に走り出す。
+    """
+
+    ARMED = dict(mode=1, arm=True, target_speed=1.0, source="gui")
+
+    def setUp(self):
+        self.link = FakeLink()
+        self.sub = FakeSub()
+        self.node = mark_handshaken(IoNode(self.link, sub=self.sub, allow_arm=True))
+        self.node.state.health = "OK"
+        self.node._control_synced = True          # `run()` が [control] の同期を確かめた後の状態
+
+    def packet(self, **cmd) -> packets.Command:
+        self.sub.push(DriveCmd(**cmd))
+        self.node._recv_cmd(time.monotonic_ns())
+        return self.node._command_packet()
+
+    def assert_armed(self, pkt):
+        self.assertTrue(pkt.flags & packets.CMD_FLG_ARM)
+        self.assertEqual(pkt.mode, packets.Mode.MANUAL)
+
+    def assert_disarm(self, pkt):
+        self.assertEqual((pkt.mode, pkt.flags, pkt.target_speed), (packets.Mode.DISARM, 0, 0))
+
+    def test_arm_is_blocked_while_the_estop_is_latched(self):
+        self.assert_armed(self.packet(**self.ARMED))
+        self.node.state.estop_active = True
+        self.assert_disarm(self.packet(**self.ARMED))
+        self.assertIn("E-Stop", self.node._arm_block_reason())
+
+    def test_releasing_the_estop_does_not_resume_a_held_arm(self):
+        self.node.state.estop_active = True
+        self.assert_disarm(self.packet(**self.ARMED))
+        self.node.state.estop_active = False
+        for _ in range(3):
+            self.assert_disarm(self.packet(**self.ARMED))
+        self.assertIn("入れ直", self.node._arm_block_reason())
+
+    def test_dropping_arm_once_after_the_release_allows_arming_again(self):
+        self.node.state.estop_active = True
+        self.packet(**self.ARMED)
+        self.node.state.estop_active = False
+        self.assert_disarm(self.packet(mode=0, arm=False, source="gui"))
+        self.assertEqual(self.node._arm_block_reason(), "")
+        self.assert_armed(self.packet(**self.ARMED))
+
+    def test_an_arm_dropped_during_the_estop_does_not_count(self):
+        """E-Stop 中に外して入れ直した ARM は、解除の瞬間に走り出すのと同じ。"""
+        self.node.state.estop_active = True
+        self.packet(mode=0, arm=False, source="gui")
+        self.packet(**self.ARMED)
+        self.node.state.estop_active = False
+        self.assert_disarm(self.packet(**self.ARMED))
+
+    def test_a_stale_cmd_does_not_count_as_dropping_arm(self):
+        self.node.state.estop_active = True
+        self.packet(**self.ARMED)
+        self.node.state.estop_active = False
+        self.node._recv_cmd(time.monotonic_ns() + CMD_TIMEOUT_NS + 1)     # 途絶
+        self.assertTrue(self.node.cmd_stale)
+        self.assertTrue(self.node._arm_block_reason())
+        self.assert_disarm(self.packet(**self.ARMED))
+
+    def test_drive_power_lock_behaves_the_same(self):
+        self.node.state.drive_power_locked = True
+        self.assert_disarm(self.packet(**self.ARMED))
+        self.assertIn("駆動電源", self.node._arm_block_reason())
+        self.node.state.drive_power_locked = False
+        self.assert_disarm(self.packet(**self.ARMED))
+        self.packet(mode=0, arm=False, source="gui")
+        self.assert_armed(self.packet(**self.ARMED))
+
+    def test_an_stm32_restart_needs_arm_again(self):
+        self.assert_armed(self.packet(**self.ARMED))
+        self.node._on_time_reset(time.monotonic_ns())
+        self.node._control_synced = True          # [control] は入り直したとして、ラッチだけを見る
+        self.assert_disarm(self.packet(**self.ARMED))
+        self.assertIn("再起動", self.node._arm_block_reason())
+        self.packet(mode=0, arm=False, source="gui")
+        self.assert_armed(self.packet(**self.ARMED))
+
+    def test_an_stm32_restart_asks_for_the_settings_again(self):
+        """STM32 は ON/OFF・自動停止のマージンを既定値へ戻す。前の値を出し続けない。"""
+        self.node.state.auto_stop_margin_cm = 30.0
+        self.node.state.brake_hold_enabled = False
+        self.link.sent.clear()
+        self.node._on_time_reset(time.monotonic_ns())
+        self.assertIsNone(self.node.state.auto_stop_margin_cm)
+        self.assertIsNone(self.node.state.brake_hold_enabled)
+        asked = {p.param_id for p in self.link.sent if isinstance(p, packets.ConfigGet)}
+        self.assertLessEqual({packets.Param.AUTO_STOP_MARGIN_CM, packets.Param.BRAKE_HOLD_ENABLE}, asked)
+
+    def test_the_cmd_deadman_does_not_latch(self):
+        """`cmd` の途絶は従来どおり: 指令が戻ればそのまま通る。"""
+        self.assert_armed(self.packet(**self.ARMED))
+        self.node._recv_cmd(time.monotonic_ns() + CMD_TIMEOUT_NS + 1)
+        self.assertEqual(self.node._arm_block_reason(), "")
+        self.assert_armed(self.packet(**self.ARMED))
 
 
 if __name__ == "__main__":
