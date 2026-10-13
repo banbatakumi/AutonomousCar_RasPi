@@ -25,8 +25,8 @@ LINK_KEYS = toml_update.LINK_KEYS
 #: (内部キー, 表示名, この記録から求めるパラメータ)。**並び順が解析の順序**——
 #: 後ろの試験は前の試験の結果を使う。舵の効き・中立ずれ・アンダーステア勾配・リンクのガタ・
 #: ヨーの遅れは1つの試験では決まらないので、最後にステア・前後運動・旋回の記録をまとめて
-#: 当てはめる（`GEOMETRY`）。速度応答と加減速は前後運動試験（加速度を
-#: 段階的に上げる）1つで測る
+#: 当てはめる（`GEOMETRY`）。速度応答と加減速は前後運動試験（加速度の
+#: 違う段を走る）1つで測る
 TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("steer", "① ステア試験", ("tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s",
                               "steer_servo_hysteresis_rad", "steer_servo_gain")),

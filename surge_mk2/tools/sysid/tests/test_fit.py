@@ -40,13 +40,15 @@ class TestBenchRecovery(unittest.TestCase):
         sp = r["spaces"]["accel"]
         self.assertLess(sp.width, 2.0 + car + 0.05, f"accel: {sp}")
         self.assertLess(sp.height, 0.7, f"accel: {sp}")
-        # ステアは±30°の段とステップで車の向きが回り、車体の前端が開始位置より後ろへ振れる分 +0.3m。
-        # 階段部は後退の途中で舵を次の段へ切るので、上りの途中で車の向きが最大約25°回る（下りで
-        # 戻る）。中立付近の段は0.6m/sで走る。横幅はシードによって0.6〜1.05m（2026-09-27、
-        # ベンチの3シード×3つの記録の条件で最大1.04m）
+        # ステアは走行部のジグザグ（±15°）で横に振れ、車体の前端が開始位置より後ろへ振れる分 +0.3m。
+        # 階段と±30°のステップは同じ点からの往復（2026-10-13、距離で区切る）なので、その間は横に
+        # 広がらず、走行部が終わった位置の近くで試験を終える。横幅はベンチの8条件で 0.46〜0.67m
+        # （時間で区切っていた頃は 0.48〜0.96m、実機では階段部だけで約0.45mずれた）
         sp = r["spaces"]["steer"]
         self.assertLess(sp.width, 2.0 + car + 0.3, f"steer: {sp}")
-        self.assertLess(sp.height, 1.1, f"steer: {sp}")
+        self.assertLess(sp.height, 0.8, f"steer: {sp}")
+        self.assertLess(sp.drift_m, 0.3, f"steer: {sp}")
+        self.assertLess(sp.duration_s, 70.0, f"steer: {sp}")
         # 旋回は限界の直後で止まるので、円の大きさはほぼ最小旋回半径で決まる（リンクのガタ・不感帯・
         # サーボの定常偏差で大舵角の効きが落ちるほど大きい）。速度を連続して上げる形（2026-09-27）で
         # 既定の真値は 1.74×1.92m（段で上げていた頃は限界の検出が1段遅れ、約2.0〜2.13m）
@@ -170,7 +172,7 @@ class TestResidualWarnings(unittest.TestCase):
 
 class TestBrakeFit(unittest.TestCase):
     def test_strength_slope_and_lock_from_the_accel_log(self):
-        """前後運動試験の4段の制動から、傾き（強さ→減速度）と後輪のロックの頭打ちを読む
+        """前後運動試験の制動（最大＋その下に割り振った3段）から、傾き（強さ→減速度）と頭打ちを読む
         （制動中の走行距離に、MD の境界層込みのシムの制動を当てはめる）。"""
         base = replace(TRUTH, steer_gain=1.0, steer_offset_rad=0.0)
         log, _, _ = run_test("sysid_accel", TRUTH, seed=2)
@@ -179,6 +181,40 @@ class TestBrakeFit(unittest.TestCase):
         self.assertTrue(any("ABS が制動を削った" in n for n in notes), notes)
         self.assertAlmostEqual(v["brake_decel_per_nm"], TRUTH.brake_decel_per_nm, delta=0.05 * TRUTH.brake_decel_per_nm)
         self.assertAlmostEqual(v["brake_decel_m_s2"], TRUTH.brake_decel_m_s2, delta=0.15)
+
+    def test_levels_are_placed_below_the_limit_on_a_low_grip_floor(self):
+        """グリップの低い路面（頭打ち 1.8m/s² ≒ 0.04N·m）でも、最大制動で読んだ頭打ちの下に3段置かれ、
+        傾きと頭打ちの両方が読める。固定の段（0.04・0.08・0.12・最大、〜2026-10-12）ではこの条件で
+        3段が頭打ちし、傾きを1段だけで決めていた（2026-10-10 の実機の記録と同じ形）。"""
+        truth = bench.TRUTH_LOWGRIP
+        base = replace(TRUTH, steer_gain=1.0, steer_offset_rad=0.0)
+        log, _, _ = run_test("sysid_accel", truth, seed=0, noise=bench.SLIPPING)
+        runs = fit._brake_runs(log)
+        free = sorted({round(r.nm, 3) for r in runs if not r.abs_cut and r.v0 > 0.3})
+        self.assertEqual(len(free), 3, free)
+        v, notes = fit._fit_brake_runs(log, base, truth.rolling_resistance)
+        self.assertFalse([n for n in notes if n.startswith("注意")], notes)
+        self.assertAlmostEqual(v["brake_decel_per_nm"], truth.brake_decel_per_nm,
+                               delta=bench.REL_TOL["brake_decel_per_nm"] * truth.brake_decel_per_nm)
+        self.assertAlmostEqual(v["brake_decel_m_s2"], truth.brake_decel_m_s2, delta=0.15)
+
+    def test_one_level_below_the_limit_is_pointed_out(self):
+        """頭打ちの下の強さが1段しか無い記録は、傾きが1点で決まっていると所見で知らせる。"""
+        def run(nm, abs_cut):
+            return fit._BrakeRun(nm, np.array([0.0]), np.array([0.0]), 1.0, False, abs_cut)
+        log, _, _ = run_test("sysid_accel", TRUTH, seed=2)
+        base = replace(TRUTH, steer_gain=1.0, steer_offset_rad=0.0)
+        real_runs = fit._brake_runs(log)
+        orig = fit._brake_runs
+        try:
+            # 頭打ちした回だけ残し、頭打ちしなかった回は1段だけにする
+            cut = [r for r in real_runs if r.abs_cut]
+            keep = [r for r in real_runs if not r.abs_cut][:1]
+            fit._brake_runs = lambda _log: keep + cut
+            _, notes = fit._fit_brake_runs(log, base, TRUTH.rolling_resistance)
+        finally:
+            fit._brake_runs = orig
+        self.assertTrue([n for n in notes if n.startswith("注意")], notes)
 
     def test_abs_spikes_are_not_a_lock(self):
         """ABS（★v0.15）の一瞬の滑り（10〜20ms だけ後輪が前輪の6割未満）はロックではない。

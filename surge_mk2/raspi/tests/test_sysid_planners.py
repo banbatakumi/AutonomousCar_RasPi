@@ -17,43 +17,79 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs.types import VehicleState  # noqa: E402
 
 
-class TestCreepDirection(unittest.TestCase):
-    def test_direction_never_flips_at_a_steer_step(self):
-        """低速部の前後の切り替えは舵のステップ（holdの整数倍）と重ならない
-        （重なると、そのステップは実質据え切りになる）。"""
-        hold = 1.0
-        flips = []
-        prev = SysIdSteer.creep_sign(0.0, hold)
-        for k in range(1, 9000):
-            t = k * 0.001
-            sg = SysIdSteer.creep_sign(t, hold)
-            if sg != prev:
-                flips.append(t)
-            prev = sg
-        self.assertTrue(flips)
-        for t in flips:
-            frac = (t / hold) % 1.0
-            self.assertAlmostEqual(frac, 0.5, delta=0.01)
+class TestSteerShuttle(unittest.TestCase):
+    """ステア試験の階段部・大振幅部（2026-10-13、時間で区切る往復からオドメトリの距離で区切る往復へ）。"""
 
+    AMAX = Vehicle.load().max_steer
+    WHEELBASE = Vehicle.load().wheelbase
 
-class TestSteerStair(unittest.TestCase):
-    """ステア試験の階段部（2026-09-27、掃引から置き換え）。"""
+    def _run(self, reverse_lag_s: float = 0.15):
+        """走行部を飛ばして階段部・大振幅部だけを、遅れのある車（速度は1次遅れ、舵は7rad/sの
+        ランプ）で回す。返り値は判断ごとの `(reason, 舵の指令, 速度の指令, 車速, x, y, yaw, 舵角)`。"""
+        pl = SysIdSteer()
+        pl.settings["roll_speed"] = 0.0
+        pl.set_engaged(True)
+        x = y = yaw = v = steer = odom = 0.0
+        t_ns, out = 0, []
+        cmd_v = cmd_d = 0.0
+        for _ in range(3000):
+            vs = VehicleState(t_capture=t_ns, speed=v, steer_actual=steer, steer_cmd_echo=steer,
+                              odom_dist=[odom, odom], wheel_speed=[v, v, v, v], armed=True)
+            st = pl.plan(None, vs, {}, 0.1)
+            if st.reason == "完了":
+                return out
+            cmd_v, cmd_d = st.target_speed, st.target_steer
+            out.append((st.reason, cmd_d, cmd_v, v, x, y, yaw, steer))
+            for _k in range(100):            # 1kHz で車を進める
+                h = 0.001
+                v += (cmd_v - v) * h / reverse_lag_s
+                steer += max(-7.0 * h, min(7.0 * h, cmd_d - steer))
+                ds = v * h
+                yaw += ds * math.tan(steer) / self.WHEELBASE
+                x += ds * math.cos(yaw)
+                y += ds * math.sin(yaw)
+                odom += ds / math.cos(steer)          # 前輪の走行距離
+                t_ns += 1_000_000
+                if _k % 20 == 19:
+                    pl.on_vehicle_state(VehicleState(
+                        t_capture=t_ns, speed=v, steer_actual=steer, steer_cmd_echo=steer,
+                        odom_dist=[odom, odom], wheel_speed=[v, v, v, v], armed=True))
+        raise AssertionError("終わらなかった")
 
-    P = SysIdSteer.SETTINGS
-    AMAX = math.radians(30.0)
-
-    def _trace(self):
-        dt = 0.01
-        n = int(SysIdSteer.stair_duration(self.P, self.AMAX) / dt)
-        return [SysIdSteer.stair_point(self.P, self.AMAX, k * dt) for k in range(n)]
-
-    def test_steer_changes_only_while_reversing(self):
-        """舵は後退中にしか変わらない（止まった車で舵を切らない・前進区間は一定の舵角）。
+    def test_steer_changes_only_while_rolling(self):
+        """舵の指令が変わるのは車が転がっている間だけ（止まった車で舵を切らない）。
         最初の段だけは、転がり出すのと同時に切る。"""
-        tr = self._trace()
-        for (d0, _), (d1, v1) in zip(tr, tr[1:]):
-            if abs(d1 - d0) > 1e-12:
-                self.assertLess(v1, 0.0)
+        tr = self._run()
+        tr = tr[next(i for i, r in enumerate(tr) if r[0].startswith("階段")):]
+        for a, b in zip(tr, tr[1:]):
+            if abs(b[1] - a[1]) > 1e-9:
+                self.assertGreater(abs(b[3]), 0.1, b[0])
+
+    def test_stair_holds_the_steer_through_the_forward_leg(self):
+        """階段の前進区間は丸ごと一定の舵角（舵が動いている最中の遅れを曲率に混ぜない）。"""
+        tr = [r for r in self._run() if r[0].startswith("階段")]
+        for a, b in zip(tr, tr[1:]):
+            if a[2] > 0 and b[2] > 0:
+                self.assertAlmostEqual(a[1], b[1], places=9)
+
+    def test_returns_to_the_start_whatever_the_reversal_takes(self):
+        """前進した道を同じ舵角で戻るので、反転の遅さによらず元の位置・向きの近くで終わる
+        （時間で区切っていた頃は、実機で階段部だけで約0.45mずれた）。"""
+        for lag in (0.05, 0.15, 0.3):
+            tr = self._run(lag)
+            xs, ys = [r[4] for r in tr], [r[5] for r in tr]
+            self.assertLess(math.hypot(tr[-1][4], tr[-1][5]), 0.15, lag)
+            self.assertLess(abs(math.degrees(tr[-1][6])), 15.0, lag)
+            # 掃く範囲（車体原点）も狭い: 前後は中立付近の長い往復＋行き過ぎ、左右は弧のふくらみ
+            self.assertLess(max(xs) - min(xs), 0.75, lag)
+            self.assertLess(max(ys) - min(ys), 0.25, lag)
+
+    def test_forward_leg_length_does_not_depend_on_the_reversal(self):
+        """前進区間の長さ（＝定常の観測の量）は距離で決まる。反転が遅い車でも短くならない。"""
+        for lag in (0.05, 0.3):
+            first = [r for r in self._run(lag) if r[0].startswith("階段 1/")]   # 舵いっぱいの段
+            far = max(math.hypot(r[4], r[5]) for r in first)
+            self.assertGreater(far, 0.8 * SysIdSteer.SETTINGS["stair_leg_m"] * math.cos(self.AMAX), lag)
 
     def test_every_level_is_approached_from_both_sides(self):
         """どの段（両端を除く）にも上りと下りの両方から近づく（上りと下りの曲率の差＝ガタ）。"""
@@ -65,7 +101,14 @@ class TestSteerStair(unittest.TestCase):
         for x in inner:
             self.assertEqual(seen.get(round(x, 6)), {1, -1}, math.degrees(x))
         # 中立付近（不感帯が効く所）に段がある
-        self.assertTrue(any(0 < abs(x) <= math.radians(2.0) for x in levels))
+        self.assertTrue(any(0 < abs(x) <= math.radians(3.0) for x in levels))
+
+    def test_big_steps_happen_both_forward_and_backward(self):
+        """大振幅のステップは前進中にも後退中にもある（前進中のものが低速のヨーの過渡の材料）。"""
+        tr = [r for r in self._run() if r[0].startswith("低速")]
+        big = [b for a, b in zip(tr, tr[1:]) if abs(b[1] - a[1]) > math.radians(40.0)]
+        self.assertGreaterEqual(sum(b[3] > 0.1 for b in big), 2)
+        self.assertGreaterEqual(sum(b[3] < -0.1 for b in big), 2)
 
 
 class TestCornerRamp(unittest.TestCase):

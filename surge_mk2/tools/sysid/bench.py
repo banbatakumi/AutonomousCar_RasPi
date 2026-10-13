@@ -46,7 +46,7 @@ from sim.vehicle import (GRAVITY_MPS2, DriveInput, SteerServo, VehicleModel, Veh
 from tools.sysid import fit
 from tools.sysid.fit import Cmd, Log, ScanStamp, build_log
 
-__all__ = ["TRUTH", "TRUTH_SLIP", "Pipeline", "Noise", "REALISTIC", "SLIPPING", "run_test", "run_all", "Space",
+__all__ = ["TRUTH", "TRUTH_SLIP", "TRUTH_LOWGRIP", "Pipeline", "Noise", "REALISTIC", "SLIPPING", "run_test", "run_all", "Space",
            "write_mcap", "reproduction_error"]
 
 #: 既定の真値。`vehicle.toml` の旧手順の値とは**わざとずらしてある**（既定値に
@@ -83,7 +83,11 @@ TRUTH_NOCAP = replace(TRUTH, drive_accel_m_s2=0.0, drive_fade_speed_m_s=0.0, dri
                       speed_decel_m_s2=0.0)
 #: 加速の上限がグリップで決まる真値（速度による低下なし）。`SLIPPING`（後輪が滑る）と組で使う
 TRUTH_SLIP = replace(TRUTH, drive_fade_speed_m_s=0.0, drive_top_speed_m_s=0.0)
-TRUTHS = {"default": TRUTH, "nocap": TRUTH_NOCAP, "slip": TRUTH_SLIP}
+#: グリップの低い路面（加速・制動とも約1.8m/s²で頭打ち）。固定の段（〜2026-10-12）では制動4段のうち
+#: 3段が頭打ちに当たる条件で、段を最大の下に割り振れているかを見る。`SLIPPING` と組で使う
+TRUTH_LOWGRIP = replace(TRUTH, drive_accel_m_s2=1.9, drive_fade_speed_m_s=0.0, drive_top_speed_m_s=0.0,
+                        brake_decel_m_s2=1.8, speed_decel_m_s2=1.6)
+TRUTHS = {"default": TRUTH, "nocap": TRUTH_NOCAP, "slip": TRUTH_SLIP, "lowgrip": TRUTH_LOWGRIP}
 
 #: 比べるときの許容誤差（相対。`None` は絶対誤差 `ABS_TOL`）
 REL_TOL = {
@@ -168,9 +172,15 @@ _TC_SLIP_FLOOR_M_S = 0.5
 class Space:
     width: float
     height: float
+    #: 試験を終えて止まった位置・向きの、開始からのずれ（往復で元に戻る試験は小さいはず）
+    drift_m: float = 0.0
+    drift_deg: float = 0.0
+    #: 試験開始から「完了」までの時間 [s]
+    duration_s: float = 0.0
 
     def __str__(self) -> str:
-        return f"{self.width:.2f}m × {self.height:.2f}m"
+        return (f"{self.width:.2f}m × {self.height:.2f}m（{self.duration_s:.0f}秒、終了位置のずれ "
+                f"{self.drift_m:.2f}m・{self.drift_deg:+.0f}°）")
 
 
 def _scan(seq: int) -> Scan:
@@ -387,7 +397,9 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
 
     if done_at is None:
         raise RuntimeError(f"{planner_id}: {max_s}s 以内に完了しなかった（{state.reason if state else ''}）")
-    return build_log(vs_log, cmds, scans), Space(xmax - xmin, ymax - ymin), latencies
+    space = Space(xmax - xmin, ymax - ymin, math.hypot(veh.x, veh.y), math.degrees(veh.yaw),
+                  done_at - pre_s)
+    return build_log(vs_log, cmds, scans), space, latencies
 
 
 def run_all(truth: VehicleSpec = TRUTH, seed: int = 0, verbose: bool = True,
@@ -678,11 +690,11 @@ def main() -> int:
     ap.add_argument("--seeds", type=int, default=1)
     ap.add_argument("--truth", choices=sorted(TRUTHS), default="default",
                     help="真値（nocap: 加減速の上限なし＝ランプとPIだけで決まる車、"
-                         "slip: 加速がグリップで頭打ちになり後輪が滑る車）")
+                         "slip: 加速がグリップで頭打ちになり後輪が滑る車、lowgrip: グリップの低い路面）")
     args = ap.parse_args()
     n_bad = 0
     for sd in range(args.seeds):
-        r = run_all(truth=TRUTHS[args.truth], seed=sd, noise=SLIPPING if args.truth == "slip" else None)
+        r = run_all(truth=TRUTHS[args.truth], seed=sd, noise=SLIPPING if args.truth in ("slip", "lowgrip") else None)
         n_bad += sum(not _within(k, tv, gv) for k, (tv, gv) in r["values"].items())
     print(f"許容誤差外: {n_bad}")
     return 1 if n_bad else 0

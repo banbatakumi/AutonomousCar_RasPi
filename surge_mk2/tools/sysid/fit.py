@@ -1321,9 +1321,10 @@ def _slip_limited_accel(s: list[Sample]) -> tuple[float, float] | None:
 
 
 def _slip_accel(s: list[Sample]) -> float | None:
-    """後輪が滑った最初の区間の、指令の加速度（`_accel_level`）。無ければ None。"""
+    """後輪が滑った区間のうち、いちばん低い段の指令の加速度（`_accel_level`）。無ければ None。
+    （2026-10-13 から前後運動試験は全開の段が最初なので、「最初に滑った段」では常に全開になる。）"""
     runs = _slip_runs(s)
-    return _accel_level(s[runs[0][0]]) if runs else None
+    return min(_accel_level(s[r[0]]) for r in runs) if runs else None
 
 
 def _top_accel_level(s: list[Sample]) -> float:
@@ -1494,6 +1495,14 @@ def _fit_brake_runs(log: Log, base: VehicleSpec, rr: float) -> tuple[dict[str, f
                 if use_cap else "、最大の強さまで頭打ちなし")
              + f"。強さ {'・'.join(f'{x:.2f}' for x in levels)}N·m、指令から効き始めるまで {lag * 1000:.0f}ms、"
              f"走行距離の残差RMS {math.sqrt(e) * 1000:.1f}mm"]
+    free_levels = [x for x in levels if x not in abs_cut and x not in locked]
+    if use_cap and len(free_levels) < 2:
+        # 頭打ちの下の強さが1つだけだと、傾きはその1点（と各回の低速の尾）で決まり、強さに対して直線か
+        # どうかは確かめられない（2026-10-10 の実機の記録: 0.04・0.08・0.12・最大 のうち 0.08 以上が頭打ち）
+        notes.append(f"注意: 頭打ちしなかった制動の強さが {len(free_levels)} 段だけ"
+                     + (f"（{free_levels[0]:.2f}N·m）" if free_levels else "")
+                     + "。傾きはほぼその1点で決まっており、強さに対して直線かどうかは確かめられていない"
+                     "（2026-10-13 以降の前後運動試験は、最大制動で頭打ちを測ってから残りの段をその下に置く）")
     if abs_cut:
         notes.append(f"制動トルク {'・'.join(f'{x:.2f}' for x in abs_cut)}N·m で ABS が制動を削った"
                      "（頭打ちはロックではなく ABS が保ったグリップの上限）")
@@ -1524,7 +1533,8 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
     上限とその速度依存（`drive_accel_m_s2`・`drive_fade_speed_m_s`・`drive_top_speed_m_s`）・
     速度指令での減速の上限（`speed_decel_m_s2`）・制動の減速度。
 
-    2026-09-27 から前後運動試験（`sysid_accel`）は加速度を段階的に上げる1つの試験で、速度応答
+    2026-09-27 から前後運動試験（`sysid_accel`）は加速度の違う段を走る1つの試験で（2026-10-13 から、
+    全開・最大制動で最大を測ってから残りの段をその下に置く）、速度応答
     試験（`sysid_speed`）は無くなった。車体の利得・転がり抵抗もこの記録だけで当てはめる。
 
     全開加速（目標 v_max+1.0）でも、ファームは目標を `speed_ramp_max_m_s2`（3.0m/s²）で
@@ -1592,6 +1602,21 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
             if name == "up":
                 use["fade"] = False
             fixed, pb, eb, rb = fixed2, p2, e2, r2
+    if use["up"] and not use["fade"]:
+        # 外した速度依存を、決まった残りの値から入れ直して確かめる。全部入りの当てはめが悪い局所解
+        # （速度依存が効かない所）に落ちていると、外しても残差が変わらず「有意でない」と外してしまう
+        # （ベンチで、1.3m/sから落ちる真値を約20条件中1〜4条件で見落とした。残差は 0.4→0.9cm/s）
+        fade_keys = ("drive_fade_speed_m_s", "drive_top_speed_m_s")
+        fixed4 = {k: v for k, v in fixed.items() if k not in fade_keys}
+        free4 = {k: (pb[k], *full[k][1:]) if k in pb and k not in fade_keys else v
+                 for k, v in full.items() if k not in fixed4}
+        p4, e4, r4 = _fit_speed_model(
+            logs, base, free4, fixed4,
+            starts=[{"drive_fade_speed_m_s": f * v_top, "drive_top_speed_m_s": t * v_top}
+                    for f, t in ((0.6, 2.0), (0.4, 3.0), (0.8, 1.5))])
+        if _lr_significant(n_eff(r4), e4, eb):
+            use["fade"] = True
+            fixed, pb, eb, rb = fixed4, p4, e4, r4
     # 上限に張り付いた＝効いていない
     if pb.get("drive_accel_m_s2", 0.0) >= 0.95 * _NO_CAP:
         use["up"] = use["fade"] = False
@@ -1615,7 +1640,7 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
         a_sl, lv = sl if sl is not None else (None, 0.0)
         a_grip = a_sl if a_sl is not None and a_sl > 0.1 else None
         traction_notes.append(
-            f"加速中に後輪が滑った（{slip_a:.1f}m/s² の段から）。"
+            f"加速中に後輪が滑った（{'全開の段だけ' if slip_a >= 3.0 else f'{slip_a:.1f}m/s² の段から上'}）。"
             + (f"滑っていた間の加速度は{'全開' if lv >= 3.0 else f' {lv:.1f}m/s² '}の段の {a_sl:.2f}m/s² が最大で、"
                "これを正味の加速の上限にした（グリップで決まる）。"
                if a_grip is not None else "滑っていた時間が短く、その加速度は読めなかった。")

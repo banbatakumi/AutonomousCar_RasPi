@@ -100,7 +100,7 @@ steer_rate_limit_rad_s = 0.0
 steer_servo_hysteresis_rad = 0.015899999999999997
 # サーボの位置ループの定常ゲイン（実舵角 / 参照舵角）。1.0 = 定常偏差なし
 steer_servo_gain = 0.9739876830514631
-# ── ② 前後運動試験（`sysid_accel`、直線。加速度を段階的に上げる）: 速度制御の形と車体 ──
+# ── ② 前後運動試験（`sysid_accel`、直線。全開・最大制動で最大を測り、残りの段をその下に割り振る）: 速度制御の形と車体 ──
 # シムの速度はファームの速度制御そのもの（`sim/vehicle.py` の `SpeedController`、2026-09-26〜）:
 # 目標速度を COMMAND の accel_limit でランプ → PI（speed_kp・speed_ki、出力 ±speed_torque_max_nm）→
 # 車体（加速度 = speed_plant_gain × トルク − rolling_resistance）。
