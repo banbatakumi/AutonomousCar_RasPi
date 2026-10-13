@@ -517,7 +517,8 @@ export type AutoState = {
    * 今の場所の横の上限、`v_plan`・`a_plan`＝加速・減速の学習へ渡した計画の速度・加速度、
    * `excess`・`thr`＝直近の不足としきい値（上限に対する割合）、`noise`＝測った雑音の幅 [1/m]、
    * `mean`・`mean_thr`＝直近の試行の平均の不足としきい値、`cross_gain`＝同じく横偏差の増え [m]、
-   * `events`・`trials`・`passes`＝前兆・試行・通過の数、`win`・`win_noisy`＝加速・減速の窓の数
+   * `events`・`trials`・`passes`＝前兆・試行・通過の数、`win`＝減速を判断した周の数、
+   * `lag_dec`＝直近の周の、制動区間の終わりで車速が計画より速かったぶん [m/s]
    */
   grip: Record<string, number>
   /** 使った点群の古さ [ms] */

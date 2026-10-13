@@ -236,26 +236,11 @@ class Result:
             if self.grip_long:
                 lg = self.grip_long
                 out.append(f"           加速 {lg['acc']:.2f}m/s²（真値 {lg['acc_true']:.2f}）・減速 "
-                           f"{lg['dec']:.2f}m/s²（真値 {lg['dec_true']:.2f}）  窓 {lg['windows']}・"
+                           f"{lg['dec']:.2f}m/s²（真値 {lg['dec_true']:.2f}）  判断 {lg['windows']} 回・"
                            f"下げた {len(lg['events'])} 回"
-                           + "".join(f"\n             {e['t']:6.1f}s {e['kind']} 求めた {e['ask']:.2f}・"
-                                     f"出た {e['got']:.2f}" for e in lg["events"][:12]))
-                for name, sg in (("加速", 1), ("減速", -1)):
-                    ms = [x for x in lg["meas"] if x[1] == sg]
-                    lim = [100.0 * (x[3] / x[5] - 1.0) for x in ms if x[4] == "限界"]
-                    # 「限界」と測ったのに真値はそれより 5% 以上高い＝取り違え
-                    wrong = sum(1 for e in lim if e < -5.0)
-                    # 「出た」としたのに真値より 3% 以上高い値を求めていた＝取り違え
-                    over = sum(1 for x in ms if x[4] == "出た" and x[2] > 1.03 * x[5])
-                    if ms:
-                        err = (f"誤差 中央 {np.median(lim):+.1f}%・範囲 {min(lim):+.1f}〜{max(lim):+.1f}%"
-                               if lim else "—")
-                        out.append(f"           {name}の窓 {len(ms)}: 出た "
-                                   f"{sum(1 for x in ms if x[4] == '出た')}・限界 {len(lim)}（{err}・"
-                                   f"取り違え {wrong}）・出たの取り違え {over}")
-                if lg.get("skips"):
-                    out.append("           評価しなかった窓 " + "・".join(
-                        f"{k} {n}" for k, n in sorted(lg["skips"].items())))
+                           + "".join(f"\n             {e['t']:6.1f}s {e['kind']} {e['ask']:.2f} → "
+                                     f"{e['got']:.2f}（計画との差 {e['lag']:+.2f}m/s）"
+                                     for e in lg["events"][:12]))
                 if lg["trail"]:
                     out.append("           加速/減速の移り変わり " + " ".join(
                         f"{t:.0f}s:{a:.2f}/{d:.2f}" for t, a, d in lg["trail"][:40]))
@@ -457,19 +442,19 @@ class Bench:
             lg = getattr(getattr(self.planner, "_grip", None), "long", None)
             if lg is not None:
                 self._long_f = open(str(trace) + ".long.csv", "w")
-                self._long_f.write("t,v,a_plan,lat_frac,gate,v_plan,v_true,ax_true,grip_long,u_y,"
-                                   "cmd_v,accel,decel,probe\n")
+                self._long_f.write("t,v,a_plan,gate,v_plan,v_true,ax_true,grip_long,u_y,"
+                                   "cmd_v,accel,decel\n")
                 inner = lg.observe
 
-                def observe(t, v, a_plan, lat_frac, gate, v_plan=None, tc=False, _in=inner, _lg=lg):
+                def observe(t, v, a_plan, gate, v_plan=None, _in=inner, _lg=lg):
                     tv, sp = self.sim.vehicle, self.sim.spec
                     u = tv.speed ** 2 * abs(tv._curv_req) / max(sp.mu * tv.grip_lat * 9.81, 1e-6)
                     self._long_f.write(
-                        f"{t:.4f},{v:.4f},{a_plan:.4f},{lat_frac:.4f},{gate},"
+                        f"{t:.4f},{v:.4f},{a_plan:.4f},{gate},"
                         f"{float('nan') if v_plan is None else v_plan:.4f},{tv.speed:.4f},"
                         f"{tv.accel_x:.4f},{tv.grip_long:.4f},{u:.4f},{tv.cmd.target_speed:.4f},"
-                        f"{_lg.map.accel:.4f},{_lg.map.decel:.4f},{_lg.probe:.4f}\n")
-                    return _in(t, v, a_plan, lat_frac, gate, v_plan, tc)
+                        f"{_lg.map.accel:.4f},{_lg.map.decel:.4f}\n")
+                    return _in(t, v, a_plan, gate, v_plan)
                 lg.observe = observe
         # 車体外形の輪郭と、真の壁からの距離場（`_clearance`）
         from scipy.ndimage import distance_transform_edt
@@ -801,19 +786,9 @@ class Bench:
                        sp.cmd_accel_limit_m_s2)
         dec_true = min(sp.speed_decel_m_s2 * v.grip_long + sp.rolling_resistance,
                        sp.cmd_accel_limit_m_s2)
-        # 窓ごとの判定に、その瞬間の真値を添える（「限界」と測った値の誤差を出す）
-        meas = r.grip_long.get("meas", [])
-        if lg.windows < self._long_n:
-            self._long_n = 0                    # 学習をやり直した
-        new = lg.windows - self._long_n
-        if new > 0:
-            self._long_n = lg.windows
-            for _, sign, ask, got, verdict in lg.log[-new:]:
-                meas.append((tr, sign, ask, got, verdict, acc_true if sign > 0 else dec_true))
         r.grip_long = {"acc": g.map.accel, "dec": g.map.decel, "windows": lg.windows, "events": ev,
-                       "trail": trail, "meas": meas, "acc_true": acc_true, "dec_true": dec_true,
-                       "skips": dict(lg.skips),
-                       "done": (lg.acc_done, lg.dec_done)}
+                       "trail": trail, "acc_true": acc_true, "dec_true": dec_true,
+                       "done": (True, lg.dec_done)}
 
     def _clearance(self, x: float, y: float, yaw: float) -> float:
         """車体外形（輪郭）と真の壁との最小距離 [m]。0 = 接触。"""

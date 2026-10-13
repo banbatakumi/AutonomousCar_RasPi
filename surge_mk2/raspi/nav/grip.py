@@ -2,7 +2,16 @@
 反応から場所ごとに決める（`slam2d_raceline` / `slam2d_route`）。
 
 車に固有の値はシステム同定、**路面で変わる値は走行中に決める**。`config/vehicle.toml` の同定値は
-初期値として読むだけで、書き戻さない。横（`GripLearner`）と、加速・減速（`LongLearner`、下の節）を学習する。
+初期値として読むだけで、書き戻さない。横と、加速・減速（`LongLearner`、下の節）を学習する。
+
+**横の決め方は 2 つある**（planner の `grip_by_time`）:
+
+- **`TimeLearner`（既定。2026-10-13）**: 周回のタイムで決める。上限を 1 段上げて走り、速度プロファイルが
+  縮むはずの時間の `time_gain` 以上縮んだら採用、縮まなければやめる。前兆は「行き過ぎた段を早くやめる」
+  安全装置としてだけ使う。横の上限はコースで 1 つ。クラスの docstring を読むこと
+- **`GripLearner`（元の方式）**: 前兆が出るまで上げ、出た値のすぐ下で止める。**この下の説明は、断りが
+  なければこちらのもの。** 実機では検出の穴の両側へ外れた（誤検出で 4.41m/s² に止まる／リアの滑りを
+  見られず 8.0m/s² まで上がる）ので、既定から外した。即時の層と雑音の測り方は `TimeLearner` も使う
 
 ## 持ち方（`GripMap`）
 
@@ -47,6 +56,11 @@
 しない）。これが無いと、検出できないコーナーで限界を数 % 超えたまま走り続け、検出できる
 コーナーとの間で全体の値が上下して収束しなかった（sim.bench の実測、真値 0.42）。
 
+比べるのは、横の上限で車速が決まっている所だけ（`plateau_long`。加速しながら回る所・制動しながら入る所は、
+上限を上げても横加速度が増えない）。雑音が大きいときは上限が `plateau_ask_noisy` 以上上がるまで比べず、
+線を乗り換えたら前の値を捨てる（`new_line`）。実機 2026-10-13 に、この 3 つが無い版で滑っていないのに
+頭打ちが 3 回出て、横が 4.41m/s² で止まった（同じ床の前の走行は 5.91）。
+
 ## 前兆の量
 
 `dev = 車速² ×（舵角から出る曲率 − 実曲率）`＝舵が要求した横加速度のうち出ていないぶん [m/s²]
@@ -83,6 +97,17 @@
 - 雑音が `noise_quiet` を超えているときは、1 回の上げ幅を `noisy_step` 倍にし、出ている横加速度を
   長めにならす（試行の「出た最大」が雑音の山を拾うと、前兆の値を消して上限が跳ね上がった）
 
+### 横の限界はコースで 1 つ（場所ごとに下げるのはセルだけ）
+
+舵の切り具合で限界を分ける形は 2 つ試して、どちらも捨てた（2026-10-13）:
+
+- **帯ごとに全体の値を別々に持つ**: 中間の舵角はコーナーの出入りの過渡にしか現れず、試行の少ない帯は誤った
+  前兆から戻れない（シム、真値 5.40 に対して 4 帯で 3.97/3.69/3.48/4.90・1 周 10.1 → 11.1s）
+- **きついコーナー（経路の曲率 1.5/m 以上）の前兆は、その場所だけの値にする**: 実機で悪化した。コーナーが続く
+  コースではヘアピンと次のコーナーが 1 つの試行につながり、ほとんどの前兆が「きつい所」に数えられて、
+  全体の値を止めるものが無くなった（8.0 まで上がり、横偏差が周ごとに約 10cm・最大 19cm、逆ハンが出た）。
+  その走行の周ごとの集計では、この車・この床の横の限界は 6.3〜6.8m/s²（それより上げても速くならない）
+
 ### 崩れないための歯止め
 
 - 横の上限は、出発点の `floor` 倍より下へは下げない
@@ -100,52 +125,30 @@
 - 舵が上限に張り付いている所・曲がり切れない区間・通常の周回以外は planner が `gate` で止める
 - 加減速しながら出た前兆は、前後に使っていた力を合成した半径で記録する（横だけの限界と取り違えない）
 
-## 加速・減速（`LongLearner`）— 出ない加速度を求めて、出た値を測る
+## 減速（`LongLearner`）— 上げていって、コーナーへ計画より速く入るようになった所が限界
 
-横と違って場所ごとには持たず、コース全体で 1 つずつ（`GripMap.accel`・`decel`）。
+横と違って場所ごとには持たず、コース全体で 1 つ（`GripMap.decel`）。規則は横の `TimeLearner` と同じ形:
+**1 段上げて 1 周走り、車が計画どおりに動けたら次へ、動けなければ 1 段戻して止める**。
 
-**測り方**: プロファイルが加速（減速）を求め続けている間の車速を 0.15〜0.4 秒の窓に溜め、最小二乗の
-傾き＝出た加速度を、求めた加速度と比べる。
+- 「動けたか」は、制動区間の**終わり**（コーナーの入口）で車速が計画より速かったぶんで見る。その周の
+  いちばん大きい区間の値が `lag` [m/s] 以下なら付いて行けた
+- 止めた後も毎周見て、付いて行けなくなったら 1 段下げる。上げ直すのは、横の学習が「路面が変わった」と
+  見たとき（`rescale`・`recheck`）だけ
+- 付いて行けない理由は区別しない（タイヤの限界でも、モータのトルクでも、そこがこの車の限界）
+- 区間の途中の差は使わない。制動の出だしは指令の遅れのぶん必ず計画より速く、その差は減速度に比例する
+  （区間全体の 90% 点で見たら、シムで真値 3.00 に対して 2.40 で止まった）。終わりの差は、実機 4 走行
+  （2026-10-13）で減速 1.9〜2.9 のどこでも −0.15〜+0.09m/s（中央 −0.05〜+0.03）＝まだ付いて行けている
 
-- 求めたぶん出ている（97% 以上）→ 限界はそれ以上
-- 出ていなくて、**車速が計画から遅れていき、傾きが一定**（窓の前半と後半で同じ）→ 路面で頭打ち。
-  **出た値がそのまま限界**（上にも下にも、その 1 回で採る）
-- どちらでもない（立ち上がりの途中・計画より先に居て追いつかれているだけ・区間の終わりで先に
-  細った）→ 何もしない
+**加速は学習しない**（`GripMap.accel` は planner が渡す値のまま。planner は目標車速を動かす傾きの上限
+`cmd_accel_limit_m_s2` を渡す）。同じ見方をしても分かれない:
+加速区間の終わりの遅れは、加速 1.77 でも 2.66 でも 0.1〜0.25m/s（周ごとに 0.5 まで振れる）で変わらず、はっきり
+大きいのは横の上限が高すぎてリアが滑り続けた走行（1.1m/s）だけだった。高すぎる加速は STM32 の TC が抑える。
+学習していた版は、内側の後輪が浮いた窓 1 つで 2.66 → 1.77 に下げて戻れなかった（実機 2026-10-13）。
 
-「頭打ちで一定になった所だけを測る」のが要点。以前の形（区間の始めと終わりの速度²の変化を計画と
-比べ、85%／95% のしきい値で「出た／出ない」を決める）は精度が 5〜10% で、1 割の不足に気づけなかった
-（減速の見積もりが真値を 6〜11% 上回ったまま残った）。
-
-- 見るのは、横加速度が横の限界の `lat_max`（0.5）未満の間だけ。摩擦円のぶん（`sqrt(1 − 割合²)`）で
-  割って直線での値に直す
-- 区間の初め `settle_s`・求めるのをやめる手前 `tail_s` は入れない。計画の速度が跳んだ窓は捨てる
-- **車速に雑音があるとき**（窓の中の 2 階の差分から出した傾きの誤差が、求めた加速度の `se_free` 以上）は
-  1 つの窓で決めない。減速は「今の値より強く求めた窓の、出た値」を誤差の重みで溜め、その平均から
-  誤差の `z` 倍を引いた下の端まで上げる。加速は 出た÷求めた の下の端が `pass_lo` 以上で 1 段。
-  「限界」と言うのは、出た値が誤差の `z` 倍を足しても足りないときだけ。実機の車速の雑音（σ 0.03〜
-  0.05m/s）では 0.4 秒の窓の傾きが ±0.1〜0.3m/s² ずれ、1 つの窓で決めると、たまたま高く出た窓の
-  たびに減速が 15% ずつ上がって真値を 17% 上回った（sim.bench `--real-noise`）。
-  ★そのぶん上がるのは遅い（真値 2.56 に対して 170 秒で 1.91 → 2.2）
-- 短い窓（0.2〜0.3 秒）の傾きをプロファイルの加速度と比べて「出ていない」を決める形は採らなかった
-  （走り出し・追いつく途中・作り直した直後に取り違え、減速が下がり続けた）。今の形との違いは、
-  「出ていない」と言うのに**遅れが増えていること・傾きが一定であること**を求める点と、比べるのでは
-  なく**出た値そのものを採る**点
-
-- **加速**: 求めたぶん出たら `step_up`（10%）上げる。頭打ちになったら、出た値の `acc_keep`（0.97）倍に
-  して止める。そこで出続けていれば、限界を 3% ずつ上へ見直す（1 回の測り違いで低く決めたままにしない）
-- 計画よりずっと遅れている間（前兆で減速した後・迂回の後の「追いつく途中」）は測らない。planner は
-  計画の加速度ではなく、今の車速から追いつく速度を指令している
-- **減速**: 見積もりが高すぎると、止まれない速度でコーナーに入る。だから**制動を始める位置は確かめた値
-  のまま、制動区間の初めの 0.35 秒だけ `boost`（1.15）倍の減速を求める**（`raceline.probe_brake`。
-  出なくても元のプロファイルより速くは入らない）。出たら出た値（の 0.97 倍）まで上げ、頭打ちになったら出た値を採る。
-  近い値が 2 回そろったら「決まった」（`dec_done`）として、強く求めるのをやめる（時間がたっても
-  測り直さない——確かめた値が真値に近いと、強く求めた区間で車が目標から遅れ、コーナーへ速く入る）
-  - ふだんの制動で頭打ちになったら（路面が滑りやすくなった）、その区間のうちに下げて、また測る
-  - 速度プロファイルには確かめた値の 0.95 倍を使う（planner の `LEARN_BRAKE_USE`）
-- **路面が変わったとき**: 横の学習が「想定外」の前兆を見たら、加速・減速も同じ割合で先に下げて測り直す
-  （`rescale`）。落ち着いていた加速がはっきり落ちたら、減速も同じ割合で下げる。**前後の低下から横を
-  下げることはしない**（試したが、1 回の測り違いで横まで大きく下げてしまった）
+以前の形（0.15〜0.4 秒の窓で車速の傾きを測る・TC とスリップ率で判定する・制動区間の初めだけ強い減速を
+求めて測る `raceline.probe_brake`）は、雑音や後輪の浮き・経路の形ごとに手当てが増え続けたので捨てた
+（定数 約 35 個。測れるかどうかが線しだいで、横の上限が低い間は減速が 1 度も上がらない走行があった）。
+★そのぶん、減速は限界を 1 段超えた周に、コーナーへ計画より速く入る（`step` ぶん。横の安全装置が受ける）。
 
 ## シムと実機の違い
 
@@ -297,11 +300,54 @@ class GripConfig:
     plateau_ask: float = 0.5
     plateau_gain: float = 0.3
     plateau_cells: int = 2
+    #: 雑音が `noise_quiet` を超えているときは、上限が前に比べた値より**この割合以上**上がるまで比べない
+    #: （それまで前の値を持ち続ける）。実機では同じ上限でも、セルごとの出た値が周ごとに sd 0.15m/s² 動く。
+    #: 1 回の上げ幅 3% で比べると要る伸びは 0.04〜0.07m/s² で、比べたセルの 24% が「伸びていない」になった
+    #: （実機 2026-10-13 `surge_20261013_075704`: 滑っていないのに頭打ち 3 回、横が 4.41 で止まった）
+    plateau_ask_noisy: float = 0.08
+    #: 頭打ちを比べるのは、計画の前後の加速度が加速・減速の上限のこの割合未満の所だけ。それ以上の所は
+    #: 車速が手前からの加速（先のコーナーへの制動）で決まっていて、横の上限を上げても横加速度は増えない
+    #: （同じ走行: ヘアピンの出口から加速しながら回る長いコーナーで、上限 4.15 → 4.54 の間 車速が変わらず）
+    plateau_long: float = 0.25
     #: 横の上限を下げてよいのは、出発点のこの割合まで（測り違いが重なって下がり続けないための
     #: 歯止め。加速・減速の `LongConfig.floor` と同じ）
     floor: float = 0.5
     #: 発進の加速度から初期値を出すときの安全率
     launch_safety: float = 0.92
+    # ── タイムで決める学習（`TimeLearner`）──
+    #: 1 段で上げる割合（縮まなければ半分にして、`time_step_min` を切ったら終わり）
+    time_step: float = 0.08
+    time_step_min: float = 0.03
+    #: 1 段を測る周の数（複数なら中央値）。同じ計画で続けて走った周のばらつきは、ゲートで計ったラップで
+    #: sd 0.015s（実機 `surge_20261013_112645`。10Hz の記録から出した 0.040〜0.045s は記録の粗さだった）、
+    #: 8% の段で縮む時間は 0.15〜0.2s。2 周で測っていた版は収束に 173 秒かかった
+    time_laps: int = 1
+    #: 終える前に、採用済みの段をもう一度測って（前の値と平均して）から、元の幅で 1 回だけ試し直す。
+    #: 幅を半分にした試行は、どれも同じ「採用済みの段のタイム」と比べている。それがたまたま速く
+    #: 出ていると続けて断って、限界の手前で終わる（モデルの試算で、ばらつき 0.07s のとき 2 割）
+    time_confirm: bool = True
+    #: 採用の条件: 実際に縮んだ時間 ÷ 速度プロファイルが縮むはずの時間 がこれ以上。
+    #: 実機 4 走行（2026-10-13）の記録に当てはめると、横 6.0 までの段は 0.7〜1.4、6.2〜6.9 の段は
+    #: 0.35〜0.6、7 より上の段は負（上げるほど遅い）
+    time_gain: float = 0.6
+    #: 採用したら幅をこの倍率で戻す（`time_step` まで）。戻さないと、雑音で 1 回断っただけで幅が半分の
+    #: まま残り、小さい幅は雑音に埋もれて続けて断られる（実機のラップのばらつきは sd 0.04s、8% の段で
+    #: 縮む時間は 0.15〜0.2s。幅 2% では 0.04s）
+    time_regrow: float = 2.0
+    #: 計画のラップがこの割合も縮まない段は採用しない（`v_max` や加減速で決まっていて、上げる意味が無い）
+    time_plan_min: float = 0.003
+    #: これより短い「1 周」は数えない [s]（自己位置が跳んでゲートを 2 度またいだ）
+    time_lap_min_s: float = 2.0
+    #: **リアの滑り**: 舵が求める曲率と実曲率が逆向き（逆ハン）で、横加速度が `slide_alat` [m/s²] 以上の
+    #: 状態が `slide_s` 秒たまったら、その段をやめる。実機では上限 6.5 未満で 0 秒、6.6 以上で毎周 0.05〜0.24 秒
+    slide_alat: float = 3.0
+    slide_s: float = 0.06
+    #: 採用済みの段で安全装置が働いたときに下げる割合と、続けて下げない時間 [s]
+    time_back: float = 0.05
+    time_guard_quiet_s: float = 3.0
+    #: 安全装置が働いた上限には、この割合より近づかない（その走行の間。同じ段を試し直して同じ外れ方を
+    #: 繰り返さない: sim.bench で、採用のたびに幅を戻して 6.20 を 3 回試し、3 回とも線から 12〜18cm）
+    time_ceil: float = 0.97
     #: True なら `step_up` を planner の設定で上書きしない（`sim.bench --grip-set step_up=…`）
     fixed_step: bool = False
     #: True なら周の境目でだけ上げる（収束の速さを比べる基準版。`sim.bench --grip-per-lap`）
@@ -473,102 +519,24 @@ class LaunchFit:
 
 @dataclass
 class LongConfig:
-    #: 加速: 求めたぶん出たら 1 回で上げる割合。高すぎても車が付いて来ないだけで、その区間で
-    #: 出た値が測れる（モジュール docstring）
-    step_up: float = 0.10
-    #: 減速: 制動区間の初めに求める減速度（確かめた値に対する倍率。上限は `dec_max`）。**出ない値を
-    #: 求めて、出た値を測る**ので、1 割ずつ試すより大きくしてある
-    #: ★ 値が決まったら（`dec_done`）強く求めるのをやめ、時間がたっても測り直さない。確かめた値が
-    #: 真値に近いと、強く求めた区間で車が「試す形」から 0.2m/s ほど遅れ、コーナーへ速く入って横の前兆が
-    #: 出ることがある（sim.bench、60 秒ごとに測り直していた版で線から 18cm・横の値を 1 割低く誤った）。
-    #: 測り直すのは、ふだんの制動で出なかったとき・横の学習が「路面が変わった」と見たとき・保存した値から
-    #: 再開したときだけ。路面が良くなったことには気づかない（上げ直すには `.grip.json` を消す）
-    boost: float = 1.15
-    back_off: float = 0.92      #: 保存した値から再開するときに掛ける割合
-    #: 求めた加速度に対して出た割合がこれ以上なら「出た」（＝限界はそれ以上）
-    pass_ratio: float = 0.97
-    #: プロファイルが上限のこの割合以上を求めている間を 1 つの区間とする
+    #: 1 段で上げる（下げる）割合
+    step: float = 0.08
+    #: 付いて行けたとみなす、制動区間の終わりで車速が計画より速かったぶん [m/s]（モジュール docstring）
+    lag: float = 0.10
+    #: プロファイルが減速の上限のこの割合以上を求めている間を 1 つの制動区間とする。`min_s` 秒より短い
+    #: 区間は見ない。終わりの `tail_s` 秒の平均を、その区間の値にする
     zone: float = 0.5
-    #: 窓を通して平均で上限のこの割合以上を求めていた窓だけ評価する
-    demand: float = 0.85
-    #: 横加速度が横の限界のこの割合未満の間だけ測る。摩擦円で前後に使える力が減るぶん
-    #: （`sqrt(1 − 割合²)`）で割って直線での値に直すが、この補正はモデルに依る（シムの車は
-    #: `1/sqrt(1 + 割合²)`）。0.5 なら補正は最大 13%・モデルの違いは最大 3%（窓の平均ではその半分ほど）。
-    #: 0.35 にすると、コーナーの続くコース（toyota2）では測れる窓が 1 周に 1 つも無くなる
-    lat_max: float = 0.5
-    #: 減速を強く求める（`raceline.probe_brake`）のは、横がこの割合未満の所・落とす速度²のこの
-    #: 割合まで・この時間 [s] 以上続けられる区間だけ
-    probe_lat: float = 0.5
-    probe_part: float = 0.6
-    probe_min_s: float = 0.25
-    #: 同じく、強く求める時間の上限 [s]（測るのに要るぶんだけ）
-    probe_max_s: float = 0.35
-    #: 同じく、強く求めた後に元のプロファイルへ戻す距離の時定数 [m]
-    probe_ease_m: float = 1.2
-    #: 窓の長さ [s]: これだけ溜まったら評価して次の窓へ／区間の終わりで評価する下限
-    win_s: float = 0.4
-    win_min_s: float = 0.15
-    #: 区間の初めのこの時間は窓に入れない [s]（指令の遅れ・STM32 の傾きのローパス・車速のローパス）
-    settle_s: float = 0.06
-    #: 区間の終わりのこの時間も評価に入れない [s]。指令は少し先の場所の速度なので（`speedctl.ref_command`
-    #: の前倒し）、区間が終わる手前で車の加速が先に細る——それを「出ていない」と取り違えた（sim.bench）
-    tail_s: float = 0.08
-    #: 窓の前半と後半の傾きの差がこの割合を超えたら捨てる（立ち上がりの途中。頭打ちになっていない）
-    plateau: float = 0.15
-    #: 「求めたのに出ていない」と言うのに要る、窓の間に増えた車速の遅れ [m/s]
-    lag_min: float = 0.03
-    #: 「計画に乗っている」とみなす車速の差 [m/s]。区間の最初の窓がこれより遅れて始まったら、
-    #: 「出ていない」とは言わない
-    lag_on: float = 0.3
-    #: 加速: 測った限界に掛けて上限にする割合
-    acc_keep: float = 0.97
-    #: 減速: 求めたぶん出たとき、出た値に掛けて上限にする割合
-    dec_keep: float = 0.97
-    #: 加速: 測った限界のすぐ下でこれだけ続けて「出た」ら、限界を `acc_creep` だけ上へ見直す。1 回の
-    #: 測り違いで低く決めたままにしない（走り出しの 1 回で真値 3.0 を 2.2 と測り、そのまま 150 秒
-    #: 走った、sim.bench）。10% ずつ試し直す形にはしない（コーナーの出口で求めすぎになる）
-    acc_creep_n: int = 6
-    acc_creep: float = 0.03
-    #: 減速: 続けて 2 回、この幅に収まる測定が出たら「決まった」（`dec_done`。強く求めるのをやめる。
-    #: ラインの引き直しもこれを待つ）
-    settle_tol: float = 0.04
-    #: 上限を下げてよいのは、出発点のこの割合まで（測り違いが重なって下がり続けないための歯止め）
-    floor: float = 0.5
-    #: 学習値が変わってからこの時間は見ない [s]（速度プロファイルが作り直され、求める加速度が
-    #: 窓の途中で変わる）
+    min_s: float = 0.3
+    tail_s: float = 0.1
+    #: 学習値（横も含む）が変わってからこの時間は見ない [s]（速度プロファイルが作り直される）
     quiet_s: float = 0.4
-    #: 出た加速度が求めた値のこの割合に届かない窓は捨てる（路面の限界ではなく、追っていないだけ）
-    sane_ratio: float = 0.4
-    #: これより小さい変化では値を書き換えない（速度プロファイルを作り直し続けない）
-    min_change: float = 0.01
-    #: 計画の速度が 1 つの状態の間にこれ以上動いたら、窓を捨てる [m/s]（ふだんは 0.06 まで）
-    jump: float = 0.15
-    #: 落ち着いていた加速の上限がこの割合を切ったら「路面が変わった」（減速も同じ割合で先に下げる）
-    road_drop: float = 0.8
-    #: **車速の雑音があるとき**（窓の直線当てはめの残りから出した傾きの誤差が、求めた加速度の
-    #: `se_free` 以上）は、1 つの窓で決めない。出た÷求めた を窓ごとに誤差の重みで溜め、その
-    #: 平均から誤差の `z` 倍を引いた下の端で判断する:
-    #: - 減速を上げる: 今の値より強く求めた窓の「出た値」を溜め、下の端（× `dec_keep`）が今の値を
-    #:   `gain_min` 以上上回ったら、そこまで。求めた値までは上げない
-    #: - 加速を上げる: 出た÷求めた の下の端が `pass_lo` 以上で 1 段
-    #: - 「限界」と言うのは、その窓の出た値が誤差の `z` 倍を足しても足りないときだけ
-    #: 実機の車速の雑音（σ 0.03〜0.05m/s、約 11Hz）では 0.4 秒の窓の傾きが ±0.2m/s²（約 8%）ずれる。
-    #: 1 つの窓で決めると、たまたま高く出た窓のたびに減速が 15% ずつ上がり、真値を 17% 上回った
-    #: （sim.bench `--real-noise`、真値 2.56 に対して 3.00。コーナーへ止まれない速度で入る）
-    se_free: float = 0.015
-    z: float = 1.5
-    gain_min: float = 0.03
-    pass_lo: float = 0.95
-    #: 車速の雑音が独立とみなせる間隔 [s]（実機の車速は 2〜3 標本先で相関がほぼ消える）
-    noise_corr_s: float = 0.03
-    #: 雑音があるとき、TC が窓のこの割合以上で介入していたら、加速は路面で頭打ちとみなす
-    tc_part: float = 0.5
-    #: 区間の途中では、横の割合が `lat_max` のこの倍率まで続ける
-    lat_hold: float = 1.2
+    #: 保存した値から再開するときに掛ける割合と、上限を下げてよい下限（出発点に対する割合）
+    back_off: float = 0.92
+    floor: float = 0.5
 
 
 class LongLearner:
-    """加速・減速の上限を走行中に決める（モジュール docstring）。値は `GripMap.accel`・`decel`。"""
+    """減速の上限を走行中に決める（モジュール docstring）。値は `GripMap.decel`。加速は学習しない。"""
 
     def __init__(self, cfg: LongConfig | None = None) -> None:
         self.cfg = cfg or LongConfig()
@@ -576,357 +544,98 @@ class LongLearner:
 
     def reset(self, m: GripMap) -> None:
         self.map = m
-        self.acc_max = self.dec_max = A_CEIL
-        self.dec_use = 1.0
+        self.dec_max = A_CEIL
+        self.dec_floor = X_FLOOR
         self.down_only = False
-        self.acc_done = self.dec_done = False
+        self.dec_done = False               #: 止めたか（付いて行けなくなった・設定の上限まで来た）
         self.ver = 0                        #: 値が変わるたびに進む
         self.ver_down = 0
-        self.events: list[dict] = []        #: 値を下げた測定の記録（表示・ベンチ用）
-        self.windows = 0                    #: 評価した窓の数
-        self.skips: dict[str, int] = {}     #: 評価しなかった窓の数（理由ごと。診断用）
-        self.acc_floor = self.dec_floor = X_FLOOR
-        self._dec_init = 0.0
-        self._dec_seen = False              #: 減速の窓を 1 つでも評価したか
-        #: 窓ごとの (時刻, 向き, 求めた, 出た, 判定)（診断用。直近 2000）。判定は "出た"・"限界"・""
-        self.log: list[tuple] = []
-        self.acc_ceil = 0.0                 #: 測った加速の限界 [m/s²]（0 = まだ測っていない）
-        self._acc_pass = 0                  #: 測った限界のすぐ下で続けて「出た」数
-        self._dec_hist: list[float] = []    #: 直近の減速の測定 [m/s²]
-        self._dec_done_t = 0.0              #: 減速が「決まった」時刻
-        #: 今の窓 [向き, 時刻…, 車速…, 計画の速度…, 求めた加速度…, 摩擦円の割合…]
-        self._win: list | None = None
-        self._zone_sign = 0
-        self._zone_t = 0.0                  #: 今の区間が始まった時刻
-        self._zone_first = True             #: 今の区間で、まだ「計画に乗っている」窓を見ていない
-        self._quiet_t = -1e9                #: 最後に学習値が変わった時刻
-        self._now = 0.0
-        #: 雑音があるときに溜める、向きごとの [Σ重み, Σ重み×値, Σ重み×求めた]（`LongConfig.se_free`。
-        #: 値は、加速が 出た÷求めた、減速が 出た値 [m/s²]）
-        self._ev: dict[int, list[float]] = {1: [0.0, 0.0, 0.0], -1: [0.0, 0.0, 0.0]}
-        self.noisy = 0                      #: 雑音ありとして扱った窓の数（診断用）
+        self.events: list[dict] = []        #: 値を下げた記録（表示・ベンチ用）
+        self.windows = 0                    #: 判断した周の数
+        self.last = 0.0                     #: 直近の周の、区間の終わりの差のいちばん大きい値 [m/s]（診断用）
+        self._zone: list[float] | None = None   #: 今の制動区間の「車速 − 計画の速度」
+        self._ends: list[float] = []        #: この周の、区間ごとの終わりの差
+        self._plan = (0.0, 0.0, 0.0)        #: 直近に受け取った計画の (加速度, 速度) と、それが変わった時刻
+        self._t = self._dt = 0.0
+        self._quiet_t = -1e9
 
-    def configure(self, *, acc_init: float, dec_init: float, acc_max: float, dec_max: float,
-                  down_only: bool, dec_use: float = 1.0) -> None:
-        """:param dec_use: 速度プロファイルが減速に使う割合（確かめた値に対して。planner の
-            `LEARN_BRAKE_USE`）。制動区間の初めに強く求めるのは、それより強く求められる間だけ"""
+    def configure(self, *, acc_init: float, dec_init: float, dec_max: float, down_only: bool) -> None:
+        """:param acc_init: 加速の上限 [m/s²]（学習しない。この値をそのまま使う）"""
         m = self.map
-        self.dec_use = dec_use
-        self.acc_max = max(X_FLOOR, acc_max)
         self.dec_max = max(X_FLOOR, dec_max)
         self.down_only = down_only
-        self.acc_floor = max(X_FLOOR, self.cfg.floor * acc_init)
         self.dec_floor = max(X_FLOOR, self.cfg.floor * dec_init)
-        self._dec_init = dec_init
-        if m.accel <= 0.0:
-            m.accel = max(X_FLOOR, min(self.acc_max, acc_init))
-            self._bump(True)
-        if m.decel <= 0.0:
-            m.decel = max(X_FLOOR, min(self.dec_max, dec_init))
-            self._bump(True)
-        if m.accel > self.acc_max or m.decel > self.dec_max:
-            m.accel, m.decel = min(m.accel, self.acc_max), min(m.decel, self.dec_max)
+        acc = max(X_FLOOR, acc_init)
+        dec = min(self.dec_max, max(self.dec_floor, m.decel if m.decel > 0.0 else dec_init))
+        if acc != m.accel or dec != m.decel:
+            m.accel, m.decel = acc, dec
             self._bump(True)
 
     def load(self) -> None:
         """保存した値から再開する（`reset` の後）。そのまま信じず `back_off` 倍から。"""
         m = self.map
-        if m.accel > 0.0:
-            m.accel = max(X_FLOOR, m.accel * self.cfg.back_off)
         if m.decel > 0.0:
             m.decel = max(X_FLOOR, m.decel * self.cfg.back_off)
 
-    @property
-    def probe(self) -> float:
-        """制動区間の初めに求める減速度 [m/s²]（`raceline.probe_brake`）。"""
-        return min(self.dec_max, self.map.decel * self.cfg.boost)
-
-    @property
-    def probing(self) -> bool:
-        """確かめた値より強い減速を求めて測るか（「下げるだけ」のときは求めない）。"""
-        return (not self.down_only and not self.dec_done
-                and self.probe > self.dec_use * self.map.decel * 1.02)
-
     def rescale(self, r: float) -> None:
-        """路面が変わった（横の限界が `r` 倍になった。横の学習が呼ぶ）。前後も同じ割合で下げ、測り直す。"""
+        """路面が変わった（横の限界が `r` 倍になった。横の学習が呼ぶ）。減速も同じ割合で下げ、探し直す。"""
         m = self.map
-        self._ev = {1: [0.0, 0.0, 0.0], -1: [0.0, 0.0, 0.0]}
         if r < 1.0:
-            m.accel = max(self.acc_floor, m.accel * r)
             m.decel = max(self.dec_floor, m.decel * r)
-        self.acc_ceil = 0.0
-        self._dec_hist = []
         self.dec_done = False
         self._bump(True)
 
     def recheck(self) -> None:
-        """減速を測り直す（路面が変わったらしい。横の学習が呼ぶ）。"""
-        if self.dec_done:
-            self.dec_done = False
-            self._dec_hist = self._dec_hist[-1:]
-            self._bump(False)
+        """探し直す（路面が変わったらしい。横の学習が呼ぶ）。"""
+        self.dec_done = False
 
-    def observe(self, t: float, v: float, a_plan: float, lat_frac: float, gate: str,
-                v_plan: float | None = None, tc: bool = False) -> None:
+    def observe(self, t: float, v: float, a_plan: float, gate: str, v_plan: float | None) -> None:
         """車両状態 1 つぶん。
 
         :param a_plan: 今の場所でプロファイルが求めている前後の加速度 [m/s²]（減速は負）
-        :param lat_frac: 今の横加速度 ÷ その場所の横の限界
         :param v_plan: 今の場所のプロファイルの速度 [m/s]
-        :param tc: STM32 の TC が介入しているか（`VehicleState.tc_active`）
+        :param gate: 空でなければ見ない理由（通常の周回でない・前兆で減速している）
         """
+        cfg = self.cfg
+        self._dt, self._t = t - self._t, t
+        if v_plan is not None and (a_plan, v_plan) != self._plan[:2]:
+            self._plan = (a_plan, v_plan, t)
+        if gate or v_plan is None or v < 0.5 or t - self._quiet_t < cfg.quiet_s:
+            self._zone = None                   # 途中で切れた区間は捨てる
+            return
+        if -a_plan < cfg.zone * self.map.decel:
+            z, self._zone = self._zone, None
+            dt = self._dt if 0.0 < self._dt < 0.1 else 0.01
+            if z is not None and len(z) * dt >= cfg.min_s:
+                k = max(1, int(round(cfg.tail_s / dt)))
+                self._ends.append(sum(z[-k:]) / len(z[-k:]))
+            return
+        if self._zone is None:
+            self._zone = []
+        # 計画は planner の周期（10Hz）でしか更新されない。その間は計画の加速度で今へ進める
+        self._zone.append(v - (v_plan + a_plan * min(t - self._plan[2], 0.2)))
+
+    def lap(self, t: float) -> None:
+        """1 周した。付いて行けていれば 1 段上げ、行けていなければ 1 段下げて止める。"""
         cfg, m = self.cfg, self.map
-        self._now = t
-        if v_plan is None or t - self._quiet_t < cfg.quiet_s:
-            gate = gate or "見ない"
-        sign, f = 0, 1.0
-        # 区間の途中では、横の割合が境目を少し超えても続ける（境目の近くで行き来して窓が細切れに
-        # なると、どの窓も「短い」で評価されない。sim.bench `--real-noise`、真値 0.30 で加速の窓 0）
-        lat_ok = lat_frac < cfg.lat_max * (cfg.lat_hold if self._zone_sign else 1.0)
-        if not gate and v > 0.5:
-            f = math.sqrt(1.0 - min(lat_frac, cfg.lat_max * cfg.lat_hold) ** 2)
-            if a_plan >= cfg.zone * m.accel * f:
-                sign = 1
-            elif -a_plan >= cfg.zone * m.decel * f:
-                sign = -1
-        demand = sign                           # 横を見ない「求めている向き」
-        if not lat_ok:
-            sign = 0
-        w = self._win
-        if sign != self._zone_sign:
-            # 区間が変わった（止められた・横を使い始めた・求める向きが変わった）。溜めた窓を評価する。
-            # 求めるのをやめた所で終わったなら、終わりの `tail_s` を除く（横を使い始めて終わった
-            # だけなら、求め続けているので除かない）
-            self._zone_sign, self._zone_t, self._win = sign, t, None
-            if w is not None and not gate:
-                self._eval(t, w if demand == w[0] else self._cut(w, t - cfg.tail_s)[0])
-            self._zone_first = True
-            w = None
-        if not sign or t - self._zone_t < cfg.settle_s:
+        ends, self._ends = self._ends, []
+        if not ends:
             return
-        if w is None:
-            w = self._win = [sign, [], [], [], [], [], []]
-        if w[3] and abs(v_plan - w[3][-1]) > cfg.jump:
-            # 計画の速度が跳んだ（プロファイルが作り直された・自己位置が動いた）。窓を取り直す
-            self._skip("計画が跳んだ")
-            self._win = None
-            self._zone_sign = 0
-            return
-        w[1].append(t)
-        w[2].append(v)
-        w[3].append(v_plan)
-        w[4].append(abs(a_plan) / f)
-        w[5].append(f)
-        w[6].append(1.0 if tc else 0.0)
-        if t - w[1][0] >= cfg.win_s + cfg.tail_s:
-            # 窓が溜まった。終わりの `tail_s` は次の窓へ回す（そこで区間が終わるかもしれない）
-            head, self._win = self._cut(w, t - cfg.tail_s)
-            self._eval(t, head)
-
-    @staticmethod
-    def _cut(w: list, t_end: float) -> tuple[list, list]:
-        """窓を時刻 `t_end` で前後に分ける。"""
-        k = len(w[1])
-        while k > 0 and w[1][k - 1] > t_end:
-            k -= 1
-        return [w[0]] + [x[:k] for x in w[1:]], [w[0]] + [x[k:] for x in w[1:]]
-
-    def _eval(self, t: float, w: list, half: bool = False) -> None:
-        """窓 1 つを評価する: 車速の傾き（最小二乗）＝出た加速度を、求めた加速度と比べる。
-
-        - 求めたぶん出ている → 限界はそれ以上
-        - 出ていなくて、車速が計画から離れていき、傾きが一定 → **路面で頭打ち。出た値が限界**
-        - どちらでもない（立ち上がりの途中・追っていないだけ）→ 何もしない
-        """
-        cfg, m = self.cfg, self.map
-        sign, ts, vs, vps, asks, fs, tcs = w
-        n = len(ts)
-        if n < 8 or ts[-1] - ts[0] < cfg.win_min_s:
-            self._skip("短い")
-            return
-        tt = np.asarray(ts) - ts[0]
-        vv = np.asarray(vs)
-        slope = float(np.polyfit(tt, vv, 1)[0])
-        got = sign * slope / (sum(fs) / n)      # 直線での値に直す
-        ask = sum(asks) / n
-        level = m.accel if sign > 0 else m.decel
-        if ask < cfg.demand * level or got < cfg.sane_ratio * ask:
-            self._skip("求めていない" if ask < cfg.demand * level else "追っていない")
-            return
-        # 傾きの誤差。車速の雑音の幅は 2 階の差分の中央値から出す（傾きが途中で変わった窓でも
-        # 雑音と取り違えない。直線からの残りで測ると、頭打ちに入った折れ目を雑音に数えてしまう）。
-        # 2 階の差分の幅 → 雑音の幅の換算 0.65 は実機の車速の自己相関（隣 0.4〜0.6）での値
-        span = float(tt[-1])
-        d2 = vv[2:] - 2.0 * vv[1:-1] + vv[:-2]
-        sv = 0.65 * 1.4826 * float(np.median(np.abs(d2)))
-        se = sv * math.sqrt(12.0 / max(2.0, span / cfg.noise_corr_s)) / max(span, 1e-6) / (sum(fs) / n)
-        noisy = se >= cfg.se_free * ask
-        h = n // 2
-        s1 = float(np.polyfit(tt[:h], vv[:h], 1)[0])
-        s2 = float(np.polyfit(tt[h:], vv[h:], 1)[0])
-        # 半分ずつの傾きは、全体の傾きより誤差が約 2.8 倍大きい（長さ半分・標本半分）
-        flat = abs(s1 - s2) <= cfg.plateau * abs(slope) + (cfg.z * 2.8 * math.sqrt(2.0) * se if noisy else 0.0)
-        lag0, lag1 = sign * (vps[0] - vs[0]), sign * (vps[-1] - vs[-1])
-        verdict = ""
-        if (not flat and not half and got < cfg.pass_ratio * ask
-                and ts[-1] - ts[h] >= cfg.win_min_s and abs(s2) < abs(s1)):
-            # 窓の途中で傾きが落ちた（路面が変わった・頭打ちに入った）。後半だけで評価し直す
-            self._eval(t, [sign] + [x[h:] for x in w[1:]], half=True)
-            return
-        bounded = False
-        lag_min = cfg.lag_min
-        if noisy:
-            # 遅れは窓の両端の 1 点ずつではなく、当てはめた直線の両端で見る（1 点の車速は雑音で動く）
-            lf = np.polyfit(tt, sign * (np.asarray(vps) - vv), 1)
-            lag0, lag1 = float(lf[1]), float(lf[1] + lf[0] * span)
-            lag_min += cfg.z * se * span        # 傾きの誤差のぶん、遅れの増えを多めに求める
-        behind = (flat and lag1 >= lag_min and lag1 - lag0 >= lag_min
-                  and (abs(lag0) <= cfg.lag_on or not self._zone_first))
-        if noisy:
-            self.noisy += 1
-            ev = self._ev[sign]
-            if sign > 0:
-                # 加速: 出た÷求めた を溜める（求めたぶん出ているか）
-                wgt = (ask / se) ** 2
-                ev[0] += wgt
-                ev[1] += wgt * got / ask
-            elif ask >= m.decel * (1.0 + cfg.gain_min):
-                # 減速: 今の値より強く求めた窓の、出た値を溜める（どこまで出るか）。ふだんの制動の窓
-                # （求めた値が今の値以下）を混ぜると、平均が今の値に寄って上がらなくなる
-                wgt = 1.0 / (se * se)
-                ev[0] += wgt
-                ev[1] += wgt * got
-                ev[2] += wgt * ask
-            lo = ev[1] / ev[0] - cfg.z / math.sqrt(ev[0]) if ev[0] > 0.0 else 0.0
-            # 加速は、TC が窓の半分以上で介入していれば路面で頭打ち（車速の傾きの形に頼らない。
-            # 雑音があると「遅れが増えていて傾きが一定」が言えず、高すぎる加速が下がらなかった）
-            tc_lim = sign > 0 and sum(tcs) >= cfg.tc_part * n and got < cfg.pass_ratio * ask
-            if tc_lim or (got + cfg.z * se < cfg.pass_ratio * ask and behind):
-                verdict = "限界"
-            elif sign > 0 and lo >= cfg.pass_lo:
-                verdict = "出た"
-            elif sign < 0 and lo * cfg.dec_keep > m.decel * (1.0 + cfg.gain_min):
-                verdict = "出た"
-                ask, got = ev[2] / ev[0], lo
-                bounded = True                          # 上げるのは、下の端が示す値まで
-            if verdict:
-                self._ev[sign] = [0.0, 0.0, 0.0]
-        elif got >= cfg.pass_ratio * ask:
-            verdict = "出た"
-        elif behind:
-            # 車速が計画より遅れていて（減速なら速くて）、その遅れが増えている。計画より先に居る車が
-            # 計画に追いつかれるだけの窓（遅れが負から 0 へ）は数えない——路面ではなく車速PIが抑えている。
-            # 区間の初めから計画より大きく遅れている車（前兆で減速した後・迂回の後の「追いつく途中」）も
-            # 数えない——planner は計画の加速度ではなく、今の車速から追いつく速度を指令している
-            verdict = "限界"
-        if verdict == "限界" or lag1 < cfg.lag_on:
-            self._zone_first = False            # 計画に乗っていた区間の続きの窓は、遅れていてよい
+        e = self.last = max(ends)
         self.windows += 1
-        self.last = (lag0, lag1, s1, s2)        # 診断用
-        self.log.append((t, sign, ask, got, verdict))
-        del self.log[:-2000]
-        if verdict and sign > 0:
-            self._accel(t, ask, got, verdict == "限界")
-        elif verdict:
-            self._decel(t, ask, got, verdict == "限界", bounded)
-
-    def _skip(self, why: str) -> None:
-        self.skips[why] = self.skips.get(why, 0) + 1
-
-    def _accel(self, t: float, ask: float, got: float, limit: bool) -> None:
-        cfg, m = self.cfg, self.map
-        if limit:
-            # 路面で頭打ち。出た値が限界
-            new = max(self.acc_floor, min(self.acc_max, got * cfg.acc_keep))
-            d = m.decel
-            if not self._dec_seen:
-                # 加速が路面で頭打ちなら、減速も同じ後輪で同じ路面。まだ一度も制動を見て
-                # いないなら、同じ割合まで先に下げておく（最初のコーナーへ速すぎる速度で
-                # 入らない。下げすぎなら、制動区間の初めの測定で戻る）
-                d = max(self.dec_floor, self._dec_init * got / ask)
-            elif self.acc_done and new < cfg.road_drop * m.accel:
-                # 落ち着いていた加速の上限が、はっきり落ちた（路面が変わった）。減速も同じ割合で
-                # 先に下げて、測り直す——次の制動で気づくのでは、そのコーナーに間に合わない
-                d = max(self.dec_floor, m.decel * new / m.accel)
-            if d < m.decel:
-                m.decel = d
-                self._dec_hist = []
-                self.dec_done = False
-                self._bump(True)
-            self.acc_ceil = got
-            self._acc_pass = 0
-            self.acc_done = True
-            if new < m.accel * (1.0 - cfg.min_change) or (
-                    new > m.accel * (1.0 + cfg.min_change) and not self.down_only):
-                if new < m.accel:
-                    self.events.append({"t": t, "kind": "加速", "ask": ask, "got": got})
-                down = new < m.accel
-                m.accel = new
-                self._bump(down)
+        val = m.decel
+        if e > cfg.lag:
+            new, self.dec_done = max(self.dec_floor, val / (1.0 + cfg.step)), True
+            if new < val:
+                self.events.append({"t": t, "kind": "減速", "ask": val, "got": new, "lag": e})
+        elif self.dec_done or self.down_only:
             return
-        if ask < 0.9 * m.accel or self.down_only:
-            return
-        top = self.acc_max
-        if self.acc_ceil:
-            top = min(top, self.acc_ceil * cfg.acc_keep)
-        if m.accel >= top * (1.0 - cfg.min_change):
-            # 測った限界（か設定の上限）のすぐ下で出ている
-            self.acc_done = True
-            if self.acc_ceil:
-                self._acc_pass += 1
-                if self._acc_pass >= cfg.acc_creep_n:
-                    self._acc_pass = 0
-                    self.acc_ceil *= 1.0 + cfg.acc_creep
-            return
-        m.accel = min(top, m.accel * (1.0 + cfg.step_up))
-        self._bump(False)
-
-    def _decel(self, t: float, ask: float, got: float, limit: bool, bounded: bool = False) -> None:
-        """:param bounded: 雑音があるときの「出た」。求めた値までは上げず、`got`（溜めた窓の下の端）まで"""
-        cfg, m = self.cfg, self.map
-        self._dec_seen = True
-        was = self.dec_done
-        if not limit:
-            # 求めたぶん出た。出た値（の少し下）までは出ると分かったので、そこまで上げる。求めた値では
-            # なく出た値で上げる——窓には強く求めていない所も入るので、求めた値の平均で上げると 1 周に
-            # 4% ずつしか上がらなかった（sim.bench、真値 3.0 に届くまで 150 秒）
-            new = min(self.dec_max, got * cfg.dec_keep if bounded else max(ask, got * cfg.dec_keep))
-            if new > m.decel * (1.0 + cfg.min_change) and not self.down_only:
-                m.decel = new
-                self._dec_hist = []
-                self._bump(False)
-            if m.decel >= self.dec_max * (1.0 - cfg.min_change) and ask >= 0.97 * self.dec_max:
-                self._done(t, True)             # 設定の上限まで出ている
-            return
-        # 路面で頭打ち。出た値が限界。はっきり低い値はすぐ採る（止まれない速度で入り続けない）。
-        # 近い値は直近 3 つの中央値にする（1 回の測り違いで動かさない）
-        hist = self._dec_hist
-        if got < m.decel * (1.0 - 0.03):
-            hist[:] = [got]
-            new = got
         else:
-            hist.append(got)
-            del hist[:-3]
-            new = float(np.median(hist)) if len(hist) >= 2 else min(got, max(m.decel, got * 0.97))
-        new = max(self.dec_floor, min(self.dec_max, new))
-        if new < m.decel * (1.0 - cfg.min_change):
-            self.events.append({"t": t, "kind": "減速", "ask": ask, "got": got})
+            new = min(self.dec_max, val * (1.0 + cfg.step))
+            self.dec_done = new >= self.dec_max
+        if new != val:
             m.decel = new
-            self._bump(True)
-        elif new > m.decel * (1.0 + cfg.min_change) and not self.down_only:
-            m.decel = new
-            self._bump(False)
-        self._done(t, len(hist) >= 2 and max(hist) - min(hist) <= cfg.settle_tol * new)
-        if was and not self.dec_done:
-            self._bump(False)                   # また強く求めて測る（プロファイルの形が変わる）
-
-    def _done(self, t: float, done: bool) -> None:
-        if done and not self.dec_done:
-            self.dec_done = True
-            self._dec_done_t = t
-            self._bump(False)                   # 強く求めるのをやめる（プロファイルの形が変わる）
-        elif not done:
-            self.dec_done = False
+            self._bump(new < val)
 
     def _bump(self, down: bool) -> None:
         self.ver += 1
@@ -935,10 +644,10 @@ class LongLearner:
         self.note_change()
 
     def note_change(self) -> None:
-        """学習値（横も含む）が変わった。今の窓を捨て、しばらく見ない。"""
-        self._quiet_t = self._now
-        self._win = None
-        self._zone_sign = 0
+        """学習値（横も含む）が変わった。今の区間を捨て、しばらく見ない。"""
+        self._quiet_t = self._t
+        self._zone = None
+
 
 
 class GripLearner:
@@ -1167,9 +876,8 @@ class GripLearner:
         if v > 0.8 and rate < cfg.steady and self.cap is None:
             # 雑音の幅は、学習を止めている間も直線でも測る（センサと車の性質で、走り方に依らない）
             self._noise_add(self._kexp - self._kmeas, dt)
-        self.long.observe(t, v, a_x, a / max(self.level_at(x, y), 1e-6),
-                          gate or long_gate or ("横の前兆" if self.cap is not None else ""), v_plan,
-                          tc_active)
+        self.long.observe(t, v, a_x, gate or long_gate or ("横の前兆" if self.cap is not None else ""),
+                          v_plan)
         if gate:
             self._dev_run = 0
             self._seg = None
@@ -1252,7 +960,9 @@ class GripLearner:
                 seg["ex_ap"] += applied * dt
             lv, own = self._cell_level(cell)
             if a_rec > seg["cells"].get(key, (0.0, 0.0))[0]:
-                seg["cells"][key] = (a_rec, applied, own)
+                lim = self.map.accel if a_x > 0.0 else self.map.decel
+                seg["cells"][key] = (a_rec, applied, own,
+                                     lim <= 0.0 or abs(a_x) < cfg.plateau_long * lim)
                 if a_rec > seg["peak"]:
                     seg["at"] = (x, y)
             seg["peak"] = max(seg["peak"], a_rec)
@@ -1296,6 +1006,20 @@ class GripLearner:
         r = min(abs(d - self._nz_mean), 3.0 * m.noise + 1e-4)
         m.noise += (1.2533 * r - m.noise) / min(m.noise_n, cfg.noise_n)
         m.noise = min(m.noise, NOISE_CEIL)
+
+    def observe_plan(self, lap_s: float, ref_lap_s: float = 0.0) -> None:
+        """今の速度プロファイルどおりに走ったときの 1 周の時間 [s]（planner が計画の周期で渡す。
+        `TimeLearner` が使う）。
+
+        :param ref_lap_s: 横の上限だけを `ref_level` に戻したときの同じ時間 [s]（0 = 無い）
+        """
+
+    #: 比べる相手の横の上限 [m/s²]（`TimeLearner` が段を試している間だけ。0 = 無い）
+    ref_level = 0.0
+
+    def diag(self) -> dict:
+        """記録に残す追加の診断（`AutoState.grip` に足す。値は Python の数だけ）。"""
+        return {}
 
     def observe_cross(self, cross: float) -> None:
         """経路からの横偏差 [m]（planner が計画の周期で渡す。補助の前兆）。"""
@@ -1402,7 +1126,9 @@ class GripLearner:
         sig = (m.level, self.conf, m.bad, self._prov is None, self.converged)
         cells_changed = False
         flat_own = True
-        for key, (a, ap, own) in seg["cells"].items():
+        noisy = self.noise_sigma > cfg.noise_quiet
+        ask = max(cfg.plateau_ask * self.step, cfg.plateau_ask_noisy if noisy else 0.0)
+        for key, (a, ap, own, lat_set) in seg["cells"].items():
             c = m.cells.get(key)
             if c is None:
                 c = m.cells[key] = _Cell()
@@ -1413,12 +1139,16 @@ class GripLearner:
                 c.ok = a
                 cells_changed = cells_changed or bool(c.bad)
             # 頭打ち: 前より高い上限で通ったのに、出た横加速度が増えていない
-            if c.ap > 0.0 and ap >= c.ap * (1.0 + cfg.plateau_ask * self.step):
+            if not lat_set:
+                continue                        # 車速が加減速で決まっている所（`plateau_long`）
+            if c.ap > 0.0 and ap >= c.ap * (1.0 + ask):
                 if a - c.al < cfg.plateau_gain * (ap / c.ap - 1.0) * c.al:
                     flat.append(c)
                     flat_own = flat_own and own
                 else:
                     grew += 1
+            elif noisy and cfg.plateau_ask_noisy > 0.0 and 0.0 < c.ap <= ap:
+                continue                        # まだ比べられる幅が無い。前の値を持ち続ける
             c.ap, c.al = ap, a
         # 前兆の値は周り `patch_m` のセルにも書いてある（`_precursor`）が、コーナーの入口などは
         # 上限いっぱいを使わないので試行に入らず、自分では見直されない。通ったセルの隣の、試行に
@@ -1452,7 +1182,7 @@ class GripLearner:
                     if m.cells[k].cxn >= cfg.cross_gain_n), default=0.0)
         self.last_cross_gain = gain
         if gain > cfg.cross_gain:
-            ap = max(ap for _, ap, _ in seg["cells"].values())
+            ap = max(x[1] for x in seg["cells"].values())
             self._plateau(t, seg, self._patch(seg["cells"]), b=min(peak, ap / (1.0 + self.step)),
                           kind="横偏差の増え", excess=gain, local=seg["lv"] <= 0.0)
             return
@@ -1521,6 +1251,13 @@ class GripLearner:
         if now != sig or cells_changed:
             self._bump(down=m.level < before[0] or now[1] < sig[1] or cells_changed)
 
+    def new_line(self) -> None:
+        """追う線が変わった（planner が呼ぶ）。同じ場所でも曲率と車速が変わるので、頭打ち・横偏差の増えを
+        比べる「前に通ったときの値」を捨てる（実機 2026-10-13: 乗り換え前の線の値と比べて頭打ちになった）。"""
+        for c in self.map.cells.values():
+            c.ap = c.al = c.cx = 0.0
+            c.cxn = 0
+
     def _patch(self, keys) -> list[_Cell]:
         """`keys` のセルと、その周り `patch_m` のセル（即時の前兆と同じ範囲。コーナーの入口のセルは
         まだ上限いっぱいを使っておらず、試行のセルに入っていない）。無ければ作る。"""
@@ -1539,7 +1276,13 @@ class GripLearner:
             （全体まで下げると、ほかのコーナーをその低い値から探し直すことになる）
         """
         m, cfg = self.map, self.cfg
-        b = max(self.floor, seg["peak"] if b is None else b)
+        if b is None:
+            # 出た横加速度の最大。試行は「上限の `trial_use` 以上まで出た」区間なので、それより下には
+            # しない（雑音が大きいときに試行へ書く値は長めにならしてあり、短いコーナーでは山に届かない。
+            # そのまま採って、上限 4.74 に対して 3.08 を記録した。sim.bench `--real-noise`）
+            ap = max((x[1] for x in seg["cells"].values()), default=0.0)
+            b = max(seg["peak"], cfg.trial_use * ap)
+        b = max(self.floor, b)
         for c in flat:
             c.bad = b if not c.bad else min(c.bad, b)
             if c.ok >= c.bad:
@@ -1548,7 +1291,7 @@ class GripLearner:
         self._lap_event = True
         applied = self.use * seg["lv"]
         if local:
-            applied = max((ap for _, ap, _ in seg["cells"].values()), default=0.0)
+            applied = max((x[1] for x in seg["cells"].values()), default=0.0)
         else:
             self._share(x, y, b)
             m.level = min(m.level, b)
@@ -1577,6 +1320,7 @@ class GripLearner:
 
     def lap(self, t: float) -> None:
         """1周した（基準版 `per_lap` はここでだけ上げる）。"""
+        self.long.lap(t)
         if self.cfg.per_lap and self._lap_pass and not self._lap_event:
             lv = self.map.level
             self._relevel(t, raise_ok=True)
@@ -1640,3 +1384,328 @@ class GripLearner:
         if self.converged:
             return "収束"
         return "挟み込み" if self.map.bad else "探索"
+
+
+#: 周回のタイムに数えてよい「学習を止める理由」（走り方は変わっていない）
+_TIME_OK_GATES = ("舵が上限", "曲がり切れない区間")
+
+
+class TimeLearner(GripLearner):
+    """横の上限を**周回のタイムで**決める（前兆を探して決めるのをやめた版。2026-10-13）。
+
+    目的は速く走ることで、「前兆が出ない範囲でいちばん高い横加速度」はその代用品にすぎない。代用品は
+    前兆の検出が完全であることに頼っていて、実機では誤検出で早く止まる（4.41m/s²）・検出の穴から
+    上がりすぎる（8.0m/s²、リアが滑る）の両方が起きた。同じ 4 走行の集計では、ラップは 6.0〜6.3m/s² で
+    頭打ちになっていた——**上げても縮まなくなった所が、求めている値**。
+
+    - 上限を 1 段（`time_step`）上げて `time_laps` 周走り、前の段より
+      「実際に縮んだ時間 ÷ 速度プロファイルが縮むはずの時間」が `time_gain` 以上なら採用して次へ。
+      届かなければ戻して幅を半分にし、幅が `time_step_min` を切ったら終わり（収束）
+    - 計画と比べるのは、加速・減速の学習が同時に進むから。「縮むはずの時間」は、今の加速・減速のまま
+      横の上限だけを採用済みの段へ戻した計画との差（planner が出す）。採用済みの段を測った後に減速が
+      上がって縮んだぶんは、計画どおり出たものとして実際のタイムから引く（横を上げた効果と取り違えない）
+    - タイムは、走り出した場所に置いたゲート線をまたいだ時刻（100Hz で補間）で計る。回避・線の乗り換え・
+      推測航法・前兆での減速があった周は捨てる
+    - **安全装置**（上限を探すためではなく、行き過ぎた 1 段を早くやめるためだけ）: 即時の前兆（曲率の
+      不足・横偏差 `cross_thr`）、リアの滑り（`slide_s`）、コーナーを抜けたときの横偏差の増え（`cross_gain`）。
+      試している段で出たらその段をやめ、採用済みの段で出たら `time_back` だけ下げて測り直す。
+      働いた上限には、その走行の間は近づかない（`time_ceil`）。ただし「横偏差の増え」は同じ高さで
+      2 回出てから（1 回で決めると、限界の 16% 手前の誤検出 1 回でそこに止まった。まったく決めないと、
+      採用のたびに同じ段を試し直して 400 秒たっても終わらなかった。どちらも sim.bench）
+    - 場所ごとの値（セルの前兆の値）は使わない。横の上限はコースで 1 つ
+
+    コーナー単位の前兆のうち、頭打ち・平均の不足・挟み込み（1 か所の前兆の確認）は、この版では働かない。
+    """
+
+    def reset(self, keep_map: bool = False) -> None:
+        super().reset(keep_map)
+        self._step = self.cfg.time_step
+        #: 採用した段の (上限, ラップ, 計画のラップ)。`None` = 今の段を測ってから決める
+        self._ref: tuple[float, float, float] | None = None
+        #: 今の段の (ラップ, 計画のラップ, 横だけ採用済みの段へ戻した計画のラップ)
+        self._laps: list[tuple[float, float, float]] = []
+        self._gate_line: tuple[float, float, float, float] | None = None
+        self._gate_prev: tuple[float, float, float, float] | None = None    #: 直前の (時刻, x, y, 進み)
+        self._lap_t0 = 0.0
+        self._lap_ok = False
+        self._plan_sum = [0.0, 0.0]         #: 周の中で足した [計画のラップ, 横だけ戻した計画のラップ]
+        self._plan_n = [0, 0]
+        self._slide = 0.0
+        self._guard_t = -1e9
+        self.steps: list[dict] = []         #: 段ごとの判断の記録（ベンチ・診断用）
+        self._confirmed = False             #: 採用済みの段の測り直しを済ませたか（`time_confirm`）
+        self._ceil = math.inf               #: 安全装置が働いた上限のうち、いちばん低い値 [m/s²]
+        self._soft: list[float] = []        #: 「横偏差の増え」が出た上限 [m/s²]
+        self._ref_old: tuple[float, float, float] | None = None     #: 測り直す前の値（平均する）
+        self.last_lap = (0.0, 0.0)          #: 直近に数えた (ラップ, 計画のラップ) [s]
+
+    def load(self, m: GripMap) -> None:
+        super().load(m)
+        self._ref, self._laps, self._step = None, [], self.cfg.time_step
+        self._ref_old, self._confirmed = None, False
+
+    def new_line(self) -> None:
+        super().new_line()
+        # 線が変われば 1 周の長さも変わる。前の線のタイムとは比べない
+        self._ref, self._laps, self._lap_ok = None, [], False
+        self._ref_old, self._confirmed = None, False
+
+    def _cell_level(self, c: _Cell | None) -> tuple[float, bool]:
+        return self.map.level, False
+
+    def lap(self, t: float) -> None:
+        """planner の周回カウンタ（10Hz）は使わない。タイムは自前のゲートで計る。"""
+
+    def _end_trial(self, t: float, seg: dict) -> None:
+        """コーナーを 1 つ抜けた。その場所の普段より横偏差が増えていたら（`GripConfig.cross_gain`）、
+        試している段をやめる。線から `cross_thr` 外れてから気づくのでは遅い（sim.bench、路面 μ0.42:
+        即時の層は実機相当の雑音では数 % の超過に気づかず、14〜28cm の外れが 5 回）。"""
+        self.trials += 1
+        if seg["fail"]:
+            return
+        self.passes += 1
+        cfg, cells = self.cfg, self.map.cells
+        gain = max((cx - cells[k].cx for k, cx in seg["cx"].items()
+                    if k in cells and cells[k].cxn >= cfg.cross_gain_n), default=0.0)
+        self.last_cross_gain = gain
+        # 探している間だけ見る。収束した後は、線から大きく外れる・リアが滑るといったはっきりした
+        # 出来事でだけ下げる（1 回の「増え」で 5% ずつ下げていくと、測り違いのたびに遅くなる）
+        if gain > cfg.cross_gain and not self.converged:
+            x, y = seg.get("at", (0.0, 0.0))
+            self._guard(t, x, y, "横偏差の増え", seg["peak"], gain, soft=True)
+            return
+        for k, cx in seg["cx"].items():
+            c = cells.get(k)
+            if c is None:
+                c = cells[k] = _Cell()
+            c.cxn += 1
+            c.cx += (cx - c.cx) / min(c.cxn, 5)
+
+    @property
+    def ref_level(self) -> float:
+        ref = self._ref
+        return ref[0] if ref is not None and self.map.level > ref[0] * (1.0 + 1e-6) else 0.0
+
+    def observe_plan(self, lap_s: float, ref_lap_s: float = 0.0) -> None:
+        for k, val in enumerate((lap_s, ref_lap_s)):
+            if val > 0.0:
+                self._plan_sum[k] += val
+                self._plan_n[k] += 1
+
+    def observe(self, t: float, x: float, y: float, v: float, yaw_rate: float, kappa_steer: float,
+                *, a_x: float = 0.0, gate: str = "", tc_active: bool = False,
+                v_plan: float | None = None, long_gate: str = "") -> None:
+        dt = t - self._t
+        super().observe(t, x, y, v, yaw_rate, kappa_steer, a_x=a_x, gate=gate, tc_active=tc_active,
+                        v_plan=v_plan, long_gate=long_gate)
+        if 0.0 <= dt < 1e-4:
+            return                              # 同じ時刻の状態（基底も捨てている）
+        if not 0.0 < dt < 0.1:
+            self._gate_prev, self._lap_ok, self._slide = None, False, 0.0
+            return
+        cfg = self.cfg
+        if (gate and gate not in _TIME_OK_GATES) or self.cap is not None:
+            self._lap_ok = False
+        # リアの滑り: 舵が求める曲率と実曲率が逆向きのまま、横加速度が出ている
+        if not gate and v > 0.8 and self._kexp * self._kmeas < 0.0 \
+                and v * v * abs(self._kmeas) >= cfg.slide_alat:
+            self._slide += dt
+            if self._slide >= cfg.slide_s:
+                self._slide = 0.0
+                self._slow(t, v, 0.95, False)
+                self._guard(t, x, y, "リアの滑り", self._alat)
+        else:
+            self._slide = max(0.0, self._slide - dt)
+        self._time_lap(t, x, y, v, gate)
+
+    def _time_lap(self, t: float, x: float, y: float, v: float, gate: str) -> None:
+        """ゲート線をまたいだ時刻を補間して、1 周の時間を出す。"""
+        prev, line = self._gate_prev, self._gate_line
+        if line is None:
+            self._gate_prev = (t, x, y, 0.0)
+            if prev is None or gate or v < 0.8:
+                return
+            dx, dy = x - prev[1], y - prev[2]
+            n = math.hypot(dx, dy)
+            if n < 1e-3:
+                return
+            # 走り出して最初に学習が見ている場所。進む向きに直交する線
+            self._gate_line = (x, y, dx / n, dy / n)
+            self._lap_t0, self._lap_ok = t, True
+            self._plan_sum, self._plan_n = [0.0, 0.0], [0, 0]
+            return
+        x0, y0, nx, ny = line
+        d = (x - x0) * nx + (y - y0) * ny
+        self._gate_prev = (t, x, y, d)
+        if prev is None or not (prev[3] < 0.0 <= d) or d - prev[3] > 0.5:
+            return
+        if abs(-(x - x0) * ny + (y - y0) * nx) > 0.6:
+            return                              # 線の延長を、コースの別の場所でまたいだ
+        tc = prev[0] + (t - prev[0]) * (-prev[3]) / max(d - prev[3], 1e-9)
+        lap = tc - self._lap_t0
+        if lap < self.cfg.time_lap_min_s:
+            return
+        ok, (sp, sr), (n, nr) = self._lap_ok, self._plan_sum, self._plan_n
+        plan = sp / n if n else 0.0
+        # 横だけ戻した計画は、周のほとんどで渡されていたときだけ使う（途中で段が変わった周は無し）
+        plan_ref = sr / nr if nr and nr >= 0.8 * n else 0.0
+        self._lap_t0, self._lap_ok = tc, True
+        self._plan_sum, self._plan_n = [0.0, 0.0], [0, 0]
+        self.long.lap(tc)
+        if ok and plan > 0.0:
+            self.last_lap = (lap, plan)
+            self._lap_done(tc, lap, plan, plan_ref)
+
+    def _lap_done(self, t: float, lap: float, plan: float, plan_ref: float = 0.0) -> None:
+        cfg, m = self.cfg, self.map
+        self._laps.append((lap, plan, plan_ref))
+        if len(self._laps) < cfg.time_laps:
+            return
+        lap, plan, plan_ref = (float(np.median([r[k] for r in self._laps])) for k in range(3))
+        self._laps = []
+        ref = self._ref
+        if ref is None or m.level <= ref[0] * (1.0 + 1e-6):
+            # この段が基準（初め・下げた後・終える前の測り直し）
+            old, self._ref_old = self._ref_old, None
+            if old is not None and abs(old[0] - m.level) < 1e-6:
+                # 前に測った値と平均する。計画が動いたぶん（減速の学習）は今の計画へ寄せてから
+                lap = 0.5 * (lap + old[1] - (old[2] - plan))
+            self._ref = (m.level, lap, plan)
+            self._raise(t)
+            return
+        # 横を上げたぶんで縮むはずの時間と、実際に縮んだ時間（加速・減速が変わって縮んだぶんは除く）
+        base = plan_ref if plan_ref > 0.0 else ref[2]
+        plan_gain = base - plan
+        gain = (ref[1] - lap) - (ref[2] - base)
+        ok = plan_gain > cfg.time_plan_min * ref[2] and gain >= cfg.time_gain * plan_gain
+        self.steps.append({"t": t, "from": ref[0], "to": m.level, "gain": gain, "plan_gain": plan_gain,
+                           "ok": ok})
+        if ok:
+            self._ref = (m.level, lap, plan)
+            self._step = min(cfg.time_step, self._step * cfg.time_regrow)
+            self._confirmed = False
+            self._raise(t)
+        else:
+            self._reject(t)
+
+    def _raise(self, t: float) -> None:
+        """採用した段から 1 段上を試す。"""
+        m = self.map
+        if self.converged or self.down_only:
+            return
+        new = self._next(m.level)
+        if new <= m.level * (1.0 + 0.5 * self.cfg.time_step_min):
+            self._set_converged(t)              # 設定の上限（か、安全装置が働いた値のすぐ下）まで来た
+            return
+        m.level = self.conf = new
+        self._bump(down=False)
+
+    def _next(self, level: float) -> float:
+        """`level` から今の幅で 1 段上（設定の上限と、安全装置が働いた値の手前まで）。"""
+        return min(self.max_level, self.cfg.time_ceil * self._ceil, level * (1.0 + self._step))
+
+    def _reject(self, t: float) -> None:
+        """試した段をやめる。採用済みの段へ戻し、幅を半分にしてもう一度（幅が尽きたら終わり）。"""
+        m, ref = self.map, self._ref
+        self._laps = []
+        if ref is None:
+            return
+        self._step *= 0.5
+        new = self._next(ref[0])
+        room = new > ref[0] * (1.0 + 0.5 * self.cfg.time_step_min)
+        if self._confirmed or self._step < self.cfg.time_step_min or not room:
+            # 幅が尽きた（か、測り直した後の試し直しも断った・上にもう試せる所が無い）
+            m.level = self.conf = ref[0]
+            self._step = self.cfg.time_step
+            if self.cfg.time_confirm and not self._confirmed and self._next(ref[0]) > ref[0] * (
+                    1.0 + 0.5 * self.cfg.time_step_min):
+                self._confirmed = True
+                self._ref_old, self._ref = ref, None
+            else:
+                self._set_converged(t)
+        else:
+            m.level = self.conf = new
+        self._bump(down=True)
+
+    def _slow(self, t: float, v: float, ratio: float, hard: bool) -> bool:
+        """目標速度をすぐ落とす（即時の層と同じ）。もう落としている途中なら `False`。"""
+        cfg = self.cfg
+        cap = v * math.sqrt(max(0.5, min(1.0, ratio))) * (1.0 - cfg.cap_margin)
+        self._cap_t, self._cap_low = t, 0.0
+        if self.cap is not None:
+            self.cap = min(self.cap, cap)
+            self.cap_hard = self.cap_hard or hard
+            return False
+        self.cap, self.cap_hard = cap, hard
+        return True
+
+    def _precursor(self, t: float, x: float, y: float, v: float, a: float, a_x: float,
+                   ratio: float, applied: float, tc_active: bool, excess: float,
+                   kind: str = "") -> None:
+        hard = ratio < self.cfg.cap_hard
+        if not self._slow(t, v, ratio, hard):
+            return
+        if hard:
+            # 大きく超えている（路面が急に変わった）。今出ている横加速度まですぐ下げ、前後も測り直す
+            m, old = self.map, self.map.level
+            b = max(self.floor, min(a, v * v * abs(self._kmeas)) * self.cfg.back_off)
+            if b < old:
+                m.level = self.conf = b
+                self._ref, self._laps, self._step = None, [], self.cfg.time_step
+                self.converged = False
+                self.long.rescale(b / max(old, 1e-6))
+                self._guard_t = t
+                self._ceil = min(self._ceil, old)
+                self._event(t, x, y, kind or "横", a, old, excess, True)
+                self._bump(down=True)
+                return
+        self._guard(t, x, y, kind or "横", a, excess)
+
+    def _guard(self, t: float, x: float, y: float, kind: str, a: float, excess: float = 0.0,
+               soft: bool = False) -> None:
+        """安全装置が働いた。試している段ならやめ、採用済みの段なら少し下げて測り直す。
+
+        :param soft: 線から大きく外れる前の兆候（横偏差の増え）。1 回ではその上限を「近づかない値」に
+            しない。近い高さ（1 段ぶん上まで）で 2 回目が出たら、する
+        """
+        cfg, m = self.cfg, self.map
+        self._lap_ok = False
+        self._event(t, x, y, kind, a, m.level, excess, False)
+        if t - self._guard_t < cfg.time_guard_quiet_s:
+            return                              # 同じ出来事の続き
+        self._guard_t = t
+        if not soft:
+            self._ceil = min(self._ceil, m.level)
+        else:
+            # 2 回目: 前にも同じ高さ以下で出ていたら今の値、1 段ぶん上までで出ていたらその値を諦める
+            near = [lv for lv in self._soft if lv <= m.level * (1.0 + 1.3 * cfg.time_step)]
+            if near:
+                self._ceil = min(self._ceil, max(m.level, min(near)))
+            self._soft.append(m.level)
+        ref = self._ref
+        if ref is not None and m.level > ref[0] * (1.0 + 1e-6) and not self.converged:
+            self._reject(t)
+            return
+        # 採用済みの段（か、まだ基準の無い段）で出た。下げて、そこを測り直す。上げ直すのは小さい幅で
+        m.level = self.conf = max(self.floor, m.level * (1.0 - cfg.time_back))
+        self._ref, self._laps = None, []
+        self._step = max(cfg.time_step_min, 0.5 * self._step)
+        self.converged = False
+        self._bump(down=True)
+
+    def _event(self, t: float, x: float, y: float, kind: str, a: float, applied: float,
+               excess: float, surprise: bool) -> None:
+        self.events.append({"t": t, "x": x, "y": y, "a": a, "a_x": 0.0, "b": a, "kind": kind,
+                            "applied": applied, "surprise": surprise, "tc": False, "excess": excess})
+
+    def diag(self) -> dict:
+        ref = self._ref or (0.0, 0.0, 0.0)
+        return {"t_lap": round(float(self.last_lap[0]), 3), "t_plan": round(float(self.last_lap[1]), 3),
+                "ref_lat": round(float(ref[0]), 3), "ref_lap": round(float(ref[1]), 3),
+                "ref_plan": round(float(ref[2]), 3), "step": round(float(self._step), 4),
+                "laps_n": len(self._laps), "steps": len(self.steps)}
+
+    def state(self, gate: str = "") -> str:
+        if gate or self.cap is not None or self.down_only or self.converged:
+            return super().state(gate)
+        return f"タイムで探索 +{self._step * 100:.0f}%・{len(self._laps)}/{self.cfg.time_laps}周"

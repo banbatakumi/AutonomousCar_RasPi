@@ -71,8 +71,7 @@ from .local_map import _edt, footprint_circles
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha",
            "sight_distance", "sight_speed",
-           "chord_curvature", "speed_kappa", "retime", "refine_time", "tight_sections",
-           "probe_brake"]
+           "chord_curvature", "speed_kappa", "retime", "refine_time", "tight_sections"]
 
 #: 速度を決める曲率を測る弦の長さ [m]（モジュール docstring）
 SPEED_CHORD_M = 0.4
@@ -410,83 +409,6 @@ def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min
             if lim < vl[i]:
                 vl[i] = lim
     return np.maximum(np.asarray(vl), v_min)
-
-
-def probe_brake(rl: RaceLine, a_probe: float, a_grip, lat_max: float = 0.5,
-                part: float = 0.6, min_s: float = 0.0, max_s: float = math.inf,
-                ease_m: float = 1.2) -> RaceLine:
-    """制動を始める位置はそのままで、制動区間の初めだけ求める減速度を `a_probe` に上げた速度プロファイル。
-
-    減速の上限を走行中に測るためのもの（`nav/grip.LongLearner`）: **出ない減速を求めて、出た値を測る**。
-    速度が下がり続ける区間ごとに、始まりの点から `a_probe` で落とし、落とす速度²の `part` まで（か
-    `max_s` 秒たつまで）来たら、そこから先は元のプロファイルとの差（速度²）を距離 `ease_m` の
-    時定数で詰めながら元へ戻す。**どの点でも元の速度以下**なので、`a_probe` が出なくても
-    元のプロファイルより速くコーナーへ入ることはない。
-
-    ★ 強く求めた直後に元のプロファイルへ戻す形（途中の速度で保つ形）にはしない。出ない減速を
-    求めると車は試す形より速いまま残り（頭打ちの間に車速PIの積分が戻され、遅れが 0.3 秒ほど残る）、
-    保つ区間が短いとコーナーの入口まで遅れを持ち込んで外へ出た（sim.bench、真値 0.42 で毎周 前兆）。
-    元より低い速度を `ease_m` の間は求め続ければ、遅れはその間に消える。差を区間の終わりまで保つ形
-    （元より手前で落ち切る）も安全だが、1 区間で 0.2 秒失う。
-    横を使っている所では摩擦円のぶん（`sqrt(1 − (横÷限界)²)`）だけ弱く求め、横加速度が限界の
-    `lat_max` を超える点から先は強く求めるのをやめる。
-
-    :param a_grip: 横の限界 [m/s²]（スカラーか点ごとの配列）
-    :param min_s: 強く求める時間がこれより短い区間は、元のままにする [s]（測れない）
-    :param max_s: 強く求める時間の上限 [s]
-    :param ease_m: 強く求めた後、元のプロファイルへ戻す距離の時定数 [m]
-    """
-    n = len(rl)
-    if n < 3 or a_probe <= 0.0:
-        return rl
-    v = np.asarray(rl.v, dtype=np.float64)
-    kap = speed_kappa(rl.xy, rl.closed)
-    grip = np.maximum(np.broadcast_to(np.asarray(a_grip, dtype=np.float64), (n,)), 1e-6)
-    lat = (v * v * kap / grip).tolist()
-    kl, gl = kap.tolist(), grip.tolist()
-    if rl.closed:
-        ds = np.hypot(*(np.roll(rl.xy, -1, axis=0) - rl.xy).T).tolist()
-        start = int(np.argmax(v))               # いちばん速い点は制動の途中ではない
-        order = [(start + k) % n for k in range(n)]
-    else:
-        ds = np.hypot(*np.diff(rl.xy, axis=0).T).tolist() + [0.0]
-        order = list(range(n))
-    vl = v.tolist()
-    out = list(vl)
-    k = 0
-    while k < n - 1:
-        i = order[k]
-        if vl[order[k + 1]] >= vl[i] - 1e-9:
-            k += 1
-            continue
-        end = k + 1                             # 速度が下がり続ける区間 [k, end]
-        while end < n - 1 and vl[order[end + 1]] < vl[order[end]] - 1e-9:
-            end += 1
-        low = vl[order[end]]
-        floor = math.sqrt(vl[i] * vl[i] - part * (vl[i] * vl[i] - low * low))
-        cur, hard, t_hard, gap = vl[i], True, 0.0, 0.0
-        seg = []
-        for q in range(k + 1, end + 1):
-            j, prev = order[q], order[q - 1]
-            u = cur * cur * kl[prev] / gl[prev]                # 今の速度での 横 ÷ 限界
-            hard = (hard and lat[j] < lat_max and u < lat_max and cur > floor + 1e-9
-                    and t_hard < max_s)
-            if hard:
-                a = a_probe * math.sqrt(1.0 - u * u)
-                nxt = min(vl[j], math.sqrt(max(floor * floor, cur * cur - 2.0 * a * ds[prev])))
-                t_hard += 2.0 * ds[prev] / max(cur + nxt, 1e-6)
-                cur = nxt
-                gap = vl[j] * vl[j] - cur * cur                # 元との速度²の差
-            else:
-                # 元との差を少しずつ詰める。区間のいちばん低い速度より下へは落とさない
-                gap *= math.exp(-ds[prev] / ease_m) if ease_m > 1e-6 else 0.0
-                cur = math.sqrt(max(low * low, vl[j] * vl[j] - gap))
-            seg.append((j, cur))
-        if t_hard >= min_s:
-            for j, c in seg:
-                out[j] = c
-        k = end
-    return RaceLine(**{**rl._asdict(), "v": np.asarray(out)})
 
 
 def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:

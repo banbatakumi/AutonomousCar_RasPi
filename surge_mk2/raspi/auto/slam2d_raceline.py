@@ -197,14 +197,10 @@ FIXED_LAT_USE = 0.9
 FIXED_ACCEL_USE = 0.95
 FIXED_BRAKE_USE = 0.9
 #: 学習するときの減速の出発点（同定値に対する割合）。低めから始める——減速の見積もりが高すぎると
-#: 最初のコーナーへ止まれない速度で入り、気づいた時点で打つ手が無い。出ると分かれば、制動の位置を
-#: 変えずに強く求めて測った値まで上がる（`grip.LongLearner`。シムで真値 0.72 倍の路面のとき、0.9 から
-#: 始めると最初のコーナーで線から 33cm 外れた）
+#: 最初のコーナーへ止まれない速度で入り、気づいた時点で打つ手が無い。車速が計画に付いて行けている間、
+#: 1 周に 1 段ずつ上がる（`grip.LongLearner`。シムで真値 0.72 倍の路面のとき、0.9 から始めると最初の
+#: コーナーで線から 33cm 外れた）
 LEARN_BRAKE_INIT = 0.75
-#: 学習した減速の上限のうち、速度プロファイルに使う割合。測った値の誤差（シムで ±3%）と、車速PIが
-#: プロファイルを追うのに要る余力のぶん。そのまま使うとコーナーへ少し速く入って横の前兆が増えた
-#: （sim.bench、真値 0.42 で前兆 7 回）
-LEARN_BRAKE_USE = 0.95
 #: ラインの形を決める設定（変わったら引き直す）。ラインは見積もりのラップ時間を最小にするので、
 #: 速度の設定も形に効く
 LINE_KEYS = ("line_margin", "kappa_use") + SPEED_KEYS
@@ -598,10 +594,11 @@ class Slam2dRaceLine(Planner):
         ParamSpec(group=GROUP_GRIP, key="grip_learn", label="路面の限界を走りながら決める", min=0, max=1,
                   step=1, default=0, unit="",
                   note="★0 = 固定（同定値に決まった余裕を掛けて使う。今までと同じ）。1 = 走行中の車の反応から"
-                       "横・加速・減速の上限を決める。横は場所ごと: 前兆（舵が求めた横加速度が出ていない）が"
-                       "出たらその場で減速してその場所の値を下げ、前兆なしでコーナーを抜けるたびに全体を"
-                       "少しずつ上げる。加速・減速はコース全体で 1 つずつ: 求めたのに出なかった値を測る"
-                       "（減速は、制動を始める位置を変えずに初めだけ強く求める）。"
+                       "横・加速・減速の上限を決める。横はコースで 1 つ: 上限を 1 段（8%）上げて 1 周走り、"
+                       "計画で縮むはずの時間の 6 割以上ラップが縮んだら採用、縮まなければ戻して終える"
+                       "（線から外れる・リアが滑るといった兆候が出た段はすぐやめる）。"
+                       "減速もコース全体で 1 つ: 1 周に 1 段上げ、コーナーへ計画より速く入るように"
+                       "なったら 1 段戻して止める。加速は上限（目標車速の傾きの上限）で固定（学習しない）。"
                        "値は地図の横（<地図名>.grip.json）に保存する"),
         ParamSpec(group=GROUP_GRIP, key="grip_init", hidden=True, label="初期値（同定値に対する割合）", min=0.5, max=1.2,
                   step=0.05, default=0.85, unit="×",
@@ -614,6 +611,11 @@ class Slam2dRaceLine(Planner):
                   default=6.0, unit="%",
                   note="前兆なしでコーナーを1つ抜けるたびに、横の限界をこの割合だけ上げる。"
                        "★既定の 6% はシムで決めた値。実機で初めて試すときは 3% から"),
+        ParamSpec(group=GROUP_GRIP, key="grip_by_time", hidden=True, label="横の上限を周回のタイムで決める",
+                  min=0, max=1, step=1, default=1, unit="",
+                  note="1 = 上限を 1 段上げて 1 周走り、計画で縮むはずの時間の 6 割以上縮んだら採用する"
+                       "（`nav/grip.TimeLearner`。前兆は行き過ぎた段をやめる安全装置としてだけ使う）。"
+                       "0 = 前兆が出るまで上げる元の方式（`GripLearner`）"),
         ParamSpec(group=GROUP_GRIP, key="grip_reline", hidden=True, label="学習値でラインを引き直す",
                   min=0, max=1, step=1, default=0, unit="",
                   note="★1 = 学習が落ち着いたら、学習した限界でラインを引き直して乗り移る。既定は 0: "
@@ -641,11 +643,11 @@ class Slam2dRaceLine(Planner):
         self._ref_acc: np.ndarray | None = None
         self._ref_acc_src: np.ndarray | None = None
         self.vehicle = Vehicle.load()
-        v = self.vehicle
         #: 横グリップの学習（`nav/grip.py`、`grip_learn` が 1 の間だけ働く）。舵角から出る曲率に
         #: 掛ける遅れはヨーの応答ぶん（舵そのものの遅れは実舵角に入っている）
-        self._grip = grip_mod.GripLearner(yaw_wn=v.yaw_natural_freq_rad_s, yaw_zeta=v.yaw_damping,
-                                          rolling_resistance=v.rolling_resistance)
+        self._grip = self._grip_make(True)
+        #: 計画のラップ [s] と、それを出した `path.v`（`TimeLearner` へ渡す）
+        self._grip_plan: tuple = (None, 0.0, 0.0, 0.0)
         self._grip_on = False
         self.ftg = FollowTheGap()
         self.slam = Slam2dNav(resolution=MAP_RES, size_m=MAP_SIZE_M,
@@ -972,6 +974,7 @@ class Slam2dRaceLine(Planner):
         self._speed_key = None
         self._map_dirty = True
         self._grip_quiet_ns = self._grip_gate_t + int(_GRIP_SWITCH_QUIET_S * 1e9)
+        self._grip.new_line()
 
     def _try_adopt_line(self, vs: VehicleState, p: dict[str, float]) -> None:
         """裏で引き直したラインへ、**乗り移れる場所に来たら**差し替える（RACE 中）。
@@ -2228,22 +2231,14 @@ class Slam2dRaceLine(Planner):
             return speed_kwargs(p, self.vehicle)
         m = self._grip.map
         return speed_kwargs(p, self.vehicle, dict(a_lat=lv[0], a_grip=lv[1], a_accel=m.accel,
-                                                  a_brake=LEARN_BRAKE_USE * m.decel))
+                                                  a_brake=m.decel))
 
     def _timed(self, path: rl_mod.RaceLine, p: dict[str, float],
                v_cap: np.ndarray | None = None) -> rl_mod.RaceLine:
-        """周回の経路に今の設定と学習値で速度を付ける。減速の上限を試している間は、制動を始める
-        位置は変えずに求める減速度だけ上げた形にする（`rl_mod.probe_brake`）。"""
+        """周回の経路に今の設定と学習値で速度を付ける。"""
         rl = rl_mod.retime(path, v_cap=v_cap, **self._spd(p, path))
-        g = self._grip
-        # 試す形を重ねる前の速度（`_grip_begin` が「足元は前の速度のまま」の上限に使う。試す形の
-        # 速度を上限にすると、作り直すたびに制動が手前へずれていく）
+        # `_grip_begin` が「足元は前の速度のまま」の上限に使う
         self._grip_plain = (path.xy, rl.v)
-        if self._grip_on and path.closed and g.long.probing:
-            c = g.long.cfg
-            rl = rl_mod.probe_brake(rl, g.long.probe, self._grip_levels(path)[1],
-                                    c.probe_lat, c.probe_part, c.probe_min_s, c.probe_max_s,
-                                    c.probe_ease_m)
         return rl
 
     def _grip_learned(self) -> tuple[float, float, float] | None:
@@ -2251,7 +2246,7 @@ class Slam2dRaceLine(Planner):
         m = self._grip.map
         if not self._grip_on or m.level <= 0.0 or m.accel <= 0.0 or m.decel <= 0.0:
             return None
-        return m.level, m.accel, LEARN_BRAKE_USE * m.decel
+        return m.level, m.accel, m.decel
 
     def _grip_scalar(self) -> dict | None:
         """`speed_kwargs` の `grip` に渡す全体の値（回避の線の比較用）。"""
@@ -2354,6 +2349,12 @@ class Slam2dRaceLine(Planner):
         h = self._grip_hold_cap
         return h[1] if h is not None and h[0] is path.xy else None
 
+    def _grip_make(self, by_time: bool) -> grip_mod.GripLearner:
+        v = self.vehicle
+        cls = grip_mod.TimeLearner if by_time else grip_mod.GripLearner
+        return cls(yaw_wn=v.yaw_natural_freq_rad_s, yaw_zeta=v.yaw_damping,
+                   rolling_resistance=v.rolling_resistance)
+
     def _grip_begin(self, vs: VehicleState, p: dict[str, float]) -> None:
         """周期の初めに学習の設定を渡し、値が変わっていれば速度の作り直しを予約する。
 
@@ -2372,6 +2373,14 @@ class Slam2dRaceLine(Planner):
         self._grip_capped = False
         if not on:
             return
+        by_time = p.get("grip_by_time", 1) > 0
+        if isinstance(self._grip, grip_mod.TimeLearner) != by_time:
+            # 方式を切り替えた。学習器を作り直し、保存した値から始める（判定の設定は引き継ぐ）
+            self._grip_save()
+            cfg = self._grip.cfg
+            self._grip = self._grip_make(by_time)
+            self._grip.cfg = cfg
+            self._grip_load(getattr(self, "_grip_name", ""))
         g = self._grip
         if not g.cfg.fixed_step:
             g.cfg.step_up = p["grip_step"] / 100.0
@@ -2379,12 +2388,11 @@ class Slam2dRaceLine(Planner):
         v = self.vehicle
         g.configure(init_level=p["grip_init"] * v.a_lat_max, max_level=p["grip_max"],
                     down_only=down_only, lat_use=1.0)
-        # 加速の出発点は同定値に余裕を掛けた値（学習しないときと同じ）、減速は低めから。
-        # 上げてよいのは、目標車速を動かす傾きの上限（`[safety] cmd_accel_limit_m_s2`）まで
-        g.long.configure(acc_init=FIXED_ACCEL_USE * v.a_accel_max(0.0),
+        # 加速は学習しない: 目標車速を動かす傾きの上限（`[safety] cmd_accel_limit_m_s2`）で固定。出なければ
+        # STM32 の TC が抑える。減速は低めから始め、同じ上限まで上げてよい
+        g.long.configure(acc_init=v.speed_ramp_max_m_s2,
                          dec_init=LEARN_BRAKE_INIT * v.a_decel_max,
-                         acc_max=v.speed_ramp_max_m_s2, dec_max=v.speed_ramp_max_m_s2,
-                         down_only=down_only, dec_use=LEARN_BRAKE_USE)
+                         dec_max=v.speed_ramp_max_m_s2, down_only=down_only)
         path, i = self.path, self._hint
         n = len(path) if path is not None else 0
         hold = self._grip_hold_cap
@@ -2444,6 +2452,21 @@ class Slam2dRaceLine(Planner):
             gate = "見通しの上限"
         self._grip_gate = gate
         g.observe_cross(0.0 if gate else pp.cross_track)
+        if path.closed and len(path.v) == len(path):
+            # 計画のラップ（減速を試す形を重ねる前の速度で）と、横の上限だけを学習の「比べる相手」へ
+            # 戻したときのラップ。加速・減速が変わって縮んだぶんを、横を上げた効果と分ける
+            plain = self._grip_plain
+            v = plain[1] if plain is not None and plain[0] is path.xy and len(plain[1]) == len(path) \
+                else path.v
+            ref = g.ref_level
+            if self._grip_plan[0] is not v or self._grip_plan[1] != ref:
+                lap_ref = 0.0
+                if ref > 0.0:
+                    kw = dict(self._spd(p, path))
+                    kw["a_lat"] = kw["a_grip"] = np.full(len(path), max(ref, g.floor))
+                    lap_ref = rl_mod._travel_time(path.xy, rl_mod.retime(path, **kw).v, True)
+                self._grip_plan = (v, ref, rl_mod._travel_time(path.xy, v, True), lap_ref)
+            g.observe_plan(self._grip_plan[2], self._grip_plan[3])
         t = vs.t_capture / 1e9
         if self.laps != self._grip_laps:
             self._grip_laps = self.laps
@@ -2468,7 +2491,8 @@ class Slam2dRaceLine(Planner):
             "mean": round(g.last_mean[0], 4), "mean_thr": round(g.last_mean[1], 4),
             "cross_gain": round(g.last_cross_gain, 4),
             "events": len(g.events), "trials": g.trials, "passes": g.passes,
-            "win": lg.windows, "win_noisy": lg.noisy,
+            "win": lg.windows, "lag_dec": round(float(lg.last), 3),
+            **g.diag(),
         }
         last = f"・直近 {g.events[-1]['kind']}" if g.events else ""
         return (f"・学習 横 {m.level:.2f}・加速 {m.accel:.2f}・減速 {m.decel:.2f}m/s²"

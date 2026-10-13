@@ -694,6 +694,7 @@ class Slam2dRoute(Slam2dRaceLine):
             sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=self._lim(p).a_brake)
             if sw.switched:
                 self._grip_quiet_ns = int(vs.t_capture) + int(_GRIP_SWITCH_QUIET_S * 1e9)
+                self._grip.new_line()
                 self._hint = sw.hint
                 self._prev_idx = -1
                 self._map_dirty = True
