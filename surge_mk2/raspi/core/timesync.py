@@ -156,13 +156,25 @@ class TimeSync:
             return None
         return min(s.delay_ns for s in self._samples)
 
+    def _good(self) -> list[Sample]:
+        """往復遅延が小さい（待ち行列で伸びていない）サンプル。古い順。"""
+        best = min(s.delay_ns for s in self._samples)
+        thr = best * self._good_factor + self._good_margin_ns
+        return [s for s in self._samples if s.delay_ns <= thr]
+
     @property
     def offset_ns(self) -> int | None:
-        """min filter によるオフセット（offset = t_pi − t_stm）。回帰前の素朴推定。"""
+        """オフセット（offset = t_pi − t_stm）。回帰前の素朴推定。
+
+        **往復遅延が小さいサンプルのうち、いちばん新しいもの**から取る。窓全体で遅延が最小の
+        1点を使うと、その点が古いほどドリフトのぶんずれる——実機の STM32 の時計は Pi より
+        約 0.35% 速く（2026-10-13 実測、`drift_ppm` ≈ −3500）、回帰が始まる前の 15 秒間に
+        最大で約 50ms ずれた時刻を返していた。
+        """
         if not self._samples:
             return None
-        best = min(self._samples, key=lambda s: s.delay_ns)
-        return best.t_pi_ns - best.t_stm_ns
+        latest = self._good()[-1]
+        return latest.t_pi_ns - latest.t_stm_ns
 
     def _fit(self) -> tuple[int, float, float] | None:
         """delay の小さいサンプルで t_pi = a + b*(t_stm − x0) を回帰。
@@ -171,9 +183,7 @@ class TimeSync:
         """
         if len(self._samples) < 4:
             return None
-        best = min(s.delay_ns for s in self._samples)
-        thr = best * self._good_factor + self._good_margin_ns
-        good = [s for s in self._samples if s.delay_ns <= thr]
+        good = self._good()
         if len(good) < 4:
             return None
         # 時間スパンが短いと傾きがジッタで暴れるので、貯まるまで回帰しない

@@ -232,10 +232,22 @@ CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
 #: 無ければここを読む。無ければトークン無し（＝誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
 
-#: `/ws/telemetry` の頻度。**表示の遅れは平均でこの周期の半分**（20Hz で 25ms、50Hz で 10ms）。
+#: `/ws/telemetry` の頻度の**上限**。刻みではない——`_telemetry_pump` は `vehicle_state` が届いた周に
+#: 送る（100Hz の `vehicle_state` の2回に1回）。刻みで送っていた頃は、届いてから送るまでに平均
+#: 7.5〜9.4ms・最大 20ms 待っていた（実機 2026-10-13。位相がゆっくりずれるので測るたびに変わる）。
 #: 50Hz にしても制御系電流は +1.6mA（525.2→526.8mA、ばらつきの範囲）・CPU +1.2pt（実機 DISARM・
 #: 2026-10-12、20/30/50Hz を行き来して計測）。`vehicle_state` は 100Hz、点群は 10Hz（同じ周は送らない）
 TELEMETRY_HZ = 50
+#: 配信の周期に対して、次のフレームをこの割合まで早く出してよい（`CAMERA_DUE_SLACK` と同じ役目）。
+#: `vehicle_state` の到着は 10ms の前後に揺れるので、2回目が 20ms に少し届かなくても送る
+TELEMETRY_DUE_SLACK = 0.15
+#: `_snapshot` が**中身が変わったときだけ載せる**キーとそのトピック。どれも 10Hz 以下でしか
+#: 変わらないのに 50Hz で同じ物を送り直していた（実機で1フレーム 4.4kB のうち 3.3kB）。
+#: GUI は載っていないキーの値を前のまま持つ（`gui/src/bus/live.ts` の `noteTelemetry`）
+SNAPSHOT_ON_CHANGE = (
+    ("scan", TOPIC_SCAN), ("link", TOPIC_DIAG_LINK), ("auto", TOPIC_AUTO_STATE),
+    ("line_cam", TOPIC_LINE_CAM), ("track", TOPIC_TRACK_TARGET),
+    ("signal", TOPIC_SIGNAL_STATUS))
 CMD_PUB_HZ = 50
 #: GUIへ配信する既定のJPEG頻度。`docs/architecture.md` §9の帯域見積もり
 #: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で前後カメラ同時30fps配信を
@@ -560,6 +572,8 @@ class TelemetryServer:
         self._last_auto_key: tuple | None = None
         #: カメラの新しいフレームがバスに届いたら立つ（`_bus_pump` → `_camera_pump`）
         self._cam_wake = asyncio.Event()
+        #: 新しい `vehicle_state` がバスに届いたら立つ（`_bus_pump` → `_telemetry_pump`）
+        self._tel_wake = asyncio.Event()
         #: `_publish_cmd` が前回「操縦者が居た」と判断したか（デッドマンの切れ目を数える）
         self._cmd_was_live = False
         self._load_auto_conf()
@@ -672,7 +686,9 @@ class TelemetryServer:
         self._mcap_error: str | None = None
 
 
-        self._last_scan_seq = -1
+        #: `SNAPSHOT_ON_CHANGE` のキーごとに、最後に `/ws/telemetry` へ載せた版 `(seq, t_pub)`。
+        #: 視聴者が増えたら空にする（来たばかりの人に全部を1回送る。`_telemetry_channel`）
+        self._snapshot_sent: dict[str, tuple[int, int]] = {}
         self._running = False
         self.frames_sent = 0
         self.cmds_published = 0
@@ -848,6 +864,8 @@ class TelemetryServer:
 
     async def _telemetry_channel(self, ws) -> None:
         self.telemetry_clients.add(ws)
+        # 変わったときだけ載せるキー（`SNAPSHOT_ON_CHANGE`）を、次のフレームで全部載せ直す
+        self._snapshot_sent.clear()
         try:
             await ws.wait_closed()
         finally:
@@ -2464,11 +2482,13 @@ class TelemetryServer:
         使える**方を取った）。`auto/cmd` の中身が変わっていたら、`/cmd` をその場で送る
         （`_on_auto_cmd`）。
 
-        **`auto/cmd` かカメラ画像のソケットに届いたら起きる。届かない間は `BUS_IDLE_POLL_S` ごと**
-        1ms ごとに13本のソケットを覗くと、それだけで CPU を
+        **`auto/cmd`・カメラ画像・`vehicle_state` のソケットに届いたら起きる。届かない間は
+        `BUS_IDLE_POLL_S` ごと** 1ms ごとに13本のソケットを覗くと、それだけで CPU を
         約8%使う（Pi 5・1.5GHz で実測。この形で約4%）。即時中継の待ちも 1ms 周期の
-        平均 0.8ms から 0.35ms に縮む。画像は届いた周に `_camera_pump` を起こす
-        （刻みで見に行くと、撮ってから送るまでに配信周期ぶんの待ちが乗る）。
+        平均 0.8ms から 0.35ms に縮む。画像は届いた周に `_camera_pump` を、`vehicle_state` は
+        届いた周に `_telemetry_pump` を起こす（刻みで見に行くと、届いてから送るまでに
+        配信周期ぶんの待ちが乗る）。`vehicle_state` は 100Hz なので、起きる回数は
+        `BUS_IDLE_POLL_S`（10ms）ごとに覗いていた頃と変わらない。
         """
         wake, fds = self._watch_bus()
         try:
@@ -2478,6 +2498,8 @@ class TelemetryServer:
                         self._node_hb[msg.node] = (time.monotonic_ns(), msg.pid, msg.detail)
                     elif topic in (TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR):
                         self._cam_wake.set()
+                    elif topic == TOPIC_VEHICLE_STATE:
+                        self._tel_wake.set()
                 self._on_auto_cmd(time.monotonic_ns())
                 self._on_armed_change()
                 if wake is None:
@@ -2495,7 +2517,7 @@ class TelemetryServer:
                 asyncio.get_running_loop().remove_reader(fd)
 
     def _watch_bus(self) -> tuple[asyncio.Event | None, list[int]]:
-        """`auto/cmd`・カメラ画像のソケットに届いたら立つ Event と、監視している fd。
+        """`auto/cmd`・カメラ画像・`vehicle_state` のソケットに届いたら立つ Event と、監視している fd。
 
         zmq のソケットを持たない `sub`（テストの偽物）では `(None, [])`
         ——`_bus_pump` は `BUS_POLL_S` ごとに覗く形へ戻る。`auto/cmd` を見張れなければ
@@ -2504,7 +2526,7 @@ class TelemetryServer:
         wake = asyncio.Event()
         fds: list[int] = []
         loop = asyncio.get_running_loop()
-        for topic in (TOPIC_AUTO_CMD, TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR):
+        for topic in (TOPIC_AUTO_CMD, TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR, TOPIC_VEHICLE_STATE):
             sock = socks.get(topic)
             if sock is None:
                 if topic == TOPIC_AUTO_CMD:
@@ -2583,18 +2605,26 @@ class TelemetryServer:
                 return_exceptions=True)
 
     async def _telemetry_pump(self) -> None:
+        """`/ws/telemetry` を送る。**新しい `vehicle_state` が届いた周に送る。**
+
+        刻み（`1/TELEMETRY_HZ`）で送ると、100Hz の `vehicle_state` と位相が合わないぶん、届いて
+        から送るまでに待ちが乗る（`TELEMETRY_HZ` の注記）。`TELEMETRY_HZ` は送る頻度の上限で、
+        `vehicle_state` の2回に1回を届いた周に送る。`vehicle_state` が来ない間（io_node が居ない・
+        STM32 が黙っている）も、診断を出し続けるため周期ごとには送る。
+        """
         period = 1.0 / TELEMETRY_HZ
-        #: 絶対時刻で刻む（相対 `sleep(period)` だと組み立てと送信のぶん毎周期遅れ、
-        #: 実機で 50ms のつもりが 51.4ms になっていた）
-        next_tick = time.monotonic()
+        min_gap = period * (1.0 - TELEMETRY_DUE_SLACK)
+        last_tx = 0.0
         while self._running:
-            next_tick += period
-            delay = next_tick - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            else:
-                next_tick = time.monotonic()
-                await asyncio.sleep(0)
+            try:
+                await asyncio.wait_for(self._tel_wake.wait(), period)
+            except asyncio.TimeoutError:
+                pass
+            self._tel_wake.clear()
+            now = time.monotonic()
+            if now - last_tx < min_gap:
+                continue
+            last_tx = now
             if not self.telemetry_clients:
                 continue
             payload = self._snapshot()
@@ -2606,13 +2636,20 @@ class TelemetryServer:
 
     def _snapshot(self) -> bytes:
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
-        link = self.sub.latest.get(TOPIC_DIAG_LINK)
-        scan = self.sub.latest.get(TOPIC_SCAN)
-        # 点群は 10Hz なので、50Hz の配信では大半が同じもの。**同じ周を2回送らない**
-        if scan is not None and scan.seq == self._last_scan_seq:
-            scan = None
-        elif scan is not None:
-            self._last_scan_seq = scan.seq
+        # 10Hz 以下でしか変わらないもの（点群・診断・planner の判断・カメラ系の認識結果）は、
+        # 50Hz の配信では大半が同じもの。**同じ版を2回送らない**（`SNAPSHOT_ON_CHANGE`）。
+        # 発行元が止まれば載らなくなるので、GUI は古さ（`lastAutoMs` 等）を正しく数えられる
+        # ——同じ物を送り直していた頃は、planning_node が落ちても `auto` が新しく見え続けた
+        fresh = {}
+        for key, topic in SNAPSHOT_ON_CHANGE:
+            msg = self.sub.latest.get(topic)
+            if msg is not None:
+                ver = (msg.seq, msg.t_pub)
+                if self._snapshot_sent.get(key) == ver:
+                    msg = None
+                else:
+                    self._snapshot_sent[key] = ver
+            fresh[key] = msg
         return _encoder.encode({
             # **型定義そのものから決まる札。** GUI はこれが自分の持つ値と違えば
             # そのフレームを捨てて警告を出す。Pi だけ新しくなった GUI が、
@@ -2621,20 +2658,20 @@ class TelemetryServer:
             "schema": SCHEMA_VERSION,
             "t_server": time.monotonic_ns(),
             "vs": vs,
-            "link": link,
-            "scan": scan,
+            "link": fresh["link"],
+            "scan": fresh["scan"],
             # 自律走行の「判断の根拠」。**engage していなくても流れる**ので、
             # 手動走行しながら planner が何を選ぶかを見比べられる
-            "auto": self.sub.latest.get(TOPIC_AUTO_STATE),
+            "auto": fresh["auto"],
             # `line_trace` が認識している白線の目標点。**engage していなくても流れる**
             # （`auto` と同じ理由——手動走行中でも見え方を確認できた方が良い）
-            "line_cam": self.sub.latest.get(TOPIC_LINE_CAM),
+            "line_cam": fresh["line_cam"],
             # `follow_object` の追跡結果。**engage していなくても流れる**
             # （`auto`/`line_cam` と同じ理由——対象を選んだだけで見え方を確認できる）
-            "track": self.sub.latest.get(TOPIC_TRACK_TARGET),
+            "track": fresh["track"],
             # 矢印信号認識の直近判定。**ARM/engage と無関係に流れる**
             # （`line_cam`/`track` と同じ理由——GUIのライブチューニングは駐車中にも使いたい）
-            "signal": self.sub.latest.get(TOPIC_SIGNAL_STATUS),
+            "signal": fresh["signal"],
             "ctl": {"has_controller": self.controller is not None,
                     "controller": self.controller_name},
             # STM32 側の温度（`vs.temp`）とは別枠。RasPi 自体は STM32 のバスに乗らない

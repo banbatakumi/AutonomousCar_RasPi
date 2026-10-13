@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Iterable
 from typing import NamedTuple
@@ -15,6 +16,10 @@ import serial
 from ..core.cleanup import quiet_close
 from ..proto import UART_BAUD, FrameEncoder, FrameParser
 from ..proto.generated.packets import HEADER_SIZE, S2P_TYPES
+
+
+#: `poll(block=False)` の1回の read で取る上限 [B]（カーネルの tty バッファは 4096）
+_READ_MAX = 4096
 
 
 class RxFrame(NamedTuple):
@@ -58,10 +63,18 @@ class SerialLink:
         in_waiting 分をまとめて読むので syscall 数を抑えられる。`block=False` は来ている分
         だけ読んで待たない（呼び側が `fileno()` を他の待ち合わせと一緒に poll する、`io_node`）。
         """
-        n = self._ser.in_waiting
-        if not n and not block:
-            return []
-        data = self._ser.read(n if n else 1)
+        if not block:
+            # 呼び側が fd の受信を待ってから呼ぶので、来ている分を1回の read で取る。pyserial の
+            # `in_waiting` + `read` は ioctl・select・read の3回で、毎秒600回以上（フレームは
+            # 十数バイトずつ届く）呼ばれるぶん CPU を使っていた。fd は pyserial が非ブロッキングで
+            # 開いている
+            try:
+                data = os.read(self._ser.fd, _READ_MAX)
+            except BlockingIOError:
+                return []
+        else:
+            n = self._ser.in_waiting
+            data = self._ser.read(n if n else 1)
         rx_ns = time.monotonic_ns()
         if not data:
             return []

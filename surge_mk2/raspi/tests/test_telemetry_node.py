@@ -826,3 +826,72 @@ class TestTrackRoiSelectNeedsArm(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSnapshotSendsSlowPartsOnlyOnChange(unittest.TestCase):
+    """10Hz 以下でしか変わらないもの（診断・planner の判断・点群など）は、変わったときだけ
+    `/ws/telemetry` に載せる（2026-10-13）。50Hz で同じ物を送り直していた頃は、実機の
+    1フレーム 4.4kB のうち 3.3kB がそれだった。"""
+
+    def _server(self):
+        import msgspec
+
+        from raspi.msgs.types import (TOPIC_AUTO_STATE, TOPIC_DIAG_LINK, TOPIC_VEHICLE_STATE,
+                                      AutoState, LinkDiag, VehicleState)
+
+        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        srv._snapshot_sent = {}
+        srv.controller = None
+        srv.controller_name = ""
+        link = LinkDiag(health="OK")
+        link.seq, link.t_pub = 1, 100
+        auto = AutoState()
+        auto.seq, auto.t_pub = 1, 100
+        vs = VehicleState(speed=1.0)
+        vs.seq, vs.t_pub = 1, 100
+        srv.sub = type("S", (), {"latest": {
+            TOPIC_DIAG_LINK: link, TOPIC_AUTO_STATE: auto, TOPIC_VEHICLE_STATE: vs}})()
+        return srv, link, auto, lambda: msgspec.msgpack.decode(srv._snapshot())
+
+    def test_same_version_is_sent_once(self):
+        srv, link, auto, snap = self._server()
+        first, second = snap(), snap()
+        self.assertEqual(first["link"]["health"], "OK")
+        self.assertIsNotNone(first["auto"])
+        self.assertIsNone(second["link"])
+        self.assertIsNone(second["auto"])
+        # 車両状態は毎回載せる（計器はこれで動く）
+        self.assertEqual(second["vs"]["speed"], 1.0)
+
+    def test_new_version_is_sent_again(self):
+        srv, link, auto, snap = self._server()
+        snap()
+        link.seq, link.t_pub = 2, 200
+        s = snap()
+        self.assertIsNotNone(s["link"])
+        self.assertIsNone(s["auto"])
+
+    def test_publisher_restart_with_same_seq_is_still_new(self):
+        """発行元が再起動すると `seq` は 1 から数え直す。`t_pub` も見ているので取りこぼさない。"""
+        srv, link, auto, snap = self._server()
+        snap()
+        link.t_pub = 999                                   # seq は 1 のまま
+        self.assertIsNotNone(snap()["link"])
+
+    def test_new_viewer_gets_everything_once(self):
+        """後から繋いだ GUI にも、次のフレームで全部を1回載せる（`_telemetry_channel`）。"""
+        import asyncio
+
+        srv, link, auto, snap = self._server()
+        srv.telemetry_clients = set()
+        snap()
+        self.assertIsNone(snap()["link"])
+
+        class _Ws:
+            async def wait_closed(self):
+                return None
+
+        asyncio.run(srv._telemetry_channel(_Ws()))
+        s = snap()
+        self.assertIsNotNone(s["link"])
+        self.assertIsNotNone(s["auto"])

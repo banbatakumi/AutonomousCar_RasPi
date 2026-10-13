@@ -571,6 +571,84 @@ class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
                 os.environ["SURGE_BUS_DIR"] = old
             tmp.cleanup()
 
+    async def test_telemetry_goes_out_when_vehicle_state_arrives(self):
+        """`/ws/telemetry` は `vehicle_state` が届いた周に出る（2026-10-13）。刻みで送っていた頃は
+        届いてから送るまでに平均 7.5〜9.4ms・最大 20ms 待っていた（実機）。100Hz の2回に1回を送る。"""
+        import os
+        import tempfile
+
+        import msgspec
+
+        from raspi.bus import LATEST, Publisher, Subscriber
+        from raspi.msgs.types import TOPIC_AUTO_CMD, TOPIC_VEHICLE_STATE, VehicleState
+
+        tmp = tempfile.TemporaryDirectory()
+        old = os.environ.get("SURGE_BUS_DIR")
+        os.environ["SURGE_BUS_DIR"] = tmp.name
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        srv._on_armed_change = lambda: None
+        srv._tel_wake = asyncio.Event()
+        srv._snapshot_sent = {}
+        srv.frames_sent = 0
+        sent = []
+
+        class _Ws:
+            async def send(self, payload):
+                sent.append((time.monotonic_ns(), msgspec.msgpack.decode(payload)))
+
+        srv.telemetry_clients = {_Ws()}
+        io = Publisher("io")
+        planning = Publisher("planning")
+        sub = Subscriber({TOPIC_AUTO_CMD: LATEST, TOPIC_VEHICLE_STATE: LATEST})
+        srv.sub = sub
+        pumps = [asyncio.create_task(srv._bus_pump()),
+                 asyncio.create_task(srv._telemetry_pump())]
+        try:
+            await asyncio.sleep(0.2)
+            sent.clear()
+            for i in range(40):                           # 100Hz で 0.4 秒
+                io.send(TOPIC_VEHICLE_STATE, VehicleState(speed=float(i)))
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.02)
+            # 2回に1回（約50Hz）。CI の揺れで sleep が延びるぶんを見込む
+            self.assertGreaterEqual(len(sent), 12)
+            self.assertLessEqual(len(sent), 24)
+            # 載っている `vehicle_state` は届いたばかりのもの（実機で約 0.5ms。Mac の ipc は数ms 掛かる）
+            # （最初の `vehicle_state` が届く前に周期で出たフレームには載っていない）
+            ages = sorted((t - m["vs"]["t_pub"]) / 1e6 for t, m in sent if m["vs"])
+            self.assertLess(ages[len(ages) // 2], 6.0, ages)
+        finally:
+            srv._running = False
+            await asyncio.wait_for(asyncio.gather(*pumps), 1.0)
+            sub.close()
+            io.close()
+            planning.close()
+            if old is None:
+                os.environ.pop("SURGE_BUS_DIR", None)
+            else:
+                os.environ["SURGE_BUS_DIR"] = old
+            tmp.cleanup()
+
+    async def test_telemetry_still_ticks_without_vehicle_state(self):
+        """`vehicle_state` が来なくても（io_node が居ない）、診断を出すため周期ごとには送る。"""
+        srv = TestImmediateCmdRelay._server(self, live=True)
+        srv._tel_wake = asyncio.Event()
+        srv._snapshot_sent = {}
+        srv.frames_sent = 0
+        sent = []
+
+        class _Ws:
+            async def send(self, payload):
+                sent.append(payload)
+
+        srv.telemetry_clients = {_Ws()}
+        pump = asyncio.create_task(srv._telemetry_pump())
+        await asyncio.sleep(0.25)
+        srv._running = False
+        await asyncio.wait_for(pump, 1.0)
+        self.assertGreaterEqual(len(sent), 6)             # 50Hz × 0.25s ≒ 12
+        self.assertLessEqual(len(sent), 14)
+
     async def test_fake_sub_without_sockets_still_polls(self):
         srv = TestImmediateCmdRelay._server(self, live=True)
         srv._on_armed_change = lambda: None
@@ -1240,6 +1318,71 @@ class TestIoWaitsOnLinkAndBus(unittest.TestCase):
             dt, got = self._wait(node, lambda: self.b.send(b"\xaa\x55"))
             self.assertLess(dt, 0.3)
             self.assertTrue(got)
+        finally:
+            self.sub.close()
+            self.pub.close()
+
+    def _partial_node(self):
+        """`"|"` が届くまではフレームが揃わない偽の UART（本物は十数バイトずつ届く）。"""
+        node = self._node()
+        sock = self.a
+        buf = bytearray()
+
+        def poll(block=True):
+            sock.setblocking(False)
+            try:
+                buf.extend(sock.recv(4096))
+            except BlockingIOError:
+                pass
+            if b"|" not in buf:
+                return []
+            buf.clear()
+            return [b"frame"]
+
+        node.link.poll = poll
+        return node
+
+    def test_partial_uart_bytes_do_not_wake_the_loop(self):
+        """フレームの途中までしか届いていない間は、ループへ返さず残りを待つ（2026-10-13）。
+        起こされるたびに1周回していた頃は、実機で毎秒約620周のうち6割が空振りだった。"""
+        import threading
+        node = self._partial_node()
+        try:
+            threading.Timer(0.06, lambda: self.b.send(b"cd|")).start()
+            dt, got = self._wait(node, lambda: self.b.send(b"ab"))
+            self.assertEqual(got, [b"frame"])
+            self.assertGreater(dt, 0.05)       # 途中（20ms 後の "ab"）では返っていない
+            self.assertLess(dt, 0.3)
+        finally:
+            self.sub.close()
+            self.pub.close()
+
+    def test_bus_message_still_wakes_while_a_frame_is_partial(self):
+        """フレームの残りを待っている間も、`cmd` が届けばすぐ返す（指令の即時中継を遅らせない）。"""
+        import threading
+        from raspi.msgs.types import TOPIC_CMD
+        node = self._partial_node()
+        try:
+            threading.Timer(0.06, lambda: self.pub.send(
+                TOPIC_CMD, DriveCmd(mode=1, source="gui"))).start()
+            dt, got = self._wait(node, lambda: self.b.send(b"ab"))
+            self.assertEqual(got, [])
+            self.assertGreater(dt, 0.05)
+            self.assertLess(dt, 0.3)
+        finally:
+            self.sub.close()
+            self.pub.close()
+
+    def test_partial_frame_wait_ends_at_the_deadline(self):
+        """残りが来なくても、次の定期送信の時刻（とハートビートの申告）までには必ず返す。"""
+        node = self._partial_node()
+        try:
+            self.b.send(b"ab")
+            t0 = time.monotonic()
+            got = node._poll_link(time.monotonic_ns(), time.monotonic_ns() + 30_000_000)
+            dt = time.monotonic() - t0
+            self.assertEqual(got, [])
+            self.assertLess(dt, 0.02)          # `LINK_WAIT_S`（5ms）で返る
         finally:
             self.sub.close()
             self.pub.close()

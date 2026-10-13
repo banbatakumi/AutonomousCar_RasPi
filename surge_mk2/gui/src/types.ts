@@ -119,8 +119,9 @@ export type Snapshot = {
   schema: number
   t_server: number
   vs: VehicleState | null
+  /** `link`・`scan`・`auto`・`line_cam`・`track`・`signal` は **中身が変わったフレームにだけ入る**
+   * （どれも 10Hz 以下。入っていないフレームでは前の値を持ち続ける。`bus/live.ts` の `noteTelemetry`） */
   link: LinkDiag | null
-  /** 点群は 10Hz なので、同じ周は2回送られてこない（新しいときだけ入る） */
   scan: Scan | null
   /** **engage していなくても流れる**（走らせる前に何をするか見られる） */
   auto: AutoState | null

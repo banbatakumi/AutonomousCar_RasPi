@@ -286,8 +286,9 @@ class IoNode:
         self._ping_seq = 0
         self._running = False
         self._t_start = 0
-        #: UART とバスをまとめて待つ poller（`run` が作る。`_make_poller`）
+        #: UART とバスをまとめて待つ poller（`run` が作る。`_make_poller`）と、そこに載せた UART の fd
         self._poller = None
+        self._uart_fd = -1
         link.on_tx = self._on_tx
 
     def _on_telemetry_chain(self, extra):
@@ -815,19 +816,36 @@ class IoNode:
             return None
         import zmq
         poller = zmq.Poller()
-        poller.register(fileno(), zmq.POLLIN)
+        self._uart_fd = fileno()
+        poller.register(self._uart_fd, zmq.POLLIN)
         for sock in socks.values():
             poller.register(sock, zmq.POLLIN)
         return poller
 
     def _poll_link(self, now_ns: int, due_ns: int) -> list:
         """UART の受信を読む。poller があれば UART かバスが来るまで（上限は `LINK_WAIT_S` と
-        次の定期送信の時刻の早い方）待ってから、来ている分だけ読む。"""
+        次の定期送信の時刻の早い方）待ってから、来ている分だけ読む。
+
+        **フレームが揃うまではここで待ち続ける。** UART のドライバは1フレーム（TELEMETRY で
+        91バイト）を十数バイトずつに分けて渡すので、1フレームにつき約6回起こされる。起こされる
+        たびにループ1周（指令の判定・健全性・表示の更新）を回していた頃は、何も変わっていない
+        周が全体の6割を占め、それだけで CPU を使っていた（実機 DISARM で毎秒約620周のうち、
+        フレームの完成・指令の到着・定期送信は約250周）。途中までしか届いていない間は残りを
+        待つだけにする。バスに何か届いたとき・定期送信の時刻が来たときは今までどおりすぐ返す。
+        """
         if self._poller is None:
             return self.link.poll()
-        wait_ms = max(0.0, min(LINK_WAIT_S * 1e3, (due_ns - now_ns) / 1e6))
-        self._poller.poll(math.ceil(wait_ms))
-        return self.link.poll(block=False)
+        deadline_ns = min(due_ns, now_ns + int(LINK_WAIT_S * NS))
+        while True:
+            wait_ms = max(0.0, (deadline_ns - now_ns) / 1e6)
+            events = self._poller.poll(math.ceil(wait_ms))
+            frames = self.link.poll(block=False)
+            # フレームが揃った・時間切れ・バス（`cmd` など）に届いた、のどれかなら1周回す
+            if frames or any(sock != self._uart_fd for sock, _ in events) or not events:
+                return frames
+            now_ns = time.monotonic_ns()
+            if now_ns >= deadline_ns:
+                return frames
 
     def run(self, duration_s: float | None = None, status_cb=None) -> None:
         self._running = True

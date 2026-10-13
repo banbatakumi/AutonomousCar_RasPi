@@ -117,6 +117,20 @@ class TestDriftRecovery(unittest.TestCase):
         self.assertIsNotNone(ts.offset_ns)      # オフセットは出る
 
 
+class TestOffsetBeforeFit(unittest.TestCase):
+    def test_large_drift_does_not_skew_time_before_regression_starts(self):
+        """回帰が始まる前（最初の 15 秒）も、ドリフトのぶんずれた時刻を返さない（2026-10-13）。
+
+        実機の STM32 の時計は Pi より約 0.35% 速い。窓全体で遅延が最小の1点からオフセットを
+        取っていた頃は、その点が古いほどずれた（10 秒前の点なら 35ms）。"""
+        clock = Clock(offset_us=1_000_000, ratio=1 + 3500e-6)
+        ts, pi = run_session(clock, n=50)       # 50 × 200ms = 10秒 < 15秒ガード
+        self.assertIsNone(ts.drift_ppm)
+        pi_est = ts.to_pi_ns(clock.stm_us(pi))
+        # 最後の PONG から 200ms ぶんのドリフト（0.7ms）だけが残る
+        self.assertAlmostEqual(pi_est, pi, delta=1_000_000)
+
+
 class TestJitterRejection(unittest.TestCase):
     def test_min_filter_ignores_delayed_samples(self):
         clock = Clock(offset_us=7_777_777, ratio=1.0)
