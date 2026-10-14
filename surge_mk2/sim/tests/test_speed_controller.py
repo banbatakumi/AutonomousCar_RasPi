@@ -42,12 +42,42 @@ class TestSpeedController(unittest.TestCase):
         v, _ = _run(ctl, DriveInput(armed=True, target_speed=1.0, accel_limit=3.0), 0.0, 8.0)
         self.assertAlmostEqual(v, 1.0, delta=0.01)
 
+    def test_brake_and_torque_mode_track_the_vehicle_speed(self):
+        """制動・torque_mode の間、目標は実車速に合わせ続ける（0 に固定しない）。
+        離したとき、実車速から残りをランプで詰めるので、急に減速しない。サイドブレーキ・DISARM は 0。"""
+        for kw in ({"brake": True}, {"torque_mode": True}):
+            ctl = SpeedController(SPEC)
+            _run(ctl, DriveInput(armed=True, target_speed=1.5, accel_limit=3.0), 0.0, 1.0)
+            v, _ = _run(ctl, DriveInput(armed=True, **kw), 1.2, 0.02)
+            self.assertAlmostEqual(ctl.ref, ctl.v_meas, delta=1e-9)
+            self.assertGreater(ctl.ref, 1.0)
+            self.assertEqual(ctl.integral, 0.0)
+            # 離した直後の最初の周期で、PI が車速を落とそうとしない（目標 ≒ 実車速）
+            ctl.step(DriveInput(armed=True, target_speed=1.2, accel_limit=3.0), v, 0.001)
+            self.assertAlmostEqual(ctl.ref, ctl.v_meas, delta=0.01)
+        ctl = SpeedController(SPEC)
+        _run(ctl, DriveInput(armed=True, brake=True, side_brake=True), 1.0, 0.1)
+        self.assertEqual(ctl.ref, 0.0)
+        _run(ctl, DriveInput(armed=False), 1.0, 0.1)
+        self.assertEqual(ctl.ref, 0.0)
+
+    def test_target_speed_is_clamped_and_no_acceleration_above_the_limit(self):
+        from sim.vehicle import DRIVE_MAX_SPEED_M_S
+        ctl = SpeedController(SPEC)
+        _run(ctl, DriveInput(armed=True, target_speed=30.0, accel_limit=60.0), 0.0, 3.0)
+        self.assertLessEqual(ctl.ref, DRIVE_MAX_SPEED_M_S + 1e-9)
+        v, _ = _run(SpeedController(SPEC), DriveInput(armed=True, target_speed=30.0, accel_limit=60.0),
+                    DRIVE_MAX_SPEED_M_S + 0.5, 0.5)
+        self.assertLessEqual(v, DRIVE_MAX_SPEED_M_S + 0.5)         # 上限超過中は加速しない
+
     def test_standstill_coasts_and_brake_resets(self):
         ctl = SpeedController(SPEC)
         v, _ = _run(ctl, DriveInput(armed=True, target_speed=0.0), 0.0, 1.0)
         self.assertEqual(v, 0.0)
         _run(ctl, DriveInput(armed=True, target_speed=1.0, accel_limit=3.0), 0.0, 1.0)
         _run(ctl, DriveInput(armed=True, brake=True), 1.0, 0.01)
+        self.assertEqual(ctl.integral, 0.0)
+        _run(ctl, DriveInput(armed=False), 1.0, 0.01)
         self.assertEqual((ctl.ref, ctl.integral), (0.0, 0.0))
 
     def test_launch_bypasses_the_ramp_and_hands_over_at_target(self):

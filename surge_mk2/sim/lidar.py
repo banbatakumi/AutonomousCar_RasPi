@@ -75,6 +75,14 @@ class VirtualLidar:
         #: **車両角**で並べた直近の観測 [m]。0 = 無効。シミュレータGUI が描くためだけの物で、
         #: UART には流れない（Pi 側はセクタパケットから `ScanAssembler` が組み立てる）
         self.last_scan = np.zeros(360)
+        #: 直近にセクタを作った時刻 [ns]（0 = まだ無い）。仮想 STM32 の自動停止が「LiDAR が生きているか」に使う
+        self.last_emit_ns = 0
+
+    def power_off(self) -> None:
+        """無給電にする（回転が止まり、点群は古くなる）。次の `poll` から回転を始め直す。"""
+        self._next_ns = 0
+        self.last_emit_ns = 0
+        self.last_scan[:] = 0.0
 
     def poll(self, t_ns: int, vehicle, stm_us) -> list[tuple[int, packets.LidarSector]]:
         """`t_ns` までに走査が終わったセクタを返す。
@@ -101,6 +109,7 @@ class VirtualLidar:
                 continue                      # ★ パケットごと出さない = sector_seen False
 
             pkt = self._sector_packet(idx, t_end, vehicle, stm_us)
+            self.last_emit_ns = t_end
             out.append((t_end + self._delay_ns(), pkt))
         return out
 

@@ -133,9 +133,20 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 | 場所・時刻で変わる路面の摩擦（`surface.py`。`sim.bench --mu/--surface/--mu-at` だけが使う。横の限界と、加速・速度指令での減速の上限に効く） | タイヤが徐々に逃げる動き・後輪の巻き込みとロック・制動モードの減速の低下 |
 | 走行中の揺れ（`SimParams.vib_*`。実機で測ったヨーレート・車速・実舵角の約 11Hz の雑音。**既定は 0**、`sim.bench --real-noise` で実機の値が入る） | 揺れの原因（舵指令のばたつきに車が応える動き）そのもの。テレメトリの値に足すだけで、車の運動は変えない |
 
-**ファームとの食い違い（auto_stop）。** シムの `auto_stop` は**固定 20cm の超音波**（進行方向）で
-ブレーキを掛けるだけ。ファームは車速に応じた停止距離を **LiDAR ±20°** で見るので別物
-（模擬していない）。`auto_stop` を使う試験の結果は実機に当てはまらない。
+**自動停止（`auto_stop`）はファームの判定を写してある**（`sim/stm32.py` の `_auto_stop_obstacle`、定数は
+`vehicle.h` の `VEHICLE_AUTO_STOP_*` と同じ）。停止距離 `v×0.1 + v²/(2×3.0) + マージン（CONFIG_SET、既定 15cm）`
+以内で、進行方向（ほぼ静止なら指令の向き）・車幅 ±15cm の矩形に LiDAR の点が 3 点以上あれば作動し、
+止まるまで保持する。超音波は至近（車体先端から 5cm 未満）と、LiDAR が 300ms 来ないときの停止距離判定の代わり。
+違い: LiDAR の点は UART を通さず `VirtualLidar.last_scan`（セクタを撃った時点の値）から読む。
+`NO_HEARTBEAT`・`AUTO_STOP_BLIND`（TELEMETRY の予約ビット）は常に 0。
+
+**そのほかファームに合わせたもの。** 目標車速は ±5m/s にクランプし、実車速がそれを超えたら加速させない。
+ブレーキ・torque_mode の間は目標車速を実車速に合わせ続ける（離したあとに 0 から数え直さない。サイドブレーキと
+DISARM は 0）。フェイルセーフ（途絶・E-Stop）で停車して 30 秒たつと駆動電源を切り、ARM を入れ直すまで入れない。
+ロック中（再 ARM 待ち）の ARM は駆動電源も入れない。`steer_link_*` はシムに換算が無い（舵角は最初から路面舵角）ので
+CONFIG_SET の値を持つだけ。起動待ちは `SimParams.md_boot_s`（MD が使えるまで ARM を通さない秒数、**既定 0**）と
+`lidar_power_gate`（1 で LiDAR は ARM を要求している間と外れて 5 秒だけ回る、**既定 0**）で再現できる。
+左右の車輪速は旋回で差が付く（ヨーレート×トレッド/2）。衝突したら壁へ向かう動きだけを止め、逆向きなら離れられる。
 
 **LiDAR のセクタは、撃つ時刻の姿勢で撃つ**（`advance_to` が長く進んでも、溜まったセクタが終点の姿勢に
 まとまらない）。
@@ -312,6 +323,11 @@ sim/
   bench が SLAM の map フレームへ直して planner に渡す
 - `--switch T:G` / `--signal T:V`: 時刻 T に経路グループの切替・信号の値を送る（GUI の A〜D
   ボタン・`route/select` と同じ口）
+- `--map` の走行は、保存地図を真のコースへ重ねて（`slam_bench.align_map`）自己位置の誤差と、真の位置から
+  経路までの距離（「真の横偏差」）を出す。planner の自己申告（「横偏差」）とは別の数字
+- bench は `io_node` と同じ受信経路（`LinkTracker`＋`BusBridge`。PING を 5Hz で送って時刻同期を育て、LiDAR の
+  セクタ時刻と車両状態の時刻を STM32 の `t_us` から換算する）を通り、`vehicle.toml` の `[control]` を
+  仮想 STM32 へ全部入れる（`launch_exit_torque_nm`・速度 FF・`tc_enable` など）
 - 地図作成が終わると bench が「走行」を押す（DONE → 保存した地図を `request_load`）。
   保存先は一時ディレクトリ（実機の `saved_maps/` を汚さない）
 - 結果に**周回ごとに真値で通った道路グラフのエッジ**（真のコースから作ったグラフの番号）と、
@@ -340,8 +356,8 @@ sim/
 - `--vehicle KEY=VALUE`: **真値の車だけ**諸元を変える（`sim.vehicle.VehicleSpec` の欄名。例 `mu=0.3755`・
   `steer_servo_gain=0.877`・`speed_kp=0.3`）。planner は `config/vehicle.toml` のまま——同定値が外れて
   いたときに走りが壊れないかを見る
-- `--control KEY=VALUE`: **シムの STM32 だけ** `[control]` の値を変える（今は車速PIの加速度フィードフォワード
-  `speed_ff_nm_per_m_s2`・`speed_ff_rr_nm`）。planner は `config/vehicle.toml` のまま——「Pi は新しいのに
+- `--control KEY=VALUE`: **シムの STM32 だけ** `[control]` の値を変える（車に効くのは発進を終える積分の初期値
+  `launch_exit_torque_nm` と車速PIの加速度フィードフォワード `speed_ff_*`。`tc_enable` は TC の旗の出し方に効く）。planner は `config/vehicle.toml` のまま——「Pi は新しいのに
   ファームに値が入っていない」場合の走りを見られる
 - `--obs-log`: 障害物まわりの判断（reason の移り変わり、横へ避けられなかった理由つき）を時刻つきで出す
 - 結果の「車の使い方」: 舵の張り付き・横G p99・要求中の実加減速・経路の速度からの出過ぎ・`plan()` の p99。

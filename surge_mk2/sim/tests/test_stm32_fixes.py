@@ -166,5 +166,161 @@ class TestArmRule(unittest.TestCase):
         self.assertTrue(sim._input.armed)
 
 
+class TestAutoStop(unittest.TestCase):
+    """ファームの自動停止: 停止距離の矩形に LiDAR 3 点以上＋至近の超音波、LiDAR 不調時だけ超音波が停止距離で見る。"""
+
+    def _sim(self, speed):
+        sim, ld = make(lidar=True)
+        sim.vehicle.speed = sim.vehicle.speed_measured = speed
+        sim._now = 2_000_000_000
+        ld.last_emit_ns = sim._now                    # LiDAR は生きている
+        ld.last_scan[:] = 0.0
+        sim.us_front = sim.us_rear = 0.0
+        return sim, ld
+
+    def _put(self, ld, deg, dist_m, n=3):
+        for k in range(n):
+            ld.last_scan[(deg + k) % 360] = dist_m
+
+    def test_rectangle_not_sector(self):
+        sim, ld = self._sim(0.0)
+        # 停止中: d_stop = マージン 15cm、LiDAR から 15+23=38cm 以内・幅 ±15cm
+        self._put(ld, 0, 0.30)
+        self.assertTrue(sim._auto_stop_obstacle(1.0))
+        ld.last_scan[:] = 0.0
+        self._put(ld, 0, 0.45)                        # 遠い
+        self.assertFalse(sim._auto_stop_obstacle(1.0))
+        ld.last_scan[:] = 0.0
+        self._put(ld, 40, 0.30)                       # 横 0.19m（> 15cm）は扇形なら入るが矩形では入らない
+        self.assertFalse(sim._auto_stop_obstacle(1.0))
+        ld.last_scan[:] = 0.0
+        self._put(ld, 0, 0.30, n=2)                   # 2 点では確定しない
+        self.assertFalse(sim._auto_stop_obstacle(1.0))
+
+    def test_distance_grows_with_speed_and_direction_follows_motion(self):
+        sim, ld = self._sim(2.0)
+        # 2m/s: 0.2 + 0.667 + マージン 0.15 = 1.017m + 0.23
+        self._put(ld, 0, 1.2)
+        self.assertTrue(sim._auto_stop_obstacle(1.0))
+        ld.last_scan[:] = 0.0
+        self._put(ld, 180, 0.25)                      # 後方の障害物は前進中は見ない
+        self.assertFalse(sim._auto_stop_obstacle(-1.0))
+        sim.vehicle.speed_measured = 0.0              # 静止なら指令の向きで見る
+        self.assertTrue(sim._auto_stop_obstacle(-1.0))
+
+    def test_ultrasonic_near_always_and_fallback_only_without_lidar(self):
+        sim, ld = self._sim(0.0)
+        sim.us_front = 0.08                           # 5+4=9cm 未満
+        self.assertTrue(sim._auto_stop_obstacle(1.0))
+        sim.us_front = 0.15                           # 停止距離（15+4=19cm）以内だが LiDAR が生きている
+        self.assertFalse(sim._auto_stop_obstacle(1.0))
+        ld.last_emit_ns = 0                           # LiDAR 不調 → 超音波が停止距離で見る
+        self.assertTrue(sim._auto_stop_obstacle(1.0))
+
+    def test_latches_until_stopped(self):
+        sim, ld = self._sim(1.0)
+        sim._cmd_flags = packets.CMD_FLG_AUTO_STOP
+        sim.uart_timeout = False
+        sim._input = DriveInput(armed=True, target_speed=1.0)
+        self._put(ld, 0, 0.5)
+        self.assertTrue(sim._auto_stop_should_brake(sim._input))
+        ld.last_scan[:] = 0.0                         # 障害物が範囲外になっても、止まるまで解除しない
+        sim.auto_stop_active = True
+        self.assertTrue(sim._auto_stop_should_brake(sim._input))
+        sim.vehicle.speed_measured = 0.0              # 止まったら判定し直す
+        for _ in range(5):
+            r = sim._auto_stop_should_brake(sim._input)
+        self.assertFalse(r)
+
+
+class TestFailsafePowerOff(unittest.TestCase):
+    def test_power_is_cut_after_30s_stopped_and_needs_rearm(self):
+        sim, _ = make()
+        t = 1_000_000_000
+        cmd(sim, t, False)
+        cmd(sim, t + 10_000_000, True)
+        t = run(sim, t + 10_000_000, 0.5, True)
+        self.assertTrue(sim._drive_powered())
+        t = run(sim, t, 20.0, False)                  # 途絶して停車（20s）
+        self.assertTrue(sim._drive_powered())
+        t = run(sim, t, 12.0, False)
+        self.assertFalse(sim._drive_powered())
+        cmd(sim, t, True)                             # ARM のまま戻っても入れない
+        self.assertFalse(sim._drive_powered())
+        cmd(sim, t + 10_000_000, False)
+        cmd(sim, t + 20_000_000, True)
+        self.assertTrue(sim._drive_powered())
+
+    def test_target_speed_is_clamped_to_firmware_limit(self):
+        sim, _ = make()
+        t = 1_000_000_000
+        cmd(sim, t, False)
+        cmd(sim, t + 10_000_000, True, speed=32000)   # 32 m/s（u16/0.001 で表せる範囲）
+        self.assertLessEqual(sim._input.target_speed, 5.0)
+
+
+class TestBootGates(unittest.TestCase):
+    def test_md_boot_delays_arm_when_enabled(self):
+        sim, _ = make(SimParams(md_boot_s=1.0))
+        t = 1_000_000_000
+        cmd(sim, t, False)
+        cmd(sim, t + 10_000_000, True)
+        self.assertFalse(sim._input.armed)
+        for k in range(2, 111):                       # COMMAND は届き続ける
+            cmd(sim, t + k * 10_000_000, True)
+        self.assertTrue(sim._input.armed)
+
+    def test_lidar_is_off_until_arm_when_gated(self):
+        sim, ld = make(SimParams(lidar_power_gate=1.0), lidar=True)
+        t = run(sim, 1_000_000_000, 0.5, True)
+        self.assertEqual(ld.last_emit_ns, 0)
+        cmd(sim, t, False)
+        cmd(sim, t + 10_000_000, True)
+        t = run(sim, t + 10_000_000, 0.5, True)
+        self.assertGreater(ld.last_emit_ns, 0)
+
+
+class TestVehicleDerived(unittest.TestCase):
+    def test_wheel_speeds_split_in_a_turn(self):
+        sim, _ = make()
+        v = sim.vehicle
+        v.speed = v.speed_measured = 2.0
+        v.yaw_rate = 1.0                                # 左旋回: 右輪が速い
+        w = v.wheel_speed
+        half = 1.0 * v.spec.track / 2
+        self.assertAlmostEqual(w[2], 2.0 - half, places=6)
+        self.assertAlmostEqual(w[3], 2.0 + half, places=6)
+        self.assertLess(w[0], w[1])
+        v.yaw_rate = 0.0
+        self.assertEqual(v.wheel_speed[2], v.wheel_speed[3])
+
+    def test_raycast_has_no_systematic_bias(self):
+        import numpy as np
+        from sim.course import Course as C
+        res = 0.02
+        grid = np.zeros((100, 100), dtype=bool)
+        grid[:, 60:] = True                              # 壁の面は x = 1.20m
+        c = C(name="t", path=Path("t"), resolution=res, origin=(0.0, 0.0),
+              start=(0.1, 0.5, 0.0), grid=grid)
+        errs = [float(c.raycast(0.1 + k * 0.0013, 0.5, np.array([0.0]), 3.0)[0]) - (1.2 - 0.1 - k * 0.0013)
+                for k in range(16)]
+        self.assertLess(abs(sum(errs) / len(errs)), 0.003)      # 平均の偏りが 3mm 未満（半歩戻す前は約 5mm）
+        self.assertLess(max(abs(e) for e in errs), res * 0.5 + 1e-6)
+
+    def test_can_back_away_after_a_collision(self):
+        sim, _ = make()
+        v = sim.vehicle
+        v.speed = 1.0
+        v.note_collision(True)
+        self.assertEqual(v.speed, 0.0)
+        v.speed = 0.5                                    # 壁へ向かう動きは殺す
+        v.note_collision(True)
+        self.assertEqual(v.speed, 0.0)
+        v.speed = -0.3                                   # 逆向きは通す
+        v.note_collision(True)
+        self.assertEqual(v.speed, -0.3)
+        self.assertEqual(v.collisions, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

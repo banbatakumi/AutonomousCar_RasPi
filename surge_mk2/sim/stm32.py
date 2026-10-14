@@ -8,6 +8,14 @@
 - **E-Stop は自動発動しない。** GPIO6 ハートビートが Mac に無いため（`--no-heartbeat`
   と同じ扱い）。代わりに `sim.gui` から手で発動できる
 - **TC/TV は実装していない。** タイヤモデルが無いので介入する材料が無い
+- **TELEMETRY の予約ビット `NO_HEARTBEAT`・`AUTO_STOP_BLIND` は常に 0。** ハートビートの線も
+  超音波・LiDAR の不調も持たないので、立てる材料が無い
+- **`steer_link_*`（ステアのリンク換算）は持たない。** シムの舵角は最初から路面舵角で、ファームの
+  「停車・DISARM 中にだけ適用／`steer_link_cubic` の丸めを ACK に反映」は写していない
+  （CONFIG_SET の値をそのまま ACK する）
+- 自動停止（`_auto_stop_obstacle`）はファームの判定（停止距離の矩形に LiDAR 3 点以上＋超音波）を
+  写してある。違いは、LiDAR の点群を真値のレイキャストから直接読むこと（`VirtualLidar.last_scan`。
+  UART の遅れ・欠落セクタは通らない）と、ビンの新旧を 300ms の生存だけで見ること
 - 電流・温度・電圧は「それらしい」値。負荷に応じて緩く動くだけで物理的な根拠は無い
 
 ## 時計は Pi と独立にしてある
@@ -28,6 +36,7 @@ from raspi.proto import UART_BAUD, FrameEncoder, FrameParser, packets
 from raspi.proto.generated.packets import FRAME_OVERHEAD, P2S_TYPES, PROTOCOL_VERSION
 
 from .params import SimParams
+from .vehicle import DRIVE_MAX_SPEED_M_S as _DRIVE_MAX_SPEED_M_S
 from .vehicle import DriveInput, VehicleModel, VehicleSpec, brake_decel
 
 __all__ = ["VirtualStm32", "FW_ID"]
@@ -55,8 +64,37 @@ DISARM_BRAKE_STANDSTILL_M_S = 0.05
 #: `COMMAND.steer_rate_limit` = 0 のときの既定 [rad/s]（ファームの `VEHICLE_DEFAULT_STEER_RATE_RAD_S`）
 DEFAULT_STEER_RATE_RAD_S = 0.5
 
-#: `auto_stop`（v0.7）が効き始める距離 [m]
-AUTO_STOP_DISTANCE_M = 0.20
+#: 自動停止（`vehicle.h` の `VEHICLE_AUTO_STOP_*`。**ファームと同じ値にすること**）。
+#: 停止距離 d_stop = v×遅延 + v²/(2a) + マージン（マージンは CONFIG_SET の `AUTO_STOP_MARGIN_CM`）
+AUTO_STOP_DELAY_S = 0.1
+AUTO_STOP_DECEL_M_S2 = 3.0
+AUTO_STOP_DIRECTION_DEADBAND_M_S = 0.05
+#: LiDAR は進行方向（前 0°・後 180°）へ伸ばした矩形で見る。片側の幅と、障害物と確定する点数
+AUTO_STOP_LIDAR_HALF_WIDTH_CM = 15.0
+AUTO_STOP_LIDAR_MIN_POINTS = 3
+#: LiDAR の結果に関わらず、超音波がこの距離（車体先端から）未満なら止める
+AUTO_STOP_ULTRASONIC_NEAR_CM = 5.0
+#: センサから車体先端までの後退量 [cm]（しきい値に足す）
+AUTO_STOP_LIDAR_OFFSET_CM = {True: 23.0, False: 14.0}       # 前進側 / 後退側
+AUTO_STOP_ULTRASONIC_OFFSET_CM = {True: 4.0, False: 3.0}
+#: `Lidar_IsOk` — この時間セクタが来なければ LiDAR 不調（超音波が代わりに停止距離で見る）
+LIDAR_TIMEOUT_NS = 300 * 1_000_000
+#: 自動停止の判定周期（ステップ数。1ms × 5 ＝ 200Hz。毎ステップ撃つほどではない）
+_AUTO_STOP_EVERY_STEPS = 5
+
+#: フェイルセーフで停車してから駆動電源を切るまで [s]（`VEHICLE_FAILSAFE_POWER_OFF_S`）と、
+#: 停車とみなす車速・保持時間（`VEHICLE_BRAKE_HOLD_SPEED_M_S`・`VEHICLE_BRAKE_HOLD_DELAY_S`）
+FAILSAFE_POWER_OFF_S = 30.0
+BRAKE_HOLD_SPEED_M_S = 0.2
+BRAKE_HOLD_DELAY_S = 0.3
+#: ARM が外れてから LiDAR を止めるまで（`VEHICLE_LIDAR_IDLE_OFF_DELAY_S`）
+LIDAR_IDLE_OFF_NS = 5 * NS
+
+_AS_OFFSETS = np.arange(-89, 90)
+_AS_COS = np.cos(np.deg2rad(np.abs(_AS_OFFSETS)))
+_AS_SIN = np.sin(np.deg2rad(np.abs(_AS_OFFSETS)))
+#: 中心角（前 0・後 180）ごとの、矩形の判定に使う 1° ビンの添字
+_AS_BINS = {True: (_AS_OFFSETS % 360), False: ((180 + _AS_OFFSETS) % 360)}
 
 #: ABS の旗を立てる下限の車速 [m/s]。v0.16 のファームはスリップ率の分母に下限を置いて低速でも働くが、
 #: MD の制動が車輪の止まる手前で抜ける（約0.6m/s から）ので、低速で ABS が削る場面はほとんど無い
@@ -65,7 +103,7 @@ ABS_MIN_SPEED_M_S = 0.25
 #: `LIMITS`(0x0A、★v0.11) が返す値。**実機 STM32 の固定定数
 #: （`DRIVE_MAX_SPEED_M_S`/`DRIVE_MAX_ACCEL_M_S2`/`DRIVE_MAX_TORQUE_NM`）と
 #: 一致させること。** `docs/uart_protocol.md` §5.12 に記載の値が正
-DRIVE_MAX_SPEED_M_S = 5.0
+DRIVE_MAX_SPEED_M_S = _DRIVE_MAX_SPEED_M_S
 #: ★v0.22: STM32 は `accel_limit` に上限を掛けない。ワイヤ（u16×0.001）で表せる最大を返す
 DRIVE_MAX_ACCEL_M_S2 = 65.535
 #: 走行中の揺れ（`_vibration`）の減衰の時定数 [s]（100Hz で極の半径 0.75。実機の自己相関に合わせた）
@@ -133,6 +171,16 @@ class VirtualStm32:
         #: ARM が外れたあと、停車を待って最大制動を続ける期限（★v0.19。0 = 制動していない）
         self._arm_requested = False
         self._disarm_brake_until = 0
+        #: フェイルセーフで長く停車して駆動電源を切った（ARM し直すまで入れない）
+        self._drive_power_cut = False
+        self._failsafe_still_s = 0.0
+        #: 駆動電源が入った時刻（MD の起動待ち `SimParams.md_boot_s` の起点。None = 切れている）
+        self._power_on_ns: int | None = None
+        #: LiDAR の給電（`SimParams.lidar_power_gate` が 1 のときだけ意味を持つ）
+        self._lidar_on = False
+        self._lidar_idle_ns = 0
+        self._as_tick = 0
+        self._as_hit = False
 
         #: 路面の摩擦を場所と時刻で変える（`sim/surface.py`。`None` = `VehicleSpec` の値のまま）
         self.surface = None
@@ -201,14 +249,7 @@ class VirtualStm32:
         elif isinstance(msg, packets.LimitsReq):
             self._emit_limits(t_ns)
         elif isinstance(msg, packets.ConfigSet):
-            self._config[msg.param_id] = msg.value
-            known = msg.param_id in vars(packets.Param).values()
-            if msg.param_id == packets.Param.LAUNCH_EXIT_TORQUE_NM:
-                self.vehicle.set_launch_exit_torque(msg.value)
-            elif msg.param_id == packets.Param.SPEED_FF_NM_PER_M_S2:
-                self.vehicle.set_speed_ff(nm_per_m_s2=msg.value)
-            elif msg.param_id == packets.Param.SPEED_FF_RR_NM:
-                self.vehicle.set_speed_ff(rr_nm=msg.value)
+            known = self.apply_config(msg.param_id, msg.value)
             self._emit(packets.ConfigAck(
                 param_id=msg.param_id, applied=msg.value,
                 result=packets.ConfigResult.OK if known else packets.ConfigResult.UNKNOWN_ID), t_ns)
@@ -216,6 +257,21 @@ class VirtualStm32:
             self._emit(packets.ConfigAck(
                 param_id=msg.param_id, applied=self._config.get(msg.param_id, 0.0),
                 result=packets.ConfigResult.OK), t_ns)
+
+    def apply_config(self, param_id: int, value: float) -> bool:
+        """`CONFIG_SET` の中身を適用する。知っている `param_id` なら True。
+
+        車に効くのは発進を終える積分の初期値と速度 FF だけ（ほかの `[control]` は値を持つだけ。
+        TC・ABS の ON/OFF は旗の出し方に効く）。`sim.bench` は io_node を通さないので、
+        `[control]` をこれで入れる。"""
+        self._config[param_id] = value
+        if param_id == packets.Param.LAUNCH_EXIT_TORQUE_NM:
+            self.vehicle.set_launch_exit_torque(value)
+        elif param_id == packets.Param.SPEED_FF_NM_PER_M_S2:
+            self.vehicle.set_speed_ff(nm_per_m_s2=value)
+        elif param_id == packets.Param.SPEED_FF_RR_NM:
+            self.vehicle.set_speed_ff(rr_nm=value)
+        return param_id in vars(packets.Param).values()
 
     def lamps(self, t_ns: int) -> dict:
         """灯火の状態（シムの描画用）。`docs/uart_protocol.md` §5.6.1 の表に合わせる。
@@ -260,31 +316,47 @@ class VirtualStm32:
         if not arm_requested:
             self._arm_locked = False
             self._arm_warned = False
-        armed = arm_requested and self.mode != packets.Mode.DISARM
-        if armed and self._arm_locked:
-            armed = False
+        # ロック中の ARM は外れているのと同じに扱う（駆動電源も入れない。走っていれば停車まで制動する）
+        if arm_requested and self._arm_locked:
+            arm_requested = False
             if not self._arm_warned:
                 self._arm_warned = True
                 self._emit(packets.Log(
                     severity=packets.LogSeverity.WARN,
                     message=b"ARM ignored: disarm once to re-arm (after e-stop / COMMAND loss)"),
                     t_ns)
+        armed = arm_requested and self.mode != packets.Mode.DISARM
         if self.estop_active:
             armed = False       # E-Stop 中は COMMAND が一切効かない（実機と同じ）
-        # ★v0.19: 走行中に ARM が外れたら、止まるまで駆動電源を切らず最大制動する
-        # （`vehicle.c` の `UpdateDisarmBraking`）
-        if arm_requested:
-            self._disarm_brake_until = 0
-        elif self._arm_requested:
-            self._disarm_brake_until = t_ns + DISARM_BRAKE_TIMEOUT_NS
-        self._arm_requested = arm_requested
+        else:
+            # ★v0.19: 走行中に ARM が外れたら、止まるまで駆動電源を切らず最大制動する
+            # （`vehicle.c` の `UpdateDisarmBraking`）
+            was_powered = self._drive_powered()
+            if arm_requested:
+                self._disarm_brake_until = 0
+            elif self._arm_requested and not self._drive_power_cut:
+                self._disarm_brake_until = t_ns + DISARM_BRAKE_TIMEOUT_NS
+            self._arm_requested = arm_requested
+            # 長い停車で切った電源は、ARM を要求し直す（ロックを通った ARM）まで入れない
+            if arm_requested:
+                self._drive_power_cut = False
+            if self._drive_powered() and not was_powered:
+                self._power_on_ns = t_ns
+            elif not self._drive_powered():
+                self._power_on_ns = None
+            # MD は給電から約1秒指令を受け付けず、その間は走らせない（ファームの `md_started`）
+            if (armed and self.params.md_boot_s > 0 and self._power_on_ns is not None
+                    and (t_ns - self._power_on_ns) < self.params.md_boot_s * NS):
+                armed = False
 
         self._steer_cmd_echo = c.target_steer * _CMD_SCALE["target_steer"]
         self._input = DriveInput(
             armed=armed,
             brake=bool(c.flags & packets.CMD_FLG_BRAKE),
             torque_mode=bool(c.flags & packets.CMD_FLG_TORQUE_MODE),
-            target_speed=c.target_speed * _CMD_SCALE["target_speed"],
+            # ファームは目標車速を ±DRIVE_MAX_SPEED_M_S に収める（Drive_SetTargetSpeed）
+            target_speed=max(-DRIVE_MAX_SPEED_M_S, min(DRIVE_MAX_SPEED_M_S,
+                                                      c.target_speed * _CMD_SCALE["target_speed"])),
             target_steer=self._steer_cmd_echo,
             accel_limit=c.accel_limit * _CMD_SCALE["accel_limit"],
             # ファームは steer_rate_limit=0 を既定の 0.5rad/s と読む（`vehicle.h` の
@@ -337,8 +409,26 @@ class VirtualStm32:
 
         self._poll_lidar(t_ns)
 
+    def _drive_powered(self) -> bool:
+        """駆動電源が入っているか。ARM を要求している間と、外れたあと停車を待って制動している間。"""
+        return (self._arm_requested or bool(self._disarm_brake_until)) and not self._drive_power_cut
+
+    def _lidar_powered(self, t_ns: int) -> bool:
+        """LiDAR が回っているか。ファームは ARM を要求している間（と外れて5秒）だけ給電する。"""
+        if self.lidar is None:
+            return False
+        if self.params.lidar_power_gate <= 0:
+            return True
+        if self._arm_requested and not (self.uart_timeout or self.estop_active):
+            self._lidar_on = True
+            self._lidar_idle_ns = t_ns
+        elif self._lidar_on and t_ns - self._lidar_idle_ns >= LIDAR_IDLE_OFF_NS:
+            self._lidar_on = False
+            self.lidar.power_off()
+        return self._lidar_on
+
     def _poll_lidar(self, t_ns: int) -> None:
-        if self.lidar is not None:
+        if self.lidar is not None and self._lidar_powered(t_ns):
             for gen_ns, pkt in self.lidar.poll(t_ns, self.vehicle, self.stm_us):
                 self._emit(pkt, gen_ns)
 
@@ -355,12 +445,23 @@ class VirtualStm32:
         # COMMAND 途絶 → 最大制動（舵角は最後の値を保持する）
         self.uart_timeout = (self._now - self._cmd_ns) > COMMAND_TIMEOUT_NS
         if self.uart_timeout or self.estop_active:
-            # 駆動電源が入っていれば最大制動（ファームのフェイルセーフは電源を切らない）。
+            # 駆動電源が入っていれば最大制動（停車して30秒たつまでは電源を切らない）。
             # 入っていなければ（一度も ARM していない・DISARM 済み）制動する手段が無い
-            powered = self._arm_requested or bool(self._disarm_brake_until)
+            powered = self._drive_powered()
             cmd = DriveInput(armed=powered, brake=powered, brake_torque=0.0,
                              target_steer=v.steer_actual)
-        elif self._disarm_brake_until:
+            # 止まったまま長く保持し続けない（過熱・電池消耗）。切ったあとは ARM し直すまで入れない
+            if powered and abs(v.speed) < BRAKE_HOLD_SPEED_M_S:
+                self._failsafe_still_s += dt
+                if self._failsafe_still_s >= BRAKE_HOLD_DELAY_S + FAILSAFE_POWER_OFF_S:
+                    self._drive_power_cut = True
+                    self._disarm_brake_until = 0
+                    self._failsafe_still_s = 0.0
+            else:
+                self._failsafe_still_s = 0.0
+        else:
+            self._failsafe_still_s = 0.0
+        if not (self.uart_timeout or self.estop_active) and self._disarm_brake_until:
             # ★v0.19: ARM が外れたあとの停止待ち。止まるか時間切れで駆動電源を切る
             if abs(v.speed) < DISARM_BRAKE_STANDSTILL_M_S or self._now >= self._disarm_brake_until:
                 self._disarm_brake_until = 0
@@ -387,7 +488,7 @@ class VirtualStm32:
         if self.side_brake_active:
             cmd = DriveInput(armed=cmd.armed, brake=True, brake_torque=0.0,
                              target_steer=cmd.target_steer,
-                             steer_rate_limit=cmd.steer_rate_limit)
+                             steer_rate_limit=cmd.steer_rate_limit, side_brake=True)
 
         # 超音波（前後 1 本ずつのレイキャスト）と auto_stop
         self._update_ultrasonic()
@@ -431,17 +532,50 @@ class VirtualStm32:
             setattr(self, attr, d)
 
     def _auto_stop_should_brake(self, cmd: DriveInput) -> bool:
-        """v0.7。**進行方向**の超音波だけを見る。ラッチせず、ヒステリシスも無い。"""
-        if not (self._cmd_flags & packets.CMD_FLG_AUTO_STOP) or not cmd.armed:
+        """ファームの自動停止（`vehicle.c` の `IsAutoStopObstacleAhead` と保持）。
+
+        一度作動したら、止まるまで解除しない（減速で停止距離が縮み「範囲外」になって再加速→再作動を
+        繰り返すのを避ける）。止まってからは毎回判定し直す。"""
+        if (self.uart_timeout or self.estop_active or not cmd.armed
+                or not (self._cmd_flags & packets.CMD_FLG_AUTO_STOP)):
             return False
-        want = cmd.target_torque if cmd.torque_mode else cmd.target_speed
-        if want > 0:
-            d = self.us_front
-        elif want < 0:
-            d = self.us_rear
-        else:
-            return False
-        return 0.0 < d < AUTO_STOP_DISTANCE_M
+        v = self.vehicle
+        moving = abs(v.speed_measured) > AUTO_STOP_DIRECTION_DEADBAND_M_S
+        if self.auto_stop_active and moving:
+            return True
+        tick, self._as_tick = self._as_tick, (self._as_tick + 1) % _AUTO_STOP_EVERY_STEPS
+        if tick == 0:
+            inp = self._input
+            want = inp.target_torque if inp.torque_mode else inp.target_speed
+            self._as_hit = self._auto_stop_obstacle(want)
+        return self._as_hit
+
+    def _auto_stop_obstacle(self, desired_direction: float) -> bool:
+        """進行方向（ほぼ静止なら指令の向き）の、停止距離以内に障害物があるか。逆方向は見ない。"""
+        v = self.vehicle
+        speed = v.speed_measured
+        forward = (speed >= 0.0) if abs(speed) > AUTO_STOP_DIRECTION_DEADBAND_M_S \
+            else (desired_direction >= 0.0)
+        av = abs(speed)
+        d_stop_cm = ((av * AUTO_STOP_DELAY_S + av * av / (2.0 * AUTO_STOP_DECEL_M_S2)) * 100.0
+                     + self._config.get(packets.Param.AUTO_STOP_MARGIN_CM, 15.0))
+        lidar_fresh = lidar_hit = False
+        lid = self.lidar
+        if lid is not None and lid.last_emit_ns and (self._now - lid.last_emit_ns) < LIDAR_TIMEOUT_NS:
+            lidar_fresh = True
+            d = lid.last_scan[_AS_BINS[forward]] * 100.0                 # cm。0 = 無効
+            x, y = d * _AS_COS, d * _AS_SIN
+            n = int(np.count_nonzero((d > 0.0)
+                                     & (x <= d_stop_cm + AUTO_STOP_LIDAR_OFFSET_CM[forward])
+                                     & (y <= AUTO_STOP_LIDAR_HALF_WIDTH_CM)))
+            lidar_hit = n >= AUTO_STOP_LIDAR_MIN_POINTS
+        us_cm = (self.us_front if forward else self.us_rear) * 100.0
+        off = AUTO_STOP_ULTRASONIC_OFFSET_CM[forward]
+        us_valid = us_cm > 0.0
+        us_near = us_valid and us_cm < AUTO_STOP_ULTRASONIC_NEAR_CM + off
+        # LiDAR が使えないときだけ、超音波が停止距離で見る
+        us_fallback = us_valid and not lidar_fresh and us_cm < d_stop_cm + off
+        return lidar_hit or us_near or us_fallback
 
     # ── テレメトリ ──
 
@@ -450,7 +584,7 @@ class VirtualStm32:
         if self._input.armed and not self.estop_active and not self.uart_timeout:
             f |= packets.FLG_ARMED
         # ★v0.19: 駆動電源。ARM を要求している間と、外れたあと停車を待って制動している間
-        if self._arm_requested or self._disarm_brake_until:
+        if self._drive_powered():
             f |= packets.FLG_DRIVE_POWER_ON
         if self.estop_active:
             f |= packets.FLG_ESTOP_ACTIVE
@@ -467,7 +601,8 @@ class VirtualStm32:
         # ★ 作り物: このモデルは後輪の回転を持たないので TC そのものは無い。駆動の加速度が
         #   グリップの上限で頭打ちになっている間（実機なら TC が介入する場面）に旗だけ立てる。
         #   発進の加速度から横グリップの初期値を出す処理（`raspi/nav/grip.LaunchFit`）の検証用
-        if self.vehicle.accel_capped and self._input.armed:
+        if (self.vehicle.accel_capped and self._input.armed
+                and self._config.get(packets.Param.TC_ENABLE, 1.0) != 0.0):
             f |= packets.FLG_TC_ACTIVE
         # v0.14: ウィンカー。点滅周期は暫定 1Hz（0.5s ON / 0.5s OFF）。
         # **実際の周期は STM32 側の実装依存**なので、ここは GUI 配線の確認用の近似

@@ -175,7 +175,9 @@ class Course:
 
         hit = occ.any(axis=1)
         first = occ.argmax(axis=1)                 # 当たらない行は 0 を返すので hit で潰す
-        return np.where(hit, t[first], 0.0).astype(np.float64)
+        # 最初に壁の中へ入った標本点は、壁の面から 0〜step 先にある。半歩戻すと偏りが消える
+        # （そのままだと平均で step/2 ＝約 0.6cm 長く測る）
+        return np.where(hit, np.maximum(t[first] - 0.5 * step, 0.0), 0.0).astype(np.float64)
 
     def ray(self, ox: float, oy: float, angle: float, max_range: float) -> float:
         """レイ1本。超音波用。"""

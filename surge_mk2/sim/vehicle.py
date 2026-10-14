@@ -309,6 +309,9 @@ class DriveInput:
     brake_torque: float = 0.0        # N·m（後輪各輪）。0 = 未指定 = 最大制動
     target_torque: float = 0.0       # N·m（駆動トルク直接指令、v0.6）
     launch: bool = False             # ローンチコントロールの要求（v0.20。`SpeedController` が見る）
+    #: サイドブレーキ（`brake` も立てて渡す）。ファームは目標車速を 0 に固定する（通常の制動・
+    #: torque_mode は実車速に合わせ続ける、`SpeedController.step`）
+    side_brake: bool = False
 
 
 class SteerServo:
@@ -364,6 +367,10 @@ class SteerServo:
         if rate_cap > 1e-6:
             return actual + max(-rate_cap * dt, min(rate_cap * dt, want - actual))
         return want
+
+
+#: ファームの `DRIVE_MAX_SPEED_M_S`。目標車速のクランプと、これを超えたら加速させない最終防壁
+DRIVE_MAX_SPEED_M_S = 5.0
 
 
 def drive_accel_limit(spec: VehicleSpec, v: float) -> float:
@@ -432,12 +439,14 @@ def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float
         # 車が一切動かない**ので、加速度への換算だけは入れてある
         a = cmd.target_torque * sp.drive_ratio / (sp.wheel_radius * sp.mass)
         a -= math.copysign(sp.rolling_resistance, v) if abs(v) > 1e-3 else 0.0
+        if (v >= DRIVE_MAX_SPEED_M_S and a > 0.0) or (v <= -DRIVE_MAX_SPEED_M_S and a < 0.0):
+            a = 0.0                      # 上限を超えたら加速させない（ファームの ApplyOverspeedLimit）
         return v + a * dt
 
     # 速度指令: 1次遅れで追う。加速側は`drive_accel_limit()`（実測・速度依存）、
     # 減速側は`speed_decel_m_s2`（未実測なら`drive_accel_m_s2`＝対称な上限）。
     # `cmd.accel_limit`（COMMANDのレート制限）も効く場合は厳しい方を採る
-    target = cmd.target_speed
+    target = max(-DRIVE_MAX_SPEED_M_S, min(DRIVE_MAX_SPEED_M_S, cmd.target_speed))
     if sp.tau_speed_s > 1e-6:
         want = v + (target - v) * (1.0 - math.exp(-dt / sp.tau_speed_s))
     else:
@@ -467,7 +476,10 @@ class SpeedController:
     上限（`drive_accel_limit()`・`speed_decel_m_s2`。外側の制限なので積分を back-calculation で
     戻す、`UnwindIntegral` と同じ時定数0.1s）→ 車体（加速度 = `speed_plant_gain`×トルク −
     転がり抵抗）。目標と測定速度がどちらも 0.05m/s 未満なら惰行して積分を捨てる
-    （`IsStandstill`）。ブレーキ・トルク指令・DISARM の間は目標を0・積分を0に戻す。
+    （`IsStandstill`）。ブレーキ・トルク指令の間は積分を0にして、目標を実車速（ローパス後）に
+合わせ続ける（`drive.c` の `TrackVehicleSpeed`。0 に固定すると、走っているうちに離したとき
+目標が 0 から数え直しになって減速し続ける）。サイドブレーキ・DISARM の間は目標も0に戻す。
+目標は ±`DRIVE_MAX_SPEED_M_S` にクランプし、実車速がそれを超えたら加速させない。
 
     「1次遅れ＋加速度上限」ではファームのこの構造（ランプ→2次応答・行き過ぎ）を
     表現できず、同定で時定数が下限に張り付く。
@@ -541,7 +553,10 @@ class SpeedController:
         else:
             self.v_meas = v
         if not cmd.armed or cmd.brake or cmd.torque_mode:
-            self.ref = 0.0
+            if cmd.armed and not cmd.side_brake:
+                self.ref = max(-DRIVE_MAX_SPEED_M_S, min(DRIVE_MAX_SPEED_M_S, self.v_meas))
+            else:
+                self.ref = 0.0
             self.integral = 0.0
             self.ff_accel = 0.0
             self.launching = self._launch_spent = False
@@ -561,7 +576,8 @@ class SpeedController:
             lim = sp.speed_ramp_max_m_s2
             if cmd.accel_limit > 0:
                 lim = min(lim, max(0.01, cmd.accel_limit))
-            step = max(-lim * dt, min(lim * dt, cmd.target_speed - self.ref))
+            target = max(-DRIVE_MAX_SPEED_M_S, min(DRIVE_MAX_SPEED_M_S, cmd.target_speed))
+            step = max(-lim * dt, min(lim * dt, target - self.ref))
             self.ref += step
             if abs(self.ref) < self.STANDSTILL_M_S and abs(self.v_meas) < self.STANDSTILL_M_S:
                 self.integral = 0.0
@@ -592,6 +608,8 @@ class SpeedController:
             sp.speed_decel_m_s2 if sp.speed_decel_m_s2 > 1e-6 else math.inf)) * accel_scale
         a_lim *= grip
         a = max(-a_lim, min(a_lim, a_req))
+        if (self.v_meas > DRIVE_MAX_SPEED_M_S and a > 0.0) or (self.v_meas < -DRIVE_MAX_SPEED_M_S and a < 0.0):
+            a = 0.0                      # 最終防壁（ファームの ApplyOverspeedLimit）
         self.accel_capped = driving and abs(a_req) > a_lim and abs(v) > self.STANDSTILL_M_S
         if a != a_req and not launching and sp.speed_ki > 1e-9 and g > 1e-9:
             self.integral += (a - a_req) / g / sp.speed_ki * (dt / self.ANTIWINDUP_TT_S)
@@ -680,6 +698,8 @@ class VehicleModel:
         self.grip_long = getattr(self, "grip_long", 1.0)
         self.odom_front = [0.0, 0.0]     # [FL, FR] 累積 [m]（射影なし = 前輪の実距離）
         self.collided = False
+        #: 衝突した瞬間の進行方向（+1 前進 / -1 後退）。`note_collision` が逆向きの動きを通す
+        self._hit_dir = 1.0
         self.collisions = 0
         self.cmd = DriveInput()
         sp = self.spec
@@ -813,23 +833,32 @@ class VehicleModel:
         """
         if hit and not self.collided:
             self.collisions += 1
+            self._hit_dir = 1.0 if self.speed >= 0.0 else -1.0
         self.collided = hit
-        if hit:
+        if hit and self.speed * self._hit_dir >= 0.0:
+            # 壁へ向かう動きだけを殺す。逆向きに動かせば離れられる（壁に押し付けられたまま
+            # 永久に動けなくならない）
             self.speed = 0.0
 
     # ── 派生量 ──
 
+    def _wheel_speeds(self, v: float) -> list[float]:
+        """車体中心の車速 `v` から [FL, FR, RL, RR]。旋回中は内輪が遅く外輪が速い
+        （ヨーレート×トレッド/2。左旋回で右輪が速い）。前輪は舵角ぶん 1/cos(δ) 倍で回る。"""
+        c = max(0.1, math.cos(self.steer_actual))
+        half = self.yaw_rate * self.spec.track / 2.0
+        f = v / c
+        return [f - half * c, f + half * c, v - half, v + half]
+
     @property
     def wheel_speed(self) -> list[float]:
-        """[FL, FR, RL, RR]。**射影なし**（前輪は 1/cos(δ) 倍で回る）。"""
-        f = self.speed / max(0.1, math.cos(self.steer_actual))
-        return [f, f, self.speed, self.speed]
+        """[FL, FR, RL, RR]。**射影なし**（前輪は 1/cos(δ) 倍で回る）。左右は旋回で差が付く。"""
+        return self._wheel_speeds(self.speed)
 
     @property
     def wheel_speed_measured(self) -> list[float]:
         """`wheel_speed` に `speed` と同じローパスを掛けたもの（STM32 が送る値）。"""
-        f = self.speed_measured / max(0.1, math.cos(self.steer_actual))
-        return [f, f, self.speed_measured, self.speed_measured]
+        return self._wheel_speeds(self.speed_measured)
 
     @property
     def accel_lateral(self) -> float:

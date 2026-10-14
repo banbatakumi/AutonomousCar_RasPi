@@ -20,8 +20,13 @@ RACE で最初に走り出した真値の位置に、進行方向と直交する
     SimLink.poll() → フレーム → ScanAssembler / StateBuilder → planner.plan()
                   → command_from_cmd() → SimLink.send()
 
-**実機と同じ変換コードを通す**（`ScanAssembler` の鏡像反転、整数スケール換算、
-`command_from_cmd` のクランプ）ので、ここで走れば `sim.run` でも走る。
+**実機と同じ変換コードを通す**（`BusBridge`＝`ScanAssembler` の鏡像反転・`StateBuilder`、
+`LinkTracker`＋`TimeSync` による STM32 時刻→Pi 時刻の換算、`command_from_cmd` のクランプ）ので、
+ここで走れば `sim.run` でも走る。PING を 5Hz で送って時刻同期を育てる（収束するまでは実機と同じく
+受信時刻で代用する）。
+
+`--map` の走行は、地図を**真のコースへ重ねて**（`slam_bench.align_map`）自己位置の誤差と
+経路からの真の横偏差を出す（planner の自己申告ではない）。
 
 ## なぜ別に用意するのか
 
@@ -61,7 +66,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np  # noqa: E402
 
 from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
-from raspi.msgs import DriveCmd, ScanAssembler, StateBuilder, command_from_cmd  # noqa: E402
+from raspi.core.bus_bridge import BusBridge  # noqa: E402
+from raspi.core.link_tracker import LinkTracker  # noqa: E402
+from raspi.msgs import DriveCmd, command_from_cmd  # noqa: E402
+from raspi.msgs.types import TOPIC_SCAN, TOPIC_VEHICLE_STATE  # noqa: E402
 from raspi.proto.generated import packets  # noqa: E402
 
 from .course import list_courses  # noqa: E402
@@ -76,6 +84,22 @@ __all__ = ["Bench", "Result"]
 
 NS = 1_000_000_000
 CMD_HZ = 100
+#: PING の間隔（`io_node` の `PING_HZ`）
+PING_PERIOD_NS = NS // 5
+
+
+class _Capture:
+    """`BusBridge` の出力（バスの代わり）。最後に出た車両状態と、組み上がった点群を受ける。"""
+
+    def __init__(self) -> None:
+        self.vs = None
+        self.scan = None
+
+    def send(self, topic, obj) -> None:
+        if topic == TOPIC_VEHICLE_STATE:
+            self.vs = obj
+        elif topic == TOPIC_SCAN:
+            self.scan = obj
 
 
 class Result:
@@ -86,7 +110,9 @@ class Result:
         self.plan_ms: list[float] = []
         self.pose_err: list[float] = []        #: SLAM と真値の**移動量**の差 [m]
         self.yaw_err: list[float] = []         #: 同 向き [deg]
-        self.cross: list[float] = []           #: 経路からの横偏差 [m]（RACE 段のみ）
+        self.cross: list[float] = []           #: 経路からの横偏差 [m]（RACE 段のみ。planner の自己申告）
+        #: 真の位置から経路までの距離 [m]（`--map` の RACE 段。地図を真のコースへ重ねて測る）
+        self.cross_true: list[float] = []
         self.collisions = 0
         self.laps = 0
         self.phase = ""
@@ -176,7 +202,9 @@ class Result:
             f"計画       {self.plans} 回  1周期 {stat(self.plan_ms, 'ms')}{gap}",
             f"自己位置   {stat(self.pose_err, 'cm', 100)}",
             f"向き       {stat(self.yaw_err, '°')}",
-            f"横偏差     {stat([abs(c) for c in self.cross], 'cm', 100)}",
+            f"横偏差     {stat([abs(c) for c in self.cross], 'cm', 100)}（自己申告）",
+            *([f"真の横偏差 {stat(self.cross_true, 'cm', 100)}（地図を真のコースへ重ねた）"]
+              if self.cross_true else []),
             f"周回       {self.laps} 周  走行 {self.distance:.1f}m  衝突 {self.collisions}",
         ]
         if self.explore_end_pose_err is not None:
@@ -364,9 +392,15 @@ class Bench:
         # 通さないので、車速PIの加速度フィードフォワード（★v0.21）だけ直に入れる
         from raspi.core.control_params import load_control_params
         ctl = {**load_control_params(), **(control or {})}
-        self.link.sim.vehicle.set_speed_ff(ctl.get("speed_ff_nm_per_m_s2", 0.0),
-                                           ctl.get("speed_ff_rr_nm", 0.0))
         self.sim = self.link.sim
+        # 車に効かないもの（TC・TV の係数など）も値を持たせる。launch_exit_torque_nm・速度 FF は車へ、
+        # TC・ABS の有効/無効は旗の出し方に効く
+        from raspi.core.control_params import CONTROL_PARAM_IDS, ENABLE_KEYS
+        self.sim.vehicle.set_speed_ff(0.0, 0.0)
+        for key, val in ctl.items():
+            pid = CONTROL_PARAM_IDS.get(key, ENABLE_KEYS.get(key))
+            if pid is not None:
+                self.sim.apply_config(pid, float(val))
         if obstacles:
             # 障害物はシムの世界（LiDAR と衝突判定が見る格子）にだけ刻む。`--map` と
             # 併用すると凍結地図には無い物が経路の上に居る状況になる
@@ -412,8 +446,15 @@ class Bench:
         self.max_steer = max_steer
         self.quiet = quiet
 
-        self.asm = ScanAssembler()
-        self.state = StateBuilder()
+        # `io_node` と同じ受信経路（時刻同期つき）。バスの代わりに `_Capture` が結果を受ける
+        self._cap = _Capture()
+        self.bridge = BusBridge(self._cap, clock=time.monotonic_ns)
+        self.tracker = LinkTracker(on_telemetry=self.bridge.on_telemetry,
+                                   on_frame=self.bridge.on_frame,
+                                   on_time_reset=self._on_time_reset)
+        self.bridge.to_pi_ns = self.tracker.sync.to_pi_ns
+        self._ping_seq = 0
+        self._next_ping_ns = 0
         self.vs = None
         self.res = Result()
 
@@ -421,6 +462,8 @@ class Bench:
         # 起点からの移動量どうしを比べる（`test_nav.py` と同じ考え方）
         v = self.sim.vehicle
         self._origin = (v.x, v.y, v.yaw)
+        #: `--map` の地図の原点の世界姿勢（RACE に入ってから `_align_map` が決める）
+        self._map_origin: tuple[float, float, float] | None = None
         self._last_lap_t = 0.0
         self._prev_laps = 0
         self._prev_phase = ""
@@ -490,11 +533,22 @@ class Bench:
         self._feed_vs = getattr(self.planner, "on_vehicle_state", None)
         self._tick_fn = getattr(self.planner, "tick", None)
 
+    def _on_time_reset(self, rx_ns: int) -> None:
+        self.bridge.state_builder.reset()
+        self.bridge.scans.reset()
+
+    def _send_ping(self, now_ns: int) -> None:
+        self._ping_seq = (self._ping_seq + 1) & 0xFFFFFFFF
+        t1 = self.link.send(packets.Ping(ping_id=self._ping_seq))
+        self.tracker.note_ping_sent(self._ping_seq, t1)
+        self._next_ping_ns = now_ns + PING_PERIOD_NS
+
     # ── 座標 ──
 
-    def _to_map(self, x: float, y: float, yaw: float | None = None):
-        """シムの世界座標 → SLAM の map フレーム（起点が原点、起点の向きが +x）。"""
-        ox, oy, oyaw = self._origin
+    def _to_map(self, x: float, y: float, yaw: float | None = None, origin=None):
+        """シムの世界座標 → SLAM の map フレーム（起点が原点、起点の向きが +x）。
+        `origin` は map の原点の世界姿勢（既定は bench の起点。`--map` の地図は別）。"""
+        ox, oy, oyaw = origin or self._origin
         c, s = math.cos(-oyaw), math.sin(-oyaw)
         dx, dy = x - ox, y - oy
         mx, my = dx * c - dy * s, dx * s + dy * c
@@ -520,9 +574,9 @@ class Bench:
     # ── 真値 ──
 
     def _truth_rel(self) -> tuple[float, float, float]:
-        """起点から見た真の姿勢（起点の車体座標系）。"""
+        """map フレームでの真の姿勢。`--map` なら、地図を真のコースへ重ねた原点（`_align_map`）基準。"""
         v = self.sim.vehicle
-        ox, oy, oyaw = self._origin
+        ox, oy, oyaw = self._map_origin or self._origin
         dx, dy = v.x - ox, v.y - oy
         c, s = math.cos(-oyaw), math.sin(-oyaw)
         return (dx * c - dy * s, dx * s + dy * c,
@@ -545,14 +599,19 @@ class Bench:
                 slow[key] = max(slow.get(key, 0.0), (time.perf_counter() - t_start) * 1000)
 
         rearm = False
+        # 仮想 STM32 は起動直後、ARM を一度外すまで ARM を受け付けない。最初の指令を ARM にすると
+        # 断られて入れ直しになる（実機では人が ARM を入れる前に DISARM が流れている）ので、先に DISARM を送る
+        self.link.send(command_from_cmd(DriveCmd(mode=0), allow_arm=True,
+                                        max_speed=self.max_speed, max_steer=self.max_steer))
         while time.monotonic() - t0 < duration_s:
             t_poll = time.perf_counter()
             frames = self.link.poll()
             took("シム", t_poll)
             for f in frames:
-                msg = f.decode()
+                self._cap.scan = None
+                msg = self.tracker.feed(f.rx_ns, f.type, f.seq, f.payload)
                 if isinstance(msg, packets.Telemetry):
-                    self.vs = self.state.build(msg, f.rx_ns)
+                    self.vs = self._cap.vs
                     # `planning_node` と同じく、届いた順に全部渡す（点ごとの脱スキューと、
                     # 点群の合間の姿勢の前進に使う。渡さないと SLAM は
                     # 「1周のあいだ twist は一定」の近似になる）
@@ -570,7 +629,7 @@ class Bench:
                 if not isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
                                         packets.LidarSectorC)):
                     continue
-                scan = self.asm.feed(msg, f.rx_ns)
+                scan = self._cap.scan
                 if scan is None:
                     continue
 
@@ -608,6 +667,8 @@ class Bench:
                                    launch=st.launch)
 
             now = time.monotonic_ns()
+            if now >= self._next_ping_ns:
+                self._send_ping(now)
             if now >= next_tick:
                 # 点群の合間の追従（`planning_node._tick` と同じ。50Hz）
                 next_tick = now + NS // 50
@@ -882,12 +943,19 @@ class Bench:
         self._prev_reason_head = st.reason
         v = self.sim.vehicle
         self._truth_log.append((st.phase, st.laps, getattr(st, "route_active", ""), v.x, v.y))
-        if not self._map_name:
-            # 保存済み地図の map フレームは bench の起点と無関係なので比べられない
+        if self._map_name and self._map_origin is None and st.phase in ("RACE", "DETOUR") and st.ready:
+            self._align_map(st)
+        if not self._map_name or self._map_origin is not None:
+            # 保存済み地図の map フレームは bench の起点と無関係なので、`--map` は地図を真のコースへ
+            # 重ねてから比べる（RACE に入る前は比べない）
             tx, ty, tyaw = self._truth_rel()
             self.res.pose_err.append(math.hypot(st.pose_x - tx, st.pose_y - ty))
             d = (st.pose_yaw - tyaw + math.pi) % (2 * math.pi) - math.pi
             self.res.yaw_err.append(abs(math.degrees(d)))
+            if self._map_name and st.phase in ("RACE", "DETOUR"):
+                dist = self._path_distance(tx, ty)
+                if dist is not None:
+                    self.res.cross_true.append(dist)
         if st.phase == "RACE":
             self.res.cross.append(st.cross_track)
         if st.laps > self._prev_laps:
@@ -912,6 +980,41 @@ class Bench:
                    if self.res.pose_err else f"速度 {v.speed:4.2f}m/s")
             print(f"  {t:5.1f}s [{st.phase or '-'}] 真値({v.x:5.2f},{v.y:5.2f}) {err}  "
                   f"一致度 {st.match_score:.2f}  {st.reason}", flush=True)
+
+    def _align_map(self, st) -> None:
+        """`--map` の地図を真のコースへ剛体で重ね、地図の原点の世界姿勢を決める。
+
+        初期値は「いまの真の姿勢と planner の自己位置が一致する原点」。そこから壁の重なりで
+        詰める（`slam_bench.align_map`）ので、自己位置の誤差は壁の重ね合わせには入らない。"""
+        v = self.sim.vehicle
+        oyaw = v.yaw - st.pose_yaw
+        c, s = math.cos(oyaw), math.sin(oyaw)
+        guess = (v.x - (st.pose_x * c - st.pose_y * s), v.y - (st.pose_x * s + st.pose_y * c), oyaw)
+        slam = getattr(self.planner, "slam", None)
+        if slam is None:
+            self._map_origin = guess
+            return
+        from .slam_bench import align_map
+        self._map_origin = align_map(slam.grid, self.sim.course, guess)
+        d = math.hypot(self._map_origin[0] - guess[0], self._map_origin[1] - guess[1])
+        self.res.notes.append(f"地図を真のコースへ重ねた（初期値から {d * 100:.0f}cm・"
+                              f"{math.degrees(self._map_origin[2] - guess[2]):+.1f}°）")
+
+    def _path_distance(self, x: float, y: float) -> float | None:
+        """map フレームの点 `(x, y)` から、いま追っている経路（折れ線）までの距離 [m]。"""
+        path = getattr(self.planner, "path", None)
+        if path is None or len(path) < 2:
+            return None
+        xy = np.asarray(path.xy, dtype=np.float64)
+        a = xy
+        b = np.roll(xy, -1, axis=0) if getattr(path, "closed", False) else xy[1:]
+        if not getattr(path, "closed", False):
+            a = xy[:-1]
+        ab = b - a
+        l2 = np.maximum((ab ** 2).sum(axis=1), 1e-12)
+        t = np.clip(((np.array([x, y]) - a) * ab).sum(axis=1) / l2, 0.0, 1.0)
+        proj = a + ab * t[:, None]
+        return float(np.sqrt(((proj - np.array([x, y])) ** 2).sum(axis=1)).min())
 
     def map_quality(self) -> str:
         """出来上がった地図を**真のコースと重ねて**採点する。
@@ -1093,8 +1196,8 @@ def main() -> int:
                     help="真値の車だけ諸元を上書き（`sim.vehicle.VehicleSpec` の欄名。例 mu=0.37、複数可）。"
                          "planner は config/vehicle.toml のまま")
     ap.add_argument("--control", action="append", default=[], metavar="KEY=VALUE",
-                    help="**シムの STM32 だけ** `[control]` の値を上書き（今は speed_ff_nm_per_m_s2・"
-                         "speed_ff_rr_nm）。planner は config/vehicle.toml のまま")
+                    help="**シムの STM32 だけ** `[control]` の値を上書き（launch_exit_torque_nm・"
+                         "speed_ff_*・tc_enable などは仮想 STM32 が持つ）。planner は config/vehicle.toml のまま")
     ap.add_argument("--mu", default=None, metavar="MU[:MU_LONG]",
                     help="真値の路面の摩擦係数（一様）。`--vehicle mu=` と違い、加速の上限も同じ割合で変える。"
                          "MU_LONG を付けると前後だけ別の値（前後と横で摩擦が違う路面）")
