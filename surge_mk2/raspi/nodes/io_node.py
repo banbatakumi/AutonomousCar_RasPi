@@ -121,6 +121,19 @@ FAILSAFE_STOPPED_NS = 300_000_000
 #: telemetry_node がデッドマン（GUI の指令の途絶）で流す `cmd` の発行元
 DEADMAN_SOURCE = "deadman"
 
+#: STM32 が「ARM を入れ直して」と言ってきた `LOG` の書き出し（`_on_stm_log`）
+STM_LOG_ARM_IGNORED = "ARM ignored"
+#: 再 ARM ラッチ（`IoNode._rearm_reason`）の理由。立てた後に `cmd.arm` が一度 False になるまで ARM を通さない
+REARM_STM_RESTART = "stm_restart"
+REARM_LINK_LOST = "stm_link_lost"
+#: ラッチの原因が収まった後に `arm_inhibit_reason` へ出す文（GUI にそのまま出る）
+_REARM_MESSAGES = {
+    "E-Stop": "E-Stop は解除されました。ARM を一度外してから入れ直してください",
+    "駆動電源ラッチ": "駆動電源ラッチは解除されました。ARM を一度外してから入れ直してください",
+    REARM_STM_RESTART: "STM32 が再起動しました。ARM を一度外してから入れ直してください",
+    REARM_LINK_LOST: "STM32 が通信途絶から復帰しました。ARM を一度外してから入れ直してください",
+}
+
 #: `handshake()` で `LIMITS` を取り損ねた場合（STM32 の起動burstを取り逃した、
 #: 応答が1回ノイズで落ちた等）に `LIMITS_REQ` を再送する間隔。
 #: `state.limits` が一度埋まれば以降は送らない（実行時に変化しない値のため）
@@ -392,6 +405,11 @@ class IoNode:
         if msg.severity >= packets.LogSeverity.WARN:
             self.stm_log.insert(0, f"{time.strftime('%H:%M:%S')} {level} {text}")
             del self.stm_log[4:]
+        if text.startswith(STM_LOG_ARM_IGNORED):
+            # STM32 は起動直後・E-Stop 解除後・COMMAND 途絶からの復帰後、ARM ビットが一度 0 になるまで
+            # ARM を受け付けない。こちらも ARM を入れ直させないと、GUI は ARM のつもりなのに車だけ
+            # 動かない状態が続く。人が押し直せば 0 → 1 が STM32 にも届いて揃う
+            self._rearm_reason = REARM_LINK_LOST
 
     def _on_frame(self, rx_ns: int, pkt_type: int, seq: int, msg) -> None:
         if isinstance(msg, packets.ConfigAck):
@@ -413,7 +431,7 @@ class IoNode:
         self.control_sync.reset()
         self._control_synced = False
         # 再起動の前に入っていた ARM をそのまま引き継がせない（人が入れ直す）
-        self._rearm_reason = "STM32 が再起動しました"
+        self._rearm_reason = REARM_STM_RESTART
         self._requery_config()
         self._log_event("time_reset", {})
         print("\n!! STM32 の再起動を検出 — 時刻同期をやり直します（オドメトリ・"
@@ -686,7 +704,8 @@ class IoNode:
         return ""
 
     def _update_rearm_latch(self) -> str:
-        """E-Stop・駆動電源ラッチ・STM32 の再起動の後は、ARM を入れ直すまで通さない。理由を返す。
+        """E-Stop・駆動電源ラッチ・STM32 の再起動の後と、STM32 が ARM を受け付けなかったと言ってきた
+        （`LOG` "ARM ignored"）後は、ARM を入れ直すまで通さない。理由を返す。
 
         ラッチが立っている間はもちろん、**収まった後も `cmd.arm` が一度 False になるまで**続ける。
         収まる前に外した ARM は数えない（E-Stop 中に外して入れ直してあると、解除した瞬間に走る）。
@@ -704,9 +723,7 @@ class IoNode:
         if self.cmd is not None and not self.cmd_stale and not self.cmd.arm:
             self._rearm_reason = ""
             return ""
-        if self._rearm_reason == "STM32 が再起動しました":
-            return "STM32 が再起動しました。ARM を一度外してから入れ直してください"
-        return f"{self._rearm_reason} は解除されました。ARM を一度外してから入れ直してください"
+        return _REARM_MESSAGES[self._rearm_reason]
 
     def _send_command_disarm(self) -> None:
         self.link.send(self._disarm_command())

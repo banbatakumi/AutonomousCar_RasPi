@@ -1363,6 +1363,40 @@ class TestIoNodeRearmAfterStop(unittest.TestCase):
         asked = {p.param_id for p in self.link.sent if isinstance(p, packets.ConfigGet)}
         self.assertLessEqual({packets.Param.AUTO_STOP_MARGIN_CM, packets.Param.BRAKE_HOLD_ENABLE}, asked)
 
+    def test_the_stm32_refusing_arm_makes_us_ask_for_it_again(self):
+        """STM32 が ARM を受け付けなかった（`LOG` "ARM ignored"）なら、こちらも入れ直させる。"""
+        self.assert_armed(self.packet(**self.ARMED))
+        self.node._on_stm_log(packets.Log(
+            severity=packets.LogSeverity.WARN,
+            message=b"ARM ignored: disarm once to re-arm (after e-stop / COMMAND loss)"))
+        self.assert_disarm(self.packet(**self.ARMED))
+        self.assertIn("通信途絶から復帰", self.node._arm_block_reason())
+        self.assertIn("ARM ignored", self.node.stm_log[0])      # diag/link にも出る
+        self.assert_disarm(self.packet(mode=0, arm=False, source="gui"))
+        self.assert_armed(self.packet(**self.ARMED))
+
+    def test_new_firmware_warnings_reach_the_diag(self):
+        """ファームの WARN/ERROR は `stm_log`（`diag/link`）に載る。ARM の判断は変えない。"""
+        for sev, text in ((packets.LogSeverity.WARN,
+                           b"armed without heartbeat (RAS_SIG never seen): e-stop is inactive"),
+                          (packets.LogSeverity.ERROR,
+                           b"restarted by watchdog reset (main loop had stopped)")):
+            self.node._on_stm_log(packets.Log(severity=sev, message=text))
+            self.assertIn(text.decode(), self.node.stm_log[0])
+        self.assertEqual(self.node._arm_block_reason(), "")
+
+    def test_after_an_stm32_restart_arm_bit_zero_is_on_the_wire(self):
+        """再起動を検出した後、STM32 に実際に届く COMMAND の ARM ビットが 0 であること。"""
+        self.packet(**self.ARMED)
+        self.node._on_time_reset(time.monotonic_ns())          # `_control_synced` も落ちる
+        self.link.sent.clear()
+        self.sub.push(DriveCmd(**self.ARMED))
+        self.node._recv_cmd(time.monotonic_ns())
+        self.node._send_command()
+        cs = commands(self.link)
+        self.assertTrue(cs)
+        self.assertTrue(all(not (c.flags & packets.CMD_FLG_ARM) for c in cs))
+
     def test_the_cmd_deadman_does_not_latch(self):
         """`cmd` の途絶は従来どおり: 指令が戻ればそのまま通る。"""
         self.assert_armed(self.packet(**self.ARMED))
