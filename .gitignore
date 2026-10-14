@@ -88,3 +88,7 @@ surge_mk2/config/secret.txt
 
 # sim.park_bench --plot の出力（デバッグ用の生成物）
 surge_mk2/park_bench_result.png
+
+# MkDocs のビルド出力
+surge_mk2/site/build/
+surge_mk2/site/.venv/

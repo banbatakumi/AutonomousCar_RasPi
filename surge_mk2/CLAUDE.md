@@ -36,6 +36,7 @@
 | 車両パラメータ（幾何・質量・動特性） | `config/vehicle.toml`（全ノードがここだけを見る） |
 | STM32 の TC・ABS・TV の値を決めたい | `config/vehicle.toml` の `[control]`（io_node が STM32 へ送る）。決め方は [`docs/development.md`](docs/development.md) §4.7（`tools/ctrl_tune`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
+| 公開用の技術解説サイト（GitHub Pages） | [`site/`](site/)（Markdown。`master` への push で自動公開。更新の方針は `site/docs/about.md`）。**数値の正は持たない**ので、コードを変えたら該当ページを見直す |
 | 過去の経緯（旧 PROGRESS・監査報告など） | `docs/archive/`（**陳腐化。ユーザーが求めない限り読まない・根拠にしない**） |
 
 ## 新規開発方針
