@@ -329,6 +329,8 @@ write_unit surge-mdns "ホスト名の mDNS 応答（ユニキャスト）" "ras
 #   ② 合計が MAX_LOG_MB を超えている間、**古い順に消す**（連続運転の保険）
 # タイマーは毎日ではなく**毎時**。
 MAX_LOG_MB=8000
+OUT_MAX_MB=10       # logs/*.out 1本あたりの上限
+OUT_KEEP_MB=2       # 上限を超えたときに残す末尾
 
 cat > /etc/systemd/system/surge-logclean.service <<EOF
 [Unit]
@@ -344,6 +346,17 @@ ExecStart=/bin/sh -c 'cd $ROOT/logs || exit 0; \
     f=\$(ls -tr *.sfl *.mcap 2>/dev/null | head -1); \
     [ -n "\$f" ] || break; \
     echo "上限 ${MAX_LOG_MB}MB 超過のため削除: \$f"; rm -f "\$f"; \
+  done'
+# 各サービスの標準出力（`logs/<名前>.out`、unit の `StandardOutput=append:`）は追記だけで、
+# 放っておくと際限なく伸びる（カメラの再起動ループや LOG の連発で数十MB）。
+# ${OUT_MAX_MB}MB を超えたら末尾 ${OUT_KEEP_MB}MB だけ残す。書き手は O_APPEND で開いているので、
+# その場で中身を差し替えても続きは末尾に付く（ファイルを消すと書き手は消えたファイルに書き続ける）
+ExecStart=/bin/sh -c 'cd $ROOT/logs || exit 0; \
+  for f in *.out; do \
+    [ -f "\$f" ] || continue; \
+    [ "\$(wc -c < "\$f")" -gt $((OUT_MAX_MB * 1048576)) ] || continue; \
+    tail -c $((OUT_KEEP_MB * 1048576)) "\$f" > "\$f.tmp" && cat "\$f.tmp" > "\$f"; \
+    rm -f "\$f.tmp"; echo "\$f を末尾 ${OUT_KEEP_MB}MB に切り詰めた"; \
   done'
 EOF
 cat > /etc/systemd/system/surge-logclean.timer <<EOF
