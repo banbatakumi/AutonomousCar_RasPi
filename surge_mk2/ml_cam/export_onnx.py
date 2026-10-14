@@ -21,11 +21,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from model import DrivableSegModel  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 
 __all__ = ["export", "verify_parity", "MEAN", "STD", "THRESHOLD"]
 
@@ -72,6 +74,8 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *, note: str
     cfg = {
         "input_size": [w, h],           # [width, height]
         "input_layout": "NCHW",
+        "resize": "area",               # 学習は `ml_cam/dataset.py` の `resize_area`（面積平均）
+        "preproc_version": PREPROC_VERSION,
         "mean": MEAN,
         "std": STD,
         "threshold": THRESHOLD,

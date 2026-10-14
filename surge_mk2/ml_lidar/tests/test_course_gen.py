@@ -266,7 +266,7 @@ class TestWidthDistribution(unittest.TestCase):
     v21以前は`uniform(0.8, 1.4)`で、**近い側の壁が必ず0.70m以内**という状態だった。
     その結果、方策は広いコースを一度も見ないまま学習され、実機でtoyota型（中央1.45m）の
     コースが不安定になった。同じ穴を再び掘らないよう、レンジと「実際に広いコースが
-    出てくること」を固定する（PROGRESS.md 2026-09-17「6回目」節）。
+    出てくること」を固定する。
     """
 
     def test_range_covers_real_courses(self) -> None:

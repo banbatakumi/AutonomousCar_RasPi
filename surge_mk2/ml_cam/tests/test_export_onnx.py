@@ -20,6 +20,7 @@ import torch  # noqa: E402
 
 from export_onnx import MEAN, STD, THRESHOLD, export, verify_parity  # noqa: E402
 from model import DrivableSegModel  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 
 
 class TestExportOnnx(unittest.TestCase):
@@ -41,6 +42,8 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["std"], STD)
             self.assertEqual(cfg["threshold"], THRESHOLD)
             self.assertEqual(cfg["note"], "")   # 省略時は空文字
+            self.assertEqual(cfg["resize"], "area")
+            self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
 
     def test_note_is_embedded_in_the_exported_json(self):
         """`ml_cam/app.py`の備考欄→`note.txt`→エクスポート、という経路で

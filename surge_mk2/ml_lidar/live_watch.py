@@ -47,7 +47,7 @@
 
 理想ライン（MCL）は2026-09-24に表示をやめた。学習には一切使っておらず
 （報酬は`progress`＋衝突のみ）、しかも広いコースや障害物のあるコースでは
-理想ラインが実際に通れる経路を表せない（PROGRESS.md 2026-09-24節）ため、
+理想ラインが実際に通れる経路を表せないため、
 観戦画面で比較の基準に見えるのは誤解のもとになる。
 """
 
@@ -241,6 +241,9 @@ def run(args: argparse.Namespace) -> None:
         print(f"!! {run_dir} にenv_config.jsonが無い（学習がまだ始まっていないのでは）",
              file=sys.stderr)
         raise SystemExit(1)
+    from ml_lidar.eval_stats import steer_contract_warnings
+    for w in steer_contract_warnings(run_dir / "env_config.json"):
+        print(f"!! {w}", file=sys.stderr)
     max_episode_steps = max(1, int(round(args.episode_s / env_cfg.dt)))
 
     panels = _build_panels(env_cfg, max_episode_steps)

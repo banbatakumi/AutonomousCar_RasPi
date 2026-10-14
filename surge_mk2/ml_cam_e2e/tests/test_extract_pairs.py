@@ -277,6 +277,16 @@ class TestRejectReason(unittest.TestCase):
         self.assertEqual(reject_reason(own, include_auto=True), "カメラE2E自身の走行")
         self.assertEqual(reject_reason(own), "カメラE2E自身の走行")
 
+    def test_stale_commands_are_never_a_demonstration(self):
+        """入力途絶のブレーキ・舵保持（`:stale`）は、自分のものも他 planner のものも手本にしない。"""
+        for src in ("auto:cam_e2e:stale", "auto:slam2d_route:stale"):
+            cmd = {"arm": True, "mode": 2, "source": src}
+            self.assertIsNotNone(reject_reason(cmd, include_auto=True), src)
+        own = {"arm": True, "mode": 2, "source": "auto:cam_e2e:stale"}
+        self.assertEqual(reject_reason(own, include_auto=True), "カメラE2E自身の走行")
+        self.assertIsNone(reject_reason(
+            {"arm": True, "mode": 2, "source": "auto:slam2d_route"}, include_auto=True))
+
     def test_opting_in_does_not_relax_the_other_filters(self):
         self.assertEqual(reject_reason({"arm": False, "mode": 2}, include_auto=True), "DISARM中")
         self.assertEqual(reject_reason({"arm": True, "mode": 2, "torque_mode": True},

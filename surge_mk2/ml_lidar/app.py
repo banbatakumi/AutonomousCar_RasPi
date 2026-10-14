@@ -81,7 +81,11 @@ def describe_run_status(run_dir: Path) -> str:
     npz_path = run_dir / "eval" / "evaluations.npz"
     if not gen_path.exists() and not npz_path.exists():
         return "未学習"
-    mark = "✓ONNX済" if (run_dir / "final_model.zip").exists() else ""
+    # 実際に書き出された .onnx（models/e2e_lidar/<run名>.onnx か <run名>_*.onnx）があるときだけ
+    n = run_dir.name
+    exported = MODELS_DIR.is_dir() and any(
+        p.stem == n or p.stem.startswith(n + "_") for p in MODELS_DIR.glob("*.onnx"))
+    mark = "✓ONNX済" if exported else ""
     try:
         import numpy as np
         if gen_path.exists():
@@ -308,7 +312,7 @@ class App:
 
         use_sde_row = 2 + len(basic)
         # 既定OFF: v15(2026-09-11)以降の全runがuse_sde=Falseで学習されている
-        # (モデルファイルから確認済み、PROGRESS.md参照)。v11/v12で試したgSDEの
+        # (モデルファイルから確認済み)。v11/v12で試したgSDEの
         # 改善は誤差程度で、決定論的方策の振動は探索ノイズではなく方策写像
         # そのものの粗さだと判明している(env.py EnvConfig docstring「v21」参照)
         self.use_sde_var = tk.BooleanVar(value=False)
@@ -587,7 +591,7 @@ class App:
         ttk.Separator(frame, orient="horizontal").grid(
             row=4, column=0, columnspan=3, sticky="we", pady=8)
 
-        self.eval_episodes_var = tk.StringVar(value="60")
+        self.eval_episodes_var = tk.StringVar(value="300")
         ttk.Label(frame, text="エピソード数:").grid(row=5, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(frame, textvariable=self.eval_episodes_var, width=10).grid(
             row=5, column=1, sticky="w", pady=(4, 0))

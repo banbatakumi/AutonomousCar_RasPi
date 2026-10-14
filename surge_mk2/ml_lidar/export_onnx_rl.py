@@ -21,7 +21,6 @@ PyTorch側（SB3のpolicy → 決定論的action、`[-1,1]`クリップ込み）
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -39,7 +38,8 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.env import EnvConfig  # noqa: E402
-from ml_lidar.eval_stats import find_env_config  # noqa: E402
+from ml_lidar.eval_stats import (  # noqa: E402
+    find_env_config, find_env_config_path, steer_contract_warnings)  # noqa: E402
 
 __all__ = ["PolicyONNXWrapper", "export_model", "check_parity", "parse_args", "main"]
 
@@ -80,7 +80,10 @@ def export_model(model: PPO, out_path: Path) -> None:
 
     obs_dim = int(model.observation_space.shape[0])
     dummy = th.zeros(1, obs_dim, dtype=th.float32)
-    th.onnx.export(wrapper, (dummy,), str(out_path), input_names=["obs"], output_names=["action"])
+    # external_data=False が必須（`ml_cam/export_onnx.py`と同じ）。既定だと重みが
+    # `.<name>.tmp.onnx.data` という別ファイルに出て、rename した<name>.onnxがそれに依存して壊れる
+    th.onnx.export(wrapper, (dummy,), str(out_path), input_names=["obs"], output_names=["action"],
+                   external_data=False)
 
 
 def check_parity(model: PPO, onnx_path: Path, *, n_samples: int = _PARITY_SAMPLES,
@@ -118,6 +121,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--steer-rate-max-rad-s", type=float, default=1.0,
                    help="[rad/s] train_rl.pyの--steer-rate-max-rad-sと同じ(v13、"
                         "env_config.jsonが見つからない場合のフォールバック)")
+    p.add_argument("--max-steer", type=float, default=None,
+                   help="学習したときの最大舵角[rad]（契約 JSON の max_steer）。省略は今の "
+                        "config/vehicle.toml の値。vehicle.toml が学習後に変わった run を書き出すとき用")
     p.add_argument("--steer-link", type=float, nargs=2, default=None, metavar=("GAIN", "CUBIC"),
                    help="学習したときの STM32 のステアのリンクの換算（契約 JSON の steer_link）。省略は今の "
                         "config/vehicle.toml の [control]。★2026-10-08 より前の vehicle.toml（max_steer "
@@ -136,9 +142,12 @@ def main(argv: list[str] | None = None) -> None:
                         steer_rate_max_rad_s=args.steer_rate_max_rad_s)
     # 最大舵角はEnvConfigに持たせていない（`config/vehicle.toml`固定）ので、
     # モデル契約JSONへはここで直接読んで書く
-    max_steer = VehicleSpec.load().max_steer
+    max_steer = args.max_steer if args.max_steer else VehicleSpec.load().max_steer
     # 舵角の数値の意味（`raspi/auto/e2e_lidar.py` が今の車の路面舵角へ直すのに使う）
     steer_link = list(args.steer_link) if args.steer_link else list(Vehicle.load().steer_link)
+    # run が記録した学習時の値と、今書こうとしている値が違えば警告する（無い古い run もその旨）
+    for w in steer_contract_warnings(find_env_config_path(args.model), max_steer, steer_link):
+        print(f"!! {w}", file=sys.stderr)
 
     model = PPO.load(str(args.model), device="cpu")
 
@@ -163,6 +172,8 @@ def main(argv: list[str] | None = None) -> None:
         "max_speed": cfg.max_speed,
         "steer_rate_max_rad_s": cfg.steer_rate_max_rad_s,
         "steer_link": steer_link,
+        "dt": cfg.dt,                    # [s] 学習時の決定周期（推論側は0.10±0.02外を拒否）
+        "steer_tau": cfg.steer_tau,      # [s] 学習時の舵の一次遅れ時定数
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"→ {final_path}\n→ {json_path}")
 

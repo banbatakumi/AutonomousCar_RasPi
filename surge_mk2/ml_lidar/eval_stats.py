@@ -46,12 +46,60 @@ from sim.course import Course  # noqa: E402
 from sim.raceline import compute_raceline_offsets, compute_speed_profile  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["find_env_config", "reference_lap", "run_episode", "evaluate", "parse_args", "main"]
+__all__ = ["find_env_config", "find_env_config_path", "steer_contract_warnings", "reference_lap", "run_episode", "evaluate", "parse_args", "main"]
 
 #: 参照ラインを壁から離す余裕 [m]（`sim.raceline`の既定と同じ）
 _RACELINE_SAFETY_MARGIN_M = 0.03
 
 _ENV_CONFIG_SEARCH_LEVELS = 3
+
+
+def find_env_config_path(model_path: Path) -> Path | None:
+    """`model_path`から遡って見つかる`env_config.json`のパス（無ければ`None`）。"""
+    d = model_path.resolve().parent
+    for _ in range(_ENV_CONFIG_SEARCH_LEVELS):
+        cand = d / "env_config.json"
+        if cand.exists():
+            return cand
+        d = d.parent
+    return None
+
+
+def steer_contract_warnings(env_config_json: Path | None,
+                            max_steer: float | None = None,
+                            steer_link: tuple[float, float] | list[float] | None = None) -> list[str]:
+    """run の`env_config.json`に記録された学習時の`max_steer`/`steer_link`と、今の
+    `config/vehicle.toml`（`max_steer`/`steer_link`を渡せばそちら）を比べ、警告文を返す。
+
+    学習後に vehicle.toml が変わると、舵角の意味が学習時とずれたまま評価・書き出しされる。
+    記録の無い古い run は「記録していない」と警告する（従来どおり今の値で続行）。
+    """
+    if env_config_json is None or not env_config_json.exists():
+        return []
+    try:
+        data = json.loads(env_config_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if max_steer is None:
+        max_steer = VehicleSpec.load().max_steer
+    if steer_link is None:
+        from raspi.core.vehicle import Vehicle
+        steer_link = Vehicle.load().steer_link
+    out: list[str] = []
+    if "max_steer" not in data:
+        out.append("この run は max_steer を記録していない（今の vehicle.toml の値で続行する）")
+    elif abs(float(data["max_steer"]) - float(max_steer)) > 1e-6:
+        out.append(f"学習時の max_steer={float(data['max_steer']):.4f} と今の vehicle.toml の "
+                   f"{float(max_steer):.4f} が違う（舵角の意味がずれる）")
+    if "steer_link" not in data:
+        out.append("この run は steer_link を記録していない（今の vehicle.toml の値で続行する）")
+    else:
+        rec = [float(v) for v in data["steer_link"]]
+        now = [float(v) for v in steer_link]
+        if len(rec) != 2 or any(abs(a - b) > 1e-6 for a, b in zip(rec, now)):
+            out.append(f"学習時の steer_link={rec} と今の vehicle.toml の {now} が違う"
+                       "（舵角の意味がずれる）")
+    return out
 
 
 def find_env_config(model_path: Path) -> EnvConfig | None:
@@ -340,6 +388,8 @@ def main(argv: list[str] | None = None) -> None:
              file=sys.stderr)
         cfg = EnvConfig(fov_deg=args.fov_deg, max_range=args.max_range,
                         max_speed=args.max_speed, steer_tau=args.steer_tau)
+    for w in steer_contract_warnings(find_env_config_path(args.model)):
+        print(f"!! {w}", file=sys.stderr)
     # 統計評価は学習の汎化そのものを見るためのものなので、ランダム化は常にONにする
     # （固定・ノイズ無効のtrain_rl.py evalとは目的が違う）
     cfg = dataclasses.replace(cfg, randomize_lidar=True, randomize_dynamics=True)

@@ -82,8 +82,12 @@ MODE_MANUAL = 1
 MODE_AUTO = 2
 #: 自動運転中の `cmd` に telemetry_node が付ける `source` の接頭辞（`auto:<planner id>`）
 _AUTO_SOURCE_PREFIX = "auto:"
-#: 自分自身（このモデルで走った記録）は手本にしない
+#: 自分自身（このモデルで走った記録）は手本にしない（`auto:cam_e2e` と、その派生
+#: `auto:cam_e2e:stale` などの接頭辞一致）
 _SELF_SOURCE = _AUTO_SOURCE_PREFIX + "cam_e2e"
+#: どの planner でも、`:stale` で終わる source は「入力が途絶えてブレーキ・舵保持した指令」で
+#: 人の手本にならない。自動運転を手本にする設定でも常に除外する
+_STALE_SUFFIX = ":stale"
 #: 自動運転中だから除外した、という理由の文字列。操作パネルが「自動運転も手本にする」を
 #: 案内するのに使う
 REASON_AUTO = "自動運転中"
@@ -132,8 +136,11 @@ def reject_reason(cmd: dict | None, *, include_auto: bool = False) -> str | None
         return "DISARM中"
     mode = int(cmd.get("mode", 0))
     if mode == MODE_AUTO:
-        if str(cmd.get("source", "")) == _SELF_SOURCE:
+        source = str(cmd.get("source", ""))
+        if source.startswith(_SELF_SOURCE):
             return "カメラE2E自身の走行"
+        if source.endswith(_STALE_SUFFIX):
+            return "入力途絶中の指令(stale)"
         if not include_auto:
             return REASON_AUTO
     elif mode != MODE_MANUAL:

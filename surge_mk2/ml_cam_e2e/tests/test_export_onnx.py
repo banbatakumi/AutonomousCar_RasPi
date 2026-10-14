@@ -53,6 +53,16 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
             self.assertEqual(cfg["color"], "RGB")
             self.assertEqual(cfg["note"], "")
+            self.assertEqual(len(cfg["steer_link"]), 2)
+
+    def test_steer_link_comes_from_train_config_or_argument(self):
+        with tempfile.TemporaryDirectory() as d:
+            ckpt_path = _save_checkpoint(d)
+            out_path = Path(d) / "model.onnx"
+            export(ckpt_path, out_path, (64, 48), max_steer=0.5, speed_ref=2.0,
+                   steer_link=(0.5, 0.25))
+            cfg = json.loads(out_path.with_suffix(".json").read_text())
+            self.assertEqual(cfg["steer_link"], [0.5, 0.25])
 
     def test_exported_model_is_accepted_by_the_vehicle_side_loader(self):
         """書いた契約を、実車が使う `load_model()` がそのまま読めること

@@ -73,6 +73,7 @@ import argparse
 import dataclasses
 import json
 import shutil
+import signal
 import sys
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -88,7 +89,9 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback,
 from stable_baselines3.common.monitor import Monitor  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv  # noqa: E402
 
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from sim.course import Course  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.course_gen import walk_loop_course  # noqa: E402
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
@@ -171,7 +174,7 @@ EVAL_COURSE_PARAMS: tuple[EvalCourseSpec, ...] = (
     # 旧5本は道幅1.0〜1.1mしか無く、**広いコースでの失敗がbest_model選定に一切
     # 反映されなかった**。実機でtoyota(中央1.45m)のようなコースが不安定になった
     # 原因が学習・評価の道幅分布の狭さだったため、両方に広いコースを入れる
-    # （`ml_lidar/course_gen.py`の`_WIDTH_RANGE_M`・PROGRESS.md 2026-09-17「6回目」節）
+    # （道幅分布は`ml_lidar/course_gen.py`の`_WIDTH_RANGE_M`）
     EvalCourseSpec("wide", 8, 3.0, 0.30, 0.30, 2.2, seed=1021, clockwise=False),
     # 「広いのに急角ターンが連続する」＝toyotaに最も近い組み合わせ。道幅と
     # コーナーの鋭さは独立なので、wideとは別のアーキタイプとして分ける
@@ -510,8 +513,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "代わりに、方策特徴量に依存し`--sde-sample-freq`ステップごとにしか"
                         "再サンプリングしないノイズを使う——生アクションの振動(v7〜v10で"
                         "reward側の(撤去済み)steer_rate_weightを0/0.03/0.1/0.2と振っても"
-                        "単調悪化するだけだったため探索ノイズの生成過程自体を変える方向、"
-                        "PROGRESS.md 2026-09-10節参照)。v11/v12で試して改善は誤差程度に"
+                        "単調悪化するだけだったため探索ノイズの生成過程自体を変える方向)。"
+                        "v11/v12で試して改善は誤差程度に"
                         "留まっており、決定論的方策の振動は探索ノイズではなく方策写像"
                         "そのものの粗さだと判明している(env.py docstring「v21」参照)")
     p.add_argument("--sde-sample-freq", type=int, default=4,
@@ -519,15 +522,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "通常ノイズに近づき、大きいほど探索が単調になる。論文でPPOに対して"
                         "良好だった4〜8のオーダーを既定にしてある")
     # v26(2026-09-26)で既定を0.0→-1.0（σ 1.0→0.37）。障害物ありのv24/v25は学習の最後まで
-    # σ≈0.6が残り、学習中の方策は自分のノイズで障害物コースの4割を衝突していた
-    # （PROGRESS.md 2026-09-26節）。gSDE無しで-3まで下げると探索が潰れた前歴があるので-1に留める
+    # σ≈0.6が残り、学習中の方策は自分のノイズで障害物コースの4割を衝突していた。
+    # gSDE無しで-3まで下げると探索が潰れた前歴があるので-1に留める
     p.add_argument("--log-std-init", type=float, default=-1.0,
                    help="方策の探索ノイズ標準偏差の初期値(exp(log_std_init))。SB3既定は0.0（v26から既定-1.0）。"
                         "gSDE有効時はノイズが方策側MLPの潜在層(net_archのpi、既定64次元。"
                         "features_dimそのものではない)ぶんの内積で作られるため、実効的な標準偏差が"
                         "理論上sqrt(latent_dim_pi)倍(既定なら8倍)に膨らむ——v11(log_std_init=0.0)で"
                         "train/approx_klが学習序盤に1.62(通常は0.01前後が目安)まで跳ね上がり"
-                        "崩壊したのはこれが原因と特定済み(PROGRESS.md 2026-09-10節)。"
+                        "崩壊したのはこれが原因と特定済み。"
                         "--use-sde時はexp(log_std_init)*sqrt(latent_dim_pi)が1程度になるよう"
                         "-3前後まで下げること")
     p.add_argument("--features-dim", type=int, default=128)
@@ -577,8 +580,13 @@ def main(argv: list[str] | None = None) -> None:
         # `eval_stats.py`/`export_onnx_rl.py`がモデルの観測・行動契約を自動で読めるように、
         # 学習に使った実際のEnvConfigをそのまま保存しておく（CLI引数の再入力に頼ると
         # 値がズレたまま評価・エクスポートしてしまう事故を防ぐ）
+        # max_steer/steer_link は EnvConfig の外（vehicle.toml 由来）だが、学習時の舵角の意味として
+        # 一緒に残す（export/eval/live_watch が今の vehicle.toml と比べて警告する）
         (run_dir / "env_config.json").write_text(
-            json.dumps(dataclasses.asdict(cfg), indent=2, ensure_ascii=False), encoding="utf-8")
+            json.dumps({**dataclasses.asdict(cfg),
+                        "max_steer": VehicleSpec.load().max_steer,
+                        "steer_link": list(Vehicle.load().steer_link)},
+                       indent=2, ensure_ascii=False), encoding="utf-8")
 
     env_fns = [make_train_env(cfg, max_episode_steps, seed=args.seed + i)
               for i in range(args.n_envs)]
@@ -621,6 +629,12 @@ def main(argv: list[str] | None = None) -> None:
         ),
     ]
 
+    # GUI の停止は SIGTERM。既定では finally が走らず final_model が保存されないので、
+    # KeyboardInterrupt に変換して下の finally（保存）を通す
+    def _on_sigterm(signum, frame):  # noqa: ARG001
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         model.learn(total_timesteps=args.total_timesteps, callback=callbacks,
                    tb_log_name=args.run_name, reset_num_timesteps=not resuming)

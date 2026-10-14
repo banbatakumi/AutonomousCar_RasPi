@@ -29,6 +29,7 @@ import torch  # noqa: E402
 
 from model import DriveRegressionModel  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.nodes.cam_e2e_node import MODEL_OUTPUTS  # noqa: E402
 
 __all__ = ["export", "verify_parity", "read_train_config", "MEAN", "STD"]
@@ -52,7 +53,8 @@ def read_train_config(run_dir: Path) -> dict:
 
 def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None, *,
           max_steer: float | None = None, speed_ref: float | None = None,
-          note: str = "") -> tuple[int, int]:
+          note: str = "", steer_link: tuple[float, float] | list[float] | None = None
+          ) -> tuple[int, int]:
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に契約を書く。
 
     `size`・`max_steer`・`speed_ref` を省略すると `train_config.json` の値を使う。
@@ -73,6 +75,15 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
         max_steer = cfg.get("max_steer")
     if speed_ref is None:
         speed_ref = cfg.get("speed_ref")
+    if steer_link is None:
+        steer_link = cfg.get("steer_link")
+    if steer_link is None:
+        # steer_link を記録していない古い run。今の vehicle.toml で代用するが、学習時と
+        # 違えば舵角の意味がずれるので警告する
+        steer_link = list(Vehicle.load().steer_link)
+        print(f"!! {checkpoint.parent}/train_config.json に steer_link が無い。今の vehicle.toml の値 "
+              f"{steer_link} を契約に書く（学習時と違えば舵がずれる）", file=sys.stderr)
+    steer_link = [float(steer_link[0]), float(steer_link[1])]
     if not max_steer or not speed_ref or max_steer <= 0 or speed_ref <= 0:
         raise ValueError(f"max_steer/speed_ref が決まらない（{max_steer}/{speed_ref}）。"
                          f"{checkpoint.parent}/train_config.json が無ければ "
@@ -101,6 +112,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
         "std": STD,
         "outputs": list(MODEL_OUTPUTS),
         "max_steer": float(max_steer),  # [rad] steer = steer_norm * max_steer
+        "steer_link": steer_link,       # [gain, cubic] 学習時の STM32 ステアのリンク換算
         "speed_ref": float(speed_ref),  # [m/s] speed = speed_norm * speed_ref
         "note": note,
     }, ensure_ascii=False, indent=2), encoding="utf-8")

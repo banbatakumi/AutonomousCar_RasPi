@@ -175,6 +175,7 @@ def main() -> int:
     config = {
         "input_size": [w, h], "preproc_version": PREPROC_VERSION,
         "max_steer": max_steer, "speed_ref": speed_ref,
+        "steer_link": list(Vehicle.load().steer_link),
         "block_s": args.block_s, "val_ratio": args.val_ratio, "seed": args.seed,
         "balance": args.balance, "speed_weight": args.speed_weight,
         "flip": not args.no_flip, "epochs": args.epochs,
