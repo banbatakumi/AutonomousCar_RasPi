@@ -25,9 +25,10 @@
 ## ループ閉じ（`slam2d/backend/`・`slam2d/pipeline.SlamSystem`）を使う
 
 **ループクロージャの最適化・地図再構築は、EXPLORE→BUILD遷移の瞬間にのみ
-行う**（`SlamSystem.flush()`）。`raspi/auto/slam2d_raceline.py`の`_explore()`
-はこの瞬間`ready=False`で車両を止める設計になっており、0.2〜1.5秒の一時
-停止コストを安全に払える（キーフレーム数に比例。`sim/slam_bench.py`の実測）。
+行う**（`SlamSystem.flush_steps()`）。`raspi/auto/slam2d_raceline.py`の`_explore()`
+はこの瞬間`ready=False`で車両を止める。全体は 360 キーフレームで Pi 5 に約 1.8 秒
+（キーフレーム数に比例）かかるので、`freeze_steps()`で1周期に`chunk`個ずつ進め、
+`plan()`を止めない（その間は`update()`を呼ばない）。`freeze()`は同じ処理を一括で行う。
 RACE段は`Frontend`を直接叩き、追跡専用に保つ（走行中に最適化・地図再構築の
 重い処理を挟まない）。
 
@@ -132,6 +133,14 @@ def scan_to_raw(scan: Scan) -> RawScan:
     return RawScan(_ANGLES, dist, valid, saturated, point_times_ns(scan))
 
 
+def _finite_or_zero(v: float | None) -> float:
+    """車速・ヨーレートの読み。None・NaN・inf は 0 として扱う（姿勢に入ると戻らない）。"""
+    if v is None:
+        return 0.0
+    v = float(v)
+    return v if math.isfinite(v) else 0.0
+
+
 class Slam2dNav:
     """`slam2d.core.Frontend`を包み、planner（`slam2d_raceline`・`slam2d_route`）が使う
     最小限の面（`update`/`idle`/`pose`/`grid`/`trajectory`/`trajectory_array`/
@@ -225,6 +234,8 @@ class Slam2dNav:
         """
         if vs is None or not vs.t_capture:
             return
+        if not (math.isfinite(vs.speed) and math.isfinite(vs.yaw_rate)):
+            return
         self._fe.add_twist(int(vs.t_capture), Twist2D(float(vs.speed), 0.0,
                                                       float(vs.yaw_rate)))
 
@@ -235,8 +246,8 @@ class Slam2dNav:
         `yaw_rate`/`speed`が`None`なら 0 として扱う（`slam2d`側に等速度モデルへの自動
         フォールバックは無い。推測航法は常にジャイロ＋車速）。
         """
-        self._raw_yaw_rate = 0.0 if yaw_rate is None else float(yaw_rate)
-        self._raw_speed = 0.0 if speed is None else float(speed)
+        self._raw_yaw_rate = _finite_or_zero(yaw_rate)
+        self._raw_speed = _finite_or_zero(speed)
         raw = scan_to_raw(scan)
         prev_yaw = self._fe.pose.yaw
         if self._backend_active and self._system is not None:
@@ -252,8 +263,8 @@ class Slam2dNav:
         姿勢がまだ分からない間（保存地図を読んだ直後の LOCATE）に `update()` の代わりに呼ぶ。
         `deskew_scan()` が履歴の足りないときに使う twist を最新に保つ。
         """
-        self._raw_yaw_rate = 0.0 if yaw_rate is None else float(yaw_rate)
-        self._raw_speed = 0.0 if speed is None else float(speed)
+        self._raw_yaw_rate = _finite_or_zero(yaw_rate)
+        self._raw_speed = _finite_or_zero(speed)
 
     @property
     def pose(self) -> Pose2D:
@@ -321,8 +332,18 @@ class Slam2dNav:
         処理コストを安全に払える）。以後RACEまでは`Frontend`直結の追跡専用に
         切り替える——凍結後の地図にループ拘束を追加で足す理由が無いため
         """
+        for _ in self.freeze_steps(chunk=1 << 30):
+            pass
+
+    def freeze_steps(self, chunk: int = 16):
+        """`freeze()`を分けて進めるジェネレータ。`next()`1回で、ループ閉じの最適化または
+        `chunk`キーフレームの地図の焼き直し（Pi 5 で約5ms/個）だけを進める。
+
+        **途中で`update()`・`idle()`を呼んではいけない**（地図は最後にまとめて差し替わる）。
+        走行中に呼ぶ側（`plan()`）は、1周期に1回`next()`して指令を出し続ける。
+        """
         if self._backend_active and self._system is not None:
-            self._system.flush()
+            yield from self._system.flush_steps(chunk)
         self._fe.grid.freeze()
         self._backend_active = False
 

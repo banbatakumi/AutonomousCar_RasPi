@@ -89,11 +89,22 @@ class SlamSystem:
 
     def flush(self) -> None:
         """保留中のループ拘束があれば最適化して地図を作り直す。走行の終わりに呼ぶ。"""
+        for _ in self.flush_steps():
+            pass
+
+    def flush_steps(self, chunk: int = 16):
+        """`flush()`を分けて進めるジェネレータ。`next()`1回ぶんの仕事は、グラフの最適化
+        または`chunk`キーフレームの焼き直し。途中は`update()`を呼んではいけない。"""
         if self._since_opt > 0:
-            self.optimize()
+            yield from self.optimize_steps(chunk)
 
     def optimize(self) -> None:
         """グラフを最適化し、外れ値のループ拘束を外してやり直し、地図へ反映する。"""
+        for _ in self.optimize_steps(chunk=1 << 30):
+            pass
+
+    def optimize_steps(self, chunk: int = 16):
+        """`optimize()`を分けて進めるジェネレータ（`flush_steps`参照）。"""
         if self._synced < 2:
             return
         self._graph.optimize(self.config.iterations)
@@ -108,8 +119,9 @@ class SlamSystem:
                 self._graph.drop_loop(i)
                 self.rejected.append(self.loops[i])
             self._graph.optimize(self.config.iterations)
+        yield 0.0
         poses = self._graph.all_poses()
-        self.frontend.apply_correction(poses)
+        yield from self.frontend.apply_correction_steps(poses, chunk)
         self._since_opt = 0
         self.optimizations += 1
 

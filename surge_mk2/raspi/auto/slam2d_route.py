@@ -26,7 +26,7 @@
 
 道路グラフ（Pi で数百ms）と経路ごとのレーシングライン（1本 数十〜数百ms）は
 `plan()`（10Hz）の中で回すと指令が途切れる（`cmd_deadman_ms` 150ms で DISARM）。
-ワーカー1本（`slam2d_raceline.submit_job`。プロセスを作れない環境ではスレッド）に投げ、`plan()` は毎周期出来上がりを覗くだけにする。
+ワーカー（`slam2d_raceline.submit_job`。仕上げ用と急ぎ用の2本。プロセスを作れない環境ではスレッド）に投げ、`plan()` は毎周期出来上がりを覗くだけにする。
 ワーカーは地図の**写し**（3値から作り直した `OccGrid`）だけを触る。
 
 ## 停止と駐車
@@ -796,7 +796,8 @@ class Slam2dRoute(Slam2dRaceLine):
             _compute_stop, g.trinary().copy(), g.resolution, tuple(g.origin), self._graph,
             self._stop_start(pose, vs), stop, float(vs.speed), dict(p), self.vehicle,
             list(self._cfg.avoid),
-            frozenset(self._route_paths_edges(self._switch.active_key)) or None)
+            frozenset(self._route_paths_edges(self._switch.active_key)) or None,
+            urgent=True)
 
     def _stop_start(self, pose, vs: VehicleState) -> tuple[float, float, float]:
         """停止経路を引き始める姿勢: **今の位置**と、今の経路のその場所の向き。

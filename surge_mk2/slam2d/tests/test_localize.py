@@ -160,3 +160,22 @@ class TestGlobalLocalizerAmbiguousSymmetry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCandidatesOfferBothHeadings(unittest.TestCase):
+    """前後対称の通路では、場所ごとの最良の向きが反対になりうる。同じ場所の別の向きも候補に出す。"""
+
+    def test_same_place_opposite_heading_is_a_separate_candidate(self):
+        walls = [(-4, -0.5, 4, -0.5), (4, -0.5, 4, 0.5), (4, 0.5, -4, 0.5), (-4, 0.5, -4, -0.5)]
+        g = OccGrid(resolution=0.05, size_m=12.0, origin=(-6.0, -6.0))
+        for x in np.arange(-3.0, 3.01, 0.5):
+            g.integrate(make_room_points(x, 0.0, 0.0, segs=walls, max_range=8.0), Pose2D(x, 0.0, 0.0))
+        g.freeze()
+        pts = make_room_points(1.0, 0.0, 0.0, segs=walls, max_range=8.0)
+        loc = GlobalLocalizer(g, config=LocalizeConfig(spacing=0.2, angle_step=math.radians(15.0)))
+        _run_to_done(loc, pts)
+        cands = loc.candidates(8)
+        near = [c for c in cands if math.hypot(c.x - 1.0, c.y) < 0.6]
+        yaws = {round(abs(math.remainder(c.yaw, 2 * math.pi)) / (math.pi / 2)) for c in near}
+        self.assertIn(0, yaws)           # 向き 0（真）
+        self.assertIn(2, yaws)           # 向き π（反対）

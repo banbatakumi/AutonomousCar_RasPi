@@ -89,6 +89,10 @@ class TestOptimizeRefine(unittest.TestCase):
                      fine.xy[:, None, 1] - self.cl.xy[None, :, 1]).min(axis=1)
         self.assertLess(float(d.max()), 0.6)
 
+    def test_short_flag_marks_a_line_that_cannot_keep_the_margin(self):
+        self.assertFalse(self._line(refine_evals=0).short)
+        self.assertTrue(self._line(refine_evals=0, margin=0.6).short)    # 道幅 1.2m に余裕 0.6m は無理
+
     def test_more_starts_never_worse(self):
         one = self._line(refine_starts=1)
         two = self._line(refine_starts=2)
@@ -167,3 +171,12 @@ class TestSight(unittest.TestCase):
         self.assertLess(float(v[95]), 1.6)                         # 0.5m 手前: sqrt(0.25+2·2·0.5)=1.5
         self.assertAlmostEqual(float(v[50]), 3.0)
         self.assertTrue(np.all(np.abs(np.diff(v ** 2)) <= 2 * 2.0 * 0.1 + 1e-6))
+
+
+class TestUrgentWorker(unittest.TestCase):
+    def test_urgent_jobs_use_their_own_worker(self):
+        """急ぎの計算（避ける線の引き直し・停止経路）は、仕上げの計算の後ろに並ばない。"""
+        a, b = sr.worker_pool(False), sr.worker_pool(True)
+        self.assertIsNot(a, b)
+        self.assertIs(sr.worker_pool(True), b)
+        self.assertEqual(sr.submit_job(math.sqrt, 4.0, urgent=True).result(timeout=30), 2.0)

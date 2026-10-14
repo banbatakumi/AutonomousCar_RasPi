@@ -128,6 +128,18 @@ def polyline_length(xy: np.ndarray) -> float:
     return float(np.hypot(d[:, 0], d[:, 1]).sum())
 
 
+def _write_text_atomic(p: Path, text: str, *, sync: bool) -> None:
+    """`p` へ原子的に書く。`sync` なら差し替える前にディスクまで落とす（`_write_npz_atomic`）。
+    走行中に何度も書く小さなファイル（`.grip.json`）は `sync=False`（計画の周期を止めない）。"""
+    tmp = p.with_name(p.name + ".tmp")
+    with open(tmp, "w") as f:
+        f.write(text)
+        if sync:
+            f.flush()
+            os.fsync(f.fileno())
+    os.replace(tmp, p)
+
+
 def _write_meta(target: Path, loaded: LoadedMap) -> None:
     height, width = loaded.trinary.shape
     meta = {
@@ -140,9 +152,7 @@ def _write_meta(target: Path, loaded: LoadedMap) -> None:
     }
     # 途中で落ちても壊れた JSON を残さない（壊れると `list_maps` がその地図を黙って飛ばす）
     p = _meta_path(target)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(meta))
-    os.replace(tmp, p)
+    _write_text_atomic(p, json.dumps(meta), sync=True)
 
 
 # ── 一覧 ──
@@ -399,10 +409,8 @@ def save_routes(name: str, text: str) -> bool:
     target = resolve_map_path(name)
     if target is None or not target.is_file():
         return False
-    p = _routes_path(target)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, p)
+    # 人が置いた経由点・停止点。電源を切られても失わないよう fsync する（編集のたびで、周期の中ではない）
+    _write_text_atomic(_routes_path(target), text, sync=True)
     return True
 
 
@@ -424,10 +432,7 @@ def save_grip(name: str, text: str) -> bool:
     target = resolve_map_path(name)
     if target is None or not target.is_file():
         return False
-    p = _grip_path(target)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, p)
+    _write_text_atomic(_grip_path(target), text, sync=False)
     return True
 
 

@@ -11,8 +11,9 @@
 障害物検出（`nav/obstacles.py`）は`OccGrid`に対してダックタイピングで動くので、
 `slam2d.core.grid.OccGrid`のインスタンスをそのまま渡している。
 
-- **ループ閉じは EXPLORE→BUILD の瞬間に1回だけ**（`Slam2dNav.freeze()` が
-  `SlamSystem.flush()` を呼ぶ）。走行中（RACE）は`Frontend`直結の追跡専用
+- **ループ閉じは EXPLORE→BUILD の瞬間に1回だけ**（`Slam2dNav.freeze_steps()` が
+  `SlamSystem.flush_steps()` を回す。重いので1周期に少しずつ進め、その間は指令を出さない）。
+  走行中（RACE）は`Frontend`直結の追跡専用
 - 推測航法は`ExternalTwistModel`固定（ジャイロ＋車速。LiDAR だけで走るモードは無い）
 """
 
@@ -115,9 +116,36 @@ LAP_NEAR_M = 0.8
 LAP_YAW_DEG = 35.0
 LAP_CONFIRM = 3
 
-#: `LOCATE`で候補を絞り込めたとみなす当たり率の差。仕上げ（Gauss-Newton）後の
-#: 当たり率は正解が0.9台・不正解が0.6以下に割れるので、0.1で十分に分かれる
-LOCATE_INLIER_GAP = 0.10
+#: `LOCATE`の候補の点数の式に入れる残差の物差し[m]（`locate_score`）
+LOCATE_RMS_SCALE = 0.03
+#: `LOCATE`で2位の点数が1位のこの割合以上なら「絞り込めていない」。通路状のコースで
+#: 片端にだけ小さな違いがある場合、当たり率は真と反対側で数%しか違わないが、
+#: 残差のRMSは桁で違う（真0.7cm・反対側6cm）。点数はその両方を掛ける
+LOCATE_SCORE_RATIO = 0.7
+#: `LOCATE`で採る候補の点数の下限。真の姿勢は 0.85〜0.92（`sim.slam_bench --locate`、実機相当の誤差、
+#: 完全な地図）に出る一方、探索が真の姿勢を候補に入れられなかったときの最良は 0.0〜0.6 だった。
+#: 点数が低いのに当たり率（`min_score`）だけで採ると、誤った姿勢で走り出す。実機の地図は
+#: シムより粗いので真の姿勢の点数はもう少し下がりうる（見つからないときはクリックのヒントで絞る）
+LOCATE_MIN_SCORE = 0.5
+#: `LOCATE`で仕上げて比べる候補の数。粗探索（0.2m・15°刻み）の順位は当てにならず、真の姿勢が
+#: 8〜14位に来ることがあった（3つまでだと、真の姿勢を落として10m離れたそっくりの場所を自信満々で採った）。
+#: 1周期に1候補ずつ仕上げる（停止中）ので、増やすほど探索が 0.1s ずつ延びる（12個で約1.2s）
+LOCATE_CANDIDATES = 12
+
+
+def locate_score(ref) -> float:
+    """`Frontend.refine()`の結果の点数（大きいほどよい）。
+
+    **全点に対する当たり率**（`inlier_all`、照合できなかった点は外れ扱い）に、
+    残差のRMSで`exp(-(rms/LOCATE_RMS_SCALE)²/2)`を掛ける。`inlier`（照合できた点の中の割合）
+    だけだと、点の大半が地図の外に落ちる誤った姿勢でも1に近く出るうえ、
+    当たり判定（5cm）に収まる程度の違いは見えない。
+    なお`inlier_all`は無傷の走査でも1にならない（壁の裏側に落ちた点や掠め角の点は
+    未知のセルに落ちて照合できない）ので、絶対値ではなく候補どうしの比較に使う。
+    """
+    if ref is None or ref.used <= 0 or not math.isfinite(ref.rms):
+        return 0.0
+    return float(ref.inlier_all) * math.exp(-0.5 * (ref.rms / LOCATE_RMS_SCALE) ** 2)
 
 
 def forward_traj(traj: np.ndarray, min_step: float = 0.02) -> np.ndarray:
@@ -351,8 +379,11 @@ def mpc_config(p: dict[str, float], vehicle) -> MPCConfig:
 #   - 起動は `spawn`（`fork` は ZeroMQ のソケットやスレッドを持ったまま複製してしまう）
 #   - 子は優先度を下げる（計画と SLAM のコアを奪わない）
 #   - プロセスを作れない環境ではスレッドに落ちる（走れないよりは遅い方がよい）
-#   - planner ごとに作らず 1 つを使い回す（起動に約 1 秒かかる。同時に走る planner は 1 つ）
-_WORKER: Executor | None = None
+#   - planner ごとに作らず使い回す（起動に約 1 秒かかる。同時に走る planner は 1 つ）
+#   - 仕上げの計算（ライン・道路グラフ。数秒〜十数秒）と、**急ぎの計算**（障害物を避ける線の
+#     引き直し・停止経路。数十〜数百ms）は別のワーカーに分ける。1本だと急ぎが仕上げの後ろに
+#     並び、止まれる速度まで減速しながら待つ羽目になる（`submit_job(urgent=True)`）
+_WORKERS: dict[bool, Executor] = {}
 _WORKER_IS_PROCESS = False
 
 
@@ -363,45 +394,59 @@ def _worker_init() -> None:
         pass
 
 
-def _shutdown_worker() -> None:
-    global _WORKER
-    if _WORKER is not None:
-        _WORKER.shutdown(wait=False, cancel_futures=True)
-        _WORKER = None
+def _shutdown_worker(urgent: bool | None = None) -> None:
+    for k in ([urgent] if urgent is not None else list(_WORKERS)):
+        w = _WORKERS.pop(k, None)
+        if w is not None:
+            w.shutdown(wait=False, cancel_futures=True)
 
 
-def worker_pool() -> Executor:
-    """重い計算を投げる先（1 つを使い回す。上のコメント）。"""
-    global _WORKER, _WORKER_IS_PROCESS
-    if _WORKER is None:
+def worker_pool(urgent: bool = False) -> Executor:
+    """重い計算を投げる先（仕上げ用と急ぎ用に1つずつを使い回す。上のコメント）。"""
+    global _WORKER_IS_PROCESS
+    if urgent not in _WORKERS:
         try:
             if os.environ.get("SURGE_LINE_WORKER", "process") != "process":
                 raise OSError("SURGE_LINE_WORKER でスレッドを指定")
-            _WORKER = ProcessPoolExecutor(max_workers=1,
-                                          mp_context=multiprocessing.get_context("spawn"),
-                                          initializer=_worker_init)
+            _WORKERS[urgent] = ProcessPoolExecutor(
+                max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                initializer=_worker_init)
             _WORKER_IS_PROCESS = True
         except (OSError, ValueError, ImportError) as e:
             print(f"# ライン生成を別プロセスで回せない（{e}）。スレッドで回す——計算中は plan() が"
                   "待たされる", file=sys.stderr, flush=True)
-            _WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="line")
+            _WORKERS[urgent] = ThreadPoolExecutor(max_workers=1, thread_name_prefix="line")
             _WORKER_IS_PROCESS = False
         atexit.register(_shutdown_worker)
-    return _WORKER
+    return _WORKERS[urgent]
 
 
-def submit_job(fn, *args, **kwargs):
-    """`fn(*args)` を別プロセスへ投げて `Future` を返す。プロセスが落ちていたら作り直して投げ直す。"""
-    global _WORKER
+def submit_job(fn, *args, urgent: bool = False, **kwargs):
+    """`fn(*args)` を別プロセスへ投げて `Future` を返す。プロセスが落ちていたら作り直して投げ直す。
+
+    `urgent=True` は急ぎの計算（走行中に結果を待っている）用で、仕上げの計算とは別のワーカーで回す。
+    """
     try:
-        return worker_pool().submit(fn, *args, **kwargs)
+        return worker_pool(urgent).submit(fn, *args, **kwargs)
     except Exception:                               # noqa: BLE001  BrokenProcessPool など
-        _shutdown_worker()
-        return worker_pool().submit(fn, *args, **kwargs)
+        _shutdown_worker(urgent)
+        return worker_pool(urgent).submit(fn, *args, **kwargs)
 
 
 #: 自己位置のヒント（地図のクリック）を有効とみなす時間 [s]
 _LOC_HINT_TTL_S = 120.0
+#: 走行中に自己位置を信用できなくなり、止まったまま（`_STILL_SPEED`未満）これだけ続いたら、
+#: 今の推定姿勢を種に`LOCATE`（全域探索）へ戻る。凍結地図の上の追跡は予測の周りの±0.4m・±15°
+#: しか探さないので、それより外へずれると追跡のままでは戻れない
+LOST_RELOCATE_S = 3.0
+#: 地図の確定（ループ閉じ）で、1周期に焼き直すキーフレームの数（1個約5ms、Pi 5）
+FREEZE_CHUNK = 8
+_STILL_SPEED = 0.1
+#: `LOCATE`の探索中に車が動いていたら探索をやり直す（候補は周期ごとの点群で1つずつ仕上げる
+#: ので、動くと候補ごとに別の場所で仕上げて、古い姿勢を採ってしまう）
+_LOCATE_MOVE_SPEED = 0.05
+_LOCATE_MOVE_YAW_RATE = 0.05
+
 
 class Slam2dRaceLine(Planner):
     id = "slam2d_raceline"
@@ -671,6 +716,8 @@ class Slam2dRaceLine(Planner):
         self._build_step = 0
         self._build_error = ""
         self._freeze_requested = False
+        #: 地図の確定（`Slam2dNav.freeze_steps`）の途中ならそのジェネレータ
+        self._freeze_iter = None
         self._hint = -1
         self._mpc.reset()
         self._sff.reset()
@@ -706,6 +753,10 @@ class Slam2dRaceLine(Planner):
         self._rejoins = 0
         #: 自己位置を信用できない状態が続いている時間 [s]（`_localization_ok`）
         self._coast_t = 0.0
+        #: 自己位置を信用できないまま止まっている時間 [s]（`LOST_RELOCATE_S`で`LOCATE`へ戻る）
+        self._lost_still_t = 0.0
+        self._speed_now = 0.0
+        self._yaw_rate_now = 0.0
         #: 停車中に舵を動かしている時間 [s]（手動の地図作成での据え切りの注意）と直前の舵角
         self._still_steer_t = 0.0
         self._prev_steer = 0.0
@@ -1028,11 +1079,20 @@ class Slam2dRaceLine(Planner):
         self._dt = dt
         self._last_p = p
         self._tick_ctx = self._tick_path = None
+        self._speed_now = vs.speed if vs is not None else 0.0
+        self._yaw_rate_now = vs.yaw_rate if vs is not None else 0.0
         self._poll_line()
 
         if vs is None:
             st.reason = "車両状態がまだ届いていない"
             return st
+
+        if self._freeze_iter is not None:
+            # 地図の確定の途中。追跡は止める（地図は最後にまとめて差し替わる）
+            self.slam.idle(yaw_rate=vs.yaw_rate, speed=vs.speed)
+            st.pose_x, st.pose_y, st.pose_yaw = self.slam.pose
+            st.laps = self.laps
+            return self._freeze_step(st)
 
         if self.phase == LOCATE and not self._load_failed:
             # ★ 姿勢が分かるまで追跡（`slam.update`）は回さない。回しても毎周期「見失い」で、
@@ -1174,11 +1234,10 @@ class Slam2dRaceLine(Planner):
         lap_done, explore_done = self._check_lap(p)
         if lap_done:
             if explore_done:
-                self.slam.freeze()
-                self.phase = st.phase = BUILD
-                self._build_step = 0
-                st.reason = "地図を確定した。経路を作っている"
-                return st
+                # ループ閉じの最適化と地図の焼き直しは 360 キーフレームで約 2 秒かかる。
+                # `plan()` を止めないよう、1周期に少しずつ進める（`_freeze_step`）
+                self._freeze_iter = self.slam.freeze_steps(FREEZE_CHUNK)
+                return self._freeze_step(st)
             lap_msg = f"{self.laps}周目を検出した"
 
         if not self._engaged:
@@ -1215,6 +1274,20 @@ class Slam2dRaceLine(Planner):
             st.reason = f"{head}・{lap_msg}"
         else:
             st.reason = f"{head}・{sub.reason}"
+        return st
+
+    def _freeze_step(self, st: AutoState) -> AutoState:
+        """地図の確定（`Slam2dNav.freeze_steps`）を1段進める。終われば BUILD へ。
+        確定の間は追跡（`slam.update`）を回さず、指令は出さない（`ready=False`）。"""
+        try:
+            next(self._freeze_iter)
+            st.reason = "地図を確定している（ループ閉じの反映）"
+            return st
+        except StopIteration:
+            self._freeze_iter = None
+        self.phase = st.phase = BUILD
+        self._build_step = 0
+        st.reason = "地図を確定した。経路を作っている"
         return st
 
     def _explore_manual(self, st: AutoState, vs: VehicleState, p: dict[str, float], dt: float,
@@ -1321,6 +1394,8 @@ class Slam2dRaceLine(Planner):
         base = (f"経路ができた（{len(self.path)}点・"
                 f"1周 {self.path.length:.1f}m・"
                 f"{self.path.v.min():.2f}〜{self.path.v.max():.2f} m/s）。")
+        if self.path.short:
+            base += "★道が狭く、車体と壁の余裕を確保できない所がある。"
         st.reason = base + (
             f"地図を『{self._saved_map_name}』として保存した。"
             "レーシングライン走行で開始してください"
@@ -1388,6 +1463,14 @@ class Slam2dRaceLine(Planner):
         `localize.py`のモジュールdocstring参照）ので、この段の間は車両を
         `ready=False`で静止させたまま複数周期にわたって`step()`を呼び続ける。
         """
+        if (abs(self._speed_now) > _LOCATE_MOVE_SPEED
+                or abs(self._yaw_rate_now) > _LOCATE_MOVE_YAW_RATE):
+            # 動いている間は探さない（途中までの候補は別の場所の点群で仕上げたもの）。
+            # 止まってから最初からやり直す
+            self._localizer = None
+            self._loc_cands, self._loc_scored = None, []
+            st.reason = "自己位置を探している。車が動いている間は待つ（止まってから探索する）"
+            return st
         pts = self.slam.deskew_scan(scan)
         # ヒントは「クリック→読み込み」の意思なので読み込みでは捨てないが、古いものは使わない
         # （別の地図・別の出発点で、ずっと前のクリックに探索が絞られないように）
@@ -1408,7 +1491,7 @@ class Slam2dRaceLine(Planner):
                 st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%）"
                 return st
 
-            cands = self._localizer.candidates(3)
+            cands = self._localizer.candidates(LOCATE_CANDIDATES)
             self._localizer = None
             if not cands:
                 if seeded:
@@ -1418,15 +1501,15 @@ class Slam2dRaceLine(Planner):
             self._loc_cands, self._loc_scored = list(cands), []
 
         # ★ 粗探索（0.2m間隔・15°刻み）の得点だけで決めない。上位候補を
-        #   それぞれ総当たり＋Gauss-Newton で仕上げ、**当たり率**で比べる。
-        #   粗い尺度では並ぶ候補（オーバルの反対側の直線など）も、
+        #   それぞれ総当たり＋Gauss-Newton で仕上げ、**全点に対する当たり率と残差RMS**
+        #   （`locate_score`）で比べる。粗い尺度では並ぶ候補（オーバルの反対側の直線など）も、
         #   仕上げるとはっきり差がつく（`slam2d/core/localize.py`参照）。
         #   1候補の仕上げは Pi で数十ms かかるので **1周期に1候補**（まとめると
         #   指令が `cmd_deadman_ms` を超えて途切れる。停止中なので点群は変わらない）
         c = self._loc_cands.pop(0)
         ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw))
         if ref is not None:
-            self._loc_scored.append((ref.inlier, ref))
+            self._loc_scored.append((locate_score(ref), ref))
         if self._loc_cands:
             st.reason = f"自己位置の候補を仕上げている（残り {len(self._loc_cands)}）"
             return st
@@ -1438,17 +1521,18 @@ class Slam2dRaceLine(Planner):
             return st
         scored.sort(key=lambda t: -t[0])
         best = scored[0][1]
-        if len(scored) >= 2 and scored[0][0] - scored[1][0] < LOCATE_INLIER_GAP:
+        if len(scored) >= 2 and scored[0][0] > 0 and scored[1][0] >= scored[0][0] * LOCATE_SCORE_RATIO:
             if seeded:
                 self._locate_seed = None
             st.reason = ("自己位置の候補が複数あり絞り込めない"
                          "（左右対称・繰り返し形状の疑い）。"
                          "地図パネルをタップしておおよその位置を教えてください")
             return st
-        if best.inlier < p["min_score"]:
+        if best.inlier < p["min_score"] or scored[0][0] < LOCATE_MIN_SCORE:
             if seeded:
                 self._locate_seed = None      # 種が外れている。全域で探し直す
-            st.reason = f"自己位置が見つからない（最良の当たり率 {best.inlier:.2f}）"
+            st.reason = (f"自己位置が見つからない（最良の当たり率 {best.inlier:.2f}・"
+                         f"点数 {scored[0][0]:.2f}）")
             return st
         self.slam.set_pose(*best.pose)
         self.phase = st.phase = RACE
@@ -1903,7 +1987,7 @@ class Slam2dRaceLine(Planner):
                     v_now=speed, room=self._avoid_room(path, p),
                     # 線の候補どうしを比べる速度。候補は点が違うので、学習中は全体の値（スカラー）を渡す
                     speed=speed_kwargs(p, self.vehicle, self._grip_scalar()),
-                    v_tight=p["avoid_speed"], ahead_m=ahead)
+                    v_tight=p["avoid_speed"], ahead_m=ahead, urgent=True)
             return False
         self._avoid_fail = None
         self._avoid_path = chosen
@@ -2203,6 +2287,7 @@ class Slam2dRaceLine(Planner):
                 # 横グリップの前兆（線から外れた）と取り違えない
                 self._grip_quiet(self._grip_gate_t, "自己位置が戻った直後")
             self._coast_t = 0.0
+            self._lost_still_t = 0.0
             return False
         self._coast_t += self._dt
         if self._joined and p["coast_s"] > 0.0 and self._coast_t <= p["coast_s"]:
@@ -2210,7 +2295,28 @@ class Slam2dRaceLine(Planner):
         st.reason = (f"自己位置が信用できない（一致度 {st.match_score:.2f} < "
                      f"{p['min_score']:.2f}"
                      + (f"・{self._coast_t:.1f}s 続いた" if p["coast_s"] > 0.0 else "") + "）")
+        # 走り続けていない（止まっている）のに信用できない状態が続くなら、追跡の探索幅の外へ
+        # ずれている。今の姿勢を種にして全域探索へ戻る（ここへ来た時点で指令は止めている）
+        if abs(self._speed_now) < _STILL_SPEED and self.phase == RACE:
+            self._lost_still_t += self._dt
+            if self._lost_still_t >= LOST_RELOCATE_S:
+                self._back_to_locate()
+                st.phase = self.phase
+                st.reason = "自己位置を見失ったまま止まっている。地図の全域から探し直す"
+        else:
+            self._lost_still_t = 0.0
         return None
+
+    def _back_to_locate(self) -> None:
+        """走行中に見失ったまま止まったとき、今の推定姿勢を種に`LOCATE`からやり直す。
+        地図・経路・周回数は残す（`_locate()`が復元できれば`RACE`へ戻る）。"""
+        self._lost_still_t = 0.0
+        self._coast_t = 0.0
+        self._locate_seed = (self.slam.pose.x, self.slam.pose.y)
+        self._loc_hint = None
+        self._localizer = None
+        self._loc_cands = None
+        self.phase = LOCATE
 
     def _md_fault(self, st: AutoState, vs: VehicleState, p: dict[str, float]) -> str | None:
         """後輪のモータドライバが無応答のときの抑え。戻り値は reason に足す注記、止めたら `None`。

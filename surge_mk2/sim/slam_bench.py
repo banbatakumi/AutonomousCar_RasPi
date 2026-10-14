@@ -94,6 +94,10 @@ class SensorModel:
     speed_scale: float = 1.0        #: 車速の倍率誤差（車輪半径の誤差・摩耗）
     speed_noise: float = 0.0        #: 車速の白色ノイズ σ [m/s]
     speed_tau: float = 0.0          #: 車速の計測遅れ（1次遅れ）[s]。強いローパスの再現
+    speed_quant: float = 0.0        #: 車速の量子化の刻み [m/s]（アナログ絶対角エンコーダの粗さ。0=無し）
+    #: テレメトリの時刻の一定のずれ [ms]（時刻同期の残差。+ は実際より未来の時刻を付ける）。
+    #: 脱スキューと`pose_now`は`t_capture`で履歴を引くので、ずれると推測航法が狂う
+    time_offset_ms: float = 0.0
     gyro_bias_dps: float = 0.0      #: ジャイロのゼロ点ずれ [°/s]
     gyro_noise_dps: float = 0.0     #: ジャイロの白色ノイズ σ [°/s]
     gyro_scale: float = 1.0         #: ジャイロの倍率誤差
@@ -356,6 +360,13 @@ class RunConfig:
     still_s: float = 3.0
     #: `SensorModel.ghost`（プリセットに足す）
     ghost: tuple[tuple[float, float, float, float, float, float], ...] = ()
+    #: `SensorModel`の上書き（プリセットの後に`dataclasses.replace`で当てる）。
+    #: 例 `{"speed_quant": 0.05, "time_offset_ms": 100.0}`
+    sensor_overrides: tuple[tuple[str, float], ...] = ()
+    #: 凍結地図を保存地図と同じ経路（3値→`occgrid_from_trinary`）で読み直し、RACE 中の
+    #: 等間隔の`locate`か所で全域探索（`GlobalLocalizer`→仕上げ→`locate_score`）して、
+    #: 真値と比べる回数。0 なら通らない。車は動いている（実機の LOCATE は止まっているので厳しめ）
+    locate: int = 0
 
 
 @dataclass
@@ -417,6 +428,9 @@ class RunResult:
     wall_time_s: float
     map_walls: np.ndarray | None = None   #: 凍結地図の壁セル中心（重ね合わせ後の世界座標）
     course_obj: Course | None = None
+    #: 保存地図＋LOCATE の結果（`RunConfig.locate`）: n, ok（10cm・3°以内で採用）,
+    #: ambiguous（決めずに断った）, wrong（誤った姿勢を採用）, none（候補なし・足りない）, err_cm（採用した姿勢の誤差）
+    locate: dict = field(default_factory=dict)
 
     def row(self) -> dict:
         e = self.explore.summary()
@@ -441,6 +455,8 @@ class RunResult:
             if (self.explore.update_ms or self.race.update_ms) else float("nan"),
             ms_max=max(self.explore.update_ms + self.race.update_ms, default=float("nan")),
             relocs=self.relocs, loops=self.loop_closures, oob=self.out_of_bounds,
+            loc_n=self.locate.get("n", 0), loc_ok=self.locate.get("ok", 0),
+            loc_amb=self.locate.get("ambiguous", 0), loc_wrong=self.locate.get("wrong", 0),
         )
 
 
@@ -497,6 +513,8 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
     sensors = SensorModel.preset(cfg.errors, course)
     if cfg.ghost:
         sensors = dataclasses.replace(sensors, ghost=sensors.ghost + tuple(cfg.ghost))
+    if cfg.sensor_overrides:
+        sensors = dataclasses.replace(sensors, **dict(cfg.sensor_overrides))
     spec = VehicleSpec.load()
     lidar_x, lidar_y, _ = spec.sensor_pose("lidar")
     ghost_box = _wall_bbox(course)
@@ -531,6 +549,8 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
     map_before: dict = {}
     map_after: dict = {}
     freeze_ms = 0.0
+    locate: dict = {}
+    loc_done = 0
     lost_streak = 0
     was_colliding = False
     last_plan_ns = 0
@@ -564,10 +584,12 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         if t_ns >= next_tlm:
             next_tlm += NS // TELEMETRY_HZ
             sp = speed_meas + (float(rng.normal(0, sensors.speed_noise)) if sensors.speed_noise > 0 else 0.0)
+            if sensors.speed_quant > 0.0:
+                sp = round(sp / sensors.speed_quant) * sensors.speed_quant
             yr = (veh.yaw_rate * sensors.gyro_scale + bias
                   + (float(rng.normal(0, gsig)) if gsig > 0 else 0.0))
             vs = VehicleState(speed=sp, yaw_rate=yr, steer_actual=veh.steer_actual,
-                              t_capture=t_ns, stopped=abs(sp) < SPEED_DEADBAND_MPS)
+                              t_capture=t_ns + int(sensors.time_offset_ms * 1e6), stopped=abs(sp) < SPEED_DEADBAND_MPS)
             slam.on_vehicle_state(vs)
 
         # ── LiDAR（セクタ単位・伝送遅延つき）→ ScanAssembler ──
@@ -648,7 +670,10 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
                   flush=True)
 
         if phase == "explore" and driver.progress >= explore_len:
-            map_before = map_quality(slam.grid, course, origin)
+            # ★ 採点の条件を揃える: 前後どちらも真のコースへ剛体で重ねてから採点する
+            #   （前だけ重ねないと、地図全体が少し回っているだけで before が悪く見える）
+            aligned_before = align_map(slam.grid, course, origin)
+            map_before = map_quality(slam.grid, course, aligned_before)
             t0 = time.perf_counter()
             slam.freeze()
             freeze_ms = (time.perf_counter() - t0) * 1000.0
@@ -664,8 +689,13 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
             phase_split = len(traj_true)
             race_start_progress = driver.progress
             lost_streak = 0
-        elif phase == "race" and driver.progress - race_start_progress >= race_len:
-            break
+        elif phase == "race":
+            done_m = driver.progress - race_start_progress
+            if cfg.locate > 0 and loc_done < cfg.locate and done_m >= race_len * (loc_done + 0.5) / cfg.locate:
+                loc_done += 1
+                _locate_trial(slam, scan, tr, factory or default_factory(), locate)
+            if done_m >= race_len:
+                break
 
     return RunResult(
         cfg=cfg, explore=explore, race=race, map_before=map_before, map_after=map_after,
@@ -674,7 +704,54 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         traj_true=np.asarray(traj_true), traj_est=np.asarray(traj_est),
         phase_split=phase_split, wall_time_s=time.perf_counter() - t_wall,
         map_walls=_walls_world(slam.grid, origin) if origin is not None else None,
-        course_obj=course)
+        course_obj=course, locate=locate)
+
+
+def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict) -> None:
+    """保存地図を読み直した状態から、今の点群で全域探索（LOCATE）して真値と比べる。
+
+    実機の流れと同じ部品を通す: 地図は3値に落として`occgrid_from_trinary`で読み直し、候補は
+    `GlobalLocalizer`→`refine`→`locate_score`、採否は`LOCATE_SCORE_RATIO`（2位が1位に近ければ断る）。
+    """
+    from raspi.auto._slam2d_nav import occgrid_from_trinary
+    from raspi.auto.slam2d_raceline import (LOCATE_CANDIDATES, LOCATE_MIN_SCORE, LOCATE_SCORE_RATIO,
+                                            locate_score)
+    from slam2d.core.localize import GlobalLocalizer
+    from slam2d.core.types import Pose2D
+
+    g = slam.grid
+    loaded = occgrid_from_trinary(g.trinary(), resolution=g.resolution, origin=tuple(g.origin),
+                                  seq=g.seq + 1)
+    nav2 = factory()
+    nav2.replace_grid_for_race(loaded)
+    out["n"] = out.get("n", 0) + 1
+    pts = slam.nav.deskew_scan(scan)
+    loc = GlobalLocalizer(loaded)
+    for _ in range(10_000):
+        if loc.step(pts):
+            break
+    cands = loc.candidates(LOCATE_CANDIDATES)
+    scored = []
+    for c in cands:
+        ref = nav2.refine(pts, Pose2D(c.x, c.y, c.yaw))
+        if ref is not None:
+            scored.append((locate_score(ref), ref))
+    if not scored:
+        out["none"] = out.get("none", 0) + 1
+        return
+    scored.sort(key=lambda t: -t[0])
+    if len(scored) >= 2 and scored[0][0] > 0 and scored[1][0] >= scored[0][0] * LOCATE_SCORE_RATIO:
+        out["ambiguous"] = out.get("ambiguous", 0) + 1
+        return
+    if scored[0][0] < LOCATE_MIN_SCORE:
+        out["none"] = out.get("none", 0) + 1       # 見つからないとして断る
+        return
+    pose = scored[0][1].pose
+    err = math.hypot(pose.x - truth_pose[0], pose.y - truth_pose[1])
+    yaw = abs(math.degrees(_wrap(pose.yaw - truth_pose[2])))
+    out.setdefault("err_cm", []).append(err * 100.0)
+    key = "ok" if err <= 0.10 and yaw <= 3.0 else "wrong"
+    out[key] = out.get(key, 0) + 1
 
 
 def _walls_world(grid, origin) -> np.ndarray:
@@ -803,6 +880,7 @@ _COLS = [
     ("ghost_n", "{:5d}"), ("ghost_max", "{:7.1f}"),
     ("ms_mean", "{:6.1f}"), ("ms_max", "{:7.0f}"),
     ("relocs", "{:4d}"), ("loops", "{:4d}"), ("oob", "{:6d}"),
+    ("loc_n", "{:5d}"), ("loc_ok", "{:6d}"), ("loc_amb", "{:7d}"), ("loc_wrong", "{:9d}"),
 ]
 
 
@@ -888,6 +966,13 @@ def main() -> int:
                          "距離に差し替える")
     ap.add_argument("--behind-margin", type=float, default=None,
                     help="FrontendConfig.behind_margin を上書き（0で壁の向こうの点の除去を切る）")
+    ap.add_argument("--speed-quant", type=float, default=0.0,
+                    help="車速の読みの量子化の刻み [m/s]（エンコーダの粗さ。例 0.05）")
+    ap.add_argument("--time-offset-ms", type=float, default=0.0,
+                    help="テレメトリの時刻の一定のずれ [ms]（時刻同期の残差。例 100）")
+    ap.add_argument("--locate", type=int, default=0,
+                    help="RACE 中にこの回数だけ、保存地図を読み直して全域探索（LOCATE）を試し、"
+                         "真値と比べる（loc_ok / loc_amb=断った / loc_wrong=誤った姿勢を採用）")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--json", default=None, help="結果の行を JSON で保存")
     ap.add_argument("--verbose", action="store_true")
@@ -910,13 +995,19 @@ def main() -> int:
             ap.error("--ghost は 段(explore|race):開始:秒数:deg0:deg1:offset")
         ghost.append((1.0 if f[0] == "race" else 0.0, *(float(v) for v in f[1:])))
     ghost = tuple(ghost)
+    ov = []
+    if args.speed_quant:
+        ov.append(("speed_quant", args.speed_quant))
+    if args.time_offset_ms:
+        ov.append(("time_offset_ms", args.time_offset_ms))
     rows = []
     for err in args.errors.split(","):
         for name in args.course.split(","):
             for s in range(args.seed0, args.seed0 + args.seeds):
                 cfg = RunConfig(course=name, seed=s, errors=err, laps=args.laps,
                                 explore_speed=args.explore_speed, race_laps=args.race_laps,
-                                race_speed=args.race_speed, route=args.route, ghost=ghost)
+                                race_speed=args.race_speed, route=args.route, ghost=ghost, locate=args.locate,
+                                sensor_overrides=tuple(ov))
                 res = run(cfg, default_factory(**kw), verbose=args.verbose)
                 row = res.row()
                 row["wall_s"] = res.wall_time_s

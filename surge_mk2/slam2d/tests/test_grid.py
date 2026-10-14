@@ -27,6 +27,21 @@ class TestOccGrid(unittest.TestCase):
             self.g.integrate(pts, Pose2D(3.0, 2.0, 0.0))
         self.assertGreater(int(self.g.wall_mask().sum()), 100)
 
+    def test_rays_start_at_the_given_origin(self):
+        """レイは`origin`（LiDAR の位置）から引く。車体原点から引くと、LiDAR より後ろの
+        セルまで「素通り」と数えてしまう。"""
+        a = np.array([1.0]); z = np.array([0.0])
+        pts = ScanPoints(a, z, np.array([True]), 0, False)
+        g0 = OccGrid(resolution=0.05, size_m=6.0, origin=(-3.0, -3.0))
+        g1 = OccGrid(resolution=0.05, size_m=6.0, origin=(-3.0, -3.0))
+        g0.integrate(pts, Pose2D(0.0, 0.0, 0.0))
+        g1.integrate(pts, Pose2D(0.0, 0.0, 0.0), origin=(0.3, 0.0))
+        c, r = g0.to_cell(0.1, 0.0)             # 車体原点とLiDARの間
+        self.assertGreater(int(g0.misses[r, c]), 0)
+        self.assertEqual(int(g1.misses[r, c]), 0)
+        c2, r2 = g1.to_cell(0.6, 0.0)
+        self.assertGreater(int(g1.misses[r2, c2]), 0)
+
     def test_trinary_values(self):
         pts = make_room_points(3.0, 2.0, 0.0)
         for _ in range(4):

@@ -535,6 +535,17 @@ class TestRealNoise(unittest.TestCase):
             res = self.replay.replay(rec, self.vehicle, pin=pin)
             self.assertEqual([e["kind"] for e in res.learner.events], [], pin)
 
+    def test_time_learner_replay_runs_and_has_no_false_guard(self):
+        """`--learner time`（planner の既定の学習器）でも、滑っていない実機の記録で安全装置が働かない。"""
+        rec = self.replay.load(DATA / "grip_real_20261012.npz")
+        res = self.replay.replay(rec, self.vehicle, learner="time")
+        self.assertIsInstance(res.learner, grip.TimeLearner)
+        self.assertEqual([e["kind"] for e in res.learner.events], [])
+        res = self.replay.replay(rec, self.vehicle, learner="time", plan_lap=6.0)
+        self.assertEqual([e["kind"] for e in res.learner.events], [])
+        with self.assertRaises(ValueError):
+            self.replay.replay(rec, self.vehicle, learner="x")
+
     def test_clean_laps_at_high_lateral_acceleration_have_no_precursor(self):
         """横 4〜5.8m/s² で滑らずに周回した記録。上限をどこに置いても前兆 0。"""
         rec = self.replay.load(DATA / "grip_real_20261011.npz")

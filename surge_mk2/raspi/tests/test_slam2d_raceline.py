@@ -55,6 +55,8 @@ def drive_one_lap_and_build(p: Slam2dRaceLine, params: dict, *, steps: int = 265
     stop = (x0 + _LAP_R * math.sin(a), y0 + _LAP_R * (1.0 - math.cos(a)), a)
     p.request_freeze()
     st = p.plan(make_room_scan(*stop, segs=ROOM), vs(), params, dt)
+    while p._freeze_iter is not None:          # 地図の確定は数周期に分かれて進む
+        st = p.plan(make_room_scan(*stop, segs=ROOM), vs(), params, dt)
     for _ in range(10):
         if st.phase != BUILD:
             break
@@ -224,8 +226,16 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
 
         self.assertTrue(self.p.slam._backend_active)
         self.p.request_freeze()
-        self.p.plan(make_room_scan(cx, cy, math.pi / 2, segs=ROOM),
-                   vs(speed=0.0, yaw_rate=0.0), self.params, dt)
+        # 確定（ループ閉じの反映）は数周期に分けて進む。その間は指令を出さない
+        cycles = 0
+        while self.p.phase == EXPLORE and cycles < 200:
+            st = self.p.plan(make_room_scan(cx, cy, math.pi / 2, segs=ROOM),
+                             vs(speed=0.0, yaw_rate=0.0), self.params, dt)
+            cycles += 1
+            if self.p.phase == EXPLORE:
+                self.assertFalse(st.ready)
+        self.assertGreater(cycles, 1)
+        self.assertEqual(self.p.phase, BUILD)
 
         self.assertFalse(self.p.slam._backend_active)
         self.assertGreater(self.p.slam.loop_closures, 0)
@@ -797,11 +807,50 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertGreater(p._grip_quiet_ns, p._grip_gate_t)
         self.assertEqual(p._grip_quiet_why, "自己位置が戻った直後")
 
+    def test_lost_while_stopped_falls_back_to_locate_and_recovers(self):
+        from raspi.auto.slam2d_raceline import LOST_RELOCATE_S
+        params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4}, hidden=True)
+        p = self._race_on_line(params)
+        weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
+        for _ in range(int(LOST_RELOCATE_S / 0.1) + 5):
+            st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
+            if p.phase == LOCATE:
+                break
+        self.assertEqual(p.phase, LOCATE)
+        self.assertFalse(st.ready)
+        for _ in range(40):
+            st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            if st.phase == RACE:
+                break
+        self.assertEqual(st.phase, RACE)
+        self.assertAlmostEqual(p.slam.pose.x, 3.0, delta=0.1)
+
+    def test_lost_while_moving_does_not_fall_back_to_locate(self):
+        params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4}, hidden=True)
+        p = self._race_on_line(params)
+        weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
+        for _ in range(60):
+            p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(speed=1.0), params, 0.1)
+        self.assertEqual(p.phase, RACE)
+
     def test_coast_disabled_stops_immediately(self):
         params = Slam2dRaceLine.merged({"coast_s": 0.0}, hidden=True)
         p = self._race_on_line(params)
         weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
         st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
+        self.assertFalse(st.ready)
+
+    def test_locate_restarts_while_the_car_moves(self):
+        self._save_manual_map("course_mv")
+        p = Slam2dRaceLine()
+        p.request_load("course_mv")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(), params, 0.1)
+        self.assertIsNotNone(p._localizer)
+        st = p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(speed=0.3), params, 0.1)
+        self.assertIsNone(p._localizer)
+        self.assertEqual(st.phase, LOCATE)
         self.assertFalse(st.ready)
 
     def test_locate_hint_is_recorded_and_resets_in_progress_search(self):
@@ -884,3 +933,37 @@ class TestLapCountAcrossLines(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLocateScore(unittest.TestCase):
+    """LOCATE の候補比較: 周回通路（片端にだけポケット）で真の姿勢が反対側より明確に勝つ。"""
+
+    def test_true_pose_beats_mirrored_corridor(self):
+        from raspi.auto.slam2d_raceline import LOCATE_SCORE_RATIO, locate_score
+        from slam2d.core.frontend import Frontend, FrontendConfig
+        from slam2d.core.motion import ConstantVelocityModel
+
+        def rect(x0, y0, x1, y1):
+            return [(x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0)]
+        outer = [(-4, -2, 4, -2), (4, -2, 4, -0.5), (4, -0.5, 5, -0.5), (5, -0.5, 5, 0.5),
+                 (5, 0.5, 4, 0.5), (4, 0.5, 4, 2), (4, 2, -4, 2), (-4, 2, -4, -2)]
+        segs = outer + rect(-3, -1, 3, 1)
+        g = OccGrid(resolution=0.025, size_m=14.0, min_hits=3, min_seen=3, hit_weight=8.0)
+        path = ([(x, -1.5, 0.0) for x in np.arange(-3.4, 3.5, 0.1)]
+                + [(3.5, y, math.pi / 2) for y in np.arange(-1.4, 1.5, 0.1)]
+                + [(x, 1.5, math.pi) for x in np.arange(3.4, -3.5, -0.1)]
+                + [(-3.5, y, -math.pi / 2) for y in np.arange(1.4, -1.5, -0.1)])
+        for q in path:
+            for _ in range(2):
+                g.integrate(make_room_points(*q, segs=segs, max_range=8.0), Pose2D(*q))
+        g.freeze()
+        fe = Frontend(g, ConstantVelocityModel(), FrontendConfig(max_range=8.0))
+        rng = np.random.default_rng(1)
+        pts = make_room_points(2.6, -1.5, 0.0, segs=segs, max_range=8.0,
+                               noise_sigma=0.01, rng=rng)
+        true = fe.refine(pts, Pose2D(2.6, -1.6, 0.0))
+        mirror = fe.refine(pts, Pose2D(2.6, 1.4, 0.0))
+        self.assertGreater(locate_score(true), 0.0)
+        self.assertLess(locate_score(mirror), locate_score(true) * LOCATE_SCORE_RATIO)
+        self.assertEqual(locate_score(None), 0.0)
+

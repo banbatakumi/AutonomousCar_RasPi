@@ -119,6 +119,8 @@ class GlobalLocalizer:
         #: 候補ごとの「これまで試した角度のうちの最良得点・その角度」
         self._best_score = np.zeros(self._xs.size, dtype=np.float64)
         self._best_yaw = np.zeros(self._xs.size, dtype=np.float64)
+        #: 角度ごとの得点（`candidates()`が、同じ場所の別の向きを候補に出すため）
+        self._by_angle = np.zeros((len(self._angles), self._xs.size), dtype=np.float32)
         #: 候補が1つも無い（ヒント範囲に空きセルが無い等）。呼び出し側は
         #: `step()`を呼ばずにこれだけ見て諦めてよい
         self.done = self._xs.size == 0
@@ -153,6 +155,7 @@ class GlobalLocalizer:
         like = np.where(a.valid, np.exp(-np.minimum(a.dist, 10.0) ** 2 * inv2s2), 0.0)
         totals = like.sum(axis=1) / sx.size
 
+        self._by_angle[self._ai] = totals
         better = totals > self._best_score
         self._best_score = np.where(better, totals, self._best_score)
         self._best_yaw = np.where(better, yaw, self._best_yaw)
@@ -168,22 +171,38 @@ class GlobalLocalizer:
         return self.done
 
     def candidates(self, k: int = 3) -> list[LocalizeResult]:
-        """得点上位の候補を、**互いに`ambiguous_min_dist`以上離して**`k`個返す。
+        """得点上位の候補を`k`個返す。**同じ向きの候補は互いに`ambiguous_min_dist`以上離す。**
 
         呼び出し側はこれを`Frontend.refine()`で仕上げ、当たり率で比べて選ぶ
         （上のdocstring参照）。`ambiguous`には粗い尺度での判定をそのまま入れる。
+
+        候補は**場所ごとの最良の向き**と、**それと90°以上離れた向きの中での最良**の2つ。
+        前後対称の通路では、真の姿勢の場所でも粗い尺度の最良の向きは反対になりやすく、
+        向きを1つしか出さないと、真の姿勢が候補に入らないまま似た別の場所が選ばれる
+        （`sim.slam_bench --locate`、toyota で 3.2m 外れ）。距離で間引くのは同じ向きの候補どうしだけ。
         """
         if self._xs.size == 0:
             return []
-        order = np.argsort(-self._best_score)
+        best_i = np.argmax(self._by_angle, axis=0)
+        far = (np.abs((self._angles[:, None] - self._angles[best_i][None, :] + math.pi)
+                      % (2.0 * math.pi) - math.pi) >= math.radians(90.0))
+        alt = np.where(far, self._by_angle, -1.0)
+        alt_i = np.argmax(alt, axis=0)
+        alt_s = alt[alt_i, np.arange(self._xs.size)]
+        pos = np.concatenate([np.arange(self._xs.size)] * 2)
+        yaw = np.concatenate([self._angles[best_i], self._angles[alt_i]])
+        score = np.concatenate([self._by_angle[best_i, np.arange(self._xs.size)], alt_s])
+        order = np.argsort(-score, kind="stable")
         picked: list[LocalizeResult] = []
         for i in order:
-            x, y = float(self._xs[i]), float(self._ys[i])
+            if score[i] <= 0.0 and picked:
+                break
+            x, y, yw = float(self._xs[pos[i]]), float(self._ys[pos[i]]), float(yaw[i])
             if any(math.hypot(x - p.x, y - p.y) < self._config.ambiguous_min_dist
+                   and abs(math.remainder(yw - p.yaw, 2.0 * math.pi)) < math.radians(60.0)
                    for p in picked):
                 continue
-            picked.append(LocalizeResult(x, y, float(self._best_yaw[i]),
-                                         float(self._best_score[i]), False))
+            picked.append(LocalizeResult(x, y, yw, float(score[i]), False))
             if len(picked) >= k:
                 break
         if len(picked) >= 2:

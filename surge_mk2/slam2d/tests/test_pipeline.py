@@ -124,6 +124,23 @@ class TestLoopClosureReducesDrift(unittest.TestCase):
         self.assertGreater(system.frontend.grid.seq, grid_before.seq)
         self.assertGreater(int(system.frontend.grid.wall_mask().sum()), 500)
 
+    def test_flush_steps_gives_the_same_map_and_does_not_touch_it_until_the_end(self):
+        """分けて進めても結果は一括の`flush()`と同じで、最後の`next()`まで地図は変わらない。"""
+        a, ha = _make_system()
+        b, hb = _make_system()
+        _drive(a, laps=1.6, gyro_bias_dps=1.0, twist_holder=ha)
+        _drive(b, laps=1.6, gyro_bias_dps=1.0, twist_holder=hb)
+        a.flush()
+        grid_before = b.frontend.grid
+        n = 0
+        for _ in b.flush_steps(chunk=4):
+            n += 1
+            self.assertIs(b.frontend.grid, grid_before)
+        self.assertGreater(n, 2)
+        self.assertIsNot(b.frontend.grid, grid_before)
+        self.assertTrue(np.array_equal(a.frontend.grid.hits, b.frontend.grid.hits))
+        self.assertAlmostEqual(a.frontend.pose.x, b.frontend.pose.x, places=9)
+
     def test_no_loops_no_optimization(self):
         """ループが見つからない短い走行では、最適化も焼き直しも起きない。"""
         system, holder = _make_system()

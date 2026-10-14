@@ -512,7 +512,7 @@ class Frontend:
         else:
             info = np.zeros((3, 3))
         small = truncate(pts, cfg.map_range)
-        self.grid.integrate(small, self.pose)
+        self.grid.integrate(small, self.pose, (cfg.mount_x, cfg.mount_y))
         self.local.add(self.pose, hx, hy)
         self.keyframes.append(Keyframe(self.pose, small, hx.astype(np.float32),
                                        hy.astype(np.float32), info, self._path, self._t_ref))
@@ -528,6 +528,17 @@ class Frontend:
         地図を**新しい版の格子に焼き直し**（古い版に上書きすると、同じコースを
         角度違いで重ね描きした形に崩れる）、局所地図を作り直し、今の姿勢を
         最後のキーフレームとの相対関係を保ったまま移す。
+        """
+        for _ in self.apply_correction_steps(poses, chunk=max(1, len(poses))):
+            pass
+
+    def apply_correction_steps(self, poses: list[Pose2D], chunk: int = 16):
+        """`apply_correction()`を`chunk`キーフレームずつに分けるジェネレータ。
+
+        キーフレーム1個の焼き直しは Pi 5 で約5ms（360個で1.8s）。1度にやると`plan()`が
+        その間止まるので、呼び出し側が`next()`ごとに他の仕事を挟めるようにする。
+        **最後の`next()`までこのオブジェクトの状態は変わらない**（新しい格子は別に作り、
+        最後にまとめて差し替える）。途中で`update()`を呼んではいけない。
         """
         if len(poses) != len(self.keyframes) or not poses:
             raise ValueError("poses must match keyframes")
@@ -545,9 +556,11 @@ class Frontend:
         new.height, new.width = g.hits.shape
         new.seq = g.seq + 1
         kfs = []
-        for p, kf in zip(poses, self.keyframes):
-            new.integrate(kf.points, p)
+        for n, (p, kf) in enumerate(zip(poses, self.keyframes), 1):
+            new.integrate(kf.points, p, (self.config.mount_x, self.config.mount_y))
             kfs.append(kf._replace(pose=p))
+            if n % chunk == 0 and n < len(poses):
+                yield n / len(poses)
         self.grid = new
         self.keyframes = kfs
         self.trajectory = [k.pose for k in kfs]

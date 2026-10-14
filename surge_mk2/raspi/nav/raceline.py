@@ -83,6 +83,10 @@ class RaceLine(NamedTuple):
     length: float                          #: 1周の長さ [m]（開いた経路なら始点→終点の長さ）
     #: False なら開いた経路（今の位置→ゴール、`nav/route.py`）。**添字は巡回しない**
     closed: bool = True
+    #: True なら、道が狭くて車体外形の壁との余裕（`margin`）を確保できない所が残っている
+    #: （`optimize` が余裕を満たす解を見つけられなかった）。線は返すが、呼び出し側は
+    #: 利用者に知らせるか速度を抑える
+    short: bool = False
 
     def __len__(self) -> int:
         return int(self.xy.shape[0])
@@ -948,4 +952,5 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     kap = curvature(xy, closed)
     v = speed_profile(xy, speed_kappa(xy, closed), **spd)
     seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
-    return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed)
+    short = bool(body is not None and float(body.clearance(xy).min()) < margin - 0.01)
+    return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed, short=short)

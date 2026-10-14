@@ -136,8 +136,13 @@ class OccGrid:
 
     # ── 更新 ──
 
-    def integrate(self, pts: ScanPoints, pose: Pose2D) -> None:
+    def integrate(self, pts: ScanPoints, pose: Pose2D,
+                  origin: tuple[float, float] = (0.0, 0.0)) -> None:
         """脱スキュー済みの点群を1周ぶん取り込む。`pose`は共通フレームでの世界姿勢。
+
+        `origin`は**レイの起点（LiDAR の位置）の車体座標**。素通りの数え（`_carve`）は
+        ここから終端へ引く。既定の車体原点だと、LiDAR が前（後）へずれている分だけ
+        レイの最初の部分が違う線になる。
 
         **凍結後は何もしない。** 凍結は「この地図で走る（使う）」という宣言なので、
         使用中に地図が動くと経路との対応が黙って崩れる。
@@ -148,15 +153,17 @@ class OccGrid:
         c, s = np.cos(yaw), np.sin(yaw)
         wx = x0 + pts.x * c - pts.y * s
         wy = y0 + pts.x * s + pts.y * c
+        rx = x0 + origin[0] * c - origin[1] * s
+        ry = y0 + origin[0] * s + origin[1] * c
 
         if self.grow:
-            self._ensure_inside(min(float(wx.min()), x0), min(float(wy.min()), y0),
-                                max(float(wx.max()), x0), max(float(wy.max()), y0))
+            self._ensure_inside(min(float(wx.min()), rx), min(float(wy.min()), ry),
+                                max(float(wx.max()), rx), max(float(wy.max()), ry))
         # 「地図が足りない」の指標は**レイの終端が格子の外に出た本数**。
         # レイ全体が外に出た本数だと、車が格子の中にいる限り一生増えない
         col, row = self.to_cell(wx, wy)
         self.out_of_bounds += int((~self.inside(col, row)).sum())
-        self._carve(x0, y0, wx, wy)
+        self._carve(rx, ry, wx, wy)
         self._mark(wx[pts.hit], wy[pts.hit])
         self.seq += 1
 
