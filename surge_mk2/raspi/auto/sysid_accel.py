@@ -85,6 +85,7 @@ import math
 from ..msgs.types import AutoState, Scan, VehicleState
 from ._sysid_common import (ABORT_BRAKE_TORQUE_NM, OdomRun, SensorGuard, TestGate, abort_state,
                             brake_decel_guess, settle_state, stop_distance)
+from ..core.vehicle import Vehicle
 from .base import Planner
 
 __all__ = ["SysIdAccel", "ACCEL_FRACTIONS", "BRAKE_FRACTIONS", "HOLD_SPEEDS_M_S", "N_STAGES"]
@@ -93,9 +94,11 @@ __all__ = ["SysIdAccel", "ACCEL_FRACTIONS", "BRAKE_FRACTIONS", "HOLD_SPEEDS_M_S"
 _PI_MAX_SPEED = 3.0
 #: 全開の段で `target_speed` を `v_max` からどれだけ上に置くか [m/s]（docstring参照）
 _ACCEL_OVERSHOOT = 1.0
-#: 停止距離の見積もりに使う全開加速中の加速度 [m/s²]（ファームの目標ランプの上限。測る対象
-#: そのものなので `vehicle.toml` に頼らない）
-_ACCEL_FOR_STOP_M_S2 = 3.0
+#: 停止距離の見積もりに使う全開加速中の加速度 [m/s²]。全開の段は `accel_limit=0` で走るので、
+#: Pi が送る目標速度のランプの上限（`[safety] cmd_accel_limit_m_s2`）がそのまま効く。
+#: 解析側（`tools/sysid/fit.cmd_accel_cap`）と同じ値を読む——上限を上げたのにここが 3.0 のままだと、
+#: 停止距離を短く見積もって直線をはみ出す
+_ACCEL_FOR_STOP_M_S2 = Vehicle.load().speed_ramp_max_m_s2
 #: 割り振る段の加速度（全開の段で測った最大に対する割合）。いちばん上でも限界の7割＝滑らない
 #: （実機で限界 2.8m/s² に対し 2.4m/s² の段は滑り、1.6m/s² の段は滑らなかった）
 ACCEL_FRACTIONS: tuple[float, ...] = (0.3, 0.5, 0.7)
@@ -120,8 +123,8 @@ _BRAKE_BACKOFF = 0.8
 #: 最大が読めなかったときの値 [m/s²]（全開が短すぎた・最大制動が走れなかった）
 _ACCEL_MAX_FALLBACK = 2.0
 _DECEL_MAX_FALLBACK = 2.4
-#: 最大の加速度として扱う範囲 [m/s²]（上はファームの目標ランプ）
-_ACCEL_MAX_RANGE = (0.5, 3.0)
+#: 最大の加速度として扱う範囲 [m/s²]（上は目標速度のランプの上限）
+_ACCEL_MAX_RANGE = (0.5, _ACCEL_FOR_STOP_M_S2)
 #: 読むサンプルの条件: 加速は車速がこれ以上。制動は、指令してから効き始めるまでの時間を捨て、
 #: 最大の減速度は MD の境界層（下）より上の車速だけ、傾きは境界層を式に入れて低い車速まで使う
 #: （弱い段は 1.0m/s から踏むので、0.6m/s より上だけでは 0.1〜0.2s しか無い）
