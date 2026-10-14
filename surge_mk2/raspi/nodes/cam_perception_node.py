@@ -215,7 +215,7 @@ class CamPerceptionNode:
         self._loaded_model_name = loaded_model_name
         self.vehicle = vehicle or Vehicle.load()
         v = self.vehicle
-        #: 地面からの高さは base_link の z をそのまま使う近似（`ipm.py` docstring参照）
+        #: `cam_front_z` は路面からレンズ中心までの高さ（`ipm.py` docstring参照）
         self.base_ext = CameraExtrinsics(x=v.cam_front_x, y=v.cam_front_y,
                                          height=v.cam_front_z, pitch=v.cam_front_pitch,
                                          yaw=v.cam_front_yaw)
@@ -386,13 +386,23 @@ class CamPerceptionNode:
         """
         if self._last_grid is None or self._last_occ is None or self._last_intr is None:
             return CamPath(seq=seq, t_capture=t_capture_ns)
+        grid = self._last_grid
         seen_grid = project_seen_to_grid(self._last_drivable.shape, self._last_intr,
-                                         self._last_ext, self._last_grid, stride=2)
+                                         self._last_ext, grid, stride=2)
         blocked = (~seen_grid) | self._last_occ
-        xs, ys, widths = extract_centerline(self._last_grid, blocked,
+        xs, ys, widths = extract_centerline(grid, blocked,
                                             x_min=self.path_x_min, x_max=self.max_range,
                                             x_step=self.path_x_step)
-        return CamPath(seen=True, xs=xs, ys=ys, widths=widths,
+        # **画像の下端より手前（車体の真下付近）の点は捨てる。** そこは見えていないので
+        # 幅が 0 と測れ、`cam_centerline` が「直前の通行幅が足りない」で止まり続ける
+        # （下端が写す地面は取付高さ・ピッチ・`bottom_crop` で決まり、`path_x_min` とは無関係）。
+        # 見えている最初の点から先だけを渡す
+        col, row = grid.to_cell(np.asarray(xs), np.zeros(len(xs)))
+        inside = grid.inside(col, row)
+        visible = np.zeros(len(xs), dtype=bool)
+        visible[inside] = seen_grid[row[inside], col[inside]]
+        first = int(np.argmax(visible)) if visible.any() else len(xs)
+        return CamPath(seen=True, xs=xs[first:], ys=ys[first:], widths=widths[first:],
                        seq=seq, t_capture=t_capture_ns)
 
     def encode_mask_jpeg(self) -> bytes | None:

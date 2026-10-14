@@ -41,6 +41,17 @@ def _vehicle_straight() -> Vehicle:
     return Vehicle()
 
 
+def _new_node(**kw) -> CamTrackNode:
+    """起動して `track/roi` を `select_seq=0` で一度受けた（同期済みの）ノード。
+
+    **起動後に最初に受けた seq は同期だけ**（`CamTrackNode._sync_roi_seq()`）なので、
+    「起動直後から telemetry が seq=0 を流している」普段の状態を作ってから試す。
+    """
+    node = CamTrackNode(**kw)
+    node.process_cycle(None, roi=TargetRoiCtrl(), scan=None, now_ns=0)
+    return node
+
+
 class _FakeTracker:
     """`box_sequence`を`update()`のたびに順番に返す偽トラッカー。
 
@@ -81,11 +92,68 @@ class _FakeFactory:
         return _FakeTracker(self._box_sequence)
 
 
+class TestRoiSeqSync(unittest.TestCase):
+    """`select_seq`/`clear_seq` は「最初は同期だけ・逆行は同期だけ・増加で発火」。"""
+
+    def _roi(self, select_seq, clear_seq=0, box=(0.3, 0.3, 0.5, 0.5)):
+        x0, y0, x1, y1 = box
+        return TargetRoiCtrl(x0=x0, y0=y0, x1=x1, y1=y1,
+                             select_seq=select_seq, clear_seq=clear_seq)
+
+    def test_restart_does_not_reselect_remembered_roi(self):
+        """再起動相当: 新しいノードが、telemetry が覚えている選択（seq=5）を受けても追わない。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(),
+                            factory=_FakeFactory([(10.0, 10.0, 20.0, 20.0)]))
+        frame = _blank_frame(64, 48)
+        for t in range(3):
+            st = node.process_cycle(frame, roi=self._roi(5), scan=None, now_ns=t)
+            self.assertFalse(st.tracking)
+        # その後に選び直されれば（seq が増えれば）追う
+        st = node.process_cycle(frame, roi=self._roi(6), scan=None, now_ns=10)
+        self.assertTrue(st.tracking)
+
+    def test_seq_going_backwards_only_resyncs(self):
+        """telemetry の再起動（seq が 0 から数え直し、枠も既定の 0 面積）では選ばず、
+        その後の新しい選択（増加）は効く。"""
+        node = _new_node(vehicle=_vehicle_straight(),
+                         factory=_FakeFactory([(10.0, 10.0, 20.0, 20.0)]))
+        frame = _blank_frame(64, 48)
+        self.assertTrue(node.process_cycle(frame, roi=self._roi(5), scan=None,
+                                           now_ns=1).tracking)
+        st = node.process_cycle(frame, roi=self._roi(0, box=(0, 0, 0, 0)), scan=None, now_ns=2)
+        self.assertTrue(st.tracking, "逆行で選択も解除も起きてはいけない")
+        self.assertEqual(node._last_select_seq, 0)
+        node._enter_idle()
+        st = node.process_cycle(frame, roi=self._roi(1), scan=None, now_ns=3)
+        self.assertTrue(st.tracking, "数え直した後の新しい選択が効いていない")
+
+    def test_clear_seq_going_backwards_does_not_clear(self):
+        node = _new_node(vehicle=_vehicle_straight(),
+                         factory=_FakeFactory([(10.0, 10.0, 20.0, 20.0)]))
+        frame = _blank_frame(64, 48)
+        node.process_cycle(frame, roi=self._roi(1, clear_seq=3), scan=None, now_ns=1)
+        st = node.process_cycle(frame, roi=self._roi(1, clear_seq=0), scan=None, now_ns=2)
+        self.assertTrue(st.tracking)
+        st = node.process_cycle(frame, roi=self._roi(1, clear_seq=1), scan=None, now_ns=3)
+        self.assertFalse(st.tracking, "逆行の後の clear が効いていない")
+
+    def test_run_does_not_read_frame_for_remembered_roi(self):
+        """`run()` も最初の周は同期だけで、古い選択のためにフレームを読まない。"""
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        roi = self._roi(5)
+        ref = ImageRef(shm_name="does-not-matter", slot=0, ring_seq=0, frame_id=0,
+                       width=1, height=1, fmt="RGB888", stride=1, nbytes=1, cam="front")
+        sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+        with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
+            node.run(sub=sub, pub=_FakePub(), duration_s=0.05)
+        mock_read.assert_not_called()
+
+
 class TestBearingFromPixel(unittest.TestCase):
     """画素→方位角変換を、既知の内部パラメータ（`yaw=0`の既定Vehicle）で検証する。"""
 
     def test_center_pixel_is_zero_bearing(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.45, y0=0.4, x1=0.55, y1=0.6, select_seq=1)
         t = node.process_cycle(frame, roi=roi, scan=None, now_ns=0)
@@ -94,14 +162,14 @@ class TestBearingFromPixel(unittest.TestCase):
 
     def test_left_of_center_is_positive_bearing(self):
         """画面左（u < cx）＝反時計回り正（左）の方位になる。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.0, y0=0.4, x1=0.2, y1=0.6, select_seq=1)
         t = node.process_cycle(frame, roi=roi, scan=None, now_ns=0)
         self.assertGreater(t.bearing, 0.0)
 
     def test_right_of_center_is_negative_bearing(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.8, y0=0.4, x1=1.0, y1=0.6, select_seq=1)
         t = node.process_cycle(frame, roi=roi, scan=None, now_ns=0)
@@ -110,12 +178,12 @@ class TestBearingFromPixel(unittest.TestCase):
 
 class TestStateTransitions(unittest.TestCase):
     def test_idle_until_selected(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         t = node.process_cycle(_blank_frame(640, 480), roi=None, scan=None, now_ns=0)
         self.assertFalse(t.tracking)
 
     def test_select_then_clear_returns_to_idle(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(100, 100, 50, 50)]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
@@ -127,7 +195,7 @@ class TestStateTransitions(unittest.TestCase):
         self.assertFalse(t.tracking)
 
     def test_too_small_roi_is_rejected_and_seq_not_consumed(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(100, 100, 50, 50)]))
         frame = _blank_frame(640, 480)
         # 640x480に対し、0.1%四方は数px四方 → 最小ROIサイズ(4px)を割る
@@ -137,7 +205,7 @@ class TestStateTransitions(unittest.TestCase):
         self.assertEqual(node._last_select_seq, 0)          # seqを消費していない
 
     def test_model_unavailable_is_ignored_and_seq_not_consumed(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([], available=False))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
@@ -148,7 +216,7 @@ class TestStateTransitions(unittest.TestCase):
     def test_single_update_failure_is_absorbed_as_flicker(self):
         """★ちらつき吸収（Phase 2）。1回だけの`update()`失敗では`lost`にしない
         （`_LOST_DEBOUNCE_FRAMES`回連続するまで様子を見る）。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([None, (100, 100, 50, 50)]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
@@ -161,7 +229,7 @@ class TestStateTransitions(unittest.TestCase):
         self.assertFalse(t2.lost)
 
     def test_update_failure_marks_lost_after_debounce_and_holds_bearing(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([None]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([None]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
         t1 = node.process_cycle(frame, roi=roi, scan=None, now_ns=0)
@@ -188,7 +256,7 @@ class TestStateTransitions(unittest.TestCase):
     def test_no_frame_available_is_treated_as_lost_after_debounce(self):
         """共有メモリがまだ読めない周期（`frame=None`）も見失い扱いにする
         （ちらつき吸収のデバウンスは掛かる）。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(100, 100, 50, 50)]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
@@ -203,7 +271,7 @@ class TestStateTransitions(unittest.TestCase):
         """★見失いを諦める。NanoTrackは狭い探索範囲しか見ない「追跡」であって
         「検出」ではないため、長時間見失った後は`IDLE`へ戻し選び直しを要求する
         （別の物体を誤って掴み直すリスクを避ける）。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([None]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([None]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
         node.process_cycle(frame, roi=roi, scan=None, now_ns=0)             # 選択
@@ -227,7 +295,7 @@ class TestStateTransitions(unittest.TestCase):
     def test_reacquires_if_target_returns_before_give_up(self):
         """諦める前に対象が戻ってくれば、追跡は普通に再開する
         （`_LOST_DEBOUNCE_FRAMES`と同じ`_lost_since_ns`のクリアで足りる）。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([None, None, None, (100, 100, 50, 50)]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.3, y0=0.3, x1=0.5, y1=0.5, select_seq=1)
@@ -254,7 +322,7 @@ class TestLidarFusion(unittest.TestCase):
     def _node_and_bearing_deg(self):
         # フェイクトラッカーのbboxもROI選択も中心(cx=320,cy=240)に揃えてあるので、
         # 選択直後・追跡中のどちらでもbearing=0（deg=0）になる
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(300, 210, 40, 60)]))
         frame = _blank_frame(640, 480)
         roi = TargetRoiCtrl(x0=0.45, y0=0.4, x1=0.55, y1=0.6, select_seq=1)
@@ -333,7 +401,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
                     width=1, height=1, fmt="RGB888", stride=1, nbytes=1, cam="front")
 
     def test_no_roi_at_all_never_reads_frame(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF})
         pub = _FakePub()
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
@@ -343,7 +411,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
     def test_roi_without_new_select_seq_never_reads_frame(self):
         """ROIメッセージ自体は流れてきていても、`select_seq`が既に処理済み
         （進んでいない）間は読まない。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
         sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
         pub = _FakePub()
@@ -353,7 +421,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
 
     def test_new_select_seq_still_reads_frame(self):
         """新規選択（`select_seq`が進む）が来た周期は読む（回帰防止）。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         ring = FrameRing.create("surge_test_track_gating", 32, 24, "RGB888", n_slots=2)
         try:
             data = np.zeros((24, 32, 3), dtype=np.uint8)
@@ -379,7 +447,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         `need_frame`が永久に`True`になり、IDLE中CPU消費バグ
         （2026-09-04修正）が別経路で再発する（回帰防止）。
         """
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([], available=False))
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
         sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
@@ -403,7 +471,7 @@ class TestRunTracksEachFrameOnce(unittest.TestCase):
         return ring, ref
 
     def test_unchanged_frame_is_tracked_once(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(10.0, 8.0, 6.0, 6.0)]))
         ring, ref = self._ring_and_ref("surge_test_track_once")
         try:
@@ -420,7 +488,7 @@ class TestRunTracksEachFrameOnce(unittest.TestCase):
 
     def test_stalled_camera_still_advances_lost_timer(self):
         """フレームが来なくなっても、停滞判定ごとにフレーム無しで回して見失いへ進む。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(10.0, 8.0, 6.0, 6.0)]))
         ring, ref = self._ring_and_ref("surge_test_track_stall")
         try:
@@ -446,7 +514,7 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
                     width=1, height=1, fmt="RGB888", stride=1, nbytes=1, cam="front")
 
     def test_disarmed_never_reads_frame_while_already_tracking(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         node._state = "TRACKING"                # 既に追跡中だったと仮定
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
         sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
@@ -458,7 +526,7 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
 
     def test_disarmed_ignores_new_select_seq(self):
         """DISARM中に新規選択（`select_seq`が進む）が来ても読まない。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
         sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
                         TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
@@ -469,7 +537,7 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
 
     def test_armed_resumes_reading_after_disarm(self):
         """回帰防止: armed=Trueなら追跡中の状態から普通に読み直す。"""
-        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         node._state = "TRACKING"
         ring = FrameRing.create("surge_test_track_armed_resume", 32, 24, "RGB888", n_slots=2)
         try:
@@ -499,7 +567,7 @@ class TestRunSurvivesProcessCycleException(unittest.TestCase):
     """
 
     def test_exception_does_not_propagate_and_falls_back_to_not_tracking(self):
-        node = CamTrackNode(vehicle=_vehicle_straight(),
+        node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([(100, 100, 50, 50)]))
 
         def _raise(*a, **kw):

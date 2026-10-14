@@ -19,12 +19,14 @@ import numpy as np
 
 from ..msgs import ImageRef
 from .cleanup import quiet_close
+from .jpeg import STALE_GAP
 
 __all__ = ["FrameReader"]
 
 #: `ImageRef.ring_seq` とこちらが掴んでいる `write_seq` がこれ以上開いていたら、
-#: 掴んでいるのは作り直される前の共有メモリだと判断して attach し直す
-_STALE_GAP = 1000
+#: 掴んでいるのは作り直される前の共有メモリだと判断して attach し直す。
+#: `core/jpeg.py` と同じ値（片方だけ鈍いと、そちらだけ復帰が遅れる）
+_STALE_GAP = STALE_GAP
 
 #: `t_capture`（センサ取得時刻、CLOCK_MONOTONIC）がこれより古いフレームは
 #: 「新鮮」として扱わない。**camera_node が死ぬ／`capture_request()` がハング
@@ -92,7 +94,13 @@ class FrameReader:
             if time.monotonic_ns() - t_capture > _MAX_FRAME_AGE_NS:
                 # 撮像から時間が経ちすぎている＝上流（`camera_node`）が死んでいる
                 # か固まっている。共有メモリ自体は読めてしまうので、ここで
-                # 明示的に弾かないと「凍った画像」がいつまでも新鮮に見える
+                # 明示的に弾かないと「凍った画像」がいつまでも新鮮に見える。
+                # **掴んでいるリングも手放す。** camera_node が再起動して共有メモリを
+                # 作り直していた場合、`write_seq` の乖離（`_STALE_GAP`）が開くまで
+                # 古い方を掴み続けてしまう（旧リングが短命だと数十秒〜百秒）。
+                # 次の周で attach し直せば、作り直されていればすぐ新しい方が読める
+                del arr, frame_ref
+                self.close()
                 return None
             return arr, t_capture
         except Exception:

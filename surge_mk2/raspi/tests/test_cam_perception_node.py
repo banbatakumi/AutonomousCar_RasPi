@@ -199,6 +199,65 @@ class TestCamPerceptionNodeProcessFrame(unittest.TestCase):
         self.assertEqual(st.seq, 3)
 
 
+class _FixedMaskModel:
+    """`infer()` が決まったマスクを返すだけの身代わり（幾何だけを試す）。"""
+
+    def __init__(self, mask: np.ndarray) -> None:
+        self.mask = mask
+
+    def infer(self, rgb: np.ndarray) -> np.ndarray:
+        return self.mask
+
+
+class TestRealGeometry(unittest.TestCase):
+    """`config/vehicle.toml` の実際のカメラ（低い取付・魚眼・下端クロップ）で、
+    `scan/cam` と `path/cam` が使える値になること。"""
+
+    W = H = 224
+
+    def _node(self, mask):
+        return CamPerceptionNode(model=_FixedMaskModel(mask), vehicle=Vehicle.load())
+
+    def test_wall_distance_is_not_pushed_farther(self):
+        """壁の根元より奥を「走行不可」にしたマスクで、正面の距離が実際より遠くならない
+        （縦を間引いたり画素の中心で投影したりすると 2m の壁が 2.3m 以上に出ていた）。"""
+        from raspi.nav.ipm import ground_to_pixel
+        frame = np.zeros((360, 640, 3), np.uint8)
+        node = self._node(np.ones((self.H, self.W), bool))
+        node.process_frame(frame)
+        for wall in (1.0, 1.5, 2.0):
+            u, v = ground_to_pixel(wall, 0.0, node._last_intr, node._last_ext)
+            mask = np.ones((self.H, self.W), bool)
+            mask[:int(np.ceil(v)), :] = False       # 画素の中心が根元より上の行は全部壁
+            node.model = _FixedMaskModel(mask)
+            st = node.process_frame(frame)
+            front = st.dist[0]
+            self.assertLessEqual(front, wall + 0.08, f"{wall}m の壁が {front:.2f}m に出た")
+            self.assertGreater(front, wall - 0.3)
+
+    def test_centerline_is_usable_on_open_ground(self):
+        """全面が走行可能なら、見えている最初の点から 2.5m 先まで十分な幅がある
+        （観測範囲を点の逆投影で作っていたときは 0.7m より先が全部「未観測＝壁」だった）。"""
+        node = self._node(np.ones((self.H, self.W), bool))
+        node.process_frame(np.zeros((360, 640, 3), np.uint8))
+        path = node.build_path()
+        self.assertTrue(path.seen)
+        self.assertLessEqual(path.xs[0], 0.45, "見えている最初の点が遠すぎる")
+        for x, w in zip(path.xs, path.widths):
+            if x <= 2.5:
+                self.assertGreater(w, 1.0, f"{x:.1f}m の幅が {w:.2f}m しかない")
+
+    def test_centerline_starts_at_the_first_visible_point(self):
+        """画像の下端より手前（見えていない）の点は渡さない——そこを幅 0 として
+        渡すと `cam_centerline` が「直前の通行幅が足りない」で止まり続ける。"""
+        node = self._node(np.ones((self.H, self.W), bool))
+        node.path_x_min = 0.1
+        node.process_frame(np.zeros((360, 640, 3), np.uint8))
+        path = node.build_path()
+        self.assertGreater(path.xs[0], 0.1)
+        self.assertGreater(path.widths[0], 0.5)
+
+
 class TestModelSelection(unittest.TestCase):
     """`cam/model` トピック経由でのモデル切替。
 

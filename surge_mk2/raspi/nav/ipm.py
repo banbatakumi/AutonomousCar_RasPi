@@ -7,14 +7,12 @@
 契約そのものであるのと同じ理由——片方だけ直すと、もう片方（GUI の進路
 ガイド）が古いモデルのまま表示され続ける。
 
-## 高さは base_link の z をそのまま「地面からの高さ」とみなす近似
+## 高さは路面からレンズ中心まで
 
-`config/vehicle.toml` の `cam_front.z` は base_link 基準の取付高さであって
-「地面からの高さ」の実測値ではない（`measured = false`）。base_link は
-後輪車軸中心なので、真の地面からの高さは本来 `z + wheel_radius` 程度になる
-はずだが、その差は数cmで、遠方ほど誤差が拡大する IPM の性質を踏まえても
-初期スキャフォールドとしては許容範囲とする。実測較正は保留事項
-（`docs/plans` のカメラピッチ較正の項）。
+`config/vehicle.toml` のレンズのプロファイルの `z`（`[sensors.cam_*.lenses.<レンズ>]`）は
+**路面からレンズ中心までの高さ**（実測）で、そのまま `CameraExtrinsics.height` に入れる。
+x・y は base_link（後輪車軸中心）基準。カメラが低い（約 9cm）ので、地平線付近では
+1 画素・1° の差が大きな距離の差になる（2m 先で 1 画素 ≒ 25cm）。
 
 ## レンズモデル（2026-10 魚眼化）
 
@@ -33,6 +31,7 @@ IMX219 160° 広角レンズに替えたので、`vehicle.toml` に校正値
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import NamedTuple
 
 import numpy as np
@@ -75,7 +74,7 @@ class CameraExtrinsics(NamedTuple):
 
     x: float        #: [m]
     y: float        #: [m]
-    height: float   #: 地面からの高さ [m]（★上記の近似）
+    height: float   #: 路面からレンズ中心までの高さ [m]
     pitch: float    #: [rad] 下向きが正
     yaw: float      #: [rad]
 
@@ -115,14 +114,10 @@ def pixel_ray(u, v, intr: CameraIntrinsics):
     return unproject_pixels(u, v, intr.f, intr.f_y, intr.cx, intr.principal_y, intr.k)
 
 
-def ground_to_pixel(x: float, y: float, intr: CameraIntrinsics,
-                     ext: CameraExtrinsics) -> tuple[float, float] | None:
-    """base_link 座標の地面点 `(x, y)` → 画素 `(u, v)`。
-
-    `CameraView.tsx` の `project()` と同じ式（順方向）。`pixel_to_ground()` の
-    逆変換なので、キャリブレーション確認・テストの往復に使う。
-    """
-    dx, dy = x - ext.x, y - ext.y
+def _ground_to_pixel_vec(x, y, intr: CameraIntrinsics, ext: CameraExtrinsics):
+    """`ground_to_pixel()` のベクトル化版。`(u, v, valid)`（valid＝カメラの前方 `_MIN_ZC` 以上）。"""
+    dx = np.asarray(x, dtype=np.float64) - ext.x
+    dy = np.asarray(y, dtype=np.float64) - ext.y
     cy, sy = math.cos(ext.yaw), math.sin(ext.yaw)
     # base_link 座標 → カメラのヨーだけ戻したローカル座標 (depth, lateral)
     depth = dx * cy + dy * sy
@@ -130,11 +125,23 @@ def ground_to_pixel(x: float, y: float, intr: CameraIntrinsics,
 
     cp, sp = math.cos(ext.pitch), math.sin(ext.pitch)
     zc = depth * cp + ext.height * sp          # 光軸方向
-    if zc < _MIN_ZC:
-        return None
+    valid = zc >= _MIN_ZC
     yc = -depth * sp + ext.height * cp          # 下向きが正
-    u, v = project_rays(-lateral, yc, zc, intr.f, intr.f_y, intr.cx,
-                        intr.principal_y, intr.k)
+    u, v = project_rays(-lateral, yc, np.where(valid, zc, 1.0), intr.f, intr.f_y,
+                        intr.cx, intr.principal_y, intr.k)
+    return u, v, valid
+
+
+def ground_to_pixel(x: float, y: float, intr: CameraIntrinsics,
+                     ext: CameraExtrinsics) -> tuple[float, float] | None:
+    """base_link 座標の地面点 `(x, y)` → 画素 `(u, v)`。
+
+    `CameraView.tsx` の `project()` と同じ式（順方向）。`pixel_to_ground()` の
+    逆変換なので、キャリブレーション確認・テストの往復に使う。
+    """
+    u, v, valid = _ground_to_pixel_vec(x, y, intr, ext)
+    if not bool(valid):
+        return None
     return float(u), float(v)
 
 
@@ -157,8 +164,30 @@ def _pixel_to_ground_vec(u: np.ndarray, v: np.ndarray, intr: CameraIntrinsics,
                           ext: CameraExtrinsics
                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """`pixel_to_ground()` のベクトル化版。`(x, y, valid)` を返す。"""
-    cp, sp = math.cos(ext.pitch), math.sin(ext.pitch)
     rx, ry, rz = pixel_ray(u.astype(np.float64), v.astype(np.float64), intr)
+    return _rays_to_ground(rx, ry, rz, ext)
+
+
+@lru_cache(maxsize=8)
+def _image_rays(height: int, width: int, col_stride: int, v_offset: float,
+                intr: CameraIntrinsics) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """全行 × `col_stride` 列おきの画素の光線 `(rx, ry, rz)`（形 `(height, ⌈width/col_stride⌉)`）。
+
+    光線は内部パラメータだけで決まり、毎フレーム変わるのは取付ピッチ（IMU 補正）だけ
+    なので、魚眼の逆写像（Newton 法）は解像度ごとに1回で済ませる。
+    `v_offset` は画素の中心からのずれ（0.5 ＝ 画素の下端）。
+    """
+    vs, us = np.mgrid[0:height, 0:width:col_stride].astype(np.float64)
+    rays = pixel_ray(us, vs + v_offset, intr)
+    for r in rays:
+        r.setflags(write=False)
+    return rays
+
+
+def _rays_to_ground(rx: np.ndarray, ry: np.ndarray, rz: np.ndarray,
+                    ext: CameraExtrinsics) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """カメラ座標の光線 → base_link 座標の地面点 `(x, y, valid)`。"""
+    cp, sp = math.cos(ext.pitch), math.sin(ext.pitch)
 
     # カメラ座標の光線 → ヨーだけ戻したローカル座標（奥行き・下向き・左）
     down = rz * sp + ry * cp
@@ -190,18 +219,18 @@ def project_mask_to_grid(drivable_mask: np.ndarray, intr: CameraIntrinsics,
     `max_range` が受け止める。`scan_window()` の「欠測は壁」とは違う扱いに
     なる点に注意: ここは"見えている範囲の外"であって"欠測"ではない）。
 
-    `stride` で画素を間引く。IPM は近距離ほど画素が密になるので全画素を
-    使う必要はなく、間引かないと大きな画像で遅くなる。
+    **縦は間引かず、各画素の下端（`v + 0.5`）を投影する。** カメラが低いので地平線付近の
+    1 行は遠方の数十 cm に当たる。行を間引いたり画素の中心を使ったりすると、壁の根元が
+    実際より遠くに出る（＝危険側）。下端を使えば、その画素が触れている地面のうち
+    一番近い所に壁を置くことになる。`stride` は列（横方向）だけを間引く。
     """
     occ = np.zeros((grid.height, grid.width), dtype=bool)
-    not_drivable = ~drivable_mask[::stride, ::stride]
-    vs, us = np.nonzero(not_drivable)
-    if vs.size == 0:
+    h, w = drivable_mask.shape
+    not_drivable = ~drivable_mask[:, ::stride]
+    if not not_drivable.any():
         return occ
-    vs = (vs * stride).astype(np.float64)
-    us = (us * stride).astype(np.float64)
-
-    x, y, valid = _pixel_to_ground_vec(us, vs, intr, ext)
+    rx, ry, rz = _image_rays(h, w, stride, 0.5, intr)
+    x, y, valid = _rays_to_ground(rx[not_drivable], ry[not_drivable], rz[not_drivable], ext)
     x, y = x[valid], y[valid]
     if x.size == 0:
         return occ
@@ -228,23 +257,23 @@ def project_seen_to_grid(mask_shape: tuple[int, int], intr: CameraIntrinsics,
     `blocked = (~seen) | occ` を作り、**未観測は壁と同じ扱いにする**
     （`scan_window()` の「欠測は壁」と同じ安全側の判断）。
 
-    `mask_shape` は `(height, width)`。中身の画素値は使わない——全画素を
-    対象に「地面座標へ投影できたか」だけを見る。`project_mask_to_grid()` と
-    同じ `stride` を渡せば、同じ画素位置の組を2回サンプルすることになり
-    座標系が完全に一致する。
+    **格子のセルの中心を画像へ順投影し、画像の内側に落ちたセルを観測済みにする。**
+    画素を地面へ逆投影して点を打つだけだと、遠方（地平線付近）では 1 行が数十 cm に
+    広がるので観測済みのセルが飛び飛びの円弧になり、間が全部「未観測＝壁」になる
+    （低いカメラでは 1m 先から先がほぼ塞がる）。加えて `project_mask_to_grid()` と同じ
+    画素の点（列は `stride` おき）も観測済みにするので、占有セルは必ず観測済みに含まれる。
+
+    `mask_shape` は `(height, width)`。中身の画素値は使わない。
     """
     h, w = mask_shape
-    seen = np.zeros((grid.height, grid.width), dtype=bool)
-    vs, us = np.mgrid[0:h:stride, 0:w:stride]
-    us = us.astype(np.float64).reshape(-1)
-    vs = vs.astype(np.float64).reshape(-1)
+    gc, gr = np.meshgrid(np.arange(grid.width), np.arange(grid.height))
+    gx, gy = grid.to_world(gc, gr)
+    u, v, valid = _ground_to_pixel_vec(gx, gy, intr, ext)
+    seen = valid & (u >= 0.0) & (u < w) & (v >= 0.0) & (v < h)
 
-    x, y, valid = _pixel_to_ground_vec(us, vs, intr, ext)
-    x, y = x[valid], y[valid]
-    if x.size == 0:
-        return seen
-
-    col, row = grid.to_cell(x, y)
+    rx, ry, rz = _image_rays(h, w, stride, 0.5, intr)
+    x, y, ok = _rays_to_ground(rx, ry, rz, ext)
+    col, row = grid.to_cell(x[ok], y[ok])
     inside = grid.inside(col, row)
     seen[row[inside], col[inside]] = True
     return seen

@@ -217,6 +217,11 @@ class CamTrackNode:
         self._state = "IDLE"
         self._last_select_seq = 0
         self._last_clear_seq = 0
+        #: `track/roi` の seq を一度でも受けたか。**起動後に最初に受けた seq は同期するだけで
+        #: 選択しない**——telemetry_node は選択を覚えたまま再送し続けるので、このノードが
+        #: 再起動した直後に古い矩形を「新しい選択」と読むと、その時たまたま矩形に写っている
+        #: 別の物を追い始めてしまう（`_sync_roi_seq()`）
+        self._roi_synced = False
         self._tracker: TargetTracker | None = None
 
         #: `TRACKING`中に保持する直近の値（`lost=True`の間もこれを返し続ける）
@@ -253,6 +258,32 @@ class CamTrackNode:
         self._last_distance_ns = None
         self._pending_distance = None
         self._pending_count = 0
+
+    def _sync_roi_seq(self, roi: TargetRoiCtrl | None) -> None:
+        """`select_seq`/`clear_seq` を「起動後の最初」と「逆行」では同期だけする。
+
+        - 最初に受けた周: 今の値を覚えるだけ（再起動で古い選択を拾い直さない）
+        - 値が小さくなった（telemetry_node の再起動で 0 から数え直した）: 覚え直すだけ
+        - 値が増えた: 呼び出し側（`_is_new_select()`・clear の判定）が発火させる
+
+        planning_node の `AutoCtrl` の seq と同じ約束。
+        """
+        if roi is None:
+            return
+        if not self._roi_synced:
+            self._last_select_seq = roi.select_seq
+            self._last_clear_seq = roi.clear_seq
+            self._roi_synced = True
+            return
+        if roi.select_seq < self._last_select_seq:
+            self._last_select_seq = roi.select_seq
+        if roi.clear_seq < self._last_clear_seq:
+            self._last_clear_seq = roi.clear_seq
+
+    def _is_new_select(self, roi: TargetRoiCtrl | None) -> bool:
+        """`roi` が未処理の新しい選択か（同期済みで、`select_seq` が増えた）。"""
+        return (roi is not None and self._roi_synced
+                and roi.select_seq > self._last_select_seq)
 
     def _try_select(self, frame: np.ndarray, roi: TargetRoiCtrl) -> bool:
         """`roi`で指定された矩形からNanoTrackを初期化する。
@@ -409,13 +440,13 @@ class CamTrackNode:
 
     def process_cycle(self, frame: np.ndarray | None, *, roi: TargetRoiCtrl | None,
                       scan: Scan | None, now_ns: int) -> TargetTrack:
+        self._sync_roi_seq(roi)
         if roi is not None and roi.clear_seq > self._last_clear_seq:
             self._last_clear_seq = roi.clear_seq
             self._enter_idle()
 
         just_selected = False
-        if (roi is not None and roi.select_seq > self._last_select_seq
-                and frame is not None):
+        if self._is_new_select(roi) and frame is not None:
             if self._try_select(frame, roi):
                 self._last_select_seq = roi.select_seq
                 just_selected = True
@@ -482,6 +513,7 @@ class CamTrackNode:
         self._enter_idle()
         self._last_select_seq = 0
         self._last_clear_seq = 0
+        self._roi_synced = False
 
     # ── ループ（実バス配線） ──
 
@@ -526,15 +558,17 @@ class CamTrackNode:
                 #: `select_seq`を消費せずに`False`を返し続けるので、これを
                 #: 見ずに読み続けると`_state=="IDLE"`のまま`need_frame`が
                 #: 永久に`True`になり、上と同じCPU消費バグが別経路で再発する
+                #: **起動後に最初に受けた seq は同期だけ**（`_sync_roi_seq()`）。ここで先に
+                #: 同期しておかないと、最初の周に古い選択のためにフレームを読んでしまう
+                self._sync_roi_seq(roi)
                 need_frame = vehicle_armed(vs) and (
                     self._state != "IDLE"
-                    or (self._factory.available and roi is not None
-                        and roi.select_seq > self._last_select_seq))
+                    or (self._factory.available and self._is_new_select(roi)))
                 #: **同じフレームを2度追跡しない**。このループは
                 #: vehicle_state（100Hz）の到着でも起きるので、同じフレームを読み直すと
                 #: NanoTrack が回り続ける（実測で約85回/s。新しいフレームだけにすると 30Hz 追跡で制御系電流 −138mA）
                 now = time.monotonic_ns()
-                new_select = roi is not None and roi.select_seq > self._last_select_seq
+                new_select = self._is_new_select(roi)
                 if need_frame:
                     ref: ImageRef | None = sub.latest.get(TOPIC_IMAGE_FRONT)
                     # 間引きはフレームの撮像時刻で判定する（処理した時刻だと起床の揺れで

@@ -187,7 +187,7 @@ class LinePerceptionNode:
                 far_band: tuple[float, float] | None = None) -> None:
         self.vehicle = vehicle or Vehicle.load()
         v = self.vehicle
-        #: 地面からの高さは base_link の z をそのまま使う近似（`ipm.py` docstring参照）
+        #: `cam_front_z` は路面からレンズ中心までの高さ（`ipm.py` docstring参照）
         self.base_ext = CameraExtrinsics(x=v.cam_front_x, y=v.cam_front_y,
                                          height=v.cam_front_z, pitch=v.cam_front_pitch,
                                          yaw=v.cam_front_yaw)
