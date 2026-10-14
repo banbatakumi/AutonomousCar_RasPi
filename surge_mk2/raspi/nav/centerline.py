@@ -98,17 +98,29 @@ class Centerline(NamedTuple):
         return int(self.xy.shape[0])
 
 
-def close_gap(xy: np.ndarray) -> np.ndarray:
+#: 始点と終点のずれの上限 [m]。これを超えるずれは「まだ1周していない」とみなして閉じない。
+#: 周回の検出（`slam2d_raceline.LAP_NEAR_M` = 0.8m）で戻ったと見なした位置のずれに余裕を
+#: 足した値。ずれを線形に配ってよいのはせいぜいこの程度までで、数 m を配ると壁を貫く
+MAX_CLOSE_GAP_M = 1.0
+
+
+def close_gap(xy: np.ndarray, max_gap: float = MAX_CLOSE_GAP_M) -> np.ndarray:
     """始点と終点のずれを**軌跡全体へ線形に配分して**閉じる。
 
     スキャンマッチだけだとループクロージャが無いので、1周して戻ってきたとき
     始点と数 cm〜数十 cm ずれる。終点だけを始点に貼り付けると、その1箇所に
     折れ目ができて曲率が跳ね、レーシングラインがそこだけ暴れる。
     **ずれを1周かけて薄く配る**のが、軽量なポーズグラフ最適化の代わりになる。
+
+    ずれが`max_gap`を超えるなら（出発点へ戻る前に確定した）閉じずに`ValueError`にする。
+    数 m のずれを配ると、壁を貫く中心線になる。
     """
     if len(xy) < 3:
         return xy
     gap = xy[0] - xy[-1]
+    if float(np.hypot(*gap)) > max_gap:
+        raise ValueError(f"出発点まで戻ってから確定してください"
+                         f"（始点と終点が {float(np.hypot(*gap)):.1f}m 離れている）")
     w = np.linspace(0.0, 1.0, len(xy))[:, None]
     return xy + gap * w
 

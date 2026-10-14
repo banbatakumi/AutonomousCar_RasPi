@@ -45,6 +45,7 @@ ATE が6cm、MPU6050相当の誤差で複雑コースは見失ったまま戻ら
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -370,6 +371,27 @@ class Frontend:
         self.updates += 1
         return FrontendUpdate(self.pose, score, lost, matched)
 
+    def corrected_delta(self, t0_ns: int, t1_ns: int) -> Pose2D:
+        """`t0`の車体から見た`t1`の姿勢を、学習済みのバイアス・倍率で補正した履歴から積む。
+
+        `update()`の推測航法の予測と同じ補正。履歴が2点未満なら恒等。呼び出しごとに
+        区間の周りのサンプルだけを補正する（走行中に50Hzで呼ばれる）。
+        """
+        tw = self.twists
+        n = len(tw)
+        if n < 2:
+            return Pose2D(0.0, 0.0, 0.0)
+        i0 = max(0, bisect.bisect_left(tw.t, t0_ns) - 2)
+        i1 = min(n, bisect.bisect_right(tw.t, t1_ns) + 2)
+        correct = getattr(self.motion, "correct", None)
+        buf = TwistBuffer()
+        for k in range(i0, i1):
+            w = Twist2D(tw.vx[k], tw.vy[k], tw.w[k])
+            buf.add(tw.t[k], correct(w) if correct is not None else w)
+        if len(buf) < 2:
+            return tw.delta(t0_ns, t1_ns)
+        return buf.delta(t0_ns, t1_ns)
+
     def _corrected_twists(self) -> TwistBuffer | None:
         """生のサンプルに、学習済みのバイアス・倍率を適用した履歴を作る。"""
         if len(self.twists) < 2:
@@ -459,6 +481,15 @@ class Frontend:
                         sigma=max(0.06, coarse_trans_step * 0.8), max_points=64)
         if coarse.score <= 0.0:
             return None
+        # 最良が窓の端なら真の解は窓の外かもしれない。中心を移して1度だけ探し直し、
+        # それでも端なら信用しない（端の値に飛ばない）
+        if coarse.edge:
+            coarse = search(field_, hx, hy, coarse.pose, trans=cfg.reloc_trans,
+                            rot=cfg.reloc_rot, trans_step=coarse_trans_step,
+                            rot_step=coarse_rot_step,
+                            sigma=max(0.06, coarse_trans_step * 0.8), max_points=64)
+            if coarse.score <= 0.0 or coarse.edge:
+                return None
         # ★ 離れた候補が肉薄しているなら飛び移らない（曖昧さの判定は上の docstring 参照）
         if coarse.second >= cfg.reloc_ambiguity * coarse.score:
             return None
@@ -599,5 +630,13 @@ class Frontend:
         sr = search(f, hx, hy, guess, trans=cfg.reloc_trans if trans is None else trans,
                     rot=cfg.reloc_rot if rot is None else rot,
                     trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
+        if sr.edge:
+            # 最良が窓の端。真の解が外にあるかもしれないので、中心を移して1度だけ探し直し、
+            # それでも端なら信用しない（端の値を黙って返さない）
+            sr = search(f, hx, hy, sr.pose, trans=cfg.reloc_trans if trans is None else trans,
+                        rot=cfg.reloc_rot if rot is None else rot,
+                        trans_step=cfg.reloc_trans_step, rot_step=cfg.reloc_rot_step)
+            if sr.edge:
+                return None
         return register(f, hx, hy, sr.pose, prior=sr.pose, prior_info=ANCHOR_INFO,
                         config=cfg.register)

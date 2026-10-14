@@ -15,7 +15,7 @@ from slam2d.core.motion import (  # noqa: E402
     ConstantVelocityModel, ExternalTwistModel, GyroBiasEstimator, OdometryNoise,
     SpeedScaleEstimator,
 )
-from slam2d.core.types import Twist2D, integrate_twist  # noqa: E402
+from slam2d.core.types import Pose2D, Twist2D, integrate_twist  # noqa: E402
 
 
 class TestIntegrateTwist(unittest.TestCase):
@@ -160,6 +160,46 @@ class TestGyroBiasEstimator(unittest.TestCase):
         for _ in range(100):
             est.update(raw_yaw_rate=100.0, measured_yaw_rate=0.0)
         self.assertLessEqual(abs(est.bias), 0.1 + 1e-9)
+
+
+class TestStillCalibrationGuards(unittest.TestCase):
+    def test_slow_turn_with_zero_speed_reading_is_not_learned_as_bias(self):
+        """車速の読みが0で、1周期の回頭が小さい判定内（0.25°）でも、一方向へ回り続けているなら
+        ゼロ点として学習しない（点群が測った回頭の平均が`still_rate`以上）。"""
+        bias_est = GyroBiasEstimator(alpha_still=0.5)
+        m = ExternalTwistModel(lambda: Twist2D(0.0, 0.0, math.radians(2.5)), bias_estimator=bias_est)
+        for _ in range(30):
+            m.current_twist()
+            m.update(Pose2D(0.0, 0.0, math.radians(0.25)), 0.1,
+                     raw_delta=Pose2D(0.0, 0.0, math.radians(0.25)))
+        self.assertEqual(bias_est.still_updates, 0)
+        self.assertEqual(bias_est.bias, 0.0)
+
+    def test_needs_consecutive_still_cycles(self):
+        bias_est = GyroBiasEstimator(alpha_still=0.5)
+        m = ExternalTwistModel(lambda: Twist2D(0.0, 0.0, 0.02), bias_estimator=bias_est,
+                               still_cycles=3)
+        for _ in range(2):
+            m.current_twist()
+            m.update(Pose2D(0.0, 0.0, 0.0), 0.1, raw_delta=Pose2D(0.0, 0.0, 0.002))
+        self.assertEqual(bias_est.still_updates, 0)
+        m.current_twist()
+        m.update(Pose2D(0.0, 0.0, 0.0), 0.1, raw_delta=Pose2D(0.0, 0.0, 0.002))
+        self.assertEqual(bias_est.still_updates, 1)
+
+    def test_note_stationary_learns_only_when_still_long_enough(self):
+        bias_est = GyroBiasEstimator(alpha_still=0.5)
+        raw = [Twist2D(0.0, 0.0, 0.02)]
+        m = ExternalTwistModel(lambda: raw[0], bias_estimator=bias_est)
+        learned = [m.note_stationary(0.02) for _ in range(30)]     # 50Hz で 0.6s
+        self.assertFalse(learned[0])
+        self.assertTrue(learned[-1])
+        self.assertAlmostEqual(bias_est.bias, 0.02, delta=0.002)
+        # 動き出したら（車速の読みが 1 周期 4mm を超える）学習せず、続いた時間も数え直す
+        raw[0] = Twist2D(0.5, 0.0, 0.02)
+        n = bias_est.still_updates
+        self.assertFalse(m.note_stationary(0.02))
+        self.assertEqual(bias_est.still_updates, n)
 
 
 if __name__ == "__main__":

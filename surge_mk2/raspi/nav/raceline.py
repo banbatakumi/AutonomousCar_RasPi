@@ -297,12 +297,16 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
                                   a_grip=a_grip, v_cap=v_cap)
     n = len(xy)
     k = np.abs(np.asarray(kappa, dtype=np.float64))
-    v = np.maximum(_lateral_limit(k, v_max=v_max, a_lat=a_lat), v_min)
+    v = _lateral_limit(k, v_max=v_max, a_lat=a_lat)
     if n == 0:
         return v
     if v_cap is not None:
         v = np.minimum(v, np.maximum(np.asarray(v_cap, dtype=np.float64), 0.05))
-        v_min = min(v_min, float(v.min()))             # 上限の方が低い所は `v_min` で持ち上げない
+    # `v_min` は直線の下限。横の限界（見通しの上限も）で決まる速度が `v_min` より低い所は、
+    # その速度を採る（`v_min` で持ち上げると曲がり切れない）
+    floor = np.minimum(v, v_min)
+    if v_cap is not None:
+        v_min = min(v_min, float(v.min()))
     # ここから下の `a_lat` は摩擦円の半径としてだけ使う
     grip = max(a_lat, a_grip) if a_grip else a_lat
     inv_grip2 = 1.0 / (grip * grip) if friction_circle and grip > 1e-9 else 0.0
@@ -350,7 +354,7 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
             lim = reach(vl[j], kl[j], a_accel, ds[j])
             if lim < vl[i]:
                 vl[i] = lim
-    return np.maximum(np.asarray(vl), v_min)
+    return np.maximum(np.asarray(vl), floor)
 
 
 def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min: float,
@@ -364,11 +368,13 @@ def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min
     n = len(xy)
     k = np.abs(np.asarray(kappa, dtype=np.float64))
     lat = np.maximum(np.broadcast_to(np.asarray(a_lat, dtype=np.float64), (n,)), 1e-6)
-    v = np.maximum(np.minimum(v_max, np.sqrt(lat / np.maximum(k, 1e-6))), v_min)
+    v = np.minimum(v_max, np.sqrt(lat / np.maximum(k, 1e-6)))
     if n == 0:
         return v
     if v_cap is not None:
         v = np.minimum(v, np.maximum(np.asarray(v_cap, dtype=np.float64), 0.05))
+    floor = np.minimum(v, v_min)                       # `speed_profile` と同じ（横の限界が低い所は持ち上げない）
+    if v_cap is not None:
         v_min = min(v_min, float(v.min()))
     grip = lat if a_grip is None else np.maximum(
         lat, np.broadcast_to(np.asarray(a_grip, dtype=np.float64), (n,)))
@@ -412,7 +418,7 @@ def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min
             lim = reach(j, a_accel, ds[j])
             if lim < vl[i]:
                 vl[i] = lim
-    return np.maximum(np.asarray(vl), v_min)
+    return np.maximum(np.asarray(vl), floor)
 
 
 def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:
@@ -815,7 +821,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
 
     ## ★ 車が曲がり切れる半径に開く（`kappa_max`、`KAPPA_ITERS`）
 
-    速度は `v_min` で下支えされるので、見積もりの時間には「曲がり切れない」ことの損が
+    速度は `v_min` で下支えされる（横の限界が `v_min` より低い所を除く）ので、見積もりの時間には「曲がり切れない」ことの損が
     出ない。壁の先端を回るヘアピンで半径 37cm（車の限界 46cm）の線が最短として選ばれ、
     実車は舵が張り付いたまま出口で 14〜20cm 膨らんで壁まで 0〜2cm だった。
     最小時間の反復の後、`kappa_max` を超えた所の重みを上げて解き直し、超えた量の
@@ -839,7 +845,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
         short = int(body is not None and float(body.clearance(xy).min()) < margin - 0.01)
         ks = speed_kappa(xy, closed)
         # ★ 車が曲がり切れない解は、曲がり切れる解より必ず後ろ（超えた量の小さい順）。
-        # 速度は `v_min` で下支えされるので、時間だけで比べると超えた分が見えない
+        # 速度は `v_min` で下支えされる（横の限界が低い所を除く）ので、時間だけで比べると超えた分が見えない
         over = max(0.0, float(ks.max()) - kappa_max) if kappa_max and len(ks) else 0.0
         if time_iters > 0:
             t = _travel_time(xy, speed_profile(xy, ks, **spd), closed)

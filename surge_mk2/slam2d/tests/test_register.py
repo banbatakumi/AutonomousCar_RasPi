@@ -167,5 +167,57 @@ class TestSearch(unittest.TestCase):
         self.assertGreater(sr.second, 0.7 * sr.score)
 
 
+class TestSearchEdge(unittest.TestCase):
+    def test_best_on_the_window_edge_is_flagged(self):
+        truth = (3.0, 2.0, 0.0)
+        smap = _map_from([truth])
+        px, py = _scan(*truth)
+        kw = dict(trans=0.4, rot=math.radians(6.0), trans_step=0.1,
+                  rot_step=math.radians(2.0), sigma=0.08)
+        # 真値が窓の外（中心から x 方向に 0.8m）: 端の値が返るので edge
+        far = search(smap, px, py, Pose2D(truth[0] - 0.8, truth[1], truth[2]), **kw)
+        self.assertTrue(far.edge)
+        # 真値が窓の中なら edge ではない
+        near = search(smap, px, py, Pose2D(truth[0] - 0.2, truth[1], truth[2]), **kw)
+        self.assertFalse(near.edge)
+
+    def test_rotation_window_edge_is_flagged(self):
+        truth = (3.0, 2.0, 0.0)
+        smap = _map_from([truth])
+        px, py = _scan(*truth)
+        sr = search(smap, px, py, Pose2D(truth[0], truth[1], math.radians(14.0)), trans=0.2,
+                    rot=math.radians(6.0), trans_step=0.1, rot_step=math.radians(2.0), sigma=0.08)
+        self.assertTrue(sr.edge)
+
+
+class TestRegisterWithoutPrior(unittest.TestCase):
+    def test_degenerate_direction_is_not_moved(self):
+        """情報の無い方向（直線の通路の進行方向）は、右辺に雑音が残っていても更新しない。"""
+        from slam2d.core.register import _solve_step
+        h = np.diag([1e-8, 4.0e5, 2.0e5])          # x（進行方向）にほぼ情報が無い
+        b = np.array([1e-3, 2.0e2, 1.0e2])         # x 向きの右辺は雑音ぶん。従来の解は 1e5 [m]
+        d = _solve_step(h, b)
+        self.assertEqual(float(d[0]), 0.0)
+        self.assertAlmostEqual(float(d[1]), -2.0e2 / 4.0e5, places=9)
+        self.assertAlmostEqual(float(d[2]), -1.0e2 / 2.0e5, places=9)
+
+    def test_well_conditioned_system_matches_a_direct_solve(self):
+        from slam2d.core.register import _solve_step
+        rng = np.random.default_rng(0)
+        a = rng.normal(size=(3, 3))
+        h = a @ a.T * 1e3 + np.eye(3) * 2.5e3      # 事前分布付きの呼び出しに相当（最小固有値が支えられる）
+        b = rng.normal(size=3)
+        np.testing.assert_allclose(_solve_step(h, b), -np.linalg.solve(h, b), rtol=1e-6)
+
+    def test_corridor_without_prior_stays_put(self):
+        corridor = [(-20.0, 0.0, 20.0, 0.0), (-20.0, 1.0, 20.0, 1.0)]
+        smap = _map_from([(0.0, 0.5, 0.0)], segs=corridor)
+        rng = np.random.default_rng(1)
+        px, py = _scan(0.0, 0.5, 0.0, segs=corridor, noise=0.01, rng=rng)
+        r = register(smap, px, py, Pose2D(0.3, 0.5, 0.0))
+        self.assertAlmostEqual(r.pose.x, 0.3, delta=0.02)
+        self.assertAlmostEqual(r.pose.y, 0.5, delta=0.02)
+
+
 if __name__ == "__main__":
     unittest.main()

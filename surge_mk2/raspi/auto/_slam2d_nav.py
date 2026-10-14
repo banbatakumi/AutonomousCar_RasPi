@@ -38,7 +38,9 @@ RACE段は`Frontend`を直接叩き、追跡専用に保つ（走行中に最適
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 
 import numpy as np
 
@@ -52,6 +54,8 @@ from ..msgs.types import Scan, VehicleState
 from ..nav.deskew import point_times_ns
 
 __all__ = ["Slam2dNav", "WALL_HIT_WEIGHT", "occgrid_from_trinary", "scan_to_raw"]
+
+_log = logging.getLogger(__name__)
 
 #: キルスイッチ。Falseにすると`Frontend`単体運用（ループ閉じ無し）に戻る
 ENABLE_LOOP_CLOSURE = True
@@ -164,6 +168,7 @@ class Slam2dNav:
         self._hit_weight = float(hit_weight)
         self._raw_yaw_rate = 0.0
         self._raw_speed = 0.0
+        self._idle_t: float | None = None
         #: ループ閉じを使うか（`ENABLE_LOOP_CLOSURE`が既定。評価・切り分け用に
         #: インスタンス単位でも切れるようにしてある）
         self._loop_closure = bool(loop_closure)
@@ -178,14 +183,20 @@ class Slam2dNav:
         config = FrontendConfig(mount_x=self._lidar_x, mount_y=self._lidar_y,
                                 max_range=self._max_range, **self._frontend_kw)
         if self._loop_closure:
+            try:
+                from slam2d.backend.loop_detection import LoopDetectorConfig
+                from slam2d.pipeline import PipelineConfig, SlamSystem
+            except ImportError as exc:
+                # g2opy が入っていない環境。ループ閉じ無しで走行は続ける
+                _log.warning("ループ閉じを無効にします（%s）", exc)
+                self._loop_closure = False
+        if self._loop_closure:
             # 最適化・地図の焼き直しは`freeze()`（EXPLORE→BUILD遷移、車両停止済み）
             # での明示的な`flush()`だけ。走行中は拘束を溜めるだけにする
             #
             # `slam2d.pipeline`は`backend/posegraph.py`経由でg2opyを要求する
             # （issue #22）。ループ閉じを使わない構成やplanner一覧の表示だけの
             # 場合にまでg2opyの依存を強制しないよう、実際に使うここでだけ import する
-            from slam2d.backend.loop_detection import LoopDetectorConfig
-            from slam2d.pipeline import PipelineConfig, SlamSystem
             self._system = SlamSystem(grid, motion, PipelineConfig(
                 frontend=config, loop_detector=LoopDetectorConfig(), optimize_every=0))
             self._fe = self._system.frontend
@@ -265,6 +276,13 @@ class Slam2dNav:
         """
         self._raw_yaw_rate = _finite_or_zero(yaw_rate)
         self._raw_speed = _finite_or_zero(speed)
+        # 点群を取り込まない間も、止まっていればジャイロのゼロ点を学ぶ（保存地図から走る流れは
+        # LOCATE 中に `update()` が回らず、発進前の静止較正が抜けるため）
+        now = time.monotonic()
+        last, self._idle_t = self._idle_t, now
+        note = getattr(self._fe.motion, "note_stationary", None)
+        if note is not None and last is not None and 0.0 < now - last <= 0.2:
+            note(now - last)
 
     @property
     def pose(self) -> Pose2D:
@@ -275,14 +293,15 @@ class Slam2dNav:
 
         `plan()` が走る時点で `pose` は数十ms 古く、点群の合間（次の周まで 100ms）はさらに古く
         なる。経路の追従はこれを使う（`slam2d_raceline.tick`）。twist の履歴が無い・時刻が
-        食い違う（0.5s 以上）ときは `pose` をそのまま返す。
+        食い違う（0.5s 以上）ときは `pose` をそのまま返す。進める twist は `update()` と同じ補正
+        （ジャイロのゼロ点・車速の倍率）を掛けたもの。
         """
         fe = self._fe
         t0 = int(fe._t_ref)
         t1 = int(vs.t_capture) if vs is not None else 0
         if not t0 or t1 <= t0 or t1 - t0 > 500_000_000 or len(fe.twists) < 2:
             return fe.pose
-        return compose(fe.pose, fe.twists.delta(t0, t1))
+        return compose(fe.pose, fe.corrected_delta(t0, t1))
 
     @property
     def grid(self) -> OccGrid:

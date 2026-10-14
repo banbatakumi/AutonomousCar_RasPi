@@ -163,10 +163,20 @@ class ExternalTwistModel:
     def __init__(self, twist_source, *, bias_estimator: "GyroBiasEstimator | None" = None,
                  scale_estimator: "SpeedScaleEstimator | None" = None,
                  noise: OdometryNoise = OdometryNoise(),
-                 still_dist: float = 0.004, still_yaw: float = math.radians(0.3)) -> None:
+                 still_dist: float = 0.004, still_yaw: float = math.radians(0.3),
+                 still_cycles: int = 3, still_rate: float = math.radians(1.0)) -> None:
         #: 「止まっている」とみなす1周期あたりの移動量・回頭
         self._still_dist = still_dist
         self._still_yaw = still_yaw
+        #: ゼロ点を学ぶには、静止の判定が`still_cycles`周期続き、その間に点群が測った
+        #: 回頭の平均が`still_rate`[rad/s]未満であること。車速の読みが0に張り付いて
+        #: 4mm/周期未満・3°/s未満でゆっくり動いている（ずれる）とき、1周期ごとの判定
+        #: だけではその回頭がゼロ点として学習されてしまう
+        self._still_cycles = max(1, int(still_cycles))
+        self._still_rate = still_rate
+        self._still_n = 0
+        self._still_yaw_sum = 0.0
+        self._still_t = 0.0
         self._twist_source = twist_source
         self._bias = bias_estimator
         self._scale = scale_estimator
@@ -188,6 +198,31 @@ class ExternalTwistModel:
         k = self._scale.scale if self._scale is not None else 1.0
         return Twist2D(twist.vx * k, twist.vy * k, yaw_rate)
 
+    def note_stationary(self, dt: float, *, cycle: float = 0.1) -> bool:
+        """点群の位置合わせが無い間（LOCATE 中など）の静止較正。学習したら True。
+
+        車速・ヨーレートの読みが「1周期（`cycle`秒）あたり`still_dist`・`still_yaw`
+        未満」の状態が`still_cycles`周期ぶんの時間続いたときだけ、ヨーレートの読みを
+        ゼロ点として学ぶ。点群が回頭を測っていないので、`update()`の判定より
+        読みだけに頼る分、続いた時間で確かめる。
+        """
+        if self._bias is None or not (1e-6 < dt):
+            return False
+        raw = self._twist_source()
+        ok = (abs(raw.vx) * cycle < self._still_dist and abs(raw.vy) * cycle < self._still_dist
+              and abs(raw.yaw_rate) * cycle < self._still_yaw)
+        if not ok:
+            self._still_n = 0
+            self._still_yaw_sum = 0.0
+            self._still_t = 0.0
+            return False
+        self._still_n += 1
+        self._still_t += dt
+        if self._still_t < self._still_cycles * cycle:
+            return False
+        self._bias.update_stationary(raw.yaw_rate)
+        return True
+
     def current_twist(self) -> Twist2D:
         raw = self._twist_source()
         self._last_raw = raw
@@ -208,8 +243,18 @@ class ExternalTwistModel:
         still = (abs(raw_fwd) < self._still_dist and abs(measured_delta.x) < self._still_dist
                  and abs(measured_delta.y) < self._still_dist
                  and abs(measured_delta.yaw) < self._still_yaw)
+        if still:
+            self._still_n += 1
+            self._still_yaw_sum += measured_delta.yaw
+            self._still_t += dt
+        else:
+            self._still_n = 0
+            self._still_yaw_sum = 0.0
+            self._still_t = 0.0
         if self._bias is not None and still:
-            self._bias.update_stationary(raw_yaw_rate)
+            if (self._still_n >= self._still_cycles
+                    and abs(self._still_yaw_sum) < self._still_rate * self._still_t):
+                self._bias.update_stationary(raw_yaw_rate)
             return
         if not absolute:
             # 地図を作りながらの観測は「自分で焼いた局所地図」が基準なので、

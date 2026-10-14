@@ -309,5 +309,46 @@ class TestPosesVectorizedMatchesLoop(unittest.TestCase):
         self._assert_matches(buf, NS, t_lo=NS, t_hi=NS)
 
 
+class TestDeskewTrajWithPerPointTimes(unittest.TestCase):
+    def test_turning_scan_with_per_point_times_matches_the_world_wall(self):
+        """回頭しながら点ごとに時刻を持つ走査を脱スキューすると、壁が直線に戻る。
+
+        期待値は脱スキューの実装を通さずに作る: 世界に壁 `x = 3` を置き、等速円運動
+        （v, ω 一定）の**閉じた式**の姿勢から、各点の時刻の車体が壁へ撃った距離を作る。
+        脱スキュー後の点を、最後の点の時刻の姿勢で世界へ戻すと壁の上に乗るはず。
+        """
+        v, w = 1.5, 1.2                      # 車速 [m/s]・ヨーレート [rad/s]（回頭が大きい）
+        t0 = 10 * NS
+        n = 120
+        t_pt = t0 + np.linspace(0.0, 0.1 * NS, n).astype(np.int64)       # 1周 0.1s
+        ts = (t_pt - t0) / NS
+
+        def pose(t):                         # 時刻 t [s]（t0 起点）の世界姿勢
+            return (v / w * math.sin(w * t), v / w * (1.0 - math.cos(w * t)), w * t)
+
+        wall_x = 3.0
+        ang = np.linspace(-0.6, 0.6, n)
+        rng = np.empty(n)
+        for i in range(n):
+            x, y, th = pose(ts[i])
+            rng[i] = (wall_x - x) / math.cos(th + ang[i])
+        raw = _raw(ang, rng, t_point_ns=t_pt)
+
+        buf = TwistBuffer()
+        for k in range(-10, 30):             # 100Hz。点群の前後を挟む
+            buf.add(t0 + k * NS // 100, Twist2D(v, 0.0, w))
+        pts = deskew_traj(raw, buf)
+        self.assertTrue(pts.corrected)
+        self.assertEqual(pts.t_ref_ns, int(t_pt.max()))
+
+        xr, yr, thr = pose(float(ts[-1]))
+        c, s = math.cos(thr), math.sin(thr)
+        world_x = xr + c * pts.x - s * pts.y
+        np.testing.assert_allclose(world_x, wall_x, atol=1e-3)
+        # 補正しなかった場合（全点を最後の姿勢で読む）は壁が大きく曲がる＝このテストが効く
+        raw_x = xr + c * (rng * np.cos(ang)) - s * (rng * np.sin(ang))
+        self.assertGreater(float(np.abs(raw_x - wall_x).max()), 0.05)
+
+
 if __name__ == "__main__":
     unittest.main()

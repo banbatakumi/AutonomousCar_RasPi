@@ -162,6 +162,8 @@ def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
                     max_points=64, ambiguity_dist=max(config.ambiguity_dist, step * 2))
     if coarse.score < config.min_score * 0.6:
         return None
+    if coarse.edge:
+        return None                     # 最良が探索窓の端＝真の解が窓の外かもしれない
     if coarse.second >= config.ambiguity_ratio * coarse.score:
         return None
     mid = search(field, cur.hx, cur.hy, coarse.pose, trans=step * 1.5,

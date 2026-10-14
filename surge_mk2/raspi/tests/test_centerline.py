@@ -105,5 +105,27 @@ class TestMeasureRobustToHoles(unittest.TestCase):
         self.assertGreater(float(left[i]), width)
 
 
+class TestCloseGap(unittest.TestCase):
+    def _arc(self, end_gap: float) -> np.ndarray:
+        th = np.linspace(0.0, 2.0 * np.pi, 60, endpoint=False)
+        xy = np.column_stack([2.0 * np.cos(th), 2.0 * np.sin(th)])
+        return xy[: int(len(xy) * 0.9)] if end_gap else xy
+
+    def test_small_gap_is_closed(self):
+        xy = self._arc(0.0)
+        xy[-1] += [0.05, -0.03]
+        out = cl.close_gap(xy)
+        np.testing.assert_allclose(out[-1], xy[0], atol=1e-9)     # 終点が始点に重なる
+
+    def test_large_gap_is_refused(self):
+        """出発点に戻る前に確定した（数 m 離れている）軌跡は、閉じずにエラー。"""
+        xy = self._arc(1.0)
+        with self.assertRaises(ValueError) as cm:
+            cl.close_gap(xy)
+        self.assertIn("出発点まで戻ってから", str(cm.exception))
+        with self.assertRaises(ValueError):
+            cl.build(straight_corridor(), xy)
+
+
 if __name__ == "__main__":
     unittest.main()

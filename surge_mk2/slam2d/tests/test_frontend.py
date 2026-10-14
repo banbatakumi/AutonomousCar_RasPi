@@ -25,7 +25,7 @@ from slam2d.core import frontend as frontend_mod  # noqa: E402
 from slam2d.core.frontend import Frontend, FrontendConfig  # noqa: E402
 from slam2d.core.grid import OccGrid  # noqa: E402
 from slam2d.core.motion import (ConstantVelocityModel, ExternalTwistModel,  # noqa: E402
-                                GyroBiasEstimator)
+                                GyroBiasEstimator, SpeedScaleEstimator)
 from slam2d.core.types import Pose2D, RawScan, Twist2D, compose  # noqa: E402
 from slam2d.tests.helpers import ROOM, make_raw_scan, make_room_points  # noqa: E402
 
@@ -399,6 +399,26 @@ class TestBehindWallRays(unittest.TestCase):
             want = fe._not_behind_wall(hx, hy, pose)
         self.assertTrue(np.array_equal(got, want))
         self.assertGreater(int((~got).sum()), 10)       # 壁の向こうの点を実際に外している
+
+
+class TestCorrectedDelta(unittest.TestCase):
+    def test_applies_learned_bias_and_scale(self):
+        bias, scale = GyroBiasEstimator(), SpeedScaleEstimator()
+        bias.bias, scale.scale = 0.1, 1.1
+        tw = Twist2D(1.0, 0.0, 0.1)
+        fe = _make_frontend(motion=ExternalTwistModel(lambda: tw, bias_estimator=bias,
+                                                      scale_estimator=scale))
+        t0 = NS
+        for k in range(0, 31):
+            fe.add_twist(t0 + k * NS // 100, tw)
+        # 読みのヨーレートは 0.1 でゼロ点も 0.1 → 補正後は直進、前進は 1.1 倍
+        d = fe.corrected_delta(t0 + NS // 10, t0 + 2 * NS // 10)
+        self.assertAlmostEqual(d.x, 0.11, delta=1e-6)
+        self.assertAlmostEqual(d.y, 0.0, delta=1e-6)
+        self.assertAlmostEqual(d.yaw, 0.0, delta=1e-9)
+        # 補正前の履歴は曲がる
+        raw = fe.twists.delta(t0 + NS // 10, t0 + 2 * NS // 10)
+        self.assertAlmostEqual(raw.yaw, 0.01, delta=1e-6)
 
 
 if __name__ == "__main__":

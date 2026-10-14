@@ -164,6 +164,27 @@ def _normal_equations(smap: SurfaceMap, px, py, x, y, yaw, k: np.ndarray, inv_s2
     return h, b, a
 
 
+#: ヘッセ行列の固有値がこの割合（最大固有値比）を下回る方向は更新しない。事前分布が無い
+#: 退化（直線の通路の進行方向）で、その方向の解が測距ノイズだけで `max_step` まで流れるのを
+#: 防ぐ。事前分布付きの呼び出しでは最小固有値が事前分布の情報（≥数百）で支えられるので、
+#: この下限には掛からない
+_MIN_EIG_RATIO = 1e-4
+
+
+def _solve_step(h: np.ndarray, b: np.ndarray) -> np.ndarray | None:
+    """`-h⁻¹ b`。情報の無い方向（最大固有値の`_MIN_EIG_RATIO`倍未満）は0にする。"""
+    try:
+        w, v = np.linalg.eigh(h)
+    except np.linalg.LinAlgError:
+        return None
+    top = float(w[-1])
+    if not math.isfinite(top) or top <= 0.0:
+        return None
+    keep = w >= max(top * _MIN_EIG_RATIO, 1e-9)
+    coef = np.where(keep, (v.T @ b) / np.where(keep, w, 1.0), 0.0)
+    return -(v @ coef)
+
+
 def register(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, guess: Pose2D, *,
              prior: Pose2D | None = None, prior_info: Cov3 | None = None,
              config: RegisterConfig = RegisterConfig()) -> RegisterResult:
@@ -193,9 +214,8 @@ def register(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, guess: Pose2D, *,
             b = b + prior_info @ e
         if not np.any(h):
             break
-        try:
-            delta = -np.linalg.solve(h + np.eye(3) * 1e-9, b)
-        except np.linalg.LinAlgError:
+        delta = _solve_step(h, b)
+        if delta is None:
             break
         step = math.hypot(delta[0], delta[1])
         if step > config.max_step:
@@ -227,6 +247,10 @@ class SearchResult(NamedTuple):
     #: 最良解から`ambiguity_dist`以上離れた候補の中での最高点。対称・繰り返し形状で
     #: 1位と並ぶなら、その解は信用できない
     second: float
+    #: 最良が探索窓の端（並進の四辺または回転の両端）に当たったか。真の解が窓の外に
+    #: あると端の値が黙って返るので、呼び出し側は信用を下げる（広い段では不採用、
+    #: 仕上げでは中心を移してもう一度探す）。窓が1点だけの軸は数えない
+    edge: bool = False
 
 
 def search(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2D, *,
@@ -274,4 +298,6 @@ def search(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2D, *,
     far_yaw = np.abs(np.arctan2(np.sin(dyaws - dyaws[k]), np.cos(dyaws - dyaws[k]))) >= ambiguity_yaw
     far = far_xy[None, :, :] | far_yaw[:, None, None]
     second = float(scores[far].max()) if far.any() else 0.0
-    return SearchResult(pose, best, second)
+    edge = bool((nt > 0 and (i in (0, 2 * nt) or j in (0, 2 * nt)))
+                or (nr > 0 and k in (0, 2 * nr)))
+    return SearchResult(pose, best, second, edge)

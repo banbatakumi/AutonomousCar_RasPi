@@ -97,6 +97,12 @@ _ADOPT_DIST = 0.04
 _ADOPT_YAW = math.radians(6.0)
 #: ローンチコントロールを要求する舵角の上限 [rad]（約7°。これより切っている発進は速度PIに任せる）
 _LAUNCH_STEER_MAX = 0.12
+#: 舵が上限に張り付き（`_SAT_STEER_FRAC`）、なお経路から `_SAT_CROSS_M` [m] 以上外れているとき、
+#: 目標速度を今の速度の `_SAT_SLOW` 倍（`v_min` が下限）に抑える。舵で直せないずれは速度を
+#: 落とすしかない。設計どおりの急カーブ（横偏差が小さい）では掛からない
+_SAT_STEER_FRAC = 0.97
+_SAT_CROSS_M = 0.15
+_SAT_SLOW = 0.8
 #: 車速がこれ未満になったら「発進」と見なし、次に経路の速度へ届くまでローンチコントロールを要求する [m/s]
 _LAUNCH_ARM_SPEED = 0.3
 #: 車速が経路の速度のこれだけ手前に届いたら発進は終わり [m/s]
@@ -1185,12 +1191,22 @@ class Slam2dRaceLine(Planner):
         if not path.closed or p["speed_ff"] <= 0:
             return pp.steer, None, 0.0             # 停止点へ向かう経路の速度は `plan()` が決める
         speed, ramp = self._speed_cmd(path, pp.index, pose, vs, p)
+        sat = self._steer_sat_cap(pp, vs, p)
+        if speed > sat:
+            speed, ramp = sat, 0.0
         if speed > cap:
             speed, ramp = cap, 0.0                 # 抑えた値へは STM32 の上限で向かう
         g = self._grip_cap()
         if g is not None and g[0] < speed:
             return pp.steer, g[0], g[1]            # 横グリップの前兆（`nav/grip.py`）
         return pp.steer, speed, ramp
+
+    def _steer_sat_cap(self, pp, vs: VehicleState, p: dict[str, float]) -> float:
+        """舵が上限に張り付いたまま経路から外れているときの速度の上限 [m/s]（掛からなければ inf）。"""
+        if (abs(pp.steer) >= _SAT_STEER_FRAC * self.vehicle.max_steer
+                and abs(pp.cross_track) >= _SAT_CROSS_M):
+            return max(p["v_min"], _SAT_SLOW * abs(vs.speed))
+        return math.inf
 
     def _speed_cmd(self, path: rl_mod.RaceLine, index: int, pose, vs: VehicleState,
                    p: dict[str, float]) -> tuple[float, float]:
@@ -1610,6 +1626,7 @@ class Slam2dRaceLine(Planner):
         st.target_speed = pp.speed
         st.free_ahead = dist if hit is not None else math.inf
         self._join_cap(st, pp, self._avoid_path or self.path, pose, p)
+        st.target_speed = min(st.target_speed, self._steer_sat_cap(pp, vs, p))
         if coasting:
             st.target_speed = min(st.target_speed, p["coast_speed"])
         md_note = self._md_fault(st, vs, p)

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from slam2d.backend.posegraph import PoseGraph  # noqa: E402
-from slam2d.core.types import Pose2D  # noqa: E402
+from slam2d.core.types import Pose2D, between, wrap_angle  # noqa: E402
 
 
 class TestPoseGraphBasic(unittest.TestCase):
@@ -84,6 +84,18 @@ class TestPoseGraphLoopClosure(unittest.TestCase):
         dist_with_loop = math.hypot(poses_with_loop[3].x - true_side * 0,
                                     poses_with_loop[3].y)
         self.assertLess(dist_with_loop, dist_no_loop)
+
+        # 閉じた後の誤差を数値で見る（「近づいた」だけでは、ほとんど効いていなくても通る）。
+        # 真の正方形は (0,0)(1,0)(1,1)(0,1)。辺の測定は3本が1.05、ループ拘束だけが1.0なので、
+        # 最適解でも誤差は各辺へ分かれて残る（0.05 → 0.01 前後）
+        truth = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+        errs = [math.hypot(q.x - tx, q.y - ty) for q, (tx, ty) in zip(poses_with_loop, truth)]
+        self.assertLess(errs[3], 0.02)                 # 閉じる直前のノード（閉じる前は 0.05）
+        self.assertLess(max(errs), 0.06)               # どのノードも閉じる前の最大誤差（0.07）より小さい
+        close = between(poses_with_loop[3], poses_with_loop[0])    # ループ拘束の残差
+        self.assertLess(abs(close.x - true_side), 0.015)
+        self.assertLess(abs(close.y), 1e-3)
+        self.assertLess(abs(wrap_angle(close.yaw - math.pi / 2)), 0.02)
 
 
 class TestInformationFrame(unittest.TestCase):

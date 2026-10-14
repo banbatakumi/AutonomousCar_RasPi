@@ -23,7 +23,7 @@ from raspi.msgs import VehicleState  # noqa: E402
 from raspi.nav.grid import unpack_trinary  # noqa: E402
 from raspi.tests.test_nav import ROOM, make_room_scan  # noqa: E402
 from slam2d.core.grid import OccGrid  # noqa: E402
-from slam2d.core.types import Pose2D  # noqa: E402
+from slam2d.core.types import Pose2D, Twist2D  # noqa: E402
 from slam2d.tests.helpers import make_room_points  # noqa: E402
 
 
@@ -983,3 +983,88 @@ class TestLocateScore(unittest.TestCase):
         self.assertLess(locate_score(mirror), locate_score(true) * LOCATE_SCORE_RATIO)
         self.assertEqual(locate_score(None), 0.0)
 
+
+class TestSlam2dNavRobustness(unittest.TestCase):
+    def test_pose_now_uses_the_learned_gyro_bias_and_scale(self):
+        """`pose_now()` は `update()` と同じ補正（ジャイロのゼロ点・車速の倍率）で姿勢を進める。"""
+        from raspi.auto._slam2d_nav import Slam2dNav
+        nav = Slam2dNav(resolution=0.05, size_m=8.0)
+        nav._fe.motion._bias.bias = 0.1
+        nav._fe.motion._scale.scale = 1.1
+        t0 = 1_000_000_000
+        nav._fe._t_ref = t0
+        for k in range(0, 21):
+            nav._fe.add_twist(t0 + k * 10_000_000, Twist2D(1.0, 0.0, 0.1))
+        v = VehicleState(speed=1.0, yaw_rate=0.1, steer_actual=0.0, t_capture=t0 + 100_000_000)
+        p = nav.pose_now(v)
+        self.assertAlmostEqual(p.x, 0.11, delta=1e-4)        # 倍率 1.1
+        self.assertAlmostEqual(p.yaw, 0.0, delta=1e-6)       # 読み 0.1 − ゼロ点 0.1
+
+    def test_idle_calibrates_gyro_bias_while_standing_still(self):
+        """LOCATE 中（`update()` を呼ばない）でも、止まっていればジャイロのゼロ点を学ぶ。"""
+        from unittest import mock
+        from raspi.auto import _slam2d_nav as mod
+        nav = mod.Slam2dNav(resolution=0.05, size_m=8.0)
+        clock = [100.0]
+        with mock.patch.object(mod.time, "monotonic", lambda: clock[0]):
+            for _ in range(60):
+                clock[0] += 0.02
+                nav.idle(yaw_rate=0.02, speed=0.0)
+        self.assertGreater(nav._fe.motion._bias.still_updates, 10)
+        self.assertAlmostEqual(nav._fe.motion.bias, 0.02, delta=0.002)
+
+    def test_missing_g2opy_disables_loop_closure_and_keeps_running(self):
+        from unittest import mock
+        from raspi.auto._slam2d_nav import Slam2dNav
+        real_import = __import__
+
+        def fake_import(name, *a, **k):
+            if name == "slam2d.pipeline" or name.startswith("slam2d.pipeline"):
+                raise ImportError("g2opy が無い（テスト）")
+            return real_import(name, *a, **k)
+
+        with mock.patch("builtins.__import__", fake_import):
+            nav = Slam2dNav(resolution=0.05, size_m=4.0, loop_closure=True)
+        self.assertEqual(nav.loop_closures, 0)
+        self.assertFalse(nav._backend_active)
+        nav.reset()          # 再構築（planner の reset）でも落ちない
+
+
+class TestSpeedProfileFloor(unittest.TestCase):
+    def test_v_min_does_not_lift_speed_above_the_lateral_limit(self):
+        """`v_min` は直線の下限。横の限界から決まる速度がそれより低い所はそちらを採る。"""
+        from raspi.nav import raceline as rl
+        t = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+        xy = np.c_[0.15 * np.cos(t), 0.15 * np.sin(t)]          # 半径 15cm（κ≈6.7）
+        k = rl.speed_kappa(xy)
+        kw = dict(v_max=3.0, v_min=0.8, a_lat=2.0, a_accel=2.8, a_brake=2.5)
+        lim = np.sqrt(2.0 / np.maximum(k, 1e-6))
+        self.assertLess(float(lim.max()), 0.8)                   # 前提: 横の限界が v_min より低い
+        v = rl.speed_profile(xy, k, **kw)
+        np.testing.assert_allclose(v, np.minimum(lim, 3.0), rtol=1e-6)
+        va = rl.speed_profile(xy, k, **{**kw, "a_lat": np.full(len(xy), 2.0)})
+        np.testing.assert_allclose(va, v, rtol=1e-6)
+
+    def test_v_min_still_floors_a_gentle_stretch(self):
+        from raspi.nav import raceline as rl
+        t = np.linspace(0.0, 2.0 * np.pi, 240, endpoint=False)
+        xy = np.c_[4.0 * np.cos(t), 2.0 * np.sin(t)]
+        v = rl.speed_profile(xy, rl.speed_kappa(xy), v_max=3.0, v_min=0.35, a_lat=3.0,
+                             a_accel=2.8, a_brake=2.5)
+        self.assertGreaterEqual(float(v.min()), 0.35 - 1e-9)
+
+
+class TestSteerSaturationCap(unittest.TestCase):
+    def test_slows_only_when_saturated_and_off_the_path(self):
+        from types import SimpleNamespace
+        p = Slam2dRaceLine()
+        top = p.vehicle.max_steer
+        prm = {"v_min": 0.35}
+        v = vs(speed=2.0)
+        sat_off = SimpleNamespace(steer=top, cross_track=0.3)
+        sat_on = SimpleNamespace(steer=top, cross_track=0.05)
+        free_off = SimpleNamespace(steer=0.5 * top, cross_track=0.3)
+        self.assertAlmostEqual(p._steer_sat_cap(sat_off, v, prm), 1.6, places=9)
+        self.assertEqual(p._steer_sat_cap(sat_on, v, prm), math.inf)
+        self.assertEqual(p._steer_sat_cap(free_off, v, prm), math.inf)
+        self.assertAlmostEqual(p._steer_sat_cap(sat_off, vs(speed=0.1), prm), 0.35, places=9)
