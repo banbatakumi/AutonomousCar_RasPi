@@ -33,6 +33,7 @@ from charts import (
     runs,
 )
 from eval_model import (
+    SPLIT_NEW,
     SPLIT_TRAIN,
     SPLIT_UNUSED,
     SPLIT_VAL,
@@ -46,7 +47,8 @@ from eval_model import (
 __all__ = ["EvalTab"]
 
 NS = 1_000_000_000
-_SPLIT_LABEL = {SPLIT_VAL: "検証", SPLIT_TRAIN: "学習", SPLIT_UNUSED: "不使用"}
+_SPLIT_LABEL = {SPLIT_VAL: "検証", SPLIT_TRAIN: "学習", SPLIT_UNUSED: "不使用",
+                SPLIT_NEW: "学習後に追加"}
 
 
 class EvalTab:
@@ -166,6 +168,7 @@ class EvalTab:
             self._rows = read_eval(path)
             s = summarize(self._rows)
             v, t = s[SPLIT_VAL], s[SPLIT_TRAIN]
+            new = s.get(SPLIT_NEW)
             if self._with_speed:
                 self.summary_var.set(
                     f"検証 {v['n']}枚: 舵 {v['steer_mae_deg']:.1f}°・速度 {v['speed_mae']:.2f}m/s　"
@@ -175,6 +178,10 @@ class EvalTab:
                 self.summary_var.set(
                     f"検証 {v['n']}枚: 舵 {v['steer_mae_deg']:.1f}°　"
                     f"｜ 学習 {t['n']}枚: 舵 {t['steer_mae_deg']:.1f}°　（速度は学習していない）")
+            if new is not None:
+                self.summary_var.set(
+                    self.summary_var.get()
+                    + f"　｜ 学習後に追加 {new['n']}枚: 舵 {new['steer_mae_deg']:.1f}°")
         self._keys = list(dict.fromkeys((r["source_mcap"], r["cam"]) for r in self._rows))
         labels = [self._label(k) for k in self._keys]
         self.record_combo["values"] = labels

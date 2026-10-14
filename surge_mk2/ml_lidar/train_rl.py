@@ -101,6 +101,7 @@ from ml_lidar.run_info import has_existing_run  # noqa: E402
 
 __all__ = ["RUNS_DIR", "EvalCourseSpec", "EVAL_COURSE_PARAMS", "GeneralizationEvalCallback",
           "build_env_config", "has_existing_run", "make_train_env", "make_eval_vec_env",
+          "build_selection", "load_saved_selection", "resume_seed_offset",
           "build_model", "find_latest_checkpoint", "find_watch_source", "load_saved_env_config",
           "parse_args", "main"]
 
@@ -194,7 +195,38 @@ def build_env_config(args: argparse.Namespace) -> EnvConfig:
         dynamics_jitter_frac=args.dynamics_jitter_frac,
         obstacle_prob=args.obstacle_prob,
         max_obstacles=args.max_obstacles,
+        # 新しいrunの学習から効く項目。`EnvConfig`の既定は旧runを読むための従来値（OFF）のままで、
+        # ここで明示した値を`env_config.json`へ保存する（保存値が無い旧runは従来値で動く）
+        windowed_progress=args.windowed_progress,
+        auto_stop=args.auto_stop,
+        lidar_dr=args.lidar_dr,
+        lidar_delay=args.lidar_delay,
+        lidar_mount_yaw_err_deg=args.lidar_mount_yaw_err_deg,
+        steer_offset_jitter_rad=args.steer_offset_jitter_rad,
     )
+
+
+#: 新規runのモデル選定（`GeneralizationEvalCallback`）の設定。`env_config.json`の`selection`に保存し、
+#: 無い旧runは従来どおり（毎回違うシード・`lap_ratio/lap_rate`）で選ぶ
+_LEGACY_SELECTION: dict = {"fixed_seed": None, "metric": "lap_time"}
+
+
+def build_selection(args: argparse.Namespace, cfg: EnvConfig) -> dict:
+    """新規runの選定設定。評価コースの集合は固定（比較の土台を揃える）、障害物ありのrunは
+    理想ラップが成り立たないので衝突・停止を含む失敗率（`1 - lap_rate`）を主指標にする。"""
+    return {"fixed_seed": args.gen_eval_seed,
+            "metric": "fail_rate" if cfg.obstacle_prob > 0.0 else "lap_time"}
+
+
+def load_saved_selection(run_dir: Path) -> dict:
+    """`<run_dir>/env_config.json`の`selection`。無い（旧run）なら従来の選定設定。"""
+    path = run_dir / "env_config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return dict(_LEGACY_SELECTION)
+    sel = data.get("selection")
+    return {**_LEGACY_SELECTION, **sel} if isinstance(sel, dict) else dict(_LEGACY_SELECTION)
 
 
 def _max_episode_steps(cfg: EnvConfig, episode_s: float) -> int:
@@ -214,6 +246,19 @@ def find_latest_checkpoint(run_dir: Path) -> Path | None:
         return max(candidates, key=_steps)
     final = run_dir / "final_model.zip"
     return final if final.exists() else None
+
+
+def resume_seed_offset(resume_path: Path) -> int:
+    """`--resume`で学習環境のシードへ足す値（再開点ごとに違い、同じ再開点なら同じ）。
+
+    チェックポイント名のステップ数を使う。`final_model`など数が取れなければ、更新時刻から作る。
+    n_envsぶんの連番（`seed+i`）と重ならないよう1000の倍数にする。
+    """
+    try:
+        steps = int(resume_path.stem.split("_")[-2])
+    except (IndexError, ValueError):
+        steps = int(resume_path.stat().st_mtime) if resume_path.exists() else 1
+    return 1000 * (1 + steps % 1_000_000)
 
 
 def find_watch_source(run_dir: Path) -> tuple[Path, float] | None:
@@ -295,36 +340,65 @@ class GeneralizationEvalCallback(BaseCallback):
     ——周回率が落ちれば（衝突してやり直す前提で）比例して悪化する、という解釈。
     1本も完走できなかった評価回はスコアを付けず、前のbestを保持する。
 
+    ## 新規runの選定（`env_config.json`の`selection`）
+
+    - **固定シード集合**（`fixed_seed`）: 毎回違うコース集合のn=200の最良値を取ると、
+      運の良い評価回がbestに残る（勝者の呪い）。新規runは同じ基準シードを使い続け、
+      チェックポイント間を同じコース集合で比べる（同じ集合への過適合は、学習側が毎回
+      違うコースを引くのでほぼ起きない）。
+    - **主指標**（`metric`）: 障害物ありのrunは理想ラップが障害物を避けられず
+      `lap_ratio`が成り立たないので、`1 - lap_rate`（衝突・停止・時間切れの率）を主、
+      `mean_lap_ratio`を従にする。障害物なしは従来の`mean_lap_ratio / lap_rate`。
+    - 完走だけで平均した`mean_lap_ratio`は生存者バイアスを持つ（難しいコースで落ちた
+      エピソードが平均から外れる）ので、`lap_rate`で割る形（従来）か`1 - lap_rate`を使う。
+    - 保存値が無い旧runは従来どおり（毎回違うシード・`lap_time`）。
+
     **`--resume`の注意**: 旧runの`generalization_evaluations.npz`には`mean_lap_ratio`/
     `lap_rate`列が無いので過去のbestスコアを復元できない。その場合はresume後の最初の
     評価が無条件にbestになる（既存の`best_model_generalized.zip`を上書きしうる）。
     """
 
     def __init__(self, cfg: EnvConfig, save_dir: Path, eval_freq: int, n_episodes: int,
-                episode_s: float, verbose: int = 0) -> None:
+                episode_s: float, verbose: int = 0, *, fixed_seed: int | None = None,
+                metric: str = "lap_time") -> None:
+        """:param fixed_seed: 指定すると毎回この基準シードで同じコース集合を評価する
+            （チェックポイント間の比較が同じ土台になる）。`None`は従来どおり
+            `num_timesteps`から作る毎回違うシード。新規runだけが指定する
+        :param metric: `"lap_time"`＝`mean_lap_ratio / lap_rate`（従来）、`"fail_rate"`＝
+            `1 - lap_rate`（衝突・停止・時間切れ）を主、`mean_lap_ratio`を従にする。
+            障害物ありのrunは理想ラップが成り立たないので後者
+        """
         super().__init__(verbose)
+        if metric not in ("lap_time", "fail_rate"):
+            raise ValueError(f"unknown metric: {metric}")
         self.cfg = dataclasses.replace(cfg, randomize_lidar=True, randomize_dynamics=True)
         self.save_dir = save_dir
         self.eval_freq = max(1, eval_freq)
         self.n_episodes = n_episodes
         self.episode_s = episode_s
+        self.fixed_seed = fixed_seed
+        self.metric = metric
         self._log_path = save_dir / "generalization_evaluations.npz"
         (self._timesteps, self._mean_rewards, self._collision_rates, self._mean_speeds,
          self._mean_abs_steer_diffs, self._steer_sign_flip_rates,
          self._mean_lap_ratios, self._lap_rates) = self._load_history()
-        scores = [s for s in (self._score(lr, lp)
+        scores = [s for s in (self._score(lr, lp, metric)
                               for lr, lp in zip(self._mean_lap_ratios, self._lap_rates))
                   if s is not None]
         self.best_score = min(scores) if scores else np.inf
 
     @staticmethod
-    def _score(mean_lap_ratio: float | None, lap_rate: float) -> float | None:
+    def _score(mean_lap_ratio: float | None, lap_rate: float,
+               metric: str = "lap_time") -> float | None:
         """選定スコア（小さいほど良い）。クラスdocstring「選定基準」参照。
 
         `None`は「この評価回では順位づけできない（1本も完走していない）」の意。
+        `metric="fail_rate"`は完走率を主にし、同率なら`mean_lap_ratio`が小さい方（`1e-3`倍で従）。
         """
         if mean_lap_ratio is None or not np.isfinite(mean_lap_ratio) or lap_rate <= 0.0:
             return None
+        if metric == "fail_rate":
+            return float((1.0 - lap_rate) + 1e-3 * mean_lap_ratio)
         return float(mean_lap_ratio / lap_rate)
 
     def _load_history(self) -> tuple[list[int], list[float], list[float], list[float],
@@ -352,7 +426,7 @@ class GeneralizationEvalCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_freq != 0:
             return True
-        base_seed = int(self.num_timesteps)
+        base_seed = int(self.num_timesteps) if self.fixed_seed is None else int(self.fixed_seed)
         result = eval_stats_evaluate(self.model, self.cfg, n_episodes=self.n_episodes,
                                      episode_s=self.episode_s, base_seed=base_seed)
         self._timesteps.append(self.num_timesteps)
@@ -385,7 +459,7 @@ class GeneralizationEvalCallback(BaseCallback):
                  f"mean_speed={result['mean_speed']:.2f}m/s "
                  f"mean_abs_steer_diff={result['mean_abs_steer_diff']:.3f} "
                  f"steer_sign_flip_rate={result['steer_sign_flip_rate']:.1%}")
-        score = self._score(lap_ratio, result["lap_rate"])
+        score = self._score(lap_ratio, result["lap_rate"], self.metric)
         if score is not None and score < self.best_score:
             self.best_score = score
             self.model.save(str(self.save_dir / "best_model_generalized"))
@@ -488,6 +562,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="静的な円柱障害物を置くコースの割合（0で無効）")
     p.add_argument("--max-obstacles", type=int, default=4,
                    help="障害物を置くコースで1〜この個数を一様に引く")
+    # 新規runの既定ON（`EnvConfig`の既定は旧runを読むための従来値のまま。保存値が無い旧runは従来どおり）
+    bool_opt = argparse.BooleanOptionalAction
+    p.add_argument("--windowed-progress", action=bool_opt, default=True,
+                   help="進捗の射影を前回の添字の前後だけに限り、1ステップの進捗を"
+                        "max_speed*dt*1.5で打ち切る（大域最近傍は1ステップに最大3.5m飛ぶ）")
+    p.add_argument("--auto-stop", action=bool_opt, default=True,
+                   help="STM32の自動停止（停止距離以内の前方矩形にLiDAR点3点以上で最大制動）を"
+                        "学習環境で模す。実機で自動停止に繰り返し止められる方策を避ける")
+    p.add_argument("--lidar-dr", action=bool_opt, default=True,
+                   help="LiDARのノイズ・欠測をエピソードごとに揺らす")
+    p.add_argument("--lidar-delay", action=bool_opt, default=True,
+                   help="LiDARの伝送遅延（VirtualLidar.pollのgen_ns）を反映する。--lidar-drがON"
+                        "なら遅延量も0〜40msで揺らす")
+    p.add_argument("--lidar-mount-yaw-err-deg", type=float, default=2.0,
+                   help="LiDAR取付ヨー角の誤差の上限[deg]（エピソードごとに±一様）。0で無し")
+    p.add_argument("--steer-offset-jitter-rad", type=float, default=0.01,
+                   help="舵角オフセット(vehicle.tomlのsteer_offset_rad)の揺らし幅[rad]。0で無し")
+    p.add_argument("--gen-eval-seed", type=int, default=7000,
+                   help="汎化性能評価（best_model_generalizedの選定）の基準シード。毎回これを"
+                        "使い同じコース集合で比べる（新規runのみ。resumeは保存済みの設定を使う）")
     p.add_argument("--no-randomize-lidar", action="store_true")
     p.add_argument("--no-randomize-dynamics", action="store_true")
 
@@ -573,6 +667,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.no_randomize_dynamics:
             cfg.randomize_dynamics = False
 
+    selection = load_saved_selection(run_dir) if resuming else build_selection(args, cfg)
     max_episode_steps = _max_episode_steps(cfg, args.episode_s)
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -585,21 +680,28 @@ def main(argv: list[str] | None = None) -> None:
         (run_dir / "env_config.json").write_text(
             json.dumps({**dataclasses.asdict(cfg),
                         "max_steer": VehicleSpec.load().max_steer,
-                        "steer_link": list(Vehicle.load().steer_link)},
+                        "steer_link": list(Vehicle.load().steer_link),
+                        "selection": selection},
                        indent=2, ensure_ascii=False), encoding="utf-8")
 
-    env_fns = [make_train_env(cfg, max_episode_steps, seed=args.seed + i)
-              for i in range(args.n_envs)]
-    vec_env: VecEnv = (SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
-    eval_env = make_eval_vec_env(cfg, max_episode_steps)
-
+    resume_path = None
+    seed_offset = 0
     if resuming:
         resume_path = find_latest_checkpoint(run_dir)
         if resume_path is None:
             print(f"!! {run_dir} に再開対象（checkpoints/またはfinal_model.zip）が無い。"
                  "--overwriteで0から始めること", file=sys.stderr)
             raise SystemExit(1)
-        print(f"→ {resume_path} から再開する")
+        seed_offset = resume_seed_offset(resume_path)
+
+    # 再開時は学習環境のシードをずらす（同じシードだと、最初の学習と同じコース列をもう一度引く）
+    env_fns = [make_train_env(cfg, max_episode_steps, seed=args.seed + seed_offset + i)
+              for i in range(args.n_envs)]
+    vec_env: VecEnv = (SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
+    eval_env = make_eval_vec_env(cfg, max_episode_steps)
+
+    if resuming:
+        print(f"→ {resume_path} から再開する（学習環境のシードを+{seed_offset}ずらす）")
         model = PPO.load(str(resume_path), env=vec_env, device=args.device,
                          tensorboard_log=str(run_dir / "tb"))
     else:
@@ -626,6 +728,8 @@ def main(argv: list[str] | None = None) -> None:
             n_episodes=args.gen_eval_episodes,
             episode_s=args.episode_s,
             verbose=1,
+            fixed_seed=selection["fixed_seed"],
+            metric=selection["metric"],
         ),
     ]
 

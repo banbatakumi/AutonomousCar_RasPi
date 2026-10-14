@@ -9,6 +9,13 @@
 
 `sim/courses/`の自作コース（`--course`で指定）は学習プロセスに一切関与しない確認専用。指定しなければ`course_gen`のランダムコースを使う。
 
+## 最高速度（`--max-speed`）
+
+実機のGUIの`E2ELidar`「最高速度」既定は1.0m/sで、学習時の`max_speed`（2.0）より低い
+＝**学習分布の外**。省略時はこの実機既定のまま走らせる（実機で触らないときの挙動を見る）。
+`--max-speed model`でモデルの契約JSONが持つ学習時の値、`--max-speed 1.5`のように数値で
+上書きもできる。学習どおりの走りを見たいときは`model`、実機の見え方を確かめたいときは省略。
+
 オレンジの破線は理想ライン（MCL、`sim/raceline.py`の`compute_raceline_xy`）。
 学習には一切関与しない診断用オーバーレイで、どのモデルでも常に描く——
 「このモデルが理想ラインからどれだけ離れているか」を目視する比較材料。
@@ -56,7 +63,14 @@ class Watcher:
     """
 
     def __init__(self, model_path: Path, course: Course, *, dt: float = EnvConfig().dt,
-                physics_substep: float = 0.005, params: SimParams | None = None) -> None:
+                physics_substep: float = 0.005, params: SimParams | None = None,
+                max_speed: float | str | None = None) -> None:
+        """:param max_speed: `E2ELidar`の「最高速度」パラメータ（GUIのスライダ相当）。
+            `None`＝GUIの既定値（実機で何も触らないときと同じ。学習時の`max_speed`より
+            低いことが多く、学習分布の外になる）、数値＝その値、`"model"`＝モデルの契約JSONが
+            持つ学習時の`max_speed`。実機の挙動を見たいときは`None`、学習どおりの走りを
+            見たいときは`"model"`
+        """
         self.dt = dt
         self.physics_substep = physics_substep
         self.course = course
@@ -69,6 +83,12 @@ class Watcher:
         self.t_ns = 0
         self.planner = E2ELidar(model_path=model_path)
         self.planner.reset()
+        if max_speed == "model":
+            self._plan_overrides = {"max_speed": self.planner._model_max_speed}
+        elif max_speed is None:
+            self._plan_overrides = {}
+        else:
+            self._plan_overrides = {"max_speed": float(max_speed)}
         self._pump_lidar()
 
     def _pump_lidar(self) -> None:
@@ -90,7 +110,7 @@ class Watcher:
     def step(self) -> dict:
         """1制御周期ぶん進める。`E2ELidar.plan()`の戻り値をそのまま反映する。"""
         vs = VehicleState(speed=self.vehicle.speed_measured, steer_actual=self.vehicle.steer_actual)
-        params = E2ELidar.merged({})
+        params = E2ELidar.merged(self._plan_overrides)
         state = self.planner.plan(self.scan, vs, params, self.dt)
 
         sp = self.vehicle.spec
@@ -140,7 +160,7 @@ def run(args: argparse.Namespace) -> None:
 
     course = _load_course(args)
     model_path = args.models_dir / f"{args.model}.onnx"
-    watcher = Watcher(model_path, course, dt=args.dt)
+    watcher = Watcher(model_path, course, dt=args.dt, max_speed=_parse_max_speed(args.max_speed))
     footprint = np.asarray(VehicleSpec.load().footprint)
 
     fig, ax = plt.subplots(figsize=(7, 7))
@@ -212,6 +232,13 @@ def run(args: argparse.Namespace) -> None:
     plt.show()
 
 
+def _parse_max_speed(value: str | None) -> float | str | None:
+    """`--max-speed`の値。`None`・`"model"`はそのまま、数値は`float`にする。"""
+    if value is None or value == "model":
+        return value
+    return float(value)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ml_lidar 観戦（実車と同じplan()契約で駆動）")
     p.add_argument("--model", required=True, help="`models/e2e_lidar/<name>.onnx`の<name>")
@@ -222,6 +249,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # 既定は`EnvConfig.dt`に追従させる（観戦だけ別の周期で回すと、
     # 実車・学習と違う応答を見て判断してしまう）
     p.add_argument("--dt", type=float, default=EnvConfig().dt)
+    p.add_argument("--max-speed", default=None,
+                   help="E2ELidarの最高速度[m/s]。省略＝GUIの既定値（実機で触らないときと同じ。"
+                        "学習時のmax_speedより低く、学習分布の外）。`model`＝モデルの契約JSONの"
+                        "学習時の値。数値ならその値")
     return p.parse_args(argv)
 
 

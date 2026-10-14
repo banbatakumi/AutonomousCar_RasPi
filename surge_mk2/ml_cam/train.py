@@ -16,6 +16,7 @@ import json
 import random
 import sys
 import time
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,7 +27,8 @@ from torch.utils.data import DataLoader  # noqa: E402
 from dataset import DrivableDataset, list_labeled_pairs  # noqa: E402
 from model import DrivableSegModel  # noqa: E402
 
-__all__ = ["iou_score", "split_pairs", "train_one_epoch", "evaluate", "pick_device"]
+__all__ = ["iou_score", "split_pairs", "split_pairs_blocks", "train_one_epoch", "evaluate",
+           "pick_device"]
 
 
 def split_pairs(pairs: list, val_ratio: float = 0.15,
@@ -43,6 +45,51 @@ def split_pairs(pairs: list, val_ratio: float = 0.15,
         return shuffled, []
     n_val = max(1, int(round(len(shuffled) * val_ratio)))
     return shuffled[n_val:], shuffled[:n_val]
+
+
+def _frame_block(frame: Path, block_s: float) -> str | None:
+    """フレームが属する時間ブロックの名前。`extract_frames.py`の命名
+    `<mcap名>_<cam>_<撮像ns>.jpg`から「元ファイル+カメラ」と時刻ブロックを作る。
+    形式に合わない名前は`None`（呼び出し側がフレーム単位に倒す）。"""
+    head, sep, tail = frame.stem.rpartition("_")
+    if not sep or not tail.isdigit():
+        return None
+    block = int(tail) // max(1, int(block_s * 1_000_000_000))
+    return f"{head}:{block}"
+
+
+def split_pairs_blocks(pairs: list, val_ratio: float = 0.15, seed: int = 0,
+                       block_s: float = 5.0) -> tuple[list, list]:
+    """train/val に**時間ブロック単位**で分ける（`ml_cam_e2e/samples.py`と同じ考え方）。
+
+    連続フレームはほぼ同じ絵なので、フレーム単位でシャッフルすると、train の隣のフレームが
+    val に漏れて val_iou が過大になる。`block_s`秒のかたまり（元ファイル・カメラ別）を
+    まるごと振り分ける。ブロックを`seed`で決まる順に並べ、val のフレーム数が
+    `val_ratio`に届くまで val に回す（trainを1ブロックは残す）。ブロックが1つしか
+    取れない（名前が`extract_frames.py`形式でない・短い録画）ときはフレーム単位
+    （`split_pairs`）へ倒す。
+    """
+    blocks: dict[str, list] = {}
+    for pair in pairs:
+        key = _frame_block(Path(pair[0]), block_s)
+        if key is None:
+            return split_pairs(pairs, val_ratio, seed)
+        blocks.setdefault(key, []).append(pair)
+    if len(blocks) < 2:
+        return split_pairs(pairs, val_ratio, seed)
+    order = sorted(blocks, key=lambda k: zlib.crc32(f"{k}:{seed}".encode()))
+    n_val_target = max(1, int(round(len(pairs) * val_ratio)))
+    val_keys: list[str] = []
+    n_val = 0
+    for key in order[:-1]:                 # trainに最低1ブロックは残す
+        if n_val >= n_val_target:
+            break
+        val_keys.append(key)
+        n_val += len(blocks[key])
+    chosen = set(val_keys)
+    val = [pair for key in val_keys for pair in blocks[key]]
+    train = [pair for key in order if key not in chosen for pair in blocks[key]]
+    return train, val
 
 
 def iou_score(pred: torch.Tensor, target: torch.Tensor, *, threshold: float = 0.5,
@@ -111,6 +158,9 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--size", default="224x224")
     ap.add_argument("--val-ratio", type=float, default=0.15)
+    ap.add_argument("--block-s", type=float, default=5.0,
+                    help="train/valを分ける時間ブロックの長さ[s]。隣のフレームがvalに漏れない"
+                         "ようにブロック単位で振り分ける")
     ap.add_argument("--no-pretrained", action="store_true",
                     help="ImageNet 事前学習重みを使わない（オフライン環境・動作確認向け）")
     ap.add_argument("--seed", type=int, default=0,
@@ -129,7 +179,8 @@ def main() -> int:
               f"先に `ml_cam/annotate.py` でラベル付けしてください", file=sys.stderr)
         return 2
 
-    train_pairs, val_pairs = split_pairs(pairs, args.val_ratio, seed=args.seed)
+    train_pairs, val_pairs = split_pairs_blocks(pairs, args.val_ratio, seed=args.seed,
+                                                block_s=args.block_s)
     train_ds = DrivableDataset(train_pairs, size=(w, h), augment=True)
     val_ds = DrivableDataset(val_pairs, size=(w, h), augment=False)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)

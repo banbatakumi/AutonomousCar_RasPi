@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 import samples as S  # noqa: E402
 
-__all__ = ["EVAL_COLUMNS", "SPLIT_TRAIN", "SPLIT_VAL", "SPLIT_UNUSED",
+__all__ = ["EVAL_COLUMNS", "SPLIT_TRAIN", "SPLIT_VAL", "SPLIT_UNUSED", "SPLIT_NEW",
            "split_of", "speed_trained", "load_train_config", "read_eval", "summarize",
            "worst_segments"]
 
@@ -43,6 +43,9 @@ SPLIT_TRAIN = "train"
 SPLIT_VAL = "val"
 #: 除外区間・後退・静止など、学習に使っていないフレーム。予測は出すが誤差の集計には入れない
 SPLIT_UNUSED = "unused"
+#: 学習後に追加された記録（`train_config.json`の`train_sources`に無い）。学習にも検証にも
+#: 使っていないので、「train」と誤表示せず別に数える（本当に見たことのないデータでの誤差）
+SPLIT_NEW = "new"
 
 NS = 1_000_000_000
 
@@ -50,6 +53,9 @@ NS = 1_000_000_000
 def split_of(sample: S.Sample, exclusions: list[S.Exclusion], train_cfg: dict) -> str:
     if not S.usable(sample, exclusions):
         return SPLIT_UNUSED
+    sources = train_cfg.get("train_sources")
+    if sources is not None and sample.source_mcap not in sources:
+        return SPLIT_NEW
     is_val = S.is_val(sample.source_mcap, sample.t_ns,
                       block_s=float(train_cfg.get("block_s", 5.0)),
                       val_ratio=float(train_cfg.get("val_ratio", 0.15)),
@@ -89,9 +95,13 @@ def read_eval(csv_path: Path) -> list[dict]:
 
 
 def summarize(rows: list[dict]) -> dict[str, dict]:
-    """`{"val": {"n", "steer_mae_deg", "speed_mae"}, "train": {...}}`。"""
+    """`{"val": {"n", "steer_mae_deg", "speed_mae"}, "train": {...}}`。学習後に追加された
+    記録（`new`）があれば同じ形で`"new"`も入る。"""
     out = {}
-    for name in (SPLIT_VAL, SPLIT_TRAIN):
+    names = [SPLIT_VAL, SPLIT_TRAIN]
+    if any(r["split"] == SPLIT_NEW for r in rows):
+        names.append(SPLIT_NEW)
+    for name in names:
         part = [r for r in rows if r["split"] == name]
         n = len(part)
         out[name] = {

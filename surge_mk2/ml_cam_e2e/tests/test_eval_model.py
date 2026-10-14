@@ -13,6 +13,7 @@ import samples as S  # noqa: E402
 from eval_model import (  # noqa: E402
     EVAL_COLUMNS,
     SPLIT_TRAIN,
+    SPLIT_NEW,
     SPLIT_UNUSED,
     SPLIT_VAL,
     read_eval,
@@ -110,6 +111,25 @@ class TestSplitOf(unittest.TestCase):
         ex = [S.Exclusion("a.mcap", "front", 0, NS)]
         self.assertEqual(split_of(self._s(0.5), ex, {}), SPLIT_UNUSED)
         self.assertEqual(split_of(self._s(5.0, target_speed=-1.0), [], {}), SPLIT_UNUSED)
+
+
+class TestNewRecordings(unittest.TestCase):
+    _s = TestSplitOf._s
+
+    def test_recording_added_after_training_is_new_not_train(self):
+        cfg = {"block_s": 2.0, "val_ratio": 0.3, "seed": 7, "train_sources": ["old.mcap"]}
+        s = self._s(1.0)           # source_mcap="a.mcap"は学習の後に増えた
+        self.assertEqual(split_of(s, [], cfg), SPLIT_NEW)
+
+    def test_without_train_sources_old_behaviour(self):
+        s = self._s(1.0)
+        self.assertIn(split_of(s, [], {"block_s": 2.0}), (SPLIT_VAL, SPLIT_TRAIN))
+
+    def test_summarize_counts_new_separately(self):
+        got = summarize([_row(0, 1.0, split=SPLIT_NEW), _row(1, 1.0, split=SPLIT_TRAIN)])
+        self.assertEqual(got[SPLIT_NEW]["n"], 1)
+        self.assertEqual(got[SPLIT_TRAIN]["n"], 1)
+        self.assertNotIn(SPLIT_NEW, summarize([_row(0, 1.0)]))
 
 
 class TestReadEval(unittest.TestCase):

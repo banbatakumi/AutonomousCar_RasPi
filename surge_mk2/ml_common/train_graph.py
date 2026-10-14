@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import tkinter as tk
 
 __all__ = ["TrainCurveCanvas"]
@@ -54,31 +55,30 @@ class TrainCurveCanvas:
         plot_w = max(width - 2 * pad, 1)
         plot_h = max(height - 2 * pad, 1)
 
-        def points(values: list[float]) -> list[tuple[float, float]]:
-            vmin, vmax = min(values), max(values)
+        def draw(values: list[float | None], color: str) -> list[float]:
+            """有限な値だけを線で結ぶ（`None`・nan・infは飛ばす）。描いた値を返す。"""
+            pts = [(i, v) for i, v in enumerate(values)
+                   if v is not None and math.isfinite(v)]
+            if not pts:
+                return []
+            vals = [v for _, v in pts]
+            vmin, vmax = min(vals), max(vals)
             span = vmax - vmin
-            pts = []
-            for i, v in enumerate(values):
+
+            def xy(i: int, v: float) -> tuple[float, float]:
                 x = pad + plot_w * i / max(n - 1, 1)
                 y = pad + plot_h * (1 - (v - vmin) / span) if span > 0 else pad + plot_h / 2
-                pts.append((x, y))
-            return pts
+                return x, y
 
-        loss_pts = points(self._losses)
-        for (x1, y1), (x2, y2) in zip(loss_pts, loss_pts[1:]):
-            c.create_line(x1, y1, x2, y2, fill="#d33", width=2)
+            for (i1, v1), (i2, v2) in zip(pts, pts[1:]):
+                (x1, y1), (x2, y2) = xy(i1, v1), xy(i2, v2)
+                c.create_line(x1, y1, x2, y2, fill=color, width=2)
+            return vals
+
+        draw(self._losses, "#d33")
         c.create_text(pad, 10, anchor="w", text=f"loss: {self._losses[-1]:.4f}", fill="#d33")
 
-        metric_values = [v for v in self._metrics if v is not None]
+        metric_values = draw(self._metrics, "#37c")
         if metric_values:
-            metric_pts_all = [(i, v) for i, v in enumerate(self._metrics) if v is not None]
-            vmin, vmax = min(metric_values), max(metric_values)
-            span = vmax - vmin
-            for (i1, v1), (i2, v2) in zip(metric_pts_all, metric_pts_all[1:]):
-                x1 = pad + plot_w * i1 / max(n - 1, 1)
-                x2 = pad + plot_w * i2 / max(n - 1, 1)
-                y1 = pad + plot_h * (1 - (v1 - vmin) / span) if span > 0 else pad + plot_h / 2
-                y2 = pad + plot_h * (1 - (v2 - vmin) / span) if span > 0 else pad + plot_h / 2
-                c.create_line(x1, y1, x2, y2, fill="#37c", width=2)
             c.create_text(width - pad, 10, anchor="e",
                           text=f"{self.metric_label}: {metric_values[-1]:.3f}", fill="#37c")

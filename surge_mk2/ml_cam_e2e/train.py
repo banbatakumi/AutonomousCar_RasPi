@@ -180,6 +180,9 @@ def main() -> int:
         "balance": args.balance, "speed_weight": args.speed_weight,
         "flip": not args.no_flip, "epochs": args.epochs,
         "n_train": len(train_s), "n_val": len(val_s),
+        # 学習に使った記録。後から追加された記録を評価で「train」と誤表示しないための印
+        # （`eval_model.split_of`）
+        "train_sources": sorted({s.source_mcap for s in used}),
     }
 
     def write_config(**extra) -> None:

@@ -146,6 +146,7 @@ squashingの連続制御は報酬・探索ノイズの設計に関わらず両�
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
@@ -173,6 +174,16 @@ NS = 1_000_000_000
 _MAX_RESET_PUMP_S = 0.25
 #: `reset()`でスタート姿勢が壁に埋まっていた場合の作り直し上限回数
 _MAX_RESET_RETRY = 5
+
+#: STM32自動停止（`VEHICLE_AUTO_STOP_*`）と同じ規則の定数。ファームの値は
+#: `/AutonomousCar/Program/MainF446RE_V3`の`vehicle`層。実機未計測の遅延見積りもそのまま写す
+_AUTO_STOP_DELAY_S = 0.1
+_AUTO_STOP_DECEL_M_S2 = 3.0
+_AUTO_STOP_MARGIN_M = 0.15
+_AUTO_STOP_HALF_WIDTH_M = 0.15
+_AUTO_STOP_MIN_POINTS = 3
+#: ラッチを解く車速 [m/s]（止まったとみなす）
+_AUTO_STOP_STOPPED_M_S = 0.05
 
 
 @dataclass
@@ -238,6 +249,29 @@ class EnvConfig:
     #: 固定コース（`course=`指定、evalの使い回し）には置かない
     obstacle_prob: float = 0.0
     max_obstacles: int = 4
+    #: 進捗の弧長射影を「前回の添字の前後だけ」に限る（窓付き射影）＋1ステップの進捗を
+    #: `max_speed*dt*1.5`でクランプする。**既定OFF＝従来の大域最近傍**（旧runの再評価・
+    #: 再開は従来どおり）。大域最近傍は、道幅が広い・折り返しが近いコースで隣の区間の
+    #: 中心線へ射影が飛び（実測で最大3.5m＝報酬+35）、飛びが1ステップの報酬に乗る。
+    #: `train_rl.py`が新規runで`True`にして`env_config.json`へ保存する
+    windowed_progress: bool = False
+    #: STM32の自動停止（`COMMAND.flags`bit7）を模す。**既定OFF**（旧runは従来どおり）。
+    #: ファームと同じ規則: 停止距離`v*0.1 + v²/(2*3.0) + 0.15`m（車体先端基準）以内の、
+    #: 進行方向・車幅±15cmの矩形にLiDAR点が3点以上あれば最大制動を掛け、止まるまで解除しない。
+    #: 方策が実機で自動停止に繰り返し止められるのを学習中から避けさせるため、新規runでON
+    auto_stop: bool = False
+    #: LiDARのノイズ・欠測を**エピソードごとに**揺らす（`randomize_lidar`がTrueのとき）。
+    #: 既定OFF（旧runは`SimParams()`の固定値）。新規runでON
+    lidar_dr: bool = False
+    #: `VirtualLidar.poll`が返す伝送遅延`gen_ns`を使い、遅延ぶんスキャンの到着を遅らせる
+    #: （`randomize_lidar`がTrueのとき）。既定OFF。`lidar_dr`もONなら遅延量もエピソードごとに揺れる
+    lidar_delay: bool = False
+    #: LiDARの取付ヨー角の誤差の上限 [deg]。エピソードごとに±この範囲の一様乱数を、
+    #: 実機が知らない取付誤差として足す（観測側の`scan_window`は公称取付のまま）。0＝無し
+    lidar_mount_yaw_err_deg: float = 0.0
+    #: 舵角オフセット（`VehicleSpec.steer_offset_rad`）をエピソードごとに揺らす上限 [rad]。
+    #: 0＝無し（`randomize_dynamics`がTrueのとき有効）
+    steer_offset_jitter_rad: float = 0.0
 
 
 class LidarE2EEnv(gym.Env):
@@ -277,7 +311,15 @@ class LidarE2EEnv(gym.Env):
         self._steer = 0.0
         self._steer_target = 0.0
         self._s_prev = 0.0
+        self._s_idx = 0
         self._lap_progress_m = 0.0
+        self._lidar_queue: list = []
+        self._scan_updated = False
+        self._last_proj_idx = 0
+        self._auto_stop_latched = False
+        self._auto_stop_steps = 0
+        self._front_x = 0.0
+        self._lidar_xy = (0.0, 0.0)
         self._centerline_xy: np.ndarray | None = None
         self._centerline_arc: np.ndarray | None = None
         self._total_length = 0.0
@@ -297,6 +339,16 @@ class LidarE2EEnv(gym.Env):
                 break
             if self._fixed_course is not None:
                 break  # 固定コースは作り直せない。壁埋まりはコース側の不備として諦める
+        else:
+            # 5回とも壁に埋まった。埋まったまま始めるとスタート直後に衝突扱いで学習を汚すので、
+            # 乱数を進めつつ埋まらないコースが出るまで作り直す（実際にはほぼ起きない）
+            for _ in range(_MAX_RESET_RETRY * 10):
+                course = random_walk_loop_course(self._rng)
+                body = course.body_samples(spec.footprint)
+                if not course.collides(*course.start, body):
+                    break
+            else:
+                raise RuntimeError("スタート姿勢が壁に埋まらないコースを作れなかった")
         # 障害物はスタート地点の前後を避けて置く（`obstacles._START_CLEAR_*`）ので、
         # 上のスタート姿勢の壁埋まり判定をやり直す必要はない
         if (self._fixed_course is None and self.cfg.obstacle_prob > 0.0
@@ -313,13 +365,20 @@ class LidarE2EEnv(gym.Env):
         self.lidar = VirtualLidar(course, spec, params, seed=lidar_seed)
         self.assembler = ScanAssembler()
         self._scan = None
+        self._lidar_queue = []
+        self._auto_stop_latched = False
+        self._auto_stop_steps = 0
+        self._front_x = max(float(p[0]) for p in spec.footprint)
+        self._lidar_xy = spec.sensor_pose("lidar")[:2]
+        self._apply_extra_randomization(spec, params)
         self._t_ns = 0
         self._steer = 0.0
         self._steer_target = 0.0
         #: 今STM32に効いている指令。`control_latency_s`のあいだは新しい指令ではなく
         #: これが効き続ける（`step()`参照）
         self._applied_cmd = self._drive_input(0.0, 0.0)
-        self._s_prev = self._project_arc_length(self.vehicle.x, self.vehicle.y)
+        self._s_prev = self._project_arc_length(self.vehicle.x, self.vehicle.y, windowed=False)
+        self._s_idx = self._last_proj_idx
         self._lap_progress_m = 0.0
 
         self._pump_lidar_until_scan()
@@ -333,6 +392,11 @@ class LidarE2EEnv(gym.Env):
         self._steer += (steer_cmd - self._steer) * alpha
 
         cmd = self._drive_input(speed_cmd, self._steer)
+        if self.cfg.auto_stop:
+            self._update_auto_stop()
+            if self._auto_stop_latched:
+                cmd = dataclasses.replace(cmd, brake=True, target_speed=0.0)
+                self._auto_stop_steps += 1
 
         n_sub = max(1, int(round(self.cfg.dt / self.cfg.physics_substep)))
         sub_dt = self.cfg.dt / n_sub
@@ -340,6 +404,8 @@ class LidarE2EEnv(gym.Env):
         # （Pi側の処理・中継・UART。`sysid_latency`で実測）。そのあいだは前の指令が効く。
         # 1決定周期を超える遅れは表現しない（実測は数十msの想定）
         n_delay = min(n_sub, int(round(self.vehicle.spec.control_latency_s / sub_dt)))
+        if self._auto_stop_latched:
+            n_delay = 0        # 自動停止はSTM32の内部判定なので指令の伝送遅れが無い
         self._applied_cmd, prev_cmd = cmd, self._applied_cmd
         collided = False
         for i in range(n_sub):
@@ -349,12 +415,28 @@ class LidarE2EEnv(gym.Env):
             hit = self.course.collides(self.vehicle.x, self.vehicle.y, self.vehicle.yaw, self._body)
             self.vehicle.note_collision(hit)
             self._poll_lidar()
+            if self.cfg.auto_stop and self._scan_updated:
+                self._update_auto_stop()
+                if self._auto_stop_latched and not cmd.brake:
+                    cmd = dataclasses.replace(cmd, brake=True, target_speed=0.0)
+                    self._applied_cmd = cmd
+                    n_delay = 0
             if hit:
                 collided = True
                 break
 
         s_now = self._project_arc_length(self.vehicle.x, self.vehicle.y)
         delta = self._progress_delta(s_now)
+        if self.cfg.windowed_progress:
+            # 1ステップで進める上限（`max_speed`の1.5倍）。窓付き射影では通常超えない保険で、
+            # 超えたら進捗だけ打ち切り、基準位置も打ち切った分しか進めない
+            limit = self.cfg.max_speed * self.cfg.dt * 1.5
+            if abs(delta) > limit:
+                delta = math.copysign(limit, delta)
+                s_now = (self._s_prev + delta) % self._total_length
+                self._last_proj_idx = int(np.searchsorted(self._centerline_arc, s_now)) \
+                    % len(self._centerline_arc)
+            self._s_idx = self._last_proj_idx
         self._s_prev = s_now
         self._lap_progress_m += delta
         progress = max(0.0, delta)
@@ -374,6 +456,8 @@ class LidarE2EEnv(gym.Env):
             "lap_progress_m": self._lap_progress_m,
             "collided": collided,
             "speed": self.vehicle.speed,
+            "auto_stop": self._auto_stop_latched,
+            "auto_stop_steps": self._auto_stop_steps,
         }
         return obs, reward, terminated, False, info
 
@@ -406,10 +490,26 @@ class LidarE2EEnv(gym.Env):
     # ── LiDAR ──
 
     def _poll_lidar(self) -> None:
+        """セクタを取り込む。`cfg.lidar_delay`なら`gen_ns`（伝送遅延を足した到着時刻）まで
+        スキャンへ入れず待たせる。OFFなら従来どおり生成した瞬間に入れる。"""
+        self._scan_updated = False
+        queue = self._lidar_queue
         for gen_ns, pkt in self.lidar.poll(self._t_ns, self.vehicle, stm_us):
-            scan = self.assembler.feed(pkt, gen_ns)
-            if scan is not None:
-                self._scan = scan
+            if self.cfg.lidar_delay:
+                queue.append((gen_ns, pkt))
+            else:
+                self._feed(gen_ns, pkt)
+        if queue:
+            queue.sort(key=lambda e: e[0])
+            while queue and queue[0][0] <= self._t_ns:
+                gen_ns, pkt = queue.pop(0)
+                self._feed(gen_ns, pkt)
+
+    def _feed(self, gen_ns: int, pkt) -> None:
+        scan = self.assembler.feed(pkt, gen_ns)
+        if scan is not None:
+            self._scan = scan
+            self._scan_updated = True
 
     def _pump_lidar_until_scan(self) -> None:
         """`reset()`直後、車体は動かさずスキャンが1周ぶん組み上がるまで時計だけ進める。"""
@@ -434,11 +534,31 @@ class LidarE2EEnv(gym.Env):
         self._centerline_xy = xy
         self._centerline_arc = arc
         self._total_length = float(arc[-1] + closing)
+        # 窓の半幅（添字数）。1ステップの上限進捗に余裕0.5mを足し、中心線の平均間隔で割る
+        spacing = max(float(np.mean(seg)), 1e-3) if len(seg) else 1.0
+        reach = self.cfg.max_speed * self.cfg.dt * 1.5 + 0.5
+        self._proj_window = max(2, min(int(math.ceil(reach / spacing)) + 1, len(xy) // 2))
 
-    def _project_arc_length(self, x: float, y: float) -> float:
-        """車体位置をセンターラインへ最近傍射影したときの弧長 [m]。"""
-        d2 = (self._centerline_xy[:, 0] - x) ** 2 + (self._centerline_xy[:, 1] - y) ** 2
-        return float(self._centerline_arc[int(np.argmin(d2))])
+    def _project_arc_length(self, x: float, y: float, *, windowed: bool | None = None) -> float:
+        """車体位置をセンターラインへ最近傍射影したときの弧長 [m]。
+
+        `cfg.windowed_progress`なら前回の添字の前後（`max_speed*dt*1.5`＋余裕ぶん）だけを
+        探す（閉ループなので添字は循環）。`windowed=False`は大域探索（reset用）。
+        最後に選んだ添字は`_last_proj_idx`に残る。
+        """
+        xy = self._centerline_xy
+        n = len(xy)
+        if windowed is None:
+            windowed = self.cfg.windowed_progress
+        if windowed:
+            idx = (self._s_idx + np.arange(-self._proj_window, self._proj_window + 1)) % n
+            d2 = (xy[idx, 0] - x) ** 2 + (xy[idx, 1] - y) ** 2
+            best = int(idx[int(np.argmin(d2))])
+        else:
+            d2 = (xy[:, 0] - x) ** 2 + (xy[:, 1] - y) ** 2
+            best = int(np.argmin(d2))
+        self._last_proj_idx = best
+        return float(self._centerline_arc[best])
 
     def _progress_delta(self, s_now: float) -> float:
         """`s_prev → s_now`の弧長差分。**半周を超える飛びは周回とみなして補正する**——
@@ -454,7 +574,59 @@ class LidarE2EEnv(gym.Env):
             d += self._total_length
         return d
 
+    # ── STM32の自動停止（ファームと同じ規則） ──
+
+    def _update_auto_stop(self) -> None:
+        """最新スキャンと車速から自動停止のラッチを更新する（進行方向は前だけ）。
+
+        停止距離`d_stop = v*0.1 + v²/(2*3.0) + 0.15`m。車体先端から`d_stop`以内、
+        左右±15cmの矩形にLiDAR点が3点以上で作動し、車速がほぼ0になるまで保持する。
+        """
+        if self._scan is None:
+            return
+        v = float(self.vehicle.speed_measured)
+        if self._auto_stop_latched and abs(v) < _AUTO_STOP_STOPPED_M_S:
+            self._auto_stop_latched = False
+        if self._auto_stop_latched:
+            return
+        d_stop = max(v, 0.0) * _AUTO_STOP_DELAY_S + v * v / (2.0 * _AUTO_STOP_DECEL_M_S2) \
+            + _AUTO_STOP_MARGIN_M
+        dist = np.asarray(self._scan.dist, dtype=np.float64)
+        ang = np.deg2rad(np.arange(len(dist), dtype=np.float64))
+        valid = dist > 0.0
+        # LiDAR原点→車体座標（取付オフセットを足す。取付ヨーは公称0として扱う）
+        x = dist * np.cos(ang) + self._lidar_xy[0]
+        y = dist * np.sin(ang) + self._lidar_xy[1]
+        hit = valid & (x > 0.0) & (x - self._front_x <= d_stop) \
+            & (np.abs(y) <= _AUTO_STOP_HALF_WIDTH_M)
+        if int(np.count_nonzero(hit)) >= _AUTO_STOP_MIN_POINTS:
+            self._auto_stop_latched = True
+
     # ── ドメインランダム化 ──
+
+    def _apply_extra_randomization(self, spec: VehicleSpec, params: SimParams) -> None:
+        """`cfg`で有効にした追加のランダム化をエピソードごとに掛ける。全部OFFなら乱数を
+        1つも消費しない（旧runと同じシードで同じ列になる）。
+
+        LiDARのノイズ・欠測・遅延は`SimParams`（`VirtualLidar`が毎回参照する）を直接揺らす。
+        ジャイロはこの環境の観測に入らないので揺らさない。
+        """
+        rng = self._rng
+        if self.cfg.randomize_lidar:
+            if self.cfg.lidar_dr:
+                params.lidar_noise_sigma_m *= float(rng.uniform(0.5, 2.0))
+                params.lidar_noise_rel *= float(rng.uniform(0.0, 2.0))
+                params.lidar_drop_rate = float(rng.uniform(0.0, 0.06))
+                params.lidar_sector_drop_rate = float(rng.uniform(0.0, 0.02))
+                if self.cfg.lidar_delay:
+                    params.lidar_delay_ms = float(rng.uniform(0.0, 40.0))
+                    params.lidar_delay_jitter_ms = float(rng.uniform(0.0, 10.0))
+            if self.cfg.lidar_mount_yaw_err_deg > 0.0:
+                mx, my, myaw = self.lidar.mount
+                err = math.radians(float(rng.uniform(-1.0, 1.0)) * self.cfg.lidar_mount_yaw_err_deg)
+                self.lidar.mount = (mx, my, myaw + err)
+        if self.cfg.randomize_dynamics and self.cfg.steer_offset_jitter_rad > 0.0:
+            spec.steer_offset_rad += float(rng.uniform(-1.0, 1.0)) * self.cfg.steer_offset_jitter_rad
 
     def _sample_sim_params(self) -> SimParams:
         if self.cfg.randomize_lidar:

@@ -22,6 +22,14 @@ class TestDrivableSegModel(unittest.TestCase):
             out = model(x)
         self.assertEqual(out.shape, (2, 1, 64, 64))
 
+    def test_batchnorm_tracks_fast_enough_for_short_fine_tuning(self):
+        """torchvision既定のmomentum=0.01のままだと、短い微調整で推論用の統計が追いつかず
+        学習中と検証・ONNXで挙動が食い違う（`ml_cam_e2e/model.py`と同じ対策）。"""
+        model = DrivableSegModel(pretrained=False)
+        bns = [m for m in model.modules() if isinstance(m, torch.nn.BatchNorm2d)]
+        self.assertTrue(bns)
+        self.assertTrue(all(m.momentum == 0.1 for m in bns))
+
     def test_output_is_a_probability(self):
         """シグモイド出力なので必ず [0, 1] に収まる。"""
         model = DrivableSegModel(pretrained=False)

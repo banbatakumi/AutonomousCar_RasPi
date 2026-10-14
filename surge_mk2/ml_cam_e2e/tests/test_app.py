@@ -27,7 +27,6 @@ from app import (  # noqa: E402
     extract_warning,
     list_model_names,
     next_model_name,
-    parse_epoch_line,
     read_note,
     write_note,
 )

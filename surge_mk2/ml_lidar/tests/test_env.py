@@ -19,6 +19,7 @@ import numpy as np  # noqa: E402
 from ml_lidar.course_gen import random_walk_loop_course  # noqa: E402
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
 from sim.lidar import SCAN_HZ  # noqa: E402
+from sim.vehicle import VehicleSpec  # noqa: E402
 
 
 def _square_centerline(side: float = 2.0, step: float = 0.1) -> np.ndarray:
@@ -217,6 +218,137 @@ class TestEnvSmoke(unittest.TestCase):
         self.assertTrue(terminated, "400ステップ以内に衝突しなかった")
         self.assertTrue(info["collided"])
         self.assertLess(reward, -8.0)
+
+
+class TestWindowedProgress(unittest.TestCase):
+    """窓付き射影は前回の添字の近傍だけを探し、大域最近傍が飛ぶ場所でも1ステップの進捗が
+    `max_speed*dt*1.5`を超えない。既定OFFは従来の大域最近傍のまま。"""
+
+    @staticmethod
+    def _env(windowed: bool) -> LidarE2EEnv:
+        env = LidarE2EEnv(EnvConfig(windowed_progress=windowed))
+        env._prepare_centerline(types.SimpleNamespace(centerline=_square_centerline(side=2.0)))
+        return env
+
+    def test_default_is_global_nearest(self) -> None:
+        self.assertFalse(EnvConfig().windowed_progress)
+
+    def test_window_ignores_far_section(self) -> None:
+        # 往路と復路が0.3mしか離れていない細長い周回。往路上の添字を覚えていれば、
+        # 復路側に少しだけ近い点でも往路へ射影する（大域最近傍は復路へ飛ぶ）
+        out = [(x, 0.0, 0.0) for x in np.arange(0.0, 6.0, 0.1)]
+        back = [(x, 0.3, math.pi) for x in np.arange(6.0, 0.0, -0.1)]
+        env = LidarE2EEnv(EnvConfig(windowed_progress=True))
+        env._prepare_centerline(types.SimpleNamespace(centerline=np.asarray(out + back)))
+        env._s_idx = 30
+        env._last_proj_idx = 30
+        s_win = env._project_arc_length(3.0, 0.17)
+        s_glob = env._project_arc_length(3.0, 0.17, windowed=False)
+        self.assertAlmostEqual(s_win, 3.0, delta=0.11)
+        self.assertGreater(s_glob, 8.0)
+
+    def test_window_wraps_around_loop_end(self) -> None:
+        env = self._env(True)
+        n = len(env._centerline_xy)
+        env._s_idx = n - 1
+        env._last_proj_idx = n - 1
+        # 始点（添字0）は循環で窓に入る
+        s = env._project_arc_length(0.0, 0.0)
+        self.assertAlmostEqual(s, 0.0, delta=0.06)
+
+    def test_step_progress_is_clamped(self) -> None:
+        cfg = EnvConfig(windowed_progress=True)
+        env = LidarE2EEnv(cfg, seed=0)
+        env.reset(seed=0)
+        limit = cfg.max_speed * cfg.dt * 1.5
+        for _ in range(60):
+            _, _, term, _, info = env.step(np.array([0.0, 1.0], dtype=np.float32))
+            self.assertLessEqual(info["progress_m"], limit + 1e-9)
+            if term:
+                break
+
+
+class TestAutoStop(unittest.TestCase):
+    def _env_with_wall(self, auto_stop: bool, gap_m: float) -> LidarE2EEnv:
+        """車体先端から`gap_m`前に壁（LiDARの正面5点）があるスキャンを持つ環境。"""
+        env = LidarE2EEnv(EnvConfig(auto_stop=auto_stop, randomize_lidar=False,
+                                    randomize_dynamics=False), seed=0)
+        env.reset(seed=0)
+        scan = env._scan
+        dist_m = gap_m + env._front_x - env._lidar_xy[0]
+        d = [0.0] * 360
+        for deg in (-3, -1, 0, 1, 3):
+            d[deg % 360] = dist_m
+        scan.dist = d
+        return env
+
+    def test_default_off(self) -> None:
+        self.assertFalse(EnvConfig().auto_stop)
+
+    def test_latches_when_obstacle_within_stop_distance(self) -> None:
+        env = self._env_with_wall(True, 0.1)          # 静止時のd_stop=0.15m以内
+        env._update_auto_stop()
+        self.assertTrue(env._auto_stop_latched)
+
+    def test_far_obstacle_does_not_latch(self) -> None:
+        env = self._env_with_wall(True, 3.0)
+        env._update_auto_stop()
+        self.assertFalse(env._auto_stop_latched)
+
+    def test_stop_distance_grows_with_speed(self) -> None:
+        env = self._env_with_wall(True, 0.9)
+        env._update_auto_stop()
+        self.assertFalse(env._auto_stop_latched)          # 静止（d_stop=0.15m）では作動しない
+        env.vehicle.speed_measured = 2.0                   # 2m/s: 0.2+0.667+0.15
+        env._update_auto_stop()
+        self.assertTrue(env._auto_stop_latched)
+
+    def test_wide_off_axis_points_are_ignored(self) -> None:
+        env = self._env_with_wall(True, 0.1)
+        env._scan.dist = [0.0] * 360
+        for deg in (60, 61, 62, 63):                       # 横向きの壁（矩形の外）
+            env._scan.dist[deg] = 0.3
+        env._update_auto_stop()
+        self.assertFalse(env._auto_stop_latched)
+
+    def test_step_brakes_to_standstill_and_reports(self) -> None:
+        env = LidarE2EEnv(EnvConfig(auto_stop=True, randomize_lidar=False,
+                                    randomize_dynamics=False), seed=3)
+        env.reset(seed=3)
+        stopped = False
+        for _ in range(200):
+            _, _, term, _, info = env.step(np.array([0.0, 1.0], dtype=np.float32))
+            if info["auto_stop"] and info["speed"] < 0.05:
+                stopped = True
+            if term:
+                break
+        self.assertGreater(info["auto_stop_steps"], 0)
+        self.assertTrue(stopped or info["collided"])
+
+
+class TestExtraRandomization(unittest.TestCase):
+    def test_all_off_consumes_no_extra_random_numbers(self) -> None:
+        a = LidarE2EEnv(EnvConfig(), seed=5)
+        b = LidarE2EEnv(EnvConfig(lidar_mount_yaw_err_deg=0.0, steer_offset_jitter_rad=0.0), seed=5)
+        a.reset(seed=5)
+        b.reset(seed=5)
+        self.assertEqual(a._rng.random(), b._rng.random())
+
+    def test_lidar_delay_holds_scan_back(self) -> None:
+        env = LidarE2EEnv(EnvConfig(lidar_delay=True, lidar_dr=True), seed=1)
+        env.reset(seed=1)
+        self.assertGreaterEqual(env.lidar.params.lidar_delay_ms, 0.0)
+        env.step(np.array([0.0, 0.0], dtype=np.float32))
+        self.assertLessEqual(len(env._lidar_queue), 3 * 12)
+
+    def test_mount_error_and_steer_offset_are_applied(self) -> None:
+        env = LidarE2EEnv(EnvConfig(lidar_mount_yaw_err_deg=3.0, steer_offset_jitter_rad=0.02), seed=2)
+        base = VehicleSpec.load()
+        env.reset(seed=2)
+        self.assertNotEqual(env.lidar.mount[2], base.sensor_pose("lidar")[2])
+        self.assertNotEqual(env.vehicle.spec.steer_offset_rad, base.steer_offset_rad)
+        self.assertLessEqual(abs(env.lidar.mount[2] - base.sensor_pose("lidar")[2]),
+                             math.radians(3.0) + 1e-9)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,17 @@
 `<run_dir>/env_config.json`に書き出したものを`--model`から遡って自動で読む。
 見つからなければCLI引数の既定値（`train_rl.py`と同じ）にフォールバックする。
 
+## 指標の読み方の注意
+
+- `lap_time_s`は**静止からの発進を含む**（`reset()`直後の速度0から測る）。一方
+  `reference_lap`の理想ラップは周回中の定常ラップなので、`lap_ratio`には発進ぶん
+  （加速に要する数秒）が上乗せされる。絶対値ではなくモデル同士の比較に使うこと。
+- `stalled`は「完走も衝突もせず、末尾2秒の平均車速が0.1m/s未満」（止まった）。
+  動いているのに制限時間までに1周できなかったものは`timed_out`として分けて数える。
+- 衝突・完走・停止の率には95%のWilson信頼区間を添える（`wilson_interval`）。
+  障害物ありのコースは理想ラインが障害物を避けられず`lap_ratio`が目安にしかならないので、
+  衝突・完走（`1 - lap_rate`）を主指標に読む。
+
 ## `--episodes`は最低でも既定値(300)を使うこと。60では判定を誤る
 
 v1/v2の比較検証（2026-09-07）で、`--episodes 60`程度（当初の既定値）だと結論そのものが
@@ -30,6 +41,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -46,7 +58,27 @@ from sim.course import Course  # noqa: E402
 from sim.raceline import compute_raceline_offsets, compute_speed_profile  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
-__all__ = ["find_env_config", "find_env_config_path", "steer_contract_warnings", "reference_lap", "run_episode", "evaluate", "parse_args", "main"]
+__all__ = ["find_env_config", "find_env_config_path", "steer_contract_warnings", "reference_lap",
+           "wilson_interval", "run_episode", "evaluate", "parse_args", "main"]
+
+#: 「止まっている」とみなす、エピソード末尾の平均車速 [m/s] と、その平均を取る長さ [s]
+_STALL_SPEED_M_S = 0.1
+_STALL_WINDOW_S = 2.0
+
+
+def wilson_interval(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """二項比率`k/n`のWilson信頼区間（既定は95%）。`n=0`は`(0.0, 1.0)`。
+
+    nが小さい・比率が0や1に近いときも正規近似のように範囲外へ出ない。モデル同士の
+    衝突率・完走率の差が誤差かを見るのに使う（区間が重なるなら差を結論にしない）。
+    """
+    if n <= 0:
+        return 0.0, 1.0
+    p = k / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2.0 * n)) / denom
+    half = z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
 
 #: 参照ラインを壁から離す余裕 [m]（`sim.raceline`の既定と同じ）
 _RACELINE_SAFETY_MARGIN_M = 0.03
@@ -219,6 +251,9 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
         collided = collided or bool(info["collided"])
         path.append((env.unwrapped.vehicle.x, env.unwrapped.vehicle.y))
     lap_done = bool(terminated and not collided)
+    tail = speeds[-max(1, int(round(_STALL_WINDOW_S / cfg.dt))):]
+    unfinished = (not collided) and (not lap_done)
+    stalled = bool(unfinished and tail and float(np.mean(tail)) < _STALL_SPEED_M_S)
     course = env.unwrapped.course
     n_obstacles = 0 if course.obstacles is None else int(len(course.obstacles))
     width_m = float(course.width) if np.isscalar(course.width) else float(np.median(course.width))
@@ -249,9 +284,11 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
         "reward": total_reward,
         "steps": steps,
         "collided": collided,
-        # 衝突も完走もせず打ち切り＝止まった（または極端に遅い）。障害物の前で
-        # 「止まれば安全」に縮退していないかを見る（`obstacles.py`のdocstring参照）
-        "stalled": (not collided) and (not lap_done),
+        # 衝突も完走もせず打ち切られ、**末尾2秒の平均車速が0.1m/s未満**＝止まった。障害物の前で
+        # 「止まれば安全」に縮退していないかを見る（`obstacles.py`のdocstring参照）。
+        # 動いているのに制限時間までに1周できなかったものは`timed_out`（遅い走りの指標）
+        "stalled": stalled,
+        "timed_out": bool(unfinished and not stalled),
         "n_obstacles": n_obstacles,
         "width_m": width_m,
         "lap_done": lap_done,
@@ -290,6 +327,11 @@ def evaluate(model: PPO, cfg: EnvConfig, *, n_episodes: int, episode_s: float,
         "collision_rate": sum(e["collided"] for e in episodes) / n,
         "lap_rate": sum(e["lap_done"] for e in episodes) / n,
         "stall_rate": sum(e["stalled"] for e in episodes) / n,
+        "timeout_rate": sum(e["timed_out"] for e in episodes) / n,
+        # 二項比率の95%信頼区間（Wilson）。モデル比較は区間が重なるなら差を結論にしない
+        "collision_rate_ci": wilson_interval(sum(e["collided"] for e in episodes), n),
+        "lap_rate_ci": wilson_interval(sum(e["lap_done"] for e in episodes), n),
+        "stall_rate_ci": wilson_interval(sum(e["stalled"] for e in episodes), n),
         "mean_lap_time_s": _mean_of("lap_time_s"),
         "mean_lap_ratio": _mean_of("lap_ratio"),
         "mean_dist_ratio": _mean_of("dist_ratio"),
@@ -350,6 +392,7 @@ def by_obstacles(episodes: list[dict]) -> list[dict]:
             "collision_rate": sum(e["collided"] for e in bucket) / len(bucket),
             "lap_rate": sum(e["lap_done"] for e in bucket) / len(bucket),
             "stall_rate": sum(e["stalled"] for e in bucket) / len(bucket),
+            "timeout_rate": sum(e["timed_out"] for e in bucket) / len(bucket),
             "mean_lap_ratio": float(np.mean(ratios)) if ratios else None,
             "mean_speed": float(np.mean([e["mean_speed"] for e in bucket])),
         })
@@ -406,10 +449,15 @@ def main(argv: list[str] | None = None) -> None:
         v = result[key]
         return "n/a" if v is None else format(v, spec)
 
+    def _ci(key: str) -> str:
+        lo, hi = result[key]
+        return f"[{lo:.1%}〜{hi:.1%}]"
+
     print(f"episodes={result['n_episodes']} "
-         f"collision_rate={result['collision_rate']:.1%} "
-         f"lap_rate={result['lap_rate']:.1%} "
-         f"stall_rate={result['stall_rate']:.1%}")
+         f"collision_rate={result['collision_rate']:.1%}{_ci('collision_rate_ci')} "
+         f"lap_rate={result['lap_rate']:.1%}{_ci('lap_rate_ci')} "
+         f"stall_rate={result['stall_rate']:.1%}{_ci('stall_rate_ci')} "
+         f"timeout_rate={result['timeout_rate']:.1%}  (括弧は95%Wilson区間)")
     # ★第一指標。lap_ratio ≈ dist_ratio / speed_ratio に分解して、タイムを
     # 「ライン（遠回り）」で失っているのか「速度」で失っているのかを読む
     print(f"  lap_time={_fmt('mean_lap_time_s', '.2f')}s "
@@ -435,6 +483,7 @@ def main(argv: list[str] | None = None) -> None:
             lap = "n/a" if b["mean_lap_ratio"] is None else f"{b['mean_lap_ratio']:.3f}"
             print(f"  障害物{b['n_obstacles']}個 (n={b['n']:3d}): "
                  f"collision={b['collision_rate']:5.1%} stall={b['stall_rate']:5.1%} "
+                 f"timeout={b['timeout_rate']:5.1%} "
                  f"lap_ratio={lap} speed={b['mean_speed']:.2f}")
 
     if args.out:

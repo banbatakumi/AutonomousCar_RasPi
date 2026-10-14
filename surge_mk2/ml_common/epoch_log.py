@@ -20,9 +20,13 @@ def make_epoch_line_parser(
 ) -> Callable[[str], tuple[int, float, float | None] | None]:
     """"epoch N/M  loss=X.XXXX  <metric_name>=X.XXX" 形式の行から
     `(epoch, loss, metric)` を取り出すパーサーを組み立てる。
-    metric値が "nan"（検証データが無いとき）なら `None`。該当しない行なら `None` を返す。"""
+    metric値が "nan"（検証データが無いとき）なら `None`。該当しない行なら `None` を返す。
+    **lossが "nan"/"inf"（発散）の行も読む**（`float("nan")`で返す）——読めない行として捨てると、
+    発散した後はグラフが更新されなくなり、止まったように見える。"""
+    num = r"[-+]?(?:\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+)|[-+]?nan|[-+]?inf"
     pattern = re.compile(
-        rf"epoch\s+(\d+)/\d+\s+loss=([\d.]+)\s+{re.escape(metric_name)}=([\d.]+|nan)")
+        rf"epoch\s+(\d+)/\d+\s+loss=({num})\s+{re.escape(metric_name)}=({num})",
+        re.IGNORECASE)
 
     def parse(line: str) -> tuple[int, float, float | None] | None:
         m = pattern.search(line)
@@ -31,7 +35,7 @@ def make_epoch_line_parser(
         epoch = int(m.group(1))
         loss = float(m.group(2))
         metric_s = m.group(3)
-        metric = None if metric_s == "nan" else float(metric_s)
+        metric = None if metric_s.lstrip("+-").lower() == "nan" else float(metric_s)
         return epoch, loss, metric
 
     return parse

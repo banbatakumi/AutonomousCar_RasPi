@@ -72,6 +72,24 @@ class TestWatcher(unittest.TestCase):
             # 実際に推論結果（ready=True）へ到達していることを確認する
             self.assertTrue(saw_ready, "E2ELidar.plan()がreadyに一度も到達しなかった")
 
+    def test_max_speed_option_selects_gui_default_model_or_number(self) -> None:
+        import tempfile
+
+        from ml_lidar.watch import _parse_max_speed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            onnx_path = _train_and_export_tiny_model(Path(tmp))
+            course = random_walk_loop_course(np.random.default_rng(0))
+            default = Watcher(onnx_path, course, dt=0.05)
+            self.assertEqual(default._plan_overrides, {})              # GUIの既定値（実機と同じ）
+            model = Watcher(onnx_path, course, dt=0.05, max_speed="model")
+            self.assertEqual(model._plan_overrides, {"max_speed": 1.5})  # 契約JSONの学習時の値
+            num = Watcher(onnx_path, course, dt=0.05, max_speed=2.5)
+            self.assertEqual(num._plan_overrides, {"max_speed": 2.5})
+        self.assertIsNone(_parse_max_speed(None))
+        self.assertEqual(_parse_max_speed("model"), "model")
+        self.assertEqual(_parse_max_speed("2.0"), 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,11 +137,37 @@ class TestGeneralizationScore(unittest.TestCase):
         """同じラップタイムでも、周回できない率が高いほどスコアは悪化する。"""
         self.assertLess(self._score(1.05, 1.0), self._score(1.05, 0.5))
 
+    def test_fail_rate_metric_ranks_by_completion(self) -> None:
+        from ml_lidar.train_rl import GeneralizationEvalCallback as G
+        # 障害物あり: 完走率が主。遅くても完走率が高い方が良い
+        self.assertLess(G._score(1.4, 0.95, "fail_rate"), G._score(1.0, 0.85, "fail_rate"))
+        # 同じ完走率ならラップ比が小さい方
+        self.assertLess(G._score(1.0, 0.9, "fail_rate"), G._score(1.2, 0.9, "fail_rate"))
+        self.assertIsNone(G._score(None, 0.0, "fail_rate"))
+
     def test_unrankable_returns_none(self) -> None:
         """1本も完走できなかった評価回は順位づけしない（前のbestを保持させる）。"""
         self.assertIsNone(self._score(None, 0.0))
         self.assertIsNone(self._score(1.1, 0.0))
         self.assertIsNone(self._score(float("nan"), 0.5))
+
+
+class TestWilsonInterval(unittest.TestCase):
+    def test_known_values(self) -> None:
+        from ml_lidar.eval_stats import wilson_interval
+        lo, hi = wilson_interval(10, 100)
+        self.assertAlmostEqual(lo, 0.0552, places=3)
+        self.assertAlmostEqual(hi, 0.1744, places=3)
+
+    def test_edges_stay_in_unit_interval(self) -> None:
+        from ml_lidar.eval_stats import wilson_interval
+        lo, hi = wilson_interval(0, 50)
+        self.assertEqual(lo, 0.0)
+        self.assertGreater(hi, 0.0)
+        lo, hi = wilson_interval(50, 50)
+        self.assertEqual(hi, 1.0)
+        self.assertEqual(wilson_interval(0, 0), (0.0, 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

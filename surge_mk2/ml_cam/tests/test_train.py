@@ -13,12 +13,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # ml_cam/
 
 import torch  # noqa: E402
-from PIL import Image  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 from dataset import DrivableDataset  # noqa: E402
 from model import DrivableSegModel  # noqa: E402
-from train import evaluate, iou_score, split_pairs, train_one_epoch  # noqa: E402
+from train import evaluate, iou_score, split_pairs, split_pairs_blocks, train_one_epoch  # noqa: E402
 
 
 class TestIouScore(unittest.TestCase):
@@ -77,6 +76,40 @@ class TestSplitPairs(unittest.TestCase):
         train, val = split_pairs([("x", "y")])
         self.assertEqual(len(train), 1)
         self.assertEqual(len(val), 0)
+
+
+class TestSplitPairsBlocks(unittest.TestCase):
+    @staticmethod
+    def _pairs():
+        """10fps・60秒ぶんの連続フレーム（`extract_frames.py`の命名）。"""
+        return [(Path(f"run1_front_{int(i * 0.1 * 1e9)}.jpg"), Path("m.png")) for i in range(600)]
+
+    def test_neighbouring_frames_do_not_straddle_train_and_val(self):
+        train, val = split_pairs_blocks(self._pairs(), val_ratio=0.2, seed=1, block_s=5.0)
+        self.assertEqual(len(train) + len(val), 600)
+        t_val = {int(p[0].stem.rsplit("_", 1)[1]) // 5_000_000_000 for p in val}
+        t_train = {int(p[0].stem.rsplit("_", 1)[1]) // 5_000_000_000 for p in train}
+        self.assertEqual(t_val & t_train, set())          # 同じ5秒ブロックは片側だけ
+        self.assertGreaterEqual(len(val), 120)
+
+    def test_deterministic_given_seed(self):
+        self.assertEqual(split_pairs_blocks(self._pairs(), seed=3),
+                         split_pairs_blocks(self._pairs(), seed=3))
+
+    def test_unparsable_names_fall_back_to_frame_split(self):
+        pairs = [(Path(f"frame{i}.jpg"), Path("m.png")) for i in range(20)]
+        train, val = split_pairs_blocks(pairs, val_ratio=0.2, seed=1)
+        self.assertEqual((len(train), len(val)), (16, 4))
+
+    def test_single_block_falls_back_and_keeps_both_sides(self):
+        pairs = [(Path(f"a_front_{i}.jpg"), Path("m.png")) for i in range(20)]
+        train, val = split_pairs_blocks(pairs, val_ratio=0.2, seed=1)
+        self.assertTrue(train and val)
+
+    def test_train_keeps_at_least_one_block(self):
+        pairs = [(Path("a_front_0.jpg"), Path("m.png")), (Path("a_front_9000000000.jpg"), Path("m.png"))]
+        train, val = split_pairs_blocks(pairs, val_ratio=0.9, seed=0, block_s=5.0)
+        self.assertEqual((len(train), len(val)), (1, 1))
 
 
 def _make_pair(d: Path, name: str) -> tuple[Path, Path]:

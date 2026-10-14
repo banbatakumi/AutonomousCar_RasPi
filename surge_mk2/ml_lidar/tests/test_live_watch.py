@@ -12,7 +12,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # surge_mk2/
 
-import numpy as np  # noqa: E402
 from gymnasium.wrappers import TimeLimit  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.monitor import Monitor  # noqa: E402

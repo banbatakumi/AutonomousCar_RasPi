@@ -19,6 +19,8 @@ import torchvision
 
 __all__ = ["DrivableSegModel"]
 
+_BN_MOMENTUM = 0.1
+
 
 class _DecoderBlock(nn.Module):
     """2倍アップサンプル＋畳み込み。**転置畳み込みではなく補間＋通常畳み込み**にして
@@ -52,6 +54,15 @@ class DrivableSegModel(nn.Module):
                   if pretrained else None)
         backbone = torchvision.models.mobilenet_v3_small(weights=weights)
         self.encoder = backbone.features
+        # **BatchNorm の移動平均を速く追従させる。** torchvision の MobileNetV3 は
+        # momentum=0.01（ImageNet の長い学習向け）で、数百イテレーションの微調整では
+        # 推論用の統計が重みの変化に追いつかず、学習中（バッチ統計）と検証・ONNX
+        # （移動平均）で挙動が食い違う（`ml_cam_e2e/model.py`で実際に踏んだ）。
+        # PyTorch既定の0.1に戻す。momentumは重みに入らないので、既存の学習済みモデルの
+        # 読み込み・推論は変わらない（新しい学習から効く）
+        for m in self.encoder.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.momentum = _BN_MOMENTUM
 
         # **エンコーダの出力チャネル数はハードコードしない。** torchvision の
         # バージョンで内部構成が変わりうるので、実際に1回forwardして確かめる
