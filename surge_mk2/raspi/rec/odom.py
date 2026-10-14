@@ -56,11 +56,13 @@ STILL_SETTLE_S = 0.5
 #: これだけ続けて動いたら「止まってからの時間」を数え直す [s]（モジュール docstring）
 MOVING_RESET_S = 0.1
 
-#: 静止中にこれを超える回頭 [rad/s] を読んだら学習しない（手で回した等）
-BIAS_MAX_RATE = 0.2
-
 #: ゼロ点ずれの上限 [rad/s]。MPU6050 のゼロ点ずれは通常 0.05rad/s 未満
 BIAS_LIMIT = 0.3
+
+#: 静止中にこれを超える回頭 [rad/s] を読んだら学習しない（手で回した等）。
+#: **`BIAS_LIMIT` と同じ値**——これが狭いと、上限の内側にあるゼロ点ずれ（0.2〜0.3rad/s）を
+#: いつまでも学べない
+BIAS_MAX_RATE = BIAS_LIMIT
 
 
 class OdomPose(msgspec.Struct):

@@ -339,11 +339,16 @@ Description=SURGE Mk.2 — 古い記録（.sfl / .mcap）を消す
 Type=oneshot
 ExecStart=/usr/bin/find $ROOT/logs -name '*.sfl' -mtime +7 -delete
 ExecStart=/usr/bin/find $ROOT/logs -name '*.mcap' -mtime +7 -delete
-# 合計が上限を超えている間、古い順に消す。**記録中のファイルも消えうる**が、
-# カードが埋まって全ノードが書けなくなるよりは安い
+ExecStart=/usr/bin/find $ROOT/logs -name '*.mcap.bak' -mtime +7 -delete
+# 合計が上限を超えている間、古い順に消す（`mcap_repair --inplace` の `.mcap.bak` も対象）。
+# **最終更新が1分以内のもの（記録中）は消さない**——残りが記録中の1本だけになったとき、それを消すと
+# 書き手は消えた実体へ書き続け、何も残らない。消せるものが無ければやめる
 ExecStart=/bin/sh -c 'cd $ROOT/logs || exit 0; \
   while [ "\$(du -sm . | cut -f1)" -gt $MAX_LOG_MB ]; do \
-    f=\$(ls -tr *.sfl *.mcap 2>/dev/null | head -1); \
+    f=""; \
+    for c in \$(ls -tr *.sfl *.mcap *.mcap.bak 2>/dev/null); do \
+      [ -n "\$(find "\$c" -maxdepth 0 -mmin +1)" ] && { f="\$c"; break; }; \
+    done; \
     [ -n "\$f" ] || break; \
     echo "上限 ${MAX_LOG_MB}MB 超過のため削除: \$f"; rm -f "\$f"; \
   done'

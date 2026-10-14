@@ -28,6 +28,10 @@ MCAP で読めるのは protobuf / ros / flatbuffer / **json** であって、ms
 換算するのは MCAP のヘッダ側の時刻だけ。こうしておけば `.sfl` と突き合わせられる。
 変換に使った1組は MCAP のメタデータ `surge` に残してあるので、後から逆算できる。
 
+`log_time` は観測の時刻（`t_capture`、無ければ `t_pub`）。`publish_time` は、ライブ記録
+（`publish_at_write=True`・`logger_node`）では Pi がそのメッセージを受け取って書いた時刻で、
+差が受信までの遅れになる。オフライン変換（`sfl2mcap` 等）は受信時刻を持たないので `log_time` と同じ。
+
 ## Foxglove 用の可視化トピック
 
 生トピック（`/scan` など）は数値の記録としては完全だが、Foxglove の 3D パネルは
@@ -280,12 +284,17 @@ class McapLog:
 
     def __init__(self, path: str | Path, *, t0_mono_ns: int | None = None,
                  t0_unix_ns: int | None = None, compression: str = "zstd",
-                 metadata: dict[str, Any] | None = None) -> None:
+                 metadata: dict[str, Any] | None = None,
+                 publish_at_write: bool = False) -> None:
         if not HAS_MCAP:
             raise RuntimeError(
                 "mcap が入っていません。`pip install mcap` してください "
                 "（.sfl の記録・再生には不要で、MCAP 書き出しのときだけ要ります）")
 
+        #: True（ライブ記録）なら `publish_time` に「Pi がこのメッセージを書いた（受け取った）時刻」を
+        #: 入れる。`log_time`（観測の時刻）との差が受信までの遅れになる。False（オフライン変換）は
+        #: 受信時刻を知らないので `log_time` と同じ値
+        self.publish_at_write = publish_at_write
         self.t0_mono_ns = t0_mono_ns if t0_mono_ns is not None else time.monotonic_ns()
         self.t0_unix_ns = t0_unix_ns if t0_unix_ns is not None else time.time_ns()
 
@@ -428,7 +437,8 @@ class McapLog:
         if not seq:
             seq = self._seq.get(topic, 0) + 1
         self._seq[topic] = seq
-        self._w.add_message(channel_id=cid, log_time=t, publish_time=t,
+        pub = self.to_unix_ns(time.monotonic_ns()) if self.publish_at_write else t
+        self._w.add_message(channel_id=cid, log_time=t, publish_time=max(pub, t),
                             data=data, sequence=seq)
         self.counts[topic] = self.counts.get(topic, 0) + 1
         self.written += 1

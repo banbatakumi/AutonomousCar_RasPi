@@ -196,6 +196,15 @@ class TestCheckDiskGenerationalDelete(TempDirCase):
             status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
         self.assertEqual(status.deleted, ["old.mcap"])
 
+    def test_mcap_repair_backups_are_also_candidates(self):
+        """`mcap_repair --inplace` の `.mcap.bak` も世代管理の対象（残り続けて空きを食わない）。"""
+        self._touch("old.mcap.bak", age_s=500)
+        usages = iter([_usage(100, 2), _usage(100, 10)])
+        with mock.patch("raspi.rec.logclean.shutil.disk_usage",
+                        side_effect=lambda _p: next(usages)):
+            status = logclean.check_disk(self.tmp, critical_free_pct=5.0, keep_newest=0)
+        self.assertEqual(status.deleted, ["old.mcap.bak"])
+
     def test_no_candidates_left_still_reports_warned(self):
         """消せるものが無くても crash せず、warned だけ立てて終わること。"""
         with mock.patch("raspi.rec.logclean.shutil.disk_usage",

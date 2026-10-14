@@ -38,8 +38,9 @@
    デッドマンも同じ扱い
 3. **Pi 側でも速度・舵角を上限でクランプする。** STM32 にも上限はあるが、
    下位だけが守る構造にしない。上限は STM32 から取得した `LIMITS`（★v0.11・
-   車両の物理的な上限）を受信済みならそちらを使う。`--max-speed`/`--max-steer`
-   は `LIMITS` 未受信の間だけ使うフォールバック（`_send_command`）
+   車両の物理的な上限）を使う。**`LIMITS` を受け取るまでは ARM を通さない**（`_arm_block_reason`。
+   VERSION と同じ扱い）。`--max-speed`/`--max-steer` は ARM していない間の表示用の既定で、
+   走行の上限には使われない（`_command_packet`）
 
 さらに GPIO6 ハートビート（第1層）と STM32 の COMMAND タイムアウト（第2層）が
 下にある。ここは第3層（`docs/architecture.md` §7）。
@@ -93,7 +94,7 @@ from raspi.msgs.types import (  # noqa: E402
 )
 from raspi.proto import UART_BAUD, packets  # noqa: E402
 from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
-from raspi.rec.framelog import FrameLogWriter, default_log_path  # noqa: E402
+from raspi.rec.framelog import AsyncFrameLog, FrameLogWriter, default_log_path  # noqa: E402
 from raspi.rec import logclean  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -133,6 +134,12 @@ _REARM_MESSAGES = {
     REARM_STM_RESTART: "STM32 が再起動しました。ARM を一度外してから入れ直してください",
     REARM_LINK_LOST: "STM32 が通信途絶から復帰しました。ARM を一度外してから入れ直してください",
 }
+
+#: 自発の VERSION（STM32 の起動バースト。100ms 間隔×3回）を再起動の合図として数える窓。
+#: `VERSION_REQ` の応答は数えない（`_version_req_expect`）。バースト3回で1回だけ処理する
+BOOT_BURST_WINDOW_NS = 1_000_000_000
+#: `VERSION_REQ` を出してから、その応答として受け取る VERSION を待つ最長時間
+VERSION_REPLY_WINDOW_NS = 1_500_000_000
 
 #: `handshake()` で `LIMITS` を取り損ねた場合（STM32 の起動burstを取り逃した、
 #: 応答が1回ノイズで落ちた等）に `LIMITS_REQ` を再送する間隔。
@@ -237,7 +244,7 @@ class IoNode:
     """
 
     def __init__(self, link: SerialLink, on_telemetry=None,
-                 log: FrameLogWriter | None = None,
+                 log: FrameLogWriter | AsyncFrameLog | None = None,
                  log_meta: dict | None = None,
                  heartbeat: Heartbeat | None = None,
                  indicator: StatusIndicator | None = None,
@@ -312,6 +319,13 @@ class IoNode:
         #: そのまま実行するので、ARM 付きの指令が流れ続けていると、車のそばでボタン2を押した
         #: 瞬間に走り出す
         self._rearm_reason = ""
+        #: 直近に受けた GUI の設定（`ui/event`。`ConfigSet` の param_id → 値）。STM32 は Flash に
+        #: 持たず再起動で既定へ戻るので、再起動を検出したら送り直す（`_on_time_reset`）
+        self._ui_settings: dict[int, float] = {}
+        #: 自発の VERSION（STM32 の起動バースト）と `VERSION_REQ` の応答を見分ける。最後に
+        #: `VERSION_REQ` を送った時刻と、直近に再起動として処理した時刻
+        self._version_req_ns = 0
+        self._boot_seen_ns = -BOOT_BURST_WINDOW_NS
 
         self._log = log
         self._log_meta = log_meta
@@ -345,6 +359,7 @@ class IoNode:
         #: UART とバスをまとめて待つ poller（`run` が作る。`_make_poller`）と、そこに載せた UART の fd
         self._poller = None
         self._uart_fd = -1
+        self._pollerr = 0
         link.on_tx = self._on_tx
 
     def _on_telemetry_chain(self, extra):
@@ -416,7 +431,19 @@ class IoNode:
             self.control_sync.on_ack(msg)
         elif isinstance(msg, packets.Log):
             self._on_stm_log(msg)
+        elif isinstance(msg, packets.Version):
+            self._on_version(rx_ns)
         self.bridge.on_frame(rx_ns, pkt_type, seq, msg)
+
+    def _on_version(self, rx_ns: int) -> None:
+        """VERSION を受けた。**こちらが `VERSION_REQ` を出していないのに来たら STM32 の起動バースト**
+        （稼働1秒未満の再起動は `t_us` の後退では見えない）。再起動として扱う。"""
+        if rx_ns - self._version_req_ns < VERSION_REPLY_WINDOW_NS:
+            return          # 要求の応答
+        if rx_ns - self._boot_seen_ns < BOOT_BURST_WINDOW_NS:
+            return          # 同じバーストの2回目以降
+        self._boot_seen_ns = rx_ns
+        self._on_time_reset(rx_ns)
 
     def _on_time_reset(self, t_ns: int) -> None:
         """STM32 の再起動を検出（`TimeSync.observe_stm_us` が `t_us` の大きな後退を
@@ -433,6 +460,7 @@ class IoNode:
         # 再起動の前に入っていた ARM をそのまま引き継がせない（人が入れ直す）
         self._rearm_reason = REARM_STM_RESTART
         self._requery_config()
+        self._resend_ui_settings()
         # STM32 の SEQ は 0 から振り直される。基準を捨てないと、追いつくまでの差を欠落として数える
         # （シムの link には無いので getattr）
         getattr(self.link, "reset_seq", lambda: None)()
@@ -478,7 +506,8 @@ class IoNode:
         if active:
             try:
                 path = default_log_path()
-                self._log = FrameLogWriter(path, meta=self._log_meta)
+                # 開く・書く・fsync は専用スレッド（SD が詰まってもループを止めない）
+                self._log = AsyncFrameLog(path, meta=self._log_meta)
             except Exception as e:
                 print(f"\n!! .sfl 記録を開始できない: {e}", file=sys.stderr)
                 return
@@ -486,8 +515,11 @@ class IoNode:
             self._log_event("record_start", {"path": str(path)})
         else:
             self._log_event("record_stop")
-            self._log.close()
-            self._log = None
+            log, self._log = self._log, None
+            try:
+                log.close()
+            except Exception:
+                self._log_errors += 1
             print("\n# .sfl 記録停止", file=sys.stderr)
 
     def _log_linkstats(self, now_ns: int) -> None:
@@ -543,6 +575,13 @@ class IoNode:
         self._disk_check_thread = threading.Thread(
             target=_worker, name="io-disk-check", daemon=True)
         self._disk_check_thread.start()
+
+    def _poll_log_open_error(self) -> None:
+        """専用スレッドが `.sfl` を開けなかったら、記録中の扱いをやめて理由を出す。"""
+        err = getattr(self._log, "open_error", "")
+        if err:
+            print(f"\n!! .sfl 記録を開始できない: {err}", file=sys.stderr)
+            self._log = None
 
     def _poll_disk_check(self) -> None:
         """`_check_disk_space` が起こしたチェックが終わっていれば、結果をメインスレッドで処理する。
@@ -615,6 +654,7 @@ class IoNode:
         `LIMITS` が届かなくても（旧ファームウェア等）通信自体は継続する。
         """
         self.link.reset_input()
+        self._version_req_ns = time.monotonic_ns()
         self.link.send(packets.VersionReq())
         self.link.send(packets.LimitsReq())
         deadline = time.monotonic() + timeout_s
@@ -695,6 +735,8 @@ class IoNode:
         if ver.protocol_version != PROTOCOL_VERSION:
             return (f"protocol_version が違います（STM32 0x{ver.protocol_version:04X} / "
                     f"Pi 0x{PROTOCOL_VERSION:04X}）。両方を同じ版に入れ替えてください")
+        if self.state.limits is None:
+            return "STM32 の LIMITS（速度・舵角の上限）を受信できていません"
         # E-Stop の層（GPIO6 のハートビート）が STM32 に見えていなければ、止める手段が一つ欠けている。
         # --no-heartbeat で動かすときは、ハートビートを出さないと承知の上なので封印しない
         if self.heartbeat is not None and self.state.no_heartbeat:
@@ -751,6 +793,16 @@ class IoNode:
                       packets.Param.BRAKE_HOLD_ENABLE, packets.Param.AUTO_STOP_MARGIN_CM):
             self.link.send(packets.ConfigGet(param_id=param))
 
+    def _resend_ui_settings(self) -> None:
+        """再起動で既定へ戻った GUI の設定（自動停止のマージン・ブレーキホールド等）を入れ直す。
+        `_requery_config` の読み戻しの後ろに送るので、`state` は最後に入れ直した値に落ち着く。"""
+        for param, value in self._ui_settings.items():
+            self.link.send(packets.ConfigSet(param_id=param, value=value))
+
+    def _send_ui_setting(self, param: int, value: float) -> None:
+        self._ui_settings[param] = value
+        self.link.send(packets.ConfigSet(param_id=param, value=value))
+
     def _recv_cmd(self, now_ns: int) -> None:
         """バスから走行指令・`.sfl` 記録の意思（`log/ctrl`）・GUI イベントを取り込む。"""
         if self.sub is not None:
@@ -786,26 +838,20 @@ class IoNode:
             self.buzzer.play(MELODY_GUI_CONNECT)
         elif msg.kind == "tc_enable":
             self.control_sync.set_wanted("tc_enable", 1.0 if msg.value else 0.0)
-            self.link.send(packets.ConfigSet(
-                param_id=packets.Param.TC_ENABLE, value=1.0 if msg.value else 0.0))
+            self._send_ui_setting(packets.Param.TC_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "tv_enable":
             self.control_sync.set_wanted("tv_enable", 1.0 if msg.value else 0.0)
-            self.link.send(packets.ConfigSet(
-                param_id=packets.Param.TV_ENABLE, value=1.0 if msg.value else 0.0))
+            self._send_ui_setting(packets.Param.TV_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "wheel_lift_guard_enable":
             self.control_sync.set_wanted("wheel_lift_guard_enable", 1.0 if msg.value else 0.0)
-            self.link.send(packets.ConfigSet(
-                param_id=packets.Param.WHEEL_LIFT_GUARD_ENABLE, value=1.0 if msg.value else 0.0))
+            self._send_ui_setting(packets.Param.WHEEL_LIFT_GUARD_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "abs_enable":
             self.control_sync.set_wanted("abs_enable", 1.0 if msg.value else 0.0)
-            self.link.send(packets.ConfigSet(
-                param_id=packets.Param.ABS_ENABLE, value=1.0 if msg.value else 0.0))
+            self._send_ui_setting(packets.Param.ABS_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "brake_hold_enable":
-            self.link.send(packets.ConfigSet(
-                param_id=packets.Param.BRAKE_HOLD_ENABLE, value=1.0 if msg.value else 0.0))
+            self._send_ui_setting(packets.Param.BRAKE_HOLD_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "auto_stop_margin_cm":
-            self.link.send(packets.ConfigSet(
-                param_id=packets.Param.AUTO_STOP_MARGIN_CM, value=msg.float_value))
+            self._send_ui_setting(packets.Param.AUTO_STOP_MARGIN_CM, msg.float_value)
 
     def _send_command(self, pkt: packets.Command | None = None,
                        encoded: bytes | None = None) -> None:
@@ -816,14 +862,12 @@ class IoNode:
         分岐をここ1箇所に集めてある（判断が散ると、どこかで解禁されていたが起きる）。
 
         速度・舵角・加速度・トルクの上限は、STM32 から受け取った `LIMITS`（★v0.11。
-        車両の物理的な上限）を**受信済みなら無条件にそちらを使う**（GUI
-        側の `effectiveRange()` と方針を合わせた。それまでは `self.max_speed`/
-        `self.max_steer` との小さい方だったが、それだと LIMITS の方が緩い場合に
-        `--max-speed`/`--max-steer` の古い値で頭打ちのままになり、GUI 側が実測値
-        まで見せているのに実車だけ変わらない食い違いが起きるため）。`self.max_speed`/
-        `self.max_steer`（CLI/GUI で設定した値）は **`LIMITS` をまだ受け取っていない
-        間だけ**使うフォールバック。RC（MANUAL）・自律走行（AUTO）どちらの `cmd` も
-        この1箇所を通るため、モードを問わず同じ上限が効く。
+        車両の物理的な上限）を無条件に使う（GUI 側の `effectiveRange()` と方針を合わせた）。
+        **`LIMITS` を受け取るまでは ARM を通さない**（`_arm_block_reason`）ので、ここへ来る
+        ARM 付きの指令は必ず `LIMITS` を持っている。`self.max_speed`/`self.max_steer`
+        （CLI の `--max-speed`/`--max-steer`）は ARM していない間の既定値でしかない。
+        RC（MANUAL）・自律走行（AUTO）どちらの `cmd` もこの1箇所を通るため、モードを問わず
+        同じ上限が効く。
 
         `pkt`/`encoded` は変化判定（呼び出し側）で `_command_packet()`/`encode()`
         を既に済ませている場合の使い回し用（issue #21、二重エンコード回避）。
@@ -928,6 +972,7 @@ class IoNode:
             return None
         import zmq
         poller = zmq.Poller()
+        self._pollerr = zmq.POLLERR
         self._uart_fd = fileno()
         poller.register(self._uart_fd, zmq.POLLIN)
         for sock in socks.values():
@@ -951,6 +996,11 @@ class IoNode:
         while True:
             wait_ms = max(0.0, (deadline_ns - now_ns) / 1e6)
             events = self._poller.poll(math.ceil(wait_ms))
+            # UART が切断・エラー（USB シリアルが抜けた等）だと fd は読めない状態のまま起こし続け、
+            # 空読みで CPU を回す。プロセスごと落として systemd の再起動に任せる
+            # （ハートビートが止まり STM32 が E-Stop。`os.read` の EIO が `SerialException` で落ちるのと同じ）
+            if any(sock == self._uart_fd and (ev & self._pollerr) for sock, ev in events):
+                raise OSError("UART の fd がエラー状態です（切断？）")
             frames = self.link.poll(block=False)
             # フレームが揃った・時間切れ・バス（`cmd` など）に届いた、のどれかなら1周回す
             if frames or any(sock != self._uart_fd for sock, _ in events) or not events:
@@ -1019,6 +1069,7 @@ class IoNode:
                 if self.state.limits is None:
                     self.link.send(packets.LimitsReq())
                 if self.state.version is None:
+                    self._version_req_ns = now
                     self.link.send(packets.VersionReq())
                 next_limits_retry = now + int(LIMITS_RETRY_S * NS)
 
@@ -1113,6 +1164,7 @@ class IoNode:
             # 前回起こしたディスクチェックが終わっていれば結果を処理する
             # （実処理はワーカースレッド。issue #5）
             self._poll_disk_check()
+            self._poll_log_open_error()
             if now >= next_disk_check:
                 next_disk_check = now + int(DISK_CHECK_INTERVAL_S * NS)
                 self._check_disk_space()
@@ -1163,11 +1215,11 @@ def main() -> int:
                          "付けない限り COMMAND は DISARM 固定")
     ap.add_argument("--max-speed", type=float, default=DEFAULT_MAX_SPEED,
                     help=f"Pi 側の速度クランプ [m/s]（既定 {DEFAULT_MAX_SPEED}）。"
-                         "STM32 から LIMITS を受信済みならそちらが優先されるので、"
-                         "実質的には未接続時のフォールバックにしかならない")
+                         "STM32 から LIMITS を受信すればそちらが使われる。LIMITS を受信するまでは"
+                         "ARM 自体を通さないので、これが走行の上限になることは無い（表示用の既定）")
     ap.add_argument("--max-steer", type=float, default=DEFAULT_MAX_STEER,
                     help=f"Pi 側の舵角クランプ [rad]（既定 {DEFAULT_MAX_STEER}）。"
-                         "同上、LIMITS 受信後はそちらが優先される。"
+                         "同上（LIMITS 未受信の間は ARM しないので走行の上限にはならない）。"
                          "vehicle.toml の max_steer より大きい値はそこで頭打ち")
     ap.add_argument("--sim", action="store_true",
                     help="UART の相手を Mac 上のシミュレータにする（`sim/` 参照）。"
@@ -1225,7 +1277,7 @@ def main() -> int:
     log = None
     if args.log is not None:
         path = Path(args.log) if args.log.endswith(".sfl") else default_log_path(args.log)
-        log = FrameLogWriter(path, meta=log_meta)
+        log = AsyncFrameLog(path, meta=log_meta)
         print(f"# 記録: {path}")
 
     # ── GPIO ──
@@ -1311,13 +1363,12 @@ def main() -> int:
               f"加速度{lim.max_accel_m_s2:.2f}m/s² トルク{lim.max_torque_nm:.3f}N·m "
               f"舵角±{math.degrees(lim.max_steer_rad):.1f}°")
     else:
-        print("!! LIMITS 応答なし。Pi 側の既定上限（--max-speed/--max-steer）のみでクランプする"
-              "（受信でき次第そちらへ切り替わる）")
+        print("!! LIMITS 応答なし。受信できるまで ARM は通さない（LIMITS_REQ を再送し続ける）")
 
     if args.allow_arm:
         eff_speed = lim.max_speed_m_s if lim else args.max_speed
         eff_steer = lim.max_steer_rad if lim else node.max_steer
-        source = "LIMITS" if lim else f"--max-speed={args.max_speed}/--max-steer={args.max_steer}（未受信のフォールバック）"
+        source = "LIMITS" if lim else "未受信（受信するまで ARM は通らない）"
         print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")
         print(f"#     実効クランプ: 速度 ±{eff_speed:.3f} m/s / 舵角 ±{eff_steer:.3f} rad（出所: {source}）")
         print(f"#     cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら最大制動 → 停止後に DISARM")
@@ -1353,7 +1404,8 @@ def main() -> int:
         # 始まった／途中で止められた場合、起動時の `log` 変数はもう最新ではない
         if node._log is not None:
             node._log_linkstats(time.monotonic_ns())
-            node._log.close()
+            # 専用スレッドが残りを書き切るのを少し待つ（SD が詰まっていても数秒で諦める）
+            node._log.close(wait_s=3.0)
         link.close()
         if sub is not None:
             sub.close()
@@ -1391,7 +1443,7 @@ def main() -> int:
         # 捕まえた例外の数、`lg.stats.write_errors` は `FrameLogWriter._write` が
         # OSError（ENOSPC 等）を捕まえて数えた分。前者はもう後者を含まない
         # （`_write` が例外を投げなくなったため）ので両方出す
-        errs = node._log_errors + lg.stats.write_errors
+        errs = node._log_errors + lg.stats.write_errors + getattr(lg, "dropped", 0)
         print(f"log: {lg.path} rx={lg.stats.rx} tx={lg.stats.tx} "
               f"events={lg.stats.events} {mb:.1f}MB"
               + (f" !! 書き込みエラー {errs} 回"

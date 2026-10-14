@@ -20,6 +20,7 @@ from raspi.rec.framelog import (  # noqa: E402
     HEADER_SIZE,
     MAGIC,
     REC_HEADER_SIZE,
+    AsyncFrameLog,
     FrameLogReader,
     FrameLogWriter,
     Kind,
@@ -442,6 +443,69 @@ class TestJsonEncoding(TempDirCase):
         body = json.loads(raw[HEADER_SIZE + REC_HEADER_SIZE:
                               HEADER_SIZE + REC_HEADER_SIZE + n])
         self.assertEqual(body["k"], "v")
+
+
+class TestAsyncFrameLog(TempDirCase):
+    """専用スレッドに載せた記録。呼び出し側は SD に触れない。"""
+
+    def test_round_trip_and_close_event(self):
+        path = self.tmp / "a.sfl"
+        log = AsyncFrameLog(path, meta={"node": "t"})
+        log.write_rx(10, 0x01, 1, b"abc")
+        log.write_tx(20, 0x02, 2, b"")
+        log.write_event(30, "hello", {"k": 1})
+        log.close(wait_s=5.0)
+        with FrameLogReader(path) as r:
+            recs = list(r)
+            self.assertEqual(r.meta["node"], "t")
+        kinds = [x.kind for x in recs if x.kind != Kind.META]
+        self.assertEqual(kinds[:3], [Kind.RX, Kind.TX, Kind.EVENT])
+        self.assertEqual(recs[-1].json()["name"], "close")
+        self.assertEqual(log.stats.rx, 1)
+
+    def test_write_does_not_block_while_the_file_io_is_stuck(self):
+        """open が詰まっても write_* は即返る。キューが溢れたら古い方から捨てて数える。"""
+        import threading
+        gate = threading.Event()
+        orig = FrameLogWriter.__init__
+
+        def slow_init(self_, *a, **kw):
+            gate.wait(5.0)
+            orig(self_, *a, **kw)
+
+        with mock.patch.object(FrameLogWriter, "__init__", slow_init):
+            log = AsyncFrameLog(self.tmp / "b.sfl", queue_max=10)
+            for i in range(100):
+                log.write_tx(i, 1, i & 0xFF, b"x")
+            self.assertEqual(log.dropped, 90)
+            gate.set()
+            log.close(wait_s=5.0)
+        with FrameLogReader(self.tmp / "b.sfl") as r:
+            tx = [x for x in r if x.kind == Kind.TX]
+        self.assertEqual([x.t_ns for x in tx], list(range(90, 100)))   # 新しい10件が残る
+
+    def test_open_failure_is_reported_not_raised(self):
+        # 親がファイルだと開けない
+        blocker = self.tmp / "blocker"
+        blocker.write_text("x")
+        bad = AsyncFrameLog(blocker / "d.sfl")
+        bad.join(5.0)
+        self.assertTrue(bad.open_error)
+        self.assertTrue(bad.broken)
+        bad.write_tx(1, 1, 1, b"")      # 例外を投げない
+
+    def test_periodic_fsync_runs_in_the_writer_thread(self):
+        import threading
+        calls = []
+        with mock.patch("raspi.rec.framelog.os.fsync",
+                        lambda fd: calls.append(threading.current_thread().name)):
+            log = AsyncFrameLog(self.tmp / "e.sfl", sync_interval_s=0.05)
+            log.write_tx(1, 1, 1, b"x")
+            import time as _t
+            _t.sleep(0.4)
+            log.close(wait_s=5.0)
+        self.assertTrue(calls)
+        self.assertTrue(all(n == "sfl-writer" for n in calls))
 
 
 if __name__ == "__main__":

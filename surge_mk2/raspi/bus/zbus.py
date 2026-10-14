@@ -32,7 +32,7 @@ SUB の購読は**先頭バイト列の前方一致**なので、これでフィ
 | ポリシー | 用途 | 設定 |
 |---|---|---|
 | `LATEST` | 制御・GUI 表示 | `CONFLATE=1`（キュー長1・上書き） |
-| `RELIABLE` | ロガー・記録 | `RCVHWM` 大きめ |
+| `RELIABLE` | ロガー・記録 | `RCVHWM` 10000（取りこぼさないが、無限には貯めない） |
 
 制御系が「2秒前の点群で舵を切る」のを防ぐのが `LATEST` の目的。
 
@@ -235,8 +235,10 @@ class Policy(msgspec.Struct, frozen=True):
 
 #: 制御・GUI 表示用。**古いデータは捨てて最新だけ**
 LATEST = Policy(conflate=True)
-#: ロガー・記録用。**1フレームも落としたくない**
-RELIABLE = Policy(conflate=False, hwm=100_000)
+#: ロガー・記録用。**1フレームも落としたくない**が、無限には貯めない。受信が詰まった購読者（止まった
+#: logger_node 等）のキューは件数で伸び続けるので、100Hz の `vehicle_state` で約100秒ぶんまで
+#: （発行側の `SNDHWM` と合わせても、通常の記録の揺れには十分）。超えたぶんは捨てる
+RELIABLE = Policy(conflate=False, hwm=10_000)
 
 
 # ── Publisher ────────────────────────────────────────────────────────

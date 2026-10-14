@@ -152,6 +152,24 @@ class TestMcapLog(unittest.TestCase):
         (log_time, _), = read_back(self.path)["msgs"]["/vehicle_state"]
         self.assertEqual(log_time, t0_unix + 2 * 10**9)
 
+    def test_publish_time_is_the_write_time_only_for_live_recording(self):
+        """ライブ記録の `publish_time` は Pi が書いた（受け取った）時刻、`log_time` は観測の時刻。
+        オフライン変換は受信時刻を知らないので同じ値。"""
+        from mcap.reader import make_reader
+        t0_mono = time.monotonic_ns()
+        t0_unix = time.time_ns()
+        def pub_log(live):
+            with McapLog(self.path, t0_mono_ns=t0_mono, t0_unix_ns=t0_unix,
+                         publish_at_write=live) as log:
+                log.write("/vehicle_state", VehicleState(), t_mono_ns=t0_mono - 5 * 10**6)
+            with open(self.path, "rb") as f:
+                (_, _, m), = list(make_reader(f).iter_messages())
+            return m.log_time, m.publish_time
+        lt, pt = pub_log(False)
+        self.assertEqual(lt, pt)
+        lt, pt = pub_log(True)
+        self.assertGreaterEqual(pt - lt, 5 * 10**6)
+
     def test_message_keeps_the_monotonic_time(self):
         """**中身の `t_capture` は触らない。** `.sfl` と突き合わせられなくなる。"""
         t0_mono, t0_unix = 5_000_000_000, 1_800_000_000_000_000_000

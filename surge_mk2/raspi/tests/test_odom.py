@@ -64,6 +64,12 @@ class TestDeadReckoner(unittest.TestCase):
         self.assertLess(abs(p.yaw_unwrapped), 0.005)
         self.assertLess(abs(p.y), 0.05)
 
+    def test_bias_up_to_the_limit_is_learned(self):
+        """学習の条件が `BIAS_LIMIT` より狭いと、上限の内側のゼロ点ずれ（0.25rad/s）を学べない。"""
+        dr = DeadReckoner()
+        p = run(dr, 1000, v=0.0, w=0.25)
+        self.assertAlmostEqual(p.gyro_bias, 0.25, delta=5e-3)
+
     def test_without_learning_the_bias_drifts(self):
         """比較のため: 較正しないで走り出すとゼロ点ずれがそのまま方位に乗る。"""
         dr = DeadReckoner()

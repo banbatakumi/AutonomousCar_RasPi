@@ -343,10 +343,12 @@ class TestIoNodeLogToggle(unittest.TestCase):
 
         node._set_log_active(True)
         self.assertIsNotNone(node._log)
-        path = node._log.path
+        log = node._log
+        path = log.path
 
         node._set_log_active(False)
         self.assertIsNone(node._log)
+        log.join(5.0)                    # 閉じるのは専用スレッド
         self.assertTrue(path.is_file())
 
     def test_toggle_to_the_same_state_is_a_no_op(self):
@@ -357,6 +359,15 @@ class TestIoNodeLogToggle(unittest.TestCase):
         first = node._log
         node._set_log_active(True)
         self.assertIs(node._log, first)
+        node._set_log_active(False)
+        first.join(5.0)
+
+    def test_a_log_that_cannot_be_opened_is_dropped_without_stopping_the_loop(self):
+        node = IoNode(FakeLink(), log_meta={"node": "io_node", "port": "fake"})
+        node._set_log_active(True)
+        node._log.open_error = "OSError: simulated"      # 専用スレッドが開けなかった
+        node._poll_log_open_error()
+        self.assertIsNone(node._log)
 
     def test_bus_log_ctrl_message_toggles_recording(self):
         """`_recv_cmd` が `log/ctrl` を拾って記録を開始/停止すること。"""

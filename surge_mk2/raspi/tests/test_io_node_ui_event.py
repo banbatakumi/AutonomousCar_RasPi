@@ -68,6 +68,57 @@ class TestUiEventSeqReset(unittest.TestCase):
         self.assertEqual(len(link.sent) - before, 1)
 
 
+class TestUiSettingsSurviveStmRestart(unittest.TestCase):
+    """STM32 だけが再起動すると設定は既定へ戻る。io_node が覚えていて送り直す。"""
+
+    def test_settings_are_resent_after_a_restart(self):
+        from raspi.proto import packets
+        link = FakeLink()
+        node = IoNode(link)
+        node._on_ui_event(UiEvent(kind="auto_stop_margin_cm", float_value=30.0, seq=1, t_pub=1))
+        node._on_ui_event(UiEvent(kind="brake_hold_enable", value=False, seq=2, t_pub=2))
+        link.sent.clear()
+        node._on_time_reset(0)
+        from raspi.proto.framing import HEADER_SIZE
+        msgs = [packets.BY_TYPE[f[2]].decode(f[HEADER_SIZE:HEADER_SIZE + f[4]]) for f in link.sent]
+        sets = {m.param_id: m.value for m in msgs if isinstance(m, packets.ConfigSet)}
+        self.assertEqual(sets[packets.Param.AUTO_STOP_MARGIN_CM], 30.0)
+        self.assertEqual(sets[packets.Param.BRAKE_HOLD_ENABLE], 0.0)
+        # 読み戻し（ConfigGet）の後ろに送る＝state は最後に入れ直した値に落ち着く
+        kinds = [type(m).__name__ for m in msgs]
+        self.assertLess(max(i for i, k in enumerate(kinds) if k == "ConfigGet"),
+                        min(i for i, k in enumerate(kinds) if k == "ConfigSet"))
+
+
+class TestBootVersionMeansRestart(unittest.TestCase):
+    """稼働1秒未満の再起動は `t_us` の後退で見えない。自発の VERSION（起動バースト）で検出する。"""
+
+    def _node(self):
+        from raspi.proto import packets
+        node = IoNode(FakeLink())
+        node.state.version = packets.Version(protocol_version=packets.PROTOCOL_VERSION)
+        return node, packets
+
+    def test_unsolicited_version_is_a_restart_once_per_burst(self):
+        node, packets = self._node()
+        resets = []
+        node._on_time_reset = lambda t: resets.append(t)
+        v = packets.Version(protocol_version=packets.PROTOCOL_VERSION)
+        t0 = 10_000_000_000
+        for i in range(3):                      # 100ms 間隔×3回のバースト
+            node._on_frame(t0 + i * 100_000_000, packets.Version.TYPE, i, v)
+        self.assertEqual(len(resets), 1)
+
+    def test_a_reply_to_version_req_is_not_a_restart(self):
+        node, packets = self._node()
+        resets = []
+        node._on_time_reset = lambda t: resets.append(t)
+        node._version_req_ns = 10_000_000_000
+        node._on_frame(10_050_000_000, packets.Version.TYPE, 0,
+                       packets.Version(protocol_version=packets.PROTOCOL_VERSION))
+        self.assertEqual(resets, [])
+
+
 class TestQuietStream(unittest.TestCase):
     """出力先（`logs/surge-io.out`）に書けなくても、`print` で io_node を落とさない。"""
 

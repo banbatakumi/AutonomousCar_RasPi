@@ -175,7 +175,8 @@ class LoggerNode:
             "image_hz": image_hz if self._jpeg is not None else 0,
             "jpeg": self._jpeg.impl if self._jpeg is not None else "none",
         }
-        self.log = McapLog(path, compression=compression, metadata=self._metadata)
+        self.log = McapLog(path, compression=compression, metadata=self._metadata,
+                           publish_at_write=True)
         #: 書けなくなって記録を続けられずに終わった（標準出力の相手が消えた等）。終了コードに出す
         self.failed = False
         #: 書けなくなったファイルを閉じて、新しいファイルで記録を再開した回数
@@ -273,7 +274,7 @@ class LoggerNode:
             self.vizrec.close()
         old.close()
         self.log = McapLog(default_mcap_path(old.path.parent), compression=self._compression,
-                           metadata=self._metadata)
+                           metadata=self._metadata, publish_at_write=True)
         # 推測航法と軌跡は新しいファイルの先頭から数え直す（前のファイルとは別の記録）
         self.vizrec = VizRecorder(self.log) if self.viz else None
         self.reopened += 1

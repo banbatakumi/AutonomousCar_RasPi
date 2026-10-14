@@ -44,8 +44,11 @@ TELEMETRY 内の STM32 時刻や TimeSync の推定と突き合わせるとき�
 from __future__ import annotations
 
 import json
+import os
 import struct
+import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +61,7 @@ __all__ = [
     "LogRecord",
     "FileHeader",
     "FrameLogWriter",
+    "AsyncFrameLog",
     "FrameLogReader",
     "default_log_path",
 ]
@@ -146,10 +150,11 @@ class FrameLogWriter:
 
     io_node の実時間ループから叩かれるので、1レコードあたりの仕事は
     「struct.pack 1回 + BufferedWriter への write 2回」に抑えてある。
-    fsync はしない（コストが跳ね上がる）。代わりに一定間隔で flush する。
+    書き込みごとの fsync はしない（コストが跳ね上がる）。代わりに一定間隔で flush する。
     **flush は OS のページキャッシュへ渡すだけ**なので、これで守れるのはプロセスが
-    落ちた場合（失うのは `flush_interval_s` 秒ぶん）。電源が落ちた場合は、カーネルが
-    SD へ書き出すまでの時間ぶん（既定の設定で数秒〜30秒程度）を失いうる。
+    落ちた場合（失うのは `flush_interval_s` 秒ぶん）。電源が落ちた場合に備えるには
+    `sync()`（flush + fsync）を数秒ごとに呼ぶ。io_node は `AsyncFrameLog` の専用スレッドで呼ぶ
+    （fsync は SD 上で数十〜数百 ms 止まりうるので、実時間ループからは呼ばない）。
 
     ## SD が満杯になったとき（ENOSPC）
 
@@ -299,6 +304,16 @@ class FrameLogWriter:
         except OSError as e:
             self._mark_broken(e)
 
+    def sync(self) -> None:
+        """flush して fsync する（電源断でも、ここまでは残る）。**ブロックしうる**ので実時間ループからは呼ばない。"""
+        if self._closed or self._broken:
+            return
+        try:
+            self._f.flush()
+            os.fsync(self._f.fileno())
+        except OSError as e:
+            self._mark_broken(e)
+
     def close(self) -> None:
         """終了イベントを書いてから閉じる。
 
@@ -318,6 +333,7 @@ class FrameLogWriter:
             if not self._broken:
                 try:
                     self._f.flush()
+                    os.fsync(self._f.fileno())
                 except OSError as e:
                     self._mark_broken(e)
         finally:
@@ -329,6 +345,132 @@ class FrameLogWriter:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+class AsyncFrameLog:
+    """`FrameLogWriter` を専用スレッドへ載せた記録。実時間ループ（io_node）用。
+
+    SD が詰まっても（open・write・flush・fsync・close はどれも数十〜数百 ms 止まりうる）呼び出し側は
+    止まらない: `write_*` はキューへ積むだけ。**`FrameLogWriter` に触るのはこの専用スレッドだけ**
+    （単一スレッド前提を崩さない）。キューが `queue_max` 件を超えたら**古いものから捨てて**
+    `dropped` に数える（記録より走行を優先する）。専用スレッドは `sync_interval_s` ごとに fsync する
+    （電源断で失うのを数秒に抑える）。
+
+    ファイルを開くのもスレッドの中。開けなかったら `open_error` に理由が入る（以後の書き込みは捨てる）。
+    `close()` は残りを書き切って終了イベントを書くようスレッドに頼む。`wait_s` までは待つ（既定は待たない）。
+    """
+
+    def __init__(self, path: str | Path, meta: dict[str, Any] | None = None, *,
+                 queue_max: int = 50_000, sync_interval_s: float = 3.0,
+                 **writer_kwargs: Any) -> None:
+        self.path = Path(path)
+        self.dropped = 0
+        self.open_error = ""
+        self._q: deque = deque()
+        self._queue_max = queue_max
+        self._sync_interval_s = sync_interval_s
+        self._meta = meta
+        self._kwargs = writer_kwargs
+        self._writer: FrameLogWriter | None = None
+        self._stats0 = _WriterStats()
+        self._closing = False
+        self._wake = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="sfl-writer", daemon=True)
+        self._thread.start()
+
+    # ── 呼び出し側（任意のスレッドから、ブロックしない）──
+
+    def _push(self, item: tuple) -> None:
+        if self._closing:
+            raise ValueError("クローズ済みの AsyncFrameLog に書き込もうとしました")
+        if len(self._q) >= self._queue_max:
+            try:
+                self._q.popleft()
+                self.dropped += 1
+            except IndexError:
+                pass
+        self._q.append(item)
+
+    def write_rx(self, t_ns: int, pkt_type: int, seq: int, payload: bytes) -> None:
+        self._push((Kind.RX, t_ns, pkt_type, seq, payload))
+
+    def write_tx(self, t_ns: int, pkt_type: int, seq: int, payload: bytes) -> None:
+        self._push((Kind.TX, t_ns, pkt_type, seq, payload))
+
+    def write_event(self, t_ns: int, name: str, data: dict[str, Any] | None = None) -> None:
+        self._push((Kind.EVENT, t_ns, name, data, None))
+
+    @property
+    def stats(self) -> _WriterStats:
+        w = self._writer
+        return w.stats if w is not None else self._stats0
+
+    @property
+    def last_write_error(self) -> str:
+        w = self._writer
+        return self.open_error or (w.last_write_error if w is not None else "")
+
+    @property
+    def broken(self) -> bool:
+        w = self._writer
+        return bool(self.open_error) or (w is not None and w.broken)
+
+    def close(self, wait_s: float = 0.0) -> None:
+        """閉じるよう頼む。残りを書き切って終了イベントと fsync を済ませるのはスレッド。"""
+        self._closing = True
+        self._wake.set()
+        if wait_s > 0:
+            self._thread.join(wait_s)
+
+    def join(self, timeout: float | None = None) -> None:
+        self._thread.join(timeout)
+
+    # ── 専用スレッド ──
+
+    def _run(self) -> None:
+        try:
+            w = FrameLogWriter(self.path, meta=self._meta, **self._kwargs)
+        except Exception as e:
+            self.open_error = f"{type(e).__name__}: {e}"
+            self._q.clear()
+            return
+        self._writer = w
+        next_sync = time.monotonic() + self._sync_interval_s
+        dirty = False
+        try:
+            while True:
+                closing = self._closing
+                n = 0
+                while n < 2000:
+                    try:
+                        kind, t_ns, a, b, c = self._q.popleft()
+                    except IndexError:
+                        break
+                    try:
+                        if kind == Kind.RX:
+                            w.write_rx(t_ns, a, b, c)
+                        elif kind == Kind.TX:
+                            w.write_tx(t_ns, a, b, c)
+                        else:
+                            w.write_event(t_ns, a, b)
+                    except Exception:
+                        w.stats.write_errors += 1
+                    dirty = True
+                    n += 1
+                if closing and not self._q:
+                    break
+                if dirty and time.monotonic() >= next_sync:
+                    w.sync()
+                    dirty = False
+                    next_sync = time.monotonic() + self._sync_interval_s
+                if n < 2000:
+                    self._wake.wait(0.02)
+                    self._wake.clear()
+        finally:
+            try:
+                w.close()
+            except Exception:
+                pass
 
 
 # ── 読み出し ────────────────────────────────────────────────────────────

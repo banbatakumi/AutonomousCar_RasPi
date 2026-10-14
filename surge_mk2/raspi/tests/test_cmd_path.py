@@ -77,8 +77,10 @@ def commands(link) -> list:
 
 
 def mark_handshaken(node: IoNode) -> IoNode:
-    """`handshake()` で STM32 の `VERSION` が一致したことにする（一致するまで ARM は通らない）。"""
+    """`handshake()` で STM32 の `VERSION` が一致し `LIMITS` も届いたことにする（どちらも揃うまで ARM は通らない）。"""
     node.state.version = packets.Version(protocol_version=packets.PROTOCOL_VERSION)
+    node.state.limits = packets.Limits(max_speed_m_s=5.0, max_accel_m_s2=3.0,
+                                       max_torque_nm=0.15, max_steer_rad=0.524)
     return node
 
 
@@ -282,13 +284,25 @@ class TestIoNodeArmGate(unittest.TestCase):
 
     def test_pi_side_clamp_applies_even_when_armed(self):
         """STM32 の上限だけに頼らない。上位が壊れたときに下位だけが守る形にしない。"""
-        n = self.node(allow_arm=True, max_speed=0.3, max_steer=0.05)
+        n = self.node(allow_arm=True)
+        n.state.limits = packets.Limits(max_speed_m_s=0.3, max_accel_m_s2=3.0,
+                                        max_torque_nm=0.15, max_steer_rad=0.05)
         self.sub.push(DriveCmd(mode=1, arm=True, target_speed=9.0, target_steer=1.5))
         n.run(duration_s=0.1)
         live = [c for c in commands(self.link) if c.mode == packets.Mode.MANUAL]
         self.assertTrue(live)
         self.assertEqual(live[0].target_speed, 300)
         self.assertEqual(live[0].target_steer, 500)
+
+    def test_without_limits_from_the_stm32_arm_is_blocked(self):
+        """`LIMITS` を受け取るまでは ARM を通さない（フォールバックの上限で走らせない）。取り直しは試みる。"""
+        n = self.node(allow_arm=True)
+        n.state.limits = None
+        self.sub.push(DriveCmd(mode=1, arm=True, target_speed=1.0, source="gui"))
+        n.run(duration_s=0.1)
+        self.assert_all_disarm()
+        self.assertIn("LIMITS", n._arm_block_reason())
+        self.assertTrue(any(isinstance(p, packets.LimitsReq) for p in self.link.sent))
 
     def test_limits_overrides_max_speed_even_when_more_permissive(self):
         """★v0.11・2026-08-22。`LIMITS` を受信済みなら `--max-speed`/`--max-steer` より
@@ -855,6 +869,52 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(srv.published[-1][1].target_speed, 0.7)
         self.assertEqual(srv.stale_cmds, 1)
 
+    async def test_sparse_cmds_do_not_make_the_car_run_in_pulses(self):
+        """バックグラウンドで 1Hz に間引かれた GUI の「走れ」は、1発ごとに即時中継して 150ms ずつ
+        走らせない。最初の1発は通るが、間隔が開いたあとの「走れ」は通さない。50Hz に戻れば次から通る。"""
+        from raspi.nodes.telemetry_node import CMD_SPARSE_GAP_NS
+        srv = self._server()
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.5)
+        self.assertEqual(srv.published[-1][1].mode, 1)
+        n = len(srv.published)
+        srv._prev_cmd_arrival_ns -= CMD_SPARSE_GAP_NS + 1            # 次の1発は 300ms 超ぶり
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.6)
+        self.assertEqual(len(srv.published), n)
+        self.assertEqual(srv.sparse_cmds, 1)
+        # 止める指令は間隔が開いていても通る
+        srv._prev_cmd_arrival_ns -= CMD_SPARSE_GAP_NS + 1
+        await self._send(srv, srv.ws, type="cmd", mode=0, arm=False)
+        self.assertEqual(srv.published[-1][1].mode, 0)
+        # 直後（間隔が詰まった）の「走れ」は通る
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.6)
+        self.assertEqual(srv.published[-1][1].target_speed, 0.6)
+        self.assertEqual(srv.sparse_cmds, 1)
+
+    async def test_persistent_lateness_releases_control_so_the_baseline_is_remeasured(self):
+        """遅れた「走れ」を `CMD_LATE_RELEASE_NS` 捨て続けたら操縦権を外す（回線の遅延が増えたまま
+        基準が追いつくのを最大約50秒待たせない）。人が取り直せば新しい遅延で再開できる。"""
+        from raspi.nodes.telemetry_node import CMD_LATE_RELEASE_NS
+        srv = self._server()
+        released = []
+        srv._status_soon = lambda: None
+        srv.token = ""
+        orig = srv._release_control
+        srv._release_control = lambda why: (released.append(why), orig(why))
+        now_ms = time.monotonic_ns() / 1e6
+        await self._send(srv, srv.ws, type="cmd", t=now_ms, mode=1, arm=True, speed=0.5)
+        await self._send(srv, srv.ws, type="cmd", t=now_ms - 400, mode=1, arm=True, speed=0.5)
+        self.assertEqual(srv.stale_cmds, 1)
+        self.assertEqual(released, [])
+        srv._late_since_ns -= CMD_LATE_RELEASE_NS                    # 捨て続けて2秒経った
+        await self._send(srv, srv.ws, type="cmd", t=now_ms - 400, mode=1, arm=True, speed=0.5)
+        self.assertEqual(len(released), 1)
+        self.assertIsNone(srv.controller)
+        # 取り直せば基準が測り直され、新しい遅延のまま走れる
+        await self._send(srv, srv.ws, type="take_control", name="x")
+        self.assertIs(srv.controller, srv.ws)
+        await self._send(srv, srv.ws, type="cmd", t=now_ms - 400, mode=1, arm=True, speed=0.5)
+        self.assertEqual(srv.published[-1][1].mode, 1)
+
     async def test_auto_rides_through_a_short_link_gap(self):
         """自律走行中は GUI の指令が `auto_link_grace_ms` 途絶えるまで DISARM しない。
         手動操縦は `cmd_deadman_ms` のまま（2026-10-06）。"""
@@ -975,6 +1035,8 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.sub = type("S", (), {"latest": {}})()
         srv._sfl_active = False
         srv._mcap_proc = None
+        srv._mcap_starting = False
+        srv._logger_running = False
         srv._mcap_started_ns = 0
         srv._mcap_error = None
         # 自動運転（§8）。**engage していない既定の状態**を組む
@@ -1274,6 +1336,16 @@ class TestOriginCheck(unittest.TestCase):
         # ポートだけ違うのも別オリジン
         self.assertFalse(self._ok("http://surge.local:9999"))
 
+    def test_dns_rebinding_host_is_rejected(self):
+        """攻撃者のドメインが Pi の IP を指すと Host と Origin は一致する。名前が未知なら弾く。"""
+        self.assertFalse(self._ok("http://evil.example:8000", host="evil.example:8000"))
+        self.assertTrue(self._ok("http://surge-mk2.local:8000", host="surge-mk2.local:8000"))
+        self.assertTrue(self._ok("http://localhost:8000", host="localhost:8000"))
+        self.assertTrue(self._ok("http://[::1]:8000", host="[::1]:8000"))
+        import socket
+        me = socket.gethostname().lower()
+        self.assertTrue(self._ok(f"http://{me}.local:8000", host=f"{me}.local:8000"))
+
     def test_no_origin_passes(self):
         """`Origin` 無し = ブラウザ以外（curl・`tools/`）。
 
@@ -1508,6 +1580,21 @@ class TestIoWaitsOnLinkAndBus(unittest.TestCase):
             dt, got = self._wait(node, lambda: self.b.send(b"\xaa\x55"))
             self.assertLess(dt, 0.3)
             self.assertTrue(got)
+        finally:
+            self.sub.close()
+            self.pub.close()
+
+    def test_a_broken_uart_fd_stops_the_node_instead_of_spinning(self):
+        """UART の fd が切断・エラー状態だと poller は起こし続け、空読みで CPU を回す。落として再起動に任せる。"""
+        import zmq
+        node = self._node()
+        try:
+            class _Broken:
+                def poll(self_, _ms):
+                    return [(node._uart_fd, zmq.POLLIN | zmq.POLLERR)]
+            node._poller = _Broken()
+            with self.assertRaises(OSError):
+                node._poll_link(time.monotonic_ns(), time.monotonic_ns() + 10**9)
         finally:
             self.sub.close()
             self.pub.close()

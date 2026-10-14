@@ -99,12 +99,17 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
 | 層 | 何を止めるか |
 |---|---|
 | `--host` の既定が `127.0.0.1` | 「打ち忘れ」で外に開くのを止める。外に出すなら `--host 0.0.0.0` を明示 |
-| Origin 検査（`_origin_ok`） | **クロスサイト WebSocket ハイジャック**。操縦中に別タブで開いた悪意あるページが `/ws/control` を張るのを弾く |
+| Origin 検査（`_origin_ok`） | **クロスサイト WebSocket ハイジャック**。操縦中に別タブで開いた悪意あるページが `/ws/control` を張るのを弾く。Host が既知の名前か IP リテラルかも見る（DNS リバインディング） |
 | 共有トークン（`--token`） | 同一ネットワーク上の第三者。実際には**隣の班の PC の誤接続**を止める意味が大きい |
 | `engage` に操縦権を要求 | 操縦権を持たない接続が自律走行を**開始**するのを止める |
 
 engage している間は、操縦者以外の接続は自律走行の設定（パラメータ・駐車目標・経路・地図）を
 変えられない（解除だけできる）。ARM 中のシャットダウンも受け付けない。
+
+操縦者の指令には、遅れ・間引きの守りも掛かる（止める指令は通す）: 遅れて届いた「走れ」は捨て、
+捨て続けて `CMD_LATE_RELEASE_NS` 経ったら操縦権を外して人に取り直させる（遅れの基準を測り直す）。
+`CMD_SPARSE_GAP_NS` 以上間隔が開いたあとの最初の「走れ」は通さない（バックグラウンドで間引かれた
+GUI の1発ごとに走らせない）。
 
 **止める操作には条件をつけない。** E-Stop・操縦権の解放・engage の解除は
 トークンも操縦権も要求しない。止める指令に条件を足すと、
@@ -122,11 +127,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import http
+import ipaddress
 import math
 import mimetypes
 import os
 import secrets
 import signal
+import socket
 import sys
 import tempfile
 import time
@@ -168,6 +175,7 @@ from raspi.msgs import (  # noqa: E402
     TargetRoiCtrl,
     UiEvent,
 )
+from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM  # noqa: E402
 from raspi.msgs.schema import schema_version  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -254,6 +262,9 @@ TELEMETRY_HZ = 50
 #: 配信の周期に対して、次のフレームをこの割合まで早く出してよい（`CAMERA_DUE_SLACK` と同じ役目）。
 #: `vehicle_state` の到着は 10ms の前後に揺れるので、2回目が 20ms に少し届かなくても送る
 TELEMETRY_DUE_SLACK = 0.15
+#: `vehicle_state`（10ms 間隔）の周に対して、配信周期まであとこれだけ（以内）なら飛ばさず刻みまで
+#: 待って送る。飛ばすと次の `vehicle_state`（さらに10ms後）まで待つので、間隔が周期の1.5倍に開く
+TELEMETRY_WAKE_MARGIN_S = 0.008
 #: `_snapshot` が**中身が変わったときだけ載せる**キーとそのトピック。どれも 10Hz 以下でしか
 #: 変わらないのに 50Hz で同じ物を送り直していた（実機で1フレーム 4.4kB のうち 3.3kB）。
 #: GUI は載っていないキーの値を前のまま持つ（`gui/src/bus/live.ts` の `noteTelemetry`）
@@ -364,6 +375,15 @@ AUTO_LINK_GRACE_NS = max(CMD_DEADMAN_NS, int(_SAFETY.auto_link_grace_ms * 1_000_
 #: GUI の時計と Pi の時計の進みの差として見込む量 [ms/s]（`_cmd_lateness_ms`）。
 #: 水晶のずれ（0.1ms/s 未満）より十分大きく、溜まっていた指令の遅れ（秒単位）より十分小さい
 CMD_CLOCK_DRIFT_MS_PER_S = 1.0
+#: 遅れた「走れ」を捨て続けて（`_cmd_lateness_ms`）これだけ経ったら、遅れが一時的な溜まりではなく
+#: 恒常的な増加（回線の遅延が増えたまま）とみなして**操縦権を外す**。基準は操縦権を取るたびに
+#: 測り直すので、人が取り直せば新しい遅延で再開できる（放っておくと基準が追いつく最大約50秒、
+#: 走れないまま待たされる）。まとめて届く溜まりは数百ms で流れ切るので、それより十分長く
+CMD_LATE_RELEASE_NS = 2 * NS
+#: 操縦者の指令の間隔がこれより開いたあとの**最初の**「走れ」は通さない。バックグラウンドで 1Hz に
+#: 間引かれた GUI が、1発ごとに「変化あり」で即時中継されて 150ms ずつ走るのを止める
+#: （50Hz で再開すれば次の1発（20ms 後）から通る）。デッドマン（150ms）より十分長く
+CMD_SPARSE_GAP_NS = 300_000_000
 #: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` と同じ値）
 DEFAULT_MCAP_IMAGE_HZ = 5.0
 #: 中継の読み取り単位
@@ -397,6 +417,39 @@ SEND_TIMEOUT_S = 0.5
 #: （`/ws/control` で黙っている相手）が死んだことは、これでしか分からない
 WS_PING_INTERVAL_S = 5.0
 WS_PING_TIMEOUT_S = 5.0
+#: Host ヘッダとして受け付ける名前（IP リテラルは常に通す）。**DNS リバインディング対策**:
+#: 攻撃者のドメインを Pi の IP へ引かせたページは `Host`・`Origin` が一致して Origin 検査を
+#: 通ってしまうので、名前そのものも見る。Pi 自身のホスト名（`.local` 付きも）は実行時に足す。
+#: 他の名前で繋ぎたいときは環境変数 `SURGE_ALLOWED_HOSTS`（カンマ区切り）
+KNOWN_HOSTS = frozenset({"localhost", "surge.local", "surge-mk2.local"})
+
+
+def _known_hosts() -> frozenset[str]:
+    extra = {h.strip().lower() for h in os.environ.get("SURGE_ALLOWED_HOSTS", "").split(",")
+             if h.strip()}
+    try:
+        me = socket.gethostname().lower()
+        extra |= {me, me + ".local"}
+    except OSError:
+        pass
+    return KNOWN_HOSTS | extra
+
+
+def _host_ok(host: str) -> bool:
+    """`Host` ヘッダ（`名前[:ポート]`）が既知の名前か IP リテラルか。"""
+    host = host.strip().lower()
+    if host.startswith("["):                     # [::1]:8000
+        name = host[1:].split("]", 1)[0]
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    return name.rstrip(".") in _known_hosts()
+
+
 #: 同一オリジン以外で許すオリジン。**Vite の dev サーバだけ。**
 #: 本番（telemetry_node が GUI も配る）は Host ヘッダと突き合わせるので列挙しない
 DEV_ORIGINS = frozenset(
@@ -489,6 +542,12 @@ def _onnx_model_files(models_dir: Path) -> list[dict]:
 class TelemetryServer:
     #: 遅れて届いたので捨てた「走れ」の指令の数（`_cmd_lateness_ms`）
     stale_cmds = 0
+    #: 間隔が開いたあとの最初の「走れ」として通さなかった指令の数（`CMD_SPARSE_GAP_NS`）
+    sparse_cmds = 0
+    #: 遅れた「走れ」を捨て続けている最初の時刻（捨てていなければ None。`CMD_LATE_RELEASE_NS`）
+    _late_since_ns: int | None = None
+    #: 操縦者の直前の指令の到着時刻（捨てたものも含む。0 = 操縦権を取って最初）
+    _prev_cmd_arrival_ns = 0
     #: 壊れていて捨てた `/ws/control` のメッセージの数（`_on_control`）
     bad_cmds = 0
     #: GUI の時刻 → Pi の受信時刻の差の最小値 [ms] と、それを更新した時刻。操縦権ごとに測り直す
@@ -544,6 +603,8 @@ class TelemetryServer:
 
         self.telemetry_clients: set = set()
         self.control_clients: set = set()
+        #: `status` に自動運転の宣言（`catalog`）を毎回は載せなくてよい `/ws/control` クライアント
+        self._catalog_lite: set = set()
         #: `"mask"` は `ftg_cam` の走行可否マスク（`_mask_pump` が中継。
         #: front/rear と違い telemetry_node 自身のエンコーダを使わないので
         #: `_camera_channel` の `self._jpeg is None` チェックの対象外にしてある）
@@ -857,12 +918,17 @@ class TelemetryServer:
         許可の判定は **Host ヘッダとの一致**で行う。オリジンを定数で列挙すると、
         `surge.local` でも `192.168.x.x` でも繋ぎたい実運用で必ず取りこぼす。
         同一オリジンなら Origin は必ず `scheme://<Host と同じ>` になる。
+        **Host が既知の名前か IP リテラルかも見る**（`_host_ok`）——攻撃者のドメインを Pi の IP へ
+        引かせる DNS リバインディングでは Host と Origin が一致してしまうため。
         """
         origin = request.headers.get("Origin")
         if origin is None:
             return True
         host = request.headers.get("Host") or ""
-        return origin in (f"http://{host}", f"https://{host}") or origin in DEV_ORIGINS
+        if origin in DEV_ORIGINS:
+            return True
+        return (origin in (f"http://{host}", f"https://{host}")
+                and _host_ok(host))
 
     async def _process_request(self, connection, request):
         """WebSocket 以外のリクエストは静的ファイルまたはログのダウンロードとして返す。
@@ -972,6 +1038,11 @@ class TelemetryServer:
 
     async def _control_channel(self, ws) -> None:
         self.control_clients.add(ws)
+        # `?catalog=changed` で繋いだ GUI には、`status.auto.catalog`（数十 kB）を**接続時の1通目
+        # だけ**載せる。宣言一式はプロセスの起動中は変わらないので、毎回送り直さない。付けない
+        # クライアントは従来どおり毎回載る（`_broadcast_control_status`）
+        if "catalog=changed" in ws.request.path.partition("?")[2].split("&"):
+            self._catalog_lite.add(ws)
         # **GUI が繋がった合図。** io_node が拾ってブザーで接続音を鳴らす
         # （起動音・STM32 の起動音とは別の音形。`raspi/io/gpio.py` 参照）
         self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="gui_connect"))
@@ -983,6 +1054,7 @@ class TelemetryServer:
             pass
         finally:
             self.control_clients.discard(ws)
+            self._catalog_lite.discard(ws)
             if self.controller is ws:
                 # **操縦者が消えたら即座に手放す。** タイムアウトを待たない
                 self._release_control("接続が切れた")
@@ -1028,6 +1100,8 @@ class TelemetryServer:
             self._last_cmd = None
             self._last_cmd_ns = 0
             self._cmd_clock_base_ms = None    # 遅れの基準は操縦権を取るたびに測り直す
+            self._late_since_ns = None
+            self._prev_cmd_arrival_ns = 0
             self._relay_now()
             self._status_soon()
 
@@ -1057,9 +1131,27 @@ class TelemetryServer:
             # ブラウザと TCP に溜まり、復帰した瞬間にまとめて届く。受信時刻だけで鮮度を
             # 見ると、何十秒も前の ARM でデッドマンが「生きている」に戻り、人の操作なしに
             # 走り出す。**止める指令（DISARM・`arm=false`）は遅れていても通す**
-            late_ms = self._cmd_lateness_ms(m.get("t"), time.monotonic_ns())
-            if late_ms > _SAFETY.cmd_deadman_ms and cmd.arm and cmd.mode != 0:
+            now_ns = time.monotonic_ns()
+            late_ms = self._cmd_lateness_ms(m.get("t"), now_ns)
+            gap_ns = now_ns - self._prev_cmd_arrival_ns if self._prev_cmd_arrival_ns else 0
+            self._prev_cmd_arrival_ns = now_ns
+            go = cmd.arm and cmd.mode != 0
+            if late_ms > _SAFETY.cmd_deadman_ms and go:
                 self.stale_cmds += 1
+                if self._late_since_ns is None:
+                    self._late_since_ns = now_ns
+                elif now_ns - self._late_since_ns >= CMD_LATE_RELEASE_NS:
+                    # 遅れが続いている＝基準が古い。操縦権を外して人に取り直させる（測り直す）
+                    self._release_control("通信の遅れが続いたため操縦権を解放（取り直してください）")
+                    self._relay_now()
+                    self._status_soon()
+                return
+            if go:
+                self._late_since_ns = None
+            if go and gap_ns > CMD_SPARSE_GAP_NS:
+                # 間引かれた指令（バックグラウンドの 1Hz 等）や途絶明けの最初の1発では走らせない。
+                # 到着は記録したので、続けて 50Hz で届けば次の指令から通る
+                self.sparse_cmds += 1
                 return
             # **中身が変わったらその場で `/cmd` へ**。50Hz の `_cmd_pump` を待つと
             # GUI の 50Hz と非同期で平均10ms・最大20ms遅れ、人のブレーキも同じだけ遅れた。
@@ -1394,6 +1486,8 @@ class TelemetryServer:
 
     def _release_control(self, why: str) -> None:
         self._cmd_clock_base_ms = None
+        self._late_since_ns = None
+        self._prev_cmd_arrival_ns = 0
         self.controller = None
         self.controller_name = ""
         self._last_cmd = None
@@ -1675,14 +1769,13 @@ class TelemetryServer:
     def _vehicle_armed(self) -> bool:
         """STM32側の `armed`（DISARM=駐車中/ARM=いつでも走れる）。
 
-        `VehicleState` がまだ1度も届いていない起動直後は `True`
-        （＝ARM相当のFPSのまま）を返す。**`False` を既定にすると、
-        起動直後の一瞬だけ節電用の低FPSに落ちて誤解のもとになる**
-        （`_read_pi_temp_c` の None 扱いと違い、こちらは「わからない」を
-        安全側＝高FPS側に倒す）。
+        `VehicleState` がまだ1度も届いていない（io_node が居ない・落ちている）間は `False`。
+        ARM かどうかが分からないのに ARM 扱いにすると、CPU を上限周波数のまま・カメラを
+        常時回したままにする（省電力が効かない）。ARM した瞬間は `vehicle_state` が届くので
+        `_on_armed_change` が即座に切り替える。
         """
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
-        return True if vs is None else bool(vs.armed)
+        return False if vs is None else bool(vs.armed)
 
     def _desired_front_fps(self) -> float:
         """前カメラの capture fps。優先度は上から:
@@ -1802,29 +1895,35 @@ class TelemetryServer:
     # ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
 
     #: `DrivingSettings`（GUI側 `gui/src/store/ui.ts`）のうち、車体の運転パラメータとして
-    #: Pi側に保存する項目。`speedUnit`/`engineSoundType` は表示上の好みなので対象外
-    #: （GUI側でブラウザ`localStorage`のみに残す）。値は GUI 側の `clampSettings` が
-    #: 必ずクランプするので、ここでは型だけ検査する（`_on_camera` ほど厳密なレンジの
-    #: サーバ側再現はしない——物理的に効く値ではなく、表示・演算用の値のため）
-    _DRIVE_SETTINGS_NUMERIC_KEYS = frozenset({
-        "maxSpeed", "maxSteer", "accel", "coast", "brake",
-        "steerRate", "steerReturn", "steerCounter",
-        "gamepadSteerExpo", "gamepadSteerDeadzone",
-        "armIdleTimeoutMs", "brakeTorque", "driveTorque",
-        "mtMaxSpeed", "mtAccel",
-        "mtGear1", "mtGear2", "mtGear3", "mtGear4", "mtGear5",
-        "mtCoast", "mtEngineBrake", "camHeight",
-    })
-    _DRIVE_SETTINGS_BOOL_KEYS = frozenset({"autoStop"})
+    #: Pi側に保存する項目と、その範囲 `(min, max)`。`speedUnit`/`engineSoundType` は表示上の
+    #: 好みなので対象外（GUI側でブラウザ`localStorage`のみに残す）。範囲は GUI の
+    #: `SETTINGS_RANGE` と同じ。`LIMITS` で広がる項目（速度・加速度・トルク）は GUI が実測値まで
+    #: 広げるので、ここは**壊れた値を弾くだけの広い天井**にしてある（実際の上限は io_node と
+    #: STM32 が `LIMITS` で掛ける）。範囲外は切り詰めて通す（捨てると保存が古いまま残る）
+    _DRIVE_SETTINGS_RANGE: dict[str, tuple[float, float]] = {
+        "maxSpeed": (0.1, 10.0), "maxSteer": (0.175, _SAFETY.max_steer),
+        "accel": (0.5, 70.0), "coast": (0.5, 70.0), "brake": (0.5, 70.0),
+        "steerRate": (0.5, 6.5), "steerReturn": (0.5, 6.5), "steerCounter": (0.5, 6.5),
+        "gamepadSteerExpo": (0.0, 1.0), "gamepadSteerDeadzone": (0.0, 0.3),
+        "armIdleTimeoutMs": (5_000.0, 60_000.0),
+        "brakeTorque": (0.005, MAX_BRAKE_TORQUE_NM), "driveTorque": (0.01, MAX_TARGET_TORQUE_NM),
+        "mtMaxSpeed": (0.1, 10.0), "mtAccel": (0.5, 70.0),
+        "mtGear1": (0.05, 1.0), "mtGear2": (0.05, 1.0), "mtGear3": (0.05, 1.0),
+        "mtGear4": (0.05, 1.0), "mtGear5": (0.05, 1.0),
+        "mtCoast": (0.2, 70.0), "mtEngineBrake": (0.0, 6.0), "camHeight": (0.03, 0.25),
+    }
+    _DRIVE_SETTINGS_NUMERIC_KEYS = frozenset(_DRIVE_SETTINGS_RANGE)
+    _DRIVE_SETTINGS_BOOL_KEYS = frozenset({"autoStop", "launchControl"})
     _DRIVE_MODES = frozenset({"speed", "torque", "mt"})
 
     def _valid_drive_settings(self, raw: dict) -> dict:
-        """既知キーだけ、型検査を通ったものだけを取り出す（`_on_drive_settings`／
-        `_load_drive_settings` 共通）。数値レンジのクランプはGUI側 `clampSettings` の責務"""
+        """既知キーだけ、型検査とレンジ（`_DRIVE_SETTINGS_RANGE`）を通ったものだけを取り出す
+        （`_on_drive_settings`／`_load_drive_settings` 共通）。範囲外は切り詰める。"""
         out: dict = {}
-        for k in self._DRIVE_SETTINGS_NUMERIC_KEYS:
-            if k in raw and isinstance(raw[k], (int, float)) and math.isfinite(raw[k]):
-                out[k] = float(raw[k])
+        for k, (lo, hi) in self._DRIVE_SETTINGS_RANGE.items():
+            v = raw.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                out[k] = min(hi, max(lo, float(v)))
         for k in self._DRIVE_SETTINGS_BOOL_KEYS:
             if k in raw and isinstance(raw[k], bool):
                 out[k] = raw[k]
@@ -2239,7 +2338,8 @@ class TelemetryServer:
         return [{"node": name, "age_ms": round((now - t_ns) / 1e6), "pid": pid, "detail": detail}
                 for name, (t_ns, pid, detail) in sorted(self._node_hb.items())]
 
-    def _control_status(self) -> dict:
+    def _control_status(self, catalog: bool = True) -> dict:
+        """`/ws/control` の `status`。`catalog=False` は自動運転の宣言（`auto.catalog`）を省く。"""
         link = self.sub.latest.get(TOPIC_DIAG_LINK)
         return {
             "type": "status",
@@ -2283,7 +2383,7 @@ class TelemetryServer:
             "bad_cmds": self.bad_cmds,
             "sfl": {"active": self._sfl_active},
             "mcap": self._mcap_status(),
-            "auto": self._auto_status(),
+            "auto": self._auto_status(catalog),
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
             "pi": self._pi_state.as_dict(),
@@ -2296,22 +2396,24 @@ class TelemetryServer:
             "cam_e2e_model": self._cam_e2e_model_status(),
         }
 
-    def _auto_status(self) -> dict:
+    def _auto_status(self, catalog: bool = True) -> dict:
         """自動運転の意思と、**選べるモードの宣言そのもの**。
 
         `catalog` は `raspi/auto/registry.py` の内容をそのまま流している。
         GUI のモード選択もパラメータのスライダもこれ 1 つから組まれるので、
         **planner を足しても GUI は 1 行も変えなくてよい。**
         """
-        return {
+        out = {
             "mode": self._auto_mode,
             "engaged": self._auto_engaged,
             "params": self._auto_params,
             #: 今のモードのプリセットの名前（GUI のドロップダウン）
             "presets": sorted(self._auto_presets.get(self._auto_mode, {})),
-            "catalog": auto_catalog(),
             "stalls": self.auto_stalls,
         }
+        if catalog:
+            out["catalog"] = auto_catalog()
+        return out
 
     def _mcap_status(self) -> dict:
         active = self._mcap_proc is not None
@@ -2591,10 +2693,20 @@ class TelemetryServer:
     async def _broadcast_control_status(self) -> None:
         if not self.control_clients:
             return
-        # 全員に同じ物を送るので、JSON 化は1回だけ（`catalog` を含み数十 kB ある）
-        text = _json_encode(self._control_status()).decode()
-        await asyncio.gather(*(self._send_text(c, text) for c in list(self.control_clients)),
-                             return_exceptions=True)
+        # 同じ物を送るので、JSON 化は種類ごとに1回だけ（`catalog` を含む版は数十 kB ある）。
+        # `catalog` を省いてよいクライアント（`?catalog=changed`）には省いた版を送る
+        clients = list(self.control_clients)
+        lite_set = getattr(self, "_catalog_lite", ())
+        lite = [c for c in clients if c in lite_set]
+        full = [c for c in clients if c not in lite_set]
+        sends = []
+        if full:
+            text = _json_encode(self._control_status()).decode()
+            sends += [self._send_text(c, text) for c in full]
+        if lite:
+            text = _json_encode(self._control_status(catalog=False)).decode()
+            sends += [self._send_text(c, text) for c in lite]
+        await asyncio.gather(*sends, return_exceptions=True)
 
     def _status_soon(self) -> None:
         """`status` を全員へ配る。**呼んだ側は待たない。**
@@ -2834,8 +2946,13 @@ class TelemetryServer:
                 pass
             self._tel_wake.clear()
             now = time.monotonic()
-            if now - last_tx < min_gap:
-                continue
+            elapsed = now - last_tx
+            if elapsed < min_gap:
+                if elapsed < period - TELEMETRY_WAKE_MARGIN_S:
+                    continue          # 早すぎる周は飛ばす（次の `vehicle_state` を待つ）
+                # 次の周まで待つと周期を大きく超える（最大約30ms 開く）ので、刻みまで待って送る
+                await asyncio.sleep(max(0.0, min_gap - elapsed))
+                now = time.monotonic()
             last_tx = now
             if not self.telemetry_clients:
                 continue

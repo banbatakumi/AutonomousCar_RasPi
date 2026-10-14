@@ -622,10 +622,32 @@ class TestVehicleArmed(unittest.TestCase):
         fake = _fake_cam_server(armed=False)
         self.assertFalse(tn.TelemetryServer._vehicle_armed(fake))
 
-    def test_defaults_true_before_first_vehicle_state(self):
-        """起動直後、`VehicleState`がまだ届いていない一瞬は節電側に倒さない。"""
+    def test_false_before_first_vehicle_state(self):
+        """`VehicleState` が届いていない（io_node が居ない）間は非 ARM 扱い。ARM 扱いだと省電力が効かない。"""
         fake = _fake_cam_server(armed=None)
-        self.assertTrue(tn.TelemetryServer._vehicle_armed(fake))
+        self.assertFalse(tn.TelemetryServer._vehicle_armed(fake))
+
+
+class TestValidDriveSettings(unittest.TestCase):
+    """運転設定の保存: 型だけでなく GUI の `SETTINGS_RANGE` と同じ範囲で切り詰める。"""
+
+    def _v(self, raw):
+        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        return srv._valid_drive_settings(raw)
+
+    def test_out_of_range_values_are_clamped(self):
+        out = self._v({"maxSpeed": 1e9, "steerRate": -3, "mtGear2": 7, "brakeTorque": 5,
+                       "armIdleTimeoutMs": 0})
+        self.assertEqual(out["maxSpeed"], 10.0)
+        self.assertEqual(out["steerRate"], 0.5)
+        self.assertEqual(out["mtGear2"], 1.0)
+        self.assertEqual(out["brakeTorque"], 0.13)
+        self.assertEqual(out["armIdleTimeoutMs"], 5000.0)
+
+    def test_bad_types_are_dropped_and_launch_control_is_kept(self):
+        out = self._v({"maxSpeed": "fast", "accel": True, "camHeight": float("inf"),
+                       "launchControl": True, "autoStop": 1, "driveMode": "x"})
+        self.assertEqual(out, {"launchControl": True})
 
 
 class TestDesiredFrontFps(unittest.TestCase):
@@ -679,8 +701,8 @@ class TestDesiredFrontEnabled(unittest.TestCase):
     def test_armed_always_enabled(self):
         self.assertTrue(self._front(_fake_cam_server(armed=True)))
 
-    def test_before_first_vehicle_state_is_enabled(self):
-        self.assertTrue(self._front(_fake_cam_server(armed=None)))
+    def test_before_first_vehicle_state_is_treated_as_disarmed(self):
+        self.assertFalse(self._front(_fake_cam_server(armed=None)))
 
     def test_disarmed_and_unused_is_stopped(self):
         self.assertFalse(self._front(_fake_cam_server(armed=False)))
@@ -952,6 +974,19 @@ class TestStalledClient(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(srv._broadcast_control_status(), 0.5)
         self.assertEqual(len(good.got), 1)
         self.assertTrue(stuck.aborted)
+
+    async def test_catalog_is_left_out_for_clients_that_ask(self):
+        """`?catalog=changed` の GUI には `auto.catalog`（数十 kB）を毎回は送らない。付けない側は従来どおり。"""
+        import json
+        srv = _cp.TestControlOwnership._server(self)
+        del srv._send_json
+        lite, old = _GoodWs(), _GoodWs()
+        srv.control_clients = {lite, old}
+        srv._catalog_lite = {lite}
+        await srv._broadcast_control_status()
+        self.assertNotIn("catalog", json.loads(lite.got[0])["auto"])
+        self.assertIn("catalog", json.loads(old.got[0])["auto"])
+        self.assertIn("catalog", srv._control_status()["auto"])      # 接続時の1通目は常に載る
 
     async def test_control_handler_does_not_wait_for_the_broadcast(self):
         """status の配信が終わらなくても、操縦者の次のメッセージ（E-Stop）は処理される。"""
