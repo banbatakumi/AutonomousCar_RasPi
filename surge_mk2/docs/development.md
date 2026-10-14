@@ -830,8 +830,9 @@ tools/deploy.sh --test                                           # Pi 上でも�
 ### 8.5 速度が上がらない
 
 **上限は `LIMITS`（STM32 が報告する車両の物理上限）が正。** io_node も GUI（`effectiveRange`）も、
-`LIMITS` を受信済みならそれを使う。`--max-speed`（既定 3.0 m/s）・`--max-steer`（0.524 rad ＝ 30°。
-路面舵角の実機上限）は **`LIMITS` を受け取るまでのフォールバック**で、`--services` ＋ `--restart-io` で反映する。
+`LIMITS` を受信済みならそれを使う。**`LIMITS` を受け取るまで io_node は ARM を通さない。**
+`--max-speed`（既定 3.0 m/s）・`--max-steer`（`vehicle.toml` の `max_steer` で頭打ち）は ARM していない間の
+既定で、`--services` ＋ `--restart-io` で反映する。
 
 | 症状 | 疑う |
 |---|---|
@@ -870,6 +871,19 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | SD が埋まる | `.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 ＝ **1日 18GB** | `surge-logclean.timer` が毎時「7日超」と「合計 8GB 超過分」を消す。**`.mcap` は既定で SD に書かない**（GUI か `tools/record.sh` で PC に流す）。加えて `io_node`/`logger_node` 自身が30秒ごとに空き容量[%]を見て、逼迫していれば警告・世代管理で古い順に削除する（`raspi/rec/logclean.py`。毎時タイマーより早く気づける・記録中のファイルは保護する点が異なる） |
 | それでも `.sfl`/`.mcap` の書き込み中に SD が満杯（ENOSPC） | 上の掃除が間に合わなかった・他プロセスが埋めた等 | `FrameLogWriter`/`McapLog` は `OSError` を握り潰し、以後そのファイルへの書き込みを止める（`broken`/`errors`/`last_error` に理由が残る）。**記録スレッドはクラッシュしない**——走行そのものは続く |
 | `.sfl` が途中で切れている | 追記のみ・索引なし | **前半は必ず読める。** これが `.sfl` を残している理由 |
+
+**記録まわりの約束**（2026-10）:
+- `.sfl` は io_node の専用スレッド（`sfl-writer`）が書き、3 秒ごとに fsync する。SD が詰まってもメインループは
+  止まらない（キューが溢れたら古い順に捨て、終了時の統計に `dropped` として出す）
+- `logs/<サービス>.out` は毎時の掃除で 10MB を超えたら末尾 2MB だけ残す。毎時の掃除は最終更新が 1 分以内の
+  ファイル（記録中）を消さない。`mcap_repair --inplace` の `.mcap.bak` も掃除の対象
+- STM32 だけが再起動したら（`t_us` の後退、または要求していない VERSION の到着で検出）、io_node は時刻同期を
+  やり直し、`[control]` と GUI で設定した値（TC/TV/ABS/片輪浮き/ブレーキホールド/自動停止マージン）を送り直し、
+  ARM を入れ直すまで通さない
+- 同定（`tools/sysid`）の「適用」で `[control]` が変わったら、STM32 に入れるには `tools/deploy.sh --restart-io`
+  （`--restart` では入らない）。ジャイロ倍率の誤差は `mu` と `steer_link_gain` にそのまま乗る
+- 検証用: `sim.slam_bench --locate N`（保存地図の読み直し＋全域探索の検証）・`--speed-quant`・`--time-offset-ms`、
+  `sim.bench --errors real|harsh`、`raspi.tools.grip_replay --learner time --plan-lap`
 
 ### 8.10 点群がおかしい
 
