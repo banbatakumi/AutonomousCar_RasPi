@@ -11,6 +11,8 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -626,9 +628,12 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             f: Future = Future()
             f.set_result((line, "注意"))
             pl._stopping, pl._stop_job = "P", f
-            pl._poll()
+            # 車は終わりの区間（270 番目）の上＝始点の側では 10 番目あたりの上に居る
+            with mock.patch.object(pl, "slam", SimpleNamespace(pose=np.array(pose))):
+                pl._poll()
             self.assertEqual(pl._switch.active_key, "stop")
-            self.assertEqual(pl._hint, 0)
+            # 全体の最寄り（終わり側）ではなく、始点の側の最初の谷から追う
+            self.assertLess(abs(pl._hint - 10), 3)
             self.assertEqual(pl._stop_error, "注意")
         finally:
             pl.close()
@@ -800,6 +805,21 @@ class TestLapCount(unittest.TestCase):
         for i in list(range(0, 100, 3)) + [1, 4]:
             self.pl._count_lap(self.path, i)
         self.assertEqual(self.pl.laps, 1)
+
+    def test_grip_learning_is_gated_before_stopping_for_lost_localization(self):
+        """自己位置が信用できずに止まる周期にも、横グリップの学習のゲートを閉じる。"""
+        from raspi.auto.slam2d_raceline import RACE
+        from raspi.msgs import AutoState, VehicleState
+        pl = self.pl
+        pl.phase = RACE
+        pl._race_started = True
+        pl._routes = {"auto": self.path}
+        pl._switch.set_active("auto", self.path)
+        pl._grip_gate = ""                                   # 前の周期は学習してよかった
+        p = type(pl).merged({"grip_learn": 1})
+        st = pl._race(AutoState(match_score=0.0), None, VehicleState(t_capture=5), p, True)
+        self.assertFalse(st.ready)
+        self.assertEqual(pl._grip_gate, "走行を抑えている")
 
 
 class TestObstacleFreeMask(unittest.TestCase):

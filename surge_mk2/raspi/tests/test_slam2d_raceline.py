@@ -793,6 +793,9 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
         self.assertTrue(st.ready)
         self.assertEqual(p._coast_t, 0.0)
+        # 戻った直後は自己位置が跳ぶので、横グリップの学習をしばらく止める
+        self.assertGreater(p._grip_quiet_ns, p._grip_gate_t)
+        self.assertEqual(p._grip_quiet_why, "自己位置が戻った直後")
 
     def test_coast_disabled_stops_immediately(self):
         params = Slam2dRaceLine.merged({"coast_s": 0.0}, hidden=True)
@@ -814,6 +817,69 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         fresh.request_locate_hint(3.0, 2.0)
         self.assertEqual(fresh._loc_hint, (3.0, 2.0))
         self.assertIsNone(fresh._localizer)   # ヒントで探索をやり直す
+
+
+class TestAvoidSurvivesRetime(unittest.TestCase):
+    """避けている途中に元の経路の速度だけ付け直しても（同じ `xy`）、避ける経路を捨てない。"""
+
+    def _track_once(self, p: Slam2dRaceLine, path):
+        from types import SimpleNamespace
+        from raspi.msgs import AutoState
+        p._detect_obstacles = lambda st, scan, prm: None
+        p._poll_elastic = lambda *a: None
+        p._avoid_passed = lambda i: False
+        p._blocking = lambda *a: (None, math.inf)
+        p._follow = lambda *a: SimpleNamespace(index=3, steer=0.0, speed=1.0, cross_track=0.0,
+                                               target=(0.0, 0.0), _replace=lambda **k: None)
+        p.slam.pose_now = lambda v: (0.0, 0.0, 0.0)
+        prm = Slam2dRaceLine.merged({"speed_ff": 0}, hidden=True)
+        p._track(AutoState(), None, vs(), prm, path, (0.0, 0.0, 0.0))
+
+    def test_same_shape_keeps_the_avoid_path(self):
+        from raspi.nav.raceline import RaceLine, retime
+        xy = np.c_[np.linspace(0, 5, 51), np.zeros(51)]
+        base = RaceLine(xy=xy, v=np.ones(51), kappa=np.zeros(51), length=5.0, closed=True)
+        p = Slam2dRaceLine()
+        avoid = object()
+        p._avoid, p._avoid_base, p._avoid_path = avoid, base, base
+        retimed = retime(base, v_max=2.0, v_min=0.3, a_lat=3.0, a_accel=2.0, a_brake=2.0)
+        self._track_once(p, retimed)
+        self.assertIs(p._avoid, avoid)
+        self.assertIs(p._avoid_base, retimed)
+        moved = RaceLine(**{**base._asdict(), "xy": xy + [0.0, 0.1]})
+        self._track_once(p, moved)                      # 形が替わったら捨てる
+        self.assertIsNone(p._avoid)
+
+
+class TestLapCountAcrossLines(unittest.TestCase):
+    """周回は地図上の固定ゲートで数える（経路の継ぎ目が違う経路へ乗り換えても数え違えない）。"""
+
+    @staticmethod
+    def _circle(phase: float, n: int = 190):
+        from raspi.nav.raceline import RaceLine
+        a = phase + np.arange(n) * 2 * np.pi / n
+        return RaceLine(xy=np.c_[3 * np.cos(a), 3 * np.sin(a)], v=np.ones(n),
+                        kappa=np.full(n, 1 / 3), length=2 * np.pi * 3, closed=True)
+
+    def _laps(self, phase_b: float, every: float) -> int:
+        from raspi.nav.purepursuit import nearest_index
+        p = Slam2dRaceLine()
+        lines = [self._circle(0.0), self._circle(phase_b)]
+        k, th, nxt = 0, 0.05, every
+        while th < 0.05 + 5 * 2 * np.pi:
+            if th >= nxt:                       # `slam2d_route._race` の乗り換えと同じ扱い
+                k, p._prev_idx, nxt = 1 - k, -1, nxt + every
+            line = lines[k]
+            p._count_lap(line, nearest_index(line, 3 * math.cos(th), 3 * math.sin(th)))
+            th += 0.02
+        return p.laps
+
+    def test_switching_between_lines_with_different_seams(self):
+        self.assertEqual(self._laps(0.0, 1e9), 5)
+        for phase in (0.4, 0.6):
+            for every in (0.55, 1.0, 1.5):
+                self.assertEqual(self._laps(phase * 2 * np.pi, every * 2 * np.pi), 5,
+                                 f"継ぎ目のずれ {phase} 周・{every} 周ごとに乗り換え")
 
 
 if __name__ == "__main__":

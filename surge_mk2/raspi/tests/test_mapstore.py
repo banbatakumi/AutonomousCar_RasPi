@@ -77,6 +77,31 @@ class TestMapstore(unittest.TestCase):
         (mapstore.MAPS_DIR / "broken.npz").write_bytes(b"not a real npz file")
         self.assertIsNone(mapstore.load_map("broken"))
 
+    def test_any_kind_of_corruption_returns_none(self):
+        """圧縮データの破損（`zlib.error`）や 0 次元でない数値（`TypeError`）も、例外を外へ出さない。"""
+        import io
+        buf = io.BytesIO()
+        np.savez_compressed(buf, trinary=np.random.default_rng(0).integers(0, 3, (200, 200)).astype(np.uint8),
+                            resolution=np.float64(0.025), origin_x=np.float64(0), origin_y=np.float64(0),
+                            centerline_xy=np.zeros((0, 2)), raceline_xy=np.zeros((0, 2)),
+                            raceline_v=np.zeros(0))
+        raw = buf.getvalue()
+        for off in range(100, len(raw) - 8, 97):          # 圧縮ストリームのあちこちを壊す
+            data = bytearray(raw)
+            data[off:off + 8] = b"\xff" * 8
+            mapstore.validate_upload(bytes(data))          # 例外を出さない（None か、偶然読めた地図）
+        buf = io.BytesIO()
+        np.savez_compressed(buf, trinary=make_trinary(), resolution=np.array([0.025, 0.025]),
+                            origin_x=np.float64(0), origin_y=np.float64(0),
+                            centerline_xy=np.zeros((0, 2)), raceline_xy=np.zeros((0, 2)),
+                            raceline_v=np.zeros(0))
+        self.assertIsNone(mapstore.validate_upload(buf.getvalue()))
+        mapstore.MAPS_DIR.mkdir(parents=True, exist_ok=True)
+        data = bytearray(raw)
+        data[400:408] = b"\xff" * 8
+        (mapstore.MAPS_DIR / "broken.npz").write_bytes(bytes(data))
+        mapstore.load_map("broken")                        # 例外を出さない（None か、偶然読めた地図）
+
     def test_delete_removes_both_files(self):
         mapstore.save_map(
             "course_d", resolution=0.05, origin_x=0.0, origin_y=0.0,

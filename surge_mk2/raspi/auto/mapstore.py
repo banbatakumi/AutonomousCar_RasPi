@@ -48,7 +48,6 @@ import json
 import math
 import os
 import time
-import zipfile
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
@@ -198,10 +197,22 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
     # **ファイルオブジェクトを渡す。** `np.savez_compressed(path, ...)` は
     # 拡張子が`.npz`で終わっていないと自動で足してしまい、`<name>.npz.tmp`が
     # `<name>.npz.tmp.npz`として書かれて後続の`os.replace`が壊れる
-    with open(tmp, "wb") as f:
-        _write_npz(f, loaded)
-    os.replace(tmp, target)      # 原子的に差し替える
+    _write_npz_atomic(tmp, target, loaded)
     _write_meta(target, loaded)
+
+
+def _write_npz_atomic(tmp: Path, target: Path, m: LoadedMap) -> None:
+    """`tmp` へ書いて**ディスクまで落としてから**（fsync）`target` へ原子的に差し替える。
+
+    地図は数分かけて作るもので、作った直後に電源を切られることが多い（バッテリーを抜く）。
+    fsync しないと、差し替えだけがディスクに残って中身の無いファイルになりうる。
+    走行中に何度も書く小さなファイル（`.grip.json`）は fsync しない（計画の周期を止めない）。
+    """
+    with open(tmp, "wb") as f:
+        _write_npz(f, m)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
 
 
 def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None,
@@ -221,7 +232,9 @@ def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None,
 
 def _load_npz(file) -> LoadedMap:
     """`raise ValueError`: 必須キー欠落・型不正。それ以外の壊れ方は
-    `np.load`/`zipfile`側の例外（呼び出し側でまとめて潰す）。
+    `np.load`/`zipfile`側の例外で、**種類は決まっていない**（圧縮データが壊れていれば `zlib.error`、
+    0 次元でない数値なら `TypeError`）。呼び出し側は `except Exception` でまとめて潰す——
+    取りこぼすと、地図を選んだだけで planner を呼んだノードまで落ちる。
     """
     with np.load(file, allow_pickle=False) as z:
         missing = _REQUIRED_KEYS - set(z.files)
@@ -258,7 +271,7 @@ def load_map(name: str) -> LoadedMap | None:
         return None
     try:
         return _load_npz(target)
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError):
+    except Exception:                       # noqa: BLE001  壊れ方は問わない（下記）
         return None
 
 
@@ -267,7 +280,7 @@ def validate_upload(data: bytes) -> LoadedMap | None:
     import io
     try:
         return _load_npz(io.BytesIO(data))
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError):
+    except Exception:                       # noqa: BLE001  壊れ方は問わない（`_load_npz`）
         return None
 
 
@@ -307,7 +320,7 @@ def _bundled_grip(data: bytes) -> str | None:
             return None
         from ..nav.grip import GripMap             # 遅延 import（純粋なファイル I/O 層に保つ）
         return GripMap.from_json(text).to_json()
-    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, EOFError):
+    except Exception:                               # noqa: BLE001  壊れた同梱は捨てる（`_load_npz`）
         return None
 
 
@@ -329,13 +342,11 @@ def import_upload(name: str, data: bytes) -> tuple[LoadedMap | None, str]:
         if routes is not None:
             from .route_config import RouteConfig   # 遅延 import（純粋なファイル I/O 層に保つ）
             routes = RouteConfig.from_json(routes).to_json()
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, EOFError) as e:
+    except Exception as e:                  # noqa: BLE001  壊れ方は問わない（`_load_npz`）
         return None, f"同梱の経路の設定が不正です（{e}）"
     MAPS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
-    with open(tmp, "wb") as f:
-        _write_npz(f, loaded)               # 同梱の経路の設定はディスクの npz に残さない
-    os.replace(tmp, target)
+    _write_npz_atomic(tmp, target, loaded)  # 同梱の経路の設定はディスクの npz に残さない
     _write_meta(target, loaded)
     if routes is None:
         _routes_path(target).unlink(missing_ok=True)

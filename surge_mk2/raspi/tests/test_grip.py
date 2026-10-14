@@ -433,6 +433,47 @@ class TestTimeLearner(unittest.TestCase):
         self.assertLess(top, tried)
         self.assertGreater(g.map.level, 5.0)
 
+    def test_guard_ceiling_survives_save_and_reload(self):
+        """安全装置が働いた上限は保存され、読み直した次の走行でもその手前で止まる。"""
+        g = self._g(init=5.0)
+        g._ref = (5.0, self._plan(5.0), self._plan(5.0))
+        g._raise(0.0)
+        tried = g.map.level
+        g._guard(1.0, 0.0, 0.0, "リアの滑り", tried)
+        self.assertAlmostEqual(grip.GripMap.from_json(g.map.to_json()).ceil, round(tried, 3))
+        g2 = self._g(init=5.0)
+        g2.load(grip.GripMap.from_json(g.map.to_json()))
+        g2.configure(init_level=5.0, max_level=8.0, down_only=False, lat_use=1.0)
+        top = self._run(g2)
+        self.assertLessEqual(top, g2.cfg.time_ceil * tried + 1e-3)
+        # `ceil` の無い古いファイルは「無い」として読む
+        old = json.loads(g.map.to_json())
+        del old["ceil"]
+        self.assertEqual(grip.TimeLearner().map.ceil, 0.0)
+        self.assertEqual(grip.GripMap.from_json(json.dumps(old)).ceil, 0.0)
+
+    def test_not_worth_saving_until_a_lap_is_measured(self):
+        """読み込んだ値（0.92 倍）を、1 周も測らないうちに保存しない（短い走行で下がり続けない）。"""
+        g = self._g(init=5.0)
+        g.load(grip.GripMap(level=6.0))
+        g.trials = 3                                    # コーナーは抜けたが周は測っていない
+        self.assertFalse(g.worth_saving())
+        g._lap_done(0.0, self._plan(g.map.level), self._plan(g.map.level))
+        self.assertTrue(g.worth_saving())
+        g2 = self._g(init=5.0)
+        g2._guard(1.0, 0.0, 0.0, "リアの滑り", 5.0)       # 安全装置が働いたら保存する
+        self.assertTrue(g2.worth_saving())
+
+    def test_launch_only_lowers_the_level(self):
+        g = self._g(init=3.5)
+        g.launch_ratio = 1.5
+        g.set_launch(4.0)                               # 4.0×1.5×0.92 = 5.5 へは上げない
+        self.assertEqual(g.map.level, 3.5)
+        g = self._g(init=3.5)
+        g.launch_ratio = 1.5
+        g.set_launch(2.0)                               # 2.0×1.5×0.92 = 2.76 へは下げる
+        self.assertAlmostEqual(g.map.level, 2.0 * 1.5 * g.cfg.launch_safety)
+
     def test_one_soft_sign_does_not_fix_the_ceiling(self):
         """「横偏差の増え」1 回では、その上限を諦めない（2 回目で諦める）。"""
         g = self._g(init=4.0)
@@ -579,6 +620,15 @@ class TestGripMap(unittest.TestCase):
         old = json.loads(g.map.to_json())
         del old["noise"], old["noise_n"]
         self.assertEqual(grip.GripMap.from_json(json.dumps(old)).noise, 0.0)
+
+    def test_odd_numbers_are_a_value_error(self):
+        """巨大な数・型の違いも `ValueError`（呼び出し側はそれだけを受ける）。"""
+        good = json.loads(grip.GripMap(level=4.0).to_json())
+        for cells in ([[1e999, 0, 1.0, 0.0]], [["a", 0, 1.0, 0.0]], [[None, 0, 1.0, 0.0]], "x"):
+            with self.assertRaises(ValueError):
+                grip.GripMap.from_json(json.dumps({**good, "cells": cells}))
+        with self.assertRaises(ValueError):
+            grip.GripMap.from_json("[1, 2]")
 
     def test_roundtrip(self):
         g = learner(3.5)
@@ -1030,6 +1080,9 @@ class TestPlannerWiring(unittest.TestCase):
         g.configure(init_level=4.0, max_level=8.0, down_only=False, lat_use=1.0)
         g.trials = 3
         g.launch_ratio = 1.5
+        pl._grip_save()
+        self.assertEqual(ms.load_grip("m"), "")         # 1 周も測っていない間は保存しない
+        g._measured = True
         pl._grip_save()
         self.assertAlmostEqual(json.loads(ms.load_grip("m"))["level"], 4.0)
         self.assertAlmostEqual(ms.load_grip_vehicle(), 1.5)

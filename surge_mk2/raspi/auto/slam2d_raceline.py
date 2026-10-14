@@ -42,7 +42,6 @@ from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
 from ..nav.mpc import MPCConfig, MPCFollower
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
-from ..nav.route_switch import lap_crossed
 from ..nav import speedctl
 from ..nav.signals import SignalLights
 from ..proto.generated.packets import MDS_COMM_OK
@@ -683,6 +682,13 @@ class Slam2dRaceLine(Planner):
         #: 沿って進んだ距離 [m]
         self._prev_idx = -1
         self._lap_s = 0.0
+        #: 周回を数えるゲート（地図座標の点。`None` = 次に数えた経路の先頭の点にする）と、
+        #: それを経路の添字に直した値・直した経路（`_count_lap`）
+        self._lap_gate: tuple[float, float] | None = None
+        self._lap_gate_ref: np.ndarray | None = None
+        self._lap_gate_idx = 0
+        #: 前の周期にゲートから進んでいた割合 [0, 1)（-1 = まだ無い）
+        self._lap_frac = -1.0
         #: 障害物の候補にしてよいセル（`obs_mod.free_mask`）と、それを作った (地図の版, 幅)
         self._obs_free: np.ndarray | None = None
         self._obs_near: np.ndarray | None = None
@@ -808,6 +814,7 @@ class Slam2dRaceLine(Planner):
         self._grip_vp: float | None = None  #: 同じく、プロファイルの速度 [m/s]
         #: この時刻 [ns] までは学習しない（別の線へ乗り換えた直後。横へ数 cm 跳ぶぶんが前兆に見える）
         self._grip_quiet_ns = 0
+        self._grip_quiet_why = ""                #: 上の理由（reason の「停止: …」に出す）
         #: 経路の各点の `(求める横加速度, 限界)`（`_grip_levels`）: [(経路の点, 鍵, 配列の組)]（直近の3本）
         self._grip_cache: list[tuple] = []
         #: 経路の各点での車体と壁の余裕（`_grip_wall`）と、それを測った (経路の点, 地図の版)
@@ -973,7 +980,7 @@ class Slam2dRaceLine(Planner):
         self._prev_idx = -1
         self._speed_key = None
         self._map_dirty = True
-        self._grip_quiet_ns = self._grip_gate_t + int(_GRIP_SWITCH_QUIET_S * 1e9)
+        self._grip_quiet(self._grip_gate_t, "線を乗り換えた直後")
         self._grip.new_line()
 
     def _try_adopt_line(self, vs: VehicleState, p: dict[str, float]) -> None:
@@ -1441,6 +1448,8 @@ class Slam2dRaceLine(Planner):
         self._loc_hint = None
         self._prev_idx = -1
         self._lap_s = 0.0
+        self._lap_gate = None
+        self._lap_frac = -1.0
         self._hint = -1
         self._joined = False
         self._off_t = 0.0
@@ -1553,18 +1562,33 @@ class Slam2dRaceLine(Planner):
     def _count_lap(self, path: rl_mod.RaceLine, index: int) -> None:
         """閉じた経路の最寄り点の添字から周回を数える（`slam2d_route` と共通）。
 
-        添字が末尾→先頭へ回っても、半周も進んでいなければ数えない（走り出しの位置が
-        経路の終端の直前だと、動いた瞬間に「1周」と数えてしまう）。進んだ距離は
+        数える線（ゲート）は**地図上の 1 点に固定**する: 最初に数えた経路の先頭の点（`_lap_gate`）。
+        経路の継ぎ目（添字 0）は経路ごとに違う（経由点のグループは最初の経由点、自動経路は
+        地図作成の出発点、引き直したラインは引き直した位置）ので、継ぎ目で数えると経路を
+        切り替えるたびに数え過ぎ・数え漏れが出る。経路が替わったら、その経路でゲートに
+        いちばん近い添字を数える位置にする。
+
+        添字がゲートの手前→先へ回っても、半周も進んでいなければ数えない（走り出しの位置が
+        ゲートの直前だと、動いた瞬間に「1周」と数えてしまう）。進んだ距離は
         **符号付きの巡回差**で積む——`(−1) % n` のように足すと、最寄り点が1つ戻った
         だけでほぼ1周ぶん進んだことになり、この歯止めが効かなくなる。
         """
         n = len(path)
-        if self._prev_idx >= 0:
-            di = (index - self._prev_idx + n // 2) % n - n // 2
-            self._lap_s += di * path.length / n
-        if lap_crossed(self._prev_idx, index, n) and self._lap_s > 0.5 * path.length:
+        if self._lap_gate is None:
+            self._lap_gate = (float(path.xy[0, 0]), float(path.xy[0, 1]))
+        if self._lap_gate_ref is not path.xy:
+            self._lap_gate_ref = path.xy
+            self._lap_gate_idx = nearest_index(path, *self._lap_gate)
+        # ゲートから進んだ割合 [0, 1)。経路を乗り換えても同じ地図の位置はほぼ同じ割合なので、
+        # 前の周期の値を持ち越す（乗り換えた周期にゲートをまたいでも取りこぼさない）
+        frac = ((index - self._lap_gate_idx) % n) / n
+        prev = self._lap_frac
+        if prev >= 0.0:
+            self._lap_s += ((frac - prev + 0.5) % 1.0 - 0.5) * path.length
+        if prev > 0.75 and frac < 0.25 and self._lap_s > 0.5 * path.length:
             self.laps += 1
             self._lap_s = 0.0
+        self._lap_frac = frac
         self._prev_idx = index
 
     # ── 障害物: 検出・横へ避ける・止まる・Hybrid A* で抜ける（`slam2d_route` と共通） ──
@@ -1579,9 +1603,14 @@ class Slam2dRaceLine(Planner):
         cfg = pursuit_config(p, self.vehicle)
         self._v_now = float(vs.speed)
         self._detect_obstacles(st, scan, p)
-        if self._avoid is not None and (self._avoid_base is not path
+        # ★ 元の経路が替わったかは**形**（`xy`）で見る。速度だけ付け直した経路（学習値の版が進んだ・
+        #   速度の設定を変えた。`retime` は `xy` を共有する）は同じ経路で、避けている途中に元の線へ
+        #   戻すと障害物の側へ舵を切る
+        if self._avoid is not None and (self._avoid_base is None or self._avoid_base.xy is not path.xy
                                         or self._avoid_passed(self._hint)):
             self._clear_avoid()
+        elif self._avoid is not None:
+            self._avoid_base = path
         self._poll_elastic(path, self._hint, vs, p)
         followed = self._avoid_path or self._with_sight(path, p)
         # ★ 追従に使う姿勢は「今」へ進めたもの（`pose` は点群の基準時刻のもので、計画の時点で
@@ -2159,6 +2188,10 @@ class Slam2dRaceLine(Planner):
         別の部屋が一瞬見えただけで急停止する。経路に乗る前（自己位置の復元直後）は続行しない。
         """
         if not (lost or st.match_score < p["min_score"]):
+            if self._coast_t > 0.0:
+                # 見失いから戻った周期は、自己位置が最大で探し直しの幅（数十cm）跳ぶ。直後の横偏差を
+                # 横グリップの前兆（線から外れた）と取り違えない
+                self._grip_quiet(self._grip_gate_t, "自己位置が戻った直後")
             self._coast_t = 0.0
             return False
         self._coast_t += self._dt
@@ -2240,6 +2273,11 @@ class Slam2dRaceLine(Planner):
         # `_grip_begin` が「足元は前の速度のまま」の上限に使う
         self._grip_plain = (path.xy, rl.v)
         return rl
+
+    def _grip_quiet(self, t_ns: int, why: str) -> None:
+        """時刻 `t_ns` から `_GRIP_SWITCH_QUIET_S` のあいだ学習を止める（`_grip_end` のゲート）。"""
+        self._grip_quiet_ns = int(t_ns) + int(_GRIP_SWITCH_QUIET_S * 1e9)
+        self._grip_quiet_why = why
 
     def _grip_learned(self) -> tuple[float, float, float] | None:
         """学習した全体の値 `(横, 加速, 減速)` [m/s²]（学習していない・まだ値が無いなら `None`）。"""
@@ -2444,7 +2482,7 @@ class Slam2dRaceLine(Planner):
         elif abs(st.target_steer) >= 0.97 * self.vehicle.max_steer:
             gate = "舵が上限"
         elif vs.t_capture < self._grip_quiet_ns:
-            gate = "線を乗り換えた直後"
+            gate = self._grip_quiet_why or "線を乗り換えた直後"
         elif 0 <= i < len(path) and self._grip_tight(path, p)[i]:
             gate = "曲がり切れない区間"
         elif (followed is not None and followed is not path and len(followed) == len(path)
@@ -2549,10 +2587,11 @@ class Slam2dRaceLine(Planner):
             pass                                # 壊れた・古い形式。初期値から学習し直す
 
     def _grip_save(self) -> None:
-        """学習した値を地図の横へ書く（試行か前兆があって、前回から変わっているときだけ）。"""
+        """学習した値を地図の横へ書く（学習器が保存に値すると言い（`worth_saving`）、前回から
+        変わっているときだけ）。"""
         g = getattr(self, "_grip", None)
         name = getattr(self, "_grip_name", "")
-        if g is None or not name or not (g.trials or g.events or g.long.windows):
+        if g is None or not name or not g.worth_saving():
             return
         key = (g.ver + g.long.ver, g.launch_ratio)
         if key == self._grip_saved:

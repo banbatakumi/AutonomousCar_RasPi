@@ -345,8 +345,8 @@ class GripConfig:
     #: 採用済みの段で安全装置が働いたときに下げる割合と、続けて下げない時間 [s]
     time_back: float = 0.05
     time_guard_quiet_s: float = 3.0
-    #: 安全装置が働いた上限には、この割合より近づかない（その走行の間。同じ段を試し直して同じ外れ方を
-    #: 繰り返さない: sim.bench で、採用のたびに幅を戻して 6.20 を 3 回試し、3 回とも線から 12〜18cm）
+    #: 安全装置が働いた上限には、この割合より近づかない（`GripMap.ceil` に保存し、次の走行でも。同じ段を
+    #: 試し直して同じ外れ方を繰り返さない: sim.bench で、採用のたびに幅を戻して 6.20 を 3 回試し、3 回とも線から 12〜18cm）
     time_ceil: float = 0.97
     #: True なら `step_up` を planner の設定で上書きしない（`sim.bench --grip-set step_up=…`）
     fixed_step: bool = False
@@ -399,6 +399,11 @@ class GripMap:
     #: と、それに入れた標本の数。前兆のしきい値の下限になる（`GripConfig.noise_k`）
     noise: float = 0.0
     noise_n: int = 0
+    #: 横の安全装置（リアの滑り・線から外れた等）が働いた上限のうち、いちばん低い値 [m/s²]（0 = 無い）。
+    #: `TimeLearner` はこの `time_ceil` 倍より上を試さない。**読み直しても引き継ぐ**——引き継がないと、
+    #: 走行を始めるたびに前回滑った高さを 1 段越えて試し直す。路面が良くなっても上げ直さないので、
+    #: 上げ直したいときは `.grip.json` を消す
+    ceil: float = 0.0
 
     def to_json(self) -> str:
         cells = [[ix, iy, round(c.ok, 3), round(c.bad, 3), round(c.base, 4), min(c.n, 50)]
@@ -407,12 +412,23 @@ class GripMap:
                            "ok": round(self.ok, 3), "bad": round(self.bad, 3),
                            "accel": round(self.accel, 3), "decel": round(self.decel, 3),
                            "noise": round(self.noise, 5), "noise_n": min(self.noise_n, 100000),
-
+                           "ceil": round(self.ceil, 3),
                            "cells": cells})
 
     @classmethod
     def from_json(cls, text: str) -> "GripMap":
-        """検査して読む。形式の違い・壊れた中身は `ValueError`。値は `[A_FLOOR, A_CEIL]` へ丸める。"""
+        """検査して読む。形式の違い・壊れた中身は `ValueError`。値は `[A_FLOOR, A_CEIL]` へ丸める。
+
+        `ceil` の無い古いファイルも読める（0 = 無い）。
+        """
+        try:
+            return cls._from_json(text)
+        except (TypeError, OverflowError, AttributeError, IndexError) as e:
+            # 型の食い違い・巨大な数（`int(1e999)`）も呼び出し側には `ValueError` として渡す
+            raise ValueError(f"grip: 中身が不正（{e!r}）") from e
+
+    @classmethod
+    def _from_json(cls, text: str) -> "GripMap":
         raw = json.loads(text)
         if not isinstance(raw, dict) or raw.get("format") != FORMAT:
             raise ValueError("grip: 形式の版が違う")
@@ -425,7 +441,8 @@ class GripMap:
                 ok=_num(raw.get("ok"), A_FLOOR, A_CEIL), bad=_num(raw.get("bad"), A_FLOOR, A_CEIL),
                 accel=_num(raw.get("accel"), X_FLOOR, A_CEIL),
                 decel=_num(raw.get("decel"), X_FLOOR, A_CEIL),
-                noise=_num(raw.get("noise"), 0.0, NOISE_CEIL))
+                noise=_num(raw.get("noise"), 0.0, NOISE_CEIL),
+                ceil=_num(raw.get("ceil"), A_FLOOR, A_CEIL))
         try:
             m.noise_n = max(0, min(100000, int(raw.get("noise_n", 0)))) if m.noise > 0.0 else 0
         except (TypeError, ValueError):
@@ -758,6 +775,10 @@ class GripLearner:
         self.converged = False
         self._stall = 0
         self._bump(down=True)
+
+    def worth_saving(self) -> bool:
+        """保存する値があるか（試行・前兆・減速の判断が 1 つでもあった）。"""
+        return bool(self.trials or self.events or self.long.windows)
 
     def set_launch(self, a: float) -> None:
         """発進の加速度から横の初期値を出す（比が分かっているとき。まだ前兆も試行も無い間だけ）。"""
@@ -1409,10 +1430,11 @@ class TimeLearner(GripLearner):
     - **安全装置**（上限を探すためではなく、行き過ぎた 1 段を早くやめるためだけ）: 即時の前兆（曲率の
       不足・横偏差 `cross_thr`）、リアの滑り（`slide_s`）、コーナーを抜けたときの横偏差の増え（`cross_gain`）。
       試している段で出たらその段をやめ、採用済みの段で出たら `time_back` だけ下げて測り直す。
-      働いた上限には、その走行の間は近づかない（`time_ceil`）。ただし「横偏差の増え」は同じ高さで
+      働いた上限には近づかない（`time_ceil`。`GripMap.ceil` に保存して次の走行でも）。ただし「横偏差の増え」は同じ高さで
       2 回出てから（1 回で決めると、限界の 16% 手前の誤検出 1 回でそこに止まった。まったく決めないと、
       採用のたびに同じ段を試し直して 400 秒たっても終わらなかった。どちらも sim.bench）
     - 場所ごとの値（セルの前兆の値）は使わない。横の上限はコースで 1 つ
+    - 保存は 1 周を測り終えてから（`worth_saving`）。発進の加速度から決める初期値は下げる方向だけ
 
     コーナー単位の前兆のうち、頭打ち・平均の不足・挟み込み（1 か所の前兆の確認）は、この版では働かない。
     """
@@ -1434,15 +1456,45 @@ class TimeLearner(GripLearner):
         self._guard_t = -1e9
         self.steps: list[dict] = []         #: 段ごとの判断の記録（ベンチ・診断用）
         self._confirmed = False             #: 採用済みの段の測り直しを済ませたか（`time_confirm`）
-        self._ceil = math.inf               #: 安全装置が働いた上限のうち、いちばん低い値 [m/s²]
         self._soft: list[float] = []        #: 「横偏差の増え」が出た上限 [m/s²]
         self._ref_old: tuple[float, float, float] | None = None     #: 測り直す前の値（平均する）
         self.last_lap = (0.0, 0.0)          #: 直近に数えた (ラップ, 計画のラップ) [s]
+        #: 読み込み（か作り直し）の後に、1 周を測り終えたか（`worth_saving`）
+        self._measured = False
+
+    @property
+    def _ceil(self) -> float:
+        """安全装置が働いた上限のうち、いちばん低い値 [m/s²]（無ければ inf）。`GripMap.ceil` に持つ
+        ので、地図と一緒に保存され、読み直しても引き継ぐ。"""
+        c = self.map.ceil
+        return c if c > 0.0 else math.inf
+
+    @_ceil.setter
+    def _ceil(self, value: float) -> None:
+        self.map.ceil = float(value) if math.isfinite(value) else 0.0
 
     def load(self, m: GripMap) -> None:
         super().load(m)
         self._ref, self._laps, self._step = None, [], self.cfg.time_step
         self._ref_old, self._confirmed = None, False
+        self._measured = False
+
+    def worth_saving(self) -> bool:
+        """保存してよいか。読み込んだ値は `back_off` 倍から始めるので、1 周も測らないうちに保存すると、
+        短い走行を繰り返すたびに 0.92 倍ずつ下がっていく。前兆・安全装置が働いたときは保存する。"""
+        return self._measured or bool(self.events)
+
+    def set_launch(self, a: float) -> None:
+        """発進の加速度から決める初期値は**下げる方向だけ**使う。上げる方向は、1 段ずつタイムで
+        確かめる（この学習器の前提）を飛ばして、別の日の比から一度に数割上がるため。"""
+        if self.launch_ratio <= 0.0 or self._launch_used or self.events or self.passes:
+            return
+        self._launch_used = True
+        g = max(A_FLOOR, a * self.launch_ratio * self.cfg.launch_safety)
+        if g < self.map.level:
+            self.map.level = self.conf = max(self.floor, g)
+            self._ref, self._laps = None, []
+            self._bump(down=True)
 
     def new_line(self) -> None:
         super().new_line()
@@ -1558,6 +1610,7 @@ class TimeLearner(GripLearner):
 
     def _lap_done(self, t: float, lap: float, plan: float, plan_ref: float = 0.0) -> None:
         cfg, m = self.cfg, self.map
+        self._measured = True
         self._laps.append((lap, plan, plan_ref))
         if len(self._laps) < cfg.time_laps:
             return

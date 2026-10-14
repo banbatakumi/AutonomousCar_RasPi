@@ -59,7 +59,7 @@ from ._slam2d_nav import occgrid_from_trinary
 from .base import ParamSpec
 from .park_to_point import ParkToPoint
 from .route_config import AUTO_KEY, ROUTE_KEYS, RouteConfig, Stop
-from .slam2d_raceline import (_GRIP_SWITCH_QUIET_S, DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS,
+from .slam2d_raceline import (DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS,
                               Slam2dRaceLine,
                               forward_traj, limits, line_kwargs, submit_job)
 
@@ -415,7 +415,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self._stop_retry_t = 0.0            # 停止点・ミッションを直したらすぐ試す
         self._stop_error = ""
         if self._map_name:
-            mapstore.save_routes(self._map_name, cfg.to_json())
+            self._save_routes(self._map_name)
         # ★ 最初の計算がまだ走っている間（`_graph` が無い）の編集も取りこぼさない。
         #   `_submit` は計算中なら「終わったらやり直す」印を立てるだけ
         if rebuild and (self._graph is not None or self._job is not None):
@@ -424,6 +424,13 @@ class Slam2dRoute(Slam2dRaceLine):
             self._build_error = ""          # 経路が無いまま DONE に居る。作り直しの結果を待つ
         self._map_dirty = True
         self._route_ver += 1
+
+    def _save_routes(self, name: str) -> None:
+        """経路の設定を地図の横へ書く。書けなくても（ディスクが一杯など）走りは止めず、理由を出す。"""
+        try:
+            mapstore.save_routes(name, self._cfg.to_json())
+        except OSError as e:
+            self._note = f"経路の設定を保存できない（{e}）"
 
     def request_route(self, group: str, source: str = "gui") -> None:
         """走行中に経路のグループを切り替える（GUI の A〜D ボタン、信号認識）。"""
@@ -539,12 +546,21 @@ class Slam2dRoute(Slam2dRaceLine):
                 self._stop_retry_t = self._race_t + _STOP_RETRY_S
                 self._stopping = ""
             else:
-                self._stop_error = warn
-                self._set_active(_STOP_KEY, line)
-                # ★ 停止経路は**始点から**追う。1周回ってから止まる経路は終わりの区間が
+                # ★ 停止経路は**始点の側から**追う。1周回ってから止まる経路は終わりの区間が
                 #   始めの区間と同じ場所を通るので、最寄り点を全体から探すと終わり側に
-                #   貼り付き、1周せずにそのまま止まりに行った
-                self._hint = 0
+                #   貼り付き、1周せずにそのまま止まりに行った。ただし計算している間に車は始点から
+                #   進んでいる（Pi では数百ms〜、ワーカーが混んでいればもっと）。添字 0 を起点に
+                #   すると、追従の探索窓の外に車が居て、注視点が車の後ろになる。始点から前へ辿って
+                #   最初に車へ近づき切った点を起点にし、それが遠ければ（経路を過ぎた）引き直す
+                k = _first_nearest(line, self.slam.pose)
+                if k < 0:
+                    self._stop_error = "停止点への経路ができる前に通り過ぎた（引き直す）"
+                    self._stop_retry_t = self._race_t
+                    self._stopping = ""
+                else:
+                    self._stop_error = warn
+                    self._set_active(_STOP_KEY, line)
+                    self._hint = k
         return True
 
     def _set_active(self, key: str, line: rl_mod.RaceLine) -> None:
@@ -625,7 +641,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self._saved_map_name = self._auto_save_map()
         if self._saved_map_name:
             self._map_name = self._saved_map_name
-            mapstore.save_routes(self._saved_map_name, self._cfg.to_json())
+            self._save_routes(self._saved_map_name)
         saved = (f"地図を『{self._saved_map_name}』として保存した。" if self._saved_map_name
                  else f"{self._save_error}。")
         if not key:
@@ -679,10 +695,15 @@ class Slam2dRoute(Slam2dRaceLine):
                 self._set_active(self._switch.active_key, self._switch.active)
             self._race_started = True
             self._lap_s = 0.0
+            self._lap_gate = None              # 走り出しの経路の先頭を周回のゲートにする
+            self._lap_frac = -1.0
             self._joined = False
             self._race_t = 0.0
             self.laps = 0
 
+        # 学習のゲート（「走行を抑えている」）は、この先で止まる・抑える判断より前に閉じる。
+        # 自己位置が信用できずに止まる周期にも、学習が前の周期の判断のまま見続けないように
+        self._grip_begin(vs, p)
         coasting = self._localization_ok(st, lost, p)
         if coasting is None:
             return st
@@ -693,7 +714,7 @@ class Slam2dRoute(Slam2dRaceLine):
             # 障害物を避けている間も乗り換えない（避ける経路の元が変わって外れる）
             sw = self._switch.step(tuple(pose), vs.speed, tol=SWITCH_TOL, a_brake=self._lim(p).a_brake)
             if sw.switched:
-                self._grip_quiet_ns = int(vs.t_capture) + int(_GRIP_SWITCH_QUIET_S * 1e9)
+                self._grip_quiet(int(vs.t_capture), "線を乗り換えた直後")
                 self._grip.new_line()
                 self._hint = sw.hint
                 self._prev_idx = -1
@@ -703,7 +724,6 @@ class Slam2dRoute(Slam2dRaceLine):
         path = self._switch.active
         assert path is not None
         # 横グリップを学習している間は、学習した限界で速度を付け直した版を追う（`_grip_timed`）
-        self._grip_begin(vs, p)
         path = self._grip_timed(path, p)
         self.path = path
         self._race_t += self._dt
@@ -910,6 +930,30 @@ def _start_of(traj) -> Waypoint | None:
     j = int(far[0])
     return Waypoint(float(xy[0, 0]), float(xy[0, 1]),
                     math.atan2(xy[j, 1] - xy[0, 1], xy[j, 0] - xy[0, 0]))
+
+
+#: 停止経路の起点として採る、車からの距離の上限 [m]（`_first_nearest`）
+_STOP_JOIN_M = 0.5
+
+
+def _first_nearest(path: rl_mod.RaceLine, pose, max_d: float = _STOP_JOIN_M) -> int:
+    """開いた経路を始点から辿って、車へ近づき切った最初の点の添字（無い・`max_d` より遠いなら -1）。
+
+    全体の最寄り点ではなく**始点の側の最初の谷**を採る（1周回ってから止まる経路は、同じ場所を
+    終わりの区間も通るため）。
+    """
+    d = np.hypot(path.xy[:, 0] - pose[0], path.xy[:, 1] - pose[1])
+    n = len(d)
+    k = 0
+    while k + 1 < n and d[k + 1] <= d[k]:
+        k += 1
+    if d[k] > max_d:
+        # 始点が少し横にずれていて最初の谷が浅い場合に備え、前半の最寄りも見る
+        half = max(1, n // 2)
+        k = int(np.argmin(d[:half]))
+        if d[k] > max_d:
+            return -1
+    return k
 
 
 def _remaining(path: rl_mod.RaceLine, pose, hint: int = -1) -> float:
