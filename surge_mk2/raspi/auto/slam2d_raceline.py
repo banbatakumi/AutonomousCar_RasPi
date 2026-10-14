@@ -400,6 +400,9 @@ def submit_job(fn, *args, **kwargs):
         return worker_pool().submit(fn, *args, **kwargs)
 
 
+#: 自己位置のヒント（地図のクリック）を有効とみなす時間 [s]
+_LOC_HINT_TTL_S = 120.0
+
 class Slam2dRaceLine(Planner):
     id = "slam2d_raceline"
     #: GUI のモード選択には出さない（分岐のないコースも `slam2d_route` の自動経路で走れる。こちらは
@@ -572,8 +575,8 @@ class Slam2dRaceLine(Planner):
                   default=1.2, step=0.1, unit="m",
                   note="Hybrid A* の目標を、障害物の後ろ（車体後端が抜ける位置）からこれだけ先の経路上に置く"),
         ParamSpec(group=GROUP_AVOID, key="detour_budget_ms", hidden=True, label="Hybrid A* の時間予算", min=20.0,
-                  max=200.0, default=60.0, step=10.0, unit="ms",
-                  note="★1回の経路探索の上限。Pi では指令が150ms途切れると止まる（デッドマン）"),
+                  max=150.0, default=60.0, step=10.0, unit="ms",
+                  note="★1回の経路探索の上限。plan() 全体が auto_cmd_stale_ms（200ms）を超えると中継側が最大制動に読み替える"),
         ParamSpec(group=GROUP_AVOID, key="detour_speed", hidden=True, label="Hybrid A* で抜ける速度", min=0.15,
                   max=0.8, default=0.5, step=0.05, unit="m/s",
                   note="止まってから Hybrid A* で障害物の先へ抜ける間の巡航速度。上げるほど早く抜けるが、"
@@ -790,6 +793,7 @@ class Slam2dRaceLine(Planner):
         self._loc_scored: list = []
         #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
         self._loc_hint: tuple[float, float] | None = None
+        self._loc_hint_t = 0.0                   #: `_loc_hint` を受けた時刻（`time.monotonic()`）
         #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
         self._locate_seed: tuple[float, float] | None = None
         self._load_error = ""
@@ -1012,6 +1016,7 @@ class Slam2dRaceLine(Planner):
 
     def request_locate_hint(self, x: float, y: float) -> None:
         self._loc_hint = (x, y)
+        self._loc_hint_t = time.monotonic()
         self._localizer = None     # 探索中なら絞り込んでやり直す
         self._loc_cands = None
 
@@ -1384,6 +1389,10 @@ class Slam2dRaceLine(Planner):
         `ready=False`で静止させたまま複数周期にわたって`step()`を呼び続ける。
         """
         pts = self.slam.deskew_scan(scan)
+        # ヒントは「クリック→読み込み」の意思なので読み込みでは捨てないが、古いものは使わない
+        # （別の地図・別の出発点で、ずっと前のクリックに探索が絞られないように）
+        if self._loc_hint is not None and time.monotonic() - self._loc_hint_t > _LOC_HINT_TTL_S:
+            self._loc_hint = None
         seeded = self._loc_hint is None and self._locate_seed is not None
 
         if self._loc_cands is None:
@@ -2150,7 +2159,8 @@ class Slam2dRaceLine(Planner):
                      p: dict[str, float]) -> AutoState:
         assert self._detour is not None
         pp = {s.key: s.default for s in ParkToPoint.params}
-        pp["plan_budget_ms"] = p["detour_budget_ms"]
+        # `ParkToPoint.merged` を通らないので、上限はここで掛ける（Pi は Mac より 5〜8 倍遅い）
+        pp["plan_budget_ms"] = min(float(p["detour_budget_ms"]), 150.0)
         pp["cruise_speed"] = p["detour_speed"]
         pp["pos_tol_m"] = _DETOUR_POS_TOL
         pp["yaw_tol_deg"] = _DETOUR_YAW_TOL_DEG
