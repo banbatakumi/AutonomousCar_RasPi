@@ -117,7 +117,12 @@ def main() -> int:
                     help="armed フラグを立てて返す（io_node の --allow-arm を模す）")
     args = ap.parse_args()
 
-    pub = Publisher("io")
+    try:
+        pub = Publisher("io")
+    except RuntimeError as e:
+        # io_node と同じ endpoint を持つので、同じバスでは同時に動かせない
+        print(f"!! {e}\n   io_node（surge-io かシムの io_node --sim）を止めてから使ってください", file=sys.stderr)
+        return 2
     sub = Subscriber({TOPIC_CMD: LATEST})
     car = DemoVehicle()
     print(f"# bus_demo → {pub.endpoint}  vehicle_state {STATE_HZ}Hz / "

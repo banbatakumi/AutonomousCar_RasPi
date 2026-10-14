@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """STM32 との UART 疎通を確認する診断ツール。
 
-io_node を書く前に「そもそも通信できているか」「ファームが v0.8 か」を切り分ける。
+「そもそも通信できているか」「ファームのプロトコル版が Pi と合っているか」を切り分ける。
+
+**io_node（surge-io）が動いている間は使わない。** 同じ UART を2つのプロセスで読むとバイトを
+取り合い、`VERSION_REQ` 前の受信バッファ消去で io_node 側のフレームも捨てる（排他のロックは無い）。
+止めると E-Stop がラッチする（解除はボタン2）。
 
     .venv/bin/python raspi/tools/probe_uart.py                 # VERSION_REQ を投げて 3秒聞く
     .venv/bin/python raspi/tools/probe_uart.py --passive       # 何も送らず受信だけ見る
@@ -10,7 +14,7 @@ io_node を書く前に「そもそも通信できているか」「ファーム
 出力:
 - 生バイトの先頭サンプル（フレーミングが合わなくても中身が見える）
 - TYPE 別のフレーム数
-- VERSION が返れば protocol_version を照合（0x0008 = v0.8）
+- VERSION が返れば protocol_version を Pi 側（`protocol.toml`）と照合
 - 最初の TELEMETRY を SI 単位でデコード表示
 - CRC / ロス / 長さエラーの統計
 """
@@ -81,6 +85,7 @@ def main() -> int:
     args = ap.parse_args()
 
     print(f"# port={args.port} baud={args.baud} v{PROTOCOL_VERSION:#06x} 期待")
+    print("# io_node（surge-io）が動いていないこと（UART を取り合う）")
     try:
         ser = serial.Serial(args.port, args.baud, timeout=0.1)
     except serial.SerialException as e:

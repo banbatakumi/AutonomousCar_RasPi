@@ -1,9 +1,7 @@
 """`sim/surface.py`（場所と時刻で変わる路面）と、それを使う真値の車・仮想 STM32 のテスト。"""
 
-import math
 import sys
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))

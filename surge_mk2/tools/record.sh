@@ -58,7 +58,8 @@ echo "# 終了は Ctrl-C。索引はそのとき書かれる"
 echo
 
 # **stdout は MCAP そのもの。** logger_node は人間向けの出力を全部 stderr に出す
-ssh "${SSH_OPTS[@]}" "$HOST" \
+# 空の配列は `${A[@]+…}` で展開する（macOS の bash 3.2 は `set -u` で空の `"${A[@]}"` を未定義扱いする）
+ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$HOST" \
   "cd ~/surge_mk2 && .venv/bin/python -u -m raspi.nodes.logger_node -o - ${ARGS[*]:-}" \
   > "$OUT"
 rc=$?

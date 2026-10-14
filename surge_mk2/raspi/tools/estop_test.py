@@ -24,8 +24,14 @@
    **ここが破れていると、E-Stop 中に GUI の ARM ボタンで駆動が復活する**
 6. **解除** — 人間がボタン2を押して初めて解除されること
 
-期待値（`docs/uart_protocol.md` §9）: 途絶から 50ms でラッチ。TELEMETRY は 50Hz
-（20ms 周期）なので、Pi から観測できるのは概ね 50〜90ms。
+期待値（`docs/uart_protocol.md` §9）: 途絶から 50ms でラッチ。TELEMETRY は 100Hz
+（10ms 周期）なので、Pi から観測できるのは概ね 50〜80ms。
+
+## ★ 終わるとまたラッチする
+
+STM32 は一度ハートビートを見た後に途絶えるとラッチする。**この検査は終了時にハートビートを
+止めるので、段階6で解除しても、終わった時点で再びラッチする**（`arm_test` と同じ）。
+surge-io を起動し直してから、もう一度ボタン2を押して解除すること。
 
 ## ★ 2回に分けて回すこと
 
@@ -77,6 +83,11 @@ VIOLATION_HOLD_S = 0.15
 
 #: 段階2 で駆動電源が入ったとみなす電圧 [V]
 DRIVE_ON_V = 5.0
+
+
+#: 終了時の案内。終了でハートビートが止まり、STM32 は再びラッチする（モジュール docstring）
+RELATCH_NOTICE = ("\n※ この検査は終了時にハートビートを止めるので、車両は**再び E-Stop がラッチ**します。"
+                  "\n   surge-io を起動し直してから、もう一度ボタン2を押して解除してください。")
 
 
 class Aborted(Exception):
@@ -308,6 +319,7 @@ def main() -> int:
                 print("!! 解除されませんでした。車両は E-Stop のままです。", file=sys.stderr)
                 return 1
             print(f"✓ {dt:.1f}s で解除を確認（{_flags(rig)}）")
+            print(RELATCH_NOTICE)
             return 0
 
         print("E-Stop 端から端まで検査")
@@ -416,7 +428,7 @@ def main() -> int:
             skipped.append("ラッチ中は arm できない（--wheels-clear 無しのため未実施）")
 
         # ── 3. 途絶 ──
-        head(3, "ハートビートを止める → E-Stop がラッチするはず（期待 50〜90ms）")
+        head(3, "ハートビートを止める → E-Stop がラッチするはず（期待 50〜80ms）")
         if log:
             log.write_event(time.monotonic_ns(), "phase", {"n": 3, "hb": False})
         # **途絶後は駆動トルクの監視を切る。** v0.5 の E-Stop は最大制動トルクを
@@ -440,7 +452,7 @@ def main() -> int:
         print(f"  ✓ {ms:.0f}ms で E-Stop がラッチ（{_flags(rig)}）")
         checks["途絶でラッチする"] = True
         if ms > 200:
-            print("  ! 期待より遅い（50〜90ms のはず）")
+            print("  ! 期待より遅い（50〜80ms のはず）")
 
         # arm した状態で発動させられたこと自体が、この検査で足した価値。
         # **`armed` が落ちることを期待してはいけない。**
@@ -571,6 +583,8 @@ def main() -> int:
         if left_latched:
             print("\n!! ただし**車両は E-Stop がラッチしたまま**です。"
                   "\n   ボタン2を押して解除してください（`--release-only` でも待てます）")
+        else:
+            print(RELATCH_NOTICE)
         print("=" * 62)
         return 0 if ok and not left_latched else 1
 

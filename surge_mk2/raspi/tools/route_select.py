@@ -8,7 +8,8 @@ planning_node → `slam2d_route.request_signal()`）を先に通しておく**�
 認識ノードを作るときも、このファイルと同じく `signal` というノード名で
 `RouteSelect` を publish すればよい（`raspi/bus/zbus.py` の `TOPIC_OWNER`）。
 
-**認識ノードが動いている間は使えない**（同じ `signal` の endpoint に bind するため）。
+**認識ノード（`arrow_signal_node`）が動いている間は使えない**（同じ `signal` の endpoint を
+1プロセスだけが持てる。起動を断って、止めるよう案内する）。
 
 ## 1秒ほど繰り返し送る
 
@@ -39,7 +40,13 @@ def main() -> int:
     ap.add_argument("--repeat-s", type=float, default=1.0, help="繰り返し送る時間 [s]")
     args = ap.parse_args()
 
-    pub = Publisher("signal")
+    try:
+        pub = Publisher("signal")
+    except RuntimeError as e:
+        # `signal` の endpoint は1プロセスだけが持てる（認識ノードと取り合わない）
+        print(f"!! {e}\n   矢印信号の認識ノード（arrow_signal_node / surge-arrow-signal）を止めてから"
+              "使ってください", file=sys.stderr)
+        return 2
     msg = RouteSelect(value=args.value, source=args.source, event_id=time.time_ns())
     t_end = time.monotonic() + max(0.0, args.repeat_s)
     n = 0

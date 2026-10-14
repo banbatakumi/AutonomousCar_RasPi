@@ -70,6 +70,24 @@ def _dt(rec: Rec) -> float:
     return float(np.median(np.diff(rec.t)))
 
 
+#: TELEMETRY の取りこぼしとみなす間隔（中央値の何倍か）。微分（`savgol_filter`）と刻みの積分
+#: （`_spin_sim`）は等間隔を前提にしているので、多ければ所見で知らせる
+_GAP_FACTOR = 1.5
+_GAP_WARN_FRAC = 0.02
+
+
+def _gap_note(rec: Rec) -> str | None:
+    """取りこぼしが多い記録の所見（少なければ None）。"""
+    d = np.diff(rec.t)
+    if len(d) == 0:
+        return None
+    frac = float(np.mean(d > _GAP_FACTOR * np.median(d)))
+    if frac <= _GAP_WARN_FRAC:
+        return None
+    return (f"TELEMETRY の取りこぼしが {frac * 100:.0f}%（間隔が中央値の{_GAP_FACTOR}倍超）。解析は等間隔を"
+            "前提に微分・積分するので、値がずれる")
+
+
 def _md_torque(cmd: np.ndarray, omega: np.ndarray, dt: float, tau: float, delay: float) -> np.ndarray:
     """記録のトルク指令（駆動は正、制動は負）→ モータが実際に出したトルク。
 
@@ -270,7 +288,15 @@ def analyze(sources: dict[str, str | Path | Rec], base: Plant) -> Analysis:
             continue
         try:
             rec = src if isinstance(src, Rec) else load_mcap(src)
+            if rec.md_dropouts:
+                # 止まった MD は駆動も制動もせず、車輪の値は古いまま固まる（`tools/sysid/analyze` と同じ扱い）
+                names = "・".join(dict.fromkeys(n for _, _, n in rec.md_dropouts))
+                raise ValueError(f"★{names}のモータドライバが試験中に無応答になった（{rec.md_dropouts[0][0]:.1f}s から）。"
+                                 "この記録は使えない——駆動バッテリーと MD の電源を確かめて録り直してください")
             r = _FNS[key](rec, plant)
+            gap = _gap_note(rec)
+            if gap is not None:
+                r.warn(gap)
         except Exception as e:  # noqa: BLE001 - 画面にそのまま出す
             out.errors.append(f"{label}: {e}")
             continue

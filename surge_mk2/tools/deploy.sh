@@ -53,9 +53,12 @@ while [ $# -gt 0 ]; do
 done
 
 # 鍵を明示する（~/.ssh/config が古い鍵を指していても通るように。record.sh と同じ）
+# 空の配列は `${A[@]+"${A[@]}"}` で展開する（macOS の bash 3.2 は `set -u` のもとで空の
+# `"${A[@]}"` を未定義変数として止まる）
 SSH_OPTS=()
 [ -f "$KEY" ] && SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes)
-ssh_pi() { ssh "${SSH_OPTS[@]}" "$HOST" "$@"; }
+ssh_pi() { ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$HOST" "$@"; }
+RSYNC_SSH="ssh ${SSH_OPTS[*]:-}"
 
 # ── 0. 疎通 ──
 echo "# $HOST へ接続を確認"
@@ -83,6 +86,8 @@ fi
 # 先頭の `/` は転送元の直下に固定する（無いと別の階層の同名ファイルまで外れる）
 # **`--info=stats1` は使わない。** macOS の rsync は 2.6.9 系（openrsync）で
 # `--info` を知らない。GNU rsync 前提のオプションを書かないこと
+# 学習の途中経過（`runs/`・`checkpoints/`）は Mac だけのもの（合わせて約2GB）。Pi が読むモデルは
+# 書き出した先の `models/` にある
 echo "# rsync → $HOST:$DEST"
 rsync -az --stats \
   --exclude '.venv' \
@@ -102,22 +107,39 @@ rsync -az --stats \
   --exclude '/config/e2e_lidar_model.json' \
   --exclude '/config/cam_e2e_model.json' \
   --exclude '/ml_cam_e2e/runs/' \
+  --exclude '/ml_lidar/runs/' \
+  --exclude '/ml_cam/runs/' \
+  --exclude '/ml_cam/checkpoints/' \
   --exclude '/config/odometer.json' \
   --exclude '/saved_maps/' \
-  -e "ssh ${SSH_OPTS[*]}" \
+  -e "$RSYNC_SSH" \
   "$ROOT/" "$HOST:$DEST" || exit 1
+
+# 全体には `--delete` を掛けない（Pi にだけある状態・記録を消さないため）。その代わり、Mac で消した・
+# 名前を変えた `.py` が Pi に残っていないかを見て知らせる。`raspi/auto/` に残った planner は
+# 起動時に拾われて GUI に出続ける
+STALE=$(comm -13 \
+  <(find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' | sort) \
+  <(ssh_pi "cd $DEST && find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' 2>/dev/null | sort"))
+if [ -n "$STALE" ]; then
+  echo
+  echo "!! Mac に無い .py が Pi に残っている（消していない。不要なら Pi で消すこと）:"
+  echo "$STALE" | sed 's/^/     /'
+fi
 
 # `gui/dist` だけは --delete する。ビルドごとにファイル名のハッシュが変わるので、
 # そうしないと古い `index-*.js` が Pi に溜まり続ける
 if [ "$BUILD_GUI" = 1 ] && [ -d gui/dist ]; then
-  rsync -az --delete -e "ssh ${SSH_OPTS[*]}" "$ROOT/gui/dist/" "$HOST:$DEST/gui/dist/" || exit 1
+  rsync -az --delete -e "$RSYNC_SSH" "$ROOT/gui/dist/" "$HOST:$DEST/gui/dist/" || exit 1
 fi
 
 # ── 3. テスト ──
 if [ "$RUN_TEST" = 1 ]; then
   echo
   echo "# Pi 上でユニットテスト"
-  ssh_pi 'cd ~/surge_mk2 && .venv/bin/python -m unittest discover -s raspi/tests -t . 2>&1 | tail -5' || exit 1
+  # `| tail` の終了コードで失敗を隠さないよう、テストの終了コードを持ち帰る
+  ssh_pi "cd $DEST && out=\$(.venv/bin/python -m unittest discover -s raspi/tests -t . 2>&1); rc=\$?; \
+printf '%s\n' \"\$out\" | tail -5; exit \$rc" || { echo "!! Pi 上のテストが失敗した" >&2; exit 1; }
 fi
 
 # ── 4. systemd unit の入れ直し ──

@@ -170,6 +170,24 @@ class TestResidualWarnings(unittest.TestCase):
         self.assertNotIn("rolling_resistance", r.values)
 
 
+class TestSpeedFeedforward(unittest.TestCase):
+    def test_firmware_feedforward_is_modelled(self):
+        """STM32 の加速度フィードフォワード（`[control]` の speed_ff_*）が有効な車の記録から、車体の利得と
+        転がり抵抗を復元する。FF を知らずに当てはめると、FF で速くなった応答を利得が吸って約9倍
+        （22→196）に出た。記録から FF が分からなければ★を出す。"""
+        truth = bench.TRUTH_NOCAP
+        base = replace(truth, steer_gain=1.0, steer_offset_rad=0.0)
+        log, _, _ = run_test("sysid_accel", truth, seed=0, speed_ff=bench.truth_ff(truth))
+        r = fit.fit_accel(log, base)
+        self.assertEqual(r.warnings, [], r.notes)
+        self.assertAlmostEqual(r.values["speed_plant_gain"], truth.speed_plant_gain,
+                               delta=bench.REL_TOL["speed_plant_gain"] * truth.speed_plant_gain)
+        self.assertAlmostEqual(r.values["rolling_resistance"], truth.rolling_resistance,
+                               delta=bench.ABS_TOL["rolling_resistance"])
+        unknown = fit.fit_accel(replace(log, speed_ff=None), base)
+        self.assertTrue(any("フィードフォワード" in w for w in unknown.warnings), unknown.notes)
+
+
 class TestBrakeFit(unittest.TestCase):
     def test_strength_slope_and_lock_from_the_accel_log(self):
         """前後運動試験の制動（最大＋その下に割り振った3段）から、傾き（強さ→減速度）と頭打ちを読む

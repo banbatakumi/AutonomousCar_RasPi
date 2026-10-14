@@ -13,6 +13,7 @@ import ctypes
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -123,15 +124,20 @@ def _export_ref(git_ref: str) -> Path:
                          capture_output=True, text=True).stdout.strip()
     dst = _cache_dir() / f"tree_{sha[:16]}"
     if not dst.exists():
-        dst.mkdir()
+        # 取り出しが途中で落ちると壊れたツリーが残り、次から黙って使われるので、別名で作ってから置く
+        work = Path(tempfile.mkdtemp(dir=_cache_dir(), prefix=f"tree_{sha[:16]}."))
         prefix = subprocess.run(["git", "-C", str(FW_DIR), "rev-parse", "--show-prefix"], check=True,
                                 capture_output=True, text=True).stdout.strip()
         tar = subprocess.run(["git", "-C", str(FW_DIR), "archive", sha, "src/control", *_INCLUDES[:3]],
                              check=True, capture_output=True).stdout
-        subprocess.run(["tar", "-x", "-C", str(dst)], input=tar, check=True)
-        if prefix and (dst / prefix).exists():      # archive がリポジトリ根からのパスで出した場合
-            for child in (dst / prefix).iterdir():
-                child.rename(dst / child.name)
+        subprocess.run(["tar", "-x", "-C", str(work)], input=tar, check=True)
+        if prefix and (work / prefix).exists():     # archive がリポジトリ根からのパスで出した場合
+            for child in (work / prefix).iterdir():
+                child.rename(work / child.name)
+        try:
+            work.rename(dst)
+        except OSError:                             # 別のプロセスが先に置いた
+            shutil.rmtree(work, ignore_errors=True)
     return dst
 
 
@@ -140,21 +146,28 @@ def _build(tree: Path) -> Path:
     srcs = [host / "host_sim.c"] + [tree / s for s in _SOURCES if (tree / s).exists()]
     has_params = (tree / "src/control/control_params.c").exists()
     has_launch = "Drive_SetLaunch" in (tree / "src/control/drive.h").read_text(encoding="utf-8")
-    files = srcs + sorted((host / "shim").glob("*.h")) + sorted((tree / "src/control").glob("*.h"))
-    digest = hashlib.sha256()
-    for f in files:
+    # キャッシュの鍵は、コンパイルに入るものすべて（ソース・取り込むヘッダ——`lib/` の PID・フィルタは
+    # ヘッダだけの実装——と、コンパイルの引数）。どれか1つでも漏らすと、直したのに古いライブラリを使う
+    headers = [f for d in ((host / "shim"), *(tree / inc for inc in _INCLUDES)) for f in sorted(d.glob("*.h"))]
+    defines = [*(["-DHOST_FW_HAS_CONTROL_PARAMS"] if has_params else []),
+               *(["-DHOST_FW_HAS_LAUNCH"] if has_launch else [])]
+    flags = ["-O2", "-shared", "-fPIC"]
+    digest = hashlib.sha256(" ".join(flags + defines).encode())
+    for f in srcs + headers:
+        digest.update(str(f.relative_to(tree) if f.is_relative_to(tree) else f.name).encode())
         digest.update(f.read_bytes())
     ext = "dylib" if sys.platform == "darwin" else "so"
     lib = _cache_dir() / f"host_sim_{digest.hexdigest()[:16]}.{ext}"
     if not lib.exists():
-        cmd = ["cc", "-O2", "-shared", "-fPIC", f"-I{host / 'shim'}",
-               *[f"-I{tree / inc}" for inc in _INCLUDES],
-               *(["-DHOST_FW_HAS_CONTROL_PARAMS"] if has_params else []),
-               *(["-DHOST_FW_HAS_LAUNCH"] if has_launch else []),
-               *map(str, srcs), "-lm", "-o", str(lib)]
+        tmp = lib.with_suffix(f".{os.getpid()}.tmp")
+        cmd = ["cc", *flags, f"-I{host / 'shim'}",
+               *[f"-I{tree / inc}" for inc in _INCLUDES], *defines,
+               *map(str, srcs), "-lm", "-o", str(tmp)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
+            tmp.unlink(missing_ok=True)
             raise RuntimeError(f"ファームのホスト向けコンパイルに失敗:\n{r.stderr}")
+        os.replace(tmp, lib)          # 書きかけのライブラリを別のプロセス（最適化の並列）に読ませない
     return lib
 
 

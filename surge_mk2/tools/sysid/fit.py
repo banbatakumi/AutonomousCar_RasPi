@@ -53,11 +53,10 @@ from pathlib import Path
 
 import numpy as np
 from mcap.reader import make_reader
-from scipy.optimize import least_squares, minimize, minimize_scalar
+from scipy.optimize import least_squares, minimize
 from scipy.signal import cont2discrete, lfilter
 
-from raspi.auto._sysid_common import (REAR_SLIP_LIMIT, corner_limit, corner_windows, first_saturated,
-                                      md_down, rear_slip)
+from raspi.auto._sysid_common import (REAR_SLIP_LIMIT, corner_limit, corner_windows, md_down, rear_slip)
 from raspi.auto.sysid_latency import LATENCY_CODE_MOD, LATENCY_CODE_STEP_RAD
 from sim.vehicle import (DriveInput, SpeedController, SteerLink, SteerServo, VehicleSpec, backlash,
                          brake_speed_factor, next_speed)
@@ -144,6 +143,15 @@ class Log:
     #: （`/diag/link` の `control_params`。無い記録＝プロトコル v0.17 以前は換算なし＝`(1, 0)`）。
     #: 記録の舵角（`steer_actual`・指令）はこの換算を通した後の路面舵角
     steer_link: tuple[float, float] = (1.0, 0.0)
+    #: `steer_link` が記録から確かめられたか。mcap に `/diag/link` の `control_params` が無く、換算を持つ
+    #: ファーム（プロトコル v0.18〜）かどうかも分からない記録は False——「換算なし」とみなして舵の効きを
+    #: 畳み込むと、STM32 に入っている換算を消してしまう（`analyze` は畳み込まない）
+    steer_link_known: bool = True
+    #: 記録したときに STM32 に入っていた車速PIの加速度フィードフォワード
+    #: `(speed_ff_nm_per_m_s2, speed_ff_rr_nm)`（`/diag/link` の `control_params`。プロトコル v0.20 以前の
+    #: 記録は FF が無い＝`(0, 0)`）。None は記録から分からない。前後運動の当てはめは同じ値をシムの
+    #: `SpeedController` に入れる——FF を知らずに当てはめると、FF で速くなった応答を車体の利得が吸う
+    speed_ff: tuple[float, float] | None = (0.0, 0.0)
     #: モータドライバが無応答だった区間 `(始まり [s], 終わり [s], 名前)`（`md_dropouts`）。その間、
     #: STM32 はその車輪の速度・電流を最後の値のまま送り、止まった MD は駆動も制動もしない
     md_dropouts: list[tuple[float, float, str]] = field(default_factory=list)
@@ -439,12 +447,20 @@ def _speed_from_odom(samples: list[Sample]) -> None:
         x.speed = float(vi)
 
 
+#: `/diag/link` の `control_params` から読む項目と、それが入ったプロトコルの版（`protocol_version`）
+_LINK_PARAMS = ("steer_link_gain", "steer_link_cubic")
+_FF_PARAMS = ("speed_ff_nm_per_m_s2", "speed_ff_rr_nm")
+_PROTO_STEER_LINK = 0x0012
+_PROTO_SPEED_FF = 0x0015
+
+
 def load_log(path: str | Path) -> Log:
     """mcap → `Log`。時刻はメッセージの中の単調時刻（モジュールdocstring参照）。"""
     vs_raw: list[tuple[int, int, dict]] = []
     cmd_raw: list[tuple[int, int, dict]] = []
     scan_raw: list[tuple[int, int, dict]] = []
     fw_id = None
+    proto = None
     link: dict[str, float] = {}
     with open(path, "rb") as f:
         reader = make_reader(f)
@@ -453,9 +469,10 @@ def load_log(path: str | Path) -> Log:
             obj = json.loads(message.data)
             if channel.topic == "/diag/link":
                 fw_id = fw_id if fw_id is not None else obj.get("fw_id")
+                proto = proto if proto is not None else obj.get("protocol_version")
                 # STM32 が答えた値（接続直後は空。最後に見えた値を採る）
                 link.update({k: float(v) for k, v in (obj.get("control_params") or {}).items()
-                             if k in ("steer_link_gain", "steer_link_cubic")})
+                             if k in _LINK_PARAMS + _FF_PARAMS and isinstance(v, (int, float))})
             elif channel.topic == "/vehicle_state":
                 vs_raw.append((int(obj.get("t_capture", 0)), message.log_time, obj))
             elif channel.topic == "/cmd":
@@ -480,7 +497,17 @@ def load_log(path: str | Path) -> Log:
                                        int(o.get("seq", 0))))
     log = build_log(vs_msgs, cmds, scans)
     log.fw_id = fw_id
+    # STM32 が答えた値が記録にあればそれ。無ければ、その項目を持たない古いファームの記録（＝換算なし・
+    # FF なし）と分かるときだけ既定値にし、それ以外は「分からない」として残す
     log.steer_link = (link.get("steer_link_gain", 1.0), link.get("steer_link_cubic", 0.0))
+    log.steer_link_known = (all(k in link for k in _LINK_PARAMS)
+                            or (proto is not None and proto < _PROTO_STEER_LINK))
+    if all(k in link for k in _FF_PARAMS):
+        log.speed_ff = (link[_FF_PARAMS[0]], link[_FF_PARAMS[1]])
+    elif proto is not None and proto < _PROTO_SPEED_FF:
+        log.speed_ff = (0.0, 0.0)
+    else:
+        log.speed_ff = None
     return log
 
 
@@ -962,7 +989,7 @@ def _speed_runs(s: list[Sample], min_s: float = 0.5) -> list[_SpeedRun]:
 
 
 def _simulate_speed(spec: VehicleSpec, cmds: list[Cmd], delay: float, run: _SpeedRun,
-                    dt: float = _SPEED_SIM_DT) -> np.ndarray:
+                    dt: float = _SPEED_SIM_DT, ff: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
     """`SpeedController`（ファームの速度制御）に `/cmd` を `delay` だけ遅らせて入れた応答を、
     **実測の速度と同じ操作**（オドメトリの窓の直線当てはめ、`odom_speed`）を通して区間の時刻で返す。
 
@@ -972,11 +999,11 @@ def _simulate_speed(spec: VehicleSpec, cmds: list[Cmd], delay: float, run: _Spee
     落ちる」が説明してしまい、上限の無い真値で約2.3m/sの最高速を返した（検証で8シード中3例）。そこで区間の中はシムの速度を積分した位置、区間の外は実測のオドメトリの
     増分をつないだ位置に、実測と同じ窓の当てはめを掛けてから比べる。"""
     if run.win_t is None:
-        return _simulate_speed_raw(spec, cmds, delay, run, run.t, dt)
+        return _simulate_speed_raw(spec, cmds, delay, run, run.t, dt, ff)
     t, od, d = run.win_t, run.win_x, run.win_d
     ks, ke = run.k_start, run.k_end
     fine = t[ks] + np.arange(1, int(math.ceil((t[ke] - t[ks]) / dt)) + 1) * dt
-    v = _simulate_speed_raw(spec, cmds, delay, run, fine, dt)
+    v = _simulate_speed_raw(spec, cmds, delay, run, fine, dt, ff)
     tt = np.concatenate([[t[ks]], fine])
     # 車速（車体中心線方向）→ 前輪の走行距離の進み（実測の射影 cos の逆）
     rate = np.concatenate([[run.v_start], v]) / np.maximum(np.cos(np.interp(tt, t, d)), 0.2)
@@ -988,18 +1015,25 @@ def _simulate_speed(spec: VehicleSpec, cmds: list[Cmd], delay: float, run: _Spee
 
 
 def _simulate_speed_raw(spec: VehicleSpec, cmds: list[Cmd], delay: float, run: _SpeedRun,
-                        t_eval: np.ndarray, dt: float = _SPEED_SIM_DT) -> np.ndarray:
+                        t_eval: np.ndarray, dt: float = _SPEED_SIM_DT,
+                        ff: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
     """`_simulate_speed` のシムの部分（微分を掛ける前の速度を `t_eval` で）。
-    区間の頭の状態: 速度は実測、目標のランプは直前の指令、積分は転がり抵抗と釣り合う値。"""
+    区間の頭の状態: 速度は実測、目標のランプは直前の指令、積分は転がり抵抗と釣り合う値。
+
+    `ff` は記録したときに STM32 に入っていた加速度フィードフォワード（`Log.speed_ff`）。ファームは
+    PI の出力にこれを足すので、同じ値をシムの制御器にも入れる（当てはめる利得とは独立な、記録時の定数）。"""
     t0, t1 = float(run.t_start), float(t_eval[-1])
     cmd_t = [c.t + delay for c in cmds]
     inputs = [DriveInput(armed=True, brake=c.brake, target_speed=c.target_speed,
                          accel_limit=c.accel_limit, brake_torque=c.brake_torque) for c in cmds]
     ctl = SpeedController(spec)
+    ctl.speed_ff_nm_per_m_s2, ctl.speed_ff_rr_nm = float(ff[0]), float(ff[1])
     v = float(run.v_start)
     i0 = 0.0
     if abs(run.ref0) >= SpeedController.STANDSTILL_M_S and spec.speed_ki > 1e-9 and spec.speed_plant_gain > 1e-9:
-        i0 = math.copysign(spec.rolling_resistance / spec.speed_plant_gain / spec.speed_ki, run.ref0)
+        # 定速で釣り合うトルクのうち、FF の転がり抵抗ぶんは積分の外から出ている
+        i0 = math.copysign((spec.rolling_resistance / spec.speed_plant_gain - float(ff[1])) / spec.speed_ki,
+                           run.ref0)
     ctl.reset(v=v, ref=run.ref0, integral=i0)
     idle = DriveInput(armed=True, target_speed=run.target0)
     n = int(math.ceil((t1 - t0) / dt)) + 1
@@ -1067,15 +1101,16 @@ def _fit_speed_model(logs: Log | list[Log], base: VehicleSpec,
     全記録で共通）。`starts` は初期値の上書きの候補（最も残差の小さい解を採る）。
     返り値 `(値, 平均二乗誤差, 残差)`。"""
     logs = logs if isinstance(logs, list) else [logs]
-    all_sets = [(lg.cmds, _speed_runs(lg.samples)) for lg in logs]
-    if not any(runs for _, runs in all_sets):
+    # FF が分からない記録は FF なしで当てはめる（`fit_accel` が★で知らせる）
+    all_sets = [(lg.cmds, _speed_runs(lg.samples), lg.speed_ff or (0.0, 0.0)) for lg in logs]
+    if not any(runs for _, runs, _ in all_sets):
         raise ValueError("前進の速度指令の区間が見つかりません（mcapが正しいか確認）")
     # TC の介入・空転を含む区間は外す（タイヤのグリップで加速が決まっていて、速度制御のモデルの形から
     # 外れる。含めると外れた分を車体の利得・転がり抵抗が吸収し、TC を写した真値で 22→17.6 と壊れた）。
     # 全部が外れる記録では外さない（残差の★で知らせる）
-    sets = [(cmds, [r for r in runs if not _traction_event(lg.samples, r.idx)])
-            for (cmds, runs), lg in zip(all_sets, logs)]
-    if not any(runs for _, runs in sets):
+    sets = [(cmds, [r for r in runs if not _traction_event(lg.samples, r.idx)], ff)
+            for (cmds, runs, ff), lg in zip(all_sets, logs)]
+    if not any(runs for _, runs, _ in sets):
         sets = all_sets
     names = list(free)
     fx = dict(fixed or {})
@@ -1088,8 +1123,8 @@ def _fit_speed_model(logs: Log | list[Log], base: VehicleSpec,
 
     def resid(x):
         sp, delay = spec_of(x)
-        return np.concatenate([_simulate_speed(sp, cmds, delay, r) - r.v
-                               for cmds, runs in sets for r in runs])
+        return np.concatenate([_simulate_speed(sp, cmds, delay, r, ff=ff) - r.v
+                               for cmds, runs, ff in sets for r in runs])
 
     lo = [free[n][1] for n in names]
     hi = [free[n][2] for n in names]
@@ -1707,6 +1742,18 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
         warnings = [notes[-1]]
     notes += traction_notes
     warnings = warnings + [n for n in traction_notes if n.startswith("★")]
+    for lg in logs:
+        if lg.speed_ff is None:
+            notes.append("★記録に STM32 の加速度フィードフォワード（[control] の speed_ff_*、/diag/link の "
+                         "control_params）が残っておらず、FF なしとして当てはめた。FF が有効な車の記録なら、"
+                         "FF で速くなった応答を車体の利得が吸って何倍にも大きく出る（転がり抵抗は小さく出る）。"
+                         "/diag/link を含めて録り直すこと")
+            warnings.append(notes[-1])
+            break
+        if lg.speed_ff[0] > 0.0 or lg.speed_ff[1] > 0.0:
+            notes.append(f"記録時の加速度フィードフォワード（{lg.speed_ff[0]:.4f}N·m/(m/s²)・"
+                         f"{lg.speed_ff[1]:.4f}N·m）をシムの速度制御に入れて当てはめた")
+            break
     if len(brake_levels) >= 2:
         vb, nb = _fit_brake_runs(log, base, float(pb["rolling_resistance"]))
         values.update(vb)

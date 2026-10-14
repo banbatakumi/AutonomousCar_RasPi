@@ -104,8 +104,10 @@ steer_servo_gain = 0.9739876830514631
 # シムの速度はファームの速度制御そのもの（`sim/vehicle.py` の `SpeedController`、2026-09-26〜）:
 # 目標速度を COMMAND の accel_limit でランプ → PI（speed_kp・speed_ki、出力 ±speed_torque_max_nm）→
 # 車体（加速度 = speed_plant_gain × トルク − rolling_resistance）。
-# **次の3つはファームの定数で同定しない**（MainF446RE_V3 `src/control/drive.h` の DRIVE_SPEED_KP・
-# DRIVE_SPEED_KI・DRIVE_MAX_TORQUE_NM×2輪）。ファームを変えたらここも直すこと。
+# **次の3つは同定しない**。speed_kp・speed_ki はここが唯一の定義で、io_node が接続のたびに CONFIG_SET で
+# STM32 へ送る（ファームは値を持たない。`raspi/core/control_params.py` の FROM_DYNAMICS）。
+# speed_torque_max_nm はファームの定数（MainF446RE_V3 `src/control/drive.h` の DRIVE_MAX_TORQUE_NM×2輪）で、
+# ファームを変えたらここも直すこと。
 # ★ランプの上限（旧 speed_ramp_max_m_s2 = 3.0、ファームの DRIVE_MAX_ACCEL_M_S2）は v0.22 で STM32 から
 #   無くなった。上限は Pi が送る値で決まり、その値は [safety] の cmd_accel_limit_m_s2（1か所だけ）
 speed_kp = 0.3
@@ -127,9 +129,9 @@ speed_filter_s = 0.00995
 speed_filter_order = 1
 # ── ③ 旋回グリップ試験（`sysid_corner`）──
 # 横方向グリップ限界 a_lat_max = mu * g [m/s²]。質量に依存しない（F_lat_max = mu*m*g を質量mで割ると
-# mu*g だけが残るため）。2026-09-28 実測: 後輪が先に滑った限界 4.48m/s²（1.54m/s）。TV が外輪を押し続けていた
+# mu*g だけが残るため）。2026-09-28 実測: 旋回試験の限界 4.09m/s²（1.45m/s で頭打ち）。TV が外輪を押し続けていた
 # 旧ファームでは 4.91 だった——**TV の設定で変わる**（2026-10-08 に TV を荷重比例の配分へ置き換えた。
-# 置き換え後の値は未測定）
+# 置き換え後の値は未測定）。★コースの走行では 5〜5.5m/s² でも線から外れておらず、この値は低めの可能性
 mu = 0.41718121313132595
 # ── ①②③をまとめて（`fit_geometry`）──
 # タイヤ角 d = 不感帯(ガタ(steer_actual))、曲率 = tan(gain·d + cubic·d³ + offset) / (L + K·v²)
@@ -209,7 +211,8 @@ drive_ratio = 2.0             # 駆動輪数（後輪2輪ぶんのトルクが�
 # **値は `tools/ctrl_tune`（launcher の「制御の調整」）が決める**: 実機の記録で同定した車両モデル
 # （下の [control.plant]）と、ホストでコンパイルした STM32 の制御そのものを閉ループにして最適化する。
 # 手で変えるなら、変える前後で `python -m tools.ctrl_tune.bench` を回して比べること。
-# ★今の値は机上の車両モデルで決めた初期値（STM32 の既定値と同じ）。実機の同定は未実施★
+# STM32 の既定値は「何もしない」仮置き（各範囲の下限。リンクの換算だけ 1 と 0）で、ここの値を送るまで
+# io_node は ARM を通さない。TC・ABS のゲインは実機の記録で同定した [control.plant] をもとに最適化した値
 # ─────────────────────────────────────────────────────────────
 [control]
 # ── 機能の ON/OFF（0/1）。**STM32 の既定は無効**で、io_node が接続のたびにここの値を送って有効にする。
@@ -255,7 +258,8 @@ steer_link_cubic = -0.5987390237312006
 #    ランプと車速PIを迂回して全開＋TC で加速する。空転を抑えるのは上の TC の値。`slam2d_raceline` の `launch`）──
 # 発進を終えて車速PIへ戻すときの積分の初期値 [N·m、1輪あたり] = その車速を保つのに要るトルク。
 # 0 だと積分が溜まるまで車速が目標より落ち込む（この値×2÷speed_kp [m/s]、戻るのに約0.5秒）。
-# 決め方: [dynamics] の rolling_resistance ÷ speed_plant_gain ÷ 2（0.366÷20.3÷2）。同定し直したら直す
+# 決め方: [dynamics] の rolling_resistance ÷ speed_plant_gain ÷ 2。★今の 0.009 は旧同定値（0.366÷20.3÷2）の
+# まま。今の [dynamics] なら 0.2732÷21.52÷2 ≒ 0.0063 で、`tools/sysid` は書き直さない（手で直す）
 launch_exit_torque_nm = 0.009
 
 # ── 車速PIの加速度フィードフォワード（★プロトコル v0.21。後輪2輪の合計トルク [N·m]）──

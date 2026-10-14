@@ -2,6 +2,7 @@
 
     .venv/bin/python -m tools.sysid.bench            # 既定の真値・シード0
     .venv/bin/python -m tools.sysid.bench --seeds 3
+    .venv/bin/python -m tools.sysid.bench --ff       # STM32 の加速度フィードフォワードを有効にして録る
 
 ## なぜ要るか
 
@@ -47,7 +48,7 @@ from tools.sysid import fit
 from tools.sysid.fit import Cmd, Log, ScanStamp, build_log
 
 __all__ = ["TRUTH", "TRUTH_SLIP", "TRUTH_LOWGRIP", "Pipeline", "Noise", "REALISTIC", "SLIPPING", "run_test", "run_all", "Space",
-           "write_mcap", "reproduction_error"]
+           "write_mcap", "reproduction_error", "truth_ff"]
 
 #: 既定の真値。`vehicle.toml` の旧手順の値とは**わざとずらしてある**（既定値に
 #: たまたま一致して「復元できた」ように見えるのを避ける）
@@ -193,8 +194,12 @@ def _q(x: float, lsb: float) -> float:
 
 def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
              seed: int = 0, pipe: Pipeline | None = None, noise: Noise | None = None,
-             max_s: float = 180.0, pre_s: float = 0.2) -> tuple[Log, Space, list[float]]:
+             max_s: float = 180.0, pre_s: float = 0.2,
+             speed_ff: tuple[float, float] = (0.0, 0.0)) -> tuple[Log, Space, list[float]]:
     """プランナー1つを閉ループで最後まで回す → `(ログ, 掃いた範囲, 真の遅延[s]の列)`。
+
+    `speed_ff` は STM32 の車速PIの加速度フィードフォワード `(speed_ff_nm_per_m_s2, speed_ff_rr_nm)`
+    （`[control]` の同名の値。実機は有効で走る）。記録（`Log.speed_ff`）にも同じ値が残る。
 
     `pre_s` だけ停止したまま記録してから試験を始める。ジャイロのバイアスを読む静止区間は
     プランナー自身が試験の頭に作る（`_sysid_common.SETTLE_S`）ので、ここは短くしてある。
@@ -214,6 +219,7 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
             p[k] = v
 
     veh = VehicleModel(truth, (0.0, 0.0, 0.0))
+    veh.set_speed_ff(*speed_ff)
     ms = 1e-3
     # 各周期の位相 [ms]。周期はLiDAR 100・TELEMETRY 10（100Hz、ファームの RAS_TELEMETRY_INTERVAL_US）・
     # auto/cmd 20・/cmd 20・COMMAND 10
@@ -399,11 +405,19 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
         raise RuntimeError(f"{planner_id}: {max_s}s 以内に完了しなかった（{state.reason if state else ''}）")
     space = Space(xmax - xmin, ymax - ymin, math.hypot(veh.x, veh.y), math.degrees(veh.yaw),
                   done_at - pre_s)
-    return build_log(vs_log, cmds, scans), space, latencies
+    log = build_log(vs_log, cmds, scans)
+    log.speed_ff = (float(speed_ff[0]), float(speed_ff[1]))
+    return log, space, latencies
+
+
+def truth_ff(truth: VehicleSpec) -> tuple[float, float]:
+    """真値の車に合った加速度フィードフォワード（`toml_update.speed_ff_values` と同じ決め方）。"""
+    return 1.0 / truth.speed_plant_gain, truth.rolling_resistance / truth.speed_plant_gain
 
 
 def run_all(truth: VehicleSpec = TRUTH, seed: int = 0, verbose: bool = True,
-            noise: Noise | None = None, pipe: Pipeline | None = None) -> dict:
+            noise: Noise | None = None, pipe: Pipeline | None = None,
+            speed_ff: tuple[float, float] = (0.0, 0.0)) -> dict:
     """4試験を回して解析し、`{key: (真値, 推定値)}` と各試験のスペースを返す。"""
     base = replace(VehicleSpec.load(), steer_gain=1.0, steer_offset_rad=0.0)
     got: dict[str, float] = {}
@@ -416,7 +430,8 @@ def run_all(truth: VehicleSpec = TRUTH, seed: int = 0, verbose: bool = True,
     def step(test: str, planner_id: str, fn) -> None:
         nonlocal base
         if test not in logs:
-            log, space, lat = run_test(planner_id, truth, seed=seed, noise=noise, pipe=pipe)
+            log, space, lat = run_test(planner_id, truth, seed=seed, noise=noise, pipe=pipe,
+                                       speed_ff=speed_ff)
             logs[test] = log
             spaces[test] = space
             true_latency.extend(lat if test == "latency" else [])
@@ -471,14 +486,22 @@ def write_mcap(log: Log, path, t0_ns: int = 5_000_000_000) -> None:
     """ベンチの記録を、実機と同じロガー（`McapLog`）・同じトピックで mcap に書く。
 
     `speed` は STM32 が送る値（ローパス後、`speed_filtered`）、`odom_dist` は前輪の累積距離。
+    `/diag/link` には STM32 に入っていた値（ステアのリンクの換算・加速度フィードフォワード）を残す
+    （解析は記録からそれを読む。`fit.load_log`）。
     """
-    from raspi.msgs.types import DriveCmd, Scan as ScanMsg
+    from raspi.msgs.types import DriveCmd, LinkDiag, Scan as ScanMsg
+    from raspi.proto.generated.packets import PROTOCOL_VERSION
     from raspi.rec.mcap_log import McapLog
 
     def ns(t: float) -> int:
         return t0_ns + int(round(t * 1e9))
 
+    ff = log.speed_ff or (0.0, 0.0)
     with McapLog(path, t0_mono_ns=t0_ns, t0_unix_ns=1_700_000_000_000_000_000) as w:
+        w.write("/diag/link", LinkDiag(
+            t_capture=ns(0.0), protocol_version=PROTOCOL_VERSION, control_params_status="ok",
+            control_params={"steer_link_gain": log.steer_link[0], "steer_link_cubic": log.steer_link[1],
+                            "speed_ff_nm_per_m_s2": ff[0], "speed_ff_rr_nm": ff[1]}))
         for x in log.samples:
             w.write("/vehicle_state", VehicleState(
                 t_capture=ns(x.t), speed=x.speed_filtered, yaw_rate=x.yaw_rate,
@@ -688,13 +711,17 @@ def _within(key: str, truth: float, got: float) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--seeds", type=int, default=1)
+    ap.add_argument("--ff", action="store_true",
+                    help="STM32 の加速度フィードフォワードを有効にして録る（実機と同じ。値は真値から）")
     ap.add_argument("--truth", choices=sorted(TRUTHS), default="default",
                     help="真値（nocap: 加減速の上限なし＝ランプとPIだけで決まる車、"
                          "slip: 加速がグリップで頭打ちになり後輪が滑る車、lowgrip: グリップの低い路面）")
     args = ap.parse_args()
     n_bad = 0
     for sd in range(args.seeds):
-        r = run_all(truth=TRUTHS[args.truth], seed=sd, noise=SLIPPING if args.truth in ("slip", "lowgrip") else None)
+        truth = TRUTHS[args.truth]
+        r = run_all(truth=truth, seed=sd, noise=SLIPPING if args.truth in ("slip", "lowgrip") else None,
+                    speed_ff=truth_ff(truth) if args.ff else (0.0, 0.0))
         n_bad += sum(not _within(k, tv, gv) for k, (tv, gv) in r["values"].items())
     print(f"許容誤差外: {n_bad}")
     return 1 if n_bad else 0

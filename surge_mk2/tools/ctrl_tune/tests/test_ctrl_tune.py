@@ -346,5 +346,61 @@ class TestTomlRoundTrip(unittest.TestCase):
         self.assertEqual(load_control_params(self.path), load_control_params(DEFAULT_TOML))
 
 
+class TestRecordChecks(unittest.TestCase):
+    """記録の読み込み（`record`）と解析の入口（`fit.analyze`）の検査。ファームは要らない。"""
+
+    @staticmethod
+    def _rows(n=200, md=0x31, dt=0.01, drop_every=0):
+        vs, cmd = [], [(0.0, {"brake": False, "torque_mode": True})]
+        for i in range(n):
+            if drop_every and i % drop_every == 0:
+                continue
+            vs.append((i * dt, {"speed": 0.0, "odom_dist": [0.0, 0.0], "wheel_speed": [0.0, 0.0, 1.0, 1.0],
+                                "torque_cmd": [0.05, 0.05], "md_status": [md, md, md]}))
+        return vs, cmd
+
+    def test_md_dropout_is_rejected(self):
+        vs, cmd = self._rows()
+        for i in range(50, 120):
+            vs[i][1]["md_status"] = [0x21, 0x31, 0x31]          # 左後輪の MDS_COMM_OK（0x10）が落ちた
+        rec = record._build(vs, cmd)
+        self.assertTrue(rec.md_dropouts)
+        res = fit.analyze({"wheel": rec}, NOMINAL)
+        self.assertTrue(any("無応答" in e for e in res.errors), res.errors)
+        self.assertEqual(res.results, {})
+
+    def test_many_gaps_are_pointed_out(self):
+        vs, cmd = self._rows(drop_every=7)
+        self.assertIsNotNone(fit._gap_note(record._build(vs, cmd)))
+        vs, cmd = self._rows()
+        self.assertIsNone(fit._gap_note(record._build(vs, cmd)))
+
+    def test_time_base_is_switched_for_the_whole_record(self):
+        """単調時刻が1件でも欠けていたら全部 log_time にする（1件だけ epoch へ飛ばさない）。"""
+        vs = [(5_000_000_000 + i * 10_000_000, 1_700_000_000_000_000_000 + i * 10_000_000, {}) for i in range(5)]
+        vs[2] = (0, vs[2][1], {})
+        cmd = [(5_000_000_000, 1_700_000_000_000_000_000, {})]
+        got_vs, got_cmd = record._times_pair(vs, cmd)
+        self.assertTrue(all(t > 1e9 for t, _ in got_vs + got_cmd))
+        self.assertTrue(np.all(np.diff([t for t, _ in got_vs]) > 0))
+
+
+@unittest.skipUnless(HAVE_FW, f"ファームのリポジトリ（{FW_DIR}）か cc がありません")
+class TestBuildCache(unittest.TestCase):
+    def test_lib_header_change_rebuilds(self):
+        """`lib/`（ヘッダだけの PID・フィルタ）を直したら別のライブラリになる（古いキャッシュを使わない）。"""
+        from tools.ctrl_tune import fw as fwmod
+        with tempfile.TemporaryDirectory() as d:
+            tree = Path(d)
+            for sub in ("src/control", *fwmod._INCLUDES[:3]):
+                shutil.copytree(FW_DIR / sub, tree / sub)
+            first = fwmod._build(tree)
+            pid = next((tree / "lib" / "pid").glob("*.h"))
+            pid.write_text(pid.read_text(encoding="utf-8") + "\n// changed\n", encoding="utf-8")
+            second = fwmod._build(tree)
+            self.assertNotEqual(first, second)
+            self.assertTrue(second.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

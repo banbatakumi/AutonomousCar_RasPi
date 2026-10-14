@@ -163,7 +163,19 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
             r = fit.fit_geometry(geo_logs, base)
             vals = {k: v for k, v in r.values.items() if k in geo_params}
             notes = list(r.notes)
-            if fold_link and ("steer_gain" in vals or "steer_gain_cubic" in vals):
+            warn_geo = bool(r.warnings)
+            unknown = [k for k, lg in geo_logs.items() if not lg.steer_link_known]
+            if fold_link and unknown and ("steer_gain" in vals or "steer_gain_cubic" in vals):
+                # 記録したときの換算が分からないと、畳み込んだ結果は「どの換算の上の残りか」が決まらない。
+                # 換算なしとみなすと、STM32 に入っている換算を黙って消してしまう
+                vals.pop("steer_gain", None)
+                vals.pop("steer_gain_cubic", None)
+                notes.append("★記録（" + "・".join(unknown) + "）に STM32 のステアのリンクの換算（/diag/link の "
+                             "control_params）が残っておらず、記録時の換算が分からない。舵の効きは換算へ"
+                             "畳み込まず、steer_link_*・steer_gain・steer_gain_cubic は出さない。/diag/link を"
+                             "含めて録り直すこと")
+                warn_geo = True
+            elif fold_link and ("steer_gain" in vals or "steer_gain_cubic" in vals):
                 links = {lg.steer_link for lg in geo_logs.values()}
                 if len(links) > 1:
                     raise ValueError("記録によって STM32 のステアのリンクの換算が違います（" + "、".join(
@@ -183,7 +195,7 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
                     "steer_gain_cubic は 1 と 0、max_steer はこの最大舵角になる")
             out.results.update(vals)
             out.notes[geo_label] = notes
-            if r.warnings:
+            if warn_geo:
                 out.warned.update({k: geo_label for k in vals})
         except Exception as e:  # noqa: BLE001
             out.errors.append(f"{geo_label}: {e}")

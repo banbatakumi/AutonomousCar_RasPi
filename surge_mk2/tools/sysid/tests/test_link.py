@@ -24,7 +24,10 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from sim.vehicle import DEFAULT_SPEC_PATH, VehicleSpec  # noqa: E402
 from tools.sysid import toml_update  # noqa: E402
 from tools.sysid.analyze import LINK_KEYS, analyze, fold_steer_link  # noqa: E402
-from tools.sysid.bench import TRUTH, run_test  # noqa: E402
+from raspi.msgs.types import DriveCmd, VehicleState  # noqa: E402
+from raspi.rec.mcap_log import McapLog  # noqa: E402
+from tools.sysid.bench import TRUTH, run_test, write_mcap  # noqa: E402
+from tools.sysid.fit import Cmd, build_log, load_log  # noqa: E402
 
 
 class TestFoldSteerLink(unittest.TestCase):
@@ -120,10 +123,52 @@ class TestAnalyzeFolds(unittest.TestCase):
         for key, value in zip(LINK_KEYS, want):
             self.assertAlmostEqual(res.results[key], value, places=9)
 
+    def test_unknown_link_is_not_folded(self):
+        """記録時の換算が分からない記録（`/diag/link` の `control_params` が無い）は、換算なしとみなして
+        畳み込まない——STM32 に入っている換算を消してしまうので、舵の効きの項目は出さずに★で知らせる。"""
+        res = analyze({"steer": replace(self.log, steer_link_known=False)}, self.base)
+        for key in (*LINK_KEYS, "steer_gain", "steer_gain_cubic"):
+            self.assertNotIn(key, res.results)
+        notes = res.notes["舵の効き（①②③をまとめて）"]
+        self.assertTrue(any(n.startswith("★") and "換算" in n for n in notes), notes)
+        # 舵の効き以外の項目（ヨーの遅れ等）は出るが、★の出た解析なので既定で適用しない
+        self.assertIn("yaw_rate_filter_s", res.results)
+        self.assertIn("yaw_rate_filter_s", res.warned)
+
     def test_logs_with_different_links_are_rejected(self):
         res = analyze({"steer": self.log, "corner": replace(self.log, steer_link=(0.98, -0.2))}, self.base)
         self.assertTrue(any("リンクの換算が違います" in e for e in res.errors), res.errors)
         self.assertNotIn("steer_link_gain", res.results)
+
+
+class TestRecordedParams(unittest.TestCase):
+    """記録（mcap）の `/diag/link` から、STM32 に入っていた換算・加速度フィードフォワードを読む。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        vs = [(i * 0.01, {"t_capture": 0, "speed": 0.0, "odom_dist": [0.0, 0.0]}) for i in range(60)]
+        self.log = build_log(vs, [Cmd(t=0.0, target_speed=0.0, target_steer=0.0, brake=False)], [])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_values_in_diag_link_are_read(self):
+        path = Path(self.tmp.name) / "with.mcap"
+        write_mcap(replace(self.log, steer_link=(0.97, -0.4), speed_ff=(0.05, 0.012)), path)
+        got = load_log(path)
+        self.assertTrue(got.steer_link_known)
+        self.assertEqual(got.steer_link, (0.97, -0.4))
+        self.assertEqual(got.speed_ff, (0.05, 0.012))
+
+    def test_missing_diag_link_is_unknown_not_default(self):
+        path = Path(self.tmp.name) / "without.mcap"
+        with McapLog(path, t0_mono_ns=5_000_000_000, t0_unix_ns=1_700_000_000_000_000_000) as w:
+            for x in self.log.samples:
+                w.write("/vehicle_state", VehicleState(t_capture=5_000_000_000 + int(x.t * 1e9)))
+            w.write("/cmd", DriveCmd(t_capture=5_000_000_000, t_pub=5_000_000_000))
+        got = load_log(path)
+        self.assertFalse(got.steer_link_known)
+        self.assertIsNone(got.speed_ff)
 
 
 if __name__ == "__main__":

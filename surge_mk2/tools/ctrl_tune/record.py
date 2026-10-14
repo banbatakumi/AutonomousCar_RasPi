@@ -54,6 +54,9 @@ class Rec:
     tc_off: np.ndarray
     abs_off: np.ndarray
     notes: list[str] = field(default_factory=list)
+    #: モータドライバが無応答だった区間 `(始まり [s], 終わり [s], 名前)`。その間 STM32 は車輪の値を
+    #: 古いまま送り、止まった MD は駆動も制動もしないので、記録は車の特性ではない（解析は拒否する）
+    md_dropouts: list[tuple[float, float, str]] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.t)
@@ -62,6 +65,7 @@ class Rec:
 def _build(vs_rows: list[tuple[float, dict]], cmd_rows: list[tuple[float, dict]]) -> Rec:
     if not vs_rows:
         raise ValueError("記録に /vehicle_state がありません")
+    from tools.sysid.fit import md_dropouts
     vs_rows.sort(key=lambda x: x[0])
     cmd_rows.sort(key=lambda x: x[0])
     t0 = vs_rows[0][0]
@@ -89,7 +93,10 @@ def _build(vs_rows: list[tuple[float, dict]], cmd_rows: list[tuple[float, dict]]
         cols["abs_active"].append(bool(vs.get("abs_active", False)))
         cols["tc_off"].append(ov.get("tc_enable", 1.0) == 0.0)
         cols["abs_off"].append(ov.get("abs_enable", 1.0) == 0.0)
-    return Rec(**{k: np.asarray(v) for k, v in cols.items()})
+    rec = Rec(**{k: np.asarray(v) for k, v in cols.items()})
+    rec.md_dropouts = [(a - t0, b - t0, name) for a, b, name in md_dropouts(vs_rows)]
+    return rec
+
 
 
 #: MCAP の先頭（マジック＋ヘッダレコード: profile ""・library "surge-mk2"）。先頭の欠けた記録を
@@ -112,19 +119,27 @@ def _read_headless(path: str | Path) -> tuple[list[tuple[float, dict]], list[tup
 
     data = _MCAP_HEAD + Path(path).read_bytes()
     channels = {r.id: r.topic for r in StreamReader(io.BytesIO(data)).records if isinstance(r, Channel)}
-    vs_rows: list[tuple[float, dict]] = []
-    cmd_rows: list[tuple[float, dict]] = []
+    vs_raw: list[tuple[int, int, dict]] = []
+    cmd_raw: list[tuple[int, int, dict]] = []
     for r in StreamReader(io.BytesIO(data)).records:
         if not isinstance(r, Message):
             continue
         topic = channels.get(r.channel_id)
         if topic == "/vehicle_state":
             obj = json.loads(r.data)
-            vs_rows.append(((obj.get("t_capture") or r.log_time) / NS, obj))
+            vs_raw.append((int(obj.get("t_capture") or 0), r.log_time, obj))
         elif topic == "/cmd":
             obj = json.loads(r.data)
-            cmd_rows.append(((obj.get("t_pub") or r.log_time) / NS, obj))
-    return vs_rows, cmd_rows
+            cmd_raw.append((int(obj.get("t_pub") or 0), r.log_time, obj))
+    return _times_pair(vs_raw, cmd_raw)
+
+
+def _times_pair(vs_raw, cmd_raw):
+    """`/vehicle_state` と `/cmd` を同じ時間軸にする（どちらかに単調時刻の欠けがあれば両方 log_time）。"""
+    mono = all(m for m, _, _ in vs_raw + cmd_raw)
+    pick = (lambda m, lt: m) if mono else (lambda m, lt: lt)
+    return ([(pick(m, lt) / NS, o) for m, lt, o in vs_raw],
+            [(pick(m, lt) / NS, o) for m, lt, o in cmd_raw])
 
 
 def load_mcap(path: str | Path) -> Rec:
@@ -138,16 +153,16 @@ def load_mcap(path: str | Path) -> Rec:
         rec = _build(vs_rows, cmd_rows)
         rec.notes.append("記録の先頭（MCAP のヘッダ）が欠けていたので、残りから読み出しました")
         return rec
-    vs_rows = []
-    cmd_rows = []
+    vs_raw: list[tuple[int, int, dict]] = []
+    cmd_raw: list[tuple[int, int, dict]] = []
     with open(path, "rb") as f:
         for _schema, channel, message in make_reader(f).iter_messages(topics=["/cmd", "/vehicle_state"]):
             obj = json.loads(message.data)
             if channel.topic == "/vehicle_state":
-                vs_rows.append(((obj.get("t_capture") or message.log_time) / NS, obj))
+                vs_raw.append((int(obj.get("t_capture") or 0), message.log_time, obj))
             else:
-                cmd_rows.append(((obj.get("t_pub") or message.log_time) / NS, obj))
-    return _build(vs_rows, cmd_rows)
+                cmd_raw.append((int(obj.get("t_pub") or 0), message.log_time, obj))
+    return _build(*_times_pair(vs_raw, cmd_raw))
 
 
 def _vehicle_state(o: np.ndarray, t_ns: int) -> VehicleState:

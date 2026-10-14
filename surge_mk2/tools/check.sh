@@ -10,8 +10,10 @@
 # GitHub Actions が動くのは push 後なので、手元でも同じものを1コマンドで
 # 打てないと「push してから気づく」を繰り返す。
 #
-# pre-commit に入れるなら:
-#   ln -s ../../surge_mk2/tools/check.sh .git/hooks/pre-commit
+# pre-commit に入れるなら（リポジトリ根で。シンボリックリンクにすると `$0` が `.git/hooks/` を指し、
+# 下の `cd` が別の場所へ行くので、絶対パスで呼ぶ小さなフックにする）:
+#   printf '#!/bin/sh\nexec "$(git rev-parse --show-toplevel)/surge_mk2/tools/check.sh" --fast\n' \
+#     > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 set -u
 
 cd "$(dirname "$0")/.." || exit 1
@@ -45,13 +47,18 @@ RUFF=".venv/bin/ruff"
 [ -x "$RUFF" ] || RUFF="$(command -v ruff || true)"
 if [ -n "$RUFF" ]; then
   run "ruff (F401/F541/F821)" "$RUFF" check --select F401,F541,F821 \
-    --exclude raspi/proto/generated raspi slam2d config
+    --exclude raspi/proto/generated raspi slam2d config tools sim
 else
   echo "── ruff … 見つからないので飛ばす（.venv/bin/pip install ruff で有効化）"
 fi
 
 if [ "$FAST" = 0 ]; then
   run "pytest" "$PY" -m pytest raspi/tests -q
+  # Mac 側の補助ツール（同定の値は全ノードとファームが信じて走る）。シムを回す重いもの
+  # （`tools/sysid/tests/test_fit.py`・`test_end_to_end.py`・`test_link.py` の TestAnalyzeFolds・
+  # `tools/ctrl_tune/tests`）は数分かかるので入れない。直したら個別に回すこと
+  run "pytest (tools)" "$PY" -m pytest tools/tests tools/sysid/tests/test_link.py \
+    -k "not TestAnalyzeFolds" -q
   if [ -d gui/node_modules ]; then
     printf '── tsc -b\n'
     (cd gui && npx tsc -b) || { echo "   ✗ 失敗: tsc" >&2; fail=1; }

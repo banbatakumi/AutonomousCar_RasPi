@@ -16,6 +16,8 @@ Pi が `arm=0` を送ると STM32 が駆動電源を切る。
   実験中にこのプロセスが死ねば 150ms 以内に STM32 が制動をかける
 - **段階を分ける。** いきなり MANUAL にせず、まず `arm=1` + `mode=DISARM` を試す
 - **動いたら即座に降りる。** 速度・車輪速が閾値を超えたら自動で DISARM して終了
+- **Ctrl-C でもすぐ降りる。** 指令を送り続けるループの中で毎回見る（段階の途中・静止待ち・
+  ボタン2の待ちでも、次の段階へ進まずに DISARM して終了）
 - **舵角は今の位置を保持する指令にする。** 中央に戻す動きを起こさないため
 - 全フレームを `.sfl` に記録する
 
@@ -59,8 +61,11 @@ class Aborted(Exception):
 
 
 class Rig:
-    def __init__(self, link: SerialLink, log: FrameLogWriter, hb: Heartbeat) -> None:
+    def __init__(self, link: SerialLink, log: FrameLogWriter, hb: Heartbeat,
+                 stop: dict | None = None) -> None:
         self.link = link
+        #: Ctrl-C で立つ旗（`{"v": bool}`）。送信ループが毎回見る
+        self.stop = stop if stop is not None else {"v": False}
         self.log = log
         self.hb = hb
         self.tr = LinkTracker()
@@ -89,6 +94,7 @@ class Rig:
         """
         end = time.monotonic() + seconds
         while time.monotonic() < end:
+            self.check_stop(label)
             now = time.monotonic_ns()
             self.hb.kick()
             for rx in self.link.poll():
@@ -99,6 +105,11 @@ class Rig:
                 self._next_cmd = now + CMD_PERIOD_NS
             self.tr.update_health(now)
             self._check(label, check_motion, watch_wheels)
+
+    def check_stop(self, label: str) -> None:
+        """Ctrl-C が押されていれば降りる（`Aborted`）。"""
+        if self.stop["v"]:
+            raise Aborted(f"{label}: Ctrl-C で中断")
 
     @staticmethod
     def rear_valid(t) -> bool:
@@ -236,9 +247,9 @@ def main() -> int:
                          meta={"node": "arm_test", "note": "arm を通す最小実験"})
     link.on_tx = log.write_tx
     hb = Heartbeat(pin)
-    rig = Rig(link, log, hb)
     stop = {"v": False}
     signal.signal(signal.SIGINT, lambda *_: stop.__setitem__("v", True))
+    rig = Rig(link, log, hb, stop)
 
     rc = 0
     try:
@@ -254,6 +265,7 @@ def main() -> int:
         print("[0/3] 送信せずに現状を見る")
         end = time.monotonic() + 2.0
         while time.monotonic() < end:
+            rig.check_stop("段階0")
             hb.kick()
             for rx in link.poll():
                 log.write_rx(rx.rx_ns, rx.type, rx.seq, rx.payload)
@@ -271,6 +283,7 @@ def main() -> int:
                   "（最大120秒待ちます）", flush=True)
             end = time.monotonic() + 120
             while time.monotonic() < end and (t.flags & P.FLG_ESTOP_ACTIVE):
+                rig.check_stop("解除待ち")
                 hb.kick()
                 for rx in link.poll():
                     log.write_rx(rx.rx_ns, rx.type, rx.seq, rx.payload)
@@ -309,11 +322,13 @@ def main() -> int:
         # ── 段階3: MANUAL（任意） ──
         v3 = None
         skipped = None
-        if args.manual and not stop["v"]:
+        rig.check_stop("段階3の前")
+        if args.manual:
             print("\n   MANUAL に入る前に輪の静止を待ちます"
                   "（台上では前輪の空転が幻の速度になるため）", flush=True)
             w = rig.wait_still(timeout_s=20.0, arm=True, mode=P.Mode.DISARM,
                                steer=hold_steer)
+            rig.check_stop("静止待ち")
             if w >= 0.05:
                 # **段階1・2 の結果は有効なので、ここで全体を落とさない**
                 skipped = (f"輪が {w:.3f} m/s で回り続けているため MANUAL は省略。"
