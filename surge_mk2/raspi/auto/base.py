@@ -221,6 +221,8 @@ class StandstillSteer:
     #: 停車してから舵を戻すまでの時間 [s]。切り返しの停止（数百ms）や制動の停止直後は保持し、
     #: 長い停車だけ戻す。MD ステアの過熱は分単位の据え切りで起きるので、2s で十分間に合う
     HOLD_S = 2.0
+    #: 停車とみなす車速 [m/s]
+    STILL_SPEED_M_S = 0.05
 
     def __init__(self) -> None:
         self._still_s = 0.0
@@ -230,7 +232,9 @@ class StandstillSteer:
 
     def observe(self, vs: VehicleState | None, dt: float) -> None:
         """毎周期1回、`plan()` の頭で。`vs` が無い・動いているなら数え直す。"""
-        if vs is not None and vs.stopped:
+        # `stopped` 印だけでなく車速そのものも見る（印を作らない経路——同定ベンチなど——で、走行中も
+        # 「停車」と数えて減速中に舵を戻し、直進してはみ出した）
+        if vs is not None and vs.stopped and abs(vs.speed) < self.STILL_SPEED_M_S:
             self._still_s += max(0.0, dt)
         else:
             self._still_s = 0.0
