@@ -4,6 +4,10 @@
     python3 raspi/proto/generate.py            生成
     python3 raspi/proto/generate.py --check    生成物が最新かだけ確認（CI 用）
 
+**STM32 側は `surge_proto.h` を取り込んでいない**（`ras_link.h/.c` に手で写している）。`--check` は
+Pi 側の生成物しか見ないので、toml を変えたらファームの `RAS_LEN_*`・`RAS_FLAG_*`・`RAS_PROTOCOL_VERSION`
+も直すこと（param_id だけは `tools/ctrl_tune/tests` が突き合わせる）。
+
 パケット定義を Pi 側と STM32 側の2箇所に手書きすると必ずズレる
 （実際に v0.4 の策定中、フィールド順のズレで2往復した）。定義は protocol.toml だけに置く。
 """
@@ -69,10 +73,26 @@ def load_spec() -> dict:
     with SPEC_PATH.open("rb") as fp:
         spec = tomllib.load(fp)
 
+    fr = spec["frame"]
+    if fr["overhead"] != fr["header_size"] + fr["crc_size"]:
+        raise SystemExit("[frame] overhead は header_size + crc_size のはず")
+    if not 0 < fr["max_payload"] <= 255:
+        raise SystemExit("[frame] max_payload は LEN（u8）で表せる 255 以下")
+    if fr["endian"] != "little":
+        raise SystemExit("[frame] endian は little だけに対応（生成する struct は '<' 固定）")
+    # framing.py は CRC を binascii.crc_hqx（poly=0x1021・反転なし）+ init で計算している
+    crc = spec["crc"]
+    if (crc["poly"], crc["init"], crc["refin"], crc["refout"], crc["xorout"]) != (0x1021, 0xFFFF, False, False, 0):
+        raise SystemExit("[crc] が framing.py の実装（CRC-16/CCITT-FALSE）と合わない")
+
     seen_type: dict[int, str] = {}
+    seen_name: set[str] = set()
     for p in spec["packets"]:
         name, fields = p["name"], p["fields"]
 
+        if name in seen_name:
+            raise SystemExit(f"パケット名 {name} が重複")
+        seen_name.add(name)
         if p["type"] in seen_type:
             raise SystemExit(f"TYPE 0x{p['type']:02X} が重複: {seen_type[p['type']]} と {name}")
         seen_type[p["type"]] = name
@@ -99,7 +119,19 @@ def load_spec() -> dict:
             if p["len"] > spec["frame"]["max_payload"]:
                 raise SystemExit(f"{name}: LEN が max_payload を超えている")
 
+    # param_id の重複（別名で同じ ID を書くと、片方の意味で送ったものが STM32 では別の項目になる）
+    seen_param: dict[int, str] = {}
+    for k, v in spec.get("params", {}).items():
+        if k == "comment":
+            continue
+        if v in seen_param:
+            raise SystemExit(f"param_id 0x{v:04X} が重複: {seen_param[v]} と {k}")
+        seen_param[v] = k
+
     return spec
+
+
+INIT_TEXT = f'"""{BANNER}"""\n\nfrom .packets import *  # noqa: F401,F403\n'
 
 
 # ── Python 生成 ─────────────────────────────────────────────────────────
@@ -387,7 +419,7 @@ def main() -> int:
     args = ap.parse_args()
 
     spec = load_spec()
-    outputs = {PY_OUT: gen_python(spec), H_OUT: gen_header(spec)}
+    outputs = {PY_OUT: gen_python(spec), H_OUT: gen_header(spec), OUT_DIR / "__init__.py": INIT_TEXT}
 
     if args.check:
         stale = [p.name for p, text in outputs.items()
@@ -400,8 +432,6 @@ def main() -> int:
         return 0
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    (OUT_DIR / "__init__.py").write_text(
-        f'"""{BANNER}"""\n\nfrom .packets import *  # noqa: F401,F403\n', encoding="utf-8")
     for path, text in outputs.items():
         path.write_text(text, encoding="utf-8")
         print(f"生成: {path.relative_to(PROTO_DIR.parent.parent)}")

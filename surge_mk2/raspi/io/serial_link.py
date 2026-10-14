@@ -67,11 +67,15 @@ class SerialLink:
             # 呼び側が fd の受信を待ってから呼ぶので、来ている分を1回の read で取る。pyserial の
             # `in_waiting` + `read` は ioctl・select・read の3回で、毎秒600回以上（フレームは
             # 十数バイトずつ届く）呼ばれるぶん CPU を使っていた。fd は pyserial が非ブロッキングで
-            # 開いている
+            # 開いている。pyserial の `read` を通さないので、読み取りの失敗（端末が消えた等）は
+            # pyserial と同じ `SerialException` に揃える。空（0 バイト）は「まだ来ていない」——
+            # pyserial は VMIN=0 で開くので、来ていなければ EAGAIN ではなく 0 バイトが返ることがある
             try:
                 data = os.read(self._ser.fd, _READ_MAX)
-            except BlockingIOError:
+            except (BlockingIOError, InterruptedError):
                 return []
+            except OSError as e:
+                raise serial.SerialException(f"read failed: {e}") from e
         else:
             n = self._ser.in_waiting
             data = self._ser.read(n if n else 1)
@@ -115,6 +119,10 @@ class SerialLink:
     def reset_input(self) -> None:
         self._ser.reset_input_buffer()
         self._parser.reset()
+
+    def reset_seq(self) -> None:
+        """受信 SEQ の追跡をやり直す（STM32 の再起動を検出したとき。`FrameParser.reset_seq`）。"""
+        self._parser.reset_seq()
 
     def close(self) -> None:
         with quiet_close(f"SerialLink の pyserial ({self._ser.port})"):

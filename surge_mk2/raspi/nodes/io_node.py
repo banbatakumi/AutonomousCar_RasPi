@@ -433,6 +433,9 @@ class IoNode:
         # 再起動の前に入っていた ARM をそのまま引き継がせない（人が入れ直す）
         self._rearm_reason = REARM_STM_RESTART
         self._requery_config()
+        # STM32 の SEQ は 0 から振り直される。基準を捨てないと、追いつくまでの差を欠落として数える
+        # （シムの link には無いので getattr）
+        getattr(self.link, "reset_seq", lambda: None)()
         self._log_event("time_reset", {})
         print("\n!! STM32 の再起動を検出 — 時刻同期をやり直します（オドメトリ・"
               "LiDAR組み立てをリセット）", file=sys.stderr)

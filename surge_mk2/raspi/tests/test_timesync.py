@@ -131,6 +131,59 @@ class TestOffsetBeforeFit(unittest.TestCase):
         self.assertAlmostEqual(pi_est, pi, delta=1_000_000)
 
 
+def _run_delays(clock, owd_ns_list, period_ns=200_000_000, proc_us=300):
+    """片道の遅延 [ns] を1往復ごとに指定して回す。各往復の直後の換算誤差 [ns] の列も返す。"""
+    ts = TimeSync()
+    pi = 10_000_000_000
+    errs = []
+    for owd in owd_ns_list:
+        t1 = pi
+        t2_pi = t1 + owd
+        t3_pi = t2_pi + proc_us * 1000
+        t4 = t3_pi + owd
+        ts.observe_stm_us(clock.stm_us(t2_pi))
+        ts.add_pong(t1, clock.stm_us(t2_pi), clock.stm_us(t3_pi), t4)
+        q = t4 + 100_000_000                     # 次の PONG までの間に来る TELEMETRY
+        errs.append(ts.to_pi_ns(clock.stm_us(q)) - q)
+        pi = t1 + period_ns
+    return ts, errs
+
+
+class TestFitIsKept(unittest.TestCase):
+    """回帰に使える点が足りなくなっても、古い1点のオフセットへ落とさない。
+
+    STM32 の時計は Pi より約 0.35% 速いので、51 秒ぶんの窓の中の古い点を基準にすると
+    最大約 0.18 秒ずれる。"""
+
+    CLOCK = dict(offset_us=5_000_000, ratio=1 + 3500e-6)
+
+    def test_a_lasting_rise_of_the_round_trip_delay_does_not_skew_time(self):
+        # 60 秒は片道 0.2ms、その後は 0.75ms（往復 1.5ms）が続く: 新しい点は全部「遅延が小さい」から
+        # 外れ、古い点だけが残って回帰のスパンが 15 秒を切る
+        ts, errs = _run_delays(Clock(**self.CLOCK), [200_000] * 300 + [750_000] * 400)
+        self.assertLess(max(abs(e) for e in errs[80:]), 500_000)
+        self.assertIsNotNone(ts.drift_ppm)
+
+    def test_one_sample_with_a_tiny_delay_does_not_skew_time(self):
+        owd = [200_000] * 700
+        owd[350] = 10_000                        # 1つだけ遅延が小さい → 他が全部しきい値の外
+        ts, errs = _run_delays(Clock(**self.CLOCK), owd)
+        self.assertLess(max(abs(e) for e in errs[80:]), 500_000)
+
+    def test_before_the_first_fit_a_stale_good_sample_is_not_used(self):
+        # 回帰が始まる前（15 秒未満）に遅延が増えた: 「遅延が小さい」のは増える前の点だけ
+        ts, errs = _run_delays(Clock(**self.CLOCK), [200_000] * 10 + [750_000] * 50)
+        self.assertIsNone(ts.drift_ppm)
+        self.assertLess(abs(errs[-1]), 6_000_000)     # 直近 8 個（1.6 秒）の中の点から。古い点なら 35ms
+
+    def test_reset_forgets_the_fit(self):
+        ts, _ = _run_delays(Clock(**self.CLOCK), [200_000] * 300)
+        self.assertIsNotNone(ts.drift_ppm)
+        ts.reset()
+        self.assertIsNone(ts.drift_ppm)
+        self.assertIsNone(ts.to_pi_ns(0))
+
+
 class TestJitterRejection(unittest.TestCase):
     def test_min_filter_ignores_delayed_samples(self):
         clock = Clock(offset_us=7_777_777, ratio=1.0)

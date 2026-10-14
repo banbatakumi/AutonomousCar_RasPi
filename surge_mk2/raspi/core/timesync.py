@@ -13,7 +13,8 @@ SLAM・アクチュエータ遅延の実測・センサ融合がすべてこれ�
 
 `delay` が小さいサンプルほど信頼できる（待ち行列で伸びていない）。
 直近ウィンドウの中から delay の小さいものを使い、線形回帰で切片（オフセット）と
-傾き（クロック比≈ドリフト）を同時に推定する。
+傾き（クロック比≈ドリフト）を同時に推定する。回帰は PONG が来たときにだけ計算して持っておき、
+回帰に使える点が一時的に足りなくなっても最後に成立した回帰で外挿する（傾きを捨てない）。
 
 STM32 の μs カウンタは u32 で約 71.6 分でラップするため、内部では 64bit に伸ばして扱う。
 """
@@ -42,7 +43,7 @@ class TimeSync:
     """
 
     __slots__ = ("_samples", "_ref_stm_us", "_good_factor", "_good_margin_ns",
-                 "_min_fit_span_ns", "_last_raw_u32", "resets")
+                 "_min_fit_span_ns", "_last_raw_u32", "_fit_cache", "resets")
 
     #: 生値がこれ以上後退したら「STM32 が再起動した」と見なす（1秒）。
     #: 通常運転中のジッタは μs 級なので十分大きい余裕がある
@@ -50,6 +51,11 @@ class TimeSync:
     #: 71.6分の正規のラップ（u32 μs が一周する）は、直前の生値がこの近くにある。
     #: ここより手前からの後退はラップでは説明できず、再起動と判断する
     _WRAP_NEAR_MARGIN_US = 2_000_000
+    #: 回帰がまだ無い間のオフセットに使う「いちばん新しい良いサンプル」が、最新のサンプルより
+    #: これ以上古ければ使わない（STM32 の時計は Pi より約 0.35% 速く、古さ1秒で 3.5ms ずれる）
+    _OFFSET_MAX_AGE_NS = 1_000_000_000
+    #: そのときに代わりに見る直近のサンプル数（この中で遅延が最小のものを使う）
+    _OFFSET_RECENT = 8
 
     def __init__(self, window: int = 256, good_factor: float = 2.0,
                  good_margin_ns: int = 300_000,
@@ -59,13 +65,14 @@ class TimeSync:
         self._good_factor = good_factor
         self._good_margin_ns = good_margin_ns
         # ドリフト推定に必要な最小時間スパン。短い窓の回帰は ms 級ジッタで傾きが暴れ、
-        # 実在しない数千 ppm を出す。docs §6.3 の「30秒窓」に倣い、貯まるまでは
-        # 傾き=1（オフセットのみ）にフォールバックする。
+        # 実在しない数千 ppm を出す。貯まるまでは傾き=1（オフセットのみ、`offset_ns`）で換算する
         self._min_fit_span_ns = min_fit_span_ns
         #: 直前に見た生の u32 μs（unwrap 前）。再起動検出は unwrap 後の値では
         #: できない——`_unwrap` は基準に最も近い周回を選ぶため、再起動で 0 付近に
         #: 戻った生値も「ほぼ同じ時刻」として辻褄を合わせてしまう
         self._last_raw_u32: int | None = None
+        #: 最後に成立した回帰 (x0, a, b)。`add_pong` のたびに計算し直し、成立しなければ前のものを残す
+        self._fit_cache: tuple[int, float, float] | None = None
         #: 再起動を検出してリセットした回数。呼び出し側は feed 前後でこれを見て、
         #: 変化していれば `StateBuilder`/`ScanAssembler` 等も合わせてリセットする
         self.resets: int = 0
@@ -75,7 +82,7 @@ class TimeSync:
     def observe_stm_us(self, raw_u32: int) -> int:
         """任意の STM32 タイムスタンプ（TELEMETRY.t_us 等）を u64 μs に伸ばして返す。
 
-        50Hz で来る TELEMETRY を毎回これに通しておくと基準が最新に保たれ、
+        100Hz で来る TELEMETRY を毎回これに通しておくと基準が最新に保たれ、
         まれにしか来ない PONG の T2/T3 も正しい周回で unwrap できる。
 
         **STM32 の再起動（ブラウンアウト等で `t_us` が 0 付近へ戻る）を検出したら
@@ -100,6 +107,7 @@ class TimeSync:
     def reset(self) -> None:
         """時刻同期をやり直す。STM32 の再起動を検出したときに呼ぶ（自動・手動どちらも可）。"""
         self._samples.clear()
+        self._fit_cache = None
         self._ref_stm_us = 0
         self.resets += 1
 
@@ -142,6 +150,9 @@ class TimeSync:
         self._samples.append(sample)
         if t3 > self._ref_stm_us:
             self._ref_stm_us = t3
+        fit = self._compute_fit()
+        if fit is not None:
+            self._fit_cache = fit
         return sample
 
     # ── 推定値 ──
@@ -167,16 +178,34 @@ class TimeSync:
         """オフセット（offset = t_pi − t_stm）。回帰前の素朴推定。
 
         **往復遅延が小さいサンプルのうち、いちばん新しいもの**から取る。窓全体で遅延が最小の
-        1点を使うと、その点が古いほどドリフトのぶんずれる——実機の STM32 の時計は Pi より
-        約 0.35% 速く（2026-10-13 実測、`drift_ppm` ≈ −3500）、回帰が始まる前の 15 秒間に
-        最大で約 50ms ずれた時刻を返していた。
+        1点を使うと、その点が古いほどドリフトのぶんずれる（STM32 の時計は Pi より約 0.35% 速く、
+        10 秒前の点なら 35ms）。往復遅延が増えたまま続くと「小さい」に入る点が古いものだけに
+        なるので、その点が `_OFFSET_MAX_AGE_NS` より古ければ、直近 `_OFFSET_RECENT` 個の中で
+        遅延が最小のものに切り替える（遅延の非対称ぶんの誤差は増えるが、ms 未満。古い点の
+        ドリフトより小さい）。
         """
         if not self._samples:
             return None
         latest = self._good()[-1]
+        newest = self._samples[-1]
+        if newest.t_pi_ns - latest.t_pi_ns > self._OFFSET_MAX_AGE_NS:
+            n = len(self._samples)
+            recent = [self._samples[i] for i in range(max(0, n - self._OFFSET_RECENT), n)]
+            latest = min(recent, key=lambda s: s.delay_ns)
         return latest.t_pi_ns - latest.t_stm_ns
 
     def _fit(self) -> tuple[int, float, float] | None:
+        """最後に成立した回帰 (x0, a, b)。一度も成立していなければ None。
+
+        回帰は `add_pong` でだけ計算する（`to_pi_ns` は TELEMETRY・LiDAR セクタごとに毎秒200回
+        以上呼ばれる）。今の窓で回帰できなくなっても前の回帰を返す: 往復遅延が増えたまま続く・
+        遅延の小さい点が1つだけ紛れ込む、のどちらでも「小さい」に入る点が足りなくなるが、
+        時計の比は変わっていないので外挿で足りる（オフセットの素朴推定へ落とすと、古い点の
+        ドリフトのぶん最大約 0.18 秒ずれる）。窓が入れ替われば新しい回帰に置き換わる。
+        """
+        return self._fit_cache
+
+    def _compute_fit(self) -> tuple[int, float, float] | None:
         """delay の小さいサンプルで t_pi = a + b*(t_stm − x0) を回帰。
 
         戻り値 (x0, a, b)。b はクロック比（≈1）。x0 は数値精度のための基準点。

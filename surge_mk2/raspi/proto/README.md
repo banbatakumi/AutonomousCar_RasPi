@@ -41,13 +41,23 @@ python3 -m unittest raspi.tests.test_proto
 - TYPE の重複
 - 方向規約（`0x01-0x0F` = STM32→Pi、`0x10-0x1F` = Pi→STM32）と `dir` の整合
 - 可変長フィールド (`bytes`) が末尾にあるか
+- パケット名・`param_id` の重複
+- `[frame]`（`overhead = header_size + crc_size`、`max_payload ≤ 255`、リトルエンディアン）と
+  `[crc]` が `framing.py` の実装（CRC-16/CCITT-FALSE）と合っているか
 
 ## STM32 側への渡し方
 
-**`generated/surge_proto.h` をそのままコピーして取り込む。編集しない。**
+**現状、STM32 側は `generated/surge_proto.h` を取り込んでいない。** TYPE・LEN・ビット定義・
+`protocol_version` は `MainF446RE_V3/src/comm/ras_link.h`・`ras_link.c` に手で写してあり、
+調整パラメータの param_id・範囲は `src/control/control_params.h` の表が正（`[params]` はその写し）。
 
-生成物をリポジトリにコミットしているのは、STM32 側が Python を動かさずに
-ヘッダだけ取得できるようにするため。
+したがって `generate.py --check` は Pi 側の生成物が toml と合っているかしか見ない。**toml を変えたら
+ファームの `RAS_LEN_*`・`RAS_FLAG_*`・`RAS_CMD_FLAG*`・`RAS_PROTOCOL_VERSION` も同時に直し、
+`protocol_version` を上げること**（Pi は版数が完全に一致しない STM32 には ARM を通さない）。
+param_id と範囲だけは `tools/ctrl_tune/tests` がファームの表と突き合わせる。
+
+ヘッダは、ファーム側で取り込むときのためと、レイアウトを C で確かめるために生成している。
+取り込む場合は編集せずにコピーする。
 
 ```bash
 cp raspi/proto/generated/surge_proto.h  <STM32プロジェクト>/Core/Inc/
@@ -61,8 +71,8 @@ cp raspi/proto/generated/surge_proto.h  <STM32プロジェクト>/Core/Inc/
 - `FLG_*` / `MDS_*` / `CMD_FLG_*` — ビット定義
 - `MODE_*` / `PARAM_*` など enum
 
-CRC とフレーム組み立ては STM32 側で実装する（`docs/stm32_interface.md` §3 に参照実装あり）。
-`SURGE_CRC_CHECK` (= `0x29B1`) で必ず検証すること。
+CRC とフレーム組み立ては STM32 側の実装（`lib/crc16/crc16.h`・`ras_link.c`）。
+`SURGE_CRC_CHECK` (= `0x29B1`) で検証すること。
 
 ### ヘッダの健全性確認
 
@@ -93,6 +103,10 @@ ser.write(enc.encode(packets.Command(mode=packets.Mode.MANUAL,
 ```
 
 `parser.stats` に `crc_error` / `len_error` / `packet_loss` / `unknown_type` などが溜まる。
+`reordered`（SEQ の逆行）は STM32 の優先度キューで PONG・TELEMETRY が先に積まれた LiDAR 等を
+追い越すと増える。**正常でも増える**（SEQ はキューへ積むときに振られるため）。追い越された分は
+いったん `packet_loss` に数え、遅れて届いたら差し引くので、`packet_loss` は実際のロスだけを表す。
+STM32 の再起動で SEQ が 0 から始まり直したら `reset_seq()` を呼ぶ（呼ばないと1回だけ偽のロスが乗る）。
 **GUI では STM32 側の `STATS` パケットと並べて出している**（`DiagGrid`）。
 片方向だけ増えるのか両方向なのかで、原因の切り分けが変わる。
 

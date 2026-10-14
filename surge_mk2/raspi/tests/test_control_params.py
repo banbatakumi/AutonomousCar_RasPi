@@ -83,6 +83,14 @@ class TestLoad(unittest.TestCase):
         self.addCleanup(Path(f.name).unlink)
         return Path(f.name)
 
+    def test_a_value_too_large_for_the_packet_is_an_error(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".toml") as f:
+            f.write("[control]\ntc_slip_target = 1e39\n")
+            f.flush()
+            with self.assertRaises(ValueError):
+                load_control_params(f.name, strict=False)
+
     def test_missing_table_sends_nothing(self):
         self.assertEqual(load_control_params(self._toml("[dynamics]\nmu = 0.5\n"), strict=False), {})
 
@@ -195,7 +203,32 @@ class TestSync(unittest.TestCase):
         self.assertEqual(sync.status, "ok")
         self.assertAlmostEqual(stm.values[P.TC_SLIP_TARGET], 0.12)
         self.assertAlmostEqual(stm.values[P.ABS_KP_NM_PER_M_S], 0.2)
-        self.assertEqual(sync.drift_count, 2)
+        self.assertEqual(sync.drift_count, 1)        # 1つ見つけたら全部を送り直す（1回の再起動で1回）
+
+    def test_one_readback_mismatch_resends_everything_at_once(self):
+        """食い違いを1つ見つけたら、読み戻しの一巡を待たずに全項目を送り直す。"""
+        sync, stm = make(self.WANT)
+        run(sync, ms=200)
+        for pid in list(stm.values):                 # 再起動: 全部が別の値に戻った
+            stm.values[pid] = 0.0
+        n = len(stm.sent)
+        run(sync, start_ms=200, ms=1000)             # 読み戻しは 0.5 秒に1項目
+        sets = {p.param_id for p in stm.sent[n:] if isinstance(p, packets.ConfigSet)}
+        self.assertEqual(sets, {CONTROL_PARAM_IDS[k] for k in self.WANT})
+        self.assertEqual(sync.status, "ok")
+        self.assertEqual(sync.drift_count, 1)
+
+    def test_intended_changes_do_not_count_as_drift(self):
+        sync, stm = make({**self.WANT, "tc_enable": 1.0})
+        run(sync, ms=200)
+        sync.set_overrides({"tc_enable": 0.0, "tc_slip_target": 0.3})
+        run(sync, start_ms=200, ms=2000)
+        sync.set_overrides({})
+        run(sync, start_ms=2200, ms=2000)
+        sync.set_wanted("tc_enable", 0.0)
+        run(sync, start_ms=4200, ms=2000)
+        self.assertEqual(sync.drift_count, 0)
+        self.assertEqual(sync.status, "ok")
 
     def test_reset_resends_all(self):
         sync, stm = make(self.WANT)
@@ -249,6 +282,42 @@ class TestOverrides(unittest.TestCase):
         sync.set_overrides({})
         run(sync, start_ms=300, ms=100)
         self.assertAlmostEqual(stm.values[P.TC_SLIP_TARGET], 0.12)
+
+    def test_clamped_override_goes_back_to_toml_value(self):
+        """範囲外で丸められた上書きを外したら、元の値を送り直す（丸めた値を STM32 に残さない）。"""
+        sync, stm = make({"tc_slip_target": 0.12}, clamp={P.TC_SLIP_TARGET: 0.2})
+        run(sync, ms=200)
+        sync.set_overrides({"tc_slip_target": 0.9})
+        run(sync, start_ms=200, ms=100)
+        self.assertEqual(sync.status, "mismatch")
+        self.assertAlmostEqual(stm.values[P.TC_SLIP_TARGET], 0.2)
+        sync.set_overrides({})
+        run(sync, start_ms=300, ms=100)
+        self.assertAlmostEqual(stm.values[P.TC_SLIP_TARGET], 0.12)
+        self.assertEqual(sync.status, "ok")
+
+    def test_set_wanted_after_a_clamp_sends_the_new_value(self):
+        sync, stm = make({"tc_slip_target": 0.9}, clamp={P.TC_SLIP_TARGET: 0.2})
+        run(sync, ms=200)
+        self.assertEqual(sync.status, "mismatch")
+        sync.set_wanted("tc_slip_target", 0.15)
+        run(sync, start_ms=200, ms=100)
+        self.assertAlmostEqual(stm.values[P.TC_SLIP_TARGET], 0.15)
+        self.assertEqual(sync.status, "ok")
+
+    def test_reset_forgets_where_to_restore(self):
+        """STM32 が再起動したら既定値に戻っているので、上書きの戻し先は持ち越さない。"""
+        sync, stm = make({})
+        sync.set_overrides({"abs_enable": 0.0})
+        run(sync, ms=100)
+        sync.set_overrides({})
+        sync.reset()
+        self.assertEqual(sync.status, "none")
+
+    def test_values_too_large_for_the_packet_are_ignored(self):
+        sync, stm = make({})
+        sync.set_overrides({"tc_slip_target": 1e39})
+        self.assertFalse(sync.overriding)
 
     def test_garbage_overrides_are_ignored(self):
         sync, stm = make({})

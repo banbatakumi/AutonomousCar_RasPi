@@ -30,6 +30,8 @@ _MAX_PLAUSIBLE_RTT_NS = 500_000_000
 #: LiDAR セクタの先頭点の時刻（換算後）が受信よりこれ以上古ければ、時刻同期が外れていると見て
 #: 受信時刻で代用する。正常なら 1セクタ（約 8.3ms）＋送信待ちで 10〜20ms
 _MAX_SECTOR_AGE_NS = 200_000_000
+#: `TELEMETRY` のスナップショットの時刻（換算後）も同じ扱い。正常なら送信待ち＋線上の時間で数ms
+_MAX_STATE_AGE_NS = 200_000_000
 
 
 class BusBridge:
@@ -73,8 +75,13 @@ class BusBridge:
     def on_telemetry(self, t: packets.Telemetry, t_pi_ns: int | None) -> None:
         now = self.clock()
         # 時刻同期が未収束のうちは STM32 時刻を Pi 時刻に直せない。
-        # そのときは受信時刻で代用する（**0 を入れると 1970年扱いになる**）
-        capture = t_pi_ns if t_pi_ns is not None else now
+        # そのときは受信時刻で代用する（**0 を入れると 1970年扱いになる**）。
+        # 換算後が受信より後・古すぎる（同期の外れ）ときも同じ——LiDAR セクタ（`_sector_start_ns`）と
+        # 同じ判定にしておかないと、同期が外れたときに状態と点群の時間軸が食い違う
+        if t_pi_ns is None or t_pi_ns > now or now - t_pi_ns > _MAX_STATE_AGE_NS:
+            capture = now
+        else:
+            capture = t_pi_ns
 
         echo = t.cmd_seq_echo
         if echo != self._last_echo:

@@ -92,6 +92,10 @@ CRC 計算範囲   : TYPE(offset 2) から PAYLOAD 末尾まで（= LEN + 3 バ�
 | `CRC16` | CRC-16/CCITT-FALSE（下記） |
 
 `SEQ` は送信方向ごとに1本の通し番号であり、**リンク全体のロス率の指標**である。
+STM32 は SEQ を**送信キューへ積むときに**振り、優先度の高いキューから先に送る（§7）。そのため後から
+積んだ `PONG`・`TELEMETRY` が先に積んだ LiDAR セクタ等を追い越し、Pi から見て SEQ が数個ぶん逆行する。
+これは正常で、Pi 側の `RxStats.reordered` はその回数（エラーではない）。追い越された分はいったん
+`packet_loss` に数え、遅れて届いたら差し引くので、`packet_loss` は実際のロスだけを表す。
 「どのストリームが落ちたか」までは分からないが、LiDAR は `sector_idx` の連続性で
 個別に追跡できるため実害は小さい。
 
@@ -136,17 +140,19 @@ STM32 側は速度が必要なら 256エントリのテーブル駆動版に置�
 | `0x01` | `LIDAR_SECTOR` | STM32 → Pi | 120 Hz (12/周 × 10 Hz) | 69 |
 | `0x02` | `TELEMETRY` | STM32 → Pi | 100 Hz（値の古さは平均5ms） | **84** |
 | `0x03` | `CONFIG_ACK` | STM32 → Pi | イベント | 7 |
-| `0x04` | `LOG` | STM32 → Pi | 低優先 | 可変 (2-255) |
+| `0x04` | `LOG` | STM32 → Pi | 低優先 | 可変 (1-128) |
 | `0x05` | `LIDAR_SECTOR_I` | STM32 → Pi | 120 Hz（強度付き・既定OFF） | 99 |
 | `0x06` | `PONG` | STM32 → Pi | `PING` への即応答 | 12 |
 | `0x07` | `VERSION` | STM32 → Pi | 起動時×3 / 要求時 | **10** |
 | `0x08` | `STATS` | STM32 → Pi | 1 Hz | **48** |
 | `0x09` | `LIDAR_SECTOR_C` | STM32 → Pi | 120 Hz（圧縮・既定OFF） | **39** |
+| `0x0A` | `LIMITS` | STM32 → Pi | 起動時×3 / 要求時 / リンクの換算の変更時 | 16 |
 | `0x10` | `COMMAND` | Pi → STM32 | 100 Hz | **15** |
 | `0x11` | `CONFIG_SET` | Pi → STM32 | イベント | 6 |
 | `0x12` | `PING` | Pi → STM32 | 5 Hz | 4 |
 | `0x13` | `CONFIG_GET` | Pi → STM32 | イベント | **2** |
 | `0x14` | `VERSION_REQ` | Pi → STM32 | リンク確立時 | **0** |
+| `0x15` | `LIMITS_REQ` | Pi → STM32 | リンク確立時 | 0 |
 
 **LEN は TYPE ごとに一意**（`LOG` を除く）。方向規約と併せて、受信側から見た曖昧さは生じない。
 
@@ -292,8 +298,8 @@ LD06 の測距精度が ±1.5cm 程度なので、2cm 量子化による情報�
 ### 5.3 `TELEMETRY` (0x02) — LEN = 84
 
 > **`t_us` は送信時刻ではなく、中身のスナップショットを取った時刻**（新しいスナップショットができたときに
-> 1回だけ送る）。中身を作るタイマーと送信タイマーは別の 50Hz なので、送信時刻を付けると中身が最大20ms古いのに
-> 新しく見え、制御遅延の同定（`sysid_latency`）が最大+20ms ずれる。
+> 1回だけ送る）。送信は送信キューの順番待ちのあとなので、送信時刻を付けると中身が古いのに新しく見え、
+> 制御遅延の同定（`sysid_latency`）がずれる（中身を作るタイマーと送信タイマーが別々だった頃は最大+20ms）。
 > **`VERSION.fw_id` が `0x4D463304` 未満のファームで取った記録の `control_latency_s` は使わないこと**
 > （ワイヤ形式は同じで `protocol_version` では見分けられない。同定の解析 `tools/sysid/fit.py` の
 > `fit_latency` は、記録の `/diag/link` の `fw_id` が古ければ★を出す）。
@@ -383,7 +389,7 @@ d_center ≈ (odom_dist[FL] + odom_dist[FR]) / 2 × cos(steer_actual)     ← �
 **正しくは、1周期ごとの差分に、その時点の舵角で射影して積算する:**
 
 ```python
-# 50Hz の各サイクルで
+# TELEMETRY（100Hz）を受けるたびに
 d_front = ((odom_dist[FL] - prev[FL]) + (odom_dist[FR] - prev[FR])) / 2 * 1e-4   # [m]
 d_center += d_front * math.cos(steer_actual)      # ← 差分に対して射影
 prev = odom_dist[:]
@@ -433,8 +439,8 @@ slip_front = wheel_speed[FL] * math.cos(steer_actual) - speed # 前輪は射影�
   車輪径やギア比を知らなくて済む。換算定数は STM32 側に閉じる。
 
 - **`odom_dist` を速度と別に累積で送る理由**
-  `speed` の時間積分では、パケットが1個落ちると 20ms 分の移動距離が**永久に失われる**。
-  50Hz で 1% ロスなら 1分走行で 12回分がそのまま自己位置の誤差になる。
+  `speed` の時間積分では、パケットが1個落ちると 10ms 分の移動距離が**永久に失われる**。
+  100Hz で 1% ロスなら 1分走行で 60回分がそのまま自己位置の誤差になる。
   累積値なら次の1発で回復する。スキャンマッチングの初期値精度は地図の品質に直結する。
 
 - **`torque_cmd` を載せる理由**
@@ -476,15 +482,15 @@ slip_front = wheel_speed[FL] * math.cos(steer_actual) - speed # 前輪は射影�
 
 #### 更新レートに関する注意
 
-**フィールドによって実際の更新レートが異なる。** 50Hz で来るからといって
-50Hz で更新されているとは限らない。
+**フィールドによって実際の更新レートが異なる。** 100Hz で来るからといって
+100Hz で更新されているとは限らない。
 
 | フィールド | 実更新レート | Pi 側の扱い |
 |---|---|---|
 | `us_front` / `us_rear` | **実質 20Hz 以下**（前後交互、往復時間の制約） | 同じ値が連続することを前提にする。エッジ検出に使わない |
 | `temp[4]` | 数 Hz 程度 | 傾向監視のみ |
 | `batt_*` | 数十 Hz | フィルタ済み |
-| `speed` / `wheel_speed` | 50Hz。**1次ローパス（時定数約10ms）通過後** | 下記参照 |
+| `speed` / `wheel_speed` | 100Hz（STM32 内は 2kHz）。**1次ローパス（時定数約10ms）通過後** | 下記参照 |
 
 **`speed` / `wheel_speed` を微分して加速度を求めてはならない。**
 前輪エンコーダはアナログ絶対角の ADC 読みで分解能が粗く、角速度換算で
@@ -493,7 +499,7 @@ STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均し�
 **k=0.951 の1次ローパス（2kHz で時定数9.95ms）**を掛けて送る（**ノイズは実機未確認**）。
 `speed` そのものは遅れ10msの車速としてリアルタイムの用途（プランナー・E2E）にそのまま使ってよいが、
 微分すればノイズが増幅される。**加速度は必ず `accel_x/y/z`（IMU）から取ること。**
-50Hz への間引きで 25Hz より上のノイズが折り返すので、**記録を後から解析する用途（システム同定）は
+100Hz への間引きで 50Hz より上のノイズが折り返すので、**記録を後から解析する用途（システム同定）は
 `odom_dist`（ローパス前の積算位置）を前後のサンプルでゼロ位相に微分する方が正確**（`tools/sysid/fit.py`）。
 遅れの値はシムが `config/vehicle.toml` の `speed_filter_s` として持つ（ファームを変えたらそこも直す）。
 
@@ -631,8 +637,9 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `accel_limit` / `steer_rate_limit` と同じ約束であり、**フィールドの埋め忘れで
   ブレーキが効かなくなる方が危険**なのでゼロ値を安全側に倒してある。
   Pi 側は正の指定が丸めで 0 に落ちないよう最小 1 LSB に留める（`msgs/convert.py`）。
-- STM32 側の上限は **0.15 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM`）。超えた値は
-  黙ってクランプされるので、Pi 側でも同じ上限を持つ（`msgs.MAX_BRAKE_TORQUE_NM`）。
+- STM32 側の上限は **0.13 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM` = `DRIVE_MAX_TORQUE_NM`。`LIMITS.max_torque_nm`
+  で届く）。超えた値は黙ってクランプされるので、Pi 側でも同じ上限を持つ（`msgs.convert.MAX_BRAKE_TORQUE_NM`。
+  `LIMITS` を受け取っていればそちらでクランプする）。
 - **`brake` が立っている間、車速 PI ループは完全に迂回される。** MD を制動モードに切り替えて
   指定トルクを直接掛ける（「目標車速 0」を与えるだけではない）。離すと目標車速 0 から `accel_limit` に従って加速し直すので、
   ブレーキ中に `target_speed` を保持し続けても離した瞬間に飛び出すことはない。
@@ -643,8 +650,8 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `brake_torque` と同じ理由（値域が小さい）で `target_torque` のスケールも 0.0001 N·m/LSB。
 - **`target_torque` に `0` の特別な意味はない。** `brake_torque` の「0=未指定=最大制動」とは
   違い、そのまま「駆動トルク 0」として扱ってよい。丸めで 0 に落ちても危険側には振れない。
-- **上限は 0.15 N·m**（モータ物理上限 0.1557 N·m 未満）。超えた値は STM32 側で
-  クランプされる想定。Pi 側にも同じ上限を持つ（`msgs.MAX_TARGET_TORQUE_NM`）。
+- **上限は 0.13 N·m**（`DRIVE_MAX_TORQUE_NM`。モータ物理上限 0.1557 N·m 未満）。超えた値は STM32 側で
+  クランプされる。Pi 側にも同じ上限を持つ（`msgs.convert.MAX_TARGET_TORQUE_NM`。`LIMITS` 受信後はそちら）。
 - **`torque_mode` が立っている間、車速 PI ループは `brake` と同様に迂回**し、
   `target_torque` を各輪へ直接掛ける（`target_speed` は無視）。
   **`brake` と `torque_mode` が同時に立っていたら `brake` が優先**（制動は駆動より安全側）。
@@ -703,7 +710,8 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 | 0 | `side_brake` | 立てている間、**速度に関わらず即座に**後輪モータを位置制御へ切り替えて機械的に固定（サイドブレーキ／パーキングロック） |
 | 1 | `winker_left` | 左ウィンカー点滅を要求（§5.6.6） |
 | 2 | `winker_right` | 右ウィンカー点滅を要求（§5.6.6） |
-| 3-7 | — | 予約（0 を送ること） |
+| 3 | `launch` | ローンチコントロール（§5.6.7） |
+| 4-7 | — | 予約（0 を送ること） |
 
 - **`side_brake` は既存の `flags` bit1（`brake`）より優先される。** `brake` は速度PI
   ループを迂回して制動トルクを掛けるだけなので惰性で多少動くが、`side_brake` は
@@ -759,7 +767,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 |---|---|---|
 | 3 | `launch` | 立っている間、車速指令の、目標が車速より大きく離れた加速（発進）をローンチコントロールで行う |
 
-車速指令（`torque_mode`・`brake`・`side_brake` でない）の加速は、STM32 が目標車速を `accel_limit`（上限 3.0m/s²）で
+車速指令（`torque_mode`・`brake`・`side_brake` でない）の加速は、STM32 が目標車速を `accel_limit`（0 なら既定の 3.0m/s²。上限は掛けない）で
 ランプさせ、車速PIがそれを追う。PIは偏差が溜まるまでトルクが出ないので、グリップの限界のトルクに届くまで
 約0.3秒かかる。`launch` が立っている間、目標が車速より大きく離れた加速では、STM32 がランプとPIを迂回して**全開のトルクを要求し、TC に
 グリップの限界へ絞らせる**（= `torque_mode` の全開と同じ加速）。
@@ -806,7 +814,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **`COMMAND` が 100ms 途絶したら STM32 は自動ブレーキ。**
   100Hz 送信に対して 200ms は 20発の取りこぼしを許すことになり緩すぎる。
   3 m/s なら 60cm 進んでからブレーキがかかる計算になる。100ms（10発）とする。
-  **緊急停止時・途絶時とも最大制動トルク（現在は 0.15 N·m/輪。STM32 の
+  **緊急停止時・途絶時とも最大制動トルク（現在は 0.13 N·m/輪。STM32 の
   `DRIVE_MAX_BRAKE_TORQUE_NM`）を直接掛ける**（速度 PI 任せにしない）。**停止距離が短くなる。**
   舵角は最後の指令値のまま保持される（直進に戻すと車体が予期しない方向へ動くため）。
 
@@ -835,9 +843,10 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 
 - `t_ping_rx_us` をメインループで取ると、ループ周期分のジッタがそのままオフセット推定の
   バイアスになる。必ず割り込みで取る。
-- `t_pong_tx_us` を「送信キュー投入時」に取ると、**LiDAR セクタ1個の送信に 3.04ms かかる**ため、
-  PONG がその後ろに並ぶと T3 以降に最大 3ms の非対称遅延が生じる。
-  **4タイムスタンプ方式でも除去されず、オフセットに最大 1.5ms のバイアスが乗る。**
+- `t_pong_tx_us` を「送信キュー投入時」に取ると、**送信中のフレーム（LiDAR セクタ1個で 0.76ms）が
+  終わるまでの待ち**が T3 以降の非対称遅延になる。**4タイムスタンプ方式でも除去されず、オフセットに
+  その半分のバイアスが乗る。** STM32 は PONG を最優先キューに積み、DMA を起動する直前に
+  `t_pong_tx_us` を書き込んで CRC を計算し直す（`ras_link.c` の `PumpTx`）。
 
 ### 5.8 `CONFIG_SET` (0x11) / `CONFIG_GET` (0x13) / `CONFIG_ACK` (0x03)
 
@@ -862,9 +871,10 @@ CONFIG_ACK : [param_id : u16][applied : f32][result : u8]    = 7 B   (STM32 → 
 
 `applied` は書き込んだときしか返らないため、**GUI 起動時に実機の現在値を同期できなかった**。
 
-> **Pi 側の実装**: `io_node`（`raspi/nodes/io_node.py`）はハンドシェイク直後に `CONFIG_GET` で初期状態を取得し、
-> 以降は GUI の操作に応じて `CONFIG_SET` を送る。ON/OFF 系（`0x0010`/`0x0020`/`0x0050`/`0x0060`/`0x0070`/
-> `0x0090`）と調整パラメータ（§5.8.4）を送り、`MAX_SPEED` 等は §5.8.1 の理由により送らない。
+> **Pi 側の実装**: `io_node`（`raspi/nodes/io_node.py`）は接続時と STM32 の再起動を検出したときに、ON/OFF 系
+> （`0x0010`/`0x0020`/`0x0050`/`0x0070`/`0x0090`）と自動停止のマージン（`0x0060`）を `CONFIG_GET` で聞き直し、
+> 以降は GUI の操作に応じて `CONFIG_SET` を送る。調整パラメータ（§5.8.4）と `[control]` に書いた ON/OFF は
+> `ControlParamSync` が送って確かめる。`MAX_SPEED` 等は §5.8.1 の理由により送らない。
 
 #### 設定は Flash に永続化しない（揮発）
 
@@ -873,7 +883,7 @@ CONFIG_ACK : [param_id : u16][applied : f32][result : u8]    = 7 B   (STM32 → 
 ```
 電源投入   →  STM32 は安全側のデフォルト値で起動
            →  Pi が接続時に CONFIG_GET で現在値を読む
-           →  Pi が config/params.yaml の値を CONFIG_SET で push
+           →  Pi が config/vehicle.toml の [control] の値を CONFIG_SET で push
            →  以降、Pi の値が正
 ```
 
@@ -893,7 +903,7 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 |---|---|---|---|
 | ~~`0x0001`~~ | ~~最大速度~~ | — | **廃止**（`RAS_CONFIG_UNKNOWN_PARAM` を返す）。STM32 側固定定数 `DRIVE_MAX_SPEED_M_S`（5.0 m/s）に一本化。**Pi からは元々未送信**（§5.8.1） |
 | ~~`0x0002`~~ | ~~最大加速度~~ | — | **廃止**（同上）。STM32 側の上限そのものが無い（`accel_limit` は Pi が決める。上限は `vehicle.toml` `[safety] cmd_accel_limit_m_s2`） |
-| ~~`0x0003`~~ | ~~最大舵角（路面舵角）~~ | — | **廃止**（同上）。路面舵角 ±30° に一本化 |
+| ~~`0x0003`~~ | ~~最大舵角（路面舵角）~~ | — | **廃止**（同上）。`Steering_GetMaxRoadWheelAngleRad()`（リンクの換算で変わる。`LIMITS.max_steer_rad` で届く） |
 | `0x0010` | TC 有効 | 0/1 | **STM32 の既定は無効。** Pi 側 `io_node` が `vehicle.toml` `[control]` の `tc_enable` を接続のたびに送り、GUI のトグルでも送る |
 | `0x0011`-`0x0015` | **TC の調整パラメータ・スリップの測り方** | f32 | §5.8.4。`TC_SLIP_TARGET`/`TC_KP_NM_PER_M_S`/`TC_KI_NM_PER_M`/`TC_MIN_TORQUE_NM`/`SLIP_SPEED_FLOOR_M_S` |
 | `0x0020` | トルクベクタリング 有効 | 0/1 | **STM32 の既定は無効。** Pi 側 `io_node` が `[control]` の `tv_enable` を接続のたびに送り、GUI のトグルでも送る |
@@ -994,8 +1004,9 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
   TC・TV などの ON/OFF（`tc_enable`・`tv_enable`）も `[control]` に書いて送る（STM32 の既定は無効）
 - **Pi 側の手順**（`raspi/core/control_params.py` の `ControlParamSync`）:
   1. 接続したら全項目を `CONFIG_SET` で送り、`CONFIG_ACK.applied` が送った値と一致するまで 0.3s ごとに再送
-  2. 一致した後も、0.5s ごとに1項目ずつ順番に `CONFIG_GET` で読み戻す。食い違えば送り直す
-     （STM32 だけが再起動して既定値へ戻った場合。`diag/link` の `control_params_drift` が増える）
+  2. 一致した後も、0.5s ごとに1項目ずつ順番に `CONFIG_GET` で読み戻す。1つでも食い違えば STM32 だけが
+     再起動して既定値へ戻ったと見て、全項目を送り直す（`diag/link` の `control_params_drift` が増え、io_node は
+     入り直すまで ARM を通さない）。Pi が送る値を変えたとき（GUI の ON/OFF・同定の一時的な上書き）は増えない
   3. STM32 の再起動を検出したら（`t_us` の後退）最初からやり直す
   4. 結果は `diag/link` の `control_params_status`（`ok`/`pending`/`mismatch`/`unsupported`/`invalid`/`none`）と
      `control_params`（STM32 が答えた値）。GUI の「設定 → 走行アシスト」に出る
@@ -1039,7 +1050,9 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
 混ぜると、パケットロスで設定値が化けたまま誰も気づかない状態が発生する。
 個別 ID + ack + **`applied` に実際に適用された値を返す**ことで、GUI が常に「実機の真の値」を表示できる。
 
-Pi 側は ack が 500ms 以内に返らなければ再送する（最大3回、以降 FAULT）。
+Pi 側（`ControlParamSync`）は ack が 0.3 秒返らなければ、一致するまで再送し続ける（回数の上限・FAULT は無い。
+揃うまでは ARM を通さない）。範囲外で丸められた項目は再送しても同じなので止め、`mismatch` として出す
+（送る値を変えれば送り直す）。
 
 ### 5.9 `VERSION` (0x07) — LEN = 10 / `VERSION_REQ` (0x14) — LEN = 0
 
@@ -1052,7 +1065,7 @@ Pi 側は ack が 500ms 以内に返らなければ再送する（最大3回、�
 
 | offset | size | type | field | 備考 |
 |---|---|---|---|---|
-| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。現行は `0x0015`（`protocol.toml`） |
+| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。現行は `0x0017`（`protocol.toml`） |
 | 2 | 4 | u32 | `fw_id` | ファームの git short hash 等 |
 | 6 | 4 | u32 | `build_epoch` | ビルド時刻（UNIX epoch 秒） |
 
@@ -1066,7 +1079,9 @@ Pi 側は ack が 500ms 以内に返らなければ再送する（最大3回、�
 - STM32 は**起動直後に 3回**（100ms 間隔）`VERSION` を自発送信する。
   ただしこれは補助であり、**Pi はリンク確立時に必ず `VERSION_REQ` を送ること**
   （Pi の起動が遅れていると自発送信は無駄になる）。
-- Pi は `protocol_version` が自分の期待値と**メジャーが違えば即 FAULT、マイナーが違えば警告**。
+- Pi は `protocol_version` が自分の期待値と**完全に一致しない限り ARM を通さない**（メジャー・マイナーを
+  区別しない。DISARM を送り続け、通信・表示は続ける。理由は `diag/link` の `arm_inhibit_reason`）。
+  `VERSION` を受け取れていない間も同じ。
 - `fw_id` / `build_epoch` はログの先頭とテレメトリ記録のヘッダに必ず残す。
 
 ### 5.10 `STATS` (0x08) — LEN = 48
@@ -1121,12 +1136,15 @@ Pi 側の `crc_error_count` / `packet_loss_count`（下り側）と並べて GUI
 > `lidar_ok` は「300ms 完全に途絶したか」しか見ておらず、
 > **「たまにフレームを落としている」状態が見えない。** 必須ではない。
 
-### 5.11 `LOG` (0x04) — LEN = 2〜255
+### 5.11 `LOG` (0x04) — LEN = 1〜128
 
 | offset | size | type | field | 備考 |
 |---|---|---|---|---|
 | 0 | 1 | u8 | `severity` | 0=DEBUG / 1=INFO / 2=WARN / 3=ERROR |
-| 1 | 可変 | char[] | `message` | ASCII、改行なし、NUL 終端なし |
+| 1 | 可変 | char[] | `message` | ASCII、改行なし、NUL 終端なし。空もありうる |
+
+STM32 は本文を 127 文字で打ち切る（スタックの都合。プロトコル上は 254 文字まで載る）。Pi 側は LEN = 0
+（`severity` すら無い）を `len_error` として捨てる。
 
 **最低優先度で送信**し、帯域が逼迫したら破棄してよい（破棄数は `STATS.tx_drop` に計上）。
 Pi 側は `severity` でフィルタし、既定では WARN 以上のみを GUI に出す。
@@ -1198,6 +1216,9 @@ SLAM・アクチュエータ遅延の実測・センサ融合のすべてがこ�
     オフセット offset = ((T2 − T1) + (T3 − T4)) / 2      ※ offset = t_stm − t_pi
 ```
 
+Pi の実装（`raspi/core/timesync.py`）はオフセットを**逆向き（`offset_ns` = t_pi − t_stm）**で持ち、
+STM32 の中点 (T2+T3)/2 と Pi の中点 (T1+T4)/2 を対応点として回帰する。
+
 **`T3 − T2` を引くことで、STM32 側の処理・送信待ち時間が推定から完全に除去される。**
 これが 2タイムスタンプ方式（単純な RTT/2）より優れている理由。
 
@@ -1206,21 +1227,32 @@ SLAM・アクチュエータ遅延の実測・センサ融合のすべてがこ�
 
 ### 6.3 実装上の要点
 
-1. **`delay` が最小のサンプルを採用する（min filter）**
-   UART の待ち行列や割り込み遅延で伸びたサンプルは推定を汚す。直近 50〜100 サンプルのうち
-   `delay` が最小のものを基準にする。
+1. **`delay` が小さいサンプルだけを使う**
+   UART の待ち行列や割り込み遅延で伸びたサンプルは推定を汚す。直近 256 サンプル（5Hz で約51秒）のうち、
+   `delay` ≤ 最小値×2 + 0.3ms のものを「良い」サンプルとする。
 
 2. **線形回帰でクロックドリフトも補正する**
-   水晶発振子の誤差は典型 50 ppm = **50 μs/秒** ずれる。1分走ると 3ms ずれる。
-   `(t_stm, t_pi)` の組を線形回帰し、**切片（オフセット）と傾き（クロック比）の両方**を推定すると
-   精度が一桁上がる。回帰は直近30秒程度のウィンドウで行う。
+   `(t_stm, t_pi)` の組を線形回帰し、**切片（オフセット）と傾き（クロック比）の両方**を推定する。
+   実機の STM32 の時計は Pi より**約 0.35% 速い**（`drift_ppm` ≈ −3500。故障ではない）ので、傾きを
+   推定しないと1秒で 3.5ms ずれる。
+   - 良いサンプルの時間スパンが 15 秒に届くまでは回帰しない（短い窓では傾きがジッタで暴れる）。
+     それまでは**良いサンプルのうちいちばん新しいもの**のオフセットを使う。それが最新のサンプルより
+     1秒以上古ければ（往復遅延が増えたまま続いている）、直近 8 個の中で `delay` 最小のものを使う
+   - 回帰は `PONG` が来たときにだけ計算し、**今の窓で回帰できなくなっても最後に成立した回帰で外挿する**。
+     往復遅延が増えたまま続く・遅延の小さい点が1つだけ紛れ込む、のどちらでも良いサンプルが古いものだけに
+     なり回帰が組めなくなるが、時計の比は変わっていないので外挿で足りる（古い1点のオフセットへ落とすと
+     ドリフトのぶん最大約 0.18 秒ずれる）
+   - Pi 側の受け手は換算後の時刻が受信より後・200ms 以上古いときは受信時刻で代用する
+     （`bus_bridge.py`。`TELEMETRY` と LiDAR セクタで同じ判定）
 
 3. **`PING` は 5Hz。** 起動直後は 20Hz で 3秒ほど打ち、収束を早めてよい。
 
 4. **32bit μs カウンタのラップに注意。**
    STM32 の `t_us` は起動時 0 スタートの 32bit μs カウンタで、**約 71.6 分**でラップする。
    差分計算を必ず符号なし演算で行えばラップをまたいでも正しい値が出る（`(uint32_t)(a - b)`）。
-   Python 側も `(a - b) & 0xFFFFFFFF` で扱い、64bit に拡張して累積すること。
+   Pi 側は `TELEMETRY`/`STATS` の `t_us` を見るたびに 64bit へ伸ばす基準を更新し、どの値も基準に最も近い
+   周回へ伸ばす。生値が 1 秒以上後退し、直前の値がラップの 2 秒手前でもなければ STM32 の再起動と見て
+   時刻同期をやり直す（`TimeSync.resets`。io_node は状態の組み立て・LiDAR・調整パラメータも合わせてやり直す）。
 
 5. 換算後の時刻は、Pi 内部の全メッセージの `t_capture` に入れる
    （単位 ns、Pi の `CLOCK_MONOTONIC` 基準）。
@@ -1240,7 +1272,7 @@ SLAM・アクチュエータ遅延の実測・センサ融合のすべてがこ�
 - `TELEMETRY` が次点なのは、安全監視と制御に直結するため
 - `LOG` は溢れたら破棄する（破棄数は `STATS.tx_drop` に計上）
 
-### 送信待ち時間は 3.04ms で有界
+### 送信待ち時間は約 1ms で有界
 
 優先度キューがあり、かつ**送信中の DMA フレームを途中で中断しない**ため、
 `TELEMETRY` が LiDAR に阻まれる最大待ち時間は**送信中の1フレーム分**である。
@@ -1265,16 +1297,16 @@ SLAM・アクチュエータ遅延の実測・センサ融合のすべてがこ�
 | SYNC ロスト | 1バイトずつずらして `0xAA 0x55` を再探索 |
 | `LEN` が TYPE の期待値と不一致 | 破棄。`len_error_count++`。**その場で SYNC の探し直しに戻る**（LEN ぶん読み飛ばさない。下記） |
 | `SEQ` 欠番 | `packet_loss_count += 欠番数` |
-| 未知の `TYPE` | 破棄。`unknown_type_count++`。**その場で SYNC の探し直しに戻る**（`LEN` を信用して読み飛ばさない。Pi→STM は既知の TYPE・固定長しか送らないので、ここに来るのは化けたときだけ。化けた LEN ぶん最大257B を読み飛ばすと 75〜110ms 分の `COMMAND` を失い、途絶の自動ブレーキに入りえた。Pi 側の `FrameParser` はもともと探し直す） |
+| 未知の `TYPE` | 破棄。`unknown_type_count++`。**その場で SYNC の探し直しに戻る**（`LEN` を信用して読み飛ばさない。ここに来るのは TYPE が化けたか、ペイロード中の偽の SYNC を拾ったときだけ。化けた LEN ぶん最大 257B を待つと、STM32 は 75〜110ms 分の `COMMAND` を失い途絶の自動ブレーキに入りえ、Pi は後続のフレームの受け取りが十数ms 遅れる。両側とも同じ） |
 | **`TELEMETRY` が 100ms 途絶** | **Pi → `DEGRADED`**（警告表示。制御は継続） |
 | **`TELEMETRY` が 200ms 途絶** | **Pi → `FAULT`**（停止シーケンス） |
 | **`COMMAND` が 100ms 途絶** | **STM32 → 自動ブレーキ**（安全の第2層） |
 | `md_status[i].comm_ok = 0` | 該当モータの値を無効扱い。継続したら FAULT |
-| `protocol_version` のメジャー不一致 | 即 FAULT。通信を開始しない |
+| `protocol_version` の不一致・未受信 | ARM を通さない（DISARM を送り続ける）。通信・表示は続け、`VERSION_REQ` を 1 秒ごとに送り直す |
 
 ### `TELEMETRY` 途絶を2段階にする理由
 
-LiDAR バーストによる滞留は理由ではない（§7 のとおり送信待ちは 3.04ms で有界）。
+LiDAR バーストによる滞留は理由ではない（§7 のとおり送信待ちは約 1ms で有界）。
 
 **理由は、単発の CRC エラーや一時的なロスで即座に FAULT へ落とさないため。**
 100Hz なら 100ms = 10発。ノイズ環境で 10発連続ロスは起こりうるが、
@@ -1335,11 +1367,14 @@ STM32 側の実装が固まったので、**Pi 側はこの表を前提にして
 | 接続判定 | **エッジを10回（=50ms 分）数えて初めて「Pi が繋がっている」とみなす。** 単発ノイズで接続済みと判定して直後に緊急停止へ落ちるのを防ぐ |
 | 未接続時 | ハートビートを一度も見ていない間は**緊急停止を発動しない**（ベンチ確認のため） |
 | 途絶時 | 50ms で**ラッチ**し、`TELEMETRY.flags` bit3 `estop_active` が立つ |
-| 復帰 | **自動復帰しない。** ハートビートが戻っている状態で**車両側のボタン2を人間が押す**まで解除されない |
+| 復帰 | **自動復帰しない。** ハートビートが戻っている状態で**車両側のボタン2を人間が押す**まで解除されない。解除後も、`COMMAND` の `arm` が一度 0 になってから立ち上がるまで ARM しない（`arm` を立てっぱなしの指令で走り出さない） |
 | 発動時の動作 | 目標車速0で制動、ハザード点滅。**駆動電源は切らない**（切ると MD が制動をかけられず惰行して停止距離が伸びるため） |
 
 #### Pi 側が守ること
 
+- **E-Stop 解除後は `arm` を一度下ろしてから立て直す。** io_node は `estop_active`（と `drive_power_locked`、
+  STM32 の再起動の検出）を見たら、操縦側の `cmd.arm` が一度 False になるまで ARM を通さない
+  （`diag/link` の `arm_inhibit_reason`）。STM32 も `arm` の立ち上がりを待つので、どちらか片方だけでも走り出さない
 - **出し始めたら出し続ける。** 途中でやめると緊急停止になる。
   逆に言えば、**一度も出さなければ緊急停止は発動しない**ので、
   ベンチ診断では意図的に出さない選択もできる
@@ -1361,7 +1396,7 @@ STM32 側の実装が固まったので、**Pi 側はこの表を前提にして
 | 層 | 機構 | 反応時間 | 復帰 | Pi の扱い |
 |---|---|---|---|---|
 | 1 | **GPIO ハートビート断**（`estop_active`） | 50ms | 人間の明示操作 | FAULT |
-| 2 | **`COMMAND` 途絶**（`uart_timeout`） | 100ms | `COMMAND` 再開で自動 | DEGRADED → FAULT |
+| 2 | **`COMMAND` 途絶**（`uart_timeout`） | 100ms | `COMMAND` 再開で制動は解除。ARM は `arm` が一度 0 になってからの立ち上がりで | DEGRADED → FAULT |
 | 3 | **過電流ハード遮断**（`fault_*_overcurrent`, `drive_power_locked`） | 即時 | **電源リセットのみ**（ラッチ） | FAULT。ただし `arm` 拒否は正常動作 |
 | 4 | **低電圧警告**（`fault_*_undervoltage`） | 1秒継続 | 電圧回復で自動 | 警告表示のみ |
 
@@ -1461,7 +1496,7 @@ def unwrap_u32(prev_raw: int, curr_raw: int, acc: int) -> tuple[int, int]:
 **受信は `io_node` 専用プロセスで、パースだけに専念させる。**
 
 ここに知覚処理を混ぜると、CPU スパイクのたびに UART バッファが溢れる。
-Linux のシリアル受信バッファは **4KB 程度 = 本プロトコルでは約 160ms 分**しかない。
+Linux のシリアル受信バッファは **4KB 程度 = 本プロトコル（上り約 19kB/s）では約 200ms 分**しかない。
 
 ### 12.6 構造体アライメント
 
@@ -1472,23 +1507,25 @@ Linux のシリアル受信バッファは **4KB 程度 = 本プロトコルで�
 - **Python 側**: `struct` のフォーマット文字列は必ず **`<` で始める**。
   `=` や `@` を使うとネイティブアライメントでパディングが入り、オフセットがずれる。
 
-```python
-# すべて '<' 始まり。struct.calcsize() が LEN と一致することを import 時に assert する
-TELEM_FMT   = "<2I8h2i10h14B"   # TELEMETRY      66 B
-LIDAR_FMT   = "<BIHH30H"        # LIDAR_SECTOR   69 B
-LIDAR_I_FMT = "<BIHH30H30B"     # LIDAR_SECTOR_I 99 B
-LIDAR_C_FMT = "<BIHH30B"        # LIDAR_SECTOR_C 39 B
-STATS_FMT   = "<12I"            # STATS          48 B
-VERSION_FMT = "<HII"            # VERSION        10 B
-PONG_FMT    = "<3I"             # PONG           12 B
-CMD_FMT     = "<BBhhHHH"        # COMMAND        12 B
-CFG_ACK_FMT = "<HfB"            # CONFIG_ACK      7 B
+実際のフォーマットは生成物 `raspi/proto/generated/packets.py` の各クラスの `FMT`（`protocol.toml` から生成。
+`generate.py` が LEN との一致を検証する）。手で書き写さないこと。
 
-assert struct.calcsize(TELEM_FMT) == 66
+```python
+TELEMETRY       '<2I8h2i19h14B'   # 84 B
+LIDAR_SECTOR    '<BI32H'          # 69 B（sector_idx, t_start_us, duration_us, rot_speed_dps, dist×30）
+LIDAR_SECTOR_I  '<BI32H30B'       # 99 B
+LIDAR_SECTOR_C  '<BI2H30B'        # 39 B
+STATS           '<12I'            # 48 B
+VERSION         '<H2I'            # 10 B
+PONG            '<3I'             # 12 B
+COMMAND         '<2B2h3HhB'       # 15 B
+CONFIG_ACK      '<HfB'            #  7 B
+LIMITS          '<4f'             # 16 B
 ```
 
-`TELEM_FMT` の内訳: `2I`(t_us, flags) / `8h`(speed, yaw_rate, steer×2, wheel_speed×4) /
-`2i`(odom_dist) / `10h`(accel×3, pitch, roll, motor_current×3, torque_cmd×2) /
+`TELEMETRY` の内訳: `2I`(t_us, flags) / `8h`(speed, yaw_rate, steer×2, wheel_speed×4) /
+`2i`(odom_dist) / `19h`(accel×3, pitch, roll, motor_current×3, torque_cmd×2, slip×2, tc_limit_nm×2,
+torque_req×2, abs_limit_nm, tv_ratio, tv_moment_nm) /
 `14B`(temp×4, batt×4, us×2, md_status×3, cmd_seq_echo)
 
 ### 12.7 GPIO
@@ -1499,16 +1536,17 @@ Pi 5 は RP1 チップ採用のため `RPi.GPIO` が動作しない。**`gpiozer
 
 ```
 1. UART オープン
-2. VERSION_REQ (0x14) を送信 → VERSION (0x07) を待つ（500ms タイムアウト、3回リトライ）
-3. protocol_version を検証（メジャー不一致なら即 FAULT）
-4. CONFIG_GET で全パラメータを読み出し、GUI の初期値にする
-5. config/params.yaml の値を CONFIG_SET で push
-6. PING を 20Hz で 3秒打ち、クロックオフセットを収束させる
+2. VERSION_REQ (0x14) と LIMITS_REQ (0x15) を送信 → VERSION・LIMITS を最大 1 秒待つ
+   （届かなければ以降 1 秒ごとに送り直す。STM32 は起動直後にも 3 回自発送信する）
+3. protocol_version が一致するまで ARM を通さない（DISARM を送り続ける）
+4. ON/OFF 系と自動停止のマージンを CONFIG_GET で読み、GUI の初期値にする
+5. config/vehicle.toml の [control] を CONFIG_SET で push し、CONFIG_ACK で確かめる（揃うまで ARM 不可）
+6. PING を 20Hz で 3秒打ってから 5Hz に落とす（時刻同期の収束を早める）
 7. GPIO6 ハートビート開始
-8. steer_center_valid が立っているか確認
-   （立っていなければ走行禁止・GUI に整備手順を表示）
-9. COMMAND の 100Hz 送信を開始（最初は mode=DISARM）
-10. drive_power_locked が落ちていることを確認してから arm 要求
+8. COMMAND の 100Hz 送信を開始（ARM を通せる条件が揃うまでは mode=DISARM）
+9. steer_center_valid が立っていなければ STM32 は MANUAL/AUTO に入らない（GUI に整備手順を表示）
+10. drive_power_locked・estop_active が立っていないことを確認してから arm 要求
+    （立っていた後は arm を一度下ろしてから立て直す。§9）
 ```
 
 ---

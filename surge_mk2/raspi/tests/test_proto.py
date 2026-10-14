@@ -359,6 +359,31 @@ class TestFrameParser(unittest.TestCase):
         self.assertEqual(frames, [])
         self.assertEqual(self.parser.stats.unknown_type, 1)
 
+    def test_unknown_type_header_does_not_hold_back_the_next_frames(self):
+        """未知の TYPE のヘッダ（LEN=255）の後ろのフレームを、LEN ぶん溜まるのを待たずに返す。"""
+        frames = self.parser.feed(b"\xaa\x55\x77\x00\xff" + self._telemetry(speed=5))
+        self.assertEqual([f.decode().speed for f in frames], [5])
+        self.assertEqual(self.parser.stats.unknown_type, 1)
+        self.assertEqual(self.parser.stats.crc_error, 0)
+
+    def test_log_shorter_than_its_fixed_part_is_a_len_error(self):
+        """LEN=0 の LOG は severity が無く decode できない。フレームとして返さない。"""
+        frames = self.parser.feed(build_frame(packets.Log.TYPE, 0, b"") + self._telemetry(speed=6))
+        self.assertEqual([f.type for f in frames], [packets.Telemetry.TYPE])
+        self.assertEqual(self.parser.stats.len_error, 1)
+        ok = self.parser.feed(build_frame(packets.Log.TYPE, 1, b"\x02"))     # 本文が空の LOG は通る
+        self.assertEqual(ok[0].decode().message, b"")
+
+    def test_reset_seq_forgets_only_the_sequence(self):
+        """相手の再起動で SEQ が 0 から始まり直しても、ロスとして数えない。"""
+        self.parser.feed(build_frame(0x12, 200, b"\x00" * 4))
+        half = self._telemetry(speed=7)
+        self.parser.feed(half[:10])
+        self.parser.reset_seq()
+        frames = self.parser.feed(half[10:])
+        self.assertEqual(len(frames), 1)                 # 途中まで届いていたフレームは捨てない
+        self.assertEqual(self.parser.stats.packet_loss, 0)
+
     def test_zero_length_frame(self):
         """VERSION_REQ (LEN=0)。ここでハングする実装が多い。"""
         frames = self.parser.feed(build_frame(0x14, 0))
@@ -452,6 +477,38 @@ class TestScaleMetadata(unittest.TestCase):
         self.assertAlmostEqual(t.speed * packets.Telemetry.META["speed"][0], 1.5)
         self.assertAlmostEqual(t.steer_actual * 1e-4, -0.2618, places=4)
         self.assertAlmostEqual(t.odom_dist[0] * 1e-4, 1.2345)
+
+
+class TestGeneratorChecks(unittest.TestCase):
+    """`generate.py` が定義の矛盾を生成前に弾く。"""
+
+    def _load(self, mutate):
+        import copy
+        import importlib.util
+        import tomllib
+        spec_mod = importlib.util.spec_from_file_location("proto_generate", REPO / "raspi/proto/generate.py")
+        gen = importlib.util.module_from_spec(spec_mod)
+        spec_mod.loader.exec_module(gen)
+        with gen.SPEC_PATH.open("rb") as fp:
+            spec = tomllib.load(fp)
+        mutate(spec)
+        gen.tomllib = type("T", (), {"load": staticmethod(lambda fp: copy.deepcopy(spec))})
+        return gen.load_spec
+
+    def test_current_definition_passes(self):
+        self._load(lambda s: None)()
+
+    def test_duplicate_param_id_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self._load(lambda s: s["params"].__setitem__("SAME_AS_TC_SLIP", 0x0011))()
+
+    def test_duplicate_packet_name_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self._load(lambda s: s["packets"].append(dict(s["packets"][2], type=0x0B)))()
+
+    def test_inconsistent_frame_overhead_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self._load(lambda s: s["frame"].__setitem__("overhead", 8))()
 
 
 if __name__ == "__main__":

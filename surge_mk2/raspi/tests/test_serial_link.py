@@ -56,6 +56,22 @@ class TestNonBlockingPoll(unittest.TestCase):
         self.assertGreater(got[0].rx_ns, 0)
         self.assertEqual(self.link.stats.crc_error, 0)
 
+    def test_everything_waiting_is_read_in_one_call(self):
+        frames = b"".join(build_frame(packets.Pong.TYPE, i, packets.Pong(ping_id=i).encode())
+                          for i in range(20))
+        os.write(self.master, frames)
+        time.sleep(0.05)
+        got = self.link.poll(block=False)
+        self.assertEqual([f.decode().ping_id for f in got], list(range(20)))
+        self.assertTrue(all(f.rx_ns == got[0].rx_ns for f in got))   # 同じ read で揃ったフレームは同じ時刻
+
+    def test_a_failed_read_is_reported_like_pyserial_does(self):
+        import serial
+        from unittest import mock
+        with mock.patch("os.read", side_effect=OSError(5, "Input/output error")):
+            with self.assertRaises(serial.SerialException):
+                self.link.poll(block=False)
+
 
 if __name__ == "__main__":
     unittest.main()

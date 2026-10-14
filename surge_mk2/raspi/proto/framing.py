@@ -14,6 +14,7 @@ CRC 計算範囲は TYPE から PAYLOAD 末尾まで（LEN + 3 バイト）。
 from __future__ import annotations
 
 import binascii
+import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -55,6 +56,11 @@ def crc16_ccitt(data: bytes | bytearray | memoryview) -> int:
 # 実装ミスに即座に気づけるよう import 時に検証する。
 # ここを間違えると通信が一切成立しないので、遅延させる意味がない。
 assert crc16_ccitt(b"123456789") == CRC_CHECK_VALUE, "CRC 実装が仕様と一致しません"
+
+
+#: 可変長パケット（LOG）の TYPE → ペイロードの最小長（固定部分のバイト数）。これより短いと
+#: `decode()` が固定部分を読めない
+_MIN_VARIABLE_LEN = {c.TYPE: struct.calcsize(c.FMT) for c in BY_TYPE.values() if c.LEN is None}
 
 
 # ── 組み立て ────────────────────────────────────────────────────────────
@@ -120,10 +126,10 @@ class RxStats:
     frame_ok: int = 0
     crc_error: int = 0
     len_error: int = 0
-    unknown_type: int = 0
+    unknown_type: int = 0  #: ヘッダの TYPE が定義に無い（TYPE の化け・ペイロード中の偽の SYNC・未対応の新パケット）
     wrong_direction: int = 0
     packet_loss: int = 0
-    reordered: int = 0     #: SEQ が逆行した回数（STM32 の優先度キューによる並べ替え）
+    reordered: int = 0     #: SEQ が逆行した回数（STM32 の優先度キューによる追い越し。正常でも増える）
     duplicate: int = 0     #: 同一 SEQ の重複
     resync_bytes: int = 0  #: SYNC を探して読み飛ばしたバイト数
 
@@ -155,6 +161,11 @@ class FrameParser:
     def reset(self) -> None:
         """バッファと SEQ 追跡をクリアする（再接続時に呼ぶ）。"""
         self._buf.clear()
+        self._last_seq = None
+
+    def reset_seq(self) -> None:
+        """SEQ 追跡だけをクリアする。相手が再起動して SEQ が 0 から始まり直したときに呼ぶ
+        （呼ばないと、その1回の飛びを最大127個のロスとして数える）。"""
         self._last_seq = None
 
     # ── 内部 ──
@@ -191,13 +202,19 @@ class FrameParser:
 
         pkt_type, seq, plen = buf[2], buf[3], buf[4]
 
-        known = pkt_type in EXPECTED_LEN
-        if known:
-            expected = EXPECTED_LEN[pkt_type]
-            # expected が None なのは可変長（LOG）のみ
-            if expected is not None and plen != expected:
-                self.stats.len_error += 1
-                return self._discard_sync()
+        # 未知の TYPE は LEN を信用せず、その場で SYNC を探し直す（STM32 側のパーサと同じ）。
+        # LEN ぶん溜まるまで待つと、化けたヘッダ1つで最大 262 バイト（上りの流量で十数ms）ぶん
+        # 後続のフレームの受け取りと受信時刻が遅れる。定義に無い新しいパケットが本当に来た場合は
+        # その SEQ を見ないので packet_loss に1個ずつ数える（版数が違えばそもそも ARM を通さない）
+        if pkt_type not in EXPECTED_LEN:
+            self.stats.unknown_type += 1
+            return self._discard_sync()
+        expected = EXPECTED_LEN[pkt_type]
+        # expected が None なのは可変長（LOG）のみ。固定部分に足りない長さも弾く
+        if (plen != expected if expected is not None
+                else plen < _MIN_VARIABLE_LEN[pkt_type]):
+            self.stats.len_error += 1
+            return self._discard_sync()
 
         total = FRAME_OVERHEAD + plen
         if len(buf) < total:
@@ -210,10 +227,11 @@ class FrameParser:
         payload = bytes(buf[HEADER_SIZE:HEADER_SIZE + plen])
         del buf[:total]
 
-        # CRC が通った時点で SEQ は信用できる。未知の TYPE でもロス計上には使う。
+        # CRC が通った時点で SEQ は信用できる。
         #
-        # 注意: STM32 は送信優先度キューを持ち、TELEMETRY が LIDAR を追い越すため
-        # SEQ が数個ぶん前後する（逆行しうる）。単純な (seq-last-1)&0xFF だと
+        # 注意: STM32 は SEQ をキューへ積むときに振り、優先度の高いキュー（PONG > TELEMETRY >
+        # LIDAR > CONFIG_ACK 等 > LOG）から先に送るので、後から積んだ PONG・TELEMETRY が先に届く。
+        # SEQ が数個ぶん前後する（逆行する）のは正常で、reordered はその回数（エラーではない）。単純な (seq-last-1)&0xFF だと
         # 1つの逆行を「254個ロスした」と誤計上して数字が爆発する。
         # 前方への飛びだけをロスとみなし、逆行は reordered として別に数える。
         if self._last_seq is not None:
@@ -232,9 +250,6 @@ class FrameParser:
         else:
             self._last_seq = seq
 
-        if not known:
-            self.stats.unknown_type += 1
-            return None
         if self.expect_types is not None and pkt_type not in self.expect_types:
             self.stats.wrong_direction += 1
             return None

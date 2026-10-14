@@ -18,8 +18,9 @@ STM32 は `CONFIG_SET` に必ず `CONFIG_ACK`（`param_id`・**実際に入っ�
 STM32 は値を Flash に保存しないので、電源を入れ直すと既定値に戻る。そこで:
 
 1. 接続したら全項目を `CONFIG_SET` で送り、`CONFIG_ACK.applied` が送った値と一致するまで再送する
-2. 一致した後も、1項目ずつ順番に `CONFIG_GET` で読み戻し続ける。食い違い（STM32 だけが
-   再起動して既定値に戻った等）を見つけたらその項目を送り直す
+2. 一致した後も、1項目ずつ順番に `CONFIG_GET` で読み戻し続ける。食い違いを1つでも見つけたら
+   STM32 だけが再起動して既定値に戻ったと見て、全項目を送り直す（`drift_count` が増える。
+   io_node はこれを見て、入り直すまで ARM を通さない）
 3. STM32 の再起動を検出したら（`reset()`）最初からやり直す
 
 状態は `status`（`pending`/`ok`/`mismatch`/`unsupported`）と `applied`（STM32 が答えた値）で
@@ -109,6 +110,14 @@ _ENABLE_IDS = frozenset(ENABLE_KEYS.values())
 #: 送った値と `applied` の一致の許容（STM32 は float32 で持つ）
 _REL_TOL = 1e-5
 _ABS_TOL = 1e-7
+#: `CONFIG_SET.value`（float32）で表せる最大。これを超える値はパケットに詰められない
+_F32_MAX = 3.4028234663852886e38
+
+
+def _is_number(value) -> bool:
+    """`CONFIG_SET` で送れる数か（bool・非数・無限大・float32 に入らない大きさを除く）。"""
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and math.isfinite(value) and abs(value) <= _F32_MAX)
 
 
 def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = True) -> dict[str, float]:
@@ -130,7 +139,7 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
                 out[key] = 1.0 if value else 0.0
                 continue
             raise ValueError(f"[control] {key} は 0/1 か true/false です: {value!r}")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if not _is_number(value):
             raise ValueError(f"[control] {key} が数ではありません: {value!r}")
         if key in FROM_DYNAMICS:
             raise ValueError(f"[control] {key} は [dynamics] に書いてください（そちらが唯一の定義）")
@@ -142,7 +151,7 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
     for key in FROM_DYNAMICS:
         if key in dyn:
             v = dyn[key]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            if not _is_number(v):
                 raise ValueError(f"[dynamics] {key} が数ではありません: {v!r}")
             out[key] = float(v)
     if strict:
@@ -185,7 +194,8 @@ class ControlParamSync:
         self._last_tx: dict[int, int] = {}
         self._next_verify_ns = 0
         self._verify_i = 0
-        #: 一致した後の読み戻しで食い違いを見つけた回数（STM32 だけが再起動した等）
+        #: 一致した後の読み戻しで食い違いを見つけた回数（STM32 だけが再起動した等）。送る値を
+        #: こちらが変えたとき（`set_wanted`・`set_overrides`）には増えない
         self.drift_count = 0
 
     # ── 外から呼ぶもの ──
@@ -197,6 +207,7 @@ class ControlParamSync:
         self._unsupported.clear()
         self._clamped.clear()
         self._last_tx.clear()
+        self._restore.clear()
 
     def set_wanted(self, name: str, value: float) -> None:
         """送る値（`[control]` 由来）を差し替える。GUI の ON/OFF が変えた機能が、読み戻しで元へ戻らないように。
@@ -207,16 +218,14 @@ class ControlParamSync:
         if pid is None or pid not in self._base or self._base[pid] == float(value):
             return
         self._base[pid] = float(value)
-        self._confirmed.discard(pid)
-        self._last_tx.pop(pid, None)
+        self._resend(pid)
 
     def set_overrides(self, overrides: dict[str, float]) -> None:
         """一時的な上書きを差し替える（空にすれば元へ戻す）。知らない名前・数でない値は無視する。"""
         new: dict[int, float] = {}
         for k, v in overrides.items():
             pid = OVERRIDABLE.get(k)
-            if pid is None or isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or not math.isfinite(v):
+            if pid is None or not _is_number(v):
                 continue
             new[pid] = float(v)
         if new == self._overrides:
@@ -233,8 +242,14 @@ class ControlParamSync:
                    if new.get(pid) != self._overrides.get(pid)}
         self._overrides = new
         for pid in changed:
-            self._confirmed.discard(pid)
-            self._last_tx.pop(pid, None)       # すぐ送る
+            self._resend(pid)
+
+    def _resend(self, pid: int) -> None:
+        """送る値が変わった項目を次の `tick()` で送る。前の値が範囲外で丸められていた記憶も消す
+        （消さないと、丸められた上書きを外しても元の値を送らず、STM32 に丸めた値が残る）。"""
+        self._confirmed.discard(pid)
+        self._clamped.discard(pid)
+        self._last_tx.pop(pid, None)
 
     def on_ack(self, msg: packets.ConfigAck) -> None:
         pid = msg.param_id
@@ -255,8 +270,12 @@ class ControlParamSync:
             if pid in self._restore and pid not in self._overrides:
                 del self._restore[pid]         # 戻し終えた
         elif pid in self._confirmed:
-            self._confirmed.discard(pid)       # 読み戻しで食い違い → 次の tick で送り直す
-            self._last_tx.pop(pid, None)
+            # 一致を確かめた後の読み戻しで食い違った = こちらが送っていないのに STM32 の値が変わった
+            # （STM32 だけが再起動して既定値に戻った）。ほかの項目も戻っているはずなので、1項目ずつの
+            # 読み戻しが一巡する（全項目で十数秒）のを待たず、全部を次の tick から送り直す
+            self._confirmed.clear()
+            self._clamped.clear()
+            self._last_tx.clear()
             self.drift_count += 1
 
     def tick(self, now_ns: int) -> None:
