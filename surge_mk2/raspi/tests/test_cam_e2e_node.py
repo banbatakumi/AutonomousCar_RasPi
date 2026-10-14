@@ -142,6 +142,43 @@ class TestLoadModel(unittest.TestCase):
             load_model(self.dir / "bare.onnx")
 
 
+class TestSteerLink(unittest.TestCase):
+    """契約 JSON の steer_link があれば、舵角を今の車の換算へ直す。無ければそのまま。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_contract_without_steer_link_loads_as_none(self):
+        _make_model_files(self.dir, "old", 32, 32)
+        self.assertIsNone(load_model(self.dir / "old.onnx").steer_link)
+
+    def test_contract_with_steer_link_is_read(self):
+        _make_model_files(self.dir, "new", 32, 32, steer_link=[1.0, 0.0])
+        self.assertEqual(load_model(self.dir / "new.onnx").steer_link, (1.0, 0.0))
+
+    def test_relinked_when_link_differs_from_vehicle(self):
+        from raspi.core.control_params import steer_relink
+
+        _make_model_files(self.dir, "m", 32, 32, steer_link=[1.0, 0.0])
+        node = CamE2ENode(models_dir=self.dir, vehicle=Vehicle.load())
+        node.reload_if_changed("m")
+        # 車の換算を差し替えて、直した結果が steer_relink と一致することを見る
+        node.vehicle = type("V", (), {"steer_link": (0.6, 0.5)})()
+        ring, ref = _ref_with_frame("surge_test_ce2e_link")
+        try:
+            cmd = node._attempt(ref, 0)
+            want = steer_relink(200 / 255 * 0.524, (1.0, 0.0), (0.6, 0.5)) / 0.524
+            self.assertAlmostEqual(cmd.steer_norm, want, places=4)
+            self.assertNotAlmostEqual(cmd.steer_norm, 200 / 255, places=3)
+        finally:
+            node.close()
+            ring.unlink()
+
+
 class TestProcessFrame(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -195,6 +232,32 @@ class TestModelSelection(unittest.TestCase):
         first = node.model
         self.assertFalse(node.reload_if_changed("model_a"))
         self.assertIs(node.model, first)
+
+    def test_failed_load_is_not_retried_until_the_file_changes(self):
+        import os
+
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        bad = self.models_dir / "bad.onnx"
+        bad.write_bytes(b"not an onnx")
+        _write_contract(self.models_dir / "bad.json", 32, 32)
+        calls = []
+        import raspi.nodes.cam_e2e_node as mod
+        orig = mod.load_model
+
+        def counting(path):
+            calls.append(path)
+            return orig(path)
+        mod.load_model = counting
+        try:
+            node.reload_if_changed("bad")
+            node.reload_if_changed("bad")
+            self.assertEqual(len(calls), 1, "同じ壊れたファイルを再試行している")
+            st = bad.stat()
+            os.utime(bad, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+            node.reload_if_changed("bad")
+            self.assertEqual(len(calls), 2, "mtime が変わったのに再試行しない")
+        finally:
+            mod.load_model = orig
 
     def test_missing_model_keeps_the_previous_one(self):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())

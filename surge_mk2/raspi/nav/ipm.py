@@ -168,6 +168,11 @@ def _pixel_to_ground_vec(u: np.ndarray, v: np.ndarray, intr: CameraIntrinsics,
     return _rays_to_ground(rx, ry, rz, ext)
 
 
+#: 走行不可の画素を地面へ落とすときの縦のずれ（画素単位。0.5 ＝ 画素の下端）。
+#: 分類の量子化で壁が最大1画素遠くに出るぶんを近い側へ見込む
+_WALL_V_OFFSET = 1.5
+
+
 @lru_cache(maxsize=8)
 def _image_rays(height: int, width: int, col_stride: int, v_offset: float,
                 intr: CameraIntrinsics) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -219,17 +224,19 @@ def project_mask_to_grid(drivable_mask: np.ndarray, intr: CameraIntrinsics,
     `max_range` が受け止める。`scan_window()` の「欠測は壁」とは違う扱いに
     なる点に注意: ここは"見えている範囲の外"であって"欠測"ではない）。
 
-    **縦は間引かず、各画素の下端（`v + 0.5`）を投影する。** カメラが低いので地平線付近の
-    1 行は遠方の数十 cm に当たる。行を間引いたり画素の中心を使ったりすると、壁の根元が
-    実際より遠くに出る（＝危険側）。下端を使えば、その画素が触れている地面のうち
-    一番近い所に壁を置くことになる。`stride` は列（横方向）だけを間引く。
+    **縦は間引かず、各画素の下端からさらに1画素下（`v + 1.5`）を投影する。** カメラが低いので
+    地平線付近の 1 行は遠方の数十 cm に当たる。行を間引いたり画素の中心を使ったりすると、
+    壁の根元が実際より遠くに出る（＝危険側）。マスクは「画素の中心が壁の向こうか」で
+    分類されるので、最後の走行不可の行の下端（`v + 0.5`）と次の行の中心の間に本当の境界が
+    あり得る。その分（最大1画素）を近い側へ見込んで、低解像度（160x120 など）でも
+    壁が真の距離より遠くに出ないようにする。`stride` は列（横方向）だけを間引く。
     """
     occ = np.zeros((grid.height, grid.width), dtype=bool)
     h, w = drivable_mask.shape
     not_drivable = ~drivable_mask[:, ::stride]
     if not not_drivable.any():
         return occ
-    rx, ry, rz = _image_rays(h, w, stride, 0.5, intr)
+    rx, ry, rz = _image_rays(h, w, stride, _WALL_V_OFFSET, intr)
     x, y, valid = _rays_to_ground(rx[not_drivable], ry[not_drivable], rz[not_drivable], ext)
     x, y = x[valid], y[valid]
     if x.size == 0:

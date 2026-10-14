@@ -99,7 +99,7 @@ class _FakeWorker:
     instances: list["_FakeWorker"] = []
     fail_indices: set[int] = set()
 
-    def __init__(self, idx, size, fmt, fps, n_slots, on_frame=None) -> None:
+    def __init__(self, idx, size, fmt, fps, n_slots, on_frame=None, device=None) -> None:
         if idx in _FakeWorker.fail_indices:
             raise RuntimeError(f"cam{idx} 初期化失敗")
         self.idx = idx
@@ -119,15 +119,21 @@ class TestCameraNodeInitCleansUpOnPartialFailure(unittest.TestCase):
         _FakeWorker.instances = []
         _FakeWorker.fail_indices = set()
 
-    def test_first_camera_is_closed_when_second_fails_to_construct(self):
+    def test_missing_camera_does_not_stop_the_others(self):
+        """片方が開けなくても、開けた方だけで続行する（欠けた番号は `missing`）。"""
         _FakeWorker.fail_indices = {1}
+        with patch("raspi.nodes.camera_node.CameraWorker", _FakeWorker):
+            node = CameraNode([0, 1], (640, 480), "RGB888", 30.0, 8)
+
+        self.assertEqual([w.idx for w in node.workers], [0])
+        self.assertEqual(node.missing, [1])
+        self.assertFalse(node.workers[0].closed)
+
+    def test_all_missing_raises(self):
+        _FakeWorker.fail_indices = {0, 1}
         with patch("raspi.nodes.camera_node.CameraWorker", _FakeWorker):
             with self.assertRaises(RuntimeError):
                 CameraNode([0, 1], (640, 480), "RGB888", 30.0, 8)
-
-        self.assertEqual(len(_FakeWorker.instances), 1)
-        self.assertTrue(_FakeWorker.instances[0].closed,
-                        "2台目の構築失敗時、1台目がクリーンアップされていない")
 
     def test_all_succeed_leaves_nothing_closed(self):
         with patch("raspi.nodes.camera_node.CameraWorker", _FakeWorker):

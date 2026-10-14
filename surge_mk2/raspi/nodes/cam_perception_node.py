@@ -213,6 +213,11 @@ class CamPerceptionNode:
         #: GUI が選んだモデル名（`cam/model`）から `models_dir/<name>.onnx` を探す
         self.models_dir = models_dir or DEFAULT_MODELS_DIR
         self._loaded_model_name = loaded_model_name
+        #: 読み込みに失敗した (名前, onnx の mtime, json の mtime)。同じ組なら再試行しない
+        #: （毎ループ読み直して失敗を繰り返さない。ファイルを置き直すと mtime が変わって再試行する）
+        self._failed_model_key: tuple | None = None
+        #: 直近の周期の状態（`hb/cam_perception` の detail に載せる。GUI で理由が見える）
+        self._status = "起動直後"
         self.vehicle = vehicle or Vehicle.load()
         v = self.vehicle
         #: `cam_front_z` は路面からレンズ中心までの高さ（`ipm.py` docstring参照）
@@ -248,6 +253,12 @@ class CamPerceptionNode:
         self._degs = np.arange(-half, half + 1)
         #: カメラの実視野に入る `sector_seen` の添字。**この外は常に False**
         self._sectors = sorted({sector_of_deg(int(d) % 360) for d in self._degs})
+        #: 見えているセクタに入っているが、視野の角度（`_degs`）の外にある角度。
+        #: 距離を入れないと 0（＝測距不能＝空き）と読まれ、planner の視野がこちらへ広がると
+        #: 片側（セクタの境界が 30° の倍数にある側）だけ空きに化ける。最小距離を入れて壁にする
+        in_fov = {int(d) % 360 for d in self._degs}
+        self._outside_degs = [a for a in range(360)
+                              if a not in in_fov and sector_of_deg(a) in self._sectors]
 
         self._reader = FrameReader()
 
@@ -298,10 +309,22 @@ class CamPerceptionNode:
                                  std=float(cfg.get("std", 255.0)),
                                  threshold=float(cfg.get("threshold", 0.5)))
 
+    def _model_key(self, name: str) -> tuple:
+        """読み込みの再試行を判断するための (名前, onnx の mtime, json の mtime)。無ければ mtime は None。"""
+        onnx_path = self.models_dir / f"{name}.onnx"
+
+        def mtime(path: Path):
+            try:
+                return path.stat().st_mtime_ns
+            except OSError:
+                return None
+
+        return (name, mtime(onnx_path), mtime(onnx_path.with_suffix(".json")))
+
     def reload_if_changed(self, desired_name: str) -> bool:
         """`desired_name` が今ロード中のモデルと違えば読み込み直す。
 
-        **失敗しても今のモデルを保持する。** GUI が壊れた・存在しないモデル名を
+        **失敗しても今のモデルを保持し、同じファイル（名前と mtime が同じ）は再試行しない。** GUI が壊れた・存在しないモデル名を
         選んでも、それだけで走行が止まる（`self.model` が `None` に戻って
         `failed_frame()` の壁扱いになる）よりは、前のモデルで走り続けられる
         方が安全側——ただし選び間違いに気づけるようログには残す。
@@ -310,12 +333,17 @@ class CamPerceptionNode:
         """
         if not desired_name or desired_name == self._loaded_model_name:
             return False
+        key = self._model_key(desired_name)
+        if key == self._failed_model_key:
+            return False                  # 前回と同じファイルで失敗済み（再試行しない）
         try:
             self.model = self._load_model_by_name(desired_name)
             self._loaded_model_name = desired_name
+            self._failed_model_key = None
             print(f"# モデル切替: {desired_name}", flush=True)
             return True
         except Exception as e:                                # noqa: BLE001
+            self._failed_model_key = key
             print(f"# モデル読み込み失敗（{desired_name}）: {e}。"
                  f"前のモデルのまま続行", file=sys.stderr, flush=True)
             return False
@@ -366,6 +394,8 @@ class CamPerceptionNode:
         dist = np.maximum(dist, _MIN_DIST)                 # 契約1
 
         full_dist = [0.0] * 360
+        for a in self._outside_degs:
+            full_dist[a] = _MIN_DIST
         for d, val in zip(self._degs.tolist(), dist.tolist()):
             full_dist[d % 360] = float(val)
         sector_seen = [s in self._sectors for s in range(12)]
@@ -477,16 +507,20 @@ class CamPerceptionNode:
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
                 self._last_path = None
+                self._status = "idle"
             elif self.model is None:
                 # **契約2の入口。** まだ GUI がモデルを選んでいない（起動直後・
                 # 未選択のまま）。フレームが来ていても推論しようがない
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
                 self._last_path = None
+                self._status = "failed: モデル未選択"
             elif ref is None:
                 st = self.failed_frame(seq=seq)
                 self._last_scan = None
                 self._last_path = None
+                self._status = "failed: image/front が来ていない"
+
             elif (self._last_scan is not None
                   and now - self._last_infer_ns < self._infer_period_ns):
                 # ★省電力化（issue #13）: 間引き判定を共有メモリの読み取り
@@ -502,6 +536,7 @@ class CamPerceptionNode:
                     st = self.failed_frame(seq=seq)
                     self._last_scan = None
                     self._last_path = None
+                    self._status = "failed: フレームを読めない"
                 else:
                     frame, t_capture = got
                     self._last_infer_ns = now
@@ -518,7 +553,9 @@ class CamPerceptionNode:
                         self._last_scan = None
                         self._last_path = None
                         path_msg = None
+                        self._status = "failed: 推論が例外"
                     else:
+                        self._status = f"ok model={self._loaded_model_name or '-'}"
                         self._last_scan = st
                         #: `cam_centerline` が選ばれていなくても、同じ推論結果から
                         #: ただで作れる（下の `_CAM_MODES` docstring参照）ので常に計算する
@@ -543,7 +580,7 @@ class CamPerceptionNode:
             if now >= next_hb:
                 next_hb = now + NS // HB_HZ
                 pub.send(TOPIC_HB_PREFIX + "cam_perception",
-                        HbMsg(node="cam_perception"))
+                        HbMsg(node="cam_perception", detail=self._status))
             if status_cb:
                 status_cb(st)
             pacer.idle_sleep(active)

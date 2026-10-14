@@ -82,7 +82,7 @@ class Probe:
         self.cam.configure(cfg)
         self.size = size
         self.fmt = fmt
-        self.samples: list[tuple[int, int, int]] = []   # (sensor_ts, t_after, seq)
+        self.samples: list[tuple[int, int, int]] = []   # (sensor_ts, t_after, 未使用)
 
     def start(self) -> None:
         self.cam.start()
@@ -94,7 +94,7 @@ class Probe:
         try:
             md = req.get_metadata()
             self.samples.append(
-                (md.get("SensorTimestamp", 0), t_after, md.get("FrameCount", -1)))
+                (md.get("SensorTimestamp", 0), t_after, 0))
         finally:
             req.release()
 
@@ -127,12 +127,14 @@ class Probe:
               f"最小 {min(lat):.1f}ms  最大 {max(lat):.1f}ms")
         print(f"    帯域          : {mbps:.0f} MB/s（生 RGB 換算）")
 
-        # フレーム落ち: FrameCount が飛んでいないか
-        seqs = [s[2] for s in self.samples if s[2] >= 0]
-        if len(seqs) > 1:
-            dropped = (seqs[-1] - seqs[0]) - (len(seqs) - 1)
-            print(f"    フレーム落ち  : {dropped}  "
-                  + ("（libcamera 側で捨てられている）" if dropped else "（なし）"))
+        # フレーム落ち: picamera2 のメタデータに FrameCount は無いので、SensorTimestamp の
+        # 間隔が周期（中央値）の1.5倍を超えた分を落ちとみなす
+        from raspi.nodes.camera_node import count_dropped
+
+        period_ns = statistics.median(gaps) * 1e6
+        dropped = sum(count_dropped(g * 1e6, period_ns) for g in gaps)
+        print(f"    フレーム落ち  : {dropped}  "
+              + ("（間隔が周期の1.5倍を超えた箇所がある）" if dropped else "（なし）"))
 
 
 def run(indices: list[int], size, fps, frames: int) -> int:

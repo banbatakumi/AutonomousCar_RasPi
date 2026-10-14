@@ -15,6 +15,11 @@
   **画素はバスに流さない**（下流は共有メモリからゼロコピーで読む）
 
 カメラ番号とトピックの対応は `CAM_TOPIC`。**取り付けを入れ替えたらここだけ直す。**
+指定した番号のカメラが一部見えないときは、**見えているカメラだけで起動を続ける**
+（欠けた側の配信は止まり、`hb/camera` の detail に `<役割>=missing` と出る）。
+どの番号をどの役割に使ったかは起動ログに出す。`--by-i2c` を付けると、番号ではなく
+接続先の I2C アドレス（`I2C_ADDR_ROLE`）で前後を決める（libcamera の列挙順が入れ替わる
+環境向け。既定は番号どおり）。
 
 共有メモリの名前は `surge_cam0` / `surge_cam1`。読み手は:
 
@@ -41,6 +46,27 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 
 SHM_PREFIX = "surge_cam"
+
+#: ログ（stdout/stderr）の行頭に日時を付ける。`logs/*.out` には日時が無く、再起動の
+#: 時刻や間隔を後から追えなかったため
+class _Stamped:
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self._bol = True
+
+    def write(self, text: str) -> int:
+        out = []
+        for piece in text.splitlines(keepends=True):
+            if self._bol and piece.strip() and not piece.startswith("\r"):
+                out.append(time.strftime("%Y-%m-%d %H:%M:%S "))
+            out.append(piece)
+            self._bol = piece.endswith("\n")
+        self._stream.write("".join(out))
+        return len(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
 
 #: `_grab()` が連続してこの回数失敗したら、そのカメラは諦めてスレッドを終了する
 MAX_CONSECUTIVE_GRAB_FAILURES = 10
@@ -154,7 +180,60 @@ _MAX_GAPS_SAMPLES = 1000
 #: **スレッド自体は`is_alive()`のままなので、生死監視だけでは検出できない**
 #: （issue #4）。`CamStats.last_grab_ns`（`_grab()`が成功するたびに更新）を
 #: 見て、これだけ進んでいなければハングとみなしてノード全体を終了させる
+#: 実際の猶予は 1台ごとに `max(これ, 3×フレーム周期)`（1fps 設定でも誤検出しない）
 _CAPTURE_HANG_S = 1.0
+
+
+#: 取得間隔がフレーム周期のこの倍率を超えたら、その間にフレームが落ちたとみなす
+DROP_GAP_FACTOR = 1.5
+
+
+def count_dropped(gap_ns: float, period_ns: float) -> int:
+    """連続する2フレームの `SensorTimestamp` の間隔から、その間に落ちたフレーム数を推定する。
+
+    picamera2 のメタデータに `FrameCount` は無いので、`SensorTimestamp` の間隔が周期の
+    `DROP_GAP_FACTOR` 倍を超えたとき、周期で割った分から1を引いた枚数（最低1）を落ちとみなす。
+    周期が不明（0 以下）なら数えない。
+    """
+    if period_ns <= 0 or gap_ns <= period_ns * DROP_GAP_FACTOR:
+        return 0
+    return max(1, round(gap_ns / period_ns) - 1)
+
+
+#: 終了時の後始末（picamera2 の stop/close 等）を待つ上限 [秒]。`capture_request()` が
+#: 本当にハングしていると `Picamera2.close()` も戻らないことがあるため、これを超えたら
+#: プロセスごと強制終了して systemd に再起動させる
+CLOSE_TIMEOUT_S = 5.0
+
+
+def run_bounded(fn, timeout_s: float) -> bool:
+    """`fn()` を別スレッドで実行し、`timeout_s` 以内に終わったか（例外で終わった場合も True）を返す。"""
+    def body() -> None:
+        try:
+            fn()
+        except Exception as e:                       # noqa: BLE001
+            print(f"!! 後始末中の例外: {type(e).__name__}: {e}", file=sys.stderr)
+
+    t = threading.Thread(target=body, name="camclose", daemon=True)
+    t.start()
+    t.join(timeout_s)
+    return not t.is_alive()
+
+
+#: 接続先の I2C アドレス（`Picamera2.global_camera_info()` の `Id` に含まれる文字列）→ 役割。
+#: Pi 5 の CAM0/CAM1 コネクタの I2C バスで、前がこの機体の実測（`--by-i2c` のときだけ使う）
+I2C_ADDR_ROLE = {"i2c@88000": "front", "i2c@80000": "rear"}
+
+
+def devices_by_i2c(infos: list[dict], wanted_roles: list[str]) -> dict[str, int]:
+    """`global_camera_info()` の結果から 役割 → libcamera の番号 を作る（見つかった役割だけ）。"""
+    out: dict[str, int] = {}
+    for dev, info in enumerate(infos):
+        ident = str(info.get("Id", ""))
+        for addr, role in I2C_ADDR_ROLE.items():
+            if addr in ident and role in wanted_roles and role not in out:
+                out[role] = dev
+    return out
 
 
 #: `hb/camera`（生存申告。`detail` に実 fps と落ち数）を出す周期。撮像は別スレッドなので
@@ -174,6 +253,8 @@ def make_hb_detail():
     def detail(node) -> str:
         now = time.monotonic()
         parts = []
+        for i in getattr(node, "missing", []):
+            parts.append(f"{CAM_TOPIC.get(i, ('', f'cam{i}'))[1]}=missing")
         for wk in node.workers:
             role = CAM_TOPIC.get(wk.idx, ("", f"cam{wk.idx}"))[1]
             frames = wk.stats.frames
@@ -197,7 +278,7 @@ def make_hb_detail():
 @dataclass(slots=True)
 class CamStats:
     frames: int = 0
-    dropped: int = 0            #: libcamera 側で落ちた（FrameCount の飛び）
+    dropped: int = 0            #: 落ちたフレーム数の推定（SensorTimestamp の間隔が周期の1.5倍超）
     write_ns_max: int = 0       #: 共有メモリへの1回の書き込みにかかった最大時間
     write_ns_total: int = 0
     last_t_capture: int = 0
@@ -223,9 +304,11 @@ class CameraWorker(threading.Thread):
     """カメラ1台ぶんの取得ループ。**1台につき1スレッド。**"""
 
     def __init__(self, idx: int, size: tuple[int, int], fmt: str, fps: float | None,
-                 n_slots: int, on_frame=None) -> None:
+                 n_slots: int, on_frame=None, device: int | None = None) -> None:
         super().__init__(name=f"cam{idx}", daemon=True)
         self.idx = idx
+        #: libcamera の番号（`Picamera2(device)`）。既定は `idx`（リング・トピックの番号）と同じ
+        self.device = idx if device is None else device
         self.size = size
         self.fmt = fmt
         self.fps = fps
@@ -233,7 +316,6 @@ class CameraWorker(threading.Thread):
         self.stats = CamStats()
         self.error: Exception | None = None
         self._running = False
-        self._last_frame_id = -1
         #: **`run()` のスレッドだけが picamera2 を呼ぶ。** `request_fps`/
         #: `request_enabled` は他スレッド（`CameraNode._config_loop`）から呼ばれるが、
         #: そこでは pending 変数を書き換えるだけで picamera2 には触らない
@@ -248,8 +330,11 @@ class CameraWorker(threading.Thread):
         # チューニングは全カメラで同じもの（None ＝ 標準）。**ここより前に picamera2 でカメラを
         # 数えない**——`global_camera_info()` を呼ぶだけで標準に固定される（`cam_tuning.py`）
         tuning, tuning_sensor = _isp_tuning
-        self.cam = Picamera2(idx, tuning=tuning)
-        check_sensor(tuning_sensor, str(self.cam.camera_properties.get("Model", "")), idx)
+        self.cam = Picamera2(self.device, tuning=tuning)
+        props = self.cam.camera_properties
+        print(f"# cam{idx}: libcamera 番号 {self.device}  {props.get('Model', '?')}  "
+              f"{props.get('Location', '')}", flush=True)
+        check_sensor(tuning_sensor, str(props.get("Model", "")), idx)
         ctrl = {}
         if fps:
             us = int(1e6 / fps)
@@ -278,7 +363,8 @@ class CameraWorker(threading.Thread):
         self.cam.start()
 
     def run(self) -> None:
-        self._running = True
+        # `run()` が始まる前に `stop()` が呼ばれていたら（起動直後の SIGTERM）そのまま終わる
+        self._running = not getattr(self, "_stop_requested", False)
         consecutive_failures = 0
         try:
             while self._running:
@@ -295,6 +381,8 @@ class CameraWorker(threading.Thread):
                     continue
                 try:
                     self._grab()
+                    if consecutive_failures:
+                        self.error = None            # 一過性の失敗は回復したので残さない
                     consecutive_failures = 0
                 except Exception as e:
                     # 一過性のキャプチャエラー（バッファ取得タイムアウト等）1回では
@@ -328,9 +416,8 @@ class CameraWorker(threading.Thread):
                 self.stats.last_grab_ns = time.monotonic_ns()
             else:
                 self.cam.stop()
-            # stop/start で picamera2 の FrameCount が 0 に戻ることがある。
-            # 前回値と比較して「大量に落ちた」と誤集計しないようにリセットする
-            self._last_frame_id = -1
+            # 停止していた間の間隔を「落ち」と誤集計しないよう、前回の時刻を捨てる
+            self.stats.last_t_capture = 0
 
     def request_fps(self, fps: float) -> None:
         """**picamera2 には触らない。** 次のループで `_apply_pending` が反映する。"""
@@ -347,7 +434,6 @@ class CameraWorker(threading.Thread):
         try:
             md = req.get_metadata()
             t_cap = md.get("SensorTimestamp", 0)
-            fid = md.get("FrameCount", -1)
             # make_array は DMA バッファへの view。**release() すると無効になる**ので、
             # 共有メモリへの書き込みは release より前に済ませる。
             # ここで release を先にすると、解放済みメモリを読むことになる
@@ -355,8 +441,9 @@ class CameraWorker(threading.Thread):
             if not arr.flags["C_CONTIGUOUS"]:
                 arr = _contig(arr)
             t0 = time.monotonic_ns()
+            # picamera2 のメタデータに FrameCount は無いので、取得枚数を frame_id にする
             desc = self.ring.write(
-                arr, t_capture_ns=t_cap, frame_id=max(fid, 0))
+                arr, t_capture_ns=t_cap, frame_id=self.stats.frames)
             dt = time.monotonic_ns() - t0
         finally:
             req.release()
@@ -367,24 +454,27 @@ class CameraWorker(threading.Thread):
         s.write_ns_max = max(s.write_ns_max, dt)
         s.last_grab_ns = t0             # ハング検出用（上のCamStats参照）
         if s.last_t_capture and t_cap:
-            s.gaps_ms.append((t_cap - s.last_t_capture) / 1e6)
+            gap_ns = t_cap - s.last_t_capture
+            s.gaps_ms.append(gap_ns / 1e6)
+            if self.fps:
+                s.dropped += count_dropped(gap_ns, 1e9 / self.fps)
         s.last_t_capture = t_cap
-        if self._last_frame_id >= 0 and fid > self._last_frame_id + 1:
-            s.dropped += fid - self._last_frame_id - 1
-        self._last_frame_id = fid
 
         if self.on_frame:
             self.on_frame(desc)
 
     def stop(self) -> None:
+        self._stop_requested = True
         self._running = False
 
     def close(self) -> None:
+        # 共有メモリの unlink を先にする: `cam.stop()` がハングして強制終了になっても
+        # 名前だけは残さない
+        with quiet_close(f"FrameRing {self.ring.name} の unlink"):
+            self.ring.unlink()
         with quiet_close("picamera2 のカメラ"):
             self.cam.stop()
             self.cam.close()
-        with quiet_close(f"FrameRing {self.ring.name} の unlink"):
-            self.ring.unlink()
 
 
 def _contig(arr):
@@ -395,18 +485,31 @@ def _contig(arr):
 
 class CameraNode:
     def __init__(self, indices: list[int], size, fmt: str, fps, n_slots: int,
-                 on_frame=None, cfg_sub=None) -> None:
+                 on_frame=None, cfg_sub=None,
+                 devices: dict[int, int] | None = None) -> None:
+        """`devices` は リング・トピックの番号 → libcamera の番号（省略時は同じ番号）。
+
+        開けないカメラがあっても、1台でも開ければ続行する（開けなかった番号は `missing`）。
+        1台も開けなければ最後の例外を投げる。
+        """
         self.workers: list[CameraWorker] = []
-        try:
-            for i in indices:
+        #: 開けなかったカメラの番号（`hb/camera` に `missing` と出す）
+        self.missing: list[int] = []
+        self._stop_requested = False
+        last_err: Exception | None = None
+        for i in indices:
+            kwargs = {"device": devices[i]} if devices and i in devices else {}
+            try:
                 self.workers.append(
-                    CameraWorker(i, size, fmt, fps, n_slots, on_frame))
-        except Exception:
-            # 2台目以降の構築中に落ちても、既に構築済みの1台目のカメラ・
-            # 共有メモリが後始末されず残ってしまわないようにする
-            for w in self.workers:
-                w.close()
-            raise
+                    CameraWorker(i, size, fmt, fps, n_slots, on_frame, **kwargs))
+            except Exception as e:                   # noqa: BLE001
+                last_err = e
+                self.missing.append(i)
+                print(f"!! cam{i} を開けない（{type(e).__name__}: {e}）。"
+                      f"開けたカメラだけで続行する", file=sys.stderr, flush=True)
+        if not self.workers:
+            assert last_err is not None
+            raise last_err
         self._t_start = 0.0
         #: GUI/自動運転からの capture 設定（`cam/config`）を拾うための Subscriber。
         #: `--no-bus` やバス未接続なら None（既定 fps・常時 ON のまま動く）
@@ -419,6 +522,8 @@ class CameraNode:
         for w in self.workers:
             w.start_camera()
         time.sleep(0.5)                     # AE/AWB が落ち着くまで
+        if getattr(self, "_stop_requested", False):
+            return                          # 起動中に SIGTERM が来た（下の finally は通らないので何も起動していない）
         start_ns = time.monotonic_ns()
         for w in self.workers:
             w.stats = CamStats()
@@ -443,17 +548,25 @@ class CameraNode:
                 # `capture_request()` がブロックしたまま戻らないハングは
                 # スレッドが `is_alive()` のままなので、`last_grab_ns` の
                 # 停滞で別途検出する
+                if getattr(self, "_stop_requested", False):
+                    break
                 dead = [w for w in self.workers if not w.is_alive()]
                 if dead:
                     break
                 now_ns = time.monotonic_ns()
+                # 1台ごとの猶予 = max(hang_s, 3×フレーム周期)。1fps 設定で1枚が1秒かかっても
+                # ハング扱いしない
+                limits = {}
+                for w in self.workers:
+                    fps = getattr(w, "fps", None)
+                    limits[w.idx] = max(hang_s, 3.0 / fps) if fps else hang_s
                 hung = [w for w in self.workers
-                       if now_ns - w.stats.last_grab_ns > hang_s * 1e9]
+                       if now_ns - w.stats.last_grab_ns > limits[w.idx] * 1e9]
                 if hung:
                     for w in hung:
                         if w.error is None:
                             w.error = TimeoutError(
-                                f"cam{w.idx}: capture_request() が{hang_s:.1f}s"
+                                f"cam{w.idx}: capture_request() が{limits[w.idx]:.1f}s"
                                 f"以上応答していない（ハング）")
                     break
                 el = time.monotonic() - self._t_start
@@ -506,13 +619,16 @@ class CameraNode:
         return time.monotonic() - self._t_start if self._t_start else 0.0
 
     def stop(self) -> None:
+        self._stop_requested = True
         self._cfg_running = False
-        if self._cfg_thread is not None:
+        if self._cfg_thread is not None and self._cfg_thread.is_alive():
             self._cfg_thread.join(timeout=1.0)
         for w in self.workers:
             w.stop()
         for w in self.workers:
-            w.join(timeout=2.0)
+            # 起動前（start していない）スレッドの join は RuntimeError になる
+            if w.is_alive():
+                w.join(timeout=2.0)
 
     def close(self) -> None:
         for w in self.workers:
@@ -541,7 +657,13 @@ def main() -> int:
     ap.add_argument("--duration", type=float, default=None, help="秒で自動終了")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--no-bus", action="store_true", help="ZeroMQ に配信しない")
+    ap.add_argument("--by-i2c", action="store_true",
+                    help="前後のカメラを番号でなく I2C アドレス（I2C_ADDR_ROLE）で決める。"
+                         "ISP チューニングを使うレンズでは、先に列挙するとチューニングが"
+                         "効かなくなるので無視して番号どおりにする")
     args = ap.parse_args()
+    sys.stdout = _Stamped(sys.stdout)
+    sys.stderr = _Stamped(sys.stderr)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
     indices = [int(v) for v in args.cameras.split(",") if v.strip()]
@@ -589,8 +711,23 @@ def main() -> int:
 
     try:
         prepare_isp_tuning(indices)
+        devices = None
+        if args.by_i2c:
+            if _isp_tuning[0] is not None:
+                print("!! --by-i2c は ISP チューニング使用中は使えない（カメラを数えると"
+                      "チューニングが標準に固定される）。番号どおりに開く", file=sys.stderr)
+            else:
+                from picamera2 import Picamera2
+
+                infos = Picamera2.global_camera_info()
+                print(f"# 見えているカメラ: {[i.get('Id') for i in infos]}")
+                roles = [CAM_TOPIC.get(i, ("", f"cam{i}"))[1] for i in indices]
+                by_role = devices_by_i2c(infos, roles)
+                devices = {i: by_role[CAM_TOPIC[i][1]] for i in indices
+                           if i in CAM_TOPIC and CAM_TOPIC[i][1] in by_role}
+                print(f"# I2C で決めた番号（リング番号→libcamera 番号）: {devices}")
         node = CameraNode(indices, (w, h), args.fmt, args.fps, args.slots,
-                          on_frame=on_frame, cfg_sub=cfg_sub)
+                          on_frame=on_frame, cfg_sub=cfg_sub, devices=devices)
     except Exception as e:
         print(f"カメラを開けない: {e}", file=sys.stderr)
         return 2
@@ -600,12 +737,14 @@ def main() -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: node.stop())
 
+    if node.missing:
+        print(f"!! 開けなかったカメラ: {node.missing}（配信しない）", file=sys.stderr)
     for wk in node.workers:
-        print(f"# cam{wk.idx} -> /dev/shm/{wk.ring.name}  "
+        print(f"# cam{wk.idx} (libcamera {wk.device}) -> /dev/shm/{wk.ring.name}  "
               f"{wk.ring.width}x{wk.ring.height} {wk.ring.fmt} "
               f"×{wk.ring.n_slots}枚 ({wk.ring._shm.size / 1e6:.1f}MB)")
     print("# 読み手: python3 -m raspi.tools.shm_view "
-          f"{SHM_PREFIX}{indices[0]}\n")
+          f"{SHM_PREFIX}{node.workers[0].idx}\n")
 
     try:
         node.run(duration_s=args.duration,
@@ -617,10 +756,19 @@ def main() -> int:
             print(f"cam{wk.idx}: {wk.stats.summary(el)}")
             if wk.error:
                 print(f"  !! 異常終了: {wk.error}")
-        if pub is not None:
-            print(f"bus: {pub.sent} 件 publish")
-            pub.close()
-        node.close()
+        def _cleanup() -> None:
+            if pub is not None:
+                print(f"bus: {pub.sent} 件 publish")
+                pub.close()
+            node.close()
+
+        # `capture_request()` が本当にハングしていると後始末も戻らないことがある。
+        # 時間を区切り、超えたらプロセスごと落として systemd に再起動させる
+        if not run_bounded(_cleanup, CLOSE_TIMEOUT_S):
+            print(f"!! 後始末が{CLOSE_TIMEOUT_S:.0f}s で終わらない。強制終了する",
+                  file=sys.stderr, flush=True)
+            sys.stdout.flush()
+            os._exit(1)
     # **いずれかのワーカーにエラーが残っていれば exit 1。**
     # 常に `return 0` だと、カメラが全滅・ハングしても
     # systemd の `Restart=on-failure` が発火せず恒久停止する（issue #4）。

@@ -147,6 +147,40 @@ class TestArrowSignalNodeProcessCycle(unittest.TestCase):
         self.assertIsNone(node.process_cycle(None))
 
 
+class TestConfirmedValueLifetime(unittest.TestCase):
+    def test_confirmed_value_expires_without_the_arrow(self):
+        t = [0.0]
+        node = ArrowSignalNode(confirm_frames=2, confirm_ttl_s=5.0, clock=lambda: t[0])
+        frame = _frame_with_arrow(240, 320, lit_col=60, lit_width=40)
+        node.process_cycle(frame)
+        self.assertIsNotNone(node.process_cycle(frame))
+        t[0] = 4.0
+        self.assertIsNotNone(node.process_cycle(None))
+        t[0] = 5.5
+        self.assertIsNone(node.process_cycle(None))
+
+    def test_seeing_the_same_arrow_refreshes_the_lifetime(self):
+        t = [0.0]
+        node = ArrowSignalNode(confirm_frames=2, confirm_ttl_s=5.0, clock=lambda: t[0])
+        frame = _frame_with_arrow(240, 320, lit_col=60, lit_width=40)
+        node.process_cycle(frame)
+        node.process_cycle(frame)
+        t[0] = 4.0
+        node.process_cycle(frame)
+        t[0] = 8.0
+        self.assertIsNotNone(node.process_cycle(None))
+
+
+class TestToBgr(unittest.TestCase):
+    def test_rgb_ring_is_swapped_and_bgr_is_not(self):
+        from raspi.nodes.arrow_signal_node import _to_bgr
+        f = np.zeros((2, 2, 3), np.uint8)
+        f[..., 0] = 10
+        f[..., 2] = 30
+        self.assertEqual(_to_bgr(f, "BGR888")[0, 0, 0], 10)
+        self.assertEqual(_to_bgr(f, "RGB888")[0, 0, 0], 30)
+
+
 class _FakeSub:
     def __init__(self, latest=None):
         self.latest = latest or {}

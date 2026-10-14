@@ -21,6 +21,10 @@ from raspi.nodes.camera_node import (  # noqa: E402
     CamStats,
     _MAX_GAPS_SAMPLES,
     _should_give_up,
+    _Stamped,
+    count_dropped,
+    devices_by_i2c,
+    run_bounded,
 )
 
 
@@ -151,6 +155,129 @@ class TestCameraNodeHangDetection(unittest.TestCase):
         node.run(duration_s=0.2, hang_s=0.1)
 
         self.assertIsNone(node.workers[0].error)
+
+
+class TestDropCount(unittest.TestCase):
+    def test_normal_jitter_is_not_a_drop(self):
+        self.assertEqual(count_dropped(33.3e6 * 1.4, 33.3e6), 0)
+
+    def test_one_missing_frame(self):
+        self.assertEqual(count_dropped(66.6e6, 33.3e6), 1)
+
+    def test_three_missing_frames(self):
+        self.assertEqual(count_dropped(133.3e6, 33.3e6), 3)
+
+    def test_unknown_period_counts_nothing(self):
+        self.assertEqual(count_dropped(1e9, 0), 0)
+
+
+class TestRunBounded(unittest.TestCase):
+    def test_finishes_in_time(self):
+        self.assertTrue(run_bounded(lambda: None, 1.0))
+
+    def test_exception_counts_as_finished(self):
+        def boom():
+            raise RuntimeError("x")
+        self.assertTrue(run_bounded(boom, 1.0))
+
+    def test_hang_is_reported(self):
+        ev = threading.Event()
+        try:
+            self.assertFalse(run_bounded(lambda: ev.wait(5.0), 0.1))
+        finally:
+            ev.set()
+
+
+class TestDevicesByI2c(unittest.TestCase):
+    INFOS = [{"Id": "/base/axi/pcie@120000/rp1/i2c@80000/imx219@10"},
+             {"Id": "/base/axi/pcie@120000/rp1/i2c@88000/imx219@10"}]
+
+    def test_swapped_enumeration(self):
+        self.assertEqual(devices_by_i2c(self.INFOS, ["front", "rear"]),
+                         {"rear": 0, "front": 1})
+
+    def test_only_one_visible(self):
+        self.assertEqual(devices_by_i2c(self.INFOS[:1], ["front", "rear"]), {"rear": 0})
+
+
+class TestHangLimitFollowsFps(unittest.TestCase):
+    def test_slow_fps_is_not_hung(self):
+        """0.5fps（周期2秒）の設定で、1枚の間隔が hang_s を超えてもハング扱いしない。"""
+        w = _FakeCameraWorker(0, progresses=False)
+        w.fps = 0.5
+        node = CameraNode.__new__(CameraNode)
+        node.workers = [w]
+        node._cfg_sub = None
+        node._cfg_thread = None
+        node._t_start = 0.0
+        node.run(duration_s=0.5, hang_s=0.1)
+        self.assertIsNone(w.error)
+
+
+class TestStopBeforeStart(unittest.TestCase):
+    def test_stop_with_unstarted_worker_does_not_raise(self):
+        node = CameraNode.__new__(CameraNode)
+        node.workers = [_FakeCameraWorker(0)]       # start していない
+        node._cfg_thread = None
+        node._cfg_running = False
+        node.stop()                                  # RuntimeError にならないこと
+
+    def test_stop_requested_before_run_returns_immediately(self):
+        node = CameraNode.__new__(CameraNode)
+        node.workers = [_FakeCameraWorker(0)]
+        node._cfg_sub = None
+        node._cfg_thread = None
+        node._t_start = 0.0
+        node._stop_requested = True
+        t0 = time.monotonic()
+        node.run(duration_s=5.0)
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+
+class TestStamped(unittest.TestCase):
+    def test_line_start_gets_timestamp(self):
+        import io
+        out = io.StringIO()
+        st = _Stamped(out)
+        st.write("abc")
+        st.write("def\nghi\n")
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d abcdef$")
+        self.assertRegex(lines[1], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d ghi$")
+
+    def test_carriage_return_status_is_left_alone(self):
+        import io
+        out = io.StringIO()
+        _Stamped(out).write("\rcam0: 3枚")
+        self.assertEqual(out.getvalue(), "\rcam0: 3枚")
+
+
+class TestTransientErrorIsCleared(unittest.TestCase):
+    def test_error_cleared_after_recovery(self):
+        from raspi.nodes.camera_node import CameraWorker
+
+        w = CameraWorker.__new__(CameraWorker)
+        threading.Thread.__init__(w, daemon=True)
+        w.idx = 0
+        w.error = None
+        w.stats = CamStats()
+        w._cfg_lock = threading.Lock()
+        w._pending_fps = None
+        w._pending_enabled = None
+        w._enabled = True
+        calls = {"n": 0}
+
+        def grab():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("一過性")
+            if calls["n"] >= 3:
+                w._running = False
+        w._grab = grab
+        w.run()
+        self.assertGreaterEqual(calls["n"], 3)
+        self.assertIsNone(w.error)
 
 
 if __name__ == "__main__":

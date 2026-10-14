@@ -40,6 +40,13 @@ bind するため、**このノードと`route_select.py`は同時に使えな�
 **変わったとき**だけ新しく発番する。左右どちらでもない（`straight`／非点灯）
 の間は何も publish しない——現在の経路グループを維持する（安全側）。
 
+## 確定値の寿命・DISARM での初期化
+
+確定値は最後に同じ矢印を見てから `_CONFIRM_TTL_S` 秒で捨てる。DISARM 中・`enabled=False`
+の間は確定値と連続回数を初期化する（再 ARM 後に古い矢印で経路が切り替わらないように）。
+その間のループは `IdlePacer` で間引く（約2Hz で publish、起床も落とす）。
+フレームの色順は `ImageRef.fmt` を見て BGR に直してから判定する。
+
 ## GUIからのライブ設定（`signal/config`）とON/OFFトグル
 
 `SignalConfig`（`signal/config`）を購読し、`enabled=False`の間は
@@ -74,7 +81,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from raspi.core.auto_gate import vehicle_armed  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, vehicle_armed  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.msgs import ImageRef, SignalConfig, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
@@ -113,6 +120,9 @@ _MIN_LIT_FRAC = 0.02
 _CENTER_DEADBAND_FRAC = 0.08
 #: 同じ方向がこの回数連続するまで確定しない（単発フレームの誤判定対策）
 _CONFIRM_FRAMES = 3
+#: 確定値の寿命 [s]。同じ矢印がこの時間見えなかったら確定値を捨てる（`route/select` を
+#: 流し止める）。看板が視界から外れた後も永久に「左」を主張し続けないため
+_CONFIRM_TTL_S = 10.0
 
 
 class ArrowResult:
@@ -197,9 +207,15 @@ class ArrowSignalNode:
     """前方カメラ → `route/select`。`process_cycle()`はバス・共有メモリを知らない純粋関数。"""
 
     def __init__(self, *, detector: ArrowSignalDetector | None = None,
-                confirm_frames: int = _CONFIRM_FRAMES) -> None:
+                confirm_frames: int = _CONFIRM_FRAMES,
+                confirm_ttl_s: float = _CONFIRM_TTL_S,
+                clock=time.monotonic) -> None:
         self.detector = detector or ArrowSignalDetector()
         self.confirm_frames = confirm_frames
+        self.confirm_ttl_s = confirm_ttl_s
+        self._clock = clock
+        #: 確定値と同じ矢印を最後に見た時刻（寿命の起点）
+        self._last_match_t = 0.0
 
         self._pending_value: str | None = None
         self._pending_count = 0
@@ -240,6 +256,8 @@ class ArrowSignalNode:
             self.last_result = result
             raw = result.value
             if raw in ("left", "right"):
+                if raw == self._confirmed_value:
+                    self._last_match_t = self._clock()
                 if raw == self._pending_value:
                     self._pending_count += 1
                 else:
@@ -249,6 +267,7 @@ class ArrowSignalNode:
                         and raw != self._confirmed_value):
                     self._confirmed_value = raw
                     self._event_id = time.time_ns()
+                    self._last_match_t = self._clock()
             else:
                 self._pending_value = None
                 self._pending_count = 0
@@ -264,6 +283,7 @@ class ArrowSignalNode:
         self._pending_count = 0
         self._confirmed_value = None
         self._event_id = 0
+        self.last_result = None
 
     def _current_route_select(self) -> RouteSelect | None:
         """`process_cycle()`を呼ばずに、今の確定状態から`RouteSelect`だけ組み立てる。
@@ -273,6 +293,9 @@ class ArrowSignalNode:
         `process_cycle()`の末尾と同じ組み立て方（**書き写さない**ために
         ここへ切り出した）。
         """
+        if (self._confirmed_value is not None
+                and self._clock() - self._last_match_t > self.confirm_ttl_s):
+            self._confirmed_value = None       # 寿命切れ（同じ矢印がしばらく見えない）
         if self._confirmed_value is None:
             return None
         return RouteSelect(value=self._confirmed_value, source="arrow_signal",
@@ -292,10 +315,12 @@ class ArrowSignalNode:
         self._running = True
         t_end = time.monotonic() + duration_s if duration_s else None
         next_hb = time.monotonic_ns()
+        pacer = IdlePacer()
+        active = False
         while self._running:
             if t_end and time.monotonic() >= t_end:
                 break
-            for _ in sub.poll(20):
+            for _ in sub.poll(pacer.poll_timeout_ms(active)):
                 pass  # `latest` を見るだけなので中身の処理は不要
 
             cfg: SignalConfig | None = sub.latest.get(TOPIC_SIGNAL_CONFIG)
@@ -312,7 +337,12 @@ class ArrowSignalNode:
             vs: VehicleState | None = sub.latest.get(TOPIC_VEHICLE_STATE)
             frame = None
             skip_same_frame = False
-            if vehicle_armed(vs) and enabled:
+            active = bool(vehicle_armed(vs) and enabled)
+            if not active:
+                # DISARM・無効の間は確定値を持ち越さない
+                self.reset()
+                self._last_ring_seq = -1
+            if active:
                 #: DISARM中・enabled=False中は共有メモリすら読まない
                 #: （モジュールdocstring参照、`cam_track_node.py`と同じ節電）
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
@@ -326,6 +356,7 @@ class ArrowSignalNode:
                         got = self.read_frame(ref)
                         if got is not None:
                             frame, _t_capture = got
+                            frame = _to_bgr(frame, ref.fmt)
                             self._last_ring_seq = ref.ring_seq
 
             if skip_same_frame:
@@ -340,7 +371,8 @@ class ArrowSignalNode:
                     print(f"# arrow_signal process_cycle() が例外: {e}",
                          file=sys.stderr, flush=True)
                     msg = None
-            if msg is not None:
+            publish = pacer.should_publish(active, time.monotonic_ns())
+            if msg is not None and publish:
                 pub.send(TOPIC_ROUTE_SELECT, msg)
 
             #: GUIライブチューニング・映像オーバーレイ向けの現在値（モジュール
@@ -352,12 +384,21 @@ class ArrowSignalNode:
                 lit_frac=self.last_result.lit_frac if self.last_result else 0.0,
                 confirmed_value=self._confirmed_value or "",
                 roi_top=self.detector.roi_band[0], roi_bottom=self.detector.roi_band[1])
-            pub.send(TOPIC_SIGNAL_STATUS, status)
+            if publish:
+                pub.send(TOPIC_SIGNAL_STATUS, status)
 
             now = time.monotonic_ns()
             if now >= next_hb:
                 next_hb = now + NS // HB_HZ
                 pub.send(TOPIC_HB_PREFIX + "signal", HbMsg(node="signal"))
+            pacer.idle_sleep(active)
+
+
+def _to_bgr(frame: np.ndarray, fmt: str) -> np.ndarray:
+    """共有メモリの生フレーム → BGR の (H, W, 3)。`fmt` は `ImageRef.fmt`（メモリ上のバイト順）。"""
+    if fmt.startswith("BGR"):
+        return frame[..., :3]
+    return np.ascontiguousarray(frame[..., 2::-1])
 
 
 def _parse_band(s: str) -> tuple[float, float]:

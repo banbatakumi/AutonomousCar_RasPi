@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import signal
 import sys
 import time
@@ -62,6 +63,7 @@ import numpy as np  # noqa: E402
 
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION, preprocess, to_rgb  # noqa: E402
+from raspi.core.control_params import steer_relink  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import CamE2ECmd, ImageRef  # noqa: E402
@@ -101,7 +103,8 @@ class RegressionModel:
 
     def __init__(self, model_path: str, *, input_size: tuple[int, int] = (224, 128),
                 mean: float = 0.0, std: float = 255.0, max_steer: float = 0.0,
-                speed_ref: float = 0.0) -> None:
+                speed_ref: float = 0.0,
+                steer_link: tuple[float, float] | None = None) -> None:
         import onnxruntime as ort
 
         # `cam_perception_node.SegmentationModel` と同じ省電力設定
@@ -118,6 +121,9 @@ class RegressionModel:
         self.std = std
         self.max_steer = max_steer
         self.speed_ref = speed_ref
+        #: 学習したときの STM32 のステアのリンクの換算 `(gain, cubic)`。`None` ＝ 契約 JSON に
+        #: 無い（換算の記録が始まる前のモデル）。あれば推論の舵角を今の車の換算へ直す
+        self.steer_link = steer_link
 
     def infer(self, rgb: np.ndarray) -> tuple[float, float]:
         """**RGB** の `(H, W, 3)` uint8 → `(steer_norm, speed_norm)`。
@@ -156,10 +162,19 @@ def load_model(onnx_path: Path) -> RegressionModel:
     if max_steer <= 0 or speed_ref <= 0:
         raise ValueError(f"max_steer/speed_ref が正でない: {max_steer}/{speed_ref}")
     w, h = cfg["input_size"]
+    steer_link = None
+    if "steer_link" in cfg:
+        gain, cubic = cfg["steer_link"]
+        steer_link = (float(gain), float(cubic))
+    else:
+        print(f"# {onnx_path.name}: 契約 JSON に steer_link が無い（舵角をそのまま使う。"
+              f"ステアの換算が違う車で学習したモデルなら舵の切れ角がずれる）",
+              file=sys.stderr, flush=True)
     return RegressionModel(str(onnx_path), input_size=(int(w), int(h)),
                            mean=float(cfg.get("mean", 0.0)),
                            std=float(cfg.get("std", 255.0)),
-                           max_steer=max_steer, speed_ref=speed_ref)
+                           max_steer=max_steer, speed_ref=speed_ref,
+                           steer_link=steer_link)
 
 
 class CamE2ENode:
@@ -177,6 +192,8 @@ class CamE2ENode:
         self.model = model
         self.models_dir = models_dir or DEFAULT_MODELS_DIR
         self._loaded_model_name = loaded_model_name
+        #: 読み込みに失敗した (名前, onnx の mtime, json の mtime)。同じ組なら再試行しない
+        self._failed_model_key: tuple | None = None
         self.vehicle = vehicle or Vehicle.load()
 
         # ★省電力化: `cam_perception_node.py` と同じ理由で推論を間引く
@@ -193,15 +210,28 @@ class CamE2ENode:
 
     def reload_if_changed(self, desired_name: str) -> bool:
         """`cam_perception_node.CamPerceptionNode.reload_if_changed()` と同じ契約
-        （失敗しても今のモデルを保持する）。"""
+        （失敗しても今のモデルを保持し、同じファイルは再試行しない）。"""
         if not desired_name or desired_name == self._loaded_model_name:
             return False
+        onnx_path = self.models_dir / f"{desired_name}.onnx"
+
+        def mtime(path: Path):
+            try:
+                return path.stat().st_mtime_ns
+            except OSError:
+                return None
+
+        key = (desired_name, mtime(onnx_path), mtime(onnx_path.with_suffix(".json")))
+        if key == self._failed_model_key:
+            return False                  # 前回と同じファイルで失敗済み（再試行しない）
         try:
-            self.model = load_model(self.models_dir / f"{desired_name}.onnx")
+            self.model = load_model(onnx_path)
             self._loaded_model_name = desired_name
+            self._failed_model_key = None
             print(f"# モデル切替: {desired_name}", flush=True)
             return True
         except Exception as e:                                # noqa: BLE001
+            self._failed_model_key = key
             print(f"# モデル読み込み失敗（{desired_name}）: {e}。"
                  f"前のモデルのまま続行", file=sys.stderr, flush=True)
             return False
@@ -243,6 +273,12 @@ class CamE2ENode:
             # （`planning_node._replan()` と同じパターン）
             print(f"# cam_e2e process_frame() が例外: {e}", file=sys.stderr, flush=True)
             return self.failed_cmd(seq=seq, t_capture_ns=t_capture)
+        link = self.model.steer_link
+        if link is not None and self.model.max_steer > 0 and math.isfinite(steer_norm):
+            # モデルが学習したときの換算の舵角 → 今の車の換算の舵角（同じモータ角になる値）。
+            # `cam_e2e.py` が `model_max_steer` を掛けて物理量に戻すので、その基準で正規化し直す
+            angle = max(-1.0, min(1.0, steer_norm)) * self.model.max_steer
+            steer_norm = steer_relink(angle, link, self.vehicle.steer_link) / self.model.max_steer
         return CamE2ECmd(ready=True, steer_norm=steer_norm, speed_norm=speed_norm,
                          model_max_steer=self.model.max_steer,
                          model_speed_ref=self.model.speed_ref,

@@ -209,6 +209,22 @@ class _FixedMaskModel:
         return self.mask
 
 
+class TestOutsideFovIsWall(unittest.TestCase):
+    """見えているセクタのうち視野の外の角度は、空き（距離 0 ＝ 測距不能）でなく壁になる。"""
+
+    def test_symmetric_when_planner_fov_is_wider(self):
+        from raspi.auto.base import scan_window
+        node = CamPerceptionNode(model=_FixedMaskModel(np.ones((64, 64), bool)),
+                                 vehicle=Vehicle.load())
+        st = node.process_frame(np.zeros((360, 640, 3), np.uint8))
+        for fov in (65, 70):
+            w = scan_window(st, fov, 3.0)
+            by = dict(zip(w.degs, w.dist))
+            half = int(round(fov / 2))
+            self.assertLess(by[half], 0.1, f"fov {fov}: +{half}° が壁でない")
+            self.assertLess(by[-half], 0.1, f"fov {fov}: -{half}° が壁でない")
+
+
 class TestRealGeometry(unittest.TestCase):
     """`config/vehicle.toml` の実際のカメラ（低い取付・魚眼・下端クロップ）で、
     `scan/cam` と `path/cam` が使える値になること。"""
@@ -232,8 +248,27 @@ class TestRealGeometry(unittest.TestCase):
             node.model = _FixedMaskModel(mask)
             st = node.process_frame(frame)
             front = st.dist[0]
-            self.assertLessEqual(front, wall + 0.08, f"{wall}m の壁が {front:.2f}m に出た")
-            self.assertGreater(front, wall - 0.3)
+            self.assertLessEqual(front, wall + 0.05, f"{wall}m の壁が {front:.2f}m に出た")
+            self.assertGreater(front, wall - 0.45)
+
+    def test_wall_is_never_farther_at_low_resolutions(self):
+        """マスクの解像度が低くても（160x120・320x180）、壁は真の距離以下（近い側）に出る。
+        行の量子化（最大1行ぶん）を近い側へ見込んでいる。1m の壁が極端に近くならないことも見る。"""
+        from raspi.nav.ipm import ground_to_pixel
+        frame = np.zeros((360, 640, 3), np.uint8)
+        for w, h in ((224, 224), (160, 120), (320, 180)):
+            node = self._node(np.ones((h, w), bool))
+            node.process_frame(frame)
+            for wall in (1.0, 2.0):
+                u, v = ground_to_pixel(wall, 0.0, node._last_intr, node._last_ext)
+                mask = np.ones((h, w), bool)
+                mask[:int(round(v)), :] = False
+                node.model = _FixedMaskModel(mask)
+                dist = node.process_frame(frame).dist
+                worst = max(dist[d % 360] for d in range(-30, 31, 5))
+                best = min(dist[d % 360] for d in range(-30, 31, 5))
+                self.assertLessEqual(worst, wall, f"{w}x{h} の {wall}m の壁が {worst:.2f}m に出た")
+                self.assertGreater(best, wall * 0.85, f"{w}x{h} の {wall}m の壁が近すぎる {best:.2f}m")
 
     def test_centerline_is_usable_on_open_ground(self):
         """全面が走行可能なら、見えている最初の点から 2.5m 先まで十分な幅がある
