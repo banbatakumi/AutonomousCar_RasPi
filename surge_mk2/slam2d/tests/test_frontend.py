@@ -330,6 +330,37 @@ class TestTwistHistory(unittest.TestCase):
         self.assertAlmostEqual(fe.pose.x, 0.02 * 19, delta=0.03)
 
 
+class TestEmptyCycleAndNonFinite(unittest.TestCase):
+    def test_all_invalid_cycle_does_not_double_count_dead_reckoning(self):
+        """全点無効の周は姿勢を進めない（次の周が2周期ぶんを返すため）。"""
+        tw = Twist2D(1.0, 0.0, 0.0)
+        fe = _make_frontend(motion=ExternalTwistModel(lambda: tw), kf_dist=0.05)
+        t = NS
+        for i in range(6):
+            for k in range(1, 11):
+                fe.add_twist(t - NS // 10 + k * NS // 100, tw)
+            raw = _timed_scan(0.1 * i, t)
+            if i == 4:
+                raw = RawScan(raw.angles, raw.ranges, np.zeros(360, dtype=bool),
+                              raw.saturated, np.zeros(360, dtype=np.int64))
+                before = fe.pose.x
+                fe.update(raw, 0.1)
+                self.assertAlmostEqual(fe.pose.x, before, places=6)
+            else:
+                fe.update(raw, 0.1)
+            t += NS // 10
+        # 空の周の後、2周期ぶん(0.2m)だけ進む。二重に積むと0.3m以上に飛ぶ
+        self.assertAlmostEqual(fe.pose.x, 0.5, delta=0.06)
+
+    def test_non_finite_twist_is_ignored(self):
+        fe = _make_frontend()
+        fe.add_twist(NS, Twist2D(float("nan"), 0.0, 0.0))
+        fe.add_twist(NS + 1000, Twist2D(1.0, 0.0, float("inf")))
+        self.assertEqual(len(fe.twists), 0)
+        fe.update(make_raw_scan(3.0, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+        self.assertTrue(all(math.isfinite(v) for v in (fe.pose.x, fe.pose.y, fe.pose.yaw)))
+
+
 class TestRecoveryDoesNotTeach(unittest.TestCase):
     def test_bias_is_not_learned_from_the_jump_back(self):
         """見失いから戻る周期の姿勢の差（溜まったずれ）を、1周期ぶんの回頭として学習しない。"""

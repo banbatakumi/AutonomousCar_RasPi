@@ -132,25 +132,40 @@ class TwistBuffer:
     保持するのは直近`window_s`秒ぶんだけ（1周の点群は最大でも1回転ぶん過去）。
     """
 
-    def __init__(self, *, window_s: float = 0.6, max_samples: int = 256) -> None:
+    def __init__(self, *, window_s: float = 0.6, max_samples: int = 256,
+                 max_gap_s: float = 0.5) -> None:
         self._window_ns = int(window_s * NS)
         self._max = max_samples
         self.t: list[int] = []
         self.vx: list[float] = []
         self.vy: list[float] = []
         self.w: list[float] = []
+        self._max_gap_ns = int(max_gap_s * NS)
+        self._far_t: int | None = None      #: 直前から大きく先に飛んだサンプルの時刻（保留）
 
     def __len__(self) -> int:
         return len(self.t)
 
     def clear(self) -> None:
         self.t.clear(); self.vx.clear(); self.vy.clear(); self.w.clear()
+        self._far_t = None
 
     def add(self, t_ns: int, twist: Twist2D) -> None:
         """**時刻が戻るサンプルは捨てる**（同じ値の再送・時刻の巻き戻り対策）。"""
         t_ns = int(t_ns)
         if t_ns <= 0 or (self.t and t_ns <= self.t[-1]):
             return
+        if self.t and t_ns - self.t[-1] > self._max_gap_ns:
+            # 直前から`max_gap_s`より先のサンプル。1件だけの外れ値を入れると以後の正常な
+            # サンプルが全部「古い」として捨てられるので、まず保留する。続けて届いた
+            # サンプルがその保留と連続しているなら、本当にデータが途切れていたとみて
+            # 履歴を捨てて入れ直す
+            far = self._far_t
+            self._far_t = t_ns
+            if far is None or not (0 < t_ns - far <= self._max_gap_ns):
+                return
+            self.clear()
+        self._far_t = None
         self.t.append(t_ns)
         self.vx.append(float(twist.vx))
         self.vy.append(float(twist.vy))
@@ -162,7 +177,8 @@ class TwistBuffer:
         if drop:
             del self.t[:drop], self.vx[:drop], self.vy[:drop], self.w[:drop]
 
-    def covers(self, t0_ns: int, t1_ns: int, *, max_extrap_s: float = 0.06) -> bool:
+    def covers(self, t0_ns: int, t1_ns: int, *, max_extrap_s: float = 0.06,
+               max_gap_s: float = 0.2) -> bool:
         """`[t0, t1]`をだいたい挟んでいるか（端の外挿が`max_extrap_s`以内か）。
 
         テレメトリ（100Hz）は点群より少し古いところまでしか無いのが普通なので、
@@ -172,7 +188,13 @@ class TwistBuffer:
         if len(self.t) < 2:
             return False
         pad = int(max_extrap_s * NS)
-        return self.t[0] <= t0_ns + pad and self.t[-1] >= t1_ns - pad
+        if not (self.t[0] <= t0_ns + pad and self.t[-1] >= t1_ns - pad):
+            return False
+        # 区間内にサンプルの空白が大きいと、その間を一定 twist で積むことになる
+        t = np.asarray(self.t, dtype=np.int64)
+        m = (t >= t0_ns - int(max_gap_s * NS)) & (t <= t1_ns + int(max_gap_s * NS))
+        tt = t[m]
+        return bool(tt.size < 2 or np.diff(tt).max() <= int(max_gap_s * NS))
 
     def _samples(self, t_lo: int, t_hi: int):
         """`[t_lo, t_hi]`を挟むように、端を一定 twist で外挿したサンプル列。"""

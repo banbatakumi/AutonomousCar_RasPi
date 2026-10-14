@@ -96,6 +96,10 @@ class RegisterResult(NamedTuple):
     #: 使えた点の残差の RMS [m]
     rms: float
     iterations: int
+    #: **全点**（照合できなかった点も分母に入れる）に対する、壁から`inlier_dist`以内に
+    #: 来た点の割合（0〜1）。`inlier`は照合できた点の中の割合なので、点群の大半が
+    #: 地図の外でも高く出る。その差を見たいときに使う
+    inlier_all: float = 0.0
 
 
 def _subsample(px, py, n):
@@ -204,12 +208,14 @@ def register(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, guess: Pose2D, *,
     used = int(a.valid.sum())
     if used:
         d = a.dist[a.valid]
-        inl = float((d <= config.inlier_dist).mean())
+        n_hit = int((d <= config.inlier_dist).sum())
+        inl = float(n_hit / used)
+        inl_all = float(n_hit / max(1, px.size))
         rms = float(np.sqrt(np.mean(d * d)))
     else:
-        inl, rms = 0.0, math.inf
+        inl, inl_all, rms = 0.0, 0.0, math.inf
     return RegisterResult(Pose2D(x, y, wrap_angle(yaw)), h_pts * config.info_scale,
-                          inl, used, rms, it)
+                          inl, used, rms, it, inl_all)
 
 
 class SearchResult(NamedTuple):
@@ -262,7 +268,7 @@ def search(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2D, *,
     # （正方形の部屋のように、同じ位置でも90°回すと同じ形に見えることがある）
     ii, jj = np.meshgrid(offs, offs, indexing="ij")
     far_xy = np.hypot(ii - offs[i], jj - offs[j]) >= ambiguity_dist
-    far_yaw = np.abs(dyaws - dyaws[k]) >= ambiguity_yaw
+    far_yaw = np.abs(np.arctan2(np.sin(dyaws - dyaws[k]), np.cos(dyaws - dyaws[k]))) >= ambiguity_yaw
     far = far_xy[None, :, :] | far_yaw[:, None, None]
     second = float(scores[far].max()) if far.any() else 0.0
     return SearchResult(pose, best, second)

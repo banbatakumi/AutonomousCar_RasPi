@@ -135,10 +135,6 @@ class TestTruncate(unittest.TestCase):
         self.assertAlmostEqual(float(out.x[0]), 1.0, places=9)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTwistBuffer(unittest.TestCase):
     """時刻つき twist の履歴（点ごとの脱スキューと推測航法の予測が共有する）。"""
 
@@ -165,6 +161,30 @@ class TestTwistBuffer(unittest.TestCase):
         b = self._buf(Twist2D(1.0, 0.0, 0.0))
         self.assertTrue(b.covers(NS - int(0.01 * NS), NS + int(0.13 * NS)))
         self.assertFalse(b.covers(NS - int(0.5 * NS), NS + int(0.1 * NS)))
+
+    def test_future_outlier_does_not_freeze_buffer(self):
+        """10秒先の1件が入っても、以後の正常なサンプルで delta が正常値に戻る。"""
+        b = self._buf(Twist2D(1.0, 0.0, 0.0), n=6)
+        b.add(NS + 10 * NS, Twist2D(9.0, 0.0, 0.0))
+        for i in range(6, 12):
+            b.add(NS + int(i * 0.02 * NS), Twist2D(1.0, 0.0, 0.0))
+        self.assertEqual(len(b), 12)
+        d = b.delta(NS, NS + int(0.2 * NS))
+        self.assertAlmostEqual(d.x, 0.2, places=6)
+
+    def test_real_gap_resets_after_consecutive_samples(self):
+        b = self._buf(Twist2D(1.0, 0.0, 0.0), n=6)
+        t = 5 * NS
+        for i in range(3):
+            b.add(t + int(i * 0.02 * NS), Twist2D(2.0, 0.0, 0.0))
+        self.assertEqual(len(b), 2)
+        self.assertAlmostEqual(b.delta(t, t + int(0.02 * NS)).x, 0.04, places=6)
+
+    def test_covers_rejects_large_internal_gap(self):
+        b = TwistBuffer()
+        b.add(NS, Twist2D(1.0, 0.0, 0.0))
+        b.add(NS + int(0.4 * NS), Twist2D(1.0, 0.0, 0.0))
+        self.assertFalse(b.covers(NS, NS + int(0.4 * NS)))
 
     def test_ignores_out_of_order_samples(self):
         b = TwistBuffer()
@@ -287,3 +307,7 @@ class TestPosesVectorizedMatchesLoop(unittest.TestCase):
     def test_single_sample_range(self):
         buf = self._buf([(0.0, 1.0, 0.0, 0.5)])
         self._assert_matches(buf, NS, t_lo=NS, t_hi=NS)
+
+
+if __name__ == "__main__":
+    unittest.main()

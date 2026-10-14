@@ -50,7 +50,7 @@ class LocalMapConfig:
 
 
 class LocalMap:
-    """直近のキーフレーム点群から距離場を作る。"""
+    """直近のキーフレーム点群から面要素地図（`SurfaceMap`）を作る。"""
 
     def __init__(self, config: LocalMapConfig = LocalMapConfig()) -> None:
         self.config = config

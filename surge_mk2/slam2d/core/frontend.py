@@ -237,6 +237,9 @@ class Frontend:
         サンプル列を積んだ推測航法の予測を使う。入れなければ
         「1周期のあいだ twist は一定」の近似になる。
         """
+        if not (math.isfinite(twist.vx) and math.isfinite(twist.vy)
+                and math.isfinite(twist.yaw_rate)):
+            return
         self.twists.add(t_ns, twist)
 
     def update(self, raw: RawScan, dt: float) -> FrontendUpdate:
@@ -246,6 +249,9 @@ class Frontend:
         """
         cfg = self.config
         twist = self.motion.current_twist()
+        if not (math.isfinite(twist.vx) and math.isfinite(twist.vy)
+                and math.isfinite(twist.yaw_rate)):
+            twist = Twist2D(0.0, 0.0, 0.0)      # NaN/inf が姿勢に入ると戻らない
         buf = self._corrected_twists()
         # ★ 時刻の範囲は**有効で時刻のある点だけ**で取る。欠けたセクタの点は時刻 0 で届く
         #   （`raspi/nav/deskew.point_times_ns`）ので、全点の最小を取ると1セクタ欠けただけで
@@ -278,6 +284,11 @@ class Frontend:
         if first:
             delta_pred = Pose2D(0.0, 0.0, 0.0)
             cov_body = np.diag([1e-6, 1e-6, 1e-8])
+        elif not pts.t_ref_ns and prev_t_ref > 0:
+            # 有効な点が無い周は`_t_ref`が進まない。ここで姿勢だけ1周期進めると、
+            # 次の周の`buf.delta(prev_t_ref, t_ref)`が2周期ぶんを返して二重に積まれる
+            delta_pred = Pose2D(0.0, 0.0, 0.0)
+            cov_body = self.motion.prediction_covariance(span)
         else:
             if use_traj and prev_t_ref > 0:
                 delta_pred = buf.delta(prev_t_ref, pts.t_ref_ns)

@@ -69,8 +69,6 @@ class TestOccGrid(unittest.TestCase):
         self.assertFalse(bool(self.g.wall_mask()[row, col]))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestThinWalls(unittest.TestCase):
@@ -180,3 +178,7 @@ class TestCachedMasksAreReadOnly(unittest.TestCase):
         for _ in range(3):
             g.integrate(make_room_points(3.2, 2.0, 0.0), Pose2D(0.2, 0.0, 0.0))
         self.assertNotEqual(n1, int(g.wall_mask().sum()))
+
+
+if __name__ == "__main__":
+    unittest.main()

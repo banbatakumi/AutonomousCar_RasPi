@@ -66,7 +66,7 @@ __all__ = ["SensorModel", "RunConfig", "run", "load_course"]
 
 NS = 1_000_000_000
 DT = 0.002                     #: 車両の積分刻み [s]
-TELEMETRY_HZ = 50              #: `VehicleState` の更新周期（実機の TELEMETRY と同じ）
+TELEMETRY_HZ = 100             #: `VehicleState` の更新周期（実機の TELEMETRY と同じ）
 COURSE_DIR = Path(__file__).resolve().parent / "courses"
 
 

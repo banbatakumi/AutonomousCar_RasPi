@@ -102,6 +102,21 @@ class TestCorridorKeepsPrior(unittest.TestCase):
 
 
 class TestRobustness(unittest.TestCase):
+    def test_inlier_all_counts_unmatched_points(self):
+        truth = (3.0, 2.0, 0.0)
+        smap = _map_from([truth])
+        px, py = _scan(*truth)
+        r0 = register(smap, px, py, Pose2D(*truth))
+        # 点の3割を地図の外（遠方）へ差し替える
+        n = px.size * 3 // 10
+        px2 = np.concatenate([px[:-n], np.full(n, 40.0)])
+        py2 = np.concatenate([py[:-n], np.linspace(-1.0, 1.0, n)])
+        r = register(smap, px2, py2, Pose2D(*truth))
+        self.assertGreater(r.inlier, 0.9)
+        self.assertLess(r.inlier_all, r.inlier - 0.15)
+        self.assertLessEqual(r.inlier_all, r.inlier)
+        self.assertLessEqual(r0.inlier_all, r0.inlier)
+
     def test_moving_obstacle_does_not_drag_the_pose(self):
         truth = (3.0, 2.0, 0.0)
         smap = _map_from([truth])

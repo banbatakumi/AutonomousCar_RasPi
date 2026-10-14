@@ -1,8 +1,9 @@
-# slam2d/ — 車体非依存の汎用2D LiDAR SLAMライブラリの依存（Mac 専用、Pi には入れない）
+# slam2d/ — 車体非依存の汎用2D LiDAR SLAMライブラリの依存（Mac の開発環境と Pi の両方で使う）
 #
 #   .venv/bin/pip install -r slam2d/requirements.txt
 #
-# `ml_lidar/`・`ml_cam/` と同じく、slam2d/ の依存は raspi/ 側に持ち込まない。
+# Pi には `raspi/requirements.txt` が g2opy を入れ、走行中のループ閉じでも使う。
+# （開発・評価用の pytest・matplotlib は Mac 側のみ。）
 # slam2d/ 自体も raspi.* を一切 import しない一方向依存にする。
 
 numpy>=2.1
