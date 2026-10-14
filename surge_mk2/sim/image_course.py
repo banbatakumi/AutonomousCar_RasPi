@@ -179,10 +179,30 @@ def sample_grid(mask: np.ndarray, scale: float, origin: tuple[float, float] = (0
     """画像マスクを世界座標の占有格子（`res` m/セル）へ最近傍サンプリングする。
 
     格子の範囲は画像全体。`origin` は画像の左下の世界座標。
+
+    1セルが1画素より大きい（縮小する）ときは、セルが覆う画素に1つでも壁があれば壁にする
+    （最近傍だと、セルの中心を外れた細い壁が消える）。
     """
     h, w = mask.shape
     gw = max(1, int(np.ceil(w / scale / res)))
     gh = max(1, int(np.ceil(h / scale / res)))
+    step = res * scale                       # 1セルが覆う画素数
+    if step > 1.0:
+        flipped = mask[::-1].astype(np.int32)       # 行0 = y 最小
+
+        def spans(n_cells, n_px):
+            a = np.minimum((np.arange(n_cells) * step).astype(int), n_px - 1)
+            b = np.minimum(np.maximum(np.ceil((np.arange(n_cells) + 1) * step).astype(int), a + 1),
+                           n_px)
+            return a, b
+
+        r0, r1 = spans(gh, h)
+        c0, c1 = spans(gw, w)
+        ii = np.zeros((h + 1, w + 1), dtype=np.int64)
+        ii[1:, 1:] = flipped.cumsum(0).cumsum(1)
+        cnt = (ii[r1[:, None], c1[None, :]] - ii[r0[:, None], c1[None, :]]
+               - ii[r1[:, None], c0[None, :]] + ii[r0[:, None], c0[None, :]])
+        return Sampled(np.ascontiguousarray(cnt > 0), origin)
     cols = np.clip(((np.arange(gw) + 0.5) * res * scale).astype(int), 0, w - 1)
     rows = np.clip(h - 1 - ((np.arange(gh) + 0.5) * res * scale).astype(int), 0, h - 1)
     return Sampled(np.ascontiguousarray(mask[rows[:, None], cols[None, :]]), origin)

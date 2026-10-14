@@ -87,6 +87,8 @@ class TestSimLaunch(unittest.TestCase):
 
     def _command(self, sim: VirtualStm32, launch: bool) -> None:
         flags2 = packets.CMD_FLG2_LAUNCH if launch else 0
+        # 起動直後は ARM を受け付けない。一度 DISARM を挟む（ファームの規則）
+        sim._on_command(packets.Command(mode=2, flags=0), 0, 1_000_000_000)
         sim._on_command(packets.Command(mode=2, flags=packets.CMD_FLG_ARM, target_speed=2000,
                                         flags2=flags2), 0, 1_000_000_000)
 

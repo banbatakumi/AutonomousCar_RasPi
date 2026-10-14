@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import random
 
@@ -124,6 +125,11 @@ class VirtualStm32:
         self._brake_lamp_until_ns = 0
         self._steer_cmd_echo = 0.0
         self._input = DriveInput()
+        #: 舵角を凍結している間の保持値（`None` = 凍結していない）
+        self._steer_freeze: float | None = None
+        #: ARM ビットが一度 0 になるまで ARM を受け付けない（起動直後・E-Stop 解除後・途絶復帰後）
+        self._arm_locked = True
+        self._arm_warned = False
         #: ARM が外れたあと、停車を待って最大制動を続ける期限（★v0.19。0 = 制動していない）
         self._arm_requested = False
         self._disarm_brake_until = 0
@@ -238,14 +244,31 @@ class VirtualStm32:
                 "winker_right_req": bool(self._cmd_flags2 & packets.CMD_FLG2_WINKER_RIGHT)}
 
     def _on_command(self, c: packets.Command, seq: int, t_ns: int) -> None:
+        # COMMAND 途絶（100ms）からの復帰は、ARM を一度 0 に戻すまで ARM を受け付けない
+        # （ファーム vehicle.c。起動直後も `_cmd_ns` が過去なのでここに入る）
+        if (t_ns - self._cmd_ns) > COMMAND_TIMEOUT_NS:
+            self._arm_locked = True
         self._cmd_ns = t_ns
         self._cmd_seq_echo = seq
         self._cmd_flags = c.flags
         self._cmd_flags2 = c.flags2
-        self.mode = c.mode if c.mode in (0, 1, 2) else packets.Mode.DISARM
+        # mode=3（予約）はファームと同じく現モードを保つ（DISARM にしない）
+        if c.mode in (0, 1, 2):
+            self.mode = c.mode
 
         arm_requested = bool(c.flags & packets.CMD_FLG_ARM)
+        if not arm_requested:
+            self._arm_locked = False
+            self._arm_warned = False
         armed = arm_requested and self.mode != packets.Mode.DISARM
+        if armed and self._arm_locked:
+            armed = False
+            if not self._arm_warned:
+                self._arm_warned = True
+                self._emit(packets.Log(
+                    severity=packets.LogSeverity.WARN,
+                    message=b"ARM ignored: disarm once to re-arm (after e-stop / COMMAND loss)"),
+                    t_ns)
         if self.estop_active:
             armed = False       # E-Stop 中は COMMAND が一切効かない（実機と同じ）
         # ★v0.19: 走行中に ARM が外れたら、止まるまで駆動電源を切らず最大制動する
@@ -297,6 +320,7 @@ class VirtualStm32:
             self._acc -= STEP_S
             self._substep(STEP_S)
             t_state += int(STEP_S * NS)
+            self._poll_lidar(t_state)       # セクタの時刻を過ぎたら、その時点の姿勢で撃つ
         self._emit_due_telemetry(t_state)
 
         if self._boot_versions > 0:
@@ -311,6 +335,9 @@ class VirtualStm32:
             self._emit(self._stats, self._next_stats)
             self._next_stats += NS // STATS_HZ
 
+        self._poll_lidar(t_ns)
+
+    def _poll_lidar(self, t_ns: int) -> None:
         if self.lidar is not None:
             for gen_ns, pkt in self.lidar.poll(t_ns, self.vehicle, self.stm_us):
                 self._emit(pkt, gen_ns)
@@ -340,6 +367,18 @@ class VirtualStm32:
             else:
                 cmd = DriveInput(armed=True, brake=True, brake_torque=0.0,
                                  target_steer=v.steer_actual)
+
+        # 途絶・E-Stop・DISARM 中は舵角を凍結する（ファームは `applied_steer_rad` を保持する）。
+        # 駆動のフェイルセーフとは別。凍結の瞬間の参照舵角を保つ
+        frozen = (self.uart_timeout or self.estop_active or not cmd.armed
+                  or cmd is not self._input and self._disarm_brake_until != 0)
+        if frozen:
+            if self._steer_freeze is None:
+                self._steer_freeze = v.steer_ref
+            cmd = dataclasses.replace(cmd, target_steer=self._steer_freeze, steer_rate_limit=0.0,
+                                      hold_steer=True)
+        else:
+            self._steer_freeze = None
 
         # v0.13: サイドブレーキ。**個別車輪の位置制御モデルを持たないため、
         # 最大制動として近似する**（実車は速度に関わらず後輪を機械的に位置固定するが、
@@ -477,11 +516,11 @@ class VirtualStm32:
         odom = [d * (1.0 + p.odom_scale_err)
                 + (self.rng.gauss(0.0, p.odom_noise_m) if p.odom_noise_m > 0 else 0.0)
                 for d in v.odom_front]
-        yaw_rate = v.yaw_rate_measured + math.radians(
+        yaw_rate = v.yaw_rate_measured * (1.0 + p.gyro_scale_err) + math.radians(
             p.gyro_bias_dps
             + (self.rng.gauss(0.0, p.gyro_noise_dps) if p.gyro_noise_dps > 0 else 0.0))
         # 走行中の揺れ（`SimParams.vib_*`。既定 0 なら乱数も引かない＝今までと同じ結果）
-        speed_meas, steer_meas = v.speed_measured, v.steer_actual
+        speed_meas, steer_meas = v.speed_measured * (1.0 + p.speed_scale_err), v.steer_actual
         if p.vib_gyro_dps_per_m_s > 0 or p.vib_speed_ratio > 0 or p.vib_steer_rad > 0:
             vib = self._vibration(t_ns)
             sp = abs(v.speed)
@@ -629,4 +668,6 @@ class VirtualStm32:
         self.vehicle.reset(self.course.start)
 
     def set_estop(self, active: bool) -> None:
+        if self.estop_active and not active:
+            self._arm_locked = True          # 解除後は ARM を一度 0 にするまで受け付けない
         self.estop_active = active

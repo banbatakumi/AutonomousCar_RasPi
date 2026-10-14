@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import NamedTuple
@@ -27,6 +28,9 @@ REAL_VIBRATION = {"vib_gyro_dps_per_m_s": 3.8, "vib_speed_ratio": 0.021, "vib_st
 #: `config/*.json` と同じ流儀（`.gitignore` 済み）。`sim.run` は Mac のローカルチェックアウトで
 #: 動くため、実機の `config/` とは物理的に別ファイルになる
 SIM_PARAMS_CONF = Path(__file__).resolve().parents[1] / "config" / "sim_params.json"
+
+#: `SimParams.load` が設定ファイルを読んだことを一度だけ知らせる
+_announced = False
 
 
 @dataclass
@@ -63,6 +67,11 @@ class SimParams:
     #: 既定 0.02°/s ≒ 1.2°/min
     gyro_bias_dps: float = 0.02
     gyro_noise_dps: float = 0.3            #: ヨーレートのランダムノイズ σ [°/s]
+    #: 車速の倍率誤差（1.0 からのずれ。車輪半径の誤差・摩耗）。既定 0 = 真値のまま。
+    #: `sim.bench --errors real` が 0.02 を入れる
+    speed_scale_err: float = 0.0
+    #: ジャイロの倍率誤差（1.0 からのずれ）。既定 0 = 倍率 1.0。`--errors real` が 0.01
+    gyro_scale_err: float = 0.0
     #: **走行中の揺れ**（車体の振動・舵のばたつき）。白色ではなく `vib_hz` あたりで揺れる雑音を、
     #: テレメトリのヨーレート・車速・実舵角に足す（車の運動は変えない）。既定 0 = 足さない。
     #: 実機の値は `REAL_VIBRATION`。★これが 0 のシムで決めたしきい値は実機で通用しない
@@ -88,10 +97,15 @@ class SimParams:
         """`SIM_PARAMS_CONF` から戻す。無い・壊れている・型が合わないフィールドは
         既定値のまま（`telemetry_node._load_camera_conf` と同じ防御的スタイル。
         フィールドの増減にも強い——古い保存値の余分なキーは単に無視される）"""
+        global _announced
         try:
             raw = json.loads(SIM_PARAMS_CONF.read_bytes())
         except Exception:
             return cls()
+        if not _announced:
+            _announced = True
+            print(f"[sim] {SIM_PARAMS_CONF} を読んだ（既定値と違う設定が入っている可能性）",
+                  file=sys.stderr)
         if not isinstance(raw, dict):
             return cls()
         names = {f.name for f in fields(cls)}

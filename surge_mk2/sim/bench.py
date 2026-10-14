@@ -37,6 +37,13 @@ RACE で最初に走り出した真値の位置に、進行方向と直交する
 シム専用の入口で、動かす対象が numpy の中の車だけなので ARM を人間に握らせる
 意味が無い（`sim/run.py` が `--allow-arm` を既定で付けているのと同じ理由）。
 **このファイルを実機のコードから import してはいけない。**
+
+## 限界
+
+- **壁時計で回る**: 計画・指令の周期は `time.monotonic_ns()` で刻むので、ホストの負荷で結果が
+  変わる（決定論的でない）。`advance_to` は 1 回 0.25s で頭打ちなので、それ以上ホストが止まると
+  シムの時間が遅れる。指令の間隔が仮想 STM32 の途絶（100ms）を超えた走行は「捨てる走行」の
+  印が付く（`Result.report`）。
 """
 
 from __future__ import annotations
@@ -60,6 +67,10 @@ from raspi.proto.generated import packets  # noqa: E402
 from .course import list_courses  # noqa: E402
 from .link import create_sim_link  # noqa: E402
 from .params import REAL_VIBRATION  # noqa: E402
+from .stm32 import COMMAND_TIMEOUT_NS  # noqa: E402
+
+#: 仮想 STM32 が COMMAND 途絶で車を止める間隔 [ms]
+_DEADMAN_MS = COMMAND_TIMEOUT_NS / 1e6
 
 __all__ = ["Bench", "Result"]
 
@@ -154,8 +165,8 @@ class Result:
                     f"最大 {max(a):.2f}{unit}")
 
         gap = (f"  指令の間隔 最大 {self.cmd_gap_ms:.0f}ms"
-               + ("（★150ms を超えた。デッドマンで止まった走行。捨てて走らせ直す）"
-                  if self.cmd_gap_ms > 150.0 else ""))
+               + (f"（★{_DEADMAN_MS:.0f}ms を超えた。デッドマンで止まった走行。捨てて走らせ直す）"
+                  if self.cmd_gap_ms > _DEADMAN_MS else ""))
         if self.cmd_gap_ms > 100.0:
             gap += "  各部の最大 " + "・".join(f"{k} {v:.0f}ms" for k, v in self.slow_ms.items())
         out = [
@@ -292,7 +303,7 @@ class Bench:
 
         from raspi.auto import mapstore
         self._real_maps_dir = mapstore.MAPS_DIR
-        mapstore.MAPS_DIR = Path(tempfile.mkdtemp(prefix="bench_maps_"))
+        self._tmp_maps_dir = mapstore.MAPS_DIR = Path(tempfile.mkdtemp(prefix="bench_maps_"))
         #: `--map`: 保存済み地図の**写し**を一時ディレクトリへ置いて読む（経路の設定を
         #: 保存し直しても実機の `saved_maps/` を書き換えない）
         self._map_name = map_name
@@ -461,7 +472,10 @@ class Bench:
 
         from .course import _outline
         c = self.sim.course
-        self._edt = distance_transform_edt(~c.grid.astype(bool)) * c.resolution
+        # `distance_transform_edt` はセル中心どうしの距離なので、壁の面までは約半セル短い。
+        # 半セル引く（負にはしない）
+        self._edt = np.maximum(
+            distance_transform_edt(~c.grid.astype(bool)) * c.resolution - c.resolution / 2, 0.0)
         self._outline = _outline(np.asarray(self.sim.spec.footprint, dtype=np.float64),
                                  c.resolution / 2)
         self._lap_clear = math.inf
@@ -1008,6 +1022,23 @@ class Bench:
         if close is not None:
             close()
         self.link.close()
+        # 書き換えた保存先を戻し、一時ディレクトリを消す
+        import shutil
+
+        from raspi.auto import mapstore
+        mapstore.MAPS_DIR = self._real_maps_dir
+        shutil.rmtree(self._tmp_maps_dir, ignore_errors=True)
+
+
+def _error_preset(name: str) -> dict[str, float]:
+    """`--errors` の車速・ジャイロの誤差を `SimParams` の欄に直す。値は `slam_bench.SensorModel`
+    の preset から読む（二重に持たない）。"""
+    if name == "none":
+        return {}
+    from .slam_bench import SensorModel
+    m = SensorModel.preset(name)
+    return {"speed_scale_err": m.speed_scale - 1.0, "gyro_scale_err": m.gyro_scale - 1.0,
+            "gyro_bias_dps": m.gyro_bias_dps, "gyro_noise_dps": m.gyro_noise_dps}
 
 
 def main() -> int:
@@ -1075,6 +1106,9 @@ def main() -> int:
     ap.add_argument("--real-noise", action="store_true",
                     help="実機で測った走行中の揺れ（ヨーレート・車速・実舵角）をテレメトリに足す"
                          "（`sim.params.REAL_VIBRATION`。`--sim` の指定が優先）")
+    ap.add_argument("--errors", default="none", choices=["none", "real", "harsh"],
+                    help="閉ループのセンサ誤差（`sim.slam_bench` の real・harsh と同じ車速・ジャイロの"
+                         "倍率とバイアス）。既定 none = 今まで通り。`--sim` の指定が優先")
     ap.add_argument("--obs-log", action="store_true",
                     help="障害物まわりの判断（reason の移り変わり）を時刻つきで出す")
     ap.add_argument("--quiet", action="store_true")
@@ -1131,8 +1165,8 @@ def main() -> int:
                        (kv.partition("=") for kv in args.control)},
               surface=surface or None, assume=pairs(args.assume),
               grip_file=Path(args.grip) if args.grip else None, grip_cfg=grip_cfg,
-              sim_params=({**REAL_VIBRATION, **pairs(args.sim)} if args.real_noise
-                          else pairs(args.sim)),
+              sim_params={**(REAL_VIBRATION if args.real_noise else {}),
+                          **_error_preset(args.errors), **pairs(args.sim)},
               launch_ratio=args.launch_ratio)
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:

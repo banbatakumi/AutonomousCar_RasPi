@@ -99,5 +99,19 @@ class TestGrid(unittest.TestCase):
             ic.crop_for_save(np.zeros((10, 10), dtype=bool), (0.0, 0.0))
 
 
+class TestSampleGridThinWall(unittest.TestCase):
+    def test_one_pixel_line_survives_downsampling(self):
+        mask = np.zeros((100, 100), dtype=bool)
+        mask[:, 51] = True                       # 幅1画素の縦線（セル中心から外れる位置）
+        g = ic.sample_grid(mask, scale=100.0, res=0.05).grid   # 1セル = 5画素
+        self.assertTrue(g[:, 10].all())          # 51/5 = 10 列目
+
+    def test_orientation_row0_is_bottom(self):
+        mask = np.zeros((100, 100), dtype=bool)
+        mask[99, :] = True                       # 画像の最下行 = y 最小
+        g = ic.sample_grid(mask, scale=100.0, res=0.05).grid
+        self.assertTrue(g[0].all() and not g[1:].any())
+
+
 if __name__ == "__main__":
     unittest.main()

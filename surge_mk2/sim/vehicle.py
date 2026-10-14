@@ -297,6 +297,9 @@ class DriveInput:
     """`COMMAND` を SI に開いたもの。"""
 
     armed: bool = False
+    #: True なら ARM していなくても `target_steer` へ舵を向ける（ファームの舵角の凍結。
+    #: 既定 False = 今まで通り DISARM では目標 0）
+    hold_steer: bool = False
     brake: bool = False
     torque_mode: bool = False
     target_speed: float = 0.0        # m/s
@@ -727,7 +730,7 @@ class VehicleModel:
         cmd = self.cmd
 
         # ── 操舵: 参照ランプ（= steer_cmd_echo） → むだ時間 → 1次遅れ → 物理上限 ──
-        target = max(-sp.max_steer, min(sp.max_steer, cmd.target_steer if cmd.armed else 0.0))
+        target = max(-sp.max_steer, min(sp.max_steer, cmd.target_steer if (cmd.armed or cmd.hold_steer) else 0.0))
         if cmd.steer_rate_limit > 0:
             r = cmd.steer_rate_limit * dt
             self.steer_ref += max(-r, min(r, target - self.steer_ref))
