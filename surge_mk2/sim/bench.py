@@ -153,6 +153,7 @@ class Result:
         #: 加速・減速の学習（終わりの値・真値・出なかった窓・移り変わり）
         self.grip_long: dict = {}
         self.cmd_gap_ms = 0.0                  #: 指令を送る間隔の最大 [ms]
+        self.rearms = 0                        #: 仮想 STM32 が ARM を断り、外して入れ直した回数
         self.slow_ms: dict[str, float] = {}
 
     def report(self) -> str:
@@ -169,6 +170,8 @@ class Result:
                   if self.cmd_gap_ms > _DEADMAN_MS else ""))
         if self.cmd_gap_ms > 100.0:
             gap += "  各部の最大 " + "・".join(f"{k} {v:.0f}ms" for k, v in self.slow_ms.items())
+        if self.rearms:
+            gap += f"  ARM の入れ直し {self.rearms} 回（ホストが詰まって COMMAND が途切れた）"
         out = [
             f"計画       {self.plans} 回  1周期 {stat(self.plan_ms, 'ms')}{gap}",
             f"自己位置   {stat(self.pose_err, 'cm', 100)}",
@@ -541,6 +544,7 @@ class Bench:
             if self._gate is not None:
                 slow[key] = max(slow.get(key, 0.0), (time.perf_counter() - t_start) * 1000)
 
+        rearm = False
         while time.monotonic() - t0 < duration_s:
             t_poll = time.perf_counter()
             frames = self.link.poll()
@@ -556,6 +560,12 @@ class Bench:
                         t_vs = time.perf_counter()
                         self._feed_vs(self.vs)
                         took("車両状態", t_vs)
+                    continue
+                if isinstance(msg, packets.Log) and msg.message.startswith(b"ARM ignored"):
+                    # ホストが詰まって COMMAND が 100ms 途切れると、仮想 STM32 はファームと同じく
+                    # ARM を一度外すまで受け付けない。実機では io_node が GUI の ARM を下ろさせ、
+                    # 人が入れ直す。ベンチは人の代わりに1回だけ外して入れ直す
+                    rearm = True
                     continue
                 if not isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
                                         packets.LidarSectorC)):
@@ -624,8 +634,13 @@ class Bench:
                     self.res.cmd_gap_ms = max(self.res.cmd_gap_ms, (now - self._last_cmd_ns) / 1e6)
                 self._last_cmd_ns = now
                 next_cmd = now + cmd_period
+                out_cmd = cmd
+                if rearm:
+                    out_cmd = DriveCmd(mode=0)       # ARM を一度外す（次の周期から元の指令に戻る）
+                    rearm = False
+                    self.res.rearms += 1
                 self.link.send(command_from_cmd(
-                    cmd, allow_arm=True,
+                    out_cmd, allow_arm=True,
                     max_speed=self.max_speed, max_steer=self.max_steer))
                 t_smp = time.perf_counter()
                 self._sample(time.monotonic() - t0, cmd, cmd_period / NS)
