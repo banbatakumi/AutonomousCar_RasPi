@@ -41,7 +41,7 @@ from pathlib import Path
 from ..core.control_params import steer_relink
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
-from .base import ParamSpec, Planner, scan_window
+from .base import ParamSpec, Planner, blind_reason, scan_window
 
 __all__ = ["E2ELidar"]
 
@@ -53,6 +53,14 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "e2e_lidar"
 #: 視野内でセクタが見えている割合がこれを下回ったら計画を放棄する
 #: （`disparity_extender.py` の `MIN_SEEN_RATIO` と同じ理由でパラメータにしない）
 MIN_SEEN_RATIO = 0.6
+#: 実機の判断の周期 [s]（LiDAR の10Hz。`planning_node` は新しい周が来たときだけ `plan()` を呼ぶ）。
+#: 契約 JSON の `dt`（学習時の制御周期）がこれと合わないモデルは読み込まない——1判断で動かせる
+#: 舵の量（`steer_rate_max_rad_s × dt`）も観測の更新間隔も、学習時と別物になる
+PLAN_PERIOD_S = 0.10
+_DT_TOLERANCE_S = 0.02
+#: 契約 JSON に `dt` が無いモデルで、舵角速度の積分に使う `dt` の上限 [s]。点群が途切れた後の
+#: 最初の `plan()` は `dt` が数百ms になり、そのまま掛けると1判断で舵が大きく跳ぶ
+_DT_MAX_S = 0.15
 
 
 def _load_from_path(path: Path) -> dict:
@@ -92,6 +100,12 @@ def _load_from_path(path: Path) -> dict:
     # エクスポートしているので`shape[-1]`は必ず具体的な整数になる）。JSONの値とズレようがない
     # 「モデル本体が持つ唯一の真実」。旧モデル（v9以前、362次元）と現行（363次元）の両方を扱う
     in_dim = int(session.get_inputs()[0].shape[-1])
+    # 学習時の制御周期と舵の平滑化（無い JSON は従来のモデル: 実測の `dt` と GUI の値を使う）
+    dt = float(cfg["dt"]) if "dt" in cfg else None
+    if dt is not None and abs(dt - PLAN_PERIOD_S) > _DT_TOLERANCE_S:
+        raise ValueError(
+            f"{cfg_path} の dt={dt:g}s が実機の判断の周期 {PLAN_PERIOD_S:g}s と合わない。"
+            "学習時の制御周期を LiDAR の周期に合わせたモデルだけが使える")
     return {
         "session": session,
         "input_name": session.get_inputs()[0].name,
@@ -101,6 +115,8 @@ def _load_from_path(path: Path) -> dict:
         "max_steer": float(cfg.get("max_steer", 0.45)),
         "max_speed": float(cfg.get("max_speed", 1.5)),
         "steer_rate_max_rad_s": float(cfg["steer_rate_max_rad_s"]),
+        "dt": dt,
+        "steer_tau": float(cfg["steer_tau"]) if "steer_tau" in cfg else None,
         # 学習したときの STM32 のステアのリンクの換算。無い JSON（2026-10-08 より前のモデル）は
         # 換算なし＝舵角の数値が「モータ角×0.5」だった頃のもの（`plan()` で今の路面舵角へ直す）
         "steer_link": tuple(float(v) for v in cfg.get("steer_link", (1.0, 0.0))),
@@ -125,8 +141,9 @@ class E2ELidar(Planner):
         ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
                   default=0.10, unit="s",
                   note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが反応が鈍る"
-                       "（`de`/`ftg`と同じ仕組み。2026-08-29追加——LiDARスキャンのフレーム間の"
-                       "微小な揺らぎがそのままステア出力の揺らぎになっていたため）"),
+                       "（`de`/`ftg`と同じ仕組み。LiDARスキャンのフレーム間の微小な揺らぎが"
+                       "そのままステア出力の揺らぎになるのを抑える）。★モデルの契約 JSON に"
+                       "`steer_tau` があればそちら（学習時の値）を使い、この値は効かない"),
     )
 
     def __init__(self, model_path: str | Path | None = None, *,
@@ -148,6 +165,10 @@ class E2ELidar(Planner):
         self._model_steer_link = (1.0, 0.0)
         self._model_max_speed = 1.5
         self._model_steer_rate_max_rad_s = 2.0
+        #: 学習時の制御周期と舵の平滑化（契約 JSON にあれば。None = 実測の `dt`・GUI の値を使う）
+        self._model_dt: float | None = None
+        self._model_steer_tau: float | None = None
+        self._engaged = False
         self._load_error = "未選択"
         self._steer = 0.0
         self._steer_target = 0.0
@@ -175,6 +196,8 @@ class E2ELidar(Planner):
         self._model_steer_link = loaded["steer_link"]
         self._model_max_speed = loaded["max_speed"]
         self._model_steer_rate_max_rad_s = loaded["steer_rate_max_rad_s"]
+        self._model_dt = loaded.get("dt")
+        self._model_steer_tau = loaded.get("steer_tau")
 
     def reload_if_changed(self, desired_name: str) -> bool:
         """GUIが選んだモデル名（`e2e/model`）が今と違えば読み込み直す。
@@ -201,6 +224,18 @@ class E2ELidar(Planner):
         self._steer = 0.0
         self._steer_target = 0.0
 
+    def set_engaged(self, engaged: bool) -> None:
+        """`planning_node` が `plan()` の直前に呼ぶ（ダックタイピング）。
+
+        engage の立ち上がりで舵の積分を捨てる。`plan()` は engage していなくても回り続ける
+        （`auto/state` に「今なら何をするか」を出すため）ので、そのあいだも舵角速度を積分して
+        いる。捨てないと、止まっている間に溜まった舵（最大舵角に張り付いていることもある）から
+        走り出す。学習側はエピソードの頭で 0 から始める。
+        """
+        if engaged and not self._engaged:
+            self.reset()
+        self._engaged = bool(engaged)
+
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
         st = AutoState(mode=self.id, planner=self.name)
@@ -214,6 +249,11 @@ class E2ELidar(Planner):
         st.valid_ratio = w.valid_ratio
         if w.seen_ratio < MIN_SEEN_RATIO:
             st.reason = f"点群の欠測が多すぎる（視野の {w.seen_ratio * 100:.0f}%）"
+            return st
+        # 測距不能は入力では「最大距離」になる。全点がそうなった点群を方策に渡さない
+        blind = blind_reason(w)
+        if blind:
+            st.reason = blind
             return st
 
         # ★独立した安全策。モデルの判断を経由しない「事実」としての正面の余裕
@@ -267,6 +307,11 @@ class E2ELidar(Planner):
         # 引き続きGUIの安全側クランプ（`p["max_speed"]`）を使う
         steer_norm = max(-1.0, min(1.0, steer_norm))
         speed_norm = max(-1.0, min(1.0, speed_norm))
+        # 積分と平滑化の刻み。契約に学習時の `dt` があれば1判断ぶんとしてそれを使う（学習側は
+        # 1判断で必ず `steer_rate_max × dt` まで動く）。無ければ実測の `dt` を上限つきで使う。
+        # 最初の `plan()`（`dt == 0`）は動かさない
+        if dt > 0:
+            dt = self._model_dt if self._model_dt is not None else min(dt, _DT_MAX_S)
         self._steer_target = max(-self._model_max_steer, min(self._model_max_steer,
             self._steer_target + steer_norm * self._model_steer_rate_max_rad_s * dt))
         speed = (speed_norm + 1.0) * 0.5 * self._model_max_speed
@@ -279,7 +324,7 @@ class E2ELidar(Planner):
 
         # ★舵の平滑化（時間ベースの1次遅れ）。詳細は `steer_tau` の note 参照
         # （バンビが実車で「舵角の決定が少し不安定」と気づいたのがきっかけ）
-        tau = p["steer_tau"]
+        tau = self._model_steer_tau if self._model_steer_tau is not None else p["steer_tau"]
         alpha = 1.0 if tau <= 1e-3 or dt <= 0 else 1.0 - math.exp(-dt / tau)
         self._steer += (target - self._steer) * alpha
         st.target_steer = self._steer

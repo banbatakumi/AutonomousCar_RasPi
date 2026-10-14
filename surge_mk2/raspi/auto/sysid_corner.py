@@ -30,6 +30,9 @@ LiDARで見ながら速度を上げる**（`scan_window()`を流用）。
 
 止め方: 舵はそのまま、目標速度0を `accel_limit` 1.0m/s² でゆっくり（制動は後輪がロックする）。
 周囲クリアランスでの停止・中止も、舵を保ってロックしない強さ（`ABORT_BRAKE_TORQUE_NM`）で制動する。
+**周囲クリアランスで止まったら、その回の試験はそこで終わり**（空いても走り出さない）——続きから
+再開すると、止まっている車へ停止前の速度（限界の近く）がそのまま指令され、舵いっぱいのまま
+全開で加速する。録り直すには試験開始を押し直す。
 `v_max` は「そこまでに限界が来なければ諦める」上限。
 
 ## 舵角は`max_steer`まで振ってよい
@@ -49,8 +52,8 @@ import math
 
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
-from ._sysid_common import (ABORT_BRAKE_TORQUE_NM, SensorGuard, TestGate, abort_state, corner_limit,
-                            corner_windows, settle_state)
+from ._sysid_common import (SensorGuard, TestGate, abort_state, corner_limit, corner_windows,
+                            settle_state)
 from .base import ParamSpec, Planner, scan_window
 
 __all__ = ["SysIdCorner"]
@@ -100,6 +103,8 @@ class SysIdCorner(Planner):
     def _reset_state(self) -> None:
         self._t = 0.0
         self._done_reason = ""
+        #: 周囲クリアランス不足で中止した理由（"" = していない）。立ったら試験開始を押し直すまで制動のまま
+        self._abort_reason = ""
         #: 走り出してからの (経過時間, 速さ, 横加速度)。`on_vehicle_state` が全サンプルで足す
         self._t_s: list[float] = []
         self._v_s: list[float] = []
@@ -131,6 +136,11 @@ class SysIdCorner(Planner):
         """`planning_node.py`がplan()の直前に呼ぶ（ダックタイピング）。"""
         self._gate.set_engaged(engaged)
 
+    def _finish(self, reason: str) -> None:
+        """試験を終える。サンプルを貯めるのも止める（engage したまま置いても増え続けない）。"""
+        self._done_reason = reason
+        self._running = False
+
     def _check_limit(self, p: dict[str, float]) -> None:
         """溜めたサンプルで限界を判定する（解析 `fit_corner()` と同じ区間・同じ判定）。
         判定は `CORNER_WINDOW_STEP_S` ごとに1回（毎周だと全区間を作り直して重い）。"""
@@ -142,7 +152,7 @@ class SysIdCorner(Planner):
         k, why = corner_limit([(v_, a) for v_, a, _, _ in corner_windows(t, v, self._a_s[i0:])])
         if k is not None:
             self._at_limit = True
-            self._done_reason = f"完了（グリップ限界: {why}）"
+            self._finish(f"完了（グリップ限界: {why}）")
 
     def _stop_state(self, st: AutoState, p: dict[str, float], steer: float) -> AutoState:
         """終わった後: 舵を保ったまま目標速度0へゆっくり（制動しない）。"""
@@ -181,13 +191,12 @@ class SysIdCorner(Planner):
         w = scan_window(scan, 360.0, max(1.0, p["margin_m"] * 4))
         nearest = min(w.dist) if w.dist else 0.0
         st.nearest = nearest
-        if nearest < p["margin_m"]:
-            st.ready = True
-            st.brake = True
-            st.brake_torque = ABORT_BRAKE_TORQUE_NM
-            st.target_steer = steer
-            st.reason = f"周囲クリアランス不足（最近傍 {nearest * 100:.0f}cm）で停止"
-            return st
+        if nearest < p["margin_m"] and not self._abort_reason:
+            self._abort_reason = (f"周囲クリアランス不足（最近傍 {nearest * 100:.0f}cm）。"
+                                  "場所を空けて試験開始を押し直してください")
+            self._running = False
+        if self._abort_reason:
+            return abort_state(st, self._abort_reason, steer)
 
         if self._done_reason:
             return self._stop_state(st, p, steer)
@@ -197,7 +206,7 @@ class SysIdCorner(Planner):
         self._check_limit(p)
         speed = min(p["v_start"] + p["ramp_m_s2"] * self._t, p["v_max"])
         if not self._done_reason and speed >= p["v_max"]:
-            self._done_reason = "完了（上限速度まで限界が来なかった。v_maxを上げて録り直す）"
+            self._finish("完了（上限速度まで限界が来なかった。v_maxを上げて録り直す）")
         if self._done_reason:
             return self._stop_state(st, p, steer)
 

@@ -95,7 +95,9 @@ class SteerMap(NamedTuple):
 
 class PursuitConfig(NamedTuple):
     wheelbase: float = 0.23                #: L [m]（実測確定）
-    max_steer: float = 0.524               #: [rad] = 30°（リンク比 0.5 実測確定）
+    #: 最大路面舵角 [rad]。**呼び出し側が `Vehicle.max_steer` を渡すこと**（この既定は
+    #: `vehicle.toml` にキーが無いときの `Vehicle` の既定と同じ、リンクの換算なしの 30°）
+    max_steer: float = 0.524
     lookahead_k: float = 0.8               #: `Ld = k·v + min` の k [s]
     lookahead_min: float = 0.35            #: [m]
     delay_s: float = 0.15                  #: 遅延補償の時間 [s]

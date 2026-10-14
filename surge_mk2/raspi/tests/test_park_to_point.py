@@ -161,6 +161,103 @@ class TestDeadReckoning(unittest.TestCase):
         self.assertFalse(st.park_active)
 
 
+class TestDoneIsLatched(unittest.TestCase):
+    """完了は新しい目標が来るまで保持する（推定の揺れで再び動き出さない）。"""
+
+    def test_estimate_drift_after_arrival_does_not_restart(self):
+        pp = ParkToPoint()
+        p = pp.merged(IDEAL)
+        pp.request_park_target(0.04, 0.0, 0.0)
+        vs = VehicleState(stopped=True)
+        for _ in range(4):
+            st = pp.plan(_open_scan(), vs, p, DT)
+        self.assertEqual(st.phase, "完了")
+        pp._park_pose = (-0.03, 0.0, 0.0)          # 推定が 3cm 動いた → 残り 7cm（許容 5cm の外）
+        for _ in range(3):
+            st = pp.plan(_open_scan(), vs, p, DT)
+            self.assertEqual(st.phase, "完了")
+            self.assertTrue(st.brake)
+            self.assertTrue(st.winker_left and st.winker_right)
+        self.assertTrue(pp.done)
+        self.assertEqual(pp._replans, 0)
+
+    def test_new_target_leaves_done(self):
+        pp = ParkToPoint()
+        p = pp.merged(IDEAL)
+        pp.request_park_target(0.04, 0.0, 0.0)
+        vs = VehicleState(stopped=True)
+        for _ in range(4):
+            pp.plan(_open_scan(), vs, p, DT)
+        self.assertTrue(pp.done)
+        pp.request_park_target(1.0, 0.0, 0.0)
+        for _ in range(4):
+            st = pp.plan(_open_scan(), vs, p, DT)
+        self.assertFalse(pp.done)
+        self.assertGreater(st.target_speed, 0.0)
+
+
+class TestEngageGating(unittest.TestCase):
+    """制限時間と再計画の回数は engage している間だけ数える（`set_engaged`）。"""
+
+    def _wait(self, pp, seconds):
+        p = pp.merged(IDEAL)
+        vs = VehicleState(stopped=True)
+        st = None
+        for _ in range(int(seconds / DT)):
+            st = pp.plan(_open_scan(), vs, p, DT)
+        return st
+
+    def test_waiting_before_engage_does_not_time_out(self):
+        pp = ParkToPoint()
+        pp.set_engaged(False)
+        pp.request_park_target(1.0, 0.0, 0.0)
+        st = self._wait(pp, 60.0)                  # 既定の制限時間 40s より長く待つ
+        self.assertNotEqual(st.phase, "失敗", st.reason)
+        self.assertEqual(pp._maneuver_t, 0.0)
+        self.assertEqual(pp._replans, 0)
+        self.assertTrue(st.park_path_x)            # 経路は先に見せる
+
+    def test_time_limit_still_applies_while_engaged(self):
+        pp = ParkToPoint()
+        pp.set_engaged(True)
+        pp.request_park_target(1.0, 0.0, 0.0)
+        st = self._wait(pp, 41.0)                  # 車は動かない（速度を積分していない）
+        self.assertEqual(st.phase, "失敗")
+        self.assertIn("制限時間", st.reason)
+
+    def test_default_is_engaged_for_direct_callers(self):
+        """`set_engaged` を呼ばない使い方（走行中の迂回の引き継ぎ）は従来どおり数える。"""
+        pp = ParkToPoint()
+        pp.request_park_target(1.0, 0.0, 0.0)
+        self._wait(pp, 1.0)
+        self.assertGreater(pp._maneuver_t, 0.5)
+
+
+class TestBlockedReplanIsThrottled(unittest.TestCase):
+    """塞がれて制動している間、毎周期は引き直さない（`BLOCKED_REPLAN_S` おき）。"""
+
+    def test_replans_are_spaced_while_blocked(self):
+        from raspi.auto import park_to_point as mod
+        pp = ParkToPoint()
+        p = pp.merged(IDEAL)
+        pp.request_park_target(1.5, 0.0, 0.0)
+        vs = VehicleState(stopped=True)
+        for _ in range(4):
+            pp.plan(_open_scan(), vs, p, DT)
+        self.assertEqual(pp._replans, 1)
+        calls = []
+        pp._replan = lambda prm: calls.append(pp._since_replan) or setattr(pp, "_since_replan", 0.0)
+        pp._safety_brake = lambda *a, **k: (True, "進行方向に障害物")
+        n = 12
+        for _ in range(n):
+            st = pp.plan(_open_scan(), vs, p, DT)
+            self.assertTrue(st.brake)
+        # 1.2 秒で 0.5 秒おき → 2〜3 回（毎周期なら 12 回で上限 8 を使い切る）
+        self.assertLessEqual(len(calls), int(n * DT / mod.BLOCKED_REPLAN_S) + 1)
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertTrue(all(c >= mod.BLOCKED_REPLAN_S - 1e-9 for c in calls))
+
+
 class TestSafetyBrake(unittest.TestCase):
     """掃引ベースの安全停止（`_safety_brake`）。
 
@@ -236,14 +333,18 @@ class TestSafetyBrake(unittest.TestCase):
         pp._set_path(path, (0.0, 0.0, 0.0))
         pp._steer = pp.vehicle.max_steer       # 掃引は指令舵角で作られる
         poses = sample_path_array((0.0, 0.0, 0.0), path, step=0.02)
-        # 制動距離内の姿勢で、車体の左前角が通る位置
-        i = min(6, len(poses) - 1)
-        x, y, yaw = poses[i]
-        ox = x + 0.30 * math.cos(yaw) - 0.09 * math.sin(yaw)
-        oy = y + 0.30 * math.sin(yaw) + 0.09 * math.cos(yaw)
-        ang = math.degrees(math.atan2(oy, ox))
-        self.assertGreater(abs(ang), 25.0,
-                           f"この点は旧方式の安全窓(±25°)の中にある({ang:.0f}°)")
+        # 制動距離内の姿勢で、車体の左前角が通る位置。**旧方式の窓（±25°）の外に出る最初の
+        # 姿勢**を選ぶ（添字を決め打ちにすると、最大舵角が変わったとき角が窓の中に入る）
+        def corner(pose):
+            x, y, yaw = pose
+            return (x + 0.30 * math.cos(yaw) - 0.09 * math.sin(yaw),
+                    y + 0.30 * math.sin(yaw) + 0.09 * math.cos(yaw))
+
+        d_stop = 0.3 * 0.1 + 0.3 ** 2 / (2.0 * p["a_brake_est"]) + p["obstacle_margin_m"]
+        in_reach = [corner(q) for q in poses[:int(d_stop / 0.02) + 1]]
+        outside = [c for c in in_reach if abs(math.degrees(math.atan2(c[1], c[0]))) > 25.0]
+        self.assertTrue(outside, "制動距離内に、旧方式の安全窓(±25°)の外を通る姿勢が無い")
+        ox, oy = outside[0]
         brake, reason = pp._safety_brake(_points([(ox, oy)]), (0.0, 0.0, 0.0),
                                          0.3, 0, p)
         self.assertTrue(brake, reason)

@@ -22,7 +22,7 @@ from onnx import TensorProto, helper  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.control_params import steer_relink  # noqa: E402
 from raspi.auto.base import extend_disparity as _extend  # noqa: E402
-from raspi.auto.base import sector_of_deg  # noqa: E402
+from raspi.auto.base import blind_reason, scan_window, sector_of_deg  # noqa: E402
 from raspi.auto.cam_centerline import CamCenterline  # noqa: E402
 from raspi.auto.cam_e2e import CamE2E  # noqa: E402
 from raspi.auto.disparity_extender import DisparityExtender  # noqa: E402
@@ -1200,6 +1200,83 @@ class TestAutoStateContract(unittest.TestCase):
         self.assertFalse(st.ready)
 
 
+class TestUnmeasurableScan(unittest.TestCase):
+    """測距不能（`dist == 0`・NaN・Inf）が大半の点群では走らない（`base.blind_reason`）。
+
+    `scan_window` は測距不能を「空き」と読むので、LiDAR の窓が塞がれると全方位が空きに化ける。
+    """
+
+    PLANNERS = (FollowTheGap, DisparityExtender, DisparityPursuit)
+
+    def test_all_unmeasurable_scan_is_not_ready(self):
+        for cls in self.PLANNERS:
+            for bad in (0.0, math.nan, math.inf):
+                st = cls().plan(make_scan(default=bad), VehicleState(speed=0.5), cls.merged({}), 0.1)
+                self.assertFalse(st.ready, f"{cls.id} dist={bad}")
+                self.assertEqual(st.target_speed, 0.0)
+                self.assertIn("測距", st.reason)
+
+    def test_unmeasurable_front_alone_is_not_ready(self):
+        """横は測れていても、正面の扇が測れていなければ走らない。"""
+        scan = make_scan({d: 0.0 for d in range(-30, 31)})
+        for cls in self.PLANNERS:
+            st = cls().plan(scan, None, cls.merged({}), 0.1)
+            self.assertFalse(st.ready, cls.id)
+
+    def test_a_few_unmeasurable_points_still_drive(self):
+        """一部だけ返らなかった点群（黒い面・射程外）は従来どおり空きとして走る。"""
+        scan = make_scan({d: 0.0 for d in range(-10, 11)})
+        for cls in self.PLANNERS:
+            st = cls().plan(scan, None, cls.merged({}), 0.1)
+            self.assertTrue(st.ready, f"{cls.id}: {st.reason}")
+
+    def test_saturated_points_count_as_known(self):
+        """飽和（5.10m 以上）は「そこまで何も無い」と分かっている点。開けた場所で止まらない。"""
+        scan = make_scan(default=5.1)
+        scan.saturated = [True] * 360
+        w = scan_window(scan, 180, 6.0)
+        self.assertEqual(w.valid_ratio, 0.0)
+        self.assertEqual(w.known_ratio, 1.0)
+        self.assertEqual(blind_reason(w), "")
+
+    def test_missing_sectors_are_not_counted_as_unmeasurable(self):
+        """欠測セクタは `seen_ratio` が見る。測距不能の割合には入れない。"""
+        scan = make_scan()
+        scan.sector_seen[0] = False
+        w = scan_window(scan, 180, 6.0)
+        self.assertEqual(w.known_ratio, 1.0)
+        self.assertEqual(blind_reason(w), "")
+
+    def test_dist_is_unchanged_for_the_learning_contract(self):
+        """`ScanWindow.dist` は変えない（`ml_lidar/env.py` の観測と同じ値のまま）。"""
+        w = scan_window(make_scan({0: 0.0, 1: math.inf, 2: math.nan, 3: 9.0}), 20, 6.0)
+        j = w.degs.index(0)
+        self.assertEqual(w.dist[j:j + 4], [6.0, 6.0, 6.0, 6.0])
+        self.assertEqual(w.measured[j:j + 4], [False, False, False, True])
+
+
+class TestMissingSectorDisparity(unittest.TestCase):
+    """欠測セクタ1つで視野の大半が塞がらないこと（`extend_disparity` の欠測の縁）。"""
+
+    def test_one_missing_side_sector_keeps_the_rest_open(self):
+        scan = make_scan()
+        scan.sector_seen[1] = False                # 車両角 31〜60° が欠測
+        for cls in (DisparityExtender, DisparityPursuit):
+            st = cls().plan(scan, None, cls.merged({}), 0.1)
+            self.assertTrue(st.ready, st.reason)
+            # 残った −90〜+30° の帯の真ん中あたりを狙う（塞がりすぎると −76° へ跳ぶ）
+            self.assertGreater(math.degrees(st.heading), -45.0)
+            self.assertLess(math.degrees(st.heading), -20.0)
+
+    def test_missing_edge_still_gets_a_body_width_margin(self):
+        """欠測の縁は、隣の距離で車体半幅を見込むぶんだけ塞ぐ（0 にはしない）。"""
+        r = [0.0] * 10 + [3.0] * 60
+        ext = _extend(r, 0.3, 0.3)
+        k = math.ceil(math.degrees(math.atan2(0.3, 3.0)))
+        self.assertEqual(ext[10:10 + k], [0.0] * k)
+        self.assertEqual(ext[10 + k], 3.0)
+
+
 #: `sim/gym_env.py` の `OBS_DIM`（点群361 + 速度1 + ステア1）と揃える。
 #: `raspi/tests/` は `sim/` を import しない方針なので、値をここに書き写す
 #: （変えたら両方直すこと。2026-09-02、ステア観測追加で362→363）
@@ -1273,6 +1350,69 @@ class TestE2ELidar(unittest.TestCase):
         st = p.plan(make_scan(), None, E2ELidar.merged({}), 0.1)
         self.assertFalse(st.ready)
         self.assertIn("モデル", st.reason)
+
+    def test_all_unmeasurable_scan_is_not_ready(self):
+        """全点が測距不能の点群は、方策に渡さず止まる（入力では全ビンが最大距離になる）。"""
+        with tempfile.TemporaryDirectory() as d:
+            model_path = Path(d) / "e2e_lidar.onnx"
+            _make_dummy_e2e_model(model_path)
+            model_path.with_suffix(".json").write_text(json.dumps(
+                {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}))
+            p = E2ELidar(model_path=model_path)
+            st = p.plan(make_scan(default=0.0), None, E2ELidar.merged({}), 0.1)
+            self.assertFalse(st.ready)
+            self.assertIn("測距", st.reason)
+
+    _CONTRACT = {"fov_deg": 360, "max_range": 5.10, "max_steer": 0.45, "max_speed": 1.5,
+                 "steer_rate_max_rad_s": 2.0}
+
+    def _planner(self, d, steer_norm, **contract):
+        model_path = Path(d) / "m.onnx"
+        _make_constant_steer_e2e_model(model_path, steer_norm)
+        model_path.with_suffix(".json").write_text(json.dumps({**self._CONTRACT, **contract}))
+        return E2ELidar(model_path=model_path)
+
+    def test_long_gap_does_not_jump_the_steer(self):
+        """点群が途切れた後の長い `dt` をそのまま積分しない（1判断の舵の変化に上限）。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = self._planner(d, 1.0)
+            prm = E2ELidar.merged({"steer_tau": 0.0})
+            p.plan(corridor(180), None, prm, 0.0)
+            p.plan(corridor(180), None, prm, 1.0)          # 1秒空いた
+            self.assertAlmostEqual(p._steer_target, 2.0 * 0.15, places=6)
+
+    def test_contract_dt_and_steer_tau_are_used(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._planner(d, 1.0, dt=0.1, steer_tau=0.1)
+            prm = E2ELidar.merged({"steer_tau": 0.0})      # GUI の値は効かない
+            p.plan(corridor(180), None, prm, 0.0)
+            st = p.plan(corridor(180), None, prm, 0.13)    # 実測の周期が少しずれても学習時の刻み
+            self.assertAlmostEqual(p._steer_target, 2.0 * 0.1, places=6)
+            want = steer_relink(0.2, (1.0, 0.0), p.vehicle.steer_link) * (1.0 - math.exp(-1.0))
+            self.assertAlmostEqual(st.target_steer, want, places=6)
+
+    def test_model_trained_at_another_period_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self._planner(d, 1.0, dt=0.05)
+            st = p.plan(corridor(180), None, E2ELidar.merged({}), 0.1)
+            self.assertFalse(st.ready)
+            self.assertIn("dt", st.reason)
+
+    def test_engage_edge_resets_the_integrated_steer(self):
+        """engage していない間に溜まった舵から走り出さない。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = self._planner(d, 1.0)
+            prm = E2ELidar.merged({})
+            p.set_engaged(False)
+            for _ in range(20):
+                p.plan(corridor(180), None, prm, 0.1)
+            self.assertGreater(p._steer_target, 0.3)
+            p.set_engaged(True)
+            self.assertEqual((p._steer_target, p._steer), (0.0, 0.0))
+            p.plan(corridor(180), None, prm, 0.1)
+            p.set_engaged(True)                             # 立ち上がり以外では捨てない
+            self.assertGreater(p._steer_target, 0.0)
 
     def test_loaded_model_produces_finite_command(self):
         with tempfile.TemporaryDirectory() as d:

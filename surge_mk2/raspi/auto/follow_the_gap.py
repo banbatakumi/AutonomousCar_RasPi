@@ -76,7 +76,7 @@ import math
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from ..nav.purepursuit import steer_for_target
-from .base import ParamSpec, Planner, min_filter, scan_window
+from .base import ParamSpec, Planner, blind_reason, min_filter, scan_window
 
 __all__ = ["FollowTheGap"]
 
@@ -160,6 +160,10 @@ class FollowTheGap(Planner):
             st.reason = (f"点群の欠測が多すぎる（視野の {w.seen_ratio * 100:.0f}% しか"
                          f"受信できていない）")
             return st                      # ready=False のまま返す ＝ 制動
+        blind = blind_reason(w)
+        if blind:
+            st.reason = blind
+            return st                      # 測距不能を「空き」と読んで走らない（`base.blind_reason`）
 
         # ── ③ 安全バブル ──
         #

@@ -17,9 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.auto.e2e_lidar import E2ELidar  # noqa: E402
 from raspi.auto.registry import make_planner  # noqa: E402
-from raspi.msgs import AutoCtrl, Scan  # noqa: E402
+from raspi.msgs import AutoCtrl, AutoState, Scan, VehicleState  # noqa: E402
 from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,  # noqa: E402
-                              TOPIC_SCAN_CAM, E2EModelCtrl)
+                              TOPIC_SCAN_CAM, TOPIC_VEHICLE_STATE, E2EModelCtrl)
 from raspi.nodes.planning_node import (  # noqa: E402
     POLL_MAX_MS, PlanningNode, _poll_timeout_ms, input_topics)
 
@@ -227,6 +227,144 @@ class TestCurrentStaleness(unittest.TestCase):
 
         stale = node._current(350 * 1_000_000)
         self.assertIn("古い", stale.reason)
+
+
+class TestVehicleStateStaleness(unittest.TestCase):
+    """`vehicle_state` が古ければ制動に読み替える（TELEMETRY だけ止まったとき、固まった値で走らない）。"""
+
+    MS = 1_000_000
+
+    def _node(self, vs):
+        # 点群は 200ms 時点のもの（下の判定時刻ではまだ新しい）
+        scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=1,
+                    t_pub=200 * self.MS, t_capture=200 * self.MS)
+        sub = FakeSub({TOPIC_SCAN: scan, TOPIC_VEHICLE_STATE: vs})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
+        node._replan(200 * self.MS)
+        return node
+
+    def test_stale_vehicle_state_is_not_ready(self):
+        node = self._node(VehicleState(t_pub=10 * self.MS))
+        self.assertTrue(node._current(300 * self.MS).ready)       # 290ms 古い: まだ走る
+        st = node._current(320 * self.MS)                         # 310ms 古い
+        self.assertFalse(st.ready)
+        self.assertIn("車両状態", st.reason)
+
+    def test_missing_or_untimed_vehicle_state_is_left_to_the_planner(self):
+        """届いたことが無い・時刻の無いものでは止めない（planner が `vs is None` を扱う）。"""
+        self.assertTrue(self._node(VehicleState())._current(400 * self.MS).ready)
+        node = self._node(VehicleState())
+        del node.sub.latest[TOPIC_VEHICLE_STATE]
+        self.assertTrue(node._current(400 * self.MS).ready)
+
+
+class TestNotReadyKeepsLastSteer(unittest.TestCase):
+    """「分からない」（ready=False）の制動は、最後に出した舵を保つ（直進へ戻さない）。"""
+
+    def _engaged(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        return node
+
+    def test_brake_holds_the_steer_of_the_last_command(self):
+        node = self._engaged()
+        node._cmd_from(AutoState(ready=True, target_speed=1.0, target_steer=0.3))
+        st = AutoState(reason="点群が 400ms 古い")              # 新しい AutoState（舵 0）
+        cmd = node._cmd_from(st)
+        self.assertTrue(cmd.brake)
+        self.assertEqual(cmd.target_steer, 0.3)
+        self.assertEqual(st.target_steer, 0.3)                    # auto/state にも出す舵が見える
+
+    def test_nan_output_brakes_with_the_last_finite_steer(self):
+        node = self._engaged()
+        node._cmd_from(AutoState(ready=True, target_speed=1.0, target_steer=-0.2))
+        cmd = node._cmd_from(AutoState(ready=True, target_speed=1.0, target_steer=float("nan")))
+        self.assertTrue(cmd.brake)
+        self.assertEqual(cmd.target_steer, -0.2)
+
+    def test_a_decided_brake_uses_the_planners_steer(self):
+        node = self._engaged()
+        node._cmd_from(AutoState(ready=True, target_speed=1.0, target_steer=0.3))
+        cmd = node._cmd_from(AutoState(ready=True, brake=True, target_steer=0.1))
+        self.assertEqual(cmd.target_steer, 0.1)
+
+    def test_steer_is_not_carried_into_the_next_engage(self):
+        node = self._engaged()
+        node._cmd_from(AutoState(ready=True, target_speed=1.0, target_steer=0.3))
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        self.assertEqual(node._cmd_from(AutoState()).target_steer, 0.0)
+
+
+class TestSeqAfterTelemetryRestart(unittest.TestCase):
+    """telemetry_node が起動し直すと `AutoCtrl` の回数（`*_seq`）は 0 に戻る。逆行では発火せず、
+    その後の新しい操作（0 → 1）は前の値 N を超えるのを待たずに効くこと。"""
+
+    def test_counter_going_back_syncs_and_next_increment_fires(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg", quiet=True)
+        node.planner = _FakeFreezeClearPlanner()
+        node._apply_ctrl(AutoCtrl(mode="ftg", freeze_seq=5, clear_seq=3))    # 最初の1通は同期だけ
+        self.assertEqual((node.planner.freeze_calls, node.planner.clear_calls), (0, 0))
+        node._apply_ctrl(AutoCtrl(mode="ftg", freeze_seq=6, clear_seq=3))
+        self.assertEqual(node.planner.freeze_calls, 1)
+        node._apply_ctrl(AutoCtrl(mode="ftg"))                                # 再起動で 0 へ逆行
+        self.assertEqual((node.planner.freeze_calls, node.planner.clear_calls), (1, 0))
+        node._apply_ctrl(AutoCtrl(mode="ftg", freeze_seq=1, clear_seq=1))    # 新しい操作
+        self.assertEqual((node.planner.freeze_calls, node.planner.clear_calls), (2, 1))
+
+
+class _FakeRaisingRequests:
+    """`auto/ctrl` の要求で例外を投げる planner の身代わり。"""
+
+    name = "raising"
+    input_topic = TOPIC_SCAN
+    stale_ms = 300
+
+    def request_load(self, name):
+        raise ValueError("地図ファイルが壊れている")
+
+    def request_freeze(self):
+        pass
+
+    def reset(self):
+        raise RuntimeError("reset の中のバグ")
+
+    def plan(self, scan, vs, p, dt):
+        return AutoState(ready=True, target_speed=0.2, reason="走行中")
+
+
+class TestCtrlRequestSurvivesPlannerException(unittest.TestCase):
+    """`auto/ctrl` の要求で planner が例外を投げても、ノードは落ちず理由を `auto/state` に出す。"""
+
+    def test_request_exception_is_reported_and_cleared_by_the_next_request(self):
+        sub = FakeSub({TOPIC_SCAN: _scan()})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg", quiet=True)
+        node.planner = _FakeRaisingRequests()
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", race_seq=1, race_map="broken"))   # 落ちないこと
+        node._replan(1)
+        self.assertIn("地図の読み込みに失敗", node._current(1).reason)
+        node._apply_ctrl(AutoCtrl(mode="ftg", race_seq=1, freeze_seq=1))        # 通る要求で消える
+        sub.latest[TOPIC_SCAN] = Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=2)
+        node._replan(2)
+        self.assertNotIn("失敗", node._current(2).reason)
+
+    def test_reset_exception_on_release_does_not_propagate(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg", quiet=True)
+        node.planner = _FakeRaisingRequests()
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        node._apply_ctrl(AutoCtrl(mode="ftg"))                                  # reset() が投げる
+        self.assertFalse(node.ctrl.engaged)
+
+    def test_planner_that_cannot_be_built_leaves_no_mode(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="", quiet=True)
+        with mock.patch("raspi.nodes.planning_node.make_planner",
+                        side_effect=RuntimeError("依存が無い")):
+            node._apply_ctrl(AutoCtrl(mode="ftg"))
+        self.assertIsNone(node.planner)
+        self.assertIn("依存が無い", node._current(1).reason)
 
 
 class _FakeReloadablePlanner:

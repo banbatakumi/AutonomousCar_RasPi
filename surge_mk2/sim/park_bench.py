@@ -31,6 +31,15 @@
 `ok`の条件は **phase=="完了" かつ 無衝突 かつ 真値の姿勢誤差が許容内**。
 デッドレコニングがドリフトすると planner は誤った場所で「完了」と言うので、
 申告を信じた評価では品質が測れない。
+
+**「完了」を申告した瞬間には締めない。** その周期の車はまだ動いているので、
+`SETTLE_AFTER_DONE_S` だけ回し続け、止まった後の真値で判定する。その間の衝突も数え、
+「完了」から別の phase へ戻ったら（＝止まった後に動き出したら）失敗にする。
+
+## 測っていないもの
+
+`plan()` の計算時間は 0 として扱う（結果がその周期の指令に即反映される）。実機では経路探索の
+100ms 以上のあいだ `auto/cmd` が出ず、中継側が途絶とみなして制動することがある。
 """
 
 from __future__ import annotations
@@ -59,6 +68,8 @@ from .vehicle import DriveInput, VehicleModel, VehicleSpec  # noqa: E402
 __all__ = ["SensorErrors", "RunResult", "run_one", "run_batch"]
 
 DT = 0.02          #: 車両モデルの積分刻み [s]
+#: plannerが「完了」を申告してから、真値で判定するまで回し続ける時間 [s]
+SETTLE_AFTER_DONE_S = 1.5
 
 
 @dataclass
@@ -119,6 +130,10 @@ class RunResult:
     final_pose: tuple[float, float, float]
     params: dict
     log: list[dict]
+    #: 「完了」を申告した後に別の phase へ戻った（止まった後に動き出した）
+    left_done: bool = False
+    #: 「完了」を申告してから判定までに真値で動いた距離 [m]
+    moved_after_done: float = 0.0
 
 
 def _stm_us(t_ns: int) -> int:
@@ -178,6 +193,9 @@ def run_one(sc: W.ParkScenario, *, errors: SensorErrors | None = None,
     est_last = (0.0, 0.0)
     est_max = 0.0
     t_last_plan = 0.0
+    t_done: float | None = None        # 「完了」を最初に申告した時刻
+    pose_done = (0.0, 0.0)
+    left_done = False
     st = None
     log: list[dict] = []
 
@@ -232,8 +250,17 @@ def run_one(sc: W.ParkScenario, *, errors: SensorErrors | None = None,
                                 steer=math.degrees(last_steer_cmd),
                                 phase=st.phase, reverse=st.park_reverse,
                                 reason=st.reason))
-                if st.phase in ("完了", "失敗"):
+                if st.phase == "失敗":
                     break
+                if st.phase == "完了" and t_done is None:
+                    t_done = t
+                    pose_done = (veh.x, veh.y)
+                elif t_done is not None and st.phase != "完了":
+                    left_done = True
+
+        # 「完了」の後もしばらく回す（止まるまでの移動・その間の衝突・再始動を真値で見る）
+        if t_done is not None and t - t_done >= SETTLE_AFTER_DONE_S:
+            break
 
         veh.apply(DriveInput(armed=True, brake=(last_speed_cmd == 0.0),
                              target_speed=last_speed_cmd, target_steer=last_steer_cmd))
@@ -260,15 +287,19 @@ def run_one(sc: W.ParkScenario, *, errors: SensorErrors | None = None,
     reached = err_pos <= p["pos_tol_m"] and math.degrees(err_yaw) <= p["yaw_tol_deg"]
     phase = st.phase if st is not None else "no-plan"
     return RunResult(
-        scenario=sc.name, ok=(phase == "完了" and collisions == 0 and reached),
-        reached=reached, no_collision=(collisions == 0), phase=phase, t=t,
+        scenario=sc.name, ok=(phase == "完了" and not left_done and collisions == 0 and reached),
+        reached=reached, no_collision=(collisions == 0), phase=phase,
+        t=(t_done if t_done is not None else t),      # 所要時間は「完了」の申告まで
         switches=switches, collisions=collisions,
         min_clear=(0.0 if min_clear is math.inf else min_clear),
         err_pos=err_pos, err_yaw_deg=math.degrees(err_yaw),
         believed_pos=(st.park_rho if st is not None else 0.0),
         est_err_pos=est_last[0], est_err_yaw_deg=est_last[1],
         est_err_pos_max=est_max,
-        final_pose=(veh.x, veh.y, veh.yaw), params=sc.params, log=log)
+        final_pose=(veh.x, veh.y, veh.yaw), params=sc.params, log=log,
+        left_done=left_done,
+        moved_after_done=(math.hypot(veh.x - pose_done[0], veh.y - pose_done[1])
+                          if t_done is not None else 0.0))
 
 
 def run_batch(names: list[str], n: int, *, seed: int = 0,

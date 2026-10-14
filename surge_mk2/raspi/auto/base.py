@@ -31,8 +31,15 @@ import msgspec
 
 from ..msgs.types import TOPIC_SCAN, AutoMap, AutoState, Scan, VehicleState
 
-__all__ = ["ParamSpec", "Planner", "ScanWindow", "min_filter", "scan_window",
+__all__ = ["ParamSpec", "Planner", "ScanWindow", "blind_reason", "min_filter", "scan_window",
            "sector_of_deg", "wrap_deg"]
+
+#: 受信できた点のうち「距離が分かった」（実測または飽和）点の割合の下限。視野全体と、
+#: 正面 ±`BLIND_FRONT_DEG` の扇のそれぞれで見る（`blind_reason`）。**パラメータにしていない**
+#: （`MIN_SEEN_RATIO` と同じ理由。「見えていないのに走る」を人がスライダで許可できる場所を作らない）
+MIN_KNOWN_RATIO = 0.3
+MIN_FRONT_KNOWN_RATIO = 0.5
+BLIND_FRONT_DEG = 30
 
 
 class ParamSpec(msgspec.Struct):
@@ -214,6 +221,10 @@ class ScanWindow(NamedTuple):
     measured: list[bool]                   #: 実測点か（最近傍の判定に使う）
     seen_ratio: float                      #: セクタが見えていた割合 [0..1]
     valid_ratio: float                     #: 実測点だった割合 [0..1]
+    #: 受信できた点のうち距離が分かった（実測または飽和）点の割合 [0..1]。視野全体と正面の扇。
+    #: 受信できた点が無ければ 1.0（欠測の多さは `seen_ratio` が見る）。`blind_reason` が使う
+    known_ratio: float = 1.0
+    front_known_ratio: float = 1.0
 
 
 def scan_window(scan: Scan, fov_deg: float, max_range: float, *,
@@ -230,7 +241,7 @@ def scan_window(scan: Scan, fov_deg: float, max_range: float, *,
     |---|---|---|
     | `sector_seen[s] == False` | **壁**（距離 0 ＝ 侵入禁止） | 受信できていないだけで、そこが空いている保証はまったく無い |
     | `saturated[i]`（5.10m 以上） | `max_range`（空き） | 「5.10m ちょうど」ではなく「以上」。壁として打つと実在しない円い壁ができる |
-    | `dist[i] == 0`（測距不能） | `max_range`（空き） | ★下記。**唯一、危険側に倒している判断** |
+    | `dist[i] == 0`・NaN・Inf（測距不能） | `max_range`（空き） | ★下記。**唯一、危険側に倒している判断** |
 
     `dist == 0` は LD06 が「反射が返らなかった」と言っているだけで、
     **射程外に何も無い**場合と**黒い/斜めの面が至近にある**場合の両方がありうる。
@@ -241,6 +252,10 @@ def scan_window(scan: Scan, fov_deg: float, max_range: float, *,
     重ねて持たない（STM32側の方が速度に応じて停止距離が伸びる分高性能なため。
     `docs/uart_protocol.md` §5.6.4）。
 
+    ★ ただし**測距不能が大半を占める点群では走らない**（`blind_reason`）。LiDAR の窓が
+    塞がれた・反射が返らないと全点が「空き」に化け、`auto_stop` も同じ点群を見ているので
+    働かない。空き扱いにしてよいのは「大半は測れていて、一部だけ返らなかった」ときだけ。
+
     ★ **planner ごとに書き写さないこと。** ここは「点群をどう安全に読むか」
     という契約そのもので、片方だけ直すと**もう片方が古い読み方のまま走る**。
     """
@@ -250,6 +265,9 @@ def scan_window(scan: Scan, fov_deg: float, max_range: float, *,
     dist: list[float] = []
     measured: list[bool] = []
     seen = 0
+    known = 0
+    front_seen = 0
+    front_known = 0
     for d in degs:
         i = (d + offset) % 360
         if not scan.sector_seen[sector_of_deg(i)]:
@@ -257,22 +275,48 @@ def scan_window(scan: Scan, fov_deg: float, max_range: float, *,
             measured.append(False)
             continue
         seen += 1
+        front = abs(d) <= BLIND_FRONT_DEG
+        front_seen += front
         if scan.saturated is not None and scan.saturated[i]:
             dist.append(max_range)         # 「5.10m 以上」。実測点として扱わない
             measured.append(False)
+            known += 1                     # 「そこまでは何も無い」と分かっている
+            front_known += front
             continue
         raw = scan.dist[i]
-        if not (raw > 0.0):                # NaN もここに落ちる（NaN との比較は常に False）
+        # NaN は比較が常に False なので前半で落ちる。Inf は「測れた距離」ではないので同じ扱い
+        if not (raw > 0.0) or raw == math.inf:
             dist.append(max_range)         # 測距不能。★上表の「唯一の危険側」
             measured.append(False)
         else:
             dist.append(min(raw, max_range))
             measured.append(True)
+            known += 1
+            front_known += front
 
     n = len(degs)
     return ScanWindow(degs, dist, measured,
                       seen / n if n else 0.0,
-                      sum(measured) / n if n else 0.0)
+                      sum(measured) / n if n else 0.0,
+                      known / seen if seen else 1.0,
+                      front_known / front_seen if front_seen else 1.0)
+
+
+def blind_reason(w: ScanWindow) -> str:
+    """測距不能な点が多すぎて走ってはいけないなら、その理由。走ってよければ ""。
+
+    `scan_window` は測距不能（`dist == 0`・NaN・Inf）を「空き」と読む。全点がそうなった点群
+    （LiDAR の窓が塞がれた・反射が返らない）では全方位が `max_range` の空きになり、何も
+    見えていないのに最高速で直進する。受信できた点のうち距離が分かった点の割合が、視野全体
+    （`MIN_KNOWN_RATIO`）か正面の扇（`MIN_FRONT_KNOWN_RATIO`）で下限を割ったら走らない。
+    欠測セクタは数えない（`seen_ratio` と各 planner の `MIN_SEEN_RATIO` が見る）。
+    """
+    if w.front_known_ratio < MIN_FRONT_KNOWN_RATIO:
+        return (f"正面の点群が測距できていない（正面 ±{BLIND_FRONT_DEG}° の "
+                f"{w.front_known_ratio * 100:.0f}% しか距離が分からない）")
+    if w.known_ratio < MIN_KNOWN_RATIO:
+        return f"点群が測距できていない（視野の {w.known_ratio * 100:.0f}% しか距離が分からない）"
+    return ""
 
 
 def min_filter(r: list[float], half_width: int) -> list[float]:
@@ -305,8 +349,12 @@ def extend_disparity(r: list[float], disparity: float, half_width: float) -> lis
         if abs(hi - lo) < disparity:
             continue
         near = min(lo, hi)
-        # 距離 `near` の所で半幅ぶんを見込む角度［度］。至近では 90° で頭打ち
-        span = min(90.0, math.degrees(math.atan2(half_width, max(near, 1e-3))))
+        # 距離 `near` の所で半幅ぶんを見込む角度［度］。至近では 90° で頭打ち。
+        # ★ 近い側が 0（欠測セクタ＝侵入禁止）のときは、その縁が**遠い側と同じ距離にある**として
+        #   見込む。距離 0 のまま計算すると 90° になり、欠測 30° の両隣 90° ずつ（＝視野のほぼ
+        #   全部）が塞がる——1周だけセクタが欠けただけで「どこにも進めない」になっていた
+        edge = near if near > 0.0 else max(lo, hi)
+        span = min(90.0, math.degrees(math.atan2(half_width, max(edge, 1e-3))))
         k = int(math.ceil(span))           # 点は 1° 刻み
         if hi > lo:
             # 遠いのは右→左方向（添字が増える側）。i+1 から先を塗る

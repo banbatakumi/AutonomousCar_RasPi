@@ -45,6 +45,19 @@ def straight(length=20.0, v=2.0):
 
 
 class TestMPC(unittest.TestCase):
+    def test_path_without_curvature_falls_back_to_pure_pursuit(self):
+        """曲率の列が経路と合わない（空）経路でも落ちず、Pure Pursuit の舵を返す。"""
+        from raspi.nav.purepursuit import PursuitConfig, follow
+        base = straight()
+        path = type(base)(**{**base._asdict(), "kappa": np.zeros(0)})
+        cfg = MPCConfig(wheelbase=L)
+        pose = (1.0, 0.1, 0.0)
+        out = MPCFollower().follow(path, pose, 1.0, 0.0, cfg, now=0.0)
+        want = follow(path, pose, 1.0, 0.0,
+                      PursuitConfig(wheelbase=L, max_steer=cfg.max_steer, delay_s=cfg.delay_s,
+                                    speed_preview_s=cfg.speed_preview_s, steer_map=cfg.steer_map))
+        self.assertEqual(out.steer, want.steer)
+
     def setUp(self):
         self.cfg = MPCConfig(wheelbase=L, delay_s=0.0, period=0.05)
 

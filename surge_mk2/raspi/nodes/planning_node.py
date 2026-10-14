@@ -101,6 +101,11 @@ def _poll_timeout_ms(wait_ns: int) -> int:
 VEHICLE_STATE_POLICY = Policy(conflate=False, hwm=1000)
 
 
+#: `vehicle_state` がこれより古ければ制動に読み替える [ms]（`PlanningNode._current`）。100Hz の
+#: ストリームなので 30 通ぶん。planner は車速・オドメトリ・ヨーレートを最新値として使うので、
+#: TELEMETRY だけが止まると固まった値で走り続ける（同定の `SensorGuard` もサンプルが来ないと働かない）
+VEHICLE_STATE_STALE_MS = 300
+
 #: 走行中に起動し直したとき `auto/state` の理由に出す文言（`PlanningNode._apply_ctrl`）
 _RESTART_NOTE = "★planning_node が起動し直した。自動運転を一度解除して入れ直してください"
 
@@ -141,6 +146,12 @@ class PlanningNode:
         #: 起動した時点で既に engage されていた（＝走行中にこのノードが起動し直した）。
         #: 人が入れ直すまで engage を受けない
         self._engage_blocked = False
+        #: 最後に `auto/cmd` へ出した舵 [rad]。**「分からない」（ready=False）の制動はこの舵を保つ**
+        #: （`_cmd_from`）。engage・解除・モード変更で 0 に戻す
+        self._last_steer = 0.0
+        #: `auto/ctrl` の要求（地図の読み込み・経路の保存など）で planner が投げた例外。次の要求が
+        #: 通るかモードが変わるまで `auto/state` の理由に出す（`_ask`）
+        self._ctrl_error = ""
 
         #: 最後に出した判断。新しい判断はその場で、それ以外は 50Hz で `auto/cmd` に繰り返す
         self.state = AutoState()
@@ -160,6 +171,22 @@ class PlanningNode:
         self._running = False
 
     # ── 意思の受け取り ──
+
+    def _ask(self, what: str, fn, *args) -> bool:
+        """planner への要求（`request_*`・`close`・`reset` など）を呼ぶ。**例外でノードを落とさない。**
+
+        ここで落ちると systemd が起動し直し、人が自動運転を入れ直すまで何も動かなくなる
+        （`_engage_blocked`）。壊れた地図ファイルや経路の JSON 1つでそうなる理由は無いので、
+        理由を `auto/state` に出して続ける。通ったら True。
+        """
+        try:
+            fn(*args)
+        except Exception as e:                      # noqa: BLE001
+            self._ctrl_error = f"{what}に失敗: {e}"
+            print(f"# {what}で例外: {e}", file=sys.stderr, flush=True)
+            return False
+        self._ctrl_error = ""
+        return True
 
     def _apply_ctrl(self, c: AutoCtrl) -> None:
         """`auto/ctrl` を反映する。**モードが変わったら planner を作り直す。**
@@ -187,6 +214,8 @@ class PlanningNode:
         # disengage も状態を捨てる契機にする。次に engage したときに、
         # **前回の舵の続きから動き出さない**ようにするため
         released = self.ctrl.engaged and not c.engaged
+        if changed or c.engaged != self.ctrl.engaged:
+            self._last_steer = 0.0          # 前の走行・前のモードの舵を持ち越さない
         # 「地図を確定」「地図を削除」は**回数が増えたときだけ**効かせる
         # （`AutoCtrl.freeze_seq` / `clear_seq`）。モード変更（`changed`）と
         # 同一メッセージに乗って来ても、意思としては両方とも有効——
@@ -201,38 +230,42 @@ class PlanningNode:
         route = c.route_seq > self.ctrl.route_seq
         self.ctrl = c
         if clear and self.planner is not None:
-            self.planner.request_clear()
+            self._ask("地図の削除", self.planner.request_clear)
             self._last_map_seq = -1
             if not self.quiet:
                 print("# 地図を削除（GUI）", flush=True)
         if freeze and self.planner is not None:
-            self.planner.request_freeze()
+            self._ask("地図の確定", self.planner.request_freeze)
             if not self.quiet:
                 print("# 地図を確定（GUI）", flush=True)
         if load and self.planner is not None:
-            self.planner.request_load(c.race_map)
+            self._ask("地図の読み込み", self.planner.request_load, c.race_map)
             self._last_map_seq = -1
             if not self.quiet:
                 print(f"# 地図を読み込み（GUI）: {c.race_map}", flush=True)
         if hint and self.planner is not None:
-            self.planner.request_locate_hint(c.loc_hint_x, c.loc_hint_y)
+            self._ask("自己位置のヒント", self.planner.request_locate_hint, c.loc_hint_x, c.loc_hint_y)
         if park and self.planner is not None:
-            self.planner.request_park_target(c.park_x, c.park_y, c.park_yaw)
+            self._ask("駐車目標の設定", self.planner.request_park_target,
+                      c.park_x, c.park_y, c.park_yaw)
         # 経由点エディタの保存・走行中の経路グループ切替（`slam2d_route`だけが持つ口。
         # `on_vehicle_state`と同じダックタイピングで「持っていれば渡す」）
         if routes:
             fn = getattr(self.planner, "request_routes", None)
             if fn is not None:
-                fn(c.routes_json)
+                self._ask("経路の設定の保存", fn, c.routes_json)
         if route:
             fn = getattr(self.planner, "request_route", None)
             if fn is not None:
-                fn(c.route_group, "gui")
+                self._ask("経路の切替", fn, c.route_group, "gui")
         if changed:
             close = getattr(self.planner, "close", None)
             if close is not None:
-                close()                     # 経路計算のワーカーを残さない
-            self.planner = make_planner(c.mode)
+                self._ask("planner の終了", close)   # 経路計算のワーカーを残さない
+            self.planner = None
+            self._ctrl_error = ""
+            # 作れなければ「モードなし」と同じ（走らない）。理由は `_ctrl_error` に残る
+            self._ask(f"モード {c.mode} の開始", self._make_planner, c.mode)
             self.state = AutoState(mode=c.mode)
             self._last_scan_seq = -1
             self._last_map_seq = -1
@@ -248,10 +281,13 @@ class PlanningNode:
             # 解除だけなら、持っていれば `on_disengage`（slam2d 系は地図作成中の地図を残す）
             on_disengage = getattr(self.planner, "on_disengage", None)
             if released and not changed and on_disengage is not None:
-                on_disengage()
+                self._ask("解除の処理", on_disengage)
             elif changed or released:
-                self.planner.reset()
+                self._ask("planner の初期化", self.planner.reset)
         self._params = merged_params(c.mode, c.params)
+
+    def _make_planner(self, mode: str) -> None:
+        self.planner = make_planner(mode)
 
     def _apply_route_select(self, m) -> None:
         """信号認識（`route/select`）の切替要求。**`(value, event_id)` が変わったときだけ**
@@ -263,7 +299,11 @@ class PlanningNode:
         self._last_route_select = key
         fn = getattr(self.planner, "request_signal", None)
         if fn is not None:
-            fn(m.value, m.source or "signal")
+            try:
+                fn(m.value, m.source or "signal")
+            except Exception as e:                  # noqa: BLE001  信号1つでノードを落とさない
+                print(f"# 経路の切替（信号）で例外: {e}", file=sys.stderr, flush=True)
+                return
             if not self.quiet:
                 print(f"# 経路の切替要求（{m.source or 'signal'}）: {m.value}", flush=True)
 
@@ -277,7 +317,7 @@ class PlanningNode:
         """
         reload_fn = getattr(self.planner, "reload_if_changed", None)
         if reload_fn is not None:
-            reload_fn(m.name)
+            self._ask("モデルの切替", reload_fn, m.name)
 
     # ── 計画 ──
 
@@ -368,7 +408,7 @@ class PlanningNode:
         st = self.state
         if self.planner is None:
             return AutoState(mode=self.ctrl.mode, engaged=self.ctrl.engaged,
-                             reason="モードが選ばれていない")
+                             reason=self._ctrl_error or "モードが選ばれていない")
         scan = self.sub.latest.get(self.planner.input_topic)
         if scan is None:
             return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
@@ -385,7 +425,15 @@ class PlanningNode:
                              engaged=self.ctrl.engaged,
                              scan_age_ms=age / 1e6, plan_hz=self._plan_hz,
                              reason=f"点群が {age / 1e6:.0f}ms 古い")
+        # 車両状態も同じ。届いたことが無い（None）・時刻の無いもの（テスト・合成）は planner に任せる
+        vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        if vs is not None and vs.t_pub > 0 and now_ns - vs.t_pub > VEHICLE_STATE_STALE_MS * 1_000_000:
+            return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
+                             engaged=self.ctrl.engaged, plan_hz=self._plan_hz,
+                             reason=f"車両状態が {(now_ns - vs.t_pub) / 1e6:.0f}ms 古い")
         st.engaged = self.ctrl.engaged
+        if self._ctrl_error and self._ctrl_error not in st.reason:
+            st.reason = f"★{self._ctrl_error}（{st.reason}）" if st.reason else f"★{self._ctrl_error}"
         if self._engage_blocked and not st.reason.startswith(_RESTART_NOTE):
             st.reason = f"{_RESTART_NOTE}（{st.reason}）" if st.reason else _RESTART_NOTE
         return st
@@ -394,7 +442,10 @@ class PlanningNode:
         """判断 → 走行指令。
 
         **`ready=False` は必ず制動になる。** planner が「分からない」と言った
-        ときに惰行させると、分からないまま壁まで転がる。
+        ときに惰行させると、分からないまま壁まで転がる。このときの舵は**最後に出した舵のまま**
+        にする（`_last_steer`）——点群が古い・planner の例外・隙間が無い、はどれも新しい
+        `AutoState`（舵 0）で来るので、そのまま載せると旋回中の最大制動と同時に舵が直進へ戻り、
+        外へ飛び出す（中継側 `telemetry_node._merge_auto` が途絶のときに舵を保つのと同じ方針）。
 
         `arm` と `brake_torque` はここでは決めない（`brake_torque=0` は
         「未指定 ＝ STM32 の最大制動」の意味になる）。**中継側が GUI の値を
@@ -413,6 +464,10 @@ class PlanningNode:
         if not st.ready or st.brake:
             # 制動トルクは planner が決めた制動（ready）のときだけ載せる。「分からない」（ready=False）
             # の制動は 0＝中継側の GUI の値
+            if st.ready:
+                self._last_steer = st.target_steer
+            else:
+                st.target_steer = self._last_steer      # `auto/state` にも実際に出す舵を見せる
             return DriveCmd(mode=2, arm=True, brake=True,
                             target_speed=0.0, target_steer=st.target_steer,
                             brake_torque=st.brake_torque if st.ready else 0.0,
@@ -423,7 +478,9 @@ class PlanningNode:
         if st.torque_mode and not math.isfinite(st.target_torque):
             st.ready = False
             st.reason = "出力がNaN/Inf"
-            return DriveCmd(mode=2, arm=True, brake=True, source=f"planning:{self.ctrl.mode}")
+            return DriveCmd(mode=2, arm=True, brake=True, target_steer=self._last_steer,
+                            source=f"planning:{self.ctrl.mode}")
+        self._last_steer = st.target_steer
         return DriveCmd(mode=2, arm=True,
                         target_speed=st.target_speed, target_steer=st.target_steer,
                         accel_limit=st.accel_limit,

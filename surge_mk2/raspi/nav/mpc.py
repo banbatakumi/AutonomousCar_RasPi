@@ -163,7 +163,8 @@ class MPCFollower:
         else:
             t = path.xy[min(i + 1, n - 1)] - path.xy[max(i - 1, 0)]
         tn = math.hypot(*t)
-        if tn < 1e-9:
+        # 接線が取れない・曲率の列が経路と合わない（曲率なしで作った経路）なら Pure Pursuit の舵で返す
+        if tn < 1e-9 or len(path.kappa) != n:
             return base
         ty = math.atan2(t[1], t[0])
         e_y = (t[0] * (py - path.xy[i, 1]) - t[1] * (px - path.xy[i, 0])) / tn
@@ -175,7 +176,7 @@ class MPCFollower:
         #   （実機の記録、ヘアピン 1.1m/s で約 11Hz・±0.05rad。走行中の学習の誤検出の元にもなった）
         dx, dy = px - path.xy[i, 0], py - path.xy[i, 1]
         s_off = (t[0] * dx + t[1] * dy) / tn
-        k_i = float(path.kappa[i]) if len(path.kappa) == n else 0.0
+        k_i = float(path.kappa[i])
         if not path.closed and (i == 0 or i == n - 1):
             s_off = 0.0                           # 端点の外側へは延ばさない
         s_lim = path.length / max(1, n)           # 射影が隣の点を大きく越えることは無い（保険）

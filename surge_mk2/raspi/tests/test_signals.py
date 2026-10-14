@@ -64,5 +64,22 @@ def test_hazard_overrides():
 
 
 def test_planning_cmd_carries_lights():
+    """planner が `AutoState` に出した灯火が、走行中・制動中とも `auto/cmd` に載る。"""
+    from raspi.msgs.types import AutoCtrl
     from raspi.nodes.planning_node import PlanningNode
-    assert "passing" in AutoState.__struct_fields__ and "winker_left" in DriveCmd.__struct_fields__
+
+    class _Sub:
+        latest: dict = {}
+
+    node = PlanningNode(pub=None, sub=_Sub(), mode="ftg", quiet=True)
+    node._apply_ctrl(AutoCtrl(mode="ftg"))                    # 起動後の最初の1通（解除状態）
+    node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+    run_cmd = node._cmd_from(AutoState(ready=True, target_speed=1.0, passing=True, winker_left=True))
+    assert isinstance(run_cmd, DriveCmd)
+    assert (run_cmd.passing, run_cmd.winker_left, run_cmd.winker_right) == (True, True, False)
+    hazard = node._cmd_from(AutoState(ready=True, brake=True, winker_left=True, winker_right=True))
+    assert hazard.brake and hazard.winker_left and hazard.winker_right
+    # engage していなければ灯火も出さない（見せるためだけの指令）
+    node._apply_ctrl(AutoCtrl(mode="ftg"))
+    idle = node._cmd_from(AutoState(ready=True, passing=True, winker_left=True))
+    assert not (idle.passing or idle.winker_left)

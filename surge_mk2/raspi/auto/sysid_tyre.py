@@ -29,20 +29,27 @@ TC・ABS・TV を切る。片輪浮き対策は入れたまま（後輪の周速
 
 ## 安全
 
-- 直線 `run_length_m`（2m）＋車長が要る。止まりきれなくなる地点で制動に移る
+- 直線 `run_length_m`（2m）＋車長が要る。止まりきれなくなる地点（判断の遅れの間の加速ぶんも
+  入れた見積もり）で制動に移る
 - 後輪の空転は 100Hz で見て `spin_end_m_s` で打ち切る
 """
 
 from __future__ import annotations
 
 from ..msgs.types import AutoState, Scan, VehicleState
-from ._sysid_common import OdomRun, TestGate, settle_state
+from ._sysid_common import OdomRun, TestGate, settle_state, stop_distance
 from .base import Planner
 
 __all__ = ["SysIdTyre", "OVERRIDES"]
 
 OVERRIDES = {"tc_enable": 0.0, "abs_enable": 0.0, "tv_enable": 0.0}
 _MAX_TORQUE_NM = 0.13
+#: 止まりきれなくなる地点の見積もりに入れる、判断の遅れの間の加速度 [m/s²]。駆動の区間は TC を
+#: 切ったトルク直接指令なので、制動に移ると決めてから効くまでの間もタイヤの限界で加速し続ける
+#: （ファームの目標ランプの上限と同じ値。測る対象そのものなので `vehicle.toml` に頼らない）。
+#: 転がす区間は `accel_limit` の値
+_DRIVE_ACCEL_FOR_STOP_M_S2 = 3.0
+_ROLL_ACCEL_M_S2 = 2.0
 
 
 #: 経過時間の比較の余裕 [s]（0.1s の足し算の丸め誤差で判断が1周期ずれないように）
@@ -146,7 +153,10 @@ class SysIdTyre(Planner):
 
         self._t += dt
         v = vs.speed
-        out_of_road = self._run.must_stop(vs, p["run_length_m"], v)
+        # 加速中の区間は、判断の遅れの間の増速ぶんも止まる距離に入れる（入れないと直線をはみ出す）
+        accel_now = {self._ROLL: _ROLL_ACCEL_M_S2, self._DRIVE: _DRIVE_ACCEL_FOR_STOP_M_S2}.get(self._phase, 0.0)
+        out_of_road = (self._run.traveled(vs) + stop_distance(v, True, accel_now)
+                       >= p["run_length_m"])
         if self._phase == self._ROLL:
             done = self._t >= p["roll_s"] - _EPS or out_of_road
         elif self._phase == self._DRIVE:
@@ -171,7 +181,7 @@ class SysIdTyre(Planner):
 
         if self._phase == self._ROLL:
             st.target_speed = p["roll_speed"]
-            st.accel_limit = 2.0
+            st.accel_limit = _ROLL_ACCEL_M_S2
         elif self._phase == self._DRIVE:
             torque = min(_MAX_TORQUE_NM, p["drive_start_nm"] + p["drive_step_nm"] * self._steps)
             if torque >= _MAX_TORQUE_NM:

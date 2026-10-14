@@ -136,6 +136,21 @@ class TestTyre(unittest.TestCase):
         self.assertTrue(all(b > a for a, b in zip(torques, torques[1:])))
         self.assertTrue(st.brake)
 
+    def test_drive_ends_where_it_can_still_stop_counting_the_ongoing_acceleration(self):
+        """駆動の打ち切りは、判断の遅れの間も加速し続けるぶんを入れた停止距離で決める。"""
+        from raspi.auto._sysid_common import stop_distance
+        v = 1.6
+        with_accel = stop_distance(v, True, 3.0)
+        self.assertGreater(with_accel, stop_distance(v) + 0.15)
+        # 加速ぶんを入れない見積もりなら止まれる、入れると止まれない位置
+        odom = 2.0 - 0.5 * (with_accel + stop_distance(v))
+        p = SysIdTyre()
+        start(p, vs())
+        p._enter(p._DRIVE)
+        st = p.plan(None, vs(speed=v, rear=v, odom=odom), {}, DT)
+        self.assertTrue(st.brake, st.reason)
+        self.assertFalse(st.torque_mode)
+
     def test_brake_backs_off_after_lock(self):
         p = SysIdTyre()
         p._gate.set_engaged(True)

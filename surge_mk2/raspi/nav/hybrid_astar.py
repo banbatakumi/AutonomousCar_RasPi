@@ -24,8 +24,9 @@ Planning for Autonomous Driving", 2008（DARPA Urban Challengeの実装）の構
    詰めで探索が発散する
 3. **二重ヒューリスティック**。「障害物を無視したRS長」と「非ホロノミックを
    無視した2D測地距離（Dijkstra）」の**max**を使う。前者だけでは行き止まりに
-   誘い込まれ、後者だけでは向きの拘束を無視して過小評価する。**どちらも真の
-   コスト以下なので、maxを取っても許容的（admissible）**
+   誘い込まれ、後者だけでは向きの拘束を無視して過小評価する。RS長は真の
+   コスト以下。測地距離は粗い格子の8近傍で測るので、斜めの経路では実距離を最大8%ほど
+   長く見積もる（厳密には許容的でない。影響は経路がわずかに最短でなくなるだけ）
 
 ## コスト設計
 
@@ -113,10 +114,10 @@ class HybridConfig:
     goal_slack: float = 0.03
     #: 展開の上限。超えたら失敗（呼び出し側は直前の経路を保持する）
     max_expansions: int = 4000
-    #: 探索の時間予算 [s]。**実機ではこれが実質的な上限になる。**
-    #: `plan()`は`planning_node`の周期ループの中で同期的に呼ばれるので、
-    #: ここで長くブロックすると指令が途絶え、デッドマン（150ms、
-    #: `config/vehicle.toml`の`cmd_deadman_ms`）でDISARMに落ちる。
+    #: 探索の時間予算 [s]（ヒューリスティックの格子を作る時間も含む）。**実機ではこれが
+    #: 実質的な上限になる。** `plan()`は`planning_node`の周期ループの中で同期的に呼ばれ、
+    #: その間は`auto/cmd`が出ない。長くブロックすると中継側が途絶とみなして最大制動する
+    #: （`config/vehicle.toml`の`auto_cmd_stale_ms`、200ms）。
     #: 予算切れは「失敗」として返し、車両は直前の経路を維持する
     time_budget_s: float = 0.25
     #: 何回展開ごとに目標へRSを撃つか
@@ -327,6 +328,8 @@ def plan(start: tuple[float, float, float], goal: tuple[float, float, float],
                             f"目標姿勢が障害物と重なっています（余裕{goal_clear * 100:.1f}cm）")
     margin = min(cfg.margin, max(-cfg.goal_slack, goal_clear - 0.005))
 
+    # 予算は格子のヒューリスティック（Dijkstra）を作る時間も含めて測る
+    t_start = time.perf_counter()
     curvatures = _curvature_levels(cfg)
     h2d = _Heuristic2D(lmap, goal[:2], cfg, margin)
 
@@ -348,11 +351,10 @@ def plan(start: tuple[float, float, float], goal: tuple[float, float, float],
     best: dict[tuple[int, int, int], float] = {_key(start, cfg): 0.0}
     expansions = 0
 
-    t_start = time.perf_counter()
     while heap and expansions < cfg.max_expansions:
-        # 時間予算。32展開ごとにしか時計を見ない（`perf_counter`自体が
-        # 1回0.1µs程度あり、1展開0.1msの探索では無視できない比率になる）
-        if (expansions & 31) == 0 and time.perf_counter() - t_start > cfg.time_budget_s:
+        # 時間予算。4展開ごとに時計を見る。目標の近くでは1展開が0.5ms以上かかる（子ごとの
+        # RS長・解析展開）ので、間を空けると予算を数十ms超える。`perf_counter`は1回0.1µs程度
+        if (expansions & 3) == 0 and time.perf_counter() - t_start > cfg.time_budget_s:
             return HybridResult(ReedsSheppPath(()), False, expansions,
                                 f"時間予算{cfg.time_budget_s * 1000:.0f}msに到達",
                                 0.0, margin)

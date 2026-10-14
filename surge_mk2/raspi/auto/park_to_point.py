@@ -57,7 +57,8 @@ Reeds-Shepp（`raspi/nav/reeds_shepp.py`）は捨てずに、解析展開と
 ヒューリスティックとして内部で使う。48語（9語族）へ完全化した。
 
 時間予算（既定120ms）で打ち切る——`planning_node`の周期ループ内で同期的に
-走るので、`cmd_deadman_ms`(150ms)を超えると指令が途絶えてDISARMに落ちる。
+走り、その間は`auto/cmd`が出ない。`plan()`全体が`auto_cmd_stale_ms`(200ms)を
+超えると、中継側（`telemetry_node`）が途絶とみなして最大制動する。
 予算内に解が出なければRS候補選択へ落ちる（「動かない」より「少し進んで
 別の姿勢から再計画」の方が次の機会で解ける）。
 
@@ -106,6 +107,13 @@ Reeds-Shepp（`raspi/nav/reeds_shepp.py`）は捨てずに、解析展開と
 `rho < pos_tol_m`かつ`|向き誤差| < yaw_tol_deg`で完了。満たさなければ
 その時点の姿勢から再計画する（`max_replans`回まで）。`max_maneuver_s`を
 超えたら失敗として打ち切る。
+
+**完了は保持する**（新しい目標が来るまで）。毎周期判定し直すと、止まったあとに自己位置推定が
+1〜2cm 揺れただけで許容を外れ、再計画して動き出す（ハザードも消え、繰り返すと失敗に変わる）。
+
+**制限時間と再計画の回数は engage している間だけ数える**（`set_engaged`）。`planning_node` は
+engage していなくても `plan()` を回す（経路を先に見せるため）ので、数え続けると、目標を置いて
+から engage するまで待っただけで失敗になる。
 
 `phase`（`AutoState`の汎用文字列フィールド）は日本語文字列を使う。
 `gui/src/components/AutoPanel.tsx`の`st?.phase === 'DONE'`はモードで
@@ -159,6 +167,9 @@ PATH_VIEW_STEP = 0.05
 MAP_PAD_M = 2.0
 #: 地図の最小の広さ [m]。目標が近くても切り返しの余地は要る
 MAP_MIN_SIZE_M = 6.0
+#: 進路を塞がれて制動している間の、再計画の間隔の下限 [s]。毎周期（0.1s）引き直すと、人が
+#: 1秒横切っただけで `max_replans` を使い切り、探索の時間（1回 100ms 以上）で指令も滞る
+BLOCKED_REPLAN_S = 0.5
 
 
 class ParkToPoint(Planner):
@@ -246,12 +257,13 @@ class ParkToPoint(Planner):
         ParamSpec(key="a_brake_est", label="想定制動減速度", min=0.3, max=4.0, step=0.1,
                   default=1.0, unit="m/s²",
                   note="★実車未計測の暫定値。安全側の停止距離計算に使う"),
-        ParamSpec(key="plan_budget_ms", label="経路探索の時間予算", min=20.0, max=400.0,
+        ParamSpec(key="plan_budget_ms", label="経路探索の時間予算", min=20.0, max=150.0,
                   step=10.0, default=120.0, unit="ms",
-                  note="★探索は`planning_node`の周期ループ内で同期的に走るので、"
-                       "ここを`cmd_deadman_ms`(150ms)より大きくすると指令が途絶えて"
-                       "DISARMに落ちる。実測では120msで96%・500msで99%なので、"
-                       "伸ばす価値は小さい"),
+                  note="★探索は`planning_node`の周期ループ内で同期的に走り、その間は"
+                       "`auto/cmd`が出ない。`plan()`全体が`auto_cmd_stale_ms`(200ms)を"
+                       "超えると中継側が途絶とみなして最大制動する（計画は停車中か制動中に"
+                       "しか走らないので止まるだけだが、指令は滞る）。実測では120msで96%・"
+                       "500msで99%なので、伸ばす価値は小さい"),
         ParamSpec(key="steer_reserve", label="計画に使う曲率の割合", min=0.5, max=1.0,
                   step=0.05, default=0.95, unit="",
                   note="計画の最小旋回半径を「車の最小旋回半径（同定した舵の効き込み、46cm）"
@@ -295,7 +307,14 @@ class ParkToPoint(Planner):
         )
         self._body_box = (min(x for x, _ in fp), max(x for x, _ in fp),
                           min(y for _, y in fp), max(y for _, y in fp))
+        #: engage しているか（`set_engaged`）。`planning_node` を通さず `plan()` を直接呼ぶ使い方
+        #: （走行中の迂回の引き継ぎ）では呼ばれないので、既定は True
+        self._engaged = True
         self.reset()
+
+    def set_engaged(self, engaged: bool) -> None:
+        """`planning_node` が `plan()` の直前に呼ぶ（ダックタイピング）。"""
+        self._engaged = bool(engaged)
 
     #: 到達したらハザードを出す（単独の駐車。迂回・経路上の駐車は呼び出し側が灯火を決める）
     hazard_on_done = True
@@ -310,6 +329,8 @@ class ParkToPoint(Planner):
         self._failed_reason = ""
         self._path: ReedsSheppPath = ReedsSheppPath(segments=())
         self._replans = 0
+        #: 最後に経路を引いてからの時間 [s]（`BLOCKED_REPLAN_S`）
+        self._since_replan = math.inf
         #: 走行区間の切り替え待ち（gearが変わる境界で実際に停止するのを待つ）
         self._waiting_stop = False
         self._set_path(ReedsSheppPath(segments=()), (0.0, 0.0, 0.0))
@@ -347,6 +368,7 @@ class ParkToPoint(Planner):
         self._failed_reason = ""
         self._phase = "接近中"
         self._replans = 0
+        self._since_replan = math.inf
         self._waiting_stop = False
         self._set_path(ReedsSheppPath(segments=()), (0.0, 0.0, 0.0))
         # 基準スキャンも張り直す。**目標と基準は必ず同じ瞬間のものにする**
@@ -393,6 +415,7 @@ class ParkToPoint(Planner):
             gear_change_cost=p["gear_change_cost"],
             time_budget_s=p["plan_budget_ms"] / 1000.0,
         )
+        self._since_replan = 0.0
         res = hybrid_plan(self._park_pose, self._target_in_park, self._map, cfg)
         self._plan_how = res.how
         self._plan_clearance = res.clearance
@@ -724,6 +747,12 @@ class ParkToPoint(Planner):
             return self._hold(st, self._phase, self._failed_reason)
 
         self._anchor_enabled = p["anchor_enabled"] >= 0.5
+        if not self._engaged:
+            # engage するまでは時間も回数も減らさない（経路は先に見せる）
+            self._maneuver_t = 0.0
+            self._replans = 0
+        if dt > 0:
+            self._since_replan += dt
         # 点群は1周期に1回だけ作る（脱スキュー＋取付位置補正込み）
         pts = deskew(scan, vs.speed, vs.yaw_rate,
                      mount_x=self.vehicle.lidar_x, mount_y=self.vehicle.lidar_y,
@@ -746,7 +775,8 @@ class ParkToPoint(Planner):
         yaw_err_deg = math.degrees(abs(wrap_angle(rel[2])))
         self._fill_state(st, rel, rho)
 
-        if rho < p["pos_tol_m"] and yaw_err_deg < p["yaw_tol_deg"]:
+        # 一度着いたら保持する（推定の揺れで許容を外れても動き出さない。モジュールdocstring）
+        if self._phase == "完了" or (rho < p["pos_tol_m"] and yaw_err_deg < p["yaw_tol_deg"]):
             self._phase = "完了"
             if self.hazard_on_done:
                 st.winker_left = st.winker_right = True      # 駐車完了はハザード
@@ -780,7 +810,7 @@ class ParkToPoint(Planner):
             # ★到達（完了）したあとは数えない。数え続けると、下の制限時間の判定が
             # 到達の判定より先にあるため、止まって待っているだけで`max_maneuver_s`後に
             # 「制限時間を超過」の失敗へ書き換わる（`slam2d_route`の駐車の引き継ぎで発覚）
-            if self._phase != "完了":
+            if self._phase != "完了" and self._engaged:
                 self._maneuver_t += dt
             self._park_pose = integrate_pose(*self._park_pose,
                                              d_center, vs.yaw_rate * dt)
@@ -874,8 +904,10 @@ class ParkToPoint(Planner):
             # ★**塞がれたら止まるだけでなく、その場で経路を引き直す。**
             # 再計画が「経路を全部使い切ったとき」だけだと、追従中に
             # 塞がれると永久に停止したままになる。地図は毎周期育つので、
-            # 計画時に空きだった場所が壁に変わることは普通に起きる
-            if self._replans < int(p["max_replans"]):
+            # 計画時に空きだった場所が壁に変わることは普通に起きる。
+            # 引き直すのは `BLOCKED_REPLAN_S` おき（塞がれている間じゅう毎周期は引かない）
+            if (self._replans < int(p["max_replans"])
+                    and self._since_replan >= BLOCKED_REPLAN_S):
                 self._replans += 1
                 self._replan(p)
                 self._fill_path(st)

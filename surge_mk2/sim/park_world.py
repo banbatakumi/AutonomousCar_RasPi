@@ -11,7 +11,8 @@ PNGを経由せずに作れる——`raycast()`/`collides()`/`occupied()`はす�
 ## 車体寸法との関係（`config/vehicle.toml`実測値）
 
     全長 0.37m（base_link から前 0.30・後 0.07）・全幅 0.18m
-    最小旋回半径 wheelbase/tan(max_steer) = 0.23/tan(30°) = 0.398m
+    最小旋回半径 1/Vehicle.kappa_max ≒ 0.48m（同定した舵の効き込み。幾何だけなら
+    wheelbase/tan(max_steer) = 0.23/tan(26.5°) = 0.46m）
 
 隙間の既定範囲はこの寸法に対して「実車の駐車として妥当な難しさ」になるよう
 選んである（縦列の隙間は車長の1.6〜2.7倍、実車の教習が目安にする1.5倍前後を

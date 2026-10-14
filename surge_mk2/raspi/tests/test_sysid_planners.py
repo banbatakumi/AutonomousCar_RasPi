@@ -118,7 +118,7 @@ class TestCornerRamp(unittest.TestCase):
     def _run(self, a_lat_cap: float | None, slip_above: float | None = None,
              oversteer_above: float | None = None):
         from raspi.msgs.types import Scan
-        pl = SysIdCorner()
+        pl = self._last = SysIdCorner()
         prm = {s.key: s.default for s in SysIdCorner.params}
         pl.set_engaged(True)
         scan = Scan(dist=[4.0] * 360, sector_seen=[True] * 12)
@@ -172,6 +172,41 @@ class TestCornerRamp(unittest.TestCase):
         want = min(math.radians(SysIdCorner.SETTINGS["steer_deg"]), Vehicle.load().max_steer)
         self.assertAlmostEqual(abs(st.target_steer), want, places=6)
         self.assertEqual(st.accel_limit, SysIdCorner.SETTINGS["stop_decel_m_s2"])
+
+    def test_clearance_stop_ends_the_run_and_does_not_resume(self):
+        """周囲クリアランスで止まったら、空いても走り出さない（停止前の速度へ全開で戻らない）。"""
+        from raspi.msgs.types import Scan
+        pl = SysIdCorner()
+        prm = {s.key: s.default for s in SysIdCorner.params}
+        pl.set_engaged(True)
+        far = Scan(dist=[4.0] * 360, sector_seen=[True] * 12)
+        near = Scan(dist=[0.2] * 360, sector_seen=[True] * 12)
+        state = VehicleState(armed=True)
+        for _ in range(100):
+            st = pl.plan(far, state, prm, 0.1)
+        self.assertGreater(st.target_speed, 0.5)
+        st = pl.plan(near, state, prm, 0.1)
+        self.assertTrue(st.brake)
+        self.assertEqual(st.brake_torque, ABORT_BRAKE_TORQUE_NM)
+        self.assertNotEqual(st.target_steer, 0.0)              # 舵は保つ
+        for _ in range(5):
+            st = pl.plan(far, state, prm, 0.1)                 # 空いた
+            self.assertTrue(st.brake)
+            self.assertEqual(st.target_speed, 0.0)
+            self.assertIn("中止", st.reason)
+        # 試験開始を押し直せば最初から
+        pl.set_engaged(False)
+        pl.set_engaged(True)
+        st = pl.plan(far, state, prm, 0.1)
+        self.assertFalse(st.brake)
+
+    def test_samples_stop_accumulating_after_the_run(self):
+        st, _ = self._run(a_lat_cap=4.0)
+        pl = self._last
+        n = len(pl._t_s)
+        for k in range(50):
+            pl.on_vehicle_state(VehicleState(t_capture=10**12 + k, speed=0.0, armed=True))
+        self.assertEqual(len(pl._t_s), n)
 
     def test_without_saturation_runs_to_v_max(self):
         st, speeds = self._run(a_lat_cap=None)
