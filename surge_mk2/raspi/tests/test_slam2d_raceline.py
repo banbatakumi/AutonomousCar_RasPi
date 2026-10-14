@@ -579,6 +579,22 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
             raceline_xy=np.asarray(am.raceline, dtype=np.float64),
             raceline_v=np.asarray(am.raceline_v, dtype=np.float64))
 
+    def test_disengage_on_a_saved_map_returns_to_locate_not_explore(self):
+        """★ 保存地図で走っている途中に自動運転を解いても、地図作成（EXPLORE）へ戻らない。
+
+        戻ると、人が engage し直した瞬間に FTG の地図作成走行が始まっていた。
+        """
+        p = self._drive_to_race()
+        self._save_current_map(p, "course_b")
+        fresh = Slam2dRaceLine()
+        fresh.request_load("course_b")
+        fresh.phase = RACE                      # 走っている途中を模す
+        fresh.on_disengage()
+        self.assertEqual(fresh.phase, LOCATE)
+        self.assertTrue(fresh.slam.grid.frozen)
+        self.assertIsNotNone(fresh.path)
+        self.assertIsNotNone(fresh._locate_seed)    # 今の姿勢を探索の種にする
+
     def test_request_load_enters_locate_phase_with_frozen_grid_and_path(self):
         p = self._drive_to_race()
         self._save_current_map(p, "course_a")

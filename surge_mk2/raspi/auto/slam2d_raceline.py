@@ -852,6 +852,8 @@ class Slam2dRaceLine(Planner):
         self._load_failed = False
         #: BUILD完了時に自動保存した地図の名前（`DONE`段の表示用）
         self._saved_map_name = ""
+        #: いま走っている地図の名前（読み込んだ・作って保存した）。解除で地図を捨てないために持つ
+        self._active_map_name = ""
         self._save_error = ""
         self._grip_save()
         self._grip.reset()
@@ -912,13 +914,27 @@ class Slam2dRaceLine(Planner):
         """自動運転を解いた（`planning_node` が `reset()` の代わりに呼ぶ）。
 
         地図作成中なら**地図を残して**人のラジコンでの地図作成へ移る——FTG で走らせて
-        いる途中に人が操作を奪っても、それまでの地図を捨てない。それ以外の段は
-        従来どおり作り直す（次に engage したとき前回の舵の続きから動き出さないため）。
+        いる途中に人が操作を奪っても、それまでの地図を捨てない。
+
+        保存済みの地図で走っていた（RACE・LOCATE・停止・駐車など）なら、**その地図を読み直して
+        LOCATE からやり直す**。作り直すと地図作成（EXPLORE）に戻り、人が engage し直した瞬間に
+        FTG で走り出していた。読み直すので、前回の舵・追従・回避の状態は残らない
+        （次に engage したとき前回の舵の続きから動き出さない）。今の姿勢は探索の種にする
+        （車を動かされていたら外れ、全域探索に落ちる）。
+        それ以外は従来どおり作り直す。
         """
         self._load_failed = False
         if self.phase == EXPLORE and self.slam.trajectory:
             self.ftg.reset()
             return
+        name = self._active_map_name
+        if name and self.phase != EXPLORE:
+            seed = (self.slam.pose.x, self.slam.pose.y)
+            self.reset()
+            self.request_load(name)
+            if not self._load_error:
+                self._locate_seed = seed
+                return
         self.reset()
 
     def request_freeze(self) -> None:
@@ -957,6 +973,7 @@ class Slam2dRaceLine(Planner):
         #   保存地図は今の格子をそのまま書き出したものなので座標系も一致する
         self._locate_seed = ((self.slam.pose.x, self.slam.pose.y)
                              if name == self._saved_map_name else None)
+        self._active_map_name = name
         self.slam.replace_grid_for_race(grid)
         # ラインが無い地図（経路を作れないまま保存した地図）は、経路を自前で作る planner
         # （`slam2d_route`）でだけ走れる
@@ -1391,6 +1408,7 @@ class Slam2dRaceLine(Planner):
         self._hint = -1
         self._map_dirty = True
         self._saved_map_name = self._auto_save_map()
+        self._active_map_name = self._saved_map_name
         base = (f"経路ができた（{len(self.path)}点・"
                 f"1周 {self.path.length:.1f}m・"
                 f"{self.path.v.min():.2f}〜{self.path.v.max():.2f} m/s）。")
