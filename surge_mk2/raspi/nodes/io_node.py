@@ -695,6 +695,10 @@ class IoNode:
         if ver.protocol_version != PROTOCOL_VERSION:
             return (f"protocol_version が違います（STM32 0x{ver.protocol_version:04X} / "
                     f"Pi 0x{PROTOCOL_VERSION:04X}）。両方を同じ版に入れ替えてください")
+        # E-Stop の層（GPIO6 のハートビート）が STM32 に見えていなければ、止める手段が一つ欠けている。
+        # --no-heartbeat で動かすときは、ハートビートを出さないと承知の上なので封印しない
+        if self.heartbeat is not None and self.state.no_heartbeat:
+            return "STM32 がハートビートを検出していません（E-Stop が効きません。GPIO6 の配線を確認）"
         if self.control_params_error:
             return self.control_params_error
         status = self.control_sync.status

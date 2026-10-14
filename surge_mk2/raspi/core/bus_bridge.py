@@ -150,6 +150,8 @@ class BusBridge:
             health=state.health,
             estop_active=state.estop_active,
             drive_power_locked=state.drive_power_locked,
+            no_heartbeat=state.no_heartbeat,
+            auto_stop_blind=state.auto_stop_blind,
             tc_enabled=state.tc_enabled,
             tv_enabled=state.tv_enabled,
             wheel_lift_guard_enabled=state.wheel_lift_guard_enabled,

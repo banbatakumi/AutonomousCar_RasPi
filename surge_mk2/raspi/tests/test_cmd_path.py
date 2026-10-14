@@ -117,6 +117,22 @@ class TestIoNodeArmGate(unittest.TestCase):
         self.assert_all_disarm()
         self.assertIn("protocol_version", n._arm_block_reason())
 
+    def test_arm_is_blocked_while_the_stm32_has_never_seen_the_heartbeat(self):
+        """E-Stop の層（GPIO6）が STM32 に見えていなければ止める手段が欠ける。`--no-heartbeat` なら承知の上。"""
+        class _Hb:
+            def kick(self):
+                pass
+
+        n = self.node(allow_arm=True, heartbeat=_Hb())
+        n.state.no_heartbeat = True
+        self.assertIn("ハートビート", n._arm_block_reason())
+        n.state.no_heartbeat = False
+        self.assertNotIn("ハートビート", n._arm_block_reason())
+        # ハートビートを出さない（--no-heartbeat）起動では、このビットを理由に封印しない
+        n2 = self.node(allow_arm=True)
+        n2.state.no_heartbeat = True
+        self.assertNotIn("ハートビート", n2._arm_block_reason())
+
     def test_arm_waits_until_the_control_params_are_in_the_stm32(self):
         """`[control]`（ステアのリンクの換算を含む）が STM32 に入るまでは走らせない。"""
         n = self.node(allow_arm=True, control_params={"tc_slip_target": 0.1})

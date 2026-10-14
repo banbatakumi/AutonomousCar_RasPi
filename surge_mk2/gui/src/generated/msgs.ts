@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x3a144ac0
+export const MSGS_SCHEMA = 0x85f1cd4c
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -225,6 +225,13 @@ export type LinkDiag = {
   estop_active: boolean
   /** 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない** */
   drive_power_locked: boolean
+  /**
+   * STM32 がハートビート（GPIO6）を一度も検出していない＝**E-Stop の層が働いていない**。
+   * `--no-heartbeat` で動かしているとき以外は ARM を封印する（`arm_inhibit_reason`）
+   */
+  no_heartbeat: boolean
+  /** ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態（STM32 が数秒続いたら立てる） */
+  auto_stop_blind: boolean
   /**
    * io_node が `arm` を封印しているか（`--allow-arm` が無い・STM32 と版が合わない・
    * `[control]` が STM32 に入っていない）。理由は `arm_inhibit_reason`

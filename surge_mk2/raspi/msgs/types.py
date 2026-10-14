@@ -383,6 +383,11 @@ class LinkDiag(MsgBase):
     estop_active: bool = False
     #: 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない**
     drive_power_locked: bool = False
+    #: STM32 がハートビート（GPIO6）を一度も検出していない＝**E-Stop の層が働いていない**。
+    #: `--no-heartbeat` で動かしているとき以外は ARM を封印する（`arm_inhibit_reason`）
+    no_heartbeat: bool = False
+    #: ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態（STM32 が数秒続いたら立てる）
+    auto_stop_blind: bool = False
     #: io_node が `arm` を封印しているか（`--allow-arm` が無い・STM32 と版が合わない・
     #: `[control]` が STM32 に入っていない）。理由は `arm_inhibit_reason`
     arm_inhibited: bool = True

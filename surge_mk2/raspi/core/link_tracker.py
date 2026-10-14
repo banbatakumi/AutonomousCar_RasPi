@@ -83,6 +83,11 @@ class LinkState:
     estop_active: bool = False
     #: 過電流で駆動電源がラッチ遮断。**電源を入れ直すまで復帰しない**
     drive_power_locked: bool = False
+    #: STM32 がハートビート（GPIO6 → RAS_SIG）を一度も検出していない＝**E-Stop の層が働いていない**。
+    #: ラッチではなく、検出した時点で False に戻る。古いファームは常に False
+    no_heartbeat: bool = False
+    #: ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態（STM32 が数秒続いたら立てる）
+    auto_stop_blind: bool = False
 
     #: TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.8）。
     #: まだ `CONFIG_ACK` を受け取っていなければ None
@@ -199,6 +204,9 @@ class LinkTracker:
         `estop_active` は**車両のボタンを人間が押すまで戻らない**ので、
         立った瞬間を逃すと「なぜ動かないのか」が後から分からなくなる。
         """
+        # ラッチではなく状態そのものの警告ビット（変化の通知は要らない）
+        self.state.no_heartbeat = bool(flags & packets.FLG_NO_HEARTBEAT)
+        self.state.auto_stop_blind = bool(flags & packets.FLG_AUTO_STOP_BLIND)
         for name, bit in LATCHING_FLAGS.items():
             new = bool(flags & bit)
             if new != getattr(self.state, name):

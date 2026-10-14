@@ -66,6 +66,8 @@
 #define FLG_DRIVE_POWER_ON             0x00400000u
 #define FLG_MD_FAULT                   0x00800000u
 #define FLG_LAUNCH_ACTIVE              0x01000000u
+#define FLG_NO_HEARTBEAT               0x02000000u
+#define FLG_AUTO_STOP_BLIND            0x04000000u
 
 /* md_status[i] (u8) */
 #define MDS_RUNNING       0x01u

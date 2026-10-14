@@ -265,6 +265,26 @@ class TestLatchingFlags(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class TestWarningFlags(unittest.TestCase):
+    """ハートビート未検出・自動停止の検知手段なし。ラッチではなく、いまの状態をそのまま映す。"""
+
+    def test_follow_the_flags_both_ways(self):
+        seen = []
+        tr = LinkTracker(on_latch=lambda n, v, t: seen.append((n, v)))
+        self.assertFalse(tr.state.no_heartbeat)
+        self.assertFalse(tr.state.auto_stop_blind)
+        feed(tr, packets.Telemetry(
+            t_us=0, flags=packets.FLG_NO_HEARTBEAT | packets.FLG_AUTO_STOP_BLIND), 1)
+        self.assertTrue(tr.state.no_heartbeat)
+        self.assertTrue(tr.state.auto_stop_blind)
+        feed(tr, packets.Telemetry(t_us=0, flags=packets.FLG_NO_HEARTBEAT), 2)
+        self.assertTrue(tr.state.no_heartbeat)
+        self.assertFalse(tr.state.auto_stop_blind)
+        feed(tr, packets.Telemetry(t_us=0, flags=0), 3)
+        self.assertFalse(tr.state.no_heartbeat)
+        self.assertEqual(seen, [], "ラッチ通知には出さない")
+
+
 class TestFormatStatus(unittest.TestCase):
     def test_handles_empty_state(self):
         tr = LinkTracker()
