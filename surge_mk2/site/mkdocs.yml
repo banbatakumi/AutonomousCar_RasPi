@@ -1,0 +1,97 @@
+site_name: SURGE Mark.2 技術解説
+site_description: 自律走行ミニカー SURGE Mark.2 の制御・システム・自動運転の解説
+site_url: https://banbatakumi.github.io/AutonomousCar_RasPi/
+repo_url: https://github.com/banbatakumi/AutonomousCar_RasPi
+repo_name: AutonomousCar_RasPi
+edit_uri: edit/master/surge_mk2/site/docs/
+docs_dir: docs
+site_dir: build
+
+# build は --strict で回す（壊れたリンクをここで落とす）
+strict: true
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+theme:
+  name: material
+  language: ja
+  font: false   # Google Fonts を使わず端末のフォントで表示する
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: ダークモードへ
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: ライトモードへ
+
+plugins:
+  - search:
+      lang: ja
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+      # 見出しが日本語でもアンカーを作る（既定の slugify は非 ASCII を落とす）
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js
+
+nav:
+  - ホーム: index.md
+  - 全体像:
+      - システム構成: overview/system.md
+      - 検証状況: overview/status.md
+  - STM32 ファームウェア:
+      - 構成と制御周期: stm32/index.md
+      - 駆動制御（車速 PI）: stm32/drive.md
+      - スリップ制御（TC・ABS）: stm32/traction.md
+      - トルクベクタリング: stm32/torque-vectoring.md
+      - 安全層とフェイルセーフ: stm32/safety.md
+  - 上位との通信:
+      - UART プロトコル: link/protocol.md
+  - Raspberry Pi 側:
+      - ノード構成と内部バス: raspi/index.md
+      - 上位の安全設計: raspi/safety.md
+      - 走行モード: raspi/modes.md
+      - 地図と自己位置推定: raspi/mapping.md
+      - レーシングライン: raspi/raceline.md
+      - 経路追従と速度指令: raspi/tracking.md
+  - 開発の進め方:
+      - 検証の仕組み: dev/workflow.md
+      - 設計上の教訓: dev/lessons.md
+  - このサイトについて: about.md
