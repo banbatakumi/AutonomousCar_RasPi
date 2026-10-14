@@ -26,10 +26,12 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { LogControls } from './components/LogControls'
 import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
+import { live } from './bus/live'
 import { useEngineSound } from './hooks/useEngineSound'
 import { useDriving } from './input/useDriving'
 import type { DrivingSettings } from './store/ui'
-import { useUi } from './store/ui'
+import { MSGS_SCHEMA } from './generated/msgs'
+import { notify, useUi } from './store/ui'
 import { AutoView } from './views/AutoView'
 import { DiagView } from './views/DiagView'
 import { RcView } from './views/RcView'
@@ -37,6 +39,9 @@ import { SysIdView } from './views/SysIdView'
 import { ControlChannel } from './ws/control'
 import { connectMap } from './ws/map'
 import { connectTelemetry } from './ws/telemetry'
+
+/** 車が ARM 状態か（テレメトリ上の実際の状態） */
+const isArmed = () => !!live.vs?.armed
 
 const TABS = ['ラジコン', '自動運転', '診断', 'システム同定'] as const
 type Tab = (typeof TABS)[number]
@@ -82,6 +87,24 @@ export function App() {
       // **操縦権が自分かどうかは名前の一致で判定する。**
       // 「誰かが持っている」だけだと2枚目のタブが自分だと誤認する
       onStatus: (s) => {
+        // 型定義の札。テレメトリと同じ照合を、こちらのチャンネルでも行う
+        // （古い Pi は札を送らない → 版が違うとして扱う）
+        if (s.schema !== MSGS_SCHEMA && !useUi.getState().schemaMismatch) {
+          console.error(
+            `status の型定義が食い違っています（Pi: ${s.schema == null ? 'なし' : '0x' + s.schema.toString(16)}）。` +
+              'Pi と GUI の版が違います',
+          )
+          set({ schemaMismatch: true })
+        }
+        // `?catalog=changed` で繋いでいるので、`auto.catalog` は接続時の1通目にしか載らない。
+        // 載っていない status では前の宣言を保つ（`auto` を丸ごと置き換えない）
+        // 自分が持っていた操縦権が外れたら、その理由を出す（自分で解放したときは理由が空）
+        const hadControl = useUi.getState().hasControl
+        if (hadControl && !(s.has_controller && s.controller === c.id) && s.released_reason) {
+          notify(`操縦権が外れました: ${s.released_reason}`)
+        }
+        const prevCatalog = useUi.getState().auto?.catalog
+        const auto = s.auto.catalog ? s.auto : { ...s.auto, catalog: prevCatalog ?? [] }
         set({
           status: s,
           hasControl: s.has_controller && s.controller === c.id,
@@ -89,7 +112,7 @@ export function App() {
           ...(s.has_controller && s.controller === c.id ? { deniedReason: null } : {}),
           sfl: s.sfl,
           mcap: s.mcap,
-          auto: s.auto,
+          auto,
           fan: s.fan,
           cameraConfig: s.camera_config,
           signalConfig: s.signal_config,
@@ -99,17 +122,38 @@ export function App() {
         })
         if (!driveSettingsSynced.current && Object.keys(s.drive_settings ?? {}).length > 0) {
           driveSettingsSynced.current = true
-          useUi.getState().setSettings(s.drive_settings as Partial<DrivingSettings>)
+          // **走行中（ARM 中）の再接続では取り込まない。** Wi-Fi の瞬断で繋ぎ直すたびに Pi の
+          // 保存値で最高速・舵角などが走行中に書き換わるのを防ぐ。DISARM 中だけ取り込む
+          // （ARM 中に変えた手元の値は、次の変更時に Pi へ送られる）
+          const driving = useUi.getState().armRequested || isArmed()
+          if (!driving) useUi.getState().setSettings(s.drive_settings as Partial<DrivingSettings>)
         }
       },
-      onDenied: (holder, reason) =>
-        set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false }),
+      onDenied: (holder, reason) => {
+        if (reason === 'auto_busy') {
+          // 自律走行中の操作は操縦者だけが行える。操縦権は変わらないので hasControl は触らない
+          notify(`自律走行中は操縦者（${holder || '不明'}）以外は設定を変えられません（解除だけ可）`)
+          return
+        }
+        set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false })
+        if (reason === 'bad_token') notify('操縦権を取れません（トークンが違います）', 'bad')
+        else if (reason === 'auto_engage') notify('自律走行の engage には操縦権が要ります')
+        else notify(`操縦権を取れません（操縦者: ${holder || '不明'}）`)
+      },
       onRtt: (v) => set({ wsRttMs: v }),
       onLogs: (files) => set({ logFiles: files }),
       onCamModels: (files) => set({ camModelFiles: files }),
       onE2EModels: (files) => set({ e2eModelFiles: files }),
       onCamE2EModels: (files) => set({ camE2eModelFiles: files }),
       onMaps: (files) => set({ mapFiles: files }),
+      onLogsDeleteResult: (error) => notify(`記録の削除に失敗: ${error || '理由不明'}`, 'bad'),
+      onShutdownDenied: (reason) =>
+        notify(
+          reason === 'armed'
+            ? 'ARM 中はシャットダウンできません（先に E-STOP か ARM 解除）'
+            : `シャットダウンを拒否されました（${reason}）`,
+          'bad',
+        ),
       onMapsSaveResult: (ok, error) => set({ mapSaveResult: { ok, error } }),
     })
     chRef.current = c

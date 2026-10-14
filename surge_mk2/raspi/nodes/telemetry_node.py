@@ -262,9 +262,6 @@ TELEMETRY_HZ = 50
 #: 配信の周期に対して、次のフレームをこの割合まで早く出してよい（`CAMERA_DUE_SLACK` と同じ役目）。
 #: `vehicle_state` の到着は 10ms の前後に揺れるので、2回目が 20ms に少し届かなくても送る
 TELEMETRY_DUE_SLACK = 0.15
-#: `vehicle_state`（10ms 間隔）の周に対して、配信周期まであとこれだけ（以内）なら飛ばさず刻みまで
-#: 待って送る。飛ばすと次の `vehicle_state`（さらに10ms後）まで待つので、間隔が周期の1.5倍に開く
-TELEMETRY_WAKE_MARGIN_S = 0.008
 #: `_snapshot` が**中身が変わったときだけ載せる**キーとそのトピック。どれも 10Hz 以下でしか
 #: 変わらないのに 50Hz で同じ物を送り直していた（実機で1フレーム 4.4kB のうち 3.3kB）。
 #: GUI は載っていないキーの値を前のまま持つ（`gui/src/bus/live.ts` の `noteTelemetry`）
@@ -2348,6 +2345,8 @@ class TelemetryServer:
             "schema": SCHEMA_VERSION,
             "has_controller": self.controller is not None,
             "controller": self.controller_name,
+            # 直前に操縦権が外れた理由（E-Stop・切断・遅れが続いた など）。GUI が人に見せる
+            "released_reason": getattr(self, "_why_released", ""),
             # **io_node が封印しているかどうか。ここでは覆せない**
             "arm_inhibited": link.arm_inhibited if link else True,
             "health": link.health if link else "INIT",
@@ -2948,11 +2947,9 @@ class TelemetryServer:
             now = time.monotonic()
             elapsed = now - last_tx
             if elapsed < min_gap:
-                if elapsed < period - TELEMETRY_WAKE_MARGIN_S:
-                    continue          # 早すぎる周は飛ばす（次の `vehicle_state` を待つ）
-                # 次の周まで待つと周期を大きく超える（最大約30ms 開く）ので、刻みまで待って送る
-                await asyncio.sleep(max(0.0, min_gap - elapsed))
-                now = time.monotonic()
+                # 早すぎる周は飛ばす（次の `vehicle_state` を待つ）。届いた周に送るので、位相の
+                # ずれで間隔が最大約30ms 開くことがあるが、平均は `TELEMETRY_HZ` を超えない
+                continue
             last_tx = now
             if not self.telemetry_clients:
                 continue

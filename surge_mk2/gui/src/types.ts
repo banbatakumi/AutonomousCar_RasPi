@@ -107,6 +107,9 @@ export type AutoStatus = {
   params: Record<string, number>
   /** 今のモードのプリセットの名前（`config/auto_presets.json`、GUI のドロップダウン） */
   presets?: string[]
+  /** 選べるモードの宣言。**`/ws/control?catalog=changed` で繋いでいるので、接続時の
+   * 1通目にしか載らない**（`App.tsx` が前の値を保って `ui.auto` に入れる。
+   * `ui.auto.catalog` は常にある。生の `status.auto` では無いことがある） */
   catalog: AutoPlannerInfo[]
   /** engage したまま `auto/cmd` が途絶して制動に落ちた回数 */
   stalls: number
@@ -295,7 +298,11 @@ export type NodeAlive = {
 /** `/ws/control` のサーバ → GUI。 */
 export type ControlStatus = {
   type: 'status'
+  /** 型定義の札（`generated/msgs.ts` の `MSGS_SCHEMA`）。古い Pi は送らない */
+  schema?: number
   has_controller: boolean
+  /** 直前に操縦権が外れた理由（古い Pi には無い） */
+  released_reason?: string
   controller: string
   /** io_node が arm を封印しているか。**GUI 側では覆せない** */
   arm_inhibited: boolean

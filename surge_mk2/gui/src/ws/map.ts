@@ -148,6 +148,11 @@ export function connectMap(onOpenChange: (open: boolean) => void): () => void {
         const msg = decode(new Uint8Array(ev.data)) as AutoMapMsg
         const built = await build(msg)
         if (!built) return
+        // アンマウント後（切断済み）に終わった展開の絵は誰も使わないので、解放して捨てる
+        if (closed) {
+          built.bitmap?.close()
+          return
+        }
         // **先に届いた1枚で後に届いた1枚を上書きしない。** 展開は非同期なので、
         // 続けて届いた2枚の完成順が入れ替わりうる
         if (n < shown) {

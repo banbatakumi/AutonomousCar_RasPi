@@ -111,7 +111,10 @@ export function LinkPage({ n, st }: PageProps) {
             {vs.uart_timeout ? '自動ブレーキ中' : 'なし'}
           </Row>
         </Card>
-        <Card title="ハートビート・ループ" level={link?.hb_alive === false ? 'bad' : undefined}>
+        <Card title="ハートビート・ループ" level={link?.hb_alive === false || link?.no_heartbeat ? 'bad' : undefined}>
+          <Row label="STM32 側の検出" level={link?.no_heartbeat ? 'bad' : undefined}>
+            {link?.no_heartbeat ? '一度も検出していない（E-Stop が効かない）' : '検出済み'}
+          </Row>
           <Row label="GPIO6 ハートビート" level={link?.hb_alive == null ? 'na' : link.hb_alive ? undefined : 'bad'}>
             {link?.hb_alive == null ? 'GPIO なし' : link.hb_alive ? '出力中' : '停止'}
           </Row>

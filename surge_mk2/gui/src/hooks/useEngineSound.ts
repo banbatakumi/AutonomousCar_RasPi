@@ -79,7 +79,16 @@ export function useEngineSound() {
       prevMtGear = isCombustion && mtMode ? ui.mtGear : null
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    // タブが背後に回ると rAF が止まり、最後の周波数のまま鳴り続ける。非表示の間は止める
+    // （表示に戻れば `update()` が `resume()` する）
+    const onVisibility = () => {
+      if (document.hidden) engine.suspend()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      cancelAnimationFrame(raf)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
     // `type` は初回 start() のみに使う（以後の変更は上の effect が `setType()` で担う）ので、
     // 依存配列にはあえて含めない——含めると音色を変えるたびに rAF ループを作り直してしまう
   }, [engine, on])

@@ -284,6 +284,16 @@ export class EngineSound {
   private idleChugModGain: GainNode | null = null
   private master: GainNode | null = null
   private type: EngineSoundType = 'combustion'
+  /** 直近に `update()` が AudioParam へ書いた入力の量子化キー。同じなら書き直さない
+   * （毎フレーム `setTargetAtTime` を積むと、定常時もオートメーションのイベントが溜まり続ける） */
+  private lastUpdateKey = ''
+
+  /** タブが背後に回ったら止める（rAF が止まると最後の周波数のまま鳴り続けるため）。
+   * `visible` に戻ったら `update()` が自動で再開する */
+  suspend() {
+    const ctx = this.ctx
+    if (ctx && ctx.state === 'running') void ctx.suspend().catch(() => {})
+  }
 
   /** ユーザー操作のハンドラの中で呼ぶこと（自動再生制限を通すため） */
   start(type: EngineSoundType = this.type) {
@@ -402,11 +412,13 @@ export class EngineSound {
     this.idleChugModGain = idleChugModGain
     this.master = master
 
+    this.lastUpdateKey = ''
     this.applyProfile(type)
   }
 
   stop() {
     if (!this.ctx) return
+    this.lastUpdateKey = ''
     this.osc1?.stop()
     this.osc2?.stop()
     this.layer3?.stop()
@@ -439,6 +451,7 @@ export class EngineSound {
   }
 
   private applyProfile(type: EngineSoundType) {
+    this.lastUpdateKey = ''
     const ctx = this.ctx
     if (
       !ctx || !this.osc1 || !this.osc2 || !this.layer3 || !this.osc1Gain || !this.osc2Gain ||
@@ -481,7 +494,14 @@ export class EngineSound {
     ) {
       return
     }
+    // ブラウザは自動再生制限・タブの非表示・端末の割り込みで `suspended` にする。
+    // 表示中に戻っていれば再開する（拒否されたら次のフレームでまた試す）
+    if (ctx.state === 'suspended' && !document.hidden) void ctx.resume().catch(() => {})
     const p = PROFILES[this.type]
+    // 入力が前回と同じなら AudioParam を書き直さない（定常走行・停車中の毎フレームの積み増しを避ける）
+    const key = `${armed ? 1 : 0}|${Math.round(rpmFrac * 400)}`
+    if (key === this.lastUpdateKey) return
+    this.lastUpdateKey = key
     const now = ctx.currentTime
     const smooth = 0.05 // なめらかさの時定数 [s]
 

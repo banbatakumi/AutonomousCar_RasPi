@@ -266,6 +266,11 @@ export function CameraView({
         decoding = true
         try {
           const bmp = await createImageBitmap(new Blob([ev.data], { type: 'image/jpeg' }))
+          // アンマウント後に終わったデコードの絵は誰も使わない（解放しないとリークする）
+          if (closed) {
+            bmp.close()
+            return
+          }
           bitmap?.close()
           bitmap = bmp
           frames++
@@ -391,6 +396,10 @@ export function CameraView({
         decoding = true
         try {
           const bmp = await createImageBitmap(new Blob([ev.data], { type: 'image/jpeg' }))
+          if (closed) {
+            bmp.close()
+            return
+          }
           maskBitmapRef.current?.close()
           maskBitmapRef.current = bmp
         } catch {

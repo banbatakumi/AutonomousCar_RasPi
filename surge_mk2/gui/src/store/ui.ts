@@ -281,6 +281,8 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
 }
 
 /** 設定パネルのスライダのレンジ。`min`/`max`/`step` の3つ組。
+ * ⚠ **ここの範囲を変えたら、Pi 側の `telemetry_node._DRIVE_SETTINGS_RANGE`（保存時の天井・床）も
+ * 合わせること。** あちらが狭いと、GUI で出せる値が保存時に切り詰められて次の接続で別の値に戻る
  * **数値項目だけ。** boolean/enum 項目（`driveMode`/`autoStop`）はスライダを持たないのでここに含めない */
 export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: number; step: number }> = {
   maxSpeed: { min: 0.1, max: PI_MAX_SPEED_CAP, step: 0.01 },
@@ -585,6 +587,9 @@ type UiState = {
   /** 操縦権を取れなかった理由。**`bad_token` は「誰かが持っている」ではなく
    *  「トークンが違う」** なので、表示を分けないと原因を探して時間を溶かす */
   deniedReason: string | null
+  /** 画面に数秒だけ出す通知（操縦権の拒否・削除失敗・シャットダウン拒否など）。
+   * `notify()` で出す。ARM の解除理由（`disarmReason`）のような継続状態ではない */
+  notice: { text: string; level: 'warn' | 'bad'; id: number } | null
   /** GUI ↔ Pi の往復 [ms]。UART 区間の遅延とは別物 */
   wsRttMs: number | null
 
@@ -819,6 +824,19 @@ type UiState = {
   resetTripOdom: () => void
 }
 
+let noticeSeq = 0
+let noticeTimer: number | undefined
+/** 画面上部のステータスバーへ一過性の通知を出す（`NOTICE_MS` で消える）。同じ文面の連続は上書き */
+export function notify(text: string, level: 'warn' | 'bad' = 'warn') {
+  const id = ++noticeSeq
+  window.clearTimeout(noticeTimer)
+  useUi.setState({ notice: { text, level, id } })
+  noticeTimer = window.setTimeout(() => {
+    if (useUi.getState().notice?.id === id) useUi.setState({ notice: null })
+  }, NOTICE_MS)
+}
+const NOTICE_MS = 8000
+
 export const useUi = create<UiState>((set, get) => ({
   mapOpen: false,
   telemetryOpen: false,
@@ -828,6 +846,7 @@ export const useUi = create<UiState>((set, get) => ({
   hasControl: false,
   deniedBy: null,
   deniedReason: null,
+  notice: null,
   wsRttMs: null,
 
   armRequested: false,

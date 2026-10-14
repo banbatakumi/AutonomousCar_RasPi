@@ -124,7 +124,7 @@ src/
 ├── bus/live.ts        20Hz のデータ置き場。**React の state には入れない**
 ├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
 ├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・50Hz）
-├── ws/control.ts      /ws/control（JSON・操縦権・E-Stop）
+├── ws/control.ts      /ws/control?catalog=changed（JSON・操縦権・E-Stop。auto.catalog は接続時の1通目のみ → App.tsx が前の値を保つ）
 ├── input/useDriving.ts ゲームパッド + キーボード → cmd（rAF。変化はそのフレームで、繰り返しは 50Hz 以下）
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
@@ -168,6 +168,8 @@ src/
   枠の合計が4の倍数になるように並べる。値は折り返さない（折り返すとそのカードだけ高くなる）
 - **一時停止しても記録は止まらない**（履歴は常時貯める。止めるのは表示の窓だけ）
 - 色は `uplotBase.ts` の `tones()` が CSS 変数から引く。**グラフ側に色の値を書かない**
+- 画面に数秒だけ出す通知（操縦権の拒否・記録削除の失敗・シャットダウン拒否など）は `store/ui.ts` の `notify()`（ステータスバーのピル）。
+- パッドの `timestamp` が2秒進まず入力が中立でないときは、圏外とみなして入力を中立にする（`input/useDriving.ts`）。
 - `status.pi`（CPU・メモリ・スロットリング）と `status.nodes`（ノードの生存申告）は `/ws/control` で 1Hz。
   Pi 以外（シム・`bus_demo`）では `pi.available=false` で「取得不可」になる
 

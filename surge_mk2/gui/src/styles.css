@@ -164,6 +164,11 @@ button.on {
   animation: armpulse 1.2s ease-in-out infinite;
 }
 
+.armbtn.warn:not(.on) {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
 .armbtn:disabled {
   opacity: .35;
   cursor: not-allowed;

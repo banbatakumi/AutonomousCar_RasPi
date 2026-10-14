@@ -223,6 +223,7 @@ import {
   mtGearAt, mtGearIndex, mtGearRatio, useUi,
 } from '../store/ui'
 import type { LaunchPhase } from '../store/ui'
+import { notify } from '../store/ui'
 import { SAFETY } from '../generated/vehicle'
 import type { CmdOut } from '../types'
 import type { ControlChannel } from '../ws/control'
@@ -271,6 +272,12 @@ const STEER_RATE_LIMIT = STEER_RATE_SAFETY_LIMIT // rad/s
 // **左スティック（舵）のデッドゾーン／EXPO は設定パネルから調整する
 // （`s.gamepadSteerDeadzone`/`s.gamepadSteerExpo`、`store/ui.ts`）。**
 const TRIGGER_DZ = 0.06
+/** パッドの `timestamp` がこの時間進まないのに、トリガー・スティックが中立でないなら、
+ * 圏外（Bluetooth が切れかけ）で**最後の入力のまま張り付いている**とみなして入力を中立にする。
+ * ブラウザは接続が切れても `connected` を落とさないことがある。トリガーを一定に握り続けると
+ * 値が変わらず `timestamp` も進まないので、**正常な操作を切らないよう保守的に長く**取る
+ * （アナログの揺らぎがあれば進む。全開で握り続ける場合は2秒で一度中立に戻る） */
+const PAD_STALE_MS = 2000
 /** 中央付近を緩くする度合い（0=リニア, 1=完全3乗）。スロットルは控えめのまま固定
  * （左右対称なペダルではなく踏み込み量なので、舵ほど中央を緩める必要が無い） */
 const THROTTLE_EXPO = 0.25
@@ -619,6 +626,10 @@ export function useDriving(ch: ControlChannel | null) {
     let lastTxMs = 0
     let lastTakeMs = 0
     let padLightWas = false
+    let padSeenIndex = -1
+    let padSeenTs = -1
+    let padTsChangedMs = 0
+    let padStaleWas = false
     let padArmWas = false
     let padGearL1Was = false
     let padGearR1Was = false
@@ -675,8 +686,29 @@ export function useDriving(ch: ControlChannel | null) {
       // 標準マッピングのパッドを優先する（ボタン番号が `PAD_*` と合うのはそれだけ。ヘッドセット等が
       // ゲームパッドとして先に列挙される環境がある）。無ければ従来どおり最初の1台
       const pads = navigator.getGamepads?.() ?? []
-      const pad = pads.find((p) => p && p.connected && p.mapping === 'standard')
+      const padRaw = pads.find((p) => p && p.connected && p.mapping === 'standard')
         ?? pads.find((p) => p && p.connected) ?? null
+      // 圏外で最後の入力のまま張り付いたパッドは無いものとして扱う（`PAD_STALE_MS`）
+      let padStale = false
+      if (padRaw) {
+        if (padRaw.index !== padSeenIndex || padRaw.timestamp !== padSeenTs) {
+          padSeenIndex = padRaw.index
+          padSeenTs = padRaw.timestamp
+          padTsChangedMs = now
+        } else if (now - padTsChangedMs > PAD_STALE_MS) {
+          padStale =
+            (padRaw.buttons[7]?.value ?? 0) > TRIGGER_DZ ||
+            (padRaw.buttons[6]?.value ?? 0) > TRIGGER_DZ ||
+            Math.abs(padRaw.axes[0] ?? 0) > s.gamepadSteerDeadzone
+        }
+      } else {
+        padSeenIndex = -1
+      }
+      if (padStale !== padStaleWas) {
+        padStaleWas = padStale
+        if (padStale) notify('パッドの入力が更新されていません（圏外？）— 入力を中立にしました', 'bad')
+      }
+      const pad = padStale ? null : padRaw
 
       // ── 入力を読む ──
       const k = keys.current

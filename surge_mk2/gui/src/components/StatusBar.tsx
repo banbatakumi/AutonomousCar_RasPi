@@ -52,6 +52,10 @@ export function StatusBar({
   if (link?.drive_power_locked) latches.push('駆動電源ラッチ — 電源を入れ直してください')
   if (vs && !vs.steer_center_valid) latches.push('ステア原点が未保存 — 走行禁止')
   if (link?.protocol_match === false) latches.push('プロトコル版数が不一致')
+  // STM32 が GPIO6 のハートビートを一度も検出していない＝E-Stop の層が働いていない。
+  // 自動停止のセンサが両方使えないときは、近づいても止まらない
+  if (link?.no_heartbeat) latches.push('STM32 がハートビートを検出していません — E-Stop が効かない可能性があります（ARM は封印されます）')
+  if (link?.auto_stop_blind) latches.push('自動停止のセンサ（LiDAR・前後の超音波）がすべて使えません — 障害物の手前で止まりません')
   // STM32 が MD の異常で走行を止めている（後輪を制動→位置保持「固定中」。ARM を外すまで戻らない）。
   // どの MD がなぜ、は STM32 の LOG（`link.stm_log`）にしか出ない
   if (vs?.faults.includes('md_fault')) {
@@ -143,14 +147,19 @@ export function StatusBar({
           className={`pill ${ui.schemaMismatch ? 'lv-bad' : ui.telemetryOpen ? 'lv-ok' : 'lv-bad'}`}
           title={
             ui.schemaMismatch
-              ? 'Pi 側とテレメトリの型定義が食い違っています。gui を再ビルドしてください（npm run build）'
+              ? 'Pi と GUI の版が違います（型定義が食い違っています）。gui を再ビルドしてください（npm run build）'
               : undefined
           }
         >
-          {ui.schemaMismatch ? '型不一致' : ui.telemetryOpen ? '接続' : '切断'}
+          {ui.schemaMismatch ? '版不一致' : ui.telemetryOpen ? '接続' : '切断'}
         </span>
         {/* 直前に ARM が下りた理由（E-STOP・操縦権の喪失・無操作など）。**なぜ止まったかを
             必ず見せる**——出さないと、押していないのに ARM が外れた理由が分からない */}
+        {ui.notice && (
+          <span className={`pill ${ui.notice.level === 'bad' ? 'lv-bad' : 'lv-warn'}`} role="status">
+            {ui.notice.text}
+          </span>
+        )}
         {!ui.armRequested && ui.disarmReason && (
           <span className="pill lv-warn" title="直前に ARM が解除された理由">
             {ui.disarmReason}
@@ -200,13 +209,17 @@ function ArmButton() {
 
   return (
     <button
-      className={`armbtn ${ui.armRequested ? 'on' : ''}`}
+      className={`armbtn ${ui.armRequested ? 'on' : ''} ${n.link?.no_heartbeat || n.link?.auto_stop_blind ? 'warn' : ''}`}
       onClick={toggle}
       disabled={blocked}
       title={
         blocked
           ? n.link?.arm_inhibit_reason || 'io_node が ARM を通さない（テレメトリ未受信・--allow-arm が無い等）。GUI からは解禁できない'
-          : 'Enter キーでも同じ。無操作で自動解除される'
+          : n.link?.no_heartbeat
+            ? '⚠ STM32 がハートビートを検出していない（E-Stop が効かない）。Enter キーでも同じ'
+            : n.link?.auto_stop_blind
+              ? '⚠ 自動停止のセンサが使えない（障害物で止まらない）。Enter キーでも同じ'
+              : 'Enter キーでも同じ。無操作で自動解除される'
       }
     >
       {/* 残り 10秒を切ったら 0.1秒刻みにする。長いうちは秒刻みの方が落ち着いて読める */}

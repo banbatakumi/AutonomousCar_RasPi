@@ -106,6 +106,14 @@ export function runChecks(n: Numbers, st: ControlStatus | null): Check[] {
   add('安全', 'フォルト', vs.faults.length ? vs.faults.map(faultText).join('・') : 'なし', vs.faults.length ? 'bad' : 'ok', '電源・熱')
   add('安全', 'ステア原点', vs.steer_center_valid ? '保存済み' : '未保存', vs.steer_center_valid ? 'ok' : 'bad', '駆動・制御')
 
+  // STM32 側の「安全の層が働いていない」状態。link が無い（未受信）ときは判定しない
+  if (link) {
+    add('安全', 'STM32 のハートビート検出', link.no_heartbeat ? '未検出（E-Stop が効かない）' : '検出済み',
+      link.no_heartbeat ? 'bad' : 'ok', '通信')
+    add('安全', '自動停止のセンサ', link.auto_stop_blind ? '使えない（LiDAR・超音波とも）' : '使える',
+      link.auto_stop_blind ? 'bad' : 'ok', 'センサ・Pi')
+  }
+
   // ── 電源・熱 ──
   add('電源', '駆動バッテリー', `${num(vs.batt_voltage[0], 2)} V`, battLevel(vs.batt_voltage[0]), '電源・熱')
   add('電源', '信号バッテリー', `${num(vs.batt_voltage[1], 2)} V`, battLevel(vs.batt_voltage[1]), '電源・熱')

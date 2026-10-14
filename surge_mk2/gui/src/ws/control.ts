@@ -69,6 +69,10 @@ export type ControlHandlers = {
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
   onMapsSaveResult: (ok: boolean, error: string) => void
+  /** `logs_delete` の失敗（成功時は `onLogs` の一覧更新だけが届く） */
+  onLogsDeleteResult: (error: string) => void
+  /** `shutdown` の拒否。`reason: 'armed'` = ARM 中は受け付けない */
+  onShutdownDenied: (reason: string) => void
 }
 
 /** 後勝ちの浅いマージ。`undefined` は「このキーは送らない」なので、前の値を消さない */
@@ -97,7 +101,7 @@ export class ControlChannel {
   }
 
   private open() {
-    const ws = new WebSocket(wsUrl('/ws/control'))
+    const ws = new WebSocket(wsUrl('/ws/control?catalog=changed'))
     this.ws = ws
     ws.onopen = () => this.h.onOpenChange(true)
     ws.onmessage = (ev) => {
@@ -118,6 +122,9 @@ export class ControlChannel {
       else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
       else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
       else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
+      else if (m.type === 'logs_delete_result') {
+        if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
+      } else if (m.type === 'shutdown_denied') this.h.onShutdownDenied(m.reason ?? '')
       else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)

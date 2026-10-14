@@ -111,6 +111,13 @@ export function MapCanvas({
     const ctx = cv.getContext('2d')
     if (!ctx) return
     let raf = 0
+    // 地図まわりの線のオフスクリーン（何で焼いたかを覚えて、変わったときだけ焼き直す）
+    const layer: {
+      cv: HTMLCanvasElement | null
+      map: object | null
+      pw: number; ph: number; ox: number; oy: number; px: number; dpr: number
+      pending: string
+    } = { cv: null, map: null, pw: 0, ph: 0, ox: 0, oy: 0, px: 0, dpr: 0, pending: '' }
 
     const draw = () => {
       raf = requestAnimationFrame(draw)
@@ -167,16 +174,37 @@ export function MapCanvas({
       }
 
       if (map) {
-        drawGraph(ctx, map.graph, map.graphBreaks, sx, sy)
-        drawPolyline(ctx, map.centerline, sx, sy, C.center, 1, [4, 4])
-        // 走っていないグループの経路（細く）。今の経路は下の速度色の線が重なる
-        for (const [k, pts] of Object.entries(map.routes)) {
-          if (k === map.routeActive) continue
-          const pending = auto?.route_pending === k
-          drawPolyline(ctx, pts, sx, sy, GROUP_COLOR[k] ?? '#888', pending ? 2 : 1,
-            pending ? [8, 5] : [2, 4], k !== 'stop')
+        // 道路グラフ・中心線・各経路・レーシングライン（速度色は区間ごとに引き直すので重い）は、
+        // 地図・表示範囲・拡大率・切替待ちの経路が変わったときだけオフスクリーンへ焼き直し、
+        // 毎フレームは貼るだけにする。車と軌跡は動くので下で毎フレーム描く
+        const pending = auto?.route_pending ?? ''
+        const L = layer
+        if (!L.cv || L.map !== map || L.pw !== pw || L.ph !== ph || L.ox !== ox || L.oy !== oy
+          || L.px !== px || L.dpr !== dpr || L.pending !== pending) {
+          const off = L.cv ?? document.createElement('canvas')
+          if (off.width !== pw || off.height !== ph) {
+            off.width = pw
+            off.height = ph
+          }
+          const oc = off.getContext('2d')
+          if (oc) {
+            oc.setTransform(1, 0, 0, 1, 0, 0)
+            oc.clearRect(0, 0, off.width, off.height)
+            oc.setTransform(dpr, 0, 0, dpr, 0, 0)
+            drawGraph(oc, map.graph, map.graphBreaks, sx, sy)
+            drawPolyline(oc, map.centerline, sx, sy, C.center, 1, [4, 4])
+            // 走っていないグループの経路（細く）。今の経路は下の速度色の線が重なる
+            for (const [k, pts] of Object.entries(map.routes)) {
+              if (k === map.routeActive) continue
+              const isPending = pending === k
+              drawPolyline(oc, pts, sx, sy, GROUP_COLOR[k] ?? '#888', isPending ? 2 : 1,
+                isPending ? [8, 5] : [2, 4], k !== 'stop')
+            }
+            drawRaceline(oc, map, sx, sy, map.routeActive !== 'stop')
+          }
+          Object.assign(L, { cv: off, map, pw, ph, ox, oy, px, dpr, pending })
         }
-        drawRaceline(ctx, map, sx, sy, map.routeActive !== 'stop')
+        if (L.cv) ctx.drawImage(L.cv, 0, 0, w, h)
         // 経由点・停止点。**編集中は手元の写し**を、それ以外は地図に載っている設定を描く
         const cfg = routeEdit.cfg ?? cachedCfg(map.routesJson)
         if (cfg) drawRouteCfg(ctx, cfg, sx, sy, routeEdit.active ? routeEdit.target : '')
