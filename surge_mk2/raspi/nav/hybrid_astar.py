@@ -105,8 +105,11 @@ class HybridConfig:
     clearance_weight: float = 0.8
     #: 未知領域への罰則。**禁止ではなくコスト**（モジュールdocstring参照）
     unknown_weight: float = 0.5
-    goal_xy_tol: float = 0.04
-    goal_yaw_tol: float = math.radians(4.0)
+    #: 格子探索の到達許容。**完了判定（`park_to_point` の `pos_tol_m` 0.05m・`yaw_tol_deg` 5°）より
+    #: 十分小さく**する——近いと、到達ぎりぎりの経路が追従誤差で完了許容を外れ、再計画を繰り返す。
+    #: 実際の到達は解析展開（終点が目標に一致）が大半なので、小さくしても探索はほぼ重くならない
+    goal_xy_tol: float = 0.02
+    goal_yaw_tol: float = math.radians(2.0)
     #: 目標姿勢の余裕がこれだけ負（＝わずかに食い込んで見える）でも受け入れる [m]。
     #: ★格子1cm＋円被覆1〜2cmの保守性があるので、**実際には入る駐車枠が
     #: 「数mm食い込む」と読まれることがある**。ここを0にすると、その配置で
@@ -189,6 +192,12 @@ def _advance(x: float, y: float, yaw: float, curvature: float,
     return (x + r * (math.sin(yaw + dyaw) - math.sin(yaw)),
             y - r * (math.cos(yaw + dyaw) - math.cos(yaw)),
             wrap_angle(yaw + dyaw))
+
+
+#: 8近傍の格子距離（斜めは√2）は連続空間の直線距離を最大で `1/cos(22.5°)`≒1.0824 倍に過大評価する
+#: （角度22.5°の向き）。過大評価のヒューリスティックは許容的でなく、最短でない経路を返しうるので、
+#: この倍率で割って「直線距離以上にはならない」形にする
+_OCTILE_ADMISSIBLE = 1.0 / 1.0824
 
 
 class _Heuristic2D:
@@ -278,7 +287,7 @@ class _Heuristic2D:
         r = int((y - self.origin[1]) / self.res)
         if not (0 <= c < self.n and 0 <= r < self.n):
             return math.inf
-        return float(self.cost[r, c])
+        return float(self.cost[r, c]) * _OCTILE_ADMISSIBLE
 
 
 def _merge(prims: list[tuple[int, float, float]]) -> ReedsSheppPath:

@@ -141,10 +141,14 @@ class LocalMap:
     :param min_seen: 空きとして確定するのに必要な観測数。1でよい
         ——「1度素通りした」で空きとみなしても危険側には倒れない（危険側は
         「壁を空きと言う」方であって、こちらは`hits`の比率条件が守っている）
+    :param vanish_hits: 壁だったセルをレイが素通りした周期、そのセルの `hits` をここまで減らす。
+        壁の確定は `hits / (hits + misses) >= 0.5` なので、長く見えていた物（hits が大きい）は、
+        消えてから同じ回数だけ素通りされないと壁のまま残り、動いた物の跡が経路を塞ぐ。
+        近くの壁が今周期も当たっているセル（姿勢の揺れで端のセルが素通りされるだけ）は減らさない
     """
 
     def __init__(self, *, resolution: float = 0.01, size_m: float = 6.0,
-                 min_hits: int = 2, min_seen: int = 1,
+                 min_hits: int = 2, min_seen: int = 1, vanish_hits: int = 3,
                  footprint: list[tuple[float, float]] | tuple = (),
                  circles_x: int = 5, circles_y: int = 3,
                  max_cells: int = 700) -> None:
@@ -157,6 +161,7 @@ class LocalMap:
         self.center = (0.0, 0.0)
         self._min_hits = int(min_hits)
         self._min_seen = int(min_seen)
+        self._vanish_hits = max(int(vanish_hits), int(min_hits))
         self._circles, self._circle_r = (
             footprint_circles(footprint, circles_x, circles_y) if footprint
             else (np.zeros((1, 2)), 0.1))
@@ -217,7 +222,10 @@ class LocalMap:
         ——そして安全層（今のスキャンを見る）がそれを拒否する、という食い違いが
         起きる。実測では縦列駐車で「計画→即制動→再計画」が延々と交代した。
         """
-        self.grid.integrate(pts, pose)
+        g = self.grid
+        hits0, miss0 = g.hits.copy(), g.misses.copy()
+        g.integrate(pts, pose)
+        self._forget_vanished(hits0, miss0, int(np.count_nonzero(pts.hit)))
         x0, y0, yaw = pose
         c, s = math.cos(yaw), math.sin(yaw)
         wx = x0 + pts.x[pts.hit] * c - pts.y[pts.hit] * s
@@ -234,6 +242,34 @@ class LocalMap:
             self._fresh.fill(False)
         self._fresh[row[ok], col[ok]] = True
         self._fresh_seq = self.grid.seq
+
+    #: 消えた物を忘れる処理を行うのに必要な、今周期の当たり点の数（点群が痩せた周期は
+    #: 素通りの数も当てにならないので何もしない）
+    _MIN_HITS_TO_FORGET = 30
+
+    def _forget_vanished(self, hits0: np.ndarray, miss0: np.ndarray, n_hit: int) -> None:
+        """今周期に素通りされ、当たりが無かった壁セルの `hits` を `vanish_hits` へ減らす。"""
+        if n_hit < self._MIN_HITS_TO_FORGET:
+            return
+        g = self.grid
+        hit_now = g.hits > hits0
+        passed = (g.misses > miss0) & ~hit_now & (g.hits > self._vanish_hits)
+        if not passed.any():
+            return
+        near = hit_now.copy()                      # 当たったセルの2セル以内は姿勢の揺れとして除く
+        for _ in range(2):
+            grown = near.copy()
+            grown[1:, :] |= near[:-1, :]
+            grown[:-1, :] |= near[1:, :]
+            grown[:, 1:] |= near[:, :-1]
+            grown[:, :-1] |= near[:, 1:]
+            grown[1:, 1:] |= near[:-1, :-1]
+            grown[1:, :-1] |= near[:-1, 1:]
+            grown[:-1, 1:] |= near[1:, :-1]
+            grown[:-1, :-1] |= near[1:, 1:]
+            near = grown
+        g.hits[passed & ~near] = self._vanish_hits
+        g._cache_seq = -1                          # 読み出しのキャッシュ（`wall_mask` など）を捨てる
 
     # ── 距離場 ──
 

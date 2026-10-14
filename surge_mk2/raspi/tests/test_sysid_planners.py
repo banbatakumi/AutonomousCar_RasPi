@@ -125,7 +125,7 @@ class TestCornerRamp(unittest.TestCase):
         kappa = 1.0 / 0.42
         t_ns, v, speeds = 0, 0.0, []
         for _ in range(1000):
-            st = pl.plan(scan, VehicleState(armed=True, speed=v), prm, 0.1)
+            st = pl.plan(scan, VehicleState(armed=True, speed=v, stopped=v < 0.05), prm, 0.1)
             if st.reason.startswith("完了"):
                 return st, speeds
             v = st.target_speed
@@ -181,7 +181,7 @@ class TestCornerRamp(unittest.TestCase):
         pl.set_engaged(True)
         far = Scan(dist=[4.0] * 360, sector_seen=[True] * 12)
         near = Scan(dist=[0.2] * 360, sector_seen=[True] * 12)
-        state = VehicleState(armed=True)
+        state = VehicleState(armed=True, stopped=False)
         for _ in range(100):
             st = pl.plan(far, state, prm, 0.1)
         self.assertGreater(st.target_speed, 0.5)
@@ -199,6 +199,32 @@ class TestCornerRamp(unittest.TestCase):
         pl.set_engaged(True)
         st = pl.plan(far, state, prm, 0.1)
         self.assertFalse(st.brake)
+
+    def test_steer_returns_to_neutral_after_standing_still(self):
+        """止まって `StandstillSteer.HOLD_S` 経ったら舵を中立へ戻す（据え切りの過熱）。動いている間は保つ。"""
+        from raspi.auto.base import StandstillSteer
+        from raspi.msgs.types import Scan
+        pl = SysIdCorner()
+        prm = {s.key: s.default for s in SysIdCorner.params}
+        pl.set_engaged(True)
+        far = Scan(dist=[4.0] * 360, sector_seen=[True] * 12)
+        near = Scan(dist=[0.2] * 360, sector_seen=[True] * 12)
+        moving = VehicleState(armed=True, stopped=False, speed=0.5)
+        for _ in range(30):
+            pl.plan(far, moving, prm, 0.1)
+        st = pl.plan(near, moving, prm, 0.1)             # 中止（まだ動いている）
+        self.assertNotEqual(st.target_steer, 0.0)
+        still = VehicleState(armed=True, stopped=True)
+        n = int(StandstillSteer.HOLD_S / 0.1) - 2
+        for _ in range(n):
+            st = pl.plan(far, still, prm, 0.1)
+            self.assertNotEqual(st.target_steer, 0.0)    # 停車の直後は保つ
+        for _ in range(5):
+            st = pl.plan(far, still, prm, 0.1)
+        self.assertEqual(st.target_steer, 0.0)
+        self.assertTrue(st.brake)                        # 制動は続ける
+        st = pl.plan(far, moving, prm, 0.1)              # 動いたら数え直し（保持へ戻る）
+        self.assertNotEqual(st.target_steer, 0.0)
 
     def test_samples_stop_accumulating_after_the_run(self):
         st, _ = self._run(a_lat_cap=4.0)
@@ -270,6 +296,28 @@ class TestDeadReckon(unittest.TestCase):
 def _vs(t_ns: int, front: float, rear: float, odom: float = 0.0) -> VehicleState:
     return VehicleState(t_capture=t_ns, speed=front, wheel_speed=[front, front, rear, rear],
                         odom_dist=[odom, odom], armed=True)
+
+
+class TestSensorGuardArmed(unittest.TestCase):
+    def test_md_status_before_arm_is_ignored(self):
+        """試験開始から ARM までの MD 起動待ちの `md_status` で fault を立てない。"""
+        g = SensorGuard()
+        ok, lost = 0x31, 0x01
+        for k in range(50):
+            g.update(VehicleState(t_capture=10**9 + k, md_status=[ok, lost, ok], armed=False))
+        self.assertIsNone(g.fault)
+        g.update(VehicleState(t_capture=10**10, md_status=[ok, ok, ok], armed=True))
+        self.assertIsNone(g.fault)
+
+    def test_md_only_guard_ignores_wheel_mismatch(self):
+        """`wheel_check=False`（タイヤ試験）は後輪の空転で止めないが、MD の無応答では止める。"""
+        g = SensorGuard(wheel_check=False)
+        for k in range(100):
+            g.update(VehicleState(t_capture=10**9 + k * 10_000_000, speed=0.1,
+                                  wheel_speed=[0.1, 0.1, 2.0, 2.0], armed=True))
+        self.assertIsNone(g.fault)
+        g.update(VehicleState(t_capture=10**11, md_status=[0x31, 0x01, 0x31], armed=True))
+        self.assertIsNotNone(g.fault)
 
 
 class TestSensorGuard(unittest.TestCase):

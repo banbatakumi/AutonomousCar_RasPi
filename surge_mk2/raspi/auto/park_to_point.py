@@ -142,7 +142,7 @@ from ..nav.local_map import LocalMap
 from ..nav.reeds_shepp import ReedsSheppPath, candidate_paths, sample_path_array
 from ..nav.scan_anchor import ScanAnchor
 from ..nav.se2 import Pose, between, wrap_angle
-from .base import ParamSpec, Planner
+from .base import ParamSpec, Planner, StandstillSteer
 
 __all__ = ["ParkToPoint"]
 
@@ -310,6 +310,8 @@ class ParkToPoint(Planner):
         #: engage しているか（`set_engaged`）。`planning_node` を通さず `plan()` を直接呼ぶ使い方
         #: （走行中の迂回の引き継ぎ）では呼ばれないので、既定は True
         self._engaged = True
+        #: 停車の長さ（据え切りでステア MD を過熱させない。`StandstillSteer`）
+        self._still = StandstillSteer()
         self.reset()
 
     def set_engaged(self, engaged: bool) -> None:
@@ -326,6 +328,7 @@ class ParkToPoint(Planner):
         self._phase = ""
         self._maneuver_t = 0.0
         self._steer = 0.0
+        self._still.reset()
         self._failed_reason = ""
         self._path: ReedsSheppPath = ReedsSheppPath(segments=())
         self._replans = 0
@@ -678,11 +681,18 @@ class ParkToPoint(Planner):
 
     # ── `AutoState` の組み立て ──
 
-    def _hold(self, st: AutoState, phase: str, reason: str) -> AutoState:
-        """制動して待つ。`ready=True`なので指令は生き、速度0が流れる。"""
+    def _hold(self, st: AutoState, phase: str, reason: str, relax: bool = True) -> AutoState:
+        """制動して待つ。`ready=True`なので指令は生き、速度0が流れる。
+
+        舵は保つが、**停車が `StandstillSteer.HOLD_S` 続いたら中立へ戻す**（据え切りの過熱。完了・
+        失敗・障害物待ちで舵を切ったまま止まり続けない）。動き出すときは追従の平滑化が
+        中立から舵を作り直す。前後進の切り替えの停止（`relax=False`）は次の舵を準備する
+        ために保つ。"""
         st.ready = True
         st.brake = True
         st.phase = phase
+        if relax and self._still.relaxed:
+            self._steer = 0.0
         st.target_steer = self._steer
         st.reason = reason
         return st
@@ -743,6 +753,7 @@ class ParkToPoint(Planner):
         if vs is None:
             st.reason = "車両状態を受信していません"
             return st
+        self._still.observe(vs, dt)
         if self._phase == "失敗":
             return self._hold(st, self._phase, self._failed_reason)
 
@@ -938,4 +949,5 @@ class ParkToPoint(Planner):
         if vs.stopped:
             self._waiting_stop = False
             self._ref_i = min(nxt, len(self._ref_s) - 1)
-        return self._hold(st, "切替中", "前後進の切り替えのため停止中（次の舵を準備）")
+        return self._hold(st, "切替中", "前後進の切り替えのため停止中（次の舵を準備）",
+                          relax=False)

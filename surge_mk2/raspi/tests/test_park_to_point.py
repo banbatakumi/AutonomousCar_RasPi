@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.auto.park_to_point import ParkToPoint  # noqa: E402
-from raspi.msgs.types import Scan, VehicleState  # noqa: E402
+from raspi.msgs.types import AutoState, Scan, VehicleState  # noqa: E402
 from raspi.nav.deskew import Points  # noqa: E402
 from raspi.nav.reeds_shepp import (  # noqa: E402
     PathSegment, ReedsSheppPath, sample_path_array,
@@ -194,6 +194,49 @@ class TestDoneIsLatched(unittest.TestCase):
             st = pp.plan(_open_scan(), vs, p, DT)
         self.assertFalse(pp.done)
         self.assertGreater(st.target_speed, 0.0)
+
+
+class TestStandstillSteerRelax(unittest.TestCase):
+    """停車が続いたら舵を中立へ戻す（据え切りの過熱）。切り替えの停止中は保つ。"""
+
+    def _still_plan(self, pp, seconds, stopped=True):
+        p = pp.merged(IDEAL)
+        vs = VehicleState(stopped=stopped)
+        st = None
+        for _ in range(int(seconds / DT)):
+            st = pp.plan(_open_scan(), vs, p, DT)
+        return st
+
+    def test_done_hold_returns_steer_to_neutral(self):
+        pp = ParkToPoint()
+        pp.request_park_target(0.04, 0.0, 0.0)
+        self._still_plan(pp, 0.5)
+        self.assertTrue(pp.done)
+        pp._steer = 0.3
+        st = self._still_plan(pp, 1.0)
+        self.assertAlmostEqual(st.target_steer, 0.3)           # 停車の直後は保つ
+        st = self._still_plan(pp, 2.0)
+        self.assertEqual(st.target_steer, 0.0)
+        self.assertTrue(st.brake)
+
+    def test_moving_vehicle_keeps_the_steer(self):
+        pp = ParkToPoint()
+        pp.request_park_target(0.04, 0.0, 0.0)
+        self._still_plan(pp, 0.5)
+        pp._steer = 0.3
+        st = self._still_plan(pp, 5.0, stopped=False)
+        self.assertAlmostEqual(st.target_steer, 0.3)
+
+    def test_switch_stop_keeps_the_prepared_steer(self):
+        pp = ParkToPoint()
+        pp._still._still_s = 10.0
+        pp._steer = 0.3
+        pp._ref_s = np.zeros(3)
+        pp._ref_kappa = np.array([0.0, 1.0, 1.0])
+        st = pp._switch_stop(AutoState(), VehicleState(stopped=False), 0)
+        self.assertNotEqual(st.target_steer, 0.0)              # 次の区間の舵を保つ
+        self.assertEqual(st.target_steer, pp._steer)
+        self.assertEqual(st.phase, "切替中")
 
 
 class TestEngageGating(unittest.TestCase):

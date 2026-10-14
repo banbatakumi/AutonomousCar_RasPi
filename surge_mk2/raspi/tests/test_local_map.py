@@ -67,6 +67,40 @@ class TestFootprintCircles(unittest.TestCase):
         self.assertGreater(r - (0.37 / 6) / 2, 0.06)
 
 
+class TestVanishedObjects(unittest.TestCase):
+    #: 部屋の中の板（x=1.0、y=-0.3〜0.3）。置いたり外したりする
+    BOARD = [(1.0, -0.3, 1.0, 0.3)]
+
+    def _board_cell_is_wall(self, lmap):
+        col, row = lmap.grid.to_cell(1.0, 0.0)
+        return bool(lmap.grid.wall_mask()[int(row), int(col)])
+
+    def test_long_seen_object_disappears_in_a_few_cycles(self):
+        lmap = LocalMap(footprint=FOOTPRINT)
+        _feed(lmap, n=30, segs=ROOM4 + self.BOARD)
+        self.assertTrue(self._board_cell_is_wall(lmap))
+        _feed(lmap, n=5, segs=ROOM4)               # 板を外した（30周見えていた物が5周で消える）
+        self.assertFalse(self._board_cell_is_wall(lmap))
+
+    def test_static_wall_survives_many_cycles(self):
+        lmap = LocalMap(footprint=FOOTPRINT)
+        _feed(lmap, n=40, segs=ROOM4 + self.BOARD)
+        self.assertTrue(self._board_cell_is_wall(lmap))
+
+    def test_sparse_scan_does_not_forget(self):
+        """点群が痩せた周期（欠測）では、見えていた物を忘れない。"""
+        lmap = LocalMap(footprint=FOOTPRINT)
+        _feed(lmap, n=30, segs=ROOM4 + self.BOARD)
+        pts = deskew(make_room_scan(0.0, 0.0, 0.0, segs=ROOM4, max_range=6.0), max_range=6.0)
+        keep = pts.hit.copy()
+        keep[:] = False
+        keep[:10] = pts.hit[:10]
+        self.assertLess(int(keep.sum()), LocalMap._MIN_HITS_TO_FORGET)
+        before = lmap.grid.hits.copy()
+        lmap._forget_vanished(before, lmap.grid.misses.copy(), int(keep.sum()))
+        self.assertTrue((lmap.grid.hits == before).all())
+
+
 class TestReadiness(unittest.TestCase):
     def test_not_ready_before_min_hits(self):
         lmap = LocalMap(footprint=FOOTPRINT, min_hits=2)

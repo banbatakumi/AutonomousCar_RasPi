@@ -159,6 +159,34 @@ class TestTyre(unittest.TestCase):
         p.on_vehicle_state(vs(speed=1.5, rear=0.2))
         self.assertTrue(p._locked)
 
+    def test_locked_brake_ends_early_with_a_conservative_decel(self):
+        """ロック後の弱い制動は減速度が小さいので、直線を出そうなら早めに最大制動の局面へ移る。"""
+        from raspi.auto._sysid_common import brake_decel_guess, stop_distance
+        v = 1.5
+        gentle = SysIdTyre.SETTINGS["gentle_brake_nm"]
+        d_gentle, d_max = stop_distance(v, True, 0.0, brake_decel_guess(gentle)), stop_distance(v)
+        self.assertGreater(d_gentle, d_max + 0.2)
+        odom = 2.0 - 0.5 * (d_gentle + d_max)       # 最大制動なら止まれる、弱い制動では止まれない位置
+        p = SysIdTyre()
+        start(p, vs())
+        p._enter(p._BRAKE)
+        p._locked = True
+        p.plan(None, vs(speed=v, rear=0.2, odom=odom), {}, DT)
+        self.assertEqual(p._phase, p._HOLD)
+
+    def test_md_loss_aborts_but_wheel_spin_does_not(self):
+        p = SysIdTyre()
+        start(p, vs())
+        p._enter(p._DRIVE)
+        for _ in range(50):                          # 後輪が前輪より速いのは試験の中身
+            p.on_vehicle_state(vs(speed=0.5, rear=2.0))
+        self.assertIsNone(p._guard.fault)
+        lost = VehicleState(speed=0.5, armed=True, md_status=[0x31, 0x01, 0x31])
+        p.on_vehicle_state(lost)
+        st = p.plan(None, lost, {}, DT)
+        self.assertIn("中止", st.reason)
+        self.assertTrue(st.brake)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -219,7 +219,12 @@ class MPCFollower:
         # 箱制約: 絶対値の限界と、今の舵角から舵レートで届く範囲
         lim = cfg.max_steer * max(abs(cfg.servo_gain), 1e-6)
         lo_abs, hi_abs = sm.effective(-lim), sm.effective(lim)
-        reach = cfg.steer_rate * cfg.dt * np.arange(1, N + 1)
+        # 1 つ目の指令は**前回の指令から今回までの時間**（呼び出し周期。50Hz なら 0.02s）で届く範囲、
+        # 以降は予測の刻み（`dt`）ごとに足す。全部 `dt` 刻みにすると、周期が刻みより短いとき
+        # 次の指令の舵レートが実際の 5 倍まで許される
+        prev_t = self._sent[0][0] if self._sent else None
+        dt_call = cfg.dt if prev_t is None or now - prev_t < 1e-4 else min(cfg.dt, now - prev_t)
+        reach = cfg.steer_rate * (dt_call + cfg.dt * np.arange(N))
         lo = np.maximum(lo_abs, delta_now - reach)
         hi = np.minimum(hi_abs, delta_now + reach)
         hi = np.maximum(hi, lo)

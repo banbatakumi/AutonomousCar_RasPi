@@ -54,7 +54,7 @@ from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from ._sysid_common import (SensorGuard, TestGate, abort_state, corner_limit, corner_windows,
                             settle_state)
-from .base import ParamSpec, Planner, scan_window
+from .base import ParamSpec, Planner, StandstillSteer, scan_window
 
 __all__ = ["SysIdCorner"]
 
@@ -98,6 +98,8 @@ class SysIdCorner(Planner):
         self._gate = TestGate()
         #: 前輪エンコーダの不調で段を上げ続けないための照合（`SensorGuard`）
         self._guard = SensorGuard()
+        #: 終わった後・中止した後、停車が続いたら舵を中立へ戻す（据え切りの過熱）
+        self._still = StandstillSteer()
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -115,6 +117,7 @@ class SysIdCorner(Planner):
         self._at_limit = False
         self._checked_until = 0.0
         self._guard.reset()
+        self._still.reset()
 
     def reset(self) -> None:
         self._gate.reset()
@@ -181,8 +184,9 @@ class SysIdCorner(Planner):
             return st
 
         steer = math.copysign(min(math.radians(p["steer_deg"]), self.vehicle.max_steer), p["direction"])
+        self._still.observe(vs, dt)
         if self._guard.fault is not None:
-            return abort_state(st, self._guard.fault, steer)
+            return abort_state(st, self._guard.fault, self._still.steer(steer))
         if self._gate.settling(dt):
             return settle_state(st)
 
@@ -196,10 +200,10 @@ class SysIdCorner(Planner):
                                   "場所を空けて試験開始を押し直してください")
             self._running = False
         if self._abort_reason:
-            return abort_state(st, self._abort_reason, steer)
+            return abort_state(st, self._abort_reason, self._still.steer(steer))
 
         if self._done_reason:
-            return self._stop_state(st, p, steer)
+            return self._stop_state(st, p, self._still.steer(steer))
 
         self._running = True
         self._t += dt
@@ -208,7 +212,7 @@ class SysIdCorner(Planner):
         if not self._done_reason and speed >= p["v_max"]:
             self._finish("完了（上限速度まで限界が来なかった。v_maxを上げて録り直す）")
         if self._done_reason:
-            return self._stop_state(st, p, steer)
+            return self._stop_state(st, p, self._still.steer(steer))
 
         st.target_steer = steer
         st.target_speed = speed

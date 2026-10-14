@@ -44,6 +44,19 @@ def straight(length=20.0, v=2.0):
     return _line(np.c_[np.arange(n) * 0.05, np.zeros(n)], closed=False, v=v)
 
 
+class TestSteerForTarget(unittest.TestCase):
+    def test_target_behind_saturates_instead_of_straightening(self):
+        from raspi.nav.purepursuit import steer_for_target
+        m = 0.46
+        for sign in (1, -1):
+            a = steer_for_target(sign * math.radians(80), 1.0, L, m)
+            b = steer_for_target(sign * math.radians(120), 1.0, L, m)
+            c = steer_for_target(sign * math.radians(175), 1.0, L, m)
+            self.assertEqual(b, sign * m)
+            self.assertEqual(c, sign * m)
+            self.assertGreaterEqual(abs(b), abs(a))
+
+
 class TestMPC(unittest.TestCase):
     def test_path_without_curvature_falls_back_to_pure_pursuit(self):
         """曲率の列が経路と合わない（空）経路でも落ちず、Pure Pursuit の舵を返す。"""
@@ -60,6 +73,15 @@ class TestMPC(unittest.TestCase):
 
     def setUp(self):
         self.cfg = MPCConfig(wheelbase=L, delay_s=0.0, period=0.05)
+
+    def test_steer_rate_limit_uses_the_call_interval(self):
+        """50Hz で呼ばれるなら、次の指令の変化は舵レート×0.02s まで（予測刻み 0.1s ぶんではない）。"""
+        cfg = MPCConfig(wheelbase=L, delay_s=0.0, steer_rate=3.0, r_d=0.0, r_u=0.0)
+        mpc = MPCFollower()
+        path = straight()
+        a = mpc.follow(path, (1.0, 0.4, 0.0), 1.0, 0.0, cfg, now=0.0)
+        b = mpc.follow(path, (1.0, 0.4, 0.0), 1.0, a.steer, cfg, now=0.02)
+        self.assertLessEqual(abs(b.steer - a.steer), 3.0 * 0.02 + 1e-6)
 
     def test_直線で横ずれが収束する(self):
         cross, _ = run(straight(), (0.0, 0.3, 0.0), self.cfg)

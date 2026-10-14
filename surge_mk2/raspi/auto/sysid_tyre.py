@@ -37,7 +37,8 @@ TC・ABS・TV を切る。片輪浮き対策は入れたまま（後輪の周速
 from __future__ import annotations
 
 from ..msgs.types import AutoState, Scan, VehicleState
-from ._sysid_common import OdomRun, TestGate, settle_state, stop_distance
+from ._sysid_common import (OdomRun, SensorGuard, TestGate, abort_state, brake_decel_guess, settle_state,
+                            stop_distance)
 from .base import Planner
 
 __all__ = ["SysIdTyre", "OVERRIDES"]
@@ -86,6 +87,8 @@ class SysIdTyre(Planner):
         self.settings = dict(self.SETTINGS)
         self._gate = TestGate()
         self._run = OdomRun()
+        #: MD の無応答だけ見る。前輪と後輪の照合はしない（後輪をわざと空転・ロックさせる試験）
+        self._guard = SensorGuard(wheel_check=False)
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -97,6 +100,7 @@ class SysIdTyre(Planner):
         self._spun = False
         self._locked = False
         self._run = OdomRun()
+        self._guard.reset()
 
     def reset(self) -> None:
         self._gate.reset()
@@ -107,6 +111,7 @@ class SysIdTyre(Planner):
 
     def on_vehicle_state(self, vs: VehicleState) -> None:
         """`planning_node` が全サンプル（100Hz）で呼ぶ。空転・ロックを覚える。"""
+        self._guard.update(vs)
         if len(vs.wheel_speed) < 4:
             return
         rear_fast = max(vs.wheel_speed[2], vs.wheel_speed[3])
@@ -142,6 +147,8 @@ class SysIdTyre(Planner):
             return st
         assert vs is not None
         st.fw_overrides = dict(OVERRIDES)
+        if self._guard.fault is not None:
+            return abort_state(st, self._guard.fault)
         if self._gate.settling(dt):
             self._run.start(vs)
             return settle_state(st)
@@ -155,15 +162,21 @@ class SysIdTyre(Planner):
         v = vs.speed
         # 加速中の区間は、判断の遅れの間の増速ぶんも止まる距離に入れる（入れないと直線をはみ出す）
         accel_now = {self._ROLL: _ROLL_ACCEL_M_S2, self._DRIVE: _DRIVE_ACCEL_FOR_STOP_M_S2}.get(self._phase, 0.0)
-        out_of_road = (self._run.traveled(vs) + stop_distance(v, True, accel_now)
-                       >= p["run_length_m"])
+        # ロック後は弱い制動（gentle_brake_nm）で止まるので、その強さの見積もり（保守側）で測る
+        decel = (brake_decel_guess(p["gentle_brake_nm"])
+                 if self._phase == self._BRAKE and self._locked else None)
+        stop_d = (stop_distance(v, True, accel_now) if decel is None
+                  else stop_distance(v, True, accel_now, decel))
+        out_of_road = self._run.traveled(vs) + stop_d >= p["run_length_m"]
         if self._phase == self._ROLL:
             done = self._t >= p["roll_s"] - _EPS or out_of_road
         elif self._phase == self._DRIVE:
             done = (self._spun or self._at_max_s >= p["max_hold_s"] - _EPS or v >= p["v_max"] or out_of_road
                     or self._t >= self._PHASE_TIMEOUT_S - _EPS)
         elif self._phase == self._BRAKE:
-            done = abs(v) <= self._STOPPED_M_S or self._t >= self._PHASE_TIMEOUT_S - _EPS
+            # ロック後の弱い制動で直線を出そうなら、止まる局面（HOLD＝最大制動）へ早めに移る
+            done = (abs(v) <= self._STOPPED_M_S or self._t >= self._PHASE_TIMEOUT_S - _EPS
+                    or (self._locked and out_of_road))
         elif self._phase == self._HOLD:
             done = self._t >= p["stop_hold_s"] - _EPS
             if done:

@@ -90,6 +90,20 @@ def _rs_alone_works(lmap, start, goal, margin):
     return False
 
 
+class TestHeuristicAdmissible(unittest.TestCase):
+    def test_grid_distance_never_exceeds_straight_line(self):
+        """8近傍の格子距離は斜め22.5°で直線距離の1.08倍になる。ヒューリスティックは直線距離を超えない。"""
+        lmap = _map(ROOM)
+        cfg = _cfg()
+        goal = (0.0, 0.0)
+        h = _Heuristic2D(lmap, goal, cfg, cfg.margin)
+        for ang in range(0, 360, 15):
+            for r in (0.5, 1.0, 1.5):
+                x, y = goal[0] + r * math.cos(math.radians(ang)), goal[1] + r * math.sin(math.radians(ang))
+                # セル中心への丸め（半セル）ぶんの余裕だけ許す
+                self.assertLessEqual(h(x, y), r + 1.5 * cfg.heuristic_resolution, (ang, r))
+
+
 class TestFindsPaths(unittest.TestCase):
     def test_open_space_straight(self):
         lmap = _map(ROOM)

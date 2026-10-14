@@ -31,7 +31,7 @@ import msgspec
 
 from ..msgs.types import TOPIC_SCAN, AutoMap, AutoState, Scan, VehicleState
 
-__all__ = ["ParamSpec", "Planner", "ScanWindow", "blind_reason", "min_filter", "scan_window",
+__all__ = ["ParamSpec", "Planner", "ScanWindow", "StandstillSteer", "blind_reason", "min_filter", "scan_window",
            "sector_of_deg", "wrap_deg"]
 
 #: 受信できた点のうち「距離が分かった」（実測または飽和）点の割合の下限。視野全体と、
@@ -105,7 +105,19 @@ class Planner:
     stats: tuple[str, ...] = ("free_ahead", "nearest", "gap", "valid_ratio")
 
     def reset(self) -> None:
-        """内部状態を捨てる。**モード切替・disengage のたびに呼ばれる。**"""
+        """内部状態を捨てる。**モード切替・disengage のたびに呼ばれる。**
+
+        ただし `on_disengage()` を持つ planner では、**解除だけのとき**（モードは同じ）は
+        `reset()` の代わりにそちらが呼ばれる（`planning_node._apply_ctrl`）。何を残して何を
+        捨てるかは planner が決める: 解除のたびに地図・自己位置を作り直したくない planner は
+        `on_disengage()` を実装し、捨てる状態だけをそこで捨てる。モード切替では必ず `reset()`。
+        `on_disengage()` が何もしなければ、解除で状態は全て残る（次の engage は続きから動く）ので、
+        舵の平滑化など「前回の走行の続き」になる状態は自分で捨てること。
+
+        ほかにダックタイピングで呼ばれる任意のメソッド（持っていれば `planning_node` が呼ぶ）:
+        `on_vehicle_state(vs)`（全サンプル）、`set_engaged(engaged)`（`plan()` の直前）、
+        `on_disengage()`（上記）、`close()`（モード切替で捨てるとき）。
+        """
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
@@ -196,6 +208,40 @@ class Planner:
                 continue
             out[s.key] = min(s.max, max(s.min, v))
         return out
+
+
+class StandstillSteer:
+    """停車中に舵を切ったまま保持し続けない（据え切りでステア MD が過熱する。
+    `docs/system_overview.md` §2・`docs/stm32_interface.md` §8.4）。
+
+    **停車を確認して `HOLD_S` 経ったら舵を中立へ戻す。** 走行中・切り返しの途中（呼び出し側が
+    `allow=False` を渡す）では戻さない。止まっている間だけ数え、動き出したら数え直す。
+    """
+
+    #: 停車してから舵を戻すまでの時間 [s]。切り返しの停止（数百ms）や制動の停止直後は保持し、
+    #: 長い停車だけ戻す。MD ステアの過熱は分単位の据え切りで起きるので、2s で十分間に合う
+    HOLD_S = 2.0
+
+    def __init__(self) -> None:
+        self._still_s = 0.0
+
+    def reset(self) -> None:
+        self._still_s = 0.0
+
+    def observe(self, vs: VehicleState | None, dt: float) -> None:
+        """毎周期1回、`plan()` の頭で。`vs` が無い・動いているなら数え直す。"""
+        if vs is not None and vs.stopped:
+            self._still_s += max(0.0, dt)
+        else:
+            self._still_s = 0.0
+
+    @property
+    def relaxed(self) -> bool:
+        return self._still_s >= self.HOLD_S
+
+    def steer(self, steer: float, allow: bool = True) -> float:
+        """`steer` を出してよいか。停車が続いていて `allow` なら 0（中立）を返す。"""
+        return 0.0 if allow and self.relaxed else steer
 
 
 def wrap_deg(deg: float) -> float:

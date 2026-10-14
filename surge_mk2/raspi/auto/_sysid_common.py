@@ -68,7 +68,10 @@ class SensorGuard:
     TOLERANCE_FRAC = 0.3
     PERSIST_S = 0.3
 
-    def __init__(self) -> None:
+    def __init__(self, wheel_check: bool = True) -> None:
+        """`wheel_check=False` は前輪と後輪の照合をしない（後輪をわざと空転させる `sysid_tyre`。
+        空転は照合に引っかかる状態そのもの）。MD の無応答の検出は常に行う。"""
+        self.wheel_check = wheel_check
         self.fault: str | None = None
         self._bad_since_ns: int | None = None
 
@@ -77,7 +80,13 @@ class SensorGuard:
         self._bad_since_ns = None
 
     def update(self, vs: VehicleState) -> None:
+        """**ARM 済みのサンプルだけで判定する。** 試験開始から ARM までの間（MD の起動待ち約 1s）の
+        `md_status` は「まだ状態が来ていない・起動中」で、そこで fault を立てると ARM 直後に
+        「MD 無応答」で中止してしまう。ARM が外れている間は連続判定も数え直す。"""
         if self.fault is not None:
+            return
+        if not vs.armed:
+            self._bad_since_ns = None
             return
         down = md_down(vs.md_status)
         if down:
@@ -85,7 +94,7 @@ class SensorGuard:
             self.fault = (f"{'・'.join(down)}のモータドライバが無応答（車輪の値が古いまま固まる"
                           f"{'。電圧異常' if volt else ''}）。駆動バッテリーの残量と MD の電源を確かめる")
             return
-        if len(vs.wheel_speed) < 4:
+        if not self.wheel_check or len(vs.wheel_speed) < 4:
             return
         front = vs.speed
         rear = 0.5 * (vs.wheel_speed[2] + vs.wheel_speed[3])

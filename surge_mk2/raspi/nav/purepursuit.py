@@ -96,8 +96,8 @@ class SteerMap(NamedTuple):
 class PursuitConfig(NamedTuple):
     wheelbase: float = 0.23                #: L [m]（実測確定）
     #: 最大路面舵角 [rad]。**呼び出し側が `Vehicle.max_steer` を渡すこと**（この既定は
-    #: `vehicle.toml` にキーが無いときの `Vehicle` の既定と同じ、リンクの換算なしの 30°）
-    max_steer: float = 0.524
+    #: `vehicle.toml` の現在値（リンクの換算後、約 26.5°）に合わせた値）
+    max_steer: float = 0.46175
     lookahead_k: float = 0.8               #: `Ld = k·v + min` の k [s]
     lookahead_min: float = 0.35            #: [m]
     delay_s: float = 0.15                  #: 遅延補償の時間 [s]
@@ -146,7 +146,13 @@ def steer_for_target(eta: float, lookahead: float, wheelbase: float, max_steer: 
 
     `lookahead` は正の値を仮定（呼び出し側で下限を保証すること。ここでは
     0 除算だけ避ける）。
+
+    **狙点が真横より後ろ（|η|>90°）なら最大舵角に飽和させる。** 式の `sinη` は 90° を超えると
+    減るので、そのままだと後ろ寄りの狙点ほど舵が戻って旋回をやめてしまう。
     """
+    eta = (eta + math.pi) % (2.0 * math.pi) - math.pi
+    if abs(eta) > 0.5 * math.pi:
+        return math.copysign(max_steer, eta)
     steer = math.atan2(2.0 * wheelbase * math.sin(eta), max(lookahead, 1e-3))
     return max(-max_steer, min(max_steer, steer))
 
