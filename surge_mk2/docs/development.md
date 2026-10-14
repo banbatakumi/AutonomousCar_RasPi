@@ -151,6 +151,10 @@ sudo journalctl --list-boots                 # 勝手に再起動した形跡を
 sudo bash ~/surge_mk2/raspi/setup/install_services.sh --safe   # arm 封印で入れ直す
 ```
 
+`install_services.sh` は unit を書き換えるだけで、**動いている surge-io は古い引数のまま**（`--safe` を入れても
+封印はまだ効いていない）。スクリプトが最後にそう警告する。反映は `tools/deploy.sh --restart-io`（★E-Stop）。
+surge-io は drop-in `surge-io.service.d/10-priority.conf` で `Nice=-10` にしてある。
+
 **接続先は常に `surge-mk2.local`**（mDNS）。直結・Wi-Fi の生きている方を自動で選ぶので、
 IP を調べる作業は要らない。GUI は `http://surge-mk2.local:8000/`。
 
@@ -763,6 +767,10 @@ tools/deploy.sh --test                                           # Pi 上でも�
 1. `io_node` に **`--allow-arm`** が付いている（`install_services.sh` の既定で付く）
 2. **`cmd` が 150ms 以内に届き続けている**（途絶＝上位が死んだ、とみなして止める）
 3. GUI で**人間が ARM を保持している**
+
+加えて、`protocol_version` の一致と `[control]` の同期が済んでいること。E-Stop・駆動電源ラッチ・STM32 の
+再起動・COMMAND 途絶の後は、**ARM を一度外してから入れ直す**まで通らない（io_node と STM32 の両方が持つ。
+理由は GUI の ARM ボタンの横と `diag/link` の `arm_inhibit_reason` に出る）。
 
 **engage（自律走行の開始）は ARM ではない。** planning_node は `arm` を立てられないので、
 **電源を入れただけで走り出す経路は存在しない。**
