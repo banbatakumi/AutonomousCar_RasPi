@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ★ PC（Mac）側で実行する。作業ツリーを Pi(`~/surge_mk2`) に反映する。
+# ★ PC（Mac）側で実行する。作業ツリーを Pi(既定 `~/surge_mk2`、`SURGE_DEST` で変更) に反映する。
 #
 #   tools/deploy.sh                  # GUI をビルドして rsync（これが既定・いちばん安全）
 #   tools/deploy.sh --no-gui         # Python だけ直したとき（npm を回さない）
@@ -58,7 +58,9 @@ done
 SSH_OPTS=()
 [ -f "$KEY" ] && SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes)
 ssh_pi() { ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$HOST" "$@"; }
-RSYNC_SSH="ssh ${SSH_OPTS[*]:-}"
+# rsync の -e は空白で分けて読むので、鍵のパスに空白があっても壊れないよう各引数を単引用符で囲む
+RSYNC_SSH="ssh"
+for _o in ${SSH_OPTS[@]+"${SSH_OPTS[@]}"}; do RSYNC_SSH+=" '${_o}'"; done
 
 # ── 0. 疎通 ──
 echo "# $HOST へ接続を確認"
@@ -146,7 +148,7 @@ fi
 if [ "$DO_SERVICES" = 1 ]; then
   echo
   echo "# systemd unit を入れ直す"
-  ssh_pi 'sudo bash ~/surge_mk2/raspi/setup/install_services.sh' || exit 1
+  ssh_pi "sudo bash $DEST/raspi/setup/install_services.sh" || exit 1
   echo
   echo "  ※ unit を書き換えただけ。**走っている io_node は古い引数のまま。**"
   echo "     反映するには --restart-io（E-Stop がラッチする）"
@@ -187,4 +189,4 @@ echo "=== $HOST の状態 ==="
 ssh_pi 'systemctl is-active surge-io surge-camera surge-telemetry | paste -d" " - - - | sed "s/^/  io camera telemetry = /"'
 echo
 echo "  GUI  : http://surge-mk2.local:8000/"
-echo "  ログ : ssh $HOST 'tail -F ~/surge_mk2/logs/surge-io.out'"
+echo "  ログ : ssh $HOST 'tail -F ${DEST%/}/logs/surge-io.out'"

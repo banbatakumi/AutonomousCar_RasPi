@@ -16,9 +16,13 @@
 
 from __future__ import annotations
 
+import math
+import tomllib
 from dataclasses import dataclass, field, replace
 
 import numpy as np
+
+from raspi.core.control_params import DEFAULT_TOML
 
 from .fw import (FLAG_ABS, FLAG_LAUNCH, FLAG_LIFT, FLAG_TC, FLAG_TV, IN, MODE_BRAKE, MODE_DISARM,
                  MODE_SPEED, MODE_SPEED_LAUNCH, MODE_TORQUE, OUT, Firmware, HostConfig)
@@ -137,7 +141,8 @@ def run(fw: Firmware, plant: Plant, sc: Scenario, params: dict[str, float] | Non
     out = fw.run(plant.to_c(), cfg, sc.inputs(), params)
     # その場面を受け持つ制御の目標（制動モードは ABS、それ以外は TC）
     key = "abs_slip_target" if sc.segs[sc.measure].mode == MODE_BRAKE else "tc_slip_target"
-    target = (params or {}).get(key, fw.params[key].default if key in fw.params else 0.1)
+    # 走らせた値と同じものを基準にする（省略時は toml の値。ファームの表の既定は仮置きで、走らせていない）
+    target = {**fw.base_params(), **(params or {})}.get(key, fw.params[key].default if key in fw.params else 0.1)
     return Result(sc, out, _metrics(sc, out, target))
 
 
@@ -170,15 +175,26 @@ def replace_plant_noise(plant: Plant) -> Plant:
     return replace(plant, front_noise_rad_s=0.0, rear_noise_rad_s=0.0, gyro_noise_rad_s=0.0)
 
 
+def _cmd_accel_limit() -> float:
+    """`[safety] cmd_accel_limit_m_s2`（Pi が COMMAND に載せる傾きの上限）。読めなければ 3.0。"""
+    try:
+        with open(DEFAULT_TOML, "rb") as f:
+            v = float(tomllib.load(f).get("safety", {}).get("cmd_accel_limit_m_s2", 0.0))
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        return 3.0
+    return v if math.isfinite(v) and v > 0.0 else 3.0
+
+
+_RAMP = _cmd_accel_limit()
 _FULL = MAX_TORQUE_NM
 _COAST = Seg(0.05, MODE_DISARM)
 
 #: TC・ABS・片輪浮き対策の場面
 SLIP: tuple[Scenario, ...] = (
     Scenario("launch", "停止から全開（トルク指令）", (Seg(1.0, MODE_TORQUE, _FULL),), 0.0),
-    Scenario("launch_pi", "停止から車速指令 3m/s（ランプ3.0）", (Seg(1.0, MODE_SPEED, 3.0, 3.0),), 0.0),
+    Scenario("launch_pi", "停止から車速指令 3m/s（ランプは cmd_accel_limit）", (Seg(1.0, MODE_SPEED, 3.0, _RAMP),), 0.0),
     Scenario("launch_lc", "停止から車速指令 3m/s＋ローンチコントロール",
-             (Seg(1.0, MODE_SPEED_LAUNCH, 3.0, 3.0),), 0.0),
+             (Seg(1.0, MODE_SPEED_LAUNCH, 3.0, _RAMP),), 0.0),
     Scenario("roll", "0.5m/s から全開", (Seg(0.8, MODE_TORQUE, _FULL),), 0.5),
     Scenario("accel_mu_drop", "全開の途中で路面μが0.4倍（0.2s）",
              (Seg(0.25, MODE_TORQUE, _FULL), Seg(0.2, MODE_TORQUE, _FULL, mu_left=0.4, mu_right=0.4),
@@ -188,28 +204,28 @@ SLIP: tuple[Scenario, ...] = (
     Scenario("lift", "停止から全開・左後輪が浮いている",
              (Seg(0.6, MODE_TORQUE, _FULL, mu_left=0.03),), 0.0),
     Scenario("corner_exit", "旋回（舵0.3rad・1.2m/s）から全開",
-             (Seg(0.5, MODE_SPEED, 1.2, 3.0, steer=0.3), Seg(0.7, MODE_TORQUE, _FULL, steer=0.3)), 1.2,
+             (Seg(0.5, MODE_SPEED, 1.2, _RAMP, steer=0.3), Seg(0.7, MODE_TORQUE, _FULL, steer=0.3)), 1.2,
              measure=1),
-    Scenario("brake", "2.5m/s から最大制動", (Seg(0.1, MODE_SPEED, 2.5, 3.0), Seg(1.5, MODE_BRAKE, _FULL)),
+    Scenario("brake", "2.5m/s から最大制動", (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(1.5, MODE_BRAKE, _FULL)),
              2.5, measure=1, kind="brake"),
     Scenario("brake_soft", "2.5m/s から制動 0.10N·m",
-             (Seg(0.1, MODE_SPEED, 2.5, 3.0), Seg(1.5, MODE_BRAKE, 0.10)), 2.5, measure=1, kind="brake"),
+             (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(1.5, MODE_BRAKE, 0.10)), 2.5, measure=1, kind="brake"),
     Scenario("brake_mu_drop", "最大制動の途中で路面μが0.4倍（0.2s）",
-             (Seg(0.1, MODE_SPEED, 2.5, 3.0), Seg(0.2, MODE_BRAKE, _FULL),
+             (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(0.2, MODE_BRAKE, _FULL),
               Seg(0.2, MODE_BRAKE, _FULL, mu_left=0.4, mu_right=0.4), Seg(1.5, MODE_BRAKE, _FULL)),
              2.5, measure=3, kind="brake"),
     Scenario("brake_split", "最大制動・左だけ路面μが0.4倍",
-             (Seg(0.1, MODE_SPEED, 2.5, 3.0), Seg(2.0, MODE_BRAKE, _FULL, mu_left=0.4)), 2.5, measure=1,
+             (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(2.0, MODE_BRAKE, _FULL, mu_left=0.4)), 2.5, measure=1,
              kind="brake"),
-    Scenario("decel_pi", "2.5m/s から車速指令0（ランプ3.0）",
-             (Seg(0.1, MODE_SPEED, 2.5, 3.0), Seg(1.5, MODE_SPEED, 0.0, 3.0)), 2.5, measure=1,
+    Scenario("decel_pi", "2.5m/s から車速指令0（ランプは cmd_accel_limit）",
+             (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(1.5, MODE_SPEED, 0.0, _RAMP)), 2.5, measure=1,
              kind="brake"),
-    Scenario("decel_pi_corner", "旋回しながら車速指令0（ランプ3.0）",
-             (Seg(0.3, MODE_SPEED, 1.5, 3.0, steer=0.25), Seg(1.0, MODE_SPEED, 0.0, 3.0, steer=0.25)), 1.5,
+    Scenario("decel_pi_corner", "旋回しながら車速指令0（ランプは cmd_accel_limit）",
+             (Seg(0.3, MODE_SPEED, 1.5, _RAMP, steer=0.25), Seg(1.0, MODE_SPEED, 0.0, _RAMP, steer=0.25)), 1.5,
              measure=1, kind="brake"),
-    Scenario("cruise", "1.5m/s の定速（介入しないこと）", (Seg(1.0, MODE_SPEED, 1.5, 3.0),), 1.5),
+    Scenario("cruise", "1.5m/s の定速（介入しないこと）", (Seg(1.0, MODE_SPEED, 1.5, _RAMP),), 1.5),
     Scenario("cruise_turn", "1.2m/s・舵0.35rad の定常旋回（介入しないこと）",
-             (Seg(1.0, MODE_SPEED, 1.2, 3.0, steer=0.35),), 1.2),
+             (Seg(1.0, MODE_SPEED, 1.2, _RAMP, steer=0.35),), 1.2),
 )
 
 ALL = SLIP

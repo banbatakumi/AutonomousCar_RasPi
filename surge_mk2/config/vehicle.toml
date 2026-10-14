@@ -33,7 +33,7 @@ max_steer = 0.4617551884201365
 # によりタイヤ側は半分しか切れない。上の値はタイヤ側（路面舵角）基準。
 wheel_radius = 0.03          # [m]
 wheel_width = 0.025           # タイヤ幅 [m]（GUI・シムの車体イラスト用。★概算、実測したら直す）
-encoder_ticks_per_rev = 0     # ★未確定（STM32 の実測待ち）
+encoder_ticks_per_rev = 0     # ★未確定（STM32 の実測待ち）。どのコードも読まない（記録用の欄）
 mass = 2.0                    # 車両質量 [kg]（実測確定）
 
 # 車体外形ポリゴン [m]。base_link 基準・反時計回り。実測確定（2026-08-20）。
@@ -300,7 +300,8 @@ y = 0.0
 z = 0.110
 yaw = 0.0
 # LD06 は裏向きに実装されているため、センサ角と車両角が鏡像関係になる。
-# その反転は `raspi/msgs/convert.py` の ScanAssembler が行う（ここでは表現しない）
+# その反転は `raspi/msgs/convert.py` の ScanAssembler が行う（ここでは表現しない）。
+# **この `mirrored` はどのコードも読まない（記録用の欄）。** 反転は ScanAssembler に固定で入っている
 mirrored = true
 
 [sensors.cam_front]

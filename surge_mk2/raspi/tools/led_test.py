@@ -9,6 +9,9 @@
 
 割り当ては `docs/architecture.md` §2:
 GPIO19=緑 / GPIO13=赤 / GPIO18=ブザー。
+
+ブザーは**パッシブ圧電ブザー**（直流の High では鳴らない）。本番と同じ `open_tone()`
+（gpiozero の `TonalBuzzer`、ソフトウェア PWM）で A4 の音を鳴らす。極性（`--active-low`）は無関係。
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from raspi.io.gpio import (  # noqa: E402
     PIN_LED_GREEN,
     PIN_LED_RED,
     open_output,
+    open_tone,
 )
 
 
@@ -70,12 +74,15 @@ def main() -> int:
 
     g = Lamp("緑", args.green, args.active_low)
     r = Lamp("赤", args.red, args.active_low)
-    b = Lamp("ブザー", args.buzzer_pin, args.active_low) if args.buzzer else None
+    b = open_tone(args.buzzer_pin) if args.buzzer else None
 
-    for lamp in (g, r, b):
-        if lamp is not None and not lamp.ok:
+    for lamp in (g, r):
+        if not lamp.ok:
             print(f"!! GPIO{lamp.gpio}（{lamp.label}）を開けない", file=sys.stderr)
             return 2
+    if args.buzzer and b is None:
+        print(f"!! GPIO{args.buzzer_pin}（ブザー）を開けない", file=sys.stderr)
+        return 2
 
     print(f"LED 配線確認  緑=GPIO{args.green} 赤=GPIO{args.red}"
           + (f" ブザー=GPIO{args.buzzer_pin}" if b else " （ブザーは鳴らしません）")
@@ -106,10 +113,10 @@ def main() -> int:
         g.set(False); r.set(False)
 
         if b:
-            print(f"[6/{total}] **ブザーが 0.3秒 × 2回**鳴るはず", flush=True)
+            print(f"[6/{total}] **ブザーが A4（440Hz）の音を 0.3秒 × 2回**鳴らすはず", flush=True)
             for _ in range(2):
-                b.set(True); time.sleep(0.3)
-                b.set(False); time.sleep(0.3)
+                b.play("A4"); time.sleep(0.3)
+                b.stop(); time.sleep(0.3)
 
         print("\n終了。全部消灯しています。")
         print("見えたとおりと違った場合:")
@@ -117,9 +124,11 @@ def main() -> int:
         print("  - 緑と赤が入れ替わっている  → --green / --red でピンを入れ替え")
         print("  - どちらも光らない          → 配線・抵抗・GND を確認")
     finally:
-        for lamp in (g, r, b):
-            if lamp is not None:
-                lamp.close()
+        g.close()
+        r.close()
+        if b is not None:
+            b.stop()
+            b.close()
     return 0
 
 

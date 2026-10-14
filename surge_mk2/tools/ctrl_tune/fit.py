@@ -256,6 +256,14 @@ def fit_tyre(rec: Rec, base: Plant) -> FitResult:
         out.warn("TC・ABS・片輪浮き対策が介入しています（切れていない、または片輪浮き対策が働いた）")
     if rms > 1.0:
         out.warn(f"残差が大きい（{rms:.1f}N）——車輪の慣性（Ⓐ）が合っていない可能性")
+    # 探索範囲の端に張り付いた値は「求まった」のではなく「範囲で止められた」
+    for name, val, lo, hi in (("形 C", c, 1.0, 1.9), ("傾き B", math.exp(log_b), 2.0, 80.0),
+                              ("μ", mu, 0.1, 2.0)):
+        if val <= lo * 1.001 + 1e-9 or val >= hi * 0.999:
+            out.warn(f"{name} が探索範囲の端（{lo:g}〜{hi:g}）に張り付いた（{val:.3g}）——値は信用できない。"
+                     "記録がモデルの形（sin(C·atan(B·κ))）から外れている")
+    if both and (lt <= 1e-3 or lt >= 0.6 * 0.999):
+        out.warn(f"荷重移動が探索範囲の端（0〜0.6）に張り付いた（{lt:.3f}）")
     out.values = {"mu": float(mu), "tyre_b": float(math.exp(log_b)), "tyre_c": float(c)}
     if both:
         out.values["load_transfer"] = float(lt)

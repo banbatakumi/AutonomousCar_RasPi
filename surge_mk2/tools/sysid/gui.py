@@ -29,10 +29,11 @@ DEFAULT_TOML = REPO_ROOT / "config" / "vehicle.toml"
 
 #: 物理的に正でなければおかしいパラメータ。0.0や負値は測定失敗（配線ミス等）が
 #: すり抜けたサインの可能性が高いので、GUI側でも独立に検知して警告する。
-#: むだ時間・物理上限・加減速の上限・減衰の速度・遅延は0（＝無し・観測できず）があり得るので含めない。
+#: むだ時間・物理上限・加減速の上限（`brake_decel_m_s2` の 0 は「頭打ちなし」）・減衰の速度・遅延は
+#: 0（＝無し・観測できず）があり得るので含めない。
 #: 中立ずれ・アンダーステア勾配は符号つき
 _MUST_BE_POSITIVE = {
-    "tau_steer_s", "speed_plant_gain", "mu", "brake_decel_m_s2", "steer_gain", "steer_servo_gain",
+    "tau_steer_s", "speed_plant_gain", "mu", "steer_gain", "steer_servo_gain",
 }
 
 
@@ -243,7 +244,10 @@ class SysIdApp(tk.Tk):
             "適用しました",
             (f"更新: {', '.join(changed)}" if changed else "変更はありませんでした（既存値と同じ）")
             + "\n\n★ヘッダの説明文・「★未実測」の注記・measuredフラグは自動更新して"
-              "いません。手動で見直してください。",
+              "いません。手動で見直してください。"
+            + ("\n\n[control] の値（steer_link_*・速度PIのFF）は Pi へ反映すると（tools/deploy.sh "
+               "--restart-io。--restart では入りません）、io_node が STM32 へ送ります。"
+               if any(k in toml_update.LINK_KEYS or k in toml_update.FF_KEYS for k in changed) else ""),
         )
 
 

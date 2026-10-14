@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import math
+import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -56,6 +57,7 @@ from mcap.reader import make_reader
 from scipy.optimize import least_squares, minimize
 from scipy.signal import cont2discrete, lfilter
 
+from raspi.core.control_params import DEFAULT_TOML
 from raspi.auto._sysid_common import (REAR_SLIP_LIMIT, corner_limit, corner_windows, md_down, rear_slip)
 from raspi.auto.sysid_latency import LATENCY_CODE_MOD, LATENCY_CODE_STEP_RAD
 from sim.vehicle import (DriveInput, SpeedController, SteerLink, SteerServo, VehicleSpec, backlash,
@@ -1331,9 +1333,21 @@ def _traction_event(s: list[Sample], idx: list[int]) -> bool:
     return any(i in ids for r in _slip_runs(s) for i in r)
 
 
+def cmd_accel_cap() -> float:
+    """目標車速を動かす傾きの上限 [m/s²]（`[safety] cmd_accel_limit_m_s2`。読めなければ 3.0）。
+    `accel_limit`=0（全開）の段はこの傾きで走ったとみなす。"""
+    try:
+        with open(DEFAULT_TOML, "rb") as f:
+            v = float(tomllib.load(f).get("safety", {}).get("cmd_accel_limit_m_s2", 0.0))
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        return 3.0
+    return v if math.isfinite(v) and v > 0.0 else 3.0
+
+
 def _accel_level(x: Sample) -> float:
-    """そのサンプルの段の指令の加速度（`accel_limit`。0＝全開は3.0とみなす）。"""
-    return x.accel_limit if 0.0 < x.accel_limit < 3.0 else 3.0
+    """そのサンプルの段の指令の加速度（`accel_limit`。0＝全開は `cmd_accel_cap()` とみなす）。"""
+    cap = cmd_accel_cap()
+    return x.accel_limit if 0.0 < x.accel_limit < cap else cap
 
 
 def _slip_limited_accel(s: list[Sample]) -> tuple[float, float] | None:
@@ -1550,7 +1564,7 @@ def _fit_brake_runs(log: Log, base: VehicleSpec, rr: float) -> tuple[dict[str, f
 
 def _spin_accel(s: list[Sample]) -> float | None:
     """加速中（制動なし・前進の指令）に後輪が前輪より大きく速い状態（TC で抑えきれない空転）が
-    続いた最初の区間の、指令の加速度（`accel_limit`。0＝全開は3.0とみなす）。無ければ None。"""
+    続いた最初の区間の、指令の加速度（`_accel_level`）。無ければ None。"""
     since = None
     for x in s:
         on = not x.brake and x.target_speed > 0.0 and _spinning(x)
@@ -1559,7 +1573,7 @@ def _spin_accel(s: list[Sample]) -> float | None:
             continue
         since = x.t if since is None else since
         if x.t - since >= _SPIN_PERSIST_S:
-            return x.accel_limit if 0.0 < x.accel_limit < 3.0 else 3.0
+            return _accel_level(x)
     return None
 
 
@@ -1671,16 +1685,17 @@ def fit_accel(log: Log, base: VehicleSpec | None = None, speed_log: Log | None =
             f"加速度から {spin:.1f}m/s² の間——正味の加速の上限は上から抑えて {spin:.1f}m/s² にした。シムは空転を"
             "表現しない。TC の定数（DRIVE_TC_*）も確かめる")
     elif slip_a is not None:
+        ramp = cmd_accel_cap()
         sl = _slip_limited_accel(s)
         a_sl, lv = sl if sl is not None else (None, 0.0)
         a_grip = a_sl if a_sl is not None and a_sl > 0.1 else None
         traction_notes.append(
-            f"加速中に後輪が滑った（{'全開の段だけ' if slip_a >= 3.0 else f'{slip_a:.1f}m/s² の段から上'}）。"
-            + (f"滑っていた間の加速度は{'全開' if lv >= 3.0 else f' {lv:.1f}m/s² '}の段の {a_sl:.2f}m/s² が最大で、"
+            f"加速中に後輪が滑った（{'全開の段だけ' if slip_a >= ramp else f'{slip_a:.1f}m/s² の段から上'}）。"
+            + (f"滑っていた間の加速度は{'全開' if lv >= ramp else f' {lv:.1f}m/s² '}の段の {a_sl:.2f}m/s² が最大で、"
                "これを正味の加速の上限にした（グリップで決まる）。"
                if a_grip is not None else "滑っていた時間が短く、その加速度は読めなかった。")
             + "滑った区間は速度制御（車体の利得・転がり抵抗）の当てはめから外した")
-        if a_grip is not None and lv < 3.0 and lv >= _top_accel_level(s) and a_grip >= 0.9 * lv:
+        if a_grip is not None and lv < ramp and lv >= _top_accel_level(s) and a_grip >= 0.9 * lv:
             # 段の指令より上の加速度は出ないので、指令どおりに加速できていれば限界はもっと上かもしれない
             traction_notes.append(
                 f"★この加速度は段の指令（{lv:.1f}m/s²）とほぼ同じで、それより上の段を走っていない。"
@@ -1868,6 +1883,9 @@ def fit_corner(log: Log, base: VehicleSpec | None = None) -> FitResult:
         notes.append(f"★ジャイロが測定範囲（±{math.degrees(GYRO_RANGE_RAD_S):.0f}°/s）に張り付いた"
                      f"サンプルが {n_sat} 個（横加速度の材料から外した）。滑り出す前に張り付くと、"
                      "限界の判定が遅れる")
+    notes.append("ジャイロの倍率（実機で約1%小さい疑い）は同定の外: 横加速度（速さ×ヨーレート）と舵の効きが"
+                 "倍率の分だけそのまま偏り、`mu` と `steer_link_gain` に乗る（倍率が1%違えば両方とも約1%）。"
+                 "既知の円（舵一定で半径を巻尺で測る）で一度確かめておくこと")
     if len(stages) < 3:
         raise ValueError("旋回の区間が3つ未満です（記録が短すぎる）")
     if first_sat is None:
@@ -1876,7 +1894,9 @@ def fit_corner(log: Log, base: VehicleSpec | None = None) -> FitResult:
             raise ValueError(
                 "グリップの頭打ちに達していないようです（速度を上げても横加速度が伸び続けている）。"
                 f"{v_top:.2f}m/s で止まっている——周囲のクリアランスで止まっていないか確認し、"
-                "実際に滑り出すところまで録り直してください")
+                "実際に滑り出すところまで録り直してください（プランナーが「完了（グリップ限界…）」で止めた"
+                "記録なら、プランナーは走りながらのバイアスと区間で、ここでは停止区間のバイアスと"
+                "ウォームアップ除外で切っているために判定が分かれた。そのときは解析側の限界判定が遅い）")
         # 学習の速度域の上まで走って頭打ちが無い＝その範囲ではグリップは効かない。
         # 観測した最大の横加速度を mu の下限として返す（シムはその範囲で頭打ちにならない）
         a_max = max(st.a_lat for st in stages)

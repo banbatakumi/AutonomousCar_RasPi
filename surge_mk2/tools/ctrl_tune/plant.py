@@ -31,7 +31,8 @@ __all__ = ["Plant", "NOMINAL", "variants", "IDENTIFIED_KEYS"]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TOML = REPO_ROOT / "config" / "vehicle.toml"
 
-#: 実機の記録から同定する項目（`[control.plant]` に書くキー）
+#: `[control.plant]` に書けるキー。このうち `md_delay_s`・`fz_static_n` はどの試験も求めない
+#: （机上値。手で書き込むときだけここを通す）。試験が求めるのは `fit.TESTS` の各行
 IDENTIFIED_KEYS = ("wheel_inertia_kgm2", "wheel_friction_nm", "md_delay_s", "md_tau_s",
                    "mu", "fz_static_n", "load_transfer", "tyre_b", "tyre_c")
 

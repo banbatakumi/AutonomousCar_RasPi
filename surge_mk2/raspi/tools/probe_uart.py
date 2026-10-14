@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -74,6 +75,15 @@ def fmt_telemetry(t: packets.Telemetry) -> str:
     return "\n".join(lines)
 
 
+def _io_node_running() -> bool:
+    """surge-io が動いているか（systemd が無い・問い合わせに失敗した環境では False）。"""
+    try:
+        r = subprocess.run(["systemctl", "is-active", "--quiet", "surge-io"], timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -82,7 +92,14 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=3.0, help="受信を聞く秒数")
     ap.add_argument("--passive", action="store_true", help="何も送信せず受信だけ")
     ap.add_argument("--ping", action="store_true", help="PING も送る")
+    ap.add_argument("--force", action="store_true",
+                    help="surge-io が動いていても開く（UART を取り合う。通常は使わない）")
     args = ap.parse_args()
+
+    if not args.force and _io_node_running():
+        print("!! surge-io が動いている。同じ UART を取り合って io_node のフレームを壊すので開かない。\n"
+              "   止めるなら E-Stop がラッチする（解除はボタン2）。承知のうえなら --force", file=sys.stderr)
+        return 2
 
     print(f"# port={args.port} baud={args.baud} v{PROTOCOL_VERSION:#06x} 期待")
     print("# io_node（surge-io）が動いていないこと（UART を取り合う）")

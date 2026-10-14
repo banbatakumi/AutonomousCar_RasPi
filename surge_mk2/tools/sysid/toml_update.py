@@ -15,6 +15,9 @@ STM32 へ送る値なので `[control]` に書き、合わせて `[dynamics]` �
 
 from __future__ import annotations
 
+import math
+import os
+import tempfile
 from pathlib import Path
 
 import tomlkit
@@ -37,6 +40,10 @@ def speed_ff_values(speed_plant_gain: float, rolling_resistance: float) -> dict[
     """
     return {FF_KEYS[0]: round(1.0 / speed_plant_gain, 6),
             FF_KEYS[1]: round(max(rolling_resistance, 0.0) / speed_plant_gain, 6)}
+
+#: STM32 が `CONFIG_SET` で受け付ける範囲（範囲外は丸められる。`steer_link_*` は 0x0081/0x0082）。
+#: 丸められた値を toml に残すと Pi が送る値と STM32 の値、`max_steer` の三者が食い違うので、書く前に弾く
+LINK_RANGES = {"steer_link_gain": (0.5, 1.5), "steer_link_cubic": (-1.5, 1.5)}
 
 #: このツールが書き込んでよいキー（[dynamics]直下のみ）。
 #: `drive_ratio` は対象外（書こうとしたら`ValueError`にして誤って上書きしないようにする）。
@@ -71,6 +78,9 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
         テーブルが無い
     """
     values = dict(values)
+    for key, value in values.items():
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{key} が有限の数ではありません（{value}）。書き込みを中止します")
     link = {k: values.pop(k) for k in LINK_KEYS if k in values}
     unknown = set(values) - ALLOWED_KEYS
     if unknown:
@@ -81,6 +91,11 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
     if link and ("steer_gain" in values or "steer_gain_cubic" in values):
         raise ValueError("steer_link_* と steer_gain・steer_gain_cubic は同時に書けません"
                          "（リンクの換算へ畳み込んだ後の舵の効きは 1 と 0）")
+
+    for key, (lo, hi) in LINK_RANGES.items():
+        if key in link and not lo <= float(link[key]) <= hi:
+            raise ValueError(f"{key}={link[key]:.4g} は STM32 の受け付ける範囲 {lo}〜{hi} の外です。"
+                             "書き込みを中止します（試験をやり直してください）")
 
     path = Path(toml_path)
     doc = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -105,7 +120,8 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
             put(doc["control"], key, link[key])
         put(dynamics, "steer_gain", 1.0)
         put(dynamics, "steer_gain_cubic", 0.0)
-        put(doc, "max_steer", steer_link_road(STEER_LINK_X_MAX_RAD, *(link[k] for k in LINK_KEYS)))
+        # 書かれる値（put は float にするだけだが、比較は書式に依らない）から計算する
+        put(doc, "max_steer", steer_link_road(STEER_LINK_X_MAX_RAD, *(float(link[k]) for k in LINK_KEYS)))
     # 車速PIの加速度フィードフォワード（★v0.21）は車体の利得と転がり抵抗から決まる。`[control]` に
     # 有効な値（> 0）が書いてあれば、同定し直した値に合わせて書き直す（0・未記入なら無効のまま）
     control = doc.get("control")
@@ -116,5 +132,23 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
             put(control, key, ff[key])
 
     if changed:
-        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+        _atomic_write(path, tomlkit.dumps(doc))
     return changed
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """同じフォルダの一時ファイルへ書いてから置き換える（途中で止まっても元のファイルは壊れない）。"""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, path.stat().st_mode & 0o777)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
