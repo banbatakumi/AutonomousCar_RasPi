@@ -66,7 +66,7 @@ import numpy as np
 
 from .centerline import (Centerline, measure, normals, normals_open,
                          resample_loop, resample_open, tangents, tangents_open)
-from .grid import OccGrid, dilate
+from .grid import OccGrid, dilate, unknown_wall_mask
 from .local_map import _edt, footprint_circles
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha",
@@ -87,6 +87,10 @@ class RaceLine(NamedTuple):
     #: （`optimize` が余裕を満たす解を見つけられなかった）。線は返すが、呼び出し側は
     #: 利用者に知らせるか速度を抑える
     short: bool = False
+    #: True なら、**未知のセルも壁とみなすと**車体外形の余裕（`margin`）が足りない所がある。
+    #: 道幅のレイと車体の検査は未知を通れる所として扱う（壁の切れ目の先が未観測だと余裕を過大に
+    #: 測りうる）が、道路グラフは未知を壁として扱う。線は変えず、知らせるためだけの印
+    unknown_short: bool = False
 
     def __len__(self) -> int:
         return int(self.xy.shape[0])
@@ -714,8 +718,11 @@ class _BodyCheck:
     （`local_map.footprint_circles`）、壁の距離場で直接確かめる。
     """
 
-    def __init__(self, grid, footprint, closed: bool) -> None:
+    def __init__(self, grid, footprint, closed: bool, extra_wall: np.ndarray | None = None) -> None:
+        """:param extra_wall: 壁に加えて壁とみなすセル（未知を壁にしたときの余裕を測る、`unknown_short`）"""
         wall = getattr(grid, "base_wall_mask", grid.wall_mask)()
+        if extra_wall is not None:
+            wall = wall | extra_wall
         self.res = float(grid.resolution)
         self.origin = (float(grid.origin[0]), float(grid.origin[1]))
         self.edt = _edt(~wall, self.res)
@@ -959,4 +966,18 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     v = speed_profile(xy, speed_kappa(xy, closed), **spd)
     seg = np.hypot(*((np.roll(xy, -1, axis=0) - xy) if closed else np.diff(xy, axis=0)).T)
     short = bool(body is not None and float(body.clearance(xy).min()) < margin - 0.01)
-    return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed, short=short)
+    return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed, short=short,
+                    unknown_short=short or _unknown_short(grid, footprint, closed, xy, margin))
+
+
+def _unknown_short(grid, footprint, closed: bool, xy: np.ndarray, margin: float) -> bool:
+    """未知セルも壁とみなすと、車体外形の余裕が `margin` を切る所があるか（線は変えない）。"""
+    if footprint is None or not (hasattr(grid, "unknown_wall_mask") or hasattr(grid, "trinary")):
+        return False
+    try:
+        extra = (grid.unknown_wall_mask() if hasattr(grid, "unknown_wall_mask")
+                 else unknown_wall_mask(grid))
+        return bool(float(_BodyCheck(grid, footprint, closed, extra).clearance(xy).min())
+                    < margin - 0.01)
+    except Exception:                      # noqa: BLE001  警告のための測定で線を作れなくしない
+        return False

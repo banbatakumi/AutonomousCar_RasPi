@@ -60,6 +60,7 @@ from .base import ParamSpec
 from .park_to_point import ParkToPoint
 from .route_config import AUTO_KEY, ROUTE_KEYS, RouteConfig, Stop
 from .slam2d_raceline import (DETOUR, DONE, GROUP_LINE, PATH_STEP, SPEED_KEYS,
+                              UNKNOWN_SHORT_NOTE,
                               Slam2dRaceLine,
                               forward_traj, limits, line_kwargs, submit_job)
 
@@ -143,10 +144,15 @@ def _put(out: _BuildOut, key: str, rl, cl, rp, vehicle) -> None:
     out.routes[key], out.centerlines[key], out.paths[key] = rl, cl, rp
     r, i = tightest_radius(rl, PATH_STEP)
     r_min = 1.0 / vehicle.kappa_max
+    notes = []
     if r < 1.1 * r_min:
         x, y = rl.xy[i]
-        out.warnings[key] = (f"({x:.1f}, {y:.1f}) の半径{r * 100:.0f}cmは車の最小旋回半径"
-                             f"{r_min * 100:.0f}cmに近い（最低速度で通る。外れるなら経由点を見直す）")
+        notes.append(f"({x:.1f}, {y:.1f}) の半径{r * 100:.0f}cmは車の最小旋回半径"
+                     f"{r_min * 100:.0f}cmに近い（最低速度で通る。外れるなら経由点を見直す）")
+    if rl.unknown_short:
+        notes.append(UNKNOWN_SHORT_NOTE.rstrip("。"))
+    if notes:
+        out.warnings[key] = "。".join(notes)
 
 
 #: 自動経路で、見積もりの速い順に本来の設定で引き直して曲がれるか確かめる本数
@@ -262,6 +268,8 @@ def _compute_stop(trinary: np.ndarray, resolution: float, origin: tuple[float, f
     if r < r_min:
         warn = (f"停止点への経路に半径{r * 100:.0f}cmの所がある（車の最小旋回半径"
                 f"{r_min * 100:.0f}cm）。停止点を道の中心へ寄せると止まる位置が合う")
+    if rl.unknown_short:
+        warn += ("。" if warn else "") + UNKNOWN_SHORT_NOTE.rstrip("。")
     return rl, warn
 
 

@@ -312,6 +312,12 @@ def speed_kwargs(p: dict[str, float], vehicle, grip=None) -> dict:
 LINE_REFINE_STARTS = 2
 
 
+#: 道幅と車体の検査は未知を通れる所として扱うので、壁の切れ目の先が未観測だと余裕を過大に測りうる
+#: （`RaceLine.unknown_short`）。線は変えず、知らせるだけ
+UNKNOWN_SHORT_NOTE = ("★壁の切れ目の先が未観測の所で、未知を壁とみなすと車体の余裕が足りない"
+                      "（地図の壁の穴を走って埋めると直る）。")
+
+
 def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None) -> dict:
     """`rl_mod.optimize` へ渡す経路と速度の設定（BUILD と地図の読み込みで共通）。
 
@@ -1430,6 +1436,8 @@ class Slam2dRaceLine(Planner):
                 f"{self.path.v.min():.2f}〜{self.path.v.max():.2f} m/s）。")
         if self.path.short:
             base += "★道が狭く、車体と壁の余裕を確保できない所がある。"
+        elif self.path.unknown_short:
+            base += UNKNOWN_SHORT_NOTE
         st.reason = base + (
             f"地図を『{self._saved_map_name}』として保存した。"
             "レーシングライン走行で開始してください"
@@ -1662,6 +1670,8 @@ class Slam2dRaceLine(Planner):
             self._tight_key = key
             self._tight_msg = (f"・★曲がり切れない区間 {length:.1f}m（曲率が上限の {ratio * 100:.0f}%、"
                                f"半径 {1.0 / max(ratio * lim, 1e-6) * 100:.0f}cm）" if length > 0.0 else "")
+            if path.unknown_short:
+                self._tight_msg += "・★未知を壁とみなすと車体の余裕が足りない所がある"
         return self._tight_msg
 
     def _launch_ok(self, st: AutoState, vs: VehicleState, hit, coasting: bool, md_note: str,

@@ -47,7 +47,8 @@ import numpy as np
 
 from .deskew import Points
 
-__all__ = ["OccGrid", "dilate", "pack_trinary", "unpack_trinary"]
+__all__ = ["OccGrid", "UnknownWallGrid", "dilate", "pack_trinary", "unknown_wall_mask",
+           "unpack_trinary"]
 
 #: レイを進める刻み幅を解像度の何倍にするか。1.0 だと斜めのレイがセルを飛ばす
 _STEP_RATIO = 0.5
@@ -321,6 +322,60 @@ class OccGrid:
         first = occ.argmax(axis=1)
         d = t[first] + fill * self.resolution
         return np.where(hit, np.minimum(d, max_range), max_range).astype(np.float64)
+
+
+def unknown_wall_mask(grid, hole_cells: int = 5) -> np.ndarray:
+    """**未知を壁とみなしたとき**に壁へ加わるセル（未知のうち、空きに囲まれた小さな穴を除く）。
+
+    道路グラフ（`roadgraph.build_graph`）は未知を壁として扱うが、`raycast` と車体の検査
+    （`raceline._BodyCheck`）は壁だけを見る。壁の切れ目の先が未知だと、後者は奥まで素通りして
+    道幅と余裕を過大に測る。この差を測る・埋めるための印。スキャンの死角になった小さな
+    穴は塞ぐ（`build_graph` と同じ closing。塞がないと空きの真ん中の穴で道幅が縮む）。
+
+    :param grid: `trinary()` を持つ格子（`slam2d.core.grid.OccGrid` / このモジュールの `OccGrid`）
+    """
+    import cv2
+    tri = grid.trinary()
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (hole_cells, hole_cells))
+    closed = cv2.morphologyEx((tri == FREE).astype(np.uint8), cv2.MORPH_CLOSE, k)
+    return (tri == UNKNOWN) & ~closed.astype(bool)
+
+
+class UnknownWallGrid:
+    """未知セル（一度も見ていない所）も壁として扱う格子（`wall_mask` / `raycast` だけを差し替える）。
+
+    ★ **今は本番の経路生成では使っていない**（道幅・車体検査は壁だけを見る）。実機の地図で
+    比べた結果を `docs`/PROGRESS の「未知セルの扱い」に残した。揃えるなら `occgrid_from_trinary`
+    の直後にこれで包む。ライン生成は `RaceLine.unknown_short` で警告するだけに留めている。
+
+    ★ `OccGrid.raycast` は壁だけを見るので、壁の切れ目の先が未知だと、レイは未知を素通りして
+    奥の壁まで届き、道幅や車体の余裕を過大に測る。道路グラフ（`roadgraph.build_graph`）は
+    未知を壁として扱う（走ったことの無い所に経路を引かない）ので、道幅と車体の検査もそれに揃える。
+
+    **スキャンの死角になった小さな未知の穴は塞いで空き扱いにする**（`build_graph` と同じ
+    closing）。塞がないと、空きの真ん中の穴で道幅が急に縮む。
+    それ以外は `base` へ委ねる（`resolution`・`origin`・`to_cell` など）。
+    """
+
+    def __init__(self, base, hole_cells: int = 5) -> None:
+        self._base = base
+        #: 壁に数えた未知セル
+        self.unknown_wall = unknown_wall_mask(base, hole_cells)
+        self._wall = np.ascontiguousarray(base.wall_mask() | self.unknown_wall)
+        self._wall.setflags(write=False)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def wall_mask(self) -> np.ndarray:
+        return self._wall
+
+    def base_wall_mask(self) -> np.ndarray:
+        return self._wall
+
+    def raycast(self, ox, oy, angles, max_range, mask=None, fill: int = 1):
+        return self._base.raycast(ox, oy, angles, max_range,
+                                  mask=self._wall if mask is None else mask, fill=fill)
 
 
 def pack_trinary(t: np.ndarray) -> bytes:

@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .grid import unknown_wall_mask
+
 # cv2 はここでは import しない（issue #22）。line_perception_node 等、道路グラフを
 # 使わないノードもこのモジュールを import 経由で引き込みうるため、実際に使う
 # 関数の中で import する（cv2 は onnxruntime 等と同じ扱い）。
@@ -621,6 +623,10 @@ class CorridorGrid:
     def base_wall_mask(self) -> np.ndarray:
         """回廊の外を含まない、本当の壁（車体の検査用、`raceline._BodyCheck`）。"""
         return self._base.wall_mask()
+
+    def unknown_wall_mask(self, hole_cells: int = 5) -> np.ndarray:
+        """未知を壁とみなしたときに加わるセル（`nav/grid.unknown_wall_mask`、警告の測定用）。"""
+        return unknown_wall_mask(self._base, hole_cells)
 
     def raycast(self, ox, oy, angles, max_range, mask=None, fill: int = 1):
         return self._base.raycast(ox, oy, angles, max_range,

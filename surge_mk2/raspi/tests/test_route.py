@@ -1006,5 +1006,81 @@ class TestObstacleResponse(unittest.TestCase):
         self.assertTrue(all(type(v) is float for v in tgt), tgt)
 
 
+class TestUnknownCells(unittest.TestCase):
+    """未知セル（壁の切れ目の先）の扱い。道幅のレイと車体の検査は未知を通れる所として扱うが、
+    道路グラフは壁として扱う。線は変えずに `RaceLine.unknown_short` で知らせる
+    （実機の地図で揃えると最大15cm動く場合があったので、揃えていない）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from raspi.core.vehicle import Vehicle
+        cls.veh = Vehicle.load()
+        t = oval()
+        _rect(t, 2.5, 0.5, 5.0, 0.55, 0)         # 外壁の切れ目（先は未知）
+        cls.gapped = t
+        cls.whole = oval()
+        th = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+        cls.mid = np.column_stack([3.5 + 2.5 * np.cos(th), 2.5 + 1.5 * np.sin(th)])
+
+    @staticmethod
+    def _grid(t):
+        return occgrid_from_trinary(t, resolution=RES, origin=(0.0, 0.0), seq=0)
+
+    def _line(self, grid):
+        from raspi.nav import centerline as cl_mod
+        cl = cl_mod.build(grid, self.mid, step=0.1, max_width=3.0)
+        return rl_mod.optimize(grid, cl, half_width=HALF_WIDTH, margin=0.05, lam=0.1, passes=2,
+                               v_max=2.0, v_min=0.3, a_lat=2.5, a_accel=1.2, a_brake=1.8,
+                               footprint=self.veh.footprint)
+
+    def test_raycast_passes_through_a_gap_only_when_unknown_is_free(self):
+        from raspi.nav.grid import UnknownWallGrid
+        g = self._grid(self.gapped)
+        down = np.array([-math.pi / 2])
+        self.assertGreater(float(g.raycast(3.5, 1.0, down, 3.0)[0]), 0.9)    # 外まで抜ける
+        self.assertAlmostEqual(float(UnknownWallGrid(g).raycast(3.5, 1.0, down, 3.0)[0]),
+                               0.4625, delta=0.03)                           # 空きの縁で止まる
+
+    def test_small_unknown_holes_in_free_space_stay_free(self):
+        from raspi.nav.grid import unknown_wall_mask
+        t = self.whole.copy()
+        _rect(t, 3.0, 1.0, 3.05, 1.05, 0)        # 空きの真ん中の 2×2 セルの死角
+        g = self._grid(t)
+        m = unknown_wall_mask(g)
+        self.assertFalse(bool(m[int(1.0 / RES):int(1.05 / RES), int(3.0 / RES):int(3.05 / RES)].any()))
+        self.assertTrue(bool(m[0, 0]))           # 地図の外側の未知は壁
+
+    def test_line_near_a_gap_is_flagged_but_not_moved(self):
+        from raspi.nav.grid import UnknownWallGrid
+        g = self._grid(self.gapped)
+        plain = self._line(g)
+        self.assertFalse(plain.short)
+        self.assertTrue(plain.unknown_short)     # 未知を壁とみなすと余裕が足りない
+        # 壁を揃えた格子で引くと、同じ設定でも切れ目から離れ、警告は出ない
+        wrapped = self._line(UnknownWallGrid(g))
+        self.assertFalse(wrapped.short)
+        self.assertFalse(wrapped.unknown_short)
+        self.assertGreater(float(wrapped.xy[:, 1].min()), float(plain.xy[:, 1].min()) + 0.05)
+
+    def test_closed_course_has_no_unknown_warning(self):
+        line = self._line(self._grid(self.whole))
+        self.assertFalse(line.short)
+        self.assertFalse(line.unknown_short)
+
+    def test_route_line_carries_the_warning_through_the_corridor(self):
+        t = self.gapped
+        g = build_graph(t, resolution=RES, origin=(0.0, 0.0), keep=KEEP)
+        r = plan_loop(g, [Waypoint(2.0, 1.0, 0.0)])
+        kw = dict(half_width=HALF_WIDTH, margin=0.05, lam=0.1, passes=2, v_max=2.0, v_min=0.3,
+                  a_lat=2.5, a_accel=1.2, a_brake=1.8, footprint=self.veh.footprint)
+        line, _ = build_raceline(self._grid(t), g, r, **kw)
+        self.assertFalse(line.short)
+        self.assertTrue(line.unknown_short)
+        from raspi.auto import slam2d_route as srt
+        out = srt._BuildOut(graph=g)
+        srt._put(out, "k", line, None, r, self.veh)
+        self.assertIn("未知", out.warnings.get("k", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
