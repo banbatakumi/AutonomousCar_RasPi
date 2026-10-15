@@ -62,8 +62,16 @@ class WallExtractionError(Exception):
 
 
 def rasterize_walls(loops: list[Loop], thickness: float, resolution: float,
-                    margin: float = 0.4) -> tuple[np.ndarray, tuple[float, float]]:
+                    margin: float = 0.4, *, exact_thickness: bool = False
+                    ) -> tuple[np.ndarray, tuple[float, float]]:
     """壁ループの列 → 占有格子。
+
+    :param exact_thickness: False（既定）は円盤スタンプの半径を整数セルに丸める
+        （`round(thickness/2/resolution)`、最小1）。`thickness=0.03`・格子 0.02m なら
+        半径1セル＝**3セル＝6cm** になり、指定の倍の太さに描かれる。ベンチの数字を
+        変えないため既定はこのまま。True は壁の線から `thickness/2` 以内にセル中心が入る
+        セルだけを塗る（太さは±半セルの誤差）。細すぎて斜めの光線が抜けうる太さ
+        （`thickness < resolution`）は `WallExtractionError`。
 
     **初期値は全部「壁なし」。** 中心線モードの `rasterize()`（全部壁で埋めてから
     中心線沿いに掘る）とは逆に、壁のストロークだけを円盤スタンプでOR演算していく
@@ -81,6 +89,24 @@ def rasterize_walls(loops: list[Loop], thickness: float, resolution: float,
     h = int(math.ceil((float(xy[:, 1].max()) + pad - y0) / resolution))
 
     grid = np.zeros((h, w), dtype=bool)
+    if exact_thickness:
+        if thickness < resolution:
+            raise WallExtractionError(
+                f"壁の太さ {thickness}m が格子 {resolution}m より細く、斜めの壁で光線が"
+                "抜けます。exact_thickness は太さ >= 格子 で使ってください")
+        # 格子に丸めない点列（刻みを細かくして、線から half 以内のセルを漏れなく拾う）
+        fine = np.concatenate([sample_loop(loop, resolution / 4)[:, :2] for loop in loops])
+        k = int(math.ceil(half / resolution)) + 1
+        off = np.arange(-k, k + 1)
+        orr, occ = np.meshgrid(off, off, indexing="ij")
+        fc = (fine[:, 0] - x0) / resolution
+        fr = (fine[:, 1] - y0) / resolution
+        cc = np.round(fc).astype(np.int64)[:, None] + occ.ravel()[None, :]
+        rr = np.round(fr).astype(np.int64)[:, None] + orr.ravel()[None, :]
+        near = np.hypot(cc - fc[:, None], rr - fr[:, None]) * resolution <= half
+        ok = near & (cc >= 0) & (cc < w) & (rr >= 0) & (rr < h)
+        grid[rr[ok], cc[ok]] = True
+        return grid, (x0, y0)
     r = max(1, int(round(half / resolution)))
     yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
     disc = (xx * xx + yy * yy) <= r * r
@@ -290,7 +316,8 @@ def build(meta: dict) -> dict:
     thickness = float(meta.get("wall_thickness", 0.03))
     margin = float(meta.get("margin", 0.4))
     loops = [path_to_loop(tuple(w["origin"]), w["path"]) for w in meta["walls"]]
-    grid, origin = rasterize_walls(loops, thickness, res, margin)
+    grid, origin = rasterize_walls(loops, thickness, res, margin,
+                                   exact_thickness=bool(meta.get("exact_thickness", False)))
 
     obstacles_in = meta.get("obstacles")
     obstacles = None

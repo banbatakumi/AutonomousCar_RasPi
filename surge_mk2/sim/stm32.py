@@ -74,6 +74,8 @@ AUTO_STOP_LIDAR_HALF_WIDTH_CM = 15.0
 AUTO_STOP_LIDAR_MIN_POINTS = 3
 #: LiDAR の結果に関わらず、超音波がこの距離（車体先端から）未満なら止める
 AUTO_STOP_ULTRASONIC_NEAR_CM = 5.0
+#: 超音波を測り直す周期 [ns]（ファームのトリガ周期 60ms）
+US_PERIOD_NS = 60_000_000
 #: センサから車体先端までの後退量 [cm]（しきい値に足す）
 AUTO_STOP_LIDAR_OFFSET_CM = {True: 23.0, False: 14.0}       # 前進側 / 後退側
 AUTO_STOP_ULTRASONIC_OFFSET_CM = {True: 4.0, False: 3.0}
@@ -192,6 +194,7 @@ class VirtualStm32:
         self.mode = packets.Mode.DISARM
 
         self.us_front = 0.0
+        self._us_next_ns = 0                 #: 次に超音波を測る時刻（`US_PERIOD_NS` ごと）
         self.us_rear = 0.0
         self._last_collision_check = (0.0, 0.0)
 
@@ -491,7 +494,11 @@ class VirtualStm32:
                              steer_rate_limit=cmd.steer_rate_limit, side_brake=True)
 
         # 超音波（前後 1 本ずつのレイキャスト）と auto_stop
-        self._update_ultrasonic()
+        # 超音波は実物も約 60ms 周期でしか測れない（`ultrasonic.h`）。積分の刻みごとにレイを撃つと
+        # シムの負荷の大半を占め、ホストが詰まって指令が途切れた
+        if self._now >= self._us_next_ns:
+            self._us_next_ns = self._now + US_PERIOD_NS
+            self._update_ultrasonic()
         self.auto_stop_active = self._auto_stop_should_brake(cmd)
         if self.auto_stop_active:
             cmd = DriveInput(armed=cmd.armed, brake=True, brake_torque=0.0,

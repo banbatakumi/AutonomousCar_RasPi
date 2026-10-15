@@ -156,11 +156,18 @@ class Course:
 
         当たらなかったレイは **0.0**（プロトコルの「無効」と同じ表現）。
         `dist=0` を「距離0の障害物」と読んではいけないのは実機と同じ。
+
+        `ox`/`oy` は配列（`angles` と同じ長さ）でもよい。その場合はレイごとに原点が違う
+        （走査中に動く LiDAR の点ごとの姿勢。`sim/lidar.py`）。
         """
         step = self.resolution * _STEP_RATIO
         n_steps = max(1, int(max_range / step))
         t = np.arange(1, n_steps + 1, dtype=np.float32) * step      # (S,)
 
+        if np.ndim(ox):
+            ox = np.asarray(ox, dtype=np.float32)[:, None]
+        if np.ndim(oy):
+            oy = np.asarray(oy, dtype=np.float32)[:, None]
         cos = np.cos(angles).astype(np.float32)[:, None]            # (R,1)
         sin = np.sin(angles).astype(np.float32)[:, None]
         cols = ((ox - self.origin[0]) / self.resolution

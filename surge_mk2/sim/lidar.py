@@ -10,6 +10,11 @@ UART で送る（`docs/architecture.md` §4）。**Pi 側に LD06 の生パー�
 実機の LD06 は 10回転/秒なので、1周する間に 3m/s の車は 30cm 進む。
 セクタごとにその時刻の姿勢でレイを撃てば、この歪みが自然に入る。
 
+**セクタの中でも点ごとに時刻が違う**（1セクタ 30点・約 8.3ms、3m/s なら 2.5cm 進む）。
+実機の点 i は `t_start + duration * i / 29`（`raspi/nav/deskew.py` の `point_times_ns` と同じ式）
+に測られるので、点ごとに「セクタ始まりと終わりの姿勢の補間」から撃つ。補間する添字 i は
+**センサ順**（鏡像を戻す前）で、`t_start` が先頭の点（i=0）、末尾の点（i=29）が `t_end`。
+
 ## 出力はセンサ座標系（＝わざと鏡像にする）
 
 実機の LD06 は裏向きに実装されていて、`ScanAssembler` が
@@ -70,6 +75,9 @@ class VirtualLidar:
 
         self._next_ns = 0
         self._sector = 0
+        #: 直前のセクタ終端の姿勢 (x, y, yaw)。次のセクタの始まりの姿勢（点ごとの補間に使う）。
+        #: yaw は巻き戻さず連続量で持つ
+        self._prev_pose: tuple[float, float, float] | None = None
         #: 出さなかったセクタの数。`lidar_sectors_lost` と突き合わせる用
         self.dropped_sectors = 0
         #: **車両角**で並べた直近の観測 [m]。0 = 無効。シミュレータGUI が描くためだけの物で、
@@ -81,6 +89,7 @@ class VirtualLidar:
     def power_off(self) -> None:
         """無給電にする（回転が止まり、点群は古くなる）。次の `poll` から回転を始め直す。"""
         self._next_ns = 0
+        self._prev_pose = None
         self.last_emit_ns = 0
         self.last_scan[:] = 0.0
 
@@ -92,6 +101,7 @@ class VirtualLidar:
         """
         if self._next_ns == 0:
             self._next_ns = t_ns + SECTOR_PERIOD_NS
+            self._prev_pose = (vehicle.x, vehicle.y, vehicle.yaw)
             return []
 
         out: list[tuple[int, packets.LidarSector]] = []
@@ -103,29 +113,43 @@ class VirtualLidar:
             idx = self._sector
             self._sector = (self._sector + 1) % SECTORS
             self._next_ns += SECTOR_PERIOD_NS
+            # 落とすセクタでも姿勢の履歴は進める（次のセクタの始まりの姿勢になる）
+            pose0 = self._prev_pose
+            self._prev_pose = (vehicle.x, vehicle.y, vehicle.yaw)
 
             if self.rng.random() < self.params.lidar_sector_drop_rate:
                 self.dropped_sectors += 1
                 continue                      # ★ パケットごと出さない = sector_seen False
 
-            pkt = self._sector_packet(idx, t_end, vehicle, stm_us)
+            pkt = self._sector_packet(idx, t_end, vehicle, stm_us, pose0)
             self.last_emit_ns = t_end
             out.append((t_end + self._delay_ns(), pkt))
         return out
 
     # ── 1セクタ分 ──
 
-    def _sector_packet(self, idx: int, t_end_ns: int, vehicle,
-                       stm_us) -> packets.LidarSector:
+    def _sector_packet(self, idx: int, t_end_ns: int, vehicle, stm_us,
+                       pose0=None) -> packets.LidarSector:
         p = self.params
-        # センサ位置（車体座標 → 世界座標）
         mx, my, myaw = self.mount
-        c, s = math.cos(vehicle.yaw), math.sin(vehicle.yaw)
-        ox = vehicle.x + mx * c - my * s
-        oy = vehicle.y + mx * s + my * c
+        x1, y1, yaw1 = vehicle.x, vehicle.y, vehicle.yaw
+        if pose0 is None:
+            pose0 = (x1, y1, yaw1)
+        x0, y0, yaw0 = pose0
+        # 点 i（センサ順）の時刻は t_start + dur * i / 29。始まり（i=0）と終わり（i=29）の
+        # 姿勢を線形補間する。yaw は差を [-π, π) に畳んでから補間する
+        f = np.arange(POINTS_PER_SECTOR) / (POINTS_PER_SECTOR - 1)
+        dyaw = (yaw1 - yaw0 + math.pi) % (2 * math.pi) - math.pi
+        px = x0 + (x1 - x0) * f
+        py = y0 + (y1 - y0) * f
+        pyaw = yaw0 + dyaw * f
+        c, s = np.cos(pyaw), np.sin(pyaw)
+        # センサ位置（車体座標 → 世界座標）
+        ox = px + mx * c - my * s
+        oy = py + mx * s + my * c
 
         # **車両角で撃つ。並びはセンサ順のまま**（＝配列の添字が鏡像になっている）
-        angles = vehicle.yaw + myaw + _VEHICLE_RAD[idx]
+        angles = pyaw + myaw + _VEHICLE_RAD[idx]
         d = self.course.raycast(ox, oy, angles, p.lidar_max_range_m)
 
         valid = d > 0

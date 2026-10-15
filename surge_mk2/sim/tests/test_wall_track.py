@@ -40,6 +40,66 @@ def _ring_grid():
     return grid, origin
 
 
+def _diamond_loop(r: float, rot: float) -> Loop:
+    """原点まわりに `rot` [rad] 回した一辺の斜めな四角形（斜めの壁の光線抜けを調べる用）。"""
+    import math
+    loop = Loop()
+    for k in range(4):
+        a = rot + k * math.pi / 2
+        loop.add_line((r * math.cos(a), r * math.sin(a)))
+    loop.close()
+    return loop
+
+
+class TestExactThickness(unittest.TestCase):
+    res = 0.02
+
+    def _wall_cells_across(self, grid, origin, y_line):
+        """x=0 の縦線に沿った壁セルの連続数（壁の太さ[セル]）の最大。"""
+        col = int(round((0.0 - origin[0]) / self.res))
+        column = grid[:, col]
+        best = run = 0
+        for v in column:
+            run = run + 1 if v else 0
+            best = max(best, run)
+        return best
+
+    def test_default_is_unchanged_double_thickness(self):
+        grid, origin = rasterize_walls([_rect_loop(1.0)], 0.03, self.res, 0.2)
+        self.assertEqual(self._wall_cells_across(grid, origin, 1.0), 3)   # 6cm
+
+    def test_exact_is_thinner_than_default(self):
+        g0, o0 = rasterize_walls([_rect_loop(1.0)], 0.03, self.res, 0.2)
+        g1, o1 = rasterize_walls([_rect_loop(1.0)], 0.03, self.res, 0.2,
+                                 exact_thickness=True)
+        self.assertLess(g1.sum(), g0.sum())
+        # 1.5 セル相当: 1〜2 セル幅（指定 3cm に ±半セルの範囲）
+        self.assertIn(self._wall_cells_across(g1, o1, 1.0), (1, 2))
+
+    def test_too_thin_raises(self):
+        with self.assertRaises(WallExtractionError):
+            rasterize_walls([_rect_loop(1.0)], 0.01, self.res, 0.2,
+                            exact_thickness=True)
+
+    def test_oblique_walls_do_not_leak(self):
+        """斜めの壁（15〜75°）を内側から外側へ撃っても光線が抜けない。"""
+        from sim.course import Course
+        from pathlib import Path
+        for rot_deg in (0, 15, 30, 45, 60, 75):
+            grid, origin = rasterize_walls([_diamond_loop(1.5, np.radians(rot_deg))],
+                                           0.03, self.res, 0.5, exact_thickness=True)
+            course = Course(name="t", path=Path("t"), resolution=self.res, origin=origin,
+                            start=(0.0, 0.0, 0.0), grid=grid)
+            # 内側の点から全方向へ。外へ抜けると画像外まで進んで壁(画像端)に当たる
+            # ＝ 距離が壁までより大きくなるので、壁の外側から跳ね返った距離を見る
+            angles = np.linspace(0, 2 * np.pi, 3600, endpoint=False)
+            for ox, oy in ((0.0, 0.0), (0.4, -0.3), (-0.6, 0.5)):
+                d = course.raycast(ox, oy, angles, 10.0)
+                # 菱形の最遠の頂点は 1.5m。内側の点から壁を抜けずに止まれば 3.1m 未満
+                self.assertTrue(((d > 0) & (d < 3.1)).all(),
+                                f"rot={rot_deg} origin=({ox},{oy}) 光線が抜けた")
+
+
 class TestRasterizeWalls(unittest.TestCase):
     def test_no_loops_raises(self):
         with self.assertRaises(WallExtractionError):

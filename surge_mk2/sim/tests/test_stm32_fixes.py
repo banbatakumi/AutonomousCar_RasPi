@@ -39,9 +39,9 @@ class TestLidarPose(unittest.TestCase):
         xs = []
         orig = ld._sector_packet
 
-        def spy(idx, t_end, vehicle, stm_us):
+        def spy(idx, t_end, vehicle, stm_us, *rest):
             xs.append((vehicle.x, vehicle.y))
-            return orig(idx, t_end, vehicle, stm_us)
+            return orig(idx, t_end, vehicle, stm_us, *rest)
         ld._sector_packet = spy
         sim.advance_to(t + 60_000_000)                # 60ms をまとめて進める
         self.assertGreaterEqual(len(xs), 5)
