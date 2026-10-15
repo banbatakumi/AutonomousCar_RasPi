@@ -38,10 +38,11 @@ import numpy as np
 
 from ..core.surfmap import SurfaceMap
 from ..core.frontend import Keyframe, inflate_info, rotate_info
-from ..core.register import ANCHOR_INFO, RegisterConfig, register, search
+from ..core.register import ANCHOR_INFO, RegisterConfig, register, search_steps
 from ..core.types import Cov3, Pose2D, between, wrap_angle
 
-__all__ = ["LoopDetectorConfig", "LoopCandidate", "find_loop_closure", "build_submap"]
+__all__ = ["LoopDetectorConfig", "LoopCandidate", "find_loop_closure",
+           "find_loop_closure_steps", "build_submap"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +87,9 @@ class LoopDetectorConfig:
     #: 拘束に足す「モデル化していない誤差」（`core/frontend.inflate_info`）
     sigma_xy: float = 0.02
     sigma_yaw: float = math.radians(0.3)
+    #: `find_loop_closure_steps`が総当たりの向きを何個調べるごとに`yield`するか。
+    #: 1向きは Mac で約0.5ms・Pi 5 で約4ms（粗い段）
+    yaw_chunk: int = 4
 
 
 class LoopCandidate(NamedTuple):
@@ -120,7 +124,30 @@ def build_submap(keyframes: Sequence[Keyframe], indices: Sequence[int], center: 
 def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
                       config: LoopDetectorConfig = LoopDetectorConfig()
                       ) -> LoopCandidate | None:
-    """`keyframes[new_index]`が過去のキーフレームの近くに戻ってきたかを調べる。"""
+    """`keyframes[new_index]`が過去のキーフレームの近くに戻ってきたかを調べる。
+
+    `find_loop_closure_steps()`を最後まで一気に進めたもの。"""
+    gen = find_loop_closure_steps(keyframes, new_index, config=config)
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+def find_loop_closure_steps(keyframes: Sequence[Keyframe], new_index: int, *,
+                            config: LoopDetectorConfig = LoopDetectorConfig()):
+    """`find_loop_closure()`を細かく分けて進めるジェネレータ。
+
+    1回の`next()`の仕事は、候補探し＋部分地図の構築、または総当たりの向き
+    `config.yaw_chunk`個、または Gauss-Newton のどれか1つ（Mac で最大約5ms・
+    Pi 5 で約40ms）。**戻り値**（`StopIteration.value`）が`LoopCandidate | None`。
+    走行中は`SlamSystem.update()`が1周期に1回だけ進める（一括だと Pi 5 で約150ms
+    かかり、LiDAR の周期100msを超えていた）。
+
+    `keyframes[:new_index+1]`は途中で書き換わらないこと（キーフレームは追加されるだけで、
+    姿勢の補正で列ごと差し替わる前に呼び出し側が破棄する）。
+    """
     cur = keyframes[new_index]
     if cur.hx.size < config.min_used:
         return None
@@ -147,32 +174,41 @@ def find_loop_closure(keyframes: Sequence[Keyframe], new_index: int, *,
                          radius=config.submap_radius)
     if field.empty:
         return None
+    yield
 
     # 探索は粗→中→細の3段。粗い段の範囲は「候補までの距離」に応じて広げ、
     # 刻みと尤度の幅（sigma）を範囲に合わせて粗くする（Cartographer の
     # multi-resolution 探索と同じ考え方——粗い段は「山のふもと」を見つける
     # のが仕事で、精度は後段が出す）。計算量は 範囲²×角度×点数 で決まるので、
     # 範囲を広げるときは必ず刻みも粗くすること
+    chunk = max(1, config.yaw_chunk)
     trans = min(max(config.search_trans, config.search_trans_per_dist * best_d),
                 config.search_trans_max)
     step = max(0.08, trans / 8.0)
-    coarse = search(field, cur.hx, cur.hy, cur.pose, trans=trans,
-                    rot=config.search_rot, trans_step=step,
-                    rot_step=math.radians(3.0), sigma=max(0.06, step * 0.8),
-                    max_points=64, ambiguity_dist=max(config.ambiguity_dist, step * 2))
+    coarse = yield from search_steps(
+        field, cur.hx, cur.hy, cur.pose, trans=trans,
+        rot=config.search_rot, trans_step=step,
+        rot_step=math.radians(3.0), sigma=max(0.06, step * 0.8),
+        max_points=64, ambiguity_dist=max(config.ambiguity_dist, step * 2), yaw_chunk=chunk)
     if coarse.score < config.min_score * 0.6:
         return None
     if coarse.edge:
         return None                     # 最良が探索窓の端＝真の解が窓の外かもしれない
     if coarse.second >= config.ambiguity_ratio * coarse.score:
         return None
-    mid = search(field, cur.hx, cur.hy, coarse.pose, trans=step * 1.5,
-                 rot=math.radians(4.0), trans_step=max(0.03, step / 4.0),
-                 rot_step=math.radians(1.0), sigma=0.06, max_points=120)
-    fine = search(field, cur.hx, cur.hy, mid.pose, trans=0.06, rot=math.radians(1.5),
-                  trans_step=0.015, rot_step=math.radians(0.4), sigma=0.03, max_points=160)
+    yield
+    mid = yield from search_steps(
+        field, cur.hx, cur.hy, coarse.pose, trans=step * 1.5,
+        rot=math.radians(4.0), trans_step=max(0.03, step / 4.0),
+        rot_step=math.radians(1.0), sigma=0.06, max_points=120, yaw_chunk=chunk)
+    yield
+    fine = yield from search_steps(
+        field, cur.hx, cur.hy, mid.pose, trans=0.06, rot=math.radians(1.5),
+        trans_step=0.015, rot_step=math.radians(0.4), sigma=0.03, max_points=160,
+        yaw_chunk=chunk)
     if fine.score < config.min_score:
         return None
+    yield
     r = register(field, cur.hx, cur.hy, fine.pose, prior=fine.pose, prior_info=ANCHOR_INFO,
                  config=config.register)
     if r.used < config.min_used or r.inlier < config.min_inlier or r.rms > config.max_rms:

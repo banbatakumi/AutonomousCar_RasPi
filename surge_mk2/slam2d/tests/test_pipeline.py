@@ -141,6 +141,30 @@ class TestLoopClosureReducesDrift(unittest.TestCase):
         self.assertTrue(np.array_equal(a.frontend.grid.hits, b.frontend.grid.hits))
         self.assertAlmostEqual(a.frontend.pose.x, b.frontend.pose.x, places=9)
 
+    def test_loop_search_is_spread_over_updates_and_flush_finishes_it(self):
+        """ループ検出は`update()`1回に`loop_steps_per_update`段ずつ。flush は進行中の検出も終わらせ、
+        一括で検出した場合と同程度にドリフトを直す。"""
+        a, ha = _make_system(loop_steps_per_update=0)
+        b, hb = _make_system(loop_steps_per_update=1)
+        _drive(a, laps=1.6, gyro_bias_dps=1.0, twist_holder=ha)
+        pending = []
+        track_orig = b._advance_job
+
+        def spy(steps):
+            track_orig(steps)
+            pending.append(b.loop_search_pending)
+        b._advance_job = spy
+        _drive(b, laps=1.6, gyro_bias_dps=1.0, twist_holder=hb)
+        self.assertTrue(any(pending), "検出が周期をまたいでいない")
+        self.assertGreater(len(a.loops), 0)
+        self.assertGreater(len(b.loops), 0)
+        b.flush()
+        self.assertFalse(b.loop_search_pending)
+        a.flush()
+        self.assertGreater(b.optimizations, 0)
+        pa, pb = a.frontend.pose, b.frontend.pose
+        self.assertLess(math.hypot(pa.x - pb.x, pa.y - pb.y), 0.1)
+
     def test_no_loops_no_optimization(self):
         """ループが見つからない短い走行では、最適化も焼き直しも起きない。"""
         system, holder = _make_system()

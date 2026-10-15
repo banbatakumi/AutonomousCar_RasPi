@@ -217,11 +217,17 @@ class SurfaceMap:
                    max_dist=max_dist)
 
 
+try:                                          # pragma: no cover - 環境依存
+    # ★ 関数の中で遅延 import すると、最初の1回だけ Mac で約45ms（Pi 5 で100ms超）かかり、
+    #   走行開始直後の2周期目で LiDAR の周期を超えていた。読み込み時に済ませる
+    import cv2 as _cv2
+except ImportError:                            # pragma: no cover
+    _cv2 = None
+
+
 def _nearest_occupied(occ: np.ndarray, idx_map: np.ndarray) -> np.ndarray:
     """各セルについて最寄りの壁セルの index（`idx_map`の値）。"""
-    try:                                      # pragma: no cover - 環境依存
-        import cv2 as _cv2
-    except ImportError:                        # pragma: no cover
+    if _cv2 is None:                           # pragma: no cover
         return _jump_flood(occ, idx_map)
     src = np.where(occ, 0, 1).astype(np.uint8)
     _d, labels = _cv2.distanceTransformWithLabels(

@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from slam2d.backend.loop_detection import LoopDetectorConfig, find_loop_closure  # noqa: E402
+from slam2d.backend.loop_detection import (LoopDetectorConfig, find_loop_closure,  # noqa: E402
+                                           find_loop_closure_steps)
 from slam2d.core.frontend import Keyframe  # noqa: E402
 from slam2d.core.types import Pose2D, ScanPoints  # noqa: E402
 from slam2d.tests.helpers import ROOM, ray_segments  # noqa: E402
@@ -110,6 +111,25 @@ class TestFindLoopClosure(unittest.TestCase):
         self.assertIsNotNone(cand)
         self.assertAlmostEqual(cand.delta.y, 0.0, delta=0.08)
         self.assertAlmostEqual(math.degrees(cand.delta.yaw), 0.0, delta=2.0)
+
+    def test_steps_give_the_same_result_in_many_small_steps(self):
+        """分けて進めても一括と同じ拘束になり、1回の`next()`は総当たりの一部だけ進める。"""
+        kfs = _keyframes(_straight_and_back(drift=(0.0, 0.20, 0.0)))
+        cfg = LoopDetectorConfig(min_path_gap=4.0, yaw_chunk=3)
+        whole = find_loop_closure(kfs, len(kfs) - 1, config=cfg)
+        gen = find_loop_closure_steps(kfs, len(kfs) - 1, config=cfg)
+        n = 0
+        try:
+            while True:
+                next(gen)
+                n += 1
+        except StopIteration as stop:
+            parts = stop.value
+        self.assertGreater(n, 8)
+        self.assertIsNotNone(whole)
+        self.assertEqual(whole.src, parts.src)
+        self.assertEqual(tuple(whole.delta), tuple(parts.delta))
+        self.assertEqual(whole.score, parts.score)
 
     def test_too_few_points_is_rejected(self):
         kfs = _keyframes(_straight_and_back(drift=(0.0, 0.2, 0.0)))

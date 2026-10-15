@@ -29,6 +29,10 @@
 はこの瞬間`ready=False`で車両を止める。全体は 360 キーフレームで Pi 5 に約 1.8 秒
 （キーフレーム数に比例）かかるので、`freeze_steps()`で1周期に`chunk`個ずつ進め、
 `plan()`を止めない（その間は`update()`を呼ばない）。`freeze()`は同じ処理を一括で行う。
+**走行中のループ検出**（候補の部分地図づくり・総当たり・Gauss-Newton）は、
+`SlamSystem.update()`が1周期に数段（`PipelineConfig.loop_steps_per_update`）ずつ進める
+——一括だと Pi 5 で最大約150msかかり、LiDAR の周期（100ms）を超えて`plan()`が止まっていた。
+拘束はグラフに足すだけで、最適化は上のとおり凍結時（`flush_steps`が進行中の検出も終わらせる）。
 RACE段は`Frontend`を直接叩き、追跡専用に保つ（走行中に最適化・地図再構築の
 重い処理を挟まない）。
 
@@ -192,7 +196,8 @@ class Slam2dNav:
                 self._loop_closure = False
         if self._loop_closure:
             # 最適化・地図の焼き直しは`freeze()`（EXPLORE→BUILD遷移、車両停止済み）
-            # での明示的な`flush()`だけ。走行中は拘束を溜めるだけにする
+            # での明示的な`flush()`だけ。走行中は拘束を溜めるだけにする（ループ検出自体も
+            # `SlamSystem.update()`が数周期に分けて進める。1周期の最大が約半分になる）
             #
             # `slam2d.pipeline`は`backend/posegraph.py`経由でg2opyを要求する
             # （issue #22）。ループ閉じを使わない構成やplanner一覧の表示だけの

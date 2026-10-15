@@ -128,6 +128,25 @@ class PoseGraph:
         self._opt.initialize_optimization()
         self._opt.optimize(iterations)
 
+    def optimize_steps(self, iterations: int = 30, per: int = 10):
+        """`optimize()`を`per`反復ずつに分けるジェネレータ（走行中に周期をまたいで進める用）。
+
+        反復の途中で収束したら残りは省く。2回目以降の呼び出しは`online=True`で、
+        Levenberg の減衰を最初からやり直さず前回の続きから進める。
+        """
+        self._opt.initialize_optimization()
+        done = 0
+        first = True
+        while done < iterations:
+            k = min(max(1, per), iterations - done)
+            ran = self._opt.optimize(k, not first)
+            first = False
+            done += k
+            if ran < k:
+                break                       # 収束（これ以上改善しない）
+            if done < iterations:
+                yield
+
     def pose(self, node_id: int) -> Pose2D:
         est = self._opt.vertex(node_id).estimate()
         return Pose2D(float(est[0]), float(est[1]), float(est[2]))

@@ -52,6 +52,12 @@ pipeline.py    SlamSystem（フロントエンド＋ループ閉じの公開API�
 
 ## 検証
 
+- **ループ検出は数周期に分けて進める**（`pipeline.PipelineConfig.loop_steps_per_update`、
+  `loop_detection.find_loop_closure_steps`）。一括だと Mac で約20ms・Pi 5 で約150ms かかり、
+  LiDAR の周期100msを超えた。分けた後の1スキャンは Mac で平均約4ms・p99約10ms・最大約15ms
+  （toyota、地図作成。分ける前は p99約20ms・最大約30〜60ms）。ポーズグラフの最適化は走行中に
+  回さず凍結時（`flush_steps`、g2o は`optimize_chunk_iters`反復ずつ）。`opencv`は import を
+  起動時に済ませる（遅延だと最初の1周期が約45ms）
 - 合成データの単体テスト: `pytest slam2d/tests -q`（15秒程度）
 - **シミュレータでの通し評価**: `.venv/bin/python -m sim.slam_bench`
   （`sim/slam_bench.py`。実機と同じ `VirtualLidar → ScanAssembler` 経路を通し、

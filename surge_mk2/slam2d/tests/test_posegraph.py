@@ -31,6 +31,26 @@ class TestPoseGraphBasic(unittest.TestCase):
         self.assertAlmostEqual(p1.x, 1.0, places=6)
         self.assertAlmostEqual(p2.x, 2.0, places=6)
 
+    def test_optimize_steps_converges_like_optimize(self):
+        """反復を分けて進めても、一括の`optimize()`と同じ解に収束する。"""
+        def build():
+            g = PoseGraph()
+            ids = [g.add_node(Pose2D(1.1 * i + 0.1 * (i % 3), 0.2 * (i % 2), 0.03 * i))
+                   for i in range(12)]
+            g.fix(ids[0])
+            info = np.eye(3) * 100.0
+            for a, b in zip(ids, ids[1:]):
+                g.add_odometry_edge(a, b, Pose2D(1.0, 0.0, 0.0), info)
+            g.add_loop_edge(ids[0], ids[-1], Pose2D(11.0, 0.0, 0.0), info)
+            return g
+        a, b = build(), build()
+        a.optimize(30)
+        steps = sum(1 for _ in b.optimize_steps(30, per=3))
+        self.assertGreater(steps, 0)
+        for pa, pb in zip(a.all_poses(), b.all_poses()):
+            self.assertAlmostEqual(pa.x, pb.x, places=3)
+            self.assertAlmostEqual(pa.y, pb.y, places=3)
+
     def test_fixed_node_never_moves(self):
         g = PoseGraph()
         n0 = g.add_node(Pose2D(5.0, 3.0, 1.0))

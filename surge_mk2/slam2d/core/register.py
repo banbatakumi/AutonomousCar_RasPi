@@ -257,7 +257,27 @@ def search(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2D, *,
            trans: float, rot: float, trans_step: float, rot_step: float,
            sigma: float = 0.03, max_points: int = 120,
            ambiguity_dist: float = 0.25, ambiguity_yaw: float = math.radians(20.0)) -> SearchResult:
-    """`center`の周り（±`trans`[m]・±`rot`[rad]）を総当たりで探す。
+    """`search_steps()`を最後まで進めた結果（引数の意味はそちら）。"""
+    gen = search_steps(smap, px, py, center, trans=trans, rot=rot, trans_step=trans_step,
+                       rot_step=rot_step, sigma=sigma, max_points=max_points,
+                       ambiguity_dist=ambiguity_dist, ambiguity_yaw=ambiguity_yaw,
+                       yaw_chunk=1 << 30)
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+def search_steps(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2D, *,
+                 trans: float, rot: float, trans_step: float, rot_step: float,
+                 sigma: float = 0.03, max_points: int = 120,
+                 ambiguity_dist: float = 0.25, ambiguity_yaw: float = math.radians(20.0),
+                 yaw_chunk: int = 4):
+    """`center`の周り（±`trans`[m]・±`rot`[rad]）を総当たりで探すジェネレータ。
+
+    向きの候補`yaw_chunk`個ぶんを調べるごとに`yield`する（走行中の1周期に収めるため。
+    Pi 5 で 1 向きあたり約 1〜3ms）。**戻り値**（`StopIteration.value`）が`SearchResult`。
 
     Gauss-Newton（`register()`）の引き込み範囲を超えてずれたとき（見失いからの
     復帰・ループ閉じ）の初期値を作るためのもの。得点は滑らかな尤度
@@ -284,6 +304,8 @@ def search(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2D, *,
         a = smap.associate(wx, wy)
         like = np.where(a.valid, np.exp(-np.minimum(a.dist, 10.0) ** 2 * inv2s2), 0.0)
         scores[k] = like.sum(axis=2) / n_pts
+        if (k + 1) % yaw_chunk == 0 and k + 1 < dyaws.size:
+            yield k + 1
 
     flat = int(np.argmax(scores))
     k, i, j = np.unravel_index(flat, scores.shape)
