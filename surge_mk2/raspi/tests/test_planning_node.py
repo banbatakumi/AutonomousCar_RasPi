@@ -229,6 +229,32 @@ class TestCurrentStaleness(unittest.TestCase):
         self.assertIn("古い", stale.reason)
 
 
+class TestPerceptionReason(unittest.TestCase):
+    """知覚ノードが載せた `reason` が、鮮度判定の「古い」より先に表示へ出ること。"""
+
+    def test_reason_replaces_stale_message_when_t_capture_is_zero(self):
+        sub = FakeSub({TOPIC_SCAN_CAM: Scan(dist=[0.0] * 360, sector_seen=[False] * 12,
+                                            reason="モデル未選択")})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg_cam")
+        st = node._current(10_000 * 1_000_000)
+        self.assertEqual(st.reason, "モデル未選択")
+        self.assertNotIn("古い", st.reason)
+        self.assertFalse(st.ready)            # 止まる挙動は変わらない
+
+    def test_reason_and_age_when_capture_exists(self):
+        scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12, t_capture=1_000_000,
+                    reason="フレームが来ない")
+        node = PlanningNode(pub=FakePub(), sub=FakeSub({TOPIC_SCAN_CAM: scan}), mode="ftg_cam")
+        st = node._current(2_000 * 1_000_000)
+        self.assertIn("フレームが来ない", st.reason)
+        self.assertIn("古い", st.reason)
+
+    def test_without_reason_message_is_unchanged(self):
+        node = PlanningNode(pub=FakePub(), sub=FakeSub({TOPIC_SCAN_CAM: _scan()}),
+                            mode="ftg_cam")
+        self.assertTrue(node._current(600 * 1_000_000).reason.startswith("点群が"))
+
+
 class TestVehicleStateStaleness(unittest.TestCase):
     """`vehicle_state` が古ければ制動に読み替える（TELEMETRY だけ止まったとき、固まった値で走らない）。"""
 

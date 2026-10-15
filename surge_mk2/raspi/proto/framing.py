@@ -129,7 +129,7 @@ class RxStats:
     unknown_type: int = 0  #: ヘッダの TYPE が定義に無い（TYPE の化け・ペイロード中の偽の SYNC・未対応の新パケット）
     wrong_direction: int = 0
     packet_loss: int = 0
-    reordered: int = 0     #: SEQ が逆行した回数（STM32 の優先度キューによる追い越し。正常でも増える）
+    reordered: int = 0     #: SEQ が逆行した回数（古いファームは優先度キューによる追い越しで正常でも増えた。現行は送信直前に SEQ を振るので 0）
     duplicate: int = 0     #: 同一 SEQ の重複
     resync_bytes: int = 0  #: SYNC を探して読み飛ばしたバイト数
 
@@ -229,9 +229,10 @@ class FrameParser:
 
         # CRC が通った時点で SEQ は信用できる。
         #
-        # 注意: STM32 は SEQ をキューへ積むときに振り、優先度の高いキュー（PONG > TELEMETRY >
-        # LIDAR > CONFIG_ACK 等 > LOG）から先に送るので、後から積んだ PONG・TELEMETRY が先に届く。
-        # SEQ が数個ぶん前後する（逆行する）のは正常で、reordered はその回数（エラーではない）。単純な (seq-last-1)&0xFF だと
+        # 注意: 古い STM32 ファームは SEQ をキューへ積むときに振り、優先度の高いキュー（PONG >
+        # TELEMETRY > LIDAR > CONFIG_ACK 等 > LOG）から先に送るので、後から積んだ PONG・TELEMETRY が
+        # 先に届いた。SEQ が数個ぶん前後する（逆行する）のは古いファームでは正常で、reordered はその
+        # 回数（エラーではない）。現行は送信直前に SEQ を振るので逆行しない（互換のため残す）。単純な (seq-last-1)&0xFF だと
         # 1つの逆行を「254個ロスした」と誤計上して数字が爆発する。
         # 前方への飛びだけをロスとみなし、逆行は reordered として別に数える。
         if self._last_seq is not None:

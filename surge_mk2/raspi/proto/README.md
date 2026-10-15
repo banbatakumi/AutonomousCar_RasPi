@@ -103,9 +103,11 @@ ser.write(enc.encode(packets.Command(mode=packets.Mode.MANUAL,
 ```
 
 `parser.stats` に `crc_error` / `len_error` / `packet_loss` / `unknown_type` などが溜まる。
-`reordered`（SEQ の逆行）は STM32 の優先度キューで PONG・TELEMETRY が先に積まれた LiDAR 等を
-追い越すと増える。**正常でも増える**（SEQ はキューへ積むときに振られるため）。追い越された分は
-いったん `packet_loss` に数え、遅れて届いたら差し引くので、`packet_loss` は実際のロスだけを表す。
+`reordered`（SEQ の逆行）は、**古いファーム（SEQ を送信キューへ積むときに振っていたもの）では
+正常でも増えた**: 優先度キューで PONG・TELEMETRY が先に積まれた LiDAR 等を追い越すため。
+現行のファームは DMA を起動する直前に SEQ を振る（送出順に単調増加）ので、正常なら 0 のまま
+で、増えたら実際の異常（経路上の入れ替わり）。追い越された分はいったん `packet_loss` に数え、
+遅れて届いたら差し引くので、`packet_loss` は実際のロスだけを表す（古いファームへの互換）。
 STM32 の再起動で SEQ が 0 から始まり直したら `reset_seq()` を呼ぶ（呼ばないと1回だけ偽のロスが乗る）。
 **GUI では STM32 側の `STATS` パケットと並べて出している**（`DiagGrid`）。
 片方向だけ増えるのか両方向なのかで、原因の切り分けが変わる。

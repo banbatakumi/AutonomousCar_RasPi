@@ -421,10 +421,20 @@ class PlanningNode:
         cap_age = now_ns - scan.t_capture
         if age > self.planner.stale_ms * 1_000_000 or cap_age > self.planner.stale_ms * 1_000_000:
             age = max(age, cap_age)
+            # 知覚ノードが失敗・未選択の結果を `t_capture=0` で出すと、鮮度判定が先に
+            # 「古い」と言ってしまい本当の理由が隠れる。理由が載っていればそれを表示に使う
+            # （止まる挙動は同じ。`t_capture=0` なら経過時間は意味が無いので付けない）
+            why = getattr(scan, "reason", "") or ""
+            if why and scan.t_capture <= 0:
+                reason = why
+            elif why:
+                reason = f"{why}（点群が {age / 1e6:.0f}ms 古い）"
+            else:
+                reason = f"点群が {age / 1e6:.0f}ms 古い"
             return AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                              engaged=self.ctrl.engaged,
                              scan_age_ms=age / 1e6, plan_hz=self._plan_hz,
-                             reason=f"点群が {age / 1e6:.0f}ms 古い")
+                             reason=reason)
         # 車両状態も同じ。届いたことが無い（None）・時刻の無いもの（テスト・合成）は planner に任せる
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
         if vs is not None and vs.t_pub > 0 and now_ns - vs.t_pub > VEHICLE_STATE_STALE_MS * 1_000_000:

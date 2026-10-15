@@ -287,11 +287,17 @@ class LinePerceptionNode:
 
         st.seen = st.near_seen or st.far_seen
         st.coverage = max(coverages) if coverages else 0.0
+        if not st.seen:
+            st.reason = "白線を見失った"
         return st
 
-    def failed_frame(self, *, seq: int = 0) -> LineScan:
-        """フレームが読めない周期。**契約＝見失った扱い。**"""
-        return LineScan(seq=seq)
+    def failed_frame(self, *, seq: int = 0, reason: str = "") -> LineScan:
+        """フレームが読めない周期。**契約＝見失った扱い。**
+
+        `reason` は失敗の本当の理由（`LineScan.reason`）。`t_capture=0` で出るので
+        planning_node の鮮度判定が先に「古い」と言うが、表示にはこの理由を使う。
+        """
+        return LineScan(seq=seq, reason=reason)
 
     # ── 共有メモリの読み取り（`raspi/core/frame_reader.py` に委譲） ──
 
@@ -334,11 +340,13 @@ class LinePerceptionNode:
             if not active:
                 # `line_trace` が選ばれていない、またはDISARM中は共有メモリすら読まない
                 # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
-                st = self.failed_frame(seq=seq)
+                st = self.failed_frame(
+                    seq=seq, reason="line_trace が選ばれていない／DISARM中（認識停止）")
             else:
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
                 if ref is None:
-                    st = self.failed_frame(seq=seq)
+                    st = self.failed_frame(seq=seq,
+                                           reason="カメラのフレームが来ていない（image/front）")
                     self._last_scan = None
                 elif ref.ring_seq == self._last_ring_seq and self._last_scan is not None:
                     # ★省電力化: カメラの新しいフレームがまだ来ていない
@@ -354,7 +362,7 @@ class LinePerceptionNode:
                 else:
                     got = self.read_frame(ref)
                     if got is None:
-                        st = self.failed_frame(seq=seq)
+                        st = self.failed_frame(seq=seq, reason="カメラのフレームを読めない")
                         self._last_scan = None
                     else:
                         frame, t_capture = got
@@ -367,7 +375,7 @@ class LinePerceptionNode:
                             # （`planning_node._replan()` と同じパターン）
                             print(f"# line_perception process_frame() が例外: {e}",
                                  file=sys.stderr, flush=True)
-                            st = self.failed_frame(seq=seq)
+                            st = self.failed_frame(seq=seq, reason=f"認識が例外: {e}")
                             self._last_scan = None
                         else:
                             self._last_scan = st

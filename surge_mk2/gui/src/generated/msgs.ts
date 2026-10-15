@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x712939b8
+export const MSGS_SCHEMA = 0xef0e8305
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -210,6 +210,12 @@ export type Scan = {
   saturated: boolean[] | null
   /** 0=通常 1=強度付き 2=圧縮 */
   lidar_format: number
+  /**
+   * 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+   * 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+   * planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+   */
+  reason: string
 }
 
 /**
@@ -615,6 +621,12 @@ export type LineScan = {
    * 低いのに走っているなら疑う（`follow_the_gap.py` の `valid_ratio` と同じ扱い）
    */
   coverage: number
+  /**
+   * 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+   * 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+   * planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+   */
+  reason: string
 }
 
 /**
@@ -652,6 +664,12 @@ export type TargetTrack = {
   bbox_h: number
   /** トラッカー（NanoTrack）の確信度 [0..1]。そのまま置く */
   confidence: number
+  /**
+   * 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+   * 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+   * planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+   */
+  reason: string
 }
 
 /**

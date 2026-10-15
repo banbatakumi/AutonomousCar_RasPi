@@ -28,6 +28,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_VEHICLE_STATE,
     Scan,
     TargetRoiCtrl,
+    TargetTrack,
 )
 from raspi.nodes.cam_track_node import CamTrackNode  # noqa: E402
 
@@ -390,6 +391,29 @@ class _FakePub:
 
     def send(self, topic, msg):
         self.sent.append((topic, msg))
+
+
+class TestReason(unittest.TestCase):
+    def test_idle_result_carries_reason(self):
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        pub = _FakePub()
+        node.run(sub=_FakeSub({}), pub=pub, duration_s=0.05)
+        sent = [m for t, m in pub.sent if t == TOPIC_TRACK_TARGET]
+        self.assertTrue(sent)
+        self.assertFalse(sent[0].tracking)
+        self.assertTrue(sent[0].reason)
+
+    def test_reason_by_state(self):
+        node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
+        idle = TargetTrack(tracking=False)
+        self.assertIn("DISARM", node._reason(idle, None, ref_present=True, armed=False))
+        self.assertIn("選択", node._reason(idle, None, ref_present=True, armed=True))
+        node2 = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([], available=False))
+        self.assertIn("モデル", node2._reason(idle, None, ref_present=True, armed=True))
+        trk = TargetTrack(tracking=True)
+        self.assertIn("フレーム", node._reason(trk, None, ref_present=False, armed=True))
+        self.assertEqual(node._reason(trk, np.zeros((2, 2, 3), np.uint8),
+                                      ref_present=True, armed=True), "")
 
 
 class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):

@@ -402,9 +402,13 @@ class CamPerceptionNode:
         return Scan(dist=full_dist, sector_seen=sector_seen, seq=seq,
                    t_capture=t_capture_ns, rot_speed_dps=0.0)
 
-    def failed_frame(self, *, seq: int = 0) -> Scan:
-        """フレームが読めない／推論が失敗した周期。**契約2＝全セクタ壁扱い。**"""
-        return Scan(dist=[0.0] * 360, sector_seen=[False] * 12, seq=seq)
+    def failed_frame(self, *, seq: int = 0, reason: str = "") -> Scan:
+        """フレームが読めない／推論が失敗した周期。**契約2＝全セクタ壁扱い。**
+
+        `reason` は失敗の本当の理由（`Scan.reason`）。`t_capture=0` で出るので
+        planning_node の鮮度判定が先に「古い」と言うが、表示にはこの理由を使う。
+        """
+        return Scan(dist=[0.0] * 360, sector_seen=[False] * 12, seq=seq, reason=reason)
 
     def build_path(self, *, seq: int = 0, t_capture_ns: int = 0) -> CamPath:
         """直前の `process_frame()` の結果から走行可能領域の中心線を作る。
@@ -415,7 +419,8 @@ class CamPerceptionNode:
         （契約2と同じ「分からなければ壁／未検出扱い」）。
         """
         if self._last_grid is None or self._last_occ is None or self._last_intr is None:
-            return CamPath(seq=seq, t_capture=t_capture_ns)
+            return CamPath(seq=seq, t_capture=t_capture_ns,
+                           reason="推論結果がまだ無い（直前が失敗）")
         grid = self._last_grid
         seen_grid = project_seen_to_grid(self._last_drivable.shape, self._last_intr,
                                          self._last_ext, grid, stride=2)
@@ -504,19 +509,20 @@ class CamPerceptionNode:
             if not active:
                 # どちらのカメラ系モードも選ばれていない間は共有メモリすら読まない
                 # （CPU/IO を無駄に使わない。上のモジュールdocstring参照）
-                st = self.failed_frame(seq=seq)
+                st = self.failed_frame(
+                    seq=seq, reason="カメラ系モードが選ばれていない／DISARM中（推論停止）")
                 self._last_scan = None
                 self._last_path = None
                 self._status = "idle"
             elif self.model is None:
                 # **契約2の入口。** まだ GUI がモデルを選んでいない（起動直後・
                 # 未選択のまま）。フレームが来ていても推論しようがない
-                st = self.failed_frame(seq=seq)
+                st = self.failed_frame(seq=seq, reason="モデル未選択")
                 self._last_scan = None
                 self._last_path = None
                 self._status = "failed: モデル未選択"
             elif ref is None:
-                st = self.failed_frame(seq=seq)
+                st = self.failed_frame(seq=seq, reason="カメラのフレームが来ていない（image/front）")
                 self._last_scan = None
                 self._last_path = None
                 self._status = "failed: image/front が来ていない"
@@ -533,7 +539,7 @@ class CamPerceptionNode:
             else:
                 got = self.read_frame(ref)
                 if got is None:
-                    st = self.failed_frame(seq=seq)
+                    st = self.failed_frame(seq=seq, reason="カメラのフレームを読めない")
                     self._last_scan = None
                     self._last_path = None
                     self._status = "failed: フレームを読めない"
@@ -549,7 +555,7 @@ class CamPerceptionNode:
                         # （`planning_node._replan()` と同じパターン）
                         print(f"# cam_perception process_frame() が例外: {e}",
                              file=sys.stderr, flush=True)
-                        st = self.failed_frame(seq=seq)
+                        st = self.failed_frame(seq=seq, reason=f"推論が例外: {e}")
                         self._last_scan = None
                         self._last_path = None
                         path_msg = None
@@ -574,7 +580,7 @@ class CamPerceptionNode:
             if should_publish and pacer.should_publish(active, now):
                 pub.send(TOPIC_SCAN_CAM, st)
                 pub.send(TOPIC_CAM_PATH, path_msg if path_msg is not None
-                         else CamPath(seq=seq))
+                         else CamPath(seq=seq, reason=st.reason))
             seq += 1
 
             if now >= next_hb:

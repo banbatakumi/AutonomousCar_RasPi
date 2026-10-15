@@ -405,6 +405,25 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
         self.assertEqual(topic, TOPIC_SCAN_CAM)
         self.assertEqual(st.sector_seen, [False] * 12)
 
+    def test_failed_frame_carries_the_real_reason(self):
+        """失敗の理由が `Scan.reason`（と `cam/path`）に載ること。planning_node が「古い」より先に出す。"""
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        self.assertEqual(node.failed_frame(reason="x").reason, "x")
+        # 未選択（カメラ系モードが選ばれていない）
+        pub = _FakePub()
+        node.run(sub=_FakeSub({}), pub=pub, duration_s=0.02)
+        scans = [m for t, m in pub.sent if t == TOPIC_SCAN_CAM]
+        self.assertTrue(scans[0].reason)
+        # モード選択済み・モデル未選択
+        node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
+        pub = _FakePub()
+        node.run(sub=_FakeSub({TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")}), pub=pub,
+                 duration_s=0.02)
+        scans = [m for t, m in pub.sent if t == TOPIC_SCAN_CAM]
+        self.assertEqual(scans[0].reason, "モデル未選択")
+        paths = [m for t, m in pub.sent if t == TOPIC_CAM_PATH]
+        self.assertTrue(paths and paths[0].reason == "モデル未選択")
+
     def test_selecting_a_model_via_cam_model_topic_starts_inference(self):
         """`cam/model` に流れてきた名前を `run()` が実際に拾って切り替えること。
 

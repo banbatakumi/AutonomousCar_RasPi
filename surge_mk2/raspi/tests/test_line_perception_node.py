@@ -201,6 +201,20 @@ class TestLinePerceptionNodeProcessFrame(unittest.TestCase):
         self.assertFalse(st.seen)
         self.assertEqual(st.seq, 3)
 
+    def test_failed_frame_carries_reason(self):
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+        self.assertEqual(node.failed_frame(seq=1, reason="x").reason, "x")
+        self.assertEqual(node.failed_frame(seq=1).reason, "")
+
+    def test_no_image_reports_reason_through_run(self):
+        node = LinePerceptionNode(vehicle=Vehicle.load())
+        sub = _FakeSub({TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+        pub = _FakePub()
+        node.run(sub=sub, pub=pub, duration_s=0.02)
+        lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
+        self.assertTrue(lines)
+        self.assertIn("image/front", lines[0].reason)
+
 
 class _FakeSub:
     """`Subscriber` の身代わり。`latest` を読むだけ・`poll` は何も待たない。"""

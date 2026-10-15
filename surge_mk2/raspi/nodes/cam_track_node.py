@@ -509,6 +509,23 @@ class CamTrackNode:
                            bbox_cx=cx, bbox_cy=cy, bbox_w=bw_n, bbox_h=bh_n,
                            confidence=confidence)
 
+    def _reason(self, st: TargetTrack, frame, *, ref_present: bool, armed: bool) -> str:
+        """結果が出せない／空の理由（`TargetTrack.reason`）。正常なら空。
+
+        `t_capture=0` のまま出る結果は planning_node の鮮度判定が先に「古い」と言うので、
+        表示に使う本当の理由をここで付ける。
+        """
+        if st.tracking:
+            if frame is not None:
+                return ""
+            return ("カメラのフレームが来ていない" if ref_present
+                    else "カメラのフレームが来ていない（image/front なし）")
+        if not armed:
+            return "DISARM中（追跡しない）"
+        if not self._factory.available:
+            return "追跡モデルが無い"
+        return "対象が選択されていない"
+
     def reset(self) -> None:
         self._enter_idle()
         self._last_select_seq = 0
@@ -605,6 +622,8 @@ class CamTrackNode:
                     st = TargetTrack(tracking=False)
                 st.seq = seq
                 st.t_capture = t_capture
+                st.reason = self._reason(st, frame, ref_present=sub.latest.get(
+                    TOPIC_IMAGE_FRONT) is not None, armed=vehicle_armed(vs))
                 #: 追跡中・選択の処理中は ACTIVE。IDLE（未選択か DISARM）の間は
                 #: 起床・publish を約20Hz・2Hzに落とす（`IdlePacer`。省電力）
                 active = need_frame or self._state != "IDLE"

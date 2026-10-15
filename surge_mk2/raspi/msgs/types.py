@@ -284,6 +284,10 @@ class Scan(MsgBase):
     #: ここを実測点として地図に打つと実在しない壁が円状に生成される
     saturated: list[bool] | None = None
     lidar_format: int = 0                  #: 0=通常 1=強度付き 2=圧縮
+    #: 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+    #: 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+    #: planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+    reason: str = ""
 
 
 class LineScan(MsgBase):
@@ -310,6 +314,10 @@ class LineScan(MsgBase):
     #: ROI（近傍・遠方の帯）内で白と判定された画素の割合の最大値 [0..1]。
     #: 低いのに走っているなら疑う（`follow_the_gap.py` の `valid_ratio` と同じ扱い）
     coverage: float = 0.0
+    #: 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+    #: 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+    #: planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+    reason: str = ""
 
 
 class DriveCmd(MsgBase):
@@ -1013,6 +1021,10 @@ class TargetTrack(MsgBase):
     bbox_h: float = 0.0
     #: トラッカー（NanoTrack）の確信度 [0..1]。そのまま置く
     confidence: float = 0.0
+    #: 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+    #: 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+    #: planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+    reason: str = ""
 
 
 class CamMask(MsgBase):
@@ -1049,6 +1061,10 @@ class CamPath(MsgBase):
     xs: list[float] = msgspec.field(default_factory=list)     #: [m] base_link 座標
     ys: list[float] = msgspec.field(default_factory=list)     #: [m] 同上
     widths: list[float] = msgspec.field(default_factory=list)  #: [m] 左右合計の空き幅
+    #: 結果が出せない（または空の）ときの**本当の理由**。空文字は正常。
+    #: 失敗・未選択の結果は `t_capture=0` で出る（鮮度判定が先に「古い」と言う）ので、
+    #: planning_node はこれを「点群が古い」の前に表示に使う。止まる挙動は変わらない
+    reason: str = ""
 
 
 #: トピック → 型。`Subscriber` がデコードに使う。
