@@ -2824,7 +2824,8 @@ class Slam2dRaceLine(Planner):
         m = AutoMap(map_seq=g.seq, resolution=g.resolution,
                     origin_x=g.origin[0], origin_y=g.origin[1],
                     width=g.width, height=g.height,
-                    cells=pack_trinary(g.trinary()))
+                    cells=pack_trinary(g.trinary()),
+                    map_name=self._active_map_name)
         if self.centerline is not None:
             m.centerline = self.centerline.xy.reshape(-1).tolist()
         elif self._loaded_centerline_xy is not None:

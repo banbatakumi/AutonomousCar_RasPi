@@ -125,11 +125,13 @@ export function mapReplaced(): boolean {
   const a = routeEdit.baseMap
   const b = live.map
   if (!a || !b) return a !== b
+  // 保存地図の名前が両方あれば、それで見分ける（確実）
+  if (a.mapName && b.mapName) return a.mapName !== b.mapName
   if (a.res !== b.res || a.originX !== b.originX || a.originY !== b.originY
     || a.width !== b.width || a.height !== b.height) return true
-  // 同じ置き方の別の地図への差し替えは格子だけでは分からない（`AutoMap` に地図名が無く、
-  // `map_seq` も planner の作り直しで巻き戻る）。経路の選択や編集で変わらない中心線の
-  // 点数・両端・中央の点で見分ける
+  // 名前の無い地図（作成中・古い Pi）は、同じ置き方の別の地図への差し替えを格子だけでは
+  // 見分けられない（`map_seq` も planner の作り直しで巻き戻る）。経路の選択や編集で変わらない
+  // 中心線の点数・両端・中央の点で見分ける
   return centerSig(a.centerline) !== centerSig(b.centerline)
 }
 

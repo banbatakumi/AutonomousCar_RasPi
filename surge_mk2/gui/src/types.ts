@@ -55,6 +55,8 @@ export type MapData = {
   routeActive: string
   /** 経路の設定 JSON（経由点・停止点・ミッション、`raspi/auto/route_config.py`） */
   routesJson: string
+  /** 走っている保存地図の名前（作成中・古い Pi は空） */
+  mapName: string
   /** 観測できた範囲 [m]。**画面はここに合わせる**（地図の枠ではなく） */
   known: { x0: number; y0: number; x1: number; y1: number } | null
 }

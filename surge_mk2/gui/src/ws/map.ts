@@ -119,6 +119,7 @@ export async function build(msg: AutoMapMsg): Promise<MapData | null> {
     ),
     routeActive: msg.route_active ?? '',
     routesJson: msg.routes_json ?? '',
+    mapName: msg.map_name ?? '',
     known,
   }
 }

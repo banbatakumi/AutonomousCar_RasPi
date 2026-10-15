@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x85f1cd4c
+export const MSGS_SCHEMA = 0x712939b8
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -586,6 +586,11 @@ export type AutoMapMsg = {
    * GUI の経由点エディタはここから編集を始める
    */
   routes_json: string
+  /**
+   * いま走っている保存地図の名前（作成中・名前の無い地図は空）。GUI の経由点エディタが、
+   * 編集中に別の地図へ差し替わったことを見分けるのに使う（格子の置き方が同じ地図もあるため）
+   */
+  map_name: string
 }
 
 /**

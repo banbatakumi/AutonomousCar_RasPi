@@ -784,6 +784,9 @@ class AutoMap(MsgBase):
     #: 経路の設定（経由点・停止点・ミッション、`route_config.py` の JSON）。
     #: GUI の経由点エディタはここから編集を始める
     routes_json: str = ""
+    #: いま走っている保存地図の名前（作成中・名前の無い地図は空）。GUI の経由点エディタが、
+    #: 編集中に別の地図へ差し替わったことを見分けるのに使う（格子の置き方が同じ地図もあるため）
+    map_name: str = ""
 
 
 class RouteSelect(MsgBase):
