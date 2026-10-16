@@ -446,6 +446,11 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv._mcap_proc = None
         srv._mcap_started_ns = 0
         srv._mcap_error = None
+        srv._video_proc = None
+        srv._video_starting = False
+        srv._video_started_ns = 0
+        srv._video_error = None
+        srv._video_files = []
 
         class _P:
             """本物の `Publisher.send` と同じく、渡された msg に `seq`/`t_pub` を押す。
@@ -1036,6 +1041,11 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._sfl_active = False
         srv._mcap_proc = None
         srv._mcap_starting = False
+        srv._video_proc = None
+        srv._video_starting = False
+        srv._video_started_ns = 0
+        srv._video_error = None
+        srv._video_files = []
         srv._logger_running = False
         srv._mcap_started_ns = 0
         srv._mcap_error = None

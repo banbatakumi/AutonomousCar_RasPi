@@ -1002,6 +1002,34 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
         finally:
             node.close()
 
+    def test_image_hz_equal_to_camera_rate_keeps_every_frame(self):
+        """`image_hz` とカメラの周期が同じとき、到着が数 ms 早いだけで1枚おきに落ちないこと。"""
+        from types import SimpleNamespace
+
+        from raspi.nodes.logger_node import LoggerNode
+
+        node = LoggerNode(self.path, topics=["image/"], image_hz=30)
+        try:
+            node._jpeg = SimpleNamespace(
+                encode_latest=lambda shm_name, expect_seq=None: (b"\xff\xd8jpg", 0),
+                close=lambda: None, encoded=0, torn=0, errors=0, reattached=0)
+            period = int(1e9 / 30)
+            clock = [10 * period]
+            import raspi.nodes.logger_node as ln
+            real = ln.time.monotonic_ns
+            ln.time.monotonic_ns = lambda: clock[0]
+            try:
+                for n in range(60):
+                    # 30fps のフレームが ±3ms 揺れて届く
+                    clock[0] = (10 + n) * period + (3_000_000 if n % 2 else -3_000_000)
+                    node._last_ref["front"] = SimpleNamespace(shm_name="f", ring_seq=n)
+                    node._pump_images()
+            finally:
+                ln.time.monotonic_ns = real
+            self.assertEqual(node.images_written, 60)
+        finally:
+            node.close()
+
     def test_stdout_with_a_dead_reader_ends_the_run_as_failed(self):
         from raspi.nodes.logger_node import LoggerNode
 

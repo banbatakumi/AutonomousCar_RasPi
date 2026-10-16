@@ -381,8 +381,15 @@ CMD_LATE_RELEASE_NS = 2 * NS
 #: 間引かれた GUI が、1発ごとに「変化あり」で即時中継されて 150ms ずつ走るのを止める
 #: （50Hz で再開すれば次の1発（20ms 後）から通る）。デッドマン（150ms）より十分長く
 CMD_SPARSE_GAP_NS = 300_000_000
-#: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` と同じ値）
-DEFAULT_MCAP_IMAGE_HZ = 5.0
+#: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` 単体の既定 5Hz とは別）。
+#: 動画は別の 🎥 ボタン（`video_node`、30fps）で録る
+DEFAULT_MCAP_IMAGE_HZ = 10.0
+#: 🎥 録画（mp4）の fps。カメラの上限と同じ。録画中は前後カメラの capture もこれに上げる
+VIDEO_FPS = CAM_FPS_MAX
+#: 🎥 録画が自動で止まるまでの時間 [s]（止め忘れでSDが埋まるのを防ぐ）
+VIDEO_MAX_S = 600
+#: `GET /logs/<name>` の `.mp4` の上限 [B]（全量をメモリに載せて返すので `.mcap` より大きく取れない）
+MAX_INLINE_VIDEO_BYTES = 256 * 1024 * 1024
 #: 中継の読み取り単位
 RECORD_CHUNK = 65536
 #: 最初の視聴者（`/ws/record`）が繋がるまで取っておく量の上限 [B]（`_mcap_pump`）。
@@ -786,6 +793,18 @@ class TelemetryServer:
         self._mcap_started_ns = 0
         self._mcap_error: str | None = None
 
+        #: 🎥 録画（`video_node` のサブプロセス。Pi の `logs/` に mp4 を書く）
+        self._video_proc: asyncio.subprocess.Process | None = None
+        self._video_starting = False
+        self._video_started_ns = 0
+        self._video_error: str | None = None
+        #: 今回（または直近）の出力の接頭辞と、書き終えた mp4 のファイル名。
+        #: `files` が空でなく `active` が false になったら GUI がダウンロードする
+        self._video_prefix = ""
+        self._video_files: list[str] = []
+        self._video_stopping = False
+        self._video_task: asyncio.Task | None = None
+
 
         #: `SNAPSHOT_ON_CHANGE` のキーごとに、最後に `/ws/telemetry` へ載せた版 `(seq, t_pub)`。
         #: 視聴者が増えたら空にする（来たばかりの人に全部を1回送る。`_telemetry_channel`）
@@ -838,16 +857,18 @@ class TelemetryServer:
         if target is None or not target.is_file():
             return _response(404, "text/plain; charset=utf-8", b"not found")
         size = target.stat().st_size
-        if size > MAX_INLINE_LOG_BYTES:
+        limit = MAX_INLINE_VIDEO_BYTES if target.suffix == ".mp4" else MAX_INLINE_LOG_BYTES
+        if size > limit:
             # **全量をメモリに載せてから返す実装なので、上限を切る。**
             # 長時間走行の `.mcap` は毎時 1GB 近くになり、繰り返し叩かれると
             # それだけで Pi が OOM で落ちる。大きいログは scp で取る運用にする
             return _response(413, "text/plain; charset=utf-8",
                              f"{target.name} は {size >> 20}MB あります"
-                             f"（上限 {MAX_INLINE_LOG_BYTES >> 20}MB）。"
+                             f"（上限 {limit >> 20}MB）。"
                              f"scp で取得してください: "
                              f"scp pi@surge.local:~/surge_mk2/logs/{target.name} .".encode())
-        return _response(200, "application/octet-stream", target.read_bytes(),
+        return _response(200, "video/mp4" if target.suffix == ".mp4" else "application/octet-stream",
+                         target.read_bytes(),
                          extra={"Content-Disposition": f'attachment; filename="{target.name}"'})
 
     def _serve_snapshot(self, path: str) -> Response:
@@ -1334,6 +1355,14 @@ class TelemetryServer:
             await self._mcap_stop()
             self._status_soon()
 
+        elif kind == "video_record_start":
+            await self._video_start()
+            self._status_soon()
+
+        elif kind == "video_record_stop":
+            await self._video_stop()
+            self._status_soon()
+
         elif kind == "logs_list":
             await self._send_json(ws, self._logs_list())
 
@@ -1779,14 +1808,25 @@ class TelemetryServer:
 
         1. カメラを使う自動運転が engage 中 → 上限を無視して `CAM_FPS_MAX`
            （`line_trace`/`ftg_cam` は毎フレーム新しい画を欲しがるため）
-        2. DISARM中（駐車中）→ 節電用の低FPS（`front_fps_disarm`）
-        3. それ以外（ARM中）→ ユーザー設定の上限（`front_fps_armed`）
+        2. 🎥 録画中 → `CAM_FPS_MAX`（DISARM 中でも。動画を 30fps で録るため）
+        3. DISARM中（駐車中）→ 節電用の低FPS（`front_fps_disarm`）
+        4. それ以外（ARM中）→ ユーザー設定の上限（`front_fps_armed`）
         """
         if self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES:
+            return CAM_FPS_MAX
+        if self._video_recording():
             return CAM_FPS_MAX
         if self._vehicle_armed():
             return self._cam_front_fps_armed
         return self._cam_front_fps_disarm
+
+    def _video_recording(self) -> bool:
+        """🎥 録画中（起動処理の途中を含む）か。"""
+        return self._video_proc is not None or self._video_starting
+
+    def _desired_rear_fps(self) -> float:
+        """後カメラの capture fps。🎥 録画中はユーザー設定を無視して `CAM_FPS_MAX`。"""
+        return CAM_FPS_MAX if self._video_recording() else self._cam_rear_fps_armed
 
     def _desired_rear_enabled(self) -> bool:
         """後方カメラの capture ON/OFF。DISARM中（駐車中）は監視の用途が無いので
@@ -1808,11 +1848,11 @@ class TelemetryServer:
         return self._vehicle_armed() or self._cam_in_use_while_disarmed("front")
 
     def _cam_in_use_while_disarmed(self, cam: str) -> bool:
-        """DISARM 中に `cam` の映像を使う者がいるか（GUI の視聴者・mcap 記録・常駐ロガー）。
+        """DISARM 中に `cam` の映像を使う者がいるか（GUI の視聴者・mcap 記録・🎥 録画・常駐ロガー）。
         前カメラ専用（後カメラは DISARM 中は設定だけで決める。`_desired_rear_enabled`）。"""
         return (bool(self.camera_clients.get(cam))
                 or self._mcap_proc is not None or self._mcap_starting
-                or self._logger_running)
+                or self._video_recording() or self._logger_running)
 
     def _camera_config_status(self) -> dict:
         return {
@@ -1837,7 +1877,7 @@ class TelemetryServer:
     def _publish_cam_config(self) -> None:
         self.pub.send(TOPIC_CAM_CONFIG, CamConfig(
             front_fps=self._desired_front_fps(),
-            rear_fps=self._cam_rear_fps_armed,
+            rear_fps=self._desired_rear_fps(),
             rear_enabled=self._desired_rear_enabled(),
             front_enabled=self._desired_front_enabled()))
 
@@ -2382,6 +2422,7 @@ class TelemetryServer:
             "bad_cmds": self.bad_cmds,
             "sfl": {"active": self._sfl_active},
             "mcap": self._mcap_status(),
+            "video": self._video_status(),
             "auto": self._auto_status(catalog),
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
@@ -2418,6 +2459,70 @@ class TelemetryServer:
         active = self._mcap_proc is not None
         elapsed = (time.monotonic_ns() - self._mcap_started_ns) / NS if active else 0.0
         return {"active": active, "elapsed_s": elapsed, "error": self._mcap_error}
+
+    # ── 🎥 録画（`video_node` が `logs/` に mp4 を書く。止めたら GUI が `GET /logs/<name>` で取る） ──
+
+    def _video_status(self) -> dict:
+        active = self._video_proc is not None
+        elapsed = (time.monotonic_ns() - self._video_started_ns) / NS if active else 0.0
+        return {"active": active, "elapsed_s": elapsed, "error": self._video_error,
+                "files": [] if active else list(self._video_files)}
+
+    async def _video_start(self) -> None:
+        if self._video_proc is not None or self._video_starting:
+            return
+        self._video_starting = True
+        self._video_error = None
+        self._video_files = []
+        # DISARM 中に止めているカメラを起こし、fps を `CAM_FPS_MAX` に上げる
+        self._publish_cam_config()
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        prefix = self.logs_dir / f"surge_{time.strftime('%Y%m%d_%H%M%S')}"
+        cmd = [sys.executable, "-u", "-m", "raspi.nodes.video_node",
+               "--prefix", str(prefix), "--fps", str(VIDEO_FPS),
+               "--duration", str(VIDEO_MAX_S)]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(REPO_ROOT),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        except Exception as e:
+            self._video_error = f"video_node を起動できない: {e}"
+            self._video_starting = False
+            self._publish_cam_config()        # 起動に失敗したら fps を戻す
+            return
+        # `_video_proc` を先に立ててから `_video_starting` を下ろす（間で fps が戻らないように）
+        self._video_prefix = str(prefix)
+        self._video_proc = proc
+        self._video_starting = False
+        self._video_started_ns = time.monotonic_ns()
+        self._video_task = asyncio.create_task(self._video_wait(proc))
+
+    async def _video_wait(self, proc: asyncio.subprocess.Process) -> None:
+        """`video_node` の終了を待ち、書き終えた mp4 の一覧を status に載せる。"""
+        assert proc.stderr is not None
+        err = (await proc.stderr.read()).decode(errors="replace").strip()
+        rc = await proc.wait()
+        if self._video_proc is proc:
+            self._video_proc = None
+        prefix = Path(self._video_prefix)
+        self._video_files = sorted(p.name for p in prefix.parent.glob(prefix.name + "_*.mp4"))
+        if rc != 0 and not self._video_stopping:
+            self._video_error = f"video_node が異常終了しました（rc={rc}）: {err[-200:]}"
+        elif not self._video_files:
+            self._video_error = "映像が来なかったので mp4 ができていません（カメラが止まっていないか確認）"
+        self._video_stopping = False
+        self._publish_cam_config()            # 録画のために上げた fps・起こしたカメラを元に戻す
+        await self._broadcast_control_status()
+
+    async def _video_stop(self) -> None:
+        proc = self._video_proc
+        if proc is None:
+            return
+        self._video_stopping = True
+        try:
+            proc.terminate()                  # SIGTERM → video_node が mp4 を閉じて終わる
+        except ProcessLookupError:
+            pass
 
     # ── mcap のライブ中継（Piのディスクには書かない） ──
 
@@ -2494,6 +2599,7 @@ class TelemetryServer:
                 if rc != 0:
                     self._mcap_error = f"logger_node が異常終了しました（rc={rc}）"
                 self._mcap_proc = None
+                self._publish_cam_config()
                 self._status_soon()
             # **中継が完全に終わった合図として `/ws/record` を切る。** MCAP の索引は
             # 最後に書かれるので、GUI 側はこの切断イベントを「もう来ない」の目印にして
@@ -2512,6 +2618,7 @@ class TelemetryServer:
             proc.terminate()
         except ProcessLookupError:
             pass
+        self._publish_cam_config()            # 記録のために上げた fps / 起こしたカメラを元に戻す
         # 実際の終了待ち・末尾チャンク（MCAPの索引）の中継は `_mcap_pump` が続ける
 
     # ── `logs/` の一覧・ダウンロード・削除 ──
@@ -2537,7 +2644,7 @@ class TelemetryServer:
         files = []
         if self.logs_dir.is_dir():
             for p in sorted(self.logs_dir.iterdir()):
-                if not p.is_file() or p.suffix not in (".sfl", ".mcap"):
+                if not p.is_file() or p.suffix not in (".sfl", ".mcap", ".mp4"):
                     continue
                 st = p.stat()
                 files.append({"name": p.name, "kind": p.suffix.lstrip("."),
@@ -3237,7 +3344,7 @@ class TelemetryServer:
         while self._running:
             await asyncio.sleep(period)
             self.pub.send(TOPIC_LOG_CTRL, LogCtrl(active=self._sfl_active))
-            if self._mcap_proc is not None:
+            if self._mcap_proc is not None or self._video_proc is not None:
                 await self._broadcast_control_status()
 
     async def _auto_ctrl_pump(self) -> None:
@@ -3402,11 +3509,12 @@ class TelemetryServer:
             self._cpufreq.restore()   # 上限を絞ったまま残さない
         # mcap 中継のサブプロセスも道連れにする（ベストエフォート。
         # systemd 配下なら KillMode=control-group で既に片付いているはず）
-        if self._mcap_proc is not None:
-            try:
-                self._mcap_proc.terminate()
-            except ProcessLookupError:
-                pass
+        for proc in (self._mcap_proc, self._video_proc):
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
         self.sub.close()
         self.pub.close()
 

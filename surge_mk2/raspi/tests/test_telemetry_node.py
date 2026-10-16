@@ -498,8 +498,11 @@ def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mod
         _cam_front_fps_armed=30.0, _cam_front_fps_disarm=10.0,
         _cam_rear_enabled_armed=True, _cam_rear_enabled_disarm=False,
         camera_clients={"front": set(), "rear": set(), "mask": set()},
-        _mcap_proc=None, _mcap_starting=False, _logger_running=False)
+        _cam_rear_fps_armed=10.0,
+        _mcap_proc=None, _mcap_starting=False, _logger_running=False,
+        _video_proc=None, _video_starting=False)
     fake._vehicle_armed = lambda: tn.TelemetryServer._vehicle_armed(fake)
+    fake._video_recording = lambda: tn.TelemetryServer._video_recording(fake)
     fake._cam_in_use_while_disarmed = \
         lambda cam: tn.TelemetryServer._cam_in_use_while_disarmed(fake, cam)
     return fake
@@ -671,6 +674,36 @@ class TestDesiredFrontFps(unittest.TestCase):
     def test_auto_engaged_with_non_camera_mode_does_not_override(self):
         fake = _fake_cam_server(armed=True, auto_engaged=True, auto_mode="e2e_lidar")
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 30.0)
+
+
+class TestVideoRecordingFps(unittest.TestCase):
+    """🎥 録画中は、DISARM 中でも前後カメラを `CAM_FPS_MAX`（30fps）で撮る。"""
+
+    def test_disarmed_recording_raises_front_and_rear_to_max(self):
+        fake = _fake_cam_server(armed=False)
+        fake._video_proc = object()
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), tn.CAM_FPS_MAX)
+        self.assertEqual(tn.TelemetryServer._desired_rear_fps(fake), tn.CAM_FPS_MAX)
+
+    def test_mcap_recording_does_not_force_fps(self):
+        """mcap 記録（10Hz）はカメラの fps を上げない。"""
+        fake = _fake_cam_server(armed=False)
+        fake._mcap_proc = object()
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 10.0)
+
+    def test_starting_counts_as_recording(self):
+        fake = _fake_cam_server(armed=False)
+        fake._video_starting = True
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), tn.CAM_FPS_MAX)
+
+    def test_not_recording_keeps_user_settings(self):
+        fake = _fake_cam_server(armed=False)
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 10.0)
+        self.assertEqual(tn.TelemetryServer._desired_rear_fps(fake), 10.0)
+
+    def test_mcap_default_image_hz_is_10(self):
+        self.assertEqual(tn.DEFAULT_MCAP_IMAGE_HZ, 10.0)
+        self.assertEqual(tn.VIDEO_FPS, tn.CAM_FPS_MAX)
 
 
 class TestDesiredRearEnabled(unittest.TestCase):

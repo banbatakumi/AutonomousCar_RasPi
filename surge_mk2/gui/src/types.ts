@@ -352,6 +352,8 @@ export type ControlStatus = {
   sfl: { active: boolean }
   /** mcap のライブ中継。**Piのディスクには一切書かない**（ブラウザが直接ダウンロードする） */
   mcap: { active: boolean; elapsed_s: number; error: string | null }
+  /** 🎥 録画（Pi の `logs/` に前後カメラの mp4 を書く）。止めて `files` が出たらダウンロードする */
+  video: { active: boolean; elapsed_s: number; error: string | null; files: string[] }
   /** 自動運転の意思と、選べるモードの宣言。**サーバが真値** */
   auto: AutoStatus
   /** Pi5純正ファンの意思。**サーバが真値** */
@@ -381,10 +383,10 @@ export type ControlStatus = {
   cam_e2e_model: CamE2EModelStatus
 }
 
-/** `logs/` にある `.sfl`/`.mcap` の1件（`logs_list` の応答）。 */
+/** `logs/` にある `.sfl`/`.mcap`/`.mp4` の1件（`logs_list` の応答）。 */
 export type LogFile = {
   name: string
-  kind: 'sfl' | 'mcap'
+  kind: 'sfl' | 'mcap' | 'mp4'
   size: number
   /** UNIX epoch秒（Pythonの `os.stat().st_mtime` そのまま） */
   mtime: number

@@ -578,6 +578,15 @@ export class ControlChannel {
     this.send({ type: 'mcap_record_stop' })
   }
 
+  /** 🎥 録画（前後カメラを 30fps の mp4 で Pi の `logs/` に書く。DISARM 中でも 30fps に上げる） */
+  videoRecordStart() {
+    this.send({ type: 'video_record_start' })
+  }
+
+  videoRecordStop() {
+    this.send({ type: 'video_record_stop' })
+  }
+
   logsList() {
     this.send({ type: 'logs_list' })
   }

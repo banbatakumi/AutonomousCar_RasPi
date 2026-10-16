@@ -747,7 +747,9 @@ type UiState = {
   sfl: ControlStatus['sfl'] | null
   /** mcap のライブ中継。Piには保存されない */
   mcap: ControlStatus['mcap'] | null
-  /** `logs/` にある `.sfl`/`.mcap` の一覧 */
+  /** 🎥 録画（mp4）。Pi の `logs/` に書かれ、止めるとブラウザへダウンロードする */
+  video: ControlStatus['video'] | null
+  /** `logs/` にある `.sfl`/`.mcap`/`.mp4` の一覧 */
   logFiles: LogFile[]
 
   /**
@@ -882,6 +884,7 @@ export const useUi = create<UiState>((set, get) => ({
 
   sfl: null,
   mcap: null,
+  video: null,
   logFiles: [],
   auto: null,
   fan: null,
