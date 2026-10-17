@@ -719,6 +719,11 @@ class VirtualStm32:
             torque_req=[_q("torque_req", torque, -32768, 32767)] * 2,
             abs_limit_nm=_q("abs_limit_nm", DRIVE_MAX_TORQUE_NM, -32768, 32767),
             tv_ratio=0, tv_moment_nm=0,
+            # ★v0.24: シムはカルマンフィルタを持たない。加速度は測った値、バイアス・ゲートは無し
+            accel_kf=_q("accel_x", v.accel_x, -32768, 32767),
+            accel_bias_kf=0, kf_gated=0,
+            kf_z_rms_dist=0, kf_z_rms_accel=0, kf_rho_dist=0, kf_rho_accel=0,
+            front_angle=[0, 0],
             temp=[temp, temp, 25 + int(10 * abs(v.steer_actual)), 40],
             batt_voltage_drive=_q("batt_voltage_drive", vd, 0, 255),
             batt_voltage_signal=_q("batt_voltage_signal", vs, 0, 255),

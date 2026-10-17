@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xef0e8305
+export const MSGS_SCHEMA = 0xce486c96
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -78,6 +78,22 @@ export type VehicleState = {
   tv_ratio: number
   /** [N·m] TV が要求した左右トルク差のヨーモーメント換算（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド */
   tv_moment_nm: number
+  /** [m/s²] カルマンフィルタの加速度 */
+  accel_kf: number
+  /** [m/s²] カルマンフィルタの加速度計バイアス（取付ずれ+重力の傾き成分）。坂・傾きで動く */
+  accel_bias_kf: number
+  /** カルマンフィルタが測定を弱めた累積回数（16bit で巻き戻る）。前輪のロック・スリップ・衝撃の目安 */
+  kf_gated: number
+  /**
+   * ★v0.26: KF の一貫性の診断（前回の TELEMETRY からの値。0 = その間に測定が無かった）。`*_rms` は残差を
+   * 「フィルタが主張する標準偏差」で割った z の RMS（= √NIS。前提が合っていれば 1）、`*_rho` は隣り合う z の相関係数（同 0）
+   */
+  kf_z_rms_dist: number
+  kf_z_rms_accel: number
+  kf_rho_dist: number
+  kf_rho_accel: number
+  /** ★v0.26: [rad] 前輪エンコーダの絶対角 [FL, FR]（0〜2π。取付向きの符号のまま）。周期誤差の同定用 */
+  front_angle: [number, number]
   /** [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None */
   temp: [number | null, number | null, number | null, number | null]
   /** [V] 駆動,信号 */

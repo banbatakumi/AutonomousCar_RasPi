@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x0017      # 上位=メジャー 下位=マイナー
+protocol_version = 0x001A      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -55,7 +55,7 @@ fields = [
 name = "TELEMETRY"
 type = 0x02
 dir = "s2p"
-len = 84
+len = 102
 rate_hz = 100  # 値の古さは平均5ms
 doc = "車両状態。フィールド順は v0.4 確定版（wheel_speed → odom_dist → accel）。★v0.13で slip/tc_limit_nm、★v0.16で torque_req/abs_limit_nm/yaw_rate_target/tv_moment_nm を追加、★v0.17で yaw_rate_target を tv_ratio に置き換え（オフセット・LEN は同じ）"
 fields = [
@@ -89,6 +89,14 @@ fields = [
   { name = "us_rear",             type = "u8",  scale = 0.02, unit = "m", note = "0=無効" },
   { name = "md_status",           type = "u8",  count = 3, note = "[RL,RR,ST] MDS_* 参照" },
   { name = "cmd_seq_echo",        type = "u8" },
+  { name = "accel_kf",            type = "i16", scale = 0.001,  unit = "m/s2",  note = "カルマンフィルタの加速度 ★v0.24" },
+  { name = "accel_bias_kf",       type = "i16", scale = 0.001,  unit = "m/s2",  note = "カルマンフィルタの加速度計バイアス（重力の傾き成分を含む）★v0.24" },
+  { name = "kf_gated",            type = "u16", note = "カルマンフィルタが測定を弱めた累積回数（16bitで巻き戻る。前輪のロック・衝撃の目安）★v0.24" },
+  { name = "kf_z_rms_dist",       type = "u16", scale = 0.001,  note = "走行距離の残差の z の RMS（=√NIS。前提が合っていれば1。0=その間に測定なし）★v0.26" },
+  { name = "kf_z_rms_accel",      type = "u16", scale = 0.001,  note = "加速度の残差の z の RMS ★v0.26" },
+  { name = "kf_rho_dist",         type = "i16", scale = 0.0001, note = "走行距離の残差の隣り合う相関係数（-1〜1。前提が合っていれば0）★v0.26" },
+  { name = "kf_rho_accel",        type = "i16", scale = 0.0001, note = "加速度の残差の相関係数 ★v0.26" },
+  { name = "front_angle",         type = "u16", scale = 0.0001, unit = "rad", count = 2, note = "[FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26" },
 ]
 
 [[packets]]

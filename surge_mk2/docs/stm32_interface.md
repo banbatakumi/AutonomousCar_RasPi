@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.23（`uart_protocol.md` v0.23 に対応。`protocol_version = 0x0017`）
+**バージョン**: v0.26（`uart_protocol.md` v0.26 に対応。`protocol_version = 0x001A`）
 **最終更新**: 2026-10-11
 **状態**: 実装済み・ビルド済み。**STM32・MD は未書き込み、実機での動作検証は未了**
 **対象読者**: STM32 ファームウェアを実装する人
@@ -337,7 +337,15 @@ typedef struct {
     uint8_t  us_rear;              /* 2 cm/LSB。0 = 無効                          */
     uint8_t  md_status[3];         /* §8.6 参照 [RL, RR, ST]                      */
     uint8_t  cmd_seq_echo;         /* 最後に受理した COMMAND の SEQ                */
-} telemetry_t;                     /* = 84 bytes */
+    int16_t  accel_kf;             /* 0.001 m/s² ★v0.24 車速KFの加速度           */
+    int16_t  accel_bias_kf;        /* 0.001 m/s² ★v0.24 KFの加速度計バイアス     */
+    uint16_t kf_gated;             /* ★v0.24 測定を弱めた累積回数（巻き戻る）       */
+    uint16_t kf_z_rms_dist;        /* 0.001 ★v0.26 走行距離の残差の z の RMS（=√NIS、1が理想）*/
+    uint16_t kf_z_rms_accel;       /* 0.001 ★v0.26 加速度の残差の z の RMS                  */
+    int16_t  kf_rho_dist;          /* 0.0001 ★v0.26 走行距離の残差の相関係数（0が理想）     */
+    int16_t  kf_rho_accel;         /* 0.0001 ★v0.26 加速度の残差の相関係数                  */
+    uint16_t front_angle[2];       /* 0.0001 rad ★v0.26 前輪エンコーダの絶対角 [FL,FR] */
+} telemetry_t;                     /* = 102 bytes */
 ```
 
 ##### 配列インデックスの規約
@@ -420,7 +428,7 @@ typedef struct {
 
 ```c
 typedef struct {
-    uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。現行 0x0017 */
+    uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。現行 0x001A */
     uint32_t fw_id;             /* git short hash 等                        */
     uint32_t build_epoch;       /* ビルド時刻（UNIX epoch 秒）               */
 } version_t;                    /* = 10 bytes */
@@ -731,13 +739,13 @@ frame_send() ──▶ [TX リングバッファ 1024B] ──▶ DMA ──▶ 
 | パケット | フレーム長 | 頻度 | 帯域 |
 |---|---|---|---|
 | `LIDAR_SECTOR` | 76 B | 120 Hz | 9.12 kB/s |
-| `TELEMETRY` | **91 B** | 100 Hz | **9.1 kB/s**（1Mbps なので余裕あり） |
+| `TELEMETRY` | **109 B** | 100 Hz | **10.9 kB/s**（1Mbps なので余裕あり） |
 | `PONG` | 19 B | 5 Hz | 0.10 kB/s |
 | `STATS` | 55 B | 1 Hz | 0.06 kB/s |
 | `CONFIG_ACK` / `LOG` / `VERSION` | — | 散発 | 約 0.2 kB/s |
-| **合計** | | | **約 18.6 kB/s（上限 100 kB/s の約 19%）** |
+| **合計** | | | **約 20.4 kB/s（上限 100 kB/s の約 20%）** |
 
-1Mbps なので余裕がある。強度 ON（`0x05`）でも約 22 kB/s、圧縮（`0x09`）は約 15 kB/s。
+1Mbps なので余裕がある。強度 ON（`0x05`）でも約 23 kB/s、圧縮（`0x09`）は約 16 kB/s。
 `param_id 0x0040` で Pi 側から**走行中でも**切り替えられる。
 
 ---

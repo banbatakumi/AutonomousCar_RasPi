@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x0017
+PROTOCOL_VERSION = 0x001A
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -160,7 +160,7 @@ class LidarSector:
         return _S_LIDAR_SECTOR.pack(self.sector_idx, self.t_start_us, self.duration_us, self.rot_speed_dps, *self.dist)
 
 
-_S_TELEMETRY = struct.Struct('<2I8h2i19h14B')
+_S_TELEMETRY = struct.Struct('<2I8h2i19h14B2h3H2h2H')
 
 
 @dataclass(slots=True)
@@ -170,10 +170,10 @@ class Telemetry:
     TYPE: ClassVar[int] = 0x02
     NAME: ClassVar[str] = 'TELEMETRY'
     DIR: ClassVar[str] = 's2p'
-    LEN: ClassVar[int | None] = 84
-    FMT: ClassVar[str] = '<2I8h2i19h14B'
+    LEN: ClassVar[int | None] = 102
+    FMT: ClassVar[str] = '<2I8h2i19h14B2h3H2h2H'
     RATE_HZ: ClassVar[float] = 100
-    META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'slip': (0.0001, None), 'tc_limit_nm': (0.0001, 'N.m'), 'torque_req': (0.0001, 'N.m'), 'abs_limit_nm': (0.0001, 'N.m'), 'tv_ratio': (0.0001, None), 'tv_moment_nm': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm')}
+    META: ClassVar[dict] = {'t_us': (None, 'us'), 'speed': (0.001, 'm/s'), 'yaw_rate': (0.001, 'rad/s'), 'steer_actual': (0.0001, 'rad'), 'steer_cmd_echo': (0.0001, 'rad'), 'wheel_speed': (0.001, 'm/s'), 'odom_dist': (0.0001, 'm'), 'accel_x': (0.001, 'm/s2'), 'accel_y': (0.001, 'm/s2'), 'accel_z': (0.001, 'm/s2'), 'pitch': (0.0001, 'rad'), 'roll': (0.0001, 'rad'), 'motor_current': (0.001, 'A'), 'torque_cmd': (0.0001, 'N.m'), 'slip': (0.0001, None), 'tc_limit_nm': (0.0001, 'N.m'), 'torque_req': (0.0001, 'N.m'), 'abs_limit_nm': (0.0001, 'N.m'), 'tv_ratio': (0.0001, None), 'tv_moment_nm': (0.0001, 'N.m'), 'temp': (1.0, 'degC'), 'batt_voltage_drive': (0.05, 'V'), 'batt_voltage_signal': (0.05, 'V'), 'batt_current_drive': (0.05, 'A'), 'batt_current_signal': (0.02, 'A'), 'us_front': (0.02, 'm'), 'us_rear': (0.02, 'm'), 'accel_kf': (0.001, 'm/s2'), 'accel_bias_kf': (0.001, 'm/s2'), 'kf_z_rms_dist': (0.001, None), 'kf_z_rms_accel': (0.001, None), 'kf_rho_dist': (0.0001, None), 'kf_rho_accel': (0.0001, None), 'front_angle': (0.0001, 'rad')}
 
     t_us: int = 0
     flags: int = 0  # FLG_* 参照
@@ -205,14 +205,22 @@ class Telemetry:
     us_rear: int = 0  # 0=無効
     md_status: list[int] = field(default_factory=lambda: [0] * 3)  # [RL,RR,ST] MDS_* 参照
     cmd_seq_echo: int = 0
+    accel_kf: int = 0  # カルマンフィルタの加速度 ★v0.24
+    accel_bias_kf: int = 0  # カルマンフィルタの加速度計バイアス（重力の傾き成分を含む）★v0.24
+    kf_gated: int = 0  # カルマンフィルタが測定を弱めた累積回数（16bitで巻き戻る。前輪のロック・衝撃の目安）★v0.24
+    kf_z_rms_dist: int = 0  # 走行距離の残差の z の RMS（=√NIS。前提が合っていれば1。0=その間に測定なし）★v0.26
+    kf_z_rms_accel: int = 0  # 加速度の残差の z の RMS ★v0.26
+    kf_rho_dist: int = 0  # 走行距離の残差の隣り合う相関係数（-1〜1。前提が合っていれば0）★v0.26
+    kf_rho_accel: int = 0  # 加速度の残差の相関係数 ★v0.26
+    front_angle: list[int] = field(default_factory=lambda: [0] * 2)  # [FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26
 
     @classmethod
     def decode(cls, payload: bytes) -> 'Telemetry':
         v = _S_TELEMETRY.unpack(payload)
-        return cls(t_us=v[0], flags=v[1], speed=v[2], yaw_rate=v[3], steer_actual=v[4], steer_cmd_echo=v[5], wheel_speed=list(v[6:10]), odom_dist=list(v[10:12]), accel_x=v[12], accel_y=v[13], accel_z=v[14], pitch=v[15], roll=v[16], motor_current=list(v[17:20]), torque_cmd=list(v[20:22]), slip=list(v[22:24]), tc_limit_nm=list(v[24:26]), torque_req=list(v[26:28]), abs_limit_nm=v[28], tv_ratio=v[29], tv_moment_nm=v[30], temp=list(v[31:35]), batt_voltage_drive=v[35], batt_voltage_signal=v[36], batt_current_drive=v[37], batt_current_signal=v[38], us_front=v[39], us_rear=v[40], md_status=list(v[41:44]), cmd_seq_echo=v[44])
+        return cls(t_us=v[0], flags=v[1], speed=v[2], yaw_rate=v[3], steer_actual=v[4], steer_cmd_echo=v[5], wheel_speed=list(v[6:10]), odom_dist=list(v[10:12]), accel_x=v[12], accel_y=v[13], accel_z=v[14], pitch=v[15], roll=v[16], motor_current=list(v[17:20]), torque_cmd=list(v[20:22]), slip=list(v[22:24]), tc_limit_nm=list(v[24:26]), torque_req=list(v[26:28]), abs_limit_nm=v[28], tv_ratio=v[29], tv_moment_nm=v[30], temp=list(v[31:35]), batt_voltage_drive=v[35], batt_voltage_signal=v[36], batt_current_drive=v[37], batt_current_signal=v[38], us_front=v[39], us_rear=v[40], md_status=list(v[41:44]), cmd_seq_echo=v[44], accel_kf=v[45], accel_bias_kf=v[46], kf_gated=v[47], kf_z_rms_dist=v[48], kf_z_rms_accel=v[49], kf_rho_dist=v[50], kf_rho_accel=v[51], front_angle=list(v[52:54]))
 
     def encode(self) -> bytes:
-        return _S_TELEMETRY.pack(self.t_us, self.flags, self.speed, self.yaw_rate, self.steer_actual, self.steer_cmd_echo, *self.wheel_speed, *self.odom_dist, self.accel_x, self.accel_y, self.accel_z, self.pitch, self.roll, *self.motor_current, *self.torque_cmd, *self.slip, *self.tc_limit_nm, *self.torque_req, self.abs_limit_nm, self.tv_ratio, self.tv_moment_nm, *self.temp, self.batt_voltage_drive, self.batt_voltage_signal, self.batt_current_drive, self.batt_current_signal, self.us_front, self.us_rear, *self.md_status, self.cmd_seq_echo)
+        return _S_TELEMETRY.pack(self.t_us, self.flags, self.speed, self.yaw_rate, self.steer_actual, self.steer_cmd_echo, *self.wheel_speed, *self.odom_dist, self.accel_x, self.accel_y, self.accel_z, self.pitch, self.roll, *self.motor_current, *self.torque_cmd, *self.slip, *self.tc_limit_nm, *self.torque_req, self.abs_limit_nm, self.tv_ratio, self.tv_moment_nm, *self.temp, self.batt_voltage_drive, self.batt_voltage_signal, self.batt_current_drive, self.batt_current_signal, self.us_front, self.us_rear, *self.md_status, self.cmd_seq_echo, self.accel_kf, self.accel_bias_kf, self.kf_gated, self.kf_z_rms_dist, self.kf_z_rms_accel, self.kf_rho_dist, self.kf_rho_accel, *self.front_angle)
 
 
 _S_CONFIG_ACK = struct.Struct('<HfB')

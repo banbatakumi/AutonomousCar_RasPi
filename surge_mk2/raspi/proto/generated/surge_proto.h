@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x0017u
+#define SURGE_PROTOCOL_VERSION  0x001Au
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -23,7 +23,7 @@
 /* ── パケット種別 ─────────────────────────────────────────── */
 /* STM32 -> Pi */
 #define PKT_LIDAR_SECTOR       0x01u   /* LEN = 69 */
-#define PKT_TELEMETRY          0x02u   /* LEN = 84 */
+#define PKT_TELEMETRY          0x02u   /* LEN = 102 */
 #define PKT_CONFIG_ACK         0x03u   /* LEN = 7 */
 #define PKT_LOG                0x04u   /* LEN = 可変 */
 #define PKT_LIDAR_SECTOR_I     0x05u   /* LEN = 99 */
@@ -193,6 +193,14 @@ typedef struct {
     uint8_t  us_rear;              /* 0.02 m  0=無効 */
     uint8_t  md_status[3];         /* [RL,RR,ST] MDS_* 参照 */
     uint8_t  cmd_seq_echo;
+    int16_t  accel_kf;             /* 0.001 m/s2  カルマンフィルタの加速度 ★v0.24 */
+    int16_t  accel_bias_kf;        /* 0.001 m/s2  カルマンフィルタの加速度計バイアス（重力の傾き成分を含む）★v0.24 */
+    uint16_t kf_gated;             /* カルマンフィルタが測定を弱めた累積回数（16bitで巻き戻る。前輪のロック・衝撃の目安）★v0.24 */
+    uint16_t kf_z_rms_dist;        /* 0.001  走行距離の残差の z の RMS（=√NIS。前提が合っていれば1。0=その間に測定なし）★v0.26 */
+    uint16_t kf_z_rms_accel;       /* 0.001  加速度の残差の z の RMS ★v0.26 */
+    int16_t  kf_rho_dist;          /* 0.0001  走行距離の残差の隣り合う相関係数（-1〜1。前提が合っていれば0）★v0.26 */
+    int16_t  kf_rho_accel;         /* 0.0001  加速度の残差の相関係数 ★v0.26 */
+    uint16_t front_angle[2];       /* 0.0001 rad  [FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26 */
 } surge_telemetry_t;
 
 /* CONFIG_ACK (0x03) —  */
@@ -294,7 +302,7 @@ typedef struct {
 
 /* サイズ検証。#pragma pack の付け忘れをビルド時に検出する。 */
 _Static_assert(sizeof(surge_lidar_sector_t) == 69, "surge_lidar_sector_t size mismatch");
-_Static_assert(sizeof(surge_telemetry_t) == 84, "surge_telemetry_t size mismatch");
+_Static_assert(sizeof(surge_telemetry_t) == 102, "surge_telemetry_t size mismatch");
 _Static_assert(sizeof(surge_config_ack_t) == 7, "surge_config_ack_t size mismatch");
 _Static_assert(sizeof(surge_lidar_sector_i_t) == 99, "surge_lidar_sector_i_t size mismatch");
 _Static_assert(sizeof(surge_pong_t) == 12, "surge_pong_t size mismatch");

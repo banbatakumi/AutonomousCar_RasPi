@@ -183,6 +183,20 @@ class VehicleState(MsgBase):
     tv_ratio: float = 0.0
     #: [N·m] TV が要求した左右トルク差のヨーモーメント換算（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド
     tv_moment_nm: float = 0.0
+    # ── ★v0.24: 車速のカルマンフィルタ（STM32 `src/control/speed_kf.h`）の診断。**`speed` がこのフィルタの車速**（走行距離+加速度計。v0.25 で前輪の微分+LPF は廃止）──
+    accel_kf: float = 0.0                  #: [m/s²] カルマンフィルタの加速度
+    #: [m/s²] カルマンフィルタの加速度計バイアス（取付ずれ+重力の傾き成分）。坂・傾きで動く
+    accel_bias_kf: float = 0.0
+    #: カルマンフィルタが測定を弱めた累積回数（16bit で巻き戻る）。前輪のロック・スリップ・衝撃の目安
+    kf_gated: int = 0
+    #: ★v0.26: KF の一貫性の診断（前回の TELEMETRY からの値。0 = その間に測定が無かった）。`*_rms` は残差を
+    #: 「フィルタが主張する標準偏差」で割った z の RMS（= √NIS。前提が合っていれば 1）、`*_rho` は隣り合う z の相関係数（同 0）
+    kf_z_rms_dist: float = 0.0
+    kf_z_rms_accel: float = 0.0
+    kf_rho_dist: float = 0.0
+    kf_rho_accel: float = 0.0
+    #: ★v0.26: [rad] 前輪エンコーダの絶対角 [FL, FR]（0〜2π。取付向きの符号のまま）。周期誤差の同定用
+    front_angle: list[float] = msgspec.field(default_factory=lambda: [0.0, 0.0])
     #: [℃] [RL, RR, ST, MCU]。MD の `comm_ok=0` なら該当要素は None
     temp: list[int | None] = msgspec.field(default_factory=lambda: [None] * 4)
     batt_voltage: list[float] = msgspec.field(default_factory=lambda: [0.0] * 2)  #: [V] 駆動,信号
