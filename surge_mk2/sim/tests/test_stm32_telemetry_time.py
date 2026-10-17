@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sim.course import Course  # noqa: E402
 from sim.params import SimParams  # noqa: E402
-from sim.stm32 import NS, STEP_S, TELEMETRY_HZ, VirtualStm32  # noqa: E402
+from sim.stm32 import NS, STEP_S, TELEMETRY_HZ, TELEMETRY_WIRE_NS, VirtualStm32  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 COURSE = Path(__file__).resolve().parents[1] / "courses" / "circuit_chicane_a.png"
@@ -54,4 +54,4 @@ class TestTelemetrySnapshotTime(unittest.TestCase):
         sim.due_bytes(10**12)                          # 線上のものを全部読んだ
         due = sim.next_due_ns()
         self.assertIsNotNone(due)
-        self.assertLessEqual(due, 1_000_000_000 + NS // TELEMETRY_HZ + 1_000_000)
+        self.assertLessEqual(due, 1_000_000_000 + NS // TELEMETRY_HZ + TELEMETRY_WIRE_NS + 100_000)

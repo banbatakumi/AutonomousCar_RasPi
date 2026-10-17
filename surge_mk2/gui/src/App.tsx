@@ -112,6 +112,7 @@ export function App() {
           ...(s.has_controller && s.controller === c.id ? { deniedReason: null } : {}),
           sfl: s.sfl,
           mcap: s.mcap,
+          video: s.video ?? null,
           auto,
           fan: s.fan,
           cameraConfig: s.camera_config,

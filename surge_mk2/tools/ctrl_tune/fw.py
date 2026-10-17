@@ -34,7 +34,7 @@ FW_DIR = Path(os.environ.get("SURGE_FW_DIR",
                              REPO_ROOT.parent.parent / "AutonomousCar" / "Program" / "MainF446RE_V3"))
 
 #: `host/host_sim.c` の HOST_SIM_ABI
-ABI = 4
+ABI = 8
 
 #: 入力の列（`host_sim.c` の enum と同じ並び）
 IN = {name: i for i, name in enumerate(
@@ -45,7 +45,8 @@ OUT = {name: i for i, name in enumerate(
      "force_left", "force_right", "kappa_left", "kappa_right", "tc_limit_left", "tc_limit_right",
      "abs_limit", "yaw_target", "fw_speed", "fw_slip_left", "fw_slip_right", "flags", "distance",
      "torque_left", "torque_right", "accel", "fw_rear_left", "fw_rear_right", "fw_yaw_rate",
-     "front_odom"))}
+     "front_odom", "fw_accel_bias", "fw_kf_gated",
+     "fw_nis_dist", "fw_nis_accel", "fw_ac_dist", "fw_ac_accel"))}
 
 MODE_SPEED, MODE_TORQUE, MODE_BRAKE, MODE_DISARM = 0, 1, 2, 3
 #: 車速指令＋ローンチコントロールの要求（`COMMAND.flags2` の LAUNCH）。持たない古いファームでは
@@ -108,7 +109,8 @@ def param_table(fw_dir: Path | None = None) -> dict[str, ParamSpec]:
     return out
 
 
-_SOURCES = ("src/control/drive.c", "src/control/torque_vectoring.c", "src/control/control_params.c")
+_SOURCES = ("src/control/drive.c", "src/control/torque_vectoring.c", "src/control/control_params.c",
+            "src/control/speed_kf.c")
 _INCLUDES = ("lib/pid", "lib/filter", "lib/mymath", "src/control")
 
 
@@ -141,7 +143,7 @@ def _export_ref(git_ref: str) -> Path:
     return dst
 
 
-def _build(tree: Path) -> Path:
+def _build(tree: Path, extra_defines: tuple[str, ...] = ()) -> Path:
     host = FW_DIR / "host"
     srcs = [host / "host_sim.c"] + [tree / s for s in _SOURCES if (tree / s).exists()]
     has_params = (tree / "src/control/control_params.c").exists()
@@ -149,8 +151,11 @@ def _build(tree: Path) -> Path:
     # キャッシュの鍵は、コンパイルに入るものすべて（ソース・取り込むヘッダ——`lib/` の PID・フィルタは
     # ヘッダだけの実装——と、コンパイルの引数）。どれか1つでも漏らすと、直したのに古いライブラリを使う
     headers = [f for d in ((host / "shim"), *(tree / inc for inc in _INCLUDES)) for f in sorted(d.glob("*.h"))]
+    has_speed_kf = "Drive_GetAccelBiasKf" in (tree / "src/control/drive.h").read_text(encoding="utf-8")
     defines = [*(["-DHOST_FW_HAS_CONTROL_PARAMS"] if has_params else []),
-               *(["-DHOST_FW_HAS_LAUNCH"] if has_launch else [])]
+               *(["-DHOST_FW_HAS_LAUNCH"] if has_launch else []),
+               *(["-DHOST_FW_HAS_SPEED_KF"] if has_speed_kf else []),
+               *extra_defines]
     flags = ["-O2", "-shared", "-fPIC"]
     digest = hashlib.sha256(" ".join(flags + defines).encode())
     for f in srcs + headers:
@@ -174,13 +179,14 @@ def _build(tree: Path) -> Path:
 class Firmware:
     """ホストでコンパイルしたファームの制御。`git_ref` を渡すとそのコミットの `src/control`。"""
 
-    def __init__(self, git_ref: str | None = None) -> None:
+    def __init__(self, git_ref: str | None = None, extra_defines: tuple[str, ...] = ()) -> None:
         if not (FW_DIR / "host" / "host_sim.c").exists():
             raise FileNotFoundError(
                 f"ファームのリポジトリが見つかりません: {FW_DIR}（環境変数 SURGE_FW_DIR で指定）")
         self.git_ref = git_ref
         tree = _export_ref(git_ref) if git_ref else FW_DIR
-        self._lib = ctypes.CDLL(str(_build(tree)))
+        # extra_defines: コンパイル時の定数の上書き（例 "-DSPEED_KF_SIGMA_S_M=0.0001f"）。調整値の掃引用
+        self._lib = ctypes.CDLL(str(_build(tree, tuple(extra_defines))))
         self._lib.host_sim_run.restype = ctypes.c_int
         self._lib.host_sim_create.restype = ctypes.c_void_p
         self._lib.host_sim_free.argtypes = [ctypes.c_void_p]

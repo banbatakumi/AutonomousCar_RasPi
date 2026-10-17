@@ -9,12 +9,16 @@
  * ファイル一覧・ダウンロード・削除は診断タブの「記録」ページ（`LogsPage`）に移した——
  * ここはタブバーという狭い場所なので、「録る/録らない」の意思表示に絞る。
  *
+ * **🎥 録画**は動画（mp4）用で、MCAP とは別物（`useVideoRecord`。Pi の `logs/` に書き、
+ * 停止後にダウンロードする。MCAP は解析用で画像は 10Hz）。
+ *
  * 同じ並びに **📷 撮影**（`useSnapshot`。前カメラと、取得中なら後カメラの生画像を
  * PNG で Mac に保存。魚眼校正の写真撮りに使う）と、**配信映像の魚眼補正の切替**
  * （`status.camera_config.undistort`、校正済みのカメラがあるときだけ出す）を置く。
  */
 import { formatBytes, formatElapsed } from '../format'
 import { useMcapDownload } from '../hooks/useMcapDownload'
+import { useVideoRecord } from '../hooks/useVideoRecord'
 import { useSnapshot, type SnapCam } from '../hooks/useSnapshot'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
@@ -25,6 +29,7 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
   const sflActive = sfl?.active ?? false
   const mcapActive = mcap?.active ?? false
   const { bufferedBytes, start } = useMcapDownload(ch)
+  const video = useVideoRecord(ch)
   const cam = useUi((s) => s.cameraConfig)
   const snapshot = useSnapshot()
   // 取得を止めているカメラ（DISARM 中で映像を表示していない等）はフレームが無いので撮らない
@@ -53,6 +58,20 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
         MCAP{mcapActive ? ` ${formatElapsed(mcap!.elapsed_s)} / ${formatBytes(bufferedBytes)}` : ''}
       </button>
       {mcap?.error && <span className="badge-bad">{mcap.error}</span>}
+      <button
+        className={`recbtn ${video.active ? 'recording' : ''}`}
+        disabled={!ch}
+        onClick={video.toggle}
+        title={
+          '動画（mp4）を録画する。前後カメラを 30fps で別々のファイルに書き、'
+          + '停止するとMacにダウンロードする（DISARM 中でも 30fps に上げる。最長10分で自動停止）。'
+          + '静止画は📷'
+        }
+      >
+        <span className="rec-dot" />
+        🎥{video.active ? ` ${formatElapsed(video.elapsedS)}` : ''}
+      </button>
+      {video.error && <span className="badge-bad">{video.error}</span>}
       <button
         className={`recbtn snapbtn ${snapshot.busy ? 'busy' : ''}`}
         disabled={!ch || snapshot.busy}

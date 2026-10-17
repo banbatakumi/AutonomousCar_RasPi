@@ -82,7 +82,7 @@ class TestPacketDefinitions(unittest.TestCase):
 
     EXPECTED = {
         "LIDAR_SECTOR": (0x01, 69, "s2p"),
-        "TELEMETRY": (0x02, 84, "s2p"),
+        "TELEMETRY": (0x02, 102, "s2p"),
         "CONFIG_ACK": (0x03, 7, "s2p"),
         "LOG": (0x04, None, "s2p"),
         "LIDAR_SECTOR_I": (0x05, 99, "s2p"),
@@ -124,7 +124,7 @@ class TestPacketDefinitions(unittest.TestCase):
                 self.assertEqual(cls.DIR, "s2p" if cls.TYPE < 0x10 else "p2s")
 
     def test_protocol_version(self):
-        self.assertEqual(packets.PROTOCOL_VERSION, 0x0017)
+        self.assertEqual(packets.PROTOCOL_VERSION, 0x001A)
 
     def test_generated_files_up_to_date(self):
         """protocol.toml を編集して再生成し忘れていないか。"""
@@ -165,9 +165,12 @@ class TestTelemetryWireLayout(unittest.TestCase):
             us_front=205, us_rear=206,
             md_status=[0x11, 0x22, 0x33],
             cmd_seq_echo=0xAB,
+            accel_kf=303, accel_bias_kf=-304, kf_gated=0xBEEF,
+            kf_z_rms_dist=105, kf_z_rms_accel=206, kf_rho_dist=-307, kf_rho_accel=408,
+            front_angle=[12345, 54321],
         )
         buf = t.encode()
-        self.assertEqual(len(buf), 84)
+        self.assertEqual(len(buf), 102)
 
         def u32(off): return struct.unpack_from("<I", buf, off)[0]
         def i32(off): return struct.unpack_from("<i", buf, off)[0]
@@ -206,6 +209,17 @@ class TestTelemetryWireLayout(unittest.TestCase):
         self.assertEqual(buf[78], 205, "us_front @78")
         self.assertEqual(buf[80], 0x11, "md_status[0] @80")
         self.assertEqual(buf[83], 0xAB, "cmd_seq_echo @83")
+        # ★ v0.24 で追加。cmd_seq_echo の直後（末尾に足したので既存の位置は変わらない）
+        self.assertEqual(i16(84), 303, "accel_kf @84")
+        self.assertEqual(i16(86), -304, "accel_bias_kf @86")
+        self.assertEqual(struct.unpack_from("<H", buf, 88)[0], 0xBEEF, "kf_gated @88")
+        # ★ v0.26 で追加（kf_gated の直後）
+        self.assertEqual(struct.unpack_from("<H", buf, 90)[0], 105, "kf_z_rms_dist @90")
+        self.assertEqual(struct.unpack_from("<H", buf, 92)[0], 206, "kf_z_rms_accel @92")
+        self.assertEqual(i16(94), -307, "kf_rho_dist @94")
+        self.assertEqual(i16(96), 408, "kf_rho_accel @96")
+        self.assertEqual(struct.unpack_from("<H", buf, 98)[0], 12345, "front_angle[FL] @98")
+        self.assertEqual(struct.unpack_from("<H", buf, 100)[0], 54321, "front_angle[FR] @100")
 
     def test_odom_dist_is_signed(self):
         """後退で負になる。符号なしで読むと 429km 飛ぶ。"""
@@ -349,7 +363,7 @@ class TestFrameParser(unittest.TestCase):
         self.assertEqual(frames[0].decode().speed, 2)
 
     def test_len_mismatch(self):
-        frame = bytearray(build_frame(0x02, 0, b"\x00" * 10))  # TELEMETRY は 84
+        frame = bytearray(build_frame(0x02, 0, b"\x00" * 10))  # TELEMETRY は 102
         frames = self.parser.feed(bytes(frame) + self._telemetry(speed=3))
         self.assertEqual(self.parser.stats.len_error, 1)
         self.assertEqual(len(frames), 1)

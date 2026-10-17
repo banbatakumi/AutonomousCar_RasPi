@@ -71,9 +71,18 @@ class Plant:
     front_scale_error: float = 0.0
     front_ripple: float = 0.0
     seed: int = 0
+    #: 前輪エンコーダの測り方。1 = 角度に白色の量子化ノイズが乗り、その差分が回転量になる（実機の静止実測と同じ。
+    #: 隣り合う周期の相関 -0.5。`front_noise_rad_s` は角速度の標準偏差のまま）。**既定は 1**（車速は走行距離を測定値にする
+    #: カルマンフィルタ speed_kf.h で、角速度に白色ノイズの旧モデルでは位置がランダムウォークして不当に悪くなる）。0 = 旧モデル
+    front_position_noise: int = 1
+    #: `front_ripple` の周期。0 = 1回転に1周期（従来）、1 = 2周期（実機の記録で、位相別の速度が1回転に2周期で
+    #: 約 ±1.5% 揺れていた）
+    front_ripple_2x: int = 1
 
     def to_c(self) -> HostPlant:
-        return HostPlant(**{f.name: getattr(self, f.name) for f in fields(self)})
+        d = {f.name: getattr(self, f.name) for f in fields(self)
+             if f.name not in ("front_position_noise", "front_ripple_2x")}
+        return HostPlant(**d, reserved=(1 if self.front_position_noise else 0) | (2 if self.front_ripple_2x else 0))
 
     @classmethod
     def load(cls, toml_path: str | Path = DEFAULT_TOML) -> "Plant":

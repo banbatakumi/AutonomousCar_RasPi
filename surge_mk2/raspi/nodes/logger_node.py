@@ -311,13 +311,18 @@ class LoggerNode:
         now = time.monotonic_ns()
         period = int(NS / self.image_hz)
         for cam, ref in self._last_ref.items():
-            if now < self._next_image_ns.get(cam, 0):
+            due = self._next_image_ns.get(cam, 0)
+            # **周期の 1/4 だけ早く来たフレームも通す。** カメラの周期（30fps なら 33.3ms）と
+            # `image_hz` が同じだと、フレームの到着の揺らぎで「予定より数 ms 早い」だけで
+            # 見送られ、1枚おき（15fps）に落ちる
+            if now < due - period // 4:
                 continue
             key = (ref.shm_name, ref.ring_seq)
             if self._last_image.get(cam) == key:
                 continue                      # 新しいフレームが来ていない
             got = self._jpeg.encode_latest(ref.shm_name, expect_seq=ref.ring_seq)
-            self._next_image_ns[cam] = now + period
+            # 次の予定は「今」ではなく「前の予定」から数える（位相を保つ）。遅れすぎたら今に合わせ直す
+            self._next_image_ns[cam] = due + period if 0 < due and now - due < period else now + period
             if got is None:
                 continue
             self._last_image[cam] = key

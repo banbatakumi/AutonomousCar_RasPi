@@ -1,6 +1,6 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.23（`protocol_version = 0x0017`。唯一の定義は `raspi/proto/protocol.toml`）
+**バージョン**: v0.26（`protocol_version = 0x001A`。唯一の定義は `raspi/proto/protocol.toml`）
 **最終更新**: 2026-10-11
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
 **状態**: Pi・STM32 とも実装済み。**STM32・MD は未書き込み、実機での動作検証は未了**。
@@ -141,7 +141,7 @@ STM32 側は速度が必要なら 256エントリのテーブル駆動版に置�
 | TYPE | 名称 | 方向 | 頻度 | LEN |
 |---|---|---|---|---|
 | `0x01` | `LIDAR_SECTOR` | STM32 → Pi | 120 Hz (12/周 × 10 Hz) | 69 |
-| `0x02` | `TELEMETRY` | STM32 → Pi | 100 Hz（値の古さは平均5ms） | **84** |
+| `0x02` | `TELEMETRY` | STM32 → Pi | 100 Hz（値の古さは平均5ms） | **102** |
 | `0x03` | `CONFIG_ACK` | STM32 → Pi | イベント | 7 |
 | `0x04` | `LOG` | STM32 → Pi | 低優先 | 可変 (1-128) |
 | `0x05` | `LIDAR_SECTOR_I` | STM32 → Pi | 120 Hz（強度付き・既定OFF） | 99 |
@@ -298,7 +298,7 @@ else:                 mark_hit(d * 0.02)     # 通常のヒット点
 LD06 の測距精度が ±1.5cm 程度なので、2cm 量子化による情報損失はほぼ無い。
 失われるのは 5.1m 以遠の情報だけ。
 
-### 5.3 `TELEMETRY` (0x02) — LEN = 84
+### 5.3 `TELEMETRY` (0x02) — LEN = 102
 
 > **`t_us` は送信時刻ではなく、中身のスナップショットを取った時刻**（新しいスナップショットができたときに
 > 1回だけ送る）。送信は送信キューの順番待ちのあとなので、送信時刻を付けると中身が古いのに新しく見え、
@@ -345,11 +345,19 @@ off  size  type    field                 単位 / 備考
  79    1   u8      us_rear               2 cm/LSB (0〜5.1m)  0 = 無効
  80    3   u8×3    md_status[3]          §5.5  [RL, RR, ST]
  83    1   u8      cmd_seq_echo          最後に受信した COMMAND の SEQ
+ 84    2   i16     accel_kf              0.001 m/s²  ★v0.24 カルマンフィルタの加速度（§5.3.1）
+ 86    2   i16     accel_bias_kf         0.001 m/s²  ★v0.24 カルマンフィルタの加速度計バイアス
+ 88    2   u16     kf_gated              ★v0.24 測定を弱めた累積回数（16bit で巻き戻る）
+ 90    2   u16     kf_z_rms_dist         0.001 ★v0.26 走行距離の残差の z の RMS（=√NIS。1 が理想。0=測定なし）
+ 92    2   u16     kf_z_rms_accel        0.001 ★v0.26 加速度の残差の z の RMS
+ 94    2   i16     kf_rho_dist           0.0001 ★v0.26 走行距離の残差の隣り合う相関係数（0 が理想）
+ 96    2   i16     kf_rho_accel          0.0001 ★v0.26 加速度の残差の相関係数
+ 98    4   u16×2   front_angle[2]        0.0001 rad ★v0.26 前輪エンコーダの絶対角 [FL, FR]（0〜2π、取付向きの符号のまま）
 ──────────────────────────────────────────────────────────────────────────────
-                                                            合計 84 バイト
+                                                            合計 102 バイト
 ```
 
-**フレーム長 = 84 + 7 = 91 バイト。100Hz で 9.1 kB/s。**
+**フレーム長 = 102 + 7 = 109 バイト。100Hz で 10.9 kB/s。**
 
 #### 配列インデックスの規約
 
@@ -493,18 +501,19 @@ slip_front = wheel_speed[FL] * math.cos(steer_actual) - speed # 前輪は射影�
 | `us_front` / `us_rear` | **実質 20Hz 以下**（前後交互、往復時間の制約） | 同じ値が連続することを前提にする。エッジ検出に使わない |
 | `temp[4]` | 数 Hz 程度 | 傾向監視のみ |
 | `batt_*` | 数十 Hz | フィルタ済み |
-| `speed` / `wheel_speed` | 100Hz（STM32 内は 2kHz）。**1次ローパス（時定数約10ms）通過後** | 下記参照 |
+| `speed` | 100Hz（STM32 内は 2kHz）。**カルマンフィルタの車速**（§5.3.1。v0.24 まではローパス τ≈10ms） | 下記参照 |
+| `wheel_speed`（前輪） | 100Hz。ローパス（τ≈10ms）通過後の各輪の周速 | 下記参照 |
 
 **`speed` / `wheel_speed` を微分して加速度を求めてはならない。**
 前輪エンコーダはアナログ絶対角の ADC 読みで分解能が粗く、角速度換算で
 **1LSB ≈ 1.5 rad/s 相当のノイズ**が乗る（500µs で差分した場合。実測のノイズは±100mV程度）。
-STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均した角度**から速度を作り、
-**k=0.951 の1次ローパス（2kHz で時定数9.95ms）**を掛けて送る（**ノイズは実機未確認**）。
-`speed` そのものは遅れ10msの車速としてリアルタイムの用途（プランナー・E2E）にそのまま使ってよいが、
-微分すればノイズが増幅される。**加速度は必ず `accel_x/y/z`（IMU）から取ること。**
+STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均した角度**を使う。
+**v0.25 以降の `speed` はカルマンフィルタの車速**（§5.3.1。遅れはほぼ無い）で、リアルタイムの用途（プランナー・E2E）に
+そのまま使ってよい。ただし微分すれば加速度計の雑音が増幅されるので、**加速度は `accel_x/y/z`（IMU）か `accel_kf` から取ること。**
+`wheel_speed[FL/FR]` は各輪の周速を **k=0.951 の1次ローパス（2kHz で時定数9.95ms）** に通した報告用の値（車速の計算には使わない）。
 100Hz への間引きで 50Hz より上のノイズが折り返すので、**記録を後から解析する用途（システム同定）は
 `odom_dist`（ローパス前の積算位置）を前後のサンプルでゼロ位相に微分する方が正確**（`tools/sysid/fit.py`）。
-遅れの値はシムが `config/vehicle.toml` の `speed_filter_s` として持つ（ファームを変えたらそこも直す）。
+v0.24 以前の記録の `speed` は遅れ約10msのローパス版（シムの `config/vehicle.toml` の `speed_filter_s` はこの遅れ）。
 
 #### 前輪エンコーダに由来するその他の制約
 
@@ -520,6 +529,25 @@ STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均し�
   **絶対方位は Pi 側の SLAM（スキャンマッチング）で確定させる。**
 - `pitch` / `roll` は重力ベクトルで補正されるためドリフトしない。信用してよい。
 - ジャイロバイアスは静止時に STM32 が追従補正し、キャリブレーション値は Flash に永続化済み。
+
+#### 5.3.1 車速の推定とその一貫性の診断（★v0.24 で導入、v0.25 で前輪の微分+LPF を廃止、v0.26 で診断を追加）
+
+`speed` は**走行距離と加速度計のカルマンフィルタ**（`src/control/speed_kf.h`）の車速で、車速PI・TC/ABS のスリップの基準・
+自動停止の前後判定のすべてがこれを使う。従来の前輪エンコーダの微分+LPF（τ≈10ms）は廃止した（遅れ 10ms と、
+`Encoder_Update` の `dt` の誤りによる約 1.8% の過大があった。`dt` は直した）。
+**v0.23 以前・v0.24 の記録の `speed` は LPF 版**で、v0.24 の記録だけ `speed_lpf`・`speed_kf` が両方ある。
+
+- `accel_kf`・`accel_bias_kf` はフィルタの状態。`accel_bias_kf` は加速度計の取付ずれと重力の傾き成分の合計で、坂・傾きで動く
+- `kf_gated` が走行中に増える＝前輪の距離が予測と大きく食い違った（ロック・スリップ・衝撃）。そのたびに測定ノイズを
+  膨らませて効きを弱めている
+- **一貫性の診断（v0.26）**: フィルタは測定ごとに「残差 ÷ 自分が主張する標準偏差」= z を作る。調整値（測定ノイズ・プロセスノイズ）が
+  合っていれば z は平均 0・分散 1 の**白色雑音**になる。`kf_z_rms_*` は前回の TELEMETRY からの z の RMS（その2乗が NIS。
+  1 より大きい＝誤差が主張より大きい、小さい＝大きく見積もりすぎ）、`kf_rho_*` は隣り合う z の相関係数（0 でない＝残差が
+  時間的に相関している＝周期誤差などモデルが表せない誤差がある）。**NIS を直接送らないのは、静止で 1e-3 まで小さくなり、
+  そのまま量子化すると潰れるため**（RMS と ρ なら窓ごとの NIS・自己相関に正確に戻せる）。`*_dist` は走行距離（2kHz）、
+  `*_accel` は加速度（IMU の 200Hz）。z は ±10 で切ってあり、0 はその間に測定が無かったこと。
+  調整値の検証は `python3 -m raspi.tools.kf_consistency <記録>.mcap`。
+  `front_angle` は前輪エンコーダの絶対角で、角度の関数である周期誤差（INL）を同定するためのもの（車速の計算には使わない）
 
 ### 5.4 `flags` (u32) ビット定義
 
@@ -1074,7 +1102,7 @@ Pi 側（`ControlParamSync`）は ack が 0.3 秒返らなければ、一致す�
 
 | offset | size | type | field | 備考 |
 |---|---|---|---|---|
-| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。現行は `0x0017`（`protocol.toml`） |
+| 0 | 2 | u16 | `protocol_version` | 上位バイト = メジャー、下位 = マイナー。現行は `0x001A`（`protocol.toml`） |
 | 2 | 4 | u32 | `fw_id` | ファームの git short hash 等 |
 | 6 | 4 | u32 | `build_epoch` | ビルド時刻（UNIX epoch 秒） |
 
@@ -1423,13 +1451,13 @@ GUI でも赤（層1-3）と黄（層4）で明確に分けること。
 | パケット | フレーム長 | 頻度 | 帯域 |
 |---|---|---|---|
 | `LIDAR_SECTOR` (0x01) | 76 B | 120 Hz | 9.12 kB/s |
-| `TELEMETRY` (0x02) | 91 B | 100 Hz | 9.1 kB/s |
+| `TELEMETRY` (0x02) | 109 B | 100 Hz | 10.9 kB/s |
 | `PONG` (0x06) | 19 B | 5 Hz | 0.10 kB/s |
 | `STATS` (0x08) | 55 B | 1 Hz | 0.06 kB/s |
 | `CONFIG_ACK` / `LOG` / `VERSION` | — | 散発 | 約 0.2 kB/s |
-| **合計** | | | **約 18.6 kB/s（約19%）** |
+| **合計** | | | **約 20.4 kB/s（約20%）** |
 
-強度 ON（`param 0x0040 = 1`）は約 22 kB/s、圧縮（`= 2`）は約 15 kB/s。いずれも余裕があり、
+強度 ON（`param 0x0040 = 1`）は約 23 kB/s、圧縮（`= 2`）は約 16 kB/s。いずれも余裕があり、
 送信キューの滞留は §7 のとおり有界。判断材料は Pi 側のロス率と `STATS.tx_drop`。
 
 ### Pi → STM32（別方向・独立）
@@ -1520,7 +1548,7 @@ Linux のシリアル受信バッファは **4KB 程度 = 本プロトコル（�
 `generate.py` が LEN との一致を検証する）。手で書き写さないこと。
 
 ```python
-TELEMETRY       '<2I8h2i19h14B'   # 84 B
+TELEMETRY       '<2I8h2i19h14B2h3H2h2H'   # 102 B
 LIDAR_SECTOR    '<BI32H'          # 69 B（sector_idx, t_start_us, duration_us, rot_speed_dps, dist×30）
 LIDAR_SECTOR_I  '<BI32H30B'       # 99 B
 LIDAR_SECTOR_C  '<BI2H30B'        # 39 B
@@ -1535,7 +1563,7 @@ LIMITS          '<4f'             # 16 B
 `TELEMETRY` の内訳: `2I`(t_us, flags) / `8h`(speed, yaw_rate, steer×2, wheel_speed×4) /
 `2i`(odom_dist) / `19h`(accel×3, pitch, roll, motor_current×3, torque_cmd×2, slip×2, tc_limit_nm×2,
 torque_req×2, abs_limit_nm, tv_ratio, tv_moment_nm) /
-`14B`(temp×4, batt×4, us×2, md_status×3, cmd_seq_echo)
+`14B`(temp×4, batt×4, us×2, md_status×3, cmd_seq_echo) / `2h`(accel_kf, accel_bias_kf) / `3H`(kf_gated, kf_z_rms_dist, kf_z_rms_accel) / `2h`(kf_rho_dist, kf_rho_accel) / `2H`(front_angle×2)
 
 ### 12.7 GPIO
 
