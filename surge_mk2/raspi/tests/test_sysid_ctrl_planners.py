@@ -113,11 +113,11 @@ class TestWheel(unittest.TestCase):
 
 
 class TestTyre(unittest.TestCase):
-    def test_turns_tc_and_abs_off_but_keeps_wheel_speed_cap(self):
+    def test_turns_tc_abs_tv_and_wheel_lift_guard_off(self):
+        """限界で片方の輪が先に空転しても、トルクを絞られない（素のタイヤ特性を測る）。"""
         st = start(SysIdTyre(), vs())
-        self.assertEqual(st.fw_overrides["tc_enable"], 0.0)
-        self.assertEqual(st.fw_overrides["abs_enable"], 0.0)
-        self.assertNotIn("wheel_lift_guard_enable", st.fw_overrides)
+        for key in ("tc_enable", "abs_enable", "tv_enable", "wheel_lift_guard_enable"):
+            self.assertEqual(st.fw_overrides[key], 0.0, key)
 
     def test_torque_rises_in_steps_and_spin_ends_the_drive(self):
         p = SysIdTyre()

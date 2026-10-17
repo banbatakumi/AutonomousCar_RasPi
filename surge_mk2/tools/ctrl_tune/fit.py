@@ -109,8 +109,8 @@ def _md_torque(cmd: np.ndarray, omega: np.ndarray, dt: float, tau: float, delay:
 def _limited(rec: Rec) -> bool:
     """トルク直接指令の間に、左右のトルク指令が食い違ったか（どちらかの輪が絞られた）。
 
-    試験は左右へ同じトルクを指令する（TV は切ってある）。食い違うのは TC か片輪浮き対策が
-    片輪を絞ったとき。片輪浮き対策の介入は TELEMETRY の旗に無いので、ここで見る。
+    試験は左右へ同じトルクを指令する（TC・TV・片輪浮き対策は切ってある）。食い違うのは、それらが
+    切れていなくて片輪を絞ったとき。
     """
     m = rec.torque_mode & (np.maximum(rec.torque_left, rec.torque_right) > 0.004)
     if not np.any(m):
@@ -194,7 +194,8 @@ def fit_wheel(rec: Rec, base: Plant) -> FitResult:
 def _tyre_samples(rec: Rec, base: Plant):
     """記録 → (スリップ率, 前後力 [N], 前後加速度) を両輪ぶん。"""
     dt = _dt(rec)
-    v = savgol_filter(rec.odom, 9, 2, deriv=1, delta=dt)
+    # 車速は STM32 の KF の出力（TC・ABS が実機で見ているものと同じ）。走行距離の微分は周期誤差が乗る
+    v = rec.speed
     accel = savgol_filter(v, 11, 2, deriv=1, delta=dt)
     active = (rec.torque_mode | rec.brake) & (v > 0.35)
     kappas, forces, accels = [], [], []
@@ -253,7 +254,7 @@ def fit_tyre(rec: Rec, base: Plant) -> FitResult:
     if brake_min >= -0.3:
         out.warn(f"制動で限界まで滑っていません（スリップ率の最小 {brake_min:.2f}）——上限と形は外挿")
     if np.any(rec.tc_active & rec.torque_mode) or np.any(rec.abs_active) or _limited(rec):
-        out.warn("TC・ABS・片輪浮き対策が介入しています（切れていない、または片輪浮き対策が働いた）")
+        out.warn("TC・ABS・片輪浮き対策が介入しています（試験が切るはずのものが切れていない。左右のトルク指令が食い違った）")
     if rms > 1.0:
         out.warn(f"残差が大きい（{rms:.1f}N）——車輪の慣性（Ⓐ）が合っていない可能性")
     # 探索範囲の端に張り付いた値は「求まった」のではなく「範囲で止められた」
