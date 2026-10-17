@@ -31,8 +31,13 @@ import msgspec
 
 from ..msgs.types import TOPIC_SCAN, AutoMap, AutoState, Scan, VehicleState
 
-__all__ = ["ParamSpec", "Planner", "ScanWindow", "StandstillSteer", "blind_reason", "min_filter", "scan_window",
+__all__ = ["CMD_HZ", "ParamSpec", "Planner", "ScanWindow", "StandstillSteer", "blind_reason", "min_filter", "scan_window",
            "sector_of_deg", "wrap_deg"]
+
+#: planner の指令（`auto/cmd`）の周期 [Hz]。**ここが唯一の定義**で、planning_node が発行し、
+#: telemetry_node が STM32 への COMMAND をこの周期で中継する（ファームの `drive.h` の
+#: DRIVE_HOST_COMMAND_PERIOD_S もこの逆数）。planner は指令の遅れの見積もりに使う
+CMD_HZ = 50
 
 #: 受信できた点のうち「距離が分かった」（実測または飽和）点の割合の下限。視野全体と、
 #: 正面 ±`BLIND_FRONT_DEG` の扇のそれぞれで見る（`blind_reason`）。**パラメータにしていない**

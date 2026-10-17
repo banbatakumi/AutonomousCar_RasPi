@@ -154,10 +154,13 @@ class VehicleSpec:
     speed_plant_gain: float = 1.0 / (0.03 * 2.0)
     #: STM32 が `speed`/`wheel_speed` に掛けているローパス（1次遅れを `speed_filter_order`
     #: 段つないだもの）の1段あたりの時定数 [s]。0＝無し。**ファームの定数**（1段・
-    #: 9.95ms。`docs/uart_protocol.md`「更新レート」）で、同定はしない。
+    #: 9.95ms。`drive.h` の DRIVE_LPF_TAU_FRONT_S）で、同定はしない。
     #: **観測（テレメトリ・学習の入力）だけに効き、車の動きには効かない**
     speed_filter_s: float = 0.0
     speed_filter_order: int = 1
+    #: STM32 が車速PIの加速度フィードフォワードで目標車速の傾きに掛けるローパスの時定数 [s]。
+    #: **ファームの定数**（`drive.h` の DRIVE_SPEED_FF_TAU_S、`[dynamics] speed_ff_filter_s`）
+    speed_ff_filter_s: float = 0.02
     #: タイヤの緩和長 [m]: 舵を切ってから曲率がついてくるまでの**走行距離**での遅れ
     #: （横力が立ち上がるまでタイヤが転がる距離）。時間にすると低速ほど長い。0＝即座に追従
     yaw_relaxation_m: float = 0.0
@@ -221,6 +224,7 @@ class VehicleSpec:
             control_latency_s=dyn.get("control_latency_s", 0.0),
             speed_filter_s=dyn.get("speed_filter_s", 0.0),
             speed_filter_order=int(dyn.get("speed_filter_order", 1)),
+            speed_ff_filter_s=dyn.get("speed_ff_filter_s", dflt.speed_ff_filter_s),
             yaw_relaxation_m=dyn.get("yaw_relaxation_m", 0.0),
             yaw_rate_filter_s=dyn.get("yaw_rate_filter_s", 0.0),
             yaw_natural_freq_rad_s=dyn.get("yaw_natural_freq_rad_s", 0.0),
@@ -498,9 +502,6 @@ class SpeedController:
     LAUNCH_END_MARGIN_M_S = 0.05
     LAUNCH_TIMEOUT_S = 3.0
 
-    #: 加速度フィードフォワードに使う目標車速の傾きのローパス [s]（`drive.h` の DRIVE_SPEED_FF_TAU_S）
-    FF_TAU_S = 0.02
-
     def __init__(self, spec: VehicleSpec, launch_exit_torque_nm: float = 0.0) -> None:
         self.spec = spec
         #: 発進を終えて PI へ戻すときの積分の初期値 [N·m、1輪あたり]（`[control]` の同名の値）
@@ -586,7 +587,7 @@ class SpeedController:
                 return _toward_zero(v, rr * dt)
             # 加速度フィードフォワード: 目標車速の傾きをならして、その加速に要るトルクを先に足す
             if dt > 0.0:
-                self.ff_accel += (step / dt - self.ff_accel) * (dt / (self.FF_TAU_S + dt))
+                self.ff_accel += (step / dt - self.ff_accel) * (dt / (sp.speed_ff_filter_s + dt))
             e = self.ref - self.v_meas
             self.integral += e * dt
             t_req = sp.speed_kp * e + sp.speed_ki * self.integral

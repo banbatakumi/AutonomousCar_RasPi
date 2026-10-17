@@ -23,8 +23,8 @@ STM32 は目標速度をランプ（3.0m/s²）でならし、PI（kp・ki）で
 - `k_fb`: 車速がプロファイルから外れたぶんを目標に足し戻す（同定値のずれ・TC の介入の保険。
   「今の速度では次のコーナーに間に合わない」とき、目標がさらに下がって PI が最大減速へ張り付く）
 
-値は `Vehicle`（`config/vehicle.toml` の同定値）から決まり、手で合わせる数字は `lead` の係数だけ
-（`config_from_vehicle`）。`raspi/tests/test_speedctl.py` がファームの写しに対する追従を確かめる。
+値は `Vehicle`（`config/vehicle.toml` の同定値）と指令の遅れ（`cmd_delay_s`）から決まり、手で合わせる
+数字は減速の前倒しの係数 `LEAD_RATIO` だけ（`config_from_vehicle`）。`raspi/tests/test_speedctl.py` がファームの写しに対する追従を確かめる。
 """
 
 from __future__ import annotations
@@ -42,10 +42,9 @@ __all__ = ["SpeedFFConfig", "SpeedFF", "config_from_vehicle", "path_accel", "arc
 #: 減速の前倒し `lead_s` を速度ループの時定数の何倍にするか。ファームの写しに対する 1 次元の実験
 #: （直線＋一定速コーナー、指令 50Hz・遅れ 25ms）で、0.65 倍（0.1s）がコーナー進入の出過ぎ・追従の
 #: 誤差とも最小だった（0 倍: 出過ぎ +0.49m/s、0.65 倍: +0.12、1.3 倍: 早く落としすぎて 1 周 +2%）。
-#: kp を 0.3 に・加減速を 85% にした車でも同じ所が最良
+#: kp を 0.3 に・加減速を 85% にした車でも同じ所が最良。★経験則（物理から決まらない）。ファームの
+#: 加速度フィードフォワードが有効な間（`ref_command`）は使わない
 LEAD_RATIO = 0.65
-#: 加速の前倒し [s]（指令が届くまでの遅れぶんだけ）
-LEAD_ACC_S = 0.05
 
 
 class SpeedFFConfig(NamedTuple):
@@ -56,10 +55,12 @@ class SpeedFFConfig(NamedTuple):
     k_fb: float = 1.0           #: 車速のずれを目標へ戻す重み
 
 
-def config_from_vehicle(vehicle, k_fb: float = 1.0) -> SpeedFFConfig:
+def config_from_vehicle(vehicle, k_fb: float = 1.0, *, cmd_delay_s: float = 0.0) -> SpeedFFConfig:
+    """:param cmd_delay_s: 指令を決めてから STM32 が受理するまでの遅れ [s]（次の指令までの半周期＋
+        通信。加速の前倒しはこの遅れぶんだけ）"""
     tau = float(vehicle.speed_loop_tau_s)
     return SpeedFFConfig(tau_v=tau, reset_s=float(vehicle.speed_loop_reset_s),
-                         lead_s=LEAD_RATIO * tau, lead_acc_s=LEAD_ACC_S if tau > 0.0 else 0.0,
+                         lead_s=LEAD_RATIO * tau, lead_acc_s=max(cmd_delay_s, 0.0) if tau > 0.0 else 0.0,
                          k_fb=k_fb)
 
 
@@ -82,19 +83,19 @@ def path_accel(path: RaceLine) -> np.ndarray:
     return a
 
 
-#: STM32 が目標車速の傾きに掛けるローパスの時定数 [s]（**ファームの定数** `drive.h` の
-#: DRIVE_SPEED_FF_TAU_S。変えたらここと `sim/vehicle.py` の `SpeedController.FF_TAU_S` も直す）
-FW_FF_TAU_S = 0.02
-#: ファームの加速度フィードフォワードが有効なときの、目標車速のランプの下限 [m/s²]（`ref_command`）
+#: ファームの加速度フィードフォワードが有効なときの、目標車速のランプの下限 [m/s²]（`ref_command`）。
+#: 定速の区間で目標が 0 の傾きに固まらず、車速の小さなずれを詰められるだけの値
 REF_ACCEL_MIN = 0.3
 #: 同じく、ランプをプロファイルの加速度の何倍にするか（1 より少し大きく。目標が先へ逃げない）
 REF_ACCEL_GAIN = 1.1
-#: 同じく、車速のずれをこの時間で詰められるランプまで許す [s]
+#: 同じく、車速のずれを詰める時間の既定 [s]。**呼び出し側は `Vehicle.speed_loop_tau_s`（速度PIの
+#: 比例項の時定数 1/(車体の利得×kp)）を渡す**——PI が偏差 Δv を詰める初めの傾きは Δv/τ なので、
+#: ランプをそれより絞ると PI より先に目標が詰まらない。これは未同定（τ=0）のときの値
 REF_CATCH_S = 0.15
 
 
 def ref_command(path: RaceLine, pos: float, v_now: float, *, lead_s: float,
-                acc: np.ndarray | None = None) -> tuple[float, float]:
+                acc: np.ndarray | None = None, catch_s: float = 0.0) -> tuple[float, float]:
     """ファームの加速度フィードフォワード（★v0.21）が有効なときの `(目標速度, ランプの加速度)`。
 
     STM32 は目標車速を `accel_limit` の傾きで動かし、**その傾きに要るトルクを先に足す**
@@ -105,7 +106,8 @@ def ref_command(path: RaceLine, pos: float, v_now: float, *, lead_s: float,
 
     STM32 の目標はプロファイルと同じ傾きで動き、車速PIは残ったずれだけを直す。`SpeedFF` の
     前倒し（経験則の係数）・比例項の逆算・ハイパスは要らない。車速がプロファイルから外れている
-    ときは、その差を `REF_CATCH_S` で詰められるランプまで許す（速すぎるときに減速が遅れない）。
+    ときは、その差を `catch_s`（速度PIの時定数。0 なら `REF_CATCH_S`）で詰められるランプまで許す
+    （速すぎるときに減速が遅れない）。
     """
     n = len(path)
     if n < 2:
@@ -117,7 +119,8 @@ def ref_command(path: RaceLine, pos: float, v_now: float, *, lead_s: float,
     q = pos + max(0.0, v_now) * lead_s / step
     v_ref = _lerp(path.v, q, closed)
     a = abs(_lerp(acc, q, closed))
-    ramp = max(REF_ACCEL_MIN, REF_ACCEL_GAIN * a, abs(v_ref - v_now) / REF_CATCH_S)
+    catch = catch_s if catch_s > 1e-6 else REF_CATCH_S
+    ramp = max(REF_ACCEL_MIN, REF_ACCEL_GAIN * a, abs(v_ref - v_now) / catch)
     return max(0.0, v_ref), ramp
 
 

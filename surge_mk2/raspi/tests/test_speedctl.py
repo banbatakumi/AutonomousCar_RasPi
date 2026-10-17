@@ -249,6 +249,10 @@ class TestRefCommand(unittest.TestCase):
         v, ramp = speedctl.ref_command(path, 5.0, 2.0, lead_s=0.0)
         self.assertAlmostEqual(v, 1.0)
         self.assertAlmostEqual(ramp, 1.0 / speedctl.REF_CATCH_S)
+        # 同定した速度PIの時定数を渡せば、その時定数で詰める（PI が偏差を詰める初めの傾き Δv/τ）
+        tau = Vehicle.load().speed_loop_tau_s
+        _, ramp = speedctl.ref_command(path, 5.0, 2.0, lead_s=0.0, catch_s=tau)
+        self.assertAlmostEqual(ramp, 1.0 / tau)
 
     def test_planner_uses_it_only_when_the_firmware_feeds_forward(self):
         veh = Vehicle.load()

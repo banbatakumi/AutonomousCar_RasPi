@@ -48,7 +48,7 @@ from ..nav.signals import SignalLights
 from ..proto.generated.packets import MDS_COMM_OK
 from . import mapstore
 from ._slam2d_nav import WALL_HIT_WEIGHT, Slam2dNav, occgrid_from_trinary
-from .base import ParamSpec, Planner
+from .base import CMD_HZ, ParamSpec, Planner
 from .follow_the_gap import FollowTheGap
 from .park_to_point import ParkToPoint
 
@@ -374,9 +374,10 @@ def steer_delay(p: dict[str, float], vehicle) -> float:
 
 
 def mpc_config(p: dict[str, float], vehicle) -> MPCConfig:
+    """遅延補償は Pure Pursuit と同じ `steer_delay`（どちらも「今」へ進めた姿勢を使うので、見込む遅れは同じ）。"""
     return MPCConfig(
         wheelbase=vehicle.wheelbase, max_steer=vehicle.max_steer,
-        horizon=int(p["mpc_horizon"]), dt=p["mpc_dt"], delay_s=p["mpc_delay_s"],
+        horizon=int(p["mpc_horizon"]), dt=p["mpc_dt"], delay_s=steer_delay(p, vehicle),
         q_y=p["mpc_q_y"], q_psi=p["mpc_q_psi"], r_d=p["mpc_r_d"],
         steer_map=vehicle.steer_map, servo_gain=vehicle.steer_servo_gain,
         speed_preview_s=p["speed_preview"])
@@ -530,10 +531,6 @@ class Slam2dRaceLine(Planner):
                   step=1, default=0, unit="",
                   note="★1で舵をMPC（経路座標の線形化自転車モデル＋舵レート制約、`nav/mpc.py`）で決める。"
                        "速度は経路のプロファイルのまま。既定は0（Pure Pursuit）。MPCは実機未検証"),
-        ParamSpec(group=GROUP_STEER, key="mpc_delay_s", hidden=True, label="MPC 遅延補償", min=0.0, max=0.3, step=0.01,
-                  default=0.06, unit="s",
-                  note="★MPC専用（Pure Pursuitの遅延補償とは別）。指令が効くまでの時間。大きすぎると逆に"
-                       "振動する（3m/sのtoyota2で0.15は毎周期±全舵の振動で衝突、0.05〜0.07で衝突0。★シムの実効遅れはLiDAR周期＋姿勢の古さで決まる）"),
         ParamSpec(group=GROUP_STEER, key="mpc_horizon", hidden=True, label="MPC 予測ステップ数", min=5, max=40, step=1,
                   default=20, unit="",
                   note="予測区間 = ステップ数×刻み。長いほど先のコーナーに備えるが重い"),
@@ -556,7 +553,7 @@ class Slam2dRaceLine(Planner):
                   note="低速時の注視距離。小さすぎると舵が振動する"),
         ParamSpec(group=GROUP_STEER, key="delay_trim", hidden=True, label="遅延補償の補正", min=-0.05, max=0.3,
                   default=0.0, step=0.01, unit="s",
-                  note="★舵の遅延補償は同定値（舵のむだ時間＋ヨーの遅れ＋通信、約0.06s）から決まる。"
+                  note="★舵の遅延補償は同定値（舵のむだ時間＋ヨーの遅れ＋通信、約0.05s）から決まる（Pure Pursuit・MPC 共通）。"
                        "ここはそれに足す補正。追従に使う姿勢は車速とジャイロで『今』へ進めてあるので、"
                        "以前の『遅延補償』（`delay_s`、0.15 前後。姿勢の古さの手当て込み）とは意味が違うので、"
                        "キーを変えてある（保存済みの `delay_s` は読まない）"),
@@ -1227,7 +1224,7 @@ class Slam2dRaceLine(Planner):
         t = int(vs.t_capture)
         dt = (t - self._sff_t) / 1e9 if self._sff_t and t else 0.0
         self._sff_t = t
-        cfg = speedctl.config_from_vehicle(self.vehicle, k_fb=p["speed_fb"])
+        cfg = speedctl.config_from_vehicle(self.vehicle, k_fb=p["speed_fb"], cmd_delay_s=self._cmd_delay())
         # 今ここで前へ使ってよい加速度（摩擦円の残り）
         n = len(path)
         kap = float(np.abs(path.kappa[j])) if len(path.kappa) == n else 0.0
@@ -1250,20 +1247,26 @@ class Slam2dRaceLine(Planner):
             local = speedctl.catch_up(path, j, vs.speed, a_accel=lim.a_accel,
                                       a_grip=grip if grip is not None else self.vehicle.a_lat_max)
             if self.vehicle.speed_ff_firmware:
-                return speedctl.ref_command(local, pos, vs.speed, lead_s=self._ref_lead())
+                return speedctl.ref_command(local, pos, vs.speed, lead_s=self._ref_lead(),
+                                            catch_s=self.vehicle.speed_loop_tau_s)
             return self._sff_catch.command(local, pos, vs.speed, dt, cfg, a_room=a_room), 0.0
         if self.vehicle.speed_ff_firmware:
             if self._ref_acc_src is not path.v:
                 self._ref_acc, self._ref_acc_src = speedctl.path_accel(path), path.v
             return speedctl.ref_command(path, pos, vs.speed, lead_s=self._ref_lead(),
-                                        acc=self._ref_acc)
+                                        acc=self._ref_acc, catch_s=self.vehicle.speed_loop_tau_s)
         return self._sff.command(path, pos, vs.speed, dt, cfg, a_room=a_room), 0.0
 
+    def _cmd_delay(self) -> float:
+        """指令を決めてから STM32 が受理するまでの時間 [s]: 次の指令までの半周期（`CMD_HZ`）＋
+        通信（同定の遅延試験）。"""
+        return 0.5 / CMD_HZ + cmd_latency(self.vehicle)
+
     def _ref_lead(self) -> float:
-        """指令を決めてからフィードフォワードのトルクに効くまでの時間 [s]:
-        次の指令までの半周期（50Hz）＋通信（同定の遅延試験）＋STM32 が目標車速の傾きに掛ける
-        ローパスの時定数。どれも実測か既知の定数で、合わせ込む係数は無い。"""
-        return 0.01 + cmd_latency(self.vehicle) + speedctl.FW_FF_TAU_S
+        """指令を決めてからフィードフォワードのトルクに効くまでの時間 [s]: `_cmd_delay` ＋STM32 が
+        目標車速の傾きに掛けるローパスの時定数（`Vehicle.speed_ff_filter_s`）。どれも実測か既知の
+        定数で、合わせ込む係数は無い。"""
+        return self._cmd_delay() + self.vehicle.speed_ff_filter_s
 
     # ── EXPLORE ──
 

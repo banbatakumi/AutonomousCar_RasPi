@@ -120,13 +120,19 @@ rolling_resistance = 0.27320845610211264
 # 旧モデル（1次遅れ）の時定数 [s]。speed_kp > 0 の間は使わない（テスト・旧設定との互換のため残す）
 tau_speed_s = 0.14957988168793218
 # STM32 が speed/wheel_speed に掛けているローパス（1次遅れ×段数、各段の時定数 [s]）。
-# **同定しない。ファームの定数**（MainF446RE_V3 `src/control/drive.h` の DRIVE_LPF_K_FRONT=0.951 を
-# 2kHz で回す 1次遅れ: τ = -0.0005/ln(0.951) = 9.95ms。2026-09-25 に 100ms から変更）。
-# ファームを変えたらここも直すこと。シムの観測（テレメトリ・学習の入力）の遅れにだけ効く。
+# **同定しない。ファームの定数**（MainF446RE_V3 `src/control/drive.h` の DRIVE_LPF_TAU_FRONT_S。
+# 2026-09-25 に 100ms から変更。2026-10-17 から係数ではなく時定数で持つ）。
+# ファームを変えたらここも直すこと（`tools/ctrl_tune/tests/test_fw_constants.py` が突き合わせる）。
+# シムの観測（テレメトリ・学習の入力）の遅れにだけ効く。
 # 同定の解析は speed ではなくオドメトリをゼロ位相で微分した速度を使うので、この値に依存しない
 # （解析の所見「速度センサの自己点検」が、この値と記録の speed の食い違いを警告する）
 speed_filter_s = 0.00995
 speed_filter_order = 1
+# STM32 が車速PIの加速度フィードフォワード（[control] の speed_ff_*）で、目標車速の傾きに掛けている
+# ローパスの時定数 [s]。**同定しない。ファームの定数**（`drive.h` の DRIVE_SPEED_FF_TAU_S = Pi の
+# 指令周期 50Hz）。Pi はこの時定数ぶん先の速度を送り（`raspi/nav/speedctl.py`）、シムの
+# `SpeedController` も同じ値でならす。ファームを変えたらここも直すこと（同じテストが突き合わせる）
+speed_ff_filter_s = 0.02
 # ── ③ 旋回グリップ試験（`sysid_corner`）──
 # 横方向グリップ限界 a_lat_max = mu * g [m/s²]。質量に依存しない（F_lat_max = mu*m*g を質量mで割ると
 # mu*g だけが残るため）。2026-09-28 実測: 旋回試験の限界 4.09m/s²（1.45m/s で頭打ち）。TV が外輪を押し続けていた
@@ -258,9 +264,11 @@ steer_link_cubic = -0.5987390237312006
 #    ランプと車速PIを迂回して全開＋TC で加速する。空転を抑えるのは上の TC の値。`slam2d_raceline` の `launch`）──
 # 発進を終えて車速PIへ戻すときの積分の初期値 [N·m、1輪あたり] = その車速を保つのに要るトルク。
 # 0 だと積分が溜まるまで車速が目標より落ち込む（この値×2÷speed_kp [m/s]、戻るのに約0.5秒）。
-# 決め方: [dynamics] の rolling_resistance ÷ speed_plant_gain ÷ 2。★今の 0.009 は旧同定値（0.366÷20.3÷2）の
-# まま。今の [dynamics] なら 0.2732÷21.52÷2 ≒ 0.0063 で、`tools/sysid` は書き直さない（手で直す）
-launch_exit_torque_nm = 0.009
+# 決め方: [dynamics] の rolling_resistance ÷ speed_plant_gain ÷ drive_ratio（転がり抵抗を打ち消す
+# 後輪1輪ぶんのトルク）。**同定を適用すると `tools/sysid` が書き直す**（ここが 0 より大きいときだけ。
+# `tools/sysid/toml_update.py` の `launch_exit_value`）。2026-10-17 に旧同定値（0.366÷20.3÷2 = 0.009）から
+# 今の [dynamics]（0.2732÷21.52÷2）へ直した
+launch_exit_torque_nm = 0.006346
 
 # ── 車速PIの加速度フィードフォワード（★プロトコル v0.21。後輪2輪の合計トルク [N·m]）──
 # STM32 は車速PIの出力に「speed_ff_nm_per_m_s2 × 目標車速の傾き [m/s²] ＋ speed_ff_rr_nm × 進む向き」を足す。

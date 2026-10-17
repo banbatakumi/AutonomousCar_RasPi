@@ -28,7 +28,7 @@ flowchart LR
 **車速の真値は、駆動していない前輪のエンコーダ**から取ります。駆動輪の速度は空転すると真の車速から離れますが、
 前輪は転がっているだけなので、**後輪の周速との差が「滑り」としてそのまま計算できます**。TC と ABS の前提です。
 
-1. 前輪の角速度（左右）をローパス（係数 `k = 0.951`、時定数 \(\tau = -\Delta t/\ln k \approx 10\,\mathrm{ms}\)）に通す。
+1. 前輪の角速度（左右）をローパス（時定数 \(\tau \approx 10\,\mathrm{ms}\)、`DRIVE_LPF_TAU_FRONT_S`。係数は毎周期 \(k = e^{-\Delta t/\tau}\)）に通す。
 2. 前輪は操舵されているので、転がり速度は車体前後の速度より \(1/\cos\delta\) 倍だけ速い。逆に \(\cos\delta\) を掛けて戻す。
    左右を平均すると、旋回の内外輪差は相殺される。\(\delta\) は路面舵角。
 3. \(v = \dfrac{v_L + v_R}{2}\cos\delta\)
@@ -85,9 +85,10 @@ PI だけだと、加速度 \(a\) を出すトルクは「偏差が \(a/(\text{�
 | `speed_ff_nm_per_m_s2` | \(k_a\)。車体の利得の逆数 | 0.046 N·m/(m/s²) |
 | `speed_ff_rr_nm` | \(k_{rr}\)。転がり抵抗ぶん（進む向きへ） | 0.013 N·m |
 
-- 傾きは上位が 50 Hz で目標を刻むため周期ごとに跳ぶので、\(\tau = 20\,\mathrm{ms}\) の 1 次ローパスでならします
-  （`DRIVE_SPEED_FF_TAU_S`）。**Pi 側 `raspi/nav/speedctl.py` の `FW_FF_TAU_S` と、シミュレータの
-  `SpeedController.FF_TAU_S` も同じ値にする必要があります**（三箇所の値が揃っていないとシムと実機が食い違う）。
+- 傾きは上位が 50 Hz で目標を刻むため周期ごとに跳ぶので、その刻みの周期 \(\tau = 20\,\mathrm{ms}\) を時定数にした
+  1 次ローパスでならします（`DRIVE_SPEED_FF_TAU_S` = `DRIVE_HOST_COMMAND_PERIOD_S`）。Pi 側は `vehicle.toml` の
+  `[dynamics] speed_ff_filter_s` だけが同じ値を持ち（planner とシミュレータが読む）、ファームとの一致は
+  `tools/ctrl_tune/tests/test_fw_constants.py` が確かめます。
 - 制動・torque_mode・ローンチ・停車中は足しません。2 つとも 0 なら FF なしの PI と同じ動きです。
 
 ## アンチウィンドアップ

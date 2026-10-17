@@ -58,6 +58,7 @@ import msgspec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from raspi.auto.base import CMD_HZ  # noqa: E402  `auto/cmd` の発行レート
 from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
 from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
@@ -76,8 +77,6 @@ from raspi.msgs.types import (  # noqa: E402
 __all__ = ["PlanningNode", "input_topics"]
 
 NS = 1_000_000_000
-#: `auto/cmd` の発行レート。**telemetry_node の `CMD_PUB_HZ` と揃える**
-CMD_HZ = 50
 #: `auto/state` の発行レート。点群が 10Hz なのでそれ以上出しても同じ絵になる
 STATE_HZ = 10
 HB_HZ = 10
