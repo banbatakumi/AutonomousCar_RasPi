@@ -415,7 +415,7 @@ TC のスリップ・オドメトリ・曲率に誤差が乗る）。リンク�
 5点の当てはめで量子化の誤差は約0.5mm/s（端数が出る条件で確認）。旧ファームの `speed`（100ms）で
 解析すると、ブレーキ減速度・ガタなどが誤る。
 `vehicle.toml` の `speed_filter_s`（ファームの定数、同定しない）はシムの観測にだけ使う。
-**ファームの `DRIVE_LPF_K_FRONT` を変えたら直す**——解析の所見「速度センサの自己点検」が、
+**ファームの `DRIVE_LPF_TAU_FRONT_S` を変えたら直す**（`tools/ctrl_tune/tests/test_fw_constants.py` が突き合わせる）——解析の所見「速度センサの自己点検」が、
 記録の `speed` とオドメトリを照合して食い違いを警告する（静止中のノイズも出る）。
 同じく `speed_kp`・`speed_ki`・`speed_torque_max_nm` もファームの定数
 （`DRIVE_SPEED_KP/KI`・`DRIVE_MAX_TORQUE_NM`×2）なので、ファームを変えたら直す。目標車速のランプの上限は STM32 には無く、

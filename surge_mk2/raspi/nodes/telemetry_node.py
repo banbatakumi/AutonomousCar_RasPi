@@ -149,6 +149,7 @@ from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
 from raspi.auto import mapstore  # noqa: E402
+from raspi.auto.base import CMD_HZ  # noqa: E402
 from raspi.auto.registry import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
 from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
@@ -269,7 +270,8 @@ SNAPSHOT_ON_CHANGE = (
     ("scan", TOPIC_SCAN), ("link", TOPIC_DIAG_LINK), ("auto", TOPIC_AUTO_STATE),
     ("line_cam", TOPIC_LINE_CAM), ("track", TOPIC_TRACK_TARGET),
     ("signal", TOPIC_SIGNAL_STATUS))
-CMD_PUB_HZ = 50
+#: `cmd` の中継レート（planner の指令と同じ。`raspi/auto/base.py` の `CMD_HZ` が唯一の定義）
+CMD_PUB_HZ = CMD_HZ
 #: GUIへ配信する既定のJPEG頻度。`docs/architecture.md` §9の帯域見積もり
 #: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で前後カメラ同時30fps配信を
 #: 検証して帯域は問題なかったので既定30。**送る頻度の上限**で、刻みではない

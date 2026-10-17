@@ -24,7 +24,8 @@ import tomlkit
 
 from raspi.core.control_params import STEER_LINK_X_MAX_RAD, steer_link_road
 
-__all__ = ["ALLOWED_KEYS", "LINK_KEYS", "FF_KEYS", "speed_ff_values", "apply_dynamics"]
+__all__ = ["ALLOWED_KEYS", "LINK_KEYS", "FF_KEYS", "LAUNCH_EXIT_KEY", "speed_ff_values",
+           "launch_exit_value", "apply_dynamics"]
 
 #: `[control]` に書くステアのリンクの換算。**必ず2つ一緒に**渡す
 LINK_KEYS = ("steer_link_gain", "steer_link_cubic")
@@ -40,6 +41,19 @@ def speed_ff_values(speed_plant_gain: float, rolling_resistance: float) -> dict[
     """
     return {FF_KEYS[0]: round(1.0 / speed_plant_gain, 6),
             FF_KEYS[1]: round(max(rolling_resistance, 0.0) / speed_plant_gain, 6)}
+
+#: `[control]` のローンチコントロールを終えるときの積分の初期値（1輪あたり）
+LAUNCH_EXIT_KEY = "launch_exit_torque_nm"
+
+
+def launch_exit_value(speed_plant_gain: float, rolling_resistance: float, drive_ratio: float) -> float:
+    """`[dynamics]` の車体の利得・転がり抵抗・駆動輪数 → `LAUNCH_EXIT_KEY` の値 [N·m、1輪あたり]。
+
+    発進を終えて車速PIへ戻すとき、積分を「その車速を保つのに要るトルク」から始める。それは
+    転がり抵抗を打ち消す後輪の合計トルク（転がり抵抗 ÷ 利得）を駆動輪で割ったもの。
+    """
+    return round(max(rolling_resistance, 0.0) / speed_plant_gain / max(drive_ratio, 1.0), 6)
+
 
 #: STM32 が `CONFIG_SET` で受け付ける範囲（範囲外は丸められる。`steer_link_*` は 0x0081/0x0082）。
 #: 丸められた値を toml に残すと Pi が送る値と STM32 の値、`max_steer` の三者が食い違うので、書く前に弾く
@@ -126,10 +140,15 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
     # 有効な値（> 0）が書いてあれば、同定し直した値に合わせて書き直す（0・未記入なら無効のまま）
     control = doc.get("control")
     gain = float(dynamics.get("speed_plant_gain", 0.0) or 0.0)
+    rr = float(dynamics.get("rolling_resistance", 0.0) or 0.0)
     if control is not None and gain > 1e-6 and float(control.get(FF_KEYS[0], 0.0) or 0.0) > 0.0:
-        ff = speed_ff_values(gain, float(dynamics.get("rolling_resistance", 0.0) or 0.0))
+        ff = speed_ff_values(gain, rr)
         for key in FF_KEYS:
             put(control, key, ff[key])
+    # ローンチコントロールを終えるときの積分の初期値も同じ2つ（と駆動輪数）で決まる。同じく有効なときだけ
+    if control is not None and gain > 1e-6 and float(control.get(LAUNCH_EXIT_KEY, 0.0) or 0.0) > 0.0:
+        put(control, LAUNCH_EXIT_KEY,
+            launch_exit_value(gain, rr, float(dynamics.get("drive_ratio", 2.0) or 2.0)))
 
     if changed:
         _atomic_write(path, tomlkit.dumps(doc))

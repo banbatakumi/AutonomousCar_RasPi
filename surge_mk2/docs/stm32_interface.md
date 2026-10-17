@@ -380,8 +380,8 @@ STM32 は `speed` を作るときに `cos(steer_actual)` を掛けること。
 
 - **`speed` / `wheel_speed` はローパスを通した値を入れる。** 前輪はアナログ絶対角エンコーダの
   ADC 読みで、角速度換算すると 1LSB ≈ 1.5 rad/s 相当のノイズが乗る。生値を送ると Pi 側が使えない。
-  ADC を1制御周期ぶん（32スキャン）平均した角度から微分し、k=0.951（2kHz で
-  時定数9.95ms）の1次ローパスを掛ける。**Pi 側はリアルタイムの用途に `speed` を
+  ADC を1制御周期ぶん（32スキャン）平均した角度から微分し、時定数9.95ms（`DRIVE_LPF_TAU_FRONT_S`）の
+  1次ローパスを掛ける。**Pi 側はリアルタイムの用途に `speed` を
   遅れ10msの車速として直接使い、システム同定は `odom_dist` をゼロ位相で微分して使う**（シムは
   `config/vehicle.toml` の `speed_filter_s` でこの遅れを持つので、ファームの係数を変えたら必ずそこも
   直す）。微分して加速度を求めてはならない点は変わらない。
@@ -1386,7 +1386,7 @@ Pi 側が計算する:
 - [ ] LiDAR 300ms 断で `lidar_ok` を落とす
 - [ ] `steer_actual` が**路面舵角に換算済み**である（モータ機械角ではない）
 - [ ] `target_steer` を**路面舵角として解釈**している
-- [ ] `speed` / `wheel_speed` に**ローパス**を掛けている（k=0.951・時定数9.95ms。Pi の `vehicle.toml` `speed_filter_s` と一致）
+- [ ] `speed` / `wheel_speed` に**ローパス**を掛けている（時定数9.95ms。Pi の `vehicle.toml` `speed_filter_s` と一致）
 - [ ] **`speed` を `cos(steer_actual)` で車体中心線方向に射影している**
 - [ ] **`wheel_speed` / `odom_dist` は射影せず生値で送っている**
 - [ ] `odom_dist` は**ローパスを掛けずに**絶対角アンラップから積算している

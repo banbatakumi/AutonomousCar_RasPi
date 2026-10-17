@@ -202,6 +202,9 @@ class Vehicle:
     #: STM32 の車速PIの加速度フィードフォワードが有効か（`[control]` の `speed_ff_nm_per_m_s2` > 0、
     #: ★v0.21）。有効なら速度指令は「プロファイルの速度＋その傾き」を渡すだけにする（`nav/speedctl.py`）
     speed_ff_firmware: bool = False
+    #: そのフィードフォワードが目標車速の傾きに掛けるローパスの時定数 [s]（`[dynamics] speed_ff_filter_s`、
+    #: ファームの定数 DRIVE_SPEED_FF_TAU_S）。Pi はこの時定数ぶん先の速度を送る
+    speed_ff_filter_s: float = 0.02
     #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/architecture.md` §9.4）。
     #: **telemetry_node と io_node が独立に持つが、値はここ 1 つ**
     cmd_deadman_ms: float = 150.0
@@ -394,6 +397,7 @@ class Vehicle:
             yaw_damping=float(dyn.get("yaw_damping", 1.0)),
             cmd_steer_rate_limit_rad_s=float(safety.get("cmd_steer_rate_limit_rad_s", 0.0)),
             speed_ff_firmware=float(d.get("control", {}).get("speed_ff_nm_per_m_s2", 0.0)) > 0.0,
+            speed_ff_filter_s=float(dyn.get("speed_ff_filter_s", 0.02)),
             cmd_deadman_ms=_deadman_ms(safety.get("cmd_deadman_ms", 150.0)),
             auto_link_grace_ms=float(safety.get("auto_link_grace_ms", 5000.0)),
             auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),

@@ -510,7 +510,7 @@ slip_front = wheel_speed[FL] * math.cos(steer_actual) - speed # 前輪は射影�
 STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均した角度**を使う。
 **v0.25 以降の `speed` はカルマンフィルタの車速**（§5.3.1。遅れはほぼ無い）で、リアルタイムの用途（プランナー・E2E）に
 そのまま使ってよい。ただし微分すれば加速度計の雑音が増幅されるので、**加速度は `accel_x/y/z`（IMU）か `accel_kf` から取ること。**
-`wheel_speed[FL/FR]` は各輪の周速を **k=0.951 の1次ローパス（2kHz で時定数9.95ms）** に通した報告用の値（車速の計算には使わない）。
+`wheel_speed[FL/FR]` は各輪の周速を **時定数9.95ms の1次ローパス（`DRIVE_LPF_TAU_FRONT_S`）** に通した報告用の値（車速の計算には使わない）。
 100Hz への間引きで 50Hz より上のノイズが折り返すので、**記録を後から解析する用途（システム同定）は
 `odom_dist`（ローパス前の積算位置）を前後のサンプルでゼロ位相に微分する方が正確**（`tools/sysid/fit.py`）。
 v0.24 以前の記録の `speed` は遅れ約10msのローパス版（シムの `config/vehicle.toml` の `speed_filter_s` はこの遅れ）。
@@ -702,8 +702,9 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   STM32 が `target_speed`/`target_torque` を無視して**最大制動トルクで停止**する。
 - **`d_stop` は固定値ではない**（前後超音波の固定20cm未満ではない）。
   `d_stop = v・t_delay + v²/(2・a_max) + margin` で、`v` は進行方向の実走行速度の
-  絶対値。`t_delay`/`a_max` は STM32 側の固定定数（`VEHICLE_AUTO_STOP_DELAY_S`/
-  `VEHICLE_AUTO_STOP_DECEL_M_S2` 3.0m/s²。駆動の加速度上限とは独立）。走行速度が上がるほど `d_stop` は伸び、早い段階で作動する。
+  絶対値。`t_delay`/`a_max` は STM32 側の定数（`VEHICLE_AUTO_STOP_DELAY_S` = LiDAR の1回転 0.1s ＋
+  MD のトルクの立ち上がり 4.5ms、`VEHICLE_AUTO_STOP_DECEL_M_S2` = 同定した制動の減速度 2.47m/s²
+  （`[dynamics] brake_decel_m_s2`）。駆動の加速度上限とは独立）。走行速度が上がるほど `d_stop` は伸び、早い段階で作動する。
   `margin` だけが `CONFIG_SET`（`param_id = 0x0060`）でcm単位の連続値として直接
   指定できる（§5.8.3）。
 - **判定は3つのセンサ条件の OR**（いずれか1つでも成立すれば作動）:

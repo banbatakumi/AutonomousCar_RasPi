@@ -50,9 +50,9 @@ def run(spec: VehicleSpec, veh: Vehicle, *, feedforward: bool, laps: int = 3):
     v = float(path.v[0])
     ctl.reset(v=v, ref=v)
     ff = speedctl.SpeedFF()
-    cfg = speedctl.config_from_vehicle(veh)
     s = t = 0.0
     dt, period, latency = 0.002, 0.02, 0.025
+    cfg = speedctl.config_from_vehicle(veh, cmd_delay_s=0.5 * period + latency)
     next_cmd, target, queue = 0.0, v, []
     over, err2, cnt = 0.0, 0.0, 0
 
@@ -98,7 +98,7 @@ def run_firmware_ff(spec: VehicleSpec, veh: Vehicle, *, gain_error: float = 1.0,
     acc = speedctl.path_accel(path)
     s = t = 0.0
     dt, period, latency = 0.002, 0.02, 0.025
-    lead = 0.5 * period + latency + speedctl.FW_FF_TAU_S
+    lead = 0.5 * period + latency + spec.speed_ff_filter_s
     next_cmd, target, ramp, queue = 0.0, v, 3.0, []
     over, err2, cnt = 0.0, 0.0, 0
 
