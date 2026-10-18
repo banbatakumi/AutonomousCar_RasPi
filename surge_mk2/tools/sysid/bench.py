@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import math
 import random
+import tomllib
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -42,14 +43,24 @@ import numpy as np
 from raspi.auto.registry import PLANNERS
 from raspi.msgs.types import Scan, VehicleState
 from sim.stm32 import ABS_MIN_SPEED_M_S
-from sim.vehicle import (GRAVITY_MPS2, DriveInput, SteerServo, VehicleModel, VehicleSpec, brake_decel,
+from sim.vehicle import (DEFAULT_SPEC_PATH, GRAVITY_MPS2, DriveInput, SteerServo, VehicleModel, VehicleSpec, brake_decel,
                          drive_accel_limit)
-from tools.sysid import fit
+from tools.sysid import fit, toml_update
 from tools.sysid.encoder_cal import Cal
 from tools.sysid.fit import Cmd, Log, ScanStamp, build_log
 
 __all__ = ["TRUTH", "TRUTH_SLIP", "TRUTH_LOWGRIP", "Pipeline", "Noise", "REALISTIC", "SLIPPING", "run_test", "run_all", "Space",
            "write_mcap", "reproduction_error", "truth_ff"]
+
+def _truth_speed_pi(gain: float) -> dict[str, float]:
+    """真値の車の速度PI（`speed_kp`・`speed_ki`）。真値の利得から極配置で導く。
+
+    `vehicle.toml` の値は実機の ⑤ を適用するたびに書き直るので（実機の利得に合わせた値）、真値の利得とは
+    食い違う。真値の車が自分の利得に合ったゲインで走るよう、狙い（ζ・ωn）だけを toml から読む。"""
+    with open(DEFAULT_SPEC_PATH, "rb") as f:
+        dyn = tomllib.load(f)["dynamics"]
+    return toml_update.speed_pi_values(gain, dyn["speed_pi_zeta"], dyn["speed_pi_wn_rad_s"])
+
 
 #: 既定の真値。`vehicle.toml` の旧手順の値とは**わざとずらしてある**（既定値に
 #: たまたま一致して「復元できた」ように見えるのを避ける）
@@ -59,11 +70,10 @@ TRUTH = replace(
     # 速度はファームの PI（`SpeedController`）。Kp/Ki・出力上限・ランプはファームの定数、
     # 車体の利得・転がり抵抗・加減速の上限が同定の対象。加速の上限2.8・減速の上限2.5は
     # ファームのランプ3.0より低い＝観測できる側（観測できない真値は `test_fit` で別に見る）
-    # ★ Kp/Ki はここで決め打ちしない（`vehicle.toml` の値＝ファームの定数をそのまま使う）。解析は
-    #   toml の Kp/Ki を既知として当てはめるので、真値だけ別の値だと車体の利得が Kp の比だけ
-    #   ずれて出る（0.25/0.5 を決め打ちすると 0.3/0.6 のとき利得 22 → 18.4 と出た）
+    # ★ Kp/Ki は真値の利得から極配置で導く（`_truth_speed_pi`）。解析は記録に残した Kp/Ki を既知として
+    #   当てはめるので、真値の車が実機の toml のゲインで走ると、利得が Kp の比だけずれて出る
     speed_torque_max_nm=0.30, speed_ramp_max_m_s2=3.0,
-    speed_plant_gain=22.0, rolling_resistance=0.3,
+    speed_plant_gain=22.0, rolling_resistance=0.3, **_truth_speed_pi(22.0),
     drive_accel_m_s2=2.8, drive_fade_speed_m_s=1.3, drive_top_speed_m_s=4.5,
     brake_decel_m_s2=3.9, speed_decel_m_s2=2.5,
     # 制動トルク→減速度の傾き（名目 33 とわざとずらす）。0.04・0.08N·m の段は直線、0.12・0.15 は

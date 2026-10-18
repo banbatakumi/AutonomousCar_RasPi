@@ -43,7 +43,8 @@ class TestPlantRecovery(unittest.TestCase):
             self.assertAlmostEqual(p.dead_s + p.lag_s, dead + tau, delta=sp.DEAD_TIME_UNCERTAINTY_S)
 
     def test_analyze_reports_gains(self):
-        res = sp.analyze(_record(0.004, 0.012, seed=1), DEFAULT_SPEC_PATH)
+        # ② の値は toml から取らず固定する（⑤ を実機で適用すると toml の利得が変わり、真値 22 との差が警告になる）
+        res = sp.analyze(_record(0.004, 0.012, seed=1), DEFAULT_SPEC_PATH, base_gain=21.5, base_rr=0.27)
         self.assertEqual(set(res.values), {"speed_plant_gain", "rolling_resistance"})
         self.assertEqual(res.warnings, [])
         self.assertTrue(any("ωn の上限" in n for n in res.notes))

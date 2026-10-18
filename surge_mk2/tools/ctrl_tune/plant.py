@@ -143,6 +143,10 @@ def variants(base: Plant, seeds: int = 1) -> list[tuple[str, Plant]]:
             (f"高μ×1.4{tag}", replace(b, mu=b.mu * 1.4)),
             (f"ピークのあるタイヤ{tag}", replace(b, tyre_c=1.6)),
             (f"平らなタイヤ{tag}", replace(b, tyre_c=1.0)),
+            # スリップ剛性 B は TC・ABS のループの利得そのもの。同定の不確かさ（Ⓑ の保持区間でも±数十%）
+            # に対してゲインが壊れないよう、両側に振る
+            (f"柔らかいタイヤ(B×0.5){tag}", replace(b, tyre_b=max(b.tyre_b * 0.5, 2.0))),
+            (f"硬いタイヤ(B×2){tag}", replace(b, tyre_b=min(b.tyre_b * 2.0, 80.0))),
             (f"慣性×0.5{tag}", replace(b, wheel_inertia_kgm2=b.wheel_inertia_kgm2 * 0.5)),
             (f"慣性×2{tag}", replace(b, wheel_inertia_kgm2=b.wheel_inertia_kgm2 * 2.0)),
             (f"MDが遅い{tag}", replace(b, md_delay_s=b.md_delay_s + 0.004, md_tau_s=b.md_tau_s * 3.0)),

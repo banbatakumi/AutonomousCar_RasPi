@@ -93,7 +93,9 @@ class TestWheel(unittest.TestCase):
         self.assertTrue(seen_brake)
         self.assertLessEqual(max(seen_torque), 0.02)       # 浮いた輪はわずかなトルクで吹け上がる
         self.assertEqual(st.fw_overrides.get("tc_enable"), 0.0)
-        self.assertNotIn("wheel_lift_guard_enable", st.fw_overrides)   # 周速の上限は残す
+        # 素の車輪を測る: トルクに手を入れうるものは全部切る（空中の左右の個体差で片輪浮き対策が誤作動する）
+        self.assertEqual(st.fw_overrides.get("abs_enable"), 0.0)
+        self.assertEqual(st.fw_overrides.get("wheel_lift_guard_enable"), 0.0)
 
     def test_aborts_when_the_car_moves(self):
         """前輪が回った＝後輪が接地している。すぐ止める。"""

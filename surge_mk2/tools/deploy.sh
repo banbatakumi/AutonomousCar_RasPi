@@ -4,6 +4,7 @@
 #   tools/deploy.sh                  # GUI をビルドして rsync（これが既定・いちばん安全）
 #   tools/deploy.sh --no-gui         # Python だけ直したとき（npm を回さない）
 #   tools/deploy.sh --test           # 反映後に Pi 上でユニットテストを回す
+#   tools/deploy.sh --no-prune       # Mac に無くなった .py を Pi から消さない（既定は消す）
 #   tools/deploy.sh --services       # ★ systemd unit を入れ直す（--max-speed 等を変えたとき）
 #   tools/deploy.sh --restart-io     # ★★ surge-io を再起動する（E-Stop がラッチする）
 #
@@ -38,6 +39,9 @@ RUN_TEST=0
 DO_SERVICES=0
 DO_RESTART_IO=0
 DO_RESTART=0
+PRUNE=1
+#: 一度に消してよい古い .py の数の上限（環境変数で変える）。超えたら消さずに止める
+PRUNE_MAX=${SURGE_PRUNE_MAX:-30}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,6 +50,7 @@ while [ $# -gt 0 ]; do
     --services)   DO_SERVICES=1 ;;
     --restart-io) DO_RESTART_IO=1 ;;
     --restart)    DO_RESTART=1 ;;
+    --no-prune)   PRUNE=0 ;;
     -h|--help)    sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "知らない引数: $1（--help）" >&2; exit 2 ;;
   esac
@@ -117,16 +122,36 @@ rsync -az --stats \
   -e "$RSYNC_SSH" \
   "$ROOT/" "$HOST:$DEST" || exit 1
 
-# 全体には `--delete` を掛けない（Pi にだけある状態・記録を消さないため）。その代わり、Mac で消した・
-# 名前を変えた `.py` が Pi に残っていないかを見て知らせる。`raspi/auto/` に残った planner は
-# 起動時に拾われて GUI に出続ける
-STALE=$(comm -13 \
-  <(find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' | sort) \
-  <(ssh_pi "cd $DEST && find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' 2>/dev/null | sort"))
+# 全体には `--delete` を掛けない（Pi にだけある状態・記録を消さないため）。代わりに、Mac で消した・
+# 名前を変えた `.py` だけを Pi からも消す。残すと、古いテストが `unittest discover` を落とし、
+# 古いモジュールが import できてしまう。**消すのは `raspi sim slam2d tools config` 配下の `.py` だけ**
+# （設定の json・地図・モデル・記録は検出に入らない）。
+# 数が `PRUNE_MAX` を超えたら、別ブランチや空の作業ツリーから反映した事故を疑って消さずに止める。
+# `comm` は並びが揃っていないと別のファイルを「片側にだけある」と数える。macOS と Pi で `sort` の並びが
+# 違う（`_` の位置）ので、どちらも `LC_ALL=C` に固定する
+STALE=$(LC_ALL=C comm -13 \
+  <(find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' | LC_ALL=C sort) \
+  <(ssh_pi "cd $DEST && find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort"))
 if [ -n "$STALE" ]; then
+  N_STALE=$(printf '%s\n' "$STALE" | wc -l | tr -d ' ')
   echo
-  echo "!! Mac に無い .py が Pi に残っている（消していない。不要なら Pi で消すこと）:"
-  echo "$STALE" | sed 's/^/     /'
+  if [ "$PRUNE" != 1 ]; then
+    echo "!! Mac に無い .py が Pi に残っている（--no-prune のため消していない）: ${N_STALE} 個"
+    printf '%s\n' "$STALE" | sed 's/^/     /'
+  elif [ "$N_STALE" -gt "$PRUNE_MAX" ]; then
+    echo "!! Mac に無い .py が Pi に ${N_STALE} 個ある（上限 ${PRUNE_MAX} を超えたので消さない）。" >&2
+    echo "   別のブランチ・古い作業ツリーから反映していないか確かめること。本当に不要なら SURGE_PRUNE_MAX を上げて再実行。" >&2
+    printf '%s\n' "$STALE" | head -10 | sed 's/^/     /' >&2
+    exit 1
+  elif printf '%s\n' "$STALE" | grep -qvE '^(raspi|sim|slam2d|tools|config)/[A-Za-z0-9_./-]+\.py$' || \
+       printf '%s\n' "$STALE" | grep -qF '..'; then
+    echo "!! 想定外のパスが含まれているので消さない:" >&2
+    printf '%s\n' "$STALE" | sed 's/^/     /' >&2
+    exit 1
+  else
+    echo "# Mac に無くなった .py を Pi から消す（${N_STALE} 個）"
+    printf '%s\n' "$STALE" | ssh_pi "cd $DEST && xargs -d '\n' rm -v --" | sed 's/^/     /' || exit 1
+  fi
 fi
 
 # `gui/dist` だけは --delete する。ビルドごとにファイル名のハッシュが変わるので、

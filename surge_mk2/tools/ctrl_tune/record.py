@@ -180,10 +180,11 @@ def _vehicle_state(o: np.ndarray, t_ns: int) -> VehicleState:
 
 
 def simulate(fw: Firmware, plant: Plant, planner, params: dict[str, float] | None = None,
-             max_s: float = 90.0, lifted: bool = False) -> Rec:
+             max_s: float = 90.0, lifted: bool = False, mu_scale: tuple[float, float] = (1.0, 1.0)) -> Rec:
     """`planner`（`raspi/auto` の `Planner`）を車両モデルと閉ループで回し、記録を返す。
 
-    `lifted` は後輪を両方とも浮かせた状態（路面μをほぼ 0 にし、車体は動かない）。
+    `lifted` は後輪を両方とも浮かせた状態（路面μをほぼ 0 にし、車体は動かない）。`mu_scale` は左右の後輪の路面μの倍率
+    （左右でグリップが違う車）。
     planner が「完了」と言ってから 0.3s で終える。
     """
     cfg = HostConfig(dt_s=DT, substeps=SUBSTEPS, tc_enabled=1, abs_enabled=1, wheel_lift_guard_enabled=1,
@@ -194,7 +195,7 @@ def simulate(fw: Firmware, plant: Plant, planner, params: dict[str, float] | Non
     on_vs = getattr(planner, "on_vehicle_state", None)
     mu = 1e-4 if lifted else 1.0
     row = np.zeros(len(IN))
-    row[[IN["mode"], IN["mu_left"], IN["mu_right"], IN["front_scale"]]] = (MODE_DISARM, mu, mu, 1.0)
+    row[[IN["mode"], IN["mu_left"], IN["mu_right"], IN["front_scale"]]] = (MODE_DISARM, mu * mu_scale[0], mu * mu_scale[1], 1.0)
     row[IN["test_moment"]] = 0.0
     pending: list[tuple[int, np.ndarray, dict]] = []      # (効き始める TELEMETRY の番号, 入力, 上書き)
     applied_ov: dict[str, float] = {}

@@ -16,8 +16,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
-import onnx  # noqa: E402
-from onnx import TensorProto, helper  # noqa: E402
+try:
+    import onnx  # noqa: E402
+    from onnx import TensorProto, helper  # noqa: E402
+except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの道具。Pi には入れない（実行は onnxruntime）
+    raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402

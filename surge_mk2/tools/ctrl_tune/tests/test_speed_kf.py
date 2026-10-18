@@ -61,9 +61,12 @@ class TestSpeedKf(unittest.TestCase):
         恒等の校正（既定）は従来どおり（ファームの `lib/encoder_cal` を前輪の読みの経路で通す）。"""
         plant = replace(REAL_FRONT, front_ripple=0.06, front_ripple_2x=1, front_absolute_angle=1)
         sc = _scenario("cruise_turn")
-        raw = _rmse(S.run(self.fw, plant, sc).out)
-        cal = _rmse(S.run(self.fw, plant, sc, plant.encoder_cal_params()).out)
-        clean = _rmse(S.run(self.fw, replace(plant, front_ripple=0.0), sc).out)
+        # toml の enc_* は実機の校正が入っている（恒等でない）ので、校正なし・ありとも全部を明示する
+        ident = {f"enc_{side}_{k}": (1.0 if k == "hi" else 0.0)
+                 for side in ("left", "right") for k in ("lo", "hi", "h1s", "h1c", "h2s", "h2c")}
+        raw = _rmse(S.run(self.fw, plant, sc, ident).out)
+        cal = _rmse(S.run(self.fw, plant, sc, {**ident, **plant.encoder_cal_params()}).out)
+        clean = _rmse(S.run(self.fw, replace(plant, front_ripple=0.0), sc, ident).out)
         self.assertLess(cal, 0.5 * raw, f"校正なし {1e3 * raw:.2f} → 校正 {1e3 * cal:.2f}mm/s")
         self.assertLess(cal, clean * 1.3 + 2e-4, f"周期誤差なし {1e3 * clean:.2f}mm/s")
 

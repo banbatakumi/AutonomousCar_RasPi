@@ -191,62 +191,193 @@ def fit_wheel(rec: Rec, base: Plant) -> FitResult:
 
 # ── Ⓑ タイヤの前後力 ──────────────────────────────────────────────────────
 
-def _tyre_samples(rec: Rec, base: Plant):
-    """記録 → (スリップ率, 前後力 [N], 前後加速度) を両輪ぶん。"""
-    dt = _dt(rec)
-    # 車速は STM32 の KF の出力（TC・ABS が実機で見ているものと同じ）。走行距離の微分は周期誤差が乗る
+#: 一定トルクとみなす最短の長さ [s]、頭の捨てる時間 [s]（MD のトルクと車速の推定が落ち着くまで）、トルクの許容差 [N·m]
+HOLD_MIN_S = 0.22
+HOLD_SKIP_S = 0.10
+HOLD_TORQUE_TOL = 0.002
+#: 保持区間として使うスリップ率の上限（これより滑っていたら暴走中で、定常ではない）と、区間内のばらつきの上限
+HOLD_MAX_KAPPA = 0.6
+HOLD_MAX_KAPPA_STD = 0.15
+#: 転がり中の後輪周速/車速の校正の残り [スリップ率]、暴走区間の1サンプルのスリップ率の不確かさ、力の不確かさ [N]
+SIGMA_K_SCALE = 0.003
+SIGMA_K_SAMPLE = 0.03
+SIGMA_F_HOLD = 0.12
+SIGMA_F_SAMPLE = 0.3
+#: B（スリップ剛性）の対数の標準誤差がこれを超えたら「決まっていない」（0.5 ≒ 約1.6倍の幅）
+B_MAX_LOG_SE = 0.5
+#: 保持区間の点がこれ未満なら B は決まらない
+MIN_HOLD_POINTS = 8
+
+
+def _rear_ratio(rec: Rec, accel: np.ndarray):
+    """転がり中（トルクなし・制動なし・ほぼ定速）の 後輪周速/車速 を左右別に。スリップ率の原点の校正に使う。
+
+    後輪の周速は MD の角速度に車輪の半径を掛けたもので、車速は前輪（校正済み）から。左右の半径や
+    エンコーダの個体差で 2% ほどずれる（2026-10-18 の実機: 左 0.996・右 1.017）。小スリップ領域では
+    このずれがスリップ率そのものと同じ大きさになる。
+    """
     v = rec.speed
-    accel = savgol_filter(v, 11, 2, deriv=1, delta=dt)
-    active = (rec.torque_mode | rec.brake) & (v > 0.35)
-    kappas, forces, accels = [], [], []
-    for speed, cmd in ((rec.wheel_left, rec.torque_left), (rec.wheel_right, rec.torque_right)):
-        # 記録の周速はローパスで遅れている。その分だけ先の値がその瞬間の値
+    roll = (~rec.torque_mode) & (~rec.brake) & (v > 0.3) & (np.abs(accel) < 0.15)
+    out = []
+    for w in (rec.wheel_left, rec.wheel_right):
+        r = w[roll] / v[roll]
+        out.append(float(np.mean(r)) if len(r) >= 20 else None)
+    return None if None in out else (out[0], out[1])
+
+
+def _hold_runs(rec: Rec, dt: float):
+    """トルク指令が一定の区間 `(輪, 始め, 終わり)`（頭の `HOLD_SKIP_S` を捨てたあと）。"""
+    runs = []
+    active = rec.torque_mode | rec.brake
+    v = rec.speed
+    n = len(v)
+    skip = int(round(HOLD_SKIP_S / dt))
+    for side, cmd in enumerate((rec.torque_left, rec.torque_right)):
+        i = 0
+        while i < n:
+            if not active[i] or abs(cmd[i]) < 0.01 or v[i] < 0.35:
+                i += 1
+                continue
+            j = i
+            while (j + 1 < n and active[j + 1] and rec.brake[j + 1] == rec.brake[i] and v[j + 1] >= 0.35
+                   and abs(cmd[j + 1] - cmd[i]) < HOLD_TORQUE_TOL):
+                j += 1
+            if (j - i + 1) * dt >= HOLD_MIN_S and j + 1 - (i + skip) >= 8:
+                runs.append((side, i + skip, j + 1))
+            i = j + 1
+    return runs
+
+
+def _tyre_data(rec: Rec, base: Plant, ratio, accel: np.ndarray):
+    """記録 → 当てはめに使う点: 輪(0=左,1=右)・スリップ率（校正済み）・前後力 [N]・前後加速度・σκ・σF・保持区間か。
+
+    力はすべて**トルク指令の尺度**（トルクから車輪の慣性・摩擦を引いて半径で割った値）。シム（ctrl_tune）は
+    トルク指令をそのまま使い、Ⓐ で求めた慣性・摩擦も指令の尺度の値なので、タイヤの力も同じ尺度で表す。
+
+    - **保持区間**（限界の下の一定トルク）は、区間の平均を1輪ごとに1点にする。スリップ率が定常なので平均でき
+      （誤差 0.003 前後）、B が決まる
+    - **暴走区間**（空転・ロックまで上げた所）は1サンプルずつ。上限（μ）と限界の先の形に効くが、
+      スリップ率の誤差が大きい（σκ 0.03）
+
+    左右に同じトルクを掛けても、左右のグリップは同じではない（2026-10-18 の実機で、同じトルクで左だけが
+    先に限界に達した）ので、輪ごとの点のまま持つ。
+    """
+    dt = _dt(rec)
+    v = rec.speed
+    rl, rr_ = ratio if ratio is not None else (1.0, 1.0)
+    W, K, F, A, SK, SF, H = [], [], [], [], [], [], []
+    kappas, forces = {}, {}
+    for side, (speed, cmd, r) in enumerate(((rec.wheel_left, rec.torque_left, rl), (rec.wheel_right, rec.torque_right, rr_))):
         omega = np.interp(rec.t + REAR_OBS_TAU_S, rec.t, speed) / WHEEL_RADIUS_M
         omega_dot = savgol_filter(omega, 5, 2, deriv=1, delta=dt)
         torque = _md_torque(cmd, omega, dt, base.md_tau_s, base.md_delay_s)
-        force = (torque - base.wheel_inertia_kgm2 * omega_dot
-                 - base.wheel_friction_nm * np.tanh(omega)) / WHEEL_RADIUS_M
-        kappa = (omega * WHEEL_RADIUS_M - v) / np.maximum(np.abs(v), base.slip_speed_floor_m_s)
-        m = active & (np.abs(cmd) > 0.03)
-        kappas.append(kappa[m])
-        forces.append(force[m])
-        accels.append(accel[m])
-    return np.concatenate(kappas), np.concatenate(forces), np.concatenate(accels)
+        force = (torque - base.wheel_inertia_kgm2 * omega_dot - base.wheel_friction_nm * np.tanh(omega)) / WHEEL_RADIUS_M
+        kappa = (omega * WHEEL_RADIUS_M / r - v) / np.maximum(np.abs(v), base.slip_speed_floor_m_s)
+        kappas[side], forces[side] = kappa, force
+        active = (rec.torque_mode | rec.brake) & (v > 0.35) & (np.abs(cmd) > 0.03)
+        n = int(active.sum())
+        W.append(np.full(n, side)); K.append(kappa[active]); F.append(force[active]); A.append(accel[active])
+        SK.append(np.full(n, SIGMA_K_SAMPLE)); SF.append(np.full(n, SIGMA_F_SAMPLE)); H.append(np.zeros(n, dtype=bool))
+    runs = _hold_runs(rec, dt)
+    n_hold = 0
+    for side, i0, i1 in runs:
+        k = kappas[side][i0:i1]
+        if abs(float(np.mean(k))) > HOLD_MAX_KAPPA or float(np.std(k)) > HOLD_MAX_KAPPA_STD:
+            continue
+        se = float(np.std(k)) / math.sqrt(max((i1 - i0) / 3.0, 1.0))
+        W.append(np.array([side])); K.append(np.array([float(np.mean(k))]))
+        F.append(np.array([float(np.mean(forces[side][i0:i1]))])); A.append(np.array([float(np.mean(accel[i0:i1]))]))
+        SK.append(np.array([math.hypot(se, SIGMA_K_SCALE)])); SF.append(np.array([SIGMA_F_HOLD])); H.append(np.array([True]))
+        n_hold += 1
+    # 診断: 車体の加速度から出した力（後輪2つの平均）÷ トルク由来の力。1より大きければ MD の実トルクが指令より大きい
+    left = [(a, b) for sd, a, b in runs if sd == 0]
+    right = [(a, b) for sd, a, b in runs if sd == 1]
+    f_body_sum = f_torque_sum = 0.0
+    for a0, a1 in left:
+        for b0, b1 in right:
+            lo, hi = max(a0, b0), min(a1, b1)
+            if hi - lo >= max(8, 0.7 * (a1 - a0)):
+                a_m = float(np.mean(accel[lo:hi]))
+                sgn = 1.0 if float(np.mean(v[lo:hi])) >= 0 else -1.0
+                f_body_sum += abs(0.5 * base.mass_kg * (a_m + sgn * base.rolling_decel_m_s2))
+                f_torque_sum += abs(0.5 * (float(np.mean(forces[0][lo:hi])) + float(np.mean(forces[1][lo:hi]))))
+    rho = f_body_sum / f_torque_sum if f_torque_sum > 1e-6 else 1.0
+    cat = np.concatenate
+    return cat(W), cat(K), cat(F), cat(A), cat(SK), cat(SF), cat(H), n_hold, rho
 
 
 def fit_tyre(rec: Rec, base: Plant) -> FitResult:
     out = FitResult({})
-    kappa, force, accel = _tyre_samples(rec, base)
+    dt = _dt(rec)
+    accel = savgol_filter(rec.speed, 11, 2, deriv=1, delta=dt)
+    ratio = _rear_ratio(rec, accel)
+    if ratio is None:
+        out.warn("転がり区間（トルクなし・ほぼ定速）が取れず、後輪周速の個体差を校正できない（スリップ率の原点がずれる）")
+    side, kappa, force, accel_s, sig_k, sig_f, is_hold, n_hold, rho = _tyre_data(rec, base, ratio, accel)
     if len(kappa) < 50:
         out.warn("駆動・制動の区間がほとんどありません")
         return out
-    drive_max, brake_min = float(np.max(kappa)), float(np.min(kappa))
+    runaway = ~is_hold
+    drive_max, brake_min = float(np.max(kappa[runaway])), float(np.min(kappa[runaway]))
     both = drive_max > 0.3 and brake_min < -0.3
+    is_right = side == 1
 
-    def model(x, kappa=kappa, accel=accel):
-        mu, lt, log_b, c = x
-        fz = np.maximum(base.fz_static_n + lt * base.mass_kg * accel * 0.5, 0.0)
-        return mu * fz * np.sin(c * np.arctan(math.exp(log_b) * kappa))
+    fz0 = base.fz_static_n
+    f_roll = base.wheel_friction_nm / WHEEL_RADIUS_M
+
+    def parts(x):
+        mu_l, mu_r, lt, log_b, c = x
+        mu = np.where(is_right, mu_r, mu_l)
+        b = math.exp(log_b)
+        # 転がり中でもタイヤは軸受の摩擦ぶんの力を出している。校正は「転がり中を原点」にするので、その分を足す
+        ratio_roll = np.minimum(f_roll / np.maximum(mu * fz0, 1e-6), 0.95)
+        k_roll = np.tan(np.arcsin(ratio_roll) / c) / b
+        k = kappa + k_roll
+        fz = np.maximum(fz0 + lt * base.mass_kg * accel_s * 0.5, 0.0)
+        th = np.arctan(b * k)
+        model = mu * fz * np.sin(c * th)
+        dk = mu * fz * c * b * np.cos(c * th) / (1.0 + (b * k) ** 2)
+        return model, dk
+
+    def resid(x):
+        model, dk = parts(x)
+        return (model - force) / np.sqrt(sig_f ** 2 + (dk * sig_k) ** 2)
 
     # 荷重移動は駆動と制動の上限の差から決まる。片方しか限界に届いていなければ机上値のまま
     lt_lo, lt_hi = (0.0, 0.6) if both else (base.load_transfer - 1e-9, base.load_transfer + 1e-9)
     best = None
     for c0 in (1.05, 1.3, 1.6):
         for b0 in (8.0, 25.0):
-            r = least_squares(lambda x: model(x) - force,
-                              [base.mu, min(max(base.load_transfer, lt_lo), lt_hi), math.log(b0), c0],
-                              bounds=([0.1, lt_lo, math.log(2.0), 1.0], [2.0, lt_hi, math.log(80.0), 1.9]),
-                              loss="soft_l1", f_scale=0.3)
+            r = least_squares(resid, [base.mu, base.mu, min(max(base.load_transfer, lt_lo), lt_hi), math.log(b0), c0],
+                              bounds=([0.1, 0.1, lt_lo, math.log(2.0), 1.0], [2.0, 2.0, lt_hi, math.log(150.0), 1.9]),
+                              loss="soft_l1", f_scale=2.0)
             if best is None or r.cost < best.cost:
                 best = r
-    mu, lt, log_b, c = best.x
-    rms = float(np.sqrt(np.mean((model(best.x) - force) ** 2)))
-    peak_slip = math.tan(math.pi / (2.0 * c)) / math.exp(log_b) if c > 1.0 else float("inf")
+    mu_l, mu_r, lt, log_b, c = best.x
+    mu = math.sqrt(mu_l * mu_r)
+    b = math.exp(log_b)
+    model, _ = parts(best.x)
+    rms = float(np.sqrt(np.mean((model - force) ** 2)))
+    # B の不確かさ: 当てはめのヤコビアンから（正規化残差の自乗平均が1を超えたぶんは広げる）
+    chi2 = float(np.mean(resid(best.x) ** 2))
+    cov = np.linalg.pinv(best.jac.T @ best.jac) * max(chi2, 1.0)
+    se_log_b = math.sqrt(max(float(cov[3, 3]), 0.0))
+    peak_slip = math.tan(math.pi / (2.0 * c)) / b if c > 1.0 else float("inf")
     drop = 1.0 - math.sin(c * math.pi / 2.0) if c > 1.0 else 0.0
-    out.notes.append(f"μ {mu:.3f}・荷重移動 {lt:.3f}・傾き B {math.exp(log_b):.1f}・形 C {c:.2f}"
-                     f"（残差 {rms:.2f}N、{len(kappa)}点、スリップ率 {brake_min:+.2f}〜{drive_max:+.2f}）")
-    out.notes.append(f"前後力の上限: 駆動 約{mu * (base.fz_static_n + lt * base.mass_kg * 1.7):.1f}N・"
-                     f"制動 約{mu * (base.fz_static_n - lt * base.mass_kg * 1.6):.1f}N（後輪1つ）。"
+    out.notes.append(f"傾き B {b:.1f}（±{(math.exp(se_log_b) - 1) * 100:.0f}%）・形 C {c:.2f}・荷重移動 {lt:.3f}"
+                     f"・μ 左 {mu_l:.3f}／右 {mu_r:.3f}（残差 {rms:.2f}N、{len(kappa)}点うち保持区間 {n_hold}、"
+                     f"スリップ率 {brake_min:+.2f}〜{drive_max:+.2f}）")
+    if max(mu_l, mu_r) / min(mu_l, mu_r) > 1.4:
+        out.notes.append(f"左右のグリップが違う（μ の比 {max(mu_l, mu_r) / min(mu_l, mu_r):.2f}）——同じトルクでも弱い輪が先に滑る。"
+                         "車両モデルには左右の平均（幾何平均）μ を入れ、最適化は μ×0.6・×1.4 の場面で両側を見る")
+    if n_hold:
+        out.notes.append(f"力の尺度（診断）: 車体の加速度から出した力 ÷ トルクから逆算した力 = {rho:.2f}"
+                         "（1より大きいほど MD の実トルクが指令より大きい）")
+    if ratio is not None:
+        out.notes.append(f"後輪周速/車速（転がり中）: 左 {ratio[0]:.4f}・右 {ratio[1]:.4f}（スリップ率の原点を合わせた）")
+    fz_d, fz_b = fz0 + lt * base.mass_kg * 1.7, fz0 - lt * base.mass_kg * 1.6
+    out.notes.append(f"前後力の上限（後輪1つ）: 駆動 左 約{mu_l * fz_d:.1f}N・右 約{mu_r * fz_d:.1f}N、"
+                     f"制動 左 約{mu_l * fz_b:.1f}N・右 約{mu_r * fz_b:.1f}N。"
                      + (f"力が最大になるスリップ率 {peak_slip:.2f}、滑らせ切ると {drop * 100:.0f}% 落ちる"
                         if peak_slip < 2.0 else "滑らせても力がほとんど落ちない形"))
     if drive_max <= 0.3:
@@ -257,15 +388,23 @@ def fit_tyre(rec: Rec, base: Plant) -> FitResult:
         out.warn("TC・ABS・片輪浮き対策が介入しています（試験が切るはずのものが切れていない。左右のトルク指令が食い違った）")
     if rms > 1.0:
         out.warn(f"残差が大きい（{rms:.1f}N）——車輪の慣性（Ⓐ）が合っていない可能性")
+    if n_hold < MIN_HOLD_POINTS:
+        out.warn(f"限界の下で一定トルクを保った区間が{n_hold}個しか取れていません（{MIN_HOLD_POINTS}個以上要る）——"
+                 "スリップ剛性 B は決まりません（古い手順の記録か、保つ往復が途中で終わった）")
+    elif se_log_b > B_MAX_LOG_SE:
+        out.warn(f"スリップ剛性 B の不確かさが大きい（±{(math.exp(se_log_b) - 1) * 100:.0f}%）——保持区間のスリップ率が"
+                 "小さすぎて原点のずれと区別できない可能性（転がり区間の校正・車速の誤差を確かめる）")
     # 探索範囲の端に張り付いた値は「求まった」のではなく「範囲で止められた」
-    for name, val, lo, hi in (("形 C", c, 1.0, 1.9), ("傾き B", math.exp(log_b), 2.0, 80.0),
-                              ("μ", mu, 0.1, 2.0)):
+    # 形 C の下限 1.0 は「ピークがなく、滑らせても力が落ちない」という物理的な端なので警告しない
+    # （注記に「滑らせても力がほとんど落ちない形」と出る）。上限は警告する
+    for name, val, lo, hi in (("形 C", c, 0.0, 1.9), ("傾き B", b, 2.0, 150.0), ("μ（左）", mu_l, 0.1, 2.0),
+                              ("μ（右）", mu_r, 0.1, 2.0)):
         if val <= lo * 1.001 + 1e-9 or val >= hi * 0.999:
-            out.warn(f"{name} が探索範囲の端（{lo:g}〜{hi:g}）に張り付いた（{val:.3g}）——値は信用できない。"
+            out.warn(f"{name} が探索範囲の端（{max(lo, 1.0) if name == '形 C' else lo:g}〜{hi:g}）に張り付いた（{val:.3g}）——値は信用できない。"
                      "記録がモデルの形（sin(C·atan(B·κ))）から外れている")
     if both and (lt <= 1e-3 or lt >= 0.6 * 0.999):
         out.warn(f"荷重移動が探索範囲の端（0〜0.6）に張り付いた（{lt:.3f}）")
-    out.values = {"mu": float(mu), "tyre_b": float(math.exp(log_b)), "tyre_c": float(c)}
+    out.values = {"mu": float(mu), "tyre_b": float(b), "tyre_c": float(c)}
     if both:
         out.values["load_transfer"] = float(lt)
     return out
