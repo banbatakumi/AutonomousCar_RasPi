@@ -316,13 +316,6 @@ enc_right_h1s = 0.0
 enc_right_h1c = 0.0
 enc_right_h2s = 0.0
 enc_right_h2c = 0.0
-# ── 車輪の有効転がり半径 [m]（★v0.27。**校正の結果**。同じ試験の解析が書く）──
-# 名目は最上位の wheel_radius（直径 60mm の幾何）。ゴムタイヤは荷重でつぶれるので実際は数%小さい。前輪は車速・
-# 走行距離の倍率、後輪はスリップ率の基準（前輪との比）を決める。下の値は名目のまま（未校正）
-front_radius_left_m = 0.030
-front_radius_right_m = 0.030
-rear_radius_left_m = 0.030
-rear_radius_right_m = 0.030
 # ── 車速のカルマンフィルタの調整値（★v0.27。STM32 `src/control/speed_kf.h`）──
 # 下の値は v0.26 の固定値（一部は 2026-10-16・17 の記録1本から決めた経験値。`docs/control_constants.md`）。
 # **記録から推定して書き直す**: `python -m tools.sysid.kf_tune <mcap...>`（走行の記録を複数。エンコーダの校正を

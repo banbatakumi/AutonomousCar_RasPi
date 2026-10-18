@@ -28,7 +28,7 @@ LINK_KEYS = toml_update.LINK_KEYS
 #: 当てはめる（`GEOMETRY`）。速度応答と加減速は前後運動試験（加速度の
 #: 違う段を走る）1つで測る
 #: ⓪ エンコーダ校正は `[control]`（STM32 へ送る校正）を求める。**①〜④はその校正を STM32 に入れてから録る**
-#: （車速・走行距離が真の値になってから。校正前の記録は走行距離の倍率が名目の半径のぶんずれている）
+#: （車速の1回転ごとのうねりが消えてから。校正前の記録は Pi 側の `fit.correct_encoder_ripple` が記録ごとに補正する）
 TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("encoder", "⓪ エンコーダ校正", encoder_cal.CONTROL_KEYS),
     ("steer", "① ステア試験", ("tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s",

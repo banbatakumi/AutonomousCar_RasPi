@@ -56,9 +56,8 @@ CONTROL_PARAM_IDS: dict[str, int] = {
         "TV_LOAD_GAIN_S2_PER_M", "TV_MAX_RATIO", "TV_TEST_MOMENT_NM",
         "STEER_LINK_GAIN", "STEER_LINK_CUBIC", "LAUNCH_EXIT_TORQUE_NM",
         "SPEED_FF_NM_PER_M_S2", "SPEED_FF_RR_NM", "SPEED_KP", "SPEED_KI",
-        # ★v0.27: 前輪エンコーダの校正・車輪の有効半径・車速のカルマンフィルタ
+        # ★v0.27: 前輪エンコーダの校正・車速のカルマンフィルタ
         *(f"ENC_{side}_{k}" for side in ("LEFT", "RIGHT") for k in ("LO", "HI", "H1S", "H1C", "H2S", "H2C")),
-        "FRONT_RADIUS_LEFT_M", "FRONT_RADIUS_RIGHT_M", "REAR_RADIUS_LEFT_M", "REAR_RADIUS_RIGHT_M",
         "KF_SIGMA_S_M", "KF_SIGMA_A_M_S2", "KF_SIGMA_A_PER_M_S", "KF_JERK_PSD", "KF_BIAS_WALK_PSD",
         "KF_LEVER_ARM_M")}
 

@@ -256,8 +256,8 @@ class SysIdApp(tk.Tk):
                "--restart-io。--restart では入りません）、io_node が STM32 へ送ります。"
                if any(k in toml_update.LINK_KEYS or k in toml_update.FF_KEYS or k in toml_update.CONTROL_RANGES
                       for k in changed) else "")
-            + ("\n\n★エンコーダの校正を変えたので、①〜④の試験は反映した後に録り直してください（車速・走行距離の"
-               "倍率が変わります）。" if control else ""),
+            + ("\n\n★エンコーダの校正を変えたので、①〜⑤の試験は反映した後に録り直してください（車速の1回転ごとの"
+               "うねりが変わります）。" if any(k.startswith("enc_") for k in control) else ""),
         )
 
 

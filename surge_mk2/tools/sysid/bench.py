@@ -37,13 +37,10 @@ import math
 import random
 from dataclasses import dataclass, replace
 
-import msgspec
 import numpy as np
 
 from raspi.auto.registry import PLANNERS
-from raspi.core.vehicle import Vehicle
 from raspi.msgs.types import Scan, VehicleState
-from raspi.nav.deskew import Points, deskew
 from sim.stm32 import ABS_MIN_SPEED_M_S
 from sim.vehicle import (GRAVITY_MPS2, DriveInput, SteerServo, VehicleModel, VehicleSpec, brake_decel,
                          drive_accel_limit)
@@ -200,20 +197,16 @@ def _scan(seq: int) -> Scan:
 
 @dataclass
 class EncoderTruth:
-    """前輪エンコーダと車輪半径の真値（エンコーダ校正試験のベンチ用）と、STM32 に入っている校正（`active_*`）。
+    """前輪エンコーダの真値（エンコーダ校正試験のベンチ用）と、STM32 に入っている校正（`active_cal`）。
 
     読み u = lo + (hi − lo)·frac((θ + e(θ))/2π)（`lib/encoder_cal` のモデルそのもの）。θ は取付向きの符号つき
-    （`mount`。左右で向きが逆の実装を想定）。STM32 は `active_cal` で角度に直し、`active_front` を掛けて
-    `odom_dist` にし、後輪の周速に `active_rear` を掛ける。既定の真値は名目・恒等とわざとずらしてある。"""
+    （`mount`。左右で向きが逆の実装を想定）。STM32 は `active_cal` で角度に直し、車輪の半径（実測値）を掛けて
+    `odom_dist` にする。既定の真値は恒等とわざとずらしてある。"""
 
     cal: tuple[Cal, Cal] = (Cal(lo=0.012, hi=0.985, h1s=0.012, h1c=-0.008, h2s=0.004, h2c=0.003),
                             Cal(lo=0.020, hi=0.970, h1s=0.030, h1c=0.018, h2s=-0.010, h2c=0.006))
     mount: tuple[float, float] = (1.0, -1.0)
-    front: tuple[float, float] = (0.0294, 0.0297)
-    rear: tuple[float, float] = (0.0291, 0.0293)
     active_cal: tuple[Cal, Cal] = (Cal(), Cal())
-    active_front: tuple[float, float] = (0.030, 0.030)
-    active_rear: tuple[float, float] = (0.030, 0.030)
     #: ADC を平均した後の読みのノイズ [rad]（1回転＝2π に対して）
     sigma_rad: float = 0.004
 
@@ -222,38 +215,6 @@ class EncoderTruth:
         th_m = theta + float(c.ripple(np.array(theta)))
         u = c.lo + (c.hi - c.lo) * ((th_m / (2 * math.pi)) % 1.0) + rng.gauss(0.0, self.sigma_rad) / (2 * math.pi)
         return round(min(max(u, 0.0), 1.0) * 4095.0) / 4095.0
-
-
-#: スキャンを作る部屋（壁と箱、世界座標 [m]）。車は原点から +x へ往復する。前後の壁が進む向きを、
-#: 左右の箱が横と回頭を拘束する
-_ROOM = np.array([
-    (-1.2, -1.5, 3.8, -1.5), (3.8, -1.5, 3.8, 1.8), (3.8, 1.8, -1.2, 1.8), (-1.2, 1.8, -1.2, -1.5),
-    (1.0, 1.2, 1.4, 1.2), (1.4, 1.2, 1.4, 1.8), (-0.8, -1.1, -0.4, -1.1), (-0.4, -1.1, -0.4, -1.5),
-    (2.5, -1.2, 2.9, -1.2), (2.5, -1.5, 2.5, -1.2),
-])
-
-
-def room_scan(x: float, y: float, yaw: float, veh: Vehicle, rng: random.Random, seq: int = 0) -> Scan:
-    """`_ROOM` を LiDAR から見たスキャン（車両角 0〜359°、LD06 の測距 σ ≈ 8mm＋0.3%×距離）。"""
-    c, s = math.cos(yaw), math.sin(yaw)
-    ox, oy = x + c * veh.lidar_x - s * veh.lidar_y, y + s * veh.lidar_x + c * veh.lidar_y
-    ang = yaw + np.radians(np.arange(360))
-    dx, dy = np.cos(ang)[:, None], np.sin(ang)[:, None]
-    ax, ay, bx, by = (_ROOM[:, k][None, :] for k in range(4))
-    ex, ey = bx - ax, by - ay
-    den = dx * ey - dy * ex
-    with np.errstate(divide="ignore", invalid="ignore"):
-        t = ((ax - ox) * ey - (ay - oy) * ex) / den
-        u = ((ax - ox) * dy - (ay - oy) * dx) / den
-    t = np.where((np.abs(den) > 1e-12) & (t > 0.02) & (u >= 0.0) & (u <= 1.0), t, np.inf)
-    r = t.min(axis=1)
-    r = np.where(np.isfinite(r), r + np.array([rng.gauss(0.0, 0.008 + 0.003 * v) if np.isfinite(v) else 0.0
-                                                for v in r]), 0.0)
-    return Scan(dist=[float(v) for v in r], sector_seen=[True] * 12, seq=seq)
-
-
-def room_points(scan: Scan, veh: Vehicle) -> Points:
-    return deskew(scan, 0.0, 0.0, mount_x=veh.lidar_x, mount_y=veh.lidar_y)
 
 
 def _q(x: float, lsb: float) -> float:
@@ -270,9 +231,8 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
     `speed_ff` は STM32 の車速PIの加速度フィードフォワード `(speed_ff_nm_per_m_s2, speed_ff_rr_nm)`
     （`[control]` の同名の値。実機は有効で走る）。記録（`Log.speed_ff`）にも同じ値が残る。
 
-    `encoder` を渡すと前輪エンコーダの生の読み（`front_angle`）・左右別の `odom_dist`・後輪の周速を
-    その真値から作り、部屋（`_ROOM`）のスキャンを点群にする。`capture`（dict）を渡すと、記録の素
-    （`vs`: `/vehicle_state` の dict、`cmd`: `/cmd` の dict、`scans`: `(測り終えた時刻, Scan)`、`poses`: 真の
+    `encoder` を渡すと前輪エンコーダの生の読み（`front_angle`）と左右別の `odom_dist` をその真値から作る。
+    `capture`（dict）を渡すと、記録の素（`vs`: `/vehicle_state` の dict、`cmd`: `/cmd` の dict、`poses`: 真の
     `(時刻, x, y, yaw, 左前輪の走行距離, 右前輪)`）をそこへ入れる（`encoder_record`・`write_encoder_mcap`）。
 
     `pre_s` だけ停止したまま記録してから試験を始める。ジャイロのバイアスを読む静止区間は
@@ -338,10 +298,8 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
     md_hist: list[tuple[float, float]] = []   # (時刻, 各輪のトルク指令) — MD のむだ時間用
     md_torque = 0.0                     # MD で効いているトルク（1次遅れの後）
     cmd_dicts: list[tuple[float, dict]] = []
-    scan_msgs: list[tuple[float, Scan]] = []
     poses: list[tuple[float, float, float, float, float, float]] = []   # 真の (t, x, y, yaw, 前輪 L, R)
     if encoder is not None:
-        geo = Vehicle.load()
         half_tf = 0.5 * truth.track
         wheel_s = [0.0, 0.0]            # 前輪の左右それぞれの真の走行距離 [m]
         prev_center, prev_yaw = 0.0, 0.0
@@ -383,7 +341,7 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
             prev_center, prev_yaw = veh.odom_front[0], veh.yaw
             for i in range(2):
                 wheel_s[i] += d_c + (-half_tf if i == 0 else half_tf) * d_psi
-                enc_u[i] = encoder.read(i, encoder.mount[i] * wheel_s[i] / encoder.front[i], rng)
+                enc_u[i] = encoder.read(i, encoder.mount[i] * wheel_s[i] / r_w, rng)
                 a_new = float(encoder.active_cal[i].angle(np.array(enc_u[i])))
                 fw_accum[i] += (a_new - fw_angle[i] + math.pi) % (2 * math.pi) - math.pi
                 fw_angle[i] = a_new
@@ -421,13 +379,8 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
                                    and brake_decel(veh.spec, veh.cmd, veh.speed)[1]),
             }
             if encoder is not None:
-                vs_dict["odom_dist"] = [_q(encoder.mount[i] * fw_accum[i] * encoder.active_front[i], 0.0001)
-                                        for i in range(2)]
+                vs_dict["odom_dist"] = [_q(encoder.mount[i] * fw_accum[i] * r_w, 0.0001) for i in range(2)]
                 vs_dict["front_angle"] = [_q((enc_u[i] * 2 * math.pi) % (2 * math.pi), 0.0001) for i in range(2)]
-                vr = [veh.speed + (-half_tf if i == 0 else half_tf) * veh.yaw_rate for i in range(2)]
-                vs_dict["wheel_speed"] = [0.0, 0.0] + [
-                    _q(vr[i] / encoder.rear[i] * encoder.active_rear[i] + rng.gauss(0, noise.rear_sigma), 0.001)
-                    for i in range(2)]
                 poses.append((now, veh.x, veh.y, veh.yaw, wheel_s[0], wheel_s[1]))
             t_cap = now + noise.clock_offset_s          # 時刻同期のずれ（Pi時刻に換算した値がずれる）
             vs_log.append((t_cap, vs_dict))
@@ -447,8 +400,6 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
             t_done = now + pipe.scan_rx_s
             t_pub = t_done + rng.uniform(*pipe.scan_proc_s)
             scans.append(ScanStamp(t_done=t_done, t_pub=t_pub, seq=seq))
-            if encoder is not None:
-                scan_msgs.append((t_done + noise.clock_offset_s, room_scan(veh.x, veh.y, veh.yaw, geo, rng, seq)))
             scan_meas_t[seq] = now
             plan_queue.append((t_pub + rng.uniform(*pipe.plan_s), seq))
 
@@ -541,7 +492,7 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
     log.speed_ff = (float(speed_ff[0]), float(speed_ff[1]))
     log.speed_pi = (truth.speed_kp, truth.speed_ki)
     if capture is not None:
-        capture.update(vs=vs_log, cmd=cmd_dicts, scans=scan_msgs, poses=poses)
+        capture.update(vs=vs_log, cmd=cmd_dicts, poses=poses)
     return log, space, latencies
 
 
@@ -654,14 +605,11 @@ def write_mcap(log: Log, path, t0_ns: int = 5_000_000_000) -> None:
                                      seq=sc.seq, sector_t_ns=[ns(sc.t_done)] * 12))
 
 
-def encoder_record(capture: dict, encoder: EncoderTruth):
+def encoder_record(capture: dict):
     """`run_test(..., encoder=, capture=)` の記録 → `encoder_cal.Record`（mcap を通さない）。"""
     from tools.sysid.encoder_cal import build_record
 
-    geo = Vehicle.load()
-    return build_record(capture["vs"], capture["cmd"],
-                        [(t, room_points(sc, geo)) for t, sc in capture["scans"]],
-                        rear_radius=encoder.active_rear)
+    return build_record(capture["vs"], capture["cmd"])
 
 
 def write_encoder_mcap(capture: dict, encoder: EncoderTruth, path, t0_ns: int = 5_000_000_000) -> None:
@@ -678,8 +626,6 @@ def write_encoder_mcap(capture: dict, encoder: EncoderTruth, path, t0_ns: int = 
     for i, side in enumerate(("left", "right")):
         c = encoder.active_cal[i]
         params.update({f"enc_{side}_{k}": float(getattr(c, k)) for k in ("lo", "hi", "h1s", "h1c", "h2s", "h2c")})
-        params[f"front_radius_{side}_m"] = encoder.active_front[i]
-        params[f"rear_radius_{side}_m"] = encoder.active_rear[i]
     with McapLog(path, t0_mono_ns=t0_ns, t0_unix_ns=1_700_000_000_000_000_000) as w:
         w.write("/diag/link", LinkDiag(t_capture=ns(0.0), protocol_version=PROTOCOL_VERSION,
                                        control_params_status="ok", control_params=params))
@@ -690,9 +636,6 @@ def write_encoder_mcap(capture: dict, encoder: EncoderTruth, path, t0_ns: int = 
                 front_angle=d.get("front_angle", [0.0, 0.0]), armed=True))
         for t, d in capture["cmd"]:
             w.write("/cmd", DriveCmd(t_capture=ns(t), t_pub=ns(t), **d))
-        for t, sc in capture["scans"]:
-            w.write("/scan", msgspec.structs.replace(sc, t_capture=ns(t - 0.1), t_pub=ns(t),
-                                                     sector_t_ns=[ns(t)] * 12))
 
 
 def reproduction_error(truth: VehicleSpec, model: VehicleSpec, seed: int = 0,

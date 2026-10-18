@@ -423,11 +423,6 @@ ENC_RIGHT_H1S             = 0x00CB
 ENC_RIGHT_H1C             = 0x00CC
 ENC_RIGHT_H2S             = 0x00CD
 ENC_RIGHT_H2C             = 0x00CE
-# 車輪の有効転がり半径 [m]（★v0.27）。前輪は車速・`odom_dist` の換算、後輪はスリップ率の基準。既定 0.030（名目）
-FRONT_RADIUS_LEFT_M       = 0x00D1
-FRONT_RADIUS_RIGHT_M      = 0x00D2
-REAR_RADIUS_LEFT_M        = 0x00D3
-REAR_RADIUS_RIGHT_M       = 0x00D4
 # 車速のカルマンフィルタの調整値（★v0.27。`speed_kf.h`）。既定は v0.26 の固定値と同じ
 KF_SIGMA_S_M              = 0x00E1  # 走行距離の測定ノイズ [m]
 KF_SIGMA_A_M_S2           = 0x00E2  # 加速度の測定ノイズ [m/s²]（車速 0 のとき）

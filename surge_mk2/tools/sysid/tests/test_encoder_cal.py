@@ -2,9 +2,9 @@
 
     cd surge_mk2 && .venv/bin/python -m pytest tools/sysid/tests/test_encoder_cal.py -q
 
-真値の分かっているベンチ（`bench.EncoderTruth`: 出力の範囲が全域でない・周期誤差 ±1.1°/±2.7°・前輪の半径が
-名目より 2%/1% 小さい・左右で取付の向きが逆）で試験を閉ループで回し、解析が真値を復元するか、復元した校正を
-STM32 に入れると走行距離が真の値になるかを見る。
+真値の分かっているベンチ（`bench.EncoderTruth`: 出力の範囲が全域でない・周期誤差 ±1.1°/±2.7°・左右で取付の
+向きが逆）で試験を閉ループで回し、解析が真値を復元するか、復元した校正を STM32 に入れると走行距離が真の値に
+なるかを見る。
 """
 
 from __future__ import annotations
@@ -32,12 +32,11 @@ from tools.sysid.bench import (TRUTH, EncoderTruth, encoder_record, run_test,  #
                                write_encoder_mcap)
 
 ENC = EncoderTruth()
-#: 許容誤差。段差（hi − lo）、角度に直した結果 [rad]（`_angle_err`）、半径（相対）。前輪の半径はスキャンの照合の偏り
-#: （ベンチで約 −1mm／片道）で −0.1% 前後に寄る
+#: 許容誤差。段差（hi − lo）、角度に直した結果 [rad]（`_angle_err`）
 SPAN_TOL = 0.001
 H_TOL = math.radians(0.1)
-FRONT_TOL = 0.002
-REAR_TOL = 0.003
+#: 校正を入れた後の走行距離の誤差（往復の総距離に対する割合）
+ODOM_TOL = 0.002
 
 
 def _angle_err(a: ec.Cal, b: ec.Cal) -> float:
@@ -86,19 +85,12 @@ class TestCalModel(unittest.TestCase):
         u = cal.lo + (cal.hi - cal.lo) * np.mod(theta + cal.ripple(theta), 2 * math.pi) / (2 * math.pi)
         self.assertLess(float(np.abs(ec._wrap_pi(cal.angle(u) - theta)).max()), math.radians(0.005))
 
-    def test_unwrap_skips_window_straddle(self):
-        """ADC の平均の窓が境目を跨いだ1点だけの飛びで、回転を数え違えない。"""
-        theta = np.mod(np.linspace(0.0, 6 * math.pi, 120), 2 * math.pi)
-        bad = theta.copy()
-        bad[37] = np.mod(bad[37] + 3.5, 2 * math.pi)
-        self.assertAlmostEqual(float(ec.unwrap_angle(bad)[-1] - ec.unwrap_angle(bad)[0]), 6 * math.pi, places=6)
-
 
 class TestRecovery(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cap = _run(ENC, seed=0)
-        cls.res = ec.analyze(encoder_record(cls.cap, ENC))
+        cls.res = ec.analyze(encoder_record(cls.cap))
 
     def _check(self, res: ec.Result):
         self.assertEqual(res.warnings, [])
@@ -107,42 +99,34 @@ class TestRecovery(unittest.TestCase):
             v = res.values
             self.assertAlmostEqual(v[f"enc_{side}_hi"] - v[f"enc_{side}_lo"], c.hi - c.lo, delta=SPAN_TOL)
             self.assertLess(_angle_err(ec.Cal.from_params(v, side), c), H_TOL, msg=side)
-            self.assertAlmostEqual(v[f"front_radius_{side}_m"] / ENC.front[i], 1.0, delta=FRONT_TOL)
-            self.assertAlmostEqual(v[f"rear_radius_{side}_m"] / ENC.rear[i], 1.0, delta=REAR_TOL)
 
     def test_recovers_truth(self):
         self._check(self.res)
-        self.assertEqual(len(self.res.legs), 8)              # 4往復＝片道8本
-        self.assertTrue(all(x.ok for x in self.res.legs))
 
     def test_through_mcap(self):
-        """実機と同じロガーで mcap に書いて読み直しても同じ結果（`/diag/link` から記録時の半径を読む）。"""
+        """実機と同じロガーで mcap に書いて読み直しても同じ結果。"""
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "enc.mcap"
             write_encoder_mcap(self.cap, ENC, path)
             rec = ec.load_record(path)
-        self.assertEqual(rec.rear_radius, ENC.active_rear)
         res = ec.analyze(rec)
         self._check(res)
         for k in ec.CONTROL_KEYS:
-            self.assertAlmostEqual(res.values[k], self.res.values[k], delta=2e-5 if "radius" not in k else 1e-5)
+            self.assertAlmostEqual(res.values[k], self.res.values[k], delta=1e-4)   # mcap の float32 の丸め
 
     def test_calibrated_firmware(self):
         """求めた校正を STM32 に入れて録り直す: 走行距離が真の値に合い、解析は同じ値を返す（生の読みから
         求めるので、前の校正に依らない）。"""
         v = self.res.values
-        enc = replace(ENC,
-                      active_cal=tuple(ec.Cal.from_params(v, s) for s in ec.SIDES),
-                      active_front=tuple(v[f"front_radius_{s}_m"] for s in ec.SIDES),
-                      active_rear=tuple(v[f"rear_radius_{s}_m"] for s in ec.SIDES))
+        enc = replace(ENC, active_cal=tuple(ec.Cal.from_params(v, s) for s in ec.SIDES))
         cap = _run(enc, seed=1)
         poses = np.array(cap["poses"])
         odom = np.array(cap["vs"][-1][1]["odom_dist"])
         true = poses[-1, 4:6]
         # 往復で戻るので終点の累積は小さい。行き帰りの総距離で比べる
         dist = np.abs(np.diff(poses[:, 4:6], axis=0)).sum(axis=0)
-        np.testing.assert_allclose(odom, true, atol=dist.max() * FRONT_TOL)
-        res2 = ec.analyze(encoder_record(cap, enc))
+        np.testing.assert_allclose(odom, true, atol=dist.max() * ODOM_TOL)
+        res2 = ec.analyze(encoder_record(cap))
         self.assertEqual(res2.warnings, [])
         for side in ec.SIDES:
             self.assertLess(_angle_err(ec.Cal.from_params(res2.values, side), ec.Cal.from_params(v, side)), H_TOL)
@@ -152,7 +136,7 @@ class TestRecovery(unittest.TestCase):
         def ripple_rms(cap):
             t = np.array([x[0] for x in cap["vs"]])
             od = np.array([x[1]["odom_dist"][1] for x in cap["vs"]])
-            idx = ec.coast_segments(encoder_record(cap, ENC))[0]
+            idx = ec.coast_segments(encoder_record(cap))[0]
             v = np.diff(od[idx]) / np.diff(t[idx])
             # 惰行の滑らかな減速を2次式で除いた残り
             tt = t[idx][1:]
@@ -174,11 +158,11 @@ class TestApplyControl(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_writes_control(self):
-        changed = toml_update.apply_control(self.toml, {"enc_left_h1s": 0.0123, "front_radius_right_m": 0.0297})
-        self.assertEqual(sorted(changed), ["enc_left_h1s", "front_radius_right_m"])
+        changed = toml_update.apply_control(self.toml, {"enc_left_h1s": 0.0123, "kf_jerk_psd": 42.0})
+        self.assertEqual(sorted(changed), ["enc_left_h1s", "kf_jerk_psd"])
         c = tomllib.loads(self.toml.read_text(encoding="utf-8"))["control"]
         self.assertEqual(c["enc_left_h1s"], 0.0123)
-        self.assertEqual(c["front_radius_right_m"], 0.0297)
+        self.assertEqual(c["kf_jerk_psd"], 42.0)
 
     def test_refuses_out_of_range(self):
         before = self.toml.read_bytes()

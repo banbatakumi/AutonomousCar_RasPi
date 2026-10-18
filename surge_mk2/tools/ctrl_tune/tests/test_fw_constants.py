@@ -149,8 +149,6 @@ class TestFirmwareConstants(unittest.TestCase):
                            ("kf_lever_arm_m", "SPEED_KF_LEVER_ARM_M")):
             with self.subTest(key=key):
                 self.assertAlmostEqual(table[key].default, self.fw(macro), places=7)
-        for key in ("front_radius_left_m", "front_radius_right_m", "rear_radius_left_m", "rear_radius_right_m"):
-            self.assertAlmostEqual(table[key].default, self.fw("DRIVE_FRONT_WHEEL_RADIUS_M"), places=7)
 
     def test_derived_timeouts_are_physical(self):
         """DISARM 後の制動の上限は、最高速から同定した減速度で止まり切れる時間より長い。"""

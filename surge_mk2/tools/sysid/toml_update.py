@@ -180,7 +180,6 @@ CONTROL_RANGES: dict[str, tuple[float, float]] = {
     **{f"enc_{s}_lo": (0.0, 0.2) for s in ("left", "right")},
     **{f"enc_{s}_hi": (0.8, 1.0) for s in ("left", "right")},
     **{f"enc_{s}_{h}": (-0.1, 0.1) for s in ("left", "right") for h in ("h1s", "h1c", "h2s", "h2c")},
-    **{f"{a}_radius_{s}_m": (0.025, 0.035) for a in ("front", "rear") for s in ("left", "right")},
     # 車速のカルマンフィルタ（`tools/sysid/kf_tune.py`）
     "kf_sigma_s_m": (0.00001, 0.005), "kf_sigma_a_m_s2": (0.01, 5.0), "kf_sigma_a_per_m_s": (0.0, 2.0),
     "kf_jerk_psd": (1.0, 10000.0), "kf_bias_walk_psd": (0.00001, 10.0), "kf_lever_arm_m": (-0.5, 0.5),
