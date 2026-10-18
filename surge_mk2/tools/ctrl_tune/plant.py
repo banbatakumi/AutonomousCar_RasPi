@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import math
+
 import tomllib
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -78,11 +80,26 @@ class Plant:
     #: `front_ripple` の周期。0 = 1回転に1周期（従来）、1 = 2周期（実機の記録で、位相別の速度が1回転に2周期で
     #: 約 ±1.5% 揺れていた）
     front_ripple_2x: int = 1
+    #: 1 = 前輪を絶対角の読みとして作り、ファームの校正（`[control]` の `enc_*`、`lib/encoder_cal`）を通す
+    #: （周期誤差は角度の関数 `front_ripple`/h·sin(hθ + 位相)。左の位相 0・右 1.3）。0 = 角速度の倍率としての周期誤差（従来）
+    front_absolute_angle: int = 0
 
     def to_c(self) -> HostPlant:
         d = {f.name: getattr(self, f.name) for f in fields(self)
-             if f.name not in ("front_position_noise", "front_ripple_2x")}
-        return HostPlant(**d, reserved=(1 if self.front_position_noise else 0) | (2 if self.front_ripple_2x else 0))
+             if f.name not in ("front_position_noise", "front_ripple_2x", "front_absolute_angle")}
+        return HostPlant(**d, reserved=(1 if self.front_position_noise else 0) | (2 if self.front_ripple_2x else 0)
+                         | (4 if self.front_absolute_angle else 0))
+
+    def encoder_cal_params(self) -> dict[str, float]:
+        """`front_absolute_angle` の周期誤差を打ち消す `[control]` の `enc_*`（正しい校正。テスト・ベンチ用）。"""
+        h = 2.0 if self.front_ripple_2x else 1.0
+        amp = self.front_ripple / h
+        out = {}
+        for side, phase in (("left", 0.0), ("right", 1.3)):
+            k = "2" if h == 2.0 else "1"
+            out[f"enc_{side}_h{k}s"] = amp * math.cos(phase)
+            out[f"enc_{side}_h{k}c"] = amp * math.sin(phase)
+        return out
 
     @classmethod
     def load(cls, toml_path: str | Path = DEFAULT_TOML) -> "Plant":

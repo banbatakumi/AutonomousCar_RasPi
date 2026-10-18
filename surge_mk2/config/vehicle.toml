@@ -104,12 +104,20 @@ steer_servo_gain = 0.9739876830514631
 # シムの速度はファームの速度制御そのもの（`sim/vehicle.py` の `SpeedController`、2026-09-26〜）:
 # 目標速度を COMMAND の accel_limit でランプ → PI（speed_kp・speed_ki、出力 ±speed_torque_max_nm）→
 # 車体（加速度 = speed_plant_gain × トルク − rolling_resistance）。
-# **次の3つは同定しない**。speed_kp・speed_ki はここが唯一の定義で、io_node が接続のたびに CONFIG_SET で
-# STM32 へ送る（ファームは値を持たない。`raspi/core/control_params.py` の FROM_DYNAMICS）。
+# speed_kp・speed_ki は io_node が接続のたびに CONFIG_SET で STM32 へ送る（ファームは値を持たない。
+# `raspi/core/control_params.py` の FROM_DYNAMICS）。**手で決めず、極配置の式から出す**: 車体を v' = G·T（G = speed_plant_gain）
+# とみると PI の閉ループは s² + G·kp·s + G·ki = 0 なので、狙う減衰比 ζ と固有角周波数 ωn から
+#   speed_kp = 2·ζ·ωn / G、speed_ki = ωn² / G
+# 狙い（speed_pi_zeta・speed_pi_wn_rad_s）は方針の値で、`tools/sysid` が G を書き直すたびに kp・ki をこの式で
+# 書き直す。下の値は v0.26 までの手置きの kp 0.3・ki 0.6 を G = 21.52 で割り戻したもの（同じ動き）。
+# ωn をどこまで上げてよいかは ⑤ 車速PI試験（トルク往復、`tools/sysid/speed_pi.py`）が、測ったトルクの遅れから
+# 位相余裕で示す（所見の「ωn の上限」）
 # speed_torque_max_nm はファームの定数（MainF446RE_V3 `src/control/drive.h` の DRIVE_MAX_TORQUE_NM×2輪）で、
 # ファームを変えたらここも直すこと。
 # ★ランプの上限（旧 speed_ramp_max_m_s2 = 3.0、ファームの DRIVE_MAX_ACCEL_M_S2）は v0.22 で STM32 から
 #   無くなった。上限は Pi が送る値で決まり、その値は [safety] の cmd_accel_limit_m_s2（1か所だけ）
+speed_pi_zeta = 0.898434
+speed_pi_wn_rad_s = 3.593735
 speed_kp = 0.3
 speed_ki = 0.6
 speed_torque_max_nm = 0.26
@@ -287,6 +295,44 @@ launch_exit_torque_nm = 0.006346
 # この項目を知らず、planner だけが「ファームが先に足してくれる」前提の指令を出してしまう）
 speed_ff_nm_per_m_s2 = 0.046458
 speed_ff_rr_nm = 0.012693
+
+# ── 前輪エンコーダの校正（★プロトコル v0.27。調整値ではなく**校正の結果**。STM32 `lib/encoder_cal`）──
+# アナログ出力の絶対角エンコーダ（AS5600）の読みを STM32 が真の角度へ直してから、車速・`odom_dist`・
+# 各輪の周速にする。**手で書かない**: エンコーダ校正試験（`sysid_encoder`、GUI「システム同定」⓪）の解析が書く。
+#   enc_*_lo・hi: 角度 0・2π に当たる ADC の読み（フルスケールに対する比）。出力の範囲が電源電圧の全域でないと、
+#                 1回転が 2π より小さく読めて走行距離の倍率と 0/2π の境目の段差になる
+#   enc_*_h1s…h2c: 1回転の周期誤差 e(θ) = h1s·sinθ + h1c·cosθ + h2s·sin2θ + h2c·cos2θ [rad]（θ は取付向きの符号のまま）。
+#                 2026-10-17 の走行記録の推定では左 ±1.1°・右 ±2.3°（右はデータシートの INL ±1° を超える。磁石のずれの疑い）
+# 下の値は「校正なし」（v0.26 までと同じ動き）
+enc_left_lo = 0.0
+enc_left_hi = 1.0
+enc_left_h1s = 0.0
+enc_left_h1c = 0.0
+enc_left_h2s = 0.0
+enc_left_h2c = 0.0
+enc_right_lo = 0.0
+enc_right_hi = 1.0
+enc_right_h1s = 0.0
+enc_right_h1c = 0.0
+enc_right_h2s = 0.0
+enc_right_h2c = 0.0
+# ── 車輪の有効転がり半径 [m]（★v0.27。**校正の結果**。同じ試験の解析が書く）──
+# 名目は最上位の wheel_radius（直径 60mm の幾何）。ゴムタイヤは荷重でつぶれるので実際は数%小さい。前輪は車速・
+# 走行距離の倍率、後輪はスリップ率の基準（前輪との比）を決める。下の値は名目のまま（未校正）
+front_radius_left_m = 0.030
+front_radius_right_m = 0.030
+rear_radius_left_m = 0.030
+rear_radius_right_m = 0.030
+# ── 車速のカルマンフィルタの調整値（★v0.27。STM32 `src/control/speed_kf.h`）──
+# 下の値は v0.26 の固定値（一部は 2026-10-16・17 の記録1本から決めた経験値。`docs/control_constants.md`）。
+# **記録から推定して書き直す**: `python -m tools.sysid.kf_tune <mcap...>`（走行の記録を複数。エンコーダの校正を
+# 入れた後の記録で）。検定は `raspi/tools/kf_consistency.py`（NIS≈1・相関≈0 になること）
+kf_sigma_s_m = 0.0008           # 走行距離の測定ノイズ [m]（★周期誤差を白色雑音として逃がすための水増し。校正後に下げる）
+kf_sigma_a_m_s2 = 0.6           # 加速度の測定ノイズ [m/s²]（車速 0 のとき）
+kf_sigma_a_per_m_s = 0.0        # 同 車速 1m/s あたりの増え方（走行中の振動は車速とともに増える）
+kf_jerk_psd = 100.0             # 加速度の変化の強さ [m²/s⁵]（経験値）
+kf_bias_walk_psd = 0.05         # 加速度計のバイアスの変化の強さ [(m/s²)²/s]（経験値）
+kf_lever_arm_m = 0.15           # 旋回で加速度計に乗る −k·ω² の補正 [m]（2026-10-16 の記録1本の回帰）
 
 # 車両モデル（後輪＋タイヤ＋ヨー）の同定結果。`tools/ctrl_tune` が実機の記録
 # （GUI「システム同定」タブの「制御の同定」3試験）から求めて書き込み、最適化に使う。

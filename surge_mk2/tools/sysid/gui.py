@@ -3,7 +3,8 @@
     .venv/bin/python -m tools.sysid.gui
 
 GUIの「システム同定」タブでダウンロードしたmcapファイル（試験ごとに1つ）を開き、
-`tools/sysid/fit.py` で解析して `config/vehicle.toml` の `[dynamics]` に書き戻す。
+`tools/sysid/fit.py` で解析して `config/vehicle.toml` の `[dynamics]` に書き戻す（⓪ エンコーダ校正は
+`tools/sysid/encoder_cal.py` で `[control]` へ）。
 解析の所見（残差・測れなかった項目）も一緒に表示する。
 
 ネイティブGUIにしてあるのは、ファイル選択・結果の見比べ・適用の可否判断を
@@ -49,8 +50,9 @@ def _load_current_dynamics(toml_path: str) -> dict[str, float]:
     except (OSError, tomllib.TOMLDecodeError):
         return {}
     out = {k: float(v) for k, v in d.get("dynamics", {}).items() if isinstance(v, (int, float))}
-    # ステアのリンクの換算は [control] にある（`toml_update.LINK_KEYS`）
-    out.update({k: float(d["control"][k]) for k in toml_update.LINK_KEYS if k in d.get("control", {})})
+    # ステアのリンクの換算・エンコーダの校正は [control] にある（`toml_update.LINK_KEYS`・`CONTROL_RANGES`）
+    out.update({k: float(d["control"][k]) for k in (*toml_update.LINK_KEYS, *toml_update.CONTROL_RANGES)
+                if k in d.get("control", {})})
     return out
 
 
@@ -133,7 +135,8 @@ class SysIdApp(tk.Tk):
 
         def work() -> None:
             try:
-                res = analyze(sources, base, progress=lambda f, t: self._events.put(("p", f, t)))
+                res = analyze(sources, base, progress=lambda f, t: self._events.put(("p", f, t)),
+                              toml_path=self.toml_path.get())
                 self._events.put(("done", res))
             except Exception as e:  # noqa: BLE001
                 self._events.put(("fail", e))
@@ -235,8 +238,12 @@ class SysIdApp(tk.Tk):
             )
             if not proceed:
                 return
+        control = {k: v for k, v in chosen.items() if k in toml_update.CONTROL_RANGES}
+        dynamics = {k: v for k, v in chosen.items() if k not in control}
         try:
-            changed = toml_update.apply_dynamics(self.toml_path.get(), chosen)
+            changed = toml_update.apply_control(self.toml_path.get(), control) if control else []
+            if dynamics:
+                changed += toml_update.apply_dynamics(self.toml_path.get(), dynamics)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("適用エラー", str(e))
             return
@@ -245,9 +252,12 @@ class SysIdApp(tk.Tk):
             (f"更新: {', '.join(changed)}" if changed else "変更はありませんでした（既存値と同じ）")
             + "\n\n★ヘッダの説明文・「★未実測」の注記・measuredフラグは自動更新して"
               "いません。手動で見直してください。"
-            + ("\n\n[control] の値（steer_link_*・速度PIのFF）は Pi へ反映すると（tools/deploy.sh "
+            + ("\n\n[control] の値（steer_link_*・速度PIのFF・エンコーダの校正）は Pi へ反映すると（tools/deploy.sh "
                "--restart-io。--restart では入りません）、io_node が STM32 へ送ります。"
-               if any(k in toml_update.LINK_KEYS or k in toml_update.FF_KEYS for k in changed) else ""),
+               if any(k in toml_update.LINK_KEYS or k in toml_update.FF_KEYS or k in toml_update.CONTROL_RANGES
+                      for k in changed) else "")
+            + ("\n\n★エンコーダの校正を変えたので、①〜④の試験は反映した後に録り直してください（車速・走行距離の"
+               "倍率が変わります）。" if control else ""),
         )
 
 

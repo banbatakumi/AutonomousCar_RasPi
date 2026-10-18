@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x001A
+PROTOCOL_VERSION = 0x001B
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -118,6 +118,28 @@ class Param:
     LAUNCH_EXIT_TORQUE_NM = 0x00A1
     SPEED_FF_NM_PER_M_S2 = 0x00B1
     SPEED_FF_RR_NM = 0x00B2
+    ENC_LEFT_LO = 0x00C1
+    ENC_LEFT_HI = 0x00C2
+    ENC_LEFT_H1S = 0x00C3
+    ENC_LEFT_H1C = 0x00C4
+    ENC_LEFT_H2S = 0x00C5
+    ENC_LEFT_H2C = 0x00C6
+    ENC_RIGHT_LO = 0x00C9
+    ENC_RIGHT_HI = 0x00CA
+    ENC_RIGHT_H1S = 0x00CB
+    ENC_RIGHT_H1C = 0x00CC
+    ENC_RIGHT_H2S = 0x00CD
+    ENC_RIGHT_H2C = 0x00CE
+    FRONT_RADIUS_LEFT_M = 0x00D1
+    FRONT_RADIUS_RIGHT_M = 0x00D2
+    REAR_RADIUS_LEFT_M = 0x00D3
+    REAR_RADIUS_RIGHT_M = 0x00D4
+    KF_SIGMA_S_M = 0x00E1
+    KF_SIGMA_A_M_S2 = 0x00E2
+    KF_SIGMA_A_PER_M_S = 0x00E3
+    KF_JERK_PSD = 0x00E4
+    KF_BIAS_WALK_PSD = 0x00E5
+    KF_LEVER_ARM_M = 0x00E6
     SPEED_KP = 0x0030
     SPEED_KI = 0x0031
     LIDAR_FORMAT = 0x0040
@@ -212,7 +234,7 @@ class Telemetry:
     kf_z_rms_accel: int = 0  # 加速度の残差の z の RMS ★v0.26
     kf_rho_dist: int = 0  # 走行距離の残差の隣り合う相関係数（-1〜1。前提が合っていれば0）★v0.26
     kf_rho_accel: int = 0  # 加速度の残差の相関係数 ★v0.26
-    front_angle: list[int] = field(default_factory=lambda: [0] * 2)  # [FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26
+    front_angle: list[int] = field(default_factory=lambda: [0] * 2)  # [FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26。★v0.27 から校正前の生の読み（ADC÷フルスケール×2π。ENC_* に依らない）
 
     @classmethod
     def decode(cls, payload: bytes) -> 'Telemetry':

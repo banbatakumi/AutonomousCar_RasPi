@@ -133,12 +133,17 @@ class TestEncoderRipple(unittest.TestCase):
 
 class TestResidualWarnings(unittest.TestCase):
     def test_speed_controller_mismatch_is_flagged(self):
-        """ファームの PI の定数が vehicle.toml と違う（＝シムの速度モデルの形が違う）と★で知らせる。"""
+        """ファームの PI の定数が vehicle.toml と違い、記録にもゲインが残っていない（＝シムの速度モデルの形が
+        違う）と★で知らせる。記録にゲインがあれば（`/diag/link`、`Log.speed_pi`）その値で当てはめて正しく復元する。"""
         truth = replace(TRUTH, speed_kp=0.08, speed_ki=1.5)
         log, _, _ = run_test("sysid_accel", truth, seed=2, noise=bench.REALISTIC)
-        r = fit.fit_accel(log, TRUTH)
+        r = fit.fit_accel(replace(log, speed_pi=None), TRUTH)
         self.assertTrue([n for n in r.notes if n.startswith("★")], r.notes)
         self.assertTrue(r.warnings, r.notes)
+        r = fit.fit_accel(log, TRUTH)
+        self.assertEqual(r.warnings, [], r.notes)
+        self.assertAlmostEqual(r.values["speed_plant_gain"], truth.speed_plant_gain,
+                               delta=bench.REL_TOL["speed_plant_gain"] * truth.speed_plant_gain)
 
     def test_warned_accel_is_not_applied_by_default(self):
         """前後運動の記録がモデルから外れて★が出たら、その試験で求めた項目（車体の利得・
@@ -147,6 +152,7 @@ class TestResidualWarnings(unittest.TestCase):
         base = replace(TRUTH, steer_gain=1.0, steer_offset_rad=0.0)
         off = replace(TRUTH, speed_kp=0.08, speed_ki=1.5)      # 記録の車だけ別の制御器
         off_log, _, _ = run_test("sysid_accel", off, seed=1)
+        off_log.speed_pi = None                                # 記録にゲインが残っていない
         a = analyze({"accel": off_log}, base)
         for k in ("speed_plant_gain", "rolling_resistance", "drive_accel_m_s2", "brake_decel_m_s2"):
             self.assertIn(k, a.warned)
@@ -164,6 +170,7 @@ class TestResidualWarnings(unittest.TestCase):
         good, _, _ = run_test("sysid_accel", TRUTH, seed=1)
         off = replace(TRUTH, speed_kp=0.08, speed_ki=1.5)
         bad, _, _ = run_test("sysid_accel", off, seed=1)
+        bad.speed_pi = None                                    # 記録にゲインが残っていない
         r = fit.fit_accel(bad, base, good)
         self.assertTrue(r.warnings, r.notes)
         self.assertNotIn("speed_plant_gain", r.values)

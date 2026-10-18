@@ -49,8 +49,14 @@ def load(path: str | Path) -> dict:
     return {"t": t, "wl": ticks["wl"] * 0.05, "wr": ticks["wr"] * 0.05, "ti": ti, "ax": imus["ax"].astype(float)}
 
 
+class _KfConfig(C.Structure):
+    """`speed_kf.h` の `SpeedKfConfig`（並びも同じ）。"""
+    _fields_ = [("sigma_s_m", C.c_float), ("sigma_a_m_s2", C.c_float), ("sigma_a_per_m_s", C.c_float),
+                ("jerk_psd", C.c_float), ("bias_walk_psd", C.c_float)]
+
+
 class _Kf(C.Structure):
-    _fields_ = [("x", C.c_float * 4), ("p", C.c_float * 16), ("s_meas", C.c_float), ("initialized", C.c_bool),
+    _fields_ = [("cfg", _KfConfig), ("x", C.c_float * 4), ("p", C.c_float * 16), ("s_meas", C.c_float), ("initialized", C.c_bool),
                 ("resync", C.c_bool), ("gated_count", C.c_uint32), ("diag", C.c_ubyte * 128)]
 
 

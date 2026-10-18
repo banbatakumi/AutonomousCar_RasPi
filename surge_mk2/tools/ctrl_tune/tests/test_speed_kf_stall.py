@@ -20,15 +20,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tools.ctrl_tune.fw import FW_DIR  # noqa: E402
+from tools.ctrl_tune.kf_raw_replay import _Kf  # noqa: E402  speed_kf.h の SpeedKf の写し（並びを1か所に）
 
 R = 0.03                       # 前輪の半径 [m]（drive.h の DRIVE_FRONT_WHEEL_RADIUS_M）
 DT = 5e-4
-
-
-class _Kf(C.Structure):
-    # speed_kf.h の SpeedKf（先頭の x・p・s_meas・initialized・gated_count だけ使う。診断の配列ぶんの余白を取る）
-    _fields_ = [("x", C.c_float * 4), ("p", C.c_float * 16), ("s_meas", C.c_float), ("initialized", C.c_bool),
-                ("resync", C.c_bool), ("gated_count", C.c_uint32), ("diag", C.c_ubyte * 128)]
 
 
 def _build() -> C.CDLL:

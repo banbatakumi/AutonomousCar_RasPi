@@ -29,6 +29,8 @@ from .slam2d_raceline import Slam2dRaceLine
 from .slam2d_route import Slam2dRoute
 from .sysid_accel import SysIdAccel
 from .sysid_corner import SysIdCorner
+from .sysid_encoder import SysIdEncoder
+from .sysid_speed_pi import SysIdSpeedPi
 from .sysid_latency import SysIdLatency
 from .sysid_steer import SysIdSteer
 from .sysid_tyre import SysIdTyre
@@ -52,10 +54,13 @@ PLANNERS: dict[str, type[Planner]] = {
     ParkToPoint.id: ParkToPoint,
     #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブの
     #: モード選択には出さない（`AutoPanel.tsx` 側のフィルタ）
+    #: ⓪ はほかの試験より先に録る（走行距離・車速の校正。ほかの試験の記録はその上に乗る）
+    SysIdEncoder.id: SysIdEncoder,
     SysIdSteer.id: SysIdSteer,
     SysIdAccel.id: SysIdAccel,
     SysIdCorner.id: SysIdCorner,
     SysIdLatency.id: SysIdLatency,
+    SysIdSpeedPi.id: SysIdSpeedPi,
     #: 足回りの制御（TC・ABS）の車両モデルの同定（解析は `tools/ctrl_tune`）
     SysIdWheel.id: SysIdWheel,
     SysIdTyre.id: SysIdTyre,

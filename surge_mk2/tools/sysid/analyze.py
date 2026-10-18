@@ -15,7 +15,7 @@ import numpy as np
 from raspi.core.control_params import STEER_LINK_X_MAX_RAD, steer_link_road
 from sim.vehicle import VehicleSpec
 
-from . import fit, toml_update
+from . import encoder_cal, fit, speed_pi, toml_update
 
 __all__ = ["TESTS", "GEOMETRY", "LINK_KEYS", "Analysis", "analyze", "fold_steer_link"]
 
@@ -27,7 +27,10 @@ LINK_KEYS = toml_update.LINK_KEYS
 #: ヨーの遅れは1つの試験では決まらないので、最後にステア・前後運動・旋回の記録をまとめて
 #: 当てはめる（`GEOMETRY`）。速度応答と加減速は前後運動試験（加速度の
 #: 違う段を走る）1つで測る
+#: ⓪ エンコーダ校正は `[control]`（STM32 へ送る校正）を求める。**①〜④はその校正を STM32 に入れてから録る**
+#: （車速・走行距離が真の値になってから。校正前の記録は走行距離の倍率が名目の半径のぶんずれている）
 TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("encoder", "⓪ エンコーダ校正", encoder_cal.CONTROL_KEYS),
     ("steer", "① ステア試験", ("tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s",
                               "steer_servo_hysteresis_rad", "steer_servo_gain")),
     ("accel", "② 前後運動試験", ("speed_plant_gain", "rolling_resistance",
@@ -35,6 +38,9 @@ TESTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
                                "brake_decel_m_s2", "brake_decel_per_nm", "speed_decel_m_s2")),
     ("corner", "③ 旋回グリップ試験", ("mu",)),
     ("latency", "④ 遅延試験", ("control_latency_s",)),
+    # PI を通さずに測った車体の利得・転がり抵抗は ② の値より優先する（② は PI のゲインを既知として当てはめる）。
+    # 適用すると speed_kp・speed_ki が狙い（speed_pi_zeta・speed_pi_wn_rad_s）とこの利得から書き直る
+    ("speed_pi", "⑤ 車速PI試験", ("speed_plant_gain", "rolling_resistance")),
 )
 GEOMETRY = ("舵の効き（①②③をまとめて）",
             ("steer_gain", "steer_gain_cubic", "steer_offset_rad", "understeer_gradient",
@@ -92,8 +98,10 @@ _W_TEST, _W_SENSOR, _W_GEOMETRY = 1.0, 0.3, 2.0
 
 def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
             fold_link: bool = True,
-            progress: Callable[[float, str], None] | None = None) -> Analysis:
-    """`sources` は試験キー（`TESTS` の内部キー）→ mcap のパス（または読み込み済みの `Log`）。
+            progress: Callable[[float, str], None] | None = None,
+            toml_path: str | Path = fit.DEFAULT_TOML) -> Analysis:
+    """`sources` は試験キー（`TESTS` の内部キー）→ mcap のパス（または読み込み済みの `Log`。⓪ は
+    `encoder_cal.Record`）。
 
     `base` は今の `vehicle.toml`。前の試験で求めた値で順に上書きしながら次の試験を解析する。
 
@@ -103,6 +111,8 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
     書いて `[dynamics]` の2つを 1 と 0 に戻す。False は当てはめの結果そのまま（解析の検証用）。
 
     `progress(割合 0〜1, 今やっていること)`: 進捗の通知。解析を走らせたスレッドから呼ばれる。
+
+    `toml_path`: ⑤ が車速PIの狙い（`[dynamics]` の `speed_pi_zeta`・`speed_pi_wn_rad_s`）を読む `vehicle.toml`。
     """
     total = (_W_TEST * sum(k in sources for k, _, _ in TESTS) + (_W_SENSOR if "accel" in sources else 0.0)
              + (_W_GEOMETRY if any(k in sources for k in GEOMETRY[2]) else 0.0)) or 1.0
@@ -121,6 +131,29 @@ def analyze(sources: dict[str, str | Path | fit.Log], base: VehicleSpec,
         if src is None:
             continue
         report(f"{label} を解析中…")
+        if key in ("encoder", "speed_pi"):
+            try:
+                if key == "encoder":
+                    rec = src if isinstance(src, encoder_cal.Record) else encoder_cal.load_record(src)
+                    r = encoder_cal.analyze(rec)
+                else:
+                    rec = src if isinstance(src, speed_pi.Record) else speed_pi.load_record(src)
+                    r = speed_pi.analyze(rec, toml_path, base.speed_plant_gain, base.rolling_resistance)
+            except Exception as e:  # noqa: BLE001 - 画面にそのまま出す
+                out.errors.append(f"{label}: {e}")
+                report(f"{label} 失敗", _W_TEST)
+                continue
+            report(f"{label} 完了", _W_TEST)
+            vals = {k: v for k, v in r.values.items() if k in params}
+            out.results.update(vals)
+            out.notes[label] = r.notes
+            for k in vals:
+                if r.warnings:
+                    out.warned[k] = label
+                else:
+                    out.warned.pop(k, None)
+            base = replace(base, **{k: v for k, v in vals.items() if hasattr(base, k)})
+            continue
         try:
             lg = src if isinstance(src, fit.Log) else fit.load_log(src)
             if lg.md_dropouts:

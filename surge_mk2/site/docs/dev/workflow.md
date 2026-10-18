@@ -80,7 +80,9 @@ flowchart LR
 
 ## システム同定
 
-[`tools/sysid`][sysid] は、実機の走行記録から `vehicle.toml` の `[dynamics]` を推定します。専用の planner（`sysid_steer`・`sysid_accel`・`sysid_corner`・`sysid_latency`・`sysid_wheel`・`sysid_tyre`）が試験の走り方を持ちます。
+[`tools/sysid`][sysid] は、実機の走行記録から `vehicle.toml` の `[dynamics]` を推定します。専用の planner（`sysid_encoder`・`sysid_steer`・`sysid_accel`・`sysid_corner`・`sysid_latency`・`sysid_speed_pi`・`sysid_wheel`・`sysid_tyre`）が試験の走り方を持ちます。
+
+最初に録るのは**エンコーダ校正**（`sysid_encoder`）です。前輪の絶対角エンコーダの1回転の周期誤差と出力の範囲、前後輪の有効転がり半径を測り、STM32 が読みを直してから車速・走行距離にします。前輪の半径の基準は、直線の端で止まっている間の LiDAR のスキャンどうしの移動量です（メジャーが要りません）。車速のカルマンフィルタの調整値は、走行の記録に同じフィルタを通した残差の尤度を最大にして決めます（`tools/sysid/kf_tune.py`）。
 
 **方針は「シムのモデルそのものを当てはめる」**ことです。モデルとは別の特徴量（10 % 到達時刻、IMU の加速度の 95 パーセンタイルなど）から値を読むと、
 読んだ値をシムに入れても実機の応答を再現する保証がありません（IMU のノイズ・傾き・バイアスで加速度が STM32 の上限を超えて読まれた）。

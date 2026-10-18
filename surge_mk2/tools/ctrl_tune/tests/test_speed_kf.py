@@ -56,6 +56,17 @@ class TestSpeedKf(unittest.TestCase):
                 e = _rmse(S.run(self.fw, RIPPLE, _scenario(key)).out)
                 self.assertLess(e, 0.008, f"RMSE {1e3 * e:.1f}mm/s")
 
+    def test_encoder_calibration_removes_ripple(self):
+        """絶対角の読みに周期誤差（角度の関数）があるとき、正しい校正（`enc_*`）を入れると車速の誤差が下がり、
+        恒等の校正（既定）は従来どおり（ファームの `lib/encoder_cal` を前輪の読みの経路で通す）。"""
+        plant = replace(REAL_FRONT, front_ripple=0.06, front_ripple_2x=1, front_absolute_angle=1)
+        sc = _scenario("cruise_turn")
+        raw = _rmse(S.run(self.fw, plant, sc).out)
+        cal = _rmse(S.run(self.fw, plant, sc, plant.encoder_cal_params()).out)
+        clean = _rmse(S.run(self.fw, replace(plant, front_ripple=0.0), sc).out)
+        self.assertLess(cal, 0.5 * raw, f"校正なし {1e3 * raw:.2f} → 校正 {1e3 * cal:.2f}mm/s")
+        self.assertLess(cal, clean * 1.3 + 2e-4, f"周期誤差なし {1e3 * clean:.2f}mm/s")
+
     def test_kf_estimates_accel_bias(self):
         """加速度計のバイアス（シムは 0.7m/s²）を静止中に覚える。"""
         out = S.run(self.fw, REAL_FRONT, _scenario("cruise")).out

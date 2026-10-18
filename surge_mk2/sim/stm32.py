@@ -58,16 +58,19 @@ STATS_HZ = 1
 #: `COMMAND` がこれだけ途絶したら最大制動（`uart_protocol.md` §5.6、実機と同じ）
 COMMAND_TIMEOUT_NS = 100 * 1_000_000
 #: ★v0.19: 走行中に ARM が外れたとき、停車を待って制動を続ける上限と、停車とみなす車速
-#: （ファームの `VEHICLE_DISARM_BRAKE_TIMEOUT_S`・`DRIVE_STANDSTILL_SPEED_M_S`）
-DISARM_BRAKE_TIMEOUT_NS = 3 * NS
+#: （ファームの `VEHICLE_DISARM_BRAKE_TIMEOUT_S` = 最高速 ÷ 制動の減速度 × 1.5・`DRIVE_STANDSTILL_SPEED_M_S`。
+#: `tools/ctrl_tune/tests/test_fw_constants.py` がファームと突き合わせる）
+DISARM_BRAKE_TIMEOUT_NS = round(5.0 / 2.47 * 1.5 * NS)
 DISARM_BRAKE_STANDSTILL_M_S = 0.05
 #: `COMMAND.steer_rate_limit` = 0 のときの既定 [rad/s]（ファームの `VEHICLE_DEFAULT_STEER_RATE_RAD_S`）
 DEFAULT_STEER_RATE_RAD_S = 0.5
 
-#: 自動停止（`vehicle.h` の `VEHICLE_AUTO_STOP_*`。**ファームと同じ値にすること**）。
-#: 停止距離 d_stop = v×遅延 + v²/(2a) + マージン（マージンは CONFIG_SET の `AUTO_STOP_MARGIN_CM`）
-AUTO_STOP_DELAY_S = 0.1
-AUTO_STOP_DECEL_M_S2 = 3.0
+#: 自動停止（`vehicle.h` の `VEHICLE_AUTO_STOP_*`。**ファームと同じ値にすること**。
+#: `tools/ctrl_tune/tests/test_fw_constants.py` が突き合わせる）。
+#: 停止距離 d_stop = v×遅延 + v²/(2a) + マージン（マージンは CONFIG_SET の `AUTO_STOP_MARGIN_CM`）。
+#: 遅延 = LiDAR の1回転（10Hz）＋MD のトルクの立ち上がり 4.5ms、減速度 = 同定した制動の減速度
+AUTO_STOP_DELAY_S = 0.1 + 0.0045
+AUTO_STOP_DECEL_M_S2 = 2.47
 AUTO_STOP_DIRECTION_DEADBAND_M_S = 0.05
 #: LiDAR は進行方向（前 0°・後 180°）へ伸ばした矩形で見る。片側の幅と、障害物と確定する点数
 AUTO_STOP_LIDAR_HALF_WIDTH_CM = 15.0

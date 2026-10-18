@@ -443,8 +443,10 @@ def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float
 
     if cmd.torque_mode:
         # トルク直接指令（v0.6）。**無視すると「スポーティなラジコンモード」で
-        # 車が一切動かない**ので、加速度への換算だけは入れてある
-        a = cmd.target_torque * sp.drive_ratio / (sp.wheel_radius * sp.mass)
+        # 車が一切動かない**ので、加速度への換算だけは入れてある。換算は速度PIと同じ車体の利得
+        # （`speed_plant_gain` × 駆動輪数。未同定なら名目の 1/(車輪半径×質量)）——名目の式のままだと、
+        # 同じトルクで車速指令とトルク指令の加速が食い違う（同定値で約3割）
+        a = cmd.target_torque * sp.drive_ratio * sp.speed_plant_gain
         a -= math.copysign(sp.rolling_resistance, v) if abs(v) > 1e-3 else 0.0
         if (v >= DRIVE_MAX_SPEED_M_S and a > 0.0) or (v <= -DRIVE_MAX_SPEED_M_S and a < 0.0):
             a = 0.0                      # 上限を超えたら加速させない（ファームの ApplyOverspeedLimit）

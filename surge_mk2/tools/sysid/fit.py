@@ -76,6 +76,9 @@ NS = 1e9
 #: これに張り付いたサンプルは本当のヨーレートではないので、曲率・横加速度の材料から外す
 GYRO_RANGE_RAD_S = math.radians(250.0)
 _GYRO_SAT = 0.97 * GYRO_RANGE_RAD_S
+#: ファームが前輪の累積回転角を距離に直すときの半径の名目（`[control]` の `front_radius_*_m` の既定）。
+#: ★v0.27 から記録の `/diag/link` にあればその値を使う（`build_log` の `front_radius`）
+_FRONT_WHEEL_RADIUS_M = 0.030
 
 
 # ── ログ ──────────────────────────────────────────────────────────────────
@@ -121,6 +124,9 @@ class Cmd:
     accel_limit: float = 0.0
     steer_rate_limit: float = 0.0
     brake_torque: float = 0.0
+    #: トルク直接指令（`target_speed` を無視して `target_torque` [N·m、後輪各輪] を掛ける）
+    torque_mode: bool = False
+    target_torque: float = 0.0
 
 
 @dataclass
@@ -154,6 +160,10 @@ class Log:
     #: 記録は FF が無い＝`(0, 0)`）。None は記録から分からない。前後運動の当てはめは同じ値をシムの
     #: `SpeedController` に入れる——FF を知らずに当てはめると、FF で速くなった応答を車体の利得が吸う
     speed_ff: tuple[float, float] | None = (0.0, 0.0)
+    #: 記録したときに STM32 に入っていた車速PIのゲイン `(speed_kp, speed_ki)`（`/diag/link` の `control_params`）。
+    #: None は記録から分からない（toml の値を使う）。★kp・ki は利得から極配置で書き直る（`toml_update`）ので、
+    #: 前の記録を解析し直すときは記録時の値で当てはめる（今の toml の値だと、ゲインの違いを車体の利得が吸う）
+    speed_pi: tuple[float, float] | None = None
     #: モータドライバが無応答だった区間 `(始まり [s], 終わり [s], 名前)`（`md_dropouts`）。その間、
     #: STM32 はその車輪の速度・電流を最後の値のまま送り、止まった MD は駆動も制動もしない
     md_dropouts: list[tuple[float, float, str]] = field(default_factory=list)
@@ -178,7 +188,9 @@ def _cmd_from_json(t: float, o: dict) -> Cmd:
                brake=bool(o.get("brake", False)),
                accel_limit=float(o.get("accel_limit", 0.0)),
                steer_rate_limit=float(o.get("steer_rate_limit", 0.0)),
-               brake_torque=float(o.get("brake_torque", 0.0)))
+               brake_torque=float(o.get("brake_torque", 0.0)),
+               torque_mode=bool(o.get("torque_mode", False)),
+               target_torque=float(o.get("target_torque", 0.0)))
 
 
 def md_dropouts(vs_msgs: list[tuple[float, dict]]) -> list[tuple[float, float, str]]:
@@ -198,8 +210,10 @@ def md_dropouts(vs_msgs: list[tuple[float, dict]]) -> list[tuple[float, float, s
 
 
 def build_log(vs_msgs: list[tuple[float, dict]], cmds: list[Cmd],
-              scans: list[ScanStamp]) -> Log:
-    """時刻 [s]（同じ時間軸）付きのメッセージ列 → `Log`。`bench.py` も使う。"""
+              scans: list[ScanStamp],
+              front_radius: tuple[float, float] = (_FRONT_WHEEL_RADIUS_M, _FRONT_WHEEL_RADIUS_M)) -> Log:
+    """時刻 [s]（同じ時間軸）付きのメッセージ列 → `Log`。`bench.py` も使う。`front_radius` は記録したときに
+    STM32 が前輪の角度を `odom_dist` に直した半径（`/diag/link` の `front_radius_*_m`）。"""
     vs_msgs = sorted(vs_msgs, key=lambda x: x[0])
     cmds = sorted(cmds, key=lambda c: c.t)
     scans = sorted(scans, key=lambda s: s.t_done)
@@ -231,7 +245,7 @@ def build_log(vs_msgs: list[tuple[float, dict]], cmds: list[Cmd],
             wheel_speed_rear=(float(ws[2]) + float(ws[3])) / 2.0 if len(ws) >= 4 else 0.0,
             abs_active=bool(vs.get("abs_active", False)),
         ))
-    sensor_notes = correct_encoder_ripple(samples)
+    sensor_notes = correct_encoder_ripple(samples, front_radius)
     _speed_from_odom(samples)
     return Log(samples=samples,
                cmds=[replace(c, t=c.t - t0) for c in cmds],
@@ -275,19 +289,17 @@ def _lr_significant(n: float, err_small: float, err_big: float) -> bool:
 
 # ── 前輪エンコーダの周期誤差 ─────────────────────────────────
 
-#: ファームが累積回転角を距離に直すときの車輪半径（`DRIVE_FRONT_WHEEL_RADIUS_M`）
-_FRONT_WHEEL_RADIUS_M = 0.030
 #: 推定する高調波（1回転に k 回）
 _RIPPLE_HARMONICS = (1, 2, 3)
 #: 補正するのは振幅がこれより大きく、尤度比で有意なときだけ [rad]
 _RIPPLE_MIN_RAD = math.radians(0.3)
 
 
-def _ripple_segments(samples: list[Sample]) -> list[np.ndarray]:
+def _ripple_segments(samples: list[Sample], radius: float = _FRONT_WHEEL_RADIUS_M) -> list[np.ndarray]:
     """周期誤差の推定に使う区間: 指令が変わらず・制動なし・同じ向きに 0.15m/s 以上で走り続け、
     車輪が1.5回転以上回る区間（頭の0.2sは捨てる）。"""
     out = []
-    circ = 2 * math.pi * _FRONT_WHEEL_RADIUS_M
+    circ = 2 * math.pi * radius
     cur: list[int] = []
 
     def flush():
@@ -319,22 +331,27 @@ def _ripple_design(theta: np.ndarray) -> np.ndarray:
     return np.stack(cols, axis=1)
 
 
-def encoder_ripple(samples: list[Sample], side: str) -> tuple[np.ndarray, float, float]:
+def encoder_ripple(samples: list[Sample], side: str,
+                   radius: float = _FRONT_WHEEL_RADIUS_M) -> tuple[np.ndarray, float, float]:
     """片輪の角度の周期誤差 `e(θ) = Σ a_k sin kθ + b_k cos kθ` の係数・振幅 [rad]・尤度比の統計量。
 
     アナログの絶対角エンコーダは1回転の中で読みが非線形（1回転に1〜数回のうねり）なので、
     読んだ角度 θ_m = θ + e(θ) を微分した速度は車輪の回転数でうねる。これは白色ノイズと違い
     何サンプルも続くので、曲率（ヨーレート÷速度）に乗ってガタ・不感帯を取り違えさせた
     （検証: ±3.4°の誤差で不感帯0.6°→0・ガタ0.8°→1.15°）。定速の区間ごとに「3次式＋共通の
-    高調波」を θ_m に当てはめて推定する（θ ≈ θ_m で評価。誤差の2次の項は無視）。"""
-    segs = _ripple_segments(samples)
+    高調波」を θ_m に当てはめて推定する（θ ≈ θ_m で評価。誤差の2次の項は無視）。
+
+    ★プロトコル v0.27 から STM32 自身が校正（`[control]` の `enc_*`、エンコーダ校正試験）で直してから積算する。
+    校正を入れた記録では、ここで見つかるのは校正の残り（有意でなければ何もしない）。`radius` は記録したときに
+    STM32 が角度を距離に直した半径（`odom_dist` ÷ これ = 角度）。"""
+    segs = _ripple_segments(samples, radius)
     if not segs:
         return np.zeros(2 * len(_RIPPLE_HARMONICS)), 0.0, 0.0
     attr = "odom_l" if side == "l" else "odom_r"
     blocks, ys, harm = [], [], []
     for idx in segs:
         t = np.array([samples[i].t for i in idx])
-        th = np.array([getattr(samples[i], attr) for i in idx]) / _FRONT_WHEEL_RADIUS_M
+        th = np.array([getattr(samples[i], attr) for i in idx]) / radius
         tt = (t - t.mean()) / max(np.ptp(t), 1e-3)
         blocks.append(np.stack([np.ones_like(tt), tt, tt ** 2, tt ** 3], axis=1))
         ys.append(th)
@@ -363,14 +380,16 @@ def encoder_ripple(samples: list[Sample], side: str) -> tuple[np.ndarray, float,
     return coef, amp, stat
 
 
-def correct_encoder_ripple(samples: list[Sample]) -> list[str]:
+def correct_encoder_ripple(samples: list[Sample],
+                           radius: tuple[float, float] = (_FRONT_WHEEL_RADIUS_M, _FRONT_WHEEL_RADIUS_M)) -> list[str]:
     """左右の前輪で周期誤差を推定し、有意なら `odom_l/odom_r/odom` を補正する。所見を返す。"""
     notes = []
     if len(samples) < 50:
         return notes
     fixed = {}
     for side, name in (("l", "左"), ("r", "右")):
-        coef, amp, stat = encoder_ripple(samples, side)
+        r = radius[0] if side == "l" else radius[1]
+        coef, amp, stat = encoder_ripple(samples, side, r)
         if amp == 0.0 and stat == 0.0:
             notes.append("前輪エンコーダの周期誤差: 定速の区間が無く推定できず")
             return notes
@@ -381,9 +400,10 @@ def correct_encoder_ripple(samples: list[Sample]) -> list[str]:
             fixed[side] = coef
     for side, coef in fixed.items():
         attr = "odom_l" if side == "l" else "odom_r"
-        th = np.array([getattr(x, attr) for x in samples]) / _FRONT_WHEEL_RADIUS_M
+        r = radius[0] if side == "l" else radius[1]
+        th = np.array([getattr(x, attr) for x in samples]) / r
         th_true = th - _ripple_design(th) @ coef
-        for x, v in zip(samples, th_true * _FRONT_WHEEL_RADIUS_M):
+        for x, v in zip(samples, th_true * r):
             setattr(x, attr, float(v))
     if fixed:
         for x in samples:
@@ -452,6 +472,8 @@ def _speed_from_odom(samples: list[Sample]) -> None:
 #: `/diag/link` の `control_params` から読む項目と、それが入ったプロトコルの版（`protocol_version`）
 _LINK_PARAMS = ("steer_link_gain", "steer_link_cubic")
 _FF_PARAMS = ("speed_ff_nm_per_m_s2", "speed_ff_rr_nm")
+_RADIUS_PARAMS = ("front_radius_left_m", "front_radius_right_m")
+_PI_PARAMS = ("speed_kp", "speed_ki")
 _PROTO_STEER_LINK = 0x0012
 _PROTO_SPEED_FF = 0x0015
 
@@ -474,7 +496,8 @@ def load_log(path: str | Path) -> Log:
                 proto = proto if proto is not None else obj.get("protocol_version")
                 # STM32 が答えた値（接続直後は空。最後に見えた値を採る）
                 link.update({k: float(v) for k, v in (obj.get("control_params") or {}).items()
-                             if k in _LINK_PARAMS + _FF_PARAMS and isinstance(v, (int, float))})
+                             if k in _LINK_PARAMS + _FF_PARAMS + _RADIUS_PARAMS + _PI_PARAMS
+                             and isinstance(v, (int, float))})
             elif channel.topic == "/vehicle_state":
                 vs_raw.append((int(obj.get("t_capture", 0)), message.log_time, obj))
             elif channel.topic == "/cmd":
@@ -497,13 +520,16 @@ def load_log(path: str | Path) -> Log:
             if t_done:
                 scans.append(ScanStamp(t_done / NS, int(o.get("t_pub", 0)) / NS,
                                        int(o.get("seq", 0))))
-    log = build_log(vs_msgs, cmds, scans)
+    log = build_log(vs_msgs, cmds, scans,
+                    tuple(link.get(k, _FRONT_WHEEL_RADIUS_M) for k in _RADIUS_PARAMS))
     log.fw_id = fw_id
     # STM32 が答えた値が記録にあればそれ。無ければ、その項目を持たない古いファームの記録（＝換算なし・
     # FF なし）と分かるときだけ既定値にし、それ以外は「分からない」として残す
     log.steer_link = (link.get("steer_link_gain", 1.0), link.get("steer_link_cubic", 0.0))
     log.steer_link_known = (all(k in link for k in _LINK_PARAMS)
                             or (proto is not None and proto < _PROTO_STEER_LINK))
+    if all(k in link for k in _PI_PARAMS):
+        log.speed_pi = (link[_PI_PARAMS[0]], link[_PI_PARAMS[1]])
     if all(k in link for k in _FF_PARAMS):
         log.speed_ff = (link[_FF_PARAMS[0]], link[_FF_PARAMS[1]])
     elif proto is not None and proto < _PROTO_SPEED_FF:
@@ -1107,6 +1133,7 @@ def _fit_speed_model(logs: Log | list[Log], base: VehicleSpec,
     logs = logs if isinstance(logs, list) else [logs]
     # FF が分からない記録は FF なしで当てはめる（`fit_accel` が★で知らせる）
     all_sets = [(lg.cmds, _speed_runs(lg.samples), lg.speed_ff or (0.0, 0.0)) for lg in logs]
+    pis = [lg.speed_pi for lg in logs]
     if not any(runs for _, runs, _ in all_sets):
         raise ValueError("前進の速度指令の区間が見つかりません（mcapが正しいか確認）")
     # TC の介入・空転を含む区間は外す（タイヤのグリップで加速が決まっていて、速度制御のモデルの形から
@@ -1127,8 +1154,11 @@ def _fit_speed_model(logs: Log | list[Log], base: VehicleSpec,
 
     def resid(x):
         sp, delay = spec_of(x)
-        return np.concatenate([_simulate_speed(sp, cmds, delay, r, ff=ff) - r.v
-                               for cmds, runs, ff in sets for r in runs])
+        out = []
+        for (cmds, runs, ff), pi in zip(sets, pis):
+            spl = replace(sp, speed_kp=pi[0], speed_ki=pi[1]) if pi is not None else sp
+            out += [_simulate_speed(spl, cmds, delay, r, ff=ff) - r.v for r in runs]
+        return np.concatenate(out)
 
     lo = [free[n][1] for n in names]
     hi = [free[n][2] for n in names]

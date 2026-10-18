@@ -112,6 +112,9 @@ def param_table(fw_dir: Path | None = None) -> dict[str, ParamSpec]:
 _SOURCES = ("src/control/drive.c", "src/control/torque_vectoring.c", "src/control/control_params.c",
             "src/control/speed_kf.c")
 _INCLUDES = ("lib/pid", "lib/filter", "lib/mymath", "src/control")
+#: `host/shim` と同じく**常に作業ツリーから**取るヘッダ（車両モデル `host_sim.c` とシムが使う。比べる相手の
+#: 古いコミットには無いことがある）
+_HOST_INCLUDES = ("lib/encoder_cal",)
 
 
 def _cache_dir() -> Path:
@@ -150,7 +153,8 @@ def _build(tree: Path, extra_defines: tuple[str, ...] = ()) -> Path:
     has_launch = "Drive_SetLaunch" in (tree / "src/control/drive.h").read_text(encoding="utf-8")
     # キャッシュの鍵は、コンパイルに入るものすべて（ソース・取り込むヘッダ——`lib/` の PID・フィルタは
     # ヘッダだけの実装——と、コンパイルの引数）。どれか1つでも漏らすと、直したのに古いライブラリを使う
-    headers = [f for d in ((host / "shim"), *(tree / inc for inc in _INCLUDES)) for f in sorted(d.glob("*.h"))]
+    headers = [f for d in ((host / "shim"), *(FW_DIR / inc for inc in _HOST_INCLUDES), *(tree / inc for inc in _INCLUDES))
+               for f in sorted(d.glob("*.h"))]
     has_speed_kf = "Drive_GetAccelBiasKf" in (tree / "src/control/drive.h").read_text(encoding="utf-8")
     defines = [*(["-DHOST_FW_HAS_CONTROL_PARAMS"] if has_params else []),
                *(["-DHOST_FW_HAS_LAUNCH"] if has_launch else []),
@@ -165,7 +169,7 @@ def _build(tree: Path, extra_defines: tuple[str, ...] = ()) -> Path:
     lib = _cache_dir() / f"host_sim_{digest.hexdigest()[:16]}.{ext}"
     if not lib.exists():
         tmp = lib.with_suffix(f".{os.getpid()}.tmp")
-        cmd = ["cc", *flags, f"-I{host / 'shim'}",
+        cmd = ["cc", *flags, f"-I{host / 'shim'}", *[f"-I{FW_DIR / inc}" for inc in _HOST_INCLUDES],
                *[f"-I{tree / inc}" for inc in _INCLUDES], *defines,
                *map(str, srcs), "-lm", "-o", str(tmp)]
         r = subprocess.run(cmd, capture_output=True, text=True)

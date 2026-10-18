@@ -1,7 +1,8 @@
 # 制御定数の棚卸し — どの数字が物理・同定・経験則か
 
 制御系（STM32 の `MainF446RE_V3/src/control`・`src/vehicle` と、Pi の速度指令・舵の追従・シム）に出てくる
-定数を、**どこから来た数字か**で分けた一覧。2026-10-17 に両リポジトリを走査して作った。
+定数を、**どこから来た数字か**で分けた一覧。2026-10-17 に両リポジトリを走査して作り、2026-10-18 に
+同じ種類の事例（試験の無い手置きのゲイン・一時的な記録で決めた値・未校正のセンサ）を洗い直した（§1.2・§6）。
 
 方針: 当てずっぽうの定数・一時的な走行ログから決めた値を残さず、**物理法則（式）・データシート・
 システム同定**のどれかに根拠を置く。根拠を置けないもの（方針・経験則）は、そうだと分かる名前と
@@ -38,6 +39,18 @@
 | `[control] launch_exit_torque_nm` | 0.009（旧同定値のまま。コメントに「手で直す」） | `rolling_resistance ÷ speed_plant_gain ÷ drive_ratio` = **0.006346**。`tools/sysid` が同定の適用時に書き直す（`launch_exit_value`） | その車速を保つのに要る 1 輪あたりのトルク |
 | シムの車速PIの帰還・`speed` の遅れ | `speed_filter_s` 9.95ms（v0.24 までの前輪ローパス） | `[dynamics] speed_kf_lag_s` = 0（ホストでコンパイルしたファームのカルマンフィルタを測った遅れ 0.1〜0.3ms）。`speed_filter_s` は `wheel_speed` だけ | v0.25 から実機の `speed` はカルマンフィルタ。§4 |
 
+### 1.2 2026-10-18 に直したもの（試験・校正を足して B/C へ。★プロトコル v0.27。**実機未検証**、既定値は前と同じ動き）
+
+| 場所 | 前 | 後 | 根拠・試験 |
+|---|---|---|---|
+| 前輪エンコーダ（AS5600）の読み | 校正なし（出力の範囲は全域と仮定、1回転の周期誤差は Pi の解析だけが記録ごとに推定） | `[control]` の `enc_*`（出力の範囲 lo・hi、周期誤差の1・2次の係数）。STM32 の `Encoder` が直してから車速・走行距離にする（`lib/encoder_cal`） | **⓪ エンコーダ校正試験**（`sysid_encoder` → `tools/sysid/encoder_cal.py`）。トルク0の惰行の区間で当てはめる（巡航は車速PIが読みの誤差に合わせてトルクを揺らし、真の動きが誤差を打ち消す） |
+| 前輪・後輪の転がり半径 | `DRIVE_*_WHEEL_RADIUS_M` 30mm（直径 60mm の幾何。荷重でつぶれる分を含まない） | `[control]` の `front_radius_*`・`rear_radius_*`（左右別） | ⓪ と同じ試験。前輪は止まっている間の LiDAR のスキャンどうしの移動量（メジャー不要。ベンチで −0.1% 程度の偏り）、後輪は惰行中の前輪との周速の比 |
+| 車速のカルマンフィルタの調整値 | `SPEED_KF_*`（σs 0.8mm は周期誤差を逃がす水増し、σa 0.6・jerk 100・バイアス 0.05 は 2026-10-16・17 の記録1本と経験） | `[control]` の `kf_*`（＋車速による加速度の雑音の増え方 `kf_sigma_a_per_m_s`） | `tools/sysid/kf_tune.py`: 走行の記録に STM32 と同じフィルタを通し、残差の尤度を最大にする（予測誤差分解）。結果の NIS・ρ で白色の前提を検定 |
+| `[dynamics] speed_kp`・`speed_ki` | 0.3・0.6（手置き） | 狙い `speed_pi_zeta`・`speed_pi_wn_rad_s`（D）と利得 G から極配置: kp = 2ζωn/G、ki = ωn²/G（`toml_update.speed_pi_values`。G を書き直すと kp・ki も書き直る）。狙いの既定は手置きの値を今の G で割り戻した ζ 0.898・ωn 3.59 | **⑤ 車速PI試験**（`sysid_speed_pi` → `tools/sysid/speed_pi.py`）: トルク指令で往復し、PI を通さずに G・転がり抵抗（前後別）・トルクの遅れを測る。測った遅れで位相余裕 45° を保てる ωn の上限を示す。過去の記録の解析は記録時の kp・ki（`/diag/link`）で当てはめる（`Log.speed_pi`） |
+| シムの STM32 の自動停止の定数（`sim/stm32.py`） | 遅延 0.1・減速度 3.0・DISARM 制動の上限 3.0s（ファームの旧値のまま） | ファームの式と同じ（0.1045・2.47・3.04s）。`test_fw_constants.py` が突き合わせる | ファームを直したときにシムの写しが置き去りになっていた |
+| シムのトルク指令の加速度（`sim/vehicle.py`） | 名目の 1/(車輪半径×質量) | 車速PIと同じ車体の利得 `speed_plant_gain`×駆動輪数 | 同じトルクで車速指令とトルク指令の加速が約3割食い違っていた |
+| 同定の試験の停止距離の減速度 `_sysid_common._STOP_DECEL_M_S2` | コメントの出典が廃止された `DRIVE_MAX_ACCEL_M_S2` | 値は同じ 2.4。同定した制動の減速度 2.47 より小さい＝安全側、と根拠を書き直した | 同定の前にも回すので、同定値には頼らない |
+
 ## 2. 維持するもの
 
 ### A 物理（`vehicle.toml` が正。ファームの写しはテストで突き合わせる）
@@ -56,6 +69,7 @@
   `yaw_natural_freq_rad_s`・`speed_plant_gain`・`rolling_resistance`・`mu`・`drive_accel_m_s2`・
   `brake_decel_m_s2`・`control_latency_s` ほか）
 - `[control]` の `steer_link_*`（リンクの換算）・`max_steer`
+- `[control]` の `enc_*`・`front_radius_*`・`rear_radius_*`（⓪）、`kf_*`（`kf_tune`）— §1.2
 - `[control]` の TC・ABS のゲイン（`tc_kp/ki`・`abs_kp/ki`）— 同定した車両モデル `[control.plant]` とファームの制御を閉ループにして最適化
 - `[control.plant]`（タイヤ・荷重移動・MD の時定数）
 - ファームの写し: `VEHICLE_BRAKE_DECEL_M_S2`（← `brake_decel_m_s2`）・`VEHICLE_MD_TORQUE_TAU_S`（← `md_tau_s`）。
@@ -64,7 +78,8 @@
 ### C 式（手で書かない）
 
 - `speed_ff_nm_per_m_s2` = 1/`speed_plant_gain`、`speed_ff_rr_nm` = `rolling_resistance`/`speed_plant_gain`、
-  `launch_exit_torque_nm`（上表）— `tools/sysid/toml_update.py` が書く
+  `launch_exit_torque_nm`（上表）、`speed_kp` = 2ζωn/`speed_plant_gain`・`speed_ki` = ωn²/`speed_plant_gain`（§1.2）—
+  `tools/sysid/toml_update.py` が書く
 - `max_steer`（リンクの換算を可動域に通した値）— 同上
 - `Vehicle.kappa_max`・`a_lat_max`・`a_accel_max`・`a_decel_max`・`speed_loop_tau_s`・`speed_loop_reset_s`・`steer_delay_s` — `raspi/core/vehicle.py` の派生量
 - `tv_load_gain_s2_per_m` 0.045 = `load_transfer` × `mass` ÷ 後輪1つの静止荷重（机上の式。実機未調整）
@@ -75,7 +90,7 @@
 
 | 定数 | 値 | 分類 | 根拠・次の手 |
 |---|---|---|---|
-| `[dynamics] speed_kp`・`speed_ki` | 0.3・0.6 | **E** | 同定しない手置きのゲイン。今の同定値では閉ループの固有角振動数 √(G·ki) = 3.6rad/s・減衰比 G·kp/(2√(G·ki)) = 0.90 に当たる。**次の候補**: 減衰比と帯域（MD の時定数・車速の推定の遅れで上限が決まる）を方針値として持ち、利得 G から極配置で求める。ただし同定（`tools/sysid/fit.py`）は記録時の kp・ki を前提に利得を当てはめるので、自動で書き直すと過去の記録の解析が狂う——ゲインを記録に残してから行うこと |
+| `[dynamics] speed_pi_zeta`・`speed_pi_wn_rad_s` | 0.898・3.59 | D | 車速PIの狙い（§1.2）。ωn の上限は ⑤ が測った遅れから位相余裕で示す。上げるかは追従の速さと車速の雑音（kp に比例してトルクに乗る）の釣り合いで人が決める |
 | `DRIVE_ANTIWINDUP_TT_S` | 0.10 | E | 積分の巻き戻しの時定数。教科書の目安は Ti = kp/ki（今 0.5s）の 0.1〜1 倍。`ctrl_tune.bench` で比べてから式にする |
 | `DRIVE_STANDSTILL_SPEED_M_S` | 0.05 | D | 停車の判定。車速の推定の雑音（静止 σ ≒ 2mm/s）より十分上 |
 | `DRIVE_LAUNCH_END_MARGIN_M_S` | 0.05 | E | コメントの根拠「前輪 LPF τ≈10ms の遅れ×全開の加速度」は車速がカルマンフィルタになって古い。今の式なら 加速度×(加速度計の DLPF 3ms＋MD 4.5ms) ≒ 0.02。実機のローンチの記録で確かめてから直す |
@@ -84,9 +99,7 @@
 | `tc_slip_target`・`abs_slip_target` | 0.2・0.25 | D | 前後力と横グリップの配分の方針（`tools/ctrl_tune/optimize.py` の冒頭。`tradeoff()` の表で人が決める） |
 | `slip_speed_floor_m_s`・`wheel_lift_diff_threshold_m_s` | 0.5・0.35 | E | 低速のスリップ率の分母、片輪浮きの判定。前輪の読みの誤差（タイヤ径・周期誤差 数%）より上に置く。後者は車速に比例させる（例: 7%×車速＋下限）のが物理的 |
 | `tv_max_ratio` | 0.5 | D | 内輪のトルクを残す上限 |
-| `SPEED_KF_JERK_PSD`・`BIAS_WALK_PSD` | 100・0.05 | E | カルマンフィルタのプロセス雑音。**検定の手段がある**: TELEMETRY の NIS・自己相関（`raspi/tools/kf_consistency.py`）が 1・0 に近づくよう合わせる |
-| `SPEED_KF_SIGMA_S_M`・`SIGMA_A_M_S2` | 0.8mm・0.6 | B（記録から）| AS5600 の INL・走行中の残差から（`speed_kf.h` のコメント）。同じ検定で見直す |
-| `SPEED_KF_LEVER_ARM_M` | 0.15 | B（記録から）| 走行記録の回帰（IMU の取付位置＋横滑りの和）。IMU の取付位置を実測すれば一部は A にできる |
+| `[control] kf_*`（`SPEED_KF_*` は既定値） | 0.8mm・0.6・0・100・0.05・0.15 | B（`kf_tune` が書く。今の値は v0.26 の経験値のまま） | §1.2。⓪ の校正を入れた後の記録で推定し直す。`kf_lever_arm_m` は旋回を含む記録のときだけ推定（IMU の取付位置を実測すれば一部は A にできる） |
 | `STEERING_LINKAGE_MIN_SLOPE` | 0.3 | D | リンクの換算が単調であるための下限（Pi の `SteerMap.command` は 0.2 で打ち切るが、ファームが 0.3 以上を保証するので届かない） |
 | 自動停止の `VEHICLE_AUTO_STOP_LATERAL_MARGIN_M`・`_LIDAR_MIN_POINTS`・`_ULTRASONIC_NEAR_CM` | 6cm・3点・5cm | D | 誤検知と見逃しの釣り合い |
 | `VEHICLE_STOP_TIME_MARGIN` | 1.5 | D | 低速で MD の制動が tanh で弱まるぶん（0.33m/s 以下で同定の減速度を下回る。延びは約 2cm で、自動停止では上位のマージンが持つ） |
@@ -120,3 +133,25 @@
 1. `tools/sysid`（前後運動試験）で `brake_decel_m_s2` が変わったら、ファームの `VEHICLE_BRAKE_DECEL_M_S2` を直す
 2. `tools/ctrl_tune`（制御の同定）で `md_tau_s` が変わったら、`VEHICLE_MD_TORQUE_TAU_S` を直す
 3. `python -m pytest tools/ctrl_tune/tests/test_fw_constants.py` が通ることを確かめてから書き込む
+
+## 6. 再調査（2026-10-18）— 同じ種類で、まだ残っているもの
+
+§1.2 の3つ（車速PIのゲイン・KF の調整値・エンコーダの校正）と同じ形の事例を両リポジトリで探した。**直したものは §1.2**。
+以下は残っているもの（値は動かしていない）。上ほど走りへの効きが大きい。
+
+| 対象 | 今の値・状態 | 種類 | 効き | 手段（案） |
+|---|---|---|---|---|
+| ジャイロの感度（MPU6050） | データシートの 131LSB/(°/s) のまま。バイアスだけ静止中に追従 | 未校正のセンサ | 感度の公差 ±3% がそのままヨーレート・曲率の倍率になる。舵の効き・アンダーステア勾配の同定（`fit_geometry`）が吸ってしまい、旋回の向きの積分（SLAM の初期値・推測航法）に残る | その場で N 回転させ、LiDAR のスキャンの回転角と積分を比べる（⓪ と同じくスキャンが基準。試験を足す） |
+| LiDAR の取付の向き（`[sensors.lidar] yaw`） | 0（未校正） | 未校正のセンサ | 点群全体が回る。SLAM の地図・自動停止の矩形が向きの誤差ぶんずれる | ⓪ の直線の往復で、スキャンが測った移動の向き atan2(dy, dx) と車体の前（推測航法）の差。解析に足すだけで録り直し不要 |
+| IMU の取付の傾き（ヨー・ピッチ） | 軸変換だけ。ずれの校正なし | 未校正のセンサ | 加速度の x に横・上の加速度が混ざる。静止の分は KF のバイアスが吸うが、旋回の横加速度は `kf_lever_arm_m` が別の形で吸う | 直進の加減速と定常旋回で accel の y・x を回帰（取付角）。`kf_tune` に取付角を足す |
+| MD の左右のトルク定数 | 指令をそのままトルクとみなす（`torque_cmd` は指令） | 未校正の駆動 | 同定の G は左右の平均。左右差はトルクベクタリングの差に乗る | ⑤ の記録で、トルク指令の左右差とヨーレートを回帰（直進中に小さな差を加える段を足す） |
+| `scan2scan.PRIOR_XY` | 5mm（「倍率誤差 2%」の前提） | 一時的な前提 | ⓪ で倍率誤差は 0.1% 程度になる見込みで、事前分布を締められる | ⓪ を入れた後の走行で、照合の残差から決め直す |
+| トルクベクタリングの利得 `tv_load_gain_s2_per_m` | 0.045（机上の式） | 手置き（式だが実機未調整） | 旋回中の左右配分 | `sysid_tyre`・`ctrl_tune` の旋回シナリオで最適化（他の TC・ABS と同じ手順） |
+| ABS・TC・片輪浮き対策のしきい値・ゲイン | 車両モデル上で最適化した机上値 | 試験はあるが実機で未検証 | 限界域の挙動 | 既存の `sysid_wheel`・`sysid_tyre` の記録で `ctrl_tune` を回し直す（手順は `development.md` §4.7） |
+| `LIDAR_PWM_DUTY` 0.4 | 目で見て合わせた（「回転数を見ながら詰めること」） | 手置き | 回転数（10Hz からずれると 1 周の点の密度と自動停止の遅延が変わる） | LD06 が回転速度を送ってくる（`Scan.rot_speed_dps`）ので、STM32 で PI にして 3600°/s に合わせるか、記録から duty→回転数を当てはめる |
+| AHRS の積分の上限・`IMU_ACCEL_LPF_K` | 仮置きの値・係数で持つ（周期を前提にした係数） | 手置き | ピッチ・ロールの推定 | 時定数で持つ形に（`LPF_UpdateTau` と同じ直し方）、静止・傾けた台での記録で確かめる |
+| ESS・ブレーキ灯のしきい値 | 記録1本から | 一時的な記録（表示のみ） | 走りには効かない | 録り直すときに一緒に見る（D のまま） |
+| 後ろカメラの魚眼の校正・`bottom_crop` | 前カメラの値の流用（★仮） | 未校正のセンサ | 後ろカメラを使う機能（後退の駐車・カメラE2E） | `development.md` §4.6 の手順で後ろカメラ単独で校正 |
+| 電圧・電流の ADC の換算（`ADC_VREF` ほか） | 公称 3.3V・分圧比の設計値 | 未校正のセンサ | 電池の残量・過電流の判定 | テスタで2点（満充電・放電後）を測って倍率を出す |
+| `wheel_width` | 概算 | 未実測の寸法 | 外形・接触（小） | ノギスで測る |
+| `telemetry_node` の合図の既定値 | `arrow_signal_node` と手で同じ値に合わせている | 写し（二重定義） | 片方を変えると食い違う | 1 か所に寄せる（定数の共有） |

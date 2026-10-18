@@ -28,7 +28,7 @@ from tools.ctrl_tune import scenarios as S  # noqa: E402
 from tools.ctrl_tune.fw import FW_DIR, OUT, Firmware  # noqa: E402
 from tools.ctrl_tune.plant import NOMINAL  # noqa: E402
 
-HEADERS = ("src/control/drive.h", "src/vehicle/vehicle.h", "src/sensing/lidar.h")
+HEADERS = ("src/control/drive.h", "src/vehicle/vehicle.h", "src/sensing/lidar.h", "src/control/speed_kf.h")
 
 _DEFINE = re.compile(r"^\s*#define\s+([A-Z][A-Z0-9_]*)\s+(.+)$")
 _NUM_SUFFIX = re.compile(r"(?<=[0-9.])[fFuU]+\b")
@@ -119,6 +119,38 @@ class TestFirmwareConstants(unittest.TestCase):
                            ("LAUNCH_TIMEOUT_S", "DRIVE_LAUNCH_TIMEOUT_S")):
             with self.subTest(attr=attr):
                 self.assertSame(name, getattr(SpeedController, attr))
+
+    def test_sim_stm32_mirrors_vehicle_h(self):
+        """シムの STM32（`sim/stm32.py`）が写している自動停止・DISARM 後の制動の値。"""
+        import sim.stm32 as st
+        self.assertSame("VEHICLE_AUTO_STOP_DELAY_S", st.AUTO_STOP_DELAY_S)
+        self.assertSame("VEHICLE_AUTO_STOP_DECEL_M_S2", st.AUTO_STOP_DECEL_M_S2)
+        self.assertSame("VEHICLE_AUTO_STOP_DIRECTION_DEADBAND_M_S", st.AUTO_STOP_DIRECTION_DEADBAND_M_S)
+        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_HALF_WIDTH_CM", st.AUTO_STOP_LIDAR_HALF_WIDTH_CM, tol=1e-4)
+        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_MIN_POINTS", st.AUTO_STOP_LIDAR_MIN_POINTS)
+        self.assertSame("VEHICLE_AUTO_STOP_ULTRASONIC_NEAR_CM", st.AUTO_STOP_ULTRASONIC_NEAR_CM)
+        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_FRONT_OFFSET_CM", st.AUTO_STOP_LIDAR_OFFSET_CM[True], tol=1e-4)
+        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_REAR_OFFSET_CM", st.AUTO_STOP_LIDAR_OFFSET_CM[False], tol=1e-4)
+        self.assertSame("VEHICLE_AUTO_STOP_ULTRASONIC_FRONT_OFFSET_CM", st.AUTO_STOP_ULTRASONIC_OFFSET_CM[True], tol=1e-4)
+        self.assertSame("VEHICLE_AUTO_STOP_ULTRASONIC_REAR_OFFSET_CM", st.AUTO_STOP_ULTRASONIC_OFFSET_CM[False], tol=1e-4)
+        self.assertSame("VEHICLE_DISARM_BRAKE_TIMEOUT_S", st.DISARM_BRAKE_TIMEOUT_NS / 1e9, tol=1e-6)
+        self.assertSame("DRIVE_STANDSTILL_SPEED_M_S", st.DISARM_BRAKE_STANDSTILL_M_S)
+        self.assertSame("VEHICLE_FAILSAFE_POWER_OFF_S", st.FAILSAFE_POWER_OFF_S)
+        self.assertSame("VEHICLE_BRAKE_HOLD_SPEED_M_S", st.BRAKE_HOLD_SPEED_M_S)
+        self.assertSame("VEHICLE_BRAKE_HOLD_DELAY_S", st.BRAKE_HOLD_DELAY_S)
+        self.assertSame("VEHICLE_DEFAULT_STEER_RATE_RAD_S", st.DEFAULT_STEER_RATE_RAD_S)
+
+    def test_control_param_defaults_match_speed_kf_h(self):
+        """`control_params.h` の KF の仮置きは `speed_kf.h` の既定（上位が送る前の動きを v0.26 と同じにする）。"""
+        from tools.ctrl_tune.fw import param_table
+        table = param_table(FW_DIR)
+        for key, macro in (("kf_sigma_s_m", "SPEED_KF_SIGMA_S_M"), ("kf_sigma_a_m_s2", "SPEED_KF_SIGMA_A_M_S2"),
+                           ("kf_jerk_psd", "SPEED_KF_JERK_PSD"), ("kf_bias_walk_psd", "SPEED_KF_BIAS_WALK_PSD"),
+                           ("kf_lever_arm_m", "SPEED_KF_LEVER_ARM_M")):
+            with self.subTest(key=key):
+                self.assertAlmostEqual(table[key].default, self.fw(macro), places=7)
+        for key in ("front_radius_left_m", "front_radius_right_m", "rear_radius_left_m", "rear_radius_right_m"):
+            self.assertAlmostEqual(table[key].default, self.fw("DRIVE_FRONT_WHEEL_RADIUS_M"), places=7)
 
     def test_derived_timeouts_are_physical(self):
         """DISARM 後の制動の上限は、最高速から同定した減速度で止まり切れる時間より長い。"""

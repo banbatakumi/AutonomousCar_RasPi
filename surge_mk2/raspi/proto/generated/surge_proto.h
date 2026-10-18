@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x001Au
+#define SURGE_PROTOCOL_VERSION  0x001Bu
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -135,6 +135,28 @@
 #define PARAM_LAUNCH_EXIT_TORQUE_NM 0x00A1u
 #define PARAM_SPEED_FF_NM_PER_M_S2 0x00B1u
 #define PARAM_SPEED_FF_RR_NM     0x00B2u
+#define PARAM_ENC_LEFT_LO        0x00C1u
+#define PARAM_ENC_LEFT_HI        0x00C2u
+#define PARAM_ENC_LEFT_H1S       0x00C3u
+#define PARAM_ENC_LEFT_H1C       0x00C4u
+#define PARAM_ENC_LEFT_H2S       0x00C5u
+#define PARAM_ENC_LEFT_H2C       0x00C6u
+#define PARAM_ENC_RIGHT_LO       0x00C9u
+#define PARAM_ENC_RIGHT_HI       0x00CAu
+#define PARAM_ENC_RIGHT_H1S      0x00CBu
+#define PARAM_ENC_RIGHT_H1C      0x00CCu
+#define PARAM_ENC_RIGHT_H2S      0x00CDu
+#define PARAM_ENC_RIGHT_H2C      0x00CEu
+#define PARAM_FRONT_RADIUS_LEFT_M 0x00D1u
+#define PARAM_FRONT_RADIUS_RIGHT_M 0x00D2u
+#define PARAM_REAR_RADIUS_LEFT_M 0x00D3u
+#define PARAM_REAR_RADIUS_RIGHT_M 0x00D4u
+#define PARAM_KF_SIGMA_S_M       0x00E1u
+#define PARAM_KF_SIGMA_A_M_S2    0x00E2u
+#define PARAM_KF_SIGMA_A_PER_M_S 0x00E3u
+#define PARAM_KF_JERK_PSD        0x00E4u
+#define PARAM_KF_BIAS_WALK_PSD   0x00E5u
+#define PARAM_KF_LEVER_ARM_M     0x00E6u
 #define PARAM_SPEED_KP           0x0030u
 #define PARAM_SPEED_KI           0x0031u
 #define PARAM_LIDAR_FORMAT       0x0040u
@@ -200,7 +222,7 @@ typedef struct {
     uint16_t kf_z_rms_accel;       /* 0.001  加速度の残差の z の RMS ★v0.26 */
     int16_t  kf_rho_dist;          /* 0.0001  走行距離の残差の隣り合う相関係数（-1〜1。前提が合っていれば0）★v0.26 */
     int16_t  kf_rho_accel;         /* 0.0001  加速度の残差の相関係数 ★v0.26 */
-    uint16_t front_angle[2];       /* 0.0001 rad  [FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26 */
+    uint16_t front_angle[2];       /* 0.0001 rad  [FL,FR] 前輪エンコーダの絶対角（0〜2π。取付向きの符号のまま。周期誤差の同定用）★v0.26。★v0.27 から校正前の生の読み（ADC÷フルスケール×2π。ENC_* に依らない） */
 } surge_telemetry_t;
 
 /* CONFIG_ACK (0x03) —  */

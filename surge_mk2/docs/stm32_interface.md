@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.26（`uart_protocol.md` v0.26 に対応。`protocol_version = 0x001A`）
+**バージョン**: v0.27（`uart_protocol.md` v0.27 に対応。`protocol_version = 0x001B`）
 **最終更新**: 2026-10-11
 **状態**: 実装済み・ビルド済み。**STM32・MD は未書き込み、実機での動作検証は未了**
 **対象読者**: STM32 ファームウェアを実装する人

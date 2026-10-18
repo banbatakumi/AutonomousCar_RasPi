@@ -69,7 +69,8 @@ $$
 T_{\mathrm{total}} = K_p\,(v^* - v) + K_i \!\int (v^* - v)\,dt \;+\; \underbrace{k_a\,\dot v^* + k_{rr}\,\mathrm{sgn}(v^*)}_{\text{フィードフォワード}}
 $$
 
-- \(K_p, K_i\) はファームに焼き込まず、Pi が送る（`speed_kp = 0.3`、`speed_ki = 0.6`。[`vehicle.toml`][vehicle-toml] の `[dynamics]`）。微分項は使わない（車速は微分ノイズが乗りやすい）。
+- \(K_p, K_i\) はファームに焼き込まず、Pi が送る（[`vehicle.toml`][vehicle-toml] の `[dynamics]`）。微分項は使わない（車速は微分ノイズが乗りやすい）。
+- ゲインは手で決めず、**極配置**で決める: 車体を \(\dot v = G\,T\)（\(G\) は同定した車体の利得）とみると閉ループは \(s^2 + G K_p s + G K_i = 0\) なので、狙いの減衰比 \(\zeta\) と固有角周波数 \(\omega_n\) から \(K_p = 2\zeta\omega_n/G\)、\(K_i = \omega_n^2/G\)（今は \(\zeta = 0.90\)、\(\omega_n = 3.6\) rad/s で \(K_p = 0.3\)、\(K_i = 0.6\)）。\(\omega_n\) の上限は、トルクを直接掛けて往復する試験で測ったトルクの遅れから位相余裕で決まる。
 - 出力は後輪 2 輪の合計トルクで、±0.26 N·m（1 輪 0.13 N·m ×2）に収める。
 
 ### なぜフィードフォワードが要るか

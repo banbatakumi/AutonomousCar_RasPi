@@ -24,8 +24,9 @@ import tomlkit
 
 from raspi.core.control_params import STEER_LINK_X_MAX_RAD, steer_link_road
 
-__all__ = ["ALLOWED_KEYS", "LINK_KEYS", "FF_KEYS", "LAUNCH_EXIT_KEY", "speed_ff_values",
-           "launch_exit_value", "apply_dynamics"]
+__all__ = ["ALLOWED_KEYS", "LINK_KEYS", "FF_KEYS", "LAUNCH_EXIT_KEY", "CONTROL_RANGES", "PI_KEYS", "PI_DESIGN_KEYS",
+           "speed_ff_values", "speed_pi_values",
+           "launch_exit_value", "apply_dynamics", "apply_control"]
 
 #: `[control]` に書くステアのリンクの換算。**必ず2つ一緒に**渡す
 LINK_KEYS = ("steer_link_gain", "steer_link_cubic")
@@ -41,6 +42,17 @@ def speed_ff_values(speed_plant_gain: float, rolling_resistance: float) -> dict[
     """
     return {FF_KEYS[0]: round(1.0 / speed_plant_gain, 6),
             FF_KEYS[1]: round(max(rolling_resistance, 0.0) / speed_plant_gain, 6)}
+
+#: 車速PIのゲイン（`[dynamics]`）と、それを決める狙い（減衰比・固有角周波数。方針の値で、同定しない）
+PI_KEYS = ("speed_kp", "speed_ki")
+PI_DESIGN_KEYS = ("speed_pi_zeta", "speed_pi_wn_rad_s")
+
+
+def speed_pi_values(speed_plant_gain: float, zeta: float, wn: float) -> dict[str, float]:
+    """極配置: 車体 v' = G·T と PI の閉ループ s² + G·kp·s + G·ki を s² + 2ζωn·s + ωn² に合わせる。"""
+    return {"speed_kp": round(2.0 * zeta * wn / speed_plant_gain, 6),
+            "speed_ki": round(wn * wn / speed_plant_gain, 6)}
+
 
 #: `[control]` のローンチコントロールを終えるときの積分の初期値（1輪あたり）
 LAUNCH_EXIT_KEY = "launch_exit_torque_nm"
@@ -61,8 +73,8 @@ LINK_RANGES = {"steer_link_gain": (0.5, 1.5), "steer_link_cubic": (-1.5, 1.5)}
 
 #: このツールが書き込んでよいキー（[dynamics]直下のみ）。
 #: `drive_ratio` は対象外（書こうとしたら`ValueError`にして誤って上書きしないようにする）。
-#: `speed_filter_s`/`_order`・`speed_kp`/`speed_ki`/`speed_torque_max_nm` は
-#: ファームの定数（測るものではない）なので対象外。`tau_speed_s`（1次遅れ）は測らない（速度はファームの PI、`sim/vehicle.py` の `SpeedController`）
+#: `speed_filter_s`/`_order`・`speed_torque_max_nm` はファームの定数（測るものではない）なので対象外。
+#: `speed_kp`/`speed_ki` は直接は書かず、`speed_plant_gain` と狙い（`PI_DESIGN_KEYS`）から書き直す（`speed_pi_values`）。`tau_speed_s`（1次遅れ）は測らない（速度はファームの PI、`sim/vehicle.py` の `SpeedController`）
 ALLOWED_KEYS = {"tau_steer_s", "dead_time_s", "steer_rate_limit_rad_s", "mu",
                 "drive_accel_m_s2", "brake_decel_m_s2",
                 "drive_fade_speed_m_s", "drive_top_speed_m_s", "speed_decel_m_s2",
@@ -145,11 +157,58 @@ def apply_dynamics(toml_path: str | Path, values: dict[str, float]) -> list[str]
         ff = speed_ff_values(gain, rr)
         for key in FF_KEYS:
             put(control, key, ff[key])
+    # 車速PIのゲインは車体の利得と狙い（減衰比・固有角周波数）から決まる。狙いが書いてあるときだけ
+    zeta = float(dynamics.get(PI_DESIGN_KEYS[0], 0.0) or 0.0)
+    wn = float(dynamics.get(PI_DESIGN_KEYS[1], 0.0) or 0.0)
+    if gain > 1e-6 and zeta > 0.0 and wn > 0.0:
+        for key, value in speed_pi_values(gain, zeta, wn).items():
+            put(dynamics, key, value)
     # ローンチコントロールを終えるときの積分の初期値も同じ2つ（と駆動輪数）で決まる。同じく有効なときだけ
     if control is not None and gain > 1e-6 and float(control.get(LAUNCH_EXIT_KEY, 0.0) or 0.0) > 0.0:
         put(control, LAUNCH_EXIT_KEY,
             launch_exit_value(gain, rr, float(dynamics.get("drive_ratio", 2.0) or 2.0)))
 
+    if changed:
+        _atomic_write(path, tomlkit.dumps(doc))
+    return changed
+
+
+#: 校正・同定の結果として `[control]` へそのまま書く値と、STM32 が `CONFIG_SET` で受け付ける範囲
+#: （`control_params.h` の表の写し。`tools/ctrl_tune/tests/test_fw_constants.py` が突き合わせる）。範囲の外は
+#: STM32 が丸めて Pi の値と食い違うので、書く前に弾く
+CONTROL_RANGES: dict[str, tuple[float, float]] = {
+    **{f"enc_{s}_lo": (0.0, 0.2) for s in ("left", "right")},
+    **{f"enc_{s}_hi": (0.8, 1.0) for s in ("left", "right")},
+    **{f"enc_{s}_{h}": (-0.1, 0.1) for s in ("left", "right") for h in ("h1s", "h1c", "h2s", "h2c")},
+    **{f"{a}_radius_{s}_m": (0.025, 0.035) for a in ("front", "rear") for s in ("left", "right")},
+    # 車速のカルマンフィルタ（`tools/sysid/kf_tune.py`）
+    "kf_sigma_s_m": (0.00001, 0.005), "kf_sigma_a_m_s2": (0.01, 5.0), "kf_sigma_a_per_m_s": (0.0, 2.0),
+    "kf_jerk_psd": (1.0, 10000.0), "kf_bias_walk_psd": (0.00001, 10.0), "kf_lever_arm_m": (-0.5, 0.5),
+}
+
+
+def apply_control(toml_path: str | Path, values: dict[str, float]) -> list[str]:
+    """`values`（`CONTROL_RANGES` のキー → 値）を `[control]` に書く。変えたキーを返す。"""
+    unknown = set(values) - set(CONTROL_RANGES)
+    if unknown:
+        raise ValueError(f"[control]に書き込めないキーです: {sorted(unknown)}")
+    for key, value in values.items():
+        lo, hi = CONTROL_RANGES[key]
+        if not (lo <= float(value) <= hi):
+            raise ValueError(f"{key}={float(value):.6g} は STM32 の受け付ける範囲 {lo}〜{hi} の外です。"
+                             "書き込みを中止します（試験をやり直してください）")
+    path = Path(toml_path)
+    doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+    if "control" not in doc:
+        raise ValueError(f"{path} に [control] テーブルがありません")
+    control = doc["control"]
+    changed = []
+    for key, value in values.items():
+        old = control.get(key)
+        if old is not None and abs(float(old) - float(value)) < 1e-12:
+            continue
+        control[key] = float(value)
+        changed.append(key)
     if changed:
         _atomic_write(path, tomlkit.dumps(doc))
     return changed
