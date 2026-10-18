@@ -466,8 +466,8 @@ class LidarE2EEnv(gym.Env):
     def _to_obs(self) -> np.ndarray:
         w = scan_window(self._scan, self.cfg.fov_deg, self.cfg.max_range)
         scan_n = np.asarray(w.dist, dtype=np.float32) / self.cfg.max_range
-        # 実機の E2E は STM32 の `speed`（ファームのローパス後）を見る。真の速度ではなく
-        # 同じローパスを通した値を入れる（`VehicleSpec.speed_filter_s`。ファームの定数で、今は約10ms）
+        # 実機の E2E は STM32 の `speed`（カルマンフィルタの車速）を見る。真の速度ではなく
+        # 同じ遅れを通した値を入れる（`VehicleSpec.speed_kf_lag_s`。ファームの式から決まり、今は 0）
         speed_norm = float(np.clip(self.vehicle.speed_measured / self.cfg.max_speed, 0.0, 1.0))
         steer_norm = float(np.clip(self._steer_target / self.max_steer, -1.0, 1.0)) \
             if self.max_steer > 1e-6 else 0.0

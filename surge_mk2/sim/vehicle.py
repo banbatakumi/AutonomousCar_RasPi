@@ -152,12 +152,14 @@ class VehicleSpec:
     speed_ramp_max_m_s2: float = 3.0   # 目標速度のランプの上限（Pi が COMMAND の accel_limit に載せる上限）
     #: 車体の加速度 / 後輪合計トルク [(m/s²)/(N·m)]。名目は 1/(車輪半径×質量)
     speed_plant_gain: float = 1.0 / (0.03 * 2.0)
-    #: STM32 が `speed`/`wheel_speed` に掛けているローパス（1次遅れを `speed_filter_order`
+    #: STM32 が `wheel_speed`（各輪の周速）に掛けているローパス（1次遅れを `speed_filter_order`
     #: 段つないだもの）の1段あたりの時定数 [s]。0＝無し。**ファームの定数**（1段・
-    #: 9.95ms。`drive.h` の DRIVE_LPF_TAU_FRONT_S）で、同定はしない。
-    #: **観測（テレメトリ・学習の入力）だけに効き、車の動きには効かない**
+    #: 9.95ms。`drive.h` の DRIVE_LPF_TAU_FRONT_S）で、同定はしない。**観測だけに効く**
     speed_filter_s: float = 0.0
     speed_filter_order: int = 1
+    #: STM32 の `speed`（カルマンフィルタの車速）の遅れ [s]。**車速PIの帰還**（車の動きに効く）と
+    #: TELEMETRY の `speed`（観測）の両方。ファームの式から決まる（`[dynamics] speed_kf_lag_s`、今は 0）
+    speed_kf_lag_s: float = 0.0
     #: STM32 が車速PIの加速度フィードフォワードで目標車速の傾きに掛けるローパスの時定数 [s]。
     #: **ファームの定数**（`drive.h` の DRIVE_SPEED_FF_TAU_S、`[dynamics] speed_ff_filter_s`）
     speed_ff_filter_s: float = 0.02
@@ -224,6 +226,7 @@ class VehicleSpec:
             control_latency_s=dyn.get("control_latency_s", 0.0),
             speed_filter_s=dyn.get("speed_filter_s", 0.0),
             speed_filter_order=int(dyn.get("speed_filter_order", 1)),
+            speed_kf_lag_s=dyn.get("speed_kf_lag_s", 0.0),
             speed_ff_filter_s=dyn.get("speed_ff_filter_s", dflt.speed_ff_filter_s),
             yaw_relaxation_m=dyn.get("yaw_relaxation_m", 0.0),
             yaw_rate_filter_s=dyn.get("yaw_rate_filter_s", 0.0),
@@ -475,8 +478,8 @@ class SpeedController:
     """STM32 の速度制御（`MainF446RE_V3/src/control/drive.c`）を写したもの。
 
     目標速度を `min(cmd.accel_limit, speed_ramp_max_m_s2)` でランプ（★v0.22 からファームに上限は無い。
-    `speed_ramp_max_m_s2` は Pi が載せる上限 `[safety] cmd_accel_limit_m_s2` と同じ値）→ PI（帰還は前輪速度の
-    ローパス後 `speed_filter_s`。出力 ±`speed_torque_max_nm` で条件付き積分）→ 加速度の
+    `speed_ramp_max_m_s2` は Pi が載せる上限 `[safety] cmd_accel_limit_m_s2` と同じ値）→ PI（帰還はカルマンフィルタの車速。
+    遅れ `speed_kf_lag_s`。出力 ±`speed_torque_max_nm` で条件付き積分）→ 加速度の
     上限（`drive_accel_limit()`・`speed_decel_m_s2`。外側の制限なので積分を back-calculation で
     戻す、`UnwindIntegral` と同じ時定数0.1s）→ 車体（加速度 = `speed_plant_gain`×トルク −
     転がり抵抗）。目標と測定速度がどちらも 0.05m/s 未満なら惰行して積分を捨てる
@@ -549,8 +552,8 @@ class SpeedController:
             1.0 = 同定値）"""
         sp = self.spec
         self.accel_capped = False
-        if sp.speed_filter_s > 1e-6:
-            self.v_meas += (v - self.v_meas) * (1.0 - math.exp(-dt / sp.speed_filter_s))
+        if sp.speed_kf_lag_s > 1e-6:
+            self.v_meas += (v - self.v_meas) * (1.0 - math.exp(-dt / sp.speed_kf_lag_s))
         else:
             self.v_meas = v
         if not cmd.armed or cmd.brake or cmd.torque_mode:
@@ -678,8 +681,10 @@ class VehicleModel:
     def reset(self, start: tuple[float, float, float]) -> None:
         self.x, self.y, self.yaw = start
         self.speed = 0.0
-        #: STM32 が送ってくる `speed`（`speed_filter_s` のローパス後）。観測専用
+        #: STM32 が送ってくる `speed`（カルマンフィルタの車速。`speed_kf_lag_s` だけ遅れる）。観測専用
         self.speed_measured = 0.0
+        #: `wheel_speed` の元にする車速（`speed_filter_s` のローパス後）
+        self._wheel_ref_speed = 0.0
         self._speed_stages = [0.0] * max(1, int(round(self.spec.speed_filter_order)))
         self.steer_actual = 0.0
         #: STM32がCOMMANDのレート制限で作る参照舵角。**`steer_cmd_echo`はこれ**
@@ -776,15 +781,19 @@ class VehicleModel:
         else:
             self.speed = next_speed(sp, cmd, self.speed, dt)
         self.accel_x = (self.speed - prev_speed) / dt if dt > 0 else 0.0
+        if sp.speed_kf_lag_s > 1e-6:
+            self.speed_measured += (self.speed - self.speed_measured) * (1.0 - math.exp(-dt / sp.speed_kf_lag_s))
+        else:
+            self.speed_measured = self.speed
         if sp.speed_filter_s > 1e-6:
             a = 1.0 - math.exp(-dt / sp.speed_filter_s)
             x = self.speed
             for i in range(len(self._speed_stages)):
                 self._speed_stages[i] += (x - self._speed_stages[i]) * a
                 x = self._speed_stages[i]
-            self.speed_measured = x
+            self._wheel_ref_speed = x
         else:
-            self.speed_measured = self.speed
+            self._wheel_ref_speed = self.speed
 
         # ── 運動（自転車モデル。原点は後輪車軸中心） ──
         # 実効舵角・アンダーステア勾配で決まる曲率を、グリップ限界で頭打ちにする。
@@ -858,8 +867,8 @@ class VehicleModel:
 
     @property
     def wheel_speed_measured(self) -> list[float]:
-        """`wheel_speed` に `speed` と同じローパスを掛けたもの（STM32 が送る値）。"""
-        return self._wheel_speeds(self.speed_measured)
+        """`wheel_speed` にファームの各輪のローパス（`speed_filter_s`）を掛けたもの（STM32 が送る値）。"""
+        return self._wheel_speeds(self._wheel_ref_speed)
 
     @property
     def accel_lateral(self) -> float:

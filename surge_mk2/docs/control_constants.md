@@ -36,6 +36,7 @@
 | Pi `slam2d_raceline._ref_lead` の `0.01` | 50Hz の半周期を数字で | `0.5 / CMD_HZ` | 指令周期を `raspi/auto/base.py` の `CMD_HZ` 1 箇所に（planning_node・telemetry_node も読む） |
 | Pi MPC の遅延補償 `mpc_delay_s` | 0.06（GUI のスライダ。シムで 0.05〜0.07 が最良） | Pure Pursuit と同じ `steer_delay()` = 同定した舵・ヨーの遅れ＋通信 ≒ **0.053** | 両者とも「今」へ進めた姿勢を使うので、見込む遅れは同じ。手で合わせた最良域と同定値が一致した |
 | `[control] launch_exit_torque_nm` | 0.009（旧同定値のまま。コメントに「手で直す」） | `rolling_resistance ÷ speed_plant_gain ÷ drive_ratio` = **0.006346**。`tools/sysid` が同定の適用時に書き直す（`launch_exit_value`） | その車速を保つのに要る 1 輪あたりのトルク |
+| シムの車速PIの帰還・`speed` の遅れ | `speed_filter_s` 9.95ms（v0.24 までの前輪ローパス） | `[dynamics] speed_kf_lag_s` = 0（ホストでコンパイルしたファームのカルマンフィルタを測った遅れ 0.1〜0.3ms）。`speed_filter_s` は `wheel_speed` だけ | v0.25 から実機の `speed` はカルマンフィルタ。§4 |
 
 ## 2. 維持するもの
 
@@ -102,13 +103,16 @@
 | Pure Pursuit の `look_k`・`look_min`・`speed_preview`・`steer_ff`、MPC の重み `q_y`・`q_psi`・`r_d` | GUI の設定 | E | 追従の設計値（シム `sim.bench` で比べて決めた）。遅延補償だけは同定値から決まる（上表） |
 | `Vehicle` の未同定時の既定（`a_lat_max` 3.5・加減速 2.5・`cmd_latency` 0.02 等） | — | D | 同定値が無いときに控えめに走るための値。同定後は使われない |
 
-## 4. 見つけたが直していない食い違い
+## 4. 食い違いと、その後の扱い
 
-- **`[dynamics] speed_filter_s`（9.95ms）は今の `speed` には当たらない。** v0.25 から `speed` はカルマンフィルタの車速で、
-  前輪のローパスを通るのは `wheel_speed` だけ。シムは `speed`（`sim/stm32.py` の TELEMETRY）にも、ファームの
-  車速PIの帰還（`sim/vehicle.py` の `SpeedController.v_meas`）にもこのローパスを掛けているので、観測と速度ループの
-  帰還が実機より約 10ms 遅い。`SpeedController` は前後運動試験の当てはめ（`tools/sysid/fit.py`）にも使うので、
-  直すなら同定をやり直す前提で、帰還の遅れをカルマンフィルタの遅れ（ほぼ 0）に合わせる
+- **シムの車速の遅れ（直した）。** v0.25 から実機の `speed`（車速PIの帰還にも使う）はカルマンフィルタの車速で、
+  前輪のローパス（`speed_filter_s` 9.95ms）を通るのは `wheel_speed` だけになった。シムは `speed` にも車速PIの帰還にも
+  9.95ms のローパスを掛けていたので、新しく `[dynamics] speed_kf_lag_s` を設けて `speed`・帰還はそちらで遅らせ、
+  `speed_filter_s` は `wheel_speed` だけにした。値はホストでコンパイルしたファームを車両モデルで回して測った遅れ
+  （加減速で 0.1〜0.3ms、加速度計に 5ms の遅れを入れても）で 0。`test_fw_constants.py` が測り直して突き合わせる。
+  **2026-09-28 の前後運動の同定値はローパスを帰還に使っていた旧ファームで測ったもの**なので、v0.26 のファームで
+  前後運動試験を取り直すまでは、シムの速度ループがわずかに（帰還の遅れ 10ms ぶん）実機と違う。
+  同定ツールのベンチ（`tools/sysid/bench.py`）も記録の `speed` をカルマンフィルタに見立てて作る
 - `[control.plant] md_tau_s` 4.54ms と `VEHICLE_MD_TORQUE_TAU_S` 4.5ms は丸めの範囲で一致（テストの許容 0.1ms）
 
 ## 5. 同定し直したときの手順（ファームの写しがあるもの）

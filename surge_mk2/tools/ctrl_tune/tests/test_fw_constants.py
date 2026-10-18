@@ -17,12 +17,16 @@ import tomllib
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from raspi.auto.base import CMD_HZ  # noqa: E402
 from raspi.core.vehicle import DEFAULT_PATH  # noqa: E402
 from sim.vehicle import SpeedController  # noqa: E402
-from tools.ctrl_tune.fw import FW_DIR  # noqa: E402
+from tools.ctrl_tune import scenarios as S  # noqa: E402
+from tools.ctrl_tune.fw import FW_DIR, OUT, Firmware  # noqa: E402
+from tools.ctrl_tune.plant import NOMINAL  # noqa: E402
 
 HEADERS = ("src/control/drive.h", "src/vehicle/vehicle.h", "src/sensing/lidar.h")
 
@@ -122,6 +126,33 @@ class TestFirmwareConstants(unittest.TestCase):
         self.assertGreater(self.fw("VEHICLE_DISARM_BRAKE_TIMEOUT_S"), stop_s)
         self.assertTrue(math.isclose(self.fw("VEHICLE_AUTO_STOP_DELAY_S"),
                                      1.0 / self.fw("LIDAR_SCAN_FREQ_HZ") + self.fw("VEHICLE_MD_TORQUE_TAU_S")))
+
+
+def kf_lag_s(out: np.ndarray, dt: float = 5e-4) -> float:
+    """加減速している間の「真の車速 − ファームの車速」÷ 加速度 [s]（1次遅れなら時定数に等しい）。"""
+    v, k = out[:, OUT["speed"]], out[:, OUT["fw_speed"]]
+    a = np.gradient(v, dt)
+    m = np.abs(a) > 0.5
+    return float(np.mean((v - k)[m] * np.sign(a[m])) / np.mean(np.abs(a[m])))
+
+
+@unittest.skipUnless((FW_DIR / "src" / "control" / "speed_kf.c").exists(), "ファームに speed_kf が無い")
+class TestSpeedKfLag(unittest.TestCase):
+    """`[dynamics] speed_kf_lag_s`（シムの車速PIの帰還・`speed` の遅れ）を、コンパイルしたファームで測る。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fw = Firmware()
+        with open(DEFAULT_PATH, "rb") as fp:
+            cls.lag = float(tomllib.load(fp)["dynamics"]["speed_kf_lag_s"])
+
+    def test_measured_lag_matches_vehicle_toml(self):
+        for key in ("launch_pi", "brake", "decel_pi"):
+            sc = next(s for s in S.ALL if s.key == key)
+            measured = kf_lag_s(S.run(self.fw, NOMINAL, sc).out)
+            with self.subTest(scenario=key):
+                self.assertLess(abs(measured - self.lag), 1e-3,
+                                f"ファームの車速の遅れ {measured * 1e3:.2f}ms と speed_kf_lag_s {self.lag * 1e3:.2f}ms")
 
 
 if __name__ == "__main__":

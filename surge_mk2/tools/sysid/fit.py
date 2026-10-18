@@ -103,7 +103,7 @@ class Sample:
     steer_rate_limit: float = 0.0   # [rad/s]（/cmd）
     brake_torque: float = 0.0       # [N·m]（/cmd）
     odom: float = 0.0               # [m] 前輪累積走行距離の平均（射影なし。周期誤差の補正後）
-    speed_filtered: float = 0.0     # [m/s] STM32 が送った `speed` そのもの（ローパス後。自己点検用）
+    speed_filtered: float = 0.0     # [m/s] STM32 が送った `speed` そのもの（カルマンフィルタの車速。自己点検用）
     odom_l: float = 0.0             # [m] 左前輪の累積走行距離（記録の値）
     odom_r: float = 0.0             # [m] 右前輪
     wheel_speed_rear: float = 0.0   # [m/s] 後輪モータの周速の平均（前輪と独立なセンサ。表示・点検用）
@@ -936,8 +936,10 @@ def fit_steer(log: Log) -> FitResult:
 
 # ── ② 前後運動（速度制御の応答。2026-09-26 までは速度応答試験） ───────────────
 
-#: 速度の出力誤差の刻み [s]（ファームは2kHz。PI の遅れに対して十分細かい）
-_SPEED_SIM_DT = 0.004
+#: 速度の出力誤差の刻み [s]（ファームは2kHz）。v0.25 から車速PIの帰還に遅れが無い（カルマンフィルタ、
+#: `speed_kf_lag_s`）ので、陽解法の刻みの誤差がそのまま出る: 細かい刻み（0.1ms）との差の最大が 4ms で
+#: 1.2cm/s、2ms で 0.6cm/s（`test_fit.TestSpeedSimulation`）。解析の時間は 1 割ほど延びる
+_SPEED_SIM_DT = 0.002
 
 
 @dataclass
@@ -1217,9 +1219,9 @@ def sensor_check(log: Log, base: VehicleSpec | None = None) -> FitResult:
     """速度センサの自己点検（値は返さない。所見だけ）。
 
     - 静止中の `speed` とオドメトリ由来の速度のノイズ
-    - オドメトリ由来の速度（同定に使う値）に `vehicle.toml` のローパス（ファームの定数）を
-      掛けたものが、記録の `speed` と合うか。合わなければ、ファームのローパスが `vehicle.toml` と
-      違う（＝シムの観測の遅れ、学習の入力が実機と食い違う）
+    - オドメトリ由来の速度（同定に使う値）に `vehicle.toml` の `speed_kf_lag_s`（ファームの車速の
+      遅れ）を掛けたものが、記録の `speed` と合うか。合わなければ、ファームの車速の遅れが `vehicle.toml` と
+      違う（＝シムの車速PIの帰還と観測の遅れ、学習の入力が実機と食い違う）
     ファームの ADC 平均化・ローパスの変更で、ノイズがどれだけ残ったかは
     実機で未確認なので、最初の記録で必ず見る。
     """
@@ -1237,7 +1239,7 @@ def sensor_check(log: Log, base: VehicleSpec | None = None) -> FitResult:
     if float(np.ptp(vo)) < 0.3:
         notes.append("オドメトリが動いておらず、speed のローパスの照合はできず")
         return FitResult({}, notes)
-    tau, order = base.speed_filter_s, max(1, int(round(base.speed_filter_order)))
+    tau, order = base.speed_kf_lag_s, 1
     moving = np.abs(vf) > 0.2
 
     def rms(tau_: float, order_: int) -> float:
@@ -1251,9 +1253,10 @@ def sensor_check(log: Log, base: VehicleSpec | None = None) -> FitResult:
                  f"残差 {e_cfg * 100:.1f}cm/s、記録に最も合う1段のローパスは {tau_best * 1000:.1f}ms"
                  f"（残差 {e_best * 100:.1f}cm/s）")
     if e_cfg > 1.5 * e_best + 0.005 and abs(tau_best - tau) > 0.01:
-        notes.append("★vehicle.toml の speed_filter_s がファームの実際のローパスと合っていない可能性。"
-                     "シムの観測（学習の入力）の遅れが実機とずれるので、ファームの DRIVE_LPF_K_FRONT を"
-                     "確認して直すこと（同定の値はオドメトリから求めているので影響しない）")
+        notes.append("★vehicle.toml の speed_kf_lag_s がファームの車速（カルマンフィルタ）の実際の遅れと合っていない"
+                     "可能性。シムの車速PIの帰還と観測（学習の入力）の遅れが実機とずれるので、ファームの "
+                     "speed_kf.h と `tools/ctrl_tune/tests/test_fw_constants.py` を確認すること"
+                     "（同定の値はオドメトリから求めているので影響しない）")
     return FitResult({}, notes)
 
 

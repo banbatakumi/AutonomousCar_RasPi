@@ -692,7 +692,7 @@ class VirtualStm32:
         return packets.Telemetry(
             t_us=self.stm_us(t_ns),
             flags=self._flags(t_ns),
-            # 実機の speed/wheel_speed はファームのローパス後（`VehicleSpec.speed_filter_s`、約10ms）
+            # 実機の speed はカルマンフィルタ（遅れ `VehicleSpec.speed_kf_lag_s`）、wheel_speed はローパス後（`speed_filter_s`、約10ms）
             speed=_q("speed", speed_meas, -32768, 32767),
             yaw_rate=_q("yaw_rate", yaw_rate, -32768, 32767),
             steer_actual=_q("steer_actual", steer_meas, -32768, 32767),

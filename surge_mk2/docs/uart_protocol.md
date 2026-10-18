@@ -513,7 +513,7 @@ STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均し�
 `wheel_speed[FL/FR]` は各輪の周速を **時定数9.95ms の1次ローパス（`DRIVE_LPF_TAU_FRONT_S`）** に通した報告用の値（車速の計算には使わない）。
 100Hz への間引きで 50Hz より上のノイズが折り返すので、**記録を後から解析する用途（システム同定）は
 `odom_dist`（ローパス前の積算位置）を前後のサンプルでゼロ位相に微分する方が正確**（`tools/sysid/fit.py`）。
-v0.24 以前の記録の `speed` は遅れ約10msのローパス版（シムの `config/vehicle.toml` の `speed_filter_s` はこの遅れ）。
+v0.24 以前の記録の `speed` は遅れ約10msのローパス版（今のシムは `speed` を `config/vehicle.toml` の `speed_kf_lag_s`、`wheel_speed` を `speed_filter_s` で遅らせる）。
 
 #### 前輪エンコーダに由来するその他の制約
 

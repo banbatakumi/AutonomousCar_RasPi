@@ -119,7 +119,8 @@ speed_plant_gain = 21.52488872326685
 rolling_resistance = 0.27320845610211264
 # 旧モデル（1次遅れ）の時定数 [s]。speed_kp > 0 の間は使わない（テスト・旧設定との互換のため残す）
 tau_speed_s = 0.14957988168793218
-# STM32 が speed/wheel_speed に掛けているローパス（1次遅れ×段数、各段の時定数 [s]）。
+# STM32 が wheel_speed（各輪の周速。報告用）に掛けているローパス（1次遅れ×段数、各段の時定数 [s]）。
+# ★v0.25 から `speed`（車体の車速。車速PIの帰還にも使う）はこのローパスを通らない（下の speed_kf_lag_s）。
 # **同定しない。ファームの定数**（MainF446RE_V3 `src/control/drive.h` の DRIVE_LPF_TAU_FRONT_S。
 # 2026-09-25 に 100ms から変更。2026-10-17 から係数ではなく時定数で持つ）。
 # ファームを変えたらここも直すこと（`tools/ctrl_tune/tests/test_fw_constants.py` が突き合わせる）。
@@ -128,6 +129,11 @@ tau_speed_s = 0.14957988168793218
 # （解析の所見「速度センサの自己点検」が、この値と記録の speed の食い違いを警告する）
 speed_filter_s = 0.00995
 speed_filter_order = 1
+# STM32 の `speed`（走行距離と加速度計のカルマンフィルタ、`src/control/speed_kf.c`）の遅れ [s]。車速PIの帰還と
+# TELEMETRY の `speed` がこれだけ遅れる。**同定しない。ファームの式から決まる**: ホストでコンパイルした
+# ファームを車両モデルで回すと、加減速の場面で真の車速に対し 0.1〜0.3ms（加速度計に 5ms の遅れを入れても。
+# 走行距離の測定に遅れが無いため）なので 0。`tools/ctrl_tune/tests/test_fw_constants.py` が測って突き合わせる
+speed_kf_lag_s = 0.0
 # STM32 が車速PIの加速度フィードフォワード（[control] の speed_ff_*）で、目標車速の傾きに掛けている
 # ローパスの時定数 [s]。**同定しない。ファームの定数**（`drive.h` の DRIVE_SPEED_FF_TAU_S = Pi の
 # 指令周期 50Hz）。Pi はこの時定数ぶん先の速度を送り（`raspi/nav/speedctl.py`）、シムの

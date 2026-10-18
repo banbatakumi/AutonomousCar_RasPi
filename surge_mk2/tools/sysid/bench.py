@@ -72,8 +72,9 @@ TRUTH = replace(
     mu=0.47, steer_gain=0.93, steer_offset_rad=0.012, understeer_gradient=0.025,
     steer_gain_cubic=-0.25, steer_servo_hysteresis_rad=math.radians(0.4),
     steer_link_hysteresis_rad=math.radians(0.8), steer_link_deadband_rad=math.radians(0.6),
-    # STM32 の speed のローパス（ファームの定数: 1段・9.95ms。解析はオドメトリを使うので自己点検だけに効く）
-    speed_filter_s=0.00995, speed_filter_order=1,
+    # STM32 の wheel_speed のローパス（ファームの定数: 1段・9.95ms）と speed（カルマンフィルタ）の遅れ（0）。
+    # 解析はオドメトリを使うので自己点検だけに効く
+    speed_filter_s=0.00995, speed_filter_order=1, speed_kf_lag_s=0.0,
     # IMU のローパス（MPU6050 の DLPF 20Hz 設定で約8ms）とタイヤの緩和長
     yaw_rate_filter_s=0.01, yaw_relaxation_m=0.02,
     control_latency_s=0.0,
@@ -161,7 +162,8 @@ class Noise:
 
 #: 実機でありそうな記録の不完全さ: 取りこぼし2%、時刻同期のずれ3ms。
 #: yaw_rate のローパスとタイヤの緩和長は**真値（`VehicleSpec`）の側で持つ**。speed は
-#: エンコーダの角度からファームと同じ計算で作る（ローパスの時定数は真値の `speed_filter_s`）
+#: ファームのカルマンフィルタの出力に見立てて、真の車速に真値の `speed_kf_lag_s` の遅れを掛けて作る
+#: （ホストでコンパイルしたファームで、真の車速との誤差は 2〜3mm/s RMS・遅れ 0.3ms 未満）
 REALISTIC = Noise(drop_prob=0.02, clock_offset_s=0.003)
 #: 加速がグリップで頭打ちになると後輪が滑る車（実機と同じ見え方）。`TRUTH_SLIP` と組で使う
 SLIPPING = Noise(tc_slip=0.2)
@@ -257,8 +259,8 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
     r_w = truth.wheel_radius
     enc_prev = 0.0                      # 前回の計測角 [rad]
     enc_accum = 0.0                     # 累積角（= odom_dist / 車輪半径）
-    omega_f = 0.0                       # ローパス後の角速度
-    a_spd = 1.0 - math.exp(-ms / truth.speed_filter_s) if truth.speed_filter_s > 0 else 1.0
+    v_kf = 0.0                          # STM32 の車速（カルマンフィルタ）
+    a_spd = 1.0 - math.exp(-ms / truth.speed_kf_lag_s) if truth.speed_kf_lag_s > 0 else 1.0
     rear_slip = 0.0                     # 後輪の滑り率（`Noise.tc_slip`）
 
     for k in range(int(max_s / ms)):
@@ -283,7 +285,7 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
         gap = enc - enc_prev
         enc_prev = enc
         enc_accum += gap
-        omega_f += (gap / ms - omega_f) * a_spd
+        v_kf += (veh.speed - v_kf) * a_spd
 
         if k % 10 == 0 and started:                     # 掃いた範囲（10msごと）
             c, s_ = math.cos(veh.yaw), math.sin(veh.yaw)
@@ -294,8 +296,8 @@ def run_test(planner_id: str, truth: VehicleSpec, *, params: dict | None = None,
 
         if k % tlm_ms == ph_tlm and rng.random() >= noise.drop_prob:   # ── TELEMETRY ──
             vs_dict = {
-                # STM32 の speed: 角度の差分→ローパス→車体中心線方向へ射影
-                "speed": _q(omega_f * r_w * math.cos(veh.steer_actual), 0.001),
+                # STM32 の speed: 走行距離と加速度計のカルマンフィルタ（車体中心線方向の車速）
+                "speed": _q(v_kf, 0.001),
                 # STM32 の yaw_rate は IMU のローパス後（真値の yaw_rate_filter_s）
                 "yaw_rate": _q(veh.yaw_rate_measured + noise.yaw_bias + rng.gauss(0, noise.yaw_sigma), 0.001),
                 "steer_actual": _q(veh.steer_actual + rng.gauss(0, noise.steer_sigma), 0.0001),
@@ -485,7 +487,7 @@ def run_all(truth: VehicleSpec = TRUTH, seed: int = 0, verbose: bool = True,
 def write_mcap(log: Log, path, t0_ns: int = 5_000_000_000) -> None:
     """ベンチの記録を、実機と同じロガー（`McapLog`）・同じトピックで mcap に書く。
 
-    `speed` は STM32 が送る値（ローパス後、`speed_filtered`）、`odom_dist` は前輪の累積距離。
+    `speed` は STM32 が送る値（カルマンフィルタの車速、`speed_filtered`）、`odom_dist` は前輪の累積距離。
     `/diag/link` には STM32 に入っていた値（ステアのリンクの換算・加速度フィードフォワード）を残す
     （解析は記録からそれを読む。`fit.load_log`）。
     """
