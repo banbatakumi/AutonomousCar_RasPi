@@ -3,7 +3,7 @@
 !!! warning "【シム／ホスト検証】"
     対象: [`drive.c`][drive-c] の `UpdateSlipLimiter` / `UpdateWheelLimit` / `ApplyAbs`、[`drive.h`][drive-h]、
     [`control_params.h`][params-h]。確認した版: ファーム `2a2e9a8`。
-    **ゲインとしきい値は、実機の記録から同定した車両モデル上で最適化した値で、現行ファームでの実機確認は無い**
+    **目標スリップ率とゲインは、実機の記録から測ったタイヤの曲線と遅れから式で決める（車両の校正 7）。現行ファームでの実機確認は無い**
     （ファーム `CLAUDE.md`「机上値」、[検証状況](../overview/status.md)）。
 
 3 つの機能が**同じ仕組み（`SlipLimiter`）**を共有しています。
@@ -81,7 +81,7 @@ $$
 
 実車の油圧 ABS はバルブの開閉しかできないので段を刻みますが、**モータはトルクを連続に出せる**ので、連続の PI にしてあります。
 段を刻むと最初の一撃で深くロックし、再カットで必要以上に抜く（ロックなしの約 85 %）、とコードのコメントにあります
-（比較は Pi 側リポジトリ `tools/ctrl_tune/bench.py`、**【シム／ホスト検証】**）。
+（比較は Pi 側リポジトリ `tools/fwsim/bench.py`、**【シム／ホスト検証】**）。
 
 ## 3. TC（各輪独立）
 
@@ -142,7 +142,7 @@ $$
 | `abs_kp_nm_per_m_s` | 0x0072 | 0〜1.0 | 0.121 | ABS 比例 |
 | `abs_ki_nm_per_m` | 0x0073 | 0〜50 | 3.06 | ABS 積分 |
 
-!!! info "スリップ率の「目標」は最適化しない"
+!!! info "目標スリップ率とゲインの決め方（2026-10-19 に数値最適化から式に置き換えた）"
     調整ツールが最適化するのは**ゲイン（kp・ki）だけ**です。`tc_slip_target` と `abs_slip_target` は
     「前後の力」と「横グリップ」のどちらを取るかという**方針**で、最適な値が無いからです。人が `tradeoff()` の表を見て決めます。
 
@@ -150,7 +150,13 @@ $$
     「ABS のゲインを下げてロックさせた方が止まる」解が最適になったそうです（効率 0.91→0.97 と引き換えに、
     滑っていた割合 0.03→0.58）。後輪だけで制動する車で後輪をロックさせるとスピンしますが、
     モデルは横滑りを表せないので、その損をコストに入れられません。
-    — [`tools/ctrl_tune/optimize.py`][optimize-py] のコメントより。
+    — 2026-10-18 までの数値最適化（`tools/ctrl_tune/optimize.py`）のコメントより。
+
+    今は車両の校正 7（[`tools/calib/tyre.py`][tyre-py]）が、TC・ABS 自身に目標スリップ率を振って保たせた記録から
+    「スリップ率 → 前後力」の曲線を測り、**山の 95% の力が出るスリップ率**を目標にします（横グリップを残す方針）。
+    ゲインは、目標の点で線形化したスリップの動き \(\dot u = (r/J)T - a u\)（\(a = r^2 k/(J v)\)、\(k\) は曲線の傾き）と
+    測った遅れから位相余裕 60° の式で決めます。旧最適化の TC のゲインは、この式で位相余裕 58° 相当でした。
+    効きは閉ループの試験（校正 8）で、スリップ率が目標に保たれ振動しないかを実機で確かめます。
 
 ## 7. 設計上の教訓
 
@@ -163,4 +169,4 @@ $$
 [drive-h]: https://github.com/banbatakumi/AutonomousCar/blob/FW/MainBoard_V3/Program/MainF446RE_V3/src/control/drive.h
 [params-h]: https://github.com/banbatakumi/AutonomousCar/blob/FW/MainBoard_V3/Program/MainF446RE_V3/src/control/control_params.h
 [vehicle-toml]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/config/vehicle.toml
-[optimize-py]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/tools/ctrl_tune/optimize.py
+[tyre-py]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/tools/calib/tyre.py

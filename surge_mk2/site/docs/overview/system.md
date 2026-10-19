@@ -18,7 +18,7 @@ MD は後輪左・後輪右・ステアの 3 台で、STM32 と 1 Mbps の UART 
 
 - **車速制御・スリップ制御は 2 kHz 級の応答が要る。** Python の 10〜100 Hz では足りません。
   この車の後輪は軽く、実機の ABS の記録では、グリップの限界を超えるトルクを掛けると **約 20 ms で深くロック** しました
-  （[`tools/ctrl_tune/plant.py`][plant-py] のコメント）。
+  （[`tools/fwsim/plant.py`][plant-py] のコメント）。
 - **一方、SLAM やレーシングライン計算は Python の方が速く作れる。** 地図計算は Pi 5 でも 100 ms を超えることがあります
   （[地図と自己位置推定](../raspi/mapping.md) の実測を参照）。
 - **上位が落ちても止まれること。** 安全に関わる処理を下位に置くと、上位の不具合・遅延・Wi-Fi 切断が車の暴走に直結しません。
@@ -84,13 +84,13 @@ flowchart TB
 - STM32 の時刻は `micros` のカウンタ（32 bit、約 71.6 分でラップ）で、Pi の `CLOCK_MONOTONIC` とは別物です。
   PING／PONG の 4 つのタイムスタンプからクロックオフセットとドリフトを推定して換算します
   （[プロトコル](../link/protocol.md#時刻同期)）。SLAM と遅延測定がこれに依存します。
-- システム同定の実測値（[`vehicle.toml`][vehicle-toml] の `[dynamics]`、2026-09-28）:
+- 実測値（[`vehicle.toml`][vehicle-toml] の `[dynamics]`。舵は 2026-09-28 の旧同定、遅延は 2026-10-18 の記録）:
 
     | 量 | 値 |
     |---|---|
     | 操舵のむだ時間（`dead_time_s`） | 約 8 ms |
     | 操舵の 1 次遅れ時定数（`tau_steer_s`） | 約 0.8 ms |
-    | LiDAR スキャン完了 → 反応した指令を STM32 が受理（`control_latency_s`） | 約 13 ms |
+    | LiDAR スキャン完了 → 反応した指令を STM32 が受理（`control_latency_s`） | 約 12 ms |
 
     舵そのものはほとんど遅れません。経路追従はこれらを [遅延補償](../raspi/tracking.md#遅延補償) で見込んでいます。
 
@@ -102,5 +102,5 @@ flowchart TB
 - **V1 の `robotcar/`** — Raspberry Pi 3 の手動遠隔操縦システム。この解説の対象外です。
 
 [install-services]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/raspi/setup/install_services.sh
-[plant-py]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/tools/ctrl_tune/plant.py
+[plant-py]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/tools/fwsim/plant.py
 [vehicle-toml]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/config/vehicle.toml

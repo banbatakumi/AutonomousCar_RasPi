@@ -70,7 +70,7 @@ T_{\mathrm{total}} = K_p\,(v^* - v) + K_i \!\int (v^* - v)\,dt \;+\; \underbrace
 $$
 
 - \(K_p, K_i\) はファームに焼き込まず、Pi が送る（[`vehicle.toml`][vehicle-toml] の `[dynamics]`）。微分項は使わない（車速は微分ノイズが乗りやすい）。
-- ゲインは手で決めず、**極配置**で決める: 車体を \(\dot v = G\,T\)（\(G\) は同定した車体の利得）とみると閉ループは \(s^2 + G K_p s + G K_i = 0\) なので、狙いの減衰比 \(\zeta\) と固有角周波数 \(\omega_n\) から \(K_p = 2\zeta\omega_n/G\)、\(K_i = \omega_n^2/G\)（今は \(\zeta = 0.90\)、\(\omega_n = 3.6\) rad/s で \(K_p = 0.3\)、\(K_i = 0.6\)）。\(\omega_n\) の上限は、トルクを直接掛けて往復する試験で測ったトルクの遅れから位相余裕で決まる。
+- ゲインは手で決めず、**位相余裕**から決める（車両の校正 5、`tools/calib/speed.py`・`loop.py`）: 車体を \(\dot v = G\,T\)（\(G\) は校正で測った車体の利得）に、測ったトルクの遅れ（むだ時間 \(d\)・1 次遅れ \(\tau\)）を付けた一巡 \(L = G K_p (s + \omega_z) e^{-sd}/(s^2(1+s\tau))\) について、PI の零点を交差の 1/4 に置き、位相余裕が 60° になる交差 \(\omega_c\)（上限 15 rad/s）から \(K_p\)・\(K_i = K_p \omega_z\) を出す。決めた値は車速指令の閉ループの試験（`calib_speed_check`）で、追従の誤差を予測と比べて確かめる。
 - 出力は後輪 2 輪の合計トルクで、±0.26 N·m（1 輪 0.13 N·m ×2）に収める。
 
 ### なぜフィードフォワードが要るか
@@ -89,7 +89,7 @@ PI だけだと、加速度 \(a\) を出すトルクは「偏差が \(a/(\text{�
 - 傾きは上位が 50 Hz で目標を刻むため周期ごとに跳ぶので、その刻みの周期 \(\tau = 20\,\mathrm{ms}\) を時定数にした
   1 次ローパスでならします（`DRIVE_SPEED_FF_TAU_S` = `DRIVE_HOST_COMMAND_PERIOD_S`）。Pi 側は `vehicle.toml` の
   `[dynamics] speed_ff_filter_s` だけが同じ値を持ち（planner とシミュレータが読む）、ファームとの一致は
-  `tools/ctrl_tune/tests/test_fw_constants.py` が確かめます。
+  `tools/fwsim/tests/test_fw_constants.py` が確かめます。
 - 制動・torque_mode・ローンチ・停車中は足しません。2 つとも 0 なら FF なしの PI と同じ動きです。
 
 ## アンチウィンドアップ

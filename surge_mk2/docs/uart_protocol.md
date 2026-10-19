@@ -1,6 +1,6 @@
 # SURGE Mark.2 UART プロトコル仕様
 
-**バージョン**: v0.27（`protocol_version = 0x001B`。唯一の定義は `raspi/proto/protocol.toml`）
+**バージョン**: v0.29（`protocol_version = 0x001D`。唯一の定義は `raspi/proto/protocol.toml`）
 **最終更新**: 2026-10-11
 **対象**: Raspberry Pi 5 ⇄ STM32F446RE 間の通信
 **状態**: Pi・STM32 とも実装済み。**STM32・MD は未書き込み、実機での動作検証は未了**。
@@ -302,9 +302,9 @@ LD06 の測距精度が ±1.5cm 程度なので、2cm 量子化による情報�
 
 > **`t_us` は送信時刻ではなく、中身のスナップショットを取った時刻**（新しいスナップショットができたときに
 > 1回だけ送る）。送信は送信キューの順番待ちのあとなので、送信時刻を付けると中身が古いのに新しく見え、
-> 制御遅延の同定（`sysid_latency`）がずれる（中身を作るタイマーと送信タイマーが別々だった頃は最大+20ms）。
+> 制御遅延の校正（`calib_latency`）がずれる（中身を作るタイマーと送信タイマーが別々だった頃は最大+20ms）。
 > **`VERSION.fw_id` が `0x4D463304` 未満のファームで取った記録の `control_latency_s` は使わないこと**
-> （ワイヤ形式は同じで `protocol_version` では見分けられない。同定の解析 `tools/sysid/fit.py` の
+> （ワイヤ形式は同じで `protocol_version` では見分けられない。旧同定の解析の
 > `fit_latency` は、記録の `/diag/link` の `fw_id` が古ければ★を出す）。
 > `cmd_seq_echo` だけは送信時点で最後に受けた COMMAND の SEQ（他のフィールドより最大1周期新しい。
 > 往復時間の測定にはこの方が正しい）。
@@ -512,7 +512,7 @@ STM32 は **ADC を1制御周期ぶん（32スキャン、約444µs）平均し�
 そのまま使ってよい。ただし微分すれば加速度計の雑音が増幅されるので、**加速度は `accel_x/y/z`（IMU）か `accel_kf` から取ること。**
 `wheel_speed[FL/FR]` は各輪の周速を **時定数9.95ms の1次ローパス（`DRIVE_LPF_TAU_FRONT_S`）** に通した報告用の値（車速の計算には使わない）。
 100Hz への間引きで 50Hz より上のノイズが折り返すので、**記録を後から解析する用途（システム同定）は
-`odom_dist`（ローパス前の積算位置）を前後のサンプルでゼロ位相に微分する方が正確**（`tools/sysid/fit.py`）。
+`odom_dist`（ローパス前の積算位置）を前後のサンプルでゼロ位相に微分する方が正確**（`tools/calib` の解析はこうしている）。
 v0.24 以前の記録の `speed` は遅れ約10msのローパス版（今のシムは `speed` を `config/vehicle.toml` の `speed_kf_lag_s`、`wheel_speed` を `speed_filter_s` で遅らせる）。
 
 #### 前輪エンコーダに由来するその他の制約
@@ -703,9 +703,9 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   STM32 が `target_speed`/`target_torque` を無視して**最大制動トルクで停止**する。
 - **`d_stop` は固定値ではない**（前後超音波の固定20cm未満ではない）。
   `d_stop = v・t_delay + v²/(2・a_max) + margin` で、`v` は進行方向の実走行速度の
-  絶対値。`t_delay`/`a_max` は STM32 側の定数（`VEHICLE_AUTO_STOP_DELAY_S` = LiDAR の1回転 0.1s ＋
-  MD のトルクの立ち上がり 4.5ms、`VEHICLE_AUTO_STOP_DECEL_M_S2` = 同定した制動の減速度 2.47m/s²
-  （`[dynamics] brake_decel_m_s2`）。駆動の加速度上限とは独立）。走行速度が上がるほど `d_stop` は伸び、早い段階で作動する。
+  絶対値。`t_delay` = LiDAR の1回転 0.1s（STM32 の定数）＋ MD のトルクの遅れ（`CONFIG_SET` `MD_TORQUE_LAG_S`、★v0.29）、
+  `a_max` = 制動の減速度（`CONFIG_SET` `BRAKE_DECEL_M_S2`。値は `[limits] abs_brake_decel_m_s2`、校正 8。
+  駆動の加速度上限とは独立）。走行速度が上がるほど `d_stop` は伸び、早い段階で作動する。
   `margin` だけが `CONFIG_SET`（`param_id = 0x0060`）でcm単位の連続値として直接
   指定できる（§5.8.3）。
 - **判定は3つのセンサ条件の OR**（いずれか1つでも成立すれば作動）:
@@ -958,8 +958,10 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 | `0x00A1` | **ローンチコントロールを終えるときの積分の初期値** [N·m、1輪あたり] | f32 | §5.6.7・§5.8.4。`LAUNCH_EXIT_TORQUE_NM`。範囲 0〜0.05、既定 0 |
 | `0x00B1` | **車速PIの加速度フィードフォワードの利得** [N·m/(m/s²)、後輪 2 輪の合計] | f32 | §5.8.4。`SPEED_FF_NM_PER_M_S2`。＝ 1 ÷ 車体の利得。範囲 0〜0.2、既定 0（無し） |
 | `0x00B2` | **同 転がり抵抗ぶんのトルク** [N·m、後輪 2 輪の合計] | f32 | `SPEED_FF_RR_NM`。目標車速の向きへ足す。範囲 0〜0.05、既定 0 |
-| `0x00C1`-`0x00C6`・`0x00C9`-`0x00CE` | **前輪エンコーダの校正**（左・右） | f32 | ★v0.27。`ENC_{LEFT,RIGHT}_{LO,HI,H1S,H1C,H2S,H2C}`。角度 0・2π に当たる ADC の読みの比（lo 0〜0.2・hi 0.8〜1.0、既定 0・1）と、1回転の周期誤差の 1・2 次の係数 [rad]（±0.1、既定 0）。読み θm = θ + e(θ) を STM32 が直してから角度・回転量・`odom_dist` にする。値はエンコーダ校正試験（`sysid_encoder`）の解析が `[control]` に書く。入れ替えた瞬間に回転量へ段差は出ない |
+| `0x00C1`-`0x00C6`・`0x00C9`-`0x00CE` | **前輪エンコーダの校正**（左・右） | f32 | ★v0.27。`ENC_{LEFT,RIGHT}_{LO,HI,H1S,H1C,H2S,H2C}`。角度 0・2π に当たる ADC の読みの比（lo 0〜0.2・hi 0.8〜1.0、既定 0・1）と、1回転の周期誤差の 1・2 次の係数 [rad]（±0.1、既定 0）。読み θm = θ + e(θ) を STM32 が直してから角度・回転量・`odom_dist` にする。値は校正 1（`calib_encoder`、`docs/calibration.md`）が `[control]` に書く。入れ替えた瞬間に回転量へ段差は出ない |
 | `0x00E1`-`0x00E6` | **車速のカルマンフィルタの調整値** | f32 | ★v0.27。`KF_SIGMA_S_M`（0.0008）・`KF_SIGMA_A_M_S2`（0.6）・`KF_SIGMA_A_PER_M_S`（0。加速度のノイズ = これ×|車速| を足す）・`KF_JERK_PSD`（100）・`KF_BIAS_WALK_PSD`（0.05）・`KF_LEVER_ARM_M`（0.15）。括弧は既定＝v0.26 の固定値 |
+| `0x00F1` | **ジャイロ z 軸の感度の補正** | f32 | ★v0.28。`IMU_GYRO_Z_SCALE`（倍率 0.9〜1.1、既定 1）。STM32 の `imu.c` がバイアスを引いた後の z の角速度に掛ける（`yaw_rate`・TC/TV の基準・姿勢推定のすべてに効く）。値は `[control]` に手で置く（既定 1 = 補正なし） |
+| `0x0101`・`0x0102` | **制動の減速度・MD のトルクの遅れ** | f32 | ★v0.29。`BRAKE_DECEL_M_S2`（[m/s²]、0.5〜10）・`MD_TORQUE_LAG_S`（[s]、0〜0.1）。STM32 の自動停止の停止距離（§5.9）と、走行中に ARM が外れたときに制動を続ける上限（最高速 5m/s ÷ 減速度 × 1.5）に使う。**ファームは値を持たない**（仮置きは範囲の下限で、上位が送るまで ARM しない）。`[control]` には書かず、`[limits] abs_brake_decel_m_s2`（校正 8）と `[control.plant] md_delay_s + md_tau_s`（校正 6）から io_node が作って送る（`raspi/core/control_params.py` の `DERIVED`） |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
 
 #### 5.8.1 なぜ `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を Pi から送らないか
@@ -1034,7 +1036,7 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
 
 - **名前・`param_id`・範囲の唯一の定義は STM32 側 `src/control/control_params.h` の表。** 表の「既定値」列は
   **上位が送るまでの仮置き**（各範囲の下限＝何もしない値。ステアのリンクだけ恒等の 1・0）で、本物の値ではない（★v0.23）
-  `protocol.toml` の `[params]` はその `param_id` を写したもの（食い違いは `tools/ctrl_tune/tests` が検出）
+  `protocol.toml` の `[params]` はその `param_id` を写したもの（`tools/fwsim/fw.py` の `param_table` がファームの表を読む）
 - 範囲外の値は STM32 が範囲内へ丸め、`CONFIG_ACK.result = 2`（範囲外）・`applied` = 丸めた後の値を返す。
   非数は仮置きの値になる
 - **Flash には保存しない。** 値の唯一の定義は Pi 側 `config/vehicle.toml`（`[control]`。車速PI の `speed_kp`・`speed_ki` だけ
@@ -1048,7 +1050,7 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
   3. STM32 の再起動を検出したら（`t_us` の後退）最初からやり直す
   4. 結果は `diag/link` の `control_params_status`（`ok`/`pending`/`mismatch`/`unsupported`/`invalid`/`none`）と
      `control_params`（STM32 が答えた値）。GUI の「設定 → 走行アシスト」に出る
-- **一時的な上書き**: 同定の試験（`raspi/auto/sysid_wheel.py` など）は `AutoState.fw_overrides` →
+- **一時的な上書き**: 校正の試験（`raspi/auto/calib_wheel.py`・`calib_tyre.py` など）は `AutoState.fw_overrides` →
   `DriveCmd.fw_overrides` に名前と値を書く（調整パラメータ全部と `tc_enable`/`tv_enable`/
   `wheel_lift_guard_enable`/`abs_enable`）。io_node は**その指令が届いている間だけ**入れ、届かなくなったら
   元の値へ戻す（試験が中断しても TC を切ったままにならない）
@@ -1063,7 +1065,7 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
   ヨーモーメント→ヨーレートの効きが小さく（0.1N·m で 0.056rad/s）ループゲインが 0.05 しかない、定常の
   ヨーレートは舵の方が約30倍動かせる、回り過ぎの修正は空転している内輪へトルクを足す向きで TC に
   打ち消された（PROGRESS.md 2026-10-08「TV の作り直し」）
-- 値を決める手順は `tools/ctrl_tune`（[`development.md`](development.md)「足回りの制御を調整する」）
+- 値を決める手順は車両の校正（[`calibration.md`](calibration.md)）
 - **ステアのリンクの換算（`0x0081`/`0x0082`）も同じ仕組みで送る**が、調整値ではなくシステム同定の
   結果: `路面舵角 = gain·x + cubic·x³`、x = ステアモータの角度×0.5（可動範囲 ±30°）。STM32 は指令
   （路面舵角→モータ角、ニュートン法）・報告・`LIMITS.max_steer_rad`・車速の射影のすべてに使う。可動範囲の
@@ -1071,7 +1073,7 @@ TC・ABS・片輪浮き対策・TV のゲイン・しきい値を実行時に読
   決まらなくなるため）。丸めたときは `CONFIG_ACK` の `applied` に丸めた値を返し `result=OUT_OF_RANGE` にする
   （`gain` を変えて保持中の `cubic` が丸められたときは `cubic` の保持値だけが変わる。`CONFIG_GET` で読める）。
   **この2つは受けた値を保持するだけで、STM32 が停車して DISARM のときに適用する**（走行中に換算が変わると、
-  同じ指令でも舵角の意味が途中で変わる）。適用時に `LIMITS` を送り直す。Pi は DISARM のまま送るので通常は即適用される`tools/sysid` が舵角ごとの曲率から求め、`[control]` の2つ・`[dynamics]` の
+  同じ指令でも舵角の意味が途中で変わる）。適用時に `LIMITS` を送り直す。Pi は DISARM のまま送るので通常は即適用される校正 2（`calib_steer`）が低速の弧の曲率から求め、`[control]` の2つ・`[dynamics]` の
   `steer_gain`=1/`steer_gain_cubic`=0・最上位の `max_steer` を**そろえて**書く（`toml_update.apply_dynamics`）。
   記録（mcap）の舵角の意味は、そのとき STM32 に入っていた換算で決まる（`/diag/link` の `control_params` に残る。
   解析は記録時の換算の上に重ねる、`analyze.fold_steer_link`）

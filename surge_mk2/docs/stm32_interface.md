@@ -1,6 +1,6 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
-**バージョン**: v0.27（`uart_protocol.md` v0.27 に対応。`protocol_version = 0x001B`）
+**バージョン**: v0.29（`uart_protocol.md` v0.29 に対応。`protocol_version = 0x001D`）
 **最終更新**: 2026-10-11
 **状態**: 実装済み・ビルド済み。**STM32・MD は未書き込み、実機での動作検証は未了**
 **対象読者**: STM32 ファームウェアを実装する人
@@ -1051,7 +1051,7 @@ STM32 側は必ずこのビットを立てること。**立て忘れると Pi �
 
 **据え切り（停車中の操舵）による MD ステアの過熱**は、この車両構成で最も起こりやすい故障モード。
 停車中の連続操舵時間に上限を設けるか、電流を絞る保護を入れること。Pi 側の planner は、停車を確認して
-2 秒経ったら舵を中立へ戻す（`raspi/auto/base.py` の `StandstillSteer`。`park_to_point`・`sysid_corner`）。
+2 秒経ったら舵を中立へ戻す（`raspi/auto/base.py` の `StandstillSteer`。`park_to_point`）。
 STM32 はフェイルセーフで停車して 30 秒経つと駆動電源を切る。ファーム側の操舵時間の上限は未実装。
 
 **`md_status[i].comm_ok` は必須。** MD が死んで無言になると status は最後の値のまま固まるため、
@@ -1194,6 +1194,7 @@ MD が返す status バイトをそのまま転送し、上位ビットを STM32
 | `0x00A1` | ローンチコントロールを終えるときの積分の初期値（`launch_exit_torque_nm`）[N·m、1輪あたり] | float | `control_params.h` の表。0〜0.05、既定 0 |
 | `0x00B1` | 車速PIの加速度フィードフォワードの利得（`speed_ff_nm_per_m_s2`）[N·m/(m/s²)、後輪2輪の合計] | float | `control_params.h` の表。0〜0.2、既定 0 |
 | `0x00B2` | 同 転がり抵抗ぶんのトルク（`speed_ff_rr_nm`）[N·m、後輪2輪の合計] | float | 0〜0.05、既定 0 |
+| `0x0101`・`0x0102` | 制動の減速度（`brake_decel_m_s2`）[m/s²]・MD のトルクの遅れ（`md_torque_lag_s`）[s] | float | ★v0.29。自動停止の停止距離と DISARM 後の制動の上限（最高速 ÷ 減速度 × 1.5）に使う。**ファームは値を持たない**（仮置きは範囲の下限 0.5・0）。上位は `[limits] abs_brake_decel_m_s2` と `[control.plant] md_delay_s + md_tau_s` から作って送る |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
 
 **`param_id 0x0060` — 自動停止 安全マージン**

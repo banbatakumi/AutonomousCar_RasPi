@@ -92,7 +92,7 @@ $$
     STM32 の加速度フィードフォワード（\(\tau = 20\) ms のローパス、Pi の指令周期そのもの）の値は、Pi 側では
     `vehicle.toml` の `[dynamics] speed_ff_filter_s` だけが持ち、planner とシミュレータの両方がそこを読みます
     （[駆動制御](../stm32/drive.md#車速-pi--加速度フィードフォワード)）。ファームの値とずれていないかは
-    `tools/ctrl_tune/tests/test_fw_constants.py` が確かめます。
+    `tools/fwsim/tests/test_fw_constants.py` が確かめます。
 
 ## 設計の要点
 

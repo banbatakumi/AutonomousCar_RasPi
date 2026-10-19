@@ -7,13 +7,10 @@
 
 ```mermaid
 flowchart LR
-    LOG["実機の走行記録<br/>(.sfl / .mcap)"] --> SYSID["システム同定<br/>tools/sysid"]
-    LOG --> FIT["車輪・タイヤのモデル同定<br/>tools/ctrl_tune"]
-    SYSID --> TOML["vehicle.toml"]
-    FIT --> TOML
+    LOG["実機の校正の試験の記録<br/>(.mcap)"] --> CAL["車両の校正<br/>tools/calib"]
+    CAL --> TOML["vehicle.toml"]
+    FW["ファームの制御コードをホストで実行<br/>tools/fwsim"] --> CAL
     TOML --> SIM["シミュレータ<br/>sim/"]
-    TOML --> OPT["制御パラメータの最適化<br/>(ファームの制御コードをホストで実行)"]
-    OPT --> TOML
     SIM --> BENCH["ベンチ<br/>(真値で評価)"]
     TOML --> CAR["実機へ配備"]
     CAR --> LOG
@@ -32,7 +29,7 @@ flowchart LR
 - **例外は「SIM」バッジだけ**です。これは利便性ではなく安全要件で、シムと実機の画面が見分けられないと「シムのつもりで `--allow-arm` した実車が動く」ためです。
 - シムとシミュレータ GUI の間は ZeroMQ ではなく **UDP ループバック**にします（バスに乗せると、メッセージ型とバスにシムの語彙が入り込む）。
 - 仮想 STM32 の時計は Pi と独立で、実機で実測したドリフト（+3378 ppm）を持たせます。**Pi の時計をそのまま返すと、時刻同期のコードが仕事をしているか確認できない**ためです。
-- **仮想 STM32 は TC/TV を実装していません**（タイヤモデルが無く、介入する材料が無い）。TC/TV の検証は次の `ctrl_tune` が担います。
+- **仮想 STM32 は TC/TV を実装していません**（タイヤモデルが無く、介入する材料が無い）。TC/TV の検証は次の `tools/fwsim` が担います。
 
 ### 評価ベンチ（真値で測る）
 
@@ -47,29 +44,24 @@ flowchart LR
 
 ## ファームの制御コードをそのままホストで回す
 
-[`tools/ctrl_tune`][ctrl-tune] は、STM32 ファームの `src/control`（Drive・TorqueVectoring・ControlParams）を
-**ホスト（Mac/Linux）でそのままコンパイル**し、後輪＋タイヤ＋車体のモデルと閉ループにして、TC・ABS・TV のパラメータを最適化します。
-調整するのは実物のコードなので、**Python に写した制御とのずれが起きません。**
+[`tools/fwsim`][fwsim] は、STM32 ファームの `src/control`（Drive・TorqueVectoring・ControlParams・車速のカルマンフィルタ）を
+**ホスト（Mac/Linux）でそのままコンパイル**し、後輪＋タイヤ＋車体のモデルと閉ループにします。動かすのは実物のコードなので、
+**Python に写した制御とのずれが起きません。**
 
 !!! warning "リポジトリをまたぐ依存"
-    `ctrl_tune` は、ファームのリポジトリが**このリポジトリの隣**（`../AutonomousCar/Program/MainF446RE_V3`）にあることを前提にします
+    ファームのリポジトリが**このリポジトリの隣**（`../AutonomousCar/Program/MainF446RE_V3`）にあることを前提にします
     （違う場所なら環境変数 `SURGE_FW_DIR`）。ファームのソースをコミット単位で取り出して比べる機能（`--ref v0.15`）もあります。
-    **ファームの制御コードを変えたら、Pi 側のリポジトリで `python -m tools.ctrl_tune.bench` と `pytest tools/ctrl_tune/tests` を回す**、が手順です。
+    **ファームの制御コードを変えたら `python -m tools.fwsim.bench` と `pytest tools/fwsim/tests` を回す**、が手順です。
 
 | ファイル | 役割 |
 |---|---|
-| `host/host_sim.c`（ファーム側） | 車両モデルと閉ループの本体。2 kHz の制御周期を 20 に刻んで積分。速さのため車両モデルも C で書く |
+| `host/host_sim.c`（ファーム側） | 車両モデルと閉ループの本体。2 kHz の制御周期を 20 に刻んで積分。前輪エンコーダの真の特性（出力の範囲・周期誤差）も持てる |
 | `host/shim/*.h`（ファーム側） | HAL に触るヘッダ（timer・encoder・imu・bldc_motor・serial）の差し替え |
 | `fw.py` | ファームの `src/control` と `lib/` を取り出してコンパイルし、呼び出す |
-| `plant.py` | 後輪＋タイヤ＋車体のモデルのパラメータと、それを揺らした「あり得る車」の組 |
-| `optimize.py` | パラメータの最適化 |
+| `plant.py`・`scenarios.py` | 車のモデルの値と、比べる場面（発進・制動・旋回の加速など） |
 | `bench.py` | 2 つのファーム（コミット済み／作業ツリー）を同じ車両モデル・同じ場面で並べて比べる |
 
-最適化は、**あり得る車の組すべてで場面を回して「平均と最悪の中間」が最小になる値**を探します（平均だけだと、ある 1 つの条件で破綻する値が選ばれる）。
-コストの主役は目標スリップからの行き過ぎと深く滑っていた時間で、効率の損は小さい重みに留めます
-（効率を主にすると、積分を弱くして目標より上に居座るゲインが選ばれる）。
-
-テスト（`tools/ctrl_tune/tests`）は**制御の約束**を回帰として固定しています。例:
+テスト（`tools/fwsim/tests`）は**制御の約束**を回帰として固定しています。例:
 
 - 定速で介入しない（`test_no_intervention_when_cruising`）
 - 停止からの発進で TC が働く（`test_tc_works_from_standstill`）
@@ -77,30 +69,34 @@ flowchart LR
 - 片輪を絞ったトルクを反対輪に移さない（`test_cut_wheel_torque_is_not_moved_to_the_other_wheel`）
 - 前輪エンコーダが死んでも暴走しない（`test_dead_front_encoder_does_not_runaway`）
 - 制動中は加速度 FF を足さない、ローンチの開始・終了条件、TV の配分
+- ファームの定数の写しが `vehicle.toml` と一致する（`test_fw_constants.py`）
 
-## システム同定
+## 車両の校正
 
-[`tools/sysid`][sysid] は、実機の走行記録から `vehicle.toml` の `[dynamics]` を推定します。専用の planner（`sysid_encoder`・`sysid_steer`・`sysid_accel`・`sysid_corner`・`sysid_latency`・`sysid_speed_pi`・`sysid_wheel`・`sysid_tyre`）が試験の走り方を持ちます。
+[`tools/calib`][calib] は、専用の試験（`calib_encoder`・`calib_steer`・`calib_steer_dyn`・`calib_latency`・`calib_speed`・
+`calib_speed_check`・`calib_wheel`・`calib_tyre`・`calib_traction_check`）の記録から `vehicle.toml` の値を決めます
+（2026-10-18 に旧システム同定 `tools/sysid`・旧制御の調整 `tools/ctrl_tune` から作り直した）。設計は
+[`docs/calibration.md`][calib-md] が正です。
 
-最初に録るのは**エンコーダ校正**（`sysid_encoder`）です。前輪の絶対角エンコーダの1回転の周期誤差と出力の範囲を、トルク0で惰行する区間の生の読みから測り、STM32 が読みを直してから車速・走行距離にします。車速のカルマンフィルタの調整値は、走行の記録に同じフィルタを通した残差の尤度を最大にして決めます（`tools/sysid/kf_tune.py`）。
+**1 つの校正は「測る → 式で決める → 閉ループで確かめる」の 3 段**です。
 
-**方針は「シムのモデルそのものを当てはめる」**ことです。モデルとは別の特徴量（10 % 到達時刻、IMU の加速度の 95 パーセンタイルなど）から値を読むと、
-読んだ値をシムに入れても実機の応答を再現する保証がありません（IMU のノイズ・傾き・バイアスで加速度が STM32 の上限を超えて読まれた）。
+- 測る: 開ループで車体の性質を測る。モデルは物理の式で、パラメータは少なく。例: 車速は走行距離そのものに当てはめ、
+  遅れだけを格子で探して残り（利得・転がり抵抗・初速）は線形の最小二乗で解く（大域解が一意）
+- 決める: 車速の PI・TC・ABS のゲインは、測った植物と遅れから**位相余裕 60°** の式（`loop.py`）。旧数値最適化の TC のゲインは
+  この式で位相余裕 58° 相当だった
+- 確かめる: 閉ループで制御そのものの効きを測り、合否を出す。モデルではなく「制御が狙いどおりに効いているか」を実機で直接見る
 
-- 舵: シムの `SteerServo`（むだ時間 → 定常ゲイン → 1 次遅れ → 角速度上限 → ヒステリシス）に実機の指令を入れ、出てくる舵角が実機に最も近くなるパラメータを探す（**出力誤差法**）。
-- 速度・加減速: 同じく `SpeedController`（ランプ → PI → 加速度の上限 → 車体）に実機の `/cmd` を入れて、車速に合わせる。
-- 黙って誤った値を返さないための仕組み: 有効自由度を**残差の自己相関**から決める（決め打ちだと存在しないガタ・ヒステリシスを採る）、
-  前輪エンコーダの**周期誤差の推定と補正**（ガタと不感帯を取り違える）、残差をノイズの床と比べて「モデルの形から外れている」と警告する。
-- **解析が正しい値を返すかを真値と突き合わせる検証器**（`tools/sysid/bench.py`）を先に持ちます。真値の分かっているシムで各試験を閉ループで回し、解析が復元できるか見ます。
-  ただし復元できるのは「解析がシムのモデル構造に対して正しい」ことまでです。
+**解析そのものも確かめます。** 各解析は「真値の分かっているシムで試験を走らせ、解析が真値を復元するか」をテストに持ち
+（`tools/calib/tests`）、検証器が誤りを見分けられること（わざと誤ったゲインを入れると確かめの試験が不合格にする）も確かめます。
 
-!!! bug "検証器があって見つかった不具合"
-    前後運動の解析がファームの加速度フィードフォワードを知らず、FF 有効の車で利得が 9 倍（22 → 196）に出ていました。合成データで 21.98 を復元できる形に直しています（開発記録 2026-10-14）。
+!!! bug "作り直しで見つかったこと"
+    旧②前後運動の解析は PI を通した応答に記録時のゲインを既知として当てはめていて、車体の利得を 21.5 と出していました。
+    同じ記録を PI を仮定せず STM32 が実際に出したトルクから当てはめると 16.5〜16.8（名目 16.7）です。
 
 ## 記録と再生
 
 - `.sfl`（送受信フレームを生のまま）を `replay_node` で再生すると、**実機を走らせなくても知覚・SLAM・経路生成を開発できます**（[ノード構成](../raspi/index.md#再生と実機を同じコードにする)）。
-- mcap の記録は、システム同定・グリップの解析・ビデオ化（`tools/mcap_video.py`）に使います。
+- mcap の記録は、車両の校正・グリップの解析・ビデオ化（`tools/mcap_video.py`）に使います。
 
 ## 「検査を人間の記憶に頼らない」
 
@@ -125,6 +121,7 @@ CI（[`.github/workflows/ci.yml`][ci-yml]）の本体は、**生成物が正と�
 **STM32 が E-Stop をラッチして、車両のボタン 2 を物理的に押すまで戻りません。** そのため `--restart-io` は独立した、明示的なオプションです。
 
 [sim-dir]: https://github.com/banbatakumi/AutonomousCar_RasPi/tree/master/surge_mk2/sim
-[ctrl-tune]: https://github.com/banbatakumi/AutonomousCar_RasPi/tree/master/surge_mk2/tools/ctrl_tune
-[sysid]: https://github.com/banbatakumi/AutonomousCar_RasPi/tree/master/surge_mk2/tools/sysid
+[fwsim]: https://github.com/banbatakumi/AutonomousCar_RasPi/tree/master/surge_mk2/tools/fwsim
+[calib]: https://github.com/banbatakumi/AutonomousCar_RasPi/tree/master/surge_mk2/tools/calib
+[calib-md]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/surge_mk2/docs/calibration.md
 [ci-yml]: https://github.com/banbatakumi/AutonomousCar_RasPi/blob/master/.github/workflows/ci.yml

@@ -4,6 +4,12 @@
 定数を、**どこから来た数字か**で分けた一覧。2026-10-17 に両リポジトリを走査して作り、2026-10-18 に
 同じ種類の事例（試験の無い手置きのゲイン・一時的な記録で決めた値・未校正のセンサ）を洗い直した（§1.2・§6）。
 
+> **2026-10-19: 同定は車両の校正（[`calibration.md`](calibration.md)、`tools/calib`）に作り直した。** 下の表の旧ツール名の
+> 読み替え: `tools/sysid`・`tools/ctrl_tune` の同定 → `tools/calib`（校正 1〜8）、`tools/ctrl_tune` のファームのシム → `tools/fwsim`、
+> ⓪ → 校正 1、⑤ → 校正 5、`sysid_wheel`・`sysid_tyre` → 校正 6・7。②前後運動・③旋回は試験ごと消し、その値（`mu`・
+> `drive_accel_m_s2`・`brake_decel_m_s2` など）はシム専用の `[sim]` へ、slam2d の上限は `[limits]`（校正 7・8 が書く）へ移した。
+> 車速 PI のゲインは極配置（ζ・ωn）ではなく位相余裕 60° の式（`tools/calib/loop.py`）。§1〜§3 は 2026-10-17〜18 時点の記録
+
 方針: 当てずっぽうの定数・一時的な走行ログから決めた値を残さず、**物理法則（式）・データシート・
 システム同定**のどれかに根拠を置く。根拠を置けないもの（方針・経験則）は、そうだと分かる名前と
 コメントで残し、同定・検証の手段を書く。
@@ -11,13 +17,13 @@
 | 分類 | 意味 | 扱い |
 |---|---|---|
 | **A 物理** | 車体寸法・質量・データシートの値・物理定数 | 維持。`config/vehicle.toml` が正 |
-| **B 同定** | `tools/sysid`・`tools/ctrl_tune` が実機の記録から求める値 | 維持。同定し直すとツールが書き直す |
+| **B 同定** | 車両の校正（`tools/calib`）が実機の記録から求める値 | 維持。校正し直すとツールが書き直す |
 | **C 式** | A・B から式で決まる値 | **手で書かない**。式で持つか、ツールが書く |
 | **D 方針** | 物理からは決まらない設計上の選択（安全の余裕・前後力と横グリップの配分など） | 名前を付けて残す。根拠をコメントに |
 | **E 経験則** | シム・実機の試行で合わせた値 | 残すが、同定・検証の手段を併記。置き換え候補 |
 
 ファームは `vehicle.toml` を読めないので、A・B の一部を `#define` に写している。写しが正と食い違わないことは
-`tools/ctrl_tune/tests/test_fw_constants.py` が確かめる（ファームのリポジトリが隣にあるときだけ走る）。
+`tools/fwsim/tests/test_fw_constants.py` が確かめる（ファームのリポジトリが隣にあるときだけ走る）。
 
 ---
 
@@ -25,8 +31,8 @@
 
 | 場所 | 前 | 後 | 根拠 |
 |---|---|---|---|
-| ファーム `vehicle.h` 自動停止の減速度 `VEHICLE_AUTO_STOP_DECEL_M_S2` | 3.0（手置き。コメントに「楽観的、測り直したら更新」） | `VEHICLE_BRAKE_DECEL_M_S2` = **2.47**（`[dynamics] brake_decel_m_s2`、ABS 込みの制動の同定値） | 自動停止は制動モードで止める。停止距離は 2m/s で約 15cm 伸びる（安全側） |
-| 同 自動停止の遅延 `VEHICLE_AUTO_STOP_DELAY_S` | 0.1（未実測のプレースホルダー） | `1/LIDAR_SCAN_FREQ_HZ + VEHICLE_MD_TORQUE_TAU_S` = 0.1045 | 点群の各ビンは 1 回転に 1 回しか更新されない（LD06 標準 10Hz）＋MD のトルクの立ち上がり（`[control.plant] md_tau_s`）。判定は STM32 内で閉じるので通信は通らない |
+| ファーム `vehicle.h` 自動停止の減速度 `VEHICLE_AUTO_STOP_DECEL_M_S2` | 3.0（手置き。コメントに「楽観的、測り直したら更新」） | `VEHICLE_BRAKE_DECEL_M_S2` = **2.47**（`[dynamics] brake_decel_m_s2`、ABS 込みの制動の同定値）。★v0.29 で CONFIG_SET `BRAKE_DECEL_M_S2`（`[limits] abs_brake_decel_m_s2`）へ | 自動停止は制動モードで止める。停止距離は 2m/s で約 15cm 伸びる（安全側） |
+| 同 自動停止の遅延 `VEHICLE_AUTO_STOP_DELAY_S` | 0.1（未実測のプレースホルダー） | `1/LIDAR_SCAN_FREQ_HZ + VEHICLE_MD_TORQUE_TAU_S` = 0.1045。★v0.29 で後ろは CONFIG_SET `MD_TORQUE_LAG_S`（`md_delay_s + md_tau_s`） | 点群の各ビンは 1 回転に 1 回しか更新されない（LD06 標準 10Hz）＋MD のトルクの立ち上がり（`[control.plant] md_tau_s`）。判定は STM32 内で閉じるので通信は通らない |
 | 同 センサの取付オフセット `VEHICLE_AUTO_STOP_*_OFFSET_CM` | 23・14・4・3（手で引き算した結果） | 車体外形・センサ位置（`VEHICLE_BODY_*`・`VEHICLE_*_X_M`）の差 | 値は同じ。寸法を変えたら追従する |
 | 同 LiDAR の矩形の半幅 `VEHICLE_AUTO_STOP_LIDAR_HALF_WIDTH_CM` | 15（9＋6 を手計算） | `VEHICLE_BODY_HALF_WIDTH_M + VEHICLE_AUTO_STOP_LATERAL_MARGIN_M`（D: 余裕 6cm） | 値は同じ。余裕を名前の付いた方針値に分離 |
 | 同 DISARM 後の制動の上限 `VEHICLE_DISARM_BRAKE_TIMEOUT_S` | 3.0（「2.5m/s² で 2 秒」の手計算） | `DRIVE_MAX_SPEED_M_S / VEHICLE_BRAKE_DECEL_M_S2 × VEHICLE_STOP_TIME_MARGIN`（D: 1.5）= 3.04 | 最高速から同定した減速度で止まり切れる時間 |
@@ -62,23 +68,21 @@
 - トルク上限 `DRIVE_MAX_TORQUE_NM` 0.13 — MD の絶対上限（Kt×10A ≒ 0.144〜0.148）より下。`speed_torque_max_nm` はその 2 輪分
 - 前輪エンコーダ AS5600・IMU MPU6050 のデータシート値（`speed_kf.h` のコメント）
 
-### B 同定（`tools/sysid`・`tools/ctrl_tune` が書く）
+### B 同定（車両の校正 `tools/calib` が書く。どの校正がどの値かは `config/vehicle.toml` の各行と `calibration.md` §2）
 
-- `[dynamics]` の舵・ヨー・前後運動・グリップ・遅延（`tau_steer_s`・`dead_time_s`・`steer_servo_gain`・
-  `yaw_natural_freq_rad_s`・`speed_plant_gain`・`rolling_resistance`・`mu`・`drive_accel_m_s2`・
-  `brake_decel_m_s2`・`control_latency_s` ほか）
-- `[control]` の `steer_link_*`（リンクの換算）・`max_steer`
-- `[control]` の `enc_*`（⓪）、`kf_*`（`kf_tune`）— §1.2
-- `[control]` の TC・ABS のゲイン（`tc_kp/ki`・`abs_kp/ki`）— 同定した車両モデル `[control.plant]` とファームの制御を閉ループにして最適化
-- `[control.plant]`（タイヤ・荷重移動・MD の時定数）
-- ファームの写し: `VEHICLE_BRAKE_DECEL_M_S2`（← `brake_decel_m_s2`）・`VEHICLE_MD_TORQUE_TAU_S`（← `md_tau_s`）。
-  **同定し直したらファームも直す**（テストが食い違いで落ちる）
+- `[dynamics]` の舵・ヨーの遅れ・車体の利得・転がり抵抗・遅延（校正 2〜5）
+- `[control]` の `steer_link_*`・`max_steer`（校正 2）、`enc_*`（校正 1）、`kf_*`（`tools/calib/kf.py`）
+- `[control]` の TC・ABS の目標とゲイン（校正 7。位相余裕の式）、`[control.plant]`（校正 6・7）
+- `[limits]`（slam2d の上限。校正 7・8）
+- 自動停止・DISARM 後の制動の見積もり: `[limits] abs_brake_decel_m_s2`（校正 8 の ABS の制動）と
+  `[control.plant] md_delay_s + md_tau_s`（校正 6）を、io_node が CONFIG_SET（★v0.29 `BRAKE_DECEL_M_S2`・
+  `MD_TORQUE_LAG_S`）で STM32 へ送る。**ファームは写しを持たない**（2026-10-19 に `VEHICLE_BRAKE_DECEL_M_S2`・
+  `VEHICLE_MD_TORQUE_TAU_S` を削除。校正し直しても toml を書いて `--restart-io` するだけ）
 
 ### C 式（手で書かない）
 
 - `speed_ff_nm_per_m_s2` = 1/`speed_plant_gain`、`speed_ff_rr_nm` = `rolling_resistance`/`speed_plant_gain`、
-  `launch_exit_torque_nm`（上表）、`speed_kp` = 2ζωn/`speed_plant_gain`・`speed_ki` = ωn²/`speed_plant_gain`（§1.2）—
-  `tools/sysid/toml_update.py` が書く
+  `launch_exit_torque_nm`、`speed_kp`・`speed_ki`（位相余裕 60° の式）— 校正 5（`tools/calib/speed.py`）が書く
 - `max_steer`（リンクの換算を可動域に通した値）— 同上
 - `Vehicle.kappa_max`・`a_lat_max`・`a_accel_max`・`a_decel_max`・`speed_loop_tau_s`・`speed_loop_reset_s`・`steer_delay_s` — `raspi/core/vehicle.py` の派生量
 - `tv_load_gain_s2_per_m` 0.045 = `load_transfer` × `mass` ÷ 後輪1つの静止荷重（机上の式。実機未調整）
@@ -125,13 +129,14 @@
   **2026-09-28 の前後運動の同定値はローパスを帰還に使っていた旧ファームで測ったもの**なので、v0.26 のファームで
   前後運動試験を取り直すまでは、シムの速度ループがわずかに（帰還の遅れ 10ms ぶん）実機と違う。
   同定ツールのベンチ（`tools/sysid/bench.py`）も記録の `speed` をカルマンフィルタに見立てて作る
-- `[control.plant] md_tau_s` 4.54ms と `VEHICLE_MD_TORQUE_TAU_S` 4.5ms は丸めの範囲で一致（テストの許容 0.1ms）
+- （2026-10-19 まで）`[control.plant] md_tau_s` とファームの `VEHICLE_MD_TORQUE_TAU_S` の写しがあった。v0.29 で
+  ファームの定数を消し、`md_delay_s + md_tau_s` を CONFIG_SET で送る形にした
 
-## 5. 同定し直したときの手順（ファームの写しがあるもの）
+## 5. 校正し直したときの手順（ファームの写しがあるもの）
 
-1. `tools/sysid`（前後運動試験）で `brake_decel_m_s2` が変わったら、ファームの `VEHICLE_BRAKE_DECEL_M_S2` を直す
-2. `tools/ctrl_tune`（制御の同定）で `md_tau_s` が変わったら、`VEHICLE_MD_TORQUE_TAU_S` を直す
-3. `python -m pytest tools/ctrl_tune/tests/test_fw_constants.py` が通ることを確かめてから書き込む
+校正で変わる値のファームの写しは無い（2026-10-19、v0.29 で制動の減速度・MD の遅れも CONFIG_SET にした）。
+toml を書いて `./tools/deploy.sh --restart-io` するだけ。ファームが写しを持つのは車体寸法（`DRIVE_WHEELBASE_M` ほか、
+校正では変わらない）だけで、変えたら `python -m pytest tools/fwsim/tests/test_fw_constants.py` が食い違いを知らせる
 
 ## 6. 再調査（2026-10-18）— 同じ種類で、まだ残っているもの
 
