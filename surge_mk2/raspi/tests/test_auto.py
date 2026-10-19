@@ -1102,7 +1102,7 @@ class TestAutoCtrlGate(unittest.TestCase):
         以前は今のモードの分しか持たず、戻ると既定値になっていた（2026-10-06）。"""
         self.srv._on_auto({"mode": "slam2d_route", "params": {"v_max": 1.2}})
         self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 0.3}})
-        self.srv._on_auto({"mode": "sysid_steer"})
+        self.srv._on_auto({"mode": "calib_steer"})
         self.srv._on_auto({"mode": ""})
         self.srv._on_auto({"mode": "slam2d_route"})
         self.assertAlmostEqual(self.srv._auto_params["v_max"], 1.2)

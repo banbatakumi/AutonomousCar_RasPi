@@ -48,7 +48,7 @@ class TestLoad(unittest.TestCase):
         for text in ('wheelbase = "long"',
                      "control = 3",
                      "footprint = [1, 2]",
-                     '[dynamics]\nmu = "high"'):
+                     '[limits]\na_lat_m_s2 = "high"'):
             with self.subTest(text=text):
                 v, warned = load(text)
                 self.assertEqual(v, Vehicle())

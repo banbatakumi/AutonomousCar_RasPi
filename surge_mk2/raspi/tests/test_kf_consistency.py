@@ -2,7 +2,7 @@
 
 検定器が正しく判定できなければ、実機の記録に当てても何も言えない（検証器を先に疑う）ので、
 **真値の分かる合成データ**で「整合・保守的・過小見積もり・相関あり」を言い分けられることを確かめる。
-ファームの C を使うテスト（シムの閉ループ）は `tools/ctrl_tune/tests/test_speed_kf.py`。
+ファームの C を使うテスト（シムの閉ループ）は `tools/fwsim/tests/test_speed_kf.py`。
 """
 
 from __future__ import annotations

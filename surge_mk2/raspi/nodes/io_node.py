@@ -63,7 +63,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.bus_bridge import BusBridge  # noqa: E402
-from raspi.core.control_params import ControlParamSync, load_control_params  # noqa: E402
+from raspi.core.control_params import ControlParamSync, disarm_brake_timeout_s, load_control_params  # noqa: E402
 from raspi.core.link_tracker import (  # noqa: E402
     LinkState,
     LinkTracker,
@@ -113,10 +113,11 @@ LINKSTATS_HZ = 1
 DIAG_HZ = 10
 HB_HZ = 10
 
-#: 異常系（`cmd` 途絶・`TELEMETRY` 途絶・デッドマン）で、DISARM に落とす前に最大制動を続ける
-#: 時間の上限。最高速からでも止まり切れる長さ（STM32 側 `VEHICLE_DISARM_BRAKE_TIMEOUT_S` と同じ）。
-#: `TELEMETRY` が見えていれば停止を確認した時点で切り上げる。見えていなければここまで続ける
-FAILSAFE_BRAKE_MAX_NS = 3 * NS
+#: 異常系（`cmd` 途絶・`TELEMETRY` 途絶・デッドマン）で、DISARM に落とす前に最大制動を続ける時間の上限は、
+#: 最高速からでも止まり切れる長さ（STM32 の DISARM 後の制動と同じ式 `disarm_brake_timeout_s`、減速度は toml の
+#: `brake_decel_m_s2`。`IoNode.failsafe_brake_max_ns`）。`TELEMETRY` が見えていれば停止を確認した時点で切り上げる。
+#: 見えていなければここまで続ける。toml を読めないとき（ARM は通らない）は減速度の下限で見積もる
+FAILSAFE_BRAKE_DECEL_FALLBACK_M_S2 = 0.5
 #: 停止（|車速| < `SPEED_DEADBAND_MPS`）がこれだけ続いたら「止まった」とみなして DISARM に落とす
 FAILSAFE_STOPPED_NS = 300_000_000
 #: telemetry_node がデッドマン（GUI の指令の途絶）で流す `cmd` の発行元
@@ -258,6 +259,8 @@ class IoNode:
         self.link = link
         #: 足回りの制御の調整パラメータ（`vehicle.toml` の `[control]`）を STM32 に入れて保つ
         self.control_sync = ControlParamSync(control_params or {}, link.send)
+        self.failsafe_brake_max_ns = round(disarm_brake_timeout_s(
+            (control_params or {}).get("brake_decel_m_s2", FAILSAFE_BRAKE_DECEL_FALLBACK_M_S2)) * NS)
         #: STM32 の `LOG` の直近の警告・エラー（新しい順。`diag/link` に載せる）
         self.stm_log: list[str] = []
         #: `[control]` が読めなかった理由（空 = 読めた）。`LinkDiag` に出す
@@ -918,7 +921,7 @@ class IoNode:
         制動中は ARM を立てたまま `brake`・`brake_torque=0`（STM32 の最大）を送る。モードと舵角は
         最後の通常の指令のまま（直進へ戻すと車体が予期しない方向へ動く。STM32 のフェイルセーフと
         同じ方針）。止まったかは `TELEMETRY` の車速で見る。`TELEMETRY` 自体が途絶している
-        （`health == "FAULT"`）ときは見えないので、`FAILSAFE_BRAKE_MAX_NS` いっぱい制動する。
+        （`health == "FAULT"`）ときは見えないので、`failsafe_brake_max_ns` いっぱい制動する。
         """
         last = self._last_armed_pkt
         if last is None:
@@ -941,7 +944,7 @@ class IoNode:
         else:
             self._failsafe_still_ns = None
 
-        if stopped or now_ns - self._failsafe_since_ns >= FAILSAFE_BRAKE_MAX_NS:
+        if stopped or now_ns - self._failsafe_since_ns >= self.failsafe_brake_max_ns:
             # 以後は指令が戻るまで DISARM（`_last_armed_pkt` を消すので制動へは戻らない）
             self._log_event("failsafe_disarm", {
                 "stopped": stopped,

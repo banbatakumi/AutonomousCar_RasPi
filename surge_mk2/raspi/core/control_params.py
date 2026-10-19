@@ -5,11 +5,13 @@
 `config/vehicle.toml` の `[control]` が唯一の定義（キーは STM32 側 `control_params.h` のフィールド名）。
 同定用の `tv_test_moment_nm` だけは `[control]` に書けない（一時的な上書きでだけ入れる）。
 車速PIのゲイン `speed_kp`・`speed_ki` だけは `[dynamics]` に書く（同定・シム・Pi の計算と共通の値）。
+自動停止・DISARM 後の制動の見積もり（`brake_decel_m_s2`・`md_torque_lag_s`、v0.29）は `[control]` に書かず、
+校正の結果（`DERIVED`）から作る。
 **STM32 は値を持たない**（起動直後は仮置き）ので、全項目が揃っていなければ `load_control_params` は
 エラーにし、io_node は ARM を通さない。
 
 `steer_link_gain`・`steer_link_cubic`（ステアのリンクの換算、モータ角→路面舵角）もここを通る。
-調整値ではなくシステム同定の結果で、`tools/sysid` が `[control]` に書く。STM32 に入っていないと
+調整値ではなく校正の結果で、`tools/calib`（校正 2、`docs/calibration.md`）が `[control]` に書く。STM32 に入っていないと
 舵角の指令・報告・`max_steer` の意味が食い違うので、`control_params_status` が `ok` でない間は走らせないこと。
 
 ## 入ったことの確かめ方（`ControlParamSync`）
@@ -28,7 +30,7 @@ STM32 は値を Flash に保存しないので、電源を入れ直すと既定�
 
 ## 一時的な上書き（`set_overrides()`）
 
-同定の試験（`raspi/auto/sysid_wheel.py`・`sysid_tyre.py`）は TC・ABS を切る。
+校正の試験（`raspi/auto/calib_wheel.py` は TC・ABS を切る、`calib_tyre.py` は目標スリップ率を振る）が使う。
 planner が `AutoState.fw_overrides` に書いた値を、指令（`DriveCmd.fw_overrides`）が届いている間だけ
 入れ、届かなくなったら元の値へ戻す（試験が中断・異常終了しても TC を切ったままにならない）。
 """
@@ -42,7 +44,7 @@ from typing import Callable
 
 from ..proto.generated import packets
 
-__all__ = ["CONTROL_PARAM_IDS", "ENABLE_KEYS", "FROM_DYNAMICS", "REQUIRED", "OVERRIDABLE", "load_control_params", "ControlParamSync",
+__all__ = ["CONTROL_PARAM_IDS", "DERIVED", "ENABLE_KEYS", "FROM_DYNAMICS", "disarm_brake_timeout_s", "REQUIRED", "OVERRIDABLE", "load_control_params", "ControlParamSync",
            "DEFAULT_TOML", "STEER_LINK_X_MAX_RAD", "steer_link_road", "steer_link_x", "steer_relink"]
 
 DEFAULT_TOML = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
@@ -59,10 +61,34 @@ CONTROL_PARAM_IDS: dict[str, int] = {
         # ★v0.27: 前輪エンコーダの校正・車速のカルマンフィルタ
         *(f"ENC_{side}_{k}" for side in ("LEFT", "RIGHT") for k in ("LO", "HI", "H1S", "H1C", "H2S", "H2C")),
         "KF_SIGMA_S_M", "KF_SIGMA_A_M_S2", "KF_SIGMA_A_PER_M_S", "KF_JERK_PSD", "KF_BIAS_WALK_PSD",
-        "KF_LEVER_ARM_M")}
+        "KF_LEVER_ARM_M",
+        # ★v0.28: ジャイロ z 軸の感度の補正
+        "IMU_GYRO_Z_SCALE",
+        # ★v0.29: 自動停止・DISARM 後の制動の見積もり（`DERIVED` から作る）
+        "BRAKE_DECEL_M_S2", "MD_TORQUE_LAG_S")}
 
 #: `[control]` ではなく `[dynamics]` から読む項目（同定・シム・Pi の計算と共通の値。2か所に持たない）
 FROM_DYNAMICS = ("speed_kp", "speed_ki")
+
+#: `[control]` に書かず、ほかの節の校正の結果から作る項目（同じ値を2か所に持たない）。値は (説明, 作り方)
+DERIVED: dict[str, tuple[str, Callable[[dict], float]]] = {
+    "brake_decel_m_s2": ("[limits] abs_brake_decel_m_s2（校正 8）",
+                         lambda d: d["limits"]["abs_brake_decel_m_s2"]),
+    "md_torque_lag_s": ("[control.plant] md_delay_s + md_tau_s（校正 6）",
+                        lambda d: d["control"]["plant"]["md_delay_s"] + d["control"]["plant"]["md_tau_s"]),
+}
+
+#: STM32 の最高速の歯止め（`drive.h` の DRIVE_MAX_SPEED_M_S）と、止まり切るはずの時間に掛ける余裕
+#: （`vehicle.h` の VEHICLE_STOP_TIME_MARGIN）。ファームの定数の写し（`tools/fwsim/tests/test_fw_constants.py` が突き合わせる）
+STM32_MAX_SPEED_M_S = 5.0
+STOP_TIME_MARGIN = 1.5
+
+
+def disarm_brake_timeout_s(brake_decel_m_s2: float) -> float:
+    """走行中に ARM が外れたとき、停車を待って制動を続ける時間の上限 [s]（STM32 の vehicle.c と同じ式）。
+    最高速から `brake_decel_m_s2` で止まり切る時間 × 余裕。"""
+    return STM32_MAX_SPEED_M_S / brake_decel_m_s2 * STOP_TIME_MARGIN
+
 
 #: `load_control_params` が揃っていることを求める数値項目（STM32 は値を持たず、上位が送るまで仮置き）
 REQUIRED = tuple(k for k in CONTROL_PARAM_IDS if k != "tv_test_moment_nm")
@@ -147,6 +173,8 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
             raise ValueError(f"[control] {key} が数ではありません: {value!r}")
         if key in FROM_DYNAMICS:
             raise ValueError(f"[control] {key} は [dynamics] に書いてください（そちらが唯一の定義）")
+        if key in DERIVED:
+            raise ValueError(f"[control] {key} は書かない（{DERIVED[key][0]} から作る）")
         if key in CONTROL_PARAM_IDS and key != "tv_test_moment_nm":
             out[key] = float(value)
         else:
@@ -158,12 +186,21 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
             if not _is_number(v):
                 raise ValueError(f"[dynamics] {key} が数ではありません: {v!r}")
             out[key] = float(v)
+    for key, (src, make) in DERIVED.items():
+        try:
+            v = make(d)
+        except (KeyError, TypeError):
+            continue                          # 足りなければ下の strict で知らせる
+        if not _is_number(v):
+            raise ValueError(f"{src} が数ではありません: {v!r}")
+        out[key] = float(v)
     if strict:
         missing = [k for k in REQUIRED if k not in out]
         if missing:
             raise ValueError("STM32 は調整パラメータの値を持たないので vehicle.toml に全項目が要ります。"
                              f"足りない項目: {', '.join(missing)}"
-                             "（speed_kp・speed_ki は [dynamics]、ほかは [control]）")
+                             "（speed_kp・speed_ki は [dynamics]、"
+                             + "・".join(f"{k} は {v[0]}" for k, v in DERIVED.items()) + "、ほかは [control]）")
     return out
 
 

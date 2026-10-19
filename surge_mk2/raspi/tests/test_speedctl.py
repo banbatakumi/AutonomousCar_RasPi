@@ -32,30 +32,33 @@ def ring(radius: float = 3.0, step: float = 0.1, v: float = 2.0) -> rl.RaceLine:
 
 class TestVehicleEnvelope(unittest.TestCase):
     def setUp(self):
-        self.v = replace(Vehicle(), mu=0.4, drive_accel_m_s2=2.8, speed_decel_m_s2=2.2,
+        self.v = replace(Vehicle(), lim_lat_m_s2=0.4 * GRAVITY, lim_accel_m_s2=2.5, lim_brake_m_s2=2.5,
                          rolling_resistance=0.3, speed_kp=0.25, speed_ki=0.5,
                          speed_plant_gain=25.0, dead_time_s=0.008, tau_steer_s=0.001,
                          yaw_natural_freq_rad_s=58.0, yaw_damping=0.93)
 
     def test_limits_come_from_identified_values(self):
+        """上限は `[limits]` の値（正味。校正 7・8 が書く）をそのまま使う。"""
         v = self.v
         self.assertAlmostEqual(v.a_lat_max, 0.4 * GRAVITY)
-        self.assertAlmostEqual(v.a_accel_max(), 2.8 - 0.3)        # 転がり抵抗を引いた正味
-        self.assertAlmostEqual(v.a_decel_max, 2.2 + 0.3)          # 減速は転がり抵抗が味方
+        self.assertAlmostEqual(v.a_accel_max(), 2.5)
+        self.assertAlmostEqual(v.a_decel_max, 2.5)
         self.assertAlmostEqual(v.speed_loop_tau_s, 1 / (25.0 * 0.25))
         self.assertAlmostEqual(v.speed_loop_reset_s, 0.5)
         self.assertAlmostEqual(v.steer_delay_s, 0.008 + 0.001 + 2 * 0.93 / 58.0)
 
     def test_ramp_caps_the_limits(self):
         """STM32 は目標速度を `speed_ramp_max_m_s2` でならすので、それより上は出ない。"""
-        v = replace(self.v, drive_accel_m_s2=9.0, speed_decel_m_s2=9.0)
+        v = replace(self.v, lim_accel_m_s2=9.0, lim_brake_m_s2=9.0)
         self.assertAlmostEqual(v.a_accel_max(), v.speed_ramp_max_m_s2)
         self.assertAlmostEqual(v.a_decel_max, v.speed_ramp_max_m_s2)
 
-    def test_drive_fades_with_speed(self):
-        v = replace(self.v, drive_fade_speed_m_s=2.0, drive_top_speed_m_s=4.0)
-        self.assertAlmostEqual(v.a_accel_max(1.0), 2.5)
-        self.assertAlmostEqual(v.a_accel_max(3.0), 2.8 * 0.5 - 0.3)
+    def test_limits_read_from_toml(self):
+        """`config/vehicle.toml` の `[limits]` が読める（校正 7・8 の値。無ければ控えめな既定）。"""
+        veh = Vehicle.load()
+        self.assertGreater(veh.lim_lat_m_s2, 0.0)
+        self.assertGreater(veh.lim_accel_m_s2, 0.0)
+        self.assertGreater(veh.lim_brake_m_s2, 0.0)
 
     def test_unidentified_values_fall_back(self):
         v = Vehicle()

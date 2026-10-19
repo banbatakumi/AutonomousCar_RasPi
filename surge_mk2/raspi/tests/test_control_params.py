@@ -72,6 +72,9 @@ class TestLoad(unittest.TestCase):
             d = tomllib.load(f)
         expect = {k: float(x) for k, x in d["control"].items() if not isinstance(x, dict)}
         expect.update({k: float(d["dynamics"][k]) for k in FROM_DYNAMICS})
+        expect["brake_decel_m_s2"] = float(d["limits"]["abs_brake_decel_m_s2"])
+        pl = d["control"]["plant"]
+        expect["md_torque_lag_s"] = float(pl["md_delay_s"] + pl["md_tau_s"])
         self.assertEqual(v, expect)
         self.assertIn("tv_load_gain_s2_per_m", v)
         self.assertEqual(set(REQUIRED) - set(v), set())       # STM32 は値を持たないので全項目が要る
@@ -111,6 +114,16 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(v, {"speed_kp": 0.3, "speed_ki": 0.6})
         with self.assertRaises(ValueError):
             load_control_params(self._toml("[control]\nspeed_kp = 0.3\n"), strict=False)
+
+    def test_brake_values_come_from_calibration_results_only(self):
+        """制動の減速度・MD の遅れ（★v0.29）は校正の結果から作り、[control] には書けない（2か所に持たない）。"""
+        v = load_control_params(self._toml("[limits]\nabs_brake_decel_m_s2 = 1.7\n"
+                                           "[control.plant]\nmd_delay_s = 0.004\nmd_tau_s = 0.012\n"), strict=False)
+        self.assertEqual(v["brake_decel_m_s2"], 1.7)
+        self.assertAlmostEqual(v["md_torque_lag_s"], 0.016)
+        for key in ("brake_decel_m_s2", "md_torque_lag_s"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                load_control_params(self._toml(f"[control]\n{key} = 1.0\n"), strict=False)
 
     def test_enable_keys_accept_bool_and_01(self):
         v = load_control_params(self._toml("[control]\ntc_enable = true\ntv_enable = 0\n"), strict=False)

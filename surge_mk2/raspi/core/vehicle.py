@@ -175,15 +175,11 @@ class Vehicle:
     #: 路面舵角 = gain·x + cubic·x³、x = モータ角×0.5。**舵角の数値の意味はこれで決まる**——
     #: 別の換算のもとで学習したモデルの舵角は `control_params.steer_relink` で直す
     steer_link: tuple[float, float] = (1.0, 0.0)
-    # ── 走りの限界（`[dynamics]` の同定値。**経路の速度と減速開始点はここから決める**）──
-    #: 横方向グリップ係数（限界の横加速度 = mu·g）。0 = 未同定
-    mu: float = 0.0
-    #: 速度PIが出せる駆動・減速の加速度の上限 [m/s²]（転がり抵抗を引く前。0 = 未同定）
-    drive_accel_m_s2: float = 0.0
-    speed_decel_m_s2: float = 0.0
-    #: 駆動の上限が落ち始める速度と 0 になる速度 [m/s]（0 = 減衰なし）
-    drive_fade_speed_m_s: float = 0.0
-    drive_top_speed_m_s: float = 0.0
+    # ── 走りの限界（`[limits]`。**経路の速度と減速開始点はここから決める**。走行中の学習の初期値）──
+    #: 横・加速・減速の上限 [m/s²]（正味。`docs/calibration.md` §4.7・§4.8 の校正 7・8 が書く）。0 = 未校正
+    lim_lat_m_s2: float = 0.0
+    lim_accel_m_s2: float = 0.0
+    lim_brake_m_s2: float = 0.0
     rolling_resistance: float = 0.0        #: 転がり抵抗による減速度 [m/s²]
     #: STM32 の速度PI（ファームの定数）と車体の利得 [(m/s²)/(N·m)]。**速度指令の前倒しに使う**
     speed_kp: float = 0.0
@@ -260,25 +256,23 @@ class Vehicle:
 
     @property
     def a_lat_max(self) -> float:
-        """横加速度の限界 [m/s²]（`mu`·g）。未同定なら 3.5。"""
-        return self.mu * GRAVITY if self.mu > 1e-6 else 3.5
+        """横加速度の限界 [m/s²]（`[limits] a_lat_m_s2`。校正 7 がタイヤの μ から見積もる）。未校正なら 3.5。"""
+        return self.lim_lat_m_s2 if self.lim_lat_m_s2 > 1e-6 else 3.5
 
     def a_accel_max(self, v: float = 0.0) -> float:
-        """速度 `v` で直線を加速できる上限 [m/s²]（転がり抵抗を引いた正味）。
+        """直線を加速できる上限 [m/s²]（正味。`[limits] a_accel_m_s2`。校正 8 が TC を入れた全開の発進で測る）。
 
-        `sim/vehicle.py` の `drive_accel_limit` と同じ形（`drive_fade_speed_m_s` から線形に落ちる）。
-        目標速度は `speed_ramp_max_m_s2`（Pi が送る `accel_limit` の上限）でならすので、それより上は出ない。"""
-        a = self.drive_accel_m_s2 if self.drive_accel_m_s2 > 1e-6 else 2.5 + self.rolling_resistance
-        vk, vt = self.drive_fade_speed_m_s, self.drive_top_speed_m_s
-        if vt > 1e-6 and vt > vk and abs(v) > vk:
-            a *= max(0.0, (vt - abs(v)) / (vt - vk))
-        return max(0.05, min(a - self.rolling_resistance, self.speed_ramp_max_m_s2))
+        目標速度は `speed_ramp_max_m_s2`（Pi が送る `accel_limit` の上限）でならすので、それより上は出ない。
+        `v` は互換のため（車速による低下は測っていない。2m の直線で出せるのは約 2m/s まで）。"""
+        a = self.lim_accel_m_s2 if self.lim_accel_m_s2 > 1e-6 else 2.5
+        return max(0.05, min(a, self.speed_ramp_max_m_s2))
 
     @property
     def a_decel_max(self) -> float:
-        """速度指令を下げたときの減速度の上限 [m/s²]（転がり抵抗を足した正味。`brake` は使わない）。"""
-        a = self.speed_decel_m_s2 if self.speed_decel_m_s2 > 1e-6 else 2.5 - self.rolling_resistance
-        return max(0.05, min(a + self.rolling_resistance, self.speed_ramp_max_m_s2))
+        """速度指令を下げたときの減速度の上限 [m/s²]（正味。`[limits] a_brake_m_s2`。校正 8 が車速指令で
+        目一杯減速して測る。`brake`＝ABS は使わない）。"""
+        a = self.lim_brake_m_s2 if self.lim_brake_m_s2 > 1e-6 else 2.5
+        return max(0.05, min(a, self.speed_ramp_max_m_s2))
 
     @property
     def speed_loop_tau_s(self) -> float:
@@ -382,11 +376,9 @@ class Vehicle:
             steer_offset_rad=float(dyn.get("steer_offset_rad", 0.0)),
             steer_link=(float(d.get("control", {}).get("steer_link_gain", 1.0)),
                         float(d.get("control", {}).get("steer_link_cubic", 0.0))),
-            mu=float(dyn.get("mu", 0.0)),
-            drive_accel_m_s2=float(dyn.get("drive_accel_m_s2", 0.0)),
-            speed_decel_m_s2=float(dyn.get("speed_decel_m_s2", 0.0)),
-            drive_fade_speed_m_s=float(dyn.get("drive_fade_speed_m_s", 0.0)),
-            drive_top_speed_m_s=float(dyn.get("drive_top_speed_m_s", 0.0)),
+            lim_lat_m_s2=float(d.get("limits", {}).get("a_lat_m_s2", 0.0)),
+            lim_accel_m_s2=float(d.get("limits", {}).get("a_accel_m_s2", 0.0)),
+            lim_brake_m_s2=float(d.get("limits", {}).get("a_brake_m_s2", 0.0)),
             rolling_resistance=float(dyn.get("rolling_resistance", 0.0)),
             speed_kp=float(dyn.get("speed_kp", 0.0)),
             speed_ki=float(dyn.get("speed_ki", 0.0)),

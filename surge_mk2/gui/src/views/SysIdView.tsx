@@ -1,16 +1,15 @@
 /**
- * システム同定タブ — `config/vehicle.toml` `[dynamics]` の実車試験（`docs/architecture.md` §5.3）。
+ * システム同定タブ — 車両の校正の実車試験（`docs/calibration.md`）。
  *
- * 中身は自動運転と全く同じ仕組み（`raspi/auto/sysid_*.py` も普通の `Planner`
+ * 中身は自動運転と全く同じ仕組み（`raspi/auto/calib_*.py` も普通の `Planner`
  * サブクラスで、`category = "sysid"` が付いているだけ）に乗っている。
  * このタブが足しているのは「試験選択」の絞り込みと、**試験開始と同時に
  * mcap記録を始め、プランナーが終了合図（`AutoState.reason` が「完了」または「中止」で
  * 始まる）を出し、車が止まったら自動で記録を止めてダウンロードする**オーケストレーションだけ。
  *
  * 以前は `reason === "完了"` の完全一致だったため、「完了（後輪が滑った…）」や
- * 「中止: …」では終わらず、手動の「試験中止」が要った。止まるまで待つのは、旋回試験が
- * 「完了（グリップ限界…）」を出したあとも舵を保って減速するため（途中で disengage すると
- * GUI の指令に切り替わる）。
+ * 「中止: …」では終わらず、手動の「試験中止」が要った。止まるまで待つのは、試験が
+ * 「完了」を出したあとも止まりきるまで制動するため（途中で disengage すると GUI の指令に切り替わる）。
  *
  * ## ARM は人間が保持する（省略しない）
  *
@@ -52,7 +51,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
 
   const sysidCatalog = auto?.catalog.filter((c) => c.category === 'sysid') ?? []
   const selected = sysidCatalog.find((c) => c.id === auto?.mode) ?? null
-  // ファイル名を試験ごとに分かりやすくする（例: sysid_steer_20260831_220145.mcap）。
+  // ファイル名を試験ごとに分かりやすくする（例: calib_steer_20261019_220145.mcap）。
   // `selected`が変わるたびにフックの中身は作り直されるが、React
   // のフックはコンポーネント関数のトップレベルで毎回同じ順序で
   // 呼ばれていれば問題ない（条件分岐でスキップしていない）
@@ -155,7 +154,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
       <div className="settings-head">
         <h2>システム同定</h2>
         <p className="dim">
-          {'vehicle.toml の [dynamics] を測る試験（開始と同時に mcap 記録）'}
+          {'車両の校正の試験（開始と同時に mcap 記録。手順・順番は docs/calibration.md）'}
         </p>
       </div>
 
@@ -175,7 +174,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
       {selected && (
         <section className="settings-group">
           {/* 手順は測定に必要な条件を満たす組み合わせでプランナー側に固定してある
-              （`raspi/auto/_sysid_common.py`「手順を固定した理由」）。選べるのは旋回方向だけ */}
+              （`raspi/auto/_calib_common.py`「手順は GUI から変えられない」） */}
           {selected.params.length > 0 ? (
             <>
               <span className="label">選択</span>
@@ -224,8 +223,7 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
           <p className="badge-live">
             {canceled ? '試験を中止しました。' : '試験が完了しました。'}
             {endReason && endReason !== '完了' && `（${endReason}）`}
-            記録をダウンロードしました。Macの解析ツール（launcher の「システム同定」。「制御の同定」の2試験は
-            「制御の調整」）でこのファイルを開いてください
+            記録をダウンロードしました。Mac の解析ツール（launcher の「車両の校正」）でこのファイルを開いてください
           </p>
         )}
       </section>

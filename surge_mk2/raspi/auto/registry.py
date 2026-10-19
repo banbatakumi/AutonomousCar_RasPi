@@ -27,14 +27,15 @@ from .line_trace import LineTrace
 from .park_to_point import ParkToPoint
 from .slam2d_raceline import Slam2dRaceLine
 from .slam2d_route import Slam2dRoute
-from .sysid_accel import SysIdAccel
-from .sysid_corner import SysIdCorner
-from .sysid_encoder import SysIdEncoder
-from .sysid_speed_pi import SysIdSpeedPi
-from .sysid_latency import SysIdLatency
-from .sysid_steer import SysIdSteer
-from .sysid_tyre import SysIdTyre
-from .sysid_wheel import SysIdWheel
+from .calib_encoder import CalibEncoder
+from .calib_latency import CalibLatency
+from .calib_speed import CalibSpeed
+from .calib_speed_check import CalibSpeedCheck
+from .calib_steer import CalibSteer
+from .calib_steer_dyn import CalibSteerDyn
+from .calib_traction_check import CalibTractionCheck
+from .calib_tyre import CalibTyre
+from .calib_wheel import CalibWheel
 
 __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
 
@@ -52,18 +53,17 @@ PLANNERS: dict[str, type[Planner]] = {
     E2ELidar.id: E2ELidar,
     FollowObject.id: FollowObject,
     ParkToPoint.id: ParkToPoint,
-    #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブの
-    #: モード選択には出さない（`AutoPanel.tsx` 側のフィルタ）
-    #: ⓪ はほかの試験より先に録る（走行距離・車速の校正。ほかの試験の記録はその上に乗る）
-    SysIdEncoder.id: SysIdEncoder,
-    SysIdSteer.id: SysIdSteer,
-    SysIdAccel.id: SysIdAccel,
-    SysIdCorner.id: SysIdCorner,
-    SysIdLatency.id: SysIdLatency,
-    SysIdSpeedPi.id: SysIdSpeedPi,
-    #: 足回りの制御（TC・ABS）の車両モデルの同定（解析は `tools/ctrl_tune`）
-    SysIdWheel.id: SysIdWheel,
-    SysIdTyre.id: SysIdTyre,
+    #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブのモード選択には出さない
+    #: （`AutoPanel.tsx` 側のフィルタ）。車両の校正（`docs/calibration.md`）の試験で、並びは校正の順番
+    CalibEncoder.id: CalibEncoder,
+    CalibSteer.id: CalibSteer,
+    CalibSteerDyn.id: CalibSteerDyn,
+    CalibLatency.id: CalibLatency,
+    CalibSpeed.id: CalibSpeed,
+    CalibSpeedCheck.id: CalibSpeedCheck,
+    CalibWheel.id: CalibWheel,
+    CalibTyre.id: CalibTyre,
+    CalibTractionCheck.id: CalibTractionCheck,
 }
 
 

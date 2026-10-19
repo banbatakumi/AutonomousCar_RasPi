@@ -519,7 +519,7 @@ class TestRealNoise(unittest.TestCase):
         # 記録を取ったときの同定値に固定する（`config/vehicle.toml` が変わってもテストは変わらない）
         v = Vehicle.load()
         from dataclasses import replace
-        cls.vehicle = replace(v, mu=0.4172, yaw_natural_freq_rad_s=58.5, yaw_damping=0.934,
+        cls.vehicle = replace(v, lim_lat_m_s2=0.4172 * 9.80665, yaw_natural_freq_rad_s=58.5, yaw_damping=0.934,
                               steer_gain=1.0, steer_gain_cubic=0.0, steer_servo_gain=0.974,
                               steer_offset_rad=0.0028)
 

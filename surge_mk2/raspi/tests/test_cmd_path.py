@@ -18,7 +18,6 @@ from raspi.io.serial_link import RxFrame  # noqa: E402
 from raspi.msgs import DriveCmd  # noqa: E402
 from raspi.nodes.io_node import (  # noqa: E402
     CMD_TIMEOUT_NS,
-    FAILSAFE_BRAKE_MAX_NS,
     FAILSAFE_STOPPED_NS,
     IoNode,
 )
@@ -257,9 +256,9 @@ class TestIoNodeArmGate(unittest.TestCase):
         n.state.telemetry = packets.Telemetry(speed=0)              # 古い値は信じない
         t0 = time.monotonic_ns()
         self.assertTrue(n._failsafe_packet(t0).flags & packets.CMD_FLG_BRAKE)
-        self.assertTrue(n._failsafe_packet(t0 + FAILSAFE_BRAKE_MAX_NS - 1).flags
+        self.assertTrue(n._failsafe_packet(t0 + n.failsafe_brake_max_ns - 1).flags
                         & packets.CMD_FLG_BRAKE)
-        done = n._failsafe_packet(t0 + FAILSAFE_BRAKE_MAX_NS)
+        done = n._failsafe_packet(t0 + n.failsafe_brake_max_ns)
         self.assertEqual((done.mode, done.flags), (packets.Mode.DISARM, 0))
 
     def test_without_allow_arm_a_live_cmd_is_still_disarmed(self):
