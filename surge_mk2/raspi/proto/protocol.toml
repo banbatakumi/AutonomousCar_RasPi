@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x001B      # 上位=メジャー 下位=マイナー
+protocol_version = 0x001D      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -382,7 +382,7 @@ TC_ENABLE      = 0x0010
 # param_id だけを写したもので、名前は表のフィールド名の大文字（`config/vehicle.toml` の `[control]`
 # のキーは小文字）。値は `[control]` に書き、io_node が接続のたびに送って `CONFIG_ACK.applied`
 # と突き合わせる（`raspi/core/control_params.py`。Flash には保存されない）。
-# 値を決める手順は `tools/ctrl_tune`。0x0011 は v0.15 まで未実装の TC_SLIP_THRESH だった
+# 値を決める手順は車両の校正（`docs/calibration.md`、`tools/calib`）。0x0011 は v0.15 まで未実装の TC_SLIP_THRESH だった
 TC_SLIP_TARGET       = 0x0011
 TC_KP_NM_PER_M_S     = 0x0012
 TC_KI_NM_PER_M       = 0x0013
@@ -405,12 +405,12 @@ LAUNCH_EXIT_TORQUE_NM     = 0x00A1
 #   SPEED_FF_NM_PER_M_S2 × 目標車速の傾き [m/s²] ＋ SPEED_FF_RR_NM × 進む向き
 # を足す（どちらも後輪2輪の合計トルク [N·m]）。0 で無し（既定）。値は `[control]`——`[dynamics]` の同定値から
 #   SPEED_FF_NM_PER_M_S2 = 1 ÷ speed_plant_gain、SPEED_FF_RR_NM = rolling_resistance ÷ speed_plant_gain
-# （`tools/sysid` が同定のたびに書く）。目標車速の傾きは COMMAND の accel_limit で決まる
+# （校正 5 の車速制御が書く）。目標車速の傾きは COMMAND の accel_limit で決まる
 SPEED_FF_NM_PER_M_S2      = 0x00B1
 SPEED_FF_RR_NM            = 0x00B2
 # 前輪エンコーダの校正（★v0.27。STM32 `lib/encoder_cal`）: 角度 0・2π に当たる ADC の読みの比 lo・hi と、
 # 1回転の周期誤差 e(θ) = h1s·sinθ + h1c·cosθ + h2s·sin2θ + h2c·cos2θ [rad]（θ は取付向きの符号のまま）。
-# 値は `[control]`（エンコーダ校正試験 `sysid_encoder` の解析が書く）。既定は lo=0・hi=1・係数 0（校正なし）
+# 値は `[control]`（校正 1 の前輪エンコーダ `calib_encoder` が書く）。既定は lo=0・hi=1・係数 0（校正なし）
 ENC_LEFT_LO               = 0x00C1
 ENC_LEFT_HI               = 0x00C2
 ENC_LEFT_H1S              = 0x00C3
@@ -430,6 +430,13 @@ KF_SIGMA_A_PER_M_S        = 0x00E3  # 同 車速 1m/s あたりの増え方
 KF_JERK_PSD               = 0x00E4  # [m²/s⁵]
 KF_BIAS_WALK_PSD          = 0x00E5  # [(m/s²)²/s]
 KF_LEVER_ARM_M            = 0x00E6  # 旋回で加速度計に乗る −k·ω² の補正 [m]
+# ★v0.28: ジャイロ z 軸の感度の補正（倍率、0.9〜1.1、既定 1）。STM32 の imu.c がバイアスを引いた後の z に掛ける。
+# 値は `[control]`（手で置く。既定 1 = 補正なし）
+IMU_GYRO_Z_SCALE          = 0x00F1
+# ★v0.29: 自動停止の停止距離・DISARM 後の制動の上限の見積もり（STM32 の vehicle.c）。ファームは値を持たない。
+# 値は `vehicle.toml` の `[limits] abs_brake_decel_m_s2`（校正 8）と `[control.plant] md_delay_s + md_tau_s`（校正 6）
+BRAKE_DECEL_M_S2          = 0x0101  # 制動モード（ABS 込み）の減速度 [m/s²]（0.5〜10）
+MD_TORQUE_LAG_S           = 0x0102  # MD のトルクの遅れ [s]（0〜0.1）。自動停止の遅れ = LiDAR の1回転 + これ
 # 車速PIのゲイン（★v0.23）。値は `vehicle.toml` の `[dynamics]` speed_kp / speed_ki（同定・シム・Pi の計算と共通）
 SPEED_KP       = 0x0030  # 比例 [N·m/(m/s)]
 SPEED_KI       = 0x0031  # 積分 [N·m/(m/s)/s]

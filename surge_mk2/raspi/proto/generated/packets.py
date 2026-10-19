@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x001B
+PROTOCOL_VERSION = 0x001D
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -136,6 +136,9 @@ class Param:
     KF_JERK_PSD = 0x00E4
     KF_BIAS_WALK_PSD = 0x00E5
     KF_LEVER_ARM_M = 0x00E6
+    IMU_GYRO_Z_SCALE = 0x00F1
+    BRAKE_DECEL_M_S2 = 0x0101
+    MD_TORQUE_LAG_S = 0x0102
     SPEED_KP = 0x0030
     SPEED_KI = 0x0031
     LIDAR_FORMAT = 0x0040

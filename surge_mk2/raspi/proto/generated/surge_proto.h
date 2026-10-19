@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x001Bu
+#define SURGE_PROTOCOL_VERSION  0x001Du
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -153,6 +153,9 @@
 #define PARAM_KF_JERK_PSD        0x00E4u
 #define PARAM_KF_BIAS_WALK_PSD   0x00E5u
 #define PARAM_KF_LEVER_ARM_M     0x00E6u
+#define PARAM_IMU_GYRO_Z_SCALE   0x00F1u
+#define PARAM_BRAKE_DECEL_M_S2   0x0101u
+#define PARAM_MD_TORQUE_LAG_S    0x0102u
 #define PARAM_SPEED_KP           0x0030u
 #define PARAM_SPEED_KI           0x0031u
 #define PARAM_LIDAR_FORMAT       0x0040u
