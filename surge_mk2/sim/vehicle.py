@@ -83,7 +83,8 @@ GRAVITY_MPS2 = 9.81
 
 @dataclass
 class VehicleSpec:
-    """`config/vehicle.toml` の中身。幾何・質量は実測確定、`[dynamics]` は `tools/sysid/` の実測値。"""
+    """`config/vehicle.toml` の中身。幾何・質量は実測確定、`[dynamics]` は校正（`docs/calibration.md`）の値、
+    `[sim]` はシムの車だけが使う値（グリップ・加減速の上限・ガタなど。実機の制御は読まない）。"""
 
     wheelbase: float = 0.23
     track: float = 0.155
@@ -191,6 +192,20 @@ class VehicleSpec:
         with open(path, "rb") as fp:
             d = tomllib.load(fp)
         dyn = d.get("dynamics", {})
+        # シムの車だけが使う値（実機の制御は読まない・同定しない）は `[sim]`。古い toml は [dynamics] にある
+        sim_only = {**dyn, **d.get("sim", {})}
+        # 走りの上限は、校正（7・8）が実機で測って `[limits]` に書いた値から作る（シムが実機から離れていかないように）。
+        # `[limits]` は正味の加速度、シムの drive_accel・speed_decel は転がり抵抗を引く／足す前の値
+        lim = d.get("limits", {})
+        rr = float(dyn.get("rolling_resistance", 0.35))
+        if lim.get("a_lat_m_s2"):
+            sim_only["mu"] = float(lim["a_lat_m_s2"]) / GRAVITY_MPS2
+        if lim.get("a_accel_m_s2"):
+            sim_only["drive_accel_m_s2"] = float(lim["a_accel_m_s2"]) + rr
+        if lim.get("a_brake_m_s2"):
+            sim_only["speed_decel_m_s2"] = max(0.05, float(lim["a_brake_m_s2"]) - rr)
+        if lim.get("abs_brake_decel_m_s2"):
+            sim_only["brake_decel_m_s2"] = float(lim["abs_brake_decel_m_s2"])
         safety = d.get("safety", {})
         dflt = cls()
         return cls(
@@ -203,33 +218,33 @@ class VehicleSpec:
             footprint=d.get("footprint", dflt.footprint),
             tau_steer_s=dyn.get("tau_steer_s", 0.12),
             dead_time_s=dyn.get("dead_time_s", 0.030),
-            tau_speed_s=dyn.get("tau_speed_s", 0.35),
+            tau_speed_s=sim_only.get("tau_speed_s", 0.35),
             rolling_resistance=dyn.get("rolling_resistance", 0.35),
             drive_ratio=dyn.get("drive_ratio", 2.0),
-            mu=dyn.get("mu", 0.8),
-            drive_accel_m_s2=dyn.get("drive_accel_m_s2", 0.0),
-            brake_decel_m_s2=dyn.get("brake_decel_m_s2", 0.0),
-            brake_decel_per_nm=dyn.get("brake_decel_per_nm", 0.0),
-            brake_boundary_speed_m_s=dyn.get("brake_boundary_speed_m_s", 0.0),
-            brake_deadband_speed_m_s=dyn.get("brake_deadband_speed_m_s", 0.0),
-            steer_rate_limit_rad_s=dyn.get("steer_rate_limit_rad_s", 6.0),
+            mu=sim_only.get("mu", 0.8),
+            drive_accel_m_s2=sim_only.get("drive_accel_m_s2", 0.0),
+            brake_decel_m_s2=sim_only.get("brake_decel_m_s2", 0.0),
+            brake_decel_per_nm=sim_only.get("brake_decel_per_nm", 0.0),
+            brake_boundary_speed_m_s=sim_only.get("brake_boundary_speed_m_s", 0.0),
+            brake_deadband_speed_m_s=sim_only.get("brake_deadband_speed_m_s", 0.0),
+            steer_rate_limit_rad_s=sim_only.get("steer_rate_limit_rad_s", 6.0),
             steer_gain=dyn.get("steer_gain", 1.0),
             steer_gain_cubic=dyn.get("steer_gain_cubic", 0.0),
             steer_offset_rad=dyn.get("steer_offset_rad", 0.0),
-            steer_servo_hysteresis_rad=dyn.get("steer_servo_hysteresis_rad", 0.0),
-            steer_link_hysteresis_rad=dyn.get("steer_link_hysteresis_rad", 0.0),
-            steer_link_deadband_rad=dyn.get("steer_link_deadband_rad", 0.0),
-            understeer_gradient=dyn.get("understeer_gradient", 0.0),
-            speed_decel_m_s2=dyn.get("speed_decel_m_s2", 0.0),
-            drive_fade_speed_m_s=dyn.get("drive_fade_speed_m_s", 0.0),
-            drive_top_speed_m_s=dyn.get("drive_top_speed_m_s", 0.0),
+            steer_servo_hysteresis_rad=sim_only.get("steer_servo_hysteresis_rad", 0.0),
+            steer_link_hysteresis_rad=sim_only.get("steer_link_hysteresis_rad", 0.0),
+            steer_link_deadband_rad=sim_only.get("steer_link_deadband_rad", 0.0),
+            understeer_gradient=sim_only.get("understeer_gradient", 0.0),
+            speed_decel_m_s2=sim_only.get("speed_decel_m_s2", 0.0),
+            drive_fade_speed_m_s=sim_only.get("drive_fade_speed_m_s", 0.0),
+            drive_top_speed_m_s=sim_only.get("drive_top_speed_m_s", 0.0),
             control_latency_s=dyn.get("control_latency_s", 0.0),
             speed_filter_s=dyn.get("speed_filter_s", 0.0),
             speed_filter_order=int(dyn.get("speed_filter_order", 1)),
             speed_kf_lag_s=dyn.get("speed_kf_lag_s", 0.0),
             speed_ff_filter_s=dyn.get("speed_ff_filter_s", dflt.speed_ff_filter_s),
-            yaw_relaxation_m=dyn.get("yaw_relaxation_m", 0.0),
-            yaw_rate_filter_s=dyn.get("yaw_rate_filter_s", 0.0),
+            yaw_relaxation_m=sim_only.get("yaw_relaxation_m", 0.0),
+            yaw_rate_filter_s=sim_only.get("yaw_rate_filter_s", 0.0),
             yaw_natural_freq_rad_s=dyn.get("yaw_natural_freq_rad_s", 0.0),
             yaw_damping=dyn.get("yaw_damping", 1.0),
             steer_servo_gain=dyn.get("steer_servo_gain", 1.0),

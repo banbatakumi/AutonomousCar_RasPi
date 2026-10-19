@@ -154,7 +154,7 @@ CONFIG_SET の値を持つだけ。起動待ちは `SimParams.md_boot_s`（MD �
 **E-Stop は自動発動しない。** GPIO6 ハートビートが Mac に無いため（`--no-heartbeat` と
 同じ扱い）。シミュレータGUI の `E` で手動発動できる。
 
-車両パラメータは `config/vehicle.toml` の `[dynamics]`（`tools/sysid` で同定）だけを見る。
+車両パラメータは `config/vehicle.toml` の `[dynamics]`（車両の校正 `docs/calibration.md` で測る）と `[sim]`（シムの車だけの値）を見る。
 直せば全部が追随する。
 
 ## わざと鏡像で出している

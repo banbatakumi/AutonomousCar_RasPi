@@ -32,6 +32,7 @@ import random
 
 import numpy as np
 
+from raspi.core.control_params import disarm_brake_timeout_s
 from raspi.proto import UART_BAUD, FrameEncoder, FrameParser, packets
 from raspi.proto.generated.packets import FRAME_OVERHEAD, P2S_TYPES, PROTOCOL_VERSION
 
@@ -57,20 +58,22 @@ STATS_HZ = 1
 
 #: `COMMAND` がこれだけ途絶したら最大制動（`uart_protocol.md` §5.6、実機と同じ）
 COMMAND_TIMEOUT_NS = 100 * 1_000_000
-#: ★v0.19: 走行中に ARM が外れたとき、停車を待って制動を続ける上限と、停車とみなす車速
-#: （ファームの `VEHICLE_DISARM_BRAKE_TIMEOUT_S` = 最高速 ÷ 制動の減速度 × 1.5・`DRIVE_STANDSTILL_SPEED_M_S`。
-#: `tools/ctrl_tune/tests/test_fw_constants.py` がファームと突き合わせる）
-DISARM_BRAKE_TIMEOUT_NS = round(5.0 / 2.47 * 1.5 * NS)
+#: ★v0.19: 走行中に ARM が外れたとき、停車を待って制動を続ける上限は `disarm_brake_timeout_s`（ファームの
+#: vehicle.c と同じ式。減速度は CONFIG_SET の `BRAKE_DECEL_M_S2`、★v0.29）。停車とみなす車速はファームの
+#: `DRIVE_STANDSTILL_SPEED_M_S`（`tools/fwsim/tests/test_fw_constants.py` がファームと突き合わせる）
 DISARM_BRAKE_STANDSTILL_M_S = 0.05
 #: `COMMAND.steer_rate_limit` = 0 のときの既定 [rad/s]（ファームの `VEHICLE_DEFAULT_STEER_RATE_RAD_S`）
 DEFAULT_STEER_RATE_RAD_S = 0.5
 
 #: 自動停止（`vehicle.h` の `VEHICLE_AUTO_STOP_*`。**ファームと同じ値にすること**。
-#: `tools/ctrl_tune/tests/test_fw_constants.py` が突き合わせる）。
+#: `tools/fwsim/tests/test_fw_constants.py` が突き合わせる）。
 #: 停止距離 d_stop = v×遅延 + v²/(2a) + マージン（マージンは CONFIG_SET の `AUTO_STOP_MARGIN_CM`）。
-#: 遅延 = LiDAR の1回転（10Hz）＋MD のトルクの立ち上がり 4.5ms、減速度 = 同定した制動の減速度
-AUTO_STOP_DELAY_S = 0.1 + 0.0045
-AUTO_STOP_DECEL_M_S2 = 2.47
+#: 遅延 = LiDAR の1回転（10Hz、`VEHICLE_AUTO_STOP_SENSOR_DELAY_S`）＋MD のトルクの遅れ（CONFIG_SET の
+#: `MD_TORQUE_LAG_S`）、減速度 = 制動の減速度（同 `BRAKE_DECEL_M_S2`）。★v0.29 から後の 2 つはファームが値を持たない
+AUTO_STOP_SENSOR_DELAY_S = 0.1
+#: CONFIG_SET が来る前の仮置き（ファームの `control_params.h` と同じく範囲の下限。上位が送るまで ARM しない）
+BRAKE_DECEL_PLACEHOLDER_M_S2 = 0.5
+MD_TORQUE_LAG_PLACEHOLDER_S = 0.0
 AUTO_STOP_DIRECTION_DEADBAND_M_S = 0.05
 #: LiDAR は進行方向（前 0°・後 180°）へ伸ばした矩形で見る。片側の幅と、障害物と確定する点数
 AUTO_STOP_LIDAR_HALF_WIDTH_CM = 15.0
@@ -264,6 +267,9 @@ class VirtualStm32:
                 param_id=msg.param_id, applied=self._config.get(msg.param_id, 0.0),
                 result=packets.ConfigResult.OK), t_ns)
 
+    def _brake_decel(self) -> float:
+        return self._config.get(packets.Param.BRAKE_DECEL_M_S2, BRAKE_DECEL_PLACEHOLDER_M_S2)
+
     def apply_config(self, param_id: int, value: float) -> bool:
         """`CONFIG_SET` の中身を適用する。知っている `param_id` なら True。
 
@@ -341,7 +347,7 @@ class VirtualStm32:
             if arm_requested:
                 self._disarm_brake_until = 0
             elif self._arm_requested and not self._drive_power_cut:
-                self._disarm_brake_until = t_ns + DISARM_BRAKE_TIMEOUT_NS
+                self._disarm_brake_until = t_ns + round(disarm_brake_timeout_s(self._brake_decel()) * NS)
             self._arm_requested = arm_requested
             # 長い停車で切った電源は、ARM を要求し直す（ロックを通った ARM）まで入れない
             if arm_requested:
@@ -567,7 +573,8 @@ class VirtualStm32:
         forward = (speed >= 0.0) if abs(speed) > AUTO_STOP_DIRECTION_DEADBAND_M_S \
             else (desired_direction >= 0.0)
         av = abs(speed)
-        d_stop_cm = ((av * AUTO_STOP_DELAY_S + av * av / (2.0 * AUTO_STOP_DECEL_M_S2)) * 100.0
+        delay_s = AUTO_STOP_SENSOR_DELAY_S + self._config.get(packets.Param.MD_TORQUE_LAG_S, MD_TORQUE_LAG_PLACEHOLDER_S)
+        d_stop_cm = ((av * delay_s + av * av / (2.0 * self._brake_decel())) * 100.0
                      + self._config.get(packets.Param.AUTO_STOP_MARGIN_CM, 15.0))
         lidar_fresh = lidar_hit = False
         lid = self.lidar
