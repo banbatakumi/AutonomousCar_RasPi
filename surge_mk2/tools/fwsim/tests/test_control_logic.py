@@ -25,6 +25,10 @@ HAVE_FW = (FW_DIR / "host" / "host_sim.c").exists() and shutil.which("cc") is no
 #: ファームの同定用ヨーモーメント注入（`tv_test_moment_nm`）の確認に使う値 [N·m]
 MOMENT_NM = 0.12
 QUIET = replace(NOMINAL, front_noise_rad_s=0.0, rear_noise_rad_s=0.0, gyro_noise_rad_s=0.0)
+#: 仕組み（FF が遅れを消す・ローンチが PI より速い）を見る試験の車速 PI のゲイン。vehicle.toml の値（校正 5）は
+#: 車ごとに変わり、強いゲインでは FF なし・ローンチなしでも遅れが小さく、比べたい差が見えなくなる（2026-10-19、
+#: kp 1.14・ki 4.26 で 3 件が落ちた）。値は 2026-10-18 までの toml の値
+MECH_SPEED_PI = {"speed_kp": 0.3, "speed_ki": 0.6}
 
 
 def scenario(key: str) -> S.Scenario:
@@ -73,22 +77,28 @@ class TestLogic(unittest.TestCase):
         m = S.run(self.fw, NOMINAL, scenario("lift")).metrics
         self.assertLess(m["wheel_peak"], 2.5)
 
+    #: 目標を大きく超えて滑っていた時間の割合（`locking`）の上限。2026-10-19 に固定の 0.3 で見る `slipping` から
+    #: 置き換えた（校正 7 の目標が真の値で約 0.3 になり、目標どおりでも数えていた）。旧ゲイン・旧目標で 0〜0.06、
+    #: 2026-10-19 の校正 7 のゲインで 0.04〜0.08（標準モデルの減速だけ旧 0.000 → 0.055 と悪い）
+    LOCKING_MAX = 0.1
+
     def test_brake_holds_near_the_limit(self):
-        """制動で限界の近くに保つ。ゲインは**同定した実機のタイヤ**（`Plant.load()`）に合わせて最適化した値なので、
-        深く滑る時間の割合の厳しい基準（0.15）はそのタイヤで見る。汎用の標準モデル（`NOMINAL`）は別のタイヤなので、
-        止まる・距離が最良の9割以上・極端にロックしない（0.25 未満）ことだけを見る。"""
+        """制動で限界の近くに保つ: 止まる・距離が最良の9割以上・目標を大きく超えて滑らない。
+        ゲインを決めた**同定した実機のタイヤ**（`Plant.load()`）と、形の違う標準モデル（`NOMINAL`）の両方で見る。"""
         sc = scenario("brake")
-        for name, plant, slipping_max in (("標準モデル", NOMINAL, 0.25), ("同定したタイヤ", Plant.load(), 0.15)):
+        for name, plant in (("標準モデル", NOMINAL), ("同定したタイヤ", Plant.load())):
             with self.subTest(plant=name):
                 m = S.run(self.fw, plant, sc).metrics
                 self.assertTrue(m["stopped"])
                 self.assertGreater(S.oracle(self.fw, plant, sc) / m["distance"], 0.9)
-                self.assertLess(m["slipping"], slipping_max)
+                self.assertLess(m["locking"], self.LOCKING_MAX)
 
     def test_speed_command_decel_does_not_lock(self):
         """車速指令の減速（ランプ3.0m/s²は後輪だけの制動の限界を超える）でも後輪がロックしない。"""
-        m = S.run(self.fw, NOMINAL, scenario("decel_pi")).metrics
-        self.assertLess(m["slipping"], 0.05)
+        for name, plant in (("標準モデル", NOMINAL), ("同定したタイヤ", Plant.load())):
+            with self.subTest(plant=name):
+                m = S.run(self.fw, plant, scenario("decel_pi")).metrics
+                self.assertLess(m["locking"], self.LOCKING_MAX)
 
     # ── 車速PIの加速度フィードフォワード（v0.21。`drive.h` の同名の節）──
 
@@ -109,8 +119,8 @@ class TestLogic(unittest.TestCase):
         gain, rr = self._plant_gain()
         self.assertGreater(gain, 5.0)
         sc = S.Scenario("t", "t", (S.Seg(1.0, MODE_SPEED, 2.4, 2.0),), 0.0)   # 停止から 2.0m/s² で
-        off = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0})
-        on = S.run(self.fw, QUIET, sc, {"speed_ff_nm_per_m_s2": 1.0 / gain,
+        off = S.run(self.fw, QUIET, sc, {**MECH_SPEED_PI, "speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0})
+        on = S.run(self.fw, QUIET, sc, {**MECH_SPEED_PI, "speed_ff_nm_per_m_s2": 1.0 / gain,
                                         "speed_ff_rr_nm": max(rr, 0.0) / gain})
 
         def lag(r) -> float:
@@ -140,7 +150,8 @@ class TestLogic(unittest.TestCase):
     def test_launch_accelerates_like_full_torque_and_hands_over_at_target(self):
         """車速指令＋ローンチは、最初の周期から全開を要求してトルク指令の全開と同じだけ進み、
         目標に届いたら車速PIへ戻って行き過ぎない。"""
-        params = {"launch_exit_torque_nm": 0.012, "speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0}   # FF なしの車速PIと比べる
+        params = {**MECH_SPEED_PI, "launch_exit_torque_nm": 0.012, "speed_ff_nm_per_m_s2": 0.0,
+                  "speed_ff_rr_nm": 0.0}   # FF なしの車速PIと比べる
         lc = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED_LAUNCH, 1.5, 3.0),), 0.0),
                    params)
         pi = S.run(self.fw, QUIET, S.Scenario("t", "t", (S.Seg(1.5, MODE_SPEED, 1.5, 3.0),), 0.0), params)
@@ -166,7 +177,8 @@ class TestLogic(unittest.TestCase):
         segs = (S.Seg(0.6, MODE_SPEED, 0.5, 3.0), S.Seg(0.8, MODE_SPEED_LAUNCH, 2.0, 3.0))
         # ローンチの仕組み（いつ始まり、効くか）を見る試験なので、TC は固定の設定で見る。vehicle.toml の TC
         # （目標スリップ率 0.10）は PI の発進だけでローンチ並みの距離が出てしまい、優位が見えなくなる
-        tc = {"tc_slip_target": 0.2, "tc_kp_nm_per_m_s": 0.2011, "tc_ki_nm_per_m": 5.3387}
+        tc = {"tc_slip_target": 0.2, "tc_kp_nm_per_m_s": 0.2011, "tc_ki_nm_per_m": 5.3387,
+              **MECH_SPEED_PI, "speed_ff_nm_per_m_s2": 0.0, "speed_ff_rr_nm": 0.0}
         lc = S.run(self.fw, QUIET, S.Scenario("t", "t", segs, 0.5, measure=1), tc)
         pi = S.run(self.fw, QUIET, S.Scenario(
             "t", "t", (segs[0], S.Seg(0.8, MODE_SPEED, 2.0, 3.0)), 0.5, measure=1), tc)

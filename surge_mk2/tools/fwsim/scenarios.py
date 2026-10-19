@@ -93,6 +93,10 @@ class Result:
         return self.out[:, OUT[name]]
 
 
+#: `locking` の余裕（目標のスリップ率をこれだけ超えたらロックしかけとみなす）
+LOCK_MARGIN = 0.15
+
+
 def _metrics(sc: Scenario, out: np.ndarray, slip_target: float = 0.1) -> dict[str, float]:
     w = sc.window()
     o = out[w]
@@ -116,6 +120,9 @@ def _metrics(sc: Scenario, out: np.ndarray, slip_target: float = 0.1) -> dict[st
         m["speed_end"] = float(c("speed")[-1])
         o_end = len(o)
     m["slipping"] = float(np.mean(kappa > 0.3))
+    # 目標を `LOCK_MARGIN` より大きく超えて滑っていた時間の割合（ロックしかけ）。`slipping` は固定の 0.3 で見るので、
+    # 目標そのものが 0.3 近くにあると（2026-10-19 の校正 7 は真の値で約 0.3）目標どおりでも数えてしまう
+    m["locking"] = float(np.mean(kappa > slip_target + LOCK_MARGIN))
     # 目標のスリップ率からの行き過ぎ（目標に対する比の時間平均。0 = 一度も目標を超えていない、
     # 1 = 平均して目標の2倍で滑っていた）。「目標より上に居座る」ゲインを見分ける物差し
     m["slip_over"] = float(np.mean(np.maximum(0.0, kappa - slip_target)) / slip_target)
