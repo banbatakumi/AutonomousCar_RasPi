@@ -54,11 +54,12 @@ fi
 
 if [ "$FAST" = 0 ]; then
   run "pytest" "$PY" -m pytest raspi/tests -q
-  # Mac 側の補助ツール（同定の値は全ノードとファームが信じて走る）。シムを回す重いもの
-  # （`tools/sysid/tests/test_fit.py`・`test_end_to_end.py`・`test_link.py` の TestAnalyzeFolds・
-  # `tools/ctrl_tune/tests`）は数分かかるので入れない。直したら個別に回すこと
-  run "pytest (tools)" "$PY" -m pytest tools/tests tools/sysid/tests/test_link.py \
-    -k "not TestAnalyzeFolds" -q
+  # Mac 側の補助ツール。校正（`tools/calib`）の値は全ノードとファームが信じて走るので、解析が真値を
+  # 復元するかのテスト（真値の分かっているシムで試験を走らせる。約 40 秒）も入れる。ファームの定数の写しの
+  # 突き合わせ（`tools/fwsim/tests/test_fw_constants.py`）も。車速のカルマンフィルタのシムのテスト
+  # （`tools/fwsim/tests/test_speed_kf*.py`）は重いので入れない。ファームを直したら個別に回すこと
+  run "pytest (tools)" "$PY" -m pytest tools/tests tools/calib/tests tools/fwsim/tests/test_fw_constants.py \
+    tools/fwsim/tests/test_control_logic.py -q
   if [ -d gui/node_modules ]; then
     printf '── tsc -b\n'
     (cd gui && npx tsc -b) || { echo "   ✗ 失敗: tsc" >&2; fail=1; }

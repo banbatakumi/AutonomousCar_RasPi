@@ -27,7 +27,7 @@
    **大きさまでは言えない**: 残差の分散 S は「状態の不確かさ HPHᵀ」と「測定ノイズ R」の和で、σ だけを
    √NIS 倍にしても NIS は 1 にならない（シムで確かめた: SIGMA_A を 0.6→0.11 にして NIS 0.034→0.099）。
    値の決め直しは、ここで測った NIS・自己相関をシムの雑音モデルに合わせ込み、真値のあるシムで
-   誤差を最小にする（`tools/ctrl_tune` の掃引、`docs/development.md` §4.8）。
+   誤差を最小にする（`tools/fwsim` のファームのシムで掃引、`docs/development.md` §4.8）。
 3. 静止の区間は、センサ自身の白色雑音だけを見ている（振動・周期誤差は出ない）。
 4. 静止の NIS が走行中よりずっと小さいのは普通（走行中は振動・周期誤差・加速度の変化が足される）。
 """
@@ -64,7 +64,7 @@ _FIELDS = ("speed", "accel_kf", "accel_bias_kf", "kf_gated", "t_stm_us", "steer_
 def firmware_constants(fw_dir: Path | None = None) -> dict[str, float]:
     """ファームの `speed_kf.h` の既定値（SIGMA_S・SIGMA_A など）。読めなければ空。"""
     if fw_dir is None:
-        from tools.ctrl_tune.fw import FW_DIR
+        from tools.fwsim.fw import FW_DIR
         fw_dir = FW_DIR
     path = fw_dir / "src" / "control" / "speed_kf.h"
     if not path.exists():
