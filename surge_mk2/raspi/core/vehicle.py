@@ -188,6 +188,15 @@ class Vehicle:
     #: 目標速度をならす傾きの上限 [m/s²]。**`[safety] cmd_accel_limit_m_s2`**（Pi が COMMAND に載せる
     #: 上限。v0.22 で STM32 の固定上限 3.0 が無くなり、これが実効の上限になった）
     speed_ramp_max_m_s2: float = 3.0
+    #: 後輪の静的な荷重の割合と、前後の荷重移動 h/L（重心高さ ÷ ホイールベース）。`[control.plant]` の
+    #: `rear_lateral_share`・`load_transfer`（校正 7）。slam2d の車軸ごとの摩擦（`grip_shape` = 1）が使う
+    rear_load_frac: float = 0.59
+    load_transfer_hl: float = 0.133
+    #: planner が計画に使う**加速**の天井 [m/s²]（`[safety] plan_accel_limit_m_s2`。無ければ
+    #: `speed_ramp_max_m_s2`）。減速の天井はランプの上限のまま——ランプの上限は加減速で対称なので、
+    #: 減速だけを上げるときに加速の計画まで上がらないように分けてある（2026-10-20。加速は TC が
+    #: 絞っていて 3.0 も出ていない。減速の天井を上げるのは後輪のロックを確かめてから、vehicle.toml）
+    plan_accel_limit_m_s2: float = 0.0
     #: LiDAR の周の終わり → STM32 が COMMAND を受理するまで [s]
     control_latency_s: float = 0.0
     #: 曲率の2次遅れ（ヨー応答）の固有角振動数 [rad/s] と減衰比。0 = 無し
@@ -260,16 +269,24 @@ class Vehicle:
         return self.lim_lat_m_s2 if self.lim_lat_m_s2 > 1e-6 else 3.5
 
     def a_accel_max(self, v: float = 0.0) -> float:
-        """直線を加速できる上限 [m/s²]（正味。`[limits] a_accel_m_s2`。校正 8 が TC を入れた全開の発進で測る）。
+        """直線を加速できる上限 [m/s²]（正味。`[limits] a_accel_m_s2`。校正 9 が TC を入れた全開の発進で測る）。
 
         目標速度は `speed_ramp_max_m_s2`（Pi が送る `accel_limit` の上限）でならすので、それより上は出ない。
+        計画の加速の天井（`plan_accel_max`）でも頭打ちにする。
         `v` は互換のため（車速による低下は測っていない。2m の直線で出せるのは約 2m/s まで）。"""
         a = self.lim_accel_m_s2 if self.lim_accel_m_s2 > 1e-6 else 2.5
-        return max(0.05, min(a, self.speed_ramp_max_m_s2))
+        return max(0.05, min(a, self.plan_accel_max))
+
+    @property
+    def plan_accel_max(self) -> float:
+        """planner が計画に使う加速の天井 [m/s²]（走行中の学習の加速の出発点と天井も）。
+        `[safety] plan_accel_limit_m_s2`、ランプの上限より上にはしない。"""
+        p = self.plan_accel_limit_m_s2
+        return min(p, self.speed_ramp_max_m_s2) if p > 0.0 else self.speed_ramp_max_m_s2
 
     @property
     def a_decel_max(self) -> float:
-        """速度指令を下げたときの減速度の上限 [m/s²]（正味。`[limits] a_brake_m_s2`。校正 8 が車速指令で
+        """速度指令を下げたときの減速度の上限 [m/s²]（正味。`[limits] a_brake_m_s2`。校正 9 が車速指令で
         目一杯減速して測る。`brake`＝ABS は使わない）。"""
         a = self.lim_brake_m_s2 if self.lim_brake_m_s2 > 1e-6 else 2.5
         return max(0.05, min(a, self.speed_ramp_max_m_s2))
@@ -379,11 +396,14 @@ class Vehicle:
             lim_lat_m_s2=float(d.get("limits", {}).get("a_lat_m_s2", 0.0)),
             lim_accel_m_s2=float(d.get("limits", {}).get("a_accel_m_s2", 0.0)),
             lim_brake_m_s2=float(d.get("limits", {}).get("a_brake_m_s2", 0.0)),
+            rear_load_frac=float(d.get("control", {}).get("plant", {}).get("rear_lateral_share", 0.59)),
+            load_transfer_hl=float(d.get("control", {}).get("plant", {}).get("load_transfer", 0.133)),
             rolling_resistance=float(dyn.get("rolling_resistance", 0.0)),
             speed_kp=float(dyn.get("speed_kp", 0.0)),
             speed_ki=float(dyn.get("speed_ki", 0.0)),
             speed_plant_gain=float(dyn.get("speed_plant_gain", 0.0)),
             speed_ramp_max_m_s2=_ramp_max(dyn, safety),
+            plan_accel_limit_m_s2=float(safety.get("plan_accel_limit_m_s2", 0.0)),
             control_latency_s=float(dyn.get("control_latency_s", 0.0)),
             yaw_natural_freq_rad_s=float(dyn.get("yaw_natural_freq_rad_s", 0.0)),
             yaw_damping=float(dyn.get("yaw_damping", 1.0)),

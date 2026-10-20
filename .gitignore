@@ -37,6 +37,8 @@ logs/*.jsonl
 *.mcap
 surge_mk2/saved_maps/*.npz
 surge_mk2/saved_maps/*.json
+# 地図ごとの仕上げた経路の写し（planner が書く。大きい・機体ごと）
+surge_mk2/saved_maps/*.pkl
 
 # ml_cam/（カメラセグメンテーションのオフライン学習パイプライン。2026-08-29に
 # ml/ から改名）の生成物・大容量ファイル

@@ -72,6 +72,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM as _MAX_BRAKE_TORQUE_NM
+
 __all__ = ["VehicleSpec", "VehicleModel", "DriveInput", "SteerServo", "SteerLink", "next_speed",
            "SpeedController", "SecondOrder",
            "backlash", "deadband",
@@ -149,7 +151,7 @@ class VehicleSpec:
     #: 同定するのは車体の側（`speed_plant_gain`・`rolling_resistance`、`SpeedController`参照）
     speed_kp: float = 0.0            # [N·m/(m/s)]
     speed_ki: float = 0.0            # [N·m/(m/s)/s]
-    speed_torque_max_nm: float = 0.26  # PI 出力の上限（後輪2輪の合計）[N·m]
+    speed_torque_max_nm: float = 0.30  # PI 出力の上限（後輪2輪の合計）[N·m]。DRIVE_MAX_TORQUE_NM × 2
     speed_ramp_max_m_s2: float = 3.0   # 目標速度のランプの上限（Pi が COMMAND の accel_limit に載せる上限）
     #: 車体の加速度 / 後輪合計トルク [(m/s²)/(N·m)]。名目は 1/(車輪半径×質量)
     speed_plant_gain: float = 1.0 / (0.03 * 2.0)
@@ -184,6 +186,16 @@ class VehicleSpec:
     #: `DriveInput`を組むときに使う（`VehicleModel`自身は`cmd`の値だけを見る）
     cmd_accel_limit_m_s2: float = 0.0
     cmd_steer_rate_limit_rad_s: float = 0.0
+    #: ★**前後の車軸ごとの摩擦**（2026-10-20）。False なら車全体で 1 つの摩擦円（今までの形）。
+    #: True なら、駆動・制動は後輪だけが受け持ち、横は前後が静的な荷重の割合で分け合い、前後の荷重移動
+    #: （重心高さ ÷ ホイールベース）で各車軸の摩擦の限界が変わる。実機の g-g（`surge_20261020_123051`）は
+    #: こちらの形に合う（横 4.9 で減速 2.6、横 6.4 で加速 2.2 が出ていた。1 つの円では出ない）
+    axle_model: bool = False
+    #: 後輪の静的な荷重の割合（`[control.plant] rear_lateral_share`）と、荷重移動 h/L（`load_transfer`）
+    rear_load_frac: float = 0.59
+    load_transfer_hl: float = 0.133
+    #: 後輪の μ ÷ 前輪の μ（モデル誤差の注入用。1 = 同じ）
+    rear_grip_ratio: float = 1.0
 
     sensors: dict = field(default_factory=dict)
 
@@ -250,7 +262,7 @@ class VehicleSpec:
             steer_servo_gain=dyn.get("steer_servo_gain", 1.0),
             speed_kp=dyn.get("speed_kp", 0.0),
             speed_ki=dyn.get("speed_ki", 0.0),
-            speed_torque_max_nm=dyn.get("speed_torque_max_nm", 0.26),
+            speed_torque_max_nm=dyn.get("speed_torque_max_nm", 0.30),
             # 旧キー（[dynamics] speed_ramp_max_m_s2）が残っている toml はそちらを読む
             speed_ramp_max_m_s2=dyn.get("speed_ramp_max_m_s2",
                                         safety.get("cmd_accel_limit_m_s2", 0.0) or 3.0),
@@ -562,11 +574,12 @@ class SpeedController:
         return self.launching
 
     def step(self, cmd: DriveInput, v: float, dt: float, grip: float = 1.0,
-             accel_scale: float = 1.0) -> float:
+             accel_scale: float = 1.0, cap: float = math.inf) -> float:
         """:param grip: 加速度の上限に掛ける割合（0〜1）。旋回で横に使っているぶんだけ前後に
             出せる力が減る（`VehicleModel.step` が渡す）。1.0 = 直進（同定の解析はこのまま）
         :param accel_scale: 前後の加速度の上限（駆動も減速も）に掛ける路面の倍率（`sim/surface.py`。
-            1.0 = 同定値）"""
+            1.0 = 同定値）
+        :param cap: 前後の加速度の絶対値の上限 [m/s²]（車軸ごとの摩擦、`VehicleSpec.axle_model`）"""
         sp = self.spec
         self.accel_capped = False
         if sp.speed_kf_lag_s > 1e-6:
@@ -627,7 +640,7 @@ class SpeedController:
         driving = (a_req >= 0.0) == (v >= 0.0) or abs(v) < 1e-3
         a_lim = (drive_accel_limit(sp, v) if driving else (
             sp.speed_decel_m_s2 if sp.speed_decel_m_s2 > 1e-6 else math.inf)) * accel_scale
-        a_lim *= grip
+        a_lim = min(a_lim * grip, cap)
         a = max(-a_lim, min(a_lim, a_req))
         if (self.v_meas > DRIVE_MAX_SPEED_M_S and a > 0.0) or (self.v_meas < -DRIVE_MAX_SPEED_M_S and a < 0.0):
             a = 0.0                      # 最終防壁（ファームの ApplyOverspeedLimit）
@@ -688,8 +701,8 @@ class VehicleModel:
     """真値の状態を持つ。座標は世界系（x = 東、y = 北、yaw = 反時計回り）。"""
 
     #: `brake_torque = 0`（未指定）のときに使う最大制動トルク [N·m]。
-    #: `convert.py` の MAX_BRAKE_TORQUE_NM と同値
-    MAX_BRAKE_TORQUE_NM = 0.13
+    #: `convert.py` の MAX_BRAKE_TORQUE_NM（唯一の定義）
+    MAX_BRAKE_TORQUE_NM = _MAX_BRAKE_TORQUE_NM
 
     def __init__(self, spec: VehicleSpec, start: tuple[float, float, float]) -> None:
         self.spec = spec
@@ -790,11 +803,22 @@ class VehicleModel:
             # いる横加速度 `u_y`（グリップ限界に対する割合）に対し、前後の上限を `1/sqrt(1+u_y²)` 倍に
             # する（前後・横の要求が円からはみ出すとき、両方を同じ割合で縮めた形。横の側は下で
             # `accel_x` のぶんを引く）。横が限界に張り付いても 0 にはならない（止まれなくならない）
-            u_y = self.speed ** 2 * abs(self._curv_req) / max(
-                sp.mu * self.grip_lat * GRAVITY_MPS2, 1e-6)
-            self.speed = self._speed_ctl.step(cmd, self.speed, dt,
-                                              grip=1.0 / math.sqrt(1.0 + u_y * u_y),
-                                              accel_scale=self.grip_long)
+            if sp.axle_model:
+                # 後輪の摩擦円: (前後)² + (後輪が受け持つ横)² ≤ (μ_r · 後輪の荷重)²。荷重は前後の加速度で移る
+                # （加速で後ろへ。1 ステップ前の加速度で見積もる）
+                mu_g = sp.mu * self.grip_lat * GRAVITY_MPS2
+                ay = self.speed ** 2 * abs(self._curv_req)
+                cap_r = sp.rear_grip_ratio * mu_g * max(
+                    0.0, sp.rear_load_frac + sp.load_transfer_hl * self.accel_x / GRAVITY_MPS2)
+                a_cap = math.sqrt(max(0.0, cap_r * cap_r - (ay * sp.rear_load_frac) ** 2))
+                self.speed = self._speed_ctl.step(cmd, self.speed, dt, grip=1.0,
+                                                  accel_scale=self.grip_long, cap=a_cap)
+            else:
+                u_y = self.speed ** 2 * abs(self._curv_req) / max(
+                    sp.mu * self.grip_lat * GRAVITY_MPS2, 1e-6)
+                self.speed = self._speed_ctl.step(cmd, self.speed, dt,
+                                                  grip=1.0 / math.sqrt(1.0 + u_y * u_y),
+                                                  accel_scale=self.grip_long)
         else:
             self.speed = next_speed(sp, cmd, self.speed, dt)
         self.accel_x = (self.speed - prev_speed) / dt if dt > 0 else 0.0
@@ -829,8 +853,17 @@ class VehicleModel:
             # （ヨーレートそのものに掛けると、停止後もヨーが振動し続けた）
             requested_curvature = self._yaw2.step(requested_curvature, dt)
         self._curv_req = requested_curvature
-        a_lat_max = math.sqrt(max(0.0, (sp.mu * self.grip_lat * GRAVITY_MPS2) ** 2
-                                  - self.accel_x ** 2))
+        if sp.axle_model:
+            # 横は前後の車軸の小さい方: 前輪は横だけ（荷重は加速で減る）、後輪は前後の残り
+            mu_g = sp.mu * self.grip_lat * GRAVITY_MPS2
+            r, hl, ax = sp.rear_load_frac, sp.load_transfer_hl, self.accel_x
+            front = mu_g * max(0.0, 1.0 - hl * ax / GRAVITY_MPS2 / max(1.0 - r, 1e-3))
+            cap_r = sp.rear_grip_ratio * mu_g * max(0.0, r + hl * ax / GRAVITY_MPS2)
+            rear = math.sqrt(max(0.0, cap_r * cap_r - ax * ax)) / max(r, 1e-3)
+            a_lat_max = min(front, rear)
+        else:
+            a_lat_max = math.sqrt(max(0.0, (sp.mu * self.grip_lat * GRAVITY_MPS2) ** 2
+                                      - self.accel_x ** 2))
         self._a_lat_max = a_lat_max
         max_curvature = a_lat_max / max(abs(self.speed), 1e-6) ** 2
         curvature = math.copysign(min(abs(requested_curvature), max_curvature), requested_curvature)

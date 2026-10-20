@@ -73,6 +73,8 @@ export type AutoParamSpec = {
   note: string
   /** 見出しを付けてまとめる組（`ParamSpec.group`）。空・無しなら組分けしない */
   group?: string
+  /** 値ごとの名前（`ParamSpec.choices`、`min` から `step` 刻み）。あればスライダではなく選択肢で出す */
+  choices?: string[]
 }
 
 /** 選べる自動運転モード1つ（`raspi/auto/registry.py` の `catalog()`）。 */

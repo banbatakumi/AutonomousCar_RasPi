@@ -5,6 +5,7 @@
 """
 
 import json
+import time
 import math
 import sys
 import unittest
@@ -267,7 +268,7 @@ class TestLearner(unittest.TestCase):
         self.assertLess(e["b"], 3.3)                    # 変わる前の値を引きずらない
         self.assertLess(g.map.level, 3.1)
         self.assertLess(g.map.decel, 3.0 * 0.65)
-        self.assertEqual(g.map.accel, 3.0)              # 加速は学習しない
+        self.assertEqual(g.map.accel, 3.0)              # 実測の加速度を渡していないので加速は学習しない
         self.assertFalse(g.long.dec_done)               # 探し直す
 
     def test_combined_precursor_is_recorded_as_circle_radius(self):
@@ -941,6 +942,134 @@ class TestLongLearner(unittest.TestCase):
         self.assertAlmostEqual(g.long.map.decel, 2.0 * 1.08 ** 2, places=6)
 
 
+class TestAccelIsFixed(unittest.TestCase):
+    def test_accel_is_the_configured_ceiling(self):
+        """加速は学習しない（TC の窓で決める版は実機で下がり続けたので消した、2026-10-20）。設定の値をそのまま使う。"""
+        lg = long_learner(acc=3.0)
+        self.assertEqual(lg.map.accel, 3.0)
+        lg.map.accel = 2.0
+        lg.configure(acc_init=3.0, dec_init=2.0, dec_max=3.0, down_only=False)
+        self.assertEqual(lg.map.accel, 3.0)
+
+
+class TestCouple(unittest.TestCase):
+    """摩擦円の形（`GripMap.coup`）: 横が収束した後、横と同じ「1 段上げて測り、縮めば採用」で決める。"""
+
+    LIMIT = 1.5     #: これより上げても縮まない（実機のタイヤが楕円より角張っている程度）
+
+    def _g(self, **kw) -> grip.TimeLearner:
+        g = grip.TimeLearner(yaw_wn=0.0)
+        g.configure(init_level=5.0, max_level=8.0, down_only=kw.pop("down_only", False), lat_use=1.0)
+        g.converged = True                              # 横は収束済み
+        for k, v in kw.items():
+            setattr(g.cfg, k, v)
+        return g
+
+    @staticmethod
+    def _plan(coup: float) -> float:
+        return 6.0 - 0.8 * (coup - 1.0)
+
+    def _run(self, g, laps=60, noise=0.0, seed=0) -> float:
+        rng = np.random.default_rng(seed)
+        top = 1.0
+        for k in range(laps):
+            if g.coup_done:
+                break
+            c = g.map.coup
+            top = max(top, c)
+            real = self._plan(min(c, self.LIMIT)) + noise * rng.standard_normal()
+            rc = g.ref_coup
+            g._lap_done(float(k), real, self._plan(c), self._plan(rc) if rc else 0.0)
+        return top
+
+    def test_levels_radius_follows_coup(self):
+        g = self._g()
+        xy = np.array([[0.0, 0.0], [0.5, 0.0]])
+        lat, radius = g.levels(xy)
+        self.assertTrue(np.allclose(radius, lat))
+        g.map.coup = 1.4
+        lat2, radius2 = g.levels(xy)
+        self.assertTrue(np.allclose(lat2, lat))
+        self.assertTrue(np.allclose(radius2, lat * 1.4))
+
+    def test_json_roundtrip_and_old_files(self):
+        m = grip.GripMap(level=5.0, coup=1.37)
+        self.assertAlmostEqual(grip.GripMap.from_json(m.to_json()).coup, 1.37, places=3)
+        old = json.loads(m.to_json())
+        old.pop("coup")
+        self.assertEqual(grip.GripMap.from_json(json.dumps(old)).coup, 1.0)
+        bad = json.loads(m.to_json())
+        bad["coup"] = 99.0
+        self.assertEqual(grip.GripMap.from_json(json.dumps(bad)).coup, grip.COUP_CEIL)
+
+    def test_stops_where_the_lap_stops_improving(self):
+        g = self._g()
+        top = self._run(g)
+        self.assertTrue(g.coup_done)
+        self.assertGreater(g.map.coup, 1.0)
+        self.assertGreater(g.map.coup, 0.92 * self.LIMIT)
+        self.assertLessEqual(g.map.coup, 1.05 * self.LIMIT)
+        self.assertLess(top, 1.2 * self.LIMIT)
+
+    def test_no_gain_keeps_the_ellipse(self):
+        """計画が縮むはずなのに実際のタイムが縮まない（今の形が正しい）なら、比は 1 のまま終わる。"""
+        g = self._g()
+        for k in range(30):
+            if g.coup_done:
+                break
+            c = g.map.coup
+            rc = g.ref_coup
+            g._lap_done(float(k), self._plan(1.0), self._plan(c), self._plan(rc) if rc else 0.0)
+        self.assertTrue(g.coup_done)
+        self.assertAlmostEqual(g.map.coup, 1.0, places=6)
+
+    def test_real_lap_noise_does_not_run_away(self):
+        for seed in range(15):
+            g = self._g()
+            self._run(g, noise=0.03, seed=seed)
+            self.assertLess(g.map.coup, 1.35 * self.LIMIT, seed)
+            self.assertTrue(g.coup_done or g.map.coup < 1.7, seed)
+
+    def test_guard_during_a_trial_reverts_the_coupling_not_the_lateral_level(self):
+        g = self._g()
+        g._lap_done(0.0, self._plan(1.0), self._plan(1.0), 0.0)         # 基準を測って 1 段上げる
+        trial = g.map.coup
+        self.assertGreater(trial, 1.0)
+        level = g.map.level
+        g._guard(10.0, 0.0, 0.0, "リアの滑り", 5.0)
+        self.assertLess(g.map.coup, trial)
+        self.assertEqual(g.map.level, level)                            # 横は変えない
+        self.assertTrue(g.converged)
+        self.assertLessEqual(g._coup_bad, trial)
+
+    def test_diag_survives_the_auto_state_codec(self):
+        """`AutoState.grip` は `dict[str, float]`。診断に bool などを入れると、受け側のデコードが失敗して GUI へ状態が
+        届かなくなる（2026-10-20 に `coup_done` で起きた）。"""
+        import msgspec
+        from raspi.msgs.types import AutoState
+        for learner in (grip.GripLearner(yaw_wn=0.0), grip.TimeLearner(yaw_wn=0.0)):
+            learner.configure(init_level=5.0, max_level=8.0, down_only=False, lat_use=1.0)
+            learner.converged = True
+            raw = msgspec.json.encode(AutoState(mode="x", grip={k: v for k, v in learner.diag().items()}))
+            back = msgspec.json.decode(raw, type=AutoState)
+            self.assertEqual(set(back.grip), set(learner.diag()))
+        learner.coup_done = True
+        raw = msgspec.json.encode(AutoState(mode="x", grip=dict(learner.diag())))
+        self.assertEqual(msgspec.json.decode(raw, type=AutoState).grip["coup_done"], 1.0)
+
+    def test_off_switches(self):
+        for kw in ({"couple_learn": False}, {"down_only": True}):
+            g = self._g(**kw)
+            g._lap_done(0.0, 6.0, 6.0, 0.0)
+            self.assertEqual(g.map.coup, 1.0, kw)
+
+    def test_does_not_start_before_the_lateral_search_has_converged(self):
+        g = self._g()
+        g.converged = False
+        g._lap_done(0.0, 6.0, 6.0, 0.0)
+        self.assertEqual(g.map.coup, 1.0)
+
+
 class TestParamsAndModes(unittest.TestCase):
     def test_use_fractions_are_gone_and_hidden_params_stay_constant(self):
         from raspi.auto.registry import catalog, merged_params
@@ -953,7 +1082,8 @@ class TestParamsAndModes(unittest.TestCase):
         self.assertIn("v_max", shown)
         self.assertIn("line_margin", shown)
         self.assertNotIn("look_k", shown)
-        self.assertLessEqual(len(shown), 22)
+        # 23: 「限界のモデル」（`grip_shape`、楕円 / 車軸ごと）を足した（2026-10-20 バンビ依頼）
+        self.assertLessEqual(len(shown), 23)
         # 隠した項目は、保存済みの設定・GUI から来た値を読まない（bench だけ上書きできる）
         self.assertEqual(merged_params("slam2d_route", {"look_k": 1.5})["look_k"], 0.45)
         self.assertEqual(merged_params("slam2d_route", {"look_k": 1.5}, hidden=True)["look_k"], 1.5)
@@ -1103,6 +1233,146 @@ class TestPlannerWiring(unittest.TestCase):
         (ms.MAPS_DIR / "m.grip.json").write_text("{broken")
         pl._grip_load("m")                      # 壊れていても走れる（初期値から）
         self.assertEqual(pl._grip.map.level, 0.0)
+
+    def _new_map(self, name):
+        self.mapstore.save_map(name, resolution=0.05, origin_x=0.0, origin_y=0.0,
+                               trinary=np.ones((8, 8), dtype=np.uint8), centerline_xy=np.zeros((0, 2)),
+                               raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+
+    def test_new_map_starts_from_the_surface_record(self):
+        """学習値の無い地図は、別の地図で学習した路面の記録 × back_off から始める。ceil は引き継ぎ、セルは引き継がない。"""
+        pl, ms = self.pl, self.mapstore
+        self._new_map("a")
+        pl._grip_load("a")
+        g = pl._grip
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=4.0, down_only=False)
+        self.assertFalse(pl._grip_prior)
+        g.map.level, g.map.decel, g.map.coup, g.map.ceil = 5.5, 3.0, 1.06, 6.2
+        g._measured = True
+        pl._grip_save()
+        rec = ms.load_grip_surface()
+        self.assertAlmostEqual(rec["lat"], 5.5)
+        self.assertAlmostEqual(rec["dec"], 3.0)
+        self.assertAlmostEqual(rec["coup"], 1.06)
+        self.assertAlmostEqual(rec["ceil"], 6.2)
+
+        self._new_map("b")
+        pl._grip_load("b")
+        g = pl._grip
+        b = g.cfg.back_off
+        self.assertTrue(pl._grip_prior)
+        self.assertAlmostEqual(g.map.level, 5.5 * b)
+        self.assertAlmostEqual(g.map.decel, 3.0 * g.long.cfg.back_off)
+        self.assertAlmostEqual(g.map.coup, 1.06)
+        self.assertAlmostEqual(g.map.ceil, 6.2)         # 安全装置が働いた高さは引き継ぐ（その上を試さない）
+        self.assertEqual(g.map.cells, {})
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        self.assertAlmostEqual(g.map.level, 5.5 * b)    # 同定値 × grip_init で上書きしない
+
+        # 地図に学習値があれば、そちらを使う
+        pl._grip_load("a")
+        self.assertFalse(pl._grip_prior)
+        self.assertAlmostEqual(pl._grip.map.level, 5.5 * b)
+
+    def test_surface_record_is_the_ceiling_on_a_new_map(self):
+        """記録から始めた地図では、記録の値（横・減速・比）より上は試さない。記録が無ければ切らない。"""
+        pl, ms = self.pl, self.mapstore
+        ms.save_grip_surface(5.0, 2.8, 1.1, 0.0, t=time.time())
+        self._new_map("b")
+        pl._grip_load("b")
+        self.assertEqual(pl._grip_prior_cap, (5.0, 2.8, 1.1))
+        g = pl._grip
+        self.assertAlmostEqual(g._couple_next(1.1), 1.1)
+        p = {s.key: s.default for s in pl.params}
+        p.update(grip_learn=1.0, grip_max=8.0)
+        from raspi.core.vehicle import Vehicle
+        v = Vehicle.load()
+        cap = pl._grip_prior_cap
+        g.configure(init_level=p["grip_init"] * v.a_lat_max, max_level=min(p["grip_max"], cap[0]),
+                    down_only=False, lat_use=1.0)
+        self.assertAlmostEqual(g.max_level, 5.0)
+        self.assertLessEqual(g._next(g.map.level), 5.0)
+        ms.clear_grip_surface()
+        self._new_map("c")
+        pl._grip_load("c")
+        self.assertIsNone(pl._grip_prior_cap)
+
+    def test_old_surface_record_is_not_used(self):
+        """床が変わったかは走る前に分からないので、古い記録（別の日）は使わない。"""
+        from raspi.auto import slam2d_raceline as S
+        pl, ms = self.pl, self.mapstore
+        ms.save_grip_surface(5.0, 2.8, 1.1, 0.0, t=time.time() - S.GRIP_SURFACE_MAX_AGE_S - 60.0)
+        self._new_map("b")
+        pl._grip_load("b")
+        self.assertFalse(pl._grip_prior)
+        self.assertEqual(pl._grip.map.level, 0.0)
+
+    def test_map_best_values_start_the_next_run_without_probing(self):
+        """この地図で学習を終えた値（best）は、次の走行で back_off を掛けずにそのまま使い、探索もしない。"""
+        pl, ms = self.pl, self.mapstore
+        self._new_map("a")
+        pl._grip_load("a")
+        g = pl._grip
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=3.0, down_only=False)
+        g.map.level, g.map.decel, g.map.coup = 5.96, 3.0, 1.06
+        g.converged, g.coup_done, g._measured = True, True, True
+        pl._grip_save()
+        saved = json.loads(ms.load_grip("a"))
+        self.assertAlmostEqual(saved["best_lat"], 5.96)
+        self.assertAlmostEqual(saved["best_dec"], 3.0)
+
+        pl._grip_load("a")
+        g = pl._grip
+        self.assertTrue(g.from_best)
+        self.assertAlmostEqual(g.map.level, 5.96)        # 0.92 倍しない
+        self.assertAlmostEqual(g.map.decel, 3.0)
+        self.assertAlmostEqual(g.map.coup, 1.06)
+        self.assertTrue(g.converged and g.coup_done and g.long.dec_done)
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=3.0, down_only=False)
+        self.assertAlmostEqual(g.map.level, 5.96)
+
+    def test_map_best_follows_a_lowered_value(self):
+        """終えた後に安全装置で下げたら、終え直さないまま走行をやめても best は下がっている。"""
+        pl, ms = self.pl, self.mapstore
+        self._new_map("a")
+        pl._grip_load("a")
+        g = pl._grip
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=3.0, down_only=False)
+        g.map.level, g.map.decel = 5.96, 3.0
+        g.converged, g.coup_done, g._measured = True, True, True
+        pl._grip_save()
+        g.converged = False
+        g.map.level = 5.6
+        pl._grip_save()
+        self.assertAlmostEqual(json.loads(ms.load_grip("a"))["best_lat"], 5.6)
+
+    def test_surface_record_is_the_accepted_level_not_the_trial(self):
+        """試している段（まだ確かめていない値）ではなく、採用済みの段を書く。"""
+        pl, ms = self.pl, self.mapstore
+        self._new_map("a")
+        pl._grip_load("a")
+        g = pl._grip
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=4.0, down_only=False)
+        g._ref = (5.0, 6.0, 6.0)
+        g.map.level = 5.4
+        g._measured = True
+        pl._grip_save()
+        self.assertAlmostEqual(ms.load_grip_surface()["lat"], 5.0)
+
+    def test_no_surface_record_before_a_measured_lap(self):
+        pl, ms = self.pl, self.mapstore
+        self._new_map("a")
+        pl._grip_load("a")
+        g = pl._grip
+        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
+        g.trials = 3
+        pl._grip_save()
+        self.assertIsNone(ms.load_grip_surface())
 
 
 if __name__ == "__main__":

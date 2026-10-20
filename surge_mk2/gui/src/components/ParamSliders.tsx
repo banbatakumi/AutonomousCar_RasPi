@@ -69,6 +69,28 @@ function ParamGrid({
     <div className="auto-param-grid">
       {params.map((p) => {
         const v = values[p.key] ?? p.default
+        if (p.choices && p.choices.length > 0) {
+          // 方式の切り替えなど、数値の大小に意味が無い設定は選択肢で出す
+          return (
+            <label key={p.key} className="auto-param" title={p.note}>
+              <span className="auto-param-head">{p.label}</span>
+              <select
+                value={String(v)}
+                disabled={disabled}
+                onChange={(e) => onChange(p.key, Number(e.target.value))}
+              >
+                {p.choices.map((name, i) => {
+                  const val = p.min + i * p.step
+                  return (
+                    <option key={val} value={String(val)}>
+                      {name}
+                    </option>
+                  )
+                })}
+              </select>
+            </label>
+          )
+        }
         return (
           <label key={p.key} className="auto-param" title={p.note}>
             <span className="auto-param-head">

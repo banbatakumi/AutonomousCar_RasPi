@@ -139,8 +139,9 @@
   （区間全体の 90% 点で見たら、シムで真値 3.00 に対して 2.40 で止まった）。終わりの差は、実機 4 走行
   （2026-10-13）で減速 1.9〜2.9 のどこでも −0.15〜+0.09m/s（中央 −0.05〜+0.03）＝まだ付いて行けている
 
-**加速は学習しない**（`GripMap.accel` は planner が渡す値のまま。planner は目標車速を動かす傾きの上限
-`cmd_accel_limit_m_s2` を渡す）。同じ見方をしても分かれない:
+**加速は学習しない**（天井 `plan_accel_limit_m_s2` で固定）。TC が絞っている間の実測の加速度で決める版（2026-10-20）は、
+実機で 3.0 → 1.86 まで下がり続けた（窓の加速度が計画の要求に引きずられる正のフィードバック）ので消した。減速と
+同じ見方をしても分かれない:
 加速区間の終わりの遅れは、加速 1.77 でも 2.66 でも 0.1〜0.25m/s（周ごとに 0.5 まで振れる）で変わらず、はっきり
 大きいのは横の上限が高すぎてリアが滑り続けた走行（1.1m/s）だけだった。高すぎる加速は STM32 の TC が抑える。
 学習していた版は、内側の後輪が浮いた窓 1 つで 2.66 → 1.77 に下げて戻れなかった（実機 2026-10-13）。
@@ -174,6 +175,8 @@ FORMAT = 1
 #: 読み込んだ値を丸める範囲 [m/s²]（壊れた値・古い形式で速度が跳ね上がらないように）
 A_FLOOR = 1.0
 A_CEIL = 9.0
+#: 摩擦円の半径の、横の限界に対する比の範囲（`GripMap.coup`。1 = 楕円、大きいほど前後と横の取り合いが弱い）
+COUP_CEIL = 2.0
 #: 読み込むセルの数の上限
 MAX_CELLS = 20000
 #: 加速・減速の上限の下限 [m/s²]
@@ -348,6 +351,14 @@ class GripConfig:
     #: 安全装置が働いた上限には、この割合より近づかない（`GripMap.ceil` に保存し、次の走行でも。同じ段を
     #: 試し直して同じ外れ方を繰り返さない: sim.bench で、採用のたびに幅を戻して 6.20 を 3 回試し、3 回とも線から 12〜18cm）
     time_ceil: float = 0.97
+    # ── 摩擦円の形（前後と横の取り合いの強さ）をタイムで決める（`TimeLearner`。横が収束した後）──
+    #: 横の限界に対する摩擦円の半径の比 `coup` を、1 段上げて測り、タイムが縮めば採用する。横の学習と同じ仕組み。
+    #: 比が大きいほど、横を使っているコーナー出口でも前後の力が残る（楕円 = 1.0）。計画の試算では、半径を横の限界の
+    #: 1.2 倍にすると周回が約 3%、結合なしで約 6.5% 縮む
+    couple_learn: bool = True
+    couple_step: float = 0.12
+    couple_step_min: float = 0.04
+    couple_max: float = COUP_CEIL
     #: True なら `step_up` を planner の設定で上書きしない（`sim.bench --grip-set step_up=…`）
     fixed_step: bool = False
     #: True なら周の境目でだけ上げる（収束の速さを比べる基準版。`sim.bench --grip-per-lap`）
@@ -404,6 +415,14 @@ class GripMap:
     #: 走行を始めるたびに前回滑った高さを 1 段越えて試し直す。路面が良くなっても上げ直さないので、
     #: 上げ直したいときは `.grip.json` を消す
     ceil: float = 0.0
+    #: 摩擦円の半径 ÷ 横の限界（`TimeLearner` がタイムで決める。1 = 楕円のまま）
+    coup: float = 1.0
+    #: **この地図（コース）で学習を終えた値**（`TimeLearner` が横・摩擦円の比の探索を終え、1 周を測った後の
+    #: 採用済みの値。0 = まだ無い）。読み込むとこの値から**そのまま**始め、探索もしない——2 回目以降の走行は
+    #: 1 周目からベストの設定で走る（2026-10-20 バンビ依頼）。安全装置が働いて下げたら、ここも下げる
+    best_lat: float = 0.0
+    best_dec: float = 0.0
+    best_coup: float = 0.0
 
     def to_json(self) -> str:
         cells = [[ix, iy, round(c.ok, 3), round(c.bad, 3), round(c.base, 4), min(c.n, 50)]
@@ -412,7 +431,9 @@ class GripMap:
                            "ok": round(self.ok, 3), "bad": round(self.bad, 3),
                            "accel": round(self.accel, 3), "decel": round(self.decel, 3),
                            "noise": round(self.noise, 5), "noise_n": min(self.noise_n, 100000),
-                           "ceil": round(self.ceil, 3),
+                           "ceil": round(self.ceil, 3), "coup": round(self.coup, 3),
+                           "best_lat": round(self.best_lat, 3), "best_dec": round(self.best_dec, 3),
+                           "best_coup": round(self.best_coup, 3),
                            "cells": cells})
 
     @classmethod
@@ -443,6 +464,12 @@ class GripMap:
                 decel=_num(raw.get("decel"), X_FLOOR, A_CEIL),
                 noise=_num(raw.get("noise"), 0.0, NOISE_CEIL),
                 ceil=_num(raw.get("ceil"), A_FLOOR, A_CEIL))
+        m.coup = min(COUP_CEIL, max(1.0, _num(raw.get("coup"), 1.0, COUP_CEIL) or 1.0))
+        m.best_lat = _num(raw.get("best_lat"), A_FLOOR, A_CEIL)
+        m.best_dec = _num(raw.get("best_dec"), X_FLOOR, A_CEIL)
+        m.best_coup = min(COUP_CEIL, max(1.0, _num(raw.get("best_coup"), 1.0, COUP_CEIL) or 1.0))
+        if not (m.best_lat > 0.0 and m.best_dec > 0.0):
+            m.best_lat = m.best_dec = m.best_coup = 0.0
         try:
             m.noise_n = max(0, min(100000, int(raw.get("noise_n", 0)))) if m.noise > 0.0 else 0
         except (TypeError, ValueError):
@@ -553,7 +580,8 @@ class LongConfig:
 
 
 class LongLearner:
-    """減速の上限を走行中に決める（モジュール docstring）。値は `GripMap.decel`。加速は学習しない。"""
+    """減速の上限を走行中に決める（モジュール docstring）。値は `GripMap.decel`。加速（`GripMap.accel`）は
+    設定の天井で固定（`configure` の `acc_init`）。"""
 
     def __init__(self, cfg: LongConfig | None = None) -> None:
         self.cfg = cfg or LongConfig()
@@ -780,6 +808,14 @@ class GripLearner:
         """保存する値があるか（試行・前兆・減速の判断が 1 つでもあった）。"""
         return bool(self.trials or self.events or self.long.windows)
 
+    def surface_values(self) -> tuple[float, float, float, float] | None:
+        """路面の記録（地図によらない学習の出発点、`mapstore.save_grip_surface`）に書く
+        `(横, 減速, 摩擦円の比, 安全装置が働いた上限)`。書くに値しなければ `None`。"""
+        m = self.map
+        if not self.worth_saving() or m.level <= 0.0 or m.decel <= 0.0:
+            return None
+        return m.level, m.decel, m.coup, m.ceil
+
     def set_launch(self, a: float) -> None:
         """発進の加速度から横の初期値を出す（比が分かっているとき。まだ前兆も試行も無い間だけ）。"""
         if self.launch_ratio <= 0.0 or self._launch_used or self.events or self.passes:
@@ -833,7 +869,7 @@ class GripLearner:
                 lv = conf + w[i] * (g - conf)
             out.append(lv)
         lim = np.maximum(np.asarray(out, dtype=np.float64), self.floor)
-        return self.use * lim, lim
+        return self.use * lim, lim * self.map.coup
 
     # ── 100Hz の観測 ──
 
@@ -1039,7 +1075,8 @@ class GripLearner:
     ref_level = 0.0
 
     def diag(self) -> dict:
-        """記録に残す追加の診断（`AutoState.grip` に足す。値は Python の数だけ）。"""
+        """記録に残す追加の診断（`AutoState.grip` に足す。値は Python の数（float）だけ。`AutoState.grip` は `dict[str, float]`
+        で、bool を入れると受け側のデコードが失敗して GUI に状態が届かなくなる）。"""
         return {}
 
     def observe_cross(self, cross: float) -> None:
@@ -1461,6 +1498,14 @@ class TimeLearner(GripLearner):
         self.last_lap = (0.0, 0.0)          #: 直近に数えた (ラップ, 計画のラップ) [s]
         #: 読み込み（か作り直し）の後に、1 周を測り終えたか（`worth_saving`）
         self._measured = False
+        # 摩擦円の形（`coup`）の探索。横が収束した後に始まる
+        self._cref: tuple[float, float, float] | None = None   #: 採用した `coup` の (比, ラップ, 計画のラップ)
+        self._claps: list[tuple[float, float, float]] = []
+        self._cstep = self.cfg.couple_step
+        self.coup_done = False
+        self._coup_bad = math.inf           #: 安全装置が働いた比。これより上は試さない
+        #: 地図に保存した「学習を終えた値」（`GripMap.best_*`）から始めたか
+        self.from_best = False
 
     @property
     def _ceil(self) -> float:
@@ -1478,11 +1523,57 @@ class TimeLearner(GripLearner):
         self._ref, self._laps, self._step = None, [], self.cfg.time_step
         self._ref_old, self._confirmed = None, False
         self._measured = False
+        self._reset_couple()
+        self.coup_done = False
+        self._coup_bad = math.inf
+        self.from_best = False
+        if m.best_lat > 0.0 and m.best_dec > 0.0:
+            # この地図で学習を終えた値がある。`back_off` を掛けず、探索もせず、その値で 1 周目から走る。
+            # 下げる向きは今までどおり働く（安全装置で `_guard` が下げ、減速は計画に遅れたら下げる）
+            m.level = self.conf = m.best_lat
+            m.decel = m.best_dec
+            m.coup = m.best_coup or 1.0
+            self.converged = True
+            self.coup_done = True
+            self.long.dec_done = True
+            self.from_best = True
+            self._bump(down=True)
+
+    def settled(self) -> bool:
+        """この地図での学習を終えたか（横の探索を終え、摩擦円の比の探索も終えたか、しない設定）。"""
+        return (self.converged and self._measured and self.cap is None
+                and (self.coup_done or not self.cfg.couple_learn or self.down_only))
+
+    def mark_best(self) -> None:
+        """終えていれば今の値を `GripMap.best_*` に書く。終えていなくても、下げた値は best にも反映する
+        （安全装置で下げた後に終えないまま走行をやめても、次に高い値から始めない）。"""
+        m = self.map
+        if self.settled():
+            m.best_lat = self.ref_level or m.level
+            m.best_dec = m.decel
+            m.best_coup = self.ref_coup or m.coup
+        elif m.best_lat > 0.0:
+            m.best_lat = min(m.best_lat, self.ref_level or m.level)
+            m.best_dec = min(m.best_dec, m.decel)
+
+    def _reset_couple(self) -> None:
+        """摩擦円の形の基準（採用した比のタイム）を捨てる。横の上限や線が変わると、前のタイムとは比べられない。"""
+        self._cref, self._claps = None, []
+        self._cstep = self.cfg.couple_step
 
     def worth_saving(self) -> bool:
         """保存してよいか。読み込んだ値は `back_off` 倍から始めるので、1 周も測らないうちに保存すると、
         短い走行を繰り返すたびに 0.92 倍ずつ下がっていく。前兆・安全装置が働いたときは保存する。"""
         return self._measured or bool(self.events)
+
+    def surface_values(self) -> tuple[float, float, float] | None:
+        """路面の記録に書く値。**1 周を測り終えてから**で、試している段ではなく採用済みの段
+        （横は `ref_level`、比は `ref_coup`。試していなければ今の値）を書く——試している段は
+        まだ確かめていない値で、次の地図の出発点にすると 1 段ぶん行き過ぎから始まる。"""
+        m = self.map
+        if not self._measured or m.level <= 0.0 or m.decel <= 0.0:
+            return None
+        return self.ref_level or m.level, m.decel, self.ref_coup or m.coup, m.ceil
 
     def set_launch(self, a: float) -> None:
         """発進の加速度から決める初期値は**下げる方向だけ**使う。上げる方向は、1 段ずつタイムで
@@ -1494,6 +1585,7 @@ class TimeLearner(GripLearner):
         if g < self.map.level:
             self.map.level = self.conf = max(self.floor, g)
             self._ref, self._laps = None, []
+            self._reset_couple()
             self._bump(down=True)
 
     def new_line(self) -> None:
@@ -1501,6 +1593,7 @@ class TimeLearner(GripLearner):
         # 線が変われば 1 周の長さも変わる。前の線のタイムとは比べない
         self._ref, self._laps, self._lap_ok = None, [], False
         self._ref_old, self._confirmed = None, False
+        self._reset_couple()
 
     def _cell_level(self, c: _Cell | None) -> tuple[float, bool]:
         return self.map.level, False
@@ -1522,7 +1615,7 @@ class TimeLearner(GripLearner):
         self.last_cross_gain = gain
         # 探している間だけ見る。収束した後は、線から大きく外れる・リアが滑るといったはっきりした
         # 出来事でだけ下げる（1 回の「増え」で 5% ずつ下げていくと、測り違いのたびに遅くなる）
-        if gain > cfg.cross_gain and not self.converged:
+        if gain > cfg.cross_gain and (not self.converged or self._coup_trial()):
             x, y = seg.get("at", (0.0, 0.0))
             self._guard(t, x, y, "横偏差の増え", seg["peak"], gain, soft=True)
             return
@@ -1611,6 +1704,9 @@ class TimeLearner(GripLearner):
     def _lap_done(self, t: float, lap: float, plan: float, plan_ref: float = 0.0) -> None:
         cfg, m = self.cfg, self.map
         self._measured = True
+        if self.converged and self._couple_on():
+            self._couple_lap(t, lap, plan, plan_ref)
+            return
         self._laps.append((lap, plan, plan_ref))
         if len(self._laps) < cfg.time_laps:
             return
@@ -1640,6 +1736,76 @@ class TimeLearner(GripLearner):
             self._raise(t)
         else:
             self._reject(t)
+
+    # ── 摩擦円の形（`GripMap.coup`）をタイムで決める。横が収束した後、横と同じ「1 段上げて測る」を回す ──
+
+    def _couple_on(self) -> bool:
+        return self.cfg.couple_learn and not self.down_only and not self.coup_done and self.cap is None
+
+    def _coup_trial(self) -> bool:
+        """採用した比より上を試している最中か。"""
+        ref = self._cref
+        return ref is not None and self.converged and self.map.coup > ref[0] * (1.0 + 1e-6)
+
+    @property
+    def ref_coup(self) -> float:
+        """試している比の「採用済みの比」（planner が、その比に戻した計画のラップを出す）。試していなければ 0。"""
+        ref = self._cref
+        return ref[0] if self._coup_trial() and ref is not None else 0.0
+
+    def _couple_next(self, coup: float) -> float:
+        return min(self.cfg.couple_max, 0.97 * self._coup_bad, coup * (1.0 + self._cstep))
+
+    def _couple_lap(self, t: float, lap: float, plan: float, plan_ref: float) -> None:
+        cfg, m = self.cfg, self.map
+        self._claps.append((lap, plan, plan_ref))
+        if len(self._claps) < cfg.time_laps:
+            return
+        lap, plan, plan_ref = (float(np.median([r[k] for r in self._claps])) for k in range(3))
+        self._claps = []
+        ref = self._cref
+        if ref is None or m.coup <= ref[0] * (1.0 + 1e-6):
+            self._cref = (m.coup, lap, plan)            # 今の比が基準
+            self._couple_raise(t)
+            return
+        # 比を上げたぶんで縮むはずの時間と、実際に縮んだ時間（加速・減速が変わって縮んだぶんは除く）
+        base = plan_ref if plan_ref > 0.0 else ref[2]
+        plan_gain = base - plan
+        gain = (ref[1] - lap) - (ref[2] - base)
+        ok = plan_gain > cfg.time_plan_min * ref[2] and gain >= cfg.time_gain * plan_gain
+        self.steps.append({"t": t, "kind": "coup", "from": ref[0], "to": m.coup, "gain": gain,
+                           "plan_gain": plan_gain, "ok": ok})
+        if ok:
+            self._cref = (m.coup, lap, plan)
+            self._cstep = min(cfg.couple_step, self._cstep * cfg.time_regrow)
+            self._couple_raise(t)
+        else:
+            self._couple_reject(t)
+
+    def _couple_raise(self, t: float) -> None:
+        m = self.map
+        new = self._couple_next(m.coup)
+        if new <= m.coup * (1.0 + 0.5 * self.cfg.couple_step_min):
+            self.coup_done = True               # 上限（か、安全装置が働いた値のすぐ下）まで来た
+            return
+        m.coup = new
+        self._bump(down=False)
+
+    def _couple_reject(self, t: float) -> None:
+        """試した比をやめる。採用済みの比へ戻し、幅を半分にしてもう一度（幅が尽きたら終わり）。"""
+        m, ref = self.map, self._cref
+        self._claps = []
+        if ref is None:
+            return
+        self._cstep *= 0.5
+        new = self._couple_next(ref[0])
+        if self._cstep < self.cfg.couple_step_min or new <= ref[0] * (1.0 + 0.5 * self.cfg.couple_step_min):
+            m.coup = ref[0]
+            self._cstep = self.cfg.couple_step
+            self.coup_done = True
+        else:
+            m.coup = new
+        self._bump(down=True)
 
     def _raise(self, t: float) -> None:
         """採用した段から 1 段上を試す。"""
@@ -1705,6 +1871,8 @@ class TimeLearner(GripLearner):
             if b < old:
                 m.level = self.conf = b
                 self._ref, self._laps, self._step = None, [], self.cfg.time_step
+                self._reset_couple()
+                self.coup_done = False
                 self.converged = False
                 self.long.rescale(b / max(old, 1e-6))
                 self._guard_t = t
@@ -1727,6 +1895,11 @@ class TimeLearner(GripLearner):
         if t - self._guard_t < cfg.time_guard_quiet_s:
             return                              # 同じ出来事の続き
         self._guard_t = t
+        if self._coup_trial():
+            # 試している摩擦円の形が原因とみなす（横の上限は変えない）
+            self._coup_bad = min(self._coup_bad, m.coup)
+            self._couple_reject(t)
+            return
         if not soft:
             self._ceil = min(self._ceil, m.level)
         else:
@@ -1742,6 +1915,8 @@ class TimeLearner(GripLearner):
         # 採用済みの段（か、まだ基準の無い段）で出た。下げて、そこを測り直す。上げ直すのは小さい幅で
         m.level = self.conf = max(self.floor, m.level * (1.0 - cfg.time_back))
         self._ref, self._laps = None, []
+        self._reset_couple()
+        self.coup_done = False
         self._step = max(cfg.time_step_min, 0.5 * self._step)
         self.converged = False
         self._bump(down=True)
@@ -1756,9 +1931,14 @@ class TimeLearner(GripLearner):
         return {"t_lap": round(float(self.last_lap[0]), 3), "t_plan": round(float(self.last_lap[1]), 3),
                 "ref_lat": round(float(ref[0]), 3), "ref_lap": round(float(ref[1]), 3),
                 "ref_plan": round(float(ref[2]), 3), "step": round(float(self._step), 4),
-                "laps_n": len(self._laps), "steps": len(self.steps)}
+                "laps_n": len(self._laps), "steps": len(self.steps),
+                "coup": round(float(self.map.coup), 3), "coup_done": 1.0 if self.coup_done else 0.0}
 
     def state(self, gate: str = "") -> str:
-        if gate or self.cap is not None or self.down_only or self.converged:
+        if gate or self.cap is not None or self.down_only:
+            return super().state(gate)
+        if self.converged:
+            if self._couple_on() and self.cfg.couple_learn:
+                return f"摩擦円を探索 ×{self.map.coup:.2f}・{len(self._claps)}/{self.cfg.time_laps}周"
             return super().state(gate)
         return f"タイムで探索 +{self._step * 100:.0f}%・{len(self._laps)}/{self.cfg.time_laps}周"

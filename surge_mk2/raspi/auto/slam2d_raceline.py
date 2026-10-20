@@ -216,6 +216,9 @@ _GRIP_AHEAD_M = 1.5
 _GRIP_AHEAD_S = 0.6
 #: 壁との余裕は、その点からこの距離だけ先までの最小を使う [m]（外へ膨らむのは少し先）
 _GRIP_WALL_AHEAD_M = 1.5
+#: 路面の記録（`mapstore.save_grip_surface`）を新しい地図の出発点に使ってよい、書いてからの時間 [s]。
+#: 同じ日・同じ床で地図を作り直す場面だけに効かせる（`_grip_load_surface`）
+GRIP_SURFACE_MAX_AGE_S = 6 * 3600.0
 #: 学習した値を地図の横へ保存する間隔 [s]
 _GRIP_SAVE_S = 10.0
 #: 別の線へ乗り換えてから、学習を止めておく時間 [s]
@@ -672,6 +675,20 @@ class Slam2dRaceLine(Planner):
                   note="1 = 上限を 1 段上げて 1 周走り、計画で縮むはずの時間の 6 割以上縮んだら採用する"
                        "（`nav/grip.TimeLearner`。前兆は行き過ぎた段をやめる安全装置としてだけ使う）。"
                        "0 = 前兆が出るまで上げる元の方式（`GripLearner`）"),
+        ParamSpec(group=GROUP_GRIP, key="grip_couple", label="摩擦円の形（前後と横の取り合い）をタイムで決める",
+                  min=0, max=1, step=1, default=0, unit="",
+                  note="1 = 横が収束した後、摩擦円の半径 ÷ 横の限界（`GripMap.coup`）を 1 段上げて測り、周回タイムが縮めば採用する"
+                       "（`nav/grip.TimeLearner`）。コーナー出口で前後の力が残る。0 = 楕円（比 1）のまま。"
+                       "★既定は 0: シムの車（真の形は楕円）では効かず、横の安全装置が増えた。実機で A/B してから 1 にする"),
+        ParamSpec(group=GROUP_GRIP, key="grip_shape", label="限界のモデル（前後と横の取り合い）",
+                  min=0, max=1, step=1, default=0, unit="",
+                  choices=("従来: 楕円（横・加速・減速を別々に学習）", "新: 車軸ごとの摩擦（μ だけを学習）"),
+                  note="0 = 楕円（横・加速・減速を別々に持ち、楕円でつなぐ。今までの形）。1 = **車軸ごとの摩擦**"
+                       "（駆動・制動は後輪だけ、横は前後で分け合う、荷重移動あり。`raceline.axle_reach`）。"
+                       "車軸の値（後輪の荷重の割合・h/L）は vehicle.toml、学習するのは横の限界（μg）1 つ。"
+                       "摩擦円の比の学習は使わず、減速は形から決まる（学習は遅れたときに下げるだけ）。加速も μ から決まる"
+                       "（床が変わっても追従する。上限はランプ 3.0）。★シムで誤差を入れた 6 条件の衝突は 楕円 5・車軸 2。"
+                       "タイムは未確認（車軸は μ が低めで落ち着いた）。実機で A/B して決める（PROGRESS.md 2026-10-20 深夜）"),
         ParamSpec(group=GROUP_GRIP, key="grip_reline", hidden=True, label="学習値でラインを引き直す",
                   min=0, max=1, step=1, default=0, unit="",
                   note="★1 = 学習が落ち着いたら、学習した限界でラインを引き直して乗り移る。既定は 0: "
@@ -702,8 +719,12 @@ class Slam2dRaceLine(Planner):
         #: 横グリップの学習（`nav/grip.py`、`grip_learn` が 1 の間だけ働く）。舵角から出る曲率に
         #: 掛ける遅れはヨーの応答ぶん（舵そのものの遅れは実舵角に入っている）
         self._grip = self._grip_make(True)
+        #: 学習を路面の記録から始めたか（`_grip_load_surface`）と、そのときの記録 `(横, 減速, 比)`。
+        #: 記録の値はこの路面で確かめた天井として扱い、その上は試さない
+        self._grip_prior = False
+        self._grip_prior_cap: tuple[float, float, float] | None = None
         #: 計画のラップ [s] と、それを出した `path.v`（`TimeLearner` へ渡す）
-        self._grip_plan: tuple = (None, 0.0, 0.0, 0.0)
+        self._grip_plan: tuple = (None, (0.0, 0.0), 0.0, 0.0)
         self._grip_on = False
         self.ftg = FollowTheGap()
         self.slam = Slam2dNav(resolution=MAP_RES, size_m=MAP_SIZE_M,
@@ -2424,11 +2445,24 @@ class Slam2dRaceLine(Planner):
         """`path` に速度を付ける設定（`speed_kwargs`）。学習中は点ごとの横の限界と、学習した
         加速・減速の上限を通す。"""
         lv = self._grip_levels(path)
+        axle = self._axle(p)
         if lv is None:
-            return speed_kwargs(p, self.vehicle)
+            kw = speed_kwargs(p, self.vehicle)
+            return dict(kw, axle=axle) if axle else kw
         m = self._grip.map
+        if axle:
+            # 横の限界（μg）だけが学習値。前後は車軸の摩擦で決まり、加速・減速の値は上限としてだけ効く
+            return speed_kwargs(p, self.vehicle, dict(a_lat=lv[0], a_grip=lv[0], a_accel=m.accel,
+                                                      a_brake=m.decel, axle=axle))
         return speed_kwargs(p, self.vehicle, dict(a_lat=lv[0], a_grip=lv[1], a_accel=m.accel,
                                                   a_brake=m.decel))
+
+    def _axle(self, p: dict[str, float]) -> tuple[float, float, float] | None:
+        """`grip_shape` = 1 のときの車軸の値 `(後輪の荷重の割合, h/L, 後輪の μ ÷ 前輪の μ)`。"""
+        if p.get("grip_shape", 0) <= 0:
+            return None
+        v = self.vehicle
+        return (v.rear_load_frac, v.load_transfer_hl, 1.0)
 
     def _timed(self, path: rl_mod.RaceLine, p: dict[str, float],
                v_cap: np.ndarray | None = None) -> rl_mod.RaceLine:
@@ -2588,13 +2622,23 @@ class Slam2dRaceLine(Planner):
             g.cfg.step_up = p["grip_step"] / 100.0
         down_only = p["grip_down_only"] > 0
         v = self.vehicle
-        g.configure(init_level=p["grip_init"] * v.a_lat_max, max_level=p["grip_max"],
+        cap = self._grip_prior_cap
+        g.configure(init_level=p["grip_init"] * v.a_lat_max,
+                    max_level=min(p["grip_max"], cap[0]) if cap else p["grip_max"],
                     down_only=down_only, lat_use=1.0)
-        # 加速は学習しない: 目標車速を動かす傾きの上限（`[safety] cmd_accel_limit_m_s2`）で固定。出なければ
-        # STM32 の TC が抑える。減速は低めから始め、同じ上限まで上げてよい
-        g.long.configure(acc_init=v.speed_ramp_max_m_s2,
-                         dec_init=LEARN_BRAKE_INIT * v.a_decel_max,
-                         dec_max=v.speed_ramp_max_m_s2, down_only=down_only)
+        # 加速は学習しない。計画の加速の天井 `[safety] plan_accel_limit_m_s2` で固定（TC が絞っている間の実測の
+        # 加速度で決める版は実機で下がり続けたので消した、2026-10-20）。減速は低めから始め、ランプの上限 `cmd_accel_limit_m_s2` まで
+        # 上げてよい（制動区間の終わりで計画より遅れたら 1 段下げて止まる）
+        axle = p.get("grip_shape", 0) > 0
+        # 車軸の形では、前後と横の取り合いは形が決める（摩擦円の比は学習しない）。減速も形から決まるので、
+        # 減速の学習は天井から始めて、制動区間の終わりで計画に遅れたときに下げるだけ
+        g.cfg.couple_learn = p.get("grip_couple", 0) > 0 and not axle
+        if axle:
+            g.map.coup = 1.0
+        g.long.configure(acc_init=v.plan_accel_max,
+                         dec_init=v.speed_ramp_max_m_s2 if axle else LEARN_BRAKE_INIT * v.a_decel_max,
+                         dec_max=min(v.speed_ramp_max_m_s2, cap[1]) if cap else v.speed_ramp_max_m_s2,
+                         down_only=down_only)
         path, i = self.path, self._hint
         n = len(path) if path is not None else 0
         hold = self._grip_hold_cap
@@ -2661,13 +2705,20 @@ class Slam2dRaceLine(Planner):
             v = plain[1] if plain is not None and plain[0] is path.xy and len(plain[1]) == len(path) \
                 else path.v
             ref = g.ref_level
-            if self._grip_plan[0] is not v or self._grip_plan[1] != ref:
+            rc = getattr(g, "ref_coup", 0.0)
+            if self._grip_plan[0] is not v or self._grip_plan[1] != (ref, rc):
                 lap_ref = 0.0
-                if ref > 0.0:
+                if ref > 0.0 or rc > 0.0:
                     kw = dict(self._spd(p, path))
-                    kw["a_lat"] = kw["a_grip"] = np.full(len(path), max(ref, g.floor))
+                    if ref > 0.0:
+                        # 横の上限だけを採用済みの段に戻す（摩擦円の半径は、その段 × 今の比）
+                        kw["a_lat"] = np.full(len(path), max(ref, g.floor))
+                        kw["a_grip"] = kw["a_lat"] * g.map.coup
+                    if rc > 0.0:
+                        # 摩擦円の比だけを採用済みの比に戻す
+                        kw["a_grip"] = np.asarray(kw["a_grip"]) * (rc / g.map.coup)
                     lap_ref = rl_mod._travel_time(path.xy, rl_mod.retime(path, **kw).v, True)
-                self._grip_plan = (v, ref, rl_mod._travel_time(path.xy, v, True), lap_ref)
+                self._grip_plan = (v, (ref, rc), rl_mod._travel_time(path.xy, v, True), lap_ref)
             g.observe_plan(self._grip_plan[2], self._grip_plan[3])
         t = vs.t_capture / 1e9
         if self.laps != self._grip_laps:
@@ -2694,11 +2745,18 @@ class Slam2dRaceLine(Planner):
             "cross_gain": round(g.last_cross_gain, 4),
             "events": len(g.events), "trials": g.trials, "passes": g.passes,
             "win": lg.windows, "lag_dec": round(float(lg.last), 3),
+            # 新しい地図を路面の記録から始めたか（float だけ。`AutoState.grip` は dict[str, float]）
+            "prior": 1.0 if self._grip_prior else 0.0,
+            # この地図で学習を終えた値（`GripMap.best_*`）から始めたか・その値（0 = まだ無い）
+            "from_best": 1.0 if getattr(g, "from_best", False) else 0.0,
+            "best_lat": round(m.best_lat, 3),
             **g.diag(),
         }
         last = f"・直近 {g.events[-1]['kind']}" if g.events else ""
+        prior = ("・路面の記録から開始" if self._grip_prior
+                 else "・地図の確定値から開始" if getattr(g, "from_best", False) else "")
         return (f"・学習 横 {m.level:.2f}・加速 {m.accel:.2f}・減速 {m.decel:.2f}m/s²"
-                f"（{g.state(gate)}・前兆 {len(g.events)}回{last}）")
+                f"（{g.state(gate)}・前兆 {len(g.events)}回{last}{prior}）")
 
     def _grip_cap(self) -> tuple[float, float] | None:
         """前兆で落としている `(目標速度 [m/s], 落とす速さ [m/s²])`。落としていなければ `None`。
@@ -2742,22 +2800,64 @@ class Slam2dRaceLine(Planner):
         self._grip_tok += 1
         self._grip_saved = (0, 0.0)
         g.launch_ratio = mapstore.load_grip_vehicle()
+        self._grip_prior = False
+        self._grip_prior_cap = None
         text = mapstore.load_grip(name)
         if not text:
+            self._grip_load_surface()
             return
         try:
             g.load(grip_mod.GripMap.from_json(text))
         except (ValueError, TypeError, KeyError):
             pass                                # 壊れた・古い形式。初期値から学習し直す
 
+    def _grip_load_surface(self) -> None:
+        """新しい地図（学習値の保存が無い）は、路面の記録（直近に別の地図で学習した横・減速・摩擦円の比、
+        `mapstore.load_grip_surface`）から始める。無ければ今までどおり同定値 × `grip_init` から。
+
+        路面の限界は床で決まり、コースでは変わらない（2026-10-20 の実機: 新しい地図で同定値 × 0.85 = 3.48 から
+        始めて、5.52 に届くまで 8 周・約 3 秒を失った。予選は 3 周）。そのまま信じず、保存値からの再開と同じ
+        `back_off` 倍から始める。路面が違えば安全装置（リアの滑り・横偏差の増え・減速の遅れ）で下がる。
+
+        ★ **記録の値（横・減速・摩擦円の比）は、この路面で確かめた天井として扱い、その上は試さない**
+        （`_grip_begin` が学習の上限を記録の値で切る）。上を試すと、記録から始めた学習は 2〜3 周で記録を
+        越えた 1 段を、横と減速の両方で同じ周に試す。場所ごとの横偏差の基準もまだできていないので気づくのが
+        遅れ、sim.bench `real_20261020` で 3 周目にヘアピンの壁に当たって止まった（記録を天井にしないと、
+        安全装置が働いた高さ `ceil` を引き継いでも当たった）。路面が良くなって上を探したいときは
+        記録を消す（`mapstore.clear_grip_surface`）。下げる向き（安全装置）は今までどおり働く。
+        セル（場所ごとの値）はコースに固有なので引き継がない。
+
+        ★ **記録は書いてから `GRIP_SURFACE_MAX_AGE_S` の間だけ使う。** 床が変わったかは走る前に分からず、
+        床が記録より滑ると 1 周目から限界を越える（sim.bench: 記録が真値より 24% 高いと、1 周目で壁に当たって
+        止まった。安全装置も発進の加速度からの見積もりも間に合わない）。いちばん起きやすいのは、会場で地図を
+        作り直したときに、前の日に家の床で書いた記録を使うこと。同じ日・同じ床で地図を作り直す場面だけに効かせる
+        """
+        prior = mapstore.load_grip_surface()
+        if prior is None or not -60.0 <= time.time() - prior["t"] <= GRIP_SURFACE_MAX_AGE_S:
+            return
+        m = grip_mod.GripMap(level=prior["lat"], decel=prior["dec"], ceil=prior["ceil"])
+        m.coup = prior["coup"]
+        self._grip.load(m)
+        self._grip_prior = True
+        self._grip_prior_cap = (prior["lat"], prior["dec"], prior["coup"])
+        if hasattr(self._grip, "_coup_bad"):
+            # 比の探索は `0.97 × _coup_bad` より上を試さない。記録の比で止める
+            self._grip._coup_bad = prior["coup"] / 0.97
+
     def _grip_save(self) -> None:
         """学習した値を地図の横へ書く（学習器が保存に値すると言い（`worth_saving`）、前回から
         変わっているときだけ）。"""
         g = getattr(self, "_grip", None)
         name = getattr(self, "_grip_name", "")
-        if g is None or not name or not g.worth_saving():
+        if g is None or not name:
             return
-        key = (g.ver + g.long.ver, g.launch_ratio)
+        mark = getattr(g, "mark_best", None)
+        if mark is not None:
+            mark()
+        if not g.worth_saving():
+            return
+        m = g.map
+        key = (g.ver + g.long.ver, g.launch_ratio, m.best_lat, m.best_dec, m.best_coup)
         if key == self._grip_saved:
             return
         self._grip_saved = key
@@ -2765,6 +2865,9 @@ class Slam2dRaceLine(Planner):
             mapstore.save_grip(name, g.map.to_json())
             if g.launch_ratio > 0.0:
                 mapstore.save_grip_vehicle(g.launch_ratio)
+            surf = g.surface_values()
+            if surf is not None:
+                mapstore.save_grip_surface(*surf, t=time.time())
         except OSError:
             pass
 

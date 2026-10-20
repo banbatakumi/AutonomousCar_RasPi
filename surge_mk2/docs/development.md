@@ -326,15 +326,16 @@ B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --se
    0.75 倍（減速）で、そこから上げない。前兆が誤って出ないか
    （reason の「前兆 n回」が何もない所で増えないか、減速の値が下がり続けないか）を見る。
    減速は「制動区間の終わりで車速が計画より速かったぶん」で決める（記録の `grip.lag_dec`。0.10m/s を超えた周に
-   1 段下がる）。加速は学習せず、上限 3.0m/s² で固定
+   1 段下がる）。加速は学習しない（`plan_accel_limit_m_s2`＝3.0m/s² で固定）
 3. **上げる**: `grip_down_only` 0・`grip_max` を今走れている値＋0.5m/s² 程度（例 5.0）・`v_max` は
    普段より下げる。壁の外側に緩衝材を置く。★横は**限界の見積もりそのものまで出す**。出してよい
    上限は `grip_max` で決める。上げ幅（既定 6%）は隠した設定 `grip_step` で、実機で小さくしたいときは
    `raspi/auto/slam2d_raceline.py` の既定値を変える
    ★減速も同時に学習される（切り離す設定は無い）。1 周に 1 段（8%）上げるので、同定値の 0.75 倍から
-   上限（`cmd_accel_limit_m_s2`）まで 6 周ほど。限界を 1 段超えた周は、コーナーへ計画より速く入る
-4. 値が落ち着いたら `grip_max` を上げる。本番の計測走行は、練習で収束した値を保存したうえで
-   `grip_down_only` 1（保存した値の 0.92 倍から始まり、上げない）
+   上限（`cmd_accel_limit_m_s2`）まで 6 周ほど（同じ日に同じ床で学習した記録があれば、新しい地図もその 0.92 倍から始まる。`system_overview.md` の学習の節）。限界を 1 段超えた周は、コーナーへ計画より速く入る
+4. 値が落ち着いたら `grip_max` を上げる。本番の計測走行は、練習で**学習を終えた**（reason が「収束」）地図をそのまま使う。
+   次からは学習を終えた値で 1 周目から走る（reason に「地図の確定値から開始」。0.92 倍しない・上げない）。
+   床が変わったら `saved_maps/<地図名>.grip.json` を消して学習し直す
 
 ### 4.4 SLAM だけを数値で比べる（`sim.slam_bench`）
 
@@ -369,7 +370,7 @@ B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --se
 **手順・式・合否の正は [`docs/calibration.md`](calibration.md)**（2026-10-18 に旧システム同定 `tools/sysid`・旧制御の調整
 `tools/ctrl_tune` から作り直した）。ここは操作だけ。
 
-1. 実機: GUI の「システム同定」タブで試験（`校正 1`〜`校正 8`）を選び「試験開始」→ ARM を保持。終わると記録が落ちてくる
+1. 実機: GUI の「システム同定」タブで試験（`校正 1`〜`校正 9`）を選び「試験開始」→ ARM を保持。終わると記録が落ちてくる
 2. Mac: launcher →「車両の校正」（`.venv/bin/python -m tools.calib.gui`）で記録を開く。所見・合否・今の値との差が出るので、
    値を選んで「適用」（`config/vehicle.toml`）。コマンドなら `.venv/bin/python -m tools.calib 記録.mcap [--apply]`
 3. `./tools/deploy.sh --restart-io` で Pi へ（`[control]` は接続のたびに STM32 へ送られる。GUI の「制御パラメータ: 適用済み ✓」）

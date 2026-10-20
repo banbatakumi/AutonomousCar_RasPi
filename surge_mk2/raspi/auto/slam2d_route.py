@@ -41,8 +41,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
+import pickle
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -102,6 +105,23 @@ _LINE_KEYS = SPEED_KEYS + ("line_margin", "turn_max_deg", "graph_margin")
 #: 乗り換えは押した後の最初の乗れる周期に起きる。上げると別の枝の上から乗り換えて経路へ斜めに
 #: 突っ込む（安全弁）、下げると重なり区間でも乗れなくなる
 SWITCH_TOL = 0.15
+
+
+def _code_digest() -> str:
+    """経路を作るコードの指紋。コードが変わったら、保存した経路の写し（`save_line_cache`）を使わない。"""
+    h = hashlib.sha256()
+    here = Path(__file__).resolve().parent
+    for f in (here / "slam2d_route.py", here / "slam2d_raceline.py", here.parent / "nav" / "raceline.py",
+              here.parent / "nav" / "route.py", here.parent / "nav" / "roadgraph.py",
+              here.parent / "nav" / "centerline.py"):
+        try:
+            h.update(f.read_bytes())
+        except OSError:
+            h.update(f.name.encode())
+    return h.hexdigest()
+
+
+_CODE_DIGEST = _code_digest()
 
 
 def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None) -> dict:
@@ -356,6 +376,8 @@ class Slam2dRoute(Slam2dRaceLine):
         self._auto_start: Waypoint | None = None
         self._auto_wps: list[Waypoint] = []
         self._auto_note = ""
+        #: 今の計算が仕上げ込みなら、その条件の指紋（できたら地図の横へ写しを書く、`_poll`）
+        self._job_cache_key = ""
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
@@ -406,7 +428,48 @@ class Slam2dRoute(Slam2dRaceLine):
         self._auto_wps = (waypoints_from_traj(self.path.xy)
                           if self._auto_start is None and self.path is not None
                           and len(self.path) >= 20 else [])
-        self._submit(graph=None)
+        if not self._load_cached_lines(name):
+            self._submit(graph=None)
+
+    # ── 仕上げた経路の写し（地図ごと。`mapstore.save_line_cache`） ──
+
+    def _cache_key(self, p: dict[str, float]) -> str:
+        """経路を作る条件の指紋: 地図・経路の設定・線の設定・車の諸元・学習値で引くか・コード。
+        どれかが違えば写しは使わない（作り直す）。"""
+        g = self.slam.grid
+        h = hashlib.sha256()
+        h.update(_CODE_DIGEST.encode())
+        h.update(np.ascontiguousarray(g.trinary()).tobytes())
+        h.update(repr((g.resolution, tuple(g.origin), self._cfg.to_json(), self._auto_start,
+                       self._auto_wps, self._line_key(p),
+                       sorted(_line_kwargs(p, self.vehicle, True, self._grip_line_kw()).items(),
+                              key=lambda kv: kv[0]))).encode())
+        return h.hexdigest()
+
+    def _load_cached_lines(self, name: str) -> bool:
+        """同じ条件で仕上げた経路の写しがあれば取り込む（仕上げの 8 秒を待たず、1 周目から仕上げた線で走る）。"""
+        p = self._p or {s.key: s.default for s in self.params}
+        try:
+            data = mapstore.load_line_cache(name, self._cache_key(p))
+            out = pickle.loads(data) if data else None
+        except Exception:                  # noqa: BLE001  壊れた写しは捨てて作り直す
+            out = None
+        if not isinstance(out, _BuildOut) or not out.routes:
+            return False
+        self._built_key = self._line_key(p)
+        self._refine_next = False
+        self._grip_line = None
+        self._install(out)
+        self._note = "仕上げた経路を地図から読んだ"
+        return True
+
+    def _save_cached_lines(self, out: _BuildOut, key: str) -> None:
+        if not self._map_name or not out.routes or out.errors:
+            return
+        try:
+            mapstore.save_line_cache(self._map_name, key, pickle.dumps(out))
+        except Exception:                  # noqa: BLE001  保存できなくても走りは止めない
+            pass
 
     def request_routes(self, text: str) -> None:
         """GUI の経由点エディタが「保存」したときに呼ばれる。"""
@@ -488,6 +551,9 @@ class Slam2dRoute(Slam2dRaceLine):
         if refine is None:
             refine = bool(self._routes)
         self._refine_next = not refine
+        # 仕上げ込みで、学習値で引き直していない計算だけを写しとして残す（`_poll`）
+        self._job_cache_key = (self._cache_key(p) if refine and self._grip_line_kw() is None
+                               and self._map_name else "")
         self._job = submit_job(
             _compute_routes, g.trinary().copy(), g.resolution, tuple(g.origin), seed,
             None if traj is None else traj.copy(), self._groups_to_build(), dict(p),
@@ -538,6 +604,9 @@ class Slam2dRoute(Slam2dRaceLine):
                     self._build_error = msg
             else:
                 self._install(out)
+                key, self._job_cache_key = self._job_cache_key, ""
+                if key and not self._job_again:
+                    self._save_cached_lines(out, key)
             if self._job_again:
                 self._job_again = False
                 self._submit(graph=None if self._regraph else self._graph)

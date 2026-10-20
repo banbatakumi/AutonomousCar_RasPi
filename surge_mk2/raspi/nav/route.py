@@ -553,6 +553,7 @@ def build_raceline(base_grid, graph: RoadGraph, route: RoutePath, *, half_width:
                    kappa_max: float | None = None, footprint=None,
                    time_iters: int = 0, a_grip: float | None = None,
                    refine_evals: int = 0, refine_starts: int = 1,
+                   axle: tuple[float, float, float] | None = None,
                    ) -> tuple[rl_mod.RaceLine, cl_mod.Centerline]:
     """経路 → 中心線 → レーシングライン（回廊の上で、モジュール docstring 参照）。
 
@@ -571,5 +572,5 @@ def build_raceline(base_grid, graph: RoadGraph, route: RoutePath, *, half_width:
                          front_overhang=front_overhang, rear_overhang=rear_overhang,
                          v_start=v_start, v_end=v_end, kappa_max=kappa_max,
                          footprint=footprint, time_iters=time_iters, a_grip=a_grip,
-                         refine_evals=refine_evals, refine_starts=refine_starts)
+                         refine_evals=refine_evals, refine_starts=refine_starts, axle=axle)
     return rl, cl

@@ -272,12 +272,60 @@ def _next_v(v: float, a_x: float, kappa: float, a_lat: float, ds: float,
     return math.sqrt(v * v + 2.0 * a_x * ds)
 
 
+_G = 9.80665
+
+
+def axle_reach(axle: tuple[float, float, float]):
+    """車軸ごとの摩擦（`speed_profile` の `axle`）で、前後に出せる加速度を返す関数 `(加速, 減速)` を作る。
+
+    駆動も制動も後輪だけが受け持ち、横は前後が静的な荷重の割合で分け合う（後輪は横 × `r`）。後輪の荷重は
+    前後の加速度で移る（加速で増え、減速で減る。重心高さ ÷ ホイールベース `hl`）。
+    - 後輪: (前後)² + (横 · r)² ≤ (ρ · μg · (r ± hl · 前後 / g))²  … 加速と減速の両方
+    - 前輪: 横 ≤ μg · (1 − hl · 加速 / (g · (1 − r)))                 … 加速すると前輪の荷重が減る
+    どちらも前後について 2 次式なので閉じた形で解く。`μg`（`grip`）は横の限界（前輪の μ × g）。
+
+    :param axle: `(r, hl, ρ)` = 後輪の静的な荷重の割合・荷重移動 h/L・後輪の μ ÷ 前輪の μ
+    """
+    r, hl, rho = axle
+    sqrt = math.sqrt
+    front_k = _G * (1.0 - r) / hl if hl > 1e-9 else math.inf
+
+    def acc(ay: float, grip: float, cap: float) -> float:
+        rm = rho * grip
+        q = rm * hl / _G
+        a2 = 1.0 - q * q
+        b = rm * r * q
+        c = (ay * r) ** 2 - (rm * r) ** 2
+        disc = b * b - a2 * c
+        if disc <= 0.0 or a2 <= 1e-9:
+            return 0.0
+        x = (b + sqrt(disc)) / a2
+        if ay >= grip:
+            return 0.0
+        x = min(x, (1.0 - ay / grip) * front_k)
+        return max(0.0, min(cap, x))
+
+    def brk(ay: float, grip: float, cap: float) -> float:
+        rm = rho * grip
+        q = rm * hl / _G
+        a2 = 1.0 - q * q
+        b = rm * r * q
+        c = (ay * r) ** 2 - (rm * r) ** 2
+        disc = b * b - a2 * c
+        if disc <= 0.0 or a2 <= 1e-9:
+            return 0.0
+        return max(0.0, min(cap, (-b + sqrt(disc)) / a2))
+
+    return acc, brk
+
+
 def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
                   v_max: float, v_min: float, a_lat,
                   a_accel: float, a_brake: float, closed: bool = True,
                   v_start: float | None = None, v_end: float | None = None,
                   friction_circle: bool = True, a_grip=None,
-                  v_cap: np.ndarray | None = None) -> np.ndarray:
+                  v_cap: np.ndarray | None = None,
+                  axle: tuple[float, float, float] | None = None) -> np.ndarray:
     """曲率から目標速度 [m/s]。閉ループとして前後パスを2周ならす。
 
     :param kappa: **速度を決める曲率**（ふつうは `speed_kappa(xy)`）
@@ -289,16 +337,19 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
         限界に対する割合で決まる——`a_lat` で円を引くと頂点で前後が 0 になり、
         コーナーの中で加減速できない前提のプロファイルになる
 
+    :param axle: 与えると、前後の加速度を楕円ではなく**車軸ごとの摩擦**で決める（`axle_reach`）。
+        `a_grip` はそのとき横の限界（μg）、`a_accel`・`a_brake` は上限（モータ・ランプ）としてだけ効く
+
     `closed=False`（開いた経路）は1往復だけで、**終点は `v_end`**（既定 `v_min`、
     止まる直前の這う速度）まで減速し、始点は `v_start`（今の速度）から加速する。
     """
-    if np.ndim(a_lat) or (a_grip is not None and np.ndim(a_grip)):
+    if axle is not None or np.ndim(a_lat) or (a_grip is not None and np.ndim(a_grip)):
         # 点ごとの上限（走行中に学習した横グリップ、`nav/grip.py`）。スカラーの経路は下のまま
         # （`refine_time` が数千回呼ぶので、そちらに分岐や配列の読み出しを足さない）
         return _speed_profile_var(xy, kappa, v_max=v_max, v_min=v_min, a_lat=a_lat,
                                   a_accel=a_accel, a_brake=a_brake, closed=closed,
                                   v_start=v_start, v_end=v_end, friction_circle=friction_circle,
-                                  a_grip=a_grip, v_cap=v_cap)
+                                  a_grip=a_grip, v_cap=v_cap, axle=axle)
     n = len(xy)
     k = np.abs(np.asarray(kappa, dtype=np.float64))
     v = _lateral_limit(k, v_max=v_max, a_lat=a_lat)
@@ -364,7 +415,8 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
 def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min: float,
                        a_lat, a_accel: float, a_brake: float, closed: bool,
                        v_start: float | None, v_end: float | None, friction_circle: bool,
-                       a_grip, v_cap: np.ndarray | None) -> np.ndarray:
+                       a_grip, v_cap: np.ndarray | None,
+                       axle: tuple[float, float, float] | None = None) -> np.ndarray:
     """`speed_profile` の、横の上限 `a_lat`・摩擦円の半径 `a_grip` が**点ごとの配列**の版。
 
     式は `speed_profile` と同じで、点 `j` から出る加減速の摩擦円にその点の半径を使う。
@@ -387,26 +439,35 @@ def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min
     vl = v.tolist()
     kl = k.tolist()
 
-    def reach(j: int, a_x: float, d: float) -> float:
-        vj = vl[j]
-        g = ig[j]
-        if g:
+    if axle is not None:
+        acc_f, brk_f = axle_reach(axle)
+        gl = np.broadcast_to(grip, (n,)).tolist()
+
+        def reach(j: int, a_x: float, d: float, acc: bool) -> float:
+            vj = vl[j]
             ay = vj * vj * kl[j]
-            r = 1.0 - ay * ay * g
-            a_x = a_x * sqrt(r) if r > 0.0 else 0.0
-        return sqrt(vj * vj + 2.0 * a_x * d)
+            return sqrt(vj * vj + 2.0 * (acc_f if acc else brk_f)(ay, gl[j], a_x) * d)
+    else:
+        def reach(j: int, a_x: float, d: float, acc: bool) -> float:
+            vj = vl[j]
+            g = ig[j]
+            if g:
+                ay = vj * vj * kl[j]
+                r = 1.0 - ay * ay * g
+                a_x = a_x * sqrt(r) if r > 0.0 else 0.0
+            return sqrt(vj * vj + 2.0 * a_x * d)
 
     if not closed:
         ds = np.hypot(*np.diff(xy, axis=0).T).tolist() if n >= 2 else []
         vl[-1] = min(vl[-1], v_min if v_end is None else v_end)
         for i in range(n - 2, -1, -1):
-            lim = reach(i + 1, a_brake, ds[i])
+            lim = reach(i + 1, a_brake, ds[i], False)
             if lim < vl[i]:
                 vl[i] = lim
         if v_start is not None:
             vl[0] = min(vl[0], max(v_start, v_min))
             for i in range(1, n):
-                lim = reach(i - 1, a_accel, ds[i - 1])
+                lim = reach(i - 1, a_accel, ds[i - 1], True)
                 if lim < vl[i]:
                     vl[i] = lim
         return np.asarray(vl)
@@ -414,12 +475,12 @@ def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min
     ds = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T).tolist()
     for _ in range(2):
         for i in range(n - 1, -1, -1):
-            lim = reach(i + 1 if i + 1 < n else 0, a_brake, ds[i])
+            lim = reach(i + 1 if i + 1 < n else 0, a_brake, ds[i], False)
             if lim < vl[i]:
                 vl[i] = lim
         for i in range(n):
             j = i - 1 if i > 0 else n - 1
-            lim = reach(j, a_accel, ds[j])
+            lim = reach(j, a_accel, ds[j], True)
             if lim < vl[i]:
                 vl[i] = lim
     return np.maximum(np.asarray(vl), floor)
@@ -437,7 +498,8 @@ def _travel_time(xy: np.ndarray, v: np.ndarray, closed: bool) -> float:
 
 def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat, a_accel: float,
            a_brake: float, v_start: float | None = None, v_end: float | None = None,
-           a_grip=None, v_cap: np.ndarray | None = None) -> RaceLine:
+           a_grip=None, v_cap: np.ndarray | None = None,
+           axle: tuple[float, float, float] | None = None) -> RaceLine:
     """経路の形はそのままで、速度プロファイルだけを今の設定で作り直す。
 
     ★ 速度は地図を作ったとき（BUILD）の設定で焼き込まれ、保存した地図から走ると
@@ -446,7 +508,7 @@ def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat, a_accel: float,
     """
     v = speed_profile(rl.xy, speed_kappa(rl.xy, rl.closed), v_max=v_max, v_min=v_min,
                       a_lat=a_lat, a_accel=a_accel, a_brake=a_brake, closed=rl.closed,
-                      v_start=v_start, v_end=v_end, a_grip=a_grip, v_cap=v_cap)
+                      v_start=v_start, v_end=v_end, a_grip=a_grip, v_cap=v_cap, axle=axle)
     # `_replace` は使えない（`RaceLine.__len__` が点の数を返すので、NamedTuple の
     # 要素数の検査に引っかかる）
     return RaceLine(**{**rl._asdict(), "v": v})
@@ -786,7 +848,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
              kappa_max: float | None = None, footprint=None,
              time_iters: int = 0, a_grip: float | None = None,
              refine_evals: int = 0, refine_cycles: int = 4,
-             refine_starts: int = 1) -> RaceLine:
+             refine_starts: int = 1,
+             axle: tuple[float, float, float] | None = None) -> RaceLine:
     """中心線からレーシングラインを作る。
 
     :param half_width: 車体半幅 [m]。`config/vehicle.toml` の外形から取る
@@ -842,7 +905,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     left, right = cl.w_left, cl.w_right
 
     spd = dict(v_max=v_max, v_min=v_min, a_lat=a_lat, a_accel=a_accel, a_brake=a_brake,
-               closed=closed, v_start=v_start, v_end=v_end, a_grip=a_grip)
+               closed=closed, v_start=v_start, v_end=v_end, a_grip=a_grip, axle=axle)
 
     body = _BodyCheck(grid, footprint, closed) if footprint is not None else None
 

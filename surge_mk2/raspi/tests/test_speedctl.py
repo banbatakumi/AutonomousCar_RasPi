@@ -53,6 +53,21 @@ class TestVehicleEnvelope(unittest.TestCase):
         self.assertAlmostEqual(v.a_accel_max(), v.speed_ramp_max_m_s2)
         self.assertAlmostEqual(v.a_decel_max, v.speed_ramp_max_m_s2)
 
+    def test_plan_accel_ceiling_is_separate_from_the_ramp(self):
+        """ランプの上限（加減速で対称）を上げても、加速の計画は `plan_accel_limit_m_s2` で止まる。減速は上がる。"""
+        v = replace(self.v, lim_accel_m_s2=9.0, lim_brake_m_s2=9.0, speed_ramp_max_m_s2=4.0,
+                    plan_accel_limit_m_s2=3.0)
+        self.assertAlmostEqual(v.plan_accel_max, 3.0)
+        self.assertAlmostEqual(v.a_accel_max(), 3.0)
+        self.assertAlmostEqual(v.a_decel_max, 4.0)
+        # ランプより上の値は効かない・無ければランプ
+        self.assertAlmostEqual(replace(v, plan_accel_limit_m_s2=5.0).plan_accel_max, 4.0)
+        self.assertAlmostEqual(replace(v, plan_accel_limit_m_s2=0.0).plan_accel_max, 4.0)
+
+    def test_toml_splits_the_accel_and_decel_ceilings(self):
+        veh = Vehicle.load()
+        self.assertLessEqual(veh.plan_accel_max, veh.speed_ramp_max_m_s2)
+
     def test_limits_read_from_toml(self):
         """`config/vehicle.toml` の `[limits]` が読める（校正 7・8 の値。無ければ控えめな既定）。"""
         veh = Vehicle.load()

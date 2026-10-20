@@ -69,6 +69,9 @@ class ParamSpec(msgspec.Struct):
     #: 人が決める必要のない値（同定値や走行中の学習から決まるはずの値・一度決めたら触らない値）を、
     #: コードから消す前の段階として定数にしておくための印。`sim.bench --set` だけは上書きできる
     hidden: bool = False
+    #: 値ごとの名前（`min` から `step` 刻みの順）。あれば GUI はスライダではなく**選択肢**として出す
+    #: （方式の切り替えなど、数値の大小に意味が無い設定）
+    choices: tuple[str, ...] = ()
 
 
 class Planner:

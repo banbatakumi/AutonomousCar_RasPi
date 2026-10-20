@@ -303,6 +303,38 @@ class TestGripBundle(unittest.TestCase):
         self.assertFalse(mapstore.save_grip("missing", self.GRIP))   # 地図が無い名前には書かない
         self.assertEqual([m["name"] for m in mapstore.list_maps()], ["src"])
 
+    def test_line_cache(self):
+        """仕上げた経路の写しは条件の指紋が同じときだけ読め、地図の削除・上書きで消える。"""
+        mapstore.save_line_cache("src", "k1", b"abc")
+        self.assertEqual(mapstore.load_line_cache("src", "k1"), b"abc")
+        self.assertIsNone(mapstore.load_line_cache("src", "k2"))     # 条件が違う
+        mapstore.save_line_cache("nope", "k1", b"abc")                # 地図が無い名前には書かない
+        self.assertIsNone(mapstore.load_line_cache("nope", "k1"))
+        mapstore.delete_map("src")
+        self.assertFalse((mapstore.MAPS_DIR / "src.lines.pkl").exists())
+
+    def test_surface_record(self):
+        """路面の記録は `launch_ratio` と同じファイルに同居し、互いに消し合わない。範囲外は使わない。"""
+        self.assertIsNone(mapstore.load_grip_surface())
+        mapstore.save_grip_vehicle(1.46)
+        mapstore.save_grip_surface(5.52, 3.0, 1.06, 5.9, t=100.0)
+        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.46)
+        rec = mapstore.load_grip_surface()
+        self.assertAlmostEqual(rec["lat"], 5.52)
+        self.assertAlmostEqual(rec["dec"], 3.0)
+        self.assertAlmostEqual(rec["coup"], 1.06)
+        self.assertAlmostEqual(rec["ceil"], 5.9)
+        mapstore.save_grip_vehicle(1.5)
+        self.assertAlmostEqual(mapstore.load_grip_surface()["lat"], 5.52)
+        mapstore.clear_grip_surface()
+        self.assertIsNone(mapstore.load_grip_surface())
+        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.5)
+        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"surface": {"lat": 40, "dec": 3}}')
+        self.assertIsNone(mapstore.load_grip_surface())
+        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"launch_ratio": 1.4}')   # 古い形式
+        self.assertIsNone(mapstore.load_grip_surface())
+        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.4)
+
     def test_export_and_upload_carry_grip(self):
         import json
         mapstore.save_grip("src", self.GRIP)
