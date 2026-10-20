@@ -451,12 +451,16 @@ class _FakeFreezeClearPlanner:
     def __init__(self) -> None:
         self.freeze_calls = 0
         self.clear_calls = 0
+        self.grip_clears: list[str] = []
 
     def request_freeze(self) -> None:
         self.freeze_calls += 1
 
     def request_clear(self) -> None:
         self.clear_calls += 1
+
+    def request_clear_grip(self, name: str) -> None:
+        self.grip_clears.append(name)
 
     def reset(self) -> None:
         pass
@@ -490,6 +494,17 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
         node._apply_ctrl(AutoCtrl(mode="ftg_cam", clear_seq=1))
         self.assertEqual(fake.clear_calls, 1, "モード変更と同時だとclearが握り潰されている")
+
+    def test_grip_clear_seq_increment_passes_the_map_name_once(self):
+        """「学習値を消す」は回数で一度だけ、対象の地図名を planner へ渡す。"""
+        node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
+        fake = _FakeFreezeClearPlanner()
+        node.planner = fake
+        node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
+        req = AutoCtrl(mode="ftg", grip_clear_seq=1, grip_clear_map="course")
+        node._apply_ctrl(req)
+        node._apply_ctrl(req)                       # 同じ回数の再送では繰り返さない
+        self.assertEqual(fake.grip_clears, ["course"])
 
 
 class _FakeDisengagePlanner(_FakeFreezeClearPlanner):

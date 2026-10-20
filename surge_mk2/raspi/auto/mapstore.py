@@ -56,7 +56,7 @@ import numpy as np
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
            "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
            "import_upload", "export_map", "save_routes", "load_routes", "ROUTES_KEY",
-           "save_grip", "load_grip", "save_grip_vehicle", "load_grip_vehicle",
+           "save_grip", "load_grip", "clear_grip", "save_grip_vehicle", "load_grip_vehicle",
            "save_grip_surface", "load_grip_surface", "clear_grip_surface", "GRIP_KEY",
            "save_line_cache", "load_line_cache",
            "polyline_length"]
@@ -177,7 +177,9 @@ def list_maps() -> list[dict]:
             meta = json.loads(_meta_path(p).read_text())
         except (OSError, ValueError):
             continue
-        out.append({"name": p.stem, **meta})
+        # 学習値の有無は軽いファイルの有無だけで分かる（npz を開かない）。GUI は
+        # 「学習値を消す」を押せるかどうかの表示に使う
+        out.append({"name": p.stem, **meta, "has_grip": _grip_path(p).is_file()})
     return out
 
 
@@ -459,6 +461,26 @@ def load_grip(name: str) -> str:
         return _grip_path(target).read_text()
     except OSError:
         return ""
+
+
+def clear_grip(name: str) -> bool:
+    """地図 `name` の学習値（`<name>.grip.json`）だけを消す。消したら `True`。
+
+    **地図・経路の設定（`.routes.json`）・仕上げた経路の写し（`.lines.pkl`）は残す。**
+    車に固有の `_grip_vehicle.json`（発進の加速度との比・路面の記録）も残す——あれは
+    コースではなく車・床の値なので、地図を選び直しても同じ値を使う。
+
+    走行中の planner は学習値を持ったままなので、GUI からの削除は
+    `AutoCtrl.grip_clear_seq` でも planner に伝える（`slam2d_raceline.request_clear_grip`）。
+    ここだけで消すと、planner が次の保存で書き戻す。
+    """
+    target = resolve_map_path(name)
+    if target is None:
+        return False
+    p = _grip_path(target)
+    existed = p.is_file()
+    p.unlink(missing_ok=True)
+    return existed
 
 
 def _grip_vehicle_read() -> dict:

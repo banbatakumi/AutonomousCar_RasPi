@@ -658,6 +658,10 @@ class TelemetryServer:
         #: `_auto_freeze_seq`/`_auto_clear_seq` と同じ理由で永続化しない
         self._auto_race_map = ""
         self._auto_race_seq = 0
+        #: 「学習値を消す」で対象にする保存済み地図の名前・押した回数。
+        #: ファイルは telemetry_node が消し、planner の持ち物は `AutoCtrl` で伝える
+        self._auto_grip_clear_map = ""
+        self._auto_grip_clear_seq = 0
         #: 地図パネルのクリックによる自己位置探索の絞り込みヒント
         self._auto_loc_hint_x = 0.0
         self._auto_loc_hint_y = 0.0
@@ -1397,6 +1401,13 @@ class TelemetryServer:
             mapstore.delete_map(str(m.get("name", "")))
             await self._send_json(ws, self._maps_list())
 
+        elif kind == "maps_clear_grip":
+            # 地図の学習値（`.grip.json`）だけを消す。**地図・経路・経由点は残す。**
+            ok, error = self._maps_clear_grip(str(m.get("name", "")))
+            await self._send_json(ws, {"type": "maps_clear_grip_result",
+                                       "ok": ok, "error": error})
+            await self._send_json(ws, self._maps_list())
+
         # ── シャットダウン（誰でも実行できる。estop と同じく、走行の操縦権とは無関係。
         #    誤操作は GUI 側の window.confirm で防ぐ——操縦権を要求すると
         #    「操縦権が無い接続には holder="" の control_denied が返るだけで GUI に
@@ -1613,6 +1624,8 @@ class TelemetryServer:
                         clear_seq=self._auto_clear_seq,
                         race_map=self._auto_race_map,
                         race_seq=self._auto_race_seq,
+                        grip_clear_map=self._auto_grip_clear_map,
+                        grip_clear_seq=self._auto_grip_clear_seq,
                         loc_hint_x=self._auto_loc_hint_x,
                         loc_hint_y=self._auto_loc_hint_y,
                         loc_hint_seq=self._auto_loc_hint_seq,
@@ -2685,6 +2698,26 @@ class TelemetryServer:
 
     def _maps_list(self) -> dict:
         return {"type": "maps", "map_files": mapstore.list_maps()}
+
+    def _maps_clear_grip(self, name: str) -> tuple[bool, str]:
+        """保存済み地図の学習値（`<name>.grip.json`）だけを消す。
+
+        **地図・経路・経由点は消さない**（`mapstore.clear_grip`）。走行中の planner は
+        学習値をメモリに持っていて次の保存で書き戻すので、`AutoCtrl.grip_clear_seq` を
+        進めて planner 側も初期化させる（`slam2d_raceline.request_clear_grip`）。
+        """
+        if not name:
+            return False, "地図を選んでください"
+        target = mapstore.resolve_map_path(name)
+        if target is None:
+            return False, "地図の名前が不正です"
+        if not target.is_file():
+            return False, "地図が見つかりません"
+        mapstore.clear_grip(name)
+        self._auto_grip_clear_map = name
+        self._auto_grip_clear_seq += 1
+        self._publish_auto_ctrl()          # 待たせない（planner が走っていても次の周期で効く）
+        return True, ""
 
     def _maps_save(self, name: str) -> tuple[bool, str]:
         """今の `auto/map`（経路ができている段の `AutoMap` スナップショット）をそのまま保存する。

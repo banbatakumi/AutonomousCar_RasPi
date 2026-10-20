@@ -223,6 +223,7 @@ class PlanningNode:
         freeze = c.freeze_seq > self.ctrl.freeze_seq
         clear = c.clear_seq > self.ctrl.clear_seq
         load = c.race_seq > self.ctrl.race_seq
+        grip_clear = c.grip_clear_seq > self.ctrl.grip_clear_seq
         hint = c.loc_hint_seq > self.ctrl.loc_hint_seq
         park = c.park_seq > self.ctrl.park_seq
         routes = c.routes_seq > self.ctrl.routes_seq
@@ -242,6 +243,13 @@ class PlanningNode:
             self._last_map_seq = -1
             if not self.quiet:
                 print(f"# 地図を読み込み（GUI）: {c.race_map}", flush=True)
+        if grip_clear and self.planner is not None:
+            # telemetry_node も先にファイルを消しているが、planner は学習値を持ったまま
+            # 走っているので、こちらでも同じ地図の持ち物を初期化する（次に学習を保存しても
+            # 古い値が書き戻らないように、ファイルの削除も planner 側でやり直す）
+            self._ask("学習値の削除", self.planner.request_clear_grip, c.grip_clear_map)
+            if not self.quiet:
+                print(f"# 学習値を削除（GUI）: {c.grip_clear_map}", flush=True)
         if hint and self.planner is not None:
             self._ask("自己位置のヒント", self.planner.request_locate_hint, c.loc_hint_x, c.loc_hint_y)
         if park and self.planner is not None:

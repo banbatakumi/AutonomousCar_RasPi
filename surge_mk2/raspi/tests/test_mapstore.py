@@ -298,10 +298,27 @@ class TestGripBundle(unittest.TestCase):
 
     def test_save_and_load(self):
         self.assertEqual(mapstore.load_grip("src"), "")
+        self.assertFalse(mapstore.list_maps()[0]["has_grip"])
         self.assertTrue(mapstore.save_grip("src", self.GRIP))
         self.assertEqual(mapstore.load_grip("src"), self.GRIP)
+        self.assertTrue(mapstore.list_maps()[0]["has_grip"])
         self.assertFalse(mapstore.save_grip("missing", self.GRIP))   # 地図が無い名前には書かない
         self.assertEqual([m["name"] for m in mapstore.list_maps()], ["src"])
+
+    def test_clear_grip_keeps_map_routes_and_line_cache(self):
+        """「学習値を消す」は地図・経路の設定・仕上げた経路の写しを残す。"""
+        mapstore.save_grip("src", self.GRIP)
+        mapstore.save_routes("src", '{"groups": {}, "active": "auto"}')
+        mapstore.save_line_cache("src", "k1", b"abc")
+
+        self.assertTrue(mapstore.clear_grip("src"))
+        self.assertEqual(mapstore.load_grip("src"), "")
+        self.assertFalse(mapstore.list_maps()[0]["has_grip"])
+        self.assertIsNotNone(mapstore.load_map("src"))
+        self.assertIn('"auto"', mapstore.load_routes("src"))
+        self.assertEqual(mapstore.load_line_cache("src", "k1"), b"abc")
+        self.assertFalse(mapstore.clear_grip("src"))          # 2回目は消す物が無い
+        self.assertFalse(mapstore.clear_grip("../etc/passwd"))  # 名前の検査は delete_map と同じ
 
     def test_line_cache(self):
         """仕上げた経路の写しは条件の指紋が同じときだけ読め、地図の削除・上書きで消える。"""

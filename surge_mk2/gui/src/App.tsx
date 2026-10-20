@@ -156,6 +156,13 @@ export function App() {
           'bad',
         ),
       onMapsSaveResult: (ok, error) => set({ mapSaveResult: { ok, error } }),
+      onMapsClearGripResult: (ok, error) =>
+        notify(
+          ok
+            ? '学習値を消しました（次にこの地図で走ると学習をやり直します）'
+            : `学習値を消せませんでした: ${error || '理由不明'}`,
+          ok ? undefined : 'bad',
+        ),
     })
     chRef.current = c
     setCh(c)

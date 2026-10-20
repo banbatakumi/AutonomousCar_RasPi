@@ -413,6 +413,8 @@ export type MapFile = {
   raceline_points: number
   /** レーシングライン1周の長さ [m] */
   length_m: number
+  /** この地図の学習値（`<name>.grip.json`）があるか。無ければ「学習値を消す」は押せない */
+  has_grip: boolean
 }
 
 /** `/ws/control` のサーバ → GUI。`maps_list`/`maps_save`/`maps_delete` への応答。 */

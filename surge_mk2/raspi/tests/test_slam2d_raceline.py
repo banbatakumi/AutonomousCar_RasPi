@@ -579,6 +579,30 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
             raceline_xy=np.asarray(am.raceline, dtype=np.float64),
             raceline_v=np.asarray(am.raceline_v, dtype=np.float64))
 
+    def test_request_clear_grip_keeps_map_and_resets_memory(self):
+        """「学習値を消す」は地図を残し、planner が持っている値も初期化する。
+
+        ファイルだけ消すと、planner が次の保存で古い値を書き戻す
+        （`request_clear_grip` の docstring）。
+        """
+        mapstore.save_map(
+            "learned", resolution=0.05, origin_x=0.0, origin_y=0.0,
+            trinary=np.zeros((4, 4), dtype=np.uint8), centerline_xy=np.zeros((0, 2)),
+            raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+        mapstore.save_grip(
+            "learned", '{"format": 1, "cell_m": 0.25, "level": 4.5, "ok": 4.4, '
+                       '"bad": 4.6, "cells": []}')
+        p = Slam2dRaceLine()
+        p._grip_name = "learned"
+        p._grip.map.level = 4.5
+
+        p.request_clear_grip("learned")
+
+        self.assertIsNotNone(mapstore.load_map("learned"))
+        self.assertEqual(mapstore.load_grip("learned"), "")
+        self.assertEqual(p._grip.map.level, 0.0)
+        self.assertEqual(p._grip_name, "learned")   # 次の保存先は同じ地図のまま
+
     def test_disengage_on_a_saved_map_returns_to_locate_not_explore(self):
         """★ 保存地図で走っている途中に自動運転を解いても、地図作成（EXPLORE）へ戻らない。
 

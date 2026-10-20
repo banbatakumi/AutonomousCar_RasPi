@@ -30,6 +30,12 @@
  * （バンビの指示）。**削除は走行する側（telemetry_node が動いている機械）の
  * `saved_maps/` から `.npz`・`.json`・`.routes.json` を消す**（`mapstore.delete_map`）。
  * 実機なら Pi、`sim.run` なら Mac。ダウンロード済みの写しは消えない。ごみ箱は無い。
+ *
+ * **「学習値を消す」は地図を残したまま `<name>.grip.json` だけを消す。**
+ * 路面の限界（横・加速・減速）を覚え直したいときに使う。経由点・路線・地図を
+ * 作り直す必要は無い。走行中の planner も学習値をメモリに持っているので、
+ * サーバは `AutoCtrl` の回数で planner 側も初期化する（`ws/control.ts` の
+ * `mapsClearGrip`）。無い地図では押せない（`MapFile.has_grip`）。
  */
 import { useEffect, useRef, useState } from 'react'
 import { useNumbers } from '../bus/live'
@@ -140,6 +146,24 @@ export function MapLibrary({ ch }: { ch: ControlChannel | null }) {
               >
                 DL
               </a>
+              <button
+                disabled={!ch || !current.has_grip}
+                title={
+                  current.has_grip
+                    ? 'この地図の学習値（路面の限界・加速・減速）だけを消す。地図・経路・経由点は残る'
+                    : 'この地図には保存された学習値がありません'
+                }
+                onClick={() => {
+                  const msg =
+                    (phase === 'RACE' ? '走行中です。' : '') +
+                    `「${current.name}」の学習値だけを消しますか？\n` +
+                    '地図・経路・経由点は残ります。' +
+                    (phase === 'RACE' ? '\n（走行中の学習もやり直します）' : '')
+                  void askConfirm(msg).then((ok) => ok && ch?.mapsClearGrip(current.name))
+                }}
+              >
+                学習値を消す
+              </button>
               <button
                 title="走行する側の saved_maps/ から消す（元に戻せない）"
                 onClick={() => {

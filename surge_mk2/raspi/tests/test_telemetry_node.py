@@ -385,6 +385,56 @@ class TestMapsSave(unittest.TestCase):
         self.assertIn("course_y", [f["name"] for f in result["map_files"]])
 
 
+class TestMapsClearGrip(unittest.TestCase):
+    """`_maps_clear_grip`（地図を残して学習値 `.grip.json` だけを消す）。"""
+
+    GRIP = ('{"format": 1, "cell_m": 0.25, "level": 4.5, "ok": 4.4, "bad": 4.6, '
+            '"cells": []}')
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._orig_dir = mapstore.MAPS_DIR
+        mapstore.MAPS_DIR = Path(self._td.name) / "saved_maps"
+
+    def tearDown(self):
+        mapstore.MAPS_DIR = self._orig_dir
+        self._td.cleanup()
+
+    def _fake(self):
+        published = []
+        fake = SimpleNamespace(_auto_grip_clear_map="", _auto_grip_clear_seq=0,
+                               _publish_auto_ctrl=lambda: published.append(True))
+        return fake, published
+
+    def _save(self, name="course"):
+        mapstore.save_map(
+            name, resolution=0.05, origin_x=0.0, origin_y=0.0,
+            trinary=np.zeros((4, 4), dtype=np.uint8), centerline_xy=np.zeros((0, 2)),
+            raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+        mapstore.save_grip(name, self.GRIP)
+
+    def test_clears_grip_and_tells_the_planner(self):
+        self._save("course")
+        fake, published = self._fake()
+        ok, err = tn.TelemetryServer._maps_clear_grip(fake, "course")
+        self.assertTrue(ok, err)
+        self.assertEqual(mapstore.load_grip("course"), "")
+        self.assertTrue((mapstore.MAPS_DIR / "course.npz").is_file())   # 地図は残る
+        self.assertEqual(fake._auto_grip_clear_map, "course")
+        self.assertEqual(fake._auto_grip_clear_seq, 1)
+        self.assertEqual(published, [True])          # 待たせずに planner へ伝える
+
+    def test_rejects_empty_invalid_and_missing_names(self):
+        self._save("course")
+        fake, published = self._fake()
+        for name in ("", "../course", "no_such_map"):
+            ok, err = tn.TelemetryServer._maps_clear_grip(fake, name)
+            self.assertFalse(ok, name)
+            self.assertTrue(err, name)
+        self.assertEqual(fake._auto_grip_clear_seq, 0)
+        self.assertEqual(published, [])
+
+
 class TestServeMapFile(unittest.TestCase):
     """`GET /maps/<name>`（`_serve_map_file`）。`_serve_log_file`と同じ形。"""
 

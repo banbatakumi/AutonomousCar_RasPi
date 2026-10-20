@@ -69,6 +69,8 @@ export type ControlHandlers = {
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
   onMapsSaveResult: (ok: boolean, error: string) => void
+  /** `mapsClearGrip()` の成否。`error`は失敗時の理由（成功時は空文字） */
+  onMapsClearGripResult: (ok: boolean, error: string) => void
   /** `logs_delete` の失敗（成功時は `onLogs` の一覧更新だけが届く） */
   onLogsDeleteResult: (error: string) => void
   /** `shutdown` の拒否。`reason: 'armed'` = ARM 中は受け付けない */
@@ -126,6 +128,7 @@ export class ControlChannel {
         if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
       } else if (m.type === 'shutdown_denied') this.h.onShutdownDenied(m.reason ?? '')
       else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
+      else if (m.type === 'maps_clear_grip_result') this.h.onMapsClearGripResult(!!m.ok, m.error ?? '')
       else if (m.type === 'pong' && m.id === this.pingId) {
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
@@ -366,6 +369,17 @@ export class ControlChannel {
 
   mapsDelete(name: string) {
     this.send({ type: 'maps_delete', name })
+  }
+
+  /**
+   * 保存済み地図の**学習値だけ**を消す（`<name>.grip.json`。地図・経路・経由点は残す）。
+   *
+   * 走行中の planner も学習値を持っているので、サーバは `AutoCtrl` の回数で
+   * planner 側の持ち物も初期化する。成否は `onMapsClearGripResult`、続けて最新の
+   * 一覧が `onMaps` に届く（`mapsSave` と同じ流れ）。
+   */
+  mapsClearGrip(name: string) {
+    this.send({ type: 'maps_clear_grip', name })
   }
 
   // ── ファン（Pi5純正クーリング） ──

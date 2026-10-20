@@ -1033,6 +1033,25 @@ class Slam2dRaceLine(Planner):
         self._hint = -1
         self._map_dirty = True
 
+    def request_clear_grip(self, name: str) -> None:
+        """保存済み地図の学習値だけを消す（GUI の「学習値を消す」）。
+
+        `mapstore.clear_grip` は telemetry_node も呼ぶが、**こちらでも消す**。
+        走行中は planner が学習値を持っており、次に `_grip_save()` が走ると
+        消したファイルをそのまま書き戻すため（telemetry_node → `auto/ctrl` →
+        ここ、の順は保証されない）。地図・経路・経由点・仕上げた経路の写しには触らない。
+
+        消したあとは `_grip_load(name)` で、その地図を初めて読んだときと同じ状態
+        （同定値、または路面の記録があればそこ）から始め直す。`_grip_name` を
+        いったん空にするのは、`_grip_load` の冒頭の `_grip_save()` に**今の古い値**を
+        書かせないため。
+        """
+        mapstore.clear_grip(name)
+        if name != getattr(self, "_grip_name", ""):
+            return
+        self._grip_name = ""
+        self._grip_load(name)
+
     def _submit_line(self, p: dict[str, float]) -> None:
         """読み込んだ地図の中心線から、今の設定でラインを引き直す（ワーカーへ投げる）。"""
         cl = self._loaded_centerline_xy

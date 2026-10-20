@@ -173,6 +173,13 @@ class Planner:
         （既定は何もしない＝保存済み地図を持たない planner には無関係）。
         """
 
+    def request_clear_grip(self, name: str) -> None:
+        """人間が保存済み地図の「学習値を消す」と言ってきた。
+
+        地図の横に保存した学習値（`<name>.grip.json`）だけを消す。地図・経路・
+        経由点は残す。対応する planner だけ実装する（既定は何もしない）。
+        """
+
     def request_locate_hint(self, x: float, y: float) -> None:
         """GUIの地図パネルをクリックして、自己位置探索の絞り込みヒントを送ってきた。
 

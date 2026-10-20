@@ -585,6 +585,11 @@ class AutoCtrl(MsgBase):
     #: 「レーシングライン走行」（保存済み地図から走り始める）を押した回数。
     #: `freeze_seq`/`clear_seq` と同じ「回数」の約束
     race_seq: int = 0
+    #: 「学習値を消す」で対象にする保存済み地図の名前と、押した回数。
+    #: 消すのは地図の横の `<name>.grip.json` だけで、地図・経路・経由点は残す。
+    #: `freeze_seq`/`clear_seq` と同じ「回数」の約束（planner の持ち物も初期化する）
+    grip_clear_map: str = ""
+    grip_clear_seq: int = 0
     #: 地図パネルのクリックによる自己位置探索の絞り込みヒント（mapフレーム座標）
     loc_hint_x: float = 0.0
     loc_hint_y: float = 0.0
