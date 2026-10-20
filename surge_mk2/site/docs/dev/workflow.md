@@ -74,7 +74,7 @@ flowchart LR
 ## 車両の校正
 
 [`tools/calib`][calib] は、専用の試験（`calib_encoder`・`calib_steer`・`calib_steer_dyn`・`calib_latency`・`calib_speed`・
-`calib_speed_check`・`calib_wheel`・`calib_tyre`・`calib_traction_check`）の記録から `vehicle.toml` の値を決めます
+`calib_speed_check`・`calib_wheel`・`calib_tyre`・`calib_tc_gain`・`calib_traction_check`）の記録から `vehicle.toml` の値を決めます
 （2026-10-18 に旧システム同定 `tools/sysid`・旧制御の調整 `tools/ctrl_tune` から作り直した）。設計は
 [`docs/calibration.md`][calib-md] が正です。
 
@@ -82,8 +82,8 @@ flowchart LR
 
 - 測る: 開ループで車体の性質を測る。モデルは物理の式で、パラメータは少なく。例: 車速は走行距離そのものに当てはめ、
   遅れだけを格子で探して残り（利得・転がり抵抗・初速）は線形の最小二乗で解く（大域解が一意）
-- 決める: 車速の PI・TC・ABS のゲインは、測った植物と遅れから**位相余裕 60°** の式（`loop.py`）。旧数値最適化の TC のゲインは
-  この式で位相余裕 58° 相当だった
+- 決める: 車速の PI のゲインは、測った植物と遅れから**位相余裕 60°** の式（`loop.py`）。TC・ABS のゲインは、同じく積分器の式で
+  交差周波数ごとの基準を作り、**実機で交差周波数を低い方から上げて**（発進・制動を実走）発振の手前を採る（式の前提がタイヤの揺れで成り立たないため）
 - 確かめる: 閉ループで制御そのものの効きを測り、合否を出す。モデルではなく「制御が狙いどおりに効いているか」を実機で直接見る
 
 **解析そのものも確かめます。** 各解析は「真値の分かっているシムで試験を走らせ、解析が真値を復元するか」をテストに持ち

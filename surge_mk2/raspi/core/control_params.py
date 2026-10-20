@@ -30,7 +30,7 @@ STM32 は値を Flash に保存しないので、電源を入れ直すと既定�
 
 ## 一時的な上書き（`set_overrides()`）
 
-校正の試験（`raspi/auto/calib_wheel.py` は TC・ABS を切る、`calib_tyre.py` は目標スリップ率を振る）が使う。
+校正の試験（`raspi/auto/calib_wheel.py`・`calib_tyre.py` は TC・ABS を切る）が使う。
 planner が `AutoState.fw_overrides` に書いた値を、指令（`DriveCmd.fw_overrides`）が届いている間だけ
 入れ、届かなくなったら元の値へ戻す（試験が中断・異常終了しても TC を切ったままにならない）。
 """
@@ -72,7 +72,7 @@ FROM_DYNAMICS = ("speed_kp", "speed_ki")
 
 #: `[control]` に書かず、ほかの節の校正の結果から作る項目（同じ値を2か所に持たない）。値は (説明, 作り方)
 DERIVED: dict[str, tuple[str, Callable[[dict], float]]] = {
-    "brake_decel_m_s2": ("[limits] abs_brake_decel_m_s2（校正 8）",
+    "brake_decel_m_s2": ("[limits] abs_brake_decel_m_s2（校正 9）",
                          lambda d: d["limits"]["abs_brake_decel_m_s2"]),
     "md_torque_lag_s": ("[control.plant] md_delay_s + md_tau_s（校正 6）",
                         lambda d: d["control"]["plant"]["md_delay_s"] + d["control"]["plant"]["md_tau_s"]),

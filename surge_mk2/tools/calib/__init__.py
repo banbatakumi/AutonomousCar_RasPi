@@ -67,6 +67,11 @@ def _tyre(log):
     return tyre.analyze(log)
 
 
+def _tc_gain(log):
+    from . import tc_gain
+    return tc_gain.analyze(log)
+
+
 def _traction(log):
     from . import traction
     return traction.analyze(log)
@@ -75,8 +80,9 @@ def _traction(log):
 #: エンコーダの校正（校正 1）。ほかの試験の車速・走行距離・スリップ率はすべてこの上に乗る
 _ENC = tuple(f"control.enc_{s}_{k}" for s in ("left", "right") for k in ("lo", "hi", "h1s", "h1c", "h2s", "h2c"))
 _SPEED = ("dynamics.speed_kp", "dynamics.speed_ki", "control.speed_ff_nm_per_m_s2", "control.speed_ff_rr_nm")
-_TRACTION = ("control.tc_slip_target", "control.tc_kp_nm_per_m_s", "control.tc_ki_nm_per_m",
-             "control.abs_slip_target", "control.abs_kp_nm_per_m_s", "control.abs_ki_nm_per_m")
+_SLIP_TARGETS = ("control.tc_slip_target", "control.abs_slip_target")
+_TRACTION = _SLIP_TARGETS + ("control.tc_kp_nm_per_m_s", "control.tc_ki_nm_per_m",
+                             "control.abs_kp_nm_per_m_s", "control.abs_ki_nm_per_m")
 
 CALIBRATIONS: tuple[Calibration, ...] = (
     Calibration("1", "前輪エンコーダ", ("calib_encoder", "sysid_encoder"), _enc),
@@ -87,7 +93,8 @@ CALIBRATIONS: tuple[Calibration, ...] = (
     Calibration("5", "車速制御（確かめる）", ("calib_speed_check",), _speed_check, "5（測る）を適用", _ENC + _SPEED),
     Calibration("6", "後輪の空転（台上）", ("calib_wheel", "sysid_wheel"), _wheel),
     Calibration("7", "タイヤ→TC・ABS", ("calib_tyre",), _tyre, "1 を適用して録る・5・6 を適用して解析", _ENC),
-    Calibration("8", "TC・ABS の確かめ", ("calib_traction_check",), _traction, "7 を適用", _ENC + _TRACTION),
+    Calibration("8", "TC・ABS のゲイン", ("calib_tc_gain",), _tc_gain, "5・6・7 を適用", _ENC + _SLIP_TARGETS),
+    Calibration("9", "TC・ABS の確かめ", ("calib_traction_check",), _traction, "7・8 を適用", _ENC + _TRACTION),
 )
 
 

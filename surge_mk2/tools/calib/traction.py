@@ -1,5 +1,5 @@
-"""校正 8: TC・ABS の確かめ（`raspi/auto/calib_traction_check.py` の記録）→ 合否と `[limits]`。
-設計は `docs/calibration.md` §4.8。
+"""校正 9: TC・ABS の確かめ（`raspi/auto/calib_traction_check.py` の記録）→ 合否と `[limits]`。
+設計は `docs/calibration.md` §4.9。
 
 区間ごと（車速 0.6m/s 以上を `_CHUNK_S` に区切る）に、STM32 のスリップ率（駆動・車速指令の減速は左右の平均、
 制動はロックしかけている側）と車体の加速度（走行距離の 2 次式）を出す。
@@ -21,6 +21,8 @@ from __future__ import annotations
 import numpy as np
 
 from raspi.auto._calib_common import phase_parts
+from raspi.auto.calib_tc_gain import OSC_FREQ_MIN_HZ
+from raspi.msgs.convert import MAX_TARGET_TORQUE_NM
 
 from .encoder import _stm_time
 from .log import Log
@@ -28,9 +30,14 @@ from .replay import car_from_toml, replay
 from .result import Result
 from .speed import body_distance
 
-__all__ = ["analyze", "SLIP_TOL", "SLIP_STD_MAX", "LIMIT_USE"]
+__all__ = ["analyze", "SLIP_TOL", "SLIP_TOL_REL", "SLIP_STD_MAX", "LIMIT_USE", "OSC_FAIL_STD"]
 
 SLIP_TOL = 0.04
+#: 目標が高いとき（最大トルクまで滑らせる目標は 0.2〜0.5）の許容は目標の割合でも見る: 許容 = max(SLIP_TOL, 目標 × SLIP_TOL_REL)
+SLIP_TOL_REL = 0.25
+#: 発振で不合格にする揺れ（区間内の標準偏差）の下限。実機は TC・ABS のゲインによらず 20〜30Hz の常在の揺れがあり（標準偏差 0.05〜0.14。ABS が最大）、
+#: 一つの周波数に集まるだけでは発振と言えない。それより大きい集中した揺れだけを不合格にし、小さければ★
+OSC_FAIL_STD = 0.2
 SLIP_STD_MAX = 0.04
 #: 揺れのパワーのうち一番強い周波数（隣の 1 本を含む）が占める割合の上限。超えたら発振とみなす
 PEAK_SHARE_MAX = 0.5
@@ -43,20 +50,26 @@ _TARGET_V = 1.0
 _ONSET_S = 0.12
 
 
-def _onsets(log: Log, kind: str, slip: np.ndarray, select_low: bool) -> list[tuple[float, float]]:
+def _is(p: str, kind: str, leg: int | None) -> bool:
+    """区間の名前 `p` が種類 `kind`（と、指定があれば片道 `leg`）か。"""
+    parts = phase_parts(p) or ("", -1)
+    return parts[0] == kind and (leg is None or parts[1] == leg)
+
+
+def _onsets(log: Log, kind: str, slip: np.ndarray, select_low: bool, leg: int | None = None) -> list[tuple[float, float]]:
     """区間の始まりの行き過ぎ: (スリップ率の大きさの最大, 目標の 2 倍を超えていた時間 [s]) の並び。"""
     out = []
-    for _, i0, i1 in log.segments(lambda p, k=kind: (phase_parts(p) or ("",))[0] == k):
+    for _, i0, i1 in log.segments(lambda p, k=kind: _is(p, k, leg)):
         j1 = min(i1, i0 + int(0.3 / 0.01))
         sl, sr = slip[i0:j1, 0], slip[i0:j1, 1]
-        s = np.abs(np.minimum(sl, sr) if select_low else 0.5 * (sl + sr))
+        s = np.abs(np.minimum(sl, sr) if select_low else np.maximum(sl, sr))
         out.append((float(np.max(s)) if len(s) else 0.0, s))
     return out
 
 
-def _chunks(log: Log, kind: str, t: np.ndarray, x: np.ndarray, v: np.ndarray):
+def _chunks(log: Log, kind: str, t: np.ndarray, x: np.ndarray, v: np.ndarray, leg: int | None = None):
     out = []
-    for _, i0, i1 in log.segments(lambda p, k=kind: (phase_parts(p) or ("",))[0] == k):
+    for _, i0, i1 in log.segments(lambda p, k=kind: _is(p, k, leg)):
         idx = np.arange(i0, i1)
         idx = idx[(np.abs(v[idx]) >= _MIN_V) & (t[idx] - t[i0] >= _ONSET_S)]
         if len(idx) < 8:
@@ -69,12 +82,12 @@ def _chunks(log: Log, kind: str, t: np.ndarray, x: np.ndarray, v: np.ndarray):
     return out
 
 
-def peak_share(log: Log, kind: str, series_of, v: np.ndarray, t: np.ndarray) -> tuple[float, float]:
+def peak_share(log: Log, kind: str, series_of, v: np.ndarray, t: np.ndarray, leg: int | None = None,
+               n: int = 32) -> tuple[float, float]:
     """区間ごとのスリップ率（1 次の傾きを引く）のパワースペクトルを足し、一番強い周波数とその隣が占める割合と
     その周波数 [Hz] を返す。発振なら一つの周波数に集まり、タイヤの力のむらなら広く散る。"""
-    n = 32
     acc = None
-    for _, i0, i1 in log.segments(lambda p, k=kind: (phase_parts(p) or ("",))[0] == k):
+    for _, i0, i1 in log.segments(lambda p, k=kind: _is(p, k, leg)):
         idx = np.arange(i0, i1)
         idx = idx[(np.abs(v[idx]) >= _MIN_V) & (t[idx] - t[i0] >= _ONSET_S)]
         for j in range(0, len(idx) - n + 1, n):
@@ -91,7 +104,7 @@ def peak_share(log: Log, kind: str, series_of, v: np.ndarray, t: np.ndarray) -> 
 
 
 def analyze(log: Log, car=None) -> Result:
-    res = Result("校正 8: TC・ABS の確かめ")
+    res = Result("校正 9: TC・ABS の確かめ")
     if log.aborted:
         res.warn(f"試験は途中で中止された（{log.aborted}）")
     t = _stm_time(log)
@@ -119,13 +132,16 @@ def analyze(log: Log, car=None) -> Result:
                                             ("decel", "車速指令の減速（TC）", tc_t, False),
                                             ("brake", "最大の制動（ABS）", abs_t, True)):
         ch = _chunks(log, kind, t, x, v)
-        if len(ch) < 3:
-            res.fail(f"{name}: 区間が足りない（{len(ch)} 個。`calib_traction_check` の記録か確かめる）")
+        if not ch:
+            res.fail(f"{name}: 区間が無い（`calib_traction_check` の記録か確かめる）")
             continue
+        if len(ch) < 3:
+            # 最大トルク 0.15N·m では減速・加速が速く、車速 0.6m/s 以上の区間が短い。点が少ないので統計は粗い
+            res.warn(f"{name}: 評価できた区間が {len(ch)} 個だけ（0.12 秒ごと）。統計が粗い")
         lam, acc, inner, vv = [], [], [], []
         for part, a in ch:
             sl, sr = slip[part, 0], slip[part, 1]
-            series = np.abs(np.minimum(sl, sr) if select_low else 0.5 * (sl + sr))
+            series = np.abs(np.minimum(sl, sr) if select_low else np.maximum(sl, sr))
             lam.append(float(np.mean(series)))
             inner.append(float(np.std(series)))
             acc.append(abs(a))
@@ -144,26 +160,33 @@ def analyze(log: Log, car=None) -> Result:
             pa = [abs(float(np.polyfit(t[p] - t[p[0]], pred["distance"][p], 2)[0]) * 2) for p, _ in ch]
             txt += f"（予測 {np.median(pa):.2f}m/s²）"
         res.info(txt)
-        if abs(mean - target) > SLIP_TOL:
-            # 試験のトルクで目標まで滑らない（タイヤが強い）なら外れていても問題ない: 制限が働いていない
+        tol = max(SLIP_TOL, SLIP_TOL_REL * target)
+        if mean > target + tol:
+            res.fail(f"{name}: スリップ率の平均 {mean:.3f} が目標 {target:.3f} を {mean - target:.3f} 超える（目安 +{tol:.3f} まで。目標に抑えられていない）")
+        elif mean < target - tol:
+            # TC・ABS は上限として働く（目標より下は何もしない）。目標が「最大トルクまで滑らせた値」なら、試験のトルクで届かないのは普通。
+            # 目標まで届かないのに制限が大きく働いていたら、必要以上に絞っている疑い
             lim = log.vs["tc_limit_nm"].min(axis=1) if kind != "brake" else log.vs["abs_limit_nm"]
             idxs = np.concatenate([p for p, _ in ch])
-            active = float(np.mean(lim[idxs] < 0.13 - 1e-3))
-            if mean < target and active < 0.3:
-                res.warn(f"{name}: スリップ率が目標まで上がらず、制限が働いたのは {active:.0%} だけ（トルクの上限で決まっている）。"
-                         "この試験では TC・ABS の効きを確かめられていない（グリップの強い路面？）")
-            else:
-                res.fail(f"{name}: スリップ率の平均 {mean:.3f} が目標 {target:.3f} から {abs(mean - target):.3f} 外れる（目安 ±{SLIP_TOL}）")
+            active = float(np.mean(lim[idxs] < MAX_TARGET_TORQUE_NM - 1e-3))
+            res.warn(f"{name}: スリップ率の平均 {mean:.3f} が目標 {target:.3f} まで上がらない（制限が働いたのは {active:.0%}）。TC・ABS は上限なので"
+                     "問題ないが、この試験では目標に保つ効きを確かめられていない")
         else:
             res.ok(f"{name}: スリップ率が目標に保たれている（差 {abs(mean - target):.3f}）")
         if std > SLIP_STD_MAX:
             def series_of(part, sl=select_low):
                 a, b = slip[part, 0], slip[part, 1]
-                return np.abs(np.minimum(a, b) if sl else 0.5 * (a + b))
+                return np.abs(np.minimum(a, b) if sl else np.maximum(a, b))
             share, f_pk = peak_share(log, kind, series_of, v, t)
-            if share > PEAK_SHARE_MAX:
-                res.fail(f"{name}: 区間の中のスリップ率の揺れ {std:.3f}、その {share:.0%} が {f_pk:.0f}Hz に集まる"
+            if share > PEAK_SHARE_MAX and f_pk < OSC_FREQ_MIN_HZ:
+                res.warn(f"{name}: 区間の中のスリップ率の揺れ {std:.3f} は {f_pk:.0f}Hz に集まる（{share:.0%}）が、遅い揺れ（{OSC_FREQ_MIN_HZ:.0f}Hz 未満）"
+                         "なので発振ではなく、目標に追従できていない（ゲインが低い・目標が遠い）")
+            elif share > PEAK_SHARE_MAX and std > OSC_FAIL_STD:
+                res.fail(f"{name}: 区間の中のスリップ率の揺れ {std:.3f}（{OSC_FAIL_STD} 超）、その {share:.0%} が {f_pk:.0f}Hz に集まる"
                          f"（目安 {PEAK_SHARE_MAX:.0%} 以下。TC・ABS が発振している）")
+            elif share > PEAK_SHARE_MAX:
+                res.warn(f"{name}: 区間の中のスリップ率の揺れ {std:.3f} は {f_pk:.0f}Hz に {share:.0%} 集まる。実機は TC・ABS のゲインによらず"
+                         f" 20〜30Hz の揺れが常にあるので、{OSC_FAIL_STD} 以下は発振とは言えず★（校正 8 でゲインによって増えないことを確かめている）")
             else:
                 res.warn(f"{name}: 区間の中のスリップ率の揺れ {std:.3f} は大きいが、周波数は散っている（一番強い {f_pk:.0f}Hz で"
                          f" {share:.0%}）。発振ではなく、滑っているタイヤの力のむら")

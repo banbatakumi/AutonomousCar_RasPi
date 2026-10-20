@@ -33,6 +33,7 @@ from .calib_speed import CalibSpeed
 from .calib_speed_check import CalibSpeedCheck
 from .calib_steer import CalibSteer
 from .calib_steer_dyn import CalibSteerDyn
+from .calib_tc_gain import CalibTcGain
 from .calib_traction_check import CalibTractionCheck
 from .calib_tyre import CalibTyre
 from .calib_wheel import CalibWheel
@@ -63,6 +64,7 @@ PLANNERS: dict[str, type[Planner]] = {
     CalibSpeedCheck.id: CalibSpeedCheck,
     CalibWheel.id: CalibWheel,
     CalibTyre.id: CalibTyre,
+    CalibTcGain.id: CalibTcGain,
     CalibTractionCheck.id: CalibTractionCheck,
 }
 

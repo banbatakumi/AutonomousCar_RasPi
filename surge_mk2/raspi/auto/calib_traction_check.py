@@ -1,6 +1,6 @@
-"""校正 8: TC・ABS の確かめ。`config/vehicle.toml` の値（STM32 に入っている値）のまま、直線で全開の発進と目一杯の
+"""校正 9: TC・ABS の確かめ。`config/vehicle.toml` の値（STM32 に入っている値）のまま、直線で全開の発進と目一杯の
 減速を行い、スリップ率が目標に保たれているかと、**実際に出る加速度・減速度**を測る。解析は `tools/calib/traction.py`、
-設計は `docs/calibration.md` §4.8。
+設計は `docs/calibration.md` §4.9。
 
 前進の片道は 4 回: 「全開の発進 → 車速指令で目一杯の減速（TC。slam2d の減速と同じ経路）」を 2 回、
 「全開の発進 → 最大の制動（ABS）」を 2 回。後退の片道は低速で戻る。測った加速度・減速度は slam2d の上限
@@ -18,7 +18,7 @@ __all__ = ["CalibTractionCheck"]
 
 class CalibTractionCheck(TractionLegs):
     id = "calib_traction_check"
-    name = "校正 8: TC・ABS の確かめ"
+    name = "校正 9: TC・ABS の確かめ"
     description = ("今の TC・ABS の設定のまま、直線で全開の発進と目一杯の減速（車速指令2回・制動2回）を行い、"
                    "スリップ率の保ち方と実際に出る加速度・減速度を測る。直線2m＋車長。約35秒")
 

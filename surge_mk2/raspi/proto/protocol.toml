@@ -434,7 +434,7 @@ KF_LEVER_ARM_M            = 0x00E6  # 旋回で加速度計に乗る −k·ω² 
 # 値は `[control]`（手で置く。既定 1 = 補正なし）
 IMU_GYRO_Z_SCALE          = 0x00F1
 # ★v0.29: 自動停止の停止距離・DISARM 後の制動の上限の見積もり（STM32 の vehicle.c）。ファームは値を持たない。
-# 値は `vehicle.toml` の `[limits] abs_brake_decel_m_s2`（校正 8）と `[control.plant] md_delay_s + md_tau_s`（校正 6）
+# 値は `vehicle.toml` の `[limits] abs_brake_decel_m_s2`（校正 9）と `[control.plant] md_delay_s + md_tau_s`（校正 6）
 BRAKE_DECEL_M_S2          = 0x0101  # 制動モード（ABS 込み）の減速度 [m/s²]（0.5〜10）
 MD_TORQUE_LAG_S           = 0x0102  # MD のトルクの遅れ [s]（0〜0.1）。自動停止の遅れ = LiDAR の1回転 + これ
 # 車速PIのゲイン（★v0.23）。値は `vehicle.toml` の `[dynamics]` speed_kp / speed_ki（同定・シム・Pi の計算と共通）
