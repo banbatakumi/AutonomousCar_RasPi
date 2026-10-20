@@ -97,7 +97,7 @@ TC・ABS・TV・車速 PI のゲインなどは、ファームに**値を持た�
 | Pi との UART | USART1、1 Mbps（誤差 0 %） | `app.c` のコメント |
 | MD との UART | USART2（ステア）・USART3（左後輪）・UART4（右後輪）、1 Mbps | `CLAUDE.md` |
 | LiDAR | USART6、230400 bps | `app.c` |
-| 1 輪の最大トルク | 0.13 N·m | `drive.h` の `DRIVE_MAX_TORQUE_NM` |
+| 1 輪の最大トルク | 0.15 N·m | `drive.h` の `DRIVE_MAX_TORQUE_NM` |
 | 最高車速（暴走時の防壁） | 5.0 m/s | `drive.h` の `DRIVE_MAX_SPEED_M_S` |
 | ハートビート断の判定 | 50 ms | `heartbeat.h` |
 | COMMAND 途絶の判定 | 100 ms | `ras_link.h` の `RAS_COMMAND_TIMEOUT_US` |

@@ -41,6 +41,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.signal import lfilter
 
+from raspi.msgs.convert import MAX_TARGET_TORQUE_NM
+
 from . import loop
 from .encoder import _stm_time
 from .log import Log
@@ -52,7 +54,7 @@ WHEEL_RADIUS_M = 0.030
 MASS_KG = 2.0
 G_NOMINAL = 1.0 / (WHEEL_RADIUS_M * MASS_KG)
 #: ファームの値（`drive.h`）。1輪あたりのトルクの上限・制御周期
-MAX_TORQUE_NM = 0.13
+MAX_TORQUE_NM = MAX_TARGET_TORQUE_NM
 CONTROL_PERIOD_S = 0.0005
 #: 車速（カルマンフィルタ）の遅れの見積もり [s]。走行距離を主にするので小さい（`docs/control_constants.md`）
 SPEED_EST_LAG_S = 0.001

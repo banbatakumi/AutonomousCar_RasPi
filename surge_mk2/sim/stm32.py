@@ -33,6 +33,7 @@ import random
 import numpy as np
 
 from raspi.core.control_params import disarm_brake_timeout_s
+from raspi.msgs.convert import MAX_TARGET_TORQUE_NM as _MAX_TARGET_TORQUE_NM
 from raspi.proto import UART_BAUD, FrameEncoder, FrameParser, packets
 from raspi.proto.generated.packets import FRAME_OVERHEAD, P2S_TYPES, PROTOCOL_VERSION
 
@@ -119,7 +120,7 @@ _VIB_TAU_S = 0.035
 #: 同じく車速の揺れ（100Hz で極の半径 0.5・中心 17Hz → 隣との相関 0.39・2 つ先 −0.07）
 _VIB_SPEED_TAU_S = 0.0144
 _VIB_SPEED_HZ = 17.0
-DRIVE_MAX_TORQUE_NM = 0.13   # VehicleModel.MAX_BRAKE_TORQUE_NM と同値
+DRIVE_MAX_TORQUE_NM = _MAX_TARGET_TORQUE_NM   # raspi/msgs/convert.py が唯一の定義
 
 #: 積分の刻み。細かくしても運動学モデルでは意味が薄く、粗いと舵の遅れが崩れる
 STEP_S = 0.001

@@ -22,6 +22,7 @@ from dataclasses import dataclass, fields, replace
 
 import numpy as np
 
+from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM
 from raspi.msgs.types import Scan, VehicleState
 from tools.fwsim.fw import IN, MODE_BRAKE, MODE_DISARM, MODE_SPEED, MODE_TORQUE, OUT, Firmware, HostConfig, HostPlant
 
@@ -146,11 +147,12 @@ class Truth:
 
 
 def run(planner, car: Car = Car(), params: dict[str, float] | None = None, *, lifted: bool = False,
-        max_s: float = 120.0, mode: str | None = None) -> tuple[Log, Truth]:
+        max_s: float = 120.0, mode: str | None = None,
+        mu_scale: tuple[float, float] = (1.0, 1.0)) -> tuple[Log, Truth]:
     """`planner` を `car` と閉ループで回し、記録と真値を返す。
 
     `params` は `[control]` の調整値の上書き（`vehicle.toml` の値の上に重ねる）。`lifted` は後輪を両方とも
-    浮かせた置き方（路面の μ をほぼ 0 にする。車体は動かない）。planner が「完了」か「中止」と
+    浮かせた置き方（路面の μ をほぼ 0 にする。車体は動かない）。`mu_scale` は路面の μ の左右の倍率（左右でグリップが違う車）。planner が「完了」か「中止」と
     言ってから 0.5s で終える。
     """
     fw = firmware()
@@ -163,7 +165,7 @@ def run(planner, car: Car = Car(), params: dict[str, float] | None = None, *, li
     on_vs = getattr(planner, "on_vehicle_state", None)
     mu = 1e-4 if lifted else 1.0
     row = np.zeros(len(IN))
-    row[[IN["mode"], IN["mu_left"], IN["mu_right"], IN["front_scale"]]] = (MODE_DISARM, mu, mu, 1.0)
+    row[[IN["mode"], IN["mu_left"], IN["mu_right"], IN["front_scale"]]] = (MODE_DISARM, mu * mu_scale[0], mu * mu_scale[1], 1.0)
     row[IN["test_moment"]] = float("nan")
     pending: list[tuple[int, np.ndarray, dict]] = []      # (効き始めるファームの周期の番号, 入力, 上書き)
     applied_ov: dict[str, float] = {}
@@ -206,7 +208,7 @@ def run(planner, car: Car = Car(), params: dict[str, float] | None = None, *, li
             new = (pending[-1][1] if pending else row).copy()
             if not st.ready or st.brake:
                 new[IN["mode"]] = MODE_BRAKE
-                new[IN["value"]] = st.brake_torque if (st.ready and st.brake_torque > 0) else 0.13
+                new[IN["value"]] = st.brake_torque if (st.ready and st.brake_torque > 0) else MAX_BRAKE_TORQUE_NM
             elif st.torque_mode:
                 new[IN["mode"]], new[IN["value"]] = MODE_TORQUE, st.target_torque
             else:

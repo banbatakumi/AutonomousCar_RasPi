@@ -18,6 +18,7 @@ from __future__ import annotations
 import numpy as np
 
 from raspi.auto._calib_common import phase_parts
+from raspi.msgs.convert import MAX_TARGET_TORQUE_NM
 
 from .encoder import _stm_time
 from .log import Log
@@ -125,7 +126,7 @@ def analyze(log: Log, car=None) -> Result:
         del idx_step
     for r in rows:
         res.info(r)
-    tc = (log.vs["tc_limit_nm"].min(axis=1) < 0.13 - 1e-3) & moving
+    tc = (log.vs["tc_limit_nm"].min(axis=1) < MAX_TARGET_TORQUE_NM - 1e-3) & moving
     if tc.sum() * 0.01 > 0.2:
         res.warn(f"TC が {tc.sum() * 0.01:.2f} 秒ぶん駆動を絞った（グリップの限界に近い。その区間の誤差は制御器ではなくタイヤによる）")
     elif tc.any():

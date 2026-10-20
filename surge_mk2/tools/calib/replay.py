@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from raspi.core.control_params import DEFAULT_TOML
+from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM
 from tools.fwsim.fw import IN, MODE_BRAKE, MODE_SPEED, MODE_TORQUE, OUT, HostConfig
 
 from .log import Log
@@ -53,7 +54,7 @@ def _inputs(log: Log, latency: float, n: int, t0: float) -> tuple[np.ndarray, li
     u[:, IN["front_scale"]] = 1.0
     u[:, IN["test_moment"]] = np.nan
     u[:, IN["mode"]] = MODE_BRAKE
-    u[:, IN["value"]] = 0.13
+    u[:, IN["value"]] = MAX_BRAKE_TORQUE_NM
     tf = t0 + np.arange(n) * DT
     k = np.searchsorted(log.cmd_t + latency, tf, side="right") - 1
     valid = k >= 0
@@ -62,7 +63,7 @@ def _inputs(log: Log, latency: float, n: int, t0: float) -> tuple[np.ndarray, li
     torque = log.cmd["torque_mode"][kk] > 0.5
     mode = np.where(brake, MODE_BRAKE, np.where(torque, MODE_TORQUE, MODE_SPEED))
     bt = log.cmd["brake_torque"][kk]
-    value = np.where(brake, np.where(bt > 0, bt, 0.13), np.where(torque, log.cmd["target_torque"][kk],
+    value = np.where(brake, np.where(bt > 0, bt, MAX_BRAKE_TORQUE_NM), np.where(torque, log.cmd["target_torque"][kk],
                                                                  log.cmd["target_speed"][kk]))
     u[valid, IN["mode"]] = mode[valid]
     u[valid, IN["value"]] = value[valid]

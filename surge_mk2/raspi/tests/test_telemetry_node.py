@@ -644,7 +644,7 @@ class TestValidDriveSettings(unittest.TestCase):
         self.assertEqual(out["maxSpeed"], 10.0)
         self.assertEqual(out["steerRate"], 0.5)
         self.assertEqual(out["mtGear2"], 1.0)
-        self.assertEqual(out["brakeTorque"], 0.13)
+        self.assertEqual(out["brakeTorque"], tn.MAX_BRAKE_TORQUE_NM)
         self.assertEqual(out["armIdleTimeoutMs"], 5000.0)
 
     def test_bad_types_are_dropped_and_launch_control_is_kept(self):

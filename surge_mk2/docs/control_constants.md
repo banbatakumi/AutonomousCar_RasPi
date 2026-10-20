@@ -65,7 +65,7 @@
 - `mass` 2.0kg、`drive_ratio` 2（駆動輪数）、`GRAVITY` 9.81
 - ステアモータの可動域 ±60°（`STEERING_MAX_ANGLE_RAD`）、リンク比 0.5（`STEERING_LINKAGE_RATIO`）
 - MD の制動の境界層・不感帯（`brake_boundary_speed_m_s` 0.6・`brake_deadband_speed_m_s` 0.06）— MD ファームの定数
-- トルク上限 `DRIVE_MAX_TORQUE_NM` 0.13 — MD の絶対上限（Kt×10A ≒ 0.144〜0.148）より下。`speed_torque_max_nm` はその 2 輪分
+- トルク上限 `DRIVE_MAX_TORQUE_NM` 0.15（2026-10-20 に 0.13 から。MD の自動校正し直し（2026-10-18）で絶対上限が約 0.2 になったため。それ以前は Kt×10A ≒ 0.144〜0.148 で 0.15 は MD が受け付けず走れなかった）。Pi 側の唯一の定義は `raspi/msgs/convert.py` の `MAX_TARGET_TORQUE_NM`（GUI・toml・シム・tools はここと突き合わせ/参照。`test_fw_constants.py`）。`speed_torque_max_nm` はその 2 輪分
 - 前輪エンコーダ AS5600・IMU MPU6050 のデータシート値（`speed_kf.h` のコメント）
 
 ### B 同定（車両の校正 `tools/calib` が書く。どの校正がどの値かは `config/vehicle.toml` の各行と `calibration.md` §2）
@@ -74,7 +74,7 @@
 - `[control]` の `steer_link_*`・`max_steer`（校正 2）、`enc_*`（校正 1）、`kf_*`（`tools/calib/kf.py`）
 - `[control]` の TC・ABS の目標とゲイン（校正 7。位相余裕の式）、`[control.plant]`（校正 6・7）
 - `[limits]`（slam2d の上限。校正 7・8）
-- 自動停止・DISARM 後の制動の見積もり: `[limits] abs_brake_decel_m_s2`（校正 8 の ABS の制動）と
+- 自動停止・DISARM 後の制動の見積もり: `[limits] abs_brake_decel_m_s2`（校正 9 の ABS の制動）と
   `[control.plant] md_delay_s + md_tau_s`（校正 6）を、io_node が CONFIG_SET（★v0.29 `BRAKE_DECEL_M_S2`・
   `MD_TORQUE_LAG_S`）で STM32 へ送る。**ファームは写しを持たない**（2026-10-19 に `VEHICLE_BRAKE_DECEL_M_S2`・
   `VEHICLE_MD_TORQUE_TAU_S` を削除。校正し直しても toml を書いて `--restart-io` するだけ）
@@ -99,7 +99,7 @@
 | `DRIVE_LAUNCH_END_MARGIN_M_S` | 0.05 | E | コメントの根拠「前輪 LPF τ≈10ms の遅れ×全開の加速度」は車速がカルマンフィルタになって古い。今の式なら 加速度×(加速度計の DLPF 3ms＋MD 4.5ms) ≒ 0.02。実機のローンチの記録で確かめてから直す |
 | `DRIVE_LAUNCH_TIMEOUT_S`・`_MIN_STEP_M_S`・`_REVERSE_SPEED_M_S` | 3.0・0.5・0.3 | D | 発進を始める・打ち切る条件 |
 | `DRIVE_ABS_FALLBACK_LIMIT_RATIO`・`_TIME_S` | 0.2・0.2 | D | 前輪エンコーダ故障時に ABS が制動を抜き続けないための見張り |
-| `tc_slip_target`・`abs_slip_target` | 0.2・0.25 | D | 前後力と横グリップの配分の方針（`tools/ctrl_tune/optimize.py` の冒頭。`tradeoff()` の表で人が決める） |
+| `tc_slip_target`・`abs_slip_target` | 校正 7 が決める | D | 曲線の山の 95% の力が出るスリップ率（`tools/calib/tyre.py`。前後の力を優先し、横のための上限は付けない = 2026-10-19 の決定）。ゲインは校正 8（`tools/calib/tc_gain.py`）が実機で決める |
 | `slip_speed_floor_m_s`・`wheel_lift_diff_threshold_m_s` | 0.5・0.35 | E | 低速のスリップ率の分母、片輪浮きの判定。前輪の読みの誤差（タイヤ径・周期誤差 数%）より上に置く。後者は車速に比例させる（例: 7%×車速＋下限）のが物理的 |
 | `tv_max_ratio` | 0.5 | D | 内輪のトルクを残す上限 |
 | `[control] kf_*`（`SPEED_KF_*` は既定値） | 0.8mm・0.6・0・100・0.05・0.15 | B（`kf_tune` が書く。今の値は v0.26 の経験値のまま） | §1.2。⓪ の校正を入れた後の記録で推定し直す。`kf_lever_arm_m` は旋回を含む記録のときだけ推定（IMU の取付位置を実測すれば一部は A にできる） |
@@ -151,7 +151,7 @@ toml を書いて `./tools/deploy.sh --restart-io` するだけ。ファーム�
 | MD の左右のトルク定数 | 指令をそのままトルクとみなす（`torque_cmd` は指令） | 未校正の駆動 | 同定の G は左右の平均。左右差はトルクベクタリングの差に乗る | ⑤ の記録で、トルク指令の左右差とヨーレートを回帰（直進中に小さな差を加える段を足す） |
 | `scan2scan.PRIOR_XY` | 5mm（「倍率誤差 2%」の前提） | 一時的な前提 | 半径は実測済み・Encoder の dt の誤り（1.8%）も直ったので、倍率誤差の前提は古い | 今の走行で、照合の残差から決め直す |
 | トルクベクタリングの利得 `tv_load_gain_s2_per_m` | 0.045（机上の式） | 手置き（式だが実機未調整） | 旋回中の左右配分 | `sysid_tyre`・`ctrl_tune` の旋回シナリオで最適化（他の TC・ABS と同じ手順） |
-| ABS・TC・片輪浮き対策のしきい値・ゲイン | 車両モデル上で最適化した机上値 | 試験はあるが実機で未検証 | 限界域の挙動 | 既存の `sysid_wheel`・`sysid_tyre` の記録で `ctrl_tune` を回し直す（手順は `development.md` §4.7） |
+| ABS・TC・片輪浮き対策のしきい値・ゲイン | 車両モデル上で最適化した机上値 | 試験はあるが実機で未検証 | 限界域の挙動 | 校正 6・7・8（`calib_wheel`・`calib_tyre`・`calib_tc_gain`）を実機で録り直す（手順は `docs/calibration.md`） |
 | `LIDAR_PWM_DUTY` 0.4 | 目で見て合わせた（「回転数を見ながら詰めること」） | 手置き | 回転数（10Hz からずれると 1 周の点の密度と自動停止の遅延が変わる） | LD06 が回転速度を送ってくる（`Scan.rot_speed_dps`）ので、STM32 で PI にして 3600°/s に合わせるか、記録から duty→回転数を当てはめる |
 | AHRS の積分の上限・`IMU_ACCEL_LPF_K` | 仮置きの値・係数で持つ（周期を前提にした係数） | 手置き | ピッチ・ロールの推定 | 時定数で持つ形に（`LPF_UpdateTau` と同じ直し方）、静止・傾けた台での記録で確かめる |
 | ESS・ブレーキ灯のしきい値 | 記録1本から | 一時的な記録（表示のみ） | 走りには効かない | 録り直すときに一緒に見る（D のまま） |

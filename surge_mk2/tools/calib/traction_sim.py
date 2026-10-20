@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM
+
 from tools.fwsim.fw import IN, MODE_BRAKE, MODE_SPEED, MODE_TORQUE, OUT, HostConfig
 
 from .simcar import DT, SUBSTEPS, Car, firmware
@@ -61,7 +63,7 @@ def launch(car: Car, params: dict[str, float], duration: float = 1.0) -> Outcome
     n = int(duration / DT)
     u = _inputs(n)
     u[:, IN["mode"]] = MODE_TORQUE
-    u[:, IN["value"]] = 0.13
+    u[:, IN["value"]] = MAX_TARGET_TORQUE_NM
     out = _run(car, params, u, 0.0)
     v = out[:, OUT["speed"]]
     mask = v > 0.6
@@ -75,7 +77,7 @@ def brake(car: Car, params: dict[str, float], v0: float = 2.0) -> Outcome:
     u[:200, IN["mode"]] = MODE_SPEED
     u[:200, IN["value"]] = v0
     u[200:, IN["mode"]] = MODE_BRAKE
-    u[200:, IN["value"]] = 0.13
+    u[200:, IN["value"]] = MAX_BRAKE_TORQUE_NM
     out = _run(car, params, u, v0)
     v = out[:, OUT["speed"]]
     i0 = 200

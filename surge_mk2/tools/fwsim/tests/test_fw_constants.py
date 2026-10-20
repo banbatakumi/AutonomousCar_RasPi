@@ -98,7 +98,7 @@ class TestFirmwareConstants(unittest.TestCase):
     def test_brake_values_are_runtime_params(self):
         """制動の減速度と MD のトルクの遅れはファームが値を持たない（★v0.29、CONFIG_SET で Pi が送る）。
 
-        Pi 側は `[limits] abs_brake_decel_m_s2`（校正 8）と `[control.plant] md_delay_s + md_tau_s`（校正 6）から作り
+        Pi 側は `[limits] abs_brake_decel_m_s2`（校正 9）と `[control.plant] md_delay_s + md_tau_s`（校正 6）から作り
         （`control_params.DERIVED`）、DISARM 後の制動の上限は同じ式（`disarm_brake_timeout_s`）で io_node・シムも使う"""
         from raspi.core import control_params as cp
         from tools.fwsim.fw import param_table
@@ -120,6 +120,25 @@ class TestFirmwareConstants(unittest.TestCase):
         self.assertSame("DRIVE_SPEED_FF_TAU_S", dyn["speed_ff_filter_s"])
         self.assertSame("DRIVE_HOST_COMMAND_PERIOD_S", 1.0 / CMD_HZ)
         self.assertSame("DRIVE_MAX_TORQUE_NM", dyn["speed_torque_max_nm"] / dyn["drive_ratio"])
+
+    def test_torque_limit_is_the_same_everywhere(self):
+        """1 輪のトルク上限は `convert.MAX_TARGET_TORQUE_NM` が Pi 側の唯一の定義。ファーム（`DRIVE_MAX_TORQUE_NM`）・
+        GUI（`store/ui.ts`）・toml の `speed_torque_max_nm`（2 輪分）・シムの写しがこれと一致する。
+        食い違うと、片方が黙ってクランプして「スライダを上げても効きが変わらない」・ファームが MD を使えないと判断する。"""
+        from raspi.msgs import convert
+        from sim import stm32 as sim_stm32
+        from sim.vehicle import VehicleModel
+        limit = convert.MAX_TARGET_TORQUE_NM
+        self.assertSame("DRIVE_MAX_TORQUE_NM", limit)
+        self.assertSame("DRIVE_MAX_BRAKE_TORQUE_NM", convert.MAX_BRAKE_TORQUE_NM)
+        self.assertAlmostEqual(self.toml["dynamics"]["speed_torque_max_nm"], 2 * limit, places=6)
+        self.assertEqual(sim_stm32.DRIVE_MAX_TORQUE_NM, limit)
+        self.assertEqual(VehicleModel.MAX_BRAKE_TORQUE_NM, convert.MAX_BRAKE_TORQUE_NM)
+        ui = (Path(__file__).resolve().parents[3] / "gui" / "src" / "store" / "ui.ts").read_text(encoding="utf-8")
+        for name, expect in (("MAX_TARGET_TORQUE_NM", limit), ("MAX_BRAKE_TORQUE_NM", convert.MAX_BRAKE_TORQUE_NM)):
+            m = re.search(rf"export const {name} = ([0-9.]+)", ui)
+            self.assertIsNotNone(m, name)
+            self.assertAlmostEqual(float(m.group(1)), expect, places=6, msg=f"gui/src/store/ui.ts の {name}")
 
     def test_sim_speed_controller_mirrors_drive_h(self):
         for attr, name in (("STANDSTILL_M_S", "DRIVE_STANDSTILL_SPEED_M_S"),

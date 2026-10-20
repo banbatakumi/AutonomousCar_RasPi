@@ -671,7 +671,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `accel_limit` / `steer_rate_limit` と同じ約束であり、**フィールドの埋め忘れで
   ブレーキが効かなくなる方が危険**なのでゼロ値を安全側に倒してある。
   Pi 側は正の指定が丸めで 0 に落ちないよう最小 1 LSB に留める（`msgs/convert.py`）。
-- STM32 側の上限は **0.13 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM` = `DRIVE_MAX_TORQUE_NM`。`LIMITS.max_torque_nm`
+- STM32 側の上限は **0.15 N·m/輪**（`DRIVE_MAX_BRAKE_TORQUE_NM` = `DRIVE_MAX_TORQUE_NM`。`LIMITS.max_torque_nm`
   で届く）。超えた値は黙ってクランプされるので、Pi 側でも同じ上限を持つ（`msgs.convert.MAX_BRAKE_TORQUE_NM`。
   `LIMITS` を受け取っていればそちらでクランプする）。
 - **`brake` が立っている間、車速 PI ループは完全に迂回される。** MD を制動モードに切り替えて
@@ -684,7 +684,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
   `brake_torque` と同じ理由（値域が小さい）で `target_torque` のスケールも 0.0001 N·m/LSB。
 - **`target_torque` に `0` の特別な意味はない。** `brake_torque` の「0=未指定=最大制動」とは
   違い、そのまま「駆動トルク 0」として扱ってよい。丸めで 0 に落ちても危険側には振れない。
-- **上限は 0.13 N·m**（`DRIVE_MAX_TORQUE_NM`。モータ物理上限 0.1557 N·m 未満）。超えた値は STM32 側で
+- **上限は 0.15 N·m**（`DRIVE_MAX_TORQUE_NM`。MD の自動校正し直し（2026-10-18）後のモータの絶対上限は約 0.2 N·m）。超えた値は STM32 側で
   クランプされる。Pi 側にも同じ上限を持つ（`msgs.convert.MAX_TARGET_TORQUE_NM`。`LIMITS` 受信後はそちら）。
 - **`torque_mode` が立っている間、車速 PI ループは `brake` と同様に迂回**し、
   `target_torque` を各輪へ直接掛ける（`target_speed` は無視）。
@@ -704,7 +704,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **`d_stop` は固定値ではない**（前後超音波の固定20cm未満ではない）。
   `d_stop = v・t_delay + v²/(2・a_max) + margin` で、`v` は進行方向の実走行速度の
   絶対値。`t_delay` = LiDAR の1回転 0.1s（STM32 の定数）＋ MD のトルクの遅れ（`CONFIG_SET` `MD_TORQUE_LAG_S`、★v0.29）、
-  `a_max` = 制動の減速度（`CONFIG_SET` `BRAKE_DECEL_M_S2`。値は `[limits] abs_brake_decel_m_s2`、校正 8。
+  `a_max` = 制動の減速度（`CONFIG_SET` `BRAKE_DECEL_M_S2`。値は `[limits] abs_brake_decel_m_s2`、校正 9。
   駆動の加速度上限とは独立）。走行速度が上がるほど `d_stop` は伸び、早い段階で作動する。
   `margin` だけが `CONFIG_SET`（`param_id = 0x0060`）でcm単位の連続値として直接
   指定できる（§5.8.3）。
@@ -850,7 +850,7 @@ Pi 側は `comm_ok = 0` を検出したら該当値を GUI 上でグレーアウ
 - **`COMMAND` が 100ms 途絶したら STM32 は自動ブレーキ。**
   100Hz 送信に対して 200ms は 20発の取りこぼしを許すことになり緩すぎる。
   3 m/s なら 60cm 進んでからブレーキがかかる計算になる。100ms（10発）とする。
-  **緊急停止時・途絶時とも最大制動トルク（現在は 0.13 N·m/輪。STM32 の
+  **緊急停止時・途絶時とも最大制動トルク（現在は 0.15 N·m/輪。STM32 の
   `DRIVE_MAX_BRAKE_TORQUE_NM`）を直接掛ける**（速度 PI 任せにしない）。**停止距離が短くなる。**
   舵角は最後の指令値のまま保持される（直進に戻すと車体が予期しない方向へ動くため）。
 
@@ -961,7 +961,7 @@ STM32 だけに値が残ると、「誰も知らない古い設定が残って�
 | `0x00C1`-`0x00C6`・`0x00C9`-`0x00CE` | **前輪エンコーダの校正**（左・右） | f32 | ★v0.27。`ENC_{LEFT,RIGHT}_{LO,HI,H1S,H1C,H2S,H2C}`。角度 0・2π に当たる ADC の読みの比（lo 0〜0.2・hi 0.8〜1.0、既定 0・1）と、1回転の周期誤差の 1・2 次の係数 [rad]（±0.1、既定 0）。読み θm = θ + e(θ) を STM32 が直してから角度・回転量・`odom_dist` にする。値は校正 1（`calib_encoder`、`docs/calibration.md`）が `[control]` に書く。入れ替えた瞬間に回転量へ段差は出ない |
 | `0x00E1`-`0x00E6` | **車速のカルマンフィルタの調整値** | f32 | ★v0.27。`KF_SIGMA_S_M`（0.0008）・`KF_SIGMA_A_M_S2`（0.6）・`KF_SIGMA_A_PER_M_S`（0。加速度のノイズ = これ×|車速| を足す）・`KF_JERK_PSD`（100）・`KF_BIAS_WALK_PSD`（0.05）・`KF_LEVER_ARM_M`（0.15）。括弧は既定＝v0.26 の固定値 |
 | `0x00F1` | **ジャイロ z 軸の感度の補正** | f32 | ★v0.28。`IMU_GYRO_Z_SCALE`（倍率 0.9〜1.1、既定 1）。STM32 の `imu.c` がバイアスを引いた後の z の角速度に掛ける（`yaw_rate`・TC/TV の基準・姿勢推定のすべてに効く）。値は `[control]` に手で置く（既定 1 = 補正なし） |
-| `0x0101`・`0x0102` | **制動の減速度・MD のトルクの遅れ** | f32 | ★v0.29。`BRAKE_DECEL_M_S2`（[m/s²]、0.5〜10）・`MD_TORQUE_LAG_S`（[s]、0〜0.1）。STM32 の自動停止の停止距離（§5.9）と、走行中に ARM が外れたときに制動を続ける上限（最高速 5m/s ÷ 減速度 × 1.5）に使う。**ファームは値を持たない**（仮置きは範囲の下限で、上位が送るまで ARM しない）。`[control]` には書かず、`[limits] abs_brake_decel_m_s2`（校正 8）と `[control.plant] md_delay_s + md_tau_s`（校正 6）から io_node が作って送る（`raspi/core/control_params.py` の `DERIVED`） |
+| `0x0101`・`0x0102` | **制動の減速度・MD のトルクの遅れ** | f32 | ★v0.29。`BRAKE_DECEL_M_S2`（[m/s²]、0.5〜10）・`MD_TORQUE_LAG_S`（[s]、0〜0.1）。STM32 の自動停止の停止距離（§5.9）と、走行中に ARM が外れたときに制動を続ける上限（最高速 5m/s ÷ 減速度 × 1.5）に使う。**ファームは値を持たない**（仮置きは範囲の下限で、上位が送るまで ARM しない）。`[control]` には書かず、`[limits] abs_brake_decel_m_s2`（校正 9）と `[control.plant] md_delay_s + md_tau_s`（校正 6）から io_node が作って送る（`raspi/core/control_params.py` の `DERIVED`） |
 | ~~`0x0041`~~ | — | — | **廃止**（`0x0040` の enum に統合） |
 
 #### 5.8.1 なぜ `MAX_SPEED`/`MAX_ACCEL`/`MAX_STEER` を Pi から送らないか

@@ -565,11 +565,11 @@ typedef struct {
   `TELEMETRY.flags` **bit0-1** で返る
 - `steer_rate_limit` は角度制御ループの追従限界を超える指令によるオーバーシュート・発振を防ぐ
 - **`brake` 中は車速 PI を迂回し、`brake_torque` を直接掛ける**。
-  `brake_torque = 0` は「制動 0」ではなく「未指定 = 最大制動」。上限 **0.13 N·m/輪**
+  `brake_torque = 0` は「制動 0」ではなく「未指定 = 最大制動」。上限 **0.15 N·m/輪**
   （`DRIVE_MAX_BRAKE_TORQUE_NM` = `DRIVE_MAX_TORQUE_NM`。`LIMITS.max_torque_nm` で Pi へ伝える）
 - **`torque_mode` 中は車速 PI を迂回し、`target_torque` を各輪へ直接掛ける**。
   `brake` と同時に立っていたら `brake` を優先すること。`target_torque` の `0` は
-  「未指定」ではなく素直に「駆動トルク 0」。上限は **0.13 N·m**（`DRIVE_MAX_TORQUE_NM`。Pi 側でもクランプ済み。
+  「未指定」ではなく素直に「駆動トルク 0」。上限は **0.15 N·m**（`DRIVE_MAX_TORQUE_NM`。Pi 側でもクランプ済み。
   モータ物理上限 0.1557 N·m 未満）。**TC/TV との関係は未確定**
   （そのまま通すか、空転抑制のため減衰させるか。`uart_protocol.md` §14 #8）
 - **`auto_stop` 中は動的停止距離 `d_stop = v・t_delay + v²/(2・a_max) + margin` を使う**
@@ -1349,7 +1349,7 @@ Pi 側が計算する:
 - [ ] パラメータのデフォルト値が安全側である
 - [ ] **`torque_mode`（bit6）が立っている間、車速 PI を迂回し `target_torque` を直接掛けている**
 - [ ] `brake` と `torque_mode` が同時に立っていたら **`brake` を優先**している
-- [ ] `target_torque` を **±0.13 N·m（`DRIVE_MAX_TORQUE_NM`）でクランプ**している（Pi 側のクランプに頼っていない）
+- [ ] `target_torque` を **±0.15 N·m（`DRIVE_MAX_TORQUE_NM`）でクランプ**している（Pi 側のクランプに頼っていない）
 - [ ] **`auto_stop`（bit7）が立っている間、進行方向の `d_stop = v・t_delay + v²/(2・a_max) +
       margin` 未満で最大制動している**
 - [ ] `auto_stop` の進行方向判定に `torque_mode` の有無を反映している（速度 or トルクの符号）

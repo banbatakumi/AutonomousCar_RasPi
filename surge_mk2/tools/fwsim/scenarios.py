@@ -23,6 +23,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from raspi.core.control_params import DEFAULT_TOML
+from raspi.msgs.convert import MAX_TARGET_TORQUE_NM
 
 from .fw import (FLAG_ABS, FLAG_LAUNCH, FLAG_LIFT, FLAG_TC, FLAG_TV, IN, MODE_BRAKE, MODE_DISARM,
                  MODE_SPEED, MODE_SPEED_LAUNCH, MODE_TORQUE, OUT, Firmware, HostConfig)
@@ -32,7 +33,7 @@ __all__ = ["Seg", "Scenario", "Result", "run", "oracle", "SLIP", "ALL", "DT"]
 
 DT = 0.0005          # ファームの制御周期
 SUBSTEPS = 20
-MAX_TORQUE_NM = 0.13
+MAX_TORQUE_NM = MAX_TARGET_TORQUE_NM
 
 
 @dataclass(frozen=True)
