@@ -56,6 +56,8 @@ class CalibWheel(Planner):
         #: 惰行をやめる周速 [m/s]
         "coast_min_m_s": 0.15,
         "brake_nm": 0.01,
+        #: 制動で周速が止まりきらなくても次へ進む上限 [s]（周速の雑音・静止摩擦で止まりきらない場合に固まらない）
+        "brake_s": 2.0,
         #: 前輪がこれ以上動いたら中止 [m]（台に載っていない）
         "front_move_m": 0.02,
     }
@@ -129,7 +131,7 @@ class CalibWheel(Planner):
             self._stage, self._stage_t, self._too_fast = "coast", 0.0, False
         if self._stage == "coast" and (self._stage_t >= s["coast_s"] or self._rim < s["coast_min_m_s"]):
             self._stage, self._stage_t = "brake", 0.0
-        if self._stage == "brake" and self._rim < 0.03:
+        if self._stage == "brake" and (self._rim < 0.03 or self._stage_t >= s["brake_s"]):
             self._stage, self._stage_t = "rest", 0.0
         if self._stage == "rest" and self._stage_t >= s["rest_s"]:
             self._i += 1

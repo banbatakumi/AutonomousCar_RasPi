@@ -58,6 +58,10 @@ _MIN_SPEED = 0.12
 _MIN_REVS_SEG = 1.5
 _MIN_REVS_TOTAL = 10.0
 _POLY_DEG = 3
+#: STM32 が受け付ける範囲（ファーム `control_params.h`。外れると丸められ、ARM できない）
+LO_MAX = 0.2
+HI_MIN, HI_MAX = 0.8, 1.0
+H_MAX = 0.1
 #: 合否の目安 [°]
 _RESID_WARN_DEG = 0.5
 #: STM32 が直せない 3・4 次の高調波がこれを超えたら知らせる [°]
@@ -156,7 +160,7 @@ class WheelFit:
 
 
 def fit_wheel(t: np.ndarray, u: np.ndarray, segs: list[tuple[int, int]], side: str = "",
-              lo: float | None = None) -> WheelFit:
+              lo: float | None = None, _lo_retry: int = 0) -> WheelFit:
     """生の読み `u`（0〜1）の惰行の区間 `segs` から出力の範囲と周期誤差を当てはめる。"""
     if lo is None:
         allu = np.concatenate([u[a:b] for a, b in segs])
@@ -213,8 +217,15 @@ def fit_wheel(t: np.ndarray, u: np.ndarray, segs: list[tuple[int, int]], side: s
         X = np.column_stack([np.sin(order * th), np.cos(order * th)])
         c, *_ = np.linalg.lstsq(X, r, rcond=None)
         higher = max(higher, math.degrees(float(np.hypot(*c))))
-    return WheelFit(side, lo, float(span), np.array(h), np.array(se[1:5]), math.degrees(sigma), len(r), revs,
-                    float(se[0]), higher)
+    fit = WheelFit(side, lo, float(span), np.array(h), np.array(se[1:5]), math.degrees(sigma), len(r), revs,
+                   float(se[0]), higher)
+    # STM32 の hi は 0.8〜1.0（`control_params.h`）。ADC は 1.0 で飽和するので hi > 1 はあり得ず、外れると ARM が
+    # 「範囲外で丸められた」で止まる。lo は読みの最小値に置いたので、惰行が下端まで届かないと真の lo より大きく、
+    # lo + 幅 が 1.0 を超える（実機で 1.000655）。lo は角度の原点でしかない（ずらすと周期誤差の位相が回るだけ）ので、
+    # hi = 1.0 になる lo へ下げて当てはめ直す
+    if fit.hi > HI_MAX and _lo_retry < 2 and HI_MAX - fit.span >= 0.0:
+        return fit_wheel(t, u, segs, side, lo=HI_MAX - fit.span, _lo_retry=_lo_retry + 1)
+    return fit
 
 
 def post_cal_ripple_deg(log: Log, side_i: int, segs: list[tuple[int, int]], t: np.ndarray,
@@ -283,6 +294,9 @@ def analyze(log: Log) -> Result:
         res.info(f"{name}: 周期誤差 ±{fit.amp_deg:.2f}°（係数の標準誤差 {se_deg:.3f}°）、出力の範囲 "
                  f"{fit.lo:.4f}〜{fit.hi:.4f}（幅の標準誤差 {fit.span_se:.4f}）、惰行 {len(segs)} 区間・"
                  f"{fit.revs:.0f} 回転・{fit.n_points} 点")
+        if fit.lo > LO_MAX or np.max(np.abs(fit.h)) > H_MAX:
+            res.fail(f"{name}: 求めた値が STM32 の受け付ける範囲（lo ≤ {LO_MAX}、|周期誤差の係数| ≤ {H_MAX}rad）を外れる。"
+                     "適用すると ARM できない。エンコーダの取り付け・磁石を確かめる")
         if fit.resid_deg > _RESID_WARN_DEG:
             res.warn(f"{name}: 当てはめの残差 {fit.resid_deg:.2f}° が大きい（目安 {_RESID_WARN_DEG}° 以下）。"
                      "角度の関数でない誤差（振動・グリッチ）が多い")

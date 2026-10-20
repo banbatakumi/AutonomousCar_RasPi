@@ -51,6 +51,20 @@ class TestEncoderCalibration(unittest.TestCase):
             self.assertAlmostEqual(res.values[f"control.enc_{side}_hi"] - res.values[f"control.enc_{side}_lo"],
                                    true[1] - true[0], delta=3e-4)
 
+    def test_values_stay_in_firmware_range(self):
+        """惰行が下端まで届かず、読みの最小値（= lo の置き場所）が真の lo より大きくても、求めた hi は
+        STM32 の範囲（0.8〜1.0）に収まる。外れると ARM できない（実機で hi = 1.000655 が「範囲外で丸められた」になった）。"""
+        base = simcar.Car()
+        car = replace(base, enc_right=(0.0035, 0.9999) + tuple(base.enc_right[2:]))
+        res = self._run(car)
+        for side in ("left", "right"):
+            lo, hi = self._cal(res, side)[:2]
+            self.assertLessEqual(lo, encoder.LO_MAX)
+            self.assertTrue(encoder.HI_MIN <= hi <= encoder.HI_MAX, f"{side}: hi={hi}")
+            self.assertTrue(all(abs(h) <= encoder.H_MAX for h in self._cal(res, side)[2:]))
+        err = corrected_error_deg(car.enc_right, self._cal(res, "right"))
+        self.assertLess(err, 0.05, f"right: 直した角度の誤差 {err:.3f}°")
+
     def test_no_ripple_gives_identity(self):
         car = replace(simcar.Car(), enc_left=(0.0, 1.0, 0, 0, 0, 0), enc_right=(0.0, 1.0, 0, 0, 0, 0))
         res = self._run(car)

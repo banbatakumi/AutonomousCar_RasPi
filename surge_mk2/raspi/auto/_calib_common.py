@@ -282,6 +282,8 @@ class StraightTest(Planner):
     stop_decel_m_s2 = 2.0
     _STOPPED_M_S = 0.02
     _STOP_TIMEOUT_S = 3.0
+    #: 停止の待ちが尽きたとき、これを超える速度で動いていれば中止する [m/s]
+    _STILL_MOVING_M_S = 0.1
 
     def __init__(self) -> None:
         self.settings = dict(getattr(self, "SETTINGS", {}))
@@ -418,8 +420,13 @@ class StraightTest(Planner):
                 st.reason = f"{step.note or step.label}（{'前進' if forward else '後退'} {self.leg_title(self._leg)}）"
                 return st
         if self._stage == "stop":
-            if v <= self._STOPPED_M_S or self._stage_t >= self._STOP_TIMEOUT_S:
+            if v <= self._STOPPED_M_S:
                 self._stage, self._stage_t = "hold", 0.0
+            elif self._stage_t >= self._STOP_TIMEOUT_S:
+                if v > self._STILL_MOVING_M_S:
+                    # 止まらないまま静止（ジャイロのバイアス）や次の向きの片道へ進まない
+                    return abort_state(st, f"制動しても止まらない（{vs.speed:+.2f}m/s）", steer)
+                self._stage, self._stage_t = "hold", 0.0     # ごくゆっくりの這い（エンコーダの分解能）は止まったと見なす
             else:
                 st.brake = True
                 st.brake_torque = self.stop_torque_nm
