@@ -140,5 +140,30 @@ class TestJobRunnerPrefixLabels(unittest.TestCase):
             self.assertTrue(all(not t.startswith("[ラベル]") for t in matching))
 
 
+class TestDrainSurvivesCallbackErrors(unittest.TestCase):
+    def test_exception_in_a_callback_does_not_stop_the_drain(self):
+        """GUI の更新が例外を投げても drain を抜けさせない（抜けると `root.after` が再登録されず
+        ログもジョブ一覧も二度と更新されない）。後ろのイベントまで処理される。"""
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            runner = JobRunner(Path(d), allow_concurrent=False)
+            done: list[int] = []
+            runner.start("job", [sys.executable, "-c", "print('hello')"], "テスト", on_done=done.append)
+            seen: list[str] = []
+
+            def on_log(text: str) -> None:
+                seen.append(text)
+                raise RuntimeError("boom")
+
+            def finished() -> bool:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    runner.drain(on_log)       # 例外を投げずに戻ること
+                return bool(done)
+
+            self.assertTrue(_wait_for(finished))
+            self.assertTrue(any("hello" in t for t in seen))
+
+
 if __name__ == "__main__":
     unittest.main()

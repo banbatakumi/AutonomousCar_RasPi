@@ -14,6 +14,7 @@ from __future__ import annotations
 import queue
 import subprocess
 import threading
+import traceback
 from pathlib import Path
 from typing import Callable
 
@@ -118,23 +119,31 @@ class JobRunner:
         """`root.after(100, ...)` から毎回呼ぶ。queueが空になるまで処理し、
         `on_log(text)` でログ欄へ、`start()`で登録した `on_line`/`on_done` を
         各ジョブへ配る。"done" イベントでは完了メッセージを自動的に `on_log` 経由で流す。"""
+        def call(fn, *args) -> None:
+            # コールバック（GUI の更新）の例外で drain を抜けさせない。呼び出し側は drain の後に
+            # `root.after` を登録し直すので、ここで抜けると以後ログもジョブ一覧も更新されなくなる
+            try:
+                fn(*args)
+            except Exception:                       # noqa: BLE001
+                traceback.print_exc()
+
         try:
             while True:
                 kind, job_key, payload = self.log_queue.get_nowait()
                 if kind == "log":
-                    on_log(payload)
+                    call(on_log, payload)
                     cb = self._on_line_cbs.get(job_key)
                     if cb is not None:
-                        cb(payload)
+                        call(cb, payload)
                 elif kind == "done":
                     code = payload
                     label = self._labels.pop(job_key, job_key)
                     self._procs.pop(job_key, None)
                     self._on_line_cbs.pop(job_key, None)
                     ok = code == 0
-                    on_log(f"\n[{label}] {'完了' if ok else f'終了コード {code}'}\n")
+                    call(on_log, f"\n[{label}] {'完了' if ok else f'終了コード {code}'}\n")
                     done_cb = self._on_done_cbs.pop(job_key, None)
                     if done_cb is not None:
-                        done_cb(code)
+                        call(done_cb, code)
         except queue.Empty:
             pass
