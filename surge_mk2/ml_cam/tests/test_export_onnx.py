@@ -45,6 +45,39 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["resize"], "area")
             self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
 
+    def _ckpt_with_train_config(self, d, **cfg):
+        ckpt_path = Path(d) / "best.pt"
+        torch.save(DrivableSegModel(pretrained=False).state_dict(), ckpt_path)
+        (Path(d) / "train_config.json").write_text(json.dumps(cfg))
+        return ckpt_path
+
+    def test_size_defaults_to_the_trained_size(self):
+        with tempfile.TemporaryDirectory() as d:
+            ckpt = self._ckpt_with_train_config(d, input_size=[64, 48], preproc_version=PREPROC_VERSION)
+            out = Path(d) / "m.onnx"
+            self.assertEqual(export(ckpt, out), (64, 48))
+            self.assertEqual(json.loads(out.with_suffix(".json").read_text())["input_size"], [64, 48])
+
+    def test_size_differing_from_the_trained_size_is_rejected(self):
+        """学習 64x48 を 128x96 で書き出すと、変換の突き合わせでは見つからず精度だけが落ちる。"""
+        with tempfile.TemporaryDirectory() as d:
+            ckpt = self._ckpt_with_train_config(d, input_size=[64, 48])
+            with self.assertRaises(ValueError):
+                export(ckpt, Path(d) / "m.onnx", (128, 96))
+
+    def test_missing_size_everywhere_is_an_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            ckpt = self._ckpt_with_train_config(d)
+            with self.assertRaises(ValueError):
+                export(ckpt, Path(d) / "m.onnx")
+
+    def test_stale_preproc_version_is_rejected(self):
+        """旧い前処理で学習したモデルに今の版を書くと、ノードの照合をすり抜ける。"""
+        with tempfile.TemporaryDirectory() as d:
+            ckpt = self._ckpt_with_train_config(d, input_size=[64, 48], preproc_version=PREPROC_VERSION - 1)
+            with self.assertRaises(ValueError):
+                export(ckpt, Path(d) / "m.onnx")
+
     def test_note_is_embedded_in_the_exported_json(self):
         """`ml_cam/app.py`の備考欄→`note.txt`→エクスポート、という経路で
         `<名前>.json`に書き込まれる自由記述の備考（`ml_lidar/export_onnx_rl.py`

@@ -134,9 +134,12 @@ def build_train_cmd(python: str, frames_dir: str, out_dir: str, epochs: int,
     return cmd
 
 
-def build_export_cmd(python: str, checkpoint: str, out_path: str, size: str) -> list[str]:
-    return [python, str(ML_CAM_DIR / "export_onnx.py"), "--checkpoint", checkpoint,
-           "--size", size, "--out", out_path]
+def build_export_cmd(python: str, checkpoint: str, out_path: str, size: str = "") -> list[str]:
+    """`size` を空にすると `--size` を渡さず、学習時の値（`train_config.json`）を使わせる。"""
+    cmd = [python, str(ML_CAM_DIR / "export_onnx.py"), "--checkpoint", checkpoint, "--out", out_path]
+    if size:
+        cmd += ["--size", size]
+    return cmd
 
 
 def build_preview_cmd(python: str, frames_dir: str, model_path: str) -> list[str]:
@@ -532,11 +535,10 @@ class App:
         ttk.Label(frame, textvariable=self.checkpoint_path_var, foreground="gray").grid(
             row=1, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
-        size_var = tk.StringVar(value="224x224")
-        ttk.Label(frame, text="入力解像度:").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=size_var, width=10).grid(row=2, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="③学習タブと同じ値にしてください", foreground="gray").grid(
-            row=3, column=0, columnspan=3, sticky="w")
+        # 入力解像度は学習時の値（train_config.json）を自動で使う。手入力にすると学習と食い違えても
+        # 変換の突き合わせでは見つからず、精度だけが静かに落ちる
+        ttk.Label(frame, text="入力解像度は学習時の値を自動で使います", foreground="gray").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         ttk.Label(frame, text="出力先:").grid(row=4, column=0, sticky="w", pady=(8, 0))
         ttk.Label(frame, textvariable=self.export_out_path_var, foreground="gray").grid(
@@ -551,8 +553,7 @@ class App:
             if not confirm_overwrite(out_path, rel):
                 return
             self._last_exported_model_name = name
-            cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path),
-                                   size_var.get())
+            cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path))
             self._run("export", cmd, "エクスポート")
 
         ttk.Button(frame, text="エクスポート実行", command=run).grid(row=5, column=0, sticky="w", pady=10)

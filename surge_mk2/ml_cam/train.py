@@ -20,12 +20,14 @@ import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 from dataset import DrivableDataset, list_labeled_pairs  # noqa: E402
 from model import DrivableSegModel  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 
 __all__ = ["iou_score", "split_pairs", "split_pairs_blocks", "train_one_epoch", "evaluate",
            "pick_device"]
@@ -210,7 +212,8 @@ def main() -> int:
         best_iou = float("nan")
     torch.save(model.state_dict(), args.out / "last.pt")
     (args.out / "train_config.json").write_text(json.dumps({
-        "input_size": [w, h], "epochs": args.epochs, "best_val_iou": best_iou,
+        "input_size": [w, h], "preproc_version": PREPROC_VERSION,
+        "epochs": args.epochs, "best_val_iou": best_iou,
         "n_train": len(train_pairs), "n_val": len(val_pairs),
     }, indent=2))
     print(f"# 完了。最良 val_iou={best_iou:.3f} → {args.out}/best.pt")

@@ -1,7 +1,7 @@
 """ml_cam/export_onnx.py — 学習済みモデルを ONNX にエクスポートし、Pi側の前処理契約を固定する。
 
     python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt \\
-        --size 224x224 --out ml_cam/runs/latest/model.onnx
+        --out ml_cam/runs/latest/model.onnx
 
 **前処理定数（入力解像度・平均/分散・閾値）を `model.json` に書き出す。**
 `raspi/nodes/cam_perception_node.py` の `SegmentationModel` がこれと違う値で
@@ -39,15 +39,48 @@ STD = 255.0
 THRESHOLD = 0.5
 
 
-def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *, note: str = "") -> None:
+def read_train_config(run_dir: Path) -> dict:
+    """`run_dir/train_config.json`。無い・読めないなら空の dict。"""
+    cfg_path = run_dir / "train_config.json"
+    try:
+        return json.loads(cfg_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None, *,
+           note: str = "") -> tuple[int, int]:
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に
     前処理契約を書く。
+
+    `size` を省くと `train_config.json`（学習時の入力解像度）を使う。**学習時と違う値を渡すと
+    例外**にする——ONNX の変換は同じサイズどうしで突き合わせるので、解像度の食い違いは
+    `verify_parity` では見つからず、精度だけが静かに落ちる。学習時の前処理の版
+    （`preproc_version`）が今と違う場合も例外にする。
+    :return: 実際に使った入力解像度 `(width, height)`
 
     :param note: `<out_path>.json`に同梱する自由記述の備考（どんな変更をしたか・
         どのコースか等）。GUIのモデル選択に表示される（`ml_lidar/export_onnx_rl.py`
         の`note`と対称。`--checkpoint`と同じディレクトリの
         `note.txt`から`main()`が拾う）。
     """
+    train_cfg = read_train_config(checkpoint.parent)
+    trained = train_cfg.get("input_size")
+    if size is None:
+        if trained is None:
+            raise ValueError(f"{checkpoint.parent}/train_config.json に input_size が無い。"
+                             "--size で指定してください")
+        size = (int(trained[0]), int(trained[1]))
+    elif trained is not None and tuple(int(v) for v in trained) != tuple(size):
+        raise ValueError(f"--size {size[0]}x{size[1]} が学習時の入力解像度 "
+                         f"{int(trained[0])}x{int(trained[1])} と違う（精度が静かに落ちる）")
+    trained_ver = train_cfg.get("preproc_version")
+    if trained_ver is not None and trained_ver != PREPROC_VERSION:
+        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 {PREPROC_VERSION} と違う。"
+                         "契約に今の版を書くと照合をすり抜けるので、学習し直してください")
+    if trained_ver is None:
+        print(f"!! {checkpoint.parent}/train_config.json に preproc_version が無い"
+              f"（古い run）。今の版 {PREPROC_VERSION} を契約に書く", file=sys.stderr)
     w, h = size
     model = DrivableSegModel(pretrained=False)
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
@@ -83,6 +116,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int], *, note: str
         "note": note,
     }
     out_path.with_suffix(".json").write_text(json.dumps(cfg, indent=2))
+    return size
 
 
 def verify_parity(onnx_path: Path, model, size: tuple[int, int], *,
@@ -112,11 +146,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, required=True)
-    ap.add_argument("--size", default="224x224")
+    ap.add_argument("--size", default=None,
+                    help="入力解像度 WxH。省くと学習時の値（train_config.json）。違う値は拒否")
     ap.add_argument("--out", type=Path, default=Path("ml_cam/runs/latest/model.onnx"))
     args = ap.parse_args()
 
-    w, h = (int(v) for v in args.size.lower().split("x"))
+    size = tuple(int(v) for v in args.size.lower().split("x")) if args.size else None
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     # ★--checkpointと同じディレクトリのnote.txt（ml_cam/app.pyの備考欄が書く）があれば
@@ -124,7 +159,7 @@ def main() -> int:
     note_path = args.checkpoint.parent / "note.txt"
     note = note_path.read_text(encoding="utf-8") if note_path.exists() else ""
 
-    export(args.checkpoint, args.out, (w, h), note=note)
+    w, h = export(args.checkpoint, args.out, size, note=note)
 
     model = DrivableSegModel(pretrained=False)
     model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"))

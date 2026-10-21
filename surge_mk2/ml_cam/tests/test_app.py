@@ -124,6 +124,8 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--checkpoint") + 1], "best.pt")
         self.assertEqual(cmd[cmd.index("--out") + 1], "model.onnx")
         self.assertEqual(cmd[cmd.index("--size") + 1], "224x224")
+        # 省くと学習時の解像度を使わせる（食い違いを手入力で作らせない）
+        self.assertNotIn("--size", build_export_cmd("python3", "best.pt", "model.onnx"))
 
     def test_preview_cmd(self):
         cmd = build_preview_cmd("python3", "frames", "model.onnx")

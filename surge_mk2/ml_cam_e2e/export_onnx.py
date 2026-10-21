@@ -71,6 +71,11 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
             raise ValueError(f"{checkpoint.parent}/train_config.json に input_size が無い。"
                              f"--size で指定してください")
         size = (int(cfg["input_size"][0]), int(cfg["input_size"][1]))
+    trained_ver = cfg.get("preproc_version")
+    if trained_ver is not None and trained_ver != PREPROC_VERSION:
+        # 契約に今の版を書くとノード側の照合（cam_e2e_node）をすり抜けてしまう
+        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 {PREPROC_VERSION} と違う。"
+                         "学習し直してください")
     if max_steer is None:
         max_steer = cfg.get("max_steer")
     if speed_ref is None:
