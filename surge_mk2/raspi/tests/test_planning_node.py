@@ -614,6 +614,47 @@ class TestE2EModelRouting(unittest.TestCase):
         m.assert_called_once_with("alpha")
 
 
+class TestStandstillSteer(unittest.TestCase):
+    """停車が続いたら舵を中立へ戻す（据え切りでステア MD が過熱する）。以前は `park_to_point` だけだった。"""
+
+    def _node(self, mode="ftg", speed=0.0, stopped=True):
+        vs = VehicleState(speed=speed, stopped=stopped)
+        node = PlanningNode(pub=FakePub(), sub=FakeSub({TOPIC_VEHICLE_STATE: vs}), mode=mode)
+        node.ctrl = AutoCtrl(mode=mode, engaged=True)
+        return node
+
+    def _run(self, node, cmd, seconds):
+        out, t = cmd, 0
+        for _ in range(int(seconds * 50)):
+            t += 20_000_000
+            out = node._relax_standstill_steer(cmd, t)
+        return out
+
+    def test_full_lock_is_released_after_standing_still(self):
+        from raspi.msgs import DriveCmd
+        node = self._node()
+        cmd = DriveCmd(mode=2, arm=True, brake=True, target_steer=0.4)
+        self.assertEqual(self._run(node, cmd, 1.0).target_steer, 0.4)     # まだ保つ
+        self.assertEqual(self._run(node, cmd, 3.0).target_steer, 0.0)     # 2 秒を超えたら中立
+
+    def test_moving_or_starting_is_untouched(self):
+        from raspi.msgs import DriveCmd
+        node = self._node(speed=1.0, stopped=False)
+        cmd = DriveCmd(mode=2, arm=True, brake=True, target_steer=0.4)
+        self.assertEqual(self._run(node, cmd, 5.0).target_steer, 0.4)
+        node = self._node()
+        go = DriveCmd(mode=2, arm=True, target_speed=1.0, target_steer=0.4)   # 発進の指令
+        self.assertEqual(self._run(node, go, 5.0).target_steer, 0.4)
+
+    def test_sysid_planner_is_exempt(self):
+        from raspi.auto.registry import PLANNERS
+        from raspi.msgs import DriveCmd
+        sysid = next(k for k, v in PLANNERS.items() if v.category == "sysid")
+        node = self._node(mode=sysid)
+        cmd = DriveCmd(mode=2, arm=True, brake=True, target_steer=0.4)
+        self.assertEqual(self._run(node, cmd, 5.0).target_steer, 0.4)
+
+
 class TestPollTimeout(unittest.TestCase):
     """poll は次の定期送信の期限まで待つ（固定2msで500Hz起床していたのを直した、2026-10-04）。"""
 

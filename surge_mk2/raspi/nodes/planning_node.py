@@ -58,7 +58,7 @@ import msgspec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.base import CMD_HZ  # noqa: E402  `auto/cmd` の発行レート
+from raspi.auto.base import CMD_HZ, StandstillSteer  # noqa: E402  `auto/cmd` の発行レート
 from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
 from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
@@ -150,6 +150,10 @@ class PlanningNode:
         #: 最後に `auto/cmd` へ出した舵 [rad]。**「分からない」（ready=False）の制動はこの舵を保つ**
         #: （`_cmd_from`）。engage・解除・モード変更で 0 に戻す
         self._last_steer = 0.0
+        #: 停車の長さ（据え切りでステア MD を過熱させない）。planner が自前の `StandstillSteer` を
+        #: 持たないときだけ使う（`_relax_standstill_steer`）
+        self._still = StandstillSteer()
+        self._still_t_ns = 0
         #: `auto/ctrl` の要求（地図の読み込み・経路の保存など）で planner が投げた例外。次の要求が
         #: 通るかモードが変わるまで `auto/state` の理由に出す（`_ask`）
         self._ctrl_error = ""
@@ -515,6 +519,28 @@ class PlanningNode:
                         fw_overrides=st.fw_overrides,
                         source=f"planning:{self.ctrl.mode}")
 
+    def _relax_standstill_steer(self, cmd: DriveCmd, now_ns: int) -> DriveCmd:
+        """停車が `StandstillSteer.HOLD_S` 続いたら舵を中立へ戻す（据え切りでステア MD が過熱する。
+        `docs/system_overview.md` §2）。
+
+        `park_to_point` は切り返しの途中を知っているので自前の `StandstillSteer` を持つ。それ以外の
+        走行用 planner（障害物に当てて止まった・局所化を失って制動中、など）は、舵を最後の値のまま
+        保つ（`_cmd_from`）ので、ここで一括して戻す。**システム同定の planner は対象外**（止まった
+        まま舵を掛ける試験がある）。発進の指令（制動でも目標速度 0 でもない）は触らない。
+        """
+        if (not self.ctrl.engaged or getattr(self.planner, "category", "drive") != "drive"
+                or hasattr(self.planner, "_still")):
+            self._still.reset()
+            self._still_t_ns = 0
+            return cmd
+        dt = 0.0 if self._still_t_ns == 0 else min(0.2, max(0.0, (now_ns - self._still_t_ns) / 1e9))
+        self._still_t_ns = now_ns
+        self._still.observe(self.sub.latest.get(TOPIC_VEHICLE_STATE), dt)
+        holding = cmd.brake or abs(cmd.target_speed) < 1e-3
+        if self._still.relaxed and holding and cmd.target_steer != 0.0:
+            return msgspec.structs.replace(cmd, target_steer=0.0)
+        return cmd
+
     def _publish_map(self) -> None:
         """地図と経路を `auto/map` へ。**`map_seq` が変わったときだけ。**
 
@@ -593,7 +619,7 @@ class PlanningNode:
                 if now - next_cmd > cmd_period * 5:
                     next_cmd = now + cmd_period      # 大きく遅れたら追いつきをやめる
                 st = self._current(now)
-                self.pub.send(TOPIC_AUTO_CMD, self._cmd_from(st))
+                self.pub.send(TOPIC_AUTO_CMD, self._relax_standstill_steer(self._cmd_from(st), now))
                 if now >= next_state:
                     next_state = now + NS // STATE_HZ
                     self.pub.send(TOPIC_AUTO_STATE, st)
