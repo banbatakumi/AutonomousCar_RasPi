@@ -294,8 +294,13 @@ def analyze(log: Log) -> Result:
         res.info(f"{name}: 周期誤差 ±{fit.amp_deg:.2f}°（係数の標準誤差 {se_deg:.3f}°）、出力の範囲 "
                  f"{fit.lo:.4f}〜{fit.hi:.4f}（幅の標準誤差 {fit.span_se:.4f}）、惰行 {len(segs)} 区間・"
                  f"{fit.revs:.0f} 回転・{fit.n_points} 点")
-        if fit.lo > LO_MAX or np.max(np.abs(fit.h)) > H_MAX:
-            res.fail(f"{name}: 求めた値が STM32 の受け付ける範囲（lo ≤ {LO_MAX}、|周期誤差の係数| ≤ {H_MAX}rad）を外れる。"
+        # `hi` も見る（外れると STM32 が丸め、`control_params_status` が mismatch になって ARM が止まる）。
+        # 上側は惰行が下端まで届かず `hi = lo + 幅` が 1.0 を超えるのを当てはめ直しで 1.0 に収めてあるので、
+        # 丸めの誤差ぶんだけ許す
+        if (fit.lo > LO_MAX or np.max(np.abs(fit.h)) > H_MAX
+                or not HI_MIN <= fit.hi <= HI_MAX + 1e-6):
+            res.fail(f"{name}: 求めた値が STM32 の受け付ける範囲（lo ≤ {LO_MAX}、{HI_MIN} ≤ hi ≤ {HI_MAX}、"
+                     f"|周期誤差の係数| ≤ {H_MAX}rad）を外れる。"
                      "適用すると ARM できない。エンコーダの取り付け・磁石を確かめる")
         if fit.resid_deg > _RESID_WARN_DEG:
             res.warn(f"{name}: 当てはめの残差 {fit.resid_deg:.2f}° が大きい（目安 {_RESID_WARN_DEG}° 以下）。"
