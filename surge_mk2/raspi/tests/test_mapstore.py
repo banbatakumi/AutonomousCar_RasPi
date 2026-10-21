@@ -187,12 +187,37 @@ class TestMapstore(unittest.TestCase):
             self._save("foo")
         self.assertEqual(mapstore.load_routes("foo"), '{"groups": {}}')
 
-    def test_non_finite_line_is_rejected(self):
-        self._save("nan", raceline_xy=np.array([[0.0, 0.0], [np.nan, 0.0], [1.0, 1.0]]),
-                   raceline_v=np.ones(3))
+    def test_non_finite_map_is_rejected_at_save(self):
+        """読み込みが弾く地図を保存の時点で断る（一覧に居座って GUI から消せなくなる）。"""
+        with self.assertRaises(ValueError):
+            self._save("nan", raceline_xy=np.array([[0.0, 0.0], [np.nan, 0.0], [1.0, 1.0]]),
+                       raceline_v=np.ones(3))
+        with self.assertRaises(ValueError):
+            self._save("zero_res", resolution=0.0)
+        with self.assertRaises(ValueError):
+            self._save("nan_res", resolution=float("nan"))
+        self.assertEqual(mapstore.list_maps(), [])
         self.assertIsNone(mapstore.load_map("nan"))
-        self._save("zero_res", resolution=0.0)
-        self.assertIsNone(mapstore.load_map("zero_res"))
+
+    def test_non_finite_upload_is_rejected(self):
+        import io
+        for kw in ({"resolution": 0.0}, {"raceline_xy": np.array([[np.nan, 0.0]]), "raceline_v": np.ones(1)}):
+            args = dict(resolution=0.025, origin_x=0.0, origin_y=0.0, trinary=np.zeros((4, 4), np.uint8),
+                        centerline_xy=np.zeros((0, 2)), raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+            args.update(kw)
+            buf = io.BytesIO()
+            np.savez_compressed(buf, **args)
+            self.assertIsNone(mapstore.validate_upload(buf.getvalue()), kw)
+
+    def test_oversized_upload_is_rejected_before_inflating(self):
+        """圧縮後は小さくても展開後が巨大な npz（展開爆弾）は、展開する前に断る。"""
+        import io
+        buf = io.BytesIO()
+        side = int(mapstore.MAX_MAP_CELLS ** 0.5) + 1
+        np.savez_compressed(buf, resolution=0.025, origin_x=0.0, origin_y=0.0,
+                            trinary=np.zeros((side, side), np.uint8), centerline_xy=np.zeros((0, 2)),
+                            raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
+        self.assertIsNone(mapstore.validate_upload(buf.getvalue()))
 
     def test_empty_line_is_loadable(self):
         """ラインが空の地図は有効（経路を道路グラフから作り直す planner が読む）。"""

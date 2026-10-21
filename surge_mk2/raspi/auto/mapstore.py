@@ -162,7 +162,7 @@ def _write_meta(target: Path, loaded: LoadedMap) -> None:
     }
     # 途中で落ちても壊れた JSON を残さない（壊れると `list_maps` がその地図を黙って飛ばす）
     p = _meta_path(target)
-    _write_text_atomic(p, json.dumps(meta), sync=True)
+    _write_text_atomic(p, json.dumps(meta, allow_nan=False), sync=True)
 
 
 # ── 一覧 ──
@@ -215,6 +215,7 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
         raceline_xy=np.asarray(raceline_xy, dtype=np.float64).reshape(-1, 2),
         raceline_v=np.asarray(raceline_v, dtype=np.float64).reshape(-1),
         created_at=float(created_at))
+    _check_finite(loaded)       # 読み込み側が弾く地図を、保存の時点で断る（一覧に居座って消せなくなる）
 
     tmp = target.with_name(target.name + ".tmp")
     # **ファイルオブジェクトを渡す。** `np.savez_compressed(path, ...)` は
@@ -253,6 +254,40 @@ def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None,
 
 # ── 読み込み・検証 ──
 
+#: 地図の格子の上限（セル数）。実機の地図は 640×640 前後（0.025m、16m 四方）。圧縮後 32MB の
+#: アップロードでも、deflate は同じ値の繰り返しを千倍以上に縮めるので、展開後は何 GB にもなりうる
+#: （Pi が OOM で落ちる）。展開する前に配列の形から断る
+MAX_MAP_CELLS = 16_000_000
+#: 中心線・レーシングラインの点数の上限
+MAX_MAP_POINTS = 200_000
+
+
+def _check_npz_sizes(z) -> None:
+    """`np.load` した npz の各配列を**展開する前に**、`.npy` のヘッダの形だけで大きさを見る。"""
+    from numpy.lib import format as npy
+    for key, limit in (("trinary", MAX_MAP_CELLS), ("centerline_xy", 2 * MAX_MAP_POINTS),
+                       ("raceline_xy", 2 * MAX_MAP_POINTS), ("raceline_v", MAX_MAP_POINTS)):
+        with z.zip.open(key + ".npy") as f:
+            version = npy.read_magic(f)
+            read_header = npy.read_array_header_1_0 if version == (1, 0) else npy.read_array_header_2_0
+            shape = read_header(f)[0]
+        if math.prod(shape) > limit:
+            raise ValueError(f"{key} is too large: shape={shape}")
+
+
+def _check_finite(m: LoadedMap) -> None:
+    """数値として使えない中身を走行まで持ち込まない（NaN の経路は RACE に入ってから毎周期
+    例外になる）。読み込み（`_load_npz`）と保存（`save_map`）が同じ条件を共有する。
+    **点の数はここでは見ない**——ラインが空の地図（経路を道路グラフから作り直す
+    `slam2d_route` 用）は有効で、足りるかは読む側が決める"""
+    if not (math.isfinite(m.resolution) and m.resolution > 0.0
+            and math.isfinite(m.origin_x) and math.isfinite(m.origin_y)):
+        raise ValueError("resolution/origin must be finite and resolution > 0")
+    for key in ("centerline_xy", "raceline_xy", "raceline_v"):
+        if not np.isfinite(getattr(m, key)).all():
+            raise ValueError(f"{key} contains NaN/Inf")
+
+
 def _load_npz(file) -> LoadedMap:
     """`raise ValueError`: 必須キー欠落・型不正。それ以外の壊れ方は
     `np.load`/`zipfile`側の例外で、**種類は決まっていない**（圧縮データが壊れていれば `zlib.error`、
@@ -263,10 +298,11 @@ def _load_npz(file) -> LoadedMap:
         missing = _REQUIRED_KEYS - set(z.files)
         if missing:
             raise ValueError(f"missing keys: {sorted(missing)}")
+        _check_npz_sizes(z)
         trinary = np.asarray(z["trinary"])
         if trinary.ndim != 2 or trinary.dtype != np.uint8:
             raise ValueError("trinary must be a 2D uint8 array")
-        if not np.isin(trinary, (0, 1, 2)).all():
+        if trinary.size and int(trinary.max()) > 2:      # uint8 なので 0 未満は無い。一時配列も作らない
             raise ValueError("trinary must contain only 0/1/2")
         m = LoadedMap(
             resolution=float(z["resolution"]), origin_x=float(z["origin_x"]),
@@ -275,15 +311,7 @@ def _load_npz(file) -> LoadedMap:
             raceline_xy=np.asarray(z["raceline_xy"], dtype=np.float64).reshape(-1, 2),
             raceline_v=np.asarray(z["raceline_v"], dtype=np.float64).reshape(-1),
             created_at=float(z["created_at"]) if "created_at" in z.files else 0.0)
-    # 数値として使えない中身を走行まで持ち込まない（NaN の経路は RACE に入ってから毎周期
-    # 例外になる）。**点の数はここでは見ない**——ラインが空の地図（経路を道路グラフから
-    # 作り直す `slam2d_route` 用）は有効で、足りるかは読む側が決める
-    if not (math.isfinite(m.resolution) and m.resolution > 0.0
-            and math.isfinite(m.origin_x) and math.isfinite(m.origin_y)):
-        raise ValueError("resolution/origin must be finite and resolution > 0")
-    for key in ("centerline_xy", "raceline_xy", "raceline_v"):
-        if not np.isfinite(getattr(m, key)).all():
-            raise ValueError(f"{key} contains NaN/Inf")
+    _check_finite(m)
     return m
 
 
