@@ -99,6 +99,10 @@ class SlamSystem:
         u = self.frontend.update(raw, dt)
         self._advance_job(self.config.loop_steps_per_update)
         self._sync_graph()
+        # 最適化は**グラフがキーフレーム列に追いついてから**。`_add_loop` の中でやると、この周期に
+        # 増えたキーフレームがまだグラフに無く、`apply_correction_steps` が長さ不一致で落ちる
+        if 0 < self.config.optimize_every <= self._since_opt:
+            self.optimize()
         return u
 
     @property
@@ -176,8 +180,6 @@ class SlamSystem:
                                   huber=self.config.loop_huber or None)
         self.loops.append(cand)
         self._since_opt += 1
-        if 0 < self.config.optimize_every <= self._since_opt:
-            self.optimize()
 
     def _sync_graph(self) -> None:
         kfs = self.frontend.keyframes

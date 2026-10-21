@@ -184,5 +184,21 @@ class TestGraphBookkeeping(unittest.TestCase):
         self.assertGreater(len(system.frontend.keyframes), 5)
 
 
+class TestOptimizeEvery(unittest.TestCase):
+    def test_periodic_optimization_does_not_raise(self):
+        """`optimize_every > 0` で、キーフレームが増えた周期にループが確定しても落ちない
+        （以前は `poses must match keyframes`。グラフが1つ遅れていた）。"""
+        grid = OccGrid(resolution=0.025, size_m=16.0, origin=(-8.0, -8.0))
+        holder = {"twist": Twist2D(0.0, 0.0, 0.0)}
+        motion = ExternalTwistModel(lambda: holder["twist"], noise=OdometryNoise())
+        # キーフレームを密にすると、ループ確定の周期にキーフレームが増える機会が多くなる
+        cfg = PipelineConfig(frontend=FrontendConfig(max_range=8.0, kf_dist=0.01),
+                             loop_detector=LoopDetectorConfig(min_path_gap=6.0), optimize_every=1)
+        system = SlamSystem(grid, motion, cfg)
+        _drive(system, laps=2.0, gyro_bias_dps=1.0, twist_holder=holder)
+        self.assertGreater(system.optimizations, 0)
+        self.assertEqual(system._graph.size, len(system.frontend.keyframes))
+
+
 if __name__ == "__main__":
     unittest.main()
