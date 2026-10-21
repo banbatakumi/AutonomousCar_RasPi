@@ -2,7 +2,7 @@
 
 対象: `surge_mk2/`（`/Users/banbatakumi/GitHub/AutonomousCar_RasPi/surge_mk2`）
 基準コミット: `aee4e1d`「保存済み地図の学習値だけを GUI から消せるようにする」（14 ファイル, +249/-2）
-作業ツリー: `git status` はクリーン。未追跡の `docs/review_2026-10-21.md`（86KB）が 1 つあるが、本レビューの营利とは独立している（ 後述「補足」）。
+作業ツリー: `git status` はクリーン。未追跡の `docs/archive/review_2026-10-21.md`（86KB）が 1 つあるが、本レビューの营利とは独立している（ 後述「補足」）。
 
 観点: **アルゴリズムの正しさではなく「A の値を B が X として読んでいる」契約の破れ**、および**設定値が複数の定義元を持ちどれが正か決まっていない状態**に絞った。
 
@@ -90,7 +90,7 @@ fwsim 同一个 `Plant` の中で:
 - `gui/src/store/ui.ts:417-425` — `LIMITS` 受信前の仮値として `PI_MAX_SPEED_CAP` を使う
 
 **内容**
-`docs/review_2026-10-14.md` §2.7 は「最高速の上限が 3 か所にある（GUI の静的上限 3.0・io_node の `--max-speed`・LIMITS の 5.0）。3.0 より上に設定してもリロードで 3.0 に戻りうる（`ui.ts:202, 410-422, 860`）」と指摘したが、**現時点でも 4 か所**（`install_services.sh` の 3.0、io_node の既定 1.0、GUI の 3.0、firmware の 5.0）。
+`docs/archive/review_2026-10-14.md` §2.7 は「最高速の上限が 3 か所にある（GUI の静的上限 3.0・io_node の `--max-speed`・LIMITS の 5.0）。3.0 より上に設定してもリロードで 3.0 に戻りうる（`ui.ts:202, 410-422, 860`）」と指摘したが、**現時点でも 4 か所**（`install_services.sh` の 3.0、io_node の既定 1.0、GUI の 3.0、firmware の 5.0）。
 
 `gui/src/store/ui.ts:195` のコメントは「install_services.sh の `--max-speed` と一致させてある」と**逆向きの依存**を宣言している（GUI は Pi 側の設定値を知らなくてもよい）。`gui/src/store/ui.ts:417-425` を見ると、`LIMITS` が届く前は `PI_MAX_SPEED_CAP`（3.0）でクランプし、届いた時点で `ws/telemetry.ts` が `setSettings({})` して解放する設計なので、**一時的に 3.0 未満で|France تقديم不可能な状態を作り、3.0 超の保存値はリロードで巻き戻る**。
 
@@ -224,7 +224,7 @@ GUI の「走行アシスト」トグルと `config/vehicle.toml` の ON/OFF が
 - firmware `src/comm/ras_link.h:27` — `#define RAS_PROTOCOL_VERSION 0x001Du`（**手書き**）
 - firmware `src/comm/ras_link.c` — `surge_proto.h` の include が**無い**
 - `tools/fwsim/tests/test_control_logic.py:38-41` — `control_params.h` の表と `protocol.toml` の param_id の一致だけを見る
-- `docs/review_2026-10-14.md` §2.7 — 「ファームは生成物 `surge_proto.h` を使っておらず、パケット定義は手書きの複製」
+- `docs/archive/review_2026-10-14.md` §2.7 — 「ファームは生成物 `surge_proto.h` を使っておらず、パケット定義は手書きの複製」
 
 **内容**
 Pi 側の Python パーサは `protocol.toml` から生成されるが、**STM32 側のバイト配置は手書き**。README と `generate.py` の docstring が**相反する**（「唯一的定义」と「手書き」）ため、読む側はどちらが正か分からない。
@@ -335,7 +335,7 @@ planner 側の `a_lat_max` を**既定で `Vehicle.a_lat_max` から取る**（`
 - `raspi/core/timesync.py:177-195` — `offset_ns` は「往復遅延が小さいサンプルのうち、いちばん新しいもの」から取る
 - `raspi/core/timesync.py:208-235` — 回帰は 4 サンプル以上かつ 15 s スパンを満たすまで成立しない
 - `raspi/core/bus_bridge.py:81-84` — `t_pi_ns > now` なら fallback（**過去方向の跳躍は検出しない**）
-- `docs/review_2026-10-14.md` §2.3 — 「時刻の軸」
+- `docs/archive/review_2026-10-14.md` §2.3 — 「時刻の軸」
 
 `to_pi_ns` は過去方向の `offset` 跳躍（例: 遅延の非対称がPLIEDで `latest` サンプルが古い）に**上位落下しない**。`bus_bridge.py:82` の `t_pi_ns > now` チェックは**未来への跳躍だけを**弾く。過去への跳躍（例: 10 秒前のサンプルを picked up）は `t_capture` が 10 秒巻き戻ることを意味する。
 
@@ -408,7 +408,7 @@ bench は実機の 2 倍の速度で指令を出している。FF やランプ�
 - `gui/src/ws/control.ts:32-50` — `ServerMsg` に版フィールドが無い（`type` による分岐のみ）
 - `gui/src/ws/control.ts:36` — 「境界の実行時検証は `/ws/telemetry` 側の札（`MSGS_SCHEMA`）が担っている」← **誤り**（`/ws/control` には `MSGS_SCHEMA` は届かない）
 - `raspi/msgs/schema.py:65` — `schema_version()` は msgpack チャネル用
-- `docs/review_2026-10-14.md` §2.7 — 「契約に版と単位が入っていない」
+- `docs/archive/review_2026-10-14.md` §2.7 — 「契約に版と単位が入っていない」
 
 `/ws/telemetry` には版があるのに `/ws/control` にはない、という**非対称**。新機能の `has_grip`（C-4）や `map_files` の追加 field は、この非対称の Healing 側に乗る。
 
@@ -600,12 +600,12 @@ M-10・M-12 が指摘した乖離が**機械的に検出できない**理由。
 `/Users/banbatakumi/GitHub/AutonomousCar/Program/MainF446RE_V3/src/comm/ras_link.h`・`src/comm/ras_link.c`・`src/control/control_params.h`・`host/host_sim.c`
 
 **CI・文書**
-`.github/workflows/ci.yml`・`PROGRESS.md`・`docs/control_constants.md`・`docs/uart_protocol.md`・`docs/stm32_interface.md`・`docs/system_overview.md`・`docs/architecture.md`・`docs/development.md`・`docs/review_2026-10-14.md`・`docs/README.md`
+`.github/workflows/ci.yml`・`PROGRESS.md`・`docs/control_constants.md`・`docs/uart_protocol.md`・`docs/stm32_interface.md`・`docs/system_overview.md`・`docs/architecture.md`・`docs/development.md`・`docs/archive/review_2026-10-14.md`・`docs/README.md`
 
 ---
 
 ## 10. 補足：作業ツリーの未追跡ファイルについて
 
-`docs/review_2026-10-21.md`（86KB, 2026-10-21 01:23）は **`git ls-files` に無い未追跡ファイル**で、本レビューとは独立に作られた**別のレビュー（先行版）**とみられる。C-1（μ・`[limits]`/`[control.plant]` の矛盾）、H-2（`axle_model` ）、C-2（`rear_lateral_share` 欠落）、M-7/M-8（CI と fwsim テスト）で**重なっている**。同じ指摘が 2 か所に散らばっている状態なので、**1 本に統合**するのが望ましい。
+`docs/archive/review_2026-10-21.md`（86KB, 2026-10-21 01:23）は **`git ls-files` に無い未追跡ファイル**で、本レビューとは独立に作られた**別のレビュー（先行版）**とみられる。C-1（μ・`[limits]`/`[control.plant]` の矛盾）、H-2（`axle_model` ）、C-2（`rear_lateral_share` 欠落）、M-7/M-8（CI と fwsim テスト）で**重なっている**。同じ指摘が 2 か所に散らばっている状態なので、**1 本に統合**するのが望ましい。
 
 なお、本レビューで検証した範囲（`config/generate.py --check`・`raspi/proto/generate.py --check`・`config/gen_msgs.py --check`・`config/check_docs.py --check` すべて PASS、`raspi/tests` 1666 passed / 1 skipped、`TELEMETRY` 102 バイトのフィールド順・オフセット・スケールの一致、48 param_id の一致、`convert.py` の全スケール定数と `packets.*.META` の一致、`steer_link_road(π/6, 1.101158, -0.730735) = 0.47167` の数値一致）はいずれも**問題なし**と確認済み。**生成物と正のずれは無い**。本次見つかった問題は-Polices は「正の**定義**が 1 箇所にない」側に集中している。

@@ -15,13 +15,13 @@
 
 | 原稿 | 範囲 | 原稿の件数 | 統合後 |
 |---|---|---|---|
-| `docs/review_2026-10-21.md` | 全体俯瞰（正の伝播網・契約・文書・ロードマップ） | 60 | CFG/VER/SAF/ML/NAV/SLM/GUI/OPS/GEN に分散 |
-| `docs/review_2026-10-21_nav.md` | `raspi/nav/`（Pure Pursuit / MPC / Hybrid A* / speedctl / raceline） | 14 | NAV-01〜NAV-24 に整理（＋ SLM-08 / ML-09 / GEN-02 へ併合） |
-| `docs/review_2026-10-21-contract-review.md` | モジュール境界の契約・設定の単一情報源・`vehicle.toml` スキーマ | 38 | CFG-01〜CFG-26 ＋ VER-01/02/05/08 ＋ NAV-23 ＋ GEN-24 に整理 |
-| `docs/review_2026-10-21_summary.md` | 総合俯瞰（全体＋nav＋新規の SLAM / ML / 校正系） | 54 | 全 ID に整理（＋ OPS-08 / GEN-22 / GEN-23 / GEN-24 を追加） |
+| `docs/archive/review_2026-10-21.md` | 全体俯瞰（正の伝播網・契約・文書・ロードマップ） | 60 | CFG/VER/SAF/ML/NAV/SLM/GUI/OPS/GEN に分散 |
+| `docs/archive/review_2026-10-21_nav.md` | `raspi/nav/`（Pure Pursuit / MPC / Hybrid A* / speedctl / raceline） | 14 | NAV-01〜NAV-24 に整理（＋ SLM-08 / ML-09 / GEN-02 へ併合） |
+| `docs/archive/review_2026-10-21-contract-review.md` | モジュール境界の契約・設定の単一情報源・`vehicle.toml` スキーマ | 38 | CFG-01〜CFG-26 ＋ VER-01/02/05/08 ＋ NAV-23 ＋ GEN-24 に整理 |
+| `docs/archive/review_2026-10-21_summary.md` | 総合俯瞰（全体＋nav＋新規の SLAM / ML / 校正系） | 54 | 全 ID に整理（＋ OPS-08 / GEN-22 / GEN-23 / GEN-24 を追加） |
 | **合計** | | **166**（重複込み） | **140** ＋ 取り下げ 2 |
 
-原稿間の重複は **同一問題を指す記述 4 本**（`review_2026-10-21_summary.md` §10 が既に
+原稿間の重複は **同一問題を指す記述 4 本**（`docs/archive/review_2026-10-21_summary.md` §10 が既に
 「同じ指摘が 2 か所に散らばっているので 1 本に統合するのが望ましい」と指摘していた）。
 本ファイルは **和集合**であり、いずれかの原稿が持っていた指摘を落としているものはない
 （根拠の弱かった記述は §5 で明示的に取り下げた）。

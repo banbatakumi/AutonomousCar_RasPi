@@ -14,7 +14,7 @@ scan2scan, scan_anchor, se2, deskew, signals, roadgraph, avoid）＋
 - 深刻度: **C**ritical（安全な走行を直接損なう）/ **H**igh / **M**edium / **L**ow
 - 「確認」列: **再現** = ホストで実際に発生させた / **コード** = 呼び出し関係をたどって確定 /
   **突合** = 別のファイル・数値計算と機械的に照合
-- **既存の全体レビュー `docs/review_2026-10-21.md`（H6/H7/H8/C1/M21/M24/M28）と重複するものは
+- **既存の全体レビュー `docs/archive/review_2026-10-21.md`（H6/H7/H8/C1/M21/M24/M28）と重複するものは
   繰り返さず、参照に留めた。**本書は `nav/` 内部の点に絞っている。**
 
 ---
@@ -268,7 +268,7 @@ GUI は `ACCEL_SAFETY_LIMIT`（`gui/src/store/ui.ts:201` ← `gui/src/generated/
 
 1. **安全の網が GUI にある。** GUI が無い／`accel_limit=0` で送ってきた場合、
    `telemetry_node.py:3246` は `accel = auto.accel_limit`（planner の値 36 m/s²）を採用する。
-   `docs/review_2026-10-21.md` H3/M32 と同じ「正が GUI にある」構造。
+   `docs/archive/review_2026-10-21.md` H3/M32 と同じ「正が GUI にある」構造。
 2. **`cmd_accel_limit_m_s2`（3.0）が `ref_command` の出口で効かない。**
    値は `raspi/core/vehicle.py:78-87` の `_ramp_max()` が読み、
    `Vehicle.speed_ramp_max_m_s2`（`vehicle.py:188-190`、実測 3.0）として公開されている。
@@ -568,7 +568,7 @@ H2 の修正（ランプを `a_decel_max` で頭打ち）と同じ処置で解�
 
 ### 5.1 「正」が 1 箇所に無い（3 層の伝播網）
 
-本リポジトリ全体のテーマ（`docs/review_2026-10-21.md` §0）だが、nav 内部で
+本リポジトリ全体のテーマ（`docs/archive/review_2026-10-21.md` §0）だが、nav 内部で
 **3 つの独立した破断面**が確認できた。
 
 | 破断面 | 症状 | 本書 |
@@ -623,7 +623,7 @@ plan_budget_ms（既定 120 ms、最大 150 ms）  ≤  cmd_deadman_ms 150 ms  <
 
 `raspi/auto/park_to_point.py:260` の `plan_budget_ms` は max 150 ms、
 `raspi/nodes/telemetry_node.py:360` `AUTO_CMD_STALE_NS = auto_cmd_stale_ms` = 200 ms。
-**1 回の再計画が 150 ms かかると `auto/cmd` が 1 周期途切れ**（`docs/review_2026-10-21.md` H8 参照）。
+**1 回の再計画が 150 ms かかると `auto/cmd` が 1 周期途切れ**（`docs/archive/review_2026-10-21.md` H8 参照）。
 余裕は 50 ms しかない。
 
 実測（`raspi/tests/test_hybrid_astar.py` のシーン、`time_budget_s=0.15`）:
@@ -672,7 +672,7 @@ $ .venv/bin/python -m pytest raspi/tests/test_nav.py raspi/tests/test_mpc.py ras
 | # | 穴 | 捕まえない理由 | 対応 |
 |---|---|---|---|
 | T1 | **Pure Pursuit の FF 分岐（`\|η\|>90°`）の飽和** | `steer_for_target` の飽和は `test_mpc.py:46-57` で検査されるが、`follow()` の **FF 分岐**を検査するテストが無い。`ff_gain>0` を使うのは `test_laptime.py:203,213` の周回（前方を向く）だけ | C1 に直接対応 |
-| T2 | **`Vehicle.speed_loop_tau_s` と `docs/control_constants.md` の整合** | `config/check_docs.py` は値を検査しない（`docs/review_2026-10-21.md` L37 参照）。校正ツールが `speed_kp` を書いても文書は直らない | H1 |
+| T2 | **`Vehicle.speed_loop_tau_s` と `docs/control_constants.md` の整合** | `config/check_docs.py` は値を検査しない（`docs/archive/review_2026-10-21.md` L37 参照）。校正ツールが `speed_kp` を書いても文書は直らない | H1 |
 | T3 | **`ref_command` のランプが `cmd_accel_limit_m_s2` / `a_decel_max` を守ること** | `test_speedctl.py:248-273` は「プロファイルとその傾きを送る」ことと「乗っている間は最小ランプ」を検査するが、**ランプに上限が無いこと**は検査しない | H2 / M5 |
 | T4 | **MPC の出力が `max_steer` と `cmd_steer_rate_limit_rad_s` を守ること** | `test_mpc.py:98` は MPCConfig 内の `steer_rate` で検査しているだけで、**`vehicle.cmd_steer_rate_limit_rad_s` との紐付け**が無い | M2 |
 | T5 | **MPC の `now=None` フォールバック（`t_capture==0`）** | `test_mpc.py:127-164` は時刻正常系（`now=0.0, 0.02, …`）のみ。`t_capture==0` → `self._clock` 混入の経路が無い | M1 |
@@ -682,7 +682,7 @@ $ .venv/bin/python -m pytest raspi/tests/test_nav.py raspi/tests/test_mpc.py ras
 | T9 | **`Vehicle.kappa_max` の左右非対称** | `kappa_max` は「最大曲率」として 1 つの値しか返さないので、非対称が設計か欠陥かを区別できない | M3 |
 | T10 | **`speedctl.REF_CATCH_S` と `τ=0` のフォールバック** | `test_speedctl.py:78-84` は「未同定なら既定値へ」を検査するが、**`catch_s=0` → `REF_CATCH_S` へ落ちる経路**（`speedctl.py:122`）は明示されていない | L4 |
 
-**交差参照（重複ではなく参照）**: `docs/review_2026-10-21.md` の
+**交差参照（重複ではなく参照）**: `docs/archive/review_2026-10-21.md` の
 **H6**（Hybrid A* の margin 緩和が経路全体に効く）、**H7**（`nearest_index` に全体検索のフォールバックが無い）、
 **H8**（探索時間予算が `auto/cmd` の陳腐化閾値を超える）、**C1**（非常制動が GUI のブレーキスライダ値に格下げされる）、
 **M21**（`auto/cmd` → `cmd` の合流で `accel_limit` が 1 周期遅れる）、

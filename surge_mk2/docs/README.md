@@ -11,7 +11,7 @@
 | [../sim/README.md](../sim/README.md) | シミュレータ（Mac 専用） |
 | [../gui/README.md](../gui/README.md) | GUI のコード地図 |
 | [setup_credentials.md](setup_credentials.md) | Pi の SSH・Wi-Fi 等の設定値（`.gitignore` 対象・機密） |
-| [archive/](archive/README.md) | **過去の記録。陳腐化しており、指示がない限り読まない** |
+| [archive/](archive/README.md) | **過去の記録（旧 PROGRESS・監査・コードレビュー）。陳腐化しており、指示がない限り読まない** |
 
 現在地・実測値は [`../PROGRESS.md`](../PROGRESS.md)。**プロトコルは v0.29**（`protocol.toml` の `protocol_version` が正）。
 

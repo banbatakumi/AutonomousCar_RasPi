@@ -39,7 +39,7 @@
 | STM32 の制御をホストで回して比べたい | `tools/fwsim`（ファームをそのままコンパイルして車のモデルと閉ループ。`python -m tools.fwsim.bench`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
 | 公開用の技術解説サイト（GitHub Pages） | [`site/`](site/)（Markdown。`master` への push で自動公開。更新の方針は `site/docs/about.md`）。**数値の正は持たない**ので、コードを変えたら該当ページを見直す |
-| 過去の経緯（旧 PROGRESS・監査報告など） | `docs/archive/`（**陳腐化。ユーザーが求めない限り読まない・根拠にしない**） |
+| 過去の経緯（旧 PROGRESS・監査報告・コードレビュー） | `docs/archive/`（**陳腐化。ユーザーが求めない限り読まない・根拠にしない**） |
 
 ## 新規開発方針
 

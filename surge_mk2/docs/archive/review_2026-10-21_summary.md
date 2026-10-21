@@ -950,9 +950,9 @@ CI を直し、意味論の検査（firmware の並び・convert のスケール
 
 | ファイル | 対象 | 行数 |
 |---|---|---|
-| `docs/review_2026-10-21.md` | 全体俯瞰（正の伝播網・契約・文書・ロードマップ） | ~1490 |
-| `docs/review_2026-10-21_nav.md` | `raspi/nav/`（Pure Pursuit / MPC / Hybrid A\* / speedctl / raceline） | ~714 |
-| `docs/review_2026-10-21-contract-review.md` | モジュール境界の契約・設定の単一情報源・`vehicle.toml` スキーマ | ~611 |
+| `docs/archive/review_2026-10-21.md` | 全体俯瞰（正の伝播網・契約・文書・ロードマップ） | ~1490 |
+| `docs/archive/review_2026-10-21_nav.md` | `raspi/nav/`（Pure Pursuit / MPC / Hybrid A\* / speedctl / raceline） | ~714 |
+| `docs/archive/review_2026-10-21-contract-review.md` | モジュール境界の契約・設定の単一情報源・`vehicle.toml` スキーマ | ~611 |
 
 各レポートの末尾に調査ファイル一覧とテストの穴の項目があるため、
 個別の修正着手時はそちらを参照のこと。
