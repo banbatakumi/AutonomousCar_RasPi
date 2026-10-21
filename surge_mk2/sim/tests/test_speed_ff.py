@@ -158,8 +158,11 @@ class TestFirmwareFeedForward(unittest.TestCase):
     def test_feedforward_removes_the_ramp_lag(self):
         """一定の傾きで目標を上げる間、車速は目標にほぼ遅れない（無しだと 0.1m/s 前後遅れたまま）。"""
         lag = {}
+        # 仕組みを見る試験なので、PI は弱いゲイン（2026-10-18 までの toml の値）で回す。校正で強いゲインになると、
+        # FF なしでも遅れが小さく、比べたい差が見えなくなる（fwsim の MECH_SPEED_PI と同じ事情）
+        spec = replace(self.spec, speed_kp=0.3, speed_ki=0.6)
         for name, on in (("off", False), ("on", True)):
-            ctl = SpeedController(self.spec)
+            ctl = SpeedController(spec)
             if on:
                 ctl.speed_ff_nm_per_m_s2 = 1.0 / self.spec.speed_plant_gain
                 ctl.speed_ff_rr_nm = self.spec.rolling_resistance / self.spec.speed_plant_gain
@@ -180,12 +183,13 @@ class TestSpeedFeedForward(unittest.TestCase):
         cls.veh = Vehicle.load()
 
     def test_feedforward_enters_corners_on_speed(self):
+        # 校正で PI が強くなり（2026-10-19 以降）、旧方式でも出過ぎが約 0.1m/s まで減った。差は縮んだが向きは変わらない
         over_old, rms_old = run(self.spec, self.veh, feedforward=False)
         over_new, rms_new = run(self.spec, self.veh, feedforward=True)
-        self.assertGreater(over_old, 0.35)          # 旧方式は速すぎる速度で入る
-        self.assertLess(over_new, 0.2)
-        self.assertLess(over_new, 0.5 * over_old)
-        self.assertLess(rms_new, 0.08)
+        self.assertGreater(over_old, 0.08)          # 旧方式は上限より速く入る
+        self.assertLess(over_new, 0.1)
+        self.assertLess(over_new, 0.8 * over_old)
+        self.assertLess(rms_new, 0.04)
         self.assertLess(rms_new, 0.6 * rms_old)
 
     def test_robust_to_a_different_pi_gain(self):
