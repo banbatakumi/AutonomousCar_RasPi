@@ -55,10 +55,34 @@ jobs:
       - name: pytest
         working-directory: surge_mk2
         run: python -m pytest raspi/tests -q
-      # tools/check.sh と同じ軽いものだけ（シムを回す同定のテストは数分かかるので入れない）
+      # tools/check.sh と同じ対象にする（片方だけ直して食い違うと、削除済みの tools/sysid を参照したまま
+      # 赤になった。2026-10-21 のレビュー VER-01）。ファームが無いので fwsim の2本は skip になる
       - name: pytest (tools)
         working-directory: surge_mk2
-        run: python -m pytest tools/tests tools/sysid/tests/test_link.py -k "not TestAnalyzeFolds" -q
+        run: python -m pytest tools/tests tools/calib/tests tools/fwsim/tests/test_fw_constants.py tools/fwsim/tests/test_control_logic.py -q
+      # sim/ のテスト。シムと実機の一致を保つ網（2026-10-21 のレビュー VER-03）
+      - name: pytest (sim)
+        working-directory: surge_mk2
+        run: python -m pytest sim/tests -q
+
+  ml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # CPU 版の torch で足りる。ml_cam と ml_cam_e2e は `dataset` をフラットに import するので
+      # 同じプロセスでは収集できない（module 名が衝突する）。ディレクトリごとに別プロセスで回す
+      - run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          pip install -r surge_mk2/raspi/requirements.txt -r surge_mk2/tools/requirements.txt pytest "onnx<1.23" onnxscript
+      - name: pytest (ml)
+        working-directory: surge_mk2
+        run: |
+          for d in ml_cam ml_cam_e2e ml_lidar ml_common; do
+            python -m pytest "$d/tests" -q || exit 1
+          done
 
   gui:
     runs-on: ubuntu-latest

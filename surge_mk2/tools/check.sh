@@ -60,6 +60,15 @@ if [ "$FAST" = 0 ]; then
   # （`tools/fwsim/tests/test_speed_kf*.py`）は重いので入れない。ファームを直したら個別に回すこと
   run "pytest (tools)" "$PY" -m pytest tools/tests tools/calib/tests tools/fwsim/tests/test_fw_constants.py \
     tools/fwsim/tests/test_control_logic.py -q
+  run "pytest (sim)" "$PY" -m pytest sim/tests -q
+  # ML のテスト（torch が要る）。ml_cam と ml_cam_e2e は `dataset` をフラットに import するので別プロセスで回す
+  if "$PY" -c "import torch" 2>/dev/null; then
+    for d in ml_cam ml_cam_e2e ml_lidar ml_common; do
+      run "pytest ($d)" "$PY" -m pytest "$d/tests" -q
+    done
+  else
+    echo "── pytest (ml_*) … torch が無いので飛ばす"
+  fi
   if [ -d gui/node_modules ]; then
     printf '── tsc -b\n'
     (cd gui && npx tsc -b) || { echo "   ✗ 失敗: tsc" >&2; fail=1; }

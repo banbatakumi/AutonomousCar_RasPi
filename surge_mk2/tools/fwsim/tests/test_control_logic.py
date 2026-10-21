@@ -34,6 +34,7 @@ MECH_SPEED_PI = {"speed_kp": 0.3, "speed_ki": 0.6}
 def scenario(key: str) -> S.Scenario:
     return {s.key: s for s in S.ALL}[key]
 
+@unittest.skipUnless(HAVE_FW, "ファームがありません")
 class TestParamTable(unittest.TestCase):
     def test_ids_match_protocol(self):
         """`control_params.h` の表と `protocol.toml` の param_id が同じ（名前も）。"""
