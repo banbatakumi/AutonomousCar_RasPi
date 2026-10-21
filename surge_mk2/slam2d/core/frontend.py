@@ -336,6 +336,11 @@ class Frontend:
                 self.rms_ref += a * (min(res.rms, cfg.max_rms) - self.rms_ref)
             else:
                 lost = True
+        elif not first and field_ is not None and not field_.empty:
+            # 地図はあるのに合わせる点が1つも無い（全点が範囲外・壁の向こう・無効）。**合わせようとして
+            # いない**だけで、推測航法の姿勢のままキーフレームにして地図へ焼くと壁が二重になる。
+            # 見失いとして数える（連続すれば作り直しが掛かる）
+            lost = True
         self.last = res
 
         if lost or first or recovering:

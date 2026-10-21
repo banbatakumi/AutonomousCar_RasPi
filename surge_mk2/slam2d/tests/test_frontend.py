@@ -98,6 +98,22 @@ class TestLost(unittest.TestCase):
         fe.update(make_raw_scan(3.0, 2.0, 0.0, segs=weird, max_range=8.0), 0.1)
         self.assertTrue(np.array_equal(before, fe.grid.hits))
 
+    def test_scan_without_matchable_points_is_lost_and_not_baked(self):
+        """地図があるのに合わせる点が1つも無い周は、見失い扱いにして地図へ焼かない
+        （以前は matched=False のまま lost=False で、推測航法の姿勢のキーフレームが増えた）。"""
+        motion = ExternalTwistModel(lambda: Twist2D(0.1, 0.0, 0.0))
+        fe = _make_frontend(motion=motion, kf_dist=0.02)
+        self._drive(fe)
+        n_kf, before = len(fe.keyframes), fe.grid.hits.copy()
+        raw = make_raw_scan(3.0, 2.0, 0.0, segs=ROOM, max_range=8.0)
+        raw = RawScan(raw.angles, raw.ranges, np.zeros(len(raw.ranges), dtype=bool),
+                      np.ones(len(raw.ranges), dtype=bool), raw.t_point_ns)
+        u = fe.update(raw, 0.1)
+        self.assertFalse(u.matched)
+        self.assertTrue(u.lost)
+        self.assertEqual(len(fe.keyframes), n_kf)
+        self.assertTrue(np.array_equal(before, fe.grid.hits))
+
     def test_mapping_restarts_after_a_long_loss(self):
         """見失い続けたら局所地図を作り直して走り続ける（永久に止まらない）。"""
         motion = ExternalTwistModel(lambda: Twist2D(0.1, 0.0, 0.0))
