@@ -3243,7 +3243,13 @@ class TelemetryServer:
         # 効かせられない。0 は「指定なし」なので、指定のある方を採る）
         accel = gui.accel_limit
         if auto.accel_limit > 0:
-            accel = min(accel, auto.accel_limit) if accel > 0 else auto.accel_limit
+            if accel > 0:
+                accel = min(accel, auto.accel_limit)
+            else:
+                # GUI が指定していない（`accel_limit=0` を送るクライアント）と planner の値がそのまま
+                # 出る。STM32 は v0.22 から上限を掛けないので、Pi 側の正（`[safety] cmd_accel_limit_m_s2`）
+                # で頭打ちにする
+                accel = min(auto.accel_limit, _SAFETY.speed_ramp_max_m_s2)
         # 制動トルクは planner の指定があればそれ、無ければ GUI の値。人（GUI）もブレーキを
         # 掛けていれば**強い方**（0 は「STM32 の最大」なので一番強い）
         brake_torque = gui.brake_torque

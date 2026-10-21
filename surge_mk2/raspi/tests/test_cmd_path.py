@@ -738,6 +738,13 @@ class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
         srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=1.0, accel_limit=1.6,
                                                   t_pub=time.monotonic_ns(), source="planning:x")
         self.assertEqual(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).accel_limit, 1.6)
+        # ただし Pi 側の上限（`[safety] cmd_accel_limit_m_s2`）は超えない。STM32 は上限を掛けないので、
+        # 指定なしの GUI に planner の大きな値（`speedctl.ref_command` は 36 m/s² まで出す）が素通りしない
+        from raspi.nodes.telemetry_node import _SAFETY
+        srv.sub.latest[TOPIC_AUTO_CMD] = DriveCmd(mode=2, arm=True, target_speed=1.0, accel_limit=36.0,
+                                                  t_pub=time.monotonic_ns(), source="planning:x")
+        self.assertEqual(srv._merge_auto(srv._last_cmd, time.monotonic_ns()).accel_limit,
+                         _SAFETY.speed_ramp_max_m_s2)
 
     async def test_lights_are_ored_with_the_gui(self):
         """パッシング・ウィンカーは planner の要求と GUI の値の OR（どちらも相手を消さない）。"""
