@@ -274,9 +274,14 @@ const STEER_RATE_LIMIT = STEER_RATE_SAFETY_LIMIT // rad/s
 const TRIGGER_DZ = 0.06
 /** パッドの `timestamp` がこの時間進まないのに、トリガー・スティックが中立でないなら、
  * 圏外（Bluetooth が切れかけ）で**最後の入力のまま張り付いている**とみなして入力を中立にする。
- * ブラウザは接続が切れても `connected` を落とさないことがある。トリガーを一定に握り続けると
- * 値が変わらず `timestamp` も進まないので、**正常な操作を切らないよう保守的に長く**取る
- * （アナログの揺らぎがあれば進む。全開で握り続ける場合は2秒で一度中立に戻る） */
+ * ブラウザは接続が切れても `connected` を落とさないことがあるため、この保険は残す。
+ *
+ * ⚠ **`timestamp` は「入力が変わったとき」しか進まない機種がある**（macOS/Linux の多くの
+ * ブラウザ）。その機種で一定に握り続けると、正常な操作なのに timestamp が止まり、圏外と
+ * 誤判定してしまう。そこで**「入力が同じなのに timestamp が進む」ことを観測できた機種
+ * （＝timestamp が心拍になっている機種）でだけ**この判定を有効にする（`padTsHeartbeat`）。
+ * 観測できない機種では判定を無効にし、切断は `gamepaddisconnected` と `connected` で拾う。
+ */
 const PAD_STALE_MS = 2000
 /** 中央付近を緩くする度合い（0=リニア, 1=完全3乗）。スロットルは控えめのまま固定
  * （左右対称なペダルではなく踏み込み量なので、舵ほど中央を緩める必要が無い） */
@@ -365,6 +370,21 @@ const TAKE_CONTROL_MS = 250
 function padPressed(b: GamepadButton | undefined): boolean {
   if (!b) return false
   return b.pressed || b.value > 0.5
+}
+
+/**
+ * パッドの入力内容の署名。**timestamp が進んだのに入力が同じ**かを見るために使う。
+ *
+ * 値の変化でしか `timestamp` が進まない機種では、この署名が同じなのに timestamp が
+ * 進むことはないので「timestamp は心拍」という判定が誤って立たない。
+ */
+function padSignature(p: Gamepad | null): string {
+  if (!p) return ''
+  let s = ''
+  for (const b of p.buttons) s += `${b.pressed ? 1 : 0}:${b.value.toFixed(3)},`
+  s += '|'
+  for (const a of p.axes) s += `${a.toFixed(3)},`
+  return s
 }
 
 /** デッドゾーンを**切り落とすのではなく再スケールする**。段差が出ない */
@@ -630,6 +650,14 @@ export function useDriving(ch: ControlChannel | null) {
     let padSeenTs = -1
     let padTsChangedMs = 0
     let padStaleWas = false
+    /** `timestamp` が「入力が変わらなくても進む」機種か（接続中に自動判定する）。
+     * **これが true のときだけ** `PAD_STALE_MS` の圏外判定を使う */
+    let padTsHeartbeat = false
+    /** 「入力が同じなのに timestamp が進んだ」の連続観測回数。1回だけでは、
+     * 2フレームの間に値を動かして戻した（変化を跨いだ）だけの可能性がある */
+    let padTsHeartbeatHits = 0
+    /** 直前フレームの入力の署名。timestamp が進んだのに入力が同じかを見る */
+    let padLastSig = ''
     let padArmWas = false
     let padGearL1Was = false
     let padGearR1Was = false
@@ -688,14 +716,30 @@ export function useDriving(ch: ControlChannel | null) {
       const pads = navigator.getGamepads?.() ?? []
       const padRaw = pads.find((p) => p && p.connected && p.mapping === 'standard')
         ?? pads.find((p) => p && p.connected) ?? null
-      // 圏外で最後の入力のまま張り付いたパッドは無いものとして扱う（`PAD_STALE_MS`）
+      // 圏外で最後の入力のまま張り付いたパッドは無いものとして扱う（`PAD_STALE_MS`）。
+      // **`timestamp` が心拍として進む機種でだけ判定する**（`padTsHeartbeat`）。値の変化で
+      // しか進まない機種では、一定に握り続ける正常な操作と圏外を区別できないため。
+      const padSig = padSignature(padRaw)
       let padStale = false
       if (padRaw) {
         if (padRaw.index !== padSeenIndex || padRaw.timestamp !== padSeenTs) {
+          // **入力の署名が同じなのに timestamp が進んだ** → このブラウザは入力が無くても
+          // パッドを定期更新している。3回連続で観測できたら timestamp を生存確認に使える
+          // （1回だけなら、2フレームの間に値を動かして戻しただけの可能性がある）
+          if (padRaw.index === padSeenIndex) {
+            if (padSig === padLastSig) {
+              padTsHeartbeatHits += 1
+              if (padTsHeartbeatHits >= 3) padTsHeartbeat = true
+            } else {
+              padTsHeartbeatHits = 0
+            }
+          } else {
+            padTsHeartbeatHits = 0
+          }
           padSeenIndex = padRaw.index
           padSeenTs = padRaw.timestamp
           padTsChangedMs = now
-        } else if (now - padTsChangedMs > PAD_STALE_MS) {
+        } else if (padTsHeartbeat && now - padTsChangedMs > PAD_STALE_MS) {
           padStale =
             (padRaw.buttons[7]?.value ?? 0) > TRIGGER_DZ ||
             (padRaw.buttons[6]?.value ?? 0) > TRIGGER_DZ ||
@@ -704,6 +748,7 @@ export function useDriving(ch: ControlChannel | null) {
       } else {
         padSeenIndex = -1
       }
+      padLastSig = padSig
       if (padStale !== padStaleWas) {
         padStaleWas = padStale
         if (padStale) notify('パッドの入力が更新されていません（圏外？）— 入力を中立にしました', 'bad')
@@ -1261,7 +1306,38 @@ export function useDriving(ch: ControlChannel | null) {
       ch.cmd(c)
     }
 
+    // **接続・切断はイベントでも受ける。** `timestamp` は機種によって心拍にならないので、
+    // 圏外判定だけに頼らない。切断されたら状態を捨て、次のフレームから入力を中立にする
+    // （`connected` を見るだけでも同じだが、その瞬間を通知できるのと、
+    //  心拍判定の基準をパッドごとに取り直せるのが利点）。
+    const onPadConnected = () => {
+      padSeenIndex = -1
+      padSeenTs = -1
+      padTsChangedMs = performance.now()
+      padStaleWas = false
+      padTsHeartbeat = false
+      padTsHeartbeatHits = 0
+      padLastSig = ''
+    }
+    const onPadDisconnected = (e: GamepadEvent) => {
+      if (e.gamepad.index === padSeenIndex) {
+        notify('ゲームパッドが切断されました — 入力を中立にしました', 'bad')
+      }
+      padSeenIndex = -1
+      padSeenTs = -1
+      padStaleWas = false
+      padTsHeartbeat = false
+      padTsHeartbeatHits = 0
+      padLastSig = ''
+    }
+    window.addEventListener('gamepadconnected', onPadConnected)
+    window.addEventListener('gamepaddisconnected', onPadDisconnected)
+
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('gamepadconnected', onPadConnected)
+      window.removeEventListener('gamepaddisconnected', onPadDisconnected)
+    }
   }, [ch])
 }

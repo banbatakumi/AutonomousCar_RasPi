@@ -170,6 +170,8 @@ src/
 - 色は `uplotBase.ts` の `tones()` が CSS 変数から引く。**グラフ側に色の値を書かない**
 - 画面に数秒だけ出す通知（操縦権の拒否・記録削除の失敗・シャットダウン拒否など）は `store/ui.ts` の `notify()`（ステータスバーのピル）。
 - パッドの `timestamp` が2秒進まず入力が中立でないときは、圏外とみなして入力を中立にする（`input/useDriving.ts`）。
+  **ただし `timestamp` が「入力が変わらなくても進む」機種でだけ**判定する（値の変化でしか進まない機種では、
+  一定に握る正常な操作と圏外を区別できないため）。切断は `gamepaddisconnected` でも拾う。
 - `status.pi`（CPU・メモリ・スロットリング）と `status.nodes`（ノードの生存申告）は `/ws/control` で 1Hz。
   Pi 以外（シム・`bus_demo`）では `pi.available=false` で「取得不可」になる
 
