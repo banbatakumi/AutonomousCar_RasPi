@@ -327,10 +327,25 @@ def main() -> int:
                   "実車と別のマシンで実行するか、SURGE_BUS_DIR で別のバスを指定してください",
                   file=sys.stderr)
             return 2
-        # **時刻はログのカーソル**。壁時計を使うと記録時と時刻の座標系がずれる
-        bridge = BusBridge(pub, clock=lambda: holder["node"]._cursor_ns)
+        # **時刻はログのカーソル。** 壁時計を使うと記録時と時刻の座標系がずれる。ただし記録元 Pi の
+        # 単調時刻のままだと、`Publisher` が押す `t_pub`（この再生プロセスの単調時刻）と領域が食い違い、
+        # planner が `now - t_capture` を数時間と見て恒久的に「点群が古い」と止める（2026-10-21 のレビュー GEN-01）。
+        # 最初の1回で「記録の時刻 → このプロセスの単調時刻」のずれを決め、以後は全部それを足して出す
+        # （記録内の時刻の差は変わらない）
+        shift: list[int | None] = [None]
+
+        def _local(ns: int) -> int:
+            if shift[0] is None:
+                shift[0] = time.monotonic_ns() - ns
+            return ns + shift[0]
+
+        def _to_local_pi_ns(t_us):
+            v = holder["node"].sync.to_pi_ns(t_us)
+            return None if v is None else _local(v)
+
+        bridge = BusBridge(pub, clock=lambda: _local(holder["node"]._cursor_ns))
         # LiDAR セクタの時刻も実機（io_node）と同じく STM32 の時刻から換算する（記録に PONG があれば）
-        bridge.to_pi_ns = lambda t_us: holder["node"].sync.to_pi_ns(t_us)
+        bridge.to_pi_ns = _to_local_pi_ns
         print(f"# バス配信 {pub.endpoint}（io_node のふり）")
         if args.speed == 0:
             print("!! --speed 0 は待たずに流すので、購読側は取りこぼす。"
@@ -339,7 +354,7 @@ def main() -> int:
         next_diag = [0]
 
         def _on_telem(t, t_pi_ns):
-            bridge.on_telemetry(t, t_pi_ns)
+            bridge.on_telemetry(t, None if t_pi_ns is None else _local(t_pi_ns))
             # diag/link は 10Hz。TELEMETRY の回数ではなく記録の時刻で数える（回数だと
             # TELEMETRY の周波数が違う記録で頻度が変わる）
             # 時刻同期の前（t_pi_ns が None）は STM32 の時刻で数える。逆行したら数え直す
