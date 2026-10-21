@@ -79,6 +79,8 @@ __all__ = ["PlanningNode", "input_topics"]
 NS = 1_000_000_000
 #: `auto/state` の発行レート。点群が 10Hz なのでそれ以上出しても同じ絵になる
 STATE_HZ = 10
+#: planner に渡す `dt` の上限 [s]（点群が途絶えた後の最初の周）
+MAX_PLAN_DT_S = 0.5
 HB_HZ = 10
 #: poll の最長待ち。期限計算が狂っても応答が止まらないための上限（= auto/cmd の1周期）
 POLL_MAX_MS = 1000 // CMD_HZ
@@ -276,6 +278,7 @@ class PlanningNode:
             self.state = AutoState(mode=c.mode)
             self._last_scan_seq = -1
             self._last_map_seq = -1
+            self._last_plan_ns = 0      # 前のモードを走っていた時間を、次の planner の最初の `dt` にしない
             if not self.quiet:
                 who = self.planner.name if self.planner else "（なし）"
                 print(f"# モード → {who}", flush=True)
@@ -339,7 +342,9 @@ class PlanningNode:
             return False                    # 同じ周。計算しても答えは変わらない
         self._last_scan_seq = scan.seq
 
-        dt = (now_ns - self._last_plan_ns) / NS if self._last_plan_ns else 0.0
+        # 上限を付ける: 点群が長く途絶えた後の最初の周が、巨大な `dt`（舵の平滑化・時間で進む試験の
+        # ステップ）を planner に渡さない
+        dt = min((now_ns - self._last_plan_ns) / NS, MAX_PLAN_DT_S) if self._last_plan_ns else 0.0
         self._last_plan_ns = now_ns
 
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
@@ -351,7 +356,7 @@ class PlanningNode:
         # 中止しても止まらないという不具合の修正）
         set_engaged_fn = getattr(self.planner, "set_engaged", None)
         if set_engaged_fn is not None:
-            set_engaged_fn(self.ctrl.engaged)
+            self._ask("engage の通知", set_engaged_fn, self.ctrl.engaged)
         t_plan = time.perf_counter()
         try:
             st = self.planner.plan(scan, vs, self._params, dt)
@@ -477,7 +482,9 @@ class PlanningNode:
         # ここで落とせば `st.reason` に理由を残せる
         if not (math.isfinite(st.target_speed) and math.isfinite(st.target_steer)):
             st.ready = False
-            st.reason = f"{st.reason}（出力がNaN/Inf）" if st.reason else "出力がNaN/Inf"
+            # `self.state` を書き換えるので、毎周期付け足して伸び続けないように一度だけ付ける
+            if "出力がNaN/Inf" not in st.reason:
+                st.reason = f"{st.reason}（出力がNaN/Inf）" if st.reason else "出力がNaN/Inf"
         if not st.ready or st.brake:
             # 制動トルクは planner が決めた制動（ready）のときだけ載せる。「分からない」（ready=False）
             # の制動は 0＝中継側の GUI の値
@@ -518,7 +525,11 @@ class PlanningNode:
         """
         if self.planner is None:
             return
-        m = self.planner.snapshot()
+        try:
+            m = self.planner.snapshot()
+        except Exception as e:                      # noqa: BLE001  表示専用。走行の判断を巻き込まない
+            print(f"# {self.planner.name} の snapshot() が例外: {e}", file=sys.stderr, flush=True)
+            return
         if m is None:
             return
         # 経路の版（`AutoMap.route_seq`）も見る。地図が凍結したあとも経路は
@@ -561,7 +572,11 @@ class PlanningNode:
                     # 「持っていれば渡す」（持たない planner には無関係）
                     fn = getattr(self.planner, "on_vehicle_state", None)
                     if fn is not None:
-                        fn(msg)
+                        try:
+                            fn(msg)
+                        except Exception as e:      # noqa: BLE001  planner のバグでノードを落とさない
+                            print(f"# {self.planner.name} の on_vehicle_state() が例外: {e}",
+                                  file=sys.stderr, flush=True)
 
             now = time.monotonic_ns()
             planned = self._replan(now)
