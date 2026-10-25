@@ -53,21 +53,6 @@ class TestVehicleEnvelope(unittest.TestCase):
         self.assertAlmostEqual(v.a_accel_max(), v.speed_ramp_max_m_s2)
         self.assertAlmostEqual(v.a_decel_max, v.speed_ramp_max_m_s2)
 
-    def test_plan_accel_ceiling_is_separate_from_the_ramp(self):
-        """ランプの上限（加減速で対称）を上げても、加速の計画は `plan_accel_limit_m_s2` で止まる。減速は上がる。"""
-        v = replace(self.v, lim_accel_m_s2=9.0, lim_brake_m_s2=9.0, speed_ramp_max_m_s2=4.0,
-                    plan_accel_limit_m_s2=3.0)
-        self.assertAlmostEqual(v.plan_accel_max, 3.0)
-        self.assertAlmostEqual(v.a_accel_max(), 3.0)
-        self.assertAlmostEqual(v.a_decel_max, 4.0)
-        # ランプより上の値は効かない・無ければランプ
-        self.assertAlmostEqual(replace(v, plan_accel_limit_m_s2=5.0).plan_accel_max, 4.0)
-        self.assertAlmostEqual(replace(v, plan_accel_limit_m_s2=0.0).plan_accel_max, 4.0)
-
-    def test_toml_splits_the_accel_and_decel_ceilings(self):
-        veh = Vehicle.load()
-        self.assertLessEqual(veh.plan_accel_max, veh.speed_ramp_max_m_s2)
-
     def test_limits_read_from_toml(self):
         """`config/vehicle.toml` の `[limits]` が読める（校正 7・8 の値。無ければ控えめな既定）。"""
         veh = Vehicle.load()
@@ -329,6 +314,44 @@ class TestRefineTime(unittest.TestCase):
         grip = rl.speed_profile(path.xy, k, a_grip=4.0, **kw)
         self.assertTrue(np.all(grip >= own - 1e-9))
         self.assertGreater(float((grip - own).max()), 0.01)
+
+    def test_accel_circle_can_be_smaller_than_the_brake_circle(self):
+        """`a_grip_accel` を与えると減速だけ大きい円で決まる。与えなければ従来どおり加減速で同じ円。"""
+        path = ring(radius=3.0)
+        kw = dict(v_max=3.0, v_min=0.2, a_lat=3.0, a_accel=2.0, a_brake=2.0)
+        k = 0.8 + 0.6 * np.sin(np.arange(len(path)) * 2 * math.pi / len(path))
+        both = rl.speed_profile(path.xy, k, a_grip=4.0, **kw)
+        same = rl.speed_profile(path.xy, k, a_grip=4.0, a_grip_accel=4.0, **kw)
+        split = rl.speed_profile(path.xy, k, a_grip=4.0, a_grip_accel=3.0, **kw)
+        brake_only = rl.speed_profile(path.xy, k, **kw)
+        np.testing.assert_allclose(same, both)
+        self.assertTrue(np.all(split <= both + 1e-9))               # 加速側の円を縮めれば遅くなる
+        self.assertTrue(np.all(split >= brake_only - 1e-9))         # 減速側の円を広げたぶんは残る
+        self.assertGreater(float((both - split).max()), 0.005)
+        # 点ごとの配列の版（走行中に学習した値）も同じ結果
+        arr = rl.speed_profile(path.xy, k, a_lat=np.full(len(k), 3.0), a_grip=np.full(len(k), 4.0),
+                               a_grip_accel=np.full(len(k), 3.0),
+                               **{x: kw[x] for x in ("v_max", "v_min", "a_accel", "a_brake")})
+        np.testing.assert_allclose(arr, split, atol=1e-9)
+
+    def test_accel_exponent_cuts_the_exit_acceleration(self):
+        """`accel_exp` = 2 は従来どおり。小さいほど、横を使っている所の加速が減って遅くなる。"""
+        path = ring(radius=3.0)
+        kw = dict(v_max=3.0, v_min=0.2, a_lat=3.0, a_accel=2.0, a_brake=2.0, a_grip=4.0)
+        k = 0.8 + 0.6 * np.sin(np.arange(len(path)) * 2 * math.pi / len(path))
+        base = rl.speed_profile(path.xy, k, **kw)
+        np.testing.assert_allclose(rl.speed_profile(path.xy, k, accel_exp=2.0, **kw), base)
+        v15 = rl.speed_profile(path.xy, k, accel_exp=1.5, **kw)
+        v10 = rl.speed_profile(path.xy, k, accel_exp=1.0, **kw)
+        self.assertTrue(np.all(v15 <= base + 1e-9))
+        self.assertTrue(np.all(v10 <= v15 + 1e-9))
+        self.assertGreater(float((base - v10).max()), 0.01)
+        # 減速は円のまま: 曲率の大きい所へ入る手前の減速は、加速側の形に影響されない
+        kk = np.full(len(k), 0.0)
+        kk[100:140] = 1.0
+        a = rl.speed_profile(path.xy, kk, **kw)
+        b = rl.speed_profile(path.xy, kk, accel_exp=1.2, **kw)
+        np.testing.assert_allclose(a[60:100], b[60:100], atol=1e-9)
 
 
 class TestAvoidSpeedCap(unittest.TestCase):

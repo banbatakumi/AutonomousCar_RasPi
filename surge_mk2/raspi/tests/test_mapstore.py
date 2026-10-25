@@ -355,28 +355,6 @@ class TestGripBundle(unittest.TestCase):
         mapstore.delete_map("src")
         self.assertFalse((mapstore.MAPS_DIR / "src.lines.pkl").exists())
 
-    def test_surface_record(self):
-        """路面の記録は `launch_ratio` と同じファイルに同居し、互いに消し合わない。範囲外は使わない。"""
-        self.assertIsNone(mapstore.load_grip_surface())
-        mapstore.save_grip_vehicle(1.46)
-        mapstore.save_grip_surface(5.52, 3.0, 1.06, 5.9, t=100.0)
-        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.46)
-        rec = mapstore.load_grip_surface()
-        self.assertAlmostEqual(rec["lat"], 5.52)
-        self.assertAlmostEqual(rec["dec"], 3.0)
-        self.assertAlmostEqual(rec["coup"], 1.06)
-        self.assertAlmostEqual(rec["ceil"], 5.9)
-        mapstore.save_grip_vehicle(1.5)
-        self.assertAlmostEqual(mapstore.load_grip_surface()["lat"], 5.52)
-        mapstore.clear_grip_surface()
-        self.assertIsNone(mapstore.load_grip_surface())
-        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.5)
-        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"surface": {"lat": 40, "dec": 3}}')
-        self.assertIsNone(mapstore.load_grip_surface())
-        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"launch_ratio": 1.4}')   # 古い形式
-        self.assertIsNone(mapstore.load_grip_surface())
-        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.4)
-
     def test_export_and_upload_carry_grip(self):
         import json
         mapstore.save_grip("src", self.GRIP)
@@ -416,12 +394,12 @@ class TestGripBundle(unittest.TestCase):
         mapstore.delete_map("src")
         self.assertFalse((mapstore.MAPS_DIR / "src.grip.json").exists())
 
-    def test_vehicle_ratio(self):
-        self.assertEqual(mapstore.load_grip_vehicle(), 0.0)
-        mapstore.save_grip_vehicle(1.46)
-        self.assertAlmostEqual(mapstore.load_grip_vehicle(), 1.46)
-        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"launch_ratio": 40}')
-        self.assertEqual(mapstore.load_grip_vehicle(), 0.0)      # 範囲外は使わない
+    def test_no_record_outside_the_map(self):
+        """地図をまたぐ学習の記録は持たない（`_grip_vehicle.json` を書かない・読まない）。"""
+        for name in ("save_grip_vehicle", "load_grip_vehicle", "save_grip_surface",
+                     "load_grip_surface", "clear_grip_surface"):
+            self.assertFalse(hasattr(mapstore, name), name)
+        (mapstore.MAPS_DIR / "_grip_vehicle.json").write_text('{"launch_ratio": 1.4}')   # 古い記録は無視される
         self.assertEqual([m["name"] for m in mapstore.list_maps()], ["src"])
 
 

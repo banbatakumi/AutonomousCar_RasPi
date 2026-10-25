@@ -125,31 +125,29 @@
 - 舵が上限に張り付いている所・曲がり切れない区間・通常の周回以外は planner が `gate` で止める
 - 加減速しながら出た前兆は、前後に使っていた力を合成した半径で記録する（横だけの限界と取り違えない）
 
-## 減速（`LongLearner`）— 上げていって、コーナーへ計画より速く入るようになった所が限界
+## 加速・減速（`LongLearner`）— 求めた所で実際に出た値に合わせる（2026-10-22）
 
-横と違って場所ごとには持たず、コース全体で 1 つ（`GripMap.decel`）。規則は横の `TimeLearner` と同じ形:
-**1 段上げて 1 周走り、車が計画どおりに動けたら次へ、動けなければ 1 段戻して止める**。
+横と違って場所ごとには持たず、コース全体で 1 つずつ（`GripMap.accel`・`decel`）。出発点は校正の値
+（`[limits] a_accel_m_s2`・`a_brake_m_s2`）、天井は目標車速のランプの上限（`[safety] cmd_accel_limit_m_s2`）。
 
-- 「動けたか」は、制動区間の**終わり**（コーナーの入口）で車速が計画より速かったぶんで見る。その周の
-  いちばん大きい区間の値が `lag` [m/s] 以下なら付いて行けた
-- 止めた後も毎周見て、付いて行けなくなったら 1 段下げる。上げ直すのは、横の学習が「路面が変わった」と
-  見たとき（`rescale`・`recheck`）だけ
+- **測る量は「計画からの車速のずれ `e = 車速 − 今の場所の計画の速度` の傾き」**。計画が上限の `strong` 倍以上の
+  加速（減速）を求めている間を 1 つの窓にし、出だしの `settle_s`（速度ループの時定数。遅れが溜まる過渡）を
+  捨てて直線を当てる。**出た加速度 = 求めた加速度 ± de/dt**。場所で比べるので、指令の前倒しや一定の遅れは
+  傾きに出ない（付いて行けている間は 出た ÷ 求めた ≈ 1）
+- 窓を `pool_s` 秒ぶん溜めたら（実機のコースで 2 周ほど）、周の境目で **出た ÷ 求めた**（長さの重み）で判断する:
+  `short` 未満なら上限をその比だけ下げ（1 回に `cut_max` まで）、`follow` 以上なら 1 段上げ、その間は保つ。
+  下げたら 1 段の幅を半分にする（境目を行き来しない）。横を使っている所も窓に入れる——このコースは強い加減速を
+  求める所がほとんどコーナーの出入りで、直線だけでは 1 周 0.1〜0.2 秒しか測れない（ばらつき 0.8〜3.2m/s²）。
+  そのぶん、出口で後輪が駆動と横を同時に受け持てないことも加速の上限に入る（横を上げると出口の加速が削られる）
+- 減速は従来の安全装置も残す: 制動区間の**終わり**（コーナーの入口）で車速が計画より `lag` 以上速ければ 1 段下げる
 - 付いて行けない理由は区別しない（タイヤの限界でも、モータのトルクでも、そこがこの車の限界）
-- 区間の途中の差は使わない。制動の出だしは指令の遅れのぶん必ず計画より速く、その差は減速度に比例する
-  （区間全体の 90% 点で見たら、シムで真値 3.00 に対して 2.40 で止まった）。終わりの差は、実機 4 走行
-  （2026-10-13）で減速 1.9〜2.9 のどこでも −0.15〜+0.09m/s（中央 −0.05〜+0.03）＝まだ付いて行けている
+- 2026-10-21 `surge_20261021_122530` への当てはめ: 周ごとの比は減速 0.81〜1.06（平均 0.95）、加速 0.49〜1.02
+  （横の上限を上げている間は 0.5〜0.85、落ち着いた後は 0.95 前後）
 
-**加速は学習しない**（天井 `plan_accel_limit_m_s2` で固定）。TC が絞っている間の実測の加速度で決める版（2026-10-20）は、
-実機で 3.0 → 1.86 まで下がり続けた（窓の加速度が計画の要求に引きずられる正のフィードバック）ので消した。減速と
-同じ見方をしても分かれない:
-加速区間の終わりの遅れは、加速 1.77 でも 2.66 でも 0.1〜0.25m/s（周ごとに 0.5 まで振れる）で変わらず、はっきり
-大きいのは横の上限が高すぎてリアが滑り続けた走行（1.1m/s）だけだった。高すぎる加速は STM32 の TC が抑える。
-学習していた版は、内側の後輪が浮いた窓 1 つで 2.66 → 1.77 に下げて戻れなかった（実機 2026-10-13）。
-
-以前の形（0.15〜0.4 秒の窓で車速の傾きを測る・TC とスリップ率で判定する・制動区間の初めだけ強い減速を
-求めて測る `raceline.probe_brake`）は、雑音や後輪の浮き・経路の形ごとに手当てが増え続けたので捨てた
-（定数 約 35 個。測れるかどうかが線しだいで、横の上限が低い間は減速が 1 度も上がらない走行があった）。
-★そのぶん、減速は限界を 1 段超えた周に、コーナーへ計画より速く入る（`step` ぶん。横の安全装置が受ける）。
+**経緯**: 以前は減速を区間の終わりの遅れだけで決めていた。実機では、3.0 を求めた直線の 0.2 秒で右後輪がロックして
+2.4 しか出ていなくても、コーナーの中で取り戻すので「付いて行けた」と見て、ランプの上限 3.0 に張り付いた。
+加速は、TC が絞っている間の実測の加速度をそのまま上限にした版（2026-10-20）が、窓の加速度が計画の要求に
+引きずられて 3.0 → 1.86 まで下がり続けた（出だしの遅れを捨てず、求めた値と比べていなかった）ので、いったん固定にしていた。
 
 ## シムと実機の違い
 
@@ -177,6 +175,8 @@ A_FLOOR = 1.0
 A_CEIL = 9.0
 #: 摩擦円の半径の、横の限界に対する比の範囲（`GripMap.coup`。1 = 楕円、大きいほど前後と横の取り合いが弱い）
 COUP_CEIL = 2.0
+#: 加速側の摩擦の形の指数 `accn` の上限（2 = 円。`GripMap.accn`）
+ACCN_CEIL = 2.0
 #: 読み込むセルの数の上限
 MAX_CELLS = 20000
 #: 加速・減速の上限の下限 [m/s²]
@@ -359,6 +359,14 @@ class GripConfig:
     couple_step: float = 0.12
     couple_step_min: float = 0.04
     couple_max: float = COUP_CEIL
+    #: 加速しながらのリアの滑りが出たら、加速側の形の指数 `accn`（2 = 円）を `accn_step` ずつ `accn_min` まで下げる。
+    #: 横の上限や制動側の比は下げない（出口の駆動と横の取り合いが原因で、ほかの原因ではないため）。
+    #: 「横偏差の増え」も、横偏差がいちばん増えた時点でそのコーナーの出口の加速（計画が `accn_drive` [m/s²] 以上）が
+    #: 始まっていて、加速中に TC が介入していたら同じ扱い（`v_max` に届いて計画の加速が 0 になった後の膨らみも含める）（2026-10-21 `surge_20261021_122530`: 前兆 6 回のうち 5 回が出口の加速の
+    #: 終わりの同じ場所で、直前に TC が後輪の空転でトルクを 0 まで切っていた。うち 4 回が横の上限を 5.96 → 5.38 に下げた）
+    accn_min: float = 1.25
+    accn_step: float = 0.25
+    accn_drive: float = 0.15
     #: True なら `step_up` を planner の設定で上書きしない（`sim.bench --grip-set step_up=…`）
     fixed_step: bool = False
     #: True なら周の境目でだけ上げる（収束の速さを比べる基準版。`sim.bench --grip-per-lap`）
@@ -415,14 +423,23 @@ class GripMap:
     #: 走行を始めるたびに前回滑った高さを 1 段越えて試し直す。路面が良くなっても上げ直さないので、
     #: 上げ直したいときは `.grip.json` を消す
     ceil: float = 0.0
-    #: 摩擦円の半径 ÷ 横の限界（`TimeLearner` がタイムで決める。1 = 楕円のまま）
+    #: **減速側の**摩擦円の半径 ÷ 横の限界（`TimeLearner` がタイムで決める。1 = 楕円のまま）。
+    #: 加速側は常に比 1（2026-10-21。実機の g-g で制動はコーナーの中でも楕円よりずっと残り、出口の加速は後輪が
+    #: 駆動と横を同時に受け持つ限界で決まる。比を加減速で共有すると、出口のリアの滑りで制動側の拡大まで止まった）
     coup: float = 1.0
+    #: **加速側**の摩擦の形の指数 `n`（加速 = 上限 × (1 − (横/半径)ⁿ)^(1/n)。2 = 円。小さいほど、横を使っている
+    #: コーナー出口で加速を削る）。加速しながらのリアの滑りで下がり、上がらない（2026-10-21。実機の事象は 5 回とも駆動中）。
+    #: コースの場所ごとではなく、コース全体で 1 つ
+    accn: float = ACCN_CEIL
     #: **この地図（コース）で学習を終えた値**（`TimeLearner` が横・摩擦円の比の探索を終え、1 周を測った後の
     #: 採用済みの値。0 = まだ無い）。読み込むとこの値から**そのまま**始め、探索もしない——2 回目以降の走行は
     #: 1 周目からベストの設定で走る（2026-10-20 バンビ依頼）。安全装置が働いて下げたら、ここも下げる
     best_lat: float = 0.0
     best_dec: float = 0.0
     best_coup: float = 0.0
+    best_accn: float = 0.0
+    #: 加速の学習を終えた値（2026-10-22 から学習する。0 = 無い・古いファイル → `accel` から）
+    best_acc: float = 0.0
 
     def to_json(self) -> str:
         cells = [[ix, iy, round(c.ok, 3), round(c.bad, 3), round(c.base, 4), min(c.n, 50)]
@@ -432,8 +449,9 @@ class GripMap:
                            "accel": round(self.accel, 3), "decel": round(self.decel, 3),
                            "noise": round(self.noise, 5), "noise_n": min(self.noise_n, 100000),
                            "ceil": round(self.ceil, 3), "coup": round(self.coup, 3),
+                           "accn": round(self.accn, 3), "best_accn": round(self.best_accn, 3),
                            "best_lat": round(self.best_lat, 3), "best_dec": round(self.best_dec, 3),
-                           "best_coup": round(self.best_coup, 3),
+                           "best_coup": round(self.best_coup, 3), "best_acc": round(self.best_acc, 3),
                            "cells": cells})
 
     @classmethod
@@ -465,8 +483,11 @@ class GripMap:
                 noise=_num(raw.get("noise"), 0.0, NOISE_CEIL),
                 ceil=_num(raw.get("ceil"), A_FLOOR, A_CEIL))
         m.coup = min(COUP_CEIL, max(1.0, _num(raw.get("coup"), 1.0, COUP_CEIL) or 1.0))
+        m.accn = _num(raw.get("accn"), 1.0, ACCN_CEIL) or ACCN_CEIL
+        m.best_accn = _num(raw.get("best_accn"), 1.0, ACCN_CEIL)
         m.best_lat = _num(raw.get("best_lat"), A_FLOOR, A_CEIL)
         m.best_dec = _num(raw.get("best_dec"), X_FLOOR, A_CEIL)
+        m.best_acc = _num(raw.get("best_acc"), X_FLOOR, A_CEIL)
         m.best_coup = min(COUP_CEIL, max(1.0, _num(raw.get("best_coup"), 1.0, COUP_CEIL) or 1.0))
         if not (m.best_lat > 0.0 and m.best_dec > 0.0):
             m.best_lat = m.best_dec = m.best_coup = 0.0
@@ -563,12 +584,31 @@ class LaunchFit:
 
 @dataclass
 class LongConfig:
-    #: 1 段で上げる（下げる）割合
+    #: 上げる 1 段の割合（下げた後は半分ずつ、`step_min` まで）
     step: float = 0.08
-    #: 付いて行けたとみなす、制動区間の終わりで車速が計画より速かったぶん [m/s]（モジュール docstring）
+    step_min: float = 0.02
+    #: 計画が上限のこの割合以上の加速（減速）を求めている間を 1 つの窓にする（下げる判断はこの窓すべてで見る）
+    strong: float = 0.5
+    #: **上げる**判断は、上限のこの割合以上を求めた窓（上限近くを試した窓）だけで見て、合計 `near_min_s` [s] 溜まるまで
+    #: 上げない（緩い要求に付いて行けても、上限で付いて行ける証拠にならない。シム `real_20261020` で、コーナーの中の
+    #: 緩い窓だけで減速を 3.08 まで上げ、入口の安全装置が 2.8 へ戻す往復になった。真値 2.54）
+    near: float = 0.85
+    near_min_s: float = 0.3
+    #: 窓の出だしで捨てる時間 [s]（速度ループの遅れが溜まる過渡。planner が速度ループの時定数の `settle_k` 倍を
+    #: 入れる。実機 `122530` で 1 倍 → 2.5 倍にすると、窓ごとの減速のばらつきが 0.51 → 0.25m/s² になった）と、
+    #: 残りがこれより短い窓は使わない [s]
+    settle_s: float = 0.17
+    settle_k: float = 2.5
+    fit_min_s: float = 0.1
+    #: 窓をこの長さ [s] 溜めたら、周の境目で判断する
+    pool_s: float = 2.0
+    #: 出た ÷ 求めた がこれ未満なら下げる・これ以上なら上げる（その間は保つ）。1 回に下げるのはこの割合まで
+    short: float = 0.90
+    follow: float = 0.97
+    cut_max: float = 0.8
+    #: 減速の安全装置: 制動区間の終わりで車速が計画より速かったぶん [m/s]。上限の `zone` 倍以上の減速を求めている
+    #: 間を制動区間とし、`min_s` 秒より短い区間は見ない。終わりの `tail_s` 秒の平均を、その区間の値にする
     lag: float = 0.10
-    #: プロファイルが減速の上限のこの割合以上を求めている間を 1 つの制動区間とする。`min_s` 秒より短い
-    #: 区間は見ない。終わりの `tail_s` 秒の平均を、その区間の値にする
     zone: float = 0.5
     min_s: float = 0.3
     tail_s: float = 0.1
@@ -579,9 +619,50 @@ class LongConfig:
     floor: float = 0.5
 
 
+class _Axis:
+    """加速か減速の一方（`LongLearner`）。窓を集め、溜まったら判断する。"""
+
+    def __init__(self, sign: float) -> None:
+        self.sign = sign                    #: +1 = 加速、−1 = 減速
+        self.init = 0.0
+        self.max = A_CEIL
+        self.floor = X_FLOOR
+        self.step = 0.0
+        self.win: list[tuple[float, float, float, float]] = []  #: 今の窓の (時刻, ずれ, 求めた大きさ, 上限)
+        self.got = 0.0                      #: 溜めた Σ 出た×長さ
+        self.req = 0.0                      #: 溜めた Σ 求めた×長さ
+        self.len = 0.0                      #: 溜めた長さ [s]
+        #: 上限近くを求めた窓だけの、同じ 3 つ（上げる判断に使う）
+        self.near_got = self.near_req = self.near_len = 0.0
+        self.ratio = 0.0                    #: 直近に判断した 出た ÷ 求めた（診断用。0 = まだ）
+        self.decisions = 0
+
+    def close(self, cfg: LongConfig) -> None:
+        """今の窓を閉じる。出だしを捨てて、ずれに直線を当てる。"""
+        w, self.win = self.win, []
+        if not w:
+            return
+        t0 = w[0][0] + cfg.settle_s
+        k = [r for r in w if r[0] >= t0]
+        if len(k) < 3 or k[-1][0] - k[0][0] < cfg.fit_min_s:
+            return
+        ts = np.asarray([r[0] for r in k])
+        de = float(np.polyfit(ts - ts[0], np.asarray([r[1] for r in k]), 1)[0])
+        req = float(np.mean([r[2] for r in k]))
+        d = float(ts[-1] - ts[0])
+        # 加速: e の傾き = 出た − 求めた。減速（大きさ）: e の傾き = 求めた − 出た
+        got = req + self.sign * de
+        self.got += got * d
+        self.req += req * d
+        self.len += d
+        if req >= cfg.near * float(np.mean([r[3] for r in k])):
+            self.near_got += got * d
+            self.near_req += req * d
+            self.near_len += d
+
+
 class LongLearner:
-    """減速の上限を走行中に決める（モジュール docstring）。値は `GripMap.decel`。加速（`GripMap.accel`）は
-    設定の天井で固定（`configure` の `acc_init`）。"""
+    """加速・減速の上限を走行中に決める（モジュール docstring）。値は `GripMap.accel`・`decel`。"""
 
     def __init__(self, cfg: LongConfig | None = None) -> None:
         self.cfg = cfg or LongConfig()
@@ -589,50 +670,77 @@ class LongLearner:
 
     def reset(self, m: GripMap) -> None:
         self.map = m
-        self.dec_max = A_CEIL
-        self.dec_floor = X_FLOOR
+        self.acc = _Axis(1.0)
+        self.dec = _Axis(-1.0)
         self.down_only = False
-        self.dec_done = False               #: 止めたか（付いて行けなくなった・設定の上限まで来た）
         self.ver = 0                        #: 値が変わるたびに進む
         self.ver_down = 0
         self.events: list[dict] = []        #: 値を下げた記録（表示・ベンチ用）
-        self.windows = 0                    #: 判断した周の数
-        self.last = 0.0                     #: 直近の周の、区間の終わりの差のいちばん大きい値 [m/s]（診断用）
-        self._zone: list[float] | None = None   #: 今の制動区間の「車速 − 計画の速度」
+        self.windows = 0                    #: 判断した回数（加速・減速と、減速の安全装置）
+        self.last = 0.0                     #: 直近の周の、制動区間の終わりの差のいちばん大きい値 [m/s]（診断用）
+        self._zone: list[float] | None = None   #: 今の制動区間の「車速 − 計画の速度」（減速の安全装置）
         self._ends: list[float] = []        #: この周の、区間ごとの終わりの差
         self._plan = (0.0, 0.0, 0.0)        #: 直近に受け取った計画の (加速度, 速度) と、それが変わった時刻
         self._t = self._dt = 0.0
         self._quiet_t = -1e9
 
-    def configure(self, *, acc_init: float, dec_init: float, dec_max: float, down_only: bool) -> None:
-        """:param acc_init: 加速の上限 [m/s²]（学習しない。この値をそのまま使う）"""
+    @property
+    def dec_done(self) -> bool:
+        """減速の値が落ち着いたか（判断を 1 度でもして、上げる途中でない）。ラインの引き直しの判断に使う。"""
+        return self.dec.decisions > 0 and self.dec.step <= self.cfg.step * 0.5 + 1e-9
+
+    def configure(self, *, acc_init: float, dec_init: float, dec_max: float, down_only: bool,
+                  acc_max: float | None = None, loop_tau_s: float | None = None) -> None:
+        """:param acc_init: 加速の出発点（校正の値）[m/s²]
+        :param acc_max: 加速を上げる天井（目標車速のランプの上限）[m/s²]。`None` なら `dec_max`
+        :param loop_tau_s: 速度ループの時定数 [s]（窓の出だしで捨てる時間 = その `settle_k` 倍）"""
         m = self.map
-        self.dec_max = max(X_FLOOR, dec_max)
         self.down_only = down_only
-        self.dec_floor = max(X_FLOOR, self.cfg.floor * dec_init)
-        acc = max(X_FLOOR, acc_init)
-        dec = min(self.dec_max, max(self.dec_floor, m.decel if m.decel > 0.0 else dec_init))
-        if acc != m.accel or dec != m.decel:
-            m.accel, m.decel = acc, dec
+        if acc_max is None:
+            acc_max = dec_max
+        if loop_tau_s is not None and loop_tau_s > 0.0:
+            self.cfg.settle_s = max(0.05, self.cfg.settle_k * loop_tau_s)
+        changed = False
+        for ax, init, top, attr in ((self.acc, acc_init, acc_max, "accel"), (self.dec, dec_init, dec_max, "decel")):
+            ax.max = max(X_FLOOR, top)
+            ax.init = max(X_FLOOR, min(ax.max, init))
+            ax.floor = max(X_FLOOR, self.cfg.floor * ax.init)
+            if ax.step <= 0.0:
+                ax.step = self.cfg.step
+            cur = getattr(m, attr)
+            val = min(ax.max, max(ax.floor, cur if cur > 0.0 else ax.init))
+            if val != cur:
+                setattr(m, attr, val)
+                changed = True
+        if changed:
             self._bump(True)
 
     def load(self) -> None:
         """保存した値から再開する（`reset` の後）。そのまま信じず `back_off` 倍から。"""
         m = self.map
+        if m.accel > 0.0:
+            m.accel = max(X_FLOOR, m.accel * self.cfg.back_off)
         if m.decel > 0.0:
             m.decel = max(X_FLOOR, m.decel * self.cfg.back_off)
+
+    def settle(self) -> None:
+        """地図に保存した「学習を終えた値」から始める（探さない。下げる向きは働く）。"""
+        for ax in (self.acc, self.dec):
+            ax.step = self.cfg.step_min
+            ax.decisions = max(ax.decisions, 1)
 
     def rescale(self, r: float) -> None:
         """路面が変わった（横の限界が `r` 倍になった。横の学習が呼ぶ）。減速も同じ割合で下げ、探し直す。"""
         m = self.map
         if r < 1.0:
-            m.decel = max(self.dec_floor, m.decel * r)
-        self.dec_done = False
+            m.decel = max(self.dec.floor, m.decel * r)
+        self.recheck()
         self._bump(True)
 
     def recheck(self) -> None:
-        """探し直す（路面が変わったらしい。横の学習が呼ぶ）。"""
-        self.dec_done = False
+        """探し直す（路面が変わったらしい。横の学習が呼ぶ）。1 段の幅を戻す。"""
+        for ax in (self.acc, self.dec):
+            ax.step = self.cfg.step
 
     def observe(self, t: float, v: float, a_plan: float, gate: str, v_plan: float | None) -> None:
         """車両状態 1 つぶん。
@@ -641,14 +749,26 @@ class LongLearner:
         :param v_plan: 今の場所のプロファイルの速度 [m/s]
         :param gate: 空でなければ見ない理由（通常の周回でない・前兆で減速している）
         """
-        cfg = self.cfg
+        cfg, m = self.cfg, self.map
         self._dt, self._t = t - self._t, t
         if v_plan is not None and (a_plan, v_plan) != self._plan[:2]:
             self._plan = (a_plan, v_plan, t)
         if gate or v_plan is None or v < 0.5 or t - self._quiet_t < cfg.quiet_s:
             self._zone = None                   # 途中で切れた区間は捨てる
+            self.acc.win, self.dec.win = [], []
             return
-        if -a_plan < cfg.zone * self.map.decel:
+        # 計画は planner の周期（10Hz）でしか更新されない。その間は計画の加速度で今へ進める
+        e = v - (v_plan + a_plan * min(t - self._plan[2], 0.2))
+        for ax, lim in ((self.acc, m.accel), (self.dec, m.decel)):
+            want = ax.sign * a_plan
+            if lim > 0.0 and want >= cfg.strong * lim:
+                if ax.win and t - ax.win[-1][0] > 0.05:
+                    ax.close(cfg)
+                ax.win.append((t, e, want, lim))
+            elif ax.win:
+                ax.close(cfg)
+        # 減速の安全装置（制動区間の終わりの遅れ）
+        if -a_plan < cfg.zone * m.decel:
             z, self._zone = self._zone, None
             dt = self._dt if 0.0 < self._dt < 0.1 else 0.01
             if z is not None and len(z) * dt >= cfg.min_s:
@@ -657,29 +777,46 @@ class LongLearner:
             return
         if self._zone is None:
             self._zone = []
-        # 計画は planner の周期（10Hz）でしか更新されない。その間は計画の加速度で今へ進める
-        self._zone.append(v - (v_plan + a_plan * min(t - self._plan[2], 0.2)))
+        self._zone.append(e)
 
     def lap(self, t: float) -> None:
-        """1 周した。付いて行けていれば 1 段上げ、行けていなければ 1 段下げて止める。"""
+        """1 周した。減速の安全装置を見て、窓が溜まっていれば加速・減速を判断する。"""
         cfg, m = self.cfg, self.map
         ends, self._ends = self._ends, []
-        if not ends:
-            return
-        e = self.last = max(ends)
-        self.windows += 1
-        val = m.decel
-        if e > cfg.lag:
-            new, self.dec_done = max(self.dec_floor, val / (1.0 + cfg.step)), True
-            if new < val:
-                self.events.append({"t": t, "kind": "減速", "ask": val, "got": new, "lag": e})
-        elif self.dec_done or self.down_only:
-            return
-        else:
-            new = min(self.dec_max, val * (1.0 + cfg.step))
-            self.dec_done = new >= self.dec_max
+        dec0 = m.decel
+        for ax, attr, name in ((self.acc, "accel", "加速"), (self.dec, "decel", "減速")):
+            if ax.len < cfg.pool_s or ax.req <= 0.0:
+                continue
+            r = ax.ratio = ax.got / ax.req
+            ax.got = ax.req = ax.len = 0.0
+            ax.decisions += 1
+            self.windows += 1
+            val = getattr(m, attr)
+            near = ax.near_got / ax.near_req if ax.near_len >= cfg.near_min_s and ax.near_req > 0.0 else 0.0
+            if r < cfg.short:
+                self._set(ax, attr, val * max(r, cfg.cut_max), t, name, ratio=r)
+            elif r >= cfg.follow and near >= cfg.follow and not self.down_only:
+                new = min(ax.max, val * (1.0 + ax.step))
+                if new > val:
+                    self._set(ax, attr, new, t, name, ratio=near)
+                    ax.step = min(cfg.step, ax.step * 1.5)
+        if ends:
+            # 減速の安全装置: この周に下げていなければ、入口で遅れた周は 1 段下げる
+            e = self.last = max(ends)
+            if e > cfg.lag and m.decel >= dec0:
+                self.windows += 1
+                self.dec.decisions = max(self.dec.decisions, 1)
+                self._set(self.dec, "decel", m.decel / (1.0 + cfg.step), t, "減速（入口で遅れ）", lag=e)
+
+    def _set(self, ax: _Axis, attr: str, new: float, t: float, kind: str, **info) -> None:
+        val = getattr(self.map, attr)
+        new = min(ax.max, max(ax.floor, new))
+        if new < val:
+            ax.step = max(self.cfg.step_min, 0.5 * ax.step)
+            self.events.append({"t": t, "kind": kind, "ask": val, "got": new, **info})
         if new != val:
-            m.decel = new
+            setattr(self.map, attr, new)
+            ax.near_got = ax.near_req = ax.near_len = 0.0      # 上限が変わった。上限近くの窓は測り直す
             self._bump(new < val)
 
     def _bump(self, down: bool) -> None:
@@ -689,9 +826,10 @@ class LongLearner:
         self.note_change()
 
     def note_change(self) -> None:
-        """学習値（横も含む）が変わった。今の区間を捨て、しばらく見ない。"""
+        """学習値（横も含む）が変わった。今の区間・窓を捨て、しばらく見ない。"""
         self._quiet_t = self._t
         self._zone = None
+        self.acc.win, self.dec.win = [], []
 
 
 
@@ -807,14 +945,6 @@ class GripLearner:
     def worth_saving(self) -> bool:
         """保存する値があるか（試行・前兆・減速の判断が 1 つでもあった）。"""
         return bool(self.trials or self.events or self.long.windows)
-
-    def surface_values(self) -> tuple[float, float, float, float] | None:
-        """路面の記録（地図によらない学習の出発点、`mapstore.save_grip_surface`）に書く
-        `(横, 減速, 摩擦円の比, 安全装置が働いた上限)`。書くに値しなければ `None`。"""
-        m = self.map
-        if not self.worth_saving() or m.level <= 0.0 or m.decel <= 0.0:
-            return None
-        return m.level, m.decel, m.coup, m.ceil
 
     def set_launch(self, a: float) -> None:
         """発進の加速度から横の初期値を出す（比が分かっているとき。まだ前兆も試行も無い間だけ）。"""
@@ -1006,9 +1136,17 @@ class GripLearner:
         if use >= cfg.trial_use:
             if seg is None:
                 seg = self._seg = {"cells": {}, "fail": False, "peak": 0.0, "top": 0.0, "lv": 0.0,
-                                   "ex": 0.0, "ex_t": 0.0, "ex_v2": 0.0, "ex_ap": 0.0, "cx": {}}
+                                   "ex": 0.0, "ex_t": 0.0, "ex_v2": 0.0, "ex_ap": 0.0, "cx": {},
+                                   "drive": {}, "acc": False, "tc": False}
             self._seg_low = 0.0
-            seg["cx"][key] = max(seg["cx"].get(key, 0.0), abs(self._cross))
+            if abs(a_x) >= cfg.accn_drive:
+                seg["acc"] = a_x > 0.0          # 制動に入ったら戻す（コーナーが続くと 1 つの試行につながる）
+            if tc_active and a_x > 0.0:
+                seg["tc"] = True
+            if abs(self._cross) >= seg["cx"].get(key, 0.0):
+                seg["cx"][key] = abs(self._cross)
+                # その場所の横偏差がいちばん大きかったとき、出口の加速が始まっていたか（`TimeLearner._end_trial`）
+                seg["drive"][key] = seg["acc"]
             if ex is not None:
                 # コーナー 1 つぶんの平均（`_end_trial`）: 不足 [m/s²]・時間・車速²・上限
                 seg["ex"] += ex * applied * dt
@@ -1532,10 +1670,12 @@ class TimeLearner(GripLearner):
             # 下げる向きは今までどおり働く（安全装置で `_guard` が下げ、減速は計画に遅れたら下げる）
             m.level = self.conf = m.best_lat
             m.decel = m.best_dec
+            m.accel = m.best_acc or m.accel
             m.coup = m.best_coup or 1.0
+            m.accn = m.best_accn or m.accn
             self.converged = True
             self.coup_done = True
-            self.long.dec_done = True
+            self.long.settle()
             self.from_best = True
             self._bump(down=True)
 
@@ -1551,10 +1691,14 @@ class TimeLearner(GripLearner):
         if self.settled():
             m.best_lat = self.ref_level or m.level
             m.best_dec = m.decel
+            m.best_acc = m.accel
             m.best_coup = self.ref_coup or m.coup
+            m.best_accn = m.accn
         elif m.best_lat > 0.0:
             m.best_lat = min(m.best_lat, self.ref_level or m.level)
             m.best_dec = min(m.best_dec, m.decel)
+            m.best_acc = min(m.best_acc or m.accel, m.accel)
+            m.best_accn = min(m.best_accn or m.accn, m.accn)
 
     def _reset_couple(self) -> None:
         """摩擦円の形の基準（採用した比のタイム）を捨てる。横の上限や線が変わると、前のタイムとは比べられない。"""
@@ -1565,15 +1709,6 @@ class TimeLearner(GripLearner):
         """保存してよいか。読み込んだ値は `back_off` 倍から始めるので、1 周も測らないうちに保存すると、
         短い走行を繰り返すたびに 0.92 倍ずつ下がっていく。前兆・安全装置が働いたときは保存する。"""
         return self._measured or bool(self.events)
-
-    def surface_values(self) -> tuple[float, float, float] | None:
-        """路面の記録に書く値。**1 周を測り終えてから**で、試している段ではなく採用済みの段
-        （横は `ref_level`、比は `ref_coup`。試していなければ今の値）を書く——試している段は
-        まだ確かめていない値で、次の地図の出発点にすると 1 段ぶん行き過ぎから始まる。"""
-        m = self.map
-        if not self._measured or m.level <= 0.0 or m.decel <= 0.0:
-            return None
-        return self.ref_level or m.level, m.decel, self.ref_coup or m.coup, m.ceil
 
     def set_launch(self, a: float) -> None:
         """発進の加速度から決める初期値は**下げる方向だけ**使う。上げる方向は、1 段ずつタイムで
@@ -1610,14 +1745,16 @@ class TimeLearner(GripLearner):
             return
         self.passes += 1
         cfg, cells = self.cfg, self.map.cells
-        gain = max((cx - cells[k].cx for k, cx in seg["cx"].items()
-                    if k in cells and cells[k].cxn >= cfg.cross_gain_n), default=0.0)
+        gain, at = max(((cx - cells[k].cx, k) for k, cx in seg["cx"].items()
+                        if k in cells and cells[k].cxn >= cfg.cross_gain_n), default=(0.0, None))
         self.last_cross_gain = gain
         # 探している間だけ見る。収束した後は、線から大きく外れる・リアが滑るといったはっきりした
         # 出来事でだけ下げる（1 回の「増え」で 5% ずつ下げていくと、測り違いのたびに遅くなる）
         if gain > cfg.cross_gain and (not self.converged or self._coup_trial()):
             x, y = seg.get("at", (0.0, 0.0))
-            self._guard(t, x, y, "横偏差の増え", seg["peak"], gain, soft=True)
+            # 出口の加速で後輪が空転して膨らんだ（増えた所が加速中で、そのコーナーで TC が介入していた）
+            drive = seg["tc"] and seg["drive"].get(at, False)
+            self._guard(t, x, y, "横偏差の増え", seg["peak"], gain, soft=True, drive=drive)
             return
         for k, cx in seg["cx"].items():
             c = cells.get(k)
@@ -1658,7 +1795,7 @@ class TimeLearner(GripLearner):
             if self._slide >= cfg.slide_s:
                 self._slide = 0.0
                 self._slow(t, v, 0.95, False)
-                self._guard(t, x, y, "リアの滑り", self._alat)
+                self._guard(t, x, y, "リアの滑り", self._alat, drive=a_x > 0.15 or tc_active)
         else:
             self._slide = max(0.0, self._slide - dt)
         self._time_lap(t, x, y, v, gate)
@@ -1883,9 +2020,11 @@ class TimeLearner(GripLearner):
         self._guard(t, x, y, kind or "横", a, excess)
 
     def _guard(self, t: float, x: float, y: float, kind: str, a: float, excess: float = 0.0,
-               soft: bool = False) -> None:
+               soft: bool = False, drive: bool = False) -> None:
         """安全装置が働いた。試している段ならやめ、採用済みの段なら少し下げて測り直す。
 
+        :param drive: 加速しながら（計画が加速を求めている・TC が介入している）出た後輪の滑り・横偏差の増え。
+            原因は出口の駆動と横の取り合いなので、横の上限・制動側の比ではなく、加速側の形 `accn` を下げる
         :param soft: 線から大きく外れる前の兆候（横偏差の増え）。1 回ではその上限を「近づかない値」に
             しない。近い高さ（1 段ぶん上まで）で 2 回目が出たら、する
         """
@@ -1895,6 +2034,10 @@ class TimeLearner(GripLearner):
         if t - self._guard_t < cfg.time_guard_quiet_s:
             return                              # 同じ出来事の続き
         self._guard_t = t
+        if drive and cfg.couple_learn and not self.down_only \
+                and m.accn > cfg.accn_min + 1e-9:
+            self._drive_slip(t)
+            return
         if self._coup_trial():
             # 試している摩擦円の形が原因とみなす（横の上限は変えない）
             self._coup_bad = min(self._coup_bad, m.coup)
@@ -1921,6 +2064,27 @@ class TimeLearner(GripLearner):
         self.converged = False
         self._bump(down=True)
 
+    def _drive_slip(self, t: float) -> None:
+        """加速しながらのリアの滑り。加速側の形 `accn` を 1 段下げる（出口の加速を削る）。
+
+        横の上限は下げず、「近づかない値」（`ceil`）にもしない: 原因が横ではなく、出口の駆動と横の取り合い
+        だから。形が変わると、前のタイム・計画は比べられない。試している横の段があればやめ、採用済みの段なら
+        そこを測り直す（収束していれば、形が変わったぶん上がるかを探し直す）。
+        """
+        cfg, m = self.cfg, self.map
+        m.accn = max(cfg.accn_min, m.accn - cfg.accn_step)
+        self._laps, self._claps = [], []
+        ref = self._ref
+        if ref is not None and m.level > ref[0] * (1.0 + 1e-6) and not self.converged:
+            self._reject(t)                     # 試している横の段をやめる（`_reject` が `_bump` する）
+            return
+        self._ref = None
+        self._reset_couple()
+        self.coup_done = False
+        self._step = max(cfg.time_step_min, 0.5 * self._step)
+        self.converged = False
+        self._bump(down=True)
+
     def _event(self, t: float, x: float, y: float, kind: str, a: float, applied: float,
                excess: float, surprise: bool) -> None:
         self.events.append({"t": t, "x": x, "y": y, "a": a, "a_x": 0.0, "b": a, "kind": kind,
@@ -1932,7 +2096,8 @@ class TimeLearner(GripLearner):
                 "ref_lat": round(float(ref[0]), 3), "ref_lap": round(float(ref[1]), 3),
                 "ref_plan": round(float(ref[2]), 3), "step": round(float(self._step), 4),
                 "laps_n": len(self._laps), "steps": len(self.steps),
-                "coup": round(float(self.map.coup), 3), "coup_done": 1.0 if self.coup_done else 0.0}
+                "coup": round(float(self.map.coup), 3), "coup_done": 1.0 if self.coup_done else 0.0,
+                "accn": round(float(self.map.accn), 3)}
 
     def state(self, gate: str = "") -> str:
         if gate or self.cap is not None or self.down_only:

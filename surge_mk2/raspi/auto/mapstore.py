@@ -56,8 +56,7 @@ import numpy as np
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
            "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
            "import_upload", "export_map", "save_routes", "load_routes", "ROUTES_KEY",
-           "save_grip", "load_grip", "clear_grip", "save_grip_vehicle", "load_grip_vehicle",
-           "save_grip_surface", "load_grip_surface", "clear_grip_surface", "GRIP_KEY",
+           "save_grip", "load_grip", "clear_grip", "GRIP_KEY",
            "save_line_cache", "load_line_cache",
            "polyline_length"]
 
@@ -67,11 +66,6 @@ MAPS_DIR = Path(__file__).resolve().parents[2] / "saved_maps"
 ROUTES_KEY = "routes_json"
 #: npz に同梱する学習した横グリップの項目名（`nav/grip.GripMap` の JSON）
 GRIP_KEY = "grip_json"
-#: 地図によらない学習の記録を置くファイル。地図ではないので `*.npz` の一覧に出ない。
-#: 車に固有の値（`launch_ratio` = 横の限界 ÷ 発進の加速度）と、路面の記録（`surface`、`save_grip_surface`）
-_GRIP_VEHICLE = "_grip_vehicle.json"
-#: 路面の記録として受け付ける範囲 [m/s²]（`nav/grip.A_FLOOR`〜`A_CEIL`、摩擦円の比は 1〜`COUP_CEIL`）
-_SURFACE_RANGE = {"lat": (1.0, 9.0), "dec": (0.5, 9.0), "coup": (1.0, 2.0)}
 #: 同梱できる経路の設定の大きさの上限（`telemetry_node` が GUI から受ける上限と同じ）
 _MAX_ROUTES_CHARS = 1_000_000
 
@@ -495,8 +489,7 @@ def clear_grip(name: str) -> bool:
     """地図 `name` の学習値（`<name>.grip.json`）だけを消す。消したら `True`。
 
     **地図・経路の設定（`.routes.json`）・仕上げた経路の写し（`.lines.pkl`）は残す。**
-    車に固有の `_grip_vehicle.json`（発進の加速度との比・路面の記録）も残す——あれは
-    コースではなく車・床の値なので、地図を選び直しても同じ値を使う。
+    学習値は地図の横にしか置かない（地図をまたぐ記録は持たない。2026-10-21 に消した）。
 
     走行中の planner は学習値を持ったままなので、GUI からの削除は
     `AutoCtrl.grip_clear_seq` でも planner に伝える（`slam2d_raceline.request_clear_grip`）。
@@ -509,32 +502,6 @@ def clear_grip(name: str) -> bool:
     existed = p.is_file()
     p.unlink(missing_ok=True)
     return existed
-
-
-def _grip_vehicle_read() -> dict:
-    try:
-        raw = json.loads((MAPS_DIR / _GRIP_VEHICLE).read_text())
-    except (OSError, ValueError):
-        return {}
-    return raw if isinstance(raw, dict) else {}
-
-
-def _grip_vehicle_write(**items) -> None:
-    """`_grip_vehicle.json` の項目を書き換える（他の項目は残す。`None` の項目は消す）。"""
-    try:
-        raw = _grip_vehicle_read()
-        for k, v in items.items():
-            if v is None:
-                raw.pop(k, None)
-            else:
-                raw[k] = v
-        MAPS_DIR.mkdir(parents=True, exist_ok=True)
-        p = MAPS_DIR / _GRIP_VEHICLE
-        tmp = p.with_name(p.name + ".tmp")
-        tmp.write_text(json.dumps(raw))
-        os.replace(tmp, p)
-    except OSError:
-        pass
 
 
 def save_line_cache(name: str, key: str, data: bytes) -> None:
@@ -573,58 +540,3 @@ def _write_bytes_atomic(p: Path, data: bytes) -> None:
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, p)
-
-
-def save_grip_vehicle(launch_ratio: float) -> None:
-    """車に固有の「横の限界 ÷ 発進の加速度」を書く（地図によらない。`vehicle.toml` には書かない）。"""
-    _grip_vehicle_write(launch_ratio=round(float(launch_ratio), 4))
-
-
-def load_grip_vehicle() -> float:
-    """保存した比。無い・壊れている・範囲外（0.5〜4）なら 0。"""
-    try:
-        r = float(_grip_vehicle_read().get("launch_ratio", 0.0))
-    except (ValueError, TypeError):
-        return 0.0
-    return r if math.isfinite(r) and 0.5 <= r <= 4.0 else 0.0
-
-
-def save_grip_surface(lat: float, dec: float, coup: float, ceil: float = 0.0, *, t: float) -> None:
-    """路面の記録（直近に学習して採用した横・減速の上限 [m/s²]・摩擦円の比・横の安全装置が働いた
-    いちばん低い上限 `ceil` [m/s²]（0 = 無い））を書く。
-
-    地図によらない。**新しい地図**（`.grip.json` が無い）の学習の出発点になる（`load_grip_surface`）。
-    路面はコースではなく床で決まるので、同じ床の別のコースでも 1 周目から使える。
-    :param t: 書いた時刻（UNIX 秒。表示用）
-    """
-    _grip_vehicle_write(surface={"lat": round(float(lat), 3), "dec": round(float(dec), 3),
-                                 "coup": round(float(coup), 3), "ceil": round(float(ceil), 3),
-                                 "t": round(float(t), 1)})
-
-
-def load_grip_surface() -> dict[str, float] | None:
-    """路面の記録 `{"lat", "dec", "coup", "ceil", "t"}`。無い・壊れている・範囲外なら `None`
-    （`ceil` だけは範囲外なら 0 = 無い）。"""
-    raw = _grip_vehicle_read().get("surface")
-    if not isinstance(raw, dict):
-        return None
-    out: dict[str, float] = {}
-    try:
-        for k, (lo, hi) in _SURFACE_RANGE.items():
-            v = float(raw.get(k, 1.0 if k == "coup" else 0.0))
-            if not (math.isfinite(v) and lo <= v <= hi):
-                return None
-            out[k] = v
-        c = float(raw.get("ceil", 0.0))
-        lo, hi = _SURFACE_RANGE["lat"]
-        out["ceil"] = c if math.isfinite(c) and lo <= c <= hi else 0.0
-        t = float(raw.get("t", 0.0))
-        out["t"] = t if math.isfinite(t) else 0.0
-    except (ValueError, TypeError):
-        return None
-    return out
-
-
-def clear_grip_surface() -> None:
-    """路面の記録を消す（路面が変わった。次の新しい地図は同定値から学習する）。"""
-    _grip_vehicle_write(surface=None)

@@ -184,10 +184,15 @@ def replace_plant_noise(plant: Plant) -> Plant:
 
 
 def _cmd_accel_limit() -> float:
-    """`[safety] cmd_accel_limit_m_s2`（Pi が COMMAND に載せる傾きの上限）。読めなければ 3.0。"""
+    """自動運転中に Pi が COMMAND に載せる傾き（学習前。`slam2d_raceline.auto_ramp`、校正値から決まる）。
+    ★2026-10-22 から `[safety] cmd_accel_limit_m_s2`（4.0）は学習の天井で、planner はそれより低い値で締める。
+    手動操縦は GUI の値（= その天井）のまま動くので、この試験の外。読めなければ 3.0。"""
     try:
-        with open(DEFAULT_TOML, "rb") as f:
-            v = float(tomllib.load(f).get("safety", {}).get("cmd_accel_limit_m_s2", 0.0))
+        from raspi.auto.registry import merged_params
+        from raspi.auto.slam2d_raceline import auto_ramp, limits
+        from raspi.core.vehicle import Vehicle
+        veh = Vehicle.load(DEFAULT_TOML)
+        v = auto_ramp(veh, limits(merged_params("slam2d_route", {}), veh))
     except (OSError, ValueError, tomllib.TOMLDecodeError):
         return 3.0
     return v if math.isfinite(v) and v > 0.0 else 3.0
@@ -200,7 +205,7 @@ _COAST = Seg(0.05, MODE_DISARM)
 #: TC・ABS・片輪浮き対策の場面
 SLIP: tuple[Scenario, ...] = (
     Scenario("launch", "停止から全開（トルク指令）", (Seg(1.0, MODE_TORQUE, _FULL),), 0.0),
-    Scenario("launch_pi", "停止から車速指令 3m/s（ランプは cmd_accel_limit）", (Seg(1.0, MODE_SPEED, 3.0, _RAMP),), 0.0),
+    Scenario("launch_pi", "停止から車速指令 3m/s（ランプは自動運転の学習前の値）", (Seg(1.0, MODE_SPEED, 3.0, _RAMP),), 0.0),
     Scenario("launch_lc", "停止から車速指令 3m/s＋ローンチコントロール",
              (Seg(1.0, MODE_SPEED_LAUNCH, 3.0, _RAMP),), 0.0),
     Scenario("roll", "0.5m/s から全開", (Seg(0.8, MODE_TORQUE, _FULL),), 0.5),
@@ -225,10 +230,10 @@ SLIP: tuple[Scenario, ...] = (
     Scenario("brake_split", "最大制動・左だけ路面μが0.4倍",
              (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(2.0, MODE_BRAKE, _FULL, mu_left=0.4)), 2.5, measure=1,
              kind="brake"),
-    Scenario("decel_pi", "2.5m/s から車速指令0（ランプは cmd_accel_limit）",
+    Scenario("decel_pi", "2.5m/s から車速指令0（ランプは自動運転の学習前の値）",
              (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(1.5, MODE_SPEED, 0.0, _RAMP)), 2.5, measure=1,
              kind="brake"),
-    Scenario("decel_pi_corner", "旋回しながら車速指令0（ランプは cmd_accel_limit）",
+    Scenario("decel_pi_corner", "旋回しながら車速指令0（ランプは自動運転の学習前の値）",
              (Seg(0.3, MODE_SPEED, 1.5, _RAMP, steer=0.25), Seg(1.0, MODE_SPEED, 0.0, _RAMP, steer=0.25)), 1.5,
              measure=1, kind="brake"),
     Scenario("cruise", "1.5m/s の定速（介入しないこと）", (Seg(1.0, MODE_SPEED, 1.5, _RAMP),), 1.5),

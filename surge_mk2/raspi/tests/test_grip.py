@@ -5,7 +5,6 @@
 """
 
 import json
-import time
 import math
 import sys
 import unittest
@@ -416,6 +415,101 @@ class TestTimeLearner(unittest.TestCase):
         self.assertAlmostEqual(g.map.level, 5.0 * 0.95, places=6)
         self.assertFalse(g.converged)                   # 下げた所を測り直す
 
+    def test_rear_slide_under_drive_lowers_the_accel_shape_not_the_level(self):
+        """加速しながらのリアの滑りは、横の上限・ceil ではなく加速側の形 `accn` を下げる。"""
+        g = self._g(init=5.0)
+        g._ref = (5.0, 6.0, 6.0)
+        g.converged = True
+        self.assertEqual(g.map.accn, 2.0)
+        t = 10.0
+        for want in (1.75, 1.5, 1.25):
+            g._guard(t, 0.0, 0.0, "リアの滑り", 5.0, drive=True)
+            self.assertAlmostEqual(g.map.accn, want)
+            self.assertAlmostEqual(g.map.level, 5.0)    # 横の上限はそのまま
+            self.assertEqual(g.map.ceil, 0.0)           # 「近づかない値」にもしない
+            self.assertFalse(g.converged)               # 形が変わったので探し直す
+            g.converged = True
+            t += 10.0
+        # 形がこれ以上削れなければ、これまでどおり横の上限を下げる
+        g._guard(t, 0.0, 0.0, "リアの滑り", 5.0, drive=True)
+        self.assertAlmostEqual(g.map.accn, 1.25)
+        self.assertAlmostEqual(g.map.level, 5.0 * 0.95)
+        self.assertGreater(g.map.ceil, 0.0)
+
+    def test_rear_slide_without_drive_keeps_the_old_handling(self):
+        g = self._g(init=5.0)
+        g._ref = (5.0, 6.0, 6.0)
+        g.converged = True
+        g._guard(1.0, 0.0, 0.0, "リアの滑り", 5.0)
+        self.assertEqual(g.map.accn, 2.0)
+        self.assertAlmostEqual(g.map.level, 5.0 * 0.95)
+
+    def test_drive_slide_during_a_coup_trial_does_not_blame_the_brake_side(self):
+        g = self._g(init=5.0)
+        g.converged = True
+        g._cref = (1.0, 6.0, 6.0)
+        g.map.coup = 1.12                               # 減速側の比を試している
+        g._guard(1.0, 0.0, 0.0, "リアの滑り", 5.0, drive=True)
+        self.assertAlmostEqual(g.map.accn, 1.75)
+        self.assertEqual(g._coup_bad, math.inf)         # 試した比は「安全装置が働いた比」にされない
+
+    def _exit_seg(self, g, *, drive: bool, tc: bool) -> dict:
+        """普段 1cm の場所で横偏差が 10cm に増えて抜けたコーナー（`_end_trial` に渡す形）。"""
+        c = g.map.cells[(0, 0)] = grip._Cell()
+        c.cx, c.cxn = 0.01, 5
+        return {"fail": False, "cx": {(0, 0): 0.10}, "drive": {(0, 0): drive}, "tc": tc,
+                "peak": g.map.level, "at": (0.0, 0.0)}
+
+    def test_cross_gain_while_accelerating_with_tc_lowers_the_accel_shape(self):
+        """出口の加速で TC が介入して膨らんだ「横偏差の増え」は、横の上限ではなく `accn` を下げる
+        （実機 2026-10-21 `122530`: 4 回とも出口の加速の終わりで、横の上限を 5.96 → 5.38 に下げていた）。"""
+        g = self._g(init=5.0)
+        g._ref = (5.0, 6.0, 6.0)
+        g._raise(0.0)                                   # 5.4 を試している
+        g._end_trial(1.0, self._exit_seg(g, drive=True, tc=True))
+        self.assertAlmostEqual(g.map.accn, 1.75)
+        self.assertEqual(g.map.ceil, 0.0)
+        self.assertEqual(g._soft, [])                   # 横の「近づかない値」の候補にもしない
+
+    def test_cross_gain_without_tc_or_outside_drive_stays_on_the_lateral_limit(self):
+        for drive, tc in ((True, False), (False, True)):
+            g = self._g(init=5.0)
+            g._ref = (5.0, 6.0, 6.0)
+            g._raise(0.0)
+            g._end_trial(1.0, self._exit_seg(g, drive=drive, tc=tc))
+            self.assertEqual(g.map.accn, 2.0, (drive, tc))
+            self.assertEqual(g._soft, [5.4], (drive, tc))
+
+    def test_segment_records_drive_and_tc_where_the_cross_track_peaks(self):
+        g = self._g(init=5.0)
+        g._cross = 0.02
+        for k in range(1, 100):                         # 横 4.5m/s² の定常円（減速中）
+            g.observe(k * DT, 2.0, 0.0, 3.0, 1.5, 0.5, a_x=-1.0)
+        seg = g._seg
+        self.assertIsNotNone(seg)
+        key = grip._cell(2.0, 0.0)
+        self.assertFalse(seg["drive"][key])             # 頂点の膨らみ（まだ加速していない）
+        g.observe(100 * DT, 2.0, 0.0, 3.0, 1.5, 0.5, a_x=1.0, tc_active=True)
+        g._cross = 0.08                                 # 加速の後、v_max に届いて計画の加速が 0 の所で増えた
+        g.observe(101 * DT, 2.0, 0.0, 3.0, 1.5, 0.5, a_x=0.0)
+        self.assertAlmostEqual(seg["cx"][key], 0.08)
+        self.assertTrue(seg["drive"][key])
+        self.assertTrue(seg["tc"])
+        g.observe(102 * DT, 2.0, 0.0, 3.0, 1.5, 0.5, a_x=-1.0)     # 次のコーナーへの制動
+        g._cross = 0.12
+        g.observe(103 * DT, 2.0, 0.0, 3.0, 1.5, 0.5, a_x=0.0)
+        self.assertFalse(seg["drive"][key])
+
+    def test_accn_is_saved_with_the_map(self):
+        m = grip.GripMap()
+        m.accn, m.best_accn = 1.5, 1.75
+        r = grip.GripMap.from_json(m.to_json())
+        self.assertAlmostEqual(r.accn, 1.5)
+        self.assertAlmostEqual(r.best_accn, 1.75)
+        old = json.loads(m.to_json())
+        del old["accn"], old["best_accn"]               # 古いファイル
+        self.assertEqual(grip.GripMap.from_json(json.dumps(old)).accn, 2.0)
+
     def test_level_where_the_guard_fired_is_not_tried_again(self):
         g = self._g(init=5.0)
         g._ref = (5.0, 6.0, 6.0)
@@ -771,185 +865,200 @@ class TestSpeedProfileArrays(unittest.TestCase):
         np.testing.assert_allclose(a.v, b.v, atol=1e-12)
 
 
-def long_learner(dec=2.0, top=3.0, acc=2.5, **kw) -> grip.LongLearner:
+def long_learner(dec=2.0, top=4.0, acc=2.5, **kw) -> grip.LongLearner:
     lg = grip.LongLearner()
-    lg.configure(acc_init=acc, dec_init=dec, dec_max=top, down_only=kw.get("down_only", False))
+    lg.configure(acc_init=acc, dec_init=dec, acc_max=top, dec_max=top, down_only=kw.get("down_only", False))
     return lg
 
 
 class LongTrack:
-    """1 周ぶんの制動区間を流す作り物。路面の上限 `cap` までしか減速できない車は、求められた減速が
-    それを超えるぶんだけ計画より速いまま区間の終わりへ来る。`late` は指令の遅れ [s]（制動の出だしが
-    遅れるぶん。出だしは計画より速いが、区間の終わりまでに追いつく）。"""
+    """1 周ぶんの制動区間と加速区間を流す作り物。車は計画の加減速を `late` 秒遅れで追い（車速PIが遅れを詰める）、
+    出せる加減速は `cap`（減速）・`acap`（加速）まで。"""
 
     def __init__(self, lg: grip.LongLearner) -> None:
         self.lg = lg
         self.t = 0.0
 
-    def lap(self, cap: float = 9.0, seconds: float = 1.0, gate: str = "", zones: int = 2,
-            late: float = 0.0) -> None:
+    def _zone(self, sign: float, a: float, cap: float, seconds: float, gate: str, late: float) -> None:
+        lg = self.lg
+        v = vp = 5.0 if sign < 0 else 1.0
+        hist: list[float] = []
+        for i in range(int(seconds / DT)):
+            self.t += DT
+            vp += sign * a * DT
+            hist.append(vp)
+            k = int(round(late / DT))
+            ref = hist[-1 - k] if len(hist) > k else hist[0] - sign * a * DT
+            want = sign * a + 20.0 * (ref - v)          # 車速PIが遅れを詰める
+            v += (max(-cap, want) if sign < 0 else min(cap, want)) * DT
+            lg.observe(self.t, v, sign * a, gate, vp)
+        for _ in range(60):                     # 区間の間: 何も求めていない
+            self.t += DT
+            lg.observe(self.t, vp, 0.0, gate, vp)
+
+    def lap(self, cap: float = 9.0, acap: float = 9.0, seconds: float = 1.0, gate: str = "", zones: int = 2,
+            late: float = 0.0, accel: bool = True, frac: float = 1.0) -> None:
+        """:param frac: 計画が求める加減速の、上限に対する割合（コーナーの中で摩擦円に削られた要求）"""
         lg = self.lg
         for _ in range(zones):
-            a = lg.map.decel
-            v = vp = 3.5
-            for i in range(int(seconds / DT)):
-                self.t += DT
-                vp -= a * DT
-                want = 0.0 if i * DT < late else a + 20.0 * (v - vp)     # 車速PIが遅れを詰める
-                v -= min(want, cap) * DT
-                lg.observe(self.t, v, -a, gate, vp)
-            for _ in range(60):                 # 区間の間: 何も求めていない
-                self.t += DT
-                lg.observe(self.t, vp, 0.0, gate, vp)
+            self._zone(-1.0, frac * lg.map.decel, cap, seconds, gate, late)
+            if accel:
+                self._zone(1.0, frac * lg.map.accel, acap, seconds, gate, late)
         lg.lap(self.t)
 
 
 class TestLongLearner(unittest.TestCase):
-    """減速: 1 周に 1 段上げ、コーナーへ計画より速く入るようになったら 1 段戻して止める。"""
+    """加速・減速: 計画が強く求めた所で実際に出た値に合わせる（2026-10-22）。"""
 
-    def test_rises_while_the_car_follows_and_stops_one_step_below(self):
-        lg = long_learner(dec=1.6)
+    def test_lowers_to_what_the_car_delivers(self):
+        """校正値 3.0 から始めて、2.4 しか出ない車では 2.4 前後に下がって止まる（上がり直さない）。"""
+        lg = long_learner(dec=3.0)
         tr = LongTrack(lg)
         seen = []
-        for _ in range(12):
-            tr.lap(cap=2.2)
-            seen.append(lg.map.decel)
-        self.assertTrue(lg.dec_done)
-        self.assertLess(max(seen), 2.2 * (1.0 + lg.cfg.step) * 1.06)    # 行き過ぎは 1 段ほどまで
-        self.assertLessEqual(seen[-1], 2.2 * 1.06)
-        self.assertGreater(seen[-1], 2.2 / (1.0 + lg.cfg.step) * 0.95)
-        self.assertEqual(seen[-1], seen[-4])                    # 止めた後は動かない
-
-    def test_stops_at_the_configured_maximum(self):
-        lg = long_learner()
-        tr = LongTrack(lg)
-        for _ in range(8):
-            tr.lap()
-        self.assertEqual(lg.map.decel, 3.0)
-        self.assertTrue(lg.dec_done)
-        self.assertEqual(lg.events, [])
-
-    def test_late_start_of_braking_is_not_a_shortfall(self):
-        """制動の出だしは指令の遅れのぶん計画より速い。区間の終わりで追いついていれば、付いて行けている
-        （区間全体の差で見ていた版は、シムで真値 3.00 に対して 2.40 で止まった）。"""
-        lg = long_learner()
-        tr = LongTrack(lg)
-        for _ in range(8):
-            tr.lap(late=0.08)
-        self.assertEqual(lg.map.decel, 3.0)
-        self.assertEqual(lg.events, [])
-
-    def test_accel_is_not_learned(self):
-        lg = long_learner(acc=2.66)
-        tr = LongTrack(lg)
-        for _ in range(8):
-            tr.lap(cap=1.0)
-        self.assertEqual(lg.map.accel, 2.66)
-        lg.map.accel = 1.77                     # 以前の版が保存した値が残っていても、使わない
-        lg.configure(acc_init=2.66, dec_init=2.0, dec_max=3.0, down_only=False)
-        self.assertEqual(lg.map.accel, 2.66)
-
-    def test_lowers_again_when_the_road_gets_worse(self):
-        """止めた後も毎周見る。付いて行けなくなったら 1 段ずつ下げる。"""
-        lg = long_learner()
-        tr = LongTrack(lg)
-        for _ in range(8):
-            tr.lap()
-        for _ in range(6):
+        for _ in range(16):
             tr.lap(cap=2.4)
-        self.assertLessEqual(lg.map.decel, 2.4 * 1.06)
-        self.assertGreater(lg.map.decel, 2.4 / 1.08 * 0.95)
-        self.assertEqual({e["kind"] for e in lg.events}, {"減速"})
+            seen.append(lg.map.decel)
+        self.assertAlmostEqual(seen[5], 2.4, delta=0.15)
+        self.assertLess(max(seen[5:]), 2.4 * 1.1)
+        self.assertGreater(min(seen[5:]), 2.4 * 0.9)
+        self.assertIn("減速", {e["kind"] for e in lg.events})
 
-    def test_does_not_rise_again_until_told_the_road_changed(self):
-        lg = long_learner(dec=1.6)
+    def test_rises_while_the_car_follows_and_settles_near_its_limit(self):
+        lg = long_learner(dec=2.0)
         tr = LongTrack(lg)
-        for _ in range(8):
-            tr.lap(cap=2.0)
-        d = lg.map.decel
-        for _ in range(5):
-            tr.lap()                            # 路面は良くなったが、上げ直さない
-        self.assertEqual(lg.map.decel, d)
-        lg.recheck()                            # 横の学習が「路面が変わった」と見た
-        tr.lap()
-        self.assertGreater(lg.map.decel, d)
+        seen = []
+        for _ in range(30):
+            tr.lap(cap=3.0)
+            seen.append(lg.map.decel)
+        self.assertLess(max(seen), 3.0 * 1.1)          # 行き過ぎは 1 段まで
+        self.assertGreater(min(seen[-8:]), 3.0 * 0.85)
+        self.assertLess(max(seen[-8:]), 3.0 * 1.1)
+
+    def test_constant_lag_is_not_a_shortfall(self):
+        """車速が計画に一定時間遅れて付いて来るだけなら下げない（出だしの過渡は捨てる。前回の加速の学習が
+        下がり続けたのは、遅れのぶんを「出ていない」と見ていたため）。"""
+        lg = long_learner(dec=2.0, acc=2.0)
+        lg.cfg.lag = 1e9            # 入口の安全装置は外す（遅れが区間の終わりまで残れば、実際に速く入るので働いてよい）
+        tr = LongTrack(lg)
+        for _ in range(20):
+            tr.lap(late=0.04)
+        self.assertEqual(lg.events, [])
+        self.assertAlmostEqual(lg.map.decel, 4.0)
+        self.assertAlmostEqual(lg.map.accel, 4.0)
+
+    def test_gentle_demands_alone_do_not_raise(self):
+        """上限の 6 割しか求めない窓に付いて行けても上げない（上限で付いて行ける証拠にならない）。下げる判断には使う。"""
+        lg = long_learner(dec=2.0, acc=2.0)
+        lg.cfg.lag = 1e9
+        tr = LongTrack(lg)
+        for _ in range(20):
+            tr.lap(frac=0.6)
+        self.assertEqual((lg.map.decel, lg.map.accel), (2.0, 2.0))
+        self.assertGreater(lg.dec.decisions, 3)
+        for _ in range(6):
+            tr.lap(frac=0.6, cap=0.9)                   # 0.6×2.0 = 1.2 も出ない
+        # 要求（0.6×上限）の 9 割以上が出る所まで下げる: 0.9 ÷ 0.6 = 1.5〜1.67
+        self.assertGreater(lg.map.decel, 1.4)
+        self.assertLess(lg.map.decel, 0.9 / 0.6 / lg.cfg.short + 1e-6)
+
+    def test_accel_is_learned_independently(self):
+        lg = long_learner(dec=2.0, acc=2.9, top=3.0)
+        tr = LongTrack(lg)
+        for _ in range(12):
+            tr.lap(acap=2.0)
+        self.assertAlmostEqual(lg.map.accel, 2.0, delta=0.15)
+        self.assertAlmostEqual(lg.map.decel, 3.0)       # 減速は出せるので天井まで
+        self.assertEqual({e["kind"] for e in lg.events}, {"加速"})
+
+    def test_stops_at_the_ceiling(self):
+        lg = long_learner(dec=2.0, top=3.0)
+        tr = LongTrack(lg)
+        for _ in range(16):
+            tr.lap()
+        self.assertEqual(lg.map.decel, 3.0)
+        self.assertEqual(lg.events, [])
+
+    def test_entry_lag_safety_lowers_one_step(self):
+        """減速の安全装置: 制動区間の終わりで計画より速ければ、溜めた窓を待たずに 1 段下げる。"""
+        lg = long_learner(dec=3.0)
+        lg.cfg.pool_s = 1e9                             # 比での判断はさせない
+        tr = LongTrack(lg)
+        tr.lap(cap=2.0, accel=False)
+        self.assertAlmostEqual(lg.map.decel, 3.0 / 1.08)
+        self.assertEqual(lg.events[0]["kind"], "減速（入口で遅れ）")
 
     def test_plan_speed_is_advanced_between_planner_ticks(self):
-        """計画は 10Hz でしか届かない。その間を計画の減速度で進めて比べる。"""
+        """計画は 10Hz でしか届かない。その間を計画の減速度で進めて比べる（進めないと、ずれが鋸歯に見える）。"""
         lg = long_learner(dec=2.0)
-        t, v, vp = 0.0, 3.5, 3.5
-        for i in range(120):
-            t += DT
-            v -= 2.0 * DT
-            if i % 10 == 0:
-                vp = v                          # 届いた瞬間は計画どおり。次に届くまで古いまま
-            lg.observe(t, v, -2.0, "", vp)
-        lg.observe(t + DT, v, 0.0, "", v)
+        t = 0.0
+        for _ in range(3):
+            v = vp = 3.5
+            for i in range(120):
+                t += DT
+                v -= 2.0 * DT
+                if i % 10 == 0:
+                    vp = v                      # 届いた瞬間は計画どおり。次に届くまで古いまま
+                lg.observe(t, v, -2.0, "", vp)
+            for _ in range(60):
+                t += DT
+                lg.observe(t, v, 0.0, "", v)
         lg.lap(t)
-        self.assertAlmostEqual(lg.last, 0.0, delta=0.03)        # 進めないと −0.2〜0 に見える
+        self.assertAlmostEqual(lg.dec.ratio, 1.0, delta=0.03)
         self.assertGreater(lg.map.decel, 2.0)
 
     def test_short_or_gated_zones_are_not_judged(self):
         lg = long_learner()
         tr = LongTrack(lg)
-        tr.lap(cap=1.0, seconds=0.2)            # `min_s` に満たない
-        tr.lap(cap=1.0, gate="障害物")
-        self.assertEqual(lg.map.decel, 2.0)
+        for _ in range(3):
+            tr.lap(cap=1.0, acap=1.0, seconds=0.15)     # 出だしを捨てると `fit_min_s` に満たない
+            tr.lap(cap=1.0, acap=1.0, gate="障害物")
+        self.assertEqual((lg.map.decel, lg.map.accel), (2.0, 2.5))
         self.assertEqual(lg.windows, 0)
 
     def test_down_only_never_raises(self):
         lg = long_learner(down_only=True)
         tr = LongTrack(lg)
-        for _ in range(4):
+        for _ in range(6):
             tr.lap()
         self.assertEqual(lg.map.decel, 2.0)
-        tr.lap(cap=1.5)
+        for _ in range(4):
+            tr.lap(cap=1.5)
         self.assertLess(lg.map.decel, 2.0)
 
     def test_floor_and_saved_values(self):
         lg = long_learner()
         tr = LongTrack(lg)
         for _ in range(30):
-            tr.lap(cap=0.2)
+            tr.lap(cap=0.2, acap=0.2)
         self.assertAlmostEqual(lg.map.decel, 0.5 * 2.0)         # 出発点の半分より下へは下げない
+        self.assertAlmostEqual(lg.map.accel, 0.5 * 2.5)
         m = grip.GripMap.from_json(lg.map.to_json())
         lg2 = grip.LongLearner()
         lg2.reset(m)
         lg2.load()
         self.assertAlmostEqual(m.decel, 1.0 * lg2.cfg.back_off, places=3)
+        self.assertAlmostEqual(m.accel, 1.25 * lg2.cfg.back_off, places=3)
 
     def test_rescale_lowers_and_searches_again(self):
-        lg = long_learner()
-        tr = LongTrack(lg)
-        for _ in range(8):
-            tr.lap()
+        lg = long_learner(dec=3.0)
+        lg.dec.step = lg.cfg.step_min
         lg.rescale(0.7)
         self.assertAlmostEqual(lg.map.decel, 3.0 * 0.7)
-        self.assertFalse(lg.dec_done)
+        self.assertEqual(lg.dec.step, lg.cfg.step)
 
     def test_time_learner_judges_once_per_lap(self):
-        """横をタイムで決める学習器は、自前のゲートで 1 周を数えて減速も判断する。"""
+        """横をタイムで決める学習器は、自前のゲートで 1 周を数えて加速・減速も判断する。"""
         g = grip.TimeLearner(yaw_wn=0.0)
         g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
-        g.long.configure(acc_init=2.0, dec_init=2.0, dec_max=3.0, down_only=False)
+        g.long.configure(acc_init=2.0, dec_init=2.0, acc_max=3.0, dec_max=3.0, down_only=False)
         t, w = 0.0, 1.0
-        for i in range(int(2.6 * 2.0 * math.pi / DT)):          # 半径 2m を 2m/s で 2.6 周
+        for i in range(int(3.6 * 2.0 * math.pi / DT)):          # 半径 2m を 2m/s で 3.6 周
             t += DT
             brake = (w * t) % (2.0 * math.pi) > math.pi         # 半周は減速を求められている
             g.observe(t, 2.0 * math.cos(w * t), 2.0 * math.sin(w * t), 2.0, w, 0.5,
                       a_x=-2.0 if brake else 0.0, v_plan=2.0 + 1e-9 * i)     # 計画は毎周期届く
-        self.assertEqual(g.long.windows, 2)
-        self.assertAlmostEqual(g.long.map.decel, 2.0 * 1.08 ** 2, places=6)
-
-
-class TestAccelIsFixed(unittest.TestCase):
-    def test_accel_is_the_configured_ceiling(self):
-        """加速は学習しない（TC の窓で決める版は実機で下がり続けたので消した、2026-10-20）。設定の値をそのまま使う。"""
-        lg = long_learner(acc=3.0)
-        self.assertEqual(lg.map.accel, 3.0)
-        lg.map.accel = 2.0
-        lg.configure(acc_init=3.0, dec_init=2.0, dec_max=3.0, down_only=False)
-        self.assertEqual(lg.map.accel, 3.0)
+        self.assertGreaterEqual(g.long.windows, 1)
+        self.assertGreater(g.long.map.decel, 2.0)       # 計画どおり（ずれが増えない）なので上げる
 
 
 class TestCouple(unittest.TestCase):
@@ -1082,8 +1191,7 @@ class TestParamsAndModes(unittest.TestCase):
         self.assertIn("v_max", shown)
         self.assertIn("line_margin", shown)
         self.assertNotIn("look_k", shown)
-        # 23: 「限界のモデル」（`grip_shape`、楕円 / 車軸ごと）を足した（2026-10-20 バンビ依頼）
-        self.assertLessEqual(len(shown), 23)
+        self.assertLessEqual(len(shown), 22)
         # 隠した項目は、保存済みの設定・GUI から来た値を読まない（bench だけ上書きできる）
         self.assertEqual(merged_params("slam2d_route", {"look_k": 1.5})["look_k"], 0.45)
         self.assertEqual(merged_params("slam2d_route", {"look_k": 1.5}, hidden=True)["look_k"], 1.5)
@@ -1196,15 +1304,17 @@ class TestPlannerWiring(unittest.TestCase):
         p = {**self.p, "grip_learn": 1.0}
         self._retimed(p)
         g = pl._grip
-        g.converged, g.long.dec_done = True, True
+        g.converged = True
+        g.long.settle()
         pl._last_p = p
         self.assertFalse(pl._grip_line_stale())         # 既定（`grip_reline` 0）では引き直さない
-        g.converged, g.long.dec_done = False, False
+        g.converged = False
+        g.long.dec.decisions = 0
         p = {**p, "grip_reline": 1.0}
         pl._last_p = p
         self.assertFalse(pl._grip_line_stale())         # まだ値が動いている
         g.converged = True
-        g.long.dec_done = True
+        g.long.settle()
         self.assertTrue(pl._grip_line_stale())          # 同定値で引いた線のまま
         pl._grip_line = pl._grip_learned()
         self.assertFalse(pl._grip_line_stale())
@@ -1220,16 +1330,13 @@ class TestPlannerWiring(unittest.TestCase):
         g = pl._grip
         g.configure(init_level=4.0, max_level=8.0, down_only=False, lat_use=1.0)
         g.trials = 3
-        g.launch_ratio = 1.5
         pl._grip_save()
         self.assertEqual(ms.load_grip("m"), "")         # 1 周も測っていない間は保存しない
         g._measured = True
         pl._grip_save()
         self.assertAlmostEqual(json.loads(ms.load_grip("m"))["level"], 4.0)
-        self.assertAlmostEqual(ms.load_grip_vehicle(), 1.5)
         pl._grip_load("m")
         self.assertAlmostEqual(pl._grip.map.level, 4.0 * pl._grip.cfg.back_off)
-        self.assertAlmostEqual(pl._grip.launch_ratio, 1.5)
         (ms.MAPS_DIR / "m.grip.json").write_text("{broken")
         pl._grip_load("m")                      # 壊れていても走れる（初期値から）
         self.assertEqual(pl._grip.map.level, 0.0)
@@ -1239,74 +1346,34 @@ class TestPlannerWiring(unittest.TestCase):
                                trinary=np.ones((8, 8), dtype=np.uint8), centerline_xy=np.zeros((0, 2)),
                                raceline_xy=np.zeros((0, 2)), raceline_v=np.zeros(0))
 
-    def test_new_map_starts_from_the_surface_record(self):
-        """学習値の無い地図は、別の地図で学習した路面の記録 × back_off から始める。ceil は引き継ぎ、セルは引き継がない。"""
+    def test_new_map_does_not_inherit_anything_from_another_map(self):
+        """学習値は地図の横にしか置かない。別の地図で学習した値も、車・床の記録も、新しい地図へは持ち込まない。"""
         pl, ms = self.pl, self.mapstore
         self._new_map("a")
         pl._grip_load("a")
         g = pl._grip
         g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
         g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=4.0, down_only=False)
-        self.assertFalse(pl._grip_prior)
         g.map.level, g.map.decel, g.map.coup, g.map.ceil = 5.5, 3.0, 1.06, 6.2
         g._measured = True
         pl._grip_save()
-        rec = ms.load_grip_surface()
-        self.assertAlmostEqual(rec["lat"], 5.5)
-        self.assertAlmostEqual(rec["dec"], 3.0)
-        self.assertAlmostEqual(rec["coup"], 1.06)
-        self.assertAlmostEqual(rec["ceil"], 6.2)
+        names = {p.name for p in ms.MAPS_DIR.iterdir()}
+        self.assertIn("a.grip.json", names)
+        self.assertFalse([n for n in names if n.startswith("_")], names)    # 地図に属さない記録は書かない
 
         self._new_map("b")
         pl._grip_load("b")
         g = pl._grip
-        b = g.cfg.back_off
-        self.assertTrue(pl._grip_prior)
-        self.assertAlmostEqual(g.map.level, 5.5 * b)
-        self.assertAlmostEqual(g.map.decel, 3.0 * g.long.cfg.back_off)
-        self.assertAlmostEqual(g.map.coup, 1.06)
-        self.assertAlmostEqual(g.map.ceil, 6.2)         # 安全装置が働いた高さは引き継ぐ（その上を試さない）
+        self.assertEqual(g.map.level, 0.0)
+        self.assertEqual(g.map.ceil, 0.0)
         self.assertEqual(g.map.cells, {})
+        self.assertEqual(g.launch_ratio, 0.0)
         g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
-        self.assertAlmostEqual(g.map.level, 5.5 * b)    # 同定値 × grip_init で上書きしない
+        self.assertAlmostEqual(g.map.level, 3.5)        # 同定値 × grip_init から
 
-        # 地図に学習値があれば、そちらを使う
+        # 学習値のある地図に戻れば、その地図の値を使う
         pl._grip_load("a")
-        self.assertFalse(pl._grip_prior)
-        self.assertAlmostEqual(pl._grip.map.level, 5.5 * b)
-
-    def test_surface_record_is_the_ceiling_on_a_new_map(self):
-        """記録から始めた地図では、記録の値（横・減速・比）より上は試さない。記録が無ければ切らない。"""
-        pl, ms = self.pl, self.mapstore
-        ms.save_grip_surface(5.0, 2.8, 1.1, 0.0, t=time.time())
-        self._new_map("b")
-        pl._grip_load("b")
-        self.assertEqual(pl._grip_prior_cap, (5.0, 2.8, 1.1))
-        g = pl._grip
-        self.assertAlmostEqual(g._couple_next(1.1), 1.1)
-        p = {s.key: s.default for s in pl.params}
-        p.update(grip_learn=1.0, grip_max=8.0)
-        from raspi.core.vehicle import Vehicle
-        v = Vehicle.load()
-        cap = pl._grip_prior_cap
-        g.configure(init_level=p["grip_init"] * v.a_lat_max, max_level=min(p["grip_max"], cap[0]),
-                    down_only=False, lat_use=1.0)
-        self.assertAlmostEqual(g.max_level, 5.0)
-        self.assertLessEqual(g._next(g.map.level), 5.0)
-        ms.clear_grip_surface()
-        self._new_map("c")
-        pl._grip_load("c")
-        self.assertIsNone(pl._grip_prior_cap)
-
-    def test_old_surface_record_is_not_used(self):
-        """床が変わったかは走る前に分からないので、古い記録（別の日）は使わない。"""
-        from raspi.auto import slam2d_raceline as S
-        pl, ms = self.pl, self.mapstore
-        ms.save_grip_surface(5.0, 2.8, 1.1, 0.0, t=time.time() - S.GRIP_SURFACE_MAX_AGE_S - 60.0)
-        self._new_map("b")
-        pl._grip_load("b")
-        self.assertFalse(pl._grip_prior)
-        self.assertEqual(pl._grip.map.level, 0.0)
+        self.assertAlmostEqual(pl._grip.map.level, 5.5 * pl._grip.cfg.back_off)
 
     def test_map_best_values_start_the_next_run_without_probing(self):
         """この地図で学習を終えた値（best）は、次の走行で back_off を掛けずにそのまま使い、探索もしない。"""
@@ -1349,31 +1416,6 @@ class TestPlannerWiring(unittest.TestCase):
         g.map.level = 5.6
         pl._grip_save()
         self.assertAlmostEqual(json.loads(ms.load_grip("a"))["best_lat"], 5.6)
-
-    def test_surface_record_is_the_accepted_level_not_the_trial(self):
-        """試している段（まだ確かめていない値）ではなく、採用済みの段を書く。"""
-        pl, ms = self.pl, self.mapstore
-        self._new_map("a")
-        pl._grip_load("a")
-        g = pl._grip
-        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
-        g.long.configure(acc_init=3.0, dec_init=1.9, dec_max=4.0, down_only=False)
-        g._ref = (5.0, 6.0, 6.0)
-        g.map.level = 5.4
-        g._measured = True
-        pl._grip_save()
-        self.assertAlmostEqual(ms.load_grip_surface()["lat"], 5.0)
-
-    def test_no_surface_record_before_a_measured_lap(self):
-        pl, ms = self.pl, self.mapstore
-        self._new_map("a")
-        pl._grip_load("a")
-        g = pl._grip
-        g.configure(init_level=3.5, max_level=8.0, down_only=False, lat_use=1.0)
-        g.trials = 3
-        pl._grip_save()
-        self.assertIsNone(ms.load_grip_surface())
-
 
 if __name__ == "__main__":
     unittest.main()

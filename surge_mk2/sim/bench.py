@@ -318,8 +318,6 @@ class Bench:
                  surface: dict | None = None, assume: dict[str, float] | None = None,
                  grip_file: Path | None = None, grip_cfg: dict[str, float] | None = None,
                  sim_params: dict[str, float] | None = None,
-                 launch_ratio: float = 0.0,
-                 grip_prior: tuple[float, ...] | None = None,
                  state_dir: Path | None = None) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
@@ -359,13 +357,6 @@ class Bench:
                     f = state_dir / f"{map_name}{suf}"
                     if f.is_file():
                         shutil.copy(f, mapstore.MAPS_DIR / f.name)
-        if launch_ratio > 0.0:
-            # `--launch-ratio`: 車に固有の「横の限界 ÷ 発進の加速度」を知っている状態から始める
-            mapstore.save_grip_vehicle(launch_ratio)
-        if grip_prior is not None:
-            # `--grip-prior`: 別の地図で学習した路面の記録がある状態から始める（新しい地図の出発点）
-            import time as _time
-            mapstore.save_grip_surface(*grip_prior, t=_time.time())
         # `--vehicle`: **真値の車だけ**諸元を変える（planner は `config/vehicle.toml` のまま）。
         # 同定値が外れていたとき（グリップが低い・舵が届かない等）に走りが壊れないかを見る
         spec = None
@@ -1225,12 +1216,6 @@ def main() -> int:
                     help="学習した横グリップの JSON を --map の地図の横へ置いてから走る（保存値からの再開）")
     ap.add_argument("--save-grip", default=None, metavar="FILE",
                     help="走り終えたときの学習した横グリップを FILE へ書く")
-    ap.add_argument("--launch-ratio", type=float, default=0.0,
-                    help="横の限界 ÷ 発進の加速度（前の走行で収束したときに保存される値）を与えて始める。"
-                         "発進の加速度から横グリップの初期値を出す経路の確認用")
-    ap.add_argument("--grip-prior", default=None, metavar="LAT:DEC[:COUP[:CEIL]]",
-                    help="路面の記録（別の地図で学習した横・減速 [m/s²]・摩擦円の比・安全装置が働いた横の上限）を置いてから走る。"
-                         "新しい地図の学習はここから始まる（`mapstore.save_grip_surface`）")
     ap.add_argument("--state", default=None, metavar="DIR",
                     help="--map の地図の学習値（.grip.json）と仕上げた経路の写し（.lines.pkl）を DIR から読み、"
                          "走り終えたら DIR へ書く（同じ地図の 2 回目の走行を再現する）")
@@ -1304,11 +1289,7 @@ def main() -> int:
               grip_file=Path(args.grip) if args.grip else None, grip_cfg=grip_cfg,
               sim_params={**(REAL_VIBRATION if args.real_noise else {}),
                           **_error_preset(args.errors), **pairs(args.sim)},
-              launch_ratio=args.launch_ratio,
-              state_dir=Path(args.state) if args.state else None,
-              grip_prior=(tuple(float(x) for x in (args.grip_prior.split(":") + ["1.0", "0"][
-                                    max(0, len(args.grip_prior.split(":")) - 2):])[:4])
-                          if args.grip_prior else None))
+              state_dir=Path(args.state) if args.state else None)
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)
@@ -1333,11 +1314,6 @@ def main() -> int:
             if f.is_file():
                 _sh.copy(f, _st / f.name)
         res.notes.append(f"地図の学習値・経路の写しを {_st} に書いた")
-    surf = _ms.load_grip_surface()
-    if surf is not None:
-        res.notes.append(f"路面の記録: 横 {surf['lat']:.2f}・減速 {surf['dec']:.2f}・比 {surf['coup']:.2f}"
-                         f"・安全装置 {surf['ceil']:.2f}"
-                         f"（--grip-prior {surf['lat']}:{surf['dec']}:{surf['coup']}:{surf['ceil']}）")
     b.close()
     if args.obs_log:
         print("\n=== 障害物まわりの判断 ===")

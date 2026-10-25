@@ -85,7 +85,7 @@
   `launch_exit_torque_nm`、`speed_kp`・`speed_ki`（位相余裕 60° の式）— 校正 5（`tools/calib/speed.py`）が書く
 - `max_steer`（リンクの換算を可動域に通した値）— 同上
 - `Vehicle.kappa_max`・`a_lat_max`・`a_accel_max`・`a_decel_max`・`speed_loop_tau_s`・`speed_loop_reset_s`・`steer_delay_s` — `raspi/core/vehicle.py` の派生量
-- `tv_load_gain_s2_per_m` 0.045 = `load_transfer` × `mass` ÷ 後輪1つの静止荷重（机上の式。実機未調整）
+- `tv_load_gain_s2_per_m` 0.02（机上の式 `load_transfer` × `mass` ÷ 後輪1つの静止荷重 = 0.045 から、2026-10-22 に実機の滑りを見て下げた。内外の滑りがそろうかは未確認）
 
 ## 3. 残しているもの — 方針（D）と経験則（E）、置き換えの手段
 
@@ -115,7 +115,7 @@
 | `speedctl.LEAD_RATIO` | 0.65 | E | 減速の前倒し（ファームのFFが無効なときの旧方式だけ）。今は FF が有効なので使われない |
 | `speedctl.REF_ACCEL_MIN`・`REF_ACCEL_GAIN` | 0.3・1.1 | D | ランプの下限と、プロファイルより少し速く追う余裕 |
 | `speedctl.CATCH_UP_M` | 6.0 | D | 追いつく速度を引き直す先の距離（停止から最高速までの加速距離 v²/(2a) ≒ 4.5m より長く） |
-| `slam2d_raceline.FIXED_*_USE`・`LEARN_BRAKE_INIT` | 0.9・0.95・0.9・0.75 | D | 路面の限界を学習しないときに同定値に掛ける余裕 |
+| `slam2d_raceline.FIXED_*_USE` | 0.9・0.95・0.9 | D | 路面の限界を学習しないときに同定値に掛ける余裕（学習するときの加速・減速の出発点は校正値そのまま、2026-10-22） |
 | Pure Pursuit の `look_k`・`look_min`・`speed_preview`・`steer_ff`、MPC の重み `q_y`・`q_psi`・`r_d` | GUI の設定 | E | 追従の設計値（シム `sim.bench` で比べて決めた）。遅延補償だけは同定値から決まる（上表） |
 | `Vehicle` の未同定時の既定（`a_lat_max` 3.5・加減速 2.5・`cmd_latency` 0.02 等） | — | D | 同定値が無いときに控えめに走るための値。同定後は使われない |
 
@@ -150,7 +150,7 @@ toml を書いて `./tools/deploy.sh --restart-io` するだけ。ファーム�
 | IMU の取付の傾き（ヨー・ピッチ） | 軸変換だけ。ずれの校正なし | 未校正のセンサ | 加速度の x に横・上の加速度が混ざる。静止の分は KF のバイアスが吸うが、旋回の横加速度は `kf_lever_arm_m` が別の形で吸う | 直進の加減速と定常旋回で accel の y・x を回帰（取付角）。`kf_tune` に取付角を足す |
 | MD の左右のトルク定数 | 指令をそのままトルクとみなす（`torque_cmd` は指令） | 未校正の駆動 | 同定の G は左右の平均。左右差はトルクベクタリングの差に乗る | ⑤ の記録で、トルク指令の左右差とヨーレートを回帰（直進中に小さな差を加える段を足す） |
 | `scan2scan.PRIOR_XY` | 5mm（「倍率誤差 2%」の前提） | 一時的な前提 | 半径は実測済み・Encoder の dt の誤り（1.8%）も直ったので、倍率誤差の前提は古い | 今の走行で、照合の残差から決め直す |
-| トルクベクタリングの利得 `tv_load_gain_s2_per_m` | 0.045（机上の式） | 手置き（式だが実機未調整） | 旋回中の左右配分 | `sysid_tyre`・`ctrl_tune` の旋回シナリオで最適化（他の TC・ABS と同じ手順） |
+| トルクベクタリングの利得 `tv_load_gain_s2_per_m` | 0.02（机上の式 0.045 から実機の滑りで下げた） | 手置き（実機で調整中） | 旋回中の左右配分 | `sysid_tyre`・`ctrl_tune` の旋回シナリオで最適化（他の TC・ABS と同じ手順） |
 | ABS・TC・片輪浮き対策のしきい値・ゲイン | 車両モデル上で最適化した机上値 | 試験はあるが実機で未検証 | 限界域の挙動 | 校正 6・7・8（`calib_wheel`・`calib_tyre`・`calib_tc_gain`）を実機で録り直す（手順は `docs/calibration.md`） |
 | `LIDAR_PWM_DUTY` 0.4 | 目で見て合わせた（「回転数を見ながら詰めること」） | 手置き | 回転数（10Hz からずれると 1 周の点の密度と自動停止の遅延が変わる） | LD06 が回転速度を送ってくる（`Scan.rot_speed_dps`）ので、STM32 で PI にして 3600°/s に合わせるか、記録から duty→回転数を当てはめる |
 | AHRS の積分の上限・`IMU_ACCEL_LPF_K` | 仮置きの値・係数で持つ（周期を前提にした係数） | 手置き | ピッチ・ロールの推定 | 時定数で持つ形に（`LPF_UpdateTau` と同じ直し方）、静止・傾けた台での記録で確かめる |

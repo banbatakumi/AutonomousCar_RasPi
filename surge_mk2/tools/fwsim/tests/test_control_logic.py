@@ -95,7 +95,7 @@ class TestLogic(unittest.TestCase):
                 self.assertLess(m["locking"], self.LOCKING_MAX)
 
     def test_speed_command_decel_does_not_lock(self):
-        """車速指令の減速（ランプ3.0m/s²は後輪だけの制動の限界を超える）でも後輪がロックしない。"""
+        """車速指令の減速（自動運転の学習前のランプ約 3.06m/s²。後輪だけの制動の限界を超える）でも後輪がロックしない。"""
         for name, plant in (("標準モデル", NOMINAL), ("同定したタイヤ", Plant.load())):
             with self.subTest(plant=name):
                 m = S.run(self.fw, plant, scenario("decel_pi")).metrics

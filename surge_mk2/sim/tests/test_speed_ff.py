@@ -22,6 +22,13 @@ from raspi.nav.raceline import RaceLine  # noqa: E402
 from sim.vehicle import DriveInput, SpeedController, VehicleSpec  # noqa: E402
 
 DS = 0.1
+
+
+def auto_ramp(veh: Vehicle, use: float = 0.95) -> float:
+    """自動運転中に planner が送る目標車速のランプ（`slam2d_raceline.auto_ramp`）。この試験の走りの上限から"""
+    from raspi.auto.slam2d_raceline import Limits, auto_ramp as ramp
+    return ramp(veh, Limits(a_lat=0.0, a_accel=use * veh.a_accel_max(), a_brake=use * veh.a_decel_max, react_s=0.0))
+
 SEGS = ((4.0, 3.0), (1.2, 1.2), (2.5, 3.0), (1.0, 0.9), (6.0, 3.0), (1.5, 1.6), (1.5, 3.0),
         (1.0, 1.1))
 
@@ -72,7 +79,7 @@ def run(spec: VehicleSpec, veh: Vehicle, *, feedforward: bool, laps: int = 3):
             queue.append((t + latency, tgt))
         while queue and queue[0][0] <= t:
             target = queue.pop(0)[1]
-        v = ctl.step(DriveInput(armed=True, target_speed=target, accel_limit=6.0), v, dt)
+        v = ctl.step(DriveInput(armed=True, target_speed=target, accel_limit=auto_ramp(veh)), v, dt)
         s += v * dt
         t += dt
         if s >= length:
@@ -114,7 +121,9 @@ def run_firmware_ff(spec: VehicleSpec, veh: Vehicle, *, gain_error: float = 1.0,
                                                                lead_s=lead, acc=acc))
         while queue and queue[0][0] <= t:
             _, target, ramp = queue.pop(0)
-        v = ctl.step(DriveInput(armed=True, target_speed=target, accel_limit=min(6.0, ramp)), v, dt)
+        top = auto_ramp(veh)
+        v = ctl.step(DriveInput(armed=True, target_speed=target, accel_limit=min(top, ramp) if ramp > 0 else top),
+                     v, dt)
         s += v * dt
         t += dt
         if s >= length:
