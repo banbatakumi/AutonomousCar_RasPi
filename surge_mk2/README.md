@@ -133,6 +133,7 @@ tools/deploy.sh --test       # 配備後に Raspberry Pi 側のテストを実�
 
 | 目的 | 文書 |
 | --- | --- |
+| システム構成を1枚で把握する | [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) |
 | システム全体を把握する | [docs/system_overview.md](docs/system_overview.md) |
 | 設計理由を知る | [docs/architecture.md](docs/architecture.md) |
 | 開発・配備・トラブルシューティング | [docs/development.md](docs/development.md) |
