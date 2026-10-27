@@ -409,6 +409,28 @@ class TestObstacleBrakeAndMdFault(unittest.TestCase):
         st = self.AutoState(target_speed=2.5)
         self.assertEqual(self.p._md_fault(st, self._vs(2.0, (0, 0, 0)), self.params), "")
 
+    def test_drive_undervoltage_that_lasts_stops_until_reengaged(self):
+        """駆動電池の電圧低下の警告が `batt_low_s` 続いたら止まり、警告が消えても走り出さない（2026-10-26
+        `surge_20261026_104056`: 警告から 6.7 秒全開で走り、MD が落ちて舵が固まったまま壁に当たった）。"""
+        low = VehicleState(speed=3.0, armed=True, flags=self.packets.FLG_FAULT_DRIVE_UNDERVOLTAGE,
+                           batt_voltage=[7.7, 10.0])
+        n = int(round(self.params["batt_low_s"] / self.p._dt))
+        for _ in range(n - 1):
+            st = self.AutoState(target_speed=3.0)
+            self.assertFalse(self.p._low_batt(st, low, self.params))
+        st = self.AutoState(target_speed=3.0)
+        self.assertFalse(self.p._low_batt(st, self._vs(3.0), self.params))     # 途切れたら数え直す
+        for _ in range(n):
+            st = self.AutoState(target_speed=3.0)
+            stopped = self.p._low_batt(st, low, self.params)
+        self.assertTrue(stopped)
+        self.assertEqual(st.target_speed, 0.0)
+        self.assertIn("電圧低下", st.reason)
+        st = self.AutoState(target_speed=3.0)
+        self.assertTrue(self.p._low_batt(st, self._vs(0.0), self.params))      # 電圧が戻っても止まったまま
+        self.p.reset()
+        self.assertFalse(self.p._low_batt(self.AutoState(target_speed=3.0), self._vs(0.0), self.params))
+
 
 class TestObstaclePadFollowsPath(unittest.TestCase):
     """`obstacle_pad` は、経路が壁にいちばん寄る所の壁までの距離まで詰める（実機 2026-10-11:

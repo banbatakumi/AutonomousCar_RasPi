@@ -45,7 +45,7 @@ from ..nav.mpc import MPCConfig, MPCFollower
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from ..nav import speedctl
 from ..nav.signals import SignalLights
-from ..proto.generated.packets import MDS_COMM_OK
+from ..proto.generated.packets import FLG_FAULT_DRIVE_UNDERVOLTAGE, MDS_COMM_OK
 from . import mapstore
 from ._slam2d_nav import WALL_HIT_WEIGHT, Slam2dNav, occgrid_from_trinary
 from .base import CMD_HZ, ParamSpec, Planner
@@ -646,6 +646,10 @@ class Slam2dRaceLine(Planner):
                   max=3.0, default=1.0, step=0.05, unit="m/s",
                   note="★後輪のモータドライバが片方だけ無応答（低電圧など）の間はこの速度に抑えて走り続ける"
                        "（制動が約半分になる。実測 −2.5→−1.4 m/s²）。両方とも無応答なら 0 を指令して戻るのを待つ"),
+        ParamSpec(group=GROUP_SAFETY, key="batt_low_s", hidden=True, label="駆動電池の電圧低下で止まるまで", min=0.5,
+                  max=10.0, default=2.0, step=0.5, unit="s",
+                  note="STM32 の駆動電池の電圧低下の警告がこれだけ続いたら、線を追いながら止まる（解除して入れ直すまで"
+                       "走らない）。実機では警告から約 7 秒で MD が落ちて舵が効かなくなった"),
         ParamSpec(group=GROUP_SAFETY, key="md_fault_s", hidden=True, label="片輪無応答で止まるまで", min=1.0,
                   max=60.0, default=10.0, step=1.0, unit="s",
                   note="片輪の無応答がこれだけ続いたら、止まって戻るのを待つ（戻れば走り出す）"),
@@ -828,6 +832,9 @@ class Slam2dRaceLine(Planner):
         self._brake_hold: float | None = None
         #: 駆動 MD が片輪だけ無応答の状態が続いている時間 [s]（`_md_fault`）
         self._md_t = 0.0
+        #: 駆動電池の電圧低下の警告が続いている時間 [s] と、それで止めたか（この走行の間は戻らない。`_low_batt`）
+        self._batt_t = 0.0
+        self._batt_stop = False
         #: 止まってから経路の速度に届くまで（＝発進の間）True（`_launch_ok`）
         self._launch_armed = False
         #: Hybrid A* で抜けている（`DETOUR`）。同じ障害物で試した回数（失敗が続いたら止まって待つ）
@@ -1687,6 +1694,8 @@ class Slam2dRaceLine(Planner):
         st.target_speed = min(st.target_speed, self._steer_sat_cap(pp, vs, p))
         if coasting:
             st.target_speed = min(st.target_speed, p["coast_speed"])
+        if self._low_batt(st, vs, p):
+            return st
         md_note = self._md_fault(st, vs, p)
         if md_note is None:
             return st
@@ -2412,6 +2421,24 @@ class Slam2dRaceLine(Planner):
         self._localizer = None
         self._loc_cands = None
         self.phase = LOCATE
+
+    def _low_batt(self, st: AutoState, vs: VehicleState, p: dict[str, float]) -> bool:
+        """駆動電池の電圧低下（STM32 の警告 `fault_drive_undervoltage`）が `batt_low_s` 続いたら、線を追いながら止まる。
+
+        止めたら、自動運転を解除して入れ直すまで戻らない（止まると電圧が戻って警告が消えるので、戻すと走っては止まるを
+        繰り返す）。2026-10-26 `surge_20261026_104056`: 警告（7.75V）から 6.7 秒全開で走り続け、7.6V で MD が 3 台とも落ちて
+        舵が固まったまま壁に当たった。満充電の走行（最低 9.75V）では一度も立っていない。戻り値は止めたか。
+        """
+        low = bool(vs.flags & FLG_FAULT_DRIVE_UNDERVOLTAGE) and vs.armed
+        self._batt_t = self._batt_t + self._dt if low else 0.0
+        if self._batt_t >= p["batt_low_s"]:
+            self._batt_stop = True
+        if not self._batt_stop:
+            return False
+        st.target_speed = 0.0
+        st.reason = (f"★駆動電池の電圧低下（{vs.batt_voltage[0]:.2f}V）が続いたので止まった。"
+                     "充電してから自動運転を入れ直す")
+        return True
 
     def _md_fault(self, st: AutoState, vs: VehicleState, p: dict[str, float]) -> str | None:
         """後輪のモータドライバが無応答のときの抑え。戻り値は reason に足す注記、止めたら `None`。
