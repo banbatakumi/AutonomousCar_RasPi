@@ -280,8 +280,12 @@ class Result:
                 out.append(f"           加速 {lg['acc']:.2f}m/s²（真値 {lg['acc_true']:.2f}）・減速 "
                            f"{lg['dec']:.2f}m/s²（真値 {lg['dec_true']:.2f}）  判断 {lg['windows']} 回・"
                            f"下げた {len(lg['events'])} 回"
-                           + "".join(f"\n             {e['t']:6.1f}s {e['kind']} {e['ask']:.2f} → "
-                                     f"{e['got']:.2f}（計画との差 {e['lag']:+.2f}m/s）"
+                           + (f"  包絡（横の使い具合 0/0.5/1）加速 {'/'.join(f'{x:.2f}' for x in lg['acc_env'])}"
+                              f"・減速 {'/'.join(f'{x:.2f}' for x in lg['dec_env'])}" if lg.get("acc_env") else "")
+                           + "".join(f"\n             {e['t']:6.1f}s {e['kind']} u={e.get('u', 0.0):.1f} "
+                                     f"{e['ask']:.2f} → {e['got']:.2f}"
+                                     + (f"（計画との差 {e['lag']:+.2f}m/s）" if "lag" in e else
+                                        f"（出た÷求めた {e['ratio']:.2f}）" if "ratio" in e else "")
                                      for e in lg["events"][:12]))
                 if lg["trail"]:
                     out.append("           加速/減速の移り変わり " + " ".join(
@@ -881,6 +885,7 @@ class Bench:
         dec_true = min(sp.speed_decel_m_s2 * v.grip_long + sp.rolling_resistance,
                        sp.cmd_accel_limit_m_s2)
         r.grip_long = {"acc": g.map.accel, "dec": g.map.decel, "windows": lg.windows, "events": ev,
+                       "acc_env": list(g.map.acc), "dec_env": list(g.map.dec),
                        "trail": trail, "acc_true": acc_true, "dec_true": dec_true,
                        "done": (True, lg.dec_done)}
 
