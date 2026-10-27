@@ -121,8 +121,9 @@ write_unit() {          # write_unit <名前> <説明> <ExecStart の引数> [Af
 # raspi/setup/install_services.sh が生成。手で編集しても再実行で上書きされる
 [Unit]
 Description=SURGE Mk.2 — $desc
-After=network.target $after
-Wants=network.target
+# network.target には依存しない（バスは ipc、GUI は 0.0.0.0 bind で、Wi-Fi/NM の起動を待つ理由がない。
+# 待つと起動が約 1 秒遅れる）
+After=$after
 
 [Service]
 Type=simple
@@ -218,6 +219,12 @@ systemctl restart systemd-logind || true
 # ⚠ `config.txt` の `dtoverlay=disable-bt` は**使わない**。あれは BT を UART から
 #    切り離す副作用で `/dev/serial0` の割り当てを動かすので、STM32 との UART が壊れる
 systemctl disable --now bluetooth 2>/dev/null || true
+
+# ── 起動短縮 ──
+# cloud-init は rpi-imager の初回設定（ユーザ・Wi-Fi・ホスト名）専用で、起動経路上に約 0.9 秒ある。
+# 初回設定は済んでいるので止める（実測: サービス起動 5.05s→2.86s、network.target 非依存化と合わせて）。
+# 戻すには `sudo rm /etc/cloud/cloud-init.disabled` して再起動
+touch /etc/cloud/cloud-init.disabled
 
 # Wi-Fi の省電力を**切る**。Raspberry Pi OS の既定は有効で、無線が眠っている間の
 # 受信はルーターが溜めて次のビーコン（約100ms周期）で渡すので、GUI の指令の到着が揺れる
