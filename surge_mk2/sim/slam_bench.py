@@ -39,6 +39,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import copy
 import dataclasses
 import json
 import math
@@ -173,6 +175,64 @@ def inject_ghost(scan, pose_lidar: tuple[float, float, float], deg0: float, deg1
         sat = np.asarray(scan.saturated, dtype=bool)
         sat[sel] = False
         scan.saturated = sat.tolist()
+
+
+#: 他車（小さな障害物）の箱の大きさ [m]（長さ, 幅）。自車と同程度の小型車
+CAR_SIZE = (0.40, 0.22)
+
+
+def inject_boxes(scan, pose_lidar: tuple[float, float, float],
+                 boxes: list[tuple[float, float, float, float, float]], max_range: float) -> None:
+    """`scan.dist`の全周に、有向矩形`(cx, cy, yaw, 長さ, 幅)`（世界座標）を差し込む。
+
+    他車が走査線を遮った状態を作る。レイが矩形に当たり、かつ壁より手前なら距離を書き換える
+    （壁の距離0=無効は「無限遠」として扱う）。
+    """
+    if not boxes:
+        return
+    ang = pose_lidar[2] + np.radians(np.arange(360))
+    dx, dy = np.cos(ang), np.sin(ang)
+    dist = np.asarray(scan.dist, dtype=float)
+    cur = np.where(dist > 0.0, dist, np.inf)
+    for cx, cy, yaw, ln, wd in boxes:
+        c, s = math.cos(yaw), math.sin(yaw)
+        ox = c * (pose_lidar[0] - cx) + s * (pose_lidar[1] - cy)
+        oy = -s * (pose_lidar[0] - cx) + c * (pose_lidar[1] - cy)
+        ux, uy = c * dx + s * dy, -s * dx + c * dy
+        t0 = np.full(360, -np.inf)
+        t1 = np.full(360, np.inf)
+        ok = np.ones(360, dtype=bool)
+        for o, u, h in ((ox, ux, ln / 2), (oy, uy, wd / 2)):
+            par = np.abs(u) < 1e-9
+            ok &= ~par | (np.abs(o) <= h)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                a, b = (-h - o) / u, (h - o) / u
+            t0 = np.maximum(t0, np.where(par, -np.inf, np.minimum(a, b)))
+            t1 = np.minimum(t1, np.where(par, np.inf, np.maximum(a, b)))
+        hit = ok & (t0 <= t1) & (t0 > 0.05) & (t0 < cur) & (t0 <= max_range)
+        cur = np.where(hit, t0, cur)
+    out = np.where(np.isfinite(cur), cur, 0.0)
+    scan.dist = out.tolist()
+    if scan.saturated is not None:
+        sat = np.asarray(scan.saturated, dtype=bool)
+        sat[out != dist] = False
+        scan.saturated = sat.tolist()
+
+
+def car_box(driver: "TruthDriver", s: float, lateral: float,
+            backward: bool = False) -> tuple[float, float, float, float, float]:
+    """中心線の弧長`s`の地点から左へ`lateral`ずらした位置の他車の箱。向きは中心線の接線（`backward`で逆走）。"""
+    n = len(driver.xy)
+    f = (s / driver.step) % n
+    i = int(f) % n
+    a = f - int(f)
+    p0, p1 = driver.xy[i], driver.xy[(i + 1) % n]
+    p = p0 * (1.0 - a) + p1 * a
+    tx, ty = p1[0] - p0[0], p1[1] - p0[1]
+    h = math.atan2(ty, tx)
+    x = p[0] - math.sin(h) * lateral
+    y = p[1] + math.cos(h) * lateral
+    return (float(x), float(y), h + (math.pi if backward else 0.0), CAR_SIZE[0], CAR_SIZE[1])
 
 
 # ── コースと真値の運転手 ───────────────────────────────────────────────────
@@ -367,6 +427,11 @@ class RunConfig:
     #: 等間隔の`locate`か所で全域探索（`GlobalLocalizer`→仕上げ→`locate_score`）して、
     #: 真値と比べる回数。0 なら通らない。車は動いている（実機の LOCATE は止まっているので厳しめ）
     locate: int = 0
+    #: 走行中に居る他車（小さな障害物）。`(段, 弧長s0[m], 横ずれ[m], 速度[m/s])`の組。段は
+    #: 0=地図作成・1=走行・2=両方。速度が0以外なら中心線に沿って動く（負は逆走）
+    cars: tuple[tuple[float, float, float, float], ...] = ()
+    #: `locate`の各試行で、自車のまわりに置く他車の数（前後・左右に振り分ける）
+    locate_cars: int = 0
 
 
 @dataclass
@@ -456,7 +521,7 @@ class RunResult:
             ms_max=max(self.explore.update_ms + self.race.update_ms, default=float("nan")),
             relocs=self.relocs, loops=self.loop_closures, oob=self.out_of_bounds,
             loc_n=self.locate.get("n", 0), loc_ok=self.locate.get("ok", 0),
-            loc_amb=self.locate.get("ambiguous", 0), loc_wrong=self.locate.get("wrong", 0),
+            loc_amb=self.locate.get("ambiguous", 0), loc_wrong=self.locate.get("wrong", 0), loc_none=self.locate.get("none", 0),
         )
 
 
@@ -629,6 +694,14 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
             inject_ghost(scan, lp, deg0, deg1, box, sensors.lidar.lidar_max_range_m)
             ghosted = phase == "race"
 
+        if cfg.cars:
+            ph = 1.0 if phase == "race" else 0.0
+            boxes = [car_box(driver, s0 + v * t_ns / NS, lat, v < 0)
+                     for (cp, s0, lat, v) in cfg.cars if cp == 2.0 or cp == ph]
+            c, s_ = math.cos(veh.yaw), math.sin(veh.yaw)
+            inject_boxes(scan, (veh.x + c * lidar_x - s_ * lidar_y, veh.y + s_ * lidar_x + c * lidar_y, veh.yaw),
+                         boxes, sensors.lidar.lidar_max_range_m)
+
         dt = (t_ns - last_plan_ns) / NS if last_plan_ns else 0.1
         last_plan_ns = t_ns
         t0 = time.perf_counter()
@@ -693,7 +766,14 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
             done_m = driver.progress - race_start_progress
             if cfg.locate > 0 and loc_done < cfg.locate and done_m >= race_len * (loc_done + 0.5) / cfg.locate:
                 loc_done += 1
-                _locate_trial(slam, scan, tr, factory or default_factory(), locate)
+                tscan = scan
+                if cfg.locate_cars > 0:
+                    tscan = copy.deepcopy(scan)
+                    c, s_ = math.cos(veh.yaw), math.sin(veh.yaw)
+                    inject_boxes(tscan, (veh.x + c * lidar_x - s_ * lidar_y, veh.y + s_ * lidar_x + c * lidar_y, veh.yaw),
+                                 _trial_cars(driver, cfg.locate_cars, loc_done), sensors.lidar.lidar_max_range_m)
+                _locate_trial(slam, tscan, tr, factory or default_factory(), locate,
+                              force_rescan=tscan is not scan)
             if done_m >= race_len:
                 break
 
@@ -707,15 +787,28 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         course_obj=course, locate=locate)
 
 
-def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict) -> None:
+def _trial_cars(driver: "TruthDriver", n: int, k: int) -> list[tuple[float, float, float, float, float]]:
+    """`locate`の`k`回目の試行で自車のまわりに置く他車`n`台。自車の中心線上の位置から前後に振り分け、
+    左右の横ずれは交互にする（自車の真上には置かない）。"""
+    s_ego = driver.progress
+    slots = [(0.9, 0.30), (-0.9, -0.30), (1.8, -0.30), (-1.8, 0.30), (2.7, 0.30), (-2.7, -0.30)]
+    out = []
+    for i in range(n):
+        ds, lat = slots[(i + k) % len(slots)]
+        out.append(car_box(driver, s_ego + ds, lat, backward=(i + k) % 3 == 0))
+    return out
+
+
+def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict,
+                  force_rescan: bool = False) -> None:
     """保存地図を読み直した状態から、今の点群で全域探索（LOCATE）して真値と比べる。
 
     実機の流れと同じ部品を通す: 地図は3値に落として`occgrid_from_trinary`で読み直し、候補は
     `GlobalLocalizer`→`refine`→`locate_score`、採否は`LOCATE_SCORE_RATIO`（2位が1位に近ければ断る）。
     """
     from raspi.auto._slam2d_nav import occgrid_from_trinary
-    from raspi.auto.slam2d_raceline import (LOCATE_CANDIDATES, LOCATE_MIN_SCORE, LOCATE_SCORE_RATIO,
-                                            locate_score)
+    from raspi.auto.slam2d_raceline import (LOCATE_CANDIDATES, locate_score, locate_score_robust,
+                                            pick_locate)
     from slam2d.core.localize import GlobalLocalizer
     from slam2d.core.types import Pose2D
 
@@ -725,28 +818,33 @@ def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict) -
     nav2 = factory()
     nav2.replace_grid_for_race(loaded)
     out["n"] = out.get("n", 0) + 1
+    # ★ `deskew_scan`は直前の`update()`と同じ時刻の走査なら結果を使い回す。他車を差し込んだ走査を
+    #   渡しても無視されるので、使い回しを外す
+    fe = getattr(slam.nav, "_fe", None)
+    if fe is not None and force_rescan:
+        fe.last_points = None
     pts = slam.nav.deskew_scan(scan)
     loc = GlobalLocalizer(loaded)
     for _ in range(10_000):
         if loc.step(pts):
             break
     cands = loc.candidates(LOCATE_CANDIDATES)
+    from slam2d.core.locscore import LocateScorer
+    scorer = LocateScorer(loaded)
     scored = []
     for c in cands:
         ref = nav2.refine(pts, Pose2D(c.x, c.y, c.yaw))
         if ref is not None:
-            scored.append((locate_score(ref), ref))
-    if not scored:
-        out["none"] = out.get("none", 0) + 1
+            scored.append((locate_score(ref), locate_score_robust(scorer.fit(pts, ref.pose, nav2.lidar_xy)), ref))
+    if os.environ.get("LOC_DEBUG"):
+        print("   LOC", " ".join(sorted(f"{a:.2f}/{b:.2f}(e{math.hypot(r.pose.x - truth_pose[0], r.pose.y - truth_pose[1])*100:.0f})"
+                                         for a, b, r in scored)[::-1]), flush=True)
+    best, why = pick_locate(scored)
+    if best is None:
+        key = {"ambiguous": "ambiguous"}.get(why, "none")
+        out[key] = out.get(key, 0) + 1
         return
-    scored.sort(key=lambda t: -t[0])
-    if len(scored) >= 2 and scored[0][0] > 0 and scored[1][0] >= scored[0][0] * LOCATE_SCORE_RATIO:
-        out["ambiguous"] = out.get("ambiguous", 0) + 1
-        return
-    if scored[0][0] < LOCATE_MIN_SCORE:
-        out["none"] = out.get("none", 0) + 1       # 見つからないとして断る
-        return
-    pose = scored[0][1].pose
+    pose = best.pose
     err = math.hypot(pose.x - truth_pose[0], pose.y - truth_pose[1])
     yaw = abs(math.degrees(_wrap(pose.yaw - truth_pose[2])))
     out.setdefault("err_cm", []).append(err * 100.0)
@@ -880,7 +978,7 @@ _COLS = [
     ("ghost_n", "{:5d}"), ("ghost_max", "{:7.1f}"),
     ("ms_mean", "{:6.1f}"), ("ms_max", "{:7.0f}"),
     ("relocs", "{:4d}"), ("loops", "{:4d}"), ("oob", "{:6d}"),
-    ("loc_n", "{:5d}"), ("loc_ok", "{:6d}"), ("loc_amb", "{:7d}"), ("loc_wrong", "{:9d}"),
+    ("loc_n", "{:5d}"), ("loc_ok", "{:6d}"), ("loc_amb", "{:7d}"), ("loc_wrong", "{:9d}"), ("loc_none", "{:8d}"),
 ]
 
 
@@ -973,6 +1071,11 @@ def main() -> int:
     ap.add_argument("--locate", type=int, default=0,
                     help="RACE 中にこの回数だけ、保存地図を読み直して全域探索（LOCATE）を試し、"
                          "真値と比べる（loc_ok / loc_amb=断った / loc_wrong=誤った姿勢を採用）")
+    ap.add_argument("--car", action="append", default=[],
+                    help="走行中に居る他車 `段:弧長s0:横ずれ:速度`（繰り返し可）。段は explore|race|both。"
+                         "速度0なら止まっている・負は逆走。LiDARの走査線を遮る小さな箱として差し込む")
+    ap.add_argument("--locate-cars", type=int, default=0,
+                    help="--locate の各試行で自車のまわり（前後左右）に置く他車の台数")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--json", default=None, help="結果の行を JSON で保存")
     ap.add_argument("--verbose", action="store_true")
@@ -995,6 +1098,12 @@ def main() -> int:
             ap.error("--ghost は 段(explore|race):開始:秒数:deg0:deg1:offset")
         ghost.append((1.0 if f[0] == "race" else 0.0, *(float(v) for v in f[1:])))
     ghost = tuple(ghost)
+    cars = []
+    for c_ in args.car:
+        f = c_.split(":")
+        if len(f) != 4 or f[0] not in ("explore", "race", "both"):
+            ap.error("--car は 段(explore|race|both):弧長:横ずれ:速度")
+        cars.append(({"explore": 0.0, "race": 1.0, "both": 2.0}[f[0]], *(float(v) for v in f[1:])))
     ov = []
     if args.speed_quant:
         ov.append(("speed_quant", args.speed_quant))
@@ -1007,6 +1116,7 @@ def main() -> int:
                 cfg = RunConfig(course=name, seed=s, errors=err, laps=args.laps,
                                 explore_speed=args.explore_speed, race_laps=args.race_laps,
                                 race_speed=args.race_speed, route=args.route, ghost=ghost, locate=args.locate,
+                                cars=tuple(cars), locate_cars=args.locate_cars,
                                 sensor_overrides=tuple(ov))
                 res = run(cfg, default_factory(**kw), verbose=args.verbose)
                 row = res.row()

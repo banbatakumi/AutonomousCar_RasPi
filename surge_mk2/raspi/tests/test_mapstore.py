@@ -360,7 +360,7 @@ class TestGripBundle(unittest.TestCase):
         mapstore.save_grip("src", self.GRIP)
         loaded, err = mapstore.import_upload("dst", mapstore.export_map("src"))
         self.assertIsNotNone(loaded, err)
-        self.assertEqual(json.loads(mapstore.load_grip("dst"))["cells"][0][:4], [3, -2, 4.2, 4.6])
+        self.assertEqual(json.loads(mapstore.load_grip("dst"))["level"], 4.5)      # 読み込みで今の形式へ直す
         with np.load(mapstore.MAPS_DIR / "dst.npz", allow_pickle=False) as z:
             self.assertNotIn(mapstore.GRIP_KEY, z.files)
 

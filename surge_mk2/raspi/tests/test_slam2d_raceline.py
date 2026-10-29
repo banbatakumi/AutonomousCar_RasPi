@@ -17,7 +17,7 @@ import numpy as np  # noqa: E402
 
 from raspi.auto import mapstore  # noqa: E402
 from raspi.auto.registry import PLANNERS, make_planner  # noqa: E402
-from raspi.auto.slam2d_raceline import (BUILD, DONE, EXPLORE, LOCATE, RACE,  # noqa: E402
+from raspi.auto.slam2d_raceline import (BUILD, DONE, EXPLORE, LOCATE, LOCATED, RACE,  # noqa: E402
                                         Slam2dRaceLine, forward_traj)
 from raspi.msgs import VehicleState  # noqa: E402
 from raspi.nav.grid import unpack_trinary  # noqa: E402
@@ -915,6 +915,49 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertEqual(st.phase, LOCATE)
         self.assertFalse(st.ready)
 
+    def test_locate_waits_in_located_until_engaged_then_races(self):
+        """未 engage で自己位置を特定すると走り出さず LOCATED で待つ。engage したら RACE へ入る。"""
+        self._save_manual_map("course_two_step")
+        p = Slam2dRaceLine()
+        p.set_engaged(False)
+        p.request_load("course_two_step")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        st = None
+        for _ in range(60):
+            st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            if p.phase != LOCATE:
+                break
+        self.assertEqual(p.phase, LOCATED, st.reason)
+        self.assertFalse(st.ready)
+        for _ in range(5):                               # 待っている間は走らず、LOCATED のまま
+            st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            self.assertEqual(p.phase, LOCATED)
+            self.assertFalse(st.ready)
+        p.set_engaged(True)
+        st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+        self.assertEqual(p.phase, RACE)
+        self.assertAlmostEqual(p.slam.pose.x, 3.0, delta=0.15)
+
+    def test_located_returns_to_locate_when_tracking_is_lost(self):
+        self._save_manual_map("course_two_step_lost")
+        p = Slam2dRaceLine()
+        p.set_engaged(False)
+        p.request_load("course_two_step_lost")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        for _ in range(60):
+            p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            if p.phase == LOCATED:
+                break
+        self.assertEqual(p.phase, LOCATED)
+        weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
+        for _ in range(20):
+            p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
+            if p.phase == LOCATE:
+                break
+        self.assertEqual(p.phase, LOCATE)
+
     def test_locate_hint_is_recorded_and_resets_in_progress_search(self):
         p = self._drive_to_race()
         self._save_current_map(p, "course_c")
@@ -1028,6 +1071,13 @@ class TestLocateScore(unittest.TestCase):
         self.assertGreater(locate_score(true), 0.0)
         self.assertLess(locate_score(mirror), locate_score(true) * LOCATE_SCORE_RATIO)
         self.assertEqual(locate_score(None), 0.0)
+        # 頑健な尺度でも真の姿勢が勝つ
+        from raspi.auto.slam2d_raceline import locate_score_robust
+        from slam2d.core.locscore import LocateScorer
+        scorer = LocateScorer(g)
+        ts = locate_score_robust(scorer.fit(pts, true.pose, (0.0, 0.0)))
+        ms = locate_score_robust(scorer.fit(pts, mirror.pose, (0.0, 0.0)))
+        self.assertLess(ms, ts * LOCATE_SCORE_RATIO)
 
 
 class TestSlam2dNavRobustness(unittest.TestCase):

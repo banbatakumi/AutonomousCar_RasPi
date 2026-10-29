@@ -306,13 +306,22 @@ export class ControlChannel {
   }
 
   /**
-   * 「レーシングライン走行」。保存済み地図を読み込み、地図作成（EXPLORE/BUILD）
-   * を経ずに自己位置復元（LOCATE）から走り始める。
+   * 「自己位置を特定」。保存済み地図を読み込み、自己位置復元（LOCATE）だけを行う。
+   * **engage はしない**——特定できると planner は `LOCATED` で止まって待つので、
+   * 人が車の周りの状況（他車など）を確かめてから `startSlam2dDrive()` で出発する。
    *
    * `freezeMap`/`clearMap`と同じ「回数」の約束（`AutoCtrl.race_seq`）。
    */
-  startSlam2dRace(mode: string, mapName: string) {
-    this.send({ type: 'auto', mode, load_map: true, map_name: mapName, engaged: true })
+  startSlam2dLocate(mode: string, mapName: string) {
+    this.send({ type: 'auto', mode, load_map: true, map_name: mapName, engaged: false })
+  }
+
+  /**
+   * 「走行を開始」。自己位置を特定済み（`LOCATED`）の planner を engage して走り出させる。
+   * 地図は読み直さない。
+   */
+  startSlam2dDrive() {
+    this.send({ type: 'auto', engaged: true })
   }
 
   /**

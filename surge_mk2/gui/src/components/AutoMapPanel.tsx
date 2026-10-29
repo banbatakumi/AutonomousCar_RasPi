@@ -47,6 +47,7 @@ const PHASE_LABEL: Record<string, string> = {
   //: 押されるまでここで待つ
   DONE: '保存済み・待機中',
   LOCATE: '自己位置を復元中',
+  LOCATED: '自己位置を特定済み（走行開始待ち）',
   RACE: '走行中',
   //: `slam2d_route`のミッションの終わり（停止点で止まった／駐車に引き継いだ）
   STOPPED: '停止点で停止',

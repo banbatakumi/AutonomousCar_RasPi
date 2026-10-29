@@ -434,15 +434,17 @@ function Stat({ value, unit }: { value: string; unit: string }) {
  * 地図を持つ planner（`slam2d_raceline`/`slam2d_route`、`catalog[].map_ui`）専用:
  * 「地図を作成」/保存済み地図の選択/「レーシングライン走行」。単一engageボタンの代わりに出す（`AutoPanel.tsx`冒頭docstring参照）。
  *
- * 「レーシングライン走行」は地図を選んでいないと押せない。保存済み地図の
+ * 走り出しは2段階。「自己位置を特定」（地図を選んでいないと押せない。読み込んで自己位置だけ探す）→
+ * 特定できて planner が `LOCATED` になったら「走行を開始」（engage）。他車が車の周りに居ないか等を
+ * 人が確かめてから出発できる。保存済み地図の
  * 一覧は`AutoPanel`がマウント時に一度要求済み（`mapsList()`）のものを
  * ストアから読むだけで、ここで改めて要求しない。
  *
  * ## ドロップダウンで選んだ地図をその場で下見する
  *
- * 「レーシングライン走行」を押す前に、選んだ地図とグリッドを`AutoMapPanel`
+ * 「自己位置を特定」を押す前に、選んだ地図とグリッドを`AutoMapPanel`
  * に表示し、クリックで自己位置ヒントを置けるようにする（`bus/mapPreview.ts`）。押した瞬間（`startSlam2dExplore`/
- * `startSlam2dRace`）にプレビューは消し、以後は本物のライブ地図に譲る。
+ * `startSlam2dLocate`）にプレビューは消し、以後は本物のライブ地図に譲る。
  */
 function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string }) {
   const mapFiles = useUi((s) => s.mapFiles)
@@ -537,10 +539,13 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
         disabled={!selectedMap}
         onClick={() => {
           clearPreview()
-          ch?.startSlam2dRace(mode, selectedMap)
+          ch?.startSlam2dLocate(mode, selectedMap)
         }}
       >
-        レーシングライン走行
+        自己位置を特定
+      </button>
+      <button disabled={phase !== 'LOCATED'} onClick={() => ch?.startSlam2dDrive()}>
+        走行を開始
       </button>
     </div>
   )

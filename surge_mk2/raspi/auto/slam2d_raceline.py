@@ -31,6 +31,7 @@ from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 import numpy as np
 
 from slam2d.core.localize import GlobalLocalizer
+from slam2d.core.locscore import LocateScorer
 from slam2d.core.types import Pose2D
 
 from ..core.vehicle import Vehicle
@@ -60,6 +61,11 @@ __all__ = ["Slam2dRaceLine"]
 #: 走れるようにした意味が無くなる（人間が地図内の好きな場所へ車を置き直す間
 #: を作るため）
 EXPLORE, BUILD, DONE, LOCATE, RACE = "EXPLORE", "BUILD", "DONE", "LOCATE", "RACE"
+#: 自己位置を特定できたが、自動運転に入っていない（GUI の「自己位置を特定」まで押し、
+#: 「走行を開始」を待っている）段。他車が動かされた等で追跡を見失ったら LOCATE へ戻る
+LOCATED = "LOCATED"
+#: `LOCATED`で追跡を見失い続けたらやり直す周期数
+LOCATED_LOST_CYCLES = 5
 #: 横へ避けられない障害物・スタックを、Hybrid A*（`ParkToPoint`）で後退・切り返しも使って
 #: 抜けている段。抜けたら RACE へ戻る
 DETOUR = "DETOUR"
@@ -101,6 +107,10 @@ _LAUNCH_STEER_MAX = 0.12
 #: 目標速度を今の速度の `_SAT_SLOW` 倍（`v_min` が下限）に抑える。舵で直せないずれは速度を
 #: 落とすしかない。設計どおりの急カーブ（横偏差が小さい）では掛からない
 _SAT_STEER_FRAC = 0.97
+#: 舵がこの割合以上なら横の学習を止める（「舵が上限」。周回のタイムには数える）。舵を大きく切った低速のヘアピンは、
+#: 速度ではなく舵で曲がれるかが決まっていて（実機 `surge_20261029_071044` の 2 つ目のヘアピンは毎周 上限の 99%）、
+#: 横の上限とは関係ない兆候が出る（`054426`: 1.4m/s・舵 上限の 81〜88% で出た誤った前兆が横の上限を止めた）
+GRIP_STEER_GATE = 0.80
 _SAT_CROSS_M = 0.15
 _SAT_SLOW = 0.8
 #: 車速がこれ未満になったら「発進」と見なし、次に経路の速度へ届くまでローンチコントロールを要求する [m/s]
@@ -124,12 +134,20 @@ LAP_CONFIRM = 3
 
 #: `LOCATE`の候補の点数の式に入れる残差の物差し[m]（`locate_score`）
 LOCATE_RMS_SCALE = 0.03
+#: 頑健な尺度（`locate_score_robust`）の壁に乗った点の残差の物差し[m]
+LOCATE_ROBUST_RMS_SCALE = 0.04
+#: 頑健な尺度で採る候補の点数の下限。他車3台が周りに居ても真の姿勢は 0.7 前後（`--locate-cars 3`）
+LOCATE_MIN_SCORE_ROBUST = 0.5
+#: `LOCATE`の点数で、光路が地図の壁を突き抜けた点（地図と矛盾。他車では起きない）を、
+#: 壁に乗った点の何倍で減点するか（`locate_score`）
+LOCATE_CROSS_WEIGHT = 3.0
 #: `LOCATE`で2位の点数が1位のこの割合以上なら「絞り込めていない」。通路状のコースで
 #: 片端にだけ小さな違いがある場合、当たり率は真と反対側で数%しか違わないが、
 #: 残差のRMSは桁で違う（真0.7cm・反対側6cm）。点数はその両方を掛ける
 LOCATE_SCORE_RATIO = 0.7
-#: `LOCATE`で採る候補の点数の下限。真の姿勢は 0.85〜0.92（`sim.slam_bench --locate`、実機相当の誤差、
-#: 完全な地図）に出る一方、探索が真の姿勢を候補に入れられなかったときの最良は 0.0〜0.6 だった。
+#: `LOCATE`で採る候補の点数の下限。真の姿勢は他車が無ければ 0.85〜0.92 に出る一方
+#: （`sim.slam_bench --locate`、実機相当の誤差、完全な地図）、探索が真の姿勢を候補に入れられなかった
+#: ときの最良は 0.0〜0.6 だった。他車が周りに3台居ても真の姿勢は 0.7 前後（`--locate-cars 3`）。
 #: 点数が低いのに当たり率（`min_score`）だけで採ると、誤った姿勢で走り出す。実機の地図は
 #: シムより粗いので真の姿勢の点数はもう少し下がりうる（見つからないときはクリックのヒントで絞る）
 LOCATE_MIN_SCORE = 0.5
@@ -140,7 +158,7 @@ LOCATE_CANDIDATES = 12
 
 
 def locate_score(ref) -> float:
-    """`Frontend.refine()`の結果の点数（大きいほどよい）。
+    """`Frontend.refine()`の結果の点数（大きいほどよい）。**全点が地図に合うことを求める厳密な尺度。**
 
     **全点に対する当たり率**（`inlier_all`、照合できなかった点は外れ扱い）に、
     残差のRMSで`exp(-(rms/LOCATE_RMS_SCALE)²/2)`を掛ける。`inlier`（照合できた点の中の割合）
@@ -148,10 +166,48 @@ def locate_score(ref) -> float:
     当たり判定（5cm）に収まる程度の違いは見えない。
     なお`inlier_all`は無傷の走査でも1にならない（壁の裏側に落ちた点や掠め角の点は
     未知のセルに落ちて照合できない）ので、絶対値ではなく候補どうしの比較に使う。
+    **地図に無い他車が走査線を遮ると、真の姿勢でも潰れる**（`locate_score_robust`が補う）。
     """
     if ref is None or ref.used <= 0 or not math.isfinite(ref.rms):
         return 0.0
     return float(ref.inlier_all) * math.exp(-0.5 * (ref.rms / LOCATE_RMS_SCALE) ** 2)
+
+
+def locate_score_robust(fit) -> float:
+    """`LocateScorer.fit()`の結果の点数。**遮り物（他車）に強い尺度**（`slam2d/core/locscore.py`）。
+
+    壁に乗った点の割合`hit`から、光路が壁を突き抜けた点の割合`cross`（地図と矛盾。他車では起きない）を
+    `LOCATE_CROSS_WEIGHT`倍して引き、壁に乗った点の残差のRMSで`exp(-(rms/LOCATE_ROBUST_RMS_SCALE)²/2)`を掛ける。
+    地図から外れた点を一切罰しない代わりに、厳密な尺度（`locate_score`）より鋭さが無い
+    （他車が無い走査では、似た別の場所との差が縮む。`pick_locate`が使い分ける）。
+    """
+    if fit is None or fit.n <= 0 or not math.isfinite(fit.rms):
+        return 0.0
+    base = max(0.0, fit.hit - LOCATE_CROSS_WEIGHT * fit.cross)
+    return float(base * math.exp(-0.5 * (fit.rms / LOCATE_ROBUST_RMS_SCALE) ** 2))
+
+
+def pick_locate(scored: list) -> tuple[object | None, str]:
+    """仕上げた候補`[(厳密な点数, 頑健な点数, ref)]`から採る姿勢を決める。戻り値は`(ref, 断る理由)`。
+
+    **全点が地図によく合う候補があれば（`LOCATE_MIN_SCORE`以上）従来どおり厳密な尺度で決める。**
+    無いときは、他車などの遮り物で点数が潰れたとみなし、頑健な尺度で決める。どちらの尺度でも
+    2位が1位の`LOCATE_SCORE_RATIO`以上なら「絞り込めていない」として断る。
+    厳密な尺度で良い候補が無いのに頑健な尺度へ落ちるのは、厳密な尺度で**2位と競っている**ときではない
+    （競っているときは断る）。
+    """
+    if not scored:
+        return None, "none"
+    strict = sorted(scored, key=lambda t: -t[0])
+    if strict[0][0] >= LOCATE_MIN_SCORE:
+        order, k = strict, 0
+    else:
+        order, k = sorted(scored, key=lambda t: -t[1]), 1
+        if order[0][1] < LOCATE_MIN_SCORE_ROBUST:
+            return None, "low"
+    if len(order) >= 2 and order[0][k] > 0 and order[1][k] >= order[0][k] * LOCATE_SCORE_RATIO:
+        return None, "ambiguous"
+    return order[0][2], ""
 
 
 def forward_traj(traj: np.ndarray, min_step: float = 0.02) -> np.ndarray:
@@ -214,8 +270,6 @@ GROUP_GRIP = "本番走行: 路面の限界の学習"
 #: 学習で上げた速度を反映しない、車の先の距離 [m] と時間 [s]（足元の目標速度を跳ばさない、`_grip_hold`）
 _GRIP_AHEAD_M = 1.5
 _GRIP_AHEAD_S = 0.6
-#: 壁との余裕は、その点からこの距離だけ先までの最小を使う [m]（外へ膨らむのは少し先）
-_GRIP_WALL_AHEAD_M = 1.5
 #: 学習した値を地図の横へ保存する間隔 [s]
 _GRIP_SAVE_S = 10.0
 #: 別の線へ乗り換えてから、学習を止めておく時間 [s]
@@ -622,6 +676,10 @@ class Slam2dRaceLine(Planner):
                   default=1.0, step=0.05, unit="m/s",
                   note="★障害物・壁との余裕が『車体外形の合格線』ちょうどのときの速度。余裕がそれより"
                        "15cm 以上広ければ抑えず（曲率で決まる速度のまま）、その間は余裕に比例して上げる"),
+        ParamSpec(group=GROUP_AVOID, key="obstacle_predict", hidden=True, label="動く障害物の通り道を見込む", min=0, max=1,
+                  step=1, default=0, unit="",
+                  note="★実験。1で、速度のある障害物（等速で動くと見る）の通り道ぜんぶを避ける。"
+                       "シム（sim.bench --mover）では 0 との差が試行のばらつきに埋もれた"),
         ParamSpec(group=GROUP_AVOID, key="avoid_len_min", hidden=True, label="避け始める長さの下限", min=0.3, max=3.0,
                   default=0.8, step=0.1, unit="m",
                   note="横へずれ始めてからずれ切るまでの距離の下限。速いほど・ずれが大きいほど長くなる"),
@@ -660,25 +718,14 @@ class Slam2dRaceLine(Planner):
                        "横・加速・減速の上限を決める。横はコースで 1 つ: 上限を 1 段（8%）上げて 1 周走り、"
                        "計画で縮むはずの時間の 6 割以上ラップが縮んだら採用、縮まなければ戻して終える"
                        "（線から外れる・リアが滑るといった兆候が出た段はすぐやめる）。"
-                       "減速もコース全体で 1 つ: 1 周に 1 段上げ、コーナーへ計画より速く入るように"
-                       "なったら 1 段戻して止める。加速は上限（目標車速の傾きの上限）で固定（学習しない）。"
+                       "加速・減速は横の使い具合ごとの包絡で、計画に付いて行けたかで上げ下げする。"
                        "値は地図の横（<地図名>.grip.json）に保存する"),
         ParamSpec(group=GROUP_GRIP, key="grip_init", hidden=True, label="初期値（同定値に対する割合）", min=0.5, max=1.2,
                   step=0.05, default=0.85, unit="×",
-                  note="学習の出発点 = 同定値 `mu`×g × これ。発進の加速度から初期値が出たとき"
-                       "（TC が介入した発進）と、保存した値があるときは、そちらを使う"),
+                  note="学習の出発点 = 同定値 `mu`×g × これ。保存した値があるときは、そちらを使う"),
         ParamSpec(group=GROUP_GRIP, key="grip_max", label="上げてよい上限", min=2.0, max=8.0, step=0.1,
                   default=6.0, unit="m/s²",
                   note="学習で横の限界をここより上げない"),
-        ParamSpec(group=GROUP_GRIP, key="grip_step", hidden=True, label="1回の上げ幅", min=1.0, max=10.0, step=0.5,
-                  default=6.0, unit="%",
-                  note="前兆なしでコーナーを1つ抜けるたびに、横の限界をこの割合だけ上げる。"
-                       "★既定の 6% はシムで決めた値。実機で初めて試すときは 3% から"),
-        ParamSpec(group=GROUP_GRIP, key="grip_by_time", hidden=True, label="横の上限を周回のタイムで決める",
-                  min=0, max=1, step=1, default=1, unit="",
-                  note="1 = 上限を 1 段上げて 1 周走り、計画で縮むはずの時間の 6 割以上縮んだら採用する"
-                       "（`nav/grip.TimeLearner`。前兆は行き過ぎた段をやめる安全装置としてだけ使う）。"
-                       "0 = 前兆が出るまで上げる元の方式（`GripLearner`）"),
         ParamSpec(group=GROUP_GRIP, key="grip_reline", hidden=True, label="学習値でラインを引き直す",
                   min=0, max=1, step=1, default=0, unit="",
                   note="★1 = 学習が落ち着いたら、学習した限界でラインを引き直して乗り移る。既定は 0: "
@@ -711,10 +758,10 @@ class Slam2dRaceLine(Planner):
         self.vehicle = Vehicle.load()
         #: 横グリップの学習（`nav/grip.py`、`grip_learn` が 1 の間だけ働く）。舵角から出る曲率に
         #: 掛ける遅れはヨーの応答ぶん（舵そのものの遅れは実舵角に入っている）
-        self._grip = self._grip_make(True)
+        self._grip = self._grip_make()
         #: 学習を路面の記録から始めたか（`_grip_load_surface`）と、そのときの記録 `(横, 減速, 比)`。
         #: 記録の値はこの路面で確かめた天井として扱い、その上は試さない
-        #: 計画のラップ [s] と、それを出した `path.v`（`TimeLearner` へ渡す）
+        #: 計画のラップ [s] と、それを出した `path.v`（`GripLearner` へ渡す）
         self._grip_plan: tuple = (None, -1.0, 0.0, 0.0)
         self._grip_on = False
         self.ftg = FollowTheGap()
@@ -784,6 +831,8 @@ class Slam2dRaceLine(Planner):
         #: 灯火（パッシング→ウィンカー）。`_signal_step` が毎周期 `st` へ書く
         self._signals = SignalLights()
         self._hit_now = False             #: この周期、前方を塞ぐ障害物を見ているか（`_track`）
+        self._vel_tracker = obs_mod.VelocityTracker()   #: 障害物の速度を出す（動く物の予測に使う）
+        self._obs_t = 0.0
         self._detour_side = 0             #: Hybrid A* の迂回先の向き（+1=左 -1=右 0=不明）
         #: 障害物を避けている一時経路（`avoid.plan_offset`）と、その元にした経路
         self._avoid: av_mod.AvoidPlan | None = None
@@ -861,11 +910,13 @@ class Slam2dRaceLine(Planner):
         #: 自前生成するものだけを持つので、読み込み経路はここに置く。
         #: `snapshot()`が両方を出し分ける）
         self._loaded_centerline_xy: np.ndarray | None = None
+        self._located_lost = 0                   #: `LOCATED`で見失った周期数
         #: 進行中のグローバルローカリゼーション（`LOCATE`段でのみ非None）
         self._localizer: GlobalLocalizer | None = None
         #: 粗探索の上位候補のうち、まだ仕上げていないもの（`None` = 粗探索中）と仕上げた結果
         self._loc_cands: list | None = None
         self._loc_scored: list = []
+        self._loc_scorer: LocateScorer | None = None   #: 候補の採点器（地図ごとの前処理を持つ。LOCATEごとに作る）
         #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
         self._loc_hint: tuple[float, float] | None = None
         self._loc_hint_t = 0.0                   #: `_loc_hint` を受けた時刻（`time.monotonic()`）
@@ -900,10 +951,6 @@ class Slam2dRaceLine(Planner):
         self._grip_quiet_why = ""                #: 上の理由（reason の「停止: …」に出す）
         #: 経路の各点の `(求める横加速度, 限界)`（`_grip_levels`）: [(経路の点, 鍵, 配列の組)]（直近の3本）
         self._grip_cache: list[tuple] = []
-        #: 経路の各点での車体と壁の余裕（`_grip_wall`）と、それを測った (経路の点, 地図の版)
-        self._grip_wall_arr: np.ndarray | None = None
-        self._grip_wall_ref: np.ndarray | None = None
-        self._grip_wall_key: tuple | None = None
         #: 曲がり切れない区間の印（`_grip_tight`）
         self._grip_tight_arr: np.ndarray | None = None
         self._grip_tight_ref: np.ndarray | None = None
@@ -919,7 +966,6 @@ class Slam2dRaceLine(Planner):
         self._grip_capped = False
         self._grip_saved: tuple = (0, 0.0)
         self._grip_save_t = 0.0
-        self._grip_laps = 0
 
     def on_vehicle_state(self, vs: VehicleState) -> None:
         """`planning_node`が`vehicle_state`を受けるたびに呼ぶ（100Hz）。
@@ -1195,6 +1241,8 @@ class Slam2dRaceLine(Planner):
         if self._load_failed:
             st.reason = f"{self._load_error}。地図を選び直すか、自動運転を解除してください"
             return st
+        if self.phase == LOCATED:
+            return self._located(st, u.lost)
         if self.phase == EXPLORE:
             return self._explore(st, scan, vs, p, dt, u.lost)
         if self.phase == BUILD:
@@ -1604,6 +1652,7 @@ class Slam2dRaceLine(Planner):
                 st.reason = "自己位置の候補が見つからない"
                 return st
             self._loc_cands, self._loc_scored = list(cands), []
+            self._loc_scorer = LocateScorer(self.slam.grid)
 
         # ★ 粗探索（0.2m間隔・15°刻み）の得点だけで決めない。上位候補を
         #   それぞれ総当たり＋Gauss-Newton で仕上げ、**全点に対する当たり率と残差RMS**
@@ -1614,7 +1663,8 @@ class Slam2dRaceLine(Planner):
         c = self._loc_cands.pop(0)
         ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw))
         if ref is not None:
-            self._loc_scored.append((locate_score(ref), ref))
+            fit = self._loc_scorer.fit(pts, ref.pose, self.slam.lidar_xy)
+            self._loc_scored.append((locate_score(ref), locate_score_robust(fit), ref))
         if self._loc_cands:
             st.reason = f"自己位置の候補を仕上げている（残り {len(self._loc_cands)}）"
             return st
@@ -1624,22 +1674,42 @@ class Slam2dRaceLine(Planner):
                 self._locate_seed = None
             st.reason = "自己位置の候補を仕上げられなかった"
             return st
-        scored.sort(key=lambda t: -t[0])
-        best = scored[0][1]
-        if len(scored) >= 2 and scored[0][0] > 0 and scored[1][0] >= scored[0][0] * LOCATE_SCORE_RATIO:
+        best, why = pick_locate(scored)
+        if why == "ambiguous":
             if seeded:
                 self._locate_seed = None
             st.reason = ("自己位置の候補が複数あり絞り込めない"
                          "（左右対称・繰り返し形状の疑い）。"
                          "地図パネルをタップしておおよその位置を教えてください")
             return st
-        if best.inlier < p["min_score"] or scored[0][0] < LOCATE_MIN_SCORE:
+        if best is None or best.inlier < p["min_score"]:
             if seeded:
                 self._locate_seed = None      # 種が外れている。全域で探し直す
-            st.reason = (f"自己位置が見つからない（最良の当たり率 {best.inlier:.2f}・"
-                         f"点数 {scored[0][0]:.2f}）")
+            top = max(scored, key=lambda t: max(t[0], t[1]))
+            st.reason = (f"自己位置が見つからない（最良の当たり率 {top[2].inlier:.2f}・"
+                         f"点数 {max(top[0], top[1]):.2f}）。車の周りの障害物を離すか、"
+                         "地図パネルをタップして位置を教えてください")
             return st
         self.slam.set_pose(*best.pose)
+        # ★ `st.match_score`は`plan()`冒頭の`slam.update()`（古い姿勢からの追跡で未知の領域を指して
+        #   失敗する）の値のまま残っている。求め直した値に置き換えないとRACEへ切り替わった瞬間だけ「一致度0」になる
+        st.match_score = best.inlier
+        st.pose_x, st.pose_y, st.pose_yaw = best.pose
+        if not self._engaged:
+            # 「自己位置を特定」だけ押された。走り出さず、人が「走行を開始」を押すのを待つ
+            self.phase = st.phase = LOCATED
+            self._locate_seed = None
+            self._loc_hint = None
+            self._located_lost = 0
+            self._map_dirty = True
+            st.reason = f"自己位置を特定した（一致度 {best.inlier:.2f}）。『走行を開始』で出発する"
+            return st
+        self._begin_race(st)
+        st.reason = f"自己位置を復元した（一致度 {best.inlier:.2f}）。走行を開始する"
+        return st
+
+    def _begin_race(self, st: AutoState) -> None:
+        """`LOCATE`/`LOCATED`から`RACE`へ入る（走り出しの状態を初期化する）。"""
         self.phase = st.phase = RACE
         self._locate_seed = None
         # クリックのヒントは使い切り（残すと、次に読む別の地図の探索までその周りに絞る）
@@ -1653,13 +1723,22 @@ class Slam2dRaceLine(Planner):
         self._off_t = 0.0
         self._rejoins = 0
         self._map_dirty = True
-        # ★ `st.match_score`はこの`plan()`冒頭の`self.slam.update()`（`_locate()`
-        # 呼び出し前の古い姿勢からの追跡マッチ、当然ながら未知の領域を指して
-        # 失敗する）の値のまま残っている。ここで求め直した値に置き換えないと、
-        # RACEへ切り替わった瞬間だけ「一致度0」を報告してしまう
-        st.match_score = best.inlier
-        st.pose_x, st.pose_y, st.pose_yaw = best.pose
-        st.reason = f"自己位置を復元した（一致度 {best.inlier:.2f}）。走行を開始する"
+
+    def _located(self, st: AutoState, lost: bool) -> AutoState:
+        """自己位置を特定済みで走行開始を待つ。追跡は回し続け（他車が動いても地図に対して追える）、
+        見失い続けたら今の姿勢を種に`LOCATE`からやり直す。自動運転に入ったら`RACE`へ。"""
+        st.ready = False
+        self._located_lost = self._located_lost + 1 if lost else 0
+        if self._located_lost >= LOCATED_LOST_CYCLES:
+            self._back_to_locate()
+            st.phase = LOCATE
+            st.reason = "自己位置を見失った。探し直す"
+            return st
+        if self._engaged:
+            self._begin_race(st)
+            st.reason = "走行を開始する"
+            return st
+        st.reason = "自己位置を特定済み。『走行を開始』で出発する"
         return st
 
     # ── RACE ──
@@ -1862,6 +1941,8 @@ class Slam2dRaceLine(Planner):
         pad = self._obs_pad
         now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
                              wall_pad=pad, free=self._obs_free, near=self._obs_near)
+        self._obs_t += self._dt
+        now = self._vel_tracker.update(self._obs_t, now)
         self._obs = obs_mod.confirm(now, self._prev_obs)
         # ★ すぐ近く（今の速度で止まれる距離＋0.6m 以内）に出た物は、2周期目を待たずに扱う。
         #   見通しの悪いコーナーの先の障害物は、見えた時点でもう 1m も無い。確認を待つ 0.1s の間に
@@ -2020,6 +2101,10 @@ class Slam2dRaceLine(Planner):
                 and self._plan_avoid(path, index, hit, vs, p, kappa_frac=0.9)):
             st.reason += "。止まってから避ける経路を引いた"
             self._blocked_t = 0.0
+        elif hit.speed >= obs_mod.MOVING_MIN_SPEED:
+            # ★ 動いている物（他車・人）は、どけば道が空く。後退・切り返しで抜けに行かず、その場で
+            #   待つ（止まっている間も `_plan_avoid` を毎周期引き直し、避けられる隙ができたら避ける）
+            st.reason += f"。動く障害物（{hit.speed:.1f}m/s）なので、その場で待って道が空けば避ける"
         elif self._blocked_t >= wait and self._detour_tries < DETOUR_TRIES:
             self._start_detour(st, path, index, hit, dist, p, "横へ避けられない")
         elif self._detour_tries >= DETOUR_TRIES:
@@ -2039,7 +2124,8 @@ class Slam2dRaceLine(Planner):
             kappa_max=v.kappa_max, footprint=tuple(v.footprint),
             # 避けた後の経路で `_blocking` が同じ障害物を拾わないよう、経路の余裕より広く取る
             margin=max(p["avoid_margin"], p["line_margin"]) + 0.01,
-            clear=p["avoid_clear"], len_min=p["avoid_len_min"], kappa_frac=kappa_frac)
+            clear=p["avoid_clear"], len_min=p["avoid_len_min"], kappa_frac=kappa_frac,
+            predict=p["obstacle_predict"] > 0)
 
         speed = max(vs.speed, 0.0)
         ahead = speed * speed / (2.0 * max(self._lim(p).a_brake, 0.1)) + 0.6 * speed + 3.5
@@ -2050,7 +2136,7 @@ class Slam2dRaceLine(Planner):
         #   遠くで見つけたときは点が少なく半径を大きく過小評価する（10cm の円柱が 3.6cm に
         #   見えた）ので下限を置く
         def grown(o: obs_mod.Obstacle) -> obs_mod.Obstacle:
-            return obs_mod.Obstacle(o.x, o.y, max(_OBS_GROW * o.r, _OBS_MIN_R), o.n)
+            return obs_mod.Obstacle(o.x, o.y, max(_OBS_GROW * o.r, _OBS_MIN_R), o.n, None, o.vx, o.vy)
         grow = [grown(o) for o in self._obs]
         target = grown(hit)
         # ★ 引けなかった直後は、車か障害物が動く（または使ってよい曲率が変わる）まで引き直さない。
@@ -2587,26 +2673,9 @@ class Slam2dRaceLine(Planner):
         for ref, k, arr in self._grip_cache:
             if ref is path.xy and k == key:
                 return arr
-        arr = g.levels(path.xy, self._grip_wall(path))
+        arr = g.levels(path.xy)
         self._grip_cache = [(path.xy, key, arr)] + self._grip_cache[:2]
         return arr
-
-    def _grip_wall(self, path: rl_mod.RaceLine) -> np.ndarray | None:
-        """経路の各点から `_GRIP_WALL_AHEAD_M` 先までの、車体外形と壁の余裕の最小 [m]。
-
-        同じ超過でも、耐えられる横偏差は場所で違う。外へ膨らむのは前兆が出た所の少し先なので、
-        先の余裕まで見る。閉じた経路だけ（`_body_check` は巡回の接線で測る）。
-        """
-        if not path.closed or len(path) < 3:
-            return None
-        key = (self.slam.grid.seq,)
-        if self._grip_wall_ref is not path.xy or self._grip_wall_key != key:
-            c = self._body_check().clearance(path.xy)
-            out = c.copy()
-            for k in range(1, int(_GRIP_WALL_AHEAD_M / max(path.length / len(path), 1e-6)) + 1):
-                np.minimum(out, np.roll(c, -k), out=out)
-            self._grip_wall_ref, self._grip_wall_key, self._grip_wall_arr = path.xy, key, out
-        return self._grip_wall_arr
 
     def _grip_tight(self, path: rl_mod.RaceLine, p: dict[str, float]) -> np.ndarray:
         """経路の各点が「曲がり切れない区間」（の前後 0.4m）にあるか（`_tight_note` と同じ基準）。
@@ -2632,11 +2701,9 @@ class Slam2dRaceLine(Planner):
         h = self._grip_hold_cap
         return h[1] if h is not None and h[0] is path.xy else None
 
-    def _grip_make(self, by_time: bool) -> grip_mod.GripLearner:
+    def _grip_make(self) -> grip_mod.GripLearner:
         v = self.vehicle
-        cls = grip_mod.TimeLearner if by_time else grip_mod.GripLearner
-        return cls(yaw_wn=v.yaw_natural_freq_rad_s, yaw_zeta=v.yaw_damping,
-                   rolling_resistance=v.rolling_resistance)
+        return grip_mod.GripLearner(yaw_wn=v.yaw_natural_freq_rad_s, yaw_zeta=v.yaw_damping)
 
     def _grip_begin(self, vs: VehicleState, p: dict[str, float]) -> None:
         """周期の初めに学習の設定を渡し、値が変わっていれば速度の作り直しを予約する。
@@ -2656,22 +2723,12 @@ class Slam2dRaceLine(Planner):
         self._grip_capped = False
         if not on:
             return
-        by_time = p.get("grip_by_time", 1) > 0
-        if isinstance(self._grip, grip_mod.TimeLearner) != by_time:
-            # 方式を切り替えた。学習器を作り直し、保存した値から始める（判定の設定は引き継ぐ）
-            self._grip_save()
-            cfg = self._grip.cfg
-            self._grip = self._grip_make(by_time)
-            self._grip.cfg = cfg
-            self._grip_load(getattr(self, "_grip_name", ""))
         g = self._grip
-        if not g.cfg.fixed_step:
-            g.cfg.step_up = p["grip_step"] / 100.0
         down_only = p["grip_down_only"] > 0
         v = self.vehicle
         g.configure(init_level=p["grip_init"] * v.a_lat_max,
                     max_level=p["grip_max"],
-                    down_only=down_only, lat_use=1.0)
+                    down_only=down_only)
         # 前後の上限の包絡は、校正の値（直線）に既定の形を掛けた所から始め、計画が包絡で決まっている所で実際に出た値に
         # 合わせる（`grip.LongLearner`）。校正の値は出発点にだけ使う。天井は目標車速のランプの上限
         # `[safety] cmd_accel_limit_m_s2`（それより上は指令が届かない）
@@ -2726,7 +2783,7 @@ class Slam2dRaceLine(Planner):
             gate = "障害物"
         elif md_note:
             gate = "MD無応答"
-        elif abs(st.target_steer) >= 0.97 * self.vehicle.max_steer:
+        elif abs(st.target_steer) >= GRIP_STEER_GATE * self.vehicle.max_steer:
             gate = "舵が上限"
         elif vs.t_capture < self._grip_quiet_ns:
             gate = self._grip_quiet_why or "線を乗り換えた直後"
@@ -2754,9 +2811,6 @@ class Slam2dRaceLine(Planner):
                 self._grip_plan = (v, ref, rl_mod._travel_time(path.xy, v, True), lap_ref)
             g.observe_plan(self._grip_plan[2], self._grip_plan[3])
         t = vs.t_capture / 1e9
-        if self.laps != self._grip_laps:
-            self._grip_laps = self.laps
-            g.lap(t)
         cap = self._grip_cap()
         if cap is not None and cap[0] < st.target_speed:
             st.target_speed, st.accel_limit = cap
@@ -2767,38 +2821,33 @@ class Slam2dRaceLine(Planner):
         m = g.map
         lg = g.long
         # 記録から判定を追えるように（`AutoState.grip`）。実機では真値が無いので、これが唯一の手がかり
-        x, y = self.slam.pose[:2]
         st.grip = {
             "lat": round(m.level, 3), "acc": round(m.accel, 3), "dec": round(m.decel, 3),
-            "lat_here": round(g.level_at(x, y), 3),
             "v_plan": round(self._grip_vp or 0.0, 3), "a_plan": round(self._grip_ax, 3),
-            "excess": round(g.last_excess, 4), "thr": round(g.last_thr, 4),
-            "noise": round(g.noise_sigma, 5),
-            "mean": round(g.last_mean[0], 4), "mean_thr": round(g.last_mean[1], 4),
-            "cross_gain": round(g.last_cross_gain, 4),
-            "events": len(g.events), "trials": g.trials, "passes": g.passes,
+            "events": len(g.events),
             "win": lg.windows, "lag_dec": round(float(lg.last), 3),
             **lg.diag(),
             # この地図で学習を終えた値（`GripMap.best_*`）から始めたか・その値（0 = まだ無い）
-            "from_best": 1.0 if getattr(g, "from_best", False) else 0.0,
+            "from_best": 1.0 if g.from_best else 0.0,
             "best_lat": round(m.best_lat, 3),
             **g.diag(),
         }
         last = f"・直近 {g.events[-1]['kind']}" if g.events else ""
-        prior = "・地図の確定値から開始" if getattr(g, "from_best", False) else ""
-        return (f"・学習 横 {m.level:.2f}・加速 {m.accel:.2f}・減速 {m.decel:.2f}m/s²"
+        prior = "・地図の確定値から開始" if g.from_best else ""
+        # 前後は包絡（横の使い具合 0/0.5/1）。u = 0 の点は直線で全開にする所が無いコースでは測れず、出発点のまま残る
+        env = lambda vals: "/".join(f"{x:.2f}" for x in vals)  # noqa: E731
+        return (f"・学習 横 {m.level:.2f}・加速 {env(m.acc)}・減速 {env(m.dec)}m/s²"
                 f"（{g.state(gate)}・前兆 {len(g.events)}回{last}{prior}）")
 
     def _grip_cap(self) -> tuple[float, float] | None:
         """前兆で落としている `(目標速度 [m/s], 落とす速さ [m/s²])`。落としていなければ `None`。
 
         落とす速さを限界の一部に抑えるのは、強く減速するとそのぶん横に使える力が減るため。
-        大きく超えているとき（`GripLearner.cap_hard`）は抑えない（0 = STM32 の上限で落とす）。
         """
         g = self._grip
         if not self._grip_on or g.cap is None:
             return None
-        return g.cap, 0.0 if g.cap_hard else max(0.5, g.cfg.cap_decel * g.map.level)
+        return g.cap, max(0.5, g.cfg.cap_decel * g.map.level)
 
     def _grip_observe(self, vs: VehicleState) -> None:
         """車両状態 1 つぶんを学習へ渡す（100Hz）。姿勢は車速とジャイロで今へ進めたもの。"""
@@ -2807,9 +2856,6 @@ class Slam2dRaceLine(Planner):
         if not gate and t - self._grip_gate_t > 300_000_000:
             gate = "計画が止まっている"
         g = self._grip
-        a = g.launch.feed(t / 1e9, vs.speed, vs.tc_active, vs.steer_actual)
-        if a is not None:
-            g.set_launch(a)
         x, y, _ = self.slam.pose_now(vs)
         v = self.vehicle
         kappa = math.tan(v.steer_map.effective(vs.steer_actual)) / v.wheelbase
@@ -2817,7 +2863,8 @@ class Slam2dRaceLine(Planner):
         # いる。加速・減速の測定には使わない（横は見る）
         g.observe(t / 1e9, x, y, vs.speed, vs.yaw_rate, kappa, a_x=self._grip_ax, gate=gate,
                   tc_active=vs.tc_active, v_plan=self._grip_vp,
-                  long_gate="追いつく途中" if self._grip_catch else "", u_plan=self._grip_u)
+                  long_gate="追いつく途中" if self._grip_catch else "", u_plan=self._grip_u,
+                  a_y=float(vs.accel[1]) if vs.imu_ok and len(vs.accel) > 1 else None)
 
     def _grip_load(self, name: str) -> None:
         """地図 `name` の横に保存した学習値を読む（無ければ初期値から）。地図をまたぐ記録は持たない。"""
@@ -2845,9 +2892,7 @@ class Slam2dRaceLine(Planner):
         name = getattr(self, "_grip_name", "")
         if g is None or not name:
             return
-        mark = getattr(g, "mark_best", None)
-        if mark is not None:
-            mark()
+        g.mark_best()
         if not g.worth_saving():
             return
         m = g.map

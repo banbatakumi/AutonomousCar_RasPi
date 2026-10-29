@@ -41,7 +41,7 @@ from .deskew import Points
 from .grid import OccGrid
 from .local_map import _edt
 
-__all__ = ["Obstacle", "free_mask", "wall_distance", "near_pad", "detect", "confirm", "blocking"]
+__all__ = ["Obstacle", "VelocityTracker", "swept", "free_mask", "wall_distance", "near_pad", "detect", "confirm", "blocking"]
 
 #: クラスタを切る点間距離 [m]。これより離れていたら別の物体
 _SPLIT_M = 0.18
@@ -60,6 +60,13 @@ class Obstacle(NamedTuple):
     #: （重心と半径は見えている面だけから出すので、見る角度で 10cm 近く動く。車体が当たるか
     #: どうかはこの点で直接測る — `avoid.clearance_to_points`）
     pts: np.ndarray | None = None
+    #: 速度 [m/s]（map フレーム）。`VelocityTracker` が入れる。静止していると見なせば 0
+    vx: float = 0.0
+    vy: float = 0.0
+
+    @property
+    def speed(self) -> float:
+        return math.hypot(self.vx, self.vy)
 
 
 def free_mask(grid: OccGrid, wall_pad: float) -> np.ndarray:
@@ -209,3 +216,85 @@ def blocking(obstacles: list[Obstacle], path_xy: np.ndarray, index: int,
             if d < best_d:
                 best, best_d = o, d
     return best, best_d
+
+
+#: 動いていると見なす最小の速さ [m/s]。見える面が変わると重心が数 cm ずれる（10Hz で 0.2〜0.5m/s 相当）
+#: ので、それより十分上に置く
+MOVING_MIN_SPEED = 0.3
+#: 速度を回帰する履歴の長さ [s] と、必要な点数・時間幅
+_TRACK_S = 0.8
+_TRACK_MIN_N = 4
+_TRACK_MIN_SPAN_S = 0.3
+
+
+class VelocityTracker:
+    """周期ごとの検出を結んで、障害物の速度を出す。
+
+    毎周期、新しい検出を履歴の最後の位置に近いものへ結ぶ（距離 `tol + 半径`）。結んだ位置の
+    履歴（直近 `_TRACK_S` 秒）を直線で回帰した傾きが速度。**1周期の差分は使わない**——見える面が
+    変わるたびに重心が数 cm 動き、10Hz だと 0.5m/s 近い偽の速度になる。回帰の残差が速さに
+    比べて大きい（直線に乗らない）ものと、速さが `MOVING_MIN_SPEED` 未満のものは静止として 0 にする。
+    """
+
+    def __init__(self, tol: float = 0.5) -> None:
+        self._tol = tol
+        self._tracks: list[list[tuple[float, float, float]]] = []     # (t, x, y) の列
+
+    def reset(self) -> None:
+        self._tracks = []
+
+    def update(self, t: float, now: list[Obstacle]) -> list[Obstacle]:
+        used: set[int] = set()
+        new_tracks: list[list[tuple[float, float, float]]] = []
+        out: list[Obstacle] = []
+        for o in now:
+            best, best_d = -1, math.inf
+            for i, tr in enumerate(self._tracks):
+                if i in used:
+                    continue
+                d = math.hypot(o.x - tr[-1][1], o.y - tr[-1][2])
+                if d <= self._tol + o.r and d < best_d:
+                    best, best_d = i, d
+            hist = []
+            if best >= 0:
+                used.add(best)
+                hist = [h for h in self._tracks[best] if t - h[0] <= _TRACK_S]
+            hist.append((t, o.x, o.y))
+            new_tracks.append(hist)
+            vx, vy = self._fit(hist)
+            out.append(o._replace(vx=vx, vy=vy) if (vx or vy) else o)
+        self._tracks = new_tracks
+        return out
+
+    @staticmethod
+    def _fit(hist: list[tuple[float, float, float]]) -> tuple[float, float]:
+        if len(hist) < _TRACK_MIN_N or hist[-1][0] - hist[0][0] < _TRACK_MIN_SPAN_S:
+            return 0.0, 0.0
+        a = np.asarray(hist)
+        tt = a[:, 0] - a[:, 0].mean()
+        den = float((tt * tt).sum())
+        if den < 1e-9:
+            return 0.0, 0.0
+        vx = float((tt * (a[:, 1] - a[:, 1].mean())).sum() / den)
+        vy = float((tt * (a[:, 2] - a[:, 2].mean())).sum() / den)
+        sp = math.hypot(vx, vy)
+        if sp < MOVING_MIN_SPEED:
+            return 0.0, 0.0
+        # 直線に乗っているか: 予測との残差が速さ×0.25s（=ほぼ 1 周期ぶん）を超えたら信じない
+        rx = a[:, 1] - (a[:, 1].mean() + vx * tt)
+        ry = a[:, 2] - (a[:, 2].mean() + vy * tt)
+        if float(np.hypot(rx, ry).max()) > max(0.06, 0.25 * sp):
+            return 0.0, 0.0
+        return vx, vy
+
+
+def swept(o: Obstacle, horizon_s: float, step: float) -> list[Obstacle]:
+    """`o` が等速で `horizon_s` 秒動く間の通り道を、円の列（間隔 `step` 以下）で返す。
+    静止していれば `[o]`。"""
+    sp = o.speed
+    if sp < MOVING_MIN_SPEED or horizon_s <= 0.0:
+        return [o]
+    length = sp * horizon_s
+    n = max(1, int(math.ceil(length / max(step, 1e-3))))
+    return [Obstacle(o.x + o.vx * horizon_s * k / n, o.y + o.vy * horizon_s * k / n, o.r, o.n)
+            for k in range(n + 1)]

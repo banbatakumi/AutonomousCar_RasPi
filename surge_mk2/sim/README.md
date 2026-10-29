@@ -73,6 +73,8 @@ cd surge_mk2
 ```
 
 `magp1` はコース写真（外形 12.3×6.7m、管の壁、分岐あり）を PNG 化したコース（`sim/courses/magp1.png`、縮尺 95px/m）。
+`sim.bench --mover S0,SPEED[,D,R,T0]` で、planner の経路に沿って動く円柱（他車の代わり。速度が負なら逆走）を置ける。
+
 PNG コースの JSON に `"obstacles": [[x, y, 半径], ...]` を書くと、壁と別に孤立障害物を刻める。
 
 `sim.run` は起動前に**詰まりどころを潰す**（`PROGRESS.md`「Mac で起動できないときに疑う2つ」）:

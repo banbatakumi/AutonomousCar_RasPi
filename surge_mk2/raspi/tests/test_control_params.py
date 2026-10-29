@@ -133,10 +133,10 @@ class TestLoad(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_control_params(self._toml("[control]\ntc_enable = 0.5\n"), strict=False)
 
-    def test_repo_toml_turns_tc_and_tv_on(self):
-        """STM32 の既定は TC・TV とも無効。使うなら toml が有効にする。"""
+    def test_repo_toml_turns_tc_on_and_tv_off(self):
+        """STM32 の既定は TC・TV とも無効。toml は TC だけ有効にする（TV は 2026-10-29 に既定を無効）。"""
         v = load_control_params(DEFAULT_TOML)
-        self.assertEqual((v["tc_enable"], v["tv_enable"]), (1.0, 1.0))
+        self.assertEqual((v["tc_enable"], v["tv_enable"]), (1.0, 0.0))
 
     def test_plant_subtable_is_ignored(self):
         v = load_control_params(self._toml("[control]\ntc_slip_target = 0.1\n[control.plant]\nmu = 0.6\n"), strict=False)

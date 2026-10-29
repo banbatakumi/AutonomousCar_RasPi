@@ -1,26 +1,20 @@
-"""実機の記録を横グリップの学習（`raspi/nav/grip.py`）に流し直して、前兆の判定を確かめる。
+"""実機の記録を走行中の学習（`raspi/nav/grip.py`）に流し直して、安全装置の判定を確かめる。
 
-    python3 -m raspi.tools.grip_replay ~/Downloads/surge_20261012_122614.mcap
+    python3 -m raspi.tools.grip_replay ~/Downloads/surge_20261029_071044.mcap
     python3 -m raspi.tools.grip_replay run.mcap --pin 4.9          # 上限を固定して流す
     python3 -m raspi.tools.grip_replay run.mcap --export run.npz   # テスト用の小さな記録に抜く
-    python3 -m raspi.tools.grip_replay run.mcap --learner time --plan-lap 5.9   # タイムで決める版
+    python3 -m raspi.tools.grip_replay run.mcap --plan-lap 5.9     # 周回タイムの採否も流す
 
 ## 何のためか
 
-`GripLearner` の前兆の判定は 100Hz の車両状態（車速・ヨーレート・実舵角）だけで決まり、
-自己位置にも指令にも依らない。だから**記録をそのまま流せば、実機で何が前兆と判定されたかが
-手元で再現できる**。シム（`sim.bench`）の車は雑音が実機よりずっと小さく、しきい値をシムだけで
-決めると実機で誤検出する（2026-10-12: 滑っていない車で前兆 46 回、横の上限が下限の 1.0m/s² まで
-落ちて 1 周 5.7s → 13.1s）。
+安全装置のうちリアの滑り（逆ハン）は 100Hz の車両状態（車速・ヨーレート・実舵角）だけで、線から外れた・
+横偏差の増えは記録の横偏差で決まる。だから**記録をそのまま流せば、実機で何が働いたかが手元で再現できる**。
 
-- **滑っていない記録では前兆 0 が合格**。`--pin` で上限を固定すると、「その上限で走っていたと
-  したら」の判定になる（記録の車がその横加速度を実際に出していた区間だけが試行になる）
-- 既定の `--learner events` は前兆で決める元の学習器（`GripLearner`）。`--learner time` は planner が
-  既定で使う `TimeLearner` で、安全装置（前兆・リアの滑り・横偏差の増え）の判定を流せる。
-  周回タイムによる段の採否には計画のラップ時間が要るが記録には無いので、`--plan-lap` で与えたときだけ
+- **滑っていない記録では安全装置 0 回が合格**。`--pin` で横の上限を固定して流す
+- 周回タイムによる段の採否には計画のラップ時間が要るが記録には無いので、`--plan-lap` で与えたときだけ
   採否も流れる（開ループなので、採った段で記録の車が速くなることはない）
-- 流し直しは**開ループ**: 前兆で目標速度を落としても、記録の車速は変わらない。学習値が
-  どこまで上がるかは見られない（それはシムで見る）。見るのは誤検出の数と、下がり方
+- 流し直しは**開ループ**: 安全装置で目標速度を落としても、記録の車速は変わらない。学習値が
+  どこまで上がるかは見られない（それはシムで見る）
 
 ## 入力
 
@@ -46,7 +40,7 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.nav import grip as grip_mod  # noqa: E402
 
 #: 舵がこの割合以上なら「舵が上限」（`slam2d_raceline._grip_end` と同じ）
-STEER_GATE = 0.97
+STEER_GATE = 0.80
 _GATE_RE = re.compile(r"（停止: (.*?)・前兆")
 
 
@@ -65,13 +59,18 @@ class Record(NamedTuple):
     cross: np.ndarray       #: 経路からの横偏差 [m]
     gate: np.ndarray        #: 学習を止める周期か（1 = 止める）
     laps: np.ndarray
+    #: IMU の横加速度 [m/s²]（100Hz、`t` と同じ並び。`None` = 記録に無い・古い npz）
+    ay: np.ndarray | None = None
+    #: 計画が求めていた前後の加速度 [m/s²]（10Hz、`st_t` と同じ並び。`None` = 記録に無い・古い npz）。
+    #: リアの滑りで、加速・減速のどちらの包絡を疑うかを決める
+    a_plan: np.ndarray | None = None
 
 
 def load(path: str | Path, vehicle: Vehicle | None = None) -> Record:
     path = Path(path)
     if path.suffix == ".npz":
         with np.load(path, allow_pickle=False) as z:
-            return Record(**{k: np.asarray(z[k]) for k in Record._fields})
+            return Record(**{k: np.asarray(z[k]) for k in Record._fields if k in z.files})
     return _load_mcap(path, vehicle or Vehicle.load())
 
 
@@ -87,7 +86,8 @@ def _load_mcap(path: Path, vehicle: Vehicle) -> Record:
             d = json.loads(m.data)
             t = d["t_capture"] / 1e9
             if ch.topic == "/vehicle_state":
-                vs.append((t, d["speed"], d["yaw_rate"], d["steer_actual"], bool(d.get("tc_active"))))
+                ay = d["accel"][1] if d.get("imu_ok") and len(d.get("accel") or []) > 1 else math.nan
+                vs.append((t, d["speed"], d["yaw_rate"], d["steer_actual"], bool(d.get("tc_active")), ay))
                 continue
             reason = d.get("reason") or ""
             race = d.get("phase") == "RACE" and d.get("engaged") and d.get("ready")
@@ -99,7 +99,8 @@ def _load_mcap(path: Path, vehicle: Vehicle) -> Record:
                 gate = (abs(d.get("target_steer") or 0.0) >= STEER_GATE * vehicle.max_steer
                         or bool(d.get("brake")) or "乗るまで" in reason)
             st.append((t, d.get("pose_x") or 0.0, d.get("pose_y") or 0.0, d.get("pose_yaw") or 0.0,
-                       d.get("cross_track") or 0.0, gate, d.get("laps") or 0))
+                       d.get("cross_track") or 0.0, gate, d.get("laps") or 0,
+                       (d.get("grip") or {}).get("a_plan") or 0.0))
     if not vs or not st:
         raise ValueError("vehicle_state か auto/state が無い")
     vs.sort(key=lambda r: r[0])
@@ -112,7 +113,9 @@ def _load_mcap(path: Path, vehicle: Vehicle) -> Record:
                   st_t=s[:, 0] - t0, x=s[:, 1].astype(np.float32), y=s[:, 2].astype(np.float32),
                   yaw=s[:, 3].astype(np.float32), cross=s[:, 4].astype(np.float32),
                   gate=np.asarray([r[5] for r in st], dtype=np.uint8),
-                  laps=np.asarray([r[6] for r in st], dtype=np.int32))
+                  laps=np.asarray([r[6] for r in st], dtype=np.int32),
+                  ay=np.asarray([r[5] for r in vs], dtype=np.float32),
+                  a_plan=np.asarray([r[7] for r in st], dtype=np.float32))
 
 
 def cut(rec: Record, start_s: float = 0.0, end_s: float | None = None) -> Record:
@@ -120,15 +123,17 @@ def cut(rec: Record, start_s: float = 0.0, end_s: float | None = None) -> Record
     end = math.inf if end_s is None else end_s
     a = (rec.t >= start_s) & (rec.t <= end)
     b = (rec.st_t >= start_s) & (rec.st_t <= end)
-    return Record(*[x[a] for x in rec[:5]], *[x[b] for x in rec[5:]])
+    return Record(*[x[a] for x in rec[:5]], *[x[b] for x in rec[5:12]],
+                  ay=rec.ay[a] if rec.ay is not None else None,
+                  a_plan=rec.a_plan[b] if rec.a_plan is not None else None)
 
 
 def export(rec: Record, path: str | Path) -> None:
-    np.savez_compressed(path, **rec._asdict())
+    np.savez_compressed(path, **{k: x for k, x in rec._asdict().items() if x is not None})
 
 
 class Result(NamedTuple):
-    learner: grip_mod.GripLearner      #: `--learner time` なら `TimeLearner`
+    learner: grip_mod.GripLearner
     #: (時刻, 横の全体の値) の移り変わり（変わったときだけ）
     levels: list[tuple[float, float]]
     #: 学習が見ていた時間 [s]（`gate` が空の周期の合計）
@@ -136,24 +141,17 @@ class Result(NamedTuple):
 
 
 def replay(rec: Record, vehicle: Vehicle | None = None, *, init: float | None = None,
-           max_level: float = 6.0, pin: float | None = None, step_up: float = 0.06,
-           cfg: dict[str, float] | None = None, learner: str = "events",
-           plan_lap: float = 0.0) -> Result:
+           max_level: float = 6.0, pin: float | None = None,
+           cfg: dict[str, float] | None = None, plan_lap: float = 0.0) -> Result:
     """記録を `GripLearner` に流す（モジュール docstring）。
 
     :param init: 横の出発点 [m/s²]（既定は planner と同じ、同定値の 0.85 倍）
-    :param pin: 横の全体の値をこの値に固定して流す [m/s²]（学習値は動かさず、判定だけを見る）
+    :param pin: 横の値をこの値に固定して流す [m/s²]（学習値は動かさず、判定だけを見る）
     :param cfg: `GripConfig` の上書き
-    :param learner: "events"（前兆で決める `GripLearner`）か "time"（`TimeLearner`）
-    :param plan_lap: "time" のとき、計画のラップ時間 [s]。0 なら周回タイムの採否は流れない
+    :param plan_lap: 計画のラップ時間 [s]。0 なら周回タイムの採否は流れない
     """
     v = vehicle or Vehicle.load()
-    if learner not in ("events", "time"):
-        raise ValueError(f"learner は events か time: {learner}")
-    cls = grip_mod.TimeLearner if learner == "time" else grip_mod.GripLearner
-    g = cls(yaw_wn=v.yaw_natural_freq_rad_s, yaw_zeta=v.yaw_damping,
-                             rolling_resistance=v.rolling_resistance)
-    g.cfg.step_up = step_up
+    g = grip_mod.GripLearner(yaw_wn=v.yaw_natural_freq_rad_s, yaw_zeta=v.yaw_damping)
     for k, val in (cfg or {}).items():
         if not hasattr(g.cfg, k):
             raise ValueError(f"GripConfig に無い項目: {k}")
@@ -162,21 +160,20 @@ def replay(rec: Record, vehicle: Vehicle | None = None, *, init: float | None = 
     sm, wb = v.steer_map, v.wheelbase
     levels: list[tuple[float, float]] = []
     j, n_st = 0, len(rec.st_t)
-    gate, x, y, yaw, laps, t_prev = "記録の前", 0.0, 0.0, 0.0, None, None
+    gate, x, y, yaw, laps, t_prev, a_x = "記録の前", 0.0, 0.0, 0.0, None, None, 0.0
     seen = 0.0
     for i in range(len(rec.t)):
         t = float(rec.t[i])
         while j < n_st and rec.st_t[j] <= t:
             x, y, yaw = float(rec.x[j]), float(rec.y[j]), float(rec.yaw[j])
             gate = "止めている" if rec.gate[j] else ""
-            g.configure(init_level=start, max_level=max(max_level, start), down_only=False,
-                        lat_use=1.0)
+            g.configure(init_level=start, max_level=max(max_level, start), down_only=False)
             g.observe_cross(0.0 if gate else float(rec.cross[j]))
-            if plan_lap > 0.0 and isinstance(g, grip_mod.TimeLearner):
+            if plan_lap > 0.0:
                 g.observe_plan(plan_lap)
-            if laps is not None and int(rec.laps[j]) != laps:
-                g.lap(t)
             laps = int(rec.laps[j])
+            if rec.a_plan is not None:
+                a_x = float(rec.a_plan[j])
             j += 1
         if laps is None:
             continue
@@ -193,7 +190,8 @@ def replay(rec: Record, vehicle: Vehicle | None = None, *, init: float | None = 
         if pin is not None:
             _pin(g, pin)
         kappa = math.tan(sm.effective(float(rec.steer[i]))) / wb
-        g.observe(t, x, y, sp, w, kappa, gate=gate, tc_active=bool(rec.tc[i]))
+        ay = float(rec.ay[i]) if rec.ay is not None and math.isfinite(rec.ay[i]) else None
+        g.observe(t, x, y, sp, w, kappa, gate=gate, tc_active=bool(rec.tc[i]), a_y=ay, a_x=a_x)
         lv = g.map.level
         if not levels or abs(lv - levels[-1][1]) > 1e-6:
             levels.append((t, lv))
@@ -201,14 +199,10 @@ def replay(rec: Record, vehicle: Vehicle | None = None, *, init: float | None = 
 
 
 def _pin(g: grip_mod.GripLearner, level: float) -> None:
-    """全体の値と各セルの前兆の値を元へ戻す（判定だけを見る。前兆の記録 `events` は残る）。"""
-    m = g.map
-    m.level = g.conf = level
-    m.bad = 0.0
-    g._prov = None
+    """横の値を元へ戻す（判定だけを見る。安全装置の記録 `events` は残る）。"""
+    g.map.level = level
+    g.map.ceil = 0.0
     g.converged = False
-    for c in m.cells.values():
-        c.bad = 0.0
 
 
 def format_result(name: str, res: Result, *, verbose: bool = True) -> str:
@@ -217,19 +211,19 @@ def format_result(name: str, res: Result, *, verbose: bool = True) -> str:
     for e in g.events:
         kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
     lv = [x for _, x in res.levels] or [0.0]
-    out = [f"{name}: 前兆 {len(g.events)}回 {kinds or ''}  横 {lv[0]:.2f} → {lv[-1]:.2f}m/s²"
-           f"（最小 {min(lv):.2f}・最大 {max(lv):.2f}）  試行 {g.trials}（通過 {g.passes}）  "
-           f"学習が見た時間 {res.seen_s:.0f}s"]
-    if isinstance(g, grip_mod.TimeLearner):
-        out.append(f"  タイムで決める版: 段の判断 {len(g.steps)}回（採用 {sum(1 for x in g.steps if x['ok'])}）"
-                   f"・測った周 {'あり' if g._measured else 'なし（--plan-lap で計画のラップ時間を与える）'}"
-                   f"・働いた上限 {g.map.ceil:.2f}m/s²" if g.map.ceil > 0.0 else
-                   f"  タイムで決める版: 段の判断 {len(g.steps)}回・安全装置が働いた上限は無い")
+    out = [f"{name}: 安全装置 {len(g.events)}回 {kinds or ''}  横 {lv[0]:.2f} → {lv[-1]:.2f}m/s²"
+           f"（最小 {min(lv):.2f}・最大 {max(lv):.2f}）  学習が見た時間 {res.seen_s:.0f}s",
+           f"  段の判断 {len(g.steps)}回（採用 {sum(1 for x in g.steps if x['ok'])}）"
+           f"・働いた上限 {g.map.ceil:.2f}m/s²" if g.map.ceil > 0.0 else
+           f"  段の判断 {len(g.steps)}回・安全装置が働いた上限は無い"]
     if verbose:
+        lim = g.cfg.slide_long
         for k, e in enumerate(g.events, 1):
-            out.append(f"  #{k:<2d} {e['t']:6.1f}s {e['kind']}  横加速度 {e['a']:.2f}・値 {e['b']:.2f}・"
-                       f"上限 {e['applied']:.2f}m/s²  不足 {e['excess']:.3f}"
-                       f"{'  ★想定外' if e['surprise'] else ''}  ({e['x']:+.2f}, {e['y']:+.2f})")
+            al = e.get("along")
+            who = "" if al is None else f"  計画 {al:+.2f}m/s²→" + (
+                "加速を疑う" if al >= lim else "減速を疑う" if al <= -lim else "横を疑う")
+            out.append(f"  #{k:<2d} {e['t']:6.1f}s {e['kind']}  横加速度 {e['a']:.2f}・上限 {e['applied']:.2f}m/s²"
+                       f"  量 {e['excess']:.3f}  ({e['x']:+.2f}, {e['y']:+.2f}){who}")
     return "\n".join(out)
 
 
@@ -242,12 +236,10 @@ def main() -> int:
     ap.add_argument("--pin", type=float, default=None, help="横の上限を固定して流す [m/s²]")
     ap.add_argument("--start", type=float, default=0.0, help="開始位置 [s]")
     ap.add_argument("--end", type=float, default=None, help="終了位置 [s]")
-    ap.add_argument("--learner", choices=("events", "time"), default="events",
-                    help="events = 前兆で決める GripLearner、time = planner の既定の TimeLearner")
     ap.add_argument("--plan-lap", type=float, default=0.0,
-                    help="--learner time のとき、計画のラップ時間 [s]（周回タイムの採否を流す）")
+                    help="計画のラップ時間 [s]（周回タイムの採否を流す）")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
-                    help="GripConfig の上書き（例: --set dev_thr=0.2）")
+                    help="GripConfig の上書き（例: --set slide_s=0.1）")
     ap.add_argument("--export", type=Path, default=None, help="抜いた記録を .npz に書く（入力 1 本）")
     ap.add_argument("-q", "--quiet", action="store_true", help="前兆を 1 つずつ出さない")
     args = ap.parse_args()
@@ -267,7 +259,7 @@ def main() -> int:
             if args.export is not None:
                 export(rec, args.export)
             res = replay(rec, vehicle, init=args.init, max_level=args.max, pin=args.pin, cfg=cfg,
-                         learner=args.learner, plan_lap=args.plan_lap)
+                         plan_lap=args.plan_lap)
         except (OSError, ValueError, KeyError) as e:
             print(f"!! {p}: {e}", file=sys.stderr)
             rc = 1

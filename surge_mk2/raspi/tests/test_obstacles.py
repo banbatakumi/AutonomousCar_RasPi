@@ -136,5 +136,34 @@ class TestNearBand(unittest.TestCase):
         self.assertAlmostEqual(obs_mod.near_pad(0.05), 0.05)
 
 
+class TestVelocityTracker(unittest.TestCase):
+    """動く物の速度を出す。静止物の重心のぶれを速度と取り違えない。"""
+
+    def _run(self, track):
+        tr = obs_mod.VelocityTracker()
+        out = []
+        for k in range(10):
+            x, y = track(k * 0.1)
+            out = tr.update(k * 0.1, [obs_mod.Obstacle(x, y, 0.1, 5)])
+        return out[0]
+
+    def test_constant_velocity_is_recovered(self):
+        o = self._run(lambda t: (1.0 + 0.8 * t, 2.0 - 0.3 * t))
+        self.assertAlmostEqual(o.vx, 0.8, places=2)
+        self.assertAlmostEqual(o.vy, -0.3, places=2)
+
+    def test_static_jitter_is_not_a_velocity(self):
+        rng = np.random.default_rng(0)
+        o = self._run(lambda t: (1.0 + rng.normal(0, 0.03), 2.0 + rng.normal(0, 0.03)))
+        self.assertEqual(o.speed, 0.0)
+
+    def test_swept_path_covers_the_travel(self):
+        o = obs_mod.Obstacle(0.0, 0.0, 0.1, 5, None, 1.0, 0.0)
+        trail = obs_mod.swept(o, 2.0, 0.05)
+        self.assertAlmostEqual(trail[-1].x, 2.0)
+        self.assertLessEqual(max(b.x - a.x for a, b in zip(trail, trail[1:])), 0.05 + 1e-9)
+        self.assertEqual(len(obs_mod.swept(o._replace(vx=0.0), 2.0, 0.05)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

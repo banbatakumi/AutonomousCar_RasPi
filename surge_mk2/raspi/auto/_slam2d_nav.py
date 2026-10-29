@@ -386,6 +386,11 @@ class Slam2dNav:
         """凍結地図の上で`guess`の周りを探し直した結果（`Frontend.refine()`）。"""
         return self._fe.refine(pts, guess)
 
+    @property
+    def lidar_xy(self) -> tuple[float, float]:
+        """LiDAR の取り付け位置（車体座標 [m]）。"""
+        return self._lidar_x, self._lidar_y
+
     def deskew_scan(self, scan: Scan):
         """`scan`を脱スキューする（障害物検出・LOCATE用）。`Frontend`が持っている
         twist の履歴を使うので、`Frontend.update()`内の脱スキューと同じ条件になる。

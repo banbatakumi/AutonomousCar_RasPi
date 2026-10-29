@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -166,15 +167,11 @@ class Result:
         self.grip_events: list[dict] = []
         self.grip_conv_t: float | None = None  #: 収束した時刻（RACE 開始から）[s]
         self.grip_conv_laps: int | None = None #: そのとき走り終えていた周の数
-        self.grip_level = 0.0                  #: 終わったときの全体の値 [m/s²]
-        self.grip_bad = 0.0
+        self.grip_level = 0.0                  #: 終わったときの横の上限 [m/s²]
+        self.grip_ceil = 0.0                   #: 安全装置が働いた上限（`GripMap.ceil`）[m/s²]
         self.grip_state = ""
-        self.grip_trials = (0, 0)              #: (試行, 通った数)
-        self.grip_launch: float | None = None  #: 発進の加速度の見積もり [m/s²]
-        self.grip_ratio = 0.0
+        self.grip_steps = (0, 0)               #: タイムで決めた段の (判断, 採用)
         self.grip_true = 0.0                   #: 終わったときの真値の横の限界 [m/s²]
-        #: 限界より下で走っている間の、前兆の量（`dev − base`）の最大と p99.9（しきい値の余裕）
-        self.grip_excess: list[float] = []
         self.grip_levels: list[tuple[float, float]] = []   #: (RACE 開始からの時刻, 全体の値) の移り変わり
         #: 加速・減速の学習（終わりの値・真値・出なかった窓・移り変わり）
         self.grip_long: dict = {}
@@ -248,15 +245,14 @@ class Result:
                        f"迂回(Hybrid A*) {self.detour_starts} 回・{self.detour_s:.1f}s")
         if self.grip_on:
             ev = self.grip_events
-            # 頭打ち（区間を抜けてから分かる前兆）は、その瞬間の真値と突き合わせられないので別に数える
-            flat = sum(1 for e in ev if e["kind"] == "頭打ち")
-            false = sum(1 for e in ev if e["over"] <= 0.0 and e["kind"] != "頭打ち")
+            # 横偏差の増え（周を終えてから分かる）は、その瞬間の真値と突き合わせられないので誤検出に数えない
+            false = sum(1 for e in ev if e["over"] <= 0.0 and e["kind"] != "横偏差の増え")
             conv = (f"収束 {self.grip_conv_t:.1f}s・{self.grip_conv_laps}周" if self.grip_conv_t is not None
                     else "収束せず")
-            out.append(f"横G学習    全体 {self.grip_level:.2f}m/s²（真値 {self.grip_true:.2f}・"
-                       f"前兆の値 {self.grip_bad:.2f}・{self.grip_state}）  {conv}  "
-                       f"試行 {self.grip_trials[0]}（通過 {self.grip_trials[1]}）  "
-                       f"前兆 {len(ev)} 回（うち頭打ち {flat}・誤検出 {false}）")
+            out.append(f"横G学習    横 {self.grip_level:.2f}m/s²（真値 {self.grip_true:.2f}・"
+                       f"天井 {self.grip_ceil:.2f}・{self.grip_state}）  {conv}  "
+                       f"段の判断 {self.grip_steps[0]}（採用 {self.grip_steps[1]}）  "
+                       f"安全装置 {len(ev)} 回（うち誤検出 {false}）")
             if self.grip_conv_t is not None and self.gate_laps:
                 k = self.grip_conv_laps or 0
                 after = self.gate_laps[max(k, 1):]
@@ -266,13 +262,13 @@ class Result:
                     out.append(f"           収束後のラップ 平均 {ref:.2f}s（{len(after)} 周）・"
                                f"収束までに失った時間 {lost:+.2f}s（2周目から）")
             if ev:
-                out.append("           前兆のあと 1.5s: 横偏差 最大 "
+                out.append("           安全装置のあと 1.5s: 横偏差 最大 "
                            f"{max(e['cross'] for e in ev) * 100:.1f}cm・壁との余裕 最小 "
                            f"{min(e['clear'] for e in ev) * 100:.1f}cm・真値の超過 最大 "
                            f"{max(e['over'] for e in ev) * 100:.1f}%")
                 for e in ev[:40]:
-                    out.append(f"             {e['t']:6.1f}s {e['kind']} 値 {e['b']:.2f}（上限 "
-                               f"{e['applied']:.2f}{'・想定外' if e['surprise'] else ''}）真値の超過 "
+                    out.append(f"             {e['t']:6.1f}s {e['kind']} 横加速度 {e['a']:.2f}（上限 "
+                               f"{e['applied']:.2f}）真値の超過 "
                                f"{e['over'] * 100:+.1f}% → 横偏差 {e['cross'] * 100:.1f}cm・"
                                f"余裕 {e['clear'] * 100:.1f}cm")
             if self.grip_long:
@@ -290,13 +286,6 @@ class Result:
                 if lg["trail"]:
                     out.append("           加速/減速の移り変わり " + " ".join(
                         f"{t:.0f}s:{a:.2f}/{d:.2f}" for t, a, d in lg["trail"][:40]))
-            if self.grip_launch is not None:
-                out.append(f"           発進の加速度 {self.grip_launch:.2f}m/s²・比 {self.grip_ratio:.2f}")
-            if self.grip_excess:
-                ex = np.asarray(self.grip_excess)
-                out.append(f"           限界より下での前兆の量 最大 {ex.max():.3f}・p99.9 "
-                           f"{float(np.percentile(ex, 99.9)):.3f}（しきい値 "
-                           f"{self.grip_thr:.3f}）")
             if self.grip_levels:
                 out.append("           値の移り変わり " + " ".join(
                     f"{t:.0f}s:{lv:.2f}" for t, lv in self.grip_levels[:60]))
@@ -317,6 +306,7 @@ class Bench:
                  trace: Path | None = None,
                  locate_hint: tuple[float, float] | None = None,
                  obstacles: list[tuple[float, float, float]] | None = None,
+                 movers: list[str] | None = None,
                  vehicle: dict[str, float] | None = None,
                  control: dict[str, float] | None = None,
                  surface: dict | None = None, assume: dict[str, float] | None = None,
@@ -416,6 +406,12 @@ class Bench:
             c = self.sim.course
             stamp_discs(c.grid, c.origin, c.resolution, list(obstacles))
             c._padded_grid = None
+        self._movers = []
+        self._mv_col = 0
+        if movers:
+            from .moving import parse_mover
+            self._movers = [parse_mover(m) for m in movers]
+            self.sim.course._padded_grid = None
         self.planner = make_planner(mode)
         if self.planner is None:
             raise SystemExit(f"知らないモード: {mode!r}（候補 {', '.join(PLANNERS)}）")
@@ -439,7 +435,6 @@ class Bench:
                 if not hasattr(learner.cfg, k):
                     raise SystemExit(f"--grip-set: 知らない項目 {k}")
                 setattr(learner.cfg, k, type(getattr(learner.cfg, k))(val))
-            learner.cfg.fixed_step = "step_up" in grip_cfg
         self._grip_n = 0
         self._grip_open: list[dict] = []
         self._grip_slip: list[tuple[float, float]] = []    # 直近の (時刻, 真値の超過率)
@@ -502,7 +497,7 @@ class Bench:
         self._trace_f = open(trace, "w") if trace else None
         if self._trace_f:
             self._trace_f.write("t,phase,x,y,yaw,v,cmd_v,brake,prof_v,idx,cross,clear,launch,"
-                                "steer_cmd,steer,a_lat,a_x,kappa,slip,g_level,g_excess,g_cap,g_gate\n")
+                                "steer_cmd,steer,a_lat,a_x,kappa,slip,g_level,g_cross_gain,g_cap,g_gate\n")
             # 加速・減速の学習（`nav/grip.LongLearner`）へ渡した値と、その瞬間の真値（`<trace>.long.csv`）
             lg = getattr(getattr(self.planner, "_grip", None), "long", None)
             if lg is not None:
@@ -614,6 +609,37 @@ class Bench:
         while time.monotonic() - t0 < duration_s:
             t_poll = time.perf_counter()
             frames = self.link.poll()
+            if self._movers:
+                c = self.sim.course
+                path = getattr(self.planner, "path", None)
+                for m in self._movers:
+                    if (m.center is None and path is not None and len(path) >= 3
+                            and (self._map_origin is not None or not self._map_name)):
+                        ox, oy, oyaw = self._map_origin or self._origin
+                        cs, sn = math.cos(oyaw), math.sin(oyaw)
+                        q = np.asarray(path.xy, dtype=float)
+                        w = np.stack([ox + q[:, 0] * cs - q[:, 1] * sn,
+                                      oy + q[:, 0] * sn + q[:, 1] * cs], axis=1)
+                        m.bind(w, tuple(self.sim.course.start[:2]))
+                        m.t_start += time.monotonic() - t0      # 経路ができた時刻から数える
+                    m.update(c.grid, c.origin, c.resolution, time.monotonic() - t0)
+                c._padded_grid = None
+                st_ = getattr(self, "_last_st", None)
+                if st_ is not None and os.environ.get("MOVER_LOG") and st_.reason != getattr(self, "_mv_reason", None) \
+                        and any(k in st_.reason for k in ("障害", "避け")):
+                    v_ = self.sim.vehicle
+                    print(f"  {time.monotonic() - t0:5.1f}s v={v_.speed:.2f} car({v_.x:.2f},{v_.y:.2f}) "
+                          f"mover({self._movers[0].xy[0]:.2f},{self._movers[0].xy[1]:.2f}) {st_.reason}", flush=True)
+                if st_ is not None:
+                    self._mv_reason = st_.reason
+                ncol = self.sim.vehicle.collisions
+                if ncol != self._mv_col:
+                    self._mv_col = ncol
+                    v_ = self.sim.vehicle
+                    st_ = getattr(self, "_last_st", None)
+                    print(f"  {time.monotonic() - t0:5.1f}s 衝突 車({v_.x:.2f},{v_.y:.2f}) 速度{v_.speed:.2f} "
+                          + " ".join(f"mover({m.xy[0]:.2f},{m.xy[1]:.2f})" for m in self._movers)
+                          + (f" [{st_.phase}] {st_.reason}" if st_ is not None else ""), flush=True)
             took("シム", t_poll)
             for f in frames:
                 self._cap.scan = None
@@ -822,7 +848,7 @@ class Bench:
         g = getattr(self.planner, "_grip", None)
         if g is None or not getattr(self.planner, "_grip_on", False):
             return "0,0,0,"
-        return (f"{g.level_at(*self.planner.slam.pose[:2]):.3f},{g.last_excess:.4f},"
+        return (f"{g.map.level:.3f},{g.last_cross_gain:.4f},"
                 f"{g.cap if g.cap is not None else 0.0:.3f},{self.planner._grip_gate}")
 
     def _sample_grip(self, t: float, st, v) -> None:
@@ -833,7 +859,6 @@ class Bench:
             return
         r = self.res
         r.grip_on = True
-        r.grip_thr = g.cfg.dev_thr
         tr = t - (self._race_t0 or t)
         if self._grip_t0 is None:
             # 学習側の時刻（車両状態の時刻）と bench の時刻のずれ
@@ -842,8 +867,6 @@ class Bench:
         self._grip_slip.append((t, slip))
         while self._grip_slip and self._grip_slip[0][0] < t - 0.4:
             self._grip_slip.pop(0)
-        if slip <= 0.0 and not pl._grip_gate and g.last_excess != 0.0 and g.cap is None:
-            r.grip_excess.append(g.last_excess)
         clear = self._clearance(v.x, v.y, v.yaw)
         for e in self._grip_open:
             e["cross"] = max(e["cross"], abs(st.cross_track))
@@ -853,14 +876,13 @@ class Bench:
         while self._grip_n < len(g.events):
             src = g.events[self._grip_n]
             self._grip_n += 1
-            e = {"t": tr, "_t": t, "kind": src["kind"], "b": src["b"],
-                 "applied": src["applied"], "surprise": src["surprise"],
+            e = {"t": tr, "_t": t, "kind": src["kind"], "a": src["a"], "applied": src["applied"],
                  "over": max(s for _, s in self._grip_slip), "cross": abs(st.cross_track),
                  "clear": clear}
             r.grip_events.append(e)
             self._grip_open.append(e)
             if not self.quiet:
-                print(f"  {t:5.1f}s ★横Gの前兆 {src['kind']} 値 {src['b']:.2f}（上限 "
+                print(f"  {t:5.1f}s ★横の安全装置 {src['kind']} 横加速度 {src['a']:.2f}（上限 "
                       f"{src['applied']:.2f}）真値の超過 {e['over'] * 100:+.1f}%", flush=True)
         if g.converged and r.grip_conv_t is None:
             r.grip_conv_t, r.grip_conv_laps = tr, len(r.gate_laps)
@@ -869,10 +891,9 @@ class Bench:
         if abs(g.map.level - self._grip_lv) > 1e-6:
             self._grip_lv = g.map.level
             r.grip_levels.append((tr, g.map.level))
-        r.grip_level, r.grip_bad = g.map.level, g.map.bad
+        r.grip_level, r.grip_ceil = g.map.level, g.map.ceil
         r.grip_state = g.state(pl._grip_gate)
-        r.grip_trials = (g.trials, g.passes)
-        r.grip_launch, r.grip_ratio = g.launch.value, g.launch_ratio
+        r.grip_steps = (len(g.steps), sum(1 for x in g.steps if x["ok"]))
         r.grip_true = float(v.spec.mu * v.grip_lat * 9.81)
         lg, sp = g.long, v.spec
         ev = [{**e, "t": e["t"] - self._grip_t0} for e in lg.events]
@@ -1201,6 +1222,9 @@ def main() -> int:
     ap.add_argument("--trace", default=None, help="RACE 中の速度などを CSV で書く（100Hz）")
     ap.add_argument("--obstacle", action="append", default=[], metavar="X,Y,R",
                     help="シムの世界座標に円柱の障害物を置く（繰り返し可。地図には入れないなら --map と併用）")
+    ap.add_argument("--mover", action="append", default=[], metavar="S0,SPEED[,D,R,T0]",
+                    help="中心線に沿って動く円柱（他車の代わり。繰り返し可）。S0=出発点から先の弧長[m]、"
+                         "SPEED=速度[m/s]（負で逆走）、D=横ずれ[m]、R=半径[m]、T0=動き出す時刻[s]")
     ap.add_argument("--vehicle", action="append", default=[], metavar="KEY=VALUE",
                     help="真値の車だけ諸元を上書き（`sim.vehicle.VehicleSpec` の欄名。例 mu=0.37、複数可）。"
                          "planner は config/vehicle.toml のまま")
@@ -1224,8 +1248,6 @@ def main() -> int:
     ap.add_argument("--state", default=None, metavar="DIR",
                     help="--map の地図の学習値（.grip.json）と仕上げた経路の写し（.lines.pkl）を DIR から読み、"
                          "走り終えたら DIR へ書く（同じ地図の 2 回目の走行を再現する）")
-    ap.add_argument("--grip-per-lap", action="store_true",
-                    help="横グリップを周の境目でだけ上げる（収束の速さを比べる基準版）")
     ap.add_argument("--grip-set", action="append", default=[], metavar="KEY=VALUE",
                     help="学習の定数を上書き（`raspi.nav.grip.GripConfig` の欄名。上げ幅の実測用）")
     ap.add_argument("--sim", action="append", default=[], metavar="KEY=VALUE",
@@ -1276,8 +1298,6 @@ def main() -> int:
     if args.mu_at:
         surface["changes"] = [nums(c, ":") for c in args.mu_at]
     grip_cfg = pairs(args.grip_set)
-    if args.grip_per_lap:
-        grip_cfg["per_lap"] = 1.0
 
     b = Bench(course, args.mode, params, max_speed=args.max_speed,
               max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed,
@@ -1286,6 +1306,7 @@ def main() -> int:
               locate_hint=(tuple(float(v) for v in args.locate_hint.split(","))
                            if args.locate_hint else None),
               obstacles=[tuple(float(v) for v in o.split(",")) for o in args.obstacle],
+              movers=args.mover,
               vehicle={k.strip(): float(v) for k, _, v in
                        (kv.partition("=") for kv in args.vehicle)},
               control={k.strip(): float(v) for k, _, v in

@@ -28,13 +28,15 @@ import numpy as np
 
 from .centerline import normals, normals_open, tangents_open
 from .local_map import footprint_circles
-from .obstacles import Obstacle
+from .obstacles import MOVING_MIN_SPEED, Obstacle, swept
 from .raceline import RaceLine, curvature
 
 __all__ = ["AvoidConfig", "AvoidPlan", "plan_offset", "plan_elastic", "cap_speed", "speed_cap",
            "forward_order",
            "clearance_along", "clearance_to_points", "blend_in"]
 
+#: 動く障害物の通り道を見込む時間の上限 [s]
+_SWEEP_MAX_S = 3.0
 #: 5次 smoothstep の2階微分の最大 `max|f''| = 10/√3`
 _SMOOTH_D2 = 10.0 / math.sqrt(3.0)
 #: 進入長を伸ばして試す倍率（曲率が収まらなければ次を試す）
@@ -74,6 +76,8 @@ class AvoidConfig:
     len_min: float = 0.8                   #: 進入・戻りの長さの下限 [m]
     #: 曲がれる曲率のうち回避に使ってよい割合（止まってからはもっと使ってよい）
     kappa_frac: float = 0.6
+    #: 動く障害物（速度のある `Obstacle`）の通り道を見込んで避ける（実験。既定は今の位置だけ）
+    predict: bool = False
 
 
 class AvoidPlan(NamedTuple):
@@ -185,6 +189,25 @@ def plan_offset(path: RaceLine, index: int, target: Obstacle, obstacles: list[Ob
     need = target.r + cfg.half_width + cfg.margin
     hold_a = s_o - target.r - cfg.front
     hold_b = s_o + target.r + cfg.rear
+    if target.speed >= MOVING_MIN_SPEED and cfg.predict:
+        # ★ 動く障害物は、**すれ違う（抜く）までに通る道**ぜんぶを避ける。今の位置だけで引くと、
+        #   逆走なら会う点がこちらへ寄り、同方向なら抜くまでに先へ進んで、保持の区間が
+        #   外れる。等速で動くと見て、車が障害物の位置を通り終えるまでの道を円の列にする
+        kk = min(k + 1, len(order[near]) - 1)
+        tang = path.xy[order[near][kk]] - path.xy[j]
+        tang = tang / max(float(np.hypot(*tang)), 1e-9)
+        u_along = target.vx * tang[0] + target.vy * tang[1]       # 負 = 逆走
+        closing = max(v_now, 0.5) - u_along
+        t_meet = s_o / closing if closing > 0.3 else _SWEEP_MAX_S
+        horizon = min(_SWEEP_MAX_S, t_meet + (2.0 * target.r + cfg.front + cfg.rear) / max(closing, 0.5))
+        trail = swept(target, horizon, step=max(0.5 * target.r, 0.05))
+        obstacles = list(obstacles) + trail[1:]
+        s_end = []
+        for o in (trail[0], trail[-1]):
+            dd = (path.xy[order[near], 0] - o.x) ** 2 + (path.xy[order[near], 1] - o.y) ** 2
+            s_end.append(float(s_fwd[near][int(np.argmin(dd))]))
+        hold_a = min(s_end) - target.r - cfg.front
+        hold_b = max(s_end) + target.r + cfg.rear
     circles, rc = footprint_circles(cfg.footprint or (
         (cfg.front, cfg.half_width), (cfg.front, -cfg.half_width),
         (-cfg.rear, -cfg.half_width), (-cfg.rear, cfg.half_width)))

@@ -95,7 +95,7 @@
 
 ### Mac 側
 
-メイン GUI（Web）以外の補助 GUI（シミュレータ一式・コースエディタ・システム同定・SLAM 再処理・動画の書き出し・
+メイン GUI（Web）以外の補助 GUI（シミュレータ一式・コースエディタ・システム同定・SLAM 再処理・走行サマリ・動画の書き出し・
 ml_lidar / ml_cam / ml_cam_e2e）は、**`launcher.command`（surge_mk2 直下）をダブルクリック**すると
 1つの窓から起動・停止できる（`tools/launcher.py`。アプリの追加は `APPS` に1行足す）。
 ランチャーを閉じると、そこから起動したアプリも終了する。
@@ -246,8 +246,8 @@ IP を調べる作業は要らない。GUI は `http://surge-mk2.local:8000/`。
 #### 路面を変えて走らせる（走行中の学習の検証）
 
 `slam2d_route` の `grip_learn`（`raspi/nav/grip.py`。横・加速・減速の上限を走行中に決める）は、真値の
-路面を変えた車で確かめる。横の決め方は既定で「周回のタイム」（`grip.TimeLearner`）。1 段に 2 周かかるので
-`--time` は 400 秒以上にする。元の方式（前兆が出るまで上げる）と比べるときは `--set grip_by_time=0`。路面を変えるオプションは**真値の車だけ**に効く（planner は `config/vehicle.toml` のまま）。
+路面を変えた車で確かめる。横は「周回のタイム」で決める（`grip.GripLearner`。1 段に 1 周、`--time` は 300 秒以上）。
+路面を変えるオプションは**真値の車だけ**に効く（planner は `config/vehicle.toml` のまま）。
 
 ```bash
 B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --set v_max=4.0"
@@ -264,17 +264,15 @@ B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --se
 | `--mu-at T:MU[:MU_LONG]` | bench の時刻 `T` 秒から一様の値を変える |
 | `--assume KEY=VALUE` | **planner が信じている車**の諸元だけ変える（`--vehicle` の逆） |
 | `--grip FILE` / `--save-grip FILE` | 学習した値を読んでから走る / 走り終えた値を書く（保存値からの再開） |
-| `--launch-ratio R` | 横の限界÷発進の加速度を知っている状態から始める |
-| `--grip-per-lap` | 横を周の境目でだけ上げる（収束の速さを比べる基準版） |
 | `--grip-set KEY=VALUE` | 横の学習の定数（`grip.GripConfig`）を上書き |
 | `--sim KEY=VALUE` | センサ誤差（`sim.params.SimParams`）を上書き |
-| `--real-noise` | **実機で測った走行中の揺れ**（ヨーレート・車速・実舵角。約 11Hz）をテレメトリに足す（`sim.params.REAL_VIBRATION`）。★学習のしきい値・上げ幅を変えたら、これ有り・無しの両方で走らせる |
+| `--real-noise` | **実機で測った走行中の揺れ**（ヨーレート・車速・実舵角。約 11Hz）をテレメトリに足す（`sim.params.REAL_VIBRATION`）。★安全装置の判定を変えたら、これ有り・無しの両方で走らせる |
 | `--set KEY=VALUE` | planner の設定。**GUI から隠した項目（`ParamSpec.hidden`）も bench からは上書きできる** |
 
-結果の「横G学習」の行に、終わったときの値と真値・収束した時刻・前兆の回数と**誤検出**・前兆のあと
-1.5 秒の横偏差の最大と壁との余裕の最小が出る。その下に加速・減速の値と真値、値を下げた測定の一覧、
+結果の「横G学習」の行に、終わったときの値と真値・天井（安全装置が働いた上限）・収束した時刻・段の判断と採用の数・
+安全装置の回数と**誤検出**（真値で限界を超えていなかった）・そのあと 1.5 秒の横偏差の最大と壁との余裕の最小が出る。その下に加速・減速の値と真値、値を下げた測定の一覧、
 窓ごとの判定の集計（「限界」と測った値の真値との誤差・**取り違え**の数）、評価しなかった窓の理由が出る。
-`--trace` の CSV には `slip`（真値の超過率）・`g_level`・`g_excess`・`g_cap`・`g_gate` が入り、あわせて
+`--trace` の CSV には `slip`（真値の超過率）・`g_level`・`g_cross_gain`・`g_cap`・`g_gate` が入り、あわせて
 `<trace>.long.csv`（加速・減速の学習へ渡した値と、その瞬間の真値）・`<trace>.path.csv`（終わったときに
 追っていた経路と速度）を書く。
 
@@ -288,40 +286,37 @@ B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --se
 上限で頭打ちの間に立てているだけ（`sim/stm32.py`）。
 
 ★**シムの既定の雑音は実機よりずっと小さい**（ジャイロ σ 0.3°/s。実機の走行中は高周波だけで 4.5〜8°/s、
-舵も σ 0.016rad でばたつく）。既定のシムだけで決めたしきい値を実機に入れたら、滑っていない車で前兆が
-46 回出て、横の上限が下限まで落ちた（2026-10-12、1 周 5.7s → 13.1s）。`--real-noise` を付けた走行と、
-下の「実機の記録を流し直す」の両方で確かめること。
+舵も σ 0.016rad でばたつく）。2026-10-12 に、シムだけで決めた「曲率の不足」の検出器を実機に入れたら、滑っていない
+車で 46 回働き、横の上限が下限まで落ちた（1 周 5.7s → 13.1s）。この検出器は 2026-10-29 に消した。安全装置を
+変えたら、`--real-noise` を付けた走行と、下の「実機の記録を流し直す」の両方で確かめること。
 
 #### 実機の記録を学習に流し直す（`raspi/tools/grip_replay.py`）
 
-横の前兆の判定は 100Hz の車両状態（車速・ヨーレート・実舵角）だけで決まるので、記録をそのまま
-流せば実機で何が前兆と判定されたかが手元で再現できる。**滑っていない記録では前兆 0 が合格。**
+安全装置（リアの滑り・線から外れた・横偏差の増え）は車両状態（IMU の横加速度を含む）と記録の横偏差だけで決まるので、記録をそのまま
+流せば実機で何が働いたかが手元で再現できる。**滑っていない記録では 0 回が合格。**
 
 ```bash
 .venv/bin/python -m raspi.tools.grip_replay ~/Downloads/surge_xxx.mcap            # 学習を入れて走った記録
 .venv/bin/python -m raspi.tools.grip_replay ~/Downloads/surge_xxx.mcap --pin 4.9  # 学習なしの記録: 上限を固定して流す
-.venv/bin/python -m raspi.tools.grip_replay x.mcap --set noise_k=8                # GripConfig を変えて比べる
+.venv/bin/python -m raspi.tools.grip_replay x.mcap --set slide_s=0.1             # GripConfig を変えて比べる
 .venv/bin/python -m raspi.tools.grip_replay x.mcap --end 100 --export x.npz       # テスト用の小さな記録に抜く
 ```
 
-- 流し直しは開ループ（前兆で目標速度を落としても、記録の車速は変わらない）。**学習なしで走った記録を
-  `--pin` なしで流すと、上限だけ上がって車が付いて来ないので「頭打ち」が出る**——`--pin` を使う
-- 回帰テスト（`raspi/tests/test_grip.py` の `TestRealNoise`）は `raspi/tests/data/grip_real_*.npz`
-  （2026-10-11・12 の実機の記録）を流す。実機で誤検出した記録が増えたら、ここへ足す
-- 学習を入れて走った記録には `auto/state.grip`（学習値・不足としきい値・測った雑音の幅・試行の
-  平均の不足・横偏差の増え・加速と減速の学習へ渡した計画の速度と加速度）が 10Hz で入る。
-  タイムで決める方式ではさらに `t_lap`・`t_plan`（直近に数えたラップと計画のラップ [s]）・`ref_lat`・
-  `ref_lap`・`ref_plan`（比べる相手の段）・`step`（今の幅）・`laps_n`（今の段で数えた周）
-- ★`grip_replay` は元の方式（`GripLearner`）の判定を流し直す道具。タイムで決める方式の判断は開ループでは
-  再現できない（上限を変えたときのラップは、実際に走らないと出ない）
+- 流し直しは開ループ（安全装置で目標速度を落としても、記録の車速は変わらない）。学習なしで走った記録は
+  `--pin` で横の上限を固定して流す
+- 回帰テスト（`raspi/tests/test_grip.py` の `TestRealRecords`）は `raspi/tests/data/grip_real_*.npz`
+  （2026-10-11・12 の実機の記録、2026-10-29 の制動しながらの巻き込みの記録。2026-10-29 以降の npz は IMU の横加速度 `ay` を含む）を流す。実機で誤って働いた記録が増えたら、ここへ足す
+- 学習を入れて走った記録には `auto/state.grip`（学習値・前後の包絡と比・加速と減速の学習へ渡した計画の速度と加速度・
+  `t_lap`・`t_plan`（直近に数えたラップと計画のラップ [s]）・`ref_lat`・`ref_lap`・`ref_plan`（比べる相手の段）・
+  `step`（今の幅）・`cross_gain`（直近の周の横偏差の増え [m]）・`ceil`（天井））が 10Hz で入る
+- タイムで決める段の採否は開ループでは再現できない（上限を変えたときのラップは、実際に走らないと出ない）
 
 #### 走行中の学習を実機で初めて試すとき
 
 シムで決めたしきい値・上げ幅をそのまま使わない。安全側から順に:
 
 1. **記録だけ取る**（`grip_learn` = 0 のまま普段どおり周回）。記録を `grip_replay --pin <走っていた
-   横加速度>` に流し、前兆が 0 であることを見る（上の節）。しきい値は測った雑音の幅から自動で決まる
-   （`GripConfig.noise_k`）が、車・路面・センサが変わって雑音の形が変われば誤検出しうる
+   横加速度>` に流し、安全装置が 0 回であることを見る（上の節）
 2. **下げるだけ**: `grip_learn` 1・`grip_down_only` 1。出発点は同定値の 0.85 倍（横）、加速・減速は校正の値
    （`[limits]`）で、そこから上げない。前兆が誤って出ないか
    （reason の「前兆 n回」が何もない所で増えないか、減速の値が下がり続けないか）を見る。
@@ -329,8 +324,7 @@ B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --se
    車速が計画より 0.10m/s を超えて速かった周にも 1 段下がる（記録の `grip.lag_dec`）
 3. **上げる**: `grip_down_only` 0・`grip_max` を今走れている値＋0.5m/s² 程度（例 5.0）・`v_max` は
    普段より下げる。壁の外側に緩衝材を置く。★横は**限界の見積もりそのものまで出す**。出してよい
-   上限は `grip_max` で決める。上げ幅（既定 6%）は隠した設定 `grip_step` で、実機で小さくしたいときは
-   `raspi/auto/slam2d_raceline.py` の既定値を変える
+   上限は `grip_max` で決める。上げ幅（1 段 8%、断ったら半分）は `GripConfig.time_step`
    ★加速・減速も同時に学習される（切り離す設定は無い）。上げるのは、上限近くを求めた所で付いて行けたときだけ（1 段 8%、
    下げた後は半分ずつ）
 4. 値が落ち着いたら `grip_max` を上げる。本番の計測走行は、練習で**学習を終えた**（reason が「収束」）地図をそのまま使う。
@@ -811,6 +805,11 @@ python -m raspi.nodes.replay_node logs/x.sfl --bus --loop  # バスに流し直�
 **カメラ画像を動画にするには**: `launcher.command` から「動画の書き出し」を起動（`tools/mcap_video_gui.py`）→ 記録を
 選んで「書き出す」→ 前後それぞれの `<入力>_front.mp4` / `<入力>_rear.mp4` ができる（Foxglove の動画書き出しは
 Enterprise 限定のため自前。前後は同じ時間軸なので並べて再生すれば同期する）。CLI は `python -m tools.mcap_video`。
+
+**走行の結果を 1 枚で見るには**: launcher の「走行サマリ」（`tools/run_summary_gui.py`、中身は `raspi/tools/run_summary.py`）で
+実機の `.mcap` を選ぶ。周回タイム・衝突・電圧・前兆・学習値・通信を出し、保存先（任意）に残した直前の走行との差分も出す。
+衝突は縦加速度 |ax| ≥ 8 m/s²（正常走行の最大は 5.8、壁に当たった 20261026_104056 は 15.6）。CLI は
+`python3 -m raspi.tools.run_summary <mcap> [--out-dir DIR] [--prev 前回の_summary.json]`。
 
 **自己位置を見るには**: `launcher.command`（surge_mk2 直下） から「SLAM 再処理」を起動（`tools/slam_replay_gui.py`）→ 記録を
 選んで「実行」→ 終わると `<入力>_slam.mcap` が Foxglove で開く。3D パネルの設定で Display frame を `odom` にし、
