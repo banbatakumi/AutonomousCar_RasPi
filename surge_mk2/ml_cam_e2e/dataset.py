@@ -6,6 +6,9 @@
 **前処理は `raspi/core/cam_e2e_preproc.py` を通す。** 実車の推論
 （`raspi/nodes/cam_e2e_node.py`）と同じ関数なので、学習した絵と実車で
 モデルに入る絵が食い違わない。
+
+向きをずらす拡張（`yaw_max_deg > 0`）は `yaw_aug.py` 参照。拡張しない絵（検証・評価）は
+推論と同じ中央の窓（`crop_window`）になる。
 """
 
 from __future__ import annotations
@@ -20,8 +23,9 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch.utils.data import Dataset  # noqa: E402
 
-from raspi.core.cam_e2e_preproc import normalize, resize_area  # noqa: E402
+from raspi.core.cam_e2e_preproc import crop_margin_px, crop_window, normalize, resize_area  # noqa: E402
 from samples import Sample, load_rgb, speed_norm, steer_norm  # noqa: E402
+from yaw_aug import sample_psi, yawed_window  # noqa: E402
 
 __all__ = ["load_rgb", "DriveDataset"]
 
@@ -41,7 +45,9 @@ class DriveDataset(Dataset):
 
     def __init__(self, samples: list[Sample], *, size: tuple[int, int] = (224, 128),
                  max_steer: float, speed_ref: float, augment: bool = False,
-                 flip: bool = True, mean: float = 0.0, std: float = 255.0) -> None:
+                 flip: bool = True, mean: float = 0.0, std: float = 255.0,
+                 crop_x: float = 0.0, yaw_max_deg: float = 0.0, yaw_k: float = 0.0,
+                 fx_px: float = 0.0, body_mask: np.ndarray | None = None) -> None:
         self.samples = samples
         self.size = size            # (width, height)
         self.max_steer = max_steer
@@ -50,6 +56,16 @@ class DriveDataset(Dataset):
         self.flip = flip
         self.mean = mean
         self.std = std
+        #: 左右の切り落とし（`cam_e2e_preproc.crop_window`）。推論と同じ値
+        self.crop_x = crop_x
+        #: 向きをずらす拡張の最大角 [deg]。0 で拡張しない（`yaw_aug.py`）
+        self.yaw_max_deg = yaw_max_deg
+        #: 戻す舵の係数: δ' = δ − k·ψ
+        self.yaw_k = yaw_k
+        self.fx_px = fx_px
+        self.body_mask = body_mask
+        if yaw_max_deg > 0 and (crop_x <= 0 or fx_px <= 0):
+            raise ValueError("向きの拡張には crop_x と fx_px が要る")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -57,9 +73,18 @@ class DriveDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         sample = self.samples[idx]
         w, h = self.size
-        small = resize_area(load_rgb(sample.path), w, h)
+        rgb = load_rgb(sample.path)
         steer = steer_norm(sample, self.max_steer)
         speed = speed_norm(sample, self.speed_ref)
+        if self.augment and self.yaw_max_deg > 0:
+            psi = sample_psi(self.yaw_max_deg)
+            margin = crop_margin_px(rgb.shape[1], self.crop_x)
+            rgb = yawed_window(rgb, margin, psi, self.fx_px, self.body_mask)
+            # 車が左（ψ>0）を向いていたら右へ戻す。正規化値で補正して出力範囲に収める
+            steer = max(-1.0, min(1.0, steer - self.yaw_k * psi / self.max_steer))
+        else:
+            rgb = crop_window(rgb, self.crop_x)
+        small = resize_area(rgb, w, h)
 
         if self.augment:
             if self.flip and np.random.rand() < 0.5:

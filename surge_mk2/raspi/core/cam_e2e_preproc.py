@@ -14,6 +14,17 @@ numpy だけで書く——Pi には opencv も Pillow も入れていない
 `PREPROC_VERSION` はモデル同梱の `<name>.json` に書かれ、ノードが読み込み時に
 照合する。ここの処理（色順・リサイズ方式・正規化）を変えたら必ず上げること。
 古い前処理で学習したモデルを新しい前処理で走らせる事故を、読み込み拒否で止める。
+
+## 左右の切り落とし（`crop_x`、cam_e2e だけ）
+
+cam_e2e は学習で「車の向きをずらした絵」を作る（`ml_cam_e2e/dataset.py`）。絵を横にずらすと
+端に元画像の無い帯ができ、それを埋めた画素はラベルの補正と完全に連動する——モデルが帯を
+手がかりに覚えてしまう。そこで**学習でも推論でも左右を `crop_x`（画像幅に対する割合）ずつ
+切り落とした中央の窓を使い**、ずらすのは窓の位置だけにする（端に作り物の画素が出ない）。
+
+共有の `PREPROC_VERSION` を上げると切り落としと無関係な `ml_cam`（セグメンテーション）の
+モデルまで読めなくなるので、cam_e2e の契約だけ `PREPROC_VERSION_CROP` を書く。
+切り落としを知らない古いノードは版の照合でそのモデルを拒否する（黙って全幅で推論しない）。
 """
 
 from __future__ import annotations
@@ -22,9 +33,12 @@ from functools import lru_cache
 
 import numpy as np
 
-__all__ = ["PREPROC_VERSION", "to_rgb", "resize_area", "normalize", "preprocess"]
+__all__ = ["PREPROC_VERSION", "PREPROC_VERSION_CROP", "to_rgb", "crop_margin_px",
+           "crop_window", "resize_area", "normalize", "preprocess"]
 
 PREPROC_VERSION = 1
+#: 版1に「左右の切り落とし `crop_x`」を足した版（cam_e2e の契約だけが使う。モジュールdocstring参照）
+PREPROC_VERSION_CROP = 2
 
 
 def to_rgb(frame: np.ndarray, fmt: str) -> np.ndarray:
@@ -83,8 +97,29 @@ def normalize(resized: np.ndarray, mean: float = 0.0, std: float = 255.0) -> np.
     return np.ascontiguousarray(np.transpose(x, (2, 0, 1))[None, ...])
 
 
+def crop_margin_px(width: int, crop_x: float) -> int:
+    """幅 `width` の画像で左右それぞれ切り落とす画素数。"""
+    return round(width * crop_x)
+
+
+def crop_window(rgb: np.ndarray, crop_x: float, shift_px: int = 0) -> np.ndarray:
+    """左右を `crop_x` ずつ切り落とした中央の窓。`shift_px` だけ窓を右へずらす（学習の拡張用）。
+
+    窓の幅はずらしても変わらない。`|shift_px|` が切り落とし幅を超えると画像の外に出るので例外。
+    """
+    if crop_x <= 0:
+        if shift_px:
+            raise ValueError("切り落とし無しでは窓をずらせない")
+        return rgb
+    w = rgb.shape[1]
+    m = crop_margin_px(w, crop_x)
+    if abs(shift_px) > m:
+        raise ValueError(f"ずらし {shift_px}px が切り落とし幅 {m}px を超える")
+    return rgb[:, m + shift_px: w - m + shift_px]
+
+
 def preprocess(rgb: np.ndarray, size: tuple[int, int], mean: float = 0.0,
-               std: float = 255.0) -> np.ndarray:
+               std: float = 255.0, crop_x: float = 0.0) -> np.ndarray:
     """RGB の (H, W, 3) uint8 → モデル入力 (1, 3, h, w) float32。`size` は (width, height)。"""
     w, h = size
-    return normalize(resize_area(rgb, w, h), mean, std)
+    return normalize(resize_area(crop_window(rgb, crop_x), w, h), mean, std)

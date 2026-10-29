@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
+
 try:
     import onnx  # noqa: E402
     from onnx import TensorProto, helper  # noqa: E402
@@ -25,7 +26,10 @@ except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの
     raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
 from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    PREPROC_VERSION,
+    PREPROC_VERSION_CROP,
+)
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, VehicleState  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
@@ -129,7 +133,11 @@ class TestLoadModel(unittest.TestCase):
     def test_rejects_bad_contracts(self):
         cases = {
             "old_outputs": {"outputs": ["steer_norm"]},
-            "old_preproc": {"preproc_version": PREPROC_VERSION + 1},
+            "unknown_preproc": {"preproc_version": PREPROC_VERSION_CROP + 1},
+            # 版2なのに切り落とし幅が無い／範囲外（全幅で推論すると学習と違う絵になる）
+            "crop_missing": {"preproc_version": PREPROC_VERSION_CROP},
+            "crop_zero": {"preproc_version": PREPROC_VERSION_CROP, "crop_x": 0.0},
+            "crop_huge": {"preproc_version": PREPROC_VERSION_CROP, "crop_x": 0.4},
             "no_speed_ref": {"speed_ref": 0.0},
             "no_max_steer": {"max_steer": 0.0},
         }
@@ -137,6 +145,23 @@ class TestLoadModel(unittest.TestCase):
             _make_model_files(self.dir, name, 32, 32, **over)
             with self.assertRaises(ValueError, msg=name):
                 load_model(self.dir / f"{name}.onnx")
+
+    def test_crop_contract_is_read_and_applied(self):
+        """版2のモデルは左右を crop_x ずつ切り落とした絵で推論する。"""
+        _make_model_files(self.dir, "crop", 32, 32, preproc_version=PREPROC_VERSION_CROP,
+                          crop_x=0.25)
+        model = load_model(self.dir / "crop.onnx")
+        self.assertAlmostEqual(model.crop_x, 0.25)
+        # 左右の1/4だけ赤 → 切り落とせば赤は残らない
+        img = np.zeros((32, 64, 3), dtype=np.uint8)
+        img[:, :16, 0] = 255
+        img[:, 48:, 0] = 255
+        steer, _ = model.infer(img)
+        self.assertAlmostEqual(steer, 0.0, places=5)
+
+    def test_version1_model_uses_full_width(self):
+        _make_model_files(self.dir, "v1", 32, 32)
+        self.assertEqual(load_model(self.dir / "v1.onnx").crop_x, 0.0)
 
     def test_missing_contract_file_is_rejected(self):
         """セグメンテーション用など、同梱JSONの無い .onnx を読まない。"""

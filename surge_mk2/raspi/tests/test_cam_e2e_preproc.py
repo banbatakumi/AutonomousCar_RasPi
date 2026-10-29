@@ -12,7 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from raspi.core.cam_e2e_preproc import preprocess, resize_area, to_rgb  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    crop_window,
+    preprocess,
+    resize_area,
+    to_rgb,
+)
 
 
 class TestToRgb(unittest.TestCase):
@@ -79,6 +84,38 @@ class TestResizeArea(unittest.TestCase):
         frame[..., 2] = 80
         out = resize_area(to_rgb(frame, "BGR888"), 4, 4)
         self.assertEqual(out[0, 0].tolist(), [80, 0, 0])
+
+
+class TestCropWindow(unittest.TestCase):
+    def setUp(self):
+        # 列番号をそのまま値にした絵（どの列が残ったか読める）
+        self.img = np.tile(np.arange(100, dtype=np.uint8)[None, :, None], (4, 1, 3))
+
+    def test_center_window_drops_both_sides(self):
+        out = crop_window(self.img, 0.1)
+        self.assertEqual(out.shape[1], 80)
+        self.assertEqual(int(out[0, 0, 0]), 10)
+        self.assertEqual(int(out[0, -1, 0]), 89)
+
+    def test_shift_moves_the_window_but_keeps_its_width(self):
+        out = crop_window(self.img, 0.1, shift_px=-10)
+        self.assertEqual(out.shape[1], 80)
+        self.assertEqual(int(out[0, 0, 0]), 0)
+
+    def test_shift_beyond_the_margin_is_rejected(self):
+        with self.assertRaises(ValueError):
+            crop_window(self.img, 0.1, shift_px=11)
+        with self.assertRaises(ValueError):
+            crop_window(self.img, 0.0, shift_px=1)
+
+    def test_no_crop_is_identity(self):
+        self.assertIs(crop_window(self.img, 0.0), self.img)
+
+    def test_preprocess_applies_the_crop_before_resizing(self):
+        rgb = np.zeros((8, 40, 3), dtype=np.uint8)
+        rgb[:, :10, 0] = 255                   # 左の 1/4 だけ赤
+        x = preprocess(rgb, (4, 2), 0.0, 255.0, crop_x=0.25)
+        self.assertAlmostEqual(float(x[0, 0].max()), 0.0)
 
 
 class TestPreprocess(unittest.TestCase):

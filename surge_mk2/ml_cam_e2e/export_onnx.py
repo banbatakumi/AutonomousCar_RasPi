@@ -28,7 +28,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION, PREPROC_VERSION_CROP  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.nodes.cam_e2e_node import MODEL_OUTPUTS  # noqa: E402
 
@@ -72,10 +72,13 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
                              f"--size で指定してください")
         size = (int(cfg["input_size"][0]), int(cfg["input_size"][1]))
     trained_ver = cfg.get("preproc_version")
-    if trained_ver is not None and trained_ver != PREPROC_VERSION:
+    if trained_ver is not None and trained_ver not in (PREPROC_VERSION, PREPROC_VERSION_CROP):
         # 契約に今の版を書くとノード側の照合（cam_e2e_node）をすり抜けてしまう
-        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 {PREPROC_VERSION} と違う。"
-                         "学習し直してください")
+        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 "
+                         f"{PREPROC_VERSION}/{PREPROC_VERSION_CROP} と違う。学習し直してください")
+    # 左右の切り落とし（版2）。学習と同じ窓で推論させるため契約に書く
+    crop_x = float(cfg.get("crop_x", 0.0) or 0.0)
+    version = PREPROC_VERSION_CROP if crop_x > 0 else PREPROC_VERSION
     if max_steer is None:
         max_steer = cfg.get("max_steer")
     if speed_ref is None:
@@ -112,7 +115,8 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
         "input_layout": "NCHW",
         "color": "RGB",
         "resize": "area",
-        "preproc_version": PREPROC_VERSION,
+        "preproc_version": version,
+        "crop_x": crop_x,               # 左右それぞれ切り落とす幅（画像幅に対する割合）
         "mean": MEAN,
         "std": STD,
         "outputs": list(MODEL_OUTPUTS),

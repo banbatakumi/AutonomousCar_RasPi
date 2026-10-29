@@ -12,6 +12,12 @@
 舵0付近が大半を占めるデータをそのまま回すと、常に直進と答えるのが誤差を
 最小にする。`--balance`（0〜1）で舵の区間ごとに抽選の重みを変え、カーブを
 多めに見せる（`samples.balance_weights`）。枚数を捨てる間引きはしない。
+
+## ずれから戻る舵は「向きをずらした絵」で教える
+
+`--yaw-aug-deg`（既定 6°）で絵を ±その角度だけ横にずらし、舵のラベルを
+`δ − k·ψ`（`--yaw-aug-k`）に補正する。詳細と理由は `yaw_aug.py`。0 で無効
+（左右の切り落としも無くなり、前処理は版1のまま）。
 """
 
 from __future__ import annotations
@@ -33,8 +39,10 @@ from torch.utils.data import DataLoader, WeightedRandomSampler  # noqa: E402
 import samples as S  # noqa: E402
 from dataset import DriveDataset  # noqa: E402
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION, PREPROC_VERSION_CROP  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
+from samples import load_rgb  # noqa: E402
+from yaw_aug import ensure_body_mask, front_fx_px, margin_for  # noqa: E402
 
 __all__ = ["select_samples", "loss_fn", "train_one_epoch", "evaluate", "pick_device"]
 
@@ -124,6 +132,12 @@ def main() -> int:
                     help="速度の正規化基準[m/s]。0 なら学習データの最高速度")
     ap.add_argument("--no-flip", action="store_true",
                     help="左右反転の拡張を使わない（片側通行など左右対称でないコース向け）")
+    ap.add_argument("--yaw-aug-deg", type=float, default=6.0,
+                    help="向きをずらす拡張の最大角[deg]（yaw_aug.py）。0 で無効。"
+                         "左右をこの角度ぶん切り落とした窓で学習・推論する")
+    ap.add_argument("--yaw-aug-k", type=float, default=0.8,
+                    help="ずらした向き ψ から戻す舵の係数（δ − k·ψ）。"
+                         "先読み距離 Ld の pure pursuit なら 2L/Ld（L=0.23m・Ld≈0.6m で約0.8）")
     ap.add_argument("--no-pretrained", action="store_true",
                     help="ImageNet 事前学習重みを使わない（オフライン環境・動作確認向け）")
     ap.add_argument("--seed", type=int, default=0)
@@ -141,7 +155,8 @@ def main() -> int:
               f"先に `ml_cam_e2e/extract_pairs.py` でデータを作ってください", file=sys.stderr)
         return 2
 
-    max_steer = Vehicle.load().max_steer
+    vehicle = Vehicle.load()
+    max_steer = vehicle.max_steer
     speed_ref = args.speed_ref if args.speed_ref > 0 else S.auto_speed_ref(used)
     train_s, val_s = S.split(used, block_s=args.block_s, val_ratio=args.val_ratio,
                              seed=args.seed)
@@ -152,8 +167,21 @@ def main() -> int:
         print("# 警告: 検証データが0件です（記録が短い）。val_mae は nan になり、"
               "最後のエポックを best.pt にします", file=sys.stderr)
 
-    common = dict(size=(w, h), max_steer=max_steer, speed_ref=speed_ref)
-    train_ds = DriveDataset(train_s, augment=True, flip=not args.no_flip, **common)
+    crop_x = 0.0
+    fx_px = 0.0
+    body_mask = None
+    if args.yaw_aug_deg > 0:
+        src_w = load_rgb(used[0].path).shape[1]
+        fx_px = front_fx_px(vehicle, src_w)
+        crop_x = margin_for(args.yaw_aug_deg, fx_px) / src_w
+        body_mask = ensure_body_mask(args.frames, [s.path for s in used])
+        print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  k={args.yaw_aug_k:g}  fx={fx_px:.1f}px  "
+              f"左右の切り落とし {crop_x * 100:.1f}%  車体マスク {body_mask.mean() * 100:.1f}%")
+
+    common = dict(size=(w, h), max_steer=max_steer, speed_ref=speed_ref, crop_x=crop_x)
+    train_ds = DriveDataset(train_s, augment=True, flip=not args.no_flip,
+                            yaw_max_deg=args.yaw_aug_deg, yaw_k=args.yaw_aug_k, fx_px=fx_px,
+                            body_mask=body_mask, **common)
     val_ds = DriveDataset(val_s, augment=False, **common)
     if args.balance > 0:
         weights = S.balance_weights([S.steer_norm(s, max_steer) for s in train_s],
@@ -173,9 +201,12 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     config = {
-        "input_size": [w, h], "preproc_version": PREPROC_VERSION,
+        "input_size": [w, h],
+        "preproc_version": PREPROC_VERSION_CROP if crop_x > 0 else PREPROC_VERSION,
+        "crop_x": crop_x, "yaw_aug_deg": args.yaw_aug_deg, "yaw_aug_k": args.yaw_aug_k,
+        "fx_px": fx_px,
         "max_steer": max_steer, "speed_ref": speed_ref,
-        "steer_link": list(Vehicle.load().steer_link),
+        "steer_link": list(vehicle.steer_link),
         "block_s": args.block_s, "val_ratio": args.val_ratio, "seed": args.seed,
         "balance": args.balance, "speed_weight": args.speed_weight,
         "flip": not args.no_flip, "epochs": args.epochs,

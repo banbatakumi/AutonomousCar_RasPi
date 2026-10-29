@@ -17,6 +17,15 @@ PyTorch のチェックポイントではなく ONNX を、実車と同じ前処
 
 `train_config.json` の `block_s`・`val_ratio`・`seed` で学習時と同じ振り分けを
 再現する。**モデルの実力は val の誤差**。train の誤差だけ小さいなら覚え込み。
+
+## 誤差が小さくても走れるとは限らない——ずれへの応答 dδ/dψ も見る
+
+手本の線の上の絵だけで測った誤差は、線から外れたときに戻せるかを測れない
+（Codevilla et al. 2018: オフラインの誤差は実走の良さとほとんど対応しない）。
+v4 は val 誤差 0.5° でも実車では数mで線を外れた。そこで、絵を「車が向きを ψ
+変えた絵」に作り替え（`yaw_aug.py` と同じ方法）、舵がどれだけ戻す向きに動くか
+（`yaw_response`）を出す。**負で大きいほど戻す力が強い。** 手本の追従（pure pursuit・
+先読み 0.3〜0.6m）は約 −0.8〜−1.5、v4 は約 −0.12 だった。
 """
 
 from __future__ import annotations
@@ -145,6 +154,32 @@ def worst_segments(rows: list[dict], k: int = 20, merge_s: float = 1.0) -> list[
     return picked
 
 
+def yaw_response(model, rgbs: list, fx_px: float, body, deg: float = 3.0) -> list[float]:
+    """各絵について dδ/dψ（車が左へ ψ 向いたときの舵の変化 / ψ、無次元）を返す。
+
+    絵の全体を横にずらし（端は端の画素で延長）、車体は元の位置に戻してから
+    `model.infer()` に通す。切り落とし付きのモデル（版2）は、ずらしが切り落とし幅以内なら
+    延長した端が窓の外に落ちるので、学習の拡張と同じ絵になる。版1のモデルは端の帯が
+    入るぶん近似になる。
+    """
+    import numpy as np
+    from yaw_aug import yawed_window
+
+    psi = math.radians(deg)
+    shift = round(fx_px * psi)
+    out = []
+    for rgb in rgbs:
+        # 両側に shift ぶん端を延長してから窓をずらす＝全体をずらして端を延長したのと同じ
+        padded = np.pad(rgb, ((0, 0), (shift, shift), (0, 0)), mode="edge")
+        pb = None if body is None else np.pad(body, ((0, 0), (shift, shift)), mode="constant")
+        left = yawed_window(padded, shift, +psi, fx_px, pb)
+        right = yawed_window(padded, shift, -psi, fx_px, pb)
+        d_left = model.infer(np.ascontiguousarray(left))[0] * model.max_steer
+        d_right = model.infer(np.ascontiguousarray(right))[0] * model.max_steer
+        out.append((d_left - d_right) / (2 * psi))
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -207,6 +242,24 @@ def main() -> int:
     if not with_speed:
         print("# 速度は学習していないモデル（速度の重み 0）なので、速度の誤差は出しません")
     print(f"# 書き出し完了: {out_path}")
+
+    # ── ずれへの応答（モジュールdocstring参照） ──
+    from yaw_aug import ensure_body_mask, front_fx_px
+
+    from raspi.core.vehicle import Vehicle
+
+    val = [s for s in samples if split_of(s, exclusions, train_cfg) == SPLIT_VAL]
+    pick = val[::max(1, len(val) // 60)][:60] or samples[::max(1, len(samples) // 60)][:60]
+    if pick:
+        rgbs = [S.load_rgb(s.path) for s in pick]
+        fx_px = front_fx_px(Vehicle.load(), rgbs[0].shape[1])
+        # 止まっている間の絵は背景も動かないので、車体の推定には走行中の絵だけを使う
+        body = ensure_body_mask(args.frames, [s.path for s in samples
+                                              if S.drop_reason(s) is None])
+        resp = sorted(yaw_response(model, rgbs, fx_px, body))
+        med = resp[len(resp) // 2]
+        print(f"# ずれへの応答 dδ/dψ: 中央値 {med:+.2f}（{len(resp)}枚。負で大きいほど戻す力が強い。"
+              f"手本の追従は約 -0.8〜-1.5）")
     return 0
 
 

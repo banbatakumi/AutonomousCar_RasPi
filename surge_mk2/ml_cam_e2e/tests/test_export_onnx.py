@@ -19,7 +19,7 @@ import torch  # noqa: E402
 
 from export_onnx import MEAN, STD, export, verify_parity  # noqa: E402
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION, PREPROC_VERSION_CROP  # noqa: E402
 from raspi.nodes.cam_e2e_node import MODEL_OUTPUTS, load_model  # noqa: E402
 
 
@@ -63,6 +63,18 @@ class TestExportOnnx(unittest.TestCase):
                    steer_link=(0.5, 0.25))
             cfg = json.loads(out_path.with_suffix(".json").read_text())
             self.assertEqual(cfg["steer_link"], [0.5, 0.25])
+
+    def test_crop_from_train_config_goes_into_the_contract(self):
+        """向きの拡張で学習した run（crop_x>0）は版2と crop_x を契約に書き、実車もその窓で推論する。"""
+        with tempfile.TemporaryDirectory() as d:
+            _write_train_config(d, preproc_version=PREPROC_VERSION_CROP, crop_x=0.05)
+            ckpt_path = _save_checkpoint(d)
+            out_path = Path(d) / "model.onnx"
+            export(ckpt_path, out_path)
+            cfg = json.loads(out_path.with_suffix(".json").read_text())
+            self.assertEqual(cfg["preproc_version"], PREPROC_VERSION_CROP)
+            self.assertAlmostEqual(cfg["crop_x"], 0.05)
+            self.assertAlmostEqual(load_model(out_path).crop_x, 0.05)
 
     def test_exported_model_is_accepted_by_the_vehicle_side_loader(self):
         """書いた契約を、実車が使う `load_model()` がそのまま読めること

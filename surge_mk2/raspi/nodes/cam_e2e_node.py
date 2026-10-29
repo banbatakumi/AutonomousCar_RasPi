@@ -62,7 +62,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION, preprocess, to_rgb  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    PREPROC_VERSION,
+    PREPROC_VERSION_CROP,
+    preprocess,
+    to_rgb,
+)
 from raspi.core.control_params import steer_relink  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -104,7 +109,7 @@ class RegressionModel:
     def __init__(self, model_path: str, *, input_size: tuple[int, int] = (224, 128),
                 mean: float = 0.0, std: float = 255.0, max_steer: float = 0.0,
                 speed_ref: float = 0.0,
-                steer_link: tuple[float, float] | None = None) -> None:
+                steer_link: tuple[float, float] | None = None, crop_x: float = 0.0) -> None:
         import onnxruntime as ort
 
         # `cam_perception_node.SegmentationModel` と同じ省電力設定
@@ -124,6 +129,8 @@ class RegressionModel:
         #: 学習したときの STM32 のステアのリンクの換算 `(gain, cubic)`。`None` ＝ 契約 JSON に
         #: 無い（換算の記録が始まる前のモデル）。あれば推論の舵角を今の車の換算へ直す
         self.steer_link = steer_link
+        #: 左右の切り落とし（画像幅に対する割合、`cam_e2e_preproc.crop_window`）。0 は全幅
+        self.crop_x = crop_x
 
     def infer(self, rgb: np.ndarray) -> tuple[float, float]:
         """**RGB** の `(H, W, 3)` uint8 → `(steer_norm, speed_norm)`。
@@ -131,7 +138,7 @@ class RegressionModel:
         色順を直すのは呼び出し側の責任（`to_rgb()`）。ここで `fmt` を知らずに
         推測すると、学習側（JPEG をデコードした RGB）とまた食い違う。
         """
-        x = preprocess(rgb, self.input_size, self.mean, self.std)
+        x = preprocess(rgb, self.input_size, self.mean, self.std, self.crop_x)
         out = np.asarray(self.session.run(None, {self.input_name: x})[0]).reshape(-1)
         if out.size != len(MODEL_OUTPUTS):
             raise ValueError(f"モデル出力が{out.size}個（{len(MODEL_OUTPUTS)}個のはず）")
@@ -154,9 +161,16 @@ def load_model(onnx_path: Path) -> RegressionModel:
     cfg = json.loads(cfg_path.read_text())
     if tuple(cfg.get("outputs", ())) != MODEL_OUTPUTS:
         raise ValueError(f"outputs が {list(MODEL_OUTPUTS)} ではない: {cfg.get('outputs')}")
-    if cfg.get("preproc_version") != PREPROC_VERSION:
-        raise ValueError(f"前処理の版が違う（モデル {cfg.get('preproc_version')}・"
-                         f"ノード {PREPROC_VERSION}）。再エクスポートが必要")
+    version = cfg.get("preproc_version")
+    if version not in (PREPROC_VERSION, PREPROC_VERSION_CROP):
+        raise ValueError(f"前処理の版が違う（モデル {version}・"
+                         f"ノード {PREPROC_VERSION}/{PREPROC_VERSION_CROP}）。再エクスポートが必要")
+    # 版1は切り落とし無し。版2は crop_x が必須（無いまま全幅で推論すると学習と違う絵になる）
+    crop_x = 0.0
+    if version == PREPROC_VERSION_CROP:
+        crop_x = float(cfg.get("crop_x", -1.0))
+        if not 0.0 < crop_x < 0.3:
+            raise ValueError(f"crop_x が不正: {cfg.get('crop_x')}（版{version}は 0〜0.3 が必須）")
     max_steer = float(cfg.get("max_steer", 0.0))
     speed_ref = float(cfg.get("speed_ref", 0.0))
     if max_steer <= 0 or speed_ref <= 0:
@@ -174,7 +188,7 @@ def load_model(onnx_path: Path) -> RegressionModel:
                            mean=float(cfg.get("mean", 0.0)),
                            std=float(cfg.get("std", 255.0)),
                            max_steer=max_steer, speed_ref=speed_ref,
-                           steer_link=steer_link)
+                           steer_link=steer_link, crop_x=crop_x)
 
 
 class CamE2ENode:
