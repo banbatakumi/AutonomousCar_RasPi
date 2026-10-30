@@ -194,8 +194,8 @@
  *
  * rAF はタブが隠れると止まる ＝ 送信も止まる ＝ `DEADMAN_MS` でサーバが DISARM。
  * **止まる方向に転ぶので安全側**（`visibilitychange` の即 DISARM と二重）。
- * ARM 中は画面ロックによる `hidden` 化を Wake Lock API で抑止するので、この経路が
- * 意図せず頻発することはない（下記 `useDriving` 内の Wake Lock 節参照）。
+ * ARM 中は画面ロックによる `hidden` 化を Wake Lock API で抑止する。**ただし HTTPS で
+ * 開いたときだけ**（HTTP では使えず、自動ロックで DISARM する。下記 `useDriving` 内の Wake Lock 節参照）。
  *
  * ### 2. レートリミットは「GUI で作り、STM32 は保険」に一元化
  *
@@ -593,8 +593,24 @@ export function useDriving(ch: ControlChannel | null) {
   //
   // 失敗（非対応ブラウザ・API 拒否）は握りつぶす。**Wake Lock は快適性のための
   // 機能であり、取得できなくても走行の安全性には影響しない**。
+  //
+  // ⚠ **Wake Lock は HTTPS（secure context）でしか使えない。** Pi が配る
+  // `http://surge-mk2.local:8000` では `navigator.wakeLock` 自体が無く、画面が自動ロック
+  // すると DISARM する（localhost の `npm run dev` では使えるので開発中は気づけない）。
+  // 使えないときは、最初に ARM したときに一度だけ知らせる
   useEffect(() => {
-    if (!('wakeLock' in navigator)) return
+    if (!('wakeLock' in navigator)) {
+      let warned = false
+      return useUi.subscribe((state, prev) => {
+        if (warned || !state.armRequested || prev.armRequested) return
+        warned = true
+        notify(
+          window.isSecureContext
+            ? 'このブラウザは画面ロックを止められません（自動ロックすると停止します）'
+            : 'HTTP で開いているため画面ロックを止められません（自動ロックすると停止します。HTTPS で開くと防げます）',
+        )
+      })
+    }
 
     let sentinel: WakeLockSentinel | null = null
     let cancelled = false
