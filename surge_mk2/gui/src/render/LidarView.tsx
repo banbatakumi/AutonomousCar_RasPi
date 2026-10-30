@@ -147,7 +147,7 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
       ctx.fillRect(0, 0, w, h)
 
       const cx = w / 2
-      const cy = h * 0.62 // 車体をやや下に置いて前方を広く取る
+      const cy = h / 2 // LiDAR（車）を画面中央に置く
       // 画面の短辺半分が zoom [m] に対応する
       const px = Math.min(w, h) / 2 / zoom
 
