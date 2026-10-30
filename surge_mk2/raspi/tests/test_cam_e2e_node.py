@@ -445,6 +445,60 @@ class TestModeGating(unittest.TestCase):
             node.close()
             ring.unlink()
 
+    def test_same_frame_is_not_inferred_twice(self):
+        """新しいコマが来ないうちは周期が来ても推論しない（2周期までは待つ）。"""
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
+        ring, ref = _ref_with_frame("surge_test_ce2e_same")
+        try:
+            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.15)      # 1周期は過ぎるが2周期未満
+
+            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+            self.assertEqual(len(cmds), 1)
+        finally:
+            node.close()
+            ring.unlink()
+
+    def test_infers_new_frames_at_the_set_rate(self):
+        """30fps でコマが届くと、10Hz（3コマに1回）で、届いたコマを推論する。"""
+        node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
+        ring, ref = _ref_with_frame("surge_test_ce2e_fresh")
+        t0 = time.monotonic()
+
+        class _CameraSub(_FakeSub):
+            """poll のたびに、30fps の時刻割りで新しいコマを書く。"""
+            def poll(self, timeout_ms):
+                n = int((time.monotonic() - t0) / (1 / 30))
+                if n > self.n:
+                    self.n = n
+                    desc = ring.write(np.full((24, 32, 3), 200, dtype=np.uint8),
+                                      t_capture_ns=time.monotonic_ns(), frame_id=n + 1)
+                    self.latest[TOPIC_IMAGE_FRONT] = ImageRef(
+                        shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+                time.sleep(0.001)
+                return []
+
+        try:
+            sub = _CameraSub({TOPIC_IMAGE_FRONT: ref,
+                              TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                              TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            sub.n = 0
+            pub = _FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.55)
+
+            cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+            self.assertEqual(len(cmds), 6)                  # 0, 100, …, 500ms
+            self.assertTrue(all(c.ready for c in cmds))
+            self.assertEqual(len({c.t_capture for c in cmds}), 6, "同じコマを2度推論した")
+        finally:
+            node.close()
+            ring.unlink()
+
     def test_no_model_reports_not_ready_with_a_fresh_timestamp(self):
         """`t_capture=0` だと planning_node が「入力が古い」で先に止めてしまい、
         planner の「モデル未選択」が GUI に出ない。"""

@@ -55,17 +55,32 @@ def to_rgb(frame: np.ndarray, fmt: str) -> np.ndarray:
 
 
 @lru_cache(maxsize=8)
-def _area_weights(src: int, out: int) -> np.ndarray:
-    """面積平均の重み行列 `(out, src)`。行 i は出力 i が覆う入力の区画に `1/画素数`。
+def _area_bins(src: int, out: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """面積平均の区画 `(先頭, 画素数, 重み)`。出力 i は入力 `[先頭, 先頭+画素数)` を覆う。
 
+    重みは float32 の `1/画素数`（を float64 で持つ。積を丸めずに求めるため）。
     拡大方向（out > src）では区画が1画素になる（結果は最近傍と同じ）。
     """
-    idx = (np.arange(out, dtype=np.int64) * src) // out
-    counts = np.maximum(np.diff(np.append(idx, src)), 1)
-    m = np.zeros((out, src), dtype=np.float32)
-    for i, (start, n) in enumerate(zip(idx, counts)):
-        m[i, start:start + n] = 1.0 / n
-    return m
+    start = (np.arange(out, dtype=np.int64) * src) // out
+    counts = np.maximum(np.diff(np.append(start, src)), 1)
+    weight = (1.0 / counts).astype(np.float32).astype(np.float64)
+    return start, counts, weight
+
+
+def _area_axis0(x: np.ndarray, out: int) -> np.ndarray:
+    """先頭の軸を面積平均で `out` 個にする（float32）。
+
+    区画の先頭から順に「重み×画素」を足し、1項ごとに float32 へ丸める
+    （FMA で積和する BLAS と同じ丸め。下の `resize_area` 参照）。積と和は
+    float64 で求めるので、丸めは float32 へ落とす1回だけになる。
+    """
+    start, counts, weight = _area_bins(x.shape[0], out)
+    w = weight.reshape((-1,) + (1,) * (x.ndim - 1))
+    acc = (w * x[start]).astype(np.float32)
+    for k in range(1, int(counts.max())):
+        rows = np.flatnonzero(counts > k)
+        acc[rows] = (acc[rows] + w[rows] * x[start[rows] + k]).astype(np.float32)
+    return acc
 
 
 def resize_area(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -75,16 +90,20 @@ def resize_area(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
     エイリアシングが出るうえ、JPEG（学習データ）と生フレーム（推論）の差が
     そのまま残る。区画内を平均すればブロックノイズも均されて差が小さくなる。
 
-    縦・横それぞれの重み行列との積で求める（BLAS に任せられるので速い。
-    Mac で 640x360→224x128 が約 0.7ms。`np.add.reduceat` と整数除算で
-    書くと約 4ms かかった）。
+    縦→横の順に区画内を重み付きで足す。**BLAS を使わない。** 以前は重み行列との
+    積（`np.tensordot`）で求めていたが、Pi の numpy（Debian の `python3-numpy`）は
+    参照実装の BLAS につながっていて、640x360→224x128 に約 180ms かかっていた
+    （Mac は約 1ms）。ここは区画の画素だけを足すので Pi で数 ms。
+    丸めも以前の結果と同じになるように足している（`_area_axis0`。
+    `raspi/tests/test_cam_e2e_preproc.py` が旧実装と画素単位で突き合わせる）。
     """
     src_h, src_w = rgb.shape[:2]
     if (src_w, src_h) == (width, height):
         return np.ascontiguousarray(rgb, dtype=np.uint8)
-    x = np.tensordot(_area_weights(src_h, height), rgb.astype(np.float32), axes=(1, 0))
-    x = np.tensordot(x, _area_weights(src_w, width), axes=(1, 1))      # (h, C, w)
-    return np.floor(x.transpose(0, 2, 1) + 0.5).astype(np.uint8)
+    x = _area_axis0(rgb, height)                                       # (h, W, C)
+    # 横の段は連続配列に直してから（飛び飛びの読み出しのままより Pi で約 1ms 速い）
+    x = _area_axis0(np.ascontiguousarray(x.swapaxes(0, 1)), width).swapaxes(0, 1)  # (h, w, C)
+    return np.floor(x + np.float32(0.5)).astype(np.uint8)
 
 
 def normalize(resized: np.ndarray, mean: float = 0.0, std: float = 255.0) -> np.ndarray:

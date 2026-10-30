@@ -35,6 +35,15 @@ planning_node には新しい入力に見えて `plan()` が回る。推論は `
 （既定10Hz）に間引いているので、publish もその周期に合わせる
 （`cam_perception_node.py` と同じ。`stale_ms=500` に対して十分な鮮度）。
 
+## 新しいコマが届いた瞬間に推論する
+
+周期の時計だけで起こすと、その時点の最新コマは届いてから 0〜1コマ間隔（30fps で
+最大33ms）経っている。この待ちは舵の遅れにそのまま乗るので、周期が来ていて**新しい
+コマが届いたとき**に推論する（30fps・10Hz なら3コマに1回）。2026-10-30 に Pi で
+測った撮影→配信は、時計で起こすと中央 37ms・95% 65ms・9.5Hz、コマの到着で起こすと
+中央 34ms・95% 35ms・10.0Hz（どちらも前処理を速くした後。うち約16ms は camera_node の
+撮影→配信）。
+
 ## カメラ系モードが選ばれている間だけ推論する
 
 `cam_perception_node.py` と同じ節電方針。`cam_e2e_node` はプロセスとしては
@@ -92,6 +101,10 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
 
 NS = 1_000_000_000
 HB_HZ = 10
+#: 推論の周期より最大これだけ早く届いたコマも推論する。30fps（33ms 間隔）・10Hz なら
+#: 周期ちょうど付近に届くコマを、揺らぎで次のコマ（+33ms）まで見送らないため。
+#: コマの間隔より短くする（長いと周期より1コマ早く推論して Hz が上がる）
+FRAME_EARLY_NS = 20_000_000
 #: 推論（CNN）を必要とする自動運転モード
 _CAM_E2E_MODES = ("cam_e2e",)
 #: モデル出力の並び。同梱 JSON の `outputs` と照合する（`ml_cam_e2e/export_onnx.py` が書く）
@@ -213,6 +226,8 @@ class CamE2ENode:
         # ★省電力化: `cam_perception_node.py` と同じ理由で推論を間引く
         self._infer_period_ns = int(NS / infer_hz) if infer_hz > 0 else 0
         self._last_attempt_ns = 0
+        #: 前のループで見た最新コマ `(shm_name, ring_seq)`。変わったら新しいコマが届いた
+        self._seen_frame_key: tuple[str, int] | None = None
         self._running = False
         self._active = False
         self._reader = FrameReader()
@@ -341,13 +356,26 @@ class CamE2ENode:
             cmd: CamE2ECmd | None = None
             if not active:
                 self._last_attempt_ns = 0          # ACTIVE に戻った瞬間にすぐ推論する
+                self._seen_frame_key = None        # 戻った瞬間の最新コマを「届いた」とみなす
                 if idle_publish:
                     cmd = self.failed_cmd(seq=seq)
-            elif now - self._last_attempt_ns >= self._infer_period_ns:
-                # 成功・失敗どちらでも1周期に1回だけ publish する
-                # （モジュールdocstring「publish するのは推論を試みた周期だけ」）
-                self._last_attempt_ns = now
-                cmd = self._attempt(sub.latest.get(TOPIC_IMAGE_FRONT), seq)
+            else:
+                # 周期が来ていて**新しいコマが届いたら**すぐ推論する（モジュールdocstring
+                # 「新しいコマが届いた瞬間に推論する」）。「新しい」は前のループのあとに
+                # 届いたこと（周期の前に届いて残っているコマを周期の頭で拾うと、そのコマは
+                # もう古いうえ、周期が1コマぶん縮む）。コマが来ないまま2周期経ったら、
+                # 古いコマで試みて `ready=False` を出す（`FrameReader` が古いコマを弾く）
+                ref = sub.latest.get(TOPIC_IMAGE_FRONT)
+                frame_key = (ref.shm_name, ref.ring_seq) if ref is not None else None
+                arrived = frame_key != self._seen_frame_key
+                self._seen_frame_key = frame_key
+                elapsed = now - self._last_attempt_ns
+                if ((arrived and elapsed >= self._infer_period_ns - FRAME_EARLY_NS)
+                        or elapsed >= 2 * self._infer_period_ns):
+                    # 成功・失敗どちらでも1周期に1回だけ publish する
+                    # （モジュールdocstring「publish するのは推論を試みた周期だけ」）
+                    self._last_attempt_ns = now
+                    cmd = self._attempt(ref, seq)
             if cmd is not None:
                 pub.send(TOPIC_CAM_E2E_CMD, cmd)
                 seq += 1

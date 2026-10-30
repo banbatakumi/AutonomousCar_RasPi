@@ -86,6 +86,64 @@ class TestResizeArea(unittest.TestCase):
         self.assertEqual(out[0, 0].tolist(), [80, 0, 0])
 
 
+def _resize_area_matmul(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
+    """2026-10-30 までの `resize_area`（重み行列との積を BLAS に任せる）。突き合わせ用。"""
+    def weights(src, out):
+        idx = (np.arange(out, dtype=np.int64) * src) // out
+        counts = np.maximum(np.diff(np.append(idx, src)), 1)
+        m = np.zeros((out, src), dtype=np.float32)
+        for i, (start, n) in enumerate(zip(idx, counts)):
+            m[i, start:start + n] = 1.0 / n
+        return m
+    src_h, src_w = rgb.shape[:2]
+    x = np.tensordot(weights(src_h, height), rgb.astype(np.float32), axes=(1, 0))
+    x = np.tensordot(x, weights(src_w, width), axes=(1, 1))
+    return np.floor(x.transpose(0, 2, 1) + 0.5).astype(np.uint8)
+
+
+class TestResizeAreaMatchesMatmul(unittest.TestCase):
+    """BLAS を使わない実装に替えても、出力が旧実装と画素単位で同じであること。
+
+    学習済みモデル（旧実装の絵で学習）をそのまま使うための条件。四捨五入がちょうど
+    .5 になる画素（区画が 2x3 画素のとき起きる）は、足す順と丸め方まで同じでないと
+    1ずれる。旧実装は Mac（Accelerate）と Pi（参照 BLAS）で同じ結果だった。
+    """
+
+    @staticmethod
+    def _images(rng, n):
+        for i in range(n):
+            if i % 2:
+                yield rng.integers(0, 256, (360, 640, 3), dtype=np.uint8)
+            else:                                   # 隣どうしが近い絵（.5 の画素が出やすい）
+                base = rng.integers(0, 256, (12, 20, 3)).astype(np.float32)
+                img = np.kron(base, np.ones((30, 32, 1))) + rng.normal(0, 3, (360, 640, 3))
+                yield np.clip(img, 0, 255).astype(np.uint8)
+
+    def test_cam_e2e_input(self):
+        """cam_e2e: BGR のリング → RGB → 左右切り落とし → 224x128（v7 の契約）。"""
+        rng = np.random.default_rng(0)
+        for src in self._images(rng, 12):
+            rgb = crop_window(to_rgb(src, "BGR888"), 0.0515625)
+            np.testing.assert_array_equal(resize_area(rgb, 224, 128),
+                                          _resize_area_matmul(rgb, 224, 128))
+
+    def test_cam_perception_input(self):
+        """cam_perception・ml_cam: 全幅 → 224x224（縦は拡大を含まない 360→224）。"""
+        rng = np.random.default_rng(1)
+        for src in self._images(rng, 6):
+            rgb = to_rgb(src, "BGR888")
+            np.testing.assert_array_equal(resize_area(rgb, 224, 224),
+                                          _resize_area_matmul(rgb, 224, 224))
+
+    def test_other_sizes(self):
+        rng = np.random.default_rng(2)
+        for (h, w), (oh, ow) in [((480, 640), (128, 224)), ((37, 53), (10, 7)),
+                                 ((20, 30), (25, 40)), ((360, 640), (36, 64))]:
+            src = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+            np.testing.assert_array_equal(resize_area(src, ow, oh),
+                                          _resize_area_matmul(src, ow, oh))
+
+
 class TestCropWindow(unittest.TestCase):
     def setUp(self):
         # 列番号をそのまま値にした絵（どの列が残ったか読める）
