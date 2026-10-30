@@ -106,8 +106,9 @@ class TestPipeline(unittest.TestCase):
             frames = run_dir / "frames"
             onnx_path = tmp / "models" / "cam_e2e" / "v1.onnx"
 
-            # ── 抽出 ──
-            out = _run(str(ML_DIR / "extract_pairs.py"), str(mcap), "--out", str(frames)).stdout
+            # ── 抽出 ──（合成の記録は指令の区切りと画像の時刻を揃えてあるので、ラベルをずらさない）
+            out = _run(str(ML_DIR / "extract_pairs.py"), str(mcap), "--out", str(frames),
+                       "--label-shift-ms", "0").stdout
             self.assertIn(f"トルクモード {n['torque']}枚", out)
             all_samples = S.load_manifest(frames)
             self.assertEqual(len(all_samples), n["drive"] + n["wait"] + n["reverse"])
@@ -191,7 +192,8 @@ class TestLearnsTheDemonstration(unittest.TestCase):
             frames = run_dir / "frames"
             onnx_path = tmp / "models" / "cam_e2e" / "v1.onnx"
 
-            _run(str(ML_DIR / "extract_pairs.py"), *map(str, mcaps), "--out", str(frames))
+            _run(str(ML_DIR / "extract_pairs.py"), *map(str, mcaps), "--out", str(frames),
+                 "--label-shift-ms", "0")
             # 手本の速度は左右で違う（0.8/0.4）ので、左右反転の拡張は切る。
             # 速度の重みは既定が 0（舵だけ）なので、速度の出力も見るここでは明示する
             _run(str(ML_DIR / "train.py"), "--frames", str(frames), "--out", str(run_dir),

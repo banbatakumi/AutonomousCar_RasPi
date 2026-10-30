@@ -61,6 +61,7 @@ from ml_common.train_graph import TrainCurveCanvas  # noqa: E402
 
 from balance_tab import BalanceTab  # noqa: E402
 from eval_tab import EvalTab  # noqa: E402
+from extract_pairs import DEFAULT_LABEL_SHIFT_MS  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from review_tab import ReviewTab  # noqa: E402
 
@@ -99,14 +100,14 @@ def describe_model_status(model_dir: Path) -> str:
 
 def build_extract_cmd(python: str, mcap_files: list[str], out_dir: str, cam: str,
                       max_gap_ms: int, min_interval_ms: int = 0,
-                      target_count: int = 0, label_shift_ms: int = 0,
+                      target_count: int = 0, label_shift_ms: int = DEFAULT_LABEL_SHIFT_MS,
                       include_auto: bool = False) -> list[str]:
     cmd = [python, str(ML_CAM_E2E_DIR / "extract_pairs.py"), *mcap_files, "--out", out_dir,
           "--cam", cam, "--max-gap-ms", str(max_gap_ms)]
     if include_auto:
         cmd.append("--include-auto")
-    if label_shift_ms:
-        cmd += ["--label-shift-ms", str(label_shift_ms)]
+    # 0 も明示して渡す（`extract_pairs.py` の既定は 0 ではない）
+    cmd += ["--label-shift-ms", str(label_shift_ms)]
     if target_count > 0:
         cmd += ["--target-count", str(target_count)]
     elif min_interval_ms > 0:
@@ -381,7 +382,7 @@ class App:
         ttk.Label(frame, text="操舵指令との時刻差の許容[ms]:").grid(row=6, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=gap_var, width=10).grid(row=6, column=1, sticky="w", pady=(8, 0))
 
-        shift_var = tk.StringVar(value="0")
+        shift_var = tk.StringVar(value=str(DEFAULT_LABEL_SHIFT_MS))
         ttk.Label(frame, text="手本を遅らせる[ms]:").grid(row=6, column=2, sticky="e", pady=(8, 0))
         ttk.Entry(frame, textvariable=shift_var, width=8).grid(row=6, column=3, sticky="w",
                                                                padx=(4, 0), pady=(8, 0))
@@ -413,8 +414,8 @@ class App:
                              "（待機中・トルクモードは常に除外。落ちた理由と枚数はログに出ます）。\n"
                              "画像は tools/record.sh --image-hz 15 で録ると枚数を稼げます"
                              "（実機GUIの記録は5Hz）。\n"
-                             "「手本を遅らせる」は人の反応遅れの補正。まず 0 で学習し、⑥評価で"
-                             "予測が遅れて見えたら 100〜200 を試します。\n"
+                             "「手本を遅らせる」は実車の推論の遅れ（撮影→指令 約170ms）の補正。"
+                             "0 だと実車で舵が遅れて出ます。\n"
                              "同じモデル名で再実行すると、既存のペアに追加されます。",
                  foreground="gray", justify="left").grid(row=11, column=0, columnspan=4,
                                                          sticky="w")

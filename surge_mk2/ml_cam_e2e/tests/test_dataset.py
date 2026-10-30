@@ -92,6 +92,20 @@ class TestDriveDataset(unittest.TestCase):
             self.assertGreater(float(target[0]), 0.0)
             self.assertGreater(float(img[:, :, :20].mean()), float(img[:, :, 20:].mean()))
 
+    def test_photo_aug_only_when_augmenting_and_keeps_labels(self):
+        """外乱（photo_aug）は舵・速度のラベルを変えない。検証の絵（augment=False）には掛からない"""
+        plain, _ = self.ds(_sample(self.frame, steer=0.2), augment=False, photo_strength=1.0)[0]
+        want = preprocess(load_rgb(self.frame), (32, 24), 0.0, 255.0)[0]
+        self.assertTrue(np.array_equal(plain.numpy(), want))
+        ds = self.ds(_sample(self.frame, steer=0.2, speed=0.5), augment=True, flip=False,
+                     photo_strength=1.0)
+        for _ in range(10):
+            img, target = ds[0]
+            self.assertAlmostEqual(float(target[0]), 0.2 / 0.524, places=5)
+            self.assertAlmostEqual(float(target[1]), 0.25, places=5)
+            self.assertGreaterEqual(float(img.min()), 0.0)
+            self.assertLessEqual(float(img.max()), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

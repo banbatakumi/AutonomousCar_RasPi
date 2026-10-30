@@ -34,12 +34,14 @@
 何枚がどの理由で落ちたかは最後に表示する——トルクモードで録ってしまって
 全滅、というのを黙って 0 枚にしない。
 
-## `--label-shift-ms`（既定 0）
+## `--label-shift-ms`（既定 200）
 
-人は見てから操作するまでに 0.1〜0.2 秒かかる。絵と「同じ瞬間の指令」を
-組にすると、モデルは人と同じだけ遅れた操作を覚える。正の値を入れると
-「絵の少し後の指令」を手本にする。最初は 0 で学習し、評価タブで予測が
-実操舵より一貫して遅れて見えたら試す。
+絵と「同じ瞬間の指令」を組にすると、モデルの舵は**実車の推論の遅れ**の分だけ手本より遅れて出る
+（`cam_e2e_node` は撮影から指令まで約 170ms・7Hz。2026-10-30 実測）。手本の slam2d_route は自分の
+遅れを見込んで先回りした指令を出しているので、その指令を同じ絵に組んでもまだ遅い。正の値を入れると
+「絵の少し後の指令」を手本にする。0 の v6 は切り始めと戻しが約0.2s遅れて 1.1m/s で数mごとにぶつかり、
+200 の v7 は同じ手本・同じ速度で約2周を接触なしで走った（2026-10-30）。人の手動運転の手本では
+人の反応遅れも足される。推論の遅れが変わったら（`cam_e2e/cmd` の `t_pub − t_capture`）合わせて直す。
 """
 
 from __future__ import annotations
@@ -69,7 +71,8 @@ from samples import MANIFEST_COLUMNS  # noqa: E402
 __all__ = ["VIZ_IMAGE_PREFIX", "CMD_MCAP_TOPIC", "STATE_MCAP_TOPIC", "MODE_MANUAL", "MODE_AUTO",
            "REASON_AUTO",
            "load_series", "load_cmd_series", "nearest_cmd", "reject_reason",
-           "iter_valid_pairs", "count_valid_pairs", "extract_one", "check_manifest_header"]
+           "iter_valid_pairs", "count_valid_pairs", "extract_one", "check_manifest_header",
+           "DEFAULT_LABEL_SHIFT_MS"]
 
 #: `raspi/rec/mcap_log.py` の `VIZ_IMAGE_PREFIX` と同じ値（`ml_cam/extract_frames.py` 参照）
 VIZ_IMAGE_PREFIX = "/viz/image/"
@@ -80,6 +83,9 @@ STATE_MCAP_TOPIC = "/" + TOPIC_VEHICLE_STATE
 #: `raspi/msgs/types.py` の `DriveCmd.mode` の値（`0=DISARM 1=MANUAL 2=AUTO`）
 MODE_MANUAL = 1
 MODE_AUTO = 2
+#: `--label-shift-ms` の既定（実車の推論の遅れの補正。モジュールの docstring 参照）。
+#: 操作パネルの①の初期値もこれ
+DEFAULT_LABEL_SHIFT_MS = 200
 #: 自動運転中の `cmd` に telemetry_node が付ける `source` の接頭辞（`auto:<planner id>`）
 _AUTO_SOURCE_PREFIX = "auto:"
 #: 自分自身（このモデルで走った記録）は手本にしない（`auto:cam_e2e` と、その派生
@@ -251,8 +257,9 @@ def main() -> int:
     ap.add_argument("--max-gap-ms", type=int, default=100,
                     help="画像フレームと `cmd` の時刻差の許容上限[ms]。"
                          "これを超えて近い指令が無ければそのフレームは捨てる")
-    ap.add_argument("--label-shift-ms", type=int, default=0,
-                    help="絵よりこの時間だけ後の指令を手本にする（人の反応遅れの補正。既定 0）")
+    ap.add_argument("--label-shift-ms", type=int, default=DEFAULT_LABEL_SHIFT_MS,
+                    help="絵よりこの時間だけ後の指令を手本にする（実車の推論の遅れの補正。"
+                         f"既定 {DEFAULT_LABEL_SHIFT_MS}）")
     ap.add_argument("--include-auto", action="store_true",
                     help="自動運転中（slam2d_route 等）の走行も手本にする。既定は人の手動運転だけ")
     group = ap.add_mutually_exclusive_group()

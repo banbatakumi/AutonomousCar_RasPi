@@ -26,6 +26,14 @@ v4 は val 誤差 0.5° でも実車では数mで線を外れた。そこで、�
 変えた絵」に作り替え（`yaw_aug.py` と同じ方法）、舵がどれだけ戻す向きに動くか
 （`yaw_response`）を出す。**負で大きいほど戻す力が強い。** 手本の追従（pure pursuit・
 先読み 0.3〜0.6m）は約 −0.8〜−1.5、v4 は約 −0.12 だった。
+
+## 外乱で舵がどれだけ変わるか
+
+舵の正解を変えない外乱（ブレ・ノイズ・色味・JPEG・明るさ。`photo_aug.py`）を掛けた絵と
+元の絵で舵を比べる（`perturbation_response`）。**変化が小さいほど外乱に強い。** 特に
+横ブレは「旋回の速さの手がかり」になりやすく、ブレで舵が増える・減るモデルは手本と違う
+速度で走ると舵が合わない（2026-10-30、v6 は横ブレ 20px で舵が 1.4 倍）。切っている場面の
+舵の比（外乱あり / なし）も出す。
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ import samples as S  # noqa: E402
 
 __all__ = ["EVAL_COLUMNS", "SPLIT_TRAIN", "SPLIT_VAL", "SPLIT_UNUSED", "SPLIT_NEW",
            "split_of", "speed_trained", "load_train_config", "read_eval", "summarize",
-           "worst_segments"]
+           "worst_segments", "perturbations", "perturbation_response"]
 
 EVAL_COLUMNS = ["file", "source_mcap", "cam", "t_capture_ns", "split",
                 "steer_true", "steer_pred", "speed_true", "speed_pred"]
@@ -180,6 +188,43 @@ def yaw_response(model, rgbs: list, fx_px: float, body, deg: float = 3.0) -> lis
     return out
 
 
+def perturbations() -> list[tuple[str, object]]:
+    """`perturbation_response` で掛ける外乱（名前, 関数）。強さは `photo_aug` の既定の上限付近。"""
+    import numpy as np
+    import photo_aug as pa
+
+    def blur(px):
+        return lambda rgb: pa.horizontal_blur(rgb, round(rgb.shape[1] * px / 640))
+
+    return [
+        ("横ブレ12px", blur(12)),
+        ("横ブレ24px", blur(24)),
+        ("ノイズσ6", lambda rgb: pa.sensor_noise(rgb, 6.0, np.random.default_rng(0))),
+        ("JPEG品質40", lambda rgb: pa.jpeg_roundtrip(rgb, 40)),
+        ("暖色", lambda rgb: pa.color_shift(rgb, (1.08, 1.0, 0.92), 1.0)),
+        ("寒色", lambda rgb: pa.color_shift(rgb, (0.92, 1.0, 1.08), 1.0)),
+        ("暗い-25", lambda rgb: rgb.clip(25) - 25),
+        ("明るい+25", lambda rgb: rgb.clip(0, 230) + 25),
+    ]
+
+
+def perturbation_response(model, rgbs: list, turn_deg: float = 5.0) -> list[dict]:
+    """外乱ごとに、舵の変化の平均 [deg] と、切っている場面の舵の比（外乱あり / なし）を返す。"""
+    import numpy as np
+
+    base = [model.infer(rgb)[0] * model.max_steer for rgb in rgbs]
+    turning = [i for i, b in enumerate(base) if abs(b) > math.radians(turn_deg)]
+    out = []
+    for name, fn in perturbations():
+        pert = [model.infer(np.ascontiguousarray(fn(rgb)))[0] * model.max_steer for rgb in rgbs]
+        diff = sum(abs(p - b) for p, b in zip(pert, base, strict=True)) / len(rgbs)
+        ratio = (sum(abs(pert[i]) for i in turning) / sum(abs(base[i]) for i in turning)
+                 if turning else math.nan)
+        out.append({"name": name, "mean_abs_diff_deg": math.degrees(diff),
+                    "turn_ratio": ratio, "n_turn": len(turning)})
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -260,6 +305,11 @@ def main() -> int:
         med = resp[len(resp) // 2]
         print(f"# ずれへの応答 dδ/dψ: 中央値 {med:+.2f}（{len(resp)}枚。負で大きいほど戻す力が強い。"
               f"手本の追従は約 -0.8〜-1.5）")
+        # ── 外乱で舵がどれだけ変わるか（モジュールdocstring参照） ──
+        print("# 外乱による舵の変化（小さいほど強い。比は切っている場面の 外乱あり/なし、1.00 が理想）:")
+        for r in perturbation_response(model, rgbs):
+            print(f"#   {r['name']:8s} 平均 {r['mean_abs_diff_deg']:4.1f}°  比 {r['turn_ratio']:.2f}"
+                  f"（{r['n_turn']}枚）")
     return 0
 
 

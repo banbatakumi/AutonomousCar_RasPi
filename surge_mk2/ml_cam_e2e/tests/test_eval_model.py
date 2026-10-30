@@ -19,6 +19,8 @@ from eval_model import (  # noqa: E402
     read_eval,
     split_of,
     load_train_config,
+    perturbation_response,
+    perturbations,
     speed_trained,
     summarize,
     worst_segments,
@@ -144,6 +146,32 @@ class TestReadEval(unittest.TestCase):
             self.assertEqual(row["t_capture_ns"], 123)
             self.assertAlmostEqual(row["steer_pred"], 0.2)
             self.assertEqual(row["split"], SPLIT_VAL)
+
+
+class TestPerturbationResponse(unittest.TestCase):
+    class _BlurSensitive:
+        """横方向の細かさが落ちると舵が増える、ブレを手がかりにしたモデルの模型"""
+        max_steer = 0.5
+
+        def infer(self, rgb):
+            import numpy as np
+            g = rgb.astype(float).mean(axis=2)
+            sharp = np.abs(np.diff(g, axis=1)).mean()
+            return 0.2 + 0.5 / (1.0 + sharp), 0.0
+
+    def test_reports_each_perturbation_and_detects_blur_sensitivity(self):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        rgbs = [rng.integers(0, 256, (36, 64, 3), dtype=np.uint8) for _ in range(3)]
+        rows = perturbation_response(self._BlurSensitive(), rgbs)
+        self.assertEqual([r["name"] for r in rows], [n for n, _ in perturbations()])
+        by = {r["name"]: r for r in rows}
+        self.assertGreater(by["横ブレ24px"]["turn_ratio"], 1.0)
+        self.assertGreater(by["横ブレ24px"]["mean_abs_diff_deg"],
+                           by["横ブレ12px"]["mean_abs_diff_deg"] * 0.99)
+        for r in rows:
+            self.assertEqual(r["n_turn"], 3)
+            self.assertTrue(math.isfinite(r["mean_abs_diff_deg"]))
 
 
 if __name__ == "__main__":

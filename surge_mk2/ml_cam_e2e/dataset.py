@@ -7,8 +7,9 @@
 （`raspi/nodes/cam_e2e_node.py`）と同じ関数なので、学習した絵と実車で
 モデルに入る絵が食い違わない。
 
-向きをずらす拡張（`yaw_max_deg > 0`）は `yaw_aug.py` 参照。拡張しない絵（検証・評価）は
-推論と同じ中央の窓（`crop_window`）になる。
+向きをずらす拡張（`yaw_max_deg > 0`）は `yaw_aug.py`、ブレ・ノイズ・色味・JPEG の外乱
+（`photo_strength > 0`）は `photo_aug.py` 参照。拡張しない絵（検証・評価）は推論と同じ
+中央の窓（`crop_window`）になる。
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import torch  # noqa: E402
 from torch.utils.data import Dataset  # noqa: E402
 
 from raspi.core.cam_e2e_preproc import crop_margin_px, crop_window, normalize, resize_area  # noqa: E402
+import photo_aug  # noqa: E402
 from samples import Sample, load_rgb, speed_norm, steer_norm  # noqa: E402
 from yaw_aug import sample_psi, yawed_window  # noqa: E402
 
@@ -47,7 +49,8 @@ class DriveDataset(Dataset):
                  max_steer: float, speed_ref: float, augment: bool = False,
                  flip: bool = True, mean: float = 0.0, std: float = 255.0,
                  crop_x: float = 0.0, yaw_max_deg: float = 0.0, yaw_k: float = 0.0,
-                 fx_px: float = 0.0, body_mask: np.ndarray | None = None) -> None:
+                 fx_px: float = 0.0, body_mask: np.ndarray | None = None,
+                 photo_strength: float = 0.0) -> None:
         self.samples = samples
         self.size = size            # (width, height)
         self.max_steer = max_steer
@@ -64,6 +67,8 @@ class DriveDataset(Dataset):
         self.yaw_k = yaw_k
         self.fx_px = fx_px
         self.body_mask = body_mask
+        #: ブレ・ノイズ・色味・JPEG の外乱の強さの倍率。0 で無効（`photo_aug.py`）
+        self.photo_strength = photo_strength
         if yaw_max_deg > 0 and (crop_x <= 0 or fx_px <= 0):
             raise ValueError("向きの拡張には crop_x と fx_px が要る")
 
@@ -76,6 +81,11 @@ class DriveDataset(Dataset):
         rgb = load_rgb(sample.path)
         steer = steer_norm(sample, self.max_steer)
         speed = speed_norm(sample, self.speed_ref)
+        if self.augment and self.photo_strength > 0:
+            # 元の解像度で掛ける（縮小の後だとノイズが強すぎ、ブレが細かすぎる）。
+            # 乱数は np.random から種を取り、学習の seed で再現できるようにする
+            rng = np.random.default_rng(np.random.randint(0, 2**31))
+            rgb = photo_aug.apply(rgb, rng, self.photo_strength)
         if self.augment and self.yaw_max_deg > 0:
             psi = sample_psi(self.yaw_max_deg)
             margin = crop_margin_px(rgb.shape[1], self.crop_x)

@@ -138,6 +138,8 @@ def main() -> int:
     ap.add_argument("--yaw-aug-k", type=float, default=0.8,
                     help="ずらした向き ψ から戻す舵の係数（δ − k·ψ）。"
                          "先読み距離 Ld の pure pursuit なら 2L/Ld（L=0.23m・Ld≈0.6m で約0.8）")
+    ap.add_argument("--photo-aug", type=float, default=1.0,
+                    help="ブレ・ノイズ・色味・JPEG の外乱の強さの倍率（photo_aug.py）。0 で無効")
     ap.add_argument("--no-pretrained", action="store_true",
                     help="ImageNet 事前学習重みを使わない（オフライン環境・動作確認向け）")
     ap.add_argument("--seed", type=int, default=0)
@@ -181,7 +183,7 @@ def main() -> int:
     common = dict(size=(w, h), max_steer=max_steer, speed_ref=speed_ref, crop_x=crop_x)
     train_ds = DriveDataset(train_s, augment=True, flip=not args.no_flip,
                             yaw_max_deg=args.yaw_aug_deg, yaw_k=args.yaw_aug_k, fx_px=fx_px,
-                            body_mask=body_mask, **common)
+                            body_mask=body_mask, photo_strength=args.photo_aug, **common)
     val_ds = DriveDataset(val_s, augment=False, **common)
     if args.balance > 0:
         weights = S.balance_weights([S.steer_norm(s, max_steer) for s in train_s],
@@ -204,7 +206,7 @@ def main() -> int:
         "input_size": [w, h],
         "preproc_version": PREPROC_VERSION_CROP if crop_x > 0 else PREPROC_VERSION,
         "crop_x": crop_x, "yaw_aug_deg": args.yaw_aug_deg, "yaw_aug_k": args.yaw_aug_k,
-        "fx_px": fx_px,
+        "fx_px": fx_px, "photo_aug": args.photo_aug,
         "max_steer": max_steer, "speed_ref": speed_ref,
         "steer_link": list(vehicle.steer_link),
         "block_s": args.block_s, "val_ratio": args.val_ratio, "seed": args.seed,

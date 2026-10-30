@@ -30,6 +30,7 @@ from app import (  # noqa: E402
     read_note,
     write_note,
 )
+from extract_pairs import DEFAULT_LABEL_SHIFT_MS  # noqa: E402
 
 from ml_common.close_handler import confirm_and_close  # noqa: E402
 
@@ -111,12 +112,16 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertIn("--target-count", cmd)
         self.assertNotIn("--min-interval-ms", cmd)
 
-    def test_extract_cmd_passes_label_shift_only_when_set(self):
+    def test_extract_cmd_always_passes_label_shift(self):
         cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100)
-        self.assertNotIn("--label-shift-ms", cmd)
+        self.assertEqual(cmd[cmd.index("--label-shift-ms") + 1], str(DEFAULT_LABEL_SHIFT_MS))
         cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100,
                                 label_shift_ms=150)
         self.assertEqual(cmd[cmd.index("--label-shift-ms") + 1], "150")
+        # 0 も渡す（渡さないと extract_pairs.py の既定が使われる）
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100,
+                                label_shift_ms=0)
+        self.assertEqual(cmd[cmd.index("--label-shift-ms") + 1], "0")
 
     def test_train_cmd(self):
         cmd = build_train_cmd("python3", "out/frames", "out/v1", 30, 16, "224x128", False,
