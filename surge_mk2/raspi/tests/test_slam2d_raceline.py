@@ -240,6 +240,47 @@ class TestSlam2dRaceLineStateMachine(unittest.TestCase):
         self.assertFalse(self.p.slam._backend_active)
         self.assertGreater(self.p.slam.loop_closures, 0)
 
+    def test_last_lap_runs_past_the_start_before_freezing(self):
+        """最後の周回を検出しても、すぐには確定せず出発点を越えて走り足す
+        （`LAP_OVERRUN_*`）。ループ拘束が増えるか上限の距離を走ったら確定する。
+        中心線に使う最後の周は検出した位置で切る（走り足しは混ぜない）。"""
+        from raspi.auto.slam2d_raceline import LAP_OVERRUN_MAX_M
+        dt, speed, radius, cx, cy = 0.1, 0.3, 1.3, 3.0, 2.0
+        w = speed / radius
+        params = dict(self.params, explore_laps=1)
+        detected_at = None
+        for i in range(800):
+            t = i * dt
+            yaw = w * t + math.pi / 2
+            x = cx - radius * (1 - math.cos(w * t))
+            y = cy + radius * math.sin(w * t)
+            self.p.plan(make_room_scan(x, y, yaw, segs=ROOM), vs(speed=speed, yaw_rate=w), params, dt)
+            if detected_at is None and self.p._overrun is not None:
+                detected_at = self.p.slam.distance
+                lap_end = self.p._lap_idx[-1]
+                self.assertEqual(self.p.phase, EXPLORE)
+                self.assertEqual(self.p.laps, 1)
+            if self.p._freeze_iter is not None or self.p.phase != EXPLORE:
+                break
+        self.assertIsNotNone(detected_at)
+        self.assertIsNotNone(self.p._freeze_iter)
+        self.assertLessEqual(self.p.slam.distance - detected_at, LAP_OVERRUN_MAX_M + 0.1)
+        self.assertEqual(self.p._lap_idx[-1], lap_end)
+
+    def test_manual_freeze_during_overrun_freezes_at_once(self):
+        """走り足しの途中でも「地図を確定」は即時。周回は数え直さない。"""
+        self.drive(14, move=0.02)
+        self.p.laps = 1
+        self.p._lap_idx.append(len(self.p.slam.trajectory))
+        self.p._overrun = (self.p.slam.distance, self.p.slam.loop_closures)
+        n = len(self.p._lap_idx)
+        self.p.request_freeze()
+        st = self.drive(1)
+        self.assertEqual(st.phase, BUILD)
+        self.assertEqual(self.p.laps, 1)
+        self.assertEqual(len(self.p._lap_idx), n)
+        self.assertIsNone(self.p._overrun)
+
     def test_build_brakes_and_reports_progress(self):
         self.drive(14, move=0.02)
         self.p.request_freeze()

@@ -131,6 +131,14 @@ LAP_MIN_DIST = 3.0
 LAP_NEAR_M = 0.8
 LAP_YAW_DEG = 35.0
 LAP_CONFIRM = 3
+#: 最後の周回を検出してから地図を確定するまで、出発点を越えて走り足す。ループ拘束が
+#: `LAP_OVERRUN_LOOPS` 本増えるか、`LAP_OVERRUN_MAX_M` 走ったら確定する。
+#: ★ 周回の検出は出発点の約0.7m手前で成立し、1周目には照合先が出発直後の約2mしか無い。
+#:   出発点が直線の通路だと照合が前後に曖昧で捨てられ、継ぎ目の拘束が0本のまま確定して
+#:   出発点の壁が二重になった（magp2・explore_laps=1、sim.bench で RACE が壁に衝突）。
+#:   出発点を越えてカーブまで走れば照合できる
+LAP_OVERRUN_LOOPS = 3
+LAP_OVERRUN_MAX_M = 6.0
 
 #: `LOCATE`の候補の点数の式に入れる残差の物差し[m]（`locate_score`）
 LOCATE_RMS_SCALE = 0.03
@@ -781,6 +789,8 @@ class Slam2dRaceLine(Planner):
         self.path: rl_mod.RaceLine | None = None
         self._lap_idx: list[int] = [0]
         self._lap_hits = 0
+        #: 最後の周回を検出した後の走り足し中なら (その時の走行距離, ループ拘束の本数)
+        self._overrun: tuple[float, int] | None = None
         self._build_step = 0
         self._build_error = ""
         self._freeze_requested = False
@@ -1382,12 +1392,17 @@ class Slam2dRaceLine(Planner):
                  p: dict[str, float], dt: float, lost: bool) -> AutoState:
         lap_msg = ""
         lap_done, explore_done = self._check_lap(p)
-        if lap_done:
-            if explore_done:
-                # ループ閉じの最適化と地図の焼き直しは 360 キーフレームで約 2 秒かかる。
-                # `plan()` を止めないよう、1周期に少しずつ進める（`_freeze_step`）
-                self._freeze_iter = self.slam.freeze_steps(FREEZE_CHUNK)
-                return self._freeze_step(st)
+        if explore_done:
+            # ループ閉じの最適化と地図の焼き直しは 360 キーフレームで約 2 秒かかる。
+            # `plan()` を止めないよう、1周期に少しずつ進める（`_freeze_step`）
+            self._freeze_iter = self.slam.freeze_steps(FREEZE_CHUNK)
+            return self._freeze_step(st)
+        if self._overrun is not None:
+            d0, n0 = self._overrun
+            lap_msg = (f"出発点を越えて継ぎ目を照合している（ループ閉じ "
+                       f"{self.slam.loop_closures - n0}/{LAP_OVERRUN_LOOPS}本・"
+                       f"{self.slam.distance - d0:.1f}/{LAP_OVERRUN_MAX_M:.0f}m）")
+        elif lap_done:
             lap_msg = f"{self.laps}周目を検出した"
 
         if not self._engaged:
@@ -1473,9 +1488,18 @@ class Slam2dRaceLine(Planner):
     def _check_lap(self, p: dict[str, float]) -> tuple[bool, bool]:
         if self._freeze_requested:
             self._freeze_requested = False
-            self._lap_idx.append(len(self.slam.trajectory))
-            self.laps = max(1, self.laps)
+            if self._overrun is None:       # 走り足しの途中なら周回はもう数えてある
+                self._lap_idx.append(len(self.slam.trajectory))
+                self.laps = max(1, self.laps)
+            self._overrun = None
             return True, True
+        if self._overrun is not None:
+            d0, n0 = self._overrun
+            if (self.slam.loop_closures - n0 >= LAP_OVERRUN_LOOPS
+                    or self.slam.distance - d0 >= LAP_OVERRUN_MAX_M):
+                self._overrun = None
+                return False, True
+            return False, False
         if not self.slam.trajectory:
             return False, False
 
@@ -1491,7 +1515,10 @@ class Slam2dRaceLine(Planner):
         self._lap_hits = 0
         self.laps += 1
         self._lap_idx.append(len(self.slam.trajectory))
-        return True, self.laps >= want
+        if self.laps >= want:
+            # すぐには確定せず、出発点を越えて継ぎ目のループ拘束を取る（`LAP_OVERRUN_*`）
+            self._overrun = (self.slam.distance, self.slam.loop_closures)
+        return True, False
 
     def _near_start(self) -> bool:
         sx, sy, syaw = self.slam.trajectory[0]
