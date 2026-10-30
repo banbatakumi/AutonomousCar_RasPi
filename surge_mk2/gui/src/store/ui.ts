@@ -404,7 +404,12 @@ export function capAutoParams(
 
 const SETTINGS_KEY = 'surge.driveSettings.v1'
 
-function clampSettings(s: DrivingSettings): DrivingSettings {
+/**
+ * `capUpper=false` は**保存する意思の値**用。下限と型だけ直し、上は切らない。車両の上限
+ * （`LIMITS`。io_node の `--max-speed` 等で一時的に下がる）で切った値を保存すると、上限を
+ * 戻しても設定が下がったまま戻らない。上で切るのは画面と送信に使う値（`settings`）だけ
+ */
+function clampSettings(s: DrivingSettings, capUpper = true): DrivingSettings {
   // **`SETTINGS_RANGE`（静的）ではなく `effectiveRange`（`LIMITS` 受信済みならそちら
   // 優先）で必ずクランプすること。** ここを静的値のままにすると、スライダの DOM 要素
   // 自体は動的な `max` まで動くのに、`setSettings` を呼んだ瞬間ここで静的値まで
@@ -419,7 +424,7 @@ function clampSettings(s: DrivingSettings): DrivingSettings {
   for (const k of Object.keys(range) as NumericSettingKey[]) {
     const { min, max } = range[k]
     const v = out[k]
-    const upper = !speedCapKnown && (k === 'maxSpeed' || k === 'mtMaxSpeed') ? Infinity : max
+    const upper = !capUpper || (!speedCapKnown && (k === 'maxSpeed' || k === 'mtMaxSpeed')) ? Infinity : max
     out[k] = typeof v === 'number' && isFinite(v) ? Math.min(upper, Math.max(min, v)) : DEFAULT_SETTINGS[k]
   }
   out.driveMode = out.driveMode === 'torque' || out.driveMode === 'mt' ? out.driveMode : 'speed'
@@ -446,16 +451,18 @@ function migrateDriveMode(raw: Record<string, unknown>): Record<string, unknown>
   return raw
 }
 
-/** 壊れた値・古いスキーマの値で走り出さないよう、読み込み時に必ずクランプする */
-function loadSettings(): DrivingSettings {
+/** 保存してある意思の値（上は切っていない）。壊れた値・古いスキーマは読み込み時に直す */
+function loadSettingsIntent(): DrivingSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
-    if (!raw) return clampSettings(DEFAULT_SETTINGS)
-    return clampSettings({ ...DEFAULT_SETTINGS, ...migrateDriveMode(JSON.parse(raw)) })
+    if (!raw) return clampSettings(DEFAULT_SETTINGS, false)
+    return clampSettings({ ...DEFAULT_SETTINGS, ...migrateDriveMode(JSON.parse(raw)) }, false)
   } catch {
-    return clampSettings(DEFAULT_SETTINGS)
+    return clampSettings(DEFAULT_SETTINGS, false)
   }
 }
+/** 人が選んだ値。`settings` はこれを今の車両の上限で切ったもの（`clampSettings`） */
+let settingsIntent = loadSettingsIntent()
 
 function saveSettings(s: DrivingSettings) {
   try {
@@ -878,7 +885,7 @@ export const useUi = create<UiState>((set, get) => ({
   mainCam: 'front',
   engineSoundOn: false,
 
-  settings: loadSettings(),
+  settings: clampSettings(settingsIntent),
   settingsDefault: loadDefaultSettings(),
   tripOdomBase: loadTripOdomBase(),
 
@@ -902,8 +909,10 @@ export const useUi = create<UiState>((set, get) => ({
   set: (p) => set(p),
   setSettings: (p) => {
     const prev = get().settings
-    const next = clampSettings({ ...prev, ...p })
-    saveSettings(next)
+    // 変えた項目だけを意思の値に重ねる。`setSettings({})`（上限の到着）では保存値は変わらない
+    settingsIntent = clampSettings({ ...settingsIntent, ...p }, false)
+    saveSettings(settingsIntent)
+    const next = clampSettings(settingsIntent)
     // 速度制御/トルク制御から MT に切り替えた瞬間は必ず N から始める
     // （`mtGear` の型コメント参照）。前回 MT を抜けたときのギアを持ち越すと、
     // 切り替えた瞬間に前のギアの上限でいきなり動き出しかねないため
@@ -912,8 +921,9 @@ export const useUi = create<UiState>((set, get) => ({
   },
   resetSettings: () => {
     // 既定値も必ずクランプを通す（保存してある既定値が今の車両の上限を超えていることがある）
-    const def = clampSettings(get().settingsDefault)
-    saveSettings(def)
+    settingsIntent = clampSettings(get().settingsDefault, false)
+    saveSettings(settingsIntent)
+    const def = clampSettings(settingsIntent)
     set({ settings: def })
   },
   saveCurrentAsDefault: () => {
