@@ -160,6 +160,14 @@ class Result:
         self.detour_starts = 0                 #: Hybrid A* の迂回に入った回数
         self.detour_s = 0.0                    #: 迂回していた時間 [s]
         self.stop_s = 0.0                      #: RACE 中に止まっていた時間 [s]（車速 < 0.05）
+        # 動く障害物（`--mover`）の追い抜き（真値）
+        self.mover_passes = 0                  #: 他車を後ろから抜いた回数（車の座標で前→後ろへ移った）
+        #: 他車との接触のうち、他車の方が速く近づいていたもの（避けない他車に当てられた）
+        self.mover_hit_behind = 0
+        self.mover_hit_front = 0               #: 同じく車の方が速く近づいていたもの（こちらが当てた）
+        self.mover_min_clear = math.inf        #: 車体外形と他車の最小距離 [m]
+        #: 他車が 3m 以内に居る間に、車速が元の経路の速度より 0.3m/s 以上遅かった時間 [s]（抑えられた時間）
+        self.mover_slow_s = 0.0
         # 横グリップの学習（`raspi/nav/grip.py`。planner の内部状態と真値を突き合わせる）
         self.grip_on = False
         #: 前兆ごとの記録: RACE 開始からの時刻・学習側の値・真値の超過率（0 = 限界より下＝誤検出）・
@@ -238,9 +246,14 @@ class Result:
                        f"横G p99 {p99}m/s²  要求中の加速 {mean(self.race_accel)}・"
                        f"減速 {mean(self.race_decel)}m/s²  経路速度からの出過ぎ {over}  "
                        f"停止 {self.stop_s:.1f}s  計画 p99 {pms}ms")
+        if self.mover_min_clear < math.inf:
+            out.append(f"他車       抜いた {self.mover_passes} 回  接触 当てた {self.mover_hit_front}・当てられた {self.mover_hit_behind}  "
+                       f"最小距離 {self.mover_min_clear * 100:.1f}cm  "
+                       f"近くで経路の速度より遅かった {self.mover_slow_s:.1f}s")
         if self.avoid_starts or self.detour_starts:
-            ms = (f"計算 平均 {statistics.fmean(self.avoid_ms):.1f}ms 最大 {max(self.avoid_ms):.1f}ms"
-                  if self.avoid_ms else "")
+            ms = (f"計算 平均 {statistics.fmean(self.avoid_ms):.1f}ms "
+                  f"p99 {float(np.percentile(self.avoid_ms, 99)):.1f}ms 最大 {max(self.avoid_ms):.1f}ms"
+                  f"（{len(self.avoid_ms)} 回）" if self.avoid_ms else "")
             out.append(f"回避       止まらず避けた {self.avoid_starts} 回（うち引き直し {self.avoid_elastic}） {ms}  "
                        f"迂回(Hybrid A*) {self.detour_starts} 回・{self.detour_s:.1f}s")
         if self.grip_on:
@@ -633,12 +646,32 @@ class Bench:
                 if st_ is not None:
                     self._mv_reason = st_.reason
                 ncol = self.sim.vehicle.collisions
+                if ncol == self._mv_col:
+                    self._mv_speed = float(self.sim.vehicle.speed)
                 if ncol != self._mv_col:
                     self._mv_col = ncol
                     v_ = self.sim.vehicle
+                    # 車体の中心（後輪軸から前へ半分）から見て、いちばん近い他車が前か後ろか
+                    ctr = 0.5 * (max(x for x, _ in self.sim.spec.footprint) + min(x for x, _ in self.sim.spec.footprint))
+                    cx = v_.x + ctr * math.cos(v_.yaw)
+                    cy = v_.y + ctr * math.sin(v_.yaw)
+                    near = min(self._movers, key=lambda m: math.hypot(m.xy[0] - cx, m.xy[1] - cy))
+                    dist = math.hypot(near.xy[0] - cx, near.xy[1] - cy)
+                    if dist < 0.6:
+                        # どちらが当てたか: 相手へ向かう速さ（車は接触で速度が 0 になるので直前の値）
+                        rx, ry = (near.xy[0] - cx) / dist, (near.xy[1] - cy) / dist
+                        sp = getattr(self, "_mv_speed", 0.0)
+                        car_in = sp * (math.cos(v_.yaw) * rx + math.sin(v_.yaw) * ry)
+                        mv_in = -abs(near.speed) * (math.cos(near.yaw) * rx + math.sin(near.yaw) * ry)
+                        if mv_in > car_in:
+                            self.res.mover_hit_behind += 1
+                        else:
+                            self.res.mover_hit_front += 1
                     st_ = getattr(self, "_last_st", None)
-                    print(f"  {time.monotonic() - t0:5.1f}s 衝突 車({v_.x:.2f},{v_.y:.2f}) 速度{v_.speed:.2f} "
-                          + " ".join(f"mover({m.xy[0]:.2f},{m.xy[1]:.2f})" for m in self._movers)
+                    print(f"  {time.monotonic() - t0:5.1f}s 衝突 車({v_.x:.2f},{v_.y:.2f}) 向き{math.degrees(v_.yaw):.0f}° "
+                          f"速度{v_.speed:.2f} "
+                          + " ".join(f"mover({m.xy[0]:.2f},{m.xy[1]:.2f}) 向き{math.degrees(m.yaw):.0f}°"
+                                     for m in self._movers)
                           + (f" [{st_.phase}] {st_.reason}" if st_ is not None else ""), flush=True)
             took("シム", t_poll)
             for f in frames:
@@ -742,6 +775,9 @@ class Bench:
                 took("集計", t_smp)
 
         self.res.collisions = self.sim.vehicle.collisions
+        hist = getattr(self.planner, "_avoid_ms_hist", None)
+        if hist:
+            self.res.avoid_ms = list(hist)     # 追い抜きの計画は回した周期ごとの時間
         if self._race_col0 is not None:
             self.res.race_collisions = self.sim.vehicle.collisions - self._race_col0
         self.res.distance = float(self.sim.vehicle.odom_front[0])
@@ -821,8 +857,15 @@ class Bench:
         hint = getattr(pl, "_hint", -1)
         if path_now is not None and 0 <= hint < len(path_now):
             r.race_over.append(float(v.speed) - float(path_now.v[hint]))
+        if self._movers:
+            self._sample_movers(v, pl, hint, dt)
         av, dt_on = getattr(pl, "_avoid", None), getattr(pl, "_detour", None) is not None
-        if av is not None and av is not self._prev_avoid and getattr(av, "obstacle", None) is not None:
+        on = av is not None and getattr(av, "obstacle", None) is not None
+        if getattr(pl, "_avoid_how", "") == "追い抜き":
+            # 追い抜きの計画は毎周期引き直すので、避けていない → 避けている の切り替わりで数える
+            prev_on = self._prev_avoid is not None and getattr(self._prev_avoid, "obstacle", None) is not None
+            r.avoid_starts += on and not prev_on
+        elif on and av is not self._prev_avoid:
             r.avoid_starts += 1
             r.avoid_elastic += getattr(pl, "_avoid_how", "") == "引き直し"
             r.avoid_ms.append(float(getattr(pl, "_avoid_ms", 0.0)))
@@ -909,6 +952,41 @@ class Bench:
                        "acc_env": list(g.map.acc), "dec_env": list(g.map.dec),
                        "trail": trail, "acc_true": acc_true, "dec_true": dec_true,
                        "done": (True, lg.dec_done)}
+
+    def _sample_movers(self, v, pl, hint: int, dt: float) -> None:
+        """他車との距離（真値）・抜いた回数・近くで抑えられた時間を数える。"""
+        r = self.res
+        co, si = math.cos(v.yaw), math.sin(v.yaw)
+        b = self._outline
+        wx = v.x + b[:, 0] * co - b[:, 1] * si
+        wy = v.y + b[:, 0] * si + b[:, 1] * co
+        near = False
+        rel = getattr(self, "_mv_rel", None) or [None] * len(self._movers)
+        for i, m in enumerate(self._movers):
+            if m.center is None:
+                continue
+            mx, my = m.xy
+            if m.length > 0.0:
+                mc, ms = math.cos(m.yaw), math.sin(m.yaw)
+                lx = np.abs((wx - mx) * mc + (wy - my) * ms) - 0.5 * m.length
+                ly = np.abs(-(wx - mx) * ms + (wy - my) * mc) - m.r
+                d = np.where((lx > 0) | (ly > 0), np.hypot(np.maximum(lx, 0), np.maximum(ly, 0)),
+                             np.maximum(lx, ly))
+                d = float(d.min())
+            else:
+                d = float((np.hypot(wx - mx, wy - my) - m.r).min())
+            r.mover_min_clear = min(r.mover_min_clear, d)
+            fwd = (mx - v.x) * co + (my - v.y) * si
+            lat = -(mx - v.x) * si + (my - v.y) * co
+            near |= 0.0 < fwd < 3.0 and abs(lat) < 1.0
+            if rel[i] is not None and rel[i] > 0.0 >= fwd and abs(lat) < 1.0 and m.speed > 0:
+                r.mover_passes += 1
+            rel[i] = fwd if abs(lat) < 1.0 else None
+        self._mv_rel = rel
+        base = getattr(pl, "path", None)
+        if near and base is not None and 0 <= hint < len(base) and \
+                float(v.speed) < float(base.v[hint]) - 0.3:
+            r.mover_slow_s += dt
 
     def _clearance(self, x: float, y: float, yaw: float) -> float:
         """車体外形（輪郭）と真の壁との最小距離 [m]。0 = 接触。"""
@@ -1222,9 +1300,10 @@ def main() -> int:
     ap.add_argument("--trace", default=None, help="RACE 中の速度などを CSV で書く（100Hz）")
     ap.add_argument("--obstacle", action="append", default=[], metavar="X,Y,R",
                     help="シムの世界座標に円柱の障害物を置く（繰り返し可。地図には入れないなら --map と併用）")
-    ap.add_argument("--mover", action="append", default=[], metavar="S0,SPEED[,D,R,T0]",
+    ap.add_argument("--mover", action="append", default=[], metavar="S0,SPEED[,D,R,T0,L]",
                     help="中心線に沿って動く円柱（他車の代わり。繰り返し可）。S0=出発点から先の弧長[m]、"
-                         "SPEED=速度[m/s]（負で逆走）、D=横ずれ[m]、R=半径[m]、T0=動き出す時刻[s]")
+                         "SPEED=速度[m/s]（負で逆走）、D=横ずれ[m]、R=半径[m]（矩形なら半幅）、T0=動き出す時刻[s]、"
+                         "L=長さ[m]（0 で円盤、正で車の形の矩形）")
     ap.add_argument("--vehicle", action="append", default=[], metavar="KEY=VALUE",
                     help="真値の車だけ諸元を上書き（`sim.vehicle.VehicleSpec` の欄名。例 mu=0.37、複数可）。"
                          "planner は config/vehicle.toml のまま")

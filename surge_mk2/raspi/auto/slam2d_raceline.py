@@ -40,6 +40,7 @@ from ..nav import avoid as av_mod
 from ..nav import centerline as cl_mod
 from ..nav import grip as grip_mod
 from ..nav import obstacles as obs_mod
+from ..nav import overtake as ot_mod
 from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
 from ..nav.mpc import MPCConfig, MPCFollower
@@ -83,6 +84,16 @@ _DETOUR_YAW_TOL_DEG = 12.0
 _DETOUR_MAX_S = 20.0
 #: 横へ避けられない障害物の手前で止まる距離（車体前端から）[m]
 _STOP_GAP = 0.35
+#: 追い抜けない前の車に付いていくときの車間（車体前端から相手の後ろまで）[m]。★横へ出られる距離を
+#: 残す（車の限界の曲率で横へ 0.3m 出るのに約 0.9m 走る）。0.3m だと真後ろに詰めすぎて、直線に
+#: 出ても候補がすべて相手と重なり、0.5m/s の車の後ろを 1 周近く付いて回った（sim.bench --mover）
+_FOLLOW_GAP = 0.70
+#: 動く相手の残像を残す時間 [s]（`_overtake_step`）。見える点の一部が壁際の無視する帯に落ちると、
+#: 推定の横位置が 1 周期で 20cm 以上跳ぶ（ヘアピンの頂点、sim.bench --mover）。直近の観測を推定
+#: 速度で今へ進めたものも一緒に避ける
+_GHOST_S = 0.4
+#: 追い抜きの計算時間の記録を残す数（`sim.bench` が読む）
+_OT_HIST = 2000
 #: 車速が経路の速度よりこれ以上低ければ「追いつく途中」として扱う [m/s]（`_speed_cmd`）
 _CATCH_UP_GAP = 0.3
 #: 見通しの中で止まるとき、障害物の手前に残す間隔 [m]（`_sight_cap`）
@@ -684,6 +695,11 @@ class Slam2dRaceLine(Planner):
                   default=1.0, step=0.05, unit="m/s",
                   note="★障害物・壁との余裕が『車体外形の合格線』ちょうどのときの速度。余裕がそれより"
                        "15cm 以上広ければ抑えず（曲率で決まる速度のまま）、その間は余裕に比例して上げる"),
+        ParamSpec(group=GROUP_AVOID, key="overtake", hidden=True, label="追い抜きの計画（Frenet 格子）", min=0,
+                  max=1, step=1, default=1, unit="",
+                  note="★1 で、障害物・他車の今と先の位置（速度から予測）に重ならない横ずれの候補を毎周期まとめて"
+                       "作り、いちばん速いものに乗る（`nav/overtake.py`）。避ける間に速度を抑えない。抜けない前の車には"
+                       "止まらず付いていく。0 で従来の横ずらし（`avoid.plan_offset`）"),
         ParamSpec(group=GROUP_AVOID, key="obstacle_predict", hidden=True, label="動く障害物の通り道を見込む", min=0, max=1,
                   step=1, default=0, unit="",
                   note="★実験。1で、速度のある障害物（等速で動くと見る）の通り道ぜんぶを避ける。"
@@ -849,6 +865,18 @@ class Slam2dRaceLine(Planner):
         self._avoid_path: rl_mod.RaceLine | None = None
         self._avoid_base: rl_mod.RaceLine | None = None
         self._avoid_ms = 0.0
+        #: 追い抜きの計画（`_overtake_step`）: 前の周期に選んだ候補と、その元の経路・弧長・状態・
+        #: 経路のままだと当たる相手・計算時間の記録
+        self._ot_prev: ot_mod.Cand | None = None
+        self._ot_base: np.ndarray | None = None
+        self._ot_scum: np.ndarray | None = None
+        self._ot_status = ""
+        self._ot_lead: ot_mod.Track | None = None
+        #: 今走る線の上に居る動く相手と、そこまでの距離（車間を保つ上限、`_moving_ahead`）
+        self._acc: tuple[obs_mod.Obstacle, float] | None = None
+        self._avoid_ms_hist: list[float] = []
+        #: 動く相手の直近の観測 (観測の時刻, 障害物)（`_GHOST_S`）
+        self._ghosts: list[tuple[float, obs_mod.Obstacle]] = []
         #: 横へ避ける経路を引けなかったときの (障害物と条件のキー, 車の添字, 経路)。`_plan_avoid` 参照
         self._avoid_fail: tuple | None = None
         #: 直近に横へ避ける経路を引けなかった理由（表示用）
@@ -1921,16 +1949,22 @@ class Slam2dRaceLine(Planner):
         elif self._avoid is not None:
             self._avoid_base = path
         self._poll_elastic(path, self._hint, vs, p)
-        followed = self._avoid_path or self._with_sight(path, p)
         # ★ 追従に使う姿勢は「今」へ進めたもの（`pose` は点群の基準時刻のもので、計画の時点で
         #   数十ms 古い。3m/s なら 10cm 前後）。障害物の判定は地図の上の話なので `pose` のまま
         now = self.slam.pose_now(vs)
+        ot = self._overtake_step(path, now, vs, p)
+        followed = self._avoid_path or self._with_sight(path, p)
         pp = self._follow(followed, now, vs, p, cfg, self._hint)
-        hit, dist = self._blocking(followed, pp.index, vs, p)
-        if hit is not None and self._still_clear(hit, pp.index):
+        if ot is not None:
+            hit, dist = self._overtake_hit(ot, followed, pp.index)
+            self._acc = self._moving_ahead(followed, pp.index, vs, p) if hit is None else None
+        else:
+            self._acc = None
+            hit, dist = self._blocking(followed, pp.index, vs, p)
+        if hit is not None and ot is None and self._still_clear(hit, pp.index):
             hit, dist = None, math.inf
         self._hit_now = hit is not None
-        if (hit is not None and p["obstacle_avoid"] > 0
+        if (ot is None and hit is not None and p["obstacle_avoid"] > 0
                 and self._plan_avoid(path, pp.index, hit, vs, p, kappa_frac=0.6)):
             followed = self._avoid_path
             pp = self._follow(followed, now, vs, p, cfg, pp.index)
@@ -2077,6 +2111,16 @@ class Slam2dRaceLine(Planner):
                 st.target_speed = 0.0
                 st.reason = "障害物で制動中（検出が途切れた。止まるまで保つ）"
                 return True
+        if hit is None and self._acc is not None:
+            # 追い抜く計画はあるが、まだ相手の真後ろ（今走る線の上）に居る。横へ出終わる前に計画が
+            # 崩れても（相手の速度の推定が揺れる）止まり切れる車間を保つ
+            o, d_acc = self._acc
+            u = self._along_speed(o)
+            gap_acc = max(0.0, d_acc - self.vehicle.front_overhang)
+            v_f = self._follow_speed(u, gap_acc, vs, p)
+            if v_f < st.target_speed:
+                st.target_speed = v_f
+                st.reason = f"前の車（{u:.1f}m/s・{gap_acc:.1f}m 先）との車間を保つ"
         if hit is None:
             self._brake_hold = None
             self._blocked_t = 0.0
@@ -2095,6 +2139,18 @@ class Slam2dRaceLine(Planner):
         self._stuck_t = 0.0
         front = self.vehicle.front_overhang
         gap = max(0.0, dist - front)
+        lead = self._ot_lead if self._ot_status == "blocked" else None
+        if avoid_on and lead is not None and lead.moving and lead.u >= obs_mod.MOVING_MIN_SPEED:
+            # 前を同じ向きに走る車で、今は抜ける隙が無い。止まらずに相手の速さで付いていき、
+            # 隙ができたら（毎周期の `_overtake_step` が候補を見つけたら）抜く。車間は「相手が
+            # 同じ減速度で止まっても止まり切れる」距離（`v² ≤ u² + 2a·余り`）
+            self._brake_hold = None
+            self._blocked_t = 0.0
+            st.target_speed = min(st.target_speed, self._follow_speed(lead.u, gap, vs, p))
+            st.brake = gap < 0.5 * _FOLLOW_GAP and vs.speed > lead.u
+            st.reason = (f"前の車（{lead.u:.1f}m/s・{gap:.1f}m 先）に付いていく。抜ける隙ができたら抜く"
+                         f"（{self._avoid_why}）")
+            return True
         stop_at = p["obstacle_stop"]
         if slow_on:
             # 横へ避けられなかった（避けていればここへは来ない）。障害物の手前
@@ -2124,7 +2180,7 @@ class Slam2dRaceLine(Planner):
         # 止まってから: 曲がれる限界の近くまで使って横へ避け直す → だめなら Hybrid A*
         self._blocked_t += self._dt
         wait = p["avoid_wait"]
-        if (self._blocked_t >= 0.5 * wait
+        if (self._blocked_t >= 0.5 * wait and p["overtake"] <= 0
                 and self._plan_avoid(path, index, hit, vs, p, kappa_frac=0.9)):
             st.reason += "。止まってから避ける経路を引いた"
             self._blocked_t = 0.0
@@ -2138,6 +2194,198 @@ class Slam2dRaceLine(Planner):
             st.reason += (f"。Hybrid A* でも{DETOUR_TRIES}回抜けられなかったので待つ"
                           + (f"（{self._detour_error}）" if self._detour_error else ""))
         return True
+
+    def _overtake_step(self, path: rl_mod.RaceLine, pose, vs: VehicleState,
+                       p: dict[str, float]) -> ot_mod.OvertakeResult | None:
+        """追い抜きの計画（`nav/overtake.py`）を回し、避けるなら `_avoid*` に一時経路を載せる。
+
+        使わない設定・開いた経路なら `None`（従来の `_blocking` → `_plan_avoid`）。障害物が無く、
+        避けている途中でもなければ何も計算しない（障害物の無い周回は今までと同じ処理）。
+        """
+        if p["obstacle_avoid"] <= 0 or p["overtake"] <= 0 or not path.closed:
+            return None
+        if self._ot_base is not path.xy:
+            self._ot_prev = None
+            self._ot_base = path.xy
+            seg = np.hypot(*np.diff(np.vstack([path.xy, path.xy[:1]]), axis=0).T)
+            self._ot_scum = np.concatenate([[0.0], np.cumsum(seg[:-1])])
+        mine = self._avoid is not None and self._avoid_how == "追い抜き"
+        if not self._obs and not mine:
+            self._ot_prev = None
+            self._ghosts = []
+            self._ot_status, self._ot_lead = "clear", None
+            return ot_mod.OvertakeResult("clear", None, None, [], None, 0, "")
+        t0 = time.perf_counter()
+        v = self.vehicle
+        lim = self._lim(p)
+        cfg = ot_mod.OvertakeConfig(
+            half_width=v.half_width, front=v.front_overhang, rear=v.rear_overhang,
+            # ★ 車の本当の限界（同定値）を渡す。`kappa_limit`（× `kappa_use` 0.9）を渡すと、計画器が
+            #   さらに 95% を掛けて線そのものより厳しくなり、コーナーではどの候補も曲率で落ちた
+            kappa_max=v.kappa_max, a_brake=lim.a_brake, a_accel=lim.a_accel,
+            margin_lat=p["avoid_margin"])
+        hint = self._hint if 0 <= self._hint < len(path) else -1
+        idx = (nearest_index(path, pose[0], pose[1], hint, window=12) if hint >= 0
+               else nearest_index(path, pose[0], pose[1]))
+        base = self._with_sight(path, p)
+        a_lat = self._spd(p, path).get("a_lat", lim.a_lat)
+        t_now = self._obs_t
+        moving = [o for o in self._obs if o.speed >= obs_mod.MOVING_MIN_SPEED]
+        self._ghosts = [(t, o) for t, o in self._ghosts if t_now - t <= _GHOST_S] + [(t_now, o) for o in moving]
+        # 残像は、近い今の観測の点へ合流させる（障害物の数を増やすと候補が増えて計算が倍になる）
+        obs = list(self._obs)
+        for t, o in self._ghosts:
+            dt = t_now - t
+            if dt <= 0.0 or o.pts is None:
+                continue
+            g = o.pts + np.array([o.vx * dt, o.vy * dt])
+            gx, gy = float(g[:, 0].mean()), float(g[:, 1].mean())
+            k = min(range(len(obs)), key=lambda i: math.hypot(obs[i].x - gx, obs[i].y - gy), default=-1)
+            if k >= 0 and obs[k].pts is not None and math.hypot(obs[k].x - gx, obs[k].y - gy) < 0.5:
+                obs[k] = obs[k]._replace(pts=np.vstack([obs[k].pts, g]))
+            else:
+                obs.append(o._replace(x=gx, y=gy, pts=g))
+        res = ot_mod.plan(path, idx, pose, float(vs.speed), base.v, a_lat, self._avoid_room(path, p),
+                          obs, cfg, prev=self._ot_prev if mine else None,
+                          s_cum=self._ot_scum)
+        status = res.status
+        if status == "blocked" and res.cand is not None and abs(res.cand.dT) > 1e-3:
+            # 逃げ道（相手からいちばん離れていられる候補）に乗る。確かめ（壁・曲率）は同じ
+            plan = ot_mod.build(path, idx, res.cand, self._ot_scum,
+                                res.lead.src if res.lead is not None else None)
+            if not self._overtake_ok(path, plan, p):
+                self._avoid_room_path = path
+                self._avoid_path = self._avoid_timed(plan, p)
+                self._avoid, self._avoid_base = plan, path
+                self._avoid_how = "追い抜き"
+                self._ot_prev = res.cand
+        if status == "avoid" and not (res.kept and mine):
+            chosen = None
+            whys = []
+            for c in res.ranked:
+                plan = ot_mod.build(path, idx, c, self._ot_scum,
+                                    res.lead.src if res.lead is not None else None)
+                why = self._overtake_ok(path, plan, p)
+                if not why:
+                    chosen = (c, plan)
+                    break
+                whys.append(why)
+            if chosen is None:
+                status = "blocked"
+                self._avoid_why = "候補はあったが確かめで落ちた: " + "・".join(whys[:3])
+            else:
+                c, plan = chosen
+                self._avoid_room_path = path
+                self._avoid_path = self._avoid_timed(plan, p)
+                self._avoid, self._avoid_base = plan, path
+                self._avoid_how = "追い抜き"
+                self._ot_prev = c
+        if status == "clear" and mine:
+            self._clear_avoid()
+            self._ot_prev = None
+        if status == "blocked":
+            self._avoid_why = self._avoid_why if res.why == "" else res.why
+        self._ot_status, self._ot_lead = status, res.lead
+        self._avoid_ms = (time.perf_counter() - t0) * 1000.0
+        self._avoid_ms_hist.append(self._avoid_ms)
+        if len(self._avoid_ms_hist) > _OT_HIST:
+            del self._avoid_ms_hist[: _OT_HIST // 2]
+        return res._replace(status=status)
+
+    def _follow_speed(self, u: float, gap: float, vs: VehicleState, p: dict[str, float]) -> float:
+        """前を速さ `u` で走る相手に、車体前端からの車間 `gap` [m] で付いていける速度の上限。
+        相手が同じ減速度で止まっても止まり切れる（`v² ≤ u² + 2a·(gap − 車間 − 空走)`）。"""
+        a = max(self._lim(p).a_brake, 0.1)
+        u = max(u, 0.0)
+        room = gap - _FOLLOW_GAP - max(vs.speed, 0.0) * self._lim(p).react_s
+        if room >= 0.0:
+            return math.sqrt(u * u + 2.0 * a * room)
+        return max(0.0, u * (1.0 + room / _FOLLOW_GAP))
+
+    def _along_speed(self, o: obs_mod.Obstacle) -> float:
+        """障害物の速度の、車の向きの成分 [m/s]（負 = こちらへ向かってくる）。"""
+        yaw = self.slam.pose[2]
+        return o.vx * math.cos(yaw) + o.vy * math.sin(yaw)
+
+    def _moving_ahead(self, followed: rl_mod.RaceLine, index: int, vs: VehicleState,
+                      p: dict[str, float]) -> tuple[obs_mod.Obstacle, float] | None:
+        """今走る線（避けている間は一時経路）の上に、今の位置で居る動く相手と、そこまでの経路に沿った距離。
+
+        相手の**見えている点**が線から横に「車体半幅＋3cm」以内に入っていれば線の上に居るとする。
+        ★ 重心＋半径の円（`obs_mod.blocking`）で見ると、斜め後ろから見た車は半径が 20cm 近くに
+        なり、横へ出終わって並んでいる最中も「線の上」と出て、車間の上限で止まった（sim.bench --mover）。
+        """
+        moving = [o for o in self._obs if o.speed >= obs_mod.MOVING_MIN_SPEED and o.pts is not None]
+        if not moving:
+            return None
+        v = max(vs.speed, 0.0)
+        ahead = v * v / (2.0 * max(self._lim(p).a_brake, 0.1)) + v * self._lim(p).react_s + 1.5
+        n = len(followed)
+        step = followed.length / max(n, 1)
+        k = np.arange(0, int((ahead + self.vehicle.front_overhang) / step) + 1)
+        idx = (index + k) % n if followed.closed else (index + k)[(index + k) < n]
+        xy = followed.xy[idx]
+        tn = np.gradient(xy, axis=0)
+        tn /= np.maximum(np.hypot(*tn.T), 1e-9)[:, None]
+        best: tuple[obs_mod.Obstacle, float] | None = None
+        for o in moving:
+            d2 = ((o.pts[:, None, :] - xy[None, :, :]) ** 2).sum(axis=2)
+            j = np.argmin(d2, axis=1)
+            rel = o.pts - xy[j]
+            lat = np.abs(rel[:, 0] * tn[j, 1] - rel[:, 1] * tn[j, 0])
+            on = (lat < self.vehicle.half_width + 0.03) & (j > 0) & (j < len(idx) - 1)
+            if not on.any():
+                continue
+            dist = float((j[on] * step + (rel[on] * tn[j[on]]).sum(axis=1)).min())
+            if dist > self.vehicle.front_overhang and (best is None or dist < best[1]):
+                best = (o, dist)
+        return best
+
+    def _overtake_ok(self, path: rl_mod.RaceLine, plan: av_mod.AvoidPlan, p: dict[str, float]) -> str:
+        """格子の候補を直交座標で確かめる: 曲率・車体外形と壁・見えている静止物の点。通れば ""、
+        落ちたらその理由。"""
+        idx = plan.window
+        if len(idx) < 2:
+            return ""
+        n = len(path)
+        ext = np.concatenate([[(idx[0] - 1) % n], idx, [(idx[-1] + 1) % n]])
+        k_new = np.abs(plan.path.kappa[ext])
+        k_old = np.abs(path.kappa[ext]) if len(path.kappa) == n else k_new * 0.0
+        k_lim = np.maximum(self.vehicle.kappa_max, k_old + 0.12 * self.vehicle.kappa_max)
+        if bool((k_new > k_lim).any()):
+            return f"曲率{float((k_new / k_lim).max()) * 100:.0f}%"
+        wxy = plan.path.xy[ext]
+        body = self._body_check()
+        wall = body.clearance(wxy)
+        base = body.clearance(path.xy[ext])
+        if bool((wall < np.minimum(p["avoid_clear"], base - 0.02)).any()):
+            return f"壁{float(wall.min()) * 100:.0f}cm"
+        for o in self._obs:
+            if o.speed < obs_mod.MOVING_MIN_SPEED and o.pts is not None:
+                c = av_mod.clearance_to_points(wxy, self._footprint(), o.pts)
+                if c < p["avoid_clear"]:
+                    return f"障害物{c * 100:.0f}cm"
+        return ""
+
+    def _overtake_hit(self, ot: ot_mod.OvertakeResult, followed: rl_mod.RaceLine,
+                      index: int) -> tuple[obs_mod.Obstacle | None, float]:
+        """追い抜きの計画を使うときの「塞ぐ障害物」とその距離。
+
+        通れる計画がある（"clear"・"avoid"）なら、塞ぐのは車体のすぐ前で当たる物だけ（`_near_hit`。
+        計画の外れに備えた最後の砦）。帯の判定（`_blocking`）は使わない——前を走る車は今の位置では
+        経路の上に居ても、追いつく頃には先へ進んでいる。通れない（"blocked"）なら、経路のままだと
+        最初に当たる相手（付いていく・止まる相手）。
+        """
+        if ot.status == "blocked" and ot.lead is not None and ot.lead.s_lo > self.vehicle.front_overhang:
+            return ot.lead.src, ot.lead.s_lo
+        # ★ 並んでいる相手で「通れない」と出ても止まらない（止まると、避けない相手に当てられる）。
+        #   車体のすぐ前で当たる物だけを見る
+        if not self._obs:
+            return None, math.inf
+        n = len(followed)
+        step = followed.length / max(n, 1)
+        hit = self._near_hit(followed, index, step)
+        return (hit, self.vehicle.front_overhang) if hit is not None else (None, math.inf)
 
     def _plan_avoid(self, path: rl_mod.RaceLine, index: int, hit: obs_mod.Obstacle,
                     vs: VehicleState, p: dict[str, float], *, kappa_frac: float) -> bool:
@@ -2332,6 +2580,8 @@ class Slam2dRaceLine(Planner):
         見通しの上限は元の経路のものを使う（避ける経路は元の経路と同じ添字で、形もほぼ同じ）。"""
         base = self._avoid_room_path if self._avoid_room_path is not None else plan.path
         rl = rl_mod.retime(plan.path, v_cap=self._sight_cap(base, p), **self._spd(p, plan.path))
+        if p["overtake"] > 0:
+            return rl                      # 避ける間も速度は曲率と摩擦だけで決める
         cap = av_mod.speed_cap(plan.clearance, p["avoid_clear"], p["avoid_speed"], p["v_max"])
         return av_mod.cap_speed(rl, plan.window, cap, self._lim(p).a_brake, self._lim(p).a_accel)
 
