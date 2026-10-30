@@ -254,45 +254,107 @@ export function CameraView({
     let timer: number | undefined
     let raf = 0
     let decoding = false
+    /** デコード中に届いた最新の1枚。**届いた側を捨てると、次の到着まで1フレーム分遅れる** */
+    let pendingBuf: ArrayBuffer | null = null
     let lastAspect = 0
+    /** 最後に絵が更新された時刻と、フレーム間隔の移動平均 [ms]（古さの判定に使う） */
+    let lastFrameMs = 0
+    let frameIntervalMs = 0
+    let wsOpen = false
+    /** 接続した時刻と、デコードを始めた時刻（0=していない）。固まりの検出に使う */
+    let openedMs = 0
+    let decodeStartMs = 0
+    let decodeGen = 0
 
     const open = () => {
-      ws = new WebSocket(wsUrl(`/ws/camera/${cam}`))
-      ws.binaryType = 'arraybuffer'
-      ws.onmessage = async (ev) => {
-        if (!(ev.data instanceof ArrayBuffer)) return
-        // デコードが追いつかないときは**捨てる**。溜めると遅延が伸び続ける
-        if (decoding) return
-        decoding = true
-        try {
-          const bmp = await createImageBitmap(new Blob([ev.data], { type: 'image/jpeg' }))
-          // アンマウント後に終わったデコードの絵は誰も使わない（解放しないとリークする）
-          if (closed) {
-            bmp.close()
-            return
-          }
-          bitmap?.close()
-          bitmap = bmp
-          frames++
-          if (onAspect) {
-            const ar = bmp.width / bmp.height
-            if (Math.abs(ar - lastAspect) > 0.001) {
-              lastAspect = ar
-              onAspect(ar)
-            }
-          }
-        } catch {
-          /* 壊れたフレームは捨てる */
-        } finally {
-          decoding = false
-        }
+      const sock = new WebSocket(wsUrl(`/ws/camera/${cam}`))
+      ws = sock
+      sock.binaryType = 'arraybuffer'
+      sock.onopen = () => {
+        wsOpen = true
+        openedMs = performance.now()
       }
-      ws.onclose = () => {
+      sock.onmessage = (ev) => {
+        if (sock !== ws) return
+        if (!(ev.data instanceof ArrayBuffer)) return
+        // デコードが追いつかないときは**最新の1枚だけ残して古いものを捨てる**。溜めると
+        // 遅延が伸び続け、届いた側を捨てると次の到着まで待つぶん遅れる
+        if (decoding) {
+          pendingBuf = ev.data
+          return
+        }
+        void decode(ev.data)
+      }
+      sock.onclose = () => {
+        // 監視が張り直したあとに、捨てた古い接続の close が遅れて来ても無視する
+        if (sock !== ws) return
+        wsOpen = false
         if (!closed) timer = window.setTimeout(open, 800)
       }
-      ws.onerror = () => ws?.close()
+      sock.onerror = () => sock.close()
+    }
+    const decode = async (buf: ArrayBuffer) => {
+      decoding = true
+      decodeStartMs = performance.now()
+      const gen = ++decodeGen
+      try {
+        const bmp = await createImageBitmap(new Blob([buf], { type: 'image/jpeg' }))
+        // アンマウント後に終わったデコードの絵は誰も使わない（解放しないとリークする）
+        if (closed) {
+          bmp.close()
+          return
+        }
+        bitmap?.close()
+        bitmap = bmp
+        frames++
+        const now = performance.now()
+        if (lastFrameMs) {
+          const dt = now - lastFrameMs
+          frameIntervalMs = frameIntervalMs ? frameIntervalMs * 0.8 + dt * 0.2 : dt
+        }
+        lastFrameMs = now
+        if (onAspect) {
+          const ar = bmp.width / bmp.height
+          if (Math.abs(ar - lastAspect) > 0.001) {
+            lastAspect = ar
+            onAspect(ar)
+          }
+        }
+      } catch {
+        /* 壊れたフレームは捨てる */
+      } finally {
+        // 監視が固まりとみなして先へ進めたあとに終わった古いデコードは、状態に触らない
+        if (gen === decodeGen) decoding = false
+      }
+      if (gen !== decodeGen) return
+      const next = pendingBuf
+      pendingBuf = null
+      if (next && !closed) void decode(next)
     }
     open()
+
+    /** 固まりからの復帰。デコードが終わらない、または繋がっているのに映像が来ない状態を直す */
+    const watchdog = window.setInterval(() => {
+      if (closed) return
+      const now = performance.now()
+      if (decoding && now - decodeStartMs > CAM_DECODE_STUCK_MS) {
+        decodeGen++ // 終わらないデコードは見捨てる
+        decoding = false
+        const next = pendingBuf
+        pendingBuf = null
+        if (next) void decode(next)
+      }
+      // 半開きの接続（`onclose` が来ない）は、フレームが途絶えたら自分で切って張り直す
+      const lastAlive = Math.max(lastFrameMs, openedMs)
+      if (wsOpen && now - lastAlive > CAM_RECONNECT_MS && ws) {
+        const old = ws
+        wsOpen = false
+        ws = null
+        old.close()
+        window.clearTimeout(timer)
+        open()
+      }
+    }, 1000)
 
     const draw = () => {
       raf = requestAnimationFrame(draw)
@@ -352,6 +414,11 @@ export function CameraView({
           drawTrackBox(ctx, dx, dy, dw, dh)
           if (!live.vs?.armed) drawRoiDisarmedHint(ctx, dx, dy)
         }
+        // **止まった映像を生きた映像に見せない。** 切断・受信の途絶では最後の1枚が残るので、
+        // 暗くして古さを重ねる。DISARM 中は 1fps まで落とすので、しきい値は間隔に合わせて伸ばす
+        const age = performance.now() - lastFrameMs
+        const staleMs = Math.max(CAM_STALE_MIN_MS, frameIntervalMs * CAM_STALE_INTERVALS)
+        if (!wsOpen || age > staleMs) drawStale(ctx, dx, dy, dw, dh, wsOpen ? age : null)
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
@@ -371,6 +438,7 @@ export function CameraView({
     return () => {
       closed = true
       window.clearTimeout(timer)
+      window.clearInterval(watchdog)
       cancelAnimationFrame(raf)
       ws?.close()
       bitmap?.close()
@@ -657,6 +725,31 @@ function drawRoiDrag(
   ctx.lineWidth = 2
   ctx.setLineDash([6, 4])
   ctx.strokeRect(dx + x0 * dw, dy + y0 * dh, (x1 - x0) * dw, (y1 - y0) * dh)
+  ctx.restore()
+}
+
+/** 映像が古いとみなす最短の時間 [ms]。ARM 中の 15〜30fps なら数フレーム分 */
+const CAM_STALE_MIN_MS = 500
+/** フレーム間隔（移動平均）の何倍届かなければ古いとみなすか。DISARM 中の低い fps 用 */
+const CAM_STALE_INTERVALS = 3
+/** 繋がっているのにフレームが来ない状態がこれ続いたら、接続を張り直す [ms]（DISARM は 1fps） */
+const CAM_RECONNECT_MS = 5000
+/** デコードがこれ終わらなければ固まりとみなして見捨てる [ms] */
+const CAM_DECODE_STUCK_MS = 2000
+
+/** 止まった映像を暗くし、中央に古さを出す。`ageMs=null` は切断中 */
+function drawStale(
+  ctx: CanvasRenderingContext2D, dx: number, dy: number, dw: number, dh: number, ageMs: number | null,
+) {
+  const text = ageMs == null ? '映像 切断' : `映像停止 ${(ageMs / 1000).toFixed(1)}s`
+  ctx.save()
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
+  ctx.fillRect(dx, dy, dw, dh)
+  ctx.font = 'bold 16px ui-monospace, monospace'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = '#ff6b6b'
+  ctx.fillText(text, dx + dw / 2, dy + dh / 2)
   ctx.restore()
 }
 
