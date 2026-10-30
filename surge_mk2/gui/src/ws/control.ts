@@ -56,7 +56,7 @@ export type ControlHandlers = {
    * （`bad_token` = トークン不一致、`auto_engage` = engage に操縦権が要る） */
   onDenied: (holder: string, reason?: string) => void
   /** 往復遅延の実測 [ms]。**GUI↔Pi 区間**（UART 区間は link.cmd_rtt_ms） */
-  onRtt: (ms: number) => void
+  onRtt: (ms: number | null) => void
   /** `logs_list`/`logs_delete` への応答 */
   onLogs: (files: LogFile[]) => void
   /** `cam_model_list` への応答（`models/` にある `.onnx` の一覧） */
@@ -90,6 +90,7 @@ export class ControlChannel {
   private closed = false
   private pingId = 0
   private pingSentAt = 0
+  private pongReceived = true
 
   /**
    * このタブの識別子。**サーバの `status.controller` と突き合わせて
@@ -130,11 +131,13 @@ export class ControlChannel {
       else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
       else if (m.type === 'maps_clear_grip_result') this.h.onMapsClearGripResult(!!m.ok, m.error ?? '')
       else if (m.type === 'pong' && m.id === this.pingId) {
+        this.pongReceived = true
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
     }
     ws.onclose = () => {
       this.h.onOpenChange(false)
+      this.h.onRtt(null)
       if (!this.closed) this.timer = window.setTimeout(() => this.open(), RECONNECT_MS)
     }
     ws.onerror = () => ws.close()
@@ -630,6 +633,10 @@ export class ControlChannel {
   }
 
   ping() {
+    // 前の ping に pong が返らないまま次を打つ ＝ 往復が1秒以上かかっているか、届いていない。
+    // **前の値を出し続けない**（切れているのに「往復 20ms」と出ていた）
+    if (this.pingSentAt && !this.pongReceived) this.h.onRtt(null)
+    this.pongReceived = false
     this.pingId++
     this.pingSentAt = performance.now()
     this.send({ type: 'ping', id: this.pingId })
