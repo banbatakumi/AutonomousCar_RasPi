@@ -140,8 +140,13 @@ export class ControlChannel {
     ws.onerror = () => ws.close()
   }
 
-  private send(obj: unknown) {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj))
+  private send(obj: Record<string, unknown>) {
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+    // 書き込み系にはトークンを載せる（サーバの `OPERATOR_ONLY_KINDS`/`TOKEN_ONLY_KINDS`）。
+    // 50Hz の `cmd` は操縦権で守られているので載せない
+    const t = obj.type
+    const body = t === 'cmd' || t === 'ping' || t === 'estop' ? obj : { ...obj, token: authToken() }
+    this.ws.send(JSON.stringify(body))
   }
 
   /** `sendCoalesced` の種類ごとの状態（最後に送った時刻・まだ送っていない分・予約したタイマ） */
@@ -618,7 +623,7 @@ export class ControlChannel {
     this.send({ type: 'logs_delete', name })
   }
 
-  /** Pi を安全にシャットダウンする。estop と同じく誰でも実行できる（走行の操縦権とは無関係）。
+  /** Pi を安全にシャットダウンする。操縦者がいる間は操縦者だけ（サーバの `OPERATOR_ONLY_KINDS`）。
    * 実行するかどうかの確認は呼び出し側（`StatusBar.tsx`）の責務 */
   shutdown() {
     this.send({ type: 'shutdown' })

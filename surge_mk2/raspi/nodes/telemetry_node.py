@@ -411,6 +411,19 @@ MAX_MAP_UPLOAD_BYTES = 32 * 1024 * 1024
 LOG_ACTIVE_GUARD_S = 30.0
 #: 操縦者の名前の長さの上限（`cmd` の `source` として 50Hz でバスに載る）
 CONTROLLER_NAME_MAX = 40
+#: `/ws/control` のうち、**車の挙動を変える・消す・止める**書き込み。トークンに加えて
+#: 「操縦者本人か、操縦者がいないとき」に限る。観戦している別の端末が走行中に TC/ABS を
+#: 切ったり、記録や地図を消したりできないようにする（E-Stop・解除は対象外＝誰でも押せる）
+OPERATOR_ONLY_KINDS = frozenset({
+    "fan", "camera", "signal", "cam_model_select", "e2e_model_select", "cam_e2e_model_select",
+    "track_roi_select", "track_roi_clear", "tc_tv", "wheel_lift_guard", "abs", "brake_hold",
+    "auto_stop_margin", "logs_delete", "maps_save", "maps_delete", "maps_clear_grip", "shutdown",
+})
+#: トークンだけ要る書き込み（走行に影響しないもの。記録は観戦側の端末からも取りたい）
+TOKEN_ONLY_KINDS = frozenset({
+    "drive_settings", "sfl_record", "mcap_record_start", "mcap_record_stop",
+    "video_record_start", "video_record_stop",
+})
 #: `config/auto.json` を書くまでの待ち [s]。スライダを動かしている間は1目盛りごとに
 #: メッセージが来るので、最後の値だけを1回書く（終了時は待たずに書く）
 AUTO_CONF_SAVE_DELAY_S = 0.5
@@ -1108,6 +1121,21 @@ class TelemetryServer:
             # `async for` から抜け、操縦者の接続なら走行中に DISARM される（issue #12）
             return
         kind = m.get("type")
+
+        # 書き込みの権限。**止める操作（estop・release_control・自律の解除）には掛けない**
+        auto_disengage_only = kind == "auto" and "engaged" in m and not m["engaged"]
+        needs_token = (kind in OPERATOR_ONLY_KINDS or kind in TOKEN_ONLY_KINDS
+                       or (kind == "auto" and not auto_disengage_only))
+        if needs_token and not self._token_ok(m):
+            self.auth_rejects += 1
+            await self._send_json(ws, {"type": "control_denied", "holder": "",
+                                       "reason": "write_bad_token"})
+            return
+        if (kind in OPERATOR_ONLY_KINDS and self.controller is not None
+                and self.controller is not ws):
+            await self._send_json(ws, {"type": "control_denied",
+                                       "holder": self.controller_name, "reason": "operator_only"})
+            return
 
         if kind == "take_control":
             if not self._token_ok(m):
@@ -2813,7 +2841,22 @@ class TelemetryServer:
                         return
                     buf += raw
                     continue
-                # テキストフレーム = 終了合図
+                # テキストフレーム = 終了合図。**地図を上書きするので、操縦権と同じトークンを
+                # ここで照合する**（`{"type":"done","token":...}`。`maps_save` と同じ扱い）
+                try:
+                    done = _json_decode(raw)
+                except Exception:                              # noqa: BLE001
+                    done = {}
+                if not self._token_ok(done if isinstance(done, dict) else {}):
+                    self.auth_rejects += 1
+                    await self._send_json(ws, {"ok": False, "error": "トークンが違います"})
+                    return
+                if self._vehicle_armed():
+                    # アップロードの WS は操縦の WS と別なので操縦者本人かは区別できない。
+                    # 走行中の地図の差し替えを防ぐのが目的なので、ARM 中は誰からでも断る
+                    await self._send_json(ws, {"ok": False,
+                                               "error": "走行中は地図を取り込めません"})
+                    return
                 # 同梱の経路の設定も `.routes.json` へ（無ければ古いものを消す）
                 # 最大32MBの書き込みを別スレッドへ逃がし、`OSError`（ENOSPC等）も
                 # 捕まえる（issue #12。`_maps_save` と同じ理由）

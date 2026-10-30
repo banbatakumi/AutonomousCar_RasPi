@@ -136,6 +136,15 @@ export function App() {
           notify(`自律走行中は操縦者（${holder || '不明'}）以外は設定を変えられません（解除だけ可）`)
           return
         }
+        // 書き込みの拒否（操縦権は変わらない）。`telemetry_node` の `OPERATOR_ONLY_KINDS`
+        if (reason === 'operator_only') {
+          notify(`操縦者（${holder || '不明'}）がいる間は、この設定は操縦者だけが変えられます`)
+          return
+        }
+        if (reason === 'write_bad_token') {
+          notify('設定を変えられません（トークンが違います）', 'bad')
+          return
+        }
         set({ deniedBy: holder, deniedReason: reason ?? null, hasControl: false })
         if (reason === 'bad_token') notify('操縦権を取れません（トークンが違います）', 'bad')
         else if (reason === 'auto_engage') notify('自律走行の engage には操縦権が要ります')

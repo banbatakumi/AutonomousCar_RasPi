@@ -12,6 +12,7 @@
  * （終了合図、内容は見られない）を送る。サーバは検証・書き込みしてから
  * `{"ok": bool, "error"?: string}` を1通返して自分で閉じる。
  */
+import { authToken } from './token'
 import { wsUrl } from './url'
 
 //: 1フレームあたりの送信サイズ。地図は数百KB〜数MBなので、大きすぎる
@@ -44,7 +45,8 @@ export function uploadMap(
       // 空ファイル（0バイト）でも最低1フレームは送っておく。サーバ側は
       // 「バイナリを1つも受け取らないまま終了合図」でも壊れないよう検証で弾くが、
       // 意図が伝わりやすいのでここで揃えておく
-      ws.send(JSON.stringify({ type: 'done' }))
+      // トークンは地図の上書きの権限（サーバの `_map_upload_channel`）
+      ws.send(JSON.stringify({ type: 'done', token: authToken() }))
     } catch (e) {
       onDone(false, e instanceof Error ? e.message : String(e))
       ws.close()

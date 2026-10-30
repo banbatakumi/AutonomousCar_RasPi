@@ -1212,6 +1212,48 @@ class TestControlInputGuards(unittest.IsolatedAsyncioTestCase):
         await srv._on_control(object(), b'{"type":"shutdown"}')
         self.assertEqual(calls, [1])
 
+    async def test_bystander_cannot_change_the_vehicle_while_someone_drives(self):
+        srv = _cp.TestControlOwnership._server(self)
+        events = []
+        srv.pub.send = lambda topic, msg: events.append(getattr(msg, "kind", None))
+        a, b = object(), object()
+        await srv._on_control(a, b'{"type":"take_control","name":"A"}')
+        # 観戦側（操縦権なし）は走行中に ABS を切れない・ログを消せない
+        await srv._on_control(b, b'{"type":"abs","enabled":false}')
+        self.assertNotIn("abs_enable", events)
+        self.assertTrue(any(o.get("reason") == "operator_only" for w, o in srv.sent if w is b))
+        # 操縦者本人は通る
+        await srv._on_control(a, b'{"type":"abs","enabled":false}')
+        self.assertIn("abs_enable", events)
+        # E-Stop は誰でも押せる
+        await srv._on_control(b, b'{"type":"estop"}')
+        self.assertIsNone(srv.controller)
+        # 操縦者がいなければ観戦側も通る
+        events.clear()
+        await srv._on_control(b, b'{"type":"tc_tv","tc":true}')
+        self.assertIn("tc_enable", events)
+
+    async def test_writes_need_the_token(self):
+        srv = _cp.TestControlOwnership._server(self)
+        srv.token = "secret"
+        events = []
+        srv.pub.send = lambda topic, msg: events.append(getattr(msg, "kind", None))
+        b = object()
+        await srv._on_control(b, b'{"type":"abs","enabled":false}')
+        await srv._on_control(b, b'{"type":"sfl_record","active":true}')
+        self.assertEqual(events, [])
+        self.assertFalse(srv._sfl_active)
+        self.assertTrue(any(o.get("reason") == "write_bad_token" for w, o in srv.sent if w is b))
+        await srv._on_control(b, b'{"type":"abs","enabled":false,"token":"secret"}')
+        self.assertIn("abs_enable", events)
+        # 自律の解除だけはトークン無しでも通る（止める操作）
+        srv._auto_mode, srv._auto_engaged = "ftg", True
+        srv._publish_auto_ctrl = lambda: None
+        await srv._on_control(b, b'{"type":"auto","engaged":false}')
+        self.assertFalse(srv._auto_engaged)
+        for t in list(srv.__dict__.get("_bg_tasks", ())):
+            t.cancel()
+
 
 class TestPumpSupervision(unittest.IsolatedAsyncioTestCase):
     """定期タスクが例外で終わったら、サーバを止めて異常終了にする（systemd が上げ直す）。"""
