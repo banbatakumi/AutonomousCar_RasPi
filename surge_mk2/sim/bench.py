@@ -582,6 +582,13 @@ class Bench:
                 conv.append([mx, my] + ([] if myaw is None else [myaw]))
             out["groups"][k] = conv
         out["avoid"] = [list(self._to_map(q[0], q[1])[:2]) for q in (out.get("avoid") or [])]
+        # 避ける範囲は map フレームでも軸に平行な矩形なので、回した4隅を囲む矩形にする
+        rects = []
+        for x0, y0, x1, y1 in out.get("avoid_rects") or []:
+            cs = [self._to_map(x, y)[:2] for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1))]
+            xs, ys = [c[0] for c in cs], [c[1] for c in cs]
+            rects.append([min(xs), min(ys), max(xs), max(ys)])
+        out["avoid_rects"] = rects
         for name, st in (out.get("stops") or {}).items():
             mx, my, myaw = self._to_map(st["x"], st["y"], st.get("yaw"))
             st["x"], st["y"], st["yaw"] = mx, my, myaw

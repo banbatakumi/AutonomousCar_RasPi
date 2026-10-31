@@ -14,8 +14,11 @@
  * - グループ（A〜D）を編集中: 末尾に経由点を足す。**既存の経由点の近く
  *   （画面で12px以内）をクリックするとその点を消す**
  * - 停止点（P1〜P3）を編集中: 1回目で位置、2回目で向き（位置からクリックした方向）
- * - 「避ける」を編集中: 避ける点を足す（近くをクリックで消す）。いちばん近い道を
- *   自動経路・経由点の経路・停止経路のどれにも使わない（ルールで通れない近道など）
+ * - 「避ける」を編集中: **ドラッグで通ってはいけない範囲（矩形）を囲む**。範囲の中をクリックで
+ *   その範囲を消す。planner は範囲を地図に壁として塗ってから道路グラフを作るので、範囲の外の
+ *   道はそのまま使える（ルールで通れない近道・壁の隙間など）。古い設定の「避ける点」は
+ *   表示し、近くをクリックで消せる（新しくは置かない。点は「いちばん近い道」へ吸着するので、
+ *   隙間の上を指すと隣の本線ごと消えて周回が作れなくなった）
  */
 import type { MapData } from '../types'
 import { live } from './live'
@@ -36,6 +39,8 @@ export type RouteCfg = {
   mission: { laps: number; time_s: number; then: string }
   signal_map: Record<string, string>
   avoid: number[][]
+  /** 通ってはいけない範囲 `[x0, y0, x1, y1]`（x0≤x1・y0≤y1） */
+  avoid_rects: number[][]
 }
 
 /** グループごとの色（経路・経由点で共通）。停止経路は白、自動経路は灰 */
@@ -79,6 +84,7 @@ export function emptyCfg(): RouteCfg {
     mission: { laps: 0, time_s: 0, then: '' },
     signal_map: {},
     avoid: [],
+    avoid_rects: [],
   }
 }
 
@@ -93,6 +99,7 @@ export function parseCfg(text: string): RouteCfg {
     c.mission = { laps: 0, time_s: 0, then: '', ...(d.mission ?? {}) }
     c.signal_map = d.signal_map ?? {}
     c.avoid = d.avoid ?? []
+    c.avoid_rects = d.avoid_rects ?? []
   } catch {
     // 壊れた設定は空から始める（保存すれば上書きされる）
   }
@@ -157,9 +164,18 @@ export function editClick(x: number, y: number, pxPerM: number): void {
   if (!cfg) return
   const t = routeEdit.target
   if (t === AVOID) {
+    // クリックは消すだけ（足すのはドラッグ、`editDrag`）。点を優先し、無ければ後に足した範囲から
     const near = cfg.avoid.findIndex(([px, py]) => Math.hypot(px! - x, py! - y) * pxPerM < 12)
     if (near >= 0) cfg.avoid.splice(near, 1)
-    else cfg.avoid.push([round(x), round(y)])
+    else {
+      let k = cfg.avoid_rects.length - 1
+      for (; k >= 0; k--) {
+        const [x0, y0, x1, y1] = cfg.avoid_rects[k]!
+        if (x >= x0! && x <= x1! && y >= y0! && y <= y1!) break
+      }
+      if (k < 0) return
+      cfg.avoid_rects.splice(k, 1)
+    }
   } else if ((GROUPS as readonly string[]).includes(t)) {
     const pts = cfg.groups[t] ?? []
     const near = pts.findIndex(([px, py]) => Math.hypot(px! - x, py! - y) * pxPerM < 12)
@@ -170,6 +186,8 @@ export function editClick(x: number, y: number, pxPerM: number): void {
   } else {
     const cur = cfg.stops[t]
     if (routeEdit.awaitingYaw && cur) {
+      // 位置と同じ所（画面で6px以内）のクリックでは向きが決まらない（atan2(0, 0) = 0 で東向きになる）
+      if (Math.hypot(x - cur.x, y - cur.y) * pxPerM < 6) return
       cur.yaw = round(Math.atan2(y - cur.y, x - cur.x), 4)
       routeEdit.awaitingYaw = false
     } else {
@@ -180,11 +198,25 @@ export function editClick(x: number, y: number, pxPerM: number): void {
   routeEdit.dirty = true
 }
 
+/** 地図パネルのドラッグ（map フレームの2隅）。「避ける」の編集中だけ範囲を足す。 */
+export function editDrag(x0: number, y0: number, x1: number, y1: number): void {
+  const cfg = routeEdit.cfg
+  if (!cfg || routeEdit.target !== AVOID) return
+  cfg.avoid_rects.push([
+    round(Math.min(x0, x1)), round(Math.min(y0, y1)),
+    round(Math.max(x0, x1)), round(Math.max(y0, y1)),
+  ])
+  routeEdit.dirty = true
+}
+
 export function clearTarget(): void {
   const cfg = routeEdit.cfg
   if (!cfg) return
   const t = routeEdit.target
-  if (t === AVOID) cfg.avoid = []
+  if (t === AVOID) {
+    cfg.avoid = []
+    cfg.avoid_rects = []
+  }
   else if ((GROUPS as readonly string[]).includes(t)) delete cfg.groups[t]
   else {
     delete cfg.stops[t]
@@ -197,7 +229,8 @@ export function clearTarget(): void {
 export function undoLast(): void {
   const cfg = routeEdit.cfg
   if (cfg && routeEdit.target === AVOID) {
-    cfg.avoid.pop()
+    if (cfg.avoid_rects.length) cfg.avoid_rects.pop()
+    else cfg.avoid.pop()
     routeEdit.dirty = true
     return
   }

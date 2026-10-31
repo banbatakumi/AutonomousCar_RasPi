@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np  # noqa: E402
 
 from raspi.auto._slam2d_nav import occgrid_from_trinary  # noqa: E402
-from raspi.auto.route_config import RouteConfig  # noqa: E402
+from raspi.auto.route_config import RouteConfig, paint_avoid  # noqa: E402
 from raspi.nav import raceline as rl_mod  # noqa: E402
 from raspi.nav.purepursuit import PursuitConfig, follow  # noqa: E402
 from raspi.nav.roadgraph import CorridorGrid, build_graph  # noqa: E402
@@ -416,6 +416,28 @@ class TestRouteConfig(unittest.TestCase):
                 RouteConfig.from_dict(bad)
 
 
+    def test_avoid_rects_round_trip_and_normalize(self):
+        c = RouteConfig.from_dict({"avoid_rects": [[2, 3, 1, 0.5]]})
+        self.assertEqual(c.avoid_rects, [(1.0, 0.5, 2.0, 3.0)])     # x0≤x1・y0≤y1 に揃える
+        c2 = RouteConfig.from_json(c.to_json())
+        self.assertTrue(c.same_groups(c2) and c.same_rects(c2))
+        self.assertFalse(c.same_rects(RouteConfig()))
+        self.assertFalse(c.same_groups(RouteConfig()))
+        for bad in ({"avoid_rects": [[0, 0, 1]]}, {"avoid_rects": [[0, 0, 1, "x"]]},
+                    {"avoid_rects": [[0, 0, 1, float("inf")]]}, {"avoid_rects": {"a": 1}}):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                RouteConfig.from_dict(bad)
+
+    def test_paint_avoid_marks_overlapping_cells_only(self):
+        t = np.ones((40, 40), dtype=np.uint8)
+        out = paint_avoid(t, 0.1, (-1.0, -1.0), [(0.01, 0.01, 0.02, 0.02)])
+        self.assertEqual(int((out == 2).sum()), 1)                   # セルより細くても1セルは塗る
+        self.assertEqual(int(out[10, 10]), 2)
+        self.assertEqual(int((t == 2).sum()), 0)                    # 元の地図は塗らない
+        self.assertIs(paint_avoid(t, 0.1, (0.0, 0.0), []), t)
+        out = paint_avoid(t, 0.1, (0.0, 0.0), [(-5.0, -5.0, 0.25, 9.0)])   # はみ出しは切る
+        self.assertEqual(int((out == 2).sum()), 3 * 40)
+
     def test_wrong_types_are_value_errors(self):
         """型の違う設定（手で編集した routes.json 等）も `ValueError` に揃える。
 
@@ -552,6 +574,119 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             self.assertNotIn(passage, pl._route_paths_edges("auto"))
             self.assertGreater(pl._routes["auto"].length, short)
             self.assertEqual(pl._cfg.groups, {})                  # 経由点は書かない
+        finally:
+            pl.close()
+
+    def test_disengage_keeps_built_routes(self):
+        # 自動運転を解くと同じ地図を読み直す（`on_disengage`）。作った経路はメモリから戻し、
+        # 一から作り直さない（実機で走り出せるまで十数秒〜数十秒かかった）
+        from raspi.auto.slam2d_route import Slam2dRoute
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            before = dict(pl._routes)
+            self.assertTrue(before)
+            pl.on_disengage()
+            self.assertEqual(set(pl._routes), set(before))
+            self.assertIs(pl._routes["A"], before["A"])
+            self.assertEqual(pl._built_avoid_ver, pl._avoid_ver)      # すぐ出発できる
+            # 設定が違えば使わない（避ける範囲を足して保存 → 読み直し）
+            pl.request_routes(json.dumps({"groups": {"A": [[2.0, 1.0, 0.0], [6.0, 2.5]]},
+                                          "avoid_rects": [[3.0, 2.2, 4.0, 2.8]]}))
+            self._wait(pl)
+            pl.on_disengage()
+            self.assertEqual(pl._built_avoid_ver, pl._avoid_ver)
+            self._wait(pl)
+        finally:
+            pl.close()
+
+    def test_aborted_job_does_not_block_the_next(self):
+        # 走っている計算を捨てたら、ワーカーごと止める。残すと次の計算がその後ろに並ぶ
+        import time
+
+        from raspi.auto.slam2d_raceline import kill_worker, submit_job
+        kill_worker(False)                   # テストの既定（スレッド）のワーカーを捨て、プロセスで作る
+        try:
+            with mock.patch.dict("os.environ", {"SURGE_LINE_WORKER": "process"}):
+                slow = submit_job(time.sleep, 30.0)
+                time.sleep(3.0)              # 走り出すまで待つ（spawn に約1秒）
+                kill_worker(False)
+                t0 = time.monotonic()
+                self.assertEqual(submit_job(abs, -3).result(timeout=20), 3)
+                self.assertLess(time.monotonic() - t0, 10.0)
+                self.assertTrue(slow.done())
+        finally:
+            kill_worker(False)
+
+    def test_does_not_start_until_avoid_area_is_reflected(self):
+        # 保存した避ける範囲を反映した経路ができるまで走り出さない。前の設定の計算は捨て、
+        # 仕上げなしの線を先に出す（実機の記録: 仕上げ込みの約10秒を待つ間に出発し、1周目を
+        # 範囲の中を通る古い線で走った）
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_raceline import RACE
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import AutoState, Scan, VehicleState
+        xs = np.linspace(1.5, 3.0, 20)
+        traj = np.column_stack([xs, np.full_like(xs, 1.0)]).tolist()
+        mapstore.save_routes("m", json.dumps({"explore_traj": traj}))
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            rect = [3.0, 2.2, 4.0, 2.8]
+            pl.request_routes(json.dumps({"avoid_rects": [rect]}))
+            self.assertIsNotNone(pl._job)
+            self.assertTrue(pl._refine_next)                # 仕上げなしを先に投げた
+            x, y = pl._routes["auto"].xy[0]
+            pl.slam.set_pose(float(x), float(y), 0.0)
+            pl.phase = RACE
+            pl._dt = 0.1
+            p = pl.merged({})
+            scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12)
+            st = pl._race(AutoState(match_score=1.0), scan, VehicleState(speed=0.0), p, False)
+            self.assertFalse(pl._race_started)
+            self.assertIn("避ける範囲", st.reason)
+            pl._job.result(timeout=30)
+            pl._poll()                                      # 仕上げなしの線を取り込む
+            self.assertEqual(pl._built_avoid_ver, pl._avoid_ver)
+            xy = pl._routes["auto"].xy
+            inside = ((xy[:, 0] > rect[0]) & (xy[:, 0] < rect[2])
+                      & (xy[:, 1] > rect[1]) & (xy[:, 1] < rect[3]))
+            self.assertFalse(inside.any())
+            pl._race(AutoState(match_score=1.0), scan, VehicleState(speed=0.0), p, False)
+            self.assertTrue(pl._race_started)
+            self._wait(pl)
+        finally:
+            pl.close()
+
+    def test_avoid_rect_closes_the_gap_and_keeps_other_loops(self):
+        # 近道を範囲で囲むと、地図に壁を塗ってから道路グラフを作り直すので、近道の
+        # エッジそのものが消える（点のように「いちばん近い道」を選ばない）。本線は残る
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_route import Slam2dRoute
+        xs = np.linspace(1.5, 3.0, 20)
+        traj = np.column_stack([xs, np.full_like(xs, 1.0)]).tolist()
+        mapstore.save_routes("m", json.dumps({"explore_traj": traj}))
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            n_edges = len(pl._graph.edges)
+            short = pl._routes["auto"].length
+            pl.request_routes(json.dumps({"avoid_rects": [[3.0, 2.2, 4.0, 2.8]]}))
+            self._wait(pl)
+            self.assertIn("auto", pl._routes, pl._route_err)
+            self.assertLess(len(pl._graph.edges), n_edges)
+            self.assertGreater(pl._routes["auto"].length, short + 1.0)
+            # 経路は範囲に入らない
+            xy = pl._routes["auto"].xy
+            inside = ((xy[:, 0] > 3.0) & (xy[:, 0] < 4.0) & (xy[:, 1] > 2.2) & (xy[:, 1] < 2.8))
+            self.assertFalse(inside.any())
+            # 範囲を消すと近道に戻る
+            pl.request_routes(json.dumps({"avoid_rects": []}))
+            self._wait(pl)
+            self.assertAlmostEqual(pl._routes["auto"].length, short, delta=0.05)
         finally:
             pl.close()
 

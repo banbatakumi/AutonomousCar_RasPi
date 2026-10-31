@@ -223,6 +223,8 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
     <canvas
       ref={ref}
       className="lidar-canvas"
+      // ★ タッチではブラウザがスクロールを始めて pointercancel が来るので、ドラッグが目標にならない
+      style={parkingMode ? { touchAction: 'none' } : undefined}
       onPointerDown={onParkPointerDown}
       onPointerMove={onParkPointerMove}
       onPointerUp={onParkPointerUp}

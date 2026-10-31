@@ -36,7 +36,7 @@ import { live } from '../bus/live'
 import { askConfirm } from './ConfirmDialog'
 import { useNumbers } from '../bus/live'
 import { mapPreview, setPreviewHint } from '../bus/mapPreview'
-import { editClick, routeEdit } from '../bus/routeEdit'
+import { AVOID, editClick, editDrag, routeEdit } from '../bus/routeEdit'
 import { clearTrail, MapCanvas } from '../render/MapCanvas'
 import type { ControlChannel } from '../ws/control'
 
@@ -67,7 +67,8 @@ export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
   // 経由点を編集している間（`RoutePanel.tsx`）はクリックを経由点・停止点の配置に使う。
   // それ以外は今までどおり自己位置探索のヒント
   const onWorldClick = (x: number, y: number, pxPerM: number) => {
-    if (routeEdit.active) {
+    // 下見中は経由点の編集に使わない（下見の地図の座標を、planner が読んでいる地図へ保存してしまう）
+    if (routeEdit.active && !previewing) {
       editClick(x, y, pxPerM)
       return
     }
@@ -81,7 +82,11 @@ export function AutoMapPanel({ ch }: { ch: ControlChannel | null }) {
 
   return (
     <div className="auto-map">
-      <MapCanvas onWorldClick={onWorldClick} />
+      <MapCanvas
+        onWorldClick={onWorldClick}
+        // 「避ける」の編集中だけ、ドラッグで通ってはいけない範囲を囲める
+        onWorldDrag={routeEdit.active && routeEdit.target === AVOID && !previewing ? editDrag : undefined}
+      />
       <div className="auto-map-badge">
         <span className={!previewing && phase === 'RACE' ? 'lv-ok' : 'dim'}>{label}</span>
       </div>

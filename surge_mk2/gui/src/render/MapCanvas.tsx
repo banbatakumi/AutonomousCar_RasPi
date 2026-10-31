@@ -89,6 +89,11 @@ function cachedCfg(text: string): RouteCfg | null {
   return cfgParsed
 }
 
+/** ドラッグ中の矩形（map フレームの2隅 `[x0, y0, x1, y1]`）。指を離すまで描く */
+let rubber: number[] | null = null
+/** これ以上動いたらクリックではなくドラッグ [画面px] */
+const DRAG_PX = 6
+
 /** 軌跡を捨てる。engage し直したとき（＝地図を作り直すとき）に押す。 */
 export function clearTrail() {
   trail.length = 0
@@ -96,14 +101,19 @@ export function clearTrail() {
 
 export function MapCanvas({
   onWorldClick,
+  onWorldDrag,
 }: {
   /** `pxPerM` は今の拡大率（画面ピクセル/m）。経由点の削除判定を画面の距離で揃えるのに使う */
   onWorldClick?: (x: number, y: number, pxPerM: number) => void
+  /** 与えるとドラッグで矩形を選べる（2隅の map フレーム座標）。ドラッグした後のクリックは送らない */
+  onWorldDrag?: (x0: number, y0: number, x1: number, y1: number) => void
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   //: 直近フレームの世界→画面変換。`onClick`は描画ループの外（Reactのイベント
   //: ハンドラ）から呼ばれるので、`sx`/`sy`のクロージャではなく`ref`で最新値を渡す
   const xform = useRef({ ox: 0, oy: 0, px: 1 })
+  const drag = useRef<{ cx: number; cy: number; moved: boolean } | null>(null)
+  const dragged = useRef(false)
 
   useEffect(() => {
     const cv = ref.current
@@ -209,6 +219,18 @@ export function MapCanvas({
         const cfg = routeEdit.cfg ?? cachedCfg(map.routesJson)
         if (cfg) drawRouteCfg(ctx, cfg, sx, sy, routeEdit.active ? routeEdit.target : '')
       }
+      if (rubber) {
+        const [x0, y0, x1, y1] = rubber as [number, number, number, number]
+        ctx.fillStyle = 'rgba(224, 87, 77, 0.2)'
+        ctx.fillRect(sx(Math.min(x0, x1)), sy(Math.max(y0, y1)), Math.abs(x1 - x0) * px,
+          Math.abs(y1 - y0) * px)
+        ctx.setLineDash([5, 4])
+        ctx.strokeStyle = '#e0574d'
+        ctx.lineWidth = 1.5
+        ctx.strokeRect(sx(Math.min(x0, x1)), sy(Math.max(y0, y1)), Math.abs(x1 - x0) * px,
+          Math.abs(y1 - y0) * px)
+        ctx.setLineDash([])
+      }
 
       // ── 軌跡。**地図が無い段でも自分がどう走ったかは見たい** ──
       if (auto && (auto.pose_x || auto.pose_y)) {
@@ -247,17 +269,64 @@ export function MapCanvas({
     return () => cancelAnimationFrame(raf)
   }, [])
 
-  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!onWorldClick || !ref.current) return
-    const rect = ref.current.getBoundingClientRect()
+  // 画面座標 → 世界座標。`sx`/`sy`の逆変換（中心基準、yは反転）
+  const toWorld = (clientX: number, clientY: number): [number, number] => {
+    const rect = ref.current!.getBoundingClientRect()
     const { ox, oy, px } = xform.current
-    // 画面座標 → 世界座標。`sx`/`sy`の逆変換（中心基準、yは反転）
-    const wx = ox + (e.clientX - rect.left - rect.width / 2) / px
-    const wy = oy - (e.clientY - rect.top - rect.height / 2) / px
-    onWorldClick(wx, wy, px)
+    return [ox + (clientX - rect.left - rect.width / 2) / px,
+      oy - (clientY - rect.top - rect.height / 2) / px]
   }
 
-  return <canvas ref={ref} className="map-canvas" onClick={onWorldClick ? handleClick : undefined} />
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (dragged.current) {
+      dragged.current = false        // ドラッグの終わりに来るクリックは捨てる
+      return
+    }
+    if (!onWorldClick || !ref.current) return
+    const [wx, wy] = toWorld(e.clientX, e.clientY)
+    onWorldClick(wx, wy, xform.current.px)
+  }
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    // ドラッグの後にクリックが来ない環境（タッチ）でも、次のクリックを捨てないよう押すたびに戻す
+    dragged.current = false
+    if (!onWorldDrag || e.button !== 0) return
+    drag.current = { cx: e.clientX, cy: e.clientY, moved: false }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const d = drag.current
+    if (!d || !ref.current) return
+    if (!d.moved && Math.hypot(e.clientX - d.cx, e.clientY - d.cy) < DRAG_PX) return
+    d.moved = true
+    rubber = [...toWorld(d.cx, d.cy), ...toWorld(e.clientX, e.clientY)]
+  }
+  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const d = drag.current
+    drag.current = null
+    rubber = null
+    if (!d?.moved || !onWorldDrag || !ref.current) return
+    dragged.current = true
+    onWorldDrag(...toWorld(d.cx, d.cy), ...toWorld(e.clientX, e.clientY))
+  }
+  const onPointerCancel = () => {
+    drag.current = null
+    rubber = null
+  }
+
+  return (
+    <canvas
+      ref={ref}
+      className="map-canvas"
+      // ドラッグで選ぶ間は、タッチでページがスクロール・拡大しないようにする
+      style={onWorldDrag ? { touchAction: 'none' } : undefined}
+      onClick={onWorldClick ? handleClick : undefined}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+    />
+  )
 }
 
 function drawGrid(
@@ -424,8 +493,19 @@ function drawRouteCfg(
       }
     })
   }
-  // 避ける点（赤い×）
+  // 避ける範囲（赤い半透明の矩形）
+  ctx.fillStyle = editing === 'avoid' ? 'rgba(224, 87, 77, 0.35)' : 'rgba(224, 87, 77, 0.2)'
   ctx.strokeStyle = '#e0574d'
+  ctx.lineWidth = editing === 'avoid' ? 2 : 1
+  for (const [x0, y0, x1, y1] of cfg.avoid_rects ?? []) {
+    const rx = sx(x0!)
+    const ry = sy(y1!)
+    const rw = sx(x1!) - rx
+    const rh = sy(y0!) - ry
+    ctx.fillRect(rx, ry, rw, rh)
+    ctx.strokeRect(rx, ry, rw, rh)
+  }
+  // 避ける点（赤い×）
   ctx.lineWidth = editing === 'avoid' ? 3 : 2
   for (const [x, y] of cfg.avoid ?? []) {
     const cx = sx(x!)

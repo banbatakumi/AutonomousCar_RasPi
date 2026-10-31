@@ -21,6 +21,7 @@
  */
 import { useEffect, useState } from 'react'
 import { useNumbers, live } from '../bus/live'
+import { mapPreview } from '../bus/mapPreview'
 import {
   AVOID,
   GROUP_COLOR,
@@ -55,6 +56,10 @@ export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
 
   const save = () => {
     if (!cfg) return
+    if (mapPreview.data) {
+      notify('地図を下見している間は保存しません（地図パネルに出ているのは planner が読んでいる地図ではありません）。「自己位置を特定」で地図を読み込んでから編集してください')
+      return
+    }
     if (mapReplaced()) {
       notify('編集を始めてから地図が替わりました。経由点の座標は前の地図のものなので保存しません。「やめる」で閉じて、今の地図で編集し直してください')
       return
@@ -103,7 +108,12 @@ export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
 
       {!cfg ? (
         <button
-          disabled={!live.map}
+          // ★ 下見中（`mapPreview`）は編集させない。地図パネルは下見の地図を描くが、保存は planner が
+          //   今読んでいる地図（別の地図・地図なし）に書かれ、「自己位置を特定」で読み直すと消えた。
+          //   名前の無い地図（作成中）も保存先が無い
+          disabled={!live.map?.mapName || mapPreview.data !== null}
+          title={mapPreview.data !== null || !live.map?.mapName
+            ? '「自己位置を特定」で地図を読み込んでから編集できます' : undefined}
           onClick={() => {
             beginEdit()
             rerender()
@@ -125,6 +135,7 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
   const isAvoid = t === AVOID
   const stop = cfg.stops[t]
   const stopNames = Object.keys(cfg.stops)
+  const nAvoid = cfg.avoid.length + cfg.avoid_rects.length
 
   const upd = (f: () => void) => {
     f()
@@ -152,18 +163,18 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
         <button
           className={isAvoid ? 'on' : ''}
           style={{ borderColor: '#e0574d' }}
-          title="通ってはいけない道に点を置く（自動経路・経由点の経路・停止経路のどれにも使わない）"
+          title="通ってはいけない範囲をドラッグで囲む（地図に壁として塗ってから経路を作る。自動経路・経由点の経路・停止経路のどれも通らない）"
           onClick={() => {
             setTarget(AVOID)
             rerender()
           }}
         >
-          ✕避ける{cfg.avoid.length ? `(${cfg.avoid.length})` : ''}
+          ✕避ける{nAvoid ? `(${nAvoid})` : ''}
         </button>
       </div>
       <div className="dim route-hint">
         {isAvoid
-          ? '避ける道の上をクリック（点の近くで削除）'
+          ? '通ってはいけない範囲をドラッグで囲む（範囲の中をクリックで削除）'
           : isGroup
           ? `経路${t}の経由点を地図上に順に置く（点の近くで削除）`
           : routeEdit.awaitingYaw
@@ -172,7 +183,7 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
       </div>
       <div className="route-row">
         {isGroup || isAvoid ? (
-          <button onClick={() => upd(undoLast)}>最後の点を取消</button>
+          <button onClick={() => upd(undoLast)}>{isAvoid ? '最後の範囲を取消' : '最後の点を取消'}</button>
         ) : (
           stop && (
             <label>
@@ -186,7 +197,7 @@ function RouteEditor({ rerender, onSave }: { rerender: () => void; onSave: () =>
             </label>
           )
         )}
-        <button onClick={() => upd(clearTarget)}>{isAvoid ? '避ける点を全部消す' : `${t} を消す`}</button>
+        <button onClick={() => upd(clearTarget)}>{isAvoid ? '避ける範囲を全部消す' : `${t} を消す`}</button>
         <label>
           開始
           <select value={cfg.active} onChange={(e) => upd(() => (cfg.active = e.target.value))}>

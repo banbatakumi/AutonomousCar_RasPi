@@ -513,6 +513,26 @@ def _shutdown_worker(urgent: bool | None = None) -> None:
             w.shutdown(wait=False, cancel_futures=True)
 
 
+def kill_worker(urgent: bool) -> None:
+    """ワーカーを走っている計算ごと止める（次に投げたときに作り直す）。
+
+    `Future.cancel()` は始まっていない計算しか取り消せない。走っている計算を捨てただけだとワーカーは
+    それを最後まで回し続け、次に投げた計算がその後ろに並ぶ（実機で地図を読み直すたびに、経路が
+    できるまで 36〜48 秒待った。`surge_20261031_062217`）。
+    """
+    w = _WORKERS.pop(urgent, None)
+    if w is None:
+        return
+    # ★ 公開の API でプロセスを止める口は 3.14 の `terminate_workers` まで無い
+    procs = list((getattr(w, "_processes", None) or {}).values())
+    w.shutdown(wait=False, cancel_futures=True)
+    for pr in procs:
+        try:
+            pr.terminate()
+        except Exception:                           # noqa: BLE001  既に終わっている
+            pass
+
+
 def worker_pool(urgent: bool = False) -> Executor:
     """重い計算を投げる先（仕上げ用と急ぎ用に1つずつを使い回す。上のコメント）。"""
     global _WORKER_IS_PROCESS

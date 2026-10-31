@@ -11,6 +11,7 @@ GUI の経由点エディタ・`sim.bench --routes`・planner がすべてこの
   "mission": {"laps": 3, "time_s": 180, "then": "P1"},
   "signal_map": {"left": "B", "right": "A"},
   "avoid": [[x, y], ...],
+  "avoid_rects": [[x0, y0, x1, y1], ...],
   "explore_traj": [[x, y], ...]
 }
 ```
@@ -21,7 +22,12 @@ GUI の経由点エディタ・`sim.bench --routes`・planner がすべてこの
 - `stops[*].mode`: `"stop"` はその場所で止まるだけ、`"park"` は手前で止まってから
   `park_to_point` へ引き継いでその姿勢（`yaw` 必須）へ入れる
 - `avoid`: 避ける点。いちばん近い道（道路グラフのエッジ）を**自動経路・経由点の経路・停止経路の
-  どれにも使わない**（ルールで通れない近道など。地図だけからは分からない）
+  どれにも使わない**（ルールで通れない近道など。地図だけからは分からない）。★点の吸着は
+  「いちばん近い道」なので、壁の切れ目（隙間）の上を指すと隣の本線に吸着し、そこが唯一の道なら
+  周回が1つも無くなる。範囲で指すなら `avoid_rects` を使う
+- `avoid_rects`: 通ってはいけない範囲（軸に平行な矩形、map フレーム）。**道路グラフを作る前に
+  地図の上で壁として塗る**（`paint_avoid`）ので、範囲の外の道はそのまま使え、範囲に掛かる壁の
+  隙間は閉じる。レーシングラインもこの壁から車体半幅＋余裕だけ離れる
 - `signal_map`: カメラの信号認識（`route/select` トピック）が送ってくる値 → グループ（`auto` も可）
 - `active`: 走り出す経路。A〜D か `"auto"`（自動経路、既定）
 - `explore_traj`: 地図作成の軌跡（間引き済み）。**道路グラフの「通ってよい向き」
@@ -38,7 +44,7 @@ import numpy as np
 
 from ..nav.route import Waypoint
 
-__all__ = ["GROUPS", "ROUTE_KEYS", "AUTO_KEY", "RouteConfig", "Stop"]
+__all__ = ["GROUPS", "ROUTE_KEYS", "AUTO_KEY", "RouteConfig", "Stop", "paint_avoid"]
 
 GROUPS = ("A", "B", "C", "D")
 #: 自動経路のキー（経由点は持たない。planner が地図から作る）
@@ -65,6 +71,8 @@ class RouteConfig:
     mission: dict = field(default_factory=dict)
     signal_map: dict[str, str] = field(default_factory=dict)
     avoid: list[tuple[float, float]] = field(default_factory=list)
+    #: 通ってはいけない範囲 `(x0, y0, x1, y1)`（x0≤x1・y0≤y1 に揃えて持つ）
+    avoid_rects: list[tuple[float, float, float, float]] = field(default_factory=list)
     explore_traj: np.ndarray | None = None
 
     # ── 変換 ──
@@ -122,6 +130,16 @@ class RouteConfig:
         for i, q in enumerate(avoid_raw):
             w = _waypoint(q, f"避ける点{i + 1}")
             avoid.append((w.x, w.y))
+        rects_raw = d.get("avoid_rects") or []
+        if not isinstance(rects_raw, list) or len(rects_raw) > _MAX_WAYPOINTS:
+            raise ValueError(f"避ける範囲が不正（最大{_MAX_WAYPOINTS}個）")
+        rects = []
+        for i, q in enumerate(rects_raw):
+            where = f"避ける範囲{i + 1}"
+            if not isinstance(q, (list, tuple)) or len(q) != 4:
+                raise ValueError(f"{where}は [x0, y0, x1, y1]")
+            x0, y0, x1, y1 = (_num(v, where) for v in q)
+            rects.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
         traj = d.get("explore_traj")
         tr = None
         if traj is not None:
@@ -133,7 +151,7 @@ class RouteConfig:
                     or not np.isfinite(tr).all():
                 raise ValueError("explore_traj が不正")
         return cls(groups=groups, active=active, stops=stops, mission=mission,
-                   signal_map=sig, avoid=avoid, explore_traj=tr)
+                   signal_map=sig, avoid=avoid, avoid_rects=rects, explore_traj=tr)
 
     @classmethod
     def from_json(cls, s: str) -> "RouteConfig":
@@ -157,6 +175,7 @@ class RouteConfig:
             "mission": dict(self.mission),
             "signal_map": dict(self.signal_map),
             "avoid": [[round(x, 3), round(y, 3)] for x, y in self.avoid],
+            "avoid_rects": [[round(v, 3) for v in r] for r in self.avoid_rects],
         }
         if with_traj and self.explore_traj is not None:
             d["explore_traj"] = np.round(self.explore_traj, 3).tolist()
@@ -166,9 +185,15 @@ class RouteConfig:
         return json.dumps(self.to_dict(with_traj=with_traj), ensure_ascii=False)
 
     def same_groups(self, other: "RouteConfig") -> bool:
-        """経路を作り直す必要が無いか（経由点・避ける点が同じか）。"""
+        """経路を作り直す必要が無いか（経由点・避ける点・避ける範囲が同じか）。"""
         a, b = self.to_dict(with_traj=False), other.to_dict(with_traj=False)
-        return a["groups"] == b["groups"] and a["avoid"] == b["avoid"]
+        return (a["groups"] == b["groups"] and a["avoid"] == b["avoid"]
+                and a["avoid_rects"] == b["avoid_rects"])
+
+    def same_rects(self, other: "RouteConfig") -> bool:
+        """避ける範囲が同じか（違えば道路グラフから作り直す）。"""
+        return (self.to_dict(with_traj=False)["avoid_rects"]
+                == other.to_dict(with_traj=False)["avoid_rects"])
 
     @staticmethod
     def decimate(traj: np.ndarray, spacing: float = 0.2) -> np.ndarray:
@@ -180,6 +205,28 @@ class RouteConfig:
             if math.hypot(*(p - out[-1])) >= spacing:
                 out.append(p)
         return np.array(out[-_MAX_TRAJ:])
+
+
+def paint_avoid(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
+                rects) -> np.ndarray:
+    """避ける範囲を占有（2）で塗った3値地図の**写し**（範囲が無ければ元をそのまま返す）。
+
+    範囲に少しでも掛かるセルを塗る（細い範囲でも隙間を確実に閉じる）。**経路を作るときだけに
+    使い、自己位置推定・障害物検出の地図には塗らない**（そこに実際の壁は無い）。
+    """
+    if not rects:
+        return trinary
+    out = trinary.copy()
+    h, w = out.shape
+    res = float(resolution)
+    for x0, y0, x1, y1 in rects:
+        c0 = max(0, int(math.floor((x0 - origin[0]) / res)))
+        c1 = min(w, int(math.ceil((x1 - origin[0]) / res)))
+        r0 = max(0, int(math.floor((y0 - origin[1]) / res)))
+        r1 = min(h, int(math.ceil((y1 - origin[1]) / res)))
+        if c0 < c1 and r0 < r1:
+            out[r0:r1, c0:c1] = 2
+    return out
 
 
 def _obj(v, where: str) -> dict:
