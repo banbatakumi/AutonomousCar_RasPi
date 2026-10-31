@@ -122,7 +122,30 @@ _SAT_STEER_FRAC = 0.97
 #: 速度ではなく舵で曲がれるかが決まっていて（実機 `surge_20261029_071044` の 2 つ目のヘアピンは毎周 上限の 99%）、
 #: 横の上限とは関係ない兆候が出る（`054426`: 1.4m/s・舵 上限の 81〜88% で出た誤った前兆が横の上限を止めた）
 GRIP_STEER_GATE = 0.80
+#: 「舵が上限」が解けた後も、張り付いていた間にできた横偏差が戻るまでは学習を止めたままにする（「舵が上限の直後」）。
+#: 実機 `surge_20261031_053025` の低μのヘアピンでは、舵が上限の間に外へ 17cm ずれ、上限の 80% を下回った直後の
+#: 横偏差（0.12m 超）を安全装置 2 が前兆と取り、2 周で横の上限が 2.73 → 2.46 に下がった（グリップではなく舵で
+#: 曲がり切れなかったずれ）。ずれが 0.12m を切るまで 0.4s、0.06m を切るまで 1.1s かかっていた。
+#: 戻る（`_GRIP_SAT_CLEAR_M` 未満）か `_GRIP_SAT_HOLD_S` 経ったら解く。張り付いていた間の最大より `_GRIP_SAT_GROW_M`
+#: 以上さらに膨らんだら（出口で本当に滑っている）すぐ解き、安全装置に任せる
+_GRIP_SAT_HOLD_S = 1.5
+_GRIP_SAT_CLEAR_M = 0.06
+_GRIP_SAT_GROW_M = 0.04
 _SAT_CROSS_M = 0.15
+
+
+def steer_sat_hold(sat_ns: int, sat_cross: float, sat: bool, cross: float, t_ns: int) -> tuple[int, float]:
+    """「舵が上限の直後」の状態 `(最後に舵が上限だった時刻 [ns]・0 なら解けている, その間の横偏差の最大 [m])` を1周期進める。
+
+    :param sat: この周期、舵が上限（`GRIP_STEER_GATE`）か
+    :param cross: 経路からの横偏差の大きさ [m]
+    """
+    if sat:
+        return int(t_ns), max(sat_cross if sat_ns else 0.0, cross)
+    if sat_ns and (t_ns - sat_ns > _GRIP_SAT_HOLD_S * 1e9 or cross < _GRIP_SAT_CLEAR_M
+                   or cross > sat_cross + _GRIP_SAT_GROW_M):
+        return 0, sat_cross
+    return sat_ns, sat_cross
 _SAT_SLOW = 0.8
 #: 車速がこれ未満になったら「発進」と見なし、次に経路の速度へ届くまでローンチコントロールを要求する [m/s]
 _LAUNCH_ARM_SPEED = 0.3
@@ -987,6 +1010,9 @@ class Slam2dRaceLine(Planner):
         #: この時刻 [ns] までは学習しない（別の線へ乗り換えた直後。横へ数 cm 跳ぶぶんが前兆に見える）
         self._grip_quiet_ns = 0
         self._grip_quiet_why = ""                #: 上の理由（reason の「停止: …」に出す）
+        #: 「舵が上限」が最後に掛かっていた時刻 [ns]（0 = 「舵が上限の直後」も解けている）と、その間の横偏差の最大 [m]
+        self._grip_sat_ns = 0
+        self._grip_sat_cross = 0.0
         #: 経路の各点の `(求める横加速度, 限界)`（`_grip_levels`）: [(経路の点, 鍵, 配列の組)]（直近の3本）
         self._grip_cache: list[tuple] = []
         #: 曲がり切れない区間の印（`_grip_tight`）
@@ -3052,6 +3078,10 @@ class Slam2dRaceLine(Planner):
         i = pp.index
         followed = self._tick_path
         gate = ""
+        # 「舵が上限」と、その後の横偏差が戻るまで（`_GRIP_SAT_*`）
+        sat = abs(st.target_steer) >= GRIP_STEER_GATE * self.vehicle.max_steer
+        self._grip_sat_ns, self._grip_sat_cross = steer_sat_hold(
+            self._grip_sat_ns, self._grip_sat_cross, sat, abs(pp.cross_track), vs.t_capture)
         if not self._joined:
             gate = "経路に乗るまで"
         elif coasting:
@@ -3060,8 +3090,10 @@ class Slam2dRaceLine(Planner):
             gate = "障害物"
         elif md_note:
             gate = "MD無応答"
-        elif abs(st.target_steer) >= GRIP_STEER_GATE * self.vehicle.max_steer:
+        elif sat:
             gate = "舵が上限"
+        elif self._grip_sat_ns:
+            gate = "舵が上限の直後"
         elif vs.t_capture < self._grip_quiet_ns:
             gate = self._grip_quiet_why or "線を乗り換えた直後"
         elif 0 <= i < len(path) and self._grip_tight(path, p)[i]:
