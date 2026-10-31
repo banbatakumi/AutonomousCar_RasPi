@@ -55,9 +55,18 @@ class _KfConfig(C.Structure):
                 ("jerk_psd", C.c_float), ("bias_walk_psd", C.c_float)]
 
 
+class _KfDiag(C.Structure):
+    """`speed_kf.h` の `SpeedKfDiag`（並びも同じ）。"""
+    _fields_ = [("n", C.c_uint32), ("n_ac", C.c_uint32), ("nis_sum", C.c_float), ("ac_sum", C.c_float),
+                ("z_prev", C.c_float), ("has_prev", C.c_bool)]
+
+
 class _Kf(C.Structure):
+    """`speed_kf.h` の `SpeedKf`（並びも同じ。末尾に余白を置き、C 側が後ろへ足しても壊れないようにする）。"""
     _fields_ = [("cfg", _KfConfig), ("x", C.c_float * 4), ("p", C.c_float * 16), ("s_meas", C.c_float), ("initialized", C.c_bool),
-                ("resync", C.c_bool), ("gated_count", C.c_uint32), ("diag", C.c_ubyte * 128)]
+                ("resync", C.c_bool), ("gated_count", C.c_uint32), ("diag", _KfDiag * 2),
+                ("last_dt_s", C.c_float), ("gated_run_s", C.c_float), ("gated_run_m", C.c_float),
+                ("resync_count", C.c_uint32), ("predicted_step_m", C.c_float), ("_pad", C.c_ubyte * 64)]
 
 
 def build(defines: tuple[str, ...] = ()) -> C.CDLL:

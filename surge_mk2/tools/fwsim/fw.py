@@ -113,7 +113,7 @@ def param_table(fw_dir: Path | None = None) -> dict[str, ParamSpec]:
 
 
 _SOURCES = ("src/control/drive.c", "src/control/torque_vectoring.c", "src/control/control_params.c",
-            "src/control/speed_kf.c")
+            "src/control/speed_kf.c", "src/control/encoder_direction.c")
 _INCLUDES = ("lib/pid", "lib/filter", "lib/mymath", "src/control")
 #: `host/shim` と同じく**常に作業ツリーから**取るヘッダ（車両モデル `host_sim.c` とシムが使う。比べる相手の
 #: 古いコミットには無いことがある）

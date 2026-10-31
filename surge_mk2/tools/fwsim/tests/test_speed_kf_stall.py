@@ -62,7 +62,7 @@ def _run(lib: C.CDLL, speed: float, stall_s: float, unwrap: bool, t_stall: float
         lib.SpeedKf_Predict(C.byref(kf), dt)
         if unwrap:                                              # drive.c: 予測した増分に近い側の折り返しを選ぶ
             period = 2 * np.pi * R
-            gap += period * np.round((kf.x[0] - kf.s_meas - gap) / period)
+            gap += period * np.round((kf.predicted_step_m - gap) / period)  # SpeedKf_ExpectedDistanceStep
         lib.SpeedKf_UpdateDistance(C.byref(kf), gap)
         if i % 10 == 0:
             lib.SpeedKf_UpdateAccel(C.byref(kf), 0.0 + rng.normal(0, 0.3))
