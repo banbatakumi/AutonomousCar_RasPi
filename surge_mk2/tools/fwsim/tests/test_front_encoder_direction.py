@@ -69,6 +69,8 @@ class _Pipeline:
         for d in self.dirs:
             lib.EncoderDirection_Init(C.byref(d))
         self.prev: np.ndarray | None = None
+        #: 前輪の走行距離 [m]（drive.c の front_odom_*。TELEMETRY の odom_dist）
+        self.odom = np.zeros(2)
 
     def step(self, raw: np.ndarray, rear_m_s: float, accel: float, dt: float, steer: float = 0.0) -> float:
         if self.prev is None:
@@ -87,6 +89,7 @@ class _Pipeline:
         self.lib.SpeedKf_Predict(C.byref(self.kf), dt)
         expected = self.kf.predicted_step_m / (R * cos_steer)
         fwd = [g + TWO_PI * np.round((expected - g) / TWO_PI) for g in fwd]
+        self.odom += np.asarray(fwd) * R
         self.lib.SpeedKf_UpdateDistance(C.byref(self.kf), 0.5 * (fwd[0] + fwd[1]) * R * cos_steer)
         self.lib.SpeedKf_UpdateAccel(C.byref(self.kf), accel)
         return float(self.kf.x[1])
@@ -175,6 +178,7 @@ class FrontEncoderDirectionTest(unittest.TestCase):
         rear = d["rear_speed"].mean(axis=1)
         seg = np.r_[True, np.diff(t) > 0.5]                              # 抜粋は2区間。区間の頭で作り直す
         v_fix, v_raw = np.zeros(len(t)), np.zeros(len(t))
+        odom_fix, odom_raw = np.zeros((len(t), 2)), np.zeros((len(t), 2))
         flips = [0, 0]
         p_fix = p_raw = None
         for i in range(len(t)):
@@ -186,9 +190,10 @@ class FrontEncoderDirectionTest(unittest.TestCase):
             else:
                 dt = float(tc[i] - tc[i - 1])
             prev_rear = rear[i - 1] if not seg[i] else rear[i]
-            for p, out in ((p_fix, v_fix), (p_raw, v_raw)):
+            for p, out, odom in ((p_fix, v_fix, odom_fix), (p_raw, v_raw, odom_raw)):
                 out[i] = p.step(d["front_angle"][i].astype(float), float(prev_rear), float(d["accel_x"][i]), dt,
                                 float(d["steer"][i]))
+                odom[i] = p.odom
         flips = [a + b for a, b in zip(flips, p_fix.flips)]
         lt, lv = d["lidar_t"].astype(float), d["lidar_vx"].astype(float)
         moving = lv > 0.3
@@ -203,6 +208,11 @@ class FrontEncoderDirectionTest(unittest.TestCase):
         self.assertEqual(flips[0], 2)                                     # 左はヘアピンで鏡像になり戻る1回だけ
         self.assertGreater(flips[1], 6)                                   # 右は別のコーナーでも短く何度も鏡像になる
         self.assertGreater(v_fix[(t > 23.5) & (t < 26.0)].min(), 0.0)
+        # 前輪の走行距離（odom_dist）も鏡像の間に減らない。直さなければ逆に減っていた（会場の試走で 9〜10% 短い）
+        same = ~seg[1:]
+        step_fix, step_raw = np.diff(odom_fix, axis=0)[same], np.diff(odom_raw, axis=0)[same]
+        self.assertGreater(step_fix.min(), -0.002)
+        self.assertLess(step_raw.min(), -0.01)
 
 
 if __name__ == "__main__":

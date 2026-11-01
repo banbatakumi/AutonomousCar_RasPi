@@ -386,6 +386,9 @@ STM32 は `speed` を作るときに `cos(steer_actual)` を掛けること。
   ゼロ位相で微分して使う。微分して加速度を求めてはならない点は変わらない。
 - **`odom_dist` はフィルタ前の絶対角アンラップから積算する。**
   速度と違ってローパスをかけない（積算値なので位相遅れがそのまま距離誤差になる）。
+  ★ 2026-11-01 から、前輪エンコーダの読みの鏡像（`encoder_direction.c`）と折り返しを直した増分を積む
+  （車速 KF に入れるのと同じ値。前進が正）。生の向きのまま積んでいた間は、会場の試走で鏡像の間に距離が逆に減り、
+  走行距離より 9〜10% 短かった
   0.1mm 単位・`int32_t` のラップは **±214.7 km**（u32 全域で 429.5 km）なので、
   ミニカーの走行距離では**到達しない**。`t_us` と同格の注意事項ではない。
 - **`torque_cmd` は MD に出した指令値**（TC 適用後の最終値）であって実測ではない。
@@ -429,7 +432,8 @@ typedef struct {
 typedef struct {
     uint16_t protocol_version;  /* 上位=メジャー 下位=マイナー。現行 0x001A */
     uint32_t fw_id;             /* git short hash 等                        */
-    uint32_t build_epoch;       /* ビルド時刻（UNIX epoch 秒）               */
+    uint32_t build_epoch;       /* ビルド時刻（UNIX epoch 秒）。Makefile が build_info.c に埋め込む。
+                                   起動時の LOG（INFO "firmware build <git>[+dirty] epoch <秒>"）に git のコミットも出す */
 } version_t;                    /* = 10 bytes */
 ```
 
