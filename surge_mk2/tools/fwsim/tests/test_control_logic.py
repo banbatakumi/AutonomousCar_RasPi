@@ -101,6 +101,15 @@ class TestLogic(unittest.TestCase):
                 m = S.run(self.fw, plant, scenario("decel_pi")).metrics
                 self.assertLess(m["locking"], self.LOCKING_MAX)
 
+    def test_manual_stop_from_speed_does_not_lock(self):
+        """手動へ引き継いで止める（傾き 4.0m/s²・制動フラグなし）でも後輪がロックしない（車速PIの減速に ABS、
+        `drive.c` の `ApplySpeedPiAbs`）。会場の試走 `surge_20261031_055820` で後輪が 40〜70% 滑ってスピンした。"""
+        for key in ("decel_pi_manual", "decel_pi_manual_corner"):
+            for name, plant in (("標準モデル", NOMINAL), ("同定したタイヤ", Plant.load())):
+                with self.subTest(scenario=key, plant=name):
+                    m = S.run(self.fw, plant, scenario(key)).metrics
+                    self.assertLess(m["locking"], self.LOCKING_MAX)
+
     # ── 車速PIの加速度フィードフォワード（v0.21。`drive.h` の同名の節）──
 
     def _plant_gain(self) -> tuple[float, float]:

@@ -199,6 +199,8 @@ def _cmd_accel_limit() -> float:
 
 
 _RAMP = _cmd_accel_limit()
+#: 手動操縦（GUI）の傾き = 学習の天井 `[safety] cmd_accel_limit_m_s2`
+_MANUAL_RAMP = 4.0
 _FULL = MAX_TORQUE_NM
 _COAST = Seg(0.05, MODE_DISARM)
 
@@ -235,6 +237,14 @@ SLIP: tuple[Scenario, ...] = (
              kind="brake"),
     Scenario("decel_pi_corner", "旋回しながら車速指令0（ランプは自動運転の学習前の値）",
              (Seg(0.3, MODE_SPEED, 1.5, _RAMP, steer=0.25), Seg(1.0, MODE_SPEED, 0.0, _RAMP, steer=0.25)), 1.5,
+             measure=1, kind="brake"),
+    # ★ 手動へ引き継いで止める（GUI の傾きは天井の 4.0m/s²・制動フラグなし）。会場の試走 `surge_20261031_055820` で
+    #   3.9m/s から止めたとき、減速トルクに TC だけが掛かって後輪が 40〜70% 滑り、スピンした
+    Scenario("decel_pi_manual", "3m/s から車速指令0（手動の傾き 4.0m/s²）",
+             (Seg(0.1, MODE_SPEED, 3.0, _RAMP), Seg(1.5, MODE_SPEED, 0.0, _MANUAL_RAMP)), 3.0, measure=1,
+             kind="brake"),
+    Scenario("decel_pi_manual_corner", "旋回しながら車速指令0（手動の傾き 4.0m/s²）",
+             (Seg(0.3, MODE_SPEED, 2.0, _RAMP, steer=0.2), Seg(1.0, MODE_SPEED, 0.0, _MANUAL_RAMP, steer=0.2)), 2.0,
              measure=1, kind="brake"),
     Scenario("cruise", "1.5m/s の定速（介入しないこと）", (Seg(1.0, MODE_SPEED, 1.5, _RAMP),), 1.5),
     Scenario("cruise_turn", "1.2m/s・舵0.35rad の定常旋回（介入しないこと）",

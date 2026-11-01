@@ -1,8 +1,10 @@
 """校正 9: TC・ABS の確かめ（`raspi/auto/calib_traction_check.py` の記録）→ 合否と `[limits]`。
 設計は `docs/calibration.md` §4.9。
 
-区間ごと（車速 0.6m/s 以上を `_CHUNK_S` に区切る）に、STM32 のスリップ率（駆動・車速指令の減速は左右の平均、
-制動はロックしかけている側）と車体の加速度（走行距離の 2 次式）を出す。
+区間ごと（車速 0.6m/s 以上を `_CHUNK_S` に区切る）に、STM32 のスリップ率（駆動は左右の大きい方、
+車速指令の減速と制動はロックしかけている側）と車体の加速度（走行距離の 2 次式）を出す。
+★ 車速指令の減速は v0.29 の後（2026-11-01）から TC ではなく ABS が抑える（STM32 `drive.c` の `ApplySpeedPiAbs`。
+会場の試走で、減速に TC が掛かって上限が 0↔0.15N·m を往復し、後輪が 40〜70% 滑ってスピンした）ので、目標は ABS の値
 
 - 合否: 車速 `_TARGET_V` 以上でのスリップ率の平均が目標の ±`SLIP_TOL`。区間の中の揺れが `SLIP_STD_MAX` を超えたら、
   その揺れが一つの周波数に集まっているか（`PEAK_SHARE_MAX`）を見る。集まっていれば TC・ABS の発振で不合格、
@@ -129,7 +131,7 @@ def analyze(log: Log, car=None) -> Result:
     except Exception as e:                      # noqa: BLE001  予測が作れなくても合否は出す
         res.info(f"予測を作れなかった（{e}）")
     for kind, name, target, select_low in (("drive", "全開の発進（TC）", tc_t, False),
-                                            ("decel", "車速指令の減速（TC）", tc_t, False),
+                                            ("decel", "車速指令の減速（ABS）", abs_t, True),
                                             ("brake", "最大の制動（ABS）", abs_t, True)):
         ch = _chunks(log, kind, t, x, v)
         if not ch:
@@ -166,7 +168,7 @@ def analyze(log: Log, car=None) -> Result:
         elif mean < target - tol:
             # TC・ABS は上限として働く（目標より下は何もしない）。目標が「最大トルクまで滑らせた値」なら、試験のトルクで届かないのは普通。
             # 目標まで届かないのに制限が大きく働いていたら、必要以上に絞っている疑い
-            lim = log.vs["tc_limit_nm"].min(axis=1) if kind != "brake" else log.vs["abs_limit_nm"]
+            lim = log.vs["tc_limit_nm"].min(axis=1) if kind == "drive" else log.vs["abs_limit_nm"]
             idxs = np.concatenate([p for p, _ in ch])
             active = float(np.mean(lim[idxs] < MAX_TARGET_TORQUE_NM - 1e-3))
             res.warn(f"{name}: スリップ率の平均 {mean:.3f} が目標 {target:.3f} まで上がらない（制限が働いたのは {active:.0%}）。TC・ABS は上限なので"
