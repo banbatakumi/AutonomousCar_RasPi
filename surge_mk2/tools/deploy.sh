@@ -63,18 +63,34 @@ done
 SSH_OPTS=()
 [ -f "$KEY" ] && SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes)
 ssh_pi() { ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$HOST" "$@"; }
-# rsync の -e は空白で分けて読むので、鍵のパスに空白があっても壊れないよう各引数を単引用符で囲む
-RSYNC_SSH="ssh"
-for _o in ${SSH_OPTS[@]+"${SSH_OPTS[@]}"}; do RSYNC_SSH+=" '${_o}'"; done
+#: GUI の案内に出す宛先。名前が引けず IP で繋いだときは IP にする
+GUI_HOST=surge-mk2.local
 
 # ── 0. 疎通 ──
 echo "# $HOST へ接続を確認"
-ssh_pi -o ConnectTimeout=8 -o BatchMode=yes true || {
-  echo "!! $HOST に繋がらない。" >&2
-  echo "   直結の生死は IF を明示して見る: ping -b <en1x> 169.254.55.2" >&2
-  echo "   mDNS が Wi-Fi 側しか返さないときは: ssh $HOST 'sudo systemctl restart avahi-daemon'" >&2
-  exit 1
-}
+if ! ssh_pi -o ConnectTimeout=8 -o BatchMode=yes true; then
+  # Wi-Fi の Mac は surge-mk2.local が引けなくなることがある（mDNSResponder が固まる。
+  # `tools/find_pi.py`）。既定の宛先のときだけ、IP を直接引いて繋ぎ直す。
+  # ホスト鍵は名前で登録済みなので HostKeyAlias で同じ鍵を照合させる
+  IP=""
+  if [ "$HOST" = surge-mk2 ] && [ -x .venv/bin/python ]; then
+    IP=$(.venv/bin/python -m tools.find_pi 2>/dev/null)
+  fi
+  if [ -n "$IP" ] && SSH_OPTS+=(-o "HostName=$IP" -o HostKeyAlias=surge-mk2.local) \
+      && ssh_pi -o ConnectTimeout=8 -o BatchMode=yes true; then
+    echo "# 名前が引けないので IP で繋いだ: $IP"
+    GUI_HOST=$IP
+  else
+    echo "!! $HOST に繋がらない。" >&2
+    echo "   直結の生死は IF を明示して見る: ping -b <en1x> 169.254.55.2" >&2
+    echo "   mDNS が Wi-Fi 側しか返さないときは: ssh $HOST 'sudo systemctl restart avahi-daemon'" >&2
+    exit 1
+  fi
+fi
+# rsync の -e は空白で分けて読むので、鍵のパスに空白があっても壊れないよう各引数を単引用符で囲む
+# （疎通の後で組む。IP に切り替えたときの -o HostName を rsync にも渡すため）
+RSYNC_SSH="ssh"
+for _o in ${SSH_OPTS[@]+"${SSH_OPTS[@]}"}; do RSYNC_SSH+=" '${_o}'"; done
 
 # ── 1. GUI をビルド ──
 if [ "$BUILD_GUI" = 1 ]; then
@@ -213,5 +229,6 @@ echo
 echo "=== $HOST の状態 ==="
 ssh_pi 'systemctl is-active surge-io surge-camera surge-telemetry | paste -d" " - - - | sed "s/^/  io camera telemetry = /"'
 echo
-echo "  GUI  : http://surge-mk2.local:8000/"
+echo "  GUI  : http://$GUI_HOST:8000/"
+echo "         （Wi-Fi で名前が引けないときは launcher の「実機 GUI を開く」か tools/find_pi.py --open）"
 echo "  ログ : ssh $HOST 'tail -F ${DEST%/}/logs/surge-io.out'"

@@ -3,7 +3,7 @@
     .venv/bin/python -m tools.launcher
     （または surge_mk2 直下の launcher.command をダブルクリック）
 
-メイン GUI（Web）以外の補助 GUI（シミュレータ・コースエディタ・システム同定・
+実機の Web GUI を IP で開くボタンと、メイン GUI（Web）以外の補助 GUI（シミュレータ・コースエディタ・システム同定・
 カメラ校正・SLAM 再処理・ml 系の操作盤）を1つの窓から起動・停止する。アプリを増やすときは
 `APPS` に1行足すだけでよい。
 
@@ -70,6 +70,10 @@ def _sim_editor(o: Options) -> list[str]:
 
 
 APPS: list[AppSpec] = [
+    # 名前（surge-mk2.local）ではなく IP で開く。Wi-Fi の Mac は mDNS が固まることがある（`tools/find_pi.py`）
+    AppSpec("pi_gui", "実機", "実機 GUI を開く",
+            "Pi の IP を mDNS で直接引き、IP で Web GUI を開く（Wi-Fi で名前が引けないとき用）",
+            lambda o: ["-m", "tools.find_pi", "--open"]),
     AppSpec("sim", "シミュレータ", "シミュレータ一式",
             "io_node(--sim)・telemetry・planning・俯瞰ビューを起動し、Web GUI を開く",
             _sim_run, course=True, browser=True),
