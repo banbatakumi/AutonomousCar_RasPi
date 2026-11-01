@@ -167,7 +167,7 @@ class TestArmRule(unittest.TestCase):
 
 
 class TestAutoStop(unittest.TestCase):
-    """ファームの自動停止: 停止距離の矩形に LiDAR 3 点以上＋至近の超音波、LiDAR 不調時だけ超音波が停止距離で見る。"""
+    """ファームの自動停止: 実舵角の予想進路に LiDAR 3 点以上＋至近の超音波、LiDAR 不調時だけ超音波が停止距離で見る。"""
 
     def _sim(self, speed):
         sim, ld = make(lidar=True)
@@ -196,6 +196,21 @@ class TestAutoStop(unittest.TestCase):
         ld.last_scan[:] = 0.0
         self._put(ld, 0, 0.30, n=2)                   # 2 点では確定しない
         self.assertFalse(sim._auto_stop_obstacle(1.0))
+
+    def test_follows_the_steering(self):
+        sim, ld = self._sim(0.5)
+        # 左へ 0.35rad（R≈0.63m）。後車軸の円弧の 0.55m 先は base_link (0.484, 0.226)、LiDAR から 約28.6°・0.472m。
+        # 真っ直ぐの矩形（±15cm）では外だが、左へ曲がる車体は通る
+        self._put(ld, 28, 0.472)
+        sim.vehicle.steer_actual = 0.35
+        self.assertTrue(sim._auto_stop_obstacle(1.0))
+        sim.vehicle.steer_actual = 0.0
+        self.assertFalse(sim._auto_stop_obstacle(1.0))
+        sim.vehicle.steer_actual = -0.35              # 右へ切れば反対側
+        self.assertFalse(sim._auto_stop_obstacle(1.0))
+        ld.last_scan[:] = 0.0
+        self._put(ld, 330, 0.472)
+        self.assertTrue(sim._auto_stop_obstacle(1.0))
 
     def test_distance_grows_with_speed_and_direction_follows_motion(self):
         sim, ld = self._sim(2.0)

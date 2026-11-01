@@ -27,7 +27,8 @@ from tools.fwsim import scenarios as S  # noqa: E402
 from tools.fwsim.fw import FW_DIR, OUT, Firmware  # noqa: E402
 from tools.fwsim.plant import NOMINAL  # noqa: E402
 
-HEADERS = ("src/control/drive.h", "src/vehicle/vehicle.h", "src/sensing/lidar.h", "src/control/speed_kf.h")
+HEADERS = ("src/control/drive.h", "src/vehicle/vehicle.h", "src/sensing/lidar.h", "src/control/speed_kf.h",
+           "src/control/auto_stop_path.h")
 
 _DEFINE = re.compile(r"^\s*#define\s+([A-Z][A-Z0-9_]*)\s+(.+)$")
 _NUM_SUFFIX = re.compile(r"(?<=[0-9.])[fFuU]+\b")
@@ -89,11 +90,9 @@ class TestFirmwareConstants(unittest.TestCase):
         self.assertSame("VEHICLE_ULTRASONIC_REAR_X_M", s["us_rear"]["x"])
 
     def test_auto_stop_offsets_follow_geometry(self):
-        self.assertAlmostEqual(self.fw("VEHICLE_AUTO_STOP_LIDAR_FRONT_OFFSET_CM"), 23.0, places=4)
-        self.assertAlmostEqual(self.fw("VEHICLE_AUTO_STOP_LIDAR_REAR_OFFSET_CM"), 14.0, places=4)
         self.assertAlmostEqual(self.fw("VEHICLE_AUTO_STOP_ULTRASONIC_FRONT_OFFSET_CM"), 4.0, places=4)
         self.assertAlmostEqual(self.fw("VEHICLE_AUTO_STOP_ULTRASONIC_REAR_OFFSET_CM"), 3.0, places=4)
-        self.assertAlmostEqual(self.fw("VEHICLE_AUTO_STOP_LIDAR_HALF_WIDTH_CM"), 15.0, places=4)
+        self.assertAlmostEqual(self.fw("VEHICLE_AUTO_STOP_HALF_WIDTH_M"), 0.15, places=6)
 
     def test_brake_values_are_runtime_params(self):
         """制動の減速度と MD のトルクの遅れはファームが値を持たない（★v0.29、CONFIG_SET で Pi が送る）。
@@ -154,16 +153,20 @@ class TestFirmwareConstants(unittest.TestCase):
         """シムの STM32（`sim/stm32.py`）が写している自動停止・DISARM 後の制動の値。"""
         import sim.stm32 as st
         self.assertSame("VEHICLE_AUTO_STOP_SENSOR_DELAY_S", st.AUTO_STOP_SENSOR_DELAY_S)
+        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_PERIOD_S", st.AUTO_STOP_LIDAR_PERIOD_S)
         from tools.fwsim.fw import param_table
         table = param_table(FW_DIR)
         self.assertAlmostEqual(table["brake_decel_m_s2"].default, st.BRAKE_DECEL_PLACEHOLDER_M_S2, places=7)
         self.assertAlmostEqual(table["md_torque_lag_s"].default, st.MD_TORQUE_LAG_PLACEHOLDER_S, places=7)
         self.assertSame("VEHICLE_AUTO_STOP_DIRECTION_DEADBAND_M_S", st.AUTO_STOP_DIRECTION_DEADBAND_M_S)
-        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_HALF_WIDTH_CM", st.AUTO_STOP_LIDAR_HALF_WIDTH_CM, tol=1e-4)
+        self.assertSame("VEHICLE_AUTO_STOP_HALF_WIDTH_M", st.AUTO_STOP_HALF_WIDTH_M, tol=1e-6)
+        self.assertSame("VEHICLE_BODY_FRONT_X_M", st.AUTO_STOP_BODY_FRONT_X_M)
+        self.assertSame("VEHICLE_BODY_REAR_X_M", st.AUTO_STOP_BODY_REAR_X_M)
+        self.assertSame("VEHICLE_LIDAR_X_M", st.AUTO_STOP_LIDAR_X_M)
+        self.assertSame("DRIVE_WHEELBASE_M", st.AUTO_STOP_WHEELBASE_M)
+        self.assertSame("AUTO_STOP_PATH_STRAIGHT_CURVATURE_1_M", st.AUTO_STOP_STRAIGHT_CURVATURE_1_M)
         self.assertSame("VEHICLE_AUTO_STOP_LIDAR_MIN_POINTS", st.AUTO_STOP_LIDAR_MIN_POINTS)
         self.assertSame("VEHICLE_AUTO_STOP_ULTRASONIC_NEAR_CM", st.AUTO_STOP_ULTRASONIC_NEAR_CM)
-        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_FRONT_OFFSET_CM", st.AUTO_STOP_LIDAR_OFFSET_CM[True], tol=1e-4)
-        self.assertSame("VEHICLE_AUTO_STOP_LIDAR_REAR_OFFSET_CM", st.AUTO_STOP_LIDAR_OFFSET_CM[False], tol=1e-4)
         self.assertSame("VEHICLE_AUTO_STOP_ULTRASONIC_FRONT_OFFSET_CM", st.AUTO_STOP_ULTRASONIC_OFFSET_CM[True], tol=1e-4)
         self.assertSame("VEHICLE_AUTO_STOP_ULTRASONIC_REAR_OFFSET_CM", st.AUTO_STOP_ULTRASONIC_OFFSET_CM[False], tol=1e-4)
         self.assertSame("DRIVE_STANDSTILL_SPEED_M_S", st.DISARM_BRAKE_STANDSTILL_M_S)

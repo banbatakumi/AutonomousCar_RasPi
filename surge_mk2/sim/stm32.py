@@ -13,7 +13,7 @@
 - **`steer_link_*`（ステアのリンク換算）は持たない。** シムの舵角は最初から路面舵角で、ファームの
   「停車・DISARM 中にだけ適用／`steer_link_cubic` の丸めを ACK に反映」は写していない
   （CONFIG_SET の値をそのまま ACK する）
-- 自動停止（`_auto_stop_obstacle`）はファームの判定（停止距離の矩形に LiDAR 3 点以上＋超音波）を
+- 自動停止（`_auto_stop_obstacle`）はファームの判定（実舵角の予想進路に LiDAR 3 点以上＋超音波）を
   写してある。違いは、LiDAR の点群を真値のレイキャストから直接読むこと（`VirtualLidar.last_scan`。
   UART の遅れ・欠落セクタは通らない）と、ビンの新旧を 300ms の生存だけで見ること
 - 電流・温度・電圧は「それらしい」値。負荷に応じて緩く動くだけで物理的な根拠は無い
@@ -72,19 +72,27 @@ DEFAULT_STEER_RATE_RAD_S = 0.5
 #: 遅延 = LiDAR の1回転（10Hz、`VEHICLE_AUTO_STOP_SENSOR_DELAY_S`）＋MD のトルクの遅れ（CONFIG_SET の
 #: `MD_TORQUE_LAG_S`）、減速度 = 制動の減速度（同 `BRAKE_DECEL_M_S2`）。★v0.29 から後の 2 つはファームが値を持たない
 AUTO_STOP_SENSOR_DELAY_S = 0.1
+#: LiDAR の予想進路の判定の間引き [s]（`VEHICLE_AUTO_STOP_LIDAR_PERIOD_S`。停止距離の遅れに足す）
+AUTO_STOP_LIDAR_PERIOD_S = 0.005
 #: CONFIG_SET が来る前の仮置き（ファームの `control_params.h` と同じく範囲の下限。上位が送るまで ARM しない）
 BRAKE_DECEL_PLACEHOLDER_M_S2 = 0.5
 MD_TORQUE_LAG_PLACEHOLDER_S = 0.0
 AUTO_STOP_DIRECTION_DEADBAND_M_S = 0.05
-#: LiDAR は進行方向（前 0°・後 180°）へ伸ばした矩形で見る。片側の幅と、障害物と確定する点数
-AUTO_STOP_LIDAR_HALF_WIDTH_CM = 15.0
+#: LiDAR は今の実舵角のまま止まるまでに車体が掃く範囲（予想進路、ファームの `auto_stop_path.h`）で見る。
+#: 片側の幅・車体の前後端・LiDAR の位置（base_link＝後車軸の中心）・ホイールベース・直進とみなす曲率と、
+#: 障害物と確定する点数
+AUTO_STOP_HALF_WIDTH_M = 0.15
+AUTO_STOP_BODY_FRONT_X_M = 0.30
+AUTO_STOP_BODY_REAR_X_M = -0.07
+AUTO_STOP_LIDAR_X_M = 0.07
+AUTO_STOP_WHEELBASE_M = 0.23
+AUTO_STOP_STRAIGHT_CURVATURE_1_M = 0.02
 AUTO_STOP_LIDAR_MIN_POINTS = 3
 #: LiDAR の結果に関わらず、超音波がこの距離（車体先端から）未満なら止める
 AUTO_STOP_ULTRASONIC_NEAR_CM = 5.0
 #: 超音波を測り直す周期 [ns]（ファームのトリガ周期 60ms）
 US_PERIOD_NS = 60_000_000
-#: センサから車体先端までの後退量 [cm]（しきい値に足す）
-AUTO_STOP_LIDAR_OFFSET_CM = {True: 23.0, False: 14.0}       # 前進側 / 後退側
+#: 超音波から車体先端までの後退量 [cm]（しきい値に足す）
 AUTO_STOP_ULTRASONIC_OFFSET_CM = {True: 4.0, False: 3.0}
 #: `Lidar_IsOk` — この時間セクタが来なければ LiDAR 不調（超音波が代わりに停止距離で見る）
 LIDAR_TIMEOUT_NS = 300 * 1_000_000
@@ -100,10 +108,53 @@ BRAKE_HOLD_DELAY_S = 0.3
 LIDAR_IDLE_OFF_NS = 5 * NS
 
 _AS_OFFSETS = np.arange(-89, 90)
-_AS_COS = np.cos(np.deg2rad(np.abs(_AS_OFFSETS)))
-_AS_SIN = np.sin(np.deg2rad(np.abs(_AS_OFFSETS)))
-#: 中心角（前 0・後 180）ごとの、矩形の判定に使う 1° ビンの添字
+#: 中心角（前 0・後 180）ごとの、自動停止が見る 1° ビン（車両角）の添字と、その向きの単位ベクトル
 _AS_BINS = {True: (_AS_OFFSETS % 360), False: ((180 + _AS_OFFSETS) % 360)}
+_AS_DIR = {fwd: (np.cos(np.deg2rad(b)), np.sin(np.deg2rad(b))) for fwd, b in _AS_BINS.items()}
+
+
+def auto_stop_path_contains(x: np.ndarray, y: np.ndarray, forward: bool, curvature: float,
+                            length_m: float) -> np.ndarray:
+    """base_link の点 (x, y) [m] が予想進路に入るか（ファームの `AutoStopPath_Init`/`_Contains` と同じ式）。
+
+    後車軸の中心が曲率 `curvature`（左が正）の円弧を進むとして、車体（±`AUTO_STOP_HALF_WIDTH_M`）が
+    先端の中心が `length_m` 進むまでに掃く円環×角度。車体の横・後ろ（角度の下限）は見ない。"""
+    w = AUTO_STOP_HALF_WIDTH_M
+    lead = AUTO_STOP_BODY_FRONT_X_M if forward else -AUTO_STOP_BODY_REAR_X_M
+    trail = -AUTO_STOP_BODY_REAR_X_M if forward else AUTO_STOP_BODY_FRONT_X_M
+    x = np.asarray(x, dtype=float) if forward else -np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    k = abs(curvature)
+    if k < AUTO_STOP_STRAIGHT_CURVATURE_1_M:
+        return (x <= lead + length_m) & (np.abs(y) <= w)
+    r = 1.0 / k
+    r_in = r - w
+    r_in_sq = r_in * r_in if r_in > 0.0 else 0.0
+    r_out_sq = max(lead, trail) ** 2 + (r + w) ** 2
+    r_corner_sq = lead * lead + r_in * r_in
+    sweep = length_m / math.hypot(lead, r)
+    toward = r - y * (1.0 if curvature >= 0.0 else -1.0)
+    r_sq = x * x + toward * toward
+    ring = (r_sq >= r_in_sq) & (r_sq <= r_out_sq)
+    if sweep >= math.pi:
+        return ring
+    # 半径 r で最も先にある車体の点の角度 α_lead（r・cos と r・sin）。前端か、内側の側面の上
+    # 外側の先端の角より外は外側の側面の上（後退で前端が振り出す分。α_lead < 0）
+    r_far = r + w
+    side_out = r_sq > lead * lead + r_far * r_far
+    front = r_sq >= r_corner_sq
+    lead_cos_r = np.where(side_out, r_far,
+                          np.where(front, np.sqrt(np.maximum(r_sq - lead * lead, 0.0)), r_in))
+    lead_sin_r = np.where(side_out, -np.sqrt(np.maximum(r_sq - r_far * r_far, 0.0)),
+                          np.where(front, lead, np.sqrt(np.maximum(r_sq - r_in * r_in, 0.0))))
+    cs, sn = math.cos(sweep), math.sin(sweep)
+    # 上限の角度 b = α_lead + Φ（r・cos b、r・sin b）
+    lim_cos = lead_cos_r * cs - lead_sin_r * sn
+    lim_sin = lead_sin_r * cs + lead_cos_r * sn
+    within = np.where(lim_sin >= 0.0, (x < 0.0) | (toward >= lim_cos),
+                      np.where(lead_sin_r >= 0.0, True, lim_sin * toward - lim_cos * x >= 0.0))
+    return ring & within
+
 
 #: ABS の旗を立てる下限の車速 [m/s]。v0.16 のファームはスリップ率の分母に下限を置いて低速でも働くが、
 #: MD の制動が車輪の止まる手前で抜ける（約0.6m/s から）ので、低速で ABS が削る場面はほとんど無い
@@ -574,18 +625,20 @@ class VirtualStm32:
         forward = (speed >= 0.0) if abs(speed) > AUTO_STOP_DIRECTION_DEADBAND_M_S \
             else (desired_direction >= 0.0)
         av = abs(speed)
-        delay_s = AUTO_STOP_SENSOR_DELAY_S + self._config.get(packets.Param.MD_TORQUE_LAG_S, MD_TORQUE_LAG_PLACEHOLDER_S)
+        delay_s = (AUTO_STOP_SENSOR_DELAY_S + AUTO_STOP_LIDAR_PERIOD_S
+                   + self._config.get(packets.Param.MD_TORQUE_LAG_S, MD_TORQUE_LAG_PLACEHOLDER_S))
         d_stop_cm = ((av * delay_s + av * av / (2.0 * self._brake_decel())) * 100.0
                      + self._config.get(packets.Param.AUTO_STOP_MARGIN_CM, 15.0))
         lidar_fresh = lidar_hit = False
         lid = self.lidar
         if lid is not None and lid.last_emit_ns and (self._now - lid.last_emit_ns) < LIDAR_TIMEOUT_NS:
             lidar_fresh = True
-            d = lid.last_scan[_AS_BINS[forward]] * 100.0                 # cm。0 = 無効
-            x, y = d * _AS_COS, d * _AS_SIN
-            n = int(np.count_nonzero((d > 0.0)
-                                     & (x <= d_stop_cm + AUTO_STOP_LIDAR_OFFSET_CM[forward])
-                                     & (y <= AUTO_STOP_LIDAR_HALF_WIDTH_CM)))
+            d = lid.last_scan[_AS_BINS[forward]]                         # m。0 = 無効
+            cx, cy = _AS_DIR[forward]
+            curvature = math.tan(v.steer_actual) / AUTO_STOP_WHEELBASE_M
+            inside = auto_stop_path_contains(AUTO_STOP_LIDAR_X_M + d * cx, d * cy, forward, curvature,
+                                             d_stop_cm / 100.0)
+            n = int(np.count_nonzero((d > 0.0) & inside))
             lidar_hit = n >= AUTO_STOP_LIDAR_MIN_POINTS
         us_cm = (self.us_front if forward else self.us_rear) * 100.0
         off = AUTO_STOP_ULTRASONIC_OFFSET_CM[forward]
