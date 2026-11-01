@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.bus_bridge import BusBridge  # noqa: E402
 from raspi.core.control_params import ControlParamSync, disarm_brake_timeout_s, load_control_params  # noqa: E402
+from raspi.core.steer_guard import SteerGuard  # noqa: E402
 from raspi.core.link_tracker import (  # noqa: E402
     LinkState,
     LinkTracker,
@@ -128,12 +129,15 @@ STM_LOG_ARM_IGNORED = "ARM ignored"
 #: 再 ARM ラッチ（`IoNode._rearm_reason`）の理由。立てた後に `cmd.arm` が一度 False になるまで ARM を通さない
 REARM_STM_RESTART = "stm_restart"
 REARM_LINK_LOST = "stm_link_lost"
+REARM_STEER_STUCK = "steer_stuck"
 #: ラッチの原因が収まった後に `arm_inhibit_reason` へ出す文（GUI にそのまま出る）
 _REARM_MESSAGES = {
     "E-Stop": "E-Stop は解除されました。ARM を一度外してから入れ直してください",
     "駆動電源ラッチ": "駆動電源ラッチは解除されました。ARM を一度外してから入れ直してください",
     REARM_STM_RESTART: "STM32 が再起動しました。ARM を一度外してから入れ直してください",
     REARM_LINK_LOST: "STM32 が通信途絶から復帰しました。ARM を一度外してから入れ直してください",
+    REARM_STEER_STUCK: ("舵が指令に追従しなかったので止めました。ステアの機構と MD を点検してから"
+                        "ARM を一度外して入れ直してください"),
 }
 
 #: 自発の VERSION（STM32 の起動バースト。100ms 間隔×3回）を再起動の合図として数える窓。
@@ -265,6 +269,8 @@ class IoNode:
         self.stm_log: list[str] = []
         #: `[control]` が読めなかった理由（空 = 読めた）。`LinkDiag` に出す
         self.control_params_error = control_params_error
+        #: 舵が指令に追従しないことの見張り（`_check_steer`）
+        self.steer_guard = SteerGuard()
         self.bridge = BusBridge(pub, base_m=_load_odometer_base())
         #: 直近に保存した総走行距離。周期保存の間引き判定（1m以上動いたか）に使う
         self._last_saved_odom = self.bridge.state_builder.odom_center
@@ -368,10 +374,35 @@ class IoNode:
     def _on_telemetry_chain(self, extra):
         """バスへの配信を必ず通しつつ、呼び出し側のコールバックも呼ぶ。"""
         def _cb(t, t_pi_ns):
+            self._check_steer(t, t_pi_ns)
             self.bridge.on_telemetry(t, t_pi_ns)
             if extra is not None:
                 extra(t, t_pi_ns)
         return _cb
+
+    def _check_steer(self, t: packets.Telemetry, t_pi_ns: int) -> None:
+        """舵が指令に追従しない（`raspi/core/steer_guard.py`）なら、止めて ARM をラッチする。
+
+        STM32 は舵の位置制御が追従しなくても何も言わない（会場の試走 `surge_20261031_062217` で、舵が
+        動かないまま 1.4 秒まっすぐ走って壁に当たった）。走っていれば最大制動で止めてから DISARM し
+        （`_command_packet`）、人が ARM を入れ直すまで通さない（`_update_rearm_latch`）。
+        """
+        armed = bool(t.flags & packets.FLG_ARMED)
+        if not armed:
+            self.steer_guard.reset()
+            return
+        meta = packets.Telemetry.META
+        if not self.steer_guard.update(
+                t_pi_ns, armed, t.steer_cmd_echo * meta["steer_cmd_echo"][0],
+                t.steer_actual * meta["steer_actual"][0],
+                t.motor_current[2] * meta["motor_current"][0]):
+            return
+        why = self.steer_guard.reason
+        self._rearm_reason = REARM_STEER_STUCK
+        self._log_event("steer_stuck", {"reason": why})
+        self.stm_log.insert(0, f"{time.strftime('%H:%M:%S')} E Pi: {why}")
+        del self.stm_log[4:]
+        print(f"\n!! {why}。ARM を外した", file=sys.stderr, flush=True)
 
     # ── LED 表示 ──
 
@@ -893,6 +924,10 @@ class IoNode:
         # `cmd_stale` と同じ「安全側へ倒す」判断なので、誤検知しても起きるのは早めの停止だけ
         # （危険側には振れない）
         if self._arm_block_reason():
+            if self._rearm_reason == REARM_STEER_STUCK and self._last_armed_pkt is not None:
+                # 舵が追従しない（`_check_steer`）。走っていたなら最大制動で止めてから DISARM に落とす
+                # （いきなり DISARM すると駆動電源が切れ、制動できずに惰行する）
+                return self._failsafe_packet(time.monotonic_ns())
             self._last_armed_pkt = None
             self._failsafe_since_ns = None
             return self._disarm_command()
