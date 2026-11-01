@@ -1069,6 +1069,14 @@ class Slam2dRoute(Slam2dRaceLine):
         # 親が詰め直したとき（`_map_ver`）と、こちらの経路の版が進んだときの両方で変わる値
         m.route_seq = self._map_ver + self._route_ver
         m.route_active = self._switch.active_key
+        if self._switch.active is None and (key := self._start_key()):
+            # ★ 走り出す前（LOCATED・DONE）は、親が詰めたライン（`self.path` = 地図ファイルに保存した
+            #   ライン）ではなく走り出す経路を太線で出す。避ける範囲を保存して作り直しても、太線が
+            #   古いままで「走行を開始するまで再計算されない」ように見えた
+            line = self._routes[key]
+            m.route_active = key
+            m.raceline = line.xy.reshape(-1).tolist()
+            m.raceline_v = line.v.tolist()
         m.routes_json = self._cfg.to_json(with_traj=False)
         if self._graph is not None:
             xs: list[float] = []

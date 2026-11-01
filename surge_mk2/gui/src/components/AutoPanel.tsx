@@ -356,7 +356,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
       {selected?.map_ui && <MapLibrary ch={ch} />}
 
       {/* 経路グループの切替と経由点の編集（`slam2d_route`、`RoutePanel.tsx`） */}
-      {selected?.routes_ui && <RoutePanel ch={ch} />}
+      {selected?.routes_ui && <RoutePanel ch={ch} mode={selected.id} />}
 
       {/* ── planner の判断 ── */}
       <section className="auto-state">

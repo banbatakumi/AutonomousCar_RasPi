@@ -949,6 +949,27 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_snapshot_before_start_shows_the_rebuilt_route(self):
+        # 走り出す前（LOCATED）に避ける範囲を保存したら、太線（raceline）が作り直した経路になる。
+        # 地図ファイルのラインのままだと「走行を開始するまで再計算されない」ように見えた
+        from raspi.auto.slam2d_route import Slam2dRoute
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            m = pl.snapshot()
+            self.assertEqual(m.route_active, "A")         # 設定の開始グループ
+            np.testing.assert_allclose(m.raceline, pl._routes["A"].xy.reshape(-1), atol=1e-9)
+            pl.request_routes(json.dumps({"groups": {"A": [[2.0, 1.0, 0.0], [3.5, 2.5]]},
+                                          "active": "A"}))
+            self._wait(pl)
+            m2 = pl.snapshot()
+            self.assertGreater(m2.route_seq, m.route_seq)
+            np.testing.assert_allclose(m2.raceline, pl._routes["A"].xy.reshape(-1), atol=1e-9)
+            self.assertNotEqual(len(m2.raceline), len(m.raceline))
+        finally:
+            pl.close()
+
     def test_bad_routes_are_reported_not_raised(self):
         from raspi.auto.slam2d_route import Slam2dRoute
         pl = Slam2dRoute()

@@ -18,10 +18,16 @@
  * 保存すると planner が検証して地図と同じ名前の `.routes.json` に書き、
  * 経由点が変わっていれば経路を作り直す（走行中でもよい。作り直した経路へは
  * 切替と同じく乗れる地点で移る）。
+ *
+ * ## 下見中（地図を選んだだけ）でも編集を始められる
+ *
+ * 保存先と作り直しの対象は planner が読んでいる地図なので、下見中に「経由点を編集」を押したら
+ * 先にその地図を planner に読ませ（「自己位置を特定」と同じ送信。engage しないので走らない）、
+ * 読み込んだ地図が届いてから編集を始める。保存すればその場で経路を作り直して地図パネルに出る。
  */
 import { useEffect, useState } from 'react'
 import { useNumbers, live } from '../bus/live'
-import { mapPreview } from '../bus/mapPreview'
+import { clearPreview, mapPreview } from '../bus/mapPreview'
 import {
   AVOID,
   GROUP_COLOR,
@@ -43,21 +49,48 @@ import { askConfirm, notify } from './ConfirmDialog'
 /** `signal_map` で編集できる信号の値。矢印信号（大会⑥）の左右 */
 const SIGNALS = ['left', 'right'] as const
 
-export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
+export function RoutePanel({ ch, mode }: { ch: ControlChannel | null; mode: string }) {
   const st = useNumbers().auto
   const [, setTick] = useState(0)
   const rerender = () => setTick((t) => t + 1)
   const ready = st?.route_groups ?? []
   const cfg = routeEdit.cfg
+  // 下見中に押して、planner に読ませた地図が届くのを待っている（その地図の名前）
+  const [waitMap, setWaitMap] = useState('')
 
   // このパネルが消えたら（モードの切り替え等）編集も終える。残すと、地図パネルのクリックが
   // 見えない編集に吸われ続ける
   useEffect(() => endEdit, [])
 
+  // 読ませた地図が届いたら編集を始める（`auto/state` で 10Hz に描き直されるので毎回見る）。
+  // 届く前に始めると、前の地図の設定を写し取り、保存で「地図が替わった」と弾かれる。
+  // 待っている間に別の地図を下見し始めたらやめる
+  useEffect(() => {
+    if (!waitMap) return
+    if (mapPreview.data) setWaitMap('')
+    else if (live.map?.mapName === waitMap) {
+      setWaitMap('')
+      beginEdit()
+      rerender()
+    }
+  })
+
+  const startEdit = () => {
+    if (mapPreview.data && mapPreview.name) {
+      const name = mapPreview.name
+      clearPreview()
+      ch?.startSlam2dLocate(mode, name)
+      setWaitMap(name)
+      return
+    }
+    beginEdit()
+    rerender()
+  }
+
   const save = () => {
     if (!cfg) return
     if (mapPreview.data) {
-      notify('地図を下見している間は保存しません（地図パネルに出ているのは planner が読んでいる地図ではありません）。「自己位置を特定」で地図を読み込んでから編集してください')
+      notify('別の地図を下見している間は保存しません（地図パネルに出ているのは planner が読んでいる地図ではありません）。「やめる」で閉じて、選んだ地図で編集し直してください')
       return
     }
     if (mapReplaced()) {
@@ -108,18 +141,16 @@ export function RoutePanel({ ch }: { ch: ControlChannel | null }) {
 
       {!cfg ? (
         <button
-          // ★ 下見中（`mapPreview`）は編集させない。地図パネルは下見の地図を描くが、保存は planner が
-          //   今読んでいる地図（別の地図・地図なし）に書かれ、「自己位置を特定」で読み直すと消えた。
-          //   名前の無い地図（作成中）も保存先が無い
-          disabled={!live.map?.mapName || mapPreview.data !== null}
-          title={mapPreview.data !== null || !live.map?.mapName
-            ? '「自己位置を特定」で地図を読み込んでから編集できます' : undefined}
-          onClick={() => {
-            beginEdit()
-            rerender()
-          }}
+          // ★ 下見中（`mapPreview`）は、その地図を planner に読ませてから編集する（`startEdit`）。
+          //   下見の地図のまま編集させると、保存は planner が今読んでいる地図（別の地図・地図なし）に
+          //   書かれ、「自己位置を特定」で読み直すと消えた。名前の無い地図（作成中）は保存先が無い
+          disabled={!ch || waitMap !== '' || !(mapPreview.data ? mapPreview.name : live.map?.mapName)}
+          title={waitMap ? `地図 ${waitMap} を読み込んでいる`
+            : mapPreview.data ? '選んだ地図を読み込んで編集する（自己位置の特定も始まる。走り出しはしない）'
+            : !live.map?.mapName ? '地図を選ぶと編集できます' : undefined}
+          onClick={startEdit}
         >
-          経由点を編集
+          {waitMap ? '地図を読み込み中…' : '経由点を編集'}
         </button>
       ) : (
         <RouteEditor rerender={rerender} onSave={save} />
