@@ -333,7 +333,7 @@ def write_vehicle_toml(cam: str, result: CalibResult,
     180° に迫り、ピンホールの式（tan(hfov/2)）に入れると破綻するため。校正値から
     求めた水平画角は参考値として `fisheye.hfov_deg` に残す。
 
-    コメント・書式は `tomlkit` で保つ（`tools/sysid/toml_update.py` と同じ流儀）。
+    コメント・書式は `tomlkit` で保つ（`tools/calib/toml_io.py` と同じ流儀）。
     `regenerate` なら `config/generate.py` も走らせて GUI の定数を揃える
     （揃えないと CI の `--check` が落ちる）。
     """

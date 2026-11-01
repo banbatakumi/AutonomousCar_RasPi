@@ -7,9 +7,12 @@
 | [architecture.md](architecture.md) | ソフトウェア設計書。「なぜそう設計したか」 |
 | [uart_protocol.md](uart_protocol.md) | **UART プロトコル仕様**（**v0.29**）の説明 |
 | [stm32_interface.md](stm32_interface.md) | STM32 側の実装仕様（C 構造体・安全要件・立ち上げ手順） |
+| [calibration.md](calibration.md) | 車両の校正（試験 `raspi/auto/calib_*`・解析 `tools/calib`）の設計と手順 |
+| [control_constants.md](control_constants.md) | 制御定数の出どころ（物理・同定・式・方針・経験則） |
 | [competition_plan.md](competition_plan.md) | 大会に向けた計画 |
 | [../sim/README.md](../sim/README.md) | シミュレータ（Mac 専用） |
 | [../gui/README.md](../gui/README.md) | GUI のコード地図 |
+| [../slam2d/README.md](../slam2d/README.md) | 車体非依存の 2D LiDAR SLAM ライブラリ |
 | [setup_credentials.md](setup_credentials.md) | Pi の SSH・Wi-Fi 等の設定値（`.gitignore` 対象・機密） |
 | [archive/](archive/README.md) | **過去の記録（旧 PROGRESS・監査・コードレビュー）。陳腐化しており、指示がない限り読まない** |
 

@@ -136,8 +136,8 @@ Rosetta で起動されたら arm64 で立て直し、ポートや `io` endpoint
 | 走行中の揺れ（`SimParams.vib_*`。実機で測ったヨーレート・車速・実舵角の約 11Hz の雑音。**既定は 0**、`sim.bench --real-noise` で実機の値が入る） | 揺れの原因（舵指令のばたつきに車が応える動き）そのもの。テレメトリの値に足すだけで、車の運動は変えない |
 
 **自動停止（`auto_stop`）はファームの判定を写してある**（`sim/stm32.py` の `_auto_stop_obstacle`、定数は
-`vehicle.h` の `VEHICLE_AUTO_STOP_*` と同じ）。停止距離 `v×0.1 + v²/(2×3.0) + マージン（CONFIG_SET、既定 15cm）`
-以内で、進行方向（ほぼ静止なら指令の向き）・車幅 ±15cm の矩形に LiDAR の点が 3 点以上あれば作動し、
+`vehicle.h` の `VEHICLE_AUTO_STOP_*` と同じ）。停止距離 `v×遅延 + v²/(2a) + マージン（CONFIG_SET、既定 15cm）`
+（遅延 = LiDAR 1 回転 0.1s ＋ CONFIG_SET の `MD_TORQUE_LAG_S`、a = CONFIG_SET の `BRAKE_DECEL_M_S2`）以内で、進行方向（ほぼ静止なら指令の向き）・車幅 ±15cm の矩形に LiDAR の点が 3 点以上あれば作動し、
 止まるまで保持する。超音波は至近（車体先端から 5cm 未満）と、LiDAR が 300ms 来ないときの停止距離判定の代わり。
 違い: LiDAR の点は UART を通さず `VirtualLidar.last_scan`（セクタを撃った時点の値）から読む。
 `NO_HEARTBEAT`・`AUTO_STOP_BLIND`（TELEMETRY の予約ビット）は常に 0。

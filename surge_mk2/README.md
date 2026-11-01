@@ -47,7 +47,7 @@ flowchart LR
 | [`gui/`](gui/) | React + TypeScript + Vite の Web GUI |
 | [`sim/`](sim/) | Mac 上で実車相当の上流コードを動かす 2D シミュレータ |
 | [`slam2d/`](slam2d/) | 2D SLAM、地図生成、自己位置推定 |
-| [`config/`](config/) | 車両パラメータ、運転設定、プロトコル等からの生成スクリプト |
+| [`config/`](config/) | 車両パラメータ（`vehicle.toml`）、自動運転・走行設定の保存値、生成スクリプト |
 | [`ml_cam/`](ml_cam/)、[`ml_cam_e2e/`](ml_cam_e2e/)、[`ml_lidar/`](ml_lidar/) | 学習・評価・モデル出力のパイプライン |
 | [`ml_common/`](ml_common/) | 機械学習用 GUI と共通部品 |
 | [`tools/`](tools/) | デプロイ、検査、ログ変換、同定などの開発ツール |
@@ -139,7 +139,7 @@ tools/deploy.sh --test       # 配備後に Raspberry Pi 側のテストを実�
 | 開発・配備・トラブルシューティング | [docs/development.md](docs/development.md) |
 | UART プロトコル仕様 | [docs/uart_protocol.md](docs/uart_protocol.md) |
 | STM32 とのインターフェース | [docs/stm32_interface.md](docs/stm32_interface.md) |
-| 現在の進捗と未検証事項 | [PROGRESS.md](PROGRESS.md) |
+| 現在の進捗・実測値 | [PROGRESS.md](PROGRESS.md) |
 | 文書の一覧 | [docs/README.md](docs/README.md) |
 | 大会に向けた計画 | [docs/competition_plan.md](docs/competition_plan.md) |
 

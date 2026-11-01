@@ -618,7 +618,6 @@ class VirtualStm32:
             f |= packets.FLG_LAUNCH_ACTIVE
         # ★ 作り物: このモデルは後輪の回転を持たないので TC そのものは無い。駆動の加速度が
         #   グリップの上限で頭打ちになっている間（実機なら TC が介入する場面）に旗だけ立てる。
-        #   発進の加速度から横グリップの初期値を出す処理（`raspi/nav/grip.LaunchFit`）の検証用
         if (self.vehicle.accel_capped and self._input.armed
                 and self._config.get(packets.Param.TC_ENABLE, 1.0) != 0.0):
             f |= packets.FLG_TC_ACTIVE

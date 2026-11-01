@@ -453,7 +453,7 @@ WHEEL_LIFT_DIFF_THRESHOLD_M_S = 0x0051  # ★v0.16（調整パラメータ。v0.
 # （pi_uart_protocol_v0.12_delta.md）
 AUTO_STOP_MARGIN_CM = 0x0060
 # ABS_ENABLE: v0.15でSTM32ファームウェアが実装済み（制動モード＝brake・自動停止・フェイルセーフの
-# 最大制動で後輪のロックを防ぐ。車速PIの減速・torque_modeの負トルクには掛からない）。既定は有効。
+# 最大制動、および前進中の車速PIの減速で後輪のロックを防ぐ。torque_modeの負トルクには掛からない）。既定は有効。
 # TC_ENABLE と同じ bool（0.0/1.0）。Pi側から実際に送信する（raspi/nodes/io_node.py）
 ABS_ENABLE = 0x0070
 # BRAKE_HOLD_ENABLE: ★v0.19。ブレーキホールド（制動して止まったら後輪の位置保持へ自動で移る。

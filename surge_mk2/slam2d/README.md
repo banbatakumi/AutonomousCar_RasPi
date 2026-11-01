@@ -29,10 +29,12 @@ core/
   motion.py    推測航法の抽象・ジャイロのゼロ点ずれ/車速の倍率の学習
   frontend.py  1周期の処理（脱スキュー→予測→位置合わせ→地図更新）
   localize.py  グローバルローカリゼーション（保存地図の上で「どこに居るか」）
+  locscore.py  自己位置の候補の採点（他車などの遮り物に強い一致度）
 backend/
   loop_detection.py  古いキーフレームだけで作った部分地図への再訪判定
   posegraph.py       g2opy のラッパー（Huber・外れ値の除去つき）
 pipeline.py    SlamSystem（フロントエンド＋ループ閉じの公開API）
+tools/         spike_g2o.py（g2opy の動作確認）
 ```
 
 ### 設計の骨格（なぜこの形か）

@@ -153,8 +153,7 @@ class TestVehicleGripLimit(unittest.TestCase):
 
     def test_steady_cornering_a_lat_max_matches_mu_g(self):
         """縦加速度がゼロに収束した定常円旋回では、摩擦円連成を入れても
-        従来通り`mu*g`単独の限界に一致する（`sysid_corner.py`の測定条件・
-        既存テストの前提と矛盾しないことの確認）。"""
+        従来通り`mu*g`単独の限界に一致する（既存テストの前提と矛盾しないことの確認）。"""
         spec = VehicleSpec(mu=0.8)
         v = _settle(VehicleModel(spec, (0.0, 0.0, 0.0)), steer=spec.max_steer, speed=5.0)
         self.assertAlmostEqual(v.accel_x, 0.0, delta=1e-3)

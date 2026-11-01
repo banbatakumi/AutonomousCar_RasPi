@@ -24,9 +24,9 @@
 
 | 知りたいこと | 見るファイル |
 |---|---|
-| システム全体をざっと把握したい | [`docs/system_overview.md`](docs/system_overview.md) |
+| システム全体をざっと把握したい | [`docs/system_overview.md`](docs/system_overview.md)（構成図とモジュール地図だけなら [`SYSTEM_ARCHITECTURE.md`](SYSTEM_ARCHITECTURE.md)） |
 | なぜその設計にしたか | [`docs/architecture.md`](docs/architecture.md) |
-| 今どこまで進んだか・実測値 | [`PROGRESS.md`](PROGRESS.md) |
+| 今どこまで進んだか・実測値 | [`PROGRESS.md`](PROGRESS.md)（冒頭の「現在の状態」が正。下の節の状態表記は記録時点のもの） |
 | どう直して実機/シムに反映するか | [`docs/development.md`](docs/development.md) |
 | UART プロトコルの数値仕様 | [`docs/uart_protocol.md`](docs/uart_protocol.md)（唯一の定義は `raspi/proto/protocol.toml`） |
 | STM32 側の実装仕様 | [`docs/stm32_interface.md`](docs/stm32_interface.md) |

@@ -11,7 +11,7 @@
 
 ロジックは `calib.py`（CLI の `python -m tools.cam_calib` と共通）。ネイティブ GUI に
 してあるのは、写真の取捨選択と結果の見比べをターミナル操作なしで完結させるため
-（`tools/sysid/gui.py` と同じ方針）。
+（`tools/calib/gui.py` と同じ方針）。
 """
 
 from __future__ import annotations

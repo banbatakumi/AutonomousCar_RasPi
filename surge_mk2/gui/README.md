@@ -7,9 +7,9 @@ React + TypeScript + Vite。`docs/architecture.md` §10 の設計に沿う。
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
 | **ラジコン**（既定） | 運転する人 | 速度・G・舵角をメータで。介入は数値ではなくランプ。設定は ⚙ ドロワー |
-| **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。経路・占有格子の重畳は Phase 3 以降 |
+| **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。モード選択・経路パネル・地図パネル（地図を持つ planner のとき） |
 | **診断** | 点検する人・原因を追う人 | 常設サマリ＋イベント帯＋サブページ6枚（下の「診断タブ」） |
-| **システム同定** | 車両パラメータを測る人 | 試験の実行と結果の確認 |
+| **システム同定** | 車両を校正する人 | 校正試験（`calib_*`）の実行と記録の取得。解析は Mac の `tools/calib`（`docs/calibration.md`） |
 
 記録（`.sfl`・mcap）の開始・停止はタブバーの `LogControls` に常設、ファイル一覧は診断タブの「記録」ページ。
 
@@ -44,7 +44,7 @@ LiDAR にはノイズ・欠損・遅延が入り、コース上の壁が点群�
 
 ```bash
 .venv/bin/python -m sim.run                  # 4つまとめて起動。Ctrl-C で全部落ちる
-.venv/bin/python -m sim.run --course fuji    # コース指定
+.venv/bin/python -m sim.run --course toyota2    # コース指定
 ```
 
 **この GUI にはシミュレータ用の操作を一切足していない。** 出るのは
@@ -129,9 +129,9 @@ src/
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
 ├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
-├── render/MapCanvas   世界座標のキャンバス（地図生成タブ・低頻度）
+├── render/MapCanvas   世界座標のキャンバス（自動運転ビューの地図パネル `AutoMapPanel`・低頻度）
 ├── views/             RcView / AutoView / DiagView / SysIdView（＝タブ4枚）
-├── components/        StatusBar(層B) / DriveBar(層B) / LogControls ほか
+├── components/        StatusBar(層B) / DriveBar(層B) / LogControls ほか。自動運転は AutoPanel（モード・パラメータ）/ RoutePanel（経路）/ AutoMapPanel・MapLibrary（地図）/ ParamPresets
 ├── components/ErrorBoundary / ConfirmDialog  タブごとの例外の受け皿 / 止まらない確認ダイアログ
 ├── components/diag/   診断タブの部品（下の「診断タブ」）
 ├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps）

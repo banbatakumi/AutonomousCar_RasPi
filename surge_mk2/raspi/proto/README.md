@@ -15,11 +15,8 @@ proto/
 
 ## なぜ生成にしているか
 
-パケット定義を Pi 側と STM32 側で別々に手書きすると**必ずズレる**。
-実際 v0.4 の策定中、`TELEMETRY` のフィールド順（`odom_dist` と `accel` のどちらが先か）が
-食い違ったまま2往復した。バイト位置のズレは「なぜか値が化ける」という形で現れ、
-原因にたどり着くまでに時間を溶かす。
-
+パケット定義を Pi 側と STM32 側で別々に手書きすると**必ずズレる**。バイト位置のズレは
+「なぜか値が化ける」という形で現れ、原因にたどり着くまでに時間を溶かす。
 定義を1箇所に閉じ込め、両言語を機械的に吐かせればこの種の事故は起きない。
 
 ## 使い方
@@ -54,7 +51,7 @@ python3 -m unittest raspi.tests.test_proto
 したがって `generate.py --check` は Pi 側の生成物が toml と合っているかしか見ない。**toml を変えたら
 ファームの `RAS_LEN_*`・`RAS_FLAG_*`・`RAS_CMD_FLAG*`・`RAS_PROTOCOL_VERSION` も同時に直し、
 `protocol_version` を上げること**（Pi は版数が完全に一致しない STM32 には ARM を通さない）。
-param_id と範囲だけは `tools/ctrl_tune/tests` がファームの表と突き合わせる。
+調整パラメータの param_id と範囲は `tools/fwsim/tests/test_fw_constants.py` がファームの表と突き合わせる。
 
 ヘッダは、ファーム側で取り込むときのためと、レイアウトを C で確かめるために生成している。
 取り込む場合は編集せずにコピーする。
@@ -103,11 +100,9 @@ ser.write(enc.encode(packets.Command(mode=packets.Mode.MANUAL,
 ```
 
 `parser.stats` に `crc_error` / `len_error` / `packet_loss` / `unknown_type` などが溜まる。
-`reordered`（SEQ の逆行）は、**古いファーム（SEQ を送信キューへ積むときに振っていたもの）では
-正常でも増えた**: 優先度キューで PONG・TELEMETRY が先に積まれた LiDAR 等を追い越すため。
-現行のファームは DMA を起動する直前に SEQ を振る（送出順に単調増加）ので、正常なら 0 のまま
-で、増えたら実際の異常（経路上の入れ替わり）。追い越された分はいったん `packet_loss` に数え、
-遅れて届いたら差し引くので、`packet_loss` は実際のロスだけを表す（古いファームへの互換）。
+`reordered`（SEQ の逆行）は、ファームが DMA を起動する直前に SEQ を振る（送出順に単調増加）ので、
+正常なら 0 のままで、増えたら実際の異常（経路上の入れ替わり）。追い越された分はいったん
+`packet_loss` に数え、遅れて届いたら差し引くので、`packet_loss` は実際のロスだけを表す。
 STM32 の再起動で SEQ が 0 から始まり直したら `reset_seq()` を呼ぶ（呼ばないと1回だけ偽のロスが乗る）。
 **GUI では STM32 側の `STATS` パケットと並べて出している**（`DiagGrid`）。
 片方向だけ増えるのか両方向なのかで、原因の切り分けが変わる。

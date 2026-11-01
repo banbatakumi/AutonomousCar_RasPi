@@ -16,13 +16,10 @@
  * ここにあるのは**すべて GUI 側だけで完結する調整値**（`store/ui.ts` の
  * `DrivingSettings`）。`localStorage` に保存され、次回起動時も引き継がれる。
  *
- * ⚠ **STM32 実機の `CONFIG_SET`/`CONFIG_GET` で同期する設定は、
- * TC/TV の有効・無効切り替え（★v0.8）だけ対応済み。** ゲイン等の連続値
- * パラメータ（`TC_SLIP_THRESH`/`TV_GAIN`/`SPEED_KP`/`SPEED_KI`）は
- * STM32 ファームウェア側が未実装のため、まだここに無い
- * （`architecture.md` §10.5 の「Pi を single source of truth にする」
- * 設計は部分的にしか実現していない）。他はすべて GUI が指令を作る
- * ときのランプ・上限だけ。
+ * ⚠ STM32 実機の `CONFIG_SET`/`CONFIG_GET` で同期する値（TC/ABS/TV のゲイン・有効無効、
+ * 速度 PI 等）は、GUI ではなく `config/vehicle.toml` の `[control]` を io_node が送る
+ * （Pi が single source of truth。`raspi/proto/protocol.toml` の Param 参照）。
+ * ここにあるのは GUI が指令を作るときのランプ・上限だけ。
  *
  * ## 中身のタブ分け
  *

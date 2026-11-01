@@ -20,5 +20,5 @@ OpenCV の `cv2.fisheye`（Kannala-Brandt, k1..k4）。式と座標の約束（�
 ## Pi に入れない
 
 cv2 は Pi にも入っているが、校正は写真を見比べながら何度もやり直す作業なので Mac で回す
-（`tools/sysid` と同じ位置づけ）。依存は `tools/requirements.txt`。
+（`tools/calib` と同じ位置づけ）。依存は `tools/requirements.txt`。
 """

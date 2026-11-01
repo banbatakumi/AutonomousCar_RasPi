@@ -24,8 +24,7 @@
 （`mu*g`）を無条件に超えうる——`mu`の実測値（0.454）では`mu*g≈4.46m/s²`だが
 `MAX_BRAKE_TORQUE_NM`由来の制動減速度は≈5.0m/s²で、直進急制動だけでもグリップ
 限界を超えてしまう計算になる（実際はスリップして頭打ちになるはず）。`spec`に
-`drive_accel_m_s2`/`brake_decel_m_s2`（システム同定タブ「加減速試験」の実測値、
-`tools/sysid/fit.py`の`fit_accel()`参照）を追加し、実測済み（>0）ならハードウェア
+`drive_accel_m_s2`/`brake_decel_m_s2`（実測の加減速度）を追加し、実測済み（>0）ならハードウェア
 仕様値より優先して使う——モータのトルク仕様ではなく、実際にタイヤが発生できた
 加減速度そのものを使う方が、グリップ限界を含めた実車の挙動に近い。未実測
 （既定0.0）の間はトルク仕様値から逆算する。
@@ -36,7 +35,7 @@
 - **操舵の順序**（実機に合わせる）: 指令 →（`COMMAND.steer_rate_limit`による参照ランプ。
   **これが`steer_cmd_echo`**）→ むだ時間 → 1次遅れ → サーボの物理的な角速度上限。
   実機の`steer_cmd_echo`が0.524rad/7.0rad/s≈75msかけてランプするので、
-  STM32は参照側をランプさせてからサーボに渡している。レート制限は1次遅れの**前**（`tools/sysid/fit.py`の`fit_steer`参照）
+  STM32は参照側をランプさせてからサーボに渡している。レート制限は1次遅れの**前**
 - **むだ時間は時刻で引く**（`SteerServo`）。ステップ数のキューだとサブステップ幅`dt`
   ぶん遅れ側へ量子化され、`dt`で実効遅延が変わる
 - **実効舵角**（`SteerLink`）: 報告される舵角（モータ角から換算）と、実際に車が曲がる
@@ -302,8 +301,8 @@ class SteerLink:
     """ステアモータ角（`steer_actual`）→ タイヤ角: リンクのガタ → 中立付近の不感帯。
 
     `steer_actual` はモータ側のエンコーダから換算した値なので、モータとタイヤの間の
-    遊びはそこに現れず、曲率にだけ出る。`VehicleModel` と `tools/sysid/fit.py` が同じ
-    実装を使う。
+    遊びはそこに現れず、曲率にだけ出る。`VehicleModel` とステアの校正のシム（`tools/calib/simsteer.py` 経由）が
+    同じ実装を使う。
     """
 
     def __init__(self, hysteresis_rad: float, deadband_rad: float, initial: float = 0.0) -> None:
@@ -341,8 +340,7 @@ class DriveInput:
 class SteerServo:
     """ステアサーボ: 参照舵角 → むだ時間 → ×定常ゲイン → 1次遅れ → 物理的な角速度上限 → ヒステリシス → 実舵角。
 
-    `VehicleModel`と`tools/sysid/fit.py`（同定の出力誤差フィット）が**同じ実装**を使う。
-    同定値が「このシムで実機の応答を再現する値」になることを保証するため。
+    ステアの校正は `tools/calib/simsteer.py` でこの `VehicleModel` を真値として確かめる。
 
     むだ時間は「入力が始まった時刻」を記録しておき、ステップ中点 `t + dt/2 - dead`
     時点で有効だった入力を引く（ZOH）。サブステップ幅によらず実効遅延の期待値が
@@ -447,7 +445,7 @@ def brake_decel(spec: VehicleSpec, cmd: DriveInput, v: float) -> tuple[float, bo
 
 
 def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float:
-    """1ステップ後の車速。`VehicleModel`と`tools/sysid/fit.py`が共有する。"""
+    """1ステップ後の車速（`VehicleModel` が使う）。"""
     sp = spec
     if not cmd.armed:
         # ARM されていなければ惰行して止まる（駆動は切れているが慣性はある）。
@@ -509,7 +507,7 @@ class SpeedController:
 
     「1次遅れ＋加速度上限」ではファームのこの構造（ランプ→2次応答・行き過ぎ）を
     表現できず、同定で時定数が下限に張り付く。
-    `VehicleModel`（`speed_kp>0` のとき）と `tools/sysid/fit.py` が同じ実装を使う。
+    `VehicleModel`（`speed_kp>0` のとき）が使う。`raspi/nav/speedctl.py` はこれをファームの写しとして参照する。
 
     **ローンチコントロール**（`cmd.launch`、★v0.20。`drive.c` の `UpdateLaunch`）: 目標が測定速度より
     `LAUNCH_MIN_STEP_M_S` 以上速い加速では、ランプとPIを迂回して出せる最大のトルクを要求し

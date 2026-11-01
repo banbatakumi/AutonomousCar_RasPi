@@ -325,6 +325,7 @@ GUI 本体（`gui/dist`）も `telemetry_node` が HTTP で配るので、WS と
 | `0x06` | `PONG` | STM32 → Pi | 時刻同期（T2/T3） |
 | `0x07` | `VERSION` | STM32 → Pi | プロトコル版・ファーム ID |
 | `0x08` | `STATS` | STM32 → Pi | 累積エラーカウンタ |
+| `0x09` | `LIDAR_SECTOR_C` | STM32 → Pi | 距離1バイトに圧縮した LiDAR（設定時のみ。定義は `protocol.toml`） |
 | `0x0A` | `LIMITS` | STM32 → Pi | 車両の物理的上限 |
 | `0x10` | `COMMAND` | Pi → STM32 | mode・flags・目標速度・目標舵角・レート制限・制動/駆動トルク |
 | `0x11` | `CONFIG_SET` | Pi → STM32 | 制御パラメータ設定 |
@@ -379,8 +380,8 @@ GUI 本体（`gui/dist`）も `telemetry_node` が HTTP で配るので、WS と
 | `cam_centerline` | 中心線追従（カメラ） | 不要 | 走行可能領域から前方回廊の中心を作り Pure Pursuit |
 | `cam_e2e` | E2E カメラ（模倣学習） | 不要 | 前方画像から操舵を直接回帰 |
 | `de` | Disparity Extender | 不要 | 物体の縁を車体半幅ぶん塗り潰してから最遠帯の真ん中を狙う |
-| `dp` | Disparity Pursuit | 不要 | `de` の塗り方 + `ftg` の Pure Pursuit（実装済・未検証） |
-| `slam2d_raceline` | レーシングライン | 作る / 読む | SLAM 地図上で最小曲率経路を生成して追従 |
+| `dp` | Disparity Pursuit | 不要 | `de` の塗り方 + `ftg` の Pure Pursuit |
+| `slam2d_raceline` | レーシングライン | 作る / 読む | SLAM 地図上で最小曲率経路を生成して追従。GUI には出ず、`slam2d_route` の土台と `sim.bench` 用 |
 | `slam2d_route` | 経路選択走行 | 作る / 読む | 道路グラフ + 経由点で分岐を選ぶ（GUI の主力） |
 | `line_trace` | ライントレース | 不要 | 白線の 2 点を Pure Pursuit の目標点にする |
 | `e2e_lidar` | E2E LiDAR | 不要 | 強化学習（PPO）で点群→操舵・速度を直接回帰 |
@@ -613,7 +614,7 @@ telemetry_node ──── ZMQ ──── io_node
 |---|---|
 | `sim/run.py` | io / telemetry / planning / GUI をまとめて起動 |
 | `sim/stm32.py` | 仮想 STM32（プロトコル・制御・テレメトリ） |
-| `sim/vehicle.py` | 車両動力学・タイヤ・グリップ |
+| `sim/vehicle.py` | 車両動力学・簡易グリップ限界（タイヤモデルは無い） |
 | `sim/lidar.py` | 仮想 LiDAR（ノイズ・欠損・鏡像） |
 | `sim/course.py`, `sim/track.py`, `sim/raceline.py` | コース・走路・レーシングライン |
 | `sim/gui.py`, `sim/ui.py` | pygame 俯瞰ビュー |
@@ -649,9 +650,9 @@ STM32 の制御コードをホスト上でそのままコンパイルし、車�
 |---|---|---|
 | `config/vehicle.toml` | 車両幾何・質量・動特性・制御・安全タイマ | **数値の正** |
 | `config/auto.json` | 自動運転モードとパラメータの保存値 | GUI の保存先 |
-| `config/drive_settings.json` | 走行設定 | — |
+| `config/drive_settings.json` | GUI の走行設定の保存値 | — |
 | `config/odometer.json` | オドメトリ関連の保存値 | — |
-| `config/cam_tuning/` | カメラのレンズ・内部パラメータ | 校正値 |
+| `config/cam_tuning/` | カメラのレンズのプロファイル | 校正値 |
 | `config/generate.py` | TOML → Python / TypeScript 生成 | 生成元 |
 | `config/gen_msgs.py` | メッセージ定義の生成 | 生成元 |
 | `config/check_docs.py` | ドキュメントの整合検査 | — |
@@ -681,7 +682,7 @@ surge_mk2/
 │   ├── proto/              UART プロトコル定義と生成物
 │   ├── rec/                .sfl / MCAP 記録・可視化・推測航法
 │   ├── setup/              systemd サービス・配備スクリプト
-│   ├── tools/              補助 CLI（バスデモ・ログ変換・校正 等）
+│   ├── tools/              補助 CLI（バスデモ・ログ変換・走行解析 等。車両の校正は `auto/calib_*` と `tools/calib`）
 │   └── tests/              単体・結合テスト
 ├── gui/                    React + TypeScript + Vite の Web GUI
 │   ├── src/views/          ラジコン / 自動運転 / 診断 / システム同定
