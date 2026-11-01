@@ -578,6 +578,10 @@ _STILL_SPEED = 0.1
 #: ので、動くと候補ごとに別の場所で仕上げて、古い姿勢を採ってしまう）
 _LOCATE_MOVE_SPEED = 0.05
 _LOCATE_MOVE_YAW_RATE = 0.05
+#: 解く直前の姿勢での照合（`_locate_at_pose`）が、その姿勢からこれ以上動いた答えを返したら採らない（別の所へ
+#: 吸い込まれた。種からの探索に任せる）[m]・[rad]。止まっている車を人が少し動かした程度は受ける
+_LOCATE_POSE_TOL_M = 0.3
+_LOCATE_POSE_TOL_RAD = 0.35
 
 
 class Slam2dRaceLine(Planner):
@@ -1003,6 +1007,9 @@ class Slam2dRaceLine(Planner):
         self._loc_hint_t = 0.0                   #: `_loc_hint` を受けた時刻（`time.monotonic()`）
         #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
         self._locate_seed: tuple[float, float] | None = None
+        #: 自動運転を解いて地図を読み直したときの、解く直前の姿勢 `(x, y, yaw)`（`on_disengage`）。
+        #: `_locate` はまずこの姿勢の周りを 1 回だけ照合し、合えば全域を探さずに特定済みにする
+        self._locate_pose: tuple[float, float, float] | None = None
         self._load_error = ""
         #: 地図の読み込みに失敗した（`request_load`）。解くまで指令を出さない
         self._load_failed = False
@@ -1085,11 +1092,15 @@ class Slam2dRaceLine(Planner):
             return
         name = self._active_map_name
         if name and self.phase != EXPLORE:
-            seed = (self.slam.pose.x, self.slam.pose.y)
+            pose = (self.slam.pose.x, self.slam.pose.y, self.slam.pose.yaw)
             self.reset()
             self.request_load(name)
             if not self._load_error:
-                self._locate_seed = seed
+                # ★ 種（位置だけ）からの探索は Pi で 3〜12 秒かかり、会場の試走では解くたびに待ち、「見つからない」も
+                #   続いた（`surge_20261031_044100`）。車はたいてい解いた場所に止まっているので、まず向きまで含めた
+                #   姿勢で 1 回照合する（`_locate_at_pose`）。外れたら種からの探索に落ちる
+                self._locate_seed = pose[:2]
+                self._locate_pose = pose
                 return
         self.reset()
 
@@ -1107,6 +1118,7 @@ class Slam2dRaceLine(Planner):
         だけで前回の`_loc_hint`（直前に押したクリック）を捨てる必要は無い
         （むしろ「クリック→レーシングライン走行」の順で押した意思を活かす）。
         """
+        self._locate_pose = None
         loaded = mapstore.load_map(name)
         if (loaded is not None and self._reline_on_load and len(loaded.raceline_xy) < 3):
             self._load_error = f"地図『{name}』にはレーシングラインが無い"
@@ -1732,6 +1744,12 @@ class Slam2dRaceLine(Planner):
             self._loc_hint = None
         seeded = self._loc_hint is None and self._locate_seed is not None
 
+        if self._locate_pose is not None and self._loc_cands is None and self._localizer is None:
+            guess, self._locate_pose = self._locate_pose, None
+            best = self._locate_at_pose(pts, guess, p)
+            if best is not None:
+                return self._adopt_locate(st, best)
+
         if self._loc_cands is None:
             if self._localizer is None:
                 hint = self._loc_hint or self._locate_seed
@@ -1791,6 +1809,25 @@ class Slam2dRaceLine(Planner):
                          f"点数 {max(top[0], top[1]):.2f}）。車の周りの障害物を離すか、"
                          "地図パネルをタップして位置を教えてください")
             return st
+        return self._adopt_locate(st, best)
+
+    def _locate_at_pose(self, pts, guess: tuple[float, float, float], p: dict[str, float]):
+        """`guess` の周りだけを照合し、地図に十分合って `guess` から大きく動いていなければ結果を返す（`None` = 外れ）。"""
+        ref = self.slam.refine(pts, Pose2D(*guess))
+        if ref is None:
+            return None
+        fit = LocateScorer(self.slam.grid).fit(pts, ref.pose, self.slam.lidar_xy)
+        best, _ = pick_locate([(locate_score(ref), locate_score_robust(fit), ref)])
+        if best is None or best.inlier < p["min_score"]:
+            return None
+        x, y, yaw = best.pose
+        dyaw = math.atan2(math.sin(yaw - guess[2]), math.cos(yaw - guess[2]))
+        if math.hypot(x - guess[0], y - guess[1]) > _LOCATE_POSE_TOL_M or abs(dyaw) > _LOCATE_POSE_TOL_RAD:
+            return None
+        return best
+
+    def _adopt_locate(self, st: AutoState, best) -> AutoState:
+        """`_locate` で決めた姿勢を採り、LOCATED（engage 中なら RACE）へ進む。"""
         self.slam.set_pose(*best.pose)
         # ★ `st.match_score`は`plan()`冒頭の`slam.update()`（古い姿勢からの追跡で未知の領域を指して
         #   失敗する）の値のまま残っている。求め直した値に置き換えないとRACEへ切り替わった瞬間だけ「一致度0」になる

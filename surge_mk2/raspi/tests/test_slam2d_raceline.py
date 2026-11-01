@@ -980,6 +980,49 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertEqual(p.phase, RACE)
         self.assertAlmostEqual(p.slam.pose.x, 3.0, delta=0.15)
 
+    def test_disengage_relocates_at_the_last_pose_in_one_cycle(self):
+        """★ 解いて地図を読み直したら、解く直前の姿勢で 1 回照合して特定済みに戻る（全域・種の探索をしない）。
+
+        会場の試走で、解くたびに 3〜12 秒探し直し、「見つからない」も続いた（`surge_20261031_044100`）。
+        """
+        self._save_manual_map("course_relocate")
+        p = Slam2dRaceLine()
+        p.set_engaged(False)
+        p.request_load("course_relocate")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        for _ in range(60):
+            p.plan(make_room_scan(3.0, 2.0, 0.2, segs=ROOM), vs(), params, 0.1)
+            if p.phase == LOCATED:
+                break
+        self.assertEqual(p.phase, LOCATED)
+        p.phase = RACE                                  # 走っている途中を模す
+        p.on_disengage()
+        self.assertEqual(p.phase, LOCATE)
+        st = p.plan(make_room_scan(3.0, 2.0, 0.2, segs=ROOM), vs(), params, 0.1)
+        self.assertEqual(p.phase, LOCATED, st.reason)    # 1 周期で戻る
+        self.assertAlmostEqual(p.slam.pose.x, 3.0, delta=0.1)
+        self.assertAlmostEqual(p.slam.pose.yaw, 0.2, delta=0.05)
+
+    def test_disengage_falls_back_to_search_when_the_car_was_moved(self):
+        """解いた後に車を大きく動かされていたら、直前の姿勢は採らず探索に落ちる。"""
+        self._save_manual_map("course_relocate_moved")
+        p = Slam2dRaceLine()
+        p.set_engaged(False)
+        p.request_load("course_relocate_moved")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        for _ in range(60):
+            p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            if p.phase == LOCATED:
+                break
+        self.assertEqual(p.phase, LOCATED)
+        p.phase = RACE
+        p.on_disengage()
+        st = p.plan(make_room_scan(1.5, 1.2, 1.2, segs=ROOM), vs(), params, 0.1)
+        self.assertEqual(p.phase, LOCATE, st.reason)
+        self.assertIsNone(p._locate_pose)               # 1 回だけ試して捨てる
+
     def test_located_returns_to_locate_when_tracking_is_lost(self):
         self._save_manual_map("course_two_step_lost")
         p = Slam2dRaceLine()
