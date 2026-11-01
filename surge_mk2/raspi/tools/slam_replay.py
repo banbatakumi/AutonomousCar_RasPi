@@ -161,7 +161,11 @@ class SlamReplay:
         from raspi.auto.slam2d_raceline import MAP_MAX_RANGE, MAP_RES, MAP_SIZE_M
         from raspi.core.vehicle import Vehicle
 
+        from raspi.nav.body_mask import body_ranges
+
         veh = Vehicle.load()
+        #: planning_node と同じく、車体の内側の点は SLAM に渡さない（`raspi/nav/body_mask.py`）
+        self._body = body_ranges(veh.footprint, veh.lidar_x, veh.lidar_y)
         self.log = log
         self.nav = Slam2dNav(resolution=MAP_RES, size_m=MAP_SIZE_M,
                              lidar_x=veh.lidar_x, lidar_y=veh.lidar_y,
@@ -234,6 +238,8 @@ class SlamReplay:
         t_cap = scan.t_capture or scan.t_pub
         dt = (t_cap - self._scan_t_prev) / NS if self._scan_t_prev else 0.1
         self._scan_t_prev = t_cap
+        from raspi.nav.body_mask import mask_body
+        scan = mask_body(scan, self._body)
         t0 = time.perf_counter()
         u = self.nav.update(scan, dt, yaw_rate=vs.yaw_rate, speed=vs.speed)
         el = time.perf_counter() - t0

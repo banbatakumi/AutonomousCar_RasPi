@@ -62,6 +62,7 @@ from raspi.auto.base import CMD_HZ, StandstillSteer  # noqa: E402  `auto/cmd` �
 from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
 from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
+from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import AutoCtrl, AutoState, DriveCmd, Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -72,7 +73,9 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_HB_PREFIX,
     TOPIC_ROUTE_SELECT,
     TOPIC_VEHICLE_STATE,
+    Scan,
 )
+from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
 
 __all__ = ["PlanningNode", "input_topics"]
 
@@ -172,6 +175,10 @@ class PlanningNode:
         self._ms_peak = 0.0
         self._hz_t0 = 0
         self._hz_n = 0
+
+        #: LiDAR から車体の外形を出るまでの距離（`raspi/nav/body_mask.py`）。これより近い点は planner に渡さない
+        veh = Vehicle.load()
+        self._body = body_ranges(veh.footprint, veh.lidar_x, veh.lidar_y)
 
         self._running = False
 
@@ -351,6 +358,9 @@ class PlanningNode:
         dt = min((now_ns - self._last_plan_ns) / NS, MAX_PLAN_DT_S) if self._last_plan_ns else 0.0
         self._last_plan_ns = now_ns
 
+        if isinstance(scan, Scan):
+            # 車体の内側の点（部品・配線の反射）を捨てる。残すと「前方 0.0m に障害物」で止まる（会場の試走で毎走行）
+            scan = mask_body(scan, self._body)
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
         # **`plan()` は engaged を知らない**（`Planner` の共通契約に含めていない
         # ——全 planner に影響するので変えない）。時間で進むステップ列を持つ

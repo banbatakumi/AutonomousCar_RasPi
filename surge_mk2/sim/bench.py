@@ -71,6 +71,7 @@ from raspi.core.bus_bridge import BusBridge  # noqa: E402
 from raspi.core.link_tracker import LinkTracker  # noqa: E402
 from raspi.msgs import DriveCmd, command_from_cmd  # noqa: E402
 from raspi.msgs.types import TOPIC_SCAN, TOPIC_VEHICLE_STATE  # noqa: E402
+from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
 from raspi.proto.generated import packets  # noqa: E402
 
 from .course import list_courses  # noqa: E402
@@ -426,6 +427,10 @@ class Bench:
             self._movers = [parse_mover(m) for m in movers]
             self.sim.course._padded_grid = None
         self.planner = make_planner(mode)
+        # planning_node と同じく、車体の内側の点は planner に渡さない（`raspi/nav/body_mask.py`）
+        from raspi.core.vehicle import Vehicle
+        _veh = Vehicle.load()
+        self._body = body_ranges(_veh.footprint, _veh.lidar_x, _veh.lidar_y)
         if self.planner is None:
             raise SystemExit(f"知らないモード: {mode!r}（候補 {', '.join(PLANNERS)}）")
         if model:
@@ -710,6 +715,7 @@ class Bench:
                 now = time.monotonic_ns()
                 dt = (now - last_plan_ns) / NS if last_plan_ns else 0.0
                 last_plan_ns = now
+                scan = mask_body(scan, self._body)
                 t_plan = time.perf_counter()
                 st = self.planner.plan(scan, self.vs, self.params, dt)
                 self.res.plan_ms.append((time.perf_counter() - t_plan) * 1000)
