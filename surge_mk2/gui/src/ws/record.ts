@@ -10,11 +10,13 @@
  * 中継そのものが終わるまで待ってからダウンロードを発火させたい
  * （`close()` を自分で呼んだとき＝アンマウント等では呼ばない）。
  */
+import { guardSocket, type SocketGuard } from './guard'
 import { wsUrl } from './url'
 
 export class RecordChannel {
   private ws: WebSocket | null = null
   private closingByUs = false
+  private guard: SocketGuard
 
   constructor(
     private onChunk: (data: ArrayBuffer) => void,
@@ -26,13 +28,20 @@ export class RecordChannel {
       if (ev.data instanceof ArrayBuffer) this.onChunk(ev.data)
     }
     ws.onclose = () => {
+      this.guard.stop()
       if (!this.closingByUs) this.onClose?.()
     }
     this.ws = ws
+    // 開くまでの時間切れ（`guard.ts`）。握手の返らない接続を残すと、Safari では他の WS の張り直しまで止まる。
+    // 見切ったら Pi が閉じたのと同じ扱い（呼び出し側は中継の終わりとして片付ける）
+    this.guard = guardSocket(ws, () => {
+      if (!this.closingByUs) this.onClose?.()
+    })
   }
 
   close() {
     this.closingByUs = true
+    this.guard.stop()
     this.ws?.close()
     this.ws = null
   }

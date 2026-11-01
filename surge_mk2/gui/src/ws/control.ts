@@ -18,10 +18,15 @@ import type {
   LogFile,
   MapFile,
 } from '../types'
+import { guardSocket, type SocketGuard } from './guard'
 import { authToken } from './token'
 import { wsUrl } from './url'
 
 const RECONNECT_MS = 500
+/** これだけ何も届かなければ、繋がっていても死んだとみなす [ms]（`guard.ts`）。`App.tsx` が 1秒ごとに
+ *  ping を打ち、Pi は pong を返す。**見切ると繋ぎ直しで車のブザーが鳴る**（`gui_connect`）ので、
+ *  Wi-Fi の一時的な遅れでは見切らない長さにする */
+const IDLE_MS = 5000
 /** スライダの操作で送る設定系メッセージの最短間隔 [ms]。range の `onChange` は1動きごとに
  * 発火し、Pi は受けるたびに設定ファイルを書いて全クライアントへ status を配るので、
  * ドラッグ中は間引いて最後の値を必ず送る（`sendCoalesced`） */
@@ -91,6 +96,7 @@ export class ControlChannel {
   private pingId = 0
   private pingSentAt = 0
   private pongReceived = true
+  private guard: SocketGuard | null = null
 
   /**
    * このタブの識別子。**サーバの `status.controller` と突き合わせて
@@ -106,8 +112,14 @@ export class ControlChannel {
   private open() {
     const ws = new WebSocket(wsUrl('/ws/control?catalog=changed'))
     this.ws = ws
+    // 半開き・接続中のまま止まった接続を見切る（`guard.ts`）
+    const guard = guardSocket(ws, () => {
+      if (!this.closed) lost()
+    }, IDLE_MS)
+    this.guard = guard
     ws.onopen = () => this.h.onOpenChange(true)
     ws.onmessage = (ev) => {
+      guard.alive()
       // **`any` にしない。** `any` は以降のフィールドアクセスを全て検査対象から
       // 外すので、`m.holdr` のような打ち間違いも通る。`unknown` に寄せた形の
       // 部分型で受けて、使うところで絞る
@@ -135,11 +147,13 @@ export class ControlChannel {
         this.h.onRtt(performance.now() - this.pingSentAt)
       }
     }
-    ws.onclose = () => {
+    const lost = () => {
+      guard.stop()
       this.h.onOpenChange(false)
       this.h.onRtt(null)
       if (!this.closed) this.timer = window.setTimeout(() => this.open(), RECONNECT_MS)
     }
+    ws.onclose = lost
     ws.onerror = () => ws.close()
   }
 
@@ -646,6 +660,7 @@ export class ControlChannel {
     this.closed = true
     window.clearTimeout(this.timer)
     for (const st of this.coalesce.values()) window.clearTimeout(st.timer)
+    this.guard?.stop()
     this.ws?.close()
   }
 }

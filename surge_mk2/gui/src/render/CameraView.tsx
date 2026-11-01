@@ -109,6 +109,7 @@ import { useEffect, useRef } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { live } from '../bus/live'
 import { useUi } from '../store/ui'
+import { guardSocket, type SocketGuard } from '../ws/guard'
 import { wsUrl } from '../ws/url'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 import { fisheyeLens, groundProjector, pinholeLens, type Lens } from './cameraModel'
@@ -265,11 +266,21 @@ export function CameraView({
     let openedMs = 0
     let decodeStartMs = 0
     let decodeGen = 0
+    let guard: SocketGuard | null = null
 
     const open = () => {
       const sock = new WebSocket(wsUrl(`/ws/camera/${cam}`))
       ws = sock
       sock.binaryType = 'arraybuffer'
+      // **開くまで**の時間切れ（`ws/guard.ts`）。Safari は同じ相手への接続中を1本ずつしか進めないので、
+      // 握手の返らない1本が残ると telemetry・control の張り直しまで後ろで止まる（2026-11-01 再現）。
+      // 開いた後の半開きは下の watchdog が見る
+      guard?.stop()
+      guard = guardSocket(sock, () => {
+        if (sock !== ws || closed) return
+        ws = null
+        timer = window.setTimeout(open, 800)
+      })
       sock.onopen = () => {
         wsOpen = true
         openedMs = performance.now()
@@ -288,6 +299,7 @@ export function CameraView({
       sock.onclose = () => {
         // 監視が張り直したあとに、捨てた古い接続の close が遅れて来ても無視する
         if (sock !== ws) return
+        guard?.stop()
         wsOpen = false
         if (!closed) timer = window.setTimeout(open, 800)
       }
@@ -440,6 +452,7 @@ export function CameraView({
       window.clearTimeout(timer)
       window.clearInterval(watchdog)
       cancelAnimationFrame(raf)
+      guard?.stop()
       ws?.close()
       bitmap?.close()
     }
@@ -454,10 +467,17 @@ export function CameraView({
     let timer: number | undefined
     let closed = false
     let decoding = false
+    let guard: SocketGuard | null = null
 
     const open = () => {
-      ws = new WebSocket(wsUrl('/ws/camera/mask'))
+      const sock = new WebSocket(wsUrl('/ws/camera/mask'))
+      ws = sock
       ws.binaryType = 'arraybuffer'
+      // 開くまでの時間切れ（メイン映像と同じ理由）
+      guard?.stop()
+      guard = guardSocket(sock, () => {
+        if (!closed) timer = window.setTimeout(open, 800)
+      })
       ws.onmessage = async (ev) => {
         if (!(ev.data instanceof ArrayBuffer)) return
         if (decoding) return
@@ -477,15 +497,17 @@ export function CameraView({
         }
       }
       ws.onclose = () => {
+        guard?.stop()
         if (!closed) timer = window.setTimeout(open, 800)
       }
-      ws.onerror = () => ws?.close()
+      ws.onerror = () => sock.close()
     }
     open()
 
     return () => {
       closed = true
       window.clearTimeout(timer)
+      guard?.stop()
       ws?.close()
       maskBitmapRef.current?.close()
       maskBitmapRef.current = null

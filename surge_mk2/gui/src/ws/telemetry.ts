@@ -8,11 +8,15 @@ import { markHistoryGap, pushHistory } from '../bus/history'
 import { clearLive, noteTelemetry } from '../bus/live'
 import { MSGS_SCHEMA } from '../generated/msgs'
 import { useUi } from '../store/ui'
+import { guardSocket, notifyPeerLost } from './guard'
 import type { Snapshot } from '../types'
 import { wsUrl } from './url'
 
 const RECONNECT_MIN_MS = 300
 const RECONNECT_MAX_MS = 3000
+/** これだけ何も届かなければ、繋がっていても死んだとみなす [ms]。Pi は 50Hz で送り、`vehicle_state` が
+ *  来ない間も周期ごとに送る（`telemetry_node._telemetry_pump`）。実測の最大間隔は約170ms（Wi-Fi） */
+const IDLE_MS = 2000
 
 export function connectTelemetry(
   onOpenChange: (open: boolean) => void,
@@ -31,13 +35,21 @@ export function connectTelemetry(
   let seenSpeedCap: number | null = null
 
   const open = () => {
-    ws = new WebSocket(wsUrl('/ws/telemetry'))
-    ws.binaryType = 'arraybuffer'
+    const sock = new WebSocket(wsUrl('/ws/telemetry'))
+    ws = sock
+    sock.binaryType = 'arraybuffer'
+    // 半開き・接続中のまま止まった接続を見切る（`guard.ts`）。見切ったら地図にも張り直させる
+    const guard = guardSocket(sock, () => {
+      if (closed) return             // 片付け済み（アンマウント後の半開き）。誰にも知らせない
+      notifyPeerLost()
+      lost()
+    }, IDLE_MS)
     ws.onopen = () => {
       backoff = RECONNECT_MIN_MS
       onOpenChange(true)
     }
     ws.onmessage = (ev) => {
+      guard.alive()
       if (!(ev.data instanceof ArrayBuffer)) return
       // **`as Snapshot` は TypeScript に嘘をつく操作で、実行時には何も起きない。**
       // 全フィールドを実行時に舐める必要は無いが、**札を1つ見るだけ**で
@@ -60,7 +72,8 @@ export function connectTelemetry(
         useUi.getState().setSettings({})
       }
     }
-    ws.onclose = () => {
+    const lost = () => {
+      guard.stop()
       onOpenChange(false)
       clearLive()
       seenSpeedCap = null
@@ -70,8 +83,9 @@ export function connectTelemetry(
       timer = window.setTimeout(open, backoff)
       backoff = Math.min(backoff * 2, RECONNECT_MAX_MS)
     }
+    ws.onclose = lost
     // onerror の直後に onclose が来るので、再接続はそちらに任せる
-    ws.onerror = () => ws?.close()
+    ws.onerror = () => sock.close()
   }
   open()
 

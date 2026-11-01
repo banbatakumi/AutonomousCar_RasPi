@@ -13,6 +13,7 @@
  * `{"ok": bool, "error"?: string}` を1通返して自分で閉じる。
  */
 import { authToken } from './token'
+import { guardSocket } from './guard'
 import { wsUrl } from './url'
 
 //: 1フレームあたりの送信サイズ。地図は数百KB〜数MBなので、大きすぎる
@@ -31,10 +32,13 @@ export function uploadMap(
   // 呼び出し側が「アップロード中…」のまま残らないように）
   let reported = false
   const onDone = (ok: boolean, error?: string) => {
+    guard.stop()
     if (reported) return
     reported = true
     report(ok, error)
   }
+  // 開くまでの時間切れ（`guard.ts`）。握手の返らない接続を残すと、Safari では他の WS の張り直しまで止まる
+  const guard = guardSocket(ws, () => onDone(false, 'Pi に繋がりませんでした（時間切れ）'))
 
   ws.onopen = async () => {
     try {

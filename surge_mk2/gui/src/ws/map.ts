@@ -20,6 +20,7 @@
 import { decode } from '@msgpack/msgpack'
 import { live } from '../bus/live'
 import type { AutoMapMsg, MapData } from '../types'
+import { guardSocket, onPeerLost, type SocketGuard } from './guard'
 import { wsUrl } from './url'
 
 const RECONNECT_MIN_MS = 300
@@ -134,10 +135,19 @@ export function connectMap(onOpenChange: (open: boolean) => void): () => void {
   // 0 に戻るので、前の地図より小さい版が弾かれてリロードするまで地図が出なくなる
   let arrived = 0
   let shown = 0
+  let guard: SocketGuard | null = null
+  /** 今の接続を死んだとみなして捨て、張り直す（telemetry からの合図で呼ぶ） */
+  let dropDead = () => {}
 
   const open = () => {
-    ws = new WebSocket(wsUrl('/ws/map'))
+    const sock = new WebSocket(wsUrl('/ws/map'))
+    ws = sock
     ws.binaryType = 'arraybuffer'
+    // 地図は変わったときだけ届くので、黙っていても死んだとは言えない。見るのは**開くまで**だけで、
+    // 開いた後の半開きは telemetry が見切ったときの合図（`onPeerLost`）で張り直す（`guard.ts`）
+    guard = guardSocket(sock, () => {
+      if (!closed) lost()
+    })
     ws.onopen = () => {
       backoff = RECONNECT_MIN_MS
       onOpenChange(true)
@@ -167,19 +177,36 @@ export function connectMap(onOpenChange: (open: boolean) => void): () => void {
         // 壊れた1枚は捨てる。**次の版が来れば直る**ので接続は切らない
       }
     }
-    ws.onclose = () => {
+    // 1本の接続につき1回だけ（合図で捨てた後に、遅れた onclose が来ても二重に張らない）
+    let done = false
+    const lost = () => {
+      if (done) return
+      done = true
+      guard?.stop()
       onOpenChange(false)
       if (closed) return
       timer = window.setTimeout(open, backoff)
       backoff = Math.min(backoff * 2, RECONNECT_MAX_MS)
     }
-    ws.onerror = () => ws?.close()
+    dropDead = () => {
+      if (done) return
+      sock.onopen = sock.onmessage = sock.onclose = sock.onerror = null
+      sock.close()
+      lost()
+    }
+    ws.onclose = lost
+    ws.onerror = () => sock.close()
   }
+  const stopPeerLost = onPeerLost(() => {
+    if (!closed) dropDead()
+  })
   open()
 
   return () => {
     closed = true
     window.clearTimeout(timer)
+    stopPeerLost()
+    guard?.stop()
     ws?.close()
   }
 }
