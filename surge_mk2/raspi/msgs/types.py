@@ -703,6 +703,9 @@ class AutoState(MsgBase):
     route_groups: list[str] = msgspec.field(default_factory=list)   #: 経路ができているグループ
     #: 乗り換えを待っている理由・経路が作れなかった理由など
     route_note: str = ""
+    #: 『走行を開始』を押しても出発できない理由（空 = 出発できる。GUI はボタンを押せなくする）。
+    #: 経路が無く、作ってもいない（作れなかった）とき。作っている最中は空（押せば、できた時点で出発する）
+    start_blocked: str = ""
     #: ミッションの進み具合（"2/3周 → P1" 等）。空ならミッション無し
     mission: str = ""
 

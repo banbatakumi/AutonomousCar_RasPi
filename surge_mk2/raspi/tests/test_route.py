@@ -601,6 +601,49 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_lines_drawn_with_learned_grip_are_cached_on_disk(self):
+        # 学習値で引いた仕上げ済みの線もファイルに残し、学習値が少し違っても起動直後から使う
+        # （会場の試走: 写しが当たらず、起動のたびに仕上げ前の線で 2 周走った）
+        from raspi.auto.slam2d_route import Slam2dRoute
+
+        def learned(pl, lv):
+            pl._grip_learned = lambda: lv
+            pl._grip_line_kw = lambda: dict(a_lat=lv[0], a_grip=lv[0], a_accel=lv[1], a_brake=lv[2])
+
+        pl = Slam2dRoute()
+        try:
+            learned(pl, (2.5, 2.4, 2.2))
+            pl.request_load("m")
+            self._wait(pl)
+            self.assertTrue(pl._routes)
+        finally:
+            pl.close()
+        pl = Slam2dRoute()
+        try:
+            learned(pl, (2.6, 2.4, 2.2))                 # 次の起動では学習値が少し違う
+            pl.request_load("m")
+            self.assertEqual(pl._note, "仕上げた経路を地図から読んだ")
+            self.assertIsNone(pl._job)                  # 仕上げ前の線から作り直さない
+            self.assertEqual(pl._grip_line, (2.5, 2.4, 2.2))   # 引いたときの値（違えば走りながら引き直す）
+            self.assertEqual(pl._built_avoid_ver, pl._avoid_ver)
+        finally:
+            pl.close()
+
+    def test_start_is_blocked_only_when_no_route_can_be_made(self):
+        # 経路が無く作ってもいなければ『走行を開始』を押せなくする（作っている最中は押せる）
+        from raspi.auto.slam2d_route import Slam2dRoute
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self.assertIsNotNone(pl._job)
+            self.assertEqual(pl._start_blocked(), "")              # 作っている最中
+            self._wait(pl)
+            self.assertEqual(pl._start_blocked(), "")              # できた
+            pl._routes, pl._route_err = {}, {"auto": "スタートから戻ってくる周回ルートが無い"}
+            self.assertIn("周回ルートが無い", pl._start_blocked())
+        finally:
+            pl.close()
+
     def test_aborted_job_does_not_block_the_next(self):
         # 走っている計算を捨てたら、ワーカーごと止める。残すと次の計算がその後ろに並ぶ
         import time

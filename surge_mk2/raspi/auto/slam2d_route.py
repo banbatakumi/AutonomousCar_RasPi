@@ -349,7 +349,7 @@ class Slam2dRoute(Slam2dRaceLine):
         self._avoid_ver = 0
         self._built_avoid_ver = 0
         self._job_avoid_ver = 0
-        #: 最後に作った経路 `(条件の指紋, 結果, 仕上げ済みか)`。**作り直し（`reset`）でも残す**——
+        #: 最後に作った経路 `(条件の指紋, 結果, 仕上げ済みか, 引いたときの学習値)`。**作り直し（`reset`）でも残す**——
         #: 自動運転を解くたびに地図を読み直す（`on_disengage`）ので、残さないと毎回経路を一から作り、
         #: Pi で走り出せるまで十数秒〜数十秒かかった
         self._mem_lines = getattr(self, "_mem_lines", None)
@@ -388,6 +388,8 @@ class Slam2dRoute(Slam2dRaceLine):
         self._auto_note = ""
         #: 今の計算が仕上げ込みなら、その条件の指紋（できたら地図の横へ写しを書く、`_poll`）
         self._job_cache_key = ""
+        #: 今の計算に渡した学習値（`None` = 同定値で引く）。写しと一緒に残す
+        self._job_grip: tuple | None = None
 
     def plan(self, scan: Scan, vs: VehicleState | None,
              p: dict[str, float], dt: float) -> AutoState:
@@ -403,9 +405,13 @@ class Slam2dRoute(Slam2dRaceLine):
         # ときも、走り出す前に GUI へ新しい経路を出すため）
         self._poll()
         st = super().plan(scan, vs, p, dt)
-        if st.phase == LOCATED and (not self._routes or self._built_avoid_ver != self._avoid_ver):
-            # 押してもすぐには出ない。押せば経路ができ次第出発する（`_race`）
-            st.reason += "（経路を作っている。できるまでは『走行を開始』を押しても出発を待つ）"
+        if st.phase == LOCATED:
+            st.start_blocked = self._start_blocked()
+            if st.start_blocked:
+                st.reason = f"自己位置を特定済み。ただし{st.start_blocked}"
+            elif not self._routes or self._built_avoid_ver != self._avoid_ver:
+                # 押してもすぐには出ない。押せば経路ができ次第出発する（`_race`）
+                st.reason += "（経路を作っている。できるまでは『走行を開始』を押しても出発を待つ）"
         self._fill_route_state(st)
         return st
 
@@ -448,17 +454,38 @@ class Slam2dRoute(Slam2dRaceLine):
     # ── 仕上げた経路の写し（地図ごと。`mapstore.save_line_cache`） ──
 
     def _cache_key(self, p: dict[str, float]) -> str:
-        """経路を作る条件の指紋: 地図・経路の設定・線の設定・車の諸元・学習値で引くか・コード。
-        どれかが違えば写しは使わない（作り直す）。"""
+        """経路を作る条件の指紋: 地図・経路の設定・線の設定・車の諸元・学習値で引き直すか・コード。
+        どれかが違えば写しは使わない（作り直す）。
+
+        ★ **学習した値そのものは入れない。** 値は走るたびに少しずつ変わるので、入れると写しが当たらず、
+        起動のたびに仕上げ前の線で 2 周走った（会場の試走 `surge_20261031_055134`・`061401`: Pi の走行中は
+        仕上げに約 35 秒かかり 12.5/12.3s → 10.1s）。写しには引いたときの値を一緒に持たせ（`_job_grip`）、
+        読んだ後に値が 3% 以上違えば、走りながらいつもどおり引き直す（`_grip_line_stale`）。
+        """
         g = self.slam.grid
         h = hashlib.sha256()
         h.update(_CODE_DIGEST.encode())
         h.update(np.ascontiguousarray(g.trinary()).tobytes())
         h.update(repr((g.resolution, tuple(g.origin), self._cfg.to_json(), self._auto_start,
-                       self._auto_wps, self._line_key(p),
-                       sorted(_line_kwargs(p, self.vehicle, True, self._grip_line_kw()).items(),
+                       self._auto_wps, self._line_key(p), float(p.get("grip_reline", 0)) > 0,
+                       sorted(_line_kwargs(p, self.vehicle, True, None).items(),
                               key=lambda kv: kv[0]))).encode())
         return h.hexdigest()
+
+    def _start_blocked(self) -> str:
+        """『走行を開始』を押しても出発できない理由（空 = 出発できる・経路を作っている最中）。
+
+        ★ 会場の試走 `surge_20261031_052854` で、経路が作れないまま「『走行を開始』で出発する」と出ていて 5 回押された。
+        """
+        if self._job is not None:
+            return ""
+        if not self._routes:
+            why = (self._build_error or self._note or "・".join(self._route_err.values())
+                   or "経由点を置いてください")
+            return f"経路が無い（{why}）"
+        if self._built_avoid_ver != self._avoid_ver:
+            return f"避ける範囲を反映した経路を作れない（{self._note or self._build_error}）"
+        return ""
 
     def _load_cached_lines(self, name: str) -> bool:
         """同じ条件で作った経路があれば取り込む（仕上げの 8 秒を待たず、1 周目から仕上げた線で走る）。
@@ -471,7 +498,7 @@ class Slam2dRoute(Slam2dRaceLine):
         if mem is not None and mem[0] == key:
             self._built_key = self._line_key(p)
             self._refine_next = False
-            self._grip_line = None
+            self._grip_line = mem[3]
             self._install(mem[1])
             self._built_avoid_ver = self._avoid_ver
             if not mem[2]:
@@ -479,25 +506,26 @@ class Slam2dRoute(Slam2dRaceLine):
             return True
         try:
             data = mapstore.load_line_cache(name, key)
-            out = pickle.loads(data) if data else None
-        except Exception:                  # noqa: BLE001  壊れた写しは捨てて作り直す
-            out = None
+            out, grip = pickle.loads(data) if data else (None, None)
+        except Exception:                  # noqa: BLE001  壊れた写し・前の形式の写しは捨てて作り直す
+            out, grip = None, None
         if not isinstance(out, _BuildOut) or not out.routes:
             return False
         self._built_key = self._line_key(p)
         self._refine_next = False
-        self._grip_line = None
+        # 引いたときの学習値（`None` = 同定値）。今の値と違えば走りながら引き直す（`_grip_line_stale`）
+        self._grip_line = grip if isinstance(grip, tuple) else None
         self._install(out)
         self._built_avoid_ver = self._avoid_ver        # 写しの指紋は経路の設定ごと（`_cache_key`）
         self._note = "仕上げた経路を地図から読んだ"
-        self._mem_lines = (key, out, True)
+        self._mem_lines = (key, out, True, self._grip_line)
         return True
 
-    def _save_cached_lines(self, out: _BuildOut, key: str) -> None:
+    def _save_cached_lines(self, out: _BuildOut, key: str, grip: tuple | None) -> None:
         if not self._map_name or not out.routes or out.errors:
             return
         try:
-            mapstore.save_line_cache(self._map_name, key, pickle.dumps(out))
+            mapstore.save_line_cache(self._map_name, key, pickle.dumps((out, grip)))
         except Exception:                  # noqa: BLE001  保存できなくても走りは止めない
             pass
 
@@ -594,11 +622,10 @@ class Slam2dRoute(Slam2dRaceLine):
             refine = bool(self._routes)
         self._refine_next = not refine
         self._job_refined = refine
-        # 条件の指紋。メモリの写し（`_mem_lines`）に使い、仕上げ込みで学習値で引き直していない
-        # 計算だけはファイルの写しにも残す（`_poll`）
+        # 条件の指紋。メモリの写し（`_mem_lines`）に使い、仕上げ込みの計算はファイルの写しにも残す
+        # （`_poll`。学習値で引き直した線も、引いたときの値と一緒に残す。`_cache_key`）
         self._job_mem_key = self._cache_key(p)
-        self._job_cache_key = (self._job_mem_key if refine and self._grip_line_kw() is None
-                               and self._map_name else "")
+        self._job_cache_key = self._job_mem_key if refine and self._map_name else ""
         self._job = submit_job(
             _compute_routes, self._plan_trinary(), g.resolution, tuple(g.origin), seed,
             None if traj is None else traj.copy(), self._groups_to_build(), dict(p),
@@ -606,6 +633,7 @@ class Slam2dRoute(Slam2dRaceLine):
             auto_start=self._auto_start,
             avoid=list(self._cfg.avoid), refine=refine, grip=self._grip_line_kw())
         self._grip_line = self._grip_learned() if self._grip_line_kw() is not None else None
+        self._job_grip = self._grip_line
 
     def _abort_job(self) -> None:
         """経路の計算を止めて結果を捨てる。走っていればワーカーごと止める（`kill_worker`）。"""
@@ -664,10 +692,10 @@ class Slam2dRoute(Slam2dRaceLine):
                 self._install(out)
                 self._built_avoid_ver = self._job_avoid_ver
                 if not self._job_again and out.routes and not out.errors:
-                    self._mem_lines = (self._job_mem_key, out, self._job_refined)
+                    self._mem_lines = (self._job_mem_key, out, self._job_refined, self._job_grip)
                 key, self._job_cache_key = self._job_cache_key, ""
                 if key and not self._job_again:
-                    self._save_cached_lines(out, key)
+                    self._save_cached_lines(out, key, self._job_grip)
             if self._job_again:
                 self._job_again = False
                 self._submit(graph=None if self._regraph else self._graph)

@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xce486c96
+export const MSGS_SCHEMA = 0x30534910
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -483,6 +483,11 @@ export type AutoState = {
   route_groups: string[]
   /** 乗り換えを待っている理由・経路が作れなかった理由など */
   route_note: string
+  /**
+   * 『走行を開始』を押しても出発できない理由（空 = 出発できる。GUI はボタンを押せなくする）。
+   * 経路が無く、作ってもいない（作れなかった）とき。作っている最中は空（押せば、できた時点で出発する）
+   */
+  start_blocked: string
   /** ミッションの進み具合（"2/3周 → P1" 等）。空ならミッション無し */
   mission: string
   /** 対象をロックして追跡できているか（`TargetTrack.tracking and not lost`） */

@@ -450,6 +450,8 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
   const mapFiles = useUi((s) => s.mapFiles)
   const [selectedMap, setSelectedMap] = useState('')
   const phase = useNumbers().auto?.phase
+  // 経路が無く作ってもいない（slam2d_route）。押しても出発しないので押せなくする
+  const startBlocked = useNumbers().auto?.start_blocked ?? ''
   // 手動で地図作成中か。'wait'=押した直後で phase がまだ EXPLORE に変わっていない
   const [manual, setManual] = useState<'off' | 'wait' | 'on'>('off')
   useEffect(() => {
@@ -544,7 +546,11 @@ function SlamRaceButtons({ ch, mode }: { ch: ControlChannel | null; mode: string
       >
         自己位置を特定
       </button>
-      <button disabled={phase !== 'LOCATED'} onClick={() => ch?.startSlam2dDrive()}>
+      <button
+        disabled={phase !== 'LOCATED' || startBlocked !== ''}
+        title={startBlocked || undefined}
+        onClick={() => ch?.startSlam2dDrive()}
+      >
         走行を開始
       </button>
     </div>
