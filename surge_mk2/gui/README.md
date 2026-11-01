@@ -69,7 +69,8 @@ python -m raspi.nodes.camera_node
 python -m raspi.nodes.telemetry_node
 ```
 
-ブラウザで `http://surge-mk2.local:8000/`。**GUI 本体も telemetry_node が配る**ので、
+ブラウザで `http://surge-mk2.local:8000/`（Wi-Fi の Mac で名前が引けないときは launcher の
+「実機 GUI を開く」で IP で開く。`docs/development.md` §8.1）。**GUI 本体も telemetry_node が配る**ので、
 WS と同一オリジンになり接続先の書き分けが要らない。
 
 Mac で GUI を編集しながら実車に繋ぐなら:

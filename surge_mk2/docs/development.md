@@ -158,6 +158,9 @@ surge-io は drop-in `surge-io.service.d/10-priority.conf` で `Nice=-10` にし
 
 **接続先は常に `surge-mk2.local`**（mDNS）。直結・Wi-Fi の生きている方を自動で選ぶので、
 IP を調べる作業は要らない。GUI は `http://surge-mk2.local:8000/`。
+**Wi-Fi だけで繋いだ Mac では名前が引けなくなることがある**（下記 8.1）。そのときは launcher の
+「実機 GUI を開く」か `.venv/bin/python -m tools.find_pi --open` で **IP で開く**。`tools/deploy.sh` は
+名前で繋がらないと自動で IP に切り替える。
 
 ---
 
@@ -622,7 +625,9 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | 直結を挿し直したら mDNS が Wi-Fi しか返さない | avahi が再広告していない | `ssh surge-mk2 'sudo systemctl restart avahi-daemon'` |
 | ssh が IPv6 に行ってしまう | avahi は IPv6 リンクローカルも広告し、ssh は IPv6 を優先する | `~/.ssh/config` に **`AddressFamily inet`**（設定済み）。curl は `-4` |
 | 素の `ping 169.254.55.2` が通らない | `169.254/16` のルートが複数 IF に重複して載っている | **これで「直結が死んだ」と誤診したことがある。** IF 明示で見る |
-| どうしても IP が要る | — | `arp -an \| grep -i 2c:cf:67`（Raspberry Pi Ltd の MAC prefix） |
+| Wi-Fi だけの Mac で GUI が「読み込み中」のまま／INIT・切断のまま。`ssh surge-mk2` も名前解決で失敗（有線を挿すと直る） | **その Mac が Wi-Fi 上の mDNS（224.0.0.251）とブロードキャストを受け取れない**（2026-11-01 実測: Pi から各10回送って 0/10。ユニキャストと 239.x は 10/10）。Pi の再起動などで IP が変わると mDNSResponder が古いまま固まり、**問い合わせ自体を出さなくなる**（10分見て1通も出ない）。IP 直打ちなら全部届く | **IP で開く**: launcher「実機 GUI を開く」／`python -m tools.find_pi --open`（mDNSResponder を通さず Pi に直接問い合わせる）。固まりを解くのは Mac の Wi-Fi の入れ直しか `sudo killall -HUP mDNSResponder` |
+| Pi を再起動した後、開いたままの GUI が INIT・通信途絶のまま戻らない（再読み込みで直る） | **ブラウザが死んだ接続を持ち続ける。** Safari は再起動前の WS を20分「ready」のまま持ち、握手の返らない接続を310秒「接続中」のまま抱えた。Safari は同じ相手への接続中を1本ずつしか進めないので、その1本の後ろで全チャンネルの張り直しが止まる（2026-11-01、ログと再現試験で確認） | 直した: `gui/src/ws/guard.ts` が**開くまで4秒**・**開いた後は telemetry 2秒／control 5秒**届かなければ見切って張り直す（地図は telemetry の合図で張り直す）。古い GUI が残っているタブは一度だけ再読み込みする |
+| どうしても IP が要る | — | `.venv/bin/python -m tools.find_pi`。だめなら `arp -an \| grep -i 2c:cf:67`（Raspberry Pi Ltd の MAC prefix） |
 | Wi-Fi 経由で、数分おきに数秒だけ遅延が 20〜125ms に跳ねる（操縦のデッドマンは 150ms） | **NetworkManager が wpa_supplicant に定期スキャンをさせている**（`bgscan simple:30:-65:300`＝−65dBm より強ければ 5分ごと、弱ければ **30秒ごと**。1回 約3.6秒、全チャンネル） | **接続先の AP（BSSID）を固定する**と止まる: `sudo nmcli con mod <接続名> 802-11-wireless.bssid <BSSID>` → `sudo nmcli con up <接続名>`。確認は `sudo wpa_cli -i wlan0 get_network 0 bgscan`（`FAIL` なら無し）と `iw event -t`。**固定すると他の AP（メッシュの別の子機）へ移らない**。戻すのは BSSID に `""`。接続ごとの設定なので、会場の AP でもやり直す |
 
 ### 8.2 GUI が古い・表示がコードと合わない

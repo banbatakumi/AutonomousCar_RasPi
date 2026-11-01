@@ -35,7 +35,7 @@
 | **systemd の `RemoveIPC=yes` が共有メモリを消す** | そのユーザーの最後のセッションが終わると全消しされる。実際に起きた。`RemoveIPC=no` にしてある | `core/jpeg.py` |
 | **ARM64 の弱いメモリモデル** | seqlock は理屈の上で壊れうる。Python ではロックで代用しており、「証明された」とは言えない。段数を十分取るのが実効的な守り | `bus/shm_ring.py` |
 | **Wi-Fi の瞬断で走行中に DISARM した** | メッシュ Wi-Fi の中継機の切り替え（2026-10-06）。自律走行中だけ待ち時間を 5 秒に延ばした | `vehicle.toml` の `[safety]` |
-| **Wi-Fi 端末は `.local` が引けないことがある** | アクセスポイントが無線端末宛てのマルチキャストを中継しない。Pi がユニキャストで返す | `raspi/tools/mdns_unicast.py` |
+| **Wi-Fi 端末は `.local` が引けないことがある** | 無線端末に mDNS のマルチキャストが届かない。Pi がユニキャストで返すが、Pi の IP が変わると Mac の名前解決が固まることがあった。Mac 側は Pi に直接問い合わせて **IP で開く** | `raspi/tools/mdns_unicast.py`、`tools/find_pi.py` |
 | **再生と実機で同じコードを通す** | 2 つ書けば必ずズレて「再生した結果が実機と違う」になる | `core/link_tracker.py`、`core/bus_bridge.py` |
 | **時刻同期が静かに壊れていた** | 条件によって最大 178 ms 未来側へずれた。回帰を保持する形に直した（0.36 ms 以下） | `PROGRESS.md` 2026-10-14 |
 

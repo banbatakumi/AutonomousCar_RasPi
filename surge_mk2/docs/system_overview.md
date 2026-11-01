@@ -335,7 +335,7 @@ flowchart LR
 | `surge-cam-e2e` | `raspi.nodes.cam_e2e_node` | カメラE2E推論（`cam_e2e` 用） | `cam_e2e` が使えなくなるだけ |
 | `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出（`line_trace` 用） | `line_trace` が使えなくなるだけ |
 | `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従（`follow_object` 用） | `follow_object` が使えなくなるだけ |
-| `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末から `surge-mk2.local` を引けるようにする | Wi-Fi のみの端末で名前が引けないことがある |
+| `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末から `surge-mk2.local` を引けるようにする | Wi-Fi のみの端末で名前が引けないことがある。Mac 側の逃げ道は `tools/find_pi.py`（IP で開く） |
 | `surge-arrow-signal` | `raspi.nodes.arrow_signal_node` | 前方カメラの矢印信号認識。**既定では無効**（調整後に手で enable） | 矢印信号が使えない |
 | `surge-logclean.timer` | — | 毎時、古いログを消す（7日超／合計8GB超） | ディスクが埋まる |
 
