@@ -203,7 +203,9 @@ function ArmButton() {
   const blocked = inhibited && !ui.armRequested
 
   const toggle = () => {
-    if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'ボタンで解除' })
+    // 自分で押して解除したときは理由を出さない（見れば分かる。指示による）。
+    // 理由を出すのは、押していないのに外れたとき（E-STOP・操縦権の喪失・無操作など）だけ
+    if (ui.armRequested) ui.set({ armRequested: false, disarmReason: '' })
     else ui.set({ armRequested: true, disarmReason: '' })
   }
 

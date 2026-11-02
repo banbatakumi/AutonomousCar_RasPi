@@ -13,8 +13,8 @@
  * 停止後にダウンロードする。MCAP は解析用で画像は 10Hz）。
  *
  * 同じ並びに **📷 撮影**（`useSnapshot`。前カメラと、取得中なら後カメラの生画像を
- * PNG で Mac に保存。魚眼校正の写真撮りに使う）と、**配信映像の魚眼補正の切替**
- * （`status.camera_config.undistort`、校正済みのカメラがあるときだけ出す）を置く。
+ * PNG で Mac に保存。魚眼校正の写真撮りに使う）を置く。配信映像の魚眼補正の切替は
+ * 設定パネル（⚙）だけに置く（2026-11-03、指示によりタブバーから外した）。
  */
 import { formatBytes, formatElapsed } from '../format'
 import { useMcapDownload } from '../hooks/useMcapDownload'
@@ -35,7 +35,6 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
   // 取得を止めているカメラ（DISARM 中で映像を表示していない等）はフレームが無いので撮らない
   const snapCams: SnapCam[] = (['front', 'rear'] as SnapCam[]).filter((c) =>
     (c === 'front' ? cam?.front_enabled_effective : cam?.rear_enabled_effective) !== false)
-  const canUndistort = !!(cam?.undistort_available?.front || cam?.undistort_available?.rear)
 
   return (
     <div className="log-controls">
@@ -85,16 +84,6 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
       >
         📷
       </button>
-      {canUndistort && (
-        <button
-          className={`recbtn ${cam?.undistort ? 'active' : ''}`}
-          disabled={!ch}
-          onClick={() => ch?.setCamera({ undistort: !cam?.undistort })}
-          title="配信映像の魚眼補正（Pi側で仮想ピンホールに変換）。記録・撮影は常に魚眼のまま"
-        >
-          {cam?.undistort ? '補正' : '魚眼'}
-        </button>
-      )}
       {snapshot.error && <span className="badge-bad" title={snapshot.error}>撮影失敗</span>}
     </div>
   )

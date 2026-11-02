@@ -503,7 +503,8 @@ export function useDriving(ch: ControlChannel | null) {
       }
       if (e.code === 'Enter') {
         // ARM のトグル。**入れるのも切るのも同じキー**
-        if (ui.armRequested) disarm('Enter で解除')
+        // 自分で解除したときは理由を出さない（ARM ボタンと同じ。`StatusBar.tsx` の `ArmButton`）
+        if (ui.armRequested) disarm('')
         else ui.set({ armRequested: true, disarmReason: '' })
         return
       }
@@ -597,20 +598,10 @@ export function useDriving(ch: ControlChannel | null) {
   // ⚠ **Wake Lock は HTTPS（secure context）でしか使えない。** Pi が配る
   // `http://surge-mk2.local:8000` では `navigator.wakeLock` 自体が無く、画面が自動ロック
   // すると DISARM する（localhost の `npm run dev` では使えるので開発中は気づけない）。
-  // 使えないときは、最初に ARM したときに一度だけ知らせる
+  // 使えないときは何もしない。以前は最初の ARM で一度だけ知らせていたが、毎回出て
+  // 邪魔なので消した（2026-11-03、指示による）。対処は端末側で自動ロックを切る
   useEffect(() => {
-    if (!('wakeLock' in navigator)) {
-      let warned = false
-      return useUi.subscribe((state, prev) => {
-        if (warned || !state.armRequested || prev.armRequested) return
-        warned = true
-        notify(
-          window.isSecureContext
-            ? 'このブラウザは画面ロックを止められません（自動ロックすると停止します）'
-            : 'HTTP で開いているため画面ロックを止められません（自動ロックすると停止します。HTTPS で開くと防げます）',
-        )
-      })
-    }
+    if (!('wakeLock' in navigator)) return
 
     let sentinel: WakeLockSentinel | null = null
     let cancelled = false
@@ -838,7 +829,8 @@ export function useDriving(ch: ControlChannel | null) {
       if (padArm && !padArmWas) {
         if (ui.armRequested) {
           ch.estop()
-          ui.set({ armRequested: false, disarmReason: 'パッドの × で解除' })
+          // 自分の操作なので理由は出さない（ARM ボタン・Enter と同じ。指示による）
+          ui.set({ armRequested: false, disarmReason: '' })
         } else {
           ui.set({ armRequested: true, disarmReason: '' })
         }
