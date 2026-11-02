@@ -324,19 +324,19 @@ roll = 0.0
 pitch = 0.0
 yaw = 0.0
 hfov = 1.152                  # ≒66°
-bottom_crop = 0.25            # 下1/4
+bottom_crop = 0.25 
 undistort_hfov = 1.152        # 歪みが小さいので補正しても画角はほぼそのまま
 
 [sensors.cam_front.lenses.wide160]
 x = 0.1                       # 実測（2026-10-03）
 y = 0.0
-z = 0.088                     # 実測（2026-10-03）
+z = 0.08                     # 実測（2026-10-03）
 roll = 0.0
 pitch = 0.0                   # 実測（2026-10-03）水平
 yaw = 0.0
 hfov = 2.23                   # ≒128°。公称（対角160°）からの概算。校正するまでの仮
 isp_tuning = "imx219_wide160.json"   # 白壁の RAW から作成（2026-10-06）
-bottom_crop = 0.25            # 操縦用に車体（ボンネット・タイヤ）を下に残す。深く切る(0.43)と車幅・距離感がつかめず運転しにくかった（2026-10-03）。認識の帯は地面距離指定なのでクロップに依らない
+bottom_crop = 0.3  
 undistort_hfov = 1.92         # ≒110°
 
 [sensors.cam_front.lenses.wide160.fisheye]
@@ -362,19 +362,19 @@ roll = 0.0
 pitch = 0.0
 yaw = 3.14159265
 hfov = 1.152
-bottom_crop = 0.0625          # 下1/16
+bottom_crop = 0.25
 undistort_hfov = 1.152
 
 [sensors.cam_rear.lenses.wide160]
 x = 0.039                     # 実測（2026-10-03）
 y = 0.0
-z = 0.088                     # 実測（2026-10-03）
+z = 0.08                     # 実測（2026-10-03）
 roll = 0.0
 pitch = 0.0                   # 実測（2026-10-03）水平
 yaw = 3.14159265
 hfov = 2.23                   # 仮（cam_front と同じ）
 isp_tuning = "imx219_wide160.json"   # 前カメラで作った表を流用（同じレンズ。後カメラでは未確認）
-bottom_crop = 0.2          # ★仮。実機で見直す
+bottom_crop = 0.3 
 undistort_hfov = 1.92
 
 [sensors.cam_rear.lenses.wide160.fisheye]
