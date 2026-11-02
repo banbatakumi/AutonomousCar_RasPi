@@ -587,3 +587,524 @@ void zs_thin(int64_t h, int64_t w, uint8_t *img, int64_t max_iter)
     }
     free(rm);
 }
+
+/* ── Reeds-Shepp の最短経路の長さ（`raspi/nav/reeds_shepp.py` の `shortest_path(...).length`） ──
+ * Hybrid A* のヒューリスティックが子ノードごとに呼ぶ（Python 版は候補 48 通りを経路のオブジェクトで
+ * 組み立てていて、探索時間の大半）。Python 版と同じ式・同じ順で、**長さだけ**を計算する。
+ * ★ Python の `math.hypot` は libm ではなく CPython 独自の高精度の計算（`vector_norm`）、`%` は Python の剰余、
+ *   `sum` は 3.12 以降の補償つきの和（Neumaier）。どれも CPython の実装を写してある（`test_native.py` で突き合わせる） */
+
+#define RS_EPS 1e-9
+static const double RS_PI = 3.141592653589793;
+
+/* CPython の float の `%`（符号は割る数に合わせる） */
+static inline double py_mod(double x, double y)
+{
+    double m = fmod(x, y);
+    if (m != 0.0) {
+        if ((y < 0) != (m < 0)) m += y;
+    } else {
+        m = copysign(0.0, y);
+    }
+    return m;
+}
+
+/* CPython の `math.hypot(x, y)`（Modules/mathmodule.c の vector_norm、2 引数） */
+static double py_hypot(double x, double y)
+{
+    double v[2] = {fabs(x), fabs(y)};
+    if (isnan(v[0]) || isnan(v[1])) {
+        if (isinf(v[0]) || isinf(v[1])) return INFINITY;
+        return NAN;
+    }
+    double mx = v[0] > v[1] ? v[0] : v[1];
+    if (isinf(mx)) return mx;
+    if (mx == 0.0) return mx;
+    int max_e;
+    frexp(mx, &max_e);
+    if (max_e < -1023) {
+        /* 非正規数の領域（ここでは来ない）。CPython と同じく DBL_MIN で割ってやり直す */
+        return 2.2250738585072014e-308 * py_hypot(v[0] / 2.2250738585072014e-308,
+                                                 v[1] / 2.2250738585072014e-308);
+    }
+    double scale = ldexp(1.0, -max_e);
+    double csum = 1.0, frac1 = 0.0, frac2 = 0.0;
+    for (int i = 0; i < 2; i++) {
+        double t = v[i] * scale;
+        double hi = t * t, lo = fma(t, t, -hi);           /* dl_mul */
+        double sh = csum + hi, sl = (csum - sh) + hi;      /* dl_fast_sum */
+        csum = sh;
+        frac1 += lo;
+        frac2 += sl;
+    }
+    double h = sqrt(csum - 1.0 + (frac1 + frac2));
+    double hi = -h * h, lo = fma(-h, h, -hi);
+    double sh = csum + hi, sl = (csum - sh) + hi;
+    csum = sh;
+    frac1 += lo;
+    frac2 += sl;
+    double t = csum - 1.0 + (frac1 + frac2);
+    h += t / (2.0 * h);
+    return h / scale;
+}
+
+static inline double rs_mod2pi(double th)
+{
+    double v = py_mod(th, 2.0 * RS_PI);
+    if (v < 0.0) v += 2.0 * RS_PI;
+    return v;
+}
+
+static inline double rs_wrap_pi(double th)
+{
+    return py_mod(th + RS_PI, 2.0 * RS_PI) - RS_PI;
+}
+
+static void rs_tau_omega(double u, double v, double xi, double eta, double phi, int signed_omega,
+                         double *tau, double *omega)
+{
+    double delta = rs_mod2pi(u - v);
+    double a = sin(u) - sin(delta);
+    double b = cos(u) - cos(delta) - 1.0;
+    double t1 = atan2(eta * a - xi * b, xi * a + eta * b);
+    double t2 = 2.0 * (cos(delta) - cos(v) - cos(u)) + 3.0;
+    *tau = t2 < 0 ? rs_mod2pi(t1 + RS_PI) : rs_mod2pi(t1);
+    double w = *tau - u + v - phi;
+    *omega = signed_omega ? rs_wrap_pi(w) : rs_mod2pi(w);
+}
+
+/* 語族 k（`_GENERATORS` の順）を (x, y, phi) で解き、区間の符号つき長さを `w` へ。区間の数（解が無ければ 0） */
+static int rs_word(int k, double x, double y, double phi, double *w)
+{
+    const double hp = 0.5 * RS_PI;
+    switch (k) {
+    case 0: {   /* _lsl */
+        double px = x - sin(phi), py = y - 1.0 + cos(phi);
+        double u = py_hypot(px, py), t = atan2(py, px);
+        if (t >= -RS_EPS) {
+            double v = rs_mod2pi(phi - t);
+            if (v >= -RS_EPS) { w[0] = t; w[1] = u; w[2] = v; return 3; }
+        }
+        return 0;
+    }
+    case 1: {   /* _lsr */
+        double px = x + sin(phi), py = y - 1.0 - cos(phi);
+        double u1 = py_hypot(px, py), t1 = atan2(py, px);
+        if (u1 * u1 >= 4.0) {
+            double u = sqrt(u1 * u1 - 4.0);
+            double t = rs_mod2pi(t1 + atan2(2.0, u));
+            double v = rs_mod2pi(t - phi);
+            if (t >= -RS_EPS && v >= -RS_EPS) { w[0] = t; w[1] = u; w[2] = v; return 3; }
+        }
+        return 0;
+    }
+    case 2:     /* _lrl_fwd */
+    case 3: {   /* _lrl_back */
+        double xi = x - sin(phi), eta = y - 1.0 + cos(phi);
+        double u1 = py_hypot(xi, eta), theta = atan2(eta, xi);
+        if (u1 <= 4.0) {
+            double a = acos(0.25 * u1);
+            double t = rs_mod2pi(theta + 0.5 * RS_PI + a);
+            double u = rs_mod2pi(RS_PI - 2.0 * a);
+            if (k == 2) {
+                double v = rs_mod2pi(phi - t - u);
+                if (t >= -RS_EPS && u >= -RS_EPS) { w[0] = t; w[1] = -u; w[2] = v; return 3; }
+            } else {
+                double v = rs_mod2pi(t + u - phi);
+                if (t >= -RS_EPS && u >= -RS_EPS && v >= -RS_EPS) {
+                    w[0] = t; w[1] = -u; w[2] = -v; return 3;
+                }
+            }
+        }
+        return 0;
+    }
+    case 4: {   /* _lrlr_a */
+        double xi = x + sin(phi), eta = y - 1.0 - cos(phi);
+        double rho = (2.0 + py_hypot(xi, eta)) / 4.0;
+        if (rho <= 1.0) {
+            double u = acos(rho), t, v;
+            rs_tau_omega(u, -u, xi, eta, phi, 1, &t, &v);
+            if (t >= -RS_EPS && v <= RS_EPS) { w[0] = t; w[1] = u; w[2] = -u; w[3] = v; return 4; }
+        }
+        return 0;
+    }
+    case 5: {   /* _lrlr_b */
+        double xi = x + sin(phi), eta = y - 1.0 - cos(phi);
+        double rho = (20.0 - xi * xi - eta * eta) / 16.0;
+        if (0.0 <= rho && rho <= 1.0) {
+            double u = -acos(rho);
+            if (u >= -0.5 * RS_PI) {
+                double t, v;
+                rs_tau_omega(u, u, xi, eta, phi, 0, &t, &v);
+                if (t >= -RS_EPS && v >= -RS_EPS) { w[0] = t; w[1] = u; w[2] = u; w[3] = v; return 4; }
+            }
+        }
+        return 0;
+    }
+    case 6: {   /* _lrsl */
+        double xi = x - sin(phi), eta = y - 1.0 + cos(phi);
+        double rho = py_hypot(xi, eta), theta = atan2(eta, xi);
+        if (rho >= 2.0) {
+            double r = sqrt(rho * rho - 4.0);
+            double u = 2.0 - r;
+            double t = rs_mod2pi(theta + atan2(r, -2.0));
+            double v = rs_wrap_pi(phi - 0.5 * RS_PI - t);
+            if (t >= -RS_EPS && u <= RS_EPS && v <= RS_EPS) {
+                w[0] = t; w[1] = -hp; w[2] = u; w[3] = v; return 4;
+            }
+        }
+        return 0;
+    }
+    case 7: {   /* _lrsr */
+        double xi = x + sin(phi), eta = y - 1.0 - cos(phi);
+        double rho = py_hypot(-eta, xi), theta = atan2(xi, -eta);
+        if (rho >= 2.0) {
+            double t = theta, u = 2.0 - rho;
+            double v = rs_wrap_pi(t + 0.5 * RS_PI - phi);
+            if (t >= -RS_EPS && u <= RS_EPS && v <= RS_EPS) {
+                w[0] = t; w[1] = -hp; w[2] = u; w[3] = v; return 4;
+            }
+        }
+        return 0;
+    }
+    case 8: {   /* _lrslr */
+        double xi = x + sin(phi), eta = y - 1.0 - cos(phi);
+        double rho = py_hypot(xi, eta);
+        if (rho >= 2.0) {
+            double u = 4.0 - sqrt(rho * rho - 4.0);
+            if (u <= RS_EPS) {
+                double t = rs_mod2pi(atan2((4.0 - u) * xi - 2.0 * eta, -2.0 * xi + (u - 4.0) * eta));
+                double v = rs_mod2pi(t - phi);
+                if (t >= -RS_EPS && v >= -RS_EPS) {
+                    w[0] = t; w[1] = -hp; w[2] = u; w[3] = -hp; w[4] = v; return 5;
+                }
+            }
+        }
+        return 0;
+    }
+    }
+    return 0;
+}
+
+/* `sum(s.length for s in segments)`（CPython 3.12 以降の浮動小数の和: Neumaier の補償つき） */
+static double py_sum(const double *a, int n)
+{
+    double f = 0.0, c = 0.0;
+    for (int i = 0; i < n; i++) {
+        double x = a[i], t = f + x;
+        if (fabs(f) >= fabs(x)) c += (f - t) + x;
+        else c += (x - t) + f;
+        f = t;
+    }
+    if (c != 0.0 && isfinite(c)) f += c;
+    return f;
+}
+
+/* 正規化した (x, y, phi) の候補（`_candidates`）の長さの最小を `*best` に畳み込む。
+ * `rev` は逆向きの問題の解（区間の順が逆になる。長さは区間の並べ替えで和の順が変わるので逆順に足す） */
+/* テスト用: 候補の長さを全部書き出す先（NULL なら書かない） */
+static double *rs_dump = NULL;
+static int rs_ndump = 0;
+
+static void rs_fold(double x, double y, double phi, double R, int rev, double *best, int *found)
+{
+    const double args[4][3] = {{x, y, phi}, {-x, y, -phi}, {x, -y, -phi}, {-x, -y, phi}};
+    for (int k = 0; k < 9; k++) {
+        for (int s = 0; s < 4; s++) {
+            double w[5], seg[5];
+            int n = rs_word(k, args[s][0], args[s][1], args[s][2], w);
+            if (!n) continue;
+            int negate = s == 1 || s == 3, m = 0;
+            for (int i = 0; i < n; i++) {
+                double len = negate ? -w[i] : w[i];
+                if (fabs(len) > RS_EPS) seg[m++] = fabs(len) * 1.0;   /* `_build`（半径 1） */
+            }
+            if (!m) continue;
+            double scaled[5];
+            for (int i = 0; i < m; i++) scaled[i] = seg[rev ? m - 1 - i : i] * R;
+            double L = py_sum(scaled, m);
+            if (rs_dump && rs_ndump < 128) rs_dump[rs_ndump++] = L;
+            if (!*found || L < *best) { *best = L; *found = 1; }
+        }
+    }
+}
+
+/* `reeds_shepp.shortest_path(start, goal, R).length` と同じ値 */
+double rs_shortest_length(double sx, double sy, double syaw, double gx, double gy, double gyaw, double R)
+{
+    double dx = gx - sx, dy = gy - sy;
+    if (py_hypot(dx, dy) < 1e-9 && fabs(rs_mod2pi(gyaw - syaw)) < 1e-9) return 0.0;
+    double c = cos(syaw), s = sin(syaw);
+    double lx = (c * dx + s * dy) / R, ly = (-s * dx + c * dy) / R;
+    double lphi = rs_mod2pi(gyaw - syaw);
+    double best = 0.0;
+    int found = 0;
+    rs_fold(lx, ly, lphi, R, 0, &best, &found);
+    double cg = cos(gyaw), sg = sin(gyaw);
+    rs_fold(-(cg * dx + sg * dy) / R, -(-sg * dx + cg * dy) / R, rs_mod2pi(syaw - gyaw), R, 1,
+            &best, &found);
+    return found ? best : 0.0;
+}
+
+/* 語族ごとの区間の文字（`_GENERATORS` の順。0 = L、1 = R、2 = S） */
+static const int RS_LETTERS[9][5] = {
+    {0, 2, 0}, {0, 2, 1}, {0, 1, 0}, {0, 1, 0}, {0, 1, 0, 1}, {0, 1, 0, 1},
+    {0, 1, 2, 0}, {0, 1, 2, 1}, {0, 1, 2, 0, 1}};
+
+/* 正規化した (x, y, phi) の候補（`_candidates`）を書き出す。`rev` は逆向きの問題の解（区間の順と前後を反転）。
+ * 区間は実スケール（`candidate_paths` の `out`）: 曲率 ±1/R か 0、長さ |len|·1·R */
+static void rs_emit(double x, double y, double phi, double R, int rev, int8_t *gear, double *curv,
+                    double *len, int64_t *nseg, double *total, int64_t *count, int64_t cap)
+{
+    const double args[4][3] = {{x, y, phi}, {-x, y, -phi}, {x, -y, -phi}, {-x, -y, phi}};
+    for (int k = 0; k < 9; k++) {
+        for (int s = 0; s < 4; s++) {
+            double w[5];
+            int n = rs_word(k, args[s][0], args[s][1], args[s][2], w);
+            if (!n) continue;
+            int negate = s == 1 || s == 3, swap = s >= 2, m = 0;
+            int8_t g[5];
+            double cv[5], ln[5];
+            for (int i = 0; i < n; i++) {
+                double l = negate ? -w[i] : w[i];
+                if (!(fabs(l) > RS_EPS)) continue;
+                int letter = RS_LETTERS[k][i];
+                if (swap && letter < 2) letter = 1 - letter;
+                double c1 = letter == 0 ? 1.0 / 1.0 : letter == 1 ? -1.0 / 1.0 : 0.0;
+                g[m] = l > 0.0 ? 1 : -1;
+                cv[m] = c1;
+                ln[m] = fabs(l) * 1.0;
+                m++;
+            }
+            if (!m || *count >= cap) continue;
+            int64_t o = *count * 5;
+            double scaled[5];
+            for (int i = 0; i < m; i++) {
+                int j = rev ? m - 1 - i : i;
+                gear[o + i] = (int8_t)(rev ? -g[j] : g[j]);
+                curv[o + i] = cv[j] / R;
+                len[o + i] = ln[j] * R;
+                scaled[i] = len[o + i];
+            }
+            nseg[*count] = m;
+            total[*count] = py_sum(scaled, m);
+            (*count)++;
+        }
+    }
+}
+
+/* `reeds_shepp.candidate_paths` の候補を、**並べ替える前の順**（順向き → 逆向き）で書き出す。
+ * 各候補は区間 `nseg[i]` 個（`gear`・`curv`・`len` の i*5 から）と長さ `total[i]`。
+ * 戻り値は候補の数。既に目標姿勢なら −1（Python 版は空の経路 1 本を返す） */
+int64_t rs_candidates(double sx, double sy, double syaw, double gx, double gy, double gyaw, double R,
+                      int8_t *gear, double *curv, double *len, int64_t *nseg, double *total, int64_t cap)
+{
+    double dx = gx - sx, dy = gy - sy;
+    if (py_hypot(dx, dy) < 1e-9 && fabs(rs_mod2pi(gyaw - syaw)) < 1e-9) return -1;
+    double c = cos(syaw), s = sin(syaw);
+    double lx = (c * dx + s * dy) / R, ly = (-s * dx + c * dy) / R;
+    int64_t count = 0;
+    rs_emit(lx, ly, rs_mod2pi(gyaw - syaw), R, 0, gear, curv, len, nseg, total, &count, cap);
+    double cg = cos(gyaw), sg = sin(gyaw);
+    rs_emit(-(cg * dx + sg * dy) / R, -(-sg * dx + cg * dy) / R, rs_mod2pi(syaw - gyaw), R, 1,
+            gear, curv, len, nseg, total, &count, cap);
+    return count;
+}
+
+/* テスト用: CPython の `math.hypot`・`%`・`sum` を写した関数をそのまま出す */
+double rs_py_hypot(double x, double y) { return py_hypot(x, y); }
+double rs_py_mod(double x, double y) { return py_mod(x, y); }
+double rs_py_sum(const double *a, int64_t n) { return py_sum(a, (int)n); }
+
+/* テスト用: 候補の長さを全部（Python の `candidate_paths` の並べ替えの前の順に）`out` へ。個数を返す */
+int64_t rs_all_lengths(double sx, double sy, double syaw, double gx, double gy, double gyaw, double R,
+                       double *out)
+{
+    rs_dump = out;
+    rs_ndump = 0;
+    rs_shortest_length(sx, sy, syaw, gx, gy, gyaw, R);
+    rs_dump = NULL;
+    return rs_ndump;
+}
+
+/* ── Hybrid A* の子ノード（`raspi/nav/hybrid_astar.py` の `_successors` の前半） ──
+ * ギア（前・後）× 曲率ごとに、弧を `ns` 等分して進めた姿勢（`_advance`）に車体の円被覆を置き、
+ * 壁だけ・壁＋未知の距離場の値から余裕を出す（`LocalMap.body_clearance_both`）。Python 版と同じ式・同じ型
+ * （距離場は float32、余裕は float32 − float32(半径)）。出力は子 i ごとに端点の姿勢・余裕の最小・端点の余裕 */
+
+static inline double hy_wrap(double a) { return py_mod(a + RS_PI, 2.0 * RS_PI) - RS_PI; }
+
+void hy_successors(double x0, double y0, double yaw0, int64_t nc, const double *curvs, double step,
+                   int64_t ns, const float *wall_edt, const float *blk_edt, int64_t h, int64_t w,
+                   double o0, double o1, double res, int64_t k, const double *cx, const double *cy,
+                   float r32, double *pose, float *wall_min, float *unk_min, float *wall_end)
+{
+    int64_t child = 0;
+    for (int gi = 0; gi < 2; gi++) {
+        int gear = gi == 0 ? 1 : -1;
+        for (int64_t ci = 0; ci < nc; ci++, child++) {
+            double curv = curvs[ci];
+            double ds = step * gear;
+            double x = x0, y = y0, yaw = yaw0;
+            float wmin = 0.0f, umin = 0.0f, wlast = 0.0f;
+            for (int64_t i = 0; i < ns; i++) {
+                double d = ds / (double)ns;
+                if (fabs(curv) < 1e-9) {
+                    x = x + d * cos(yaw);
+                    y = y + d * sin(yaw);
+                } else {
+                    double dyaw = d * curv, r = 1.0 / curv;
+                    double nx = x + r * (sin(yaw + dyaw) - sin(yaw));
+                    double ny = y - r * (cos(yaw + dyaw) - cos(yaw));
+                    x = nx;
+                    y = ny;
+                    yaw = hy_wrap(yaw + dyaw);
+                }
+                double c = cos(yaw), s = sin(yaw);
+                float vw = 0.0f, vu = 0.0f;
+                for (int64_t j = 0; j < k; j++) {
+                    double px = x + cx[j] * c - cy[j] * s;
+                    double py = y + cx[j] * s + cy[j] * c;
+                    double fc = floor((px - o0) / res), fr = floor((py - o1) / res);
+                    float a = 0.0f, b = 0.0f;
+                    if (fc >= 0.0 && fc < (double)w && fr >= 0.0 && fr < (double)h) {
+                        int64_t idx = (int64_t)fr * w + (int64_t)fc;
+                        a = wall_edt[idx];
+                        b = blk_edt[idx];
+                    }
+                    if (j == 0 || a < vw) vw = a;
+                    if (j == 0 || b < vu) vu = b;
+                }
+                float cw = vw - r32, cu = vu - r32;
+                if (i == 0 || cw < wmin) wmin = cw;
+                if (i == 0 || cu < umin) umin = cu;
+                wlast = cw;
+            }
+            pose[3 * child] = x;
+            pose[3 * child + 1] = y;
+            pose[3 * child + 2] = yaw;
+            wall_min[child] = wmin;
+            unk_min[child] = umin;
+            wall_end[child] = wlast;
+        }
+    }
+}
+
+/* 経路（区間 `nseg` 個）を `step` ごとに標本化し（`reeds_shepp.sample_path_array`、始点を含む）、
+ * 各姿勢に車体を置いた余裕の最小（`LocalMap.path_clearance`、float32）を返す。Python 版と同じ式・同じ型 */
+float hy_path_clearance(double x, double y, double yaw, int64_t nseg, const int64_t *gear,
+                        const double *curv, const double *len, double step, const float *edt,
+                        int64_t h, int64_t w, double o0, double o1, double res, int64_t k,
+                        const double *cx, const double *cy, float r32)
+{
+    float best = 0.0f;
+    int first = 1;
+    for (int64_t si = -1; si < nseg; si++) {
+        int64_t n = 1;
+        double ds = 0.0, c0 = 0.0, s0 = 0.0;
+        double x0 = x, y0 = y, yaw0 = yaw, r = 0.0;
+        int straight = 1;
+        if (si >= 0) {
+            double q = ceil(len[si] / step);
+            n = q > 1.0 ? (int64_t)q : 1;
+            ds = (len[si] / (double)n) * (double)gear[si];
+            straight = fabs(curv[si]) < 1e-9;
+            c0 = cos(yaw0);
+            s0 = sin(yaw0);
+            if (!straight) r = 1.0 / curv[si];
+        }
+        for (int64_t i = 1; i <= n; i++) {
+            double px, py, pyaw;
+            if (si < 0) {                       /* 始点そのもの */
+                px = x0; py = y0; pyaw = yaw0;
+            } else {
+                double sv = ds * (double)i;
+                if (straight) {
+                    px = x0 + sv * c0;
+                    py = y0 + sv * s0;
+                    pyaw = yaw0;
+                } else {
+                    double dyaw = sv * curv[si];
+                    px = x0 + r * (sin(yaw0 + dyaw) - s0);
+                    py = y0 - r * (cos(yaw0 + dyaw) - c0);
+                    pyaw = yaw0 + dyaw;
+                }
+                x = px; y = py; yaw = pyaw;     /* 次の区間はこの区間の最後の姿勢から */
+            }
+            double c = cos(pyaw), s = sin(pyaw);
+            float v = 0.0f;
+            for (int64_t j = 0; j < k; j++) {
+                double qx = px + cx[j] * c - cy[j] * s;
+                double qy = py + cx[j] * s + cy[j] * c;
+                double fc = floor((qx - o0) / res), fr = floor((qy - o1) / res);
+                float a = 0.0f;
+                if (fc >= 0.0 && fc < (double)w && fr >= 0.0 && fr < (double)h)
+                    a = edt[(int64_t)fr * w + (int64_t)fc];
+                if (j == 0 || a < v) v = a;
+            }
+            float cl = v - r32;
+            if (first || cl < best) { best = cl; first = 0; }
+        }
+    }
+    return best;
+}
+
+/* ── Hybrid A* の格子のヒューリスティック（`_Heuristic2D._dijkstra`） ──
+ * 8近傍の Dijkstra。Python 版の heapq は (費用, 行, 列) の辞書式で取り出すので、同じ順位の付け方の
+ * 二分ヒープなら取り出しの順が同じになり、緩和の順（近傍の並び）も同じなので費用の配列も同じになる */
+typedef struct { double c; int64_t r, k; } hy_item;
+
+static inline int hy_less(const hy_item *a, const hy_item *b)
+{
+    if (a->c != b->c) return a->c < b->c;
+    if (a->r != b->r) return a->r < b->r;
+    return a->k < b->k;
+}
+
+void hy_dijkstra(int64_t n, const uint8_t *free_, double straight, double diag, int64_t gr,
+                 int64_t gc, double *cost)
+{
+    int64_t cap = 1024, sz = 0;
+    hy_item *hp = malloc(sizeof(hy_item) * (size_t)cap);
+    const int64_t dr[8] = {-1, 1, 0, 0, -1, -1, 1, 1}, dc[8] = {0, 0, -1, 1, -1, 1, -1, 1};
+    const double wt[8] = {straight, straight, straight, straight, diag, diag, diag, diag};
+    cost[gr * n + gc] = 0.0;
+    hp[sz++] = (hy_item){0.0, gr, gc};
+    while (sz) {
+        hy_item top = hp[0];
+        hy_item last = hp[--sz];
+        int64_t i = 0;
+        while (1) {                                   /* 根を抜いて最後の要素を沈める */
+            int64_t a = 2 * i + 1, b = a + 1, m = i;
+            const hy_item *cur = &last;
+            if (a < sz && hy_less(&hp[a], cur)) { m = a; cur = &hp[a]; }
+            if (b < sz && hy_less(&hp[b], cur)) { m = b; }
+            if (m == i) break;
+            hp[i] = hp[m];
+            i = m;
+        }
+        if (sz) hp[i] = last;
+        double c = top.c;
+        int64_t r0 = top.r, c0 = top.k;
+        if (c > cost[r0 * n + c0]) continue;
+        for (int d = 0; d < 8; d++) {
+            int64_t r1 = r0 + dr[d], c1 = c0 + dc[d];
+            if (!(r1 >= 0 && r1 < n && c1 >= 0 && c1 < n) || !free_[r1 * n + c1]) continue;
+            double nc = c + wt[d];
+            if (nc < cost[r1 * n + c1]) {
+                cost[r1 * n + c1] = nc;
+                if (sz == cap) { cap *= 2; hp = realloc(hp, sizeof(hy_item) * (size_t)cap); }
+                int64_t j = sz++;                     /* 浮かせる */
+                hy_item it = {nc, r1, c1};
+                while (j > 0) {
+                    int64_t p = (j - 1) / 2;
+                    if (!hy_less(&it, &hp[p])) break;
+                    hp[j] = hp[p];
+                    j = p;
+                }
+                hp[j] = it;
+            }
+        }
+    }
+    free(hp);
+}

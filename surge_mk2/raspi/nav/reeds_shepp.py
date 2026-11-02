@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING, NamedTuple
 if TYPE_CHECKING:  # 型検査専用。実行時は sample_path_array() 内で遅延 import する
     import numpy as np
 
-__all__ = ["PathSegment", "ReedsSheppPath", "shortest_path", "candidate_paths",
+__all__ = ["PathSegment", "ReedsSheppPath", "shortest_path", "shortest_length", "candidate_paths",
           "sample_path", "sample_path_array", "integrate_path"]
 
 _EPS = 1e-9
@@ -346,6 +346,14 @@ def candidate_paths(start: tuple[float, float, float], goal: tuple[float, float,
     衝突しない最初の候補を選ぶ」という使い方をするために公開してある。
     候補が1つも無い場合（数値的に稀）は空リスト。
     """
+    table = candidate_table(start, goal, turning_radius)
+    if table is not None:
+        # C 版（下と同じ候補・同じ値、並べ替える前の順）から経路を組み立てて同じく並べる
+        if table == ():
+            return [ReedsSheppPath(segments=())]
+        out = [ReedsSheppPath(segments=_segments(table, i)) for i in range(len(table[4]))]
+        out.sort(key=lambda p: p.length)
+        return out
     sx, sy, syaw = start
     gx, gy, gyaw = goal
     dx, dy = gx - sx, gy - sy
@@ -392,6 +400,62 @@ def shortest_path(start: tuple[float, float, float], goal: tuple[float, float, f
     """
     candidates = candidate_paths(start, goal, turning_radius)
     return candidates[0] if candidates else ReedsSheppPath(segments=())
+
+
+#: 長さ・候補を C で計算する（`nav/native.py`）。`False` なら Python 版（テストが両方を比べる）
+USE_NATIVE = True
+#: 1回の候補の数の上限（9語族 × 4変換 × 順向き・逆向き）
+_MAX_CANDIDATES = 72
+
+
+def candidate_table(start: tuple[float, float, float], goal: tuple[float, float, float],
+                    turning_radius: float):
+    """`candidate_paths` の候補を、**並べ替える前の順**の配列で返す（C 版。経路のオブジェクトを作らない）。
+
+    戻り値は `(gear, curvature, length, nseg, total)`（区間は候補 i の `i*5` から `nseg[i]` 個、`total` は
+    `ReedsSheppPath.length` と同じ値）。既に目標姿勢なら `()`、C が無ければ `None`。
+    """
+    if not USE_NATIVE:
+        return None
+    from .native import addr, lib
+    if lib is None:
+        return None
+    import numpy as np
+    gear = np.empty(_MAX_CANDIDATES * 5, dtype=np.int8)
+    curv = np.empty(_MAX_CANDIDATES * 5)
+    seg = np.empty(_MAX_CANDIDATES * 5)
+    nseg = np.empty(_MAX_CANDIDATES, dtype=np.int64)
+    total = np.empty(_MAX_CANDIDATES)
+    n = lib.rs_candidates(float(start[0]), float(start[1]), float(start[2]), float(goal[0]),
+                          float(goal[1]), float(goal[2]), float(turning_radius), addr(gear),
+                          addr(curv), addr(seg), addr(nseg), addr(total), _MAX_CANDIDATES)
+    if n < 0:
+        return ()
+    return gear, curv, seg, nseg[:n], total[:n]
+
+
+def _segments(table, i: int) -> tuple[PathSegment, ...]:
+    """`candidate_table` の候補 i の区間。"""
+    gear, curv, seg, nseg, _ = table
+    o = i * 5
+    return tuple(PathSegment(int(gear[o + j]), float(curv[o + j]), float(seg[o + j]))
+                 for j in range(int(nseg[i])))
+
+
+def shortest_length(start: tuple[float, float, float], goal: tuple[float, float, float],
+                    turning_radius: float) -> float:
+    """`shortest_path(start, goal, turning_radius).length` と同じ値（経路は作らない）。
+
+    Hybrid A* のヒューリスティックが子ノードごとに呼ぶ。C 版（`_native.c` の `rs_shortest_length`）は
+    同じ式・同じ順で長さだけを計算する（Pi で 1回 約500µs → 23µs、結果はビット一致）。
+    """
+    if USE_NATIVE:
+        from .native import lib
+        if lib is not None:
+            return lib.rs_shortest_length(float(start[0]), float(start[1]), float(start[2]),
+                                          float(goal[0]), float(goal[1]), float(goal[2]),
+                                          float(turning_radius))
+    return float(shortest_path(start, goal, turning_radius).length)
 
 
 def sample_path_array(start: tuple[float, float, float], path: ReedsSheppPath,

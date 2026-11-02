@@ -1007,6 +1007,9 @@ MPC は経路座標の線形化自転車モデルで舵角列を最適化し、�
   C は当たった所・終端で止める。採点は「候補 × 点」の配列を作らない。型（float32／float64）と演算の順を numpy に揃えてビット一致（`slam2d/tests/test_native.py`。
   `exp`・`hypot` は numpy と libm が同じ値を返すことを Mac・Pi で確かめた。点の和は numpy の pairwise 和を写した）。numpy の float64 の原点など型が揃わない組み合わせは numpy 版で回す。
   ICP の正規方程式（行列積＝BLAS の足し算の順）は numpy のまま
+- **駐車の Hybrid A\* の内側も C**（`raspi/nav/_native.c` の `rs_*`・`hy_*`。Reeds-Shepp の長さと候補、子ノードの標本化と車体の余裕、解析展開の衝突判定、格子の Dijkstra）。
+  探索は時間の予算（120ms）で打ち切るので、**Pi が遅いと解けずに駐車を失敗する**（park_bench で Pi 16/20・Mac 20/20）。C で1展開 534 → 70µs（Mac）、Pi で 20/20。
+  予算に当たらない限り Python 版と同じ経路（CPython の `math.hypot`・`%`・`sum` と heapq の順まで写した）。探索の骨組み（ヒープ・ノード）は Python のまま
 - **速度指令は速度PIの逆モデルで前倒しする**（`nav/speedctl.py`）。`brake`・`torque_mode`・`launch` はコーナーの減速に使わない（brake は解いた後に目標が 0 から立ち上がり直す、torque_mode は ABS が効かない）
 - **判断は 10Hz、追従は 50Hz**（planner の `tick()`）。障害物・自己位置の判断は点群が来たときだけ。合間は姿勢を推測航法で進めて舵と速度だけ更新する
 - **障害物・他車は Frenet 格子で追い抜く**（`nav/overtake.py`）。横ずれの候補を毎周期まとめて作り、相手の予測位置と

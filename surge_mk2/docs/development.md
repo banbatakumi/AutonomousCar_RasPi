@@ -585,6 +585,7 @@ tools/deploy.sh --test                                           # Pi 上でも�
   `raceline.py` の速度プロファイル・曲率・車体外形・仕上げの評価、`roadgraph._thin` の式を変えたら `_native.c` も直し、`test_native.py` で一致を確かめる。
   SLAM の `OccGrid.raycast`・`_carve`（`slam2d/core/grid.py`）、`SurfaceMap.associate`・`__init__` の法線（`surfmap.py`）、
   総当たりの採点（`register.search_steps`・`localize.GlobalLocalizer.step`）も同じで、C 版は `slam2d/core/_native.c`
+  駐車の `reeds_shepp.py`（長さ・候補）と `hybrid_astar.py`（子ノード・解析展開の衝突判定・Dijkstra）も同じで、C 版は `raspi/nav/_native.c`
 
 ---
 

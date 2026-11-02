@@ -61,9 +61,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# ★ C 版はモジュールの読み込み時に読む（組み立て＝コンパイルを最初の探索の中でやると、Pi で plan() が
+#   1.5秒止まった。`deploy.sh` が反映時に組んでおくので、ふつうは読むだけ）
+from . import native
 from .local_map import LocalMap
-from .reeds_shepp import (PathSegment, ReedsSheppPath, candidate_paths,
-                          sample_path_array, shortest_path)
+from .reeds_shepp import (PathSegment, ReedsSheppPath, _segments, candidate_paths,
+                          candidate_table, sample_path_array, shortest_length)
 from .se2 import wrap_angle
 
 __all__ = ["HybridConfig", "HybridResult", "plan"]
@@ -194,6 +197,9 @@ def _advance(x: float, y: float, yaw: float, curvature: float,
             wrap_angle(yaw + dyaw))
 
 
+#: 子ノードの生成・衝突判定・格子の距離を C で回す（`nav/native.py`）。`False` なら Python 版（テストが比べる）
+USE_NATIVE = True
+
 #: 8近傍の格子距離（斜めは√2）は連続空間の直線距離を最大で `1/cos(22.5°)`≒1.0824 倍に過大評価する
 #: （角度22.5°の向き）。過大評価のヒューリスティックは許容的でなく、最短でない経路を返しうるので、
 #: この倍率で割って「直線距離以上にはならない」形にする
@@ -262,9 +268,15 @@ class _Heuristic2D:
         free = free.copy()
         free[gr, gc] = True
         cost[gr, gc] = 0.0
-        heap = [(0.0, gr, gc)]
         diag = math.sqrt(2.0) * res
         straight = res
+        if native.lib is not None and USE_NATIVE:
+            # 下と同じ手順の C 版（`_native.c` の `hy_dijkstra`。取り出しの順が同じなので費用も同じ）
+            f8 = np.ascontiguousarray(free, dtype=bool)
+            native.lib.hy_dijkstra(n, native.addr(f8), float(straight), float(diag), gr, gc,
+                                   native.addr(cost))
+            return cost
+        heap = [(0.0, gr, gc)]
         while heap:
             c, r0, c0 = heapq.heappop(heap)
             if c > cost[r0, c0]:
@@ -349,7 +361,7 @@ def plan(start: tuple[float, float, float], goal: tuple[float, float, float],
             # 遠方はRS項を省く（上記`rs_heuristic_range`の理由）。
             # 粗格子で塞がれて見える場合だけ直線距離で代替する
             return d if math.isinf(hd) else hd
-        hr = shortest_path(pose, goal, cfg.turning_radius).length
+        hr = shortest_length(pose, goal, cfg.turning_radius)
         return hr if math.isinf(hd) else max(hd, hr)
 
     seq = 0
@@ -426,7 +438,74 @@ _SAMPLES = 2
 
 def _successors(node: _Node, curvatures: list[float], lmap: LocalMap,
                 cfg: HybridConfig, margin: float) -> list[_Node]:
-    """1ノードの全後継を作り、**1回のnumpy呼び出しで衝突判定**する。"""
+    """1ノードの全後継を作り、**1回の呼び出しで衝突判定**する（C 版か numpy 版）。"""
+    native = _native_successors(node, curvatures, lmap, cfg)
+    if native is not None:
+        poses, meta, wall_min, unk_min, wall_end = native
+    else:
+        poses, meta, wall_min, unk_min, wall_end = _successors_py(node, curvatures, lmap, cfg)
+    #: 今いる場所の余裕。**すでに食い込んでいる状態から脱出できるようにする**。
+    #: `node.wall_clear`は、このノードが子として作られたときの端点サンプル
+    #: （`wall_end`）と同じ値なので、ここで`body_clearance`を呼び直さない
+    here = node.wall_clear
+    out: list[_Node] = []
+    for i, (gear, curv) in enumerate(meta):
+        w = wall_min[i]
+        if w < margin:
+            # 壁は硬い拘束。**ただし既に食い込んでいる場所からは、余裕が
+            # 増える向きの動きだけは許す**——そうしないと、追従誤差で車体が
+            # 壁際に入り込んだ瞬間に全後継が却下され、その場から一歩も
+            # 動けなくなる（車庫入れで「食い込み5cm」を報告し
+            # 続けて固まる挙動を実測）
+            if not (here < margin and w > here + 1e-4):
+                continue
+        cost = cfg.step * (cfg.reverse_cost if gear < 0 else 1.0)
+        if gear != node.gear:
+            cost += cfg.gear_change_cost
+        if abs(curv - node.curvature) > 1e-9:
+            cost += cfg.steer_change_cost
+        short = max(0.0, cfg.clearance_target - w)
+        cost += cfg.clearance_weight * short
+        # 未知は禁止せずコストで避ける
+        unk_short = max(0.0, cfg.clearance_target - unk_min[i])
+        cost += cfg.unknown_weight * unk_short
+        out.append(_Node(f=0.0, seq=0, g=node.g + cost, pose=poses[i],
+                         curvature=curv, gear=gear, parent=node, ds=cfg.step,
+                         wall_clear=wall_end[i]))
+    return out
+
+
+def _native_successors(node: _Node, curvatures: list[float], lmap: LocalMap, cfg: HybridConfig):
+    """`_successors_py` と同じ値の C 版（`nav/_native.c` の `hy_successors`）。使えなければ `None`。"""
+    wall_e, blk_e = getattr(lmap, "_wall_edt", None), getattr(lmap, "_blocked_edt", None)
+    if (native.lib is None or not USE_NATIVE or wall_e is None or blk_e is None
+            or wall_e.dtype != np.float32 or blk_e.dtype != np.float32
+            or wall_e.shape != blk_e.shape or not wall_e.flags.c_contiguous
+            or not blk_e.flags.c_contiguous):
+        return None
+    circles = native.f64(lmap._circles)
+    cx, cy = np.ascontiguousarray(circles[:, 0]), np.ascontiguousarray(circles[:, 1])
+    curv = native.f64(curvatures)
+    nchild = 2 * curv.size
+    pose = np.empty(3 * nchild)
+    wmin, umin, wend = (np.empty(nchild, dtype=np.float32) for _ in range(3))
+    h, w = wall_e.shape
+    g = lmap.grid
+    x0, y0, yaw0 = node.pose
+    native.lib.hy_successors(float(x0), float(y0), float(yaw0), curv.size, native.addr(curv),
+                             float(cfg.step), _SAMPLES, native.addr(wall_e), native.addr(blk_e),
+                             h, w, float(g.origin[0]), float(g.origin[1]), float(g.resolution),
+                             cx.size, native.addr(cx), native.addr(cy),
+                             float(np.float32(lmap._circle_r)), native.addr(pose),
+                             native.addr(wmin), native.addr(umin), native.addr(wend))
+    pl = pose.tolist()
+    poses = [(pl[3 * i], pl[3 * i + 1], pl[3 * i + 2]) for i in range(nchild)]
+    meta = [(gear, c) for gear in (1, -1) for c in curvatures]
+    return poses, meta, wmin.tolist(), umin.tolist(), wend.tolist()
+
+
+def _successors_py(node: _Node, curvatures: list[float], lmap: LocalMap, cfg: HybridConfig):
+    """子の端点の姿勢・余裕の最小（壁だけ・壁＋未知）・端点の余裕（numpy 版）。"""
     x0, y0, yaw0 = node.pose
     poses: list[tuple[float, float, float]] = []
     meta: list[tuple[int, float]] = []
@@ -447,38 +526,11 @@ def _successors(node: _Node, curvatures: list[float], lmap: LocalMap,
     #: 壁のみ・壁+未知を1回のgatherで両方引く（`body_clearance`を2回呼ぶより速い、
     #: `LocalMap.body_clearance_both()`参照）
     wall, unk = lmap.body_clearance_both(arr[:, 0], arr[:, 1], arr[:, 2])
-    #: 今いる場所の余裕。**すでに食い込んでいる状態から脱出できるようにする**。
-    #: `node.wall_clear`は、このノードが子として作られたときの端点サンプル
-    #: （`wall[i, -1]`）と同じ値なので、ここで`body_clearance`を呼び直さない
-    here = node.wall_clear
     wall = wall.reshape(len(poses), _SAMPLES)
     unk = unk.reshape(len(poses), _SAMPLES)
-
-    out: list[_Node] = []
-    for i, (gear, curv) in enumerate(meta):
-        w = float(wall[i].min())
-        if w < margin:
-            # 壁は硬い拘束。**ただし既に食い込んでいる場所からは、余裕が
-            # 増える向きの動きだけは許す**——そうしないと、追従誤差で車体が
-            # 壁際に入り込んだ瞬間に全後継が却下され、その場から一歩も
-            # 動けなくなる（車庫入れで「食い込み5cm」を報告し
-            # 続けて固まる挙動を実測）
-            if not (here < margin and w > here + 1e-4):
-                continue
-        cost = cfg.step * (cfg.reverse_cost if gear < 0 else 1.0)
-        if gear != node.gear:
-            cost += cfg.gear_change_cost
-        if abs(curv - node.curvature) > 1e-9:
-            cost += cfg.steer_change_cost
-        short = max(0.0, cfg.clearance_target - w)
-        cost += cfg.clearance_weight * short
-        # 未知は禁止せずコストで避ける
-        unk_short = max(0.0, cfg.clearance_target - float(unk[i].min()))
-        cost += cfg.unknown_weight * unk_short
-        out.append(_Node(f=0.0, seq=0, g=node.g + cost, pose=poses[i],
-                         curvature=curv, gear=gear, parent=node, ds=cfg.step,
-                         wall_clear=float(wall[i, -1])))
-    return out
+    return (poses, meta, [float(wall[i].min()) for i in range(len(poses))],
+            [float(unk[i].min()) for i in range(len(poses))],
+            [float(wall[i, -1]) for i in range(len(poses))])
 
 
 def _try_analytic(pose: tuple[float, float, float], goal: tuple[float, float, float],
@@ -490,16 +542,32 @@ def _try_analytic(pose: tuple[float, float, float], goal: tuple[float, float, fl
     接続できず、探索が最後の詰めで発散する。掃引の判定は重いので、
     全半径の候補を長さでまとめて並べ、短い方から`analytic_candidates`本だけ見る。
     """
+    cands = _analytic_candidates(pose, goal, cfg)
+    for cand in cands:
+        if _path_clearance(lmap, pose, cand, cfg.xy_resolution) >= margin:
+            return cand
+    return None
+
+
+def _analytic_candidates(pose, goal, cfg: HybridConfig) -> list[ReedsSheppPath]:
+    """全半径の候補を長さでまとめて並べた、短い方から`analytic_candidates`本。
+
+    C 版（`reeds_shepp.candidate_table`）は長さの表から上位だけを経路にする。並べ方は下の Python 版
+    （半径ごとに長さで安定に並べて連結し、もう一度長さで安定に並べる）と同じ＝(長さ, 半径の順, 候補の順)。
+    """
+    tables = [candidate_table(pose, goal, cfg.turning_radius * k) for k in cfg.analytic_radii]
+    if all(t is not None for t in tables):
+        keys = [(float(t[4][i]), ri, i) for ri, t in enumerate(tables) if t != ()
+                for i in range(len(t[4]))]
+        keys.sort()
+        return [ReedsSheppPath(segments=_segments(tables[ri], i))
+                for _, ri, i in keys[:cfg.analytic_candidates]]
     cands: list[ReedsSheppPath] = []
     for k in cfg.analytic_radii:
         cands.extend(c for c in candidate_paths(pose, goal, cfg.turning_radius * k)
                      if c.segments)
     cands.sort(key=lambda c: c.length)
-    for cand in cands[:cfg.analytic_candidates]:
-        poses = sample_path_array(pose, cand, step=cfg.xy_resolution)
-        if lmap.path_clearance(poses) >= margin:
-            return cand
-    return None
+    return cands[:cfg.analytic_candidates]
 
 
 def _as_prims(path: ReedsSheppPath) -> list[tuple[int, float, float]]:
@@ -510,4 +578,26 @@ def _clearance(lmap: LocalMap, start: tuple[float, float, float],
                path: ReedsSheppPath) -> float:
     if not path.segments:
         return 0.0
-    return lmap.path_clearance(sample_path_array(start, path, step=0.03))
+    return _path_clearance(lmap, start, path, 0.03)
+
+
+def _path_clearance(lmap: LocalMap, start: tuple[float, float, float], path: ReedsSheppPath,
+                    step: float) -> float:
+    """`lmap.path_clearance(sample_path_array(start, path, step))` と同じ値（C 版は標本の配列を作らない）。"""
+    edt = getattr(lmap, "_wall_edt", None)
+    if (native.lib is None or not USE_NATIVE or edt is None or edt.dtype != np.float32
+            or not edt.flags.c_contiguous):
+        return lmap.path_clearance(sample_path_array(start, path, step=step))
+    segs = path.segments
+    gear = np.array([sg.gear for sg in segs], dtype=np.int64)
+    curv = np.array([sg.curvature for sg in segs], dtype=np.float64)
+    length = np.array([sg.length for sg in segs], dtype=np.float64)
+    circles = native.f64(lmap._circles)
+    cx, cy = np.ascontiguousarray(circles[:, 0]), np.ascontiguousarray(circles[:, 1])
+    h, w = edt.shape
+    g = lmap.grid
+    return float(native.lib.hy_path_clearance(
+        float(start[0]), float(start[1]), float(start[2]), len(segs), native.addr(gear),
+        native.addr(curv), native.addr(length), float(step), native.addr(edt), h, w,
+        float(g.origin[0]), float(g.origin[1]), float(g.resolution), cx.size, native.addr(cx),
+        native.addr(cy), float(np.float32(lmap._circle_r))))

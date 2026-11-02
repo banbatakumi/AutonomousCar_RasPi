@@ -19,6 +19,24 @@
 
 ## 直近の作業記録（新しい順）
 
+## 2026-11-02 駐車（Hybrid A*）を C に（未コミット・Pi 未反映）
+
+`sim.park_bench --scenario all --n 5 --errors real`（同じ種）で Mac と Pi を比べると、Pi は**探索が時間予算（120ms）に負けて駐車を失敗する**:
+Mac 成功 20/20・Hybrid A* の予算切れ 1/27・`plan()` 中央 4.8ms／Pi 成功 16/20（deadend 2/5・parallel 4/5）・予算切れ 18/35・`plan()` 中央 30.6ms・最大 223ms（150ms 超 18 回）。
+決勝の駐車チャレンジは配点最大級（`docs/competition_plan.md` ⑧）。予算で打ち切るので結果は CPU の速さで変わる——検証は「予算に当たらない条件で Python 版と同じ経路」＋「Pi のベンチの成功率」
+- 探索の中身（Mac で park_bench の問題 27 件を保存し予算なしで解く）: 1展開 534µs、大半が Reeds-Shepp（ヒューリスティックで子ごとに
+  `shortest_path(...).length`、候補 48 通りを経路のオブジェクトで作る）、次いで解析展開（全候補をオブジェクトにして並べる）・子の生成と衝突判定・格子の Dijkstra
+- `raspi/nav/_native.c` に、`rs_shortest_length`（長さだけ）・`rs_candidates`（全候補を表で。解析展開は上位 6 本だけ経路にする）・
+  `hy_successors`（子の標本化と車体の余裕）・`hy_path_clearance`（解析展開の衝突判定）・`hy_dijkstra`（格子のヒューリスティック）。すべて Python 版とビット一致:
+  CPython の `math.hypot`（独自の vector_norm）・float の `%`・3.12 以降の `sum`（Neumaier）を写し、heapq と同じ (費用, 行, 列) の順のヒープ。
+  clang が同じ角の sin・cos を `sincos` にまとめて 1ulp ずれた → `-fno-builtin-sin/cos/sincos`（`slam2d/core/cbuild.py`）。numpy の cos・sin・exp は libm と同じ値（Mac・Pi で確認）
+- 予算なしの 27 件の結果の指紋は変更前と同じ。1展開 534 → 70µs（Mac）。予算 120ms で解けなかった問題が Mac で 1864 展開まで進む
+- Pi の park_bench（`--n 5 --errors real`）: 成功 16/20 → **20/20**、予算切れ 18/35 → 2/28。`plan()` の 150ms 超 18 → 2 回
+  （残りの1回 1.5s は C 版を探索の中で遅れて読んで組み立てていた。モジュールの読み込み時に読むよう直した）
+- `--n 10`（40 回）: Pi 39/40・Mac 39/40（失敗は両方とも同じ parallel の1件）。Pi の Hybrid A* の最大 122ms、`plan()` 中央 29.9ms・最大 198ms（150ms 超 2 回 = 予算 120ms ＋ 毎周期の 30ms）
+- `raspi/tests/test_native.py` に Reeds-Shepp・Hybrid A* の一致（候補・子・衝突判定・Dijkstra・予算なしの探索）。Mac の pytest 全体 2070 件 OK
+- 未着手: 駐車中の毎周期の重さ（Pi の `plan()` 中央 30ms。`LocalMap.refresh` の距離変換の前後・`raspi/nav/grid.py` の `_carve`・`scan2scan.match_scans`）
+
 ## 2026-11-02 SLAM の対応付け・総当たりの採点・面要素の法線も C に（調査の②③。2026-11-02 Pi 反映済み・走行では未検証）
 
 `slam2d/core/_native.c` に `sm_associate`（`SurfaceMap.associate`）・`sm_score_rows`（`search_steps`・`GlobalLocalizer.step` の採点。

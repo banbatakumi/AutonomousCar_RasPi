@@ -23,7 +23,10 @@ import numpy as np
 
 __all__ = ["FLAGS", "load", "addr", "f64"]
 
-FLAGS = ("-O2", "-fPIC", "-shared", "-ffp-contract=off", "-fno-fast-math")
+#: ★ `-fno-builtin-sin/cos/sincos`: 同じ角の `sin` と `cos` を `sincos` の1回にまとめさせない（clang がまとめ、
+#:   Python の `math.sin`・`math.cos` と最後の1ビットが違う値になった。Reeds-Shepp の長さで 6万件中105件）
+FLAGS = ("-O2", "-fPIC", "-shared", "-ffp-contract=off", "-fno-fast-math",
+         "-fno-builtin-sin", "-fno-builtin-cos", "-fno-builtin-sincos")
 
 
 def _cache_dir() -> Path:

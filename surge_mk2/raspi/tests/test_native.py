@@ -235,6 +235,117 @@ class TestBandSolve(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+@unittest.skipUnless(NATIVE, "C コンパイラが無い（Python 版で回る）")
+class TestReedsShepp(unittest.TestCase):
+    """Reeds-Shepp（`_native.c` の `rs_*`）。CPython の `math.hypot`・`%`・`sum` を写した部分も含めてビット一致。"""
+
+    def test_cpython_helpers(self):
+        import random
+        rnd = random.Random(0)
+        lib = native.lib
+        for _ in range(20000):
+            x = rnd.uniform(-1, 1) * 10 ** rnd.uniform(-30, 30)
+            y = rnd.choice([0.0, rnd.uniform(-10, 10)])
+            self.assertEqual(math.hypot(x, y), lib.rs_py_hypot(x, y), (x, y))
+            v = rnd.uniform(-50, 50)
+            self.assertEqual(v % (2 * math.pi), lib.rs_py_mod(v, 2 * math.pi))
+            a = np.array([rnd.uniform(0, 5) * 10 ** rnd.uniform(-8, 1) for _ in range(rnd.randint(1, 5))])
+            self.assertEqual(sum(a.tolist()), lib.rs_py_sum(native.addr(a), a.size))
+
+    def _cases(self, n, seed):
+        import random
+        rnd = random.Random(seed)
+        for _ in range(n):
+            s = (rnd.uniform(-3, 3), rnd.uniform(-3, 3), rnd.uniform(-4, 4))
+            g = (rnd.uniform(-3, 3), rnd.uniform(-3, 3), rnd.uniform(-4, 4)) if rnd.random() < 0.97 else s
+            yield s, g, rnd.uniform(0.3, 1.5)
+
+    def test_shortest_length_and_candidates(self):
+        from raspi.nav import hybrid_astar as hy
+        from raspi.nav import reeds_shepp as rs
+        for s, g, r in self._cases(3000, 1):
+            self.assertEqual(rs.shortest_length(s, g, r), rs.shortest_path(s, g, r).length)
+            cfg = hy.HybridConfig(turning_radius=r)
+            try:
+                rs.USE_NATIVE = True
+                a, a2 = rs.candidate_paths(s, g, r), hy._analytic_candidates(s, g, cfg)
+                rs.USE_NATIVE = False
+                b, b2 = rs.candidate_paths(s, g, r), hy._analytic_candidates(s, g, cfg)
+            finally:
+                rs.USE_NATIVE = True
+            self.assertEqual(a, b)
+            self.assertEqual(a2, b2)
+
+
+@unittest.skipUnless(NATIVE, "C コンパイラが無い（Python 版で回る）")
+class TestHybridAStar(unittest.TestCase):
+    """Hybrid A* の子ノード・解析展開の衝突判定・格子のヒューリスティックの C 版。予算に当たらない条件で
+    探索の結果（経路・展開数・余裕）が Python 版と同じ。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from raspi.tests.test_hybrid_astar import DEADEND, GARAGE, ROOM, _map
+        cls.maps = {"room": _map(ROOM), "garage": _map(GARAGE, pose=(0.0, 0.3, 0.0)),
+                    "deadend": _map(DEADEND)}
+
+    def _both(self, fn):
+        from raspi.nav import hybrid_astar as hy
+        from raspi.nav import reeds_shepp as rs
+        try:
+            hy.USE_NATIVE = rs.USE_NATIVE = True
+            hy._DIJKSTRA_CACHE.clear()
+            a = fn()
+            hy.USE_NATIVE = rs.USE_NATIVE = False
+            hy._DIJKSTRA_CACHE.clear()
+            b = fn()
+        finally:
+            hy.USE_NATIVE = rs.USE_NATIVE = True
+            hy._DIJKSTRA_CACHE.clear()
+        return a, b
+
+    def test_successors_and_clearance(self):
+        from raspi.nav import hybrid_astar as hy
+        from raspi.nav.reeds_shepp import candidate_paths
+        from raspi.tests.test_hybrid_astar import _cfg
+        cfg = _cfg()
+        curv = hy._curvature_levels(cfg)
+        rng = np.random.default_rng(6)
+        for lmap in self.maps.values():
+            for _ in range(30):
+                pose = (float(rng.uniform(-1.5, 1.5)), float(rng.uniform(-1.0, 1.0)),
+                        float(rng.uniform(-3, 3)))
+                node = hy._Node(f=0.0, seq=0, g=0.3, pose=pose, curvature=0.0, gear=1,
+                                wall_clear=0.02)
+                a = hy._native_successors(node, curv, lmap, cfg)
+                b = hy._successors_py(node, curv, lmap, cfg)
+                self.assertEqual(a, b)
+                for p in candidate_paths(pose, (0.3, 0.1, 0.5), cfg.turning_radius)[:4]:
+                    if p.segments:
+                        x, y = self._both(lambda: hy._path_clearance(lmap, pose, p, 0.03))
+                        self.assertEqual(x, y)
+
+    def test_heuristic_grid_is_identical(self):
+        from raspi.nav import hybrid_astar as hy
+        from raspi.tests.test_hybrid_astar import _cfg
+        cfg = _cfg()
+        for lmap in self.maps.values():
+            for goal in ((0.0, 0.0), (1.2, -0.3), (-0.8, 0.2)):
+                a, b = self._both(lambda: hy._Heuristic2D(lmap, goal, cfg, cfg.margin).cost.copy())
+                self.assertTrue(np.array_equal(a, b))
+
+    def test_plans_are_identical(self):
+        from raspi.nav import hybrid_astar as hy
+        from raspi.tests.test_hybrid_astar import _cfg
+        cfg = _cfg(time_budget_s=60.0, max_expansions=1500)
+        cases = [("room", (0.0, 0.0, 0.0), (1.0, 0.5, 1.2)),
+                 ("garage", (-1.0, 0.3, 0.0), (0.0, -0.4, math.pi / 2)),
+                 ("deadend", (-1.5, 0.0, 0.0), (-1.5, 0.0, math.pi))]
+        for name, start, goal in cases:
+            lmap = self.maps[name]
+            a, b = self._both(lambda: hy.plan(start, goal, lmap, cfg))
+            self.assertEqual(a, b, name)
+
+
 class TestLoader(unittest.TestCase):
     def test_disabled_by_env(self):
         """`SURGE_NO_NATIVE=1` なら C を読まない（Python 版で回る）。"""
