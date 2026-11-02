@@ -64,7 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.bus_bridge import BusBridge  # noqa: E402
 from raspi.core.control_params import ControlParamSync, disarm_brake_timeout_s, load_control_params  # noqa: E402
-from raspi.core.steer_guard import SteerGuard  # noqa: E402
+from raspi.core.steer_guard import GIVE_UP, PAUSE, RESUME, SteerGuard  # noqa: E402
 from raspi.core.link_tracker import (  # noqa: E402
     LinkState,
     LinkTracker,
@@ -136,7 +136,7 @@ _REARM_MESSAGES = {
     "駆動電源ラッチ": "駆動電源ラッチは解除されました。ARM を一度外してから入れ直してください",
     REARM_STM_RESTART: "STM32 が再起動しました。ARM を一度外してから入れ直してください",
     REARM_LINK_LOST: "STM32 が通信途絶から復帰しました。ARM を一度外してから入れ直してください",
-    REARM_STEER_STUCK: ("舵が指令に追従しなかったので止めました。ステアの機構と MD を点検してから"
+    REARM_STEER_STUCK: ("舵が指令に追従しないまま直らなかったので止めました。ステアの機構と MD を点検してから"
                         "ARM を一度外して入れ直してください"),
 }
 
@@ -381,28 +381,45 @@ class IoNode:
         return _cb
 
     def _check_steer(self, t: packets.Telemetry, t_pi_ns: int) -> None:
-        """舵が指令に追従しない（`raspi/core/steer_guard.py`）なら、止めて ARM をラッチする。
+        """舵が指令に追従しない（`raspi/core/steer_guard.py`）なら、ARM のままその場で止めて待つ。
 
         STM32 は舵の位置制御が追従しなくても何も言わない（会場の試走 `surge_20261031_062217` で、舵が
-        動かないまま 1.4 秒まっすぐ走って壁に当たった）。走っていれば最大制動で止めてから DISARM し
-        （`_command_packet`）、人が ARM を入れ直すまで通さない（`_update_rearm_latch`）。
+        動かないまま 1.4 秒まっすぐ走って壁に当たった）。見つけたら最大制動で止め、舵の指令を見つけた時の
+        値で据え置く（`_command_packet`）。舵がそれに追従したら通常の指令へ戻す（走行は続く。本番で
+        DISARM すると人が ARM を入れ直すまで走れない）。直らなければ DISARM して、人が ARM を入れ直す
+        まで通さない（`_update_rearm_latch`）。
         """
         armed = bool(t.flags & packets.FLG_ARMED)
         if not armed:
             self.steer_guard.reset()
+            self.bridge.steer_hold = False
             return
         meta = packets.Telemetry.META
-        if not self.steer_guard.update(
-                t_pi_ns, armed, t.steer_cmd_echo * meta["steer_cmd_echo"][0],
-                t.steer_actual * meta["steer_actual"][0],
-                t.motor_current[2] * meta["motor_current"][0]):
-            return
-        why = self.steer_guard.reason
-        self._rearm_reason = REARM_STEER_STUCK
-        self._log_event("steer_stuck", {"reason": why})
-        self.stm_log.insert(0, f"{time.strftime('%H:%M:%S')} E Pi: {why}")
+        g = self.steer_guard
+        ev = g.update(
+            t_pi_ns, armed, t.steer_cmd_echo * meta["steer_cmd_echo"][0],
+            t.steer_actual * meta["steer_actual"][0],
+            t.motor_current[2] * meta["motor_current"][0],
+            t.speed * meta["speed"][0])
+        if ev == PAUSE:
+            self._log_event("steer_pause", {"reason": g.message, "trips": g.trips})
+            self._push_stm_log("W", f"Pi: {g.message}。止めて待つ")
+            print(f"\n!! {g.message}。止めて舵が戻るのを待つ", file=sys.stderr, flush=True)
+        elif ev == RESUME:
+            self._log_event("steer_resume", {"trips": g.trips})
+            self._push_stm_log("W", "Pi: 舵が指令に追従したので走行を再開")
+            print("\n!! 舵が指令に追従したので走行を再開", file=sys.stderr, flush=True)
+        elif ev == GIVE_UP:
+            self._rearm_reason = REARM_STEER_STUCK
+            self._log_event("steer_stuck", {"reason": g.reason})
+            self._push_stm_log("E", f"Pi: {g.reason}")
+            print(f"\n!! {g.reason}。ARM を外した", file=sys.stderr, flush=True)
+        self.bridge.steer_hold = g.paused
+
+    def _push_stm_log(self, level: str, text: str) -> None:
+        """`diag/link` の `stm_log`（新しい順・4 件）に Pi の判断を載せる。"""
+        self.stm_log.insert(0, f"{time.strftime('%H:%M:%S')} {level} {text}")
         del self.stm_log[4:]
-        print(f"\n!! {why}。ARM を外した", file=sys.stderr, flush=True)
 
     # ── LED 表示 ──
 
@@ -931,6 +948,12 @@ class IoNode:
             self._last_armed_pkt = None
             self._failsafe_since_ns = None
             return self._disarm_command()
+        if (self.steer_guard.paused and self._last_armed_pkt is not None
+                and self.cmd is not None and not self.cmd_stale and self.cmd.arm):
+            # 舵が追従しない（`_check_steer`）。ARM のまま最大制動で止め、舵は見つけた時の指令で据え置く
+            # （`_last_armed_pkt` を更新しない。実舵角がこれに追従したら `_check_steer` が再開する）。
+            # ARM を外した・指令が途絶えたなら下の通常の処理へ
+            return self._brake_packet(self._last_armed_pkt)
         # 同じ「安全側へ倒す」でも、走っていたかもしれないので DISARM の前に制動を通す。
         # telemetry_node のデッドマン（GUI の指令の途絶）は `cmd` 自体は届き続けるので、
         # 発行元で見分ける
@@ -988,6 +1011,11 @@ class IoNode:
             self._failsafe_since_ns = None
             return self._disarm_command()
 
+        return self._brake_packet(last)
+
+    @staticmethod
+    def _brake_packet(last: packets.Command) -> packets.Command:
+        """ARM のまま最大制動（`brake_torque=0` は STM32 の最大）。モードと舵角は `last` のまま。"""
         return packets.Command(
             mode=last.mode,
             flags=(packets.CMD_FLG_ARM | packets.CMD_FLG_BRAKE

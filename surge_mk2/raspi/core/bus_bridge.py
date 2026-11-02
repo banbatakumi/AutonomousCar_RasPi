@@ -60,6 +60,8 @@ class BusBridge:
         self._last_echo: int = -1
         #: 直近のエンドツーエンド遅延 [ms]。GUI に常時出す（50ms 超で警告）
         self.cmd_rtt_ms: float | None = None
+        #: `VehicleState.steer_hold` に載せる値（io_node の舵の見張りが立てる）
+        self.steer_hold = False
 
         self.vehicle_states = 0
         self.published_scans = 0
@@ -93,6 +95,7 @@ class BusBridge:
             self._last_echo = echo
 
         st = self.state_builder.build(t, capture)
+        st.steer_hold = self.steer_hold
         self.vehicle_states += 1
         if self.pub is not None:
             self.pub.send(TOPIC_VEHICLE_STATE, st)

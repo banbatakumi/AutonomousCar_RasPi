@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.bus_bridge import BusBridge  # noqa: E402
+from raspi.msgs import VehicleState  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 
 
@@ -19,7 +20,7 @@ class TestStateCaptureTime(unittest.TestCase):
     def _capture(self, t_pi_ns):
         b = BusBridge(None, clock=lambda: self.NOW)
         seen = []
-        b.state_builder.build = lambda t, capture: seen.append(capture)
+        b.state_builder.build = lambda t, capture: seen.append(capture) or VehicleState()
         b.on_telemetry(packets.Telemetry(), t_pi_ns)
         return seen[0]
 

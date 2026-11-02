@@ -259,6 +259,9 @@ class VehicleState(MsgBase):
     #: **生値はそのまま残し、「止まっている」の判断だけを別に持つ**。
     #: GUI はこれが True なら 0.00 と表示する
     stopped: bool = True
+    #: **舵が指令に追従しないので、io_node が ARM のまま制動して舵が戻るのを待っている**
+    #: （`raspi/core/steer_guard.py`）。この間 io_node は planner の指令を STM32 へ通さない
+    steer_hold: bool = False
 
 
 class Scan(MsgBase):

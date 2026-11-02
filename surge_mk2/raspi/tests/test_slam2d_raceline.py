@@ -399,6 +399,19 @@ class TestObstacleBrakeAndMdFault(unittest.TestCase):
         self.assertEqual(self.p._md_fault(st, self._vs(2.0), self.params), "")
         self.assertEqual(st.target_speed, 2.5)
 
+    def test_steer_hold_stops_and_resumes(self):
+        # io_node が舵の追従を待っている（`raspi/core/steer_guard.py`）。止める指令にして、戻れば元どおり
+        st = self.AutoState(target_speed=2.5)
+        vs = self._vs(1.0)
+        vs.steer_hold = True
+        self.assertIsNone(self.p._md_fault(st, vs, self.params))
+        self.assertTrue(st.brake)
+        self.assertEqual(st.target_speed, 0.0)
+        self.assertIn("舵", st.reason)
+        st = self.AutoState(target_speed=2.5)
+        self.assertEqual(self.p._md_fault(st, self._vs(1.0), self.params), "")
+        self.assertEqual(st.target_speed, 2.5)
+
     def test_one_md_down_too_long_stops(self):
         run = self.packets.MDS_RUNNING
         self.p._md_t = self.params["md_fault_s"]

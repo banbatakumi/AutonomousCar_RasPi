@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x30534910
+export const MSGS_SCHEMA = 0x2f523445
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -182,6 +182,11 @@ export type VehicleState = {
    * GUI はこれが True なら 0.00 と表示する
    */
   stopped: boolean
+  /**
+   * **舵が指令に追従しないので、io_node が ARM のまま制動して舵が戻るのを待っている**
+   * （`raspi/core/steer_guard.py`）。この間 io_node は planner の指令を STM32 へ通さない
+   */
+  steer_hold: boolean
 }
 
 /**
