@@ -326,7 +326,8 @@ class Bench:
                  surface: dict | None = None, assume: dict[str, float] | None = None,
                  grip_file: Path | None = None, grip_cfg: dict[str, float] | None = None,
                  sim_params: dict[str, float] | None = None,
-                 state_dir: Path | None = None) -> None:
+                 state_dir: Path | None = None,
+                 hijacks: list[tuple[float, float, float, float]] | None = None) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -461,6 +462,9 @@ class Bench:
         self._last_cmd_ns = 0
         self._grip_t0: float | None = None
         self._race_t0: float | None = None
+        #: 走行開始から `(t, dur, steer, speed)` の間、指令を乗っ取る（人が押した・ぶつかって弾かれた代わり。
+        #: 経路から外れた・壁に当たった所から戻れるかを見る）
+        self._hijacks = sorted(hijacks or [])
         self.mode = mode
         self.params = merged_params(mode, params, hidden=True)
         self.max_speed = max_speed
@@ -776,6 +780,11 @@ class Bench:
                 self._last_cmd_ns = now
                 next_cmd = now + cmd_period
                 out_cmd = cmd
+                hj = self._hijack(time.monotonic() - t0)
+                if hj is not None:
+                    out_cmd = DriveCmd(mode=2, arm=True, target_speed=hj[1], target_steer=hj[0],
+                                       accel_limit=self.sim.spec.cmd_accel_limit_m_s2,
+                                       steer_rate_limit=self.sim.spec.cmd_steer_rate_limit_rad_s)
                 if rearm:
                     out_cmd = DriveCmd(mode=0)       # ARM を一度外す（次の周期から元の指令に戻る）
                     rearm = False
@@ -814,6 +823,20 @@ class Bench:
         if getattr(self, "_long_f", None):
             self._long_f.close()
         return self.res
+
+    def _hijack(self, t: float) -> tuple[float, float] | None:
+        """`--hijack` の窓の中なら `(舵角, 速度)`。走行開始（`_race_t0`）から数える。"""
+        if self._race_t0 is None:
+            return None
+        tr = t - self._race_t0
+        for t1, dur, steer, speed in self._hijacks:
+            if t1 <= tr < t1 + dur:
+                if not getattr(self, "_hj_on", False) and not self.quiet:
+                    print(f"  {t:5.1f}s 指令を乗っ取る（{dur:.1f}s・舵 {steer:+.2f}・{speed:.2f}m/s）", flush=True)
+                self._hj_on = True
+                return steer, speed
+        self._hj_on = False
+        return None
 
     def _sample(self, t: float, cmd: DriveCmd, dt: float) -> None:
         """指令周期（100Hz）で真値を見る: ゲートのラップ・最高速・制動・記録。"""
@@ -1352,6 +1375,9 @@ def main() -> int:
                          "倍率とバイアス）。既定 none = 今まで通り。`--sim` の指定が優先")
     ap.add_argument("--obs-log", action="store_true",
                     help="障害物まわりの判断（reason の移り変わり）を時刻つきで出す")
+    ap.add_argument("--hijack", action="append", default=[], metavar="T:DUR:STEER:SPEED",
+                    help="走行開始から T 秒後に DUR 秒だけ指令を舵 STEER [rad]・速度 SPEED [m/s] に乗っ取る"
+                         "（経路から外れた・ぶつかった所から戻れるかを見る）")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -1407,7 +1433,8 @@ def main() -> int:
               grip_file=Path(args.grip) if args.grip else None, grip_cfg=grip_cfg,
               sim_params={**(REAL_VIBRATION if args.real_noise else {}),
                           **_error_preset(args.errors), **pairs(args.sim)},
-              state_dir=Path(args.state) if args.state else None)
+              state_dir=Path(args.state) if args.state else None,
+              hijacks=[nums(h, ":") for h in args.hijack])
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)

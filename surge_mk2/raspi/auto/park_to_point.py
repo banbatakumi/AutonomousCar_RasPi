@@ -170,6 +170,21 @@ MAP_MIN_SIZE_M = 6.0
 #: 進路を塞がれて制動している間の、再計画の間隔の下限 [s]。毎周期（0.1s）引き直すと、人が
 #: 1秒横切っただけで `max_replans` を使い切り、探索の時間（1回 100ms 以上）で指令も滞る
 BLOCKED_REPLAN_S = 0.5
+#: 今の姿勢で既に壁などに触れている（食い込みが負）とき、掃引がこれより深く食い込まなければ止めない [m]
+#: （`_safety_brake`）。触れた所から動き出す経路は先頭の今の姿勢そのものが食い込みに見えるので、
+#: 閾値 0 のままだとどの向きへ動く経路も止まる（壁に当たって止まった車が Hybrid A* で戻るとき、
+#: 0〜1cm の食い込みで制動と再計画を約 7 秒交代した。sim.bench --hijack）
+CONTACT_TOL_M = 0.01
+#: 「触れている」と扱う今の姿勢の食い込みの上限 [m]。これより深い（車体の中に点がある・塞がれている）
+#: なら従来どおり閾値 0 で止める
+CONTACT_MAX_M = 0.03
+
+
+def _contact_floor(start: float) -> float:
+    """掃引の余裕の下限。今の姿勢 `start` が浅く触れているなら、それより `CONTACT_TOL_M` 深くまで許す。"""
+    if -CONTACT_MAX_M <= start < 0.0:
+        return start - CONTACT_TOL_M
+    return 0.0
 
 
 class ParkToPoint(Planner):
@@ -472,7 +487,7 @@ class ParkToPoint(Planner):
             # **この経路を受け入れた閾値**を安全判定へ渡す（`_safety_brake`）。
             # 代替経路は余裕が足りないこともあるが、それを安全側が知らないと
             # 「計画が受け入れた経路を安全側が拒否する」交代が起きる。
-            # 実際の接触は`_sweep_clearance()`の厳密判定（閾値0）が止める
+            # 実際の接触は`_sweep_clearances()`の厳密判定（閾値0）が止める
             self._plan_margin = min(p["collision_margin_m"], best_clear)
             self._set_path(best, pose_map)
         else:
@@ -605,18 +620,21 @@ class ParkToPoint(Planner):
         if len(local) == 0:
             return False, ""
 
-        now = self._sweep_clearance(pts, local)
-        if now < 0.0:
+        # ★ 先頭は今の姿勢。既に触れているなら、それより深く食い込む動きだけを止める（`CONTACT_TOL_M`）
+        sweep = self._sweep_clearances(pts, local)
+        now = float(sweep.min())
+        if now < _contact_floor(float(sweep[0])):
             return True, (f"進行方向{d_stop:.2f}m以内に障害物"
                           f"（食い込み{-now * 100:.0f}cm）")
 
         # 地図側は推定誤差を含むので、計画が受け入れた閾値で見る
-        thr = min(0.0, self._plan_margin)
         c, s = math.cos(pose_map[2]), math.sin(pose_map[2])
         mx = pose_map[0] + local[:, 0] * c - local[:, 1] * s
         my = pose_map[1] + local[:, 0] * s + local[:, 1] * c
         myaw = pose_map[2] + local[:, 2]
-        clear = float(self._map.body_clearance(mx, my, myaw).min())
+        body = np.asarray(self._map.body_clearance(mx, my, myaw), dtype=float)
+        clear = float(body.min())
+        thr = min(0.0, self._plan_margin, _contact_floor(float(body[0])))
         if clear < thr:
             return True, (f"進行方向{d_stop:.2f}m以内で地図上の障害物に"
                           f"接触します（食い込み{-clear * 100:.0f}cm）")
@@ -646,8 +664,8 @@ class ParkToPoint(Planner):
         out[:, 2] = seg[:, 2] - ryaw
         return out
 
-    def _sweep_clearance(self, pts: Points, local: np.ndarray) -> float:
-        """**今周期のスキャンに対する掃引の最小余裕** [m]。負なら食い込み。
+    def _sweep_clearances(self, pts: Points, local: np.ndarray) -> np.ndarray:
+        """**今周期のスキャンに対する掃引の余裕** [m]（姿勢ごと）。負なら食い込み。
 
         `local`は車体座標の姿勢列、`pts`も車体座標なので、**自己位置推定を
         一切通らない**（`min_hits`の待ちも無い）。
@@ -662,7 +680,7 @@ class ParkToPoint(Planner):
         hx = pts.x[pts.hit]
         hy = pts.y[pts.hit]
         if hx.size == 0 or len(local) == 0:
-            return math.inf
+            return np.full(max(len(local), 1), math.inf)
         c = np.cos(-local[:, 2])[:, None]
         s = np.sin(-local[:, 2])[:, None]
         dx = hx[None, :] - local[:, 0][:, None]
@@ -677,7 +695,7 @@ class ParkToPoint(Planner):
         inside_depth = np.minimum(np.minimum(px - x0, x1 - px),
                                   np.minimum(py - y0, y1 - py))
         d = np.where((ox <= 0.0) & (oy <= 0.0), -inside_depth, outside)
-        return float(d.min())
+        return d.min(axis=1)
 
     # ── `AutoState` の組み立て ──
 

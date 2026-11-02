@@ -74,6 +74,8 @@ cd surge_mk2
 
 `magp1` はコース写真（外形 12.3×6.7m、管の壁、分岐あり）を PNG 化したコース（`sim/courses/magp1.png`、縮尺 95px/m）。
 `sim.bench --mover S0,SPEED[,D,R,T0]` で、planner の経路に沿って動く円柱（他車の代わり。速度が負なら逆走）を置ける。
+`sim.bench --hijack T:DUR:STEER:SPEED` で、走行開始から T 秒後に DUR 秒だけ指令を乗っ取り、経路から外す・壁に当てる
+（外れた所から戻れるかを見る。例 `--hijack 14:1.2:0.5:1.0`）。
 
 PNG コースの JSON に `"obstacles": [[x, y, 半径], ...]` を書くと、壁と別に孤立障害物を刻める。
 

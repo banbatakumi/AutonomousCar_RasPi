@@ -363,6 +363,20 @@ class TestSafetyBrake(unittest.TestCase):
         pp._set_path(pp._path, (0.0, 0.0, 0.0))  # 参照位置を巻き戻す
         self.assertTrue(pp._safety_brake(behind, (0.0, 0.0, 0.0), -0.3, 0, p)[0])
 
+    def test_touching_contact_only_blocks_moving_deeper(self):
+        """★ 既に触れている（壁に当たって止まった）所からは、離れる動きを止めず、深く食い込む動きだけ止める。
+
+        以前は今の姿勢そのものの食い込み（0〜1cm）で、どの向きへ動く経路も止めていた。
+        """
+        pp = ParkToPoint()
+        p = pp.merged({})
+        x1 = pp._body_box[1]
+        touching = _points([(x1 - 0.005, 0.0)])     # 前端が 5mm 食い込んでいる
+        self._straight_path(pp, gear=-1)
+        self.assertFalse(pp._safety_brake(touching, (0.0, 0.0, 0.0), -0.3, 0, p)[0])
+        self._straight_path(pp, gear=1)
+        self.assertTrue(pp._safety_brake(touching, (0.0, 0.0, 0.0), 0.3, 0, p)[0])
+
     def test_swept_check_catches_corner_swing(self):
         """**旋回中の前端の振り出し**を捕まえること（旧方式が見落とした16%）。
 

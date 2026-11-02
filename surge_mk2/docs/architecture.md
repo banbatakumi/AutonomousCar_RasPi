@@ -416,8 +416,11 @@ engage の状態は保存しない（`config/auto.json` に入るのはモード
   グラフ0.3s（640×640）。`plan()` の10Hzを塞ぐと `cmd_deadman` で DISARM に落ちる
 - **走り出し（LOCATE 直後）は経路に乗るまで `join_speed` に抑える。** 抑えないと、
   横に10〜30cm・向きに25°ずれたまま最高速で大回りして壁に当たった（sim.bench で実測）。
-  外れすぎたら1秒止まって乗り直す（3回まで）。**`slam2d_raceline` も同じ処理を使う**
-  （`Slam2dRaceLine._join_cap`/`_off_route`）
+  外れすぎたら止まり、閉じた経路なら 0.3s 後に Hybrid A*（`DETOUR`、後退・切り返しも使う）で経路の先へ戻って
+  滑らかに合流する（2回まで。使い切ったら従来どおり1秒止まって追従で乗り直す、3回まで）。壁に当たって進めない
+  （スタック）ときも「障害物を避ける」の設定に関係なく同じく Hybrid A* で抜ける。追従だけで乗り直すと、
+  壁の側へ切って当たり `join_speed` で壁を押し続けた（`sim.bench --hijack`）。**`slam2d_raceline` も同じ処理を使う**
+  （`Slam2dRaceLine._join_cap`/`_off_route`/`_obstacle_response`）
 
 参考: Oleynikova et al. 2018（ESDF からの疎なトポロジーグラフ）、tuw_voronoi_graph、
 nav2 route server（`ros-navigation/navigation2/nav2_route`）、Autoware mission_planner（reroute）、

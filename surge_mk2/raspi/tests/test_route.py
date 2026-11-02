@@ -1068,13 +1068,43 @@ class TestJoinAndRejoin(unittest.TestCase):
         self.pl._dt = 0.125                                # 8回でちょうど1秒（浮動小数の誤差なし）
         still = VehicleState(speed=0.0)
         for _ in range(7):
-            self.assertTrue(self.pl._off_route(AutoState(), self._pp(0.6), still, self.p))
+            self.assertTrue(self.pl._off_route(AutoState(), self._pp(0.6), still, self.p, self.path))
         self.assertTrue(self.pl._joined)                   # まだ1秒たっていない
-        self.pl._off_route(AutoState(), self._pp(0.6), still, self.p)
+        self.pl._off_route(AutoState(), self._pp(0.6), still, self.p, self.path)
         self.assertFalse(self.pl._joined)                  # 1秒止まったら乗り直す
         self.assertEqual(self.pl._rejoins, 1)
         # 乗り直し中は上限 1.5 倍（0.6m では止めない）
-        self.assertFalse(self.pl._off_route(AutoState(), self._pp(0.6), still, self.p))
+        self.assertFalse(self.pl._off_route(AutoState(), self._pp(0.6), still, self.p, self.path))
+
+    def test_closed_path_rejoins_with_hybrid_astar(self):
+        """閉じた経路で外れすぎたら、止まって少し待ってから Hybrid A* で経路の先へ戻る。
+
+        ★ 追従だけで乗り直すと、壁の側へ切って当たり `join_speed` で壁を押し続けた（sim.bench --hijack）。
+        """
+        from raspi.msgs import AutoState, VehicleState
+        calls = []
+        self.pl._start_detour = lambda st, path, index, hit, dist, p, why, extra=0.0: \
+            calls.append((index, hit, extra))
+        closed = rl_mod.RaceLine(xy=self.path.xy, v=self.path.v, kappa=self.path.kappa,
+                                 length=self.path.length, closed=True)
+        self.pl._joined = True
+        self.pl._dt = 0.1
+        moving = VehicleState(speed=0.5, armed=True)
+        self.assertTrue(self.pl._off_route(AutoState(), self._pp(0.6), moving, self.p, closed))
+        self.assertEqual(calls, [])                        # 止まるまでは入らない
+        still = VehicleState(speed=0.0, armed=True)
+        for _ in range(5):
+            self.assertTrue(self.pl._off_route(AutoState(), self._pp(0.6), still, self.p, closed))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], 10)
+        self.assertAlmostEqual(calls[0][2], 0.6)           # 外れたぶん目標を先へ置く
+        # Hybrid A* を使い切ったら、従来どおり最寄り点を探し直して乗り直す
+        from raspi.auto.slam2d_raceline import DETOUR_TRIES
+        self.pl._detour_tries = DETOUR_TRIES
+        for _ in range(10):
+            self.pl._off_route(AutoState(), self._pp(0.6), still, self.p, closed)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(self.pl._joined)
 
 
 class TestRouteSelectBus(unittest.TestCase):
@@ -1203,6 +1233,17 @@ class TestObstacleResponse(unittest.TestCase):
         # numpy のスカラを `AutoState` へ流さない（バスのエンコーダが落ちた実績がある）
         tgt = self.pl._detour._target_in_park
         self.assertTrue(all(type(v) is float for v in tgt), tgt)
+
+    def test_stuck_is_escaped_even_when_avoidance_is_off(self):
+        """★ 壁に当たって進めないときは「避ける」が 0 でも Hybrid A* で抜ける（以前は壁を押し続けた）。"""
+        handled = False
+        for _ in range(40):
+            if handled:
+                break
+            handled, st = self._respond(self.closed, None, np.inf, speed=0.0, armed=True,
+                                        obstacle_avoid=0)
+        self.assertTrue(handled)
+        self.assertEqual(self.pl.phase, "DETOUR")
 
 
 class TestUnknownCells(unittest.TestCase):

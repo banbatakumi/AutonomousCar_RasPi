@@ -109,6 +109,8 @@ _OBS_PAD_MIN = 0.15
 _NEAR_CLEAR = 0.02
 #: 障害物で制動している途中に検出が途切れても、制動を保つ時間 [s]
 _BRAKE_HOLD_S = 0.3
+#: 経路から外れすぎて止まってから、Hybrid A* で戻り始めるまでの待ち [s]（`_off_route`）
+_REJOIN_WAIT_S = 0.3
 #: Hybrid A* で抜けた後、経路からの横ずれがこれ未満なら戻り経路を作らない [m]
 _BLEND_MIN = 0.03
 #: 引き直したラインへ乗り移ってよい、今の姿勢とのずれ（横 [m]・向き [rad]、`_try_adopt_line`）
@@ -1919,7 +1921,7 @@ class Slam2dRaceLine(Planner):
         self._count_lap(self.path, pp.index)
         st.laps = self.laps
 
-        if self._off_route(st, pp, vs, p):
+        if self._off_route(st, pp, vs, p, self.path):
             return st
 
         st.ready = True
@@ -2194,6 +2196,9 @@ class Slam2dRaceLine(Planner):
         """
         slow_on = p["obstacle_avoid"] > 0
         avoid_on = slow_on and path.closed
+        # ★ スタック（壁に当たった・擦った）から抜けるのは「避ける」を切っていても行う。切っていると
+        #   壁に当たった後 `join_speed` で壁を押し続けて動けなかった（sim.bench --hijack）
+        unstick_on = path.closed
         # ★ 駆動が入っていない間（engage 済みで人が ARM を押す前）の静止は、スタックでも
         #   「止まってから避け直す」待ちでもない。数えると ARM 前に Hybrid A* へ入り、ARM した
         #   瞬間に後退を含む操縦から始まった
@@ -2220,13 +2225,13 @@ class Slam2dRaceLine(Planner):
             self._brake_hold = None
             self._blocked_t = 0.0
             # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）
-            if avoid_on and driving and st.target_speed > 0.1 and abs(vs.speed) < 0.03:
+            if unstick_on and driving and st.target_speed > 0.1 and abs(vs.speed) < 0.03:
                 self._stuck_t += self._dt
             else:
                 self._stuck_t = 0.0
                 if abs(vs.speed) > 0.2:
                     self._detour_tries = 0          # 走り出せたら数え直す
-            if avoid_on and self._stuck_t > p["stuck_s"] and self._detour_tries < DETOUR_TRIES:
+            if unstick_on and self._stuck_t > p["stuck_s"] and self._detour_tries < DETOUR_TRIES:
                 self._start_detour(st, path, index, None, 0.0, p, "進めない（スタック）")
                 return True
             return False
@@ -2781,10 +2786,13 @@ class Slam2dRaceLine(Planner):
 
     def _start_detour(self, st: AutoState, path: rl_mod.RaceLine, index: int,
                       hit: obs_mod.Obstacle | None, dist: float, p: dict[str, float],
-                      why: str) -> None:
-        """止まって、経路上の障害物の先の姿勢を目標に Hybrid A*（`ParkToPoint`）へ引き継ぐ。"""
+                      why: str, extra: float = 0.0) -> None:
+        """止まって、経路上の障害物の先の姿勢を目標に Hybrid A*（`ParkToPoint`）へ引き継ぐ。
+
+        `extra` [m] は目標をさらに先へ置く距離（経路から横へ離れているぶん、乗るまでに長さが要る）。
+        """
         order, s_fwd = av_mod.forward_order(path, index)
-        ahead = p["detour_ahead"]
+        ahead = p["detour_ahead"] + extra
         if hit is not None:
             ahead += dist + hit.r + self.vehicle.rear_overhang
         k = min(int(np.searchsorted(s_fwd, ahead)), len(order) - 2)
@@ -2905,7 +2913,8 @@ class Slam2dRaceLine(Planner):
         return True
 
     def _md_fault(self, st: AutoState, vs: VehicleState, p: dict[str, float]) -> str | None:
-        """後輪のモータドライバが無応答のときの抑え。戻り値は reason に足す注記、止めたら `None`。
+        """後輪のモータドライバが無応答・舵が追従しない（`VehicleState.steer_hold`）ときの抑え。
+        戻り値は reason に足す注記、止めたら `None`。
 
         実機で駆動バッテリーが垂れ、加速のたびに右後輪の MD が約5秒落ちた。その間の
         加速は 1.7→0.6 m/s²、制動は −2.5→−1.4 m/s²。**約5秒で戻るので止めずに速度を抑える**
@@ -2914,6 +2923,13 @@ class Slam2dRaceLine(Planner):
 
         ★ `md_status` が 0（一度も状態が来ていない・テストの既定値）は故障と見なさない。
         """
+        if vs.steer_hold:
+            # 舵が指令に追従しない。io_node が ARM のまま制動して待っている（`raspi/core/steer_guard.py`）。
+            # こちらも止まる指令にしておき（戻ったときにいきなり走行速度を出さない）、この間は学習しない
+            st.target_speed = 0.0
+            st.brake = True
+            st.reason = "★舵が指令に追従しない。止まって舵が戻るのを待つ"
+            return None
         down = [bool(s) and not (s & MDS_COMM_OK) for s in vs.md_status[:2]]
         if not any(down) or not vs.armed:
             self._md_t = 0.0
@@ -3299,15 +3315,28 @@ class Slam2dRaceLine(Planner):
             return
         st.target_speed = min(st.target_speed, p["join_speed"])
 
-    def _off_route(self, st: AutoState, pp, vs: VehicleState, p: dict[str, float]) -> bool:
+    def _off_route(self, st: AutoState, pp, vs: VehicleState, p: dict[str, float],
+                   path: rl_mod.RaceLine) -> bool:
         """経路から外れすぎたら止める（True を返す）。**止まったまま終わらせない**:
-        1秒止まったら最寄り点を探し直し、`join_speed` で乗り直す（3回まで）。
-        乗り直し中は上限を 1.5 倍に広げる（乗りに行く途中で止まらないように）。
+        閉じた経路なら、止まって `_REJOIN_WAIT_S` 経ったら Hybrid A* で経路の先へ戻る
+        （後退・切り返しも使う。抜けたら `_blend_back` で滑らかに乗る）。Hybrid A* を
+        `DETOUR_TRIES` 回試しても戻れないか開いた経路なら、1秒止まったら最寄り点を探し直し、
+        `join_speed` で乗り直す（3回まで）。乗り直し中は上限を 1.5 倍に広げる（乗りに行く途中で止まらないように）。
+
+        ★ 追従（Pure Pursuit/MPC）だけで乗り直すと、横へ大きく外れた・向きが大きくずれた所から
+        壁の側へ切って当たり、`join_speed` で壁を押し続けた（sim.bench --hijack、49cm 外れて 40s 動けない）
         """
         limit = p["max_cross"] * (1.0 if self._joined else 1.5)
         if abs(pp.cross_track) > limit:
             if abs(vs.speed) < 0.05:
                 self._off_t += self._dt
+            if (path.closed and vs.armed and self._off_t >= _REJOIN_WAIT_S
+                    and self._detour_tries < DETOUR_TRIES):
+                self._off_t = 0.0
+                self._start_detour(st, path, pp.index, None, 0.0, p,
+                                   f"経路から {abs(pp.cross_track) * 100:.0f}cm 離れた",
+                                   extra=abs(pp.cross_track))
+                return True
             if self._off_t >= 1.0 and self._rejoins < 3:
                 self._off_t = 0.0
                 self._rejoins += 1

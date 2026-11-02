@@ -912,7 +912,7 @@ class Slam2dRoute(Slam2dRaceLine):
             st.laps = self.laps
             self._maybe_finish(pose, vs, p)
 
-        if self._off_route(st, pp, vs, p):
+        if self._off_route(st, pp, vs, p, path):
             return st
 
         st.ready = True
