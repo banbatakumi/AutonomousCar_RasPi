@@ -219,7 +219,7 @@
 import { useEffect, useRef } from 'react'
 import { cmdOut, live } from '../bus/live'
 import {
-  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_OFF, MAX_TARGET_TORQUE_NM, STEER_RATE_SAFETY_LIMIT,
+  ACCEL_SAFETY_LIMIT, LIGHT_CYCLE, LIGHT_DAYTIME, LIGHT_OFF, MAX_TARGET_TORQUE_NM, STEER_RATE_SAFETY_LIMIT,
   mtGearAt, mtGearIndex, mtGearRatio, useUi,
 } from '../store/ui'
 import type { LaunchPhase } from '../store/ui'
@@ -572,7 +572,8 @@ export function useDriving(ch: ControlChannel | null) {
   useEffect(() => {
     if (!ch) return
     return useUi.subscribe((state, prev) => {
-      if (prev.armRequested && !state.armRequested) ch.disarm(state.lightMode)
+      // 灯火は DISARM で消灯に戻す（下の「ARM と灯火」）ので、DISARM の1発も消灯で送る
+      if (prev.armRequested && !state.armRequested) ch.disarm(LIGHT_OFF)
       if (!prev.armRequested && state.armRequested) lastActivity.current = performance.now()
       if (!prev.hasControl && state.hasControl) ch.disarm(state.lightMode)
       if (prev.hasControl && !state.hasControl && state.armRequested) {
@@ -585,6 +586,26 @@ export function useDriving(ch: ControlChannel | null) {
       }
     })
   }, [ch])
+
+  // ── ARM と灯火（2026-11-03、指示による） ──
+  //
+  // ARM したら DAY（減光）を点け、DISARM したら消灯に戻す。実車のデイライトと同じく
+  // 「走れる状態かどうか」が外から見て分かる。切り方・入れ方（ボタン・Enter・パッド・
+  // E-STOP・無操作・切断…）によらず、上と同じく**状態の変化そのもの**に掛ける。
+  // - ARM したときに NORMAL を手で選んでいたら下げない（消灯のときだけ DAY にする）
+  // - DISARM 中に手で点けるのは今までどおりできる（変化のときだけ書き換えるため）
+  useEffect(
+    () =>
+      useUi.subscribe((state, prev) => {
+        if (!prev.armRequested && state.armRequested && state.lightMode === LIGHT_OFF) {
+          state.set({ lightMode: LIGHT_DAYTIME })
+        }
+        if (prev.armRequested && !state.armRequested && state.lightMode !== LIGHT_OFF) {
+          state.set({ lightMode: LIGHT_OFF })
+        }
+      }),
+    [],
+  )
 
   // ── Wake Lock: ARM 中は画面ロックを抑止する ──
   //
