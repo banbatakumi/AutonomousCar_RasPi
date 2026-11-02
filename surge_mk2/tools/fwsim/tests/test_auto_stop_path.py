@@ -48,6 +48,8 @@ def _build() -> C.CDLL:
                                       C.c_float]
     lib.AutoStopPath_Contains.argtypes = [C.POINTER(_Path), C.c_float, C.c_float]
     lib.AutoStopPath_Contains.restype = C.c_bool
+    lib.AutoStopPath_IsInsideBody.argtypes = [C.c_float] * 5
+    lib.AutoStopPath_IsInsideBody.restype = C.c_bool
     lib.AutoStopPath_Curvature.argtypes = [C.c_float, C.c_float]
     lib.AutoStopPath_Curvature.restype = C.c_float
     return lib
@@ -185,6 +187,27 @@ class AutoStopPathTest(unittest.TestCase):
     def test_curvature_is_the_bicycle_model(self):
         self.assertAlmostEqual(self.lib.AutoStopPath_Curvature(0.3, L), math.tan(0.3) / L, places=5)
         self.assertAlmostEqual(self.lib.AutoStopPath_Curvature(-0.3, L), -math.tan(0.3) / L, places=5)
+
+    def test_inside_body_is_the_footprint(self):
+        """車体の外形（`config/vehicle.toml` の footprint）の内側だけを除く。車体に立てる支柱は内側、外は除かない。"""
+        hw = st.AUTO_STOP_BODY_HALF_WIDTH_M
+
+        def inside(x: float, y: float) -> bool:
+            return self.lib.AutoStopPath_IsInsideBody(x, y, FRONT, REAR, hw)
+
+        # 支柱: LiDAR から ±120° 5cm、±150° 9cm（車両角。左右対称なので向きの取り方によらない）
+        for deg, d in ((120, 0.05), (-120, 0.05), (150, 0.09), (-150, 0.09)):
+            a = math.radians(deg)
+            with self.subTest(deg=deg):
+                self.assertTrue(inside(LIDAR_X + d * math.cos(a), d * math.sin(a)))
+        for x, y in ((FRONT + 0.005, 0.0), (REAR - 0.005, 0.0), (0.1, hw + 0.005), (0.1, -hw - 0.005),
+                     (FRONT, 0.0), (0.1, hw)):
+            with self.subTest(x=x, y=y):
+                self.assertFalse(inside(x, y))
+        rng = np.random.default_rng(4)
+        px, py = rng.uniform(-0.3, 0.6, 3000), rng.uniform(-0.3, 0.3, 3000)
+        fw = np.array([inside(float(x), float(y)) for x, y in zip(px, py)])
+        np.testing.assert_array_equal(fw, st.auto_stop_inside_body(px, py))
 
     def test_sim_matches_firmware(self):
         rng = np.random.default_rng(3)

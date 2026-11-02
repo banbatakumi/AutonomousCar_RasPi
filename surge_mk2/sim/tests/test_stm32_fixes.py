@@ -232,6 +232,15 @@ class TestAutoStop(unittest.TestCase):
         ld.last_emit_ns = 0                           # LiDAR 不調 → 超音波が停止距離で見る
         self.assertTrue(sim._auto_stop_obstacle(1.0))
 
+    def test_ignores_points_inside_the_body(self):
+        """車体に立てた支柱（LiDAR から ±120° 5cm・±150° 9cm）は、後退でも止めない。車体の外の点は従来どおり。"""
+        sim, ld = self._sim(0.0)
+        for deg, dist in ((120, 0.05), (240, 0.05), (150, 0.09), (210, 0.09)):
+            self._put(ld, deg - 1, dist)
+        self.assertFalse(sim._auto_stop_obstacle(-1.0))
+        self._put(ld, 180, 0.20)                      # 後端（LiDAR から 14cm）の 6cm 後ろ
+        self.assertTrue(sim._auto_stop_obstacle(-1.0))
+
     def test_latches_until_stopped(self):
         sim, ld = self._sim(1.0)
         sim._cmd_flags = packets.CMD_FLG_AUTO_STOP

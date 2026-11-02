@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from raspi.msgs import SPEED_DEADBAND_MPS  # noqa: E402
 from raspi.msgs.convert import ScanAssembler  # noqa: E402
+from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
 from raspi.msgs.types import VehicleState  # noqa: E402
 
 from .course import Course, list_courses  # noqa: E402
@@ -217,6 +218,53 @@ def inject_boxes(scan, pose_lidar: tuple[float, float, float],
         sat = np.asarray(scan.saturated, dtype=bool)
         sat[out != dist] = False
         scan.saturated = sat.tolist()
+
+
+def mask_fov(scan, fov_deg: float) -> None:
+    """`scan.dist`の車両角 ±`fov_deg`/2 の外を 0（無効）にする。"""
+    if fov_deg >= 360.0:
+        return
+    deg = np.arange(360)
+    off = np.minimum(deg, 360 - deg)
+    dist = np.asarray(scan.dist, dtype=float)
+    dist[off > fov_deg / 2.0] = 0.0
+    scan.dist = dist.tolist()
+
+
+def inject_pillars(scan, pillars, mixed_pixel: float, rng: np.random.Generator) -> None:
+    """`scan.dist`に、LiDAR 基準で固定された円柱`(車両角, 距離, 直径)`を差し込む。
+
+    縁のレイ（支柱に当たる範囲の両端とその外側1本）は確率`mixed_pixel`で支柱と背景の間の
+    一様な距離になる（ビームの一部が支柱・残りが背景に当たったときの LD06 の誤測距の近似）。
+    """
+    if not pillars:
+        return
+    dist = np.asarray(scan.dist, dtype=float)
+    ang = np.radians(np.arange(360))
+    for deg, r, dia in pillars:
+        cx, cy = r * math.cos(math.radians(deg)), r * math.sin(math.radians(deg))
+        proj = cx * np.cos(ang) + cy * np.sin(ang)
+        perp2 = r * r - proj * proj
+        rad = dia / 2.0
+        hit = (proj > 0) & (perp2 <= rad * rad)
+        t = proj - np.sqrt(np.maximum(rad * rad - perp2, 0.0))
+        bg = dist.copy()
+        dist = np.where(hit & ((bg <= 0) | (t < bg)), t, dist)
+        if mixed_pixel > 0.0 and hit.any():
+            idx = np.nonzero(hit)[0]
+            # 360° を跨ぐ支柱もあるので、当たったレイの両隣で当たっていないものを縁とする
+            edge = {int(i) for i in idx if not hit[(i - 1) % 360] or not hit[(i + 1) % 360]}
+            edge |= {int(j) % 360 for i in idx for j in (i - 1, i + 1) if not hit[j % 360]}
+            for i in edge:
+                if rng.random() < mixed_pixel:
+                    far = bg[i] if bg[i] > 0 else 2.0
+                    near = r - rad
+                    dist[i] = float(rng.uniform(near, max(near, far)))
+    if scan.saturated is not None:
+        sat = np.asarray(scan.saturated, dtype=bool)
+        sat[dist != np.asarray(scan.dist, dtype=float)] = False
+        scan.saturated = sat.tolist()
+    scan.dist = dist.tolist()
 
 
 def car_box(driver: "TruthDriver", s: float, lateral: float,
@@ -432,6 +480,13 @@ class RunConfig:
     cars: tuple[tuple[float, float, float, float], ...] = ()
     #: `locate`の各試行で、自車のまわりに置く他車の数（前後・左右に振り分ける）
     locate_cars: int = 0
+    #: LiDAR の視野 [deg]。車両の正面を中心にこの幅だけ残し、外は「測れなかった」（dist=0）にする。
+    #: 360 で全周。車体の後ろに積んだ箱が後方を遮る状況（MAGP）の再現
+    fov_deg: float = 360.0
+    #: 車体に立てた支柱 `(車両角[deg], LiDARからの距離[m], 直径[m])`。LiDAR から見て車と一緒に動く
+    pillars: tuple[tuple[float, float, float], ...] = ()
+    #: 支柱の縁の1本ずつが「支柱と背景の間の距離」になる確率（mixed pixel。0 で無し）
+    mixed_pixel: float = 0.0
 
 
 @dataclass
@@ -591,6 +646,7 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
     driver = TruthDriver(course, spec, a_lat=cfg.a_lat)
     slam = SlamUnderTest(factory or default_factory())
     body = course.body_samples(spec.footprint)
+    body_rng = body_ranges(spec.footprint, lidar_x, lidar_y)
 
     truth = _TruthLog()
     t_ns = 0
@@ -701,6 +757,11 @@ def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
             c, s_ = math.cos(veh.yaw), math.sin(veh.yaw)
             inject_boxes(scan, (veh.x + c * lidar_x - s_ * lidar_y, veh.y + s_ * lidar_x + c * lidar_y, veh.yaw),
                          boxes, sensors.lidar.lidar_max_range_m)
+
+        mask_fov(scan, cfg.fov_deg)
+        inject_pillars(scan, cfg.pillars, cfg.mixed_pixel, rng)
+        # 実機の planning_node と同じく、車体の外形の内側の点を捨ててから SLAM に渡す
+        scan = mask_body(scan, body_rng)
 
         dt = (t_ns - last_plan_ns) / NS if last_plan_ns else 0.1
         last_plan_ns = t_ns
@@ -1076,6 +1137,12 @@ def main() -> int:
                          "速度0なら止まっている・負は逆走。LiDARの走査線を遮る小さな箱として差し込む")
     ap.add_argument("--locate-cars", type=int, default=0,
                     help="--locate の各試行で自車のまわり（前後左右）に置く他車の台数")
+    ap.add_argument("--fov", type=float, default=360.0,
+                    help="LiDAR の視野 [deg]（車両の正面を中心に残す幅。180 で前方半周だけ）")
+    ap.add_argument("--pillar", action="append", default=[],
+                    help="車体に立てた支柱 `車両角deg:距離m:直径m`（繰り返し可。例 120:0.05:0.01）")
+    ap.add_argument("--mixed-pixel", type=float, default=0.0,
+                    help="支柱の縁のレイが支柱と背景の間の距離になる確率（0〜1）")
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--json", default=None, help="結果の行を JSON で保存")
     ap.add_argument("--verbose", action="store_true")
@@ -1117,7 +1184,9 @@ def main() -> int:
                                 explore_speed=args.explore_speed, race_laps=args.race_laps,
                                 race_speed=args.race_speed, route=args.route, ghost=ghost, locate=args.locate,
                                 cars=tuple(cars), locate_cars=args.locate_cars,
-                                sensor_overrides=tuple(ov))
+                                sensor_overrides=tuple(ov), fov_deg=args.fov,
+                                pillars=tuple(tuple(float(v) for v in q.split(":")) for q in args.pillar),
+                                mixed_pixel=args.mixed_pixel)
                 res = run(cfg, default_factory(**kw), verbose=args.verbose)
                 row = res.row()
                 row["wall_s"] = res.wall_time_s

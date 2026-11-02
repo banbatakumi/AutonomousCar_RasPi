@@ -84,6 +84,8 @@ AUTO_STOP_DIRECTION_DEADBAND_M_S = 0.05
 AUTO_STOP_HALF_WIDTH_M = 0.15
 AUTO_STOP_BODY_FRONT_X_M = 0.30
 AUTO_STOP_BODY_REAR_X_M = -0.07
+#: 車体の外形の半幅（`VEHICLE_BODY_HALF_WIDTH_M`）。外形の内側の点（車体に立てた支柱など）は数えない
+AUTO_STOP_BODY_HALF_WIDTH_M = 0.09
 AUTO_STOP_LIDAR_X_M = 0.07
 AUTO_STOP_WHEELBASE_M = 0.23
 AUTO_STOP_STRAIGHT_CURVATURE_1_M = 0.02
@@ -154,6 +156,12 @@ def auto_stop_path_contains(x: np.ndarray, y: np.ndarray, forward: bool, curvatu
     within = np.where(lim_sin >= 0.0, (x < 0.0) | (toward >= lim_cos),
                       np.where(lead_sin_r >= 0.0, True, lim_sin * toward - lim_cos * x >= 0.0))
     return ring & within
+
+
+def auto_stop_inside_body(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """base_link の点 (x, y) [m] が車体の外形の内側か（ファームの `AutoStopPath_IsInsideBody`。境界は外）。"""
+    return ((x > AUTO_STOP_BODY_REAR_X_M) & (x < AUTO_STOP_BODY_FRONT_X_M)
+            & (np.abs(y) < AUTO_STOP_BODY_HALF_WIDTH_M))
 
 
 #: ABS の旗を立てる下限の車速 [m/s]。v0.16 のファームはスリップ率の分母に下限を置いて低速でも働くが、
@@ -636,9 +644,9 @@ class VirtualStm32:
             d = lid.last_scan[_AS_BINS[forward]]                         # m。0 = 無効
             cx, cy = _AS_DIR[forward]
             curvature = math.tan(v.steer_actual) / AUTO_STOP_WHEELBASE_M
-            inside = auto_stop_path_contains(AUTO_STOP_LIDAR_X_M + d * cx, d * cy, forward, curvature,
-                                             d_stop_cm / 100.0)
-            n = int(np.count_nonzero((d > 0.0) & inside))
+            px, py = AUTO_STOP_LIDAR_X_M + d * cx, d * cy
+            inside = auto_stop_path_contains(px, py, forward, curvature, d_stop_cm / 100.0)
+            n = int(np.count_nonzero((d > 0.0) & inside & ~auto_stop_inside_body(px, py)))
             lidar_hit = n >= AUTO_STOP_LIDAR_MIN_POINTS
         us_cm = (self.us_front if forward else self.us_rear) * 100.0
         off = AUTO_STOP_ULTRASONIC_OFFSET_CM[forward]

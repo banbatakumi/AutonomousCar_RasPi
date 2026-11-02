@@ -162,6 +162,7 @@ class TestFirmwareConstants(unittest.TestCase):
         self.assertSame("VEHICLE_AUTO_STOP_HALF_WIDTH_M", st.AUTO_STOP_HALF_WIDTH_M, tol=1e-6)
         self.assertSame("VEHICLE_BODY_FRONT_X_M", st.AUTO_STOP_BODY_FRONT_X_M)
         self.assertSame("VEHICLE_BODY_REAR_X_M", st.AUTO_STOP_BODY_REAR_X_M)
+        self.assertSame("VEHICLE_BODY_HALF_WIDTH_M", st.AUTO_STOP_BODY_HALF_WIDTH_M)
         self.assertSame("VEHICLE_LIDAR_X_M", st.AUTO_STOP_LIDAR_X_M)
         self.assertSame("DRIVE_WHEELBASE_M", st.AUTO_STOP_WHEELBASE_M)
         self.assertSame("AUTO_STOP_PATH_STRAIGHT_CURVATURE_1_M", st.AUTO_STOP_STRAIGHT_CURVATURE_1_M)
