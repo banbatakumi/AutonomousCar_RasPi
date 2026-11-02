@@ -8,7 +8,8 @@
 - **コミット・反映**: 下の節を含む全変更はコミット済み・2026-11-01 に Pi へ反映済み（`deploy.sh`）。この節より下の見出しの状態は記録時点のもので、以下が優先する
 - **プロトコル v0.29**（`raspi/proto/protocol.toml` が正）。STM32 はファーム `fb65b6f` を 2026-11-01 に書き込み済み（前輪エンコーダの鏡像補正・車速KFの立て直し・PI 減速の ABS・odom_dist の補正・`build_info` を含む。控え `~/stm32_backup_20261101/`）。
   Pi とファームは一緒に入れ替える（io_node は版が一致するまで ARM を通さない）
-- **2026-11-02 の経路生成の高速化（下の節）は未コミット・Pi 未反映**（Pi の別ディレクトリ `~/surge_bench` で計測しただけ）
+- **2026-11-02 の経路生成と SLAM の C 化（下の3節）はコミット済み（44ea8c2）・2026-11-02 に Pi へ反映済み**（`deploy.sh --no-gui --test --restart`、
+  Pi 上のテスト raspi 1499 件・slam2d 162 件 OK。planning_node が C 版を2つとも読み込んでいることを確認）。**実機の走行・LOCATE での時間はまだ見ていない**
 - **未検証**: 2026-10-31〜11-01 の修正の ARM・駆動・走行での確認（舵の見張り・PI 減速の ABS・odom の手押し・解除後の再特定・車体内の点のマスク）。062217 の舵の固着の原因（機構・MD）も未点検
 - **自動運転**: 主力は `slam2d_route`（`slam2d_raceline` を土台に経路選択・経由点）。障害物・他車は `nav/overtake.py`（Frenet 格子、`overtake` 既定 1）、抜けない静止物は Hybrid A*。
   走行中の学習は `raspi/nav/grip.py`（`GripLearner`＝横の上限をタイムで、`LongLearner`＝前後の包絡）。GUI の自動運転モードに「レーシングライン(slam2d)」は無い
@@ -18,7 +19,7 @@
 
 ## 直近の作業記録（新しい順）
 
-## 2026-11-02 SLAM の対応付け・総当たりの採点・面要素の法線も C に（調査の②③。未コミット・Pi 未反映）
+## 2026-11-02 SLAM の対応付け・総当たりの採点・面要素の法線も C に（調査の②③。2026-11-02 Pi 反映済み・走行では未検証）
 
 `slam2d/core/_native.c` に `sm_associate`（`SurfaceMap.associate`）・`sm_score_rows`（`search_steps`・`GlobalLocalizer.step` の採点。
 「候補 × 点」の配列を作らない）・`normal_sums`（`SurfaceMap.__init__` の25近傍の和）。すべて numpy 版とビット一致（`exp`・`hypot` が numpy と
@@ -31,7 +32,7 @@ libm で同じことを Mac・Pi で確認、点の和は numpy の pairwise 和
 実記録の再生の SLAM の結果は3つとも同じ。`slam2d/tests/test_native.py` 10件、Mac の pytest 全体 2065 件 OK。
 LOCATE の最大はまだ 150ms をわずかに超える（中身は `Frontend.refine` の3段の探索。地図が大きいほど長い）
 
-## 2026-11-02 SLAM のレイの行進を C に（調査の①。未コミット・Pi 未反映）
+## 2026-11-02 SLAM のレイの行進を C に（調査の①。2026-11-02 Pi 反映済み・走行では未検証）
 
 `slam2d/core/_native.c`（`OccGrid.raycast` の最初の当たり・`_carve` の素通りの数え）。numpy 版と型・演算の順を揃えてビット一致、
 型が揃わない組み合わせ（numpy の float64 の原点）は numpy 版。組み方は `slam2d/core/cbuild.py` に寄せ、`raspi/nav/native.py` も使う。
@@ -53,7 +54,7 @@ LOCATE の最大はまだ 150ms をわずかに超える（中身は `Frontend.r
 - 対象外: io_node（1コアの約10%だが、安全の第1層で標準ライブラリだけの方針。フレームの処理は1回数十µs）、telemetry_node
 - Pi の sim.bench は地図作成が実時間に追いつかず正しく進まない（200s で周回 0・誤差 46cm）。Pi での計測は `--map` から
 
-## 2026-11-02 slam2d_route の経路生成を速くする（線は変えない。未コミット・Pi 未反映）
+## 2026-11-02 slam2d_route の経路生成を速くする（線は変えない。2026-11-02 Pi 反映済み・走行では未検証）
 
 バンビの要望「magp2 など長いコースで経路生成に時間がかかる」。Pi で magp2 の真値地図の自動経路（既定設定）を測ると、
 **仕上げなし（まず走れる線）15.1s・仕上げ込み 75.4s**（Mac は 0.53s・9.4s）。原因は2つ:
@@ -81,7 +82,7 @@ LOCATE の最大はまだ 150ms をわずかに超える（中身は `Frontend.r
 - 本番と同じワーカープロセス経由でも並列になる（Pi・magp2: 5.54s → 3.27s、線は同じ）
 - sim.bench（toyota2・`--map mpc_toyota2`・`--real-noise`・120s）: 衝突 0、2周目以降 平均 15.03s（前回の記録 15.03〜15.05s）。
   先の2本は Mac の詰まり（★、指令の間隔 157ms・103ms）で捨てた
-- 次: Pi へ反映（`deploy.sh --test`）して、実機で BUILD → 仕上げの差し替えまでの時間と plan() の周期（並列中）を見る
+- 次: 実機で BUILD → 仕上げの差し替えまでの時間と plan() の周期（並列中）を見る
 
 ## 2026-11-01 会場の試走の解析で見つけた問題を全部直す（2026-11-01 Pi 反映・ファーム書き込み済み・走行では未検証）
 
