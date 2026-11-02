@@ -573,12 +573,18 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | `test_auto.py` `test_slam2d_raceline.py` | planner の安全条件と段の遷移。**「走る」より「止まる」を厚く** |
 | `test_nav.py` | SLAM の精度を**数値で縛る** |
 | `test_timesync.py` `test_camera_format.py` | u32 のアンラップ、画素の並び |
+| `test_native.py` | 経路の計算の C 版（`nav/_native.c`）が Python 版と**ビット一致**すること、帯行列の QP が密行列と丸め誤差の範囲で同じこと（SLAM のレイの C 版は `slam2d/tests/test_native.py`） |
 
 - テスト本体は **`unittest`**（標準ライブラリ）で書く。実行は **`pytest`**
   （CI と `tools/check.sh` が使うのに揃えてある。`unittest discover` でも動く）
 - **実時間で回るコード（`io_node` / `framelog` / `shm_ring`）は stdlib だけで書く**方針。
   この制約のおかげで、Mac でも Pi でも同じテストが通る
 - **プロトコルを直したら `generate.py` を回してからテストする**
+- **経路の計算の内側は C**（`raspi/nav/_native.c`）。初回の import で `cc` が組んで `~/.cache/surge_mk2/` に置く
+  （Pi・Mac とも。組めなければ Python 版で回る＝同じ結果で遅い）。`SURGE_NO_NATIVE=1` で C を使わない。
+  `raceline.py` の速度プロファイル・曲率・車体外形・仕上げの評価、`roadgraph._thin` の式を変えたら `_native.c` も直し、`test_native.py` で一致を確かめる。
+  SLAM の `OccGrid.raycast`・`_carve`（`slam2d/core/grid.py`）、`SurfaceMap.associate`・`__init__` の法線（`surfmap.py`）、
+  総当たりの採点（`register.search_steps`・`localize.GlobalLocalizer.step`）も同じで、C 版は `slam2d/core/_native.c`
 
 ---
 

@@ -170,6 +170,15 @@ if [ -n "$STALE" ]; then
   fi
 fi
 
+# 経路の計算・SLAM のレイの行進の C 版（`raspi/nav/_native.c`・`slam2d/core/_native.c`）を組んでおく。
+# 組まないと planning_node の最初の import で組む（Pi で約1秒）。組めなくても Python 版で走る（同じ結果で
+# 遅い）ので、止めずに知らせるだけ
+if ssh_pi "cd $DEST && .venv/bin/python -c 'import sys; from raspi.nav import native; from slam2d.core import native as s; sys.exit(native.lib is None or s.lib is None)'"; then
+  echo "# C 版（経路の計算・SLAM のレイ）: OK"
+else
+  echo "!! C 版を組めなかった（Python 版で走る。経路の生成が数倍〜十数倍、走行中の plan() も遅い）" >&2
+fi
+
 # `gui/dist` だけは --delete する。ビルドごとにファイル名のハッシュが変わるので、
 # そうしないと古い `index-*.js` が Pi に溜まり続ける
 if [ "$BUILD_GUI" = 1 ] && [ -d gui/dist ]; then

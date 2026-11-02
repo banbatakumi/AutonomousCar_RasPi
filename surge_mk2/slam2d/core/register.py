@@ -293,11 +293,20 @@ def search_steps(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2
     inv2s2 = 1.0 / (2.0 * sigma * sigma)
 
     scores = np.zeros((dyaws.size, offs.size, offs.size))
+    # C 版の採点（`SurfaceMap.like_sums`）に渡す候補の位置。下の numpy 版の (i, j) の順
+    bx = np.repeat(center.x + offs, offs.size)
+    by = np.tile(center.y + offs, offs.size)
     for k, dy in enumerate(dyaws):
         yaw = center.yaw + dy
         c, s = math.cos(yaw), math.sin(yaw)
         rx = c * px - s * py
         ry = s * px + c * py
+        sums = smap.like_sums(bx, by, rx, ry, inv2s2)
+        if sums is not None:
+            scores[k] = sums.reshape(offs.size, offs.size) / n_pts
+            if (k + 1) % yaw_chunk == 0 and k + 1 < dyaws.size:
+                yield k + 1
+            continue
         wx = (center.x + offs)[:, None, None] + rx[None, None, :]
         wy = (center.y + offs)[None, :, None] + ry[None, None, :]
         wx, wy = np.broadcast_arrays(wx, wy)

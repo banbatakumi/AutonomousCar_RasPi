@@ -25,7 +25,7 @@
 
 ## 重い計算は別プロセスのワーカーで
 
-道路グラフ（Pi で数百ms）と経路ごとのレーシングライン（1本 数十〜数百ms）は
+道路グラフ（Pi で約0.2s）と経路ごとのレーシングライン（仕上げなしで1本 0.1〜0.5s、仕上げ込みで数秒）は
 `plan()`（10Hz）の中で回すと指令が途切れる（`cmd_deadman_ms` 150ms で DISARM）。
 ワーカー（`slam2d_raceline.submit_job`。仕上げ用と急ぎ用の2本。プロセスを作れない環境ではスレッド）に投げ、`plan()` は毎周期出来上がりを覗くだけにする。
 ワーカーは地図の**写し**（3値から作り直した `OccGrid`）だけを触る。
@@ -114,7 +114,7 @@ def _code_digest() -> str:
     here = Path(__file__).resolve().parent
     for f in (here / "slam2d_route.py", here / "slam2d_raceline.py", here.parent / "nav" / "raceline.py",
               here.parent / "nav" / "route.py", here.parent / "nav" / "roadgraph.py",
-              here.parent / "nav" / "centerline.py"):
+              here.parent / "nav" / "centerline.py", here.parent / "nav" / "_native.c"):
         try:
             h.update(f.read_bytes())
         except OSError:
@@ -125,25 +125,29 @@ def _code_digest() -> str:
 _CODE_DIGEST = _code_digest()
 
 
-def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None) -> dict:
-    return dict(line_kwargs(p, vehicle, refine, grip), step=PATH_STEP)
+def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None,
+                 parallel: bool = False) -> dict:
+    return dict(line_kwargs(p, vehicle, refine, grip, parallel), step=PATH_STEP)
 
 
 def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                     seed, traj, groups: dict[str, list[Waypoint]], p: dict[str, float],
                     vehicle, graph: RoadGraph | None, *, auto_start: Waypoint | None = None,
                     avoid: list[tuple[float, float]] | None = None,
-                    refine: bool = True, grip: dict | None = None) -> _BuildOut:
+                    refine: bool = True, grip: dict | None = None,
+                    parallel: bool = False) -> _BuildOut:
     """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。
 
     `auto_start` があれば、グループとは別に自動経路（キー `auto`）を全周回の中の最速から選ぶ。
+    `parallel`: 仕上げの出発点を2プロセスで回す（止まっている間だけ、`Slam2dRaceLine._may_parallel`）
     """
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     if graph is None:
         graph = build_graph(trinary, resolution=resolution, origin=origin,
                             keep=vehicle.half_width + p["graph_margin"], seed=seed, traj=traj)
     out = _BuildOut(graph=graph)
-    kw = _line_kwargs(p, vehicle, refine, grip)     # `grip`: 走行中に学習した限界（`nav/grip.py`）
+    # `grip`: 走行中に学習した限界（`nav/grip.py`）
+    kw = _line_kwargs(p, vehicle, refine, grip, parallel)
     if auto_start is not None:
         _fastest_loop(out, grid, graph, auto_start, avoid, p, kw, vehicle)
     for key, wps in groups.items():
@@ -603,7 +607,8 @@ class Slam2dRoute(Slam2dRaceLine):
 
         :param refine: 見積もりラップの仕上げをするか。`None` なら、**走れる経路がまだ無いときは
             しない**（0.5 秒前後で「まず走れる線」を出す）。その経路を取り込んだら、同じ道路グラフで
-            仕上げ込みをもう一度投げる（`_poll`。Mac で 6〜8 秒）。できた版へは乗れる場所で移る
+            仕上げ込みをもう一度投げる（`_poll`。magp2 の自動経路で Pi 約3〜5秒・Mac 約1秒、2026-11-02）。
+            できた版へは乗れる場所で移る
         """
         if self._job is not None:
             self._job_again = True          # 走っている計算が終わってからやり直す
@@ -631,7 +636,8 @@ class Slam2dRoute(Slam2dRaceLine):
             None if traj is None else traj.copy(), self._groups_to_build(), dict(p),
             self.vehicle, graph,
             auto_start=self._auto_start,
-            avoid=list(self._cfg.avoid), refine=refine, grip=self._grip_line_kw())
+            avoid=list(self._cfg.avoid), refine=refine, grip=self._grip_line_kw(),
+            parallel=self._may_parallel())
         self._grip_line = self._grip_learned() if self._grip_line_kw() is not None else None
         self._job_grip = self._grip_line
 

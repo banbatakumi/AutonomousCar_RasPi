@@ -43,11 +43,17 @@ Jump Flooding（log2(n)回の9近傍伝播）で同じ表を作る。
 
 from __future__ import annotations
 
+import ctypes
 import math
 
 import numpy as np
 
+from . import native as _native
+
 __all__ = ["SurfaceMap", "Association"]
+
+#: 対応付けと採点を C で回す（`core/native.py`）。`False` なら numpy 版（テストが両方を比べる）
+USE_NATIVE = True
 
 from typing import NamedTuple
 
@@ -107,19 +113,28 @@ class SurfaceMap:
         sxx = np.zeros(n_occ); syy = np.zeros(n_occ); sxy = np.zeros(n_occ)
         cnt = np.zeros(n_occ)
         r_ = normal_radius
-        for dr in range(-r_, r_ + 1):
-            for dc in range(-r_, r_ + 1):
-                rr, cc = rows + dr, cols + dc
-                ok = (rr >= 0) & (rr < self.height) & (cc >= 0) & (cc < self.width)
-                j = np.full(n_occ, -1, dtype=np.int64)
-                j[ok] = idx_map[rr[ok], cc[ok]]
-                has = j >= 0
-                if not has.any():
-                    continue
-                px, py = qx[j[has]] - qx[has], qy[j[has]] - qy[has]
-                sx[has] += px; sy[has] += py
-                sxx[has] += px * px; syy[has] += py * py; sxy[has] += px * py
-                cnt[has] += 1.0
+        if USE_NATIVE and _native.lib is not None:
+            # 下のループと同じ和の C 版（`_native.c` の `normal_sums`、点ごとに同じ順に足す）
+            rows64, cols64 = rows.astype(np.int64), cols.astype(np.int64)
+            fqx, fqy = _native.f64(qx), _native.f64(qy)
+            _native.lib.normal_sums(n_occ, _native.addr(rows64), _native.addr(cols64),
+                                    _native.addr(idx_map), self.height, self.width,
+                                    _native.addr(fqx), _native.addr(fqy), int(r_),
+                                    *(_native.addr(a) for a in (sx, sy, sxx, syy, sxy, cnt)))
+        else:
+            for dr in range(-r_, r_ + 1):
+                for dc in range(-r_, r_ + 1):
+                    rr, cc = rows + dr, cols + dc
+                    ok = (rr >= 0) & (rr < self.height) & (cc >= 0) & (cc < self.width)
+                    j = np.full(n_occ, -1, dtype=np.int64)
+                    j[ok] = idx_map[rr[ok], cc[ok]]
+                    has = j >= 0
+                    if not has.any():
+                        continue
+                    px, py = qx[j[has]] - qx[has], qy[j[has]] - qy[has]
+                    sx[has] += px; sy[has] += py
+                    sxx[has] += px * px; syy[has] += py * py; sxy[has] += px * py
+                    cnt[has] += 1.0
         m = np.maximum(cnt, 1.0)
         mx, my = sx / m, sy / m
         a = sxx / m - mx * mx
@@ -145,6 +160,38 @@ class SurfaceMap:
         # ── 最寄りの壁セルの表 ──
         self._nearest = _nearest_occupied(occ, idx_map)        # (H, W) → 壁index or -1
 
+    def __getstate__(self):
+        # C 版に渡す構造体（`_c_map`）はこのプロセスのアドレスを持つので写さない
+        d = dict(self.__dict__)
+        d.pop("_cmap", None)
+        return d
+
+    def _c_map(self):
+        """C 版（`_native.c` の `smap_t`）に渡す構造体。C が無い・型が合わなければ `None`。"""
+        if not USE_NATIVE or _native.lib is None or self.empty:
+            return None
+        cm = self.__dict__.get("_cmap")
+        if cm is None:
+            arrs = dict(nearest=np.ascontiguousarray(self._nearest, dtype=np.int64),
+                        qx=_native.f64(self._qx), qy=_native.f64(self._qy),
+                        nx=_native.f64(self._nx), ny=_native.f64(self._ny),
+                        planar=np.ascontiguousarray(self._planar, dtype=bool),
+                        support=np.ascontiguousarray(self._support, dtype=bool))
+            if self.known is not None:
+                arrs["known"] = np.ascontiguousarray(self.known, dtype=bool)
+            if arrs["nearest"].shape != (self.height, self.width) or (
+                    self.known is not None and arrs["known"].shape != (self.height, self.width)):
+                return None
+            st = _native.SmapC(self.height, self.width, self.origin[0], self.origin[1],
+                               self.resolution, _native.addr(arrs["nearest"]),
+                               _native.addr(arrs["known"]) if "known" in arrs else None,
+                               _native.addr(arrs["qx"]), _native.addr(arrs["qy"]),
+                               _native.addr(arrs["nx"]), _native.addr(arrs["ny"]),
+                               _native.addr(arrs["planar"]), _native.addr(arrs["support"]),
+                               self.tangent_gate, self.max_dist)
+            cm = self.__dict__["_cmap"] = (ctypes.byref(st), st, arrs)   # 配列は解放させない
+        return cm[0]
+
     def associate(self, wx: np.ndarray, wy: np.ndarray) -> Association:
         """世界座標の点ごとに、最寄りの壁の面要素を引く。"""
         wx = np.asarray(wx, dtype=np.float64)
@@ -154,6 +201,18 @@ class SurfaceMap:
             z = np.zeros(shape)
             return Association(z, z, z, z, np.zeros(shape, bool), np.zeros(shape, bool),
                                np.full(shape, np.inf))
+        cm = self._c_map() if wy.shape == shape else None
+        if cm is not None:
+            # 下と同じ式の C 版（`_native.c` の `sm_associate`、ビット一致）
+            fx, fy = np.ascontiguousarray(wx).reshape(-1), np.ascontiguousarray(wy).reshape(-1)
+            n = fx.size
+            out = [np.empty(n) for _ in range(4)]
+            pl, va, di = np.empty(n, bool), np.empty(n, bool), np.empty(n)
+            _native.lib.sm_associate(cm, n, _native.addr(fx), _native.addr(fy),
+                                     *(_native.addr(o) for o in out), _native.addr(pl),
+                                     _native.addr(va), _native.addr(di))
+            return Association(*(o.reshape(shape) for o in out), pl.reshape(shape),
+                               va.reshape(shape), di.reshape(shape))
         res = self.resolution
         c = np.floor((wx - self.origin[0]) / res).astype(np.int64)
         r = np.floor((wy - self.origin[1]) / res).astype(np.int64)
@@ -182,6 +241,21 @@ class SurfaceMap:
         far = np.hypot(ex, ey) > self.max_dist
         valid = ok & ~far & ~beyond & (d < self.max_dist)
         return Association(qx, qy, nx, ny, planar, valid, np.where(valid, d, np.inf))
+
+    def like_sums(self, bx: np.ndarray, by: np.ndarray, rx: np.ndarray, ry: np.ndarray,
+                  inv2s2: float) -> np.ndarray | None:
+        """候補 r の点 p を `(bx[r] + rx[p], by[r] + ry[p])` に置いたときの、点の尤度
+        `exp(−min(d, 10)²·inv2s2)`（対応が無効なら 0）の和（候補ごと）。C が無ければ `None`
+        （呼び出し側が numpy で同じものを計算する。`register.search_steps`・`localize`）。"""
+        cm = self._c_map()
+        if cm is None or rx.size > 8192:
+            return None
+        bx, by, rx, ry = (_native.f64(a).reshape(-1) for a in (bx, by, rx, ry))
+        out = np.empty(bx.size)
+        _native.lib.sm_score_rows(cm, bx.size, _native.addr(bx), _native.addr(by), rx.size,
+                                  _native.addr(rx), _native.addr(ry), float(inv2s2),
+                                  _native.addr(out))
+        return out
 
     # ── 作り方 ──
 

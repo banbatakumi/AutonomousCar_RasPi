@@ -65,6 +65,8 @@ EXPLORE, BUILD, DONE, LOCATE, RACE = "EXPLORE", "BUILD", "DONE", "LOCATE", "RACE
 #: 自己位置を特定できたが、自動運転に入っていない（GUI の「自己位置を特定」まで押し、
 #: 「走行を開始」を待っている）段。他車が動かされた等で追跡を見失ったら LOCATE へ戻る
 LOCATED = "LOCATED"
+#: 車が動いている段階（`Slam2dRaceLine._may_parallel`）。`PARK` は `slam2d_route` の駐車
+MOVING_PHASES = frozenset({EXPLORE, RACE, "DETOUR", "PARK"})
 #: `LOCATED`で追跡を見失い続けたらやり直す周期数
 LOCATED_LOST_CYCLES = 5
 #: 横へ避けられない障害物・スタックを、Hybrid A*（`ParkToPoint`）で後退・切り返しも使って
@@ -298,7 +300,8 @@ LINE_PASSES = 2
 LINE_TIME_ITERS = 2
 #: 見積もりのラップ時間を直接下げる仕上げ（`rl_mod.refine_time`）の評価回数の上限。
 #: ワーカースレッドで回る。幅の巡回は最大4回で、1巡の縮みが 0.2% を切ったら終わる
-#: （`rl_mod.REFINE_STOP`）ので、上限まで使うのは S 字の多いコースだけ。Mac で 2〜4 秒
+#: （`rl_mod.REFINE_STOP`）ので、上限まで使うのは S 字の多いコースと長いコース（magp2・toyota2 は
+#: 出発点2本とも上限まで使う）。評価は C 版（`nav/native.py`）で1回 Pi 約0.15ms
 LINE_REFINE_EVALS = 15000
 
 #: GUI の組（`ParamSpec.group`）。地図作成（Follow the Gap）と本番走行を分けて見せる
@@ -417,15 +420,18 @@ UNKNOWN_SHORT_NOTE = ("★壁の切れ目の先が未観測の所で、未知を
                       "（地図の壁の穴を走って埋めると直る）。")
 
 
-def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None) -> dict:
+def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None,
+                parallel: bool = False) -> dict:
     """`rl_mod.optimize` へ渡す経路と速度の設定（BUILD と地図の読み込みで共通）。
 
     :param grip: 走行中に学習した全体の値（`speed_kwargs` の `grip`、スカラー）。ラインは見積もりの
         ラップ時間を最小にするので、路面の限界が同定値と違えば線の形も変わる
 
-    :param refine: False なら見積もりラップの仕上げをしない（0.1〜0.6 秒で引ける「まず走れる線」）。
-        仕上げ込みは Mac で 6〜8 秒かかるので、**先に仕上げなしの線で走り出し、裏で仕上げて
+    :param refine: False なら見積もりラップの仕上げをしない（Pi で 1 秒未満で引ける「まず走れる線」）。
+        仕上げ込みは Pi で数秒（magp2 で約3〜5秒）かかるので、**先に仕上げなしの線で走り出し、裏で仕上げて
         できたら差し替える**（`Slam2dRaceLine._adopt_line`、`Slam2dRoute._poll`）
+    :param parallel: 仕上げの出発点を2プロセスで同時に回す（`rl_mod.optimize` の `refine_parallel`）。
+        止まっている間だけ（`Slam2dRaceLine._may_parallel`）。走行中は plan() の周期にコアを残す
     """
     return dict(half_width=vehicle.half_width, margin=p["line_margin"], lam=LINE_LAM,
                 passes=LINE_PASSES, max_width=MAX_TRACK_WIDTH,
@@ -436,13 +442,14 @@ def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | 
                 footprint=vehicle.footprint or None,
                 time_iters=LINE_TIME_ITERS, kappa_max=kappa_limit(p, vehicle),
                 refine_evals=LINE_REFINE_EVALS if refine else 0,
-                refine_starts=LINE_REFINE_STARTS,
+                refine_starts=LINE_REFINE_STARTS, refine_parallel=parallel,
                 **speed_kwargs(p, vehicle, grip))
 
 
 def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                    cl: cl_mod.Centerline | np.ndarray, p: dict[str, float],
-                   vehicle, refine: bool = True, grip: dict | None = None) -> rl_mod.RaceLine:
+                   vehicle, refine: bool = True, grip: dict | None = None,
+                   parallel: bool = False) -> rl_mod.RaceLine:
     """レーシングラインを引く（**ワーカースレッドで走る**。地図の写しだけを触る）。
 
     `cl` が中心線でなく点列なら、保存済み地図の中心線として測り直してから引く。
@@ -452,7 +459,7 @@ def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, 
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     if not isinstance(cl, cl_mod.Centerline):
         cl = cl_mod.build(grid, cl, step=PATH_STEP, max_width=MAX_TRACK_WIDTH)
-    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle, refine, grip))
+    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle, refine, grip, parallel))
 
 
 def pursuit_config(p: dict[str, float], vehicle) -> PursuitConfig:
@@ -1201,8 +1208,13 @@ class Slam2dRaceLine(Planner):
         self._grip_line = self._grip_learned() if kw is not None else None
         self._line_job = submit_job(
             _optimize_line, g.trinary().copy(), g.resolution, tuple(g.origin),
-            np.asarray(cl).copy(), dict(p), self.vehicle, True, kw)
+            np.asarray(cl).copy(), dict(p), self.vehicle, True, kw, self._may_parallel())
         self._line_built = line_key(p)
+
+    def _may_parallel(self) -> bool:
+        """経路の仕上げをコア2つで回してよいか（`line_kwargs` の `parallel`）。車が動く段階
+        （地図作成・走行・迂回・駐車）では使わない。計算の途中で走り出せば、その計算の間だけは2つ使う"""
+        return self.phase not in MOVING_PHASES
 
     def _drop_job(self, name: str) -> None:
         """ワーカーの計算の結果を捨てる。まだ始まっていなければ取り消す（ワーカーは1本なので、

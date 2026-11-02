@@ -49,7 +49,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import native as _native
 from .grid import unknown_wall_mask
+
+#: 細線化を C で回す（テストが False にして Python 版と比べる）
+_NATIVE_THIN = True
 
 # cv2 はここでは import しない（issue #22）。line_perception_node 等、道路グラフを
 # 使わないノードもこのモジュールを import 経由で引き込みうるため、実際に使う
@@ -128,6 +132,11 @@ def thin(mask: np.ndarray, max_iter: int = 500) -> np.ndarray:
 
 def _thin(mask: np.ndarray, max_iter: int) -> np.ndarray:
     img = np.pad(mask.astype(np.uint8), 1)
+    if _native.lib is not None and _NATIVE_THIN:
+        # 下と同じ手順の C 版（`nav/_native.c` の `zs_thin`、結果は同じ。Pi で約 0.8s → 数十ms）
+        img = np.ascontiguousarray(img)
+        _native.lib.zs_thin(mask.shape[0], mask.shape[1], _native.addr(img), int(max_iter))
+        return img[1:-1, 1:-1].astype(bool)
     for _ in range(max_iter):
         changed = False
         for step in (0, 1):

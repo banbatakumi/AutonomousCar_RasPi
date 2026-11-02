@@ -53,9 +53,13 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import native as _native
 from .types import Pose2D, ScanPoints
 
 __all__ = ["OccGrid", "dilate", "UNKNOWN", "FREE", "OCCUPIED"]
+
+#: レイの行進を C で回す（`core/native.py`）。`False` なら numpy 版（テストが両方を比べる）
+USE_NATIVE = True
 
 #: レイを進める刻み幅を解像度の何倍にするか。1.0だと斜めのレイがセルを飛ばす
 _STEP_RATIO = 0.5
@@ -116,6 +120,10 @@ class OccGrid:
         #: `seq`ごとの読み出し結果のキャッシュ（1周期に何度も呼ばれるため）
         self._cache: dict[str, np.ndarray] = {}
         self._cache_seq = -1
+        #: C 版の作業領域と、型の判定の控え（`_native_cells`）
+        self._touched: np.ndarray | None = None
+        self._native_key = None
+        self._native_ok = False
 
     # ── 座標変換 ──
 
@@ -133,6 +141,22 @@ class OccGrid:
 
     def inside(self, col: np.ndarray, row: np.ndarray) -> np.ndarray:
         return (col >= 0) & (col < self.width) & (row >= 0) & (row < self.height)
+
+    def _native_cells(self, dtype) -> bool:
+        """`to_cell` の `(座標 − 原点) / 分解能` を、numpy が座標の型 `dtype` のまま計算するか
+        （`raycast`・`_carve` の C 版はその型で書いてある）。
+
+        numpy の型の昇格（NEP 50）は、原点・分解能が Python の float なら float32 の座標を float32 のまま
+        計算し、numpy の float64 なら float64 に上げる。C 版と同じ型になるときだけ C を使う。
+        """
+        if _native.lib is None or not USE_NATIVE:
+            return False
+        key = (tuple(self.origin), self.resolution, dtype)
+        if getattr(self, "_native_key", None) != key:
+            z = np.zeros(1, dtype=dtype)
+            self._native_ok = all(((z - o) / self.resolution).dtype == dtype for o in self.origin)
+            self._native_key = key
+        return self._native_ok
 
     # ── 更新 ──
 
@@ -210,10 +234,24 @@ class OccGrid:
         n_steps = max(1, int(np.ceil(float(d.max()) / step)))
         t = (np.arange(1, n_steps + 1, dtype=np.float32) * step)[None, :]
 
+        back = self.resolution * _END_BACKOFF
+        if (dx.dtype == np.float64 and self.misses.flags.c_contiguous
+                and self._native_cells(np.float64)):
+            # 下と同じ式の C 版（`_native.c` の `carve_touch`。レイごとに終端の手前で止める）
+            tt = np.ascontiguousarray(t.reshape(-1))
+            dx, dy, d = _native.f64(dx), _native.f64(dy), _native.f64(d)
+            if getattr(self, "_touched", None) is None or self._touched.shape != self.misses.shape:
+                self._touched = np.zeros(self.misses.shape, dtype=np.uint8)
+            _native.lib.carve_touch(dx.size, float(ox), float(oy), _native.addr(dx),
+                                    _native.addr(dy), _native.addr(d), tt.size, _native.addr(tt),
+                                    back, self.origin[0], self.origin[1], self.resolution,
+                                    self.height, self.width, _native.addr(self.misses),
+                                    _COUNT_MAX, _native.addr(self._touched))
+            return
         col, row = self.to_cell(ox + dx[:, None] * t, oy + dy[:, None] * t)
         ok = self.inside(col, row)
         # 終端セルの手前まで。**終端は壁かもしれないので空きにしない**（`_END_BACKOFF`）
-        ok &= t < (d[:, None] - self.resolution * _END_BACKOFF)
+        ok &= t < (d[:, None] - back)
         self._bump(self.misses, row[ok], col[ok])
 
     def _mark(self, wx: np.ndarray, wy: np.ndarray) -> None:
@@ -358,15 +396,30 @@ class OccGrid:
         sin = np.sin(angles).astype(np.float32)[:, None]
         x0 = np.asarray(ox, dtype=np.float32).reshape(-1)[:, None]
         y0 = np.asarray(oy, dtype=np.float32).reshape(-1)[:, None]
-        col, row = self.to_cell(x0 + cos * t[None, :], y0 + sin * t[None, :])
+        if t.dtype == np.float32 and self._native_cells(np.float32):
+            # 下と同じ式の C 版（`_native.c` の `ray_first_hit`。当たった所で止める）
+            nr = cos.shape[0]
+            first = np.empty(nr, dtype=np.int64)
+            cc, ss = np.ascontiguousarray(cos[:, 0]), np.ascontiguousarray(sin[:, 0])
+            xx, yy = np.ascontiguousarray(x0[:, 0]), np.ascontiguousarray(y0[:, 0])
+            g8 = np.ascontiguousarray(grid).view(np.uint8)
+            _native.lib.ray_first_hit(nr, _native.addr(xx), _native.addr(yy), xx.size,
+                                      _native.addr(cc), _native.addr(ss), t.size, _native.addr(t),
+                                      _native.addr(g8), self.height, self.width,
+                                      self.origin[0], self.origin[1], self.resolution,
+                                      _native.addr(first))
+            hit = first >= 0
+            first = np.where(hit, first, 0)
+        else:
+            col, row = self.to_cell(x0 + cos * t[None, :], y0 + sin * t[None, :])
 
-        ok = self.inside(col, row)
-        occ = grid[np.where(ok, row, 0), np.where(ok, col, 0)]
-        # 格子の外は壁扱い。地図の外へレイが伸びていくのを防ぐ
-        occ = np.where(ok, occ, True)
+            ok = self.inside(col, row)
+            occ = grid[np.where(ok, row, 0), np.where(ok, col, 0)]
+            # 格子の外は壁扱い。地図の外へレイが伸びていくのを防ぐ
+            occ = np.where(ok, occ, True)
 
-        hit = occ.any(axis=1)
-        first = occ.argmax(axis=1)
+            hit = occ.any(axis=1)
+            first = occ.argmax(axis=1)
         d = t[first] + fill * self.resolution
         return np.where(hit, np.minimum(d, max_range), max_range).astype(np.float64)
 

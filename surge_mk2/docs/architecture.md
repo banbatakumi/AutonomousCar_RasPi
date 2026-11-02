@@ -997,6 +997,16 @@ MPC は経路座標の線形化自転車モデルで舵角列を最適化し、�
   （`raspi/nav/grip.py`: `GripLearner` が横の上限をラップタイムで、`LongLearner` が前後の包絡を決める）、学習しないときは決まった余裕を掛ける。
   手で入れる絶対値にすると、同定し直しても走りが変わらず、同定値より楽観的な値（実行できないプロファイル）も入ってしまう
 - **ラインは最小曲率で終わらせず、見積もりラップを直接最小化する**（`raceline.refine_time`）。最小曲率は速度が最高速度で頭打ちの所でも大回りする。汎用 QP は入れていない——曲率の上限は「破る解を採らない探索」で守る（Pi に依存を足さない）
+- **経路の計算の内側は C で回す**（`raspi/nav/_native.c` を `nav/native.py` が初回の import で `cc` に組ませ、`~/.cache/surge_mk2/` に置いて ctypes で呼ぶ。2026-11-02）。
+  Pi の numpy は参照 BLAS で、QP を密行列で解くと magp2（510点）の仕上げ前の経路だけで 15s、仕上げ込みで 75s かかった。scipy・numba は Pi に無い。
+  QP は巡回5重対角を帯のまま Cholesky（O(n)）、仕上げの評価・速度プロファイル・車体外形・細線化は Python 版と演算の順を揃え `-ffp-contract=off` で**ビット一致**させる
+  （`raspi/tests/test_native.py`）。仕上げの評価は前回の評価から変わった点の周りだけ計算し直し、停車中は出発点2本を fork で同時に回す（走行中はコアを残す）。
+  トレードオフ: C のソースとビルド（gcc）への依存が増える。組めなければ Python 版に落ちる（結果は同じ・遅いだけ）。式を変えるときは Python 版と C 版を一緒に直す
+- **SLAM の内側も C**（`slam2d/core/_native.c`。`OccGrid.raycast`・`_carve`・`SurfaceMap.associate`・総当たりの採点（`register.search_steps`・`localize`）・面要素の法線の近傍の和。slam2d は raspi を import しないので、組み方の共通部分 `slam2d/core/cbuild.py` を raspi 側が借りる）。
+  numpy 版は全レイを最後の歩まで一時配列で進めていて、追跡の「壁の向こうの点」の判定だけで Pi の走行中の `plan()` の約4割を使っていた。
+  C は当たった所・終端で止める。採点は「候補 × 点」の配列を作らない。型（float32／float64）と演算の順を numpy に揃えてビット一致（`slam2d/tests/test_native.py`。
+  `exp`・`hypot` は numpy と libm が同じ値を返すことを Mac・Pi で確かめた。点の和は numpy の pairwise 和を写した）。numpy の float64 の原点など型が揃わない組み合わせは numpy 版で回す。
+  ICP の正規方程式（行列積＝BLAS の足し算の順）は numpy のまま
 - **速度指令は速度PIの逆モデルで前倒しする**（`nav/speedctl.py`）。`brake`・`torque_mode`・`launch` はコーナーの減速に使わない（brake は解いた後に目標が 0 から立ち上がり直す、torque_mode は ABS が効かない）
 - **判断は 10Hz、追従は 50Hz**（planner の `tick()`）。障害物・自己位置の判断は点群が来たときだけ。合間は姿勢を推測航法で進めて舵と速度だけ更新する
 - **障害物・他車は Frenet 格子で追い抜く**（`nav/overtake.py`）。横ずれの候補を毎周期まとめて作り、相手の予測位置と

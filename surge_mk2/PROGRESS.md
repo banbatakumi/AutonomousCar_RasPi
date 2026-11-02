@@ -8,6 +8,7 @@
 - **コミット・反映**: 下の節を含む全変更はコミット済み・2026-11-01 に Pi へ反映済み（`deploy.sh`）。この節より下の見出しの状態は記録時点のもので、以下が優先する
 - **プロトコル v0.29**（`raspi/proto/protocol.toml` が正）。STM32 はファーム `fb65b6f` を 2026-11-01 に書き込み済み（前輪エンコーダの鏡像補正・車速KFの立て直し・PI 減速の ABS・odom_dist の補正・`build_info` を含む。控え `~/stm32_backup_20261101/`）。
   Pi とファームは一緒に入れ替える（io_node は版が一致するまで ARM を通さない）
+- **2026-11-02 の経路生成の高速化（下の節）は未コミット・Pi 未反映**（Pi の別ディレクトリ `~/surge_bench` で計測しただけ）
 - **未検証**: 2026-10-31〜11-01 の修正の ARM・駆動・走行での確認（舵の見張り・PI 減速の ABS・odom の手押し・解除後の再特定・車体内の点のマスク）。062217 の舵の固着の原因（機構・MD）も未点検
 - **自動運転**: 主力は `slam2d_route`（`slam2d_raceline` を土台に経路選択・経由点）。障害物・他車は `nav/overtake.py`（Frenet 格子、`overtake` 既定 1）、抜けない静止物は Hybrid A*。
   走行中の学習は `raspi/nav/grip.py`（`GripLearner`＝横の上限をタイムで、`LongLearner`＝前後の包絡）。GUI の自動運転モードに「レーシングライン(slam2d)」は無い
@@ -16,6 +17,71 @@
 - 2026-10-11〜10-29 の作業記録は `docs/archive/progress_2026-10-11_to_2026-10-29.md`、それ以前も `docs/archive/`（陳腐化）
 
 ## 直近の作業記録（新しい順）
+
+## 2026-11-02 SLAM の対応付け・総当たりの採点・面要素の法線も C に（調査の②③。未コミット・Pi 未反映）
+
+`slam2d/core/_native.c` に `sm_associate`（`SurfaceMap.associate`）・`sm_score_rows`（`search_steps`・`GlobalLocalizer.step` の採点。
+「候補 × 点」の配列を作らない）・`normal_sums`（`SurfaceMap.__init__` の25近傍の和）。すべて numpy 版とビット一致（`exp`・`hypot` が numpy と
+libm で同じことを Mac・Pi で確認、点の和は numpy の pairwise 和を写す）。ICP の正規方程式は行列積なので numpy のまま。
+| Pi | C 版なし | ①＋② | ①＋②＋③ |
+|---|---|---|---|
+| シム・停車中の追跡 RACE の `plan()` 中央 / p99 | 11.4 / 14.8ms | 6.6 / 9.2ms | 6.7 / 9.4ms |
+| シム LOCATE の p95 / 最大 | 215 / 354ms | 113 / 160ms | 107 / 158ms |
+| 実記録の再生（地図作成しながら）`update` 中央 | 34.7ms | 31.6ms | 24.2ms |
+実記録の再生の SLAM の結果は3つとも同じ。`slam2d/tests/test_native.py` 10件、Mac の pytest 全体 2065 件 OK。
+LOCATE の最大はまだ 150ms をわずかに超える（中身は `Frontend.refine` の3段の探索。地図が大きいほど長い）
+
+## 2026-11-02 SLAM のレイの行進を C に（調査の①。未コミット・Pi 未反映）
+
+`slam2d/core/_native.c`（`OccGrid.raycast` の最初の当たり・`_carve` の素通りの数え）。numpy 版と型・演算の順を揃えてビット一致、
+型が揃わない組み合わせ（numpy の float64 の原点）は numpy 版。組み方は `slam2d/core/cbuild.py` に寄せ、`raspi/nav/native.py` も使う。
+- Pi・シム（`--map mpc_toyota2`、停車中の追跡）: RACE の `plan()` 中央 11.5 → 7.1ms・p99 15.0 → 10.1ms。LOCATE の最大 348 → 268ms
+  （Pi のシムは実時間に追いつかず、車が動かないまま。走行中の値は実機で見る）
+- Pi・実記録の再生（`slam_replay`、055134 の最初の 120s・200m、地図作成しながら）: `Frontend.update` 中央 34.9 → 32.0ms。SLAM の結果は同じ
+- `slam2d/tests/test_native.py`（5件: raycast・carve・飽和・地図作成→凍結→追跡の姿勢が全周期で同じ）。Mac の pytest 全体 2060 件 OK
+- 次の候補: ② `SurfaceMap.associate`（ICP・LOCATE の総当たり）③ `SurfaceMap.__init__` の法線（地図作成の残りの大半）
+
+## 2026-11-02 C で書くと効く所の調査（計測だけ。①は上の節で着手）
+
+会場の実記録7本の `plan_ms`（Pi の実測）と、Pi でのシム（`--map mpc_toyota2`）の cProfile から。
+- 実記録の `plan()`: RACE 中央 13.9ms・最大 280ms（走り出しの瞬間）、LOCATE p95 169ms・最大 413ms、EXPLORE 中央 19.6ms・最大 86ms、BUILD 中央 65ms、PARK 中央 42ms
+- RACE の毎周期の大半は自己位置の追跡（`Frontend.update` 13.4ms/周期）: `_not_behind_wall` の `OccGrid.raycast` 6.4ms、`register`（ICP の `associate`＋`_normal_equations`）4.4ms
+- LOCATE・見失いの探し直しは `register.search_steps`（総当たり、1回 約180ms）。RACE 中に見失うと plan() が 153ms（デッドマン 150ms を超える）
+- 地図作成は `SurfaceMap.__init__`（25近傍の法線、3周期に1回）と `OccGrid._carve`（全レイを最長まで歩かせる）
+- 候補（効く順）: ① `OccGrid.raycast`・`_carve` のレイの行進（早期終了で一時配列なし。float32 の演算を揃えればビット一致）
+  ② `SurfaceMap.associate`（ICP と総当たりの探索の両方）③ `SurfaceMap.__init__` の法線 ④ `overtake.plan` の候補の評価（追い抜き中のみ約 80ms）
+- 対象外: io_node（1コアの約10%だが、安全の第1層で標準ライブラリだけの方針。フレームの処理は1回数十µs）、telemetry_node
+- Pi の sim.bench は地図作成が実時間に追いつかず正しく進まない（200s で周回 0・誤差 46cm）。Pi での計測は `--map` から
+
+## 2026-11-02 slam2d_route の経路生成を速くする（線は変えない。未コミット・Pi 未反映）
+
+バンビの要望「magp2 など長いコースで経路生成に時間がかかる」。Pi で magp2 の真値地図の自動経路（既定設定）を測ると、
+**仕上げなし（まず走れる線）15.1s・仕上げ込み 75.4s**（Mac は 0.53s・9.4s）。原因は2つ:
+① QP（`min_curvature_alpha`）を n×n の密行列で解いていた（Pi の numpy は参照 BLAS で n³ が効く。仕上げなしの 13.7s がこれ）、
+② 仕上げ（`refine_time`）が出発点2本×上限15000評価に張り付き、1評価 1.7ms（Python の速度プロファイル・車体外形・曲率）。
+- **C の核** `raspi/nav/_native.c`（`nav/native.py` が初回の import で `cc -O2 -ffp-contract=off` に組ませ `~/.cache/surge_mk2/` に置く。ctypes。
+  組めなければ Python 版）: 速度プロファイル・曲率・車体外形・帯の内外・仕上げの評価をまとめた関数・細線化。Python 版と**ビット一致**
+- **QP を帯のまま Cholesky**（巡回5重対角、自由な点の部分行列は末尾2行を縁にした矢形）。これだけは密行列と丸めが違う
+- 仕上げの評価は**前回の評価から変わった点の周りだけ**計算し直す（ビット単位で変わる点は平均 1/4）。同じ2点の hypot は1回だけ。こぶの形は roll で使い回す
+- **停車中は出発点2本を fork で同時に**（`refine_parallel`、`Slam2dRaceLine._may_parallel`＝EXPLORE・RACE・DETOUR・PARK 以外）。走行中の引き直しは逐次
+- `deploy.sh` が反映の後に C 版を組む（失敗しても止めずに知らせる）
+
+| Pi（magp2・自動経路） | 変更前 | 変更後（逐次） | 変更後（停車中＝並列） |
+|---|---|---|---|
+| 仕上げなし | 15.1s | 0.66s | 0.67s |
+| 仕上げ込み | 75.4s | 5.4s | 3.3s |
+| toyota2 仕上げ込み | 42.9s | 4.4s | 2.9s |
+| 会場の地図 course_20261030_204138 仕上げ込み | 15.8s（帯の QP 無し・C 有り） | 4.8s | — |
+
+検証:
+- **線が変わらない**: QP を密行列のまま C の核と使い回しを入れた状態で、magp2・toyota2 の仕上げなし／込みの点列のハッシュが変更前と一致（Mac・Pi それぞれ）。並列 ON/OFF でも一致
+- **QP の帯化の影響**: シムの5コース＋保存地図（Mac 3・Pi 3）の仕上げ込みで、見積もりラップの差 −0.003〜+0.04%、最小半径・`short`・`unknown_short` は同じ
+  （今の Mac と Pi の差が magp2 で 0.02%。同じ程度）
+- `raspi/tests/test_native.py`（ビット一致・帯の解法・並列・細線化、12件）。Mac の pytest 全体 2055 件 OK、Pi で経路まわりの 208 件 OK
+- 本番と同じワーカープロセス経由でも並列になる（Pi・magp2: 5.54s → 3.27s、線は同じ）
+- sim.bench（toyota2・`--map mpc_toyota2`・`--real-noise`・120s）: 衝突 0、2周目以降 平均 15.03s（前回の記録 15.03〜15.05s）。
+  先の2本は Mac の詰まり（★、指令の間隔 157ms・103ms）で捨てた
+- 次: Pi へ反映（`deploy.sh --test`）して、実機で BUILD → 仕上げの差し替えまでの時間と plan() の周期（並列中）を見る
 
 ## 2026-11-01 会場の試走の解析で見つけた問題を全部直す（2026-11-01 Pi 反映・ファーム書き込み済み・走行では未検証）
 

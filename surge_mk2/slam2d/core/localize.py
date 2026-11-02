@@ -148,12 +148,17 @@ class GlobalLocalizer:
         c, s = math.cos(yaw), math.sin(yaw)
         rx = sx * c - sy * s
         ry = sx * s + sy * c
-        wx = self._xs[:, None] + rx[None, :]
-        wy = self._ys[:, None] + ry[None, :]
-        a = self._map.associate(wx, wy)
         inv2s2 = 1.0 / (2.0 * self._config.sigma ** 2)
-        like = np.where(a.valid, np.exp(-np.minimum(a.dist, 10.0) ** 2 * inv2s2), 0.0)
-        totals = like.sum(axis=1) / sx.size
+        # C 版（`SurfaceMap.like_sums`、下と同じ値）。numpy 版は「候補 × 点」の配列を作る
+        sums = self._map.like_sums(self._xs, self._ys, rx, ry, inv2s2)
+        if sums is not None:
+            totals = sums / sx.size
+        else:
+            wx = self._xs[:, None] + rx[None, :]
+            wy = self._ys[:, None] + ry[None, :]
+            a = self._map.associate(wx, wy)
+            like = np.where(a.valid, np.exp(-np.minimum(a.dist, 10.0) ** 2 * inv2s2), 0.0)
+            totals = like.sum(axis=1) / sx.size
 
         self._by_angle[self._ai] = totals
         better = totals > self._best_score

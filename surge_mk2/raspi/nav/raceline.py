@@ -68,6 +68,10 @@ from .centerline import (Centerline, measure, normals, normals_open,
                          resample_loop, resample_open, tangents, tangents_open)
 from .grid import OccGrid, dilate, unknown_wall_mask
 from .local_map import _edt, footprint_circles
+from .native import addr as _addr, f64 as _f64, lib as _NATIVE_LIB
+
+#: C の内側ループ（`nav/native.py`）。`None` なら Python 版で回す（テストが差し替えて両方を比べる）
+_NATIVE = _NATIVE_LIB
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha",
            "sight_distance", "sight_speed",
@@ -158,7 +162,15 @@ def min_curvature_alpha(c: np.ndarray, nrm: np.ndarray,
     貼り付いて、そのまま answer になる。**中心線より曲がった経路が「最適解」
     として出てくる**（実測した）。KKT 条件（下限にいる点の勾配は 0 以上、
     上限にいる点は 0 以下）を見て、破っている点を自由集合へ戻す。
+
+    ## 帯行列で解く（`_min_curvature_alpha_band`）
+
+    行列は巡回5重対角（2階差分の `DᵀWD`）なので、C があれば帯のまま O(n) で解く。密行列だと
+    行列積と `solve` が n³ で、Pi（参照 BLAS）では magp2（510点）の1本に 10 秒以上かかった。
     """
+    if _NATIVE is not None and len(c) >= _BAND_MIN_N:
+        return _min_curvature_alpha_band(c, nrm, lo, hi, lam=lam, step=step, max_iter=max_iter,
+                                         closed=closed, weights=weights, warm=warm)
     n = len(c)
     d2 = _cyclic_d2(n) if closed else _open_d2(n)
     if weights is None:
@@ -217,12 +229,137 @@ def min_curvature_alpha(c: np.ndarray, nrm: np.ndarray,
     return np.clip(alpha, lo, hi)
 
 
+#: これより点が少なければ帯行列にせず密行列で解く（巡回の角が帯と重なる）
+_BAND_MIN_N = 16
+#: 自由な点がこれより少ない部分問題は密行列で解く（`band_solve` は 6 点以上）
+_BAND_MIN_FREE = 8
+
+
+def _band_matvec(t0: np.ndarray, t1: np.ndarray, t2: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """対称な巡回5重対角行列（対角 `t0`、`t1[i]` = (i, i+1)、`t2[i]` = (i, i+2)）と `x` の積。"""
+    return (t0 * x + t1 * np.roll(x, -1) + np.roll(t1 * x, 1)
+            + t2 * np.roll(x, -2) + np.roll(t2 * x, 2))
+
+
+def _min_curvature_alpha_band(c: np.ndarray, nrm: np.ndarray, lo: np.ndarray, hi: np.ndarray, *,
+                              lam: float, step: float, max_iter: int, closed: bool,
+                              weights: np.ndarray | None, warm: np.ndarray | None) -> np.ndarray:
+    """`min_curvature_alpha` の帯行列版（手順は密行列版と同じ、行列の持ち方と解き方だけが違う）。
+
+    `DᵀWD` は、点 p を中心とする2階差分（重み `wc[p]`）の和なので、帯は
+    対角 `wc[i-1] + 4wc[i] + wc[i+1]`・1つ隣 `−2(wc[i] + wc[i+1])`・2つ隣 `wc[i+1]`。
+    開いた列は両端の点を中心とする差分が無い（`wc` の両端が 0）ので、同じ式で巡回の角が 0 になる。
+
+    自由な点だけの部分行列は、自由な点を順に並べても帯幅2のままで、巡回の結合は最初の2点と
+    最後の2点の間にしか出ない（固定した点を抜くと間が詰まるだけ）。これを C の `band_solve`
+    （末尾2行を縁にした矢形の Cholesky）で解く。
+    """
+    n = len(c)
+    if weights is None:
+        wc = np.ones(n)
+    else:
+        wc = np.asarray(weights, dtype=np.float64).copy()
+    if not closed:
+        wc[0] = wc[-1] = 0.0                    # 開いた列の差分は点 1〜n−2 を中心とする
+    wn = np.roll(wc, -1)
+    t0 = np.roll(wc, 1) + 4.0 * wc + wn
+    t1 = -2.0 * (wc + wn)
+    t2 = wn.copy()
+    nx, ny = nrm[:, 0], nrm[:, 1]
+    m0 = (nx * nx + ny * ny) * t0 + lam * step ** 4
+    m1 = (nx * np.roll(nx, -1) + ny * np.roll(ny, -1)) * t1
+    m2 = (nx * np.roll(nx, -2) + ny * np.roll(ny, -2)) * t2
+    b = nx * _band_matvec(t0, t1, t2, c[:, 0]) + ny * _band_matvec(t0, t1, t2, c[:, 1])
+    tol = 1e-12 * max(1.0, float(np.abs(b).max()))
+
+    def get(i: int, j: int) -> float:
+        """行列の (i, j) 要素（i, j は点の番号）。"""
+        d = (j - i) % n
+        if d == 0:
+            return float(m0[i])
+        if d == 1:
+            return float(m1[i])
+        if d == 2:
+            return float(m2[i])
+        if d == n - 1:
+            return float(m1[j])
+        if d == n - 2:
+            return float(m2[j])
+        return 0.0
+
+    def solve(free_idx: np.ndarray, rhs: np.ndarray) -> np.ndarray:
+        nf = len(free_idx)
+        if nf >= _BAND_MIN_FREE:
+            g1 = np.diff(free_idx)
+            d1 = np.where(g1 == 1, m1[free_idx[:-1]], np.where(g1 == 2, m2[free_idx[:-1]], 0.0))
+            d2 = np.where(free_idx[2:] - free_idx[:-2] == 2, m2[free_idx[:-2]], 0.0)
+            f0, f1, fl2, fl1 = (int(free_idx[0]), int(free_idx[1]), int(free_idx[-2]),
+                                int(free_idx[-1]))
+            gl = f0 + n - fl1
+            c10 = float(m1[fl1]) if gl == 1 else float(m2[fl1]) if gl == 2 else 0.0
+            c20 = float(m2[fl2]) if f0 + n - fl2 == 2 else 0.0
+            c11 = float(m2[fl1]) if f1 + n - fl1 == 2 else 0.0
+            d0 = _f64(m0[free_idx])
+            d1, d2, r = _f64(d1), _f64(d2), _f64(rhs)
+            x = np.empty(nf)
+            if _NATIVE.band_solve(nf, _addr(d0), _addr(d1), _addr(d2), c20, c10, c11,
+                                  _addr(r), _addr(x)) == 0:
+                return x
+        # 自由な点が少ない・正定値として解けなかった（数値的に退化）。部分行列を作って密に解く
+        sub = np.array([[get(int(i), int(j)) for j in free_idx] for i in free_idx])
+        try:
+            return np.linalg.solve(sub, rhs)
+        except np.linalg.LinAlgError:
+            # 退化した（同じ点が並んでいる等）。**例外で走行を止めない**
+            return np.linalg.lstsq(sub, rhs, rcond=None)[0]
+
+    eq = (hi - lo) <= 1e-9
+    if warm is None:
+        alpha = np.zeros(n)
+        at_lo = eq.copy()
+        at_hi = np.zeros(n, dtype=bool)
+    else:
+        alpha = np.clip(np.asarray(warm, dtype=np.float64), lo, hi)
+        at_lo = eq | (alpha <= lo + 1e-9)
+        at_hi = ~at_lo & (alpha >= hi - 1e-9)
+    alpha[eq] = lo[eq]
+    for _ in range(max_iter):
+        fixed = at_lo | at_hi
+        free = ~fixed
+        if free.any():
+            # 固定した点からの寄与 `m[free, fixed] @ alpha[fixed]`
+            fixed_part = _band_matvec(m0, m1, m2, np.where(fixed, alpha, 0.0))
+            idx = np.nonzero(free)[0]
+            alpha[free] = solve(idx, -(b[free] + fixed_part[free]))
+
+        below = alpha < lo - 1e-12
+        above = alpha > hi + 1e-12
+        if below.any() or above.any():
+            alpha = np.clip(alpha, lo, hi)
+            at_lo |= below
+            at_hi |= above
+            continue
+
+        g = 2.0 * (_band_matvec(m0, m1, m2, alpha) + b)
+        release = ((at_lo & (g < -tol)) | (at_hi & (g > tol))) & ~eq
+        if not release.any():
+            break
+        at_lo[release] = False
+        at_hi[release] = False
+    return np.clip(alpha, lo, hi)
+
+
 def curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
     """3点から曲率 [1/m]。**左旋回が正**（反時計回りが正の規約に合わせる）。
 
     2階差分をそのまま使わず外接円から出すのは、点の間隔が完全には揃わない
     （再サンプル後でも端で数 % ずれる）ため。外接円なら間隔に依存しない。
     """
+    if _NATIVE is not None and len(xy) >= 3:
+        xy = _f64(xy)
+        out = np.empty(len(xy))
+        _NATIVE.curvature(len(xy), _addr(xy), int(closed), _addr(out))
+        return out
     a = np.roll(xy, 1, axis=0)
     b = xy
     c = np.roll(xy, -1, axis=0)
@@ -240,6 +377,11 @@ def curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
 
 def chord_curvature(xy: np.ndarray, k: int, closed: bool = True) -> np.ndarray:
     """`k` 点離れた3点の外接円の曲率 [1/m]（**絶対値**）。弦は約 `2k` 点ぶん。"""
+    if _NATIVE is not None and len(xy) >= 3:
+        xy = _f64(xy)
+        out = np.empty(len(xy))
+        _NATIVE.chord_curvature(len(xy), _addr(xy), int(k), int(closed), _addr(out))
+        return out
     if closed:
         a, c = np.roll(xy, k, axis=0), np.roll(xy, -k, axis=0)
     else:
@@ -260,6 +402,11 @@ def speed_kappa(xy: np.ndarray, closed: bool = True,
     xy = np.asarray(xy, dtype=np.float64)
     if len(xy) < 3:
         return np.zeros(len(xy))
+    if _NATIVE is not None:
+        xy = _f64(xy)
+        out = np.empty(len(xy))
+        _NATIVE.speed_kappa(len(xy), _addr(xy), int(closed), float(chord), _addr(out))
+        return out
     seg = np.hypot(*np.diff(xy, axis=0).T)
     step = float(np.median(seg)) if len(seg) else 0.1
     k = max(1, int(round(chord / 2.0 / max(step, 1e-6))))
@@ -330,8 +477,24 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
     if v_cap is not None:
         v_min = min(v_min, float(v.min()))
     # ここから下の `a_lat` は摩擦円の半径としてだけ使う
-    grip = max(a_lat, a_grip) if a_grip else a_lat
-    inv_grip2 = 1.0 / (grip * grip) if friction_circle and grip > 1e-9 else 0.0
+    inv_grip2 = _inv_grip2(a_lat, a_grip, friction_circle)
+    if _NATIVE is not None:
+        # 下の Python のループと同じ演算（`nav/_native.c` の `sp_*`、ビット一致）
+        vc = _f64(v).copy()
+        kc = _f64(k)
+        xyc = _f64(xy)
+        dsc = np.empty(n)
+        _NATIVE.seg_len(n, _addr(xyc), int(closed), _addr(dsc))
+        if not closed:
+            vc[-1] = min(vc[-1], v_min if v_end is None else v_end)
+            _NATIVE.sp_open_back(n, _addr(vc), _addr(kc), _addr(dsc), float(a_brake), inv_grip2)
+            if v_start is not None:
+                vc[0] = min(vc[0], max(v_start, v_min))
+                _NATIVE.sp_open_fwd(n, _addr(vc), _addr(kc), _addr(dsc), float(a_accel), inv_grip2)
+            return vc
+        _NATIVE.sp_closed(n, _addr(vc), _addr(kc), _addr(dsc), float(a_brake), float(a_accel),
+                          inv_grip2)
+        return np.maximum(vc, floor)
     sqrt = math.sqrt
     # ★ numpy の配列を1点ずつ読むと遅い（要素の取り出しが 1 回 100ns 前後）。この関数は
     #   ラインの仕上げ（`refine_time`）が数千回呼ぶので、リストに直して回す（約5倍）
@@ -377,6 +540,17 @@ def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
             if lim < vl[i]:
                 vl[i] = lim
     return np.maximum(np.asarray(vl), floor)
+
+
+def _inv_grip2(a_lat: float, a_grip, friction_circle: bool = True) -> float:
+    """摩擦円の半径の2乗の逆数（`speed_profile` のスカラー版。0 なら摩擦円を使わない）。"""
+    grip = max(a_lat, a_grip) if a_grip else a_lat
+    return 1.0 / (grip * grip) if friction_circle and grip > 1e-9 else 0.0
+
+
+#: C で仕上げの評価をまとめて回す（`optimize` の `cost`）点の数の上限。これより多いと numpy の総和の
+#: 手順が変わる（`_native.c` の `pairwise_sum`）
+_FUSED_MAX_N = 8192
 
 
 def _speed_profile_var(xy: np.ndarray, kappa: np.ndarray, *, v_max: float, v_min: float,
@@ -639,7 +813,8 @@ def refine_time(xy: np.ndarray, cost, *, step: float, max_evals: int = 6000,
     動きも試す。細かい幅まで終えたら粗い幅へ戻ってもう一巡する（細かい幅で空いた余地を使う）。
 
     :param cost: `cost(xy) -> 比較できる値`（タプルなら辞書式）
-    :param max_evals: `cost` を呼ぶ回数の上限（計算時間の上限。1回 約0.4ms、Pi で約1ms）
+    :param max_evals: `cost` を呼ぶ回数の上限（計算時間の上限。`optimize` の評価は C 版で1回 Pi 約0.15ms、
+        Python 版で Pi 約1.7ms）
     :param cycles: 幅の列を粗い方からやり直す回数の上限（1巡して何も採れなければそこで終わる）
     """
     n = len(xy)
@@ -656,24 +831,35 @@ def refine_time(xy: np.ndarray, cost, *, step: float, max_evals: int = 6000,
             if best[:-1] == mark[:-1] and t1 > t0 * (1.0 - REFINE_STOP):
                 break
             mark = best
-        idx = np.arange(n)
+        # 中心 0 のこぶの形。中心 c のこぶはこれを c だけ回したものと要素ごとに同じ値になる
+        # （`d = (i − c + n//2) % n − n//2` は i − c だけで決まる）。exp を中心ごとに計算し直さない
+        d = (np.arange(n) + n // 2) % n - n // 2
+        g0 = np.exp(-0.5 * (d / w) ** 2)
+        pull = None
         amp = REFINE_AMP0
         while amp >= REFINE_AMP_MIN and evals < max_evals:
             improved = False
             nrm = normals(xy)
             for c in range(0, n, w):
-                d = (idx - c + n // 2) % n - n // 2
-                g = np.exp(-0.5 * (d / w) ** 2)[:, None]
-                bump = amp * g * nrm
-                cands = [xy + bump, xy - bump]
-                if tighten:
-                    # 引き締め: 寄せる割合は高さ `amp` に合わせて小さくしていく
-                    cands.insert(0, xy + (amp / REFINE_AMP0) * g * (_loop_mean(xy, w) - xy))
-                for q in cands:
+                g = np.roll(g0, c)[:, None]
+                # 候補は試す直前に作る（採れたら残りは作らない）。引き締めの行き先（移動平均）は
+                # 線が変わったときだけ計算し直す
+                for kind in ((0, 1, 2) if tighten else (1, 2)):
+                    if kind == 0:
+                        if pull is None:
+                            pull = _loop_mean(xy, w) - xy
+                        # 引き締め: 寄せる割合は高さ `amp` に合わせて小さくしていく
+                        q = xy + (amp / REFINE_AMP0) * g * pull
+                    elif kind == 1:
+                        bump = amp * g * nrm
+                        q = xy + bump
+                    else:
+                        q = xy - bump
                     cq = cost(q)
                     evals += 1
                     if cq < best:
                         xy, best, improved = q, cq, True
+                        pull = None
                         break
                 if evals >= max_evals:
                     break
@@ -720,8 +906,14 @@ class _Band:
             j = (i + 1) % n
             cv2.fillPoly(mask, [np.array([ca[i], cb[i], cb[j], ca[j]], dtype=np.int32)], 1)
         self.mask = cv2.dilate(mask, np.ones((3, 3), np.uint8)).astype(bool)
+        self._mask8 = np.ascontiguousarray(self.mask.view(np.uint8))
 
     def inside(self, xy: np.ndarray) -> bool:
+        if _NATIVE is not None:
+            xy = _f64(xy)
+            h, w = self.mask.shape
+            return bool(_NATIVE.all_inside(len(xy), _addr(xy), _addr(self._mask8), h, w,
+                                           self.origin[0], self.origin[1], self.res))
         col = np.floor((xy[:, 0] - self.origin[0]) / self.res).astype(np.int64)
         row = np.floor((xy[:, 1] - self.origin[1]) / self.res).astype(np.int64)
         h, w = self.mask.shape
@@ -756,12 +948,27 @@ class _BodyCheck:
         self.edt = _edt(~wall, self.res)
         self.circles, self.r = footprint_circles(footprint)
         self.closed = closed
+        # C 版（`clearance`）に渡す写し。距離場が float32 でなければ（cv2 の無い環境）numpy で測る
+        self._edt32 = (np.ascontiguousarray(self.edt) if self.edt.dtype == np.float32 else None)
+        self._cx = _f64(self.circles[:, 0])
+        self._cy = _f64(self.circles[:, 1])
 
     def clearance(self, xy: np.ndarray, offset: np.ndarray | None = None) -> np.ndarray:
         """各点に車体を置いたときの壁までの余裕 [m]（負 = 食い込み）。
 
         向きは `xy` の接線。`offset` を与えると位置だけずらして測る（向きは同じ）。
         """
+        if _NATIVE is not None and self._edt32 is not None and len(xy):
+            # 下の numpy と同じ演算（`nav/_native.c` の `body_min_edt`、ビット一致）
+            xy = _f64(xy)
+            off = None if offset is None else _f64(np.broadcast_to(offset, xy.shape))
+            out = np.empty(len(xy), dtype=np.float32)
+            h, w = self._edt32.shape
+            _NATIVE.body_min_edt(len(xy), _addr(xy), None if off is None else _addr(off),
+                                 int(self.closed), len(self._cx), _addr(self._cx), _addr(self._cy),
+                                 _addr(self._edt32), h, w, self.origin[0], self.origin[1],
+                                 self.res, _addr(out))
+            return out - self.r
         t = tangents(xy) if self.closed else tangents_open(xy)
         p = xy if offset is None else xy + offset
         c, s = t[:, 0:1], t[:, 1:2]
@@ -814,7 +1021,7 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
              kappa_max: float | None = None, footprint=None,
              time_iters: int = 0, a_grip: float | None = None,
              refine_evals: int = 0, refine_cycles: int = 4,
-             refine_starts: int = 1) -> RaceLine:
+             refine_starts: int = 1, refine_parallel: bool = False) -> RaceLine:
     """中心線からレーシングラインを作る。
 
     :param half_width: 車体半幅 [m]。`config/vehicle.toml` の外形から取る
@@ -832,6 +1039,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
         `refine_time`）。閉じた経路で `time_iters > 0` のときだけ。出発点1つあたりの上限
     :param refine_starts: 仕上げを始める出発点の数（下の「出発点を変えて仕上げる」）。時間は
         この数に比例する
+    :param refine_parallel: 2本目以降の出発点の仕上げを fork した子プロセスで同時に回す
+        （`_refine_forked`。結果は逐次と同じ）。コアをもう1つ使うので、走行中の引き直しでは使わない
 
     `passes > 1` にしているのは、最適化で経路が動くと**法線の向きも変わる**ため。
     斜めに当たる法線は道幅を過大に測り、**壁にめり込む解が実行可能に見える**。
@@ -953,6 +1162,8 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
             """`score` と同じ並び。**安い検査から順に**行い、最良に負けると分かった時点でやめる
             （曲率 0.03ms → 車体外形 0.1ms → 速度プロファイル 0.2ms。試す解の半分以上は制約で落ちる）。"""
             ref = seen[0] if seen else None
+            if fused is not None and len(q) <= _FUSED_MAX_N:
+                return cost_c(q, ref)
             ks = speed_kappa(q, True)
             over = max(0.0, float(ks.max()) - kappa_max) if kappa_max else 0.0
             over = round(max(over, float(np.abs(curvature(q, True)).max()) - kink, 0.0), 4)
@@ -963,6 +1174,51 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
             if float(body.clearance(q).min()) < margin - 0.01 if body is not None else False:
                 return 1, over, math.inf
             out = 0, over, _travel_time(q, speed_profile(q, ks, **spd), True)
+            if ref is None or out < ref:
+                seen[:] = [out]
+            return out
+
+        # 上の `cost` を C で（`_native.c` の `refine_kappa`・`refine_eval`。結果はビット一致）。
+        # 点ごとの横の限界（学習値の配列）や cv2 の無い環境の距離場では使わない
+        fused = None
+        if (_NATIVE is not None and np.ndim(a_lat) == 0
+                and (a_grip is None or np.ndim(a_grip) == 0)
+                and (body is None or body._edt32 is not None)):
+            bh, bw = band.mask.shape
+            if body is not None:
+                eh, ew = body._edt32.shape
+                bargs = (_addr(body._edt32), eh, ew, body.origin[0], body.origin[1], body.res,
+                         len(body._cx), _addr(body._cx), _addr(body._cy), float(np.float32(body.r)),
+                         margin - 0.01)
+            else:
+                bargs = (None, 0, 0, 0.0, 0.0, 1.0, 0, None, None, 0.0, 0.0)
+            fused = (_addr(band._mask8), bh, bw, band.origin[0], band.origin[1], band.res, *bargs,
+                     float(v_max), float(v_min), float(a_lat), float(a_accel), float(a_brake),
+                     _inv_grip2(a_lat, a_grip))
+            stats = np.empty(2)
+            t_out = np.empty(1)
+            a_stats, a_t = _addr(stats), _addr(t_out)
+            # 点ごとの値の写し（前回の評価の点列と値。C が変わった点の周りだけ計算し直す）。
+            # 点の数が変わったら（打ち直し）作り直す
+            cache: list = [0, 0, 0, 0, 0, None]   # [点の数, 曲率の領域, 有効か・k, 車体の領域, 有効か]（アドレス）
+
+        def cost_c(q: np.ndarray, ref) -> tuple[int, float, float]:
+            q = _f64(q)
+            n_q = len(q)
+            if cache[0] != n_q:
+                arrs = (np.empty(8 * n_q), np.zeros(2, np.int64), np.empty(3 * n_q),
+                        np.zeros(1, np.int64))
+                cache[:] = [n_q, *map(_addr, arrs), arrs]     # 最後は配列そのもの（解放させない）
+            _, kc, meta, bc, bmeta, _arrs = cache
+            a_q = _addr(q)
+            _NATIVE.refine_kappa(n_q, a_q, SPEED_CHORD_M, kc, meta, a_stats)
+            over = max(0.0, float(stats[0]) - kappa_max) if kappa_max else 0.0
+            over = round(max(over, float(stats[1]) - kink, 0.0), 4)
+            if ref is not None and over > ref[1]:
+                return 0, over, math.inf
+            if _NATIVE.refine_eval(n_q, a_q, kc, bc, bmeta, *fused, a_t) != 0:
+                return 1, over, math.inf               # 帯の外か、車体の余裕が足りない
+            out = 0, over, float(t_out[0])
             if ref is None or out < ref:
                 seen[:] = [out]
             return out
@@ -983,10 +1239,16 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
                 break                                  # どれも同じような線
             starts.append(far)
             pool = [f for f in pool if f is not far]
-        results = []
-        for s0 in starts:
+        def run(s0: np.ndarray) -> np.ndarray:
             seen.clear()
-            q = refine_time(s0, cost, step=cl.step, max_evals=refine_evals, cycles=refine_cycles)
+            return refine_time(s0, cost, step=cl.step, max_evals=refine_evals, cycles=refine_cycles)
+
+        done = (_refine_forked(run, starts) if refine_parallel and len(starts) >= 2 and _can_fork()
+                else None)
+        if done is None:
+            done = [run(s0) for s0 in starts]
+        results = []
+        for q in done:
             seen.clear()
             results.append((cost(q), len(results), q))
         xy = min(results)[2]
@@ -996,6 +1258,60 @@ def optimize(grid: OccGrid, cl: Centerline, *, half_width: float, margin: float,
     short = bool(body is not None and float(body.clearance(xy).min()) < margin - 0.01)
     return RaceLine(xy=xy, v=v, kappa=kap, length=float(seg.sum()), closed=closed, short=short,
                     unknown_short=short or _unknown_short(grid, footprint, closed, xy, margin))
+
+
+def _can_fork() -> bool:
+    """出発点の仕上げを fork で並べてよいか。Linux で、スレッドが自分だけのプロセス（経路のワーカー）に限る
+    （スレッドのあるプロセスを fork すると、他のスレッドが持っていたロックが子で解けない。macOS は
+    fork した子でシステムのライブラリが落ちることがある）。"""
+    import sys
+    import threading
+    return sys.platform.startswith("linux") and threading.active_count() == 1
+
+
+def _refine_forked(run, starts: list[np.ndarray]) -> list[np.ndarray] | None:
+    """`run(s)` を、`starts[0]` は自分で、残りは fork した子で同時に回す。子が1つでも失敗したら `None`
+    （呼び出し側が逐次で回し直す）。子は親（経路のワーカー）が殺されたら一緒に終わる。"""
+    import os
+    import pickle
+    kids: list[tuple[int, int]] = []
+    try:
+        for s0 in starts[1:]:
+            r, w = os.pipe()
+            pid = os.fork()
+            if pid == 0:                                # 子
+                code = 1
+                try:
+                    os.close(r)
+                    try:
+                        import ctypes
+                        import signal
+                        ctypes.CDLL(None).prctl(1, int(signal.SIGKILL))     # PR_SET_PDEATHSIG
+                    except Exception:                   # noqa: BLE001
+                        pass
+                    data = pickle.dumps(run(s0), protocol=pickle.HIGHEST_PROTOCOL)
+                    with os.fdopen(w, "wb") as f:
+                        f.write(data)
+                    code = 0
+                finally:
+                    os._exit(code)
+            os.close(w)
+            kids.append((pid, r))
+    except OSError:
+        for pid, r in kids:
+            os.close(r)
+            os.waitpid(pid, 0)
+        return None
+    out: list[np.ndarray] | None = [run(starts[0])]
+    for pid, r in kids:
+        with os.fdopen(r, "rb") as f:
+            data = f.read()
+        _, status = os.waitpid(pid, 0)
+        if out is not None and status == 0 and data:
+            out.append(pickle.loads(data))
+        else:
+            out = None
+    return out
 
 
 def _unknown_short(grid, footprint, closed: bool, xy: np.ndarray, margin: float) -> bool:
