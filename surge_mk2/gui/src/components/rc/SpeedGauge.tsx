@@ -14,6 +14,7 @@
  */
 import { useNumbers } from '../../bus/live'
 import { kmh, mps } from '../../format'
+import { virtualGear } from '../../bus/virtualGear'
 import { mtGearRatio, PI_MAX_SPEED_CAP, useUi } from '../../store/ui'
 
 /**
@@ -62,9 +63,7 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   const { driveMode, speedUnit } = settings
   const torqueMode = driveMode === 'torque'
   const setSettings = useUi((s) => s.setSettings)
-  // レンジ/ギア表示用（v0.18）。速度制御・トルク制御中は `gear`（D/R）、
-  // MT モード中は `mtGear`（R, N, D1〜D5）——`useDriving.ts` の `shiftGear()` と同じ store
-  const gear = useUi((s) => s.gear)
+  // MT のレッドライン用（ギア表示そのものは `virtualGear()`）
   const mtGear = useUi((s) => s.mtGear)
   const vs = n.vs
 
@@ -93,9 +92,12 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   // （弧・目盛り・指令マーカーのどれとも幾何学的に重ならない）。
   // 'D1'〜'D5' は '1'〜'5' に縮める。'R'/'N' はそのまま（`.slice(1)` すると
   // 'N' が空文字になってしまうので、1文字ギアは縮めない扱いに含める）
+  //
+  // 速度指令・トルク指令でも仮想変速（`bus/virtualGear.ts`）のギアを出す（2026-11-03、指示による。
+  // 'D' の代わりに 1〜6。MT は 1〜5）。演出だけで指令には関係しない。8Hz の `useNumbers()` の再描画で追従する
   const mtMode = driveMode === 'mt'
-  const gearLabel = mtMode ? (mtGear === 'R' || mtGear === 'N' ? mtGear : mtGear.slice(1)) : gear
-  const gearIsReverse = mtMode ? mtGear === 'R' : gear === 'R'
+  const gearLabel = virtualGear().label
+  const gearIsReverse = gearLabel === 'R'
 
   // ── MT モードのレッドライン（v0.18） ────────────────────────────────
   //

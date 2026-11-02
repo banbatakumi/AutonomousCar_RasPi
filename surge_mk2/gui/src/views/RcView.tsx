@@ -12,102 +12,65 @@
  * 隠すのは「正常時の数字」だけで、異常は必ず出る。E-STOP・ARM・ラッチ警告は
  * `StatusBar` が全タブ共通で出しており、ここでも一切省いていない。
  *
- * ## レイアウト
+ * ## レイアウト（2026-11-02、指示により全面改訂）
  *
  * ```
- *   ┌─────────────────────────────────┬───┐
- *   │                        [LiDAR○] │車体│
- *   │        メインカメラ (fps 右下)     │図 │
- *   ├──────┬──────────────────────────┤   │
- *   │ [PIP]│      速度計 / G メータ     │   │
- *   └──────┴──────────────────────────┴───┘
- *          映像 : 車体図 = 4 : 1（下段が最低高さのときは車体図側が広がる。後述）
+ *   ┌──────────────────────────────────────┐
+ *   │ [電池・温度] ┌──バックミラー──┐ [LiDAR○] │ ⚙
+ *   │             └──────────────┘          │
+ *   │            メインカメラ（全画面）         │
+ *   │   ⟨舵角⟩      ⟨速度⟩      ⟨G⟩           │ ← ボンネットの映る下端に HUD として重ねる
+ *   └──────────────────────────────────────┘
  * ```
  *
- * **操縦はメインの映像を見て行う。** 右パネルは車体図（`RcBar`／`DrivePanel`）専任にし、
- * LiDAR はゲームのミニマップのように映像の右上へ丸く重ねた（`LidarMini`）。
- * LiDAR は**クリックで拡大縮小**（縮小＝映像の1/3高さ、拡大＝82%高さ）。
+ * **操縦はメインの映像を見て行う**ので、映像をタブいっぱいに出し、他は全部その上に重ねる。
  *
- * ## PIP は映像の中ではなく「メータの横」に
- *
- * 以前は映像の左下に重ねていたが、**指示によりメータ行の左隣へ移動**した
- * （`.rc-cam-bottom`）。常に「今メインに出ていない方」のカメラを映し、
- * **クリックするとメインと入れ替わる**（`ui.mainCam`、`store/ui.ts`）。
- * ゲームパッドの R3（右スティック押し込み）でも同じ入れ替えができる（v0.16）。
- *
- * `.rc-cam-bottom`（PIP＋メータ行の器）は**幅をメイン映像の実測幅に固定**する
- * （`videoSize.width`）。メイン映像は列の左上に詰めているので、両者の左端も
- * 右端も揃う。**メータ（`.rc-cam-gauges`、`flex:1`）はこの固定幅のうち PIP の
- * 右側の残りいっぱいに広がる**ので、結果として速度計は「PIP の右端」と
- * 「映像の右端」のちょうど中間に来る——指示どおりの配置を、特別な座標計算を
- * せずに幅の制約だけで実現している。
+ * - **バックミラー**: 今メインに出ていない方のカメラを映像の上中央に重ねる。描くのは
+ *   **センサー全体の縦の真ん中 1/3**（`MIRROR_SENSOR_Y`）。配信画像は下端を `bottomCrop`
+ *   だけ切ってあるので、配信画像の座標に直して `CameraView` の `srcCrop` に渡す
+ *   （後方カメラなら配信画像の下半分ほどになる）。後方カメラは**左右反転**して実車の
+ *   ミラーと同じ左右で見せる。クリックでメインと入れ替わる（`ui.mainCam`、パッドの ○ でも可）
+ * - **計器（舵角・速度・G）**: 前方映像の下端＝ボンネットが映っている帯に HUD として重ねる。
+ *   高さは映像の高さの `HUD_FRAC`。背景に濃いグレーの台形（底角 `TRAP_ANGLE_DEG`）を
+ *   ボンネットに重ねて敷き、映像の上でも読めるようにする。2026-11-03 にレース用ダッシュ風へ
+ *   （F1・AEM CD-7・Ford GT のトラックモードを参考に）: 台形はカーボン調の筐体、メータの後ろに
+ *   黒いガラス調の液晶（`.rc-hud-screen`）、上辺の上にシフトライト（`ShiftLights`、仮想変速に従う）
+ *   介入ランプ（`AssistLamps`）は台形の左端、ハザードは右端に入れる。映像は上に詰め、余りは下に回す
+ * - **電池と温度**（`RcStatus`）: 映像の左上に常時出す（温度と電圧は常時出す方針のため）。
+ *   以前あった右端から引き出す車体図（駆動配分・温度・走行距離）は 2026-11-03 に廃止した（指示による）
  *
  * ## メイン映像の箱は「前方カメラ」のサイズに固定
  *
  * 入れ替え後（後方がメインに出ているとき）も、**箱の形は前方カメラの実測値の
  * まま変えない**（指示による）。`onAspect` は常に「今 front を映している方の
- * `CameraView`」（メインか PIP かは問わない）から受け取る（`frontAspect`）。
- * 後方の画像はこの固定サイズの箱の中に**中央合わせで収まる**——`CameraView`
- * の描画ループが元々やっている contain-fit（`Math.min(w/bw,h/bh)` で中央に
- * 描く）がそのまま効くので、ここでは何もしなくてよい。
+ * `CameraView`」から受け取る（`frontAspect`）。箱はタブの中に contain-fit で収める
+ * ——cover（はみ出しを切る）にしないのは、HUD をボンネットの位置に正しく重ねるには
+ * 映像の下端が見えている必要があるのと、左右の端（死角になりやすい）を削らないため。
  *
- * **メイン映像のうち PIP・LiDAR 以外をクリックすると、LiDAR・進路ガイドが
+ * **メイン映像のうちミラー・LiDAR・HUD 以外をクリックすると、LiDAR・進路ガイドが
  * まとめて表示/非表示になる**（不要なときに一瞬で消せる非常用スイッチ）。
- * PIP（小さい映像）はこの切り替えに含めない——同じクリックで
- * 一緒に消えると「LiDAR を消したつもりが映像まで消えた」と紛らわしいため、
- * PIP は独立させ常時表示のままにしてある。
- * fps だけはどちらの操作でも消えない。
+ * ミラーはこの切り替えに含めない。
  *
- * **進路ガイドは大きい方（メイン）の映像にしか出さない**。
- * ガイドは前後どちらのカメラにも描けるようになったが（`CameraView.tsx`）、
- * PIP は前後の入れ替え用サムネイルなので小さくガイドを重ねても読めないし、
- * メインと2重に出ると紛らわしい。PIP 側の `CameraView` には常に
- * `guideDisabled` を渡し、on/off の切り替えは従来どおりメイン映像クリック
- * （`toggleOverlays`）だけが担う。
- *
- * 文字は極力出さない方針にした。「前方」「後方」ラベルとガイドの校正前バッジは
- * 消し（`CameraView` の `variant="minimal"`）、fps だけを画像隅に残している。
+ * **進路ガイドはメインの映像にしか出さない**（ミラー側は `srcCrop` 指定中なので出ない）。
  *
  * ## 実測ベースのサイズ計算
  *
- * 映像は `useContainFit`、PIP とメータのダイヤルは `useElementSize` で
- * `.rc-cam-bottom` の実測高さから逆算した px を、それぞれ実測ベースで求めている。
- *
- * ⚠ どちらも CSS の `aspect-ratio` 単体には頼っていない。**箱の中に
+ * 映像は `useContainFit`、計器のダイヤルは `useElementSize` で HUD の実測高さから
+ * 逆算した px を渡す。⚠ CSS の `aspect-ratio` 単体には頼らない。**箱の中に
  * `<canvas>`/`<svg>` のような replaced element がいると、intrinsic サイズ
  * （既定 300px 相当）に負けて縮んだままになる罠を実機で踏んだ**
  * （`hooks/useContainFit.ts` 冒頭のコメント）。
  *
- * 映像の比率も実際に届いた画像から決める。最初は `camera_node.py --size` の
- * 既定値から決め打ちしていたが、**実機ではセンサーが要求どおりのモードを
- * 取らず、箱の形が画像とズレて余白ができた**。フレームが来るまでは
- * `FALLBACK_ASPECT`（4:3）で仮組みしておく。
- *
- * 映像は列の**上に詰める**（`align-self: flex-start`、`styles.css`）。
- * 余った縦幅はすべて `.rc-cam-bottom`（`flex: 1`）に渡る。
- *
- * ## 下段が最低高さのとき、車体図の列を横に広げて隙間を消す
- *
- * 下段（PIP＋メータ）が `BOTTOM_RESERVE_PX` の最低値まで縮む＝映像が
- * **高さ律速**で決まっているとき、映像の幅は列の本来の幅（`4fr` 分）より
- * 狭くなる。何もしないと映像の右側・車体図の左側の間に縦長の隙間ができる。
- *
- * `naturalCamsWidth`（`.rc` 自体の実測幅から `4:1` 比率で逆算した「列の本来の
- * 幅」）と実際の映像幅の差分だけ、`.rc` の `grid-template-columns` を
- * `${映像の実測幅}px minmax(0,1fr)` に上書きし、車体図の列（`grid-area:
- * meters`）に丸ごと渡す。横幅律速（隙間が無い）のときは上書きせず CSS 既定の
- * `4fr 1fr` に任せる——常に固定 px で上書きすると、ウィンドウ幅が変わっても
- * 映像列が追従しなくなるため。
- *
- * `naturalCamsWidth` は `.rc-cams` ではなく `.rc` 自体から測る。`.rc-cams` を
- * 測ると、上書き後の幅を拾って「上書き→再測定→再上書き」の循環に陥る
- * （`hooks/useContainFit.ts` の `widthOverride` コメント参照）。
+ * 映像の比率も実際に届いた画像から決める（実機ではセンサーが要求どおりのモードを
+ * 取らないことがある）。フレームが来るまでは `FALLBACK_ASPECT` で仮組みしておく。
  */
-import { useState } from 'react'
+import { useState, type CSSProperties } from 'react'
 import { useUi } from '../store/ui'
+import { AssistLamps } from '../components/rc/AssistLamps'
 import { GMeter } from '../components/rc/GMeter'
 import { LidarMini } from '../components/rc/LidarMini'
-import { RcBar } from '../components/rc/RcBar'
+import { RcStatus } from '../components/rc/RcStatus'
+import { ShiftLights } from '../components/rc/ShiftLights'
 import { SpeedGauge } from '../components/rc/SpeedGauge'
 import { SteerGauge } from '../components/rc/SteerGauge'
 import { HazardButton, WinkerButton, WinkerIndicator } from '../components/rc/WinkerHazard'
@@ -119,79 +82,71 @@ import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 import type { ControlChannel } from '../ws/control'
 
 /** センサー自体のネイティブ比率（4:3、`camera_node.py --size` の既定 640x480）。
- * 配信される画像はここから `bottomCrop` 分だけ下端を切ったもの（後述）。 */
+ * 配信される画像はここから `bottomCrop` 分だけ下端を切ったもの */
 const SENSOR_ASPECT = 4 / 3
-/** 最初のフレームが届くまでの仮の比率。前方カメラは下端 25%（`vehicle.toml`
- * 選ばれたレンズの `bottom_crop`）を切って配信するため、実際の映像は 4:3 より
- * 横長（≈16:9）になる。**ここを単純な 4:3 のままにしていたところ、映像を
- * 受信できていない間（起動直後・接続断中）だけ実際より縦長の箱として計算され、
- * `.rc-cams` が高さ律速に陥って幅が縮み、その分だけ車体図の列（`grid-area:
- * meters`）が異常に広がる不具合があった**（下の `camsGap` 参照）。フォールバックを
- * 実際の配信比率に合わせておけば、映像が来ていない間もほぼ同じ計算結果になり
- * 発生しない。実測が来次第、下記 `frontAspect` に置き換わる */
+/** 最初のフレームが届くまでの仮の比率。前方カメラは下端を `bottom_crop` だけ切って
+ * 配信するので 4:3 より横長になる。実測が来次第 `frontAspect` に置き換わる */
 const FALLBACK_ASPECT = SENSOR_ASPECT / (1 - VEHICLE_GEOM.camFront.bottomCrop)
-/** PIP の縦横比。前方/後方とも同じセンサーなので固定でよい */
-const PIP_ASPECT = 4 / 3
-/** 下段（PIP＋メータ）に最低限残す高さ [px]。映像を最大化する計算はこの分を先に引く
- * （`useContainFit.ts` の `reservePx`。無いと下段が0になりうる） */
-const BOTTOM_RESERVE_PX = 150
-/** ダイヤルの下に数字が入る分の高さ [px]。速度計・舵角計はここを引いた分がダイヤルの高さになる。
- * G メータには数字が無いが、**3つの高さを揃えるためあえて同じだけ差し引く**
- * （`GMeter` 側は使わなかった分だけ余白が残るが、大きさが不揃いになるよりましという判断） */
+/** バックミラーに出す範囲。**センサー全体（切る前）の縦の比率**で持つ（指示: 真ん中 1/3） */
+const MIRROR_SENSOR_Y = { y0: 1 / 3, y1: 2 / 3 }
+/** バックミラーの幅（メイン映像の幅に対する比） */
+const MIRROR_WIDTH_FRAC = 0.36
+/** HUD（計器の帯）の高さ（メイン映像の高さに対する比）と下限 [px]。
+ * 0.3 ではボンネットからはみ出した（2026-11-02 実機）。液晶の上の余白を足したぶん 0.2→0.21 */
+const HUD_FRAC = 0.21
+const HUD_MIN_PX = 90
+/** シフトライト（台形の上辺の上に載る）の高さ [px]（`.shift-lights` の `height` と同じ値）。
+ * **ライトを含めた全体の高さが `HUD_FRAC` になるよう、台形をこの分だけ低くする**（指示による） */
+const SHIFT_LIGHTS_H_PX = 17
+/** 台形の上辺から計器までの余白 [px] */
+const HUD_PAD_TOP_PX = 12
+/** ダイヤルの下に数字が入る分の高さ [px]。G メータには数字が無いが、**3つの高さを
+ * 揃えるためあえて同じだけ差し引く** */
 const DIAL_TEXT_RESERVE_PX = 34
-
-/** 以下3つは `.rc` の CSS（`styles.css`）と値を合わせている。高さ律速で映像列に
- * 余白ができたとき、その分だけ車体図の列（`grid-area: meters`）を広げて隙間を
- * 埋めるために「列の本来の幅」を逆算するのに使う（`naturalCamsWidth` 参照）。 */
-const RC_PADDING_PX = 6 // `.rc { padding: 6px }`
-const RC_GAP_PX = 6 // `.rc { gap: 6px }`（列は2つなのでgapは1回分だけ引く）
-const RC_CAMS_RATIO = 4 / 5 // `.rc { grid-template-columns: minmax(0,4fr) minmax(0,1fr) }`
+/** 計器の背景の台形の、底辺の角（鋭角）[deg]（指示: 30°） */
+const TRAP_ANGLE_DEG = 30
+/** HUD の両端の列（ランプ・ハザード）の幅と、列の間隔 [px]（`.rc-cam-gauges` の `gap` の横と同じ）。
+ * この2つの分だけ台形の左右の padding を減らし、両端の列を斜辺の下に入れる */
+const HUD_EDGE_COL_PX = 100
+const HUD_COL_GAP_PX = 18
+/** 台形の縁の太さ [px]（`.rc-hud-trap-in` の `top` と同じ値） */
+const TRAP_BORDER_PX = 2
 
 const CAM_LABEL: Record<'front' | 'rear', string> = { front: '前方', rear: '後方' }
 
+/** センサー座標の縦の範囲 → 配信画像（下端 `bottomCrop` 切り済み）の座標 */
+function sensorToDelivered(cam: 'front' | 'rear', r: { y0: number; y1: number }) {
+  const keep = 1 - (cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear).bottomCrop
+  return { y0: Math.min(1, r.y0 / keep), y1: Math.min(1, r.y1 / keep) }
+}
+
 export function RcView({ ch }: { ch: ControlChannel | null }) {
-  // `useUi()`をセレクタ無しで呼ぶと、`braking`/`horning`等パッド操作のたび
-  // 高頻度で書き変わるフィールドの更新でもこのビュー全体が再レンダリングされる。
-  // 実際に使うフィールドだけを個別に取り出す（他コンポーネントと同じ流儀）
+  // セレクタ無しの `useUi()` だと高頻度で変わるフィールドでも全体が再描画される。使う物だけ取る
   const lidarVisible = useUi((s) => s.lidarVisible)
   const pathGuide = useUi((s) => s.pathGuide)
   const lidarExpanded = useUi((s) => s.lidarExpanded)
   const rearPip = useUi((s) => s.rearPip)
   const set = useUi((s) => s.set)
-  /* PIP（`rearPip`）はここに含めない。LiDAR・進路ガイドの
-   * 2つだけをメイン映像クリックで一括切り替えする */
+  /* ミラー（`rearPip`）はここに含めない。LiDAR・進路ガイドの2つだけを一括切り替えする */
   const overlaysOn = lidarVisible && pathGuide
-  // ★v0.16: `useState` から `ui.mainCam` へ移動（ゲームパッド R3 で切り替えるため。
-  // `store/ui.ts` の `mainCam` コメント参照）
   const mainCam = useUi((s) => s.mainCam)
   const [frontAspect, setFrontAspect] = useState(FALLBACK_ASPECT)
 
-  /* `.rc-cams` 自身ではなく `.rc` 自体の幅を測る。`.rc-cams` を測ると、下で
-   * 列幅を上書きしたときにその上書き後の値を拾ってしまい循環する
-   * （`useContainFit.ts` の `widthOverride` コメント参照）。`.rc` の幅は
-   * 内部の列比率と無関係に親から決まるので、循環しない安定した基準になる。 */
-  const { ref: rcRef, size: rcSize } = useElementSize<HTMLDivElement>()
-  const naturalCamsWidth = rcSize
-    ? Math.floor((rcSize.width - RC_PADDING_PX * 2 - RC_GAP_PX) * RC_CAMS_RATIO)
-    : undefined
-  const { ref: camsRef, size: videoSize } = useContainFit<HTMLDivElement>(
-    frontAspect,
-    BOTTOM_RESERVE_PX,
-    naturalCamsWidth,
-  )
-  const { ref: bottomRef, size: bottomSize } = useElementSize<HTMLDivElement>()
-  const dialH = bottomSize ? Math.max(40, bottomSize.height - DIAL_TEXT_RESERVE_PX) : null
-  const pipCam = mainCam === 'front' ? 'rear' : 'front'
-
-  /* 下段が高さ律速で最低値（`BOTTOM_RESERVE_PX`）に達すると、映像は列の本来の
-   * 幅（`naturalCamsWidth`）より狭くなる。その差分だけ映像列を実測幅に縮め、
-   * 空いた分は車体図の列（`grid-area: meters`）が丸ごと受け取る（指示による）。
-   * 差が無い（横幅律速）ときは undefined を返し、CSS 既定の `4fr 1fr` に任せる
-   * ——固定 px で上書きし続けると、ウィンドウ幅が変わっても映像列が追従
-   * しなくなるため。 */
-  const camsGap = videoSize && naturalCamsWidth != null ? naturalCamsWidth - videoSize.width : 0
-  const rcGridStyle =
-    camsGap > 0 && videoSize ? { gridTemplateColumns: `${videoSize.width}px minmax(0, 1fr)` } : undefined
+  const { ref: rcRef, size: videoSize } = useContainFit<HTMLDivElement>(frontAspect)
+  const { ref: hudRef, size: hudSize } = useElementSize<HTMLDivElement>()
+  const dialH = hudSize ? Math.max(40, hudSize.height - HUD_PAD_TOP_PX - DIAL_TEXT_RESERVE_PX) : null
+  const mirrorCam = mainCam === 'front' ? 'rear' : 'front'
+  const mirrorCrop = sensorToDelivered(mirrorCam, MIRROR_SENSOR_Y)
+  // ミラーの箱の縦横比。センサーの横幅 : 切り出す縦幅（4:3 の 1/3 なら 4:1）
+  const mirrorAspect = SENSOR_ASPECT / (MIRROR_SENSOR_Y.y1 - MIRROR_SENSOR_Y.y0)
+  const mirrorW = videoSize ? videoSize.width * MIRROR_WIDTH_FRAC : 0
+  const hudH = (videoSize ? Math.max(HUD_MIN_PX, videoSize.height * HUD_FRAC) : HUD_MIN_PX) - SHIFT_LIGHTS_H_PX
+  // 台形の斜辺の水平ぶん。外側は高さ/tan(角)、内側は縁の太さぶん平行にずらした分
+  // （上辺が縁の太さだけ下がり、斜辺は水平に 縁/sin(角) 内へ入る）
+  const trapA = (TRAP_ANGLE_DEG * Math.PI) / 180
+  const trapInset = hudH / Math.tan(trapA)
+  const trapFootIn = TRAP_BORDER_PX / Math.sin(trapA)
+  const trapInsetIn = (hudH - TRAP_BORDER_PX) / Math.tan(trapA) + trapFootIn
 
   const toggleOverlays = () => {
     const next = !overlaysOn
@@ -199,73 +154,81 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
   }
 
   return (
-    <div className="rc" ref={rcRef} style={rcGridStyle}>
-      <div className="rc-cams" ref={camsRef}>
-        <div
-          className="rc-cam-video"
-          style={videoSize ? { width: videoSize.width, height: videoSize.height } : undefined}
-          onClick={toggleOverlays}
-          title={overlaysOn ? 'クリックで LiDAR・進路ガイドを隠す' : 'クリックで LiDAR・進路ガイドを表示'}
-        >
-          {/* 箱のサイズは常に front 側が決める。後方がメインのときは onAspect を渡さない */}
-          <CameraView
-            cam={mainCam}
-            label={CAM_LABEL[mainCam]}
-            variant="minimal"
-            onAspect={mainCam === 'front' ? setFrontAspect : undefined}
-          />
+    <div className="rc" ref={rcRef}>
+      <div
+        className="rc-cam-video"
+        style={videoSize ? { width: videoSize.width, height: videoSize.height } : undefined}
+        onClick={toggleOverlays}
+        title={overlaysOn ? 'クリックで LiDAR・進路ガイドを隠す' : 'クリックで LiDAR・進路ガイドを表示'}
+      >
+        {/* 箱のサイズは常に front 側が決める。後方がメインのときは onAspect を渡さない */}
+        <CameraView
+          cam={mainCam}
+          label={CAM_LABEL[mainCam]}
+          variant="minimal"
+          onAspect={mainCam === 'front' ? setFrontAspect : undefined}
+        />
 
-          {/* LiDAR ミニマップ。ゲームのマップ表示のように丸く重ねる（車体イラスト・軌道なし） */}
-          {lidarVisible && (
-            <div
-              className={`rc-lidar-mini ${lidarExpanded ? 'expanded' : ''}`}
-              onClick={(e) => {
-                e.stopPropagation()
-                set({ lidarExpanded: !lidarExpanded })
-              }}
-              title={lidarExpanded ? 'クリックで縮小' : 'クリックで拡大'}
-            >
-              <LidarMini />
-            </div>
-          )}
-        </div>
+        {rearPip && videoSize && <div className="rc-mirror-stay" />}
+        {rearPip && videoSize && (
+          <div
+            className="rc-mirror"
+            style={{ width: mirrorW, height: mirrorW / mirrorAspect }}
+            onClick={(e) => {
+              e.stopPropagation()
+              set({ mainCam: mirrorCam })
+            }}
+            title="クリックで前後を入れ替え（パッドの ○ でも可）"
+          >
+            <CameraView
+              cam={mirrorCam}
+              label={CAM_LABEL[mirrorCam]}
+              variant="minimal"
+              onAspect={mirrorCam === 'front' ? setFrontAspect : undefined}
+              guideDisabled
+              srcCrop={mirrorCrop}
+              mirror={mirrorCam === 'rear'}
+            />
+          </div>
+        )}
 
-        {/* PIP とメータ。幅を映像の実測幅に固定する（コメント参照） */}
-        <div
-          className="rc-cam-bottom"
-          ref={bottomRef}
-          style={videoSize ? { width: videoSize.width } : undefined}
-        >
-          {rearPip && (
-            <div
-              className="rc-pip"
-              /* PIP には速度計・舵角計のような下の数字が無いので、`dialH`（テキスト分を
-               * 差し引いた高さ）ではなく行の実測高さそのまま使う——じゃないと下に
-               * 使われない余白が残る（指示による修正） */
-              style={bottomSize ? { width: bottomSize.height * PIP_ASPECT, height: bottomSize.height } : undefined}
-              onClick={() => set({ mainCam: pipCam })}
-              title="クリックで前後を入れ替え（パッドの R3 でも可）"
-            >
-              <CameraView
-                cam={pipCam}
-                label={CAM_LABEL[pipCam]}
-                variant="minimal"
-                onAspect={pipCam === 'front' ? setFrontAspect : undefined}
-                guideDisabled
-              />
-            </div>
-          )}
+        {/* 電池と温度（左上）。走行を切り上げる判断に使うので常時出す */}
+        <RcStatus />
 
-          {/* 舵角計・速度計・G メータは同じ `dialHeight` で揃える（メータ自体は
-              縮めない）。ウィンカーは舵角計の左・G メータの右にそれぞれ添える
-              `.winker-side`（点滅表示を上、矢印ボタンを下に積む）——実車の
-              ダッシュボードで速度計を挟んで左右にウィンカーランプが並ぶ配置に
-              寄せた。速度計は元の3カラム
-              グリッド（`1fr auto 1fr`）のまま中央固定、舵角計側・G メータ側は
-              それぞれウィンカーごと1つの `.gauge-group` にまとめて左右の
-              カラムへ寄せる。ハザードはメータパネル右下に絶対配置
-              （`.hazard-btn`、`styles.css`） */}
-          <div className="rc-cam-gauges">
+        {/* LiDAR ミニマップ。ゲームのマップ表示のように丸く重ねる */}
+        {lidarVisible && (
+          <div
+            className={`rc-lidar-mini ${lidarExpanded ? 'expanded' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              set({ lidarExpanded: !lidarExpanded })
+            }}
+            title={lidarExpanded ? 'クリックで縮小' : 'クリックで拡大'}
+          >
+            <LidarMini />
+          </div>
+        )}
+
+        {/* 計器の HUD。ボンネットが映る下端の帯に重ねる。速度計は中央固定、
+            舵角計・G メータはウィンカーごと左右に寄せる。ハザードは右下 */}
+        <div className="rc-hud" ref={hudRef} style={{ height: hudH }} onClick={(e) => e.stopPropagation()}>
+          <div
+            className="rc-cam-gauges rc-hud-panel"
+            style={
+              {
+                padding: `${HUD_PAD_TOP_PX}px ${Math.max(0, trapInset - HUD_EDGE_COL_PX - HUD_COL_GAP_PX)}px 0`,
+                '--hud-edge-col': `${HUD_EDGE_COL_PX}px`,
+                '--trap-inset': `${trapInset}px`,
+                '--trap-inset-in': `${trapInsetIn}px`,
+                '--trap-foot-in': `${trapFootIn}px`,
+              } as CSSProperties
+            }
+          >
+            <div className="rc-hud-trap" />
+            <div className="rc-hud-trap-in" />
+            <div className="rc-hud-screen" />
+            <ShiftLights />
+            <AssistLamps />
             <div className="gauge-group gauge-group-left">
               <div className="winker-side">
                 <WinkerIndicator side="left" />
@@ -286,8 +249,8 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
         </div>
       </div>
 
-      <RcBar />
       <SettingsDrawer ch={ch} />
     </div>
   )
 }
+

@@ -155,9 +155,13 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
       if (cur && fresh) {
         const mag = Math.hypot(cur.x, cur.y)
         ctx.fillStyle = mag > FULL_G ? '#ffffff' : '#ffc63f'
+        // 発光（2026-11-03、HUD をレース用ダッシュ風にしたのに合わせる）
+        ctx.shadowColor = '#ff3445'
+        ctx.shadowBlur = 8 * dpr
         ctx.beginPath()
         ctx.arc(px(cur.x), py(cur.y), 3.5 * dpr, 0, Math.PI * 2)
         ctx.fill()
+        ctx.shadowBlur = 0
       }
     }
     raf = requestAnimationFrame(draw)
@@ -174,11 +178,8 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
             : undefined
         }
       >
+        {/* 軸の文字（加速・制動・左・右）は出さない（2026-11-02、指示による。HUD を簡潔にするため） */}
         <canvas ref={ref} className="gmeter" />
-        <span className="gmeter-axis gmeter-axis-t">加速</span>
-        <span className="gmeter-axis gmeter-axis-b">制動</span>
-        <span className="gmeter-axis gmeter-axis-l">左</span>
-        <span className="gmeter-axis gmeter-axis-r">右</span>
       </div>
     </div>
   )

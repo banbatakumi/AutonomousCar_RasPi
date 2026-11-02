@@ -940,61 +940,34 @@ button.on {
 
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 4fr) minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  grid-template-areas: 'cams meters';
-  gap: 6px;
-  padding: 6px;
-  position: relative;
-  /* 設定ドロワーの基準 */
-  overflow: hidden;
-  background: var(--bg);
-}
-
-.rc-cams {
-  grid-area: cams;
-  min-height: 0;
+  /* 映像をタブいっぱいに contain-fit で置き、中央に寄せる（`RcView.tsx`）。
+   * 計器・ミラー・LiDAR・車体図は全部その上に重ねる */
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  /* 映像は上に詰める（指示による。余りは下に回す） */
+  align-items: flex-start;
+  justify-content: center;
+  position: relative;
+  /* 設定ドロワー・車体図ドロワーの基準 */
+  overflow: hidden;
+  background: #000;
 }
 
 /*
- * 映像本体（2026-08-17、指示により実寸フィットへ変更）。
+ * メイン映像（2026-11-02、全画面に変更）。`width`/`height` は `RcView.tsx` が
+ * `useContainFit` で実測して inline style に px で入れる。**CSS の `aspect-ratio` +
+ * `max-width`/`max-height` だけでは足りない**——中に `<canvas>` がいると intrinsic
+ * サイズに引っ張られて縮んだままになる（`hooks/useContainFit.ts`）。ここの
+ * `max-*`/`aspect-ratio` は JS が測り終わるまでの一瞬のフォールバック。
  *
- * 以前は `flex: 1` で余った縦幅を丸ごと吸っていたため、実際のカメラ画像より
- * ずっと縦長の箱になり、canvas の中で letterbox（上下の黒帯）が大きく空いて
- * いた。
- *
- * `width`/`height` は `RcView.tsx` が `useContainFit`（`hooks/useContainFit.ts`）
- * で実測して inline style に px で入れる。**CSS の `aspect-ratio` +
- * `max-width`/`max-height` だけでは足りなかった**——箱の中に `flex:1` の
- * canvas 子がいると、その子の intrinsic サイズに引っ張られて縮んだまま
- * になる挙動を確認したため（フックのコメント参照）。比率そのものも
- * `camera_node.py --size` の既定値からの決め打ちをやめ、`CameraView` の
- * `onAspect` で実際に届いた画像から求めている（**実機ではセンサーが要求
- * どおりのモードを取らず、決め打ちの比率だと箱の形がズレていた**）。
- * ここにある `max-width`/`max-height`/`aspect-ratio` は JS が測り終わるまでの
- * 一瞬のフォールバック。
- *
- * **映像は列の上に詰める**（`align-self: flex-start`、指示による）。
- * 余った縦幅は隣の `.rc-cam-bottom` が丸ごと受け取る（`flex: 1`）。
- *
- * LiDAR ミニマップはこの箱の中でだけ絶対配置する。**PIP はもうここに無い**
- * ——2026-08-17 に `.rc-cam-bottom`（メータの横）へ移した（指示による）。
- *
- * **クリックで PIP・LiDAR・進路ガイドを一括で表示/非表示**にする
- * （`RcView.tsx`）。LiDAR 自身のクリックは `stopPropagation` で
- * ここまで伝播させず、自分の拡大縮小だけを行う。
+ * ミラー・LiDAR・HUD はこの箱の中で絶対配置する。クリックで LiDAR・進路ガイドを
+ * 一括で表示/非表示（子のクリックは `stopPropagation` で伝播させない）。
  */
 .rc-cam-video {
   position: relative;
   flex: 0 0 auto;
-  align-self: flex-start;
   max-width: 100%;
   max-height: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 16 / 9;
   display: flex;
   cursor: pointer;
 }
@@ -1004,24 +977,515 @@ button.on {
   min-width: 0;
   min-height: 0;
   cursor: default;
+  border: none;
+  border-radius: 0;
+}
+
+/* バックミラー。映像の上中央。実車のルームミラーに寄せて角を丸め、縁を付ける */
+.rc-mirror {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  border-radius: 14px;
+  overflow: hidden;
+  /* 太い黒のハウジングに、外周だけ細く明るい縁 */
+  box-shadow: 0 0 0 5px #0c0c0d, 0 0 0 6px #3a3236, 0 6px 20px #000c;
+  cursor: pointer;
+}
+
+.rc-mirror .camera {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 0;
+}
+
+.rc-mirror .camera-fps {
+  font-size: 9px;
+  padding: 1px 5px;
 }
 
 /*
- * PIP とメータの段（2026-08-17、指示による新設）。
- *
- * **幅をメイン映像の実測幅に固定する**（`RcView.tsx` が inline style で
- * `videoSize.width` を入れる）。映像は列の左上に詰めてあるので、この段も
- * 同じ左端・同じ右端で揃う。PIP はここの左端、`.rc-cam-gauges`（`flex:1`）が
- * 残りいっぱいに広がるので、**速度計は自然と「PIP の右端」と「映像の右端」の
- * 中間に来る**——特別な座標計算をしなくても、幅の制約だけで指示どおりの
- * 配置になる。
+ * 計器の HUD（2026-11-02）。前方映像の下端（ボンネットが映る帯）に重ねる。
+ * 高さは `RcView.tsx` が映像の高さから決めて inline style に入れる。
+ * 計器の背景は台形（`.rc-hud-trap`）。映像の上でも針と数字が読めるように
+ * ボンネットに重ねて敷く（指示による）。2026-11-03 にカーボン調の筐体＋液晶＋シフトライトの
+ * レース用ダッシュ風にした（`RcView.tsx` 冒頭）。`cursor: default` は映像クリック（重畳の
+ * 一括切替）と見分けるため。
  */
-.rc-cam-bottom {
-  flex: 1;
-  min-height: 0;
+.rc-hud {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
   display: flex;
-  align-items: stretch;
-  gap: 10px;
+  justify-content: center;
+  cursor: default;
+}
+
+/*
+ * 台形の背景。底辺の角が 30°（`RcView.tsx` の `TRAP_ANGLE_DEG`）になるよう、
+ * 斜辺の水平ぶん（`--trap-inset`）を px で渡して clip-path で切る（% だと幅で角度が変わる）。
+ * 外側（縁の色）と内側（地の色）の2枚で、上辺と斜辺に細い縁を付ける。
+ * 内側の斜辺は外側と平行に縁の太さぶん内へずらす（30° の斜辺を垂直に b ずらす＝水平に 2b）
+ */
+.rc-hud-trap,
+.rc-hud-trap-in {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.rc-hud-trap {
+  top: 0;
+  /* 縁。上辺は赤のアクセント、斜辺を下るほど暗くする */
+  background: linear-gradient(to bottom, #d5303f 0%, #6a1c24 35%, #2b2224 100%);
+  clip-path: polygon(var(--trap-inset) 0, calc(100% - var(--trap-inset)) 0, 100% 100%, 0 100%);
+}
+
+/*
+ * 地はカーボン織り（2026-11-03）。斜めの綾織りを gradient の重ね合わせで作る
+ * （よく知られた CSS だけのカーボン模様を 1/2 に縮めたもの。画像ファイルは使わない）。
+ * 一番上の層は上から当たる光の反射と、下へ向かう影
+ */
+.rc-hud-trap-in {
+  top: 2px;
+  background-color: #111113;
+  background-image:
+    linear-gradient(to bottom, rgba(255, 255, 255, .08) 0%, rgba(255, 255, 255, 0) 30%, rgba(0, 0, 0, .45) 100%),
+    linear-gradient(27deg, #141416 2.5px, transparent 2.5px),
+    linear-gradient(207deg, #141416 2.5px, transparent 2.5px),
+    linear-gradient(27deg, #202024 2.5px, transparent 2.5px),
+    linear-gradient(207deg, #202024 2.5px, transparent 2.5px),
+    linear-gradient(90deg, #19191c 5px, transparent 5px),
+    linear-gradient(#1b1b1e 25%, #17171a 25%, #17171a 50%, transparent 50%, transparent 75%, #222226 75%, #222226);
+  background-size: 100% 100%, 10px 10px, 10px 10px, 10px 10px, 10px 10px, 10px 10px, 10px 10px;
+  background-position: 0 0, 0 2.5px, 5px 0, 0 5px, 5px 2.5px, 0 0, 0 0;
+  clip-path: polygon(var(--trap-inset-in) 0, calc(100% - var(--trap-inset-in)) 0,
+      calc(100% - var(--trap-foot-in)) 100%, var(--trap-foot-in) 100%);
+}
+
+/*
+ * メータの後ろの液晶（2026-11-03）。黒いガラスに、上からの薄い反射と内側の影。
+ * 左右は台形の上辺の端（`--trap-inset`）より少し外まで——上辺より下に置くので、
+ * 斜辺までは余裕がある
+ */
+.rc-hud-screen {
+  position: absolute;
+  z-index: 0;
+  top: 10px;
+  bottom: 0;
+  left: calc(var(--trap-inset) - 6px);
+  right: calc(var(--trap-inset) - 6px);
+  border-radius: 10px 10px 0 0;
+  background: radial-gradient(120% 90% at 50% 0%, #1c1315 0%, #080708 70%);
+  box-shadow: inset 0 2px 12px #000, inset 0 0 0 1px #2c2226, 0 -1px 0 rgba(255, 255, 255, .06);
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.rc-hud-screen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(172deg, rgba(255, 255, 255, .07) 0%, rgba(255, 255, 255, 0) 38%);
+}
+
+/*
+ * シフトライト（`ShiftLights.tsx`）。台形の上辺の上に載る細いポッド。
+ * 消灯中もその色の暗い LED を見せる（実物の LED と同じく「そこにある」のが分かる）
+ */
+.shift-lights {
+  position: absolute;
+  z-index: 1;
+  bottom: 100%;
+  left: calc(var(--trap-inset) + 24px);
+  right: calc(var(--trap-inset) + 24px);
+  /* 高さは `RcView.tsx` の `SHIFT_LIGHTS_H_PX` と揃える（その分だけ台形を低くしている） */
+  box-sizing: border-box;
+  height: 17px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1px 12px 0;
+  background: linear-gradient(to bottom, #1a1a1d, #0b0b0c);
+  border: 1px solid #2c2427;
+  border-bottom: none;
+  border-radius: 9px 9px 0 0;
+  pointer-events: none;
+}
+
+.sl-led {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, .6);
+  transition: background 60ms linear, box-shadow 60ms linear;
+}
+
+.sl-g {
+  background: #10291a;
+}
+
+.sl-y {
+  background: #2e2608;
+}
+
+.sl-r {
+  background: #331012;
+}
+
+.sl-g.on {
+  background: #3ddc6a;
+  box-shadow: 0 0 6px #3ddc6a, 0 0 2px #fff inset;
+}
+
+.sl-y.on {
+  background: #ffc63f;
+  box-shadow: 0 0 6px #ffc63f, 0 0 2px #fff inset;
+}
+
+.sl-r.on {
+  background: #ff3b4b;
+  box-shadow: 0 0 7px #ff3b4b, 0 0 2px #fff inset;
+}
+
+/* シフトアップの合図。全灯を青で点滅 */
+.sl-led.shift {
+  background: #4aa8ff;
+  box-shadow: 0 0 8px #4aa8ff, 0 0 2px #fff inset;
+  animation: slblink 160ms steps(1, start) infinite;
+}
+
+/* TC/ABS の介入。両端を黄で点滅 */
+.sl-led.assist {
+  background: #ffc63f;
+  box-shadow: 0 0 8px #ffc63f;
+  animation: slblink 220ms steps(1, start) infinite;
+}
+
+@keyframes slblink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: .2;
+  }
+}
+
+/* 計器・ランプ・ハザードは台形と液晶の上に載せる */
+.rc-hud-panel>.gauge-group,
+.rc-hud-panel>.meter,
+.rc-hud-panel>.lamps,
+.rc-hud-panel>.hazard-btn {
+  position: relative;
+  z-index: 1;
+}
+
+/*
+ * HUD の中は [ランプ][舵角側][速度][G 側][ハザード] の5列。両端の列を同じ幅に固定し、
+ * 舵角側・G 側は `1fr` で同じ幅にするので速度計は中央に来る。
+ * 舵角側・G 側は列いっぱいに広げ、ウィンカーを列の外端へ寄せる——**舵角計と G メータは
+ * 幅が違う**ので、メータに寄せるとウィンカーが左右非対称になる（2026-11-02 実機で指摘）。
+ *
+ * 両端の列（`--hud-edge-col`）は台形の斜辺の下側に置く。`RcView.tsx` が左右の padding を
+ * その分だけ減らすので、**台形の幅はランプ・ハザードが無いときと同じ**になる（指示による）。
+ * どちらも背が低いので、下の方の広い所に収まる
+ */
+.rc-cam-gauges.rc-hud-panel {
+  grid-template-columns: var(--hud-edge-col) 1fr auto 1fr var(--hud-edge-col);
+}
+
+.rc-cam-gauges.rc-hud-panel>.gauge-group {
+  justify-self: stretch;
+  justify-content: space-between;
+}
+
+/* 2列×3段（TC/TV/ABS・STOP/BRAKE/LC）にして背を低くする。斜辺から遠い内側に寄せる */
+.rc-hud-panel>.lamps {
+  position: relative;
+  display: grid;
+  grid-template-rows: repeat(3, auto);
+  grid-auto-flow: column;
+  align-self: end;
+  justify-self: end;
+  gap: 2px 3px;
+  margin-bottom: 6px;
+}
+
+.rc-hud-panel>.hazard-btn {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  align-self: end;
+  justify-self: start;
+  margin-bottom: 4px;
+}
+
+/* 介入ランプ（台形の左端）。消灯中は枠だけ薄く出す */
+.rc-hud .lamp {
+  background: #0009;
+  font-size: 9px;
+  line-height: 1.25;
+  padding: 1px 6px;
+  text-align: center;
+}
+
+/*
+ * ── HUD の計器をレース用ダッシュ風に（2026-11-03） ──
+ * 共通の計器 CSS（`.arc-*`・`.needle` など）は残し、HUD の中だけ上書きする。
+ * 弧は細かい区切りのセグメント、塗りと針は発光、ギアは大きな斜体の白に赤い縁
+ */
+.rc-hud .arc-bg,
+.rc-hud .arc-fill {
+  stroke-width: 8;
+  stroke-linecap: butt;
+  stroke-dasharray: 2.4 1.3;
+}
+
+.rc-hud .arc-bg {
+  stroke: #24181b;
+}
+
+.rc-hud .arc-fill {
+  stroke: #ff3445;
+  filter: drop-shadow(0 0 3px rgba(255, 52, 69, .9));
+}
+
+.rc-hud .arc-tick {
+  stroke: #6a4a50;
+}
+
+.rc-hud .needle line {
+  stroke: #fff;
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, .9));
+}
+
+.rc-hud .needle-hub {
+  fill: #0b0b0c;
+  stroke: #ff3445;
+}
+
+.rc-hud .gear-chip {
+  fill: none;
+  stroke: none;
+}
+
+.rc-hud .gear-label {
+  fill: #fff;
+  font-size: 24px;
+  font-weight: 800;
+  font-style: italic;
+  paint-order: stroke;
+  stroke: #d5303f;
+  stroke-width: 1.2;
+  filter: drop-shadow(0 0 3px rgba(255, 52, 69, .8));
+}
+
+.rc-hud .gear-label.rev {
+  fill: var(--warn);
+  stroke: #6a4c08;
+}
+
+.rc-hud .meter-read b {
+  letter-spacing: -.02em;
+  text-shadow: 0 0 6px rgba(255, 52, 69, .45), 0 1px 3px #000;
+}
+
+/* ウィンカー: 消灯中は暗い緑の矢印、点滅中は緑に発光 */
+.rc-hud .winker-indicator {
+  color: #1d3a26;
+  opacity: 1;
+}
+
+.rc-hud .winker-indicator.blink {
+  color: #3ddc6a;
+  text-shadow: 0 0 8px #3ddc6a;
+}
+
+.rc-hud .winker-btn {
+  background: linear-gradient(to bottom, #222226, #121214);
+  border-color: #33333a;
+  box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, .08);
+}
+
+/* ハザード: 赤い物理ボタン風 */
+.rc-hud-panel>.hazard-btn {
+  background: linear-gradient(to bottom, #3a1215, #1a0708);
+  border-color: #7d2b23;
+  box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, .1);
+}
+
+.rc-hud-panel>.hazard-btn.on {
+  box-shadow: 0 0 12px rgba(242, 84, 75, .7), inset 0 1px 0 rgba(255, 255, 255, .15);
+}
+
+/* 介入ランプ: 消灯中は黒いバックライト無しのボタン、点灯で発光（既存の `.lamp-*.on`） */
+.rc-hud .lamp:not(.on) {
+  background: #0a0a0c;
+  border-color: #26262b;
+  color: #3a3a42;
+}
+
+/* 映像の四隅を少し暗くする（コックピットから覗いている感じ）。クリックは下へ通す */
+.rc-cam-video::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: radial-gradient(ellipse 75% 70% at 50% 45%, transparent 55%, rgba(0, 0, 0, .5) 100%);
+}
+
+/* メイン映像の fps は右下（台形の外の隅）。HUD（z-index 2）の透明な部分より上に出す */
+.rc-cam-video>.camera .camera-fps {
+  bottom: 8px;
+  right: 8px;
+  z-index: 3;
+}
+
+/*
+ * 電池・温度パネル（`RcStatus.tsx`、映像の左上。2026-11-03）。HUD と同じ黒いガラスに
+ * 上辺の赤い線、右下の角を斜めに落としてダッシュの部品に揃える。
+ * セグメントは少し傾けて（skew）速さを出す。正常は白、注意は黄、危険は赤で点滅
+ */
+.rc-cam-video {
+  --rcs-w: 168px;
+}
+
+.rc-status {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: var(--rcs-w);
+  box-sizing: border-box;
+  padding: 5px 9px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: linear-gradient(to bottom, rgba(24, 16, 18, .88), rgba(6, 6, 7, .88));
+  border-top: 2px solid #d5303f;
+  box-shadow: inset 0 0 0 1px #2c2226, 0 4px 14px #0009;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 200ms;
+}
+
+/* 受信が途絶したら沈める。**古い値を現在値に見せない** */
+.rc-status.stale {
+  opacity: .4;
+}
+
+.rcs-head {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .22em;
+  color: #d5303f;
+  margin-top: 3px;
+}
+
+.rcs-head:first-child {
+  margin-top: 0;
+}
+
+.rcs-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 14px;
+}
+
+.rcs-label {
+  width: 16px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #8a8a94;
+}
+
+.rcs-segs {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+}
+
+.rcs-segs>i {
+  flex: 1;
+  height: 8px;
+  background: #1c1a1d;
+  transform: skewX(-18deg);
+}
+
+.rcs-segs>i.on.lv-ok {
+  background: #e9e9ee;
+  box-shadow: 0 0 4px rgba(233, 233, 238, .6);
+}
+
+.rcs-segs>i.on.lv-warn {
+  background: #ffc63f;
+  box-shadow: 0 0 5px rgba(255, 198, 63, .8);
+}
+
+.rcs-segs>i.on.lv-bad {
+  background: #ff3b4b;
+  box-shadow: 0 0 6px rgba(255, 59, 75, .9);
+}
+
+.rcs-row>b {
+  width: 30px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 800;
+  font-style: italic;
+  color: #fff;
+}
+
+.rcs-row>i {
+  width: 10px;
+  font-style: normal;
+  font-size: 9px;
+  color: #8a8a94;
+}
+
+/* 取得不可（シムでの RasPi 温度・未受信の電池）。異常ではないので沈めるだけ */
+.rcs-na>b,
+.rcs-na>.rcs-label {
+  color: #4a4a52;
+}
+
+.rcs-warn>b {
+  color: #ffc63f;
+}
+
+/* 危険と未受信（`tempLevel(null)`）は赤で点滅させる。見落とすと壊すため */
+.rcs-bad>b,
+.rcs-bad>.rcs-label {
+  color: #ff3b4b;
+  animation: winkerblink 1s steps(1, start) infinite;
+}
+
+/* バックミラーの取り付けステー（ミラーの上辺中央から天井へ） */
+.rc-mirror-stay {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  z-index: 2;
+  width: 26px;
+  height: 14px;
+  transform: translateX(-50%);
+  background: linear-gradient(to bottom, #050506, #18181b);
+  border-radius: 0 0 5px 5px;
+  pointer-events: none;
 }
 
 /*
@@ -1036,7 +1500,7 @@ button.on {
  *
  * ## メータ自体も「都度最大の大きさ」にする
  *
- * `.rc-cam-bottom` の高さを、ここが `flex: 1` で丸ごと受け取る。各メータの
+ * HUD（`.rc-hud`）の高さを、ここが `height: 100%` で丸ごと受け取る。各メータの
  * 中身（`.meter-speed .arc` など）は `flex:1` + `aspect-ratio` で「高さ
  * いっぱいに広がり、幅は比率から決まる」形にしてあるので、この行の高さが
  * 変わればメータも一緒に拡大縮小する。**3つとも同じ `dialHeight` を渡すので
@@ -1051,8 +1515,10 @@ button.on {
  */
 .rc-cam-gauges {
   position: relative;
-  flex: 1;
+  height: 100%;
   min-height: 0;
+  /* 中身の幅に縮める（台形をその外側に敷く）。縮めても `1fr` の2列は大きい方に揃うので
+   * 速度計は中央のまま */
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   grid-template-rows: minmax(0, 1fr);
@@ -1132,7 +1598,7 @@ button.on {
   padding: 5px 15px;
 }
 
-/* ハザード。メータパネル（`.rc-cam-gauges`）右下に絶対配置——実車のダッシュボード
+/* ハザード。HUD（`.rc-hud`）右下に絶対配置——実車のダッシュボード
    中央にある赤い三角ボタンの位置を模した（指示による） */
 .hazard-btn {
   position: absolute;
@@ -1151,37 +1617,11 @@ button.on {
   color: #ff9b93;
 }
 
-/*
- * PIP（`.rc-cam-bottom` 内、2026-08-17 に映像内オーバーレイから移動）。
- *
- * サイズは `RcView.tsx` が `dialHeight`（メータのダイヤルと同じ高さ）から
- * inline style で決める——中に `<canvas>` を持つ replaced element なので、
- * CSS の `flex`/`aspect-ratio` だけでは縮んだままになる罠を避けるため
- * （`SpeedGauge.tsx` 冒頭のコメントと同じ理由）。**クリックでメインと
- * 入れ替わる**（拡大ではない。`RcView.tsx` の `mainCam`）。
- */
-.rc-pip {
-  flex: 0 0 auto;
-  border-radius: 5px;
-  overflow: hidden;
-  box-shadow: 0 3px 12px #000c, 0 0 0 1px var(--line);
-  cursor: pointer;
-}
-
-.rc-pip .camera {
-  height: 100%;
-  border-color: var(--line);
-}
-
-.rc-pip .camera-fps {
-  font-size: 9px;
-  padding: 1px 5px;
-}
-
-/* LiDAR ミニマップ（映像右上、指示により据え置き）。クリックで拡大縮小 */
+/* LiDAR ミニマップ（映像右上、指示により据え置き）。クリックで拡大縮小。
+   ⚙（`.gear`）と重ならないよう、その下から始める */
 .rc-lidar-mini {
   position: absolute;
-  top: 8px;
+  top: 48px;
   right: 8px;
   z-index: 2;
   height: 33.333%;
@@ -1226,25 +1666,6 @@ button.on {
   color: var(--bad);
   background: #0009;
   pointer-events: none;
-}
-
-/* 計器パネル。狭い画面では縦に溢れるので、ここだけスクロールを許す */
-.rcpanel {
-  grid-area: meters;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 8px 12px 10px;
-}
-
-/* 受信が途絶したら計器を沈める。**古い値を現在値に見せない**（.drivebar と同じ） */
-.rcpanel.stale {
-  opacity: .45;
 }
 
 /* 灯火・サイドブレーキ共通の操作トグル（DriveControls.tsx、タブ行）。 */
@@ -1439,48 +1860,10 @@ button.on {
   display: block;
 }
 
-.gmeter-axis {
-  position: absolute;
-  font-size: 9px;
-  color: var(--dim);
-  pointer-events: none;
-}
-
-.gmeter-axis-t {
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.gmeter-axis-b {
-  bottom: 0;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.gmeter-axis-l {
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-.gmeter-axis-r {
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-}
-
 .rc-side {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-width: 0;
-}
-
-.rc-small {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
   min-width: 0;
 }
 
@@ -1505,32 +1888,11 @@ button.on {
 /* `height: 100%` にして親の縦幅いっぱいに描画領域を確保し、viewBox の既定
  * `preserveAspectRatio="xMidYMid meet"` で縦横比を保ったまま中央に収める
  * （contain）。`.auto-car .drivepanel-wrap` は `height:100%` を明示済みなので
- * 影響なし。RC 側（下記 `.rcpanel .drivepanel-wrap`）はこれで縦方向の上限が
- * 効くようになる。 */
+ * 影響なし。 */
 .drivepanel {
   width: 100%;
   height: 100%;
   display: block;
-}
-
-/*
- * ラジコン画面（`.rcpanel`、flex column）専用の追加制約（2026-08-29、指示による修正）。
- *
- * 以前は `.drivepanel-wrap` の高さが `width * 縦横比` の auto 決め打ちだった
- * ため、横に広い画面でこの列の幅が広がると（`RcView.tsx` の `camsGap` 参照）
- * 高さも比例して伸び切り、下にある `TempPanel`・走行距離がパネル外に
- * 押し出されて見えなくなるバグがあった。
- *
- * `flex: 1 1 0` + `min-height: 0` で、温度計・走行距離など他の要素が使った
- * 残りの縦幅しか使わないようにする——`height: 100%`（上記 `.drivepanel`）と
- * 組み合わせることで、車体図は常にこの残り高さに収まる大きさになる。
- * `.auto-car`（自動運転タブ）は横方向（row）の flex コンテナで、こちらの
- * `flex-basis:0` を当ててしまうと `.auto-car .drivepanel-wrap` が想定している
- * 「高さ基準で幅を逆算」の挙動を壊すため、`.rcpanel` 配下だけに絞っている。
- */
-.rcpanel .drivepanel-wrap {
-  flex: 1 1 0;
-  min-height: 0;
 }
 
 .dp-body {
@@ -1716,49 +2078,6 @@ button.on {
 .lamp-dim.on {
   color: var(--dim);
   border-color: #3b4550;
-}
-
-/* 温度計（`TempPanel.tsx`）。車体図の下に縦に並べる */
-.rc-temps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* 水温計・燃料計。実車と同じで**正常でも常時出す**（走行を切り上げる判断に使う） */
-/* 画面幅いっぱいに伸ばさない。**横に長いバーは残量の変化が読み取りにくい** */
-.bar-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11px;
-  max-width: 340px;
-}
-
-.bar-row .label {
-  color: var(--dim);
-  min-width: 2.6em;
-}
-
-.bar-row b {
-  font-variant-numeric: tabular-nums;
-  min-width: 4.2em;
-  text-align: right;
-}
-
-.minibar {
-  flex: 1;
-  min-width: 60px;
-  height: 7px;
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  overflow: hidden;
-}
-
-.minibar-fill {
-  height: 100%;
-  transition: width 150ms linear;
 }
 
 /*

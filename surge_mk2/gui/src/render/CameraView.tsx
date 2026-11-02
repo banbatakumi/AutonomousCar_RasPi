@@ -122,6 +122,8 @@ export function CameraView({
   onAspect,
   guideDisabled = false,
   ch = null,
+  srcCrop,
+  mirror = false,
 }: {
   cam: 'front' | 'rear'
   label: string
@@ -135,6 +137,11 @@ export function CameraView({
   /** `follow_object` のROI選択（ドラッグ矩形）に使う。前方カメラ以外・
    * 未指定の間はポインタ操作を一切拾わない */
   ch?: ControlChannel | null
+  /** 配信画像のうち描く縦の範囲（0〜1、上端基準）。ラジコンのバックミラー用。
+   * 指定中・`mirror` 中は進路ガイド等の重畳を出さない（投影が画像全体を前提にしているため） */
+  srcCrop?: { y0: number; y1: number }
+  /** 左右反転して描く（バックミラー。後方カメラを鏡と同じ左右で見せる） */
+  mirror?: boolean
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide) && !guideDisabled
@@ -149,6 +156,11 @@ export function CameraView({
   // 配慮からここだけ漏れていた）
   const guideRef = useRef(guide)
   guideRef.current = guide
+  // 切り出し・反転も ref 経由（窓の大きさで値が変わっても WS を張り直さない）
+  const srcCropRef = useRef(srcCrop)
+  srcCropRef.current = srcCrop
+  const mirrorRef = useRef(mirror)
+  mirrorRef.current = mirror
 
   // ── モード連動のデバッグ重畳 ──
   //
@@ -386,7 +398,27 @@ export function CameraView({
       ctx.fillStyle = '#07090b'
       ctx.fillRect(0, 0, w, h)
 
-      if (bitmap) {
+      if (bitmap && (srcCropRef.current || mirrorRef.current)) {
+        // バックミラー: 縦の一部だけを切り出し、必要なら左右反転して収める。重畳は出さない
+        const crop = srcCropRef.current ?? { y0: 0, y1: 1 }
+        const sy = bitmap.height * crop.y0
+        const sh = Math.max(1, bitmap.height * (crop.y1 - crop.y0))
+        const s = Math.min(w / bitmap.width, h / sh)
+        const dw = bitmap.width * s
+        const dh = sh * s
+        const dx = (w - dw) / 2
+        const dy = (h - dh) / 2
+        ctx.save()
+        if (mirrorRef.current) {
+          ctx.translate(w, 0)
+          ctx.scale(-1, 1)
+        }
+        ctx.drawImage(bitmap, 0, sy, bitmap.width, sh, dx, dy, dw, dh)
+        ctx.restore()
+        const age = performance.now() - lastFrameMs
+        const staleMs = Math.max(CAM_STALE_MIN_MS, frameIntervalMs * CAM_STALE_INTERVALS)
+        if (!wsOpen || age > staleMs) drawStale(ctx, dx, dy, dw, dh, wsOpen ? age : null)
+      } else if (bitmap) {
         // アスペクト比を保って収める
         const s = Math.min(w / bitmap.width, h / bitmap.height)
         const dw = bitmap.width * s

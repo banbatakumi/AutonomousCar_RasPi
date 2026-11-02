@@ -6,7 +6,7 @@ React + TypeScript + Vite。`docs/architecture.md` §10 の設計に沿う。
 
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
-| **ラジコン**（既定） | 運転する人 | 速度・G・舵角をメータで。介入は数値ではなくランプ。設定は ⚙ ドロワー |
+| **ラジコン**（既定） | 運転する人 | 前方映像を全画面に、バックミラー（上中央）とレース用ダッシュ風の HUD（下端。シフトライト・速度・G・舵角）を重ねる。シフトライトとエンジン音は仮想変速（`bus/virtualGear.ts`）に従う。介入はランプ。電池と後輪・ステアの温度は左上に常時。設定は ⚙ ドロワー |
 | **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。モード選択・経路パネル・地図パネル（地図を持つ planner のとき） |
 | **診断** | 点検する人・原因を追う人 | 常設サマリ＋イベント帯＋サブページ6枚（下の「診断タブ」） |
 | **システム同定** | 車両を校正する人 | 校正試験（`calib_*`）の実行と記録の取得。解析は Mac の `tools/calib`（`docs/calibration.md`） |
@@ -135,7 +135,7 @@ src/
 ├── components/        StatusBar(層B) / DriveBar(層B) / LogControls ほか。自動運転は AutoPanel（モード・パラメータ）/ RoutePanel（経路）/ AutoMapPanel・MapLibrary（地図）/ ParamPresets
 ├── components/ErrorBoundary / ConfirmDialog  タブごとの例外の受け皿 / 止まらない確認ダイアログ
 ├── components/diag/   診断タブの部品（下の「診断タブ」）
-├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps）
+├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps / ShiftLights / RcStatus）
 ├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）
 ├── store/ui.ts        イベント駆動の状態だけ（zustand）
 └── format.ts          SI → 表示単位。**ここ以外で単位を変えない**

@@ -9,16 +9,14 @@
  * ゲインの数値を変えるだけでは片方の演出（レブリミット、シフトブリップ）が
  * もう片方にも意味もなく残ってしまうため。
  *
- * - **内燃機関**: `settings.mtMaxSpeed × mtGearRatio(ui.mtGear, s)`——**現在の
- *   ギアの上限**を分母にする。実車の MT は各ギアにそれぞれのレッドラインがある
- *   （1速を踏み切れば低速でもレブに当たるし、シフトダウンすれば同じ実速度でも
- *   相対的な回転数＝音程が上がる）ため、ギアで音程が変わること自体は正しい。
- *   ギアが変わった瞬間だけ `shiftBlip()`（クラッチを切ったような一瞬の音の
- *   落ち込み）も呼ぶ——これも内燃機関（MT）だけの演出。
- * - **EV**: `settings.mtMaxSpeed`（ギア比を掛けない、車体全体の上限）をそのまま
- *   分母にする。EV にはこのシミュレーション上「複数速のギア」という概念が無い
- *   （単一の減速機のみ）ので、ギアごとの相対レッドラインという概念自体が無い。
- *   `shiftBlip()` も呼ばない（EV にクラッチは無い）。
+ * - **内燃機関**: 仮想変速（`bus/virtualGear.ts`）の `rpmFrac`——**今のギアの上限**を
+ *   分母にする。MT は運転者が選んだギア、速度指令・トルク指令は速度から自動で選ぶ
+ *   仮想 AT（2026-11-03、指示により MT 以外でも変速させた）。実車と同じで、ギアで
+ *   音程が上下する。ギアが変わった瞬間だけ `shiftBlip()`（クラッチを切ったような
+ *   一瞬の音の落ち込み）も呼ぶ。
+ * - **EV**: ギアを使わない。MT は `settings.mtMaxSpeed`、それ以外は `settings.maxSpeed`
+ *   （どちらもギア比を掛けない車体全体の上限）をそのまま分母にする。EV は単一の
+ *   減速機なので、ギアごとのレッドラインという概念自体が無い。`shiftBlip()` も呼ばない。
  *
  * レブリミッター演出自体も `EngineSound` 側で内燃機関だけに限定してある
  * （`Profile.hasIgnitionCutLimiter`、`audio/engineSound.ts` 参照）——EV は
@@ -32,7 +30,8 @@
 import { useEffect, useRef } from 'react'
 import { EngineSound } from '../audio/engineSound'
 import { live } from '../bus/live'
-import { mtGearRatio, useUi } from '../store/ui'
+import { virtualGear } from '../bus/virtualGear'
+import { useUi } from '../store/ui'
 
 export function useEngineSound() {
   const engineRef = useRef<EngineSound | null>(null)
@@ -56,7 +55,7 @@ export function useEngineSound() {
     engine.start(type)
 
     let raf = 0
-    let prevMtGear: string | null = null
+    let prevShift: number | null = null
     const tick = () => {
       raf = requestAnimationFrame(tick)
       const ui = useUi.getState()
@@ -64,19 +63,22 @@ export function useEngineSound() {
       const vs = live.vs
       const armed = ui.armRequested
       const speedAbs = vs ? Math.abs(vs.speed) : 0
-      const mtMode = s.driveMode === 'mt'
       // **エンジン音と EV/モータ音で別ロジック**（ファイル冒頭コメント参照）。
-      // 内燃機関だけギア比を分母に掛ける——EV に「ギアごとのレッドライン」は無い
+      // 内燃機関だけ仮想変速に従う——EV に「ギアごとのレッドライン」は無い
       const isCombustion = s.engineSoundType === 'combustion'
-      const gearMax = mtMode
-        ? (isCombustion ? s.mtMaxSpeed * mtGearRatio(ui.mtGear, s) : s.mtMaxSpeed)
-        : s.maxSpeed
-      const rpmFrac = gearMax > 0.001 ? Math.min(1, speedAbs / gearMax) : 0
+      const vg = virtualGear()
+      let rpmFrac: number
+      if (isCombustion) {
+        rpmFrac = vg.rpmFrac
+      } else {
+        const whole = s.driveMode === 'mt' ? s.mtMaxSpeed : s.maxSpeed
+        rpmFrac = whole > 0.001 ? Math.min(1, speedAbs / whole) : 0
+      }
       engine.update(rpmFrac, armed)
 
-      // シフトブリップ（クラッチ操作の一時演出）も内燃機関の MT だけ
-      if (isCombustion && mtMode && prevMtGear != null && prevMtGear !== ui.mtGear) engine.shiftBlip()
-      prevMtGear = isCombustion && mtMode ? ui.mtGear : null
+      // シフトブリップ（クラッチ操作の一時演出）も内燃機関だけ
+      if (isCombustion && prevShift != null && prevShift !== vg.shiftCount) engine.shiftBlip()
+      prevShift = vg.shiftCount
     }
     raf = requestAnimationFrame(tick)
     // タブが背後に回ると rAF が止まり、最後の周波数のまま鳴り続ける。非表示の間は止める

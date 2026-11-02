@@ -502,30 +502,6 @@ function saveDefaultSettings(s: DrivingSettings) {
 }
 
 /**
- * 「リセット間走行距離」（`RcBar.tsx`）の起点。`vs.odom_center`（STM32 の
- * 累積走行距離、リセット不可）から引く値をここに持つ。リセットボタンで
- * その時点の `odom_center` を保存し、以後は差分をトリップ距離として表示する。
- */
-const TRIP_ODOM_KEY = 'surge.tripOdomBase.v1'
-
-function loadTripOdomBase(): number {
-  try {
-    const v = Number(localStorage.getItem(TRIP_ODOM_KEY))
-    return isFinite(v) ? v : 0
-  } catch {
-    return 0
-  }
-}
-
-function saveTripOdomBase(v: number) {
-  try {
-    localStorage.setItem(TRIP_ODOM_KEY, String(v))
-  } catch {
-    // 保存できなくても走行は続けられるべきなので無視する
-  }
-}
-
-/**
  * 灯火モード（`COMMAND.flags` bit3-4）。
  *
  * ⚠ **v0.4 の 1ビット `light` とは値の意味が違う。** 旧 `light=1` は全光量だったが、
@@ -744,10 +720,6 @@ type UiState = {
    * `saveCurrentAsDefault` で `settings` の現在値に上書きできる */
   settingsDefault: DrivingSettings
 
-  /** 「リセット間走行距離」の起点（`vs.odom_center` の値）。`resetTripOdom` で更新、
-   * `localStorage` に保存してリロードをまたいで維持する。`RcBar.tsx` が
-   * `odom_center - tripOdomBase` を表示する */
-  tripOdomBase: number
 
   // ── 記録・再生（ログタブ） ──
   /** `.sfl` を録ってほしいという意思。null はまだ status を受け取っていない */
@@ -829,8 +801,6 @@ type UiState = {
   /** 今の `settings` を新しい既定値として保存する。
    * 以後の「既定値に戻す」・各行の「既定値 X」表示はこの値を指す */
   saveCurrentAsDefault: () => void
-  /** 「リセット間走行距離」を今の `vs.odom_center` で 0 に踏み直す */
-  resetTripOdom: () => void
 }
 
 let noticeSeq = 0
@@ -887,7 +857,6 @@ export const useUi = create<UiState>((set, get) => ({
 
   settings: clampSettings(settingsIntent),
   settingsDefault: loadDefaultSettings(),
-  tripOdomBase: loadTripOdomBase(),
 
   sfl: null,
   mcap: null,
@@ -931,9 +900,5 @@ export const useUi = create<UiState>((set, get) => ({
     saveDefaultSettings(cur)
     set({ settingsDefault: cur })
   },
-  resetTripOdom: () => {
-    const base = live.vs?.odom_center ?? 0
-    saveTripOdomBase(base)
-    set({ tripOdomBase: base })
-  },
+
 }))
