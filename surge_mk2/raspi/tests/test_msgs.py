@@ -161,24 +161,43 @@ class TestScanAssembler(unittest.TestCase):
         return cls(sector_idx=idx, t_start_us=idx * 8300, duration_us=8300,
                    rot_speed_dps=3594, dist=[val] * 30, **kw)
 
+    def turn(self, a, start=0, **kw):
+        """1周（start〜11）を流し、最後のセクタで出た点群を返す。"""
+        for i in range(start, 11):
+            self.assertIsNone(a.feed(self.sector(i, **kw), 0))
+        return a.feed(self.sector(11, **kw), 0)
+
     def test_one_full_turn(self):
         a = ScanAssembler()
-        for i in range(12):
+        for i in range(11):
             self.assertIsNone(a.feed(self.sector(i), 1000 + i))
-        scan = a.feed(self.sector(0), 2000)      # 番号が戻った＝1周完了
+        scan = a.feed(self.sector(11), 1011)     # 最後のセクタでその場で出す（次の周の 0 を待たない）
         self.assertIsNotNone(scan)
         self.assertTrue(all(scan.sector_seen))
         self.assertEqual(len(scan.dist), 360)
         self.assertAlmostEqual(scan.dist[0], 1.0)
         self.assertAlmostEqual(scan.rot_speed_dps, 3594.0)
         self.assertEqual(a.sectors_lost, 0)
+        self.assertIsNone(a.feed(self.sector(0), 2000))     # 次の周の始まりでは出ない（二重に出さない）
+        self.assertEqual(a.scans, 1)
+
+    def test_a_lost_last_sector_closes_on_wrap(self):
+        """最後のセクタ（11）が落ちた周は、番号が戻った時点で閉じる。"""
+        a = ScanAssembler()
+        for i in range(11):
+            self.assertIsNone(a.feed(self.sector(i), 0))
+        scan = a.feed(self.sector(0), 0)
+        self.assertIsNotNone(scan)
+        self.assertFalse(scan.sector_seen[0])            # センサ 11 = 反転後 0
+        self.assertEqual(a.sectors_lost, 1)
+        self.assertIsNotNone(self.turn(a, start=1))     # 次の周（0 は受けた）は 11 で閉じる
 
     def test_a_lost_sector_does_not_stall_the_turn(self):
         """「12個そろったら」だと1個落ちた周が永久に完成せず次と混ざる。"""
         a = ScanAssembler()
-        for i in (0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11):    # 3 が欠ける
-            a.feed(self.sector(i), 0)
-        scan = a.feed(self.sector(0), 0)
+        for i in (0, 1, 2, 4, 5, 6, 7, 8, 9, 10):        # 3 が欠ける
+            self.assertIsNone(a.feed(self.sector(i), 0))
+        scan = a.feed(self.sector(11), 0)
         self.assertIsNotNone(scan)
         self.assertFalse(scan.sector_seen[11 - 3])       # 反転後のセクタ番号
         self.assertEqual(scan.dist[270], 0.0)            # センサ 90° = 車両 270°、0 = 無効
@@ -191,9 +210,9 @@ class TestScanAssembler(unittest.TestCase):
         for i in range(6):                       # 周の途中まで
             a.feed(self.sector(i), 1000 + i)
         a.reset()
-        for i in range(12):                      # 最初からやり直し
+        for i in range(11):                      # 最初からやり直し
             self.assertIsNone(a.feed(self.sector(i), 5000 + i))
-        scan = a.feed(self.sector(0), 6000)
+        scan = a.feed(self.sector(11), 5011)
         self.assertIsNotNone(scan)
         self.assertTrue(all(scan.sector_seen))   # 破棄前の欠けが残っていない
 
@@ -206,9 +225,8 @@ class TestScanAssembler(unittest.TestCase):
                 d[0] = 2000                              # センサ 90° = 車両 270°（右真横）
             if i == 0:
                 d[0], d[1] = 1000, 3000                  # センサ 0°/1° = 車両 0°/359°
-            a.feed(packets.LidarSector(sector_idx=i, duration_us=8300,
-                                       rot_speed_dps=3594, dist=d), 0)
-        scan = a.feed(self.sector(0), 0)
+            scan = a.feed(packets.LidarSector(sector_idx=i, duration_us=8300,
+                                              rot_speed_dps=3594, dist=d), 0)
         self.assertAlmostEqual(scan.dist[270], 2.0)
         self.assertEqual(scan.dist[90], 0.0)             # 反転し忘れならここに出る
         self.assertAlmostEqual(scan.dist[0], 1.0)        # 前方は反転軸上なので動かない
@@ -224,10 +242,9 @@ class TestScanAssembler(unittest.TestCase):
         a = ScanAssembler()
         for s in range(12):
             # 距離[mm] にセンサ角を入れて、どの点がどこへ行ったか追えるようにする
-            a.feed(packets.LidarSector(sector_idx=s, duration_us=8700, rot_speed_dps=3594,
-                                       dist=[s * 30 + i for i in range(30)]),
-                   s * 9_000_000)
-        scan = a.feed(self.sector(0), 12 * 9_000_000)
+            scan = a.feed(packets.LidarSector(sector_idx=s, duration_us=8700, rot_speed_dps=3594,
+                                              dist=[s * 30 + i for i in range(30)]),
+                          s * 9_000_000)
 
         for deg in range(360):
             sensor = (360 - deg) % 360                   # `Scan.sector_dur_us` の式
@@ -239,20 +256,14 @@ class TestScanAssembler(unittest.TestCase):
     def test_compressed_marks_saturation_instead_of_a_hit(self):
         """255 は「5.10m ちょうど」ではなく「5.10m 以上」。壁として打たない。"""
         a = ScanAssembler()
-        for i in range(12):
-            a.feed(self.sector(i, val=255, cls=packets.LidarSectorC), 0)
-        scan = a.feed(self.sector(0, val=100, cls=packets.LidarSectorC), 0)
+        scan = self.turn(a, val=255, cls=packets.LidarSectorC)
         self.assertEqual(scan.lidar_format, 2)
         self.assertTrue(scan.saturated[0])
         self.assertAlmostEqual(scan.dist[0], 5.10)
 
     def test_intensity_is_carried_through(self):
         a = ScanAssembler()
-        for i in range(12):
-            a.feed(self.sector(i, cls=packets.LidarSectorI,
-                               intensity=[200] * 30), 0)
-        scan = a.feed(self.sector(0, cls=packets.LidarSectorI,
-                                  intensity=[200] * 30), 0)
+        scan = self.turn(a, cls=packets.LidarSectorI, intensity=[200] * 30)
         self.assertEqual(scan.lidar_format, 1)
         self.assertEqual(scan.intensity[0], 200)
 

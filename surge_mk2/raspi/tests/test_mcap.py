@@ -403,8 +403,8 @@ class TestSflExport(unittest.TestCase):
             t = packets.Telemetry(t_us=i * 20_000, speed=i * 10, flags=1)
             w.write_rx(t0 + i * 20 * MS, t.TYPE, seq & 0xFF, t.encode())
         if with_lidar:
-            # 12セクタ × 2周ぶん。**セクタ番号が戻った時点で1周が完成する**ので、
-            # 2周ぶん入れて1周ぶん出てくるのが期待どおり
+            # 12セクタ × 2周ぶん。**最後のセクタ（11）を受けた時点で1周が完成する**ので、
+            # 2周ぶん入れて2周ぶん出てくるのが期待どおり
             for rot in range(2):
                 for idx in range(12):
                     seq += 1
@@ -429,7 +429,7 @@ class TestSflExport(unittest.TestCase):
         self._export()
         msgs = read_back(self.mcap)["msgs"]
         self.assertEqual(len(msgs["/vehicle_state"]), 10)
-        self.assertEqual(len(msgs["/scan"]), 1)        # 2周入れて完成は1周
+        self.assertEqual(len(msgs["/scan"]), 2)        # 2周入れて2周とも完成（次の周の 0 を待たない）
         self.assertIn("/uart/tx/command", msgs)
         self.assertIn("/events", msgs)
 

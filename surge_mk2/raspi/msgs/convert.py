@@ -351,8 +351,8 @@ def _brake_torque_raw(nm: float, max_torque: float | None = None) -> int:
 class ScanAssembler:
     """`LIDAR_SECTOR` 12個 → `Scan` 1周ぶん。
 
-    **セクタ番号が戻った時点で1周の完了とみなす。** 「12個そろったら」にすると、
-    1個でも落ちた周が永久に完成せず、次の周と混ざる。
+    **最後のセクタ（11）を受けた時点、それが落ちていればセクタ番号が戻った時点で1周の完了とみなす。**
+    「12個そろったら」にすると、1個でも落ちた周が永久に完成せず、次の周と混ざる。
 
     欠けたセクタは `dist=0`（無効）のまま `sector_seen=False` にする。
     **0 を「距離0の障害物」と解釈してはならない。**
@@ -470,4 +470,8 @@ class ScanAssembler:
         self._rot = float(msg.rot_speed_dps)
         self._last_idx = idx
         self._any = True
+        if idx == 11:
+            # 周の最後のセクタはその場で出す。番号が戻る（次の周の 0 が届く）のを待つと、
+            # 1セクタ（約 8.3ms）ぶん点群が遅れていた。11 が落ちた周は上の「番号が戻った」で閉じる
+            done = self._emit()
         return done
