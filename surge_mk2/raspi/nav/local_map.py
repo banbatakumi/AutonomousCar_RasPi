@@ -64,7 +64,11 @@ import math
 
 import numpy as np
 
+from . import native as _native
 from .deskew import Points
+
+#: 毎周期の地図の処理を C で回す（`nav/native.py`）。`False` なら numpy 版（テストが比べる）
+USE_NATIVE = True
 from .grid import OccGrid
 
 __all__ = ["LocalMap", "footprint_circles"]
@@ -103,7 +107,11 @@ def footprint_circles(footprint: list[tuple[float, float]] | tuple,
 
 def _edt(free: np.ndarray, resolution: float) -> np.ndarray:
     """`free`（True=空き）の各セルから最近傍の非空きセルまでの距離 [m]。"""
-    src = free.astype(np.uint8)
+    return _edt_u8(free.astype(np.uint8), resolution)
+
+
+def _edt_u8(src: np.ndarray, resolution: float) -> np.ndarray:
+    """`_edt` の、入力が既に 0/1 の uint8 の版。"""
     try:                                       # pragma: no cover - 環境依存
         import cv2
     except ImportError:                        # pragma: no cover
@@ -252,6 +260,15 @@ class LocalMap:
         if n_hit < self._MIN_HITS_TO_FORGET:
             return
         g = self.grid
+        if (USE_NATIVE and _native.lib is not None and g.hits.dtype == np.uint16
+                and g.hits.flags.c_contiguous and g.misses.flags.c_contiguous):
+            # 下と同じ判定の C 版（`_native.c` の `lm_forget`）
+            h0, m0 = np.ascontiguousarray(hits0), np.ascontiguousarray(miss0)
+            if _native.lib.lm_forget(g.height, g.width, _native.addr(g.hits), _native.addr(h0),
+                                     _native.addr(g.misses), _native.addr(m0),
+                                     int(self._vanish_hits)):
+                g._cache_seq = -1
+            return
         hit_now = g.hits > hits0
         passed = (g.misses > miss0) & ~hit_now & (g.hits > self._vanish_hits)
         if not passed.any():
@@ -277,6 +294,10 @@ class LocalMap:
         """ESDFを作り直す。**格子が更新された周期に1回だけ呼ぶ。**"""
         if self._edt_seq == self.grid.seq:
             return
+        if self._refresh_native():
+            self._edt_seq = self.grid.seq
+            self._edt_epoch += 1
+            return
         wall = self.grid.wall_mask()
         if self._fresh is not None:
             wall = wall | self._fresh          # 今見えている壁も硬い拘束に含める
@@ -291,9 +312,41 @@ class LocalMap:
         wall_only[:, 0] = wall_only[:, -1] = True
         self._wall_edt = _edt(~wall_only, self.resolution)
         self._blocked_edt = _edt(~blocked, self.resolution)
-        self._stacked_edt = np.stack([self._wall_edt, self._blocked_edt])
+        self._stacked_edt = None                    # 使うときに作る（`_stack`）
         self._edt_seq = self.grid.seq
         self._edt_epoch += 1
+
+    def _refresh_native(self) -> bool:
+        """`refresh` の距離変換の入力を C で作る（`_native.c` の `lm_masks`。壁・空きの読み出しと
+        塞がりの合成を1回の走査で）。距離変換そのものは同じ `_edt`。使えなければ False。"""
+        g = self.grid
+        if (not USE_NATIVE or _native.lib is None or g.hits.dtype != np.uint16
+                or not g.hits.flags.c_contiguous or not g.misses.flags.c_contiguous):
+            return False
+        h, w = g.height, g.width
+        wall, free, src_w, src_b = (np.empty((h, w), dtype=np.uint8) for _ in range(4))
+        fresh = None
+        if self._fresh is not None:
+            fresh = np.ascontiguousarray(self._fresh).view(np.uint8)
+        _native.lib.lm_masks(h, w, _native.addr(g.hits), _native.addr(g.misses), int(g.min_hits),
+                             int(g.min_seen), None if fresh is None else _native.addr(fresh),
+                             _native.addr(wall), _native.addr(free), _native.addr(src_w),
+                             _native.addr(src_b))
+        # 格子の読み出しのキャッシュにも同じものを入れる（同じ周期に他所が `wall_mask()` を呼んでも作り直さない）
+        g._cached("wall", lambda: wall.view(bool))
+        g._cached("free", lambda: free.view(bool))
+        self._wall_edt = _edt_u8(src_w, self.resolution)
+        self._blocked_edt = _edt_u8(src_b, self.resolution)
+        self._stacked_edt = None
+        return True
+
+    def _stack(self) -> np.ndarray | None:
+        """`(2, H, W)` の距離場（壁だけ・壁＋未知）。`body_clearance_both` の numpy 版だけが使うので、要るときに作る。"""
+        if self._wall_edt is None:
+            return None
+        if self._stacked_edt is None:
+            self._stacked_edt = np.stack([self._wall_edt, self._blocked_edt])
+        return self._stacked_edt
 
     @property
     def edt_epoch(self) -> int:
@@ -413,7 +466,7 @@ class LocalMap:
         xa = np.atleast_1d(np.asarray(x, dtype=np.float64))
         ya = np.atleast_1d(np.asarray(y, dtype=np.float64))
         yawa = np.atleast_1d(np.asarray(yaw, dtype=np.float64))
-        stack = self._stacked_edt
+        stack = self._stack()
         if stack is None:
             out = np.zeros(xa.shape)
             if scalar:

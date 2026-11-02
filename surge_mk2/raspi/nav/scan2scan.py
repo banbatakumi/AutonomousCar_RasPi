@@ -64,7 +64,11 @@ from typing import NamedTuple
 
 import numpy as np
 
+from . import native as _native
 from .deskew import Points
+
+#: 方位の表と対応探しを C で回す（`nav/native.py`）。`False` なら numpy 版（テストが比べる）
+USE_NATIVE = True
 
 __all__ = ["Delta", "match_scans"]
 
@@ -127,11 +131,17 @@ def _bearing_index(x: np.ndarray, y: np.ndarray, bins: int = 720) -> np.ndarray:
     同じ方位に複数の点が来たら**近い方**を採る（手前の壁が奥を隠す、が正しい）。
     """
     idx = np.full(bins, -1, dtype=np.int64)
-    best = np.full(bins, np.inf)
-    b = ((np.arctan2(y, x) / (2 * math.pi) + 1.0) * bins).astype(np.int64) % bins
     r = np.hypot(x, y)
     # 近い順に入れると、後から来た遠い点で上書きされない
     order = np.argsort(r)
+    if USE_NATIVE and _native.lib is not None:
+        # 下のループと同じ C 版（`_native.c` の `s2s_bearing`。並びは同じ `order`）
+        xx, yy, oo = _native.f64(x), _native.f64(y), np.ascontiguousarray(order, dtype=np.int64)
+        _native.lib.s2s_bearing(xx.size, _native.addr(xx), _native.addr(yy), _native.addr(oo),
+                                bins, _native.addr(idx))
+        return idx
+    best = np.full(bins, np.inf)
+    b = ((np.arctan2(y, x) / (2 * math.pi) + 1.0) * bins).astype(np.int64) % bins
     for i in order:
         bi = b[i]
         if r[i] < best[bi]:
@@ -161,6 +171,7 @@ def match_scans(prev: Points, cur: Points,
     nrm = _normals(px, py)
     bins = 720
     lut = _bearing_index(px, py, bins)
+    pxc, pyc = _native.f64(px), _native.f64(py)
 
     tx, ty, th = guess
     inlier = 0.0
@@ -172,19 +183,26 @@ def match_scans(prev: Points, cur: Points,
         qy = cx * s + cy * c + ty
 
         # 方位で相手を引く。前後のビンも見て、いちばん近いものを選ぶ
-        b = ((np.arctan2(qy, qx) / (2 * math.pi) + 1.0) * bins).astype(np.int64) % bins
         best_j = np.full(qx.size, -1, dtype=np.int64)
         best_d = np.full(qx.size, np.inf)
-        for off in (-2, -1, 0, 1, 2):
-            j = lut[(b + off) % bins]
-            ok = j >= 0
-            if not ok.any():
-                continue
-            jj = np.where(ok, j, 0)
-            d = np.hypot(qx - px[jj], qy - py[jj])
-            better = ok & (d < best_d)
-            best_d = np.where(better, d, best_d)
-            best_j = np.where(better, jj, best_j)
+        if USE_NATIVE and _native.lib is not None:
+            # 下のループと同じ C 版（`_native.c` の `s2s_assoc`）
+            qx, qy = _native.f64(qx), _native.f64(qy)
+            _native.lib.s2s_assoc(qx.size, _native.addr(qx), _native.addr(qy), _native.addr(pxc),
+                                  _native.addr(pyc), _native.addr(lut), bins,
+                                  _native.addr(best_j), _native.addr(best_d))
+        else:
+            b = ((np.arctan2(qy, qx) / (2 * math.pi) + 1.0) * bins).astype(np.int64) % bins
+            for off in (-2, -1, 0, 1, 2):
+                j = lut[(b + off) % bins]
+                ok = j >= 0
+                if not ok.any():
+                    continue
+                jj = np.where(ok, j, 0)
+                d = np.hypot(qx - px[jj], qy - py[jj])
+                better = ok & (d < best_d)
+                best_d = np.where(better, d, best_d)
+                best_j = np.where(better, jj, best_j)
 
         use = (best_j >= 0) & (best_d <= max_pair)
         inlier = float(use.sum()) / qx.size

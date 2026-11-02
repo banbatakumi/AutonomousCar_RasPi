@@ -45,7 +45,11 @@ import zlib
 
 import numpy as np
 
+from . import native as _native
 from .deskew import Points
+
+#: 素通りの数えを C で回す（`nav/native.py`）。`False` なら numpy 版（テストが比べる）
+USE_NATIVE = True
 
 __all__ = ["OccGrid", "UnknownWallGrid", "dilate", "pack_trinary", "unknown_wall_mask",
            "unpack_trinary"]
@@ -170,6 +174,19 @@ class OccGrid:
         step = self.resolution * _STEP_RATIO
         order = np.argsort(d)
         dx, dy, d = dx[order], dy[order], d[order]
+
+        if (USE_NATIVE and _native.lib is not None and self.misses.dtype == np.uint16
+                and self.misses.flags.c_contiguous and dx.dtype == np.float64):
+            # 下と同じ式の C 版（`_native.c` の `rg_carve`。レイごとに終端の手前で止める。結果は同じ）
+            if getattr(self, "_touched", None) is None or self._touched.shape != self.misses.shape:
+                self._touched = np.zeros(self.misses.shape, dtype=np.uint8)
+            dx, dy, d = _native.f64(dx), _native.f64(dy), _native.f64(d)
+            self.out_of_bounds += int(_native.lib.rg_carve(
+                d.size, float(ox), float(oy), _native.addr(dx), _native.addr(dy), _native.addr(d),
+                _DIST_CHUNK, float(step), float(self.resolution * _END_BACKOFF),
+                float(self.origin[0]), float(self.origin[1]), float(self.resolution), self.height,
+                self.width, _native.addr(self.misses), _COUNT_MAX, _native.addr(self._touched)))
+            return
 
         rows: list[np.ndarray] = []
         cols: list[np.ndarray] = []

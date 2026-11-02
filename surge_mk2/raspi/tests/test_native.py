@@ -346,6 +346,83 @@ class TestHybridAStar(unittest.TestCase):
             self.assertEqual(a, b, name)
 
 
+@unittest.skipUnless(NATIVE, "C コンパイラが無い（Python 版で回る）")
+class TestLocalMapCycle(unittest.TestCase):
+    """駐車の局所地図の毎周期の処理（素通りの数え・消えた物を忘れる・距離場の作り直し）の C 版が numpy 版と同じ。"""
+
+    def _run(self):
+        from raspi.nav.deskew import deskew
+        from raspi.nav.local_map import LocalMap
+        from raspi.tests.test_hybrid_astar import FOOTPRINT, GARAGE
+        from raspi.tests.test_nav import make_room_scan
+        box = [(0.6, 0.2, 0.9, 0.2), (0.9, 0.2, 0.9, 0.4), (0.9, 0.4, 0.6, 0.4), (0.6, 0.4, 0.6, 0.2)]
+        lmap = LocalMap(footprint=FOOTPRINT, resolution=0.01, size_m=6.0)
+        out = []
+        for i in range(24):
+            pose = (0.3 * math.sin(i / 7), 0.3 + 0.05 * math.cos(i / 5), 0.2 * math.sin(i / 9))
+            segs = GARAGE + (box if (i // 6) % 2 == 0 else [])     # 箱を置いたり消したり
+            pts = deskew(make_room_scan(*pose, segs=segs, max_range=6.0), max_range=6.0)
+            lmap.integrate(pts, pose)
+            lmap.refresh()
+            g = lmap.grid
+            out.append((g.hits.copy(), g.misses.copy(), g.out_of_bounds, g.wall_mask().copy(),
+                        g.known_free_mask().copy(), lmap._wall_edt.copy(), lmap._blocked_edt.copy(),
+                        lmap._stack().copy()))
+        return out
+
+    def test_cycles_are_identical(self):
+        from raspi.nav import grid as grid_mod
+        from raspi.nav import local_map as lm_mod
+        saved = grid_mod.USE_NATIVE, lm_mod.USE_NATIVE
+        try:
+            grid_mod.USE_NATIVE = lm_mod.USE_NATIVE = True
+            a = self._run()
+            grid_mod.USE_NATIVE = lm_mod.USE_NATIVE = False
+            b = self._run()
+        finally:
+            grid_mod.USE_NATIVE, lm_mod.USE_NATIVE = saved
+        forgot = False
+        for k, (ra, rb) in enumerate(zip(a, b)):
+            for fa, fb in zip(ra, rb):
+                if isinstance(fa, np.ndarray):
+                    self.assertEqual(fa.dtype, fb.dtype)
+                    self.assertTrue(np.array_equal(fa, fb), k)
+                else:
+                    self.assertEqual(fa, fb, k)
+            if k and (ra[0] < a[k - 1][0]).any():
+                forgot = True
+        self.assertTrue(forgot)                      # 消えた物を忘れる処理を通った
+
+
+@unittest.skipUnless(NATIVE, "C コンパイラが無い（Python 版で回る）")
+class TestScanToScan(unittest.TestCase):
+    def test_match_scans_is_identical(self):
+        from raspi.nav import scan2scan as s2s
+        from raspi.nav.deskew import deskew
+        from raspi.tests.test_hybrid_astar import DEADEND, GARAGE
+        from raspi.tests.test_nav import make_room_scan
+        rng = np.random.default_rng(7)
+        for segs in (GARAGE, DEADEND):
+            for _ in range(8):
+                p0 = (float(rng.uniform(-0.5, 0.5)), float(rng.uniform(-0.2, 0.3)), float(rng.uniform(-0.3, 0.3)))
+                p1 = (p0[0] + float(rng.uniform(-0.05, 0.05)), p0[1] + float(rng.uniform(-0.05, 0.05)),
+                      p0[2] + float(rng.uniform(-0.05, 0.05)))
+                a = deskew(make_room_scan(*p0, segs=segs, max_range=6.0), max_range=6.0)
+                b = deskew(make_room_scan(*p1, segs=segs, max_range=6.0), max_range=6.0)
+                guess = (float(rng.uniform(-0.03, 0.03)), 0.0, float(rng.uniform(-0.03, 0.03)))
+                try:
+                    s2s.USE_NATIVE = True
+                    r1 = s2s.match_scans(a, b, guess)
+                    i1 = s2s._bearing_index(a.x[a.hit], a.y[a.hit])
+                    s2s.USE_NATIVE = False
+                    r2 = s2s.match_scans(a, b, guess)
+                    i2 = s2s._bearing_index(a.x[a.hit], a.y[a.hit])
+                finally:
+                    s2s.USE_NATIVE = True
+                self.assertEqual(r1, r2)
+                self.assertTrue(np.array_equal(i1, i2))
+
+
 class TestLoader(unittest.TestCase):
     def test_disabled_by_env(self):
         """`SURGE_NO_NATIVE=1` なら C を読まない（Python 版で回る）。"""

@@ -1108,3 +1108,150 @@ void hy_dijkstra(int64_t n, const uint8_t *free_, double straight, double diag, 
     }
     free(hp);
 }
+
+/* ── 駐車の局所地図（`raspi/nav/local_map.py`・`grid.py`）の毎周期の処理 ──
+ * numpy 版は 600×600 の格子全体に十数回の演算をかけていて、Pi で1周期 約20ms かかっていた。同じ判定を
+ * 1回の走査でする（結果は同じ） */
+
+/* `OccGrid.wall_mask`・`known_free_mask` と、`LocalMap.refresh` の距離変換の入力
+ * （`(~wall_only).astype(uint8)`・`(~blocked).astype(uint8)`。外周1セルは塞ぐ）。`fresh` は NULL か今周期の当たり */
+void lm_masks(int64_t h, int64_t w, const uint16_t *hits, const uint16_t *misses, int64_t min_hits,
+              int64_t min_seen, const uint8_t *fresh, uint8_t *wall, uint8_t *free_, uint8_t *src_wall,
+              uint8_t *src_blk)
+{
+    for (int64_t r = 0; r < h; r++) {
+        for (int64_t c = 0; c < w; c++) {
+            int64_t i = r * w + c;
+            int32_t hh = hits[i], seen = (int32_t)hits[i] + (int32_t)misses[i];
+            uint8_t wl = hh >= min_hits && hh * 2 >= seen;
+            uint8_t fr = seen >= min_seen && hh * 2 < seen;
+            wall[i] = wl;
+            free_[i] = fr;
+            uint8_t wf = wl || (fresh && fresh[i]);
+            int border = r == 0 || r == h - 1 || c == 0 || c == w - 1;
+            src_wall[i] = border ? 0 : !wf;
+            src_blk[i] = border ? 0 : (!wf && fr);
+        }
+    }
+}
+
+/* `LocalMap._forget_vanished`（`n_hit` の判定の後）: 今周期に素通りされて当たりの無かった壁セル
+ * （`hits > vanish`）を、今周期に当たったセルの 2 セル以内（8 近傍の膨張 2 回 = 5×5）を除いて `vanish` にする。
+ * 戻り値: 素通りされたセルがあったか（numpy 版はそのときだけ読み出しのキャッシュを捨てる） */
+int lm_forget(int64_t h, int64_t w, uint16_t *hits, const uint16_t *hits0, const uint16_t *misses,
+              const uint16_t *miss0, uint16_t vanish)
+{
+    int64_t cap = 256, n = 0;
+    int64_t *list = malloc(sizeof(int64_t) * (size_t)cap);
+    for (int64_t i = 0; i < h * w; i++) {
+        if (misses[i] > miss0[i] && !(hits[i] > hits0[i]) && hits[i] > vanish) {
+            if (n == cap) { cap *= 2; list = realloc(list, sizeof(int64_t) * (size_t)cap); }
+            list[n++] = i;
+        }
+    }
+    /* 先に全部の判定を済ませてから書く（numpy 版も `near` は書き換える前の当たりで作る） */
+    int64_t m = 0;
+    for (int64_t q = 0; q < n; q++) {
+        int64_t i = list[q], r = i / w, c = i % w, near = 0;
+        for (int64_t rr = r - 2; rr <= r + 2 && !near; rr++) {
+            if (rr < 0 || rr >= h) continue;
+            for (int64_t cc = c - 2; cc <= c + 2; cc++) {
+                if (cc < 0 || cc >= w) continue;
+                int64_t j = rr * w + cc;
+                if (hits[j] > hits0[j]) { near = 1; break; }
+            }
+        }
+        if (!near) list[m++] = i;
+    }
+    for (int64_t q = 0; q < m; q++) hits[list[q]] = vanish;
+    free(list);
+    return n > 0;
+}
+
+/* `raspi/nav/grid.py` の `OccGrid._carve`（レイは距離の順に並べ替え済み）。`chunk` 本ずつの束ごとに、束の最遠の
+ * レイの長さまで `step` 刻みの点（`t` は float32）を打ち、格子の中で `t < d − back` の点のセルを素通りとして
+ * 1周に1回だけ数える（`_bump`、`count_max` で頭打ち）。束の全点が格子の外のレイの本数を返す（`out_of_bounds`）。
+ * `touched` は h×w の 0 の作業領域（使った後に 0 へ戻す） */
+int64_t rg_carve(int64_t n, double ox, double oy, const double *dx, const double *dy, const double *d,
+                 int64_t chunk, double step, double back, double o0, double o1, double res, int64_t h,
+                 int64_t w, uint16_t *misses, uint16_t count_max, uint8_t *touched)
+{
+    int64_t oob = 0, cap = 1024, nt = 0;
+    int64_t *list = malloc(sizeof(int64_t) * (size_t)cap);
+    float stepf = (float)step;
+    for (int64_t s = 0; s < n; s += chunk) {
+        int64_t e = s + chunk < n ? s + chunk : n;
+        double q = ceil(d[e - 1] / step);
+        int64_t ns = q > 1.0 ? (int64_t)q : 1;
+        for (int64_t i = s; i < e; i++) {
+            double lim = d[i] - back;
+            int any_in = 0;
+            for (int64_t k = 1; k <= ns; k++) {
+                double tk = (double)((float)k * stepf);
+                double px = ox + dx[i] * tk, py = oy + dy[i] * tk;
+                double fc = floor((px - o0) / res), fr = floor((py - o1) / res);
+                int in = fc >= 0.0 && fc < (double)w && fr >= 0.0 && fr < (double)h;
+                if (in) any_in = 1;
+                if (!(tk < lim)) {
+                    if (any_in) break;          /* ここから先は数えない。外れの判定ももう要らない */
+                    continue;
+                }
+                if (!in) continue;
+                int64_t idx = (int64_t)fr * w + (int64_t)fc;
+                if (!touched[idx]) {
+                    touched[idx] = 1;
+                    if (nt == cap) { cap *= 2; list = realloc(list, sizeof(int64_t) * (size_t)cap); }
+                    list[nt++] = idx;
+                }
+            }
+            if (!any_in) oob++;
+        }
+    }
+    for (int64_t j = 0; j < nt; j++) {
+        int64_t idx = list[j];
+        if (misses[idx] < count_max) misses[idx] += 1;
+        touched[idx] = 0;
+    }
+    free(list);
+    return oob;
+}
+
+/* ── 点群どうしの照合（`raspi/nav/scan2scan.py`）の方位の表と対応探し ──
+ * 方位のビン: ((atan2(y, x) / 2π + 1) · bins) を整数にして bins で割った余り（numpy 版と同じ式） */
+static inline int64_t s2s_bin(double x, double y, int64_t bins)
+{
+    int64_t b = (int64_t)((atan2(y, x) / (2.0 * RS_PI) + 1.0) * (double)bins);
+    return ((b % bins) + bins) % bins;
+}
+
+/* `_bearing_index`: 方位ごとにいちばん近い点の添字（無ければ −1）。`order` は numpy の `argsort(r)`（同じ距離の順を揃える） */
+void s2s_bearing(int64_t n, const double *x, const double *y, const int64_t *order, int64_t bins,
+                 int64_t *idx)
+{
+    double *best = malloc(sizeof(double) * (size_t)bins);
+    for (int64_t b = 0; b < bins; b++) { idx[b] = -1; best[b] = INFINITY; }
+    for (int64_t q = 0; q < n; q++) {
+        int64_t i = order[q], b = s2s_bin(x[i], y[i], bins);
+        double r = hypot(x[i], y[i]);
+        if (r < best[b]) { best[b] = r; idx[b] = i; }
+    }
+    free(best);
+}
+
+/* `match_scans` の対応探し: 点 (qx, qy) の方位の前後 2 ビンの相手のうち、いちばん近いもの（添字と距離）。無ければ −1・inf */
+void s2s_assoc(int64_t nq, const double *qx, const double *qy, const double *px, const double *py,
+               const int64_t *lut, int64_t bins, int64_t *best_j, double *best_d)
+{
+    for (int64_t i = 0; i < nq; i++) {
+        int64_t b = s2s_bin(qx[i], qy[i], bins), bj = -1;
+        double bd = INFINITY;
+        for (int64_t off = -2; off <= 2; off++) {
+            int64_t j = lut[(((b + off) % bins) + bins) % bins];
+            if (j < 0) continue;
+            double d = hypot(qx[i] - px[j], qy[i] - py[j]);
+            if (d < bd) { bd = d; bj = j; }
+        }
+        best_j[i] = bj;
+        best_d[i] = bd;
+    }
+}

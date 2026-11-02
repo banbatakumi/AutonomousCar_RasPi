@@ -19,7 +19,7 @@
 
 ## 直近の作業記録（新しい順）
 
-## 2026-11-02 駐車（Hybrid A*）を C に（未コミット・Pi 未反映）
+## 2026-11-02 駐車（Hybrid A*）と駐車中の毎周期の処理を C に（Pi 未反映）
 
 `sim.park_bench --scenario all --n 5 --errors real`（同じ種）で Mac と Pi を比べると、Pi は**探索が時間予算（120ms）に負けて駐車を失敗する**:
 Mac 成功 20/20・Hybrid A* の予算切れ 1/27・`plan()` 中央 4.8ms／Pi 成功 16/20（deadend 2/5・parallel 4/5）・予算切れ 18/35・`plan()` 中央 30.6ms・最大 223ms（150ms 超 18 回）。
@@ -35,7 +35,12 @@ Mac 成功 20/20・Hybrid A* の予算切れ 1/27・`plan()` 中央 4.8ms／Pi �
   （残りの1回 1.5s は C 版を探索の中で遅れて読んで組み立てていた。モジュールの読み込み時に読むよう直した）
 - `--n 10`（40 回）: Pi 39/40・Mac 39/40（失敗は両方とも同じ parallel の1件）。Pi の Hybrid A* の最大 122ms、`plan()` 中央 29.9ms・最大 198ms（150ms 超 2 回 = 予算 120ms ＋ 毎周期の 30ms）
 - `raspi/tests/test_native.py` に Reeds-Shepp・Hybrid A* の一致（候補・子・衝突判定・Dijkstra・予算なしの探索）。Mac の pytest 全体 2070 件 OK
-- 未着手: 駐車中の毎周期の重さ（Pi の `plan()` 中央 30ms。`LocalMap.refresh` の距離変換の前後・`raspi/nav/grid.py` の `_carve`・`scan2scan.match_scans`）
+- コミット d7df10d。続けて**駐車中の毎周期の処理**も C に（`raspi/nav/_native.c` の `lm_masks`・`lm_forget`・`rg_carve`・`s2s_bearing`・`s2s_assoc`。numpy 版とビット一致）:
+  Pi で `LocalMap.integrate` 7.8 → 3.2ms、`refresh` 14.5 → 10.7ms（残りは cv2 の距離変換 2 回 ≒ 9ms。cv2 は 4 スレッドで動いていてこれ以上は縮まない）、
+  `match_scans` 2.85 → 1.71ms（3×3 の行列積と solve は BLAS の丸めが環境で違うので numpy のまま）。2枚重ねの距離場（`np.stack`）は numpy 版の子ノード生成だけが使うので要るときに作る
+- Pi の park_bench（`--n 10 --errors real`）: `plan()` 中央 29.9 → **19.3ms**・p99 38.5 → 26.0ms。結果の表は C 化の前の Pi の回と同じ（39/40）。
+  150ms 超は 40 回中 2 回のまま（Hybrid A* が予算 120ms まで回った周期）。予算（`plan_budget_ms` 既定 120）を下げるかは未決
+- `raspi/tests/test_native.py` は 19 件（局所地図の毎周期・点群の照合を追加）。Mac の pytest 全体 2071 件 OK（`test_cmd_path` の時間のテスト 1 件が負荷で揺れ、単独では 3 回とも OK）
 
 ## 2026-11-02 SLAM の対応付け・総当たりの採点・面要素の法線も C に（調査の②③。2026-11-02 Pi 反映済み・走行では未検証）
 
