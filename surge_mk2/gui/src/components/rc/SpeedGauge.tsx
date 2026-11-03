@@ -150,7 +150,7 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
             />
           )}
 
-          {/* MT のレッドライン。本体の弧（r=46）と同じ半径だと `--accent` の赤に
+          {/* MT のレッドライン。本体の弧（r=46）と同じ半径だと `--brand` の赤に
               埋もれるので、外側の別半径（r=52）に描く */}
           {redlineFrac != null && redlineFrom != null && redlineFrac > 0 && (
             <path

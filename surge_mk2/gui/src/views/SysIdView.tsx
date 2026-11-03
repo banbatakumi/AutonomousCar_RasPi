@@ -152,7 +152,9 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
   return (
     <div className="settings sysid-view">
       <div className="settings-head">
-        <h2>システム同定</h2>
+        <h2>
+          システム同定<span className="page-sub">CALIB</span>
+        </h2>
         <p className="dim">
           {'車両の校正の試験（開始と同時に mcap 記録。手順・順番は docs/calibration.md）'}
         </p>
@@ -193,10 +195,14 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
 
       <section className="settings-group">
         <div className="logs-row">
-          <button className={active ? 'on' : ''} disabled={!ch || !selected || active} onClick={beginTest}>
+          <button
+            className={`sysid-start ${active ? 'on' : ''}`}
+            disabled={!ch || !selected || active}
+            onClick={beginTest}
+          >
             試験開始
           </button>
-          <button disabled={!ch || !active} onClick={cancelTest}>
+          <button className="sysid-stop" disabled={!ch || !active} onClick={cancelTest}>
             試験中止
           </button>
           {active && !ui.armRequested && <span className="badge-warn">ARM してください（Enter）</span>}

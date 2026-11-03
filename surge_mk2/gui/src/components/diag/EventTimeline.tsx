@@ -17,7 +17,7 @@ import { currentFrame, onFrame, type Frame } from './view'
 /** 上から順に並ぶ。色は意味（StatusBar のピルと同じ割り当て） */
 const LANES: { label: string; mask: number; tone: Tone }[] = [
   { label: 'ARM', mask: EV.ARM, tone: 'warn' },
-  { label: 'AUTO', mask: EV.AUTO, tone: 'accent' },
+  { label: 'AUTO', mask: EV.AUTO, tone: 'trace' },
   { label: 'E-STOP', mask: EV.ESTOP, tone: 'bad' },
   { label: 'フォルト', mask: EV.FAULT, tone: 'bad' },
   // 途絶（届いていない区間）と STM32 側の COMMAND 途絶も「通信がおかしい」として同じ段に出す

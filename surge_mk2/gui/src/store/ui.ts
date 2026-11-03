@@ -551,6 +551,11 @@ export function mtGearRatio(g: MtGear, s: DrivingSettings): number {
   }
 }
 
+/** 後退を選んでいるか。MT モードは `mtGear`、それ以外は D/R レンジ（`gear`）で決まる */
+export function reverseSelected(ui: { settings: DrivingSettings; gear: 'D' | 'R'; mtGear: MtGear }): boolean {
+  return ui.settings.driveMode === 'mt' ? ui.mtGear === 'R' : ui.gear === 'R'
+}
+
 type UiState = {
   telemetryOpen: boolean
   /** `/ws/telemetry` の型定義の札が GUI 側と食い違っているか。
@@ -676,6 +681,26 @@ type UiState = {
   lidarFollow: boolean
   /** カメラの進路ガイド。**カメラ校正前なので暫定表示** */
   pathGuide: boolean
+  /**
+   * 進路上の障害物（LiDAR）を映像に重ねるか（`bus/pathObstacles.ts`）。`pathGuide` が OFF の
+   * 間は出さない（ラジコンのメイン映像クリックで重畳をまとめて消せるように）。既定 ON
+   */
+  obstacleOverlay: boolean
+  /**
+   * 自動運転の計画（指令の進路・経路・狙っている点・検出した障害物）を前方映像に重ねるか。
+   * planner が動いている間だけ出る。`obstacleOverlay` と同じく `pathGuide` に従う。既定 ON
+   */
+  planOverlay: boolean
+  /**
+   * ラジコンで R に入れたら、メイン映像を後方カメラに切り替えるか（抜けたら前方に戻す）。
+   * 既定 ON。`localStorage` には保存しない（`pathGuide` と同じ扱い）
+   */
+  autoRearCam: boolean
+  /**
+   * クリアランスソナーの音を鳴らすか（`hooks/useParkBeep.ts`）。ARM 中、進む向きの半周
+   * （LiDAR・超音波）に近い物があるときだけ鳴る。**GUI の演出で、自動停止とは独立**。既定 ON
+   */
+  parkBeep: boolean
   /**
    * ラジコンビューで左下に PIP（今メインに出ていない方のカメラ）を表示するか。
    *
@@ -849,6 +874,10 @@ export const useUi = create<UiState>((set, get) => ({
   lidarZoom: 4, // 画面半径が何メートルぶんか
   lidarFollow: true,
   pathGuide: true,
+  obstacleOverlay: true,
+  planOverlay: true,
+  autoRearCam: true,
+  parkBeep: true,
   rearPip: true,
   lidarVisible: true,
   lidarExpanded: false,

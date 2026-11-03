@@ -108,11 +108,12 @@
 import { useEffect, useRef } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { live } from '../bus/live'
-import { useUi } from '../store/ui'
+import { reverseSelected, useUi } from '../store/ui'
 import { guardSocket, type SocketGuard } from '../ws/guard'
 import { wsUrl } from '../ws/url'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 import { fisheyeLens, groundProjector, pinholeLens, type Lens } from './cameraModel'
+import { BUMPER_X, HALF_WIDTH, findPathObstacle, scanPointsNow, type ObstacleLevel } from '../bus/pathObstacles'
 import type { ControlChannel } from '../ws/control'
 
 export function CameraView({
@@ -124,6 +125,7 @@ export function CameraView({
   ch = null,
   srcCrop,
   mirror = false,
+  overlayBottomInset = 0,
 }: {
   cam: 'front' | 'rear'
   label: string
@@ -142,6 +144,9 @@ export function CameraView({
   srcCrop?: { y0: number; y1: number }
   /** 左右反転して描く（バックミラー。後方カメラを鏡と同じ左右で見せる） */
   mirror?: boolean
+  /** 映像の下端のうち、上に何か（ラジコンの HUD）が重なって見えない高さ [CSS px]。
+   * 進路上の障害物の線がここに隠れるときは、見える下端に寄せて描く */
+  overlayBottomInset?: number
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide) && !guideDisabled
@@ -156,11 +161,25 @@ export function CameraView({
   // 配慮からここだけ漏れていた）
   const guideRef = useRef(guide)
   guideRef.current = guide
+  // 進路上の障害物（LiDAR）と自動運転の計画の重畳。どちらも進路ガイドに従う
+  // （ラジコンのメイン映像クリックでまとめて消せるように）。切り出し・反転中（ミラー）は出さない
+  const obstacleOn = useUi((s) => s.obstacleOverlay) && guide
+  const obstacleRef = useRef(obstacleOn)
+  obstacleRef.current = obstacleOn
+  // planner はモードを選んだだけで動いている（engage しなくても判断は出る）。ラジコン（`minimal`）で
+  // 手動運転中に計画が重なると邪魔なので、そちらでは engage 中だけ出す。自動運転ビューでは常に出す
+  // （engage 前に「何をしようとしているか」を見られる）
+  const engaged = useUi((s) => !!s.auto?.engaged)
+  const planOn = useUi((s) => s.planOverlay) && guide && cam === 'front' && (variant === 'full' || engaged)
+  const planRef = useRef(planOn)
+  planRef.current = planOn
   // 切り出し・反転も ref 経由（窓の大きさで値が変わっても WS を張り直さない）
   const srcCropRef = useRef(srcCrop)
   srcCropRef.current = srcCrop
   const mirrorRef = useRef(mirror)
   mirrorRef.current = mirror
+  const insetRef = useRef(overlayBottomInset)
+  insetRef.current = overlayBottomInset
 
   // ── モード連動のデバッグ重畳 ──
   //
@@ -418,6 +437,7 @@ export function CameraView({
         const age = performance.now() - lastFrameMs
         const staleMs = Math.max(CAM_STALE_MIN_MS, frameIntervalMs * CAM_STALE_INTERVALS)
         if (!wsOpen || age > staleMs) drawStale(ctx, dx, dy, dw, dh, wsOpen ? age : null)
+        else if (isLagging(age, frameIntervalMs)) drawLag(ctx, dx, dy, dw, dh, age)
       } else if (bitmap) {
         // アスペクト比を保って収める
         const s = Math.min(w / bitmap.width, h / bitmap.height)
@@ -443,10 +463,19 @@ export function CameraView({
         // が違うため異なる）とは一致せず、レターボックス量が前後で変わる。
         // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
         // ガイドがズレる（後方カメラのガイドが上に大きくズレる不具合になる）
-        if ((guideRef.current && guideFacing(cam)) || showLineTargetRef.current || showSignalRef.current) {
+        const nowMs = performance.now()
+        const obstacles = obstacleRef.current && guideFacing(cam) && nowMs - live.lastScanMs < SCAN_FRESH_MS
+        const plan = planRef.current && !!live.auto?.planner && nowMs - live.lastAutoMs < AUTO_FRESH_MS
+        if ((guideRef.current && guideFacing(cam)) || obstacles || plan || showLineTargetRef.current || showSignalRef.current) {
           ctx.save()
           ctx.translate(dx, dy)
+          // 映像の外（レターボックス）にはみ出して描かない
+          ctx.beginPath()
+          ctx.rect(0, 0, dw, dh)
+          ctx.clip()
+          if (plan) drawPlan(ctx, dw, dh, camHeightRef.current)
           if (guideRef.current && guideFacing(cam)) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
+          if (obstacles) drawObstacles(ctx, dw, dh, camHeightRef.current, cam, Math.max(0, Math.min(dh, h - dy - insetRef.current)))
           if (showLineTargetRef.current) drawLineTarget(ctx, dw, dh, camHeightRef.current)
           if (showSignalRef.current) drawArrowSignal(ctx, dw, dh)
           ctx.restore()
@@ -463,6 +492,7 @@ export function CameraView({
         const age = performance.now() - lastFrameMs
         const staleMs = Math.max(CAM_STALE_MIN_MS, frameIntervalMs * CAM_STALE_INTERVALS)
         if (!wsOpen || age > staleMs) drawStale(ctx, dx, dy, dw, dh, wsOpen ? age : null)
+        else if (isLagging(age, frameIntervalMs)) drawLag(ctx, dx, dy, dw, dh, age)
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
@@ -583,7 +613,8 @@ export function CameraView({
  * 同じ向きのカメラにだけ出す（前進中に後方カメラへ出しても意味が無い） */
 function guideFacing(cam: 'front' | 'rear'): boolean {
   const speed = live.vs?.speed ?? 0
-  const reverse = Math.abs(speed) > 0.05 ? speed < 0 : useUi.getState().gear === 'R'
+  // 止まっているときは選んでいるレンジ（MT は R 段）で決める
+  const reverse = Math.abs(speed) > 0.05 ? speed < 0 : reverseSelected(useUi.getState())
   return (cam === 'rear') === reverse
 }
 
@@ -782,6 +813,235 @@ function drawRoiDrag(
   ctx.restore()
 }
 
+/** 点群・判断がこれより古ければ重ねない [ms]（古い位置に障害物を描かない） */
+const SCAN_FRESH_MS = 400
+const AUTO_FRESH_MS = 600
+
+/** 進路上の障害物の段ごとの色（`bus/pathObstacles.ts`）。赤・琥珀は意味色、白は「あるだけ」 */
+const OB_COLOR: Record<ObstacleLevel, string> = {
+  danger: '#f2544b',
+  caution: '#e8ab21',
+  info: 'rgba(255,255,255,0.55)',
+}
+
+/**
+ * 進路上の障害物（LiDAR）を映像に重ねる（2026-11-03）。今の舵角のまま進んだら最初に
+ * 当たる点群に印を付け、**車体の前端（後退なら後端）が当たる位置に横線**（止まる線）を引く。
+ * 色は当たるまでの時間で決まる（近づいていなければ白）。距離は線の上に出す。
+ * 計算は `bus/pathObstacles.ts`（点群を取得から今までの車の動きぶん戻してから掃く）
+ */
+function drawObstacles(
+  ctx: CanvasRenderingContext2D, w: number, h: number, camHeightSetting: number, cam: 'front' | 'rear',
+  /** 映像のうち見えている下端の y（これより下は HUD に隠れる） */
+  visibleBottom: number,
+) {
+  const scan = live.scan
+  const vs = live.vs
+  if (!scan || !vs) return
+  const ob = findPathObstacle(scanPointsNow(scan, vs), vs.steer_actual, vs.speed, cam === 'rear')
+  if (!ob) return
+  const project = makeProjector(w, h, camHeightSetting, cam)
+  const col = OB_COLOR[ob.level]
+  const lit = ob.level !== 'info'
+
+  ctx.save()
+  // 当たる点群（足元＝路面に落とした位置）
+  ctx.fillStyle = col
+  for (const [x, y] of ob.hits) {
+    const p = project(x, y)
+    if (p) ctx.fillRect(p[0] - 2.5, p[1] - 2.5, 5, 5)
+  }
+  // 止まる線。車体の端の位置で、車体の幅いっぱいに
+  const { x, y, th } = ob.pose
+  const bx = ob.reverse ? BUMPER_X.rear : BUMPER_X.front
+  const ex = x + bx * Math.cos(th)
+  const ey = y + bx * Math.sin(th)
+  const nx = -Math.sin(th) * HALF_WIDTH
+  const ny = Math.cos(th) * HALF_WIDTH
+  const pa = project(ex + nx, ey + ny)
+  const pb = project(ex - nx, ey - ny)
+  let a: [number, number]
+  let b: [number, number]
+  // **近いほど路面の手前＝映像の下端（HUD の裏・画面の外）に入る。** 一番大事な近距離が
+  // 見えなくなるので、見える下端に寄せて描く（横の位置は投影できた方を使い、無ければ中央）
+  const edgeY = visibleBottom - 10
+  if (pa && pb && Math.max(pa[1], pb[1]) <= edgeY) {
+    a = pa
+    b = pb
+  } else {
+    const xs = [pa, pb].filter((p): p is [number, number] => p != null).map((p) => p[0])
+    const x0 = xs.length === 2 ? Math.min(...xs) : w * 0.35
+    const x1 = xs.length === 2 ? Math.max(...xs) : w * 0.65
+    const span = Math.max(x1 - x0, w * 0.18)
+    const mid = (x0 + x1) / 2
+    a = [Math.max(4, mid - span / 2), edgeY]
+    b = [Math.min(w - 4, mid + span / 2), edgeY]
+  }
+  ctx.strokeStyle = col
+  ctx.lineCap = 'round'
+  ctx.lineWidth = ob.level === 'danger' ? 6 : lit ? 4 : 2
+  if (lit) {
+    ctx.shadowColor = col
+    ctx.shadowBlur = 12
+  }
+  ctx.beginPath()
+  ctx.moveTo(a[0], a[1])
+  ctx.lineTo(b[0], b[1])
+  ctx.stroke()
+  ctx.shadowBlur = 0
+  // 距離。線の真ん中の上に、読める地の上で
+  const mx = (a[0] + b[0]) / 2
+  const my = Math.min(a[1], b[1]) - 10
+  const text = `${ob.distM.toFixed(2)} m`
+  ctx.font = "bold 15px 'DIN Alternate', 'Hiragino Sans', sans-serif"
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'bottom'
+  const tw = ctx.measureText(text).width
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'
+  ctx.fillRect(mx - tw / 2 - 6, my - 18, tw + 12, 20)
+  ctx.fillStyle = lit ? col : '#fff'
+  ctx.fillText(text, mx, my)
+  ctx.restore()
+}
+
+/** 自動運転の計画の色。計測値の線と同じ青（`--trace`）を指令の進路に、経路は紫 */
+const PLAN_CMD = '#4aa8ff'
+const PLAN_ROUTE = 'rgba(200,120,255,0.85)'
+/** 経路を描く範囲 [m]（base_link の前方） */
+const PLAN_ROUTE_MIN_X = 0.15
+const PLAN_ROUTE_MAX_X = 6
+const PLAN_ROUTE_MAX_Y = 3
+
+/**
+ * 自動運転の計画を前方映像に重ねる（2026-11-03）。**planner が何をしようとしているか**と
+ * **実際に見えているもの**のずれを映像の上で読むため。出すもの:
+ *
+ * - 指令の進路（青の破線）: `target_steer` のまま進んだ弧。実測舵角の進路ガイド（琥珀）と
+ *   並べると、舵の遅れや「指令と違う向きに行っている」が分かる。長さは `target_speed` の 1.5 秒ぶん
+ * - 地図を持つ planner（`phase` がある＝slam2d 系）のとき: 今走っている経路（紫）、
+ *   Pure Pursuit が狙っている点（白い菱形）、検出した動的障害物（赤い輪）。どれも map
+ *   フレームなので、自己位置（`pose_*`）で base_link に直してから投影する
+ */
+function drawPlan(ctx: CanvasRenderingContext2D, w: number, h: number, camHeightSetting: number) {
+  const a = live.auto
+  // 判断を出せていない（モデル未選択など）間は描かない。指令 0 の線は情報にならない
+  if (!a || !a.ready) return
+  const project = makeProjector(w, h, camHeightSetting, 'front')
+  ctx.save()
+
+  // 指令の進路
+  const len = Math.max(0.8, Math.min(4, Math.abs(a.target_speed) * 1.5))
+  if (a.target_speed >= 0) {
+    const k = Math.tan(a.target_steer) / VEHICLE_GEOM.wheelbase
+    ctx.beginPath()
+    let x = 0
+    let y = 0
+    let th = 0
+    let started = false
+    for (let s = 0; s < len; s += 0.05) {
+      th += 0.05 * k
+      if (Math.abs(th) > Math.PI / 2) break
+      x += 0.05 * Math.cos(th)
+      y += 0.05 * Math.sin(th)
+      const p = project(x, y)
+      if (!p) {
+        started = false
+        continue
+      }
+      if (started) ctx.lineTo(p[0], p[1])
+      else ctx.moveTo(p[0], p[1])
+      started = true
+    }
+    ctx.setLineDash([10, 7])
+    ctx.strokeStyle = PLAN_CMD
+    ctx.lineWidth = 3
+    ctx.shadowColor = PLAN_CMD
+    ctx.shadowBlur = 6
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.shadowBlur = 0
+  }
+
+  // 地図を持つ planner のときだけ（自己位置が意味を持つ）
+  if (a.phase) {
+    const c = Math.cos(a.pose_yaw)
+    const sn = Math.sin(a.pose_yaw)
+    const toBase = (mx: number, my: number): [number, number] => {
+      const dx = mx - a.pose_x
+      const dy = my - a.pose_y
+      return [dx * c + dy * sn, -dx * sn + dy * c]
+    }
+    const inView = (x: number, y: number) =>
+      x > PLAN_ROUTE_MIN_X && x < PLAN_ROUTE_MAX_X && Math.abs(y) < PLAN_ROUTE_MAX_Y
+
+    const line = live.map?.raceline
+    if (line && line.length >= 4) {
+      ctx.beginPath()
+      let started = false
+      let prev: [number, number] | null = null
+      for (let i = 0; i + 1 < line.length; i += 2) {
+        const [x, y] = toBase(line[i]!, line[i + 1]!)
+        const p = inView(x, y) ? project(x, y) : null
+        // 範囲外・写らない点・離れた点（経路の継ぎ目）では線を切る
+        const jump = prev ? Math.hypot(x - prev[0], y - prev[1]) > 0.5 : false
+        prev = [x, y]
+        if (!p || jump) {
+          started = false
+          if (!p) continue
+        }
+        if (started) ctx.lineTo(p[0], p[1])
+        else ctx.moveTo(p[0], p[1])
+        started = true
+      }
+      ctx.strokeStyle = PLAN_ROUTE
+      ctx.lineWidth = 3
+      ctx.stroke()
+    }
+
+    // 狙っている点
+    const [tx, ty] = toBase(a.target_x, a.target_y)
+    const tp = inView(tx, ty) ? project(tx, ty) : null
+    if (tp) {
+      ctx.beginPath()
+      ctx.moveTo(tp[0], tp[1] - 9)
+      ctx.lineTo(tp[0] + 7, tp[1])
+      ctx.lineTo(tp[0], tp[1] + 9)
+      ctx.lineTo(tp[0] - 7, tp[1])
+      ctx.closePath()
+      ctx.fillStyle = '#fff'
+      ctx.strokeStyle = PLAN_CMD
+      ctx.lineWidth = 2
+      ctx.fill()
+      ctx.stroke()
+    }
+
+    // 検出した動的障害物 [x, y, r, ...]
+    const obs = a.obstacles ?? []
+    ctx.strokeStyle = '#f2544b'
+    ctx.lineWidth = 2
+    for (let i = 0; i + 2 < obs.length; i += 3) {
+      const [ox, oy] = toBase(obs[i]!, obs[i + 1]!)
+      const r = obs[i + 2]!
+      if (!inView(ox, oy)) continue
+      ctx.beginPath()
+      let started = false
+      for (let j = 0; j <= 16; j++) {
+        const t = (j / 16) * Math.PI * 2
+        const p = project(ox + r * Math.cos(t), oy + r * Math.sin(t))
+        if (!p) {
+          started = false
+          continue
+        }
+        if (started) ctx.lineTo(p[0], p[1])
+        else ctx.moveTo(p[0], p[1])
+        started = true
+      }
+      ctx.stroke()
+    }
+  }
+  ctx.restore()
+}
+
 /** 映像が古いとみなす最短の時間 [ms]。ARM 中の 15〜30fps なら数フレーム分 */
 const CAM_STALE_MIN_MS = 500
 /** フレーム間隔（移動平均）の何倍届かなければ古いとみなすか。DISARM 中の低い fps 用 */
@@ -791,20 +1051,59 @@ const CAM_RECONNECT_MS = 5000
 /** デコードがこれ終わらなければ固まりとみなして見捨てる [ms] */
 const CAM_DECODE_STUCK_MS = 2000
 
-/** 止まった映像を暗くし、中央に古さを出す。`ageMs=null` は切断中 */
+/**
+ * 映像の「遅れ」（2026-11-03）。止まった（`drawStale`）とまでは言えないが、いつもの間隔より
+ * 明らかに来ていない状態。**ARM 中だけ**見る（DISARM 中は 1fps に落としているので常に遅れて見える）。
+ * カメラ配信は JPEG だけで撮影時刻が付いていないので、測れるのは「届く間隔」だけ——撮ってから
+ * 届くまでの遅れそのものは測れない
+ */
+const CAM_LAG_MIN_MS = 180
+const CAM_LAG_INTERVALS = 2.5
+
+function isLagging(ageMs: number, intervalMs: number): boolean {
+  return !!live.vs?.armed && ageMs > Math.max(CAM_LAG_MIN_MS, intervalMs * CAM_LAG_INTERVALS)
+}
+
+/** 遅れ: 映像の縁を琥珀に光らせ、左上に古さを出す（映像そのものは暗くしない） */
+function drawLag(ctx: CanvasRenderingContext2D, dx: number, dy: number, dw: number, dh: number, ageMs: number) {
+  ctx.save()
+  ctx.strokeStyle = '#e8ab21'
+  ctx.lineWidth = 4
+  ctx.shadowColor = '#e8ab21'
+  ctx.shadowBlur = 10
+  ctx.strokeRect(dx + 2, dy + 2, dw - 4, dh - 4)
+  ctx.shadowBlur = 0
+  drawTag(ctx, dx + 12, dy + 12, `映像 遅れ ${(ageMs / 1000).toFixed(1)}s`, '#e8ab21', '#1a1305')
+  ctx.restore()
+}
+
+/** 止まった映像を暗くし、中央に古さを警告灯の札で出す。`ageMs=null` は切断中 */
 function drawStale(
   ctx: CanvasRenderingContext2D, dx: number, dy: number, dw: number, dh: number, ageMs: number | null,
 ) {
   const text = ageMs == null ? '映像 切断' : `映像停止 ${(ageMs / 1000).toFixed(1)}s`
   ctx.save()
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)'
   ctx.fillRect(dx, dy, dw, dh)
-  ctx.font = 'bold 16px ui-monospace, monospace'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillStyle = '#ff6b6b'
-  ctx.fillText(text, dx + dw / 2, dy + dh / 2)
+  ctx.font = "bold 16px 'Hiragino Sans', sans-serif"
+  const tw = ctx.measureText(text).width
+  drawTag(ctx, dx + dw / 2 - tw / 2 - 12, dy + dh / 2 - 15, text, '#e2433b', '#fff', 16)
   ctx.restore()
+}
+
+/** 警告灯の札（地を塗った角丸の帯に文字）。左上の位置で受け取る */
+function drawTag(ctx: CanvasRenderingContext2D, x: number, y: number, text: string, bg: string, fg: string, size = 13) {
+  ctx.font = `bold ${size}px 'Hiragino Sans', sans-serif`
+  const tw = ctx.measureText(text).width
+  const hgt = size + 12
+  ctx.fillStyle = bg
+  ctx.beginPath()
+  ctx.roundRect(x, y, tw + 24, hgt, 4)
+  ctx.fill()
+  ctx.fillStyle = fg
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(text, x + 12, y + hgt / 2 + 1)
 }
 
 /** DISARM 中は対象を選べないことを映像の左上に出す（`onRoiPointerDown` が無視する理由）。 */

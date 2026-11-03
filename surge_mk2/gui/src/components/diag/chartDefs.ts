@@ -45,7 +45,7 @@ export const CH = {
     title: '速度',
     unit: 'm/s',
     series: [
-      { key: 'speed', label: '実測', tone: 'accent' },
+      { key: 'speed', label: '実測', tone: 'trace' },
       { key: 'speedCmd', label: '指令', tone: 'live', dash: true },
     ],
     minSpan: 0.6,
@@ -57,7 +57,7 @@ export const CH = {
     series: [
       { key: 'wheelFL', label: '前左', tone: 'dim' },
       { key: 'wheelFR', label: '前右', tone: 'fg' },
-      { key: 'wheelRL', label: '後左', tone: 'accent' },
+      { key: 'wheelRL', label: '後左', tone: 'trace' },
       { key: 'wheelRR', label: '後右', tone: 'live' },
     ],
     minSpan: 0.6,
@@ -67,7 +67,7 @@ export const CH = {
     title: '舵角',
     unit: '°',
     series: [
-      { key: 'steer', label: '実測', tone: 'accent' },
+      { key: 'steer', label: '実測', tone: 'trace' },
       { key: 'steerCmd', label: '指令', tone: 'live', dash: true },
     ],
     minSpan: 20,
@@ -77,7 +77,7 @@ export const CH = {
     title: 'バッテリー電圧',
     unit: 'V',
     series: [
-      { key: 'battDrive', label: '駆動', tone: 'accent' },
+      { key: 'battDrive', label: '駆動', tone: 'trace' },
       { key: 'battSignal', label: '信号', tone: 'live' },
     ],
     minSpan: 1,
@@ -91,7 +91,7 @@ export const CH = {
     title: 'バッテリー電流',
     unit: 'A',
     series: [
-      { key: 'currDrive', label: '駆動', tone: 'accent' },
+      { key: 'currDrive', label: '駆動', tone: 'trace' },
       { key: 'currSignal', label: '信号', tone: 'live' },
     ],
     minSpan: 1,
@@ -102,7 +102,7 @@ export const CH = {
     title: 'モータ電流',
     unit: 'A',
     series: [
-      { key: 'motorRL', label: '後左', tone: 'accent' },
+      { key: 'motorRL', label: '後左', tone: 'trace' },
       { key: 'motorRR', label: '後右', tone: 'live' },
       { key: 'motorST', label: 'ステア', tone: 'ok' },
     ],
@@ -112,7 +112,7 @@ export const CH = {
     title: '温度',
     unit: '℃',
     series: [
-      { key: 'temp0', label: 'MD後左', tone: 'accent' },
+      { key: 'temp0', label: 'MD後左', tone: 'trace' },
       { key: 'temp1', label: 'MD後右', tone: 'live' },
       { key: 'temp2', label: 'MDステア', tone: 'ok' },
       { key: 'temp3', label: 'MCU', tone: 'dim' },
@@ -129,7 +129,7 @@ export const CH = {
     title: '後左トルク',
     unit: 'N·m',
     series: [
-      { key: 'trqCmdRL', label: '実際', tone: 'accent' },
+      { key: 'trqCmdRL', label: '実際', tone: 'trace' },
       { key: 'trqReqRL', label: '要求', tone: 'live', dash: true },
     ],
     minSpan: 0.05,
@@ -141,7 +141,7 @@ export const CH = {
     title: '後右トルク',
     unit: 'N·m',
     series: [
-      { key: 'trqCmdRR', label: '実際', tone: 'accent' },
+      { key: 'trqCmdRR', label: '実際', tone: 'trace' },
       { key: 'trqReqRR', label: '要求', tone: 'live', dash: true },
     ],
     minSpan: 0.05,
@@ -153,7 +153,7 @@ export const CH = {
     title: 'スリップ率',
     unit: '%',
     series: [
-      { key: 'slipRL', label: '後左', tone: 'accent' },
+      { key: 'slipRL', label: '後左', tone: 'trace' },
       { key: 'slipRR', label: '後右', tone: 'live' },
     ],
     minSpan: 10,
@@ -165,7 +165,7 @@ export const CH = {
     title: 'TC・ABS トルク上限',
     unit: 'N·m',
     series: [
-      { key: 'tcLimitRL', label: 'TC 後左', tone: 'accent' },
+      { key: 'tcLimitRL', label: 'TC 後左', tone: 'trace' },
       { key: 'tcLimitRR', label: 'TC 後右', tone: 'live' },
       { key: 'absLimit', label: 'ABS', tone: 'warn' },
     ],
@@ -177,7 +177,7 @@ export const CH = {
     title: 'ヨーレート',
     unit: 'rad/s',
     series: [
-      { key: 'yawRate', label: '実測', tone: 'accent' },
+      { key: 'yawRate', label: '実測', tone: 'trace' },
     ],
     minSpan: 0.4,
     bands: EV.TV,
@@ -195,7 +195,7 @@ export const CH = {
     title: 'ヨーモーメント',
     unit: 'N·m',
     series: [
-      { key: 'tvApplied', label: '実際の左右差', tone: 'accent' },
+      { key: 'tvApplied', label: '実際の左右差', tone: 'trace' },
       { key: 'tvMoment', label: 'TV の要求', tone: 'live', dash: true },
     ],
     minSpan: 0.05,
@@ -206,7 +206,7 @@ export const CH = {
     title: '加速度',
     unit: 'm/s²',
     series: [
-      { key: 'accelX', label: '前後', tone: 'accent' },
+      { key: 'accelX', label: '前後', tone: 'trace' },
       { key: 'accelY', label: '左右', tone: 'live' },
     ],
     minSpan: 4,
@@ -215,7 +215,7 @@ export const CH = {
     title: '往復遅延',
     unit: 'ms',
     series: [
-      { key: 'rttMs', label: 'Pi⇄STM32', tone: 'accent' },
+      { key: 'rttMs', label: 'Pi⇄STM32', tone: 'trace' },
       { key: 'wsRttMs', label: 'ブラウザ⇄Pi', tone: 'live' },
     ],
     minSpan: 20,
@@ -227,7 +227,7 @@ export const CH = {
     title: '受信レート',
     unit: 'Hz',
     series: [
-      { key: 'rxHz', label: 'テレメトリ', tone: 'accent' },
+      { key: 'rxHz', label: 'テレメトリ', tone: 'trace' },
       { key: 'scanHz', label: 'LiDAR', tone: 'live' },
     ],
     minSpan: 10,
@@ -240,7 +240,7 @@ export const CH = {
     series: [
       { key: 'crcDelta', label: 'CRC（Pi 受信）', tone: 'bad' },
       { key: 'stmCrcDelta', label: 'CRC（STM32 受信）', tone: 'warn' },
-      { key: 'lossDelta', label: 'ロス', tone: 'accent' },
+      { key: 'lossDelta', label: 'ロス', tone: 'trace' },
     ],
     minSpan: 4,
     digits: 0,
@@ -250,7 +250,7 @@ export const CH = {
     title: 'io ループ最大・ハートビート遅れ',
     unit: 'ms',
     series: [
-      { key: 'loopMaxMs', label: 'ループ最大', tone: 'accent' },
+      { key: 'loopMaxMs', label: 'ループ最大', tone: 'trace' },
       { key: 'hbLateMs', label: 'HB 最大遅れ', tone: 'live' },
     ],
     minSpan: 5,
@@ -260,7 +260,7 @@ export const CH = {
   wifi: {
     title: 'Wi-Fi 電波強度',
     unit: 'dBm',
-    series: [{ key: 'wifiDbm', label: 'RSSI', tone: 'accent' }],
+    series: [{ key: 'wifiDbm', label: 'RSSI', tone: 'trace' }],
     minSpan: 20,
     digits: 0,
     lines: [
@@ -272,7 +272,7 @@ export const CH = {
     title: 'RasPi CPU 使用率',
     unit: '%',
     series: [
-      { key: 'piCpu', label: '平均', tone: 'accent' },
+      { key: 'piCpu', label: '平均', tone: 'trace' },
       { key: 'piCpuMax', label: '最大コア', tone: 'live' },
     ],
     minSpan: 40,
@@ -283,7 +283,7 @@ export const CH = {
     title: '超音波',
     unit: 'm',
     series: [
-      { key: 'usFront', label: '前', tone: 'accent' },
+      { key: 'usFront', label: '前', tone: 'trace' },
       { key: 'usRear', label: '後', tone: 'live' },
     ],
     minSpan: 0.5,

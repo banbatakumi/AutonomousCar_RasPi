@@ -1,26 +1,62 @@
 /*
- * 暗い背景の計器盤。走行中に**横目で読む**ことを前提にしている。
+ * レース用ダッシュの計器盤（2026-11-03、全タブをラジコンタブの見た目に揃えた）。
+ * 走行中に**横目で読む**ことを前提にしている。
  *
- * 色は意味に割り当てる。装飾で色を使わない。
- *   lv-ok   正常     lv-warn 注意（見ておく）   lv-bad 異常（今すぐ）
+ * 色は意味に割り当てる。装飾で意味色を使わない（ISO 2575 の警告灯の色の約束に合わせる）。
+ *   lv-ok   正常・作動中（緑）   lv-warn 注意（黄）   lv-bad 異常・止める（赤）
+ *   live    指令値・ARM 保持中（琥珀）   trace 計測値の線（青。グラフ・帯の実測）
  *   dim     参考値・無効
+ * **正常なものは光らせない**（航空機の「ダーク・コックピット」）。色と発光は注意・異常・作動中だけ。
+ *
+ * `--brand`（赤）は**値を持たない所**——筐体の縁・見出し・選択中のタブ——だけに使う。
+ * 異常の赤（`--bad`）と取り違えないよう、彩度と明るさを落としてある。
+ *
+ * 外装は2層: 地は**カーボン**（`--carbon`）、計器・パネルは**黒いガラスの液晶**（`--glass`）。
+ * 数字は DIN（`--font-num`。macOS・iPadOS に最初から入っているので依存もネットも要らない）。
  */
 
 :root {
-  --bg: #0b0e11;
-  --panel: #12161b;
-  --panel2: #171d23;
-  --line: #232b34;
-  --fg: #d6dde5;
-  --dim: #6a7683;
+  --bg: #0a0a0c;
+  --panel: #131316;
+  --panel2: #1a1a1e;
+  --line: #2a2a30;
+  --line-soft: #1e1e23;
+  --fg: #dfe1e5;
+  --dim: #767a83;
   --ok: #3ac26a;
   --warn: #e8ab21;
   --bad: #f2544b;
-  --accent: #4aa8ff;
   --live: #ffc63f;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  /* 計測値の線（旧 `--accent` の青）。指令（`--live`）と対で読む */
+  --trace: #4aa8ff;
+  --brand: #d5303f;
+  --brand-dim: #6a1c24;
+
+  /* 液晶の地。上辺に赤の細い縁（中央ほど濃い）、上から薄い反射 */
+  --glass:
+    linear-gradient(90deg, transparent 0%, #d5303f99 18%, #d5303f99 82%, transparent 100%) top / 100% 1px no-repeat,
+    linear-gradient(172deg, rgba(255, 255, 255, .035) 0%, rgba(255, 255, 255, 0) 32%),
+    radial-gradient(130% 100% at 50% 0%, #17171b 0%, #0c0c0e 75%);
+  /* 縁取り（ベゼル）。外に落ちる影＋内側の細い明るい縁 */
+  --bezel: inset 0 0 0 1px #26262c, inset 0 1px 0 rgba(255, 255, 255, .05), 0 2px 10px #0009;
+  /* カーボン織り（ラジコン HUD の台形と同じ模様。画像ファイルは使わない） */
+  --carbon:
+    linear-gradient(27deg, #0f0f11 2.5px, transparent 2.5px) 0 2.5px / 10px 10px,
+    linear-gradient(207deg, #0f0f11 2.5px, transparent 2.5px) 5px 0 / 10px 10px,
+    linear-gradient(27deg, #17171a 2.5px, transparent 2.5px) 0 5px / 10px 10px,
+    linear-gradient(207deg, #17171a 2.5px, transparent 2.5px) 5px 2.5px / 10px 10px,
+    linear-gradient(90deg, #121214 5px, transparent 5px) 0 0 / 10px 10px,
+    linear-gradient(#141416 25%, #101012 25%, #101012 50%, transparent 50%, transparent 75%, #18181b 75%, #18181b) 0 0 / 10px 10px,
+    #0d0d0f;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Segoe UI', sans-serif;
+  --font-num: 'DIN Alternate', 'Bahnschrift', 'Hiragino Sans', sans-serif;
+  --font-code: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+
+  font-family: var(--font-ui);
   font-size: 13px;
   color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
 }
 
 * {
@@ -37,24 +73,108 @@ body,
   overflow: hidden;
 }
 
+code,
+kbd,
+pre,
+.mono {
+  font-family: var(--font-code);
+}
+
+/* 数字は DIN の等幅数字。桁が変わっても位置が動かない */
+.num,
+b,
+.metric b {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * ボタンは物理スイッチの見た目: 上が明るい樹脂のキャップ、押すと沈む。
+ * `on`（選択中・作動中）は下辺に赤の発光ライン（値を持たない「選択」なので `--brand`）
+ */
 button {
   font: inherit;
   color: var(--fg);
-  background: var(--panel2);
-  border: 1px solid var(--line);
+  background: linear-gradient(#222227, #18181c);
+  border: 1px solid #2e2e35;
   border-radius: 4px;
   padding: 3px 9px;
   cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 1px 2px #0008;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button:hover {
-  border-color: #3a4652;
+  border-color: #45454f;
+}
+
+button:active:not(:disabled) {
+  background: linear-gradient(#141417, #1b1b1f);
+  box-shadow: inset 0 1px 3px #000c;
+  transform: translateY(1px);
 }
 
 button.on {
-  background: #22313f;
-  border-color: var(--accent);
-  color: #cfe7ff;
+  background: linear-gradient(#2a1a1d, #1c1214);
+  border-color: var(--brand);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 var(--brand), inset 0 1px 0 rgba(255, 255, 255, .06), 0 0 8px #d5303f40;
+}
+
+select,
+input[type='text'],
+input[type='number'],
+input:not([type]) {
+  font: inherit;
+  color: var(--fg);
+  background: #0c0c0e;
+  border: 1px solid #2e2e35;
+  border-radius: 4px;
+  box-shadow: inset 0 1px 3px #000a;
+}
+
+select:focus-visible,
+input:focus-visible,
+button:focus-visible {
+  outline: 1px solid var(--brand);
+  outline-offset: 1px;
+}
+
+input[type='range'] {
+  accent-color: var(--brand);
+}
+
+a {
+  color: var(--trace);
+}
+
+/* タッチ（iPad）のときだけ押す所を大きくする。マウスの Mac では今の密度のまま */
+@media (pointer: coarse) {
+
+  /* ラジコンの HUD・歯車は寸法を計算で決めているので除く */
+  button:not(.rc-hud *):not(.gear) {
+    min-height: 36px;
+    padding: 6px 12px;
+  }
+
+  .seg button {
+    min-height: 32px;
+  }
+
+  select,
+  input[type='text'],
+  input[type='number'] {
+    min-height: 36px;
+  }
+}
+
+/* 小見出し（パネルの名前）。ラジコンの `.rcs-head` と同じ流儀: 小さく、字間を広く、赤 */
+.cp-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .2em;
+  color: var(--brand);
 }
 
 .dim {
@@ -81,45 +201,137 @@ button.on {
   display: flex;
   flex-direction: column;
   height: 100%;
+  background: var(--carbon);
 }
 
 /* ── ステータスバー（層 B） ─────────────────────────────── */
 
+/*
+ * ダッシュの上辺（2026-11-03）。地はカーボン、下辺に赤の縁（ラジコン HUD の台形の上辺と同じ
+ * 「中央ほど濃い」線）。ピルは**警告灯（テルテール）**の見た目:
+ *   lv-ok   消灯に近い地に緑の小さな LED だけ（正常は光らせない）
+ *   lv-warn 琥珀に点灯   lv-bad 赤に点灯   dim 消灯（LED も暗い）
+ * 色に加えて LED の有無と地の明るさでも区別できる（色覚に頼らない）。
+ */
 .statusbar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  padding: 6px 12px 7px;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, .04), rgba(0, 0, 0, .35)),
+    var(--carbon);
   flex: 0 0 auto;
+  z-index: 5;
+}
+
+.statusbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #2b2224 0%, var(--brand) 30%, var(--brand) 70%, #2b2224 100%);
+  box-shadow: 0 0 10px #d5303f55;
+  pointer-events: none;
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+  white-space: nowrap;
+  font-family: var(--font-num);
+  font-style: italic;
+}
+
+/* 2本の赤い斜線（レーシングストライプ） */
+.brand-mark {
+  width: 16px;
+  height: 16px;
+  background: linear-gradient(90deg, var(--brand) 0 5px, transparent 5px 9px, var(--brand) 9px 14px, transparent 14px);
+  transform: skewX(-20deg);
+  filter: drop-shadow(0 0 4px #d5303f88);
+}
+
+.brand-name {
+  font-size: 17px;
   font-weight: 700;
-  letter-spacing: .04em;
-  margin-right: 6px;
+  letter-spacing: .14em;
+  color: #fff;
+}
+
+.brand-mk {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  color: var(--brand);
+  align-self: flex-end;
+  margin-bottom: 2px;
 }
 
 .pill {
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--panel2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid #26262c;
+  border-radius: 3px;
+  background: linear-gradient(#141417, #0d0d0f);
+  box-shadow: inset 0 1px 2px #000a;
+  color: #c4c7cd;
   font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
   white-space: nowrap;
 }
 
+/* LED。消灯中も「そこにある」のが分かる暗い粒を見せる（実物の警告灯と同じ） */
+.pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2c2c33;
+  flex: 0 0 auto;
+}
+
+.pill.dim {
+  color: var(--dim);
+}
+
 .pill.lv-ok {
-  border-color: #1f5c37;
+  color: #c4c7cd;
+}
+
+.pill.lv-ok::before {
+  background: var(--ok);
+  box-shadow: 0 0 5px var(--ok);
 }
 
 .pill.lv-warn {
-  border-color: #6b5210;
+  color: #1a1305;
+  background: linear-gradient(#f2bb37, #c98f12);
+  border-color: #f5c95a;
+  box-shadow: 0 0 10px #e8ab2160;
+}
+
+.pill.lv-warn::before {
+  background: #fff3cf;
 }
 
 .pill.lv-bad {
-  border-color: #6e2b27;
+  color: #fff;
+  background: linear-gradient(#e2433b, #a81f19);
+  border-color: #ff7a72;
+  box-shadow: 0 0 12px #f2544b70;
+}
+
+.pill.lv-bad::before {
+  background: #ffe1df;
 }
 
 /* SIM — 相手が実 STM32 ではなくシミュレータのときだけ出る。
@@ -132,6 +344,10 @@ button.on {
   color: #14181d;
   border-color: #b98b1b;
   background: repeating-linear-gradient(-45deg, #e0aa2a, #e0aa2a 6px, #c9971f 6px, #c9971f 12px);
+}
+
+.pill.sim::before {
+  display: none;
 }
 
 .metric {
@@ -150,17 +366,23 @@ button.on {
   font-size: 10px;
 }
 
-/* ARM は「保持されている」ことが遠目にも分かる必要がある */
+/*
+ * ARM — トグルスイッチ。保持中は琥珀に点灯して脈打つ（遠目にも「保持されている」と分かる）
+ */
 .armbtn {
-  min-width: 8.5em;
-  font-weight: 600;
-  letter-spacing: .03em;
+  min-width: 9.5em;
+  padding: 5px 12px;
+  font-family: var(--font-num);
+  font-weight: 700;
+  letter-spacing: .1em;
+  font-variant-numeric: tabular-nums;
 }
 
 .armbtn.on {
-  background: #4a3a08;
-  border-color: #b08a15;
+  background: linear-gradient(#5a470c, #3a2d06);
+  border-color: #e0ac24;
   color: var(--live);
+  text-shadow: 0 0 6px #ffc63f88;
   animation: armpulse 1.2s ease-in-out infinite;
 }
 
@@ -178,46 +400,144 @@ button.on {
 
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(255, 198, 63, .45);
+    box-shadow: inset 0 -2px 0 #ffc63f, 0 0 0 0 rgba(255, 198, 63, .45);
   }
 
   50% {
-    box-shadow: 0 0 0 4px rgba(255, 198, 63, 0);
+    box-shadow: inset 0 -2px 0 #ffc63f, 0 0 0 5px rgba(255, 198, 63, 0);
   }
 }
 
+/* E-STOP — 赤い大きな押しボタン。**どのタブでも同じ場所・同じ見た目** */
 .estop {
-  background: #40140f;
-  border-color: #7d2b23;
-  color: #ffb4ae;
+  padding: 5px 16px;
+  background: linear-gradient(#d23a32, #8e1913);
+  border: 1px solid #ff6a62;
+  color: #fff;
+  font-family: var(--font-num);
   font-weight: 700;
-  letter-spacing: .05em;
+  font-size: 14px;
+  letter-spacing: .12em;
+  text-shadow: 0 1px 0 #0006;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25), 0 0 0 2px #2a0c0a, 0 0 12px #f2544b55;
 }
 
 .estop:hover {
-  background: #5b1a13;
-  border-color: var(--bad);
+  background: linear-gradient(#e2433b, #a01d16);
+  border-color: #ff8f88;
+}
+
+/* シャットダウンは押し間違えたくないので沈ませる */
+.statusbar .shutdown-btn {
+  color: var(--dim);
+  font-size: 11px;
 }
 
 /* ラッチ系は health より目立たせる。人間が物理操作しないと戻らないため */
 .latch {
-  background: #3a1512;
-  border-bottom: 1px solid #7d2b23;
-  color: #ffc9c4;
-  padding: 5px 12px;
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(#4a1714, #33100e);
+  border-bottom: 1px solid #a3322a;
+  color: #ffd6d2;
+  padding: 6px 14px;
+  font-weight: 700;
+}
+
+.latch::before {
+  content: '!';
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background: var(--bad);
+  color: #fff;
+  font-size: 11px;
+  padding-top: 4px;
 }
 
 /* ── タブ ────────────────────────────────────────────── */
 
+/*
+ * ドライブモードの切替スイッチ風（2026-11-03）。斜めに切った板を並べ、選択中は
+ * 赤く点灯して下辺が光る。左上の数字は切替キー（1〜4）
+ */
 .tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 10px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--line);
+  gap: 10px;
+  padding: 6px 12px;
+  background: linear-gradient(#0e0e10, #0a0a0c);
+  border-bottom: 1px solid #1c1c21;
   flex: 0 0 auto;
+}
+
+.tabset {
+  display: flex;
+  gap: 3px;
+  padding-left: 6px;
+}
+
+.tabs .tab {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  column-gap: 7px;
+  align-items: center;
+  min-width: 7.5em;
+  padding: 4px 18px 4px 14px;
+  border: none;
+  border-radius: 0;
+  background: linear-gradient(#1d1d22, #141417);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+  clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  color: var(--dim);
+  text-align: left;
+}
+
+.tabs .tab:hover {
+  color: var(--fg);
+  background: linear-gradient(#25252b, #19191d);
+}
+
+.tabs .tab.on {
+  background: linear-gradient(#b52532, #6e1720);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 #ff5d6a, inset 0 1px 0 rgba(255, 255, 255, .2);
+}
+
+.tab-key {
+  grid-row: 1 / 3;
+  font-family: var(--font-num);
+  font-size: 18px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
+  opacity: .55;
+}
+
+.tab.on .tab-key {
+  opacity: .9;
+}
+
+.tab-name {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.tab-sub {
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .22em;
+  line-height: 1;
+  opacity: .6;
 }
 
 /* 灯火・ファン（DriveControls.tsx）。運転できるタブのときだけタブバー右側に出る */
@@ -261,7 +581,7 @@ button.on {
 }
 
 .recbtn.active {
-  border-color: var(--accent);
+  border-color: var(--brand);
 }
 
 .recbtn.recording .rec-dot {
@@ -344,8 +664,10 @@ button.on {
    * 内在サイズにつられて膨らんでしまう。**行自体を固定値にして初めて
    * 両セルが同じ高さになる**。`.autopanel`（`overflow-y:auto` で吸収）・
    * `.auto-car`（`height:100%` の子がここに揃う）はどちらもこの値に暗黙で
-   * 依存しているので、変えるならこの1箇所だけでよい） */
-  grid-template-rows: minmax(0, 1fr) auto 420px;
+   * 依存しているので、変えるならこの1箇所だけでよい）。
+   * 2026-11-03: 420px 固定 → 画面の高さの 44%（MacBook Air 14 で従来と同じ約 420px、
+   * 4K では広がり、iPad では詰まる）。行の高さが中身で決まらないことは変わらない */
+  grid-template-rows: minmax(0, 1fr) auto clamp(300px, 44vh, 680px);
   /* **グリッドエリア名に `auto` は使わない**——`grid-area: auto` はエリア名の
    * 参照ではなく CSS のキーワード `auto`（＝自動配置）として解釈されてしまい、
    * 意図した列に auto-placement されず空白ができるという罠を実機で踏んだ。
@@ -383,11 +705,12 @@ button.on {
 
 .camera {
   position: relative;
-  background: #07090b;
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   overflow: hidden;
   min-height: 0;
+  box-shadow: var(--bezel);
 }
 
 .camera canvas {
@@ -439,11 +762,12 @@ button.on {
 .lidar {
   grid-area: lidar;
   position: relative;
-  background: #0b0e11;
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   overflow: hidden;
   min-height: 0;
+  box-shadow: var(--bezel);
 }
 
 .lidar-canvas {
@@ -490,10 +814,11 @@ button.on {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   padding: 5px 16px;
+  box-shadow: var(--bezel);
 }
 
 /* 受信が途絶したら数字をグレーにする。**古い値を現在値に見せない** */
@@ -523,7 +848,8 @@ button.on {
 }
 
 .gauge .big {
-  font-size: 18px;
+  font-family: var(--font-num);
+  font-size: 22px;
   font-weight: 700;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -576,8 +902,8 @@ button.on {
   top: 0;
   bottom: 0;
   border-radius: 2px;
-  background: var(--accent);
-  box-shadow: 0 0 6px 0 color-mix(in srgb, var(--accent) 70%, transparent);
+  background: var(--trace);
+  box-shadow: 0 0 6px 0 color-mix(in srgb, var(--trace) 70%, transparent);
 }
 
 /* 指令値は線で重ねる。実測との差＝アクチュエータの遅れ */
@@ -642,10 +968,11 @@ button.on {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   padding: 8px 12px 10px;
+  box-shadow: var(--bezel);
 }
 
 .autopanel.engaged {
@@ -658,9 +985,12 @@ button.on {
 }
 
 .autopanel .label {
-  color: var(--dim);
-  font-size: 11px;
   display: block;
+  margin-bottom: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  color: var(--brand);
 }
 
 /* モード選択（走らせ方）と engage を横並びの1行に。狭い幅では折り返す */
@@ -728,8 +1058,11 @@ button.on {
   white-space: pre-wrap;
 }
 
+/* 縮めてよい（`min-width:0`）。縮めないと iPad の幅で中のボタン行（`.slam-race-buttons`）が
+ * 折り返せず、パネルの外にはみ出す（2026-11-03） */
 .auto-engage {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -841,7 +1174,7 @@ button.on {
 
 .auto-param input[type='range'] {
   width: 100%;
-  accent-color: var(--accent);
+  accent-color: var(--brand);
 }
 
 /* ── 車体図（`AutoPanel` の右隣、右下）────────────────────────────
@@ -869,10 +1202,11 @@ button.on {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   padding: 8px;
+  box-shadow: var(--bezel);
 }
 
 .auto-car .drivepanel-wrap {
@@ -884,37 +1218,40 @@ button.on {
   margin: 0 auto;
 }
 
-/* 3段の灯火モード。**今どれなのかが一目で分かること**だけを狙う */
+/* 3段の灯火モード。**今どれなのかが一目で分かること**だけを狙う。
+ * 見た目はダッシュの切替スイッチ: 凹んだ溝に板が並び、選んだ板だけが点灯する */
 .seg {
   display: inline-flex;
   margin-top: 3px;
+  padding: 2px;
+  gap: 2px;
+  background: #0a0a0c;
+  border: 1px solid #222227;
+  border-radius: 5px;
+  box-shadow: inset 0 1px 3px #000c;
 }
 
 .seg button {
-  border: 1px solid var(--line);
-  background: var(--panel2);
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
   color: var(--dim);
   padding: 3px 10px;
-  border-radius: 0;
+  border-radius: 3px;
   font-size: 11px;
+  font-weight: 600;
 }
 
-.seg button:first-child {
-  border-radius: 4px 0 0 4px;
-}
-
-.seg button:last-child {
-  border-radius: 0 4px 4px 0;
-}
-
-.seg button+button {
-  border-left: none;
+.seg button:hover {
+  color: var(--fg);
+  border-color: transparent;
 }
 
 .seg button.on {
-  background: #2a3441;
-  color: var(--fg);
-  border-color: #3b4550;
+  background: linear-gradient(#2c1b1e, #1e1315);
+  color: #fff;
+  border-color: #5a1e25;
+  box-shadow: inset 0 -2px 0 var(--brand), 0 0 8px #d5303f33;
 }
 
 .seg button:disabled {
@@ -925,18 +1262,14 @@ button.on {
 /* ── ラジコンビュー ───────────────────────────────────── */
 
 /*
- * GR 風「黒基調＋赤アクセント」（2026-08-17）。`.rc` の子孫だけに効く
- * スコープ付き CSS 変数で上書きしている。**グローバルな `:root` は触らない**
- * ——`--accent` は自動運転ビュー・診断タブなど他画面でも青のまま使われて
- * いるため、ここで変えると意味の対応（例: 指令値の線）が食い違う。
- * `--fg`/`--dim`/`--ok`/`--warn`/`--bad`/`--live` は安全に関わる意味色
- * なので上書きしない。華美にならないよう、赤は彩度を落とし気味にしてある。
+ * GR 風「黒基調＋赤アクセント」（2026-08-17）。2026-11-03 に赤アクセント（`--brand`）を
+ * 全タブ共通にしたので、ここで上書きするのはパネルの地の暖色寄りの黒だけ。
+ * `--fg`/`--dim`/`--ok`/`--warn`/`--bad`/`--live` は安全に関わる意味色なので上書きしない。
  */
 .rc {
   --panel: #131013;
   --panel2: #181415;
   --line: #2b2224;
-  --accent: #d5303f;
 
   flex: 1;
   min-height: 0;
@@ -979,6 +1312,8 @@ button.on {
   cursor: default;
   border: none;
   border-radius: 0;
+  background: #000;
+  box-shadow: none;
 }
 
 /* バックミラー。映像の上中央。実車のルームミラーに寄せて角を丸め、縁を付ける */
@@ -1000,6 +1335,8 @@ button.on {
   height: 100%;
   border: none;
   border-radius: 0;
+  background: #000;
+  box-shadow: none;
 }
 
 .rc-mirror .camera-fps {
@@ -1363,10 +1700,7 @@ button.on {
 }
 
 .rc-status {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  z-index: 2;
+  position: relative;
   width: var(--rcs-w);
   box-sizing: border-box;
   padding: 5px 9px 8px;
@@ -1617,6 +1951,54 @@ button.on {
   color: #ff9b93;
 }
 
+/* 映像の左上の列（電池・温度 `RcStatus` と、その下のクリアランスソナー `ParkSensor`） */
+.rc-left {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: var(--rcs-w);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: default;
+}
+
+/*
+ * クリアランスソナー（`ParkSensor.tsx`、2026-11-03）。電池・温度パネルと同じ部品の見た目
+ * （半透明の黒・上辺の赤・右下の角落とし）で、その下に縦に並ぶ
+ */
+.park-sensor {
+  box-sizing: border-box;
+  padding: 5px 9px 7px;
+  background: linear-gradient(to bottom, rgba(24, 16, 18, .88), rgba(6, 6, 7, .88));
+  border-top: 2px solid var(--brand);
+  box-shadow: inset 0 0 0 1px #2c2226, 0 4px 14px #0009;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+  transition: opacity 200ms;
+}
+
+.park-sensor.stale {
+  opacity: .4;
+}
+
+.park-svg {
+  display: block;
+  width: 72%;
+  height: auto;
+  margin: 2px auto 0;
+}
+
+.park-car {
+  fill: #2a2a30;
+  stroke: #8a8d94;
+  stroke-width: 1.2;
+}
+
+.park-glass {
+  fill: #121216;
+}
+
 /* LiDAR ミニマップ（映像右上、指示により据え置き）。クリックで拡大縮小。
    ⚙（`.gear`）と重ならないよう、その下から始める */
 .rc-lidar-mini {
@@ -1630,7 +2012,7 @@ button.on {
   aspect-ratio: 1 / 1;
   border-radius: 50%;
   overflow: hidden;
-  box-shadow: 0 3px 12px #000c, 0 0 0 2px var(--accent);
+  box-shadow: 0 3px 12px #000c, 0 0 0 2px var(--brand);
   cursor: pointer;
   transition: height 140ms ease;
 }
@@ -1729,7 +2111,7 @@ button.on {
 /* 実測の塗り。**ほんの少しだけ発光させる**（GR 風の締まり — 出しすぎると眩しいので控えめに） */
 .arc-fill {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--brand);
   stroke-width: 7;
   stroke-linecap: round;
   filter: drop-shadow(0 0 3px rgba(213, 48, 63, .55));
@@ -1753,7 +2135,7 @@ button.on {
 
 /* MT のレッドライン（v0.18）。**常時描画**して「このギアの上限はここ」を速度に
    関わらず先に見せる——実車のタコメータの赤ゾーンと同じ発想。本体の弧（r=46）
-   ではなく外側の r=52 に描くのは、`.rc` スコープの `--accent` が既に赤系で、
+   ではなく外側の r=52 に描くのは、`--brand`（弧の色）が既に赤系で、
    同じ半径だと現在速度の塗り（`.arc-fill`）に埋もれて見えなくなるため */
 .arc-redline {
   fill: none;
@@ -1787,12 +2169,12 @@ button.on {
 
 .needle-hub {
   fill: var(--fg);
-  stroke: var(--accent);
+  stroke: var(--brand);
   stroke-width: 1.5;
 }
 
 /* ギア/レンジ表示（v0.18）。240°スイープの下120°の空きに常時表示——速度制御・
-   トルク制御中は D/R、MT モード中は R/1〜5。`--accent`（弧の色）は使わない。
+   トルク制御中は D/R、MT モード中は R/1〜5。`--brand`（弧の色）は使わない。
    現在速度の表示と混同されないよう別の意味の色にしてある */
 .gear-chip {
   fill: var(--panel2);
@@ -1897,7 +2279,7 @@ button.on {
 
 .dp-body {
   fill: var(--panel2);
-  stroke: var(--accent);
+  stroke: var(--brand);
   stroke-opacity: .35;
   stroke-width: 1.5;
 }
@@ -1909,7 +2291,7 @@ button.on {
 
 /* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境にトルクぶんだけ塗る単色ゲージ */
 .dp-wheel-fill {
-  fill: var(--accent);
+  fill: var(--brand);
   filter: drop-shadow(0 0 2px rgba(213, 48, 63, .5));
 }
 
@@ -1926,7 +2308,7 @@ button.on {
 }
 
 /* TC の動的トルク上限マーカー（`tc_limit_nm`）。`.arc-target`（指令速度マーカー）
- * と同じ `--live` 系の色で、トルクゲージ本体（`--accent`）とは意図的に見分ける。
+ * と同じ `--live` 系の色で、トルクゲージ本体（`--brand`）とは意図的に見分ける。
  * 非介入時はバーの上端に張り付き、TC が効くとバーの途中まで下りてくる */
 .dp-tc-limit {
   stroke: var(--live);
@@ -1948,7 +2330,7 @@ button.on {
 /*
  * スリップゲージ（後輪はタイヤの外側半分、前輪はタイヤ全幅）。ok/warn/bad の
  * 判定を持たない量なので `--dim`（「参考値」の意味、ファイル冒頭のコメント
- * 参照）で塗る——電流ゲージの `--accent`（赤系、RCビュー用の上書き）とは
+ * 参照）で塗る——電流ゲージの `--brand`（赤系）とは
  * 意図的に違う色にして見分ける。
  */
 .dp-slip-fill {
@@ -2008,7 +2390,7 @@ button.on {
 
 .dp-flow {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--brand);
   stroke-width: 2;
   stroke-linecap: round;
   stroke-dasharray: 3 6;
@@ -2153,7 +2535,7 @@ button.on {
 
 .gear.on {
   background: #3a1418;
-  border-color: var(--accent);
+  border-color: var(--brand);
 }
 
 /*
@@ -2228,8 +2610,8 @@ button.on {
 .dg-top {
   flex: 0 0 auto;
   padding: 10px 18px 0;
-  border-bottom: 1px solid var(--line);
-  background: linear-gradient(var(--panel), var(--bg));
+  border-bottom: 1px solid #222227;
+  background: linear-gradient(rgba(10, 10, 12, .6), rgba(10, 10, 12, .9));
 }
 
 .dg-bar {
@@ -2275,6 +2657,8 @@ button.on {
   gap: 6px;
 }
 
+/* 常設サマリのタイルは**警告灯**として作る: 正常は消灯（左の縁が暗い緑になるだけ）、
+ * 注意・異常で地ごと点灯する（ダーク・コックピット） */
 .dg-tile {
   display: flex;
   flex-direction: column;
@@ -2282,10 +2666,11 @@ button.on {
   gap: 1px;
   padding: 6px 10px 7px;
   text-align: left;
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--line);
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-left: 3px solid #2c2c33;
   border-radius: 4px;
+  box-shadow: var(--bezel);
   min-width: 0;
 }
 
@@ -2296,7 +2681,8 @@ button.on {
 }
 
 .dg-tile-value {
-  font-size: 19px;
+  font-family: var(--font-num);
+  font-size: 22px;
   font-weight: 700;
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
@@ -2320,7 +2706,7 @@ button.on {
 }
 
 .dg-tile.is-ok {
-  border-left-color: var(--ok);
+  border-left-color: #2a7a48;
 }
 
 .dg-tile.is-warn {
@@ -2332,10 +2718,16 @@ button.on {
   color: var(--warn);
 }
 
+.dg-tile.is-warn {
+  background: linear-gradient(#2e2408, #1a1405);
+  box-shadow: var(--bezel), 0 0 10px #e8ab2130;
+}
+
 .dg-tile.is-bad {
   border-left-color: var(--bad);
-  border-color: #6e2b27;
-  background: #23130f;
+  border-color: #a3322a;
+  background: linear-gradient(#3a1512, #200c0a);
+  box-shadow: var(--bezel), 0 0 12px #f2544b40;
 }
 
 .dg-tile.is-bad .dg-tile-value {
@@ -2396,12 +2788,13 @@ button.on {
 }
 
 .dg-card {
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--glass);
+  border: 1px solid #222227;
   border-left: 3px solid var(--line);
-  border-radius: 5px;
+  border-radius: 6px;
   padding: 9px 12px 10px;
   min-width: 0;
+  box-shadow: var(--bezel);
 }
 
 .dg-card.wide {
@@ -2410,10 +2803,10 @@ button.on {
 
 .dg-card h4 {
   margin: 0 0 7px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--dim);
-  letter-spacing: .05em;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--brand);
+  letter-spacing: .16em;
 }
 
 .dg-card.is-warn {
@@ -2612,10 +3005,11 @@ button.on {
   gap: 0;
   margin-bottom: var(--dg-gap);
   padding: 12px 14px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   overflow-x: auto;
+  box-shadow: var(--bezel);
 }
 
 .dg-node {
@@ -2765,11 +3159,12 @@ button.on {
 }
 
 .dg-chart {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   padding: 8px 10px 6px;
   min-width: 0;
+  box-shadow: var(--bezel);
 }
 
 /* 見出しは常に2行ぶんの高さを取る（凡例が1行で済むグラフと2行になるグラフで、描画領域の位置を揃える） */
@@ -2830,7 +3225,7 @@ button.on {
   border-top-style: dashed;
 }
 
-.dg-swatch.tone-accent { color: var(--accent); }
+.dg-swatch.tone-trace { color: var(--trace); }
 .dg-swatch.tone-live { color: var(--live); }
 .dg-swatch.tone-ok { color: var(--ok); }
 .dg-swatch.tone-warn { color: var(--warn); }
@@ -2877,6 +3272,75 @@ button.on {
   margin: 0;
 }
 
+/* ページ名に添える英字（タブの `.tab-sub` と同じ流儀） */
+.page-sub {
+  margin-left: 10px;
+  font-family: var(--font-num);
+  font-size: 12px;
+  font-style: italic;
+  letter-spacing: .22em;
+  color: var(--brand);
+}
+
+/* ── システム同定（`SysIdView.tsx`）。設定パネルの部品を流用し、開始/中止だけ大きなスイッチにする */
+.sysid-view .settings-group>.label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  color: var(--brand);
+}
+
+.sysid-view select {
+  min-width: 18em;
+  padding: 5px 8px;
+}
+
+.sysid-view .logs-row {
+  gap: 10px;
+}
+
+.sysid-start,
+.sysid-stop {
+  min-width: 9em;
+  padding: 9px 18px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+/* 作動中は緑に点灯（警告灯の色の約束: 緑＝作動中） */
+.sysid-start.on {
+  background: linear-gradient(#1f5c37, #133a23);
+  border-color: var(--ok);
+  color: #d9ffe6;
+  box-shadow: inset 0 -2px 0 var(--ok), 0 0 10px #3ac26a40;
+}
+
+.sysid-stop:not(:disabled) {
+  border-color: #a3322a;
+  color: #ffc9c4;
+}
+
+.sysid-start:disabled:not(.on),
+.sysid-stop:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* 判断の文（進行・完了・中止）は液晶の大きな表示で読む */
+.sysid-view .auto-state .auto-reason {
+  margin-top: 10px;
+  padding: 10px 14px;
+  font-size: 15px;
+  font-weight: 600;
+  background: #070708;
+  border: 1px solid #222227;
+  border-radius: 4px;
+  box-shadow: inset 0 1px 4px #000c;
+}
+
 .settings-head p {
   margin: 0;
   flex: 1 1 100%;
@@ -2885,7 +3349,7 @@ button.on {
 }
 
 .settings-head code {
-  color: var(--accent);
+  color: var(--trace);
 }
 
 /* 項目テーマ別のタブ（走行／安全／カメラ）。`.seg`（制御方式トグル等と同じ見た目）を
@@ -2900,18 +3364,20 @@ button.on {
 }
 
 .settings-group {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 5px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
   padding: 10px 16px 4px;
   margin-bottom: 14px;
+  box-shadow: var(--bezel);
 }
 
 .settings-group h3 {
   margin: 0 0 6px;
-  font-size: 12px;
-  color: var(--dim);
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  color: var(--brand);
 }
 
 .settings-row {
@@ -2946,7 +3412,7 @@ button.on {
 
 .settings-row input[type='range'] {
   width: 100%;
-  accent-color: var(--accent);
+  accent-color: var(--brand);
 }
 
 .settings-checkbox {
@@ -3014,7 +3480,7 @@ button.on {
 }
 
 .logs-actions a {
-  color: var(--accent);
+  color: var(--trace);
 }
 
 /* ── 自動運転ビューの地図パネル（`AutoMapPanel.tsx`）─────────────────────
@@ -3026,10 +3492,11 @@ button.on {
   flex: 0 1 auto;
   height: 100%;
   aspect-ratio: 1 / 1;
-  background: #0b0e11;
+  background: var(--glass);
   border: 1px solid #1b2229;
-  border-radius: 5px;
+  border-radius: 6px;
   overflow: hidden;
+  box-shadow: var(--bezel);
 }
 
 .map-canvas {
@@ -3137,7 +3604,7 @@ button.on {
 }
 
 .map-library-pick a {
-  color: var(--accent);
+  color: var(--trace);
   font-size: 12px;
 }
 

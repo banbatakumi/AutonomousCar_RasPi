@@ -28,7 +28,8 @@ import { SplashEmblem } from './components/SplashEmblem'
 import { StatusBar } from './components/StatusBar'
 import { live } from './bus/live'
 import { useEngineSound } from './hooks/useEngineSound'
-import { useDriving } from './input/useDriving'
+import { useParkBeep } from './hooks/useParkBeep'
+import { isTextEntry, useDriving } from './input/useDriving'
 import type { DrivingSettings } from './store/ui'
 import { MSGS_SCHEMA } from './generated/msgs'
 import { notify, useUi } from './store/ui'
@@ -45,6 +46,14 @@ const isArmed = () => !!live.vs?.armed
 
 const TABS = ['ラジコン', '自動運転', '診断', 'システム同定'] as const
 type Tab = (typeof TABS)[number]
+
+/** タブの下に小さく添える英字（レース用ダッシュのページ名の流儀）。意味は日本語の方が正 */
+const TAB_SUB: Record<Tab, string> = {
+  ラジコン: 'DRIVE',
+  自動運転: 'AUTO',
+  診断: 'DIAG',
+  システム同定: 'CALIB',
+}
 
 /** 操縦しうるタブ。ここでだけ灯火・ファン操作（`DriveControls`）を出す（診断では邪魔になる） */
 const DRIVING_TABS: Tab[] = ['ラジコン', '自動運転', 'システム同定']
@@ -185,10 +194,25 @@ export function App() {
     }
   }, [set])
 
+  // 数字キー 1〜4 でタブを切り替える（操縦キーとは重ならない。文字を打つ欄では効かせない）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return
+      if (e.target instanceof HTMLElement && isTextEntry(e.target)) return
+      const i = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code)
+      const next = TABS[i]
+      if (next) setTab(next)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   // **タブに関係なく操縦は生きている。** 診断タブを見ている間に急に止まると事故になる
   useDriving(ch)
   // GUI 演出のみ（車両側には無関係）。`ui.engineSoundOn` の間だけ鳴る
   useEngineSound()
+  // クリアランスソナーの音。ARM 中だけ、どのタブでも鳴る（`hooks/useParkBeep.ts`）
+  useParkBeep()
 
   // タブの中身の描画が落ちたとき（`ErrorBoundary`）。何が表示できていないか分からないまま
   // 走らせないよう、車を止める。`StatusBar` と `useDriving` は境界の外なので生きている
@@ -214,11 +238,22 @@ export function App() {
         variant={tab === 'ラジコン' ? 'rc' : 'full'}
       />
       <nav className="tabs">
-        {TABS.map((t) => (
-          <button key={t} className={t === tab ? 'on' : ''} onClick={() => setTab(t)}>
-            {t}
-          </button>
-        ))}
+        <div className="tabset" role="tablist">
+          {TABS.map((t, i) => (
+            <button
+              key={t}
+              role="tab"
+              aria-selected={t === tab}
+              className={`tab ${t === tab ? 'on' : ''}`}
+              onClick={() => setTab(t)}
+              title={`${i + 1} キーでも切り替わる`}
+            >
+              <span className="tab-key">{i + 1}</span>
+              <span className="tab-name">{t}</span>
+              <span className="tab-sub">{TAB_SUB[t]}</span>
+            </button>
+          ))}
+        </div>
         <ErrorBoundary name="記録" compact>
           <LogControls ch={ch} />
         </ErrorBoundary>

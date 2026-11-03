@@ -13,7 +13,7 @@ export const SYNC_KEY = 'surge-diag'
 /** 縦軸の幅 [px]。**全グラフで揃える**（揃っていないとカーソルの縦線が隣とずれて見える） */
 export const Y_AXIS_PX = 52
 
-export type Tone = 'accent' | 'live' | 'ok' | 'warn' | 'bad' | 'dim' | 'fg' | 'line'
+export type Tone = 'trace' | 'live' | 'ok' | 'warn' | 'bad' | 'dim' | 'fg' | 'line'
 
 let cache: Record<Tone, string> | null = null
 
@@ -23,7 +23,7 @@ export function tones(): Record<Tone, string> {
   const cs = getComputedStyle(document.documentElement)
   const get = (name: string) => cs.getPropertyValue(name).trim()
   cache = {
-    accent: get('--accent'),
+    trace: get('--trace'),
     live: get('--live'),
     ok: get('--ok'),
     warn: get('--warn'),

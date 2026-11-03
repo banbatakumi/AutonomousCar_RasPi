@@ -64,11 +64,12 @@
  * 映像の比率も実際に届いた画像から決める（実機ではセンサーが要求どおりのモードを
  * 取らないことがある）。フレームが来るまでは `FALLBACK_ASPECT` で仮組みしておく。
  */
-import { useState, type CSSProperties } from 'react'
-import { useUi } from '../store/ui'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { reverseSelected, useUi } from '../store/ui'
 import { AssistLamps } from '../components/rc/AssistLamps'
 import { GMeter } from '../components/rc/GMeter'
 import { LidarMini } from '../components/rc/LidarMini'
+import { ParkSensor } from '../components/rc/ParkSensor'
 import { RcStatus } from '../components/rc/RcStatus'
 import { ShiftLights } from '../components/rc/ShiftLights'
 import { SpeedGauge } from '../components/rc/SpeedGauge'
@@ -132,6 +133,25 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
   const mainCam = useUi((s) => s.mainCam)
   const [frontAspect, setFrontAspect] = useState(FALLBACK_ASPECT)
 
+  // R に入れたらメインを後方カメラへ、抜けたら前方へ戻す（`autoRearCam`）。**戻すのは自分で
+  // 切り替えたときだけ**——R の間に人が前方へ戻したなら、抜けたときに触らない
+  const reverse = useUi((s) => reverseSelected(s))
+  const autoRearCam = useUi((s) => s.autoRearCam)
+  const switchedRef = useRef(false)
+  useEffect(() => {
+    if (!autoRearCam) return
+    const ui = useUi.getState()
+    if (reverse) {
+      if (ui.mainCam !== 'rear') {
+        ui.set({ mainCam: 'rear' })
+        switchedRef.current = true
+      }
+    } else if (switchedRef.current) {
+      switchedRef.current = false
+      if (ui.mainCam === 'rear') ui.set({ mainCam: 'front' })
+    }
+  }, [reverse, autoRearCam])
+
   const { ref: rcRef, size: videoSize } = useContainFit<HTMLDivElement>(frontAspect)
   const { ref: hudRef, size: hudSize } = useElementSize<HTMLDivElement>()
   const dialH = hudSize ? Math.max(40, hudSize.height - HUD_PAD_TOP_PX - DIAL_TEXT_RESERVE_PX) : null
@@ -167,6 +187,7 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
           label={CAM_LABEL[mainCam]}
           variant="minimal"
           onAspect={mainCam === 'front' ? setFrontAspect : undefined}
+          overlayBottomInset={hudH + SHIFT_LIGHTS_H_PX}
         />
 
         {rearPip && videoSize && <div className="rc-mirror-stay" />}
@@ -192,8 +213,12 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
           </div>
         )}
 
-        {/* 電池と温度（左上）。走行を切り上げる判断に使うので常時出す */}
-        <RcStatus />
+        {/* 左上の列: 電池と温度（走行を切り上げる判断に使うので常時）と、その下にクリアランスソナー
+            （後退中か、ゆっくり動いていて何かが近いときだけ）。映像の下側は運転に要る視界なので空けておく */}
+        <div className="rc-left" onClick={(e) => e.stopPropagation()}>
+          <RcStatus />
+          <ParkSensor />
+        </div>
 
         {/* LiDAR ミニマップ。ゲームのマップ表示のように丸く重ねる */}
         {lidarVisible && (

@@ -246,6 +246,10 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   }
   const saveCurrentAsDefault = useUi((s) => s.saveCurrentAsDefault)
   const pathGuide = useUi((s) => s.pathGuide)
+  const obstacleOverlay = useUi((s) => s.obstacleOverlay)
+  const planOverlay = useUi((s) => s.planOverlay)
+  const autoRearCam = useUi((s) => s.autoRearCam)
+  const parkBeep = useUi((s) => s.parkBeep)
   const engineSoundOn = useUi((s) => s.engineSoundOn)
   const fan = useUi((s) => s.fan)
   const set = useUi((s) => s.set)
@@ -362,11 +366,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               />
               止まった状態でブレーキとアクセルを両方踏み、ブレーキを離すと全開で発進する
             </label>
-            <p className="dim">
-              キーボードは Space＋W/S、パッドは L2＋R2（9割以上）。速度制御・MT は目標速度をいきなり上限まで上げ、
-              STM32 が速度制御の立ち上がりを待たずに全開＋TC で加速する（上限速度に届くと終わる）。トルク制御は
-              設定の駆動トルクに関わらず最大トルクを出す。どちらもアクセルを離すかブレーキを踏むと終わる
-            </p>
           </section>
           <section className="settings-group">
             <h3>自動停止（超音波+LiDAR）</h3>
@@ -669,6 +668,28 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               <input type="checkbox" checked={pathGuide} onChange={(e) => set({ pathGuide: e.target.checked })} />
               前後カメラに進路ガイドを重ねる（校正前・暫定）
             </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={obstacleOverlay}
+                disabled={!pathGuide}
+                onChange={(e) => set({ obstacleOverlay: e.target.checked })}
+              />
+              進路上の障害物（LiDAR）と当たる位置を重ねる（近づく速さで 白→琥珀→赤）
+            </label>
+            <label className="settings-checkbox">
+              <input
+                type="checkbox"
+                checked={planOverlay}
+                disabled={!pathGuide}
+                onChange={(e) => set({ planOverlay: e.target.checked })}
+              />
+              自動運転の計画（指令の進路・経路・狙う点）を前方カメラに重ねる
+            </label>
+            <label className="settings-checkbox">
+              <input type="checkbox" checked={autoRearCam} onChange={(e) => set({ autoRearCam: e.target.checked })} />
+              R に入れたらラジコンのメイン映像を後方カメラに切り替える
+            </label>
             {CAMERA_FIELDS.map((f) => (
               <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
             ))}
@@ -797,6 +818,13 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               ON/OFF は毎回明示的な操作が要る非永続の値（`store/ui.ts` の
               `engineSoundOn` コメント参照）なので、他の設定と違いここだけ `set` で
               直接読み書きする。音色（`settings.engineSoundType`）は通常どおり永続化 */}
+          <section className="settings-group">
+            <h3>クリアランスソナー</h3>
+            <label className="settings-checkbox">
+              <input type="checkbox" checked={parkBeep} onChange={(e) => set({ parkBeep: e.target.checked })} />
+              ARM 中、進む向きの半周（LiDAR・超音波）に 0.4m より近い物があると断続音、0.1m より近いと連続音を鳴らす（演出のみ。止めるのは自動停止）
+            </label>
+          </section>
           <section className="settings-group">
             <h3>エンジン音</h3>
             <label className="settings-checkbox">

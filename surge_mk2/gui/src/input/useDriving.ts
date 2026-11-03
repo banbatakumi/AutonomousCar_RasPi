@@ -418,7 +418,7 @@ const NON_TEXT_INPUT_TYPES = new Set([
 ])
 
 /** 文字を打つ欄か（テキスト・数値の入力欄、TEXTAREA、contentEditable） */
-function isTextEntry(el: HTMLElement): boolean {
+export function isTextEntry(el: HTMLElement): boolean {
   if (el.isContentEditable || el.tagName === 'TEXTAREA') return true
   return el.tagName === 'INPUT' && !NON_TEXT_INPUT_TYPES.has((el as HTMLInputElement).type)
 }

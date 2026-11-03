@@ -65,7 +65,11 @@ export function StatusBar({
   return (
     <>
       <header className="statusbar">
-        <div className="brand">SURGE&nbsp;Mk.2</div>
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true" />
+          <span className="brand-name">SURGE</span>
+          <span className="brand-mk">Mk.2</span>
+        </div>
 
         {/* **実機かシムかは何よりも先に分かる必要がある。** variant で省かない。
             これを見落としたまま --allow-arm すると本物の車が動く。
@@ -170,6 +174,7 @@ export function StatusBar({
           E-STOP
         </button>
         <button
+          className="shutdown-btn"
           onClick={() => {
             void askConfirm('ラズパイをシャットダウンしますか？').then((ok) => ok && onShutdown())
           }}
