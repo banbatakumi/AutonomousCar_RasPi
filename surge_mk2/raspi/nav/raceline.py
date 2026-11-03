@@ -656,9 +656,9 @@ def retime(rl: RaceLine, *, v_max: float, v_min: float, a_lat, a_accel: float,
 
 #: 見通しを測る間隔と上限 [m]（`sight_distance`）
 SIGHT_STRIDE_M = 0.15
-#: ★ 最高速度 4m/s を「見えている距離の中で止まれる」には 5.0m 要る（3.6 のままだと、見通しが
-#:   どれだけ利いていても 3.4m/s で頭打ちになる）
-SIGHT_MAX_M = 5.2
+#: ★ 最高速度 5m/s を「見えている距離の中で止まれる」には 7.05m 要る（学習なしの上限・空走 0.25s で。
+#:   5.2 のままだと、見通しがどれだけ利いていても 4.1m/s で頭打ちになる）。2026-11-03 に 5.2 → 7.2
+SIGHT_MAX_M = 7.2
 
 
 def sight_distance(grid, xy: np.ndarray, closed: bool = True, *, max_m: float = SIGHT_MAX_M,

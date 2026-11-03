@@ -636,11 +636,12 @@ class Slam2dRaceLine(Planner):
                        "0.9 なら半径 53cm より小さく曲がる経路を引かない。1.0 だと舵が上限に張り付き、"
                        "経路からのずれを直す舵が残らない。道幅が足りず開けない所は、いちばん緩い線になり、"
                        "走行中の表示に『曲がり切れない区間』と出る"),
-        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=4.0, default=2.0,
+        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=5.0, default=2.0,
                   step=0.05, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ。"
-                       "★3m/s より上は実機で未検証（駆動の同定は約 2m/s まで・実走の記録は 3.2m/s まで。"
-                       "STM32 の上限は 5m/s）。長い直線の無いコースでは上げても縮まない"),
+                       "★上限は STM32 の速度上限（5m/s）に合わせてある。4m/s より上は実機で未検証"
+                       "（2026-11-02 の記録で 4.06m/s まで。4m/s でも電流は指令どおり出ており、巡航のトルクは"
+                       "上限の約15%）。長い直線の無いコースでは上げても縮まない"),
         ParamSpec(group=GROUP_SPEED, key="v_min", label="最低速度", min=0.1, max=1.0, default=0.35,
                   step=0.05, unit="m/s", note="いちばんきついコーナーでもこれ以下にしない"),
         ParamSpec(group=GROUP_SPEED, key="speed_ff", hidden=True, label="速度指令の前倒し", min=0, max=1, step=1,
