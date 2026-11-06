@@ -95,7 +95,7 @@ steer_offset_rad = -0.008817   # 中立のずれ [rad]（正 = 左へ曲がる�
 steer_gain = 1.0
 steer_gain_cubic = 0.0
 # ── 校正 4（遅延、`calib_latency`）: スキャン完了 → STM32 受理 [s]。実ノードを通さない学習環境（ml_lidar）も使う ──
-control_latency_s = 0.0121
+control_latency_s = 0.0039
 # ── 校正 5（車速制御、`calib_speed` → 確かめ `calib_speed_check`）──
 # 車体の利得 [(m/s²)/(N·m)]（後輪2輪の合計トルク → 加速度。車輪の回転の慣性を含む実効の値。名目 16.7）と、
 # 転がり抵抗の減速度 [m/s²]（後輪の摩擦を含む）。★2026-09-28 の旧②の値 21.5 は解析の誤り（PI を通した応答に
