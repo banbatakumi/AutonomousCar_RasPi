@@ -120,7 +120,7 @@ class TestLimitsAndKeys(unittest.TestCase):
     def test_line_is_redrawn_when_speed_settings_change(self):
         p = {s.key: s.default for s in sr.Slam2dRaceLine.params}
         self.assertNotEqual(sr.line_key(p), sr.line_key({**p, "v_max": 1.0}))
-        self.assertNotEqual(sr.line_key(p), sr.line_key({**p, "kappa_use": 0.8}))
+        self.assertNotEqual(sr.line_key(p), sr.line_key({**p, "kappa_track": 0.2}))
         self.assertEqual(sr.line_key(p), sr.line_key({**p, "look_k": 0.9}))
 
 

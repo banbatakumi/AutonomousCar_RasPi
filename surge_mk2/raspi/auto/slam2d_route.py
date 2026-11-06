@@ -126,8 +126,8 @@ _CODE_DIGEST = _code_digest()
 
 
 def _line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None,
-                 parallel: bool = False) -> dict:
-    return dict(line_kwargs(p, vehicle, refine, grip, parallel), step=PATH_STEP)
+                 parallel: bool = False, k_us: float = 0.0) -> dict:
+    return dict(line_kwargs(p, vehicle, refine, grip, parallel, k_us), step=PATH_STEP)
 
 
 def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
@@ -135,11 +135,12 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
                     vehicle, graph: RoadGraph | None, *, auto_start: Waypoint | None = None,
                     avoid: list[tuple[float, float]] | None = None,
                     refine: bool = True, grip: dict | None = None,
-                    parallel: bool = False) -> _BuildOut:
+                    parallel: bool = False, k_us: float = 0.0) -> _BuildOut:
     """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。
 
     `auto_start` があれば、グループとは別に自動経路（キー `auto`）を全周回の中の最速から選ぶ。
     `parallel`: 仕上げの出発点を2プロセスで回す（止まっている間だけ、`Slam2dRaceLine._may_parallel`）
+    `k_us`: アンダーステア勾配の学習値（曲率の上限 `kappa_limit` に入れる）
     """
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     if graph is None:
@@ -147,7 +148,7 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
                             keep=vehicle.half_width + p["graph_margin"], seed=seed, traj=traj)
     out = _BuildOut(graph=graph)
     # `grip`: 走行中に学習した限界（`nav/grip.py`）
-    kw = _line_kwargs(p, vehicle, refine, grip, parallel)
+    kw = _line_kwargs(p, vehicle, refine, grip, parallel, k_us)
     if auto_start is not None:
         _fastest_loop(out, grid, graph, auto_start, avoid, p, kw, vehicle)
     for key, wps in groups.items():
@@ -637,7 +638,7 @@ class Slam2dRoute(Slam2dRaceLine):
             self.vehicle, graph,
             auto_start=self._auto_start,
             avoid=list(self._cfg.avoid), refine=refine, grip=self._grip_line_kw(),
-            parallel=self._may_parallel())
+            parallel=self._may_parallel(), k_us=self._us_k(p))
         self._grip_line = self._grip_learned() if self._grip_line_kw() is not None else None
         self._job_grip = self._grip_line
 

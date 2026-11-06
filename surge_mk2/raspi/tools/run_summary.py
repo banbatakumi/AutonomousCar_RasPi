@@ -57,7 +57,7 @@ VALID_V = 3.0
 POWER_SETTLE_S = 2.0
 
 #: 比較表に出す設定（auto/ctrl.params）。変わったものは別に全部出す
-KEY_PARAMS = ("v_max", "line_margin", "kappa_use", "grip_learn", "grip_init", "grip_max",
+KEY_PARAMS = ("v_max", "line_margin", "kappa_track", "grip_learn", "grip_init", "grip_max",
               "ctrl_mode", "speed_ff", "speed_fb", "launch")
 
 TOPICS = ("/vehicle_state", "/auto/state", "/auto/ctrl", "/diag/link")

@@ -333,7 +333,7 @@ FIXED_ACCEL_USE = 0.95
 FIXED_BRAKE_USE = 0.9
 #: ラインの形を決める設定（変わったら引き直す）。ラインは見積もりのラップ時間を最小にするので、
 #: 速度の設定も形に効く
-LINE_KEYS = ("line_margin", "kappa_use") + SPEED_KEYS
+LINE_KEYS = ("line_margin", "kappa_track") + SPEED_KEYS
 #: 自動運転中に送る目標車速のランプ = 走りの上限（加速・減速の大きい方）× これ（`Slam2dRaceLine._ramp`）
 _RAMP_MARGIN = 1.1
 
@@ -342,9 +342,38 @@ def line_key(p: dict[str, float]) -> tuple:
     return tuple(float(p[k]) for k in LINE_KEYS)
 
 
-def kappa_limit(p: dict[str, float], vehicle) -> float:
-    """経路に許す曲率の上限 [1/m] = 車の曲がれる限界 × `kappa_use`。"""
-    return vehicle.kappa_max * float(p.get("kappa_use", 1.0))
+def kappa_limit(p: dict[str, float], vehicle, a_lat=None, k_us: float = 0.0) -> float:
+    """経路に許す曲率の上限 [1/m] = その半径を曲がる速さで車が出せる曲率 − 追従の余裕 `kappa_track`。
+
+    出せる曲率は、舵を上限まで切ったときの `kappa_max`（同定した舵の効き、低速）をアンダーステアで割り引いた
+    `kappa_max·L/(L + K·v²)`（`nav/understeer.py`）。v はその半径を横の上限 `a_lat` で曲がる速さ
+    `√(a_lat/κ)`（`v_max` まで）で、κ と互いに決まるので数回の反復で解く。
+    2026-11-06 `surge_20261106_024246`: 舵を上限まで切ったときの実測の曲率は 1.2〜1.5m/s で 2.20、1.5〜1.8m/s で 2.09
+    （この式で K=2e-3 なら 2.14・2.09）。
+
+    ★ 余裕は割合ではなく**曲率の量**で取る。追従がずれを直すのに使う曲率は、曲がりの強さに依らず同じくらいだった
+    （同じ記録の、舵が張り付いていない区間の「指令の曲率 − ラインの曲率」の内向き p95 が 0.37〜0.38 1/m）。
+    以前の「限界 × 0.9」は限界 2.14 に対して 0.21 しか残さず、ヘアピンでは 0.11〜0.15（K のぶん）しか残っていなかった。
+    外へ 9〜16cm ずれたまま舵が上限に張り付き（RACE の 8%）、ずれを直せなかった。
+
+    :param a_lat: 横の上限 [m/s²]（経路の点ごとの配列なら最大）。`None` なら `limits` の値（同定値 × 使う割合）
+    :param k_us: アンダーステア勾配 K [rad/(m/s²)]（学習値。負＝オーバーステアは割り増ししない）
+    """
+    track = float(p.get("kappa_track", KAPPA_TRACK))
+    a = limits(p, vehicle).a_lat if a_lat is None else float(np.max(a_lat))
+    L = vehicle.wheelbase
+    k_us = max(0.0, float(k_us))
+    v2_max = float(p.get("v_max", 5.0)) ** 2
+    k = vehicle.kappa_max - track
+    for _ in range(4):
+        v2 = min(a / max(k, 1e-3), v2_max)
+        k = vehicle.kappa_max * L / (L + k_us * v2) - track
+    # 余裕が限界の半分を超える設定でも、線が引けなくならないようにする
+    return max(k, 0.5 * vehicle.kappa_max)
+
+
+#: 追従の余裕の既定値 [1/m]（`kappa_limit`、パラメータ `kappa_track`）
+KAPPA_TRACK = 0.4
 
 #: LiDAR の 1 周の時間 [s]（LD06 は 10Hz。障害物は最悪この時間だけ遅れて見える）
 SCAN_PERIOD_S = 0.1
@@ -424,7 +453,7 @@ UNKNOWN_SHORT_NOTE = ("★壁の切れ目の先が未観測の所で、未知を
 
 
 def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | None = None,
-                parallel: bool = False) -> dict:
+                parallel: bool = False, k_us: float = 0.0) -> dict:
     """`rl_mod.optimize` へ渡す経路と速度の設定（BUILD と地図の読み込みで共通）。
 
     :param grip: 走行中に学習した全体の値（`speed_kwargs` の `grip`、スカラー）。ラインは見積もりの
@@ -435,6 +464,7 @@ def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | 
         できたら差し替える**（`Slam2dRaceLine._adopt_line`、`Slam2dRoute._poll`）
     :param parallel: 仕上げの出発点を2プロセスで同時に回す（`rl_mod.optimize` の `refine_parallel`）。
         止まっている間だけ（`Slam2dRaceLine._may_parallel`）。走行中は plan() の周期にコアを残す
+    :param k_us: アンダーステア勾配 K（学習値。曲率の上限 `kappa_limit` に入れる）
     """
     return dict(half_width=vehicle.half_width, margin=p["line_margin"], lam=LINE_LAM,
                 passes=LINE_PASSES, max_width=MAX_TRACK_WIDTH,
@@ -443,7 +473,8 @@ def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | 
                 front_overhang=vehicle.front_overhang, rear_overhang=vehicle.rear_overhang,
                 # 薄い壁の先端を車体がかすめないか、外形で確かめる（`rl_mod._BodyCheck`）
                 footprint=vehicle.footprint or None,
-                time_iters=LINE_TIME_ITERS, kappa_max=kappa_limit(p, vehicle),
+                time_iters=LINE_TIME_ITERS,
+                kappa_max=kappa_limit(p, vehicle, None if grip is None else grip.get("a_lat"), k_us),
                 refine_evals=LINE_REFINE_EVALS if refine else 0,
                 refine_starts=LINE_REFINE_STARTS, refine_parallel=parallel,
                 **speed_kwargs(p, vehicle, grip))
@@ -452,7 +483,7 @@ def line_kwargs(p: dict[str, float], vehicle, refine: bool = True, grip: dict | 
 def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, float],
                    cl: cl_mod.Centerline | np.ndarray, p: dict[str, float],
                    vehicle, refine: bool = True, grip: dict | None = None,
-                   parallel: bool = False) -> rl_mod.RaceLine:
+                   parallel: bool = False, k_us: float = 0.0) -> rl_mod.RaceLine:
     """レーシングラインを引く（**ワーカースレッドで走る**。地図の写しだけを触る）。
 
     `cl` が中心線でなく点列なら、保存済み地図の中心線として測り直してから引く。
@@ -462,7 +493,7 @@ def _optimize_line(trinary: np.ndarray, resolution: float, origin: tuple[float, 
     grid = occgrid_from_trinary(trinary, resolution=resolution, origin=origin, seq=0)
     if not isinstance(cl, cl_mod.Centerline):
         cl = cl_mod.build(grid, cl, step=PATH_STEP, max_width=MAX_TRACK_WIDTH)
-    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle, refine, grip, parallel))
+    return rl_mod.optimize(grid, cl, **line_kwargs(p, vehicle, refine, grip, parallel, k_us))
 
 
 def pursuit_config(p: dict[str, float], vehicle) -> PursuitConfig:
@@ -631,12 +662,12 @@ class Slam2dRaceLine(Planner):
                        "車体外形と地図の壁の距離もこれ以上に保つ。★3m/sでは追従が±10cm振れ、"
                        "0.05では広いオーバル（normal）で衝突した。0.08で0回"),
 
-        ParamSpec(group=GROUP_LINE, key="kappa_use", hidden=True, label="最小回転半径の余裕", min=0.6, max=1.0,
-                  default=0.9, step=0.01, unit="",
-                  note="★経路に許す曲率 = 車の曲がれる限界（同定した舵の効きから。現在 半径 約48cm）× この値。"
-                       "0.9 なら半径 53cm より小さく曲がる経路を引かない。1.0 だと舵が上限に張り付き、"
-                       "経路からのずれを直す舵が残らない。道幅が足りず開けない所は、いちばん緩い線になり、"
-                       "走行中の表示に『曲がり切れない区間』と出る"),
+        ParamSpec(group=GROUP_LINE, key="kappa_track", hidden=True, label="追従の余裕（曲率）", min=0.0, max=1.0,
+                  default=KAPPA_TRACK, step=0.05, unit="1/m",
+                  note="★経路に許す曲率 = その半径を曲がる速さで車が出せる曲率（同定した舵の効き、"
+                       "アンダーステアで割り引く）− この値。追従がずれを直す舵をこのぶん残す。"
+                       "0.4 は実機の記録で追従が使った修正の曲率（内向き p95 0.37〜0.38）から。"
+                       "道幅が足りず開けない所は、いちばん緩い線になり、走行中の表示に『舵の余裕が足りない区間』と出る"),
         ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=5.0, default=2.0,
                   step=0.05, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ。"
@@ -965,7 +996,7 @@ class Slam2dRaceLine(Planner):
         self._drop_job("_elastic_job")
         self._elastic_base: np.ndarray | None = None
         self._v_now = 0.0                  #: 直近の車速（障害物の「近い」の範囲に使う）
-        #: 「曲がり切れない区間」の注記と、それを測った (経路, `kappa_use`)（`_tight_note`）
+        #: 「曲がり切れない区間」の注記と、それを測った (経路, 曲率の上限)（`_tight_note`）
         self._tight_key: tuple | None = None
         self._tight_ref: np.ndarray | None = None
         self._tight_msg = ""
@@ -1226,7 +1257,7 @@ class Slam2dRaceLine(Planner):
         self._grip_line = self._grip_learned() if kw is not None else None
         self._line_job = submit_job(
             _optimize_line, g.trinary().copy(), g.resolution, tuple(g.origin),
-            np.asarray(cl).copy(), dict(p), self.vehicle, True, kw, self._may_parallel())
+            np.asarray(cl).copy(), dict(p), self.vehicle, True, kw, self._may_parallel(), self._us_k(p))
         self._line_built = line_key(p)
 
     def _may_parallel(self) -> bool:
@@ -1963,24 +1994,26 @@ class Slam2dRaceLine(Planner):
                      + ("" if self._joined else "・経路に乗るまで減速")
                      + self._avoid_note() + self._coast_note(coasting, p) + md_note
                      + self._sight_note(self.path, p) + self._tight_note(self.path, p) + grip_note
+                     + self._us_note(p)
                      + (f"・★{self._load_error}" if self._load_error else ""))
         return st
 
     def _tight_note(self, path: rl_mod.RaceLine, p: dict[str, float]) -> str:
         """経路に「車が曲がり切れない区間」が残っていれば、その注記（経路ごとに1回だけ測る）。
 
-        道幅が足りず、半径を `kappa_use`×限界まで開けなかった所。そこは舵が上限に張り付き、
+        道幅が足りず、半径を `kappa_limit` まで開けなかった所。そこは舵が上限に張り付き、
         出口で外へ膨らむ（実車で確認）。`line_margin` を詰めるか、コースを広げるしかない。
         """
         # ★ 経路は `id()` ではなく**物そのもの**で見分ける（`is`）。`id()` は、差し替えで古い配列が
         #   解放された直後に新しい配列へ使い回されることがあり、古い結果を出してしまう
-        key = (p["kappa_use"],)
+        lim = self._kappa_lim(p)
+        key = (round(lim, 3),)
         if self._tight_ref is not path.xy or self._tight_key != key:
             self._tight_ref = path.xy
-            lim = kappa_limit(p, self.vehicle)
             length, ratio = rl_mod.tight_sections(path.xy, path.closed, lim)
             self._tight_key = key
-            self._tight_msg = (f"・★曲がり切れない区間 {length:.1f}m（曲率が上限の {ratio * 100:.0f}%、"
+            # 上限は追従の余裕（`kappa_track`）を引いた値なので、超えても曲がれないとは限らない。舵が上限に張り付きやすい
+            self._tight_msg = (f"・★舵の余裕が足りない区間 {length:.1f}m（曲率が上限の {ratio * 100:.0f}%、"
                                f"半径 {1.0 / max(ratio * lim, 1e-6) * 100:.0f}cm）" if length > 0.0 else "")
             if path.unknown_short:
                 self._tight_msg += "・★未知を壁とみなすと車体の余裕が足りない所がある"
@@ -2373,7 +2406,7 @@ class Slam2dRaceLine(Planner):
         lim = self._lim(p)
         cfg = ot_mod.OvertakeConfig(
             half_width=v.half_width, front=v.front_overhang, rear=v.rear_overhang,
-            # ★ 車の本当の限界（同定値）を渡す。`kappa_limit`（× `kappa_use` 0.9）を渡すと、計画器が
+            # ★ 車の本当の限界（同定値）を渡す。`kappa_limit`（追従の余裕を引いた値）を渡すと、計画器が
             #   さらに 95% を掛けて線そのものより厳しくなり、コーナーではどの候補も曲率で落ちた
             kappa_max=v.kappa_max, a_brake=lim.a_brake, a_accel=lim.a_accel,
             margin_lat=p["avoid_margin"])
@@ -3075,6 +3108,11 @@ class Slam2dRaceLine(Planner):
         """今の走りの上限（学習中は学習した値）。"""
         return limits(p, self.vehicle, self._grip_learned())
 
+    def _kappa_lim(self, p: dict[str, float]) -> float:
+        """今の線が守るべき曲率の上限（`kappa_limit`。ラインを引くときと同じ横の上限・K で測る）。"""
+        kw = self._grip_line_kw()
+        return kappa_limit(p, self.vehicle, None if kw is None else kw.get("a_lat"), self._us_k(p))
+
     def _grip_worse(self, old: rl_mod.RaceLine | None, new: rl_mod.RaceLine) -> bool:
         """学習値で引き直した線 `new` が、今の線 `old` より「曲がり切れない区間」が長いか。
 
@@ -3083,7 +3121,7 @@ class Slam2dRaceLine(Planner):
         """
         if old is None:
             return False
-        lim = kappa_limit(self._last_p or {}, self.vehicle)
+        lim = self._kappa_lim(self._last_p or {})
         return (rl_mod.tight_sections(new.xy, new.closed, lim)[0]
                 > rl_mod.tight_sections(old.xy, old.closed, lim)[0] + 0.05)
 
@@ -3124,9 +3162,10 @@ class Slam2dRaceLine(Planner):
         そこは舵が上限に張り付き、速度に関係なく膨らむ。グリップの前兆と取り違えないよう、
         学習から外す。
         """
-        key = (p["kappa_use"],)
+        lim = self._kappa_lim(p)
+        key = (round(lim, 3),)
         if self._grip_tight_ref is not path.xy or self._grip_tight_key != key:
-            over = rl_mod.speed_kappa(path.xy, path.closed) > kappa_limit(p, self.vehicle) * 1.01
+            over = rl_mod.speed_kappa(path.xy, path.closed) > lim * 1.01
             out = over.copy()
             for k in range(1, 5):
                 if path.closed:
