@@ -440,6 +440,22 @@ def auto_ramp(vehicle, lim: Limits) -> float:
     return min(vehicle.speed_ramp_max_m_s2, _RAMP_MARGIN * max(lim.a_accel, lim.a_brake))
 
 
+def _room_cap(cmd: tuple[float, float], v_now: float, a_room: float) -> tuple[float, float]:
+    """`speedctl.ref_command` の `(目標速度, ランプ)` の、**加速の**ランプを、今の横の使い具合で前へ使える加速度
+    `a_room`（学習した包絡、`Slam2dRaceLine._speed_cmd`）で頭打ちにする。減速のランプはそのまま。
+
+    STM32 はランプの傾きで目標車速を動かし、その傾きに要るトルクを先に足す（★v0.21）ので、ランプが車の前後の
+    加速度になる。`ref_command` は計画からの遅れを詰める項（|v_ref − v|/catch_s）を足すので、頭打ちが無いと
+    横を使い切っている所でも包絡を超えて加速した。2026-11-06 `surge_20261106_024246` のヘアピン出口では、
+    リアが出た瞬間に 2.3〜3.2m/s² を送っていた（fwsim `corner_exit_flick`: ランプ 3.06 → 1.5 でヨーの超過 0.97 → 0.26rad/s。
+    スリップ率を見る TC では、横を使い切りかけた後輪はスリップ率 0.02〜0.05 で横が抜けるので守れない）。
+    下限は `speedctl.REF_ACCEL_MIN`（0 は STM32 で「指定なし」になる）。"""
+    v_ref, ramp = cmd
+    if v_ref > v_now:
+        ramp = min(ramp, max(speedctl.REF_ACCEL_MIN, a_room))
+    return v_ref, ramp
+
+
 #: 仕上げを始める出発点の数（`rl_mod.optimize` の `refine_starts`）。1 だと出発点の中心線の
 #: わずかな違いで別の線に止まることがある（toyota2 の地図で見積もりが 6 通り中 1 通りだけ +7%）。
 #: 2 でばらつきが 7.0→2.0%・1.3→0.2%（実機の地図）、3 にしても変わらない。時間は 2 倍
@@ -1500,7 +1516,9 @@ class Slam2dRaceLine(Planner):
             self._grip_vp = speedctl._lerp(path.v, pos, path.closed)
             k_s = float(self._ref_k[j]) if len(self._ref_k) == n else kap
             self._grip_u = float(path.v[j]) ** 2 * k_s / max(a_grip, 1e-6)
-        u = max(vs.speed, 0.0) ** 2 * kap / max(a_grip, 1e-6)
+        # 横の使い具合は、線の曲率から出す値と実測（ヨーレート × 車速）の大きい方。線より強く曲がっている
+        # （線から外れて戻る・舵の遅れ・リアが出始めた）ときは、実際に使っている横のぶん前へ使える力が減る
+        u = max(max(vs.speed, 0.0) ** 2 * kap, abs(float(vs.speed) * float(vs.yaw_rate))) / max(a_grip, 1e-6)
         if self._grip_on and self._grip.map.acc:
             a_room = rl_mod.env_at(self._grip.map.acc, u)      # 学習した包絡のその横の使い具合の値
         else:
@@ -1512,14 +1530,15 @@ class Slam2dRaceLine(Planner):
             local = speedctl.catch_up(path, j, vs.speed, a_accel=lim.a_accel,
                                       a_grip=grip if grip is not None else self.vehicle.a_lat_max)
             if self.vehicle.speed_ff_firmware:
-                return speedctl.ref_command(local, pos, vs.speed, lead_s=self._ref_lead(),
-                                            catch_s=self.vehicle.speed_loop_tau_s)
+                return _room_cap(speedctl.ref_command(local, pos, vs.speed, lead_s=self._ref_lead(),
+                                                      catch_s=self.vehicle.speed_loop_tau_s), vs.speed, a_room)
             return self._sff_catch.command(local, pos, vs.speed, dt, cfg, a_room=a_room), 0.0
         if self.vehicle.speed_ff_firmware:
             if self._ref_acc_src is not path.v:
                 self._ref_acc, self._ref_acc_src = speedctl.path_accel(path), path.v
-            return speedctl.ref_command(path, pos, vs.speed, lead_s=self._ref_lead(),
-                                        acc=self._ref_acc, catch_s=self.vehicle.speed_loop_tau_s)
+            return _room_cap(speedctl.ref_command(path, pos, vs.speed, lead_s=self._ref_lead(),
+                                                  acc=self._ref_acc, catch_s=self.vehicle.speed_loop_tau_s),
+                             vs.speed, a_room)
         return self._sff.command(path, pos, vs.speed, dt, cfg, a_room=a_room), 0.0
 
     def _cmd_delay(self) -> float:

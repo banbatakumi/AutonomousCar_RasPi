@@ -124,6 +124,23 @@ class TestLimitsAndKeys(unittest.TestCase):
         self.assertEqual(sr.line_key(p), sr.line_key({**p, "look_k": 0.9}))
 
 
+class TestRoomCap(unittest.TestCase):
+    """加速のランプを、今の横の使い具合で前へ使える加速度で頭打ちにする（`_room_cap`）。"""
+
+    def test_accelerating_ramp_is_capped(self):
+        self.assertEqual(sr._room_cap((2.5, 3.0), 2.0, 1.2), (2.5, 1.2))
+
+    def test_braking_ramp_is_kept(self):
+        self.assertEqual(sr._room_cap((1.5, 3.0), 2.0, 1.2), (1.5, 3.0))
+
+    def test_small_ramp_is_kept(self):
+        self.assertEqual(sr._room_cap((2.5, 0.8), 2.0, 1.2), (2.5, 0.8))
+
+    def test_never_zero(self):
+        # 0 は STM32 で「指定なし」（ランプの天井）になってしまう
+        self.assertEqual(sr._room_cap((2.5, 3.0), 2.0, 0.0)[1], sr.speedctl.REF_ACCEL_MIN)
+
+
 if __name__ == "__main__":
     unittest.main()
 
