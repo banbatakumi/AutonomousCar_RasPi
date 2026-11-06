@@ -87,6 +87,8 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
   いずれも **engage も同時に落とす**。再開は人の engage から
 - GUI の E-Stop のあとは、操縦者が ARM を入れ直す（`arm=False` を一度送る）まで ARM を通さない
 - `auto/cmd` が 200ms 途絶したら、engage したままでも**制動**に読み替える
+- 走行中に engage が落ちたら（理由を問わない）、止まるか人がアクセルを入れるまで**制動**し、
+  舵は自律の最後の値を保つ（`_handover`。人の無操作の指令＝舵0・惰行へいきなり替えない）
 
 差し替えるのは `target_speed` / `target_steer` / `brake` だけ。灯火・ホーン・
 `auto_stop`・`brake_torque`・レートリミットは**GUI が送ってきた値のまま**通す。
@@ -358,6 +360,11 @@ _SAFETY = Vehicle.load()
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
+#: 解除の受け渡し（`_handover`）で「止まった」とみなす車速 [m/s]。これより速く走っている間に
+#: 解除されたら、人がアクセルを入れるまで最大制動で止める
+HANDOVER_STILL_M_S = 0.1
+#: 受け渡し中に「人が舵を切った」とみなす舵の指令 [rad]（GUI は無操作で 0 を送る）
+HANDOVER_STEER_INPUT_RAD = 0.01
 #: バスを覗きに行く間隔（`auto/cmd` の到着で起きられない構成＝テストの偽物の `sub` だけ）。
 #: 1ms（長いと即時の経路に平均2.5ms・最大5ms残る）
 BUS_POLL_S = 0.001
@@ -578,6 +585,13 @@ class TelemetryServer:
     _estop_hold = False
     #: 直前に見た `diag/link.estop_active`（立ち上がりで engage を落とす。`_on_estop_change`）
     _last_estop_active = False
+    #: 直前に送った `/cmd` が自律の指令だったか（`_publish_cmd`。解除の瞬間を見つける）
+    _relayed_auto = False
+    #: 解除の受け渡しで止めている間の舵（自律が最後に出した値）。止めていなければ None
+    #: （`_handover`）
+    _handover_steer: float | None = None
+    #: 解除の受け渡しで止めた回数
+    handover_stops = 0
 
     def __init__(self, *, port: int = DEFAULT_PORT, host: str = DEFAULT_HOST,
                  dist: Path = GUI_DIST, camera: bool = True,
@@ -2493,6 +2507,8 @@ class TelemetryServer:
             #: 今のモードのプリセットの名前（GUI のドロップダウン）
             "presets": sorted(self._auto_presets.get(self._auto_mode, {})),
             "stalls": self.auto_stalls,
+            #: 走行中の解除のあと、止まる（人がアクセルを入れる）まで制動している（`_handover`）
+            "handover_stop": self._handover_steer is not None,
         }
         if catalog:
             out["catalog"] = auto_catalog()
@@ -3227,6 +3243,12 @@ class TelemetryServer:
             cmd = self._last_cmd
             if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
                 cmd = self._merge_auto(cmd, now)
+            elif self._handover(cmd):
+                cmd = msgspec.structs.replace(
+                    cmd, brake=True, brake_torque=0.0, target_speed=0.0,
+                    target_steer=(cmd.target_steer if abs(cmd.target_steer) >= HANDOVER_STEER_INPUT_RAD
+                                  else self._handover_steer),
+                    torque_mode=False, target_torque=0.0, launch=False, source="handover")
             else:
                 # **`_last_cmd` そのものを送らない**。`pub.send` は渡した msg に
                 # `seq`/`t_pub` を押すので、`_on_control` の「前回と同じ中身か」の比較が
@@ -3245,8 +3267,47 @@ class TelemetryServer:
                 self._status_soon()
             cmd = DriveCmd(mode=0, source="deadman")
         self._cmd_was_live = live
+        self._relayed_auto = cmd.source.startswith("auto:")
+        if cmd.source != "handover" and self._handover_steer is not None:
+            self._handover_steer = None
+            self._status_soon()
         self.pub.send(TOPIC_CMD, cmd)
         self.cmds_published += 1
+
+    def _handover(self, gui: DriveCmd) -> bool:
+        """自律の解除から人の操縦への受け渡しの間か（True なら `_publish_cmd` が止める指令に替える）。
+
+        **解除は「人の無操作の指令へ切り替わる」ことであって、止まることではなかった。** GUI の手動の
+        指令は、無操作なら舵 0・速度 0（トルク制御ならトルク 0 = 惰行）。走行中に解除すると、その瞬間に
+        舵が直進へ戻り、トルク制御なら惰行で進み続ける。2026-11-06 `surge_20261106_024246`: 左旋回中
+        （2.6m/s・舵 +0.20rad）に解除 → 舵 0・トルク 0 の惰行（−0.6m/s²）になり、0.55s 後に外の壁へ
+        2.15m/s で当たった。
+
+        そこで、**自律の指令を送っていた直後に自律でなくなり、車が走っていたら**（解除の理由は問わない:
+        GUI の解除・モードの変更・操縦権の解放・E-Stop の後始末）、次のどれかまで最大制動で止める:
+
+        - 車が止まった（`HANDOVER_STILL_M_S` 未満）
+        - 人がアクセルを入れた（速度・トルクの指令が 0 でない）= 人が運転を引き取った
+        - もう一度 engage した（`_publish_cmd` の自律の分岐が先に効く）
+
+        舵は自律が最後に出した値を保つ（直進へ戻すと旋回中なら外へ飛び出す。`_merge_auto` の途絶時と
+        同じ方針）。人が舵を切っていればその値を使う（ブレーキは掛けたまま）。GUI の運転の設定
+        （速度・トルク・MT）に依らない。DISARM・デッドマンは別の分岐で、ここは通らない。
+        """
+        if gui.mode == 0 or not gui.arm:
+            return False
+        vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        moving = vs is None or abs(float(vs.speed)) >= HANDOVER_STILL_M_S
+        human_drives = gui.target_speed != 0.0 or (gui.torque_mode and gui.target_torque != 0.0)
+        if not moving or human_drives:
+            return False
+        if self._handover_steer is None:
+            if not self._relayed_auto:
+                return False
+            self._handover_steer = float(getattr(self, "_auto_last_steer", 0.0))
+            self.handover_stops += 1
+            self._status_soon()
+        return True
 
     def _merge_auto(self, gui: DriveCmd, now: int) -> DriveCmd:
         """GUI の `cmd` の**速度・舵・制動だけ**を `auto/cmd` で差し替える。

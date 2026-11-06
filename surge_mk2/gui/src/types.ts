@@ -115,6 +115,9 @@ export type AutoStatus = {
   catalog: AutoPlannerInfo[]
   /** engage したまま `auto/cmd` が途絶して制動に落ちた回数 */
   stalls: number
+  /** 走行中の解除のあと、止まる（人がアクセルを入れる）まで制動している（`telemetry_node._handover`）。
+   * 古いサーバは送らない */
+  handover_stop?: boolean
 }
 
 /** `/ws/telemetry` が 50Hz で送ってくるスナップショット。 */

@@ -979,6 +979,92 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
         await self._send(srv, srv.ws, type="release_control")
         self.assertEqual(srv.published[-1][1].mode, 0)
 
+    def _riding_auto(self, srv, *, speed=2.6, steer=0.2):
+        """自律で走っている最中（`auto/cmd` は新しく、車は `speed` で走っている）。"""
+        from raspi.msgs import VehicleState
+        srv._status_soon = lambda: None
+        srv._publish_auto_ctrl = lambda: None
+        srv._auto_engaged, srv._auto_mode = True, "slam2d_route"
+        srv._auto_was_fresh, srv._auto_last_steer, srv.auto_stalls = True, 0.0, 0
+        auto = DriveCmd(target_speed=2.8, target_steer=steer)
+        auto.t_pub = time.monotonic_ns()
+        srv.sub.latest = {"auto/cmd": auto, "vehicle_state": VehicleState(speed=speed)}
+
+    async def test_disengage_while_moving_brakes_and_holds_the_steer(self):
+        """★ 走行中の解除は、GUI の運転の設定（ここではトルク制御・無操作 = 惰行）に依らず最大制動で止め、
+        舵は自律の最後の値を保つ。2026-11-06: 左旋回中に解除 → 舵 0・惰行で外の壁に当たった。"""
+        srv = self._server()
+        self._riding_auto(srv)
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        self.assertTrue(srv.published[-1][1].source.startswith("auto:"))
+        srv._auto_engaged = False                                # GUI の解除
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, torque_mode=True,
+                         target_torque=0.0, steer=0.0)
+        m = srv.published[-1][1]
+        self.assertEqual(m.source, "handover")
+        self.assertTrue(m.brake)
+        self.assertEqual((m.brake_torque, m.target_speed, m.torque_mode), (0.0, 0.0, False))
+        self.assertAlmostEqual(m.target_steer, 0.2)
+        self.assertEqual(srv.handover_stops, 1)
+        self.assertIsNotNone(srv._handover_steer)
+        # 人が舵を切ればその値（ブレーキは掛けたまま）
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, torque_mode=True, steer=-0.1)
+        m = srv.published[-1][1]
+        self.assertTrue(m.brake)
+        self.assertAlmostEqual(m.target_steer, -0.1)
+        # 止まったら手動の指令に戻る（以後はもう掛けない）
+        from raspi.msgs import VehicleState
+        srv.sub.latest["vehicle_state"] = VehicleState(speed=0.02)
+        srv._publish_cmd(time.monotonic_ns())
+        self.assertNotEqual(srv.published[-1][1].source, "handover")
+        self.assertFalse(srv.published[-1][1].brake)
+        self.assertIsNone(srv._handover_steer)
+        srv.sub.latest["vehicle_state"] = VehicleState(speed=1.0)
+        srv._publish_cmd(time.monotonic_ns())
+        self.assertNotEqual(srv.published[-1][1].source, "handover")
+
+    async def test_accelerator_hands_the_car_to_the_human(self):
+        """解除のあと人がアクセルを入れたら、その指令をそのまま通す（人が運転を引き取った）。"""
+        srv = self._server()
+        self._riding_auto(srv)
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        srv._auto_engaged = False
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True)
+        self.assertEqual(srv.published[-1][1].source, "handover")
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=1.5)
+        m = srv.published[-1][1]
+        self.assertNotEqual(m.source, "handover")
+        self.assertAlmostEqual(m.target_speed, 1.5)
+        # アクセルを戻しても、もう受け渡しの制動は掛けない（人が運転している）
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True, speed=0.0)
+        self.assertNotEqual(srv.published[-1][1].source, "handover")
+
+    async def test_disengage_when_stopped_or_in_manual_does_nothing(self):
+        srv = self._server()
+        self._riding_auto(srv, speed=0.0)
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        srv._auto_engaged = False
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True)
+        self.assertNotEqual(srv.published[-1][1].source, "handover")
+        # 手動で走っている間（自律の指令を送っていない）は掛けない
+        srv2 = self._server()
+        self._riding_auto(srv2)
+        srv2._auto_engaged = False
+        await self._send(srv2, srv2.ws, type="cmd", mode=1, arm=True, steer=0.1)
+        await self._send(srv2, srv2.ws, type="cmd", mode=1, arm=True)
+        self.assertNotEqual(srv2.published[-1][1].source, "handover")
+
+    async def test_disarm_after_disengage_is_not_overridden(self):
+        """解除と同時の DISARM・E-Stop はそのまま通す（受け渡しの制動は ARM 中だけ）。"""
+        srv = self._server()
+        self._riding_auto(srv)
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        srv._auto_engaged = False
+        await self._send(srv, srv.ws, type="cmd", mode=0, arm=False)
+        m = srv.published[-1][1]
+        self.assertEqual((m.mode, m.arm), (0, False))
+        self.assertNotEqual(m.source, "handover")
+
 
 class TestImmediateCommand(unittest.TestCase):
     """io_node は `cmd` の中身が変わったらその場で COMMAND を送る（2026-09-26）。"""

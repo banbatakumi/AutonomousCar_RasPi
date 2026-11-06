@@ -203,6 +203,9 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
           {!auto.engaged && ui.autoOffReason && (
             <span className="badge-warn">{ui.autoOffReason}</span>
           )}
+          {auto.handover_stop && (
+            <span className="badge-bad">解除したので停止中（アクセルで手動に戻る）</span>
+          )}
           {auto.stalls > 0 && (
             <span className="badge-bad">指令の途絶で制動 {auto.stalls} 回</span>
           )}
