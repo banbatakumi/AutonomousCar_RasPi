@@ -36,24 +36,31 @@ def _write_train_config(d: str, **over) -> None:
 
 
 class TestExportOnnx(unittest.TestCase):
-    def test_export_writes_onnx_and_the_full_contract(self):
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = _save_checkpoint(d)
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
+    @classmethod
+    def setUpClass(cls):
+        # 既定の引数で書き出した1つを、中身を読むだけのテストで使い回す（書き出しは1回 約1秒）
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.ckpt_path = _save_checkpoint(cls._tmp.name, "model.pt")
+        cls.out_path = Path(cls._tmp.name) / "model.onnx"
+        export(cls.ckpt_path, cls.out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
 
-            self.assertTrue(out_path.exists())
-            cfg = json.loads(out_path.with_suffix(".json").read_text())
-            self.assertEqual(cfg["input_size"], [64, 48])
-            self.assertEqual(cfg["mean"], MEAN)
-            self.assertEqual(cfg["std"], STD)
-            self.assertEqual(cfg["max_steer"], 0.524)
-            self.assertEqual(cfg["speed_ref"], 2.0)
-            self.assertEqual(cfg["outputs"], list(MODEL_OUTPUTS))
-            self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
-            self.assertEqual(cfg["color"], "RGB")
-            self.assertEqual(cfg["note"], "")
-            self.assertEqual(len(cfg["steer_link"]), 2)
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_export_writes_onnx_and_the_full_contract(self):
+        self.assertTrue(self.out_path.exists())
+        cfg = json.loads(self.out_path.with_suffix(".json").read_text())
+        self.assertEqual(cfg["input_size"], [64, 48])
+        self.assertEqual(cfg["mean"], MEAN)
+        self.assertEqual(cfg["std"], STD)
+        self.assertEqual(cfg["max_steer"], 0.524)
+        self.assertEqual(cfg["speed_ref"], 2.0)
+        self.assertEqual(cfg["outputs"], list(MODEL_OUTPUTS))
+        self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
+        self.assertEqual(cfg["color"], "RGB")
+        self.assertEqual(cfg["note"], "")
+        self.assertEqual(len(cfg["steer_link"]), 2)
 
     def test_steer_link_comes_from_train_config_or_argument(self):
         with tempfile.TemporaryDirectory() as d:
@@ -79,16 +86,11 @@ class TestExportOnnx(unittest.TestCase):
     def test_exported_model_is_accepted_by_the_vehicle_side_loader(self):
         """書いた契約を、実車が使う `load_model()` がそのまま読めること
         ——キー名や版がどちらかだけ変わると、ここで落ちる。"""
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = _save_checkpoint(d)
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
-
-            model = load_model(out_path)
-            self.assertEqual(model.input_size, (64, 48))
-            steer, speed = model.infer(np.zeros((36, 64, 3), dtype=np.uint8))
-            self.assertTrue(-1.0 <= steer <= 1.0)
-            self.assertTrue(0.0 <= speed <= 1.0)
+        model = load_model(self.out_path)
+        self.assertEqual(model.input_size, (64, 48))
+        steer, speed = model.infer(np.zeros((36, 64, 3), dtype=np.uint8))
+        self.assertTrue(-1.0 <= steer <= 1.0)
+        self.assertTrue(0.0 <= speed <= 1.0)
 
     def test_note_is_embedded_in_the_exported_json(self):
         with tempfile.TemporaryDirectory() as d:
@@ -143,48 +145,24 @@ class TestExportOnnx(unittest.TestCase):
             self.assertFalse(out_path.with_suffix(".json").exists())
 
     def test_onnxruntime_output_matches_pytorch(self):
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DriveRegressionModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
-
-            reloaded = DriveRegressionModel(pretrained=False)
-            reloaded.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
-            err = verify_parity(out_path, reloaded, (64, 48))
-            self.assertLess(err, 1e-3)
+        reloaded = DriveRegressionModel(pretrained=False)
+        reloaded.load_state_dict(torch.load(self.ckpt_path, map_location="cpu"))
+        err = verify_parity(self.out_path, reloaded, (64, 48))
+        self.assertLess(err, 1e-3)
 
     def test_onnx_file_loads_alone_without_its_export_directory(self):
         """`external_data=False` により `.onnx` 単体で読める（`ml_cam/export_onnx.py`
         と同じ回帰検出テスト）。"""
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DriveRegressionModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
-
-            with tempfile.TemporaryDirectory() as lone_dir:
-                lone_path = Path(lone_dir) / "renamed.onnx"
-                shutil.copy(out_path, lone_path)
-                sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
-                sess.run(None, {"input": torch.zeros(1, 3, 48, 64).numpy()})
+        with tempfile.TemporaryDirectory() as lone_dir:
+            lone_path = Path(lone_dir) / "renamed.onnx"
+            shutil.copy(self.out_path, lone_path)
+            sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
+            sess.run(None, {"input": torch.zeros(1, 3, 48, 64).numpy()})
 
     def test_mismatched_model_raises(self):
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DriveRegressionModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
-
-            different_model = DriveRegressionModel(pretrained=False)
-            with self.assertRaises(ValueError):
-                verify_parity(out_path, different_model, (64, 48), atol=1e-6)
+        different_model = DriveRegressionModel(pretrained=False)
+        with self.assertRaises(ValueError):
+            verify_parity(self.out_path, different_model, (64, 48), atol=1e-6)
 
 
 if __name__ == "__main__":

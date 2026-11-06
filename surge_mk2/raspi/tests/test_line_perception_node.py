@@ -29,6 +29,7 @@ from raspi.nodes.line_perception_node import (  # noqa: E402
     LinePerceptionNode,
     white_mask,
 )
+from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
 
 
 def _frame_with_white_column(h: int, w: int, col: int, *, band_width: int = 20) -> np.ndarray:
@@ -208,30 +209,12 @@ class TestLinePerceptionNodeProcessFrame(unittest.TestCase):
 
     def test_no_image_reports_reason_through_run(self):
         node = LinePerceptionNode(vehicle=Vehicle.load())
-        sub = _FakeSub({TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
-        pub = _FakePub()
+        sub = FakeSub({TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+        pub = FakePub()
         node.run(sub=sub, pub=pub, duration_s=0.02)
         lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
         self.assertTrue(lines)
         self.assertIn("image/front", lines[0].reason)
-
-
-class _FakeSub:
-    """`Subscriber` の身代わり。`latest` を読むだけ・`poll` は何も待たない。"""
-
-    def __init__(self, latest=None):
-        self.latest = latest or {}
-
-    def poll(self, timeout_ms):
-        return []
-
-
-class _FakePub:
-    def __init__(self):
-        self.sent = []
-
-    def send(self, topic, msg):
-        self.sent.append((topic, msg))
 
 
 class TestModeGating(unittest.TestCase):
@@ -257,8 +240,8 @@ class TestModeGating(unittest.TestCase):
         node = LinePerceptionNode(vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_line_gating_idle")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
@@ -274,8 +257,8 @@ class TestModeGating(unittest.TestCase):
         node = LinePerceptionNode(vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_line_gating_no_ctrl")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
@@ -290,8 +273,8 @@ class TestModeGating(unittest.TestCase):
         node = LinePerceptionNode(vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_line_gating_active")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
@@ -307,9 +290,9 @@ class TestModeGating(unittest.TestCase):
         node = LinePerceptionNode(vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_line_gating_disarm")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
@@ -324,9 +307,9 @@ class TestModeGating(unittest.TestCase):
         node = LinePerceptionNode(vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_line_gating_armed")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]
@@ -363,8 +346,8 @@ class TestSameFrameIsNotReprocessed(unittest.TestCase):
             return orig(*a, **kw)
         node.process_frame = _counting
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+            pub = FakePub()
             loops = []
             node.run(sub=sub, pub=pub, duration_s=0.08,   # poll=20msで複数周回る
                      status_cb=loops.append)
@@ -436,8 +419,8 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
 
         ring, ref = self._ref_with_frame("surge_test_line_perception_exc")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
 
             lines = [st for topic, st in pub.sent if topic == TOPIC_LINE_CAM]

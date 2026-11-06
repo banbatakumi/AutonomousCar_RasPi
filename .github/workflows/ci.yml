@@ -59,11 +59,15 @@ jobs:
       # 赤になった。2026-10-21 のレビュー VER-01）。ファームが無いので fwsim の2本は skip になる
       - name: pytest (tools)
         working-directory: surge_mk2
-        run: python -m pytest tools/tests tools/calib/tests tools/fwsim/tests/test_fw_constants.py tools/fwsim/tests/test_control_logic.py -q
+        run: python -m pytest tools/tests tools/calib/tests tools/cam_calib/tests tools/fwsim/tests/test_fw_constants.py tools/fwsim/tests/test_control_logic.py -q
       # sim/ のテスト。シムと実機の一致を保つ網（2026-10-21 のレビュー VER-03）
       - name: pytest (sim)
         working-directory: surge_mk2
         run: python -m pytest sim/tests -q
+      # slam2d/ のテスト（tools/check.sh と同じ）
+      - name: pytest (slam2d)
+        working-directory: surge_mk2
+        run: python -m pytest slam2d/tests -q
 
   ml:
     runs-on: ubuntu-latest

@@ -24,26 +24,31 @@ from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 
 
 class TestExportOnnx(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # 既定の引数で書き出した1つを、中身を読むだけのテストで使い回す（書き出しは1回 約1秒）
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.ckpt_path = Path(cls._tmp.name) / "model.pt"
+        torch.save(DrivableSegModel(pretrained=False).state_dict(), cls.ckpt_path)
+        cls.out_path = Path(cls._tmp.name) / "model.onnx"
+        export(cls.ckpt_path, cls.out_path, (64, 48))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
     def test_export_writes_onnx_and_config(self):
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DrivableSegModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48))
-
-            self.assertTrue(out_path.exists())
-            cfg_path = out_path.with_suffix(".json")
-            self.assertTrue(cfg_path.exists())
-            cfg = json.loads(cfg_path.read_text())
-            self.assertEqual(cfg["input_size"], [64, 48])
-            self.assertEqual(cfg["mean"], MEAN)
-            self.assertEqual(cfg["std"], STD)
-            self.assertEqual(cfg["threshold"], THRESHOLD)
-            self.assertEqual(cfg["note"], "")   # 省略時は空文字
-            self.assertEqual(cfg["resize"], "area")
-            self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
+        self.assertTrue(self.out_path.exists())
+        cfg_path = self.out_path.with_suffix(".json")
+        self.assertTrue(cfg_path.exists())
+        cfg = json.loads(cfg_path.read_text())
+        self.assertEqual(cfg["input_size"], [64, 48])
+        self.assertEqual(cfg["mean"], MEAN)
+        self.assertEqual(cfg["std"], STD)
+        self.assertEqual(cfg["threshold"], THRESHOLD)
+        self.assertEqual(cfg["note"], "")   # 省略時は空文字
+        self.assertEqual(cfg["resize"], "area")
+        self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
 
     def _ckpt_with_train_config(self, d, **cfg):
         ckpt_path = Path(d) / "best.pt"
@@ -95,18 +100,10 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["note"], "夜間走行用、露出補正あり")
 
     def test_onnxruntime_output_matches_pytorch(self):
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DrivableSegModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48))
-
-            reloaded = DrivableSegModel(pretrained=False)
-            reloaded.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
-            err = verify_parity(out_path, reloaded, (64, 48))
-            self.assertLess(err, 1e-3)
+        reloaded = DrivableSegModel(pretrained=False)
+        reloaded.load_state_dict(torch.load(self.ckpt_path, map_location="cpu"))
+        err = verify_parity(self.out_path, reloaded, (64, 48))
+        self.assertLess(err, 1e-3)
 
     def test_onnx_file_loads_alone_without_its_export_directory(self):
         """`models/`への配置運用は`.onnx`単体をコピーする。**もとのエクスポート先
@@ -115,34 +112,18 @@ class TestExportOnnx(unittest.TestCase):
         `torch.onnx.export`の既定`external_data=True`が割った重みを参照できずに
         失敗する回帰を検出する（`ml_lidar/export_onnx_rl.py`が実際に踏んだ罠と同じ）。
         """
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DrivableSegModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48))
-
-            with tempfile.TemporaryDirectory() as lone_dir:
-                lone_path = Path(lone_dir) / "renamed.onnx"
-                shutil.copy(out_path, lone_path)          # .json も .data も持っていかない
-                sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
-                sess.run(None, {"input": torch.zeros(1, 3, 48, 64).numpy()})
+        with tempfile.TemporaryDirectory() as lone_dir:
+            lone_path = Path(lone_dir) / "renamed.onnx"
+            shutil.copy(self.out_path, lone_path)          # .json も .data も持っていかない
+            sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
+            sess.run(None, {"input": torch.zeros(1, 3, 48, 64).numpy()})
 
     def test_mismatched_model_raises(self):
         """**エクスポートできただけでは何も保証されない**——別の重みで検証すると
         検出できることを確認する。"""
-        with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DrivableSegModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
-            out_path = Path(d) / "model.onnx"
-            export(ckpt_path, out_path, (64, 48))
-
-            different_model = DrivableSegModel(pretrained=False)   # 別の乱数初期化
-            with self.assertRaises(ValueError):
-                verify_parity(out_path, different_model, (64, 48), atol=1e-6)
+        different_model = DrivableSegModel(pretrained=False)   # 別の乱数初期化
+        with self.assertRaises(ValueError):
+            verify_parity(self.out_path, different_model, (64, 48), atol=1e-6)
 
 
 if __name__ == "__main__":

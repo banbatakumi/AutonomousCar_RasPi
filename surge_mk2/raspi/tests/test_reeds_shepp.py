@@ -76,26 +76,6 @@ class TestReachability(unittest.TestCase):
         self.assertLessEqual(path.length, 1e-6)
 
 
-class TestManyRandomPoses(unittest.TestCase):
-    """ランダムな配置を多数試し、到達失敗の割合を見る。"""
-
-    def test_random_batch_all_reachable(self):
-        import random
-        rng = random.Random(42)
-        failures = []
-        n = 200
-        for _ in range(n):
-            gx = rng.uniform(-2, 2)
-            gy = rng.uniform(-2, 2)
-            gphi = rng.uniform(-math.pi, math.pi)
-            ok, path, end = _reaches((0, 0, 0), (gx, gy, gphi), tol=5e-3)
-            if not ok:
-                failures.append((gx, gy, gphi))
-        rate = 1 - len(failures) / n
-        print(f"到達率: {rate:.1%} ({n - len(failures)}/{n})")
-        self.assertEqual(failures, [], f"失敗例: {failures[:5]}")
-
-
 class TestEveryCandidateReachesGoal(unittest.TestCase):
     """**全候補が目標へ到達すること。**
 

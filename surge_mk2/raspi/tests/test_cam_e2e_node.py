@@ -45,6 +45,7 @@ from raspi.nodes.cam_e2e_node import (  # noqa: E402
     RegressionModel,
     load_model,
 )
+from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
 
 
 def _make_dummy_regression_model(path: Path, h: int, w: int, n_out: int = 2) -> None:
@@ -295,22 +296,6 @@ class TestModelSelection(unittest.TestCase):
         self.assertIs(node.model, first)
 
 
-class _FakeSub:
-    def __init__(self, latest=None):
-        self.latest = latest or {}
-
-    def poll(self, timeout_ms):
-        return []
-
-
-class _FakePub:
-    def __init__(self):
-        self.sent = []
-
-    def send(self, topic, msg):
-        self.sent.append((topic, msg))
-
-
 def _ref_with_frame(ring_name: str):
     ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
     data = np.full((24, 32, 3), 200, dtype=np.uint8)
@@ -334,10 +319,10 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_idle")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             self.assertIsNotNone(node.model, "モデル自体はモード非依存でロードされるはず")
@@ -352,10 +337,10 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_active")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -371,11 +356,11 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_disarm")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -390,11 +375,11 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_armed")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -408,10 +393,10 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_out")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             ready = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD and c.ready]
@@ -433,10 +418,10 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
         ring, ref = _ref_with_frame("surge_test_ce2e_rate")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)      # 10Hz の1周期（100ms）未満
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -450,10 +435,10 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
         ring, ref = _ref_with_frame("surge_test_ce2e_same")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.15)      # 1周期は過ぎるが2周期未満
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -468,7 +453,7 @@ class TestModeGating(unittest.TestCase):
         ring, ref = _ref_with_frame("surge_test_ce2e_fresh")
         t0 = time.monotonic()
 
-        class _CameraSub(_FakeSub):
+        class _CameraSub(FakeSub):
             """poll のたびに、30fps の時刻割りで新しいコマを書く。"""
             def poll(self, timeout_ms):
                 n = int((time.monotonic() - t0) / (1 / 30))
@@ -488,7 +473,7 @@ class TestModeGating(unittest.TestCase):
                               TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                               TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             sub.n = 0
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.55)
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -505,8 +490,8 @@ class TestModeGating(unittest.TestCase):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = _ref_with_frame("surge_test_ce2e_nomodel")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
@@ -521,8 +506,8 @@ class TestModeGating(unittest.TestCase):
 class TestStop(unittest.TestCase):
     def test_stop_breaks_the_run_loop(self):
         node = CamE2ENode(models_dir=Path("/nonexistent"), vehicle=Vehicle.load())
-        sub = _FakeSub({})
-        pub = _FakePub()
+        sub = FakeSub({})
+        pub = FakePub()
 
         thread = threading.Thread(target=node.run, kwargs={"sub": sub, "pub": pub})
         thread.start()
@@ -561,8 +546,8 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
 
         ring, ref = _ref_with_frame("surge_test_ce2e_exc")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
 
             cmds = [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]

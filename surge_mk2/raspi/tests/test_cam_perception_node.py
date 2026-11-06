@@ -37,6 +37,7 @@ from raspi.nodes.cam_perception_node import (  # noqa: E402
     CamPerceptionNode,
     SegmentationModel,
 )
+from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
 
 
 def _make_dummy_model(path: Path, h: int, w: int) -> None:
@@ -119,9 +120,9 @@ class TestColorOrder(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="red"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="red"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
-            node.run(sub=sub, pub=_FakePub(), duration_s=0.02)
+            node.run(sub=sub, pub=FakePub(), duration_s=0.02)
             self.assertIsNotNone(node._last_drivable)
             self.assertTrue(node._last_drivable.all())
         finally:
@@ -256,7 +257,9 @@ class TestRealGeometry(unittest.TestCase):
 
     def test_wall_is_never_farther_at_low_resolutions(self):
         """マスクの解像度が低くても（160x120・320x180）、壁は真の距離以下（近い側）に出る。
-        行の量子化（最大1行ぶん）を近い側へ見込んでいる。1m の壁が極端に近くならないことも見る。"""
+        行の量子化（最大1行ぶん）を近い側へ見込んでいる。1m の壁が極端に近くならないことも見る。
+        距離は占有格子の raycast なので、格子の1セルぶんは許す（行の量子化とは別。0.05m の格子で
+        320x180 の 2m の壁が +0.025m に出る。カメラ高さ 0.08m・クロップ 0.3 にしてから表に出た）。"""
         from raspi.nav.ipm import ground_to_pixel
         frame = np.zeros((360, 640, 3), np.uint8)
         for w, h in ((224, 224), (160, 120), (320, 180)):
@@ -270,7 +273,8 @@ class TestRealGeometry(unittest.TestCase):
                 dist = node.process_frame(frame).dist
                 worst = max(dist[d % 360] for d in range(-30, 31, 5))
                 best = min(dist[d % 360] for d in range(-30, 31, 5))
-                self.assertLessEqual(worst, wall, f"{w}x{h} の {wall}m の壁が {worst:.2f}m に出た")
+                self.assertLessEqual(worst, wall + node.grid_resolution,
+                                     f"{w}x{h} の {wall}m の壁が {worst:.3f}m に出た")
                 self.assertGreater(best, wall * 0.85, f"{w}x{h} の {wall}m の壁が近すぎる {best:.2f}m")
 
     def test_centerline_is_usable_on_open_ground(self):
@@ -361,24 +365,6 @@ class TestModelSelection(unittest.TestCase):
         self.assertEqual(node.model.input_size, (224, 224))    # SegmentationModel の既定値
 
 
-class _FakeSub:
-    """`Subscriber` の身代わり。`latest` を読むだけ・`poll` は何も待たない。"""
-
-    def __init__(self, latest=None):
-        self.latest = latest or {}
-
-    def poll(self, timeout_ms):
-        return []
-
-
-class _FakePub:
-    def __init__(self):
-        self.sent = []
-
-    def send(self, topic, msg):
-        self.sent.append((topic, msg))
-
-
 class TestRunModelSwitchIntegration(unittest.TestCase):
     """`run()` 全体を通した配線確認（バスは身代わり、モデル・共有メモリは本物）。"""
 
@@ -400,8 +386,8 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
         """モデル未選択のまま `run()` を回しても、壁扱いの `Scan` を出し続けるだけ
         で例外にならないこと（契約2）。"""
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        sub = _FakeSub({})
-        pub = _FakePub()
+        sub = FakeSub({})
+        pub = FakePub()
         node.run(sub=sub, pub=pub, duration_s=0.02)
         self.assertTrue(pub.sent)
         topic, st = pub.sent[0]
@@ -413,14 +399,14 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         self.assertEqual(node.failed_frame(reason="x").reason, "x")
         # 未選択（カメラ系モードが選ばれていない）
-        pub = _FakePub()
-        node.run(sub=_FakeSub({}), pub=pub, duration_s=0.02)
+        pub = FakePub()
+        node.run(sub=FakeSub({}), pub=pub, duration_s=0.02)
         scans = [m for t, m in pub.sent if t == TOPIC_SCAN_CAM]
         self.assertTrue(scans[0].reason)
         # モード選択済み・モデル未選択
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        pub = _FakePub()
-        node.run(sub=_FakeSub({TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")}), pub=pub,
+        pub = FakePub()
+        node.run(sub=FakeSub({TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")}), pub=pub,
                  duration_s=0.02)
         scans = [m for t, m in pub.sent if t == TOPIC_SCAN_CAM]
         self.assertEqual(scans[0].reason, "モデル未選択")
@@ -442,9 +428,9 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             self.assertIsNotNone(node.model)
@@ -495,9 +481,9 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_idle")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             # `reload_if_changed` はモード非依存で呼ばれ、モデル自体はロードされる
@@ -520,8 +506,8 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_no_ctrl")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
@@ -542,9 +528,9 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_cl")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_centerline")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
@@ -565,10 +551,10 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_disarm")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
@@ -586,10 +572,10 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_armed")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             paths = [st for topic, st in pub.sent if topic == TOPIC_CAM_PATH]
@@ -653,7 +639,7 @@ class TestInferenceRateLimiting(unittest.TestCase):
 
         node.read_frame = counting_read_frame
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
             orig_poll = sub.poll
 
@@ -662,7 +648,7 @@ class TestInferenceRateLimiting(unittest.TestCase):
                 poll_calls += 1
                 return orig_poll(timeout_ms)
             sub.poll = counting_poll
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
 
             self.assertGreater(poll_calls, 1, "テストがループを複数周していない")
@@ -690,9 +676,9 @@ class TestInferenceRateLimiting(unittest.TestCase):
                                  infer_hz=0.0)
         ring, ref = self._ref_with_frame("surge_test_ratelim_unthr")
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
             scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]
@@ -710,8 +696,8 @@ class TestInferenceRateLimiting(unittest.TestCase):
         try:
             latest = {TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
                       TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")}
-            sub = _FakeSub(latest)
-            pub = _FakePub()
+            sub = FakeSub(latest)
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
             self.assertEqual(node._infer_count, 1)
 
@@ -731,8 +717,8 @@ class TestStop(unittest.TestCase):
 
     def test_stop_breaks_the_run_loop(self):
         node = CamPerceptionNode(models_dir=Path("/nonexistent"), vehicle=Vehicle.load())
-        sub = _FakeSub({})
-        pub = _FakePub()
+        sub = FakeSub({})
+        pub = FakePub()
 
         thread = threading.Thread(target=node.run, kwargs={"sub": sub, "pub": pub})
         thread.start()
@@ -826,8 +812,8 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
 
             scans = [st for topic, st in pub.sent if topic == TOPIC_SCAN_CAM]

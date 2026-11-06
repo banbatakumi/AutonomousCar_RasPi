@@ -31,6 +31,7 @@ from raspi.rec.mcap_log import (  # noqa: E402
     json_schema,
     pointcloud_from_scan,
 )
+from raspi.tests.fakes import fake_disk_usage  # noqa: E402
 
 MS = 1_000_000
 
@@ -934,7 +935,7 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
 
         node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
         try:
-            usages = iter([_usage(100, 2), _usage(100, 10)])
+            usages = iter([fake_disk_usage(100, 2), fake_disk_usage(100, 10)])
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                             side_effect=lambda _p: next(usages)):
                 node._check_disk_space()
@@ -958,11 +959,11 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
             self.assertEqual(node.log.written, 0)
             # まだ空きが無い間は開き直さない
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
-                            return_value=_usage(100, 1)):
+                            return_value=fake_disk_usage(100, 1)):
                 node._check_disk_space()
             self.assertEqual(node.reopened, 0)
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
-                            return_value=_usage(100, 50)), \
+                            return_value=fake_disk_usage(100, 50)), \
                     mock.patch("raspi.nodes.logger_node.default_mcap_path",
                                return_value=Path(self._td.name) / "next.mcap"):
                 node._check_disk_space()
@@ -1068,14 +1069,6 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
                 node.close()
         finally:
             _sys.stdout = real
-
-
-def _usage(total_gb: float, free_gb: float):
-    """`shutil.disk_usage` の戻り値と同じ形。"""
-    from unittest import mock
-    total = int(total_gb * 1e9)
-    free = int(free_gb * 1e9)
-    return mock.Mock(total=total, used=total - free, free=free)
 
 
 if __name__ == "__main__":

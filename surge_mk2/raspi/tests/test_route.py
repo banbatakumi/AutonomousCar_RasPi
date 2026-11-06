@@ -26,7 +26,7 @@ from raspi.nav.roadgraph import CorridorGrid, build_graph  # noqa: E402
 from raspi.nav.route import (RouteError, Waypoint, build_raceline,  # noqa: E402
                              plan_loop, plan_to, snap, tightest_radius,
                              waypoints_from_traj)
-from raspi.nav.route_switch import Mission, RouteSwitcher, lap_crossed  # noqa: E402
+from raspi.nav.route_switch import Mission, RouteSwitcher  # noqa: E402
 
 RES = 0.025
 KEEP = 0.11          # 車体半幅 0.09 + 余裕 0.02
@@ -383,9 +383,7 @@ class TestSwitch(unittest.TestCase):
         sw.request("A", a)
         self.assertIsNone(sw.pending)
 
-    def test_lap_and_mission(self):
-        self.assertTrue(lap_crossed(95, 2, 100))
-        self.assertFalse(lap_crossed(50, 52, 100))
+    def test_mission(self):
         m = Mission.from_dict({"laps": 3, "then": "P1"})
         self.assertFalse(m.due(2, 100.0))
         self.assertTrue(m.due(3, 0.0))
@@ -653,7 +651,10 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         try:
             with mock.patch.dict("os.environ", {"SURGE_LINE_WORKER": "process"}):
                 slow = submit_job(time.sleep, 30.0)
-                time.sleep(3.0)              # 走り出すまで待つ（spawn に約1秒）
+                t_end = time.monotonic() + 10.0
+                while not slow.running() and time.monotonic() < t_end:
+                    time.sleep(0.02)         # ワーカーへ渡るまで待つ（spawn に約1秒）
+                self.assertTrue(slow.running())
                 kill_worker(False)
                 t0 = time.monotonic()
                 self.assertEqual(submit_job(abs, -3).result(timeout=20), 3)

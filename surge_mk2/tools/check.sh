@@ -58,9 +58,11 @@ if [ "$FAST" = 0 ]; then
   # 復元するかのテスト（真値の分かっているシムで試験を走らせる。約 40 秒）も入れる。ファームの定数の写しの
   # 突き合わせ（`tools/fwsim/tests/test_fw_constants.py`）も。車速のカルマンフィルタのシムのテスト
   # （`tools/fwsim/tests/test_speed_kf*.py`）は重いので入れない。ファームを直したら個別に回すこと
-  run "pytest (tools)" "$PY" -m pytest tools/tests tools/calib/tests tools/fwsim/tests/test_fw_constants.py \
-    tools/fwsim/tests/test_control_logic.py -q
+  run "pytest (tools)" "$PY" -m pytest tools/tests tools/calib/tests tools/cam_calib/tests \
+    tools/fwsim/tests/test_fw_constants.py tools/fwsim/tests/test_control_logic.py -q
   run "pytest (sim)" "$PY" -m pytest sim/tests -q
+  # SLAM（Pi の走行中も同じコードが動く）。以前はどこからも回しておらず、壊れても気づけなかった
+  run "pytest (slam2d)" "$PY" -m pytest slam2d/tests -q
   # ML のテスト（torch が要る）。ml_cam と ml_cam_e2e は `dataset` をフラットに import するので別プロセスで回す
   if "$PY" -c "import torch" 2>/dev/null; then
     for d in ml_cam ml_cam_e2e ml_lidar ml_common; do

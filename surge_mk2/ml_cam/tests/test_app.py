@@ -1,10 +1,11 @@
 """`ml_cam/app.py`（Tkinter操作パネル）のテスト。
 
 **GUIの見た目・クリック操作はテストしない**（`ml_cam/annotate.py` の cv2 ループを
-テストしないのと同じ理由）。モデル名・コマンド組み立て・ダウンロード処理という
+テストしないのと同じ理由）。コマンド組み立て・ダウンロード処理という
 Tkinterを知らない純粋関数だけを厳密にテストし、ウィジェット構築だけ
 「例外を出さずに組み立てられるか」というスモークテストに留める
-（ディスプレイが無い環境ではスキップする）。
+（ディスプレイが無い環境ではスキップする）。モデル名・備考・閉じる確認の汎用部分は
+`ml_common/tests` が見る。
 """
 
 import sys
@@ -31,12 +32,8 @@ from app import (  # noqa: E402
     default_sam_checkpoint_path,
     describe_model_status,
     download_file,
-    list_model_names,
-    next_model_name,
     parse_epoch_line,
-    read_note,
     rel,
-    write_note,
 )
 
 from ml_common.close_handler import confirm_and_close  # noqa: E402
@@ -169,34 +166,6 @@ class TestPaths(unittest.TestCase):
         self.assertEqual(MODELS_DIR, REPO_ROOT / "models")
 
 
-class TestNextModelName(unittest.TestCase):
-    def test_no_existing_models_suggests_v1(self):
-        self.assertEqual(next_model_name([]), "v1")
-
-    def test_ignores_non_v_named_models(self):
-        self.assertEqual(next_model_name(["first_model", "seg1"]), "v1")
-
-    def test_suggests_next_number_after_the_highest(self):
-        self.assertEqual(next_model_name(["v1", "v2"]), "v3")
-
-    def test_ignores_gaps_and_uses_the_max(self):
-        self.assertEqual(next_model_name(["v1", "v5", "v3"]), "v6")
-
-
-class TestListModelNames(unittest.TestCase):
-    def test_missing_dir_returns_empty(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(list_model_names(Path(d) / "nope"), [])
-
-    def test_lists_only_directories_sorted(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            (root / "v2").mkdir()
-            (root / "v1").mkdir()
-            (root / "not_a_dir.txt").write_text("x")
-            self.assertEqual(list_model_names(root), ["v1", "v2"])
-
-
 class TestDescribeModelStatus(unittest.TestCase):
     def test_missing_frames_dir_reports_zero(self):
         with tempfile.TemporaryDirectory() as d:
@@ -223,37 +192,6 @@ class TestDescribeModelStatus(unittest.TestCase):
             model_dir.mkdir()
             (model_dir / "best.pt").write_bytes(b"")
             self.assertIn("✓学習済み", describe_model_status(model_dir))
-
-
-class TestNote(unittest.TestCase):
-    """モデルごとの備考（`<model_dir>/note.txt`）。`ml_lidar/app.py`の同名機能と
-    対称。"""
-
-    def test_read_note_returns_empty_string_when_missing(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(read_note(Path(d)), "")
-
-    def test_write_then_read_note_round_trips(self):
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = Path(d) / "v1"
-            write_note(model_dir, "夜間走行用、露出補正あり")
-            self.assertEqual(read_note(model_dir), "夜間走行用、露出補正あり")
-
-    def test_write_note_creates_missing_model_dir(self):
-        """フレーム抽出より前（モデル名を決めただけの段階）でも備考を書けてよい
-        （`ml_cam/app.py`は学習前後いつでも書ける自由記述として扱う）。"""
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = Path(d) / "not_yet_created" / "v1"
-            write_note(model_dir, "これから抽出する")
-            self.assertTrue(model_dir.is_dir())
-            self.assertEqual(read_note(model_dir), "これから抽出する")
-
-    def test_write_note_overwrites_previous_content(self):
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = Path(d) / "v1"
-            write_note(model_dir, "1回目")
-            write_note(model_dir, "2回目に書き直した")
-            self.assertEqual(read_note(model_dir), "2回目に書き直した")
 
 
 class TestDownloadFile(unittest.TestCase):
@@ -355,13 +293,6 @@ class TestCloseConfirmation(unittest.TestCase):
         mock_ask.assert_called_once()
         root.destroy.assert_called_once()
 
-    def test_declining_confirmation_keeps_window_open(self):
-        jobs = self._FakeJobs(["train"], {"train": "学習"})
-        root = MagicMock()
-        with patch("ml_common.close_handler.messagebox.askyesno", return_value=False):
-            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
-        root.destroy.assert_not_called()
-
     def test_extract_running_closes_without_asking(self):
         """学習以外のジョブは既存動作どおり、確認無しでそのまま閉じられる。"""
         jobs = self._FakeJobs(["extract"], {"extract": "フレーム抽出"})
@@ -370,15 +301,6 @@ class TestCloseConfirmation(unittest.TestCase):
             confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
         mock_ask.assert_not_called()
         root.destroy.assert_called_once()
-
-    def test_no_job_running_closes_without_asking(self):
-        jobs = self._FakeJobs([])
-        root = MagicMock()
-        with patch("ml_common.close_handler.messagebox.askyesno") as mock_ask:
-            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
-        mock_ask.assert_not_called()
-        root.destroy.assert_called_once()
-
 
 @unittest.skipUnless(_HAS_DISPLAY, "ディスプレイが無い環境（ヘッドレスCI等）ではスキップ")
 class TestRunJobKeys(unittest.TestCase):

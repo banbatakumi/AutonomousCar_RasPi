@@ -174,14 +174,15 @@ def test_write_goes_into_selected_lens_profile(result, toml):
 
     current, names = lens_profiles("front", toml)
     assert current in names
+    rear_before = Vehicle.load(toml).cam_rear_fisheye
     assert write_vehicle_toml("front", result, toml, regenerate=False) == current
     text = toml.read_text(encoding="utf-8")
-    assert "下1/4" in text                                # 既存のコメントが残る
+    assert "# ★付いているレンズ" in text                 # 既存のコメントが残る
     v = Vehicle.load(toml)
     assert v.cam_front_lens == current
     assert v.cam_front_fisheye is not None
     assert v.cam_front_fisheye.fx == pytest.approx(result.calib.fx, abs=1e-3)
-    assert v.cam_rear_fisheye is None
+    assert v.cam_rear_fisheye == rear_before               # 後ろのカメラには触らない
     # 2回書いても表が増えない（上書きされる）
     write_vehicle_toml("front", result, toml, regenerate=False)
     assert _header_count(toml, f"[sensors.cam_front.lenses.{current}.fisheye]") == 1
@@ -195,14 +196,16 @@ def test_switching_lens_keeps_both_calibrations(result, toml):
 
     current, names = lens_profiles("front", toml)
     other = next(n for n in names if n != current)
+    front_before = Vehicle.load(toml).cam_front_fisheye
     write_vehicle_toml("front", result, toml, lens=other, regenerate=False)
-    assert Vehicle.load(toml).cam_front_fisheye is None      # 選ばれていないので使われない
+    assert Vehicle.load(toml).cam_front_fisheye == front_before   # 選ばれていないので使われない
     doc = tomlkit.parse(toml.read_text(encoding="utf-8"))
     doc["sensors"]["cam_front"]["lens"] = other
     toml.write_text(tomlkit.dumps(doc), encoding="utf-8")
     v = Vehicle.load(toml)
     assert v.cam_front_lens == other
     assert v.cam_front_fisheye is not None
+    assert v.cam_front_fisheye.fx == pytest.approx(result.calib.fx, abs=1e-3)
 
 
 def test_unknown_lens_is_refused(result, toml):

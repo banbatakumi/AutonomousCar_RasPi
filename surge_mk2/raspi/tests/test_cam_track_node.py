@@ -31,6 +31,7 @@ from raspi.msgs.types import (  # noqa: E402
     TargetTrack,
 )
 from raspi.nodes.cam_track_node import CamTrackNode  # noqa: E402
+from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
 
 
 def _blank_frame(w: int, h: int) -> np.ndarray:
@@ -144,9 +145,9 @@ class TestRoiSeqSync(unittest.TestCase):
         roi = self._roi(5)
         ref = ImageRef(shm_name="does-not-matter", slot=0, ring_seq=0, frame_id=0,
                        width=1, height=1, fmt="RGB888", stride=1, nbytes=1, cam="front")
-        sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+        sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
-            node.run(sub=sub, pub=_FakePub(), duration_s=0.05)
+            node.run(sub=sub, pub=FakePub(), duration_s=0.05)
         mock_read.assert_not_called()
 
 
@@ -375,29 +376,11 @@ class TestLidarFusion(unittest.TestCase):
         self.assertAlmostEqual(got, 3.0, places=6)
 
 
-class _FakeSub:
-    """`Subscriber`の身代わり。`latest`を読むだけ・`poll`は何も待たない。"""
-
-    def __init__(self, latest=None):
-        self.latest = latest or {}
-
-    def poll(self, timeout_ms):
-        return []
-
-
-class _FakePub:
-    def __init__(self):
-        self.sent = []
-
-    def send(self, topic, msg):
-        self.sent.append((topic, msg))
-
-
 class TestReason(unittest.TestCase):
     def test_idle_result_carries_reason(self):
         node = CamTrackNode(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
-        pub = _FakePub()
-        node.run(sub=_FakeSub({}), pub=pub, duration_s=0.05)
+        pub = FakePub()
+        node.run(sub=FakeSub({}), pub=pub, duration_s=0.05)
         sent = [m for t, m in pub.sent if t == TOPIC_TRACK_TARGET]
         self.assertTrue(sent)
         self.assertFalse(sent[0].tracking)
@@ -426,8 +409,8 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
 
     def test_no_roi_at_all_never_reads_frame(self):
         node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
-        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF})
-        pub = _FakePub()
+        sub = FakeSub({TOPIC_IMAGE_FRONT: self._REF})
+        pub = FakePub()
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
             node.run(sub=sub, pub=pub, duration_s=0.05)
         mock_read.assert_not_called()
@@ -437,8 +420,8 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         （進んでいない）間は読まない。"""
         node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
-        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
-        pub = _FakePub()
+        sub = FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
+        pub = FakePub()
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
             node.run(sub=sub, pub=pub, duration_s=0.05)
         mock_read.assert_not_called()
@@ -454,8 +437,8 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
             roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
             self.assertTrue(any(st.tracking for _, st in pub.sent),
                             "新規選択が来たのに追跡が始まっていない")
@@ -474,8 +457,8 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([], available=False))
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
-        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
-        pub = _FakePub()
+        sub = FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi})
+        pub = FakePub()
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
             node.run(sub=sub, pub=pub, duration_s=0.05)
         mock_read.assert_not_called()
@@ -500,8 +483,8 @@ class TestRunTracksEachFrameOnce(unittest.TestCase):
         ring, ref = self._ring_and_ref("surge_test_track_once")
         try:
             roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.1)   # 停滞判定（0.2s）より短く
             self.assertEqual(node._tracker._i, 0, "同じフレームで update() が回った")
             targets = [st for t, st in pub.sent if t == TOPIC_TRACK_TARGET]
@@ -517,8 +500,8 @@ class TestRunTracksEachFrameOnce(unittest.TestCase):
         ring, ref = self._ring_and_ref("surge_test_track_stall")
         try:
             roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.7)
             targets = [st for t, st in pub.sent if t == TOPIC_TRACK_TARGET]
             self.assertTrue(targets[-1].lost, "フレームが止まったのに見失いにならない")
@@ -541,9 +524,9 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
         node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         node._state = "TRACKING"                # 既に追跡中だったと仮定
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
-        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
+        sub = FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
                         TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
-        pub = _FakePub()
+        pub = FakePub()
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
             node.run(sub=sub, pub=pub, duration_s=0.05)
         mock_read.assert_not_called()
@@ -552,9 +535,9 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
         """DISARM中に新規選択（`select_seq`が進む）が来ても読まない。"""
         node = _new_node(vehicle=_vehicle_straight(), factory=_FakeFactory([]))
         roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
-        sub = _FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
+        sub = FakeSub({TOPIC_IMAGE_FRONT: self._REF, TOPIC_TRACK_ROI: roi,
                         TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
-        pub = _FakePub()
+        pub = FakePub()
         with patch("raspi.nodes.cam_track_node.FrameReader.read") as mock_read:
             node.run(sub=sub, pub=pub, duration_s=0.05)
         mock_read.assert_not_called()
@@ -571,9 +554,9 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
             roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=0)
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi,
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            pub = FakePub()
             with patch("raspi.nodes.cam_track_node.FrameReader.read",
                        return_value=None) as mock_read:
                 node.run(sub=sub, pub=pub, duration_s=0.05)
@@ -606,9 +589,9 @@ class TestRunSurvivesProcessCycleException(unittest.TestCase):
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
             roi = TargetRoiCtrl(x0=0.4, y0=0.4, x1=0.6, y1=0.6, select_seq=1)
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi,
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_TRACK_ROI: roi,
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
 
             self.assertTrue(pub.sent, "track/target が一度も publish されていない")

@@ -25,6 +25,7 @@ from raspi.nodes.arrow_signal_node import (  # noqa: E402
     ArrowSignalNode,
     signal_mask,
 )
+from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
 
 #: `signal_mask()` の既定「薄い青」帯に入るBGR値（HSV h=110,s=100,v=200 を逆変換）
 _LIGHT_BLUE_BGR = tuple(int(c) for c in
@@ -181,22 +182,6 @@ class TestToBgr(unittest.TestCase):
         self.assertEqual(_to_bgr(f, "RGB888")[0, 0, 0], 30)
 
 
-class _FakeSub:
-    def __init__(self, latest=None):
-        self.latest = latest or {}
-
-    def poll(self, timeout_ms):
-        return []
-
-
-class _FakePub:
-    def __init__(self):
-        self.sent = []
-
-    def send(self, topic, msg):
-        self.sent.append((topic, msg))
-
-
 class TestArmedGating(unittest.TestCase):
     """DISARM中は共有メモリすら読まない（`cam_track_node.py`と同じ節電）。"""
 
@@ -213,8 +198,8 @@ class TestArmedGating(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=1)
         ring, ref = self._ref_with_frame("surge_test_arrow_signal_disarm", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
             routes = [m for topic, m in pub.sent if topic == TOPIC_ROUTE_SELECT]
             self.assertFalse(routes, "DISARM中なのにroute/selectが出ている")
@@ -226,8 +211,8 @@ class TestArmedGating(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=1)
         ring, ref = self._ref_with_frame("surge_test_arrow_signal_armed", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
             routes = [m for topic, m in pub.sent if topic == TOPIC_ROUTE_SELECT]
             self.assertTrue(routes, "ARM中なのにroute/selectが一度も出ていない")
@@ -240,8 +225,8 @@ class TestArmedGating(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=1)
         ring, ref = self._ref_with_frame("surge_test_arrow_signal_hb", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
             hbs = [m for topic, m in pub.sent if topic == TOPIC_HB_PREFIX + "signal"]
             self.assertTrue(hbs, "hb/signal が一度も publish されていない")
@@ -273,8 +258,8 @@ class TestSameFrameIsNotDoubleCounted(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=3)
         ring, ref = self._ref_with_frame("surge_test_arrow_signal_dedup", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.12)      # 十分な周回数（poll=20ms×約6回）
 
             routes = [m for topic, m in pub.sent if topic == TOPIC_ROUTE_SELECT]
@@ -293,8 +278,8 @@ class TestSameFrameIsNotDoubleCounted(unittest.TestCase):
         ring = FrameRing.create("surge_test_arrow_dedup_prog", 320, 240,
                                 "BGR888", n_slots=4)
         try:
-            sub = _FakeSub({TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             for _ in range(3):
                 desc = ring.write(frame, t_capture_ns=time.monotonic_ns(), frame_id=1)
                 sub.latest[TOPIC_IMAGE_FRONT] = ImageRef(
@@ -329,9 +314,9 @@ class TestSignalConfigGating(unittest.TestCase):
         node.read_frame = lambda ref: (calls.append(ref) or None)
         ring, ref = self._ref_with_frame("surge_test_arrow_sig_disabled", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True),
                             TOPIC_SIGNAL_CONFIG: SignalConfig(enabled=False)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
             self.assertFalse(calls, "enabled=False なのにフレームを読んでいる")
         finally:
@@ -344,9 +329,9 @@ class TestSignalConfigGating(unittest.TestCase):
         try:
             cfg = SignalConfig(enabled=True, roi_top=0.1, roi_bottom=0.3,
                                sat_min=50, sat_max=190, val_min=160, min_lit_frac=0.05)
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True),
                             TOPIC_SIGNAL_CONFIG: cfg})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
             self.assertEqual(node.detector.roi_band, (0.1, 0.3))
             self.assertEqual(node.detector.sat_range, (50, 190))
@@ -361,8 +346,8 @@ class TestSignalConfigGating(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=1)
         ring, ref = self._ref_with_frame("surge_test_arrow_signal_no_cfg", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)
             routes = [m for topic, m in pub.sent if topic == TOPIC_ROUTE_SELECT]
             self.assertTrue(routes, "SignalConfig未着でも認識は動くはず")
@@ -387,8 +372,8 @@ class TestArrowSignalStatusPublish(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=1)
         ring, ref = self._ref_with_frame("surge_test_arrow_signal_status", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
             last = [m for topic, m in pub.sent if topic == TOPIC_SIGNAL_STATUS][-1]
             self.assertEqual(last.value, "left")
@@ -414,9 +399,9 @@ class TestArrowSignalStatusPublish(unittest.TestCase):
         node = ArrowSignalNode(confirm_frames=1)
         ring, ref = self._ref_with_frame("surge_test_arrow_sig_stat_off", lit_col=60)
         try:
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True),
                             TOPIC_SIGNAL_CONFIG: SignalConfig(enabled=False)})
-            pub = _FakePub()
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
             statuses = [m for topic, m in pub.sent if topic == TOPIC_SIGNAL_STATUS]
             self.assertTrue(statuses)
@@ -442,8 +427,8 @@ class TestRunSurvivesProcessCycleException(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = _FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
-            pub = _FakePub()
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
+            pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
         finally:
             node.close()

@@ -22,6 +22,7 @@ from raspi.nodes.io_node import IoNode  # noqa: E402
 from raspi.proto import FrameEncoder, FrameParser, packets  # noqa: E402
 from raspi.proto.generated.packets import HEADER_SIZE, S2P_TYPES  # noqa: E402
 from raspi.rec.framelog import FrameLogReader, FrameLogWriter, Kind  # noqa: E402
+from raspi.tests.fakes import fake_disk_usage  # noqa: E402
 
 
 class FakeLink:
@@ -238,7 +239,7 @@ class TestIoNodeDiskCheck(unittest.TestCase):
         log = FrameLogWriter(self.path)
         node = IoNode(link, log=log)
         try:
-            usages = iter([_usage(100, 2), _usage(100, 10)])
+            usages = iter([fake_disk_usage(100, 2), fake_disk_usage(100, 10)])
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
                             side_effect=lambda _p: next(usages)):
                 self._run_disk_check_sync(node)
@@ -257,7 +258,7 @@ class TestIoNodeDiskCheck(unittest.TestCase):
         node = IoNode(link, log=log)
         try:
             with mock.patch("raspi.rec.logclean.shutil.disk_usage",
-                            return_value=_usage(100, 10)):   # 10% free: warn だが critical ではない
+                            return_value=fake_disk_usage(100, 10)):   # 10% free: warn だが critical ではない
                 self._run_disk_check_sync(node)
         finally:
             log.close()
@@ -314,14 +315,6 @@ class TestIoNodeDiskCheck(unittest.TestCase):
             log.close()
 
         self.assertEqual(heartbeat.stats.stalls, 0)
-
-
-def _usage(total_gb: float, free_gb: float):
-    """`shutil.disk_usage` の戻り値と同じ形。"""
-    from unittest import mock
-    total = int(total_gb * 1e9)
-    free = int(free_gb * 1e9)
-    return mock.Mock(total=total, used=total - free, free=free)
 
 
 class TestIoNodeLogToggle(unittest.TestCase):

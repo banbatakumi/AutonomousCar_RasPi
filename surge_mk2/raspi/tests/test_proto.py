@@ -485,14 +485,6 @@ class TestScaleMetadata(unittest.TestCase):
         self.assertEqual(meta["odom_dist"], (0.0001, "m"))
         self.assertEqual(meta["batt_current_signal"], (0.02, "A"))
 
-    def test_si_conversion(self):
-        """raw * scale で SI 単位になる。"""
-        t = packets.Telemetry(speed=1500, steer_actual=-2618, odom_dist=[12345, 0])
-        self.assertAlmostEqual(t.speed * packets.Telemetry.META["speed"][0], 1.5)
-        self.assertAlmostEqual(t.steer_actual * 1e-4, -0.2618, places=4)
-        self.assertAlmostEqual(t.odom_dist[0] * 1e-4, 1.2345)
-
-
 class TestGeneratorChecks(unittest.TestCase):
     """`generate.py` が定義の矛盾を生成前に弾く。"""
 

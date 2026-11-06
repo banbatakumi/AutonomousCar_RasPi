@@ -38,7 +38,7 @@ import numpy as np
 from .purepursuit import nearest_index
 from .raceline import RaceLine
 
-__all__ = ["RouteSwitcher", "Mission", "SwitchResult", "lap_crossed"]
+__all__ = ["RouteSwitcher", "Mission", "SwitchResult"]
 
 
 @dataclass
@@ -144,8 +144,3 @@ class Mission:
         if self.time_s > 0.0:
             parts.append(f"{elapsed_s:.0f}/{self.time_s:.0f}s")
         return "・".join(parts) + f" → {self.then}"
-
-
-def lap_crossed(prev_idx: int, idx: int, n: int) -> bool:
-    """閉じた経路の添字が末尾側から先頭側へ回ったか（1周した）。"""
-    return prev_idx >= 0 and prev_idx > 0.75 * n and idx < 0.25 * n

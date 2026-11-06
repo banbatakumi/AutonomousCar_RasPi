@@ -242,8 +242,11 @@ class TestStandstillSteerRelax(unittest.TestCase):
 class TestEngageGating(unittest.TestCase):
     """制限時間と再計画の回数は engage している間だけ数える（`set_engaged`）。"""
 
+    #: 制限時間を既定（40s）から下限まで縮めて、超えるまで回すシム時間を短くする
+    LIMIT = {**IDEAL, "max_maneuver_s": 5.0}
+
     def _wait(self, pp, seconds):
-        p = pp.merged(IDEAL)
+        p = pp.merged(self.LIMIT)
         vs = VehicleState(stopped=True)
         st = None
         for _ in range(int(seconds / DT)):
@@ -254,7 +257,7 @@ class TestEngageGating(unittest.TestCase):
         pp = ParkToPoint()
         pp.set_engaged(False)
         pp.request_park_target(1.0, 0.0, 0.0)
-        st = self._wait(pp, 60.0)                  # 既定の制限時間 40s より長く待つ
+        st = self._wait(pp, 8.0)                   # 制限時間 5s より長く待つ
         self.assertNotEqual(st.phase, "失敗", st.reason)
         self.assertEqual(pp._maneuver_t, 0.0)
         self.assertEqual(pp._replans, 0)
@@ -264,7 +267,7 @@ class TestEngageGating(unittest.TestCase):
         pp = ParkToPoint()
         pp.set_engaged(True)
         pp.request_park_target(1.0, 0.0, 0.0)
-        st = self._wait(pp, 41.0)                  # 車は動かない（速度を積分していない）
+        st = self._wait(pp, 6.0)                   # 車は動かない（速度を積分していない）
         self.assertEqual(st.phase, "失敗")
         self.assertIn("制限時間", st.reason)
 

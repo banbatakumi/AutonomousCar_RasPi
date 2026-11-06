@@ -44,10 +44,12 @@ def _make_tiny_model(cfg: EnvConfig, max_episode_steps: int) -> PPO:
 
 
 class TestPipelineSmoke(unittest.TestCase):
-    def setUp(self) -> None:
-        self.cfg = EnvConfig(fov_deg=60.0, randomize_lidar=False, randomize_dynamics=False)
-        self.max_episode_steps = 40
-        self.model = _make_tiny_model(self.cfg, self.max_episode_steps)
+    @classmethod
+    def setUpClass(cls) -> None:
+        # 学習はテストごとに要らない（評価・書き出しはモデルを書き換えない）
+        cls.cfg = EnvConfig(fov_deg=60.0, randomize_lidar=False, randomize_dynamics=False)
+        cls.max_episode_steps = 40
+        cls.model = _make_tiny_model(cls.cfg, cls.max_episode_steps)
 
     def test_eval_stats_runs(self) -> None:
         result = eval_stats.evaluate(self.model, self.cfg, n_episodes=2, episode_s=2.0, base_seed=0)

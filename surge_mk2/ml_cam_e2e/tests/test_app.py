@@ -1,9 +1,9 @@
 """`ml_cam_e2e/app.py` のテスト。
 
-純粋関数（コマンド組み立て・モデル名・備考）に加え、ウィンドウクローズ時の
+純粋関数（コマンド組み立て・状態表示）に加え、ウィンドウクローズ時の
 確認ダイアログ（`_CONFIRM_STOP_JOB_KEYS`・`confirm_and_close`との配線）も
 検証する。GUI自体の見た目・クリック操作はテストしない（`ml_cam/tests/test_app.py`
-と同じ方針）。
+と同じ方針）。モデル名・備考・閉じる確認の汎用部分は `ml_common/tests` が見る。
 """
 
 import sys
@@ -25,10 +25,6 @@ from app import (  # noqa: E402
     build_train_cmd,
     describe_model_status,
     extract_warning,
-    list_model_names,
-    next_model_name,
-    read_note,
-    write_note,
 )
 from extract_pairs import DEFAULT_LABEL_SHIFT_MS  # noqa: E402
 
@@ -48,24 +44,6 @@ def _has_display() -> bool:
 _HAS_DISPLAY = _has_display()
 
 
-class TestModelNames(unittest.TestCase):
-    def test_next_model_name_continues_from_existing(self):
-        self.assertEqual(next_model_name([]), "v1")
-        self.assertEqual(next_model_name(["v1", "v2"]), "v3")
-        self.assertEqual(next_model_name(["v1", "custom", "v5"]), "v6")
-
-    def test_list_model_names_returns_sorted_directories(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            (root / "v2").mkdir()
-            (root / "v1").mkdir()
-            (root / "not_a_dir.txt").write_text("")
-            self.assertEqual(list_model_names(root), ["v1", "v2"])
-
-    def test_list_model_names_empty_when_missing(self):
-        self.assertEqual(list_model_names(Path("/nonexistent")), [])
-
-
 class TestModelStatus(unittest.TestCase):
     def test_describe_counts_pairs_and_training_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -81,17 +59,6 @@ class TestModelStatus(unittest.TestCase):
             (model_dir / "best.pt").write_bytes(b"x")
             status = describe_model_status(model_dir)
             self.assertIn("✓学習済み", status)
-
-
-class TestNote(unittest.TestCase):
-    def test_round_trips(self):
-        with tempfile.TemporaryDirectory() as d:
-            model_dir = Path(d) / "v1"
-            write_note(model_dir, "テストの備考")
-            self.assertEqual(read_note(model_dir), "テストの備考")
-
-    def test_missing_note_returns_empty(self):
-        self.assertEqual(read_note(Path("/nonexistent")), "")
 
 
 class TestCommandBuilders(unittest.TestCase):
@@ -264,13 +231,6 @@ class TestCloseConfirmation(unittest.TestCase):
         mock_ask.assert_called_once()
         root.destroy.assert_called_once()
 
-    def test_declining_confirmation_keeps_window_open(self):
-        jobs = self._FakeJobs(["train"], {"train": "学習"})
-        root = MagicMock()
-        with patch("ml_common.close_handler.messagebox.askyesno", return_value=False):
-            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
-        root.destroy.assert_not_called()
-
     def test_extract_running_closes_without_asking(self):
         jobs = self._FakeJobs(["extract"], {"extract": "ペア抽出"})
         root = MagicMock()
@@ -278,15 +238,6 @@ class TestCloseConfirmation(unittest.TestCase):
             confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
         mock_ask.assert_not_called()
         root.destroy.assert_called_once()
-
-    def test_no_job_running_closes_without_asking(self):
-        jobs = self._FakeJobs([])
-        root = MagicMock()
-        with patch("ml_common.close_handler.messagebox.askyesno") as mock_ask:
-            confirm_and_close(root, jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
-        mock_ask.assert_not_called()
-        root.destroy.assert_called_once()
-
 
 @unittest.skipUnless(_HAS_DISPLAY, "ディスプレイが無い環境（ヘッドレスCI等）ではスキップ")
 class TestRunJobKeys(unittest.TestCase):

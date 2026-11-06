@@ -114,23 +114,20 @@ class TestLoopClosureReducesDrift(unittest.TestCase):
                         f"ループ閉じでドリフトが減っていない: {before.mean():.3f} -> {after.mean():.3f}")
         self.assertGreater(system.optimizations, 0)
 
-    def test_map_is_rebuilt_on_optimize(self):
-        system, holder = _make_system()
-        _drive(system, laps=1.6, gyro_bias_dps=1.0, twist_holder=holder)
-        grid_before = system.frontend.grid
-        self.assertGreater(len(system.loops), 0)
-        system.flush()
-        self.assertIsNot(system.frontend.grid, grid_before)
-        self.assertGreater(system.frontend.grid.seq, grid_before.seq)
-        self.assertGreater(int(system.frontend.grid.wall_mask().sum()), 500)
-
-    def test_flush_steps_gives_the_same_map_and_does_not_touch_it_until_the_end(self):
-        """分けて進めても結果は一括の`flush()`と同じで、最後の`next()`まで地図は変わらない。"""
+    def test_flush_rebuilds_the_map_and_flush_steps_gives_the_same_map(self):
+        """`flush()` は最適化した姿勢で地図を焼き直す。分けて進めても（`flush_steps`）結果は一括の
+        `flush()`と同じで、最後の`next()`まで地図は変わらない。
+        （走行済みの状態は g2o を複製できないので、同じ走行を2本使う）"""
         a, ha = _make_system()
         b, hb = _make_system()
         _drive(a, laps=1.6, gyro_bias_dps=1.0, twist_holder=ha)
         _drive(b, laps=1.6, gyro_bias_dps=1.0, twist_holder=hb)
+        self.assertGreater(len(a.loops), 0)
+        a_grid_before = a.frontend.grid
         a.flush()
+        self.assertIsNot(a.frontend.grid, a_grid_before)
+        self.assertGreater(a.frontend.grid.seq, a_grid_before.seq)
+        self.assertGreater(int(a.frontend.grid.wall_mask().sum()), 500)
         grid_before = b.frontend.grid
         n = 0
         for _ in b.flush_steps(chunk=4):
