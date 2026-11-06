@@ -12,6 +12,7 @@
 - **横グリップの残り**: 前後に滑るほど横力が出なくなる（摩擦円）。1/√(1+(κ/0.1)²) の平均。
   直線の場面でも、同じ滑り方で旋回していたらどれだけ横に踏ん張れたかの目安になる
 - **トルクの暴れ**: 指令トルクの変化の速さの RMS [N·m/s]（振動・発熱・音）
+- **リアの出**: 舵で決まるヨーを旋回の向きに超えて回った最大 [rad/s]（`yaw_over`。駆動で後輪の横が抜けた大きさ）
 """
 
 from __future__ import annotations
@@ -138,6 +139,8 @@ def _metrics(sc: Scenario, out: np.ndarray, slip_target: float = 0.1) -> dict[st
     m["heading"] = float(abs(np.sum(yaw) * DT))
     err = c("yaw_target") - yaw
     m["yaw_err_rms"] = float(np.sqrt(np.mean(err ** 2)))
+    # 規範（舵で決まるヨー）を旋回の向きに超えて回った最大 [rad/s]。駆動でリアが出た大きさ（0 = 出ていない）
+    m["yaw_over"] = float(max(0.0, np.max((yaw - c("yaw_target")) * np.sign(c("yaw_target")))))
     m["torque_diff_rms"] = float(np.sqrt(np.mean((c("cmd_right") - c("cmd_left")) ** 2)))
     return m
 
@@ -214,6 +217,13 @@ SLIP: tuple[Scenario, ...] = (
     Scenario("accel_mu_drop", "全開の途中で路面μが0.4倍（0.2s）",
              (Seg(0.25, MODE_TORQUE, _FULL), Seg(0.2, MODE_TORQUE, _FULL, mu_left=0.4, mu_right=0.4),
               Seg(0.4, MODE_TORQUE, _FULL)), 0.5, measure=1),
+    # 滑って戻った後、同じトルクのまま次の低μで滑り直す。物差しは 2 回目の低μ。
+    #   ★ 2026-11-06 の TC の止め方の案（積分が最大値に戻るまで働き続ける）は、戻る途中で積分が掛けているトルクより
+    #   上にあるまま滑り直して効くのが遅れた（滑っていた割合 0.43 → 0.50）
+    Scenario("accel_patchy", "トルク 0.06N·m で路面μ 0.35 倍の所が 0.1s おきに 3 回（2 回目を見る）",
+             (Seg(0.2, MODE_TORQUE, 0.06),
+              *(s for _ in range(3) for s in (Seg(0.08, MODE_TORQUE, 0.06, mu_left=0.35, mu_right=0.35),
+                                              Seg(0.1, MODE_TORQUE, 0.06)))), 0.5, measure=3),
     Scenario("accel_split", "全開・左だけ路面μが0.4倍",
              (Seg(0.8, MODE_TORQUE, _FULL, mu_left=0.4),), 0.5),
     Scenario("lift", "停止から全開・左後輪が浮いている",
@@ -221,6 +231,11 @@ SLIP: tuple[Scenario, ...] = (
     Scenario("corner_exit", "旋回（舵0.3rad・1.2m/s）から全開",
              (Seg(0.5, MODE_SPEED, 1.2, _RAMP, steer=0.3), Seg(0.7, MODE_TORQUE, _FULL, steer=0.3)), 1.2,
              measure=1),
+    # ★ 2026-11-06 `surge_20261106_024246` のヘアピン出口: 左旋回から右へ切り返しながら車速指令で加速すると、内輪だけ TC が
+    #   絞り外輪は満額のまま、外輪のスリップ率は目標未満で横が抜けてリアが出た（TV は実機と同じく無効）
+    Scenario("corner_exit_flick", "左旋回から右へ切り返しながら加速（車速指令 1.6→2.8m/s）",
+             (Seg(0.5, MODE_SPEED, 1.6, _RAMP, steer=0.35), Seg(0.6, MODE_SPEED, 2.8, _RAMP, steer=-0.35)), 1.6,
+             tv=False, measure=1),
     Scenario("brake", "2.5m/s から最大制動", (Seg(0.1, MODE_SPEED, 2.5, _RAMP), Seg(1.5, MODE_BRAKE, _FULL)),
              2.5, measure=1, kind="brake"),
     Scenario("brake_soft", "2.5m/s から制動 0.10N·m",

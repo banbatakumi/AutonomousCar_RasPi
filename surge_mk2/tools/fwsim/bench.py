@@ -75,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     res = compare(fws, plant, scs, args.seeds)
     cols = (("効率", "efficiency", False), ("滑っていた割合", "slipping", True),
             ("横グリップの残り", "lateral_keep", False), ("トルクの暴れ", "chatter", True),
-            ("後輪の最高周速", "wheel_peak", True), ("ヨーレート偏差", "yaw_err_rms", True))
+            ("後輪の最高周速", "wheel_peak", True), ("ヨーレート偏差", "yaw_err_rms", True),
+            ("リアの出", "yaw_over", True))
     print("各欄: 車の組での平均（最悪の車）\n")
     for sc in scs:
         print(f"■ {sc.label}  [{sc.key}]")
