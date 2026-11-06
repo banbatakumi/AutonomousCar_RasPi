@@ -2329,8 +2329,16 @@ class Slam2dRaceLine(Planner):
         if hit is None:
             self._brake_hold = None
             self._blocked_t = 0.0
-            # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）
-            if unstick_on and driving and st.target_speed > 0.1 and abs(vs.speed) < 0.03:
+            # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）。
+            # ★ 「進めと言っている」は指令の大きさではなく、**止める指令でないこと＋経路の計画速度**で見る。
+            #   止まった所からの追い付き（`speedctl.catch_up`）は今の車速から出発するので、車が動かないと
+            #   指令が下限 0.05m/s に張り付き、指令 > 0.1 の判定に届かなかった
+            #   （2026-11-06 `surge_20261106_123306`: ヘアピンの壁に当たり、計画速度 1.76 のまま 19 秒止まり続けた）
+            n_path = len(path)
+            v_plan = float(path.v[index % n_path if path.closed else min(max(index, 0), n_path - 1)]) \
+                if n_path else 0.0
+            wants = st.target_speed > 0.0 and not st.brake and max(st.target_speed, v_plan) > 0.1
+            if unstick_on and driving and wants and abs(vs.speed) < 0.03:
                 self._stuck_t += self._dt
             else:
                 self._stuck_t = 0.0

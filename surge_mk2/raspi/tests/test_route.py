@@ -1235,6 +1235,26 @@ class TestObstacleResponse(unittest.TestCase):
         tgt = self.pl._detour._target_in_park
         self.assertTrue(all(type(v) is float for v in tgt), tgt)
 
+    def test_stuck_while_catch_up_command_is_tiny(self):
+        """★ 壁に当たって止まると追い付きの指令は 0.05m/s に張り付く。計画速度が高ければスタックとみなす
+        （2026-11-06 `surge_20261106_123306` で 19 秒抜けなかった）。"""
+        handled = False
+        for _ in range(40):
+            if handled:
+                break
+            handled, st = self._respond(self.closed, None, np.inf, speed=0.0, armed=True,
+                                        target=0.05, obstacle_avoid=1)
+        self.assertTrue(handled)
+        self.assertEqual(self.pl.phase, "DETOUR")
+
+    def test_commanded_stop_is_not_stuck(self):
+        """止める指令（目標 0）での静止はスタックでない（計画速度が高くても）。"""
+        for _ in range(40):
+            handled, _ = self._respond(self.closed, None, np.inf, speed=0.0, armed=True,
+                                       target=0.0, obstacle_avoid=1)
+        self.assertFalse(handled)
+        self.assertEqual(self.pl._stuck_t, 0.0)
+
     def test_stuck_is_escaped_even_when_avoidance_is_off(self):
         """★ 壁に当たって進めないときは「避ける」が 0 でも Hybrid A* で抜ける（以前は壁を押し続けた）。"""
         handled = False
