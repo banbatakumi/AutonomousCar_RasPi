@@ -327,7 +327,8 @@ class Bench:
                  grip_file: Path | None = None, grip_cfg: dict[str, float] | None = None,
                  sim_params: dict[str, float] | None = None,
                  state_dir: Path | None = None,
-                 hijacks: list[tuple[float, float, float, float]] | None = None) -> None:
+                 hijacks: list[tuple[float, float, float, float]] | None = None,
+                 plan_slowdown: float = 1.0) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -389,11 +390,12 @@ class Bench:
             params_sim = _replace(SimParams.load(), **sim_params)
         self.link = create_sim_link(course, seed=seed, with_channel=False, spec=spec,
                                     params=params_sim)
-        # `--mu`・`--surface`・`--mu-at`: 真値の路面を場所と時刻で変える（`sim/surface.py`）
-        self.surface = None
+        # `--mu`・`--surface`・`--mu-at`: 真値の路面を場所と時刻で変える（`sim/surface.py`）。
+        # コースの床（JSON の `"surface"`）が土台で、`--mu` はそれを置き換える
+        self.surface = self.link.sim.surface
         if surface:
             from .surface import Surface
-            sf = self.surface = Surface(self.link.sim.spec.mu)
+            sf = self.surface = self.link.sim.surface or Surface(self.link.sim.spec.mu)
             if surface.get("base"):
                 sf.set_base(*surface["base"])
             for d in surface.get("discs", []):
@@ -468,6 +470,8 @@ class Bench:
         self.mode = mode
         self.params = merged_params(mode, params, hidden=True)
         self.max_speed = max_speed
+        #: `plan()` を何倍遅く見せるか（Pi の計算の遅さ。`--plan-slowdown`）
+        self.plan_slowdown = max(1.0, float(plan_slowdown))
         self.max_steer = max_steer
         self.quiet = quiet
 
@@ -722,6 +726,9 @@ class Bench:
                 scan = mask_body(scan, self._body)
                 t_plan = time.perf_counter()
                 st = self.planner.plan(scan, self.vs, self.params, dt)
+                if self.plan_slowdown > 1.0:
+                    # Pi の遅さ: 壁時計で回るので、待つ間も仮想 STM32 の車は進む（指令が古くなる）
+                    time.sleep((time.perf_counter() - t_plan) * (self.plan_slowdown - 1.0))
                 self.res.plan_ms.append((time.perf_counter() - t_plan) * 1000)
                 self.res.plans += 1
                 took("計画", t_plan)
@@ -1378,6 +1385,9 @@ def main() -> int:
     ap.add_argument("--hijack", action="append", default=[], metavar="T:DUR:STEER:SPEED",
                     help="走行開始から T 秒後に DUR 秒だけ指令を舵 STEER [rad]・速度 SPEED [m/s] に乗っ取る"
                          "（経路から外れた・ぶつかった所から戻れるかを見る）")
+    ap.add_argument("--plan-slowdown", type=float, default=1.0, metavar="K",
+                    help="plan() を K 倍遅く見せる（その間も車は進む）。Mac は Pi より速いので、Pi で同じ planner を"
+                         "回した時間との比を入れると計算の遅れを Pi 相当にできる。計画 p99 の表示も K 倍込み")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -1434,7 +1444,8 @@ def main() -> int:
               sim_params={**(REAL_VIBRATION if args.real_noise else {}),
                           **_error_preset(args.errors), **pairs(args.sim)},
               state_dir=Path(args.state) if args.state else None,
-              hijacks=[nums(h, ":") for h in args.hijack])
+              hijacks=[nums(h, ":") for h in args.hijack],
+              plan_slowdown=args.plan_slowdown)
     print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
     try:
         res = b.run(args.time)

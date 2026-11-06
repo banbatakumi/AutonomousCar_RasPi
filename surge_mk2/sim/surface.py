@@ -10,6 +10,11 @@
     surface.add_change(60.0, 0.42)               # 60 秒後に一様の値を 0.42 へ
 
 制動モード（`brake`）の減速は連動させない（周回中の減速は速度指令で出す。制動モードは停止用）。
+
+**コースの床**: コースの JSON に `"surface": {"mu_scale": 1.25, "mu_long_scale": 1.1}` を書くと、そのコースの
+一様の倍率になる（`Surface.for_course`。`VirtualStm32` が読む。既定 1.0 = 校正の床 = `[limits]` の値）。
+会場の床は校正の床とグリップが違う（`docs/calibration.md`）ので、床が分かっている会場のコースに置く。
+**値は実機の走行記録から合わせ込まない**（校正で測るか、分からなければ倍率を振って planner が破綻しないかを見る）。
 """
 
 from __future__ import annotations
@@ -23,6 +28,18 @@ class Surface:
         self._base = (1.0, 1.0)
         self._discs: list[tuple[float, float, float, float, float]] = []
         self._changes: list[tuple[float, float, float]] = []
+
+    @classmethod
+    def for_course(cls, spec_mu: float, course) -> "Surface | None":
+        """コースの `surface`（`mu_scale`・`mu_long_scale`）から一様の床を作る。無い・どちらも 1 なら None。"""
+        meta = getattr(course, "surface", None) or {}
+        lat = float(meta.get("mu_scale", 1.0))
+        lon = float(meta.get("mu_long_scale", lat))
+        if lat == 1.0 and lon == 1.0:
+            return None
+        sf = cls(spec_mu)
+        sf.set_base(spec_mu * lat, spec_mu * lon)
+        return sf
 
     def _scale(self, mu: float, mu_long: float | None) -> tuple[float, float]:
         lat = float(mu) / self.spec_mu

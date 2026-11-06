@@ -38,6 +38,7 @@ from raspi.proto import UART_BAUD, FrameEncoder, FrameParser, packets
 from raspi.proto.generated.packets import FRAME_OVERHEAD, P2S_TYPES, PROTOCOL_VERSION
 
 from .params import SimParams
+from .surface import Surface
 from .vehicle import DRIVE_MAX_SPEED_M_S as _DRIVE_MAX_SPEED_M_S
 from .vehicle import DriveInput, VehicleModel, VehicleSpec, brake_decel
 
@@ -250,8 +251,9 @@ class VirtualStm32:
         self._as_tick = 0
         self._as_hit = False
 
-        #: 路面の摩擦を場所と時刻で変える（`sim/surface.py`。`None` = `VehicleSpec` の値のまま）
-        self.surface = None
+        #: 路面の摩擦を場所と時刻で変える（`sim/surface.py`。`None` = `VehicleSpec` の値のまま）。
+        #: コースの JSON に `"surface"` があればその床から始める
+        self.surface = Surface.for_course(spec.mu, course)
         self.estop_active = False
         self.auto_stop_active = False
         self.side_brake_active = False
@@ -878,6 +880,8 @@ class VirtualStm32:
     def set_course(self, course) -> None:
         self.course = course
         self._body = course.body_samples(self.spec.footprint)
+        self.surface = Surface.for_course(self.spec.mu, course)
+        self.vehicle.grip_lat = self.vehicle.grip_long = 1.0     # 前のコースの床を持ち越さない
         self.vehicle.reset(course.start)
         if self.lidar is not None:
             self.lidar.course = course

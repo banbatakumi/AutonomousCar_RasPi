@@ -59,6 +59,9 @@ class Course:
     #: `ml_lidar/course_gen.py`の手続き生成コースのみが設定する
     #: （`sim/courses/*.json`のファイル由来コースは常にデフォルト値のまま）
     role: str = "eval"
+    #: 床の摩擦の倍率 `{"mu_scale": 横, "mu_long_scale": 前後}`（JSON の `"surface"`。`sim/surface.py` の
+    #: `Surface.for_course`）。None = 校正の床のまま
+    surface: dict | None = None
     #: `raycast()`が使う、外周1pxを壁でpaddingした`grid`。`_padded()`で遅延生成する
     #: キャッシュ（範囲外座標を境界のpaddingセルにクランプするだけで
     #: 「画像の外は壁扱い」と同じ結果になり、毎回の`inside`bool配列+`np.where`×2回が
@@ -90,7 +93,7 @@ class Course:
                        resolution=t["resolution"], origin=t["origin"],
                        start=t["start"], grid=np.ascontiguousarray(t["grid"]),
                        centerline=t["centerline"], width=t["width"],
-                       obstacles=t.get("obstacles"))
+                       obstacles=t.get("obstacles"), surface=meta.get("surface"))
 
         if "path" in meta:
             from .track import build
@@ -99,7 +102,7 @@ class Course:
                        resolution=t["resolution"], origin=t["origin"],
                        start=t["start"], grid=np.ascontiguousarray(t["grid"]),
                        centerline=t["centerline"], width=t["width"],
-                       obstacles=t.get("obstacles"))
+                       obstacles=t.get("obstacles"), surface=meta.get("surface"))
 
         from PIL import Image
         img = Image.open(p).convert("L")
@@ -124,6 +127,7 @@ class Course:
             start=(float(start[0]), float(start[1]), float(start[2])),
             grid=np.ascontiguousarray(grid),
             obstacles=obstacles,
+            surface=meta.get("surface"),
         )
 
     # ── 寸法 ──

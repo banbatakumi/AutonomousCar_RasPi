@@ -87,5 +87,37 @@ class TestTcFlag(unittest.TestCase):
             link.close()
 
 
+class TestCourseSurface(unittest.TestCase):
+    def test_course_json_sets_floor_and_switching_resets_it(self):
+        """コースの JSON の `"surface"` が仮想 STM32 の床になり、床の無いコースへ替えたら校正の床へ戻る。"""
+        import json
+        import tempfile
+        from sim.course import Course, list_courses
+        from sim.link import create_sim_link
+        src = next(p for p in list_courses() if p.stem == "normal")
+        meta = json.loads(src.read_text(encoding="utf-8"))
+        meta["surface"] = {"mu_scale": 1.25, "mu_long_scale": 1.1}
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "grippy.json"
+            p.write_text(json.dumps(meta), encoding="utf-8")
+            link = create_sim_link(p, with_channel=False, with_lidar=False)
+            sim = link.sim
+            try:
+                self.assertIsNotNone(sim.surface)
+                lat, lon = sim.surface.scale(0.0, 0.0, 0.0)
+                self.assertAlmostEqual(lat, 1.25)
+                self.assertAlmostEqual(lon, 1.1)
+                sim.vehicle.grip_lat, sim.vehicle.grip_long = lat, lon
+                sim.set_course(Course.load(src))
+                self.assertIsNone(sim.surface)
+                self.assertEqual((sim.vehicle.grip_lat, sim.vehicle.grip_long), (1.0, 1.0))
+            finally:
+                link.close()
+
+    def test_no_surface_key_is_none(self):
+        self.assertIsNone(Surface.for_course(0.4, object()))
+        self.assertIsNone(Surface.for_course(0.4, type("C", (), {"surface": {"mu_scale": 1.0}})()))
+
+
 if __name__ == "__main__":
     unittest.main()
