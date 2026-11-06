@@ -304,7 +304,8 @@ class Vehicle:
         """曲率 ⇄ 指令舵角の変換に使う舵の効き（`nav.purepursuit.SteerMap`）。"""
         from ..nav.purepursuit import SteerMap
         return SteerMap(gain=self.steer_gain, cubic=self.steer_gain_cubic,
-                        servo_gain=self.steer_servo_gain, offset=self.steer_offset_rad)
+                        servo_gain=self.steer_servo_gain, offset=self.steer_offset_rad,
+                        wheelbase=self.wheelbase)
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Vehicle":

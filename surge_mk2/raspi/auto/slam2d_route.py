@@ -937,7 +937,8 @@ class Slam2dRoute(Slam2dRaceLine):
                      f"横偏差 {pp.cross_track * 100:+.0f}cm"
                      + ("" if self._joined else "・経路に乗るまで減速")
                      + self._avoid_note() + self._coast_note(coasting, p) + md_note
-                     + self._sight_note(path, p) + self._tight_note(path, p) + grip_note)
+                     + self._sight_note(path, p) + self._tight_note(path, p) + grip_note
+                     + self._us_note(p))
         return st
 
     def _grip_timed(self, path: rl_mod.RaceLine, p: dict[str, float]) -> rl_mod.RaceLine:

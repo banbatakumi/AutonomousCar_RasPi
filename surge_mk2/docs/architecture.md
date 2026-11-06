@@ -992,7 +992,7 @@ MPC は経路座標の線形化自転車モデルで舵角列を最適化し、�
 解法は numpy だけの射影ニュートン法（Pi の依存に scipy/cvxpy/osqp が無いため。FISTA は条件数が悪く収束しなかった）。
 トレードオフ: ①遅延は Smith 予測器で自分の未着の指令を織り込むが、実効遅延に感度がある（遅延は Pure Pursuit と同じ
 `steer_delay`＝同定した舵・ヨーの遅れ＋通信から決める）。②ラップは Pure Pursuit より1〜2%遅いが、横偏差は約35%減り壁との距離は約2倍
-（シム）。③選択は `ctrl_mode`（既定 0 = Pure Pursuit。MPC は実機未検証）。
+（シム）。③選択は `ctrl_mode`（既定 0 = Pure Pursuit。MPC は実機で検証済み）。
 
 ## slam2d 走行の速度と経路は同定値から決める
 

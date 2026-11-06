@@ -67,19 +67,37 @@ class SteerMap(NamedTuple):
     既定値は幾何どおりの車（指令 = 実効舵角）。★経路側は `Vehicle.kappa_max` でこの効きを
     通した限界まで半径を使うのに、追従が `atan(L·κ)` をそのまま指令すると、経路の上に
     乗っていても曲率が足りない（同定値で κ=2.0 のとき 91%。半径0.5mで外へ 1.5〜6.6cm）。
+
+    **アンダーステア** `understeer`（K [rad/(m/s²)]、走行中に学習する。`nav/understeer.py`）: 速く曲がると
+    同じ舵でも曲がり方が足りない。曲率 κ = tan(δ)/(L + K·v²)。`effective`・`command` に車速 `v` を渡すと、
+    実効舵角を「運動学の式 κ = tan(δ)/L で同じ曲率になる舵角」に読み替える（追従は運動学のまま書ける）。
+    K = 0 か v = 0 なら今まで通り。
     """
 
     gain: float = 1.0
     cubic: float = 0.0
     servo_gain: float = 1.0
     offset: float = 0.0
+    understeer: float = 0.0
+    wheelbase: float = 0.23
 
-    def effective(self, steer_actual: float) -> float:
-        """実舵角 → 実効舵角 [rad]。"""
-        return self.gain * steer_actual + self.cubic * steer_actual ** 3 + self.offset
+    def _speed_factor(self, v: float) -> float:
+        """(L + K·v²) / L。1 なら補正なし。"""
+        if self.understeer == 0.0 or v == 0.0:
+            return 1.0
+        return max(0.2, 1.0 + self.understeer * v * v / self.wheelbase)
 
-    def command(self, delta: float, max_steer: float) -> float:
-        """欲しい実効舵角 → 指令舵角 [rad]（`±max_steer` で頭打ち）。"""
+    def effective(self, steer_actual: float, v: float = 0.0) -> float:
+        """実舵角 → 実効舵角 [rad]（車速 `v` を渡すとアンダーステアのぶんを引いた運動学の等価な舵角）。"""
+        d = self.gain * steer_actual + self.cubic * steer_actual ** 3 + self.offset
+        f = self._speed_factor(v)
+        return d if f == 1.0 else math.atan(math.tan(d) / f)
+
+    def command(self, delta: float, max_steer: float, v: float = 0.0) -> float:
+        """欲しい実効舵角（運動学の等価な舵角）→ 指令舵角 [rad]（`±max_steer` で頭打ち）。"""
+        f = self._speed_factor(v)
+        if f != 1.0:
+            delta = math.atan(math.tan(delta) * f)
         t = delta - self.offset
         d = t / self.gain if abs(self.gain) > 1e-6 else t
         if self.cubic != 0.0:
@@ -204,7 +222,7 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
     :param steer_now: 現在の**実**舵角 [rad]（指令値ではない）
     """
     sm = cfg.steer_map
-    px, py, pyaw = _predict(*pose, v_now, sm.effective(steer_now), cfg.wheelbase, cfg.delay_s)
+    px, py, pyaw = _predict(*pose, v_now, sm.effective(steer_now, v_now), cfg.wheelbase, cfg.delay_s)
 
     i = nearest_index(path, px, py, hint, window=len(path) // 4 if hint >= 0 else 0)
 
@@ -254,7 +272,7 @@ def follow(path: RaceLine, pose: tuple[float, float, float], v_now: float,
         delta = math.atan(cfg.wheelbase * kap)
     else:
         delta = steer_for_target(eta, dist, cfg.wheelbase, math.pi / 2.0)
-    steer = sm.command(delta, cfg.max_steer)
+    steer = sm.command(delta, cfg.max_steer, v_now)
 
     kv = k
     if cfg.speed_preview_s is not None:

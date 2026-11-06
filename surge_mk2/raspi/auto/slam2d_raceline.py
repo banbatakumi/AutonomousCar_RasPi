@@ -46,6 +46,7 @@ from ..nav.grid import pack_trinary
 from ..nav.mpc import MPCConfig, MPCFollower
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from ..nav import speedctl
+from ..nav.understeer import UndersteerLearner
 from ..nav.signals import SignalLights
 from ..proto.generated.packets import FLG_FAULT_DRIVE_UNDERVOLTAGE, MDS_COMM_OK
 from . import mapstore
@@ -663,7 +664,7 @@ class Slam2dRaceLine(Planner):
         ParamSpec(group=GROUP_STEER, key="ctrl_mode", label="追従方式(0=Pure Pursuit,1=MPC)", min=0, max=1,
                   step=1, default=0, unit="",
                   note="★1で舵をMPC（経路座標の線形化自転車モデル＋舵レート制約、`nav/mpc.py`）で決める。"
-                       "速度は経路のプロファイルのまま。既定は0（Pure Pursuit）。MPCは実機未検証"),
+                       "速度は経路のプロファイルのまま。既定は0（Pure Pursuit）。MPCは実機で検証済み"),
         ParamSpec(group=GROUP_STEER, key="mpc_horizon", hidden=True, label="MPC 予測ステップ数", min=5, max=40, step=1,
                   default=20, unit="",
                   note="予測区間 = ステップ数×刻み。長いほど先のコーナーに備えるが重い"),
@@ -812,6 +813,10 @@ class Slam2dRaceLine(Planner):
                   note="★1 = 学習が落ち着いたら、学習した限界でラインを引き直して乗り移る。既定は 0: "
                        "シムで衝突は出なくなった（15 本）が、路面によって遅くなる（μ0.70 で −1〜2%、"
                        "μ0.30 で +2.5%）。`PROGRESS.md` 2026-10-12 夜の節"),
+        ParamSpec(group=GROUP_STEER, key="us_learn", hidden=True, label="舵の効きの低下を走りながら決める", min=0,
+                  max=1, step=1, default=1, unit="",
+                  note="★1 = 速く曲がると同じ舵でも曲がり方が足りなくなる度合い（アンダーステア勾配 K、床で変わる）を周回中に"
+                       "推定し、MPC・Pure Pursuit の舵の換算に入れる（`nav/understeer.py`）。地図と一緒に保存する。0 = 使わない"),
         ParamSpec(group=GROUP_GRIP, key="grip_down_only", label="下げる方向だけ許す", min=0, max=1, step=1,
                   default=0, unit="",
                   note="★1 = 上げない（本番の計測走行向け）。前兆が出たとき・加速や減速が出なかった"
@@ -840,6 +845,12 @@ class Slam2dRaceLine(Planner):
         #: 横グリップの学習（`nav/grip.py`、`grip_learn` が 1 の間だけ働く）。舵角から出る曲率に
         #: 掛ける遅れはヨーの応答ぶん（舵そのものの遅れは実舵角に入っている）
         self._grip = self._grip_make()
+        #: アンダーステア勾配の学習（`nav/understeer.py`、`us_learn` が 1 の間だけ働く）。遅れはヨーの応答ぶん
+        self._us = UndersteerLearner(
+            self.vehicle.steer_map,
+            lag_s=(2.0 * self.vehicle.yaw_damping / self.vehicle.yaw_natural_freq_rad_s
+                   if self.vehicle.yaw_natural_freq_rad_s > 1e-6 else 0.0))
+        self._us_saved = 0.0
         #: 学習を路面の記録から始めたか（`_grip_load_surface`）と、そのときの記録 `(横, 減速, 比)`。
         #: 記録の値はこの路面で確かめた天井として扱い、その上は試さない
         #: 計画のラップ [s] と、それを出した `path.v`（`GripLearner` へ渡す）
@@ -1030,6 +1041,8 @@ class Slam2dRaceLine(Planner):
         self._save_error = ""
         self._grip_save()
         self._grip.reset()
+        self._us.reset()
+        self._us_saved = 0.0
         self._grip_on = False
         #: 読み込んだ地図の名前（学習した横グリップの保存先）
         self._grip_name = ""
@@ -1079,6 +1092,8 @@ class Slam2dRaceLine(Planner):
         self.slam.on_vehicle_state(vs)
         if self._grip_on and self.phase == RACE:
             self._grip_observe(vs)
+        if self.phase == RACE and (self._last_p or {}).get("us_learn", 0) > 0:
+            self._us_observe(vs)
 
     def set_engaged(self, engaged: bool) -> None:
         self._engaged = bool(engaged)
@@ -2079,12 +2094,48 @@ class Slam2dRaceLine(Planner):
         return pp, hit, dist
 
     def _follow(self, path, pose, vs, p, cfg, hint):
-        """舵を決める。`ctrl_mode` 1 なら MPC、0 なら Pure Pursuit。"""
+        """舵を決める。`ctrl_mode` 1 なら MPC、0 なら Pure Pursuit。どちらも学習したアンダーステア勾配を
+        舵の換算に入れる（`_us_k`）。"""
+        k = self._us_k(p)
         if p["ctrl_mode"] >= 0.5:
-            return self._mpc.follow(path, pose, vs.speed, vs.steer_actual,
-                                    mpc_config(p, self.vehicle), hint=hint,
+            mcfg = mpc_config(p, self.vehicle)
+            if k:
+                mcfg = mcfg._replace(steer_map=mcfg.steer_map._replace(understeer=k))
+            return self._mpc.follow(path, pose, vs.speed, vs.steer_actual, mcfg, hint=hint,
                                     now=vs.t_capture / 1e9 if vs.t_capture else None)
+        if k:
+            cfg = cfg._replace(steer_map=cfg.steer_map._replace(understeer=k))
         return follow(path, pose, vs.speed, vs.steer_actual, cfg, hint=hint)
+
+    def _us_k(self, p: dict[str, float]) -> float:
+        """追従の舵の換算に入れるアンダーステア勾配 K [rad/(m/s²)]（`us_learn` が 0 なら 0）。"""
+        return self._us.k if p.get("us_learn", 0) > 0 else 0.0
+
+    def _us_note(self, p: dict[str, float]) -> str:
+        """reason の注記: 学習したアンダーステア勾配（使っていなければ空）。"""
+        if p.get("us_learn", 0) <= 0:
+            return ""
+        us = self._us
+        if us.ready:
+            return f"・舵の効き K {us.k * 1000:.2f}e-3"
+        if us.prior:
+            return f"・舵の効き K {us.prior * 1000:.2f}e-3（保存値）"
+        return ""
+
+    def _us_observe(self, vs: VehicleState) -> None:
+        """車両状態 1 つぶんをアンダーステアの学習へ渡す（100Hz）。
+
+        **横グリップの学習のゲート（舵が上限・障害物・自己位置の戻り等）は使わない。** K は舵・ヨーレート・
+        車速だけの関係で、自己位置にも経路にも依らない。標本を選ぶのは学習器自身の条件（車速・舵の速さ・
+        残差）だけにする。横グリップのゲートを使っていた頃（2026-11-06 `surge_20261106_024246`）は、
+        「舵が上限（の直後）」が横加速度のいちばん大きい区間（|a_y| 平均 4.3m/s²、RACE の約 35%）を捨て、
+        アンダーステアが大きい標本ほど落ちる選び方になって K が 1.9e-3 → 0.5e-3 と下がり続けた
+        （同じ記録をゲート無しで通すと約 2.1e-3 で安定）。"""
+        t = vs.t_capture / 1e9
+        self._us.observe(t, float(vs.speed), float(vs.yaw_rate), float(vs.steer_actual))
+        if not self._grip_on and t - self._grip_save_t > _GRIP_SAVE_S:
+            self._grip_save_t = t
+            self._grip_save()
 
     def _detect_obstacles(self, st: AutoState, scan: Scan, p: dict[str, float]) -> None:
         """障害物を検出して `self._obs`（2周期続いたもの）と `st.obstacles` に載せる。"""
@@ -3272,11 +3323,17 @@ class Slam2dRaceLine(Planner):
         self._grip_ver = (-1, -1)
         self._grip_tok += 1
         self._grip_saved = (0, 0.0)
+        self._us.reset()
+        self._us_saved = 0.0
         text = mapstore.load_grip(name)
         if not text:
             return                              # 新しい地図は同定値 × `grip_init` から学習する
         try:
-            g.load(grip_mod.GripMap.from_json(text))
+            m = grip_mod.GripMap.from_json(text)
+            g.load(m)
+            # アンダーステア勾配は保存した値から（推定が使えるようになるまではこのまま）
+            self._us.reset(prior=m.understeer)
+            self._us_saved = m.understeer
         except (ValueError, TypeError, KeyError):
             pass                                # 壊れた・古い形式。初期値から学習し直す
 
@@ -3288,10 +3345,26 @@ class Slam2dRaceLine(Planner):
         if g is None or not name:
             return
         g.mark_best()
+        us = self._us
+        if us.ready:
+            g.map.understeer, g.map.understeer_s = us.k, us.strong_s
+        us_new = us.ready and abs(us.k - self._us_saved) > 1e-4
         if not g.worth_saving():
+            if us_new:
+                # 横グリップは保存する段階でない（読み込んだ値を `back_off` 倍した途中など）。ファイルの K だけを書き換える
+                self._us_saved = us.k
+                try:
+                    text = mapstore.load_grip(name)
+                    m = grip_mod.GripMap.from_json(text) if text else grip_mod.GripMap()
+                    m.understeer, m.understeer_s = us.k, us.strong_s
+                    mapstore.save_grip(name, m.to_json())
+                except (OSError, ValueError):
+                    pass
             return
         m = g.map
-        key = (g.ver + g.long.ver, m.best_lat, tuple(m.best_acc), tuple(m.best_dec))
+        if us.ready:
+            self._us_saved = us.k
+        key = (g.ver + g.long.ver, m.best_lat, tuple(m.best_acc), tuple(m.best_dec), round(m.understeer, 5))
         if key == self._grip_saved:
             return
         self._grip_saved = key

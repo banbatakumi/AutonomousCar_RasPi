@@ -154,7 +154,7 @@ class MPCFollower:
         # 添字・横偏差・速度・残りは Pure Pursuit と同じ定義（比較できるように）
         base = follow(path, pose, v_now, steer_now, pcfg, hint=hint)
 
-        delta_now = sm.effective(steer_now)
+        delta_now = sm.effective(steer_now, v_now)
         px, py, pyaw = self._predict_delay(pose, v_now, delta_now, cfg, now)
         n = len(path)
         i = nearest_index(path, px, py, hint, window=n // 4 if hint >= 0 else 0)
@@ -218,7 +218,7 @@ class MPCFollower:
 
         # 箱制約: 絶対値の限界と、今の舵角から舵レートで届く範囲
         lim = cfg.max_steer * max(abs(cfg.servo_gain), 1e-6)
-        lo_abs, hi_abs = sm.effective(-lim), sm.effective(lim)
+        lo_abs, hi_abs = sm.effective(-lim, v_now), sm.effective(lim, v_now)
         # 1 つ目の指令は**前回の指令から今回までの時間**（呼び出し周期。50Hz なら 0.02s）で届く範囲、
         # 以降は予測の刻み（`dt`）ごとに足す。全部 `dt` 刻みにすると、周期が刻みより短いとき
         # 次の指令の舵レートが実際の 5 倍まで許される
@@ -274,7 +274,7 @@ class MPCFollower:
         self._sent = [(ts, x) for ts, x in self._sent if now - ts < cfg.delay_s + 1e-6][:16]
         self.last_cost = float(0.5 * d @ H @ d + g @ d)
 
-        steer = sm.command(float(d[0]), cfg.max_steer)
+        steer = sm.command(float(d[0]), cfg.max_steer, v_now)
 
         # GUI に描く点: 予測軌道の中ほど（経路の点を横偏差ぶん法線へずらす）
         X = (F @ np.array([e_y, e_psi]) + G @ (d - d_ref)).reshape(N, 2)

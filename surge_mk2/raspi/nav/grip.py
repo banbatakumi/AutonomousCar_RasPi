@@ -87,6 +87,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .raceline import ENV_U, env_at as raceline_env_at
+from .understeer import K_FORMAT, K_MAX, K_MIN
 
 __all__ = ["GripConfig", "GripMap", "GripLearner", "LongConfig", "LongLearner"]
 
@@ -151,6 +152,10 @@ class GripMap:
     best_lat: float = 0.0
     best_acc: list[float] = field(default_factory=list)
     best_dec: list[float] = field(default_factory=list)
+    #: アンダーステア勾配 K [rad/(m/s²)]（`nav/understeer.py`。0 = 無い）と、それを決めた「横を使った標本」の時間 [s]。
+    #: 横グリップの学習とは別に学ぶが、同じくコースの値なので地図と一緒に持つ
+    understeer: float = 0.0
+    understeer_s: float = 0.0
 
     @property
     def accel(self) -> float:
@@ -168,7 +173,9 @@ class GripMap:
                            "dec_env": [round(x, 3) for x in self.dec],
                            "ceil": round(self.ceil, 3), "best_lat": round(self.best_lat, 3),
                            "best_acc_env": [round(x, 3) for x in self.best_acc],
-                           "best_dec_env": [round(x, 3) for x in self.best_dec]})
+                           "best_dec_env": [round(x, 3) for x in self.best_dec],
+                           "understeer": round(self.understeer, 5), "understeer_s": round(self.understeer_s, 1),
+                           "understeer_fmt": K_FORMAT})
 
     @classmethod
     def from_json(cls, text: str) -> "GripMap":
@@ -193,6 +200,11 @@ class GripMap:
         m.best_dec = _env(raw.get("best_dec_env"), raw.get("best_dec"))
         if not (m.best_lat > 0.0 and m.best_dec and m.best_acc):
             m.best_lat, m.best_acc, m.best_dec = 0.0, [], []
+        k = float(raw.get("understeer") or 0.0)
+        # 標本の選び方が今と違う版で学んだ K は使わない（`understeer.K_FORMAT`）
+        if math.isfinite(k) and raw.get("understeer_fmt") == K_FORMAT:
+            m.understeer = max(K_MIN, min(K_MAX, k))
+            m.understeer_s = _num(raw.get("understeer_s"), 0.0, 1e6)
         return m
 
 

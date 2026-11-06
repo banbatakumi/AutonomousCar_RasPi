@@ -80,6 +80,7 @@
 | `speedctl.CATCH_UP_M` | 6.0 | D | 追いつく速度を引き直す先の距離（停止から最高速までの加速距離 v²/(2a) ≒ 4.5m より長く） |
 | `slam2d_raceline.FIXED_*_USE` | 0.9・0.95・0.9 | D | 路面の限界を学習しないときに同定値に掛ける余裕（学習するときの加速・減速の出発点は校正値そのまま） |
 | Pure Pursuit の `look_k`・`look_min`・`speed_preview`・`steer_ff`、MPC の重み `q_y`・`q_psi`・`r_d` | GUI の設定 | E | 追従の設計値（シム `sim.bench` で比べて決めた）。遅延補償 `mpc_delay_s` は Pure Pursuit と同じ `steer_delay()`（同定した舵・ヨーの遅れ＋通信） |
+| `understeer.UndersteerConfig`（`ay_strong` 2.5・`strong_min_s` 8・`memory_s` 60・`steer_rate_max` 0.6・`v_min` 1.0）、範囲 `K_MIN`・`K_MAX` −0.002・0.01 | — | D | アンダーステア勾配 K は**床で変わるので走行中に学習**（`nav/understeer.py`、校正しない）。定数は「横を使った標本が溜まるまで使わない」「舵が動いている所は使わない」の判断の値。実機 2026-11-02 の記録で 2〜3 周（約 20s）で使える状態になり 1.8〜2.4e-3 |
 | `Vehicle` の未同定時の既定（`a_lat_max` 3.5・加減速 2.5・`cmd_latency` 0.02 等） | — | D | 同定値が無いときに控えめに走るための値。同定後は使われない |
 
 ## 4. 校正し直したときの手順（ファームの写しがあるもの）
