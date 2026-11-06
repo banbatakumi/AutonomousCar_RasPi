@@ -167,3 +167,30 @@ class TestVelocityTracker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBehindWall(unittest.TestCase):
+    """`behind`（`Frontend.behind_wall`）が「壁の向こう」と言った候補は捨てる。LiDAR の光は壁を通らないので、
+    低い壁の上を越えて見えた奥か壁での反射（2026-11-06、木の仕切り壁の向こうの点がヘアピンの空きに障害物として出た）。"""
+
+    POSE = (0.0, 0.0, 0.0)
+
+    def test_candidates_behind_a_wall_are_dropped(self):
+        pts = _scan((1.5, 0.0, 0.10), (0.0, 1.5, 0.10))
+        seen = []
+
+        def behind(x, y):
+            seen.append(len(x))
+            return y > 1.0                                  # 左の物は壁の向こうだったとする
+
+        out = obs_mod.detect(_open_grid(), pts, self.POSE, behind=behind)
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(out[0].x, 1.5, delta=0.15)
+        # 候補（地図の空きに落ちた点）だけを渡す。全点を撃たない
+        self.assertEqual(len(seen), 1)
+        self.assertLess(seen[0], 40)
+
+    def test_all_behind_returns_nothing(self):
+        out = obs_mod.detect(_open_grid(), _scan((1.5, 0.0, 0.10)), self.POSE,
+                             behind=lambda x, y: np.ones(len(x), dtype=bool))
+        self.assertEqual(out, [])

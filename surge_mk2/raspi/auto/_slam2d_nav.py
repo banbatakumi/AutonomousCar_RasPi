@@ -391,6 +391,10 @@ class Slam2dNav:
         """LiDAR の取り付け位置（車体座標 [m]）。"""
         return self._lidar_x, self._lidar_y
 
+    def behind_wall(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """車体座標の点が、今の姿勢から見て地図の壁の向こうか（`Frontend.behind_wall`）。障害物の検出用。"""
+        return self._fe.behind_wall(x, y, self._fe.pose)
+
     def deskew_scan(self, scan: Scan):
         """`scan`を脱スキューする（障害物検出・LOCATE用）。`Frontend`が持っている
         twist の履歴を使うので、`Frontend.update()`内の脱スキューと同じ条件になる。

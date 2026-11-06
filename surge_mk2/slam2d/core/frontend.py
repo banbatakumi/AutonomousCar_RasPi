@@ -122,7 +122,16 @@ class FrontendConfig:
     behind_margin: float = 0.3
     #: 予測の向きのずれで正しい点を消さないよう、両隣にもレイを撃って最大を採る
     behind_spread: float = math.radians(1.5)
-    #: 外れた割合がこれを超えたら予測の方を疑い、除去をやめて全点を使う
+    #: 凍結地図で「地図に無い物」（置かれた障害物・人・他車）の点を位置合わせから外す、壁からの距離[m]。
+    #: 0で無効。地図が**空きと確定した**セル（`known_free_mask`）のうち、壁からこれ以上離れた所に落ちた点を外す。
+    #: ★ `associate()` は `frozen_max_dist`（0.5m）以内の壁へ対応を付けるので、壁の近くに置かれた物の点は
+    #: 数十 cm の残差のまま位置合わせに入り、姿勢を通路の向きへ引っ張り、残差が `max_rms` を超えて見失いに
+    #: なった（2026-11-06 `surge_20261106_024246`: 通路の障害物の横で当たり率 0.52〜0.76・残差 0.15〜0.19m で
+    #: 4周期見失い → 推測航法）。点の測距の誤差（数 cm）と1周期の予測のずれより十分大きく、`max_rms` 以下に
+    #: する（これより壁に近い物の点は残っても残差が `max_rms` を超えない）。未知のセル・まばらにしか見ていない
+    #: 壁（ヒットが `min_hits` 未満）の上の点は空きと確定していないので外さない
+    front_margin: float = 0.12
+    #: 外れた割合（壁の向こう＋手前）がこれを超えたら予測の方を疑い、除去をやめて全点を使う
     behind_max_ratio: float = 0.5
     #: キーフレーム間の拘束に足す「モデル化していない誤差」（`inflate_info`）
     edge_sigma_xy: float = 0.02
@@ -221,8 +230,13 @@ class Frontend:
         self.rms_ref = self.config.register.sigma
         self._behind_mask: np.ndarray | None = None
         self._behind_seq = -1
+        #: 地図が空きと確定し、壁から `front_margin` 以上離れたセル（`_not_behind_wall`）
+        self._open_mask: np.ndarray | None = None
+        self._open_seq = -1
         #: 直近の周期に壁の向こうとして外した点の割合（診断）
         self.behind_ratio = 0.0
+        #: 直近の周期に地図の壁より手前（地図に無い物）として外した点の割合（診断。`front_margin`）
+        self.front_ratio = 0.0
         #: 直近`update()`で脱スキューした点群と、その基準時刻。
         #: 呼び出し側（`raspi/auto/_slam2d_nav.py`の`deskew_scan()`）が
         #: **同じ点群**を障害物検出・LOCATE用にもう一度脱スキューしたい
@@ -305,7 +319,8 @@ class Frontend:
         sel = pts.hit & (d <= cfg.match_range)
         hx, hy = pts.x[sel], pts.y[sel]
         self.behind_ratio = 0.0
-        if self.grid.frozen and cfg.behind_margin > 0.0 and hx.size > 0:
+        self.front_ratio = 0.0
+        if self.grid.frozen and (cfg.behind_margin > 0.0 or cfg.front_margin > 0.0) and hx.size > 0:
             keep = self._not_behind_wall(hx, hy, pred)
             hx, hy = hx[keep], hy[keep]
 
@@ -414,9 +429,10 @@ class Frontend:
         return (r.used >= cfg.min_used and r.inlier >= cfg.min_inlier
                 and r.rms <= limit)
 
-    def _not_behind_wall(self, hx: np.ndarray, hy: np.ndarray, pred: Pose2D) -> np.ndarray:
-        """壁の向こうではない点（`True`）。凍結地図の壁までのレイの距離と比べる。
+    def _wall_rays(self, hx: np.ndarray, hy: np.ndarray, pred: Pose2D):
+        """点ごとの `(LiDAR からの距離, 同じ向きの地図の壁までの距離, 格子の外か, 列, 行)`。
 
+        壁までの距離は両隣のレイ（`behind_spread`）の**遠い方**（向きのずれで正しい点を消さない）。
         点は脱スキュー済みで`t_ref`時点の車体座標なので、レイも`t_ref`時点の
         LiDAR の位置から撃つ（点との距離もそこから測るので、走行中の移動は相殺される）。
         """
@@ -456,12 +472,46 @@ class Frontend:
         # `raycast`は格子の外を壁とみなすので、格子の外の点は判定しない
         # （`associate()`が捨てるので無害。数えると除去率の上限を誤って超える）
         col, row = g.to_cell(ox + r * np.cos(ang), oy + r * np.sin(ang))
-        keep = (r <= expected + cfg.behind_margin) | ~g.inside(col, row)
+        outside = ~g.inside(col, row)
+        return r, expected, outside, col, row
+
+    def behind_wall(self, hx: np.ndarray, hy: np.ndarray, pose: Pose2D) -> np.ndarray:
+        """凍結地図の壁の向こう（壁＋`behind_margin` より遠い）に見えた点か（`True`）。車体座標の点。
+
+        LiDAR の光は壁を通らないので、壁の向こうの点は**低い壁の上を越えて見えた奥**か**壁での反射**。
+        障害物の検出（`raspi/nav/obstacles.detect`）が使う。地図が凍結していない・`behind_margin` が 0 なら全部 False。
+        """
+        n = np.asarray(hx).size
+        if not self.grid.frozen or self.config.behind_margin <= 0.0 or n == 0:
+            return np.zeros(n, dtype=bool)
+        r, expected, outside, _, _ = self._wall_rays(np.asarray(hx, float), np.asarray(hy, float), pose)
+        return (r > expected + self.config.behind_margin) & ~outside
+
+    def _not_behind_wall(self, hx: np.ndarray, hy: np.ndarray, pred: Pose2D) -> np.ndarray:
+        """地図の壁で説明できる点（`True`）。凍結地図の壁までのレイの距離と比べて壁の向こう
+        （`behind_margin`）の点を、地図が空きと確定した所（壁から `front_margin` 以上）に落ちた
+        地図に無い物の点を外す（`_wall_rays`）。"""
+        cfg = self.config
+        g = self.grid
+        r, expected, outside, col, row = self._wall_rays(hx, hy, pred)
+        n = r.size
+        behind = (r > expected + cfg.behind_margin) if cfg.behind_margin > 0.0 \
+            else np.zeros(n, dtype=bool)
+        front = np.zeros(n, dtype=bool)
+        if cfg.front_margin > 0.0:
+            if self._open_mask is None or self._open_seq != g.seq:
+                # 4近傍の膨張なので斜めは `front_margin/√2` まで寄る（それでも測距の誤差より十分大きい）
+                cells = int(math.ceil(cfg.front_margin / g.resolution))
+                self._open_mask = g.known_free_mask() & ~dilate(g.wall_mask(), cells)
+                self._open_seq = g.seq
+            ins = ~outside
+            front[ins] = self._open_mask[row[ins], col[ins]]
+        keep = ~(behind | front) | outside
         dropped = 1.0 - float(keep.mean())
+        self.behind_ratio = float((behind & ~outside).mean())
+        self.front_ratio = float((front & ~outside).mean())
         if dropped > cfg.behind_max_ratio:
-            self.behind_ratio = dropped
             return np.ones(n, dtype=bool)
-        self.behind_ratio = dropped
         return keep
 
     def _relocalize(self, field_: SurfaceMap, hx, hy, center: Pose2D) -> RegisterResult | None:

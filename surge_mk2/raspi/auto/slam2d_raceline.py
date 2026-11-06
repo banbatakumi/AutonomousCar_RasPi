@@ -2150,7 +2150,8 @@ class Slam2dRaceLine(Planner):
             self._obs_free_key, self._obs_pad_ref = key, base
         pad = self._obs_pad
         now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
-                             wall_pad=pad, free=self._obs_free, near=self._obs_near)
+                             wall_pad=pad, free=self._obs_free, near=self._obs_near,
+                             behind=self.slam.behind_wall)
         self._obs_t += self._dt
         now = self._vel_tracker.update(self._obs_t, now)
         self._obs = obs_mod.confirm(now, self._prev_obs)

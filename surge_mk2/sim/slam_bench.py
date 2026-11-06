@@ -1125,6 +1125,8 @@ def main() -> int:
                          "距離に差し替える")
     ap.add_argument("--behind-margin", type=float, default=None,
                     help="FrontendConfig.behind_margin を上書き（0で壁の向こうの点の除去を切る）")
+    ap.add_argument("--front-margin", type=float, default=None,
+                    help="FrontendConfig.front_margin を上書き（0で地図の壁より手前の点の除去を切る）")
     ap.add_argument("--speed-quant", type=float, default=0.0,
                     help="車速の読みの量子化の刻み [m/s]（エンコーダの粗さ。例 0.05）")
     ap.add_argument("--time-offset-ms", type=float, default=0.0,
@@ -1156,6 +1158,8 @@ def main() -> int:
     fk = {}
     if args.behind_margin is not None:
         fk["behind_margin"] = args.behind_margin
+    if args.front_margin is not None:
+        fk["front_margin"] = args.front_margin
     if fk:
         kw["frontend"] = fk
     ghost = []

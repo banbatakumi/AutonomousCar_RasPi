@@ -275,6 +275,54 @@ class TestBehindWall(unittest.TestCase):
         self.assertEqual(fe.behind_ratio, 0.0)
 
 
+class TestBehindWallQuery(unittest.TestCase):
+    """`behind_wall`（障害物の検出が使う）: 凍結地図の壁＋`behind_margin` より遠い点だけ True。"""
+
+    def test_points_beyond_the_wall(self):
+        fe = _frozen_tracker()
+        # 上の壁（車から 2m）の手前 1.5m・壁の上 2.0m・壁の向こう 2.6m、右の壁の向こう
+        hx = np.array([0.0, 0.0, 0.0, 3.5])
+        hy = np.array([1.5, 2.0, 2.6, 0.0])
+        self.assertEqual(fe.behind_wall(hx, hy, fe.pose).tolist(), [False, False, True, True])
+
+    def test_nothing_while_mapping_or_disabled(self):
+        fe = _make_frontend()
+        self.assertFalse(fe.behind_wall(np.array([0.0]), np.array([9.0]), fe.pose).any())
+        fe = _frozen_tracker(behind_margin=0.0)
+        self.assertFalse(fe.behind_wall(np.array([0.0]), np.array([2.6]), fe.pose).any())
+
+
+#: 地図を作った後に、上の壁から 0.3m の所へ置いた箱（地図に無い物）
+BOX = [(3.2, 3.4, 4.4, 3.4), (4.4, 3.4, 4.4, 3.7), (4.4, 3.7, 3.2, 3.7), (3.2, 3.7, 3.2, 3.4)]
+
+
+class TestUnmappedObject(unittest.TestCase):
+    """凍結地図の壁より手前の点（地図に無い物）は位置合わせに使わない（`front_margin`）。
+
+    2026-11-06 `surge_20261106_024246`: 通路の壁の近くに置いた障害物の点が 0.5m 以内の壁へ対応付けられ、
+    残差が `max_rms` を超えて見失い → 推測航法になった。外さないと姿勢も通路の向きへ引っ張られる。"""
+
+    def test_points_on_an_unmapped_box_are_dropped(self):
+        fe = _frozen_tracker()
+        for i in range(20, 30):
+            u = fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=ROOM + BOX, max_range=8.0), 0.1)
+            self.assertFalse(u.lost)
+        self.assertGreater(fe.front_ratio, 0.05)
+        self.assertLess(fe.last.rms, 0.03)
+        self.assertAlmostEqual(fe.pose.x, 0.02 * 29, delta=0.02)
+        self.assertAlmostEqual(fe.pose.y, 0.0, delta=0.02)
+
+    def test_clean_scan_drops_nothing(self):
+        fe = _frozen_tracker()
+        fe.update(make_raw_scan(3.0 + 0.02 * 20, 2.0, 0.0, segs=ROOM, max_range=8.0), 0.1)
+        self.assertLess(fe.front_ratio, 0.01)
+
+    def test_disabled_by_zero_margin(self):
+        fe = _frozen_tracker(front_margin=0.0)
+        fe.update(make_raw_scan(3.0 + 0.02 * 20, 2.0, 0.0, segs=ROOM + BOX, max_range=8.0), 0.1)
+        self.assertEqual(fe.front_ratio, 0.0)
+
+
 class TestApplyCorrection(unittest.TestCase):
     def test_correction_moves_map_trajectory_and_pose(self):
         motion = ExternalTwistModel(lambda: Twist2D(0.2, 0.0, 0.0))

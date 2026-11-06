@@ -102,7 +102,7 @@ def near_pad(wall_pad: float) -> float:
 def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
            wall_pad: float = 0.15, min_points: int = 3,
            max_obstacles: int = 8, free: np.ndarray | None = None,
-           near: np.ndarray | None = None) -> list[Obstacle]:
+           near: np.ndarray | None = None, behind=None) -> list[Obstacle]:
     """凍結地図に無いものを拾う。**`grid.frozen` でなければ何も返さない。**
 
     地図を作っている最中は「地図に無い」が当たり前なので、判定に意味が無い。
@@ -110,6 +110,11 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
     :param free: `free_mask(grid, wall_pad)` の結果（省略すると毎回作る）
     :param near: `free_mask(grid, near_pad(wall_pad))` の結果。渡すと、`free` に1点でも落ちた
         塊はこの帯の点まで数える（省略すると `free` の点だけで数える）
+    :param behind: 車体座標の点 `(x, y)` → 地図の壁の向こうに見えた点か（`Frontend.behind_wall`）。渡すと、
+        地図の空きに落ちた候補のうち壁の向こうの点を捨てる。LiDAR の光は壁を通らないので、そういう点は
+        低い壁の上を越えて見えた奥か、壁での反射。2026-11-06 `surge_20261106_024246`: 木の仕切り壁（LiDAR の
+        上に約 3cm）の向こうの点が、ヘアピンの空き（y≈5.02）に一直線に出て 5 周で障害物になり、「経路へ戻っている」と
+        横グリップの学習の停止を起こした。本物の障害物は壁の手前にあるので消えない（壁越しに早く見つけることだけ失う）
     """
     if not grid.frozen or len(pts) == 0:
         return []
@@ -136,6 +141,13 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
         cand[ok] = near[row[ok], col[ok]]
         cand |= core
 
+    if behind is not None:
+        i = np.flatnonzero(cand)
+        drop = np.asarray(behind(pts.x[hit][i], pts.y[hit][i]), dtype=bool)
+        cand[i[drop]] = False
+        core[i[drop]] = False
+        if not core.any():
+            return []
     idx = np.flatnonzero(cand)
     px, py = wx[idx], wy[idx]
     strict = core[idx]
