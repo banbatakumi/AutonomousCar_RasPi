@@ -156,6 +156,8 @@ class GripMap:
     #: 横グリップの学習とは別に学ぶが、同じくコースの値なので地図と一緒に持つ
     understeer: float = 0.0
     understeer_s: float = 0.0
+    #: 舵の上限で出せる横加速度 [m/s²]（`UndersteerLearner.a_lock`。0 = 無い）。K と同じ版（`understeer_fmt`）で持つ
+    lock_ay: float = 0.0
 
     @property
     def accel(self) -> float:
@@ -175,7 +177,7 @@ class GripMap:
                            "best_acc_env": [round(x, 3) for x in self.best_acc],
                            "best_dec_env": [round(x, 3) for x in self.best_dec],
                            "understeer": round(self.understeer, 5), "understeer_s": round(self.understeer_s, 1),
-                           "understeer_fmt": K_FORMAT})
+                           "lock_ay": round(self.lock_ay, 3), "understeer_fmt": K_FORMAT})
 
     @classmethod
     def from_json(cls, text: str) -> "GripMap":
@@ -205,6 +207,7 @@ class GripMap:
         if math.isfinite(k) and raw.get("understeer_fmt") == K_FORMAT:
             m.understeer = max(K_MIN, min(K_MAX, k))
             m.understeer_s = _num(raw.get("understeer_s"), 0.0, 1e6)
+            m.lock_ay = _num(raw.get("lock_ay"), 0.0, A_CEIL)
         return m
 
 

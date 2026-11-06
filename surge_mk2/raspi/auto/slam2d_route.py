@@ -948,7 +948,8 @@ class Slam2dRoute(Slam2dRaceLine):
         経路の速度はワーカーが同定値で付けている（`_compute_routes`）。形は変えない。停止点へ
         向かう開いた経路は、始点・終点の速度の条件があるので付け直さない。
         """
-        if not self._grip_on or not path.closed:
+        # 舵の上限で出せる横加速度を学んだら、横グリップを学習していなくても付け直す（`lock_speed_cap`）
+        if not (self._grip_on or self._lock_a(p) is not None) or not path.closed:
             return path
         key = self._skey(p)
         if self._grip_src is not path or self._grip_src_key != key:

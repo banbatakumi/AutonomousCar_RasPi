@@ -26,6 +26,17 @@
 - 横加速度が `ay_strong` 以上の標本が `strong_min_s` 秒ぶん溜まるまでは、推定を使わず前の値（地図に保存した値、
   無ければ 0）のまま。cam_e2e の記録のように横をあまり使わない走りでは K が定まらない（前半と後半で符号が変わった）
 - 推定は `[k_min, k_max]` に収める
+- **舵が上限（`lock` − `lock_band` 以上）の標本は K に使わない**（下の「舵の上限」）
+
+## 舵の上限で出せる横加速度（`a_lock`）
+
+舵を上限まで切った所は、前輪が横に滑り始めると舵を切り足しても曲がらない（曲率 ≈ `a_lock / v²` で頭打ち）。
+K の式（線形）はこれを表せず、2026-11-06 `surge_20261106_123306` では舵が上限の標本が K を 2.9 → 4.5e-3 と
+引き上げ（張り付いていない所では実測の曲率 ÷ モデルが 1.01〜1.07 = K が大きすぎ）、しかもヘアピンの 1.6〜2.1m/s で
+式は約 2.0 曲がれると見たのに実際は 1.48〜1.67 だった（v·r ≈ 4.8〜5.3m/s²）。そこで舵が上限の標本は K から外し、
+**その中で式より曲がっていない（実測の曲率 < `sat_frac` × 式）標本の横加速度 v·|r|** の平均を `a_lock` として別に学ぶ。
+低速で舵の幾何で曲がり切る標本（式どおり曲がる）は入れない（入れると前輪の限界でない値で `a_lock` が低く出る）。
+速度の計画が「線の曲率＋追従の余裕」をこの横加速度で曲がれる速さに抑える（`slam2d_raceline.lock_speed_cap`）。
 """
 
 from __future__ import annotations
@@ -41,8 +52,9 @@ K_MIN = -0.002
 K_MAX = 0.01
 #: 保存値（`GripMap.understeer`）の標本の選び方の版。違う版の保存値は読まない（0 から学び直す）。
 #: 1 = 横グリップの学習のゲート（舵が上限など）で標本を捨てていた。横加速度の大きい区間ほど落ちて K が小さく
-#: 偏った（2026-11-06 の記録で 0.52e-3 を保存。選び直すと約 2e-3）
-K_FORMAT = 2
+#: 偏った（2026-11-06 の記録で 0.52e-3 を保存。選び直すと約 2e-3）。
+#: 2 = 舵が上限の標本も K に入れていた。前輪の飽和で K が大きく偏った（2026-11-06 `surge_20261106_123306` で 4.5e-3）
+K_FORMAT = 3
 
 
 @dataclass
@@ -55,23 +67,36 @@ class UndersteerConfig:
     strong_min_s: float = 8.0         #: その標本がこれだけ溜まるまでは推定を使わない [s]
     k_min: float = K_MIN
     k_max: float = K_MAX
+    #: 舵が上限とみなす帯 [rad]（実舵角が `lock` − これ以上）。実機の上限で張り付いた実舵角は 0.453〜0.460
+    #: （`lock` = max_steer × サーボのゲイン = 0.4655）
+    lock_band: float = 0.03
+    #: 舵が上限の標本のうち、実測の曲率が式（K 込み）のこれ倍より小さいものを「前輪が飽和した」とみなす
+    sat_frac: float = 0.92
+    #: `a_lock` を使い始める、飽和した標本の時間 [s]（忘却つき）。ヘアピン 1〜2 回ぶん（実機の記録で 1.0 だと 8 周目、0.3 で 5 周目。最初の衝突は 10 周目）
+    lock_min_s: float = 0.3
 
 
 class UndersteerLearner:
     """`observe()` を 100Hz で呼び、`k` を追従の舵の換算に使う。"""
 
-    def __init__(self, steer_map, lag_s: float = 0.0, cfg: UndersteerConfig | None = None) -> None:
+    def __init__(self, steer_map, lag_s: float = 0.0, cfg: UndersteerConfig | None = None,
+                 lock: float | None = None) -> None:
         """:param steer_map: 校正の舵の換算（`Vehicle.steer_map`。`understeer` は見ない）
-        :param lag_s: 舵角 → 曲率のヨーの遅れ [s]（`2ζ/ωn`、校正 3）"""
+        :param lag_s: 舵角 → 曲率のヨーの遅れ [s]（`2ζ/ωn`、校正 3）
+        :param lock: 舵の上限の実舵角 [rad]（`max_steer × steer_servo_gain`）。`None` なら上限の標本を分けない"""
         self.sm = steer_map._replace(understeer=0.0)
         self.L = float(steer_map.wheelbase)
         self.lag_s = max(0.0, float(lag_s))
         self.cfg = cfg or UndersteerConfig()
+        self.lock = None if lock is None else abs(float(lock))
         self.reset()
 
-    def reset(self, prior: float = 0.0) -> None:
-        """学習を捨てる。`prior` は推定が使えるようになるまで使う値（地図に保存した K）。"""
+    def reset(self, prior: float = 0.0, lock_prior: float = 0.0) -> None:
+        """学習を捨てる。`prior`・`lock_prior` は推定が使えるようになるまで使う値（地図に保存した K・`a_lock`）。"""
         self.prior = max(self.cfg.k_min, min(self.cfg.k_max, float(prior)))
+        self.lock_prior = max(0.0, float(lock_prior))
+        self._lock = [0.0, 0.0]           # Σ1, Σ(v·|r|)（忘却つき、飽和した舵の上限の標本）
+        self.lock_s = 0.0                 #: 飽和した舵の上限の標本の時間（忘却つき）[s]
         self._s = [0.0] * 6               # Σ1, Σz, Σx, Σy, Σzx, Σzy（忘却つき）
         self.strong_s = 0.0               #: 横を使った標本の時間（忘却つき）[s]
         self._hist: deque[tuple[float, float]] = deque()
@@ -91,6 +116,13 @@ class UndersteerLearner:
         if self.ready:
             return max(self.cfg.k_min, min(self.cfg.k_max, self.estimate))
         return self.prior
+
+    @property
+    def a_lock(self) -> float | None:
+        """舵の上限で出せる横加速度 [m/s²]（学んだ値、無ければ保存値。どちらも無ければ `None`）。"""
+        if self.lock_s >= self.cfg.lock_min_s and self._lock[0] > 0.0:
+            return self._lock[1] / self._lock[0]
+        return self.lock_prior if self.lock_prior > 0.0 else None
 
     def _steer_at(self, t: float) -> float | None:
         """時刻 `t` の実舵角（それ以前で最も新しい標本）。履歴が足りなければ None。"""
@@ -124,12 +156,22 @@ class UndersteerLearner:
         if d is None or d_prev is None or abs(d - d_prev) > cfg.steer_rate_max * 0.1:
             return
         tan_d = math.tan(self.sm.effective(d))
+        lam = math.exp(-dt / cfg.memory_s)
+        if self.lock is not None and abs(d) >= self.lock - cfg.lock_band:
+            # 舵が上限: K には使わない。式（K 込み）より曲がっていなければ前輪の飽和として `a_lock` へ
+            kap = yaw_rate / v
+            kap_lin = abs(tan_d) / (self.L + max(self.k, 0.0) * v * v)
+            if kap * d > 0.0 and abs(kap) < cfg.sat_frac * kap_lin:
+                lk = self._lock
+                lk[0] = lk[0] * lam + dt
+                lk[1] = lk[1] * lam + dt * v * abs(yaw_rate)
+                self.lock_s = self.lock_s * lam + dt
+            return
         y = tan_d - self.L * yaw_rate / v
         if abs(y) > cfg.resid_max:
             return
         x = v * yaw_rate
         z = v * v * tan_d / self.L
-        lam = math.exp(-dt / cfg.memory_s)
         s = self._s
         for i, val in enumerate((dt, dt * z, dt * x, dt * y, dt * z * x, dt * z * y)):
             s[i] = s[i] * lam + val

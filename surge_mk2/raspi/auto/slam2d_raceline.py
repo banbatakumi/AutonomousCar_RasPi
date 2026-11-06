@@ -375,6 +375,40 @@ def kappa_limit(p: dict[str, float], vehicle, a_lat=None, k_us: float = 0.0) -> 
 #: 追従の余裕の既定値 [1/m]（`kappa_limit`、パラメータ `kappa_track`）
 KAPPA_TRACK = 0.4
 
+
+def lock_speed_cap(path: rl_mod.RaceLine, v: np.ndarray, p: dict[str, float], vehicle,
+                   a_lock: float | None, k_us: float = 0.0) -> np.ndarray | None:
+    """舵が上限になる所の速度の上限 [m/s]（点ごと、上限の無い点は inf。どこも効かなければ `None`）。
+
+    ★ 追従の余裕 `kappa_track` を**舵角ではなく横の力で**取る。舵を上限まで切った所では、前輪が横に滑り始めると
+    舵を切り足しても曲がらず、曲率は `a_lock / v²` で頭打ちになる（`nav/understeer.py`。K の式は表せない）。
+    2026-11-06 `surge_20261106_123306`: 道幅で曲率 1.79 までしか開けないヘアピンで、横の学習値が 3.48 → 5.54 に
+    上がると速さが 1.4 → 1.9m/s になり、舵が上限のまま外へ −10 → −38cm ずれて 3 回壁に当たった
+    （舵が上限で出た横加速度 `a_lock` ≈ 4.8m/s²、K の式は約 2.0 曲がれると見ていた）。
+
+    「線の曲率＋追従の余裕」が、その速さで舵の上限が出せる曲率（K の式、`kappa_limit` と同じ）を超える点
+    ＝外へずれたら舵が上限に張り付く点だけ、`v ≤ √(a_lock / (κ + kappa_track))` に抑える。それ以外の点は
+    舵を切り足せば曲がるので抑えない（全点に掛けると、横の学習値で a_y 5〜7 を余裕を持って走れていた速いコーナーまで
+    遅くなる）。
+
+    :param v: 今の速度プロファイル（どの点が舵の上限に掛かるかを決める速さ）
+    :param a_lock: 舵の上限で出せる横加速度 [m/s²]（学習値。`None` なら抑えない）
+    """
+    if a_lock is None or a_lock <= 0.0 or len(path) < 3:
+        return None
+    track = float(p.get("kappa_track", KAPPA_TRACK))
+    need = np.abs(rl_mod.speed_kappa(path.xy, path.closed)) + track
+    v = np.asarray(v, dtype=np.float64)
+    L = vehicle.wheelbase
+    k_lin = vehicle.kappa_max * L / (L + max(0.0, float(k_us)) * v * v)
+    cap = np.sqrt(a_lock / need)
+    tight = (need > k_lin) & (cap < v)
+    if not tight.any():
+        return None
+    out = np.full(len(v), np.inf)
+    out[tight] = cap[tight]
+    return out
+
 #: LiDAR の 1 周の時間 [s]（LD06 は 10Hz。障害物は最悪この時間だけ遅れて見える）
 SCAN_PERIOD_S = 0.1
 
@@ -896,8 +930,9 @@ class Slam2dRaceLine(Planner):
         self._us = UndersteerLearner(
             self.vehicle.steer_map,
             lag_s=(2.0 * self.vehicle.yaw_damping / self.vehicle.yaw_natural_freq_rad_s
-                   if self.vehicle.yaw_natural_freq_rad_s > 1e-6 else 0.0))
-        self._us_saved = 0.0
+                   if self.vehicle.yaw_natural_freq_rad_s > 1e-6 else 0.0),
+            lock=self.vehicle.max_steer * self.vehicle.steer_servo_gain)
+        self._us_saved = (0.0, 0.0)
         #: 学習を路面の記録から始めたか（`_grip_load_surface`）と、そのときの記録 `(横, 減速, 比)`。
         #: 記録の値はこの路面で確かめた天井として扱い、その上は試さない
         #: 計画のラップ [s] と、それを出した `path.v`（`GripLearner` へ渡す）
@@ -1089,7 +1124,7 @@ class Slam2dRaceLine(Planner):
         self._grip_save()
         self._grip.reset()
         self._us.reset()
-        self._us_saved = 0.0
+        self._us_saved = (0.0, 0.0)
         self._grip_on = False
         #: 読み込んだ地図の名前（学習した横グリップの保存先）
         self._grip_name = ""
@@ -2169,10 +2204,14 @@ class Slam2dRaceLine(Planner):
             return ""
         us = self._us
         if us.ready:
-            return f"・舵の効き K {us.k * 1000:.2f}e-3"
-        if us.prior:
-            return f"・舵の効き K {us.prior * 1000:.2f}e-3（保存値）"
-        return ""
+            note = f"・舵の効き K {us.k * 1000:.2f}e-3"
+        elif us.prior:
+            note = f"・舵の効き K {us.prior * 1000:.2f}e-3（保存値）"
+        else:
+            note = ""
+        if us.a_lock is not None:
+            note += f"・舵の上限で横 {us.a_lock:.1f}m/s²"
+        return note
 
     def _us_observe(self, vs: VehicleState) -> None:
         """車両状態 1 つぶんをアンダーステアの学習へ渡す（100Hz）。
@@ -2792,7 +2831,7 @@ class Slam2dRaceLine(Planner):
         """避ける経路に速度を付ける: 曲率で決まる速度（`retime`）と、余裕で決まる上限（`speed_cap`）。
         見通しの上限は元の経路のものを使う（避ける経路は元の経路と同じ添字で、形もほぼ同じ）。"""
         base = self._avoid_room_path if self._avoid_room_path is not None else plan.path
-        rl = rl_mod.retime(plan.path, v_cap=self._sight_cap(base, p), **self._spd(p, plan.path))
+        rl = self._lock_capped(plan.path, p, self._sight_cap(base, p))
         if p["overtake"] > 0:
             return rl                      # 避ける間も速度は曲率と摩擦だけで決める
         cap = av_mod.speed_cap(plan.clearance, p["avoid_clear"], p["avoid_speed"], p["v_max"])
@@ -3085,7 +3124,8 @@ class Slam2dRaceLine(Planner):
 
     def _skey(self, p: dict[str, float]) -> tuple:
         """速度プロファイルを作り直す鍵。学習中は、学習した値の版（`_grip_tok`）も入れる。"""
-        return speed_key(p) + ((self._grip_tok,) if self._grip_on else ())
+        lock = self._lock_a(p)
+        return speed_key(p) + ((self._grip_tok,) if self._grip_on else ()) + ((lock,) if lock is not None else ())
 
     def _spd(self, p: dict[str, float], path: rl_mod.RaceLine) -> dict:
         """`path` に速度を付ける設定（`speed_kwargs`）。学習中は点ごとの横の限界と、学習した
@@ -3100,11 +3140,26 @@ class Slam2dRaceLine(Planner):
 
     def _timed(self, path: rl_mod.RaceLine, p: dict[str, float],
                v_cap: np.ndarray | None = None) -> rl_mod.RaceLine:
-        """周回の経路に今の設定と学習値で速度を付ける。"""
-        rl = rl_mod.retime(path, v_cap=v_cap, **self._spd(p, path))
+        """周回の経路に今の設定と学習値で速度を付ける。舵が上限になる所は `lock_speed_cap` で抑える。"""
+        rl = self._lock_capped(path, p, v_cap)
         # `_grip_begin` が「足元は前の速度のまま」の上限に使う
         self._grip_plain = (path.xy, rl.v)
         return rl
+
+    def _lock_a(self, p: dict[str, float]) -> float | None:
+        """速度の計画に使う、舵の上限で出せる横加速度（`us_learn` が 0 なら `None`）。鍵に使うので 0.1 刻みに丸める。"""
+        a = self._us.a_lock if p.get("us_learn", 0) > 0 else None
+        return None if a is None else round(a, 1)
+
+    def _lock_capped(self, path: rl_mod.RaceLine, p: dict[str, float],
+                     v_cap: np.ndarray | None) -> rl_mod.RaceLine:
+        """`retime` に、舵が上限になる所の上限（`lock_speed_cap`）を足したもの。"""
+        kw = self._spd(p, path)
+        rl = rl_mod.retime(path, v_cap=v_cap, **kw)
+        cap = lock_speed_cap(path, rl.v, p, self.vehicle, self._lock_a(p), self._us_k(p))
+        if cap is None:
+            return rl
+        return rl_mod.retime(path, v_cap=cap if v_cap is None else np.minimum(v_cap, cap), **kw)
 
     def _grip_quiet(self, t_ns: int, why: str) -> None:
         """時刻 `t_ns` から `_GRIP_SWITCH_QUIET_S` のあいだ学習を止める（`_grip_end` のゲート）。"""
@@ -3391,7 +3446,7 @@ class Slam2dRaceLine(Planner):
         self._grip_tok += 1
         self._grip_saved = (0, 0.0)
         self._us.reset()
-        self._us_saved = 0.0
+        self._us_saved = (0.0, 0.0)
         text = mapstore.load_grip(name)
         if not text:
             return                              # 新しい地図は同定値 × `grip_init` から学習する
@@ -3399,8 +3454,8 @@ class Slam2dRaceLine(Planner):
             m = grip_mod.GripMap.from_json(text)
             g.load(m)
             # アンダーステア勾配は保存した値から（推定が使えるようになるまではこのまま）
-            self._us.reset(prior=m.understeer)
-            self._us_saved = m.understeer
+            self._us.reset(prior=m.understeer, lock_prior=m.lock_ay)
+            self._us_saved = (m.understeer, m.lock_ay)
         except (ValueError, TypeError, KeyError):
             pass                                # 壊れた・古い形式。初期値から学習し直す
 
@@ -3415,23 +3470,27 @@ class Slam2dRaceLine(Planner):
         us = self._us
         if us.ready:
             g.map.understeer, g.map.understeer_s = us.k, us.strong_s
-        us_new = us.ready and abs(us.k - self._us_saved) > 1e-4
+        lock_ay = us.a_lock or 0.0
+        g.map.lock_ay = lock_ay
+        us_now = (us.k if us.ready else self._us_saved[0], lock_ay)
+        us_new = abs(us_now[0] - self._us_saved[0]) > 1e-4 or abs(us_now[1] - self._us_saved[1]) > 0.01
         if not g.worth_saving():
             if us_new:
-                # 横グリップは保存する段階でない（読み込んだ値を `back_off` 倍した途中など）。ファイルの K だけを書き換える
-                self._us_saved = us.k
+                # 横グリップは保存する段階でない（読み込んだ値を `back_off` 倍した途中など）。ファイルの K・`a_lock` だけを書き換える
+                self._us_saved = us_now
                 try:
                     text = mapstore.load_grip(name)
                     m = grip_mod.GripMap.from_json(text) if text else grip_mod.GripMap()
-                    m.understeer, m.understeer_s = us.k, us.strong_s
+                    m.understeer, m.understeer_s = g.map.understeer, g.map.understeer_s
+                    m.lock_ay = lock_ay
                     mapstore.save_grip(name, m.to_json())
                 except (OSError, ValueError):
                     pass
             return
         m = g.map
-        if us.ready:
-            self._us_saved = us.k
-        key = (g.ver + g.long.ver, m.best_lat, tuple(m.best_acc), tuple(m.best_dec), round(m.understeer, 5))
+        self._us_saved = us_now
+        key = (g.ver + g.long.ver, m.best_lat, tuple(m.best_acc), tuple(m.best_dec), round(m.understeer, 5),
+               round(m.lock_ay, 2))
         if key == self._grip_saved:
             return
         self._grip_saved = key
