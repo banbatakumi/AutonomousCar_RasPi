@@ -2223,7 +2223,8 @@ class Slam2dRaceLine(Planner):
         アンダーステアが大きい標本ほど落ちる選び方になって K が 1.9e-3 → 0.5e-3 と下がり続けた
         （同じ記録をゲート無しで通すと約 2.1e-3 で安定）。"""
         t = vs.t_capture / 1e9
-        self._us.observe(t, float(vs.speed), float(vs.yaw_rate), float(vs.steer_actual))
+        self._us.observe(t, float(vs.speed), float(vs.yaw_rate), float(vs.steer_actual),
+                         float(vs.accel[0]) if vs.imu_ok and len(vs.accel) > 0 else None)
         if not self._grip_on and t - self._grip_save_t > _GRIP_SAVE_S:
             self._grip_save_t = t
             self._grip_save()

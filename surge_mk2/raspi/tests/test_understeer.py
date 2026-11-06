@@ -190,6 +190,32 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestBrakingOversteer(unittest.TestCase):
+    """★ 後輪だけで制動するので、コーナーで制動すると舵の割に回り込む（2026-11-06 `surge_20261106_133258`）。
+    その標本を K に入れると K が小さく偏る。前後の加速度を渡せば外す。"""
+
+    def _run(self, give_ax):
+        rng = random.Random(3)
+        us = UndersteerLearner(SteerMap(wheelbase=L), lag_s=0.0)
+        t = 0.0
+        while t < 160.0:
+            v = 2.5 + 1.0 * math.sin(2 * math.pi * t / 7.0)
+            steer = 0.22 * math.sin(2 * math.pi * t / 3.1)
+            # 3 回に 1 回のコーナーで制動（-2.5m/s²）しながら曲がり、曲率が 1.3 倍に回り込む
+            braking = int(t / 3.1) % 3 == 0
+            kap = math.tan(steer) / (L + 0.002 * v * v) * (1.3 if braking else 1.0)
+            ax = -2.5 if braking else 0.0
+            us.observe(t, v, v * kap + rng.gauss(0.0, 0.05), steer, ax if give_ax else None)
+            t += 0.01
+        return us
+
+    def test_braking_samples_do_not_bias_k(self):
+        us = self._run(True)
+        self.assertTrue(us.ready)
+        self.assertAlmostEqual(us.k, 0.002, delta=0.0004)
+        self.assertLess(self._run(False).k, 0.001)          # 入れると小さく偏る
+
+
 class TestLockSpeedCap(unittest.TestCase):
     """`slam2d_raceline.lock_speed_cap`: 舵が上限になる所だけ、余裕ぶんを横の力で取れる速さに抑える。"""
 

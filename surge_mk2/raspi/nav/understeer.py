@@ -27,6 +27,10 @@
   無ければ 0）のまま。cam_e2e の記録のように横をあまり使わない走りでは K が定まらない（前半と後半で符号が変わった）
 - 推定は `[k_min, k_max]` に収める
 - **舵が上限（`lock` − `lock_band` 以上）の標本は K に使わない**（下の「舵の上限」）
+- **前後に加減速している標本（|a_x| ≥ `ax_max`）は K に使わない**。後輪だけで駆動・制動するので、コーナーの入口で
+  制動すると後輪の横滑り角が増えて舵の割に回り込む（2026-11-06 `surge_20261106_133258`: 学習した減速の上限が
+  2.2 → 3.6m/s² に上がるにつれ、右コーナーの入口で実ヨー ÷ 舵の運動学のヨーが最大 1.1 → 1.9）。その標本が K を
+  2.6 → 0.1e-3 と下げ続けた（024246 も 2.1 → 1.4e-3）。外すと 3.4 → 2.8e-3・2.8e-3 で落ち着く
 
 ## 舵の上限で出せる横加速度（`a_lock`）
 
@@ -53,8 +57,9 @@ K_MAX = 0.01
 #: 保存値（`GripMap.understeer`）の標本の選び方の版。違う版の保存値は読まない（0 から学び直す）。
 #: 1 = 横グリップの学習のゲート（舵が上限など）で標本を捨てていた。横加速度の大きい区間ほど落ちて K が小さく
 #: 偏った（2026-11-06 の記録で 0.52e-3 を保存。選び直すと約 2e-3）。
-#: 2 = 舵が上限の標本も K に入れていた。前輪の飽和で K が大きく偏った（2026-11-06 `surge_20261106_123306` で 4.5e-3）
-K_FORMAT = 3
+#: 2 = 舵が上限の標本も K に入れていた。前輪の飽和で K が大きく偏った（2026-11-06 `surge_20261106_123306` で 4.5e-3）。
+#: 3 = 加減速している標本も K に入れていた。制動での回り込みで K が小さく偏った（`surge_20261106_133258` で 0.1e-3）
+K_FORMAT = 4
 
 
 @dataclass
@@ -62,6 +67,9 @@ class UndersteerConfig:
     v_min: float = 1.0                #: これより遅い標本は使わない [m/s]（低速は K の効きが v² で消える）
     steer_rate_max: float = 0.6       #: 舵がこれより速く動いている標本は使わない [rad/s]（0.1s の差で見る）
     resid_max: float = 0.15           #: |y| がこれを超える標本は使わない [rad]（スピン・衝突）
+    #: 前後の加速度（IMU）の大きさがこれ以上の標本は K に使わない [m/s²]。1.5 だと 133258 で 3.4 → 2.8e-3 と
+    #: まだ下がり、1.0 で 3.7 → 3.5e-3
+    ax_max: float = 1.0
     memory_s: float = 60.0            #: 忘れる時定数（使った標本の時間）[s]
     ay_strong: float = 2.5            #: 「横を使っている」とみなす横加速度 [m/s²]
     strong_min_s: float = 8.0         #: その標本がこれだけ溜まるまでは推定を使わない [s]
@@ -136,11 +144,14 @@ class UndersteerLearner:
             out = s
         return out
 
-    def observe(self, t: float, v: float, yaw_rate: float, steer_actual: float) -> None:
+    def observe(self, t: float, v: float, yaw_rate: float, steer_actual: float,
+                a_x: float | None = None) -> None:
         """車両状態 1 つぶん。標本を選ぶのはここの条件（車速・舵の速さ・残差）だけ。
 
         **外から「この区間は使わない」と選ばない。** 横グリップの学習のゲート（舵が上限など）で選んでいた頃は、
-        アンダーステアの大きい標本ほど落ちて K が小さく偏った（`K_FORMAT` の 1）。"""
+        アンダーステアの大きい標本ほど落ちて K が小さく偏った（`K_FORMAT` の 1）。
+
+        :param a_x: 前後の加速度 [m/s²]（IMU。`None` = 使えない。加減速の標本を外さない）"""
         cfg = self.cfg
         h = self._hist
         h.append((t, float(steer_actual)))
@@ -166,6 +177,10 @@ class UndersteerLearner:
                 lk[0] = lk[0] * lam + dt
                 lk[1] = lk[1] * lam + dt * v * abs(yaw_rate)
                 self.lock_s = self.lock_s * lam + dt
+            return
+        if a_x is not None and abs(a_x) >= cfg.ax_max:
+            # 加減速中: 後輪の前後の力が横を削り、舵の割に回り込む。K には使わない（`a_lock` には使う: ヘアピンでは
+            # 加減速しながら舵が上限になるので、その条件で出せる横の力がほしい）
             return
         y = tan_d - self.L * yaw_rate / v
         if abs(y) > cfg.resid_max:
