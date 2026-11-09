@@ -1,7 +1,7 @@
 """バスに流れるメッセージ型と、UART パケットからの変換。
 
 型は `types.py`、スケール換算と射影は `convert.py`。
-**単位は SI。km/h や度への変換は GUI の表示直前だけ**（`docs/architecture.md` §5.1）。
+**単位は SI。km/h や度への変換は GUI の表示直前だけ**（`docs/system_overview.md` §7）。
 """
 
 from .convert import (

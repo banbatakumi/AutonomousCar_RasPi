@@ -102,7 +102,7 @@ class TestWallPad(unittest.TestCase):
 
 
 class TestNearBand(unittest.TestCase):
-    """実機（2026-10-08、道幅 約0.6m）: 壁から 25cm の障害物が `wall_pad=0.25` で見つからず当たった。"""
+    """実機（道幅 約0.6m）: 壁から 25cm の障害物が `wall_pad=0.25` で見つからず当たった。"""
 
     POSE = (0.0, 0.0, 0.0)
     PAD = 0.25
@@ -171,7 +171,7 @@ if __name__ == "__main__":
 
 class TestBehindWall(unittest.TestCase):
     """`behind`（`Frontend.behind_wall`）が「壁の向こう」と言った候補は捨てる。LiDAR の光は壁を通らないので、
-    低い壁の上を越えて見えた奥か壁での反射（2026-11-06、木の仕切り壁の向こうの点がヘアピンの空きに障害物として出た）。"""
+    低い壁の上を越えて見えた奥か壁での反射（木の仕切り壁の向こうの点がヘアピンの空きに障害物として出た）。"""
 
     POSE = (0.0, 0.0, 0.0)
 

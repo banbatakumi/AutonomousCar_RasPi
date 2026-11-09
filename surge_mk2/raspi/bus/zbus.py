@@ -1,4 +1,4 @@
-"""内部バス — ZeroMQ PUB/SUB の薄いラッパ（`docs/architecture.md` §6.2）。
+"""内部バス — ZeroMQ PUB/SUB の薄いラッパ（`docs/system_overview.md` §5.2）。
 
 輸送層は ZeroMQ に任せ、**その上のメッセージ規約だけを自作する**。
 画像は共有メモリ（`shm_ring`）なので、ここを通るのは数百バイト以下のものだけ。
@@ -91,7 +91,7 @@ _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
 #: `auto/cmd` に出し、engage されている間だけ telemetry_node が `cmd` へ中継する。
 #: 2つのノードが同じ `cmd` に publish すると、購読側からは区別できないまま
 #: 50Hz で交互に上書きし合い、「勝手にハンドルが戻る」という再現困難な症状になる
-#: （`docs/architecture.md` §7.4 / `telemetry_node` の `_cmd_pump`）。
+#: （`docs/system_overview.md` §4 / `telemetry_node` の `_cmd_pump`）。
 #:
 #: ★ **完全一致で先に引けるキーを持たせること。** 前方一致フォールバック
 #: （`endpoints_for_topic()` 参照）は辞書の並び順に依存する上、

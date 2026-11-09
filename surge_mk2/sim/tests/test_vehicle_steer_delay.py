@@ -1,11 +1,11 @@
-"""`sim/vehicle.py`の操舵むだ時間（A2: サブステップ化での量子化バグ修正）。
+"""`sim/vehicle.py`の操舵むだ時間の量子化。
 
-A2（2026-08）: 1step=100msを1回で積分すると、`dead_time_s`の値によらず実効遅延が
-100msに量子化されていた。`step()`をサブステップに分割して10ms粒度にした。
+1step=100msを1回で積分すると、`dead_time_s`の値によらず実効遅延が
+100msに量子化される。`step()`はサブステップに分割して10ms粒度にしてある。
 
-2026-09-24: むだ時間を`SteerServo`の「入力が始まった時刻」の履歴引き（ステップ中点
-で遡る）に置き換えた。以前の「1step=1エントリ」のキューは常に遅れ側へ
-`ceil(d/dt)+1`stepに量子化していたが、今は四捨五入相当。ここでは`VehicleModel`だけを
+むだ時間は`SteerServo`の「入力が始まった時刻」の履歴引き（ステップ中点
+で遡る）で、量子化は四捨五入相当（「1step=1エントリ」のキューだと常に遅れ側へ
+`ceil(d/dt)+1`stepに量子化される）。ここでは`VehicleModel`だけを
 使ってサブステップ幅ごとの反応時間を確かめる。
 """
 
@@ -40,7 +40,7 @@ def _time_to_react(spec: "VehicleSpec", *, dt_sub: float, total_s: float = 0.1) 
 
 
 def _expected_reaction_time(dead_time_s: float, dt_sub: float) -> float:
-    """`SteerServo`（2026-09-24〜）の量子化特性の参照実装。
+    """`SteerServo`の量子化特性の参照実装。
 
     むだ時間は「ステップ中点 `t + dt/2 - dead`」時点で有効だった入力を引く。
     指令を与えた直後のステップを k=0 として、`k*dt + dt/2 - dead >= 0` を満たす

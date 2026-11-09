@@ -4,7 +4,7 @@
  * ## なぜ円弧なのか
  *
  * 数字だけだと「今どのくらい出ているか」が読めない。**針の角度は目を向けなくても
- * 周辺視で分かる**（`architecture.md` §10.1 の層 B）。実車のメータが円弧なのは
+ * 周辺視で分かる**（`system_overview.md` §10.1 の層 B）。実車のメータが円弧なのは
  * 装飾ではなく、この理由による。
  *
  * ## 更新は 8Hz + CSS 補間
@@ -93,13 +93,13 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   // 'D1'〜'D5' は '1'〜'5' に縮める。'R'/'N' はそのまま（`.slice(1)` すると
   // 'N' が空文字になってしまうので、1文字ギアは縮めない扱いに含める）
   //
-  // 速度指令・トルク指令でも仮想変速（`bus/virtualGear.ts`）のギアを出す（2026-11-03、指示による。
+  // 速度指令・トルク指令でも仮想変速（`bus/virtualGear.ts`）のギアを出す（指示による。
   // 'D' の代わりに 1〜6。MT は 1〜5）。演出だけで指令には関係しない。8Hz の `useNumbers()` の再描画で追従する
   const mtMode = driveMode === 'mt'
   const gearLabel = virtualGear().label
   const gearIsReverse = gearLabel === 'R'
 
-  // ── MT モードのレッドライン（v0.18） ────────────────────────────────
+  // ── MT モードのレッドライン ────────────────────────────────
   //
   // 「このギアの上限（`mtMaxSpeed × mtGearRatio`。MT は `maxSpeed` を使わない）が近い＝そろそろシフトアップ」を、
   // 現在速度に関わらず常時見える静的な帯として弧の外側（r=52）に描く。

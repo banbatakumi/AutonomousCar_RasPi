@@ -175,7 +175,7 @@ class TestIoNodeLogging(unittest.TestCase):
 
 
 class TestIoNodeStm32Log(unittest.TestCase):
-    """STM32 の `LOG` は捨てずに残す（2026-10-10。STM32 が自分で止めた理由はここにしか出ない）。"""
+    """STM32 の `LOG` は捨てずに残す（STM32 が自分で止めた理由はここにしか出ない）。"""
 
     def test_warnings_and_errors_reach_the_link_diag(self):
         node = IoNode(FakeLink())

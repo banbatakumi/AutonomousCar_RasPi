@@ -86,8 +86,8 @@ export interface MountPose {
  * （片方だけ直すと進路ガイドと IPM が別の場所を指す。`test_gui_projection.py` が突き合わせる）。
  *
  * **地面の点は base_link 基準で受け取り、ここでカメラの取付位置 `x, y` を引く。**
- * 呼び出し側が「カメラからの奥行き」に直して渡す必要は無い（以前は引き忘れて
- * 前 0.1m・後 0.04m ずれていた）。`facing` が `'rear'` なら後ろ向き（yaw=π）で、
+ * 呼び出し側が「カメラからの奥行き」に直して渡す必要は無い（二重に引くと
+ * 前 0.1m・後 0.04m ずれる）。`facing` が `'rear'` なら後ろ向き（yaw=π）で、
  * 奥行き・左右とも反転する。`roll` は光軸まわりの回転 [rad]（IMU、カメラ座標の光線を回す）。 */
 export function groundProjector(
   lens: Lens,

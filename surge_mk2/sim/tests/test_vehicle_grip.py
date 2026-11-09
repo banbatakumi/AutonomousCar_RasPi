@@ -143,8 +143,8 @@ class TestVehicleGripLimit(unittest.TestCase):
         self.assertAlmostEqual(speed_before - v.speed, 2.0 * 0.1, delta=0.01)
 
     def test_measured_drive_accel_caps_speed_tracking(self):
-        """`drive_accel_m_s2`（`sysid_accel`の実測値）は`cmd.accel_limit`が
-        指定されていない呼び出し元（`sim/gym_env.py`のRL訓練など）でも一律に効く。"""
+        """`drive_accel_m_s2`（実測の加速の上限）は`cmd.accel_limit`が
+        指定されていない呼び出し元でも一律に効く。"""
         spec = VehicleSpec(mu=0.8, tau_speed_s=0.0, drive_accel_m_s2=1.0)
         v = VehicleModel(spec, (0.0, 0.0, 0.0))
         v.apply(DriveInput(armed=True, target_speed=10.0))

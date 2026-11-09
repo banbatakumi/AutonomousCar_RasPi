@@ -1,6 +1,6 @@
 """車体の内側の LiDAR の点を捨てる（`raspi/nav/body_mask.py`）。
 
-会場の試走（2026-10-31）で、車体の内側（LiDAR から 3〜15cm）の点を障害物と取り、毎走行 2〜9 回止まっていた。
+会場の試走で、車体の内側（LiDAR から 3〜15cm）の点を障害物と取り、毎走行 2〜9 回止まっていた。
 """
 
 from __future__ import annotations

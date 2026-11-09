@@ -4,9 +4,8 @@
  * **バスのメッセージ型（`VehicleState`・`Scan`・`LinkDiag`・`AutoState`・
  * `AutoMapMsg`）は `generated/msgs.ts` から再エクスポートしている。**
  * `raspi/msgs/types.py` が唯一の正で、`python3 config/gen_msgs.py` が吐く。
- * 以前はここに手で写していたが、45 フィールドの写経は片方だけ直しても
- * どのツールもエラーを出さず、**画面に静かに `undefined` が出る**形だった
- *。
+ * 手で写すと、片方だけ直してもどのツールもエラーを出さず、**画面に静かに
+ * `undefined` が出る**ため。
  *
  * ここに手書きで残してあるのは、**Python 側に対応物が無い型だけ**——
  * WS の制御 JSON（`ControlStatus`・`CmdOut`）、複数メッセージを束ねた

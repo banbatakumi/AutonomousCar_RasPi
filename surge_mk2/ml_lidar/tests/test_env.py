@@ -79,9 +79,8 @@ class TestCenterlineProgress(unittest.TestCase):
 class TestMinimalReward(unittest.TestCase):
     """v21: 報酬が`progress/dt`＋終端項だけであることを固定する回帰テスト。
 
-    v16〜v20で足した罰則3種（`steer_effort_weight`・`raceline_weight`・
-    `steer_angle_weight`）は2026-09-17に全て撤去した（env.py EnvConfig
-    docstring「v21」参照）。**罰則をうっかり足し直すと静かに壊れる**類の
+    罰則3種（`steer_effort_weight`・`raceline_weight`・`steer_angle_weight`）は
+    持たない（env.py docstring「v21」参照）。**罰則をうっかり足し直すと静かに壊れる**類の
     不変条件なので、値そのものを突き合わせて固定しておく。
     """
 

@@ -116,7 +116,7 @@ class TestPlanOffset(unittest.TestCase):
 class TestCurvatureMargin(unittest.TestCase):
     """曲率は見積もりではなく、できた線で確かめる。
 
-    実機（2026-10-08、1周 12m）と sim.bench の toyota では、障害物の前後 3m の元の曲率の最大で
+    実機（1周 12m）と sim.bench の toyota では、障害物の前後 3m の元の曲率の最大で
     枠の残りを見積もっていたせいで、横へ避ける経路が1度も引けなかった。
     """
 

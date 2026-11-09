@@ -1,4 +1,4 @@
-"""MCAP 書き出し（`rec/mcap_log.py` / `tools/sfl2mcap.py` / `nodes/logger_node.py`）のテスト。
+"""MCAP 書き出し（`rec/mcap_log.py` / `raspi/tools/sfl2mcap.py` / `nodes/logger_node.py`）のテスト。
 
 実機もカメラも要らない。**書いた MCAP を `mcap` のリーダで読み直して**
 中身を確かめる（書けたことではなく、読めることを検査する）。
@@ -273,7 +273,7 @@ class TestMcapLog(unittest.TestCase):
 
     def test_stdout_mode_survives_short_writes(self):
         """`python -u` の標準出力は `FileIO` で、シグナルが来ると**途中までしか書かずに戻る**。
-        残りを捨てるとチャンクが切れて読めなくなる（2026-10-06、実機の記録で発生）。"""
+        残りを捨てるとチャンクが切れて読めなくなる（実機の記録で発生）。"""
         import sys as _sys
 
         class ShortRaw:
@@ -372,7 +372,7 @@ class TestMcapLogEnospc(unittest.TestCase):
 
     def test_close_does_not_raise_when_finish_fails(self):
         """索引が書けなくても `close()` はクラッシュしない
-        （索引無し MCAP は `tools/mcap_repair.py` で救える）。"""
+        （索引無し MCAP は `raspi/tools/mcap_repair.py` で救える）。"""
         from unittest import mock
 
         log = McapLog(self.path)

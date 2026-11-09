@@ -1,4 +1,4 @@
-"""logger_node — 内部バスを丸ごと MCAP に記録する（`docs/architecture.md` §11）。
+"""logger_node — 内部バスを丸ごと MCAP に記録する（`docs/system_overview.md` §11）。
 
     .venv/bin/python -m raspi.nodes.logger_node                  # logs/surge_*.mcap
     .venv/bin/python -m raspi.nodes.logger_node --image-hz 0     # 画像を記録しない

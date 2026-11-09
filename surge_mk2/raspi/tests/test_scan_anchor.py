@@ -1,7 +1,6 @@
 """`raspi/nav/scan2scan.py`（点対線ICP）と`raspi/nav/scan_anchor.py`のテスト。
 
-`match_scans()`は`raspi/nav/slam.py`から使われていたが**単体テストが無かった**。
-`park_to_point`の駐車目標アンカリングがこれに依存するので、先に性質を縛る:
+`park_to_point`の駐車目標アンカリングが`match_scans()`に依存するので、性質を縛る:
 
 1. 既知の並進・回頭を復元する（初期値が間違っていてもデータが勝つ）
 2. **観測できない方向は初期値に留まる**（平行壁の通路で進行方向が暴れない）

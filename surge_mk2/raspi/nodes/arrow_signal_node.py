@@ -64,8 +64,8 @@ bind するため、**このノードと`route_select.py`は同時に使えな�
 `route/select`とは別に、直近フレームの生判定（`value`/`lit_frac`。confirm
 前の値なので反応が速い）と確定値（`confirmed_value`）を`ArrowSignalStatus`
 として毎周期publishする。GUIはこれを前方カメラ映像に重畳する（画素自体は
-載せない——`ImageRef`と同じくバス帯域を節約する設計、`docs/architecture.md`
-§6.2と同じ理由）。
+載せない——`ImageRef`と同じくバス帯域を節約する設計、`docs/system_overview.md`
+§5.2と同じ理由）。
 """
 
 from __future__ import annotations

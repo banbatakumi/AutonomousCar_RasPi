@@ -1,10 +1,10 @@
 # SURGE Mk.2 GUI
 
-React + TypeScript + Vite。`docs/architecture.md` §10 の設計に沿う。
+React + TypeScript + Vite。`docs/system_overview.md` §10 の設計に沿う。
 
 タブは4枚。**同じテレメトリを見ているが、出す物の選び方が違う。**
 
-見た目は全タブ共通でレース用ダッシュ風（2026-11-03）。地はカーボン、パネルは黒いガラスの液晶、
+見た目は全タブ共通でレース用ダッシュ風。地はカーボン、パネルは黒いガラスの液晶、
 数字は DIN（macOS・iPadOS 標準搭載なので依存なし）。**正常なものは光らせず、色と発光は注意・異常・作動中だけ**
 （色の約束は `src/styles.css` 冒頭）。タブは数字キー `1`〜`4` でも切り替わる。iPad（タッチ）ではボタンが大きくなる。
 4K ではブラウザのズーム（⌘＋）で文字を大きくする（CSS の `zoom` は地図・LiDAR のクリック座標を狂わせうるので使っていない）。
@@ -67,15 +67,9 @@ LiDAR にはノイズ・欠損・遅延が入り、コース上の壁が点群�
 
 ### 4. 実車
 
-```bash
-# Pi 上で
-python -m raspi.nodes.io_node          # ★ --allow-arm を付けない限り DISARM 固定
-python -m raspi.nodes.camera_node
-python -m raspi.nodes.telemetry_node
-```
-
+Pi では systemd が各ノードを起動している（反映の操作は [`docs/development.md` §2](../docs/development.md#2-変更--反映の対応表最重要)）。
 ブラウザで `http://surge-mk2.local:8000/`（Wi-Fi の Mac で名前が引けないときは launcher の
-「実機 GUI を開く」で IP で開く。`docs/development.md` §8.1）。**GUI 本体も telemetry_node が配る**ので、
+「実機 GUI を開く」で IP で開く。[`docs/development.md` §8.1](../docs/development.md#81-pi-に繋がらない遅い)）。**GUI 本体も telemetry_node が配る**ので、
 WS と同一オリジンになり接続先の書き分けが要らない。
 
 Mac で GUI を編集しながら実車に繋ぐなら:
@@ -89,10 +83,10 @@ SURGE_HOST=surge-mk2.local npm run dev     # /ws だけ Pi に中継される
 `dist/` は `.gitignore` 済み。**Pi に node は要らない**。Mac でビルドして rsync する。
 
 ```bash
-tools/deploy.sh          # GUI をビルドして rsync（既定）。Python だけなら --no-gui
+tools/deploy.sh          # GUI をビルドして rsync（既定）
 ```
 
-## 映像に重ねるもの（2026-11-03）
+## 映像に重ねるもの
 
 `render/CameraView.tsx`。どれも進路ガイド（`pathGuide`）に従い、ラジコンのメイン映像クリックでまとめて消える。
 
@@ -101,7 +95,7 @@ tools/deploy.sh          # GUI をビルドして rsync（既定）。Python だ
   HUD の裏に入る——そのときは線を HUD のすぐ上に寄せて出す
 - **自動運転の計画**（`planOverlay`、前方カメラ）: 指令舵角の進路（青の破線）。地図を持つ planner では経路（紫）・狙う点（白い菱形）・
   検出した障害物（赤い輪）も。ラジコンタブでは engage 中だけ、自動運転タブでは planner が判断を出していれば常に出す
-- **映像の遅れ**: ARM 中に届く間隔がいつもより明らかに空くと、縁が琥珀に光り古さを出す（止まったら従来どおり暗くして「映像停止」）。
+- **映像の遅れ**: ARM 中に届く間隔がいつもより明らかに空くと、縁が琥珀に光り古さを出す（止まったら暗くして「映像停止」）。
   カメラ配信には撮影時刻が無いので、撮ってから届くまでの遅れそのものは測れない
 - **R で後方カメラへ**（`autoRearCam`）: R に入れるとメインを後方に、抜けると前方に戻す（自分で切り替えたときだけ戻す）
 
@@ -131,7 +125,7 @@ tools/deploy.sh          # GUI をビルドして rsync（既定）。Python だ
 
 送信は画面の描画（rAF）に合わせ、**中身が変わった指令はそのフレームで、同じ中身の繰り返しは
 50Hz 以下**で送る。ARM を下ろした瞬間に DISARM を1発送り、あとは送信そのものを止める。
-サーバは `config/vehicle.toml` の `[safety] cmd_deadman_ms`（150ms）無音で DISARM に落とし、
+サーバは `config/vehicle.toml` の `[safety] cmd_deadman_ms` 無音で DISARM に落とし、
 io_node も同じだけで落とす（自律走行中だけ、Wi-Fi の瞬断を `auto_link_grace_ms` まで待つ）。
 
 操縦権は**同時に1人**。2枚目のタブで ARM すると拒否される。
@@ -215,7 +209,7 @@ src/
 
 ### 20Hz のデータを React state に入れない
 
-`architecture.md` §10.4。流量で3つに分ける。
+`system_overview.md` §10.3。流量で3つに分ける。
 
 1. 点群・カメラ → `live`（可変オブジェクト）に置き、Canvas が rAF で読む
 2. 数値表示 → **8Hz に間引いて** `useNumbers()` から配る（人間は 20Hz の数字を読めない）

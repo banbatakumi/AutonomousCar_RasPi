@@ -14,7 +14,7 @@
  *
  * 同じ並びに **📷 撮影**（`useSnapshot`。前カメラと、取得中なら後カメラの生画像を
  * PNG で Mac に保存。魚眼校正の写真撮りに使う）を置く。配信映像の魚眼補正の切替は
- * 設定パネル（⚙）だけに置く（2026-11-03、指示によりタブバーから外した）。
+ * 設定パネル（⚙）だけに置く（指示による）。
  */
 import { formatBytes, formatElapsed } from '../format'
 import { useMcapDownload } from '../hooks/useMcapDownload'

@@ -587,7 +587,7 @@ export function useDriving(ch: ControlChannel | null) {
     })
   }, [ch])
 
-  // ── ARM と灯火（2026-11-03、指示による） ──
+  // ── ARM と灯火（指示による） ──
   //
   // ARM したら DAY（減光）を点け、DISARM したら消灯に戻す。実車のデイライトと同じく
   // 「走れる状態かどうか」が外から見て分かる。切り方・入れ方（ボタン・Enter・パッド・
@@ -619,8 +619,7 @@ export function useDriving(ch: ControlChannel | null) {
   // ⚠ **Wake Lock は HTTPS（secure context）でしか使えない。** Pi が配る
   // `http://surge-mk2.local:8000` では `navigator.wakeLock` 自体が無く、画面が自動ロック
   // すると DISARM する（localhost の `npm run dev` では使えるので開発中は気づけない）。
-  // 使えないときは何もしない。以前は最初の ARM で一度だけ知らせていたが、毎回出て
-  // 邪魔なので消した（2026-11-03、指示による）。対処は端末側で自動ロックを切る
+  // 使えないときは何もしない（知らせると毎回出て邪魔なため。指示による）。対処は端末側で自動ロックを切る
   useEffect(() => {
     if (!('wakeLock' in navigator)) return
 
@@ -940,7 +939,7 @@ export function useDriving(ch: ControlChannel | null) {
       // 停止手段ではない（止めるのは Esc / E-STOP / ブレーキ）。
       // ★ 走行中に解除されると、サーバ（`telemetry_node._handover`）が**止まるかアクセルを入れるまで
       //   最大制動**する（舵は人が切ればその値、切らなければ自律の最後の値）。無操作の手動指令
-      //   （舵 0・トルク 0 = 惰行）へいきなり替わって壁に当たった（2026-11-06）。運転の設定に依らない
+      //   （舵 0・トルク 0 = 惰行）へいきなり替わると壁に当たるため。運転の設定に依らない
       //
       // ⚠ ブレーキは解除の往復を待たずに**そのまま送り続ける**。サーバ側の
       // 中継も `gui.brake or auto.brake` にしてあるので、解除が届くまでの

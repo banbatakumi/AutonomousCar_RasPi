@@ -278,8 +278,8 @@ class TestFollowTheGap(unittest.TestCase):
     def test_params_are_clamped_to_the_declared_range(self):
         """GUI を信用しない。**範囲外の値で走り出す方が、無視されるより危ない。**
 
-        ★`max_steer`はもうParamSpecではない（2026-08-28、`config/vehicle.toml`の
-        車両物理限界を直接参照する方針に変更。`self.vehicle.max_steer`を使う）ので、
+        ★`max_steer`はParamSpecではない（`config/vehicle.toml`の
+        車両物理限界を直接参照する。`self.vehicle.max_steer`を使う）ので、
         ここでのクランプ対象からは外れている。
         """
         p = FollowTheGap.merged({"max_speed": 99.0})
@@ -1099,7 +1099,7 @@ class TestAutoCtrlGate(unittest.TestCase):
     def test_params_survive_a_mode_round_trip(self):
         """★ 別のモード（システム同定を含む）へ行って戻っても、元のモードの値が残る。
 
-        以前は今のモードの分しか持たず、戻ると既定値になっていた（2026-10-06）。"""
+        以前は今のモードの分しか持たず、戻ると既定値になっていた。"""
         self.srv._on_auto({"mode": "slam2d_route", "params": {"v_max": 1.2}})
         self.srv._on_auto({"mode": "ftg", "params": {"max_speed": 0.3}})
         self.srv._on_auto({"mode": "calib_steer"})
@@ -1280,9 +1280,8 @@ class TestMissingSectorDisparity(unittest.TestCase):
         self.assertEqual(ext[10 + k], 3.0)
 
 
-#: `sim/gym_env.py` の `OBS_DIM`（点群361 + 速度1 + ステア1）と揃える。
-#: `raspi/tests/` は `sim/` を import しない方針なので、値をここに書き写す
-#: （変えたら両方直すこと。2026-09-02、ステア観測追加で362→363）
+#: 学習側（`ml_lidar/env.py` の `_to_obs()`）の観測次元（点群361 + 速度1 + ステア1）と揃える。
+#: `raspi/tests/` は学習側を import しない方針なので、値をここに書き写す（変えたら両方直すこと）
 _OBS_DIM = 363
 
 
@@ -1293,7 +1292,7 @@ def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
 
     重みは決め打ちで、テストの入力から出力を逆算しやすくしてある:
     steer は先頭の点にだけ反応、speed は末尾から2番目の入力（正規化した自車速度。
-    2026-09-02、末尾1個はステア観測が占めるようになったため`-1`→`-2`）にだけ反応。
+    末尾1個はステア観測）にだけ反応。
     """
     w = np.zeros((2, in_dim), dtype=np.float32)
     w[0, 0] = 1.0
@@ -1313,7 +1312,7 @@ def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
 def _make_constant_steer_e2e_model(path: Path, steer_norm: float, in_dim: int = _OBS_DIM) -> None:
     """入力に関わらず常に`steer_norm`（speedは0）を返すダミーモデル。舵の平滑化
     フィルタ（`steer_tau`）の時間応答だけを、スキャン内容やindexマッピングを
-    気にせずテストしたいときに使う（2026-08-29追加）。"""
+    気にせずテストしたいときに使う。"""
     w = np.zeros((2, in_dim), dtype=np.float32)
     b = np.array([steer_norm, 0.0], dtype=np.float32)
     inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, in_dim])
@@ -1329,8 +1328,8 @@ def _make_constant_steer_e2e_model(path: Path, steer_norm: float, in_dim: int = 
 
 def _make_steer_echo_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
     """出力steer_normが入力の末尾（ステア観測）をそのまま返す、speedは常に0の
-    ダミーモデル（2026-09-02追加）。`E2ELidar.plan()`が前回ステップの`self._steer`
-    を観測に混ぜていること（`sim/gym_env.py`の`SimE2EEnv._obs()`と揃える設計、
+    ダミーモデル。`E2ELidar.plan()`が前回ステップの`self._steer`
+    を観測に混ぜていること（`ml_lidar/env.py`の`_to_obs()`と揃える設計、
     `plan()`のコメント参照）を確認するために使う。"""
     w = np.zeros((2, in_dim), dtype=np.float32)
     w[0, -1] = 1.0
@@ -1432,7 +1431,7 @@ class TestE2ELidar(unittest.TestCase):
             self.assertTrue(math.isfinite(st.target_speed))
 
     def test_legacy_362dim_model_still_loads_and_runs(self):
-        """2026-09-02のステア観測追加（`_OBS_DIM`362→363）より前にエクスポートされた
+        """ステア観測の無い（`_OBS_DIM`が362の）
         v9以前のモデル（点群361+速度1=362次元）が引き続き動くことの回帰テスト。
         `plan()`は`self._model_in_dim`（`_load_from_path()`がONNXグラフ自身の
         宣言shapeから読む）を見て、362次元モデルには速度だけ・363次元モデルには
@@ -1479,7 +1478,7 @@ class TestE2ELidar(unittest.TestCase):
             self.assertGreater(st_half.target_speed, st_zero.target_speed)
 
     def test_previous_steer_feeds_into_the_next_model_input(self):
-        """②観測へのステア状態追加（2026-09-02）: 観測の末尾に「方策が直接制御する
+        """②観測へのステア状態追加: 観測の末尾に「方策が直接制御する
         目標舵角(`self._steer_target`)/max_steer」が乗る。`self._steer_target`は
         この呼び出しではまだ更新前（前回の`plan()`が残した値）なので、直接差し込んで
         確認する（`test_vehicle_speed_feeds_into_the_model_input`と同じ直接注入の
@@ -1524,8 +1523,8 @@ class TestE2ELidar(unittest.TestCase):
 
     def test_output_is_clamped_to_vehicle_max_steer(self):
         """モデルの生出力がどうであれ、`config/vehicle.toml`の車両物理限界
-        （`self.vehicle.max_steer`）が最終的な上限になる（2026-08-28、GUIの
-        `max_steer`ParamSpecを廃止して車両限界を直接参照する方針に変更）。
+        （`self.vehicle.max_steer`）が最終的な上限になる（GUIの
+        ParamSpecではなく車両限界を直接参照する）。
 
         モデル付属の`.json`の`max_steer`（学習時のステア出力レンジ。
         `self.vehicle.max_steer`とは別物）を車両限界より大きく設定し、
@@ -1564,7 +1563,7 @@ class TestE2ELidar(unittest.TestCase):
             self.assertLessEqual(abs(st.target_steer), vehicle_max_steer + 1e-9)
             self.assertGreater(st.target_steer, vehicle_max_steer - 0.05)
 
-    # ── 平滑化と初期化（2026-08-29追加。`de`/`ftg`と同じ`steer_tau`の仕組み） ──
+    # ── 平滑化と初期化（`de`/`ftg`と同じ`steer_tau`の仕組み） ──
 
     def test_steer_is_smoothed_over_time(self):
         """モデルが同じ出力を出し続けても、`target_steer`は1周期で目標値まで

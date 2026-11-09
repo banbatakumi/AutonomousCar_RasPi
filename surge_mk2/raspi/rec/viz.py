@@ -1,6 +1,6 @@
 """自己位置・地図を Foxglove の 3D パネルで見るためのトピック（`rec/mcap_log.py` の続き）。
 
-`logger_node` と `tools/sfl2mcap.py` の両方が `VizRecorder` を1つ持ち、
+`logger_node` と `raspi/tools/sfl2mcap.py` の両方が `VizRecorder` を1つ持ち、
 バスのメッセージを渡すと MCAP に以下を書く。
 
 | トピック | スキーマ | 中身 |

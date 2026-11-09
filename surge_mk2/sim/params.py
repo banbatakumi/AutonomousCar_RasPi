@@ -63,7 +63,7 @@ class SimParams:
     odom_scale_err: float = 0.01           #: 走行距離の倍率誤差（1.0 からのずれ）
     odom_noise_m: float = 0.0005           #: 1周期あたりの距離ノイズ σ [m]
     #: ヨーレートのバイアス [°/s]。**これが方位ドリフトの正体。**
-    #: `architecture.md` §15「地磁気センサが無いので方位ドリフト 1°/min」に合わせ、
+    #: 地磁気センサが無いので方位はドリフトする（`docs/system_overview.md` §9.5）。
     #: 既定 0.02°/s ≒ 1.2°/min
     gyro_bias_dps: float = 0.02
     gyro_noise_dps: float = 0.3            #: ヨーレートのランダムノイズ σ [°/s]

@@ -13,7 +13,7 @@
 
 **「今」は呼び出し側が渡す。** 実機は `time.monotonic_ns()`、再生はログ時刻の
 カーソルを渡す。こうすると再生が**記録時と同じ座標系**で動き、health の遷移まで
-そのまま再現できる（`docs/architecture.md` §11 の「バグ再現が確定的にできる」）。
+そのまま再現できる（`docs/system_overview.md` §11 の「バグ再現が確定的にできる」）。
 """
 
 from __future__ import annotations
@@ -56,8 +56,7 @@ CONFIG_ACK_BOOL_PARAMS = {
 
 #: `CONFIG_ACK` の `param_id` のうち、`LinkState` に連続値（float）として持たせるもの
 #: （★v0.12）。bool（0.0/1.0）に丸めず `applied` をそのまま持つ点が
-#: `CONFIG_ACK_BOOL_PARAMS` と違う。当初は3段階enumだったが、実機投入前に STM32 側が
-#: cm単位の直接指定へ変更した（`pi_uart_protocol_v0.12_delta.md` 改訂版）
+#: `CONFIG_ACK_BOOL_PARAMS` と違う。
 CONFIG_ACK_FLOAT_PARAMS = {
     packets.Param.AUTO_STOP_MARGIN_CM: "auto_stop_margin_cm",
 }

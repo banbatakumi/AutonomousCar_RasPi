@@ -1,4 +1,4 @@
-"""自動運転アルゴリズム（`docs/architecture.md` §8）。
+"""自動運転アルゴリズム（`docs/system_overview.md` §9）。
 
 **アルゴリズムだけを置く。** バス・WS・GUI のことは何も知らない純粋な計算に
 してあり、`Scan` と `VehicleState` を渡すと `AutoState` が返る。テストで

@@ -1,4 +1,4 @@
-"""IPM（逆透視変換）— カメラ画素 ⇄ 地面座標（`docs/architecture.md` §5.2）。
+"""IPM（逆透視変換）— カメラ画素 ⇄ 地面座標（`docs/system_overview.md` §7）。
 
 `gui/src/render/CameraView.tsx` の `drawGuide()`/`project()` が「地面座標 →
 画素」の順方向を実車で検証済みのまま持っている。ここではそれと**同一の
@@ -24,7 +24,7 @@ IMX219 160° 広角レンズに替えたので、`vehicle.toml` に校正値
 
 ## 座標系
 
-`docs/architecture.md` §5.1 のまま。カメラのローカル座標は
+`docs/system_overview.md` §7 のまま。カメラのローカル座標は
 `CameraView.tsx` に合わせて (depth=奥行き, lateral=左, height=下向きが正）。
 """
 

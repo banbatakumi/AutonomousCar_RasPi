@@ -25,7 +25,7 @@ HAVE_FW = (FW_DIR / "host" / "host_sim.c").exists() and shutil.which("cc") is no
 MOMENT_NM = 0.12
 QUIET = replace(NOMINAL, front_noise_rad_s=0.0, rear_noise_rad_s=0.0, gyro_noise_rad_s=0.0)
 #: 仕組み（FF が遅れを消す・ローンチが PI より速い）を見る試験の車速 PI のゲイン。vehicle.toml の値（校正 5）は
-#: 車ごとに変わり、強いゲインでは FF なし・ローンチなしでも遅れが小さく、比べたい差が見えなくなる（2026-10-19、
+#: 車ごとに変わり、強いゲインでは FF なし・ローンチなしでも遅れが小さく、比べたい差が見えなくなる（
 #: kp 1.14・ki 4.26 で 3 件が落ちた）。値は 2026-10-18 までの toml の値
 MECH_SPEED_PI = {"speed_kp": 0.3, "speed_ki": 0.6}
 
@@ -55,7 +55,7 @@ class TestParamTable(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_FW, "ファームがありません")
 class TestLogic(unittest.TestCase):
-    """ファームの制御の約束（2026-10-05 の見直しで直した点が戻っていないこと）。"""
+    """ファームの制御の約束（見直しで直した点が戻っていないこと）。"""
 
     def setUp(self):
         self.fw = firmware()
@@ -77,9 +77,8 @@ class TestLogic(unittest.TestCase):
         m = S.run(self.fw, NOMINAL, scenario("lift")).metrics
         self.assertLess(m["wheel_peak"], 2.5)
 
-    #: 目標を大きく超えて滑っていた時間の割合（`locking`）の上限。2026-10-19 に固定の 0.3 で見る `slipping` から
-    #: 置き換えた（校正 7 の目標が真の値で約 0.3 になり、目標どおりでも数えていた）。旧ゲイン・旧目標で 0〜0.06、
-    #: 2026-10-19 の校正 7 のゲインで 0.04〜0.08（標準モデルの減速だけ旧 0.000 → 0.055 と悪い）
+    #: 目標を大きく超えて滑っていた時間の割合（`locking`）の上限。固定の 0.3 で見ると、校正 7 の目標が真の値で
+    #: 約 0.3 のとき目標どおりでも数えてしまうため。2026-10-19 の校正 7 のゲインで 0.04〜0.08
     LOCKING_MAX = 0.1
 
     def test_brake_holds_near_the_limit(self):
@@ -231,7 +230,7 @@ class TestLogic(unittest.TestCase):
         self.assertGreater(float(np.mean(r.col("yaw_rate")[800:1000])), 0.02)     # 左へ回る
 
     def test_tv_splits_torque_by_lateral_load(self):
-        """TV（2026-10-08 に荷重比例の配分へ置き換えた）: 旋回しながらの駆動で外輪が多くなり、
+        """TV（荷重比例の配分）: 旋回しながらの駆動で外輪が多くなり、
         比率は ゲイン×車速×ヨーレート、内外輪の滑り率の差が TV なしより小さい。"""
         gain = self.fw.base_params()["tv_load_gain_s2_per_m"]     # vehicle.toml の値
         segs = (S.Seg(0.5, MODE_SPEED, 1.5, 3.0, steer=0.2), S.Seg(0.5, MODE_TORQUE, 0.04, steer=0.2))

@@ -33,7 +33,7 @@
 
 ## 座標系
 
-`docs/architecture.md` §5.1 のまま（x = 前/右、y = 左/上、SI）。
+`docs/system_overview.md` §7 のまま（x = 前/右、y = 左/上、SI）。
 `grid[row, col]` の **row は origin からの +y 方向**、col は +x 方向。
 画像として出すときに上下がひっくり返るのは表示側の都合なので、ここでは直さない
 （`sim/course.py` の格子と同じ向きに揃えてある）。

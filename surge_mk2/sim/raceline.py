@@ -1,10 +1,8 @@
 """理想レーシングライン — 中心線+道幅から、最小曲率に寄せたオフセットと
 曲率考慮の目標速度プロファイルをオフラインで計算する。
 
-`sim/gym_env.py` の `SimE2EEnv` が、アペックスを突く・進入前に減速するといった
-レーシングラインらしい走り方をしない問題への対策として使う。方策自体は
-生LiDAR+速度のE2Eのままで、**学習時の報酬にだけ**理想ラインへの追従度を組み込む
-（Trajectory-Aided Learning、Bosello et al. arXiv:2306.07003 に倣う）。
+`ml_lidar/eval_stats.py` が、E2E 方策のラップタイムを比べる理想ラップの基準として使う
+（学習の報酬には使わない。`ml_lidar/env.py` のモジュールdocstring「v21」参照）。
 
 ## 定式化
 
@@ -42,8 +40,7 @@ from .vehicle import GRAVITY_MPS2
 __all__ = ["compute_raceline_offsets", "compute_speed_profile", "compute_raceline_xy"]
 
 #: `width=None`のコース（道幅がスカラー/配列で語れないコース全般。
-#: `sim/random_course.py`には現状該当アーキタイプは無いが、将来の手作業
-#: コースエディタが作るコース等を想定したインフラとして残してある）で、
+#: 手描きコース等）で、
 #: `Course.raycast_batch`により参照パス（中心線）の法線方向へ直接壁までの
 #: 距離を測るときの探索上限 [m]。狭く見積もると「壁に当たらなかった」
 #: （`raycast`系の0.0センチネル）が発生し、`_lateral_bounds`がそれを補う
@@ -91,14 +88,13 @@ _OBSTACLE_AVOID_MARGIN_M = 0.4
 
 def _segment_lengths(xy: np.ndarray) -> np.ndarray:
     """`seg[i]` = 点`i`から点`i+1`（最後は点0に周回）までの距離 [m]。
-    `sim/random_course.py`の`_min_turn_radius_m`と同じ周回差分の作り方。"""
+    周回差分。"""
     loop = np.vstack([xy, xy[:1]])
     return np.hypot(*np.diff(loop, axis=0).T)
 
 
 def _discrete_curvature(xy: np.ndarray) -> np.ndarray:
-    """`sim/random_course.py`の`_min_turn_radius_m`と同じ離散曲率
-    （隣接セグメントのyaw差 / セグメント長）。閉ループの点`i`ごとの符号付き曲率 [1/m]。
+    """離散曲率（隣接セグメントのyaw差 / セグメント長）。閉ループの点`i`ごとの符号付き曲率 [1/m]。
     `_min_curvature_alpha`が解くのはこれの二次近似（`‖Dp‖²`）だが、最終的な
     「どちらの解が本当に曲率が小さいか」の判定（`compute_raceline_offsets`の
     ★安全弁）や`compute_speed_profile`の速度プロファイルには、近似を使わず

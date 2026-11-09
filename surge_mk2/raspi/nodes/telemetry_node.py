@@ -1,4 +1,4 @@
-"""telemetry_node — バス ⇄ PC(GUI) の WebSocket サーバ（`docs/architecture.md` §9）。
+"""telemetry_node — バス ⇄ PC(GUI) の WebSocket サーバ（`docs/system_overview.md` §5.3）。
 
     .venv/bin/python -m raspi.nodes.telemetry_node               # :8000 で待ち受け
     .venv/bin/python -m raspi.nodes.telemetry_node --port 8080
@@ -32,7 +32,7 @@ HTTP（GET）は GUI 本体のほか `/logs/<name>`（記録のダウンロー�
 
 点群を JSON で送ると CPU を無駄に食うのでテレメトリはバイナリにする。
 
-## 記録は2本とも「開始/停止」だけを `/ws/control` で操作する（`docs/architecture.md` §11）
+## 記録は2本とも「開始/停止」だけを `/ws/control` で操作する（`docs/system_overview.md` §11）
 
 - **`.sfl`**: `io_node` の実時間ループが直接 Pi のSDに書く（本ノードはバス経由で
   「録ってほしい/やめてほしい」という意思を `log/ctrl` に流すだけ）。Wi-Fi が
@@ -258,8 +258,8 @@ CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
 
 #: `/ws/telemetry` の頻度の**上限**。刻みではない——`_telemetry_pump` は `vehicle_state` が届いた周に
-#: 送る（100Hz の `vehicle_state` の2回に1回）。刻みで送っていた頃は、届いてから送るまでに平均
-#: 7.5〜9.4ms・最大 20ms 待っていた（実機 2026-10-13。位相がゆっくりずれるので測るたびに変わる）。
+#: 送る（100Hz の `vehicle_state` の2回に1回）。刻みで送ると、届いてから送るまでに平均
+#: 7.5〜9.4ms・最大 20ms 待つ（実機 2026-10-13。位相がゆっくりずれるので測るたびに変わる）。
 #: 50Hz にしても制御系電流は +1.6mA（525.2→526.8mA、ばらつきの範囲）・CPU +1.2pt（実機 DISARM・
 #: 2026-10-12、20/30/50Hz を行き来して計測）。`vehicle_state` は 100Hz、点群は 10Hz（同じ周は送らない）
 TELEMETRY_HZ = 50
@@ -275,7 +275,7 @@ SNAPSHOT_ON_CHANGE = (
     ("signal", TOPIC_SIGNAL_STATUS))
 #: `cmd` の中継レート（planner の指令と同じ。`raspi/auto/base.py` の `CMD_HZ` が唯一の定義）
 CMD_PUB_HZ = CMD_HZ
-#: GUIへ配信する既定のJPEG頻度。`docs/architecture.md` §9の帯域見積もり
+#: GUIへ配信する既定のJPEG頻度。設計時の帯域見積もり
 #: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で前後カメラ同時30fps配信を
 #: 検証して帯域は問題なかったので既定30。**送る頻度の上限**で、刻みではない
 #: （`_camera_pump` はフレームが届いた周に送る）
@@ -3119,7 +3119,7 @@ class TelemetryServer:
 
         `_telemetry_pump`（50Hz）に相乗りさせない。地図は 400×400 あって、
         しかも凍結したら二度と変わらない。同じ頻度で流す理由が無い
-        （`docs/architecture.md` §6.2 の「画像を流してはいけない」の趣旨）。
+        （`docs/system_overview.md` §5.2 の「画像を ZMQ に流さない」の趣旨）。
         """
         while self._running:
             await asyncio.sleep(0.5)
@@ -3281,7 +3281,7 @@ class TelemetryServer:
     def _handover(self, gui: DriveCmd) -> bool:
         """自律の解除から人の操縦への受け渡しの間か（True なら `_publish_cmd` が止める指令に替える）。
 
-        **解除は「人の無操作の指令へ切り替わる」ことであって、止まることではなかった。** GUI の手動の
+        **解除は「人の無操作の指令へ切り替わる」ことであって、止まることではない。** GUI の手動の
         指令は、無操作なら舵 0・速度 0（トルク制御ならトルク 0 = 惰行）。走行中に解除すると、その瞬間に
         舵が直進へ戻り、トルク制御なら惰行で進み続ける。2026-11-06 `surge_20261106_024246`: 左旋回中
         （2.6m/s・舵 +0.20rad）に解除 → 舵 0・トルク 0 の惰行（−0.6m/s²）になり、0.55s 後に外の壁へ
@@ -3323,7 +3323,7 @@ class TelemetryServer:
         止まれと言ったときだけ）。★舵を固定した最大制動は、後輪だけの制動で 3.8〜4.0m/s からスピンして
         壁に当たった（2026-11-08 の試走、5 本中 3 本）。解除が planning_node に届くまでの数十 ms は、
         まだ普通の自律の指令が来るので、その舵で `HANDOVER_DECEL_M_S2` の減速にする。
-        借りられる指令が無い（planner が対応していない・指令が古い）なら従来どおり、舵を最後の値で保って
+        借りられる指令が無い（planner が対応していない・指令が古い）なら、舵を最後の値で保って
         最大制動。人が舵を切っていればその値を使う。
         """
         steer_in = abs(gui.target_steer) >= HANDOVER_STEER_INPUT_RAD
@@ -3394,7 +3394,7 @@ class TelemetryServer:
                 accel = min(accel, auto.accel_limit)
             else:
                 # GUI が指定していない（`accel_limit=0` を送るクライアント）と planner の値がそのまま
-                # 出る。STM32 は v0.22 から上限を掛けないので、Pi 側の正（`[safety] cmd_accel_limit_m_s2`）
+                # 出る。STM32 は上限を掛けないので、Pi 側の正（`[safety] cmd_accel_limit_m_s2`）
                 # で頭打ちにする
                 accel = min(auto.accel_limit, _SAFETY.speed_ramp_max_m_s2)
         # 制動トルクは planner の指定があればそれ、無ければ GUI の値。人（GUI）もブレーキを
@@ -3719,7 +3719,7 @@ def _logger_process_running() -> bool:
     常駐ロガーはバスに何も publish しないので、systemd の目印で見る。DISARM 中に
     カメラを止めると画像の無い記録になるため、動いている間は止めない
     （`_cam_in_use_while_disarmed`）。GUI の mcap 記録は `_mcap_proc` で別に見ている。
-    `/proc` を毎秒走査する案は telemetry_node の Python 側の負荷の上位に出たのでやめた。
+    `/proc` を毎秒走査しないのは、telemetry_node の Python 側の負荷の上位に出たため。
     手で `python -m raspi.nodes.logger_node` を起動した場合は検出できない。"""
     return os.path.lexists(LOGGER_UNIT_MARKER)
 

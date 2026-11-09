@@ -1,7 +1,7 @@
 /**
  * 20Hz で届くデータの置き場。**React の state には入れない。**
  *
- * `docs/architecture.md` §10.4 のとおり、20〜30Hz のデータを setState すると
+ * `docs/system_overview.md` §10.3 のとおり、20〜30Hz のデータを setState すると
  * 再レンダリングで破綻する。流量の多いものは3つに分けて扱う。
  *
  *   1. 点群・カメラ  → ここ（可変オブジェクト）に置き、Canvas が rAF で読む

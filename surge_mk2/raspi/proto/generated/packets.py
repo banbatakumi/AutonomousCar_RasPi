@@ -211,7 +211,7 @@ class Telemetry:
     roll: int = 0
     motor_current: list[int] = field(default_factory=lambda: [0] * 3)  # [RL,RR,ST] 双方向
     torque_cmd: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] 指令値
-    slip: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13
+    slip: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。分母は max(|基準速度|, 下限)
     tc_limit_nm: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13
     torque_req: list[int] = field(default_factory=lambda: [0] * 2)  # [RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16
     abs_limit_nm: int = 0  # ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16

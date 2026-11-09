@@ -489,7 +489,7 @@ def clear_grip(name: str) -> bool:
     """地図 `name` の学習値（`<name>.grip.json`）だけを消す。消したら `True`。
 
     **地図・経路の設定（`.routes.json`）・仕上げた経路の写し（`.lines.pkl`）は残す。**
-    学習値は地図の横にしか置かない（地図をまたぐ記録は持たない。2026-10-21 に消した）。
+    学習値は地図の横にしか置かない（地図をまたぐ記録は持たない）。
 
     走行中の planner は学習値を持ったままなので、GUI からの削除は
     `AutoCtrl.grip_clear_seq` でも planner に伝える（`slam2d_raceline.request_clear_grip`）。

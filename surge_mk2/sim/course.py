@@ -9,7 +9,7 @@ PNG と同名の JSON がペアになる。PNG は「見た目」ではなく**�
 
 ## 座標系
 
-世界座標は `docs/architecture.md` §5.1 に従う（x = 前/右、y = 左/上、反時計回りが正）。
+世界座標は `docs/system_overview.md` §7 に従う（x = 前/右、y = 左/上、反時計回りが正）。
 **画像の行は上下反転して格納する**（画像は行0が上、世界は y が上に増える）ので、
 `grid[row, col]` の row は `origin` からの +y 方向のセル数になる。
 
@@ -50,10 +50,8 @@ class Course:
     centerline: np.ndarray | None = None
     #: 道幅 [m]（センターライン方式のみ）。スカラーならコース全体で一定、
     #: `centerline`と同じ長さの配列なら位置ごとに変わる
-    #: （`sim/random_course.py`の`narrow`/`obstacle`アーキタイプ）
     width: float | np.ndarray | None = None
     #: 孤立した円盤障害物の中心座標 (K,3): x, y, 半径[m]。
-    #: `sim/random_course.py`の`obstacle`アーキタイプのみが持つ
     obstacles: np.ndarray | None = None
     #: 学習/評価どちらのプールで使うか（"train"|"eval"|"both"）。
     #: `ml_lidar/course_gen.py`の手続き生成コースのみが設定する

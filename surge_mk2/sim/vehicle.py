@@ -104,7 +104,7 @@ class VehicleSpec:
     mu: float = 0.8
     #: 実測の最大加速度・減速度 [m/s²]。0.0＝未実測（`MAX_BRAKE_TORQUE_NM`からの
     #: 逆算・`cmd.accel_limit`による外部指定にフォールバック）。
-    #: システム同定タブ「加減速試験」（`raspi/auto/sysid_accel.py`）で測る
+    #: `vehicle.toml` の `[limits]`（校正 9）から作る（`VehicleSpec.load`）
     drive_accel_m_s2: float = 0.0
     #: 最大制動（`brake`）の減速度上限 [m/s²]。`brake_torque`から逆算した値がこれを
     #: 超えるときはこちらで頭打ちにする（タイヤ・TCが出せる上限）。0.0＝未実測
@@ -144,10 +144,10 @@ class VehicleSpec:
     drive_fade_speed_m_s: float = 0.0
     drive_top_speed_m_s: float = 0.0
     #: STM32 の速度PI（`drive.c`）。`speed_kp` が0なら1次遅れ（`tau_speed_s`）。
-    #: `speed_kp`・`speed_ki`・`speed_torque_max_nm` は**ファームの定数**
-    #: （`DRIVE_SPEED_KP/KI`・`DRIVE_MAX_TORQUE_NM`×2）で同定しない。`speed_ramp_max_m_s2` は
-    #: `[safety] cmd_accel_limit_m_s2`（Pi が送る上限。v0.22 で STM32 の固定上限は無くなった）。
-    #: 同定するのは車体の側（`speed_plant_gain`・`rolling_resistance`、`SpeedController`参照）
+    #: `speed_kp`・`speed_ki` は `[dynamics]`（校正 5 が式で決め、io_node が CONFIG_SET で STM32 へ送る値）。
+    #: `speed_torque_max_nm` は**ファームの定数**（`DRIVE_MAX_TORQUE_NM`×2）。`speed_ramp_max_m_s2` は
+    #: `[safety] cmd_accel_limit_m_s2`（Pi が送る上限。STM32 は固定の上限を持たない）。
+    #: 車体の側は `speed_plant_gain`・`rolling_resistance`（`SpeedController`参照）
     speed_kp: float = 0.0            # [N·m/(m/s)]
     speed_ki: float = 0.0            # [N·m/(m/s)/s]
     speed_torque_max_nm: float = 0.30  # PI 出力の上限（後輪2輪の合計）[N·m]。DRIVE_MAX_TORQUE_NM × 2
@@ -494,7 +494,7 @@ def next_speed(spec: VehicleSpec, cmd: DriveInput, v: float, dt: float) -> float
 class SpeedController:
     """STM32 の速度制御（`MainF446RE_V3/src/control/drive.c`）を写したもの。
 
-    目標速度を `min(cmd.accel_limit, speed_ramp_max_m_s2)` でランプ（★v0.22 からファームに上限は無い。
+    目標速度を `min(cmd.accel_limit, speed_ramp_max_m_s2)` でランプ（★ファームは固定の上限を持たない。
     `speed_ramp_max_m_s2` は Pi が載せる上限 `[safety] cmd_accel_limit_m_s2` と同じ値）→ PI（帰還はカルマンフィルタの車速。
     遅れ `speed_kf_lag_s`。出力 ±`speed_torque_max_nm` で条件付き積分）→ 加速度の
     上限（`drive_accel_limit()`・`speed_decel_m_s2`。外側の制限なので積分を back-calculation で

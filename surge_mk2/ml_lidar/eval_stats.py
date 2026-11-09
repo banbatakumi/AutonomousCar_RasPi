@@ -25,7 +25,7 @@
 
 ## `--episodes`は最低でも既定値(300)を使うこと。60では判定を誤る
 
-v1/v2の比較検証（2026-09-07）で、`--episodes 60`程度（当初の既定値）だと結論そのものが
+v1/v2の比較検証で、`--episodes 60`程度だと結論そのものが
 シード依存でひっくり返ることを実測した——`--seed 1000`でn=100を評価するとv2の衝突率が
 0%（v1は3%）で「v2の圧勝」に見えたが、`--seed 5000`でn=150を追加すると衝突率がv1=0%・
 v2=5.3%と逆転し、さらに`--seed 9000`でn=300を足して3系統合計n=550まで積み増して初めて
@@ -158,7 +158,7 @@ def reference_lap(course: Course, spec: VehicleSpec,
 
     理想ライン＝最小曲率線（MCL、`sim.raceline.compute_raceline_offsets`）、速度は
     `compute_speed_profile`のグリップ＋加減速の3段アルゴリズム。**学習には一切
-    関与しない評価専用の基準**で、`raceline_weight`（v18/v19で撤去済み）のように
+    関与しない評価専用の基準**で、`raceline_weight`（v18/v19で試して失敗）のように
     報酬へ戻すものではない（`ml_lidar/env.py`のdocstring「v21」参照）。
 
     :param spec: **そのエピソードで実際に使われた**`VehicleSpec`を渡すこと
@@ -179,11 +179,11 @@ def reference_lap(course: Course, spec: VehicleSpec,
         # ★`course`は必須。`Course.width`が`None`のコース（`sim/editor.py`製の
         # 手描きコースはこれ）では、`_lateral_bounds()`が壁までのレイキャストに
         # これを使う。渡し忘れるとtoyota/course1のような観戦用コースで
-        # ValueErrorになる（2026-09-22に実際に踏んだ）
+        # ValueErrorになる
         course=course,
         # 障害物のあるコースでは箱制約を障害物の無い側へ狭める（`sim.raceline`の
         # `_narrow_bounds_for_obstacles`）。★法線オフセットで表すので、障害物をかわす
-        # 経路の表現力は2026-09-24に分かった「内側の弦を表せない」問題と同じ限界がある。
+        # 経路の表現力は「内側の弦を表せない」問題と同じ限界がある。
         # 障害物ありの`lap_ratio`は目安にとどめ、衝突・完走・停止の率を主に見ること
         obstacles=course.obstacles)
     v = compute_speed_profile(course.centerline, offsets, mu=spec.mu, max_speed=max_speed,
@@ -214,10 +214,10 @@ def run_episode(model: PPO, cfg: EnvConfig, *, seed: int, max_episode_steps: int
     ステア滑らかさ（`mean_abs_steer_diff`・`steer_sign_flip_rate`）は生アクション
     `action[0]`（-1..1、`steer_tau`フィルタ前）の隣接ステップ差分で見る。フィルタ後の
     `vehicle.steer_actual`だけ見ると、フィルタが振動を隠しているだけの状態を
-    「滑らか」と誤判定しうる（v7検証、2026-09-08で実際に踏んだ落とし穴。
+    「滑らか」と誤判定しうる（v7検証で実際に踏んだ落とし穴。
     `env.py`モジュールdocstring参照）。
 
-    ## ラップタイムは`mean_speed`では代用できない（v21で追加、2026-09-17）
+    ## ラップタイムは`mean_speed`では代用できない
 
     `lap_time_s`とその理想比`lap_ratio`が**第一指標**。`mean_speed`は瞬間速度の
     単純平均なので、遠回りしても上がってしまいライン取りの評価に使えない。
@@ -352,8 +352,8 @@ def evaluate(model: PPO, cfg: EnvConfig, *, n_episodes: int, episode_s: float,
 
 
 #: `by_width()`の道幅バケット境界 [m]。v21以前の学習レンジ上限1.4mを境目に置いてある
-#: ——**v22で道幅レンジを0.8〜1.4→0.8〜2.5mへ広げた**ので、「旧レンジ内（狭い）で
-#: 退行していないか」と「新しく入れた広いコースで改善しているか」を分けて読む必要がある
+#: ——v22以降の道幅レンジは0.8〜2.5mなので、「狭いコースで退行していないか」と
+#: 「広いコースで改善しているか」を分けて読む
 #: （`ml_lidar/course_gen.py`の`_WIDTH_RANGE_M`参照）
 _WIDTH_BUCKETS_M: tuple[float, ...] = (1.4, 2.0)
 

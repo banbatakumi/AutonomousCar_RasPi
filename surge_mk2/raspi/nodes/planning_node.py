@@ -1,4 +1,4 @@
-"""planning_node — 点群から走行指令を作る（`docs/architecture.md` §6.1 / §8）。
+"""planning_node — 点群から走行指令を作る（`docs/system_overview.md` §6 / §9）。
 
     .venv/bin/python -m raspi.nodes.planning_node
     .venv/bin/python -m raspi.nodes.planning_node --mode ftg   # 起動時のモードを指定
@@ -23,8 +23,8 @@ telemetry_node も 50Hz で `cmd`（操縦者不在なら DISARM）を流して�
 中継する（`telemetry_node._cmd_pump`）。人間のデッドマン（GUI が 50Hz で
 送り続ける・150ms 途絶で DISARM）は自律走行中もそのまま生きる。
 
-`architecture.md` §6.1 の図は「planning → io 直行」と書いているが、それは
-**遅延段数の話**。中継しても増えるのは telemetry_node の 50Hz 周期ぶん
+設計時は「planning → io 直行」で遅延段数を最小にするつもりだった
+（`docs/system_overview.md` §4）。中継しても増えるのは telemetry_node の 50Hz 周期ぶん
 （最悪 20ms）で、指令の生成元が 1 つに定まる価値の方が大きいと判断した。
 
 ## engage していなくても計画は回す
@@ -136,7 +136,7 @@ def input_topics() -> set[str]:
 
 
 class PlanningNode:
-    """`docs/architecture.md` §8 のうち、まだ「行動判断」だけを持つ骨。
+    """`docs/system_overview.md` §9 のうち、まだ「行動判断」だけを持つ骨。
 
     自己位置推定・地図・経路生成は Phase 3 で足す。**足すときもこのノードの
     外側（`raspi/auto/`）に置き、ここは配線のまま保つ。**
@@ -170,7 +170,7 @@ class PlanningNode:
         self._ctrl_error = ""
         #: 走行中の解除の後処理（`on_disengage`）を、車が止まるまで待っている（`_update_release`）。
         #: 待つ間も `plan()` は回るので、自己位置は止まった所まで追い続ける（解いた瞬間の姿勢を
-        #: 再特定の種にすると、止まるまでの数 m・スピンで外れ、全域探索に十数秒かかった。2026-11-08 の試走）
+        #: 再特定の種にすると、止まるまでの数 m・スピンで外れ、全域探索に十数秒かかる）
         self._release_pending = False
         self._release_t0_ns = 0
         #: 待つ間、planner が経路に沿って舵を取りながら止める（`release_stop_decel` を持つ planner だけ）。

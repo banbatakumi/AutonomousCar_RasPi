@@ -8,8 +8,7 @@
 Pi 側の生成物しか見ないので、toml を変えたらファームの `RAS_LEN_*`・`RAS_FLAG_*`・`RAS_PROTOCOL_VERSION`
 も直すこと（param_id だけは `tools/fwsim` の `param_table` がファームの表から読む）。
 
-パケット定義を Pi 側と STM32 側の2箇所に手書きすると必ずズレる
-（実際に v0.4 の策定中、フィールド順のズレで2往復した）。定義は protocol.toml だけに置く。
+パケット定義を Pi 側と STM32 側の2箇所に手書きすると必ずズレる。定義は protocol.toml だけに置く。
 """
 
 from __future__ import annotations

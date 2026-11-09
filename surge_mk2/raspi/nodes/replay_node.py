@@ -7,7 +7,7 @@
     python3 -m raspi.nodes.replay_node logs/run.sfl --verify     # 記録と突き合わせる
 
 **これが事実上のシミュレータ代わり**
-（`docs/architecture.md` §11）。実車・STM32・シリアルが無くても、知覚・経路生成・
+（`docs/system_overview.md` §11）。実車・STM32・シリアルが無くても、知覚・経路生成・
 GUI を本物のセンサノイズ入りのデータで開発できる。pyserial にも依存しない。
 
 ## 実機と同じ結果になるようにしてあること
@@ -329,7 +329,7 @@ def main() -> int:
             return 2
         # **時刻はログのカーソル。** 壁時計を使うと記録時と時刻の座標系がずれる。ただし記録元 Pi の
         # 単調時刻のままだと、`Publisher` が押す `t_pub`（この再生プロセスの単調時刻）と領域が食い違い、
-        # planner が `now - t_capture` を数時間と見て恒久的に「点群が古い」と止める（2026-10-21 のレビュー GEN-01）。
+        # planner が `now - t_capture` を数時間と見て恒久的に「点群が古い」と止める。
         # 最初の1回で「記録の時刻 → このプロセスの単調時刻」のずれを決め、以後は全部それを足して出す
         # （記録内の時刻の差は変わらない）
         shift: list[int | None] = [None]

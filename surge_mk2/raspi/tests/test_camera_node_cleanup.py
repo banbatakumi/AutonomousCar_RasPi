@@ -1,4 +1,4 @@
-"""`camera_node.py` の後始末・構築失敗まわりの回帰テスト（2026-09-11 レビュー対応）。
+"""`camera_node.py` の後始末・構築失敗まわりの回帰テスト。
 
 picamera2 が無い開発機（Mac）でも通るように、`CameraWorker`/`CameraNode` の
 `__init__` を素通りして `__new__` + 手動での属性設定で組み立てる

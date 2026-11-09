@@ -286,7 +286,7 @@ if __name__ == "__main__":
 
 class TestDisabledWorkerIsNotHung(unittest.TestCase):
     """後カメラを OFF にしている間（disarm 中の既定）は `_grab()` が呼ばれない。
-    それを「ハング」と誤検出してノードごと落ちる不具合（2026-10-01）の回帰テスト。
+    それを「ハング」と誤検出してノードごと落ちる不具合の回帰テスト。
     """
 
     def test_disabled_worker_keeps_last_grab_ns_fresh(self):

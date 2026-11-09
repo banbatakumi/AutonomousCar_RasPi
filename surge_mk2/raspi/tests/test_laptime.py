@@ -1,4 +1,4 @@
-"""ラップタイムを詰めるための経路・速度・追従のテスト（2026-09-29）。
+"""ラップタイムを詰めるための経路・速度・追従のテスト。
 
 - 速度プロファイル: 弦で測る曲率・摩擦円・曲がれる限界の近くの横G・作り直し（`retime`）
 - 経路: 車体外形の検査（薄い壁の先端）・最小時間への寄せ・アクティブセットの等式点
@@ -108,7 +108,7 @@ class TestSpeedProfile(unittest.TestCase):
         self.assertAlmostEqual(float(pl.path.v.max()), 1.5)
         pl._retime({**p, "v_max": 2.5})
         self.assertGreater(float(pl.path.v.max()), 2.0)
-        # 「使う割合」は無い。学習しないときの上限は絶対値で人が決める（2026-11-09、magp に向けて）
+        # 「使う割合」は無い。学習しないときの上限は絶対値で人が決める（magp に向けて）
         self.assertEqual(SPEED_KEYS, ("v_max", "v_min", "lat_max", "accel_max", "brake_max"))
 
 

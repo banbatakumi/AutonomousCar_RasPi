@@ -263,7 +263,7 @@ class E2ELidar(Planner):
         try:
             import numpy as np
 
-            # 訓練側(`sim/gym_env.py`の`_obs()`・`ml_lidar/env.py`の`_to_obs()`)と
+            # 訓練側(`ml_lidar/env.py`の`_to_obs()`)と
             # 揃える: 点群のあとに自車速度・現在のステア角を1個ずつ足す。
             # 速度が無ければ0（停止中の既定）。ステア角は`self._steer_target`
             # （v13: 舵角速度を積分した、方策が直接制御する目標舵角。`steer_tau`

@@ -1,4 +1,4 @@
-"""自己位置推定・地図・経路生成の部品（`docs/architecture.md` §14 Phase 3/4）。
+"""自己位置推定・地図・経路生成の部品（`docs/system_overview.md` §9.4・§9.5）。
 
 **ここは純粋計算だけ。** バスも WebSocket も GUI も設定ファイルも知らない
 （`raspi/auto/__init__.py` の約束と同じ）。入力は `raspi/msgs/types.py` の

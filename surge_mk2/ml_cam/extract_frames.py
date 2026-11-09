@@ -1,7 +1,6 @@
 """ml_cam/extract_frames.py — `.mcap` から走行時のカメラフレームを取り出す。
 
-GUIの「ログ」タブ（`gui/src/views/LogView.tsx` の `.mcap` セクション、
-「画像を含める」を ON にした録画）で録った `.mcap` には、`/viz/image/front`・
+GUI の MCAP 記録（`gui/src/hooks/useMcapDownload.ts`。画像を含める設定の記録）や常駐ロガー（`logger_node`）で録った `.mcap` には、`/viz/image/front`・
 `/viz/image/rear` に `foxglove.CompressedImage`（JPEG・base64）として画像が
 入っている（`raspi/rec/mcap_log.py`）。**Pi 側に新しい記録コードを足す必要は
 無い**——ここではその中身を JPEG ファイルとして書き出すだけ。

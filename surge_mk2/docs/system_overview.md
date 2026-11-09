@@ -1,77 +1,86 @@
-# SURGE Mark.2 システム全体像
+# SURGE Mark.2 システム概要
 
-**対象**: このシステムを初めて見る人／久しぶりに戻ってきた人
+自律走行ミニカー **SURGE Mark.2** の Raspberry Pi 5 側（＋PC 側 GUI）が、**何を・どこで・どういう順番で**
+やっているかと、**なぜそう設計したか**をまとめた唯一の概要文書。
 
-自律走行ミニカー **SURGE Mark.2** が、**何を・どこで・どういう順番でやっているか**を
-一通り追えるようにした文書。**「なぜそう設計したか」は [`architecture.md`](architecture.md)、
-「今どこまで進んだか」は `PROGRESS.md`、「どう直して反映するか」は
-[`development.md`](development.md)** を見ること。
+> **数値・手順の正はこの文書に置かない**（複製すると片方が古くなる）。
+>
+> | 何の正か | 置き場所 |
+> |---|---|
+> | 車両の幾何・質量・動特性・制御・安全タイマ | `config/vehicle.toml`（読み手は `raspi/core/vehicle.py`） |
+> | UART のバイト配置・パケット・版 | `raspi/proto/protocol.toml`（仕様の説明は [`uart_protocol.md`](uart_protocol.md)） |
+> | 制御定数の出どころ | [`control_constants.md`](control_constants.md) |
+> | コマンド・反映手順・トラブルシューティング | [`development.md`](development.md) |
+> | 校正の手順と値の意味 | [`calibration.md`](calibration.md) |
+> | 今どこまで進んだか・実測値 | `../PROGRESS.md`（冒頭の「現在の状態」） |
+>
+> この文書とコードが食い違ったら**コードが正**。
 
 ---
 
 ## 目次
 
-1. [1枚で見る全体像](#1-1枚で見る全体像)
+1. [全体像](#1-全体像)
 2. [ハードウェア](#2-ハードウェア)
-3. [3階層アーキテクチャ](#3-3階層アーキテクチャ)
+3. [3階層アーキテクチャと責務分割](#3-3階層アーキテクチャと責務分割)
 4. [データが一周する流れ](#4-データが一周する流れ)
-5. [3つの通信路](#5-3つの通信路)
+5. [通信路](#5-通信路)
 6. [Raspberry Pi の中身 — プロセスとトピック](#6-raspberry-pi-の中身--プロセスとトピック)
-7. [座標系と単位の約束](#7-座標系と単位の約束)
+7. [座標系・単位・車両パラメータ](#7-座標系単位車両パラメータ)
 8. [安全設計 — 止まる仕組み](#8-安全設計--止まる仕組み)
 9. [自動運転のしくみ](#9-自動運転のしくみ)
 10. [GUI](#10-gui)
 11. [記録と再生](#11-記録と再生)
-12. [シミュレータ](#12-シミュレータ)
-13. [現在地とロードマップ](#13-現在地とロードマップ)
-14. [用語集](#14-用語集)
+12. [シミュレータ・学習・ファームのホストシム](#12-シミュレータ学習ファームのホストシム)
+13. [リポジトリ構成と技術スタック](#13-リポジトリ構成と技術スタック)
+14. [現在地とロードマップ](#14-現在地とロードマップ)
+15. [用語集](#15-用語集)
 
 ---
 
-## 1. 1枚で見る全体像
+## 1. 全体像
 
-**3台の計算機が、それぞれ違う速さで違う仕事をしている。**
+**PC・Raspberry Pi 5・STM32 の3台が、それぞれ違う周期で違う仕事をする。**
 
 ```mermaid
 flowchart TB
-    subgraph PC["PC（Mac） — 10〜30 Hz"]
-        GUI["ブラウザ GUI（React）<br/>可視化・設定・ラジコン操縦"]
+    subgraph PC["PC / ブラウザ — 10〜30 Hz"]
+        GUI["React + TypeScript GUI<br/>可視化・設定・遠隔操縦・自動運転の操作"]
     end
-
     subgraph PI["Raspberry Pi 5 — 10〜50 Hz"]
         direction LR
-        IO["io_node<br/>UART/GPIO"]
-        PLAN["planning_node<br/>自律走行の判断"]
-        TELE["telemetry_node<br/>WS サーバ"]
-        CAM["camera_node<br/>カメラ"]
-        LOG["logger_node<br/>記録"]
+        IO["io_node<br/>UART / GPIO / 時刻同期"]
+        CAM["camera_node"]
+        PERC["認識ノード<br/>cam / line / track / signal / e2e"]
+        PLAN["planning_node"]
+        TELE["telemetry_node<br/>WS / HTTP"]
+        LOG["logger_node（任意）"]
+        BUS{{"ZeroMQ バス<br/>+ 共有メモリ"}}
     end
-
-    subgraph STM["STM32 — 100 Hz〜1 kHz"]
-        CTRL["速度/舵角ループ・TC・トルクベクタリング<br/>電流/温度リミッタ・LiDAR パース"]
+    subgraph STM["STM32F446RE — 制御ループ 2 kHz"]
+        FW["車速 PI・舵角制御・TC / ABS / TV<br/>電流・温度リミッタ・LiDAR パース"]
     end
+    HW["BLDC ×3・LD06・MPU6050<br/>前輪エンコーダ・超音波・温度・電圧"]
 
-    HW["🔧 モータ3個・LiDAR・超音波・IMU・エンコーダ"]
-
-    GUI <-->|"WebSocket<br/>Wi-Fi / Ethernet"| TELE
-    TELE <--> IO
-    PLAN <--> IO
-    CAM --> TELE
-    IO --> LOG
-    IO <-->|"UART 1Mbps<br/>＋ GPIO6 ハートビート"| CTRL
-    CTRL <--> HW
+    GUI <-->|"WebSocket（Wi-Fi / Ethernet）"| TELE
+    TELE <--> BUS
+    BUS <--> IO
+    BUS <--> CAM
+    BUS <--> PERC
+    BUS <--> PLAN
+    BUS --> LOG
+    IO <-->|"UART 1 Mbps + GPIO6 ハートビート"| FW
+    FW <--> HW
 ```
 
-### 一言でいうと
+| 誰が | 何を | 周期 | 実装 |
+|---|---|---|---|
+| **STM32** | モータを実際に回す。速度・舵角・スリップ・保護・安全停止 | 制御 2 kHz、テレメトリ 100 Hz | C（ファームは別リポジトリ） |
+| **Raspberry Pi 5** | センサ統合・自己位置推定・経路計画・行動判断・通信・記録 | 10〜50 Hz | Python（numpy / ONNX Runtime、一部 C） |
+| **PC** | 人間が見る・設定する・遠隔操縦する・学習する | 10〜30 Hz | React + TypeScript + Vite |
 
-| 誰が | 何を | どのくらいの速さで |
-|---|---|---|
-| **STM32** | モータを実際に回す。転ばない・燃えないようにする | 100Hz〜1kHz（**ms オーダー**） |
-| **Raspberry Pi 5** | センサを読んで「どこへ向かうか」を決める | 10〜50Hz |
-| **PC** | 人間が見る・設定する・遠隔操縦する | 10〜30Hz |
-
-**Pi から STM32 へ送る指令は3つだけ**（目標速度・加速度上限・目標舵角）。
-PWM デューティやトルク配分は一切送らない。
+**Pi から STM32 へ送るのは「目標」であって出力ではない**（目標速度・加速度の上限・目標路面舵角。全体は `COMMAND`）。
+PWM やトルク配分を Pi が決めようとすると遅延で破綻する。例外は `torque_mode`（校正試験・手動のトルク操縦）と `launch` だけ。
 
 ---
 
@@ -81,59 +90,64 @@ PWM デューティやトルク配分は一切送らない。
 
 | センサ／アクチュエータ | 内容 | Pi 側の設計に効く制約 |
 |---|---|---|
-| **LiDAR LD06** | 10Hz 回転・最大約12m。専用 UART 230400bps | **裏向きに実装**されており、点群は鏡像。10Hz なので1周 100ms の間に車が動き、扇形に歪む |
-| **超音波 ×2**（前・後） | HC-SR04 系。2cm〜約4m | **実質 20Hz が上限**。100Hz の TELEMETRY に対し同じ値が連続する |
-| **駆動モータ ×2**（後輪左右独立） | BLDC + 自作 MD。**トルクモード** | TC・トルクベクタリングは STM32 内で完結 |
-| **ステアリングモータ ×1** | BLDC + 自作 MD。**位置モード**（サーボではない） | モータ角 → 路面舵角は**線形ではない**: 中立付近の比は 0.5 で、大舵角ほど切れない。STM32 が同定した3次式で換算する（`vehicle.toml` `[control]` の `steer_link_*`）。路面舵角の上限は `vehicle.toml` の `max_steer` |
-| **車速センサ** | 前輪左右の**アナログ絶対角エンコーダ**（ADC 読み） | 分解能が粗く、STM32 で ADC 平均化してから、車速 `speed` は加速度計とのカルマンフィルタ（遅れほぼ無し、`vehicle.toml` `speed_kf_lag_s`）、各輪の `wheel_speed` はローパス（時定数約10ms、`speed_filter_s`）を掛けて送る。**ここから加速度を微分してはいけない**。低速では使い物にならない |
-| **IMU MPU6050**（6軸） | Mahony 相補フィルタ。**地磁気センサ無し** | **絶対方位が出ない**。yaw は積分ドリフトする。TELEMETRY は `yaw_rate` のみ |
-| **温度センサ ×4** | MD後左 / MD後右 / MDステア / STM32 内蔵 | 据え切りを続けると**ステア MD が過熱**する（Pi の planner は停車2秒で舵を中立へ戻す。`raspi/auto/base.py` の `StandstillSteer`） |
-| **電源 2系統** | 駆動系（過電流 12.0A）／シグナル系（同 6.0A。値はファーム `power.h`）。8セル NiMH | **片方だけ落ちる**（駆動を切っても Pi と STM32 は生きている） |
+| **LiDAR LD06** | 10Hz 回転・最大約12m。専用 UART | **裏向きに実装**され点群は鏡像（`ScanAssembler` が戻す）。1周 100ms の間に車が動き、点群が扇形に歪む（脱スキューが要る） |
+| **超音波 ×2**（前・後） | HC-SR04 系 | **実質 20Hz が上限**。100Hz の TELEMETRY に同じ値が連続する |
+| **駆動モータ ×2**（後輪左右独立） | BLDC ダイレクトドライブ + 自作 MD。**トルクモード** | TC・ABS・トルクベクタリングは STM32 内で完結（[`uart_protocol.md` §5.3](uart_protocol.md#53-telemetry-0x02--len--102)） |
+| **ステアリングモータ ×1** | BLDC + 自作 MD。**位置モード**（サーボではない） | モータ角 → 路面舵角は**線形ではない**（中立付近 0.5、大舵角ほど切れない）。STM32 が同定式で換算し、Pi は路面舵角を扱う（`vehicle.toml` の `steer_link_*`・`max_steer`） |
+| **車速センサ** | 前輪左右の**アナログ絶対角エンコーダ**（ADC） | 分解能が粗い。車速 `speed` は STM32 が加速度計とのカルマンフィルタで出す（[`uart_protocol.md` §5.3.1](uart_protocol.md#531-車速の推定とその一貫性の診断)）。**ここから加速度を微分しない**。前輪は操舵輪 |
+| **IMU MPU6050**（6軸） | **地磁気センサ無し** | **絶対方位が出ない**。yaw は積分ドリフトする |
+| **温度センサ ×4** | MD 後左 / 後右 / ステア / STM32 内蔵 | 据え切りを続けると**ステア MD が過熱**する（planner は停車が続くと舵を中立へ戻す。`raspi/auto/base.py` の `StandstillSteer`） |
+| **電源 2系統** | 駆動系／シグナル系。各 Ni-MH 8セル | **片方だけ落ちる**（駆動を切っても Pi と STM32 は生きている）。駆動系の遮断はラッチする（§8.4） |
 
 ### Raspberry Pi 5 に付いているもの
 
 | ピン／接続 | 用途 |
 |---|---|
-| CSI ×2 | 前方 / 後方カメラ（`picamera2`）。IMX219 **160° 広角（魚眼）**。内部パラメータはチェッカーボードで校正し `config/vehicle.toml` のレンズのプロファイル（`lens = "wide160"` / `"stock"` で切替）に置く（[`development.md` §4.6](development.md#46-カメラ校正魚眼レンズ)） |
-| **GPIO6** | STM32 と接続。**緊急停止ハートビート**（100Hz 矩形波） |
-| GPIO14 / GPIO15 | UART TX / RX ← → STM32 |
-| GPIO18 / GPIO19 / GPIO13 | ブザー / LED緑 / LED赤 |
+| CSI ×2 | 前方 / 後方カメラ（`picamera2`）。IMX219 160° 広角（魚眼）。内部パラメータは `config/vehicle.toml` のレンズのプロファイル（[`calibration.md` §7](calibration.md#7-カメラ魚眼レンズ)） |
+| **GPIO6** | STM32 と接続。**緊急停止ハートビート**（100Hz 矩形波、§8.1） |
+| GPIO14 / GPIO15 | UART TX / RX ⇄ STM32（`/dev/serial0`） |
+| GPIO18 / GPIO19 / GPIO13 | ブザー / LED 緑 / LED 赤（`raspi/io/gpio.py`） |
+| Wi-Fi / Ethernet | PC との WebSocket（§5.4） |
 
 > **Pi 5 は Pi 3/4 と違う。** `RPi.GPIO` は RP1 チップで動かないので `gpiozero` + `lgpio`、
-> カメラは `picamera2`、UART は `/dev/serial0` を使う（デバイス名を直書きしない）。
+> カメラは `picamera2`、UART はデバイス名を直書きせず `/dev/serial0`。
 
 ---
 
-## 3. 3階層アーキテクチャ
+## 3. 3階層アーキテクチャと責務分割
 
-### 原則：「速い制御はエッジに、遅い判断は上位に」
+**「速い制御はエッジに、遅い判断は上位に」**
 
 ```
 ┌──────────────────────────────────────────────┐
 │ PC        人間が見る・触る            10〜30 Hz │
 └───────────────────┬──────────────────────────┘
-                    │ WebSocket（3チャンネル分離）
+                    │ WebSocket（用途別にチャンネル分離）
 ┌───────────────────┴──────────────────────────┐
 │ Pi 5      認知・判断                  10〜50 Hz │
 │           知覚 → 自己位置 → 経路 → 行動判断      │
 └───────────────────┬──────────────────────────┘
-                    │ UART 1Mbps ＋ GPIO6 ハートビート
+                    │ UART 1 Mbps ＋ GPIO6 ハートビート
 ┌───────────────────┴──────────────────────────┐
-│ STM32     リアルタイム制御         100 Hz〜1 kHz │
-│           速度/舵角ループ・TC・保護              │
+│ STM32     リアルタイム制御                       │
+│           速度/舵角ループ・TC・ABS・TV・保護      │
 └──────────────────────────────────────────────┘
 ```
 
-**なぜ分けるのか。** TC やスリップ制御は数 ms 以内に効かせる必要がある。
-UART 往復 + Python の処理遅延（合計 30〜50ms）を挟むと成立しないので、STM32 内に閉じる。
+TC・ABS・スリップ制御は数 ms 以内に効かせる必要があり、UART 往復 + Python の遅延を挟むと成立しないので STM32 に閉じる。
+SLAM・経路計算は Python の方が速く作れる。そして**上位が落ちても下位が自力で安全を確保できる**。
 
-**そして、上位が落ちても下位が自力で安全を確保できる。**
+| 層 | 担当 |
+|---|---|
+| **STM32** | 駆動・舵角の制御ループ、TC・ABS・TV、LD06 のパースとセクタ分割、超音波測距、電流・温度リミッタ、`COMMAND` 途絶時の自動ブレーキ、GPIO6 ハートビート監視、動的停止距離の `auto_stop` |
+| **Pi 5** | 点群処理、カメラ認識、自己位置推定・地図、経路生成、行動判断、テレメトリ配信、記録 |
+| **PC** | 可視化、パラメータ設定、ラジコン入力、学習（Mac） |
 
 | 落ちたもの | 何が起きるか |
 |---|---|
-| PC（GUI） | Pi は自律走行を継続できる。ただしラジコン操縦は 150ms で DISARM |
-| Pi | GPIO6 ハートビートが止まる → **STM32 が E-Stop をラッチ** |
-| STM32 | Pi 側が TELEMETRY 途絶を検知して FAULT |
+| PC（GUI） | 手動操縦は `cmd` 途絶で DISARM。自律走行は `auto_link_grace_ms` の範囲で継続（§8.2） |
+| Pi / `surge-io` | GPIO6 ハートビートが止まる → **STM32 が E-Stop をラッチ**。現地でボタンを押すまで動かない |
+| STM32 | Pi 側が TELEMETRY 途絶を検知して DEGRADED → FAULT |
 
 ---
 
@@ -151,62 +165,43 @@ sequenceDiagram
     participant G as GUI
 
     L->>S: 点群（10Hz 回転）
-    S->>IO: LIDAR_SECTOR ×12 (120Hz, UART)
-    Note over IO: ScanAssembler が12枚を<br/>1周にまとめ、鏡像を戻す
-    IO->>P: scan（バス, 10Hz）
-    IO->>T: vehicle_state（バス, 100Hz）
-    Note over P: planner が<br/>「どこへ向かうか」を決める
+    S->>IO: LIDAR_SECTOR ×12/周（UART）
+    Note over IO: ScanAssembler が1周にまとめ、鏡像を戻す
+    IO->>P: scan（10Hz）
+    IO->>T: vehicle_state（100Hz）
+    Note over P: planner が「どこへ向かうか」を決める
     P->>T: auto/cmd（新しい判断は即時＋50Hz）
-    Note over T: engage 中だけ<br/>速度・舵・制動を差し替える
-    T->>IO: cmd（変化は即時＋50Hz・唯一の発行元）
-    IO->>S: COMMAND（変化は即時＋100Hz, UART）
-    S->>S: 速度PI・舵角ループ・TC
-    T->>G: /ws/telemetry（vehicle_state が届いた周に・50Hz, msgpack）
+    Note over T: engage 中だけ速度・舵・制動を差し替える
+    T->>IO: cmd（唯一の発行元）
+    IO->>S: COMMAND（UART）
+    S->>S: 車速 PI・舵角ループ・TC・ABS・TV
+    T->>G: /ws/telemetry（msgpack）
     G->>T: /ws/control（操縦入力・E-Stop）
 ```
 
-### 遅延の内訳
-
-| 区間 | 目安（実機 2026-10-13） |
-|---|---|
-| GUI の指令: WS 受信 → `cmd` → `COMMAND` を UART へ書く | **0.6ms**（telemetry_node 0.3 ＋ io_node 0.3） |
-| `COMMAND` を書く → STM32 が制御に使う | 約 0.5ms（15バイト 0.2ms ＋ 500us 周期の待ち） |
-| STM32 が測る → `vehicle_state` を publish | 約 1.2ms（TELEMETRY の UART 伝送 ＋ 変換） |
-| `vehicle_state` → `/ws/telemetry` へ送る | 0.4ms |
-| カメラ: センサ時刻 → 共有メモリ → JPEG → WS へ送る | 20ms（うち 16ms はセンサの読み出しと ISP） |
-| Wi-Fi（ルータ経由）PC → Pi / Pi → PC | 中央 2ms・p90 5ms / 中央 1ms |
-| `diag/link` の `cmd_rtt_ms`（`cmd_seq_echo`） | 2〜12ms。**大半は TELEMETRY の周期（10ms）待ち**で、指令の遅れではない |
-| **ステアリング機構の応答遅れ** | 校正 3（`calib_steer_dyn`）で測る。値は `vehicle.toml`（[`calibration.md`](calibration.md)） |
-
-> **遅れが 150ms あれば、時速 10km/h なら 40cm 進んでから舵が効き始める。**
-> 「低速では動くのに速度を上げた瞬間に蛇行が発散する」典型的な失敗の原因になるので、
-> 遅延は実測して `vehicle.toml` に置く（[`calibration.md`](calibration.md)）。
+**ステアリングの応答遅れ**は校正で測って `vehicle.toml` に置き、Pure Pursuit の注視距離と遅延補償（`steer_delay`）に入れる
+（[`calibration.md`](calibration.md)）。入れないと「低速では動くのに速度を上げた瞬間に蛇行が発散する」。GUI は実測
+`steer_actual` と受理済み指令 `steer_cmd_echo` を重ねて遅れを見せる。
 
 ### ★ 指令の発行元は `cmd` 1本に絞ってある
 
-`planning_node` と `telemetry_node` の両方が `cmd` に publish すると、
-購読側からは区別できないまま交互に上書きし合い、**止める側が負けることがある**。
+`planning_node` と `telemetry_node` の両方が `cmd` に publish すると、購読側からは区別できないまま交互に
+上書きし合い、**止める側が負けることがある**（telemetry_node は操縦者不在でも 50Hz で DISARM を流し続けている）。
 
 ```
 GUI ──cmd(mode, arm, 灯火…)──▶ telemetry_node ──cmd──▶ io_node
-planning_node ──auto/cmd(速度・舵)──▶     ↑ ここで差し替える
+planning_node ──auto/cmd(速度・舵)──▶     ↑ ここで差し替える（_cmd_pump）
 ```
 
-これにより、自律走行中も人間の安全網（ARM 保持・150ms 途絶で DISARM・E-Stop）が
-そのまま生きる。
+増える遅延は telemetry_node の中継ぶんだけで、指令の生成元が1つに定まる価値の方が大きい。
+この形なら自律走行中も人間の安全網（ARM 保持・`cmd` 途絶で DISARM・E-Stop）がそのまま生きる。
 
 ---
 
-## 5. 3つの通信路
+## 5. 通信路
 
-**役割も方式も違う3本があり、混ぜていない。**
-
-| | STM32 ⇄ Pi | Pi 内部（プロセス間） | Pi ⇄ PC |
-|---|---|---|---|
-| **方式** | UART 1Mbps 8N1 | ZeroMQ PUB/SUB ＋ 共有メモリ | WebSocket |
-| **形式** | 自作バイナリフレーム（SYNC+TYPE+SEQ+LEN+CRC16） | msgspec / msgpack | msgpack（バイナリ）と JSON |
-| **監視** | GPIO6 ハートビート・SEQ 欠番・CRC | ハートビート `hb/<node>` | 往復遅延を GUI に常時表示 |
-| **定義の場所** | **`raspi/proto/protocol.toml`（唯一の定義）** | `raspi/msgs/types.py` | 同左（GUI 側は `gui/src/types.ts` に手写し） |
+**役割も方式も違う3本があり、混ぜていない**: STM32 ⇄ Pi は UART の自作バイナリフレーム、Pi 内部は ZeroMQ ＋共有メモリ
+（msgspec / msgpack）、Pi ⇄ PC は WebSocket（msgpack と JSON）。
 
 ### 5.1 UART フレーム（STM32 ⇄ Pi）
 
@@ -217,180 +212,143 @@ planning_node ──auto/cmd(速度・舵)──▶     ↑ ここで差し替�
 └────────┴──────┴─────┴─────┴───────────┴────────┘
 ```
 
-主なパケット（**仕様の正は [`uart_protocol.md`](uart_protocol.md)、数値の正は `protocol.toml`**）:
+パケットの一覧・頻度・フィールドは [`uart_protocol.md` §4](uart_protocol.md#4-パケット一覧) と `protocol.toml` が正。
+`protocol.toml` から Python パーサ（`packets.py`）と STM32 用 C ヘッダ（`surge_proto.h`）を `raspi/proto/generate.py`
+で生成する（定義が2箇所にあると必ずズレるため）。版が一致しない間は ARM しない。
 
-| TYPE | 名称 | 方向 | 頻度 | 中身 |
-|---|---|---|---|---|
-| `0x01` | `LIDAR_SECTOR` | STM32→Pi | 120Hz（12枚/周 × 10Hz） | 30点ぶんの距離 [mm] ＋ 取得時刻 |
-| `0x02` | `TELEMETRY` | STM32→Pi | 100Hz | 速度・舵角・各輪周速・オドメトリ・IMU・電流・温度・電圧・超音波・MD状態・TC/ABS/TV の状態 |
-| `0x08` | `STATS` | STM32→Pi | 1Hz | 累積エラーカウンタ |
-| `0x10` | `COMMAND` | Pi→STM32 | 100Hz | mode・flags・目標速度・目標舵角・レート制限・制動トルク・駆動トルク・flags2 |
-| `0x11` | `CONFIG_SET` | Pi→STM32 | 設定時 | `[control]` のパラメータ（`param_id`＋値） |
-| `0x12`/`0x06` | `PING`/`PONG` | 双方向 | 5Hz | 時刻同期 |
-
-**`COMMAND.flags` の8ビットが安全の要**:
-`arm` / `brake` / `horn` / `light_mode`(2bit) / `passing` / `torque_mode` / `auto_stop`
-（`flags2` は `side_brake` / ウィンカー / `launch`）
-
-> **ゼロ値は安全側に倒してある。** `brake_torque = 0` は「制動 0」ではなく
-> **「未指定＝STM32 側の最大で制動」**。フィールドの埋め忘れでブレーキが効かなくなる方が危険なため。
+- **`COMMAND.flags` が安全の要**（`arm` / `brake` / `torque_mode` / `auto_stop` ほか）
+- **ゼロ値は安全側に倒してある。** `brake_torque = 0` は「制動 0」ではなく「未指定＝STM32 側の最大で制動」。
+  フィールドの埋め忘れでブレーキが効かなくなる方が危険なため（[`uart_protocol.md` §5.6.2](uart_protocol.md#562-brake_torque-の約束)）
+- 制御パラメータは `vehicle.toml` の `[control]` を io_node が `CONFIG_SET` で送る（ファームは揮発）
 
 ### 5.2 内部バス（Pi 内部）
 
-**ZeroMQ を土台にし、メッセージ規約だけ自作。** 購読者の要求が違うので、
-**3つの配送パターンを使い分ける**。
+**ZeroMQ を土台にし、メッセージ規約だけ自作する**（`raspi/bus/zbus.py`）。輸送層まで自作するのは無駄。
+購読者の要求が違うので **3つの配送パターンを使い分ける**。
 
 | パターン | 用途 | 実装 |
 |---|---|---|
 | **最新値のみ** | 制御指令・車両状態 | ZMQ PUB/SUB + `CONFLATE=1` |
-| **取りこぼし厳禁** | ロガー・記録 | ZMQ PUB/SUB + `HWM` 大きめ |
-| **大容量ゼロコピー** | カメラ画像 | `shared_memory` のリングバッファ |
+| **取りこぼし厳禁** | ロガー・記録 | ZMQ PUB/SUB + 大きめの HWM |
+| **大容量ゼロコピー** | カメラ画像 | `shared_memory` のリングバッファ（`raspi/bus/shm_ring.py`） |
 
-**なぜ CONFLATE が要るか**: 購読側の処理が追いつかないとキューに溜まり、
-**制御ノードが2秒前の点群で舵を切る**。しかも見た目は正常に動くので気づきにくい。
+- **なぜ CONFLATE か**: 購読側が追いつかないとキューに溜まり、**制御ノードが2秒前の点群で舵を切る**。
+  見た目は正常に動くので気づきにくい。同じトピックを購読者ごとに違うポリシーで受けるのが要点
+- **なぜ画像を ZMQ に流さないか**: 640×480×3 を 30Hz で送ると約 27MB/s のコピーになる。共有メモリに置き、
+  ZMQ には `{buf_id, w, h, format, t_capture}` の参照だけ流す
+- エンドポイントは**ノード単位**。既定は `ipc:///tmp/surge-bus/<node>.ipc`（`SURGE_BUS_DIR` で移動、`SURGE_BUS_TCP` で TCP）
+- **新しいトピックは `TOPIC_OWNER` に登録する**。漏れると「動くのにデータが来ない」。前方一致に誤って拾われないか
+  も確かめる（`scan/cam` が `scan` に吸われた事故がある）
 
-**なぜ画像を ZMQ に流さないか**: 640×480×3 を 30Hz で送ると **27MB/s** のメモリコピーが発生する。
-共有メモリに置き、ZMQ には `{buf_id, w, h, format, t_capture}` の 60バイトだけ流す。
+> **ZeroMQ の落とし穴3つ**（`raspi/tests/test_zbus.py` で固定）
+> 1. **`CONFLATE` は multipart 非対応** → `topic + b"\0" + msgpack` の1フレームにした
+> 2. **`CONFLATE` はソケット単位**。1本の SUB に相乗りさせると LiDAR が来るたびに車両状態が捨てられる
+>    → **トピック1本につき SUB ソケット1本**
+> 3. **ipc の同じ経路への二重 bind はエラーにならず、後から来た方が黙って奪う** → `Publisher` が
+>    `<node>.ipc.lock` を排他ロックし、同名の2つ目は起動を拒否する
 
-> **ZeroMQ の落とし穴3つ**（どれも `test_zbus.py` で固定済み）
-> 1. **`CONFLATE` は multipart 非対応。** `[topic, payload]` の2フレームで送ると黙って壊れる
->    → `topic + b"\0" + msgpack` の1フレームにした
-> 2. **`CONFLATE` はソケット単位でトピック単位ではない。** 1本の SUB に相乗りさせると
->    **LiDAR が来るたびに車両状態が捨てられる** → トピック1本につきソケット1本
-> 3. **ipc の同じ経路への二重 bind はエラーにならず、後から来た方が endpoint を黙って奪う。**
->    `replay_node --bus` や2つ目の io_node が本物の io を乗っ取れてしまう
->    → `Publisher` が `<node>.ipc.lock` を排他ロックし、同名の2つ目は起動を拒否する（`TestSingleOwner`）
+**メッセージ規約**: `msgspec.Struct` で定義し msgpack で流す。**全メッセージが `t_capture`（センサ取得時刻、
+Pi の単調時刻に換算済み）/ `t_pub` / `seq` を持つ**。無いと、後でセンサ融合を作るときに全定義を書き直すことになる。
 
-### 5.3 WebSocket（Pi ⇄ PC）
+### 5.3 WebSocket / HTTP（Pi ⇄ PC）
 
-**1本にまとめない。** カメラのフレームが詰まった瞬間にラジコン入力まで遅延するため。
+**1本にまとめない。** カメラのフレームが詰まった瞬間にラジコン入力まで遅延するため。メッセージの形は `raspi/msgs/types.py` が正で、GUI 側は `gui/src/types.ts` に手写し。
 
-| チャンネル | 内容 | 方式 | 頻度 |
-|---|---|---|---|
-| `/ws/telemetry` | 車両状態・点群・リンク統計・自動運転の判断 | **バイナリ**（msgpack） | 50Hz（`vehicle_state` が届いた周に送る。車両状態以外は変わったときだけ載せる） |
-| `/ws/camera/{front,rear}` | JPEG フレーム | バイナリ | 最大 15Hz |
-| `/ws/control` | ラジコン入力・設定変更・状態通知 | JSON | イベント駆動 |
-| `/ws/map` | 占有格子（3値を2bitに詰めて zlib 圧縮） | バイナリ | **版が変わったときだけ** |
-| `/ws/record` | MCAP のライブ中継 | バイナリ | 記録中のみ |
+| チャンネル | 内容 | 方式 |
+|---|---|---|
+| `/ws/telemetry` | 車両状態・点群・リンク統計・自動運転の判断 | msgpack。`vehicle_state` が届いた周に送り、他は変わったときだけ載せる |
+| `/ws/camera/{front,rear}` | JPEG フレーム | バイナリ。頻度の上限は GUI のカメラ設定 |
+| `/ws/control` | 操縦入力・設定変更・状態通知 | JSON |
+| `/ws/map` | 地図（3値を2bitに詰めて zlib）・中心線・経路 | msgpack。変わったときだけ（接続時に最新の1枚） |
+| `/ws/map_upload/<name>` | 地図のアップロード | 操作時のみ |
+| `/ws/record` | MCAP のライブ中継 | 記録中のみ |
 
-**1台の詰まりを他へ波及させない。** 受信が止まったクライアント（スリープした観戦用 PC など）への
-送信は 0.5 秒で見切って切断する。待ち続けると全員への配信と操縦者の指令処理が一緒に止まるため。
-engage 中は操縦者以外が自律走行の設定を変えられず（解除だけは誰でも通る）、ARM 中のシャットダウンは拒否する。
-遅れて届いた「走れ」は捨て、2 秒続いたら操縦権を外す（基準を測り直させる）。間隔が 300ms 以上開いた直後の
-「走れ」は通さない（バックグラウンドタブで 1Hz に間引かれた指令で断続的に走らないため）。Origin に加えて
-Host 名も検査する（DNS リバインディング対策。既知の名前・IP 以外は `SURGE_ALLOWED_HOSTS`）。
-`/ws/control?catalog=changed` で繋ぐと、自動運転の宣言（`auto.catalog`、約 42kB）は接続時の1通目だけに載る。
+- **GUI 本体（`gui/dist`）も telemetry_node が HTTP（ポート 8000）で配る**ので WS と同一オリジンになり、接続先をコードに
+  書く場所が無い（`gui/src/ws/url.ts`）。`GET /logs/<name>` でログも落とせる
+- **1台の詰まりを他へ波及させない。** 受信が止まったクライアントは短時間で見切って切断する
+- **遅れて届いた「走れ」は捨てる**（`_cmd_lateness_ms`）。詰まりの後にまとめて届いてもデッドマンは生き返らない（止める指令は通す）
+- engage 中は操縦者以外が自律の設定を変えられない（解除は誰でも通る）。ARM 中のシャットダウンは拒否。Host 名も検査する
+  （DNS リバインディング対策、`SURGE_ALLOWED_HOSTS`）
 
-**GUI 本体（`gui/dist`）も telemetry_node が HTTP で配る**（ポート 8000）ので、
-WS と同一オリジンになり**接続先をコードに書く場所が存在しない**
-（`gui/src/ws/url.ts` が `location.host` から組み立てる）。
-`GET /logs/<name>` でログのダウンロードもできる（32MB まで。超えるものは scp）。
+### 5.4 ネットワーク — **Pi は常に STA。繋ぎ先を変えるだけ**
+
+研究室は研究室の AP、本番・屋外は**持込ルーター**に STA で繋ぐ（SSID を NetworkManager に登録しておくだけ）。
+フォールバックは有線 Ethernet 直結（据置開発用。走行はできない）。**AP モードは実装しない**:
+①AP では Pi の基板アンテナが電波の上限になり、切断は `cmd` 途絶 → 停止に直結する
+②ヘッドレスの Pi でモード切替に失敗すると救出手段が消える ③屋外の 5GHz は日本では W56（DFS 必須、レーダー検出で長く止まる）
+のみで、屋外は 2.4GHz 固定にする ④インターネットが来ず NTP が効かない。
+NetworkManager は知らない SSID に自動接続しないので、**持込ルーターの SSID は研究室で（直結が使えるうちに）登録**しておく。
+
+**mDNS**: `avahi-daemon` で **`surge-mk2.local`** に解決できる（`http://surge-mk2.local:8000`）。クライアントは IPv4 に固定する
+（ssh は IPv6 リンクローカルを優先して Wi-Fi 経由になる）。Wi-Fi だけの端末向けに `surge-mdns` がユニキャストで応答し、
+それでも引けない Mac は `tools/find_pi.py` で IP を引いて IP で開く。接続情報の実値は `setup_credentials.md`（gitignore 済み）。
 
 ---
 
 ## 6. Raspberry Pi の中身 — プロセスとトピック
 
-**Python の GIL があるので、スレッドではなくプロセスで分ける。**
+**Python の GIL があるので、スレッドではなくプロセスで分ける。** `io_node` は UART・GPIO に専念し、他の処理を混ぜない。
 
-```mermaid
-flowchart LR
-    UART(["UART / GPIO6"]) --> IO
-    CSI(["CSI ×2"]) --> CAM
+流れは §1 の図と下の「主要トピック」の発行元を見る。
 
-    IO["io_node<br/>最優先・実時間性重視"]
-    CAM["camera_node"]
-    CAMPERC["cam_perception_node<br/>ftg_cam用・常時起動・IDLE制御"]
-    LINEPERC["line_perception_node<br/>line_trace用・常時起動・IDLE制御"]
-    PLAN["planning_node<br/>配線だけ。中身は raspi/auto/"]
-    TELE["telemetry_node<br/>WS サーバ"]
-    LOG["logger_node<br/>MCAP 記録"]
+### systemd サービス
 
-    IO -->|"scan 10Hz"| PLAN
-    IO -->|"vehicle_state 100Hz"| PLAN
-    IO -->|"vehicle_state / scan / diag"| TELE
-    IO --> LOG
-    CAM -->|"共有メモリ<br/>image/front, image/rear"| TELE
-    CAM -->|"共有メモリ<br/>image/front"| CAMPERC
-    CAM -->|"共有メモリ<br/>image/front"| LINEPERC
-    CAM --> LOG
-    CAMPERC -->|"scan/cam"| PLAN
-    LINEPERC -->|"line/cam"| PLAN
-    PLAN -->|"auto/cmd 即時＋50Hz<br/>auto/state 10Hz"| TELE
-    TELE -->|"cmd 50Hz（唯一の発行元）"| IO
-    TELE -->|"auto/ctrl 5Hz"| PLAN
-    TELE -->|"auto/ctrl 5Hz"| CAMPERC
-    TELE <-->|"WebSocket"| BROWSER(["ブラウザ"])
-```
-
-### systemd サービス（Pi 起動時に自動で上がる）
+`raspi/setup/install_services.sh` が登録する（反映の操作は [`development.md` §2](development.md#2-変更--反映の対応表最重要)）。
 
 | unit | モジュール | 役割 | 止めると |
 |---|---|---|---|
-| `surge-io` | `raspi.nodes.io_node` | UART送受信・GPIO・時刻同期・`.sfl` 記録 | **★ E-Stop がラッチする** |
-| `surge-camera` | `raspi.nodes.camera_node` | picamera2 → 共有メモリ | カメラが止まるだけ |
-| `surge-telemetry` | `raspi.nodes.telemetry_node` | WS サーバ・GUI 配信 | GUI が繋がらない |
-| `surge-planning` | `raspi.nodes.planning_node` | 自動運転の判断 | 自律走行だけ止まる |
-| `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録（**既定では無効**） | — |
-| `surge-cam-perception` | `raspi.nodes.cam_perception_node` | カメラの走行可否セグメンテーション推論（`ftg_cam` 用）。`auto/ctrl` で `ftg_cam` 選択中だけ推論する | `ftg_cam` が使えなくなるだけ |
-| `surge-cam-e2e` | `raspi.nodes.cam_e2e_node` | カメラE2E推論（`cam_e2e` 用） | `cam_e2e` が使えなくなるだけ |
-| `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出（`line_trace` 用） | `line_trace` が使えなくなるだけ |
-| `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従（`follow_object` 用） | `follow_object` が使えなくなるだけ |
-| `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末から `surge-mk2.local` を引けるようにする | Wi-Fi のみの端末で名前が引けないことがある。Mac 側の逃げ道は `tools/find_pi.py`（IP で開く） |
-| `surge-arrow-signal` | `raspi.nodes.arrow_signal_node` | 前方カメラの矢印信号認識。**既定では無効**（調整後に手で enable） | 矢印信号が使えない |
-| `surge-logclean.timer` | — | 毎時、古いログを消す（7日超／合計8GB超） | ディスクが埋まる |
+| `surge-io` | `raspi.nodes.io_node` | UART 送受信・GPIO6 ハートビート・時刻同期・`.sfl` 記録 | **★ E-Stop がラッチする** |
+| `surge-camera` | `raspi.nodes.camera_node` | picamera2 → 共有メモリ | カメラ系が止まる |
+| `surge-telemetry` | `raspi.nodes.telemetry_node` | WS / HTTP サーバ。**`cmd` の唯一の発行元** | GUI が繋がらない |
+| `surge-planning` | `raspi.nodes.planning_node` | planner の購読・周期実行・`auto/*` の publish | 自律走行だけ止まる |
+| `surge-cam-perception` | `raspi.nodes.cam_perception_node` | 走行可否セグメンテーション → `scan/cam`・`path/cam` | `ftg_cam` / `cam_centerline` が使えない |
+| `surge-cam-e2e` | `raspi.nodes.cam_e2e_node` | 画像から操舵を回帰 → `cam_e2e/cmd` | `cam_e2e` が使えない |
+| `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出 → `line/cam` | `line_trace` が使えない |
+| `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従 → `track/target` | `follow_object` が使えない |
+| `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末向けの mDNS 応答 | 名前が引けない端末がある |
+| `surge-arrow-signal` | `raspi.nodes.arrow_signal_node` | 前方カメラの矢印信号 → `route/select`。**unit だけ置き既定は無効** | 信号による経路選択が使えない |
+| `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録。**既定では無効**（`--with-logger`、§11） | — |
+| `surge-logclean.timer` | — | 古いログを定期的に消す | ディスクが埋まる |
 
-> **カメラ系の認識ノード（`cam-perception` / `cam-e2e` / `line-perception` / `cam-track`）は常時 enable。**
-> `auto/ctrl`（`AutoCtrl.mode`）を見て、対応するモードが選ばれている間だけ実際にフレームを読んで
-> 推論する（IDLE/ACTIVE）ので、使わない間は CPU・電力をほぼ消費しない。
-> `ftg_cam` の手順は [`development.md` §12.2](development.md#122-カメラセグメンテーション走行ftg_cam)。
-
-**`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、
-起動していること自体が車を動かす条件にはならない。
+- **カメラ系の認識ノードは常時 enable。** `auto/ctrl` で対応モードが選ばれている間だけ推論する（IDLE/ACTIVE）
+- **`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、起動していること
+  自体は車を動かす条件にならない
 
 ### 主要トピック
 
-| トピック | 中身 | 頻度 | 発行元 | 配送 |
-|---|---|---|---|---|
-| `vehicle_state` | 速度・各輪周速・路面舵角・オドメトリ・IMU・温度・電源2系統・フラグ | 100Hz | io_node | LATEST |
-| `scan` | LiDAR 1周分の点群（360点＋セクタごとの時刻・受信有無） | 10Hz | io_node | LATEST |
-| `scan/cam` | カメラの走行可否セグメンテーションを`scan`と同じ形に変換した擬似点群（`ftg_cam`専用） | — | cam_perception_node | LATEST |
-| `line/cam` | カメラで検出した白線の近傍・遠方2点（地面座標、`line_trace`専用） | — | line_perception_node | LATEST |
-| `cam/model` | GUIが選んだセグメンテーションモデル名（`models/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
-| `e2e/model` | GUIが選んだE2E LiDARモデル名（`models/e2e_lidar/<name>.onnx`） | 1Hz | telemetry_node | LATEST |
-| `cam_e2e/model` | GUIが選んだカメラE2Eモデル名（`cam_e2e` 用） | 1Hz | telemetry_node | LATEST |
-| `diag/link` | リンク統計（loss / CRC / 往復 / 時刻同期 / **SIM バッジ**） | 10Hz | io_node | LATEST |
-| `image/front`, `image/rear` | 共有メモリ参照（60バイト） | 最大 30Hz | camera_node | LATEST |
-| `cmd` | 目標速度・舵角・フラグ | `auto/cmd` の変化は即時＋50Hz | **telemetry_node（唯一）** | LATEST |
-| `auto/ctrl` | どのモードで走るかの意思・パラメータ | 5Hz | telemetry_node | LATEST |
-| `log/ctrl` | `.sfl` 記録の開始/停止の意思 | 1Hz | telemetry_node | LATEST |
-| `auto/cmd` | 自律走行の目標速度・舵角 | 新しい判断は即時＋50Hz | planning_node | LATEST |
-| `auto/state` | その判断の根拠（選んだギャップ・自己位置・段） | 10Hz | planning_node | LATEST |
-| `auto/map` | 占有格子 | 版が変わったとき | planning_node | LATEST |
-| `hb/<node>` | ハートビート | 10Hz | 各ノード（cam_perception・cam_track・planning 等） | LATEST |
+持ち主の正は `raspi/bus/zbus.py` の `TOPIC_OWNER`、型の正は `raspi/msgs/types.py`。
 
-**全メッセージが `t_capture` / `t_pub` / `seq` の3フィールドを必ず持つ。**
-これが無いと、後でセンサ融合を作るときに全メッセージ定義を書き直すことになる。
+| トピック | 中身 | 発行元 |
+|---|---|---|
+| `vehicle_state` | 速度・各輪周速・路面舵角・オドメトリ・IMU・温度・電源2系統・フラグ（100Hz） | io_node |
+| `scan` | LiDAR 1周分（360点＋セクタごとの時刻・受信有無、10Hz） | io_node |
+| `diag/link` | リンク統計（loss / CRC / 往復 / 時刻同期 / ARM 禁止の理由 / **SIM バッジ**） | io_node |
+| `cmd` | 目標速度・舵角・フラグ | **telemetry_node（唯一）** |
+| `auto/ctrl` | どのモードで走るかの意思・パラメータ | telemetry_node |
+| `log/ctrl`・`cam/*`・`*/model`・`track/roi`・`signal/config` ほか | GUI の意思・設定の中継 | telemetry_node |
+| `auto/cmd` | 自律走行の目標速度・舵角・制動（新しい判断は即時＋50Hz） | planning_node |
+| `auto/state` | 判断の根拠（自己位置・段・理由 `reason`） | planning_node |
+| `auto/map` | 占有格子・中心線・経路（版が変わったとき） | planning_node |
+| `image/front`・`image/rear` | 共有メモリ参照 | camera_node |
+| `scan/cam`・`path/cam`・`cam/mask` | カメラ由来の擬似点群・走行可能回廊・マスク | cam_perception_node |
+| `line/cam` | 白線の近傍・遠方2点（地面座標） | line_perception_node |
+| `cam_e2e/cmd` | 画像からの操舵・速度 | cam_e2e_node |
+| `track/target` | 追従対象の方位・距離 | cam_track_node |
+| `route/select`・`signal/status` | 経路グループの切替要求・直近の判定 | arrow_signal_node（名前 `signal`。試験用 `raspi/tools/route_select.py` も同名） |
+| `hb/<node>` | ハートビート（logger_node が記録するだけ） | 各ノード |
 
-**バスのエンドポイントは「ノード単位」**（トピック単位ではない）。
-既定は `ipc:///tmp/surge-bus/<node>.ipc`（`SURGE_BUS_DIR` で移動、`SURGE_BUS_TCP` で TCP に切替）。
-**購読はトピック1本につき SUB ソケット1本**にしている（理由は §5.2 の落とし穴）。
-
-> **`architecture.md` §6.1 の図にある `perception_node` / `safety_node` と、`grid/local` / `pose` / `path`
-> トピックは実装されていない。** 知覚は planner が直接 `scan` を見る。Watchdog（`hb/*` を監視して
-> FAULT にする役）は無く、**GPIO6 ハートビート（第1層）が代替している**（io_node のループが止まれば
-> 波形も止まり、STM32 が E-Stop をラッチする）。相当する情報は `auto/state` と `auto/map`。
+`hb/*` を監視する Watchdog ノードは無い。その役は GPIO6 ハートビートと `cmd`・`auto/cmd` の途絶判定が分担する（§8）。
 
 ---
 
-## 7. 座標系と単位の約束
+## 7. 座標系・単位・車両パラメータ
 
-**ROS の慣例（REP-103 / REP-105）に従う。** 自作フレームワークであっても、である。
-理由は ①論文・教科書の式がそのまま使える ②将来 ROS 2 に移る場合の摩擦がゼロ
-③独自ルールは3ヶ月後に思い出せない。
+**ROS の慣例（REP-103 / REP-105）に従う。** 自作フレームワークでも、である。①論文・教科書の式がそのまま使える
+②ROS 2 に移る場合の摩擦がゼロ ③独自ルールは3ヶ月後に思い出せない。
 
 | 項目 | 規約 |
 |---|---|
-| 座標系 | **右手系。x = 前、y = 左、z = 上** |
+| 座標系 | **右手系。x = 前、y = 左、z = 上**（地図では x = 右、y = 上） |
 | 角度 | **反時計回りが正**（左旋回が正） |
 | 単位 | **SI 固定**（m, m/s, m/s², rad, rad/s, s） |
 | 時刻 | ns 単位の整数、Pi の `CLOCK_MONOTONIC` 基準 |
@@ -403,110 +361,88 @@ flowchart LR
 map ──── odom ──── base_link ──┬── lidar
  │        │            │        ├── cam_front
  │        │            │        └── cam_rear
- │        │            └─ 後輪車軸の中心に置く
- │        └─ 連続で滑らか。ただしドリフトする → 局所制御はこちら
- └─ SLAM が補正する。跳ぶことがある → 大域経路計画はこちら
+ │        │            └─ 後輪車軸の中心
+ │        └─ 連続で滑らか。ただしドリフトする → 局所制御（経路追従）
+ └─ SLAM が補正する。跳ぶことがある → 大域経路計画
 ```
 
-- **`odom` と `map` を分ける理由**: SLAM のループクロージャが効いた瞬間、自己位置は
-  数十 cm「跳ぶ」。これを制御ループに直接食わせると舵が暴れる
-- **`base_link` を後輪車軸中心に置く理由**: アッカーマン車両の運動学（自転車モデル）が
-  最も簡潔になる。Pure Pursuit の標準式も後輪基準
+- **`odom` と `map` を分ける理由**: ループ閉じが効いた瞬間に自己位置は数十 cm 跳ぶ。制御ループに直接食わせると舵が暴れる
+- **`base_link` を後輪車軸中心に置く理由**: 自転車モデルが最も簡潔になる（重心基準だとスリップ角の項が入る）。
+  Pure Pursuit の標準式も後輪基準
 
-$$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v}{L}\tan\delta$$
+$$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v}{L}\tan\delta \qquad (L = \text{ホイールベース},\ \delta = \text{路面舵角})$$
 
 ### 車両パラメータは `config/vehicle.toml` に集約
 
-**全ノードがそこだけを見る。** 同じ数字を2箇所に書くと必ず片方が古くなる。
-
-> `measured = false` は、未確定の項目（`encoder_ticks_per_rev`。どのコードも読まない記録用の欄）が1つ残っている印。
-> `[dynamics]` などの動特性は車両の校正で測った値が入る
-> （手順は [`development.md` §4.5](development.md#45-車両の校正エンコーダステア遅延車速制御tcabs)・[`calibration.md`](calibration.md)）。
+**全ノードがそこだけを見る**（Python は `raspi/core/vehicle.py` の `Vehicle`、GUI は `config/generate.py` が生成する
+`gui/src/generated/vehicle.ts`）。形式は TOML（`tomllib` で読めて依存が増えず、`protocol.toml` と流儀が揃う）。
+スキーマ（幾何・質量・センサ取付位置・`[dynamics]`・`[control]`・`[safety]`・`[limits]`）と各値の出どころは
+ファイル内のコメントが正。動特性・制御の値は車両の校正で測る（[`calibration.md`](calibration.md)）。
 
 ---
 
 ## 8. 安全設計 — 止まる仕組み
 
-**自律走行で最初に作るべきは走る機能ではなく止まる機能。** 互いに独立した3層にする。
+**自律走行で最初に作るべきは走る機能ではなく止まる機能。** 互いに独立した3層にする
+（全体表は [`uart_protocol.md` §10](uart_protocol.md#10-安全層の全体像)）。
 
 ```
-[1] ハードウェア層   GPIO6 ハートビート、STM32 内の電流・温度リミッタ
-[2] STM32 ファーム層 UART 受信タイムアウト(100ms)で自動ブレーキ
-[3] RasPi ソフト層   cmd 途絶検知、障害物近接での減速、Watchdog
+[1] ハードウェア層   GPIO6 ハートビート、STM32 内の電流・温度リミッタ、駆動電源の遮断
+[2] STM32 ファーム層 COMMAND 途絶で自動ブレーキ、auto_stop（速度に応じた動的停止距離）
+[3] Pi ソフト層      cmd・auto/cmd 途絶の検知、点群の鮮度、planner の ready=False
 ```
 
 ### 8.1 GPIO6 ハートビート（第1層）
 
-**単純なアクティブ Low の E-Stop はフェイルセーフにならない。**
-断線するとプルアップで High（＝正常）に戻ってしまい、異常を検知できないため。
+**単純なアクティブ Low の E-Stop はフェイルセーフにならない。** 断線するとプルアップで High（＝正常）に戻り、
+異常を検知できないため。Pi が GPIO6 に 100Hz の矩形波を出し続け、STM32 はエッジが途切れたら即ブレーキ＋
+`estop_active` を**ラッチ**する（詳細は [`uart_protocol.md` §9](uart_protocol.md#9-緊急停止ラインuart-とは独立した第1安全層)）。
+この1本で **Pi のフリーズ・電源断・断線・プロセスのクラッシュ**をすべて検出できる。
 
-```
-Pi   : GPIO6 に 100Hz の矩形波を出し続ける
-STM32: エッジを監視し、50ms 途切れたら即ブレーキ + estop_active（ラッチ）
-```
-
-この1本で、**Pi のフリーズ・電源断・断線・プロセスのクラッシュ**をすべて検出できる。
-実測は 100.0Hz・最大遅れ 0.46ms、途絶からラッチまで 64ms。
-
-> **★ 復帰は必ず人間の明示操作を経由する。** ラッチの解除は**車両のボタン2**を物理的に押すこと。
-> 自動復帰させない（原因未解消のまま走り出すため）。
-> つまり **`surge-io` を止める＝車が現地に行くまで動かなくなる**。
->
-> **ボタン2で解除しても、ARM を入れ直すまで走らない。** E-Stop・駆動電源ラッチ・STM32 の再起動・
-> COMMAND 途絶の後は、ARM ビットが一度 0 になるまで ARM を通さない。これを io_node
-> （`_update_rearm_latch`。理由は `diag/link` の `arm_inhibit_reason` に出る）と STM32
-> （`vehicle.c` の `rearm_required`）の両方が持つ。ARM 付きの指令が流れ続けていても、
-> 車のそばでボタンを押した瞬間に走り出すことはない。GUI は ARM 禁止を見ると ARM 要求を下ろすので、
-> 人が ARM を押し直せば通る。
+- **★ 復帰は必ず人間の明示操作。** ラッチの解除は**車両のボタン2**を物理的に押す。自動復帰させない（原因未解消の
+  まま走り出すため）。つまり **`surge-io` を止める＝車が現地に行くまで動かなくなる**
+- **ボタン2で解除しても、ARM を入れ直すまで走らない。** E-Stop・駆動電源ラッチ・STM32 の再起動・`COMMAND` 途絶の後は、
+  ARM ビットが一度 0 になるまで ARM を通さない。io_node（`_update_rearm_latch`、理由は `diag/link` の
+  `arm_inhibit_reason`）と STM32（`rearm_required`）の両方が持つ。GUI は ARM 禁止を見ると ARM 要求を下ろすので、
+  人が ARM を押し直せば通る
 
 ### 8.2 タイムアウトの一覧
 
-| 何が | どれだけ途絶したら | どうなる |
+| 何が | 閾値の正 | どうなる |
 |---|---|---|
-| GPIO6 ハートビート | 50ms | **STM32 が E-Stop をラッチ** |
-| `COMMAND`（Pi→STM32） | 100ms | STM32 が自動ブレーキ |
-| `TELEMETRY`（STM32→Pi） | 100ms / 200ms | DEGRADED（警告のみ）／ FAULT |
-| `cmd`（バス上） | 150ms | io_node が最大制動を送り、止まってから（最長3秒で）DISARM に落とす |
-| `auto/cmd`（planner の死亡） | 200ms | telemetry_node が制動に読み替える |
-| `scan` が古い | 300ms | planning_node が制動指令に読み替える |
-| GUI の無操作 | 20秒 | DISARM（**ただし自律走行中は掛けない**。人が触らないのが正常なため） |
+| GPIO6 ハートビート | [`uart_protocol.md` §9](uart_protocol.md#9-緊急停止ラインuart-とは独立した第1安全層) | **STM32 が E-Stop をラッチ** |
+| `COMMAND`（Pi→STM32） | [`uart_protocol.md` §8](uart_protocol.md#8-エラー処理と統計) | STM32 が自動ブレーキ |
+| `TELEMETRY`（STM32→Pi） | 同上（2段） | DEGRADED（警告のみ）→ FAULT（io_node が最大制動を送り DISARM） |
+| `cmd`（バス上・GUI→telemetry） | `vehicle.toml` `[safety] cmd_deadman_ms` | telemetry_node と io_node が**独立に**判定。最大制動を送り、止まってから DISARM |
+| GUI の途絶（自律走行中） | `[safety] auto_link_grace_ms` | 猶予の間は planner が走らせ続け（**その間は GUI から止められない**）、超えたら DISARM して engage も解除 |
+| `auto/cmd`（planner の死亡） | `[safety] auto_cmd_stale_ms` | telemetry_node が制動に読み替える |
+| `scan` が古い | `Planner.stale_ms`（`raspi/auto/base.py`） | planning_node が制動指令に読み替える |
+| GUI の無操作 | GUI の設定（`armIdleTimeoutMs`） | DISARM（**自律走行中は掛けない**。人が触らないのが正常なため） |
 
-**上りと下りで非対称にしてある**のは、単発の CRC エラーや一時的なロスで即 FAULT に
-落とさないため。50Hz なら 100ms ＝ 5発で、ノイズ環境なら 5発連続ロスは起こりうる。
+**上りと下りで非対称にしてある。** 上り（TELEMETRY）を2段にするのは単発の CRC エラーや一時的なロスで即 FAULT に
+落とさないため、下り（COMMAND）は安全に直結するので一段で厳しくする。
 
 ### 8.3 モータが回る条件は3つ
 
-```mermaid
-flowchart LR
-    A["io_node に<br/>--allow-arm"] --> D{"AND"}
-    B["cmd が 150ms 以内に<br/>届き続けている"] --> D
-    C["人間が GUI で<br/>ARM を保持"] --> D
-    D --> E["モータが回る"]
-    D -.->|"1つでも欠けたら"| F["DISARM"]
-```
+**①io_node が `--allow-arm` で起動している ②`cmd` が途絶せず届き続けている ③人間が GUI で ARM を保持している** の AND。
+1つでも欠けたら DISARM。加えて `protocol_version` の一致、`[control]` の STM32 への同期、E-Stop・駆動電源ラッチ・STM32 再起動の
+後の ARM の入れ直し（§8.1）が要る。
 
-このほか、`protocol_version` が一致し `[control]` を STM32 へ同期済みであること、
-E-Stop・駆動電源ラッチ・STM32 再起動の後なら ARM を入れ直していること（§8.1）が要る。
-
-**デッドマンは「離したら `speed=0` を送る」ではなく「送信そのものを止める」。**
-0 を送る設計だと、その指令が届かない状況（＝一番止めたい状況）で止まらない。
-ブラウザのフリーズ・タブの離脱・Wi-Fi 断がすべて同じ経路で停止になる。
-
-**engage ≠ ARM。** 自律走行の engage は「自律に任せてよい」という意思表示にすぎず、
-planning_node は `arm` を立てられない。engage の状態は保存されないので、
-**電源を入れただけで走り出す経路が存在しない。**
+- **デッドマンは「離したら `speed=0` を送る」ではなく「送信そのものを止める」。** 0 を送る設計だと、その指令が
+  届かない状況（＝一番止めたい状況）で止まらない。ブラウザのフリーズ・タブの離脱・Wi-Fi 断が同じ経路で停止になる
+- **engage ≠ ARM。** engage は「自律に任せてよい」という意思表示にすぎず、planning_node は `arm` を立てられない。
+  engage は保存しない（`config/auto.json` に入るのはモードとパラメータだけ）ので、**電源を入れただけで走り出す経路が無い**
 
 ### 8.4 駆動電源ラッチは異常ではない
 
-過電流で `DRIVE_POWER` がハード遮断されると**ラッチし、電源をリセットするまで復帰しない**。
-このとき STM32 は `drive_power_locked` を立て、Pi が `arm` を要求しても `armed` を立てない。
-
-**通信 FAULT と区別して**「駆動電源ラッチ中 — 電源を入れ直してください」と GUI に出す。
+過電流などで `DRIVE_POWER` がハード遮断されると**ラッチし、電源をリセットするまで復帰しない**。STM32 は
+`drive_power_locked` を立て、Pi が `arm` を要求しても `armed` を立てない。GUI は通信 FAULT と区別して
+「駆動電源ラッチ中 — 電源を入れ直してください」と出す。
 
 ### 8.5 「なぜ止まったか」を必ず出す
 
-状態機械（MAPPING / CRUISE / PARK_SEARCH 等）としての実装は無い。各 planner は `AutoState` に
-理由 `reason` を載せ、GUI は `ui.disarmReason` と合わせて「なぜ止まったか」を画面に出す。
+汎用の状態機械は持たない（操縦モード `mode`＋ARM・engage、`LinkDiag` と STM32 のフラグ、planner ごとの段に分かれる）。
+各 planner は `AutoState` に理由 `reason` を載せ、GUI は `ui.disarmReason` と合わせて画面に出す。
 
 ---
 
@@ -518,144 +454,49 @@ planning_node は `arm` を立てられない。engage の状態は保存され�
 |---|---|
 | `raspi/auto/base.py` | `Planner` と `ParamSpec`。**バスも WS も知らない純粋な計算** |
 | `raspi/auto/<algo>.py` | アルゴリズム本体 |
-| `raspi/auto/registry.py` | id → クラス。GUI へ渡す宣言（`catalog()`）もここ |
-| `raspi/nav/` | 経路生成・追従・回避・局所地図などの部品（SLAM 本体は `slam2d/`） |
+| `raspi/auto/registry.py` | id → クラス（`PLANNERS`）。GUI へ渡す宣言（`catalog()`）もここ |
+| `raspi/nav/` | 経路生成・追従・回避・局所地図・学習などの部品（SLAM 本体は `slam2d/`） |
 | `raspi/nodes/planning_node.py` | 配線だけ（購読・周期・publish） |
 
-**モードを足しても GUI を触らない。** `registry.py` に1行足せば GUI の選択肢に出て、
-パラメータのスライダも planner が宣言した `ParamSpec` から自動生成される。
-**GUI にモード名を書くと、増やすたびに2箇所直すことになり、いつか片方が古くなる。**
+**モードは増える前提で作る。** `registry.py` に1行足せば GUI の選択肢に出て、設定の UI も planner が宣言した
+`ParamSpec`（スライダ・チェックボックス・ボタン・表示条件）から自動生成される。**GUI にモード名を書かない**
+（増やすたびに2箇所直すことになり、いつか片方が古くなる）。`ParamSpec(hidden=True)` は GUI に出さない定数。
 
 `Planner` が守る**4つの約束**:
 
 1. `plan()` は状態を持ってよいが、`reset()` で完全に初期化できること
 2. 戻り値は `AutoState`。指令（速度・舵・制動）と**理由 `reason` を必ず同時に返す**
 3. 走ってよいか分からないときは `ready=False`。planning_node が制動に読み替える
-4. パラメータは `params` に宣言する（GUI が自動生成する）
+4. パラメータは `params` に宣言する
 
 ### 9.2 実装されているモード
 
-`raspi/auto/registry.py` の `PLANNERS` が正（`category = "sysid"` はシステム同定タブ専用）。
+`raspi/auto/registry.py` の `PLANNERS` が正（`category = "sysid"` の `calib_*` はシステム同定タブ専用）。学習系の使い方は [`development.md` §12](development.md#12-学習ベースの自動運転を動かすlidar-e2e--カメラセグメンテーション--カメラe2e)。
 
 | id | 名前 | 地図 | 考え方 |
 |---|---|---|---|
-| `ftg` | **Follow the Gap** | 不要 | 点群の中で**最も広く空いた区間**を選び、**その真ん中**を狙う |
-| `ftg_cam` | **Follow the Gap（カメラ）** | 不要 | `ftg`と全く同じロジックを、カメラの走行可否セグメンテーションから作った擬似点群で走らせる |
-| `cam_centerline` | **中心線追従（カメラ）** | 不要 | カメラの走行可能領域から前方複数距離の回廊中心を作り、Pure Pursuit で追う |
-| `cam_e2e` | **E2Eカメラ（模倣学習）** | 不要 | 前方カメラ画像だけから操舵を直接回帰。速度は舵の切れ具合から決める |
-| `de` | **Disparity Extender** | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う（地図なしの本線） |
-| `dp` | **Disparity Pursuit** | 不要 | `de` の塗り方＋狙点選択と `ftg` の Pure Pursuit 舵角を統合 |
-| `slam2d_raceline` | レーシングライン(slam2d) | 作る/読む | `slam2d/` で地図を作り、最小曲率の経路を引いて追う。`listed = False` で GUI には出ず、`slam2d_route` の土台と `sim.bench` 用 |
-| `slam2d_route` | **経路選択走行(slam2d)** | 作る/読む（GUI で選べるのはこちら） | 地図全体から道路グラフを作り、経由点のグループで分岐を選んで周回。走行中の切替・n周後の停止/駐車 |
-| `line_trace` | **ライントレース（カメラ）** | 不要 | カメラで検出した白線の2点を Pure Pursuit の目標点として追う。障害物回避なしの最小構成 |
-| `e2e_lidar` | **E2E LiDAR** | 不要 | 強化学習（PPO）で点群→ステア/速度を**直接回帰**する方策 |
-| `follow_object` | **対象追従** | 不要 | 映像で選択した対象との車間距離を保って追従。前進のみ・停止のみの安全側 |
-| `park_to_point` | **駐車（クリック指定）** | 不要（局所地図） | LiDAR 画面でクリックした位置・向きへ接近して停止 |
+| `ftg` | Follow the Gap | 不要 | 点群の中で**最も広く空いた区間**を選び、**その真ん中**を狙う |
+| `ftg_cam` | Follow the Gap（カメラ） | 不要 | `ftg` と同じロジックを、カメラのセグメンテーションから作った擬似点群で走らせる |
+| `cam_centerline` | 中心線追従（カメラ） | 不要 | 走行可能領域から前方の回廊中心を作り Pure Pursuit で追う |
+| `cam_e2e` | E2E カメラ（模倣学習） | 不要 | 前方画像から操舵を直接回帰。速度は舵の切れ具合から決める |
+| `de` | Disparity Extender | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う |
+| `dp` | Disparity Pursuit | 不要 | `de` の塗り方・狙点選択＋ `ftg` の Pure Pursuit 舵角＋狙点のヒステリシス |
+| `slam2d_raceline` | レーシングライン(slam2d) | 作る/読む | 地図を作り最小時間寄りのラインを追う。`listed = False` で GUI に出ず、`slam2d_route` の土台と `sim.bench` 用 |
+| `slam2d_route` | **経路選択走行(slam2d)** | 作る/読む | 道路グラフ＋経由点で分岐を選んで周回。**GUI の主力** |
+| `line_trace` | ライントレース（カメラ） | 不要 | 白線の2点を Pure Pursuit の目標点にする。障害物回避なし |
+| `e2e_lidar` | E2E LiDAR | 不要 | 強化学習（PPO）で点群→操舵・速度を直接回帰 |
+| `follow_object` | 対象追従 | 不要 | 映像で選んだ対象との車間を保って追従（前進のみ） |
+| `park_to_point` | 駐車（クリック指定） | 局所地図 | LiDAR 画面でクリックした位置・向きへ Hybrid A* で接近して停止 |
 
-#### `ftg` — 最遠点ではなく「区間の真ん中」を狙う
+各モードの要点:
 
-最遠点狙いにすると**壁際すれすれを縫う挙動**になり、車幅ぶんの余裕が無いミニカーでは
-外輪が壁に当たる。処理は6段: 前方 ±fov/2 を切り出す → 最小値フィルタ →
-最近傍点の周りを「安全バブル」で侵入禁止に塗る → `gap_min` 以上が続く最長区間を選ぶ →
-真ん中を狙う → 正面余裕と舵角の大きさで速度を落とす。
-
-#### `de` — FTG の上位互換（地図なしの本線）
-
-隣り合う測定値が `disparity_m` 以上飛んでいる所を「物の縁」とみなし、その**遠い側**を
-近い側の値で塗る。塗る角度幅は `atan2(safety_half_width, r)` ＝ 距離 r の所で車体半幅を
-見込む角度で、**近いほど広く塗る**。塗った後は「一番遠い帯の真ん中」を狙う。
-
-★ **速度は「狙う方向の見通し」で決め、正面の扇で測り直さない。**
-道幅 1.0m の走路では中央に居ても壁が 0.5m 横にあるので、正面 ±20° の扇の最小値を採ると
-**どんな直線でも見通しが短く出て**踏み切れない。
-
-#### `dp` — `de` と `ftg` の良いところ取り
-
-「安全マージンの取り方・狙点の選び方」は `de`、「狙点を舵角へ変換する式」は `ftg` の Pure Pursuit
-（速度比例の前方注視距離）を引き継ぎ、**狙点のヒステリシス**（通路湾曲時のふらつき抑制）を足した。
-`de` との採否は `sim.bench` の数値で決める（development.md §4.3）。
-
-#### `ftg_cam` — カメラでLiDARが見えない低い壁を補う
-
-`ftg`の`plan()`は一切上書きしない。ギャップ探索・安全バブル・速度決定はセンサを
-問わないロジックだと示すための狙った制約で、新しいのは`cam_perception_node.py`
-（前方カメラの走行可否セグメンテーションを`raspi.nav.ipm`で地面座標へ逆投影し、
-既存の`OccGrid.raycast()`で`scan`と同じ形の距離配列に変換して`scan/cam`へ流す）
-だけ。**独立プロセス**（`planning_node`の中ではない）で、カメラの実視野
-（hfov≈66°）を超えて`fov_deg`を広げても意味が無いので60°に絞ってある。
-
-#### `line_trace` — 白線をなぞるだけの最小構成
-
-`line_perception_node.py`（`ftg_cam`とは別の独立プロセス）が前方カメラの
-「明るく無彩色」という単純な色特徴だけで白線を検出し、地面座標の近傍・遠方
-2点を`line/cam`へ流す。`line_trace`はその遠方点（無ければ近傍点）を`ftg`と
-同じ`nav.purepursuit.steer_for_target()`に渡すだけで、学習済みモデルもLiDARも
-使わない。障害物回避は一切しないので、STM32側の超音波`auto_stop`と組み合わせる
-前提。白線を見失う（`seen=False`）と`ready=False`で必ず制動に倒す。
-
-#### `e2e_lidar` — 学習ベースで地図も経路も持たない
-
-`ml_lidar/train_rl.py`（Stable-Baselines3のPPO、シム上の強化学習）で学習した方策を
-ONNX化し、点群をそのままステア／速度へ回帰する。`de`のような**教師データを使う
-模倣ではない**——「コースに沿って進めたら＋報酬・衝突したら－報酬」を頼りに試行錯誤
-で最適化したもので、`de`を再現するのではなく**それを超えうる**代わりに、未知の
-点群パターンに対する挙動は原理的に保証できない。planner 側に固定距離の停止策は持たず、
-STM32の`auto_stop`（速度に応じて伸びる動的停止距離。§9.3）で受ける。学習・ONNX化・GUIでの使い方は
-[`development.md` §12](development.md#12-学習ベースの自動運転を動かすlidar-e2e--カメラセグメンテーション--カメラe2e)。
-
-#### `slam2d_raceline` — 地図を作り、最小曲率の経路で走る
-
-```
-[EXPLORE] → [BUILD] → [DONE] → [LOCATE] → [RACE]  （障害物で進めないときだけ [DETOUR]）
- 地図を育てる  中心線と      保存して   保存地図の上で   周回
- （中身は FTG   レーシング    人を待つ   自己位置を復元
-  か人の操縦）  ライン
-```
-
-保存済みの地図を読めば `LOCATE` から始まる。自己位置は `slam2d/`
-（`raspi/auto/_slam2d_nav.py` 経由）。
-
-- **ループ閉じは EXPLORE→BUILD の瞬間に1回だけ**。RACE 中は追跡専用。確定（`freeze_steps()`）は
-  1周期 8 キーフレームずつ進め、その間は指令を出さない（Pi 5 では一括だと数秒止まった）
-- **LOCATE の採否**: 候補 12 個（場所ごとの最良の向きと、反対向きの最良）を仕上げ、全点に対する当たり率と
-  誤差から作る点数（`locate_score`）で比べる。2位が1位の 0.7 倍以上なら自動で決めず、点数 0.5 未満は
-  「見つからない」。どちらも地図のクリック（ヒント、120 秒で失効）で絞る。LOCATE 中に車が動いていれば待つ
-- **見失ったまま 3 秒止まると**、今の推定姿勢を種に LOCATE へ戻る。RACE 中に engage を解いた場合も、
-  走っていた保存地図を読み直して LOCATE から始め直す（地図作成には戻らない）
-- **EXPLORE を複数周にする**のは、1周では**動く物が地図から消えない**ため
-- **BUILD 中は止まるのが正しい。** `plan()` が重いと `auto/cmd` が途絶し、200ms 判定で制動に落ちる
-  ので、計算は周期に分けるか別プロセスに逃がす
-- 経路は**最小曲率最適化**（中心線からの横ずれを変数にした二次計画）。アウトインアウトを教えているのでは
-  なく、**曲率の総量を最小にすると結果としてそうなる**
-- 速度は「横 G の上限 → 後ろ向きパス（減速）→ 前向きパス（加速）」の3段。
-  **減速を先に掛ける**（「止まれない速度で入る」方が「加速が足りない」より危険）
-
-- **路面で変わる値は走りながら決められる**（`grip_learn` = 1、既定は 0 = 同定値で固定。
-  実装・定数・理由は `raspi/nav/grip.py` の docstring が正）。車に固有の値は校正、路面で変わる値
-  （横・加速・減速の上限）は走行中に決める、という分担。`vehicle.toml` の校正値は出発点として読むだけで書き戻さない。
-  学習しないときは同定値に固定の余裕（`slam2d_raceline.py` の `FIXED_*_USE`）を掛ける
-  - **横の上限は周回のタイムで決める**（`grip.GripLearner`）: 上限を 1 段上げて 1 周走り、速度プロファイルが
-    縮むはずの時間の一定割合以上ラップが縮んだら採用、縮まなければ戻して幅を半分にし、幅が尽きたら終わり。
-    安全装置は結果に直結する 3 つだけ（リアの滑り・線から外れた・コーナーの横偏差の増え）。働いたら**最後に上げたものを疑う**
-  - **前後の上限は「横の使い具合ごとの包絡」（実測の g-g 図）を学習する**（`grip.LongLearner`）。
-    加速・減速それぞれ、横の使い具合 u = 横加速度 ÷ 横の限界 の 3 点の値を持ち、間は直線でつなぐ。
-    出発点は校正の値（`[limits]`）× 既定の形。計画が包絡で決まっている所で「出た ÷ 求めた」を測って上下する。
-    自動運転中の目標車速のランプは、学習した上限の大きい方 ×1.1 で締める（`auto_ramp`）
-  - 学習値は地図の横の `<地図名>.grip.json` にだけ置く（ダウンロード/アップロードは npz に同梱）。読み込んだ値は
-    0.92 倍から再開するが、その地図で学習を終えた値（`GripMap.best_*`）があれば探索せずその値で 1 周目から走る。
-    安全装置・減速の遅れで下げる向きは働き、下げたら best も下げる。床が変わったら `.grip.json` を消す
-  - **仕上げた経路の写し**（`<地図名>.lines.pkl`、`mapstore.save_line_cache`）: route の仕上げ（Pi で約 8 秒）が終わったら
-    道路グラフと線を地図の横に書き、同じ地図・同じ条件（経路の設定・線の設定・車の諸元・経路を作るコード）で読み込んだときは
-    計算せずに使う。条件が違えば作り直す
-  - ラインの形は同定値で引いたまま。学習値で引き直す隠し設定 `grip_reline` はあるが既定は切
-  - 経路に乗るまで・障害物の回避中・推測航法中・MD 無応答中・舵が上限の区間・見通しで速度を
-    抑えている区間では学習しない。状態は reason の「横G学習 …」に出る
-  - シムでの確認と実機で試す手順は [`development.md`](development.md) §4.3
-
-`slam2d_route`（経路選択走行）は同じ地図・自己位置の上で、道路グラフ＋経由点で経路を選ぶ版で、
-**GUI のモード選択に出るのはこちらだけ**（分岐のないコースも自動経路で走れる。`slam2d_raceline` は
-その土台と `sim.bench` 用に残してある）。GUI に出す設定は安全と人の意思に関わる項目（21 個）に絞ってあり、
-残りは `ParamSpec(hidden=True)` で定数になっている（保存済みの値・GUI の値は読まない）。
+- **`ftg`**: 最遠点ではなく区間の真ん中を狙う（最遠点狙いは壁際を縫い、外輪が当たる）
+- **`de`**: 測定値が大きく飛ぶ所を物の縁とみなし、遠い側を近い側の値で塗る（近いほど広く）。**速度は狙う方向の見通しで決め、
+  正面の扇で測り直さない**（狭い走路では正面の扇の最小値が常に短く出て踏み切れない）
+- **`ftg_cam`**: `ftg` の `plan()` は上書きせず、`cam_perception_node` がセグメンテーションを `raspi/nav/ipm.py` で地面へ逆投影して
+  `scan` と同じ形にする（ギャップ探索はセンサを問わないため）
+- **`line_trace`・`e2e_lidar`**: 障害物には固定距離の停止策を持たず、STM32 の `auto_stop` で受ける。`e2e_lidar` はシム上の PPO
+  （`ml_lidar/train_rl.py`）で学習するので `de` を超えうるが、未知の点群への挙動は保証できない
 
 ### 9.3 「走る」より「止まる」を先に決める
 
@@ -663,284 +504,278 @@ STM32の`auto_stop`（速度に応じて伸びる動的停止距離。§9.3）�
 
 | 誰が | 条件 | 挙動 |
 |---|---|---|
-| planner | セクタ受信率が視野の 60% 未満 | `ready=False` → 制動 |
+| planner | セクタ受信率が視野の一定割合未満（`follow_the_gap.MIN_SEEN_RATIO`） | `ready=False` → 制動 |
 | planner | 通れる隙間が1つも無い | `ready=False` |
-| `slam2d_*` | 自己位置の一致度が下限未満 | `ready=False`「自己位置が信用できない」 |
-| `slam2d_*` | 経路からの横偏差が上限超 | `ready=False`「経路から Ncm 離れた」 |
-| planning_node | 点群が **300ms** 古い | 制動指令に読み替える |
-| planning_node | モード未選択・点群未着 | `ready=False` |
-| telemetry_node | `auto/cmd` が **200ms** 途絶（planner の死亡） | 制動に読み替える |
+| `slam2d_*` | 自己位置の一致度が下限未満・経路から離れすぎた | `ready=False`（理由を reason に出す） |
+| planning_node | 点群が古い・モード未選択・点群未着 | 制動に読み替える／`ready=False` |
+| telemetry_node | `auto/cmd` の途絶（planner の死亡） | 制動に読み替える |
 | GUI | 人が舵・スロットル・ブレーキを触った | 自律を解除して手動に戻す（クルコンと同じ作法） |
 | GUI | E-Stop / 操縦権の解放 / 接続断 | engage も同時に落ちる |
 
-> ⚠ **`sector_seen == False` は「障害物なし」ではない。** 欠測した方向は距離 0（侵入禁止）
-> として扱う。空きとして扱うと、**LiDAR が片側だけ落ちた瞬間にその方向へ舵を切る。**
+> ⚠ **`sector_seen == False` は「障害物なし」ではない。** 欠測方向は距離 0（侵入禁止）として扱う。空きとして扱うと
+> **LiDAR が片側だけ落ちた瞬間にその方向へ舵を切る。** 一方 **`dist == 0`（測距不能）だけは空き**として扱う — 唯一危険側に倒す判断で、
+> STM32 の `auto_stop` で受ける取引の上に成り立つ（大半が測距不能なら走らない。契約の正は `raspi/auto/base.py` の `scan_window`）。
+> **地図に焼くときは逆に捨てる**（一度「空き」と書いた場所は後から直せない）。
 >
-> 一方 **`dist == 0`（測距不能）だけは空きとして扱っている** — これが唯一、危険側に
-> 倒している判断で、「開けた場所で一歩も動けなくなるくらいなら、STM32の`auto_stop`
-> （★v0.12・速度に応じて伸びる動的停止距離 `d_stop`、LiDAR主・超音波補助）で受ける」
-> という取引の上に成り立っている。**planner側は同種の固定距離しきい値を持たない**
-> （STM32側の方が高性能なため）。
-> **地図に焼くときは逆に捨てる**（一度「空き」と書いた場所は後から直せないため）。
+> **固定距離の緊急停止は Pi 側に持たない。** STM32 の `auto_stop`（速度に応じた動的停止距離。[`uart_protocol.md` §5.6.4](uart_protocol.md#564-auto_stop-の約束)）
+> の方が高性能なため。前方余裕による減速は走行の一部として planner に残る。
 
-### 9.4 SLAM（`slam2d/`）
+### 9.4 地図を使う走行（`slam2d_raceline` / `slam2d_route`）
 
-車体非依存の汎用2D LiDAR SLAM は `slam2d/`（構成・API は `slam2d/README.md`、精度は専用ベンチ
-`sim.slam_bench`＝development.md §4.4）。`raspi/nav/` に残るのは経路生成・追従・回避の部品で、SLAM 本体ではない。
-SLAM 実装で効いた一般的な教訓:
+```
+[EXPLORE] → [BUILD] → [DONE] → [LOCATE] → [RACE]   （障害物で進めないときだけ [DETOUR]）
+ 地図を育てる  中心線と   保存して  保存地図上で  周回
+ （FTG か人）  経路      人を待つ  自己位置を復元
+```
 
-- **姿勢の基準時刻は点群の終端時刻**にする（「今」にすると毎周期その分後ろへ引き戻される）
-- **回頭はジャイロ、前進は `speed`**。前輪は操舵輪でオドメトリは低速でばたつくので車輪の値は使わない
-- 未探査領域に落ちる点は照合から外す。平行な壁（corridor）ではオドメトリ事前分布の罰則で滑りを抑える
-- **ループ閉じ後の評価は点群と地図の照合**で測る（「始点に戻った」と仮定すると誤差を自分で注入する）
+保存済みの地図を読めば `LOCATE` から始まる。自己位置は `slam2d/`（`raspi/auto/_slam2d_nav.py` 経由、§9.5）。
+
+- **ループ閉じは EXPLORE→BUILD の瞬間に1回だけ**、RACE 中は追跡専用。EXPLORE を複数周にするのは1周では動く物が地図から消えないため
+- **BUILD 中は止まるのが正しい。** `plan()` が重いと `auto/cmd` が途絶して制動に落ちるので、重い計算は周期に分けるかワーカースレッドへ
+- **LOCATE** は候補姿勢を点数で比べ、曖昧なら自動で決めず地図のクリック（ヒント）で絞る。見失って止まると LOCATE へ戻る
+- **判断は 10Hz、追従は 50Hz**（`tick()`）。合間は推測航法で姿勢を進めて舵と速度だけ更新する
+
+**分岐のあるコースは `slam2d_route`**（`Slam2dRaceLine` の派生）。最後の1周の軌跡から中心線を作ると走らなかった枝が
+経路に現れないので、経路を**地図全体の上の探索問題**にした: 3値地図を細線化した道路グラフ（`raspi/nav/roadgraph.py`）→
+経由点を有向エッジの Dijkstra でつなぐ（`raspi/nav/route.py`）→ 選ばなかった枝を壁とみなす回廊でラインを引く →
+走行中の切替は保留して乗り換えられる周期に移る（`raspi/nav/route_switch.py`）→ ミッション（n周／t秒 → 停止・駐車）で終える。
+
+- **グラフ＋経由点を採り、地図全体の Hybrid A\* は採らない。** 全体探索は Pi で遅く、地図の微小な差で分岐の選択が揺れる。
+  グラフは速く、何が選ばれるか人間に読める。Hybrid A\* は駐車と DETOUR だけ
+- **分岐は「行きたい枝に経由点を置く」**で選ぶ。経由点が無い間は、周回を全部挙げて見積もりラップが最短のものを走る
+  （`route.enumerate_loops`）。ルール上通れない道は `avoid_rects` で道路グラフを作る前に壁として塗る
+- **大会用と汎用で実装を分けない。** 周回数・停止点・信号の対応は `saved_maps/<name>.routes.json`（`raspi/auto/route_config.py`）というデータ
+- **経路への合流は計画する**（`_join_back`・`avoid.join_in`）。今の位置・向きから経路へ滑らかにつなぐ一時経路を引き、周回と
+  同じ速度計画で乗る（速度だけ抑えて追従で乗ると、ずれたまま大回りして壁に当たった）。外れすぎ・スタックは Hybrid A* で戻る
+- **障害物・他車は Frenet 格子で追い抜く**（`raspi/nav/overtake.py`）。抜けない相手には付いていく
+
+**速度と経路は同定値から決める。**
+
+- **限界は `Vehicle`（`raspi/core/vehicle.py`）が出し、「限界の何割を使うか」の設定は無い。** 手の絶対値だと同定し直しても走りが
+  変わらず、実行できない楽観的な値も入る
+- 速度は「横 G の上限 → 後ろ向き（減速）→ 前向き（加速）」。**減速を先に掛ける**
+- ラインは最小曲率を出発点に**見積もりラップを直接最小化**する（`raceline.refine_time`。最小曲率は最高速で頭打ちの所でも大回りする）
+- **路面で変わる値は走りながら決める**（`grip_learn`。正は `raspi/nav/grip.py` の docstring）。車に固有の値は校正、路面で変わる値
+  （横・加速・減速の上限）は走行中という分担で、校正値は出発点として読むだけ。横はラップタイムで（`GripLearner`）、前後は
+  横の使い具合ごとの包絡で（`LongLearner`）決め、地図の横の `.grip.json` に置く（[`development.md` §4.3](development.md#43-走行中の学習を確かめる)）
+- **追従**は既定 Pure Pursuit（速度比例の注視距離＋遅延補償＋曲率 FF）、`ctrl_mode` で MPC（`raspi/nav/mpc.py`。舵角・舵レートの
+  制約を明示的に持ち、numpy だけの射影ニュートン法で解く。遅延は Smith 予測器）
+- **速度指令は速度 PI の逆モデルで前倒しする**（`raspi/nav/speedctl.py`）。`brake`・`torque_mode`・`launch` はコーナーの減速に使わない
+  （brake は解いた後に目標が 0 から立ち上がり直す、`torque_mode` は ABS が効かない）
+
+**重い内側は C で回す。** Pi の numpy は参照 BLAS で密行列が非常に遅く、scipy・numba も無い。`raspi/nav/_native.c`
+（`native.py` が初回 import 時に `cc` でビルド）が経路の QP・ラインの評価・駐車の Hybrid A* などを、`slam2d/core/_native.c` が
+レイキャスト・採点を持つ。**Python 版と演算の順を揃えてビット一致させる**（`test_native.py`）。組めなければ Python 版に落ちる
+（遅いだけ）。式を変えるときは両方を直す。
+
+### 9.5 SLAM（`slam2d/`）
+
+`slam2d/` は**車体非依存の汎用 2D LiDAR SLAM**（構成・API は [`slam2d/README.md`](../slam2d/README.md)）。`raspi.*` を import せず、
+`raspi/auto/_slam2d_nav.py` の薄いアダプタ越しに使う。精度は専用ベンチ `sim.slam_bench`（[`sim/README.md`](../sim/README.md#slam-だけの評価simslam_bench)）。
+
+処理は 脱スキュー（`core/deskew`）→ 推測航法の予測（`core/motion`）→ 点対線 ICP（`core/register`）→ 地図更新（`core/grid`・`core/surfmap`）、
+ループ閉じは `backend/loop_detection` と `backend/posegraph`（g2opy）、保存地図上の再特定は `core/localize`。
+
+**方式は LiDAR スキャンマッチング。** 地磁気センサが無いのでオドメトリ単体の推測航法は方位がドリフトして成立しない。
+姿勢はスキャンマッチングが決め、オドメトリと IMU は**点群の歪み補正とマッチングの初期値**を担う。カメラ系は別の自動運転
+モードとして併存する。
+
+実装で効いた教訓: **姿勢の基準時刻は点群の終端時刻**にする（「今」にすると毎周期後ろへ引き戻される）。**回頭はジャイロ、前進は
+`speed`**（前輪は操舵輪で低速ではばたつく）。未探査領域に落ちる点は照合から外す。**ループ閉じ後の評価は点群と地図の照合**で
+測る（「始点に戻った」と仮定すると誤差を自分で注入する）。地図は `saved_maps/` に `<map>.json`・`.npz`・`.routes.json`・
+`.grip.json`・`.lines.pkl` で置く。
 
 ---
 
 ## 10. GUI
 
+React + TypeScript + Vite（コード地図は [`gui/README.md`](../gui/README.md)）。
+
 ### 10.1 情報を「見る頻度」で4層に分ける
 
-**「何を表示するか」から入ると破綻する。** 表示したい項目は20個以上あり、
-全部を同じ大きさで並べると何ひとつ読めない画面になる。
+**「何を表示するか」から入ると破綻する。** 表示したい項目は20個以上あり、全部を同じ大きさで並べると何も読めない。
 項目の重要度ではなく、**人間がどれくらいの頻度でそこに視線を置くか**で分ける。
 
 | 層 | 性質 | 扱い | 該当項目 |
 |---|---|---|---|
 | **A. 常時凝視** | 走行中ずっと見ている | 画面の大部分 | 前方カメラ、LiDAR 俯瞰、予定進路 |
 | **B. 常時周辺視** | 横目で追う | 小さく固定配置、色で異常を伝える | 速度、舵角、モード、遅延 |
-| **C. 異常時のみ** | 普段は見ない | **平常時は畳み、閾値超えで自動的に前に出す** | 温度4点、電圧、CPU、パケットロス |
-| **D. 診断・設定** | 走行後・調整時 | **別タブに隔離** | パラメータ、グラフ、キャリブレーション |
+| **C. 異常時のみ** | 普段は見ない | **平常時は畳み、閾値超えで前に出す** | 温度、電圧、CPU、パケットロス |
+| **D. 診断・設定** | 走行後・調整時 | **別タブに隔離** | パラメータ、グラフ、校正 |
 
-**C の扱いが設計の肝。** 温度や電圧を常時大きく出しても、正常な間は情報量がゼロ。
-
-> **累積カウンタを「異常時のみ開く」パネルの自動展開条件にしてはいけない。**
-> CRC エラーが起動直後に1回出ただけでパネルが開きっぱなしになり、層 C を畳んだ意味が消える。
-> **「今まさに異常」だけを自動展開の条件にし、累積はバッジで数字だけ出す。**
+**C の扱いが設計の肝。** 正常な間の温度・電圧は情報量ゼロ。**「今まさに異常」だけを自動展開の条件にし、累積カウンタは
+バッジで数字だけ出す**（起動直後の CRC エラー1回でパネルが開きっぱなしになるため）。ラジコンでは開発者にしか意味がない数字
+（CRC・時刻同期・スリップ量）を診断タブへ寄せる。**隠すのは正常時の数字だけで、異常は必ず出す**（E-STOP・ARM・ラッチ警告・通信断）。
 
 ### 10.2 タブは4枚
 
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
-| **ラジコン**（既定） | 運転する人 | 前方映像を全画面に、バックミラーとレース用ダッシュ風の計器（シフトライト・速度・舵角・G）を重ねる。介入はランプ、電池と温度は左上に常時。設定は ⚙ ドロワー |
-| **自動運転** | 開発する人 | 前方・後方・LiDAR を**対等に3分割**。指令と実測を並べ、遅れをそのまま読む。モード選択・engage・地図（SLAM 系モードのとき）・経路 |
-| **診断** | 原因を追う人 | 現在値の全項目 ＋ 時系列グラフ（uPlot・直近180秒・10Hz で常時記録）＋ ログのファイル一覧 |
-| **システム同定** | 車両を測る人 | 校正試験の選択・実行・記録の取得（development.md §4.5） |
+| **ラジコン**（既定） | 運転する人 | 前方映像を主に、バックミラー（後方 PIP）・計器・介入ランプ・電池と温度を重ねる。設定は ⚙ ドロワー |
+| **自動運転** | 開発する人 | 前方・後方・LiDAR を並べ、指令と実測・判断の根拠を出す。モード選択・engage・地図・経路（`gui/src/views/AutoView.tsx`） |
+| **診断** | 原因を追う人 | 現在値の全項目・時系列グラフ・ログのファイル一覧 |
+| **システム同定** | 車両を測る人 | 校正試験の選択・実行・記録の取得（[`calibration.md`](calibration.md)） |
 
-記録（`.sfl`/mcap）の開始・停止はタブバーの `LogControls` にあり、どのタブからでも押せる。
-
-**同じデータを2つの運転画面が見ている。** 違うのは選び方の基準で、
-ラジコンは「周辺視で読めるか」、自動運転は「原因を切り分けられるか」。
-
-**モード選択と engage は「自動運転」タブ1箇所だけ。** 走らせる操作は重複させていない。
-
-**診断グラフは走行中ずっと裏で記録している**（タブを開いているかに関係なく）。
-異常に気づいてから開いても手遅れなため。切断時はバッファを消さず、
-全系列 NaN の点を1つ積んで**線をそこで断つ**（切れたこと自体が後から見たい事象）。
+**同じデータを2つの運転画面が見る**が、ラジコンは「周辺視で読めるか」、自動運転は「原因を切り分けられるか」で選ぶ。
+**モード選択と engage は自動運転タブ1箇所だけ。** 記録の開始・停止はタブバーに常設。**診断グラフは走行中ずっと裏で記録する**
+（異常に気づいてから開いても手遅れなため）。押しっぱなしのボタンは置かず、ドロワーを閉じる操作に Esc は使わない（E-STOP のため）。
 
 ### 10.3 20〜30Hz のデータを React の state に入れない
 
-入れると再レンダリングで即座に破綻する。**流量で3つに分ける。**
+入れると再レンダリングで即座に破綻する。**流量で3つに分ける**（`gui/src/bus/live.ts`）。
 
 ```
-WebSocket ─┬─▶ 点群・カメラ  → bus/live.ts に置き、Canvas が rAF で読む（React を経由しない）
-           ├─▶ 数値表示      → 8Hz に間引いて配る（人間は 20Hz の数字を読めない）
-           └─▶ 接続状態・設定 → イベント時のみ zustand
+WebSocket ─┬─▶ 点群・地図・カメラ → live.ts に置き、Canvas が requestAnimationFrame で読む（React を経由しない）
+           ├─▶ 数値表示         → 間引いて配る（人間は 20Hz で変わる数字を読めない）
+           └─▶ 接続状態・設定    → イベント時のみ zustand（gui/src/store/ui.ts）
 ```
 
-| 用途 | 採用 | 却下した理由 |
-|---|---|---|
-| 状態管理 | **Zustand** | Redux はこの規模には過剰 |
-| 時系列グラフ | **uPlot** | Chart.js / Recharts はリアルタイム更新だと重い |
-| 点群・占有格子 | **Canvas 2D** | 360点なら十分 |
+状態管理は **Zustand**（Redux はこの規模に過剰）、時系列グラフは **uPlot**（Chart.js / Recharts はリアルタイムで重い）、
+点群・地図は **Canvas 2D**。
 
-### 10.4 操縦
+### 10.4 操縦と停止経路
 
-ARM・E-STOP・走行・灯火などの割り当て（キーボード・ゲームパッド）と制御方式（速度/トルク/MT）の
-正は **`gui/src/input/useDriving.ts` 冒頭のコメント**。方式の要点:
+キー・ゲームパッドの割り当てと制御方式（速度/トルク/MT）の正は **`gui/src/input/useDriving.ts` 冒頭のコメント**。
 
-- **ARM は `Enter`（または画面のボタン／パッドの ×）のトグル**、**`Esc` / E-STOP は即 DISARM**。
-  `Space` はデッドマンではなく**ブレーキ**（押しながら WASD を操作しにくいので、押している間だけ送る方式をやめた）
-- ARM 保持＋無操作タイムアウトの方式
-
-**ARM 方式にしたことで失ったもの**: 「手を離した瞬間に止まる」性質。
-無操作でも既定 20秒は armed のまま（速度指令は 0 に落ちるがモータは励磁される）。
-**代わりに残してある即時停止経路**は全部生きている:
+- **ARM は保持＋無操作タイムアウトの方式**（トグル）。`Esc` / E-STOP は即 DISARM。`Space` はデッドマンではなくブレーキ
+- ARM 方式で失ったのは「手を離した瞬間に止まる」性質。**代わりに残してある即時停止経路**:
 
 | 経路 | 応答 |
 |---|---|
-| `Esc` / 画面の E-STOP / パッド B | 即 DISARM（**権限も条件も要らない**） |
-| ウィンドウのフォーカス喪失 | 押していたキーを全部離したことにする（DISARM はしない。iPad では離席していなくても起きるため） |
+| `Esc` / 画面の E-STOP / パッド | 即 DISARM（**権限も条件も要らない**） |
+| ウィンドウのフォーカス喪失 | 押していたキーを全部離したことにする（DISARM はしない。iPad では離席しなくても起きる） |
 | タブが背後に回る | 即 DISARM |
-| ブラウザのフリーズ・Wi-Fi 断 | 送信が止まる → サーバ 150ms → io_node 150ms で DISARM（自律走行中は 5 秒の猶予の後。猶予を過ぎたら engage も解除し、回線が戻っても人が engage し直すまで走らない） |
+| ブラウザのフリーズ・Wi-Fi 断 | 送信が止まる → `cmd` 途絶で DISARM（自律走行中は猶予の後、engage も解除。回線が戻っても人が engage し直すまで走らない） |
 | 操縦権を失う（他端末の E-STOP・切断） | ARM 要求を下ろす。自動では取り直さない |
 
-**「なぜ止まったか」は必ず画面に出す**（`ui.disarmReason`）。
-「Esc で E-STOP」「タブが背後に回った」「20秒 無操作で自動解除」など。
-
-**操縦権は同時に1人。** 2枚目のタブが握ると拒否される
-（2画面から舵を切ると「なぜか勝手にハンドルが戻る」という再現困難な症状になる）。
-判定はクライアントが自分で生成した ID の文字列一致で行う。
-**E-Stop だけは権限を問わず誰でも押せる。** GUI の E-STOP の後は、操縦者が ARM を入れ直す
-（`arm=false` を一度送る）まで telemetry_node が ARM を通さない。STM32 の E-Stop でも engage を解除する。
-
-**灯火・ホーン・パッシングは ARM していなくても効く。**
-ただし**出すものが無いときは送らない** — 送り続けると操縦権を握りっぱなしになる。
-
-**自律走行中も、指令を 50Hz で送り続けているのは GUI**（速度・舵は 0 でサーバが差し替える）。
-つまり上の停止手段がそのまま自律走行の停止手段になる。
-手動との違いは2点だけ:
-**①人が舵・スロットル・ブレーキを触ったら自律を解除**（クルコンと同じ作法）、
-**②無操作タイムアウトを掛けない**（人が触らないのが正常な状態のため）。
+- **操縦権は同時に1人**（2画面から舵を切ると「勝手にハンドルが戻る」）。**E-Stop だけは権限を問わず誰でも押せる。**
+  GUI の E-STOP の後は操縦者が `arm=false` を一度送るまで telemetry_node が ARM を通さない
+- **灯火・ホーンは ARM していなくても効く**（速度0の `cmd` にビットだけ載せる）。出すものが無いときは送らない（送り続けると操縦権を握りっぱなしになる）
+- **自律走行中も指令を 50Hz で送り続けているのは GUI**（速度・舵はサーバが差し替える）。上の停止手段がそのまま自律の停止手段になる。
+  手動との違いは ①人が操作したら自律を解除 ②無操作タイムアウトを掛けない、だけ
 
 ### 10.5 設定は Pi 側が single source of truth
 
-- GUI 起動時に全設定を取得して表示
-- 変更は個別に SET → `CONFIG_ACK` の `applied` で確定
-- **楽観的更新をしない**。範囲外の値はクランプされるので、
-  GUI が「12.0 m/s に設定した」と表示しているのに実機は 8.0 m/s、という食い違いが起きる
+起動時に全設定を取得し、変更は個別に送って Pi の確定値で表示を更新する。**楽観的更新をしない**（範囲外の値はクランプされ、
+表示と実機が食い違う）。設定の状態は全クライアントに配る。
 
 ---
 
 ## 11. 記録と再生
 
-**開発効率を最も大きく左右する部分。**
-**実データの記録・再生**が実機の挙動を再現する手段になる（アルゴリズムの比較は `sim.bench`）。
-
-### 2種類あり、目的が違う
+**開発効率を最も大きく左右する部分。** 実データの記録・再生は物理シミュレータより安く、本物のセンサノイズが入っている。
+記録ファイルを `io_node` の代わりに流し込めるので、実車なしで知覚・SLAM・経路生成・GUI を開発でき、
+**バグ再現が確定的にできる**（「あの時だけ壁に突っ込んだ」を再現できる）。録り方・見方は [`development.md` §9](development.md#9-ログの取り方見方)。
 
 | | `.sfl` | `.mcap` |
 |---|---|---|
-| 書く人 | `io_node`（実時間ループの中） | `logger_node`（別プロセス） |
-| 中身 | **UART の生バイト**（送受信とも） | 解釈済みトピック **＋ カメラ画像** |
+| 書く人 | `io_node`（実時間ループの中、`raspi/rec/framelog.py`） | `logger_node`（別プロセス、`raspi/rec/mcap_log.py`） |
+| 中身 | **UART の生バイト**（送受信とも。CRC エラー・SEQ 逆行も残る） | 解釈済みトピック **＋ カメラ画像** |
 | 依存 | **stdlib のみ** | `mcap` |
-| 置き場 | **Pi の SD**（Wi-Fi が切れても止まらない） | **PC**（SD には1バイトも書かない） |
-| 量 | 2.5MB/分 | 10.3MB/分（大半が画像） |
-| 尻切れ | **前半は必ず読める** | 索引が要る → `mcap_repair` で救う |
+| 置き場 | **Pi の SD**。GUI の記録操作（`log/ctrl`）で開始/停止 | **PC に流す**（GUI の記録・`tools/record.sh`） |
+| 尻切れ | **前半は必ず読める** | 索引が `finish()` で書かれるので弱い → `raspi.tools.mcap_repair` で救う |
 
-> **なぜ `.mcap` を SD に書かないか。** 実測 10.3MB/分は **1日 15GB** に相当し、
-> 28GB の SD を毎日半分書き潰す。**SD は書き換え回数に寿命がある。**
-> `logger_node -o -` で標準出力に流し、WebSocket か ssh パイプで PC に落とす。
-> SD への書き込みは実測 **10.54 → 2.42 MB/分（77%減）**になった。
-
-### 再生
-
-```bash
-python -m raspi.nodes.replay_node logs/run.sfl --bus --loop
-```
-
-**`io_node` の代わりにバスへ流し込む**ので、その上流（perception / planning / GUI）は
-実機と同じコードのまま動く。**バグ再現が確定的にできる**（「あの時だけ壁に突っ込んだ」を再現できる）。
-
-`.sfl` → `.mcap` の変換も `replay_node` + `BusBridge` をそのまま通すので、
-**実機・再生・変換の3つで同じ解釈コードが動く**（書き直すと必ずズレる）。
-
-`.mcap` は **Foxglove Studio でそのまま開ける**（自作 GUI＝ライブ用、Foxglove＝オフライン解析用）。
+- **2段構えの理由**: 実時間の `io_node` に外部依存を持ち込まないため。MCAP は Foxglove Studio で開ける標準形式（自作 GUI＝ライブ、
+  Foxglove＝オフライン解析）
+- **`.mcap` を SD に常時書かない**（SD の書き換え寿命）。`logger_node -o -` で標準出力に出して PC に落とす。Pi 単体で画像も録りたいときだけ
+  `install_services.sh --with-logger`
+- **再生**は `replay_node`（[`development.md` §3](development.md#3-コマンド早見表)）。`.sfl` → `.mcap` の変換（`raspi.tools.sfl2mcap`）も
+  `replay_node` + `BusBridge` を通すので、**実機・再生・変換で同じ解釈コードが動く**
+- MCAP は JSON + jsonschema で書き（Foxglove の MCAP に msgpack が無いため）、Foxglove 用の `/viz/*` と推測航法の `/odom`・`/tf` を足す。
+  **`map` と `odom` は tf でつながない**（独立した推定で原点が一致する保証が無い）。`log_time` は UNIX epoch、メッセージ内の時刻は単調時刻のまま
+- `raspi/tools/slam_replay.py` は記録に実機と同じ設定の slam2d を回し、比較用トピックを足した `<入力>_slam.mcap` を作る
 
 ---
 
-## 12. シミュレータ
+## 12. シミュレータ・学習・ファームのホストシム
 
-**実車が無い場所（Mac）で、実機と同じ制御コードのまま走らせる仕組み。**
+### 12.1 シミュレータ（`sim/`、Mac）
 
-### 入れ替え点は `SerialLink` の位置
+使い方は [`sim/README.md`](../sim/README.md)、手順は [`development.md` §4.1](development.md#41-シミュレータとベンチ)。
+
+**偽装するのは STM32 だけ。入れ替え点は `SerialLink` の位置。**
 
 ```
                             ┌─── SerialLink ──→ 実 STM32
 io_node ── link.poll/send ──┤
-                            └─── SimLink ────→ 仮想STM32 + 車両モデル + 仮想LD06 + コース
+                            └─── SimLink ────→ 仮想 STM32 + 車両モデル + 仮想 LD06 + コース
+                                                   │ UDP 127.0.0.1
+                                                sim.gui（pygame）
 ```
 
-`import serial` はリポジトリ全体で `raspi/io/serial_link.py` の**1箇所だけ**。
-ここに同じ約束を満たす偽物を差すと、**`io_node` より上流は1行も変わらない**。
+`IoNode` は link をコンストラクタ注入で受け、`import serial` はリポジトリ全体で `raspi/io/serial_link.py` の1箇所だけ。
+ここに同じ約束を満たす偽物を差すと **`io_node` より上流は1行も変わらない**（パケット定義・CRC・`convert.py` の換算と
+クランプ・`ScanAssembler`・時刻同期・`--allow-arm` ゲート・`cmd` タイムアウト・`telemetry_node`・GUI が実機と同じ）。
 
-**実機と同一のコードが走るもの**: パケット定義・CRC・フレーミング・`convert.py` の換算と
-クランプ・`ScanAssembler` の鏡像反転・時刻同期・`--allow-arm` ゲート・`cmd` 150ms
-タイムアウト・`bus_bridge`・`telemetry_node`・GUI。
+- **シムの概念を実機側に持ち込まない。** コース切替・ノイズ量など実機に対応物が無いものの UI は `sim/gui.py` に置き、
+  シム ↔ シム GUI は内部バスではなく **UDP ループバック**（`types.py` と `TOPIC_OWNER` にシムの語彙を入れない）
+- **唯一の例外が SIM バッジ**（`LinkDiag.sim`）。**安全要件**で、画面が見分けられないと「シムのつもりで `--allow-arm` した実車が動く」
+- **わざと鏡像で出している。** 素直に出すと反転処理が壊れていても画面が正しく見え、バグを検出できない
+- **モデル化の深さ**: 自転車モデル・操舵のむだ時間＋1次遅れ・ファームと同じ速度 PI・簡易のグリップ限界・車体外形での衝突。
+  タイヤの非線形・後輪の滑り・TC/TV の内部は持たない。**センサは逆に作り込んである**（ノイズ・セクタ欠損・遅延・走査ゆがみ・
+  独立した STM32 の時計）。綺麗すぎる点群で開発すると実車で初めて破綻するため
+- `raspi/tools/bus_demo.py` は GUI の配管確認用の運動学モック（UART を通らない）で、物理シミュレータに育てない
 
-### モデル化の深さ
+### 12.2 学習パイプライン（Mac）
 
-| 入れてある | 入れていない |
+`ml_cam/`（セグメンテーション）・`ml_cam_e2e/`（カメラの模倣学習）・`ml_lidar/`（LiDAR の PPO）・`ml_common/`（学習 GUI の共通部品）。
+Mac で学習して ONNX にし、Pi の `onnxruntime` で推論する（`models/`）。依存の向きは `学習 → sim`（sim は学習を知らない）。
+
+### 12.3 ファームのホストシム（`tools/fwsim/`）
+
+STM32 の制御コード（別リポジトリ）をホストでそのままコンパイルし、車両モデルと閉ループで回す（`python -m tools.fwsim.bench`）。
+ファームの定数と `vehicle.toml` の一致は `tools/fwsim/tests/test_fw_constants.py` が突き合わせる。
+
+---
+
+## 13. リポジトリ構成と技術スタック
+
+| パス | 中身 |
 |---|---|
-| 自転車モデル（後輪車軸中心） | タイヤモデル・スリップ・横滑り |
-| 操舵の**むだ時間 + 1次遅れ** + レート制限 | TC / TV の介入 |
-| 速度は**ファームの PI**（目標ランプ→PI→加速度上限。`SpeedController`） | カメラ画像の生成 |
-| 車体外形（多角形）での衝突判定 | 路面μ・勾配 |
-| **仮想 LD06**（距離ノイズ・点欠損・**セクタ欠損**・伝送遅延・走査ゆがみ） | 電流・温度・電圧の物理的根拠 |
-| UART の線上時間（1Mbps）による順番待ち | |
-| 仮想 STM32 の独立した時計（既定 +3378ppm） | |
+| `raspi/` | Pi で動くコード。`nodes/`（プロセス）・`auto/`（planner・地図の保存・校正試験。バスも WS も知らない）・`nav/`（経路・追従・回避・学習・C の内側）・`bus/`・`msgs/`・`proto/`・`core/`（車両諸元・時刻同期・リンク健全性）・`io/`・`rec/`・`setup/`・`tools/`・`tests/` |
+| `gui/` | React + TypeScript + Vite（`src/generated/` は生成物） |
+| `slam2d/` / `sim/` | 車体非依存の SLAM / Mac 用シミュレータ |
+| `ml_*/` / `models/` | 学習（Mac のみ）/ 推論モデル |
+| `tools/` | 配備・検査・校正の解析（`calib`）・ファームのホストシム（`fwsim`）・ランチャー |
+| `config/` | `vehicle.toml` と生成器・GUI の保存値（`auto.json` ほか） |
+| `saved_maps/` / `logs/` | 地図・経路 / 記録 |
+| `site/` | 公開用の技術解説サイト（数値の正は持たない） |
 
-**センサを作り込んであるのは意図的**（綺麗すぎる点群で開発すると実車で初めて破綻するため）。
-車両の動特性は `[dynamics]`（車両の校正で実機を測った値。development.md §4.5）。
-TC の細かい動きや空転はシムに入っておらず、グリップの限界は加速上限の一定値で近似している。
+**生成元を正とし、生成物を直接編集しない**（`raspi/proto/generate.py`、`config/generate.py`。整合は `tools/check.sh`）。
 
-### シムの概念を実機側に持ち込まない
-
-**シミュレータが偽装するのは STM32 だけ。** コース切替・ノイズ量・欠損率は実機に対応物が
-無い概念なので、その操作 UI は実機 GUI ではなく **`sim/gui.py`（pygame）側**に置く。
-シム ↔ シム GUI の通信も、内部バスではなく **UDP ループバック**にしてある。
-
-> **唯一の例外が SIM バッジ**（`LinkDiag.sim`、bool 1個）。これは利便性ではなく**安全要件**で、
-> シムと実機の画面が見分けられないと
-> 「**シムのつもりで `--allow-arm` した実車が動く**」が起きる。
-
-### わざと鏡像で出している
-
-実機の LD06 は裏向き実装で、`ScanAssembler` が `車両角 = (360 − センサ角) % 360` で戻している。
-**シミュレータは反転した状態で `LIDAR_SECTOR` を出す。**
-素直に車両座標で出すと、反転処理が壊れていても画面が正しく見えてしまい、
-**バグを永久に検出できない。**
-
----
-
-## 13. 現在地とロードマップ
-
-### ロードマップ
-
-| Phase | 内容 | 状態 |
+| 領域 | 採用 | 却下した選択肢と理由 |
 |---|---|---|
-| **0** | UART プロトコル、GPIO、時刻同期、ログ記録・再生、WS サーバ、GUI 骨格 | 完了 |
-| **1** | 可視化の完成、設定反映、カメラ校正、アクチュエータ遅延の実測 | 実装済み（車両の校正は [`calibration.md`](calibration.md)） |
-| **2** | 反射行動（緊急停止・壁沿い走行・障害物回避） | `ftg`・`de` ほか実装済み |
-| **3** | 自己位置推定と環境地図 | `slam2d/` を実装（検証状況は PROGRESS.md） |
-| **4** | 大域経路計画 + 経路追従 | `slam2d_route`（土台は `slam2d_raceline`。Pure Pursuit・MPC は `raspi/nav/mpc.py`） |
-| **5** | カメラ認識の本格活用、駐車タスク | `ftg_cam`・`cam_e2e`・`park_to_point` 等を実装 |
-
-現在の進捗・実測値・次にやることは `PROGRESS.md` と [`competition_plan.md`](competition_plan.md)。
-
+| ミドルウェア | **自作軽量フレームワーク**（ZeroMQ + 共有メモリ） | ROS 2 — 独自ハード・独自 GUI で既存資産の恩恵が薄く、依存が重い |
+| Pi 側言語 | **Python 中心**、重い内側は numpy / C | C++ 全面 — 開発速度が落ちる |
+| シリアライズ | **msgspec**（内部）/ **msgpack**（WS） | pickle — 遅く、型が無い |
+| GUI | **React + TypeScript**（ブラウザ） | バニラ JS — 表示項目20以上で状態管理が破綻する |
+| ログ | **MCAP**（＋自作 `.sfl`） | 独自形式のみ — Foxglove で開けない |
+| GPIO / カメラ | **gpiozero + lgpio** / **picamera2** | RPi.GPIO / picamera — Pi 5 で動かない |
+| ネットワーク | **NetworkManager（nmcli）** | hostapd + dnsmasq — Bookworm 以降は競合する |
 
 ---
 
-## 14. 用語集
+## 14. 現在地とロードマップ
+
+設計上の Phase（UART・GPIO・記録・GUI → 可視化と校正 → 反射行動 → 自己位置と地図 → 経路計画と追従 → カメラ認識と駐車）は
+すべて実装済みで、モードは §9.2 のとおり。
+
+**未解決・要相談の事項はこの文書に表として持たない。** 今の状態・未検証の項目・原因が分かっていないことは
+`../PROGRESS.md` 冒頭の「現在の状態」と「原因が分かっていないこと」、大会に向けた優先順位は
+[`competition_plan.md`](competition_plan.md)、実装上の小さな穴は [`development.md` §11](development.md#11-既知の穴と文書の読み方) を見る。
+
+---
+
+## 15. 用語集
 
 | 用語 | 意味 |
 |---|---|
 | **ARM / DISARM** | モータへの通電を許可した状態／禁じた状態。ARM は人間が GUI で保持し続ける必要がある |
 | **engage** | 自律走行に任せるという意思表示。**ARM とは別物**で、これだけでは車は動かない |
 | **E-Stop** | 緊急停止。GPIO6 ハートビート途絶で STM32 が**ラッチ**する。解除は車両のボタン2 |
-| **デッドマン** | 人が手を離したら止まる仕組み。**離したら「0 を送る」のではなく「送信そのものを止める」**（§10.4） |
-| **ready / brake** | planner の「計画を放棄した（走ってよいか分からない）」／「計画できているが**意図して止めている**」 |
-| **TC / TV** | トラクションコントロール／トルクベクタリング。どちらも STM32 内で完結 |
+| **デッドマン** | 人が手を離したら止まる仕組み。**「0 を送る」のではなく「送信そのものを止める」**（§8.3） |
+| **ready / brake** | planner の「計画を放棄した」／「計画できているが**意図して止めている**」 |
 | **`.sfl`** | UART の生バイトを記録する自作形式（Surge Frame Log）。stdlib だけで読み書きできる |
-| **MCAP** | Foxglove 製のロボットログ標準フォーマット |
-| **CONFLATE** | ZeroMQ のキュー長を1にして最新値だけ残す設定。制御系では常にこれが正解 |
-| **セクタ** | LiDAR 1周を12分割した単位。1セクタ＝30点 |
-| **`sector_seen`** | そのセクタを受信できたか。**False は「障害物なし」ではなく「不明＝侵入禁止」** |
-| **base_link** | 車体固定の基準座標系。**後輪車軸の中心**に置いてある |
-| **odom / map** | 連続だがドリフトする座標系／SLAM が補正するが跳ぶ座標系。用途で使い分ける |
-| **Follow the Gap (FTG)** | 点群の中で最も広く空いた方向へ走る反射型アルゴリズム |
-| **Disparity Extender** | 障害物の縁を車体幅ぶん膨らませてから空きを探す反射型アルゴリズム |
-| **Pure Pursuit** | 前方の目標点を追いかける経路追従則。lookahead を速度比例にするのが定石 |
+| **セクタ** / **`sector_seen`** | LiDAR 1周を12分割した単位／その受信有無。**False は「障害物なし」ではなく「不明＝侵入禁止」** |
 
----
-
-## 関連文書
-
-| 文書 | 内容 |
-|---|---|
-| [`architecture.md`](architecture.md) | **設計書。「なぜそうしたか」の正** |
-| [`uart_protocol.md`](uart_protocol.md) | UART プロトコル仕様の正（数値の正は `raspi/proto/protocol.toml`） |
-| [`stm32_interface.md`](stm32_interface.md) | STM32 側の実装仕様書 |
-| [`development.md`](development.md) | **変更の反映方法とトラブルシューティング** |
-| [`../sim/README.md`](../sim/README.md) | シミュレータの使い方 |
-| [`../gui/README.md`](../gui/README.md) | GUI のコード地図 |
-| `PROGRESS.md` | 開発の経緯と実測値。**「今どこまでやったか」はこれが正** |
+関連文書: [`stm32_interface.md`](stm32_interface.md)（STM32 側の実装仕様）・[`competition_plan.md`](competition_plan.md)・[`../sim/README.md`](../sim/README.md)・[`../gui/README.md`](../gui/README.md)・[`../slam2d/README.md`](../slam2d/README.md)（ほかは冒頭の表）

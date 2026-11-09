@@ -555,9 +555,9 @@ class VirtualStm32:
         else:
             self._steer_freeze = None
 
-        # v0.13: サイドブレーキ。**個別車輪の位置制御モデルを持たないため、
+        # サイドブレーキ。**個別車輪の位置制御モデルを持たないため、
         # 最大制動として近似する**（実車は速度に関わらず後輪を機械的に位置固定するが、
-        # 運動学モデルでは表現できない。実機での動作検証も未了 — `pi_uart_protocol_v0.13_delta.md`）
+        # 運動学モデルでは表現できない）
         self.side_brake_active = bool(self._cmd_flags2 & packets.CMD_FLG2_SIDE_BRAKE) and cmd.armed
         if self.side_brake_active:
             cmd = DriveInput(armed=cmd.armed, brake=True, brake_torque=0.0,

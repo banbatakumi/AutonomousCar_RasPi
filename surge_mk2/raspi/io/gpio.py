@@ -1,6 +1,6 @@
 """GPIO — E-Stop ハートビート（第1安全層）と状態表示。
 
-配線は `docs/architecture.md` §2 / §7.1。
+配線は `docs/system_overview.md` §2 / §8.1。
 
 | ピン | 用途 |
 |---|---|

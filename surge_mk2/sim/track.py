@@ -10,7 +10,7 @@
       "path": [["straight", 3.0], ["arc", 1.2, 90], ...]
     }
 
-`["arc", 半径[m], 角度[deg]]` の角度は**反時計回りが正**（`architecture.md` §5.1 の規約。
+`["arc", 半径[m], 角度[deg]]` の角度は**反時計回りが正**（`system_overview.md` §7 の規約。
 左旋回が正）。`["straight", 長さ[m]]`。`["turn", 角度[deg]]` は点を打たずその場で
 向きだけ変える（`sim/sketch.py` が頂点ベースの折れ線を変換するときの、直線同士が
 鋭角に折れる継ぎ目専用。手作りの `path` では普通は使わない）。
@@ -175,9 +175,8 @@ def add_offset_discs(grid: np.ndarray, origin: tuple[float, float], resolution: 
 
     `rasterize()`の`divider`（上の`rasterize()`docstring参照）と同じ「掘ったあとに
     立てる」ロジックを、**中心線上に限らず任意の横オフセット位置**に置けるよう
-    一般化したもの。`sim/random_course.py`の`narrow`（両側対称にオフセットして局所的に
-    道幅を狭める）・`obstacle`（片側にオフセットした孤立円盤を浮かべる）アーキタイプの
-    土台。
+    一般化したもの。両側対称にオフセットして局所的に道幅を狭める・片側にオフセットした
+    孤立円盤を浮かべる、といったコースの土台。
 
     :param pts: `rasterize()`に渡したのと同じ中心線点列 `(N,3)`（x, y, yaw）。
         弧長は`rasterize()`の`divider`と同じ「始点からの累積距離」（ループを
@@ -255,7 +254,7 @@ def build(meta: dict) -> dict:
 
     **これがあると走れる幅が半分になる。** 道幅 0.9m なら車線は 0.45m で、
     車体半幅 0.09m×2 と余裕を引くと振れ幅は 8cm しか残らない。地図の分解能が
-    そのまま経路の質に効く領域なので、`raspi/auto/raceline.py` の `MAP_RES` は
+    そのまま経路の質に効く領域なので、`raspi/auto/slam2d_raceline.py` の `MAP_RES` は
     ここに合わせて 2.5cm にしてある。
     """
     res = float(meta.get("resolution", 0.02))

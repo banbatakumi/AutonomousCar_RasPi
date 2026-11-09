@@ -1,4 +1,4 @@
-"""`config/vehicle.toml` の読み手（`docs/architecture.md` §5.3）。
+"""`config/vehicle.toml` の読み手（`docs/system_overview.md` §7）。
 
 **全ノードがここだけを見る。** 同じ数字を2箇所に書くと必ず片方が古くなる、が §5.3 の
 言い分なので、Pi 側でも読む口をひとつに絞っておく。
@@ -115,8 +115,8 @@ class Vehicle:
     measured: bool = False
     wheelbase: float = 0.23                #: L [m]（実測確定）
     track: float = 0.155                   #: トレッド [m]（実測確定）
-    #: 最大路面舵角 [rad]。**正は `vehicle.toml` の `max_steer`**（★v0.18 から、同定したリンクの
-    #: 換算を通した値で現在 0.4636 = 26.6°。STM32 の `LIMITS.max_steer_rad` と同じ）。
+    #: 最大路面舵角 [rad]。**正は `vehicle.toml` の `max_steer`**（同定したリンクの
+    #: 換算を通した値。STM32 の `LIMITS.max_steer_rad` と同じ）。
     #: この既定 0.524 は toml にキーが無いときの値で、換算なし（モータ角 ±60° × リンク比 0.5 = 30°）
     max_steer: float = 0.524
     wheel_radius: float = 0.03             #: [m]（実測確定）
@@ -190,7 +190,7 @@ class Vehicle:
     speed_ki: float = 0.0
     speed_plant_gain: float = 0.0
     #: 目標速度をならす傾きの上限 [m/s²]。**`[safety] cmd_accel_limit_m_s2`**（Pi が COMMAND に載せる
-    #: 上限。v0.22 で STM32 の固定上限 3.0 が無くなり、これが実効の上限になった）
+    #: 上限。STM32 は固定の上限を持たないので、これが実効の上限）
     speed_ramp_max_m_s2: float = 3.0
     #: LiDAR の周の終わり → STM32 が COMMAND を受理するまで [s]
     control_latency_s: float = 0.0
@@ -205,7 +205,7 @@ class Vehicle:
     #: そのフィードフォワードが目標車速の傾きに掛けるローパスの時定数 [s]（`[dynamics] speed_ff_filter_s`、
     #: ファームの定数 DRIVE_SPEED_FF_TAU_S）。Pi はこの時定数ぶん先の速度を送る
     speed_ff_filter_s: float = 0.02
-    #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/architecture.md` §9.4）。
+    #: 指令が途絶してから DISARM に落とすまで [ms]（`docs/system_overview.md` §8.2）。
     #: **telemetry_node と io_node が独立に持つが、値はここ 1 つ**
     cmd_deadman_ms: float = 150.0
     #: 自律走行中だけ、GUI からの `cmd` の途絶をここまで待つ [ms]（`vehicle.toml` の説明を参照）

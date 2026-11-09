@@ -199,7 +199,7 @@ typedef struct {
     int16_t  roll;                 /* 0.0001 rad */
     int16_t  motor_current[3];     /* 0.001 A  [RL,RR,ST] 双方向 */
     int16_t  torque_cmd[2];        /* 0.0001 N.m  [RL,RR] 指令値 */
-    int16_t  slip[2];              /* 0.0001  [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13 */
+    int16_t  slip[2];              /* 0.0001  [RL,RR] TC用スリップ率。正=空転 負=ロック傾向。分母は max(|基準速度|, 下限) */
     int16_t  tc_limit_nm[2];       /* 0.0001 N.m  [RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13 */
     int16_t  torque_req[2];        /* 0.0001 N.m  [RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16 */
     int16_t  abs_limit_nm;         /* 0.0001 N.m  ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16 */

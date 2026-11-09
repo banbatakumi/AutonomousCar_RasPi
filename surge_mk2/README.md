@@ -50,7 +50,7 @@ flowchart LR
 | [`config/`](config/) | 車両パラメータ（`vehicle.toml`）、自動運転・走行設定の保存値、生成スクリプト |
 | [`ml_cam/`](ml_cam/)、[`ml_cam_e2e/`](ml_cam_e2e/)、[`ml_lidar/`](ml_lidar/) | 学習・評価・モデル出力のパイプライン |
 | [`ml_common/`](ml_common/) | 機械学習用 GUI と共通部品 |
-| [`tools/`](tools/) | デプロイ、検査、ログ変換、同定などの開発ツール |
+| [`tools/`](tools/) | デプロイ、検査、校正の解析、ファームのホストシム、補助 GUI のランチャーなどの開発ツール |
 | [`models/`](models/) | 推論用モデル |
 | [`saved_maps/`](saved_maps/) | 保存済みの地図と走行経路 |
 | [`docs/`](docs/) | 設計、仕様、開発手順、運用計画 |
@@ -69,7 +69,7 @@ python3 -m venv --system-site-packages .venv
 cd gui && npm ci && cd ..
 ```
 
-環境によっては、カメラ・Raspberry Pi GPIO・実機向け依存関係を Mac にインストールする必要はありません。実機のセットアップは [開発ガイド](docs/development.md) を参照してください。
+カメラ・GPIO など実機向けの依存関係は Mac には要りません。Pi 側のサービス登録は `raspi/setup/install_services.sh`、反映の手順は [開発ガイド](docs/development.md) を参照してください。
 
 ### 2. シミュレータを起動する
 
@@ -133,13 +133,12 @@ tools/deploy.sh --test       # 配備後に Raspberry Pi 側のテストを実�
 
 | 目的 | 文書 |
 | --- | --- |
-| システム構成を1枚で把握する | [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) |
-| システム全体を把握する | [docs/system_overview.md](docs/system_overview.md) |
-| 設計理由を知る | [docs/architecture.md](docs/architecture.md) |
+| システム全体と設計理由を把握する | [docs/system_overview.md](docs/system_overview.md) |
 | 開発・配備・トラブルシューティング | [docs/development.md](docs/development.md) |
 | UART プロトコル仕様 | [docs/uart_protocol.md](docs/uart_protocol.md) |
 | STM32 とのインターフェース | [docs/stm32_interface.md](docs/stm32_interface.md) |
 | 現在の進捗・実測値 | [PROGRESS.md](PROGRESS.md) |
+| 車両の校正 | [docs/calibration.md](docs/calibration.md) |
 | 文書の一覧 | [docs/README.md](docs/README.md) |
 | 大会に向けた計画 | [docs/competition_plan.md](docs/competition_plan.md) |
 

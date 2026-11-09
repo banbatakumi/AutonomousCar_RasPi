@@ -43,7 +43,7 @@
    走行の上限には使われない（`_command_packet`）
 
 さらに GPIO6 ハートビート（第1層）と STM32 の COMMAND タイムアウト（第2層）が
-下にある。ここは第3層（`docs/architecture.md` §7）。
+下にある。ここは第3層（`docs/system_overview.md` §8）。
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ VERSION_REPLY_WINDOW_NS = 1_500_000_000
 LIMITS_RETRY_S = 1.0
 
 #: `cmd` がこれだけ途絶したら DISARM に落とす。
-#: **値は `config/vehicle.toml` の `[safety]` が正**（`docs/architecture.md` §9.4）。
+#: **値は `config/vehicle.toml` の `[safety]` が正**（`docs/system_overview.md` §8.2）。
 #: telemetry_node も同じ判定を独立に持つ（片方が死んでも成立させるための冗長）が、
 #: **数字そのものは1箇所**にしてある。
 CMD_TIMEOUT_NS = int(Vehicle.load().cmd_deadman_ms * 1_000_000)
@@ -1294,8 +1294,8 @@ def main() -> int:
     ap.add_argument("--sim", action="store_true",
                     help="UART の相手を Mac 上のシミュレータにする（`sim/` 参照）。"
                          "実機では使わない")
-    ap.add_argument("--course", default="sim/courses/oval.png",
-                    help="--sim のときのコース PNG")
+    ap.add_argument("--course", default="normal",
+                    help="--sim のときのコース。名前（`normal`）か sim/courses の PNG・JSON のパス（sim.run と同じ）")
     args = ap.parse_args()
 
     sys.stdout, sys.stderr = _QuietStream(sys.stdout), _QuietStream(sys.stderr)
@@ -1305,7 +1305,8 @@ def main() -> int:
             # **遅延 import。** Pi にはこのパッケージを配らないので、
             # --sim を付けない限り評価されてはいけない
             from sim.link import create_sim_link
-            link = create_sim_link(args.course)
+            from sim.run import resolve_course
+            link = create_sim_link(resolve_course(args.course))
         else:
             link = SerialLink(args.port, args.baud)
     except Exception as e:

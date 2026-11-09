@@ -1,4 +1,4 @@
-"""C の内側ループ（`raspi/nav/_native.c`・`native.py`）が Python 版と同じ値を出すか（2026-11-02）。
+"""C の内側ループ（`raspi/nav/_native.c`・`native.py`）が Python 版と同じ値を出すか。
 
 経路の仕上げの評価・速度プロファイル・曲率・車体外形の余裕・細線化は、C 版と Python 版が**ビット一致**
 すること（`np.array_equal`）を確かめる。演算の順を揃え、`-ffp-contract=off` で組んでいるので、どこかで

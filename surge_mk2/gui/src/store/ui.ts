@@ -1,5 +1,5 @@
 /**
- * イベント駆動の状態だけを持つ store（`architecture.md` §10.4 の3層目）。
+ * イベント駆動の状態だけを持つ store（`system_overview.md` §10.3 の3層目）。
  *
  * **20Hz で変わるものはここに入れない。** 接続状態・操縦権・設定の類だけ。
  */
@@ -34,7 +34,7 @@ export type InputSource = 'none' | 'keyboard' | 'gamepad' | 'slider' | 'auto'
  * 超えた分は `io_node` の `_send_command`（`--max-speed`/`--max-steer` と `LIMITS` の
  * 小さい方でクランプ）で黙って切り捨てられるので、GUI 側のレンジが実際の上限より
  * 緩いと「表示上は出せるはずなのに実際は出ない」食い違いが起きる
- * （`architecture.md` §10.5）。**GUI 側の `--max-speed` 相当の運用上限
+ * （`system_overview.md` §10.5）。**GUI 側の `--max-speed` 相当の運用上限
  * （`raspi/setup/install_services.sh` の deploy 引数）を上げ忘れていないか確認すること。**
  *
  * ⚠ **実際に効く上限は `LIMITS`（STM32 の物理的な上限）。** io_node は `LIMITS` を受け取った後は
@@ -511,11 +511,11 @@ export const LIGHT_OFF = 0
 export const LIGHT_DAYTIME = 1
 export const LIGHT_NORMAL = 2
 export const LIGHT_LABEL = ['消灯', 'DAY', 'NORMAL']
-/** `L` キー / パッド △ で回す順。**消灯を含む**（v0.4 では消灯にできなかった） */
+/** `L` キー / パッド △ で回す順。**消灯を含む** */
 export const LIGHT_CYCLE = [LIGHT_OFF, LIGHT_DAYTIME, LIGHT_NORMAL]
 
 /**
- * MT（擬似変速）モードのギア段（v0.17、v0.18 で N を追加）。R と D1 の間に N（ニュートラル）
+ * MT（擬似変速）モードのギア段。R と D1 の間に N（ニュートラル）
  * を挟んだ7段の並びで、実車のシフトと同じく「1つ隣へ」動かす前提の配列にしてある
  * （`useDriving.ts` の L1=シフトダウン/R1=シフトアップが `mtGearIndex`/`mtGearAt` で
  * 1段ずつ動かす）。D/R レンジ（`ui.gear`）とは独立——`driveMode==='mt'` のときだけ意味を持つ。
@@ -633,11 +633,11 @@ type UiState = {
   winkerRightRequested: boolean
 
   /**
-   * ゲームパッドの D/R レンジ（実車のシフトレバー相当、v0.14）。
+   * ゲームパッドの D/R レンジ（実車のシフトレバー相当）。
    *
    * DUALSHOCK4 の R2/L2 を実車ペダル配置（R2=アクセル固定、L2=ブレーキ固定）に
    * したことで、R2 単体では前進/後退の向きを表せなくなった。その向きをここで選ぶ
-   * （`useDriving.ts` の `gearSign`）。**キーボードの W/S は元々別キーなので影響しない。**
+   * （`useDriving.ts` の `gearSign`）。**キーボードの W/S は別キーなので影響しない。**
    *
    * `sideBrakeRequested` と違い、これは「今どちらへ踏み込むか」という持続的な選択
    * （実車のシフトと同じ）なので、DISARM で自動的に 'D' へは戻さない——切り返し

@@ -1,4 +1,4 @@
-"""SLAM の C 版（`core/_native.c`・`core/native.py`）が numpy 版と**ビット一致**するか（2026-11-02）。
+"""SLAM の C 版（`core/_native.c`・`core/native.py`）が numpy 版と**ビット一致**するか。
 
 `OccGrid.raycast`（追跡の「壁の向こうの点」の判定）と `_carve`（地図作成の「素通り」の数え）、
 `SurfaceMap.associate`（ICP の対応付け）と総当たりの採点（`register.search_steps`・`localize`）、

@@ -188,7 +188,7 @@ def replace_plant_noise(plant: Plant) -> Plant:
 
 def _cmd_accel_limit() -> float:
     """自動運転中に Pi が COMMAND に載せる傾き（学習前。`slam2d_raceline.auto_ramp`、校正値から決まる）。
-    ★2026-10-22 から `[safety] cmd_accel_limit_m_s2`（4.0）は学習の天井で、planner はそれより低い値で締める。
+    ★`[safety] cmd_accel_limit_m_s2` は学習の天井で、planner はそれより低い値で締める。
     手動操縦は GUI の値（= その天井）のまま動くので、この試験の外。読めなければ 3.0。"""
     try:
         from raspi.auto.registry import merged_params
@@ -218,7 +218,7 @@ SLIP: tuple[Scenario, ...] = (
              (Seg(0.25, MODE_TORQUE, _FULL), Seg(0.2, MODE_TORQUE, _FULL, mu_left=0.4, mu_right=0.4),
               Seg(0.4, MODE_TORQUE, _FULL)), 0.5, measure=1),
     # 滑って戻った後、同じトルクのまま次の低μで滑り直す。物差しは 2 回目の低μ。
-    #   ★ 2026-11-06 の TC の止め方の案（積分が最大値に戻るまで働き続ける）は、戻る途中で積分が掛けているトルクより
+    #   ★ TC を「積分が最大値に戻るまで働き続ける」止め方にすると、戻る途中で積分が掛けているトルクより
     #   上にあるまま滑り直して効くのが遅れた（滑っていた割合 0.43 → 0.50）
     Scenario("accel_patchy", "トルク 0.06N·m で路面μ 0.35 倍の所が 0.1s おきに 3 回（2 回目を見る）",
              (Seg(0.2, MODE_TORQUE, 0.06),

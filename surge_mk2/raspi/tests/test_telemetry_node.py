@@ -89,7 +89,7 @@ class TestAtomicWriteBytes(unittest.TestCase):
 
 class TestE2eModelsListNote(unittest.TestCase):
     """`_e2e_models_list()`が`<名前>.json`の`note`（`ml_lidar/export_onnx_rl.py`が
-    書く自由記述の備考。2026-08-29追加）を拾って返すことを確認する。"""
+    書く自由記述の備考）を拾って返すことを確認する。"""
 
     def setUp(self) -> None:
         self._orig_dir = tn.E2E_MODELS_DIR
@@ -241,7 +241,7 @@ class TestCamE2eModelSelection(unittest.TestCase):
 
 class TestCamModelsListNote(unittest.TestCase):
     """`_cam_models_list()`が`<名前>.json`の`note`（`ml_cam/export_onnx.py`が
-    書く自由記述の備考。`TestE2eModelsListNote`と対称、2026-08-29追加）を拾って
+    書く自由記述の備考。`TestE2eModelsListNote`と対称）を拾って
     返すことを確認する。"""
 
     def setUp(self) -> None:
@@ -483,7 +483,7 @@ class TestServeMapPreview(unittest.TestCase):
 
     「レーシングライン走行」を押す前に地図を見せ、自己位置ヒントを
     クリックで指定できるようにするための一回きりのプレビュー取得
-    （バンビの指示、2026-09-03）。`/ws/map`と同じ`AutoMap`のmsgpack形式で
+    （バンビの指示）。`/ws/map`と同じ`AutoMap`のmsgpack形式で
     返すので、GUI側`ws/map.ts`の展開処理をそのまま再利用できる。
     """
 
@@ -613,7 +613,7 @@ class TestServeSnapshot(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
 
     def test_stale_frame_of_stopped_camera_is_409(self):
-        """capture を止めたカメラの残り1枚を撮らない（DISARM 中の省電力停止、2026-10-04）。"""
+        """capture を止めたカメラの残り1枚を撮らない（DISARM 中の省電力停止）。"""
         ref = self.fake.sub.latest[tn.TOPIC_IMAGE_FRONT]
         ref.t_pub = time.monotonic_ns() - tn.SNAPSHOT_MAX_AGE_NS - 1
         resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/front.png")
@@ -621,7 +621,7 @@ class TestServeSnapshot(unittest.TestCase):
 
 
 class TestUndistortSetting(unittest.TestCase):
-    """配信映像の魚眼補正（`camera` メッセージの `undistort`、2026-10-03）。"""
+    """配信映像の魚眼補正（`camera` メッセージの `undistort`）。"""
 
     def _fake(self):
         calls = []
@@ -665,7 +665,7 @@ class TestUndistortSetting(unittest.TestCase):
 
 
 class TestVehicleArmed(unittest.TestCase):
-    """`_vehicle_armed`（ARM/DISARM連動カメラ節電の判定元。2026-09-03）。"""
+    """`_vehicle_armed`（ARM/DISARM連動カメラ節電の判定元）。"""
 
     def test_true_when_armed(self):
         fake = _fake_cam_server(armed=True)
@@ -704,7 +704,7 @@ class TestValidDriveSettings(unittest.TestCase):
 
 
 class TestDesiredFrontFps(unittest.TestCase):
-    """`_desired_front_fps`（ARM中/DISARM中で節電設定を切り替える。2026-09-03）。"""
+    """`_desired_front_fps`（ARM中/DISARM中で節電設定を切り替える）。"""
 
     def test_armed_uses_armed_setting(self):
         fake = _fake_cam_server(armed=True)
@@ -757,7 +757,7 @@ class TestVideoRecordingFps(unittest.TestCase):
 
 
 class TestDesiredRearEnabled(unittest.TestCase):
-    """`_desired_rear_enabled`（DISARM中は既定で後方カメラを止める。2026-09-03）。"""
+    """`_desired_rear_enabled`（DISARM中は既定で後方カメラを止める）。"""
 
     def test_armed_uses_armed_setting(self):
         fake = _fake_cam_server(armed=True)
@@ -768,7 +768,7 @@ class TestDesiredRearEnabled(unittest.TestCase):
         self.assertFalse(tn.TelemetryServer._desired_rear_enabled(fake))
 
     def test_disarmed_viewer_does_not_override_setting(self):
-        """DISARM中は GUI で後方映像を表示していても設定どおり止める（2026-10-04、バンビ判断）。"""
+        """DISARM中は GUI で後方映像を表示していても設定どおり止める（バンビ判断）。"""
         fake = _fake_cam_server(armed=False)
         fake.camera_clients["rear"].add(object())
         fake._mcap_proc = object()
@@ -776,7 +776,7 @@ class TestDesiredRearEnabled(unittest.TestCase):
 
 
 class TestDesiredFrontEnabled(unittest.TestCase):
-    """`_desired_front_enabled`（DISARM中は使う者がいなければ前カメラを止める。2026-10-04）。"""
+    """`_desired_front_enabled`（DISARM中は使う者がいなければ前カメラを止める）。"""
 
     def _front(self, fake):
         return tn.TelemetryServer._desired_front_enabled(fake)
@@ -832,7 +832,7 @@ class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
 
 
 class TestCameraPumpOnArrival(unittest.IsolatedAsyncioTestCase):
-    """`_camera_pump` はフレームが届いた周に送る（2026-10-12。刻みで見に行くと、撮ってから
+    """`_camera_pump` はフレームが届いた周に送る（刻みで見に行くと、撮ってから
     送るまでに配信周期ぶんの待ちが乗っていた）。`gui_hz` は送る頻度の上限として残る。"""
 
     def _fake(self, hz):
@@ -901,7 +901,7 @@ class TestCameraPumpOnArrival(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTrackRoiSelectNeedsArm(unittest.TestCase):
-    """DISARM 中の対象選択は受け付けない（2026-10-04。cam_track_node は DISARM 中は
+    """DISARM 中の対象選択は受け付けない（cam_track_node は DISARM 中は
     追跡しないので、受け付けると枠が出ないまま ARM 後に突然追跡が始まる）。"""
 
     def _fake(self, armed):
@@ -935,7 +935,7 @@ if __name__ == "__main__":
 
 class TestSnapshotSendsSlowPartsOnlyOnChange(unittest.TestCase):
     """10Hz 以下でしか変わらないもの（診断・planner の判断・点群など）は、変わったときだけ
-    `/ws/telemetry` に載せる（2026-10-13）。50Hz で同じ物を送り直していた頃は、実機の
+    `/ws/telemetry` に載せる。50Hz で同じ物を送り直していた頃は、実機の
     1フレーム 4.4kB のうち 3.3kB がそれだった。"""
 
     def _server(self):

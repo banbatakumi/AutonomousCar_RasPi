@@ -4,13 +4,10 @@
     python3 config/gen_msgs.py            生成
     python3 config/gen_msgs.py --check    生成物が最新かだけ確認する
 
-## なぜ要るか（2026-08-21 のレビュー 🟠2）
+## なぜ要るか
 
-バスのメッセージ型が **Python と TypeScript に手書きで二重管理**されていた。
-`VehicleState` だけで 45 フィールドの完全な写経で、git 履歴を見ると
-`types.py` の変更 10 回のうち 7 回が `gui/src/types.ts` と同一コミットだった。
-
-危ないのは、**片方だけ直してもどのツールもエラーを出さない**こと。`tsc` は
+バスのメッセージ型を **Python と TypeScript に手書きで二重管理**すると、
+**片方だけ直してもどのツールもエラーを出さない**。`tsc` は
 Pi 側を知らず、pytest は GUI を知らない。フィールドを 1 つ改名すると GUI は
 静かに `undefined` を読み、画面には空欄か `NaN` が出るだけ。50Hz で流れる値
 なので、気づくのは走行後。

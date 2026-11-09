@@ -304,7 +304,7 @@ class TestIoNodeArmGate(unittest.TestCase):
         self.assertTrue(any(isinstance(p, packets.LimitsReq) for p in self.link.sent))
 
     def test_limits_overrides_max_speed_even_when_more_permissive(self):
-        """★v0.11・2026-08-22。`LIMITS` を受信済みなら `--max-speed`/`--max-steer` より
+        """★v0.11。`LIMITS` を受信済みなら `--max-speed`/`--max-steer` より
         緩くても無条件に採用する（`min()` の多層防御ではなく「STM32 実測を優先」に変更した）。"""
         n = self.node(allow_arm=True, max_speed=0.3, max_steer=0.05)
         n.state.limits = packets.Limits(max_speed_m_s=5.0, max_accel_m_s2=3.0,
@@ -496,7 +496,7 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
 
 
 class TestImmediateCmdRelay(unittest.IsolatedAsyncioTestCase):
-    """新しい `auto/cmd` はその場で `/cmd` へ中継する（2026-09-26）。**安全の判断は定期送信と
+    """新しい `auto/cmd` はその場で `/cmd` へ中継する。**安全の判断は定期送信と
     同じ関数を通す**ので、即時の経路からデッドマンをすり抜けた指令が出ることはない。"""
 
     def _server(self, live: bool):
@@ -539,7 +539,7 @@ class TestImmediateCmdRelay(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
-    """`_bus_pump` は本物のバスでは `auto/cmd` の到着で起きる（2026-10-06）。1ms ごとに
+    """`_bus_pump` は本物のバスでは `auto/cmd` の到着で起きる。1ms ごとに
     覗いていた頃は、それだけで実機の CPU を約8%使っていた。"""
 
     async def test_relays_at_once_without_polling_at_1khz(self):
@@ -590,7 +590,7 @@ class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
             tmp.cleanup()
 
     async def test_image_arrival_wakes_the_camera_pump(self):
-        """画像が届いたら `BUS_IDLE_POLL_S` を待たずに `_cam_wake` が立つ（2026-10-12）。"""
+        """画像が届いたら `BUS_IDLE_POLL_S` を待たずに `_cam_wake` が立つ。"""
         import os
         import tempfile
 
@@ -632,7 +632,7 @@ class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
             tmp.cleanup()
 
     async def test_telemetry_goes_out_when_vehicle_state_arrives(self):
-        """`/ws/telemetry` は `vehicle_state` が届いた周に出る（2026-10-13）。刻みで送っていた頃は
+        """`/ws/telemetry` は `vehicle_state` が届いた周に出る。刻みで送っていた頃は
         届いてから送るまでに平均 7.5〜9.4ms・最大 20ms 待っていた（実機）。100Hz の2回に1回を送る。"""
         import os
         import tempfile
@@ -722,8 +722,7 @@ class TestBusPumpWakesOnAutoCmd(unittest.IsolatedAsyncioTestCase):
 
 
 class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
-    """自律中の加速度の上限は GUI の値と planner の値の**小さい方**（planner は締めるだけ、
-    2026-09-27）。"""
+    """自律中の加速度の上限は GUI の値と planner の値の**小さい方**（planner は締めるだけ）。"""
 
     async def test_planner_can_only_tighten(self):
         srv = TestImmediateCmdRelay._server(self, live=True)       # GUI の accel_limit は 6.0
@@ -783,7 +782,7 @@ class TestAutoAccelLimit(unittest.IsolatedAsyncioTestCase):
 
 class TestAutoBrakeTorque(unittest.IsolatedAsyncioTestCase):
     """自律中の制動トルク: planner の指定があればそれ、無ければ GUI の値。人（GUI）もブレーキを
-    掛けていれば強い方（0 は STM32 の最大＝一番強い）（2026-09-27）。"""
+    掛けていれば強い方（0 は STM32 の最大＝一番強い）。"""
 
     def _merge(self, gui_brake, gui_nm, auto_brake, auto_nm):
         from raspi.msgs.types import TOPIC_AUTO_CMD
@@ -804,7 +803,7 @@ class TestAutoBrakeTorque(unittest.IsolatedAsyncioTestCase):
 
 class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
     """人の操作（E-Stop・操縦権の解放・GUI の指令の変化）も、50Hz の定期送信を待たずに `/cmd`
-    へ出す（2026-09-27）。判断は定期送信と同じ `_publish_cmd` を通す。"""
+    へ出す。判断は定期送信と同じ `_publish_cmd` を通す。"""
 
     def _server(self):
         srv = TestWsDeadman._server(self)
@@ -854,7 +853,7 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
 
     async def test_late_drive_cmds_are_dropped_but_late_stops_pass(self):
         """Wi-Fi の詰まりで溜まっていた「走れ」は、復帰してまとめて届いてもデッドマンを
-        生き返らせない（2026-10-06）。止める指令は遅れていても通す。"""
+        生き返らせない。止める指令は遅れていても通す。"""
         srv = self._server()
         now_ms = time.monotonic_ns() / 1e6
         off = 12345.0                                      # GUI の時計は Pi と無関係に進む
@@ -928,7 +927,7 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_rides_through_a_short_link_gap(self):
         """自律走行中は GUI の指令が `auto_link_grace_ms` 途絶えるまで DISARM しない。
-        手動操縦は `cmd_deadman_ms` のまま（2026-10-06）。"""
+        手動操縦は `cmd_deadman_ms` のまま。"""
         from raspi.nodes.telemetry_node import AUTO_LINK_GRACE_NS, CMD_DEADMAN_NS
         self.assertGreater(AUTO_LINK_GRACE_NS, CMD_DEADMAN_NS)
         srv = self._server()
@@ -1126,7 +1125,7 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
 
 
 class TestImmediateCommand(unittest.TestCase):
-    """io_node は `cmd` の中身が変わったらその場で COMMAND を送る（2026-09-26）。"""
+    """io_node は `cmd` の中身が変わったらその場で COMMAND を送る。"""
 
     def test_changed_cmd_goes_out_right_away_and_repeats_do_not_add_sends(self):
         class TimedLink(FakeLink):
@@ -1180,8 +1179,7 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.telemetry_clients = set()
         srv.camera_clients = {"front": set(), "rear": set()}
         srv.deadman_trips = 0
-        # 公開面の守り（2026-08-21 レビュー 🔴1・🟡4）。既定は**トークン無し**
-        # ＝従来どおりの挙動。トークンを掛けた場合は個別のテストで差し替える
+        # 公開面の守り。既定は**トークン無し**。トークンを掛けた場合は個別のテストで差し替える
         srv.token = ""
         srv.auth_rejects = 0
         srv.origin_rejects = 0
@@ -1210,7 +1208,7 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv.auto_stalls = 0
         srv._publish_auto_ctrl = lambda: None      # バスに触らせない
         srv._save_auto_conf = lambda: None         # ディスクに触らせない
-        # 人の操作は `/cmd` をその場で出す（2026-09-27、`_relay_now`）。出したものは控えるだけ
+        # 人の操作は `/cmd` をその場で出す（`_relay_now`）。出したものは控えるだけ
         srv._cmd_was_live = False
         srv.cmds_published = 0
         srv.published = []
@@ -1228,14 +1226,14 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._pi_state = PiHealth(available=False)
         srv._node_hb = {}
         # カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps）。**既定値のまま**を組む。
-        # ARM/DISARMそれぞれの値を持つ（2026-09-03）
+        # ARM/DISARMそれぞれの値を持つ
         srv._cam_rear_enabled_armed = True
         srv._cam_rear_enabled_disarm = False
         srv._cam_front_fps_armed = 15.0
         srv._cam_front_fps_disarm = 15.0
         srv._cam_rear_fps_armed = 15.0
         srv.camera_hz = 15.0
-        # 配信映像の魚眼補正（2026-10-03）。未校正・OFF の既定状態
+        # 配信映像の魚眼補正。未校正・OFF の既定状態
         srv._cam_undistort = False
         srv._undistorters = {}
         srv._publish_cam_config = lambda: None     # バスに触らせない
@@ -1341,8 +1339,7 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         """v0.13/v0.14: WS の cmd JSON の `side_brake`/`winker_left`/`winker_right`
         が DriveCmd まで届く。**`_decode_cmd` へのフィールド追加を忘れると、
         GUI 側は「要求中」と表示されるのに実際には一切 STM32 へ届かない**
-        （`torque_mode` と同種の取りこぼしが `side_brake` で実際に発生し、
-        2026-08-30 に実車確認で発覚した）。"""
+        （`torque_mode` と同種の取りこぼしが `side_brake` で実際に発生した）。"""
         srv = self._server()
         a = object()
         await srv._on_control(a, b'{"type":"take_control","name":"A"}')
@@ -1659,7 +1656,7 @@ if __name__ == "__main__":
 
 
 class TestIoWaitsOnLinkAndBus(unittest.TestCase):
-    """io_node は UART の受信とバスを同じ poller で待つ（2026-09-27）。以前は UART の1バイトを
+    """io_node は UART の受信とバスを同じ poller で待つ。以前は UART の1バイトを
     `read_timeout`（5ms）待ってからでないと `/cmd` を読まず、即時の中継がそのぶん止まった。"""
 
     def setUp(self):
@@ -1781,7 +1778,7 @@ class TestIoWaitsOnLinkAndBus(unittest.TestCase):
         return node
 
     def test_partial_uart_bytes_do_not_wake_the_loop(self):
-        """フレームの途中までしか届いていない間は、ループへ返さず残りを待つ（2026-10-13）。
+        """フレームの途中までしか届いていない間は、ループへ返さず残りを待つ。
         起こされるたびに1周回していた頃は、実機で毎秒約620周のうち6割が空振りだった。"""
         import threading
         node = self._partial_node()

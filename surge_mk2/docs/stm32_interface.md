@@ -1,88 +1,51 @@
 # SURGE Mark.2 — STM32 側 実装仕様書
 
 **バージョン**: v0.29（`uart_protocol.md` v0.29 に対応。`protocol_version = 0x001D`）
-**対象読者**: STM32 ファームウェアを実装する人
-**関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの正）, [`architecture.md`](architecture.md)（全体設計）
+**対象読者**: STM32 ファームウェアを読む・直す人
+**関連文書**: [`uart_protocol.md`](uart_protocol.md)（プロトコルの説明）, [`system_overview.md`](system_overview.md)（全体設計）
 
 > **本書の位置づけ**
-> `uart_protocol.md` が仕様の**正**（数値の唯一の定義は `raspi/proto/protocol.toml`）。本書はそれを
-> 「STM32 側で何を実装すればよいか」の形に落とし込んだもので、パケットのレイアウト・ビット定義・
-> パラメータ表は**複製せず** `uart_protocol.md` を参照する。両者が食い違った場合は `uart_protocol.md` を優先し、本書を修正すること。
-> ファームのソースは `AutonomousCar/Program/MainF446RE_V3/`（`src/comm/ras_link.[ch]` が通信の実装）。
-
----
-
-## 目次
-
-1. [STM32 側の責務](#1-stm32-側の責務)
-2. [UART の設定](#2-uart-の設定)
-3. [フレーム構造と CRC](#3-フレーム構造と-crc)
-4. [パケット定義](#4-パケット定義)
-5. [送信の実装](#5-送信の実装)
-6. [受信の実装](#6-受信の実装)
-7. [LiDAR のビニング処理](#7-lidar-のビニング処理)
-8. [安全要件](#8-安全要件)
-9. [モードと原点合わせ](#9-モードと原点合わせ)
-10. [パラメータの扱い](#10-パラメータの扱い)
-11. [時刻同期で STM32 がやること](#11-時刻同期で-stm32-がやること)
-12. [実装チェックリスト](#12-実装チェックリスト)
-13. [立ち上げ・テスト手順](#13-立ち上げテスト手順)
+> 数値・バイト配置・ビット定義の唯一の定義は `raspi/proto/protocol.toml`、その説明は `uart_protocol.md`。本書は
+> 「STM32 側が何をどう実装しているか」の要点だけを書き、パケットのレイアウト・ビット定義・パラメータ表・数値は**複製しない**。
+> 食い違ったら toml → `uart_protocol.md` → ファームのコードの順に確かめ、本書を直す。
+> ファームのソースは `AutonomousCar/Program/MainF446RE_V3/`（通信は `src/comm/ras_link.[ch]`、車両の状態は `src/vehicle/vehicle.[ch]`、制御は `src/control/`）。
 
 ---
 
 ## 1. STM32 側の責務
 
-### やること
-
 | 分類 | 内容 |
 |---|---|
-| **制御** | 後輪左右モータのトルク制御、ステアリングモータの位置制御、車速の速度制御ループ（PI） |
-| **車両制御** | TC（トラクションコントロール）、ABS、片輪浮き対策、トルクベクタリング、ローンチコントロール、ブレーキホールド |
-| **センサ** | LD06 のパース・1°ビニング、超音波測距、前輪エンコーダ（ADC）、IMU、温度、電圧・電流、車速のカルマンフィルタ |
-| **単位換算** | **モータ機械角 ⇄ 路面舵角**、**車輪角速度 → 周速 [m/s]**、**エンコーダ角 → 累積距離 [0.1mm]**、**`speed` の車体中心線方向への射影** |
-| **保護** | 電流リミッタ、温度リミッタ、低電圧警告、過電流ハード遮断のラッチ管理 |
-| **安全** | UART タイムアウト時の自動ブレーキ、ハートビート監視（PB12）、自動停止（障害物） |
-| **通信** | 本書のプロトコルによる送受信 |
+| **制御** | 後輪左右モータのトルク制御、ステアモータの位置制御、車速 PI |
+| **車両制御** | TC、ABS、片輪浮き対策、TV、ローンチコントロール、ブレーキホールド |
+| **センサ** | LD06 のパース・1°ビニング、超音波、前輪エンコーダ（ADC）、IMU、温度、電圧・電流、車速のカルマンフィルタ |
+| **単位換算** | モータ機械角 ⇄ 路面舵角、車輪角速度 → 周速 [m/s]、エンコーダ角 → 累積距離 [0.1mm]、`speed` の車体中心線方向への射影 |
+| **保護・安全** | 電流・温度リミッタ、低電圧警告、過電流ラッチ、`COMMAND` 途絶時の自動ブレーキ、ハートビート監視（PB12）、自動停止 |
 
-### やらないこと
+やらないこと: 経路生成・自己位置推定・地図生成、障害物の意味判断、ステア原点の自動探索（§9）。
 
-- 経路生成・自己位置推定・地図生成（すべて Raspberry Pi 側）
-- 障害物の意味判断（「壁か人か」など）
-- ステアリング原点の自動探索（→ §9）
-
-### 機械定数は STM32 に閉じる
-
-**Pi は車輪半径・ギア比を知らない。** UART 上の物理量はすべて SI 単位（m/s、rad、N·m、0.1mm）で定義されており、
-換算は STM32 側で行う（車輪半径 0.03m。後輪はダイレクトドライブでギア比の概念が無い）。
-例外はステアのリンクの換算の係数（`STEER_LINK_GAIN`/`STEER_LINK_CUBIC`）で、Pi が `CONFIG_SET` で送る（§10）。
+**Pi は車輪半径・ギア比を知らない。** UART 上の物理量はすべて SI 単位で、換算は STM32 が行う。
+例外はステアのリンク換算の係数で、Pi が `CONFIG_SET` で送る（`uart_protocol.md` §5.8.4）。
 
 ---
 
 ## 2. UART の設定
 
-| 項目 | 値 |
-|---|---|
-| ボーレート・フォーマット・配線 | `uart_protocol.md` §1（1000000 bps、8N1、STM32 TX → Pi GPIO15 / STM32 RX ← Pi GPIO14） |
-| USART | USART1。APB2 45MHz（HCLK 180MHz の 1/4）で USARTDIV = 2.8125 = 2 + 13/16、**分周誤差 0%** |
-
-### バッファサイズ
+ボーレート・フォーマット・配線は `uart_protocol.md` §1。USART1（APB2 45MHz）で USARTDIV = 2.8125、分周誤差 0%。
 
 | 用途 | サイズ | 備考 |
 |---|---|---|
-| RX 循環 DMA バッファ | **2048 B**（`RAS_SERIAL_RX_BUF_SIZE`） | 1Mbps で約 20ms 分。これより長くポーリングが空くと、上書きされたとみなして読み捨てる（`Serial_Available`） |
-| TX キュー | 優先度ごとに PONG 64 / TELEMETRY 256 / LIDAR 512 / INFO 1024 / LOG 512 B | `ras_link.h` の `tx_*_storage`。1レコード = 長さ2B + フラグ1B + フレーム |
+| RX 循環 DMA バッファ | 2048 B（`RAS_SERIAL_RX_BUF_SIZE`、`src/app/app.c`） | 1Mbps で約 20ms 分。これより長くポーリングが空くと上書きとみなして読み捨てる（`Serial_Available`） |
+| TX キュー | 優先度ごとに PONG 64 / TELEMETRY 256 / LIDAR 512 / INFO 1024 / LOG 512 B | `ras_link.h` の `tx_*_storage` |
 
 ---
 
 ## 3. フレーム構造と CRC
 
-フレーム構造・フィールド・CRC-16/CCITT-FALSE（検査値 `"123456789"` → `0x29B1`）は **`uart_protocol.md` §3** が正。
-STM32 側の実装は `lib/crc16/crc16.h`・`ras_link.c`。実装したら必ず検査値 `0x29B1` で確認すること
-（ここを間違えると通信が一切成立しない）。
+フレーム構造・CRC-16/CCITT-FALSE は `uart_protocol.md` §3。実装は `lib/crc16/crc16.h`・`ras_link.c`（変えたら検査値 `0x29B1` で確かめる）。
 
-- `SEQ` は**送信方向ごとに独立**した 0-255 のカウンタで、**DMA 起動の直前**に振る（キューへ積むときではない）。CRC もそこで計算する
-- ソフトウェア実装の CRC で足りる（最大 109 バイト × 約 230 回/秒）。STM32 内蔵 CRC ペリフェラルは多項式・初期値の設定が機種により制限される
-- MD との通信の CRC-8/AUTOSAR とは**別物**。MD 側は STM32 内部で完結しており、Pi 側とは無関係
+- `SEQ` と CRC は**DMA 起動の直前**に確定する（キューへ積むときではない）。送出順に SEQ が単調増加し、`t_pong_tx_us` も同じ場所で書ける
+- MD との通信の CRC-8/AUTOSAR とは別物（STM32 内部で完結）
 
 ---
 
@@ -90,45 +53,33 @@ STM32 側の実装は `lib/crc16/crc16.h`・`ras_link.c`。実装したら必ず
 
 ### 4.1 パケット一覧とレイアウト
 
-TYPE・LEN・方向・各フィールドのオフセットとスケールは **`uart_protocol.md` §4・§5** が正（定義の元は `raspi/proto/protocol.toml`）。
-`raspi/proto/generate.py` が C ヘッダ `raspi/proto/generated/surge_proto.h`（`#pragma pack` 付き構造体・`_Static_assert`・ビット定義）を生成する。
-**ファームは現状このヘッダを取り込まず**、`ras_link.h`・`ras_link.c` に TYPE・LEN・ビット定義・`RAS_PROTOCOL_VERSION` を手で写している
-（詳細は `raspi/proto/README.md`）。したがって **toml を変えたらファームの `RAS_LEN_*`・`RAS_FLAG_*`・`RAS_CMD_FLAG*`・`RAS_PROTOCOL_VERSION` も同時に直し、`protocol_version` を上げること**
-（Pi は版数が完全に一致しない STM32 には ARM を通さない）。
-
-方向規約: `0x01-0x0F` = STM32 → Pi、`0x10-0x1F` = Pi → STM32。**LEN は TYPE ごとに一意**（`LOG` を除く）。
-LiDAR パケットは `0x01` / `0x05` / `0x09` のいずれか1種類だけを送る（`param_id 0x0040`、§10）。
+TYPE・LEN・方向・オフセット・スケールは `protocol.toml`（説明は `uart_protocol.md` §4・§5）。
+`raspi/proto/generate.py` は C ヘッダ `raspi/proto/generated/surge_proto.h` も生成するが、**ファームはこれを取り込まず**、
+`ras_link.h`・`ras_link.c` に TYPE・LEN・ビット定義・`RAS_PROTOCOL_VERSION` を手で写している。
+**toml を変えたらファームの `RAS_LEN_*`・`RAS_FLAG_*`・`RAS_CMD_FLAG*`・`RAS_PROTOCOL_VERSION` も同時に直し、`protocol_version` を上げる**
+（Pi は版数が完全に一致しない STM32 には ARM を通さない。手順は `raspi/proto/README.md`）。
 
 ### 4.2 構造体の注意
 
-- **必ず `#pragma pack(push, 1)`（または `__attribute__((packed))`）を付ける。** 付け忘れるとパディングが入り、Pi 側とバイト配置がずれる
-- **ペイロードはフレーム先頭から 5バイト目に始まるため、`uint32_t` / `int32_t` は 4バイト境界に乗らない。**
-  packed 構造体のメンバへの直接アクセスは安全だが遅いので、頻繁に触る値はローカル変数に取り出す。
-  **非 packed 構造体へのポインタキャストは未定義動作**で、ARM ではハードフォールトしうる。受信フレームから構造体を作るときは必ず `memcpy`
-- すべてリトルエンディアン
-- 全構造体に `_Static_assert(sizeof(...) == LEN)` を入れる（`pack` の付け忘れをビルド時に検出できる）。
-  主な LEN: `telemetry` 102 / `command` 15 / `lidar_sector` 69 / `lidar_sector_i` 99 / `lidar_sector_c` 39 / `stats` 48 / `pong` 12 / `limits` 16 / `version` 10 / `config_ack` 7 / `config_set` 6 / `config_get` 2 / `ping` 4
+ペイロードはフレームの 5バイト目から始まるので `uint32_t` / `int32_t` は 4バイト境界に乗らない。
+構造体で扱うなら `#pragma pack(push, 1)` と `_Static_assert(sizeof(...) == LEN)`（LEN は toml）を付け、受信フレームからは `memcpy` で取り出す
+（非 packed 構造体へのキャストは未定義動作で、ARM ではハードフォールトしうる）。現行の `ras_link.c` はバイト列へ順に `memcpy` して組み立てている。
 
 ### 4.3 実装上の注意（TELEMETRY・各パケット）
 
-- **`speed` は車体中心線方向に射影済み、`wheel_speed[FL/FR]`・`odom_dist` は射影なしの生値**で送る。
-  STM32 は `speed` を作るときに `cos(steer_actual)` を掛ける。Pi 側がスリップ計算に生値を必要とするため `wheel_speed`・`odom_dist` は射影しない（`uart_protocol.md` §5.3）
-- **`speed` は走行距離と加速度計のカルマンフィルタ**（`speed_kf.[ch]`）の車速。**`wheel_speed` は各輪の周速を
-  時定数 9.95ms（`DRIVE_LPF_TAU_FRONT_S`）の1次ローパスに通した報告用の値**（車速の計算には使わない。ADC を1制御周期ぶん＝32スキャン平均した角度から微分する）
-- **`odom_dist` はローパスを掛けず**、前輪エンコーダの鏡像（`encoder_direction.c`）と折り返しを直した増分（車速 KF に入れるのと同じ値。前進が正）を積算する。
-  0.1mm 単位・`int32_t` のラップは ±214.7 km でミニカーでは到達しない
-- **`torque_cmd` は MD に出した指令値**（TC 適用後の最終値）であって実測ではない。符号は正 = 駆動、負 = 制動（停車保持中も制動トルクを負で入れる）。スケールは 0.0001 N·m/LSB
-- **`temp` は符号なし**（MD が `uint8_t [degC]` で返すのでそのまま）。`temp[3]`（MCU 内蔵）は ±10℃級のダイ温度で、傾向監視のみ
-- **`us_front` / `us_rear` は実質 20Hz 更新**で、同じ値が連続して入る。`0` = 無効（HC-SR04 の最小測距 2cm より小さいので「距離 0」と区別できる）
-- **`batt_current_*` は単方向**（INA180A2 + シャント、GND 基準）。回生時は 0 に張り付く。`motor_current`（MD の `iq`）は双方向。この非対称は意図的
-- **`steer_actual` は MD が返す機械角から換算した路面舵角**であり、指令値のコピーであってはならない（Pi が遅延を実測するため）
-- **`t_us` は中身のスナップショットを取った時刻**（送信時刻ではない）。`cmd_seq_echo` だけは送信時点で最後に受けた `COMMAND` の SEQ
-- `VERSION`: `fw_id` は定数 `RAS_FIRMWARE_ID`、`build_epoch` は Makefile が `build_info.c` に埋め込むビルド時刻。**起動直後に 3回（100ms 間隔）自発送信**し、`VERSION_REQ` (0x14) にも即座に返す
-- `LIMITS`: **起動直後に 3回（`VERSION` と同じタイミング）自発送信**し、`LIMITS_REQ` (0x15) にも返す。ステアのリンクの換算が適用されたとき（`max_steer_rad` が変わる）にも送り直す。
-  `max_accel_m_s2` は上限を持たないのでワイヤで表せる最大 65.535 を返す
-- `STATS` は 1Hz。**すべて起動からの累積値で、0 クリアしない**
-- `LOG` は最低優先度で、本文を 127 文字で打ち切る（`RAS_LOG_MAX_LEN` = 128 = severity + 本文）。TX が逼迫したら破棄し `STATS.tx_drop` に計上する
-- `CONFIG_SET` / `CONFIG_GET` は**いずれも必ず `CONFIG_ACK` を返す**（不明な `param_id` でも `result=1`）
+フィールドの意味は `uart_protocol.md` §5.3。STM32 側で守っていること:
+
+- **`speed` は車体中心線方向に射影済み、`wheel_speed[FL/FR]`・`odom_dist` は射影なしの生値。** Pi がスリップ計算・オドメトリの射影に生値を使う
+- `speed` は走行距離と加速度計のカルマンフィルタ（`speed_kf.[ch]`）の車速。`wheel_speed` は各輪の周速を `DRIVE_LPF_TAU_FRONT_S` の1次ローパスに通した報告用の値
+  （ADC を1制御周期ぶん平均した角度から微分する。車速の計算には使わない）
+- `odom_dist` はローパスを掛けず、前輪エンコーダの鏡像（`encoder_direction.c`）と折り返しを直した増分（車速 KF に入れるのと同じ値。前進が正）を積算する
+- `torque_cmd` は MD に出した最終指令値で実測ではない。制動中・停車保持中も制動トルクを負で入れる
+- `steer_actual` は MD が返す機械角から換算した路面舵角で、指令のコピーにしない（Pi が遅延を実測するため）
+- `t_us` は中身のスナップショットを取った時刻（送信時刻ではない）。`cmd_seq_echo` だけは送信時点で最後に受けた `COMMAND` の SEQ
+- `VERSION`・`LIMITS` は起動直後に 3回（100ms 間隔）自発送信し、`*_REQ` にも返す。`LIMITS` はステアのリンク換算を適用したときにも送り直す
+- `STATS` は起動からの累積値で 0 クリアしない
+- `LOG` は本文を 127 文字で打ち切る（`RAS_LOG_MAX_LEN` = 128 = severity + 本文）。TX が逼迫したら破棄して `STATS.tx_drop` に数える
+- `CONFIG_SET` / `CONFIG_GET` には必ず `CONFIG_ACK` を返す（不明な `param_id` でも `result=1`）
 
 ---
 
@@ -138,34 +89,25 @@ LiDAR パケットは `0x01` / `0x05` / `0x09` のいずれか1種類だけを�
 
 | パケット | 送信タイミング |
 |---|---|
-| `PONG` | `PING` 受信時に即座（**最優先・キューの先頭に割り込ませる**） |
-| `TELEMETRY` | 10ms 周期（100Hz） |
-| `LIDAR_SECTOR` | セクタ（30点）が揃うたび。10Hz 回転なら約 8.3ms ごと |
+| `PONG` | `PING` 受信時に即座（最優先キュー） |
+| `TELEMETRY` | 10ms 周期（`RAS_TELEMETRY_INTERVAL_US`） |
+| `LIDAR_SECTOR` | セクタ（30°）が揃うたび（10Hz 回転で約 8.3ms ごと） |
 | `CONFIG_ACK` | `CONFIG_SET` / `CONFIG_GET` 受信時 |
-| `VERSION` / `LIMITS` | 起動直後 3回（100ms 間隔）+ 各 `*_REQ` 受信時 |
-| `STATS` | 1000ms 周期（1Hz） |
-| `LOG` | 任意。TX キューに空きがあるときのみ |
+| `VERSION` / `LIMITS` | 起動直後 3回 + 各 `*_REQ` 受信時 |
+| `STATS` | 1Hz |
+| `LOG` | 任意（キューに空きがあるときのみ） |
 
-### 5.2 送信優先度
+### 5.2 送信優先度と TX キュー + DMA
 
-`uart_protocol.md` §7 が正。**PONG > TELEMETRY > LIDAR > INFO（CONFIG_ACK・VERSION・LIMITS・STATS）> LOG**。
-各キューが満杯なら積まずに破棄する（`tx_drop` に計上）。
+優先度は `uart_protocol.md` §7（PONG > TELEMETRY > LIDAR > INFO（CONFIG_ACK・VERSION・LIMITS・STATS）> LOG）。各キューが満杯なら積まずに破棄する（`tx_drop`）。
 
-`PONG` を最優先にするのは、`t_pong_tx_us` を送信開始時点で取っても、PONG が LiDAR セクタの後ろに並ぶと T3 以降に非対称遅延が生じ、オフセット推定にバイアスが乗るため。
-
-### 5.3 TX キュー + DMA
-
-**ブロッキング送信（`HAL_UART_Transmit`）を使ってはいけない。** 1 フレームの送信に約 1ms かかり、その間 制御ループ（2kHz）が止まる。
+**ブロッキング送信（`HAL_UART_Transmit`）は使わない。** 1 フレームに約 1ms かかり、その間 2kHz の制御ループが止まる。
 
 1. 送信は優先度ごとのキューへ積むだけで即座に戻る
-2. DMA が動いていなければ、優先度の高いキューから1フレームだけ取り出して DMA 起動（このとき SEQ・`t_pong_tx_us`・CRC を確定する）
-3. DMA 完了（UART の TC 割り込み。NVIC を有効にすること）で次のフレームを起動する
+2. DMA が動いていなければ、優先度の高いキューから1フレーム取り出して DMA 起動（このとき SEQ・`t_pong_tx_us`・CRC を確定。`PumpTx`）
+3. DMA 完了（UART の TC 割り込み）で次のフレームを起動する
 
-**送信中の DMA を途中で中断しない**ので、`TELEMETRY` が LiDAR に阻まれる最大待ち時間は送信中の1フレーム分（約 1ms。`uart_protocol.md` §7）。
-
-### 5.4 帯域
-
-`uart_protocol.md` §11 を参照（既定構成で上り約 20 kB/s、上限 100 kB/s の約 20%）。
+送信中の DMA を途中で中断しないので、`TELEMETRY` の最大待ちは送信中の1フレーム分（約 1ms）。
 
 ---
 
@@ -173,446 +115,164 @@ LiDAR パケットは `0x01` / `0x05` / `0x09` のいずれか1種類だけを�
 
 ### 6.1 DMA + IDLE ライン検出
 
-```c
-HAL_UARTEx_ReceiveToIdle_DMA(&huart, rx_dma_buf, sizeof(rx_dma_buf));
-__HAL_DMA_DISABLE_IT(&hdma_rx, DMA_IT_HT);
-```
+`HAL_UART_Receive_DMA` の循環受信（`lib/serial`）で受け、メインループでフレームを切り出す。**割り込みハンドラ内でフレーム処理まではしない。**
+UART の IDLE 割り込みは別に有効にし（`RasLink_Init`）、時刻と DMA の書き込み位置だけを記録する（`RasLink_OnUartIdle`）。
 
-受信バイト数が渡されるので、アプリ側のリングバッファへ積み、メインループでフレーム抽出する。
-**割り込みハンドラ内でフレーム処理まで行わない。**
+**`t_ping_rx_us` はこの IDLE 時刻を使う**: フレームの末尾が記録位置と一致すれば IDLE 時刻＝最終バイトの到着時刻、一致しなければ（後続バイトが続いている）現在時刻で代用する。
+メインループで取るとループ周期分のジッタがクロックオフセットのバイアスになる。
 
-> **例外: `t_ping_rx_us` だけは IDLE 割り込み内でタイムスタンプを取る。** メインループで取ると、ループ周期分のジッタが
-> そのままクロックオフセット推定のバイアスになる。「IDLE 割り込みが入った時刻」を毎回記録し、パース結果が PING ならその時刻を使う。
+### 6.2 フレーム抽出
 
-### 6.2 フレーム抽出のステートマシン
+- `0xAA 0xAA 0x55` を取りこぼさない（SYNC1 待ちで `0xAA` を受けたら SYNC1 待ちに留まる）
+- **`LEN = 0`（`VERSION_REQ`・`LIMITS_REQ`）でペイロード 0 バイトのまま通過する経路を持つ**
+- 期待 LEN は TYPE ごとに一意（`ras_link.c` の `ExpectedPayloadLen`。値は toml）。LEN 不一致・未知の TYPE（方向規約違反を含む）は破棄し、
+  **`LEN` を信用せずその場で SYNC の探し直しに戻る**（化けた LEN ぶん最大 257B を読み飛ばすと、その間の `COMMAND` を失い途絶の自動ブレーキに入りうる）
 
-```
-WAIT_SYNC0 → (0xAA) → WAIT_SYNC1 → (0x55) → READ_HEADER(TYPE,SEQ,LEN) → READ_PAYLOAD → READ_CRC → dispatch
-```
-
-- `WAIT_SYNC1` で `0xAA` を受けたら `WAIT_SYNC1` に留まる（`0xAA 0xAA 0x55` を取りこぼさない）
-- **`LEN = 0`（`VERSION_REQ`・`LIMITS_REQ`）で `READ_PAYLOAD` を 0 バイトで通過する経路を必ず用意する**（ここでハングする実装が多い）
-- LEN が TYPE の期待値と違えば破棄して `WAIT_SYNC0` へ
-
-### 6.3 受信側の LEN 期待値
-
-| TYPE | 期待 LEN |
-|---|---|
-| `0x10` `COMMAND` | 15 |
-| `0x11` `CONFIG_SET` | 6 |
-| `0x12` `PING` | 4 |
-| `0x13` `CONFIG_GET` | 2 |
-| `0x14` `VERSION_REQ` / `0x15` `LIMITS_REQ` | **0** |
-
-上記以外の TYPE（`0x01-0x0F` の方向規約違反を含む）は「未知」として `unknown_type` に計上し、
-**`LEN` を信用せずその場で SYNC の探し直しに戻る**（化けた LEN ぶん最大 257B を読み飛ばすと、その間の `COMMAND` を失い途絶の自動ブレーキに入りうる）。
-
-### 6.4 エラー処理と統計
+### 6.3 エラー処理と統計
 
 | 事象 | 対応 |
 |---|---|
-| CRC 不一致 | 破棄。`rx_crc_error++`。`WAIT_SYNC0` へ戻る |
+| CRC 不一致 | 破棄。`rx_crc_error++` |
 | `LEN` が TYPE の期待値と不一致 | 破棄。`rx_len_error++` |
-| 未知の `TYPE` | 破棄。`rx_unknown_type++`。その場で SYNC の探し直しに戻る |
-| USART の ORE / FE / NE エラー | エラー割り込み（`PEIE`・`EIE`）を切っておき、受信 DMA を止めさせない（`RasLink_Init`）。化けたフレームは CRC で落ちる |
+| 未知の `TYPE` | 破棄。`rx_unknown_type++` |
+| USART の ORE / FE / NE | エラー割り込み（`PEIE`・`EIE`）を切り、受信 DMA を止めさせない（`RasLink_Init`）。化けたフレームは CRC で落ちる |
 
-**オーバーラン（ORE）で受信が止まったまま気づかない、というのが最も多い失敗。** HAL はエラー割り込みで受信 DMA を中断する。
-統計は `STATS`（1Hz）で Pi へ送る。カウンタは累積値で、送信後に 0 クリアしない。
+**HAL はエラー割り込みで受信 DMA を中断する**ので、オーバーランで受信が止まったまま気づかない、が最も多い失敗。統計は `STATS`（1Hz、累積値）で Pi へ送る。
 
 ---
 
 ## 7. LiDAR のビニング処理
 
-### 7.1 やること
+実装は `src/sensing/lidar.[ch]`。LD06 の生データ（約 450点/周、約 0.8° 刻み）を **1° 刻みの 360点**に整形し、30点（= 30°）ごとにセクタとして送る。
 
-LD06 の生データ（約 450点/周）を **1° 刻みの 360点**に整形し、30点（= 30°）ごとに `LIDAR_SECTOR` として送信する。
-
-```
-LD06 生パケット ──▶ 角度補間 ──▶ 1° ビンへ集約 ──▶ 30点揃ったらセクタ送信
-```
-
-**角度はセンサ基準のまま送る。左右の鏡像反転は Pi 側で行う**（`uart_protocol.md` §5.1）。
-STM32 側で直すと 0°/180° がセクタ境界に乗って1セクタが分裂するため、補正は受信側に寄せてある。
-
-### 7.2 角度の補間
-
-LD06 のパケットには `start_angle` と `end_angle` が入っており、中間の N 点は等間隔と仮定して補間する。
-
-```c
-/* N 点、start→end（0.01° 単位、ラップあり） */
-uint16_t span = (uint16_t)(end_angle - start_angle);   /* 符号なし減算でラップ処理 */
-for (int i = 0; i < N; i++) {
-    uint16_t angle = (uint16_t)((start_angle + (uint32_t)span * i / (N - 1)) % 36000);
-    ...
-}
-```
-
-### 7.3 ビンへの集約
-
-**同一ビンに複数点が入った場合は「ビン中心に最も近い点」を代表点として採用する**（最小距離にしない）。
-最小距離は衝突判定には安全側だが、地図生成用のデータを近距離側に系統的に歪ませ、平均化でも消えない
-バイアスとして ICP / スキャンマッチングの精度を落とす。
-
-```c
-int bin = (angle + 50) / 100;            /* 0.01° → 1° に丸め */
-if (bin >= 360) bin -= 360;
-
-int32_t err = (int32_t)angle - (int32_t)bin * 100;   /* ビン中心からのずれ [0.01°] */
-if (err >  18000) err -= 36000;
-if (err < -18000) err += 36000;
-uint16_t abs_err = (uint16_t)(err < 0 ? -err : err);
-
-if (dist > 0 && (bin_dist[bin] == 0 || abs_err < bin_err[bin])) {
-    bin_dist[bin] = dist;
-    bin_err[bin]  = abs_err;
-}
-```
-
-安全用途の最短距離判定（自動停止）は STM32 内部で完結させ、Pi へ送る点群にはバイアスをかけない。
-距離 0（無効・範囲外）はそのまま 0 として送る。
-
-### 7.4 セクタの送信タイミング
-
-`sector_idx = bin / 30`（0-11）。角度が次のセクタへ進んだ時点で、完了したセクタを送信する。
-
-- **`t_start_us`**: そのセクタの最初の点が観測された時刻（LD06 パケットの受信時刻でよい。精度は数百 μs あれば十分）
-- **`duration_us`**: そのセクタの最初の点から最後の点までの経過時間（= 最後の点の観測時刻 − `t_start_us`）
-- **`rot_speed_dps`**: LD06 が報告する回転速度をそのまま 1 deg/s 単位で入れる
-- 送信後、そのセクタのビン（`bin_dist` / `bin_err`）を 0 クリアする
-
-`duration_us` があることで、Pi 側はセクタを1個落としても点群の歪み補正を続行できる。
-
-### 7.5 起動時の扱い
-
-**最初の1回転は部分的にしか埋まらないため、送信をスキップする。** 1周分のビンが完全に埋まってから送信を開始する。
-
-### 7.6 LiDAR 断検出
-
-LD06 からのデータが 300ms（`LIDAR_TIMEOUT_US`）途絶したら `flags` の `lidar_ok` を落とす。
+- **各ビン中心（整数度）の距離は、前後2点から線形補間する**（角度の丸め誤差を無くすため）。2点の距離差が `LIDAR_INTERP_MAX_DIFF_MM`（50mm）を超える・
+  どちらかが無効（0）・角度の間隔が `LIDAR_INTERP_MAX_GAP_DEG`（2°）を超えるときは、実在しない点を作らないよう**ビン中心に近い方の点**をそのまま採る
+- **最小距離は採らない。** 衝突判定には安全側でも、地図用のデータを近距離側へ系統的に歪ませ、平均化で消えないバイアスとしてスキャンマッチングの精度を落とす。
+  自動停止は送るのとは別の永続配列（`point_distance_mm`・`sector_update_us`）で STM32 内部で判定する
+- **角度はセンサ基準のまま送る。** 左右の鏡像反転は Pi 側（`uart_protocol.md` §5.1）。STM32 で直すと 0°/180° がセクタ境界に乗って1セクタが分裂するうえ、
+  試したときに原因不明の通信エラー増発が再現したため
+- `sector_idx = bin / 30`。角度が次のセクタへ進んだ時点で完了したセクタを確定する。`t_start_us` はセクタ最初の点の時刻、`duration_us` は最後の点までの経過時間
+  （点の時刻は小さな逆行を直してから使う）、`rot_speed_dps` は LD06 が報告する回転速度（1 deg/s 単位）
+- LD06 のデータが 300ms（`LIDAR_TIMEOUT_US`）途絶したら `lidar_ok` を落とす
 
 ---
 
 ## 8. 安全要件
 
-**この章の内容は最優先で実装すること。** 走行機能より先に、止まる機能を作る。
-
 ### 8.0 安全層の全体像
 
-`uart_protocol.md` §10 が正（ハートビート断 50ms → `COMMAND` 途絶 100ms → 過電流ラッチ → 低電圧警告）。
-**層3（過電流ラッチ）と層4（低電圧警告）を混同しないこと。** 層3はラッチして走行不能になり、層4は警告のみで走り続けられる。
+`uart_protocol.md` §10（ハートビート断 → `COMMAND` 途絶 → 過電流ラッチ → 低電圧警告）。
+**層3（過電流ラッチ）と層4（低電圧警告）を混同しない。** 層3はラッチして走行不能、層4は警告のみ。
 
 ### 8.1 ハートビート監視（第1安全層）
 
-挙動の確定仕様は [`uart_protocol.md`](uart_protocol.md) §9。要点は「エッジ10回で接続とみなす（`HEARTBEAT_MIN_EDGES`）/ 未接続なら発動しない /
-50ms 途切れたらラッチ（`HEARTBEAT_TIMEOUT_US`）/ 車両のボタン2でのみ解除 / 発動中は最大制動で止める」。実装は `src/comm/heartbeat.[ch]`。
-Pi は GPIO6 に 100Hz の矩形波を出し、STM32 は **PB12**（`RAS_SIG`）を 2kHz の制御ループでポーリングする。
+挙動は `uart_protocol.md` §9。実装は `src/comm/heartbeat.[ch]`（`HEARTBEAT_MIN_EDGES`・`HEARTBEAT_TIMEOUT_US`）と `vehicle.c` の `UpdateEstop`。
+PB12（`RAS_SIG`）を 2kHz の制御ループでポーリングする。**EXTI ライン 12 は前方超音波の ECHO（PA12）に割り当てる**（μs 精度のパルス幅測定が要る。ハートビートは ms 精度で足りる）。
 
-**EXTI ではなくポーリング**にする理由: STM32 の EXTI はライン番号ごとに 1ポートしか選べず、PB12 と前方超音波の ECHO (PA12) が
-同じ EXTI ライン 12 を使う。超音波は μs 精度のパルス幅測定が要るので **EXTI ライン 12 は PA12 に割り当てる**。ハートビートは ms 精度で足りる。
-
-**単純なアクティブ Low の E-Stop にしない理由**: 断線するとプルアップで High（= 正常）に戻り、フェイルセーフにならない。
-矩形波なら Pi のフリーズ・電源断・断線・プロセスクラッシュを1つの機構で検出できる。
-
-**`estop_active` からの自動復帰は禁止。**
-
-```
-1. ハートビートが復活している（必要条件）
-   かつ
-2. 車両側のボタン2を人間が押す
-   その後
-3. COMMAND の flags.arm が一度 0 になり、再び 1 になって初めて再武装
-   （arm を立てっぱなしの指令で走り出さない。Pi 側の io_node も同じ条件で ARM を止める）
-```
+**`estop_active` からの自動復帰はしない**: ハートビートが復活している状態でボタン2が押されて解除し、さらに `COMMAND` の `arm` が一度 0 になって再び 1 になるまで再武装しない。
 
 ### 8.2 UART タイムアウト（第2安全層）
 
-```
-COMMAND が 100ms 途絶（RAS_COMMAND_TIMEOUT_US）  →  最大制動 + flags.uart_timeout = 1 + armed = 0
-```
+`COMMAND` が 100ms（`RAS_COMMAND_TIMEOUT_US`）途絶したら、最大制動 + `uart_timeout` + `armed = 0`。
 
-- **惰性走行（コースト）ではなくブレーキ**。最大制動トルク（`DRIVE_MAX_BRAKE_TORQUE_NM`）を直接掛ける。舵角は最後の指令のまま。`horn`・`passing`・ウィンカー要求は解除する
-- 止まったら後輪の位置保持へ移り、**止まったまま 30 秒（`VEHICLE_FAILSAFE_POWER_OFF_S`）経つと駆動電源を切る**（過熱・電池消耗の防止。再開は ARM の入れ直し）
-- `COMMAND` が再開したら `uart_timeout` は自動でクリアしてよい。ただし **`armed` は落としたまま**にし、`arm` が一度 0 になってから立ち上がるまで再武装しない
-- 走行中に `arm` が外れたときは、停車（または `最高速 ÷ BRAKE_DECEL_M_S2 × 1.5` 秒）まで駆動電源を入れたまま最大制動を続ける（いきなり電源を切ると MD ごと落ちて惰行する）
+- 惰行ではなくブレーキ。最大制動トルク（`DRIVE_MAX_BRAKE_TORQUE_NM`）を直接掛ける。舵角は最後の指令のまま。`horn`・`passing`・ウィンカー要求は解除
+- 止まったら後輪の位置保持へ移り、止まったまま 30 秒（`VEHICLE_FAILSAFE_POWER_OFF_S`）経つと駆動電源を切る（過熱・電池消耗の防止）
+- `COMMAND` が再開したら `uart_timeout` は消えるが、`armed` は `arm` が一度 0 になってから立ち上がるまで戻さない
+- 走行中に `arm` が外れたときは、停車（または `DRIVE_MAX_SPEED_M_S ÷ BRAKE_DECEL_M_S2 × VEHICLE_STOP_TIME_MARGIN` 秒）まで駆動電源を入れたまま最大制動を続ける
+  （いきなり切ると MD ごと落ちて惰行する。`UpdateDisarmBraking`）
 
 ### 8.3 電源保護（第3・第4安全層）
 
 | 系統 | 内容 | 過電流しきい値 | 動作 |
 |---|---|---|---|
-| 駆動系 (Primary) | モータードライバ電源 | 12.0 A（`POWER_DRIVE_OVERCURRENT_THRESHOLD_A`） | **DRIVE_POWER をハード遮断してラッチ** |
-| シグナル系 (Secondary) | マイコン・Pi・LiDAR・ライト類 | 6.0 A（`POWER_SIGNAL_OVERCURRENT_THRESHOLD_A`） | LiDAR / 駆動電源を遮断してラッチ |
+| 駆動系 (Primary) | モータードライバ電源 | `POWER_DRIVE_OVERCURRENT_THRESHOLD_A` | **DRIVE_POWER をハード遮断してラッチ** |
+| シグナル系 (Secondary) | マイコン・Pi・LiDAR・ライト類 | `POWER_SIGNAL_OVERCURRENT_THRESHOLD_A` | LiDAR / 駆動電源を遮断してラッチ |
 
-どちらも 8セル ニッケル水素。過電流は 50ms 継続でフォールト。
+どちらも 8セル Ni-MH。しきい値・継続時間・低電圧の判定と復帰（ヒステリシス付き）は `src/power/power.h`（値は `uart_protocol.md` §5.3・§5.4）。
 
-```
-低電圧警告: 8.0V（1.0V/cell）未満が 1秒継続で立てる
-復帰      : 8.8V（1.1V/cell）で自動クリア  ← ヒステリシス必須
-```
-
-#### 過電流ラッチと `arm` 要求の関係 — **Pi 側に必ず伝えること**
-
-過電流でラッチした後は、**リセットするまで `DRIVE_POWER` が復帰しない。** このとき `flags.drive_power_locked` を立て、
-**Pi が `arm` を要求しても `armed` を立てない。これは異常ではなく仕様**で、Pi 側は `arm` 拒否を FAULT 扱いしない
-（`uart_protocol.md` §5.4）。**立て忘れると Pi 側からは「原因不明の arm 失敗」に見える。**
+**過電流ラッチ中は `drive_power_locked` を立て、`arm` を要求されても `armed` を立てない。** これは仕様で、Pi は FAULT 扱いしない。
+立て忘れると Pi からは「原因不明の arm 失敗」に見える。
 
 ### 8.4 その他の保護
 
 | 保護 | 動作 | 反映先 |
 |---|---|---|
-| MD 過熱 | 出力制限 or 遮断。**特に MD ステア（`temp[2]`）は据え切りで過熱しやすい** | `md_status[2].overheat` |
-| MD 通信断 | 該当モータを停止 | `md_status[i].comm_ok = 0` |
-| MD 異常（`md_fault`） | 駆動電源を入れて 5 秒（`VEHICLE_MD_BOOT_TIMEOUT_S`）待っても 3台が揃わない、または走行中に使えない状態が 20ms 続いたら、最大制動して**駆動電源が切れるまでラッチ** | `flags` bit23、理由は `LOG` |
+| MD 過熱 | 出力制限 or 遮断。**MD ステア（`temp[2]`）は据え切りで過熱しやすい** | `md_status[2].overheat` |
+| MD 通信断 | 直近 100ms で状態フレームを受信できていなければ `comm_ok = 0`（MD が無言になると status は最後の値で固まるため必須） | `md_status[i].comm_ok` |
+| MD 異常（`md_fault`） | 駆動電源を入れて `VEHICLE_MD_BOOT_TIMEOUT_S` 待っても3台が揃わない、または走行中に使えない状態が `VEHICLE_MD_FAULT_DEBOUNCE_S` 続いたら、最大制動して**駆動電源が切れるまでラッチ** | `flags` bit23、理由は `LOG` |
 
-**据え切り（停車中の操舵）による MD ステアの過熱**は、この車両構成で最も起こりやすい故障モード。
-Pi 側の planner は、停車を確認して 2 秒経ったら舵を中立へ戻す（`raspi/auto/base.py` の `StandstillSteer`。`park_to_point`）。
-STM32 はフェイルセーフで停車して 30 秒経つと駆動電源を切る。**ファーム側の操舵時間の上限は未実装。**
+**据え切り（停車中の操舵）による MD ステアの過熱**は、この車両で最も起こりやすい故障モード。
+Pi 側の planner は停車を確認して 2 秒経ったら舵を中立へ戻す（`raspi/auto/base.py` の `StandstillSteer`）。
+STM32 はフェイルセーフで停車して 30 秒経つと駆動電源を切る。**ファーム側に操舵時間の上限は無い。**
 
-**`md_status[i].comm_ok` は必須。** MD が死んで無言になると status は最後の値のまま固まる。**直近 100ms で MD からの状態フレームを受信できているか**で判定する。
+### 8.5 `flags` / `md_status` のビット
 
-### 8.5 `flags` ビット定義（u32）
+定義は `uart_protocol.md` §5.4・§5.5（コードは `ras_link.h` の `RAS_FLAG_*`・`RAS_MD_STATUS_*`）。STM32 側の約束:
 
-`uart_protocol.md` §5.4（コード上は `ras_link.h` の `RAS_FLAG_*`）が正。要点:
-
-- **`mode` は bit0-1**（STM32 が実際に採用しているモード）
-- **`TC_ACTIVE`・`TV_ACTIVE`・`AUTO_STOP_ACTIVE`・`ABS_ACTIVE`・`WHEEL_LIFT_ACTIVE`・`LAUNCH_ACTIVE`・`SIDE_BRAKE_ACTIVE`・ウィンカーは
-  「有効/無効」ではなく「今まさに介入・動作しているか」**。有効/無効は Pi 自身が送った `COMMAND` で分かるので載せない
-- `ARMED`（bit2）は「上位の指令で走れる状態」、`DRIVE_POWER_ON`（bit22）は駆動電源の状態。ARM が外れたあと停車を待って制動している間は `DRIVE_POWER_ON` だけが立つ
-- bit11/12（過電流）はリセットするまで消えない。bit13/14（低電圧）は電圧が復帰すると消える。bit9 は予約
-- `NO_HEARTBEAT`（bit25）はハートビートを一度も検出していない間、`AUTO_STOP_BLIND`（bit26）は ARM 中に LiDAR も前後の超音波も使えない状態が 3 秒続いたとき
-
-### 8.6 `md_status[i]` ビット定義
-
-`uart_protocol.md` §5.5 が正。MD が返す status バイトをそのまま転送し、上位ビット（`COMM_OK`・`LIMIT_SYNCED`）を STM32 が付加する。
+- `*_ACTIVE` 系（TC・TV・自動停止・ABS・片輪浮き・ローンチ・位置保持・ウィンカー）は「有効/無効」ではなく**今まさに介入・動作しているときだけ**立てる
+- 要求したモードを拒否しても、`flags` bit0-1 には実際のモードを入れる
+- `md_status` は MD の status バイトをそのまま転送し、`COMM_OK`・`LIMIT_SYNCED` を STM32 が付加する
 
 ---
 
 ## 9. モードと原点合わせ
 
-### 9.1 モード
-
-| 値 | モード | 内容 |
-|---|---|---|
-| 0 | `DISARM` | 停止・待機。**電源投入時の初期状態** |
-| 1 | `MANUAL` | Pi 経由のラジコン操縦 |
-| 2 | `AUTO` | 自律走行 |
-| 3 | — | **予約**（Pi は送らない） |
-
-### 9.2 遷移ルール
-
-- `MANUAL` / `AUTO` へ入る（`armed` が立つ）には **`FLG_STEER_CENTER_VALID` が立っていること**と、3台の MD が使える状態であることが必要
+- 電源投入時は `DISARM`。`MANUAL` / `AUTO` に入って `armed` が立つには、`steer_center_valid` が立っていることと3台の MD が使えることが要る
 - E-Stop・`COMMAND` 途絶のあとの復帰は `arm` を一度下ろしてから（§8.1・§8.2）
-- 要求されたモードを拒否した場合も、**`TELEMETRY.flags` bit0-1 には実際のモードを入れる**
-- `mode = 3` を受信したら無視して現在のモードを維持する
+- `mode = 3`（予約）を受けたら無視して現在のモードを維持する
 
-### 9.3 ステアリング原点合わせ — 走行中のシーケンスは実装しない
+**ステア原点合わせは組み立て・整備時の作業**で、走行中のシーケンスは持たない: タイヤを手で真っ直ぐにし、**ボタン1を押しながら電源投入**すると、
+そのときのモータ機械角を中心点として Flash に保存する。両端に当てる自動較正は MD ステアの過熱と機構破損のリスクがあるので実装しない。
+IMU の静止キャリブレーションは**ボタン2を押しながら起動**（Flash に保存）。
 
-原点合わせは**組み立て・整備時の作業**。
-
-```
-1. タイヤを手で真っ直ぐにする
-2. ボタン1を押しながら電源投入
-3. そのときのモータ機械角を中心点として Flash に保存
-```
-
-自動キャリブレーション（両端に当てて中心を出す）は実装しない（MD ステアの過熱と機構破損のリスクがあり、組み立て時に一度決めれば足りる）。
-IMU の静止キャリブレーションはボタン2を押しながら起動する（Flash に保存）。
-
-#### STM32 がやること
-
-- 起動時に Flash から中心点を読み、**有効な値があれば `FLG_STEER_CENTER_VALID` を立てる**。無ければ立てない（Pi は走行に進まず、GUI に整備手順を表示する）
-- 可動範囲はモータ角で **±60°**（`STEERING_MAX_ANGLE_RAD`）にクランプする
-- モータ角 → 路面舵角の換算は `路面舵角 = gain·x + cubic·x³`、x = モータ角 × 0.5（`STEERING_LINKAGE_RATIO`）。
-  gain・cubic は既定 1・0 で、Pi がシステム同定の値を送る（`uart_protocol.md` §5.8.4）。`max_steer_rad` は `LIMITS` で届く
+- 起動時に Flash から中心点を読み、有効なら `steer_center_valid` を立てる（無ければ Pi は走行に進まず、GUI に整備手順を出す）
+- 可動範囲はモータ角で `STEERING_MAX_ANGLE_RAD` にクランプ
+- モータ角 → 路面舵角は `路面舵角 = gain·x + cubic·x³`、x = モータ角 × `STEERING_LINKAGE_RATIO`（`src/control/steering.c`）。gain・cubic は Pi が送る（既定は恒等の 1・0）
 
 ---
 
 ## 10. パラメータの扱い
 
-### 10.1 パラメータ一覧
+`param_id` の一覧と意味は `uart_protocol.md` §5.8。調整パラメータ（TC・ABS・片輪浮き・TV・車速PI・ステアのリンク・ローンチ・FF・前輪エンコーダ校正・車速 KF・
+ジャイロ補正・制動の見積もり）は **`src/control/control_params.h` の表が名前・`param_id`・範囲・仮置きの唯一の定義**。
+ON/OFF 系（`0x0010`/`0x0020`/`0x0050`/`0x0070`/`0x0090`）・`0x0040`・`0x0060` は `ras_link.h` の `RasParamId`。
 
-`param_id` の一覧・範囲・意味は **`uart_protocol.md` §5.8** が正。足回りの制御の調整パラメータ（TC・ABS・片輪浮き対策・TV・車速PI・
-ステアのリンク・ローンチ・FF・前輪エンコーダ校正・車速 KF・ジャイロ補正・制動の減速度）は
-**`src/control/control_params.h` の表が名前・`param_id`・範囲・仮置きの唯一の定義**。ON/OFF 系（`0x0010`/`0x0020`/`0x0050`/`0x0070`/`0x0090`）・
-`0x0040`・`0x0060` は `ras_link.h`（`RasParamId`）。
+1. **`CONFIG_SET` / `CONFIG_GET` には必ず `CONFIG_ACK` を返す。** 不明な ID（欠番を含む）は `result=1`
+2. **範囲外はクランプし、`applied` にクランプ後の値を入れて `result=2`**（非数は仮置きの値）。Pi の GUI が実機の真の値を表示できる
+3. `CONFIG_GET` は現在値を `applied` に入れて `result=0` で返す
+4. `0x0040`（LiDAR フォーマット）は走行中も切り替えを許す
+5. ステアのリンク（`0x0081`/`0x0082`）は受けた値を保持するだけで、**停車して DISARM のときに適用**し `LIMITS` を送り直す（`vehicle.c` の `UpdateSteeringLinkage`）
+6. `0x0101`・`0x0102`（制動の減速度・MD のトルクの遅れ）はファームが値を持たない（仮置きは範囲の下限）
 
-実装の要点:
-
-- `0x0040` LiDAR 出力フォーマットは **enum（0/1/2）**で、走行中の切り替えを許可する（`result=3` で拒否しない）。範囲外は 0〜2 へ丸め `result=2`
-- `0x0060` 自動停止のマージンは cm の連続値（0.0〜100.0、既定 15.0）。範囲外はクランプして `result=2`
-- 廃止済みの ID（`0x0001`-`0x0003`、`0x0021`-`0x0029`、`0x0041`）は `result=1`（不明 ID）を返す
-- ステアのリンク（`0x0081`/`0x0082`）は受けた値を保持するだけで、**停車して DISARM のときに適用**する（走行中に舵角の意味が変わらないように）。適用時に `LIMITS` を送り直す
-- `0x0101`（`BRAKE_DECEL_M_S2`）・`0x0102`（`MD_TORQUE_LAG_S`）は自動停止の停止距離と、ARM が外れたあとの制動の上限に使う。**ファームは値を持たず**、仮置きは範囲の下限
-
-### 10.2 実装ルール
-
-1. **`CONFIG_SET` / `CONFIG_GET` を受けたら必ず `CONFIG_ACK` を返す。** 不明な ID でも `result=1`
-2. **範囲外の値はクランプし、`applied` にクランプ後の値を入れる**（非数は仮置きの値）。Pi の GUI が常に「実機の真の値」を表示できる
-3. **`CONFIG_GET` は現在値を `applied` に入れて `result=0` で返す**（GUI 起動時に実機の値と同期するため）
-4. 走行中に変更すると危険なパラメータは `result=3`（変更不可）で拒否してよい
-
-### 10.3 制御パラメータは Flash に保存しない（揮発）
-
-**`CONFIG_SET` の値は RAM 上のみ。STM32 は Flash に書かない。**
-
-```
-電源投入   →  安全側のデフォルト値（仮置き）で起動
-           →  Pi が接続時に CONFIG_GET で現在値を読み、config/vehicle.toml の [control] を CONFIG_SET で push
-           →  以降、Pi の値が正
-```
-
-設定値の single source of truth を git 管理下のファイルに一元化するため。書き換え寿命も無駄に消費しない。
-**既定値は「上位が送るまでの仮置き」**（調整パラメータは各範囲の下限＝何もしない値、ステアのリンクは恒等の 1・0、TC/TV は無効、`0x0040 = 0`）。
-Pi は全項目を送って `CONFIG_ACK` で確かめるまで ARM を通さない。
-
-**STM32 が Flash を使ってよい値はステアリング原点と IMU キャリブレーション値のみ**（STM32 でしか測れない値）。`CONFIG_SAVE` は無い。
+**Flash には保存しない（揮発）。** 起動直後は仮置き（調整パラメータは各範囲の下限＝何もしない値、ステアのリンクは 1・0、TC/TV は無効）で、
+Pi が全項目を送って `CONFIG_ACK` で確かめるまで ARM を通さない。設定値の唯一の定義を Pi の `config/vehicle.toml`（git 管理）に置くため。
+**Flash を使ってよいのはステア原点と IMU キャリブレーションだけ**（STM32 でしか測れない値）。
 
 ---
 
 ## 11. 時刻同期で STM32 がやること
 
-Pi 側が NTP と同じ4タイムスタンプ方式でオフセットを推定する（`uart_protocol.md` §6）。STM32 は T2・T3 を正確に取って返す。
+Pi が4タイムスタンプ方式でオフセットを推定する（`uart_protocol.md` §6）。STM32 は T2・T3 を正確に取って返す。
 
-1. **`T2`（`t_ping_rx_us`）は UART の IDLE 割り込みで、PING 最終バイト到着の瞬間に取る。** メインループで取るとループ周期分のジッタがバイアスになる
-2. **`T3`（`t_pong_tx_us`）は「送信キュー投入時」ではなく「実際に1バイト目が線に出る瞬間」に取る。**
-   送信中のフレーム（LiDAR セクタ1個で 0.76ms）の待ちは 4タイムスタンプ方式でも除去されず、オフセットにその半分のバイアスが乗る。
-   実装は、PONG を最優先キューから送り、**DMA 起動の直前に `t_pong_tx_us` を埋めて CRC を計算し直す**（`ras_link.c` の `PumpTx`）
-3. **`PONG` は最優先で送る。** 定期送信の順番待ちに入れない
-4. **μs カウンタは 32bit・起動時 0 スタート・約 71.6 分でラップするものを使う。** DWT->CYCCNT は 180MHz で約 24 秒でラップするので、
-   `Micros()`（`lib/timer/timer.c`）は呼ばれるたびに経過サイクルを μs へ積み上げて 32bit μs に伸ばしている（割り込み禁止の中で更新。24 秒以上呼ばれない期間があると飛ぶ）
-
-μs カウンタのラップに STM32 側の対処は不要（そのまま送る）。差分計算は符号なし演算（`(uint32_t)(a - b)`）。Pi 側が 64bit に拡張する。
+1. **T2（`t_ping_rx_us`）は UART の IDLE 割り込みで取った時刻を使う**（§6.1）
+2. **T3（`t_pong_tx_us`）は1バイト目が線に出る瞬間**: PONG を最優先キューから送り、DMA 起動の直前に埋めて CRC を計算し直す（`PumpTx`）。
+   送信キュー投入時に取ると、送信中のフレームの待ちがオフセットのバイアスになる
+3. **μs カウンタは 32bit・起動時 0 スタート（約 71.6 分でラップ）。** DWT->CYCCNT は 180MHz で約 24 秒でラップするので、`Micros()`（`lib/timer/timer.c`）は
+   呼ばれるたびに経過サイクルを μs へ積み上げて伸ばしている（24 秒以上呼ばれない期間があると飛ぶ）。ラップの扱いは Pi 側が持つ
 
 ---
 
-## 12. 実装チェックリスト
+## 12. 再立ち上げ時の確認
 
-### 通信基盤
+ファームを大きく作り直した・基板を替えたときに、段階的に確かめる要点。いきなり全部を繋がない。
 
-- [ ] UART 1000000 bps 8N1（USART1、USARTDIV = 2.8125、誤差 0%）
-- [ ] `crc16_ccitt("123456789")` が **`0x29B1`** を返す
-- [ ] 全構造体に `#pragma pack(push,1)` を付け、`_Static_assert` で全構造体サイズを検証している（**`telemetry` == 102**、**`command` == 15**）
-- [ ] TX は **優先度付きキュー + DMA**（送信中のフレームを途中で中断しない。SEQ は DMA 起動の直前に振る）
-- [ ] RX は DMA + IDLE 検出。UART のエラー割り込み（`PEIE`・`EIE`）を切り、オーバーランで受信 DMA が止まらない
-- [ ] フレーム抽出ステートマシンが `0xAA 0xAA 0x55` を取りこぼさず、**`LEN = 0` でハングしない**
-- [ ] 未知の TYPE・LEN 不一致で `LEN` を信用せず SYNC の探し直しに戻る
-- [ ] 受信フレームから構造体を作るのに `memcpy` を使っている（キャストしていない）
+1. **CRC**: `crc16_ccitt("123456789") == 0x29B1`
+2. **STM32 → Pi**: 起動時の `VERSION` が Pi でデコードできる。続いて Pi から `VERSION_REQ`（LEN=0）を送って応答が返る（LEN=0 の受信経路の確認）
+3. **TELEMETRY のレイアウト**: 各フィールドに識別できる値を入れ、`odom_dist`（i32）の上位バイト・末尾の `front_angle` まで Pi で合っている
+4. **PING/PONG**: `delay` が数 ms に収まり、LiDAR を動かしても `delay` のばらつきが増えない（T3 の取得タイミングの確認）
+5. **安全機構（モータ未接続で）**: ハートビート停止で `estop_active`、`COMMAND` 停止で 100ms 後に `uart_timeout`、自動復帰しない、
+   `steer_center_valid` が無いと `MANUAL` に入らない。Pi 側の確認ツールは `raspi/tools/estop_test.py`
+6. **LiDAR**: 360点の極座標プロットで部屋の形が見える（回転の向き・鏡像はここで分かる）。`duration_us` が約 8300 μs、`rot_speed_dps` が約 3600
+7. **長時間**: モータを回した状態で `STATS` と Pi の統計のエラーが増えない。71.6 分を超えて μs カウンタのラップをまたいでも時刻同期が崩れない
 
-### 安全（最優先）
-
-- [ ] ハートビートを **PB12 のポーリング**で 50ms タイムアウト監視している（エッジ10回で接続とみなす。未接続なら発動しない）。**EXTI ライン 12 は PA12（超音波 ECHO）**
-- [ ] `estop_active` からの**自動復帰をしない**（ハートビート復活 + ボタン2）
-- [ ] **`COMMAND` 100ms 途絶**で**最大制動**（コーストではない）
-- [ ] UART タイムアウト後・E-Stop 解除後は、`arm` が一度 0 になってからの立ち上がりまで再武装しない
-- [ ] 電源投入時のモードが `DISARM` で、`FLG_STEER_CENTER_VALID` が立つまで `MANUAL` / `AUTO` に入れない
-- [ ] **過電流ラッチ中に `FLG_DRIVE_POWER_LOCKED` を立てている**（立て忘れ厳禁）
-- [ ] 低電圧警告に**ヒステリシス**がある（8.0V で立て、8.8V で落とす）
-- [ ] **`md_status[i].comm_ok` を直近 100ms の受信有無で更新している**。MD が使えなければ `md_fault` をラッチして最大制動
-- [ ] パラメータの仮置きが安全側である
-- [ ] **`torque_mode`（bit6）が立っている間、車速 PI を迂回し `target_torque` を直接掛けている**。`brake` と同時なら **`brake` を優先**
-- [ ] `target_torque`・`brake_torque` を **±0.15 N·m（`DRIVE_MAX_TORQUE_NM`）でクランプ**している（Pi 側のクランプに頼っていない）
-- [ ] **`auto_stop`（bit7）**: `d_stop = v・t_delay + v²/(2・a_max) + margin` 未満で最大制動し、進行方向（実車速の符号。ほぼ静止なら指令の向き）だけを見る。
-      LiDAR（実舵角のまま止まるまでに車体が掃く範囲＝予想進路 ±15cm、直近300ms、3点以上。車体の外形の内側の点は数えない。5ms ごとに判定）を主、超音波は LiDAR の当該方向に新しいデータが無いときのフォールバックと 5cm 未満の近接フェイルセーフ。
-      作動したら止まるまで解除しない。介入中だけ `FLG_AUTO_STOP_ACTIVE` を立てる
-- [ ] 優先順位が **`side_brake` > `brake` > `auto_stop` > 通常指令**。強制制動（ARM が外れたあとの停止待ち・`md_fault`）中は `side_brake` 要求を聞かない
-- [ ] 実際に位置制御へ切り替わり固定できたときだけ `FLG_SIDE_BRAKE_ACTIVE` を立てている
-- [ ] `flags2` bit1/2（ウィンカー）を `Lighting_SetWinker()` に配線し、両方立てばハザード。実際に点滅しているときだけ `FLG_WINKER_*_ACTIVE`。
-      電源系の異常・E-Stop 中は強制ハザード。`COMMAND` 途絶時は要求を解除
-- [ ] ABS が制動トルクを削っている間だけ `FLG_ABS_ACTIVE`（フォールバック中は立てない）
-- [ ] `flags2` bit3（`launch`）を `Drive_SetLaunch()` に配線し、発進している間だけ `FLG_LAUNCH_ACTIVE`
-
-### センサ・データ
-
-- [ ] LD06 のビニングで**ビン中心最寄りの代表点**を採用している。セクタ内最短距離は内部の衝突判定用に別途保持
-- [ ] `duration_us`・`rot_speed_dps`・`t_start_us` が仕様どおり。起動後の**最初の1回転を送信していない**。LiDAR 300ms 断で `lidar_ok` を落とす
-- [ ] `steer_actual` が**路面舵角に換算済み**、`target_steer` を路面舵角として解釈している
-- [ ] **`speed` を `cos(steer_actual)` で射影**し、`wheel_speed` / `odom_dist` は**射影せず生値**。`odom_dist` はローパスなし
-- [ ] `wheel_speed` が周速 [m/s]（時定数 9.95ms のローパス）、`speed` がカルマンフィルタの車速
-- [ ] `TELEMETRY` のフィールド順が `uart_protocol.md` §5.3 と一致（`wheel_speed`(16) → `odom_dist`(24) → `accel`(32)）
-- [ ] `torque_cmd` が TC 適用後の最終指令値で 0.0001 N·m/LSB、`cmd_seq_echo` が送信時点で最後に受けた `COMMAND` の SEQ
-- [ ] `flags` の `mode` が bit0-1 にある
-
-### その他
-
-- [ ] `PONG` を最優先で即座に返し、送信開始時点で `t_pong_tx_us` を確定している。`t_ping_rx_us` は IDLE 割り込み内で取得
-- [ ] **μs カウンタが 71.6 分周期**である
-- [ ] `VERSION`・`LIMITS` を起動時に3回送り、`VERSION_REQ`・`LIMITS_REQ` にも応答する
-- [ ] `STATS` を 1Hz で送り、カウンタは累積のまま
-- [ ] `param 0x0040` が enum (0/1/2) で、走行中も切り替え可能
-- [ ] `CONFIG_SET` / `CONFIG_GET` に必ず `CONFIG_ACK` を返し、範囲外はクランプして `applied` に反映
-- [ ] **`CONFIG_SET` で Flash に書いていない**。Flash に書くのはステアリング原点と IMU キャリブレーションのみ
-- [ ] `LOG` に `severity` を付け、TX 逼迫時に破棄して `STATS.tx_drop` に計上
-
----
-
-## 13. 立ち上げ・テスト手順
-
-段階的に確認する。いきなり全部を繋がない。
-
-### Step 1: CRC 単体テスト
-
-`crc16_ccitt("123456789", 9) == 0x29B1`。これが通らなければ他は何も動かない。
-
-### Step 2: ループバック試験（STM32 単体）
-
-TX と RX を短絡し、自分で送ったフレームを自分でパースできるか確認する（フレーミング・CRC・ステートマシンをまとめて検証）。
-
-### Step 3: `VERSION` + `LOG`（Pi と接続）
-
-STM32 → Pi の一方向から始める。`VERSION` を起動時に送り、Pi 側でデコードできるか確認。続いて既知の ASCII 文字列を `LOG` で 1Hz 送り、化けないか見る
-（ボーレートとフレーミングの確認を兼ねる）。続いて Pi から `VERSION_REQ` (LEN=0) を送り、応答が返るか確認する（**`LEN = 0` の受信経路の検証を兼ねる**）。
-
-### Step 4: `TELEMETRY` 送信
-
-ダミーの固定値を入れて送り、Pi 側で正しくデコードできるか確認する（構造体レイアウトのズレはここで発見される）。
-各フィールドに**それぞれ違う識別可能な値**を入れ、`odom_dist`（i32、offset 24）の上位バイトまで届くこと、`accel_x` が `odom_dist` の直後（offset 32）にあること、
-末尾の `front_angle`（offset 98）まで合っていることを確認する。
-
-### Step 5: `PING` / `PONG`
-
-Pi から `PING` を送り、`PONG` が返るか確認する。`delay` が数 ms 程度に収まっていること。**LiDAR を動かした状態でも `delay` のばらつきが増えないこと**（T3 の取得タイミングの検証）。
-
-### Step 6: `COMMAND` 受信
-
-**モータは繋がず**（または車体を浮かせて）、受信した `target_speed` / `target_steer` を `LOG` でエコーバックして確認する。
-
-### Step 7: 安全機構の確認（モータ未接続で）
-
-- [ ] Pi 側でハートビートを止める → `estop_active` が立つか
-- [ ] Pi 側で `COMMAND` の送信を止める → **100ms 後**に `uart_timeout` が立つか
-- [ ] `estop_active` から自動復帰しないか
-- [ ] 過電流を模擬して `drive_power_locked` が立ち、`arm` が拒否されるか
-- [ ] `steer_center_valid` が立っていない状態で `MANUAL` に入れないか
-
-### Step 8: `LIDAR_SECTOR`
-
-LD06 を接続。Pi 側で 360点を極座標プロットし、部屋の形が見えるか目視確認する（角度のオフセットや回転方向の逆転はここで発見する）。
-
-- `duration_us` が妥当か（10Hz 回転・30° なら約 8300 μs）、`rot_speed_dps` が約 3600（= 10 rps）か
-- **わざと 1セクタ落として**、Pi 側の歪み補正が破綻しないか
-
-### Step 9: `STATS` と長時間の品質確認
-
-`STATS` を 1Hz で送り、Pi 側の統計と並べて表示する。**モータを回した状態**でエラーが増えないか見る（ノイズが UART に乗っていないかの確認）。
-
-### Step 10: 実走行
-
-上記すべてが通ってから、**低速から**。
-
-### 長時間試験
-
-- 30分以上の連続通信で `crc_error_count` / ロス率が増えないか。**モータを回した状態**でも増えないか
-- **71.6 分以上**動かして μs カウンタのラップをまたいでも時刻同期が破綻しないか
-- `odom_dist` が単調に増え、停止中にドリフトしないか
-
----
-
-## 14. 未実測のまま残っている量
-
-`uart_protocol.md` §14 と同じ内容。**STM32 側の作業項目。**
-
-| # | 項目 | これが無いと困ること |
-|---|---|---|
-| 5 | **トルク定数 Kt** | `torque_cmd` の物理的意味。TC のゲイン設計 |
-| 6 | 前輪エンコーダの実分解能 | `odom_dist` の量子化誤差、静止デッドバンド幅 |
-
-（番号は `uart_protocol.md` §14 と共通のため欠番のまま。）
+未確定事項（トルク定数 Kt・前輪エンコーダの実分解能など）は `uart_protocol.md` §14。

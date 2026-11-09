@@ -16,7 +16,7 @@
 自転車モデル1ステップ）が既にあるので、ここには持たない。**同じ式を2箇所に
 書かない。**
 
-角度は全て [rad]・反時計回り正、座標は x=前 / y=左（`docs/architecture.md` §5.1）。
+角度は全て [rad]・反時計回り正、座標は x=前 / y=左（`docs/system_overview.md` §7）。
 """
 
 from __future__ import annotations

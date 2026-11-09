@@ -113,7 +113,7 @@ class _TimedPub:
 
 
 class TestImmediateAutoCmd(unittest.TestCase):
-    """新しい判断は 50Hz の定期送信を待たずに `auto/cmd` へ出る（2026-09-26）。"""
+    """新しい判断は 50Hz の定期送信を待たずに `auto/cmd` へ出る。"""
 
     def test_new_plan_is_sent_right_away_and_periodic_continues(self):
         t0 = time.monotonic_ns()
@@ -131,7 +131,7 @@ class TestImmediateAutoCmd(unittest.TestCase):
 
 
 class TestAccelLimitPassThrough(unittest.TestCase):
-    """planner の `AutoState.accel_limit` は `auto/cmd` に載る（2026-09-27、前後運動試験が段ごとの
+    """planner の `AutoState.accel_limit` は `auto/cmd` に載る（前後運動試験が段ごとの
     加速度を指定する）。制動・未 ready のときは載せない（制動が優先）。"""
 
     def test_accel_limit_goes_into_auto_cmd(self):
@@ -656,7 +656,7 @@ class TestStandstillSteer(unittest.TestCase):
 
 
 class TestPollTimeout(unittest.TestCase):
-    """poll は次の定期送信の期限まで待つ（固定2msで500Hz起床していたのを直した、2026-10-04）。"""
+    """poll は次の定期送信の期限まで待つ（固定2msで500Hz起床していたのを直した）。"""
 
     def test_past_deadline_does_not_block(self):
         self.assertEqual(_poll_timeout_ms(0), 0)

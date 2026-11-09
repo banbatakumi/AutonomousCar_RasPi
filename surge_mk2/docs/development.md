@@ -1,10 +1,10 @@
 # SURGE Mark.2 開発ガイド — 変更の反映とトラブルシューティング
 
-**対象**: このリポジトリを触る人（＝3ヶ月後の自分を含む）
-
 「コードを直した。どこに何をすれば実機に反映されるのか」と
 「動かない。何から疑えばいいのか」だけを書いた実務文書。
-**設計の理由は [`architecture.md`](architecture.md)、開発の経緯は `PROGRESS.md` が正。**
+**設計の理由は [`system_overview.md`](system_overview.md)、現在の状態は `PROGRESS.md` が正。**
+シミュレータとベンチは [`sim/README.md`](../sim/README.md)、GUI は [`gui/README.md`](../gui/README.md)、
+校正は [`calibration.md`](calibration.md) が正（ここには書かない）。
 
 ---
 
@@ -27,7 +27,7 @@
 
 ## 1. 開発の3つの舞台
 
-**実車を出す前に、Mac 上で潰せるものは全部潰す。** 舞台は3つある。
+**実車を出す前に、Mac 上で潰せるものは全部潰す。**
 
 | 舞台 | 何が本物か | 何を開発できるか | 起動 |
 |---|---|---|---|
@@ -36,17 +36,11 @@
 | **ログ再生** (`replay_node`) | センサデータが**本物**（実車で録った `.sfl`） | 実データでの知覚・解析。ただし**指令には反応しない** | `python -m raspi.nodes.replay_node <file> --bus` |
 | （実車） | 全部 | 最終確認・遅延やノイズの実測 | Pi 上の systemd |
 
-```
-                   速い・安全 ←───────────────────────→ 本物
-   モック(bus_demo)      シミュレータ(sim.run)      ログ再生      実車
-   配管と見た目          自律走行の開発台           実センサ      最終確認
-```
-
-### 選び方
+選び方:
 
 - **GUI の色・配置・異常表示を直した** → モック（`--faults`）
 - **planner（`raspi/auto/`）を書いた・パラメータを詰めたい** → シミュレータ、数値で比べるなら `sim.bench`
-- **SLAM（`slam2d/`）を触った** → `sim.slam_bench`（真値比較・仮想時間・誤差注入。§4.4）
+- **SLAM（`slam2d/`）を触った** → `sim.slam_bench`（真値比較・仮想時間・誤差注入）
 - **点群の解釈や換算を疑っている** → ログ再生（本物のノイズが入っている）
 - **遅延・電流・温度・電波を知りたい** → 実車以外に手段は無い
 
@@ -62,23 +56,19 @@
 |---|---|---|
 | `gui/` | **rsync だけ**（`tools/deploy.sh`）。telemetry_node は毎リクエストでファイルを読む | しない |
 | `raspi/tools/mdns_unicast.py`（Wi-Fi 端末から `surge-mk2.local` を引けるようにする avahi の補助） | rsync ＋ `ssh surge-mk2 'sudo systemctl restart surge-mdns'`。`deploy.sh --restart` は再起動しない | しない |
-| `raspi/nodes/telemetry_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera） | しない |
-| `raspi/nodes/camera_node.py` | 同上 | しない |
-| `raspi/nodes/cam_perception_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-cam-perception） | しない |
-| `raspi/nodes/cam_e2e_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-cam-e2e）。`surge-cam-e2e` は常時起動だが `cam_e2e` が選ばれている間だけ推論する（IDLE/ACTIVE、`cam_perception_node.py` と同じ設計。§12.3） | しない |
-| `raspi/nodes/line_perception_node.py` | `deploy.sh --restart`（surge-telemetry / surge-camera / surge-line-perception）。`surge-line-perception` は常時起動だが `line_trace` が選ばれている間だけ認識する（IDLE/ACTIVE、`cam_perception_node.py` と同じ） | しない |
-| **`raspi/auto/` `raspi/nav/` `planning_node.py`** | `deploy.sh --restart`（surge-planning を含む。`PLANNERS` はプロセス起動時に固定されるので必須） | しない |
-| `config/vehicle.toml` | 読んでいるノードを再起動（planning / io）。**先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync | io なら**する** |
-| `config/auto.json` `auto_presets.json` `drive_settings.json` `camera.json` `cam_model.json` `cam_e2e_model.json` `e2e_lidar_model.json` `odometer.json`・`saved_maps/` | **機械ごとの状態。`deploy.sh` は運ばない**（telemetry_node / io_node が動いている機械で書き、起動時に戻す。Mac＝シム、Pi＝実機で別々）。地図は GUI の DL/UL で運ぶ（経路の設定も同梱） | しない |
-| `raspi/nodes/io_node.py` `raspi/io/` `raspi/msgs/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
-| `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
-| `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**STM32 側にもヘッダを渡す** | **★★ する** |
-| `raspi/msgs/types.py` | **`gui/src/types.ts` も手で直す**（写しなのでズレる）→ rsync ＋ `--restart-io` | **★★ する** |
-| `models/*.onnx`（カメラセグメンテーション用）`models/cam_e2e/*.onnx`（カメラE2E用）`models/e2e_lidar/*.onnx`（LiDAR E2E用） | **通常の `tools/deploy.sh`（rsync のみ）。** プロセス再起動は不要——`cam_perception_node`/`cam_e2e_node`/`e2e_lidar` の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
-| `ml_cam/` `ml_cam_e2e/` `ml_lidar/`（学習パイプライン一式）`ml_common/`（3つの学習GUIが共有するTkinter部品） | **Mac 側だけで完結。Pi には無関係**（rsync では運ばれるが、`raspi/` 側は読まない） | しない |
+| `raspi/nodes/telemetry_node.py` `camera_node.py` `cam_perception_node.py` `cam_e2e_node.py` `line_perception_node.py` | `deploy.sh --restart`（surge-telemetry / camera / cam-perception / cam-e2e / line-perception / planning をまとめて再起動） | しない |
+| **`raspi/auto/` `raspi/nav/` `planning_node.py`** | `deploy.sh --restart`（`PLANNERS` はプロセス起動時に固定されるので必須。地図作成中に再起動すると未確定の地図は失われる） | しない |
+| `config/vehicle.toml` | **先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync。読んでいるノードを再起動（planning は `--restart`、`[control]` は io が接続時に STM32 へ送るので `--restart-io`） | io なら**する** |
+| `config/auto.json` `auto_presets.json` `drive_settings.json` `camera.json` `cam_model.json` `cam_e2e_model.json` `e2e_lidar_model.json` `odometer.json`・`saved_maps/` | **機械ごとの状態。`deploy.sh` は運ばない**（動いている機械で書き、起動時に戻す。Mac＝シム、Pi＝実機で別々）。地図は GUI の DL/UL で運ぶ（経路の設定も同梱） | しない |
+| `raspi/nodes/io_node.py` `raspi/io/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
+| `raspi/msgs/types.py` | **先に `python3 config/gen_msgs.py`**（`gui/src/generated/msgs.ts` を再生成）→ `deploy.sh --restart --restart-io` | **★★ する** |
+| `raspi/setup/install_services.sh`（unit に書く引数。`ARM=` 行の `--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
+| `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**ファームは生成ヘッダを取り込まず `ras_link.[ch]` に手で写している**ので、ファームも直して `protocol_version` を上げ、同時に書き込む（[`raspi/proto/README.md`](../raspi/proto/README.md)） | **★★ する** |
+| `models/*.onnx`（カメラセグメンテーション）`models/cam_e2e/*.onnx`（カメラE2E）`models/e2e_lidar/*.onnx`（LiDAR E2E） | **通常の `tools/deploy.sh`（rsync のみ）。** 再起動は不要——各ノード／planner の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
+| `ml_cam/` `ml_cam_e2e/` `ml_lidar/` `ml_common/`（学習パイプラインと学習 GUI の共通部品） | **Mac 側だけで完結。** rsync では運ばれるが `raspi/` 側は読まない | しない |
 
 > **`--services` は unit ファイルを書き換えるだけ。** 走っている `io_node` は古い引数のまま
-> 動き続けるので、反映には `--restart-io` が要る。
+> 動き続けるので、反映には `--restart-io` が要る（`install_services.sh` も最後にそう警告する）。
 
 ### ★★ `--restart-io` は E-Stop をラッチさせる
 
@@ -95,20 +85,14 @@
 
 ### Mac 側
 
-メイン GUI（Web）以外の補助 GUI（シミュレータ一式・コースエディタ・システム同定・SLAM 再処理・走行サマリ・動画の書き出し・
-ml_lidar / ml_cam / ml_cam_e2e）は、**`launcher.command`（surge_mk2 直下）をダブルクリック**すると
-1つの窓から起動・停止できる（`tools/launcher.py`。アプリの追加は `APPS` に1行足す）。
-ランチャーを閉じると、そこから起動したアプリも終了する。
+補助 GUI（シム・コースエディタ・校正・SLAM 再処理・走行サマリ・動画の書き出し・ml 系）は
+**`launcher.command`（surge_mk2 直下）**から起動・停止する（`tools/launcher.py` の `APPS`。閉じると子も終了する）。
 
 ```bash
 cd ~/GitHub/AutonomousCar_RasPi/surge_mk2
 
-# ── 実行 ──
+# ── 実行（オプションは sim/README.md）──
 .venv/bin/python -m sim.run                       # シミュレータ一式（Ctrl-C で全部落ちる）
-.venv/bin/python -m sim.run --course toyota2       # コース指定
-.venv/bin/python -m sim.run --list                # コース一覧
-.venv/bin/python -m sim.run --kill-stale          # 古いプロセスを落としてから起動
-.venv/bin/python -m sim.editor [名前]             # コースエディタ
 .venv/bin/python -m sim.bench --course normal      # planner の数値評価
 
 # ── テスト・生成 ──
@@ -116,6 +100,8 @@ cd ~/GitHub/AutonomousCar_RasPi/surge_mk2
 ./tools/check.sh --fast                           # 生成物の --check だけ（数秒。コミット前向き）
 .venv/bin/python -m pytest raspi/tests -q         # テストだけ単体で回すとき
 python3 raspi/proto/generate.py                   # protocol.toml を直したら必ず
+python3 config/generate.py                        # vehicle.toml を直したら必ず
+python3 config/gen_msgs.py                        # raspi/msgs/types.py を直したら必ず
 
 # ── GUI ──
 cd gui && npm run dev                             # http://localhost:5173（自動リロード）
@@ -129,13 +115,13 @@ tools/deploy.sh --no-prune                        # Mac に無くなった .py �
 tools/deploy.sh --test                            # 反映後に Pi 上でテスト
 tools/deploy.sh --restart                         # telemetry / camera / cam-perception / cam-e2e / line-perception / planning を再起動
 tools/deploy.sh --services --restart-io           # unit を入れ直して io を再起動（★E-Stop）
-tools/record.sh --duration 60                     # SD に書かずに MCAP を PC へ
+tools/record.sh --duration 60                     # SD に書かずに MCAP を PC へ（--image-hz N で画像の頻度）
 
 # ── ログ ──
 .venv/bin/python -m raspi.tools.logcat logs/x.sfl          # .sfl の要約
 .venv/bin/python -m raspi.tools.sfl2mcap logs/x.sfl        # .sfl → .mcap
 .venv/bin/python -m raspi.tools.slam_replay x.mcap          # slam2d に通し直して自己位置を足す（x_slam.mcap）
-.venv/bin/python -m raspi.tools.grip_replay x.mcap          # 走行中の学習（nav/grip.py）に流し直して安全装置の判定を見る
+.venv/bin/python -m raspi.tools.grip_replay x.mcap          # 走行中の学習に流し直して安全装置の判定を見る（§4.3）
 .venv/bin/python -m raspi.tools.mcap_repair x.mcap --inplace   # 尻切れ .mcap の復旧
 .venv/bin/python -m raspi.nodes.replay_node logs/x.sfl --bus --loop
 ```
@@ -149,373 +135,88 @@ sudo systemctl stop surge-io                 # ★ E-Stop がラッチする
 tail -F ~/surge_mk2/logs/surge-io.out        # 標準出力ログ
 journalctl -u surge-io -f                    # systemd 側のログ
 sudo journalctl --list-boots                 # 勝手に再起動した形跡を追う
-sudo bash ~/surge_mk2/raspi/setup/install_services.sh --safe   # arm 封印で入れ直す
+sudo bash ~/surge_mk2/raspi/setup/install_services.sh --safe   # arm 封印で入れ直す（反映は --restart-io）
 ```
 
-`install_services.sh` は unit を書き換えるだけで、**動いている surge-io は古い引数のまま**（`--safe` を入れても
-封印はまだ効いていない）。スクリプトが最後にそう警告する。反映は `tools/deploy.sh --restart-io`（★E-Stop）。
 surge-io は drop-in `surge-io.service.d/10-priority.conf` で `Nice=-10` にしてある。
 
-**接続先は常に `surge-mk2.local`**（mDNS）。直結・Wi-Fi の生きている方を自動で選ぶので、
-IP を調べる作業は要らない。GUI は `http://surge-mk2.local:8000/`。
-**Wi-Fi だけで繋いだ Mac では名前が引けなくなることがある**（下記 8.1）。そのときは launcher の
-「実機 GUI を開く」か `.venv/bin/python -m tools.find_pi --open` で **IP で開く**。`tools/deploy.sh` は
-名前で繋がらないと自動で IP に切り替える。
+**接続先は常に `surge-mk2.local`**（mDNS）。直結・Wi-Fi の生きている方を自動で選ぶ。
+GUI は `http://surge-mk2.local:8000/`。**Wi-Fi だけで繋いだ Mac では名前が引けなくなることがある**（§8.1）。
+そのときは launcher の「実機 GUI を開く」か `.venv/bin/python -m tools.find_pi --open` で **IP で開く**。
+`tools/deploy.sh` は名前で繋がらないと自動で IP に切り替える。
 
 ---
 
 ## 4. Mac だけで回す開発ループ
 
-### 4.1 シミュレータ
+### 4.1 シミュレータとベンチ
 
-```bash
-.venv/bin/pip install -r sim/requirements.txt     # 初回だけ（pygame / pillow）
-.venv/bin/python -m sim.run
-```
+起動・キー操作・コースの作り方・ベンチ（`sim.bench`・`sim.slam_bench`・`sim.park_bench`）のオプションと
+結果の読み方は [`sim/README.md`](../sim/README.md) が正。
 
-`io_node --sim` / `telemetry_node --no-camera` / `planning_node` / `sim.gui` の4つが上がり、
-ブラウザが開く。**`Ctrl-C` か俯瞰ビューの窓を閉じると全部止まる。**
-
-自動運転を試すときは、ブラウザの「自動運転」タブでモードを選び、
-`Enter` で ARM してから「自律走行を開始」を押す。
-**engage しなくても判断だけは流れている**ので、手動で走らせながら planner の狙いを見られる。
-
-`sim.run` は起動前に「Rosetta で動いていないか」「ポート 8000 と `io` エンドポイントを
-掴んでいる古いプロセスが居ないか」を**起動時刻つきで**点検する（下記 8.3 の2つを
-そもそも踏ませない作り）。子プロセスの扱いは3種類:
-
-| 子 | 死んだら |
-|---|---|
-| `io_node` / `telemetry_node` | **全部止める** |
-| `sim.gui` | 終了コード 0（＝窓を閉じた）なら全部止める。**非0（事故）なら続行** |
-| `planning_node` | **どう死んでも巻き添えにしない**（別ターミナルで上げ直せばよい） |
-
-> コースは `sim/courses/*.json`（`python -m sim.run --list` で一覧。`sim.run` の既定は `normal`）。
-> `io_node` 単体の `--course` 既定（`sim/courses/oval.png`）は現存しないので、手で起動するときは明示する。
-> 増やすなら `python -m sim.editor`（下記）。
-
-#### シミュレータ GUI（pygame）のキー操作
-
-| キー | 動作 |
-|---|---|
-| `P` | シムの設定ページ（コース一覧・LiDAR・ODOM・LINK）を開閉 |
-| `M` | **コースエディタを別ウィンドウで開く**（今のコースを開いた状態） |
-| `N` / コース名クリック | コース切替（車両はそのコースのスタート姿勢へ） |
-| `↑` `↓` | 行の選択（閉じているときは設定ページを開く） |
-| `←` `→` | 選択中のパラメータを増減（`Shift` で 10 倍） |
-| `R` / `E` / `T` / `D` | 姿勢リセット / E-STOP / 軌跡消去 / パラメータ既定値 |
-| `Esc` / `Q` | 終了 |
-
-**同じ操作は全部パネル下部のボタンにも出ている**（キーを併記してあるので使ううちに覚える）。
-
-#### コースを作る（`python -m sim.editor`）
-
-直線（0.5/1/2/3m）と円弧（R0.5〜2m × 30/45/60/90/180°）をクリックでつないでいくだけ。
-**閉ループを作るための数字が3つ出る**:
-
-| 表示 | 読み方 |
-|---|---|
-| **総回頭** | **360 の倍数でなければ絶対に閉じない。** 「あと 90」と出る |
-| **始点まで 前 / 左** | 進行方向基準の差。「あと 1.2m 前」「0.3m 左」と読める |
-| **直線で閉じる** | 回頭差と横ずれが無ければ、必要な長さの直線1本を足して閉じる（`Enter`） |
-
-`←` 左カーブ / `→` 右カーブ / `↑` 直線 / `Backspace` 取消 / `C` 全消去（**2度押し**）/
-`S` 保存 / `O` 既存を開く / `W`・`Shift+W` 道幅。
-保存先は `sim/courses/<名前>.json` で、**手書き JSON と完全に同じ形式**。
+- **engage しなくても判断だけは流れている**ので、手動で走らせながら planner の狙いを見られる
+- **見た目では「なんとなく速い」しか分からない。** planner の採否は `sim.bench` の数字で決める
+- ★ベンチは**実時間**で回る。並列は 2 本まで
 
 ### 4.2 GUI だけを直す
 
-サーバ（`telemetry_node`）とデータ源（`bus_demo` か `sim`）を上げたまま、
-`npm run dev` を使う。Vite の自動リロードが効くので rsync も再起動も要らない。
+サーバ（`telemetry_node`）とデータ源（`bus_demo` か `sim`）を上げたまま `npm run dev` を使う。
+Vite の自動リロードが効くので rsync も再起動も要らない（手順は [`gui/README.md`](../gui/README.md)）。
 
-### 4.3 planner を数値で比べる
-
-```bash
-.venv/bin/python -m sim.bench --course normal
-.venv/bin/python -m sim.bench --mode de --time 180 --set safety_half_width=0.12
-```
-
-**プロセスもバスも GUI も使わず、1プロセスの中で `io_node` と同じことをやる。**
-`ScanAssembler` の鏡像反転も `command_from_cmd` のクランプも通るので、
-「ここで走れば `sim.run` でも走る」。
-
-出るのは**計画周期（平均/中央/最大 ms）・自己位置誤差・向きの誤差・横偏差・
-周回数・走行距離・衝突回数・ラップタイム・地図の正確さ**。
-
-見た目では「なんとなく速い」しか分からない。**数字で出してから採否を決める。**
-
-> **ベンチだけが真値を読める。** シムの真値は UDP の私設チャンネルにしか出ないので、
-> SLAM の推定と真値を毎周期突き合わせられるのはここだけ（実機では絶対に手に入らない数字）。
-
-#### 路面を変えて走らせる（走行中の学習の検証）
+### 4.3 走行中の学習を確かめる
 
 `slam2d_route` の `grip_learn`（`raspi/nav/grip.py`。横の上限を `GripLearner` が周回のタイムで、前後の上限を
-`LongLearner` が包絡で、走行中に決める）は、真値の路面を変えた車で確かめる。横は 1 段に 1 周かかるので、
-学習の収束まで見るなら `--time` は長く取る（下の例は 150〜190 秒の部分走行。収束まで見るときは数百秒）。
-路面を変えるオプションは**真値の車だけ**に効く（planner は `config/vehicle.toml` のまま）。
+`LongLearner` が包絡で、走行中に決める）の検証は3段。
 
-```bash
-B="--course toyota2 --map mpc_toyota2 --locate-hint 0,0 --mode slam2d_route --set v_max=4.0"
-.venv/bin/python -m sim.bench $B --time 150 --mu 0.55 --set grip_learn=1          # 一様に 0.55
-.venv/bin/python -m sim.bench $B --time 170 --mu 0.55 --surface 4.38,5.68,1.0,0.30 --set grip_learn=1
-.venv/bin/python -m sim.bench $B --time 190 --mu 0.55 --mu-at 90:0.44 --set grip_learn=1   # 90 秒後に下がる
-.venv/bin/python -m sim.bench $B --time 80                                        # 学習なし（同定値で固定）
-```
-
-| オプション | 中身 |
-|---|---|
-| `--mu MU[:MU_LONG]` | 真値の摩擦係数（一様）。横の限界と、**前後（加速・速度指令での減速）の上限**を同じ割合で変える。`MU_LONG` を付けると前後だけ別の値 |
-| `--surface X,Y,R,MU[,MU_LONG]` | シムの世界座標の円の中だけ変える（繰り返し可） |
-| `--mu-at T:MU[:MU_LONG]` | bench の時刻 `T` 秒から一様の値を変える |
-| `--assume KEY=VALUE` | **planner が信じている車**の諸元だけ変える（`--vehicle` の逆） |
-| `--grip FILE` / `--save-grip FILE` | 学習した値を読んでから走る / 走り終えた値を書く（保存値からの再開） |
-| `--grip-set KEY=VALUE` | 横の学習の定数（`grip.GripConfig`）を上書き |
-| `--sim KEY=VALUE` | センサ誤差（`sim.params.SimParams`）を上書き |
-| `--real-noise` | **実機で測った走行中の揺れ**（ヨーレート・車速・実舵角。約 11Hz）をテレメトリに足す（`sim.params.REAL_VIBRATION`）。★安全装置の判定を変えたら、これ有り・無しの両方で走らせる |
-| `--set KEY=VALUE` | planner の設定。**GUI から隠した項目（`ParamSpec.hidden`）も bench からは上書きできる** |
-
-結果の「横G学習」の行に、終わったときの値・真値・天井（安全装置が働いた上限）・収束した時刻・段の判断と採用の数・
-安全装置の回数と**誤検出**（真値で限界を超えていなかった）、そのあと 1.5 秒の横偏差の最大と壁との余裕の最小が出る。
-その下に加速・減速の値と真値・包絡・下げた測定の一覧が出る。
-`--trace` の CSV には `slip`（真値の超過率）・`g_level`・`g_cross_gain`・`g_cap`・`g_gate` が入り、あわせて
-`<trace>.long.csv`（加速・減速の学習へ渡した値と、その瞬間の真値）・`<trace>.path.csv`（終わったときに
-追っていた経路と速度）を書く。
-
-★ベンチは**実時間**で回る。並列は 2 本まで。1 行目の「計画 … 最大」が 90ms を超えた走行と、
-「指令の間隔 最大」が 150ms を超えた走行（★が付く）は捨てて走らせ直す。後者はホストが詰まって仮想 STM32 の
-デッドマン（`cmd_deadman_ms`）が車を止めた走行で、直線の途中で止まり、走り直す所で壁に当たることがある
-（走りの問題ではなく、ホストの詰まりによる見かけの衝突）。
-
-シムの路面（`sim/surface.py`）と TC の旗は**作り物**: 車は限界で曲率がいきなり頭打ちになり
-（実機のタイヤは徐々に逃げる）、後輪が巻き込む動き・後輪のロックは無い。TC の旗は駆動の加速度が
-上限で頭打ちの間に立てているだけ（`sim/stm32.py`）。
-
-★**シムの既定の雑音は実機よりずっと小さい**（ジャイロ σ 0.3°/s。実機の走行中は高周波だけで 4.5〜8°/s、
-舵も σ 0.016rad でばたつく）。シムだけで決めた検出器・しきい値は、実機で誤動作しうる。安全装置を変えたら、
-`--real-noise` を付けた走行と、下の「実機の記録を流し直す」の両方で確かめること。
+1. **シム**: `sim.bench` の `--mu` / `--surface` / `--mu-at` で真値の路面だけ変えて走らせる
+   （[`sim/README.md`「路面を変えて走らせる」](../sim/README.md#路面を変えて走らせる走行中の学習の検証)）。
+   ★シムの既定の雑音は実機よりずっと小さいので、安全装置を変えたら `--real-noise` 有り・無しの両方と、下の流し直しで確かめる
+2. **実機の記録を流し直す**（下）
+3. **実機で段階的に試す**（下）
 
 #### 実機の記録を学習に流し直す（`raspi/tools/grip_replay.py`）
 
-安全装置（リアの滑り・線から外れた・横偏差の増え）は車両状態（IMU の横加速度を含む）と記録の横偏差だけで決まるので、記録をそのまま
-流せば実機で何が働いたかが手元で再現できる。**滑っていない記録では 0 回が合格。**
+安全装置（リアの滑り・線から外れた・横偏差の増え）は車両状態（IMU の横加速度を含む）と記録の横偏差だけで決まるので、
+記録をそのまま流せば実機で何が働いたかが手元で再現できる。**滑っていない記録では 0 回が合格。**
 
 ```bash
-.venv/bin/python -m raspi.tools.grip_replay ~/Downloads/surge_xxx.mcap            # 学習を入れて走った記録
-.venv/bin/python -m raspi.tools.grip_replay ~/Downloads/surge_xxx.mcap --pin 4.9  # 学習なしの記録: 上限を固定して流す
-.venv/bin/python -m raspi.tools.grip_replay x.mcap --set slide_s=0.1             # GripConfig を変えて比べる
-.venv/bin/python -m raspi.tools.grip_replay x.mcap --end 100 --export x.npz       # テスト用の小さな記録に抜く
+.venv/bin/python -m raspi.tools.grip_replay x.mcap                    # 学習を入れて走った記録
+.venv/bin/python -m raspi.tools.grip_replay x.mcap --pin 4.9          # 学習なしの記録: 横の上限を固定して流す
+.venv/bin/python -m raspi.tools.grip_replay x.mcap --set slide_s=0.1  # GripConfig を変えて比べる
+.venv/bin/python -m raspi.tools.grip_replay x.mcap --end 100 --export x.npz   # テスト用の小さな記録に抜く
 ```
 
-- 流し直しは開ループ（安全装置で目標速度を落としても、記録の車速は変わらない）。学習なしで走った記録は
-  `--pin` で横の上限を固定して流す
-- 回帰テスト（`raspi/tests/test_grip.py` の `TestRealRecords`）は `raspi/tests/data/grip_real_*.npz`
-  （実機の記録の抜粋。新しい npz は IMU の横加速度 `ay` を含む）を流す。実機で誤って働いた記録が増えたら、ここへ足す
-- 学習を入れて走った記録には `auto/state.grip`（学習値・前後の包絡と比・加速と減速の学習へ渡した計画の速度と加速度・
-  `t_lap`・`t_plan`（直近に数えたラップと計画のラップ [s]）・`ref_lat`・`ref_lap`・`ref_plan`（比べる相手の段）・
-  `step`（今の幅）・`cross_gain`（直近の周の横偏差の増え [m]）・`ceil`（天井））が 10Hz で入る
-- タイムで決める段の採否は開ループでは再現できない（`--plan-lap` で計画のラップを与えたときだけ流れる）
+- 流し直しは開ループ（安全装置で目標速度を落としても、記録の車速は変わらない）。タイムで決める段の採否は
+  `--plan-lap` で計画のラップを与えたときだけ流れる
+- 回帰テスト（`raspi/tests/test_grip.py` の `TestRealRecords`）は `raspi/tests/data/grip_real_*.npz`（実機の記録の抜粋）を流す。
+  実機で誤って働いた記録が増えたら、ここへ足す
 
 #### 走行中の学習を実機で初めて試すとき
 
 シムで決めたしきい値・上げ幅をそのまま使わない。安全側から順に:
 
-1. **記録だけ取る**（`grip_learn` = 0 のまま普段どおり周回）。記録を `grip_replay --pin <走っていた
-   横加速度>` に流し、安全装置が 0 回であることを見る（上の節）
+1. **記録だけ取る**（`grip_learn` = 0 のまま普段どおり周回）。記録を `grip_replay --pin <走っていた横加速度>` に流し、
+   安全装置が 0 回であることを見る
 2. **下げるだけ**: `grip_learn` 1・`grip_down_only` 1。出発点は同定値の 0.85 倍（横）、加速・減速は校正の値
-   （`[limits]`）で、そこから上げない。前兆が誤って出ないか
-   （reason の「前兆 n回」が何もない所で増えないか、減速の値が下がり続けないか）を見る。
-   加速・減速は「計画が求めた所で実際に出た ÷ 求めた」（包絡の点ごとに窓を 0.3 s ぶん溜めて、周の境目で判断）で決める。減速は、制動区間の終わりで
-   車速が計画より 0.10m/s を超えて速かった周にも 1 段下がる（記録の `grip.lag_dec`）
-3. **上げる**: `grip_down_only` 0・`grip_max` を今走れている値＋0.5m/s² 程度（例 5.0）・`v_max` は
-   普段より下げる。壁の外側に緩衝材を置く。★横は**限界の見積もりそのものまで出す**。出してよい
-   上限は `grip_max` で決める。上げ幅（1 段 8%、断ったら半分）は `GripConfig.time_step`
-   ★加速・減速も同時に学習される（切り離す設定は無い）。上げるのは、上限近くを求めた所で付いて行けたときだけ（1 段 5%＝`LongConfig.step`、
-   下げた後は半分ずつ）
-4. 値が落ち着いたら `grip_max` を上げる。本番の計測走行は、練習で**学習を終えた**（reason が「収束」）地図をそのまま使う。
-   次からは学習を終えた値で 1 周目から走る（reason に「地図の確定値から開始」。0.92 倍しない・上げない）。
-   床が変わったら `saved_maps/<地図名>.grip.json` を消して学習し直す
+   （`[limits]`）で、そこから上げない。前兆が誤って出ないか（reason の「前兆 n回」が何もない所で増えないか、
+   減速の値が下がり続けないか）を見る
+3. **上げる**: `grip_down_only` 0・`grip_max` を今走れている値＋0.5m/s² 程度・`v_max` は普段より下げる。
+   壁の外側に緩衝材を置く。出してよい上限は `grip_max` で決める（上げ幅は `GripConfig.time_step`・`LongConfig.step`）。
+   加速・減速も同時に学習される（切り離す設定は無い）
+4. 値が落ち着いたら `grip_max` を上げる。本番は練習で**学習を終えた**（reason が「収束」）地図をそのまま使い、
+   学習を終えた値で 1 周目から走る。床が変わったら `saved_maps/<地図名>.grip.json` を消して学習し直す
 
-### 4.4 SLAM だけを数値で比べる（`sim.slam_bench`）
+### 4.4 校正・ファームの制御
 
-```bash
-.venv/bin/python -m sim.slam_bench                                  # 全コース×real
-.venv/bin/python -m sim.slam_bench --course toyota --errors harsh --plot
-.venv/bin/python -m sim.slam_bench --course normal --seeds 3 --json out.json
-```
-
-`sim.bench` は planner 全体を実時間で回すので、**SLAM の精度だけを見たいときには
-向かない**（SLAM が制御ループの中にいるので原因の切り分けができない・コース×条件を
-振ると何十分もかかる・`VirtualStm32` は `speed` を真値のまま送る）。
-
-こちらは車を**真値の中心線に沿って真値の姿勢で**純追従させ（SLAM を制御から切り離す）、
-仮想時間で回す。LiDAR は実機と同じ `VirtualLidar → ScanAssembler` 経路を通り、
-車速・ヨーレートには `--errors ideal|real|harsh` で誤差が入る（値の根拠は
-`sim/slam_bench.py` の `SensorModel` docstring。MPU6050 と LD06 のデータシート）。
-
-測るのは2段:
-
-1. **地図作成**（EXPLORE 相当、低速2周）: 推定軌跡のずれ・見失い・1周期の処理時間・
-   ループ閉じ（`freeze()`）の前後で地図がどれだけ真の壁に乗っているか
-2. **凍結地図での追従**（RACE 相当、高速2周）: **レース中の自己位置精度はここで決まる**。
-   横方向の誤差（`rc_lat`）が走りに効く量
-
-> 地図全体の剛体回転・平行移動は planner の走りに無関係（地図の中でしか動かない）なので、
-> RACE 段の誤差は**地図を真のコースへ剛体で重ねてから**測る（`align_map`）。
-> これをやらないと「地図が1°回っている」が位置誤差として数十cmに化ける。
-
-### 4.5 車両の校正（エンコーダ・ステア・遅延・車速制御・TC/ABS）
-
-**手順・式・合否の正は [`docs/calibration.md`](calibration.md)**。ここは操作だけ。
-
-1. 実機: GUI の「システム同定」タブで試験（`校正 1`〜`校正 9`）を選び「試験開始」→ ARM を保持。終わると記録が落ちてくる
-2. Mac: launcher →「車両の校正」（`.venv/bin/python -m tools.calib.gui`）で記録を開く。所見・合否・今の値との差が出るので、
-   値を選んで「適用」（`config/vehicle.toml`）。コマンドなら `.venv/bin/python -m tools.calib 記録.mcap [--apply]`
-3. `./tools/deploy.sh --restart-io` で Pi へ（`[control]` は接続のたびに STM32 へ送られる。GUI の「制御パラメータ: 適用済み ✓」）
-
-順番: 1 エンコーダ → 2 ステア・3 ステアの遅れ・4 遅延 → 5 車速（測る → 適用 → 確かめる）→ 6 後輪の空転（台上）→
-7 タイヤ（→ 適用）→ 8 TC・ABS のゲイン（→ 適用）→ 9 TC・ABS の確かめ（→ 適用。`[limits]` の加速・減速）。解析が真値を復元するかのテストは
-`.venv/bin/python -m pytest tools/calib/tests`（真値の分かっているシムで試験を走らせる。約 40 秒）。
-
-### 4.6 カメラ校正（魚眼レンズ）
-
-前後カメラは IMX219 **160° 広角**。画角が広いぶん像が大きく歪むので、内部パラメータを
-チェッカーボードで校正して `config/vehicle.toml` に置く。
-**校正値が無い（未校正の）カメラは、従来の `hfov` ピンホールで近似する**——160° では
-端ほど大きくズレるので、レンズを替えたら必ずやる。
-
-**レンズを付け替えられるように、レンズで変わる値はプロファイルに分けてある**
-（`raspi/core/vehicle.py` の `resolve_lens`）:
-
-```toml
-[sensors.cam_front]
-lens = "wide160"               # ← 付いているレンズ。"stock"（純正 ≒66°）に変えれば戻る
-
-[sensors.cam_front.lenses.stock]      # x y z roll pitch yaw（取付位置・姿勢）・hfov・bottom_crop・undistort_hfov
-[sensors.cam_front.lenses.wide160]
-[sensors.cam_front.lenses.wide160.fisheye]   # 校正値（tools/cam_calib が書く）
-```
-
-- **取付位置・姿勢もプロファイルに持つ**（モジュールを替えるとステーも変わるため。
-  替える前の実測値が残る）。`z` は路面からレンズ中心まで、`pitch` は下向きが正
-- **戻すとき**: `lens` を書き換えて `tools/deploy.sh --restart`。両方のレンズの校正値・
-  `bottom_crop` が残っているので、他は触らなくてよい。前後で別のレンズにしてもよい
-- **別のレンズを足すとき**: `[sensors.cam_*.lenses.<名前>]` を足す（名前は英数字と `-`。
-  📷 のファイル名に入るので `_` は使えない）。存在しない名前を `lens` に書くと
-  `config/generate.py`（CI の `--check`）が落ちる
-- 📷 の写真の名前にはレンズ名が入る（`surge_front_wide160_640x360_…png`）。校正ツールは
-  別のレンズの写真を混ぜず、写真を撮ったレンズのプロファイルに書き込む
-
-| 使うところ | 校正値の効き方 |
-|---|---|
-| IPM（`raspi/nav/ipm.py`）→ `line_trace`・`ftg_cam`・`cam_centerline` | 画素 → 地面座標の変換が魚眼モデルになる |
-| `cam_track_node`（`follow_object`）| 画素 → 方位角 |
-| GUI の進路ガイド・認識ラインの重畳（`CameraView.tsx`）| 地面 → 画素の投影が魚眼モデルになる（`config/generate.py` 経由） |
-| GUI の「補正」映像（タブバーの「魚眼/補正」、設定パネルのカメラ）| `telemetry_node` が仮想ピンホール（`undistort_hfov`）に remap して配信 |
-
-**記録（mcap）・📷 撮影・認識ノードは常に魚眼のままの生画像**を使う（補正は GUI 表示だけ）。
-式（Kannala-Brandt、OpenCV `cv2.fisheye` と同じ）と「フル画角・下端クロップ前の画素で持つ」
-約束は `raspi/core/camera_model.py` の docstring が正。
-
-**手順**:
-
-1. 印刷用ボードを作る: ランチャーの「カメラ校正」→「印刷用ボードを作る」（または
-   `.venv/bin/python -m tools.cam_calib --make-board 9x6 --square 0.025 -o board.pdf`）。
-   **「実際のサイズ」で印刷し、平らな板に貼り、1マスを定規で測る。**
-   内側の角点は**片方を偶数・片方を奇数**（9x6 など）。両方奇数だと向きが決まらず校正が破綻する
-2. 撮る: GUI のタブバーの **📷**（sfl/mcap の隣）。押すたびに前カメラ（と、取得中なら後カメラ）の
-   生画像が無劣化 PNG で Mac の ~/Downloads に落ちる（`surge_front_wide160_640x360_crop0.25_….png`）。
-   **20 枚前後、画面の中央・四隅・左右の端に、距離と傾きを変えて**写す。魚眼は端ほど歪むので、
-   端にボードが写った写真が無いと RMS が小さくても端のガイドが曲がる（ツールの「画面カバー率」を見る）。
-   ブレないよう車もボードも止めて撮る
-3. 校正: ランチャーの「カメラ校正」でカメラ・ボード寸法・実測の1マスを入れ、「写真を読み込む」→「校正」。
-   再投影誤差 RMS が 0.5px 未満、補正後のプレビューで直線が直線に戻っていれば「vehicle.toml に書き込む」
-   （`config/generate.py` まで走る）。書き込み先は画面の「レンズ」（既定は今付いているレンズ）。CLI は
-   `.venv/bin/python -m tools.cam_calib --cam front --board 9x6 --square 0.025 ~/Downloads/surge_front_*.png [--write]`
-4. 反映: `tools/deploy.sh --restart`（GUI を再ビルドして rsync し、telemetry・camera・認識ノードを
-   再起動する。校正値は起動時に読むので再起動が要る。io_node は無関係＝E-Stop はラッチしない）
-
-- 校正値はカメラ×レンズごと（前後で個体差がある）。前後のカメラを入れ替えたり、
-  レンズを付け直した（ピントリングを回した等）ら撮り直す
-- 解像度（`camera_node --size`）を変えても校正値はそのまま使える（幅・高さで縮尺する）。
-  `bottom_crop` を変えても同じ（クロップは「下を切っただけ」なので内部パラメータは変わらない）
-- カメラ学習モデル（`ml_cam`・`ml_cam_e2e`）は撮ったレンズの画像に依存するので、
-  **レンズを替えたら撮り直して再学習が要る**
-
-#### 色むら補正（レンズごとの ISP チューニング）
-
-libcamera の標準のチューニング（`imx219.json`）の色むら補正（ALSC）は**純正レンズ用**。160° 広角に
-そのまま当てると、白い壁が「中央は緑・周辺はピンク」に写る（センサーの生の色むらは ±5〜8% しか
-無いのに、標準の表が約 ±20% 掛ける。実測: 白壁の R/G が 0.84〜1.45 → 補正後 1.05〜1.12）。
-
-レンズのプロファイルに `isp_tuning = "<ファイル名>"` を書くと、`config/cam_tuning/` の**差分**
-（ALSC の表だけ）を標準のチューニングへ重ねて開く（`raspi/core/cam_tuning.py`）。
-**書いていないレンズは標準のまま**なので、`lens = "stock"` に戻せば色も元どおりになる。
-
-作り方（レンズを替えた・別のレンズを足したとき）:
-
-1. 白い無地の壁にカメラを向ける。壁が**画面の中心と上の両隅**まで入ること。明るさのむらは構わないが、
-   色の違う光（窓と電球）が混ざらないこと
-2. Pi の上で（カメラを掴むので配信を止める）:
-   ```
-   sudo systemctl stop surge-camera
-   .venv/bin/python -m raspi.tools.alsc_calib --cam 0 --rows 0,0.54 --out config/cam_tuning/imx219_<レンズ>.json
-   sudo systemctl start surge-camera
-   ```
-   `--rows` は使う行の範囲（車体が写り込む下側を外す）。`残差σ` が数%なら良い。できたファイルは
-   Mac へ持ち帰ってコミットする（`deploy.sh` は Mac → Pi の一方向）
-3. プロファイルに `isp_tuning` を書いて `tools/deploy.sh --restart`
-
-- **チューニングはプロセスに1つしか効かない**（libcamera が最初にカメラを数えた時点で全カメラ分を
-  決める）。前後で `isp_tuning` が違うと、前カメラのものが両方に当たり、起動時に警告が出る。
-  `camera_node` でカメラを開く前に `Picamera2.global_camera_info()` を呼ぶと標準に固定されて
-  黙って効かなくなる（実機で確認済み）
-- 表は中心からの距離だけの関数（車体で壁が隠れていても作れる・壁の光の色の偏りを焼き込まない）。
-  周辺減光と、色温度ごとの表は作っていない（標準のまま・ALSC の適応補正まかせ）
-- 色が変わるので、色を見る処理（矢印信号の HSV しきい値・カメラ学習モデル）は撮り直し・再調整が要る
-
----
-
-### 4.7 足回りの制御（TC・ABS・片輪浮き対策・TV）
-
-TC・ABS の目標スリップ率は校正 7（タイヤ）、ゲインは校正 8、効きの確かめは校正 9 で決める（[`docs/calibration.md`](calibration.md) §4.7〜§4.9）。
-ゲインは「目標の点で線形化したスリップの動き＋測った遅れ」から位相余裕 60° の式（`tools/calib/tyre.py`・`loop.py`）で出す。
-
+- **車両の校正**（エンコーダ・ステア・遅延・車速制御・TC/ABS）、**カメラの校正**、**車速の推定（KF）の調整**は
+  [`calibration.md`](calibration.md) が正。値は `config/vehicle.toml`、反映は `tools/deploy.sh --restart-io`
+  （`[control]` は接続のたびに STM32 へ送られる。`--restart` では入らない）
 - **ファームの制御を変えるときは、変える前後で `.venv/bin/python -m tools.fwsim.bench` を回して比べる**（ホストでコンパイルした
   ファーム＋車のモデル。`--ref <コミット>` で相手を指定。物差しは `tools/fwsim/scenarios.py` の冒頭）
-- **TV は同定も最適化もしない**（`tv_*` は `[control]` を手で決める。有効/無効は `tv_enable`）。決め方: 旋回しながら加速する走行を TV の
+- **TV は同定も最適化もしない**（`tv_*` は `[control]` を手で決める。有効/無効は `tv_enable`）。旋回しながら加速する走行を TV の
   ON/OFF（「設定 → 走行アシスト」）で比べ、診断タブの「スリップ率」で内輪と外輪がそろう値を探す
-- **ローンチコントロール**（`launch_exit_torque_nm`）は校正 5 が `rolling_resistance ÷ speed_plant_gain ÷ 2` を書く
-- **モデルが表していないもの**: 後輪の横滑り（スピン）、路面の凹凸、タイヤの温度・摩耗、バッテリー電圧によるトルクの頭打ち
 
-### 4.8 車速の推定（走行距離＋加速度計のカルマンフィルタ）
-
-STM32 の車速 `speed` は**カルマンフィルタ**（ファームの `src/control/speed_kf.c`）だけで、前輪エンコーダの微分+LPF は無い。
-調整値は `[control]` の `kf_*`（`CONFIG_SET` で STM32 へ送る。値の根拠は [`docs/control_constants.md`](control_constants.md)）。
-**センサの実測だけで決まるのは加速度の雑音の一部だけ**で、走行距離の測定ノイズ `kf_sigma_s_m` は経験値（周期誤差を白色雑音として通さないための水増し）。
-
-1. **記録から最尤推定して決める**: `python -m tools.calib.kf <mcap...>`（走行の記録を複数。校正 1（エンコーダ）を入れた後の記録で）。
-   STM32 と同じフィルタ（`tools/calib/kf.replay`）に TELEMETRY を通し、残差の尤度を最大にする σ・PSD を探して NIS・ρ を出す。
-   ρ が 0.3 を超えた測定は白色の前提が破れている（周期誤差・振動）ので書き込まない。`--apply` で `[control]` へ
-2. **調整値を検定する（真値は要らない）**: `python3 -m raspi.tools.kf_consistency <記録>.mcap`。フィルタは測定ごとに
-   「残差 ÷ 自分が主張する標準偏差」z を作り、調整値が現実と合っていれば z は平均 0・分散 1 の白色雑音になる。STM32 が
-   窓（10ms）ごとの **NIS（平均 z²、1 が理想）** と **隣り合う残差の相関係数 ρ（0 が理想）** を TELEMETRY で送る。
-   区間（静止・低速・中速・高速・強い加減速）× 測定（走行距離・加速度）ごとに出る。読み方:
-   - **ρ が大きい（>0.5）なら NIS では調整できない**。前輪の周期誤差のような系統誤差（角度の関数）が残差に残っている。
-     測定ノイズを下げると周期誤差を車速へ通す
-   - ρ が小さいとき、NIS<1 は保守的（誤差を過大に見積もり）、NIS>1 は過小。**値の大きさまでは言えない**（残差の分散は
-     「状態の不確かさ」と「測定ノイズ」の和なので、σ だけを √NIS 倍にしても NIS は 1 にならない）
-   - 静止の NIS はセンサ自身の白色雑音だけを見ている（振動・周期誤差は出ない）
-3. **前輪エンコーダの周期誤差**: 校正 1 が測って STM32 が角度ごとの補正で直す。実機の前輪の絶対角エンコーダは 1 回転に 2 周期の
-   速度誤差と、決まった角度の小さな段差を持つ。TC・ABS の校正（`tools/calib`）はこの KF の車速で行う
-4. **生データで調整値を比べる**: `python3 -m tools.fwsim.kf_raw_replay <キャプチャ>.bin`（2kHz の生データに今の `speed_kf.c` を通す）。
-   センサを替えたときは `Firmware(extra_defines=("-DSPEED_KF_SIGMA_S_M=...",))` で調整値を上書きしてシムで掃引できる
-   （シムの出力列 `fw_nis_*`・`fw_ac_*` が実機の診断と同じ量）
-5. **記録を車速の精度で確かめる**: `python3 -m raspi.tools.speed_est_compare <記録>.mcap`（静止ノイズ・`kf_gated`・
-   加速度バイアスの動き・テレメトリ間隔）。基準は `odom_dist` を零位相で平滑して微分
-   （前輪から作るので、**前輪の周期誤差・滑りは基準に含まれ、測れない**）
-6. **制御ループが長く止まったとき**（I2C 異常の 25ms 待ちなど）: 前輪の角度差は ±半周に畳むので、止まっている間に半周を超えて回ると
-   1 回転ぶん折り返す。`drive.c` が予測した増分に最も近い側へ 1 回転の整数倍を足して戻す
-   （`tools/fwsim/tests/test_speed_kf_stall.py`）。1 秒以上の停止は初期化し直し、最初の増分は捨てる
+---
 
 ## 5. 実機へ反映する
 
@@ -525,9 +226,10 @@ tools/deploy.sh --test                    # ふだんはこれ（GUI ビルド +
 
 `deploy.sh` がやること:
 
-1. `surge-mk2` への疎通確認（失敗したら直結・mDNS の直し方を出す）
+1. `surge-mk2` への疎通確認（名前で繋がらなければ IP に切り替える。だめなら直し方を出す）
 2. `npm run build`（`--no-gui` で省略）
-3. `rsync`（**`.venv` `node_modules` `logs/` `docs/setup_credentials.md` は運ばない**）
+3. `rsync`（**`.venv` `node_modules` `logs/` `*.mcap` `*.sfl` `docs/setup_credentials.md`・機械ごとの状態（§2）・`ml_*/runs/` は運ばない**）。
+   全体には `--delete` を掛けず、Mac で消した `.py` だけ Pi からも消す（`--no-prune` で止める）
 4. `gui/dist` だけは `--delete` 付き（ビルドごとにハッシュが変わり、古い `index-*.js` が溜まるため）
 5. 指定に応じて test / services / restart
 6. 最後に各サービスの `is-active` を表示
@@ -535,14 +237,7 @@ tools/deploy.sh --test                    # ふだんはこれ（GUI ビルド +
 > **`.venv` を絶対に運ばない。** Pi の venv は `--system-site-packages` で作られていて
 > 中身が Mac と別物（gpiozero / lgpio / picamera2 は OS 同梱を使う）。上書きすると壊れる。
 
-### 反映後に見るところ
-
-```bash
-ssh surge-mk2 'systemctl is-active surge-io surge-camera surge-telemetry surge-planning'
-```
-
-`active` が並んでいれば良い。GUI が更新されたかは、ブラウザの読み込んでいる
-`index-*.js` のハッシュがローカルビルドと一致するかで確認できる。
+GUI が更新されたかは、ブラウザの読み込んでいる `index-*.js` のハッシュがローカルビルドと一致するかで確認できる。
 
 ---
 
@@ -554,9 +249,8 @@ ssh surge-mk2 'systemctl is-active surge-io surge-camera surge-telemetry surge-p
 tools/deploy.sh --test                                           # Pi 上でも回す
 ```
 
-**pytest で全部通る**（GPIO の無い環境＝ Mac では一部 skip される）。
-ハードウェアもシリアルもカメラも要らない（`ipc://` はテンポラリに閉じ込めてある）。
-以下は `raspi/tests/` の主なもの（全一覧は `ls raspi/tests`）。
+ハードウェアもシリアルもカメラも要らない（GPIO の無い Mac では一部 skip。`ipc://` はテンポラリに閉じ込めてある）。
+主なもの（全一覧は `ls raspi/tests`）:
 
 | ファイル | 何を守っているか |
 |---|---|
@@ -567,26 +261,18 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | `test_gpio.py` | E-Stop ハートビート。**止まるべきときに止まること**を厚く |
 | `test_link_tracker.py` | 健全性判定と**ラッチ**（人間が触るまで戻らない） |
 | `test_cmd_path.py` | GUI → WS → バス → io_node → UART の指令経路と ARM の3条件 |
-| `test_framelog.py` `test_io_node_log.py` | `.sfl` の往復と、壊れたファイルへの頑健性 |
-| `test_mcap.py` | 書いた MCAP を**読み直して**検査。尻切れファイルの修復も |
+| `test_framelog.py` `test_io_node_log.py` `test_mcap.py` | `.sfl`・MCAP の往復と、壊れた・尻切れファイルへの頑健性 |
 | `test_replay_node.py` | 再生が**実機と同じ結果**になること |
 | `test_auto.py` `test_slam2d_raceline.py` | planner の安全条件と段の遷移。**「走る」より「止まる」を厚く** |
 | `test_nav.py` | SLAM の精度を**数値で縛る** |
-| `test_timesync.py` `test_camera_format.py` | u32 のアンラップ、画素の並び |
-| `test_native.py` | 経路の計算の C 版（`nav/_native.c`）が Python 版と**ビット一致**すること、帯行列の QP が密行列と丸め誤差の範囲で同じこと（SLAM のレイの C 版は `slam2d/tests/test_native.py`） |
+| `test_native.py` | C 版と Python 版の**ビット一致**（SLAM 側は `slam2d/tests/test_native.py`） |
 
-- テスト本体は **`unittest`**（標準ライブラリ）で書く。実行は **`pytest`**
-  （CI と `tools/check.sh` が使うのに揃えてある。`unittest discover` でも動く）
-- **実時間で回るコード（`io_node` / `framelog` / `shm_ring`）は stdlib だけで書く**方針。
-  この制約のおかげで、Mac でも Pi でも同じテストが通る
+- テスト本体は **`unittest`** で書き、実行は **`pytest`**（CI と `tools/check.sh` に揃えてある）
+- **実時間で回るコード（`io_node` / `framelog` / `shm_ring`）は stdlib だけで書く**。Mac でも Pi でも同じテストが通る
 - **プロトコルを直したら `generate.py` を回してからテストする**
-- **経路の計算の内側は C**（`raspi/nav/_native.c`）。初回の import で `cc` が組んで `~/.cache/surge_mk2/` に置く
-  （Pi・Mac とも。組めなければ Python 版で回る＝同じ結果で遅い）。`SURGE_NO_NATIVE=1` で C を使わない。
-  `raceline.py` の速度プロファイル・曲率・車体外形・仕上げの評価、`roadgraph._thin` の式を変えたら `_native.c` も直し、`test_native.py` で一致を確かめる。
-  SLAM の `OccGrid.raycast`・`_carve`（`slam2d/core/grid.py`）、`SurfaceMap.associate`・`__init__` の法線（`surfmap.py`）、
-  総当たりの採点（`register.search_steps`・`localize.GlobalLocalizer.step`）も同じで、C 版は `slam2d/core/_native.c`
-  駐車の `reeds_shepp.py`（長さ・候補）・`hybrid_astar.py`（子ノード・解析展開の衝突判定・Dijkstra）・`local_map.py`（`_forget_vanished`・`refresh`）・
-  `grid.py`（`_carve`）・`scan2scan.py`（`_bearing_index`・対応探し）も同じで、C 版は `raspi/nav/_native.c`
+- **経路・SLAM・駐車の内側の計算は C 版を持つ**（`raspi/nav/_native.c`・`slam2d/core/_native.c`）。初回の import で `cc` が組んで
+  `~/.cache/surge_mk2/` に置く（組めなければ Python 版で回る＝同じ結果で遅い。`SURGE_NO_NATIVE=1` で C を使わない）。
+  C 版がある関数（各 `_native.c` の冒頭と Python 側の呼び出しで分かる）の式を変えたら C も直し、`test_native.py` で一致を確かめる
 
 ---
 
@@ -601,20 +287,12 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | **車両のボタン2**（E-Stop 解除） | ラッチした E-Stop の解除 | **人間が物理的に押す** |
 | 駆動電源を切る | モータのみ。Pi と STM32 は生きたまま | 電源投入 |
 
-### モータが回る条件は3つ、全部そろって初めて回る
+モータが回る条件（`--allow-arm`・`cmd` が 150ms 以内に届き続ける・人間が ARM を保持）と再 ARM の規則は
+[`system_overview.md` §8.3](system_overview.md#83-モータが回る条件は3つ)。E-Stop・駆動電源ラッチ・STM32 の再起動・COMMAND 途絶の後は
+**ARM を一度外してから入れ直す**まで通らない（理由は GUI の ARM ボタンの横と `diag/link` の `arm_inhibit_reason` に出る）。
+**engage（自律走行の開始）は ARM ではない**ので、電源を入れただけで走り出す経路は無い。
 
-1. `io_node` に **`--allow-arm`** が付いている（`install_services.sh` の既定で付く）
-2. **`cmd` が 150ms 以内に届き続けている**（途絶＝上位が死んだ、とみなして止める）
-3. GUI で**人間が ARM を保持している**
-
-加えて、`protocol_version` の一致と `[control]` の同期が済んでいること。E-Stop・駆動電源ラッチ・STM32 の
-再起動・COMMAND 途絶の後は、**ARM を一度外してから入れ直す**まで通らない（io_node と STM32 の両方が持つ。
-理由は GUI の ARM ボタンの横と `diag/link` の `arm_inhibit_reason` に出る）。
-
-**engage（自律走行の開始）は ARM ではない。** planning_node は `arm` を立てられないので、
-**電源を入れただけで走り出す経路は存在しない。**
-
-### 実機で `--allow-arm` のまま作業するときは
+実機で `--allow-arm` のまま作業するときは:
 
 - **車輪を浮かせる**（台上）か、周囲に人・物が無いことを確認してから電源を入れる
 - `surge-io` を止める操作は E-Stop ラッチを伴う。**車体に手が届く場所でだけ叩く**
@@ -623,26 +301,24 @@ tools/deploy.sh --test                                           # Pi 上でも�
 
 ## 8. トラブルシューティング
 
-**症状 → 疑う順 → 対処。** どれも一度は実際に踏んだもの。
+**症状 → 疑う順 → 対処。** 今も起こりうるものだけを書く。
 
 ### 8.1 Pi に繋がらない・遅い
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| `ssh surge-mk2` が遅い（6ms のはずが 40ms） | **直結が生きているのに Wi-Fi 経由で繋がっている** | `ping -b en18 169.254.55.2` のように **IF を明示**して直結の生死を見る。**アダプタの IF 名は挿し直すと変わる**（en18→en19） |
+| `ssh surge-mk2` が遅い（6ms のはずが 40ms） | **直結が生きているのに Wi-Fi 経由で繋がっている** | `ping -b en18 169.254.55.2` のように **IF を明示**して直結の生死を見る（素の `ping` は `169.254/16` のルートが複数 IF に載っていて誤診する）。**アダプタの IF 名は挿し直すと変わる** |
 | 直結を挿し直したら mDNS が Wi-Fi しか返さない | avahi が再広告していない | `ssh surge-mk2 'sudo systemctl restart avahi-daemon'` |
 | ssh が IPv6 に行ってしまう | avahi は IPv6 リンクローカルも広告し、ssh は IPv6 を優先する | `~/.ssh/config` に **`AddressFamily inet`**（設定済み）。curl は `-4` |
-| 素の `ping 169.254.55.2` が通らない | `169.254/16` のルートが複数 IF に重複して載っている | **これで「直結が死んだ」と誤診したことがある。** IF 明示で見る |
-| Wi-Fi だけの Mac で GUI が「読み込み中」のまま／INIT・切断のまま。`ssh surge-mk2` も名前解決で失敗（有線を挿すと直る） | **その Mac が Wi-Fi 上の mDNS（224.0.0.251）とブロードキャストを受け取れない**（2026-11-01 実測: Pi から各10回送って 0/10。ユニキャストと 239.x は 10/10）。Pi の再起動などで IP が変わると mDNSResponder が古いまま固まり、**問い合わせ自体を出さなくなる**（10分見て1通も出ない）。IP 直打ちなら全部届く | **IP で開く**: launcher「実機 GUI を開く」／`python -m tools.find_pi --open`（mDNSResponder を通さず Pi に直接問い合わせる）。固まりを解くのは Mac の Wi-Fi の入れ直しか `sudo killall -HUP mDNSResponder` |
-| Pi を再起動した後、開いたままの GUI が INIT・通信途絶のまま戻らない（再読み込みで直る） | **ブラウザが死んだ接続を持ち続ける。** Safari は再起動前の WS を20分「ready」のまま持ち、握手の返らない接続を310秒「接続中」のまま抱えた。Safari は同じ相手への接続中を1本ずつしか進めないので、その1本の後ろで全チャンネルの張り直しが止まる（2026-11-01、ログと再現試験で確認） | 直した: `gui/src/ws/guard.ts` が**開くまで4秒**・**開いた後は telemetry 2秒／control 5秒**届かなければ見切って張り直す（地図は telemetry の合図で張り直す）。古い GUI が残っているタブは一度だけ再読み込みする |
+| Wi-Fi だけの Mac で GUI が「読み込み中」／INIT・切断のまま。`ssh surge-mk2` も名前解決で失敗（有線を挿すと直る） | **その Mac が Wi-Fi 上の mDNS（224.0.0.251）を受け取れない。** Pi の IP が変わると mDNSResponder が古いまま固まり、問い合わせ自体を出さなくなる | **IP で開く**: launcher「実機 GUI を開く」／`python -m tools.find_pi --open`（mDNSResponder を通さず Pi に直接問い合わせる）。固まりを解くのは Mac の Wi-Fi の入れ直しか `sudo killall -HUP mDNSResponder` |
 | どうしても IP が要る | — | `.venv/bin/python -m tools.find_pi`。だめなら `arp -an \| grep -i 2c:cf:67`（Raspberry Pi Ltd の MAC prefix） |
-| Wi-Fi 経由で、数分おきに数秒だけ遅延が 20〜125ms に跳ねる（操縦のデッドマンは 150ms） | **NetworkManager が wpa_supplicant に定期スキャンをさせている**（`bgscan simple:30:-65:300`＝−65dBm より強ければ 5分ごと、弱ければ **30秒ごと**。1回 約3.6秒、全チャンネル） | **接続先の AP（BSSID）を固定する**と止まる: `sudo nmcli con mod <接続名> 802-11-wireless.bssid <BSSID>` → `sudo nmcli con up <接続名>`。確認は `sudo wpa_cli -i wlan0 get_network 0 bgscan`（`FAIL` なら無し）と `iw event -t`。**固定すると他の AP（メッシュの別の子機）へ移らない**。戻すのは BSSID に `""`。接続ごとの設定なので、会場の AP でもやり直す |
+| Wi-Fi 経由で、数分おきに数秒だけ遅延が 20〜125ms に跳ねる（操縦のデッドマンは 150ms） | **NetworkManager が wpa_supplicant に定期スキャンをさせている**（`bgscan`。電波が弱いと 30 秒ごと、1回 約3.6秒） | **接続先の AP（BSSID）を固定する**: `sudo nmcli con mod <接続名> 802-11-wireless.bssid <BSSID>` → `sudo nmcli con up <接続名>`。確認は `sudo wpa_cli -i wlan0 get_network 0 bgscan`（`FAIL` なら無し）と `iw event -t`。**固定すると他の AP へ移らない**。戻すのは BSSID に `""`。接続ごとの設定なので、会場の AP でもやり直す |
 
 ### 8.2 GUI が古い・表示がコードと合わない
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| 直したはずの画面が変わらない | **古いプロセスが配っている**（4日前に起動した `telemetry_node` が居座っていた実績あり） | `lsof -nP -iTCP:8000 -sTCP:LISTEN` → `ps -o lstart= -p <PID>` で**起動時刻を見る**。古ければ kill |
+| 直したはずの画面が変わらない | **古いプロセスが配っている** | `lsof -nP -iTCP:8000 -sTCP:LISTEN` → `ps -o lstart= -p <PID>` で**起動時刻を見る**。古ければ kill |
 | 実機の GUI が古い | `gui/dist` が更新されていない | `tools/deploy.sh`（`--no-gui` を付けていないか確認）。配信中の `index-*.js` のハッシュを見る |
 | 偽のデータが出る | `bus_demo` が生き残って `io` endpoint に bind している | `sim.run --kill-stale`、または `pgrep -af bus_demo` |
 
@@ -650,30 +326,26 @@ tools/deploy.sh --test                                           # Pi 上でも�
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| `ImportError: incompatible architecture (have 'arm64', need 'x86_64')` | **ターミナルが Rosetta で動いている**（python.org の Python は親のアーキを継承する） | `arch` で確認（`i386` なら Rosetta）。`arch -arm64 zsh` が応急処置。恒久対応は Terminal.app の「Rosetta を使用して開く」を外す。**VSCode の統合ターミナルは arm64** |
-| `OSError: [Errno 48] address already in use ('0.0.0.0', 8000)` | 古い `telemetry_node` が残っている | 上記 8.2 と同じ手順。`sim.run --kill-stale` でも落とせる |
-
-`sim.run` はこの2つを**起動前に検査して報告する**（Rosetta なら自動で立て直す）。
+| `ImportError: incompatible architecture (have 'arm64', need 'x86_64')` | **ターミナルが Rosetta で動いている**（python.org の Python は親のアーキを継承する） | `arch` で確認（`i386` なら Rosetta）。恒久対応は Terminal.app の「Rosetta を使用して開く」を外す。`sim.run` は自動で arm64 で立て直す |
+| `OSError: [Errno 48] address already in use ('0.0.0.0', 8000)` | 古い `telemetry_node` が残っている | §8.2 と同じ手順。`sim.run --kill-stale` でも落とせる |
 
 ### 8.4 車が動かない
 
 **上から順に潰す。**
 
-1. **ARM しているか。** GUI で ARM（`Enter` / パッドの ×）を保持しているか
+1. **ARM しているか。** GUI で ARM（`Enter` / パッドの ×）を保持しているか。ラッチの後は一度外して入れ直す（§7）
 2. **`--allow-arm` が付いているか。** `systemctl show surge-io -p ExecStart --value`
-3. **駆動電源がラッチしていないか。** 過電流でハード遮断されると
-   **電源を入れ直すまで復帰しない**（`drive_power_locked`）。**これは異常ではなく仕様**。
+3. **駆動電源がラッチしていないか。** 過電流でハード遮断されると**電源を入れ直すまで復帰しない**（`drive_power_locked`。仕様）。
    GUI に「駆動電源ラッチ中」と出る
-4. **E-Stop がラッチしていないか。** `surge-io` を止めた／Pi が落ちた後は必ずこれ。
-   **車両のボタン2**を押す
-5. **`cmd` が届いているか。** Wi-Fi が切れると 150ms で DISARM に落ちる
+4. **E-Stop がラッチしていないか。** `surge-io` を止めた／Pi が落ちた後は必ずこれ。**車両のボタン2**を押す
+5. **`LIMITS` と `[control]` が届いているか・版数が一致しているか。** どちらかが欠けると io_node は ARM を通さない（GUI のリンク表示）
+6. **`cmd` が届いているか。** Wi-Fi が切れると 150ms で DISARM に落ちる
 
 ### 8.5 速度が上がらない
 
 **上限は `LIMITS`（STM32 が報告する車両の物理上限）が正。** io_node も GUI（`effectiveRange`）も、
-`LIMITS` を受信済みならそれを使う。**`LIMITS` を受け取るまで io_node は ARM を通さない。**
-`--max-speed`（既定 3.0 m/s）・`--max-steer`（`vehicle.toml` の `max_steer` で頭打ち）は ARM していない間の
-既定で、`--services` ＋ `--restart-io` で反映する。
+`LIMITS` を受信済みならそれを使う。`--max-speed`・`--max-steer`（`vehicle.toml` の `max_steer` で頭打ち）は
+`LIMITS` 受信前の既定。
 
 | 症状 | 疑う |
 |---|---|
@@ -687,44 +359,34 @@ tools/deploy.sh --test                                           # Pi 上でも�
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| **GUI のカメラだけ映らない**（点群やメータは正常） | `RemoveIPC=yes` により、**SSH を切った瞬間に `/dev/shm/surge_cam*` が消える**。camera_node 自身はマッピングを保持したまま動き続けるので、**新しく attach するプロセスだけが失敗する** | `install_services.sh` が `RemoveIPC=no` を入れる。入っているか確認: `cat /etc/systemd/logind.conf.d/10-surge-removeipc.conf` |
-| ロガーの画像だけ入らない | 同上 | 同上 |
-| 前後とも 14fps しか出ない | **未調査の既知問題**（camera_node 自体は 30fps 出ている。配信側で落ちている疑い） | — |
+| **GUI のカメラだけ／ロガーの画像だけ入らない**（点群やメータは正常） | `RemoveIPC=yes` により、**SSH を切った瞬間に `/dev/shm/surge_cam*` が消える**。新しく attach するプロセスだけが失敗する | `install_services.sh` が `RemoveIPC=no` を入れる。入っているか確認: `cat /etc/systemd/logind.conf.d/10-surge-removeipc.conf` |
+| 前後とも 14fps しか出ない | **未調査**（camera_node 自体は 30fps 出ている。配信側で落ちている疑い） | — |
 
 ### 8.7 ログに何も出ない
 
-**`python -u` が付いていない。** リダイレクト先が tty でないと Python は 8KB 単位でしか
-書かないので、「起動したのにログが空」になる。
-`run_stack.sh` と `install_services.sh` は `-u` 付きで起動している。
+**`python -u` が付いていない。** リダイレクト先が tty でないと Python は 8KB 単位でしか書かないので、
+「起動したのにログが空」になる。`run_stack.sh` と `install_services.sh` は `-u` 付きで起動している。
 
 ### 8.8 `pkill -f raspi.nodes` で SSH ごと落ちる
 
-**リモートシェルの cmdline にパターンと同じ文字列が入っている**ため、自分自身にマッチする。
-`[r]aspi` のブラケット回避も、同じ行に実際のモジュール名があるので効かない。
-→ **スクリプト経由にする**（`run_stack.sh` なら cmdline は `bash run_stack.sh` だけ）。
-この事故は3回踏んでいる。
+**リモートシェルの cmdline にパターンと同じ文字列が入っている**ため、自分自身にマッチする
+（`[r]aspi` のブラケット回避も効かない）。→ **スクリプト経由にする**（`run_stack.sh` なら cmdline は `bash run_stack.sh` だけ）。
 
 ### 8.9 記録まわり
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| `.mcap` が開けない | **MCAP は `finish()` を呼んで初めて索引が書かれる。** 電源断や ssh 切断で尻切れになる | `python -m raspi.tools.mcap_repair <file> --inplace`。87MB のファイルから 10万件・画像 4869枚を救えた実績あり |
-| SD が埋まる | `.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 ＝ **1日 18GB** | `surge-logclean.timer` が毎時「7日超」と「合計 8GB 超過分」を消す。**`.mcap` は既定で SD に書かない**（GUI か `tools/record.sh` で PC に流す）。加えて `io_node`/`logger_node` 自身が30秒ごとに空き容量[%]を見て、逼迫していれば警告・世代管理で古い順に削除する（`raspi/rec/logclean.py`。毎時タイマーより早く気づける・記録中のファイルは保護する点が異なる） |
-| それでも `.sfl`/`.mcap` の書き込み中に SD が満杯（ENOSPC） | 上の掃除が間に合わなかった・他プロセスが埋めた等 | `FrameLogWriter`/`McapLog` は `OSError` を握り潰し、以後そのファイルへの書き込みを止める（`broken`/`errors`/`last_error` に理由が残る）。**記録スレッドはクラッシュしない**——走行そのものは続く |
+| `.mcap` が開けない | **MCAP は `finish()` を呼んで初めて索引が書かれる。** 電源断や ssh 切断で尻切れになる | `python -m raspi.tools.mcap_repair <file> --inplace` |
+| SD が埋まる | `.sfl` 2.5MB/分 ＋ `.mcap` 10.3MB/分 | `surge-logclean.timer` が毎時「7日超」と「合計の上限超過分」を消す。**`.mcap` は既定で SD に書かない**（GUI か `tools/record.sh` で PC に流す）。`io_node`/`logger_node` も30秒ごとに空き容量を見て古い順に消す（`raspi/rec/logclean.py`。記録中のファイルは保護） |
+| 書き込み中に SD が満杯（ENOSPC） | 掃除が間に合わなかった | そのファイルへの書き込みだけ止まる（`broken`/`last_error`）。**走行は続く** |
 | `.sfl` が途中で切れている | 追記のみ・索引なし | **前半は必ず読める。** これが `.sfl` を残している理由 |
 
-**記録まわりの約束**:
-- `.sfl` は io_node の専用スレッド（`sfl-writer`）が書き、3 秒ごとに fsync する。SD が詰まってもメインループは
-  止まらない（キューが溢れたら古い順に捨て、終了時の統計に `dropped` として出す）
-- `logs/<サービス>.out` は毎時の掃除で 10MB を超えたら末尾 2MB だけ残す。毎時の掃除は最終更新が 1 分以内の
-  ファイル（記録中）を消さない。`mcap_repair --inplace` の `.mcap.bak` も掃除の対象
-- STM32 だけが再起動したら（`t_us` の後退、または要求していない VERSION の到着で検出）、io_node は時刻同期を
-  やり直し、`[control]` と GUI で設定した値（TC/TV/ABS/片輪浮き/ブレーキホールド/自動停止マージン）を送り直し、
-  ARM を入れ直すまで通さない
-- 校正（`tools/calib`）の「適用」で `[control]` が変わったら、STM32 に入れるには `tools/deploy.sh --restart-io`
-  （`--restart` では入らない）。ジャイロ倍率の誤差は `mu` と `steer_link_gain` にそのまま乗る
-- 検証用: `sim.slam_bench --locate N`（保存地図の読み直し＋全域探索の検証）・`--speed-quant`・`--time-offset-ms`、
-  `sim.bench --errors real|harsh`、`raspi.tools.grip_replay --plan-lap`
+記録まわりの約束:
+
+- `.sfl` は io_node の専用スレッド（`sfl-writer`）が書き、数秒ごとに fsync する。SD が詰まってもメインループは止まらない
+  （キューが溢れたら古い順に捨て、終了時の統計に `dropped` として出す）
+- STM32 だけが再起動したら（`t_us` の後退、または要求していない VERSION の到着で検出）、io_node は時刻同期をやり直し、
+  `[control]` と GUI で設定した値（TC/TV/ABS 等）を送り直し、ARM を入れ直すまで通さない
 
 ### 8.10 点群がおかしい
 
@@ -735,22 +397,21 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | 欠測方向へ舵を切る | **`sector_seen == False` は「障害物なし」ではない。** 欠測は距離 0（侵入禁止）として扱う |
 | 古い点群で舵を切る（見た目は正常に動く） | **ZMQ の `CONFLATE` は multipart 非対応**、かつ**ソケット単位**。1フレーム送信・トピック1本につきソケット1本にしてある（`test_zbus.py` が固定） |
 
-### 8.11 Pi が勝手に再起動する
+### 8.11 Pi が勝手に再起動する・ハングする
 
-2026-08-07 に **2回**発生。`vcgencmd get_throttled` は `0x0`、温度も正常で**原因未特定**。
-永続ジャーナルは有効化済みなので、**再発したら必ずログを見ること。**
+原因が特定できていない再起動が起きたことがある（`vcgencmd get_throttled` は `0x0`、温度も正常だった）。
+永続ジャーナルは有効なので、**再発したら必ずログを見る。**
 
 ```bash
 sudo journalctl --list-boots
 sudo journalctl -b -1 -n 50        # 前回起動の最後
 ```
 
-なお「起動 → 数十秒 → ハング」を繰り返していた件は**電源不足**が原因で、
-**5V/5A（27W）USB-C PD に交換して解決済み**。緑 LED が点いていても OS はハングし得る。
+「起動 → 数十秒 → ハング」の繰り返しは**電源不足**。**5V/5A（27W）USB-C PD** を使う。緑 LED が点いていても OS はハングし得る。
 
 ### 8.12 未解決として残っているもの
 
-[`system_overview.md` §13](system_overview.md#13-現在地とロードマップ) の「未解決・要相談」表を参照（ここに複製しない）。
+`PROGRESS.md` 冒頭の「原因が分かっていないこと」と [`system_overview.md` §14](system_overview.md#14-現在地とロードマップ)（ここに複製しない）。
 
 ---
 
@@ -764,17 +425,16 @@ sudo journalctl -b -1 -n 50        # 前回起動の最後
 | 中身 | **UART を流れた生バイト**（送受信とも） | 解釈済みトピック **＋ カメラ画像** |
 | 依存 | stdlib のみ | `mcap` |
 | 置き場 | **Pi の SD**（Wi-Fi が切れても止まらない） | **PC**（SD には書かない） |
-| 量 | 2.5MB/分 | 10.3MB/分 |
+| 量 | 2.5MB/分 | 10.3MB/分（画像 5Hz×2台） |
 | 尻切れ耐性 | **強い**（追記のみ） | 弱い（索引が要る）→ `mcap_repair` |
 | 用途 | 異常の証拠・確定的な再生 | 解析・Foxglove で目視 |
 
 ### 録り方
 
 - **ふだんは GUI の「ログ」タブ**（開始/停止・一覧・ダウンロード・削除）
-- GUI を開けない・長時間なら `tools/record.sh`（ssh パイプで PC に直接落とす）
-- `.sfl` は後から `python -m raspi.tools.sfl2mcap` で MCAP に変換できる。
-  **変換は `replay_node` + `BusBridge` をそのまま通す**ので、実機・再生・変換で
-  同じ解釈コードが動く
+- GUI を開けない・長時間・画像を増やしたいなら `tools/record.sh`（ssh パイプで PC に直接落とす。`--image-hz`）
+- `.sfl` は後から `python -m raspi.tools.sfl2mcap` で MCAP に変換できる（`replay_node` + `BusBridge` をそのまま通すので、
+  実機・再生・変換で同じ解釈コードが動く）
 
 ### 見方
 
@@ -784,26 +444,16 @@ python -m raspi.nodes.replay_node logs/x.sfl --verify    # ログが解析に足
 python -m raspi.nodes.replay_node logs/x.sfl --bus --loop  # バスに流し直す（Mac 上で）
 ```
 
-`.mcap` は **Foxglove Studio でそのまま開ける**（自作 GUI＝ライブ用、Foxglove＝オフライン解析用）。
-
-**カメラ画像を動画にするには**: `launcher.command` から「動画の書き出し」を起動（`tools/mcap_video_gui.py`）→ 記録を
-選んで「書き出す」→ 前後それぞれの `<入力>_front.mp4` / `<入力>_rear.mp4` ができる（Foxglove の動画書き出しは
-Enterprise 限定のため自前。前後は同じ時間軸なので並べて再生すれば同期する）。CLI は `python -m tools.mcap_video`。
-
-**走行の結果を 1 枚で見るには**: launcher の「走行サマリ」（`tools/run_summary_gui.py`、中身は `raspi/tools/run_summary.py`）で
-実機の `.mcap` を選ぶ。周回タイム・衝突・電圧・前兆・学習値・通信を出し、保存先（任意）に残した直前の走行との差分も出す。
-衝突は縦加速度 |ax| ≥ 8 m/s²（正常走行の最大は 5.8、壁に当たった 20261026_104056 は 15.6）。CLI は
-`python3 -m raspi.tools.run_summary <mcap> [--out-dir DIR] [--prev 前回の_summary.json]`。
-
-**自己位置を見るには**: `launcher.command`（surge_mk2 直下） から「SLAM 再処理」を起動（`tools/slam_replay_gui.py`）→ 記録を
-選んで「実行」→ 終わると `<入力>_slam.mcap` が Foxglove で開く。3D パネルの設定で Display frame を `odom` にし、
-Topics の `/viz/scan` `/viz/odom/path` `/viz/slam2d/*` の目を点ける（既定では非表示のことがある）。
-点群の Decay time を伸ばすと地図のように溜まり、地図（`/viz/slam2d/map`）は Color mode を
-「RGBA (separate fields)」にする。推測航法と SLAM の差は Plot パネルで `/pose_compare.err_pos` `.err_yaw`。
-
-> **GUI からの `.sfl` 再生は実装したが撤回した。** 再生は `surge-io` と同じ ZeroMQ
-> エンドポイントを取り合うので、GUI が動いている＝`surge-io` も動いている実運用では必ず失敗する。
-> **Mac 上で `replay_node --bus` + `telemetry_node` を直接叩く**のが正しい使い方。
+- `.mcap` は **Foxglove Studio でそのまま開ける**（自作 GUI＝ライブ用、Foxglove＝オフライン解析用）
+- **`.sfl` の再生は GUI からはできない。** 再生は `surge-io` と同じ ZeroMQ エンドポイントを取り合うので、
+  **Mac 上で `replay_node --bus` + `telemetry_node` を直接叩く**
+- **動画にする**: launcher の「動画の書き出し」（`tools/mcap_video_gui.py`、CLI は `python -m tools.mcap_video`）→
+  `<入力>_front.mp4` / `<入力>_rear.mp4`（前後は同じ時間軸）
+- **走行の結果を 1 枚で見る**: launcher の「走行サマリ」（`tools/run_summary_gui.py`、中身は `raspi/tools/run_summary.py`）。
+  周回タイム・衝突・電圧・前兆・学習値・通信と、直前の走行との差分。CLI は
+  `python3 -m raspi.tools.run_summary <mcap> [--out-dir DIR] [--prev 前回の_summary.json]`
+- **自己位置を見る**: launcher の「SLAM 再処理」（`tools/slam_replay_gui.py`）→ `<入力>_slam.mcap` が Foxglove で開く。
+  3D パネルは Display frame を `odom`、`/viz/*` を表示（地図は Color mode「RGBA (separate fields)」）。差は `/pose_compare.err_pos` `.err_yaw`
 
 ---
 
@@ -813,7 +463,7 @@ Topics の `/viz/scan` `/viz/odom/path` `/viz/slam2d/*` の目を点ける（既
 
 **GUI を触らない。** `raspi/auto/` に `Planner` のサブクラスを1つ書き、
 `registry.py` に1行足すだけで GUI の選択肢に出る。
-パラメータのスライダも planner が宣言した `ParamSpec` から自動生成される。
+パラメータの UI も planner が宣言した `ParamSpec` から自動生成される。
 
 ```
 raspi/auto/base.py          Planner / ParamSpec ← バスも WS も知らない純粋な計算
@@ -822,237 +472,153 @@ raspi/auto/registry.py      id → クラス（+1行）
 raspi/nodes/planning_node.py 配線だけ。触らない
 ```
 
-**GUI にモード名を書くと、増やすたびに2箇所直すことになり、いつか片方が古くなる。**
-
 ### UART パケットを増やす・変える
 
-1. `raspi/proto/protocol.toml` を直す（**ここが唯一の定義**）
-2. `python3 raspi/proto/generate.py` → `packets.py` と `surge_proto.h` が再生成される
-3. **`surge_proto.h` を STM32 側に渡す**
+1. `raspi/proto/protocol.toml` を直す（**Pi 側の唯一の定義**）
+2. `python3 raspi/proto/generate.py` → `generated/packets.py` と `generated/surge_proto.h` が再生成される
+3. **ファームの `ras_link.[ch]`（TYPE・LEN・ビット・`RAS_PROTOCOL_VERSION`）を手で同じに直し、`protocol_version` を上げる**
+   （ファームは生成ヘッダを取り込んでいない。[`raspi/proto/README.md`](../raspi/proto/README.md)）
 4. `docs/uart_protocol.md` を更新（**仕様の説明はこれが正**。数値の正は toml）
-5. テスト → `deploy.sh --restart-io`
+5. テスト → `deploy.sh --restart-io` とファームの書き込み
 
-**版数がずれている間は走行指令が一切通らない**ので、Pi と STM32 は同時に上げること。
+**版数がずれている間は ARM が通らない**ので、Pi と STM32 は同時に上げること。
 
 ### バスのトピックを増やす
 
-`raspi/msgs/types.py` に型を足し、`raspi/bus/zbus.py` の `TOPIC_OWNER` に持ち主を登録する。
-**GUI にも見せるなら `gui/src/types.ts` を手で写す**（生成器は挟んでいない）。
+`raspi/msgs/types.py` に型を足し、**`raspi/bus/zbus.py` の `TOPIC_OWNER` に持ち主を登録する**（漏れると「動くのにデータが来ない」）。
+GUI にも見せるなら `python3 config/gen_msgs.py` で `gui/src/generated/msgs.ts` を再生成する。
 
 ### シミュレータに機能を足す
 
-**シムの概念を実機側に持ち込まない。** コース切替・ノイズ量・欠損率は実機に対応物が無いので、
-UI は `sim/gui.py`（pygame）側に置く。シム ↔ シム GUI の通信も内部バスではなく UDP ループバック。
-**唯一の例外は `LinkDiag.sim`（SIM バッジ）**で、これは利便性ではなく安全要件
-（シムと実機の画面が見分けられないと「シムのつもりで `--allow-arm` した実車が動く」）。
+**シムの概念を実機側に持ち込まない**（UI は `sim/gui.py`、通信は UDP の私設チャンネル。例外は SIM バッジだけ）。
+理由は [`sim/README.md`](../sim/README.md#設計の原則--シミュレータが偽装するのは-stm32-だけ)。
 
 ---
 
 ## 11. 既知の穴と文書の読み方
 
-**設計の理由（`architecture.md`）は設計時の記述を含み、実装に無い名前が残っている。**
-コードが正。特に次は実装に存在しない（`perception_node`・`safety_node`・`grid/local` `pose` `path` トピック）。
-Watchdog の役は GPIO6 ハートビートが担い、`hb/*` は logger_node が記録するだけ。
-実際のノード構成は [`system_overview.md` §6](system_overview.md#6-raspberry-pi-の中身--プロセスとトピック) を見る。
+**文書とコードが食い違ったらコードが正。** 実際のノード構成は
+[`system_overview.md` §6](system_overview.md#6-raspberry-pi-の中身--プロセスとトピック) を見る。
 
 ### 直したほうがよい実装上の小さな穴
 
 | 場所 | 内容 |
 |---|---|
-| `install_services.sh --remove` | **`surge-logclean.timer` を消し損ねる**。サービス本体が消えたタイマーが enable のまま残り、毎時 fail する |
-| `install_services.sh` | 引数を1つしか見ないので **`--safe --with-logger` を併用できない**。`--with-logger` 単体では arm が有効のまま |
+| `install_services.sh --remove` | **`surge-logclean.timer` を消し損ねる**（`surge-*.service` しか消さない）。サービス本体が消えたタイマーが enable のまま残り、毎時 fail する |
+| `install_services.sh` | `$1` しか見ないので **`--safe --with-logger` を併用できない**。`--with-logger` 単体では arm が有効のまま |
 
 ---
 
 ## 12. 学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション / カメラE2E）
 
 独立した3本の学習パイプラインがある。どれも「**Mac で学習 → ONNX 化 → `models/` に配置 →
-GUI でモデル名を選ぶ**」という流れは共通だが、中身も検証手段も別物なので混同しないこと。
+GUI でモデル名を選ぶ**」という流れは共通だが、中身も検証手段も別物。
+学習・評価のロジックの詳細は各スクリプトの docstring が正（`ml_*` に README は無い）。
 
 | | LiDAR E2E（`e2e_lidar`） | カメラセグメンテーション（`ftg_cam`/`cam_centerline`） | カメラE2E（`cam_e2e`） |
 |---|---|---|---|
-| 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） | 教師あり学習（人の操舵指令を直接ラベルにする模倣学習） |
-| 学習コード | `ml_lidar/`（Mac 専用。Pi には運ばない使い方をする） | `ml_cam/`（同左） | `ml_cam_e2e/`（同左） |
+| 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） | 模倣学習（人の操舵指令を直接ラベルにする） |
+| 学習コード（Mac） | `ml_lidar/` | `ml_cam/` | `ml_cam_e2e/` |
 | モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`） | `models/cam_e2e/<名前>.onnx`（＋同名 `.json`。**`.json` の無いモデルは読み込まれない**） |
-| 推論コード | `raspi/auto/e2e_lidar.py`（planner本体。配線は`planning_node`がやる） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam`へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。IPMなどの幾何変換もLiDARも使わず、操舵を直接推論。速度は planner が舵から決める）＋ `raspi/auto/cam_e2e.py` |
-| シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（`sim.run` は `--no-camera` 固定でカメラを持たない） | **できない**（同左） |
-| 実車で動かすのに要る追加操作 | 無し（`planning_node` が engage 中だけ推論する） | 無し（`surge-cam-perception` は常時 enable。`auto/ctrl` で `ftg_cam`/`cam_centerline` 選択中だけ推論する。下記 12.2） | 無し（`surge-cam-e2e` は常時 enable。`auto/ctrl` で `cam_e2e` 選択中だけ推論する。下記 12.3） |
+| 推論コード | `raspi/auto/e2e_lidar.py`（planner 本体） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam` へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。操舵を直接推論）＋ `raspi/auto/cam_e2e.py` |
+| シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（シムはカメラを持たない） | **できない**（同左） |
 
-いずれも `models/` はリポジトリの `.gitignore` 対象（機体・学習ごとに違う大容量ファイルのため）。
-配布は `tools/deploy.sh` の rsync に任せる——コミットには乗らない。
+`models/` は `.gitignore` 対象で、`tools/deploy.sh` の rsync で配る。実車で要る追加操作は無い（推論プロセスは常時起動で、対応するモードを選んだ間だけ推論する）。
+各学習パイプラインには操作用の薄い Tkinter GUI がある（`ml_lidar/app.py`・`ml_cam/app.py`・`ml_cam_e2e/app.py`、
+launcher から起動）。ロジックは持たないので、中身のスクリプトを直せば GUI 側は変えなくてよい。
+
+**共通の注意**: モデル名を GUI で選び直すと、そのモードの engage は解除される。モデル未選択・ロード失敗・推論失敗の間は
+停止側に倒れる（カメラ系は全セクタ `sector_seen=False`／`ready=False`）。**レンズや取付角度を変えたら撮り直して再学習**
+（カメラの校正は [`calibration.md` §7](calibration.md#7-カメラ魚眼レンズ)）。
 
 ### 12.1 LiDAR E2E（強化学習、`e2e_lidar`）
 
-`disparity_extender.py`（`de`）のような**模倣学習ではない**。シム上で「コースに沿って
-進めたら＋報酬・衝突したら－報酬」を頼りに、Stable-Baselines3 の PPO で方策を試行錯誤
-させる。`de` を再現するのではなく**それを超えうる**代わりに、未知の点群パターンに
-対する挙動は原理的に保証できない。planner 側に固定距離の停止策は持たず、
-STM32 の `auto_stop` で受ける（`architecture.md`「走る」より「止まる」を先に決める）。
-学習の報酬設計・バージョンごとの結果は `ml_lidar/env.py` と `train_rl.py` の docstring、`PROGRESS.md`。
+シム上で「コースに沿って進めたら＋報酬・衝突したら－報酬」を頼りに、Stable-Baselines3 の PPO で方策を試行錯誤させる。
+未知の点群パターンに対する挙動は原理的に保証できないので本番の主力にはしない。planner 側に固定距離の停止策は持たず、
+STM32 の `auto_stop` で受ける（[`system_overview.md` §9.3](system_overview.md#93-走るより止まるを先に決める)）。
+報酬設計は `ml_lidar/env.py` と `train_rl.py` の docstring。
 
 ```bash
-# 初回だけ（torch / gymnasium / stable-baselines3 / onnxruntime 等）
-.venv/bin/pip install -r ml_lidar/requirements.txt
+.venv/bin/pip install -r ml_lidar/requirements.txt          # 初回だけ
 
-# 1. 学習（毎エピソード形状も道幅も変えたランダムコースで回す）。出力は ml_lidar/runs/<run名>/。
-#    既存の run 名には --resume（続きから）か --overwrite が要る。
-#    最大舵角は config/vehicle.toml の車両物理限界を常に使う（--max-steer は無い）
+# 1. 学習（毎エピソード形状も道幅も変えたランダムコース）。出力は ml_lidar/runs/<run名>/。
+#    既存の run 名には --resume（続きから）か --overwrite が要る。最大舵角は vehicle.toml を常に使う
 .venv/bin/python -m ml_lidar.train_rl --run-name v1 --total-timesteps 2000000 --n-envs 8 --max-speed 2.0
+.venv/bin/tensorboard --logdir ml_lidar/runs/v1/tb          # 学習曲線（http://localhost:6006）
+.venv/bin/python -m ml_lidar.watch --model v1               # （任意）学習中の方策を観戦。学習を遅くしない
 
-# 学習曲線（別ターミナル。ブラウザで http://localhost:6006 ）
-.venv/bin/tensorboard --logdir ml_lidar/runs/v1/tb
-
-# 2.（任意）学習中の方策を観戦する。学習とは別プロセスで、学習を遅くしない
-.venv/bin/python -m ml_lidar.watch --model v1
-
-# 3. ONNX 化。観測・行動の契約は run の env_config.json から読む。
-#    実運用のモデル選定は eval/best_model_generalized.zip（ランダムコース・DR ありの汎化評価）
+# 2. ONNX 化。観測・行動の契約は run の env_config.json から読む。
+#    実運用のモデルは eval/best_model_generalized.zip（ランダムコース・DR ありの汎化評価）
 .venv/bin/python -m ml_lidar.export_onnx_rl --model ml_lidar/runs/v1/eval/best_model_generalized.zip --name v1
 
-# 4. 実車に配る（models/ は通常の deploy.sh で運ばれる。追加操作は不要）
+# 3. 実車に配る
 tools/deploy.sh --no-gui
 ```
 
-`ml_lidar/app.py`（または `launcher.command` から「ml_lidar」）が上記を操作する薄い Tkinter GUI
-（学習・TensorBoard・観戦・エクスポートを run 名ごとに起動でき、**学習を止めずに並行して動かせる**）。
-推論・学習のロジックは持たないので、中身のスクリプトを直せば GUI 側は変えなくてよい。
-`watch.py` は学習出力を読み直すだけで、学習には関与しない。
-
-GUI での使い方:
-
-1. 設定タブ →「E2E LiDARモデル」ドロップダウンで `models/e2e_lidar/` の一覧から選ぶ
-   （増えたモデルが出ないときは「更新」ボタン）
-2. 自動運転タブ → モードで「E2E LiDAR」を選択
-3. パラメータ `max_speed` はモデル出力をこの値でクランプするだけの安全側の上限——
-   学習時の `--max-speed` より大きくしても出力レンジがそこまで届かないので意味が無い。
-   **最大舵角は GUI パラメータではない**（`config/vehicle.toml` の車両物理限界を常に使う。他の planner も同様）。
-   舵角の意味が別のリンク換算のもとで作られたモデルは契約 JSON の `steer_link` から読み替える（§4.5）
-4. `Enter` で ARM → 自動運転タブの「自律走行を開始」で engage
-
-★ **モデル名を切り替えると `e2e_lidar` の engage は自動的に解除される**
-（`telemetry_node._on_e2e_model`）。★ モデル未選択・ロード失敗の間は「今のモデルを保持」
-（存在しない名前を選んでも走行中のモデルで続行する——ただし選び間違いに気づけるよう
-GUI 側にエラーは残る）。
+GUI: 設定タブ「E2E LiDARモデル」で選ぶ（出ないときは「更新」）→ 自動運転タブで「E2E LiDAR」→ ARM → engage。
+`max_speed` はモデル出力をクランプするだけなので、学習時の `--max-speed` より上げても速くならない。
+舵角の意味が別のリンク換算のもとで作られたモデルは契約 JSON の `steer_link` から読み替える。
 
 ### 12.2 カメラセグメンテーション走行（`ftg_cam`）
 
-前方カメラで「走行可能／不可能」の2値セグメンテーションを行い、`raspi.nav.ipm`
-（逆投影）と `OccGrid.raycast()`（既存のレイキャスト）で LiDAR と同じ形の擬似距離配列
-に変換して `scan/cam` へ流す。ギャップ探索そのものは書いておらず、`follow_the_gap_cam.py`
-が `FollowTheGap`（`ftg`）のロジックをそのまま流用する。
+前方カメラで「走行可能／不可能」の2値セグメンテーションを行い、`raspi.nav.ipm`（逆投影）と `OccGrid.raycast()` で
+LiDAR と同じ形の擬似距離配列に変換して `scan/cam` へ流す。ギャップ探索は `FollowTheGap`（`ftg`）をそのまま使う。
 
 ```bash
-# 初回だけ
-.venv/bin/pip install -r ml_cam/requirements.txt
+.venv/bin/pip install -r ml_cam/requirements.txt             # 初回だけ
 # SAM のチェックポイント（annotate.py が使う。数百MB）を別途ダウンロード:
 #   https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
-# 0. 走行を録画する（実車の GUI「ログ」タブで .mcap 記録、「画像を含める」を ON）。
-#    Pi 側には新しい記録コードは不要——.mcap をダウンロードして Mac に置くだけ
-
-# 1. .mcap からフレームを抽出（間引きは --min-interval-ms、既定0=全件）
+# 0. 実車の GUI「ログ」タブで画像つきの .mcap を録ってダウンロードする
+# 1. フレームを抽出（間引きは --min-interval-ms、既定0=全件）
 python3 ml_cam/extract_frames.py logs/run1.mcap --out ml_cam/data/frames --cam front
-
 # 2. アノテーション（走行可能な床を1クリック→SAMがマスクを提案。Shift+クリックで除外点）
-python3 ml_cam/annotate.py ml_cam/data/frames \
-    --checkpoint sam_vit_b_01ec64.pth --model-type vit_b
-
-# 3. 学習（毎エポック IoU を表示。過学習していないか val_iou を見ながら回す）
+python3 ml_cam/annotate.py ml_cam/data/frames --checkpoint sam_vit_b_01ec64.pth --model-type vit_b
+# 3. 学習（val_iou を見ながら）
 python3 ml_cam/train.py --frames ml_cam/data/frames --epochs 30 --out ml_cam/runs/latest
-
 # 4. ONNX 化（入力解像度・正規化・閾値という前処理契約を同名 .json に焼く）
-python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt \
-    --size 224x224 --out models/<好きな名前>.onnx
-
+python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt --size 224x224 --out models/<名前>.onnx
 # 5. 実車に配る
 tools/deploy.sh --no-gui
 ```
 
-ターミナル操作をまとめて避けたいなら `ml_cam/app.py`（または `launcher.command`（surge_mk2 直下） から「ml_cam」を
-起動）が上記1〜4をボタンとファイル選択ダイアログでサブプロセス起動するだけの
-薄い Tkinter GUI。推論・学習のロジックは持たないので、中身のスクリプトを直せば
-こちら側は何も変えなくてよい。
-
-★ **実車での推論プロセス（`surge-cam-perception`）は常時 enable の systemd unit。**
-`cam_perception_node.py` 自身が `auto/ctrl`（`AutoCtrl.mode`。telemetry_node が GUI の
-選択を送り続けるトピック）を見て**`ftg_cam`（と`cam_centerline`）が選ばれている間だけ推論する**。手で起動する必要はない:
-
-```bash
-ssh surge-mk2 systemctl status surge-cam-perception   # 動いているか確認するだけならこれで十分
-```
-
-- 起動時の既定引数には `--model` を渡していないので、GUI（設定タブ
-  「セグメンテーションモデル」）で選んだモデル名を `cam/model` トピック経由で待つ
-  （プロセス再起動もSSHも要らずにモデルだけ選び直せる）。モデルのロード自体は
-  `ftg_cam` が選ばれていなくても行う（選んだ瞬間から使えるように先読みしておく）
-- 前方カメラの共有メモリ（`image/front`）を読むので、**`surge-camera` が動いていること
-  が前提**（unit の `After=surge-camera.service` で順序は保証している）
-- `auto/ctrl` で `ftg_cam` 以外が選ばれている間・推論が失敗する・モデル未選択の周期は
-  全セクタ `sector_seen=False`（＝壁）を出し続けるので、`ftg_cam` は自然に
-  「点群の欠測が多すぎる」で止まる側に倒れる（安全側）
-- `raspi/nodes/cam_perception_node.py` を直したら `tools/deploy.sh --restart`
-  で反映できる（surge-telemetry / surge-camera と一緒に再起動する）
-
-GUI での使い方:
-
-1. 設定タブ →「セグメンテーションモデル」で `models/` 直下の `.onnx` 一覧から選ぶ
-2. 自動運転タブ → モードで「Follow the Gap（カメラ）」を選択
-3. パラメータの `視野角` はカメラの実視野（hfov≈66°）より広げても見えない範囲なので
-   意味が無い。既定60°
-
-★ **シミュレータでは検証できない。** `sim.run` は `--no-camera` 固定でカメラそのものを
-持たないため、`ftg_cam` を試すには実車が要る（`e2e_lidar` は LiDAR が対象なので
-`sim.run` でそのまま試せるのと対照的）。
+- `surge-cam-perception` は常時 enable。`auto/ctrl`（GUI のモード選択）が `ftg_cam`/`cam_centerline` の間だけ推論する。
+  モデルは GUI（設定タブ「セグメンテーションモデル」）で選んだ名前を `cam/model` で受け取り、モードを選ぶ前から先読みする
+- 前方カメラの共有メモリを読むので `surge-camera` が動いていることが前提
+- GUI: 自動運転タブで「Follow the Gap（カメラ）」。`視野角` はカメラの実視野より広げても意味が無い
 
 ### 12.3 カメラE2E（模倣学習、`cam_e2e`）
 
-**前方カメラの画像だけ**から操舵と速度を直接回帰する。`ftg_cam`/`cam_centerline`が
-セグメンテーション→`raspi.nav.ipm`（逆投影）という幾何変換を経由するのに対し、
-こちらは**幾何変換もLiDARも使わない**——カメラの取付高さが低く（実測8.5cm）
-IPMの深度誤差が拡大する問題を、画像から操作を直接学習することで迂回するのが
-この方式の狙い。
-教師データはSAMの手動アノテーションが不要——走行記録に入っている前方カメラ画像と
-人の指令（`cmd`）を時刻で組にするだけで作れる。**その代わり、悪い手本を外す作業が
-モデルの出来を決める。**
+**前方カメラの画像だけ**から操舵を直接回帰する。IPM もLiDARも使わない——カメラの取付高さが低く
+IPM の深度誤差が大きくなる問題を、画像から操作を直接学習することで迂回するのが狙い。
+教師データは走行記録の前方カメラ画像と人の指令（`cmd`）を時刻で組にするだけで作れる。
+**その代わり、悪い手本を外す作業がモデルの出来を決める。**
 
 #### 手順（操作パネル）
 
-`launcher.command`（surge_mk2 直下）から「ml_cam_e2e」を起動する（`ml_cam_e2e/app.py`）。
-タブは作業の順に並んでいる。
+launcher から「ml_cam_e2e」（`ml_cam_e2e/app.py`）。タブは作業の順に並ぶ。
 
 | タブ | すること |
 |---|---|
-| ① ペア抽出 | 録った `.mcap` を選んで (画像, 人の操作) の組を取り出す。モデル名を決める（以降のタブはその名前を使う） |
-| ② 確認・選別 | 映像と舵・速度の時系列を見て、手本にしない区間（コースアウト・やり直し等）を範囲で除外する。`←/→` 1枚送り、`space` 再生、`[` `]` で範囲、`x` で除外 |
-| ③ 偏り | 学習に使うコマの舵・速度の分布と、記録ごとの内訳。直進が大半なら「直進過多の補正」を上げる |
-| ④ 学習 | 学習曲線の青（`val_mae`）は検証データでの舵の誤差 |
-| ⑤ エクスポート | `models/cam_e2e/<名前>.onnx` と契約 `.json` を書く。解像度と正規化の基準は学習時の値を自動で使う |
-| ⑥ 評価 | 予測と手本の時系列、検証データでの誤差、誤差の大きい場面の一覧。場面から「選別タブで開く」で②へ飛べる |
+| ① ペア抽出 | 録った `.mcap` から (画像, 人の操作) の組を取り出す。モデル名を決める |
+| ② 確認・選別 | 映像と舵・速度の時系列を見て、手本にしない区間を除外する。`←/→` 1枚送り、`space` 再生、`[` `]` で範囲、`x` で除外 |
+| ③ 偏り | 舵・速度の分布と記録ごとの内訳。直進が大半なら「直進過多の補正」を上げる |
+| ④ 学習 | 学習曲線の `val_mae` は検証データでの舵の誤差 |
+| ⑤ エクスポート | `models/cam_e2e/<名前>.onnx` と契約 `.json` を書く |
+| ⑥ 評価 | 予測と手本の時系列、誤差の大きい場面の一覧。場面から②へ飛べる |
 
-**②と⑥を往復するのが基本の使い方。** 誤差の大きい場面は、モデルが悪いのではなく
-手本が悪い（そこだけ人が違う操作をした）ことが多い。除外して学習し直す。
+**②と⑥を往復するのが基本。** 誤差の大きい場面は、手本が悪い（そこだけ人が違う操作をした）ことが多い。
 
 #### 走行の録り方（★ここで出来が決まる）
 
-- **画像つき・高めのレートで録る。** `tools/record.sh --image-hz 15`（Mac の `logs/` に落ちる）。
-  実機GUIの MCAP ボタンは 5Hz 固定なので枚数が稼げない
-- **手本は人の手動運転か、うまく走れている自動運転。** 既定は手動運転だけを使う。
-  `slam2d_route` などの自動運転の走行を手本にする（LiDAR の走りをカメラで真似させる）なら、
-  ①の「自動運転中の走行も手本にする」にチェックを入れる（コマンドでは `--include-auto`）。
-  入れ忘れると自動運転の記録は全部落ちて0枚になる（理由はダイアログに出る）。
-  `cam_e2e` 自身の走行は、チェックを入れても手本にしない
-- **速度モードで運転する。** トルクモードの記録は `target_speed` が 0 のままで、抽出で全部
-  落ちる（落ちた理由と枚数は①のログに出る）
-- **手本は、実車で走らせる速度で録る。** 実車の速度は舵から決める（下の「仕組みの要点」）が、
-  絵は速度で変わる——ブレの強さは旋回の速さ（速度×曲率）に比例するので、モデルはブレを舵の手がかりに使ってしまう。
-  **手本より遅く走らせると舵が足りず、速く走らせると崩れる**。いくつかの速度で走らせたいなら、その範囲で速度を混ぜて録る
-- **手本どおりの走行だけでなく、壁際から戻る操作も録る。** きれいな走行だけで学習すると、
-  少しずれたときにどう戻すかを知らないモデルになる（ずれが積み上がってコースアウトする）
-- **両方向を走る。** 片回りだけだと左右どちらかの舵しか学ばない（③で左右の枚数を確認）。
-  左右反転の水増しは既定で有効だが、コースが左右対称でない（片側通行の標識など）なら④で切る
-- **止まって待つ・後退する**区間は自動で学習から外れる（`ml_cam_e2e/samples.py`）。
-  わざわざ切り取らなくてよい
-- レンズや取付角度を変えたら**録り直して再学習**（§4.6）
+- **画像つき・高めのレートで録る**: `tools/record.sh --image-hz 15`（GUI の MCAP 記録は 5Hz で枚数が稼げない）
+- **手本は人の手動運転か、うまく走れている自動運転。** 自動運転の走行を手本にするなら①の「自動運転中の走行も手本にする」
+  （`--include-auto`）。入れ忘れると自動運転の記録は全部落ちる。`cam_e2e` 自身の走行は手本にしない
+- **速度モードで運転する**（トルクモードの記録は `target_speed` が 0 のままで抽出で落ちる）
+- **実車で走らせる速度で録る。** 絵のブレは旋回の速さに比例するので、モデルはブレを舵の手がかりに使う。
+  手本より遅く走らせると舵が足りず、速く走らせると崩れる
+- **壁際から戻る操作も録る・両方向を走る**（左右反転の水増しは既定で有効。コースが左右非対称なら④で切る）
+- 止まって待つ・後退する区間は自動で学習から外れる（`ml_cam_e2e/samples.py`）
 
 #### 手順（コマンド）
 
@@ -1069,90 +635,26 @@ tools/deploy.sh --no-gui                                    # 実車に配る
 
 #### 実車で走らせる
 
-1. 自動運転タブ → モードで「E2Eカメラ（模倣学習）」→ **「カメラE2Eモデル」欄でモデルを選ぶ**
-   （選択は `config/cam_e2e_model.json` に残る。engage 中に選び直すと engage は落ちる）
-2. `Enter` で ARM → 「自律走行を開始」で engage
+自動運転タブで「E2Eカメラ（模倣学習）」→「カメラE2Eモデル」欄でモデルを選ぶ（`config/cam_e2e_model.json` に残る）→ ARM → engage。
+パラメータは `raspi/auto/cam_e2e.py` の `ParamSpec`（GUI に説明が出る）。**初めてのモデルは最高速度を低くして試す。**
 
-パラメータ（`raspi/auto/cam_e2e.py`）:
-
-| 名前 | 既定 | 意味 |
-|---|---|---|
-| 最高速度 | 0.30 m/s | 直線で出す速度。**初めてのモデルはここを低くして試す** |
-| 最低速度 | 0.10 m/s | 舵をいっぱいに切ってもこれ以下にはしない |
-| 旋回時の横加速度上限 | 3.0 m/s² | 舵の曲率 κ=tan(δ)/L から `v ≤ sqrt(これ/κ)` で減速する。暫定値（実車で未調整） |
-| 舵の倍率 | 1.0 | モデルの舵に掛ける。**戻す舵が弱いモデルの代わりにはならない**（上げるとコーナーで巻き込む。v4 で確認） |
-| 舵の平滑化 | 0.10 s | 1次遅れの時定数 |
-
-★ **このモードは自分では止まらない。** LiDAR を見ないので、前に物があっても
-モデルが「進め」と出せば進む。止める根拠は planner の外にある——GUI の
-**自動停止（STM32 の `auto_stop`）を ON** にしておくこと、人が舵・スロットル・
-ブレーキに触れれば即座に解除されること、通信が切れればデッドマンで止まること。
+★ **このモードは自分では止まらない。** LiDAR を見ないので、前に物があってもモデルが「進め」と出せば進む。
+GUI の**自動停止（STM32 の `auto_stop`）を ON** にしておくこと。
 
 #### 仕組みの要点
 
-- **学習と推論の前処理は同じ関数**（`raspi/core/cam_e2e_preproc.py`、numpy のみ）。色順（RGB）・
-  縮小（面積平均）・正規化を1箇所で定義し、Pi の推論・学習・評価・操作パネルが全部これを通る。
-  処理を変えたら `PREPROC_VERSION` を上げる——版の違うモデルは `cam_e2e_node` が読み込みを拒否する
-  （学習・推論で色順・縮小方式がずれると精度が出ない）。左右の切り落とし（`crop_x`）付きのモデルは
-  cam_e2e だけの版2（`PREPROC_VERSION_CROP`）を契約に書く。切り落としを知らない古いノードは拒否する
-- **モデルの出力は2個**（`steer_norm` -1..1、`speed_norm` 0..1。前進のみ）。物理量へ戻す基準
-  （`max_steer`・`speed_ref`）は同梱 `.json` に書く。`speed_ref` は学習に使った手本の最高速度
-- **速度は舵から決める。モデルの `speed_norm` は実車で使わない。**手本は舵に集中して
-  ゆっくり走った方が質が上がるが、そうすると速度のラベルは「遅い一定値」で情報が無く、手本の
-  遅さがそのまま実車の上限になる。学習の `--speed-weight` は既定 0（舵だけ）——このとき
-  `speed_norm` は学習されていない値なので、⑥評価は速度のグラフ・誤差・予測値を出さない
-  （`train_config.json` の `speed_weight` で判断する）。出力の契約は変えていない
-  
-- ★ **舵が切れてから遅くなる**ので、コーナー手前の減速は遅れる。舵いっぱい（30°）での速度は
-  既定の 3.0 m/s² で約 1.1 m/s——**最高速度がそれ以下なら減速は一切起きない**。足りなければ
-  「先の経路（数点）を出すモデルに変え、その曲率で手前から減速する」が次の手
-- **ずれから戻す舵は「向きをずらした絵」で教える**（`ml_cam_e2e/yaw_aug.py`、NVIDIA PilotNet と同じ方法）。
-  手本はいつも同じ線を走るので、記録には「ずれた絵とそこで戻す舵」が無い。そのまま学習すると、検証誤差が小さくても
-  ずれへの応答 dδ/dψ が手本の追従よりずっと弱く、実車では数mで線を外れる（舵の倍率では直らない。倍率は戻す舵とコーナーの舵を同じだけ増やすため）。
-  学習では絵を ±6° ずらしてラベルを `δ − k·ψ`（`--yaw-aug-k`、既定 0.8）にする。
-  端に作り物の画素を出さないよう、**学習でも推論でも左右を約5%切り落とした中央の窓を使い**
-  （契約の `crop_x`、前処理の版2）、ずらすのは窓の位置だけ。車体（ボンネット・前輪）は走行中に
-  動かない画素から推定したマスク（抽出フォルダの `body_mask.png`）で元の位置に戻す。
-  横方向の位置ずれは作れない（奥行きが要る）。⑥評価のログに dδ/dψ が出る（負で大きいほど戻す力が強い）
-- **舵の正解を変えない外乱を学習で混ぜる**（`ml_cam_e2e/photo_aug.py`、`--photo-aug` 倍率、既定 1）。
-  横ブレ → ノイズ → 色味 → JPEG を各 50% で掛ける。⑥評価のログに外乱ごとの舵の変化が出る（小さいほど強い）
-- **手本の指令は推論の遅れの分だけ後のものを組む**（①の「手本を遅らせる」、`--label-shift-ms`、
-  既定 200ms）。実車は撮影から指令まで遅れる（`cam_e2e/cmd` の `t_pub − t_capture` で測れる）ので、
-  撮影と同じ瞬間の指令を学ぶと、手本どおりの舵を遅れて出す。推論の遅れが変わったら合わせて学習し直す。
-  Pi の numpy は参照実装の BLAS なので前処理の縮小が遅くなりやすい（`PROGRESS.md`）
-- **検証データは5秒のかたまり単位で分ける**（隣のコマはほぼ同じ絵なので、1枚ずつ無作為に
-  分けると誤差が実力より小さく出る）
-- `surge-cam-e2e` は常時 enable の systemd unit。`auto/ctrl` が `cam_e2e` で、かつ ARM 中の間だけ
-  推論する（既定 10Hz、`--infer-hz`）。engage 中は前カメラの fps が上限まで上がる
-- モデル未選択・推論失敗・カメラ途絶の周期は `ready=False` を出すので、停止側へ倒れる
-- `raspi/nodes/cam_e2e_node.py` を直したら `tools/deploy.sh --restart`
+- **学習と推論の前処理は同じ関数**（`raspi/core/cam_e2e_preproc.py`）。処理を変えたら `PREPROC_VERSION` を上げる
+  （版の違うモデルは `cam_e2e_node` が拒否する。左右の切り落とし付きは `PREPROC_VERSION_CROP`）
+- **速度は舵から決める**（曲率 κ=tan(δ)/L から `v ≤ sqrt(a_lat_max/κ)`）。モデルの `speed_norm` は実車で使わず、
+  学習の `--speed-weight` は既定 0（舵だけ）。舵が切れてから遅くなるので、コーナー手前の減速は遅れる
+- **ずれから戻す舵は「向きをずらした絵」で教える**（`ml_cam_e2e/yaw_aug.py`、`--yaw-aug-k`）。手本の記録には
+  ずれた絵とそこで戻す舵が無いので、そのままだとずれへの応答 dδ/dψ が弱く、実車で線を外れる（舵の倍率では直らない）。
+  ⑥評価のログに dδ/dψ が出る（負で大きいほど戻す力が強い）
+- **舵の正解を変えない外乱を混ぜる**（`ml_cam_e2e/photo_aug.py`、`--photo-aug`）
+- **手本の指令は推論の遅れの分だけ後のものを組む**（`--label-shift-ms`）。推論の遅れ（`cam_e2e/cmd` の `t_pub − t_capture`）が
+  変わったら合わせて学習し直す
 
-★ **シミュレータでは走行を検証できない。**`ftg_cam`と同じ理由（`sim.run`はカメラを持たない。
-`sim.bench --mode cam_e2e` も対象外）。代わりに `ml_cam_e2e/tests/test_pipeline.py` が、合成した記録で
-抽出→学習→エクスポート→実車側の読み込み→評価までを通し、学習したモデルが手本の向きと速度を
-再現することを確かめる（`.venv/bin/python -m pytest ml_cam_e2e/tests -q`）。
+★ **シミュレータでは走行を検証できない**（`sim.bench --mode cam_e2e` も対象外）。代わりに `ml_cam_e2e/tests/test_pipeline.py` が
+合成した記録で抽出→学習→エクスポート→実車側の読み込み→評価までを通す（`.venv/bin/python -m pytest ml_cam_e2e/tests -q`）。
 
----
-
-## 付録: ディレクトリと担当
-
-| ディレクトリ | 中身 | 直したら |
-|---|---|---|
-| `raspi/nodes/` | プロセス本体（io / camera / telemetry / planning / logger / replay / video / cam_perception / cam_e2e / line_perception / cam_track / arrow_signal）。`cam_perception_node`（`surge-cam-perception`）・`cam_e2e_node`（`surge-cam-e2e`）・`line_perception_node`（`surge-line-perception`）とも常時 enable、`auto/ctrl` でそれぞれ対応モード選択中だけ推論/認識する（§12.2・§12.3） | ノードごとに再起動 |
-| `raspi/auto/` | 自動運転アルゴリズム（**バスも WS も知らない純粋な計算**。`e2e_lidar.py`/`follow_the_gap_cam.py`/`cam_e2e.py` もここ） | surge-planning 再起動 |
-| `raspi/nav/` | 経路生成・追従・回避・局所地図などの部品（SLAM 本体は `slam2d/`）。`ipm.py`（カメラ逆投影）は `ftg_cam`/`cam_centerline` が使用（`cam_e2e` は経由しない） | surge-planning 再起動 |
-| `raspi/proto/` | UART 定義（**STM32 と共有する唯一の定義**） | 再生成 ＋ `--restart-io` |
-| `raspi/bus/` `raspi/msgs/` | ZeroMQ ラッパ・共有メモリ・メッセージ型 | 関係ノード全部 |
-| `raspi/io/` | `SerialLink` / GPIO（**`import serial` はここ1箇所だけ**） | `--restart-io` |
-| `raspi/rec/` | `.sfl` / MCAP の書き出し | io / logger |
-| `raspi/tools/` | 単発の検査・変換ツール | — |
-| `raspi/tests/` | pytest（`tools/check.sh`） | — |
-| `gui/` | React + TypeScript | rsync だけ |
-| `sim/` | Mac 専用シミュレータ（**Pi には運ぶが使わない**）。カメラは持たない | — |
-| `ml_cam/` | カメラセグメンテーションの学習パイプライン（Mac 専用。§12.2） | Pi には無関係 |
-| `ml_cam_e2e/` | カメラE2E（模倣学習）の学習パイプライン（Mac 専用。§12.3） | Pi には無関係 |
-| `ml_lidar/` | LiDAR E2E 強化学習パイプライン（Mac 専用。§12.1） | Pi には無関係 |
-| `models/` | 学習済み ONNX の置き場（`models/*.onnx`=カメラセグメンテーション用、`models/cam_e2e/*.onnx`=カメラE2E用、`models/e2e_lidar/*.onnx`=LiDAR E2E用）。`.gitignore` 対象 | `tools/deploy.sh` で運ぶだけ。再起動は不要 |
-| `config/` | 車両諸元 `vehicle.toml`・自動運転パラメータ・生成器（§2） | 読んでいるノード |
-| `slam2d/` | 車体非依存の汎用 2D LiDAR SLAM（`slam2d/README.md`） | surge-planning 再起動 |
-| `tools/` | `deploy.sh` / `record.sh` / `calib`（車両の校正）/ `fwsim`（ファームのホストのシム）/ `cam_calib` | — |
+ディレクトリの構成は [`system_overview.md` §13](system_overview.md#13-リポジトリ構成と技術スタック)、どこを直したら何を再起動するかは §2。

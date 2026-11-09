@@ -424,7 +424,7 @@ class TestObstacleBrakeAndMdFault(unittest.TestCase):
                                  kw.get("md", ""), kw.get("params", {**self.params, "launch": 1}))
 
     def test_launch_is_off_by_default(self):
-        """既定は無効（2026-10-10: 今は手動操作でだけ使う）。"""
+        """既定は無効（今は手動操作でだけ使う）。"""
         self.p._joined = True
         st = self.AutoState(target_speed=2.0, target_steer=0.02)
         self.assertFalse(self._launch(st, 0.0, params=self.params))
@@ -847,8 +847,7 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         追跡が本来の精度検証を意図していない合成シナリオのため、姿勢が地面
         真値から大きくずれうる（`_build_map`と違って`Frontend`が推測航法
         だけで動くため）。**ここでは自己位置復元の精度そのものを確かめたい**
-        ので、`slam2d/tests/test_scanmatch.py`と同じ「既知姿勢から直接
-        `integrate()`する」手順で、地面真値と完全に一致した地図を作って保存する。
+        ので、「既知姿勢から直接`integrate()`する」手順で、地面真値と完全に一致した地図を作って保存する。
         """
         g = OccGrid(resolution=0.05, size_m=12.0, origin=(-1.0, -1.0))
         for x, y, yaw in [(3.0, 2.0, 0.0), (3.05, 2.0, 0.05), (3.0, 2.05, -0.05),

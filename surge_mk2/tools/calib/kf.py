@@ -7,7 +7,7 @@
 
 `[control]` の `kf_sigma_s_m`（走行距離の測定ノイズ）・`kf_sigma_a_m_s2` と `kf_sigma_a_per_m_s`（加速度の測定ノイズと
 その車速による増え方）・`kf_jerk_psd`（加速度の変化の強さ）・`kf_bias_walk_psd`（加速度計のバイアスの変化）・
-`kf_lever_arm_m`（旋回で加速度計に乗る −k·ω²）。v0.26 までは記録1本と経験で決めた固定値だった。
+`kf_lever_arm_m`（旋回で加速度計に乗る −k·ω²）。
 
 ## どうやって（真値は要らない）
 

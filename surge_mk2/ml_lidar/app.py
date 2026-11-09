@@ -269,35 +269,31 @@ class App:
             row=1, column=0, columnspan=3, sticky="w", pady=(2, 8))
 
         basic = {
-            # v21(2026-09-17): dt=0.05→0.10にしたので1stepの意味が倍になった。
-            # 旧5M step×0.05s=250,000シム秒に対し、3M×0.10s=300,000シム秒で1.2倍。
-            # 2Mに削るのは**危険**——既存run(v13/v14/v17/v19)のmean_speedは2M時点から
+            # dt=0.10なので3M step=300,000シム秒。
+            # 2Mに削るのは**危険**——過去のrun(v13/v14/v17/v19)のmean_speedは2M時点から
             # 最終まで+11〜26%伸び続けており、mean_rewardだけが2Mで飽和して見える
             # （経路不変なので実質「衝突せず完走したか」しか見ていない）。
-            # 今回の第一指標はlap_ratio=速度なので、飽和していないのは速度の方
+            # 第一指標はlap_ratio=速度なので、飽和していないのは速度の方
             "total-timesteps": ("学習ステップ総数", "3000000"),
             "n-envs": ("並列環境数", "8"),
             "episode-s": ("1エピソードの打ち切り秒数", "30"),
-            # v21b: LD06の回転周期(10Hz)=実車planning_nodeの計画周期に合わせた値。
-            # 0.05(20Hz)に戻すと、スキャンが更新されないステップが54%生じるうえ
+            # LD06の回転周期(10Hz)=実車planning_nodeの計画周期に合わせた値。
+            # 0.05(20Hz)にすると、スキャンが更新されないステップが54%生じるうえ
             # 実車(10Hz)と決定レートが2倍ずれる(env.py docstring「v21b」参照)
             "dt": ("制御周期[s]", "0.10"),
             "max-speed": ("最高速度[m/s]", "2.0"),
-            # v23(2026-09-22): 2.0→1.0。dt=0.10では1決定あたり最大0.1rad
-            # （max_steerの19%）で、v13が意図した権限に戻る。理想ライン追従に
-            # 必要な舵角速度のp90(0.954rad/s)を賄える値（env.py EnvConfig docstring参照）
-            # v25(2026-09-24)で1.5を試したが障害物の失敗は減らず、舵が35%忙しくなっただけ
-            # だったのでv26(2026-09-26)で1.0に戻した
+            # dt=0.10では1決定あたり最大0.1rad（max_steerの19%）。理想ライン追従に
+            # 必要な舵角速度のp90(0.954rad/s)を賄える値（env.py EnvConfig docstring参照）。
+            # 1.5では障害物の失敗は減らず、舵が35%忙しくなっただけだった
             "steer-rate-max-rad-s": ("舵角速度スケール[rad/s]", "1.0"),
-            # v16〜v20で足した報酬罰則3種(steer-effort/raceline/steer-angle)は
-            # 2026-09-17に全て撤去した。実測でタイム欠損の主因がライン取りではなく
-            # 速度だと判明し、かつステア絶対値罰は文献(Evans 2021 arXiv:2103.10098)で
-            # 「racing報酬中で最遅・コーナーを下手に曲がる」と実証済みだったため
-            # (env.py EnvConfig docstring「v21」参照)。滑らかさは報酬項ではなく
-            # 損失項(CAPS spatial / LCP勾配罰則)で攻める方針に転換している
+            # 報酬罰則(steer-effort/raceline/steer-angle)は持たない。実測でタイム欠損の
+            # 主因がライン取りではなく速度で、かつステア絶対値罰は文献(Evans 2021
+            # arXiv:2103.10098)で「racing報酬中で最遅・コーナーを下手に曲がる」と
+            # 実証済みのため(env.py docstring参照)。滑らかさは報酬項ではなく
+            # 損失項(CAPS spatial / LCP勾配罰則)で攻める
             # SB3既定(0.0)。-3はgSDE有効時専用の調整値(train_rl.pyの--log-std-init
             # ヘルプ参照)なので、gSDEチェックボックスの状態に連動させて切り替える
-            # v26(2026-09-26): 0.0→-1.0（σ 1.0→0.37。train_rl.pyの--log-std-init参照）
+            # 既定-1.0（σ 0.37。train_rl.pyの--log-std-init参照）
             "log-std-init": ("探索ノイズ初期標準偏差(log)", _LOG_STD_INIT_DEFAULT),
             "seed": ("乱数シード", "0"),
         }
@@ -311,10 +307,10 @@ class App:
             ttk.Entry(frame, textvariable=var, width=14).grid(row=i, column=1, sticky="w", pady=2)
 
         use_sde_row = 2 + len(basic)
-        # 既定OFF: v15(2026-09-11)以降の全runがuse_sde=Falseで学習されている
+        # 既定OFF: v15以降の全runがuse_sde=Falseで学習されている
         # (モデルファイルから確認済み)。v11/v12で試したgSDEの
         # 改善は誤差程度で、決定論的方策の振動は探索ノイズではなく方策写像
-        # そのものの粗さだと判明している(env.py EnvConfig docstring「v21」参照)
+        # そのものの粗さだと判明している(env.py docstring参照)
         self.use_sde_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(frame, text="gSDE(状態依存の相関探索ノイズ)を有効化",
                         variable=self.use_sde_var).grid(
@@ -536,7 +532,7 @@ class App:
                 self.run_name_var.set(self.export_run_var.get())
         self.export_run_var.trace_add("write", _sync_export_to_run)
 
-        # ★既定を`eval/best_model.zip`から変更した（2026-09-17）。SB3の`EvalCallback`は
+        # ★既定は`eval/best_model.zip`ではない。SB3の`EvalCallback`は
         # **mean_rewardで選ぶ**が、この環境のmean_rewardは1周ぶんの弧長=total_length/dtで
         # ほぼ定数になり、モデルの良し悪しを区別できない——v21では`eval/best_model.zip`も
         # `best_model_generalized.zip`も約900k時点で凍り、対MCL理想ラップ比が

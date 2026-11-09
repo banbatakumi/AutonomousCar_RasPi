@@ -52,7 +52,7 @@ class TestCamInferActive(unittest.TestCase):
 
 
 class TestIdlePacer(unittest.TestCase):
-    """IDLE中の publish を間引き、ACTIVE中と IDLE へ入った瞬間は必ず送る（2026-10-04）。"""
+    """IDLE中の publish を間引き、ACTIVE中と IDLE へ入った瞬間は必ず送る。"""
 
     def test_active_always_publishes(self):
         p = IdlePacer()

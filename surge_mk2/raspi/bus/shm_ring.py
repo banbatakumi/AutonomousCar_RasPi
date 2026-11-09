@@ -1,6 +1,6 @@
 """画像用の共有メモリリングバッファ。
 
-**なぜ ZMQ に画像を流さないか**（`docs/architecture.md` §6.2）:
+**なぜ ZMQ に画像を流さないか**（`docs/system_overview.md` §5.2）:
 640x480x3 を 30Hz で msgpack 経由にすると **28 MB/s のメモリコピー**が発生する
 （実測でも 28 MB/s だった）。代わりに:
 

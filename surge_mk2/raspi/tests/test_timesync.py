@@ -119,7 +119,7 @@ class TestDriftRecovery(unittest.TestCase):
 
 class TestOffsetBeforeFit(unittest.TestCase):
     def test_large_drift_does_not_skew_time_before_regression_starts(self):
-        """回帰が始まる前（最初の 15 秒）も、ドリフトのぶんずれた時刻を返さない（2026-10-13）。
+        """回帰が始まる前（最初の 15 秒）も、ドリフトのぶんずれた時刻を返さない。
 
         実機の STM32 の時計は Pi より約 0.35% 速い。窓全体で遅延が最小の1点からオフセットを
         取っていた頃は、その点が古いほどずれた（10 秒前の点なら 35ms）。"""

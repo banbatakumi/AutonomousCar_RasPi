@@ -1,4 +1,4 @@
-"""診断タブ用に足した Pi 側の値の単体テスト（2026-10-05）。
+"""診断タブ用に足した Pi 側の値の単体テスト。
 
 - `raspi/io/pihealth.py`（CPU・メモリ・スロットリングの読み取り）
 - `BusBridge.build_diag` の io_node 内部値（`LinkDiag.loop_max_ms` ほか）

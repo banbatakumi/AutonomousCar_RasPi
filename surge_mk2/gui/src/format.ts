@@ -1,5 +1,5 @@
 /**
- * 表示のための単位変換。**ここ以外で SI から離れないこと**（`architecture.md` §5.1）。
+ * 表示のための単位変換。**ここ以外で SI から離れないこと**（`system_overview.md` §7）。
  */
 
 export const RAD2DEG = 180 / Math.PI

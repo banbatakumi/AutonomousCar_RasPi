@@ -13,7 +13,7 @@
 - **LiDAR**: LD06（10Hz回転・裏向き実装で点群は鏡像、`ScanAssembler` が戻す）
 - **カメラ**: 前後 CSI×2（`picamera2`）
 - **超音波**: 前後×2（実質20Hz上限）
-- **制御ボード**: STM32F446RE（100Hz〜1kHz のリアルタイム制御）
+- **制御ボード**: STM32F446RE（制御ループ 2kHz・テレメトリ 100Hz のリアルタイム制御）
 - **上位計算機**: Raspberry Pi 5（RP1 チップのため `RPi.GPIO` 不可 → `gpiozero` + `lgpio`）
 
 詳細な仕様・制約（据え切り過熱、電源2系統、GPIO6ハートビート等）は
@@ -24,18 +24,17 @@
 
 | 知りたいこと | 見るファイル |
 |---|---|
-| システム全体をざっと把握したい | [`docs/system_overview.md`](docs/system_overview.md)（構成図とモジュール地図だけなら [`SYSTEM_ARCHITECTURE.md`](SYSTEM_ARCHITECTURE.md)） |
-| なぜその設計にしたか | [`docs/architecture.md`](docs/architecture.md) |
-| 今どこまで進んだか・実測値 | [`PROGRESS.md`](PROGRESS.md)（冒頭の「現在の状態」が正。下の節の状態表記は記録時点のもの） |
+| システム全体・なぜその設計にしたか | [`docs/system_overview.md`](docs/system_overview.md)（構成・プロセスとトピック・安全・自動運転・GUI・記録・シム。数値は持たずリンクする） |
+| 今どこまで進んだか・実測値 | [`PROGRESS.md`](PROGRESS.md)（冒頭の「現在の状態」が正） |
 | どう直して実機/シムに反映するか | [`docs/development.md`](docs/development.md) |
 | UART プロトコルの数値仕様 | [`docs/uart_protocol.md`](docs/uart_protocol.md)（唯一の定義は `raspi/proto/protocol.toml`） |
 | STM32 側の実装仕様 | [`docs/stm32_interface.md`](docs/stm32_interface.md) |
-| 補助 GUI（シム・同定・SLAM 再処理・走行サマリ・ml 系）を起動したい | `launcher.command`（`tools/launcher.py`） |
-| シミュレータの使い方 | [`sim/README.md`](sim/README.md) |
+| 補助 GUI（シム・校正・SLAM 再処理・走行サマリ・ml 系）を起動したい | `launcher.command`（`tools/launcher.py`） |
+| シミュレータの使い方・ベンチ（`sim.bench`・`sim.slam_bench`） | [`sim/README.md`](sim/README.md) |
 | GUI のコード地図 | [`gui/README.md`](gui/README.md) |
 | 車両パラメータ（幾何・質量・動特性） | `config/vehicle.toml`（全ノードがここだけを見る） |
 | 制御の定数がどこから来た数字か（物理・同定・式・方針・経験則） | [`docs/control_constants.md`](docs/control_constants.md)（ファームへの写しは `tools/fwsim/tests/test_fw_constants.py` が突き合わせる） |
-| 車両を校正したい（エンコーダ・ステア・遅延・車速制御・TC/ABS）・その値の意味 | [`docs/calibration.md`](docs/calibration.md)（試験 `raspi/auto/calib_*`、解析 `tools/calib`、GUI は launcher の「車両の校正」）。値は `config/vehicle.toml`（io_node が `[control]` を STM32 へ送る） |
+| 車両を校正したい（エンコーダ・ステア・遅延・車速制御・TC/ABS・カメラ・車速 KF）・その値の意味 | [`docs/calibration.md`](docs/calibration.md)（試験 `raspi/auto/calib_*`、解析 `tools/calib`、GUI は launcher の「車両の校正」）。値は `config/vehicle.toml`（io_node が `[control]` を STM32 へ送る） |
 | STM32 の制御をホストで回して比べたい | `tools/fwsim`（ファームをそのままコンパイルして車のモデルと閉ループ。`python -m tools.fwsim.bench`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
 | 公開用の技術解説サイト（GitHub Pages） | [`site/`](site/)（Markdown。`master` への push で自動公開。更新の方針は `site/docs/about.md`）。**数値の正は持たない**ので、コードを変えたら該当ページを見直す |

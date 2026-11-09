@@ -452,7 +452,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
         `_try_select()`はモデルが無ければ`select_seq`を消費せずに`False`を
         返し続けるので、ここを見ずに読み続けると`_state=="IDLE"`のまま
         `need_frame`が永久に`True`になり、IDLE中CPU消費バグ
-        （2026-09-04修正）が別経路で再発する（回帰防止）。
+        （修正済み）が別経路で再発する（回帰防止）。
         """
         node = _new_node(vehicle=_vehicle_straight(),
                             factory=_FakeFactory([], available=False))
@@ -465,7 +465,7 @@ class TestRunSkipsFrameReadWhenIdle(unittest.TestCase):
 
 
 class TestRunTracksEachFrameOnce(unittest.TestCase):
-    """追跡中は同じフレームを2度追跡しない（2026-10-04、省電力。以前は vehicle_state の
+    """追跡中は同じフレームを2度追跡しない（省電力。以前は vehicle_state の
     到着でも起きて同じフレームを読み直し、NanoTrack を約85回/s回していた）。"""
 
     def _ring_and_ref(self, name):
@@ -514,7 +514,7 @@ class TestRunSkipsFrameReadWhenDisarmed(unittest.TestCase):
 
     ROI選択（`track/roi`）はtelemetry_nodeが再起動まで覚えていて再送し続ける
     ので、armedを見ないと駐車中もNanoTrackが回り続ける
-    （主モードゲートと同じ形のバグの回帰防止、2026-09-04）。
+    （主モードゲートと同じ形のバグの回帰防止）。
     """
 
     _REF = ImageRef(shm_name="does-not-matter", slot=0, ring_seq=0, frame_id=0,

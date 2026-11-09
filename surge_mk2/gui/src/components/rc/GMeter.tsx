@@ -39,7 +39,7 @@
  *
  * `RcView.tsx` がメータ行の実測高さから逆算して渡す px。速度計・舵角計と
  * サイズを揃えるために使う（`SpeedGauge.tsx` 冒頭のコメント参照）。描画ループ
- * 自体は元々 `getBoundingClientRect()` で毎フレーム実寸を読んでいるので、
+ * 自体は `getBoundingClientRect()` で毎フレーム実寸を読んでいるので、
  * ここでは `.gmeter-wrap` の CSS サイズを変えるだけで追従する。
  */
 import { useEffect, useRef } from 'react'
@@ -155,7 +155,7 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
       if (cur && fresh) {
         const mag = Math.hypot(cur.x, cur.y)
         ctx.fillStyle = mag > FULL_G ? '#ffffff' : '#ffc63f'
-        // 発光（2026-11-03、HUD をレース用ダッシュ風にしたのに合わせる）
+        // 発光（HUD のレース用ダッシュ風の見た目に合わせる）
         ctx.shadowColor = '#ff3445'
         ctx.shadowBlur = 8 * dpr
         ctx.beginPath()
@@ -178,7 +178,7 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
             : undefined
         }
       >
-        {/* 軸の文字（加速・制動・左・右）は出さない（2026-11-02、指示による。HUD を簡潔にするため） */}
+        {/* 軸の文字（加速・制動・左・右）は出さない（HUD を簡潔にするため） */}
         <canvas ref={ref} className="gmeter" />
       </div>
     </div>

@@ -30,6 +30,7 @@ core/
   frontend.py  1周期の処理（脱スキュー→予測→位置合わせ→地図更新）
   localize.py  グローバルローカリゼーション（保存地図の上で「どこに居るか」）
   locscore.py  自己位置の候補の採点（他車などの遮り物に強い一致度）
+  _native.c・native.py・cbuild.py  レイ・総当たりの採点などの C 版（初回 import で組む。組めなければ Python 版）
 backend/
   loop_detection.py  古いキーフレームだけで作った部分地図への再訪判定
   posegraph.py       g2opy のラッパー（Huber・外れ値の除去つき）
@@ -55,21 +56,17 @@ tools/         spike_g2o.py（g2opy の動作確認）
 ## 検証
 
 - **ループ検出は数周期に分けて進める**（`pipeline.PipelineConfig.loop_steps_per_update`、
-  `loop_detection.find_loop_closure_steps`）。一括だと Mac で約20ms・Pi 5 で約150ms かかり、
-  LiDAR の周期100msを超えた。分けた後の1スキャンは Mac で平均約4ms・p99約10ms・最大約15ms
-  （toyota、地図作成。分ける前は p99約20ms・最大約30〜60ms）。ポーズグラフの最適化は走行中に
-  回さず凍結時（`flush_steps`、g2o は`optimize_chunk_iters`反復ずつ）。`opencv`は import を
-  起動時に済ませる（遅延だと最初の1周期が約45ms）
+  `loop_detection.find_loop_closure_steps`）。一括だと Pi 5 で LiDAR の周期100msを超えるため。
+  ポーズグラフの最適化は走行中に回さず凍結時（`flush_steps`、g2o は`optimize_chunk_iters`反復ずつ）。
+  `opencv`は import を起動時に済ませる（遅延だと最初の1周期が遅れる）
 - 合成データの単体テスト: `pytest slam2d/tests -q`（15秒程度）
-- **シミュレータでの通し評価**: `.venv/bin/python -m sim.slam_bench`
-  （`sim/slam_bench.py`。実機と同じ `VirtualLidar → ScanAssembler` 経路を通し、
-  車速・ジャイロに誤差を注入して真値と突き合わせる。地図作成と凍結地図での
-  追従を分けて測る）
-- 公開データセット（CARMEN log形式、`datasets/README.md`）での検証は未着手（`adapters/` は空）
+- **シミュレータでの通し評価**: `.venv/bin/python -m sim.slam_bench`（使い方は
+  [`sim/README.md`](../sim/README.md#slam-だけの評価simslam_bench)）
+- 公開データセット（CARMEN log形式、[`datasets/README.md`](datasets/README.md)）での検証は未着手（`adapters/` は空）
 
 ## 開発方針
 
-- 現行の `sim/`（車両動力学込みシミュレータ）には依存しない。`sim/slam_bench.py` は
+- `sim/`（車両動力学込みシミュレータ）には依存しない。`sim/slam_bench.py` は
   **シム側から slam2d を呼ぶ**評価ツールで、依存の向きは `sim → slam2d` のまま
 - 依存管理は `requirements.txt` 方式。`pyproject.toml` は今は作らない
 - テストは `unittest.TestCase` で書き `pytest slam2d/tests -q` で実行

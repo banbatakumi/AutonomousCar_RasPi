@@ -117,7 +117,7 @@ class TestWhiteMaskMatchesReferenceImplementation(unittest.TestCase):
 
 
 class TestWideBlobDoesNotOverrideThinLine(unittest.TestCase):
-    """実車確認（2026-09-03）で踏んだ不具合の再現テスト。
+    """実車確認で踏んだ不具合の再現テスト。
 
     毛布・カーテンのような太く明るい面が帯内にあると、単純な帯内重心は
     そちらへ引っ張られ、実際の白線（数cm幅）を見失っていた。`_band_centroid`

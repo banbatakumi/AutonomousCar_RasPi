@@ -119,8 +119,9 @@ scale, unit = packets.Telemetry.META["steer_actual"]   # (0.0001, "rad")
 ここで自動変換しないのは、ログには生値をそのまま残したいため
 （変換係数を後から直しても記録が壊れない）。
 
-## 未実装
+## proto 層では扱わないこと
 
-- `LIDAR_SECTOR_C` の `255` は「5.10m 以上（飽和）」であり実測点ではない。
-  占有格子に打たない処理は上位（perception）側で行う
-- `odom_dist` の射影（`cos(steer_actual)` を**差分に**掛ける）も上位側
+意味の解釈は上位の `raspi/msgs/convert.py` が行う（`docs/uart_protocol.md` §5.1〜§5.3）。
+
+- LiDAR の左右の鏡像反転と、`LIDAR_SECTOR_C` の `255`（「5.10m 以上（飽和）」で実測点ではない。`Scan.saturated` で区別する）
+- `odom_dist` の射影（`cos(steer_actual)` を**差分に**掛ける）

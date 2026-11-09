@@ -191,10 +191,8 @@ def make_track_from_centerline(centerline: np.ndarray,
     """任意の閉じた中心線`(N,3)`(x, y, yaw)から、内壁・外壁の線分列を作る。
 
     `make_oval_track()`と同じ発想（中心線を法線方向に`±width/2`だけオフセット
-    する）を、閉じた形状であれば任意の形（`sim/random_course.py`の procedural
-    コース等）に一般化したもの。中心線が十分細かく再標本化されている前提
-    （`sim.random_course._build_loop`は`final_step`間隔で`resample_loop`済み）
-    なので、点ごとの`yaw`をそのまま法線方向に使い、区間ごとの円弧近似はしない。
+    する）を、閉じた形状であれば任意の形に一般化したもの。中心線が十分細かく
+    再標本化されている前提なので、点ごとの`yaw`をそのまま法線方向に使い、区間ごとの円弧近似はしない。
     """
     xs, ys, yaws = centerline[:, 0], centerline[:, 1], centerline[:, 2]
     nx, ny = -np.sin(yaws), np.cos(yaws)

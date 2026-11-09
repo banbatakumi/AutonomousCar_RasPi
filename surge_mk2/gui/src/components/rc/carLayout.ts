@@ -2,12 +2,10 @@
  * `DrivePanel`（車体を上から見た図）と `ProximityRing`（障害物近接リング）が
  * 共有する、実寸 [m]（`vehicle.toml` 由来）→ svg 座標の変換と車輪配置。
  *
- * 元々 `DrivePanel` は車輪位置を見た目だけで決めた固定値（車体の外側に車輪が
- * はみ出す、いわゆるデフォルメ絵）を持っていた。`ProximityRing` は実寸の
- * `footprint` からリングを描くため、実車のトレッド（0.155m）が車体幅
- * （0.18m）より狭いことがデフォルメ絵の車輪配置に反映されず、車輪・スリップ・
- * トルクの表示がリングの表示域（車体のすぐ外）に被っていた。
- * 座標変換を1箇所にまとめ、車輪位置もトレッド・ホイールベース・車輪径の
+ * `ProximityRing` は実寸の `footprint` からリングを描く。車輪位置を見た目だけで
+ * 決めた固定値（デフォルメ絵）にすると、実車のトレッド（0.155m）が車体幅（0.18m）より
+ * 狭いことが反映されず、車輪・スリップ・トルクの表示がリングの表示域に被る。
+ * そのため座標変換を1箇所にまとめ、車輪位置もトレッド・ホイールベース・車輪径の
  * 実測値から算出することで、両者が同じ実寸比率に揃うようにする。
  */
 import { VEHICLE } from '../../generated/vehicle'
@@ -49,6 +47,6 @@ const [, cyFront] = toSvg(VEHICLE.wheelbase, 0)
 export const CY_REAR = cyRear
 export const CY_FRONT = cyFront
 
-/** 車輪の直径（転動方向）。トレッド方向の厚みは `vehicle.toml` に値が無いので
+/** 車輪の直径（転動方向）。トレッド方向の厚みは見やすさのため実寸（`wheel_width`）を使わず、
  * `DrivePanel` 側で見た目重視の固定値を持つ */
 export const WHEEL_H = 2 * VEHICLE.wheelRadius * SCALE_Y

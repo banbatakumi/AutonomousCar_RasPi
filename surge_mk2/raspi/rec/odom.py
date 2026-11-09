@@ -1,6 +1,6 @@
 """推測航法（車速＋ジャイロの積分）。**記録と可視化のための自己位置**。
 
-`logger_node` と `tools/sfl2mcap.py` が `vehicle_state` を受けるたびに呼び、
+`logger_node` と `raspi/tools/sfl2mcap.py` が `vehicle_state` を受けるたびに呼び、
 MCAP の `/odom` と Foxglove 用の `/tf`（odom→base_link）を作る（`rec/viz.py`）。
 planner が動いていない記録でも「車がどこを走ったか」を残すのが目的で、
 **走行制御には使わない**（制御側の姿勢は各 planner が自前で持つ）。

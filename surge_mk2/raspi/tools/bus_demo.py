@@ -1,4 +1,4 @@
-"""bus_demo — 車体も Pi も無い状態でバスにそれらしいデータを流す（`architecture.md` §10.6）。
+"""bus_demo — 車体も Pi も無い状態でバスにそれらしいデータを流す（`system_overview.md` §12.1）。
 
     .venv/bin/python -m raspi.tools.bus_demo
     .venv/bin/python -m raspi.tools.bus_demo --duration 60 --faults
@@ -15,7 +15,7 @@
 意図的に**運動学だけ**（自転車モデル + 矩形の部屋のレイキャスト）にしてある。
 タイヤモデルもスリップも路面もない。**ここを育てて物理シミュレータにしないこと。**
 本物のセンサノイズが要るなら `replay_node --bus` で実機ログを流す方が正しい
-（`docs/architecture.md` §11）。用途は「GUI の配管と見た目を確認すること」だけ。
+（`docs/system_overview.md` §11）。用途は「GUI の配管と見た目を確認すること」だけ。
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ STATE_HZ = 50
 SCAN_HZ = 10
 DIAG_HZ = 10
 
-WHEELBASE = 0.23          # m（実測確定。`architecture.md` §15-#4）
+WHEELBASE = 0.23          # m（実測確定。正は `config/vehicle.toml`）
 ROOM = (6.0, 4.0)         # m  部屋の内寸
 #: ステアリングの1次遅れ時定数。**実測待ちの仮値**（Phase 1 で測る）
 STEER_TAU_S = 0.12

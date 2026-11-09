@@ -200,7 +200,7 @@ class TestGripLearner(unittest.TestCase):
 
     def test_guard_after_an_envelope_raise_undoes_that_raise(self):
         """最後に上げたものを疑う: 横を採用した後に包絡を上げていたら、横ではなくその包絡を戻し、それより上は試さない。
-        シム toyota2 で、減速の包絡が真値より上がって毎周同じ所で外れたのを、u=1 の点ばかり下げて直せなかった（2026-10-29）。"""
+        シム toyota2 で、減速の包絡が真値より上がって毎周同じ所で外れたのを、u=1 の点ばかり下げて直せなかった。"""
         g = self._g_env()
         g._ref = (5.0, 6.0, 6.0)
         g._lat_up_t = 1.0
@@ -368,8 +368,8 @@ class TestGripLearner(unittest.TestCase):
 
 class TestRealRecords(unittest.TestCase):
     """滑っていない実機の記録（`data/grip_real_*.npz`。100Hz の車速・ヨーレート・実舵角と 10Hz の姿勢・横偏差を
-    `raspi/tools/grip_replay.py --export` で抜いたもの）を流して、安全装置が働かないこと。2026-10-12 には、
-    曲率の不足を見る検出器が滑っていない車で 46 回働き、1 周 5.7s → 13.1s になった（その検出器は 2026-10-29 に消した）。"""
+    `raspi/tools/grip_replay.py --export` で抜いたもの）を流して、安全装置が働かないこと
+    （曲率の不足を見る検出器が、滑っていない車で 46 回働いて 1 周 5.7s → 13.1s になった例がある）。"""
 
     @classmethod
     def setUpClass(cls):
@@ -544,7 +544,7 @@ class LongTrack:
 
 
 class TestLongLearner(unittest.TestCase):
-    """前後の上限の包絡: 計画が包絡で決まっている所で、実際に出た ÷ 求めた で点ごとに合わせる（2026-10-27）。"""
+    """前後の上限の包絡: 計画が包絡で決まっている所で、実際に出た ÷ 求めた で点ごとに合わせる。"""
 
     def test_default_envelope_is_the_calibrated_value_times_the_shape(self):
         lg = long_learner(dec=2.0, acc=2.5)

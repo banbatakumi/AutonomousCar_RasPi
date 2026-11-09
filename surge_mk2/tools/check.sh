@@ -4,9 +4,9 @@
 #   ./tools/check.sh              全部
 #   ./tools/check.sh --fast       生成物の --check だけ（数秒。コミット前向き）
 #
-# ## なぜ要るか（2026-08-21 のレビュー 🟡5）
+# ## なぜ要るか
 #
-# 生成器の `--check` を3つ持っているのに、**実行を人間の記憶に頼っていた。**
+# 生成器の `--check` を3つ持っていても、**実行を人間の記憶に頼ると忘れる。**
 # GitHub Actions が動くのは push 後なので、手元でも同じものを1コマンドで
 # 打てないと「push してから気づく」を繰り返す。
 #
@@ -37,8 +37,7 @@ run() {                 # run <説明> <コマンド...>
 run "vehicle.toml → gui/src/generated/vehicle.ts" "$PY" config/generate.py --check
 run "protocol.toml → proto/packets.py, surge_proto.h" "$PY" raspi/proto/generate.py --check
 run "msgs/types.py → gui/src/generated/msgs.ts" "$PY" config/gen_msgs.py --check
-# 生成コードだけでなく**文書中の版番号**も見る。`docs/README.md` が2版遅れたまま
-# 誰も気づかなかったことがある（2026-08-21 のレビュー 🟢13）
+# 生成コードだけでなく**文書中の版番号**も見る（手書きの版番号は片方だけ古くなっても気づけない）
 run "protocol.toml → 文書中の版番号" "$PY" config/check_docs.py --check
 
 # 未使用 import・空 f-string・未定義名（issue #24 の再発防止）。
@@ -61,7 +60,7 @@ if [ "$FAST" = 0 ]; then
   run "pytest (tools)" "$PY" -m pytest tools/tests tools/calib/tests tools/cam_calib/tests \
     tools/fwsim/tests/test_fw_constants.py tools/fwsim/tests/test_control_logic.py -q
   run "pytest (sim)" "$PY" -m pytest sim/tests -q
-  # SLAM（Pi の走行中も同じコードが動く）。以前はどこからも回しておらず、壊れても気づけなかった
+  # SLAM（Pi の走行中も同じコードが動く）
   run "pytest (slam2d)" "$PY" -m pytest slam2d/tests -q
   # ML のテスト（torch が要る）。ml_cam と ml_cam_e2e は `dataset` をフラットに import するので別プロセスで回す
   if "$PY" -c "import torch" 2>/dev/null; then

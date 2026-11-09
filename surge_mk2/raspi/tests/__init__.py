@@ -13,9 +13,9 @@ C 版の無い環境では Pi 5 で 50 秒以上）。
 仕上げの中身は `test_speedctl.py`（`refine_time` 単体）と、本番の設定で引く
 `test_line_worker.py` が確かめる。
 
-★ ここに置く理由: 以前は `conftest.py` に書いていたが、それは pytest しか読まない。`tools/deploy.sh --test`
-は Pi に pytest が無いので `unittest discover` で回しており、本番の設定のまま経路を作って、
-`test_route.py` の 30 秒の待ちを超えて失敗し、残ったワーカーを待つので終わらなかった。
+★ ここに置く理由: `conftest.py` は pytest しか読まない。`tools/deploy.sh --test`
+は Pi に pytest が無いので `unittest discover` で回しており、`conftest.py` に書くと本番の設定のまま経路を作って、
+`test_route.py` の 30 秒の待ちを超えて失敗し、残ったワーカーを待つので終わらない。
 """
 
 import os

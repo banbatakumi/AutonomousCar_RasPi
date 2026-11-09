@@ -127,8 +127,8 @@ class TestRandomWalkLoopCourse(unittest.TestCase):
 
     def test_walk_curvature_never_exceeds_the_per_step_turn_clamp(self) -> None:
         """`_walk_checkpoints()`は1歩あたりの旋回角を`max_turn_per_step`にクランプする
-        ことで曲率安全マージンを**構成時点で**保証する（旧方式の事後リジェクトサンプリング
-        とは異なる、モジュールdocstring参照）。生成された中心線の実測旋回角が、
+        ことで曲率安全マージンを**構成時点で**保証する（事後リジェクトサンプリング
+        ではない、モジュールdocstring参照）。生成された中心線の実測旋回角が、
         隣接点間で本当にこのクランプ値を超えていないことを直接確認する回帰テスト。
         """
         min_radius_m = vehicle_min_turn_radius_m() * 1.1  # course_gen._RADIUS_MARGINと同じ値
@@ -207,8 +207,8 @@ class TestRandomWalkLoopCourse(unittest.TestCase):
         """`sample_random_walk_loop_params()`のパラメータ抽出だけを直接検証する
         （重い生成を経由しない）。
 
-        旧方式と異なり、曲率安全マージンは`_walk_checkpoints()`が構成時点で保証するため、
-        `n_checkpoints`別のジッター上限較正は不要になった——ジッター範囲はn_checkpoints
+        曲率安全マージンは`_walk_checkpoints()`が構成時点で保証するため、
+        `n_checkpoints`別のジッター上限較正は要らない——ジッター範囲はn_checkpoints
         によらず一定（`course_gen.py`のモジュールdocstring参照）。
         """
         for seed in range(200):
@@ -261,11 +261,10 @@ class TestRandomWalkLoopCourse(unittest.TestCase):
 
 
 class TestWidthDistribution(unittest.TestCase):
-    """v22: 道幅レンジ（`_WIDTH_RANGE_M`）のテスト。
+    """道幅レンジ（`_WIDTH_RANGE_M`）のテスト。
 
-    v21以前は`uniform(0.8, 1.4)`で、**近い側の壁が必ず0.70m以内**という状態だった。
-    その結果、方策は広いコースを一度も見ないまま学習され、実機でtoyota型（中央1.45m）の
-    コースが不安定になった。同じ穴を再び掘らないよう、レンジと「実際に広いコースが
+    `uniform(0.8, 1.4)`では**近い側の壁が必ず0.70m以内**になり、方策は広いコースを一度も
+    見ないまま学習され、実機でtoyota型（中央1.45m）のコースが不安定になる。それを防ぐため、レンジと「実際に広いコースが
     出てくること」を固定する。
     """
 
@@ -296,11 +295,11 @@ class TestWidthDistribution(unittest.TestCase):
 
 
 class TestGenerationRobustness(unittest.TestCase):
-    """v22: 生成失敗が学習を止めないこと（2026-09-17に実際にv22の学習を1本落とした）。
+    """生成失敗が学習を止めないこと。
 
     `_generate_walk_centerline()`の内側リトライは**チェックポイント配置だけ**を引き直すので、
     パラメータの組自体が実現不能だと20回とも失敗して`RuntimeError`になり、
-    `SubprocVecEnv`のワーカーごと落ちて数時間の学習が止まる。発生率は当時4000本中3本
+    `SubprocVecEnv`のワーカーごと落ちて数時間の学習が止まる。発生率は4000本中3本
     (0.07%)で、**60本の事前確認では検出できなかった**——8env×3Mstepでは約25,000
     エピソードなので19回程度起きる計算だった。
     """

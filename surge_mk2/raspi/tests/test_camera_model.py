@@ -189,7 +189,7 @@ rms = 0.3
 
 
 class TestLensProfiles(unittest.TestCase):
-    """レンズのプロファイル（`lens = "…"` で `lenses.<名前>` を選ぶ、2026-10-03）。"""
+    """レンズのプロファイル（`lens = "…"` で `lenses.<名前>` を選ぶ）。"""
 
     TOML = """
 [sensors.cam_front]

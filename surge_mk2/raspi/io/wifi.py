@@ -2,7 +2,7 @@
 
 SSIDは `nmcli`（NetworkManager）から、電波強度(RSSI dBm)は `/proc/net/wireless`
 から読む。二系統に分けているのは、SSIDはnmcli以外に取得手段がなく（surge_mk2は
-NetworkManager前提、`architecture.md` §9.1）、RSSIは `/proc/net/wireless` を
+NetworkManager前提、`system_overview.md` §5.4）、RSSIは `/proc/net/wireless` を
 読むだけで済み `nmcli` のプロセス起動より軽いため。
 
 `nmcli` のサブプロセス起動は数十〜百数十msかかる（実機実測 ~0.1s）。20Hzの

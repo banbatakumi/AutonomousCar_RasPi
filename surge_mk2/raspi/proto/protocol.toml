@@ -74,7 +74,7 @@ fields = [
   { name = "roll",                type = "i16", scale = 0.0001, unit = "rad" },
   { name = "motor_current",       type = "i16", count = 3, scale = 0.001, unit = "A", note = "[RL,RR,ST] 双方向" },
   { name = "torque_cmd",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] 指令値" },
-  { name = "slip",                type = "i16", count = 2, scale = 0.0001, note = "[RL,RR] TC用スリップ率。正=空転 負=ロック傾向。基準速度が低いと無効区間は0 ★v0.13" },
+  { name = "slip",                type = "i16", count = 2, scale = 0.0001, note = "[RL,RR] TC用スリップ率。正=空転 負=ロック傾向。分母は max(|基準速度|, 下限)" },
   { name = "tc_limit_nm",         type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] TCが動的に決めているトルク上限。介入していなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.13" },
   { name = "torque_req",          type = "i16", count = 2, scale = 0.0001, unit = "N.m", note = "[RL,RR] スリップ制限（TC・片輪浮き対策・ABS）が絞る前に掛けたかったトルク。駆動は TV の左右差を載せた後、制動は要求の制動トルク（負）。torque_cmd との差が絞った量 ★v0.16" },
   { name = "abs_limit_nm",        type = "i16", scale = 0.0001, unit = "N.m", note = "ABS が決めている制動トルクの上限（左右共通）。働いていなければ DRIVE_MAX_TORQUE_NM と同じ ★v0.16" },
@@ -295,7 +295,7 @@ FAULT_SIGNAL_OVERCURRENT  = 0x00001000
 FAULT_DRIVE_UNDERVOLTAGE  = 0x00002000
 FAULT_SIGNAL_UNDERVOLTAGE = 0x00004000
 DRIVE_POWER_LOCKED        = 0x00008000
-AUTO_STOP_ACTIVE          = 0x00010000   # v0.7: 前後超音波の自動停止が実際に制動へ介入中
+AUTO_STOP_ACTIVE          = 0x00010000   # 自動停止（LiDAR 主・超音波補助）が実際に制動へ介入中
 SIDE_BRAKE_ACTIVE         = 0x00020000   # v0.13: サイドブレーキが実際に位置制御へ切り替わり固定中
 WINKER_LEFT_ACTIVE        = 0x00040000   # v0.14: 左ウィンカーが実際に点滅中
 WINKER_RIGHT_ACTIVE       = 0x00080000   # v0.14: 右ウィンカーが実際に点滅中
@@ -326,7 +326,7 @@ LIGHT_MASK  = 0x18   # bit3-4 = LIGHT_MODE_*
 LIGHT_SHIFT = 0x03   # マスクではなくシフト量
 PASSING     = 0x20
 TORQUE_MODE = 0x40   # v0.6: 立っている間 target_speed を無視し target_torque を直接掛ける（brakeと同様PI迂回。brake優先）
-AUTO_STOP   = 0x80   # v0.7: 立っている間、進行方向の超音波が20cm未満で STM32 が自動的に最大制動（brake優先）
+AUTO_STOP   = 0x80   # 立っている間、進行方向の停止距離内に障害物（LiDAR 主・超音波補助）があれば STM32 が最大制動（brake優先）
 
 [bits.CMD_FLG2]
 comment = "COMMAND.flags2 (u8)。★v0.13 新設"
@@ -367,15 +367,13 @@ COMPRESSED = 2
 
 [params]
 comment = "CONFIG_SET / CONFIG_GET の param_id"
-# MAX_SPEED/MAX_ACCEL/MAX_STEER: v0.10でSTM32側が廃止し、STM32側の固定定数
-# （DRIVE_MAX_SPEED_M_S等）へ一本化された。常にUNKNOWN_IDを返す。
-# Piは元々Flash非永続化・動的変更のユースケース無しを理由に意図的に未送信だったため、
-# Pi側の挙動に変化は無い。
+# MAX_SPEED/MAX_ACCEL/MAX_STEER: v0.10 以降の STM32 は固定定数（DRIVE_MAX_SPEED_M_S等）を使い、
+# 常にUNKNOWN_IDを返す。Pi は送らない。
 MAX_SPEED      = 0x0001  # 廃止（STM32側が UNKNOWN_ID を返す。v0.10）
 MAX_ACCEL      = 0x0002  # 廃止（同上）
 MAX_STEER      = 0x0003  # 廃止（同上）
-# TC_ENABLE/TV_ENABLE: v0.8でSTM32ファームウェアが実装済み（以前は未実装で
-# RAS_CONFIG_UNKNOWN_PARAM を返していた）。Pi側から実際に送信する（raspi/nodes/io_node.py）。
+# TC_ENABLE/TV_ENABLE: v0.8 以降のファームが実装（それより前は RAS_CONFIG_UNKNOWN_PARAM を返す）。
+# Pi側から実際に送信する（raspi/nodes/io_node.py）。
 TC_ENABLE      = 0x0010
 # ── 足回りの制御の調整パラメータ（★v0.16。TC・ABS・片輪浮き対策・TV）──
 # **名前・範囲・既定値の唯一の定義は STM32 側 `src/control/control_params.h` の表。** ここは
@@ -394,12 +392,12 @@ TV_ENABLE      = 0x0020
 TV_TEST_MOMENT_NM         = 0x002A  # 同定用。0 以外の間は TV の配分を止めてこのヨーモーメントだけを出す
 TV_LOAD_GAIN_S2_PER_M     = 0x002B  # ★v0.17。配分の比率 = これ × 横加速度（車速×ヨーレート）
 TV_MAX_RATIO              = 0x002C  # ★v0.17。比率の上限（1 で内輪のトルクが 0）
-# ステアのリンクの換算（★v0.18）: 路面舵角 = gain·x + cubic·x³、x = モータ角×0.5。STM32 は入れた瞬間に
-# 反映し、LIMITS（max_steer_rad）を送り直す。値はシステム同定が `[control]` に書く
+# ステアのリンクの換算（★v0.18）: 路面舵角 = gain·x + cubic·x³、x = モータ角×0.5。STM32 は保持だけして
+# 停車して DISARM のときに適用し、LIMITS（max_steer_rad）を送り直す。値は校正 2（`calib_steer`）が `[control]` に書く
 STEER_LINK_GAIN           = 0x0081
 STEER_LINK_CUBIC          = 0x0082
 # ローンチコントロール（★v0.20。`COMMAND.flags2` の LAUNCH）: 発進を終えて車速PIへ戻すときの積分の初期値
-# [N·m、1輪あたり] = その車速を保つのに要るトルク。値は `[control]`（`[dynamics]` の同定値から決める）
+# [N·m、1輪あたり] = その車速を保つのに要るトルク。値は `[control]`（校正 5 が書く）
 LAUNCH_EXIT_TORQUE_NM     = 0x00A1
 # 車速PIの加速度フィードフォワード（★v0.21）: 車速PIの出力に
 #   SPEED_FF_NM_PER_M_S2 × 目標車速の傾き [m/s²] ＋ SPEED_FF_RR_NM × 進む向き
@@ -441,18 +439,16 @@ MD_TORQUE_LAG_S           = 0x0102  # MD のトルクの遅れ [s]（0〜0.1）�
 SPEED_KP       = 0x0030  # 比例 [N·m/(m/s)]
 SPEED_KI       = 0x0031  # 積分 [N·m/(m/s)/s]
 LIDAR_FORMAT   = 0x0040
-# WHEEL_LIFT_GUARD_ENABLE: v0.9でSTM32ファームウェアが実装済み（後輪片浮きの検知・
+# WHEEL_LIFT_GUARD_ENABLE: v0.9 以降のファームが実装（後輪片浮きの検知・
 # トルク遮断）。TC_ENABLE/TV_ENABLE本体とは独立に動く別機構。Pi側から実際に送信する
 # （raspi/nodes/io_node.py）。
 WHEEL_LIFT_GUARD_ENABLE = 0x0050
 WHEEL_LIFT_DIFF_THRESHOLD_M_S = 0x0051  # ★v0.16（調整パラメータ。v0.15 まで未実装の WHEEL_LIFT_GUARD_THRESH）
-# AUTO_STOP_MARGIN_CM: v0.12でSTM32ファームウェアが実装済み。自動停止（COMMAND.flags
-# bit7=AUTO_STOP）が使う安全マージンをcm単位の連続値で直接指定する（段階enumではない。
-# 当初案は3段階enumだったが実機投入前にSTM32側がcm直接指定へ変更した）。
+# AUTO_STOP_MARGIN_CM: v0.12 以降のファームが実装。自動停止（COMMAND.flags
+# bit7=AUTO_STOP）が使う安全マージンをcm単位の連続値で直接指定する（段階enumではない）。
 # 範囲 0.0-100.0、既定15.0。未送信ならSTM32側の既定15cmのまま
-# （pi_uart_protocol_v0.12_delta.md）
 AUTO_STOP_MARGIN_CM = 0x0060
-# ABS_ENABLE: v0.15でSTM32ファームウェアが実装済み（制動モード＝brake・自動停止・フェイルセーフの
+# ABS_ENABLE: v0.15 以降のファームが実装（制動モード＝brake・自動停止・フェイルセーフの
 # 最大制動、および前進中の車速PIの減速で後輪のロックを防ぐ。torque_modeの負トルクには掛からない）。既定は有効。
 # TC_ENABLE と同じ bool（0.0/1.0）。Pi側から実際に送信する（raspi/nodes/io_node.py）
 ABS_ENABLE = 0x0070

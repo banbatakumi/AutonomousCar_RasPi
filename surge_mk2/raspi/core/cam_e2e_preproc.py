@@ -90,12 +90,12 @@ def resize_area(rgb: np.ndarray, width: int, height: int) -> np.ndarray:
     エイリアシングが出るうえ、JPEG（学習データ）と生フレーム（推論）の差が
     そのまま残る。区画内を平均すればブロックノイズも均されて差が小さくなる。
 
-    縦→横の順に区画内を重み付きで足す。**BLAS を使わない。** 以前は重み行列との
-    積（`np.tensordot`）で求めていたが、Pi の numpy（Debian の `python3-numpy`）は
-    参照実装の BLAS につながっていて、640x360→224x128 に約 180ms かかっていた
+    縦→横の順に区画内を重み付きで足す。**BLAS を使わない。** 重み行列との
+    積（`np.tensordot`）にすると、Pi の numpy（Debian の `python3-numpy`）は
+    参照実装の BLAS につながっていて、640x360→224x128 に約 180ms かかる
     （Mac は約 1ms）。ここは区画の画素だけを足すので Pi で数 ms。
-    丸めも以前の結果と同じになるように足している（`_area_axis0`。
-    `raspi/tests/test_cam_e2e_preproc.py` が旧実装と画素単位で突き合わせる）。
+    丸めは行列積の結果と同じになるように足している（`_area_axis0`。学習済みモデルの絵と揃えるため。
+    `raspi/tests/test_cam_e2e_preproc.py` が行列積版と画素単位で突き合わせる）。
     """
     src_h, src_w = rgb.shape[:2]
     if (src_w, src_h) == (width, height):

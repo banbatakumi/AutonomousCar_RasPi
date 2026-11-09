@@ -1,6 +1,6 @@
 """Pure Pursuit — レーシングラインを追う。
 
-`docs/architecture.md` §5.2 の自転車モデル（**base_link = 後輪車軸の中心**）が
+`docs/system_overview.md` §7 の自転車モデル（**base_link = 後輪車軸の中心**）が
 そのまま使える。Pure Pursuit の標準式が後輪基準で書かれているのが、
 原点をそこに置いた理由のひとつ。
 

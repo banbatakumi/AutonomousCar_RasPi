@@ -1,4 +1,4 @@
-"""`tools/slam_replay.py`（記録を slam2d に通し直す）のテスト。
+"""`raspi/tools/slam_replay.py`（記録を slam2d に通し直す）のテスト。
 
     python3 -m unittest raspi.tests.test_slam_replay
 """
@@ -132,7 +132,7 @@ class TestSlamReplay(unittest.TestCase):
 
     def test_null_floats_in_recording_are_read_as_nan(self):
         """`free_ahead = inf`（前方に障害物なし）は JSON で `null` になる。
-        レース走行の記録がこれで丸ごと読めなかった（2026-10-06）。"""
+        レース走行の記録がこれで丸ごと読めなかった。"""
         import math
 
         import msgspec

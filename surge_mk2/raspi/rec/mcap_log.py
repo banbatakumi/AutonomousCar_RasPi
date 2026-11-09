@@ -1,4 +1,4 @@
-"""MCAP 書き出し（`docs/architecture.md` §11）。
+"""MCAP 書き出し（`docs/system_overview.md` §11）。
 
 **`.sfl` が一次記録、MCAP は「読ませるための形」**という役割分担にしてある。
 
@@ -175,7 +175,7 @@ def pointcloud_from_scan(scan, unix_ns: int, frame_id: str = LIDAR_FRAME_ID,
     見えなかったセクタも同様に落ちる（`dist` が 0 のままのため）。
 
     :param pose: `frame_id` の中での点群の原点（車両の姿勢）。省略時は単位姿勢。
-        **tf を使わずに別の推定の姿勢で点群を置く**ときに使う（`tools/slam_replay.py`）
+        **tf を使わずに別の推定の姿勢で点群を置く**ときに使う（`raspi/tools/slam_replay.py`）
     """
     buf = bytearray()
     dist = scan.dist
@@ -269,7 +269,7 @@ class McapLog:
         ssh surge-mk2 '~/surge_mk2/.venv/bin/python -m raspi.nodes.logger_node -o -' > run.mcap
 
     MCAP は追記型なのでパイプでもそのまま成立する。**途中で ssh が切れたら
-    索引が書かれない**が、`tools/mcap_repair.py` で救える。
+    索引が書かれない**が、`raspi/tools/mcap_repair.py` で救える。
 
     ## SD が満杯になったとき（ENOSPC）
 
@@ -447,7 +447,7 @@ class McapLog:
         """別の MCAP のメッセージを**中身を解釈せずに**写す（`mcap.reader` の3つ組）。
 
         既存の `.mcap` に解析結果を足した新しいファイルを作るため
-        （`tools/slam_replay.py`）。`log_time` は元の値（epoch）をそのまま使う。
+        （`raspi/tools/slam_replay.py`）。`log_time` は元の値（epoch）をそのまま使う。
         スキーマとチャネルは元の名前・符号化のまま、初出で登録する。
         """
         self._check_open()
@@ -504,7 +504,7 @@ class McapLog:
             self._w.finish()
             self._f.flush()
         except OSError as e:
-            # 索引が書けなくても致命傷にはしない。`tools/mcap_repair.py` が
+            # 索引が書けなくても致命傷にはしない。`raspi/tools/mcap_repair.py` が
             # 索引無しの MCAP を修復できる（クラス docstring 参照）
             self._mark_broken(e)
         finally:

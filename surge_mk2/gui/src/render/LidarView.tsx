@@ -1,7 +1,7 @@
 /**
  * LiDAR 俯瞰ビュー。**Canvas 2D に rAF で直接描く。React を経由させない。**
  *
- * 座標は車両基準（`architecture.md` §5.1）: x = 前, y = 左, 反時計回りが正。
+ * 座標は車両基準（`system_overview.md` §7）: x = 前, y = 左, 反時計回りが正。
  * 画面では x を上、y を左に取る（上が進行方向）。
  *
  * ## 欠測を「障害物なし」に見せない
@@ -430,7 +430,7 @@ function drawVehicle(
   px: number,
   steer: number,
 ) {
-  // base_link は後輪車軸の中心（`architecture.md` §5.2）。原点はそこ
+  // base_link は後輪車軸の中心（`system_overview.md` §7）。原点はそこ
   const W = VEHICLE.width * px
   const front = VEHICLE.front * px
   const back = VEHICLE.back * px
@@ -466,7 +466,7 @@ function drawVehicle(
 }
 
 /**
- * 自転車モデルによる予測進路（`architecture.md` §5.2 の式）。
+ * 自転車モデルによる予測進路（`system_overview.md` §7 の式）。
  *
  * 舵角の実測値から描く。**指令値ではない**ので、ステアリングの遅れが
  * そのまま見える。速度が 0 のときは向きだけを短く描く。後退中は後ろへ描く

@@ -9,7 +9,7 @@
 
 1. **`SensorTimestamp` がどの時計基準か** — これが最重要。
    アーキテクチャは全メッセージが `t_capture`（Pi の `CLOCK_MONOTONIC`）を持つ前提
-   （`docs/architecture.md` §6.3）。カメラの時刻が別基準だと、
+   （`docs/system_overview.md` §5.2）。カメラの時刻が別基準だと、
    LiDAR やオドメトリと融合するときに全部を書き直すことになる。
    STM32 に時刻同期を作ったのと同じ問題がカメラにもある。
 2. **取得レイテンシ** — 撮像から Python が配列に触れるまで。制御に使うなら効く

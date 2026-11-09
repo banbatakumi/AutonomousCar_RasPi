@@ -333,7 +333,7 @@ class TestTopicOwner(unittest.TestCase):
     planner を選ばなくても** planning_node そのものが起動しない。実際に
     `line_trace`（`line/cam`）を `raspi/auto/registry.py` に足したときに
     `raspi/bus/zbus.py` の `TOPIC_OWNER` を更新し忘れて、`sim.run` の起動時に
-    再現した（2026-08-23）。
+    再現した。
     """
 
     def test_every_registered_planner_input_topic_has_an_owner(self):
@@ -379,7 +379,7 @@ if __name__ == "__main__":
 
 
 class TestPlanningVehicleStatePolicy(BusCase):
-    """planning_node は `vehicle_state` を全サンプル受ける（2026-09-27）。LATEST だと `plan()` が
+    """planning_node は `vehicle_state` を全サンプル受ける。LATEST だと `plan()` が
     TELEMETRY の間隔（10ms）より長い周に途中のサンプルが捨てられ、脱スキュー・`SensorGuard`・
     `DeadReckon` の「全サンプル」の前提が崩れていた。"""
 

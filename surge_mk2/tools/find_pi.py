@@ -3,7 +3,7 @@
     .venv/bin/python -m tools.find_pi            # IP を1行出す（見つからなければ終了コード 1）
     .venv/bin/python -m tools.find_pi --open     # 見つけた IP で実機 GUI をブラウザで開く
 
-## なぜ要るか（2026-11-01）
+## なぜ要るか
 
 Wi-Fi だけで繋いだ Mac で、`surge-mk2.local` が引けなくなり GUI が「読み込み中」や
 INIT のまま止まった。IP 直打ちなら GUI も WS も全部届く（経路は生きている）。

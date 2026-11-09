@@ -1,4 +1,4 @@
-"""自動運転アルゴリズムの共通の型（`docs/architecture.md` §8）。
+"""自動運転アルゴリズムの共通の型（`docs/system_overview.md` §9）。
 
 **1つの planner = 1つの走らせ方。** Follow the Gap・壁沿い走行・経路追従などを
 同じ形にはめておき、GUI からどれで走るかを選べるようにする。
@@ -107,7 +107,7 @@ class Planner:
     name: str = ""                         #: GUI のボタンに出る名前
     description: str = ""                  #: 1行の説明。GUI の選択肢の下に出る
     #: GUI 側の一覧をどこに出すかの分類。既定 `"drive"` は自動運転タブの
-    #: モード選択に出る。`"sysid"` はシステム同定タブ専用（`raspi/auto/sysid_*.py`）
+    #: モード選択に出る。`"sysid"` はシステム同定タブ専用（`raspi/auto/calib_*.py`）
     #: で、自動運転タブの選択肢からは除外される（`AutoPanel.tsx` 側のフィルタ）。
     #: **planning_node・engage・ARM・deadman の仕組みはどちらも完全に共通**——
     #: 分類は GUI の見せ方だけの都合で、エンジン側は関知しない

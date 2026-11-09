@@ -1,4 +1,4 @@
-"""内部バスに流れるメッセージ型（`docs/architecture.md` §6.3）。
+"""内部バスに流れるメッセージ型（`docs/system_overview.md` §5.2）。
 
 `msgspec.Struct` で定義する。Rust 実装で速く、そのまま msgpack に落ちる。
 
@@ -15,7 +15,7 @@
 ## 単位は SI で固定する
 
 UART 上は `0.001 m/s` のような整数スケールだが、**バスに出た時点で SI の float にする**
-（`docs/architecture.md` §5.1）。km/h や度への変換は GUI の表示直前だけ。
+（`docs/system_overview.md` §7）。km/h や度への変換は GUI の表示直前だけ。
 どの層でスケールが掛かっているか分からなくなるのが一番危ない。
 
 ## 「値が無い」は 0 ではなく None で表す
@@ -183,7 +183,7 @@ class VehicleState(MsgBase):
     tv_ratio: float = 0.0
     #: [N·m] TV が要求した左右トルク差のヨーモーメント換算（左旋回が正）。左右のトルク差に直すと ×2×車輪半径÷トレッド
     tv_moment_nm: float = 0.0
-    # ── ★v0.24: 車速のカルマンフィルタ（STM32 `src/control/speed_kf.h`）の診断。**`speed` がこのフィルタの車速**（走行距離+加速度計。v0.25 で前輪の微分+LPF は廃止）──
+    # ── ★v0.24: 車速のカルマンフィルタ（STM32 `src/control/speed_kf.h`）の診断。**`speed` がこのフィルタの車速**（走行距離+加速度計）──
     accel_kf: float = 0.0                  #: [m/s²] カルマンフィルタの加速度
     #: [m/s²] カルマンフィルタの加速度計バイアス（取付ずれ+重力の傾き成分）。坂・傾きで動く
     accel_bias_kf: float = 0.0
@@ -346,7 +346,7 @@ class DriveCmd(MsgBase):
 
     mode: int = 0                          #: 0=DISARM 1=MANUAL 2=AUTO
     arm: bool = False
-    #: 制動。**v0.5 では速度 PI を迂回して `brake_torque` を直接掛ける。**
+    #: 制動。**速度 PI を迂回して `brake_torque` を直接掛ける。**
     #: 立てている間 `target_speed` は無視される
     brake: bool = False
     horn: bool = False                     #: **立てている間ずっと鳴る**（v0.4 は単発）
@@ -679,7 +679,7 @@ class AutoState(MsgBase):
     #: 視野内で有効だった点の割合 [0..1]。**低いのに走っているなら疑う**
     valid_ratio: float = 0.0
 
-    # ── 地図を使う planner の状態（`raspi/auto/raceline.py`） ──
+    # ── 地図を使う planner の状態（`raspi/auto/slam2d_raceline.py`・`slam2d_route.py`） ──
     #: 走行段。"EXPLORE"（地図を作っている）/"BUILD"（経路を作っている）/"RACE"
     phase: str = ""
     pose_x: float = 0.0                    #: [m] map フレーム。**base_link 基準**
