@@ -297,7 +297,7 @@ class ParkToPoint(Planner):
                   step=0.1, default=0.6, unit="m相当",
                   note="切り返し1回を経路長これだけぶんに換算して嫌う。"
                        "★大きくすると切り返しが減るが経路が大回りになる"),
-        ParamSpec(key="anchor_enabled", label="スキャンアンカ", min=0.0, max=1.0, step=1.0,
+        ParamSpec(key="anchor_enabled", kind="bool", label="スキャンアンカ", min=0.0, max=1.0, step=1.0,
                   default=1.0, unit="",
                   note="1=ON。クリック時のスキャンを基準に毎周期2フレーム登録し、"
                        "目標を実世界の壁へ固定する（`raspi/nav/scan_anchor.py`）。"

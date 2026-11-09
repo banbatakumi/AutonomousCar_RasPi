@@ -73,6 +73,12 @@ export type AutoParamSpec = {
   note: string
   /** 見出しを付けてまとめる組（`ParamSpec.group`）。空・無しなら組分けしない */
   group?: string
+  /** GUI の部品（`ParamSpec.kind`）。`''`・無し = スライダ、`'bool'` = チェックボックス、
+   * `'choice'` = ボタンの並び（値は `min` から `step` 刻み、`choices` がその順の名前） */
+  kind?: '' | 'bool' | 'choice'
+  choices?: string[]
+  /** これを満たす間だけ出す（`ParamSpec.show_if`）: `{キー: 出す値の並び}`、全部満たしたとき */
+  show_if?: Record<string, number[]>
 }
 
 /** 選べる自動運転モード1つ（`raspi/auto/registry.py` の `catalog()`）。 */

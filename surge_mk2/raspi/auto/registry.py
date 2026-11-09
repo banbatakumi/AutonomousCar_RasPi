@@ -80,7 +80,8 @@ def catalog() -> list[dict]:
             "params": [
                 {"key": s.key, "label": s.label, "min": s.min, "max": s.max,
                  "step": s.step, "default": s.default, "unit": s.unit, "note": s.note,
-                 "group": s.group}
+                 "group": s.group, "kind": s.kind, "choices": list(s.choices),
+                 "show_if": {k: list(v) for k, v in s.show_if.items()}}
                 for s in cls.params if not s.hidden
             ],
             "stats": list(cls.stats),

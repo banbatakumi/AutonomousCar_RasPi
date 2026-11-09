@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x2f523445
+export const MSGS_SCHEMA = 0xe3ffb17b
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -465,8 +465,19 @@ export type AutoState = {
   pose_y: number
   /** [rad] 反時計回り正 */
   pose_yaw: number
-  /** スキャンマッチの一致度 0〜1。**低いのに走っているなら疑う** */
+  /**
+   * スキャンマッチの一致度 0〜1。**低いのに走っているなら疑う**（地図に無い物の点を外した残りの中の割合なので、
+   * 大きく遮られても 1 に近いまま。遮られ具合は `match_hits`）
+   */
   match_score: number
+  /**
+   * 位置合わせで、外す前の全点のうち地図の壁に乗った点の数（他車・人で大きく遮られると減る。
+   * `slam2d/core/frontend.py` の `wall_hits`）
+   */
+  match_hits: number
+  /** 点群のノイズの除去（`raspi/nav/scan_filter.py`）がこの周に捨てた点の数と、強度の自動の下限（強度が無ければ 0） */
+  scan_dropped: number
+  lidar_intensity_min: number
   /** 周回の進み具合 [周]。累積回頭 ÷ 360°。位置ではなく回頭で数えている */
   lap_progress: number
   /** 走り切った周回数 */

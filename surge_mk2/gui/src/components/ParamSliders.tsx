@@ -24,6 +24,27 @@ function byGroup(params: AutoParamSpec[]): [string, AutoParamSpec[]][] {
   return [...out.entries()]
 }
 
+/**
+ * `show_if`（`ParamSpec.show_if`）を満たすか。条件のキーが宣言に無い（隠し項目など）ときは、
+ * そのキーの既定値で判定する。値は浮動小数なので刻みの半分の幅で比べる
+ */
+export function shown(
+  p: AutoParamSpec,
+  params: AutoParamSpec[],
+  values: Record<string, number>,
+): boolean {
+  const cond = p.show_if
+  if (!cond) return true
+  for (const [key, allowed] of Object.entries(cond)) {
+    const spec = params.find((q) => q.key === key)
+    const v = values[key] ?? spec?.default
+    if (v === undefined) continue
+    const tol = (spec?.step ?? 1) / 2
+    if (!allowed.some((a) => Math.abs(a - v) < tol)) return false
+  }
+  return true
+}
+
 export function ParamSliders({
   params,
   values,
@@ -38,7 +59,8 @@ export function ParamSliders({
    * （`SysIdView.tsx`が試験実行中に渡す）。省略時は従来通り常に操作可 */
   disabled?: boolean
 }) {
-  const groups = byGroup(params)
+  // 条件（`show_if`）を満たさない項目は出さない。組が空になれば見出しごと消える
+  const groups = byGroup(params.filter((p) => shown(p, params, values)))
   if (groups.length > 1 || (groups.length === 1 && groups[0]?.[0])) {
     return (
       <div className="auto-param-groups">
@@ -51,7 +73,14 @@ export function ParamSliders({
       </div>
     )
   }
-  return <ParamGrid params={params} values={values} onChange={onChange} disabled={disabled} />
+  return (
+    <ParamGrid
+      params={params.filter((p) => shown(p, params, values))}
+      values={values}
+      onChange={onChange}
+      disabled={disabled}
+    />
+  )
 }
 
 function ParamGrid({
@@ -69,6 +98,42 @@ function ParamGrid({
     <div className="auto-param-grid">
       {params.map((p) => {
         const v = values[p.key] ?? p.default
+        if (p.kind === 'bool') {
+          return (
+            <label key={p.key} className="auto-param auto-param-bool" title={p.note}>
+              <input
+                type="checkbox"
+                checked={v >= 0.5}
+                disabled={disabled}
+                onChange={(e) => onChange(p.key, e.target.checked ? p.max : p.min)}
+              />
+              <span>{p.label}</span>
+            </label>
+          )
+        }
+        if (p.kind === 'choice' && p.choices && p.choices.length > 0) {
+          return (
+            <div key={p.key} className="auto-param" title={p.note}>
+              <span className="auto-param-head">{p.label}</span>
+              <div className="auto-param-choice">
+                {p.choices.map((name, i) => {
+                  const val = p.min + i * p.step
+                  return (
+                    <button
+                      key={name}
+                      type="button"
+                      className={Math.abs(v - val) < p.step / 2 ? 'active' : ''}
+                      disabled={disabled}
+                      onClick={() => onChange(p.key, val)}
+                    >
+                      {name}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )
+        }
         return (
           <label key={p.key} className="auto-param" title={p.note}>
             <span className="auto-param-head">

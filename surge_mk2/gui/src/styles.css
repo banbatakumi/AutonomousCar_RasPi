@@ -1177,6 +1177,37 @@ a {
   accent-color: var(--brand);
 }
 
+/* 0/1 の切り替え（`ParamSpec.kind = "bool"`） */
+.auto-param-bool {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.auto-param-bool input {
+  accent-color: var(--brand);
+}
+
+/* 名前の付いた選択肢（`ParamSpec.kind = "choice"`） */
+.auto-param-choice {
+  display: flex;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.auto-param-choice button {
+  flex: 1;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.auto-param-choice button.active {
+  background: var(--brand);
+  color: #fff;
+}
+
 /* ── 車体図（`AutoPanel` の右隣、右下）────────────────────────────
  *
  * `components/rc/DrivePanel.tsx` をラジコンビューと共用（2026-08-28、指示による）。

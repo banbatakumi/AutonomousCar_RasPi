@@ -38,6 +38,9 @@ __all__ = ["CMD_HZ", "ParamSpec", "Planner", "ScanWindow", "StandstillSteer", "b
 #: telemetry_node が STM32 への COMMAND をこの周期で中継する（ファームの `drive.h` の
 #: DRIVE_HOST_COMMAND_PERIOD_S もこの逆数）。planner は指令の遅れの見積もりに使う
 CMD_HZ = 50
+#: 走行中に解除された後、planner が経路に沿って止める指令（release stop）の `DriveCmd.source` の末尾。
+#: planning_node が付け、telemetry_node の解除の受け渡しがこれを見て舵と減速度を借りる
+RELEASE_STOP_TAG = ":release_stop"
 
 #: 受信できた点のうち「距離が分かった」（実測または飽和）点の割合の下限。視野全体と、
 #: 正面 ±`BLIND_FRONT_DEG` の扇のそれぞれで見る（`blind_reason`）。**パラメータにしていない**
@@ -69,6 +72,28 @@ class ParamSpec(msgspec.Struct):
     #: 人が決める必要のない値（同定値や走行中の学習から決まるはずの値・一度決めたら触らない値）を、
     #: コードから消す前の段階として定数にしておくための印。`sim.bench --set` だけは上書きできる
     hidden: bool = False
+    #: GUI の部品。`""` = スライダ、`"bool"` = チェックボックス（0/1）、`"choice"` = ボタンの並び
+    #: （値は `min` から `step` 刻み、`choices` がその順の名前）。**値はどれも float のまま**
+    #: （保存済みの設定・`auto/ctrl.params`・`merged()` は今までと同じ）
+    kind: str = ""
+    choices: tuple[str, ...] = ()
+    #: これが満たされている間だけ GUI に出す: `{キー: 出す値の並び}`（全部満たしたとき）。
+    #: 例: `{"obstacle_avoid": (1.0,)}` = 障害物の回避が ON のときだけ。**値の効き方は変えない**
+    #: （隠れている間も `merged()` は保存値を返す。使うかどうかは planner が決める）
+    show_if: dict[str, tuple[float, ...]] = msgspec.field(default_factory=dict)
+
+
+def bool_param(**kw) -> ParamSpec:
+    """0/1 の切り替え（チェックボックス）。`min`・`max`・`step` は決まっているので渡さない。"""
+    kw.setdefault("unit", "")
+    return ParamSpec(min=0.0, max=1.0, step=1.0, kind="bool", **kw)
+
+
+def choice_param(*, choices: tuple[str, ...], **kw) -> ParamSpec:
+    """名前の付いた選択肢（ボタンの並び）。値は 0, 1, 2…（`choices` の順）。"""
+    kw.setdefault("unit", "")
+    return ParamSpec(min=0.0, max=float(len(choices) - 1), step=1.0, kind="choice",
+                     choices=tuple(choices), **kw)
 
 
 class Planner:
