@@ -434,6 +434,11 @@ class Bench:
         from raspi.core.vehicle import Vehicle
         _veh = Vehicle.load()
         self._body = body_ranges(_veh.footprint, _veh.lidar_x, _veh.lidar_y)
+        # 点群のノイズの除去も planning_node と同じ（`raspi/nav/scan_filter.py`）
+        from raspi.nav.scan_filter import ScanFilter, config_from_items
+        self._scan_filter = ScanFilter(config_from_items(_veh.lidar_filter),
+                                       lidar_x=_veh.lidar_x, lidar_y=_veh.lidar_y)
+        self.scan_dropped = 0
         if self.planner is None:
             raise SystemExit(f"知らないモード: {mode!r}（候補 {', '.join(PLANNERS)}）")
         if model:
@@ -724,6 +729,8 @@ class Bench:
                 dt = (now - last_plan_ns) / NS if last_plan_ns else 0.0
                 last_plan_ns = now
                 scan = mask_body(scan, self._body)
+                scan = self._scan_filter.apply(scan, self.vs)
+                self.scan_dropped += self._scan_filter.dropped
                 t_plan = time.perf_counter()
                 st = self.planner.plan(scan, self.vs, self.params, dt)
                 if self.plan_slowdown > 1.0:

@@ -140,7 +140,7 @@ STM32 側は速度が必要なら 256エントリのテーブル駆動版に置�
 | `0x02` | `TELEMETRY` | STM32 → Pi | 100 Hz（値の古さは平均5ms） | **102** |
 | `0x03` | `CONFIG_ACK` | STM32 → Pi | イベント | 7 |
 | `0x04` | `LOG` | STM32 → Pi | 低優先 | 可変 (1-128) |
-| `0x05` | `LIDAR_SECTOR_I` | STM32 → Pi | 120 Hz（強度付き・既定OFF） | 99 |
+| `0x05` | `LIDAR_SECTOR_I` | STM32 → Pi | 120 Hz（強度付き。STM32 の既定は OFF、Pi が `[sensors.lidar] intensity = true` で起動時・STM32 の再起動時に `param 0x0040 = 1` を送る） | 99 |
 | `0x06` | `PONG` | STM32 → Pi | `PING` への即応答 | 12 |
 | `0x07` | `VERSION` | STM32 → Pi | 起動時×3 / 要求時 | **10** |
 | `0x08` | `STATS` | STM32 → Pi | 1 Hz | **48** |

@@ -22,7 +22,7 @@ import numpy as np
 
 from ..msgs.types import Scan
 
-__all__ = ["BODY_MARGIN_M", "body_ranges", "mask_body"]
+__all__ = ["BODY_MARGIN_M", "OBSTACLE_BODY_EXTRA_M", "body_ranges", "mask_body", "near_body"]
 
 #: 外形からこれだけ外までは車体の点とみなす [m]。LD06 の測距誤差（近距離で σ≈1cm）の 2σ。
 #: 外形の数 cm 外に本物の物があっても、そこはもう止まれない距離なので捨てても失うものは無い
@@ -81,6 +81,25 @@ def mask_body(scan: Scan, ranges: np.ndarray) -> Scan:
     if inten is not None and len(inten) == d.size:
         inten = [0 if k else int(v) for v, k in zip(inten, drop)]
     return msgspec.structs.replace(scan, dist=d.tolist(), saturated=sat, intensity=inten)
+
+
+#: 障害物の判定（`near_body`）だけで、車体の外形（＋`BODY_MARGIN_M`）からさらにこれだけ外までの点を使わない [m]。
+#: ★2026-11-08 の試走で、ヘアピンなどのコーナーごとに、車の基準点から 0.11〜0.25m（車体の側面の数 cm 外）に
+#: LiDAR から 0.12〜0.22m の点が 2〜5 点まとまって出て障害物になり、「障害物を避ける」を入れると毎回そこで止まった
+#: （近い物は 2 周期の確認を待たずに扱うため）。前の周にも続けて出るので、点群のノイズの除去では消えない。
+#: そこに本物の物があっても、もう避けることも止まることもできない距離なので、障害物として扱っても得るものが無い。
+#: SLAM の位置合わせには残す（頂点で壁に寄った所の点を失わない）
+OBSTACLE_BODY_EXTRA_M = 0.10
+
+
+def near_body(x: np.ndarray, y: np.ndarray, ranges: np.ndarray, mount_x: float, mount_y: float,
+              extra: float = OBSTACLE_BODY_EXTRA_M) -> np.ndarray:
+    """base_link 座標の点 `(x, y)` のうち、LiDAR から見てその向きの車体の外形（`ranges`）＋`extra` より近いもの。"""
+    dx = np.asarray(x, dtype=np.float64) - mount_x
+    dy = np.asarray(y, dtype=np.float64) - mount_y
+    r = np.hypot(dx, dy)
+    deg = np.round(np.degrees(np.arctan2(dy, dx))).astype(np.int64) % 360
+    return r < ranges[deg] + extra
 
 
 def _inside(poly: list[tuple[float, float]], x: float, y: float) -> bool:

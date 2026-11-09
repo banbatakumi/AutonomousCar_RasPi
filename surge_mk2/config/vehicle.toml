@@ -286,6 +286,18 @@ yaw = 0.0
 # その反転は `raspi/msgs/convert.py` の ScanAssembler が行う（ここでは表現しない）。
 # **この `mirrored` はどのコードも読まない（記録用の欄）。** 反転は ScanAssembler に固定で入っている
 mirrored = true
+# LD06 の強度（信頼度 0〜255）も送らせる（io_node が CONFIG_SET の LIDAR_FORMAT = 1 を送る。UART は約 23kB/s）。
+# 点群のノイズの除去（下の filter）と、記録で日光のノイズを切り分けるのに使う
+intensity = true
+
+# 点群のノイズの除去（`raspi/nav/scan_filter.py`。全モード共通、planning_node が車体マスクの後に掛ける）。
+# 「孤立 かつ 前の周に無い」点と、「強度が低い かつ（孤立 または 前の周に無い）」点を捨てる。強度の下限は自動
+[sensors.lidar.filter]
+enabled = true
+speckle_m = 0.15
+persist_m = 0.08
+# 手で決める強度の下限（0 = 自動だけ）
+intensity_min = 0
 
 [sensors.cam_front]
 # ★付いているレンズ。下の `[sensors.cam_front.lenses.<名前>]` から選ぶ。

@@ -126,6 +126,10 @@ class Vehicle:
     lidar_x: float = 0.0
     lidar_y: float = 0.0
     lidar_yaw: float = 0.0                 #: [rad]
+    #: LD06 の強度（信頼度）も送らせるか（`[sensors.lidar] intensity`。io_node が CONFIG_SET の `LIDAR_FORMAT` = 1 を送る）
+    lidar_intensity: bool = False
+    #: 点群のノイズの除去の設定（`[sensors.lidar.filter]`、`raspi/nav/scan_filter.py` の `ScanFilterConfig` のキー）
+    lidar_filter: tuple[tuple[str, float], ...] = ()
     #: カメラの下端カット率（ボンネット等の映り込み除去。`camera_node.py` の ISP
     #: ScalerCrop が実際の読み出しに反映する）。GUI の進路ガイドの主点補正にも使う
     cam_front_bottom_crop: float = 0.0
@@ -348,6 +352,8 @@ class Vehicle:
             lidar_x=float(lidar.get("x", 0.0)),
             lidar_y=float(lidar.get("y", 0.0)),
             lidar_yaw=float(lidar.get("yaw", 0.0)),
+            lidar_intensity=bool(lidar.get("intensity", False)),
+            lidar_filter=tuple((str(k), v) for k, v in (lidar.get("filter", {}) or {}).items()),
             cam_front_bottom_crop=float(cam_front.get("bottom_crop", 0.0)),
             cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
             cam_front_lens=cam_front["lens"],

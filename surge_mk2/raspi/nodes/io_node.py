@@ -331,6 +331,10 @@ class IoNode:
         #: 直近に受けた GUI の設定（`ui/event`。`ConfigSet` の param_id → 値）。STM32 は Flash に
         #: 持たず再起動で既定へ戻るので、再起動を検出したら送り直す（`_on_time_reset`）
         self._ui_settings: dict[int, float] = {}
+        if Vehicle.load().lidar_intensity:
+            # LD06 の強度も送らせる（`[sensors.lidar] intensity`）。STM32 は Flash に持たないので、GUI の設定と
+            # 同じく再起動のたびに送り直す（`_resend_ui_settings`）
+            self._ui_settings[packets.Param.LIDAR_FORMAT] = 1.0
         #: 自発の VERSION（STM32 の起動バースト）と `VERSION_REQ` の応答を見分ける。最後に
         #: `VERSION_REQ` を送った時刻と、直近に再起動として処理した時刻
         self._version_req_ns = 0
@@ -1419,6 +1423,7 @@ def main() -> int:
         # 機能の ON/OFF・自動停止のマージンは GUI の操作を待たずに一度聞いておく（STM32 は Flash に
         # 持たないので、GUI を触る前でも STM32 の実際の状態を出せるように）
         node._requery_config()
+        node._resend_ui_settings()          # 起動時に決めた設定（LiDAR の強度付きの形式）
 
     # ★v0.11: 車両の物理的な上限値。RC/AUTO 問わず _send_command が毎回これで
     # クランプする。受信済みなら無条件にこちらを使う（--max-speed/
