@@ -1345,3 +1345,23 @@ class TestUnknownCells(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReleaseStopDecel(unittest.TestCase):
+    """走行中に解除されたとき、経路に沿って止める減速度（`planning_node._begin_release` が聞く）。"""
+
+    def test_only_while_racing_on_a_path(self):
+        from raspi.auto.slam2d_raceline import RACE, RELEASE_DECEL_USE, Slam2dRaceLine, limits
+        pl = Slam2dRaceLine()
+        try:
+            p = {s.key: s.default for s in pl.params}
+            self.assertIsNone(pl.release_stop_decel(p))           # 地図作成中・経路なし
+            th = np.linspace(0, 2 * np.pi, 100, endpoint=False)
+            pl.path = rl_mod.RaceLine(xy=3.0 * np.column_stack([np.cos(th), np.sin(th)]), v=np.full(100, 2.0),
+                                      kappa=np.full(100, 1 / 3), length=2 * np.pi * 3.0)
+            pl.phase = RACE
+            self.assertAlmostEqual(pl.release_stop_decel(p), RELEASE_DECEL_USE * limits(p, pl.vehicle).a_brake)
+            # 学習しないときの減速の上限を手で下げれば、止める減速度も下がる
+            self.assertAlmostEqual(pl.release_stop_decel({**p, "brake_max": 2.0}), RELEASE_DECEL_USE * 2.0)
+        finally:
+            pl.close()

@@ -287,9 +287,21 @@ def _locate(auto: list[dict], min_score: float, t0) -> dict[str, Any]:
         low += int(cur and not prev)
         prev = cur
     arr = np.array([s for _, s in sc])
-    return {"score_min": float(arr.min()), "score_mean": float(arr.mean()),
-            "low_fraction": float((arr < min_score).mean()), "lost_count": low,
-            "min_score": min_score}
+    out = {"score_min": float(arr.min()), "score_mean": float(arr.mean()),
+           "low_fraction": float((arr < min_score).mean()), "lost_count": low,
+           "min_score": min_score}
+    race = [d for d in auto if d.get("phase") == "RACE"]
+    # 2026-11-09 から: 壁に乗った点の数（遮られ具合）・点群のノイズの除去が捨てた点・強度の自動の下限。古い記録には無い
+    hits = [d["match_hits"] for d in race if d.get("match_hits")]
+    if hits:
+        out["hits_min"], out["hits_p5"] = int(min(hits)), float(np.percentile(hits, 5))
+    drop = [d["scan_dropped"] for d in race if d.get("scan_dropped") is not None]
+    if drop and any(drop):
+        out["dropped_mean"], out["dropped_max"] = float(np.mean(drop)), int(max(drop))
+    thr = [d["lidar_intensity_min"] for d in race if d.get("lidar_intensity_min")]
+    if thr:
+        out["intensity_min"] = float(thr[-1])
+    return out
 
 
 def _learning(auto: list[dict]) -> dict[str, Any]:
@@ -541,6 +553,12 @@ def render_markdown(s: dict, cmp: dict | None = None) -> str:
     if lo:
         L.append(f"- 自己位置（RACE）: 一致度 最小 {lo['score_min']:.2f}・平均 {lo['score_mean']:.2f}・"
                  f"見失い {lo['lost_count']}回（しきい値 {lo['min_score']}）")
+        if "hits_min" in lo:
+            L.append(f"- 壁に乗った点（遮られ具合）: 最小 {lo['hits_min']}・5% 点 {lo['hits_p5']:.0f}")
+        if "dropped_mean" in lo or "intensity_min" in lo:
+            L.append("- 点群のノイズの除去: "
+                     + (f"捨てた点 平均 {lo['dropped_mean']:.1f}・最大 {lo['dropped_max']}/周" if "dropped_mean" in lo else "")
+                     + (f"・強度の自動の下限 {lo['intensity_min']:.0f}" if "intensity_min" in lo else ""))
     if lr:
         f_, l_ = lr["first"], lr["last"]
         L.append(f"- 学習（開始 → 終了）: 横 {_f(f_['lat'])} → {_f(l_['lat'])}・"

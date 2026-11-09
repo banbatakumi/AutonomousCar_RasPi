@@ -33,7 +33,7 @@ from .raceline import RaceLine, curvature
 
 __all__ = ["AvoidConfig", "AvoidPlan", "plan_offset", "plan_elastic", "cap_speed", "speed_cap",
            "forward_order",
-           "clearance_along", "clearance_to_points", "blend_in"]
+           "clearance_along", "clearance_to_points", "blend_in", "join_in"]
 
 #: 動く障害物の通り道を見込む時間の上限 [s]
 _SWEEP_MAX_S = 3.0
@@ -468,6 +468,58 @@ def blend_in(path: RaceLine, index: int, d0: float, length: float, body=None) ->
     rl = RaceLine(xy=xy, v=path.v.copy(), kappa=curvature(xy, path.closed),
                   length=path.length, closed=path.closed)
     return AvoidPlan(rl, idx, d0, None, clr)
+
+
+def join_in(path: RaceLine, index: int, d0: float, slope0: float, length: float, body=None) -> AvoidPlan:
+    """経路から横に `d0` [m]、向きが傾き `slope0`（= tan(車の向き − 経路の接線)）だけずれた車が、
+    `length` [m] で経路へ合流する一時経路（横ずれ d(s) は 5 次のエルミート曲線）。
+
+    d(0) = d0・d'(0) = slope0・d''(0) = 0、d(L) = d'(L) = d''(L) = 0。始点で車の位置と向きに一致し、
+    終点で経路の位置・向き・曲率につながる。`blend_in`（向きは経路と同じとみなす）の一般化で、
+    走り出し・経路から外れた所から**周回と同じ速度の計画で**乗りに行くために使う（`Slam2dRaceLine._join_back`）。
+    """
+    order, s_fwd = forward_order(path, index)
+    win = s_fwd <= length
+    idx = order[win]
+    t = s_fwd[win] / length
+    t2, t3 = t * t, t * t * t
+    h0 = 1.0 - 10.0 * t3 + 15.0 * t3 * t - 6.0 * t3 * t2
+    h1 = t - 6.0 * t3 + 8.0 * t3 * t - 3.0 * t3 * t2
+    d = d0 * h0 + slope0 * length * h1
+    nrm = normals(path.xy) if path.closed else normals_open(path.xy)
+    xy = path.xy.copy()
+    xy[idx] += nrm[idx] * d[:, None]
+    # 始点より後ろも、車の向きの直線（d = d0 − slope0·s）で `_JOIN_BACK_M` だけ延ばす。ずらさないと始点の直前で
+    # 折れ目ができ、始点の曲率が数 1/m に跳ねる（追従の曲率のフィードフォワード・曲率の判定がそれを拾う）
+    back = _back_order(path, index, _JOIN_BACK_M)
+    if back[0].size:
+        xy[back[0]] += nrm[back[0]] * (d0 - slope0 * back[1])[:, None]
+    clr = float(body.clearance(xy[idx]).min()) if body is not None and len(idx) >= 2 else math.inf
+    rl = RaceLine(xy=xy, v=path.v.copy(), kappa=curvature(xy, path.closed),
+                  length=path.length, closed=path.closed)
+    return AvoidPlan(rl, idx, d0, None, clr)
+
+
+#: `join_in` が始点より後ろを車の向きの直線で延ばす長さ [m]
+_JOIN_BACK_M = 0.6
+
+
+def _back_order(path: RaceLine, index: int, length: float) -> tuple[np.ndarray, np.ndarray]:
+    """`index` の直前から後ろへ `length` [m] までの添字と、そこまでの（後ろ向きの）弧長 [m]。"""
+    n = len(path)
+    out, dist = [], []
+    s, i = 0.0, index
+    for _ in range(n // 2):
+        j = (i - 1) % n if path.closed else i - 1
+        if j < 0:
+            break
+        s += float(np.hypot(*(path.xy[i] - path.xy[j])))
+        if s > length:
+            break
+        out.append(j)
+        dist.append(s)
+        i = j
+    return np.array(out, dtype=np.int64), np.array(dist)
 
 
 def cap_speed(path: RaceLine, window: np.ndarray, v_cap: float, a_brake: float,

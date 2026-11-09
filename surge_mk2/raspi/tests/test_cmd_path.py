@@ -1065,6 +1065,65 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((m.mode, m.arm), (0, False))
         self.assertNotEqual(m.source, "handover")
 
+    def _auto(self, srv, **kw):
+        a = DriveCmd(mode=2, arm=True, **kw)
+        a.t_pub = time.monotonic_ns()
+        srv.sub.latest["auto/cmd"] = a
+
+    async def test_disengage_borrows_the_release_stop_steer(self):
+        """★ planner が解除の後も経路に沿って舵を取っていれば（release stop）、その舵と減速度で止める。
+        舵を固定した最大制動は後輪だけでスピンした（2026-11-08 の試走、5 本中 3 本）。"""
+        from raspi.auto.base import RELEASE_STOP_TAG
+        srv = self._server()
+        self._riding_auto(srv, speed=3.8, steer=0.05)
+        self._auto(srv, target_speed=3.9, target_steer=0.05, source="planning:slam2d_route")
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        srv._auto_engaged = False
+        # 解除が planning_node に届くまでの間: 普通の自律の指令の舵で、つなぎの減速度
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True)
+        m = srv.published[-1][1]
+        self.assertEqual(m.source, "handover:path")
+        self.assertFalse(m.brake)
+        self.assertEqual(m.target_speed, 0.0)
+        self.assertAlmostEqual(m.target_steer, 0.05)
+        self.assertAlmostEqual(m.accel_limit, 2.0)
+        # release stop が届いた: その舵と減速度
+        self._auto(srv, target_speed=0.0, target_steer=-0.08, accel_limit=2.4,
+                   source=f"planning:slam2d_route{RELEASE_STOP_TAG}")
+        srv._publish_cmd(time.monotonic_ns())
+        m = srv.published[-1][1]
+        self.assertEqual(m.source, "handover:path")
+        self.assertAlmostEqual(m.target_steer, -0.08)
+        self.assertAlmostEqual(m.accel_limit, 2.4)
+        self.assertFalse(m.brake)
+        # planner が止まれと言えば制動
+        self._auto(srv, target_speed=0.0, target_steer=-0.08, accel_limit=2.4, brake=True,
+                   source=f"planning:slam2d_route{RELEASE_STOP_TAG}")
+        srv._publish_cmd(time.monotonic_ns())
+        self.assertTrue(srv.published[-1][1].brake)
+        # 指令が古くなったら、最後に借りた舵で最大制動（従来）
+        srv.sub.latest["auto/cmd"].t_pub = time.monotonic_ns() - 10**9
+        srv._publish_cmd(time.monotonic_ns())
+        m = srv.published[-1][1]
+        self.assertEqual(m.source, "handover")
+        self.assertTrue(m.brake)
+        self.assertAlmostEqual(m.target_steer, -0.08)
+
+    async def test_bridge_ends_without_release_stop(self):
+        """planner が release stop を出さない（対応していない）なら、つなぎの後は従来の最大制動。"""
+        srv = self._server()
+        self._riding_auto(srv)
+        self._auto(srv, target_speed=2.8, target_steer=0.2, source="planning:ftg")
+        await self._send(srv, srv.ws, type="cmd", mode=2, arm=True)
+        srv._auto_engaged = False
+        await self._send(srv, srv.ws, type="cmd", mode=1, arm=True)
+        self.assertEqual(srv.published[-1][1].source, "handover:path")
+        srv._handover_t0 -= 300_000_000
+        srv._publish_cmd(time.monotonic_ns())
+        m = srv.published[-1][1]
+        self.assertEqual(m.source, "handover")
+        self.assertTrue(m.brake)
+
 
 class TestImmediateCommand(unittest.TestCase):
     """io_node は `cmd` の中身が変わったらその場で COMMAND を送る（2026-09-26）。"""

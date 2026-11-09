@@ -876,6 +876,7 @@ class Slam2dRoute(Slam2dRaceLine):
             self._lap_gate = None              # 走り出しの経路の先頭を周回のゲートにする
             self._lap_frac = -1.0
             self._joined = False
+            self._join_tried = self._join_ok = False
             self._race_t = 0.0
             self.laps = 0
 
@@ -905,6 +906,10 @@ class Slam2dRoute(Slam2dRaceLine):
         path = self._grip_timed(path, p)
         self.path = path
         self._race_t += self._dt
+        if not self._joined and not self._join_tried and self._avoid is None:
+            # 走り出し・乗り直し: 今の位置と向きから経路へ合流する一時経路（`_join_back`）
+            self._join_tried = True
+            self._join_ok = self._join_back(path, p)
 
         pp, hit, dist = self._track(st, scan, vs, p, path, pose)
 

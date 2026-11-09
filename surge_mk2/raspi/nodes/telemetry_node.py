@@ -88,7 +88,8 @@ io_node 側の途絶判定は純粋に「telemetry_node が死んだか」だけ
 - GUI の E-Stop のあとは、操縦者が ARM を入れ直す（`arm=False` を一度送る）まで ARM を通さない
 - `auto/cmd` が 200ms 途絶したら、engage したままでも**制動**に読み替える
 - 走行中に engage が落ちたら（理由を問わない）、止まるか人がアクセルを入れるまで**制動**し、
-  舵は自律の最後の値を保つ（`_handover`。人の無操作の指令＝舵0・惰行へいきなり替えない）
+  舵は自律の最後の値を保つ（`_handover`。人の無操作の指令＝舵0・惰行へいきなり替えない）。
+  planner が解除の後も経路に沿って舵を取っていれば（release stop、slam2d 系の RACE）、その舵と減速度で止める
 
 差し替えるのは `target_speed` / `target_steer` / `brake` だけ。灯火・ホーン・
 `auto_stop`・`brake_torque`・レートリミットは**GUI が送ってきた値のまま**通す。
@@ -151,7 +152,7 @@ from websockets.datastructures import Headers  # noqa: E402
 from websockets.http11 import Response  # noqa: E402
 
 from raspi.auto import mapstore  # noqa: E402
-from raspi.auto.base import CMD_HZ  # noqa: E402
+from raspi.auto.base import CMD_HZ, RELEASE_STOP_TAG  # noqa: E402
 from raspi.auto.registry import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
 from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
 from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
@@ -363,6 +364,11 @@ AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
 #: 解除の受け渡し（`_handover`）で「止まった」とみなす車速 [m/s]。これより速く走っている間に
 #: 解除されたら、人がアクセルを入れるまで最大制動で止める
 HANDOVER_STILL_M_S = 0.1
+#: 受け渡しで planner の舵を借りて止めるときの減速度の下限 [m/s²]（`_handover_cmd`）
+HANDOVER_DECEL_MIN_M_S2 = 1.0
+#: 解除が planning_node に届いて release stop の指令が来るまでのつなぎの減速度 [m/s²]と、つなぐ最長 [ns]
+HANDOVER_DECEL_M_S2 = 2.0
+HANDOVER_BRIDGE_NS = 200_000_000
 #: 受け渡し中に「人が舵を切った」とみなす舵の指令 [rad]（GUI は無操作で 0 を送る）
 HANDOVER_STEER_INPUT_RAD = 0.01
 #: バスを覗きに行く間隔（`auto/cmd` の到着で起きられない構成＝テストの偽物の `sub` だけ）。
@@ -590,6 +596,8 @@ class TelemetryServer:
     #: 解除の受け渡しで止めている間の舵（自律が最後に出した値）。止めていなければ None
     #: （`_handover`）
     _handover_steer: float | None = None
+    #: 受け渡しを始めた時刻（`time.monotonic_ns()`）。release stop が届くまでのつなぎ（`_handover_cmd`）に使う
+    _handover_t0 = 0
     #: 解除の受け渡しで止めた回数
     handover_stops = 0
 
@@ -3244,11 +3252,7 @@ class TelemetryServer:
             if cmd.mode == 2 and self._auto_engaged and self._auto_mode:
                 cmd = self._merge_auto(cmd, now)
             elif self._handover(cmd):
-                cmd = msgspec.structs.replace(
-                    cmd, brake=True, brake_torque=0.0, target_speed=0.0,
-                    target_steer=(cmd.target_steer if abs(cmd.target_steer) >= HANDOVER_STEER_INPUT_RAD
-                                  else self._handover_steer),
-                    torque_mode=False, target_torque=0.0, launch=False, source="handover")
+                cmd = self._handover_cmd(cmd, now)
             else:
                 # **`_last_cmd` そのものを送らない**。`pub.send` は渡した msg に
                 # `seq`/`t_pub` を押すので、`_on_control` の「前回と同じ中身か」の比較が
@@ -3268,7 +3272,7 @@ class TelemetryServer:
             cmd = DriveCmd(mode=0, source="deadman")
         self._cmd_was_live = live
         self._relayed_auto = cmd.source.startswith("auto:")
-        if cmd.source != "handover" and self._handover_steer is not None:
+        if not cmd.source.startswith("handover") and self._handover_steer is not None:
             self._handover_steer = None
             self._status_soon()
         self.pub.send(TOPIC_CMD, cmd)
@@ -3284,7 +3288,8 @@ class TelemetryServer:
         2.15m/s で当たった。
 
         そこで、**自律の指令を送っていた直後に自律でなくなり、車が走っていたら**（解除の理由は問わない:
-        GUI の解除・モードの変更・操縦権の解放・E-Stop の後始末）、次のどれかまで最大制動で止める:
+        GUI の解除・モードの変更・操縦権の解放・E-Stop の後始末）、次のどれかまで止める（止め方は
+        `_handover_cmd`: planner が経路に沿って止めていればその舵と減速度、無ければ最大制動）:
 
         - 車が止まった（`HANDOVER_STILL_M_S` 未満）
         - 人がアクセルを入れた（速度・トルクの指令が 0 でない）= 人が運転を引き取った
@@ -3305,9 +3310,47 @@ class TelemetryServer:
             if not self._relayed_auto:
                 return False
             self._handover_steer = float(getattr(self, "_auto_last_steer", 0.0))
+            self._handover_t0 = time.monotonic_ns()
             self.handover_stops += 1
             self._status_soon()
         return True
+
+    def _handover_cmd(self, gui: DriveCmd, now: int) -> DriveCmd:
+        """解除の受け渡し中（`_handover`）に送る、止める指令。
+
+        planning_node が解除の後も経路に沿って舵を取っている（release stop、`planning_node._release_cmd`）
+        なら、**その舵と減速度を借りて**、目標車速 0 へ `accel_limit` で減速する（制動は planner が
+        止まれと言ったときだけ）。★舵を固定した最大制動は、後輪だけの制動で 3.8〜4.0m/s からスピンして
+        壁に当たった（2026-11-08 の試走、5 本中 3 本）。解除が planning_node に届くまでの数十 ms は、
+        まだ普通の自律の指令が来るので、その舵で `HANDOVER_DECEL_M_S2` の減速にする。
+        借りられる指令が無い（planner が対応していない・指令が古い）なら従来どおり、舵を最後の値で保って
+        最大制動。人が舵を切っていればその値を使う。
+        """
+        steer_in = abs(gui.target_steer) >= HANDOVER_STEER_INPUT_RAD
+        auto = self.sub.latest.get(TOPIC_AUTO_CMD)
+        usable = (auto is not None and auto.mode == 2 and auto.arm
+                  and (now - auto.t_pub) <= AUTO_CMD_STALE_NS
+                  and math.isfinite(auto.target_steer) and math.isfinite(auto.accel_limit))
+        if usable and auto.source.endswith(RELEASE_STOP_TAG):
+            decel = auto.accel_limit
+            brake = auto.brake
+        elif usable and auto.source.startswith("planning:") and self._handover_t0 > 0 \
+                and now - self._handover_t0 <= HANDOVER_BRIDGE_NS:
+            decel = HANDOVER_DECEL_M_S2
+            brake = False
+        else:
+            usable = False
+        if usable:
+            self._handover_steer = float(auto.target_steer)
+            return msgspec.structs.replace(
+                gui, brake=brake, brake_torque=0.0, target_speed=0.0,
+                accel_limit=min(max(decel, HANDOVER_DECEL_MIN_M_S2), _SAFETY.speed_ramp_max_m_s2),
+                target_steer=gui.target_steer if steer_in else self._handover_steer,
+                torque_mode=False, target_torque=0.0, launch=False, source="handover:path")
+        return msgspec.structs.replace(
+            gui, brake=True, brake_torque=0.0, target_speed=0.0,
+            target_steer=gui.target_steer if steer_in else self._handover_steer,
+            torque_mode=False, target_torque=0.0, launch=False, source="handover")
 
     def _merge_auto(self, gui: DriveCmd, now: int) -> DriveCmd:
         """GUI の `cmd` の**速度・舵・制動だけ**を `auto/cmd` で差し替える。

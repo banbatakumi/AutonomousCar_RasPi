@@ -784,7 +784,14 @@ class TestParamsAndModes(unittest.TestCase):
         self.assertIn("v_max", shown)
         self.assertIn("line_margin", shown)
         self.assertNotIn("look_k", shown)
-        self.assertLessEqual(len(shown), 22)
+        # 同時に出る数で数える（`show_if`: 学習 ON なら学習の設定、OFF なら手で決める上限だけが出る）
+        params = ids["slam2d_route"]["params"]
+        for learn in (0.0, 1.0):
+            vis = [q for q in params
+                   if all(learn in v for k, v in q["show_if"].items() if k == "grip_learn")]
+            self.assertLessEqual(len(vis), 22, learn)
+        manual = {q["key"] for q in params if q["show_if"] == {"grip_learn": [0.0]}}
+        self.assertEqual(manual, {"lat_max", "accel_max", "brake_max"})
         # 隠した項目は、保存済みの設定・GUI から来た値を読まない（bench だけ上書きできる）
         self.assertEqual(merged_params("slam2d_route", {"look_k": 1.5})["look_k"], 0.45)
         self.assertEqual(merged_params("slam2d_route", {"look_k": 1.5}, hidden=True)["look_k"], 1.5)

@@ -672,3 +672,84 @@ class TestPollTimeout(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeReleasePlanner:
+    """解除の後処理と release stop を記録する身代わり。"""
+
+    name = "fake"
+    input_topic = TOPIC_SCAN
+    category = "drive"
+
+    def __init__(self, decel=2.1):
+        self.decel = decel
+        self.disengaged = 0
+        self.engaged_calls = []
+
+    def on_disengage(self):
+        self.disengaged += 1
+
+    def reset(self):
+        pass
+
+    def set_engaged(self, e):
+        self.engaged_calls.append(e)
+
+    def release_stop_decel(self, p):
+        return self.decel
+
+
+class TestReleaseStop(unittest.TestCase):
+    """★ 走行中の解除: 後処理（地図の読み直し・再特定）を止まるまで遅らせ、その間は経路に沿って止める
+    （2026-11-08 の試走: 舵を固定した最大制動でスピン → 壁、解除した瞬間の姿勢を種にして再特定に十数秒）。"""
+
+    def _node(self, speed, decel=2.1):
+        from raspi.auto.base import RELEASE_STOP_TAG  # noqa: F401
+        sub = FakeSub({TOPIC_VEHICLE_STATE: VehicleState(speed=speed)})
+        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg", quiet=True)
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        node.planner = _FakeReleasePlanner(decel)
+        node.state = AutoState(ready=True, target_speed=3.5, target_steer=0.04)
+        return node, sub
+
+    def test_release_while_moving_steers_along_the_path_until_stopped(self):
+        from raspi.auto.base import RELEASE_STOP_TAG
+        node, sub = self._node(3.8)
+        node._apply_ctrl(AutoCtrl(mode="ftg"))                    # 解除
+        self.assertEqual(node.planner.disengaged, 0)              # まだ後処理しない
+        cmd = node._cmd_from(AutoState(ready=True, target_speed=3.5, target_steer=-0.06))
+        self.assertTrue(cmd.source.endswith(RELEASE_STOP_TAG))
+        self.assertEqual((cmd.mode, cmd.arm, cmd.brake, cmd.target_speed), (2, True, False, 0.0))
+        self.assertAlmostEqual(cmd.target_steer, -0.06)
+        self.assertAlmostEqual(cmd.accel_limit, 2.1)
+        # planner が分からなくなったら、最後の舵で制動
+        cmd = node._cmd_from(AutoState(ready=False))
+        self.assertTrue(cmd.brake)
+        self.assertAlmostEqual(cmd.target_steer, -0.06)
+        # 止まったら後処理して、普段の「見せるだけ」の指令に戻る
+        sub.latest[TOPIC_VEHICLE_STATE] = VehicleState(speed=0.05)
+        node._update_release(time.monotonic_ns())
+        self.assertEqual(node.planner.disengaged, 1)
+        self.assertEqual(node._cmd_from(AutoState(ready=True)).mode, 0)
+
+    def test_release_when_stopped_runs_disengage_at_once(self):
+        node, _ = self._node(0.0)
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        self.assertEqual(node.planner.disengaged, 1)
+
+    def test_planner_without_release_stop_only_defers(self):
+        node, sub = self._node(3.0, decel=None)
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        self.assertEqual(node.planner.disengaged, 0)
+        self.assertEqual(node._cmd_from(AutoState(ready=True)).mode, 0)   # 指令は出さない（受け渡しが止める）
+        node._release_t0_ns -= 10 * 10**9                                  # 待ちすぎ
+        node._update_release(time.monotonic_ns())
+        self.assertEqual(node.planner.disengaged, 1)
+
+    def test_re_engage_before_stopping_keeps_running(self):
+        node, _ = self._node(3.0)
+        node._apply_ctrl(AutoCtrl(mode="ftg"))
+        node._apply_ctrl(AutoCtrl(mode="ftg", engaged=True))
+        self.assertFalse(node._release_pending)
+        self.assertEqual(node.planner.disengaged, 0)

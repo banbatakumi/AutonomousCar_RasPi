@@ -37,6 +37,7 @@ from slam2d.core.types import Pose2D
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoMap, AutoState, Scan, VehicleState
 from ..nav import avoid as av_mod
+from ..nav.body_mask import body_ranges, near_body
 from ..nav import centerline as cl_mod
 from ..nav import grip as grip_mod
 from ..nav import obstacles as obs_mod
@@ -114,6 +115,14 @@ _BRAKE_HOLD_S = 0.3
 _REJOIN_WAIT_S = 0.3
 #: Hybrid A* で抜けた後、経路からの横ずれがこれ未満なら戻り経路を作らない [m]
 _BLEND_MIN = 0.03
+#: 経路へ合流する一時経路（`_join_back`）の長さの候補 [m]。曲率と壁の余裕を満たす中で、1 周の見積もり時間が
+#: いちばん短いものを採る（短いほど急に曲がって遅く、長いほど外れた所を長く走る）
+_JOIN_LENGTHS = (0.6, 0.9, 1.2, 1.6, 2.0, 2.6, 3.2, 4.0, 5.0)
+#: 合流の一時経路を作る向きのずれの上限 [rad]。これより大きくずれていたら作らない（`join_speed` で乗る・
+#: 外れすぎなら Hybrid A*）
+_JOIN_MAX_HEADING = math.radians(60.0)
+#: 合流の一時経路が壁に許す余裕の下限 [m]（今の車体の余裕がこれより小さければ、今の余裕 − 1cm まで許す）
+_JOIN_MIN_CLEAR = 0.03
 #: 引き直したラインへ乗り移ってよい、今の姿勢とのずれ（横 [m]・向き [rad]、`_try_adopt_line`）
 _ADOPT_DIST = 0.04
 _ADOPT_YAW = math.radians(6.0)
@@ -324,7 +333,7 @@ _GRIP_SAVE_S = 10.0
 _GRIP_SWITCH_QUIET_S = 1.5
 
 #: 速度プロファイルを決める設定（変わったら `_retime` で作り直す）
-SPEED_KEYS = ("v_max", "v_min")
+SPEED_KEYS = ("v_max", "v_min", "lat_max", "accel_max", "brake_max")
 #: 走行中に学習しない（`grip_learn` = 0）ときに、同定した限界の何割を使うか（横・加速・減速）。
 #: 学習しないと、同定値が路面を表していなくても気づけないので、余裕を残す。学習するときは
 #: 学習した値をそのまま使う（`nav/grip.py`）。以前の設定項目 `lat_use`・`accel_use`・`brake_use` の既定値
@@ -334,6 +343,9 @@ FIXED_BRAKE_USE = 0.9
 #: ラインの形を決める設定（変わったら引き直す）。ラインは見積もりのラップ時間を最小にするので、
 #: 速度の設定も形に効く
 LINE_KEYS = ("line_margin", "kappa_track") + SPEED_KEYS
+#: 走行中に解除されたとき、経路に沿って止める減速度 = 走りの減速の上限 × これ（`release_stop_decel`）。
+#: 学習した減速は周回中にコーナーの手前で使っている値なので、少し残して確実に経路に付いて行かせる
+RELEASE_DECEL_USE = 0.7
 #: 自動運転中に送る目標車速のランプ = 走りの上限（加速・減速の大きい方）× これ（`Slam2dRaceLine._ramp`）
 _RAMP_MARGIN = 1.1
 
@@ -435,11 +447,34 @@ def limits(p: dict[str, float], vehicle, learned: tuple[float, float, float] | N
     react = SCAN_PERIOD_S + cmd_latency(vehicle) + 0.5 * vehicle.speed_loop_tau_s
     if learned is not None:
         return Limits(a_lat=learned[0], a_accel=learned[1], a_brake=learned[2], react_s=react)
+    fixed = fixed_defaults(vehicle)
     return Limits(
-        a_lat=FIXED_LAT_USE * vehicle.a_lat_max,
-        a_accel=FIXED_ACCEL_USE * vehicle.a_accel_max(0.0),
-        a_brake=FIXED_BRAKE_USE * vehicle.a_decel_max,
+        a_lat=_manual(p, "lat_max", fixed[0], 0),
+        a_accel=_manual(p, "accel_max", fixed[1], 1),
+        a_brake=_manual(p, "brake_max", fixed[2], 2),
         react_s=react)
+
+
+def fixed_defaults(vehicle) -> tuple[float, float, float]:
+    """学習しないときの `(横, 加速, 減速)` の既定 [m/s²] = 同定値 × `FIXED_*_USE`（GUI の項目の既定値）。"""
+    return (FIXED_LAT_USE * vehicle.a_lat_max,
+            FIXED_ACCEL_USE * vehicle.a_accel_max(0.0),
+            FIXED_BRAKE_USE * vehicle.a_decel_max)
+
+
+def _manual(p: dict[str, float], key: str, fallback: float, i: int) -> float:
+    """手で決めた上限。無い・既定値のまま（GUI で動かしていない）なら、この車の同定値から出した `fallback`
+    （既定値は読み込んだ時点の `config/vehicle.toml` から作るので、シムやテストの別の車では同定値の方が正しい）。"""
+    v = p.get(key)
+    if v is None or v <= 0.0 or abs(float(v) - _FIXED_DEFAULTS[i]) < 1e-9:
+        return fallback
+    return float(v)
+
+
+def fixed_grip(p: dict[str, float], vehicle) -> float:
+    """学習しないときの摩擦円の半径 [m/s²]。同定値と、手で決めた横の上限を「限界の `FIXED_LAT_USE`」と
+    読んだ値の大きい方（横の上限を同定値より上げたのに、摩擦円が同定値のままだと前後に使える力が 0 になる）。"""
+    return max(vehicle.a_lat_max, limits(p, vehicle).a_lat / FIXED_LAT_USE)
 
 
 def cmd_latency(vehicle) -> float:
@@ -465,7 +500,7 @@ def speed_kwargs(p: dict[str, float], vehicle, grip=None) -> dict:
                 a_accel=lim.a_accel, a_brake=lim.a_brake,
                 # 摩擦円は余裕を掛けた値ではなく車の限界で引く（横を 9 割使っていても、頂点で
                 # 前後に使える力が 0 になるわけではない）
-                a_grip=vehicle.a_lat_max)
+                a_grip=fixed_grip(p, vehicle))
 
 
 def auto_ramp(vehicle, lim: Limits) -> float:
@@ -675,6 +710,11 @@ _LOCATE_POSE_TOL_M = 0.3
 _LOCATE_POSE_TOL_RAD = 0.35
 
 
+#: 手で決める限界（`lat_max`・`accel_max`・`brake_max`）の既定値。読み込んだ時点の `config/vehicle.toml` の同定値から
+#: 決める（GUI の既定値は宣言に要るので、クラスを作る前に 1 回だけ読む）
+_FIXED_DEFAULTS = fixed_defaults(Vehicle.load())
+
+
 class Slam2dRaceLine(Planner):
     id = "slam2d_raceline"
     #: GUI のモード選択には出さない（分岐のないコースも `slam2d_route` の自動経路で走れる。こちらは
@@ -723,7 +763,10 @@ class Slam2dRaceLine(Planner):
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ。"
                        "★上限は STM32 の速度上限（5m/s）に合わせてある。4m/s より上は実機で未検証"
                        "（2026-11-02 の記録で 4.06m/s まで。4m/s でも電流は指令どおり出ており、巡航のトルクは"
-                       "上限の約15%）。長い直線の無いコースでは上げても縮まない"),
+                       "上限の約15%）。長い直線の無いコースでは上げても縮まない。"
+                       "★約4.3m/s より上は、後輪 MD をトルクモードの過速度のしきい値 270 rad/s の版"
+                       "（BLDC/ProgramV4 の OVERSPEED_DIRECT_IQ_RAD_S）に書き換えてから。古い版は後輪の周速 5.4m/s"
+                       "（180 rad/s）が 50ms 続くと止まってラッチする（空転込みで後輪は車速の 1.25 倍前後まで回る）"),
         ParamSpec(group=GROUP_SPEED, key="v_min", label="最低速度", min=0.1, max=1.0, default=0.35,
                   step=0.05, unit="m/s", note="いちばんきついコーナーでもこれ以下にしない"),
         ParamSpec(group=GROUP_SPEED, key="speed_ff", hidden=True, label="速度指令の前倒し", min=0, max=1, step=1,
@@ -735,14 +778,14 @@ class Slam2dRaceLine(Planner):
                   default=1.0, step=0.1, unit="",
                   note="車速が経路の速度から外れたぶんを、この倍率で目標へ足し戻す（前倒しが 1 のとき）"),
 
-        ParamSpec(group=GROUP_SPEED, key="launch", label="ローンチコントロール", min=0, max=1, step=1,
+        ParamSpec(group=GROUP_SPEED, key="launch", kind="bool", label="ローンチコントロール", min=0, max=1, step=1,
                   default=0, unit="",
                   note="★1で、発進（止まってから経路の速度に届くまで）を STM32 のローンチコントロールで行う"
                        "（目標速度のランプと速度PIを迂回し、全開＋TCで経路の速度まで加速。PIの立ち上がり"
                        "ぶん約0.2秒早い）。経路に乗っていて、前が空いていて、舵がほぼ真っすぐのときだけ"
                        "要求する。既定は 0（速度PIで発進）——今は手動操作でだけ使う方針（2026-10-10）"),
 
-        ParamSpec(group=GROUP_STEER, key="ctrl_mode", label="追従方式(0=Pure Pursuit,1=MPC)", min=0, max=1,
+        ParamSpec(group=GROUP_STEER, key="ctrl_mode", kind="choice", choices=("Pure Pursuit", "MPC"), label="追従方式", min=0, max=1,
                   step=1, default=0, unit="",
                   note="★1で舵をMPC（経路座標の線形化自転車モデル＋舵レート制約、`nav/mpc.py`）で決める。"
                        "速度は経路のプロファイルのまま。既定は0（Pure Pursuit）。MPCは実機で検証済み"),
@@ -785,11 +828,11 @@ class Slam2dRaceLine(Planner):
                   max=1.0, default=0.1, step=0.05, unit="s",
                   note="『速度指令の前倒し』が 0 のときだけ効く。遅延補償の位置からこの時間ぶん先の"
                        "速度をそのまま指令する（旧方式）"),
-        ParamSpec(group=GROUP_SAFETY, key="join_speed", label="経路に乗るまでの速度", min=0.2, max=1.5,
+        ParamSpec(group=GROUP_SAFETY, key="join_speed", hidden=True, label="経路に乗るまでの速度", min=0.2, max=1.5,
                   default=0.5, step=0.05, unit="m/s",
-                  note="★走り出し（自己位置の復元直後）は経路から横・向きがずれている。"
-                       "乗る（横8cm・向き15°以内）まではこの速度に抑える。抑えないと最高速のまま"
-                       "大回りして壁に当たった（toyota/toyota2 の sim.bench で実測、2026-09-29）"),
+                  note="★合流の一時経路（`_join_back`）を作れなかったときだけ使う上限。普段は走り出し・乗り直しも"
+                       "合流の一時経路を周回と同じ速度の計画で走る（2026-11-09。以前はこの値で乗るまで抑えていた。"
+                       "追従だけで乗りに行くと最高速のまま大回りして壁に当たった、toyota/toyota2 の sim.bench 2026-09-29）"),
         ParamSpec(group=GROUP_SAFETY, key="min_score", hidden=True, label="自己位置の信頼下限", min=0.1, max=0.8,
                   default=0.35, step=0.01, unit="",
                   note="★スキャンマッチの一致度がこれを切ったら（見失いが推測航法での続行の"
@@ -811,7 +854,7 @@ class Slam2dRaceLine(Planner):
                   note="★壁からこの範囲に落ちた点は動的障害物と見なさない。**経路が壁にいちばん寄る所の"
                        "壁までの距離より大きければ、そこまで自動で詰める**（下限 0.15。経路の上の物が"
                        "見えなくなるため）。この外に1点でも落ちた塊は、10cm 壁寄りの点まで数える"),
-        ParamSpec(group=GROUP_AVOID, key="obstacle_avoid", label="障害物を避ける", min=0, max=1, step=1,
+        ParamSpec(group=GROUP_AVOID, key="obstacle_avoid", kind="bool", label="障害物を避ける", min=0, max=1, step=1,
                   default=0, unit="",
                   note="★1で、経路を塞ぐ障害物を横へ避ける（止まらずに済むなら止まらない）。"
                        "避けられなければ止まり、Hybrid A* で後退・切り返しも使って抜ける。"
@@ -875,7 +918,7 @@ class Slam2dRaceLine(Planner):
                   max=60.0, default=10.0, step=1.0, unit="s",
                   note="片輪の無応答がこれだけ続いたら、止まって戻るのを待つ（戻れば走り出す）"),
         # ── 横グリップの学習（`nav/grip.py`） ──
-        ParamSpec(group=GROUP_GRIP, key="grip_learn", label="路面の限界を走りながら決める", min=0, max=1,
+        ParamSpec(group=GROUP_GRIP, key="grip_learn", kind="bool", label="路面の限界を走りながら決める", min=0, max=1,
                   step=1, default=0, unit="",
                   note="★0 = 固定（同定値に決まった余裕を掛けて使う。今までと同じ）。1 = 走行中の車の反応から"
                        "横・加速・減速の上限を決める。横はコースで 1 つ: 上限を 1 段（8%）上げて 1 周走り、"
@@ -883,10 +926,21 @@ class Slam2dRaceLine(Planner):
                        "（線から外れる・リアが滑るといった兆候が出た段はすぐやめる）。"
                        "加速・減速は横の使い具合ごとの包絡で、計画に付いて行けたかで上げ下げする。"
                        "値は地図の横（<地図名>.grip.json）に保存する"),
+        ParamSpec(group=GROUP_GRIP, key="lat_max", show_if={"grip_learn": (0.0,)}, label="横加速度の上限",
+                  min=1.0, max=8.0, step=0.05, default=_FIXED_DEFAULTS[0], unit="m/s²",
+                  note="★『路面の限界を走りながら決める』が OFF のときに使う横の上限（ラインの速度・曲率の上限）。"
+                       "既定は同定値（vehicle.toml の [limits]）× 0.9。床が違う会場では走りながら合わせる"),
+        ParamSpec(group=GROUP_GRIP, key="accel_max", show_if={"grip_learn": (0.0,)}, label="加速度の上限",
+                  min=0.5, max=6.0, step=0.05, default=_FIXED_DEFAULTS[1], unit="m/s²",
+                  note="『路面の限界を走りながら決める』が OFF のときに使う前への加速の上限。既定は同定値 × 0.95"),
+        ParamSpec(group=GROUP_GRIP, key="brake_max", show_if={"grip_learn": (0.0,)}, label="減速度の上限",
+                  min=0.5, max=6.0, step=0.05, default=_FIXED_DEFAULTS[2], unit="m/s²",
+                  note="『路面の限界を走りながら決める』が OFF のときに使う減速の上限（コーナー手前の制動・解除後に止める"
+                       "減速の元）。既定は同定値 × 0.9"),
         ParamSpec(group=GROUP_GRIP, key="grip_init", hidden=True, label="初期値（同定値に対する割合）", min=0.5, max=1.2,
                   step=0.05, default=0.85, unit="×",
                   note="学習の出発点 = 同定値 `mu`×g × これ。保存した値があるときは、そちらを使う"),
-        ParamSpec(group=GROUP_GRIP, key="grip_max", label="上げてよい上限", min=2.0, max=8.0, step=0.1,
+        ParamSpec(group=GROUP_GRIP, key="grip_max", show_if={"grip_learn": (1.0,)}, label="上げてよい上限", min=2.0, max=8.0, step=0.1,
                   default=6.0, unit="m/s²",
                   note="学習で横の限界をここより上げない"),
         ParamSpec(group=GROUP_GRIP, key="grip_reline", hidden=True, label="学習値でラインを引き直す",
@@ -898,7 +952,8 @@ class Slam2dRaceLine(Planner):
                   max=1, step=1, default=1, unit="",
                   note="★1 = 速く曲がると同じ舵でも曲がり方が足りなくなる度合い（アンダーステア勾配 K、床で変わる）を周回中に"
                        "推定し、MPC・Pure Pursuit の舵の換算に入れる（`nav/understeer.py`）。地図と一緒に保存する。0 = 使わない"),
-        ParamSpec(group=GROUP_GRIP, key="grip_down_only", label="下げる方向だけ許す", min=0, max=1, step=1,
+        ParamSpec(group=GROUP_GRIP, key="grip_down_only", kind="bool", show_if={"grip_learn": (1.0,)},
+                  label="下げる方向だけ許す", min=0, max=1, step=1,
                   default=0, unit="",
                   note="★1 = 上げない（本番の計測走行向け）。前兆が出たとき・加速や減速が出なかった"
                        "ときに下げる層だけ働く。減速を強く求めて測ることもしない"),
@@ -992,6 +1047,10 @@ class Slam2dRaceLine(Planner):
         self._obs_pad_ref: np.ndarray | None = None
         #: 経路に乗ったか（乗るまでは `join_speed` に抑える、`_join_cap`）
         self._joined = False
+        #: 経路へ合流する一時経路を今の乗りに行く間に作ったか（`_join_back`）・作れたか。作れたら `join_speed` で
+        #: 抑えず、周回と同じ速度の計画（横・前後の上限）で乗りに行く
+        self._join_tried = False
+        self._join_ok = False
         #: 経路から外れて止まっている時間 [s] と、乗り直した回数（`_off_route`）
         self._off_t = 0.0
         self._rejoins = 0
@@ -1058,6 +1117,8 @@ class Slam2dRaceLine(Planner):
         #: 壁と車体外形の余裕を測る距離場（地図の版ごとに作る、`_body_check`）
         self._body: rl_mod._BodyCheck | None = None
         self._body_seq = -1
+        #: LiDAR から車体の外形を出るまでの距離（`body_mask.body_ranges`）。障害物の判定で車体のすぐ脇の点を使わない
+        self._body_rng = body_ranges(self.vehicle.footprint, self.vehicle.lidar_x, self.vehicle.lidar_y)
         #: 塞がれて止まっている時間・進めずに止まっている時間 [s]
         self._blocked_t = 0.0
         self._stuck_t = 0.0
@@ -1179,6 +1240,16 @@ class Slam2dRaceLine(Planner):
 
     def set_engaged(self, engaged: bool) -> None:
         self._engaged = bool(engaged)
+
+    def release_stop_decel(self, p: dict[str, float]) -> float | None:
+        """走行中に解除されたとき、経路に沿って止める減速度 [m/s²]（`planning_node._begin_release`）。
+
+        RACE で経路を追っているときだけ。値は今の走りの減速の上限（学習中は学習値・GUI で決めた値）×
+        `RELEASE_DECEL_USE`。周回中のコーナーの手前と同じ減速を、舵で経路を追いながら使うので滑らない。
+        """
+        if self.phase != RACE or self.path is None:
+            return None
+        return RELEASE_DECEL_USE * self._lim(p).a_brake
 
     def on_disengage(self) -> None:
         """自動運転を解いた（`planning_node` が `reset()` の代わりに呼ぶ）。
@@ -1443,6 +1514,7 @@ class Slam2dRaceLine(Planner):
         u = self.slam.update(scan, dt, yaw_rate=vs.yaw_rate, speed=vs.speed)
         st.pose_x, st.pose_y, st.pose_yaw = u.pose.x, u.pose.y, u.pose.yaw
         st.match_score = u.score
+        st.match_hits = self.slam.wall_hits
         st.lap_progress = self.slam.lap_progress()
         st.laps = self.laps
 
@@ -1540,7 +1612,7 @@ class Slam2dRaceLine(Planner):
         # 横の限界（摩擦円の半径）。学習していればその場所の値、していなければ同定値
         grip = self._grip_levels(path)
         grip = grip[1] if grip is not None else None
-        a_grip = float(grip[j]) if grip is not None else self.vehicle.a_lat_max
+        a_grip = float(grip[j]) if grip is not None else fixed_grip(p, self.vehicle)
         if self._grip_on:
             if self._ref_acc_src is not path.v:
                 self._ref_acc, self._ref_acc_src = speedctl.path_accel(path), path.v
@@ -1563,7 +1635,7 @@ class Slam2dRaceLine(Planner):
             # 車速がプロファイルよりずっと低い（迂回の後・走り出し・減速の後）。今の車速から
             # 摩擦円の中で追いつく速度へ置き換えてから前倒しする（`speedctl.catch_up`）
             local = speedctl.catch_up(path, j, vs.speed, a_accel=lim.a_accel,
-                                      a_grip=grip if grip is not None else self.vehicle.a_lat_max)
+                                      a_grip=grip if grip is not None else fixed_grip(p, self.vehicle))
             if self.vehicle.speed_ff_firmware:
                 return _room_cap(speedctl.ref_command(local, pos, vs.speed, lead_s=self._ref_lead(),
                                                       catch_s=self.vehicle.speed_loop_tau_s), vs.speed, a_room)
@@ -1973,6 +2045,8 @@ class Slam2dRaceLine(Planner):
         self._lap_frac = -1.0
         self._hint = -1
         self._joined = False
+        self._join_tried = False
+        self._join_ok = False
         self._off_t = 0.0
         self._rejoins = 0
         self._map_dirty = True
@@ -2018,6 +2092,10 @@ class Slam2dRaceLine(Planner):
             return st
 
         pose = self.slam.pose
+        if not self._joined and not self._join_tried and self._avoid is None:
+            # 走り出し・乗り直し: 今の位置と向きから経路へ合流する一時経路を引き、周回と同じ速度の計画で乗りに行く
+            self._join_tried = True
+            self._join_ok = self._join_back(self.path, p)
         pp, hit, dist = self._track(st, scan, vs, p, self.path, pose)
         self._count_lap(self.path, pp.index)
         st.laps = self.laps
@@ -2241,7 +2319,14 @@ class Slam2dRaceLine(Planner):
             self._obs_near = obs_mod.free_mask(g, obs_mod.near_pad(pad))
             self._obs_free_key, self._obs_pad_ref = key, base
         pad = self._obs_pad
-        now = obs_mod.detect(g, self.slam.deskew_scan(scan), self.slam.pose,
+        pts = self.slam.deskew_scan(scan)
+        if len(pts):
+            # 車体の外形＋10cm 以内の点は障害物にしない（`body_mask.OBSTACLE_BODY_EXTRA_M`）
+            keep = ~near_body(pts.x, pts.y, self._body_rng, self.vehicle.lidar_x, self.vehicle.lidar_y)
+            if not keep.all():
+                # `Points.__len__` が点の数を返すので `_replace` は使えない（NamedTuple の作り直しが長さを見る）
+                pts = type(pts)(pts.x[keep], pts.y[keep], pts.hit[keep], pts.t_ref_ns, pts.corrected)
+        now = obs_mod.detect(g, pts, self.slam.pose,
                              wall_pad=pad, free=self._obs_free, near=self._obs_near,
                              behind=self.slam.behind_wall)
         self._obs_t += self._dt
@@ -2838,9 +2923,61 @@ class Slam2dRaceLine(Planner):
         cap = av_mod.speed_cap(plan.clearance, p["avoid_clear"], p["avoid_speed"], p["v_max"])
         return av_mod.cap_speed(rl, plan.window, cap, self._lim(p).a_brake, self._lim(p).a_accel)
 
+    def _join_back(self, path: rl_mod.RaceLine, p: dict[str, float]) -> bool:
+        """今の位置と**向き**から経路へ合流する一時経路（`avoid.join_in`）に乗せる。乗せた・要らなければ True。
+
+        長さは `_JOIN_LENGTHS` から、曲率が `kappa_limit`（舵で出せる曲率 − 追従の余裕）以下で車体が壁から
+        `_JOIN_MIN_CLEAR` 以上離れる中で、速度を付けた 1 周の見積もり時間がいちばん短いものを採る。速度は周回と
+        同じ計画（`_lock_capped`: 横・前後の上限・舵の上限）なので、**合流の間も出せる最大の速度で走る**
+        （STM32 へは今の車速から `catch_up` で追いつく指令になる）。★以前は乗るまで `join_speed`（上限 1.5m/s）に
+        抑えていた。抑えないと追従だけで乗りに行き、大回りして壁に当たった（2026-09-29 sim.bench）ので、
+        曲がり方そのものを計画する。作れない（向きが `_JOIN_MAX_HEADING` 超・どの長さも曲がり切れないか壁に
+        当たる・開いた経路）なら False（呼び出し側は `join_speed` で乗る）。
+        """
+        if not path.closed or len(path) < 4:
+            return False
+        x, y, yaw = self.slam.pose
+        j = nearest_index(path, x, y)
+        nrm = cl_mod.normals(path.xy)[j]
+        d0 = float((x - path.xy[j, 0]) * nrm[0] + (y - path.xy[j, 1]) * nrm[1])
+        k = (j + 1) % len(path)
+        tang = math.atan2(path.xy[k, 1] - path.xy[j, 1], path.xy[k, 0] - path.xy[j, 0])
+        eps = (yaw - tang + math.pi) % (2.0 * math.pi) - math.pi
+        self._hint = j
+        if abs(d0) < _BLEND_MIN and abs(eps) < math.radians(3.0):
+            return True                                  # もう経路の上
+        if abs(eps) > _JOIN_MAX_HEADING:
+            return False
+        body = self._body_check()
+        here = float(body.clearance(np.array([[x, y], [x + 0.05 * math.cos(yaw), y + 0.05 * math.sin(yaw)]]))[0])
+        need = min(_JOIN_MIN_CLEAR, here - 0.01)
+        kap_lim = self._kappa_lim(p)
+        best = None
+        for length in _JOIN_LENGTHS:
+            plan = av_mod.join_in(path, j, d0, math.tan(eps), length, body)
+            if plan.clearance < need:
+                continue
+            if float(np.abs(plan.path.kappa[plan.window]).max()) > kap_lim:
+                continue
+            rl = self._lock_capped(plan.path, p, None)
+            seg = np.hypot(*np.diff(np.vstack([rl.xy, rl.xy[:1]]), axis=0).T)
+            t = float(np.sum(seg / np.maximum(rl.v, 0.05)))
+            if best is None or t < best[0]:
+                best = (t, plan, rl)
+        if best is None:
+            return False
+        _, plan, rl = best
+        self._avoid_path = rl
+        self._avoid, self._avoid_base = plan, path
+        return True
+
     def _blend_back(self, path: rl_mod.RaceLine, p: dict[str, float]) -> None:
-        """今の横ずれから滑らかに経路へ戻る一時経路に乗せる（`avoid.blend_in`）。"""
+        """今の横ずれから滑らかに経路へ戻る一時経路に乗せる。向きも合わせて合流する `_join_back` を先に試し、
+        作れなければ `avoid.blend_in`（`join_speed` で抑える）。"""
         if not path.closed:
+            return
+        if self._join_back(path, p):
+            self._join_tried = self._join_ok = True
             return
         x, y, _ = self.slam.pose
         j = nearest_index(path, x, y)
@@ -2993,6 +3130,7 @@ class Slam2dRaceLine(Planner):
             self.phase = pst.phase = RACE
             self._hint = -1
             self._joined = False
+            self._join_tried = self._join_ok = False
             pst.brake = True
             pst.target_speed = 0.0
             if ok and self.path is not None:
@@ -3104,9 +3242,11 @@ class Slam2dRaceLine(Planner):
         return f"・★{side}後輪 MD 無応答（減速）"
 
     def _coast_note(self, coasting: bool, p: dict[str, float]) -> str:
+        occl = (f"・★点群の半分以上が地図に無い物で遮られている（壁に乗った点 {self.slam.wall_hits}）"
+                if self.slam.filter_doubt else "")
         if not coasting:
-            return ""
-        return f"・★推測航法で続行 {self._coast_t:.1f}/{p['coast_s']:.1f}s"
+            return occl
+        return f"・★推測航法で続行 {self._coast_t:.1f}/{p['coast_s']:.1f}s" + occl
 
     def _retime(self, p: dict[str, float]) -> None:
         """速度の設定が変わっていたら、経路の速度プロファイルだけを作り直す。
@@ -3514,6 +3654,8 @@ class Slam2dRaceLine(Planner):
         if abs(pp.cross_track) < 0.08 and _heading_err(path, pp.index, pose[2]) < math.radians(15):
             self._joined = True
             return
+        if self._join_ok:
+            return                  # 合流の一時経路の上を、その速度の計画で走っている（`_join_back`）
         st.target_speed = min(st.target_speed, p["join_speed"])
 
     def _off_route(self, st: AutoState, pp, vs: VehicleState, p: dict[str, float],
@@ -3542,6 +3684,7 @@ class Slam2dRaceLine(Planner):
                 self._off_t = 0.0
                 self._rejoins += 1
                 self._joined = False
+                self._join_tried = self._join_ok = False
                 self._hint = -1
             st.reason = (f"経路から {abs(pp.cross_track) * 100:.0f}cm 離れた"
                          f"（上限 {limit * 100:.0f}cm）。"

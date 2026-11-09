@@ -58,7 +58,7 @@ import msgspec
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.base import CMD_HZ, StandstillSteer  # noqa: E402  `auto/cmd` の発行レート
+from raspi.auto.base import CMD_HZ, RELEASE_STOP_TAG, StandstillSteer  # noqa: E402  `auto/cmd` の発行レート
 from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
 from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
@@ -76,6 +76,7 @@ from raspi.msgs.types import (  # noqa: E402
     Scan,
 )
 from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
+from raspi.nav.scan_filter import ScanFilter, config_from_items  # noqa: E402
 
 __all__ = ["PlanningNode", "input_topics"]
 
@@ -109,6 +110,13 @@ VEHICLE_STATE_POLICY = Policy(conflate=False, hwm=1000)
 #: ストリームなので 30 通ぶん。planner は車速・オドメトリ・ヨーレートを最新値として使うので、
 #: TELEMETRY だけが止まると固まった値で走り続ける（同定の `SensorGuard` もサンプルが来ないと働かない）
 VEHICLE_STATE_STALE_MS = 300
+
+#: 解除の後処理（`on_disengage`）を、車がこれより遅くなるまで待つ [m/s]（`PlanningNode._update_release`）
+RELEASE_STILL_M_S = 0.1
+#: 解除の後処理を待つ最長 [s]。止まりきれない（押されている・車速が来ない）ときも、ここで後処理する
+RELEASE_MAX_WAIT_S = 6.0
+#: 解除の後、経路に沿って止める（release stop）のは、これより速く走っていたときだけ [m/s]
+RELEASE_STOP_MIN_M_S = 0.3
 
 #: 走行中に起動し直したとき `auto/state` の理由に出す文言（`PlanningNode._apply_ctrl`）
 _RESTART_NOTE = "★planning_node が起動し直した。自動運転を一度解除して入れ直してください"
@@ -160,6 +168,14 @@ class PlanningNode:
         #: `auto/ctrl` の要求（地図の読み込み・経路の保存など）で planner が投げた例外。次の要求が
         #: 通るかモードが変わるまで `auto/state` の理由に出す（`_ask`）
         self._ctrl_error = ""
+        #: 走行中の解除の後処理（`on_disengage`）を、車が止まるまで待っている（`_update_release`）。
+        #: 待つ間も `plan()` は回るので、自己位置は止まった所まで追い続ける（解いた瞬間の姿勢を
+        #: 再特定の種にすると、止まるまでの数 m・スピンで外れ、全域探索に十数秒かかった。2026-11-08 の試走）
+        self._release_pending = False
+        self._release_t0_ns = 0
+        #: 待つ間、planner が経路に沿って舵を取りながら止める（`release_stop_decel` を持つ planner だけ）。
+        #: 値は止めるときの減速度 [m/s²]。0 なら使わない（telemetry_node の受け渡しが舵を固定して最大制動）
+        self._release_decel = 0.0
 
         #: 最後に出した判断。新しい判断はその場で、それ以外は 50Hz で `auto/cmd` に繰り返す
         self.state = AutoState()
@@ -179,6 +195,8 @@ class PlanningNode:
         #: LiDAR から車体の外形を出るまでの距離（`raspi/nav/body_mask.py`）。これより近い点は planner に渡さない
         veh = Vehicle.load()
         self._body = body_ranges(veh.footprint, veh.lidar_x, veh.lidar_y)
+        #: 点群のノイズの除去（`raspi/nav/scan_filter.py`、全モード共通）。車体マスクの後に掛ける
+        self._scan_filter = ScanFilter(config_from_items(veh.lidar_filter), lidar_x=veh.lidar_x, lidar_y=veh.lidar_y)
 
         self._running = False
 
@@ -301,11 +319,67 @@ class PlanningNode:
         if self.planner is not None:
             # 解除だけなら、持っていれば `on_disengage`（slam2d 系は地図作成中の地図を残す）
             on_disengage = getattr(self.planner, "on_disengage", None)
-            if released and not changed and on_disengage is not None:
-                self._ask("解除の処理", on_disengage)
+            if c.engaged and self._release_pending and not changed:
+                # 止まりきる前に入れ直した。後処理（地図の読み直し）をせず、そのまま走り続ける
+                self._end_release(run_disengage=False)
+            elif released and not changed and on_disengage is not None:
+                if not self._begin_release(c):
+                    self._ask("解除の処理", on_disengage)
             elif changed or released:
+                self._end_release(run_disengage=False)
                 self._ask("planner の初期化", self.planner.reset)
+        else:
+            self._end_release(run_disengage=False)
         self._params = merged_params(c.mode, c.params)
+
+    def _begin_release(self, c: AutoCtrl) -> bool:
+        """走行中の解除なら、後処理（`on_disengage`）を止まるまで遅らせる。遅らせたら True。
+
+        planner が `release_stop_decel(params)` を持ち、値を返せば（slam2d 系の RACE で経路を追っている）、
+        待つ間は経路に沿って舵を取りながら、その減速度で止める（`_cmd_from`）。★解除の受け渡しが舵を固定した
+        まま最大制動すると、後輪だけの制動で 3.8〜4.0m/s からスピンして壁に当たった（2026-11-08 の試走、
+        5 本中 3 本。ヨーレート −1.5rad/s）。
+        """
+        vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        speed = abs(float(vs.speed)) if vs is not None else 0.0
+        if speed < RELEASE_STILL_M_S:
+            return False
+        self._release_pending = True
+        self._release_t0_ns = time.monotonic_ns()
+        self._release_decel = 0.0
+        fn = getattr(self.planner, "release_stop_decel", None)
+        if fn is not None and speed >= RELEASE_STOP_MIN_M_S and self.state.ready:
+            try:
+                d = fn(merged_params(c.mode, c.params))
+            except Exception as e:                  # noqa: BLE001  使えなければ従来の受け渡し
+                print(f"# {self.planner.name} の release_stop_decel() が例外: {e}", file=sys.stderr, flush=True)
+                d = None
+            if d is not None and math.isfinite(d) and d > 0.0:
+                self._release_decel = float(d)
+        return True
+
+    def _end_release(self, *, run_disengage: bool) -> None:
+        if not self._release_pending:
+            return
+        self._release_pending = False
+        self._release_decel = 0.0
+        if run_disengage and self.planner is not None:
+            fn = getattr(self.planner, "on_disengage", None)
+            if fn is not None:
+                self._ask("解除の処理", fn)
+
+    def _update_release(self, now_ns: int) -> None:
+        """解除の後処理を待っている間、止まった・待ちすぎたら後処理する。"""
+        if not self._release_pending:
+            return
+        vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        still = vs is None or abs(float(vs.speed)) < RELEASE_STILL_M_S
+        if still or now_ns - self._release_t0_ns > int(RELEASE_MAX_WAIT_S * NS):
+            self._end_release(run_disengage=True)
+
+    @property
+    def _release_stop(self) -> bool:
+        return self._release_pending and self._release_decel > 0.0
 
     def _make_planner(self, mode: str) -> None:
         self.planner = make_planner(mode)
@@ -362,6 +436,10 @@ class PlanningNode:
             # 車体の内側の点（部品・配線の反射）を捨てる。残すと「前方 0.0m に障害物」で止まる（会場の試走で毎走行）
             scan = mask_body(scan, self._body)
         vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        if isinstance(scan, Scan):
+            # 孤立して前の周にも無い点・強度の低い点（日光・反射のノイズ）を捨てる。★障害物の判定は、近い物を
+            # 2 周期の確認を待たずに扱うので、車のすぐ脇に出たノイズで止まった（2026-11-08 の試走、ヘアピン）
+            scan = self._scan_filter.apply(scan, vs)
         # **`plan()` は engaged を知らない**（`Planner` の共通契約に含めていない
         # ——全 planner に影響するので変えない）。時間で進むステップ列を持つ
         # システム同定 planner（`raspi/auto/sysid_*.py`）だけがこれを必要とする
@@ -370,7 +448,7 @@ class PlanningNode:
         # 中止しても止まらないという不具合の修正）
         set_engaged_fn = getattr(self.planner, "set_engaged", None)
         if set_engaged_fn is not None:
-            self._ask("engage の通知", set_engaged_fn, self.ctrl.engaged)
+            self._ask("engage の通知", set_engaged_fn, self.ctrl.engaged or self._release_stop)
         t_plan = time.perf_counter()
         try:
             st = self.planner.plan(scan, vs, self._params, dt)
@@ -382,6 +460,10 @@ class PlanningNode:
             st = AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                            reason=f"plannerが例外: {e}")
         st.engaged = self.ctrl.engaged
+        st.scan_dropped = self._scan_filter.dropped
+        st.lidar_intensity_min = self._scan_filter.threshold
+        if self._release_stop:
+            st.reason = f"解除した。経路に沿って {self._release_decel:.1f}m/s² で止める（{st.reason}）"
         st.scan_age_ms = (now_ns - scan.t_capture) / 1e6
         st.plan_ms = (time.perf_counter() - t_plan) * 1000.0
         self._ms_peak = max(self._ms_peak, st.plan_ms)
@@ -487,6 +569,8 @@ class PlanningNode:
         「未指定 ＝ STM32 の最大制動」の意味になる）。**中継側が GUI の値を
         使う**ので、planning_node が握るのは速度・舵・制動の有無だけ。
         """
+        if not self.ctrl.engaged and self._release_stop:
+            return self._release_cmd(st)
         if not self.ctrl.engaged:
             # engage していないときの指令は「見せるためだけ」の値。DISARM で出す
             return DriveCmd(mode=0, arm=False, source="planning:idle")
@@ -528,6 +612,21 @@ class PlanningNode:
                         winker_right=st.winker_right,
                         fw_overrides=st.fw_overrides,
                         source=f"planning:{self.ctrl.mode}")
+
+    def _release_cmd(self, st: AutoState) -> DriveCmd:
+        """解除の後、経路に沿って止める指令（`_begin_release`）。
+
+        目標速度 0・減速は `accel_limit`（STM32 の目標車速のランプ）で、舵は planner が経路を追う値。
+        planner が「分からない」・止まれ（障害物）と言えば制動（舵は最後の値・planner の値）。
+        **中継するかは telemetry_node が決める**（engage していないので `_merge_auto` は通らず、
+        解除の受け渡し `_handover` がこの指令の舵と減速度だけを借りる）。
+        """
+        ok = st.ready and math.isfinite(st.target_steer)
+        if ok:
+            self._last_steer = st.target_steer
+        return DriveCmd(mode=2, arm=True, brake=(not ok) or st.brake, target_speed=0.0,
+                        target_steer=self._last_steer, accel_limit=self._release_decel,
+                        source=f"planning:{self.ctrl.mode}{RELEASE_STOP_TAG}")
 
     def _relax_standstill_steer(self, cmd: DriveCmd, now_ns: int) -> DriveCmd:
         """停車が `StandstillSteer.HOLD_S` 続いたら舵を中立へ戻す（据え切りでステア MD が過熱する。
@@ -615,6 +714,7 @@ class PlanningNode:
                                   file=sys.stderr, flush=True)
 
             now = time.monotonic_ns()
+            self._update_release(now)
             planned = self._replan(now)
             if not planned and now >= next_cmd:
                 self._tick()
