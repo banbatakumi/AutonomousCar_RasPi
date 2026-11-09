@@ -118,12 +118,12 @@ drive_ratio = 2.0             # 駆動輪数（後輪2輪ぶんのトルクが�
 # 校正 7（タイヤ、`calib_tyre`）が横を μ から見積もり、校正 9（TC・ABS の確かめ、`calib_traction_check`）が加速・減速を
 # 実測して書く。下は旧②③の値を移したもの（横 = μ 0.417·g、加速 = 3.07 − 転がり抵抗、減速 = 2.27 + 転がり抵抗）
 [limits]
-a_lat_m_s2 = 4.0912
-a_accel_m_s2 = 2.925
-a_brake_m_s2 = 2.5413
+a_lat_m_s2 = 5.5
+a_accel_m_s2 = 3.5
+a_brake_m_s2 = 4.0
 # 非常時の最大制動（ABS）の減速度 [m/s²]。slam2d は使わない。io_node が CONFIG_SET（★v0.29 `BRAKE_DECEL_M_S2`）で
 # STM32 へ送り、自動停止の停止距離と DISARM 後の制動の上限に使う（ファームは値を持たない）。校正 9 が書く
-abs_brake_decel_m_s2 = 2.165
+abs_brake_decel_m_s2 = 2.5
 
 # ── シムの車だけが使う値（`sim/vehicle.py` の `VehicleSpec`。**実機の制御は読まない・同定しない**）──
 # 旧①②③で測っていた値をそのまま残してある。slam2d に要らないので測り直さない。
