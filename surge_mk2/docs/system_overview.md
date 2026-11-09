@@ -739,7 +739,6 @@ STM32 の制御コード（別リポジトリ）をホストでそのままコ�
 | `tools/` | 配備・検査・校正の解析（`calib`）・ファームのホストシム（`fwsim`）・ランチャー |
 | `config/` | `vehicle.toml` と生成器・GUI の保存値（`auto.json` ほか） |
 | `saved_maps/` / `logs/` | 地図・経路 / 記録 |
-| `site/` | 公開用の技術解説サイト（数値の正は持たない） |
 
 **生成元を正とし、生成物を直接編集しない**（`raspi/proto/generate.py`、`config/generate.py`。整合は `tools/check.sh`）。
 

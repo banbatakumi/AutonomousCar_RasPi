@@ -2,8 +2,8 @@
 
 自律走行ミニカー **SURGE Mark.2** の Raspberry Pi 側プログラム。
 
-**技術解説サイト: https://banbatakumi.github.io/AutonomousCar_RasPi/**
-制御・システム構成・自動運転（SLAM・レーシングライン）の解説です。
+**技術解説サイト: https://banbatakumi.github.io/surge-mk2/** （ソースは [`surge-mk2`](https://github.com/banbatakumi/surge-mk2)）
+ハードウェア（インホイール・ダイレクトドライブ）・制御・システム構成・自動運転の解説です。
 
 ## 構成
 

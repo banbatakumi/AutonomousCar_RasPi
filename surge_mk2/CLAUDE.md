@@ -37,7 +37,7 @@
 | 車両を校正したい（エンコーダ・ステア・遅延・車速制御・TC/ABS・カメラ・車速 KF）・その値の意味 | [`docs/calibration.md`](docs/calibration.md)（試験 `raspi/auto/calib_*`、解析 `tools/calib`、GUI は launcher の「車両の校正」）。値は `config/vehicle.toml`（io_node が `[control]` を STM32 へ送る） |
 | STM32 の制御をホストで回して比べたい | `tools/fwsim`（ファームをそのままコンパイルして車のモデルと閉ループ。`python -m tools.fwsim.bench`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
-| 公開用の技術解説サイト（GitHub Pages） | [`site/`](site/)（Markdown。`master` への push で自動公開。更新の方針は `site/docs/about.md`）。**数値の正は持たない**ので、コードを変えたら該当ページを見直す |
+| 公開用の技術解説サイト（GitHub Pages） | 別リポジトリ [`surge-mk2`](https://github.com/banbatakumi/surge-mk2)（`~/GitHub/surge-mk2`、Zensical。公開先 https://banbatakumi.github.io/surge-mk2/）。**数値の正は持たない**ので、コードを変えたら「このサイトについて」の見直し表に従って該当ページを見直す |
 | 過去の経緯（旧 PROGRESS・監査報告・コードレビュー） | `docs/archive/`（**陳腐化。ユーザーが求めない限り読まない・根拠にしない**） |
 
 ## 新規開発方針
