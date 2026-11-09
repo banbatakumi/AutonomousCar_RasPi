@@ -323,6 +323,28 @@ class TestUnmappedObject(unittest.TestCase):
         self.assertEqual(fe.front_ratio, 0.0)
 
 
+#: 車の両脇 0.3m を、地図に無い長い物（並走する他車）が塞ぐ
+SIDE_CARS = [(2.0, 2.3, 5.5, 2.3), (2.0, 1.7, 5.5, 1.7)]
+
+
+class TestHeavilyOccluded(unittest.TestCase):
+    """★ 点群の半分以上が地図に無い物で遮られても、外した残りで追い続ける（`behind_max_ratio`）。
+
+    以前は外した割合が 5 割を超えると無条件に全点へ戻し、他車の点で残差が膨らんで見失っていた
+    （2026-11-08 `surge_20261108_023048`: 41% → 52% の周期に一致度 1.00 → 0.65 → 0.23）。"""
+
+    def test_side_cars_do_not_make_it_lost(self):
+        fe = _frozen_tracker()
+        for i in range(20, 35):
+            u = fe.update(make_raw_scan(3.0 + 0.02 * i, 2.0, 0.0, segs=ROOM + SIDE_CARS, max_range=8.0), 0.1)
+            self.assertFalse(u.lost, i)
+        self.assertGreater(fe.front_ratio, 0.5)
+        self.assertGreater(fe.filter_doubts, 0)
+        self.assertAlmostEqual(fe.pose.x, 0.02 * 34, delta=0.02)
+        self.assertAlmostEqual(fe.pose.y, 0.0, delta=0.02)
+        self.assertGreater(fe.wall_hits, 20)
+
+
 class TestApplyCorrection(unittest.TestCase):
     def test_correction_moves_map_trajectory_and_pose(self):
         motion = ExternalTwistModel(lambda: Twist2D(0.2, 0.0, 0.0))

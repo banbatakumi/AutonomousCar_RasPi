@@ -131,11 +131,27 @@ class FrontendConfig:
     #: する（これより壁に近い物の点は残っても残差が `max_rms` を超えない）。未知のセル・まばらにしか見ていない
     #: 壁（ヒットが `min_hits` 未満）の上の点は空きと確定していないので外さない
     front_margin: float = 0.12
-    #: 外れた割合（壁の向こう＋手前）がこれを超えたら予測の方を疑い、除去をやめて全点を使う
+    #: 外れた割合（壁の向こう＋手前）がこれを超えたら、予測の方がずれている（壁の点まで外れた）のか、
+    #: 本当に地図に無い物で大きく遮られた（他車に挟まれた・人が近くに来た）のかを確かめる: 外した残りと全点の
+    #: 両方で合わせ、**全点のうち壁に乗る点が多い方**を採る（`update`）。★以前は無条件に全点へ戻していた。
+    #: 停車中に何かが近くに来て外れた点が 41% → 52% に増えた周期に、一致度が 1.00 → 0.65 → 0.23 と落ちて
+    #: 見失った（2026-11-08 `surge_20261108_023048`）。両側を他車に挟まれても届く割合
     behind_max_ratio: float = 0.5
     #: キーフレーム間の拘束に足す「モデル化していない誤差」（`inflate_info`）
     edge_sigma_xy: float = 0.02
     edge_sigma_yaw: float = math.radians(0.3)
+
+
+def _wall_hits(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, pose: Pose2D, inlier_dist: float) -> int:
+    """車体座標の点 `(px, py)` を `pose` に置いたとき、壁から `inlier_dist` 以内に来る点の数。
+
+    地図に無い物（他車・人）の点は壁に乗らないので、遮られていても正しい姿勢ほど多い（`slam2d/core/locscore.py` と同じ考え）。
+    """
+    if px.size == 0:
+        return 0
+    c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+    a = smap.associate(pose.x + c * px - s * py, pose.y + s * px + c * py)
+    return int((a.valid & (a.dist <= inlier_dist)).sum())
 
 
 class FrontendUpdate(NamedTuple):
@@ -237,6 +253,13 @@ class Frontend:
         self.behind_ratio = 0.0
         #: 直近の周期に地図の壁より手前（地図に無い物）として外した点の割合（診断。`front_margin`）
         self.front_ratio = 0.0
+        #: 外した割合が `behind_max_ratio` を超え、外した残りと全点の両方で合わせた回数・全点の方を採った回数（診断）
+        self.filter_doubts = 0
+        self.filter_reverts = 0
+        #: 直近の位置合わせで、全点（外す前）のうち壁から `inlier_dist` 以内に来た点の数（信頼度の目安。
+        #: 一致度 `inlier` は外した残りの中の割合なので、大きく遮られても 1 に近いまま）
+        self.wall_hits = 0
+        self._filter_doubt = False
         #: 直近`update()`で脱スキューした点群と、その基準時刻。
         #: 呼び出し側（`raspi/auto/_slam2d_nav.py`の`deskew_scan()`）が
         #: **同じ点群**を障害物検出・LOCATE用にもう一度脱スキューしたい
@@ -320,6 +343,8 @@ class Frontend:
         hx, hy = pts.x[sel], pts.y[sel]
         self.behind_ratio = 0.0
         self.front_ratio = 0.0
+        self._filter_doubt = False
+        all_x, all_y = hx, hy
         if self.grid.frozen and (cfg.behind_margin > 0.0 or cfg.front_margin > 0.0) and hx.size > 0:
             keep = self._not_behind_wall(hx, hy, pred)
             hx, hy = hx[keep], hy[keep]
@@ -337,6 +362,17 @@ class Frontend:
         if matched:
             res = register(field_, hx, hy, pred, prior=pred, prior_info=info_pred,
                            config=cfg.register)
+            if self._filter_doubt:
+                # 外した点が多すぎる: 全点でも合わせ、全点のうち壁に乗る点が多い姿勢を採る（`behind_max_ratio`）
+                self.filter_doubts += 1
+                alt = register(field_, all_x, all_y, pred, prior=pred, prior_info=info_pred,
+                               config=cfg.register)
+                # 差が小さければ外した方のまま（全点の方は地図に無い物の点が残差を膨らませ、見失い判定に掛かりやすい）
+                h_alt = _wall_hits(field_, all_x, all_y, alt.pose, cfg.register.inlier_dist)
+                h_res = _wall_hits(field_, all_x, all_y, res.pose, cfg.register.inlier_dist)
+                if h_alt > 1.1 * h_res + 3:
+                    res, hx, hy = alt, all_x, all_y
+                    self.filter_reverts += 1
             good = self._good(res)
             if not good and self.lost_streak + 1 >= cfg.reloc_after:
                 alt = self._relocalize(field_, hx, hy, pred)
@@ -345,6 +381,7 @@ class Frontend:
                     self.relocs += 1
                     recovering = True
             score = res.inlier
+            self.wall_hits = _wall_hits(field_, all_x, all_y, res.pose, cfg.register.inlier_dist)
             if good:
                 new_pose = res.pose
                 a = cfg.rms_alpha
@@ -511,7 +548,9 @@ class Frontend:
         self.behind_ratio = float((behind & ~outside).mean())
         self.front_ratio = float((front & ~outside).mean())
         if dropped > cfg.behind_max_ratio:
-            return np.ones(n, dtype=bool)
+            if int(keep.sum()) < cfg.min_used:
+                return np.ones(n, dtype=bool)        # 残りでは合わせられない。全点で
+            self._filter_doubt = True                # 残りと全点の両方で合わせて比べる（`update`）
         return keep
 
     def _relocalize(self, field_: SurfaceMap, hx, hy, center: Pose2D) -> RegisterResult | None:

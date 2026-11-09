@@ -290,6 +290,16 @@ class Slam2dNav:
             note(now - last)
 
     @property
+    def wall_hits(self) -> int:
+        """直近の位置合わせで、外す前の全点のうち地図の壁に乗った点の数（`Frontend.wall_hits`）。"""
+        return int(getattr(self._fe, "wall_hits", 0))
+
+    @property
+    def filter_doubt(self) -> bool:
+        """直近の周期に、地図に無い物として外した点が多すぎて、全点でも合わせて比べたか（`Frontend._filter_doubt`）。"""
+        return bool(getattr(self._fe, "_filter_doubt", False))
+
+    @property
     def pose(self) -> Pose2D:
         return self._fe.pose
 
