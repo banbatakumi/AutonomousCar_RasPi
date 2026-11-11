@@ -172,6 +172,7 @@ from raspi.msgs import (  # noqa: E402
     CamModelCtrl,
     DriveCmd,
     CamE2EModelCtrl,
+    E2EFusionModelCtrl,
     E2EModelCtrl,
     Heartbeat as HbMsg,
     LogCtrl,
@@ -192,6 +193,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_CAM_E2E_MODEL,
+    TOPIC_E2E_FUSION_MODEL,
     TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
@@ -253,6 +255,11 @@ E2E_MODEL_CONF = REPO_ROOT / "config" / "e2e_lidar_model.json"
 CAM_E2E_MODELS_DIR = MODELS_DIR / "cam_e2e"
 #: 選ばれているカメラE2Eモデル名。`CAM_MODEL_CONF` と同じ流儀
 CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
+#: `e2e_fusion`（LiDAR＋カメラの融合 E2E）のモデルの置き場と、選ばれているモデル名
+#: （`raspi/nodes/e2e_fusion_node.py` の `DEFAULT_MODELS_DIR`・`MODEL_CONF` と同じ場所。
+#: ノードは telemetry が居ないときこのファイルを自分で読む）
+E2E_FUSION_MODELS_DIR = MODELS_DIR / "e2e_fusion"
+E2E_FUSION_MODEL_CONF = REPO_ROOT / "config" / "e2e_fusion_model.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
@@ -312,9 +319,10 @@ SIGNAL_CONFIG_HZ = 1
 #: `follow_object` は `cam_track_node.py` が毎フレーム対象を追跡し続ける必要が
 #: あるので他の2つと同じ扱いにする。`cam_centerline` は `ftg_cam` と同じ
 #: `cam_perception_node.py` の推論結果を使うので同じ扱い。`cam_e2e` は前カメラの
-#: 絵だけで舵と速度を決めるので、古い絵で走らせないために同じく上限まで上げる
+#: 絵だけで舵と速度を決めるので、古い絵で走らせないために同じく上限まで上げる。
+#: `e2e_fusion` は点群の1周ごとに最新のコマと組にして推論するので同じ扱い
 CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object",
-                               "cam_e2e"})
+                               "cam_e2e", "e2e_fusion"})
 #: `track/roi`（★対象追従のROI選択）の再送周期。`_auto_ctrl_pump`と同じ理由
 #: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
 TRACK_ROI_HZ = 5
@@ -429,6 +437,7 @@ CONTROLLER_NAME_MAX = 40
 #: 切ったり、記録や地図を消したりできないようにする（E-Stop・解除は対象外＝誰でも押せる）
 OPERATOR_ONLY_KINDS = frozenset({
     "fan", "camera", "signal", "cam_model_select", "e2e_model_select", "cam_e2e_model_select",
+    "e2e_fusion_model_select",
     "track_roi_select", "track_roi_clear", "tc_tv", "wheel_lift_guard", "abs", "brake_hold",
     "auto_stop_margin", "logs_delete", "maps_save", "maps_delete", "maps_clear_grip", "shutdown",
 })
@@ -818,6 +827,11 @@ class TelemetryServer:
         #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
         self._cam_e2e_model = ""
         self._load_cam_e2e_model_conf()
+
+        # ── E2E 融合モデルの選択（`e2e_fusion` 用） ──
+        #: 選ばれているモデル名。**空文字 = 自動**（ノードがいちばん新しいモデルを使う）
+        self._e2e_fusion_model = ""
+        self._load_e2e_fusion_model_conf()
 
         # ── 対象追従（`follow_object`）のROI選択 ──
         #: GUIがドラッグ選択した矩形（正規化座標）。**永続化しない**
@@ -1329,6 +1343,15 @@ class TelemetryServer:
 
         elif kind == "cam_e2e_model_select":
             self._on_cam_e2e_model(m)
+            self._status_soon()
+
+        # ── E2E 融合モデルの選択（同じ形） ──
+
+        elif kind == "e2e_fusion_model_list":
+            await self._send_json(ws, self._e2e_fusion_models_list())
+
+        elif kind == "e2e_fusion_model_select":
+            self._on_e2e_fusion_model(m)
             self._status_soon()
 
         # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
@@ -2342,6 +2365,50 @@ class TelemetryServer:
         except Exception:
             pass
 
+    # ── E2E 融合モデルの選択（`e2e_fusion` 用） ──
+    #
+    # `_cam_e2e_model*` と同じ構造。受け手は `e2e_fusion_node`（`e2e_fusion/model`）。
+    # 違いは空文字の意味: ここでは「自動」（ノードがいちばん新しいモデルを使う）。
+
+    def _e2e_fusion_models_list(self) -> dict:
+        """`models/e2e_fusion/` にある `.onnx` の一覧。キー名は `e2e_fusion_model_files`。"""
+        return {"type": "e2e_fusion_models",
+                "e2e_fusion_model_files": _onnx_model_files(E2E_FUSION_MODELS_DIR)}
+
+    def _on_e2e_fusion_model(self, m: dict) -> None:
+        """`{"type":"e2e_fusion_model_select", "name": str}`。実在しない名前は黙って捨てる。"""
+        name = str(m.get("name") or "")
+        if name and not (E2E_FUSION_MODELS_DIR / f"{name}.onnx").is_file():
+            return
+        if name == self._e2e_fusion_model:
+            return
+        self._e2e_fusion_model = name
+        # モデルを変えたら e2e_fusion の engage は必ず落とす（走行中に挙動が急変する）
+        if self._auto_engaged and self._auto_mode == "e2e_fusion":
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+        try:
+            _atomic_write_bytes(E2E_FUSION_MODEL_CONF, _json_encode({"name": name}))
+        except Exception:
+            pass
+        self._publish_e2e_fusion_model()
+
+    def _e2e_fusion_model_status(self) -> dict:
+        return {"name": self._e2e_fusion_model}
+
+    def _publish_e2e_fusion_model(self) -> None:
+        self.pub.send(TOPIC_E2E_FUSION_MODEL, E2EFusionModelCtrl(name=self._e2e_fusion_model))
+
+    def _load_e2e_fusion_model_conf(self) -> None:
+        """`config/e2e_fusion_model.json` から戻す。無い・壊れている・消えたモデルなら「自動」。"""
+        try:
+            raw = _json_decode(E2E_FUSION_MODEL_CONF.read_bytes())
+        except Exception:
+            return
+        name = raw.get("name") if isinstance(raw, dict) else None
+        if isinstance(name, str) and name and (E2E_FUSION_MODELS_DIR / f"{name}.onnx").is_file():
+            self._e2e_fusion_model = name
+
     # ── 対象追従（`follow_object`）のROI選択 ──
     #
     # `AutoCtrl.freeze_seq`/`clear_seq` と同じ「回数」の約束（真偽値だと、
@@ -2499,6 +2566,7 @@ class TelemetryServer:
             "cam_model": self._cam_model_status(),
             "e2e_model": self._e2e_model_status(),
             "cam_e2e_model": self._cam_e2e_model_status(),
+            "e2e_fusion_model": self._e2e_fusion_model_status(),
         }
 
     def _auto_status(self, catalog: bool = True) -> dict:
@@ -3511,6 +3579,13 @@ class TelemetryServer:
             await asyncio.sleep(period)
             self._publish_cam_e2e_model()
 
+    async def _e2e_fusion_model_pump(self) -> None:
+        """`e2e_fusion_node` への希望モデル名を低頻度で再送する。`_cam_model_pump` と同じ理由。"""
+        period = 1.0 / CAM_E2E_MODEL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            self._publish_e2e_fusion_model()
+
     async def _track_roi_pump(self) -> None:
         """対象追従のROI選択（`track/roi`）を低頻度で再送する。
         `_cam_model_pump`/`_e2e_model_pump` と同じ理由
@@ -3653,7 +3728,7 @@ class TelemetryServer:
                 self._camera_pump, self._hb_pump, self._log_ctrl_pump,
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump, self._pi_health_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
-                self._cam_e2e_model_pump,
+                self._cam_e2e_model_pump, self._e2e_fusion_model_pump,
                 self._mask_pump, self._track_roi_pump, self._signal_config_pump)]
             for t in tasks:
                 t.add_done_callback(lambda t: self._on_pump_done(t, stop))

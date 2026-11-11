@@ -239,6 +239,98 @@ class TestCamE2eModelSelection(unittest.TestCase):
         self.assertEqual(self._orig[0], cam_e2e_node.DEFAULT_MODELS_DIR)
 
 
+class TestE2eFusionModelSelection(unittest.TestCase):
+    """E2E 融合（`e2e_fusion`）のモデル選択。`cam_e2e` と同じ形だが、空の名前は「自動」。"""
+
+    def setUp(self) -> None:
+        self._orig = (tn.E2E_FUSION_MODELS_DIR, tn.E2E_FUSION_MODEL_CONF)
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        tn.E2E_FUSION_MODELS_DIR = root / "models" / "e2e_fusion"
+        tn.E2E_FUSION_MODELS_DIR.mkdir(parents=True)
+        tn.E2E_FUSION_MODEL_CONF = root / "e2e_fusion_model.json"
+        for name in ("v1", "v2"):
+            (tn.E2E_FUSION_MODELS_DIR / f"{name}.onnx").write_bytes(b"dummy")
+        (tn.E2E_FUSION_MODELS_DIR / "v1.json").write_text(json.dumps({"note": "会場のコース"}))
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self) -> None:
+        tn.E2E_FUSION_MODELS_DIR, tn.E2E_FUSION_MODEL_CONF = self._orig
+        self._tmp.cleanup()
+
+    def _server(self, *, mode="e2e_fusion", engaged=True):
+        from raspi.tests.fakes import FakePub
+
+        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        srv.pub = FakePub()
+        srv._e2e_fusion_model = ""
+        srv._auto_engaged = engaged
+        srv._auto_mode = mode
+        srv.auto_ctrl_published = 0
+
+        def _publish_auto_ctrl():
+            srv.auto_ctrl_published += 1
+        srv._publish_auto_ctrl = _publish_auto_ctrl
+        return srv
+
+    def test_list_uses_its_own_key_and_carries_the_note(self) -> None:
+        result = tn.TelemetryServer._e2e_fusion_models_list(None)
+        self.assertEqual(result["type"], "e2e_fusion_models")
+        files = {f["name"]: f for f in result["e2e_fusion_model_files"]}
+        self.assertEqual(sorted(files), ["v1", "v2"])
+        self.assertEqual(files["v1"]["note"], "会場のコース")
+        self.assertFalse(files["v2"]["has_config"])
+
+    def test_select_publishes_saves_and_drops_engage(self) -> None:
+        srv = self._server()
+        srv._on_e2e_fusion_model({"name": "v1"})
+        self.assertEqual(srv._e2e_fusion_model_status(), {"name": "v1"})
+        sent = [m for t, m in srv.pub.sent if t == tn.TOPIC_E2E_FUSION_MODEL]
+        self.assertEqual([m.name for m in sent], ["v1"])
+        self.assertFalse(srv._auto_engaged, "モデルを変えたのに engage が残っている")
+        self.assertEqual(srv.auto_ctrl_published, 1)
+        self.assertEqual(json.loads(tn.E2E_FUSION_MODEL_CONF.read_text()), {"name": "v1"})
+
+    def test_empty_name_means_auto_and_is_saved(self) -> None:
+        srv = self._server()
+        srv._on_e2e_fusion_model({"name": "v1"})
+        srv._auto_engaged = True
+        srv._on_e2e_fusion_model({"name": ""})
+        self.assertEqual(srv._e2e_fusion_model, "")
+        self.assertEqual([m.name for t, m in srv.pub.sent if t == tn.TOPIC_E2E_FUSION_MODEL], ["v1", ""])
+        self.assertFalse(srv._auto_engaged)
+        self.assertEqual(json.loads(tn.E2E_FUSION_MODEL_CONF.read_text()), {"name": ""})
+
+    def test_other_modes_keep_their_engage_and_unknown_names_are_ignored(self) -> None:
+        srv = self._server(mode="slam2d_route")
+        srv._on_e2e_fusion_model({"name": "v1"})
+        self.assertTrue(srv._auto_engaged)
+        srv = self._server()
+        srv._on_e2e_fusion_model({"name": "../../etc/passwd"})
+        srv._on_e2e_fusion_model({"name": "no-such"})
+        self.assertEqual(srv.pub.sent, [])
+        self.assertTrue(srv._auto_engaged)
+
+    def test_saved_selection_comes_back_only_if_the_file_still_exists(self) -> None:
+        srv = self._server()
+        tn.E2E_FUSION_MODEL_CONF.write_text(json.dumps({"name": "v2"}))
+        srv._load_e2e_fusion_model_conf()
+        self.assertEqual(srv._e2e_fusion_model, "v2")
+        srv._e2e_fusion_model = ""
+        tn.E2E_FUSION_MODEL_CONF.write_text(json.dumps({"name": "deleted"}))
+        srv._load_e2e_fusion_model_conf()
+        self.assertEqual(srv._e2e_fusion_model, "")
+
+    def test_paths_match_the_node_and_the_select_is_operator_only(self) -> None:
+        """一覧を出す場所・保存先と、ノードが読みに行く場所が同じであること。"""
+        from raspi.nodes import e2e_fusion_node
+        self.assertEqual(self._orig, (e2e_fusion_node.DEFAULT_MODELS_DIR, e2e_fusion_node.MODEL_CONF))
+        self.assertIn("e2e_fusion_model_select", tn.OPERATOR_ONLY_KINDS)
+        self.assertIn("e2e_fusion", tn.CAMERA_AUTO_MODES)
+        from raspi.bus.zbus import TOPIC_OWNER
+        self.assertEqual(TOPIC_OWNER[tn.TOPIC_E2E_FUSION_MODEL], "control")
+
+
 class TestCamModelsListNote(unittest.TestCase):
     """`_cam_models_list()`が`<名前>.json`の`note`（`ml_cam/export_onnx.py`が
     書く自由記述の備考。`TestE2eModelsListNote`と対称）を拾って
@@ -1340,6 +1432,7 @@ class TestConfLoadersTolerateNonDict(unittest.TestCase):
                                   ("CAM_MODEL_CONF", "_load_cam_model_conf"),
                                   ("E2E_MODEL_CONF", "_load_e2e_model_conf"),
                                   ("CAM_E2E_MODEL_CONF", "_load_cam_e2e_model_conf"),
+                                  ("E2E_FUSION_MODEL_CONF", "_load_e2e_fusion_model_conf"),
                                   ("AUTO_CONF", "_load_auto_conf"),
                                   ("DRIVE_SETTINGS_CONF", "_load_drive_settings")):
                 for text in ("[]", "null", "3"):

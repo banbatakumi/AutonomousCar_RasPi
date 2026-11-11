@@ -130,6 +130,8 @@ rsync -az --stats \
   --exclude '/config/e2e_lidar_model.json' \
   --exclude '/config/cam_e2e_model.json' \
   --exclude '/ml_cam_e2e/runs/' \
+  --exclude '/ml_e2e/runs/' \
+  --exclude '/config/e2e_fusion_model.json' \
   --exclude '/ml_lidar/runs/' \
   --exclude '/ml_cam/runs/' \
   --exclude '/ml_cam/checkpoints/' \
@@ -207,7 +209,7 @@ fi
 # ── 5. 再起動 ──
 if [ "$DO_RESTART" = 1 ]; then
   echo
-  echo "# surge-telemetry / surge-camera / surge-cam-perception / surge-cam-e2e / surge-line-perception / surge-planning を再起動（E-Stop には影響しない）"
+  echo "# surge-telemetry / surge-camera / surge-cam-perception / surge-cam-e2e / surge-e2e-fusion / surge-line-perception / surge-planning を再起動（E-Stop には影響しない）"
   # surge-cam-perception / surge-cam-e2e / surge-line-perception: auto/ctrl は
   # telemetry_node が「現在の意思」を繰り返し流す設計（AutoCtrl の docstring 参照）
   # なので、再起動しても GUI 側の再選択なしに数秒で復帰する。ftg_cam/cam_centerline・
@@ -221,7 +223,7 @@ if [ "$DO_RESTART" = 1 ]; then
   # 「自動運転だけ入れ直す（安全）」と明記）。
   # ★ raceline/slam2d_raceline（SLAM地図生成モード）の EXPLORE/BUILD 中に
   # 再起動すると、まだ確定（freeze）していない地図はメモリ上にしか無いため失われる
-  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception surge-cam-e2e surge-line-perception surge-planning' || exit 1
+  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-planning' || exit 1
 fi
 
 if [ "$DO_RESTART_IO" = 1 ]; then

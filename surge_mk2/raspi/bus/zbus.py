@@ -83,7 +83,8 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 #: PUB を1プロセス1本にしておくと、購読側は接続先が固定されて配線が単純になる
 _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
                   "cam_perception": 5574, "line_perception": 5575, "cam_track": 5576,
-                  "cam_e2e": 5577, "signal": 5578, "test": 5579}
+                  "cam_e2e": 5577, "signal": 5578, "test": 5579,
+                  "e2e_fusion": 5580}
 
 #: トピック → どのノードが publish するか
 #:
@@ -111,6 +112,7 @@ TOPIC_OWNER: dict[str, str] = {
     "cam/model": "control",
     "e2e/model": "control",
     "cam_e2e/model": "control",
+    "e2e_fusion/model": "control",
     "track/roi": "control",
     "auto/cmd": "planning",
     "auto/state": "planning",
@@ -132,6 +134,7 @@ TOPIC_OWNER: dict[str, str] = {
     #: arrow_signal_node の直近の判定結果（GUIのライブチューニング・映像オーバーレイ用）
     "signal/status": "signal",
     "cam_e2e/cmd": "cam_e2e",
+    "e2e_fusion/plan": "e2e_fusion",
 }
 
 
@@ -168,7 +171,7 @@ def endpoints_for_topic(topic: str) -> list[str]:
         return [endpoint_for_node(n) for n in
                 ("io", "camera", "control", "planning",
                  "cam_perception", "line_perception", "cam_track", "cam_e2e",
-                 "signal")]
+                 "signal", "e2e_fusion")]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）

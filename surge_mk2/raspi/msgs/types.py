@@ -42,6 +42,7 @@ __all__ = [
     "SignalConfig", "TOPIC_SIGNAL_CONFIG", "ArrowSignalStatus", "TOPIC_SIGNAL_STATUS",
     "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
     "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
+    "E2EFusionPlan", "TOPIC_E2E_FUSION_PLAN", "E2EFusionModelCtrl", "TOPIC_E2E_FUSION_MODEL",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
     "TOPIC_TYPES", "type_for_topic",
 ]
@@ -120,6 +121,11 @@ TOPIC_CAM_E2E_MODEL = "cam_e2e/model"
 #: `cam_e2e_node.py` が publish する推論結果（正規化した操舵と速度）。
 #: `raspi/auto/cam_e2e.py`（id `cam_e2e`）の `input_topic`
 TOPIC_CAM_E2E_CMD = "cam_e2e/cmd"
+#: `e2e_fusion_node.py` が publish する推論結果（舵・速度・前方の経路点）。
+#: `raspi/auto/e2e_fusion.py`（id `e2e_fusion`）の `input_topic`
+TOPIC_E2E_FUSION_PLAN = "e2e_fusion/plan"
+#: `e2e_fusion_node.py` が使うモデルの選択（`cam_e2e/model` と同じ「意思を繰り返し流す」パターン）
+TOPIC_E2E_FUSION_MODEL = "e2e_fusion/model"
 
 #: 対象追従（`follow_object`）のROI選択の意思。GUIがドラッグ矩形で選んだ対象を
 #: telemetry_node が繰り返し流し、`cam_track_node.py` が拾って追跡を開始/終了する
@@ -996,6 +1002,44 @@ class CamE2ECmd(MsgBase):
     model_speed_ref: float = 0.0   #: [m/s] 同上。`speed_norm=1` が表す速度
 
 
+class E2EFusionModelCtrl(MsgBase):
+    """`e2e_fusion_node.py` への「このモデルを使ってほしい」という意思（`CamE2EModelCtrl` と同じ設計）。
+
+    `name` は `models/e2e_fusion/<name>.onnx`（＋同名の `.json`。`ml_e2e/export_onnx.py` が書く）。
+    **空文字は「自動」**: ノードが `models/e2e_fusion/` のいちばん新しいモデルを使う
+    （他のモデル選択の空文字は「未選択」で走らないが、ここは選ばなくても走れるようにしてある）。
+    """
+
+    name: str = ""
+
+
+class E2EFusionPlan(MsgBase):
+    """`e2e_fusion_node.py` の推論結果。`raspi/auto/e2e_fusion.py`（id `e2e_fusion`）の `input_topic`。
+
+    LiDAR＋前方カメラ＋車両状態から出した、舵・速度と**前方の経路点**。値は物理量に戻してある
+    （契約値はノードがモデル同梱の JSON から読む。出力の並びは `raspi/core/e2e_fusion_preproc.py`）。
+
+    **`t_capture` は画像の撮影時刻**（画像が無い周は点群の先頭セクタの時刻）で、経路点はその時刻の
+    車体座標（x=前・y=左、base_link 基準）。planner は撮影後に車が動いたぶんを推測航法でずらして追う。
+    """
+
+    ready: bool = False
+    #: ready でない理由（モデル未選択・入力が無い・推論の例外）。planner がそのまま表示する
+    reason: str = ""
+    steer: float = 0.0             #: [rad] 路面舵角の直接出力。反時計回り正
+    speed: float = 0.0             #: [m/s] 速度の直接出力
+    #: 経路点。`k` 番目は経路に沿って `(k+1)·ds` 先。4本とも同じ長さ
+    path_x: list[float] = msgspec.field(default_factory=list)   #: [m]
+    path_y: list[float] = msgspec.field(default_factory=list)   #: [m]
+    path_v: list[float] = msgspec.field(default_factory=list)   #: [m/s]
+    path_b: list[float] = msgspec.field(default_factory=list)   #: [m] 位置の不確かさ（大きいほど自信が無い）
+    ds: float = 0.0                #: [m] 経路点の間隔
+    has_image: bool = False        #: この推論に画像を使ったか
+    has_lidar: bool = False        #: この推論に点群を使ったか
+    model: str = ""                #: 使ったモデルの名前
+    infer_ms: float = 0.0          #: 前処理＋推論にかかった時間 [ms]
+
+
 class TargetRoiCtrl(MsgBase):
     """GUIがドラッグ矩形で選んだ追従対象の意思。**telemetry_node が送り続け、
     `cam_track_node.py` が従う**（`AutoCtrl`/`CamModelCtrl` と同じ「現在の意思を
@@ -1127,6 +1171,8 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_E2E_MODEL: E2EModelCtrl,
     TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl,
     TOPIC_CAM_E2E_CMD: CamE2ECmd,
+    TOPIC_E2E_FUSION_PLAN: E2EFusionPlan,
+    TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl,
     TOPIC_TRACK_ROI: TargetRoiCtrl,
     TOPIC_TRACK_TARGET: TargetTrack,
 }

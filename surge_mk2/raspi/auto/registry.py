@@ -18,6 +18,7 @@ from .base import Planner
 from .cam_centerline import CamCenterline
 from .cam_e2e import CamE2E
 from .disparity_extender import DisparityExtender
+from .e2e_fusion import E2EFusion
 from .e2e_lidar import E2ELidar
 from .follow_object import FollowObject
 from .follow_the_gap import FollowTheGap
@@ -52,6 +53,7 @@ PLANNERS: dict[str, type[Planner]] = {
     Slam2dRoute.id: Slam2dRoute,
     LineTrace.id: LineTrace,
     E2ELidar.id: E2ELidar,
+    E2EFusion.id: E2EFusion,
     FollowObject.id: FollowObject,
     ParkToPoint.id: ParkToPoint,
     #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブのモード選択には出さない

@@ -82,7 +82,7 @@ PY="$ROOT/.venv/bin/python -u"
 # **surge-logger は既定でこの一覧に入れない**（SD 書き込みの無駄を避けるため。上記）。
 # **surge-cam-track / surge-cam-perception / surge-line-perception は入れる**
 # （いずれも待機中は認識・推論を回さない設計のため。上記）
-UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-line-perception surge-mdns)
+UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-mdns)
 WITH_LOGGER=0
 
 # `--max-speed` / `--max-steer` は **STM32 から `LIMITS`（車両の物理的な上限）を受け取るまでの
@@ -298,6 +298,11 @@ write_unit surge-cam-perception "カメラの走行可否セグメンテーシ�
 # `auto/ctrl` が `cam_e2e` の間だけ推論する。`docs/development.md` §12.3）
 write_unit surge-cam-e2e "カメラE2E(模倣学習)推論(cam_e2e用)" \
            "raspi.nodes.cam_e2e_node" "surge-camera.service"
+
+# e2e_fusion も**常時 enable**（同じ IDLE/ACTIVE 設計。`auto/ctrl` が `e2e_fusion` の間だけ推論する。
+# `docs/development.md` §12.4）。点群（surge-io）と画像（surge-camera）の両方を読む
+write_unit surge-e2e-fusion "E2E融合(LiDAR+カメラ)推論(e2e_fusion用)" \
+           "raspi.nodes.e2e_fusion_node" "surge-camera.service"
 
 # line_perception も**常時 enable**（`UNITS` に入っている）。`line_trace` が
 # 選ばれていない間は自身で IDLE に落ちる（`line_perception_node.py` の
