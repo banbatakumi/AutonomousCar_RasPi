@@ -13,7 +13,6 @@
 |---|---|
 | 走れる | `ready=True` だった割合（残りは理由ごとに数える） |
 | 舵の相関・RMS | planner が出した舵と、記録の指令の舵（同じ時刻） |
-| 直接の舵 RMS | モデルの舵の直接出力と、記録の指令の舵 |
 | 速度の比 | planner の目標速度 ÷ 記録の指令の速度（中央値）。1 より小さければ手本より遅い |
 | 経路の誤差 | `--data` を渡したとき。経路点とラベルの距離（最初の 2m／全体） |
 | dδ/dψ・理想比 | 車の向きを ψ ずらした入力にしたとき、経路を追う舵がどれだけ戻るか [rad/rad]（負で大きいほど戻す）と、「モデルが経路を正しく −ψ 回した場合」の値に対する割合。1 に近いほど、ずれを入力から読み取れている |
@@ -85,7 +84,7 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
     label_idx = {int(t): i for i, t in enumerate(labels["t"])} if labels is not None else {}
     stride = max(1, int(round(model.ds / float(labels["ds"])))) if labels is not None else 1
 
-    out = {"n": 0, "ready": 0, "reasons": Counter(), "steer": [], "steer_direct": [], "steer_ref": [],
+    out = {"n": 0, "ready": 0, "reasons": Counter(), "steer": [], "steer_ref": [],
            "speed": [], "speed_ref": [], "near": [], "full": [], "b": [], "infer_ms": [], "dpsi": [], "dpsi_ratio": []}
     vi = 0
     last_plan_t = 0
@@ -125,7 +124,6 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
             continue
         out["ready"] += 1
         out["steer"].append(st.target_steer)
-        out["steer_direct"].append(plan.steer)
         out["steer_ref"].append(float(rec.cmd_steer[ci]))
         if rec.cmd_mode[ci] == 2 and not rec.cmd_brake[ci] and rec.cmd_speed[ci] > 0.2:
             out["speed"].append(st.target_speed)
@@ -229,7 +227,7 @@ def main() -> int:
     cfg = json.loads(args.model.with_suffix(".json").read_text())
     trained = set(cfg.get("train_records", []))
 
-    print(f"{'記録':30} {'学習':4} {'周':>5} {'走れる':>6} {'舵相関':>6} {'舵RMS':>6} {'直接RMS':>7} {'速度比':>6} "
+    print(f"{'記録':30} {'学習':4} {'周':>5} {'走れる':>6} {'舵相関':>6} {'舵RMS':>6} {'速度比':>6} "
           f"{'近く':>6} {'全体':>6} {'b':>5} {'dδ/dψ':>6} {'理想比':>6} {'推論':>6}")
     for p in args.mcap_files:
         labels = None
@@ -247,10 +245,9 @@ def main() -> int:
 
         s, ref = np.asarray(r["steer"]), np.asarray(r["steer_ref"])
         rms = float(np.degrees(np.sqrt(np.mean((s - ref) ** 2)))) if len(s) else float("nan")
-        rms_d = float(np.degrees(np.sqrt(np.mean((np.asarray(r["steer_direct"]) - ref) ** 2)))) if len(s) else float("nan")
         ratio = float(np.median(np.asarray(r["speed"]) / np.asarray(r["speed_ref"]))) if r["speed"] else float("nan")
         print(f"{p.stem:30} {'○' if p.stem in trained else '—':4} {r['n']:5d} "
-              f"{100.0 * r['ready'] / max(1, r['n']):5.1f}% {_corr(s, ref):6.3f} {rms:5.1f}° {rms_d:6.1f}° "
+              f"{100.0 * r['ready'] / max(1, r['n']):5.1f}% {_corr(s, ref):6.3f} {rms:5.1f}° "
               f"{ratio:6.2f} {mean('near'):5.2f}m {mean('full'):5.2f}m {mean('b'):5.2f} {med('dpsi'):6.2f} {med('dpsi_ratio'):6.2f} "
               f"{mean('infer_ms'):5.1f}ms", flush=True)
         for why, n in r["reasons"].most_common(4):

@@ -40,20 +40,18 @@ def _contract(**over) -> dict:
 
 
 def _write_model(path: Path, contract: dict | None = None, *, tail: np.ndarray | None = None) -> None:
-    """出力 = `[avail[0]·0.5, avail[1]·0.5, 定数 4K 個]`。画像・点群を使ったかが舵・速度に出る。"""
+    """出力 = `tail`（定数 4K 個）× `avail[1]`。点群を使ったかが出力に出る。"""
     if tail is None:
         tail = np.concatenate([np.linspace(0.25, 1.0, K), np.zeros(K), np.full(K, 0.4), np.full(K, 0.1)])
     inputs = [helper.make_tensor_value_info("image", TensorProto.FLOAT, [1, 3, H, W]),
               helper.make_tensor_value_info("lidar", TensorProto.FLOAT, [1, HIST + 1, FOV + 1]),
               helper.make_tensor_value_info("state", TensorProto.FLOAT, [1, 3]),
               helper.make_tensor_value_info("avail", TensorProto.FLOAT, [1, 3])]
-    init = [numpy_helper.from_array(np.array([0, 1], dtype=np.int64), "idx"),
-            numpy_helper.from_array(np.array(0.5, dtype=np.float32), "half"),
+    init = [numpy_helper.from_array(np.array([1], dtype=np.int64), "idx"),
             numpy_helper.from_array(tail.astype(np.float32)[None, :], "tail")]
-    nodes = [helper.make_node("Gather", ["avail", "idx"], ["a2"], axis=1),
-             helper.make_node("Mul", ["a2", "half"], ["ctrl"]),
-             helper.make_node("Concat", ["ctrl", "tail"], ["output"], axis=1)]
-    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 2 + 4 * K])
+    nodes = [helper.make_node("Gather", ["avail", "idx"], ["a_lidar"], axis=1),
+             helper.make_node("Mul", ["tail", "a_lidar"], ["output"])]
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4 * K])
     model = helper.make_model(helper.make_graph(nodes, "dummy", inputs, [out], init),
                               opset_imports=[helper.make_opsetid("", 18)])
     model.ir_version = 9
@@ -129,7 +127,6 @@ class TestInferOnce(_Tmp):
         self.assertTrue(plan.ready, plan.reason)
         self.assertTrue(plan.has_image and plan.has_lidar)
         self.assertEqual(plan.t_capture, 10 * NS - 20_000_000)
-        self.assertAlmostEqual(plan.speed, 0.5 * 5.0)                 # avail[1]=1 → 0.5 × speed_ref
         np.testing.assert_allclose(plan.path_x, np.linspace(0.25, 1.0, K) * 2.0, atol=1e-6)
         np.testing.assert_allclose(plan.path_v, 2.0, atol=1e-6)
         np.testing.assert_allclose(plan.path_b, 0.1, atol=1e-6)
@@ -141,7 +138,6 @@ class TestInferOnce(_Tmp):
         plan = self.node.infer_once(rgb=None, t_image_ns=0, vs=self.vs, now_ns=10 * NS)
         self.assertTrue(plan.ready)
         self.assertFalse(plan.has_image)
-        self.assertAlmostEqual(plan.steer, 0.0, delta=0.02)           # avail[0]=0（舵の換算ぶんだけ動く）
         self.assertGreater(plan.t_capture, t_scan)
         self.assertLess(plan.t_capture - t_scan, 0.2 * NS)
 

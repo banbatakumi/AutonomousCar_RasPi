@@ -37,12 +37,9 @@ def _arc(kappa: float, k: int = K, ds: float = DS) -> tuple[list[float], list[fl
     return (np.sin(kappa * s) / kappa).tolist(), ((1.0 - np.cos(kappa * s)) / kappa).tolist()
 
 
-def _plan(kappa: float = 0.0, *, t: int = T0, v: float = 2.0, b: float = 0.1, steer: float | None = None,
-          **kw) -> E2EFusionPlan:
+def _plan(kappa: float = 0.0, *, t: int = T0, v: float = 2.0, b: float = 0.1, **kw) -> E2EFusionPlan:
     x, y = _arc(kappa)
-    if steer is None:
-        steer = math.atan(0.23 * kappa)
-    return E2EFusionPlan(ready=True, t_capture=t, steer=steer, speed=v, path_x=x, path_y=y,
+    return E2EFusionPlan(ready=True, t_capture=t, path_x=x, path_y=y,
                          path_v=[v] * K, path_b=[b] * K, ds=DS, has_image=True, has_lidar=True, **kw)
 
 
@@ -75,21 +72,20 @@ class TestPreproc(unittest.TestCase):
 
     def test_decode_output_layout(self):
         k = 3
-        vec = np.concatenate([[0.5, 0.4], [0.1, 0.2, 0.3], [-0.1, 0.0, 0.1], [0.2, 0.4, 0.6], [0.05, 0.1, 0.2]])
-        o = P.decode_output(vec, k=k, max_steer=0.4, speed_ref=5.0, xy_scale=8.0)
-        self.assertAlmostEqual(o.steer, 0.2)
-        self.assertAlmostEqual(o.speed, 2.0)
+        vec = np.concatenate([[0.1, 0.2, 0.3], [-0.1, 0.0, 0.1], [0.2, 0.4, 0.6], [0.05, 0.1, 0.2]])
+        self.assertEqual(P.output_size(k), vec.size)
+        o = P.decode_output(vec, k=k, speed_ref=5.0, xy_scale=8.0)
         np.testing.assert_allclose(o.path_xy, [[0.8, -0.8], [1.6, 0.0], [2.4, 0.8]])
         np.testing.assert_allclose(o.path_v, [1.0, 2.0, 3.0])
         np.testing.assert_allclose(o.path_b, [0.05, 0.1, 0.2])
 
     def test_decode_output_rejects_wrong_size_and_nan(self):
         with self.assertRaises(ValueError):
-            P.decode_output(np.zeros(5), k=3, max_steer=0.4, speed_ref=5.0, xy_scale=8.0)
+            P.decode_output(np.zeros(5), k=3, speed_ref=5.0, xy_scale=8.0)
         bad = np.zeros(P.output_size(3))
         bad[4] = np.nan
         with self.assertRaises(ValueError):
-            P.decode_output(bad, k=3, max_steer=0.4, speed_ref=5.0, xy_scale=8.0)
+            P.decode_output(bad, k=3, speed_ref=5.0, xy_scale=8.0)
 
 
 class TestPoseTrack(unittest.TestCase):
@@ -121,7 +117,7 @@ class TestRegistration(unittest.TestCase):
 
     def test_only_human_intent_params_are_visible(self):
         shown = [s.key for s in E2EFusion.params if not s.hidden]
-        self.assertEqual(shown, ["max_speed", "use_model_speed", "drive_direct"])
+        self.assertEqual(shown, ["max_speed", "use_model_speed"])
 
 
 class TestPlan(unittest.TestCase):
@@ -149,7 +145,7 @@ class TestPlan(unittest.TestCase):
     def test_path_is_shifted_by_the_motion_since_capture(self):
         """経路は 0.2s 前の車体座標。その間に左へ回っていたら、同じ直線の経路は今の車から見て右にある。"""
         pl, vs = _planner(speed=1.0, yaw_rate=1.0)           # 左へ回りながら走っている
-        st = pl.plan(_plan(0.0, t=T0 - NS // 5, steer=-0.2), vs, self.p, 0.1)
+        st = pl.plan(_plan(0.0, t=T0 - NS // 5), vs, self.p, 0.1)
         self.assertTrue(st.ready, st.reason)
         self.assertLess(st.target_steer, -0.05)              # 右へ戻す
         # 同じ経路を「今」撮ったものとして渡すと、まっすぐ
@@ -197,7 +193,9 @@ class TestPlan(unittest.TestCase):
         pl, vs = _planner()
         self.assertEqual(pl.plan(E2EFusionPlan(ready=False, reason="モデルが無い", t_capture=T0), vs, self.p,
                                  0.1).reason, "モデルが無い")
-        self.assertFalse(pl.plan(_plan(0.0, steer=float("nan")), vs, self.p, 0.1).ready)
+        nan_v = _plan(0.0)
+        nan_v.path_v[2] = float("nan")
+        self.assertFalse(pl.plan(nan_v, vs, self.p, 0.1).ready)
         bad = _plan(0.0)
         bad.path_y[3] = float("inf")
         self.assertFalse(pl.plan(bad, vs, self.p, 0.1).ready)
@@ -207,23 +205,10 @@ class TestPlan(unittest.TestCase):
         self.assertIn("後ろ", pl.plan(back, vs, self.p, 0.1).reason)
         self.assertFalse(pl.plan(_plan(0.0), None, self.p, 0.1).ready)
 
-    def test_disagreement_between_path_and_direct_steer_slows_down(self):
-        pl, vs = _planner(speed=2.0)
-        agree = pl.plan(_plan(0.0, v=2.5), vs, self.p, 0.1)
-        pl, vs = _planner(speed=2.0)
-        clash = pl.plan(_plan(0.0, v=2.5, steer=0.35), vs, self.p, 0.1)   # 経路は直進、直接出力は左 20°
-        self.assertIn("食い違い", clash.reason)
-        self.assertAlmostEqual(clash.target_speed, agree.target_speed * self.p["disagree_slow"], places=3)
-        self.assertAlmostEqual(clash.target_steer, agree.target_steer, places=6)   # 舵は経路のまま
-
-    def test_drive_direct_uses_the_direct_outputs(self):
-        p = merged_params("e2e_fusion", {"max_speed": 3.0, "drive_direct": 1.0})
-        self.assertEqual(p["drive_direct"], 1.0)
-        pl, vs = _planner()
-        st = pl.plan(_plan(0.8, v=1.5, steer=0.05), vs, p, 0.1)
-        self.assertAlmostEqual(st.target_steer, 0.05)
-        self.assertAlmostEqual(st.target_speed, 1.5)
-        self.assertIsNone(pl.tick(vs))                                 # 直接出力では合間に追い直さない
+    def test_params_have_no_direct_output_settings(self):
+        p = merged_params("e2e_fusion", {})
+        for key in ("drive_direct", "disagree_deg", "disagree_slow"):
+            self.assertNotIn(key, p)
 
 
 class TestTick(unittest.TestCase):

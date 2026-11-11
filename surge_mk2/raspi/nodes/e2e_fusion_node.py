@@ -1,4 +1,4 @@
-"""e2e_fusion_node — LiDAR＋前方カメラ＋車両状態から、舵・速度・前方の経路点を推論する。
+"""e2e_fusion_node — LiDAR＋前方カメラ＋車両状態から、前方の経路点を推論する。
 
     .venv/bin/python -m raspi.nodes.e2e_fusion_node
     .venv/bin/python -m raspi.nodes.e2e_fusion_node --model models/e2e_fusion/v1.onnx
@@ -54,7 +54,6 @@ from raspi.auto.base import scan_window  # noqa: E402
 from raspi.bus import Policy  # noqa: E402
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, preprocess, to_rgb  # noqa: E402
-from raspi.core.control_params import steer_relink  # noqa: E402
 from raspi.core.e2e_fusion_preproc import (  # noqa: E402
     INPUT_NAMES,
     PREPROC_VERSION,
@@ -129,8 +128,6 @@ class FusionOnnx:
         self.max_steer = float(cfg["max_steer"])
         self.speed_ref = float(cfg["speed_ref"])
         self.yaw_rate_ref = float(cfg["yaw_rate_ref"])
-        link = cfg.get("steer_link")
-        self.steer_link = (float(link[0]), float(link[1])) if link else None
         self._zero_image = np.zeros((1, 3, self.input_size[1], self.input_size[0]), dtype=np.float32)
         self._zero_lidar = np.zeros((1, self.history + 1, self.fov_deg + 1), dtype=np.float32)
 
@@ -152,8 +149,7 @@ class FusionOnnx:
             "avail": avail,
         }
         out = np.asarray(self.session.run(None, feed)[0]).reshape(-1)
-        return decode_output(out, k=self.k, max_steer=self.max_steer, speed_ref=self.speed_ref,
-                             xy_scale=self.xy_scale)
+        return decode_output(out, k=self.k, speed_ref=self.speed_ref, xy_scale=self.xy_scale)
 
 
 def load_model(onnx_path: Path) -> FusionOnnx:
@@ -166,7 +162,7 @@ def load_model(onnx_path: Path) -> FusionOnnx:
     cfg = json.loads(cfg_path.read_text())
     if cfg.get("preproc_version") != PREPROC_VERSION:
         raise ValueError(f"入出力の版が違う（モデル {cfg.get('preproc_version')}・ノード {PREPROC_VERSION}）。"
-                         "再エクスポートが必要")
+                         "`ml_e2e.export_onnx` で書き出し直す")
     if cfg.get("image_preproc_version") != PREPROC_VERSION_CROP:
         raise ValueError(f"画像の前処理の版が違う（モデル {cfg.get('image_preproc_version')}・"
                          f"ノード {PREPROC_VERSION_CROP}）")
@@ -292,14 +288,9 @@ class E2EFusionNode:
         except Exception as e:                                # noqa: BLE001
             print(f"# e2e_fusion の推論が例外: {e}", file=sys.stderr, flush=True)
             return self.failed(f"推論に失敗: {e}", seq=seq)
-        steer = out.steer
-        link = self.model.steer_link
-        if link is not None:
-            # 学習したときの換算の舵角 → 今の車の換算の舵角（同じモータ角になる値）
-            steer = steer_relink(steer, link, self.vehicle.steer_link)
         t_ref = t_image_ns if rgb is not None else t_scan + int(_SCAN_AGE_NO_IMAGE_S * NS)
         return E2EFusionPlan(
-            ready=True, steer=steer, speed=out.speed,
+            ready=True,
             path_x=out.path_xy[:, 0].tolist(), path_y=out.path_xy[:, 1].tolist(),
             path_v=out.path_v.tolist(), path_b=out.path_b.tolist(), ds=self.model.ds,
             has_image=rgb is not None, has_lidar=lidar is not None, model=self.model_name,

@@ -1,10 +1,13 @@
-"""ml_e2e/model.py — 画像・点群・車両状態から、舵・速度・経路点を出すモデル。
+"""ml_e2e/model.py — 画像・点群・車両状態から、前方の経路点を出すモデル。
 
 ```
 image (3,h,w) ── MobileNetV3-Small ── 平均プール ── 全結合 ─┐
-lidar (H+1,n) ── 1D-CNN ─────────────── 全結合 ─┼─ 連結 → 全結合×2 ─┬─ 舵・速度
-state (3,)    ── 全結合 ───────────────────────┘                  └─ 経路点 K×(x, y, v, b)
+lidar (H+1,n) ── 1D-CNN ─────────────── 全結合 ─┼─ 連結 → 全結合×2 ── 経路点 K×(x, y, v, b)
+state (3,)    ── 全結合 ───────────────────────┘
 ```
+
+出力は経路点だけ（各点の位置・速度・不確かさ）。舵・速度の直接出力は持たない——走行は経路点を追い
+（`raspi/auto/e2e_fusion.py`）、直接出力は推論の遅れを補償できないので使い道が無かった（2026-11-11 に外した）。
 
 入出力の並びと正規化は `raspi/core/e2e_fusion_preproc.py` が正。
 
@@ -26,7 +29,7 @@ import torch
 import torch.nn as nn
 import torchvision
 
-__all__ = ["FusionModel"]
+__all__ = ["FusionModel", "load_weights"]
 
 _BN_MOMENTUM = 0.1
 #: `b`（不確かさ [m]）の出力範囲。下限は「位置を 1cm より細かく言い当てた」と主張させないため
@@ -80,7 +83,6 @@ class FusionModel(nn.Module):
             nn.Linear(feat * 2 + 32, hidden), nn.ReLU(inplace=True),
             nn.Linear(hidden, hidden), nn.ReLU(inplace=True),
         )
-        self.ctrl_head = nn.Linear(hidden, 2)
         self.path_head = nn.Linear(hidden, 4 * k)
         # `b` の初期値を約 0.3m にする（既定の 0 だと範囲の真ん中 2.5m から始まり、最初の数百回は
         # 「全部わからない」が損失を下げる楽な解になる）
@@ -89,17 +91,23 @@ class FusionModel(nn.Module):
 
     def forward(self, image: torch.Tensor, lidar: torch.Tensor, state: torch.Tensor,
                 avail: torch.Tensor) -> torch.Tensor:
-        """出力は `(N, 2 + 4K)`（`e2e_fusion_preproc.decode_output` の並び）。"""
+        """出力は `(N, 4K)`（`e2e_fusion_preproc.decode_output` の並び）。"""
         a_img, a_lid, a_st = avail[:, 0:1], avail[:, 1:2], avail[:, 2:3]
         f_img = self.img_fc(self.encoder(image)) * a_img + self.no_image * (1.0 - a_img)
         f_lid = self.lidar_fc(self.lidar_cnn(lidar)) * a_lid + self.no_lidar * (1.0 - a_lid)
         f_st = self.state_fc(state) * a_st + self.no_state * (1.0 - a_st)
         z = self.trunk(torch.cat([f_img, f_lid, f_st], dim=1))
 
-        c = self.ctrl_head(z)
         p = self.path_head(z)
         k = self.k
         xy = p[:, :2 * k]
         v = torch.sigmoid(p[:, 2 * k:3 * k])
         b = B_MIN + (B_MAX - B_MIN) * torch.sigmoid(p[:, 3 * k:])
-        return torch.cat([torch.tanh(c[:, :1]), torch.sigmoid(c[:, 1:]), xy, v, b], dim=1)
+        return torch.cat([xy, v, b], dim=1)
+
+
+def load_weights(model: FusionModel, path, map_location="cpu") -> None:
+    """保存した重みを読む。**舵・速度の直接出力があった頃の重み（`ctrl_head.*`）は、そのヘッドだけ捨てる**
+    （残りの層は同じ形なので、経路点の出力は変わらない）。"""
+    state = torch.load(path, map_location=map_location)
+    model.load_state_dict({k: v for k, v in state.items() if not k.startswith("ctrl_head.")})

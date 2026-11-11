@@ -3,19 +3,17 @@
 推論は `raspi/nodes/e2e_fusion_node.py`（独立プロセス）が行い、ここはその結果（`E2EFusionPlan`）を
 走行指令にする。学習は `ml_e2e/`（実機の記録の模倣）。地図も自己位置も使わない。
 
-## 経路点を追う（舵・速度の直接出力では走らせない）
+## 経路点を追う
 
-モデルは舵・速度も直接出すが、既定では**経路点を Pure Pursuit で追う**（`raspi/nav/purepursuit.follow`）。
+モデルが出すのは経路点だけ（舵・速度の直接出力は持たない）。それを **Pure Pursuit で追う**
+（`raspi/nav/purepursuit.follow`）。
 
 - **推論の遅れを幾何で消せる。** 経路点は画像の撮影時刻の車体座標。撮影から今までに車が動いたぶんを
-  推測航法（車速とヨーレートの積分）で求め、経路を「今の車」から見た位置へ移してから追う。直接出力の舵は
-  撮影時刻の舵で、遅れのぶんだけ古い（`cam_e2e` はラベルを時間でずらして補った）
+  推測航法（車速とヨーレートの積分）で求め、経路を「今の車」から見た位置へ移してから追う。舵を直接出す
+  モデルだと撮影時刻の舵になり、遅れのぶんだけ古い（`cam_e2e` はラベルを時間でずらして補った）
 - **点群の合間も追える**（`tick`、50Hz）。推論は 10Hz だが、その間も経路の上の位置は進む
 - **速度の上限を物理から掛けられる。** 経路の曲率と `Vehicle` の横の限界から出した速度（`raceline.speed_profile`）を
   モデルの速度に被せる。手本に速度の無いコース（人がゆっくり走っただけ）は、こちらだけで走る
-
-直接出力の舵は、経路を追った舵との**食い違い**を見るのに使う: 大きく違えばモデルの中で答えが割れているので
-速度を落とす。「直接出力で走る」を ON にすると、経路点を使わず直接出力で走る（実機で比べるための設定）。
 
 ## 止まる条件（`ready=False`）
 
@@ -136,14 +134,6 @@ class E2EFusion(Planner):
                         "OFF: 経路の曲がり具合と車の限界だけで決める（速度の手本が無いコース向け）"),
         ParamSpec(key="b_max", hidden=True, label="経路の不確かさの上限", min=0.1, max=3.0, step=0.05,
                   default=0.8, unit="m", note="注視点までの経路点の不確かさがこれを超えたら走らない"),
-        ParamSpec(key="disagree_deg", hidden=True, label="舵の食い違いの上限", min=1.0, max=30.0, step=1.0,
-                  default=10.0, unit="°",
-                  note="経路を追った舵と直接出力の舵の差がこれを超えたら `disagree_slow` 倍の速度にする"),
-        ParamSpec(key="disagree_slow", hidden=True, label="食い違い時の速度の倍率", min=0.2, max=1.0, step=0.05,
-                  default=0.6, unit=""),
-        bool_param(key="drive_direct", label="直接出力で走る（比較用）", default=0.0,
-                   note="ON: 経路点を追わず、モデルが直接出した舵・速度で走る。経路点で走る場合との比較用"
-                        "（推論の遅れを補償できないので、速いほど不利）"),
         ParamSpec(key="look_k", hidden=True, label="注視距離の速度係数", min=0.1, max=1.5, step=0.05,
                   default=0.45, unit="s"),
         ParamSpec(key="look_min", hidden=True, label="注視距離の下限", min=0.2, max=1.5, step=0.05,
@@ -163,7 +153,6 @@ class E2EFusion(Planner):
         self._sff_t = 0
         #: `tick()` が使う、今追っている経路と設定
         self._ctx: tuple[rl_mod.RaceLine, dict[str, float]] | None = None
-        self._slow = 1.0
         #: 今の経路の上で最後に居た点の添字。**最寄りの点はこの近くだけで探す**——経路が折り返して
         #: 自分の近くへ戻ってくる（ヘアピン・周回）と、全体から探した最寄りが経路の終わりに飛ぶ
         self._idx = 0
@@ -173,7 +162,6 @@ class E2EFusion(Planner):
         self._sff.reset()
         self._sff_t = 0
         self._ctx = None
-        self._slow = 1.0
         self._idx = 0
 
     def _cmd_latency(self) -> float:
@@ -260,7 +248,7 @@ class E2EFusion(Planner):
                                                catch_s=self.vehicle.speed_loop_tau_s)
         else:
             speed, ramp = self._sff.command(path, pos, vs.speed, dt, self._sff_cfg), 0.0
-        return pp.steer, min(speed, p["max_speed"]) * self._slow, ramp, pp.cross_track
+        return pp.steer, min(speed, p["max_speed"]), ramp, pp.cross_track
 
     # ── 判断 ──
 
@@ -274,9 +262,6 @@ class E2EFusion(Planner):
         if not plan.ready:
             st.reason = plan.reason or "推論結果が無い"
             return st
-        if not (math.isfinite(plan.steer) and math.isfinite(plan.speed)):
-            st.reason = "推論結果が不正（NaN/Inf）"
-            return st
         age = (int(vs.t_capture) - int(plan.t_capture)) / NS
         if age > _PLAN_MAX_AGE_S:
             st.reason = f"経路が古い（{age * 1e3:.0f}ms 前の入力）"
@@ -287,21 +272,9 @@ class E2EFusion(Planner):
             st.reason = why
             return st
 
-        self._slow = 1.0
         self._idx = 0                      # 新しい経路は車の位置から始まる
         steer, speed, ramp, cross = self._command(path, p, vs)
-        gap = abs(steer - plan.steer)
-        note = ""
-        if gap > math.radians(p["disagree_deg"]):
-            self._slow = p["disagree_slow"]
-            speed *= self._slow
-            note = f"・舵の食い違い {math.degrees(gap):.0f}° で減速"
-        if p["drive_direct"] > 0:
-            steer = max(-self.vehicle.max_steer, min(self.vehicle.max_steer, plan.steer))
-            speed, ramp = min(plan.speed, p["max_speed"]), 0.0
-            note += "・直接出力"
-        else:
-            self._ctx = (path, p)
+        self._ctx = (path, p)
 
         st.ready = True
         st.target_steer = st.heading = steer
@@ -310,7 +283,7 @@ class E2EFusion(Planner):
         st.cross_track = cross
         inputs = "＋".join(n for n, ok in (("画像", plan.has_image), ("点群", plan.has_lidar)) if ok)
         st.reason = (f"経路 {path.length:.1f}m を追従（{inputs}・推論 {plan.infer_ms:.0f}ms・"
-                     f"遅れ {age * 1e3:.0f}ms{note}）")
+                     f"遅れ {age * 1e3:.0f}ms）")
         return st
 
     def tick(self, vs: VehicleState | None) -> tuple[float, float | None, float] | None:

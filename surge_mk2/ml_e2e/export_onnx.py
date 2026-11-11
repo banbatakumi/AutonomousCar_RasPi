@@ -7,6 +7,9 @@
 埋めない**（学習後に同定で値が変わると、学習時と違う基準で物理量へ戻すことになる）。
 `raspi/nodes/e2e_fusion_node.py` の `load_model()` がこの契約を照合し、合わないモデルは読まない。
 
+**舵・速度の直接出力があった頃（入出力の版 1）に学習した重みも書き出せる。** 入力と経路点の並びは同じで、
+直接出力のヘッドを捨てるだけ（`model.load_weights`）。契約の版は今の版で書く。
+
 書き出した後、PyTorch と ONNXRuntime の出力を突き合わせ、さらに**実車と同じ `load_model()` で読めること**を確かめる。
 """
 
@@ -23,7 +26,7 @@ import torch
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from ml_e2e.model import FusionModel  # noqa: E402
+from ml_e2e.model import FusionModel, load_weights  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP  # noqa: E402
 from raspi.core.e2e_fusion_preproc import INPUT_NAMES, PREPROC_VERSION  # noqa: E402
 
@@ -32,7 +35,9 @@ __all__ = ["CONTRACT_KEYS", "build_model", "export", "verify_parity", "main"]
 #: `train_config.json` から契約へ写すキー
 CONTRACT_KEYS = ("preproc_version", "image_preproc_version", "input_size", "crop_x", "fov_deg", "max_range",
                  "history", "k", "ds", "xy_scale", "max_steer", "speed_ref", "yaw_rate_ref", "steer_link",
-                 "label_shift_ms", "maps", "train_records")
+                 "maps", "train_records")
+#: 学習時の入出力の版のうち、今の版として書き出せるもの（1 = 直接出力のヘッドつき。入力と経路点は同じ）
+_EXPORTABLE_VERSIONS = (1, PREPROC_VERSION)
 DEFAULT_MODELS_DIR = _ROOT / "models" / "e2e_fusion"
 
 
@@ -53,9 +58,10 @@ def _dummy(cfg: dict, rng: np.random.Generator | None = None) -> tuple[np.ndarra
 def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: str = "") -> dict:
     """`run_dir` の重みを `out_path` へ書き、同名の `.json` に契約を書く。契約の dict を返す。"""
     cfg = json.loads((run_dir / "train_config.json").read_text())
-    if cfg.get("preproc_version") != PREPROC_VERSION:
+    if cfg.get("preproc_version") not in _EXPORTABLE_VERSIONS:
         raise ValueError(f"学習時の入出力の版 {cfg.get('preproc_version')} が今の版 {PREPROC_VERSION} と違う。"
                          "学習し直してください")
+    cfg["preproc_version"] = PREPROC_VERSION
     if cfg.get("image_preproc_version") != PREPROC_VERSION_CROP:
         raise ValueError("学習時の画像の前処理の版が今と違う。学習し直してください")
     missing = [key for key in CONTRACT_KEYS if key not in cfg]
@@ -63,7 +69,7 @@ def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: 
         raise ValueError(f"train_config.json に {missing} が無い")
 
     model = build_model(cfg)
-    model.load_state_dict(torch.load(run_dir / checkpoint, map_location="cpu"))
+    load_weights(model, run_dir / checkpoint)
     model.eval()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
@@ -114,7 +120,7 @@ def main() -> int:
     try:
         cfg = export(args.run, out, checkpoint=args.checkpoint, note=note)
         model = build_model(cfg)
-        model.load_state_dict(torch.load(args.run / args.checkpoint, map_location="cpu"))
+        load_weights(model, args.run / args.checkpoint)
         err = verify_parity(out, model, cfg)
         from raspi.nodes.e2e_fusion_node import load_model
         load_model(out)                    # 実車と同じ読み込みが通るか

@@ -26,9 +26,9 @@ def _meta() -> dict:
 
 class TestCommands(unittest.TestCase):
     def test_extract(self):
-        cmd = A.build_extract_cmd("py", ["a.mcap", "b.mcap"], "out", label_shift_ms=80, include_self=True)
+        cmd = A.build_extract_cmd("py", ["a.mcap", "b.mcap"], "out", include_self=True)
         self.assertEqual(cmd, ["py", "-m", "ml_e2e.extract", "a.mcap", "b.mcap", "--out", "out",
-                               "--label-shift-ms", "80", "--include-self"])
+                               "--include-self"])
         self.assertNotIn("--include-self", A.build_extract_cmd("py", ["a.mcap"], "out"))
 
     def test_train(self):
@@ -126,7 +126,7 @@ class TestExtractWarning(unittest.TestCase):
         self.assertIn("画像", A.extract_warning(["# 合計 0枚 → out"]))
 
     def test_epoch_line_of_train_is_parsed(self):
-        line = "epoch   3/20  loss=0.9112  val_mae=0.5800  near=0.176m  b=0.34m  steer=3.3deg  (197s)"
+        line = "epoch   3/20  loss=0.9112  val_mae=0.5800  near=0.176m  b=0.34m  v=0.21m/s  (197s)"
         self.assertEqual(A.parse_epoch_line(line), (3, 0.9112, 0.58))
 
 

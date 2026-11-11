@@ -96,7 +96,9 @@ class TestExtractAutoRun(unittest.TestCase):
         self.assertGreater(self.info["samples"], 100)
         self.assertEqual(self.info["line"], self.info["samples"])
         self.assertTrue((self.data["path_src"] == X.SRC_LINE).all())
-        self.assertTrue(self.data["v_ok"].all() and self.data["speed_ok"].all())
+        self.assertTrue(self.data["v_ok"].all())
+        for key in ("steer_cmd", "speed_cmd", "speed_ok"):            # 舵・速度の指令は手本にしない
+            self.assertNotIn(key, self.data)
 
     def test_path_points_lie_on_the_line_at_the_image_time(self):
         """経路点を真の姿勢（撮影時刻）で地図へ戻すと、最適ラインの上に ds おきに並ぶ。"""
@@ -121,9 +123,7 @@ class TestExtractAutoRun(unittest.TestCase):
         idx = self.data["scan_idx"][10]
         self.assertEqual(idx.tolist(), [idx[0], idx[0] - 1, idx[0] - 2])
 
-    def test_command_labels_and_state(self):
-        np.testing.assert_allclose(self.data["steer_cmd"], 0.1, atol=1e-6)
-        np.testing.assert_allclose(self.data["speed_cmd"], 1.2, atol=1e-6)
+    def test_state(self):
         np.testing.assert_allclose(self.data["state"][:, 0], SPEED, atol=1e-6)
         np.testing.assert_allclose(self.data["state"][:, 1], 0.11, atol=1e-6)
         np.testing.assert_allclose(self.data["state"][:, 2], OMEGA, atol=1e-6)
@@ -177,8 +177,6 @@ class TestExtractOtherRuns(unittest.TestCase):
         d = np.load(npz)
         self.assertEqual(info["future"], info["samples"])
         self.assertFalse(d["v_ok"].any())
-        self.assertFalse(d["speed_ok"].any())
-        np.testing.assert_allclose(d["steer_cmd"], 0.1, atol=1e-6)     # 舵は手本にする
         # 通った軌跡は左へ曲がる円弧: 原点からの弦の長さが円の弦と合う
         p = d["path_xy"][5]
         ok = d["path_valid"][5]

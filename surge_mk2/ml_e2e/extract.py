@@ -3,21 +3,23 @@
     .venv/bin/python -m ml_e2e.extract ~/Downloads/toyota/*.mcap --out ml_e2e/data/v1
 
 画像つきで録った記録（GUI の MCAP ボタン・`tools/record.sh --image-hz 10`）の画像1枚ごとに、
-その時刻の点群・車両状態と、ラベル（前方の経路点・各点の速度・舵と速度の指令）を組にする。
+その時刻の点群・車両状態と、ラベル（前方の経路点・各点の速度）を組にする。
 
 出力（記録1本につき）:
 
 - `<out>/frames/<記録名>/<撮影時刻>.jpg` — 画像（記録のまま）
 - `<out>/<記録名>.npz` — 標本の配列（下の「配列」）
-- `<out>/dataset.json` — 抽出の設定（`K`・`ds`・手本のずらし量など）と記録ごとの内訳
+- `<out>/dataset.json` — 抽出の設定（`K`・`ds` など）と記録ごとの内訳
 
 ## ラベル
 
-| 記録の状況 | 経路点（`path_src`） | 舵・速度の指令 |
-|---|---|---|
-| `slam2d_route`／`slam2d_raceline` が RACE で走行中 | 1 = 地図の最適ライン（`labels.path_from_line`）。速度はラインの計画速度 | `/cmd` |
-| 上記以外の自動運転（回避中・探索中・他の planner） | 2 = その後に通った軌跡（`labels.path_from_future`）。速度は実速度 | `/cmd` |
-| 人の手動運転 | 2 = その後に通った軌跡。**速度は手本にしない**（`v_ok=False`） | 舵だけ（`speed_ok=False`） |
+| 記録の状況 | 経路点（`path_src`） |
+|---|---|
+| `slam2d_route`／`slam2d_raceline` が RACE で走行中 | 1 = 地図の最適ライン（`labels.path_from_line`）。速度はラインの計画速度 |
+| 上記以外の自動運転（回避中・探索中・他の planner） | 2 = その後に通った軌跡（`labels.path_from_future`）。速度は実速度 |
+| 人の手動運転 | 2 = その後に通った軌跡。**速度は手本にしない**（`v_ok=False`） |
+
+`/cmd` は「誰が運転していたか」を見るのに使う。舵・速度の指令そのものは手本にしない（モデルは経路点だけを出す）。
 
 人の走行に最適ラインのラベルを付ける（線から外れた所で戻る経路を教える）には、地図上の姿勢が要る。
 記録に `slam2d_route` の姿勢が入っていない区間は今は 2 になる。
@@ -25,7 +27,7 @@
 ## 使わないコマ（理由ごとに数えて最後に表示する）
 
 DISARM 中・入力途絶の指令（`:stale`）・トルクモード・このモデル自身の走行（`auto:e2e_fusion`。
-`--include-self` で経路点だけ使う）・止まっている・点群が無い・経路点が1点も作れない。
+`--include-self` で使う）・止まっている・点群が無い・経路点が1点も作れない。
 
 ## 時刻
 
@@ -35,8 +37,7 @@ DISARM 中・入力途絶の指令（`:stale`）・トルクモード・この�
   0.07〜0.13s。記録の画像は 10Hz なので標本では 0.07〜0.17s に散り、実車の範囲を含む
 - 地図上の姿勢は `AutoState` の姿勢（点群の基準時刻のもの）を推測航法で撮影時刻まで進める。
   姿勢の時刻のずれは記録ごとに `records.estimate_pose_lag` で求める
-- 舵・速度の指令は `--label-shift-ms` だけ後のもの（実車の推論の遅れの補正。直接出力のヘッド用で、
-  経路点には掛けない——経路点は実行時に推測航法でずらせる）
+- 推論の遅れぶんラベルをずらすことはしない（経路点は実行時に推測航法でずらせる）
 """
 
 from __future__ import annotations
@@ -72,12 +73,11 @@ DEFAULT_POSE_LAG_S = 0.055
 
 class ExtractConfig:
     def __init__(self, *, k: int = 40, ds: float = 0.25, history: int = 3,
-                 label_shift_ms: int = 100, min_speed: float = 0.15, min_score: float = 0.35,
+                 min_speed: float = 0.15, min_score: float = 0.35,
                  max_cross: float = 1.0, include_self: bool = False) -> None:
         self.k = k                          #: 経路点の数（学習時に間引ける多めの数）
         self.ds = ds                        #: 経路点の間隔 [m]
         self.history = history              #: 保存する点群の周の数（最新を含む）
-        self.label_shift_ms = label_shift_ms
         self.min_speed = min_speed          #: これ未満の車速のコマは「止まっている」として使わない
         self.min_score = min_score          #: 最適ラインのラベルに使う自己位置の一致度の下限
         self.max_cross = max_cross          #: 最適ラインからこれ以上離れていたらラインのラベルにしない
@@ -132,7 +132,6 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
         lag = DEFAULT_POSE_LAG_S
     pose_t = rec.st_t - (rec.st_scan_age * NS).astype(np.int64) + int(lag * NS) if len(rec.st_t) else rec.st_t
     line_cache: dict[int, tuple] = {}
-    shift = cfg.label_shift_ms * 1_000_000
     stem = Path(path).stem
     img_dir = out_dir / "frames" / stem
     if write_images:
@@ -142,7 +141,7 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
 
     rows: dict[str, list] = {k: [] for k in (
         "t", "scan_idx", "scan_age", "state", "path_xy", "path_v", "path_valid", "path_src", "cross",
-        "steer_cmd", "speed_cmd", "speed_ok", "v_ok", "kind", "map_pose")}
+        "v_ok", "kind", "map_pose")}
     names: list[str] = []
     for t, jpg in R.iter_images(path):
         ci = _nearest(rec.cmd_t, t)
@@ -195,14 +194,6 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
             rejects["経路点が作れない"] += 1
             continue
 
-        # ── 舵・速度の指令（推論の遅れぶん後のもの） ──
-        cj = _nearest(rec.cmd_t, t + shift)
-        same_driver = _kind(rec, cj, cfg)[0] == kind and abs(int(rec.cmd_t[cj]) - (t + shift)) <= 0.1 * NS
-        steer_cmd = float(rec.cmd_steer[cj]) if same_driver else np.nan
-        speed_cmd = 0.0 if rec.cmd_brake[cj] else float(rec.cmd_speed[cj])
-        if kind == KIND_SELF:
-            steer_cmd = np.nan
-
         name = f"{t}.jpg"
         if write_images:
             (img_dir / name).write_bytes(jpg)
@@ -216,9 +207,6 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
         rows["path_valid"].append(label.valid)
         rows["path_src"].append(src)
         rows["cross"].append(label.cross)
-        rows["steer_cmd"].append(steer_cmd)
-        rows["speed_cmd"].append(speed_cmd)
-        rows["speed_ok"].append(kind == KIND_AUTO and same_driver)
         rows["v_ok"].append(src == SRC_LINE or kind == KIND_AUTO)
         rows["kind"].append(kind)
         rows["map_pose"].append(map_pose)
@@ -246,9 +234,6 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
         path_valid=np.array(rows["path_valid"], dtype=bool),
         path_src=src_arr,
         cross=np.array(rows["cross"], dtype=np.float32),
-        steer_cmd=np.array(rows["steer_cmd"], dtype=np.float32),
-        speed_cmd=np.array(rows["speed_cmd"], dtype=np.float32),
-        speed_ok=np.array(rows["speed_ok"], dtype=bool),
         v_ok=np.array(rows["v_ok"], dtype=bool),
         kind=kind_arr,
         map_pose=np.array(rows["map_pose"], dtype=np.float64),
@@ -263,14 +248,10 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--k", type=int, default=40, help="経路点の数（既定 40）")
     ap.add_argument("--ds", type=float, default=0.25, help="経路点の間隔 [m]（既定 0.25）")
-    ap.add_argument("--label-shift-ms", type=int, default=100,
-                    help="舵・速度の指令を、絵よりこの時間だけ後のものにする（既定 100）")
-    ap.add_argument("--include-self", action="store_true",
-                    help="このモデル自身の走行も使う（経路点だけ。舵・速度は手本にしない）")
+    ap.add_argument("--include-self", action="store_true", help="このモデル自身の走行も使う")
     args = ap.parse_args()
 
-    cfg = ExtractConfig(k=args.k, ds=args.ds, label_shift_ms=args.label_shift_ms,
-                        include_self=args.include_self)
+    cfg = ExtractConfig(k=args.k, ds=args.ds, include_self=args.include_self)
     args.out.mkdir(parents=True, exist_ok=True)
     meta_path = args.out / "dataset.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {"config": cfg.to_json(), "records": {}}

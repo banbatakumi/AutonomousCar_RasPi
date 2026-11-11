@@ -7,8 +7,8 @@
 
 - **向きをずらす**（`yaw_max_deg`）: 車が ψ だけ左を向いたことにする。画像は窓を横へずらし
   （`ml_cam_e2e/yaw_aug.py`）、点群は ψ ぶん角度をずらし、経路点は −ψ 回す（どれも同じ ψ）。
-  舵の手本は `δ − k·ψ`。点群と経路点は幾何として正確で、画像だけが近似
-- **左右反転**: 画像・点群・経路点・舵・ヨーレートを一緒に反転する
+  点群と経路点は幾何として正確で、画像だけが近似
+- **左右反転**: 画像・点群・経路点と、車両状態の実舵角・ヨーレートを一緒に反転する
 - **画像の外乱**（`photo_strength`）: ブレ・ノイズ・色味・JPEG（`ml_cam_e2e/photo_aug.py`）
 - 入力を伏せる（どの入力が使えるかの `avail`）のは学習ループ側（`train.py`）
 """
@@ -131,8 +131,6 @@ class FusionDataset(Dataset):
     | `image` | (3, h, w) | |
     | `lidar` | (H+1, n) | |
     | `state` | (3,) | |
-    | `ctrl` | (2,) | 舵（−1〜1）・速度（0〜1）の手本 |
-    | `ctrl_ok` | (2,) | その手本を損失に使うか |
     | `path` | (K, 2) | 経路点（`xy_scale` で割った値） |
     | `path_v` | (K,) | 各点の速度（0〜1） |
     | `pt_ok` | (K,) | その点が有効か |
@@ -140,7 +138,7 @@ class FusionDataset(Dataset):
     """
 
     def __init__(self, records: list[Record], data_dir: Path, spec: InputSpec, *, augment: bool = False,
-                 flip: bool = True, yaw_max_deg: float = 0.0, yaw_k: float = 0.8, margin_deg: int = 0,
+                 flip: bool = True, yaw_max_deg: float = 0.0, margin_deg: int = 0,
                  fx_px: float = 0.0, body_mask: np.ndarray | None = None, photo_strength: float = 0.0,
                  load_images: bool = True) -> None:
         self.records = records
@@ -149,7 +147,6 @@ class FusionDataset(Dataset):
         self.augment = augment
         self.flip = flip
         self.yaw_max_deg = yaw_max_deg
-        self.yaw_k = yaw_k
         self.margin_deg = margin_deg
         self.fx_px = fx_px
         self.body_mask = body_mask
@@ -243,19 +240,10 @@ class FusionDataset(Dataset):
         pt_ok = d["path_valid"][i][sel]
         path_v = np.clip(np.nan_to_num(d["path_v"][i][sel]) / sp.speed_ref, 0.0, 1.0)
 
-        steer_cmd = float(d["steer_cmd"][i])
-        steer_ok = math.isfinite(steer_cmd)
-        steer_n = 0.0
-        if steer_ok:
-            steer_n = max(-1.0, min(1.0, sgn * (steer_cmd - self.yaw_k * psi) / sp.max_steer))
-        speed_n = max(0.0, min(1.0, float(d["speed_cmd"][i]) / sp.speed_ref))
-
         return {
             "image": torch.from_numpy(image),
             "lidar": torch.from_numpy(np.ascontiguousarray(lidar, dtype=np.float32)),
             "state": torch.from_numpy(state),
-            "ctrl": torch.tensor([steer_n, speed_n], dtype=torch.float32),
-            "ctrl_ok": torch.tensor([steer_ok, bool(d["speed_ok"][i])], dtype=torch.float32),
             "path": torch.from_numpy((xy / self.xy_scale).astype(np.float32)),
             "path_v": torch.from_numpy(path_v.astype(np.float32)),
             "pt_ok": torch.from_numpy(pt_ok.astype(np.float32)),

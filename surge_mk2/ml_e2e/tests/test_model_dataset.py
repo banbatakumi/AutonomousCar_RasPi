@@ -72,8 +72,7 @@ class TestDataset(_Data):
         np.testing.assert_allclose(it["lidar"][:3].numpy(), 3.0 / 8.0, atol=1e-6)
         np.testing.assert_allclose(it["lidar"][3].numpy(), 1.0)
         self.assertAlmostEqual(float(it["state"][0]), 1.0 / SPEC.speed_ref, places=5)
-        self.assertAlmostEqual(float(it["ctrl"][0]), 0.1 / 0.4, places=5)
-        self.assertEqual(it["ctrl_ok"].tolist(), [1.0, 1.0])
+        self.assertNotIn("ctrl", it)                                  # 舵・速度の手本は持たない
         self.assertAlmostEqual(ds.xy_scale, K * 0.25)
         self.assertGreater(float(it["image"][:, :, :20].mean()), float(it["image"][:, :, -20:].mean()))
 
@@ -83,11 +82,10 @@ class TestDataset(_Data):
         np.random.seed(0)
         for _ in range(20):
             it = ds[10]
-            if float(it["ctrl"][0]) < 0:
+            if float(it["state"][1]) * float(plain["state"][1]) < 0:
                 break
         else:
             self.fail("反転した標本が出なかった")
-        self.assertAlmostEqual(float(it["ctrl"][0]), -float(plain["ctrl"][0]), places=5)
         self.assertAlmostEqual(float(it["state"][1]), -float(plain["state"][1]), places=5)
         self.assertAlmostEqual(float(it["state"][2]), -float(plain["state"][2]), places=5)
         np.testing.assert_allclose(it["path"][:, 1].numpy(), -plain["path"][:, 1].numpy(), atol=1e-6)
@@ -115,8 +113,6 @@ class TestDataset(_Data):
                 a0 = math.atan2(float(plain["path"][-1, 1]), float(plain["path"][-1, 0]))
                 a1 = math.atan2(float(it["path"][-1, 1]), float(it["path"][-1, 0]))
                 self.assertAlmostEqual(math.degrees(a0 - a1), psi, places=3)
-                # 舵の手本は δ − k·ψ
-                self.assertAlmostEqual(float(it["ctrl"][0]) * 0.4, 0.1 - 0.8 * math.radians(psi), places=5)
             self.assertGreater(len(seen), 4)
             self.assertLessEqual(max(abs(p) for p in seen), 6)
         finally:
@@ -138,8 +134,8 @@ class TestModelAndLoss(unittest.TestCase):
         with torch.no_grad():
             out = self.model(*self.inp, torch.ones(2, 3))
         self.assertEqual(tuple(out.shape), (2, output_size(K)))
-        o = decode_output(out[0].numpy(), k=K, max_steer=0.4, speed_ref=5.0, xy_scale=2.0)
-        _ctrl, xy, v, b = split_output(out, K)
+        o = decode_output(out[0].numpy(), k=K, speed_ref=5.0, xy_scale=2.0)
+        xy, v, b = split_output(out, K)
         np.testing.assert_allclose(o.path_xy, xy[0].numpy() * 2.0, atol=1e-6)
         np.testing.assert_allclose(o.path_v, v[0].numpy() * 5.0, atol=1e-5)
         self.assertTrue(((b >= B_MIN) & (b <= B_MAX)).all())
@@ -167,11 +163,10 @@ class TestModelAndLoss(unittest.TestCase):
     def test_masked_labels_do_not_contribute(self):
         out = self.model(*self.inp, torch.ones(2, 3))
         batch = {"path": torch.zeros(2, K, 2), "path_v": torch.zeros(2, K), "pt_ok": torch.ones(2, K),
-                 "v_ok": torch.zeros(2), "ctrl": torch.full((2, 2), 9.0), "ctrl_ok": torch.zeros(2, 2)}
+                 "v_ok": torch.zeros(2)}
         ls = losses(out, batch, K, 2.0)
+        self.assertEqual(set(ls), {"path", "v"})
         self.assertEqual(float(ls["v"]), 0.0)
-        self.assertEqual(float(ls["steer"]), 0.0)
-        self.assertEqual(float(ls["speed"]), 0.0)
         batch["pt_ok"] = torch.zeros(2, K)
         self.assertEqual(float(losses(out, batch, K, 2.0)["path"]), 0.0)
 
@@ -186,7 +181,7 @@ class TestExport(unittest.TestCase):
             cfg = {"preproc_version": PREPROC_VERSION, "image_preproc_version": PREPROC_VERSION_CROP,
                    "input_size": [64, 32], "crop_x": 0.05, "fov_deg": 90, "max_range": 8.0, "history": 3,
                    "k": K, "ds": 0.25, "xy_scale": 2.0, "max_steer": 0.4, "speed_ref": 5.0, "yaw_rate_ref": 6.0,
-                   "steer_link": [1.0, 0.0], "label_shift_ms": 100, "maps": ["m"], "train_records": ["a"]}
+                   "steer_link": [1.0, 0.0], "maps": ["m"], "train_records": ["a"]}
             (run / "train_config.json").write_text(json.dumps(cfg))
             torch.manual_seed(0)
             model = build_model(cfg)
@@ -203,6 +198,31 @@ class TestExport(unittest.TestCase):
             (run / "train_config.json").write_text(json.dumps(bad))
             with self.assertRaises(ValueError):
                 export(run, out)
+
+    def test_weights_with_the_old_direct_head_export_to_the_same_path_outputs(self):
+        """舵・速度の直接出力があった頃（版 1）の重みは、そのヘッドだけ捨てて今の版で書き出せる。"""
+        from raspi.nodes.e2e_fusion_node import load_model
+
+        with tempfile.TemporaryDirectory() as d:
+            run = Path(d) / "run"
+            run.mkdir()
+            cfg = {"preproc_version": 1, "image_preproc_version": PREPROC_VERSION_CROP,
+                   "input_size": [64, 32], "crop_x": 0.05, "fov_deg": 90, "max_range": 8.0, "history": 3,
+                   "k": K, "ds": 0.25, "xy_scale": 2.0, "max_steer": 0.4, "speed_ref": 5.0, "yaw_rate_ref": 6.0,
+                   "steer_link": [1.0, 0.0], "label_shift_ms": 100, "maps": ["m"], "train_records": ["a"]}
+            (run / "train_config.json").write_text(json.dumps(cfg))
+            torch.manual_seed(0)
+            model = build_model(cfg)
+            old = dict(model.state_dict())
+            old["ctrl_head.weight"] = torch.zeros(2, 256)
+            old["ctrl_head.bias"] = torch.zeros(2)
+            torch.save(old, run / "best.pt")
+            out = Path(d) / "models" / "t.onnx"
+            contract = export(run, out)
+            self.assertEqual(contract["preproc_version"], PREPROC_VERSION)
+            self.assertNotIn("label_shift_ms", contract)
+            self.assertLess(verify_parity(out, model, contract), 1e-3)
+            self.assertEqual(load_model(out).k, K)
 
 
 if __name__ == "__main__":

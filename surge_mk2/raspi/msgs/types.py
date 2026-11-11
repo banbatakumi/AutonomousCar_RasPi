@@ -1016,7 +1016,7 @@ class E2EFusionModelCtrl(MsgBase):
 class E2EFusionPlan(MsgBase):
     """`e2e_fusion_node.py` の推論結果。`raspi/auto/e2e_fusion.py`（id `e2e_fusion`）の `input_topic`。
 
-    LiDAR＋前方カメラ＋車両状態から出した、舵・速度と**前方の経路点**。値は物理量に戻してある
+    LiDAR＋前方カメラ＋車両状態から出した**前方の経路点**。値は物理量に戻してある
     （契約値はノードがモデル同梱の JSON から読む。出力の並びは `raspi/core/e2e_fusion_preproc.py`）。
 
     **`t_capture` は画像の撮影時刻**（画像が無い周は点群の先頭セクタの時刻）で、経路点はその時刻の
@@ -1026,8 +1026,6 @@ class E2EFusionPlan(MsgBase):
     ready: bool = False
     #: ready でない理由（モデル未選択・入力が無い・推論の例外）。planner がそのまま表示する
     reason: str = ""
-    steer: float = 0.0             #: [rad] 路面舵角の直接出力。反時計回り正
-    speed: float = 0.0             #: [m/s] 速度の直接出力
     #: 経路点。`k` 番目は経路に沿って `(k+1)·ds` 先。4本とも同じ長さ
     path_x: list[float] = msgspec.field(default_factory=list)   #: [m]
     path_y: list[float] = msgspec.field(default_factory=list)   #: [m]

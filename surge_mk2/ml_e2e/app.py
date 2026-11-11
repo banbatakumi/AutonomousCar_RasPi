@@ -74,10 +74,9 @@ parse_epoch_line = make_epoch_line_parser("val_mae")
 
 # ── コマンド組み立て・データの読み書き（Tkinter を知らない純粋関数） ──
 
-def build_extract_cmd(python: str, mcap_files: list[str], data_dir: str, *, label_shift_ms: int = 100,
+def build_extract_cmd(python: str, mcap_files: list[str], data_dir: str, *,
                       include_self: bool = False) -> list[str]:
-    cmd = [python, "-m", "ml_e2e.extract", *mcap_files, "--out", data_dir,
-           "--label-shift-ms", str(label_shift_ms)]
+    cmd = [python, "-m", "ml_e2e.extract", *mcap_files, "--out", data_dir]
     if include_self:
         cmd.append("--include-self")
     return cmd
@@ -340,14 +339,8 @@ class App:
         ttk.Label(frame, textvariable=files_var, wraplength=700).grid(row=2, column=1, columnspan=3,
                                                                      sticky="w", pady=(8, 0))
 
-        shift_var = tk.StringVar(value="100")
-        ttk.Label(frame, text="舵・速度の手本を遅らせる[ms]:").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=shift_var, width=8).grid(row=3, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(frame, text="直接出力の舵・速度だけに効く（経路点は実車が推測航法でずらす）。"
-                             "同じモデルでは変えられない", foreground="gray").grid(
-            row=3, column=2, columnspan=2, sticky="w", pady=(8, 0))
         include_self_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="このモデル自身（E2E 融合）で走った区間も使う（経路点だけ。舵・速度は手本にしない）",
+        ttk.Checkbutton(frame, text="このモデル自身（E2E 融合）で走った区間も使う",
                         variable=include_self_var).grid(row=4, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         ttk.Label(frame, text="画像つきで録った記録（実機 GUI の MCAP ボタン、または tools/record.sh --image-hz 10）を選ぶ。\n"
@@ -364,14 +357,9 @@ class App:
             if not self._extract_files:
                 messagebox.showwarning("未選択", ".mcap ファイルを選んでください")
                 return
-            try:
-                shift = int(shift_var.get())
-            except ValueError:
-                messagebox.showerror("入力エラー", "手本を遅らせる時間は整数で入力してください")
-                return
             report: list[str] = []
             cmd = build_extract_cmd(self.python, self._extract_files, str(d / "data"),
-                                    label_shift_ms=shift, include_self=include_self_var.get())
+                                    include_self=include_self_var.get())
             self._run("extract", cmd, "標本作成", on_line=report.append,
                       on_done=lambda ok: self._after_extract(ok, report))
 
@@ -559,7 +547,7 @@ class App:
 
         ttk.Button(frame, text="学習開始", command=run).grid(row=1, column=0, sticky="w", pady=10)
         ttk.Label(frame, text="ログの見方: val_mae＝検証の経路点の誤差 [m]（全体）、near＝最初の 2m の誤差、b＝モデルが出す不確かさ、\n"
-                             "steer・speed＝直接出力の舵・速度の誤差、v＝各点の速度の誤差。最後に「入力を伏せたときの経路誤差」が出る\n"
+                             "v＝各点の速度の誤差。最後に「入力を伏せたときの経路誤差」が出る\n"
                              "（画像だけ・点群だけでも経路が出るか）。1エポックは標本1万枚で約1分（Mac）。",
                   foreground="gray", justify="left").grid(row=2, column=0, columnspan=2, sticky="w")
         graph_frame = ttk.LabelFrame(frame, text="学習曲線（赤=loss・青=val_mae＝検証の経路点の誤差 [m]）")
@@ -653,7 +641,6 @@ class App:
             "記録を、実車と同じ推論ノードと planner に通して手本と比べる（表はログに出る）。学習に使っていない記録で見ること。\n\n"
             "  走れる     経路を出せた割合。出せなかった理由は下に並ぶ\n"
             "  舵相関・舵RMS  planner が出した舵と、記録の指令の舵\n"
-            "  直接RMS    モデルの舵の直接出力と、記録の指令の舵\n"
             "  速度比     planner の目標速度 ÷ 記録の指令の速度。1 より小さければ手本より遅い\n"
             "  近く・全体   経路点とラベルの距離（最初の 2m・全体）\n"
             "  b          モデルが出す不確かさ [m]\n"
