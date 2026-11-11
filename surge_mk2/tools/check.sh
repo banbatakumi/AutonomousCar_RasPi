@@ -64,7 +64,7 @@ if [ "$FAST" = 0 ]; then
   run "pytest (slam2d)" "$PY" -m pytest slam2d/tests -q
   # ML のテスト（torch が要る）。ml_cam と ml_cam_e2e は `dataset` をフラットに import するので別プロセスで回す
   if "$PY" -c "import torch" 2>/dev/null; then
-    for d in ml_cam ml_cam_e2e ml_lidar ml_common; do
+    for d in ml_cam ml_cam_e2e ml_lidar ml_common ml_e2e; do
       run "pytest ($d)" "$PY" -m pytest "$d/tests" -q
     done
   else

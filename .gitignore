@@ -71,6 +71,10 @@ surge_mk2/ml_lidar/runs/
 # チェックポイント・評価結果。学習ごとに違い、しかも大きい
 surge_mk2/ml_cam_e2e/runs/
 
+# ml_e2e/（LiDAR＋カメラ＋車両状態の融合E2E）の生成物。抽出した標本（JPEG・npz）・
+# チェックポイント・評価結果
+surge_mk2/ml_e2e/runs/
+
 # slam2d/（汎用2D LiDAR SLAM）の検証用生ログ。公開データセットは各自ダウンロードする
 # 前提で、slam2d/datasets/README.md に入手手順だけ書く
 surge_mk2/slam2d/datasets/raw/
