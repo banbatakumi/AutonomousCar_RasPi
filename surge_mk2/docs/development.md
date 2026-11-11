@@ -511,7 +511,7 @@ GUI にも見せるなら `python3 config/gen_msgs.py` で `gui/src/generated/ms
 
 ## 12. 学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション / カメラE2E）
 
-独立した3本の学習パイプラインがある。どれも「**Mac で学習 → ONNX 化 → `models/` に配置 →
+独立した学習パイプラインがある（下の表の3本と、§12.4 の E2E 融合）。どれも「**Mac で学習 → ONNX 化 → `models/` に配置 →
 GUI でモデル名を選ぶ**」という流れは共通だが、中身も検証手段も別物。
 学習・評価のロジックの詳細は各スクリプトの docstring が正（`ml_*` に README は無い）。
 
@@ -658,3 +658,68 @@ GUI の**自動停止（STM32 の `auto_stop`）を ON** にしておくこと�
 合成した記録で抽出→学習→エクスポート→実車側の読み込み→評価までを通す（`.venv/bin/python -m pytest ml_cam_e2e/tests -q`）。
 
 ディレクトリの構成は [`system_overview.md` §13](system_overview.md#13-リポジトリ構成と技術スタック)、どこを直したら何を再起動するかは §2。
+
+### 12.4 E2E 融合（LiDAR＋カメラ＋車両状態 → 舵・速度・経路点、`e2e_fusion`）
+
+点群・前方カメラの生の画像・車両状態（車速・実舵角・ヨーレート）を入力に、**舵・速度と前方の経路点**（一定の弧長間隔の
+点と各点の速度・不確かさ）を出す1つのモデル。実機の記録を手本にした模倣学習で、**記録を録ったコースを、走行時に地図も
+自己位置も使わずに走る**ためのもの（完全に未知のコースは対象にしない）。設計の理由は各ファイルの docstring が正:
+`ml_e2e/extract.py`（ラベル）・`ml_e2e/model.py`（入力を伏せる・不確かさ）・`raspi/auto/e2e_fusion.py`（走らせ方）・
+`raspi/core/e2e_fusion_preproc.py`（入出力の形。学習と実車で同じ関数）。
+
+| | |
+|---|---|
+| 学習コード（Mac） | `ml_e2e/`。操作パネルは launcher の「ml_e2e」（`ml_e2e/app.py`） |
+| モデルの置き場 | `models/e2e_fusion/<名前>.onnx`（＋同名 `.json`。無いと読み込まれない） |
+| 推論コード | `raspi/nodes/e2e_fusion_node.py`（**独立プロセス** `surge-e2e-fusion`）＋ `raspi/auto/e2e_fusion.py` |
+| シムで検証できるか | **できない**（シムはカメラを持たない）。記録を実車と同じコードに通す `ml_e2e.eval` と実走で見る |
+
+**手本とラベル**（記録の状況で自動で決まる）:
+
+- `slam2d_route` が RACE で走っている区間 → 経路点は**地図の最適ライン**（記録の `auto/map`・`auto/state` から。車が線から
+  外れていても線へ戻る経路が付く）、各点の速度は**ラインの計画速度**、舵・速度は `/cmd`
+- それ以外の自動運転（回避中・探索中など）→ 経路点は**その後に通った軌跡**、速度は実速度
+- 人の手動運転 → 経路点はその後に通った軌跡、舵だけ手本にする。**速度は手本にしない**（遅い走りを覚えさせない。
+  実車では「モデルの速度を使う」を OFF にすれば、経路の曲がり具合と車の限界から速度が決まる）
+
+**手順（操作パネル）**: launcher から「ml_e2e」。タブは作業の順に並ぶ。
+
+| タブ | すること |
+|---|---|
+| ① 標本作成 | モデル名を決め、録った `.mcap` を選んで標本を作る。入っている記録の一覧（枚数・ライン/軌跡・自動/手動・地図）と、記録の取り外し |
+| ② ラベル確認 | 経路点が壁の内側を通るか・記録の舵と合うかの表（ログ）と、画像・点群への重ね描きを前後に送って見る |
+| ③ 学習 | 検証に回す記録を選んで学習する（既定は地図ごとに最後の1本）。「追加学習の元」で既存モデルの重みから始められる |
+| ④ エクスポート | `models/e2e_fusion/<モデル名>.onnx` と契約 `.json` を書く |
+| ⑤ 評価 | 検証に回した記録（または選んだ記録）を、実車と同じ推論ノードと planner に通す。画像だけ・点群だけの評価もできる |
+
+**手順（コマンド）**:
+
+```bash
+.venv/bin/pip install -r ml_cam_e2e/requirements.txt        # 依存は cam_e2e と同じ
+
+# 0. 走らせるコースで、画像つきの .mcap を録る（GUI の MCAP ボタンか tools/record.sh --image-hz 10）
+# 1. 標本を作る（使わなかったコマは理由ごとに数が出る）
+.venv/bin/python -m ml_e2e.extract logs/*.mcap --out ml_e2e/runs/v1/data
+# 2. ★ラベルを確かめる（経路が壁の内側を通るか・経路を追った舵が記録の舵と合うか）。--draw で重ね描き
+.venv/bin/python -m ml_e2e.check_labels ml_e2e/runs/v1/data --draw 24
+# 3. 学習（検証は記録単位。既定は地図ごとに最後の1本。--val で指定できる）
+.venv/bin/python -m ml_e2e.train --data ml_e2e/runs/v1/data --out ml_e2e/runs/v1 --epochs 20
+# 4. ONNX 化（契約を models/e2e_fusion/v1.json に書き、実車と同じ読み込みが通るか確かめる）
+.venv/bin/python -m ml_e2e.export_onnx --run ml_e2e/runs/v1 --name v1
+# 5. 学習に使っていない記録を、実車と同じ推論ノードと planner に通して比べる
+.venv/bin/python -m ml_e2e.eval --model models/e2e_fusion/v1.onnx --data ml_e2e/runs/v1/data <検証の .mcap>
+# 6. 実車に配る（初回は Pi で sudo raspi/setup/install_services.sh を回して surge-e2e-fusion を作る）
+tools/deploy.sh --no-gui
+```
+
+新しいコースを足すときは、そのコースの記録を足して 1 から回す（`--init ml_e2e/runs/v1/best.pt` で追加学習もできる）。
+
+**見る数字**: 学習の `near`（最初の 2m の経路の誤差）・`b`（モデルが出す不確かさ）、最後に出る「入力を伏せたときの経路誤差」
+（画像だけ・点群だけでも経路が出るか）。`ml_e2e.eval` の「理想比」は、車の向きをずらした入力に対して経路がどれだけ正しく
+回るか（1 に近いほど、ずれを戻せる）。**`eval` は開ループ**（車は記録どおりに動く）なので、走れるかどうかは実走で確かめる。
+
+**実車で走らせる**: 自動運転タブで「E2E 融合（LiDAR＋カメラ）」→「E2E 融合モデル」欄でモデルを選ぶ（`config/e2e_fusion_model.json` に残る。**「自動」なら `models/e2e_fusion/` のいちばん新しい `.onnx`**）→ ARM → engage。
+走行中に選び直すと engage は落ちる。設定は「最高速度」「モデルの速度を使う」「直接出力で走る（比較用）」の3つ。
+**初めてのモデル・初めてのコースは最高速度を低くして試す。** 止まる条件（経路の不確かさが大きい・入力が途絶えた等）は
+理由が自動運転タブに出る。障害物に対する固定距離の停止は持たない（STM32 の `auto_stop` を ON にしておく）。
+配線の確認は `python -m raspi.tools.bus_echo -t e2e_fusion/plan --dump --fields ready,reason,steer,speed,infer_ms`。

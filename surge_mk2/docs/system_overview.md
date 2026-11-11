@@ -303,6 +303,7 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `surge-planning` | `raspi.nodes.planning_node` | planner の購読・周期実行・`auto/*` の publish | 自律走行だけ止まる |
 | `surge-cam-perception` | `raspi.nodes.cam_perception_node` | 走行可否セグメンテーション → `scan/cam`・`path/cam` | `ftg_cam` / `cam_centerline` が使えない |
 | `surge-cam-e2e` | `raspi.nodes.cam_e2e_node` | 画像から操舵を回帰 → `cam_e2e/cmd` | `cam_e2e` が使えない |
+| `surge-e2e-fusion` | `raspi.nodes.e2e_fusion_node` | 点群＋画像＋車両状態から舵・速度・経路点 → `e2e_fusion/plan` | `e2e_fusion` が使えない |
 | `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出 → `line/cam` | `line_trace` が使えない |
 | `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従 → `track/target` | `follow_object` が使えない |
 | `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末向けの mDNS 応答 | 名前が引けない端末がある |
@@ -485,6 +486,7 @@ $$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v
 | `slam2d_route` | **経路選択走行(slam2d)** | 作る/読む | 道路グラフ＋経由点で分岐を選んで周回。**GUI の主力** |
 | `line_trace` | ライントレース（カメラ） | 不要 | 白線の2点を Pure Pursuit の目標点にする。障害物回避なし |
 | `e2e_lidar` | E2E LiDAR | 不要 | 強化学習（PPO）で点群→操舵・速度を直接回帰 |
+| `e2e_fusion` | E2E 融合（LiDAR＋カメラ） | 不要 | 点群・前方カメラ・車両状態から学習したモデルが前方の経路点を出し、それを追う（記録を録ったコース向け） |
 | `follow_object` | 対象追従 | 不要 | 映像で選んだ対象との車間を保って追従（前進のみ） |
 | `park_to_point` | 駐車（クリック指定） | 局所地図 | LiDAR 画面でクリックした位置・向きへ Hybrid A* で接近して停止 |
 
@@ -718,7 +720,7 @@ io_node ── link.poll/send ──┤
 
 ### 12.2 学習パイプライン（Mac）
 
-`ml_cam/`（セグメンテーション）・`ml_cam_e2e/`（カメラの模倣学習）・`ml_lidar/`（LiDAR の PPO）・`ml_common/`（学習 GUI の共通部品）。
+`ml_cam/`（セグメンテーション）・`ml_cam_e2e/`（カメラの模倣学習）・`ml_lidar/`（LiDAR の PPO）・`ml_e2e/`（LiDAR＋カメラ＋車両状態の融合の模倣学習）・`ml_common/`（学習 GUI の共通部品）。
 Mac で学習して ONNX にし、Pi の `onnxruntime` で推論する（`models/`）。依存の向きは `学習 → sim`（sim は学習を知らない）。
 
 ### 12.3 ファームのホストシム（`tools/fwsim/`）
