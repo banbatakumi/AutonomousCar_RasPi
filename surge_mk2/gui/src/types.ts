@@ -222,6 +222,15 @@ export type CamE2EModelStatus = {
   name: string
 }
 
+/** `models/e2e_fusion/` にある `.onnx` の1件（`e2e_fusion_model_list` の応答）。形は他のモデル一覧と同じ */
+export type E2EFusionModelFile = CamE2EModelFile
+
+/** `e2e_fusion`（LiDAR＋カメラの融合 E2E）が使うモデルの選択。**サーバが真値**
+ * （`ws/control.ts` の `e2eFusionModelSelect`）。**空文字は「自動」**（いちばん新しいモデルを使う） */
+export type E2EFusionModelStatus = {
+  name: string
+}
+
 /** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
  * ARM中(`_armed`)/DISARM中(`_disarm`)で別々の値を持つ。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
@@ -389,6 +398,8 @@ export type ControlStatus = {
   e2e_model: E2EModelStatus
   /** cam_e2e が使うモデルの選択。**サーバが真値** */
   cam_e2e_model: CamE2EModelStatus
+  /** e2e_fusion が使うモデルの選択。**サーバが真値**。古いサーバには無い */
+  e2e_fusion_model?: E2EFusionModelStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap`/`.mp4` の1件（`logs_list` の応答）。 */

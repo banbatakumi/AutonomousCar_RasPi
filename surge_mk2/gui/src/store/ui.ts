@@ -15,6 +15,8 @@ import type {
   ControlStatus,
   CamE2EModelFile,
   CamE2EModelStatus,
+  E2EFusionModelFile,
+  E2EFusionModelStatus,
   E2EModelFile,
   E2EModelStatus,
   FanStatus,
@@ -812,6 +814,11 @@ type UiState = {
   /** `models/cam_e2e/` にある `.onnx` の一覧（`camE2eModelList` の応答） */
   camE2eModelFiles: CamE2EModelFile[]
 
+  /** e2e_fusion が使うモデルの選択。**サーバが真値**（`ws/control.ts` の `e2eFusionModelSelect`）。空文字は「自動」 */
+  e2eFusionModel: E2EFusionModelStatus | null
+  /** `models/e2e_fusion/` にある `.onnx` の一覧（`e2eFusionModelList` の応答） */
+  e2eFusionModelFiles: E2EFusionModelFile[]
+
   /** `saved_maps/` にある保存済み地図の一覧（`mapsList`/`mapsSave`/`mapsDelete` の応答） */
   mapFiles: MapFile[]
   /** 直近の `mapsSave()` の結果。表示したら呼び出し側が `null` に戻す
@@ -901,6 +908,8 @@ export const useUi = create<UiState>((set, get) => ({
   e2eModelFiles: [],
   camE2eModel: null,
   camE2eModelFiles: [],
+  e2eFusionModel: null,
+  e2eFusionModelFiles: [],
   mapFiles: [],
   mapSaveResult: null,
 

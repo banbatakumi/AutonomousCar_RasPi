@@ -11,6 +11,7 @@
  */
 import type {
   CamE2EModelFile,
+  E2EFusionModelFile,
   CamModelFile,
   CmdOut,
   ControlStatus,
@@ -48,6 +49,7 @@ type ServerMsg = {
   cam_model_files?: CamModelFile[]
   e2e_model_files?: E2EModelFile[]
   cam_e2e_model_files?: CamE2EModelFile[]
+  e2e_fusion_model_files?: E2EFusionModelFile[]
   map_files?: MapFile[]
   ok?: boolean
   error?: string
@@ -70,6 +72,8 @@ export type ControlHandlers = {
   onE2EModels: (files: E2EModelFile[]) => void
   /** `cam_e2e_model_list` への応答（`models/cam_e2e/` にある `.onnx` の一覧） */
   onCamE2EModels: (files: CamE2EModelFile[]) => void
+  /** `e2e_fusion_model_list` への応答（`models/e2e_fusion/` にある `.onnx` の一覧） */
+  onE2EFusionModels: (files: E2EFusionModelFile[]) => void
   /** `maps_list`/`maps_save`/`maps_delete` への応答（`saved_maps/` の一覧） */
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
@@ -136,6 +140,7 @@ export class ControlChannel {
       else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
       else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
       else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
+      else if (m.type === 'e2e_fusion_models') this.h.onE2EFusionModels(m.e2e_fusion_model_files ?? [])
       else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
       else if (m.type === 'logs_delete_result') {
         if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
@@ -552,6 +557,22 @@ export class ControlChannel {
    */
   camE2eModelSelect(name: string) {
     this.send({ type: 'cam_e2e_model_select', name })
+  }
+
+  // ── E2E 融合モデルの選択（`e2e_fusion` 用） ──
+
+  /** `models/e2e_fusion/` にある `.onnx` の一覧を要求する。応答は `onE2EFusionModels`。 */
+  e2eFusionModelList() {
+    this.send({ type: 'e2e_fusion_model_list' })
+  }
+
+  /**
+   * `e2e_fusion` が使うモデルを選ぶ。**空文字は「自動」**（いちばん新しいモデルを使う）。
+   *
+   * ⚠ `e2e_fusion` を engage 中に選び直すと engage は必ず落ちる（サーバ側の約束）。
+   */
+  e2eFusionModelSelect(name: string) {
+    this.send({ type: 'e2e_fusion_model_select', name })
   }
 
   // ── 対象追従（`follow_object`）のROI選択 ──

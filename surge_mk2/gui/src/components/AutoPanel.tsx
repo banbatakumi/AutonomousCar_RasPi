@@ -93,6 +93,8 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const e2eModelFiles = useUi((s) => s.e2eModelFiles)
   const camE2eModel = useUi((s) => s.camE2eModel)
   const camE2eModelFiles = useUi((s) => s.camE2eModelFiles)
+  const e2eFusionModel = useUi((s) => s.e2eFusionModel)
+  const e2eFusionModelFiles = useUi((s) => s.e2eFusionModelFiles)
   // 選択中のカメラセグメンテーションモデルの備考（`ml_cam/app.py`の備考欄→エクスポート時に
   // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称）
   const camSelectedNote = camModelFiles.find((f) => f.name === camModel?.name)?.note
@@ -101,10 +103,17 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const e2eSelectedNote = e2eModelFiles.find((f) => f.name === e2eModel?.name)?.note
   // 選択中のカメラE2Eモデルの備考（`ml_cam_e2e/app.py`の備考欄→エクスポート時に同梱されたもの）
   const camE2eSelectedNote = camE2eModelFiles.find((f) => f.name === camE2eModel?.name)?.note
+  // 選択中の E2E 融合モデルの備考（`ml_e2e/app.py` の備考欄→エクスポート時に同梱されたもの）
+  const e2eFusionSelectedNote = e2eFusionModelFiles.find((f) => f.name === e2eFusionModel?.name)?.note
+  // 「自動」のときに使われるモデル（いちばん新しい、契約ファイルつきのもの。`e2e_fusion_node.pick_model_name`）
+  const e2eFusionNewest = e2eFusionModelFiles
+    .filter((f) => f.has_config)
+    .reduce<(typeof e2eFusionModelFiles)[number] | null>((a, f) => (a === null || f.mtime > a.mtime ? f : a), null)
   useEffect(() => {
     ch?.camModelList()
     ch?.e2eModelList()
     ch?.camE2eModelList()
+    ch?.e2eFusionModelList()
     ch?.mapsList()
   }, [ch])
 
@@ -288,6 +297,34 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <span className="dim">models/cam_e2e/ に .onnx がありません</span>
           )}
           {camE2eSelectedNote && <div className="auto-model-note">{camE2eSelectedNote}</div>}
+        </div>
+      )}
+
+      {/* E2E 融合（`e2e_fusion`）専用のモデル選択。上と同じ形だが、空の選択は「未選択」ではなく
+          「自動」（`e2e_fusion_node` がいちばん新しいモデルを使う）。契約ファイルの無いモデルは選ばせない */}
+      {selected?.id === 'e2e_fusion' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">E2E 融合モデル</span>
+          <select
+            value={e2eFusionModel?.name ?? ''}
+            disabled={e2eFusionModel === null}
+            onChange={(e) => ch?.e2eFusionModelSelect(e.target.value)}
+          >
+            <option value="">
+              自動（いちばん新しいもの{e2eFusionNewest ? `: ${e2eFusionNewest.name}` : ''}）
+            </option>
+            {e2eFusionModelFiles.map((f) => (
+              <option key={f.name} value={f.name} disabled={!f.has_config}>
+                {f.name}
+                {!f.has_config && '（契約ファイルなし・使用不可）'}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => ch?.e2eFusionModelList()}>更新</button>
+          {e2eFusionModelFiles.length === 0 && (
+            <span className="dim">models/e2e_fusion/ に .onnx がありません</span>
+          )}
+          {e2eFusionSelectedNote && <div className="auto-model-note">{e2eFusionSelectedNote}</div>}
         </div>
       )}
 
