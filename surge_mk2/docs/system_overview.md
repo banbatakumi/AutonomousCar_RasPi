@@ -303,7 +303,7 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `surge-planning` | `raspi.nodes.planning_node` | planner の購読・周期実行・`auto/*` の publish | 自律走行だけ止まる |
 | `surge-cam-perception` | `raspi.nodes.cam_perception_node` | 走行可否セグメンテーション → `scan/cam`・`path/cam` | `ftg_cam` / `cam_centerline` が使えない |
 | `surge-cam-e2e` | `raspi.nodes.cam_e2e_node` | 画像から操舵を回帰 → `cam_e2e/cmd` | `cam_e2e` が使えない |
-| `surge-e2e-fusion` | `raspi.nodes.e2e_fusion_node` | 点群＋画像＋車両状態から舵・速度・経路点 → `e2e_fusion/plan` | `e2e_fusion` が使えない |
+| `surge-e2e-fusion` | `raspi.nodes.e2e_fusion_node` | 点群＋画像＋車両状態から前方の経路点 → `e2e_fusion/plan` | `e2e_fusion` が使えない |
 | `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出 → `line/cam` | `line_trace` が使えない |
 | `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従 → `track/target` | `follow_object` が使えない |
 | `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末向けの mDNS 応答 | 名前が引けない端末がある |

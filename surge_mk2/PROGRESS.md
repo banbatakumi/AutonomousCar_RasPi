@@ -21,7 +21,8 @@
   抜けない静止物は Hybrid A*。走行中の学習は `raspi/nav/grip.py`（`GripLearner`＝横の上限をタイムで、`LongLearner`＝前後の包絡）と
   `raspi/nav/understeer.py`（アンダーステア勾配 K）。GUI の自動運転モードに「レーシングライン(slam2d)」は無い
 - **カメラ模倣学習**: `cam_e2e` は v9 まで（`models/cam_e2e/`）。障害物では止まらない。`ml_lidar/` はシムでの新しい学習を止めている
-- **E2E 融合（`e2e_fusion`、2026-11-11 に追加・未コミット・Pi 未反映・実走していない）**: 点群＋前方カメラ＋車両状態 → 舵・速度・前方の経路点。
+- **E2E 融合（`e2e_fusion`、2026-11-11 に追加・未コミット・Pi 未反映・実走していない）**: 点群＋前方カメラ＋車両状態 → 前方の経路点
+  （舵・速度の直接出力は 11-11 に外した。v1・v2 は学習済みの重みからそのヘッドだけ捨てて書き出し直した。再学習はしていない）。
   学習 `ml_e2e/`、推論 `raspi/nodes/e2e_fusion_node.py`（新サービス `surge-e2e-fusion`）、走行 `raspi/auto/e2e_fusion.py`（経路点を推測航法で
   ずらして追う）。操作パネルは launcher の「ml_e2e」（`ml_e2e/app.py`）、手順は [`docs/development.md` §12.4](docs/development.md)。モデル v1（`models/e2e_fusion/v1`）は 10-31〜11-08 の記録 18 本
   （3 コース・16038 枚、うち 15 本で学習）。学習に使っていない 3 本での値: 経路の誤差は最初の 2m で 0.07〜0.17m、全 8m で 0.25〜0.49m、
@@ -39,7 +40,7 @@
   `steer_guard` で止めて待つようにしたが、原因（ステア MD のファーム・エンコーダ）は調べていない
 
 - **E2E 融合（`e2e_fusion`）**: Pi で `install_services.sh`（`surge-e2e-fusion` を作る）→ 低速で engage して周回できるか、
-  自動運転タブのモデル欄で選んだモデルに切り替わるか（`reason` と Pi のログ `# モデル切替`）、「直接出力で走る」との比較、ARM 中の制御系電流の基準値と推論中の増分、`e2e_fusion/plan` の遅れ（`reason` に出る）
+  自動運転タブのモデル欄で選んだモデルに切り替わるか（`reason` と Pi のログ `# モデル切替`）、ARM 中の制御系電流の基準値と推論中の増分、`e2e_fusion/plan` の遅れ（`reason` に出る）
 
 ## 原因が分かっていないこと
 
