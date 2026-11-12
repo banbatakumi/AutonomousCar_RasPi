@@ -40,6 +40,10 @@ MCAP で読めるのは protobuf / ros / flatbuffer / **json** であって、ms
 - `/viz/scan` … `foxglove.PointCloud`。**無効点（`dist=0`）は落とす。**
   0 を残すと原点に壁があるように描かれる（`msgs.convert` の ScanAssembler と同じ理由）
 - `/viz/image/front` … `foxglove.CompressedImage`（JPEG）
+
+ステレオ関連は、`logger_node` が `/image/front`・`/image/left` の参照、
+`/scan/stereo` の生データ、`/stereo/depth` の深度JPEGを記録する。
+深度JPEGは `/viz/image/depth` にも `foxglove.CompressedImage` として書く。
 """
 
 from __future__ import annotations

@@ -92,6 +92,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_SCAN,
     TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
+    TOPIC_STEREO_DEPTH,
     TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
@@ -132,6 +133,7 @@ DEFAULT_TOPICS = [
     # カメラ系の知覚結果
     TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
+    TOPIC_STEREO_DEPTH,
     TOPIC_LINE_CAM,
     TOPIC_CAM_PATH,
     TOPIC_TRACK_TARGET,
@@ -315,6 +317,10 @@ class LoggerNode:
             # `ImageRef` 自体は全部書く（フレーム時刻の記録は軽い）。
             # 画素を焼くかどうかは `_pump_images` が別途決める
             self._last_ref[msg.cam or topic.split("/")[-1]] = msg
+        elif topic == TOPIC_STEREO_DEPTH:
+            if self.vizrec is not None and msg.jpeg:
+                self.log.write_viz_image(msg.jpeg, "depth", msg.t_capture)
+            return
         elif self.vizrec is None:
             return
         elif topic == TOPIC_VEHICLE_STATE:

@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import DriveCmd, Scan, VehicleState  # noqa: E402
+from raspi.msgs import DriveCmd, Scan, StereoDepth, VehicleState  # noqa: E402
 from raspi.proto import packets  # noqa: E402
 from raspi.rec.framelog import FrameLogWriter  # noqa: E402
 from raspi.rec.mcap_log import (  # noqa: E402
@@ -753,6 +753,24 @@ class TestLoggerNode(unittest.TestCase):
         self.assertEqual(len(msgs["/vehicle_state"]), 20)
         self.assertEqual(len(msgs["/scan"]), 1)
         self.assertIn("/viz/scan", msgs)
+
+    def test_stereo_depth_is_recorded(self):
+        from raspi.bus import Publisher
+        from raspi.nodes.logger_node import LoggerNode
+
+        node = LoggerNode(self.path, image_hz=0)
+        pub = Publisher("stereo")
+        time.sleep(0.3)
+        pub.send("stereo/depth", StereoDepth(jpeg=b"\xff\xd8\xff\xd9", near_m=0.25))
+        node.run(duration_s=0.2)
+        node.close()
+        pub.close()
+
+        msgs = read_back(self.path)["msgs"]
+        self.assertEqual(len(msgs["/stereo/depth"]), 1)
+        self.assertEqual(msgs["/stereo/depth"][0][1]["near_m"], 0.25)
+        self.assertEqual(len(msgs["/viz/image/depth"]), 1)
+        self.assertEqual(msgs["/viz/image/depth"][0][1]["format"], "jpeg")
 
     def test_stop_ends_the_run(self):
         import threading
