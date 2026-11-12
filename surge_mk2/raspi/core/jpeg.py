@@ -184,32 +184,53 @@ class RingJpeg:
             return None
         try:
             ring = self._ring(shm_name, expect_seq)
-            frame = ring.latest()
-            if frame is None:
-                return None
-            arr = frame.as_array()
-            # `fmt` は**メモリ上の実際のバイト順**。名前を信じて入れ替えない
-            colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
-            t0 = time.process_time()
-            if transform is not None:
-                # 補正映像（魚眼 → 仮想ピンホール）。remap は新しい配列を作るので
-                # 以降は共有メモリを読まない。検証（`still_valid`）は下で同じように効く
-                arr = transform(arr)
-            jpg = self.encode(arr, colorspace)
-            self.encode_cpu_s += time.process_time() - t0
-            self.encoded += 1
-            t = frame.desc.t_capture_ns
-            del arr
-            if not frame.still_valid():
-                self.torn += 1
-                return None
-            return jpg, t
+            return self._encode_frame(ring.latest(), transform)
         except Exception as e:
             self.errors += 1
             self.last_error = f"{type(e).__name__}: {e}"
             # 掴み直せば直る類（共有メモリの作り直し・消失）があるので捨てておく
             self._drop(shm_name)
             return None
+
+    def encode_at(self, shm_name: str, t_capture_ns: int, tol_ns: int,
+                  expect_seq: int | None = None) -> tuple[bytes, int] | None:
+        """撮影時刻が `t_capture_ns` から `tol_ns` 以内のフレームを `(JPEG, t_capture_ns)` にする。
+
+        リングに残っているフレームから探す（`FrameRing.find`）。ステレオの左右の組を
+        同じ瞬間でそろえて焼くのに使う。無ければ None。**例外は投げない。**
+        """
+        if self.encode is None:
+            return None
+        try:
+            ring = self._ring(shm_name, expect_seq)
+            return self._encode_frame(ring.find(t_capture_ns, tol_ns), None)
+        except Exception as e:
+            self.errors += 1
+            self.last_error = f"{type(e).__name__}: {e}"
+            self._drop(shm_name)
+            return None
+
+    def _encode_frame(self, frame, transform) -> tuple[bytes, int] | None:
+        """`FrameRef` を焼く。読んでいる間に上書きされたら None（`torn` を数える）。"""
+        if frame is None:
+            return None
+        arr = frame.as_array()
+        # `fmt` は**メモリ上の実際のバイト順**。名前を信じて入れ替えない
+        colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
+        t0 = time.process_time()
+        if transform is not None:
+            # 補正映像（魚眼 → 仮想ピンホール）。remap は新しい配列を作るので
+            # 以降は共有メモリを読まない。検証（`still_valid`）は下で同じように効く
+            arr = transform(arr)
+        jpg = self.encode(arr, colorspace)
+        self.encode_cpu_s += time.process_time() - t0
+        self.encoded += 1
+        t = frame.desc.t_capture_ns
+        del arr
+        if not frame.still_valid():
+            self.torn += 1
+            return None
+        return jpg, t
 
     def read_latest(self, shm_name: str, expect_seq: int | None = None):
         """最新フレームの**コピー**を `(配列, colorspace, FrameDesc)` で返す。読めなければ None。

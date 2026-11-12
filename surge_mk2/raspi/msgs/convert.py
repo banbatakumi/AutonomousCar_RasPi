@@ -314,6 +314,8 @@ def command_from_cmd(cmd: DriveCmd, *, allow_arm: bool = False,
     # v0.20: ローンチコントロール。始める・終える判定は STM32 側（立てるだけでよい）
     if cmd.launch:
         flags2 |= packets.CMD_FLG2_LAUNCH
+    winker_mode = cmd.winker_mode if cmd.winker_mode in (1, 2, 3) else 2
+    flags2 |= (winker_mode << packets.CMD_FLG2_WINKER_MODE_SHIFT) & packets.CMD_FLG2_WINKER_MODE_MASK
 
     # mode=3 は予約。送ってはいけない（STM32 は無視して現在のモードを維持する）
     mode = cmd.mode if cmd.mode in (0, 1, 2) else 0

@@ -14,7 +14,8 @@
 | パス | 内容 | 形式 | 頻度 |
 |---|---|---|---|
 | `/ws/telemetry` | 車両状態・点群・リンク診断 | msgpack バイナリ | 50Hz |
-| `/ws/camera/front`, `/ws/camera/rear` | JPEG | バイナリ | フレームが届くたび（上限 `gui_hz`） |
+| `/ws/camera/front`（右・主）, `/ws/camera/left` | JPEG | バイナリ | フレームが届くたび（上限 `gui_hz`） |
+| `/ws/camera/depth` | `stereo_node` の深度映像（JPEG。`_depth_pump` が中継） | バイナリ | 照合のたび |
 | `/ws/control` | ラジコン入力・操縦権・E-Stop・記録の操作 | JSON | イベント + 50Hz |
 | `/ws/map` | 地図・中心線・レーシングライン | msgpack バイナリ | **変わったときだけ** |
 | `/ws/record` | mcap記録の生バイト列 | バイナリ | 録画中のみ |
@@ -27,7 +28,7 @@
 配り終わるのを待たずに次のメッセージへ進む（`_status_soon`）。
 
 HTTP（GET）は GUI 本体のほか `/logs/<name>`（記録のダウンロード）、`/maps/…`、
-`/snapshot/<front|rear>.png`（📷 撮影ボタン。共有メモリの最新フレームを無劣化 PNG で返す。
+`/snapshot/<front|left>.png`（📷 撮影ボタン。共有メモリの最新フレームを無劣化 PNG で返す。
 魚眼の校正に使う写真なので、補正映像の設定に関わらず**常に生画像**）。
 
 点群を JSON で送ると CPU を無駄に食うのでテレメトリはバイナリにする。
@@ -190,6 +191,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_CONFIG,
     TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
+    TOPIC_STEREO_DEPTH,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
     TOPIC_CAM_E2E_MODEL,
@@ -197,7 +199,6 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
-    TOPIC_IMAGE_REAR,
     TOPIC_LINE_CAM,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
@@ -230,7 +231,7 @@ AUTO_PRESETS_CONF = REPO_ROOT / "config" / "auto_presets.json"
 #: プリセットの名前の長さの上限と、1モードあたりの個数の上限（壊れたクライアント対策）
 PRESET_NAME_MAX = 40
 PRESETS_PER_MODE_MAX = 50
-#: カメラ capture 側の設定（後方カメラON/OFF・前後のFPS上限・GUI配信fps）を覚えておく場所
+#: カメラ capture 側の設定（前カメラのFPS上限・GUI配信fps）を覚えておく場所
 CAMERA_CONF = REPO_ROOT / "config" / "camera.json"
 #: GUIの運転設定（速度ダイヤル・制御モード・フィール値等）を覚えておく場所。`CAMERA_CONF` と
 #: 同じ流儀。ファン（`_fan_mode`/`_fan_duty`）だけは意図的にここに含めない
@@ -238,19 +239,21 @@ DRIVE_SETTINGS_CONF = REPO_ROOT / "config" / "drive_settings.json"
 #: 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値を覚えておく場所。
 #: `CAMERA_CONF` と同じ流儀
 SIGNAL_CONF = REPO_ROOT / "config" / "signal.json"
-#: `cam_perception_node` へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場。
-#: `ml_cam/export_onnx.py` の出力をここへ手動で配置する運用（`.gitignore` 済み）
+#: 推論用モデルの親フォルダ（`.gitignore` 済み）。モデルの種類ごとにサブフォルダを切る
 MODELS_DIR = REPO_ROOT / "models"
+#: `cam_perception_node`（セグメンテーション、`ml_cam`）へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場
+#: （`raspi/nodes/cam_perception_node.py` の `DEFAULT_MODELS_DIR` と同じ場所）
+SEG_MODELS_DIR = MODELS_DIR / "seg"
 #: 選ばれているモデル名を覚えておく場所。`AUTO_CONF`/`CAMERA_CONF` と同じ流儀
 CAM_MODEL_CONF = REPO_ROOT / "config" / "cam_model.json"
-#: `e2e_lidar` へ渡す ONNX モデルの置き場。**カメラ用（`MODELS_DIR`直下）とは別**
+#: `e2e_lidar` へ渡す ONNX モデルの置き場。**セグメンテーション用とは別**
 #: （前処理契約が違うので、同じ一覧に混ぜると選び間違いの温床になる。
 #: `raspi/auto/e2e_lidar.py`・`ml_lidar/export_onnx_rl.py` 参照）
 E2E_MODELS_DIR = MODELS_DIR / "e2e_lidar"
 #: 選ばれている E2E LiDAR モデル名。`CAM_MODEL_CONF` と同じ流儀
 E2E_MODEL_CONF = REPO_ROOT / "config" / "e2e_lidar_model.json"
 #: `cam_e2e`（カメラE2E・模倣学習）へ渡す ONNX モデルの置き場。`E2E_MODELS_DIR` と
-#: 同じ理由でセグメンテーション用（`MODELS_DIR`直下）と分ける
+#: 同じ理由でセグメンテーション用と分ける
 #: （`raspi/nodes/cam_e2e_node.py` の `DEFAULT_MODELS_DIR` と同じ場所）
 CAM_E2E_MODELS_DIR = MODELS_DIR / "cam_e2e"
 #: 選ばれているカメラE2Eモデル名。`CAM_MODEL_CONF` と同じ流儀
@@ -283,7 +286,7 @@ SNAPSHOT_ON_CHANGE = (
 #: `cmd` の中継レート（planner の指令と同じ。`raspi/auto/base.py` の `CMD_HZ` が唯一の定義）
 CMD_PUB_HZ = CMD_HZ
 #: GUIへ配信する既定のJPEG頻度。設計時の帯域見積もり
-#: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で前後カメラ同時30fps配信を
+#: （640×480 JPEG q70 @15fps ≒ 7Mbps）に対し、実機で2台同時30fps配信を
 #: 検証して帯域は問題なかったので既定30。**送る頻度の上限**で、刻みではない
 #: （`_camera_pump` はフレームが届いた周に送る）
 CAMERA_HZ = 30
@@ -291,21 +294,17 @@ CAMERA_HZ = 30
 #: 同じとき、フレームの到着は周期の前後に数ms揺れる。少し早く来た分を次の刻みまで待たせない
 CAMERA_DUE_SLACK = 0.15
 HB_HZ = 10
-#: capture側(camera_node)のFPS上限の許容範囲、および前後カメラそれぞれの既定値。
+#: capture側(camera_node)のFPS上限の許容範囲、および前カメラの既定値。
 #: 実機計測で「30→10fpsで全体消費電力が約13〜15%下がる・
 #: 10→5fpsはほぼ横ばい」と分かった一方、GUI配信を30fpsにしても問題ないことも
 #: 実機で確認できたため、**前カメラは自動運転の応答性を優先して既定30**（ほぼ
-#: 常に画角内の変化を追う）、**後カメラはGUI表示とロギング専用**（駐車・後退の
-#: 目視確認程度で足りる）なので既定10に分けてある
+#: 常に画角内の変化を追う）。左カメラは独自の fps を持たない（同期中は前と同じ）
 CAM_FRONT_FPS_DEFAULT = 30.0
-CAM_REAR_FPS_DEFAULT = 10.0
 CAM_FPS_MIN = 1.0
 CAM_FPS_MAX = 30.0
 #: **DISARM中**（駐車中・STM32側で`armed=False`）の既定値。カメラは28%を
-#: 占める大口の消費電力源なので、走っていない間はさらに絞る。
-#: 後方カメラは駐車監視の用途が無いので既定で止める
+#: 占める大口の消費電力源なので、走っていない間はさらに絞る
 CAM_FRONT_FPS_DISARM_DEFAULT = 10.0
-CAM_REAR_ENABLED_DISARM_DEFAULT = False
 #: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
 #: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_CONFIG_HZ = 1
@@ -315,7 +314,7 @@ SIGNAL_CONFIG_HZ = 1
 #: カメラ画像を実際に使う自動運転モードの id（`raspi/auto/registry.py`）。
 #: この集合に入っているモードが engage されている間だけ、telemetry_node は
 #: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
-#: 後方カメラはどの自動運転モードも使わない（GUI表示とロギング専用）ので対象外。
+#: 左右を同期している間は上げない（`_auto_fps_override`）。
 #: `follow_object` は `cam_track_node.py` が毎フレーム対象を追跡し続ける必要が
 #: あるので他の2つと同じ扱いにする。`cam_centerline` は `ftg_cam` と同じ
 #: `cam_perception_node.py` の推論結果を使うので同じ扱い。`cam_e2e` は前カメラの
@@ -337,6 +336,13 @@ CAM_E2E_MODEL_HZ = 1
 #: カメラ本編（`CAMERA_HZ`）ほどの滑らかさは要らないデバッグ表示用途なので、
 #: 低めに抑えて CPU/帯域を節約する
 CAM_MASK_POLL_HZ = 8
+#: ステレオの深度（`stereo_node` の照合）を使う自動運転モード。選ばれていて ARM 中は照合を回す
+#: （`_desired_depth`）。**まだ無い**——段階5（`docs/stereo_plan.md`）で planner を足したらここに入れる
+STEREO_AUTO_MODES: frozenset[str] = frozenset()
+#: 左右の映像の組を入力にする自動運転モード（前方の学習系、`docs/stereo_plan.md` §1）。選ばれていて ARM 中は、
+#: 照合はしないが左カメラを同期して回す（`_desired_stereo`）。推論ノードが推論するのと同じ条件
+#: （`auto_gate.cam_infer_active`: モードが選ばれていて DISARM でない）
+STEREO_PAIR_AUTO_MODES: frozenset[str] = frozenset({"cam_e2e", "e2e_fusion"})
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
@@ -366,6 +372,16 @@ HB_POLICY = Policy(conflate=False, hwm=200)
 #: io_node は同じファイルから、GUI は `config/generate.py` の生成物から読む
 #: 
 _SAFETY = Vehicle.load()
+
+#: カメラの役割（前方ステレオ。先頭が主カメラ＝右 `front`、2台目が左 `left`）と、そのトピック。
+#: 対応は `raspi/core/vehicle.py` の `CAMERA_DEVICES`
+CAM_ROLES: tuple[str, ...] = _SAFETY.camera_roles
+CAM_ROLE_TOPIC: dict[str, str] = {role: f"image/{role}" for role in CAM_ROLES}
+#: 他ノードが JPEG 化済みのものを中継するだけの `/ws/camera/<名前>`（`_camera_pump` の対象外）
+_RELAYED_CAMS = frozenset({"mask", "depth"})
+_CAM_TOPICS = frozenset(CAM_ROLE_TOPIC.values())
+#: 主カメラは `image/front`（推論ノード・前方映像・📷 がこの名前で読む）
+assert CAM_ROLE_TOPIC[CAM_ROLES[0]] == TOPIC_IMAGE_FRONT
 #: `auto/cmd` がこれだけ古ければ中継しない（＝制動に落とす）。
 #: planning_node は 50Hz で出しているので 10 発ぶんの猶予
 AUTO_CMD_STALE_NS = int(_SAFETY.auto_cmd_stale_ms * 1_000_000)
@@ -407,7 +423,7 @@ CMD_SPARSE_GAP_NS = 300_000_000
 #: mcap のライブ中継で1台あたりに焼く画像頻度の既定（`logger_node` 単体の既定 5Hz とは別）。
 #: 動画は別の 🎥 ボタン（`video_node`、30fps）で録る
 DEFAULT_MCAP_IMAGE_HZ = 10.0
-#: 🎥 録画（mp4）の fps。カメラの上限と同じ。録画中は前後カメラの capture もこれに上げる
+#: 🎥 録画（mp4）の fps。カメラの上限と同じ。録画中は前カメラ（同期中は左も）の capture もこれに上げる
 VIDEO_FPS = CAM_FPS_MAX
 #: 🎥 録画が自動で止まるまでの時間 [s]（止め忘れでSDが埋まるのを防ぐ）
 VIDEO_MAX_S = 600
@@ -631,8 +647,7 @@ class TelemetryServer:
             TOPIC_VEHICLE_STATE: LATEST,
             TOPIC_SCAN: LATEST,
             TOPIC_DIAG_LINK: LATEST,
-            TOPIC_IMAGE_FRONT: LATEST,
-            TOPIC_IMAGE_REAR: LATEST,
+            **{topic: LATEST for topic in CAM_ROLE_TOPIC.values()},
             TOPIC_AUTO_CMD: LATEST,
             TOPIC_AUTO_STATE: LATEST,
             TOPIC_AUTO_MAP: LATEST,
@@ -640,6 +655,8 @@ class TelemetryServer:
             TOPIC_LINE_CAM: LATEST,
             #: `ftg_cam` の走行可否マスク（JPEG。GUI がカメラ映像へ重畳する。§`_mask_pump`）
             TOPIC_CAM_MASK: LATEST,
+            #: ステレオの深度映像（JPEG。自動運転画面の2枚目の枠。§`_depth_pump`）
+            TOPIC_STEREO_DEPTH: LATEST,
             #: `follow_object` の追跡結果（GUI がカメラ映像へ重畳する。§`_snapshot`）
             TOPIC_TRACK_TARGET: LATEST,
             #: 矢印信号認識の直近判定（GUI がカメラ映像へ重畳・ライブチューニングに使う。§`_snapshot`）
@@ -656,9 +673,11 @@ class TelemetryServer:
         #: `status` に自動運転の宣言（`catalog`）を毎回は載せなくてよい `/ws/control` クライアント
         self._catalog_lite: set = set()
         #: `"mask"` は `ftg_cam` の走行可否マスク（`_mask_pump` が中継。
-        #: front/rear と違い telemetry_node 自身のエンコーダを使わないので
+        #: front/left と違い telemetry_node 自身のエンコーダを使わないので
         #: `_camera_channel` の `self._jpeg is None` チェックの対象外にしてある）
-        self.camera_clients: dict[str, set] = {"front": set(), "rear": set(), "mask": set()}
+        #: `"depth"` はステレオの深度映像（`_depth_pump` が中継。"mask" と同じく自前のエンコーダは使わない）
+        self.camera_clients: dict[str, set] = {**{role: set() for role in CAM_ROLES},
+                                               "mask": set(), "depth": set()}
         #: mcap のライブ中継を見ている `/ws/record` クライアント
         self.record_clients: set = set()
         #: 地図を見ている `/ws/map` クライアント
@@ -765,22 +784,18 @@ class TelemetryServer:
         #: `_pi_health_pump` が更新するキャッシュ
         self._pi_state = PiHealth(available=False)
 
-        # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
+        # ── カメラ capture 設定（前カメラの FPS 上限・GUI配信fps） ──
         #: `config/camera.json` に保存され、次回起動で戻る（`auto.json` と同じ流儀）。
-        #: ARM中/DISARM中で別々の値を持つ（`_desired_front_fps`/
-        #: `_desired_rear_enabled` 参照）。`rear_fps` はDISARM中は使われない
-        #: （後方カメラごと止める）ので ARM 用の1本だけでよい
-        self._cam_rear_enabled_armed = True
-        self._cam_rear_enabled_disarm = CAM_REAR_ENABLED_DISARM_DEFAULT
+        #: ARM中/DISARM中で別々の値を持つ（`_desired_front_fps` 参照）。左カメラは
+        #: 同期の要否だけで決まる（`_desired_stereo`）ので設定を持たない
         self._cam_front_fps_armed = CAM_FRONT_FPS_DEFAULT
         self._cam_front_fps_disarm = CAM_FRONT_FPS_DISARM_DEFAULT
-        self._cam_rear_fps_armed = CAM_REAR_FPS_DEFAULT
         #: GUI へ配る映像を魚眼のままにするか、仮想ピンホールに補正するか
         #: （`_camera_pump`）。**記録・下流ノード・撮影ボタンは常に生画像**
         self._cam_undistort = False
-        #: カメラ（"front"/"rear"）→ 補正器。`vehicle.toml` に校正値が無いカメラは入らない
+        #: カメラの役割（`CAM_ROLES`）→ 補正器。`vehicle.toml` に校正値が無いカメラは入らない
         self._undistorters: dict[str, Undistorter] = {}
-        for cam in ("front", "rear"):
+        for cam in CAM_ROLES:
             calib = getattr(_SAFETY, f"cam_{cam}_fisheye")
             if calib is not None:
                 self._undistorters[cam] = Undistorter(
@@ -927,7 +942,7 @@ class TelemetryServer:
                          extra={"Content-Disposition": f'attachment; filename="{target.name}"'})
 
     def _serve_snapshot(self, path: str) -> Response:
-        """`GET /snapshot/<front|rear>.png` — 📷 撮影ボタン。最新フレームを PNG で返す。
+        """`GET /snapshot/<front|left>.png` — 📷 撮影ボタン。最新フレームを PNG で返す。
 
         **常に生画像（魚眼のまま・無劣化）。** 主な用途がチェッカーボード校正
         （Mac 側 `tools/cam_calib/`）で、校正は実際にパイプラインが使う画像そのもので
@@ -936,7 +951,7 @@ class TelemetryServer:
         （`raspi/core/camera_model.py` の「座標はフル画角」の節）。
         """
         cam = path[len("/snapshot/"):].split("?")[0].removesuffix(".png")
-        topic = {"front": TOPIC_IMAGE_FRONT, "rear": TOPIC_IMAGE_REAR}.get(cam)
+        topic = CAM_ROLE_TOPIC.get(cam)
         if topic is None:
             return _response(404, "text/plain; charset=utf-8", b"unknown camera")
         if self._jpeg is None:
@@ -1068,7 +1083,7 @@ class TelemetryServer:
         # "mask" は cam_perception_node が既に JPEG 化した `cam/mask` を
         # そのまま中継するだけ（`_mask_pump`）——telemetry_node 自身の
         # 共有メモリ用エンコーダ（`self._jpeg`）は使わないので、この要求から除外する
-        if cam != "mask" and self._jpeg is None:
+        if cam not in _RELAYED_CAMS and self._jpeg is None:
             await ws.close(1011, "no jpeg encoder on the pi")
             return
         self.camera_clients[cam].add(ws)
@@ -1561,7 +1576,8 @@ class TelemetryServer:
         # `OverflowError` で落ちる（64bit に収まらない値）か、UART のビット幅からはみ出す
         mode = int(m.get("mode", 0))
         light_mode = int(m.get("light_mode", 0))
-        if mode not in (0, 1, 2) or light_mode not in (0, 1, 2):
+        winker_mode = int(m.get("winker_mode", 2))
+        if mode not in (0, 1, 2) or light_mode not in (0, 1, 2) or winker_mode not in (1, 2, 3):
             raise ValueError("範囲外の mode / light_mode")
         return DriveCmd(
             mode=mode,
@@ -1594,6 +1610,7 @@ class TelemetryServer:
             # v0.14: ウィンカー。side_brake と同じ理由で追加
             winker_left=bool(m.get("winker_left", False)),
             winker_right=bool(m.get("winker_right", False)),
+            winker_mode=winker_mode,
             source=f"gui:{self.controller_name}")
 
     def _release_control(self, why: str) -> None:
@@ -1847,32 +1864,25 @@ class TelemetryServer:
             "rpm": self._fan.read_rpm(),
         }
 
-    # ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
+    # ── カメラ capture 設定（前カメラのFPS上限・GUI配信fps） ──
 
     @staticmethod
     def _clamp_cam_hz(v: float) -> float:
         return max(CAM_FPS_MIN, min(CAM_FPS_MAX, v))
 
     def _on_camera(self, m: dict) -> None:
-        """`{"type":"camera", "rear_enabled_armed"?, "rear_enabled_disarm"?,
-        "front_fps_armed"?, "front_fps_disarm"?, "rear_fps_armed"?, "gui_hz"?}`。
+        """`{"type":"camera", "front_fps_armed"?, "front_fps_disarm"?, "gui_hz"?, "undistort"?}`。
 
         どれも省略可。`_on_auto`/`_on_fan` と同じく**サーバ側でも必ずクランプする**。
-        `*_armed`/`*_disarm` は capture 側（camera_node）のFPS上限・後方ON/OFFで、
+        `*_armed`/`*_disarm` は capture 側（camera_node）の前カメラのFPS上限で、
         ARM/DISARM（`vs.armed`）ごとに別の値を持つ。
         `gui_hz` はブラウザへ配信するJPEGの頻度で、ARM状態と無関係（Wi-Fi帯域が理由）。
         `undistort` は配信映像の魚眼補正（校正済みのカメラだけに効く）。
         """
-        if "rear_enabled_armed" in m:
-            self._cam_rear_enabled_armed = bool(m["rear_enabled_armed"])
-        if "rear_enabled_disarm" in m:
-            self._cam_rear_enabled_disarm = bool(m["rear_enabled_disarm"])
         if "front_fps_armed" in m and isinstance(m["front_fps_armed"], (int, float)):
             self._cam_front_fps_armed = self._clamp_cam_hz(float(m["front_fps_armed"]))
         if "front_fps_disarm" in m and isinstance(m["front_fps_disarm"], (int, float)):
             self._cam_front_fps_disarm = self._clamp_cam_hz(float(m["front_fps_disarm"]))
-        if "rear_fps_armed" in m and isinstance(m["rear_fps_armed"], (int, float)):
-            self._cam_rear_fps_armed = self._clamp_cam_hz(float(m["rear_fps_armed"]))
         if "gui_hz" in m and isinstance(m["gui_hz"], (int, float)):
             self.camera_hz = self._clamp_cam_hz(float(m["gui_hz"]))
         if "undistort" in m and isinstance(m["undistort"], bool):
@@ -1895,35 +1905,33 @@ class TelemetryServer:
         """前カメラの capture fps。優先度は上から:
 
         1. カメラを使う自動運転が engage 中 → 上限を無視して `CAM_FPS_MAX`
-           （`line_trace`/`ftg_cam` は毎フレーム新しい画を欲しがるため）
+           （`line_trace`/`ftg_cam` は毎フレーム新しい画を欲しがるため）。**ただし左右を同期して撮っている間は
+           上げない**（下の 3 と同じ理由。上げると揃い直すまで左右の組が来ず、`cam_e2e`・`e2e_fusion` が止まる）
         2. 🎥 録画中 → `CAM_FPS_MAX`（DISARM 中でも。動画を 30fps で録るため）
         3. DISARM中（駐車中）→ 節電用の低FPS（`front_fps_disarm`）
         4. それ以外（ARM中）→ ユーザー設定の上限（`front_fps_armed`）
         """
-        if self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES:
+        if self._auto_fps_override():
             return CAM_FPS_MAX
         if self._video_recording():
             return CAM_FPS_MAX
+        if self._desired_stereo():
+            # **左右を同期して撮っている間は ARM/DISARM で fps を変えない。** 走らせたまま fps を変えると
+            # libcamera の同期が崩れ、左右が揃い直すまで 15〜35 秒 `synced` の組が来ない
+            # （`docs/stereo_plan.md` §3）。ARM 中の値に固定する
+            return self._cam_front_fps_armed
         if self._vehicle_armed():
             return self._cam_front_fps_armed
         return self._cam_front_fps_disarm
 
+    def _auto_fps_override(self) -> bool:
+        """カメラを使う自動運転の engage で前カメラを `CAM_FPS_MAX` に上げるか（`_desired_front_fps` の 1）。"""
+        return (self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES
+                and not self._desired_stereo())
+
     def _video_recording(self) -> bool:
         """🎥 録画中（起動処理の途中を含む）か。"""
         return self._video_proc is not None or self._video_starting
-
-    def _desired_rear_fps(self) -> float:
-        """後カメラの capture fps。🎥 録画中はユーザー設定を無視して `CAM_FPS_MAX`。"""
-        return CAM_FPS_MAX if self._video_recording() else self._cam_rear_fps_armed
-
-    def _desired_rear_enabled(self) -> bool:
-        """後方カメラの capture ON/OFF。DISARM中（駐車中）は監視の用途が無いので
-        既定で止める。ARM中はユーザー設定（`rear_enabled_armed`）に従う。
-
-        前カメラと違い、DISARM中に GUI で表示していても設定（`rear_enabled_disarm`）を
-        優先する。"""
-        return self._cam_rear_enabled_armed if self._vehicle_armed() \
-            else self._cam_rear_enabled_disarm
 
     def _desired_front_enabled(self) -> bool:
         """前カメラの capture ON/OFF。
@@ -1932,49 +1940,69 @@ class TelemetryServer:
         （GUI の視聴者・記録）がいる間だけ撮る。カメラ系の知覚ノードは DISARM 中は
         推論しない（`auto_gate.cam_infer_active`）ので数に入れない。センサを止めると
         DISARM 中の 10fps より約63mA、1fps より約45mA 少ない（docs/archive/power_audit_2026-10.md P4）。
-        ARM した瞬間に `_on_armed_change` が即座に再開を頼む（再開まで数百ms）。"""
-        return self._vehicle_armed() or self._cam_in_use_while_disarmed("front")
+        ARM した瞬間に `_on_armed_change` が即座に再開を頼む（再開まで数百ms）。
+
+        **照合する間（`_desired_depth`）も撮る。** 右（主）カメラは左を同期させる側なので、止まっていると
+        左も回らず照合できない（深度映像だけを見ていると前カメラの視聴者がおらず、実機で両方止まっていた）。"""
+        return (self._vehicle_armed() or self._cam_in_use_while_disarmed("front")
+                or self._desired_depth())
+
+    def _desired_depth(self) -> bool:
+        """`stereo_node` に照合（深度）を回させるか（`CamConfig.depth`）。
+
+        ステレオを使う自動運転モード（`STEREO_AUTO_MODES`）が選ばれていて ARM 中、
+        または深度映像（`/ws/camera/depth`）の視聴者がいる間（`docs/stereo_plan.md` 段階4）。"""
+        return (bool(self.camera_clients.get("depth"))
+                or (self._vehicle_armed() and self._auto_mode in STEREO_AUTO_MODES))
+
+    def _desired_stereo(self) -> bool:
+        """左右を同期して撮らせるか（`CamConfig.stereo`）。
+
+        照合する間（`_desired_depth`）、左右の組で推論するモード（`STEREO_PAIR_AUTO_MODES`）が選ばれていて
+        ARM 中、左の映像を使う者（GUI の視聴者・記録）がいる間だけ。
+        **ARM 中ずっとは回さない**（段階4 で絞った）。False の間は camera_node が左カメラを止める。"""
+        return (self._desired_depth() or self._cam_in_use_while_disarmed("left")
+                or (self._vehicle_armed() and self._auto_mode in STEREO_PAIR_AUTO_MODES))
 
     def _cam_in_use_while_disarmed(self, cam: str) -> bool:
-        """DISARM 中に `cam` の映像を使う者がいるか（GUI の視聴者・mcap 記録・🎥 録画・常駐ロガー）。
-        前カメラ専用（後カメラは DISARM 中は設定だけで決める。`_desired_rear_enabled`）。"""
+        """DISARM 中に `cam` の映像を使う者がいるか（GUI の視聴者・mcap 記録・🎥 録画・常駐ロガー）。"""
         return (bool(self.camera_clients.get(cam))
                 or self._mcap_proc is not None or self._mcap_starting
                 or self._video_recording() or self._logger_running)
 
     def _camera_config_status(self) -> dict:
         return {
-            "rear_enabled_armed": self._cam_rear_enabled_armed,
-            "rear_enabled_disarm": self._cam_rear_enabled_disarm,
             "front_fps_armed": self._cam_front_fps_armed,
             "front_fps_disarm": self._cam_front_fps_disarm,
-            "rear_fps_armed": self._cam_rear_fps_armed,
             "gui_hz": self.camera_hz,
             "undistort": self._cam_undistort,
             #: 校正値があり補正映像を出せるカメラ。GUI はこれで「補正中か」を判断して
             #: 進路ガイドの投影モデルを切り替える（未校正のカメラは魚眼のまま届く）
             "undistort_available": {cam: cam in self._undistorters
-                                    for cam in ("front", "rear")},
+                                    for cam in CAM_ROLES},
+            #: いま左右を同期して撮らせているか・照合させているか
+            "stereo_effective": self._desired_stereo(),
+            "depth_effective": self._desired_depth(),
             "armed": self._vehicle_armed(),
             "front_fps_effective": self._desired_front_fps(),
             "front_enabled_effective": self._desired_front_enabled(),
-            "rear_enabled_effective": self._desired_rear_enabled(),
-            "auto_override": self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES,
+            "auto_override": self._auto_fps_override(),
         }
 
     def _publish_cam_config(self) -> None:
         self.pub.send(TOPIC_CAM_CONFIG, CamConfig(
             front_fps=self._desired_front_fps(),
-            rear_fps=self._desired_rear_fps(),
-            rear_enabled=self._desired_rear_enabled(),
-            front_enabled=self._desired_front_enabled()))
+            front_enabled=self._desired_front_enabled(),
+            stereo=self._desired_stereo(),
+            depth=self._desired_depth(),
+            depth_view=bool(self.camera_clients.get("depth"))))
 
     def _load_camera_conf(self) -> None:
         """`config/camera.json` から戻す。`_load_auto_conf` と同じ流儀。
 
-        旧スキーマ（ARM/DISARM区別が無かった `rear_enabled`/`front_cap_hz`/
-        `rear_cap_hz`）しか無いファイルは、その値を ARM 側の初期値として引き継ぐ
-        （DISARM側はコード既定のまま）。
+        旧スキーマ（ARM/DISARM区別が無かった `front_cap_hz`）しか無いファイルは、その値を
+        ARM 側の初期値として引き継ぐ（DISARM側はコード既定のまま）。前後配置のころの後カメラの
+        キー（`rear_*`）は読まない（次に保存したときに消える）。
         """
         try:
             raw = _json_decode(CAMERA_CONF.read_bytes())
@@ -1982,22 +2010,12 @@ class TelemetryServer:
             return
         if not isinstance(raw, dict):
             return                         # 配列など → 無いのと同じ扱い
-        if isinstance(raw.get("rear_enabled_armed"), bool):
-            self._cam_rear_enabled_armed = raw["rear_enabled_armed"]
-        elif isinstance(raw.get("rear_enabled"), bool):
-            self._cam_rear_enabled_armed = raw["rear_enabled"]
-        if isinstance(raw.get("rear_enabled_disarm"), bool):
-            self._cam_rear_enabled_disarm = raw["rear_enabled_disarm"]
         if isinstance(raw.get("front_fps_armed"), (int, float)):
             self._cam_front_fps_armed = self._clamp_cam_hz(float(raw["front_fps_armed"]))
         elif isinstance(raw.get("front_cap_hz"), (int, float)):
             self._cam_front_fps_armed = self._clamp_cam_hz(float(raw["front_cap_hz"]))
         if isinstance(raw.get("front_fps_disarm"), (int, float)):
             self._cam_front_fps_disarm = self._clamp_cam_hz(float(raw["front_fps_disarm"]))
-        if isinstance(raw.get("rear_fps_armed"), (int, float)):
-            self._cam_rear_fps_armed = self._clamp_cam_hz(float(raw["rear_fps_armed"]))
-        elif isinstance(raw.get("rear_cap_hz"), (int, float)):
-            self._cam_rear_fps_armed = self._clamp_cam_hz(float(raw["rear_cap_hz"]))
         if isinstance(raw.get("gui_hz"), (int, float)):
             self.camera_hz = self._clamp_cam_hz(float(raw["gui_hz"]))
         if isinstance(raw.get("undistort"), bool):
@@ -2006,11 +2024,8 @@ class TelemetryServer:
     def _save_camera_conf(self) -> None:
         try:
             _atomic_write_bytes(CAMERA_CONF, _json_encode({
-                "rear_enabled_armed": self._cam_rear_enabled_armed,
-                "rear_enabled_disarm": self._cam_rear_enabled_disarm,
                 "front_fps_armed": self._cam_front_fps_armed,
                 "front_fps_disarm": self._cam_front_fps_disarm,
-                "rear_fps_armed": self._cam_rear_fps_armed,
                 "gui_hz": self.camera_hz,
                 "undistort": self._cam_undistort,
             }))
@@ -2170,7 +2185,7 @@ class TelemetryServer:
     # ——`_on_auto` のモード変更、`_release_control` の操縦者消失と同じ形）。
 
     def _cam_models_list(self) -> dict:
-        """`models/` にある `.onnx` の一覧。`_logs_list` と同じ流儀
+        """`models/seg/` にある `.onnx` の一覧。`_logs_list` と同じ流儀
         （要求したクライアントにだけ返す。ブロードキャストしない）。
 
         **キー名は `files` ではなく `cam_model_files`。** `_logs_list()` の
@@ -2182,8 +2197,8 @@ class TelemetryServer:
         `.json`が壊れていても一覧自体は壊さない（空文字で返す）。
         """
         files = []
-        if MODELS_DIR.is_dir():
-            for p in sorted(MODELS_DIR.iterdir()):
+        if SEG_MODELS_DIR.is_dir():
+            for p in sorted(SEG_MODELS_DIR.iterdir()):
                 if not p.is_file() or p.suffix != ".onnx":
                     continue
                 st = p.stat()
@@ -2201,13 +2216,13 @@ class TelemetryServer:
     def _on_cam_model(self, m: dict) -> None:
         """`{"type":"cam_model_select", "name": str}`。
 
-        `name` が `models/` に実在する `.onnx` と一致しなければ黙って捨てる
+        `name` が `models/seg/` に実在する `.onnx` と一致しなければ黙って捨てる
         （`_on_auto` が知らない planner id を捨てるのと同じ——GUI の一覧に
         出ていないものは選べないので、ここに来る時点で基本的に一致するはずだが、
         一覧取得後にファイルが削除された等のズレを机上でも弾いておく）。
         """
         name = str(m.get("name") or "")
-        if name and not (MODELS_DIR / f"{name}.onnx").is_file():
+        if name and not (SEG_MODELS_DIR / f"{name}.onnx").is_file():
             return
         if name == self._cam_model:
             return
@@ -2236,7 +2251,7 @@ class TelemetryServer:
         if not isinstance(raw, dict):
             return                         # 配列など → 無いのと同じ扱い
         name = raw.get("name")
-        if isinstance(name, str) and (not name or (MODELS_DIR / f"{name}.onnx").is_file()):
+        if isinstance(name, str) and (not name or (SEG_MODELS_DIR / f"{name}.onnx").is_file()):
             self._cam_model = name
 
     def _save_cam_model_conf(self) -> None:
@@ -3080,7 +3095,7 @@ class TelemetryServer:
                 for topic, msg in self.sub.poll(0):
                     if topic.startswith(TOPIC_HB_PREFIX):
                         self._node_hb[msg.node] = (time.monotonic_ns(), msg.pid, msg.detail)
-                    elif topic in (TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR):
+                    elif topic in _CAM_TOPICS:
                         self._cam_wake.set()
                     elif topic == TOPIC_VEHICLE_STATE:
                         self._tel_wake.set()
@@ -3111,7 +3126,7 @@ class TelemetryServer:
         wake = asyncio.Event()
         fds: list[int] = []
         loop = asyncio.get_running_loop()
-        for topic in (TOPIC_AUTO_CMD, TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR, TOPIC_VEHICLE_STATE):
+        for topic in (TOPIC_AUTO_CMD, *CAM_ROLE_TOPIC.values(), TOPIC_VEHICLE_STATE):
             sock = socks.get(topic)
             if sock is None:
                 if topic == TOPIC_AUTO_CMD:
@@ -3488,6 +3503,7 @@ class TelemetryServer:
             passing=gui.passing or auto.passing,
             winker_left=gui.winker_left or auto.winker_left,
             winker_right=gui.winker_right or auto.winker_right,
+            winker_mode=gui.winker_mode,
             # STM32 の設定の一時的な上書きも planner の指定だけ（GUI の指令では常に空）
             fw_overrides=auto.fw_overrides,
             source=f"auto:{self._auto_mode}")
@@ -3634,10 +3650,10 @@ class TelemetryServer:
         """
         if self._jpeg is None:
             return
-        topics = {"front": TOPIC_IMAGE_FRONT, "rear": TOPIC_IMAGE_REAR}
-        last_seq = {"front": -1, "rear": -1}
+        topics = CAM_ROLE_TOPIC
+        last_seq = {role: -1 for role in CAM_ROLES}
         #: カメラごとの「次に送ってよい時刻」。`gui_hz` は上限で、刻みではない
-        next_due = {"front": 0.0, "rear": 0.0}
+        next_due = {role: 0.0 for role in CAM_ROLES}
         #: 上限に当たって見送ったフレームを送れるようになる時刻（無ければ None）
         pending: float | None = None
         while self._running:
@@ -3655,10 +3671,10 @@ class TelemetryServer:
             pending = None
             for cam, clients in self.camera_clients.items():
                 # "mask" は `_mask_pump` が専用に中継する（このループの対象は
-                # `topics` にある front/rear のみ）。ここで弾かないと
+                # `topics` にある front/left のみ）。ここで弾かないと
                 # `topics[cam]` が KeyError になり、このタスクごと死んで
-                # front/rear の配信まで巻き添えで止まる
-                if cam == "mask" or not clients:
+                # front/left の配信まで巻き添えで止まる
+                if cam in _RELAYED_CAMS or not clients:
                     continue
                 ref = self.sub.latest.get(topics[cam])
                 if ref is None or ref.ring_seq == last_seq[cam]:
@@ -3712,6 +3728,23 @@ class TelemetryServer:
                 *(self._send_or_drop(ws, m.jpeg, clients) for ws in list(clients)),
                 return_exceptions=True)
 
+    async def _depth_pump(self) -> None:
+        """`stereo/depth`（`stereo_node` が JPEG 化済み）を `/ws/camera/depth` へそのまま中継する（`_mask_pump` と同じ形）。"""
+        last_seq = -1
+        period = 1.0 / CAM_MASK_POLL_HZ
+        while self._running:
+            await asyncio.sleep(period)
+            clients = self.camera_clients["depth"]
+            if not clients:
+                continue
+            m = self.sub.latest.get(TOPIC_STEREO_DEPTH)
+            if m is None or m.seq == last_seq:
+                continue
+            last_seq = m.seq
+            await asyncio.gather(
+                *(self._send_or_drop(ws, m.jpeg, clients) for ws in list(clients)),
+                return_exceptions=True)
+
     # ── 起動 ──
 
     async def serve_forever(self, stop: asyncio.Future) -> None:
@@ -3729,7 +3762,7 @@ class TelemetryServer:
                 self._auto_ctrl_pump, self._fan_pump, self._wifi_pump, self._pi_health_pump,
                 self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
                 self._cam_e2e_model_pump, self._e2e_fusion_model_pump,
-                self._mask_pump, self._track_roi_pump, self._signal_config_pump)]
+                self._mask_pump, self._depth_pump, self._track_roi_pump, self._signal_config_pump)]
             for t in tasks:
                 t.add_done_callback(lambda t: self._on_pump_done(t, stop))
             try:
@@ -3823,7 +3856,7 @@ npm run build      # -&gt; {dist}</code></pre>
 <p>開発中は Vite の dev サーバを使うほうが速いです（自動リロードが効く）。</p>
 <pre><code>npm run dev        # http://localhost:5173</code></pre>
 <p>チャンネル: <code>/ws/telemetry</code> <code>/ws/control</code>
-<code>/ws/camera/front</code> <code>/ws/camera/rear</code></p>
+<code>/ws/camera/front</code> <code>/ws/camera/left</code></p>
 """.encode()
 
 

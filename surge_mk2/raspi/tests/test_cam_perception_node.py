@@ -184,12 +184,18 @@ class TestCamPerceptionNodeProcessFrame(unittest.TestCase):
         node = CamPerceptionNode(model=model, vehicle=Vehicle.load(), fov_deg=60.0,
                                  max_range=3.0, grid_resolution=0.05, grid_size_m=6.0)
 
+        from raspi.nav.ipm import ground_to_pixel
         open_frame = np.full((240, 320, 3), 255, dtype=np.uint8)
-        blocked_frame = open_frame.copy()
-        # 画面下端寄り中央＝正面近く。床が映るのは地平線（この画では行212付近）より下だけ
-        blocked_frame[215:239, 130:190] = 0
-
         st_open = node.process_frame(open_frame, seq=1)
+        # 正面 0.5〜1.0m の床に当たる画素を暗くする。**行を数字で決め打ちしない**——地平線の行は
+        # `vehicle.toml` の取付と `bottom_crop` で動く（0.3 のときは行 212 付近、0 では行 120 付近）
+        # （`_last_intr` はマスク 64x64 の座標なので、画像 320x240 の画素へ伸ばす）
+        sx, sy = 320 / 64, 240 / 64
+        u_far, v_far = ground_to_pixel(1.0, 0.0, node._last_intr, node._last_ext)
+        _, v_near = ground_to_pixel(0.5, 0.0, node._last_intr, node._last_ext)
+        blocked_frame = open_frame.copy()
+        blocked_frame[int(v_far * sy):int(np.ceil(v_near * sy)) + 1,
+                      int(u_far * sx) - 30:int(u_far * sx) + 30] = 0
         st_blocked = node.process_frame(blocked_frame, seq=2)
 
         self.assertLess(st_blocked.dist[0], st_open.dist[0],
@@ -259,8 +265,13 @@ class TestRealGeometry(unittest.TestCase):
         """マスクの解像度が低くても（160x120・320x180）、壁は真の距離以下（近い側）に出る。
         行の量子化（最大1行ぶん）を近い側へ見込んでいる。1m の壁が極端に近くならないことも見る。
         距離は占有格子の raycast なので、格子の1セルぶんは許す（行の量子化とは別。0.05m の格子で
-        320x180 の 2m の壁が +0.025m に出る。カメラ高さ 0.08m・クロップ 0.3 にしてから表に出た）。"""
-        from raspi.nav.ipm import ground_to_pixel
+        320x180 の 2m の壁が +0.025m に出る。カメラ高さ 0.08m・クロップ 0.3 にしてから表に出た）。
+
+        近い側の下限は**そのマスクの行の粗さから決める**（壁の根元から 1.5 行ぶん手前の床までと、格子の
+        1セル。0.5 行は `round` の丸め、1 行は近い側への見込み）。固定の割合にしない——`bottom_crop` を
+        0 にすると同じ行数のマスクが縦に 1.4 倍の範囲を受け持ち、160x120 では 2m の壁が 1.55m に出る
+        （1行が床の上で受け持つ距離が伸びる。全画角を低い解像度のマスクに縮めることの代償）。"""
+        from raspi.nav.ipm import ground_to_pixel, pixel_to_ground
         frame = np.zeros((360, 640, 3), np.uint8)
         for w, h in ((224, 224), (160, 120), (320, 180)):
             node = self._node(np.ones((h, w), bool))
@@ -275,11 +286,18 @@ class TestRealGeometry(unittest.TestCase):
                 best = min(dist[d % 360] for d in range(-30, 31, 5))
                 self.assertLessEqual(worst, wall + node.grid_resolution,
                                      f"{w}x{h} の {wall}m の壁が {worst:.3f}m に出た")
-                self.assertGreater(best, wall * 0.85, f"{w}x{h} の {wall}m の壁が近すぎる {best:.2f}m")
+                near = pixel_to_ground(u, v + 1.5, node._last_intr, node._last_ext)[0]
+                self.assertGreater(best, near - node.grid_resolution,
+                                   f"{w}x{h} の {wall}m の壁が近すぎる {best:.2f}m（行の粗さの下限 {near:.2f}m）")
 
     def test_centerline_is_usable_on_open_ground(self):
         """全面が走行可能なら、見えている最初の点から 2.5m 先まで十分な幅がある
-        （観測範囲を点の逆投影で作っていたときは 0.7m より先が全部「未観測＝壁」だった）。"""
+        （観測範囲を点の逆投影で作っていたときは 0.7m より先が全部「未観測＝壁」だった）。
+
+        カメラのすぐ前は画角で幅が決まる（`bottom_crop` が 0 だと 0.3m の点から見え、そこの幅は約 1m）。
+        0.5m より手前は `cam_centerline` の最小通行幅の既定値を下回らないことだけを見る。"""
+        from raspi.auto.cam_centerline import CamCenterline
+        min_width = next(p.default for p in CamCenterline.params if p.key == "min_width_m")
         node = self._node(np.ones((self.H, self.W), bool))
         node.process_frame(np.zeros((360, 640, 3), np.uint8))
         path = node.build_path()
@@ -287,7 +305,8 @@ class TestRealGeometry(unittest.TestCase):
         self.assertLessEqual(path.xs[0], 0.45, "見えている最初の点が遠すぎる")
         for x, w in zip(path.xs, path.widths):
             if x <= 2.5:
-                self.assertGreater(w, 1.0, f"{x:.1f}m の幅が {w:.2f}m しかない")
+                self.assertGreater(w, 1.0 if x >= 0.5 else 2 * min_width,
+                                   f"{x:.1f}m の幅が {w:.2f}m しかない")
 
     def test_centerline_starts_at_the_first_visible_point(self):
         """画像の下端より手前（見えていない）の点は渡さない——そこを幅 0 として
@@ -297,7 +316,19 @@ class TestRealGeometry(unittest.TestCase):
         node.process_frame(np.zeros((360, 640, 3), np.uint8))
         path = node.build_path()
         self.assertGreater(path.xs[0], 0.1)
-        self.assertGreater(path.widths[0], 0.5)
+        # 見えている点なので幅は 0 にならない。ただしカメラのすぐ前は画角で幅が狭い
+        # （`bottom_crop` が 0 だと 0.2m の点で 0.15m）ので、ここでは「0 でない」ことだけを見る
+        self.assertGreater(path.widths[0], 0.1)
+
+    def test_default_start_is_wide_enough_for_cam_centerline(self):
+        """既定の `path_x_min` では、開けた床の最初の点が `cam_centerline` の最小通行幅を上回る
+        （下回ると「直前の通行幅が足りない」で止まり続ける）。"""
+        from raspi.auto.cam_centerline import CamCenterline
+        min_width = next(p.default for p in CamCenterline.params if p.key == "min_width_m")
+        node = self._node(np.ones((self.H, self.W), bool))
+        node.process_frame(np.zeros((360, 640, 3), np.uint8))
+        path = node.build_path()
+        self.assertGreater(path.widths[0], 2 * min_width)
 
 
 class TestModelSelection(unittest.TestCase):

@@ -14,7 +14,7 @@
   書き込みの記録があるのは `fb65b6f`（2026-11-01、控え `~/stm32_backup_20261101/`）まで。それより後の自動停止の予想進路（11-02）、
   TC の作り直し（`TractionLimiter`、止めない PI）と過速度ガードの分離（11-09）は**書き込みの記録がない**
 - **MD ファーム**（`~/GitHub/BLDC/ProgramV4`、ブランチ `FW/Program_V4`）: 仕様は `ProgramV4/docs/SERIAL_PROTOCOL.md`
-- **プロトコル v0.29**（`raspi/proto/protocol.toml` の `protocol_version` = 0x001D が正。ファームの `RAS_PROTOCOL_VERSION` も 0x001D）。
+- **プロトコル v0.30**（`raspi/proto/protocol.toml` の `protocol_version` = 0x001E が正。ファームの `RAS_PROTOCOL_VERSION` も 0x001E）。
   Pi とファームは一緒に入れ替える（io_node は版が一致するまで ARM を通さない）
 - **大会**: toyota の予選は 5 位で通過（2026-11-08）。本番コースはシムの `toyota2` と同じ形。次の大会 magp はシムの `magp2`
 - **自動運転**: 主力は `slam2d_route`（`slam2d_raceline` を土台に経路選択・経由点）。障害物・他車は `nav/overtake.py`（Frenet 格子）、
@@ -28,6 +28,26 @@
   （3 コース・16038 枚、うち 15 本で学習）。学習に使っていない 3 本での値: 経路の誤差は最初の 2m で 0.07〜0.17m、全 8m で 0.25〜0.49m、
   向きのずれへの応答は理想の 0.58〜0.77 倍、planner の目標速度は手本の 0.84〜0.99 倍。Pi（DISARM・1.5GHz）で前処理 10ms＋推論 8.6ms、
   10Hz で制御系 +20mA。段階の計画は `~/.claude/plans/slam-e2e-ai-lidar-imu-cosmic-kettle.md`（段階0〜1 の実走前まで済み）
+- **前方ステレオ視（2026-11-12、未コミット）**: 後カメラを前へ移して左右対称・基線 75mm にした（取付済み。`vehicle.toml` の
+  `[sensors.camera] layout` は `stereo`、右 = 主 = libcamera 0 番）。段階0（配置の切り替え・ソフト同期・左の露光の追従・GUI の2台目の枠）を実装し、
+  Pi に反映した（`--restart-io` 済み。このとき HEAD までの `e2e_fusion` の変更も一緒に入った）。Pi の配置を一時的に `stereo` にして、
+  バス上の左右の時刻差は最大 67µs（`synced` の組）、視聴者がいなければ左カメラが止まることを確かめた。露光の追従は部屋が暗く判定できていない。
+  段階1（取付後の確認）も済み: `bottom_crop` は 0（全画角）、左カメラの電流は +57mA（30fps）、露光は 2 秒以内に追従。
+  fps を変えた後に `SyncReady` が立ったまま最大 19ms ずれていたので、`synced` は左右の差を測って決めるように直した。
+  段階2（ステレオ校正）も済み: `tools/cam_calib` の「ステレオ」で 13 組、基線 76.2mm・平行化後の縦ずれ中央値 0.29px で合格し、
+  `vehicle.toml` に書いた（Pi へは未反映。読むノードがまだ無い）。段階3 は道具まで実装（`logger_node` が同期中の左右を同じ瞬間の組で焼く・`tools/stereo_bench`。Pi 未反映）。
+  段階4 も実装し Pi に反映した（`stereo_node`＝`surge-stereo`・`scan/stereo`・深度映像の枠・`CamConfig.depth`）。
+  **ARM 中でも深度・左の映像を使う者がいなければ左カメラを止めるようにした。** 640 幅のまま高速化（組の待ち方・表示を別スレッド・
+  2 スレッド・後処理を C に）し、電流 +147mA で合格。GUI の深度映像は表示専用に WLS で穴を埋める。
+  11-12 に段階3 の物差しの壁（0.5/1.0/1.5m）を記録し、距離は ±1〜3% で合った。BM は無地の面で取り違えるので **SGBM に決め**、
+  画像の約 255 行より下は自分の車体が写る（カメラが前車軸より 14cm 後ろ）ので帯を 150〜260 行にした。
+  遅れは中央値 47ms（1.5GHz・表示なし）／43ms（ARM の上限 2.0GHz）、電流 +156mA で合格。11-13 に実際に ARM して、組が途切れないことを確かめた（駆動用バッテリーの電圧不足でモータは起動せず）。床が見えるのは中央で約 1.1m より先
+  段階5 の方針を 11-13 に決めた（モードごとの扱い。前後配置へ戻すことは想定しない）。**前方の学習系（`cam_e2e`・`e2e_fusion`）は
+  左右2台の組を入力にする**ように学習・推論・telemetry_node を直した（Mac のテストまで。Pi 未反映・推論の遅れと電流は未測定・
+  左右の組での記録と学習はまだ）。以降の手順と測定値は [`docs/stereo_plan.md`](docs/stereo_plan.md)
+  11-13 に**前後配置をコードから消した**（`[sensors.camera] layout`・`cam_rear`・`image/rear`・後カメラの GUI（バックミラー・R で後方）・
+  学習系の右1台の経路）。右1台のモデル（cam_e2e v1〜v11・e2e_fusion v1〜v2）は Mac・Pi とも消した。セグメンテーションの置き場を `models/` 直下から `models/seg/` に移し、旧モデル v1〜v3 は消した（Pi の `models/` は 11-13 に全部消してあり、次の deploy で e2e_lidar・nano_track が戻る）。
+  Pi 未反映
 
 ## 実機で確かめること
 

@@ -299,3 +299,24 @@ class TestSizing(RingCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_find_picks_the_closest_frame_within_tolerance():
+    """`FrameRing.find`: リングに残っているコマから、撮影時刻が最も近いものを選ぶ。"""
+    import uuid
+
+    from raspi.bus import FrameRing
+
+    ring = FrameRing.create(f"surge_find_{uuid.uuid4().hex[:6]}", 8, 4, "RGB888", n_slots=4)
+    try:
+        assert ring.find(0, 10**9) is None                 # まだ何も無い
+        for i in range(6):                                 # 4 スロットなので古い 3 コマは上書き済み
+            ring.write(bytes(8 * 4 * 3), t_capture_ns=1_000_000 * i, frame_id=i)
+        f = ring.find(4_100_000, 200_000)
+        assert f is not None and f.desc.frame_id == 4 and f.desc.t_capture_ns == 4_000_000
+        assert ring.find(4_500_000, 200_000) is None       # 差が大きい
+        assert ring.find(1_000_000, 200_000) is None       # 上書きされたコマは見ない
+        assert ring.find(5_000_000, 0).desc.frame_id == 5
+    finally:
+        ring.close()
+        ring.unlink()

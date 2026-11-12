@@ -461,11 +461,26 @@ class TestTorqueMode(unittest.TestCase):
 
     def test_launch_occupies_flags2_bit3(self):
         """v0.20: ローンチコントロールの要求は `flags2` bit3、発進中は `flags` bit24。"""
-        self.assertEqual(self._cmd(launch=True).flags2, packets.CMD_FLG2_LAUNCH)
+        # bit4-5 は点滅モード（v0.30。既定で 2 が入る）なので、それ以外のビットで比べる
+        rest = ~packets.CMD_FLG2_WINKER_MODE_MASK & 0xFF
+        self.assertEqual(self._cmd(launch=True).flags2 & rest, packets.CMD_FLG2_LAUNCH)
         self.assertEqual(packets.CMD_FLG2_LAUNCH, 0x08)
-        self.assertEqual(self._cmd().flags2, 0)
+        self.assertEqual(self._cmd().flags2 & rest, 0)
         self.assertTrue(decode_flags(packets.FLG_LAUNCH_ACTIVE)["launch_active"])
         self.assertFalse(decode_flags(0)["launch_active"])
+
+    def test_winker_mode_occupies_flags2_bit4_5(self):
+        """v0.30: ウィンカーの点滅モード（1=通常、2=滑らか、3=豆電球風）は `flags2` bit4-5。
+        範囲外は 2（滑らか）にする。"""
+        def mode(**kw):
+            return ((self._cmd(**kw).flags2 & packets.CMD_FLG2_WINKER_MODE_MASK)
+                    >> packets.CMD_FLG2_WINKER_MODE_SHIFT)
+        self.assertEqual(packets.CMD_FLG2_WINKER_MODE_MASK, 0x30)
+        self.assertEqual(mode(), 2)
+        for m in (1, 2, 3):
+            self.assertEqual(mode(winker_mode=m), m)
+        for bad in (0, 4, -1):
+            self.assertEqual(mode(winker_mode=bad), 2)
 
     def test_target_torque_zero_is_just_zero(self):
         """`brake_torque` の 0 とは違い「未指定」の特別扱いはない。"""
@@ -526,7 +541,7 @@ class TestTopicRegistry(unittest.TestCase):
         from raspi.msgs import Heartbeat, ImageRef, VehicleState
 
         self.assertIs(type_for_topic("vehicle_state"), VehicleState)
-        self.assertIs(type_for_topic("image/rear"), ImageRef)
+        self.assertIs(type_for_topic("image/left"), ImageRef)
         self.assertIs(type_for_topic("hb/io"), Heartbeat)
 
     def test_scan_cam_reuses_scan_type(self):

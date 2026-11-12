@@ -70,6 +70,17 @@ class FrameReader:
         **例外は投げない**——1周期読めなくても呼び出し側が「失敗フレーム」に
         落ちて続行できるようにする。
         """
+        return self._read(ref, None, 0)
+
+    def read_at(self, ref: ImageRef, t_capture_ns: int, tol_ns: int) -> tuple[np.ndarray, int] | None:
+        """撮影時刻が `t_capture_ns` から `tol_ns` 以内のフレームを読む（リングに残っている中から）。
+
+        ステレオで、もう1台と同じ瞬間のコマを取り出すのに使う（`stereo_node`）。古さの検査・
+        掴み直しは `read` と同じ。
+        """
+        return self._read(ref, t_capture_ns, tol_ns)
+
+    def _read(self, ref: ImageRef, t_target: int | None, tol_ns: int):
         try:
             from ..bus import FrameRing
 
@@ -83,7 +94,8 @@ class FrameReader:
                 self._ring = FrameRing.attach(ref.shm_name)
                 self._ring_name = ref.shm_name
 
-            frame_ref = self._ring.latest()
+            frame_ref = (self._ring.latest() if t_target is None
+                         else self._ring.find(t_target, tol_ns))
             if frame_ref is None:
                 return None
             arr = frame_ref.as_array().copy()      # 呼び出し側が保持する間ずっと使うのでコピーする

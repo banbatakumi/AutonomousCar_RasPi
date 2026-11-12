@@ -16,13 +16,12 @@
 （操舵のむだ時間・1次遅れなど）だけ。
 **`measured` を見て「この数字を信じてよいか」を呼び出し側が判断できる**ようにしてある。
 
-## カメラのレンズは「プロファイル」を1行で選ぶ
+## カメラは前方ステレオの左右2台。レンズは「プロファイル」を1行で選ぶ
 
-純正レンズ（≒66°）と IMX219 160° 広角を付け替えられるように、レンズで変わる値
-（`hfov`・`bottom_crop`・`undistort_hfov`・魚眼の校正値 `fisheye`）は
-`[sensors.cam_front.lenses.<名前>]` に分けて持ち、`[sensors.cam_front]` の
-`lens = "<名前>"` で選ぶ。取付位置・姿勢（x/y/z/pitch/yaw）はレンズに依らないので
-カメラの表に残す。解決は `resolve_lens()` の1か所だけ（`config/generate.py` も使う）。
+カメラは前方に左右2台（右 `cam_front` が主カメラ、左 `cam_left`。`CAMERA_DEVICES`）。
+レンズで変わる値（`hfov`・`bottom_crop`・`undistort_hfov`・魚眼の校正値 `fisheye`）と
+取付位置・姿勢は `[sensors.cam_*.lenses.<名前>]` に持ち、`[sensors.cam_*]` の
+`lens = "<名前>"` で選ぶ。解決は `resolve_lens()` の1か所だけ（`config/generate.py` も使う）。
 """
 
 from __future__ import annotations
@@ -35,8 +34,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .camera_model import FisheyeCalib
+from .stereo_model import StereoCalib
 
-__all__ = ["Vehicle", "DEFAULT_PATH", "resolve_lens", "LENS_NAME_RE"]
+__all__ = ["Vehicle", "DEFAULT_PATH", "resolve_lens", "LENS_NAME_RE",
+           "CAMERA_DEVICES", "CAMERA_ROLES", "stereo_calib"]
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
 GRAVITY = 9.81
@@ -44,6 +45,15 @@ GRAVITY = 9.81
 #: レンズ名に使える文字。📷 のファイル名（`surge_front_<lens>_640x360_…png`）に
 #: 入るので `_` は使わせない（校正ツールが名前を区切れなくなる）
 LENS_NAME_RE = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+#: カメラの (役割, libcamera の番号) の並び。前方ステレオの右（主カメラ `front` ＝ `image/front`。
+#: 推論・前方映像が使う）と左（`left` ＝ `image/left`）。**並び順が共有メモリの番号**（`surge_cam0` が先頭）。
+#: 右は libcamera 0 番＝CAM0 ポート i2c@88000（2026-11-12 にケーブルを左右で入れ替えた）。
+#: **取り付けを入れ替えたらここだけ直す**
+CAMERA_DEVICES: tuple[tuple[str, int], ...] = (("front", 0), ("left", 1))
+#: カメラの役割の並び（先頭が主カメラ）
+CAMERA_ROLES: tuple[str, ...] = tuple(role for role, _ in CAMERA_DEVICES)
 
 
 def resolve_lens(cam: dict, *, strict: bool = False) -> dict:
@@ -73,6 +83,22 @@ def resolve_lens(cam: dict, *, strict: bool = False) -> dict:
     base["lens"] = str(name)
     return base
 
+
+
+def stereo_calib(sensors: dict, lens_right: str, lens_left: str) -> StereoCalib | None:
+    """`[sensors.stereo]`（`tools/cam_calib --stereo` が書く）を読む。
+
+    未校正、または**校正したときのレンズのプロファイルが今のものと違う**なら None
+    （付け替えた後に古い R・T で照合しない。違うときは警告を出す）。
+    """
+    st = StereoCalib.from_dict(sensors.get("stereo") or {})
+    if st is None:
+        return None
+    if (st.lens_right, st.lens_left) != (lens_right, lens_left):
+        print(f"!! vehicle.toml: [sensors.stereo] は レンズ {st.lens_right}/{st.lens_left} で校正した値で、"
+              f"今は {lens_right}/{lens_left}。ステレオ校正をやり直すまで使わない", file=sys.stderr)
+        return None
+    return st
 
 
 def _ramp_max(dyn: dict, safety: dict) -> float:
@@ -126,6 +152,8 @@ class Vehicle:
     lidar_x: float = 0.0
     lidar_y: float = 0.0
     lidar_yaw: float = 0.0                 #: [rad]
+    #: 走査面の路面からの高さ [m]（`[sensors.lidar] z`）。ステレオの距離を LiDAR と比べるのに使う
+    lidar_z: float = 0.0
     #: LD06 の強度（信頼度）も送らせるか（`[sensors.lidar] intensity`。io_node が CONFIG_SET の `LIDAR_FORMAT` = 1 を送る）
     lidar_intensity: bool = False
     #: 点群のノイズの除去の設定（`[sensors.lidar.filter]`、`raspi/nav/scan_filter.py` の `ScanFilterConfig` のキー）
@@ -133,15 +161,15 @@ class Vehicle:
     #: カメラの下端カット率（ボンネット等の映り込み除去。`camera_node.py` の ISP
     #: ScalerCrop が実際の読み出しに反映する）。GUI の進路ガイドの主点補正にも使う
     cam_front_bottom_crop: float = 0.0
-    cam_rear_bottom_crop: float = 0.0
+    cam_left_bottom_crop: float = 0.0
     #: 付いているレンズのプロファイル名（`[sensors.cam_*] lens`）。プロファイルを
     #: 使わない書き方なら ""。📷 のファイル名と校正ツールの書き込み先に使う
     cam_front_lens: str = ""
-    cam_rear_lens: str = ""
+    cam_left_lens: str = ""
     #: レンズ用の ISP チューニングの差分（`config/cam_tuning/` のファイル名、プロファイルの
     #: `isp_tuning`）。"" ＝ センサー標準のまま。`raspi/core/cam_tuning.py` が標準へ重ねる
     cam_front_isp_tuning: str = ""
-    cam_rear_isp_tuning: str = ""
+    cam_left_isp_tuning: str = ""
     #: カメラの取付位置・姿勢・画角。**IPM（`raspi/nav/ipm.py`）と `CameraView.tsx` の
     #: 進路ガイドが同じ値を見る。** `pitch` は下向きが正（`vehicle.toml` の注記どおり）で、
     #: 取り付け角度そのもの。走行中の車体姿勢ぶんは `vs.pitch`（IMU実測）で別途補正する
@@ -151,20 +179,24 @@ class Vehicle:
     cam_front_pitch: float = 0.0           #: [rad] 下向きが正
     cam_front_yaw: float = 0.0             #: [rad]
     cam_front_hfov: float = 1.152          #: [rad]
-    cam_rear_x: float = 0.044
-    cam_rear_y: float = 0.0
-    cam_rear_z: float = 0.09
-    cam_rear_pitch: float = 0.0
-    cam_rear_yaw: float = 3.14159265
-    cam_rear_hfov: float = 1.152
+    #: 前方ステレオの左カメラ（主カメラ `cam_front` は右）
+    cam_left_x: float = 0.1
+    cam_left_y: float = 0.0375
+    cam_left_z: float = 0.08
+    cam_left_pitch: float = 0.0
+    cam_left_yaw: float = 0.0
+    cam_left_hfov: float = 2.23
     #: 魚眼レンズの校正値（選んだレンズの `fisheye`、`tools/cam_calib/` が書く）。
     #: **None ＝ 未校正**で、IPM・進路ガイドは従来どおり `hfov` のピンホールで近似する
     cam_front_fisheye: FisheyeCalib | None = None
-    cam_rear_fisheye: FisheyeCalib | None = None
+    cam_left_fisheye: FisheyeCalib | None = None
     #: 補正映像（魚眼 → 仮想ピンホール、`telemetry_node`）の水平画角 [rad]。
     #: 大きいほど広く写るが端が引き伸ばされる（ピンホールは 180° に届かない）
     cam_front_undistort_hfov: float = 1.92
-    cam_rear_undistort_hfov: float = 1.92
+    cam_left_undistort_hfov: float = 1.92
+    #: 前方ステレオの外部パラメータ（`[sensors.stereo]`、`raspi/core/stereo_model.py`）。
+    #: 校正時と同じレンズのときだけ入る。None ＝ 使えない
+    stereo: StereoCalib | None = None
     #: 操舵のむだ時間と1次遅れ [s]。Pure Pursuit の遅延補償の既定値になる
     dead_time_s: float = 0.030
     tau_steer_s: float = 0.12
@@ -304,6 +336,16 @@ class Vehicle:
         return self.dead_time_s + self.tau_steer_s + yaw
 
     @property
+    def camera_roles(self) -> tuple[str, ...]:
+        """付いているカメラの役割の並び（先頭が主カメラ `front`）。"""
+        return CAMERA_ROLES
+
+    @property
+    def camera_devices(self) -> tuple[tuple[str, int], ...]:
+        """(役割, libcamera の番号) の並び。並び順が共有メモリの番号（`CAMERA_DEVICES`）。"""
+        return CAMERA_DEVICES
+
+    @property
     def steer_map(self):
         """曲率 ⇄ 指令舵角の変換に使う舵の効き（`nav.purepursuit.SteerMap`）。"""
         from ..nav.purepursuit import SteerMap
@@ -340,7 +382,7 @@ class Vehicle:
         sensors = d.get("sensors", {})
         lidar = sensors.get("lidar", {})
         cam_front = resolve_lens(sensors.get("cam_front", {}))
-        cam_rear = resolve_lens(sensors.get("cam_rear", {}))
+        cam_left = resolve_lens(sensors.get("cam_left", {}))
         fp_raw = d.get("footprint", []) or []
         return cls(
             measured=bool(d.get("measured", False)),
@@ -352,30 +394,32 @@ class Vehicle:
             lidar_x=float(lidar.get("x", 0.0)),
             lidar_y=float(lidar.get("y", 0.0)),
             lidar_yaw=float(lidar.get("yaw", 0.0)),
+            lidar_z=float(lidar.get("z", 0.0)),
             lidar_intensity=bool(lidar.get("intensity", False)),
             lidar_filter=tuple((str(k), v) for k, v in (lidar.get("filter", {}) or {}).items()),
+            cam_left_bottom_crop=float(cam_left.get("bottom_crop", 0.0)),
+            cam_left_lens=cam_left["lens"],
+            cam_left_isp_tuning=str(cam_left.get("isp_tuning", "")),
+            cam_left_x=float(cam_left.get("x", 0.1)),
+            cam_left_y=float(cam_left.get("y", 0.0375)),
+            cam_left_z=float(cam_left.get("z", 0.08)),
+            cam_left_pitch=float(cam_left.get("pitch", 0.0)),
+            cam_left_yaw=float(cam_left.get("yaw", 0.0)),
+            cam_left_hfov=float(cam_left.get("hfov", 2.23)),
+            cam_left_fisheye=FisheyeCalib.from_dict(cam_left.get("fisheye") or {}),
+            cam_left_undistort_hfov=float(cam_left.get("undistort_hfov", 1.92)),
+            stereo=stereo_calib(sensors, cam_front["lens"], cam_left["lens"]),
             cam_front_bottom_crop=float(cam_front.get("bottom_crop", 0.0)),
-            cam_rear_bottom_crop=float(cam_rear.get("bottom_crop", 0.0)),
             cam_front_lens=cam_front["lens"],
-            cam_rear_lens=cam_rear["lens"],
             cam_front_isp_tuning=str(cam_front.get("isp_tuning", "")),
-            cam_rear_isp_tuning=str(cam_rear.get("isp_tuning", "")),
             cam_front_x=float(cam_front.get("x", 0.097)),
             cam_front_y=float(cam_front.get("y", 0.0)),
             cam_front_z=float(cam_front.get("z", 0.09)),
             cam_front_pitch=float(cam_front.get("pitch", 0.0)),
             cam_front_yaw=float(cam_front.get("yaw", 0.0)),
             cam_front_hfov=float(cam_front.get("hfov", 1.152)),
-            cam_rear_x=float(cam_rear.get("x", 0.044)),
-            cam_rear_y=float(cam_rear.get("y", 0.0)),
-            cam_rear_z=float(cam_rear.get("z", 0.09)),
-            cam_rear_pitch=float(cam_rear.get("pitch", 0.0)),
-            cam_rear_yaw=float(cam_rear.get("yaw", 3.14159265)),
-            cam_rear_hfov=float(cam_rear.get("hfov", 1.152)),
             cam_front_fisheye=FisheyeCalib.from_dict(cam_front.get("fisheye") or {}),
-            cam_rear_fisheye=FisheyeCalib.from_dict(cam_rear.get("fisheye") or {}),
             cam_front_undistort_hfov=float(cam_front.get("undistort_hfov", 1.92)),
-            cam_rear_undistort_hfov=float(cam_rear.get("undistort_hfov", 1.92)),
             dead_time_s=float(dyn.get("dead_time_s", 0.030)),
             tau_steer_s=float(dyn.get("tau_steer_s", 0.12)),
             steer_servo_gain=float(dyn.get("steer_servo_gain", 1.0)),

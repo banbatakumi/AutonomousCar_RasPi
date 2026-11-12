@@ -57,6 +57,7 @@ from __future__ import annotations
 import heapq
 import math
 import time
+import weakref
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -76,7 +77,7 @@ __all__ = ["HybridConfig", "HybridResult", "plan"]
 #: `id(lmap)`は理論上GC後に再利用されうるが、このプロジェクトの唯一の
 #: 呼び出し元（`park_to_point`）は1つの`LocalMap`をセッション中使い回すため
 #: 実質起こらない。起きても`edt_epoch`まで一致する必要がありほぼ無害
-_DIJKSTRA_CACHE: dict[tuple, np.ndarray] = {}
+_DIJKSTRA_CACHE: dict[tuple, tuple[weakref.ref, np.ndarray]] = {}
 _DIJKSTRA_CACHE_MAX = 8
 
 
@@ -234,11 +235,15 @@ class _Heuristic2D:
         # `_replan_fallback`前の1回など）だけ効く——`edt_epoch`は`reset()`を
         # またいで単調増加するので、地図の中身が変わった前後で衝突しない
         # （`grid.seq`は`reset()`で0に戻るため、それ単独だとキーが衝突しうる）
+        # **`id(lmap)` は地図が解放されると別の地図に使い回される**ので、キーが合っても同じ地図とは
+        # 限らない（作り直した地図が同じ番地・同じ `edt_epoch` になると、前の地図の距離が返って
+        # 目標へ届かない＝inf になる）。弱参照を一緒に覚え、同じ実体のときだけ使う
         key = (id(lmap), lmap.edt_epoch, goal, round(margin, 6))
         cached = _DIJKSTRA_CACHE.get(key)
-        if cached is not None:
-            self.cost = cached
+        if cached is not None and cached[0]() is lmap:
+            self.cost = cached[1]
             return
+        _DIJKSTRA_CACHE.pop(key, None)
 
         cc, rr = np.meshgrid(np.arange(n), np.arange(n), indexing="xy")
         xs = self.origin[0] + (cc + 0.5) * res
@@ -253,7 +258,7 @@ class _Heuristic2D:
         # `edt_epoch`は10Hzで増え続けるので同じキーはすぐ死蔵になる）
         if len(_DIJKSTRA_CACHE) >= _DIJKSTRA_CACHE_MAX:
             _DIJKSTRA_CACHE.pop(next(iter(_DIJKSTRA_CACHE)))
-        _DIJKSTRA_CACHE[key] = self.cost
+        _DIJKSTRA_CACHE[key] = (weakref.ref(lmap), self.cost)
 
     def _dijkstra(self, free: np.ndarray, goal: tuple[float, float]) -> np.ndarray:
         n, res = self.n, self.res

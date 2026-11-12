@@ -43,6 +43,15 @@
 
 - 画像を減らす → `--image-hz 2`（約 5MB/分）/ `--image-hz 0`（画像なし）
 
+## ステレオの組（`docs/stereo_plan.md` 段階3）
+
+右（`image/front`）と左（`image/left`）がどちらも同期済み（`ImageRef.synced`）の間は、
+**2台を同じ瞬間の組として焼く**（`_pump_stereo`）。カメラごとに最新を焼くと最大1コマずれ、
+Mac での照合に使えないため。2台の最新のうち古い方の撮影時刻に合わせ、もう片方はリングに
+残っているコマから `STEREO_PAIR_TOL_NS` 以内のものを探す（`FrameRing.find`）。
+組の JPEG は照合のため品質を上げる（`--stereo-jpeg-quality`、既定 90。640×480 で約 2 倍の大きさ）。
+同期していない間（DISARM 中で左を止めている等）は、これまでどおりカメラごとに焼く。
+
 書き込み自体は軽い（Mac で実時間の 1200倍速。1分ぶんを 0.05秒で書く）ので、
 **気にするのは CPU ではなくカードの残量**。
 
@@ -77,11 +86,12 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_DIAG_LINK,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
-    TOPIC_IMAGE_REAR,
+    TOPIC_IMAGE_LEFT,
     TOPIC_LINE_CAM,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN,
     TOPIC_SCAN_CAM,
+    TOPIC_SCAN_STEREO,
     TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
@@ -121,6 +131,7 @@ DEFAULT_TOPICS = [
     TOPIC_AUTO_MAP,
     # カメラ系の知覚結果
     TOPIC_SCAN_CAM,
+    TOPIC_SCAN_STEREO,
     TOPIC_LINE_CAM,
     TOPIC_CAM_PATH,
     TOPIC_TRACK_TARGET,
@@ -130,7 +141,15 @@ DEFAULT_TOPICS = [
     TOPIC_LOG_CTRL,
     TOPIC_UI_EVENT,
 ]
-IMAGE_TOPICS = (TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR)
+IMAGE_TOPICS = (TOPIC_IMAGE_FRONT, TOPIC_IMAGE_LEFT)
+
+#: ステレオの組とみなす左右の撮影時刻の差の上限。`camera_node.STEREO_SYNC_TOL_NS`（`synced` を立てる条件）と同じ値
+STEREO_PAIR_TOL_NS = 500_000
+#: ステレオの組の JPEG 品質の既定。照合はブロックの模様を比べるので、品質 70 の 8×8 のブロック歪みが効きうる
+#: （効き方は `tools/stereo_bench` の `--requality` で確かめる）
+DEFAULT_STEREO_JPEG_QUALITY = 90
+#: 組にするカメラの役割（右＝主, 左）
+STEREO_ROLES = ("front", "left")
 
 #: バスを覗く間隔。50Hz の `vehicle_state` に対して十分細かい
 POLL_MS = 20
@@ -161,7 +180,8 @@ class LoggerNode:
 
     def __init__(self, path: str | Path, *, topics=None,
                  image_hz: float = DEFAULT_IMAGE_HZ, jpeg_quality: int = 70,
-                 compression: str = "zstd", viz: bool = True) -> None:
+                 compression: str = "zstd", viz: bool = True,
+                 stereo_jpeg_quality: int = DEFAULT_STEREO_JPEG_QUALITY) -> None:
         self.topics = list(topics if topics is not None else DEFAULT_TOPICS)
         self.image_hz = image_hz
         self.viz = viz
@@ -169,6 +189,10 @@ class LoggerNode:
         self._jpeg = RingJpeg(jpeg_quality) if image_hz > 0 else None
         if self._jpeg is not None and not self._jpeg.ok:
             self._jpeg = None                 # エンコーダ無し＝画像なしで続行
+        #: ステレオの組を焼くエンコーダ（品質だけ違う。リングの attach も別に持つ）
+        self._jpeg_stereo = (RingJpeg(stereo_jpeg_quality)
+                             if self._jpeg is not None and stereo_jpeg_quality != jpeg_quality
+                             else self._jpeg)
 
         self._compression = compression
         self._metadata = {
@@ -176,6 +200,8 @@ class LoggerNode:
             "topics": ",".join(self.topics),
             "image_hz": image_hz if self._jpeg is not None else 0,
             "jpeg": self._jpeg.impl if self._jpeg is not None else "none",
+            "jpeg_quality": jpeg_quality,
+            "stereo_jpeg_quality": stereo_jpeg_quality,
         }
         self.log = McapLog(path, compression=compression, metadata=self._metadata,
                            publish_at_write=True)
@@ -188,6 +214,8 @@ class LoggerNode:
 
         self._running = False
         self.images_written = 0
+        #: ステレオの組として焼いた数（1組 = 2枚）
+        self.stereo_pairs_written = 0
         self.t_start = time.monotonic()
         #: カメラ役割名 → 次に JPEG を焼く時刻 [ns]
         self._next_image_ns: dict[str, int] = {}
@@ -305,14 +333,17 @@ class LoggerNode:
         間引いている以上、キューに溜まった古い参照を掘り返す意味がない。
 
         **前に焼いたのと同じフレームは焼かない。** カメラが止まっている間（DISARM 中の
-        後方カメラなど）も共有メモリには最後の1枚が残るので、見ずに焼くと同じ絵を
+        左カメラなど）も共有メモリには最後の1枚が残るので、見ずに焼くと同じ絵を
         `image_hz` で書き続ける。
         """
         if self._jpeg is None:
             return
         now = time.monotonic_ns()
         period = int(NS / self.image_hz)
+        paired = self._pump_stereo(now, period)
         for cam, ref in self._last_ref.items():
+            if paired and cam in STEREO_ROLES:
+                continue
             due = self._next_image_ns.get(cam, 0)
             # **周期の 1/4 だけ早く来たフレームも通す。** カメラの周期（30fps なら 33.3ms）と
             # `image_hz` が同じだと、フレームの到着の揺らぎで「予定より数 ms 早い」だけで
@@ -332,11 +363,46 @@ class LoggerNode:
             self.log.write_viz_image(jpg, cam, t_capture)
             self.images_written += 1
 
+    def _pump_stereo(self, now: int, period: int) -> bool:
+        """右と左を同じ瞬間の組で焼く。組の扱いをする（同期済みの）間は True。
+
+        間引きの予定は右（`front`）の予定を使う。2台の最新のうち古い方の撮影時刻に合わせ、
+        両方のリングからその時刻のコマを探す（新しい方は1コマ先まで進んでいることがある）。
+        片方が見つからなければ今回は焼かず、予定も進めない（次のポーリングでもう一度試す）。
+        """
+        refs = [self._last_ref.get(r) for r in STEREO_ROLES]
+        if any(r is None or not getattr(r, "synced", False) for r in refs):
+            return False
+        rf, rl = refs
+        cam = STEREO_ROLES[0]
+        due = self._next_image_ns.get(cam, 0)
+        if now < due - period // 4:
+            return True
+        target = min(rf.t_capture, rl.t_capture)
+        key = (rf.shm_name, target)
+        if self._last_image.get(cam) == key:
+            return True                       # この瞬間の組は焼いた
+        jp = self._jpeg_stereo
+        got_f = jp.encode_at(rf.shm_name, target, STEREO_PAIR_TOL_NS, expect_seq=rf.ring_seq)
+        got_l = (jp.encode_at(rl.shm_name, target, STEREO_PAIR_TOL_NS, expect_seq=rl.ring_seq)
+                 if got_f is not None else None)
+        if got_f is None or got_l is None:
+            return True
+        self._next_image_ns[cam] = due + period if 0 < due and now - due < period else now + period
+        self._last_image[cam] = key
+        for role, (jpg, t_capture) in zip(STEREO_ROLES, (got_f, got_l)):
+            self.log.write_viz_image(jpg, role, t_capture)
+        self.images_written += 2
+        self.stereo_pairs_written += 1
+        return True
+
     def stop(self) -> None:
         self._running = False
 
     def close(self) -> None:
         self.sub.close()
+        if self._jpeg_stereo is not None and self._jpeg_stereo is not self._jpeg:
+            self._jpeg_stereo.close()
         if self._jpeg is not None:
             self._jpeg.close()
         if self.vizrec is not None:
@@ -383,6 +449,9 @@ def main() -> int:
                     help=f"JPEG を焼く頻度（カメラ1台あたり。既定 {DEFAULT_IMAGE_HZ}）。"
                          "0 で画像を記録しない")
     ap.add_argument("--jpeg-quality", type=int, default=70)
+    ap.add_argument("--stereo-jpeg-quality", type=int, default=DEFAULT_STEREO_JPEG_QUALITY,
+                    help="ステレオの組（右と左が同期している間）の JPEG 品質。"
+                         f"既定 {DEFAULT_STEREO_JPEG_QUALITY}")
     ap.add_argument("--compression", default="zstd", choices=["zstd", "lz4", "none"])
     ap.add_argument("--no-viz", action="store_true",
                     help="Foxglove 用の /viz/* を書かない（数値は全部残る）")
@@ -396,6 +465,7 @@ def main() -> int:
     try:
         node = LoggerNode(out, image_hz=args.image_hz,
                           jpeg_quality=args.jpeg_quality,
+                          stereo_jpeg_quality=args.stereo_jpeg_quality,
                           compression=args.compression, viz=not args.no_viz)
     except RuntimeError as e:                 # mcap が無い
         print(f"!! {e}", file=sys.stderr)

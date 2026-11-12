@@ -149,16 +149,21 @@ def _worker(idx: int, frames: int, dropped: int = 0, enabled: bool = True):
 
 
 class TestCameraHbDetail(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(cn, "CAM_TOPIC", {0: ("image/front", "front"), 1: ("image/left", "left")})
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_fps_from_frame_increments(self):
-        front, rear = _worker(0, 0), _worker(1, 0, enabled=False)
-        node = SimpleNamespace(workers=[front, rear])
+        front, left = _worker(0, 0), _worker(1, 0, enabled=False)
+        node = SimpleNamespace(workers=[front, left])
         detail = cn.make_hb_detail()
         with mock.patch.object(cn.time, "monotonic", return_value=100.0):
-            self.assertEqual(detail(node), "front=- rear=off")
+            self.assertEqual(detail(node), "front=- left=off sync=off")
         front.stats.frames, front.stats.dropped = 60, 1
         with mock.patch.object(cn.time, "monotonic",
                                return_value=100.0 + cn.HB_FPS_WINDOW_S):
-            self.assertEqual(detail(node), "front=30.0fps drop=1 rear=off")
+            self.assertEqual(detail(node), "front=30.0fps drop=1 left=off sync=off")
 
     def test_counter_reset_does_not_go_negative(self):
         """`CameraNode.run` は開始時に `CamStats` を作り直す（枚数が 0 に戻る）。"""
@@ -169,7 +174,7 @@ class TestCameraHbDetail(unittest.TestCase):
             detail(node)
         front.stats.frames = 3
         with mock.patch.object(cn.time, "monotonic", return_value=20.0):
-            self.assertEqual(detail(node), "front=-")
+            self.assertEqual(detail(node), "front=- sync=off")
 
 
 if __name__ == "__main__":

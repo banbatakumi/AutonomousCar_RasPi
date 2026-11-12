@@ -260,6 +260,21 @@ class TestDijkstraHeuristicCache(unittest.TestCase):
         self.assertFalse(np.array_equal(h1.cost, h2.cost),
                          "目標が違うのに同じコスト場を返した")
 
+    def test_entry_of_another_map_with_the_same_id_is_not_reused(self):
+        """`id(lmap)` は解放された地図の番地を使い回す。キーが合っても別の地図の距離は使わない
+        （一括実行のときだけ `test_grid_distance_never_exceeds_straight_line` が inf で落ちていた）。"""
+        import weakref
+        lmap = _map(ROOM)
+        other = _map(ROOM)                      # キーだけ同じ「前の地図」の身代わり
+        cfg = _cfg()
+        key = (id(lmap), lmap.edt_epoch, (0.0, 0.0), round(cfg.margin, 6))
+        stale = np.full((4, 4), np.inf)
+        _DIJKSTRA_CACHE[key] = (weakref.ref(other), stale)
+        h = _Heuristic2D(lmap, (0.0, 0.0), cfg, cfg.margin)
+        self.assertIsNot(h.cost, stale)
+        self.assertTrue(math.isfinite(h(0.5, 0.5)))
+        self.assertIs(_DIJKSTRA_CACHE[key][0](), lmap)
+
     def test_edt_epoch_advances_and_invalidates_cache(self):
         """`refresh()`のたびに`edt_epoch`が増え、新しい観測を取り込んだ後は
         同じ`(goal, margin)`でもキャッシュを再利用しない（地図が変わったのに

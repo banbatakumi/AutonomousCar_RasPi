@@ -11,14 +11,19 @@
   2台目は常に1フレーム古いものを掴む（実測 5.6ms → 38.1ms）
 - `t_capture` には picamera2 の `SensorTimestamp` をそのまま入れる。
   **これは Pi の CLOCK_MONOTONIC 基準**であることを実機で確認済みなので変換不要
-- フレームの説明（`FrameDesc`）を `image/front` `image/rear` に publish する。
+- フレームの説明（`FrameDesc`）を `image/front`（右・主）`image/left`（左）に publish する。
   **画素はバスに流さない**（下流は共有メモリからゼロコピーで読む）
 
-カメラ番号とトピックの対応は `CAM_TOPIC`。**取り付けを入れ替えたらここだけ直す。**
+カメラは前方ステレオの左右2台。番号とトピックの対応は `raspi/core/vehicle.py` の `CAMERA_DEVICES`。
+**共有メモリの 0 番（`surge_cam0`・`image/front`）は主カメラ（右）。**
+
+左右のフレームの開始を libcamera のソフト同期で揃え（`SyncMode`。実測で差は
+最大 79µs、揃うまで約 3 秒）、左の露光を主カメラに合わせる。揃ったコマは `ImageRef.synced` が
+True。同期して撮るのは `CamConfig.stereo` が True の間だけで、False なら左カメラを止める。
 指定した番号のカメラが一部見えないときは、**見えているカメラだけで起動を続ける**
 （欠けた側の配信は止まり、`hb/camera` の detail に `<役割>=missing` と出る）。
 どの番号をどの役割に使ったかは起動ログに出す。`--by-i2c` を付けると、番号ではなく
-接続先の I2C アドレス（`I2C_ADDR_ROLE`）で前後を決める（libcamera の列挙順が入れ替わる
+接続先の I2C アドレス（`I2C_ADDR_ROLE`）で左右を決める（libcamera の列挙順が入れ替わる
 環境向け。既定は番号どおり）。
 
 共有メモリの名前は `surge_cam0` / `surge_cam1`。読み手は:
@@ -29,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import signal
 import sys
@@ -77,8 +83,24 @@ def _should_give_up(consecutive_failures: int, max_consecutive: int) -> bool:
     return consecutive_failures >= max_consecutive
 DEFAULT_SLOTS = 8
 
-#: カメラ番号 → バスのトピックと役割名。**取り付けを入れ替えたらここだけ直す**
-CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
+_vehicle = Vehicle.load()
+
+#: リング番号 → バスのトピックと役割名（`CAMERA_DEVICES` から作る。**取り付けを入れ替えたらそちらを直す**）
+CAM_TOPIC = {i: (f"image/{role}", role) for i, (role, _) in enumerate(_vehicle.camera_devices)}
+#: リング番号 → libcamera の番号（`Picamera2(番号)`）。主カメラ（リング0）は 0 番
+CAM_DEVICE = {i: dev for i, (_, dev) in enumerate(_vehicle.camera_devices)}
+#: ステレオで同期して撮っている間の主カメラの AE の露光プロファイル（libcamera の `AeExposureMode`）。
+#: 標準（Normal）は暗い所で露光を 1 周期いっぱい（33ms）まで延ばし、走行中はブレて左右の照合が
+#: 落ちる。Short は同じ明るさをゲインで稼いで露光を短くする（`imx219.json` の `exposure_modes.short`）
+STEREO_AE_EXPOSURE_MODE = "Short"
+#: 左カメラが主カメラの露光・ゲインを写す間隔 [コマ]（30fps で約 6Hz）と、写し直す変化の下限
+STEREO_EXPOSURE_FOLLOW_FRAMES = 5
+STEREO_EXPOSURE_FOLLOW_RATIO = 0.03
+#: 左右のフレームの開始がこれ以内に揃っているコマだけを `synced` とする [ns]。揃っているときの実測は
+#: 最大 0.11ms。**libcamera の `SyncReady` は fps を変えた後も立ったまま**で、その間の差は最大 19ms、
+#: 揃い直すまで 14→30fps で約 15 秒・30→14fps で 35 秒以上かかる（2026-11-12 実測）。だから
+#: `SyncReady` だけを信じず、もう1台の直近のコマとの差を自分で測って判定する
+STEREO_SYNC_TOL_NS = 500_000
 
 #: カメラごとの下端カット率。前方はボンネット等が映り込む下1/4を、
 #: 後方は下1/16だけ軽く除去する。**ISP の ScalerCrop で最初から読み出し範囲を
@@ -86,13 +108,12 @@ CAM_TOPIC = {0: ("image/front", "front"), 1: ("image/rear", "rear")}
 #: 捨てるより、共有メモリ書き込み・下流の処理・帯域がその分だけ軽くなる）
 #: 値は `config/vehicle.toml` の選ばれたレンズの `bottom_crop`（`[sensors.cam_*.lenses.<レンズ>]`）が正
 #: （GUI の進路ガイド `CameraView.tsx` もここを参照して主点補正する。二重管理しない）。
-_vehicle = Vehicle.load()
-CAM_BOTTOM_CROP = {0: _vehicle.cam_front_bottom_crop, 1: _vehicle.cam_rear_bottom_crop}
+CAM_BOTTOM_CROP = {i: getattr(_vehicle, f"cam_{role}_bottom_crop") for i, (_, role) in CAM_TOPIC.items()}
 
 #: カメラごとの ISP チューニングの差分（選ばれたレンズの `isp_tuning`。"" ＝ センサー標準のまま）。
 #: 標準の色むら補正は純正レンズ用で、広角レンズでは周辺がピンクに写る（`raspi/core/cam_tuning.py`）。
 #: **プロセスに1つしか効かない**ので、`main` が最初のカメラを開く前に `prepare_isp_tuning` で1つ選ぶ
-CAM_ISP_TUNING = {0: _vehicle.cam_front_isp_tuning, 1: _vehicle.cam_rear_isp_tuning}
+CAM_ISP_TUNING = {i: getattr(_vehicle, f"cam_{role}_isp_tuning") for i, (_, role) in CAM_TOPIC.items()}
 
 #: このプロセスの全カメラに渡す (チューニング, そのセンサー名)。`(None, "")` ＝ センサー標準
 _isp_tuning: tuple[dict | None, str] = (None, "")
@@ -188,6 +209,30 @@ _CAPTURE_HANG_S = 1.0
 DROP_GAP_FACTOR = 1.5
 
 
+def exposure_changed(prev: tuple[int, float] | None, want: tuple[int, float] | None,
+                     ratio: float) -> bool:
+    """左カメラの露光を写し直すべきか（露光時間×ゲインの積が `ratio` 以上変わったとき）。
+
+    毎コマ写すと AE の細かい揺れのたびに I2C を叩くので、変化が小さい間は置いたままにする。"""
+    if want is None:
+        return False
+    if prev is None:
+        return True
+    a, b = prev[0] * prev[1], want[0] * want[1]
+    return abs(b - a) > ratio * max(a, 1e-9)
+
+
+def frame_phase_error_ns(t_a: int, t_b: int, period_ns: float) -> float:
+    """2台のフレームの開始のずれ [ns]（周期の整数倍の差は無視する。0〜周期の半分）。
+
+    相手の「直近のコマ」は同じコマとは限らない（1コマ前のこともある）ので、差を周期で折り返す。
+    どちらかの時刻が無い（0）・周期が無いときは無限大（＝揃っていない）。"""
+    if not t_a or not t_b or period_ns <= 0:
+        return math.inf
+    d = (t_a - t_b) % period_ns
+    return min(d, period_ns - d)
+
+
 def count_dropped(gap_ns: float, period_ns: float) -> int:
     """連続する2フレームの `SensorTimestamp` の間隔から、その間に落ちたフレーム数を推定する。
 
@@ -222,7 +267,12 @@ def run_bounded(fn, timeout_s: float) -> bool:
 
 #: 接続先の I2C アドレス（`Picamera2.global_camera_info()` の `Id` に含まれる文字列）→ 役割。
 #: Pi 5 の CAM0/CAM1 コネクタの I2C バスで、前がこの機体の実測（`--by-i2c` のときだけ使う）
-I2C_ADDR_ROLE = {"i2c@88000": "front", "i2c@80000": "rear"}
+#: I2C アドレス → libcamera の番号（番号どおりに列挙されたときの対応。`config.txt` の
+#: `dtoverlay=imx219,cam0` が 88000、既定の cam1 ポートが 80000）
+I2C_ADDR_DEVICE = {"i2c@88000": 0, "i2c@80000": 1}
+_ROLE_OF_DEVICE = {dev: role for role, dev in _vehicle.camera_devices}
+I2C_ADDR_ROLE = {addr: _ROLE_OF_DEVICE[dev] for addr, dev in I2C_ADDR_DEVICE.items()
+                 if dev in _ROLE_OF_DEVICE}
 
 
 def devices_by_i2c(infos: list[dict], wanted_roles: list[str]) -> dict[str, int]:
@@ -244,7 +294,7 @@ HB_FPS_WINDOW_S = 2.0
 
 
 def make_hb_detail():
-    """`hb/camera` の `detail` を作る関数を返す（例 `front=29.9fps drop=0 rear=off`）。
+    """`hb/camera` の `detail` を作る関数を返す（例 `front=29.9fps drop=0 left=off sync=off`）。
 
     fps は `HB_FPS_WINDOW_S` ごとの `CamStats.frames` の増分から出す。"""
     last: dict[int, tuple[float, int]] = {}
@@ -270,6 +320,13 @@ def make_hb_detail():
                 parts.append(f"{role}={fps[wk.idx]:.1f}fps drop={wk.stats.dropped}")
             else:
                 parts.append(f"{role}=-")
+        want = [wk for wk in node.workers if getattr(wk, "_sync_on", False)]
+        if not want:
+            parts.append("sync=off")
+        elif len(want) == len(node.workers) > 1 and all(wk.synced for wk in want):
+            parts.append("sync=ready")
+        else:
+            parts.append("sync=wait")
         return " ".join(parts)
 
     return detail
@@ -307,8 +364,23 @@ class CameraWorker(threading.Thread):
                  n_slots: int, on_frame=None, device: int | None = None) -> None:
         super().__init__(name=f"cam{idx}", daemon=True)
         self.idx = idx
-        #: libcamera の番号（`Picamera2(device)`）。既定は `idx`（リング・トピックの番号）と同じ
-        self.device = idx if device is None else device
+        #: libcamera の番号（`Picamera2(device)`）。既定は配置で決まる番号（`CAM_DEVICE`）
+        self.device = CAM_DEVICE.get(idx, idx) if device is None else device
+        #: ソフト同期での役割。主カメラ（リング0）が時刻を配る側、もう1台（左）が合わせる側
+        self.sync_role: str | None = "server" if idx == 0 else "client"
+        #: 同期して撮っているか（`CamConfig.stereo`）。**バスが無くても試せるよう、
+        #: 同期ありで始める**（telemetry_node が要らないと言えば `request_stereo(False)` で切る）
+        self._sync_on = self.sync_role is not None
+        self._pending_sync: bool | None = None
+        #: 直近のコマで `SyncReady` が立っていたか（`ImageRef.synced` に載せる）
+        self.synced = False
+        #: 直近のコマの (露光時間 [µs], アナログゲイン)。左カメラがこれを写す
+        self.exposure: tuple[int, float] | None = None
+        #: もう1台のワーカー（`CameraNode` が繋ぐ）。フレームの開始の差を測る相手
+        self.peer: "CameraWorker | None" = None
+        #: 露光を写す元のワーカー（左カメラだけ。`CameraNode` が繋ぐ）と、最後に写した値
+        self.follow: "CameraWorker | None" = None
+        self._followed: tuple[int, float] | None = None
         self.size = size
         self.fmt = fmt
         self.fps = fps
@@ -343,6 +415,7 @@ class CameraWorker(threading.Thread):
             self.cam, size, CAM_BOTTOM_CROP.get(idx, 0.0))
         if crop_rect:
             ctrl["ScalerCrop"] = crop_rect
+        ctrl.update(self._sync_controls())
         sensor_size = full_fov_sensor_size(self.cam, size)
         cfg_kwargs = {"main": {"size": size, "format": fmt},
                       "buffer_count": 6, "controls": ctrl}
@@ -358,6 +431,36 @@ class CameraWorker(threading.Thread):
         self.fmt = memory_format(self.libcamera_fmt)      # メモリ上の並びで記録する
         self.ring = FrameRing.create(f"{SHM_PREFIX}{idx}", self.size[0], self.size[1],
                                      self.fmt, n_slots=n_slots)
+
+    def _sync_controls(self) -> dict:
+        """今の `_sync_on` に合う同期・AE のコントロール（同期の役割が無ければ空）。
+
+        主カメラは AE を続け、同期中だけ露光の短いプロファイルにする。左カメラの露光は
+        `_follow_exposure` が主カメラの値を写す（左右で明るさが違うと照合が落ちる）。"""
+        if self.sync_role is None:
+            return {}
+        from libcamera import controls
+
+        mode = controls.rpi.SyncModeEnum
+        ctrl: dict = {"SyncMode": (mode.Server if self.sync_role == "server" else mode.Client)
+                      if self._sync_on else mode.Off}
+        if self.sync_role == "server":
+            ae = controls.AeExposureModeEnum
+            ctrl["AeExposureMode"] = (getattr(ae, STEREO_AE_EXPOSURE_MODE)
+                                      if self._sync_on else ae.Normal)
+        return ctrl
+
+    def _follow_exposure(self) -> None:
+        """左カメラ: 主カメラの露光時間とゲインを写す（AE を切って手動で置く）。"""
+        src = self.follow
+        if src is None or not self._sync_on or self.stats.frames % STEREO_EXPOSURE_FOLLOW_FRAMES:
+            return
+        want = src.exposure
+        if not exposure_changed(self._followed, want, STEREO_EXPOSURE_FOLLOW_RATIO):
+            return
+        self.cam.set_controls({"AeEnable": False, "ExposureTime": int(want[0]),
+                               "AnalogueGain": float(want[1])})
+        self._followed = want
 
     def start_camera(self) -> None:
         self.cam.start()
@@ -375,7 +478,7 @@ class CameraWorker(threading.Thread):
                     #
                     # **ハング検出（`CameraNode.run`）に「止めているだけ」と伝える。** これを
                     # 更新しないと `last_grab_ns` が止まったまま `_CAPTURE_HANG_S` を過ぎ、
-                    # 後カメラを OFF にしている間（disarm 中の既定）にノード全体が落ちる
+                    # 左カメラを止めている間（同期の要求が無いときの既定）にノード全体が落ちる
                     self.stats.last_grab_ns = time.monotonic_ns()
                     time.sleep(0.2)
                     continue
@@ -404,6 +507,24 @@ class CameraWorker(threading.Thread):
             self._pending_fps = None
             enabled = self._pending_enabled
             self._pending_enabled = None
+            sync = self._pending_sync
+            self._pending_sync = None
+        if sync is not None and sync != self._sync_on and self.sync_role is not None:
+            # **同期の入り切りはカメラを止めて掛け直す。** 走らせたまま `SyncMode` を変えると、
+            # 揃え直しの起点（サーバが配る「この先 N コマ目から」）が曖昧になる。止めている間に
+            # 置いたコントロールは次の `start()` で効く
+            self._sync_on = sync
+            self.synced = False
+            self._followed = None
+            if self._enabled:
+                self.cam.stop()
+            self.cam.set_controls(self._sync_controls())
+            if not sync and self.follow is not None:
+                self.cam.set_controls({"AeEnable": True})
+            if self._enabled:
+                self.cam.start()
+                self.stats.last_grab_ns = time.monotonic_ns()
+            self.stats.last_t_capture = 0
         if fps is not None and fps != self.fps:
             self.fps = fps
             us = int(1e6 / fps)
@@ -416,6 +537,7 @@ class CameraWorker(threading.Thread):
                 self.stats.last_grab_ns = time.monotonic_ns()
             else:
                 self.cam.stop()
+                self.synced = False
             # 停止していた間の間隔を「落ち」と誤集計しないよう、前回の時刻を捨てる
             self.stats.last_t_capture = 0
 
@@ -429,11 +551,20 @@ class CameraWorker(threading.Thread):
         with self._cfg_lock:
             self._pending_enabled = enabled
 
+    def request_stereo(self, on: bool) -> None:
+        """同期して撮るか（`CamConfig.stereo`）。**picamera2 には触らない。**"""
+        with self._cfg_lock:
+            self._pending_sync = on
+
     def _grab(self) -> None:
         req = self.cam.capture_request()
         try:
             md = req.get_metadata()
             t_cap = md.get("SensorTimestamp", 0)
+            self.synced = (self._sync_on and bool(md.get("SyncReady", False))
+                           and self._aligned_with_peer(t_cap))
+            if "ExposureTime" in md and "AnalogueGain" in md:
+                self.exposure = (int(md["ExposureTime"]), float(md["AnalogueGain"]))
             # make_array は DMA バッファへの view。**release() すると無効になる**ので、
             # 共有メモリへの書き込みは release より前に済ませる。
             # ここで release を先にすると、解放済みメモリを読むことになる
@@ -461,7 +592,16 @@ class CameraWorker(threading.Thread):
         s.last_t_capture = t_cap
 
         if self.on_frame:
-            self.on_frame(desc)
+            self.on_frame(desc, self.synced)
+        self._follow_exposure()
+
+    def _aligned_with_peer(self, t_cap: int) -> bool:
+        """このコマの開始が、もう1台の直近のコマと `STEREO_SYNC_TOL_NS` 以内に揃っているか。"""
+        peer = self.peer
+        if peer is None or not self.fps:
+            return False
+        return frame_phase_error_ns(t_cap, peer.stats.last_t_capture,
+                                    1e9 / self.fps) <= STEREO_SYNC_TOL_NS
 
     def stop(self) -> None:
         self._stop_requested = True
@@ -510,6 +650,16 @@ class CameraNode:
         if not self.workers:
             assert last_err is not None
             raise last_err
+        # 左カメラ（同期で合わせる側）の露光は主カメラに写させる
+        main = next((w for w in self.workers if getattr(w, "sync_role", None) == "server"), None)
+        for w in self.workers:
+            if getattr(w, "sync_role", None) is not None:
+                w.peer = next((o for o in self.workers if o is not w), None)
+            if getattr(w, "sync_role", None) == "client":
+                w.follow = main
+                if main is None:
+                    # 主カメラが開けなかった。合わせる相手がいないので同期を待たせない
+                    w.request_stereo(False)
         self._t_start = 0.0
         #: GUI/自動運転からの capture 設定（`cam/config`）を拾うための Subscriber。
         #: `--no-bus` やバス未接続なら None（既定 fps・常時 ON のまま動く）
@@ -543,7 +693,7 @@ class CameraNode:
             while True:
                 # **どちらか1台でも死んだら／ハングしたらノード全体を終了させる。**
                 # `any(is_alive())`（全滅するまで回り続ける）だと、
-                # 前後どちらか1台だけ死んでももう1台が生きている限り
+                # 左右どちらか1台だけ死んでももう1台が生きている限り
                 # プロセスが生き続け、誰も気づかない（issue #4）。
                 # `capture_request()` がブロックしたまま戻らないハングは
                 # スレッドが `is_alive()` のままなので、`last_grab_ns` の
@@ -610,9 +760,12 @@ class CameraNode:
                     if role == "front":
                         w.request_fps(msg.front_fps)
                         w.request_enabled(msg.front_enabled)
-                    elif role == "rear":
-                        w.request_fps(msg.rear_fps)
-                        w.request_enabled(msg.rear_enabled)
+                        w.request_stereo(msg.stereo)
+                    elif role == "left":
+                        # 左は主カメラと同じ fps で同期して撮るか、止めるかのどちらか
+                        w.request_fps(msg.front_fps)
+                        w.request_stereo(msg.stereo)
+                        w.request_enabled(msg.stereo and msg.front_enabled)
 
     @property
     def elapsed(self) -> float:
@@ -641,6 +794,11 @@ def _status(node: CameraNode) -> None:
     el = node.elapsed
     parts = [f"cam{w.idx}: {w.stats.frames}枚 "
              f"{w.stats.frames / el if el else 0:.1f}fps" for w in node.workers]
+    # 同期と露光合わせの様子（左の露光が主カメラに付いてきているかを目で確かめる用）
+    for w in node.workers:
+        e = w.exposure
+        parts.append(f"cam{w.idx} {'synced' if w.synced else 'unsynced'} "
+                     + (f"{e[0] / 1e3:.1f}ms×{e[1]:.2f}" if e else "-"))
     sys.stdout.write("\r" + " | ".join(parts) + "    ")
     sys.stdout.flush()
 
@@ -648,7 +806,8 @@ def _status(node: CameraNode) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cameras", default="0,1", help="使うカメラ番号（例 0 / 0,1）")
+    ap.add_argument("--cameras", default="0,1",
+                    help="使うカメラのリング番号（例 0 / 0,1）。0 が主カメラ（image/front）")
     ap.add_argument("--size", default="640x480")
     ap.add_argument("--fmt", default="RGB888")
     ap.add_argument("--fps", type=float, default=30.0)
@@ -658,7 +817,7 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--no-bus", action="store_true", help="ZeroMQ に配信しない")
     ap.add_argument("--by-i2c", action="store_true",
-                    help="前後のカメラを番号でなく I2C アドレス（I2C_ADDR_ROLE）で決める。"
+                    help="左右のカメラを番号でなく I2C アドレス（I2C_ADDR_ROLE）で決める。"
                          "ISP チューニングを使うレンズでは、先に列挙するとチューニングが"
                          "効かなくなるので無視して番号どおりにする")
     args = ap.parse_args()
@@ -682,7 +841,7 @@ def main() -> int:
             # ZeroMQ のソケットはスレッドセーフではない
             pub = Publisher("camera", thread_safe=True)
 
-            def on_frame(desc):                              # noqa: F811
+            def on_frame(desc, synced=False):                # noqa: F811
                 idx = int(desc.name[len(SHM_PREFIX):] or 0)
                 topic, role = CAM_TOPIC.get(
                     idx, (f"image/cam{idx}", f"cam{idx}"))
@@ -690,7 +849,7 @@ def main() -> int:
                     t_capture=desc.t_capture_ns, cam=role,
                     shm_name=desc.name, slot=desc.slot, ring_seq=desc.seq,
                     frame_id=desc.frame_id, width=desc.width, height=desc.height,
-                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes))
+                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, synced=synced))
 
             hb_detail = make_hb_detail()
 
@@ -701,7 +860,7 @@ def main() -> int:
             print(f"# バス配信 {pub.endpoint} "
                   + " ".join(CAM_TOPIC.get(i, (f'image/cam{i}',))[0] for i in indices))
 
-            # telemetry_node からの capture 設定（FPS上限・後方カメラON/OFF）を拾う。
+            # telemetry_node からの capture 設定（FPS上限・ON/OFF・左右の同期）を拾う。
             # **失敗しても撮像自体は続ける**（既定 fps・常時 ON のまま動くだけ）
             cfg_sub = Subscriber({TOPIC_CAM_CONFIG: LATEST})
         except ImportError as e:

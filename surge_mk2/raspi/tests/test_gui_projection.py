@@ -1,7 +1,7 @@
 """進路ガイド（GUI の `cameraModel.ts`）と IPM（Python の `ipm.py`）が同じ場所を指すこと。
 
 **GUI の投影式を Python の基準実装と数値で突き合わせる。** 画像サイズ（`--size`・
-`bottom_crop`・縮小配信）が変わっても、前後カメラ・魚眼/ピンホール/補正映像のどれでも
+`bottom_crop`・縮小配信）が変わっても、魚眼/ピンホール/補正映像のどれでも
 ずれないことを、サイズの組み合わせを振って確かめる。
 node と `gui/node_modules`（esbuild）が無い環境（クラウド CI 等）では skip する。
 """
@@ -51,7 +51,7 @@ const cases = JSON.parse(process.argv[2])
 const out = cases.map((c: any) => {{
   const lens = c.lens === 'fisheye' ? fisheyeLens(c.w, c.h, c.calib, c.crop)
     : pinholeLens(c.w, c.h, c.hfov, c.crop)
-  const proj = groundProjector(lens, c.pose, c.facing, c.roll ?? 0)
+  const proj = groundProjector(lens, c.pose, c.roll ?? 0)
   return c.points.map((p: number[]) => proj(p[0], p[1]))
 }})
 console.log(JSON.stringify(out))
@@ -69,34 +69,33 @@ def _python_ref(case: dict) -> list:
     intr = camera_intrinsics(case["hfov"], case["w"], case["h"], case["crop"], calib)
     x, y, height, pitch = case["pose"]["x"], case["pose"]["y"], case["pose"]["height"], \
         case["pose"]["pitch"]
-    yaw = 0.0 if case["facing"] == "front" else math.pi
-    ext = CameraExtrinsics(x=x, y=y, height=height, pitch=pitch, yaw=yaw)
+    ext = CameraExtrinsics(x=x, y=y, height=height, pitch=pitch, yaw=0.0)
     return [ground_to_pixel(px, py, intr, ext) for px, py in case["points"]]
 
 
 @unittest.skipUnless(ESBUILD.exists() and shutil.which("node"),
                      "node と gui/node_modules が無い（GUI の依存を入れていない）")
 class TestGuiProjectionMatchesIpm(unittest.TestCase):
-    def _cases(self, lens: str, facing: str) -> list[dict]:
+    def _cases(self, lens: str) -> list[dict]:
         cases = []
         for w, h, crop in SIZES:
             for px, py, ph, pp in POSES:
-                pts = GROUND if facing == "front" else [(-x + 0.0, -y) for x, y in GROUND]
-                cases.append({"lens": lens, "facing": facing, "w": w, "h": h, "crop": crop,
+                pts = GROUND
+                cases.append({"lens": lens, "w": w, "h": h, "crop": crop,
                               "hfov": 2.23, "calib": CALIB,
                               "pose": {"x": px, "y": py, "height": ph, "pitch": pp},
                               "points": [list(p) for p in pts]})
         return cases
 
-    def _compare(self, lens: str, facing: str) -> None:
-        cases = self._cases(lens, facing)
+    def _compare(self, lens: str) -> None:
+        cases = self._cases(lens)
         ts = _bundle_and_run(cases)
         worst = 0.0
         compared = 0
         for case, got in zip(cases, ts):
             ref = _python_ref(case)
             for g, r, pt in zip(got, ref, case["points"]):
-                tag = (lens, facing, case["w"], case["h"], case["crop"], case["pose"], pt)
+                tag = (lens, case["w"], case["h"], case["crop"], case["pose"], pt)
                 self.assertEqual(g is None, r is None, f"映る/映らないが食い違う {tag}")
                 if g is None:
                     continue
@@ -106,17 +105,11 @@ class TestGuiProjectionMatchesIpm(unittest.TestCase):
                 self.assertLess(err, 1e-6, f"{err:.3g}px ずれる {tag}")
         self.assertGreater(compared, 100, "比較した点が少なすぎる（全部画面外？）")
 
-    def test_fisheye_front(self):
-        self._compare("fisheye", "front")
+    def test_fisheye(self):
+        self._compare("fisheye")
 
-    def test_fisheye_rear(self):
-        self._compare("fisheye", "rear")
-
-    def test_pinhole_front(self):
-        self._compare("pinhole", "front")
-
-    def test_pinhole_rear(self):
-        self._compare("pinhole", "rear")
+    def test_pinhole(self):
+        self._compare("pinhole")
 
     def test_undistorted_display_matches_fisheye_source(self):
         """補正映像の画素 → Pi の remap が参照する魚眼の画素 が、GUI の魚眼投影と一致する。
@@ -130,7 +123,7 @@ class TestGuiProjectionMatchesIpm(unittest.TestCase):
         for w, h, crop in SIZES:
             pose = {"x": 0.1, "y": 0.0, "height": 0.088, "pitch": 0.0}
             pts = [list(p) for p in GROUND]
-            base = {"facing": "front", "w": w, "h": h, "crop": crop, "calib": CALIB,
+            base = {"w": w, "h": h, "crop": crop, "calib": CALIB,
                     "pose": pose, "points": pts}
             cases.append({**base, "lens": "fisheye", "hfov": 0})
             cases.append({**base, "lens": "pinhole", "hfov": hfov_out})

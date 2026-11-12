@@ -25,6 +25,17 @@ cam_e2e は学習で「車の向きをずらした絵」を作る（`ml_cam_e2e/
 共有の `PREPROC_VERSION` を上げると切り落としと無関係な `ml_cam`（セグメンテーション）の
 モデルまで読めなくなるので、cam_e2e の契約だけ `PREPROC_VERSION_CROP` を書く。
 切り落としを知らない古いノードは版の照合でそのモデルを拒否する（黙って全幅で推論しない）。
+
+## 左右2台の入力（`PREPROC_VERSION_STEREO`、cam_e2e・e2e_fusion）
+
+右（主、`image/front`）と左（`image/left`）の同じ瞬間の組を入力にする
+（`docs/stereo_plan.md` §1）。2枚をそれぞれ `preprocess` と同じ処理（切り落とし・面積平均・正規化）に
+通し、**チャネル方向に `[右 RGB, 左 RGB]` の順で重ねた `(1, 6, h, w)`** をモデルに入れる
+（`preprocess_stereo`）。モデルは前半3チャネルと後半3チャネルを同じ重みの骨格に別々に通すので、
+画素の位置が左右で合っている必要は無い。版2（切り落とし）を含む。
+
+**cam_e2e・e2e_fusion のノードは版3だけを読む。** 版1・2（右1台）は前後配置のころのモデルの版で、
+視点が変わって使えないので読み込みで拒否する（`PREPROC_VERSION` は `ml_cam` が今も使う）。
 """
 
 from __future__ import annotations
@@ -33,12 +44,19 @@ from functools import lru_cache
 
 import numpy as np
 
-__all__ = ["PREPROC_VERSION", "PREPROC_VERSION_CROP", "to_rgb", "crop_margin_px",
-           "crop_window", "resize_area", "normalize", "preprocess"]
+__all__ = ["PREPROC_VERSION", "PREPROC_VERSION_CROP", "PREPROC_VERSION_STEREO", "STEREO_CAMS",
+           "STEREO_PAIR_TOL_NS", "to_rgb", "crop_margin_px", "crop_window", "resize_area",
+           "normalize", "preprocess", "preprocess_stereo"]
 
 PREPROC_VERSION = 1
 #: 版1に「左右の切り落とし `crop_x`」を足した版（cam_e2e の契約だけが使う。モジュールdocstring参照）
 PREPROC_VERSION_CROP = 2
+#: 版2を左右2台の入力（`[右, 左]` を 6 チャネルに重ねる）にした版（モジュールdocstring参照）
+PREPROC_VERSION_STEREO = 3
+#: 左右2台の入力のカメラの並び（契約 JSON の `cams`）。`image/front` が右（主）、`image/left` が左
+STEREO_CAMS = ("front", "left")
+#: 左右を同じ瞬間の組とみなす撮影時刻の差の上限。`camera_node.STEREO_SYNC_TOL_NS`（`synced` を立てる条件）と同じ
+STEREO_PAIR_TOL_NS = 500_000
 
 
 def to_rgb(frame: np.ndarray, fmt: str) -> np.ndarray:
@@ -142,3 +160,10 @@ def preprocess(rgb: np.ndarray, size: tuple[int, int], mean: float = 0.0,
     """RGB の (H, W, 3) uint8 → モデル入力 (1, 3, h, w) float32。`size` は (width, height)。"""
     w, h = size
     return normalize(resize_area(crop_window(rgb, crop_x), w, h), mean, std)
+
+
+def preprocess_stereo(rgb_right: np.ndarray, rgb_left: np.ndarray, size: tuple[int, int],
+                      mean: float = 0.0, std: float = 255.0, crop_x: float = 0.0) -> np.ndarray:
+    """右・左の RGB `(H, W, 3)` uint8 → モデル入力 `(1, 6, h, w)` float32（`[右, 左]` の順）。"""
+    return np.concatenate([preprocess(rgb_right, size, mean, std, crop_x),
+                           preprocess(rgb_left, size, mean, std, crop_x)], axis=1)

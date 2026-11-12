@@ -36,7 +36,7 @@ __all__ = [
     "TOPIC_VEHICLE_STATE", "TOPIC_SCAN", "TOPIC_SCAN_CAM", "TOPIC_LINE_CAM", "TOPIC_CAM_MASK",
     "TOPIC_CAM_PATH",
     "TOPIC_CMD", "TOPIC_DIAG_LINK",
-    "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_REAR", "TOPIC_HB_PREFIX",
+    "TOPIC_IMAGE_FRONT", "TOPIC_IMAGE_LEFT", "TOPIC_HB_PREFIX",
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "RouteSelect", "TOPIC_ROUTE_SELECT",
     "SignalConfig", "TOPIC_SIGNAL_CONFIG", "ArrowSignalStatus", "TOPIC_SIGNAL_STATUS",
@@ -44,6 +44,7 @@ __all__ = [
     "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
     "E2EFusionPlan", "TOPIC_E2E_FUSION_PLAN", "E2EFusionModelCtrl", "TOPIC_E2E_FUSION_MODEL",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
+    "StereoDepth", "TOPIC_SCAN_STEREO", "TOPIC_STEREO_DEPTH",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -64,6 +65,12 @@ TOPIC_LINE_CAM = "line/cam"
 #: （GUI がカメラ映像に重畳表示する用。`scan/cam` はマスクを角度→距離配列に
 #: 変換した後の値で、マスクそのものはここにしか無い）
 TOPIC_CAM_MASK = "cam/mask"
+#: 前方ステレオで見つけた障害物（床より上・高さの上限以下）の擬似 `Scan`（`stereo_node.py` が publish）。
+#: **`scan`（LiDAR）・`scan/cam` とは別トピック**（理由は `TOPIC_SCAN_CAM` と同じ）。型は `Scan`。
+#: 中身の約束（0 = 見つからない ≠ 空き、原点は base_link）は `stereo_node.py` の docstring
+TOPIC_SCAN_STEREO = "scan/stereo"
+#: ステレオの距離を色にした JPEG（GUI の自動運転画面の2枚目の枠。`/ws/camera/depth` へ中継）
+TOPIC_STEREO_DEPTH = "stereo/depth"
 #: 走行可能領域の中心線（`cam_perception_node.py` が publish）。`scan/cam` が
 #: 車両原点からの角度→距離という1次元表現に潰すのに対し、こちらは前方複数距離
 #: それぞれで測った回廊の中心点列を車両座標のまま持つ。`raspi/auto/cam_centerline.py`
@@ -71,8 +78,10 @@ TOPIC_CAM_MASK = "cam/mask"
 TOPIC_CAM_PATH = "path/cam"
 TOPIC_CMD = "cmd"
 TOPIC_DIAG_LINK = "diag/link"
+#: 前方ステレオの右＝主カメラ（推論・前方映像・記録が使う）
 TOPIC_IMAGE_FRONT = "image/front"
-TOPIC_IMAGE_REAR = "image/rear"
+#: 前方ステレオの左カメラ。役割と libcamera の番号の対応は `raspi/core/vehicle.py` の `CAMERA_DEVICES`
+TOPIC_IMAGE_LEFT = "image/left"
 TOPIC_HB_PREFIX = "hb/"
 TOPIC_LOG_CTRL = "log/ctrl"
 
@@ -100,7 +109,7 @@ TOPIC_SIGNAL_STATUS = "signal/status"
 #: 出し、io_node が拾ってブザーのメロディ（起動音とは別の音形）を鳴らす
 TOPIC_UI_EVENT = "ui/event"
 
-#: capture側(camera_node)のFPS上限・後方カメラON/OFFの意思。telemetry_node が出し、
+#: capture側(camera_node)のFPS上限・ON/OFF・左右の同期の意思。telemetry_node が出し、
 #: camera_node が拾って `Picamera2.set_controls()`/`stop()`/`start()` を呼ぶ
 TOPIC_CAM_CONFIG = "cam/config"
 
@@ -385,6 +394,7 @@ class DriveCmd(MsgBase):
     #: 点滅そのものは STM32 側で行う。実際に点滅しているかは `VehicleState.winker_*_active` を見ること
     winker_left: bool = False
     winker_right: bool = False
+    winker_mode: int = 2               #: 1=通常点滅、2=滑らか、3=豆電球風（GUI選択）
     #: ローンチコントロール。立っている間、**車速指令の `target_speed` が車速より 0.5m/s 以上
     #: 速い加速（発進）**で、STM32 が目標車速のランプ（3.0m/s²）と車速PIを迂回し、全開のトルク＋TC で
     #: `target_speed` まで加速する（PIは偏差が溜まるまでトルクが出ず、グリップの限界に届くまで
@@ -534,7 +544,7 @@ class ImageRef(MsgBase):
     下流は `FrameRing.attach(shm_name)` してゼロコピーで読む。
     """
 
-    cam: str = ""                          #: "front" / "rear"
+    cam: str = ""                          #: "front"（右・主）/ "left"（`CAMERA_DEVICES` の役割）
     shm_name: str = ""                     #: 共有メモリ名（例 "surge_cam0"）
     slot: int = 0
     ring_seq: int = 0                      #: リングの write_seq。seqlock の検証に使う
@@ -544,6 +554,10 @@ class ImageRef(MsgBase):
     fmt: str = ""                          #: **メモリ上の実際のバイト順**（BGR888 等）
     stride: int = 0
     nbytes: int = 0
+    #: もう1台とフレームの開始が揃っているか（libcamera のソフト同期の `SyncReady` が立った後のコマ）。
+    #: **ステレオの照合はこれが True の組だけを使う**（揃う前は最大で半周期ずれる）。
+    #: 同期を頼んでいない間（`CamConfig.stereo` が False）は常に False
+    synced: bool = False
 
 
 class Heartbeat(MsgBase):
@@ -921,19 +935,27 @@ class CamConfig(MsgBase):
     一度きりの `UiEvent` にしなかったのは、camera_node が再起動したときに
     1秒以内で最新の意思に復帰させたいため（`_fan_pump`/`_auto_ctrl_pump` と同じ理由）。
 
-    後方カメラは自動運転が使わない（GUI表示とロギング専用）ので `rear_fps` に
-    自動運転による上書きは無い。前カメラだけ、カメラを使う自動運転モードで
-    engage 中は telemetry_node 側が `front_fps` を上限まで引き上げる。
+    左カメラは独自の fps を持たない（同期する間は主カメラと同じ `front_fps`、それ以外は止める）。
+    カメラを使う自動運転モードで engage 中は telemetry_node 側が `front_fps` を上限まで引き上げる
+    （左右を同期している間は除く）。
     """
 
+    #: 主カメラ（右）の fps
     front_fps: float = 30.0
-    rear_fps: float = 30.0
-    #: False なら camera_node が該当カメラの `Picamera2.stop()` を呼び、実際に撮像を止める
-    rear_enabled: bool = True
-    #: 前カメラの同上。DISARM中に映像を使う者（GUIの視聴者・記録）がいない間だけ
-    #: telemetry_node が False にする（省電力。センサを止めると
-    #: 1fps に落とすより約45mA少ない）。ARM中は常に True
+    #: False なら camera_node が主カメラの `Picamera2.stop()` を呼び、実際に撮像を止める。
+    #: DISARM中に映像を使う者（GUIの視聴者・記録）がいない間だけ telemetry_node が False にする
+    #: （省電力。センサを止めると 1fps に落とすより約45mA少ない）。ARM中は常に True
     front_enabled: bool = True
+    #: **左右を同期して撮る**要求。True の間、camera_node は左カメラも `front_fps` で回し、
+    #: フレームの開始を揃え、露光を主カメラに合わせる。False なら左カメラを止める（省電力）
+    stereo: bool = False
+    #: `stereo_node` に照合（深度）を回させる要求。telemetry_node が「ステレオを使う自動運転モードが
+    #: 選ばれていて ARM 中、または深度映像の視聴者がいる間」に True にする（`_desired_depth`）。
+    #: True の間は `stereo` も True（左カメラが要る）
+    depth: bool = False
+    #: 深度映像（`/ws/camera/depth`）の視聴者がいるか。False の間 `stereo_node` は深度映像の JPEG と
+    #: 表示用の穴埋めを作らない（走行中に照合するだけなら表示の時間と電力を食わない）
+    depth_view: bool = False
 
 
 class CamModelCtrl(MsgBase):
@@ -1115,6 +1137,17 @@ class CamMask(MsgBase):
     jpeg: bytes = b""
 
 
+class StereoDepth(MsgBase):
+    """`stereo_node` の距離を色にした JPEG（GUI 表示専用。`CamMask` と同じくバスに直接 JPEG を流す）。
+
+    色は視差に比例（近い = 赤 → 遠い = 青）、視差の出なかった画素は黒。`near_m` が赤の端の距離
+    （照合できる最も近い距離）。距離は視差に反比例するので、色の目盛りは等間隔ではない。
+    """
+
+    jpeg: bytes = b""
+    near_m: float = 0.0
+
+
 class CamPath(MsgBase):
     """走行可能領域の中心線（`raspi/nav/drivable_path.py` の `extract_centerline()`）。
 
@@ -1149,11 +1182,13 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_SCAN_CAM: Scan,
     TOPIC_LINE_CAM: LineScan,
     TOPIC_CAM_MASK: CamMask,
+    TOPIC_SCAN_STEREO: Scan,
+    TOPIC_STEREO_DEPTH: StereoDepth,
     TOPIC_CAM_PATH: CamPath,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,
     TOPIC_IMAGE_FRONT: ImageRef,
-    TOPIC_IMAGE_REAR: ImageRef,
+    TOPIC_IMAGE_LEFT: ImageRef,
     TOPIC_LOG_CTRL: LogCtrl,
     TOPIC_AUTO_CTRL: AutoCtrl,
     #: **`cmd` と同じ型。** io_node は `auto/cmd` を購読しない（`AutoCtrl` 参照）

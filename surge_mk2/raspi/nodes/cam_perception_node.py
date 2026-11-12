@@ -22,7 +22,7 @@ Planner の責務にする。
 
 起動時に `--model` を渡さなければ、GUI（設定タブ）で選ばれたモデル名を
 telemetry_node が `cam/model`（`CamModelCtrl`）で繰り返し流してくるのを待つ。
-モデル名は `--models-dir`（既定 `models/`）配下の `<name>.onnx` に解決される
+モデル名は `--models-dir`（既定 `models/seg/`）配下の `<name>.onnx` に解決される
 （前処理設定は同名の `<name>.json`。`ml_cam/export_onnx.py` が書く）。
 `ftg_cam` を engage する前に、走行開始ボタンを押さずにモデルだけ選び直せる
 ——プロセスの再起動もSSHも要らない（`reload_if_changed()`）。**ただしこれは
@@ -108,9 +108,10 @@ from raspi.nav.ipm import (  # noqa: E402
 
 __all__ = ["SegmentationModel", "CamPerceptionNode"]
 
-#: `surge_mk2/`。GUI から選ばれたモデル名を `models/<name>.onnx` に解決する基準
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODELS_DIR = REPO_ROOT / "models"
+#: GUI から選ばれたモデル名を `models/seg/<name>.onnx` に解決する基準
+#: （telemetry_node の `SEG_MODELS_DIR` と同じ場所。ほかの種類のモデルもそれぞれ `models/` のサブフォルダ）
+DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "seg"
 
 NS = 1_000_000_000
 HB_HZ = 10

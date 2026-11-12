@@ -1,4 +1,4 @@
-# Mac 側の補助ツール（車両の校正 tools/calib/・ファームのホストシム tools/fwsim/・カメラ校正 tools/cam_calib/） — Piには入れない
+# Mac 側の補助ツール（車両の校正 tools/calib/・ファームのホストシム tools/fwsim/・カメラ校正 tools/cam_calib/・ステレオのベンチ tools/stereo_bench/） — Piには入れない
 #
 #   .venv/bin/pip install -r tools/requirements.txt
 #   .venv/bin/python -m tools.calib.gui

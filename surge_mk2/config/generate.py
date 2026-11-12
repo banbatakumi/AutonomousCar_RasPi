@@ -55,8 +55,8 @@ def gen_ts(spec: dict) -> str:
     sensors = spec.get("sensors", {})
     # 打ち間違い（存在しないレンズ名）は生成の時点で落とす（CI の --check で気づける）
     cam = resolve_lens(sensors.get("cam_front", {}), strict=True)
-    cam_rear = resolve_lens(sensors.get("cam_rear", {}), strict=True)
-    for c in (cam, cam_rear):
+    cam_left = resolve_lens(sensors.get("cam_left", {}), strict=True)
+    for c in (cam, cam_left):
         if c["lens"] and not LENS_NAME_RE.match(c["lens"]):
             raise ValueError(f"レンズ名に使えない文字がある: {c['lens']!r}（英数字と - だけ）")
     lidar = sensors.get("lidar", {})
@@ -96,7 +96,7 @@ def gen_ts(spec: dict) -> str:
         f"    x: {float(lidar.get('x', 0))}, // m",
         f"    y: {float(lidar.get('y', 0))}, // m",
         "  },",
-        "  /** 前カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値",
+        "  /** 前方ステレオの右（主）カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値",
         "   * （`sensors.cam_front.z`）。`pitch`（取付角度）・`hfov`（未校正時の近似画角）は",
         "   * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`bottomCrop` は",
         "   * ISP が読み出し時に切り捨てる下端の割合（`camera_node.py` の `bottom_cropped`）。",
@@ -115,20 +115,17 @@ def gen_ts(spec: dict) -> str:
         "    /** 補正映像（`telemetry_node`）の仮想ピンホールの水平画角 */",
         f"    undistortHfov: {float(cam.get('undistort_hfov', 1.92))}, // rad",
         "  },",
-        "  /** 後カメラ取付。`height`/`pitch`/`hfov`/`bottomCrop`/`fisheye` の意味は `camFront` と同じ。",
-        "   * こちらは高さの調整UIを持たない（前カメラほど精密な校正の要求がまだ無いため）。",
-        "   * `yaw` は生成しない——GUI 側の進路ガイド（`CameraView.tsx`）は「後ろ向きに付いている」",
-        "   * こと自体を前提にした投影式を別に持っており、汎用の yaw 回転はしていない */",
-        "  camRear: {",
-        f"    lens: {json.dumps(cam_rear['lens'])},",
-        f"    x: {float(cam_rear.get('x', 0))}, // m 意味は camFront と同じ（後ろ向きに付いている）",
-        f"    y: {float(cam_rear.get('y', 0))}, // m",
-        f"    height: {float(cam_rear.get('z', 0))}, // m 路面からの高さ",
-        f"    pitch: {float(cam_rear.get('pitch', 0))}, // rad 下向きが正（固定値）",
-        f"    hfov: {float(cam_rear.get('hfov', 0))}, // rad 水平画角",
-        f"    bottomCrop: {float(cam_rear.get('bottom_crop', 0))}, // 下端カット率",
-        f"    fisheye: {_fisheye_ts(cam_rear)},",
-        f"    undistortHfov: {float(cam_rear.get('undistort_hfov', 1.92))}, // rad",
+        "  /** 前方ステレオの左カメラ取付（前向き。項目の意味は `camFront` と同じ） */",
+        "  camLeft: {",
+        f"    lens: {json.dumps(cam_left['lens'])},",
+        f"    x: {float(cam_left.get('x', 0))}, // m",
+        f"    y: {float(cam_left.get('y', 0))}, // m 左が正",
+        f"    height: {float(cam_left.get('z', 0))}, // m 路面からの高さ",
+        f"    pitch: {float(cam_left.get('pitch', 0))}, // rad 下向きが正（固定値）",
+        f"    hfov: {float(cam_left.get('hfov', 0))}, // rad 水平画角",
+        f"    bottomCrop: {float(cam_left.get('bottom_crop', 0))}, // 下端カット率",
+        f"    fisheye: {_fisheye_ts(cam_left)},",
+        f"    undistortHfov: {float(cam_left.get('undistort_hfov', 1.92))}, // rad",
         "  },",
         "} as const",
         "",

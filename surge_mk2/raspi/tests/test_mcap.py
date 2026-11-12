@@ -218,8 +218,8 @@ class TestMcapLog(unittest.TestCase):
     def test_image_payload_survives(self):
         blob = bytes(range(256)) * 4
         with McapLog(self.path, t0_mono_ns=0, t0_unix_ns=0) as log:
-            log.write_viz_image(blob, "rear", 0)
-        (_, body), = read_back(self.path)["msgs"]["/viz/image/rear"]
+            log.write_viz_image(blob, "left", 0)
+        (_, body), = read_back(self.path)["msgs"]["/viz/image/left"]
         self.assertEqual(base64.b64decode(body["data"]), blob)
         self.assertEqual(body["format"], "jpeg")
 
@@ -819,6 +819,58 @@ class TestLoggerNode(unittest.TestCase):
         self.assertEqual(jpg[:2], b"\xff\xd8")            # JPEG の SOI
 
     @unittest.skipUnless(_has_jpeg(), "JPEG エンコーダが無い（pip install pillow）")
+    def test_stereo_pair_is_burned_at_the_same_instant(self):
+        """ステレオで同期している間は、右と左を**同じ撮影時刻の組**で焼く（`_pump_stereo`）。
+
+        左のリングが右より1コマ先まで進んでいても、最新どうしではなく同じ瞬間のコマを選ぶ。
+        """
+        import numpy as np
+
+        from raspi.bus import FrameRing
+        from raspi.msgs import ImageRef
+        from raspi.nodes.logger_node import STEREO_PAIR_TOL_NS, LoggerNode
+
+        rf = FrameRing.create("surge_sttest_f", 32, 16, "RGB888", n_slots=4)
+        rl = FrameRing.create("surge_sttest_l", 32, 16, "RGB888", n_slots=4)
+        node = LoggerNode(self.path, topics=["image/"], image_hz=5, stereo_jpeg_quality=95)
+        period = 33_333_333
+        t0 = 10 * period
+
+        def ref(ring, d, cam, synced=True):
+            return ImageRef(t_capture=d.t_capture_ns, cam=cam, shm_name=d.name, slot=d.slot,
+                            ring_seq=d.seq, frame_id=d.frame_id, width=d.width, height=d.height,
+                            fmt=d.fmt, stride=d.stride, nbytes=d.nbytes, synced=synced)
+        try:
+            img = np.zeros((16, 32, 3), np.uint8)
+            for i in range(3):                            # 右は 3 コマ、左は 4 コマ（1 コマ先）
+                df = rf.write(img.tobytes(), t_capture_ns=t0 + i * period + 20_000, frame_id=i)
+            for i in range(4):
+                dl = rl.write(img.tobytes(), t_capture_ns=t0 + i * period, frame_id=i)
+            node._last_ref["front"] = ref(rf, df, "front")
+            node._last_ref["left"] = ref(rl, dl, "left")
+            node._pump_images()
+            node._pump_images()                           # 同じ瞬間は2度焼かない
+            self.assertEqual(node.stereo_pairs_written, 1)
+            # 同期していなければカメラごとに焼く
+            node._last_ref["left"] = ref(rl, dl, "left", synced=False)
+            node._next_image_ns.clear()
+            node._last_image.clear()
+            node._pump_images()
+            self.assertEqual(node.stereo_pairs_written, 1)
+        finally:
+            node.close()
+            for r in (rf, rl):
+                r.close()
+                r.unlink()
+        msgs = read_back(self.path)["msgs"]
+        tf = [t for t, _ in msgs["/viz/image/front"]]
+        tl = [t for t, _ in msgs["/viz/image/left"]]
+        self.assertEqual((len(tf), len(tl)), (2, 2))
+        # 組の1枚目どうしは同じ瞬間（右の最新 = 2コマ目に合わせ、左の最新 3コマ目ではない）
+        self.assertLessEqual(abs(tf[0] - tl[0]), STEREO_PAIR_TOL_NS)
+        self.assertEqual(read_back(self.path)["metadata"]["surge"]["stereo_jpeg_quality"], "95")
+
+    @unittest.skipUnless(_has_jpeg(), "JPEG エンコーダが無い（pip install pillow）")
     def test_recreated_shm_is_detected(self):
         """**camera_node を再起動すると共有メモリは作り直される。**
 
@@ -990,12 +1042,12 @@ class TestLoggerNodeDiskCheck(unittest.TestCase):
                 return b"\xff\xd8jpg", time.monotonic_ns()
             node._jpeg = SimpleNamespace(encode_latest=_encode, close=lambda: None,
                                          encoded=0, torn=0, errors=0, reattached=0)
-            node._last_ref["rear"] = SimpleNamespace(shm_name="r", ring_seq=7)
+            node._last_ref["left"] = SimpleNamespace(shm_name="r", ring_seq=7)
             for _ in range(3):
                 node._next_image_ns.clear()               # 間引きの時刻は来たことにする
                 node._pump_images()
             self.assertEqual(calls, [7])
-            node._last_ref["rear"] = SimpleNamespace(shm_name="r", ring_seq=8)
+            node._last_ref["left"] = SimpleNamespace(shm_name="r", ring_seq=8)
             node._next_image_ns.clear()
             node._pump_images()
             self.assertEqual(calls, [7, 8])

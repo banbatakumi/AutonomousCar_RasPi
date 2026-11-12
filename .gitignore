@@ -13,6 +13,8 @@ web/dist/
 .env.local
 
 # 実行時生成物
+# ステレオの後処理の C 版を、その機械で初回にビルドしたもの（raspi/core/stereo_native.py）
+surge_mk2/raspi/core/_native_build/
 # 自動運転のモードとパラメータ（telemetry_node が GUI の操作を保存する）。
 # **機体ごとに詰めた値なのでコミットしない**（別の機体に持っていくと危ない）
 surge_mk2/config/auto.json

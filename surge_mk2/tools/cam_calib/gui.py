@@ -2,12 +2,17 @@
 
     .venv/bin/python -m tools.cam_calib.gui
 
-1. カメラ（前/後）・レンズ（`vehicle.toml` の `lenses.<名前>`。既定は今選ばれているもの）・
+1. カメラ（前/後/左/ステレオ）・レンズ（`vehicle.toml` の `lenses.<名前>`。既定は今選ばれているもの）・
    ボードの寸法・写真のフォルダ（既定 ~/Downloads）を選ぶ
 2. 「写真を読み込む」で 📷 の写真（`surge_<cam>_…png`）を拾い、角点を検出する
 3. 一覧で使わない写真を外し（ダブルクリックで切替）、「校正」
 4. 結果（再投影誤差・画面カバー率・補正前後のプレビュー）を見て、
    よければ「vehicle.toml に書き込む」（`config/generate.py` まで走る）
+
+**ステレオ**（`docs/stereo_plan.md` 段階2）を選ぶと、右（`front`）と左（`left`）の写真を両方読み込み、
+「校正」で内部パラメータ2つ → 左 → 右の R・T まで求める。プレビューは平行化した左 | 右に横線を
+引いたもの（同じ角が同じ線に乗っていれば OK）。書き込みは左右の `fisheye` と `[sensors.stereo]`。
+合格（縦ずれの中央値 0.5px 以下・基線 75±2mm）でなければ書き込まない。
 
 ロジックは `calib.py`（CLI の `python -m tools.cam_calib` と共通）。ネイティブ GUI に
 してあるのは、写真の取捨選択と結果の見比べをターミナル操作なしで完結させるため
@@ -23,8 +28,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .calib import (DEFAULT_TOML, CalibResult, Detection, calibrate, coverage, detect,
-                    lens_profiles, parse_name, undistort_preview, write_vehicle_toml)
+from .calib import (BASELINE_TOL_M, DEFAULT_TOML, MAX_RECT_DY_PX, NOMINAL_BASELINE_M, CalibResult,
+                    Detection, StereoCalibration, calibrate, calibrate_stereo_set, coverage, detect,
+                    lens_profiles, parse_name, rectified_preview, undistort_preview,
+                    write_stereo_set, write_vehicle_toml)
+
+#: カメラの選択肢（値, 表示）。"stereo" は front（右）と left の組
+_CAM_CHOICES = (("front", "右（主）"), ("left", "左"), ("stereo", "ステレオ"))
 
 #: プレビューの最大幅 [px]（元画像と補正画像を横に並べた全体）
 _PREVIEW_W = 900
@@ -49,6 +59,8 @@ class CamCalibApp(tk.Tk):
         self.dets: dict[str, Detection] = {}     # Treeview の iid → 検出結果
         self.use: dict[str, bool] = {}
         self.result: CalibResult | None = None
+        #: ステレオのとき（`self.result` は使わない）
+        self.stereo_result: StereoCalibration | None = None
         self._photo: tk.PhotoImage | None = None  # 参照を持っておかないと消える
 
         self._build()
@@ -59,9 +71,11 @@ class CamCalibApp(tk.Tk):
         top = ttk.Frame(self, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="カメラ").grid(row=0, column=0, sticky="w")
-        for i, (v, t) in enumerate((("front", "前"), ("rear", "後"))):
-            ttk.Radiobutton(top, text=t, value=v, variable=self.cam,
-                            command=self._refresh_lenses).grid(row=0, column=1 + i)
+        cams = ttk.Frame(top)
+        cams.grid(row=0, column=1, columnspan=2, sticky="w")
+        for v, t in _CAM_CHOICES:
+            ttk.Radiobutton(cams, text=t, value=v, variable=self.cam,
+                            command=self._refresh_lenses).pack(side="left")
         lens_box = ttk.Frame(top)
         lens_box.grid(row=1, column=0, columnspan=10, sticky="w", pady=(4, 0))
         ttk.Label(lens_box, text="レンズ").pack(side="left")
@@ -127,6 +141,18 @@ class CamCalibApp(tk.Tk):
 
         既定は今そのカメラに選ばれているレンズ（＝付いているはずのレンズ）。
         """
+        if self.cam.get() == "stereo":
+            try:
+                lr, _ = lens_profiles("front", self.toml_path.get())
+                ll, _ = lens_profiles("left", self.toml_path.get())
+            except Exception as e:                          # noqa: BLE001
+                lr = ll = ""
+                self.lens_note.config(text=f"vehicle.toml を読めない: {e}")
+            self._stereo_lenses = (lr, ll)
+            self.lens.set("")
+            self.lens_combo.config(values=[], state="disabled")
+            self.lens_note.config(text=f"右 \"{lr}\"・左 \"{ll}\"（今付いているレンズ。写真もこの名前のものだけ読む）")
+            return
         try:
             current, names = lens_profiles(self.cam.get(), self.toml_path.get())
         except Exception as e:                              # noqa: BLE001
@@ -170,22 +196,33 @@ class CamCalibApp(tk.Tk):
                             f"保存しました: {path}\n\n「実際のサイズ」(100%) で印刷し、平らな板に貼って、"
                             "1マスを定規で測った値を「1マス [mm]」に入れてください。")
 
+    def _photo_paths(self, folder: Path) -> list[Path]:
+        """読み込む写真。別レンズで撮った写真は除く（名前にレンズが無い古い写真は残す）。"""
+        if self.cam.get() == "stereo":
+            want = dict(zip(("front", "left"), getattr(self, "_stereo_lenses", ("", ""))))
+        else:
+            want = {self.cam.get(): self.lens.get()}
+        out = []
+        for cam, lens in want.items():
+            out += sorted(p for p in folder.glob(f"surge_{cam}_*.png")
+                          if (n := parse_name(p)) and (not lens or n.lens in ("", lens)))
+        return out
+
     def _load(self) -> None:
         cam = self.cam.get()
         folder = Path(self.folder.get()).expanduser()
-        lens = self.lens.get()
-        # 別レンズで撮った写真は除く（名前にレンズが無い古い写真は残す）
-        paths = sorted(p for p in folder.glob(f"surge_{cam}_*.png")
-                       if (n := parse_name(p)) and (not lens or n.lens in ("", lens)))
+        paths = self._photo_paths(folder)
         if not paths:
+            pat = "surge_front_*.png・surge_left_*.png" if cam == "stereo" else f"surge_{cam}_*.png"
             messagebox.showwarning("写真が無い",
-                                   f"{folder} に surge_{cam}_*.png がありません。\n"
+                                   f"{folder} に {pat} がありません。\n"
                                    "GUI のタブバーの 📷 で撮ってください。")
             return
         self.tree.delete(*self.tree.get_children())
         self.dets.clear()
         self.use.clear()
         self.result = None
+        self.stereo_result = None
         self.write_btn.config(state="disabled")
         self.calib_btn.config(state="disabled")
         board = self._board()
@@ -229,14 +266,20 @@ class CamCalibApp(tk.Tk):
         board, square = self._board(), self._square_m()
         self.calib_btn.config(state="disabled")
         self.status.set(f"{len(chosen)} 枚で校正中…")
+        stereo = self.cam.get() == "stereo"
 
         def work() -> None:
             try:
-                res = calibrate(chosen, board, square)
+                if stereo:
+                    def of(cam):
+                        return [d for d in chosen if (n := parse_name(d.path)) and n.cam == cam]
+                    res = calibrate_stereo_set(of("front"), of("left"), board, square)
+                else:
+                    res = calibrate(chosen, board, square)
             except Exception as e:                          # noqa: BLE001
                 self.after(0, self._calib_failed, str(e))
                 return
-            self.after(0, self._calib_done, res)
+            self.after(0, self._stereo_done if stereo else self._calib_done, res)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -247,6 +290,7 @@ class CamCalibApp(tk.Tk):
 
     def _calib_done(self, res: CalibResult) -> None:
         self.result = res
+        self.stereo_result = None
         self.calib_btn.config(state="normal")
         self.write_btn.config(state="normal")
         for iid in self.dets:
@@ -274,7 +318,54 @@ class CamCalibApp(tk.Tk):
         self.status.set("校正できた。結果を確認して「vehicle.toml に書き込む」")
         self._show_preview()
 
+    def _stereo_done(self, sc: StereoCalibration) -> None:
+        self.stereo_result = sc
+        self.result = None
+        st = sc.stereo
+        self.calib_btn.config(state="normal")
+        self.write_btn.config(state="normal" if st.passed else "disabled")
+        errs = {**sc.right.per_image, **sc.left.per_image}
+        why = {**sc.right.rejected, **sc.left.rejected}
+        pair_err = {}
+        for pr in sc.pairs:
+            if pr.right.path in st.per_pair:
+                pair_err[pr.right.path] = pair_err[pr.left.path] = st.per_pair[pr.right.path]
+        for p, r in st.rejected.items():
+            why[p] = r
+        unpaired = set(sc.unpaired)
+        for iid in self.dets:
+            p = Path(iid)
+            vals = list(self.tree.item(iid, "values"))
+            if p in why:
+                vals[2] = f"除外: {why[p]}"
+            elif p in errs:
+                vals[2] = (f"単体 {errs[p]:.3f}px・組 {pair_err[p]:.3f}px" if p in pair_err
+                           else f"単体 {errs[p]:.3f}px・" + ("相手なし" if p in unpaired else "組に使わない"))
+            self.tree.item(iid, values=vals)
+        s = st.stereo
+        import numpy as np
+        ang = math.degrees(math.acos(max(-1.0, min(1.0, (float(np.trace(s.R_mat)) - 1.0) / 2.0))))
+        self.summary.delete("1.0", "end")
+        self.summary.insert("end", "\n".join([
+            f"右 {sc.right.lens}: RMS {sc.right.rms:.3f}px（{len(sc.right.per_image)} 枚）   "
+            f"左 {sc.left.lens}: RMS {sc.left.rms:.3f}px（{len(sc.left.per_image)} 枚）",
+            f"ステレオ {len(st.per_pair)} 組（相手なし {len(sc.unpaired)} 枚・除外 {len(st.rejected)} 組）"
+            f"  再投影誤差 RMS {st.rms:.3f}px",
+            f"基線 {s.baseline * 1000:.2f}mm（合格 {NOMINAL_BASELINE_M * 1000:.0f}±{BASELINE_TOL_M * 1000:.0f}mm）"
+            f"  T = ({', '.join(f'{v * 1000:.1f}' for v in s.T)}) mm  左右の向きの差 {ang:.2f}°",
+            f"平行化後の縦ずれ 中央値 {st.rect_dy_median:.2f}px（合格 {MAX_RECT_DY_PX}px 以下）"
+            f"  95% {st.rect_dy_p95:.2f}px  最大 {st.rect_dy_max:.2f}px",
+            f"合否: {'合格' if st.passed else '不合格（撮り直しを勧める。書き込めない）'}",
+            "写真を選ぶと平行化した左 | 右。同じ角が同じ緑の線に乗っていれば OK",
+        ]))
+        self.status.set("ステレオ校正できた。" + ("結果を確認して「vehicle.toml に書き込む」"
+                                                 if st.passed else "不合格"))
+        self._show_preview()
+
     def _show_preview(self) -> None:
+        if self.stereo_result is not None:
+            self._show_stereo_preview()
+            return
         if self.result is None:
             return
         sel = self.tree.selection()
@@ -282,10 +373,29 @@ class CamCalibApp(tk.Tk):
         if iid is None:
             return
         try:
+            d = self.dets[iid]
+            self._set_preview(undistort_preview(d.path, self.result.calib, d.crop))
+        except Exception as e:                              # noqa: BLE001
+            self.preview.config(image="", text=f"プレビューを作れない: {e}")
+
+    def _show_stereo_preview(self) -> None:
+        sc = self.stereo_result
+        sel = self.tree.selection()
+        p = Path(sel[0]) if sel else None
+        pair = next((pr for pr in sc.pairs if p in (pr.right.path, pr.left.path)),
+                    sc.pairs[0] if sc.pairs else None)
+        if pair is None:
+            return
+        try:
+            self._set_preview(rectified_preview(pair, sc.right.calib, sc.left.calib,
+                                                sc.stereo.stereo))
+        except Exception as e:                              # noqa: BLE001
+            self.preview.config(image="", text=f"プレビューを作れない: {e}")
+
+    def _set_preview(self, img) -> None:
+        try:
             import cv2
 
-            d = self.dets[iid]
-            img = undistort_preview(d.path, self.result.calib, d.crop)
             s = min(1.0, _PREVIEW_W / img.shape[1])
             if s < 1.0:
                 img = cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
@@ -298,6 +408,9 @@ class CamCalibApp(tk.Tk):
             self.preview.config(image="", text=f"プレビューを作れない: {e}")
 
     def _write(self) -> None:
+        if self.stereo_result is not None:
+            self._write_stereo()
+            return
         if self.result is None:
             return
         cam = self.cam.get()
@@ -317,6 +430,27 @@ class CamCalibApp(tk.Tk):
                             "vehicle.toml を更新しました。\n"
                             "Pi へは tools/deploy.sh --restart で反映してください"
                             "（GUI の再ビルドと telemetry・認識ノードの再起動まで入ります）。")
+        self.status.set(f"書き込んだ: {self.toml_path.get()}")
+
+    def _write_stereo(self) -> None:
+        sc = self.stereo_result
+        if not sc.stereo.passed:
+            messagebox.showerror("書き込まない", "合否が不合格。撮り直してください。")
+            return
+        if not messagebox.askyesno(
+                "vehicle.toml に書き込む",
+                f"lenses.{sc.right.lens}.fisheye（右）・lenses.{sc.left.lens}.fisheye（左）・"
+                f"[sensors.stereo] を書き込み、config/generate.py を実行します。\n"
+                f"（基線 {sc.stereo.baseline * 1000:.2f}mm・縦ずれ 中央値 {sc.stereo.rect_dy_median:.2f}px）"):
+            return
+        try:
+            write_stereo_set(sc, self.toml_path.get())
+        except Exception as e:                              # noqa: BLE001
+            messagebox.showerror("書き込みに失敗", str(e))
+            return
+        messagebox.showinfo("書き込んだ",
+                            "vehicle.toml を更新しました。\n"
+                            "Pi へは tools/deploy.sh --restart で反映してください。")
         self.status.set(f"書き込んだ: {self.toml_path.get()}")
 
 

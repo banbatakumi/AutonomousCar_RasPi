@@ -34,13 +34,13 @@ def _rot(rx: float, ry: float, rz: float) -> np.ndarray:
     return cv2.Rodrigues(np.array([rx, ry, rz], dtype=np.float64))[0]
 
 
-def _render(R: np.ndarray, t: np.ndarray, ss: int = 2) -> np.ndarray:
+def _render(R: np.ndarray, t: np.ndarray, ss: int = 2, calib: FisheyeCalib = TRUE) -> np.ndarray:
     """ボード（ボード座標の z=0 平面、原点＝左上の内側角点）をカメラ姿勢 R,t で写した画像。"""
     hh, ww = H * ss, W * ss
     vs, us = np.mgrid[0:hh, 0:ww].astype(np.float64)
     us = (us + 0.5) / ss - 0.5
     vs = (vs + 0.5) / ss - 0.5
-    x, y, z = unproject_pixels(us, vs, TRUE.fx, TRUE.fy, TRUE.cx, TRUE.cy, TRUE.k)
+    x, y, z = unproject_pixels(us, vs, calib.fx, calib.fy, calib.cx, calib.cy, calib.k)
     ray = np.stack([x, y, z], axis=-1)
     Rt = R.T
     rb = ray @ Rt.T                          # ボード座標での光線の向き
@@ -63,12 +63,12 @@ def _render(R: np.ndarray, t: np.ndarray, ss: int = 2) -> np.ndarray:
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def _corners_px(R, t) -> np.ndarray:
+def _corners_px(R, t, calib: FisheyeCalib = TRUE) -> np.ndarray:
     cols, rows = BOARD
     obj = np.zeros((cols * rows, 3))
     obj[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * SQUARE
     pc = obj @ R.T + t
-    u, v = project_rays(pc[:, 0], pc[:, 1], pc[:, 2], TRUE.fx, TRUE.fy, TRUE.cx, TRUE.cy, TRUE.k)
+    u, v = project_rays(pc[:, 0], pc[:, 1], pc[:, 2], calib.fx, calib.fy, calib.cx, calib.cy, calib.k)
     return np.stack([u, v], axis=1)
 
 
@@ -117,8 +117,10 @@ def shots():
 
 
 def test_parse_name():
-    n = parse_name("surge_rear_wide160_640x450_crop0.0625_20261003_101010123.png")
-    assert (n.cam, n.lens, n.crop) == ("rear", "wide160", 0.0625)
+    n = parse_name("surge_left_wide160sl_640x450_crop0.0625_20261003_101010123.png")
+    assert (n.cam, n.lens, n.crop) == ("left", "wide160sl", 0.0625)
+    # 前後配置のころの後カメラの写真は読まない
+    assert parse_name("surge_rear_wide160_640x450_crop0.0625_20261003_101010123.png") is None
     # レンズ名の無い名前（プロファイルを使わない設定・古い写真）も読める
     n = parse_name("surge_front_640x360_crop0.25_20261003_101010123.png")
     assert (n.cam, n.lens, n.crop) == ("front", "", 0.25)
@@ -174,7 +176,7 @@ def test_write_goes_into_selected_lens_profile(result, toml):
 
     current, names = lens_profiles("front", toml)
     assert current in names
-    rear_before = Vehicle.load(toml).cam_rear_fisheye
+    left_before = Vehicle.load(toml).cam_left_fisheye
     assert write_vehicle_toml("front", result, toml, regenerate=False) == current
     text = toml.read_text(encoding="utf-8")
     assert "# ★付いているレンズ" in text                 # 既存のコメントが残る
@@ -182,7 +184,7 @@ def test_write_goes_into_selected_lens_profile(result, toml):
     assert v.cam_front_lens == current
     assert v.cam_front_fisheye is not None
     assert v.cam_front_fisheye.fx == pytest.approx(result.calib.fx, abs=1e-3)
-    assert v.cam_rear_fisheye == rear_before               # 後ろのカメラには触らない
+    assert v.cam_left_fisheye == left_before               # 左のカメラには触らない
     # 2回書いても表が増えない（上書きされる）
     write_vehicle_toml("front", result, toml, regenerate=False)
     assert _header_count(toml, f"[sensors.cam_front.lenses.{current}.fisheye]") == 1
@@ -194,6 +196,12 @@ def test_switching_lens_keeps_both_calibrations(result, toml):
 
     from raspi.core.vehicle import Vehicle
 
+    # 2つ目のプロファイル（付け替え先）を足す
+    doc = tomlkit.parse(toml.read_text(encoding="utf-8"))
+    lenses = doc["sensors"]["cam_front"]["lenses"]
+    lenses["spare"] = tomlkit.table()
+    lenses["spare"].update({"x": 0.09, "y": -0.0375, "z": 0.08, "hfov": 2.23})
+    toml.write_text(tomlkit.dumps(doc), encoding="utf-8")
     current, names = lens_profiles("front", toml)
     other = next(n for n in names if n != current)
     front_before = Vehicle.load(toml).cam_front_fisheye

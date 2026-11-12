@@ -84,7 +84,7 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
                   "cam_perception": 5574, "line_perception": 5575, "cam_track": 5576,
                   "cam_e2e": 5577, "signal": 5578, "test": 5579,
-                  "e2e_fusion": 5580}
+                  "e2e_fusion": 5580, "stereo": 5581}
 
 #: トピック → どのノードが publish するか
 #:
@@ -119,7 +119,7 @@ TOPIC_OWNER: dict[str, str] = {
     "auto/map": "planning",
     "image/": "camera",
     "image/front": "camera",
-    "image/rear": "camera",
+    "image/left": "camera",
     "scan/cam": "cam_perception",
     "cam/mask": "cam_perception",
     "path/cam": "cam_perception",
@@ -135,6 +135,9 @@ TOPIC_OWNER: dict[str, str] = {
     "signal/status": "signal",
     "cam_e2e/cmd": "cam_e2e",
     "e2e_fusion/plan": "e2e_fusion",
+    #: **`scan` の前方一致に拾われないよう完全一致で引く**（上の ★ の事故と同じ形）
+    "scan/stereo": "stereo",
+    "stereo/depth": "stereo",
 }
 
 
@@ -171,7 +174,7 @@ def endpoints_for_topic(topic: str) -> list[str]:
         return [endpoint_for_node(n) for n in
                 ("io", "camera", "control", "planning",
                  "cam_perception", "line_perception", "cam_track", "cam_e2e",
-                 "signal", "e2e_fusion")]
+                 "signal", "e2e_fusion", "stereo")]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）

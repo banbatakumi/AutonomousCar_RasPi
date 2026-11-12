@@ -187,5 +187,17 @@ class TestPreprocess(unittest.TestCase):
         self.assertAlmostEqual(float(x[0, 1].mean()), 0.0)
 
 
+class TestPreprocessStereo(unittest.TestCase):
+    def test_right_then_left_stacked_on_channels(self):
+        from raspi.core.cam_e2e_preproc import preprocess, preprocess_stereo
+        rng = np.random.default_rng(0)
+        right = rng.integers(0, 256, (48, 64, 3), dtype=np.uint8)
+        left = rng.integers(0, 256, (48, 64, 3), dtype=np.uint8)
+        x = preprocess_stereo(right, left, (32, 16), crop_x=0.1)
+        self.assertEqual(x.shape, (1, 6, 16, 32))
+        np.testing.assert_array_equal(x[:, :3], preprocess(right, (32, 16), crop_x=0.1))
+        np.testing.assert_array_equal(x[:, 3:], preprocess(left, (32, 16), crop_x=0.1))
+
+
 if __name__ == "__main__":
     unittest.main()

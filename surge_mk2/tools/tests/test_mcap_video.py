@@ -30,25 +30,25 @@ def _frames(path) -> list[int]:
     return out
 
 
-def test_front_and_rear_are_written_on_a_shared_timeline(tmp_path):
+def test_front_and_left_are_written_on_a_shared_timeline(tmp_path):
     src = tmp_path / "run.mcap"
     with McapLog(src, t0_mono_ns=0, t0_unix_ns=0) as log:
         log.write_viz_image(_jpeg(40), "front", t_mono_ns=0)
-        log.write_viz_image(_jpeg(200), "rear", t_mono_ns=S // 2)
+        log.write_viz_image(_jpeg(200), "left", t_mono_ns=S // 2)
         log.write_viz_image(_jpeg(120), "front", t_mono_ns=1 * S)
-        log.write_viz_image(_jpeg(200), "rear", t_mono_ns=2 * S)
+        log.write_viz_image(_jpeg(200), "left", t_mono_ns=2 * S)
 
     seen: list[float] = []
     results = export_videos(src, fps=10, progress=seen.append)
 
-    assert [r.cam for r in results] == ["front", "rear"]
+    assert [r.cam for r in results] == ["front", "left"]
     assert [r.images for r in results] == [2, 2]
     assert seen[-1] == 1.0
-    front, rear = (_frames(r.path) for r in results)
-    # 0〜2s を 10fps で: 両方 21 コマ（前は 1s で、後は最初から終わりまで同じ画像）
-    assert len(front) == len(rear) == 21
+    front, left = (_frames(r.path) for r in results)
+    # 0〜2s を 10fps で: 両方 21 コマ（右は 1s で切り替わり、左は最初から終わりまで同じ画像）
+    assert len(front) == len(left) == 21
     assert abs(front[9] - 40) < 12 and abs(front[10] - 120) < 12 and abs(front[20] - 120) < 12
-    assert all(abs(v - 200) < 12 for v in rear)
+    assert all(abs(v - 200) < 12 for v in left)
 
 
 def test_camera_without_images_is_skipped(tmp_path):
@@ -56,13 +56,13 @@ def test_camera_without_images_is_skipped(tmp_path):
     with McapLog(src, t0_mono_ns=0, t0_unix_ns=0) as log:
         log.write_viz_image(_jpeg(80), "front", t_mono_ns=0)
 
-    results = export_videos(src, tmp_path / "out_missing", cams=["rear"])
+    results = export_videos(src, tmp_path / "out_missing", cams=["left"])
     assert results == []
 
     results = export_videos(src, fps=10)
     assert [r.cam for r in results] == ["front"]
     assert results[0].path == default_out_path(src, "front")
-    assert not default_out_path(src, "rear").exists()
+    assert not default_out_path(src, "left").exists()
 
 
 def test_truncated_recording_exports_what_was_readable(tmp_path):

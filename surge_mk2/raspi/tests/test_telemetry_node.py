@@ -337,20 +337,20 @@ class TestCamModelsListNote(unittest.TestCase):
     返すことを確認する。"""
 
     def setUp(self) -> None:
-        self._orig_dir = tn.MODELS_DIR
+        self._orig_dir = tn.SEG_MODELS_DIR
         self._tmp = tempfile.TemporaryDirectory()
-        tn.MODELS_DIR = Path(self._tmp.name)
+        tn.SEG_MODELS_DIR = Path(self._tmp.name)
         self.addCleanup(self._cleanup)
 
     def _cleanup(self) -> None:
-        tn.MODELS_DIR = self._orig_dir
+        tn.SEG_MODELS_DIR = self._orig_dir
         self._tmp.cleanup()
 
     def _by_name(self, files: list[dict]) -> dict[str, dict]:
         return {f["name"]: f for f in files}
 
     def test_reads_note_from_sibling_json(self) -> None:
-        d = tn.MODELS_DIR
+        d = tn.SEG_MODELS_DIR
         (d / "v1.onnx").write_bytes(b"dummy")
         (d / "v1.json").write_text(json.dumps({"note": "夜間走行用、露出補正あり"}))
 
@@ -360,7 +360,7 @@ class TestCamModelsListNote(unittest.TestCase):
         self.assertTrue(files["v1"]["has_config"])
 
     def test_missing_json_gives_empty_note(self) -> None:
-        d = tn.MODELS_DIR
+        d = tn.SEG_MODELS_DIR
         (d / "v2.onnx").write_bytes(b"dummy")
 
         result = tn.TelemetryServer._cam_models_list(None)
@@ -369,7 +369,7 @@ class TestCamModelsListNote(unittest.TestCase):
         self.assertFalse(files["v2"]["has_config"])
 
     def test_corrupt_json_gives_empty_note_without_crashing(self) -> None:
-        d = tn.MODELS_DIR
+        d = tn.SEG_MODELS_DIR
         (d / "v3.onnx").write_bytes(b"dummy")
         (d / "v3.json").write_text("{ not json")
 
@@ -379,7 +379,7 @@ class TestCamModelsListNote(unittest.TestCase):
         self.assertTrue(files["v3"]["has_config"])   # ファイルは在る（壊れているだけ）
 
     def test_json_without_note_field_gives_empty_note(self) -> None:
-        d = tn.MODELS_DIR
+        d = tn.SEG_MODELS_DIR
         (d / "v4.onnx").write_bytes(b"dummy")
         (d / "v4.json").write_text(json.dumps({"input_size": [224, 224]}))
 
@@ -623,11 +623,11 @@ class TestServeMapPreview(unittest.TestCase):
 
 
 def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mode: str = ""):
-    """`_desired_front_fps`/`_desired_rear_enabled`/`_vehicle_armed`が使う属性だけを
+    """`_desired_front_fps`/`_desired_stereo`/`_vehicle_armed`が使う属性だけを
     持つ軽量な代役。`_fake_server`（`TestMapsSave`）と同じ方針。`armed=None`は
     `VehicleState`がまだ届いていない起動直後を表す。
 
-    `_desired_front_fps`/`_desired_rear_enabled`は内部で`self._vehicle_armed()`を
+    `_desired_front_fps`/`_desired_stereo`は内部で`self._vehicle_armed()`を
     呼ぶので、`SimpleNamespace`には本物の`_vehicle_armed`実装へ委譲するcallableを
     後付けする（判定ロジックをテスト側で重複させない）。
     """
@@ -638,15 +638,16 @@ def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mod
         sub=SimpleNamespace(latest=latest),
         _auto_engaged=auto_engaged, _auto_mode=auto_mode,
         _cam_front_fps_armed=30.0, _cam_front_fps_disarm=10.0,
-        _cam_rear_enabled_armed=True, _cam_rear_enabled_disarm=False,
-        camera_clients={"front": set(), "rear": set(), "mask": set()},
-        _cam_rear_fps_armed=10.0,
+        camera_clients={"front": set(), "left": set(), "mask": set(), "depth": set()},
         _mcap_proc=None, _mcap_starting=False, _logger_running=False,
         _video_proc=None, _video_starting=False)
     fake._vehicle_armed = lambda: tn.TelemetryServer._vehicle_armed(fake)
     fake._video_recording = lambda: tn.TelemetryServer._video_recording(fake)
     fake._cam_in_use_while_disarmed = \
         lambda cam: tn.TelemetryServer._cam_in_use_while_disarmed(fake, cam)
+    fake._desired_depth = lambda: tn.TelemetryServer._desired_depth(fake)
+    fake._desired_stereo = lambda: tn.TelemetryServer._desired_stereo(fake)
+    fake._auto_fps_override = lambda: tn.TelemetryServer._auto_fps_override(fake)
     return fake
 
 
@@ -692,7 +693,7 @@ class TestServeSnapshot(unittest.TestCase):
         self.assertEqual(tuple(int(v) for v in bgr), (0, 0, 200))
 
     def test_camera_without_frames_is_404(self):
-        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/rear.png")
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/left.png")
         self.assertEqual(resp.status_code, 404)
 
     def test_unknown_camera_is_404(self):
@@ -749,7 +750,7 @@ class TestUndistortSetting(unittest.TestCase):
         ref = SimpleNamespace(shm_name="x", ring_seq=1)
         tn.TelemetryServer._encode_frame(fake, ref, "front")
         self.assertIs(seen["transform"], undist)
-        tn.TelemetryServer._encode_frame(fake, ref, "rear")       # 未校正
+        tn.TelemetryServer._encode_frame(fake, ref, "left")       # 未校正
         self.assertIsNone(seen["transform"])
         fake._cam_undistort = False
         tn.TelemetryServer._encode_frame(fake, ref, "front")
@@ -818,20 +819,87 @@ class TestDesiredFrontFps(unittest.TestCase):
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 30.0)
 
 
-class TestVideoRecordingFps(unittest.TestCase):
-    """🎥 録画中は、DISARM 中でも前後カメラを `CAM_FPS_MAX`（30fps）で撮る。"""
+class TestStereoDepthDemand(unittest.TestCase):
+    """`CamConfig.depth`・`stereo` を立てる条件と、そのときの前カメラの fps（段階4）。"""
 
-    def test_disarmed_recording_raises_front_and_rear_to_max(self):
+    def _fake(self, **kw):
+        return _fake_cam_server(**kw)
+
+    def test_depth_viewer_asks_for_depth_and_stereo(self):
+        fake = self._fake(armed=False)
+        self.assertFalse(tn.TelemetryServer._desired_depth(fake))
+        self.assertFalse(tn.TelemetryServer._desired_stereo(fake))
+        fake.camera_clients["depth"].add(object())
+        self.assertTrue(tn.TelemetryServer._desired_depth(fake))
+        self.assertTrue(tn.TelemetryServer._desired_stereo(fake))
+
+    def test_depth_viewer_alone_runs_the_front_camera(self):
+        """DISARM 中に深度映像だけを見ていても前（右）カメラを回す（止まっていると左も同期できない）。"""
+        fake = self._fake(armed=False)
+        self.assertFalse(tn.TelemetryServer._desired_front_enabled(fake))
+        fake.camera_clients["depth"].add(object())
+        self.assertTrue(tn.TelemetryServer._desired_front_enabled(fake))
+
+    def test_armed_alone_does_not_run_the_left_camera(self):
+        """ARM 中でも、深度も左の映像も使わなければ左カメラは止めておく（段階4 で絞った）。"""
+        fake = self._fake(armed=True)
+        self.assertFalse(tn.TelemetryServer._desired_stereo(fake))
+
+    def test_stereo_mode_needs_arm(self):
+        from unittest.mock import patch
+        with patch.object(tn, "STEREO_AUTO_MODES", frozenset({"stereo_ftg"})):
+            self.assertTrue(tn.TelemetryServer._desired_depth(self._fake(armed=True, auto_mode="stereo_ftg")))
+            self.assertFalse(tn.TelemetryServer._desired_depth(self._fake(armed=False, auto_mode="stereo_ftg")))
+
+    def test_fps_does_not_change_with_arm_while_stereo(self):
+        """左右を同期している間は ARM/DISARM で fps を変えない（変えると揃い直しに 15 秒以上かかる）。"""
+        for armed in (True, False):
+            fake = self._fake(armed=armed)
+            fake.camera_clients["depth"].add(object())
+            self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 30.0)
+
+
+class TestStereoPairModes(unittest.TestCase):
+    """左右の組で推論するモード（`cam_e2e`・`e2e_fusion`）: ARM 中は左カメラを回し、engage でも fps を変えない。"""
+
+    def _fake(self, **kw):
+        fake = _fake_cam_server(**kw)
+        fake._cam_front_fps_armed = 20.0                 # 上限（30）と区別できる値
+        return fake
+
+    def test_selected_and_armed_runs_the_left_camera_without_matching(self):
+        for mode in ("cam_e2e", "e2e_fusion"):
+            fake = self._fake(armed=True, auto_mode=mode)
+            self.assertTrue(tn.TelemetryServer._desired_stereo(fake), mode)
+            self.assertFalse(tn.TelemetryServer._desired_depth(fake), mode)      # 照合はしない
+            self.assertFalse(tn.TelemetryServer._desired_stereo(self._fake(armed=False, auto_mode=mode)), mode)
+        self.assertFalse(tn.TelemetryServer._desired_stereo(self._fake(armed=True, auto_mode="line_trace")))
+
+    def test_engage_keeps_the_fps_while_pairing(self):
+        fake = self._fake(armed=True, auto_mode="cam_e2e", auto_engaged=True)
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 20.0)
+        self.assertFalse(tn.TelemetryServer._auto_fps_override(fake))
+        # 左右を使わないカメラのモードは従来どおり上限へ上げる
+        fake = self._fake(armed=True, auto_mode="line_trace", auto_engaged=True)
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), tn.CAM_FPS_MAX)
+
+
+class TestVideoRecordingFps(unittest.TestCase):
+    """🎥 録画中は、DISARM 中でも前カメラ（同期中は左も同じ fps）を `CAM_FPS_MAX`（30fps）で撮る。"""
+
+    def test_disarmed_recording_raises_front_to_max(self):
         fake = _fake_cam_server(armed=False)
+        fake._cam_front_fps_armed = 20.0
         fake._video_proc = object()
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), tn.CAM_FPS_MAX)
-        self.assertEqual(tn.TelemetryServer._desired_rear_fps(fake), tn.CAM_FPS_MAX)
 
     def test_mcap_recording_does_not_force_fps(self):
-        """mcap 記録（10Hz）はカメラの fps を上げない。"""
+        """mcap 記録（10Hz）はカメラの fps を上限へ上げない。記録中は左右を同期するので
+        ARM 中の fps に固定される（`TestStereoDepthDemand`）。"""
         fake = _fake_cam_server(armed=False)
+        fake._cam_front_fps_armed = 20.0
         fake._mcap_proc = object()
-        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 10.0)
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 20.0)
 
     def test_starting_counts_as_recording(self):
         fake = _fake_cam_server(armed=False)
@@ -841,30 +909,10 @@ class TestVideoRecordingFps(unittest.TestCase):
     def test_not_recording_keeps_user_settings(self):
         fake = _fake_cam_server(armed=False)
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 10.0)
-        self.assertEqual(tn.TelemetryServer._desired_rear_fps(fake), 10.0)
 
     def test_mcap_default_image_hz_is_10(self):
         self.assertEqual(tn.DEFAULT_MCAP_IMAGE_HZ, 10.0)
         self.assertEqual(tn.VIDEO_FPS, tn.CAM_FPS_MAX)
-
-
-class TestDesiredRearEnabled(unittest.TestCase):
-    """`_desired_rear_enabled`（DISARM中は既定で後方カメラを止める）。"""
-
-    def test_armed_uses_armed_setting(self):
-        fake = _fake_cam_server(armed=True)
-        self.assertTrue(tn.TelemetryServer._desired_rear_enabled(fake))
-
-    def test_disarmed_uses_disarm_setting(self):
-        fake = _fake_cam_server(armed=False)
-        self.assertFalse(tn.TelemetryServer._desired_rear_enabled(fake))
-
-    def test_disarmed_viewer_does_not_override_setting(self):
-        """DISARM中は GUI で後方映像を表示していても設定どおり止める（バンビ判断）。"""
-        fake = _fake_cam_server(armed=False)
-        fake.camera_clients["rear"].add(object())
-        fake._mcap_proc = object()
-        self.assertFalse(tn.TelemetryServer._desired_rear_enabled(fake))
 
 
 class TestDesiredFrontEnabled(unittest.TestCase):
@@ -883,7 +931,7 @@ class TestDesiredFrontEnabled(unittest.TestCase):
         self.assertFalse(self._front(_fake_cam_server(armed=False)))
 
     def test_disarmed_but_used_is_enabled(self):
-        for attr, val in (("camera_clients", {"front": {object()}, "rear": set()}),
+        for attr, val in (("camera_clients", {"front": {object()}, "left": set()}),
                           ("_mcap_proc", object()), ("_mcap_starting", True),
                           ("_logger_running", True)):
             with self.subTest(attr):
@@ -891,16 +939,17 @@ class TestDesiredFrontEnabled(unittest.TestCase):
                 setattr(fake, attr, val)
                 self.assertTrue(self._front(fake))
 
-    def test_rear_viewer_does_not_wake_front(self):
+    def test_left_viewer_does_not_wake_front(self):
+        """左の映像だけを見ていても前（主）カメラは `front_enabled` では起こさない（左は同期の要求で回る）。"""
         fake = _fake_cam_server(armed=False)
-        fake.camera_clients["rear"].add(object())
+        fake.camera_clients["left"].add(object())
         self.assertFalse(self._front(fake))
 
 
 class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
     """`_camera_pump`（実機で発覚: `/ws/camera/mask`にクライアントが1人でも繋がると
-    `topics`（front/rearしか無い）を`camera_clients`（front/rear/maskの3種）で
-    引いて`KeyError`になり、タスクごと死んでfront/rearの配信まで巻き添えで
+    `topics`（カメラの役割しか無い）を`camera_clients`（カメラ＋maskの3種）で
+    引いて`KeyError`になり、タスクごと死んでカメラの配信まで巻き添えで
     止まっていた。2026-09-03、実機での「前後とも映像が見れない」報告から特定）。
     """
 
@@ -909,7 +958,7 @@ class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
             _running=True,
             _jpeg=object(),         # `is None`判定を通過させるだけのダミー
             camera_hz=1000.0,       # 待たずに何周かループを回す
-            camera_clients={"front": set(), "rear": set(), "mask": {object()}},
+            camera_clients={"front": set(), "left": set(), "mask": {object()}},
             sub=SimpleNamespace(latest={}),
             _cam_wake=asyncio.Event(),
         )
@@ -936,7 +985,7 @@ class TestCameraPumpOnArrival(unittest.IsolatedAsyncioTestCase):
 
         fake = SimpleNamespace(
             _running=True, _jpeg=object(), camera_hz=hz,
-            camera_clients={"front": {object()}, "rear": set(), "mask": set()},
+            camera_clients={"front": {object()}, "left": set(), "mask": set()},
             sub=SimpleNamespace(latest={}), _cam_wake=asyncio.Event(),
             _encode_frame=lambda ref, cam="": b"jpg%d" % ref.ring_seq,
             _send_or_drop=send_or_drop)

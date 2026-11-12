@@ -180,12 +180,12 @@ rms = 0.3
         v = Vehicle.load(f.name)
         Path(f.name).unlink()
         self.assertIsNotNone(v.cam_front_fisheye)
-        self.assertIsNone(v.cam_rear_fisheye)
+        self.assertIsNone(v.cam_left_fisheye)
         intr = vehicle_camera_intrinsics(v, "front", 640, 360)
         self.assertEqual(intr.k, (0.02, -0.01, 0.003, -0.0005))
         self.assertAlmostEqual(intr.f_y, 191.0)
-        # 後カメラは未校正なのでピンホールのまま
-        self.assertIsNone(vehicle_camera_intrinsics(v, "rear", 640, 480).k)
+        # 左カメラは未校正なのでピンホールのまま
+        self.assertIsNone(vehicle_camera_intrinsics(v, "left", 640, 480).k)
 
 
 class TestLensProfiles(unittest.TestCase):
@@ -274,7 +274,7 @@ k = [0.01, 0.0, 0.0, 0.0]
         from raspi.core.vehicle import DEFAULT_PATH, resolve_lens
         with open(DEFAULT_PATH, "rb") as f:
             d = tomllib.load(f)
-        for cam in ("cam_front", "cam_rear"):
+        for cam in ("cam_front", "cam_left"):
             resolve_lens(d["sensors"][cam], strict=True)
 
 

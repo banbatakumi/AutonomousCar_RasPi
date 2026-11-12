@@ -7,10 +7,10 @@ Pi の推論（`raspi/nodes/e2e_fusion_node.py`）と Mac の学習・評価（`
 
 | 名前 | 形 | 中身 |
 |---|---|---|
-| `image` | `(1, 3, h, w)` | 前方カメラ。`cam_e2e_preproc.preprocess`（左右の切り落とし・面積平均・0〜1） |
+| `image` | `(1, 6, h, w)` | 前方ステレオの左右2枚。`cam_e2e_preproc.preprocess_stereo` の `[右, 左]`（それぞれ左右の切り落とし・面積平均・0〜1。契約の `image_preproc_version` 3） |
 | `lidar` | `(1, H+1, n)` | 前方 `fov_deg` の距離（`max_range` で割った 0〜1）を新しい順に `H` 周、最後の1行は最新の周の「実測点か」 |
 | `state` | `(1, 3)` | 車速・実舵角・ヨーレート（`speed_ref`・`max_steer`・`yaw_rate_ref` で割る） |
-| `avail` | `(1, 3)` | 画像・点群・車両状態が使えるか（1/0）。0 の入力は中身を見ない（学習でも一定割合で伏せている） |
+| `avail` | `(1, 3)` | 画像・点群・車両状態が使えるか（1/0）。0 の入力は中身を見ない（学習でも一定割合で伏せている）。左右2台の画像は組で1つ（揃わなければ 0） |
 
 距離は `raspi.auto.base.scan_window` を通したもの（欠測セクタ＝0＝壁、測距不能・飽和＝`max_range`）。
 点群の読み方の契約をここに書き写さないため、`lidar_rows` は `ScanWindow` の `dist`・`measured` を受け取る。

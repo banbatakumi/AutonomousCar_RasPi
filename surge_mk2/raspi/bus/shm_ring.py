@@ -359,6 +359,28 @@ class FrameRing:
             return None
         return FrameRef(self, desc._replace(nbytes=nbytes, t_capture_ns=t_cap), lock)
 
+    def find(self, t_capture_ns: int, tol_ns: int) -> FrameRef | None:
+        """撮影時刻が `t_capture_ns` に最も近く、差が `tol_ns` 以内のフレーム。無ければ None。
+
+        リングに残っている（上書きされていない）フレームだけを探す。ステレオで、もう1台の
+        同じ瞬間のコマを取り出すのに使う（`logger_node` の左右の組）。
+        """
+        seq = self.write_seq
+        best: FrameRef | None = None
+        best_dt = tol_ns + 1
+        for k in range(min(seq, self.n_slots - 1)):     # 書き込み中の次のスロットは見ない
+            s = seq - k
+            slot = (s - 1) % self.n_slots
+            lock, t_cap, fid, nbytes = self._read_slot_meta(slot)
+            if lock % 2 == 1:
+                continue
+            dt = abs(t_cap - t_capture_ns)
+            if dt < best_dt:
+                best_dt = dt
+                best = FrameRef(self, FrameDesc(self.name, slot, s, t_cap, fid, self.width,
+                                                self.height, self.fmt, self.stride, nbytes), lock)
+        return best
+
     # ── 後始末 ──
 
     def close(self) -> None:

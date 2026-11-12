@@ -1,6 +1,6 @@
 """`.mcap` のカメラ画像を mp4 に書き出す（Mac 側）。
 
-    .venv/bin/python -m tools.mcap_video logs/run.mcap            # 前後それぞれ
+    .venv/bin/python -m tools.mcap_video logs/run.mcap            # 右・左それぞれ
     .venv/bin/python -m tools.mcap_video logs/run.mcap --cams front --fps 30
 
 `logger_node` が記録した `/viz/image/<cam>`（`foxglove.CompressedImage`、JPEG）を読み、
@@ -14,7 +14,7 @@ Foxglove 自体の動画書き出しは Enterprise プラン限定なので、�
 **出力の各コマに「その時刻までで最新の画像」を置く**（同じ画像を繰り返して埋める）。
 こうすると記録が途切れた区間も実時間のまま止まって見え、再生時刻が記録とずれない。
 
-**時間軸は全カメラ共通**（最初の画像〜最後の画像）にしてあるので、前後の動画は
+**時間軸は全カメラ共通**（最初の画像〜最後の画像）にしてあるので、左右の動画は
 同じ長さになり、並べて再生すれば同期する。
 """
 
@@ -36,7 +36,7 @@ from raspi.rec.mcap_log import VIZ_IMAGE_PREFIX
 
 __all__ = ["DEFAULT_CAMS", "DEFAULT_FPS", "VideoResult", "default_out_path", "export_videos"]
 
-DEFAULT_CAMS = ("front", "rear")
+DEFAULT_CAMS = ("front", "left")
 DEFAULT_FPS = 30.0
 
 #: 試す順。`avc1`（H.264）は QuickTime・ブラウザでそのまま再生できる。

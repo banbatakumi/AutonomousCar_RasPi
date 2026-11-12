@@ -192,12 +192,21 @@ class TestDevicesByI2c(unittest.TestCase):
     INFOS = [{"Id": "/base/axi/pcie@120000/rp1/i2c@80000/imx219@10"},
              {"Id": "/base/axi/pcie@120000/rp1/i2c@88000/imx219@10"}]
 
+    def setUp(self):
+        # 対応表を固定して、列挙順が入れ替わったときを確かめる
+        from unittest import mock
+        from raspi.nodes import camera_node
+        p = mock.patch.object(camera_node, "I2C_ADDR_ROLE",
+                              {"i2c@88000": "front", "i2c@80000": "left"})
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_swapped_enumeration(self):
-        self.assertEqual(devices_by_i2c(self.INFOS, ["front", "rear"]),
-                         {"rear": 0, "front": 1})
+        self.assertEqual(devices_by_i2c(self.INFOS, ["front", "left"]),
+                         {"left": 0, "front": 1})
 
     def test_only_one_visible(self):
-        self.assertEqual(devices_by_i2c(self.INFOS[:1], ["front", "rear"]), {"rear": 0})
+        self.assertEqual(devices_by_i2c(self.INFOS[:1], ["front", "left"]), {"left": 0})
 
 
 class TestHangLimitFollowsFps(unittest.TestCase):
@@ -265,6 +274,8 @@ class TestTransientErrorIsCleared(unittest.TestCase):
         w._cfg_lock = threading.Lock()
         w._pending_fps = None
         w._pending_enabled = None
+        w._pending_sync = None
+        w.sync_role = None
         w._enabled = True
         calls = {"n": 0}
 
@@ -285,7 +296,7 @@ if __name__ == "__main__":
 
 
 class TestDisabledWorkerIsNotHung(unittest.TestCase):
-    """後カメラを OFF にしている間（disarm 中の既定）は `_grab()` が呼ばれない。
+    """カメラを止めている間（左カメラは同期の要求が無いときの既定）は `_grab()` が呼ばれない。
     それを「ハング」と誤検出してノードごと落ちる不具合の回帰テスト。
     """
 
@@ -302,6 +313,8 @@ class TestDisabledWorkerIsNotHung(unittest.TestCase):
         w._cfg_lock = threading.Lock()
         w._pending_fps = None
         w._pending_enabled = None
+        w._pending_sync = None
+        w.sync_role = None
         w._enabled = False
         w._running = False
         w.start()

@@ -437,7 +437,7 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv.published = []
         srv.control_clients = set()
         srv.telemetry_clients = set()
-        srv.camera_clients = {"front": set(), "rear": set()}
+        srv.camera_clients = {"front": set(), "left": set()}
         srv._jpeg_impl = None
         srv._jpeg = None                   # カメラ配信なし（JPEG の実測も出ない）
         srv.sub = type("S", (), {"latest": {}})()
@@ -1177,7 +1177,7 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._last_cmd_ns = 0
         srv.control_clients = set()
         srv.telemetry_clients = set()
-        srv.camera_clients = {"front": set(), "rear": set()}
+        srv.camera_clients = {"front": set(), "left": set()}
         srv.deadman_trips = 0
         # 公開面の守り。既定は**トークン無し**。トークンを掛けた場合は個別のテストで差し替える
         srv.token = ""
@@ -1225,13 +1225,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         from raspi.io.pihealth import PiHealth
         srv._pi_state = PiHealth(available=False)
         srv._node_hb = {}
-        # カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps）。**既定値のまま**を組む。
+        # カメラ capture 設定（前カメラのFPS上限・GUI配信fps）。**既定値のまま**を組む。
         # ARM/DISARMそれぞれの値を持つ
-        srv._cam_rear_enabled_armed = True
-        srv._cam_rear_enabled_disarm = False
         srv._cam_front_fps_armed = 15.0
         srv._cam_front_fps_disarm = 15.0
-        srv._cam_rear_fps_armed = 15.0
         srv.camera_hz = 15.0
         # 配信映像の魚眼補正。未校正・OFF の既定状態
         srv._cam_undistort = False

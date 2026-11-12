@@ -2,7 +2,7 @@
 
     .venv/bin/python -m raspi.nodes.video_node --prefix logs/surge_20261016_120000
 
-カメラごとに `<prefix>_front.mp4` / `<prefix>_rear.mp4` を作る（映像が来たカメラだけ）。
+カメラごとに `<prefix>_front.mp4`（右・主）/ `<prefix>_left.mp4` を作る（映像が来たカメラだけ）。
 SIGINT/SIGTERM で書き終えて終わる——**mp4 は最後に索引を書くので、殺すと壊れる**。
 `telemetry_node` は止めるときに `terminate()`（SIGTERM）を使う。
 
@@ -32,7 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import LATEST, Subscriber  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.msgs.types import TOPIC_IMAGE_FRONT, TOPIC_IMAGE_REAR  # noqa: E402
+from raspi.core.vehicle import CAMERA_ROLES  # noqa: E402
+from raspi.msgs.types import TOPIC_IMAGE_FRONT, TOPIC_IMAGE_LEFT  # noqa: E402
 
 NS = 1_000_000_000
 DEFAULT_FPS = 30.0
@@ -40,7 +41,9 @@ DEFAULT_FPS = 30.0
 FOURCCS = ("avc1", "mp4v")
 POLL_MS = 10
 
-CAM_TOPICS = {"front": TOPIC_IMAGE_FRONT, "rear": TOPIC_IMAGE_REAR}
+CAM_TOPICS = {"front": TOPIC_IMAGE_FRONT, "left": TOPIC_IMAGE_LEFT}
+#: 既定で録るカメラ＝付いているカメラ（右 front・左 left。`raspi/core/vehicle.py` の `CAMERA_ROLES`）
+DEFAULT_CAMS: tuple[str, ...] = CAMERA_ROLES
 
 
 class _CamWriter:
@@ -83,7 +86,7 @@ class _CamWriter:
 
 class VideoNode:
     def __init__(self, prefix: str | Path, *, fps: float = DEFAULT_FPS,
-                 cams: tuple[str, ...] = ("front", "rear")) -> None:
+                 cams: tuple[str, ...] = DEFAULT_CAMS) -> None:
         self.fps = fps
         self.cams = cams
         self.sub = Subscriber({CAM_TOPICS[c]: LATEST for c in cams})
@@ -136,9 +139,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--prefix", required=True,
-                    help="出力の接頭辞（`<prefix>_front.mp4` / `<prefix>_rear.mp4`）")
+                    help="出力の接頭辞（`<prefix>_front.mp4` / `<prefix>_left.mp4`）")
     ap.add_argument("--fps", type=float, default=DEFAULT_FPS)
-    ap.add_argument("--cams", default="front,rear")
+    ap.add_argument("--cams", default=",".join(DEFAULT_CAMS))
     ap.add_argument("--duration", type=float, default=None, help="秒で自動終了")
     args = ap.parse_args()
 

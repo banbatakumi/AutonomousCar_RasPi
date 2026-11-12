@@ -11,7 +11,7 @@
 - **車速計測**: 前輪左右のアナログ絶対角エンコーダ（分解能粗く、加速度の微分には使えない）
 - **IMU**: MPU6050（6軸、地磁気無し → 絶対方位は出ない）
 - **LiDAR**: LD06（10Hz回転・裏向き実装で点群は鏡像、`ScanAssembler` が戻す）
-- **カメラ**: 前後 CSI×2（`picamera2`）
+- **カメラ**: CSI×2（`picamera2`）。前方に左右2台のステレオ（右が主カメラ・基線 75mm。`docs/stereo_plan.md`）。前後配置は 2026-11-13 にやめ、コードからも消した
 - **超音波**: 前後×2（実質20Hz上限）
 - **制御ボード**: STM32F446RE（制御ループ 2kHz・テレメトリ 100Hz のリアルタイム制御）
 - **上位計算機**: Raspberry Pi 5（RP1 チップのため `RPi.GPIO` 不可 → `gpiozero` + `lgpio`）
@@ -36,6 +36,7 @@
 | 制御の定数がどこから来た数字か（物理・同定・式・方針・経験則） | [`docs/control_constants.md`](docs/control_constants.md)（ファームへの写しは `tools/fwsim/tests/test_fw_constants.py` が突き合わせる） |
 | 車両を校正したい（エンコーダ・ステア・遅延・車速制御・TC/ABS・カメラ・車速 KF）・その値の意味 | [`docs/calibration.md`](docs/calibration.md)（試験 `raspi/auto/calib_*`、解析 `tools/calib`、GUI は launcher の「車両の校正」）。値は `config/vehicle.toml`（io_node が `[control]` を STM32 へ送る） |
 | STM32 の制御をホストで回して比べたい | `tools/fwsim`（ファームをそのままコンパイルして車のモデルと閉ループ。`python -m tools.fwsim.bench`） |
+| 前方ステレオ視（同期・校正・照合・残りの段階） | [`docs/stereo_plan.md`](docs/stereo_plan.md)（取付・校正値は `config/vehicle.toml` の `[sensors.cam_front]`・`[sensors.cam_left]`・`[sensors.stereo]`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
 | 公開用の技術解説サイト（GitHub Pages） | 別リポジトリ [`surge-mk2`](https://github.com/banbatakumi/surge-mk2)（`~/GitHub/surge-mk2`、Zensical。公開先 https://banbatakumi.github.io/surge-mk2/）。**数値の正は持たない**ので、コードを変えたら「このサイトについて」の見直し表に従って該当ページを見直す |
 | 過去の経緯（旧 PROGRESS・監査報告・コードレビュー） | `docs/archive/`（**陳腐化。ユーザーが求めない限り読まない・根拠にしない**） |

@@ -99,7 +99,7 @@ def camera_intrinsics(hfov_rad: float, width: int, height: int,
 
 def vehicle_camera_intrinsics(vehicle, cam: str, width: int,
                               height: int) -> CameraIntrinsics:
-    """`Vehicle` から前（`cam="front"`）/後カメラの内部パラメータを作る。
+    """`Vehicle` から右・主（`cam="front"`）/左（`cam="left"`）カメラの内部パラメータを作る。
 
     各ノードが `hfov`・`bottom_crop`・`fisheye` を個別に拾うと、どれか1つを
     渡し忘れた（＝校正値を無視した）ノードが黙って古いモデルで動く。口を1つにする。

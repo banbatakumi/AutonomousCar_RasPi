@@ -92,7 +92,7 @@ APPS: list[AppSpec] = [
             "実機の mcap から周回タイム・安全・電源・学習・通信を 1 枚にまとめ、前回との差分も出す",
             lambda o: ["-m", "tools.run_summary_gui"]),
     AppSpec("mcap_video", "解析", "動画の書き出し",
-            "mcap のカメラ画像を前後それぞれの mp4 に書き出す",
+            "mcap のカメラ画像を左右それぞれの mp4 に書き出す",
             lambda o: ["-m", "tools.mcap_video_gui"]),
     AppSpec("ml_lidar", "学習", "ml_lidar",
             "LiDAR 強化学習の学習・観戦・エクスポート",

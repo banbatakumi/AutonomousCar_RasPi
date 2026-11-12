@@ -94,7 +94,7 @@ class TestVideoNodeBus(unittest.TestCase):
             ring.close()
             ring.unlink()
         out = sorted(p.name for p in Path(self._out.name).iterdir())
-        self.assertEqual(out, ["v_front.mp4"])            # 映らなかった後カメラのファイルは作らない
+        self.assertEqual(out, ["v_front.mp4"])            # 映らなかった左カメラのファイルは作らない
         n = node.writers["front"].written
         self.assertTrue(40 <= n <= 50, n)                 # 約1.5秒 × 30fps
         self.assertIsNone(node.error)

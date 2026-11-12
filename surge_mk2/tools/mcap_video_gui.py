@@ -3,8 +3,8 @@
     .venv/bin/python -m tools.mcap_video_gui
     （または surge_mk2 直下の launcher.command から起動）
 
-`.mcap` を選んで「書き出す」を押すと、前後カメラそれぞれの `<入力>_front.mp4` /
-`<入力>_rear.mp4` を作る。中身は `tools/mcap_video.py`（CLI と同じ）。
+`.mcap` を選んで「書き出す」を押すと、左右のカメラそれぞれの `<入力>_front.mp4` /
+`<入力>_left.mp4` を作る。中身は `tools/mcap_video.py`（CLI と同じ）。
 
 処理を別スレッドで回す理由と作りは `tools/slam_replay_gui.py` と同じ
 （**Tk は主スレッド以外から触ると壊れる**ので、作業スレッドは `queue` に積むだけ）。
@@ -25,7 +25,7 @@ from tools.mcap_video import DEFAULT_FPS, default_out_path, export_videos
 DEFAULT_DIR = Path.home() / "Downloads"
 
 #: 画面に出すカメラ（役割名, 表示名）
-CAMS = (("front", "前"), ("rear", "後"))
+CAMS = (("front", "右（主）"), ("left", "左"))
 FPS_CHOICES = ("10", "15", "30", "60")
 
 
@@ -77,7 +77,7 @@ class McapVideoApp(tk.Tk):
         row = ttk.Frame(opt)
         row.pack(fill="x", padx=4, pady=2)
         ttk.Label(row, text="出力先:").pack(side="left")
-        self.out_label = ttk.Label(row, text="入力と同じフォルダ（<入力>_front.mp4 / _rear.mp4）")
+        self.out_label = ttk.Label(row, text="入力と同じフォルダ（<入力>_front.mp4 / _left.mp4）")
         self.out_label.pack(side="left", padx=4)
         ttk.Button(row, text="変更…", command=self._choose_out_dir).pack(side="left")
         ttk.Button(row, text="元に戻す", command=self._reset_out_dir).pack(side="left", padx=2)
@@ -143,7 +143,7 @@ class McapVideoApp(tk.Tk):
 
     def _reset_out_dir(self) -> None:
         self.out_dir.set("")
-        self.out_label.configure(text="入力と同じフォルダ（<入力>_front.mp4 / _rear.mp4）")
+        self.out_label.configure(text="入力と同じフォルダ（<入力>_front.mp4 / _left.mp4）")
 
     # ── 実行 ──
 

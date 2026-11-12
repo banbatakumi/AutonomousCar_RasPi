@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x001Du
+#define SURGE_PROTOCOL_VERSION  0x001Eu
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -89,10 +89,12 @@
 #define CMD_FLG_AUTO_STOP    0x80u
 
 /* COMMAND.flags2 (u8)。★v0.13 新設 */
-#define CMD_FLG2_SIDE_BRAKE    0x01u
-#define CMD_FLG2_WINKER_LEFT   0x02u
-#define CMD_FLG2_WINKER_RIGHT  0x04u
-#define CMD_FLG2_LAUNCH        0x08u
+#define CMD_FLG2_SIDE_BRAKE         0x01u
+#define CMD_FLG2_WINKER_LEFT        0x02u
+#define CMD_FLG2_WINKER_RIGHT       0x04u
+#define CMD_FLG2_LAUNCH             0x08u
+#define CMD_FLG2_WINKER_MODE_MASK   0x30u
+#define CMD_FLG2_WINKER_MODE_SHIFT  0x04u
 
 /* ── enum / param_id ──────────────────────────────────────── */
 #define MODE_DISARM               0u
@@ -296,7 +298,7 @@ typedef struct {
     uint16_t steer_rate_limit;  /* 0.001 rad/s */
     uint16_t brake_torque;      /* 0.0001 N.m  後輪各輪。0=未指定(最大で制動) */
     int16_t  target_torque;     /* 0.0001 N.m  駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6 */
-    uint8_t  flags2;            /* bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先）★v0.13 bit1=winker_left bit2=winker_right（両方立てばハザード）★v0.14 bit3=launch（車速指令の、目標が車速より大きく離れた加速＝発進を、ランプと車速PIを迂回して全開＋TCで行う）★v0.20 */
+    uint8_t  flags2;            /* bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先）★v0.13 bit1=winker_left bit2=winker_right（両方立てばハザード）★v0.14 bit3=launch★v0.20 bit4-5=winker_mode（0=旧ファーム互換の滑らか、1=普通、2=滑らか、3=豆電球風）★v0.30 */
 } surge_command_t;
 
 /* CONFIG_SET (0x11) —  */

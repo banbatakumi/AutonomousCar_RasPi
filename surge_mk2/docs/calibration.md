@@ -256,22 +256,24 @@ TC・ABS を入れたまま、直線で全開の発進と最大の制動を 3 �
 
 ## 7. カメラ（魚眼レンズ）
 
-前後カメラは IMX219 **160° 広角**。内部パラメータをチェッカーボードで校正して `config/vehicle.toml` に置く。
+前方ステレオの左右2台は IMX219 **160° 広角**。内部パラメータをチェッカーボードで校正して `config/vehicle.toml` に置く。
 **校正値が無いカメラは `hfov` ピンホールで近似する**——160° では端ほど大きくズレるので、レンズを替えたら必ずやる。
 
 **レンズで変わる値はプロファイルに分けてある**（`raspi/core/vehicle.py` の `resolve_lens`。キーの意味は `vehicle.toml` のコメント）:
 
 ```toml
 [sensors.cam_front]
-lens = "wide160"               # ← 付いているレンズ。"stock"（純正 ≒66°）に変えれば戻る
+lens = "wide160sr"             # ← 付いているレンズ＋取付（右・主カメラ）
 
-[sensors.cam_front.lenses.stock]      # x y z roll pitch yaw（取付位置・姿勢）・hfov・bottom_crop・undistort_hfov
-[sensors.cam_front.lenses.wide160]
-[sensors.cam_front.lenses.wide160.fisheye]   # 校正値（tools/cam_calib が書く）
+[sensors.cam_front.lenses.wide160sr]          # x y z roll pitch yaw（取付位置・姿勢）・hfov・bottom_crop・undistort_hfov
+[sensors.cam_front.lenses.wide160sr.fisheye]  # 校正値（tools/cam_calib が書く）
+
+[sensors.cam_left]
+lens = "wide160sl"             # 左カメラ（項目は同じ）
 ```
 
 - **取付位置・姿勢もプロファイルに持つ**（モジュールを替えるとステーも変わるため）。`z` は路面からレンズ中心まで、`pitch` は下向きが正
-- **戻すとき**: `lens` を書き換えて `tools/deploy.sh --restart`。前後で別のレンズにしてもよい
+- **切り替えるとき**: `lens` を書き換えて `tools/deploy.sh --restart`。プロファイルを替えたらステレオ校正（§7.2）もやり直す（`[sensors.stereo]` は校正時のレンズ名と違うと使われない）
 - **別のレンズを足すとき**: `[sensors.cam_*.lenses.<名前>]` を足す（名前は英数字と `-`。📷 のファイル名に入るので `_` は使えない）。
   存在しない名前を `lens` に書くと `config/generate.py`（CI の `--check`）が落ちる
 
@@ -290,7 +292,7 @@ lens = "wide160"               # ← 付いているレンズ。"stock"（純正
 1. 印刷用ボードを作る: launcher の「カメラ校正」→「印刷用ボードを作る」（または
    `.venv/bin/python -m tools.cam_calib --make-board 9x6 --square 0.025 -o board.pdf`）。
    **「実際のサイズ」で印刷し、平らな板に貼り、1マスを定規で測る。** 内側の角点は**片方を偶数・片方を奇数**（両方奇数だと向きが決まらない）
-2. 撮る: GUI のタブバーの **📷**。前カメラ（取得中なら後カメラも）の生画像が無劣化 PNG で ~/Downloads に落ちる。
+2. 撮る: GUI のタブバーの **📷**。右（主）カメラ（取得中なら左も）の生画像が無劣化 PNG で ~/Downloads に落ちる。
    **20 枚前後、画面の中央・四隅・左右の端に、距離と傾きを変えて**写す（端の写真が無いと RMS が小さくても端のガイドが曲がる。
    ツールの「画面カバー率」を見る）。車もボードも止めて撮る
 3. 校正: launcher の「カメラ校正」でカメラ・ボード寸法・実測の1マスを入れ、「写真を読み込む」→「校正」。
@@ -321,11 +323,32 @@ libcamera の標準のチューニング（`imx219.json`）の色むら補正（
    （`deploy.sh` は Mac → Pi の一方向）
 3. プロファイルに `isp_tuning` を書いて `tools/deploy.sh --restart`
 
-- **チューニングはプロセスに1つしか効かない**（libcamera が最初にカメラを数えた時点で全カメラ分を決める）。前後で `isp_tuning` が
-  違うと前カメラのものが両方に当たり、起動時に警告が出る。`camera_node` でカメラを開く前に `Picamera2.global_camera_info()` を呼ぶと
+- **チューニングはプロセスに1つしか効かない**（libcamera が最初にカメラを数えた時点で全カメラ分を決める）。左右で `isp_tuning` が
+  違うと右（主）カメラのものが両方に当たり、起動時に警告が出る。`camera_node` でカメラを開く前に `Picamera2.global_camera_info()` を呼ぶと
   標準に固定されて黙って効かなくなる
 - 表は中心からの距離だけの関数。周辺減光と色温度ごとの表は作っていない
 - 色が変わるので、色を見る処理（矢印信号の HSV しきい値・カメラ学習モデル）は撮り直し・再調整が要る
+
+### 7.2 ステレオ（前方左右2台）
+
+計画は [`stereo_plan.md`](stereo_plan.md)（段階2）。左右それぞれの内部パラメータと、左 → 右の R・T
+（`X_右 = R·X_左 + T`、約束と平行化は `raspi/core/stereo_model.py`）を一度に求める。
+
+1. 撮る: 📷 で右（`front`）と左（`left`）が順に落ちる（ファイル名の時刻が数百 ms ずれる。ツールは 1.5 秒以内を同じ瞬間の組にする）。
+   **ボードは両方の画面に入れ、止めて撮る**（同期は要らない）。20 組前後、画面の中央と端、距離 0.3〜1m、傾きを変えて写す。
+   片方にしか写っていない写真もその1台の内部パラメータには使われる
+2. 校正: launcher の「カメラ校正」でカメラを「ステレオ」にし、「写真を読み込む」→「校正」。
+   CLI は `.venv/bin/python -m tools.cam_calib --stereo --board 9x6 --square 0.025 ~/Downloads/surge_{front,left}_*.png [--write] [--preview-dir 出力先]`
+3. 合否: **平行化後の対応点の縦ずれの中央値 0.5px 以下、基線 75±2mm**。プレビュー（平行化した左 | 右に緑の横線）で同じ角が同じ線に乗っているかも見る。
+   合格のときだけ書き込める: 左右の `[sensors.cam_*.lenses.<レンズ>.fisheye]` と `[sensors.stereo]`
+4. 反映: `tools/deploy.sh --restart`
+
+- 縦ずれを 95% 点でなく中央値で見るのは、魚眼の周辺の角点の検出誤差（1px 級）に 95% 点が支配されるため。
+  合成画像で、真の R・T でも 95% 点は 0.69px、中央値は 0.10px。R にピッチ 0.1° の誤差を入れると中央値は 0.53px（`tools/cam_calib/calib.py` の `MAX_RECT_DY_PX`）。
+  縦ずれは平行化画像（水平 100°）の中に写る角点だけで測る
+- 検出器はボードの角点を逆順（180° 回した並び）で返すことがあり、左右で食い違うと R・T が発散する。ツールは組ごとに向きをそろえる（`aligned_left_corners`）
+- `[sensors.stereo]` には校正したときのレンズ名（`lens_right`・`lens_left`）が入る。**今のレンズと違えば `Vehicle.stereo` は None**（付け替えたら撮り直す）
+- 取付を少しでも動かしたら（ステーの曲がり・カメラの付け直し）撮り直す
 
 ## 8. 車速の推定（走行距離＋加速度計のカルマンフィルタ）
 

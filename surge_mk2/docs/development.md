@@ -360,7 +360,7 @@ tools/deploy.sh --test                                           # Pi 上でも�
 | 症状 | 原因 | 対処 |
 |---|---|---|
 | **GUI のカメラだけ／ロガーの画像だけ入らない**（点群やメータは正常） | `RemoveIPC=yes` により、**SSH を切った瞬間に `/dev/shm/surge_cam*` が消える**。新しく attach するプロセスだけが失敗する | `install_services.sh` が `RemoveIPC=no` を入れる。入っているか確認: `cat /etc/systemd/logind.conf.d/10-surge-removeipc.conf` |
-| 前後とも 14fps しか出ない | **未調査**（camera_node 自体は 30fps 出ている。配信側で落ちている疑い） | — |
+| 2台とも 14fps しか出ない（前後配置のころ） | **未調査**（camera_node 自体は 30fps 出ている。配信側で落ちている疑い） | — |
 
 ### 8.7 ログに何も出ない
 
@@ -448,7 +448,7 @@ python -m raspi.nodes.replay_node logs/x.sfl --bus --loop  # バスに流し直�
 - **`.sfl` の再生は GUI からはできない。** 再生は `surge-io` と同じ ZeroMQ エンドポイントを取り合うので、
   **Mac 上で `replay_node --bus` + `telemetry_node` を直接叩く**
 - **動画にする**: launcher の「動画の書き出し」（`tools/mcap_video_gui.py`、CLI は `python -m tools.mcap_video`）→
-  `<入力>_front.mp4` / `<入力>_rear.mp4`（前後は同じ時間軸）
+  `<入力>_front.mp4` / `<入力>_left.mp4`（左右は同じ時間軸）
 - **走行の結果を 1 枚で見る**: launcher の「走行サマリ」（`tools/run_summary_gui.py`、中身は `raspi/tools/run_summary.py`）。
   周回タイム・衝突・電圧・前兆・学習値・通信と、直前の走行との差分。CLI は
   `python3 -m raspi.tools.run_summary <mcap> [--out-dir DIR] [--prev 前回の_summary.json]`
@@ -519,11 +519,11 @@ GUI でモデル名を選ぶ**」という流れは共通だが、中身も検�
 |---|---|---|---|
 | 学習方法 | 強化学習（PPO、シム上で試行錯誤） | 教師あり学習（人がラベル付けした走行画像） | 模倣学習（人の操舵指令を直接ラベルにする） |
 | 学習コード（Mac） | `ml_lidar/` | `ml_cam/` | `ml_cam_e2e/` |
-| モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/<名前>.onnx`（＋同名 `.json`） | `models/cam_e2e/<名前>.onnx`（＋同名 `.json`。**`.json` の無いモデルは読み込まれない**） |
+| モデルの置き場 | `models/e2e_lidar/<名前>.onnx`（＋同名 `.json`） | `models/seg/<名前>.onnx`（＋同名 `.json`） | `models/cam_e2e/<名前>.onnx`（＋同名 `.json`。**`.json` の無いモデルは読み込まれない**） |
 | 推論コード | `raspi/auto/e2e_lidar.py`（planner 本体） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam` へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。操舵を直接推論）＋ `raspi/auto/cam_e2e.py` |
 | シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（シムはカメラを持たない） | **できない**（同左） |
 
-`models/` は `.gitignore` 対象で、`tools/deploy.sh` の rsync で配る。実車で要る追加操作は無い（推論プロセスは常時起動で、対応するモードを選んだ間だけ推論する）。
+`models/` は `.gitignore` 対象で、`tools/deploy.sh` の rsync で配る。種類ごとにサブフォルダを切る（セグメンテーション `models/seg/`・`models/cam_e2e/`・`models/e2e_fusion/`・`models/e2e_lidar/`・追跡器 `models/nano_track/`）。deploy は追加と上書きだけで、Mac で消したモデルは Pi に残る。実車で要る追加操作は無い（推論プロセスは常時起動で、対応するモードを選んだ間だけ推論する）。
 各学習パイプラインには操作用の薄い Tkinter GUI がある（`ml_lidar/app.py`・`ml_cam/app.py`・`ml_cam_e2e/app.py`、
 launcher から起動）。ロジックは持たないので、中身のスクリプトを直せば GUI 側は変えなくてよい。
 
@@ -577,7 +577,7 @@ python3 ml_cam/annotate.py ml_cam/data/frames --checkpoint sam_vit_b_01ec64.pth 
 # 3. 学習（val_iou を見ながら）
 python3 ml_cam/train.py --frames ml_cam/data/frames --epochs 30 --out ml_cam/runs/latest
 # 4. ONNX 化（入力解像度・正規化・閾値という前処理契約を同名 .json に焼く）
-python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt --size 224x224 --out models/<名前>.onnx
+python3 ml_cam/export_onnx.py --checkpoint ml_cam/runs/latest/best.pt --size 224x224 --out models/seg/<名前>.onnx
 # 5. 実車に配る
 tools/deploy.sh --no-gui
 ```
@@ -617,7 +617,8 @@ launcher から「ml_cam_e2e」（`ml_cam_e2e/app.py`）。タブは作業の順
 - **速度モードで運転する**（トルクモードの記録は `target_speed` が 0 のままで抽出で落ちる）
 - **実車で走らせる速度で録る。** 絵のブレは旋回の速さに比例するので、モデルはブレを舵の手がかりに使う。
   手本より遅く走らせると舵が足りず、速く走らせると崩れる
-- **壁際から戻る操作も録る・両方向を走る**（左右反転の水増しは既定で有効。コースが左右非対称なら④で切る）
+- **壁際から戻る操作も録る・両方向を走る**（左右反転の水増しは**既定で切ってある**。左右の偏りは逆回りの記録で補う）
+- **左右を同期して録る**。入力は左右2台の同じ瞬間の組で、記録中は logger_node が組で焼く。組にならなかったコマは抽出で落ちる
 - 止まって待つ・後退する区間は自動で学習から外れる（`ml_cam_e2e/samples.py`）
 
 #### 手順（コマンド）
@@ -644,7 +645,11 @@ GUI の**自動停止（STM32 の `auto_stop`）を ON** にしておくこと�
 #### 仕組みの要点
 
 - **学習と推論の前処理は同じ関数**（`raspi/core/cam_e2e_preproc.py`）。処理を変えたら `PREPROC_VERSION` を上げる
-  （版の違うモデルは `cam_e2e_node` が拒否する。左右の切り落とし付きは `PREPROC_VERSION_CROP`）
+  （版の違うモデルは `cam_e2e_node` が拒否する）
+- **入力は左右2台**（版3、`PREPROC_VERSION_STEREO`。`docs/stereo_plan.md` §1）。抽出・学習は左右の組だけ
+  （右1台の版1・2は前後配置のころの物で、ノードは読まない。v1〜v11 は使えない）。左の画像は右の画像と同じ名前に `_left` を付けて隣に置く。モデルは左右を同じ重みの骨格に通して
+  特徴を `[右, 左]` につなぐ。実車は左右が同期した組が揃ったときだけ推論し、揃わなければ止まる（片目では推論しない）。
+  反転の水増しは「左右を入れ替えてそれぞれ鏡像」（`--no-flip` を外したとき）
 - **速度は舵から決める**（曲率 κ=tan(δ)/L から `v ≤ sqrt(a_lat_max/κ)`）。モデルの `speed_norm` は実車で使わず、
   学習の `--speed-weight` は既定 0（舵だけ）。舵が切れてから遅くなるので、コーナー手前の減速は遅れる
 - **ずれから戻す舵は「向きをずらした絵」で教える**（`ml_cam_e2e/yaw_aug.py`、`--yaw-aug-k`）。手本の記録には
@@ -661,7 +666,7 @@ GUI の**自動停止（STM32 の `auto_stop`）を ON** にしておくこと�
 
 ### 12.4 E2E 融合（LiDAR＋カメラ＋車両状態 → 経路点、`e2e_fusion`）
 
-点群・前方カメラの生の画像・車両状態（車速・実舵角・ヨーレート）を入力に、**前方の経路点**（一定の弧長間隔の
+点群・前方カメラ（ステレオの左右2台の組）の生の画像・車両状態（車速・実舵角・ヨーレート）を入力に、**前方の経路点**（一定の弧長間隔の
 点と各点の速度・不確かさ）を出す1つのモデル。舵・速度は直接出さず、実車が経路点を追って決める。実機の記録を手本にした模倣学習で、**記録を録ったコースを、走行時に地図も
 自己位置も使わずに走る**ためのもの（完全に未知のコースは対象にしない）。設計の理由は各ファイルの docstring が正:
 `ml_e2e/extract.py`（ラベル）・`ml_e2e/model.py`（入力を伏せる・不確かさ）・`raspi/auto/e2e_fusion.py`（走らせ方）・
@@ -711,6 +716,9 @@ GUI の**自動停止（STM32 の `auto_stop`）を ON** にしておくこと�
 # 6. 実車に配る（初回は Pi で sudo raspi/setup/install_services.sh を回して surge-e2e-fusion を作る）
 tools/deploy.sh --no-gui
 ```
+
+**左右2台**: 抽出・学習は左右の組だけ（画像の前処理の版3。右1台の版2で学習した v1・v2 はノードが読まない）。左右が揃わない周は、実車も学習も
+画像を伏せて点群と車両状態だけで推論する。
 
 新しいコースを足すときは、そのコースの記録を足して 1 から回す（`--init ml_e2e/runs/v1/best.pt` で追加学習もできる）。
 

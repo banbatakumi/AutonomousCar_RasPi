@@ -34,6 +34,13 @@
 
 `cam_e2e_node.py` と同じ節電方針（`raspi/core/auto_gate.cam_infer_active`）。`auto/ctrl` の `mode` が
 `e2e_fusion` で DISARM 中でない間だけ推論し、それ以外は約 2Hz で `ready=False` を出す。
+
+## 画像は左右2台（画像の前処理の版3）
+
+契約の `image_preproc_version` は 3（`cam_e2e_preproc.PREPROC_VERSION_STEREO`）・`cams` は `["front", "left"]` だけを読む。
+右（`image/front`）の最新のコマと、左（`image/left`）のリングの同じ瞬間（`STEREO_PAIR_TOL_NS` 以内）の
+コマを組にして画像に入れる。**組が揃わない周は画像を伏せて**（`avail` の画像を 0）点群と車両状態だけで推論する
+（片目では推論しない。学習でも画像は左右まとめて伏せる）。
 """
 
 from __future__ import annotations
@@ -53,7 +60,13 @@ import numpy as np  # noqa: E402
 from raspi.auto.base import scan_window  # noqa: E402
 from raspi.bus import Policy  # noqa: E402
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, preprocess, to_rgb  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    PREPROC_VERSION_STEREO,
+    STEREO_CAMS,
+    STEREO_PAIR_TOL_NS,
+    preprocess_stereo,
+    to_rgb,
+)
 from raspi.core.e2e_fusion_preproc import (  # noqa: E402
     INPUT_NAMES,
     PREPROC_VERSION,
@@ -74,6 +87,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_E2E_FUSION_PLAN,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
+    TOPIC_IMAGE_LEFT,
     TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
@@ -128,11 +142,15 @@ class FusionOnnx:
         self.max_steer = float(cfg["max_steer"])
         self.speed_ref = float(cfg["speed_ref"])
         self.yaw_rate_ref = float(cfg["yaw_rate_ref"])
-        self._zero_image = np.zeros((1, 3, self.input_size[1], self.input_size[0]), dtype=np.float32)
+        # 画像は `[右, 左]` の 6ch（モジュールdocstring）
+        self._zero_image = np.zeros((1, 6, self.input_size[1], self.input_size[0]), dtype=np.float32)
         self._zero_lidar = np.zeros((1, self.history + 1, self.fov_deg + 1), dtype=np.float32)
 
-    def image_input(self, rgb: np.ndarray) -> np.ndarray:
-        return preprocess(rgb, self.input_size, 0.0, 255.0, self.crop_x)
+    def image_input(self, rgb: np.ndarray, rgb_left: np.ndarray | None) -> np.ndarray | None:
+        """画像の入力。左が無ければ `None`（画像を伏せる。片目では推論しない）。"""
+        if rgb_left is None:
+            return None
+        return preprocess_stereo(rgb, rgb_left, self.input_size, 0.0, 255.0, self.crop_x)
 
     def state_input(self, speed: float, steer: float, yaw_rate: float) -> np.ndarray:
         return state_input(speed, steer, yaw_rate, speed_ref=self.speed_ref, max_steer=self.max_steer,
@@ -163,9 +181,12 @@ def load_model(onnx_path: Path) -> FusionOnnx:
     if cfg.get("preproc_version") != PREPROC_VERSION:
         raise ValueError(f"入出力の版が違う（モデル {cfg.get('preproc_version')}・ノード {PREPROC_VERSION}）。"
                          "`ml_e2e.export_onnx` で書き出し直す")
-    if cfg.get("image_preproc_version") != PREPROC_VERSION_CROP:
+    if cfg.get("image_preproc_version") != PREPROC_VERSION_STEREO:
+        # 版2は前後配置のころの右1台のモデル（視点が違うので使えない。左右の組で学習し直す）
         raise ValueError(f"画像の前処理の版が違う（モデル {cfg.get('image_preproc_version')}・"
-                         f"ノード {PREPROC_VERSION_CROP}）")
+                         f"ノード {PREPROC_VERSION_STEREO}）。左右2台で学習し直したモデルが必要")
+    if tuple(cfg.get("cams", ())) != STEREO_CAMS:
+        raise ValueError(f"cams が {list(STEREO_CAMS)} ではない: {cfg.get('cams')}")
     for key in ("input_size", "crop_x", "fov_deg", "max_range", "history", "k", "ds", "xy_scale",
                 "max_steer", "speed_ref", "yaw_rate_ref"):
         if key not in cfg:
@@ -215,9 +236,12 @@ class E2EFusionNode:
         self._running = False
         self._active = False
         self._reader = FrameReader()
+        #: 左カメラのリング用（`FrameReader` は1本のリングしか掴まない）
+        self._reader_left = FrameReader()
 
     def close(self) -> None:
         self._reader.close()
+        self._reader_left.close()
 
     # ── モデル ──
 
@@ -271,17 +295,20 @@ class E2EFusionNode:
     # ── 1回の推論（純粋な計算） ──
 
     def infer_once(self, *, rgb: np.ndarray | None, t_image_ns: int, vs: VehicleState | None,
-                   now_ns: int, seq: int = 0) -> E2EFusionPlan:
-        """今の履歴・画像・車両状態から1回推論する。どこで失敗しても `ready=False` と理由を返す。"""
+                   now_ns: int, seq: int = 0, rgb_left: np.ndarray | None = None) -> E2EFusionPlan:
+        """今の履歴・画像・車両状態から1回推論する。どこで失敗しても `ready=False` と理由を返す。
+        `rgb` が右・`rgb_left` が左（どちらかが無ければ画像を伏せる）。"""
         if self.model is None:
             return self.failed("モデルが無い（models/e2e_fusion/ に .onnx と .json を置く）", seq=seq)
+        if rgb_left is None:
+            rgb = None
         t0 = time.perf_counter()
         got = self._lidar(now_ns)
         if got is None and rgb is None:
             return self.failed("点群も画像も届いていない", seq=seq)
         lidar, t_scan = got if got is not None else (None, 0)
         try:
-            image = self.model.image_input(rgb) if rgb is not None else None
+            image = self.model.image_input(rgb, rgb_left) if rgb is not None else None
             state = (self.model.state_input(vs.speed, vs.steer_actual, vs.yaw_rate)
                      if vs is not None else None)
             out = self.model.infer(image, lidar, state)
@@ -351,13 +378,21 @@ class E2EFusionNode:
             elif new_scans:
                 for sc in new_scans:
                     self.push_scan(sc)
-                rgb, t_img = None, 0
+                rgb, rgb_left, t_img = None, None, 0
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-                got = self._reader.read(ref) if ref is not None else None
+                # 右も通知された瞬間のコマを読む（リングの最新は通知より新しいことがあり、その左はまだ無い）
+                got = (self._reader.read_at(ref, ref.t_capture, STEREO_PAIR_TOL_NS)
+                       if ref is not None else None)
                 if got is not None:
                     frame, t_img = got
                     rgb = to_rgb(frame, ref.fmt)
-                plan = self.infer_once(rgb=rgb, t_image_ns=t_img, vs=vs, now_ns=now, seq=seq)
+                    left = sub.latest.get(TOPIC_IMAGE_LEFT)
+                    if left is not None:
+                        got_l = self._reader_left.read_at(left, t_img, STEREO_PAIR_TOL_NS)
+                        if got_l is not None:
+                            rgb_left = to_rgb(got_l[0], left.fmt)
+                plan = self.infer_once(rgb=rgb, t_image_ns=t_img, vs=vs, now_ns=now, seq=seq,
+                                       rgb_left=rgb_left)
             if plan is not None:
                 pub.send(TOPIC_E2E_FUSION_PLAN, plan)
                 seq += 1
@@ -388,7 +423,7 @@ def main() -> int:
         node.reload_if_changed(pick_model_name(node.models_dir))
 
     pub = Publisher("e2e_fusion")
-    sub = Subscriber({TOPIC_SCAN: SCAN_POLICY, TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
+    sub = Subscriber({TOPIC_SCAN: SCAN_POLICY, TOPIC_IMAGE_FRONT: LATEST, TOPIC_IMAGE_LEFT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
                       TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_FUSION_MODEL: LATEST})
     print(f"# e2e_fusion_node  publish {pub.endpoint}  モデル: {node.model_name or '（なし）'}", flush=True)
 

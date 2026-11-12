@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x001D
+PROTOCOL_VERSION = 0x001E
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -67,6 +67,8 @@ CMD_FLG2_SIDE_BRAKE = 0x01
 CMD_FLG2_WINKER_LEFT = 0x02
 CMD_FLG2_WINKER_RIGHT = 0x04
 CMD_FLG2_LAUNCH = 0x08
+CMD_FLG2_WINKER_MODE_MASK = 0x30
+CMD_FLG2_WINKER_MODE_SHIFT = 0x04
 
 class Mode:
     """COMMAND.mode / TELEMETRY.flags bit0-1"""
@@ -494,7 +496,7 @@ class Command:
     steer_rate_limit: int = 0
     brake_torque: int = 0  # 後輪各輪。0=未指定(最大で制動)
     target_torque: int = 0  # 駆動トルク直接指令。torque_mode時のみ有効、負は後退方向 ★v0.6
-    flags2: int = 0  # bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先）★v0.13 bit1=winker_left bit2=winker_right（両方立てばハザード）★v0.14 bit3=launch（車速指令の、目標が車速より大きく離れた加速＝発進を、ランプと車速PIを迂回して全開＋TCで行う）★v0.20
+    flags2: int = 0  # bit0=side_brake（速度に関わらず即座に後輪を位置制御へ切替え固定。brakeより優先）★v0.13 bit1=winker_left bit2=winker_right（両方立てばハザード）★v0.14 bit3=launch★v0.20 bit4-5=winker_mode（0=旧ファーム互換の滑らか、1=普通、2=滑らか、3=豆電球風）★v0.30
 
     @classmethod
     def decode(cls, payload: bytes) -> 'Command':

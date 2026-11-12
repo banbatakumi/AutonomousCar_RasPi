@@ -111,13 +111,8 @@ class TestVehicleProfiles(unittest.TestCase):
         with open(DEFAULT_PATH, "rb") as f:
             self.sensors = tomllib.load(f)["sensors"]
 
-    def test_stock_lens_keeps_stock_tuning(self):
-        for cam in ("cam_front", "cam_rear"):
-            prof = resolve_lens({**self.sensors[cam], "lens": "stock"}, strict=True)
-            self.assertNotIn("isp_tuning", prof, cam)
-
     def test_named_files_exist_and_fit_the_grid(self):
-        for cam in ("cam_front", "cam_rear"):
+        for cam in ("cam_front", "cam_left"):
             for lens, prof in self.sensors[cam]["lenses"].items():
                 name = prof.get("isp_tuning")
                 if not name:

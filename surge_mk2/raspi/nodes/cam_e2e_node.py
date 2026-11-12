@@ -1,9 +1,9 @@
-"""cam_e2e_node — 前方カメラの画像から操舵と速度を直接回帰する（模倣学習、幾何変換を経由しない）。
+"""cam_e2e_node — 前方ステレオの左右の画像から操舵と速度を直接回帰する（模倣学習、幾何変換を経由しない）。
 
     .venv/bin/python -m raspi.nodes.cam_e2e_node
     .venv/bin/python -m raspi.nodes.cam_e2e_node --model model.onnx   # 開発用に既定モデルを直指定
 
-`camera_node.py` が書く共有メモリ（`image/front` の `ImageRef`）を読み、ONNX
+`camera_node.py` が書く共有メモリ（`image/front`・`image/left` の `ImageRef`）を読み、ONNX
 モデルで正規化した操舵（`steer_norm`、-1..1）と速度（`speed_norm`、0..1）を
 直接推論する。`cam_perception_node.py`（走行可否セグメンテーション→IPM→
 擬似`Scan`）と違い、**幾何変換（IPM）を一切経由しない**——低いカメラ高さで
@@ -54,6 +54,14 @@ DISARM中（駐車中）でない**間だけ実際にフレームを読んで推
 推論しない——GUI再読み込みで前回選択モードがそのまま復元されるため、
 armed/engaged を見ずにモード選択だけで駆動すると駐車中の待機でも推論が
 回り続けてしまう。
+
+## 左右2台の入力（前処理の版3）
+
+モデルは右（`image/front`）と左（`image/left`）の**同じ瞬間の組**で推論する
+（`cam_e2e_preproc.preprocess_stereo`）。両方の最新の `ImageRef` が `synced` で、撮影時刻の差が
+`STEREO_PAIR_TOL_NS` 以内になったときを「新しいコマが届いた」とみなし、右の最新コマと、左のリングの同じ時刻の
+コマを読む。組が揃わない（左が止まっている・同期の揃い直し中）間は推論せず、2周期経ったら `ready=False`
+（止まる）。片目での推論はしない（`docs/stereo_plan.md` 段階5）。
 """
 
 from __future__ import annotations
@@ -72,9 +80,10 @@ import numpy as np  # noqa: E402
 
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.cam_e2e_preproc import (  # noqa: E402
-    PREPROC_VERSION,
-    PREPROC_VERSION_CROP,
-    preprocess,
+    PREPROC_VERSION_STEREO,
+    STEREO_CAMS,
+    STEREO_PAIR_TOL_NS,
+    preprocess_stereo,
     to_rgb,
 )
 from raspi.core.control_params import steer_relink  # noqa: E402
@@ -88,15 +97,15 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
+    TOPIC_IMAGE_LEFT,
     TOPIC_VEHICLE_STATE,
 )
 
 __all__ = ["MODEL_OUTPUTS", "RegressionModel", "load_model", "CamE2ENode"]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: セグメンテーション用（`models/` 直下）とは分ける。telemetry_node の
-#: `_cam_models_list` は直下の .onnx を全部セグメンテーション用として並べるので、
-#: 同じ場所に置くと `ftg_cam` の選択肢に出てしまう（`models/e2e_lidar/` と同じ理由）
+#: モデルの種類ごとに `models/` のサブフォルダを切る（セグメンテーションは `models/seg/`。
+#: 同じ場所に置くと別の種類のモデルの選択肢に出てしまう）
 DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
 
 NS = 1_000_000_000
@@ -145,13 +154,15 @@ class RegressionModel:
         #: 左右の切り落とし（画像幅に対する割合、`cam_e2e_preproc.crop_window`）。0 は全幅
         self.crop_x = crop_x
 
-    def infer(self, rgb: np.ndarray) -> tuple[float, float]:
-        """**RGB** の `(H, W, 3)` uint8 → `(steer_norm, speed_norm)`。
+    def infer(self, rgb: np.ndarray, rgb_left: np.ndarray) -> tuple[float, float]:
+        """**RGB** の `(H, W, 3)` uint8 の右 `rgb`・左 `rgb_left` → `(steer_norm, speed_norm)`。
 
         色順を直すのは呼び出し側の責任（`to_rgb()`）。ここで `fmt` を知らずに
         推測すると、学習側（JPEG をデコードした RGB）とまた食い違う。
         """
-        x = preprocess(rgb, self.input_size, self.mean, self.std, self.crop_x)
+        if rgb_left is None:
+            raise ValueError("左の絵が無い")
+        x = preprocess_stereo(rgb, rgb_left, self.input_size, self.mean, self.std, self.crop_x)
         out = np.asarray(self.session.run(None, {self.input_name: x})[0]).reshape(-1)
         if out.size != len(MODEL_OUTPUTS):
             raise ValueError(f"モデル出力が{out.size}個（{len(MODEL_OUTPUTS)}個のはず）")
@@ -175,15 +186,16 @@ def load_model(onnx_path: Path) -> RegressionModel:
     if tuple(cfg.get("outputs", ())) != MODEL_OUTPUTS:
         raise ValueError(f"outputs が {list(MODEL_OUTPUTS)} ではない: {cfg.get('outputs')}")
     version = cfg.get("preproc_version")
-    if version not in (PREPROC_VERSION, PREPROC_VERSION_CROP):
-        raise ValueError(f"前処理の版が違う（モデル {version}・"
-                         f"ノード {PREPROC_VERSION}/{PREPROC_VERSION_CROP}）。再エクスポートが必要")
-    # 版1は切り落とし無し。版2は crop_x が必須（無いまま全幅で推論すると学習と違う絵になる）
-    crop_x = 0.0
-    if version == PREPROC_VERSION_CROP:
-        crop_x = float(cfg.get("crop_x", -1.0))
-        if not 0.0 < crop_x < 0.3:
-            raise ValueError(f"crop_x が不正: {cfg.get('crop_x')}（版{version}は 0〜0.3 が必須）")
+    if version != PREPROC_VERSION_STEREO:
+        # 版1・2は前後配置のころの右1台のモデル（視点が違うので使えない。左右の組で学習し直す）
+        raise ValueError(f"前処理の版が違う（モデル {version}・ノード {PREPROC_VERSION_STEREO}）。"
+                         f"左右2台で学習し直したモデルが必要")
+    if tuple(cfg.get("cams", ())) != STEREO_CAMS:
+        raise ValueError(f"cams が {list(STEREO_CAMS)} ではない: {cfg.get('cams')}")
+    # crop_x は必須（無いまま全幅で推論すると学習と違う絵になる）
+    crop_x = float(cfg.get("crop_x", -1.0))
+    if not 0.0 < crop_x < 0.3:
+        raise ValueError(f"crop_x が不正: {cfg.get('crop_x')}（0〜0.3 が必須）")
     max_steer = float(cfg.get("max_steer", 0.0))
     speed_ref = float(cfg.get("speed_ref", 0.0))
     if max_steer <= 0 or speed_ref <= 0:
@@ -205,7 +217,7 @@ def load_model(onnx_path: Path) -> RegressionModel:
 
 
 class CamE2ENode:
-    """1台の前方カメラ → 操舵と速度の直接回帰。
+    """前方ステレオの左右2枚 → 操舵と速度の直接回帰。
 
     **`process_frame()` はバス・共有メモリを一切知らない純粋関数。**
     `run()`（実バス配線）とテストの両方がここを通る
@@ -226,14 +238,17 @@ class CamE2ENode:
         # ★省電力化: `cam_perception_node.py` と同じ理由で推論を間引く
         self._infer_period_ns = int(NS / infer_hz) if infer_hz > 0 else 0
         self._last_attempt_ns = 0
-        #: 前のループで見た最新コマ `(shm_name, ring_seq)`。変わったら新しいコマが届いた
-        self._seen_frame_key: tuple[str, int] | None = None
+        #: 前のループで見た最新コマ（`_frame_key`）。変わったら新しいコマ（左右2台なら組）が届いた
+        self._seen_frame_key: tuple | None = None
         self._running = False
         self._active = False
         self._reader = FrameReader()
+        #: 左カメラのリング用（`FrameReader` は1本のリングしか掴まない）
+        self._reader_left = FrameReader()
 
     def close(self) -> None:
         self._reader.close()
+        self._reader_left.close()
 
     # ── モデルの切替 ──
 
@@ -267,9 +282,11 @@ class CamE2ENode:
 
     # ── 1周期ぶんの処理（純粋関数） ──
 
-    def process_frame(self, frame: np.ndarray, fmt: str = "RGB888") -> tuple[float, float]:
-        """1枚の生フレーム → `(steer_norm, speed_norm)`。`self.model` が必須（呼び出し側が保証）。"""
-        return self.model.infer(to_rgb(frame, fmt))
+    def process_frame(self, frame: np.ndarray, fmt: str,
+                      left: np.ndarray, left_fmt: str) -> tuple[float, float]:
+        """生フレーム（右 `frame`・左 `left`）→ `(steer_norm, speed_norm)`。
+        `self.model` が必須（呼び出し側が保証）。"""
+        return self.model.infer(to_rgb(frame, fmt), to_rgb(left, left_fmt))
 
     def failed_cmd(self, *, seq: int = 0, t_capture_ns: int = 0) -> CamE2ECmd:
         """フレームが読めない／モデル未選択の周期。**`ready=False`。**
@@ -283,19 +300,37 @@ class CamE2ENode:
 
     # ── 共有メモリの読み取り ──
 
-    def read_frame(self, ref: ImageRef) -> tuple[np.ndarray, int] | None:
-        return self._reader.read(ref)
+    def read_left_at(self, ref: ImageRef, t_capture_ns: int) -> tuple[np.ndarray, int] | None:
+        """左のリングから、右のコマと同じ瞬間（`STEREO_PAIR_TOL_NS` 以内）のコマを読む。"""
+        return self._reader_left.read_at(ref, t_capture_ns, STEREO_PAIR_TOL_NS)
 
-    def _attempt(self, ref: ImageRef | None, seq: int) -> CamE2ECmd:
+    def _frame_key(self, ref: ImageRef | None, left: ImageRef | None) -> tuple | None:
+        """新しいコマが届いたかを見る鍵。左右の組が揃っているときだけ鍵を返す（モジュールdocstring）。"""
+        if ref is None:
+            return None
+        if (left is None or not (ref.synced and left.synced)
+                or abs(ref.t_capture - left.t_capture) > STEREO_PAIR_TOL_NS):
+            return None
+        return (ref.shm_name, ref.ring_seq, left.shm_name, left.ring_seq)
+
+    def _attempt(self, ref: ImageRef | None, seq: int, left: ImageRef | None = None) -> CamE2ECmd:
         """推論を1回試みる。どこで失敗しても `ready=False` の `CamE2ECmd` を返す。"""
         if self.model is None or ref is None:
             return self.failed_cmd(seq=seq)
-        got = self.read_frame(ref)
+        if self._frame_key(ref, left) is None:
+            return self.failed_cmd(seq=seq)    # 組が揃っていない（2周期待った後の試み）。片目では推論しない
+        # 右も通知された瞬間のコマを読む（リングの最新は通知より新しいことがあり、その左はまだ無い）
+        got = self._reader.read_at(ref, ref.t_capture, STEREO_PAIR_TOL_NS)
         if got is None:
             return self.failed_cmd(seq=seq)
         frame, t_capture = got
+        got_l = self.read_left_at(left, t_capture) if left is not None else None
+        if got_l is None:
+            return self.failed_cmd(seq=seq, t_capture_ns=t_capture)
+        left_frame = got_l[0]
         try:
-            steer_norm, speed_norm = self.process_frame(frame, ref.fmt)
+            steer_norm, speed_norm = self.process_frame(
+                frame, ref.fmt, left_frame, left.fmt)
         except Exception as e:
             # 推論側のバグでノード全体を巻き込んで落とさない。
             # 契約の「ready=False」に自然に落とす
@@ -366,8 +401,9 @@ class CamE2ENode:
                 # もう古いうえ、周期が1コマぶん縮む）。コマが来ないまま2周期経ったら、
                 # 古いコマで試みて `ready=False` を出す（`FrameReader` が古いコマを弾く）
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-                frame_key = (ref.shm_name, ref.ring_seq) if ref is not None else None
-                arrived = frame_key != self._seen_frame_key
+                left = sub.latest.get(TOPIC_IMAGE_LEFT)
+                frame_key = self._frame_key(ref, left)
+                arrived = frame_key is not None and frame_key != self._seen_frame_key
                 self._seen_frame_key = frame_key
                 elapsed = now - self._last_attempt_ns
                 if ((arrived and elapsed >= self._infer_period_ns - FRAME_EARLY_NS)
@@ -375,7 +411,7 @@ class CamE2ENode:
                     # 成功・失敗どちらでも1周期に1回だけ publish する
                     # （モジュールdocstring「publish するのは推論を試みた周期だけ」）
                     self._last_attempt_ns = now
-                    cmd = self._attempt(ref, seq)
+                    cmd = self._attempt(ref, seq, left)
             if cmd is not None:
                 pub.send(TOPIC_CAM_E2E_CMD, cmd)
                 seq += 1
@@ -406,7 +442,7 @@ def main() -> int:
                       vehicle=Vehicle.load(), infer_hz=args.infer_hz)
 
     pub = Publisher("cam_e2e")
-    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
+    sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_IMAGE_LEFT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
                       TOPIC_CAM_E2E_MODEL: LATEST, TOPIC_AUTO_CTRL: LATEST})
 
     print(f"# cam_e2e_node  publish {pub.endpoint}  cam_e2e/cmd へ配信")

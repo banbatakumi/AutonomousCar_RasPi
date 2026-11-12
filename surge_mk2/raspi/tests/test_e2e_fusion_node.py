@@ -21,7 +21,7 @@ try:
 except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの道具。Pi には入れない
     raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
 from raspi.core.e2e_fusion_preproc import PREPROC_VERSION  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Scan, VehicleState  # noqa: E402
@@ -32,18 +32,20 @@ K, W, H, FOV, HIST = 4, 32, 16, 90, 3
 
 
 def _contract(**over) -> dict:
-    c = {"preproc_version": PREPROC_VERSION, "image_preproc_version": PREPROC_VERSION_CROP,
+    c = {"preproc_version": PREPROC_VERSION, "image_preproc_version": PREPROC_VERSION_STEREO,
+         "cams": list(STEREO_CAMS),
          "input_size": [W, H], "crop_x": 0.05, "fov_deg": FOV, "max_range": 8.0, "history": HIST,
          "k": K, "ds": 0.5, "xy_scale": 2.0, "max_steer": 0.4, "speed_ref": 5.0, "yaw_rate_ref": 6.0}
     c.update(over)
     return c
 
 
-def _write_model(path: Path, contract: dict | None = None, *, tail: np.ndarray | None = None) -> None:
+def _write_model(path: Path, contract: dict | None = None, *, tail: np.ndarray | None = None,
+                 image_ch: int = 6) -> None:
     """出力 = `tail`（定数 4K 個）× `avail[1]`。点群を使ったかが出力に出る。"""
     if tail is None:
         tail = np.concatenate([np.linspace(0.25, 1.0, K), np.zeros(K), np.full(K, 0.4), np.full(K, 0.1)])
-    inputs = [helper.make_tensor_value_info("image", TensorProto.FLOAT, [1, 3, H, W]),
+    inputs = [helper.make_tensor_value_info("image", TensorProto.FLOAT, [1, image_ch, H, W]),
               helper.make_tensor_value_info("lidar", TensorProto.FLOAT, [1, HIST + 1, FOV + 1]),
               helper.make_tensor_value_info("state", TensorProto.FLOAT, [1, 3]),
               helper.make_tensor_value_info("avail", TensorProto.FLOAT, [1, 3])]
@@ -81,6 +83,9 @@ class TestLoadModel(_Tmp):
             load_model(self.dir / "none.onnx")
         for name, contract in (("ver", _contract(preproc_version=PREPROC_VERSION + 1)),
                                ("img", _contract(image_preproc_version=1)),
+                               # 前後配置のころの右1台のモデル（画像の版2）は読まない
+                               ("single", _contract(image_preproc_version=PREPROC_VERSION_CROP, cams=["front"])),
+                               ("cams", _contract(cams=["front"])),
                                ("crop", _contract(crop_x=0.0)),
                                ("k", _contract(k=K + 1)),
                                ("ref", _contract(speed_ref=0.0))):
@@ -123,7 +128,7 @@ class TestInferOnce(_Tmp):
 
     def test_image_and_lidar_give_a_ready_plan_at_the_image_time(self):
         self.node.push_scan(_scan(10 * NS - NS // 10))
-        plan = self.node.infer_once(rgb=self.rgb, t_image_ns=10 * NS - 20_000_000, vs=self.vs, now_ns=10 * NS)
+        plan = self.node.infer_once(rgb=self.rgb, rgb_left=self.rgb, t_image_ns=10 * NS - 20_000_000, vs=self.vs, now_ns=10 * NS)
         self.assertTrue(plan.ready, plan.reason)
         self.assertTrue(plan.has_image and plan.has_lidar)
         self.assertEqual(plan.t_capture, 10 * NS - 20_000_000)
@@ -143,7 +148,7 @@ class TestInferOnce(_Tmp):
 
     def test_stale_scan_is_not_used(self):
         self.node.push_scan(_scan(10 * NS - NS))                      # 1s 前
-        plan = self.node.infer_once(rgb=self.rgb, t_image_ns=10 * NS, vs=self.vs, now_ns=10 * NS)
+        plan = self.node.infer_once(rgb=self.rgb, rgb_left=self.rgb, t_image_ns=10 * NS, vs=self.vs, now_ns=10 * NS)
         self.assertTrue(plan.ready)
         self.assertFalse(plan.has_lidar)
         none = self.node.infer_once(rgb=None, t_image_ns=0, vs=self.vs, now_ns=10 * NS)
@@ -165,11 +170,11 @@ class TestInferOnce(_Tmp):
     def test_no_model_and_bad_output_give_reasons(self):
         empty = E2EFusionNode(models_dir=self.dir / "none", vehicle=Vehicle.load())
         self.addCleanup(empty.close)
-        self.assertIn("モデルが無い", empty.infer_once(rgb=self.rgb, t_image_ns=1, vs=self.vs, now_ns=1).reason)
+        self.assertIn("モデルが無い", empty.infer_once(rgb=self.rgb, rgb_left=self.rgb, t_image_ns=1, vs=self.vs, now_ns=1).reason)
         _write_model(self.dir / "nan.onnx", tail=np.full(4 * K, np.nan))
         self.assertTrue(self.node.reload_if_changed("nan"))
         self.node.push_scan(_scan(10 * NS - NS // 10))
-        plan = self.node.infer_once(rgb=self.rgb, t_image_ns=10 * NS, vs=self.vs, now_ns=10 * NS)
+        plan = self.node.infer_once(rgb=self.rgb, rgb_left=self.rgb, t_image_ns=10 * NS, vs=self.vs, now_ns=10 * NS)
         self.assertFalse(plan.ready)
         self.assertIn("推論に失敗", plan.reason)
 
@@ -238,6 +243,81 @@ class TestModelChoiceInRun(_Tmp):
         self.node.run(sub=FakeSub({TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="new")}), pub=FakePub(),
                       duration_s=0.1, fixed_model=True)
         self.assertEqual(self.node.model_name, "old")
+
+
+class TestMissingLeft(_Tmp):
+    """左右の組が揃ったときだけ画像を使い、揃わなければ画像を伏せる。"""
+
+    def setUp(self):
+        super().setUp()
+        _write_model(self.dir / "st.onnx")
+        self.node = E2EFusionNode(model=load_model(self.dir / "st.onnx"), model_name="st",
+                                  models_dir=self.dir, vehicle=Vehicle.load())
+        self.addCleanup(self.node.close)
+        self.vs = VehicleState(t_capture=10 * NS, speed=1.0)
+        self.rgb = np.zeros((48, 96, 3), dtype=np.uint8)
+
+    def test_missing_left_hides_the_image(self):
+        self.node.push_scan(_scan(10 * NS - NS // 10))
+        right_only = self.node.infer_once(rgb=self.rgb, rgb_left=None, t_image_ns=10 * NS - 20_000_000,
+                                          vs=self.vs, now_ns=10 * NS)
+        self.assertTrue(right_only.ready, right_only.reason)       # 点群だけで推論する
+        self.assertFalse(right_only.has_image)
+
+
+class TestStereoInRun(_Tmp):
+    """`run()` が右のリングと左のリングから同じ瞬間の組を読んで画像に使う（揃わなければ画像を伏せる）。"""
+
+    def _run_once(self, tag: str, dt_left_ns: int) -> list:
+        import time
+
+        from raspi.bus import FrameRing
+        from raspi.msgs import AutoCtrl, ImageRef
+        from raspi.msgs.types import (TOPIC_AUTO_CTRL, TOPIC_E2E_FUSION_PLAN, TOPIC_IMAGE_FRONT,
+                                      TOPIC_IMAGE_LEFT, TOPIC_SCAN, TOPIC_VEHICLE_STATE)
+        from raspi.tests.fakes import FakePub
+
+        _write_model(self.dir / "st.onnx")
+        node = E2EFusionNode(model=load_model(self.dir / "st.onnx"), model_name="st", models_dir=self.dir,
+                             vehicle=Vehicle.load())
+        self.addCleanup(node.close)
+        t = time.monotonic_ns()
+        refs = {}
+        for cam, tc in (("front", t), ("left", t + dt_left_ns)):
+            ring = FrameRing.create(f"surge_test_e2ef_{tag}_{cam}", 32, 24, "RGB888", n_slots=2)
+            self.addCleanup(ring.unlink)
+            desc = ring.write(np.zeros((24, 32, 3), dtype=np.uint8), t_capture_ns=tc, frame_id=1)
+            refs[cam] = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq, frame_id=1,
+                                 width=desc.width, height=desc.height, fmt=desc.fmt, stride=desc.stride,
+                                 nbytes=desc.nbytes, cam=cam, t_capture=tc, synced=True)
+        scan = _scan(t - NS // 10, seq=1)
+
+        class _Sub:
+            latest = {TOPIC_IMAGE_FRONT: refs["front"], TOPIC_IMAGE_LEFT: refs["left"],
+                      TOPIC_AUTO_CTRL: AutoCtrl(mode="e2e_fusion"),
+                      TOPIC_VEHICLE_STATE: VehicleState(t_capture=t, speed=1.0, armed=True)}
+            sent = False
+
+            def poll(self, timeout_ms):
+                if self.sent:
+                    return []
+                self.sent = True
+                return [(TOPIC_SCAN, scan)]
+
+        pub = FakePub()
+        node.run(sub=_Sub(), pub=pub, duration_s=0.05, fixed_model=True)
+        return [m for topic, m in pub.sent if topic == TOPIC_E2E_FUSION_PLAN and m.ready]
+
+    def test_synced_pair_is_used_as_the_image(self):
+        plans = self._run_once("pair", 20_000)
+        self.assertTrue(plans)
+        self.assertTrue(plans[-1].has_image)
+
+    def test_apart_pair_hides_the_image(self):
+        plans = self._run_once("apart", 5_000_000)
+        self.assertTrue(plans)
+        self.assertFalse(plans[-1].has_image)
+        self.assertTrue(plans[-1].has_lidar)
 
 
 if __name__ == "__main__":

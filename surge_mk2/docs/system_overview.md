@@ -103,7 +103,7 @@ PWM やトルク配分を Pi が決めようとすると遅延で破綻する。
 
 | ピン／接続 | 用途 |
 |---|---|
-| CSI ×2 | 前方 / 後方カメラ（`picamera2`）。IMX219 160° 広角（魚眼）。内部パラメータは `config/vehicle.toml` のレンズのプロファイル（[`calibration.md` §7](calibration.md#7-カメラ魚眼レンズ)） |
+| CSI ×2 | 前方ステレオの右（主）/ 左カメラ（`picamera2`、基線 75mm）。IMX219 160° 広角（魚眼）。前後配置は 2026-11-13 にやめた（[`stereo_plan.md`](stereo_plan.md)）。内部パラメータは `config/vehicle.toml` のレンズのプロファイル（[`calibration.md` §7](calibration.md#7-カメラ魚眼レンズ)） |
 | **GPIO6** | STM32 と接続。**緊急停止ハートビート**（100Hz 矩形波、§8.1） |
 | GPIO14 / GPIO15 | UART TX / RX ⇄ STM32（`/dev/serial0`） |
 | GPIO18 / GPIO19 / GPIO13 | ブザー / LED 緑 / LED 赤（`raspi/io/gpio.py`） |
@@ -257,7 +257,8 @@ Pi の単調時刻に換算済み）/ `t_pub` / `seq` を持つ**。無いと、
 | チャンネル | 内容 | 方式 |
 |---|---|---|
 | `/ws/telemetry` | 車両状態・点群・リンク統計・自動運転の判断 | msgpack。`vehicle_state` が届いた周に送り、他は変わったときだけ載せる |
-| `/ws/camera/{front,rear}` | JPEG フレーム | バイナリ。頻度の上限は GUI のカメラ設定 |
+| `/ws/camera/{front,left}` | JPEG フレーム | バイナリ。頻度の上限は GUI のカメラ設定 |
+| `/ws/camera/depth` | `stereo_node` の深度映像。**繋いでいる間だけ照合する** | バイナリ |
 | `/ws/control` | 操縦入力・設定変更・状態通知 | JSON |
 | `/ws/map` | 地図（3値を2bitに詰めて zlib）・中心線・経路 | msgpack。変わったときだけ（接続時に最新の1枚） |
 | `/ws/map_upload/<name>` | 地図のアップロード | 操作時のみ |
@@ -306,12 +307,14 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `surge-e2e-fusion` | `raspi.nodes.e2e_fusion_node` | 点群＋画像＋車両状態から前方の経路点 → `e2e_fusion/plan` | `e2e_fusion` が使えない |
 | `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出 → `line/cam` | `line_trace` が使えない |
 | `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従 → `track/target` | `follow_object` が使えない |
+| `surge-stereo` | `raspi.nodes.stereo_node` | 前方ステレオの照合 → 低い障害物の `scan/stereo`・深度映像（ステレオ校正済みのときだけ） | 深度映像が出ない |
 | `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末向けの mDNS 応答 | 名前が引けない端末がある |
 | `surge-arrow-signal` | `raspi.nodes.arrow_signal_node` | 前方カメラの矢印信号 → `route/select`。**unit だけ置き既定は無効** | 信号による経路選択が使えない |
 | `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録。**既定では無効**（`--with-logger`、§11） | — |
 | `surge-logclean.timer` | — | 古いログを定期的に消す | ディスクが埋まる |
 
-- **カメラ系の認識ノードは常時 enable。** `auto/ctrl` で対応モードが選ばれている間だけ推論する（IDLE/ACTIVE）
+- **カメラ系の認識ノードは常時 enable。** `auto/ctrl` で対応モードが選ばれている間だけ推論する（IDLE/ACTIVE）。
+  `stereo_node` だけは `cam/config` の `depth`（telemetry_node が深度の視聴者・ステレオを使うモードから決める）で動く
 - **`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、起動していること
   自体は車を動かす条件にならない
 
@@ -330,9 +333,10 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `auto/cmd` | 自律走行の目標速度・舵角・制動（新しい判断は即時＋50Hz） | planning_node |
 | `auto/state` | 判断の根拠（自己位置・段・理由 `reason`） | planning_node |
 | `auto/map` | 占有格子・中心線・経路（版が変わったとき） | planning_node |
-| `image/front`・`image/rear` | 共有メモリ参照 | camera_node |
+| `image/front`（右・主カメラ）・`image/left` | 共有メモリ参照 | camera_node |
 | `scan/cam`・`path/cam`・`cam/mask` | カメラ由来の擬似点群・走行可能回廊・マスク | cam_perception_node |
 | `line/cam` | 白線の近傍・遠方2点（地面座標） | line_perception_node |
+| `scan/stereo`・`stereo/depth` | ステレオで見つけた低い障害物の擬似点群（0 は「見つからない」で空きではない）・深度映像 | stereo_node |
 | `cam_e2e/cmd` | 画像からの操舵・速度 | cam_e2e_node |
 | `track/target` | 追従対象の方位・距離 | cam_track_node |
 | `route/select`・`signal/status` | 経路グループの切替要求・直近の判定 | arrow_signal_node（名前 `signal`。試験用 `raspi/tools/route_select.py` も同名） |
@@ -360,8 +364,8 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 
 ```
 map ──── odom ──── base_link ──┬── lidar
- │        │            │        ├── cam_front
- │        │            │        └── cam_rear
+ │        │            │        ├── cam_front（右）
+ │        │            │        └── cam_left
  │        │            └─ 後輪車軸の中心
  │        └─ 連続で滑らか。ただしドリフトする → 局所制御（経路追従）
  └─ SLAM が補正する。跳ぶことがある → 大域経路計画
@@ -479,14 +483,14 @@ $$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v
 | `ftg` | Follow the Gap | 不要 | 点群の中で**最も広く空いた区間**を選び、**その真ん中**を狙う |
 | `ftg_cam` | Follow the Gap（カメラ） | 不要 | `ftg` と同じロジックを、カメラのセグメンテーションから作った擬似点群で走らせる |
 | `cam_centerline` | 中心線追従（カメラ） | 不要 | 走行可能領域から前方の回廊中心を作り Pure Pursuit で追う |
-| `cam_e2e` | E2E カメラ（模倣学習） | 不要 | 前方画像から操舵を直接回帰。速度は舵の切れ具合から決める |
+| `cam_e2e` | E2E カメラ（模倣学習） | 不要 | 前方の左右2台の画像から操舵を直接回帰。速度は舵の切れ具合から決める |
 | `de` | Disparity Extender | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う |
 | `dp` | Disparity Pursuit | 不要 | `de` の塗り方・狙点選択＋ `ftg` の Pure Pursuit 舵角＋狙点のヒステリシス |
 | `slam2d_raceline` | レーシングライン(slam2d) | 作る/読む | 地図を作り最小時間寄りのラインを追う。`listed = False` で GUI に出ず、`slam2d_route` の土台と `sim.bench` 用 |
 | `slam2d_route` | **経路選択走行(slam2d)** | 作る/読む | 道路グラフ＋経由点で分岐を選んで周回。**GUI の主力** |
 | `line_trace` | ライントレース（カメラ） | 不要 | 白線の2点を Pure Pursuit の目標点にする。障害物回避なし |
 | `e2e_lidar` | E2E LiDAR | 不要 | 強化学習（PPO）で点群→操舵・速度を直接回帰 |
-| `e2e_fusion` | E2E 融合（LiDAR＋カメラ） | 不要 | 点群・前方カメラ・車両状態から学習したモデルが前方の経路点を出し、それを追う（記録を録ったコース向け） |
+| `e2e_fusion` | E2E 融合（LiDAR＋カメラ） | 不要 | 点群・前方の左右2台のカメラ・車両状態から学習したモデルが前方の経路点を出し、それを追う（記録を録ったコース向け） |
 | `follow_object` | 対象追従 | 不要 | 映像で選んだ対象との車間を保って追従（前進のみ） |
 | `park_to_point` | 駐車（クリック指定） | 局所地図 | LiDAR 画面でクリックした位置・向きへ Hybrid A* で接近して停止 |
 
@@ -613,8 +617,8 @@ React + TypeScript + Vite（コード地図は [`gui/README.md`](../gui/README.m
 
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
-| **ラジコン**（既定） | 運転する人 | 前方映像を主に、バックミラー（後方 PIP）・計器・介入ランプ・電池と温度を重ねる。設定は ⚙ ドロワー |
-| **自動運転** | 開発する人 | 前方・後方・LiDAR を並べ、指令と実測・判断の根拠を出す。モード選択・engage・地図・経路（`gui/src/views/AutoView.tsx`） |
+| **ラジコン**（既定） | 運転する人 | 前方映像（右カメラ、上 1/4 は切る）を主に、ボンネットが映る左下を覆う計器パネル（車体図＝電圧・計器・温度・介入ランプ）を重ねる。設定は ⚙ ドロワー |
+| **自動運転** | 開発する人 | 前方(左)・前方(右)・深度映像・LiDAR を並べ、指令と実測・判断の根拠を出す。モード選択・engage・地図・経路（`gui/src/views/AutoView.tsx`） |
 | **診断** | 原因を追う人 | 現在値の全項目・時系列グラフ・ログのファイル一覧 |
 | **システム同定** | 車両を測る人 | 校正試験の選択・実行・記録の取得（[`calibration.md`](calibration.md)） |
 

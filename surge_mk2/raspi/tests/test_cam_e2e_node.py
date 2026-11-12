@@ -1,6 +1,6 @@
 """`raspi/nodes/cam_e2e_node.py` の配線テスト。
 
-**実モデル・実カメラは要らない。** ダミーの ONNX モデル（R・G チャンネルの
+**実モデル・実カメラは要らない。** ダミーの ONNX モデル（右の R と左の G の
 平均を2個の出力にするだけ）で、フレーム読み取り→色順の修正→前処理→推論→
 `CamE2ECmd` 化という配管全体が壊れずに流れることだけを確認する
 （`test_cam_perception_node.py` と同じ方針）。推論の精度は問わない
@@ -27,8 +27,9 @@ except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの
 
 from raspi.bus import FrameRing  # noqa: E402
 from raspi.core.cam_e2e_preproc import (  # noqa: E402
-    PREPROC_VERSION,
     PREPROC_VERSION_CROP,
+    PREPROC_VERSION_STEREO,
+    STEREO_CAMS,
 )
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, VehicleState  # noqa: E402
@@ -37,6 +38,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_E2E_MODEL,
     TOPIC_IMAGE_FRONT,
+    TOPIC_IMAGE_LEFT,
     TOPIC_VEHICLE_STATE,
 )
 from raspi.nodes.cam_e2e_node import (  # noqa: E402
@@ -49,15 +51,15 @@ from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
 
 
 def _make_dummy_regression_model(path: Path, h: int, w: int, n_out: int = 2) -> None:
-    """R・G（先頭 `n_out` チャンネル）の平均を `[1, n_out]` で返すだけの ONNX モデル。
+    """`[右 RGB, 左 RGB]` の 6ch を受け、右の R（ch0）と左の G（ch4）の平均を `[1, n_out]` で返すだけの ONNX モデル。
 
-    前処理で 0..1 に正規化した RGB を渡すので、出力は `(赤の明るさ, 緑の明るさ)`。
-    推論そのものの正しさは問わず、配管が通ることと**色順が RGB で届くこと**を
+    前処理で 0..1 に正規化した RGB を渡すので、出力は `(右の赤の明るさ, 左の緑の明るさ)`。
+    推論そのものの正しさは問わず、配管が通ること・**色順が RGB で届くこと**・左右の並びを
     確かめるのに使う。
     """
-    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, h, w])
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 6, h, w])
     out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, n_out])
-    idx = helper.make_tensor("idx", TensorProto.INT64, [n_out], list(range(n_out)))
+    idx = helper.make_tensor("idx", TensorProto.INT64, [n_out], [0, 4][:n_out])
     nodes = [
         helper.make_node("ReduceMean", ["input"], ["chan"], axes=[2, 3], keepdims=0),
         helper.make_node("Gather", ["chan", "idx"], ["output"], axis=1),
@@ -71,8 +73,9 @@ def _make_dummy_regression_model(path: Path, h: int, w: int, n_out: int = 2) -> 
 def _write_contract(path: Path, w: int, h: int, **over) -> None:
     cfg = {"input_size": [w, h], "mean": 0.0, "std": 255.0, "max_steer": 0.524,
            "speed_ref": 1.5, "outputs": list(MODEL_OUTPUTS),
-           "preproc_version": PREPROC_VERSION}
+           "preproc_version": PREPROC_VERSION_STEREO, "crop_x": 0.05, "cams": list(STEREO_CAMS)}
     cfg.update(over)
+    cfg = {k: v for k, v in cfg.items() if v is not None}
     path.write_text(json.dumps(cfg))
 
 
@@ -88,12 +91,13 @@ class TestRegressionModel(unittest.TestCase):
         _make_dummy_regression_model(self.model_path, 32, 32)
         self.model = RegressionModel(str(self.model_path), input_size=(32, 32),
                                      mean=0.0, std=255.0, max_steer=0.524, speed_ref=1.5)
+        self.black = np.zeros((64, 64, 3), dtype=np.uint8)
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def test_returns_two_python_floats(self):
-        out = self.model.infer(np.zeros((64, 64, 3), dtype=np.uint8))
+        out = self.model.infer(self.black, self.black)
         self.assertEqual(len(out), 2)
         self.assertIsInstance(out[0], float)
         self.assertIsInstance(out[1], float)
@@ -101,9 +105,20 @@ class TestRegressionModel(unittest.TestCase):
     def test_input_is_taken_as_rgb(self):
         red = np.zeros((240, 320, 3), dtype=np.uint8)
         red[..., 0] = 255
-        steer, speed = self.model.infer(red)
+        steer, speed = self.model.infer(red, red)
         self.assertAlmostEqual(steer, 1.0, places=5)
         self.assertAlmostEqual(speed, 0.0, places=5)
+
+    def test_right_and_left_reach_the_model_in_order(self):
+        white = np.full((48, 64, 3), 255, dtype=np.uint8)
+        out_r, out_l = self.model.infer(white, self.black)
+        self.assertAlmostEqual(out_r, 1.0, places=5)
+        self.assertAlmostEqual(out_l, 0.0, places=5)
+        out_r, out_l = self.model.infer(self.black, white)
+        self.assertAlmostEqual(out_r, 0.0, places=5)
+        self.assertAlmostEqual(out_l, 1.0, places=5)
+        with self.assertRaises((ValueError, TypeError)):
+            self.model.infer(white, None)               # 片目では推論しない
 
     def test_single_output_model_is_rejected(self):
         """操舵だけの旧モデルを置いたまま走らせない。"""
@@ -111,7 +126,7 @@ class TestRegressionModel(unittest.TestCase):
         _make_dummy_regression_model(one, 32, 32, n_out=1)
         model = RegressionModel(str(one), input_size=(32, 32))
         with self.assertRaises(ValueError):
-            model.infer(np.zeros((64, 64, 3), dtype=np.uint8))
+            model.infer(self.black, self.black)
 
 
 class TestLoadModel(unittest.TestCase):
@@ -134,11 +149,15 @@ class TestLoadModel(unittest.TestCase):
     def test_rejects_bad_contracts(self):
         cases = {
             "old_outputs": {"outputs": ["steer_norm"]},
-            "unknown_preproc": {"preproc_version": PREPROC_VERSION_CROP + 1},
-            # 版2なのに切り落とし幅が無い／範囲外（全幅で推論すると学習と違う絵になる）
-            "crop_missing": {"preproc_version": PREPROC_VERSION_CROP},
-            "crop_zero": {"preproc_version": PREPROC_VERSION_CROP, "crop_x": 0.0},
-            "crop_huge": {"preproc_version": PREPROC_VERSION_CROP, "crop_x": 0.4},
+            "unknown_preproc": {"preproc_version": PREPROC_VERSION_STEREO + 1},
+            # 前後配置のころの右1台のモデル（版1・2）は読まない
+            "v1_single": {"preproc_version": 1, "crop_x": 0.0, "cams": ["front"]},
+            "v2_single": {"preproc_version": PREPROC_VERSION_CROP, "cams": ["front"]},
+            "nocams": {"cams": ["front"]},
+            # 切り落とし幅が無い／範囲外（全幅で推論すると学習と違う絵になる）
+            "crop_missing": {"crop_x": None},
+            "crop_zero": {"crop_x": 0.0},
+            "crop_huge": {"crop_x": 0.4},
             "no_speed_ref": {"speed_ref": 0.0},
             "no_max_steer": {"max_steer": 0.0},
         }
@@ -148,21 +167,16 @@ class TestLoadModel(unittest.TestCase):
                 load_model(self.dir / f"{name}.onnx")
 
     def test_crop_contract_is_read_and_applied(self):
-        """版2のモデルは左右を crop_x ずつ切り落とした絵で推論する。"""
-        _make_model_files(self.dir, "crop", 32, 32, preproc_version=PREPROC_VERSION_CROP,
-                          crop_x=0.25)
+        """左右を crop_x ずつ切り落とした絵で推論する。"""
+        _make_model_files(self.dir, "crop", 32, 32, crop_x=0.25)
         model = load_model(self.dir / "crop.onnx")
         self.assertAlmostEqual(model.crop_x, 0.25)
         # 左右の1/4だけ赤 → 切り落とせば赤は残らない
         img = np.zeros((32, 64, 3), dtype=np.uint8)
         img[:, :16, 0] = 255
         img[:, 48:, 0] = 255
-        steer, _ = model.infer(img)
+        steer, _ = model.infer(img, img)
         self.assertAlmostEqual(steer, 0.0, places=5)
-
-    def test_version1_model_uses_full_width(self):
-        _make_model_files(self.dir, "v1", 32, 32)
-        self.assertEqual(load_model(self.dir / "v1.onnx").crop_x, 0.0)
 
     def test_missing_contract_file_is_rejected(self):
         """セグメンテーション用など、同梱JSONの無い .onnx を読まない。"""
@@ -197,15 +211,15 @@ class TestSteerLink(unittest.TestCase):
         node.reload_if_changed("m")
         # 車の換算を差し替えて、直した結果が steer_relink と一致することを見る
         node.vehicle = type("V", (), {"steer_link": (0.6, 0.5)})()
-        ring, ref = _ref_with_frame("surge_test_ce2e_link")
+        rings, refs = _pair_with_frame("surge_test_ce2e_link")
         try:
-            cmd = node._attempt(ref, 0)
+            cmd = node._attempt(refs[TOPIC_IMAGE_FRONT], 0, refs[TOPIC_IMAGE_LEFT])
             want = steer_relink(200 / 255 * 0.524, (1.0, 0.0), (0.6, 0.5)) / 0.524
             self.assertAlmostEqual(cmd.steer_norm, want, places=4)
             self.assertNotAlmostEqual(cmd.steer_norm, 200 / 255, places=3)
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
 
 class TestProcessFrame(unittest.TestCase):
@@ -223,14 +237,14 @@ class TestProcessFrame(unittest.TestCase):
         ——以前は入れ替えずに渡していて、学習（RGB）と色が逆だった。"""
         frame = np.zeros((240, 320, 3), dtype=np.uint8)
         frame[..., 2] = 255
-        steer, speed = self.node.process_frame(frame, "BGR888")
+        steer, speed = self.node.process_frame(frame, "BGR888", frame, "BGR888")
         self.assertAlmostEqual(steer, 1.0, places=5)
         self.assertAlmostEqual(speed, 0.0, places=5)
 
     def test_rgb_ring_frame_is_not_swapped(self):
         frame = np.zeros((240, 320, 3), dtype=np.uint8)
         frame[..., 2] = 255
-        steer, _speed = self.node.process_frame(frame, "RGB888")
+        steer, _speed = self.node.process_frame(frame, "RGB888", frame, "RGB888")
         self.assertAlmostEqual(steer, 0.0, places=5)
 
 
@@ -296,14 +310,33 @@ class TestModelSelection(unittest.TestCase):
         self.assertIs(node.model, first)
 
 
-def _ref_with_frame(ring_name: str):
-    ring = FrameRing.create(ring_name, 32, 24, "RGB888", n_slots=2)
-    data = np.full((24, 32, 3), 200, dtype=np.uint8)
-    desc = ring.write(data, t_capture_ns=time.monotonic_ns(), frame_id=1)
-    ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
-                   frame_id=desc.frame_id, width=desc.width, height=desc.height,
-                   fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-    return ring, ref
+class _Rings:
+    """右・左のリング。`unlink()` で両方消す。"""
+
+    def __init__(self, front: FrameRing, left: FrameRing) -> None:
+        self.front, self.left = front, left
+
+    def write(self, value: int, t_ns: int, frame_id: int) -> dict:
+        """右・左に同じ瞬間のコマを書き、`{トピック: ImageRef}`（どちらも `synced`）を返す。"""
+        out = {}
+        for topic, cam, ring in ((TOPIC_IMAGE_FRONT, "front", self.front), (TOPIC_IMAGE_LEFT, "left", self.left)):
+            desc = ring.write(np.full((24, 32, 3), value, dtype=np.uint8), t_capture_ns=t_ns, frame_id=frame_id)
+            out[topic] = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                                  frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                                  fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam=cam,
+                                  t_capture=t_ns, synced=True)
+        return out
+
+    def unlink(self) -> None:
+        self.front.unlink()
+        self.left.unlink()
+
+
+def _pair_with_frame(ring_name: str, value: int = 200):
+    """右・左のリングに同じ瞬間の一様なコマ（`value`）を1組書く。`(rings, {トピック: ImageRef})`。"""
+    rings = _Rings(FrameRing.create(ring_name + "_r", 32, 24, "RGB888", n_slots=2),
+                   FrameRing.create(ring_name + "_l", 32, 24, "RGB888", n_slots=2))
+    return rings, rings.write(value, time.monotonic_ns(), 1)
 
 
 class TestModeGating(unittest.TestCase):
@@ -317,9 +350,9 @@ class TestModeGating(unittest.TestCase):
 
     def test_stays_idle_when_a_different_mode_is_selected(self):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_idle")
+        rings, refs = _pair_with_frame("surge_test_ce2e_idle")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
             pub = FakePub()
@@ -331,13 +364,13 @@ class TestModeGating(unittest.TestCase):
             self.assertFalse(cmds[-1].ready, "cam_e2e以外が選ばれているのに推論結果が出ている")
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_selecting_cam_e2e_mode_starts_inference(self):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_active")
+        rings, refs = _pair_with_frame("surge_test_ce2e_active")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
@@ -349,14 +382,14 @@ class TestModeGating(unittest.TestCase):
                             "cam_e2eが選ばれたのに推論結果が出ていない")
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_disarmed_stays_idle_even_when_cam_e2e_mode_selected(self):
         """cam_e2eが選ばれていてもDISARM中は推論を回さない（省電力バグ修正）。"""
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_disarm")
+        rings, refs = _pair_with_frame("surge_test_ce2e_disarm")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
@@ -368,14 +401,14 @@ class TestModeGating(unittest.TestCase):
             self.assertFalse(cmds[-1].ready, "DISARM中なのに推論結果が出ている")
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_armed_with_cam_e2e_mode_selected_still_activates_inference(self):
         """ARM中はモード選択だけで推論が回る（回帰防止）。"""
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_armed")
+        rings, refs = _pair_with_frame("surge_test_ce2e_armed")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
@@ -387,13 +420,13 @@ class TestModeGating(unittest.TestCase):
                             "ARM中にcam_e2eが選ばれたのに推論結果が出ていない")
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_ready_cmd_carries_both_outputs_and_the_contract(self):
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_out")
+        rings, refs = _pair_with_frame("surge_test_ce2e_out")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
@@ -410,15 +443,15 @@ class TestModeGating(unittest.TestCase):
             self.assertGreater(cmd.t_capture, 0)
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_publishes_only_once_per_inference_period(self):
         """`Publisher` は送るたびに seq を振るので、再送すると planning_node の
         `plan()` が無駄に回る。推論を試みた周期だけ publish すること。"""
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
-        ring, ref = _ref_with_frame("surge_test_ce2e_rate")
+        rings, refs = _pair_with_frame("surge_test_ce2e_rate")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
@@ -428,14 +461,14 @@ class TestModeGating(unittest.TestCase):
             self.assertEqual(len(cmds), 1)
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_same_frame_is_not_inferred_twice(self):
         """新しいコマが来ないうちは周期が来ても推論しない（2周期までは待つ）。"""
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
-        ring, ref = _ref_with_frame("surge_test_ce2e_same")
+        rings, refs = _pair_with_frame("surge_test_ce2e_same")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref,
+            sub = FakeSub({**refs,
                             TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
@@ -445,12 +478,12 @@ class TestModeGating(unittest.TestCase):
             self.assertEqual(len(cmds), 1)
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_infers_new_frames_at_the_set_rate(self):
         """30fps でコマが届くと、10Hz（3コマに1回）で、届いたコマを推論する。"""
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load(), infer_hz=10.0)
-        ring, ref = _ref_with_frame("surge_test_ce2e_fresh")
+        rings, refs = _pair_with_frame("surge_test_ce2e_fresh")
         t0 = time.monotonic()
 
         class _CameraSub(FakeSub):
@@ -459,17 +492,12 @@ class TestModeGating(unittest.TestCase):
                 n = int((time.monotonic() - t0) / (1 / 30))
                 if n > self.n:
                     self.n = n
-                    desc = ring.write(np.full((24, 32, 3), 200, dtype=np.uint8),
-                                      t_capture_ns=time.monotonic_ns(), frame_id=n + 1)
-                    self.latest[TOPIC_IMAGE_FRONT] = ImageRef(
-                        shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
-                        frame_id=desc.frame_id, width=desc.width, height=desc.height,
-                        fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
+                    self.latest.update(rings.write(200, time.monotonic_ns(), n + 1))
                 time.sleep(0.001)
                 return []
 
         try:
-            sub = _CameraSub({TOPIC_IMAGE_FRONT: ref,
+            sub = _CameraSub({**refs,
                               TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
                               TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             sub.n = 0
@@ -482,15 +510,15 @@ class TestModeGating(unittest.TestCase):
             self.assertEqual(len({c.t_capture for c in cmds}), 6, "同じコマを2度推論した")
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
     def test_no_model_reports_not_ready_with_a_fresh_timestamp(self):
         """`t_capture=0` だと planning_node が「入力が古い」で先に止めてしまい、
         planner の「モデル未選択」が GUI に出ない。"""
         node = CamE2ENode(models_dir=self.models_dir, vehicle=Vehicle.load())
-        ring, ref = _ref_with_frame("surge_test_ce2e_nomodel")
+        rings, refs = _pair_with_frame("surge_test_ce2e_nomodel")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            sub = FakeSub({**refs, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
@@ -500,7 +528,7 @@ class TestModeGating(unittest.TestCase):
             self.assertLess(time.monotonic_ns() - cmds[-1].t_capture, 1_000_000_000)
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
 
 
 class TestStop(unittest.TestCase):
@@ -544,9 +572,9 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
             raise RuntimeError("推論側のバグ")
         node.process_frame = _raise
 
-        ring, ref = _ref_with_frame("surge_test_ce2e_exc")
+        rings, refs = _pair_with_frame("surge_test_ce2e_exc")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            sub = FakeSub({**refs, TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)  # 例外を外に伝播させないこと
 
@@ -556,7 +584,61 @@ class TestRunSurvivesProcessFrameException(unittest.TestCase):
                              "process_frame()が例外を投げたのにready=Trueになっている")
         finally:
             node.close()
-            ring.unlink()
+            rings.unlink()
+
+
+# ── 左右の組が揃わないとき ──
+
+def _stereo_refs(tag: str, *, dt_left_ns: int = 20_000, synced: bool = True):
+    """右・左のリングに1コマずつ書き、`ImageRef` を返す（左は右より `dt_left_ns` 後に撮ったことにする）。"""
+    t = time.monotonic_ns()
+    rings, refs = [], []
+    for cam, value, tc in (("front", 200, t), ("left", 100, t + dt_left_ns)):
+        ring = FrameRing.create(f"surge_test_ce2e_{tag}_{cam}", 32, 24, "RGB888", n_slots=2)
+        desc = ring.write(np.full((24, 32, 3), value, dtype=np.uint8), t_capture_ns=tc, frame_id=1)
+        rings.append(ring)
+        refs.append(ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
+                             frame_id=desc.frame_id, width=desc.width, height=desc.height,
+                             fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam=cam,
+                             t_capture=tc, synced=synced))
+    return rings, refs
+
+
+class TestStereoPairing(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, tag: str, **ref_kw):
+        _make_model_files(self.dir, "st", 32, 32)
+        node = CamE2ENode(models_dir=self.dir, vehicle=Vehicle.load())
+        rings, (rf, rl) = _stereo_refs(tag, **ref_kw)
+        try:
+            sub = FakeSub({TOPIC_IMAGE_FRONT: rf, TOPIC_IMAGE_LEFT: rl,
+                           TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="st"),
+                           TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
+            pub = FakePub()
+            node.run(sub=sub, pub=pub, duration_s=0.05)
+            return [c for topic, c in pub.sent if topic == TOPIC_CAM_E2E_CMD]
+        finally:
+            node.close()
+            for ring in rings:
+                ring.unlink()
+
+    def test_synced_pair_is_inferred_with_the_left_frame(self):
+        ready = [c for c in self._run("pair") if c.ready]
+        self.assertTrue(ready)
+        # ダミーは (右の R, 左の G)。右 200・左 100
+        self.assertAlmostEqual(ready[-1].steer_norm, 200 / 255, places=3)
+        self.assertAlmostEqual(ready[-1].speed_norm, 100 / 255, places=3)
+
+    def test_unsynced_or_apart_pair_is_not_inferred(self):
+        for tag, kw in (("unsynced", {"synced": False}), ("apart", {"dt_left_ns": 5_000_000})):
+            cmds = self._run(tag, **kw)
+            self.assertFalse([c for c in cmds if c.ready], tag)
 
 
 if __name__ == "__main__":
