@@ -13,7 +13,12 @@
 ## 入力を伏せる
 
 標本ごとに、画像・点群・車両状態のどれかを確率 `--drop-*` で伏せる（画像と点群を同時には伏せない）。
-理由は `model.py` の docstring。
+理由は `model.py` の docstring。左右2台の画像は組で伏せる（推論でも組が揃わなければ画像を伏せる）。
+
+## 左右2台
+
+`ml_e2e.extract` が左右の組で取り出した標本で学習する。画像の前処理は版3（`cam_e2e_preproc.PREPROC_VERSION_STEREO`。
+左右の切り落としが要るので `--yaw-aug-deg` は正の値）。車体マスクと fx はカメラごとに持つ（左は `body_mask_left.png`）。
 
 ## 検証
 
@@ -39,11 +44,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "ml_cam_e2e"))
 
-from yaw_aug import ensure_body_mask, front_fx_px, margin_for  # noqa: E402
+from yaw_aug import BODY_MASK_LEFT_NAME, camera_fx_px, ensure_body_mask, front_fx_px, margin_for  # noqa: E402
 
 from ml_e2e.dataset import FusionDataset, InputSpec, load_records, sample_weights, split_records  # noqa: E402
 from ml_e2e.model import FusionModel, load_weights  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
 from raspi.core.e2e_fusion_preproc import PREPROC_VERSION  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 
@@ -166,20 +171,29 @@ def main() -> int:
         return 2
 
     margin_deg = int(math.ceil(args.yaw_aug_deg))
-    crop_x, fx_px, body_mask = 0.0, 0.0, None
-    first = next(iter(sorted((args.data / "frames").glob("*/*.jpg"))), None)
-    if first is None:
+    all_frames = sorted((args.data / "frames").glob("*/*.jpg"))
+    frames = [p for p in all_frames if not p.stem.endswith("_left")]       # 右（左は `_left` 付き）
+    frames_left = [p for p in all_frames if p.stem.endswith("_left")]
+    if not frames:
         print("画像がありません。先に `ml_e2e.extract` で標本を作ってください", file=sys.stderr)
         return 2
-    if args.yaw_aug_deg > 0:
-        from PIL import Image
-        src_w = Image.open(first).size[0]
-        fx_px = front_fx_px(vehicle, src_w)
-        crop_x = margin_for(args.yaw_aug_deg, fx_px) / src_w
-        frames = sorted((args.data / "frames").glob("*/*.jpg"))
-        body_mask = ensure_body_mask(args.data, frames)
-        print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  fx={fx_px:.1f}px  左右の切り落とし {crop_x * 100:.1f}%  "
-              f"車体マスク {body_mask.mean() * 100:.1f}%")
+    if not frames_left:
+        print("左の画像がありません。`ml_e2e.extract` で左右の組を取り出し直してください", file=sys.stderr)
+        return 2
+    if args.yaw_aug_deg <= 0:
+        print("--yaw-aug-deg は正の値が要る（左右2台の前処理は左右の切り落としが要る）", file=sys.stderr)
+        return 2
+    from PIL import Image
+    src_w = Image.open(frames[0]).size[0]
+    fx_px = front_fx_px(vehicle, src_w)
+    fx_px_left = camera_fx_px(vehicle, "left", src_w)
+    crop_x = margin_for(args.yaw_aug_deg, max(fx_px, fx_px_left)) / src_w
+    body_mask = ensure_body_mask(args.data, frames)
+    body_mask_left = ensure_body_mask(args.data, frames_left, BODY_MASK_LEFT_NAME)
+    note = (f"車体マスク 右 {body_mask.mean() * 100:.1f}%・左 {body_mask_left.mean() * 100:.1f}%"
+            f"  fx(左)={fx_px_left:.1f}px")
+    print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  fx={fx_px:.1f}px  左右の切り落とし {crop_x * 100:.1f}%  "
+          f"{note}")
 
     spec = InputSpec(size=(w, h), crop_x=crop_x, fov_deg=args.fov_deg, max_range=args.max_range,
                      k=args.k, stride=args.stride, max_steer=vehicle.max_steer)
@@ -193,7 +207,8 @@ def main() -> int:
 
     train_ds = FusionDataset(train_r, args.data, spec, augment=True, flip=not args.no_flip,
                              yaw_max_deg=args.yaw_aug_deg, margin_deg=margin_deg,
-                             fx_px=fx_px, body_mask=body_mask, photo_strength=args.photo_aug)
+                             fx_px=fx_px, body_mask=body_mask, photo_strength=args.photo_aug,
+                             fx_px_left=fx_px_left, body_mask_left=body_mask_left)
     val_ds = FusionDataset(val_r, args.data, spec, margin_deg=margin_deg)
     xy_scale = train_ds.xy_scale
     loader_kw = dict(batch_size=args.batch_size, num_workers=args.workers,
@@ -221,7 +236,9 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     config = {
-        "preproc_version": PREPROC_VERSION, "image_preproc_version": PREPROC_VERSION_CROP,
+        "preproc_version": PREPROC_VERSION,
+        "image_preproc_version": PREPROC_VERSION_STEREO,
+        "cams": list(STEREO_CAMS),
         "input_size": [w, h], "crop_x": crop_x, "fov_deg": spec.fov_deg, "max_range": spec.max_range,
         "history": spec.history, "k": spec.k, "ds": ds, "xy_scale": xy_scale,
         "max_steer": spec.max_steer, "speed_ref": spec.speed_ref, "yaw_rate_ref": spec.yaw_rate_ref,

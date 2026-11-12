@@ -161,9 +161,12 @@ class TestPaths(unittest.TestCase):
 
     def test_runs_and_models_dir_are_under_expected_places(self):
         self.assertEqual(RUNS_DIR, ML_CAM_DIR / "runs")
-        # `ml_lidar`と違い、実車側が`models/<name>.onnx`をフラットに探す前提なので
-        # サブディレクトリを切らない
-        self.assertEqual(MODELS_DIR, REPO_ROOT / "models")
+        # 実車側（cam_perception_node・telemetry_node）と同じ `models/seg/`
+        self.assertEqual(MODELS_DIR, REPO_ROOT / "models" / "seg")
+        from raspi.nodes.cam_perception_node import DEFAULT_MODELS_DIR
+        from raspi.nodes.telemetry_node import SEG_MODELS_DIR
+        self.assertEqual(MODELS_DIR, DEFAULT_MODELS_DIR)
+        self.assertEqual(MODELS_DIR, SEG_MODELS_DIR)
 
 
 class TestDescribeModelStatus(unittest.TestCase):

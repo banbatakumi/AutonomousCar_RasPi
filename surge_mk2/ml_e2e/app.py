@@ -499,7 +499,8 @@ class App:
         self.init_combo.grid(row=3, column=1, sticky="w", pady=(8, 0))
         ttk.Label(left, text="空なら最初から。選ぶとそのモデルの重みから始める\n（新しいコースの記録を足したとき）",
                   foreground="gray", justify="left").grid(row=4, column=0, columnspan=2, sticky="w")
-        no_flip_var = tk.BooleanVar(value=False)
+        # 既定で反転しない（ml_cam_e2e/app.py と同じ理由。docs/stereo_plan.md 段階5）
+        no_flip_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(left, text="左右反転の水増しを使わない", variable=no_flip_var).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
         no_pretrained_var = tk.BooleanVar(value=False)

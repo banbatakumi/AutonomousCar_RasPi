@@ -64,6 +64,7 @@ def _write(path: Path, *, mode: int = 2, source: str = "auto:slam2d_route", arm:
             if i % 10 == 0:
                 log.write("/scan", Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=i // 10), t_mono_ns=t)
                 log.write_viz_image(jpeg, "front", t_mono_ns=t + 30_000_000)
+                log.write_viz_image(jpeg, "left", t_mono_ns=t + 30_020_000)     # 左右の組（20µs 後）
                 if with_map:
                     x, y, yaw = _map_pose(ts - SCAN_AGE_S + POSE_LAG_S)
                     log.write("/auto/state", AutoState(mode="slam2d_route", phase="RACE", engaged=True,

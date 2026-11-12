@@ -1,10 +1,10 @@
-"""ml_cam_e2e/extract_pairs.py — `.mcap` から (前方カメラ画像, 人間の操舵・速度指令) のペアを取り出す。
+"""ml_cam_e2e/extract_pairs.py — `.mcap` から (前方ステレオの左右の画像, 人間の操舵・速度指令) のペアを取り出す。
 
     python3 ml_cam_e2e/extract_pairs.py logs/run1.mcap logs/run2.mcap \\
         --out ml_cam_e2e/runs/v1/frames
 
 画像つきで録った `.mcap`（`tools/record.sh --image-hz 15` や実機 GUI の MCAP
-ボタン）に入っている `/viz/image/front`（JPEG）を読む。
+ボタン）に入っている `/viz/image/front`・`/viz/image/left`（JPEG）を読む。
 **それに加えて `/cmd`（`DriveCmd`。50Hzで流れる人間の指令）も読み、
 画像フレームごとに時刻最近傍の指令をペアリングする。** Pi 側に新しい記録
 コードは不要——`raspi/nodes/logger_node.py` が `cmd` を既に mcap へ記録している。
@@ -30,6 +30,12 @@
   速度の手本にならないので、**学習用の走行は速度モードで録ること**
 - **画像とペアリングした `cmd` の時刻差が `--max-gap-ms` を超えたら破棄。**
   録画が途切れていた区間などで、無関係な指令と画像が対応付けられるのを防ぐ
+
+## 左右の組
+
+右（`/viz/image/front`）と左（`/viz/image/left`）を、撮影時刻の差が `STEREO_PAIR_TOL_NS` 以内の組にして取り出す
+（logger_node は同期中の左右を同じ瞬間の組として焼く）。右を manifest の行にし、左は同じ名前に `_left` を付けて隣に置く
+（`samples.left_path`）。組にならなかった右の画像は「左のコマが無い」で落とす（同期していない間の記録）。
 
 何枚がどの理由で落ちたかは最後に表示する——トルクモードで録ってしまって
 全滅、というのを黙って 0 枚にしない。
@@ -65,8 +71,10 @@ except ImportError:
           file=sys.stderr)
     raise
 
+from samples import MANIFEST_COLUMNS, left_path  # noqa: E402
+
+from raspi.core.cam_e2e_preproc import STEREO_PAIR_TOL_NS  # noqa: E402
 from raspi.msgs.types import TOPIC_CMD, TOPIC_VEHICLE_STATE  # noqa: E402
-from samples import MANIFEST_COLUMNS  # noqa: E402
 
 __all__ = ["VIZ_IMAGE_PREFIX", "CMD_MCAP_TOPIC", "STATE_MCAP_TOPIC", "MODE_MANUAL", "MODE_AUTO",
            "REASON_AUTO",
@@ -97,6 +105,8 @@ _STALE_SUFFIX = ":stale"
 #: 自動運転中だから除外した、という理由の文字列。操作パネルが「自動運転も手本にする」を
 #: 案内するのに使う
 REASON_AUTO = "自動運転中"
+#: 右の画像に同じ瞬間の左の画像が無かった
+REASON_NO_LEFT = "左のコマが無い"
 
 
 def load_series(mcap_path: Path, topic: str) -> tuple[list[int], list[dict]]:
@@ -156,46 +166,72 @@ def reject_reason(cmd: dict | None, *, include_auto: bool = False) -> str | None
     return None
 
 
-def iter_valid_pairs(mcap_path: Path, cams: set[str], cmd_times: list[int],
+def iter_images(mcap_path: Path, *, rejects: Counter | None = None):
+    """`(cam, t_ns, data, left_data)` を時系列に生成する。`data` は mcap のメッセージの中身（JSON。未デコード）。
+
+    右（`front`）と左（`left`）を撮影時刻の差が `STEREO_PAIR_TOL_NS` 以内の組にし、`cam="front"`・
+    `left_data` に左を入れて出す。組にならなかった右は `rejects` に数えて捨てる。
+    記録は時刻順に読めるので、カメラごとに直前の1枚だけ持てば組は作れる（コマの間隔は 33ms 以上）。
+    """
+    topics = [VIZ_IMAGE_PREFIX + "front", VIZ_IMAGE_PREFIX + "left"]
+    last: dict[str, tuple[int, bytes]] = {}
+
+    def drop_front() -> None:
+        if "front" in last and rejects is not None:
+            rejects[REASON_NO_LEFT] += 1
+        last.pop("front", None)
+
+    with open(mcap_path, "rb") as f:
+        for _schema, channel, message in make_reader(f).iter_messages(topics=topics, log_time_order=True):
+            cam = channel.topic[len(VIZ_IMAGE_PREFIX):]
+            other = "left" if cam == "front" else "front"
+            t = message.log_time
+            got = last.get(other)
+            if got is not None and abs(got[0] - t) <= STEREO_PAIR_TOL_NS:
+                last.pop(other)
+                (t_f, d_f), (_t_l, d_l) = ((t, message.data), got) if cam == "front" else (got, (t, message.data))
+                yield "front", t_f, d_f, d_l
+                continue
+            if cam == "front":
+                drop_front()                    # 前の右は組にならなかった
+            last[cam] = (t, message.data)
+    drop_front()
+
+
+def _jpeg(data: bytes) -> bytes:
+    return base64.b64decode(json.loads(data)["data"])
+
+
+def iter_valid_pairs(mcap_path: Path, cmd_times: list[int],
                      cmd_series: list[dict], *, max_gap_ns: int, label_shift_ns: int = 0,
                      rejects: Counter | None = None, include_auto: bool = False):
-    """`(cam, t_ns, jpeg_bytes, cmd)` を時系列に生成する。
+    """`(cam, t_ns, jpeg_bytes, cmd, left_jpeg_bytes)` を時系列に生成する。
 
-    フィルタを通らないフレームは読み飛ばし、理由を `rejects` に数える。
+    フィルタを通らないフレームは読み飛ばし、理由を `rejects` に数える（組は `iter_images` 参照）。
     """
-    topics = [VIZ_IMAGE_PREFIX + c for c in cams]
-    with open(mcap_path, "rb") as f:
-        reader = make_reader(f)
-        for _schema, channel, message in reader.iter_messages(topics=topics):
-            cam = channel.topic[len(VIZ_IMAGE_PREFIX):]
-            t_ns = message.log_time
-            cmd = nearest_cmd(cmd_times, cmd_series, t_ns + label_shift_ns, max_gap_ns)
-            reason = reject_reason(cmd, include_auto=include_auto)
-            if reason is not None:
-                if rejects is not None:
-                    rejects[reason] += 1
-                continue
-            obj = json.loads(message.data)
-            yield cam, t_ns, base64.b64decode(obj["data"]), cmd
+    for cam, t_ns, data, left in iter_images(mcap_path, rejects=rejects):
+        cmd = nearest_cmd(cmd_times, cmd_series, t_ns + label_shift_ns, max_gap_ns)
+        reason = reject_reason(cmd, include_auto=include_auto)
+        if reason is not None:
+            if rejects is not None:
+                rejects[reason] += 1
+            continue
+        yield cam, t_ns, _jpeg(data), cmd, _jpeg(left)
 
 
-def count_valid_pairs(mcap_path: Path, cams: set[str], cmd_times: list[int],
+def count_valid_pairs(mcap_path: Path, cmd_times: list[int],
                       cmd_series: list[dict], *, max_gap_ns: int,
                       label_shift_ns: int = 0, include_auto: bool = False) -> int:
     """`--target-count` の間引き幅を決めるための下見（JPEGデコードはしない軽い走査）。"""
-    topics = [VIZ_IMAGE_PREFIX + c for c in cams]
     n = 0
-    with open(mcap_path, "rb") as f:
-        reader = make_reader(f)
-        for _schema, _channel, message in reader.iter_messages(topics=topics):
-            cmd = nearest_cmd(cmd_times, cmd_series, message.log_time + label_shift_ns,
-                              max_gap_ns)
-            if reject_reason(cmd, include_auto=include_auto) is None:
-                n += 1
+    for _cam, t_ns, _data, _left in iter_images(mcap_path):
+        cmd = nearest_cmd(cmd_times, cmd_series, t_ns + label_shift_ns, max_gap_ns)
+        if reject_reason(cmd, include_auto=include_auto) is None:
+            n += 1
     return n
 
 
-def extract_one(mcap_path: Path, out_dir: Path, cams: set[str], writer: csv.writer, *,
+def extract_one(mcap_path: Path, out_dir: Path, writer: csv.writer, *,
                 max_gap_ns: int, min_interval_ns: int = 0, keep_ratio: float = 1.0,
                 acc_by_cam: dict[str, float] | None = None, label_shift_ns: int = 0,
                 rejects: Counter | None = None,
@@ -213,8 +249,8 @@ def extract_one(mcap_path: Path, out_dir: Path, cams: set[str], writer: csv.writ
     last_t_by_cam: dict[str, int] = {}
     cmd_times, cmd_series = load_cmd_series(mcap_path)
     state_times, state_series = load_series(mcap_path, STATE_MCAP_TOPIC)
-    for cam, t_ns, jpg, cmd in iter_valid_pairs(
-            mcap_path, cams, cmd_times, cmd_series, max_gap_ns=max_gap_ns,
+    for cam, t_ns, jpg, cmd, left_jpg in iter_valid_pairs(
+            mcap_path, cmd_times, cmd_series, max_gap_ns=max_gap_ns,
             label_shift_ns=label_shift_ns, rejects=rejects, include_auto=include_auto):
         if keep_ratio < 1.0:
             acc = acc_by_cam.get(cam, 0.0) + keep_ratio
@@ -231,6 +267,7 @@ def extract_one(mcap_path: Path, out_dir: Path, cams: set[str], writer: csv.writ
         speed_actual = "" if state is None else float(state.get("speed", 0.0))
         name = f"{mcap_path.stem}_{cam}_{t_ns}.jpg"
         (out_dir / name).write_bytes(jpg)
+        left_path(out_dir / name).write_bytes(left_jpg)
         writer.writerow([name, mcap_path.name, cam, t_ns,
                          float(cmd.get("target_steer", 0.0)),
                          float(cmd.get("target_speed", 0.0)),
@@ -252,8 +289,6 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mcap_files", nargs="+", type=Path)
     ap.add_argument("--out", type=Path, default=Path("ml_cam_e2e/data/frames"))
-    ap.add_argument("--cam", choices=("front", "rear", "both"), default="front",
-                    help="取り出すカメラ（既定 front。カメラE2Eは前方走行が対象）")
     ap.add_argument("--max-gap-ms", type=int, default=100,
                     help="画像フレームと `cmd` の時刻差の許容上限[ms]。"
                          "これを超えて近い指令が無ければそのフレームは捨てる")
@@ -269,7 +304,6 @@ def main() -> int:
                        help="全 .mcap 合計でこの枚数に近づくよう均等に間引く")
     args = ap.parse_args()
 
-    cams = {"front", "rear"} if args.cam == "both" else {args.cam}
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.csv"
     is_new = not manifest_path.exists()
@@ -301,7 +335,7 @@ def main() -> int:
         total = 0
         for p in existing:
             cmd_times, cmd_series = load_cmd_series(p)
-            total += count_valid_pairs(p, cams, cmd_times, cmd_series, max_gap_ns=max_gap_ns,
+            total += count_valid_pairs(p, cmd_times, cmd_series, max_gap_ns=max_gap_ns,
                                        label_shift_ns=label_shift_ns,
                                        include_auto=args.include_auto)
         keep_ratio = min(1.0, args.target_count / total) if total else 1.0
@@ -316,7 +350,7 @@ def main() -> int:
         if is_new:
             w.writerow(MANIFEST_COLUMNS)
         for p in existing:
-            n, acc_by_cam = extract_one(p, args.out, cams, w, max_gap_ns=max_gap_ns,
+            n, acc_by_cam = extract_one(p, args.out, w, max_gap_ns=max_gap_ns,
                                         min_interval_ns=min_interval_ns,
                                         keep_ratio=keep_ratio, acc_by_cam=acc_by_cam,
                                         label_shift_ns=label_shift_ns, rejects=rejects,

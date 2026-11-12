@@ -27,7 +27,7 @@ Tkinter は Python 標準ライブラリ同梱なので、`ml_cam/requirements.t
     ml_cam/runs/<モデル名>/frames/     … ①の出力・②③の入力
     ml_cam/runs/<モデル名>/best.pt     … ③の出力・④の入力
     ml_cam/runs/<モデル名>/note.txt    … 自由記述の備考（①タブで書ける）
-    models/<モデル名>.onnx             … ④の出力（実車のGUIが選ぶ場所）
+    models/seg/<モデル名>.onnx         … ④の出力（実車のGUIが選ぶ場所）
 
 モデル名は`v1`・`v2`…の続きを自動提案するが、既存の名前を選べば続きから
 作業できる（追加のフレーム抽出・再アノテーション・再学習）。
@@ -68,10 +68,9 @@ __all__ = [
 ]
 
 RUNS_DIR = ML_CAM_DIR / "runs"
-#: 実車側（`raspi/nodes/cam_perception_node.py`・`telemetry_node.py`）が
-#: `models/<name>.onnx`をフラットに探す前提に合わせる（`ml_lidar`の
-#: `models/e2e_lidar/`のようなサブディレクトリは切らない）
-MODELS_DIR = REPO_ROOT / "models"
+#: 実車側（`raspi/nodes/cam_perception_node.py` の `DEFAULT_MODELS_DIR`・`telemetry_node.py` の
+#: `SEG_MODELS_DIR`）と同じ場所。モデルの種類ごとに `models/` のサブフォルダを切る
+MODELS_DIR = REPO_ROOT / "models" / "seg"
 DEFAULT_CHECKPOINT_DIR = ML_CAM_DIR / "checkpoints"
 #: これまでのトラブルシューティングで実際に使った SAM のチェックポイント
 SAM_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
@@ -295,7 +294,7 @@ class App:
         self.model_combo["values"] = list_model_names(RUNS_DIR)
 
     def _refresh_exported_models(self) -> None:
-        """⑤タブのプレビュー対象モデル一覧（`models/*.onnx`）を最新化する。"""
+        """⑤タブのプレビュー対象モデル一覧（`models/seg/*.onnx`）を最新化する。"""
         names = sorted(p.stem for p in MODELS_DIR.glob("*.onnx")) if MODELS_DIR.is_dir() else []
         self.preview_model_combo["values"] = names
 
@@ -336,7 +335,7 @@ class App:
 
         cam_var = tk.StringVar(value="front")
         ttk.Label(frame, text="カメラ:").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(frame, textvariable=cam_var, values=["front", "rear", "both"],
+        ttk.Combobox(frame, textvariable=cam_var, values=["front", "left", "both"],
                     state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=(8, 0))
 
         thin_mode = tk.StringVar(value="interval")
@@ -573,7 +572,7 @@ class App:
         ttk.Button(frame, text="参照", command=lambda: self._browse_dir(self.preview_frames_var)).grid(
             row=1, column=2, pady=(8, 0))
 
-        # ④でエクスポート済みのモデル（`models/*.onnx`）から選ぶドロップダウン。
+        # ④でエクスポート済みのモデル（`models/seg/*.onnx`）から選ぶドロップダウン。
         # パスを手打ち・参照する必要を無くす（`ml_lidar/app.py`
         # のrun一覧ドロップダウンと同じ考え方）
         self.preview_model_var = tk.StringVar(value="")

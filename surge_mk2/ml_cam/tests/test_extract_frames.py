@@ -33,7 +33,7 @@ class TestExtractFrames(unittest.TestCase):
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=1_700_000_000_000_000_000) as log:
                 log.write_viz_image(jpg, "front", t_mono_ns=1_000_000)
                 log.write_viz_image(jpg, "front", t_mono_ns=2_000_000)
-                log.write_viz_image(jpg, "rear", t_mono_ns=1_500_000)
+                log.write_viz_image(jpg, "left", t_mono_ns=1_500_000)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
@@ -57,11 +57,11 @@ class TestExtractFrames(unittest.TestCase):
                 self.assertEqual(row[1], "run.mcap")
                 self.assertEqual(row[2], "front")
 
-    def test_rear_camera_is_skipped_when_not_requested(self):
+    def test_left_camera_is_skipped_when_not_requested(self):
         with tempfile.TemporaryDirectory() as d:
             mcap_path = Path(d) / "run.mcap"
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
-                log.write_viz_image(_tiny_jpeg(), "rear", t_mono_ns=0)
+                log.write_viz_image(_tiny_jpeg(), "left", t_mono_ns=0)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
@@ -93,13 +93,13 @@ class TestExtractFrames(unittest.TestCase):
             jpg = _tiny_jpeg()
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write_viz_image(jpg, "front", t_mono_ns=0)
-                log.write_viz_image(jpg, "rear", t_mono_ns=10_000_000)
+                log.write_viz_image(jpg, "left", t_mono_ns=10_000_000)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, _ = extract_one(mcap_path, out_dir, {"front", "rear"}, w,
+                n, _ = extract_one(mcap_path, out_dir, {"front", "left"}, w,
                                    min_interval_ns=200_000_000)
 
             self.assertEqual(n, 2, "別カメラなので間引きの基準時刻を共有しないはず")
@@ -149,17 +149,17 @@ class TestExtractFrames(unittest.TestCase):
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 for i in range(10):
                     log.write_viz_image(jpg, "front", t_mono_ns=i * 2_000_000)
-                    log.write_viz_image(jpg, "rear", t_mono_ns=i * 2_000_000 + 1_000_000)
+                    log.write_viz_image(jpg, "left", t_mono_ns=i * 2_000_000 + 1_000_000)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, _ = extract_one(mcap_path, out_dir, {"front", "rear"}, w, keep_ratio=0.5)
+                n, _ = extract_one(mcap_path, out_dir, {"front", "left"}, w, keep_ratio=0.5)
 
             cams_taken = {p.stem.split("_")[1] for p in out_dir.glob("*.jpg")}
-            self.assertEqual(cams_taken, {"front", "rear"},
-                             "前後どちらのカメラも採用されているはず")
+            self.assertEqual(cams_taken, {"front", "left"},
+                             "左右どちらのカメラも採用されているはず")
 
     def test_keep_ratio_avoids_cliff_edge_near_target(self):
         """総数が目標のちょうど2倍未満でも、割り算の余りで「間引きなし」に
@@ -190,10 +190,10 @@ class TestExtractFrames(unittest.TestCase):
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write_viz_image(jpg, "front", t_mono_ns=0)
                 log.write_viz_image(jpg, "front", t_mono_ns=1_000_000)
-                log.write_viz_image(jpg, "rear", t_mono_ns=2_000_000)
+                log.write_viz_image(jpg, "left", t_mono_ns=2_000_000)
 
             self.assertEqual(count_messages(mcap_path, {"front"}), 2)
-            self.assertEqual(count_messages(mcap_path, {"front", "rear"}), 3)
+            self.assertEqual(count_messages(mcap_path, {"front", "left"}), 3)
 
     def test_topic_prefix_matches_mcap_log(self):
         """`VIZ_IMAGE_PREFIX` が `raspi/rec/mcap_log.py` の値とズレていないこと。"""

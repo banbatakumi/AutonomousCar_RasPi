@@ -19,7 +19,7 @@ import torch  # noqa: E402
 
 from export_onnx import MEAN, STD, export, verify_parity  # noqa: E402
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION, PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
 from raspi.nodes.cam_e2e_node import MODEL_OUTPUTS, load_model  # noqa: E402
 
 
@@ -30,7 +30,8 @@ def _save_checkpoint(d: str, name: str = "best.pt") -> Path:
 
 
 def _write_train_config(d: str, **over) -> None:
-    cfg = {"input_size": [64, 48], "max_steer": 0.777, "speed_ref": 1.25}
+    cfg = {"input_size": [64, 48], "max_steer": 0.777, "speed_ref": 1.25,
+           "preproc_version": PREPROC_VERSION_STEREO, "crop_x": 0.05, "cams": list(STEREO_CAMS)}
     cfg.update(over)
     (Path(d) / "train_config.json").write_text(json.dumps(cfg))
 
@@ -41,6 +42,7 @@ class TestExportOnnx(unittest.TestCase):
         # 既定の引数で書き出した1つを、中身を読むだけのテストで使い回す（書き出しは1回 約1秒）
         cls._tmp = tempfile.TemporaryDirectory()
         cls.ckpt_path = _save_checkpoint(cls._tmp.name, "model.pt")
+        _write_train_config(cls._tmp.name)
         cls.out_path = Path(cls._tmp.name) / "model.onnx"
         export(cls.ckpt_path, cls.out_path, (64, 48), max_steer=0.524, speed_ref=2.0)
 
@@ -57,7 +59,8 @@ class TestExportOnnx(unittest.TestCase):
         self.assertEqual(cfg["max_steer"], 0.524)
         self.assertEqual(cfg["speed_ref"], 2.0)
         self.assertEqual(cfg["outputs"], list(MODEL_OUTPUTS))
-        self.assertEqual(cfg["preproc_version"], PREPROC_VERSION)
+        self.assertEqual(cfg["preproc_version"], PREPROC_VERSION_STEREO)
+        self.assertEqual(cfg["cams"], list(STEREO_CAMS))
         self.assertEqual(cfg["color"], "RGB")
         self.assertEqual(cfg["note"], "")
         self.assertEqual(len(cfg["steer_link"]), 2)
@@ -65,6 +68,7 @@ class TestExportOnnx(unittest.TestCase):
     def test_steer_link_comes_from_train_config_or_argument(self):
         with tempfile.TemporaryDirectory() as d:
             ckpt_path = _save_checkpoint(d)
+            _write_train_config(d)
             out_path = Path(d) / "model.onnx"
             export(ckpt_path, out_path, (64, 48), max_steer=0.5, speed_ref=2.0,
                    steer_link=(0.5, 0.25))
@@ -72,29 +76,39 @@ class TestExportOnnx(unittest.TestCase):
             self.assertEqual(cfg["steer_link"], [0.5, 0.25])
 
     def test_crop_from_train_config_goes_into_the_contract(self):
-        """向きの拡張で学習した run（crop_x>0）は版2と crop_x を契約に書き、実車もその窓で推論する。"""
+        """学習時の crop_x を契約に書き、実車もその窓で推論する。"""
         with tempfile.TemporaryDirectory() as d:
-            _write_train_config(d, preproc_version=PREPROC_VERSION_CROP, crop_x=0.05)
+            _write_train_config(d, crop_x=0.08)
             ckpt_path = _save_checkpoint(d)
             out_path = Path(d) / "model.onnx"
             export(ckpt_path, out_path)
             cfg = json.loads(out_path.with_suffix(".json").read_text())
-            self.assertEqual(cfg["preproc_version"], PREPROC_VERSION_CROP)
-            self.assertAlmostEqual(cfg["crop_x"], 0.05)
-            self.assertAlmostEqual(load_model(out_path).crop_x, 0.05)
+            self.assertAlmostEqual(cfg["crop_x"], 0.08)
+            self.assertAlmostEqual(load_model(out_path).crop_x, 0.08)
+
+    def test_single_camera_runs_are_refused(self):
+        """前後配置のころの右1台の学習（版1・2）や切り落とし無しは書き出さない（ノードが読めない）。"""
+        for over in ({"preproc_version": 1, "crop_x": 0.0}, {"preproc_version": PREPROC_VERSION_CROP},
+                     {"preproc_version": None}, {"crop_x": 0.0}):
+            with tempfile.TemporaryDirectory() as d:
+                _write_train_config(d, **over)
+                with self.assertRaises(ValueError, msg=str(over)):
+                    export(_save_checkpoint(d), Path(d) / "model.onnx")
 
     def test_exported_model_is_accepted_by_the_vehicle_side_loader(self):
         """書いた契約を、実車が使う `load_model()` がそのまま読めること
         ——キー名や版がどちらかだけ変わると、ここで落ちる。"""
         model = load_model(self.out_path)
         self.assertEqual(model.input_size, (64, 48))
-        steer, speed = model.infer(np.zeros((36, 64, 3), dtype=np.uint8))
+        black = np.zeros((36, 64, 3), dtype=np.uint8)
+        steer, speed = model.infer(black, black)
         self.assertTrue(-1.0 <= steer <= 1.0)
         self.assertTrue(0.0 <= speed <= 1.0)
 
     def test_note_is_embedded_in_the_exported_json(self):
         with tempfile.TemporaryDirectory() as d:
             ckpt_path = _save_checkpoint(d)
+            _write_train_config(d)
             out_path = Path(d) / "model.onnx"
             export(ckpt_path, out_path, (64, 48), max_steer=0.524, speed_ref=2.0,
                    note="夜間走行用")
@@ -137,6 +151,7 @@ class TestExportOnnx(unittest.TestCase):
             out_path = Path(d) / "model.onnx"
             with self.assertRaises(ValueError):
                 export(ckpt_path, out_path)                       # train_config.json 無し
+            _write_train_config(d, max_steer=None, speed_ref=None)
             with self.assertRaises(ValueError):
                 export(ckpt_path, out_path, (64, 48))             # 基準が無い
             _write_train_config(d, speed_ref=0.0)
@@ -157,7 +172,7 @@ class TestExportOnnx(unittest.TestCase):
             lone_path = Path(lone_dir) / "renamed.onnx"
             shutil.copy(self.out_path, lone_path)
             sess = ort.InferenceSession(str(lone_path), providers=["CPUExecutionProvider"])
-            sess.run(None, {"input": torch.zeros(1, 3, 48, 64).numpy()})
+            sess.run(None, {"input": torch.zeros(1, 6, 48, 64).numpy()})
 
     def test_mismatched_model_raises(self):
         different_model = DriveRegressionModel(pretrained=False)

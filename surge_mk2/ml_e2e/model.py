@@ -1,10 +1,13 @@
 """ml_e2e/model.py — 画像・点群・車両状態から、前方の経路点を出すモデル。
 
 ```
-image (3,h,w) ── MobileNetV3-Small ── 平均プール ── 全結合 ─┐
+image (6,h,w) ── MobileNetV3-Small ── 平均プール ── 全結合 ─┐
 lidar (H+1,n) ── 1D-CNN ─────────────── 全結合 ─┼─ 連結 → 全結合×2 ── 経路点 K×(x, y, v, b)
 state (3,)    ── 全結合 ───────────────────────┘
 ```
+
+画像は前方ステレオの左右2台で `(6,h,w)` の `[右, 左]`。右・左を同じ骨格に通し、プールした特徴を `[右, 左]` に
+つないでから全結合に入れる（`ml_cam_e2e/model.py` と同じ理由で骨格を共有する）。
 
 出力は経路点だけ（各点の位置・速度・不確かさ）。舵・速度の直接出力は持たない——走行は経路点を追い
 （`raspi/auto/e2e_fusion.py`）、直接出力は推論の遅れを補償できないので使い道が無かった（2026-11-11 に外した）。
@@ -58,8 +61,8 @@ class FusionModel(nn.Module):
                 m.momentum = _BN_MOMENTUM
         with torch.no_grad():
             enc_ch = self.encoder(torch.zeros(1, 3, 64, 64)).shape[1]
-        self.img_fc = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(enc_ch, feat),
-                                    nn.ReLU(inplace=True))
+        self.img_fc = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+                                    nn.Linear(enc_ch * 2, feat), nn.ReLU(inplace=True))
 
         self.lidar_cnn = nn.Sequential(
             nn.Conv1d(lidar_ch, 32, 7, stride=2, padding=3), nn.ReLU(inplace=True),
@@ -89,11 +92,18 @@ class FusionModel(nn.Module):
         with torch.no_grad():
             self.path_head.bias[3 * k:].fill_(-2.75)
 
+    def _image_feat(self, image: torch.Tensor) -> torch.Tensor:
+        # 画像は `(N, 6, h, w)` の `[右, 左]`。骨格は左右で共有（`ml_cam_e2e/model.py` と同じ）
+        n = image.shape[0]
+        # 右と左を縦に並べて1回で通す（同じ重み）→ プール (2N, C) → (N, 2C) の [右, 左] → 全結合
+        pooled = self.img_fc[:2](self.encoder(torch.cat([image[:, :3], image[:, 3:]], dim=0)))
+        return self.img_fc[2:](torch.cat([pooled[:n], pooled[n:]], dim=1))
+
     def forward(self, image: torch.Tensor, lidar: torch.Tensor, state: torch.Tensor,
                 avail: torch.Tensor) -> torch.Tensor:
         """出力は `(N, 4K)`（`e2e_fusion_preproc.decode_output` の並び）。"""
         a_img, a_lid, a_st = avail[:, 0:1], avail[:, 1:2], avail[:, 2:3]
-        f_img = self.img_fc(self.encoder(image)) * a_img + self.no_image * (1.0 - a_img)
+        f_img = self._image_feat(image) * a_img + self.no_image * (1.0 - a_img)
         f_lid = self.lidar_fc(self.lidar_cnn(lidar)) * a_lid + self.no_lidar * (1.0 - a_lid)
         f_st = self.state_fc(state) * a_st + self.no_state * (1.0 - a_st)
         z = self.trunk(torch.cat([f_img, f_lid, f_st], dim=1))

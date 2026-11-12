@@ -162,28 +162,43 @@ def worst_segments(rows: list[dict], k: int = 20, merge_s: float = 1.0) -> list[
     return picked
 
 
-def yaw_response(model, rgbs: list, fx_px: float, body, deg: float = 3.0) -> list[float]:
-    """各絵について dδ/dψ（車が左へ ψ 向いたときの舵の変化 / ψ、無次元）を返す。
+def _infer(model, pair) -> tuple[float, float]:
+    """`pair` は `(右の RGB, 左の RGB)`。"""
+    import numpy as np
 
+    rgb, rgb_left = pair
+    return model.infer(np.ascontiguousarray(rgb), np.ascontiguousarray(rgb_left))
+
+
+def yaw_response(model, pairs: list, fx_px, body, deg: float = 3.0) -> list[float]:
+    """各組について dδ/dψ（車が左へ ψ 向いたときの舵の変化 / ψ、無次元）を返す。
+
+    `pairs` は `(右の RGB, 左の RGB)` の列。`fx_px`・`body` は `(右, 左)` の組（1つの値なら両方に使う）。
     絵の全体を横にずらし（端は端の画素で延長）、車体は元の位置に戻してから
-    `model.infer()` に通す。切り落とし付きのモデル（版2）は、ずらしが切り落とし幅以内なら
-    延長した端が窓の外に落ちるので、学習の拡張と同じ絵になる。版1のモデルは端の帯が
-    入るぶん近似になる。
+    `model.infer()` に通す。ずらしが切り落とし幅以内なら延長した端が窓の外に落ちるので、
+    学習の拡張と同じ絵になる。同じ ψ を左右両方に掛ける。
     """
     import numpy as np
     from yaw_aug import yawed_window
 
+    fxs = tuple(fx_px) if isinstance(fx_px, (tuple, list)) else (fx_px, fx_px)
+    bodies = tuple(body) if isinstance(body, (tuple, list)) else (body, body)
     psi = math.radians(deg)
-    shift = round(fx_px * psi)
-    out = []
-    for rgb in rgbs:
+
+    def turned(rgb, i: int, sign: float):
+        if rgb is None:
+            return None
+        shift = round(fxs[i] * psi)
         # 両側に shift ぶん端を延長してから窓をずらす＝全体をずらして端を延長したのと同じ
         padded = np.pad(rgb, ((0, 0), (shift, shift), (0, 0)), mode="edge")
-        pb = None if body is None else np.pad(body, ((0, 0), (shift, shift)), mode="constant")
-        left = yawed_window(padded, shift, +psi, fx_px, pb)
-        right = yawed_window(padded, shift, -psi, fx_px, pb)
-        d_left = model.infer(np.ascontiguousarray(left))[0] * model.max_steer
-        d_right = model.infer(np.ascontiguousarray(right))[0] * model.max_steer
+        b = bodies[i]
+        pb = None if b is None else np.pad(b, ((0, 0), (shift, shift)), mode="constant")
+        return yawed_window(padded, shift, sign * psi, fxs[i], pb)
+
+    out = []
+    for rgb, rgb_left in pairs:
+        d_left = _infer(model, (turned(rgb, 0, +1), turned(rgb_left, 1, +1)))[0] * model.max_steer
+        d_right = _infer(model, (turned(rgb, 0, -1), turned(rgb_left, 1, -1)))[0] * model.max_steer
         out.append((d_left - d_right) / (2 * psi))
     return out
 
@@ -208,16 +223,16 @@ def perturbations() -> list[tuple[str, object]]:
     ]
 
 
-def perturbation_response(model, rgbs: list, turn_deg: float = 5.0) -> list[dict]:
-    """外乱ごとに、舵の変化の平均 [deg] と、切っている場面の舵の比（外乱あり / なし）を返す。"""
-    import numpy as np
-
-    base = [model.infer(rgb)[0] * model.max_steer for rgb in rgbs]
+def perturbation_response(model, pairs: list, turn_deg: float = 5.0) -> list[dict]:
+    """外乱ごとに、舵の変化の平均 [deg] と、切っている場面の舵の比（外乱あり / なし）を返す。
+    `pairs` は `(右の RGB, 左の RGB)` の列。同じ外乱を左右両方に掛ける。"""
+    base = [_infer(model, p)[0] * model.max_steer for p in pairs]
     turning = [i for i, b in enumerate(base) if abs(b) > math.radians(turn_deg)]
     out = []
     for name, fn in perturbations():
-        pert = [model.infer(np.ascontiguousarray(fn(rgb)))[0] * model.max_steer for rgb in rgbs]
-        diff = sum(abs(p - b) for p, b in zip(pert, base, strict=True)) / len(rgbs)
+        pert = [_infer(model, (fn(r), fn(l)))[0] * model.max_steer
+                for r, l in pairs]
+        diff = sum(abs(p - b) for p, b in zip(pert, base, strict=True)) / len(pairs)
         ratio = (sum(abs(pert[i]) for i in turning) / sum(abs(base[i]) for i in turning)
                  if turning else math.nan)
         out.append({"name": name, "mean_abs_diff_deg": math.degrees(diff),
@@ -254,6 +269,16 @@ def main() -> int:
               "既定の振り分けで val/train を決めます",
               file=sys.stderr)
     exclusions = S.load_exclusions(args.frames)
+    n_all = len(samples)
+    samples = [s for s in samples if S.has_left(s)]
+    if len(samples) < n_all:
+        print(f"# 左の画像が無い {n_all - len(samples)}件は評価しない", file=sys.stderr)
+    if not samples:
+        print(f"{args.frames} に左右の組がありません（extract_pairs.py で取り出し直す）", file=sys.stderr)
+        return 2
+
+    def load_pair(s):
+        return S.load_rgb(s.path), S.load_rgb(S.left_path(s.path))
 
     out_path = args.out or args.run / "eval.csv"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,7 +287,7 @@ def main() -> int:
         w = csv.writer(f)
         w.writerow(EVAL_COLUMNS)
         for i, s in enumerate(samples, 1):
-            steer_n, speed_n = model.infer(S.load_rgb(s.path))
+            steer_n, speed_n = _infer(model, load_pair(s))
             row = {
                 "file": s.path.name, "source_mcap": s.source_mcap, "cam": s.cam,
                 "t_capture_ns": s.t_ns, "split": split_of(s, exclusions, train_cfg),
@@ -289,25 +314,29 @@ def main() -> int:
     print(f"# 書き出し完了: {out_path}")
 
     # ── ずれへの応答（モジュールdocstring参照） ──
-    from yaw_aug import ensure_body_mask, front_fx_px
+    from yaw_aug import BODY_MASK_LEFT_NAME, camera_fx_px, ensure_body_mask
 
     from raspi.core.vehicle import Vehicle
 
     val = [s for s in samples if split_of(s, exclusions, train_cfg) == SPLIT_VAL]
     pick = val[::max(1, len(val) // 60)][:60] or samples[::max(1, len(samples) // 60)][:60]
     if pick:
-        rgbs = [S.load_rgb(s.path) for s in pick]
-        fx_px = front_fx_px(Vehicle.load(), rgbs[0].shape[1])
+        pairs = [load_pair(s) for s in pick]
+        vehicle = Vehicle.load()
+        width = pairs[0][0].shape[1]
         # 止まっている間の絵は背景も動かないので、車体の推定には走行中の絵だけを使う
-        body = ensure_body_mask(args.frames, [s.path for s in samples
-                                              if S.drop_reason(s) is None])
-        resp = sorted(yaw_response(model, rgbs, fx_px, body))
+        moving = [s for s in samples if S.drop_reason(s) is None]
+        fx_px = (camera_fx_px(vehicle, "front", width), camera_fx_px(vehicle, "left", width))
+        body = (ensure_body_mask(args.frames, [s.path for s in moving]),
+                ensure_body_mask(args.frames, [S.left_path(s.path) for s in moving],
+                                 BODY_MASK_LEFT_NAME))
+        resp = sorted(yaw_response(model, pairs, fx_px, body))
         med = resp[len(resp) // 2]
         print(f"# ずれへの応答 dδ/dψ: 中央値 {med:+.2f}（{len(resp)}枚。負で大きいほど戻す力が強い。"
               f"手本の追従は約 -0.8〜-1.5）")
         # ── 外乱で舵がどれだけ変わるか（モジュールdocstring参照） ──
         print("# 外乱による舵の変化（小さいほど強い。比は切っている場面の 外乱あり/なし、1.00 が理想）:")
-        for r in perturbation_response(model, rgbs):
+        for r in perturbation_response(model, pairs):
             print(f"#   {r['name']:8s} 平均 {r['mean_abs_diff_deg']:4.1f}°  比 {r['turn_ratio']:.2f}"
                   f"（{r['n_turn']}枚）")
     return 0

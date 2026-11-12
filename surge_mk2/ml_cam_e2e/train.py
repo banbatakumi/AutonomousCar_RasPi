@@ -17,7 +17,13 @@
 
 `--yaw-aug-deg`（既定 6°）で絵を ±その角度だけ横にずらし、舵のラベルを
 `δ − k·ψ`（`--yaw-aug-k`）に補正する。詳細と理由は `yaw_aug.py`。0 で無効
-（左右の切り落としも無くなり、前処理は版1のまま）。
+は使えない（左右2台の前処理の版3は左右の切り落としが要る）。
+
+## 左右2台
+
+`extract_pairs.py` で取り出した組（右の行＋`_left` の左の画像）で学習する。左の画像が無い行は使わない。
+前処理は版3（`cam_e2e_preproc.PREPROC_VERSION_STEREO`）。
+車体マスクと fx はカメラごとに持つ（左は `body_mask_left.png`・`[sensors.cam_left]` の校正値）。
 """
 
 from __future__ import annotations
@@ -39,10 +45,13 @@ from torch.utils.data import DataLoader, WeightedRandomSampler  # noqa: E402
 import samples as S  # noqa: E402
 from dataset import DriveDataset  # noqa: E402
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION, PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    PREPROC_VERSION_STEREO,
+    STEREO_CAMS,
+)
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from samples import load_rgb  # noqa: E402
-from yaw_aug import ensure_body_mask, front_fx_px, margin_for  # noqa: E402
+from yaw_aug import BODY_MASK_LEFT_NAME, camera_fx_px, ensure_body_mask, front_fx_px, margin_for  # noqa: E402
 
 __all__ = ["select_samples", "loss_fn", "train_one_epoch", "evaluate", "pick_device"]
 
@@ -52,7 +61,7 @@ _HUBER_BETA = 0.1
 
 
 def select_samples(frames_dir: Path) -> tuple[list[S.Sample], Counter]:
-    """学習に使うサンプルと、使わなかった理由の内訳を返す。"""
+    """学習に使うサンプルと、使わなかった理由の内訳を返す。左の画像が無い行も落とす。"""
     exclusions = S.load_exclusions(frames_dir)
     used: list[S.Sample] = []
     dropped: Counter = Counter()
@@ -61,6 +70,8 @@ def select_samples(frames_dir: Path) -> tuple[list[S.Sample], Counter]:
             dropped["除外区間"] += 1
         elif (reason := S.drop_reason(s)) is not None:
             dropped[reason] += 1
+        elif not S.has_left(s):
+            dropped["左の画像が無い"] += 1
         else:
             used.append(s)
     return used, dropped
@@ -148,6 +159,9 @@ def main() -> int:
     torch.manual_seed(args.seed)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
+    if args.yaw_aug_deg <= 0:
+        print("--yaw-aug-deg は正の値が要る（左右2台の前処理は左右の切り落としが要る）", file=sys.stderr)
+        return 2
     used, dropped = select_samples(args.frames)
     if dropped:
         print("# 学習に使わないペア: "
@@ -169,21 +183,23 @@ def main() -> int:
         print("# 警告: 検証データが0件です（記録が短い）。val_mae は nan になり、"
               "最後のエポックを best.pt にします", file=sys.stderr)
 
-    crop_x = 0.0
-    fx_px = 0.0
-    body_mask = None
-    if args.yaw_aug_deg > 0:
-        src_w = load_rgb(used[0].path).shape[1]
-        fx_px = front_fx_px(vehicle, src_w)
-        crop_x = margin_for(args.yaw_aug_deg, fx_px) / src_w
-        body_mask = ensure_body_mask(args.frames, [s.path for s in used])
-        print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  k={args.yaw_aug_k:g}  fx={fx_px:.1f}px  "
-              f"左右の切り落とし {crop_x * 100:.1f}%  車体マスク {body_mask.mean() * 100:.1f}%")
+    src_w = load_rgb(used[0].path).shape[1]
+    fx_px = front_fx_px(vehicle, src_w)
+    fx_px_left = camera_fx_px(vehicle, "left", src_w)
+    crop_x = margin_for(args.yaw_aug_deg, max(fx_px, fx_px_left)) / src_w
+    body_mask = ensure_body_mask(args.frames, [s.path for s in used])
+    body_mask_left = ensure_body_mask(args.frames, [S.left_path(s.path) for s in used],
+                                      BODY_MASK_LEFT_NAME)
+    mask_note = (f"車体マスク 右 {body_mask.mean() * 100:.1f}%・左 {body_mask_left.mean() * 100:.1f}%"
+                 f"  fx(左)={fx_px_left:.1f}px")
+    print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  k={args.yaw_aug_k:g}  fx={fx_px:.1f}px  "
+          f"左右の切り落とし {crop_x * 100:.1f}%  {mask_note}")
 
     common = dict(size=(w, h), max_steer=max_steer, speed_ref=speed_ref, crop_x=crop_x)
     train_ds = DriveDataset(train_s, augment=True, flip=not args.no_flip,
                             yaw_max_deg=args.yaw_aug_deg, yaw_k=args.yaw_aug_k, fx_px=fx_px,
-                            body_mask=body_mask, photo_strength=args.photo_aug, **common)
+                            body_mask=body_mask, photo_strength=args.photo_aug,
+                            fx_px_left=fx_px_left, body_mask_left=body_mask_left, **common)
     val_ds = DriveDataset(val_s, augment=False, **common)
     if args.balance > 0:
         weights = S.balance_weights([S.steer_norm(s, max_steer) for s in train_s],
@@ -204,9 +220,10 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     config = {
         "input_size": [w, h],
-        "preproc_version": PREPROC_VERSION_CROP if crop_x > 0 else PREPROC_VERSION,
+        "preproc_version": PREPROC_VERSION_STEREO,
+        "cams": list(STEREO_CAMS),
         "crop_x": crop_x, "yaw_aug_deg": args.yaw_aug_deg, "yaw_aug_k": args.yaw_aug_k,
-        "fx_px": fx_px, "photo_aug": args.photo_aug,
+        "fx_px": fx_px, "fx_px_left": fx_px_left, "photo_aug": args.photo_aug,
         "max_steer": max_steer, "speed_ref": speed_ref,
         "steer_link": list(vehicle.steer_link),
         "block_s": args.block_s, "val_ratio": args.val_ratio, "seed": args.seed,

@@ -39,7 +39,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "ml_cam_e2e"))
 
-from yaw_aug import front_fx_px, yawed_window  # noqa: E402
+from yaw_aug import camera_fx_px, yawed_window  # noqa: E402
 
 from ml_e2e import labels as L  # noqa: E402
 from ml_e2e import records as R  # noqa: E402
@@ -76,11 +76,11 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
            yaw_every: int = 0) -> dict:
     """記録1本を推論ノードと planner に通す。数字の dict を返す。"""
     rec = R.load(mcap)
-    images = list(R.iter_images(mcap)) if use_image else []
-    img_t = np.array([t for t, _ in images], dtype=np.int64)
+    model = node.model
+    images = list(R.iter_image_pairs(mcap)) if use_image else []     # (t, 右, 左)
+    img_t = np.array([im[0] for im in images], dtype=np.int64)
     planner = E2EFusion()
     node._rows.clear()
-    model = node.model
     label_idx = {int(t): i for i, t in enumerate(labels["t"])} if labels is not None else {}
     stride = max(1, int(round(model.ds / float(labels["ds"])))) if labels is not None else 1
 
@@ -106,13 +106,15 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
         if not driving:
             continue                               # 止まっている・DISARM の周は比べない
 
-        rgb, t_img = None, 0
+        rgb, rgb_left, t_img = None, None, 0
         if use_image and len(img_t):
             j = int(np.searchsorted(img_t, t_now - int(_IMAGE_ARRIVE_S * NS), side="right")) - 1
             if j >= 0 and t_now - int(img_t[j]) < 0.2 * NS:
                 t_img = int(img_t[j])
                 rgb = np.asarray(Image.open(io.BytesIO(images[j][1])).convert("RGB"))
-        plan = node.infer_once(rgb=rgb, t_image_ns=t_img, vs=vs, now_ns=t_now, seq=si)
+                if images[j][2] is not None:
+                    rgb_left = np.asarray(Image.open(io.BytesIO(images[j][2])).convert("RGB"))
+        plan = node.infer_once(rgb=rgb, t_image_ns=t_img, vs=vs, now_ns=t_now, seq=si, rgb_left=rgb_left)
         dt = (t_now - last_plan_t) / NS if last_plan_t else 0.0
         last_plan_t = t_now
         st = planner.plan(plan, vs, params, dt)
@@ -144,7 +146,7 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
 
         if yaw_every and rgb is not None and out["ready"] % yaw_every == 0 and rec.scan_seen[si].all():
             g = yaw_response(node, vehicle, rgb, rec.scan_dist[max(si - model.history + 1, 0):si + 1], vs,
-                             params, ref_xy=np.column_stack([plan.path_x, plan.path_y]))
+                             params, ref_xy=np.column_stack([plan.path_x, plan.path_y]), rgb_left=rgb_left)
             if g is not None and abs(g[1]) > 1e-3:
                 out["dpsi"].append(g[0])
                 out["dpsi_ratio"].append(g[0] / g[1])
@@ -153,18 +155,23 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
 
 def yaw_response(node: E2EFusionNode, vehicle: Vehicle, rgb: np.ndarray, dists: np.ndarray,
                  vs: VehicleState, params: dict[str, float], psi_deg: int = 4,
-                 ref_xy: np.ndarray | None = None) -> tuple[float, float] | None:
+                 ref_xy: np.ndarray | None = None,
+                 rgb_left: np.ndarray | None = None) -> tuple[float, float] | None:
     """車の向きを ±`psi_deg` ずらした入力での、経路を追う舵の変化 dδ/dψ [rad/rad]。
 
     画像は窓を横へずらし（`yaw_aug.yawed_window`、車体は動かさないマスク無し）、点群は角度をずらす。
     舵は経路点を Pure Pursuit で追ったもの（`labels.pursuit_steer`、planner と同じ注視距離）。
     戻り値は `(実際の値, 理想の値)`。理想は、ずらさない入力で出た経路 `ref_xy` をそのまま ∓ψ 回したときの値
     （注視距離が長いほど小さい。高速では −0.2 程度にしかならないので、実際の値だけでは良し悪しが分からない）。
+    `rgb_left` も同じ ψ でずらす（左が無ければ `None`）。
     """
     model = node.model
-    fx = front_fx_px(vehicle, rgb.shape[1])
+    if rgb_left is None:
+        return None
+    fx = camera_fx_px(vehicle, "front", rgb.shape[1])
+    fx_left = camera_fx_px(vehicle, "left", rgb.shape[1])
     margin = crop_margin_px(rgb.shape[1], model.crop_x)
-    if math.ceil(fx * math.radians(psi_deg)) > margin:
+    if math.ceil(max(fx, fx_left) * math.radians(psi_deg)) > margin:
         return None
     from raspi.auto.base import scan_window
     from raspi.core.e2e_fusion_preproc import lidar_input, lidar_rows
@@ -176,7 +183,8 @@ def yaw_response(node: E2EFusionNode, vehicle: Vehicle, rgb: np.ndarray, dists: 
         psi = sgn * psi_deg
         # 左右の余白が要るので、切り落とす前の絵から窓をずらして作り、モデルには切り落とし済みとして渡す
         win = yawed_window(rgb, margin, math.radians(psi), fx, None)
-        image = model.image_input(_uncrop(win, margin))
+        win_left = _uncrop(yawed_window(rgb_left, margin, math.radians(psi), fx_left, None), margin)
+        image = model.image_input(_uncrop(win, margin), win_left)
         rows = []
         for dist in dists[::-1]:                      # 新しい順
             # 車が左へ ψ 向くと、物は −ψ の方向に見える: 新しい角 θ の値は元の角 θ+ψ の値

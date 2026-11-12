@@ -32,6 +32,12 @@ def _tiny_jpeg() -> bytes:
     return b"\xff\xd8\xff\xe0mock-jpeg-bytes\xff\xd9"
 
 
+def _write_pair(log: McapLog, jpg: bytes, t_mono_ns: int) -> None:
+    """右（front）と左（left）を同じ瞬間に1組書く（logger_node が同期中の左右を焼く形）。"""
+    log.write_viz_image(jpg, "front", t_mono_ns=t_mono_ns)
+    log.write_viz_image(jpg, "left", t_mono_ns=t_mono_ns)
+
+
 class TestTopicConstant(unittest.TestCase):
     def test_cmd_mcap_topic_matches_the_real_writer(self):
         """`_mcap_topic()`（`raspi/rec/mcap_log.py`）は先頭に `/` を付けるだけ。
@@ -76,14 +82,14 @@ class TestExtractOne(unittest.TestCase):
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_steer=0.15,
                                               target_speed=0.4), t_mono_ns=0)
-                log.write_viz_image(jpg, "front", t_mono_ns=5_000_000)   # 5ms後
+                _write_pair(log, jpg, t_mono_ns=5_000_000)   # 5ms後
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
                 w.writerow(MANIFEST_COLUMNS)
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000)
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000)
 
             self.assertEqual(n, 1)
             with open(out_dir / "manifest.csv") as mf:
@@ -96,13 +102,13 @@ class TestExtractOne(unittest.TestCase):
             mcap_path = Path(d) / "run.mcap"
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=False, target_steer=0.15), t_mono_ns=0)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=0)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=0)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000)
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000)
             self.assertEqual(n, 0, "ARMしていない指令のフレームは除外されるはず")
 
     def test_include_auto_extracts_frames_during_auto_mode(self):
@@ -112,14 +118,14 @@ class TestExtractOne(unittest.TestCase):
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=2, arm=True, target_steer=0.15,
                                                    target_speed=1.2,
                                                    source="auto:slam2d_route"), t_mono_ns=0)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=0)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=0)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
                 w.writerow(MANIFEST_COLUMNS)
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000,
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000,
                                    include_auto=True)
             self.assertEqual(n, 1)
             (sample,) = load_manifest(out_dir)
@@ -131,13 +137,13 @@ class TestExtractOne(unittest.TestCase):
             mcap_path = Path(d) / "run.mcap"
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=2, arm=True, target_steer=0.15), t_mono_ns=0)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=0)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=0)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000)
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000)
             self.assertEqual(n, 0, "AUTO中の指令のフレームは除外されるはず")
 
     def test_excludes_frames_beyond_max_gap(self):
@@ -145,13 +151,13 @@ class TestExtractOne(unittest.TestCase):
             mcap_path = Path(d) / "run.mcap"
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_steer=0.15), t_mono_ns=0)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=500_000_000)   # 500ms後
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=500_000_000)   # 500ms後
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000)
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000)
             self.assertEqual(n, 0, "時刻差が許容を超えるフレームは除外されるはず")
 
     def test_min_interval_thins_valid_pairs_only(self):
@@ -160,15 +166,15 @@ class TestExtractOne(unittest.TestCase):
             jpg = _tiny_jpeg()
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_steer=0.1), t_mono_ns=0)
-                log.write_viz_image(jpg, "front", t_mono_ns=0)
-                log.write_viz_image(jpg, "front", t_mono_ns=100_000_000)   # +100ms → 間引かれる
-                log.write_viz_image(jpg, "front", t_mono_ns=250_000_000)   # +250ms → 採用
+                _write_pair(log, jpg, t_mono_ns=0)
+                _write_pair(log, jpg, t_mono_ns=100_000_000)   # +100ms → 間引かれる
+                _write_pair(log, jpg, t_mono_ns=250_000_000)   # +250ms → 採用
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=1_000_000_000,
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=1_000_000_000,
                                    min_interval_ns=200_000_000)
             self.assertEqual(n, 2)
 
@@ -182,13 +188,13 @@ class TestExtractOne(unittest.TestCase):
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, torque_mode=True,
                                                    target_torque=0.05), t_mono_ns=0)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=0)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=0)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             rejects = Counter()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
-                n, _ = extract_one(mcap_path, out_dir, {"front"}, csv.writer(mf),
+                n, _ = extract_one(mcap_path, out_dir, csv.writer(mf),
                                    max_gap_ns=100_000_000, rejects=rejects)
             self.assertEqual(n, 0)
             self.assertEqual(rejects["トルクモード"], 1)
@@ -201,14 +207,14 @@ class TestExtractOne(unittest.TestCase):
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_steer=-0.1,
                                                    target_speed=0.6, brake=True), t_mono_ns=0)
                 log.write(STATE_MCAP_TOPIC, VehicleState(speed=0.55), t_mono_ns=2_000_000)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=5_000_000)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=5_000_000)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
                 w.writerow(MANIFEST_COLUMNS)
-                extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000)
+                extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000)
 
             (sample,) = load_manifest(out_dir)
             self.assertAlmostEqual(sample.target_steer, -0.1)
@@ -224,14 +230,14 @@ class TestExtractOne(unittest.TestCase):
             with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_speed=0.6),
                           t_mono_ns=0)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=0)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=0)
 
             out_dir = Path(d) / "frames"
             out_dir.mkdir()
             with open(out_dir / "manifest.csv", "a", newline="") as mf:
                 w = csv.writer(mf)
                 w.writerow(MANIFEST_COLUMNS)
-                extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=100_000_000)
+                extract_one(mcap_path, out_dir, w, max_gap_ns=100_000_000)
             (sample,) = load_manifest(out_dir)
             self.assertTrue(math.isnan(sample.speed_actual))
 
@@ -243,7 +249,7 @@ class TestExtractOne(unittest.TestCase):
                           t_mono_ns=0)
                 log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_steer=0.3),
                           t_mono_ns=150_000_000)
-                log.write_viz_image(_tiny_jpeg(), "front", t_mono_ns=0)
+                _write_pair(log, _tiny_jpeg(), t_mono_ns=0)
 
             for shift_ms, want in ((0, 0.0), (150, 0.3)):
                 out_dir = Path(d) / f"frames{shift_ms}"
@@ -251,7 +257,7 @@ class TestExtractOne(unittest.TestCase):
                 with open(out_dir / "manifest.csv", "a", newline="") as mf:
                     w = csv.writer(mf)
                     w.writerow(MANIFEST_COLUMNS)
-                    extract_one(mcap_path, out_dir, {"front"}, w, max_gap_ns=50_000_000,
+                    extract_one(mcap_path, out_dir, w, max_gap_ns=50_000_000,
                                 label_shift_ns=shift_ms * 1_000_000)
                 (sample,) = load_manifest(out_dir)
                 self.assertAlmostEqual(sample.target_steer, want)
@@ -305,6 +311,44 @@ class TestManifestHeader(unittest.TestCase):
             new.write_text(",".join(MANIFEST_COLUMNS) + "\n")
             self.assertFalse(check_manifest_header(old))
             self.assertTrue(check_manifest_header(new))
+
+
+class TestStereoPairs(unittest.TestCase):
+    """右と左を撮影時刻 0.5ms 以内の組にし、左は `_left` 付きの隣のファイルに書く。"""
+
+    def test_pairs_right_and_left_and_drops_unpaired_right(self):
+        from collections import Counter
+
+        from extract_pairs import REASON_NO_LEFT
+        from samples import has_left, left_path
+        with tempfile.TemporaryDirectory() as d:
+            mcap_path = Path(d) / "run.mcap"
+            r_jpg, l_jpg = b"\xff\xd8right\xff\xd9", b"\xff\xd8left\xff\xd9"
+            with McapLog(mcap_path, t0_mono_ns=0, t0_unix_ns=0) as log:
+                log.write(CMD_MCAP_TOPIC, DriveCmd(mode=1, arm=True, target_speed=0.4), t_mono_ns=0)
+                log.write_viz_image(r_jpg, "front", t_mono_ns=10_000_000)
+                log.write_viz_image(l_jpg, "left", t_mono_ns=10_020_000)     # 20µs 後 → 組
+                log.write_viz_image(l_jpg, "left", t_mono_ns=39_900_000)     # 左が先でも組になる
+                log.write_viz_image(r_jpg, "front", t_mono_ns=40_000_000)
+                log.write_viz_image(r_jpg, "front", t_mono_ns=70_000_000)    # 左が 2ms 後 → 組にならない
+                log.write_viz_image(l_jpg, "left", t_mono_ns=72_000_000)
+                log.write_viz_image(r_jpg, "front", t_mono_ns=90_000_000)    # 左が無い
+            out_dir = Path(d) / "frames"
+            out_dir.mkdir()
+            rejects = Counter()
+            with open(out_dir / "manifest.csv", "a", newline="") as mf:
+                w = csv.writer(mf)
+                w.writerow(MANIFEST_COLUMNS)
+                n, _ = extract_one(mcap_path, out_dir, w, max_gap_ns=200_000_000,
+                                   rejects=rejects)
+            self.assertEqual(n, 2)
+            self.assertEqual(rejects[REASON_NO_LEFT], 2)
+            samples = load_manifest(out_dir)
+            self.assertEqual([s.t_ns for s in samples], [10_000_000, 40_000_000])
+            for s in samples:
+                self.assertTrue(has_left(s))
+                self.assertEqual(s.path.read_bytes(), r_jpg)
+                self.assertEqual(left_path(s.path).read_bytes(), l_jpg)
 
 
 if __name__ == "__main__":

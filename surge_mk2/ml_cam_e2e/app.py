@@ -76,7 +76,7 @@ __all__ = [
 
 RUNS_DIR = ML_CAM_E2E_DIR / "runs"
 #: 実車側（`cam_e2e_node.py` の `DEFAULT_MODELS_DIR`）と同じ場所。セグメンテーション用
-#: （`models/` 直下）と混ざらないよう分けてある
+#: （`models/seg/`）と混ざらないよう分けてある
 MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
 #: 学習中でも壊れない・止めても惜しくない類のジョブは確認無しで終了時に落とす。
 #: 学習だけは数十分〜数時間かかりうるので、ウィンドウを閉じる前に一言確認する
@@ -91,19 +91,21 @@ parse_epoch_line = make_epoch_line_parser("val_mae")
 
 def describe_model_status(model_dir: Path) -> str:
     frames_dir = model_dir / "frames"
-    n = len(list(frames_dir.glob("*.jpg"))) if frames_dir.is_dir() else 0
+    # 左右の組の左（`<名前>_left.jpg`、`samples.left_path`）は数えない
+    n = (sum(1 for p in frames_dir.glob("*.jpg") if not p.stem.endswith("_left"))
+         if frames_dir.is_dir() else 0)
     mark = "✓学習済み" if (model_dir / "best.pt").exists() else "未学習"
     return f"ペア {n}件・{mark}"
 
 
 # ── コマンド組み立て（Tkinter を一切知らない純粋関数） ──
 
-def build_extract_cmd(python: str, mcap_files: list[str], out_dir: str, cam: str,
+def build_extract_cmd(python: str, mcap_files: list[str], out_dir: str,
                       max_gap_ms: int, min_interval_ms: int = 0,
                       target_count: int = 0, label_shift_ms: int = DEFAULT_LABEL_SHIFT_MS,
                       include_auto: bool = False) -> list[str]:
     cmd = [python, str(ML_CAM_E2E_DIR / "extract_pairs.py"), *mcap_files, "--out", out_dir,
-          "--cam", cam, "--max-gap-ms", str(max_gap_ms)]
+          "--max-gap-ms", str(max_gap_ms)]
     if include_auto:
         cmd.append("--include-auto")
     # 0 も明示して渡す（`extract_pairs.py` の既定は 0 ではない）
@@ -373,10 +375,8 @@ class App:
         ttk.Label(frame, textvariable=files_var, wraplength=500).grid(
             row=4, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
-        cam_var = tk.StringVar(value="front")
-        ttk.Label(frame, text="カメラ:").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(frame, textvariable=cam_var, values=["front", "rear", "both"],
-                    state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="カメラ: 前方ステレオの左右の組").grid(row=5, column=0, columnspan=2,
+                                                          sticky="w", pady=(8, 0))
 
         gap_var = tk.StringVar(value="100")
         ttk.Label(frame, text="操舵指令との時刻差の許容[ms]:").grid(row=6, column=0, sticky="w", pady=(8, 0))
@@ -449,7 +449,7 @@ class App:
                     messagebox.showerror("入力エラー", "間引き間隔は整数で入力してください")
                     return
             cmd = build_extract_cmd(self.python, self._extract_files, str(model_dir / "frames"),
-                                    cam_var.get(), max_gap_ms, interval, count, label_shift_ms,
+                                    max_gap_ms, interval, count, label_shift_ms,
                                     include_auto_var.get())
             report: list[str] = []
             self._run("extract", cmd, "ペア抽出", on_line=report.append,
@@ -521,8 +521,10 @@ class App:
         ttk.Label(frame, text="損失での速度の比重（舵=1）。0 で舵だけを学習（実車は速度出力を使わない）",
                  foreground="gray").grid(row=7, column=2, sticky="w", pady=(8, 0))
 
-        no_flip_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="左右反転の水増しを使わない（片側通行など左右対称でないコース）",
+        # 既定で反転しない。左右2台の反転は「左右を入れ替えてそれぞれ鏡像」（dataset.py）で、車体の写り方が
+        # 左右対称でないと実機で起きない見え方になる。対称か確かめるまで切っておく（docs/stereo_plan.md 段階5）
+        no_flip_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(frame, text="左右反転の水増しを使わない（カメラの映りが左右対称でないとき・片側通行のコース）",
                         variable=no_flip_var).grid(row=8, column=0, columnspan=3, sticky="w",
                                                    pady=(8, 0))
         no_pretrained_var = tk.BooleanVar(value=False)

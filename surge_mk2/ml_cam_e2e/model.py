@@ -6,12 +6,19 @@
 一切経由しない**——これがこのモデルの存在理由そのもの（低いカメラ高さで
 IPMの深度誤差が拡大する問題を、画像から直接操作を学習することで迂回する）。
 
-入力: `(N, 3, H, W)` float32（0〜1に正規化済み・`ml_cam_e2e/dataset.py` と同じ前提）
+入力: `(N, 6, H, W)` float32（前方ステレオの `[右 RGB, 左 RGB]`、0〜1に正規化済み。
+    `cam_e2e_preproc.preprocess_stereo`・`ml_cam_e2e/dataset.py` と同じ前提）
 出力: `(N, 2)` float32
     - `[:, 0]` 操舵の正規化値（`tanh` で -1〜1。1 = `max_steer` いっぱい左）
     - `[:, 1]` 速度の正規化値（`sigmoid` で 0〜1。1 = `speed_ref`。前進のみ）
 
 並びは `raspi/nodes/cam_e2e_node.py` の `MODEL_OUTPUTS` と揃える。
+
+## 左右2台
+
+右と左を**同じ重みのエンコーダ**に別々に通し、プーリングした特徴を `[右, 左]` の順につないでヘッドへ渡す。
+重みを共有するので骨格2本より重みが半分で、少ないデータでも崩れにくい。左右どちらの特徴かはつなぐ位置で区別する。
+6 チャネルを1枚の画像としてエンコーダに入れないのは、左右で同じ物が違う画素に写る（視差）ため。
 """
 
 from __future__ import annotations
@@ -58,13 +65,15 @@ class DriveRegressionModel(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(enc_ch, hidden_dim),
+            nn.Linear(enc_ch * 2, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, 2),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        feat = self.encoder(x)
-        pooled = self.pool(feat)
+        n = x.shape[0]
+        # 右と左を縦に並べて1回で通す（同じ重み）→ (2N, C) → (N, 2C) の [右, 左]
+        pooled = self.pool(self.encoder(torch.cat([x[:, :3], x[:, 3:]], dim=0))).flatten(1)
+        pooled = torch.cat([pooled[:n], pooled[n:]], dim=1)
         out = self.head(pooled)
         return torch.cat([torch.tanh(out[:, :1]), torch.sigmoid(out[:, 1:])], dim=1)

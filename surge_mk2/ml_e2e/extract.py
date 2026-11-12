@@ -7,7 +7,8 @@
 
 出力（記録1本につき）:
 
-- `<out>/frames/<記録名>/<撮影時刻>.jpg` — 画像（記録のまま）
+- `<out>/frames/<記録名>/<撮影時刻>.jpg` — 画像（記録のまま）。右の画像で、同じ瞬間の左は
+  `<撮影時刻>_left.jpg`。組にならなかったコマは「左のコマが無い」で使わない
 - `<out>/<記録名>.npz` — 標本の配列（下の「配列」）
 - `<out>/dataset.json` — 抽出の設定（`K`・`ds` など）と記録ごとの内訳
 
@@ -143,7 +144,8 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
         "t", "scan_idx", "scan_age", "state", "path_xy", "path_v", "path_valid", "path_src", "cross",
         "v_ok", "kind", "map_pose")}
     names: list[str] = []
-    for t, jpg in R.iter_images(path):
+    names_left: list[str] = []
+    for t, jpg, jpg_left in R.iter_image_pairs(path, rejects):
         ci = _nearest(rec.cmd_t, t)
         if abs(int(rec.cmd_t[ci]) - t) > 0.1 * NS:
             rejects["近い指令が無い"] += 1
@@ -198,6 +200,10 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
         if write_images:
             (img_dir / name).write_bytes(jpg)
         names.append(f"frames/{stem}/{name}")
+        name_left = f"{t}_left.jpg"
+        if write_images:
+            (img_dir / name_left).write_bytes(jpg_left)
+        names_left.append(f"frames/{stem}/{name_left}")
         rows["t"].append(t)
         rows["scan_idx"].append(idx)
         rows["scan_age"].append((t - int(rec.scan_t[si])) / NS)
@@ -224,6 +230,7 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
     np.savez_compressed(
         out_dir / f"{stem}.npz",
         image=np.array(names),
+        image_left=np.array(names_left),
         t=np.array(rows["t"], dtype=np.int64),
         scan_idx=np.array(rows["scan_idx"], dtype=np.int32),
         scan_age=np.array(rows["scan_age"], dtype=np.float32),

@@ -13,7 +13,7 @@ from PIL import Image  # noqa: E402
 
 from dataset import DriveDataset, load_rgb  # noqa: E402
 from raspi.core.cam_e2e_preproc import preprocess  # noqa: E402
-from samples import Sample  # noqa: E402
+from samples import Sample, left_path  # noqa: E402
 
 
 def _write_frame(path: Path, *, size=(40, 30), left_bright=True) -> None:
@@ -36,6 +36,7 @@ class TestDriveDataset(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.frame = Path(self._tmp.name) / "a.jpg"
         _write_frame(self.frame)
+        _write_frame(left_path(self.frame))       # 左も同じ絵（左右の並びは TestStereoDataset で見る）
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -48,7 +49,7 @@ class TestDriveDataset(unittest.TestCase):
 
     def test_item_shapes_and_normalization(self):
         img, target = self.ds(_sample(self.frame, steer=0.262, speed=0.5))[0]
-        self.assertEqual(img.shape, (3, 24, 32))
+        self.assertEqual(img.shape, (6, 24, 32))
         self.assertEqual(target.shape, (2,))
         self.assertAlmostEqual(float(target[0]), 0.5, places=3)
         self.assertAlmostEqual(float(target[1]), 0.25, places=3)
@@ -65,8 +66,8 @@ class TestDriveDataset(unittest.TestCase):
     def test_image_is_exactly_what_the_vehicle_side_preprocess_produces(self):
         """学習で見る絵＝実車でモデルに入る絵。同じ関数を通っていること"""
         img, _ = self.ds(_sample(self.frame), augment=False)[0]
-        want = preprocess(load_rgb(self.frame), (32, 24), 0.0, 255.0)[0]
-        self.assertTrue(np.array_equal(img.numpy(), want))
+        one = preprocess(load_rgb(self.frame), (32, 24), 0.0, 255.0)[0]
+        self.assertTrue(np.array_equal(img.numpy(), np.concatenate([one, one])))
 
     def test_augment_flips_image_and_negates_steer_but_not_speed(self):
         """左右反転するなら、操舵ラベルの符号も一緒に反転しないと教師信号が矛盾する。"""
@@ -95,8 +96,8 @@ class TestDriveDataset(unittest.TestCase):
     def test_photo_aug_only_when_augmenting_and_keeps_labels(self):
         """外乱（photo_aug）は舵・速度のラベルを変えない。検証の絵（augment=False）には掛からない"""
         plain, _ = self.ds(_sample(self.frame, steer=0.2), augment=False, photo_strength=1.0)[0]
-        want = preprocess(load_rgb(self.frame), (32, 24), 0.0, 255.0)[0]
-        self.assertTrue(np.array_equal(plain.numpy(), want))
+        one = preprocess(load_rgb(self.frame), (32, 24), 0.0, 255.0)[0]
+        self.assertTrue(np.array_equal(plain.numpy(), np.concatenate([one, one])))
         ds = self.ds(_sample(self.frame, steer=0.2, speed=0.5), augment=True, flip=False,
                      photo_strength=1.0)
         for _ in range(10):
@@ -105,6 +106,41 @@ class TestDriveDataset(unittest.TestCase):
             self.assertAlmostEqual(float(target[1]), 0.25, places=5)
             self.assertGreaterEqual(float(img.min()), 0.0)
             self.assertLessEqual(float(img.max()), 1.0)
+
+
+class TestStereoDataset(unittest.TestCase):
+    """左右2台: `[右, 左]` の 6ch。反転は左右を入れ替えてから鏡像にする。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.frame = Path(self._tmp.name) / "a.jpg"
+        _write_frame(self.frame, left_bright=True)                 # 右カメラ: 左半分が明るい
+        _write_frame(left_path(self.frame), left_bright=False)     # 左カメラ: 右半分が明るい
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_channels_are_right_then_left(self):
+        ds = DriveDataset([_sample(self.frame)], size=(32, 24), max_steer=0.524, speed_ref=2.0)
+        img, _ = ds[0]
+        self.assertEqual(img.shape, (6, 24, 32))
+        np.testing.assert_allclose(img[:3].numpy(), preprocess(load_rgb(self.frame), (32, 24))[0], atol=1e-6)
+        np.testing.assert_allclose(img[3:].numpy(), preprocess(load_rgb(left_path(self.frame)), (32, 24))[0],
+                                   atol=1e-6)
+
+    def test_flip_swaps_the_cameras_and_mirrors_each(self):
+        from unittest.mock import patch
+        ds = DriveDataset([_sample(self.frame, steer=0.262)], size=(32, 24), max_steer=0.524,
+                          speed_ref=2.0, augment=True, flip=True)
+        plain = DriveDataset([_sample(self.frame, steer=0.262)], size=(32, 24), max_steer=0.524,
+                             speed_ref=2.0)[0][0].numpy()
+        # 反転を必ず選び、明るさの揺らぎは無しにする
+        with patch("numpy.random.rand", return_value=0.0), patch("numpy.random.uniform", return_value=0.0):
+            img, target = ds[0]
+        img = img.numpy()
+        self.assertAlmostEqual(float(target[0]), -0.5, places=3)
+        np.testing.assert_allclose(img[:3], plain[3:, :, ::-1], atol=1e-6)   # 新しい右 = 鏡像の左
+        np.testing.assert_allclose(img[3:], plain[:3, :, ::-1], atol=1e-6)   # 新しい左 = 鏡像の右
 
 
 if __name__ == "__main__":

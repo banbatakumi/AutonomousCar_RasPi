@@ -27,7 +27,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
 from ml_e2e.model import FusionModel, load_weights  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    PREPROC_VERSION_STEREO,
+    STEREO_CAMS,
+)
 from raspi.core.e2e_fusion_preproc import INPUT_NAMES, PREPROC_VERSION  # noqa: E402
 
 __all__ = ["CONTRACT_KEYS", "build_model", "export", "verify_parity", "main"]
@@ -48,7 +51,7 @@ def build_model(cfg: dict) -> FusionModel:
 
 def _dummy(cfg: dict, rng: np.random.Generator | None = None) -> tuple[np.ndarray, ...]:
     w, h = cfg["input_size"]
-    shapes = ((1, 3, h, w), (1, int(cfg["history"]) + 1, int(cfg["fov_deg"]) + 1), (1, 3))
+    shapes = ((1, 6, h, w), (1, int(cfg["history"]) + 1, int(cfg["fov_deg"]) + 1), (1, 3))
     if rng is None:
         return (*(np.zeros(s, dtype=np.float32) for s in shapes), np.ones((1, 3), dtype=np.float32))
     avail = (rng.random((1, 3)) > 0.3).astype(np.float32)
@@ -62,8 +65,9 @@ def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: 
         raise ValueError(f"学習時の入出力の版 {cfg.get('preproc_version')} が今の版 {PREPROC_VERSION} と違う。"
                          "学習し直してください")
     cfg["preproc_version"] = PREPROC_VERSION
-    if cfg.get("image_preproc_version") != PREPROC_VERSION_CROP:
-        raise ValueError("学習時の画像の前処理の版が今と違う。学習し直してください")
+    if cfg.get("image_preproc_version") != PREPROC_VERSION_STEREO:
+        # 版2は前後配置のころの右1台の学習（ノードは版3しか読まない）
+        raise ValueError("学習時の画像の前処理の版が今と違う（左右2台で学習し直してください）")
     missing = [key for key in CONTRACT_KEYS if key not in cfg]
     if missing:
         raise ValueError(f"train_config.json に {missing} が無い")
@@ -80,6 +84,7 @@ def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: 
     )
     contract = {key: cfg[key] for key in CONTRACT_KEYS}
     contract["inputs"] = list(INPUT_NAMES)
+    contract["cams"] = list(STEREO_CAMS)          # 画像のカメラの並び（[右, 左] の 6ch）
     contract["best"] = cfg.get("best", {})
     contract["note"] = note
     out_path.with_suffix(".json").write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")

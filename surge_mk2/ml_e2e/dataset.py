@@ -11,6 +11,12 @@
 - **左右反転**: 画像・点群・経路点と、車両状態の実舵角・ヨーレートを一緒に反転する
 - **画像の外乱**（`photo_strength`）: ブレ・ノイズ・色味・JPEG（`ml_cam_e2e/photo_aug.py`）
 - 入力を伏せる（どの入力が使えるかの `avail`）のは学習ループ側（`train.py`）
+
+## 左右2台
+
+画像は右（`image`）と左（`image_left`、`extract.py` が組で取り出したもの）を `[右, 左]` の 6ch にする（推論の
+`cam_e2e_preproc.preprocess_stereo` と同じ並び）。外乱・明るさは2枚に同じものを掛け、向きの拡張はカメラごとの
+fx・車体マスクで同じ ψ を掛ける。**反転は左右を入れ替えてそれぞれ鏡像**（`ml_cam_e2e/dataset.py` と同じ理由）。
 """
 
 from __future__ import annotations
@@ -128,7 +134,7 @@ class FusionDataset(Dataset):
 
     | キー | 形 | |
     |---|---|---|
-    | `image` | (3, h, w) | |
+    | `image` | (3, h, w) | 左右2台は (6, h, w) |
     | `lidar` | (H+1, n) | |
     | `state` | (3,) | |
     | `path` | (K, 2) | 経路点（`xy_scale` で割った値） |
@@ -140,7 +146,8 @@ class FusionDataset(Dataset):
     def __init__(self, records: list[Record], data_dir: Path, spec: InputSpec, *, augment: bool = False,
                  flip: bool = True, yaw_max_deg: float = 0.0, margin_deg: int = 0,
                  fx_px: float = 0.0, body_mask: np.ndarray | None = None, photo_strength: float = 0.0,
-                 load_images: bool = True) -> None:
+                 load_images: bool = True, fx_px_left: float = 0.0,
+                 body_mask_left: np.ndarray | None = None) -> None:
         self.records = records
         self.data_dir = data_dir
         self.spec = spec
@@ -152,8 +159,16 @@ class FusionDataset(Dataset):
         self.body_mask = body_mask
         self.photo_strength = photo_strength
         self.load_images = load_images
-        if yaw_max_deg > 0 and (spec.crop_x <= 0 or fx_px <= 0 or margin_deg < yaw_max_deg):
-            raise ValueError("向きの拡張には crop_x・fx_px と、点群の余白 margin_deg >= yaw_max_deg が要る")
+        self.fx_px_left = fx_px_left
+        self.body_mask_left = body_mask_left
+        if yaw_max_deg > 0 and (spec.crop_x <= 0 or fx_px <= 0 or margin_deg < yaw_max_deg
+                                or fx_px_left <= 0):
+            raise ValueError("向きの拡張には crop_x・fx_px・fx_px_left と、"
+                             "点群の余白 margin_deg >= yaw_max_deg が要る")
+        if load_images:
+            for r in records:
+                if len(r.data.get("image_left", ())) != len(r):
+                    raise ValueError(f"{r.name}: 左の画像が無い（`ml_e2e.extract` を左右の組で取り出し直す）")
         self.index = [(ri, i) for ri, r in enumerate(records) for i in range(len(r))]
         self.xy_scale = spec.k * spec.stride * self._ds()
 
@@ -198,25 +213,28 @@ class FusionDataset(Dataset):
 
         # ── 画像 ──
         if self.load_images:
-            rgb = np.asarray(Image.open(self.data_dir / str(d["image"][i])).convert("RGB"))
+            keys = ("image", "image_left")
+            rgbs = [np.asarray(Image.open(self.data_dir / str(d[k][i])).convert("RGB")) for k in keys]
             if self.augment and self.photo_strength > 0:
-                rng = np.random.default_rng(np.random.randint(0, 2**31))
-                rgb = photo_aug.apply(rgb, rng, self.photo_strength)
+                seed = np.random.randint(0, 2**31)          # 左右は同じ外乱
+                rgbs = [photo_aug.apply(r, np.random.default_rng(seed), self.photo_strength) for r in rgbs]
             if self.augment and self.yaw_max_deg > 0:
-                rgb = yawed_window(rgb, crop_margin_px(rgb.shape[1], sp.crop_x), psi, self.fx_px,
-                                   self.body_mask)
+                fxs = (self.fx_px, self.fx_px_left)
+                bodies = (self.body_mask, self.body_mask_left)
+                rgbs = [yawed_window(r, crop_margin_px(r.shape[1], sp.crop_x), psi, fxs[j], bodies[j])
+                        for j, r in enumerate(rgbs)]
             else:
-                rgb = crop_window(rgb, sp.crop_x)
-            small = resize_area(rgb, w, h)
+                rgbs = [crop_window(r, sp.crop_x) for r in rgbs]
+            smalls = [resize_area(r, w, h) for r in rgbs]
             if do_flip:
-                small = small[:, ::-1, :]
+                smalls = [x[:, ::-1, :] for x in smalls[::-1]]   # 左右は入れ替えてから鏡像
             if self.augment:
                 gain = 1.0 + np.random.uniform(-_CONTRAST, _CONTRAST)
                 bias = np.random.uniform(-_BRIGHTNESS, _BRIGHTNESS)
-                small = np.clip(small.astype(np.float32) * gain + bias, 0.0, 255.0)
-            image = normalize(np.ascontiguousarray(small))[0]
+                smalls = [np.clip(x.astype(np.float32) * gain + bias, 0.0, 255.0) for x in smalls]
+            image = np.concatenate([normalize(np.ascontiguousarray(x))[0] for x in smalls], axis=0)
         else:
-            image = np.zeros((3, h, w), dtype=np.float32)
+            image = np.zeros((6, h, w), dtype=np.float32)
 
         # ── 点群 ──
         lidar = self._lidar(rec, i, psi_deg)

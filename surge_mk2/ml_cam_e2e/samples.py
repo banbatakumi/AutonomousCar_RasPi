@@ -23,6 +23,12 @@
 `block_s` 秒のかたまりを作り、かたまり単位で振り分ける。振り分けは
 （記録名・かたまり番号・seed）のハッシュで決めるので、データを足しても
 既存のかたまりの割り当ては動かない。
+
+## 左右2台の組
+
+`extract_pairs.py` は右（`front`）の画像を manifest の行にし、同じ瞬間の左の画像を
+**同じ名前に `_left` を付けたファイル**（`left_path()`）として隣に置く。manifest の列は変えない
+。学習・評価は左のファイルがある行だけを使う。
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ __all__ = [
     "MANIFEST_COLUMNS", "EXCLUSIONS_FILE", "STOP_CMD_SPEED", "STOP_ACTUAL_SPEED",
     "STRAIGHT_NORM",
     "Sample", "Exclusion",
+    "LEFT_SUFFIX", "left_path", "has_left",
     "load_rgb", "load_manifest", "load_exclusions", "save_exclusions", "is_excluded",
     "drop_reason", "usable", "is_val", "split",
     "speed_label", "steer_norm", "speed_norm", "auto_speed_ref",
@@ -47,6 +54,8 @@ __all__ = [
 MANIFEST_COLUMNS = ["file", "source_mcap", "cam", "t_capture_ns",
                     "target_steer", "target_speed", "speed_actual", "brake"]
 EXCLUSIONS_FILE = "exclusions.json"
+#: 左右の組の左の画像のファイル名に付ける印（`left_path()`）
+LEFT_SUFFIX = "_left"
 
 #: [m/s] 速度指令がこれ以下なら「スロットルを入れていない」
 STOP_CMD_SPEED = 0.02
@@ -81,6 +90,15 @@ class Exclusion:
     t_start_ns: int
     t_end_ns: int
     note: str = ""
+
+
+def left_path(path: Path) -> Path:
+    """右の画像 `path` と組になる左の画像のパス（モジュールdocstring「左右2台の組」）。"""
+    return path.with_name(path.stem + LEFT_SUFFIX + path.suffix)
+
+
+def has_left(sample: Sample) -> bool:
+    return left_path(sample.path).exists()
 
 
 def load_rgb(path: Path):

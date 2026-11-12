@@ -31,10 +31,9 @@ from pathlib import Path
 import numpy as np
 from mcap.reader import make_reader
 
-__all__ = ["Recording", "MapLine", "load", "iter_images", "estimate_pose_lag", "decode_cells",
-           "IMAGE_TOPIC"]
+__all__ = ["Recording", "MapLine", "load", "estimate_pose_lag", "decode_cells",
+           "iter_image_pairs"]
 
-IMAGE_TOPIC = "/viz/image/front"
 _TOPICS = ("/scan", "/vehicle_state", "/odom", "/cmd", "/auto/state", "/auto/map")
 NS = 1_000_000_000
 
@@ -127,7 +126,7 @@ def _arr(vals, dtype=np.float64) -> np.ndarray:
 
 
 def load(path: Path) -> Recording:
-    """記録を読む。画像は読まない（`iter_images`）。"""
+    """記録を読む。画像は読まない（`iter_image_pairs`）。"""
     vs, od, cmd, scan, st = [], [], [], [], []
     rec = Recording(path=Path(path))
     with open(path, "rb") as f:
@@ -200,11 +199,25 @@ def load(path: Path) -> Recording:
     return rec
 
 
-def iter_images(path: Path):
-    """`(撮影時刻 [ns], JPEG のバイト列)` を記録の順に返す。"""
-    with open(path, "rb") as f:
-        for _schema, _ch, m in make_reader(f).iter_messages(topics=[IMAGE_TOPIC]):
-            yield m.log_time, base64.b64decode(json.loads(m.data)["data"])
+def iter_image_pairs(path: Path, rejects=None):
+    """`(右の撮影時刻 [ns], 右の JPEG, 左の JPEG)` を記録の順に返す（前方ステレオの左右の組）。
+
+    組の作り方（撮影時刻の差が `STEREO_PAIR_TOL_NS` 以内）は `ml_cam_e2e/extract_pairs.iter_images` と同じものを使う。
+    組にならなかった右のコマは返さず、`rejects`（`Counter`）に「左のコマが無い」で数える。
+    """
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    for p in (str(root), str(root / "ml_cam_e2e")):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from extract_pairs import (
+        iter_images,  # ml_cam_e2e のスクリプト形式のモジュール
+    )
+
+    for _cam, t, data, left in iter_images(path, rejects=rejects):
+        yield (t, base64.b64decode(json.loads(data)["data"]),
+               base64.b64decode(json.loads(left)["data"]))
 
 
 def decode_cells(ln: MapLine) -> np.ndarray | None:

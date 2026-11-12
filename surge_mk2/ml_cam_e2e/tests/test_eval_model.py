@@ -153,7 +153,7 @@ class TestPerturbationResponse(unittest.TestCase):
         """横方向の細かさが落ちると舵が増える、ブレを手がかりにしたモデルの模型"""
         max_steer = 0.5
 
-        def infer(self, rgb):
+        def infer(self, rgb, rgb_left):
             import numpy as np
             g = rgb.astype(float).mean(axis=2)
             sharp = np.abs(np.diff(g, axis=1)).mean()
@@ -163,7 +163,7 @@ class TestPerturbationResponse(unittest.TestCase):
         import numpy as np
         rng = np.random.default_rng(0)
         rgbs = [rng.integers(0, 256, (36, 64, 3), dtype=np.uint8) for _ in range(3)]
-        rows = perturbation_response(self._BlurSensitive(), rgbs)
+        rows = perturbation_response(self._BlurSensitive(), [(r, r) for r in rgbs])
         self.assertEqual([r["name"] for r in rows], [n for n, _ in perturbations()])
         by = {r["name"]: r for r in rows}
         self.assertGreater(by["横ブレ24px"]["turn_ratio"], 1.0)

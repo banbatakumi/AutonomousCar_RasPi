@@ -65,7 +65,7 @@ class TestExclusions(unittest.TestCase):
         self.assertTrue(S.is_excluded(_s(2.0), ex))
         self.assertFalse(S.is_excluded(_s(2.1), ex))
         self.assertFalse(S.is_excluded(_s(1.5, source="b.mcap"), ex))
-        self.assertFalse(S.is_excluded(_s(1.5, cam="rear"), ex))
+        self.assertFalse(S.is_excluded(_s(1.5, cam="left"), ex))
 
 
 class TestDropReason(unittest.TestCase):

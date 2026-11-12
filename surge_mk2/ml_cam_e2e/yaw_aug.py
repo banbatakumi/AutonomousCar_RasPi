@@ -38,7 +38,9 @@ import numpy as np
 from PIL import Image
 
 __all__ = [
+    "BODY_MASK_LEFT_NAME",
     "BODY_MASK_NAME",
+    "camera_fx_px",
     "ensure_body_mask",
     "estimate_body_mask",
     "front_fx_px",
@@ -50,6 +52,8 @@ __all__ = [
 
 #: 車体マスクのファイル名（抽出したフレームと同じフォルダに置く。白=車体）
 BODY_MASK_NAME = "body_mask.png"
+#: 左右2台のときの左カメラの車体マスク（右は `BODY_MASK_NAME`）
+BODY_MASK_LEFT_NAME = "body_mask_left.png"
 #: 時間方向の揺らぎ（0〜255 の標準偏差）がこれ未満の画素を車体とみなす。
 #: LED の点滅と暗部の JPEG ノイズで車体でも 20 前後は揺らぐ。背景は走行中なら 50 を大きく超える
 _STILL_STD = 35.0
@@ -136,9 +140,10 @@ def load_body_mask(path: Path) -> np.ndarray:
     return np.asarray(Image.open(path).convert("L")) >= 128
 
 
-def ensure_body_mask(frames_dir: Path, image_paths: list[Path]) -> np.ndarray:
-    """`frames_dir/body_mask.png` を読む。無ければ推定して書く（次回から同じものを使う）。"""
-    path = frames_dir / BODY_MASK_NAME
+def ensure_body_mask(frames_dir: Path, image_paths: list[Path],
+                     name: str = BODY_MASK_NAME) -> np.ndarray:
+    """`frames_dir/<name>`（既定 `body_mask.png`）を読む。無ければ推定して書く（次回から同じものを使う）。"""
+    path = frames_dir / name
     if path.exists():
         return load_body_mask(path)
     mask = estimate_body_mask(image_paths)
@@ -146,19 +151,24 @@ def ensure_body_mask(frames_dir: Path, image_paths: list[Path]) -> np.ndarray:
     return mask
 
 
-def front_fx_px(vehicle, width: int) -> float:
-    """前カメラの水平焦点距離 [px]（幅 `width` の画像の画素）。
+def camera_fx_px(vehicle, cam: str, width: int) -> float:
+    """カメラ `cam`（`front`・`left` 等、`Vehicle.cam_<cam>_*`）の水平焦点距離 [px]（幅 `width` の画像の画素）。
 
     魚眼の校正値があればその fx を幅の比で直す（校正は下端クロップ前・同じ水平画角）。
     無ければ `hfov` のピンホール近似。
     """
-    fe = getattr(vehicle, "cam_front_fisheye", None)
+    fe = getattr(vehicle, f"cam_{cam}_fisheye", None)
     if fe is not None and fe.fx > 0 and fe.width > 0:
         return fe.fx * width / fe.width
-    hfov = float(getattr(vehicle, "cam_front_hfov", 0.0) or 0.0)
+    hfov = float(getattr(vehicle, f"cam_{cam}_hfov", 0.0) or 0.0)
     if not 0.0 < hfov < math.pi:
-        raise ValueError("前カメラの fx が決まらない（魚眼の校正値も hfov も無い）")
+        raise ValueError(f"{cam} カメラの fx が決まらない（魚眼の校正値も hfov も無い）")
     return (width / 2) / math.tan(hfov / 2)
+
+
+def front_fx_px(vehicle, width: int) -> float:
+    """前カメラ（主）の水平焦点距離 [px]（`camera_fx_px` の `front`）。"""
+    return camera_fx_px(vehicle, "front", width)
 
 
 def margin_for(max_deg: float, fx_px: float) -> int:

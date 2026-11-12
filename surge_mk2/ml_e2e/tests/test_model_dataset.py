@@ -20,7 +20,7 @@ from ml_e2e.export_onnx import build_model, export, verify_parity  # noqa: E402
 from ml_e2e.model import B_MAX, B_MIN, FusionModel  # noqa: E402
 from ml_e2e.tests.test_extract import _write  # noqa: E402
 from ml_e2e.train import _avail, losses, split_output  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, PREPROC_VERSION_STEREO  # noqa: E402
 from raspi.core.e2e_fusion_preproc import PREPROC_VERSION, decode_output, output_size  # noqa: E402
 
 K = 8
@@ -66,7 +66,7 @@ class TestDataset(_Data):
     def test_item_shapes_and_values(self):
         ds = FusionDataset(self.records, self.dir, SPEC, margin_deg=6)
         it = ds[10]
-        self.assertEqual(tuple(it["image"].shape), (3, 32, 64))
+        self.assertEqual(tuple(it["image"].shape), (6, 32, 64))
         self.assertEqual(tuple(it["lidar"].shape), (4, 91))
         self.assertEqual(tuple(it["path"].shape), (K, 2))
         np.testing.assert_allclose(it["lidar"][:3].numpy(), 3.0 / 8.0, atol=1e-6)
@@ -101,7 +101,7 @@ class TestDataset(_Data):
             rec.rows[si, 0, :] = 1.0
             rec.rows[si, 0, 6 + 45 + 10] = 0.1                        # 元の +10° に近い点（余白 6・視野の左端 -45）
             ds = FusionDataset(self.records, self.dir, SPEC, margin_deg=6, augment=True, flip=False,
-                               yaw_max_deg=6.0, fx_px=38.0)
+                               yaw_max_deg=6.0, fx_px=38.0, fx_px_left=38.0)
             plain = FusionDataset(self.records, self.dir, SPEC, margin_deg=6)[10]
             np.random.seed(3)
             seen = set()
@@ -128,7 +128,7 @@ class TestModelAndLoss(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
         self.model = FusionModel(lidar_ch=4, lidar_n=91, k=K, xy_scale=2.0, pretrained=False).eval()
-        self.inp = (torch.rand(2, 3, 32, 64), torch.rand(2, 4, 91), torch.rand(2, 3))
+        self.inp = (torch.rand(2, 6, 32, 64), torch.rand(2, 4, 91), torch.rand(2, 3))
 
     def test_output_layout_matches_the_runtime_decoder(self):
         with torch.no_grad():
@@ -143,7 +143,7 @@ class TestModelAndLoss(unittest.TestCase):
 
     def test_hidden_inputs_are_ignored(self):
         """伏せた入力は、中身を変えても出力が変わらない。"""
-        other = (torch.rand(2, 3, 32, 64), torch.rand(2, 4, 91), torch.rand(2, 3))
+        other = (torch.rand(2, 6, 32, 64), torch.rand(2, 4, 91), torch.rand(2, 3))
         with torch.no_grad():
             for i in range(3):
                 avail = torch.ones(2, 3)
@@ -178,7 +178,7 @@ class TestExport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             run = Path(d) / "run"
             run.mkdir()
-            cfg = {"preproc_version": PREPROC_VERSION, "image_preproc_version": PREPROC_VERSION_CROP,
+            cfg = {"preproc_version": PREPROC_VERSION, "image_preproc_version": PREPROC_VERSION_STEREO,
                    "input_size": [64, 32], "crop_x": 0.05, "fov_deg": 90, "max_range": 8.0, "history": 3,
                    "k": K, "ds": 0.25, "xy_scale": 2.0, "max_steer": 0.4, "speed_ref": 5.0, "yaw_rate_ref": 6.0,
                    "steer_link": [1.0, 0.0], "maps": ["m"], "train_records": ["a"]}
@@ -191,13 +191,17 @@ class TestExport(unittest.TestCase):
             self.assertLess(verify_parity(out, model, cfg), 1e-3)
             self.assertEqual(contract["train_records"], ["a"])
             m = load_model(out)
-            o = m.infer(np.zeros((1, 3, 32, 64), np.float32), None, None)
+            self.assertEqual(contract["cams"], ["front", "left"])
+            o = m.infer(m.image_input(np.zeros((48, 96, 3), np.uint8), np.zeros((48, 96, 3), np.uint8)),
+                        None, None)
             self.assertEqual(o.path_xy.shape, (K, 2))
 
-            bad = dict(cfg, preproc_version=PREPROC_VERSION + 1)
-            (run / "train_config.json").write_text(json.dumps(bad))
-            with self.assertRaises(ValueError):
-                export(run, out)
+            # 入出力の版違い・前後配置のころの右1台の学習（画像の版2）は書き出さない
+            for bad in (dict(cfg, preproc_version=PREPROC_VERSION + 1),
+                        dict(cfg, image_preproc_version=PREPROC_VERSION_CROP)):
+                (run / "train_config.json").write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):
+                    export(run, out)
 
     def test_weights_with_the_old_direct_head_export_to_the_same_path_outputs(self):
         """舵・速度の直接出力があった頃（版 1）の重みは、そのヘッドだけ捨てて今の版で書き出せる。"""
@@ -206,7 +210,7 @@ class TestExport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             run = Path(d) / "run"
             run.mkdir()
-            cfg = {"preproc_version": 1, "image_preproc_version": PREPROC_VERSION_CROP,
+            cfg = {"preproc_version": 1, "image_preproc_version": PREPROC_VERSION_STEREO,
                    "input_size": [64, 32], "crop_x": 0.05, "fov_deg": 90, "max_range": 8.0, "history": 3,
                    "k": K, "ds": 0.25, "xy_scale": 2.0, "max_steer": 0.4, "speed_ref": 5.0, "yaw_rate_ref": 6.0,
                    "steer_link": [1.0, 0.0], "label_shift_ms": 100, "maps": ["m"], "train_records": ["a"]}
@@ -223,6 +227,62 @@ class TestExport(unittest.TestCase):
             self.assertNotIn("label_shift_ms", contract)
             self.assertLess(verify_parity(out, model, contract), 1e-3)
             self.assertEqual(load_model(out).k, K)
+
+
+class TestStereo(_Data):
+    """左右2台: 画像は `[右, 左]` の 6ch。反転は左右を入れ替えてからそれぞれ鏡像。"""
+
+    def setUp(self):
+        self.spec = SPEC
+        rec = self.records[0]
+        self.assertEqual(len(rec.data["image_left"]), len(rec))      # 取り出しは既定で左右の組
+        # 標本 10 の左の画像だけ右半分を明るくする（右の画像は左半分が明るい）
+        a = np.zeros((36, 80, 3), dtype=np.uint8)
+        a[:, 40:] = 220
+        self.left_file = self.dir / str(rec.data["image_left"][10])
+        self.saved = self.left_file.read_bytes()
+        Image.fromarray(a).save(self.left_file, format="JPEG", quality=95)
+
+    def tearDown(self):
+        self.left_file.write_bytes(self.saved)
+
+    def test_image_is_right_then_left(self):
+        it = FusionDataset(self.records, self.dir, self.spec, margin_deg=6)[10]
+        img = it["image"].numpy()
+        self.assertEqual(img.shape, (6, 32, 64))
+        self.assertGreater(img[:3, :, :20].mean(), img[:3, :, -20:].mean())     # 右カメラ: 左が明るい
+        self.assertLess(img[3:, :, :20].mean(), img[3:, :, -20:].mean())        # 左カメラ: 右が明るい
+
+    def test_flip_swaps_the_cameras_and_mirrors_each(self):
+        from unittest.mock import patch
+        plain = FusionDataset(self.records, self.dir, self.spec, margin_deg=6)[10]
+        ds = FusionDataset(self.records, self.dir, self.spec, margin_deg=6, augment=True, flip=True)
+        with patch("numpy.random.rand", return_value=0.0), patch("numpy.random.uniform", return_value=0.0):
+            it = ds[10]
+        a, b = it["image"].numpy(), plain["image"].numpy()
+        np.testing.assert_allclose(a[:3], b[3:, :, ::-1], atol=1e-6)
+        np.testing.assert_allclose(a[3:], b[:3, :, ::-1], atol=1e-6)
+        np.testing.assert_allclose(it["path"][:, 1].numpy(), -plain["path"][:, 1].numpy(), atol=1e-6)
+
+
+class TestRightAndLeftModel(unittest.TestCase):
+    def test_head_gets_right_then_left_features(self):
+        model = FusionModel(lidar_ch=4, lidar_n=91, k=K, xy_scale=2.0, pretrained=False).eval()
+        image = torch.rand(2, 6, 32, 64)
+        seen = {}
+
+        def grab(_m, inp, _out):
+            seen["feat"] = inp[0]          # None を返す（値を返すと出力が置き換わる）
+
+        model.img_fc[2].register_forward_hook(grab)
+        with torch.no_grad():
+            out = model(image, torch.rand(2, 4, 91), torch.rand(2, 3), torch.ones(2, 3))
+            right = model.img_fc[:2](model.encoder(image[:, :3]))
+            left = model.img_fc[:2](model.encoder(image[:, 3:]))
+        self.assertEqual(out.shape, (2, output_size(K)))
+        c = right.shape[1]
+        self.assertTrue(torch.allclose(seen["feat"][:, :c], right, atol=1e-5))
+        self.assertTrue(torch.allclose(seen["feat"][:, c:], left, atol=1e-5))
 
 
 if __name__ == "__main__":

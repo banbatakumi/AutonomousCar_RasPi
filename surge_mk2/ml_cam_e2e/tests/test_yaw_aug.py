@@ -90,6 +90,8 @@ class TestDatasetYawAugment(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "a.png"
         Image.fromarray(_columns(100, 8)).save(self.path)
+        from samples import left_path
+        Image.fromarray(_columns(100, 8)).save(left_path(self.path))      # 左も同じ絵
         self.sample = Sample(path=self.path, source_mcap="r.mcap", cam="front", t_ns=0,
                              target_steer=0.1, target_speed=1.0, speed_actual=1.0, brake=False)
 
@@ -102,14 +104,15 @@ class TestDatasetYawAugment(unittest.TestCase):
 
     def test_label_is_corrected_back_toward_the_line(self):
         """左を向いた絵（ψ>0）には右へ戻す（舵を減らす）ラベルが付く。"""
-        ds = self.ds(augment=True, yaw_max_deg=6.0, yaw_k=0.8, fx_px=100.0)
+        ds = self.ds(augment=True, yaw_max_deg=6.0, yaw_k=0.8, fx_px=100.0, fx_px_left=100.0)
         psi = 0.05
         with mock.patch.object(D, "sample_psi", return_value=psi), \
                 mock.patch.object(D.np.random, "uniform", return_value=0.0):
             img, target = ds[0]
         self.assertAlmostEqual(float(target[0]), (0.1 - 0.8 * psi) / 0.5, places=5)
-        # 窓は左へ5pxずれている（明るさの揺らぎは 0 に固定）
+        # 窓は左へ5pxずれている（明るさの揺らぎは 0 に固定）。左カメラ（ch3〜）も同じ ψ でずれる
         self.assertAlmostEqual(float(img[0, 0, 0]) * 255, 5.0, places=3)
+        self.assertAlmostEqual(float(img[3, 0, 0]) * 255, 5.0, places=3)
 
     def test_without_augmentation_the_center_window_is_used(self):
         img, target = self.ds(augment=False)[0]

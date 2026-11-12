@@ -1,7 +1,7 @@
 """ml_cam/extract_frames.py — `.mcap` から走行時のカメラフレームを取り出す。
 
-GUI の MCAP 記録（`gui/src/hooks/useMcapDownload.ts`。画像を含める設定の記録）や常駐ロガー（`logger_node`）で録った `.mcap` には、`/viz/image/front`・
-`/viz/image/rear` に `foxglove.CompressedImage`（JPEG・base64）として画像が
+GUI の MCAP 記録（`gui/src/hooks/useMcapDownload.ts`。画像を含める設定の記録）や常駐ロガー（`logger_node`）で録った `.mcap` には、`/viz/image/front`（右・主）・
+`/viz/image/left` に `foxglove.CompressedImage`（JPEG・base64）として画像が
 入っている（`raspi/rec/mcap_log.py`）。**Pi 側に新しい記録コードを足す必要は
 無い**——ここではその中身を JPEG ファイルとして書き出すだけ。
 
@@ -63,7 +63,7 @@ def extract_one(mcap_path: Path, out_dir: Path, cams: set[str],
     間引きは2通りのうち片方だけ効く。`keep_ratio < 1.0` なら誤差蓄積法
     （Bresenham 式）で間引く：カメラごとに独立した蓄積値へ毎メッセージ
     `keep_ratio` を足し、1.0 を超えたら採用してその分を引く。カメラ別に
-    蓄積するので `--cam both` で前後が交互に並んでいても偏らず、割り算の
+    蓄積するので `--cam both` で左右が交互に並んでいても偏らず、割り算の
     余りで丸めないので目標枚数からの誤差もカメラごとに高々1枚に収まる
     （通し番号を `stride` で割った余りで間引く方式だと、上記どちらも起こり得た）。
     複数ファイルをまたぐときは `acc_by_cam` に前ファイルの終了値を渡して続ける。
@@ -103,7 +103,7 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mcap_files", nargs="+", type=Path)
     ap.add_argument("--out", type=Path, default=Path("ml_cam/data/frames"))
-    ap.add_argument("--cam", choices=("front", "rear", "both"), default="front",
+    ap.add_argument("--cam", choices=("front", "left", "both"), default="front",
                     help="取り出すカメラ（既定 front。無制限部門の MVP は前方のみ想定）")
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--min-interval-ms", type=int, default=0,
@@ -112,7 +112,7 @@ def main() -> int:
                        help="全 .mcap 合計でこの枚数に近づくよう均等に間引く")
     args = ap.parse_args()
 
-    cams = {"front", "rear"} if args.cam == "both" else {args.cam}
+    cams = {"front", "left"} if args.cam == "both" else {args.cam}
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.csv"
     is_new = not manifest_path.exists()

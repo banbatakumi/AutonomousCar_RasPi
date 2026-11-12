@@ -63,7 +63,7 @@ class TestModelStatus(unittest.TestCase):
 
 class TestCommandBuilders(unittest.TestCase):
     def test_extract_cmd_with_min_interval(self):
-        cmd = build_extract_cmd("python3", ["a.mcap", "b.mcap"], "out/frames", "front",
+        cmd = build_extract_cmd("python3", ["a.mcap", "b.mcap"], "out/frames",
                                 100, min_interval_ms=500)
         self.assertIn("extract_pairs.py", cmd[1])
         self.assertIn("a.mcap", cmd)
@@ -74,19 +74,19 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertNotIn("--target-count", cmd)
 
     def test_extract_cmd_prefers_target_count(self):
-        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100,
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", 100,
                                 min_interval_ms=500, target_count=1000)
         self.assertIn("--target-count", cmd)
         self.assertNotIn("--min-interval-ms", cmd)
 
     def test_extract_cmd_always_passes_label_shift(self):
-        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100)
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", 100)
         self.assertEqual(cmd[cmd.index("--label-shift-ms") + 1], str(DEFAULT_LABEL_SHIFT_MS))
-        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100,
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", 100,
                                 label_shift_ms=150)
         self.assertEqual(cmd[cmd.index("--label-shift-ms") + 1], "150")
         # 0 も渡す（渡さないと extract_pairs.py の既定が使われる）
-        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", "front", 100,
+        cmd = build_extract_cmd("python3", ["a.mcap"], "out/frames", 100,
                                 label_shift_ms=0)
         self.assertEqual(cmd[cmd.index("--label-shift-ms") + 1], "0")
 
@@ -152,9 +152,9 @@ class TestExtractWarning(unittest.TestCase):
 
     def test_include_auto_flag_reaches_the_command(self):
         self.assertNotIn("--include-auto",
-                         build_extract_cmd("python3", ["a.mcap"], "o", "front", 100))
+                         build_extract_cmd("python3", ["a.mcap"], "o", 100))
         self.assertIn("--include-auto",
-                      build_extract_cmd("python3", ["a.mcap"], "o", "front", 100,
+                      build_extract_cmd("python3", ["a.mcap"], "o", 100,
                                         include_auto=True))
 
 
@@ -177,10 +177,10 @@ class TestCommandsMatchTheScripts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             frames = str(Path(d) / "frames")
             self._assert_args_accepted(build_extract_cmd(
-                sys.executable, [str(Path(d) / "none.mcap")], frames, "front", 100,
+                sys.executable, [str(Path(d) / "none.mcap")], frames, 100,
                 min_interval_ms=200, label_shift_ms=100))
             self._assert_args_accepted(build_extract_cmd(
-                sys.executable, [str(Path(d) / "none.mcap")], frames, "front", 100,
+                sys.executable, [str(Path(d) / "none.mcap")], frames, 100,
                 target_count=10, include_auto=True))
             self._assert_args_accepted(build_train_cmd(
                 sys.executable, frames, d, 1, 4, "64x32", True, balance=0.3,

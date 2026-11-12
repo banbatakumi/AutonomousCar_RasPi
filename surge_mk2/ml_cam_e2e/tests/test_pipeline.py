@@ -51,7 +51,7 @@ def _jpeg(left: bool) -> bytes:
 
 
 def _write_record(path: Path) -> dict:
-    """30秒の走行記録を書く。5Hz の画像・50Hz の指令・実速度つき。
+    """30秒の走行記録を書く。5Hz の画像（左右の組。左は右より 20µs 後）・50Hz の指令・実速度つき。
 
     区間ごとに中身を変えてあり、抽出・学習側のフィルタが全部働くことを確かめる:
       0〜20s  速度モードで走行（手本）。2秒ごとに左右へ切る
@@ -83,6 +83,7 @@ def _write_record(path: Path) -> dict:
             log.write(STATE_MCAP_TOPIC, VehicleState(speed=speed), t_mono_ns=t)
             if i % 10 == 0:                                   # 5Hz
                 log.write_viz_image(jpg[left], "front", t)
+                log.write_viz_image(jpg[left], "left", t + 20_000)
                 n[kind] += 1
     return n
 
@@ -147,7 +148,7 @@ class TestPipeline(unittest.TestCase):
             # ── 実車側の読み込み（`cam_e2e_node` が使う関数そのもの） ──
             model = load_model(onnx_path)
             frame_bgr = np.zeros((360, 640, 3), dtype=np.uint8)
-            steer, speed = model.infer(frame_bgr[..., ::-1])
+            steer, speed = model.infer(frame_bgr[..., ::-1], frame_bgr[..., ::-1])
             self.assertTrue(math.isfinite(steer) and -1.0 <= steer <= 1.0)
             self.assertTrue(math.isfinite(speed) and 0.0 <= speed <= 1.0)
 

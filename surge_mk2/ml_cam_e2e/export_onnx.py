@@ -28,7 +28,10 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from model import DriveRegressionModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION, PREPROC_VERSION_CROP  # noqa: E402
+from raspi.core.cam_e2e_preproc import (  # noqa: E402
+    PREPROC_VERSION_STEREO,
+    STEREO_CAMS,
+)
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.nodes.cam_e2e_node import MODEL_OUTPUTS  # noqa: E402
 
@@ -72,13 +75,15 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
                              f"--size で指定してください")
         size = (int(cfg["input_size"][0]), int(cfg["input_size"][1]))
     trained_ver = cfg.get("preproc_version")
-    if trained_ver is not None and trained_ver not in (PREPROC_VERSION, PREPROC_VERSION_CROP):
-        # 契約に今の版を書くとノード側の照合（cam_e2e_node）をすり抜けてしまう
-        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 "
-                         f"{PREPROC_VERSION}/{PREPROC_VERSION_CROP} と違う。学習し直してください")
-    # 左右の切り落とし（版2）。学習と同じ窓で推論させるため契約に書く
+    if trained_ver != PREPROC_VERSION_STEREO:
+        # 版1・2は前後配置のころの右1台の学習（ノードは版3しか読まない）
+        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 {PREPROC_VERSION_STEREO} と違う。"
+                         f"左右2台で学習し直してください")
+    # 左右の切り落とし。学習と同じ窓で推論させるため契約に書く
     crop_x = float(cfg.get("crop_x", 0.0) or 0.0)
-    version = PREPROC_VERSION_CROP if crop_x > 0 else PREPROC_VERSION
+    if crop_x <= 0:
+        raise ValueError("左右2台のモデル（版3）は切り落とし crop_x が要る（--yaw-aug-deg 0 では学習しない）")
+    version = PREPROC_VERSION_STEREO
     if max_steer is None:
         max_steer = cfg.get("max_steer")
     if speed_ref is None:
@@ -102,7 +107,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     model.eval()
 
-    dummy = torch.zeros(1, 3, h, w)
+    dummy = torch.zeros(1, 6, h, w)
     torch.onnx.export(
         model, dummy, str(out_path),
         input_names=["input"], output_names=["output"],
@@ -117,6 +122,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
         "resize": "area",
         "preproc_version": version,
         "crop_x": crop_x,               # 左右それぞれ切り落とす幅（画像幅に対する割合）
+        "cams": list(STEREO_CAMS),       # 入力のカメラの並び（[右, 左] の 6ch）
         "mean": MEAN,
         "std": STD,
         "outputs": list(MODEL_OUTPUTS),
@@ -135,13 +141,14 @@ def verify_parity(onnx_path: Path, model, size: tuple[int, int], *,
     import onnxruntime as ort
 
     w, h = size
+    ch = 6
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     model.eval()
     rng = np.random.default_rng(seed)
     max_err = 0.0
     with torch.no_grad():
         for _ in range(n_samples):
-            x_np = rng.random((1, 3, h, w), dtype=np.float32)
+            x_np = rng.random((1, ch, h, w), dtype=np.float32)
             torch_out = model(torch.from_numpy(x_np)).numpy()
             onnx_out = session.run(None, {"input": x_np})[0]
             max_err = max(max_err, float(np.abs(torch_out - onnx_out).max()))
