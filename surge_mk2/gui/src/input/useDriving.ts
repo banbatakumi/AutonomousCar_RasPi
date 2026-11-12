@@ -76,8 +76,8 @@
  * GUI 側でタイマーを持つと、DISARM やタブ切替と競合したときに消し忘れが起きる。
  *
  * 十字キー4方向は「合図・灯火系」（上＝灯火、下＝パッシング、左＝左ウィンカー、
- * 右＝右ウィンカー）。クラクションは □。面ボタンの ○＝カメラ入れ替え、
- * △＝サイドブレーキ（下記参照）。
+ * 右＝右ウィンカー）。クラクションは □。面ボタンの △＝サイドブレーキ（下記参照）。
+ * ○ は今は何も割り当てていない（前後配置のころのカメラ入れ替えを外した）。
  *
  * パッドのブレーキは L2（アナログ）だけ。奥まで踏み込めば `brakeTrig` がほぼ 1.0 に
  * なり実質フルブレーキ。キーボードの `Space` はフル（デジタル）。
@@ -85,9 +85,7 @@
  * ゲームパッドの右スティックは、ラジコンタブの表示調整に使う。
  * 上下（軸3）で LiDAR ミニマップのズームイン/アウト（`live.lidarMiniZoomM`）、
  * **R3（右スティック押し込み）でミニマップの拡大表示切替**（`ui.lidarExpanded`、
- * 画面でミニマップをクリックするのと同じ）。
- * **○ は前後カメラの入れ替え**（`ui.mainCam`、`RcView.tsx` の PIP クリックと同じ）——レーシングゲームの「リアビュー確認」
- * に近い操作なのでここに割り当てた。**いずれも ARM の有無に関係なく効く**——
+ * 画面でミニマップをクリックするのと同じ）。**いずれも ARM の有無に関係なく効く**——
  * 走行の入力ではなく画面表示の調整なので、灯火切替と同じ扱い。
  *
  * **サイドブレーキとウィンカーだけは例外でトグル。**
@@ -331,8 +329,6 @@ const DRIVING_KEYS = [
 /** × — ARM/DISARM トグル（Enter キーと同じ）。armed→unarmed の遷移だけ `ch.estop()`
  * も呼ぶ（下記 `tick()` 参照） */
 const PAD_ARM_TOGGLE = 0
-/** ○ — メイン映像の前後カメラ入れ替え */
-const PAD_CAM_SWAP = 1
 /** □ — クラクション */
 const PAD_HORN = 2
 /** △ — サイドブレーキの ON/OFF トグル。走行中でも ON にできる（`AuxPanel.tsx` の ON/OFF ボタンと同じ）。
@@ -689,7 +685,6 @@ export function useDriving(ch: ControlChannel | null) {
     let padGearL1Was = false
     let padGearR1Was = false
     let padLidarExpandWas = false
-    let padCamSwapWas = false
     let padSideBrakeWas = false
     let padWinkerLeftWas = false
     let padWinkerRightWas = false
@@ -877,15 +872,6 @@ export function useDriving(ch: ControlChannel | null) {
       if (padLidarExpand && !padLidarExpandWas) ui.set({ lidarExpanded: !ui.lidarExpanded })
       padLidarExpandWas = padLidarExpand
 
-      // ○＝前後カメラ入れ替え。`RcView.tsx` の
-      // PIP クリックと同じ `ui.mainCam` を更新するだけ。走行には関与しないので
-      // ARM の有無に関係なく効く
-      const padCamSwap = padPressed(pad?.buttons[PAD_CAM_SWAP])
-      if (padCamSwap && !padCamSwapWas) {
-        ui.set({ mainCam: ui.mainCam === 'front' ? 'rear' : 'front' })
-      }
-      padCamSwapWas = padCamSwap
-
       // △＝サイドブレーキの ON/OFF トグル。
       // **走行中でも ON にできる**（`AuxPanel.tsx` の画面ボタンと同じ。ハンドブレーキ
       // ターンのような使い方を妨げない）。STM32 側は速度に関わらず
@@ -1031,6 +1017,7 @@ export function useDriving(ch: ControlChannel | null) {
           // side_brake と違い未 ARM でも送る（灯火・ホーンと同じ理由）
           winker_left: ui.winkerLeftRequested,
           winker_right: ui.winkerRightRequested,
+          winker_mode: ui.winkerMode,
           launch: false,
         }
         if (!txDue(now, c)) return
@@ -1128,6 +1115,7 @@ export function useDriving(ch: ControlChannel | null) {
           side_brake: ui.sideBrakeRequested,
           winker_left: ui.winkerLeftRequested,
           winker_right: ui.winkerRightRequested,
+          winker_mode: ui.winkerMode,
           // 自律走行のローンチは planner が決める（サーバ側も GUI の値を使わない）
           launch: false,
         }
@@ -1329,6 +1317,7 @@ export function useDriving(ch: ControlChannel | null) {
         // ウィンカーも `side_brake` と同じくトグル。灯火系なので未 ARM でも送る
         winker_left: ui.winkerLeftRequested,
         winker_right: ui.winkerRightRequested,
+        winker_mode: ui.winkerMode,
         // ローンチコントロール。手順を踏んだ発進の間だけ立つ
         launch: launch === 'go' && !torqueModeOn,
       }

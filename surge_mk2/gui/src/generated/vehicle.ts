@@ -32,38 +32,35 @@ export const VEHICLE = {
     x: 0.07, // m
     y: 0.0, // m
   },
-  /** 前カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値
+  /** 前方ステレオの右（主）カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値
    * （`sensors.cam_front.z`）。`pitch`（取付角度）・`hfov`（未校正時の近似画角）は
    * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`bottomCrop` は
    * ISP が読み出し時に切り捨てる下端の割合（`camera_node.py` の `bottom_cropped`）。
    * 進路ガイドの投影はこの分だけ主点が下にずれる補正が要る（`CameraView.tsx`）。
    * `hfov`/`bottomCrop`/`fisheye`/`undistortHfov` は選ばれたレンズ（`lens`）の値 */
   camFront: {
-    lens: "wide160", // 付いているレンズ（`lens`。"" ＝ プロファイル無し）
-    x: 0.1, // m base_link（後輪車軸中心）から前方。地面点→カメラ奥行きの換算に要る
-    y: 0.0, // m 左が正
+    lens: "wide160sr", // 付いているレンズ（`lens`。"" ＝ プロファイル無し）
+    x: 0.09, // m base_link（後輪車軸中心）から前方。地面点→カメラ奥行きの換算に要る
+    y: -0.0375, // m 左が正
     height: 0.08, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
-    bottomCrop: 0.3, // 下端カット率
+    bottomCrop: 0.0, // 下端カット率
     /** 魚眼の校正値。null ＝ 未校正（`hfov` のピンホールで近似する） */
-    fisheye: { fx: 307.9092, fy: 307.5942, cx: 307.4241, cy: 241.533, k: [-0.03208693, 0.00352001, -0.01074923, 0.00351499], width: 640, height: 480 } as FisheyeCalib | null,
+    fisheye: { fx: 309.5465, fy: 309.8475, cx: 305.0653, cy: 241.4527, k: [-0.02424524, -0.0357911, 0.04129701, -0.01959004], width: 640, height: 480 } as FisheyeCalib | null,
     /** 補正映像（`telemetry_node`）の仮想ピンホールの水平画角 */
     undistortHfov: 1.92, // rad
   },
-  /** 後カメラ取付。`height`/`pitch`/`hfov`/`bottomCrop`/`fisheye` の意味は `camFront` と同じ。
-   * こちらは高さの調整UIを持たない（前カメラほど精密な校正の要求がまだ無いため）。
-   * `yaw` は生成しない——GUI 側の進路ガイド（`CameraView.tsx`）は「後ろ向きに付いている」
-   * こと自体を前提にした投影式を別に持っており、汎用の yaw 回転はしていない */
-  camRear: {
-    lens: "wide160",
-    x: 0.039, // m 意味は camFront と同じ（後ろ向きに付いている）
-    y: 0.0, // m
+  /** 前方ステレオの左カメラ取付（前向き。項目の意味は `camFront` と同じ） */
+  camLeft: {
+    lens: "wide160sl",
+    x: 0.09, // m
+    y: 0.0375, // m 左が正
     height: 0.08, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
-    bottomCrop: 0.3, // 下端カット率
-    fisheye: { fx: 307.9092, fy: 307.5942, cx: 307.4241, cy: 241.533, k: [-0.03208693, 0.00352001, -0.01074923, 0.00351499], width: 640, height: 480 } as FisheyeCalib | null,
+    bottomCrop: 0.0, // 下端カット率
+    fisheye: { fx: 312.2141, fy: 312.6087, cx: 305.8205, cy: 243.8084, k: [-0.04198208, 0.01777469, -0.02573278, 0.00941388], width: 640, height: 480 } as FisheyeCalib | null,
     undistortHfov: 1.92, // rad
   },
 } as const

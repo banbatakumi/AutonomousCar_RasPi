@@ -1,13 +1,11 @@
 /**
  * ウィンカー・ハザードの操作とインジケータ。
  *
- * 実車のダッシュボードに寄せ、`RcView.tsx` の `.rc-cam-gauges`（舵角計・速度計・
- * G メータの行）に組み込む——**舵角計の左に左ウィンカー、G メータの右に右
- * ウィンカー**をそれぞれ `.winker-side`（点滅表示を上段、矢印ボタンを下段に
- * 積んだ小さい列）として添える。メータ自体は縮めない（各メータを
- * ウィンカーごと包んで縮めると3つのメータの大きさが揃わなくなるため、隣に添えるだけ）。
- * ハザードは実車と同じ赤い三角のボタン一つだけをメータパネル右下
- * （`.rc-cam-gauges` 自体に対して絶対配置）に置く——ハザード専用の点滅表示は
+ * ウィンカーは**点滅表示とボタンを1つにした矢印ランプ**（`WinkerLamp`）。ラジコンの計器パネルの
+ * シフトライトの両端に置く（実車のメータ上端の左右の矢印の位置。2026-11-13）。押すと要求が切り替わり、
+ * 要求中は縁が緑、STM32 が実際に点滅させている間は矢印が緑に点滅する。以前は点滅表示と押すボタンを
+ * 別々に置いていたが、場所を2倍食ううえ「どっちを見ればいいか」が分かれていた。
+ * ハザードは実車と同じ赤い三角のボタン一つだけをパネルの斜辺の下に置く——ハザード専用の点滅表示は
  * 無く、押すと左右の矢印インジケータが両方光る（STM32 側は「左右とも
  * ON」をハザードと解釈する。`protocol.toml` flags2）。
  *
@@ -27,27 +25,15 @@
 import { useNumbers } from '../../bus/live'
 import { useUi } from '../../store/ui'
 
-export function WinkerIndicator({ side }: { side: 'left' | 'right' }) {
+export function WinkerLamp({ side }: { side: 'left' | 'right' }) {
+  // 点滅は実測（STM32 が実際に点滅させているか）、縁は要求。冒頭コメント参照
   const active = useNumbers().vs?.[side === 'left' ? 'winker_left_active' : 'winker_right_active'] ?? false
-  return (
-    <div className={`winker-indicator ${active ? 'blink' : ''}`} aria-hidden="true">
-      {side === 'left' ? '◀' : '▶'}
-    </div>
-  )
-}
-
-export function WinkerButton({ side }: { side: 'left' | 'right' }) {
-  const ui = useUi()
-  const requested = side === 'left' ? ui.winkerLeftRequested : ui.winkerRightRequested
-  const toggle = () =>
-    ui.set(
-      side === 'left'
-        ? { winkerLeftRequested: !ui.winkerLeftRequested }
-        : { winkerRightRequested: !ui.winkerRightRequested },
-    )
+  const requested = useUi((s) => (side === 'left' ? s.winkerLeftRequested : s.winkerRightRequested))
+  const set = useUi((s) => s.set)
+  const toggle = () => set(side === 'left' ? { winkerLeftRequested: !requested } : { winkerRightRequested: !requested })
   return (
     <button
-      className={`winker-btn ${requested ? 'on' : ''}`}
+      className={`winker-lamp ${requested ? 'req' : ''} ${active ? 'blink' : ''}`}
       onClick={toggle}
       title={`${side === 'left' ? '左' : '右'}ウィンカー（パッド十字キー${side === 'left' ? '左' : '右'}でも送れる）`}
     >

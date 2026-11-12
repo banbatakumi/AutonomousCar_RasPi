@@ -1,13 +1,15 @@
 /**
  * 自動運転ビュー — 自律走行を**監視・デバッグする**ための画面（`system_overview.md` §10.2）。
  *
- * 上段に**前方・後方・LiDAR を同じ幅で3分割**、その下に速度・舵角の細い帯、
+ * 上段に**前方(左)・前方(右)・深度・LiDAR を同じ幅で4分割**（2026-11-13 ステレオ化で左カメラを足した）、その下に速度・舵角の細い帯、
  * 一番下は「モード選択・engage・判断」（左2/3）と「車体図」（右1/3）。
  * 温度・電圧・リンク統計は出さない——正常時に読む数字ではなく、
  * 異常は `StatusBar` が全タブ共通で必ず伝える。詳しい数字は診断タブ（`DiagView`）で見る。
  *
- * ラジコンビューと違い、前方を特別扱いしない。自律走行の検証では
- * 「後方に何が映っているか」も「点群がどう見えているか」も同じ重さで見比べる。
+ * ラジコンビューと違い、主カメラを特別扱いしない。自律走行の検証では
+ * 左右の映像・深度・点群を同じ重さで見比べる。左カメラを開くと左右の同期撮影が回るが、
+ * 深度を開いている時点で既に回っている（`telemetry_node._desired_stereo`）ので増えるのは配信1本分。
+ * 進路ガイド・計画・ROI 選択は右（主）カメラだけ（投影と planner の入力が主カメラ基準のため）。
  *
  * ## ラジコンビューとの違い
  *
@@ -53,13 +55,14 @@ import { DriveBar } from '../components/DriveBar'
 import { SettingsDrawer } from '../components/SettingsDrawer'
 import { DrivePanel } from '../components/rc/DrivePanel'
 import { CameraView } from '../render/CameraView'
+import { DepthView } from '../render/DepthView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
 import type { ControlChannel } from '../ws/control'
 
 export function AutoView({ ch }: { ch: ControlChannel | null }) {
   const ui = useUi()
-  // 前後どちらのカメラにも同じ `pathGuide` が効く。対象追従はドラッグでROIを選ぶので奪わない
+  // 対象追従はドラッグでROIを選ぶので奪わない
   const toggleGuide = () => {
     if (ui.auto?.mode === 'follow_object') return
     ui.set({ pathGuide: !ui.pathGuide })
@@ -67,14 +70,19 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
 
   return (
     <div className="drive">
-      {/* 前方・後方・LiDAR を**同じ幅で横並び**にする。デバッグ用の画面なので、
-          「前方が主で後方が従」ではなく3つを対等に見比べられる方が使いやすい */}
-      <div className="cam-front" onClick={toggleGuide} title="クリックで進路ガイドの表示/非表示">
-        <CameraView cam="front" label="前方" ch={ch} />
+      {/* 前方(左)・前方(右)・深度・LiDAR を**同じ幅で横並び**にする。デバッグ用の画面なので、
+          4つを対等に見比べられる方が使いやすい */}
+      <div className="cam-left">
+        <CameraView cam="left" label="前方(左)" guideDisabled />
       </div>
 
-      <div className="cam-rear" onClick={toggleGuide} title="クリックで進路ガイドの表示/非表示">
-        <CameraView cam="rear" label="後方" />
+      <div className="cam-front" onClick={toggleGuide} title="クリックで進路ガイドの表示/非表示">
+        <CameraView cam="front" label="前方(右)" ch={ch} />
+      </div>
+
+      {/* 深度映像（表示している間だけ Pi が照合し、左カメラを回す） */}
+      <div className="cam-depth">
+        <DepthView />
       </div>
 
       <div className="lidar">

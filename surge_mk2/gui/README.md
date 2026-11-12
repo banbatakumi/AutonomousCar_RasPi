@@ -11,8 +11,8 @@ React + TypeScript + Vite。`docs/system_overview.md` §10 の設計に沿う。
 
 | タブ | 誰のための画面か | 特徴 |
 |---|---|---|
-| **ラジコン**（既定） | 運転する人 | 前方映像を全画面に、バックミラー（上中央）とレース用ダッシュ風の HUD（下端。シフトライト・速度・G・舵角）を重ねる。シフトライトとエンジン音は仮想変速（`bus/virtualGear.ts`）に従う。介入はランプ。電池と後輪・ステアの温度は左上に常時。進路上の障害物（LiDAR）を映像に重ね、R に入れると後方カメラへ切り替える。電池の下にクリアランスソナー（車体まわり16方向×4段、LiDAR＋超音波、断続音）。設定は ⚙ ドロワー |
-| **自動運転** | 開発する人 | 指令と実測を数値で並べ、遅れをそのまま読む。モード選択・経路パネル・地図パネル（地図を持つ planner のとき） |
+| **ラジコン**（既定） | 運転する人 | 前方映像（ステレオの右＝主カメラ。上 1/4 の天井は切る）を全画面に、ボンネットが映る左下を覆うレース用ダッシュ風の計器パネル（高さは映像の 1/2、上辺は映像の幅の 1/2 で折れて内角 135° で下る台形。左に車体図＝電圧、上段にウィンカーで挟んだシフトライト、液晶に大きい速度計と舵角・G、下の帯に温度・介入ランプ）を重ねる。シフトライトとエンジン音は仮想変速（`bus/virtualGear.ts`）に従う。上段の右端にハザード、斜辺の下の三角に LiDAR の丸（クリックで映像の中央に拡大）。進路上の障害物（LiDAR）を映像に重ねる（後ろを見るカメラは無い）。クリアランスソナーは音だけ（車体まわり16方向×4段、LiDAR＋超音波、断続音）。設定は ⚙ ドロワー |
+| **自動運転** | 開発する人 | 上段に前方(左)・前方(右)・深度・LiDAR を同じ幅で4枚。指令と実測を数値で並べ、遅れをそのまま読む。モード選択・経路パネル・地図パネル（地図を持つ planner のとき） |
 | **診断** | 点検する人・原因を追う人 | 常設サマリ＋イベント帯＋サブページ6枚（下の「診断タブ」） |
 | **システム同定** | 車両を校正する人 | 校正試験（`calib_*`）の実行と記録の取得。解析は Mac の `tools/calib`（`docs/calibration.md`） |
 
@@ -91,13 +91,12 @@ tools/deploy.sh          # GUI をビルドして rsync（既定）
 `render/CameraView.tsx`。どれも進路ガイド（`pathGuide`）に従い、ラジコンのメイン映像クリックでまとめて消える。
 
 - **進路上の障害物**（`obstacleOverlay`）: 今の舵角のまま進んだら最初に当たる点群と、車体の端が当たる位置の横線と距離。
-  色は**当たるまでの時間**（近づいていなければ白、2秒未満で琥珀、1秒未満で赤）。カメラが低い（8cm）ので約 0.9m より近い路面は
-  HUD の裏に入る——そのときは線を HUD のすぐ上に寄せて出す
+  色は**当たるまでの時間**（近づいていなければ白、2秒未満で琥珀、1秒未満で赤）。近い路面は映像の下半分＝ラジコンの
+  計器パネルの裏に入りやすい——そのときは線をパネルの高さのすぐ上に寄せて出す
 - **自動運転の計画**（`planOverlay`、前方カメラ）: 指令舵角の進路（青の破線）。地図を持つ planner では経路（紫）・狙う点（白い菱形）・
   検出した障害物（赤い輪）も。ラジコンタブでは engage 中だけ、自動運転タブでは planner が判断を出していれば常に出す
 - **映像の遅れ**: ARM 中に届く間隔がいつもより明らかに空くと、縁が琥珀に光り古さを出す（止まったら暗くして「映像停止」）。
   カメラ配信には撮影時刻が無いので、撮ってから届くまでの遅れそのものは測れない
-- **R で後方カメラへ**（`autoRearCam`）: R に入れるとメインを後方に、抜けると前方に戻す（自分で切り替えたときだけ戻す）
 
 クリアランスソナーの音はブラウザの自動再生制限のため、**一度キーかクリックを操作するまで鳴らない**（ゲームパッドだけでは鳴らせない）。
 
@@ -111,7 +110,7 @@ tools/deploy.sh          # GUI をビルドして rsync（既定）
 | ゲームパッド | ×（トグル） | R2（アクセル） | 左スティック X | L2（力加減） | L1 ダウン / R1 アップ | ×（ARM 中） |
 
 補機: 灯火 `L`／十字キー上、クラクション `H`／□、パッシング `P`／十字キー下、ウィンカー 十字キー左右、
-サイドブレーキ △、前後カメラ入れ替え ○。
+サイドブレーキ △（○ は割り当て無し）。
 
 - **タブ切替**: 数字キー `1`〜`4`（文字を打つ欄にフォーカスがある間は効かない）
 - **止める手段**: `Esc`・画面の E-STOP ボタン・ARM 中のパッドの ×。どれも ARM を下ろし、
@@ -139,20 +138,21 @@ io_node も同じだけで落とす（自律走行中だけ、Wi-Fi の瞬断を
 src/
 ├── bus/live.ts        20Hz のデータ置き場。**React の state には入れない**
 ├── bus/pathObstacles.ts 進路上の障害物（今の舵角のまま進んだら、どこで何に当たるか。点群を車の動きぶん戻してから車体の外形で掃く）
-├── bus/parkSensor.ts  クリアランスソナー（車体まわり16方向の、外形から一番近い物までの距離 → 4段・断続音の周期。表示と音で共用）
+├── bus/parkSensor.ts  クリアランスソナー（車体まわり16方向の、外形から一番近い物までの距離 → 4段・断続音の周期。今は音だけが使う）
 ├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
 ├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・50Hz）
 ├── ws/control.ts      /ws/control?catalog=changed（JSON・操縦権・E-Stop。auto.catalog は接続時の1通目のみ → App.tsx が前の値を保つ）
 ├── input/useDriving.ts ゲームパッド + キーボード → cmd（rAF。変化はそのフレームで、繰り返しは 50Hz 以下）
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
+├── render/DepthView   ステレオの深度映像（/ws/camera/depth）。自動運転画面の2枚目。表示中だけ Pi が照合する
 ├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
 ├── render/MapCanvas   世界座標のキャンバス（自動運転ビューの地図パネル `AutoMapPanel`・低頻度）
 ├── views/             RcView / AutoView / DiagView / SysIdView（＝タブ4枚）
 ├── components/        StatusBar(層B) / DriveBar(層B) / LogControls ほか。自動運転は AutoPanel（モード・パラメータ）/ RoutePanel（経路）/ AutoMapPanel・MapLibrary（地図）/ ParamPresets
 ├── components/ErrorBoundary / ConfirmDialog  タブごとの例外の受け皿 / 止まらない確認ダイアログ
 ├── components/diag/   診断タブの部品（下の「診断タブ」）
-├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps / ShiftLights / RcStatus / ParkSensor）
+├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps / ShiftLights / RcTemps / DrivePanel）
 ├── hooks/useParkBeep  クリアランスソナーの音（ARM 中・進む向きの半周が近いとき。どのタブでも鳴る）
 ├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）
 ├── store/ui.ts        イベント駆動の状態だけ（zustand）

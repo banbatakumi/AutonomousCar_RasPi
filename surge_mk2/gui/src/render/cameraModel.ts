@@ -87,22 +87,20 @@ export interface MountPose {
  *
  * **地面の点は base_link 基準で受け取り、ここでカメラの取付位置 `x, y` を引く。**
  * 呼び出し側が「カメラからの奥行き」に直して渡す必要は無い（二重に引くと
- * 前 0.1m・後 0.04m ずれる）。`facing` が `'rear'` なら後ろ向き（yaw=π）で、
- * 奥行き・左右とも反転する。`roll` は光軸まわりの回転 [rad]（IMU、カメラ座標の光線を回す）。 */
+ * 0.1m 前後ずれる）。カメラは前向き（yaw=0）。`roll` は光軸まわりの回転 [rad]
+ * （IMU、カメラ座標の光線を回す）。 */
 export function groundProjector(
   lens: Lens,
   pose: MountPose,
-  facing: 'front' | 'rear',
   roll = 0,
 ): (gx: number, gy: number) => [number, number] | null {
-  const sign = facing === 'front' ? 1 : -1
   const cp = Math.cos(pose.pitch)
   const sp = Math.sin(pose.pitch)
   const cr = Math.cos(roll)
   const sr = Math.sin(roll)
   return (gx, gy) => {
-    const depth = sign * (gx - pose.x)
-    const lateral = sign * (gy - pose.y) // 左が正
+    const depth = gx - pose.x
+    const lateral = gy - pose.y // 左が正
     const zc = depth * cp + pose.height * sp // 光軸方向
     if (zc < MIN_ZC) return null
     const yc = -depth * sp + pose.height * cp // 下向きが正

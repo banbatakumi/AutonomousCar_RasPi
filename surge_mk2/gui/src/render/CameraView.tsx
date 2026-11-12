@@ -1,5 +1,5 @@
 /**
- * カメラ映像。`/ws/camera/{front,rear}` から JPEG が流れてくる。
+ * カメラ映像。`/ws/camera/{front,left}` から JPEG が流れてくる（役割は `cameraLayout.ts`）。
  *
  * `createImageBitmap` でデコードして Canvas に描く。**React の state に
  * 画像を入れない**（1フレームごとに再レンダリングが走る）。
@@ -51,26 +51,9 @@
  *   **pitch/roll は独立に合成する近似**（厳密な3D外部パラメータではない）。
  * - IMU が無効（`imu_ok=false`）な間は 0 として扱い、固定値だけで描く。
  *
- * ## 後カメラにも同じガイドを出す
- *
- * 後カメラは車体に対し180°反対向きに付いている（`vehicle.toml` の
- * `sensors.cam_rear.yaw`）。そのため前カメラ用にそのまま流用できない点が3つある：
- *
- * 1. **奥行き・左右が反転する。** 後ろ向きのカメラにとっての「奥（画面奥）」は
- *    車体座標では −x（後方）、「左」は車体座標の −y（後ろを振り返ると左右が
- *    入れ替わるのと同じ）。`project()` へは `(−x, −y)` を渡す。
- * 2. **姿勢補正の符号が反転する。** 前が沈む（`pitch` 負）と前カメラは俯角が
- *    増えるが、後ろは持ち上がるので後カメラは俯角が減る——`dPitch` の符号を
- *    反転してから同じ式に通す。左右ロールも見ている向きが逆なので同様に反転する。
- * 3. **軌跡は「後退した場合」を描く。** 自転車モデルの曲率式 dθ/ds = tanδ/L は
- *    弧長 s の符号に依存しない（前進・後退で式の形が変わらない）ので、
- *    ループの刻み `ds` を負にするだけで「今の舵角のまま下がったら」の軌跡になる。
- *
- * ここも校正前の近似であることに変わりはない（冒頭コメント参照）。
- *
  * ## `variant`：ラジコンビューは文字を出さない
  *
- * `full`（既定・自動運転ビュー）は左上に「前方/後方」ラベルと fps を
+ * `full`（既定・自動運転ビュー）は左上に「前方」などのラベルと fps を
  * 並べたタグを出し、校正前バッジも出す。`minimal`（ラジコンビュー）は
  * ラベルもバッジも出さず、fps だけを右下に小さく残す。**fps だけは
  * 消さない** — 配信が生きているかを判断する最後の手がかりのため。
@@ -113,6 +96,7 @@ import { guardSocket, type SocketGuard } from '../ws/guard'
 import { wsUrl } from '../ws/url'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 import { fisheyeLens, groundProjector, pinholeLens, type Lens } from './cameraModel'
+import { camGeom, type CamId } from './cameraLayout'
 import { BUMPER_X, HALF_WIDTH, findPathObstacle, scanPointsNow, type ObstacleLevel } from '../bus/pathObstacles'
 import type { ControlChannel } from '../ws/control'
 
@@ -123,11 +107,10 @@ export function CameraView({
   onAspect,
   guideDisabled = false,
   ch = null,
-  srcCrop,
-  mirror = false,
   overlayBottomInset = 0,
+  cropTop = 0,
 }: {
-  cam: 'front' | 'rear'
+  cam: CamId
   label: string
   variant?: 'full' | 'minimal'
   /** デコードした画像の実際の幅/高さ比。変わったときだけ呼ばれる */
@@ -139,14 +122,13 @@ export function CameraView({
   /** `follow_object` のROI選択（ドラッグ矩形）に使う。前方カメラ以外・
    * 未指定の間はポインタ操作を一切拾わない */
   ch?: ControlChannel | null
-  /** 配信画像のうち描く縦の範囲（0〜1、上端基準）。ラジコンのバックミラー用。
-   * 指定中・`mirror` 中は進路ガイド等の重畳を出さない（投影が画像全体を前提にしているため） */
-  srcCrop?: { y0: number; y1: number }
-  /** 左右反転して描く（バックミラー。後方カメラを鏡と同じ左右で見せる） */
-  mirror?: boolean
   /** 映像の下端のうち、上に何か（ラジコンの HUD）が重なって見えない高さ [CSS px]。
    * 進路上の障害物の線がここに隠れるときは、見える下端に寄せて描く */
   overlayBottomInset?: number
+  /** 映像の上端から切って出さない割合（0〜1）。ラジコンは天井が要らないので上 1/4 を切る。
+   * 元画像全体の矩形を上へずらして置き、はみ出しをキャンバスで切るだけなので、
+   * 投影（ガイド・障害物・計画の重畳）は元画像の座標のまま正しい位置に出る */
+  cropTop?: number
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide) && !guideDisabled
@@ -162,7 +144,7 @@ export function CameraView({
   const guideRef = useRef(guide)
   guideRef.current = guide
   // 進路上の障害物（LiDAR）と自動運転の計画の重畳。どちらも進路ガイドに従う
-  // （ラジコンのメイン映像クリックでまとめて消せるように）。切り出し・反転中（ミラー）は出さない
+  // （ラジコンのメイン映像クリックでまとめて消せるように）。
   const obstacleOn = useUi((s) => s.obstacleOverlay) && guide
   const obstacleRef = useRef(obstacleOn)
   obstacleRef.current = obstacleOn
@@ -173,13 +155,11 @@ export function CameraView({
   const planOn = useUi((s) => s.planOverlay) && guide && cam === 'front' && (variant === 'full' || engaged)
   const planRef = useRef(planOn)
   planRef.current = planOn
-  // 切り出し・反転も ref 経由（窓の大きさで値が変わっても WS を張り直さない）
-  const srcCropRef = useRef(srcCrop)
-  srcCropRef.current = srcCrop
-  const mirrorRef = useRef(mirror)
-  mirrorRef.current = mirror
   const insetRef = useRef(overlayBottomInset)
   insetRef.current = overlayBottomInset
+  // 0 ≤ c < 1 に収める（1 にすると高さ 0 で割る）
+  const cropRef = useRef(0)
+  cropRef.current = Math.min(0.9, Math.max(0, cropTop))
 
   // ── モード連動のデバッグ重畳 ──
   //
@@ -357,7 +337,8 @@ export function CameraView({
         }
         lastFrameMs = now
         if (onAspect) {
-          const ar = bmp.width / bmp.height
+          // 親に返すのは上を切った後の（実際に見えている）比率
+          const ar = bmp.width / (bmp.height * (1 - cropRef.current))
           if (Math.abs(ar - lastAspect) > 0.001) {
             lastAspect = ar
             onAspect(ar)
@@ -417,34 +398,18 @@ export function CameraView({
       ctx.fillStyle = '#07090b'
       ctx.fillRect(0, 0, w, h)
 
-      if (bitmap && (srcCropRef.current || mirrorRef.current)) {
-        // バックミラー: 縦の一部だけを切り出し、必要なら左右反転して収める。重畳は出さない
-        const crop = srcCropRef.current ?? { y0: 0, y1: 1 }
-        const sy = bitmap.height * crop.y0
-        const sh = Math.max(1, bitmap.height * (crop.y1 - crop.y0))
-        const s = Math.min(w / bitmap.width, h / sh)
-        const dw = bitmap.width * s
-        const dh = sh * s
-        const dx = (w - dw) / 2
-        const dy = (h - dh) / 2
-        ctx.save()
-        if (mirrorRef.current) {
-          ctx.translate(w, 0)
-          ctx.scale(-1, 1)
-        }
-        ctx.drawImage(bitmap, 0, sy, bitmap.width, sh, dx, dy, dw, dh)
-        ctx.restore()
-        const age = performance.now() - lastFrameMs
-        const staleMs = Math.max(CAM_STALE_MIN_MS, frameIntervalMs * CAM_STALE_INTERVALS)
-        if (!wsOpen || age > staleMs) drawStale(ctx, dx, dy, dw, dh, wsOpen ? age : null)
-        else if (isLagging(age, frameIntervalMs)) drawLag(ctx, dx, dy, dw, dh, age)
-      } else if (bitmap) {
-        // アスペクト比を保って収める
-        const s = Math.min(w / bitmap.width, h / bitmap.height)
+      if (bitmap) {
+        // アスペクト比を保って収める。上端を `crop` だけ切るときは、見えている部分（高さ `dh·(1−crop)`）を
+        // 収め、元画像全体の矩形（`dx,dy,dw,dh`）はその分だけ上へはみ出させる（はみ出しはキャンバスが切る）
+        const crop = cropRef.current
+        const s = Math.min(w / bitmap.width, h / (bitmap.height * (1 - crop)))
         const dw = bitmap.width * s
         const dh = bitmap.height * s
+        const visH = dh * (1 - crop)
         const dx = (w - dw) / 2
-        const dy = (h - dh) / 2
+        const dy = (h - visH) / 2 - crop * dh
+        // 見えている部分の上端（キャンバス座標）。古さ・遅れの枠や文字はここを基準に描く
+        const vy = dy + crop * dh
         imgBoxRef.current = { dx, dy, dw, dh }
         ctx.drawImage(bitmap, dx, dy, dw, dh)
         // 走行可否マスク（`ftg_cam`）。**元フレームと同じ画角から単純リサイズ
@@ -459,10 +424,9 @@ export function CameraView({
         }
         // ガイドは映像そのもの（`dx,dy,dw,dh`）を基準に投影する。**箱の w/h では
         // 主点・焦点距離が箱基準になってしまう**——箱の形は CSS グリッドの行の
-        // 高さで決まるだけで、前後カメラそれぞれの実アスペクト比（`bottomCrop`
-        // が違うため異なる）とは一致せず、レターボックス量が前後で変わる。
-        // 箱基準のまま計算すると、その余白ぶんだけカメラごとに違う量で
-        // ガイドがズレる（後方カメラのガイドが上に大きくズレる不具合になる）
+        // 高さで決まるだけで、カメラの実アスペクト比（`bottomCrop` で変わる）とは
+        // 一致せず、レターボックスが入る。箱基準のまま計算すると、その余白ぶんだけ
+        // ガイドがズレる（前後配置のころ、後方カメラのガイドが上に大きくズレた）
         const nowMs = performance.now()
         const obstacles = obstacleRef.current && guideFacing(cam) && nowMs - live.lastScanMs < SCAN_FRESH_MS
         const plan = planRef.current && !!live.auto?.planner && nowMs - live.lastAutoMs < AUTO_FRESH_MS
@@ -471,7 +435,7 @@ export function CameraView({
           ctx.translate(dx, dy)
           // 映像の外（レターボックス）にはみ出して描かない
           ctx.beginPath()
-          ctx.rect(0, 0, dw, dh)
+          ctx.rect(0, crop * dh, dw, visH)
           ctx.clip()
           if (plan) drawPlan(ctx, dw, dh, camHeightRef.current)
           if (guideRef.current && guideFacing(cam)) drawGuide(ctx, dw, dh, camHeightRef.current, cam)
@@ -485,14 +449,14 @@ export function CameraView({
         if (trackingModeRef.current) {
           if (dragRef.current) drawRoiDrag(ctx, dx, dy, dw, dh, dragRef.current)
           drawTrackBox(ctx, dx, dy, dw, dh)
-          if (!live.vs?.armed) drawRoiDisarmedHint(ctx, dx, dy)
+          if (!live.vs?.armed) drawRoiDisarmedHint(ctx, dx, vy)
         }
         // **止まった映像を生きた映像に見せない。** 切断・受信の途絶では最後の1枚が残るので、
         // 暗くして古さを重ねる。DISARM 中は 1fps まで落とすので、しきい値は間隔に合わせて伸ばす
         const age = performance.now() - lastFrameMs
         const staleMs = Math.max(CAM_STALE_MIN_MS, frameIntervalMs * CAM_STALE_INTERVALS)
-        if (!wsOpen || age > staleMs) drawStale(ctx, dx, dy, dw, dh, wsOpen ? age : null)
-        else if (isLagging(age, frameIntervalMs)) drawLag(ctx, dx, dy, dw, dh, age)
+        if (!wsOpen || age > staleMs) drawStale(ctx, dx, vy, dw, visH, wsOpen ? age : null)
+        else if (isLagging(age, frameIntervalMs)) drawLag(ctx, dx, vy, dw, visH, age)
       } else {
         ctx.fillStyle = '#3a444e'
         ctx.font = '12px ui-monospace, monospace'
@@ -592,7 +556,7 @@ export function CameraView({
         <div className="camera-tag">
           {label}
           <span ref={statusRef} className="dim" />
-          {guide && guideFacing(cam) && !(cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear).fisheye && (
+          {guide && guideFacing(cam) && !camGeom(cam).fisheye && (
             <span className="badge-warn">ガイドは校正前・暫定</span>
           )}
           {undistorted && cam === 'front'
@@ -609,37 +573,32 @@ export function CameraView({
   )
 }
 
-/** 進路ガイドを出すカメラか。進行方向（走行中は実測速度の符号、停止中は D/R レンジ）と
- * 同じ向きのカメラにだけ出す（前進中に後方カメラへ出しても意味が無い） */
-function guideFacing(cam: 'front' | 'rear'): boolean {
+/** 進路ガイドを出すか。カメラはどれも前向きなので、前進するとき（走行中は実測速度の符号、
+ * 停止中は D/R レンジ）だけ出す（後退中に前向きのカメラへ出しても意味が無い） */
+function guideFacing(_cam: CamId): boolean {
   const speed = live.vs?.speed ?? 0
   // 止まっているときは選んでいるレンジ（MT は R 段）で決める
   const reverse = Math.abs(speed) > 0.05 ? speed < 0 : reverseSelected(useUi.getState())
-  return (cam === 'rear') === reverse
+  return !reverse
 }
 
 /** 実測舵角から予測進路を路面平面に置き、カメラモデル（`lensFor()`）で画像に落とす。
- * `camHeightSetting` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`。
- * **前カメラにしか適用しない**——後カメラは高さの調整UIを持たないので
- * `VEHICLE.camRear.height` を固定で使う）。`pitch`/レンズ（`fisheye`/`hfov`）/`bottomCrop` は
- * `vehicle.toml` 由来の固定値（`cam` に応じて `camFront`/`camRear` を選ぶ）。
- * `vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
- * （符号の向きはファイル冒頭コメント参照。後カメラは反転して使う）。 */
+ * `camHeightSetting` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`。左右とも同じ高さに付いている）。
+ * `pitch`/レンズ（`fisheye`/`hfov`）/`bottomCrop` は `vehicle.toml` 由来の固定値（`cam` に応じて
+ * `camFront`/`camLeft` を選ぶ）。`vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
+ * （符号の向きはファイル冒頭コメント参照）。 */
 function drawGuide(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
   camHeightSetting: number,
-  cam: 'front' | 'rear',
+  cam: CamId,
 ) {
   const vs = live.vs
   if (!vs) return
-  const isFront = cam === 'front'
   const project = makeProjector(w, h, camHeightSetting, cam)
-
-  // 自転車モデルの曲率式は弧長の符号によらないので、後カメラは ds を負にして
-  // 「今の舵角のまま後退したら」の軌跡を積分する（ファイル冒頭コメント参照）
-  const ds = isFront ? 0.08 : -0.08
+  // 「今の舵角のまま前進したら」の軌跡を積分する刻み [m]
+  const ds = 0.08
 
   // 車体の左右端をなぞる2本
   for (const off of [-VEHICLE_HALF_WIDTH, VEHICLE_HALF_WIDTH]) {
@@ -657,7 +616,7 @@ function drawGuide(
       y += ds * Math.sin(th)
       // 車体端は進行方向の法線（左）へ off ずらす。車両座標の y 方向へずらすと、
       // 旋回して車体が向きを変えたぶん幅が潰れて（または広がって）崩れる。
-      // 車両座標 (x=前, y=左) をそのまま渡す（後カメラの反転は投影器の中）
+      // 車両座標 (x=前, y=左) をそのまま渡す（カメラ取付位置の差し引きは投影器の中）
       const p = project(x - off * Math.sin(th), y + off * Math.cos(th))
       // 写らない点は線を繋がずに分断する（繋ぐと画面を横切る長い直線になる）
       if (!p) {
@@ -679,8 +638,8 @@ function drawGuide(
  * そうでなければ校正値があれば魚眼、無ければ `hfov` のピンホール近似。
  * 補正映像かどうかはサーバ真値（`status.camera_config.undistort` と、そのカメラが
  * 校正済みで実際に補正されているか `undistort_available`）で決める。 */
-export function lensFor(cam: 'front' | 'rear', w: number, h: number): Lens {
-  const geom = cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
+export function lensFor(cam: CamId, w: number, h: number): Lens {
+  const geom = camGeom(cam)
   const cfg = useUi.getState().cameraConfig
   if (cfg?.undistort && cfg.undistort_available?.[cam]) {
     return pinholeLens(w, h, geom.undistortHfov, geom.bottomCrop, 'undistorted')
@@ -697,28 +656,25 @@ export function lensFor(cam: 'front' | 'rear', w: number, h: number): Lens {
  * **カメラ座標の光線を回してから**レンズに通す——魚眼では「画像を主点まわりに
  * 回す」近似が成り立たない（端ほど像の回り方が違う）ため。ピンホールでは
  * 従来の画像面回転と同じ結果になる。 */
-function makeProjector(w: number, h: number, camHeightSetting: number, cam: 'front' | 'rear') {
+function makeProjector(w: number, h: number, camHeightSetting: number, cam: CamId) {
   const vs = live.vs
-  const isFront = cam === 'front'
-  const geom = isFront ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camRear
-  const height = isFront ? camHeightSetting : geom.height
+  const geom = camGeom(cam)
+  // 左右とも同じ高さに付いているので、設定パネルで校正した高さを両方に使う
+  const height = camHeightSetting
   const lens = lensFor(cam, w, h)
 
-  // IMU が無効・未受信の間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）。
-  // 後カメラは前カメラと逆向きを見ているので、姿勢補正の符号を反転する
-  // （前が沈む＝後ろは持ち上がる。左右も振り返った側から見るので鏡像になる）
-  const dPitch = (vs?.imu_ok ? vs.pitch : 0) * (isFront ? 1 : -1)
-  const dRoll = (vs?.imu_ok ? vs.roll : 0) * (isFront ? 1 : -1)
+  // IMU が無効・未受信の間は姿勢ぶんの補正をかけない（0 扱い＝固定値のみ）
+  const dPitch = vs?.imu_ok ? vs.pitch : 0
+  const dRoll = vs?.imu_ok ? vs.roll : 0
 
   // 前が沈む（dPitch 負）ほどカメラも一緒に下を向くので、符号を反転して足す。
   // roll: 光軸まわりの回転。右が沈む（dRoll 正）とカメラも右に傾き、
   // 写真の一般則どおり像は光軸を中心に反時計回りへ回って見える。
   // **返す関数は base_link 基準の地面点 `(x=前, y=左)` を受け取る**（カメラ取付位置の
-  // 差し引き・後カメラの反転は `groundProjector` がやる）
+  // 差し引きは `groundProjector` がやる）
   return groundProjector(
     lens,
     { x: geom.x, y: geom.y, height, pitch: geom.pitch - dPitch },
-    cam,
     dRoll,
   )
 }
@@ -831,14 +787,15 @@ const OB_COLOR: Record<ObstacleLevel, string> = {
  * 計算は `bus/pathObstacles.ts`（点群を取得から今までの車の動きぶん戻してから掃く）
  */
 function drawObstacles(
-  ctx: CanvasRenderingContext2D, w: number, h: number, camHeightSetting: number, cam: 'front' | 'rear',
+  ctx: CanvasRenderingContext2D, w: number, h: number, camHeightSetting: number, cam: CamId,
   /** 映像のうち見えている下端の y（これより下は HUD に隠れる） */
   visibleBottom: number,
 ) {
   const scan = live.scan
   const vs = live.vs
   if (!scan || !vs) return
-  const ob = findPathObstacle(scanPointsNow(scan, vs), vs.steer_actual, vs.speed, cam === 'rear')
+  // カメラは前向きなので、前進したときの進路上の障害物だけを描く
+  const ob = findPathObstacle(scanPointsNow(scan, vs), vs.steer_actual, vs.speed, false)
   if (!ob) return
   const project = makeProjector(w, h, camHeightSetting, cam)
   const col = OB_COLOR[ob.level]
@@ -853,7 +810,7 @@ function drawObstacles(
   }
   // 止まる線。車体の端の位置で、車体の幅いっぱいに
   const { x, y, th } = ob.pose
-  const bx = ob.reverse ? BUMPER_X.rear : BUMPER_X.front
+  const bx = BUMPER_X.front
   const ex = x + bx * Math.cos(th)
   const ey = y + bx * Math.sin(th)
   const nx = -Math.sin(th) * HALF_WIDTH

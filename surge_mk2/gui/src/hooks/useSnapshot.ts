@@ -1,7 +1,7 @@
 /**
  * 📷 撮影ボタン — Pi のカメラ映像を1枚撮って Mac（ブラウザのダウンロード先）に保存する。
  *
- * `GET /snapshot/<front|rear>.png`（`telemetry_node._serve_snapshot`）が共有メモリの
+ * `GET /snapshot/<front|left>.png`（`telemetry_node._serve_snapshot`）が共有メモリの
  * 最新フレームを**無劣化 PNG・魚眼のまま**返す。主な用途はチェッカーボード校正
  * （Mac 側 `tools/cam_calib/`、ランチャーの「カメラ校正」）で、表示中の JPEG
  * （画質を落とし、補正映像なら remap 済み）を保存するのでは校正に使えないため。
@@ -13,8 +13,9 @@
  * `useMcapDownload.ts` と同じ。
  */
 import { useState } from 'react'
+import type { CamId } from '../render/cameraLayout'
 
-export type SnapCam = 'front' | 'rear'
+export type SnapCam = CamId
 
 async function snapOne(cam: SnapCam): Promise<string> {
   const res = await fetch(`/snapshot/${cam}.png`, { cache: 'no-store' })

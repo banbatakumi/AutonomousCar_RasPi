@@ -33,6 +33,7 @@
  */
 import { useState } from 'react'
 import type { DrivingSettings, NumericSettingKey, SettingRange } from '../store/ui'
+import { CAM_LABEL } from '../render/cameraLayout'
 import {
   MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM,
   PI_MAX_SPEED_CAP, PI_MAX_STEER_CAP, effectiveRange, useUi,
@@ -248,7 +249,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   const pathGuide = useUi((s) => s.pathGuide)
   const obstacleOverlay = useUi((s) => s.obstacleOverlay)
   const planOverlay = useUi((s) => s.planOverlay)
-  const autoRearCam = useUi((s) => s.autoRearCam)
   const parkBeep = useUi((s) => s.parkBeep)
   const engineSoundOn = useUi((s) => s.engineSoundOn)
   const fan = useUi((s) => s.fan)
@@ -269,6 +269,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
   // 50Hz の `/ws/telemetry` に載せるほど頻繁に変わらない値なので tc_enabled 等とは事情が違う
   const cam = useUi((s) => s.cameraConfig)
   const sig = useUi((s) => s.signalConfig)
+  const winkerMode = useUi((s) => s.winkerMode)
   // 車両の物理的な上限値（`LIMITS` パケット由来。★v0.11）。`link`（LinkDiag、
   // `/ws/telemetry` 8Hz）から読む理由は tc_enabled 等と同じ（上のコメント参照）
   const range = effectiveRange({
@@ -520,22 +521,14 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
 
       {tab === 'camera' && (
         <>
-          {/* capture側(camera_node)のFPS上限・後方カメラON/OFF・GUI配信頻度。
+          {/* capture側(camera_node)の前カメラのFPS上限・GUI配信頻度。
               TC/TVと同じく状態はサーバ真値（`status.camera_config`）。
               ARM中/DISARM中で別々の値を持つ（駐車中の節電のため）。
               前カメラの上限は目安——カメラを使う自動運転（`line_trace`/`ftg_cam`）が
               engage 中はサーバ側が無視して最大まで引き上げる（`auto_override`） */}
           <section className="settings-group">
             <h3>カメラ（ARM中＝走行できる状態）</h3>
-            <label className="settings-checkbox">
-              <input
-                type="checkbox"
-                checked={cam?.rear_enabled_armed ?? true}
-                disabled={cam === null}
-                onChange={(e) => ch?.setCamera({ rearEnabledArmed: e.target.checked })}
-              />
-              後方カメラの映像取得{cam === null && '（未確認）'}
-            </label>
+            {/* 左カメラは設定を持たない（Pi 側が要るときだけ主カメラと同期して回す） */}
             <div
               className="settings-row"
               title={
@@ -562,22 +555,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 <span className="unit">実効 {cam.front_fps_effective.toFixed(0)}fps（自動運転中）</span>
               )}
             </div>
-            <div className="settings-row" title="後方カメラは自動運転では使わない（GUI表示とロギング専用）ので上書きは無い">
-              <div className="settings-row-head">
-                <span className="label">後カメラ 取得上限</span>
-                <b>{(cam?.rear_fps_armed ?? 10).toFixed(0)}</b>
-                <span className="unit">fps</span>
-              </div>
-              <input
-                type="range"
-                min={1}
-                max={30}
-                step={1}
-                value={cam?.rear_fps_armed ?? 10}
-                disabled={cam === null || cam?.rear_enabled_armed === false}
-                onChange={(e) => ch?.setCamera({ rearFpsArmed: Number(e.target.value) })}
-              />
-            </div>
           </section>
 
           <section className="settings-group">
@@ -589,14 +566,14 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               <input
                 type="checkbox"
                 checked={cam?.undistort ?? false}
-                disabled={cam === null || !(cam.undistort_available?.front || cam.undistort_available?.rear)}
+                disabled={cam === null || !(cam.undistort_available?.front || cam.undistort_available?.left)}
                 onChange={(e) => ch?.setCamera({ undistort: e.target.checked })}
               />
               補正した映像を表示する
-              {cam !== null && !(cam.undistort_available?.front || cam.undistort_available?.rear)
+              {cam !== null && !(cam.undistort_available?.front || cam.undistort_available?.left)
                 && '（未校正。ランチャーの「カメラ校正」で校正すると使える）'}
-              {cam?.undistort_available && cam.undistort_available.front !== cam.undistort_available.rear
-                && `（${cam.undistort_available.front ? '前' : '後'}カメラのみ校正済み）`}
+              {cam?.undistort_available && !!cam.undistort_available.front !== !!cam.undistort_available.left
+                && `（${cam.undistort_available.front ? CAM_LABEL.front : CAM_LABEL.left}カメラのみ校正済み）`}
             </label>
           </section>
 
@@ -607,15 +584,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 <span className="unit">{cam.armed ? '　現在ARM中' : '　現在DISARM中・下記を適用中'}</span>
               )}
             </h3>
-            <label className="settings-checkbox">
-              <input
-                type="checkbox"
-                checked={cam?.rear_enabled_disarm ?? false}
-                disabled={cam === null}
-                onChange={(e) => ch?.setCamera({ rearEnabledDisarm: e.target.checked })}
-              />
-              後方カメラの映像取得{cam === null && '（未確認）'}
-            </label>
             <div className="settings-row" title="駐車中は走行の応答性が要らないので、通常より低いfpsで十分">
               <div className="settings-row-head">
                 <span className="label">前カメラ 取得上限</span>
@@ -658,15 +626,14 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               選択は自動運転タブの `AutoPanel` にある——「どのモードで
               走るか」と「そのモードが使うモデル」は同じ意思決定の一部なので、ここには置かない */}
 
-          {/* 進路ガイド（前後カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
+          {/* 進路ガイド（前方カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
               height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
-              高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ——後カメラは
-              固定値（VEHICLE.camRear.height）を使い調整UIを持たない */}
+              高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ */}
           <section className="settings-group">
             <h3>進路ガイド校正</h3>
             <label className="settings-checkbox">
               <input type="checkbox" checked={pathGuide} onChange={(e) => set({ pathGuide: e.target.checked })} />
-              前後カメラに進路ガイドを重ねる（校正前・暫定）
+              前方カメラに進路ガイドを重ねる（校正前・暫定）
             </label>
             <label className="settings-checkbox">
               <input
@@ -686,10 +653,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               />
               自動運転の計画（指令の進路・経路・狙う点）を前方カメラに重ねる
             </label>
-            <label className="settings-checkbox">
-              <input type="checkbox" checked={autoRearCam} onChange={(e) => set({ autoRearCam: e.target.checked })} />
-              R に入れたらラジコンのメイン映像を後方カメラに切り替える
-            </label>
             {CAMERA_FIELDS.map((f) => (
               <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
             ))}
@@ -699,6 +662,19 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
 
       {tab === 'signal' && (
         <>
+          <section className="settings-group">
+            <h3>ウィンカー・ハザードの点滅</h3>
+            <p className="dim">選択したパターンはSTM32へ送られ、ウィンカーとハザードの両方に適用されます。</p>
+            <div className="seg">
+              {([[1, 'モード1 普通'], [2, 'モード2 滑らか'], [3, 'モード3 豆電球']] as const).map(([mode, label]) => (
+                <button key={mode} className={winkerMode === mode ? 'on' : ''}
+                  onClick={() => {
+                    useUi.getState().set({ winkerMode: mode as number })
+                    try { localStorage.setItem('surge.winkerMode', String(mode)) } catch { /* local preference is optional */ }
+                  }}>{label}</button>
+              ))}
+            </div>
+          </section>
           {/* 矢印信号認識（`arrow_signal_node`）。カメラ設定と同じく状態はサーバ真値
               （`status.signal_config`）。会場で実物の看板を見ながらここのスライダーを
               動かし、自動運転タブの前方カメラ映像に重なるROI枠線・ラベルを見て

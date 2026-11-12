@@ -1,7 +1,7 @@
 /**
  * クリアランスソナー。車体まわり 360° を `SECTORS` 方向に分け、方向ごとに
- * **車体の外形から一番近い物までの距離**を出して4段に直す。表示（`components/rc/ParkSensor.tsx`）と
- * 音（`hooks/useParkBeep.ts`）が同じしきい値を使うように、ここにだけ書く。
+ * **車体の外形から一番近い物までの距離**を出して4段に直す。使うのは音（`hooks/useParkBeep.ts`）。
+ * 表示（旧 `components/rc/ParkSensor.tsx`）は 2026-11-13 にラジコンの配置替えでやめた（車体図の近接リングと音で足りる）。
  *
  * 距離の出どころ:
  * - **LiDAR**（全周）: 点を base_link に置き、車体の外形（`VEHICLE.footprint`）までの距離を測る。

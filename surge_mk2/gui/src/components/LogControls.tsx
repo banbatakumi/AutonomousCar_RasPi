@@ -12,7 +12,7 @@
  * **🎥 録画**は動画（mp4）用で、MCAP とは別物（`useVideoRecord`。Pi の `logs/` に書き、
  * 停止後にダウンロードする。MCAP は解析用で画像は 10Hz）。
  *
- * 同じ並びに **📷 撮影**（`useSnapshot`。前カメラと、取得中なら後カメラの生画像を
+ * 同じ並びに **📷 撮影**（`useSnapshot`。右（主）カメラと、取得中なら左カメラの生画像を
  * PNG で Mac に保存。魚眼校正の写真撮りに使う）を置く。配信映像の魚眼補正の切替は
  * 設定パネル（⚙）だけに置く（指示による）。
  */
@@ -33,8 +33,8 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
   const cam = useUi((s) => s.cameraConfig)
   const snapshot = useSnapshot()
   // 取得を止めているカメラ（DISARM 中で映像を表示していない等）はフレームが無いので撮らない
-  const snapCams: SnapCam[] = (['front', 'rear'] as SnapCam[]).filter((c) =>
-    (c === 'front' ? cam?.front_enabled_effective : cam?.rear_enabled_effective) !== false)
+  const snapCams: SnapCam[] = (['front', 'left'] as SnapCam[]).filter((c) =>
+    (c === 'front' ? cam?.front_enabled_effective : cam?.stereo_effective) !== false)
 
   return (
     <div className="log-controls">
@@ -62,7 +62,7 @@ export function LogControls({ ch }: { ch: ControlChannel | null }) {
         disabled={!ch}
         onClick={video.toggle}
         title={
-          '動画（mp4）を録画する。前後カメラを 30fps で別々のファイルに書き、'
+          '動画（mp4）を録画する。左右カメラを 30fps で別々のファイルに書き、'
           + '停止するとMacにダウンロードする（DISARM 中でも 30fps に上げる。最長10分で自動停止）。'
           + '静止画は📷'
         }

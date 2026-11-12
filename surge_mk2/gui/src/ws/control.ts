@@ -441,7 +441,7 @@ export class ControlChannel {
   // ── カメラ capture 設定（後方ON/OFF・前後FPS上限・GUI配信fps） ──
 
   /**
-   * capture側(camera_node)のFPS上限・後方カメラの取得ON/OFF・GUIへのJPEG配信頻度。
+   * capture側(camera_node)の前カメラのFPS上限・GUIへのJPEG配信頻度。
    * `fan`/`tc_tv` と同じく状態はサーバが真値。**どれも省略できる**（送った項目だけ効く）。
    * ARM中/DISARM中で別々の値を持つ。
    *
@@ -452,8 +452,6 @@ export class ControlChannel {
    */
   setCamera(p: {
     frontFpsArmed?: number; frontFpsDisarm?: number
-    rearFpsArmed?: number
-    rearEnabledArmed?: boolean; rearEnabledDisarm?: boolean
     guiHz?: number
     undistort?: boolean
   }) {
@@ -461,9 +459,6 @@ export class ControlChannel {
       type: 'camera',
       front_fps_armed: p.frontFpsArmed,
       front_fps_disarm: p.frontFpsDisarm,
-      rear_fps_armed: p.rearFpsArmed,
-      rear_enabled_armed: p.rearEnabledArmed,
-      rear_enabled_disarm: p.rearEnabledDisarm,
       gui_hz: p.guiHz,
       undistort: p.undistort,
     })
@@ -644,7 +639,7 @@ export class ControlChannel {
     this.send({ type: 'mcap_record_stop' })
   }
 
-  /** 🎥 録画（前後カメラを 30fps の mp4 で Pi の `logs/` に書く。DISARM 中でも 30fps に上げる） */
+  /** 🎥 録画（左右カメラを 30fps の mp4 で Pi の `logs/` に書く。DISARM 中でも 30fps に上げる） */
   videoRecordStart() {
     this.send({ type: 'video_record_start' })
   }

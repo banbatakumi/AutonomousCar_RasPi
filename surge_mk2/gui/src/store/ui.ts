@@ -633,6 +633,8 @@ type UiState = {
    */
   winkerLeftRequested: boolean
   winkerRightRequested: boolean
+  /** STM32 のウィンカー点滅モード（1=通常、2=滑らか、3=豆電球風） */
+  winkerMode: number
 
   /**
    * ゲームパッドの D/R レンジ（実車のシフトレバー相当）。
@@ -694,40 +696,13 @@ type UiState = {
    */
   planOverlay: boolean
   /**
-   * ラジコンで R に入れたら、メイン映像を後方カメラに切り替えるか（抜けたら前方に戻す）。
-   * 既定 ON。`localStorage` には保存しない（`pathGuide` と同じ扱い）
-   */
-  autoRearCam: boolean
-  /**
    * クリアランスソナーの音を鳴らすか（`hooks/useParkBeep.ts`）。ARM 中、進む向きの半周
    * （LiDAR・超音波）に近い物があるときだけ鳴る。**GUI の演出で、自動停止とは独立**。既定 ON
    */
   parkBeep: boolean
-  /**
-   * ラジコンビューで左下に PIP（今メインに出ていない方のカメラ）を表示するか。
-   *
-   * **切ると PIP 側の `CameraView` が外れて WS が閉じる。** 流れなくなった分、
-   * メイン映像のフレームレートに回せる（カメラ2台ぶんの帯域が効いている環境向け）。
-   *
-   * 今は常時 true で切り替える操作は無い（LiDAR を消したいだけのクリックで小さい映像
-   * まで消えるのが紛らわしいため、`lidarVisible`/`pathGuide` とは連動させない）。PIP 自体のクリックは表示/非表示ではなく
-   * 「メインと入れ替え」（`RcView.tsx` の `mainCam`）。
-   */
-  rearPip: boolean
-  /** ラジコンビューで LiDAR ミニマップ（映像右上の丸）を出すか。メイン映像クリックで `pathGuide` と連動する
-   * */
-  lidarVisible: boolean
-  /** LiDAR ミニマップを拡大表示中か。false＝映像の1/3高さ、true＝82%高さ。ミニマップ自体のクリックで切り替える */
+  /** LiDAR ミニマップを拡大表示中か。false＝計器パネルの中の丸、true＝映像の中央に 82% 高さ。
+   * ミニマップ自体のクリック（パッドは R3）で切り替える */
   lidarExpanded: boolean
-  /**
-   * ラジコンビューのメイン映像に出しているカメラ（`RcView.tsx`）。PIP には
-   * 常にこの逆（`pipCam`）が出る。PIP クリックで入れ替わるほか、
-   * ゲームパッドの ○ でも切替可能（`useDriving.ts`）。
-   * パッドの rAF ループ（React ツリーの外）から切り替えるため store に持つ。
-   * **ページ再読み込みでは 'front' に戻る**（`localStorage` に保存しない。
-   * `lidarExpanded` 等と同じ——起動直後に予期せず後方カメラがメインの状態は避けたい）
-   */
-  mainCam: 'front' | 'rear'
 
   /**
    * 合成エンジン音（`audio/engineSound.ts`）を鳴らすか。**GUI 演出のみで
@@ -774,7 +749,7 @@ type UiState = {
   fan: FanStatus | null
 
   /**
-   * capture側(camera_node)のFPS上限・後方カメラON/OFF・GUI配信頻度。
+   * capture側(camera_node)の前カメラのFPS上限・GUI配信頻度。
    * **サーバが真値なのでここでは編集しない。** 押した結果は `status` の
    * ブロードキャストで返ってくる（`ws/control.ts` の `setCamera`）。
    */
@@ -874,6 +849,7 @@ export const useUi = create<UiState>((set, get) => ({
   sideBrakeRequested: false,
   winkerLeftRequested: false,
   winkerRightRequested: false,
+  winkerMode: (() => { try { const n = Number(localStorage.getItem('surge.winkerMode')); return [1, 2, 3].includes(n) ? n : 2 } catch { return 2 } })(),
   gear: 'D',
   mtGear: 'N',
 
@@ -883,12 +859,8 @@ export const useUi = create<UiState>((set, get) => ({
   pathGuide: true,
   obstacleOverlay: true,
   planOverlay: true,
-  autoRearCam: true,
   parkBeep: true,
-  rearPip: true,
-  lidarVisible: true,
   lidarExpanded: false,
-  mainCam: 'front',
   engineSoundOn: false,
 
   settings: clampSettings(settingsIntent),

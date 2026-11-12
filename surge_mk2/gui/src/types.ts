@@ -231,20 +231,14 @@ export type E2EFusionModelStatus = {
   name: string
 }
 
-/** capture側(camera_node)のFPS上限・後方カメラON/OFFの意思と、GUIへの配信頻度。
+/** capture側(camera_node)の前カメラのFPS上限の意思と、GUIへの配信頻度。
  * ARM中(`_armed`)/DISARM中(`_disarm`)で別々の値を持つ。
  * **サーバが真値**（`ws/control.ts` の `setCamera`）。 */
 export type CameraConfigStatus = {
-  /** ARM中の後方カメラ取得(capture)ON/OFF */
-  rear_enabled_armed: boolean
-  /** DISARM中（駐車中）の後方カメラ取得ON/OFF。既定OFF（監視の用途が無い） */
-  rear_enabled_disarm: boolean
   /** ARM中の前カメラcapture fps上限（目安）。カメラを使う自動運転モードのengage中は無視される */
   front_fps_armed: number
   /** DISARM中（駐車中）の前カメラcapture fps上限 */
   front_fps_disarm: number
-  /** ARM中の後カメラcapture fps上限。自動運転はrear_fpsを使わないので上書きは無い */
-  rear_fps_armed: number
   /** ブラウザへ送るJPEGの頻度。ARM状態と無関係（Wi-Fi帯域が理由） */
   gui_hz: number
   /** 現在の車両ARM状態（サーバが`vehicle_state`から判定） */
@@ -254,14 +248,14 @@ export type CameraConfigStatus = {
   /** 実際にcamera_nodeへ指示している前カメラのON/OFF。DISARM中は映像を使う者
    *  （GUIの視聴者・記録）がいなければ止める。古いサーバは送らない */
   front_enabled_effective?: boolean
-  /** 実際にcamera_nodeへ指示している後方カメラのON/OFF */
-  rear_enabled_effective: boolean
   /** カメラを使う自動運転モードでengage中で、front_fps_armedを上書きしているか */
   auto_override: boolean
   /** 配信映像を魚眼補正（仮想ピンホールへ remap）するか。記録・撮影は常に生画像 */
   undistort?: boolean
   /** 校正値があり、実際に補正映像が出るカメラ。未校正のカメラは魚眼のまま届く */
-  undistort_available?: { front: boolean; rear: boolean }
+  undistort_available?: { front: boolean; left?: boolean }
+  /** いま左右を同期して撮らせているか（False なら左カメラは止まっている） */
+  stereo_effective?: boolean
 }
 
 /** 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値。**サーバが真値**
@@ -369,7 +363,7 @@ export type ControlStatus = {
   sfl: { active: boolean }
   /** mcap のライブ中継。**Piのディスクには一切書かない**（ブラウザが直接ダウンロードする） */
   mcap: { active: boolean; elapsed_s: number; error: string | null }
-  /** 🎥 録画（Pi の `logs/` に前後カメラの mp4 を書く）。止めて `files` が出たらダウンロードする */
+  /** 🎥 録画（Pi の `logs/` に左右カメラの mp4 を書く）。止めて `files` が出たらダウンロードする */
   video: { active: boolean; elapsed_s: number; error: string | null; files: string[] }
   /** 自動運転の意思と、選べるモードの宣言。**サーバが真値** */
   auto: AutoStatus
@@ -381,7 +375,7 @@ export type ControlStatus = {
   pi?: PiHealth
   /** `hb/<node>` を一度でも出したノードの一覧。**古い Pi 側では無い** */
   nodes?: NodeAlive[]
-  /** capture側のFPS上限・後方カメラON/OFF・GUI配信頻度。**サーバが真値** */
+  /** capture側の前カメラのFPS上限・GUI配信頻度。**サーバが真値** */
   camera_config: CameraConfigStatus
   /**
    * GUIの運転設定（速度ダイヤル・制御モード・フィール値等、`DrivingSettings` の一部）。
@@ -485,6 +479,8 @@ export type CmdOut = {
    * `side_brake` と同じく**トグル**で扱う（曲がり終わったら明示的に OFF にする） */
   winker_left: boolean
   winker_right: boolean
+  /** ウィンカー点滅モード: 1=通常、2=滑らか、3=豆電球風 */
+  winker_mode: number
   /** ローンチコントロール（v0.20）。立っている間、`speed` が車速より 0.5m/s 以上速い加速を、STM32 が
    * 目標速度のランプと速度PIを迂回して全開＋TC で行う（1回の要求で1回）。`torque_mode`・`brake` の間は
    * 意味を持たない。**立てるのは `useDriving.ts` のローンチの手順を踏んだ発進だけ** */
