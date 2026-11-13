@@ -141,6 +141,22 @@
   合わせ、両方のリングから 0.5ms 以内のコマを探して**同じ瞬間の組**で焼く（`FrameRing.find`・`RingJpeg.encode_at`）。
   組の JPEG 品質は `--stereo-jpeg-quality`（既定 90。ほかは 70 のまま）。同期していない間はこれまでどおりカメラごと。
   GUI の MCAP 記録・`tools/record.sh`・`surge-logger` のどれも `logger_node` なので全部に効く
+- **記録に残すもの（2026-11-13、「同じ入力・同じ設定で照合をやり直せる」ため）**
+  - `/viz/image/front`・`/viz/image/left`: 同じ瞬間の組の JPEG（上の `_pump_stereo`）。**撮る頻度は `--image-hz`**（`logger_node` 既定 5Hz、
+    GUI の記録は `image_hz` 指定）。照合は 10Hz なので、照合の全組を残したいときは `--image-hz 10`（約 +10MB/分）
+  - `/stereo/info`（`StereoInfo`、照合ごと）: 左右の撮影時刻の差 `dt_lr_ns`、遅れの内訳（`cam_ms`・`wait_ms`・`read_ms`・`proc_ms`・`latency_ms`）、
+    障害物の点数 `n_points`、視差の出た割合 `valid_frac`、**その時の照合・抽出の設定**（`algo`・`scale`・`num_disp`・`block`・`rows`・`z_min`…`slice_m`）、
+    右カメラの取付 `cam_pose`。`scan/stereo` と同じ `t_capture`・`seq` で突き合わせる
+  - `/scan/stereo`: 方位ごとの距離（0 = 見つからない）。`/stereo/depth` は表示専用の損失画像（解析には使わない）
+  - `/cam/config`: 照合（`depth`）・左右同期（`stereo`）を回していた期間。`/stereo/info` が無い区間が「回していなかった」のか「記録が欠けた」のかを分ける
+  - `/vehicle_state`（`pitch`・速度・舵角）、`/scan`（LiDAR）、`/diag/link`（`stereo_ok`・`auto_stop_stereo`・`auto_stop_active`）: 誤検出の切り分けに使う
+  - メタデータ `provenance`（`raspi/rec/provenance.py`）: **`vehicle_toml`（校正値の全文）**、`git`、`src_sha`（ステレオ関連ファイルのハッシュ。Pi は `.git` が無いので
+    Mac のコードと突き合わせる用）、`protocol_version`
+  - 読む側: `tools/stereo_bench/data.py` の `load_run_info()`・`load_stereo_info()`・`load_frames()`。`tomllib.loads(load_run_info(p)["provenance"]["vehicle_toml"])` で
+    撮った時の校正値が取れる
+  - **記録に無いもの**: 平行化・視差そのもの（画像と校正値から作り直せる。損失の JPEG でも `--requality` で差を確かめられる）、方位ごとの点の高さ・点数
+    （C の後処理の内部。足すなら `stereo_native.c` と numpy 版の両方）。Pi が STM32 に送った `STEREO_OBS` は `scan/stereo` から
+    `raspi/core/stereo_obs.py` で同じに作れる（`tools/fwsim/stereo_replay.py`）
 - `tools/stereo_bench`（`python -m tools.stereo_bench REC.mcap`）: `StereoBM`/`StereoSGBM` × 640/320 幅（`PRESETS`）、
   `--rows` で照合する行、`--requality 70` で JPEG 品質の効き、`--save` で平行化した左と視差の絵。時間は既定 1 スレッド
 - **物差しは LiDAR**: 走査面（`[sensors.lidar] z` = 0.095m）±2cm に入るステレオの点を 1° の方位ごとに中央値でまとめ、
@@ -204,7 +220,7 @@
 | 撮影から `scan/stereo` を出すまでの遅れ（合否 50ms） | **中央値 40ms・90% 41ms**（DISARM の上限 1.5GHz）、**37ms・38ms**（ARM の上限 2.0GHz） ✓ |
 | 内訳 | カメラ 19〜20（露光〜`ImageRef` の publish。camera_node 側）＋待ち 0＋読み 1＋処理 17〜20ms |
 | 制御系電流（A-B-A-B、DISARM、両カメラ停止 → 深度映像だけに接続） | 442 → 589mA、**+147mA** ✓（前・左カメラの起動ぶんを含む。高速化前の測定） |
-| 深度映像（表示用の穴埋め＋JPEG、別スレッド） | 約 20ms・8fps（`CAM_MASK_POLL_HZ`）。障害物の遅れには乗らない |
+| 深度映像（色付け＋JPEG、別スレッド） | 穴埋めがあった頃は約 20ms・8fps（`CAM_MASK_POLL_HZ`）。穴埋めを消した後は未測定。障害物の遅れには乗らない |
 
 高速化の経緯（遅れの中央値／90% 点。改善前 83／98ms、処理 44ms）。効果を比べられるよう、先に `hb/stereo` に遅れの内訳を出した:
 
@@ -228,10 +244,7 @@
 3. 試して効かなかったもの: OpenCV のスレッド 3・4（2 より遅い。1 で 41ms、2 で 22ms、4 で 29ms）、帯を上下に分けて Python のスレッドで並列（25〜30ms）、
    ブロック 3（−0.6ms）。視差 64 は −5ms だが 0.32m より近くが測れなくなるので採らない
 
-**表示用の穴埋め**（`raspi/core/stereo_match.py` の `DisplayFiller`、GUI の深度映像だけ）: WLS フィルタ（`cv2.ximgproc`、案内画像 = 平行化した左）
-は入力について線形なので、有効画素だけの視差と有効の目印をそれぞれ通して割る（正規化した WLS）。無効の画素をそのまま通すと
-値として混ざってほとんど埋まらない（合成画像で 39% → 45%。正規化で 58%）。信頼度付きの WLS は右の視差も要り照合が倍になるので使わない。
-測った画素の値は変えない。周りに手がかりの無い所（左端の探索幅の帯・照合の効かない床）は黒のまま。**埋めた値は推測なので障害物の判定には使わない**
+**表示用の穴埋め（WLS フィルタ、`DisplayFiller`）は 2026-11-13 に削除した**（不要と判断）。深度映像は視差を色にしただけで、測れなかった所は黒のまま。障害物の判定は元から穴埋めを使っていない
 
 - `raspi/nodes/stereo_node.py`（`surge-stereo`、常時 enable）: `image/front`・`image/left` がどちらも `synced` で同じ瞬間になったら、
   そのコマを両方のリングから読み（`FrameReader.read_at`）、灰色 → 平行化（行 150〜260 の帯だけ）→
@@ -263,7 +276,7 @@
 **残り**
 1. ~~照合の方式を決める~~（SGBM・150〜260 行。上）
 2. 実際の場面で `scan/stereo` が低い障害物を拾い、床を拾わないかを見る（今回の部屋の場面では 70 方位前後に何か出ていたが、
-   中身は確かめていない）。IMU のピッチで取付の pitch を補正するか（制動で車体が沈むと遠くの床が持ち上がって見える。
+   中身は確かめていない）。IMU のピッチで取付の pitch を補正するか（制動で車体が沈むと遠くの床が持ち上がって見える。周回ログ（2026-11-13、機首上げ側）では、ピッチと偽検出の増加は LiDAR の水平面が傾いて低い物を見逃すことで説明でき、床の持ち上がりではなかった（`docs/uart_protocol.md` §5.6.5）。
    2m 先で 1° が 3.5cm）は実測を見て決める
 
 ### 段階5: 自動運転で使う

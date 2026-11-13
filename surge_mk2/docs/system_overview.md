@@ -690,6 +690,8 @@ WebSocket ─┬─▶ 点群・地図・カメラ → live.ts に置き、Canva
 - MCAP は JSON + jsonschema で書き（Foxglove の MCAP に msgpack が無いため）、Foxglove 用の `/viz/*` と推測航法の `/odom`・`/tf` を足す。
   **`map` と `odom` は tf でつながない**（独立した推定で原点が一致する保証が無い）。`log_time` は UNIX epoch、メッセージ内の時刻は単調時刻のまま
 - `raspi/tools/slam_replay.py` は記録に実機と同じ設定の slam2d を回し、比較用トピックを足した `<入力>_slam.mcap` を作る
+- **メタデータ `provenance`**（`raspi/rec/provenance.py`）に、記録した時の `vehicle.toml` の全文・`git`・主要ファイルのハッシュを残す（再生で同じ処理をやり直す・コードの版を突き合わせるため）。
+  ステレオは照合ごとに `stereo/info` も記録する（何を残し何が残らないかは [`stereo_plan.md` 段階3](stereo_plan.md)）
 
 ---
 
