@@ -179,18 +179,6 @@ const MISC_FIELDS: Field[] = [
   },
 ]
 
-const CAMERA_FIELDS: Field[] = [
-  {
-    key: 'camHeight',
-    label: '取付高さ',
-    unit: 'm',
-    note: '前カメラの路面からの高さ。既定値は vehicle.toml の実測位置。レンズ光学中心とはズレうるので映像のガイド線を見ながら追い込む',
-    digits: 3,
-  },
-  // 俯角（取付角度）はここに無い。一度ネジ止めしたら変わらない固定値なので
-  // vehicle.toml の sensors.cam_front.pitch を直接使う（store/ui.ts 参照）
-]
-
 /**
  * 項目が増えて縦に長くなりすぎたので、テーマごとにタブで分けてある。
  * 「既定値に戻す」等のヘッダはタブの外——`DrivingSettings` 全体（走行・安全・
@@ -587,7 +575,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
             <div className="settings-row" title="駐車中は走行の応答性が要らないので、通常より低いfpsで十分">
               <div className="settings-row-head">
                 <span className="label">前カメラ 取得上限</span>
-                <b>{(cam?.front_fps_disarm ?? 10).toFixed(0)}</b>
+                <b>{(cam?.front_fps_disarm ?? 1).toFixed(0)}</b>
                 <span className="unit">fps</span>
               </div>
               <input
@@ -595,7 +583,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
                 min={1}
                 max={30}
                 step={1}
-                value={cam?.front_fps_disarm ?? 10}
+                value={cam?.front_fps_disarm ?? 1}
                 disabled={cam === null}
                 onChange={(e) => ch?.setCamera({ frontFpsDisarm: Number(e.target.value) })}
               />
@@ -626,9 +614,7 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               選択は自動運転タブの `AutoPanel` にある——「どのモードで
               走るか」と「そのモードが使うモデル」は同じ意思決定の一部なので、ここには置かない */}
 
-          {/* 進路ガイド（前方カメラ映像への重ね描き）の校正。CameraView.tsx の drawGuide が
-              height/pitch を使う。hfov はレンズ公称値で固定なのでここには出さない。
-              高さのスライダ（CAMERA_FIELDS）は前カメラの camHeight のみ */}
+          {/* 進路ガイド（前方カメラ映像への重ね描き）の表示設定 */}
           <section className="settings-group">
             <h3>進路ガイド校正</h3>
             <label className="settings-checkbox">
@@ -653,9 +639,6 @@ export function SettingsPanel({ ch }: { ch: ControlChannel | null }) {
               />
               自動運転の計画（指令の進路・経路・狙う点）を前方カメラに重ねる
             </label>
-            {CAMERA_FIELDS.map((f) => (
-              <SettingRow key={f.key} field={f} settings={settings} range={range} defaults={settingsDefault} onChange={setDriveSettings} />
-            ))}
           </section>
         </>
       )}

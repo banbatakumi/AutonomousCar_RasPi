@@ -20,10 +20,7 @@
  * 運転を楽しむ画面なので文字を極力出さない方針（`RcView.tsx`）で、下記
  * `variant="minimal"` では出さない。
  *
- * 高さ（設定パネルの `camHeight`）は `config/vehicle.toml` の `sensors.cam_front.z`
- * を初期値に、実写を見ながら追い込める——定規で測れる筐体の位置とレンズ光学中心が
- * ズレうるため。**俯角（取付角度）・レンズは調整UIを持たない**。一度ネジ止めしたら
- * 変わらない物理値で、`VEHICLE.camFront.pitch`/`fisheye`/`hfov`（`vehicle.toml` 直）をそのまま使う
+ * 高さ・俯角・レンズは車体の固定値として `vehicle.toml` から使う。GUIの調整項目は持たない。
  * （変わらない物理値にスライダーは要らない）。
  *
  * ## 下端クロップぶんの主点補正
@@ -132,10 +129,9 @@ export function CameraView({
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const guide = useUi((s) => s.pathGuide) && !guideDisabled
-  const camHeight = useUi((s) => s.settings.camHeight)
+  const camHeight = VEHICLE_GEOM.camFront.height
   const statusRef = useRef<HTMLSpanElement>(null)
-  // スライダー操作のたびに WS を再接続させないよう ref 経由で最新値を渡す
-  // （下の draw ループの useEffect 依存に camHeight を入れない）
+  // 描画ループから参照する値は ref 経由にする。
   const camHeightRef = useRef(camHeight)
   camHeightRef.current = camHeight
   // `guide` も同じ理由で ref 経由に。進路ガイドの ON/OFF のたびに
@@ -583,8 +579,8 @@ function guideFacing(_cam: CamId): boolean {
 }
 
 /** 実測舵角から予測進路を路面平面に置き、カメラモデル（`lensFor()`）で画像に落とす。
- * `camHeightSetting` は設定パネルで校正できる値（`store/ui.ts` の `camHeight`。左右とも同じ高さに付いている）。
- * `pitch`/レンズ（`fisheye`/`hfov`）/`bottomCrop` は `vehicle.toml` 由来の固定値（`cam` に応じて
+ * `camHeightSetting` は `vehicle.toml` 由来の固定値（左右とも同じ高さに付いている）。
+ * `pitch`/レンズ（`fisheye`/`hfov`）/`bottomCrop` も `vehicle.toml` 由来の固定値（`cam` に応じて
  * `camFront`/`camLeft` を選ぶ）。`vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
  * （符号の向きはファイル冒頭コメント参照）。 */
 function drawGuide(

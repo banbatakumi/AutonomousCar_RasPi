@@ -302,9 +302,11 @@ HB_HZ = 10
 CAM_FRONT_FPS_DEFAULT = 30.0
 CAM_FPS_MIN = 1.0
 CAM_FPS_MAX = 30.0
-#: **DISARM中**（駐車中・STM32側で`armed=False`）の既定値。カメラは28%を
-#: 占める大口の消費電力源なので、走っていない間はさらに絞る
+#: **DISARM中**（駐車中・STM32側で`armed=False`）の前カメラ取得上限。
 CAM_FRONT_FPS_DISARM_DEFAULT = 10.0
+#: ステレオの照合周期上限。撮像FPSとは独立して、DISARM中だけ低くしてCPUを節電する。
+STEREO_DEPTH_FPS_ARMED = 10.0
+STEREO_DEPTH_FPS_DISARM = 1.0
 #: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
 #: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_CONFIG_HZ = 1
@@ -1920,10 +1922,11 @@ class TelemetryServer:
         if self._video_recording():
             return CAM_FPS_MAX
         if self._desired_stereo():
-            # **左右を同期して撮っている間は ARM/DISARM で fps を変えない。** 走らせたまま fps を変えると
-            # libcamera の同期が崩れ、左右が揃い直すまで 15〜35 秒 `synced` の組が来ない
-            # （`docs/stereo_plan.md` §3）。ARM 中の値に固定する
-            return self._cam_front_fps_armed
+            # 左右を同期して撮っている間も ARM/DISARM ごとの上限を使う。fps変更後は
+            # libcamera の同期が揃い直すまで時間がかかるが、DISARM中の節電設定を
+            # 無視してARM中の値で回し続けるより、現在の状態を正しく反映する。
+            return (self._cam_front_fps_armed if self._vehicle_armed()
+                    else self._cam_front_fps_disarm)
         if self._vehicle_armed():
             return self._cam_front_fps_armed
         return self._cam_front_fps_disarm
@@ -2000,7 +2003,9 @@ class TelemetryServer:
             front_enabled=self._desired_front_enabled(),
             stereo=self._desired_stereo(),
             depth=self._desired_depth(),
-            depth_view=bool(self.camera_clients.get("depth"))))
+            depth_view=bool(self.camera_clients.get("depth")),
+            depth_fps=(STEREO_DEPTH_FPS_ARMED if self._vehicle_armed()
+                       else STEREO_DEPTH_FPS_DISARM)))
 
     def _load_camera_conf(self) -> None:
         """`config/camera.json` から戻す。`_load_auto_conf` と同じ流儀。
@@ -2055,7 +2060,7 @@ class TelemetryServer:
         "mtMaxSpeed": (0.1, 10.0), "mtAccel": (0.5, 70.0),
         "mtGear1": (0.05, 1.0), "mtGear2": (0.05, 1.0), "mtGear3": (0.05, 1.0),
         "mtGear4": (0.05, 1.0), "mtGear5": (0.05, 1.0),
-        "mtCoast": (0.2, 70.0), "mtEngineBrake": (0.0, 6.0), "camHeight": (0.03, 0.25),
+        "mtCoast": (0.2, 70.0), "mtEngineBrake": (0.0, 6.0),
     }
     _DRIVE_SETTINGS_NUMERIC_KEYS = frozenset(_DRIVE_SETTINGS_RANGE)
     _DRIVE_SETTINGS_BOOL_KEYS = frozenset({"autoStop", "launchControl"})

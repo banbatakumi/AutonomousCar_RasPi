@@ -178,6 +178,13 @@ class StereoNode:
         #: 直近に照合した組の 左 − 右 の撮影時刻の差 [ns]（`StereoInfo.dt_lr_ns`）
         self.dt_lr_ns = 0
 
+    def _set_depth_rate(self, cfg) -> None:
+        """`cam/config` の状態別の深度推定上限を反映する。"""
+        rate_hz = getattr(cfg, "depth_fps", 10.0)
+        if not isinstance(rate_hz, (int, float)) or not math.isfinite(rate_hz):
+            rate_hz = 10.0
+        self.period_ns = int(NS / max(0.1, min(30.0, float(rate_hz))))
+
     def stop(self) -> None:
         self._running = False
 
@@ -195,6 +202,7 @@ class StereoNode:
         if not active:
             self._status = "idle"
             return StereoProcessor.failed(reason="深度を使う者がいない（照合停止）")
+        self._set_depth_rate(cfg)
         if self.proc is None:
             self._status = f"failed: {self.init_error}"
             return StereoProcessor.failed(reason=self.init_error)

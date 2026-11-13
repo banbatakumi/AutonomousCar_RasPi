@@ -799,6 +799,9 @@ class TestValidDriveSettings(unittest.TestCase):
 class TestDesiredFrontFps(unittest.TestCase):
     """`_desired_front_fps`（ARM中/DISARM中で節電設定を切り替える）。"""
 
+    def test_disarm_default_is_ten_fps(self):
+        self.assertEqual(tn.CAM_FRONT_FPS_DISARM_DEFAULT, 10.0)
+
     def test_armed_uses_armed_setting(self):
         fake = _fake_cam_server(armed=True)
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 30.0)
@@ -862,11 +865,20 @@ class TestStereoDepthDemand(unittest.TestCase):
             self.assertFalse(tn.TelemetryServer._desired_depth(self._fake(armed=False, auto_mode="stereo_ftg")))
 
     def test_fps_does_not_change_with_arm_while_stereo(self):
-        """左右を同期している間は ARM/DISARM で fps を変えない（変えると揃い直しに 15 秒以上かかる）。"""
-        for armed in (True, False):
-            fake = self._fake(armed=armed)
-            fake.camera_clients["depth"].add(object())
-            self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 30.0)
+        """左右を同期していても現在のARM/DISARM別設定を使う。"""
+        fake = self._fake(armed=True)
+        fake.camera_clients["depth"].add(object())
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 30.0)
+        fake = self._fake(armed=False)
+        fake.camera_clients["depth"].add(object())
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 10.0)
+
+    def test_disarm_stereo_uses_custom_disarm_fps(self):
+        fake = self._fake(armed=False)
+        fake._cam_front_fps_armed = 30.0
+        fake._cam_front_fps_disarm = 1.0
+        fake.camera_clients["depth"].add(object())
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 1.0)
 
 
 class TestStereoPairModes(unittest.TestCase):
@@ -912,11 +924,11 @@ class TestVideoRecordingFps(unittest.TestCase):
 
     def test_mcap_recording_does_not_force_fps(self):
         """mcap 記録（10Hz）はカメラの fps を上限へ上げない。記録中は左右を同期するので
-        ARM 中の fps に固定される（`TestStereoDepthDemand`）。"""
+        DISARM 中は DISARM 設定の fps を使う（`TestStereoDepthDemand`）。"""
         fake = _fake_cam_server(armed=False)
         fake._cam_front_fps_armed = 20.0
         fake._mcap_proc = object()
-        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 20.0)
+        self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 10.0)
 
     def test_starting_counts_as_recording(self):
         fake = _fake_cam_server(armed=False)

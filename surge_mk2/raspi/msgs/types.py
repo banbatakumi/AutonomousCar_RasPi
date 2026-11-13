@@ -962,6 +962,8 @@ class CamConfig(MsgBase):
     #: 深度映像（`/ws/camera/depth`）の視聴者がいるか。False の間 `stereo_node` は深度映像の JPEG を
     #: 作らない（走行中に照合するだけなら表示の時間と電力を食わない）
     depth_view: bool = False
+    #: 深度推定（左右画像の照合）の上限 [Hz]。撮像FPSとは独立して、DISARM中は節電のため低くする
+    depth_fps: float = 10.0
 
 
 class CamModelCtrl(MsgBase):

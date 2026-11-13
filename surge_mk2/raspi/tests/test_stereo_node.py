@@ -173,6 +173,24 @@ def test_step_gating(proc, images):
     assert len(pub.sent) == 1
 
 
+def test_depth_rate_is_configurable_without_changing_capture_rate(proc, images):
+    node = StereoNode(proc, rate_hz=10)
+    latest = {
+        TOPIC_IMAGE_FRONT: _ref("front", 1_000),
+        TOPIC_IMAGE_LEFT: _ref("left", 1_000),
+        TOPIC_CAM_CONFIG: SimpleNamespace(depth=True, depth_view=False, depth_fps=1.0),
+    }
+    node._readers["front"].read_at = lambda ref, t, tol: (images[0], t)
+    node._readers["left"].read_at = lambda ref, t, tol: (images[1], t)
+    assert node.step(latest, 1_000_000_000) is not None
+    latest[TOPIC_IMAGE_FRONT] = _ref("front", 1_500_000_000)
+    latest[TOPIC_IMAGE_LEFT] = _ref("left", 1_500_000_000)
+    assert node.step(latest, 2_000_000_000) is None
+    latest[TOPIC_IMAGE_FRONT] = _ref("front", 2_000_000_000)
+    latest[TOPIC_IMAGE_LEFT] = _ref("left", 2_000_000_000)
+    assert node.step(latest, 3_000_000_000) is not None
+
+
 def test_without_calibration():
     v = dataclasses.replace(Vehicle.load(), stereo=None)
     with pytest.raises(ValueError):

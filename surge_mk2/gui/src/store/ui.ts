@@ -147,17 +147,6 @@ export type DrivingSettings = {
    * `launch` を立てる（STM32 がランプと速度PIを迂回して全開＋TC で加速する）。トルク制御では
    * 設定の駆動トルクに関わらず最大トルクを出す。手順は `useDriving.ts` */
   launchControl: boolean
-  /**
-   * 前カメラの進路ガイド（`CameraView.tsx` の `drawGuide`）が使う取付高さ [m]。
-   * 既定値は `config/vehicle.toml` の `sensors.cam_front.z`（実測済みのセンサ位置）だが、
-   * レンズ光学中心とはズレがありうるため、実写を見ながらここで追い込む前提の値。
-   *
-   * ⚠ 俯角（取付角度）はここに無い。**一度ネジ止めしたら変わらない物理値**なので
-   * `vehicle.toml` の `sensors.cam_front.pitch` を直接使う（`VEHICLE.camFront.pitch`）。
-   * 高さだけスライダを残すのは、こちらはレンズ光学中心と `z` の実測点がズレうる
-   * （定規で測れるのは筐体の位置で、レンズ内部の光学中心そのものではない）ため。
-   */
-  camHeight: number
   /** ラジコンの速度計（`SpeedGauge.tsx`）の表示単位。既定 'ms'。クリックで切替、`localStorage` に保存 */
   speedUnit: 'ms' | 'kmh'
   /**
@@ -277,7 +266,6 @@ export const DEFAULT_SETTINGS: DrivingSettings = {
   mtEngineBrake: 3.0,
   autoStop: DEFAULT_AUTO_STOP,
   launchControl: DEFAULT_LAUNCH_CONTROL,
-  camHeight: VEHICLE.camFront.height,
   speedUnit: 'ms',
   engineSoundType: 'combustion',
 }
@@ -309,7 +297,6 @@ export const SETTINGS_RANGE: Record<NumericSettingKey, { min: number; max: numbe
   mtGear5: { min: 0.05, max: 1, step: 0.05 },
   mtCoast: { min: 0.2, max: 5.5, step: 0.1 },
   mtEngineBrake: { min: 0, max: 6.0, step: 0.1 },
-  camHeight: { min: 0.03, max: 0.25, step: 0.005 },
 }
 
 export type SettingRange = { min: number; max: number; step: number }
