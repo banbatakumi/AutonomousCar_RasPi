@@ -85,7 +85,9 @@ export function StatusBar({
         )}
 
         <span className={`pill lv-${healthLevel(health)}`}>{health}</span>
-        <span className="pill">{mode}</span>
+        {/* mode=0 は DISARM と同義（`MODE_NAME`）。ARM ピルと並べると「DISARM」が2つ出るので、
+            未 ARM のときはモードのピルを出さず ARM ピルに一本化する */}
+        {vs?.armed && <span className="pill">{mode}</span>}
         <span className={`pill ${vs?.armed ? 'lv-warn' : 'dim'}`}>
           {vs?.armed ? 'ARMED' : 'DISARM'}
         </span>

@@ -68,10 +68,36 @@ export function DepthView({ label = '深度' }: { label?: string }) {
   return (
     <div className="camera" title="ステレオの深度（赤 = 近い → 青 = 遠い、黒 = 照合できない）">
       <img ref={imgRef} alt="" className="depth-img" />
+      <DepthScale />
       <div className="camera-tag">
         {label}
         <span className="dim">{status}</span>
         <span className="dim">赤 近い → 青 遠い</span>
+      </div>
+    </div>
+  )
+}
+
+/** `colorize_disparity()` の色順に合わせた距離の凡例。距離は視差に反比例する。 */
+function DepthScale() {
+  const marks = [
+    ['0.2m', 0],
+    ['0.5m', 25],
+    ['1m', 50],
+    ['2m', 70],
+    ['5m', 85],
+    ['15m+', 100],
+  ] as const
+
+  return (
+    <div className="depth-scale" aria-label="深度の距離スケール">
+      <div className="depth-scale-bar" />
+      <div className="depth-scale-labels">
+        {marks.map(([label, left]) => (
+          <span key={label} style={{ left: `${left}%` }}>
+            {label}
+          </span>
+        ))}
       </div>
     </div>
   )

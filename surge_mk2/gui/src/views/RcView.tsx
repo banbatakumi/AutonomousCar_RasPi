@@ -72,6 +72,7 @@ import { DrivePanel } from '../components/rc/DrivePanel'
 import { GMeter } from '../components/rc/GMeter'
 import { LidarMini } from '../components/rc/LidarMini'
 import { RcTemps } from '../components/rc/RcTemps'
+import { LightButton } from '../components/rc/LightButton'
 import { ShiftLights } from '../components/rc/ShiftLights'
 import { SpeedGauge } from '../components/rc/SpeedGauge'
 import { SteerGauge } from '../components/rc/SteerGauge'
@@ -217,6 +218,7 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
             <div className="rc-hud-foot" style={{ left: L.mainLeft, bottom: PANEL_PAD_PX, width: L.mainW, height: FOOT_H_PX }}>
               <RcTemps />
               <AssistLamps />
+              <LightButton />
             </div>
 
             {/* LiDAR ミニマップ。斜辺の下の三角に内接させる（ゲームのマップ表示のような丸）。拡大中は映像の中央に出すので空ける */}

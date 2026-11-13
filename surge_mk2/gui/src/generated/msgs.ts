@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xe3ffb17b
+export const MSGS_SCHEMA = 0x60d7a14d
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -259,6 +259,10 @@ export type LinkDiag = {
   no_heartbeat: boolean
   /** ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態（STM32 が数秒続いたら立てる） */
   auto_stop_blind: boolean
+  /** ステレオの障害物が STM32 に届いている（自動停止に使われている）。古いファームは常に False */
+  stereo_ok: boolean
+  /** 今の自動停止の介入のきっかけにステレオの点が含まれる */
+  auto_stop_stereo: boolean
   /**
    * io_node が `arm` を封印しているか（`--allow-arm` が無い・STM32 と版が合わない・
    * `[control]` が STM32 に入っていない）。理由は `arm_inhibit_reason`

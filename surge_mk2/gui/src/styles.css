@@ -656,7 +656,7 @@ a {
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  /* 3段目は固定 420px（`auto` にすると `.auto-car` の `aspect-ratio` 由来の
+  /* 3段目は通常 420px（`auto` にすると `.auto-car` の `aspect-ratio` 由来の
    * 内在サイズ（実測 552px）が `.autopanel` の実際のコンテンツ高さを大きく
    * 上回り、行の高さがそちらに引っ張られて `.autopanel` の下に空白ができる
    * トラブルを実測して踏んだ——grid の `align-items:stretch`（既定）は
@@ -666,8 +666,12 @@ a {
    * `.auto-car`（`height:100%` の子がここに揃う）はどちらもこの値に暗黙で
    * 依存しているので、変えるならこの1箇所だけでよい）。
    * 2026-11-03: 420px 固定 → 画面の高さの 44%（MacBook Air 14 で従来と同じ約 420px、
-   * 4K では広がり、iPad では詰まる）。行の高さが中身で決まらないことは変わらない */
-  grid-template-rows: minmax(0, 1fr) auto clamp(300px, 44vh, 680px);
+   * 4K では広がり、iPad では詰まる）。高さ不足時は下段も縮小して、上段へ食い込ませない */
+  /* 上段はカメラの4:3を基本にしつつ、画面が低いときは残り高さまで縮める。
+   * 下段も minmax(0, ...) にして、固定の最小高さが映像へ重ならないようにする。 */
+  grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
+  /* 2026-11-13: 3段目を 44vh 固定から残り全部（1fr）へ。固定だと上段が4:3で低くなる横長画面で
+   * 下に空白が残った。車体図（高さ基準）もパラメータ欄もその分だけ大きくなる */
   /* **グリッドエリア名に `auto` は使わない**——`grid-area: auto` はエリア名の
    * 参照ではなく CSS のキーワード `auto`（＝自動配置）として解釈されてしまい、
    * 意図した列に auto-placement されず空白ができるという罠を実機で踏んだ。
@@ -676,6 +680,7 @@ a {
     'caml camf depth lidar'
     'bar  bar  bar  bar'
     'bottom bottom bottom bottom';
+  overflow: hidden;
   gap: 6px;
   padding: 6px;
   position: relative;
@@ -688,6 +693,7 @@ a {
   position: relative;
   min-height: 0;
   display: flex;
+  aspect-ratio: 4 / 3;
 }
 
 .cam-left {
@@ -726,11 +732,63 @@ a {
 }
 
 /* 深度映像（`DepthView`）。照合した行の帯だけなので横長。枠の中に収めて中央に置く */
+.cam-depth>.camera {
+  display: flex;
+  flex-direction: column;
+}
+
 .camera .depth-img {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
   width: 100%;
-  height: 100%;
   display: block;
   object-fit: contain;
+}
+
+.depth-scale {
+  flex: 0 0 45px;
+  padding: 3px 8px 5px;
+  background: #08080b;
+}
+
+.depth-scale-bar {
+  height: 12px;
+  border: 1px solid #555;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    #f00 0%,
+    #ff0 50%,
+    #00ff00 75%,
+    #00ffff 87.5%,
+    #00f 98.5%,
+    #000080 100%
+  );
+}
+
+.depth-scale-labels {
+  position: relative;
+  margin-top: 3px;
+  height: 10px;
+  color: #c9c9cf;
+  font-size: 9px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.depth-scale-labels span {
+  position: absolute;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.depth-scale-labels span:first-child {
+  transform: none;
+}
+
+.depth-scale-labels span:last-child {
+  transform: translateX(-100%);
 }
 
 .camera-tag {
@@ -776,6 +834,7 @@ a {
 .lidar {
   grid-area: lidar;
   position: relative;
+  aspect-ratio: 4 / 3;
   background: var(--glass);
   border: 1px solid #222227;
   border-radius: 6px;
@@ -3678,4 +3737,37 @@ a {
 
 .param-presets-reset {
   margin-left: auto;
+}
+
+/* 灯火ボタン（`LightButton`）。計器パネルの下の帯の右端。点灯で琥珀色に発光（DAY は減光なので弱く） */
+.rc-hud-foot>.light-btn {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 10px;
+  background: #0a0a0c;
+  border-color: #26262b;
+  color: #6a6a74;
+}
+
+.light-btn .light-ico {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.light-btn.on {
+  color: #ffd27a;
+  border-color: #b58a2a;
+}
+
+.light-btn.lv1 {
+  box-shadow: 0 0 6px rgba(255, 190, 70, .35);
+}
+
+.light-btn.lv2 {
+  background: #2a2008;
+  box-shadow: 0 0 12px rgba(255, 190, 70, .7), inset 0 1px 0 rgba(255, 255, 255, .15);
 }

@@ -23,13 +23,13 @@
 import { useNumbers } from '../bus/live'
 import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
 
-export function DriveControls() {
+export function DriveControls({ hideLight = false }: { hideLight?: boolean }) {
   const ui = useUi()
   const vs = useNumbers().vs
 
   return (
     <div className="drive-controls">
-      <div className="rc-ctl">
+      {!hideLight && <div className="rc-ctl">
         <span className="label">灯火</span>
         <div className="seg">
           {LIGHT_CYCLE.map((m) => (
@@ -43,7 +43,7 @@ export function DriveControls() {
             </button>
           ))}
         </div>
-      </div>
+      </div>}
 
       <div className="rc-ctl">
         <span className="label">サイドブレーキ</span>

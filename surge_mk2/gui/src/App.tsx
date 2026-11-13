@@ -260,7 +260,7 @@ export function App() {
         <div className="spacer" />
         {DRIVING_TABS.includes(tab) && (
           <ErrorBoundary name="灯火" compact>
-            <DriveControls />
+            <DriveControls hideLight={tab === 'ラジコン'} />
           </ErrorBoundary>
         )}
       </nav>
