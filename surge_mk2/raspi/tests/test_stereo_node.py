@@ -97,7 +97,7 @@ def proc():
 
 
 def test_low_box_is_found_and_floor_is_not(proc, images):
-    st, d, guide = proc.process(*images, "BGR888", t_capture_ns=5, seq=3)
+    st, d = proc.process(*images, "BGR888", t_capture_ns=5, seq=3)
     dist = np.array(st.dist)
     # 箱の方位（base_link 原点から ±4°）には箱の前面までの距離
     box_degs = [i % 360 for i in range(-3, 4)]
@@ -111,9 +111,7 @@ def test_low_box_is_found_and_floor_is_not(proc, images):
     assert not st.sector_seen[5]                              # 真後ろは見えない
     assert (st.seq, st.t_capture) == (3, 5)
     assert d.shape == (DEFAULT_ROWS[1] - DEFAULT_ROWS[0], 640)
-    assert guide.shape == d.shape
     assert proc.depth_jpeg(d)[:2] == b"\xff\xd8"
-    assert proc.depth_jpeg(d, guide)[:2] == b"\xff\xd8"           # 表示用の穴埋めあり
 
 
 def _ref(cam, t, synced=True):
@@ -196,24 +194,6 @@ def test_obstacle_behind_floor_mismatch_is_kept():
     assert obstacle_scan(floor, [0]).dist[0] == 0.0
 
 
-def test_display_filler_fills_holes_but_keeps_measured_values():
-    """表示用の穴埋め: 測った画素は変えず、模様の無い所を周りの値で埋める。手がかりの無い所は黒のまま。"""
-    from raspi.core.stereo_match import DisplayFiller
-
-    rng = np.random.default_rng(0)
-    guide = np.full((100, 200), 120, np.uint8)
-    # 実際の画像に近い、なめらかな模様（画素ごとの乱数だと全画素が「縁」になり、何も広がらない）
-    tex = cv2.GaussianBlur(rng.uniform(0, 255, (100, 100)).astype(np.float32), (0, 0), 3.0)
-    guide[:, :100] = cv2.normalize(tex, None, 60, 200, cv2.NORM_MINMAX).astype(np.uint8)
-    d = np.full((100, 200), -1.0, np.float32)
-    d[:, 20:100] = 30.0                        # 左半分（模様あり）だけ測れた
-    d[40:60, 40:60] = -1.0                     # 模様の中の小さな穴
-    out = DisplayFiller()(d, guide)
-    assert np.all(out[d > 0] == d[d > 0])
-    assert np.all(np.abs(out[40:60, 40:60] - 30.0) < 1.0)    # 小さな穴は埋まる
-    assert np.mean(out > 0) > np.mean(d > 0)
-
-
 def test_depth_worker_renders_in_background(proc, images):
     """深度映像は別スレッドで作り、できたものをメインのループが取り出す。"""
     import time as _t
@@ -221,10 +201,10 @@ def test_depth_worker_renders_in_background(proc, images):
     from raspi.nodes.stereo_node import DepthWorker
 
     node = StereoNode(proc)
-    st, d, guide = proc.process(*images)
+    st, d = proc.process(*images)
     w = DepthWorker(node)
     try:
-        w.submit((d, guide, 123))
+        w.submit((d, 123))
         for _ in range(200):
             msg = w.take_done()
             if msg is not None:

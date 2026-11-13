@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 __all__ = ["MatchParams", "make_matcher", "to_gray", "disparity", "ObstacleParams",
-           "obstacle_scan", "fov_degrees", "colorize_disparity", "DisplayFiller",
+           "obstacle_scan", "fov_degrees", "colorize_disparity",
            "obstacles_from_disparity", "obstacles_from_disparity_numpy"]
 
 
@@ -239,40 +239,3 @@ def colorize_disparity(d: np.ndarray, num_disp: int) -> np.ndarray:
     img = cv2.applyColorMap(v, cv2.COLORMAP_JET)
     img[d <= 0] = 0
     return img
-
-
-class DisplayFiller:
-    """**表示専用**の穴埋め（照合できなかった黒い所を、周りの視差で画像の縁を守りながら埋める）。
-
-    OpenCV の WLS フィルタ（`cv2.ximgproc`、案内画像 = 平行化した左）は入力について線形なので、
-    「有効画素だけの視差（無効は 0）」と「有効の目印（0/1）」をそれぞれ通して割る（正規化した WLS）。
-    無効の画素（値 −1）をそのまま通すと「値」として平均に混ざり、ほとんど埋まらない（合成画像で 39% → 45%）。
-    右の視差も計算する信頼度付きの WLS は照合が倍になるので使わない。
-
-    **埋めた値は測った値ではなく推測**なので、障害物の判定（`obstacle_scan`）には使わない。周りに有効な画素が
-    無い所（左端の探索幅の帯・照合が全く効かない広い面）は `min_weight` で黒のまま残す。
-    """
-
-    def __init__(self, lam: float = 8000.0, sigma_color: float = 1.0, min_weight: float = 0.02) -> None:
-        import cv2
-
-        self._wls = cv2.ximgproc.createDisparityWLSFilterGeneric(False)
-        self._wls.setLambda(lam)
-        self._wls.setSigmaColor(sigma_color)
-        self.min_weight = min_weight
-
-    #: 目印の値（int16 に収め、割り算の分解能を確保する）
-    _ONE = 1024
-
-    def __call__(self, d: np.ndarray, guide: np.ndarray) -> np.ndarray:
-        """視差（無効 −1）と案内画像（同じ大きさの灰色）→ 埋めた視差（埋まらない所は −1）。"""
-        valid = d > 0
-        num = np.where(valid, d * 16.0, 0.0).astype(np.int16)
-        den = (valid * self._ONE).astype(np.int16)
-        a = self._wls.filter(num, guide).astype(np.float32)
-        b = self._wls.filter(den, guide).astype(np.float32)
-        ok = b > self._ONE * self.min_weight
-        out = np.full(d.shape, -1.0, np.float32)
-        out[ok] = a[ok] / b[ok] * (self._ONE / 16.0)
-        out[valid] = d[valid]                      # 測った所は測った値のまま
-        return out

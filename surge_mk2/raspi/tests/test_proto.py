@@ -97,6 +97,7 @@ class TestPacketDefinitions(unittest.TestCase):
         "CONFIG_GET": (0x13, 2, "p2s"),
         "VERSION_REQ": (0x14, 0, "p2s"),
         "LIMITS_REQ": (0x15, 0, "p2s"),
+        "STEREO_OBS": (0x16, 162, "p2s"),
     }
 
     def test_all_packets_present(self):
@@ -124,7 +125,7 @@ class TestPacketDefinitions(unittest.TestCase):
                 self.assertEqual(cls.DIR, "s2p" if cls.TYPE < 0x10 else "p2s")
 
     def test_protocol_version(self):
-        self.assertEqual(packets.PROTOCOL_VERSION, 0x001E)
+        self.assertEqual(packets.PROTOCOL_VERSION, 0x001F)
 
     def test_generated_files_up_to_date(self):
         """protocol.toml を編集して再生成し忘れていないか。"""

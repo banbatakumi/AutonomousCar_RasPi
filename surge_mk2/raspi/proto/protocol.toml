@@ -11,7 +11,7 @@
 # scale は「LSB あたりの SI 値」。raw * scale = SI 単位の値。
 
 [meta]
-protocol_version = 0x001E      # 上位=メジャー 下位=マイナー
+protocol_version = 0x001F      # 上位=メジャー 下位=マイナー
 doc = "docs/uart_protocol.md"
 
 [frame]
@@ -273,6 +273,19 @@ len = 0
 doc = "ペイロードなし。応答は LIMITS (0x0A)。★v0.11 新設"
 fields = []
 
+[[packets]]
+name = "STEREO_OBS"
+type = 0x16
+dir = "p2s"
+len = 162
+rate_hz = 10
+doc = "ステレオの障害物の点（base_link）。STM32 の自動停止が LiDAR・超音波に足して予想進路と比べる。点が 0 個でも送る（途絶と区別するため）。★v0.31 新設"
+fields = [
+  { name = "age_ms", type = "u8", unit = "ms", note = "撮影から送出直前までの時間（255 で飽和）" },
+  { name = "count",  type = "u8", note = "有効な点の数（最大 40）。残りの xy は 0" },
+  { name = "xy",     type = "i16", count = 80, scale = 0.001, unit = "m", note = "x, y の順に 40 点。base_link（x 前・y 左）" },
+]
+
 
 # ─────────────────────────────────────────────────────────────
 # ビット定義・enum（C ヘッダにも出力する）
@@ -306,6 +319,8 @@ MD_FAULT                  = 0x00800000   # v0.19: MD のいずれかが使えず
 LAUNCH_ACTIVE             = 0x01000000   # v0.20: ローンチコントロールで発進している最中（要求していても、始まらなかった・終わった後は立たない）
 NO_HEARTBEAT              = 0x02000000   # ハートビート（RAS_SIG）を一度も検出していない＝E-Stop の層が働いていない。古い STM32 では常に 0
 AUTO_STOP_BLIND           = 0x04000000   # ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態が続いている。古い STM32 では常に 0
+STEREO_OK                 = 0x08000000   # v0.31: ステレオの障害物（STEREO_OBS）が 300ms 以内に届いている。古い STM32 では常に 0
+AUTO_STOP_STEREO          = 0x10000000   # v0.31: 自動停止の介入のきっかけにステレオの点が含まれる（LiDAR・超音波と同時でも立つ）。古い STM32 では常に 0
 
 [bits.MDS]
 comment = "md_status[i] (u8)"

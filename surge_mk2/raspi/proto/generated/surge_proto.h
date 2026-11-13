@@ -8,7 +8,7 @@
 
 #include <stdint.h>
 
-#define SURGE_PROTOCOL_VERSION  0x001Eu
+#define SURGE_PROTOCOL_VERSION  0x001Fu
 #define SURGE_SYNC0             0xAAu
 #define SURGE_SYNC1             0x55u
 #define SURGE_FRAME_OVERHEAD    7u
@@ -40,6 +40,7 @@
 #define PKT_CONFIG_GET         0x13u   /* LEN = 2 */
 #define PKT_VERSION_REQ        0x14u   /* LEN = 0 */
 #define PKT_LIMITS_REQ         0x15u   /* LEN = 0 */
+#define PKT_STEREO_OBS         0x16u   /* LEN = 162 */
 
 /* ── ビット定義 ───────────────────────────────────────────── */
 /* TELEMETRY.flags (u32) */
@@ -68,6 +69,8 @@
 #define FLG_LAUNCH_ACTIVE              0x01000000u
 #define FLG_NO_HEARTBEAT               0x02000000u
 #define FLG_AUTO_STOP_BLIND            0x04000000u
+#define FLG_STEREO_OK                  0x08000000u
+#define FLG_AUTO_STOP_STEREO           0x10000000u
 
 /* md_status[i] (u8) */
 #define MDS_RUNNING       0x01u
@@ -321,6 +324,13 @@ typedef struct {
 
 /* LIMITS_REQ (0x15) はペイロードなし (LEN = 0) */
 
+/* STEREO_OBS (0x16) — ステレオの障害物の点（base_link）。STM32 の自動停止が LiDAR・超音波に足して予想進路と比べる。点が 0 個でも送る（途絶と区別するため）。★v0.31 新設 */
+typedef struct {
+    uint8_t age_ms;  /* ms  撮影から送出直前までの時間（255 で飽和） */
+    uint8_t count;   /* 有効な点の数（最大 40）。残りの xy は 0 */
+    int16_t xy[80];  /* 0.001 m  x, y の順に 40 点。base_link（x 前・y 左） */
+} surge_stereo_obs_t;
+
 #pragma pack(pop)
 
 /* サイズ検証。#pragma pack の付け忘れをビルド時に検出する。 */
@@ -337,5 +347,6 @@ _Static_assert(sizeof(surge_command_t) == 15, "surge_command_t size mismatch");
 _Static_assert(sizeof(surge_config_set_t) == 6, "surge_config_set_t size mismatch");
 _Static_assert(sizeof(surge_ping_t) == 4, "surge_ping_t size mismatch");
 _Static_assert(sizeof(surge_config_get_t) == 2, "surge_config_get_t size mismatch");
+_Static_assert(sizeof(surge_stereo_obs_t) == 162, "surge_stereo_obs_t size mismatch");
 
 #endif /* SURGE_PROTO_H */

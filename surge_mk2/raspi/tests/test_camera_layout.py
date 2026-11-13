@@ -231,11 +231,17 @@ class TestTelemetryStereoDemand(unittest.TestCase):
         return tel, Stub()
 
     def test_demand(self):
-        # 段階4 から ARM だけでは左を回さない（深度か左の映像を使う者がいる間だけ）
+        from unittest.mock import patch
+        # 自動停止にステレオを使わないなら、ARM だけでは左を回さない（深度か左の映像を使う者がいる間だけ）
         for armed, in_use, want in [(True, False, False), (False, True, True), (False, False, False),
                                     (True, True, True)]:
-            _tel, node = self._node(armed, in_use)
-            self.assertEqual(node._desired_stereo(), want, (armed, in_use))
+            with patch("raspi.nodes.telemetry_node.STEREO_AUTO_STOP", False):
+                _tel, node = self._node(armed, in_use)
+                self.assertEqual(node._desired_stereo(), want, (armed, in_use))
+        # 自動停止にステレオを使う間は、ARM 中ずっと回す
+        with patch("raspi.nodes.telemetry_node.STEREO_AUTO_STOP", True):
+            self.assertTrue(self._node(True, False)[1]._desired_stereo())
+            self.assertFalse(self._node(False, False)[1]._desired_stereo())
 
 
 

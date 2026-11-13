@@ -339,6 +339,10 @@ CAM_MASK_POLL_HZ = 8
 #: ステレオの深度（`stereo_node` の照合）を使う自動運転モード。選ばれていて ARM 中は照合を回す
 #: （`_desired_depth`）。**まだ無い**——段階5（`docs/stereo_plan.md`）で planner を足したらここに入れる
 STEREO_AUTO_MODES: frozenset[str] = frozenset()
+#: ステレオの障害物を STM32 の自動停止の入力にする（`io_node._forward_stereo` → `STEREO_OBS`）。
+#: 自動運転モードに関わらず、ARM 中は照合を回し続ける（手動でも最終防壁として働くため。+約 150mA と CPU）。
+#: 照合が回らない・失敗している間は `STEREO_OBS` を送らず、STM32 は LiDAR・超音波だけで判定する
+STEREO_AUTO_STOP = True
 #: 左右の映像の組を入力にする自動運転モード（前方の学習系、`docs/stereo_plan.md` §1）。選ばれていて ARM 中は、
 #: 照合はしないが左カメラを同期して回す（`_desired_stereo`）。推論ノードが推論するのと同じ条件
 #: （`auto_gate.cam_infer_active`: モードが選ばれていて DISARM でない）
@@ -1950,10 +1954,11 @@ class TelemetryServer:
     def _desired_depth(self) -> bool:
         """`stereo_node` に照合（深度）を回させるか（`CamConfig.depth`）。
 
-        ステレオを使う自動運転モード（`STEREO_AUTO_MODES`）が選ばれていて ARM 中、
+        ARM 中（自動停止の入力、`STEREO_AUTO_STOP`）、ステレオを使う自動運転モード（`STEREO_AUTO_MODES`）が選ばれていて ARM 中、
         または深度映像（`/ws/camera/depth`）の視聴者がいる間（`docs/stereo_plan.md` 段階4）。"""
         return (bool(self.camera_clients.get("depth"))
-                or (self._vehicle_armed() and self._auto_mode in STEREO_AUTO_MODES))
+                or (self._vehicle_armed()
+                    and (STEREO_AUTO_STOP or self._auto_mode in STEREO_AUTO_MODES)))
 
     def _desired_stereo(self) -> bool:
         """左右を同期して撮らせるか（`CamConfig.stereo`）。

@@ -27,7 +27,7 @@ camera_node が左カメラを回すか（`CamConfig.stereo`）も同じ判断�
 
 ## 遅れを短くする作り（`docs/stereo_plan.md` 段階4 の経緯）
 
-頻度の上限は撮影時刻の間隔で判定する。`scan/stereo` を先に出し、深度映像（表示用の穴埋め＋JPEG）は視聴者がいるときだけ
+頻度の上限は撮影時刻の間隔で判定する。`scan/stereo` を先に出し、深度映像（色付け＋JPEG）は視聴者がいるときだけ
 別スレッドで作る（`DepthWorker`）。照合は 2 スレッド、後処理は C 版（`raspi/core/stereo_native.c`）。Pi 5 で撮影から
 `scan/stereo` まで中央値 47ms（SGBM・1.5GHz・表示なし）。
 
@@ -56,13 +56,13 @@ import numpy as np  # noqa: E402
 from raspi.core.auto_gate import IdlePacer  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
 from raspi.core.jpeg import make_encoder  # noqa: E402
-from raspi.core.stereo_match import (DisplayFiller, MatchParams, ObstacleParams,  # noqa: E402
+from raspi.core.stereo_match import (MatchParams, ObstacleParams,  # noqa: E402
                                      colorize_disparity, disparity, fov_degrees, make_matcher,
                                      obstacles_from_disparity, to_gray)
 from raspi.core.stereo_model import StereoRectifier  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs import Scan, StereoDepth  # noqa: E402
+from raspi.msgs import Scan, StereoDepth, StereoInfo  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_CONFIG,
     TOPIC_HB_PREFIX,
@@ -70,6 +70,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_LEFT,
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
+    TOPIC_STEREO_INFO,
 )
 
 __all__ = ["StereoProcessor", "StereoNode"]
@@ -94,7 +95,7 @@ class StereoProcessor:
 
     def __init__(self, vehicle: Vehicle, *, match: MatchParams = MatchParams(),
                  obst: ObstacleParams = ObstacleParams(), rows: tuple[int, int] = DEFAULT_ROWS,
-                 hfov: float = RECT_HFOV_RAD, depth_quality: int = 70, fill: bool = True) -> None:
+                 hfov: float = RECT_HFOV_RAD, depth_quality: int = 70) -> None:
         if vehicle.stereo is None or vehicle.cam_front_fisheye is None or vehicle.cam_left_fisheye is None:
             raise ValueError("ステレオの校正値が無い（stereo 配置で、tools/cam_calib の「ステレオ」を書いたか）")
         self.match, self.obst = match, obst
@@ -107,18 +108,11 @@ class StereoProcessor:
         self.fov_degs = fov_degrees(self.rect, self.cam_pose)
         self.matcher = make_matcher(match)
         self._encode, _ = make_encoder(depth_quality)
-        #: 表示専用の穴埋め（`DisplayFiller`）。cv2 に ximgproc が無ければ埋めずに出す
-        self._filler = None
-        if fill:
-            try:
-                self._filler = DisplayFiller()
-            except (AttributeError, ImportError):
-                self._filler = None
         self.last_valid_frac = 0.0
         self.last_n_points = 0
 
     def process(self, img_right: np.ndarray, img_left: np.ndarray, fmt: str = "BGR888", *,
-                t_capture_ns: int = 0, seq: int = 0) -> tuple[Scan, np.ndarray, np.ndarray]:
+                t_capture_ns: int = 0, seq: int = 0) -> tuple[Scan, np.ndarray]:
         gr, gl = to_gray(img_right, fmt), to_gray(img_left, fmt)
         rr, rl = self.rect(gr, gl)                 # 行の帯だけを平行化する
         d = disparity(self.match, self.matcher, rl, rr)
@@ -127,10 +121,10 @@ class StereoProcessor:
         self.last_n_points = res.n_points
         self.last_valid_frac = res.valid_frac
         return (Scan(dist=res.dist, sector_seen=res.sector_seen, seq=seq, t_capture=t_capture_ns,
-                     rot_speed_dps=0.0), d, rl)
+                     rot_speed_dps=0.0), d)
 
-    def depth_jpeg(self, d: np.ndarray, guide: np.ndarray | None = None) -> bytes | None:
-        """深度映像の JPEG。`guide`（平行化した左）があれば表示用に穴を埋める（`DisplayFiller`）。
+    def depth_jpeg(self, d: np.ndarray) -> bytes | None:
+        """深度映像の JPEG（視差を色にしただけ。**測れなかった所は黒のまま**）。
 
         幅 `DEPTH_JPEG_W` 以下に縮めてから焼く（Pi 5 で 640 幅は 8ms、320 幅は 2ms）。
         """
@@ -138,10 +132,6 @@ class StereoProcessor:
             return None
         import cv2
 
-        if guide is not None and self._filler is not None:
-            if self.match.scale != 1.0:
-                guide = cv2.resize(guide, (d.shape[1], d.shape[0]), interpolation=cv2.INTER_AREA)
-            d = self._filler(d, guide)
         img = colorize_disparity(d, self.match.num_disp)
         if img.shape[1] > DEPTH_JPEG_W:
             img = cv2.resize(img, (DEPTH_JPEG_W, max(1, img.shape[0] * DEPTH_JPEG_W // img.shape[1])),
@@ -176,7 +166,7 @@ class StereoNode:
         #: 深度映像を作る材料 `(視差, 平行化した左, t_capture)`。`scan/stereo` を出した**後で**別スレッドが焼く
         #: （`publish_depth`・`DepthWorker`）
         self._pending_depth: tuple | None = None
-        #: 深度映像（表示用の穴埋め＋JPEG）を作るのにかかった時間 [ms]
+        #: 深度映像（色付け＋JPEG）を作るのにかかった時間 [ms]
         self.view_ms = 0.0
         #: 遅れの内訳 [ms]（`hb/stereo` に出す。合否は「撮影 → `scan/stereo` を出すまで」50ms 以内）
         #:   cam  = 撮影時刻 → 2台目の `ImageRef` が publish されるまで（露光・読み出し・ISP。camera_node 側）
@@ -185,6 +175,8 @@ class StereoNode:
         #:   proc = 照合〜擬似 Scan を作り終えるまで
         #:   lat  = 撮影時刻 → `scan/stereo` を出すまで
         self.cam_ms = self.wait_ms = self.read_ms = self.proc_ms = self.latency_ms = 0.0
+        #: 直近に照合した組の 左 − 右 の撮影時刻の差 [ns]（`StereoInfo.dt_lr_ns`）
+        self.dt_lr_ns = 0
 
     def stop(self) -> None:
         self._running = False
@@ -236,10 +228,11 @@ class StereoNode:
             return StereoProcessor.failed(reason="同じ瞬間の左右を読めない")
         self._last_target = target
         self._last_run_ns = now_ns
+        self.dt_lr_ns = got_l[1] - got_r[1]
         t0 = time.monotonic_ns()
         self.read_ms = (t0 - t_start) / 1e6
         try:
-            st, d, guide = self.proc.process(got_r[0], got_l[0], rf.fmt, t_capture_ns=got_r[1],
+            st, d = self.proc.process(got_r[0], got_l[0], rf.fmt, t_capture_ns=got_r[1],
                                              seq=self.count)
         except Exception as e:                                 # noqa: BLE001
             print(f"# stereo process() が例外: {e}", file=sys.stderr, flush=True)
@@ -253,7 +246,7 @@ class StereoNode:
         self.count += 1
         view = bool(getattr(cfg, "depth_view", True))
         if view and (self.count == 1 or self.count % self.depth_every == 0):
-            self._pending_depth = (d, guide, got_r[1])
+            self._pending_depth = (d, got_r[1])
         elif not view:
             self.view_ms = 0.0                       # 表示していない（`hb/stereo` に前の値を残さない）
         return st
@@ -264,14 +257,29 @@ class StereoNode:
         return item
 
     def render_depth(self, item) -> StereoDepth | None:
-        """材料 → `StereoDepth`。重い（Pi 5 で穴埋め＋JPEG 約 20ms）ので `DepthWorker` のスレッドで呼ぶ。"""
+        """材料 → `StereoDepth`。照合のループを塞がないよう `DepthWorker` のスレッドで呼ぶ。"""
         if self.proc is None:
             return None
-        d, guide, t_cap = item
+        d, t_cap = item
         t0 = time.monotonic_ns()
-        jpg = self.proc.depth_jpeg(d, guide)
+        jpg = self.proc.depth_jpeg(d)
         self.view_ms = (time.monotonic_ns() - t0) / 1e6
         return None if jpg is None else StereoDepth(jpeg=jpg, near_m=self.proc.near_m, t_capture=t_cap)
+
+    def info(self, st: Scan) -> StereoInfo | None:
+        """今回の組の診断（`StereoInfo`。開発用に `.mcap` へ残る）。照合できていなければ None。"""
+        p = self.proc
+        if p is None:
+            return None
+        m, q = p.match, p.obst
+        return StereoInfo(
+            t_capture=st.t_capture, seq=st.seq, dt_lr_ns=self.dt_lr_ns,
+            cam_ms=self.cam_ms, wait_ms=self.wait_ms, read_ms=self.read_ms, proc_ms=self.proc_ms,
+            latency_ms=self.latency_ms, n_points=p.last_n_points, valid_frac=p.last_valid_frac,
+            algo=m.algo, scale=m.scale, num_disp=m.num_disp, block=m.block, rows=list(p.rect.rows),
+            z_min=q.z_min, z_max=q.z_max, r_min=q.r_min, r_max=q.r_max, min_points=q.min_points,
+            near_pct=q.near_pct, min_height_span=q.min_height_span, slice_m=q.slice_m,
+            cam_pose=[float(x) for x in p.cam_pose])
 
     def publish_depth(self, pub) -> None:
         """溜めた深度映像を**その場で**焼いて出す（テスト・スレッドを使わない呼び出し用）。"""
@@ -305,6 +313,8 @@ class StereoNode:
                     if self.count != n_before:              # 今回照合した
                         self.latency_ms = (time.monotonic_ns() - st.t_capture) / 1e6
                         self._status = self._ok_status()
+                        if (info := self.info(st)) is not None:
+                            pub.send(TOPIC_STEREO_INFO, info)
                 item = self.take_depth()
                 if item is not None:
                     worker.submit(item)
@@ -320,9 +330,9 @@ class StereoNode:
 
 
 class DepthWorker:
-    """深度映像（表示用の穴埋め＋JPEG）を別スレッドで作る。**照合のループを塞がないため。**
+    """深度映像（色付け＋JPEG）を別スレッドで作る。**照合のループを塞がないため。**
 
-    同じスレッドで作ると Pi 5 で約 20ms ループが止まり、その間に届いた組の処理が遅れた（実機で待ち 20ms）。
+    同じスレッドで作るとループが止まり、その間に届いた組の処理が遅れた（穴埋めがあった頃は約 20ms、実機で待ち 20ms）。
     cv2 と JPEG の符号化は処理中に GIL を手放すので並行して進む。材料は最新の1つだけ持ち（作っている間に来た
     古い材料は捨てる）、できあがりはメインのループが取り出して publish する。
     """
@@ -387,7 +397,6 @@ def main() -> int:
     ap.add_argument("--r-max", type=float, default=ObstacleParams.r_max)
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS,
                     help=f"OpenCV（照合）のスレッド数（既定 {DEFAULT_THREADS}）")
-    ap.add_argument("--no-fill", action="store_true", help="深度映像の穴を埋めない（表示専用の WLS を切る）")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
@@ -402,7 +411,7 @@ def main() -> int:
         proc = StereoProcessor(Vehicle.load(),
                                match=MatchParams(args.algo, args.scale, args.num_disp, args.block),
                                obst=ObstacleParams(z_min=args.z_min, z_max=args.z_max, r_max=args.r_max),
-                               rows=(v0, v1), fill=not args.no_fill)
+                               rows=(v0, v1))
     except ValueError as e:
         err = str(e)
         print(f"!! {err}。照合せずに待つ", file=sys.stderr, flush=True)

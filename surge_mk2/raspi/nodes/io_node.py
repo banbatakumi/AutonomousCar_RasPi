@@ -64,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.bus_bridge import BusBridge  # noqa: E402
 from raspi.core.control_params import ControlParamSync, disarm_brake_timeout_s, load_control_params  # noqa: E402
+from raspi.core.stereo_obs import scan_to_obs  # noqa: E402
 from raspi.core.steer_guard import GIVE_UP, PAUSE, RESUME, SteerGuard  # noqa: E402
 from raspi.core.link_tracker import (  # noqa: E402
     LinkState,
@@ -91,6 +92,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_CMD,
     TOPIC_HB_PREFIX,
     TOPIC_LOG_CTRL,
+    TOPIC_SCAN_STEREO,
     TOPIC_UI_EVENT,
 )
 from raspi.proto import UART_BAUD, packets  # noqa: E402
@@ -870,11 +872,20 @@ class IoNode:
                     self._set_log_active(msg.active)
                 elif topic == TOPIC_UI_EVENT:
                     self._on_ui_event(msg)
+                elif topic == TOPIC_SCAN_STEREO:
+                    self._forward_stereo(msg, now_ns)
         stale = self.cmd is None or (now_ns - self._cmd_ns) > CMD_TIMEOUT_NS
         if stale and not self.cmd_stale and self.cmd is not None:
             self.cmd_timeouts += 1
             self._log_event("cmd_timeout", {"source": self.cmd.source})
         self.cmd_stale = stale
+
+    def _forward_stereo(self, scan, now_ns: int) -> None:
+        """`scan/stereo` を点列にして STM32 へ送る（自動停止の入力。判定は STM32、`raspi/core/stereo_obs.py`）。
+        照合できなかった周期・古い `Scan` は送らない（STM32 は届かなければ LiDAR・超音波だけで判定する）。"""
+        obs = scan_to_obs(scan, now_ns)
+        if obs is not None:
+            self.link.send(obs)
 
     def _on_ui_event(self, msg) -> None:
         """`ui/event`（GUI 側の単発イベント）。直前に処理したものと同じなら二重処理しない。
@@ -1325,7 +1336,7 @@ def main() -> int:
             # 消費前に上書きされて消える。
             # 取りこぼしてはいけないので RELIABLE にする
             sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST,
-                               TOPIC_UI_EVENT: RELIABLE})
+                               TOPIC_UI_EVENT: RELIABLE, TOPIC_SCAN_STEREO: LATEST})
             print(f"# バス配信 {pub.endpoint} "
                   f"(vehicle_state / scan / diag/link / hb/io)")
         except ImportError as e:

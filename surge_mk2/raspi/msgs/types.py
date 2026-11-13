@@ -44,7 +44,7 @@ __all__ = [
     "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
     "E2EFusionPlan", "TOPIC_E2E_FUSION_PLAN", "E2EFusionModelCtrl", "TOPIC_E2E_FUSION_MODEL",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
-    "StereoDepth", "TOPIC_SCAN_STEREO", "TOPIC_STEREO_DEPTH",
+    "StereoDepth", "StereoInfo", "TOPIC_SCAN_STEREO", "TOPIC_STEREO_DEPTH", "TOPIC_STEREO_INFO",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -71,6 +71,8 @@ TOPIC_CAM_MASK = "cam/mask"
 TOPIC_SCAN_STEREO = "scan/stereo"
 #: ステレオの距離を色にした JPEG（GUI の自動運転画面の2枚目の枠。`/ws/camera/depth` へ中継）
 TOPIC_STEREO_DEPTH = "stereo/depth"
+#: `stereo_node` が1組照合するごとの診断（開発用。mcap に残して Mac で再現・比較する）。`scan/stereo` と同じ `t_capture`
+TOPIC_STEREO_INFO = "stereo/info"
 #: 走行可能領域の中心線（`cam_perception_node.py` が publish）。`scan/cam` が
 #: 車両原点からの角度→距離という1次元表現に潰すのに対し、こちらは前方複数距離
 #: それぞれで測った回廊の中心点列を車両座標のまま持つ。`raspi/auto/cam_centerline.py`
@@ -429,6 +431,10 @@ class LinkDiag(MsgBase):
     no_heartbeat: bool = False
     #: ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態（STM32 が数秒続いたら立てる）
     auto_stop_blind: bool = False
+    #: ステレオの障害物が STM32 に届いている（自動停止に使われている）。古いファームは常に False
+    stereo_ok: bool = False
+    #: 今の自動停止の介入のきっかけにステレオの点が含まれる
+    auto_stop_stereo: bool = False
     #: io_node が `arm` を封印しているか（`--allow-arm` が無い・STM32 と版が合わない・
     #: `[control]` が STM32 に入っていない）。理由は `arm_inhibit_reason`
     arm_inhibited: bool = True
@@ -953,8 +959,8 @@ class CamConfig(MsgBase):
     #: 選ばれていて ARM 中、または深度映像の視聴者がいる間」に True にする（`_desired_depth`）。
     #: True の間は `stereo` も True（左カメラが要る）
     depth: bool = False
-    #: 深度映像（`/ws/camera/depth`）の視聴者がいるか。False の間 `stereo_node` は深度映像の JPEG と
-    #: 表示用の穴埋めを作らない（走行中に照合するだけなら表示の時間と電力を食わない）
+    #: 深度映像（`/ws/camera/depth`）の視聴者がいるか。False の間 `stereo_node` は深度映像の JPEG を
+    #: 作らない（走行中に照合するだけなら表示の時間と電力を食わない）
     depth_view: bool = False
 
 
@@ -1148,6 +1154,46 @@ class StereoDepth(MsgBase):
     near_m: float = 0.0
 
 
+class StereoInfo(MsgBase):
+    """`stereo_node` が1組照合するごとの診断。**ステレオの開発で「その瞬間に何を入力して何で処理したか」を後から再現するため**に
+    `.mcap` へ残す（`scan/stereo` と同じ `t_capture`・`seq`）。
+
+    左右の映像（`/viz/image/front`・`/viz/image/left`、`logger_node` が同じ瞬間の組で焼く）と、校正値（`.mcap` のメタデータ
+    `vehicle_toml`）、この設定が揃えば、Mac の `tools/stereo_bench` で同じ照合をやり直せる。
+    距離を色にした JPEG（`stereo/depth`）は表示専用の損失画像なので、解析には使わない。
+    """
+
+    #: 左 − 右 の撮影時刻の差 [ns]（`camera_node` が `synced` を立てる条件は 0.5ms 以内）
+    dt_lr_ns: int = 0
+    #: 遅れの内訳 [ms]。`latency_ms` = 撮影 → `scan/stereo` を出すまで（合否 50ms）
+    cam_ms: float = 0.0       #: 撮影 → 2台目の `ImageRef` が publish されるまで（camera_node 側）
+    wait_ms: float = 0.0      #: `ImageRef` が届いてから `stereo_node` が拾うまで
+    read_ms: float = 0.0      #: 共有メモリから左右を読む時間
+    proc_ms: float = 0.0      #: 照合＋障害物の抽出
+    latency_ms: float = 0.0
+    #: 障害物とみなした点の数（高さ・距離の条件を満たした画素。方位ごとのかたまり選びの前）
+    n_points: int = 0
+    #: 視差が出た画素の割合（左端の探索幅の帯を除く）。模様の無い面・暗い所で下がる
+    valid_frac: float = 0.0
+    #: 照合の設定（`MatchParams`）。`rows` は平行化画像から使う行の帯 `[v0, v1)`
+    algo: str = ""
+    scale: float = 1.0
+    num_disp: int = 0
+    block: int = 0
+    rows: list[int] = msgspec.field(default_factory=lambda: [0, 0])
+    #: 障害物の抽出の設定（`ObstacleParams`）
+    z_min: float = 0.0
+    z_max: float = 0.0
+    r_min: float = 0.0
+    r_max: float = 0.0
+    min_points: int = 0
+    near_pct: float = 0.0
+    min_height_span: float = 0.0
+    slice_m: float = 0.0
+    #: 右（主）カメラの取付 `[x, y, z, pitch, yaw]`（base_link、pitch は下向きが正）
+    cam_pose: list[float] = msgspec.field(default_factory=lambda: [0.0] * 5)
+
+
 class CamPath(MsgBase):
     """走行可能領域の中心線（`raspi/nav/drivable_path.py` の `extract_centerline()`）。
 
@@ -1184,6 +1230,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_CAM_MASK: CamMask,
     TOPIC_SCAN_STEREO: Scan,
     TOPIC_STEREO_DEPTH: StereoDepth,
+    TOPIC_STEREO_INFO: StereoInfo,
     TOPIC_CAM_PATH: CamPath,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,

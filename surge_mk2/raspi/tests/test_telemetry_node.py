@@ -841,9 +841,19 @@ class TestStereoDepthDemand(unittest.TestCase):
         self.assertTrue(tn.TelemetryServer._desired_front_enabled(fake))
 
     def test_armed_alone_does_not_run_the_left_camera(self):
-        """ARM 中でも、深度も左の映像も使わなければ左カメラは止めておく（段階4 で絞った）。"""
-        fake = self._fake(armed=True)
-        self.assertFalse(tn.TelemetryServer._desired_stereo(fake))
+        """ステレオを自動停止に使わないなら、ARM 中でも深度も左の映像も使わない限り左カメラは止めておく（段階4 で絞った）。"""
+        from unittest.mock import patch
+        with patch.object(tn, "STEREO_AUTO_STOP", False):
+            fake = self._fake(armed=True)
+            self.assertFalse(tn.TelemetryServer._desired_stereo(fake))
+
+    def test_armed_runs_matching_for_auto_stop(self):
+        """ステレオを自動停止の入力にする間は、モードに関わらず ARM 中だけ照合し左カメラも回す。"""
+        from unittest.mock import patch
+        with patch.object(tn, "STEREO_AUTO_STOP", True):
+            self.assertTrue(tn.TelemetryServer._desired_depth(self._fake(armed=True)))
+            self.assertTrue(tn.TelemetryServer._desired_stereo(self._fake(armed=True)))
+            self.assertFalse(tn.TelemetryServer._desired_depth(self._fake(armed=False)))
 
     def test_stereo_mode_needs_arm(self):
         from unittest.mock import patch
@@ -866,6 +876,13 @@ class TestStereoPairModes(unittest.TestCase):
         fake = _fake_cam_server(**kw)
         fake._cam_front_fps_armed = 20.0                 # 上限（30）と区別できる値
         return fake
+
+    def setUp(self):
+        from unittest.mock import patch
+        # 自動停止のための照合は別のテスト（TestStereoDepthDemand）で見る。ここはモードだけの条件
+        p = patch.object(tn, "STEREO_AUTO_STOP", False)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_selected_and_armed_runs_the_left_camera_without_matching(self):
         for mode in ("cam_e2e", "e2e_fusion"):

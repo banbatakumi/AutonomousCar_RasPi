@@ -138,6 +138,7 @@ TOPIC_OWNER: dict[str, str] = {
     #: **`scan` の前方一致に拾われないよう完全一致で引く**（上の ★ の事故と同じ形）
     "scan/stereo": "stereo",
     "stereo/depth": "stereo",
+    "stereo/info": "stereo",
 }
 
 

@@ -9,7 +9,7 @@ import struct
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-PROTOCOL_VERSION = 0x001E
+PROTOCOL_VERSION = 0x001F
 SYNC = bytes([170, 85])
 FRAME_OVERHEAD = 7
 HEADER_SIZE = 5
@@ -42,6 +42,8 @@ FLG_MD_FAULT = 0x00800000
 FLG_LAUNCH_ACTIVE = 0x01000000
 FLG_NO_HEARTBEAT = 0x02000000
 FLG_AUTO_STOP_BLIND = 0x04000000
+FLG_STEREO_OK = 0x08000000
+FLG_AUTO_STOP_STEREO = 0x10000000
 
 # md_status[i] (u8)
 MDS_RUNNING = 0x01
@@ -627,6 +629,34 @@ class LimitsReq:
         return b''
 
 
+_S_STEREO_OBS = struct.Struct('<2B80h')
+
+
+@dataclass(slots=True)
+class StereoObs:
+    """0x16 p2s — ステレオの障害物の点（base_link）。STM32 の自動停止が LiDAR・超音波に足して予想進路と比べる。点が 0 個でも送る（途絶と区別するため）。★v0.31 新設"""
+
+    TYPE: ClassVar[int] = 0x16
+    NAME: ClassVar[str] = 'STEREO_OBS'
+    DIR: ClassVar[str] = 'p2s'
+    LEN: ClassVar[int | None] = 162
+    FMT: ClassVar[str] = '<2B80h'
+    RATE_HZ: ClassVar[float] = 10
+    META: ClassVar[dict] = {'age_ms': (None, 'ms'), 'xy': (0.001, 'm')}
+
+    age_ms: int = 0  # 撮影から送出直前までの時間（255 で飽和）
+    count: int = 0  # 有効な点の数（最大 40）。残りの xy は 0
+    xy: list[int] = field(default_factory=lambda: [0] * 80)  # x, y の順に 40 点。base_link（x 前・y 左）
+
+    @classmethod
+    def decode(cls, payload: bytes) -> 'StereoObs':
+        v = _S_STEREO_OBS.unpack(payload)
+        return cls(age_ms=v[0], count=v[1], xy=list(v[2:82]))
+
+    def encode(self) -> bytes:
+        return _S_STEREO_OBS.pack(self.age_ms, self.count, *self.xy)
+
+
 ALL = (
     LidarSector,
     Telemetry,
@@ -644,6 +674,7 @@ ALL = (
     ConfigGet,
     VersionReq,
     LimitsReq,
+    StereoObs,
 )
 
 BY_TYPE = {c.TYPE: c for c in ALL}

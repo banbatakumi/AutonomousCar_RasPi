@@ -87,6 +87,10 @@ class LinkState:
     no_heartbeat: bool = False
     #: ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態（STM32 が数秒続いたら立てる）
     auto_stop_blind: bool = False
+    #: ステレオの障害物（`STEREO_OBS`）が STM32 に届いている（300ms 以内）。古いファームは常に False
+    stereo_ok: bool = False
+    #: 今の自動停止の介入のきっかけにステレオの点が含まれる（LiDAR・超音波と同時でも立つ）
+    auto_stop_stereo: bool = False
 
     #: TC/TV が STM32 側で実際に有効化されているか（`CONFIG_ACK` から取得。★v0.8）。
     #: まだ `CONFIG_ACK` を受け取っていなければ None
@@ -206,6 +210,8 @@ class LinkTracker:
         # ラッチではなく状態そのものの警告ビット（変化の通知は要らない）
         self.state.no_heartbeat = bool(flags & packets.FLG_NO_HEARTBEAT)
         self.state.auto_stop_blind = bool(flags & packets.FLG_AUTO_STOP_BLIND)
+        self.state.stereo_ok = bool(flags & packets.FLG_STEREO_OK)
+        self.state.auto_stop_stereo = bool(flags & packets.FLG_AUTO_STOP_STEREO)
         for name, bit in LATCHING_FLAGS.items():
             new = bool(flags & bit)
             if new != getattr(self.state, name):
