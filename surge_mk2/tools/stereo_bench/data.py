@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["StereoFrame", "load_frames", "pair_times"]
+__all__ = ["StereoFrame", "load_frames", "pair_times", "load_run_info", "load_stereo_info"]
 
 IMAGE_RIGHT = "/viz/image/front"
 IMAGE_LEFT = "/viz/image/left"
@@ -106,4 +106,38 @@ def load_frames(path: str | Path, *, pair_tol_ns: int = 500_000, max_scan_dt_ns:
         kv = _nearest(tv, t)
         out.append(StereoFrame(t, tl[j] - t, right[i][1], left[j][1], scan, sdt,
                                speeds[kv][1] if kv is not None else None))
+    return out
+
+
+def load_run_info(path: str | Path) -> dict[str, dict[str, str]]:
+    """記録のメタデータ（`surge` = 記録元・引数、`provenance` = 校正値 `vehicle_toml`・コードの版 `git` `src_sha`）。
+
+    `vehicle_toml` を `tomllib.loads` に渡せば、撮った時の校正値で照合をやり直せる（`raspi/rec/provenance.py`）。
+    古い記録（`provenance` 無し）は `surge` だけ。
+    """
+    from mcap.reader import make_reader
+
+    out: dict[str, dict[str, str]] = {}
+    with open(path, "rb") as f:
+        for rec in make_reader(f).iter_metadata():
+            out[rec.name] = dict(rec.metadata)
+    return out
+
+
+def load_stereo_info(path: str | Path) -> list[dict]:
+    """`stereo_node` が照合ごとに出した診断（`StereoInfo`）。`log_time`（撮影時刻、epoch ns）を足して時刻順に返す。
+
+    左右の撮影時刻の差 `dt_lr_ns`、遅れの内訳 `cam_ms` `wait_ms` `read_ms` `proc_ms` `latency_ms`、点数 `n_points`、
+    視差の出た割合 `valid_frac`、照合・抽出の設定（`algo` `scale` `num_disp` `rows` `z_min` ...）、取付 `cam_pose`。
+    記録に `/stereo/info` が無い（古い記録）なら空。
+    """
+    from mcap.reader import make_reader
+
+    out = []
+    with open(path, "rb") as f:
+        for _s, _ch, m in make_reader(f).iter_messages(topics=["/stereo/info"]):
+            d = json.loads(m.data)
+            d["log_time"] = m.log_time
+            out.append(d)
+    out.sort(key=lambda d: d["log_time"])
     return out

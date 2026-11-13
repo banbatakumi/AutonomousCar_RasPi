@@ -351,6 +351,11 @@ class McapLog:
             meta[k] = str(v)
         self._w.add_metadata("surge", meta)
 
+    def add_metadata(self, name: str, meta: dict[str, Any]) -> None:
+        """MCAP のメタデータレコードを1つ足す（値は文字列にする）。記録の途中でも書ける。"""
+        self._check_open()
+        self._w.add_metadata(name, {k: str(v) for k, v in meta.items()})
+
     # ── 時刻 ──
 
     def to_unix_ns(self, t_mono_ns: int) -> int:

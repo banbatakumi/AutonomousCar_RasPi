@@ -79,6 +79,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CTRL,
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
+    TOPIC_CAM_CONFIG,
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_PATH,
     TOPIC_E2E_FUSION_PLAN,
@@ -93,11 +94,13 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
+    TOPIC_STEREO_INFO,
     TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
 )
 from raspi.rec import logclean  # noqa: E402
+from raspi.rec import provenance  # noqa: E402
 from raspi.rec.mcap_log import McapLog, default_mcap_path  # noqa: E402
 from raspi.rec.viz import VizRecorder  # noqa: E402
 
@@ -134,6 +137,9 @@ DEFAULT_TOPICS = [
     TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
+    TOPIC_STEREO_INFO,
+    # 照合・左右同期を回していた期間（`CamConfig.depth`・`stereo`）。"照合していない" と "記録が欠けた" を区別する
+    TOPIC_CAM_CONFIG,
     TOPIC_LINE_CAM,
     TOPIC_CAM_PATH,
     TOPIC_TRACK_TARGET,
@@ -207,6 +213,7 @@ class LoggerNode:
         }
         self.log = McapLog(path, compression=compression, metadata=self._metadata,
                            publish_at_write=True)
+        self.log.add_metadata("provenance", provenance.collect())
         #: 書けなくなって記録を続けられずに終わった（標準出力の相手が消えた等）。終了コードに出す
         self.failed = False
         #: 書けなくなったファイルを閉じて、新しいファイルで記録を再開した回数
@@ -307,6 +314,7 @@ class LoggerNode:
         old.close()
         self.log = McapLog(default_mcap_path(old.path.parent), compression=self._compression,
                            metadata=self._metadata, publish_at_write=True)
+        self.log.add_metadata("provenance", provenance.collect())
         # 推測航法と軌跡は新しいファイルの先頭から数え直す（前のファイルとは別の記録）
         self.vizrec = VizRecorder(self.log) if self.viz else None
         self.reopened += 1
