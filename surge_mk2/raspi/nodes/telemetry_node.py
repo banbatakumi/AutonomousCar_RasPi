@@ -1922,11 +1922,11 @@ class TelemetryServer:
         if self._video_recording():
             return CAM_FPS_MAX
         if self._desired_stereo():
-            # 左右を同期して撮っている間も ARM/DISARM ごとの上限を使う。fps変更後は
-            # libcamera の同期が揃い直すまで時間がかかるが、DISARM中の節電設定を
-            # 無視してARM中の値で回し続けるより、現在の状態を正しく反映する。
-            return (self._cam_front_fps_armed if self._vehicle_armed()
-                    else self._cam_front_fps_disarm)
+            # **左右を同期して撮っている間は ARM/DISARM で fps を変えない。** 走らせたまま fps を変えると
+            # libcamera の同期が崩れ、`synced` の組が 25〜30 秒以上来ない（実機 11-14: 10→20fps で約25秒明滅、
+            # 20→10fps で30秒以上ゼロ。`docs/stereo_plan.md` §3）。ARM 中の値に固定する。
+            # 節電は撮像でなく深度推定の頻度（`CamConfig.depth_fps`）で行う
+            return self._cam_front_fps_armed
         if self._vehicle_armed():
             return self._cam_front_fps_armed
         return self._cam_front_fps_disarm

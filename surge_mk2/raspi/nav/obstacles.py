@@ -49,6 +49,11 @@ _SPLIT_M = 0.18
 _NEAR_M = 0.10
 #: 同じく帯の下限 [m]（これより壁に近い点は数えない）
 _NEAR_MIN_M = 0.10
+#: 「壁のずれ」とみなす塊の条件（`_is_wall_shift`）。長さ（点の並びの主方向の標準偏差）[m]・
+#: 細さ（副方向/主方向）・壁からの平均距離 [m]
+_WALL_SHIFT_SPREAD = 0.12
+_WALL_SHIFT_THIN = 0.15
+_WALL_SHIFT_DIST = 0.30
 
 
 class Obstacle(NamedTuple):
@@ -99,10 +104,29 @@ def near_pad(wall_pad: float) -> float:
     return min(wall_pad, max(_NEAR_MIN_M, wall_pad - _NEAR_M))
 
 
+def _is_wall_shift(px: np.ndarray, py: np.ndarray, wall_dist: np.ndarray, grid: OccGrid) -> bool:
+    """塊が「地図の壁が動いた」ものか: 壁の近くにある、**長くて細い線**（標準偏差 12cm = 長さ約 40cm 超）。
+
+    ダクトの壁は他車の衝突でへこみ・ずれるので、地図を作った後は壁が数 cm〜30cm ずれうる。
+    ずれた壁の面は壁の脇（`wall_pad` の外）に一本の線として写る。物体（他車・人・箱）は
+    塊でコンパクトか、壁から離れている。2026-11-14 `surge_20261114_074938`: 毎周同じ 2 か所に
+    長さ 0.7m・厚さ 1cm の線が 6m 先から障害物として出た（自己位置は一致度 0.9 以上で正常）。
+    同じ地図の別の記録の本物の障害物は、長さが 0.06〜0.12・壁から 0.3m 以上離れていた。
+    """
+    col, row = grid.to_cell(px, py)
+    ok = grid.inside(col, row)
+    if not ok.any() or float(wall_dist[row[ok], col[ok]].mean()) > _WALL_SHIFT_DIST:
+        return False
+    cov = np.cov(np.vstack([px, py]))
+    minor, major = np.sqrt(np.maximum(np.sort(np.linalg.eigvalsh(cov)), 0.0))
+    return bool(major >= _WALL_SHIFT_SPREAD and minor <= _WALL_SHIFT_THIN * major)
+
+
 def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
            wall_pad: float = 0.15, min_points: int = 3,
            max_obstacles: int = 8, free: np.ndarray | None = None,
-           near: np.ndarray | None = None, behind=None) -> list[Obstacle]:
+           near: np.ndarray | None = None, behind=None,
+           wall_dist: np.ndarray | None = None) -> list[Obstacle]:
     """凍結地図に無いものを拾う。**`grid.frozen` でなければ何も返さない。**
 
     地図を作っている最中は「地図に無い」が当たり前なので、判定に意味が無い。
@@ -110,6 +134,7 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
     :param free: `free_mask(grid, wall_pad)` の結果（省略すると毎回作る）
     :param near: `free_mask(grid, near_pad(wall_pad))` の結果。渡すと、`free` に1点でも落ちた
         塊はこの帯の点まで数える（省略すると `free` の点だけで数える）
+    :param wall_dist: `wall_distance(grid)` の結果。渡すと、壁の脇の長く細い線（壁のずれ。`_is_wall_shift`）を捨てる
     :param behind: 車体座標の点 `(x, y)` → 地図の壁の向こうに見えた点か（`Frontend.behind_wall`）。渡すと、
         地図の空きに落ちた候補のうち壁の向こうの点を捨てる。LiDAR の光は壁を通らないので、そういう点は
         低い壁の上を越えて見えた奥か、壁での反射。2026-11-06 `surge_20261106_024246`: 木の仕切り壁（LiDAR の
@@ -165,6 +190,9 @@ def detect(grid: OccGrid, pts: Points, pose: tuple[float, float, float], *,
     out: list[Obstacle] = []
     for a, b in zip(starts[:-1], starts[1:]):
         if b - a < min_points or not strict[a:b].any():
+            continue
+        if (wall_dist is not None and b - a >= 5
+                and _is_wall_shift(px[a:b], py[a:b], wall_dist, grid)):
             continue
         cx, cy = float(px[a:b].mean()), float(py[a:b].mean())
         r = float(np.hypot(px[a:b] - cx, py[a:b] - cy).max())

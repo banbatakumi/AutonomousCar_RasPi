@@ -194,6 +194,13 @@ LOCATE_RMS_SCALE = 0.03
 LOCATE_ROBUST_RMS_SCALE = 0.04
 #: 頑健な尺度で採る候補の点数の下限。他車3台が周りに居ても真の姿勢は 0.7 前後（`--locate-cars 3`）
 LOCATE_MIN_SCORE_ROBUST = 0.5
+#: 探索範囲が絞れている（クリックのヒント・解除直前の位置）ときの下限。★ 実機の magp_a の地図では、
+#: 走行中に一致度 0.99 で追跡できている真の姿勢でも、厳密点数は 0.27〜0.51・頑健点数は 0〜0.24
+#: （当たり率 0.5〜0.7・壁を突き抜ける割合 0.11〜0.16）で、上の下限（0.5）では特定できなかった
+#: （`surge_20261114_043625`）。同じ記録で間違った候補は 0.05 以下。範囲が絞れていれば、
+#: 取り違えは範囲の中に限られ、2位との比（`LOCATE_SCORE_RATIO`）でも守られるので下げる
+LOCATE_MIN_SCORE_HINTED = 0.12
+LOCATE_MIN_SCORE_ROBUST_HINTED = 0.10
 #: `LOCATE`の点数で、光路が地図の壁を突き抜けた点（地図と矛盾。他車では起きない）を、
 #: 壁に乗った点の何倍で減点するか（`locate_score`）
 LOCATE_CROSS_WEIGHT = 3.0
@@ -243,7 +250,7 @@ def locate_score_robust(fit) -> float:
     return float(base * math.exp(-0.5 * (fit.rms / LOCATE_ROBUST_RMS_SCALE) ** 2))
 
 
-def pick_locate(scored: list) -> tuple[object | None, str]:
+def pick_locate(scored: list, *, hinted: bool = False) -> tuple[object | None, str]:
     """仕上げた候補`[(厳密な点数, 頑健な点数, ref)]`から採る姿勢を決める。戻り値は`(ref, 断る理由)`。
 
     **全点が地図によく合う候補があれば（`LOCATE_MIN_SCORE`以上）従来どおり厳密な尺度で決める。**
@@ -251,15 +258,18 @@ def pick_locate(scored: list) -> tuple[object | None, str]:
     2位が1位の`LOCATE_SCORE_RATIO`以上なら「絞り込めていない」として断る。
     厳密な尺度で良い候補が無いのに頑健な尺度へ落ちるのは、厳密な尺度で**2位と競っている**ときではない
     （競っているときは断る）。
+    `hinted`（探索範囲が絞れている）なら下限は `LOCATE_MIN_SCORE_HINTED` 系を使う。
     """
+    min_strict = LOCATE_MIN_SCORE_HINTED if hinted else LOCATE_MIN_SCORE
+    min_robust = LOCATE_MIN_SCORE_ROBUST_HINTED if hinted else LOCATE_MIN_SCORE_ROBUST
     if not scored:
         return None, "none"
     strict = sorted(scored, key=lambda t: -t[0])
-    if strict[0][0] >= LOCATE_MIN_SCORE:
+    if strict[0][0] >= min_strict:
         order, k = strict, 0
     else:
         order, k = sorted(scored, key=lambda t: -t[1]), 1
-        if order[0][1] < LOCATE_MIN_SCORE_ROBUST:
+        if order[0][1] < min_robust:
             return None, "low"
     if len(order) >= 2 and order[0][k] > 0 and order[1][k] >= order[0][k] * LOCATE_SCORE_RATIO:
         return None, "ambiguous"
@@ -704,6 +714,16 @@ _STILL_SPEED = 0.1
 #: ので、動くと候補ごとに別の場所で仕上げて、古い姿勢を採ってしまう）
 _LOCATE_MOVE_SPEED = 0.05
 _LOCATE_MOVE_YAW_RATE = 0.05
+#: 動いたと確定するまでに必要な連続周期数。クリック直後の微動（人が車に触れた・揺れ）で毎回 0% に
+#: 戻らないよう、これ未満の間は探索を進めず待つだけにする（候補は動いた点群で仕上げない）
+_LOCATE_MOVE_CYCLES = 3
+#: クリックのヒントで絞り込む半径 [m]。クリックは真の位置から外れやすいので、失敗したら次の段へ広げ、
+#: 最後はヒント無し（全域）へ落とす。最初の段は `LocalizeConfig.hint_radius`（0.4m）と同じ
+_LOC_HINT_RADII = (0.4, 0.8, 1.2)
+#: 同じ点の再クリックとみなす距離 [m]（探索を捨てない）
+_LOC_HINT_SAME_M = 0.15
+#: 解除後に止まるまでに転がる距離の見積もりに使う減速度 [m/s²]（実測は 2.1 前後。小さめに取って広く探す）
+_DISENGAGE_DECEL = 1.5
 #: 解く直前の姿勢での照合（`_locate_at_pose`）が、その姿勢からこれ以上動いた答えを返したら採らない（別の所へ
 #: 吸い込まれた。種からの探索に任せる）[m]・[rad]。止まっている車を人が少し動かした程度は受ける
 _LOCATE_POSE_TOL_M = 0.3
@@ -867,8 +887,8 @@ class Slam2dRaceLine(Planner):
                        "速度で +0〜8%——陰に障害物が居れば、減速はするが当たる（シムで 0.6m/s で接触）。"
                        "0 で抑えない。★見ているのは経路の線上だけ。内側の壁に寄った障害物は 1.0 でも"
                        "見えるのが遅れて当たりうる"),
-        ParamSpec(group=GROUP_AVOID, key="avoid_margin", hidden=True, label="障害物との余裕", min=0.0, max=0.4,
-                  default=0.10, step=0.01, unit="m",
+        ParamSpec(group=GROUP_AVOID, key="avoid_margin",label="障害物との余裕", min=0.0, max=0.4,
+                  default=0.20, step=0.01, unit="m",
                   note="障害物の縁から車体側面までの余裕。自己位置と障害物の位置の誤差をここで飲む"),
         ParamSpec(group=GROUP_AVOID, key="avoid_clear", hidden=True, label="車体外形の合格線", min=0.0, max=0.2,
                   default=0.05, step=0.01, unit="m",
@@ -1041,6 +1061,7 @@ class Slam2dRaceLine(Planner):
         #: 障害物の候補にしてよいセル（`obs_mod.free_mask`）と、それを作った (地図の版, 幅)
         self._obs_free: np.ndarray | None = None
         self._obs_near: np.ndarray | None = None
+        self._obs_wdist: np.ndarray | None = None
         self._obs_free_key: tuple | None = None
         #: 実際に使っている無視幅（`_obstacle_pad`）と、それを決めた経路
         self._obs_pad = 0.0
@@ -1169,11 +1190,15 @@ class Slam2dRaceLine(Planner):
         #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
         self._loc_hint: tuple[float, float] | None = None
         self._loc_hint_t = 0.0                   #: `_loc_hint` を受けた時刻（`time.monotonic()`）
+        self._loc_hint_stage = 0                 #: `_LOC_HINT_RADII` の何段目か（失敗するたびに広げる）
+        self._loc_move_n = 0                     #: `LOCATE` 中に動いていた連続周期数
         #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
         self._locate_seed: tuple[float, float] | None = None
         #: 自動運転を解いて地図を読み直したときの、解く直前の姿勢 `(x, y, yaw)`（`on_disengage`）。
         #: `_locate` はまずこの姿勢の周りを 1 回だけ照合し、合えば全域を探さずに特定済みにする
         self._locate_pose: tuple[float, float, float] | None = None
+        #: `on_disengage` の種の周りを探す半径 [m]。解いてから止まるまでに転がる分（None = 既定）
+        self._locate_seed_r: float | None = None
         self._load_error = ""
         #: 地図の読み込みに失敗した（`request_load`）。解くまで指令を出さない
         self._load_failed = False
@@ -1271,6 +1296,7 @@ class Slam2dRaceLine(Planner):
         name = self._active_map_name
         if name and self.phase != EXPLORE:
             pose = (self.slam.pose.x, self.slam.pose.y, self.slam.pose.yaw)
+            v = abs(self._speed_now)          # reset() が 0 に戻す前に取る
             self.reset()
             self.request_load(name)
             if not self._load_error:
@@ -1279,6 +1305,10 @@ class Slam2dRaceLine(Planner):
                 #   姿勢で 1 回照合する（`_locate_at_pose`）。外れたら種からの探索に落ちる
                 self._locate_seed = pose[:2]
                 self._locate_pose = pose
+                # ★ 解いてから止まるまで転がる（3.75m/s・2.1m/s² で約 3m）。種の周り 0.4m では真の位置が
+                #   範囲に入らず、必ず全域探索に落ちていた（`surge_20261114_043625`）。
+                #   転がる距離（v²/2a）に余裕を足して絞る
+                self._locate_seed_r = min(5.0, max(0.5, v * v / (2.0 * _DISENGAGE_DECEL) + 0.5))
                 return
         self.reset()
 
@@ -1297,6 +1327,7 @@ class Slam2dRaceLine(Planner):
         （むしろ「クリック→レーシングライン走行」の順で押した意思を活かす）。
         """
         self._locate_pose = None
+        self._locate_seed_r = None
         loaded = mapstore.load_map(name)
         if (loaded is not None and self._reline_on_load and len(loaded.raceline_xy) < 3):
             self._load_error = f"地図『{name}』にはレーシングラインが無い"
@@ -1453,8 +1484,12 @@ class Slam2dRaceLine(Planner):
         self._adopt_line()
 
     def request_locate_hint(self, x: float, y: float) -> None:
-        self._loc_hint = (x, y)
+        old, self._loc_hint = self._loc_hint, (x, y)
         self._loc_hint_t = time.monotonic()
+        if (old is not None and math.hypot(x - old[0], y - old[1]) <= _LOC_HINT_SAME_M
+                and (self._localizer is not None or self._loc_cands is not None)):
+            return                 # 同じ点の再クリック。進行中の探索は捨てない
+        self._loc_hint_stage = 0
         self._localizer = None     # 探索中なら絞り込んでやり直す
         self._loc_cands = None
 
@@ -1918,11 +1953,15 @@ class Slam2dRaceLine(Planner):
         if (abs(self._speed_now) > _LOCATE_MOVE_SPEED
                 or abs(self._yaw_rate_now) > _LOCATE_MOVE_YAW_RATE):
             # 動いている間は探さない（途中までの候補は別の場所の点群で仕上げたもの）。
-            # 止まってから最初からやり直す
-            self._localizer = None
-            self._loc_cands, self._loc_scored = None, []
+            # 動きが続く（_LOCATE_MOVE_CYCLES 周期）なら、止まってから最初からやり直す。
+            # 1〜2 周期の微動は探索を進めず待つだけ（捨てない）
+            self._loc_move_n += 1
+            if self._loc_move_n >= _LOCATE_MOVE_CYCLES:
+                self._localizer = None
+                self._loc_cands, self._loc_scored = None, []
             st.reason = "自己位置を探している。車が動いている間は待つ（止まってから探索する）"
             return st
+        self._loc_move_n = 0
         pts = self.slam.deskew_scan(scan)
         # ヒントは「クリック→読み込み」の意思なので読み込みでは捨てないが、古いものは使わない
         # （別の地図・別の出発点で、ずっと前のクリックに探索が絞られないように）
@@ -1939,14 +1978,23 @@ class Slam2dRaceLine(Planner):
         if self._loc_cands is None:
             if self._localizer is None:
                 hint = self._loc_hint or self._locate_seed
-                self._localizer = GlobalLocalizer(self.slam.grid, hint=hint)
+                radius = (_LOC_HINT_RADII[self._loc_hint_stage] if self._loc_hint is not None
+                          else self._locate_seed_r)
+                self._localizer = GlobalLocalizer(self.slam.grid, hint=hint, hint_radius=radius)
+                if self._localizer.done and self._loc_hint is not None:
+                    self._widen_hint()      # この半径に空きセルが無い。広げて次周期に探す
+                    self._localizer = None
+                    st.reason = "自己位置の探索範囲に空きセルが無い。ヒントの探索半径を広げる"
+                    return st
                 if self._localizer.done:
                     st.reason = ("自己位置の探索範囲に空きセルが無い。"
                                  "地図の選択かクリックしたヒントを見直してください")
                     return st
 
             if not self._localizer.step(pts):
-                st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%）"
+                rtxt = (f"・ヒント半径 {_LOC_HINT_RADII[self._loc_hint_stage]:.1f}m"
+                        if self._loc_hint is not None else "")
+                st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%{rtxt}）"
                 return st
 
             cands = self._localizer.candidates(LOCATE_CANDIDATES)
@@ -1954,6 +2002,7 @@ class Slam2dRaceLine(Planner):
             if not cands:
                 if seeded:
                     self._locate_seed = None      # 種の周りに候補が無い。全域で探し直す
+                self._widen_hint()
                 st.reason = "自己位置の候補が見つからない"
                 return st
             self._loc_cands, self._loc_scored = list(cands), []
@@ -1977,9 +2026,10 @@ class Slam2dRaceLine(Planner):
         if not scored:
             if seeded:
                 self._locate_seed = None
+            self._widen_hint()
             st.reason = "自己位置の候補を仕上げられなかった"
             return st
-        best, why = pick_locate(scored)
+        best, why = pick_locate(scored, hinted=self._loc_hint is not None or seeded)
         if why == "ambiguous":
             if seeded:
                 self._locate_seed = None
@@ -1990,6 +2040,7 @@ class Slam2dRaceLine(Planner):
         if best is None or best.inlier < p["min_score"]:
             if seeded:
                 self._locate_seed = None      # 種が外れている。全域で探し直す
+            self._widen_hint()
             top = max(scored, key=lambda t: max(t[0], t[1]))
             st.reason = (f"自己位置が見つからない（最良の当たり率 {top[2].inlier:.2f}・"
                          f"点数 {max(top[0], top[1]):.2f}）。車の周りの障害物を離すか、"
@@ -1997,13 +2048,23 @@ class Slam2dRaceLine(Planner):
             return st
         return self._adopt_locate(st, best)
 
+    def _widen_hint(self) -> None:
+        """ヒントで絞った探索が外れたとき、次の周期から半径を広げる。最後の段で外れたらヒントを捨てて全域へ。
+        （`ambiguous` は広げても悪化するだけなので呼ばない。地図のタップを促す）"""
+        if self._loc_hint is None:
+            return
+        self._loc_hint_stage += 1
+        if self._loc_hint_stage >= len(_LOC_HINT_RADII):
+            self._loc_hint = None
+            self._loc_hint_stage = 0
+
     def _locate_at_pose(self, pts, guess: tuple[float, float, float], p: dict[str, float]):
         """`guess` の周りだけを照合し、地図に十分合って `guess` から大きく動いていなければ結果を返す（`None` = 外れ）。"""
         ref = self.slam.refine(pts, Pose2D(*guess))
         if ref is None:
             return None
         fit = LocateScorer(self.slam.grid).fit(pts, ref.pose, self.slam.lidar_xy)
-        best, _ = pick_locate([(locate_score(ref), locate_score_robust(fit), ref)])
+        best, _ = pick_locate([(locate_score(ref), locate_score_robust(fit), ref)], hinted=True)
         if best is None or best.inlier < p["min_score"]:
             return None
         x, y, yaw = best.pose
@@ -2023,6 +2084,7 @@ class Slam2dRaceLine(Planner):
             # 「自己位置を特定」だけ押された。走り出さず、人が「走行を開始」を押すのを待つ
             self.phase = st.phase = LOCATED
             self._locate_seed = None
+            self._locate_seed_r = None
             self._loc_hint = None
             self._located_lost = 0
             self._map_dirty = True
@@ -2036,6 +2098,7 @@ class Slam2dRaceLine(Planner):
         """`LOCATE`/`LOCATED`から`RACE`へ入る（走り出しの状態を初期化する）。"""
         self.phase = st.phase = RACE
         self._locate_seed = None
+        self._locate_seed_r = None
         # クリックのヒントは使い切り（残すと、次に読む別の地図の探索までその周りに絞る）
         self._loc_hint = None
         self._prev_idx = -1
@@ -2316,6 +2379,7 @@ class Slam2dRaceLine(Planner):
             self._obs_pad = pad = self._obstacle_pad(p)
             self._obs_free = obs_mod.free_mask(g, pad)
             self._obs_near = obs_mod.free_mask(g, obs_mod.near_pad(pad))
+            self._obs_wdist = obs_mod.wall_distance(g)
             self._obs_free_key, self._obs_pad_ref = key, base
         pad = self._obs_pad
         pts = self.slam.deskew_scan(scan)
@@ -2326,7 +2390,7 @@ class Slam2dRaceLine(Planner):
                 # `Points.__len__` が点の数を返すので `_replace` は使えない（NamedTuple の作り直しが長さを見る）
                 pts = type(pts)(pts.x[keep], pts.y[keep], pts.hit[keep], pts.t_ref_ns, pts.corrected)
         now = obs_mod.detect(g, pts, self.slam.pose,
-                             wall_pad=pad, free=self._obs_free, near=self._obs_near,
+                             wall_pad=pad, free=self._obs_free, near=self._obs_near, wall_dist=self._obs_wdist,
                              behind=self.slam.behind_wall)
         self._obs_t += self._dt
         now = self._vel_tracker.update(self._obs_t, now)
@@ -3178,6 +3242,7 @@ class Slam2dRaceLine(Planner):
         self._lost_still_t = 0.0
         self._coast_t = 0.0
         self._locate_seed = (self.slam.pose.x, self.slam.pose.y)
+        self._locate_seed_r = None
         self._loc_hint = None
         self._localizer = None
         self._loc_cands = None

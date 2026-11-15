@@ -963,10 +963,61 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         params = Slam2dRaceLine.merged({})
         p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(), params, 0.1)
         self.assertIsNotNone(p._localizer)
-        st = p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(speed=0.3), params, 0.1)
+        for _ in range(3):                               # 動きが続けば捨てる（1〜2周期は待つだけ）
+            st = p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(speed=0.3), params, 0.1)
         self.assertIsNone(p._localizer)
         self.assertEqual(st.phase, LOCATE)
         self.assertFalse(st.ready)
+
+    def test_locate_ignores_brief_motion_but_restarts_when_it_persists(self):
+        """1〜2 周期の微動では探索を捨てない。続いたら（_LOCATE_MOVE_CYCLES）捨てる。"""
+        self._save_manual_map("course_mv2")
+        p = Slam2dRaceLine()
+        p.request_load("course_mv2")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        scan = make_room_scan(3.0, 2.0, 0.1, segs=ROOM)
+        p.plan(scan, vs(), params, 0.1)
+        self.assertIsNotNone(p._localizer)
+        for _ in range(2):
+            p.plan(scan, vs(speed=0.3), params, 0.1)
+            self.assertIsNotNone(p._localizer)
+        p.plan(scan, vs(), params, 0.1)                 # 止まれば数え直し
+        for _ in range(3):
+            p.plan(scan, vs(speed=0.3), params, 0.1)
+        self.assertIsNone(p._localizer)
+
+    def test_same_hint_click_keeps_search_but_new_point_restarts(self):
+        self._save_manual_map("course_hint_same")
+        p = Slam2dRaceLine()
+        p.request_load("course_hint_same")
+        p.request_locate_hint(3.0, 2.0)
+        params = Slam2dRaceLine.merged({})
+        p.plan(make_room_scan(3.0, 2.0, 0.1, segs=ROOM), vs(), params, 0.1)
+        loc = p._localizer
+        self.assertIsNotNone(loc)
+        p.request_locate_hint(3.05, 2.05)               # ほぼ同じ点
+        self.assertIs(p._localizer, loc)
+        p.request_locate_hint(4.0, 2.0)                 # 別の点
+        self.assertIsNone(p._localizer)
+        self.assertEqual(p._loc_hint_stage, 0)
+
+    def test_locate_widens_hint_radius_when_click_is_off(self):
+        """クリックが 0.4m 以上ずれていても、段階的に広げて自己位置を特定する。"""
+        self._save_manual_map("course_hint_off")
+        p = Slam2dRaceLine()
+        p.set_engaged(False)
+        p.request_load("course_hint_off")
+        p.request_locate_hint(3.0 + 0.7, 2.0)           # 0.4m の外（0.8m の中）
+        params = Slam2dRaceLine.merged({})
+        st = None
+        for _ in range(200):
+            st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            if p.phase != LOCATE:
+                break
+        self.assertEqual(p.phase, LOCATED, st.reason)
+        self.assertAlmostEqual(p.slam.pose.x, 3.0, delta=0.15)
+        self.assertAlmostEqual(p.slam.pose.y, 2.0, delta=0.15)
 
     def test_locate_waits_in_located_until_engaged_then_races(self):
         """未 engage で自己位置を特定すると走り出さず LOCATED で待つ。engage したら RACE へ入る。"""
@@ -1015,6 +1066,20 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         self.assertEqual(p.phase, LOCATED, st.reason)    # 1 周期で戻る
         self.assertAlmostEqual(p.slam.pose.x, 3.0, delta=0.1)
         self.assertAlmostEqual(p.slam.pose.yaw, 0.2, delta=0.05)
+
+    def test_disengage_seed_radius_covers_the_roll_until_stop(self):
+        """解いてから止まるまで転がる分（3.75m/s なら約 3m）を、種の探索半径に入れる。"""
+        self._save_manual_map("course_roll")
+        p = Slam2dRaceLine()
+        p.request_load("course_roll")
+        p.phase = RACE
+        p._speed_now = 3.75
+        p.on_disengage()
+        self.assertIsNotNone(p._locate_seed_r)
+        self.assertGreater(p._locate_seed_r, 3.0)
+        self.assertLessEqual(p._locate_seed_r, 5.0)
+        p.request_load("course_roll")                    # 読み直しで既定に戻る
+        self.assertIsNone(p._locate_seed_r)
 
     def test_disengage_falls_back_to_search_when_the_car_was_moved(self):
         """解いた後に車を大きく動かされていたら、直前の姿勢は採らず探索に落ちる。"""
@@ -1174,6 +1239,28 @@ class TestLocateScore(unittest.TestCase):
         ts = locate_score_robust(scorer.fit(pts, true.pose, (0.0, 0.0)))
         ms = locate_score_robust(scorer.fit(pts, mirror.pose, (0.0, 0.0)))
         self.assertLess(ms, ts * LOCATE_SCORE_RATIO)
+
+
+class TestPickLocateHinted(unittest.TestCase):
+    """探索範囲が絞れているときだけ、実機の粗い地図の点数（0.2 前後）でも採る。"""
+
+    class _R:
+        inlier = 0.95
+
+    def test_low_score_is_taken_only_when_hinted(self):
+        from raspi.auto.slam2d_raceline import pick_locate
+        r1, r2 = self._R(), self._R()
+        scored = [(0.17, 0.14, r1), (0.03, 0.0, r2)]
+        self.assertEqual(pick_locate(scored)[1], "low")
+        best, why = pick_locate(scored, hinted=True)
+        self.assertIs(best, r1)
+        self.assertEqual(why, "")
+
+    def test_hinted_still_refuses_close_runner_up_and_tiny_scores(self):
+        from raspi.auto.slam2d_raceline import pick_locate
+        self.assertEqual(pick_locate([(0.40, 0.0, self._R()), (0.36, 0.0, self._R())],
+                                     hinted=True)[1], "ambiguous")
+        self.assertEqual(pick_locate([(0.05, 0.0, self._R())], hinted=True)[1], "low")
 
 
 class TestSlam2dNavRobustness(unittest.TestCase):

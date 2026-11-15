@@ -176,8 +176,8 @@ def test_step_gating(proc, images):
 def test_depth_rate_is_configurable_without_changing_capture_rate(proc, images):
     node = StereoNode(proc, rate_hz=10)
     latest = {
-        TOPIC_IMAGE_FRONT: _ref("front", 1_000),
-        TOPIC_IMAGE_LEFT: _ref("left", 1_000),
+        TOPIC_IMAGE_FRONT: _ref("front", 1_000_000_000),
+        TOPIC_IMAGE_LEFT: _ref("left", 1_000_000_000),
         TOPIC_CAM_CONFIG: SimpleNamespace(depth=True, depth_view=False, depth_fps=1.0),
     }
     node._readers["front"].read_at = lambda ref, t, tol: (images[0], t)

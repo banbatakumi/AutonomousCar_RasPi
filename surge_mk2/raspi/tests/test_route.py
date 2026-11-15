@@ -1108,6 +1108,24 @@ class TestJoinAndRejoin(unittest.TestCase):
         self.assertFalse(self.pl._joined)
 
 
+class TestAutoStartAtCorner(unittest.TestCase):
+    """通路の角にあるスタートは、細線化の中心線から通常の吸着半径（0.6m）を超えて離れる。
+    自動経路はその場合だけ半径を広げて作る（magp_a2 で「0.6m以内に道が無い」になった）。"""
+
+    def test_corner_start_still_builds_auto_route(self):
+        from raspi.auto import slam2d_route as R
+        s = R.Slam2dRoute()
+        p = {q.key: q.default for q in s.params}
+        t = oval()
+        start = Waypoint(0.52, 0.52, 0.0)      # 外周の角（中心線から約0.67m）
+        g = graph_of(t)
+        with self.assertRaises(RouteError):
+            snap(g, start.x, start.y, 0.6)
+        out = R._compute_routes(t, RES, (0.0, 0.0), (3.5, 1.0), None, {}, p, s.vehicle,
+                                None, auto_start=start, refine=False)
+        self.assertIn("auto", out.routes, out.errors)
+
+
 class TestRouteSelectBus(unittest.TestCase):
     """信号認識の受け口（`route/select`）が `signal` から planning_node まで通るか。"""
 

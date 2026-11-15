@@ -81,6 +81,12 @@ class TestGlobalLocalizerUnambiguousRoom(unittest.TestCase):
         self.assertAlmostEqual(r.x, true_pose.x, delta=0.15)
         self.assertAlmostEqual(r.y, true_pose.y, delta=0.15)
 
+    def test_hint_radius_override_widens_candidates(self):
+        h = (3.0, 2.0)
+        narrow = GlobalLocalizer(self.g, hint=h, config=self._FINE)
+        wide = GlobalLocalizer(self.g, hint=h, hint_radius=1.0, config=self._FINE)
+        self.assertGreater(wide._xs.size, narrow._xs.size)
+
     def test_hint_far_from_any_free_cell_yields_no_candidates(self):
         loc = GlobalLocalizer(self.g, hint=(-50.0, -50.0),
                               config=LocalizeConfig(hint_radius=0.3))

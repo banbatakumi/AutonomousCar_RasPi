@@ -181,6 +181,12 @@ def _put(out: _BuildOut, key: str, rl, cl, rp, vehicle) -> None:
         out.warnings[key] = "。".join(notes)
 
 
+#: 自動経路のスタートを道路グラフへ吸着させる半径 [m]。道路グラフは細線化の中心線なので、
+#: 通路の角にあるスタートは線から0.6mを超えて離れることがある（magp_a2 で 0.90m）。
+#: まず通常の半径で試し、道が無い時だけ広い半径で再試行する（広いほうが別の道へ誤吸着しやすい）
+_START_SNAP_M = 0.6
+_START_SNAP_WIDE_M = 1.5
+
 #: 自動経路で、見積もりの速い順に本来の設定で引き直して曲がれるか確かめる本数
 _FULL_CHECKS = 4
 #: 自動経路で比べる周回ルートの上限（Pi で1本 数百ms。これ以上はワーカーでも待たせすぎる）
@@ -191,12 +197,17 @@ def _fastest_loop(out: _BuildOut, grid, graph: RoadGraph, start: Waypoint, avoid
                   p: dict[str, float], kw: dict, vehicle) -> None:
     """スタートから出て戻る周回ルートを全部挙げ、見積もりのラップタイムが最短のものを
     自動経路にする（モジュール docstring）。"""
-    try:
-        loops = enumerate_loops(graph, start, turn_max_deg=p["turn_max_deg"], avoid=avoid,
-                                max_loops=_MAX_AUTO_LOOPS)
-    except RouteError as e:
-        out.errors[AUTO_KEY] = str(e)
-        return
+    loops = None
+    for radius in (_START_SNAP_M, _START_SNAP_WIDE_M):
+        try:
+            loops = enumerate_loops(graph, start, turn_max_deg=p["turn_max_deg"], avoid=avoid,
+                                    max_loops=_MAX_AUTO_LOOPS, snap_radius=radius)
+            break
+        except RouteError as e:
+            # 道が近くに無い時だけ広げる（他の失敗は広げても直らない）
+            if radius == _START_SNAP_WIDE_M or "以内に道が無い" not in str(e):
+                out.errors[AUTO_KEY] = str(e)
+                return
     if not loops:
         out.errors[AUTO_KEY] = "スタートから戻ってくる周回ルートが無い（避ける点・曲がり角の上限を見直す）"
         return

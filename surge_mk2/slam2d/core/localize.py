@@ -91,6 +91,7 @@ class GlobalLocalizer:
     """1回の自己位置復元につき1個作る（使い捨て）。`step()`を`done`になるまで呼ぶ。"""
 
     def __init__(self, grid: OccGrid, *, hint: tuple[float, float] | None = None,
+                hint_radius: float | None = None,
                 config: LocalizeConfig = LocalizeConfig(),
                 surfmap: SurfaceMap | None = None) -> None:
         self._grid = grid
@@ -108,7 +109,10 @@ class GlobalLocalizer:
         rows, cols = rows * stride, cols * stride
         xs, ys = grid.to_world(cols, rows)
         if hint is not None:
-            keep = (xs - hint[0]) ** 2 + (ys - hint[1]) ** 2 <= config.hint_radius ** 2
+            # `hint_radius` で上書きできる（クリックのずれに備えて呼び出し側が段階的に広げる）。
+            # 候補の間引き（`ambiguous_min_dist`）は呼び出し側の採否（`pick_locate`）には使われない
+            r = config.hint_radius if hint_radius is None else hint_radius
+            keep = (xs - hint[0]) ** 2 + (ys - hint[1]) ** 2 <= r ** 2
             xs, ys = xs[keep], ys[keep]
 
         self._xs = np.asarray(xs, dtype=np.float64)

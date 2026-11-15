@@ -194,3 +194,39 @@ class TestBehindWall(unittest.TestCase):
         out = obs_mod.detect(_open_grid(), _scan((1.5, 0.0, 0.10)), self.POSE,
                              behind=lambda x, y: np.ones(len(x), dtype=bool))
         self.assertEqual(out, [])
+
+
+class TestWallShift(unittest.TestCase):
+    """へこんだ・ずれたダクトの壁（壁の脇の長く細い線）は障害物にしない。物体は残す。"""
+
+    POSE = (0.0, 0.0, 0.0)
+
+    def _grid(self) -> OccGrid:
+        g = _open_grid()
+        g.hits[:, 280:282] = 20             # x = +3.0 付近の縦の壁
+        return g
+
+    def _line(self, x: float, half_len: float, n: int = 12) -> Points:
+        ys = np.linspace(-half_len, half_len, n)
+        return Points(np.full(n, x), ys, np.ones(n, dtype=bool), 1, False)
+
+    def test_long_thin_line_beside_wall_is_dropped(self):
+        g = self._grid()
+        wd = obs_mod.wall_distance(g)
+        wall_x = g.to_world(np.array([280]), np.array([0]))[0][0]
+        pts = self._line(float(wall_x) - 0.22, 0.4)      # 壁の手前 22cm（wall_pad 0.15 の外）に長さ 0.8m の線
+        self.assertTrue(obs_mod.detect(g, pts, self.POSE, wall_pad=0.15))      # 渡さなければ従来どおり出る
+        self.assertEqual(obs_mod.detect(g, pts, self.POSE, wall_pad=0.15, wall_dist=wd), [])
+
+    def test_compact_object_beside_wall_is_kept(self):
+        g = self._grid()
+        wd = obs_mod.wall_distance(g)
+        wall_x = float(g.to_world(np.array([280]), np.array([0]))[0][0])
+        pts = self._line(wall_x - 0.22, 0.06, n=6)
+        self.assertEqual(len(obs_mod.detect(g, pts, self.POSE, wall_pad=0.15, wall_dist=wd)), 1)
+
+    def test_long_line_far_from_wall_is_kept(self):
+        g = _open_grid()
+        wd = obs_mod.wall_distance(g)
+        pts = self._line(1.5, 0.4)
+        self.assertEqual(len(obs_mod.detect(g, pts, self.POSE, wall_pad=0.15, wall_dist=wd)), 1)
