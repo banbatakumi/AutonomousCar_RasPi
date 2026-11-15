@@ -38,17 +38,19 @@ class SignalLights:
         self._quiet = 0.0             #: 障害物が無くなってからの経過 [s]
         self._side = 0                #: 出しているウィンカーの向き（+1=左 -1=右 0=なし）
         self._hold = 0.0              #: ウィンカーの残り [s]
+        self._tf = 0.0                #: 前の車に付いている間の経過 [s]（点滅の位相）
 
     @property
     def pass_total_s(self) -> float:
         return PASS_FLASHES * (PASS_ON_S + PASS_OFF_S)
 
     def update(self, dt: float, *, obstacle: bool, side: int = 0,
-               hazard: bool = False) -> tuple[bool, bool, bool]:
+               hazard: bool = False, follow: bool = False) -> tuple[bool, bool, bool]:
         """`(passing, winker_left, winker_right)`。
 
         :param obstacle: 障害物に対応している最中か（避ける・止まる・迂回する）
         :param side: 避ける向き（+1=左 -1=右 0=まだ決まっていない）
+        :param follow: 前に車が居る（付いていく・追い抜きを待つ）。居る間はパッシングを点滅し続ける
         :param hazard: ハザードを出す（左右同時点滅。他の灯火より優先）
         """
         if hazard:
@@ -80,6 +82,11 @@ class SignalLights:
             self._hold = max(0.0, self._hold - dt)
             if self._hold == 0.0:
                 self._side = 0
+        if follow:
+            passing = (self._tf % (PASS_ON_S + PASS_OFF_S)) < PASS_ON_S
+            self._tf += dt
+        else:
+            self._tf = 0.0
         left = self._side > 0 and self._hold > 0.0
         right = self._side < 0 and self._hold > 0.0
         return passing, left, right

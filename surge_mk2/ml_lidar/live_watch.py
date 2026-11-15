@@ -29,6 +29,8 @@
 リサイズのたびに「1枚が最も大きくなる行×列」を選び直す（横長なら2行×5列、縦長なら
 3行×3列など）。タイトルの文字もパネルの大きさに合わせて縮める。
 
+実コースで学習したrun（`<run>/real_courses.json`がある）は、評価に選んだ実コースだけを並べる。
+
 ## 学習を邪魔しないための配慮
 
 - 表示するコースは`EVAL_COURSE_PARAMS`の本数に連動する（増やすほどCPUを食う）
@@ -54,6 +56,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -70,6 +73,7 @@ from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
 from ml_lidar.obstacles import add_obstacles  # noqa: E402
+from ml_lidar.real_courses import load_real_course  # noqa: E402
 from ml_lidar.train_rl import EVAL_COURSE_PARAMS, RUNS_DIR, find_watch_source, \
     load_saved_env_config  # noqa: E402
 from ml_lidar.viz_support import catchup_step_count, set_japanese_font  # noqa: E402
@@ -153,7 +157,18 @@ class LiveWatcher:
                 panel.step(self.model)
 
 
-def _build_panels(env_cfg: EnvConfig, max_episode_steps: int) -> list[Panel]:
+def load_real_course_paths(run_dir: Path) -> tuple[str, ...]:
+    """`train_rl.py`が残した`real_courses.json`の観戦対象（evalの実コース、無ければ学習の実コース）。
+    無い・壊れている（通常のrun）なら空。"""
+    try:
+        data = json.loads((run_dir / "real_courses.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    return tuple(data.get("eval") or data.get("train") or ())
+
+
+def _build_panels(env_cfg: EnvConfig, max_episode_steps: int,
+                  real_courses: tuple[str, ...] = ()) -> list[Panel]:
     """eval固定コース（`EVAL_COURSE_PARAMS`）ぶんのパネルを作る。障害物ありで学習した
     runなら、`_OBSTACLE_PANELS`のコースに障害物を刻んだパネルを後ろに足す。
 
@@ -161,6 +176,10 @@ def _build_panels(env_cfg: EnvConfig, max_episode_steps: int) -> list[Panel]:
     ここで刻んでから渡す。`build_course()`は毎回新しい`Course`を返すので、障害物なしの
     パネルと共有して汚すことはない
     """
+    if real_courses:
+        # 実コースで学習したrunは、そのコース（evalと同じ）だけを並べる
+        return [Panel(Path(n).stem, load_real_course(n), env_cfg, max_episode_steps)
+                for n in real_courses]
     panels = [Panel(spec.name, spec.build_course(), env_cfg, max_episode_steps)
               for spec in EVAL_COURSE_PARAMS]
     if env_cfg.obstacle_prob > 0.0:
@@ -246,7 +265,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"!! {w}", file=sys.stderr)
     max_episode_steps = max(1, int(round(args.episode_s / env_cfg.dt)))
 
-    panels = _build_panels(env_cfg, max_episode_steps)
+    panels = _build_panels(env_cfg, max_episode_steps, load_real_course_paths(run_dir))
     watcher = LiveWatcher(run_dir, panels, poll_interval_s=args.poll_interval_s)
     if watcher.model is None:
         print(f"!! {run_dir} にまだeval/best_model.zipもcheckpointsも無い。"

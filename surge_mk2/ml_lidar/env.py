@@ -271,7 +271,8 @@ class LidarE2EEnv(gym.Env):
     metadata: dict = {"render_modes": []}
 
     def __init__(self, config: EnvConfig | None = None, *, course: Course | None = None,
-                seed: int | None = None) -> None:
+                seed: int | None = None, course_pool: list[Course] | None = None,
+                course_pool_prob: float = 1.0) -> None:
         """:param seed: 構築時点の乱数シード。`VecEnv`の各ワーカーに別々の値を渡すと、
             `reset(seed=...)`を呼ばずとも1本ごとに異なるコース・ドメインランダム化列になる
             （未指定ならOSエントロピー由来。`reset(seed=...)`で明示的に上書きもできる）
@@ -279,6 +280,10 @@ class LidarE2EEnv(gym.Env):
         super().__init__()
         self.cfg = config or EnvConfig()
         self._fixed_course = course
+        #: 学習用の実コース集合。毎`reset()`で確率`course_pool_prob`でこの中から1本を使い、
+        #: 外れたら従来どおり手続き生成する（`course`指定時はそちらが優先）
+        self._course_pool = list(course_pool) if course_pool else []
+        self._course_pool_prob = float(course_pool_prob)
         self._rng = np.random.default_rng(seed)
         #: 車体の物理的な最大舵角。`config/vehicle.toml`のものをそのまま使う
         #: （学習側で別の値を持たせない。`EnvConfig`docstring参照）
@@ -321,12 +326,15 @@ class LidarE2EEnv(gym.Env):
             self._rng = np.random.default_rng(seed)
 
         spec = self._sample_vehicle_spec()
+        fixed = self._fixed_course
+        if fixed is None and self._course_pool and self._rng.random() < self._course_pool_prob:
+            fixed = self._course_pool[int(self._rng.integers(len(self._course_pool)))]
         for _ in range(_MAX_RESET_RETRY):
-            course = self._fixed_course or random_walk_loop_course(self._rng)
+            course = fixed or random_walk_loop_course(self._rng)
             body = course.body_samples(spec.footprint)
             if not course.collides(*course.start, body):
                 break
-            if self._fixed_course is not None:
+            if fixed is not None:
                 break  # 固定コースは作り直せない。壁埋まりはコース側の不備として諦める
         else:
             # 5回とも壁に埋まった。埋まったまま始めるとスタート直後に衝突扱いで学習を汚すので、
@@ -340,7 +348,7 @@ class LidarE2EEnv(gym.Env):
                 raise RuntimeError("スタート姿勢が壁に埋まらないコースを作れなかった")
         # 障害物はスタート地点の前後を避けて置く（`obstacles._START_CLEAR_*`）ので、
         # 上のスタート姿勢の壁埋まり判定をやり直す必要はない
-        if (self._fixed_course is None and self.cfg.obstacle_prob > 0.0
+        if (fixed is None and self.cfg.obstacle_prob > 0.0
                 and self._rng.random() < self.cfg.obstacle_prob):
             n = int(self._rng.integers(1, self.cfg.max_obstacles + 1))
             add_obstacles(course, self._rng, n, spec)

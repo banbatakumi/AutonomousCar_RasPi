@@ -43,8 +43,9 @@ from ..core.vehicle import Vehicle
 from ..msgs.types import TOPIC_E2E_FUSION_PLAN, AutoState, E2EFusionPlan, VehicleState
 from ..nav import raceline as rl_mod
 from ..nav import speedctl
+from ..nav.mpc import MPCConfig, MPCFollower
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
-from .base import CMD_HZ, ParamSpec, Planner, bool_param
+from .base import CMD_HZ, ParamSpec, Planner, bool_param, choice_param
 
 __all__ = ["E2EFusion", "PoseTrack"]
 
@@ -132,6 +133,15 @@ class E2EFusion(Planner):
         bool_param(key="use_model_speed", label="モデルの速度を使う", default=1.0,
                    note="ON: モデルが経路の各点に出した速度（手本の速度）を上限にする。"
                         "OFF: 経路の曲がり具合と車の限界だけで決める（速度の手本が無いコース向け）"),
+        choice_param(key="ctrl_mode", choices=("Pure Pursuit", "MPC"), label="追従方式", default=0.0,
+                     note="MPC: 経路の曲率を打ち消す舵を基準に、先の経路まで見て舵を最適化する（`nav/mpc.py`）。"
+                          "Pure Pursuit は注視区間で平均した曲率で曲がるのでコーナーで内側を切りやすい"
+                          "（閉ループの試算で半径0.5m級のカーブの内側ずれ 平均3.6cm→-0.6cm）"),
+        ParamSpec(key="mpc_horizon", hidden=True, label="MPC 予測ステップ数", min=5, max=40, step=1, default=20.0),
+        ParamSpec(key="mpc_dt", hidden=True, label="MPC 刻み", min=0.03, max=0.2, step=0.01, default=0.1, unit="s"),
+        ParamSpec(key="mpc_q_y", hidden=True, label="MPC 横偏差の重み", min=1, max=1000, step=10, default=100.0),
+        ParamSpec(key="mpc_q_psi", hidden=True, label="MPC 向き偏差の重み", min=0, max=200, step=1, default=30.0),
+        ParamSpec(key="mpc_r_d", hidden=True, label="MPC 舵の変化の重み", min=0.01, max=60, step=0.1, default=20.0),
         ParamSpec(key="b_max", hidden=True, label="経路の不確かさの上限", min=0.1, max=3.0, step=0.05,
                   default=0.8, unit="m", note="注視点までの経路点の不確かさがこれを超えたら走らない"),
         ParamSpec(key="look_k", hidden=True, label="注視距離の速度係数", min=0.1, max=1.5, step=0.05,
@@ -148,6 +158,7 @@ class E2EFusion(Planner):
         self.vehicle = Vehicle.load()
         self.track = PoseTrack()
         self._sff = speedctl.SpeedFF()
+        self._mpc = MPCFollower()
         self._sff_cfg = speedctl.config_from_vehicle(
             self.vehicle, cmd_delay_s=0.5 / CMD_HZ + self._cmd_latency())
         self._sff_t = 0
@@ -160,6 +171,7 @@ class E2EFusion(Planner):
     def reset(self) -> None:
         self.track.reset()
         self._sff.reset()
+        self._mpc.reset()
         self._sff_t = 0
         self._ctx = None
         self._idx = 0
@@ -231,11 +243,23 @@ class E2EFusion(Planner):
                              lookahead_min=p["look_min"], delay_s=veh.steer_delay_s + self._cmd_latency(),
                              speed_preview_s=p["speed_preview"], steer_map=veh.steer_map)
 
+    def _mpc_config(self, p: dict[str, float]) -> MPCConfig:
+        veh = self.vehicle
+        return MPCConfig(wheelbase=veh.wheelbase, max_steer=veh.max_steer, horizon=int(p["mpc_horizon"]),
+                         dt=p["mpc_dt"], delay_s=veh.steer_delay_s + self._cmd_latency(),
+                         q_y=p["mpc_q_y"], q_psi=p["mpc_q_psi"], r_d=p["mpc_r_d"], steer_map=veh.steer_map,
+                         servo_gain=veh.steer_servo_gain, speed_preview_s=p["speed_preview"])
+
     def _command(self, path: rl_mod.RaceLine, p: dict[str, float], vs: VehicleState
                  ) -> tuple[float, float, float, float]:
         """今の姿勢で経路を追う。`(舵, 目標速度, ランプ, 横偏差)`。"""
         pose = self.track.pose
-        pp = follow(path, pose, vs.speed, vs.steer_actual, self._pursuit(p), hint=self._idx)
+        if p["ctrl_mode"] >= 0.5:
+            # 経路は推測航法の座標で毎周期作り直されるが、座標は連続なので前回解（warm start）は使える
+            pp = self._mpc.follow(path, pose, vs.speed, vs.steer_actual, self._mpc_config(p), hint=self._idx,
+                                  now=vs.t_capture / NS if vs.t_capture else None)
+        else:
+            pp = follow(path, pose, vs.speed, vs.steer_actual, self._pursuit(p), hint=self._idx)
         self._idx = pp.index
         j = nearest_index(path, pose[0], pose[1], pp.index, window=4)
         pos = speedctl.arc_index(path, j, pose[0], pose[1])

@@ -83,3 +83,11 @@ def test_planning_cmd_carries_lights():
     node._apply_ctrl(AutoCtrl(mode="ftg"))
     idle = node._cmd_from(AutoState(ready=True, passing=True, winker_left=True))
     assert not (idle.passing or idle.winker_left)
+
+
+def test_follow_keeps_flashing_passing():
+    s = SignalLights()
+    out = [s.update(0.1, obstacle=True, follow=True) for _ in range(100)]
+    assert sum(o[0] for o in out[-40:]) > 10                  # 10秒後も点滅している
+    off = [s.update(0.1, obstacle=False, follow=False) for _ in range(5)]
+    assert not any(o[0] for o in off[-3:])

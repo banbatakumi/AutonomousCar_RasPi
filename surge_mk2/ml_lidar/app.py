@@ -32,7 +32,7 @@ import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 ML_LIDAR_DIR = Path(__file__).resolve().parent
@@ -59,6 +59,7 @@ __all__ = [
 RUNS_DIR = ML_LIDAR_DIR / "runs"
 MODELS_DIR = REPO_ROOT / "models" / "e2e_lidar"
 COURSES_DIR = REPO_ROOT / "sim" / "courses"
+from ml_lidar.real_courses import load_real_course  # noqa: E402
 #: 学習タブ「探索ノイズ初期標準偏差(log)」の既定（gSDE OFF時）。gSDEのチェックで-3と
 #: 相互に切り替える判定にも使うので、表示値と同じ文字列で持つ
 _LOG_STD_INIT_DEFAULT = "-1.0"
@@ -255,11 +256,35 @@ class App:
             status = describe_run_status(RUNS_DIR / n)
             self.runs_listbox.insert("end", f"{n} — {status}")
 
+    def _scrollable_tab(self, nb: ttk.Notebook, text: str) -> ttk.Frame:
+        """縦スクロールできるタブを作り、中身を載せる`Frame`を返す（内容がウィンドウより
+        高くなっても下のボタンまで届くように。ホイール・トラックパッドでもスクロールする）。"""
+        outer = ttk.Frame(nb)
+        nb.add(outer, text=text)
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas, padding=10)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+
+        def _wheel(e: tk.Event) -> None:
+            if inner.winfo_height() <= canvas.winfo_height():
+                return
+            delta = -1 * (e.delta if sys.platform == "darwin" else e.delta // 120)
+            canvas.yview_scroll(delta, "units")
+
+        outer.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _wheel))
+        outer.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        return inner
+
     # ── ① 学習タブ ──
 
     def _build_train_tab(self, nb: ttk.Notebook) -> None:
-        frame = ttk.Frame(nb, padding=10)
-        nb.add(frame, text="① 学習")
+        frame = self._scrollable_tab(nb, "① 学習")
 
         ttk.Label(frame, text="run名:").grid(row=0, column=0, sticky="w")
         self.run_combo = ttk.Combobox(frame, textvariable=self.run_name_var, width=20)
@@ -426,6 +451,13 @@ class App:
             args["no-randomize-lidar"] = no_lidar_var.get()
             args["no-randomize-dynamics"] = no_dyn_var.get()
             args["use-sde"] = self.use_sde_var.get()
+            picked = [n for n, v in self._real_course_vars.items() if v.get()]
+            picked_eval = [n for n, v in self._real_eval_vars.items() if v.get()]
+            if picked:
+                args["real-courses"] = "|".join(picked)
+                args["real-course-prob"] = self._real_prob_var.get().strip()
+            if picked_eval:
+                args["real-eval-courses"] = "|".join(picked_eval)
             if resume_or_overwrite == "resume":
                 args["resume"] = True
             elif resume_or_overwrite == "overwrite":
@@ -448,6 +480,67 @@ class App:
         ttk.Button(frame, text="TensorBoardを開く", command=open_tensorboard).grid(
             row=adv_toggle_row + 2, column=1, sticky="w", pady=(10, 4))
 
+        course_frame = ttk.LabelFrame(
+            frame, text="実コース（学習: 無し = ランダム生成のみ／評価: 無し = 学習と同じ、"
+                        "学習も無しなら従来の7本）")
+        course_frame.grid(row=adv_toggle_row + 4, column=0, columnspan=3, sticky="we", pady=(8, 0))
+        #: パス -> (学習に使う, 評価に使う)
+        self._real_course_vars: dict[str, tk.BooleanVar] = {}
+        self._real_eval_vars: dict[str, tk.BooleanVar] = {}
+        self._real_prob_var = tk.StringVar(value="1.0")
+        self._real_course_box = ttk.Frame(course_frame)
+        self._real_course_box.grid(row=0, column=0, columnspan=3, sticky="w")
+
+        def _redraw_real_courses() -> None:
+            for w in self._real_course_box.winfo_children():
+                w.destroy()
+            if not self._real_course_vars:
+                ttk.Label(self._real_course_box, text="（未追加）", foreground="gray").grid(
+                    row=0, column=0, padx=4)
+                return
+            ttk.Label(self._real_course_box, text="学習").grid(row=0, column=1, padx=6)
+            ttk.Label(self._real_course_box, text="評価").grid(row=0, column=2, padx=6)
+            for i, path in enumerate(self._real_course_vars, start=1):
+                ttk.Label(self._real_course_box, text=Path(path).name).grid(
+                    row=i, column=0, sticky="w", padx=4)
+                ttk.Checkbutton(self._real_course_box, variable=self._real_course_vars[path]).grid(
+                    row=i, column=1)
+                ttk.Checkbutton(self._real_course_box, variable=self._real_eval_vars[path]).grid(
+                    row=i, column=2)
+                ttk.Button(self._real_course_box, text="削除", width=5,
+                           command=lambda p=path: _remove_real_course(p)).grid(row=i, column=3)
+
+        def _remove_real_course(path: str) -> None:
+            self._real_course_vars.pop(path, None)
+            self._real_eval_vars.pop(path, None)
+            _redraw_real_courses()
+
+        def _add_real_courses() -> None:
+            paths = filedialog.askopenfilenames(
+                title="コースのnpzを選択（複数可）", filetypes=[("地図 npz", "*.npz")],
+                initialdir=str(Path.home() / "Downloads"))
+            for path in paths:
+                if path in self._real_course_vars:
+                    continue
+                try:
+                    load_real_course(path)
+                except Exception as e:                                # noqa: BLE001
+                    messagebox.showerror("コースを読み込めません", f"{Path(path).name}\n\n{e}")
+                    continue
+                self._real_course_vars[path] = tk.BooleanVar(value=True)
+                self._real_eval_vars[path] = tk.BooleanVar(value=True)
+            _redraw_real_courses()
+
+        _redraw_real_courses()
+        ttk.Button(course_frame, text="npzを追加…", command=_add_real_courses).grid(
+            row=1, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(course_frame, text="実コースを使う確率(0-1、残りはランダム生成):").grid(
+            row=1, column=1, sticky="e")
+        ttk.Entry(course_frame, textvariable=self._real_prob_var, width=6).grid(
+            row=1, column=2, sticky="w", padx=4)
+        ttk.Label(course_frame, text="地図は raspi.auto.mapstore 形式のnpz（走行軌跡か中心線が必要）",
+                  foreground="gray").grid(row=2, column=0, columnspan=3, sticky="w", padx=4)
+
         note_frame = ttk.LabelFrame(frame, text="備考（どんな変更をしたか等、自由に）")
         note_frame.grid(row=adv_toggle_row + 3, column=0, columnspan=3, sticky="we", pady=(8, 0))
         self.note_text = tk.Text(note_frame, height=3, wrap="word")
@@ -458,8 +551,7 @@ class App:
     # ── ② 観戦タブ ──
 
     def _build_watch_tab(self, nb: ttk.Notebook) -> None:
-        frame = ttk.Frame(nb, padding=10)
-        nb.add(frame, text="② 観戦")
+        frame = self._scrollable_tab(nb, "② 観戦")
 
         live_frame = ttk.LabelFrame(frame, text="学習中runをライブ観戦（自動更新・複数コース並列）")
         live_frame.grid(row=0, column=0, columnspan=3, sticky="we")
@@ -518,8 +610,7 @@ class App:
     # ── ③ エクスポートタブ ──
 
     def _build_export_tab(self, nb: ttk.Notebook) -> None:
-        frame = ttk.Frame(nb, padding=10)
-        nb.add(frame, text="③ エクスポート")
+        frame = self._scrollable_tab(nb, "③ エクスポート")
 
         ttk.Label(frame, text="run名:").grid(row=0, column=0, sticky="w")
         self.export_run_var = tk.StringVar(value="")
@@ -610,8 +701,7 @@ class App:
     # ── ④ run一覧タブ ──
 
     def _build_runs_tab(self, nb: ttk.Notebook) -> None:
-        frame = ttk.Frame(nb, padding=10)
-        nb.add(frame, text="④ run一覧")
+        frame = self._scrollable_tab(nb, "④ run一覧")
 
         self.runs_listbox_names: list[str] = []
         self.runs_listbox = tk.Listbox(frame, height=14)

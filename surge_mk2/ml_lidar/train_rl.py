@@ -57,11 +57,13 @@ VecEnv内の各サブ環境は常に同じ固定コースへ`reset()`するの�
 `n_gen_eval_episodes`本のランダムコースを走らせる分`EvalCallback`より重いので、
 既定の間隔(`--gen-eval-freq`)は`--eval-freq`より疎にしてある。
 
-## `sim/courses/`の自作コードは使わない
+## `sim/courses/`の自作コースは使わない（実地図は例外・任意）
 
-学習・eval双方とも手続き生成コース（`ml_lidar/course_gen.py`）のみを使う。
-自作コース（`course1.json`等）は学習プロセスに一切関与しない観戦専用
-（`ml_lidar/watch.py`）に限定する方針。
+既定は学習・eval双方とも手続き生成コース（`ml_lidar/course_gen.py`）のみ。
+自作コース（`course1.json`等）は学習プロセスに一切関与しない観戦専用（`ml_lidar/watch.py`）。
+例外として`--real-courses`（GUIの「学習コース」）で`saved_maps/magp_*.npz`の実地図を学習に
+混ぜられる（大会コース向けの一時的な特化学習用、`ml_lidar/real_courses.py`）。指定時の
+`EvalCallback`は選んだ実コースで走る（`best_model_generalized`は従来どおりランダムコース）。
 """
 
 from __future__ import annotations
@@ -91,6 +93,7 @@ from sim.course import Course  # noqa: E402
 from sim.vehicle import VehicleSpec  # noqa: E402
 
 from ml_lidar.course_gen import walk_loop_course  # noqa: E402
+from ml_lidar.real_courses import load_real_course  # noqa: E402
 from ml_lidar.env import EnvConfig, LidarE2EEnv  # noqa: E402
 from ml_lidar.eval_stats import evaluate as eval_stats_evaluate  # noqa: E402
 from ml_lidar.features import Conv1dExtractor  # noqa: E402
@@ -287,16 +290,26 @@ def load_saved_env_config(run_dir: Path) -> EnvConfig | None:
     return EnvConfig(**{k: v for k, v in data.items() if k in field_names})
 
 
-def make_train_env(cfg: EnvConfig, max_episode_steps: int, seed: int) -> Callable[[], Monitor]:
-    """`SubprocVecEnv`の1ワーカーぶんのファクトリ。コースは`course_gen`が毎`reset()`で作り直す。"""
+def _split_courses(text: str) -> tuple[str, ...]:
+    """`|`区切りの実地図の名前またはnpzパス（パスに`,`や`:`が入っても壊れないよう`|`）。"""
+    return tuple(t.strip() for t in text.split("|") if t.strip())
+
+
+def make_train_env(cfg: EnvConfig, max_episode_steps: int, seed: int,
+                  real_courses: tuple[str, ...] = (),
+                  real_course_prob: float = 1.0) -> Callable[[], Monitor]:
+    """`SubprocVecEnv`の1ワーカーぶんのファクトリ。コースは`course_gen`が毎`reset()`で作り直す。
+    `real_courses`（`saved_maps/`の実地図名）を渡すと、確率`real_course_prob`でその中の1本を使う。"""
     def _thunk() -> Monitor:
-        env = LidarE2EEnv(cfg, seed=seed)
+        pool = [load_real_course(n) for n in real_courses]
+        env = LidarE2EEnv(cfg, seed=seed, course_pool=pool, course_pool_prob=real_course_prob)
         env = TimeLimit(env, max_episode_steps=max_episode_steps)
         return Monitor(env)
     return _thunk
 
 
-def make_eval_vec_env(cfg: EnvConfig, max_episode_steps: int) -> VecEnv:
+def make_eval_vec_env(cfg: EnvConfig, max_episode_steps: int,
+                      real_courses: tuple[str, ...] = ()) -> VecEnv:
     """直線主体・コーナー主体・中間・ヘアピン主体・連続シケイン主体・広い・広い＋急角連続
     の7固定コースを束ねたeval用VecEnv。ノイズ・DRは無効化する。"""
     eval_cfg = EnvConfig(**{**cfg.__dict__, "randomize_lidar": False, "randomize_dynamics": False})
@@ -310,6 +323,14 @@ def make_eval_vec_env(cfg: EnvConfig, max_episode_steps: int) -> VecEnv:
             return Monitor(env)
         return _thunk
 
+    if real_courses:
+        # 実コース学習時は、そのコース自体でbest_modelを選ぶ（手続き生成7本は参考にならない）
+        def _real_thunk(name: str) -> Callable[[], Monitor]:
+            def _thunk() -> Monitor:
+                env = LidarE2EEnv(eval_cfg, course=load_real_course(name))
+                return Monitor(TimeLimit(env, max_episode_steps=max_episode_steps))
+            return _thunk
+        return DummyVecEnv([_real_thunk(n) for n in real_courses])
     return DummyVecEnv([_make_thunk(spec) for spec in EVAL_COURSE_PARAMS])
 
 
@@ -504,6 +525,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--total-timesteps", type=int, default=1_000_000,
                    help="--resume指定時は「これまでの続きに何ステップ追加するか」の意味になる")
     p.add_argument("--n-envs", type=int, default=8)
+    p.add_argument("--real-courses", default="",
+                   help="学習に使う実地図（npzのパス、または`saved_maps/<名>.npz`の名前）の`|`区切り。空なら手続き生成のみ")
+    p.add_argument("--real-eval-courses", default="",
+                   help="evalに使う実地図の`|`区切り。空なら--real-coursesと同じ")
+    p.add_argument("--real-course-prob", type=float, default=1.0,
+                   help="--real-courses指定時、各エピソードで実コースを使う確率（残りは手続き生成）")
     p.add_argument("--episode-s", type=float, default=30.0, help="TimeLimitで打ち切るまでの秒数")
     p.add_argument("--max-speed", type=float, default=2.0, help="[m/s]")
     p.add_argument("--seed", type=int, default=0)
@@ -692,10 +719,23 @@ def main(argv: list[str] | None = None) -> None:
         seed_offset = resume_seed_offset(resume_path)
 
     # 再開時は学習環境のシードをずらす（同じシードだと、最初の学習と同じコース列をもう一度引く）
-    env_fns = [make_train_env(cfg, max_episode_steps, seed=args.seed + seed_offset + i)
+    real_courses = _split_courses(args.real_courses)
+    if real_courses:
+        print(f"→ 実コース学習: {', '.join(real_courses)}（各エピソード確率{args.real_course_prob:g}で使用、"
+             "残りは手続き生成）")
+    env_fns = [make_train_env(cfg, max_episode_steps, seed=args.seed + seed_offset + i,
+                              real_courses=real_courses, real_course_prob=args.real_course_prob)
               for i in range(args.n_envs)]
     vec_env: VecEnv = (SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns))
-    eval_env = make_eval_vec_env(cfg, max_episode_steps)
+    eval_courses = _split_courses(args.real_eval_courses) or real_courses
+    if eval_courses:
+        print(f"→ eval実コース: {', '.join(eval_courses)}")
+    if real_courses or eval_courses:
+        # ライブ観戦（live_watch.py）が同じ実コースを並べられるよう残す
+        (run_dir / "real_courses.json").write_text(
+            json.dumps({"train": list(real_courses), "eval": list(eval_courses)},
+                       indent=2, ensure_ascii=False), encoding="utf-8")
+    eval_env = make_eval_vec_env(cfg, max_episode_steps, eval_courses)
 
     if resuming:
         print(f"→ {resume_path} から再開する（学習環境のシードを+{seed_offset}ずらす）")
@@ -710,7 +750,7 @@ def main(argv: list[str] | None = None) -> None:
             best_model_save_path=str(run_dir / "eval"),
             log_path=str(run_dir / "eval"),
             eval_freq=max(1, args.eval_freq // args.n_envs),
-            n_eval_episodes=args.n_eval_episodes,
+            n_eval_episodes=len(eval_courses) or args.n_eval_episodes,
             deterministic=True,
         ),
         CheckpointCallback(

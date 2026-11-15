@@ -117,7 +117,7 @@ class TestRegistration(unittest.TestCase):
 
     def test_only_human_intent_params_are_visible(self):
         shown = [s.key for s in E2EFusion.params if not s.hidden]
-        self.assertEqual(shown, ["max_speed", "use_model_speed"])
+        self.assertEqual(shown, ["max_speed", "use_model_speed", "ctrl_mode"])
 
 
 class TestPlan(unittest.TestCase):

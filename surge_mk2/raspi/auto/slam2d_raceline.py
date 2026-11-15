@@ -3100,7 +3100,9 @@ class Slam2dRaceLine(Planner):
         """灯火を `st` へ書く。障害物に対応している間は パッシング → 避ける側のウィンカー。"""
         a = self._avoid
         avoiding = a is not None and a.obstacle is not None
-        obstacle = (self._hit_now or avoiding or self.phase == DETOUR
+        # 前の車に付いていく間（真後ろで追い抜きを待つ・隙が無くて付いていく）も障害物への対応中
+        following = self._acc is not None or self._ot_status == "blocked"
+        obstacle = (self._hit_now or avoiding or following or self.phase == DETOUR
                     or self._brake_hold is not None)
         side = 0
         if avoiding:
@@ -3108,7 +3110,8 @@ class Slam2dRaceLine(Planner):
         elif self.phase == DETOUR:
             side = self._detour_side
         st.passing, st.winker_left, st.winker_right = self._signals.update(
-            self._dt, obstacle=obstacle, side=side, hazard=self._hazard_now())
+            self._dt, obstacle=obstacle, side=side, hazard=self._hazard_now(),
+            follow=following)
 
     def _clear_avoid(self) -> None:
         self._avoid = self._avoid_path = self._avoid_base = None
