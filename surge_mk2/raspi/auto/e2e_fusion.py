@@ -125,6 +125,8 @@ class E2EFusion(Planner):
 
     input_topic = TOPIC_E2E_FUSION_PLAN
     stale_ms = 300
+    #: `E2EFusionPlan.has_lidar` が表す2番目の入力の表示名（`stereo_e2e` は視差）
+    second_input = "点群"
     stats = ()
 
     params = (
@@ -305,7 +307,7 @@ class E2EFusion(Planner):
         st.target_speed = speed
         st.accel_limit = ramp
         st.cross_track = cross
-        inputs = "＋".join(n for n, ok in (("画像", plan.has_image), ("点群", plan.has_lidar)) if ok)
+        inputs = "＋".join(n for n, ok in (("画像", plan.has_image), (self.second_input, plan.has_lidar)) if ok)
         st.reason = (f"経路 {path.length:.1f}m を追従（{inputs}・推論 {plan.infer_ms:.0f}ms・"
                      f"遅れ {age * 1e3:.0f}ms）")
         return st

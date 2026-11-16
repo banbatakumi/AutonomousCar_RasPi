@@ -133,6 +133,8 @@ rsync -az --stats \
   --exclude '/ml_cam_e2e/runs/' \
   --exclude '/ml_e2e/runs/' \
   --exclude '/config/e2e_fusion_model.json' \
+  --exclude '/ml_stereo_e2e/runs/' \
+  --exclude '/config/stereo_e2e_model.json' \
   --exclude '/ml_lidar/runs/' \
   --exclude '/ml_cam/runs/' \
   --exclude '/ml_cam/checkpoints/' \
@@ -210,7 +212,7 @@ fi
 # ── 5. 再起動 ──
 if [ "$DO_RESTART" = 1 ]; then
   echo
-  echo "# surge-telemetry / surge-camera / surge-cam-perception / surge-cam-e2e / surge-e2e-fusion / surge-line-perception / surge-planning / surge-stereo を再起動（E-Stop には影響しない）"
+  echo "# surge-telemetry / surge-camera / surge-cam-perception / surge-cam-e2e / surge-e2e-fusion / surge-line-perception / surge-planning / surge-stereo / surge-stereo-e2e を再起動（E-Stop には影響しない）"
   # surge-cam-perception / surge-cam-e2e / surge-line-perception: auto/ctrl は
   # telemetry_node が「現在の意思」を繰り返し流す設計（AutoCtrl の docstring 参照）
   # なので、再起動しても GUI 側の再選択なしに数秒で復帰する。ftg_cam/cam_centerline・
@@ -227,6 +229,7 @@ if [ "$DO_RESTART" = 1 ]; then
   ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-planning' || exit 1
   # surge-stereo（段階4 で追加）は unit を作るまで（--services）無いので、あるときだけ再起動する
   ssh_pi 'if systemctl cat surge-stereo >/dev/null 2>&1; then sudo systemctl restart surge-stereo; else echo "  surge-stereo の unit が無い（tools/deploy.sh --services で作る）"; fi' || exit 1
+  ssh_pi 'if systemctl cat surge-stereo-e2e >/dev/null 2>&1; then sudo systemctl restart surge-stereo-e2e; else echo "  surge-stereo-e2e の unit が無い（tools/deploy.sh --services で作る）"; fi' || exit 1
 fi
 
 if [ "$DO_RESTART_IO" = 1 ]; then

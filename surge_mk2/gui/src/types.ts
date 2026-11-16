@@ -394,6 +394,8 @@ export type ControlStatus = {
   cam_e2e_model: CamE2EModelStatus
   /** e2e_fusion が使うモデルの選択。**サーバが真値**。古いサーバには無い */
   e2e_fusion_model?: E2EFusionModelStatus
+  /** stereo_e2e が使うモデルの選択（形は e2e_fusion と同じ。空文字は「自動」）。古いサーバには無い */
+  stereo_e2e_model?: E2EFusionModelStatus
 }
 
 /** `logs/` にある `.sfl`/`.mcap`/`.mp4` の1件（`logs_list` の応答）。 */

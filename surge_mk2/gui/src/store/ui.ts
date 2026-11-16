@@ -780,6 +780,10 @@ type UiState = {
   e2eFusionModel: E2EFusionModelStatus | null
   /** `models/e2e_fusion/` にある `.onnx` の一覧（`e2eFusionModelList` の応答） */
   e2eFusionModelFiles: E2EFusionModelFile[]
+  /** stereo_e2e が使うモデルの選択（`ws/control.ts` の `stereoE2eModelSelect`）。空文字は「自動」 */
+  stereoE2eModel: E2EFusionModelStatus | null
+  /** `models/stereo_e2e/` にある `.onnx` の一覧 */
+  stereoE2eModelFiles: E2EFusionModelFile[]
 
   /** `saved_maps/` にある保存済み地図の一覧（`mapsList`/`mapsSave`/`mapsDelete` の応答） */
   mapFiles: MapFile[]
@@ -869,6 +873,8 @@ export const useUi = create<UiState>((set, get) => ({
   camE2eModelFiles: [],
   e2eFusionModel: null,
   e2eFusionModelFiles: [],
+  stereoE2eModel: null,
+  stereoE2eModelFiles: [],
   mapFiles: [],
   mapSaveResult: null,
 

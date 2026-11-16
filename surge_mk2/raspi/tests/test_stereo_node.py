@@ -232,3 +232,32 @@ def test_depth_worker_renders_in_background(proc, images):
         assert node.view_ms > 0
     finally:
         w.stop()
+
+
+def test_disp_msg_matches_band_input(proc, images):
+    """`stereo/disp` は照合した視差を `disp_band_input` で縮めたもの。学習（Mac）と同じ関数を通る。"""
+    from raspi.core.stereo_e2e_preproc import DISP_VERSION, disp_band_input, disp_from_bytes
+
+    st, d = proc.process(*images, "BGR888", t_capture_ns=7, seq=4)
+    msg = proc.disp_msg(d, t_capture_ns=7, seq=4)
+    arr = disp_from_bytes(msg.data, msg.h, msg.w)
+    ref = disp_band_input(d, proc.match.num_disp)
+    assert arr.shape == ref.shape == (2, msg.h, msg.w)
+    np.testing.assert_allclose(arr, ref, atol=2e-3)          # float16 の丸めだけ
+    assert (msg.t_capture, msg.seq, msg.preproc_version) == (7, 4, DISP_VERSION)
+    assert msg.rows == list(DEFAULT_ROWS) and msg.num_disp == proc.match.num_disp
+    # 箱（0.8m）の所は床・壁より視差が大きい。床と壁で大半のブロックに視差が出る
+    assert arr[1].mean() > 0.5
+    assert arr[0].max() > 0.2
+
+
+def test_step_leaves_disp_for_publish(proc, images):
+    node = StereoNode(proc, rate_hz=10)
+    node._readers["front"].read_at = lambda ref, t, tol: (images[0], t)
+    node._readers["left"].read_at = lambda ref, t, tol: (images[1], t)
+    latest = {TOPIC_IMAGE_FRONT: _ref("front", 1000), TOPIC_IMAGE_LEFT: _ref("left", 1000),
+              TOPIC_CAM_CONFIG: SimpleNamespace(depth=True, depth_view=False)}
+    st = node.step(latest, 10**9)
+    disp = node.take_disp()
+    assert disp is not None and disp.t_capture == st.t_capture == 1000 and disp.seq == st.seq
+    assert node.take_disp() is None

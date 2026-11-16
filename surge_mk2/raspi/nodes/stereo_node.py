@@ -11,6 +11,8 @@ IDLE/ACTIVE で省電力、`hb/stereo`）。
 - `scan/stereo`（型 `Scan`）: 床より上・高さ 20cm 以下の点を、base_link から見た 1° の方位ごとの距離にしたもの。
   約束（**0 は見つからない ≠ 空き**、原点、`sector_seen`）は `raspi/core/stereo_match.py` の docstring
 - `stereo/depth`（`StereoDepth`）: 視差を色にした JPEG（照合した行の帯だけ）。telemetry_node が `/ws/camera/depth` へ中継する
+- `stereo/disp`（`StereoDisp`）: 視差の帯をブロックごとに縮めた数値（`raspi/core/stereo_e2e_preproc.disp_band_input`）。
+  `stereo_e2e_node` の入力。照合するたびに出す（約 2KB・縮める処理は 1ms 未満）
 
 ## いつ照合するか（IDLE/ACTIVE）
 
@@ -33,7 +35,7 @@ camera_node が左カメラを回すか（`CamConfig.stereo`）も同じ判断�
 
 ## 照合の設定
 
-既定は 640 幅の StereoSGBM（ブロック 5・視差 96）、行 150〜260、10Hz。段階3 の物差しの壁の記録で決めた（`stereo_plan.md` §段階3）。
+既定は 640 幅の StereoSGBM（ブロック 5・視差 96・`uniquenessRatio` 25）、行 150〜260。頻度は `CamConfig.depth_fps`（ARM 中 15Hz・DISARM 中 1Hz、telemetry_node が決める）。段階3 の物差しの壁の記録で決め、段階7 の走行記録で詰めた（`stereo_plan.md`）。
 - SGBM: StereoBM は無地の面で取り違えて偽の近い障害物を出した
 - 行の下端 260: 平行化画像の約 255 行より下は左右とも自分の車体（カメラが前車軸より 14cm 後ろ）で、照合が成り立たず
   車体の取り違えが 0.3m 先の偽の障害物になっていた。そのため床が見えるのは中央で約 1.1m より先
@@ -59,10 +61,11 @@ from raspi.core.jpeg import make_encoder  # noqa: E402
 from raspi.core.stereo_match import (MatchParams, ObstacleParams,  # noqa: E402
                                      colorize_disparity, disparity, fov_degrees, make_matcher,
                                      obstacles_from_disparity, to_gray)
+from raspi.core.stereo_e2e_preproc import DISP_VERSION, disp_band_input, disp_to_bytes  # noqa: E402
 from raspi.core.stereo_model import StereoRectifier  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs import Scan, StereoDepth, StereoInfo  # noqa: E402
+from raspi.msgs import Scan, StereoDepth, StereoDisp, StereoInfo  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_CAM_CONFIG,
     TOPIC_HB_PREFIX,
@@ -70,6 +73,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_LEFT,
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
+    TOPIC_STEREO_DISP,
     TOPIC_STEREO_INFO,
 )
 
@@ -143,6 +147,13 @@ class StereoProcessor:
         """深度映像の赤の端（視差 = 探索幅）の距離 [m]。照合できる最も近い距離でもある。"""
         return float(self.rect.f * self.match.scale * self.rect.baseline / self.match.num_disp)
 
+    def disp_msg(self, d: np.ndarray, *, t_capture_ns: int, seq: int) -> StereoDisp:
+        """照合した視差 → `StereoDisp`（`stereo_e2e` の入力。学習の Mac も同じ `disp_band_input` を通す）。"""
+        arr = disp_band_input(d, self.match.num_disp)
+        return StereoDisp(data=disp_to_bytes(arr), h=arr.shape[1], w=arr.shape[2],
+                          num_disp=self.match.num_disp, scale=self.match.scale, rows=list(self.rect.rows),
+                          preproc_version=DISP_VERSION, t_capture=t_capture_ns, seq=seq)
+
     @staticmethod
     def failed(seq: int = 0, reason: str = "") -> Scan:
         """照合できない周期。全セクタ見えていない（`sector_seen=False`）・距離なし。"""
@@ -166,6 +177,8 @@ class StereoNode:
         #: 深度映像を作る材料 `(視差, 平行化した左, t_capture)`。`scan/stereo` を出した**後で**別スレッドが焼く
         #: （`publish_depth`・`DepthWorker`）
         self._pending_depth: tuple | None = None
+        #: 今回照合した視差の縮めた数値（`stereo/disp`）。`scan/stereo` の直後に出す
+        self._pending_disp: StereoDisp | None = None
         #: 深度映像（色付け＋JPEG）を作るのにかかった時間 [ms]
         self.view_ms = 0.0
         #: 遅れの内訳 [ms]（`hb/stereo` に出す。合否は「撮影 → `scan/stereo` を出すまで」50ms 以内）
@@ -251,6 +264,11 @@ class StereoNode:
         if t_arrive:
             self.cam_ms = (t_arrive - got_r[1]) / 1e6
             self.wait_ms = (t_start - t_arrive) / 1e6
+        try:
+            self._pending_disp = self.proc.disp_msg(d, t_capture_ns=got_r[1], seq=st.seq)
+        except Exception as e:                                 # noqa: BLE001
+            print(f"# stereo 視差を縮められない: {e}", file=sys.stderr, flush=True)
+            self._pending_disp = None
         self.count += 1
         view = bool(getattr(cfg, "depth_view", True))
         if view and (self.count == 1 or self.count % self.depth_every == 0):
@@ -258,6 +276,11 @@ class StereoNode:
         elif not view:
             self.view_ms = 0.0                       # 表示していない（`hb/stereo` に前の値を残さない）
         return st
+
+    def take_disp(self) -> StereoDisp | None:
+        """今回照合した視差の `StereoDisp` を取り出す（無ければ None）。"""
+        msg, self._pending_disp = self._pending_disp, None
+        return msg
 
     def take_depth(self) -> tuple | None:
         """溜めた深度映像の材料を取り出す（無ければ None）。"""
@@ -323,6 +346,8 @@ class StereoNode:
                         self._status = self._ok_status()
                         if (info := self.info(st)) is not None:
                             pub.send(TOPIC_STEREO_INFO, info)
+                        if (disp := self.take_disp()) is not None:
+                            pub.send(TOPIC_STEREO_DISP, disp)
                 item = self.take_depth()
                 if item is not None:
                     worker.submit(item)
@@ -430,7 +455,7 @@ def main() -> int:
 
     # 後処理の C 版は起動時にビルドしておく（最初のコマの処理中に 1 秒ほど止まらないように）
     native = load_native() is not None
-    print(f"# stereo_node  publish {pub.endpoint}  scan/stereo・stereo/depth へ配信  "
+    print(f"# stereo_node  publish {pub.endpoint}  scan/stereo・stereo/depth・stereo/disp へ配信  "
           f"スレッド {args.threads}・後処理 {'C' if native else 'numpy'}")
 
     for sig in (signal.SIGINT, signal.SIGTERM):

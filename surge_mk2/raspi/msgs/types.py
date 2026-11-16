@@ -45,6 +45,7 @@ __all__ = [
     "E2EFusionPlan", "TOPIC_E2E_FUSION_PLAN", "E2EFusionModelCtrl", "TOPIC_E2E_FUSION_MODEL",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
     "StereoDepth", "StereoInfo", "TOPIC_SCAN_STEREO", "TOPIC_STEREO_DEPTH", "TOPIC_STEREO_INFO",
+    "StereoDisp", "TOPIC_STEREO_DISP", "TOPIC_STEREO_E2E_PLAN", "TOPIC_STEREO_E2E_MODEL",
     "TOPIC_TYPES", "type_for_topic",
 ]
 
@@ -73,6 +74,8 @@ TOPIC_SCAN_STEREO = "scan/stereo"
 TOPIC_STEREO_DEPTH = "stereo/depth"
 #: `stereo_node` が1組照合するごとの診断（開発用。mcap に残して Mac で再現・比較する）。`scan/stereo` と同じ `t_capture`
 TOPIC_STEREO_INFO = "stereo/info"
+#: 照合した視差を帯ごとに縮めた数値（`StereoDisp`。`stereo_e2e_node` の入力）。`scan/stereo` と同じ `t_capture`
+TOPIC_STEREO_DISP = "stereo/disp"
 #: 走行可能領域の中心線（`cam_perception_node.py` が publish）。`scan/cam` が
 #: 車両原点からの角度→距離という1次元表現に潰すのに対し、こちらは前方複数距離
 #: それぞれで測った回廊の中心点列を車両座標のまま持つ。`raspi/auto/cam_centerline.py`
@@ -137,6 +140,11 @@ TOPIC_CAM_E2E_CMD = "cam_e2e/cmd"
 TOPIC_E2E_FUSION_PLAN = "e2e_fusion/plan"
 #: `e2e_fusion_node.py` が使うモデルの選択（`cam_e2e/model` と同じ「意思を繰り返し流す」パターン）
 TOPIC_E2E_FUSION_MODEL = "e2e_fusion/model"
+#: `stereo_e2e_node.py` が publish する推論結果（型は `E2EFusionPlan` と同じ。前方の経路点）。
+#: `raspi/auto/stereo_e2e.py`（id `stereo_e2e`）の `input_topic`
+TOPIC_STEREO_E2E_PLAN = "stereo_e2e/plan"
+#: `stereo_e2e_node.py` が使うモデルの選択（型は `E2EFusionModelCtrl` と同じ）
+TOPIC_STEREO_E2E_MODEL = "stereo_e2e/model"
 
 #: 対象追従（`follow_object`）のROI選択の意思。GUIがドラッグ矩形で選んだ対象を
 #: telemetry_node が繰り返し流し、`cam_track_node.py` が拾って追跡を開始/終了する
@@ -1063,7 +1071,7 @@ class E2EFusionPlan(MsgBase):
     path_b: list[float] = msgspec.field(default_factory=list)   #: [m] 位置の不確かさ（大きいほど自信が無い）
     ds: float = 0.0                #: [m] 経路点の間隔
     has_image: bool = False        #: この推論に画像を使ったか
-    has_lidar: bool = False        #: この推論に点群を使ったか
+    has_lidar: bool = False        #: この推論に点群を使ったか（`stereo_e2e/plan` では視差を使ったか）
     model: str = ""                #: 使ったモデルの名前
     infer_ms: float = 0.0          #: 前処理＋推論にかかった時間 [ms]
 
@@ -1196,6 +1204,23 @@ class StereoInfo(MsgBase):
     cam_pose: list[float] = msgspec.field(default_factory=lambda: [0.0] * 5)
 
 
+class StereoDisp(MsgBase):
+    """`stereo_node` が照合した視差を、帯のブロックごとに縮めた数値（`stereo_e2e` の入力）。
+
+    中身は `raspi/core/stereo_e2e_preproc.disp_band_input` の出力 `(2, h, w)` を float16 で並べたもの
+    （ch0 = 有効な画素の視差の平均 / `num_disp`、ch1 = 有効な画素の割合）。`scan/stereo` と同じ `t_capture`・`seq`。
+    学習は記録の左右の組から Mac で同じ関数を通して作り直すので、記録したこの値は Pi と Mac の突き合わせ用。
+    """
+
+    data: bytes = b""              #: float16、C 順の (2, h, w)
+    h: int = 0
+    w: int = 0
+    num_disp: int = 0              #: 照合の探索幅（縮めた画像の画素）
+    scale: float = 1.0             #: 照合の縮尺
+    rows: list[int] = msgspec.field(default_factory=lambda: [0, 0])   #: 平行化画像の行の帯 [v0, v1)
+    preproc_version: int = 0       #: `stereo_e2e_preproc.DISP_VERSION`
+
+
 class CamPath(MsgBase):
     """走行可能領域の中心線（`raspi/nav/drivable_path.py` の `extract_centerline()`）。
 
@@ -1233,6 +1258,7 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_SCAN_STEREO: Scan,
     TOPIC_STEREO_DEPTH: StereoDepth,
     TOPIC_STEREO_INFO: StereoInfo,
+    TOPIC_STEREO_DISP: StereoDisp,
     TOPIC_CAM_PATH: CamPath,
     TOPIC_CMD: DriveCmd,
     TOPIC_DIAG_LINK: LinkDiag,
@@ -1255,6 +1281,8 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_CAM_E2E_CMD: CamE2ECmd,
     TOPIC_E2E_FUSION_PLAN: E2EFusionPlan,
     TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl,
+    TOPIC_STEREO_E2E_PLAN: E2EFusionPlan,
+    TOPIC_STEREO_E2E_MODEL: E2EFusionModelCtrl,
     TOPIC_TRACK_ROI: TargetRoiCtrl,
     TOPIC_TRACK_TARGET: TargetTrack,
 }

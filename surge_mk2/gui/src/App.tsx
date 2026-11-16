@@ -128,6 +128,7 @@ export function App() {
           e2eModel: s.e2e_model,
           camE2eModel: s.cam_e2e_model,
           e2eFusionModel: s.e2e_fusion_model ?? null,
+          stereoE2eModel: s.stereo_e2e_model ?? null,
         })
         if (!driveSettingsSynced.current && Object.keys(s.drive_settings ?? {}).length > 0) {
           driveSettingsSynced.current = true
@@ -164,6 +165,7 @@ export function App() {
       onE2EModels: (files) => set({ e2eModelFiles: files }),
       onCamE2EModels: (files) => set({ camE2eModelFiles: files }),
       onE2EFusionModels: (files) => set({ e2eFusionModelFiles: files }),
+      onStereoE2EModels: (files) => set({ stereoE2eModelFiles: files }),
       onMaps: (files) => set({ mapFiles: files }),
       onLogsDeleteResult: (error) => notify(`記録の削除に失敗: ${error || '理由不明'}`, 'bad'),
       onShutdownDenied: (reason) =>

@@ -28,6 +28,7 @@ from .line_trace import LineTrace
 from .park_to_point import ParkToPoint
 from .slam2d_raceline import Slam2dRaceLine
 from .slam2d_route import Slam2dRoute
+from .stereo_e2e import StereoE2E
 from .calib_encoder import CalibEncoder
 from .calib_latency import CalibLatency
 from .calib_speed import CalibSpeed
@@ -54,6 +55,7 @@ PLANNERS: dict[str, type[Planner]] = {
     LineTrace.id: LineTrace,
     E2ELidar.id: E2ELidar,
     E2EFusion.id: E2EFusion,
+    StereoE2E.id: StereoE2E,
     FollowObject.id: FollowObject,
     ParkToPoint.id: ParkToPoint,
     #: システム同定タブ専用（`Planner.category == "sysid"`）。自動運転タブのモード選択には出さない

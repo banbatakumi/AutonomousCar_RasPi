@@ -50,6 +50,7 @@ type ServerMsg = {
   e2e_model_files?: E2EModelFile[]
   cam_e2e_model_files?: CamE2EModelFile[]
   e2e_fusion_model_files?: E2EFusionModelFile[]
+  stereo_e2e_model_files?: E2EFusionModelFile[]
   map_files?: MapFile[]
   ok?: boolean
   error?: string
@@ -74,6 +75,8 @@ export type ControlHandlers = {
   onCamE2EModels: (files: CamE2EModelFile[]) => void
   /** `e2e_fusion_model_list` への応答（`models/e2e_fusion/` にある `.onnx` の一覧） */
   onE2EFusionModels: (files: E2EFusionModelFile[]) => void
+  /** `stereo_e2e_model_list` への応答（`models/stereo_e2e/` にある `.onnx` の一覧） */
+  onStereoE2EModels: (files: E2EFusionModelFile[]) => void
   /** `maps_list`/`maps_save`/`maps_delete` への応答（`saved_maps/` の一覧） */
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
@@ -141,6 +144,7 @@ export class ControlChannel {
       else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
       else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
       else if (m.type === 'e2e_fusion_models') this.h.onE2EFusionModels(m.e2e_fusion_model_files ?? [])
+      else if (m.type === 'stereo_e2e_models') this.h.onStereoE2EModels(m.stereo_e2e_model_files ?? [])
       else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
       else if (m.type === 'logs_delete_result') {
         if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
@@ -568,6 +572,18 @@ export class ControlChannel {
    */
   e2eFusionModelSelect(name: string) {
     this.send({ type: 'e2e_fusion_model_select', name })
+  }
+
+  // ── ステレオ E2E モデルの選択（`stereo_e2e` 用。e2e_fusion と同じ形） ──
+
+  /** `models/stereo_e2e/` にある `.onnx` の一覧を要求する。応答は `onStereoE2EModels`。 */
+  stereoE2eModelList() {
+    this.send({ type: 'stereo_e2e_model_list' })
+  }
+
+  /** `stereo_e2e` が使うモデルを選ぶ。**空文字は「自動」**。engage 中に選び直すと engage は落ちる */
+  stereoE2eModelSelect(name: string) {
+    this.send({ type: 'stereo_e2e_model_select', name })
   }
 
   // ── 対象追従（`follow_object`）のROI選択 ──

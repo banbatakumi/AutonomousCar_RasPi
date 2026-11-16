@@ -95,6 +95,8 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const camE2eModelFiles = useUi((s) => s.camE2eModelFiles)
   const e2eFusionModel = useUi((s) => s.e2eFusionModel)
   const e2eFusionModelFiles = useUi((s) => s.e2eFusionModelFiles)
+  const stereoE2eModel = useUi((s) => s.stereoE2eModel)
+  const stereoE2eModelFiles = useUi((s) => s.stereoE2eModelFiles)
   // 選択中のカメラセグメンテーションモデルの備考（`ml_cam/app.py`の備考欄→エクスポート時に
   // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称）
   const camSelectedNote = camModelFiles.find((f) => f.name === camModel?.name)?.note
@@ -109,11 +111,16 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const e2eFusionNewest = e2eFusionModelFiles
     .filter((f) => f.has_config)
     .reduce<(typeof e2eFusionModelFiles)[number] | null>((a, f) => (a === null || f.mtime > a.mtime ? f : a), null)
+  const stereoE2eSelectedNote = stereoE2eModelFiles.find((f) => f.name === stereoE2eModel?.name)?.note
+  const stereoE2eNewest = stereoE2eModelFiles
+    .filter((f) => f.has_config)
+    .reduce<(typeof stereoE2eModelFiles)[number] | null>((a, f) => (a === null || f.mtime > a.mtime ? f : a), null)
   useEffect(() => {
     ch?.camModelList()
     ch?.e2eModelList()
     ch?.camE2eModelList()
     ch?.e2eFusionModelList()
+    ch?.stereoE2eModelList()
     ch?.mapsList()
   }, [ch])
 
@@ -325,6 +332,33 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
             <span className="dim">models/e2e_fusion/ に .onnx がありません</span>
           )}
           {e2eFusionSelectedNote && <div className="auto-model-note">{e2eFusionSelectedNote}</div>}
+        </div>
+      )}
+
+      {/* ステレオ E2E（`stereo_e2e`）専用のモデル選択。E2E 融合と同じ形（空の選択は「自動」） */}
+      {selected?.id === 'stereo_e2e' && (
+        <div className="auto-model-row">
+          <span className="auto-model-label">ステレオ E2E モデル</span>
+          <select
+            value={stereoE2eModel?.name ?? ''}
+            disabled={stereoE2eModel === null}
+            onChange={(e) => ch?.stereoE2eModelSelect(e.target.value)}
+          >
+            <option value="">
+              自動（いちばん新しいもの{stereoE2eNewest ? `: ${stereoE2eNewest.name}` : ''}）
+            </option>
+            {stereoE2eModelFiles.map((f) => (
+              <option key={f.name} value={f.name} disabled={!f.has_config}>
+                {f.name}
+                {!f.has_config && '（契約ファイルなし・使用不可）'}
+              </option>
+            ))}
+          </select>
+          <button onClick={() => ch?.stereoE2eModelList()}>更新</button>
+          {stereoE2eModelFiles.length === 0 && (
+            <span className="dim">models/stereo_e2e/ に .onnx がありません</span>
+          )}
+          {stereoE2eSelectedNote && <div className="auto-model-note">{stereoE2eSelectedNote}</div>}
         </div>
       )}
 

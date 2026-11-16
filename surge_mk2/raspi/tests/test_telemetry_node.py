@@ -331,6 +331,56 @@ class TestE2eFusionModelSelection(unittest.TestCase):
         self.assertEqual(TOPIC_OWNER[tn.TOPIC_E2E_FUSION_MODEL], "control")
 
 
+class TestStereoE2eModelSelection(unittest.TestCase):
+    """ステレオ E2E（`stereo_e2e`）のモデル選択（E2E 融合と同じ形）と、照合・左右同期を回す条件。"""
+
+    def setUp(self) -> None:
+        self._orig = (tn.STEREO_E2E_MODELS_DIR, tn.STEREO_E2E_MODEL_CONF)
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        tn.STEREO_E2E_MODELS_DIR = root / "models" / "stereo_e2e"
+        tn.STEREO_E2E_MODELS_DIR.mkdir(parents=True)
+        tn.STEREO_E2E_MODEL_CONF = root / "stereo_e2e_model.json"
+        (tn.STEREO_E2E_MODELS_DIR / "v1.onnx").write_bytes(b"dummy")
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self) -> None:
+        tn.STEREO_E2E_MODELS_DIR, tn.STEREO_E2E_MODEL_CONF = self._orig
+        self._tmp.cleanup()
+
+    def test_select_publishes_saves_and_drops_engage(self) -> None:
+        from raspi.tests.fakes import FakePub
+
+        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
+        srv.pub = FakePub()
+        srv._stereo_e2e_model = ""
+        srv._auto_engaged, srv._auto_mode = True, "stereo_e2e"
+        srv._publish_auto_ctrl = lambda: None
+        srv._on_stereo_e2e_model({"name": "no-such"})
+        self.assertEqual(srv.pub.sent, [])
+        srv._on_stereo_e2e_model({"name": "v1"})
+        self.assertEqual([m.name for t, m in srv.pub.sent if t == tn.TOPIC_STEREO_E2E_MODEL], ["v1"])
+        self.assertFalse(srv._auto_engaged)
+        self.assertEqual(json.loads(tn.STEREO_E2E_MODEL_CONF.read_text()), {"name": "v1"})
+        srv._stereo_e2e_model = ""
+        srv._load_stereo_e2e_model_conf()
+        self.assertEqual(srv._stereo_e2e_model, "v1")
+        files = tn.TelemetryServer._stereo_e2e_models_list(None)["stereo_e2e_model_files"]
+        self.assertEqual([f["name"] for f in files], ["v1"])
+
+    def test_paths_modes_and_owners(self) -> None:
+        from raspi.bus.zbus import TOPIC_OWNER
+        from raspi.nodes import stereo_e2e_node
+        self.assertEqual(self._orig, (stereo_e2e_node.DEFAULT_MODELS_DIR, stereo_e2e_node.MODEL_CONF))
+        self.assertIn("stereo_e2e_model_select", tn.OPERATOR_ONLY_KINDS)
+        # 視差（照合）と左右の組の両方を使う
+        self.assertIn("stereo_e2e", tn.STEREO_AUTO_MODES)
+        self.assertIn("stereo_e2e", tn.STEREO_PAIR_AUTO_MODES)
+        self.assertEqual(TOPIC_OWNER[tn.TOPIC_STEREO_E2E_MODEL], "control")
+        self.assertEqual(TOPIC_OWNER["stereo_e2e/plan"], "stereo_e2e")
+        self.assertEqual(TOPIC_OWNER["stereo/disp"], "stereo")
+
+
 class TestCamModelsListNote(unittest.TestCase):
     """`_cam_models_list()`が`<名前>.json`の`note`（`ml_cam/export_onnx.py`が
     書く自由記述の備考。`TestE2eModelsListNote`と対称）を拾って
@@ -1502,6 +1552,7 @@ class TestConfLoadersTolerateNonDict(unittest.TestCase):
                                   ("E2E_MODEL_CONF", "_load_e2e_model_conf"),
                                   ("CAM_E2E_MODEL_CONF", "_load_cam_e2e_model_conf"),
                                   ("E2E_FUSION_MODEL_CONF", "_load_e2e_fusion_model_conf"),
+                                  ("STEREO_E2E_MODEL_CONF", "_load_stereo_e2e_model_conf"),
                                   ("AUTO_CONF", "_load_auto_conf"),
                                   ("DRIVE_SETTINGS_CONF", "_load_drive_settings")):
                 for text in ("[]", "null", "3"):

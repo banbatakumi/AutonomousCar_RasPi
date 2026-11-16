@@ -106,6 +106,9 @@ APPS: list[AppSpec] = [
     AppSpec("ml_e2e", "学習", "ml_e2e",
             "E2E 融合（LiDAR＋カメラ→経路点）の模倣学習（標本作成・ラベル確認・学習・エクスポート・評価）",
             lambda o: ["ml_e2e/app.py"]),
+    AppSpec("ml_stereo_e2e", "学習", "ml_stereo_e2e",
+            "ステレオ E2E（左右の画像＋視差→経路点、LiDAR なしで走る）の模倣学習（標本作成・ラベル確認・学習・エクスポート・評価）",
+            lambda o: ["ml_stereo_e2e/app.py"]),
 ]
 
 

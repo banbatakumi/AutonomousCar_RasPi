@@ -1261,6 +1261,8 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._publish_cam_e2e_model = lambda: None  # バスに触らせない
         srv._e2e_fusion_model = ""
         srv._publish_e2e_fusion_model = lambda: None
+        srv._stereo_e2e_model = ""
+        srv._publish_stereo_e2e_model = lambda: None
         srv._save_cam_e2e_model_conf = lambda: None  # ディスクに触らせない
         srv.sent = []
 

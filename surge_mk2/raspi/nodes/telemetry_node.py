@@ -196,6 +196,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_DIAG_LINK,
     TOPIC_CAM_E2E_MODEL,
     TOPIC_E2E_FUSION_MODEL,
+    TOPIC_STEREO_E2E_MODEL,
     TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
@@ -263,6 +264,10 @@ CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
 #: ノードは telemetry が居ないときこのファイルを自分で読む）
 E2E_FUSION_MODELS_DIR = MODELS_DIR / "e2e_fusion"
 E2E_FUSION_MODEL_CONF = REPO_ROOT / "config" / "e2e_fusion_model.json"
+#: `stereo_e2e`（ステレオの画像＋視差の E2E）のモデルの置き場と、選ばれているモデル名
+#: （`raspi/nodes/stereo_e2e_node.py` の `DEFAULT_MODELS_DIR`・`MODEL_CONF` と同じ場所）
+STEREO_E2E_MODELS_DIR = MODELS_DIR / "stereo_e2e"
+STEREO_E2E_MODEL_CONF = REPO_ROOT / "config" / "stereo_e2e_model.json"
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
@@ -305,7 +310,9 @@ CAM_FPS_MAX = 30.0
 #: **DISARM中**（駐車中・STM32側で`armed=False`）の前カメラ取得上限。
 CAM_FRONT_FPS_DISARM_DEFAULT = 10.0
 #: ステレオの照合周期上限。撮像FPSとは独立して、DISARM中だけ低くしてCPUを節電する。
-STEREO_DEPTH_FPS_ARMED = 10.0
+#: ARM 中は 15Hz（30fps の2コマに1回）。照合は1組 約24ms（会場の走行記録の中央値、Pi 5）なので並列にせずに収まり、
+#: 新しく現れた障害物を見つけるまでの待ちが 100 → 67ms になる。20Hz は 30fps を割り切れず間隔が 33/67ms で揺れるので採らない
+STEREO_DEPTH_FPS_ARMED = 15.0
 STEREO_DEPTH_FPS_DISARM = 1.0
 #: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
 #: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
@@ -321,9 +328,9 @@ SIGNAL_CONFIG_HZ = 1
 #: あるので他の2つと同じ扱いにする。`cam_centerline` は `ftg_cam` と同じ
 #: `cam_perception_node.py` の推論結果を使うので同じ扱い。`cam_e2e` は前カメラの
 #: 絵だけで舵と速度を決めるので、古い絵で走らせないために同じく上限まで上げる。
-#: `e2e_fusion` は点群の1周ごとに最新のコマと組にして推論するので同じ扱い
+#: `e2e_fusion` は点群の1周ごとに最新のコマと組にして推論するので同じ扱い。`stereo_e2e` も同じ
 CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object",
-                               "cam_e2e", "e2e_fusion"})
+                               "cam_e2e", "e2e_fusion", "stereo_e2e"})
 #: `track/roi`（★対象追従のROI選択）の再送周期。`_auto_ctrl_pump`と同じ理由
 #: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
 TRACK_ROI_HZ = 5
@@ -338,9 +345,12 @@ CAM_E2E_MODEL_HZ = 1
 #: カメラ本編（`CAMERA_HZ`）ほどの滑らかさは要らないデバッグ表示用途なので、
 #: 低めに抑えて CPU/帯域を節約する
 CAM_MASK_POLL_HZ = 8
+#: `stereo/depth`（深度映像）を中継するポーリング周期。**照合の頻度（ARM 中 15Hz）より速く回し**、新しいコマだけを送る
+#: （`seq` で判定）ので、表示は照合と同じ頻度になる。15Hz ちょうどで回すと照合との位相のずれでコマを取りこぼす
+DEPTH_POLL_HZ = 30
 #: ステレオの深度（`stereo_node` の照合）を使う自動運転モード。選ばれていて ARM 中は照合を回す
-#: （`_desired_depth`）。**まだ無い**——段階5（`docs/stereo_plan.md`）で planner を足したらここに入れる
-STEREO_AUTO_MODES: frozenset[str] = frozenset()
+#: （`_desired_depth`）。`stereo_e2e` は視差の帯（`stereo/disp`）を推論の入力にする
+STEREO_AUTO_MODES: frozenset[str] = frozenset({"stereo_e2e"})
 #: ステレオの障害物を STM32 の自動停止の入力にする（`io_node._forward_stereo` → `STEREO_OBS`）。
 #: 自動運転モードに関わらず、ARM 中は照合を回し続ける（手動でも最終防壁として働くため。+約 150mA と CPU）。
 #: 照合が回らない・失敗している間は `STEREO_OBS` を送らず、STM32 は LiDAR・超音波だけで判定する
@@ -348,7 +358,7 @@ STEREO_AUTO_STOP = True
 #: 左右の映像の組を入力にする自動運転モード（前方の学習系、`docs/stereo_plan.md` §1）。選ばれていて ARM 中は、
 #: 照合はしないが左カメラを同期して回す（`_desired_stereo`）。推論ノードが推論するのと同じ条件
 #: （`auto_gate.cam_infer_active`: モードが選ばれていて DISARM でない）
-STEREO_PAIR_AUTO_MODES: frozenset[str] = frozenset({"cam_e2e", "e2e_fusion"})
+STEREO_PAIR_AUTO_MODES: frozenset[str] = frozenset({"cam_e2e", "e2e_fusion", "stereo_e2e"})
 #: `.sfl` の意思（`log/ctrl`）・録画/再生ステータスの再送周期。
 #: `_cmd_pump` と同じ理由（1回だけ送ると取りこぼしで食い違ったままになる）
 LOG_CTRL_HZ = 1
@@ -459,7 +469,7 @@ CONTROLLER_NAME_MAX = 40
 #: 切ったり、記録や地図を消したりできないようにする（E-Stop・解除は対象外＝誰でも押せる）
 OPERATOR_ONLY_KINDS = frozenset({
     "fan", "camera", "signal", "cam_model_select", "e2e_model_select", "cam_e2e_model_select",
-    "e2e_fusion_model_select",
+    "e2e_fusion_model_select", "stereo_e2e_model_select",
     "track_roi_select", "track_roi_clear", "tc_tv", "wheel_lift_guard", "abs", "brake_hold",
     "auto_stop_margin", "logs_delete", "maps_save", "maps_delete", "maps_clear_grip", "shutdown",
 })
@@ -853,6 +863,10 @@ class TelemetryServer:
         #: 選ばれているモデル名。**空文字 = 自動**（ノードがいちばん新しいモデルを使う）
         self._e2e_fusion_model = ""
         self._load_e2e_fusion_model_conf()
+
+        # ── ステレオ E2E モデルの選択（`stereo_e2e` 用。`e2e_fusion` と同じ形） ──
+        self._stereo_e2e_model = ""
+        self._load_stereo_e2e_model_conf()
 
         # ── 対象追従（`follow_object`）のROI選択 ──
         #: GUIがドラッグ選択した矩形（正規化座標）。**永続化しない**
@@ -1373,6 +1387,13 @@ class TelemetryServer:
 
         elif kind == "e2e_fusion_model_select":
             self._on_e2e_fusion_model(m)
+            self._status_soon()
+
+        elif kind == "stereo_e2e_model_list":
+            await self._send_json(ws, self._stereo_e2e_models_list())
+
+        elif kind == "stereo_e2e_model_select":
+            self._on_stereo_e2e_model(m)
             self._status_soon()
 
         # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
@@ -2434,6 +2455,46 @@ class TelemetryServer:
         if isinstance(name, str) and name and (E2E_FUSION_MODELS_DIR / f"{name}.onnx").is_file():
             self._e2e_fusion_model = name
 
+    # ── ステレオ E2E モデルの選択（`stereo_e2e` 用） ──
+    #
+    # `_e2e_fusion_model*` と同じ形（空文字は「自動」）。受け手は `stereo_e2e_node`（`stereo_e2e/model`）。
+
+    def _stereo_e2e_models_list(self) -> dict:
+        """`models/stereo_e2e/` にある `.onnx` の一覧。キー名は `stereo_e2e_model_files`。"""
+        return {"type": "stereo_e2e_models",
+                "stereo_e2e_model_files": _onnx_model_files(STEREO_E2E_MODELS_DIR)}
+
+    def _on_stereo_e2e_model(self, m: dict) -> None:
+        """`{"type":"stereo_e2e_model_select", "name": str}`。実在しない名前は黙って捨てる。"""
+        name = str(m.get("name") or "")
+        if name and not (STEREO_E2E_MODELS_DIR / f"{name}.onnx").is_file():
+            return
+        if name == self._stereo_e2e_model:
+            return
+        self._stereo_e2e_model = name
+        # モデルを変えたら engage は必ず落とす（走行中に挙動が急変する）
+        if self._auto_engaged and self._auto_mode == "stereo_e2e":
+            self._auto_engaged = False
+            self._publish_auto_ctrl()
+        try:
+            _atomic_write_bytes(STEREO_E2E_MODEL_CONF, _json_encode({"name": name}))
+        except Exception:
+            pass
+        self._publish_stereo_e2e_model()
+
+    def _publish_stereo_e2e_model(self) -> None:
+        self.pub.send(TOPIC_STEREO_E2E_MODEL, E2EFusionModelCtrl(name=self._stereo_e2e_model))
+
+    def _load_stereo_e2e_model_conf(self) -> None:
+        """`config/stereo_e2e_model.json` から戻す。無い・壊れている・消えたモデルなら「自動」。"""
+        try:
+            raw = _json_decode(STEREO_E2E_MODEL_CONF.read_bytes())
+        except Exception:
+            return
+        name = raw.get("name") if isinstance(raw, dict) else None
+        if isinstance(name, str) and name and (STEREO_E2E_MODELS_DIR / f"{name}.onnx").is_file():
+            self._stereo_e2e_model = name
+
     # ── 対象追従（`follow_object`）のROI選択 ──
     #
     # `AutoCtrl.freeze_seq`/`clear_seq` と同じ「回数」の約束（真偽値だと、
@@ -2592,6 +2653,7 @@ class TelemetryServer:
             "e2e_model": self._e2e_model_status(),
             "cam_e2e_model": self._cam_e2e_model_status(),
             "e2e_fusion_model": self._e2e_fusion_model_status(),
+            "stereo_e2e_model": {"name": self._stereo_e2e_model},
         }
 
     def _auto_status(self, catalog: bool = True) -> dict:
@@ -3611,6 +3673,7 @@ class TelemetryServer:
         while self._running:
             await asyncio.sleep(period)
             self._publish_e2e_fusion_model()
+            self._publish_stereo_e2e_model()
 
     async def _track_roi_pump(self) -> None:
         """対象追従のROI選択（`track/roi`）を低頻度で再送する。
@@ -3741,7 +3804,7 @@ class TelemetryServer:
     async def _depth_pump(self) -> None:
         """`stereo/depth`（`stereo_node` が JPEG 化済み）を `/ws/camera/depth` へそのまま中継する（`_mask_pump` と同じ形）。"""
         last_seq = -1
-        period = 1.0 / CAM_MASK_POLL_HZ
+        period = 1.0 / DEPTH_POLL_HZ
         while self._running:
             await asyncio.sleep(period)
             clients = self.camera_clients["depth"]
