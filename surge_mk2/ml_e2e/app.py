@@ -39,7 +39,7 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable
+from typing import Callable, NamedTuple
 
 ML_E2E_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ML_E2E_DIR.parent
@@ -59,12 +59,27 @@ __all__ = [
     "ML_E2E_DIR", "REPO_ROOT", "RUNS_DIR", "MODELS_DIR",
     "build_extract_cmd", "build_check_cmd", "build_train_cmd", "build_export_cmd", "build_eval_cmd",
     "read_dataset", "record_rows", "default_val_records", "remove_record", "extract_warning",
-    "describe_model_status", "parse_epoch_line", "App",
+    "describe_model_status", "parse_epoch_line", "App", "Flavor", "FUSION",
 ]
 
 RUNS_DIR = ML_E2E_DIR / "runs"
 #: 実車側（`raspi/nodes/e2e_fusion_node.py` の `DEFAULT_MODELS_DIR`）と同じ場所
 MODELS_DIR = REPO_ROOT / "models" / "e2e_fusion"
+
+
+class Flavor(NamedTuple):
+    """この操作パネルで扱うモデルの種類。`ml_stereo_e2e/app.py` が同じ画面を `STEREO` で開く。"""
+
+    pkg: str                    #: 抽出・学習・書き出し・評価のパッケージ（`python -m <pkg>.train` など）
+    title: str                  #: ウィンドウの題名・自動運転タブのモード名
+    runs_dir: Path
+    models_dir: Path            #: 実車の推論ノードが読む場所
+    second: str                 #: 2番目の入力の名前（点群・視差）
+    can_flip: bool = True       #: 左右反転の水増しがあるか
+    eval_masks: bool = True     #: 評価で入力を伏せられるか（`--no-image`・`--no-lidar`）
+
+
+FUSION = Flavor("ml_e2e", "E2E 融合（LiDAR＋カメラ）", RUNS_DIR, MODELS_DIR, "点群")
 #: 学習だけは長いので、ウィンドウを閉じる前に確認する
 _CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
 
@@ -75,8 +90,8 @@ parse_epoch_line = make_epoch_line_parser("val_mae")
 # ── コマンド組み立て・データの読み書き（Tkinter を知らない純粋関数） ──
 
 def build_extract_cmd(python: str, mcap_files: list[str], data_dir: str, *,
-                      include_self: bool = False) -> list[str]:
-    cmd = [python, "-m", "ml_e2e.extract", *mcap_files, "--out", data_dir]
+                      include_self: bool = False, pkg: str = "ml_e2e") -> list[str]:
+    cmd = [python, "-m", f"{pkg}.extract", *mcap_files, "--out", data_dir]
     if include_self:
         cmd.append("--include-self")
     return cmd
@@ -88,8 +103,8 @@ def build_check_cmd(python: str, data_dir: str, draw: int) -> list[str]:
 
 def build_train_cmd(python: str, data_dir: str, out_dir: str, *, epochs: int, batch_size: int,
                     val: list[str] | None = None, init: str = "", no_flip: bool = False,
-                    no_pretrained: bool = False) -> list[str]:
-    cmd = [python, "-m", "ml_e2e.train", "--data", data_dir, "--out", out_dir,
+                    no_pretrained: bool = False, pkg: str = "ml_e2e") -> list[str]:
+    cmd = [python, "-m", f"{pkg}.train", "--data", data_dir, "--out", out_dir,
            "--epochs", str(epochs), "--batch-size", str(batch_size)]
     if val:
         cmd += ["--val", *val]
@@ -102,14 +117,14 @@ def build_train_cmd(python: str, data_dir: str, out_dir: str, *, epochs: int, ba
     return cmd
 
 
-def build_export_cmd(python: str, run_dir: str, name: str) -> list[str]:
+def build_export_cmd(python: str, run_dir: str, name: str, *, pkg: str = "ml_e2e") -> list[str]:
     """契約は `train_config.json` から写されるので、ここでは何も渡さない。"""
-    return [python, "-m", "ml_e2e.export_onnx", "--run", run_dir, "--name", name]
+    return [python, "-m", f"{pkg}.export_onnx", "--run", run_dir, "--name", name]
 
 
 def build_eval_cmd(python: str, model_path: str, data_dir: str, mcap_files: list[str], *,
-                   no_image: bool = False, no_lidar: bool = False) -> list[str]:
-    cmd = [python, "-m", "ml_e2e.eval", "--model", model_path, "--data", data_dir, *mcap_files]
+                   no_image: bool = False, no_lidar: bool = False, pkg: str = "ml_e2e") -> list[str]:
+    cmd = [python, "-m", f"{pkg}.eval", "--model", model_path, "--data", data_dir, *mcap_files]
     if no_image:
         cmd.append("--no-image")
     if no_lidar:
@@ -187,9 +202,13 @@ def describe_model_status(model_dir: Path) -> str:
 class App:
     """タブ5枚（標本作成・ラベル確認・学習・エクスポート・評価）＋共有のログ欄。"""
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, flavor: Flavor = FUSION) -> None:
         self.root = root
-        root.title("SURGE Mk.2 — E2E 融合（LiDAR＋カメラ）")
+        if flavor is FUSION:
+            # 作った時点のモジュールの `RUNS_DIR`・`MODELS_DIR` を使う（テストが差し替える）
+            flavor = flavor._replace(runs_dir=RUNS_DIR, models_dir=MODELS_DIR)
+        self.flavor = flavor
+        root.title(f"SURGE Mk.2 — {flavor.title}")
         root.geometry("1120x900")
         self.python = sys.executable
         self.jobs = JobRunner(REPO_ROOT, allow_concurrent=False, prefix_labels=False)
@@ -237,19 +256,19 @@ class App:
         self.model_name_var.trace_add("write", lambda *_a: self._on_model_name_changed())
         self._on_model_name_changed()
 
-    @staticmethod
-    def _initial_name() -> str:
+    def _initial_name(self) -> str:
         """作業中のモデル（いちばん新しい run）。無ければ `v1`。"""
-        names = list_versioned_names(RUNS_DIR)
+        runs = self.flavor.runs_dir
+        names = list_versioned_names(runs)
         if not names:
             return "v1"
-        return max(names, key=lambda n: (RUNS_DIR / n).stat().st_mtime)
+        return max(names, key=lambda n: (runs / n).stat().st_mtime)
 
     # ── モデル名（全タブ共有） ──
 
     def _model_dir(self) -> Path | None:
         name = self.model_name_var.get().strip()
-        return RUNS_DIR / name if name else None
+        return self.flavor.runs_dir / name if name else None
 
     def _require_model_dir(self) -> Path | None:
         d = self._model_dir()
@@ -261,7 +280,7 @@ class App:
         d = self._model_dir()
         if d is not None:
             self.data_path_var.set(rel(d / "data"))
-            self.export_out_path_var.set(rel(MODELS_DIR / f"{d.name}.onnx"))
+            self.export_out_path_var.set(rel(self.flavor.models_dir / f"{d.name}.onnx"))
             note = read_note(d)
         else:
             self.data_path_var.set("（モデル名を入力してください）")
@@ -293,8 +312,9 @@ class App:
 
         self._eval_meta = meta
         self._load_check_images()
-        self.init_combo["values"] = [""] + [n for n in list_versioned_names(RUNS_DIR)
-                                           if (RUNS_DIR / n / "best.pt").exists()
+        runs = self.flavor.runs_dir
+        self.init_combo["values"] = [""] + [n for n in list_versioned_names(runs)
+                                           if (runs / n / "best.pt").exists()
                                            and (d is None or n != d.name)]
 
     def _save_note(self) -> None:
@@ -314,9 +334,9 @@ class App:
         ttk.Label(frame, text="モデル名:").grid(row=0, column=0, sticky="w")
         combo = ttk.Combobox(frame, textvariable=self.model_name_var, width=20)
         combo.grid(row=0, column=1, sticky="w")
-        combo["postcommand"] = lambda: combo.configure(values=list_versioned_names(RUNS_DIR))
+        combo["postcommand"] = lambda: combo.configure(values=list_versioned_names(self.flavor.runs_dir))
         ttk.Button(frame, text="新しい名前", command=lambda: self.model_name_var.set(
-            next_versioned_name(list_versioned_names(RUNS_DIR)))).grid(row=0, column=2, sticky="w", padx=6)
+            next_versioned_name(list_versioned_names(self.flavor.runs_dir)))).grid(row=0, column=2, sticky="w", padx=6)
         ttk.Label(frame, textvariable=self.model_status_var, foreground="gray").grid(
             row=0, column=3, sticky="w")
         ttk.Label(frame, text="出力先:").grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -358,7 +378,7 @@ class App:
                 messagebox.showwarning("未選択", ".mcap ファイルを選んでください")
                 return
             report: list[str] = []
-            cmd = build_extract_cmd(self.python, self._extract_files, str(d / "data"),
+            cmd = build_extract_cmd(self.python, self._extract_files, str(d / "data"), pkg=self.flavor.pkg,
                                     include_self=include_self_var.get())
             self._run("extract", cmd, "標本作成", on_line=report.append,
                       on_done=lambda ok: self._after_extract(ok, report))
@@ -501,8 +521,9 @@ class App:
                   foreground="gray", justify="left").grid(row=4, column=0, columnspan=2, sticky="w")
         # 既定で反転しない（ml_cam_e2e/app.py と同じ理由。docs/stereo_plan.md 段階5）
         no_flip_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(left, text="左右反転の水増しを使わない", variable=no_flip_var).grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        if self.flavor.can_flip:
+            ttk.Checkbutton(left, text="左右反転の水増しを使わない", variable=no_flip_var).grid(
+                row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
         no_pretrained_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="事前学習重みを使わない（オフライン）", variable=no_pretrained_var).grid(
             row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
@@ -539,17 +560,17 @@ class App:
             if (d / "best.pt").exists() and not messagebox.askyesno(
                     "上書きしますか？", f"{d.name} は学習済みです。学習し直すと上書きされます。"):
                 return
-            init = str(RUNS_DIR / init_var.get() / "best.pt") if init_var.get() else ""
+            init = str(self.flavor.runs_dir / init_var.get() / "best.pt") if init_var.get() else ""
             self.train_graph.reset()
             cmd = build_train_cmd(self.python, str(d / "data"), str(d), epochs=epochs, batch_size=batch,
-                                  val=val, init=init, no_flip=no_flip_var.get(),
-                                  no_pretrained=no_pretrained_var.get())
+                                  val=val, init=init, no_flip=self.flavor.can_flip and no_flip_var.get(),
+                                  no_pretrained=no_pretrained_var.get(), pkg=self.flavor.pkg)
             self._run("train", cmd, "学習", on_line=on_line)
 
         ttk.Button(frame, text="学習開始", command=run).grid(row=1, column=0, sticky="w", pady=10)
         ttk.Label(frame, text="ログの見方: val_mae＝検証の経路点の誤差 [m]（全体）、near＝最初の 2m の誤差、b＝モデルが出す不確かさ、\n"
                              "v＝各点の速度の誤差。最後に「入力を伏せたときの経路誤差」が出る\n"
-                             "（画像だけ・点群だけでも経路が出るか）。1エポックは標本1万枚で約1分（Mac）。",
+                             f"（画像だけ・{self.flavor.second}だけでも経路が出るか）。1エポックは標本1万枚で約1分（Mac）。",
                   foreground="gray", justify="left").grid(row=2, column=0, columnspan=2, sticky="w")
         graph_frame = ttk.LabelFrame(frame, text="学習曲線（赤=loss・青=val_mae＝検証の経路点の誤差 [m]）")
         graph_frame.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 0))
@@ -568,8 +589,8 @@ class App:
             row=1, column=1, sticky="w", pady=(8, 0))
         ttk.Label(frame, text="入出力の契約（解像度・視野・経路点の数・正規化の基準）は学習時の値をそのまま書く。\n"
                              "書き出した .onnx と .json は tools/deploy.sh で実車へ運ぶ。\n"
-                             "実機 GUI の自動運転タブ「E2E 融合（LiDAR＋カメラ）」のモデル欄で選ぶ"
-                             "（「自動」なら models/e2e_fusion/ のいちばん新しい .onnx）。",
+                             f"実機 GUI の自動運転タブ「{self.flavor.title}」のモデル欄で選ぶ"
+                             f"（「自動」なら {rel(self.flavor.models_dir)}/ のいちばん新しい .onnx）。",
                   foreground="gray", justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         def run() -> None:
@@ -579,9 +600,9 @@ class App:
             if not (d / "best.pt").exists():
                 messagebox.showwarning("未学習", "先に③で学習してください")
                 return
-            if not confirm_overwrite(MODELS_DIR / f"{d.name}.onnx", rel):
+            if not confirm_overwrite(self.flavor.models_dir / f"{d.name}.onnx", rel):
                 return
-            self._run("export", build_export_cmd(self.python, str(d), d.name), "エクスポート")
+            self._run("export", build_export_cmd(self.python, str(d), d.name, pkg=self.flavor.pkg), "エクスポート")
 
         ttk.Button(frame, text="エクスポート実行", command=run).grid(row=3, column=0, sticky="w", pady=10)
 
@@ -607,9 +628,10 @@ class App:
         mode_var = tk.StringVar(value="both")
         modes = ttk.Frame(frame)
         modes.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        for text, value in (("画像＋点群", "both"), ("点群だけ（画像を伏せる）", "lidar"),
-                            ("画像だけ（点群を伏せる）", "image")):
-            ttk.Radiobutton(modes, text=text, variable=mode_var, value=value).pack(side="left", padx=(0, 12))
+        if self.flavor.eval_masks:
+            for text, value in (("画像＋点群", "both"), ("点群だけ（画像を伏せる）", "lidar"),
+                                ("画像だけ（点群を伏せる）", "image")):
+                ttk.Radiobutton(modes, text=text, variable=mode_var, value=value).pack(side="left", padx=(0, 12))
 
         def val_files(d: Path) -> list[str]:
             """③で検証に回した記録の、元の .mcap（場所が分かって残っているもの）。"""
@@ -624,7 +646,7 @@ class App:
             d = self._require_model_dir()
             if d is None:
                 return
-            model = MODELS_DIR / f"{d.name}.onnx"
+            model = self.flavor.models_dir / f"{d.name}.onnx"
             if not model.exists():
                 messagebox.showwarning("未エクスポート", "先に④でエクスポートしてください")
                 return
@@ -634,7 +656,8 @@ class App:
                                        "（移動した・古い標本で場所が残っていない）。\n「別の記録(.mcap)を選ぶ」で選んでください。")
                 return
             cmd = build_eval_cmd(self.python, str(model), str(d / "data"), files,
-                                 no_image=mode_var.get() == "lidar", no_lidar=mode_var.get() == "image")
+                                 no_image=mode_var.get() == "lidar", no_lidar=mode_var.get() == "image",
+                                 pkg=self.flavor.pkg)
             self._run("eval", cmd, "評価")
 
         ttk.Button(frame, text="評価を実行", command=run).grid(row=2, column=0, sticky="w", pady=10)
@@ -683,9 +706,9 @@ class App:
         self.root.after(100, self._drain_log)
 
 
-def main() -> int:
+def main(flavor: Flavor = FUSION) -> int:
     root = tk.Tk()
-    App(root)
+    App(root, flavor)
     root.mainloop()
     return 0
 

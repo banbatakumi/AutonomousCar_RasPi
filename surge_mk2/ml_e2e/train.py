@@ -107,8 +107,11 @@ def _to(batch: dict, device) -> dict:
 
 @torch.no_grad()
 def evaluate(model: FusionModel, loader, device, spec: InputSpec, xy_scale: float, ds: float,
-             avail: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> dict[str, float]:
-    """検証の数字（物理量）。`avail` で入力を伏せた評価ができる。"""
+             avail: tuple[float, float, float] = (1.0, 1.0, 1.0), *, second: str = "lidar") -> dict[str, float]:
+    """検証の数字（物理量）。`avail` で入力を伏せた評価ができる。
+
+    `second` はモデルの2番目の入力の名前（`ml_stereo_e2e` は視差の `disp`）。
+    """
     model.eval()
     k = spec.k
     near = max(1, int(_NEAR_M / ds))
@@ -117,7 +120,7 @@ def evaluate(model: FusionModel, loader, device, spec: InputSpec, xy_scale: floa
         batch = _to(batch, device)
         n = batch["image"].shape[0]
         a = torch.tensor(avail, device=device).expand(n, 3)
-        xy, v, b = split_output(model(batch["image"], batch["lidar"], batch["state"], a), k)
+        xy, v, b = split_output(model(batch["image"], batch[second], batch["state"], a), k)
         dist = torch.linalg.norm(xy - batch["path"], dim=2) * xy_scale
         ok = batch["pt_ok"]
         s["pt"] += float((dist * ok).sum()); s["pt_n"] += float(ok.sum())

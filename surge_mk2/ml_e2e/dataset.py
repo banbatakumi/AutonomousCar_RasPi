@@ -195,59 +195,50 @@ class FusionDataset(Dataset):
         out.append(rec.rows[idx[0]][1, sl])
         return np.stack(out)
 
-    def __getitem__(self, n: int) -> dict[str, torch.Tensor]:
-        ri, i = self.index[n]
-        rec = self.records[ri]
+    def _draw_aug(self) -> tuple[int, bool]:
+        """拡張の乱数 `(ψ [deg・整数], 反転するか)`。点群は 1° 刻みなので ψ は整数度にして、全部の入力で同じ角度を使う。"""
+        psi_deg = 0
+        if self.augment and self.yaw_max_deg > 0:
+            psi_deg = int(np.random.randint(-int(self.yaw_max_deg), int(self.yaw_max_deg) + 1))
+        return psi_deg, bool(self.augment and self.flip and np.random.rand() < 0.5)
+
+    def _image(self, rec: Record, i: int, psi: float, do_flip: bool) -> np.ndarray:
+        """標本 `i` の左右の画像 `(6, h, w)`（`[右, 左]`）。`psi` は車が左へ向いた角度 [rad]。"""
         d = rec.data
         sp = self.spec
         w, h = sp.size
-
-        psi = 0.0
+        if not self.load_images:
+            return np.zeros((6, h, w), dtype=np.float32)
+        keys = ("image", "image_left")
+        rgbs = [np.asarray(Image.open(self.data_dir / str(d[k][i])).convert("RGB")) for k in keys]
+        if self.augment and self.photo_strength > 0:
+            seed = np.random.randint(0, 2**31)          # 左右は同じ外乱
+            rgbs = [photo_aug.apply(r, np.random.default_rng(seed), self.photo_strength) for r in rgbs]
         if self.augment and self.yaw_max_deg > 0:
-            # 点群は 1° 刻みなので、ずらす角度を整数度にして3つの入力で厳密に同じ角度を使う
-            psi_deg = int(np.random.randint(-int(self.yaw_max_deg), int(self.yaw_max_deg) + 1))
-            psi = math.radians(psi_deg)
+            fxs = (self.fx_px, self.fx_px_left)
+            bodies = (self.body_mask, self.body_mask_left)
+            rgbs = [yawed_window(r, crop_margin_px(r.shape[1], sp.crop_x), psi, fxs[j], bodies[j])
+                    for j, r in enumerate(rgbs)]
         else:
-            psi_deg = 0
-        do_flip = self.augment and self.flip and np.random.rand() < 0.5
-
-        # ── 画像 ──
-        if self.load_images:
-            keys = ("image", "image_left")
-            rgbs = [np.asarray(Image.open(self.data_dir / str(d[k][i])).convert("RGB")) for k in keys]
-            if self.augment and self.photo_strength > 0:
-                seed = np.random.randint(0, 2**31)          # 左右は同じ外乱
-                rgbs = [photo_aug.apply(r, np.random.default_rng(seed), self.photo_strength) for r in rgbs]
-            if self.augment and self.yaw_max_deg > 0:
-                fxs = (self.fx_px, self.fx_px_left)
-                bodies = (self.body_mask, self.body_mask_left)
-                rgbs = [yawed_window(r, crop_margin_px(r.shape[1], sp.crop_x), psi, fxs[j], bodies[j])
-                        for j, r in enumerate(rgbs)]
-            else:
-                rgbs = [crop_window(r, sp.crop_x) for r in rgbs]
-            smalls = [resize_area(r, w, h) for r in rgbs]
-            if do_flip:
-                smalls = [x[:, ::-1, :] for x in smalls[::-1]]   # 左右は入れ替えてから鏡像
-            if self.augment:
-                gain = 1.0 + np.random.uniform(-_CONTRAST, _CONTRAST)
-                bias = np.random.uniform(-_BRIGHTNESS, _BRIGHTNESS)
-                smalls = [np.clip(x.astype(np.float32) * gain + bias, 0.0, 255.0) for x in smalls]
-            image = np.concatenate([normalize(np.ascontiguousarray(x))[0] for x in smalls], axis=0)
-        else:
-            image = np.zeros((6, h, w), dtype=np.float32)
-
-        # ── 点群 ──
-        lidar = self._lidar(rec, i, psi_deg)
+            rgbs = [crop_window(r, sp.crop_x) for r in rgbs]
+        smalls = [resize_area(r, w, h) for r in rgbs]
         if do_flip:
-            lidar = lidar[:, ::-1]
+            smalls = [x[:, ::-1, :] for x in smalls[::-1]]   # 左右は入れ替えてから鏡像
+        if self.augment:
+            gain = 1.0 + np.random.uniform(-_CONTRAST, _CONTRAST)
+            bias = np.random.uniform(-_BRIGHTNESS, _BRIGHTNESS)
+            smalls = [np.clip(x.astype(np.float32) * gain + bias, 0.0, 255.0) for x in smalls]
+        return np.concatenate([normalize(np.ascontiguousarray(x))[0] for x in smalls], axis=0)
 
-        # ── 車両状態 ──
+    def _state_and_target(self, rec: Record, i: int, psi: float, do_flip: bool) -> dict[str, torch.Tensor]:
+        """車両状態と手本（`state`・`path`・`path_v`・`pt_ok`・`v_ok`）。"""
+        d = rec.data
+        sp = self.spec
         speed, steer_act, yaw_rate = (float(x) for x in d["state"][i])
         sgn = -1.0 if do_flip else 1.0
         state = np.array([speed / sp.speed_ref, sgn * steer_act / sp.max_steer,
                           sgn * yaw_rate / sp.yaw_rate_ref], dtype=np.float32)
 
-        # ── 手本 ──
         sel = slice(sp.stride - 1, sp.stride * sp.k, sp.stride)
         xy = d["path_xy"][i][sel].astype(np.float64)
         if psi:
@@ -257,13 +248,25 @@ class FusionDataset(Dataset):
             xy[:, 1] = -xy[:, 1]
         pt_ok = d["path_valid"][i][sel]
         path_v = np.clip(np.nan_to_num(d["path_v"][i][sel]) / sp.speed_ref, 0.0, 1.0)
-
         return {
-            "image": torch.from_numpy(image),
-            "lidar": torch.from_numpy(np.ascontiguousarray(lidar, dtype=np.float32)),
             "state": torch.from_numpy(state),
             "path": torch.from_numpy((xy / self.xy_scale).astype(np.float32)),
             "path_v": torch.from_numpy(path_v.astype(np.float32)),
             "pt_ok": torch.from_numpy(pt_ok.astype(np.float32)),
             "v_ok": torch.tensor(float(d["v_ok"][i]), dtype=torch.float32),
+        }
+
+    def __getitem__(self, n: int) -> dict[str, torch.Tensor]:
+        ri, i = self.index[n]
+        rec = self.records[ri]
+        psi_deg, do_flip = self._draw_aug()
+        psi = math.radians(psi_deg)
+        image = self._image(rec, i, psi, do_flip)
+        lidar = self._lidar(rec, i, psi_deg)
+        if do_flip:
+            lidar = lidar[:, ::-1]
+        return {
+            "image": torch.from_numpy(image),
+            "lidar": torch.from_numpy(np.ascontiguousarray(lidar, dtype=np.float32)),
+            **self._state_and_target(rec, i, psi, do_flip),
         }

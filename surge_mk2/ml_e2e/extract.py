@@ -75,7 +75,8 @@ DEFAULT_POSE_LAG_S = 0.055
 class ExtractConfig:
     def __init__(self, *, k: int = 40, ds: float = 0.25, history: int = 3,
                  min_speed: float = 0.15, min_score: float = 0.35,
-                 max_cross: float = 1.0, include_self: bool = False) -> None:
+                 max_cross: float = 1.0, include_self: bool = False,
+                 self_sources: tuple[str, ...] = (_SELF_SOURCE,)) -> None:
         self.k = k                          #: 経路点の数（学習時に間引ける多めの数）
         self.ds = ds                        #: 経路点の間隔 [m]
         self.history = history              #: 保存する点群の周の数（最新を含む）
@@ -83,9 +84,17 @@ class ExtractConfig:
         self.min_score = min_score          #: 最適ラインのラベルに使う自己位置の一致度の下限
         self.max_cross = max_cross          #: 最適ラインからこれ以上離れていたらラインのラベルにしない
         self.include_self = include_self
+        #: 「このモデル自身の走行」とみなす指令の `source` の接頭辞（`ml_stereo_e2e` は自分と e2e_fusion の両方）
+        self.self_sources = tuple(self_sources)
 
     def to_json(self) -> dict:
-        return dict(self.__dict__)
+        d = dict(self.__dict__)
+        # 既定のままなら書かない（この項目を足す前に抽出した `dataset.json` と比べられるように）
+        if d["self_sources"] == (_SELF_SOURCE,):
+            del d["self_sources"]
+        else:
+            d["self_sources"] = list(d["self_sources"])
+        return d
 
 
 def _nearest(times: np.ndarray, t: int) -> int:
@@ -108,7 +117,7 @@ def _kind(rec: R.Recording, i: int, cfg: ExtractConfig) -> tuple[int | None, str
     if mode == 2:
         if src.endswith(":stale"):
             return None, "入力途絶中の指令(stale)"
-        if src.startswith(_SELF_SOURCE):
+        if src.startswith(cfg.self_sources):
             return (KIND_SELF, "") if cfg.include_self else (None, "このモデル自身の走行")
         return KIND_AUTO, ""
     if mode == 1:
