@@ -511,7 +511,7 @@ GUI にも見せるなら `python3 config/gen_msgs.py` で `gui/src/generated/ms
 
 ## 12. 学習ベースの自動運転を動かす（LiDAR E2E / カメラセグメンテーション / カメラE2E）
 
-独立した学習パイプラインがある（下の表の3本と、§12.4 の E2E 融合）。どれも「**Mac で学習 → ONNX 化 → `models/` に配置 →
+独立した学習パイプラインがある（下の表の3本と、§12.4 の E2E 融合・§12.5 のステレオ E2E）。どれも「**Mac で学習 → ONNX 化 → `models/` に配置 →
 GUI でモデル名を選ぶ**」という流れは共通だが、中身も検証手段も別物。
 学習・評価のロジックの詳細は各スクリプトの docstring が正（`ml_*` に README は無い）。
 
@@ -731,3 +731,35 @@ tools/deploy.sh --no-gui
 **初めてのモデル・初めてのコースは最高速度を低くして試す。** 止まる条件（経路の不確かさが大きい・入力が途絶えた等）は
 理由が自動運転タブに出る。障害物に対する固定距離の停止は持たない（STM32 の `auto_stop` を ON にしておく）。
 配線の確認は `python -m raspi.tools.bus_echo -t e2e_fusion/plan --dump --fields ready,reason,infer_ms`。
+
+### 12.5 ステレオ E2E（左右の画像＋視差の帯＋車両状態 → 経路点、`stereo_e2e`）
+
+§12.4 の LiDAR を**ステレオの視差の帯**に置き換え、走るときに LiDAR を使わない版（`docs/stereo_plan.md` 段階7 の方式 B）。
+LiDAR は記録のときの先生（`slam2d_route` の最適ライン・推測航法の軌跡）にだけ要る。経路点の追い方は `e2e_fusion` と同じで、
+**既定の追従は MPC**（`nav/mpc.py`）。設計の理由は各ファイルの docstring が正: `raspi/core/stereo_e2e_preproc.py`（視差の帯の作り方。
+学習と実車で同じ関数）・`ml_stereo_e2e/extract.py`（視差の作り直し）・`ml_stereo_e2e/dataset.py`（向きの拡張）・
+`raspi/nodes/stereo_e2e_node.py`（推論のきっかけと時刻）・`raspi/auto/stereo_e2e.py`。
+
+| | |
+|---|---|
+| 学習コード（Mac） | `ml_stereo_e2e/`。操作パネルは launcher の「ml_stereo_e2e」（§12.4 と同じ画面） |
+| モデルの置き場 | `models/stereo_e2e/<名前>.onnx`（＋同名 `.json`） |
+| 推論コード | `raspi/nodes/stereo_e2e_node.py`（**独立プロセス** `surge-stereo-e2e`）＋ `raspi/auto/stereo_e2e.py` |
+| 視差の入力 | `stereo_node` が照合ごとに出す `stereo/disp`（帯 150〜260 行を 12×68 のブロックに縮めた視差と照合の出た割合） |
+
+**視差は2か所で作る**: 学習は記録の左右の組（JPEG 品質 90・既定 5Hz）を Mac で照合し直して作る（記録に視差が無くてよい。
+過去の記録も使える）。実車は `stereo_node` が生の画像から作る `stereo/disp`（記録にも残る）。両者の差は
+`ml_stereo_e2e.eval --check-disp <記録>` で見る。照合の設定（帯・探索幅・縮めた大きさ）がモデルの契約と違うと推論しない。
+
+```bash
+.venv/bin/python -m ml_stereo_e2e.extract logs/*.mcap --out ml_stereo_e2e/runs/v1/data   # 1万枚で数分
+.venv/bin/python -m ml_e2e.check_labels ml_stereo_e2e/runs/v1/data --draw 24              # ラベルは §12.4 と同じ
+.venv/bin/python -m ml_stereo_e2e.train --data ml_stereo_e2e/runs/v1/data --out ml_stereo_e2e/runs/v1 --epochs 20
+.venv/bin/python -m ml_stereo_e2e.export_onnx --run ml_stereo_e2e/runs/v1 --name v1
+.venv/bin/python -m ml_stereo_e2e.eval --model models/stereo_e2e/v1.onnx --data ml_stereo_e2e/runs/v1/data <検証の .mcap>
+tools/deploy.sh --no-gui        # 初回は Pi で sudo raspi/setup/install_services.sh（surge-stereo-e2e を作る）
+```
+
+**実車で走らせる**: 自動運転タブで「ステレオ E2E（カメラだけ）」→「ステレオ E2E モデル」欄で選ぶ（`config/stereo_e2e_model.json`）→ ARM → engage。
+このモードが選ばれて ARM 中は、照合（`stereo_node`）と左右の同期が回る。ステレオの障害物での減速は持たない（2026-11-16 の判断。
+STM32 の `auto_stop` を ON にしておく）。配線の確認は `python -m raspi.tools.bus_echo -t stereo_e2e/plan --dump --fields ready,reason,infer_ms`。

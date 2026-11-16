@@ -113,7 +113,7 @@ STM32 ⇄ MD 間の CRC-8/AUTOSAR は STM32 内部で閉じており、本プロ
 | `0x13` | `CONFIG_GET` | Pi → STM32 | イベント | 2 |
 | `0x14` | `VERSION_REQ` | Pi → STM32 | リンク確立時 | 0 |
 | `0x15` | `LIMITS_REQ` | Pi → STM32 | リンク確立時 | 0 |
-| `0x16` | `STEREO_OBS` | Pi → STM32 | 10Hz（ステレオが照合できた周期） | 162 |
+| `0x16` | `STEREO_OBS` | Pi → STM32 | ARM 中 15Hz・DISARM 中 1Hz（ステレオが照合できた周期。`telemetry_node` の `STEREO_DEPTH_FPS_*`） | 162 |
 
 **LiDAR パケットは 0x01 / 0x05 / 0x09 のいずれか1種類だけが送られる**（`param_id 0x0040`、§5.8.1）。
 STM32 の既定は 0x01。Pi は `config/vehicle.toml` の `[sensors.lidar] intensity = true` なら接続時・STM32 の再起動時に `0x0040 = 1` を送る。
@@ -492,7 +492,7 @@ MD が無言になると status は最後の値のまま固まるため。Pi は
 前方ステレオ（`stereo_node` の `scan/stereo`）の障害物を、`auto_stop` の入力に**足す**。実装は STM32 の `src/control/stereo_obstacle.[ch]`
 （確かめは `tools/fwsim/tests/test_stereo_obstacle.py`）、Pi 側は `raspi/core/stereo_obs.py`（`io_node._forward_stereo`）。
 
-- **ペイロード**: `age_ms`（撮影から送出直前まで、255 で飽和）・`count`（最大 40）・`xy`（base_link の x, y を i16 mm で 40 点分。残りは 0）。10Hz
+- **ペイロード**: `age_ms`（撮影から送出直前まで、255 で飽和）・`count`（最大 40）・`xy`（base_link の x, y を i16 mm で 40 点分。残りは 0）。照合の周期（ARM 中 15Hz）
 - **Pi が送るもの**: 1° の方位ごとの距離（床より上の障害物）を 2° の箱ごとの最近点にし、多ければ近い順に 40 点。**停止の判断・距離のしきい値は持たない**
 - **「見つからない」は送らない**: 照合の失敗・左右が揃わない周期・`Scan` が 250ms より古いときは送らない。**点が 0 個でも照合できた周期は送る**（STM32 が「ステレオは生きている」と分かる）
 - **STM32 の扱い**

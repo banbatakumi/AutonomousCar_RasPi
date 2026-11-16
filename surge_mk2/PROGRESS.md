@@ -48,6 +48,16 @@
   11-13 に**前後配置をコードから消した**（`[sensors.camera] layout`・`cam_rear`・`image/rear`・後カメラの GUI（バックミラー・R で後方）・
   学習系の右1台の経路）。右1台のモデル（cam_e2e v1〜v11・e2e_fusion v1〜v2）は Mac・Pi とも消した。セグメンテーションの置き場を `models/` 直下から `models/seg/` に移し、旧モデル v1〜v3 は消した（Pi の `models/` は 11-13 に全部消してあり、次の deploy で e2e_lidar・nano_track が戻る）。
   Pi 未反映
+- **ステレオの性能向上（段階7、2026-11-16、未コミット・Pi に反映済み・走行は未確認）**: 今後はステレオを主軸にする。会場の走行記録 `surge_20261115_002230` を
+  走行中の採点（`tools.stereo_bench --drive`、LiDAR を自車の動きで補正して比べる）で調べ、**ステレオと LiDAR の向きが約 4° ずれている**こと
+  （vehicle.toml には未反映。止めた場面で確かめてから）、2.5m/s 超で画像の鮮明度が半分になること（動きブレ）を見つけた。
+  SGBM の `uniquenessRatio` 25・高さの幅 3cm・ARM 中の照合 15Hz 固定・同期中の露光をゲイン 8 倍まで 8ms に抑える（Custom）を入れた。ARM 中（止めた車・2.0GHz）で遅れ 90% 点 42ms、ステレオ全体の電流 +166mA（合計 0.83A）。露光の最初の版で映像が暗くなった件は直した（段階7）。数値・次の走行で確かめることと
+  ステレオだけで走る方式の検討は [`docs/stereo_plan.md`](docs/stereo_plan.md) 段階7
+
+- **ステレオ E2E（`stereo_e2e`、2026-11-16・17、未コミット・Pi 未反映・実走していない）**: 左右の画像＋視差の帯（`stereo/disp`）＋車両状態 →
+  前方の経路点 → MPC で追従。**LiDAR を使わずに走る**（段階7 の方式 B）。学習 `ml_stereo_e2e/`、推論 `raspi/nodes/stereo_e2e_node.py`
+  （新サービス `surge-stereo-e2e`）、走行 `raspi/auto/stereo_e2e.py`、`stereo_node` に `stereo/disp` を追加。手順は
+  [`docs/development.md` §12.5](docs/development.md)、決めたことは [`docs/stereo_plan.md`](docs/stereo_plan.md) 段階7。実データで抽出〜評価が通ることまで確認（モデルは未学習）
 
 ## 実機で確かめること
 
@@ -59,6 +69,9 @@
 - **舵が追従しない**（`surge_20261031_062217`・`surge_20261102_094700`）: しばらく置いた後の最初の操舵で、ステア MD が 4.8A で押しても舵が動かないか逆へ動く。
   `steer_guard` で止めて待つようにしたが、原因（ステア MD のファーム・エンコーダ）は調べていない
 
+- **ステレオ E2E（`stereo_e2e`）**: Pi で `install_services.sh`（`surge-stereo-e2e`）→ `stereo/disp` が出ているか
+  （`bus_echo -t stereo/disp`）→ `ml_stereo_e2e.eval --check-disp` で Pi と Mac の視差の差 → 学習したモデルで遅れ（撮影から `stereo_e2e/plan`）と
+  電流 → 低速で engage
 - **E2E 融合（`e2e_fusion`）**: Pi で `install_services.sh`（`surge-e2e-fusion` を作る）→ 低速で engage して周回できるか、
   自動運転タブのモデル欄で選んだモデルに切り替わるか（`reason` と Pi のログ `# モデル切替`）、ARM 中の制御系電流の基準値と推論中の増分、`e2e_fusion/plan` の遅れ（`reason` に出る）
 

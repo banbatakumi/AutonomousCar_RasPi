@@ -307,7 +307,8 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `surge-e2e-fusion` | `raspi.nodes.e2e_fusion_node` | 点群＋画像＋車両状態から前方の経路点 → `e2e_fusion/plan` | `e2e_fusion` が使えない |
 | `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出 → `line/cam` | `line_trace` が使えない |
 | `surge-cam-track` | `raspi.nodes.cam_track_node` | 対象追従 → `track/target` | `follow_object` が使えない |
-| `surge-stereo` | `raspi.nodes.stereo_node` | 前方ステレオの照合 → 低い障害物の `scan/stereo`・深度映像（ステレオ校正済みのときだけ） | 深度映像が出ない |
+| `surge-stereo` | `raspi.nodes.stereo_node` | 前方ステレオの照合 → 低い障害物の `scan/stereo`・視差の帯 `stereo/disp`・深度映像（ステレオ校正済みのときだけ） | 深度映像が出ない・`stereo_e2e` が使えない |
+| `surge-stereo-e2e` | `raspi.nodes.stereo_e2e_node` | 左右の画像＋視差の帯＋車両状態から前方の経路点 → `stereo_e2e/plan` | `stereo_e2e` が使えない |
 | `surge-mdns` | `raspi.tools.mdns_unicast` | Wi-Fi 端末向けの mDNS 応答 | 名前が引けない端末がある |
 | `surge-arrow-signal` | `raspi.nodes.arrow_signal_node` | 前方カメラの矢印信号 → `route/select`。**unit だけ置き既定は無効** | 信号による経路選択が使えない |
 | `surge-logger` | `raspi.nodes.logger_node` | MCAP 記録。**既定では無効**（`--with-logger`、§11） | — |
@@ -491,6 +492,7 @@ $$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v
 | `line_trace` | ライントレース（カメラ） | 不要 | 白線の2点を Pure Pursuit の目標点にする。障害物回避なし |
 | `e2e_lidar` | E2E LiDAR | 不要 | 強化学習（PPO）で点群→操舵・速度を直接回帰 |
 | `e2e_fusion` | E2E 融合（LiDAR＋カメラ） | 不要 | 点群・前方の左右2台のカメラ・車両状態から学習したモデルが前方の経路点を出し、それを追う（記録を録ったコース向け） |
+| `stereo_e2e` | ステレオ E2E（カメラだけ） | 不要 | 前方の左右2台のカメラ・視差の帯・車両状態から学習したモデルが前方の経路点を出し、MPC で追う。**LiDAR を使わない**（記録を録ったコース向け） |
 | `follow_object` | 対象追従 | 不要 | 映像で選んだ対象との車間を保って追従（前進のみ） |
 | `park_to_point` | 駐車（クリック指定） | 局所地図 | LiDAR 画面でクリックした位置・向きへ Hybrid A* で接近して停止 |
 
