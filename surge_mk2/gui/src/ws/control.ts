@@ -124,7 +124,10 @@ export class ControlChannel {
       if (!this.closed) lost()
     }, IDLE_MS)
     this.guard = guard
-    ws.onopen = () => this.h.onOpenChange(true)
+    ws.onopen = () => {
+      this.h.onOpenChange(true)
+      this.flushAllCoalesced()
+    }
     ws.onmessage = (ev) => {
       guard.alive()
       // **`any` にしない。** `any` は以降のフィールドアクセスを全て検査対象から
@@ -175,6 +178,15 @@ export class ControlChannel {
     this.ws.send(JSON.stringify(body))
   }
 
+  private isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
+  /** 未接続の間に持っておいた設定を、繋がった時点で送る */
+  private flushAllCoalesced() {
+    for (const key of this.coalesce.keys()) this.flushCoalesced(key)
+  }
+
   /** `sendCoalesced` の種類ごとの状態（最後に送った時刻・まだ送っていない分・予約したタイマ） */
   private coalesce = new Map<string, { last: number; pending: Record<string, unknown> | null; timer?: number }>()
 
@@ -191,6 +203,12 @@ export class ControlChannel {
     const st = this.coalesce.get(key) ?? { last: -Infinity, pending: null }
     this.coalesce.set(key, st)
     const now = performance.now()
+    if (!this.isOpen()) {
+      // 未接続の間は捨てずに持っておき、繋がったら送る（`flushAllCoalesced`。再接続をまたいだ
+      // スライダの最後の値を失わない）
+      st.pending = st.pending ? merge(st.pending, obj) : obj
+      return
+    }
     if (st.pending == null && now - st.last >= SETTING_TX_INTERVAL_MS) {
       st.last = now
       this.send(obj)
@@ -208,7 +226,7 @@ export class ControlChannel {
     if (!st) return
     window.clearTimeout(st.timer)
     st.timer = undefined
-    if (st.pending) {
+    if (st.pending && this.isOpen()) {
       const obj = st.pending
       st.pending = null
       st.last = performance.now()
