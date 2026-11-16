@@ -149,6 +149,20 @@ class TestFirmwareConstants(unittest.TestCase):
             with self.subTest(attr=attr):
                 self.assertSame(name, getattr(SpeedController, attr))
 
+    def test_stereo_frame_period_matches_the_pi(self):
+        """ファームが確認フレームの遅れに使うステレオの間隔が、Pi の ARM 中の照合の頻度と同じ（レビュー M4）。"""
+        from raspi.nodes.telemetry_node import STEREO_DEPTH_FPS_ARMED
+        self.assertSame("VEHICLE_AUTO_STOP_STEREO_FRAME_PERIOD_S", 1.0 / STEREO_DEPTH_FPS_ARMED)
+
+    def test_stereo_obs_self_exclusion_mirrors_vehicle_h(self):
+        """Pi が STEREO_OBS を詰める前に除く自車の範囲（`raspi/core/stereo_obs.py`）が STM32 と同じ。"""
+        import raspi.core.stereo_obs as so
+        self.assertSame("VEHICLE_BODY_FRONT_X_M", so.BODY_FRONT_X_M)
+        self.assertSame("VEHICLE_BODY_REAR_X_M", so.BODY_REAR_X_M)
+        self.assertSame("VEHICLE_BODY_HALF_WIDTH_M", so.BODY_HALF_WIDTH_M)
+        self.assertSame("VEHICLE_AUTO_STOP_STEREO_SELF_EXT_FRONT_M", so.SELF_EXT_FRONT_M)
+        self.assertSame("VEHICLE_AUTO_STOP_STEREO_SELF_EXT_SIDE_M", so.SELF_EXT_SIDE_M)
+
     def test_sim_stm32_mirrors_vehicle_h(self):
         """シムの STM32（`sim/stm32.py`）が写している自動停止・DISARM 後の制動の値。"""
         import sim.stm32 as st

@@ -6,6 +6,8 @@
   STM32 は届かなければ LiDAR・超音波だけで判定に戻る。「何も見えていない」を「障害物なし」として送らない
 - 照合できた周期は、点が 0 個でも送る（STM32 が「ステレオは生きている」と分かるように）
 - 点は 1° の方位ごとの距離（base_link 原点）。2° の箱ごとに最も近い点を残し、多ければ近い順に `MAX_POINTS` 点
+- **自車（前輪・車体）の点は先に除く**（STM32 と同じ外形＋余裕。STM32 も受けた後で除く）。除かずに近い順で
+  打ち切ると、自車の点が枠を埋めて進路上の遠い点が落ちる（レビュー M7）
 """
 
 from __future__ import annotations
@@ -20,6 +22,21 @@ MAX_POINTS = 40
 BIN_DEG = 2
 #: これより古い `Scan` は送らない（STM32 側の最大の古さ 300ms より手前。古い点は予想進路を延ばして補うが、限度がある）
 MAX_AGE_MS = 250
+
+#: 自車とみなす範囲（base_link 基準）。STM32 の `vehicle.h` の写し（`tools/fwsim/tests/test_fw_constants.py` が突き合わせる）:
+#: 車体の外形 `VEHICLE_BODY_{FRONT,REAR}_X_M`・`VEHICLE_BODY_HALF_WIDTH_M` に、ステレオだけの余裕
+#: `VEHICLE_AUTO_STOP_STEREO_SELF_EXT_{FRONT,SIDE}_M`（前輪・照合の端の作り物）を足したもの
+BODY_FRONT_X_M = 0.30
+BODY_REAR_X_M = -0.07
+BODY_HALF_WIDTH_M = 0.09
+SELF_EXT_FRONT_M = 0.05
+SELF_EXT_SIDE_M = 0.04
+
+
+def _is_self(x: float, y: float) -> bool:
+    """STM32 の `AutoStopPath_IsInsideBody(x, y, 前端+余裕, 後端, 半幅+余裕)` と同じ判定。"""
+    return (BODY_REAR_X_M < x < BODY_FRONT_X_M + SELF_EXT_FRONT_M
+            and abs(y) < BODY_HALF_WIDTH_M + SELF_EXT_SIDE_M)
 
 
 def scan_to_obs(scan, now_ns: int) -> packets.StereoObs | None:
@@ -37,7 +54,10 @@ def scan_to_obs(scan, now_ns: int) -> packets.StereoObs | None:
         b = deg // BIN_DEG
         if b not in best or d < best[b][0]:
             a = math.radians(deg)
-            best[b] = (d, d * math.cos(a), d * math.sin(a))
+            x, y = d * math.cos(a), d * math.sin(a)
+            if _is_self(x, y):
+                continue
+            best[b] = (d, x, y)
     pts = sorted(best.values())[:MAX_POINTS]
     xy = [0] * (2 * MAX_POINTS)
     for i, (_, x, y) in enumerate(pts):

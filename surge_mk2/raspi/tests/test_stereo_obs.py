@@ -41,6 +41,17 @@ class StereoObsTest(unittest.TestCase):
         o = scan_to_obs(scan({i * 2: 2.0 + i * 0.01 for i in range(60)}), NOW)
         self.assertEqual(o.count, MAX_POINTS)
 
+    def test_self_points_do_not_crowd_out_the_path(self):
+        """自車（前輪など）の点は詰める前に除く。近い順の枠を埋めて進路上の遠い点を落とさない（レビュー M7）。"""
+        near = {}
+        for deg in range(20, 80):                      # 車体の左前（x≈0.12〜0.3, |y|<0.13）に点を並べる
+            a = math.radians(deg)
+            r = min(0.30 / max(math.cos(a), 1e-3), 0.12 / max(math.sin(a), 1e-3)) * 0.95
+            near[deg] = r
+        o = scan_to_obs(scan({**near, 0: 1.5}), NOW)
+        self.assertEqual(o.count, 1)
+        self.assertEqual(o.xy[:2], [1500, 0])
+
     def test_encodes_to_fixed_length(self):
         o = scan_to_obs(scan({0: 1.0}), NOW)
         self.assertEqual(len(o.encode()), packets.StereoObs.LEN)
