@@ -82,6 +82,13 @@ _PARK_SNAP_M = 2.5
 _STOP_RETRY_S = 1.0
 #: 停止経路を計算している間に車が進むと見込む時間 [s]（`_compute_stop` の「近すぎる」の判定）
 _STOP_LEAD_S = 0.4
+#: 停止点へ向かう間の目標車速の下限 [m/s]（`creep_speed` がこれより遅ければそちら）。停止経路の速度は
+#: 終点へ向けて下がるので、下限が無いと停止点の手前で目標が 0 近くになり止まり切らずに這えない。
+#: **合流（`_join_cap`）・自己位置が怪しいとき（`coast_speed`）の上限より前に掛ける**（後で掛けると上限を
+#: 押し上げ、減速すべき場面でもこの速さで進む。レビュー M2）
+_STOP_APPROACH_MIN_M_S = 0.15
+#: 止まったとみなす車速 [m/s]（停止点での停止・駐車へ移る判定）
+_STOPPED_M_S = 0.03
 
 
 @dataclass
@@ -934,6 +941,9 @@ class Slam2dRoute(Slam2dRaceLine):
 
         st.ready = True
         st.target_speed = pp.speed
+        if not path.closed:
+            # 停止点へ向かう経路: 速度の下限は上限（合流・coast）より**前**に掛ける
+            st.target_speed = max(st.target_speed, min(p["creep_speed"], _STOP_APPROACH_MIN_M_S))
         st.free_ahead = dist if hit is not None else math.inf
         self._join_cap(st, pp, self._avoid_path or path, pose, p)
         if coasting:
@@ -1022,19 +1032,18 @@ class Slam2dRoute(Slam2dRaceLine):
             st.brake = True
             st.target_speed = 0.0
             if self._stop is not None and self._stop.mode == "park":
-                if abs(vs.speed) < 0.03:
+                if abs(vs.speed) < _STOPPED_M_S:
                     self._start_park()
                     st.reason = f"停止点『{self._stopping}』の手前で止まった。駐車に移る"
                     return st
                 st.reason = f"駐車の手前で止まろうとしている（残り {rem:.2f}m）"
                 return st
-            if abs(vs.speed) < 0.03:
+            if abs(vs.speed) < _STOPPED_M_S:
                 self.phase = st.phase = STOPPED
             st.reason = f"停止点『{self._stopping}』で停止（残り {rem * 100:.0f}cm）"
             return st
         if rem <= p["creep_dist"]:
             st.target_speed = min(st.target_speed, p["creep_speed"])
-        st.target_speed = max(st.target_speed, min(p["creep_speed"], 0.15))
         st.reason = f"停止点『{self._stopping}』へ向かっている（残り {rem:.2f}m）"
         return st
 
