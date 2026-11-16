@@ -17,7 +17,7 @@ IDLE/ACTIVE で省電力、`hb/stereo`）。
 ## いつ照合するか（IDLE/ACTIVE）
 
 `cam/config` の `CamConfig.depth` が True の間だけ。決めるのは telemetry_node（`_desired_depth`:
-ステレオを使う自動運転モードが選ばれていて ARM 中、または深度映像の視聴者がいる間）。
+**ARM 中は常に**（STM32 の自動停止の入力、`telemetry_node.STEREO_AUTO_STOP`）、DISARM 中は深度映像の視聴者がいる間）。
 camera_node が左カメラを回すか（`CamConfig.stereo`）も同じ判断に従うので、照合しない間は左カメラも止まる。
 
 ## 左右の組

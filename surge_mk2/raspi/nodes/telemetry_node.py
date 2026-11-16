@@ -1997,9 +1997,9 @@ class TelemetryServer:
     def _desired_stereo(self) -> bool:
         """左右を同期して撮らせるか（`CamConfig.stereo`）。
 
-        照合する間（`_desired_depth`）、左右の組で推論するモード（`STEREO_PAIR_AUTO_MODES`）が選ばれていて
-        ARM 中、左の映像を使う者（GUI の視聴者・記録）がいる間だけ。
-        **ARM 中ずっとは回さない**（段階4 で絞った）。False の間は camera_node が左カメラを止める。"""
+        照合する間（`_desired_depth`。`STEREO_AUTO_STOP` が有効なら ARM 中は常に照合する＝ARM 中は常に左右を撮る）、
+        左右の組で推論するモード（`STEREO_PAIR_AUTO_MODES`）が選ばれていて ARM 中、左の映像を使う者（GUI の視聴者・
+        記録）がいる間。DISARM で誰も使っていなければ False で、camera_node が左カメラを止める。"""
         return (self._desired_depth() or self._cam_in_use_while_disarmed("left")
                 or (self._vehicle_armed() and self._auto_mode in STEREO_PAIR_AUTO_MODES))
 

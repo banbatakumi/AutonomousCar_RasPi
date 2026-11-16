@@ -1,7 +1,7 @@
 """シミュレータを1コマンドで立ち上げる。
 
     .venv/bin/python -m sim.run                      # これだけ
-    .venv/bin/python -m sim.run --course slalom      # コース指定（名前だけでよい）
+    .venv/bin/python -m sim.run --course toyota2     # コース指定（名前だけでよい。一覧は --list）
     .venv/bin/python -m sim.run --no-gui             # 俯瞰ビュー無し
     .venv/bin/python -m sim.run --list               # コース一覧
 
