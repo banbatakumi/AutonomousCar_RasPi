@@ -14,7 +14,9 @@
 **新しい点群の1周が届いたら推論する**（10Hz）。画像はその時点の最新のコマ。出力の基準時刻（`t_capture`）は
 画像の撮影時刻で、点群はそれより 0.07〜0.17s 古い（学習の標本と同じ関係。`ml_e2e/extract.py`）。
 画像が読めない周は点群だけで推論し（`avail` の画像を 0。学習でも一定割合で伏せている）、基準時刻は
-点群の先頭セクタの時刻＋`_SCAN_AGE_NO_IMAGE_S`。点群が途絶えた・両方無いときは `ready=False`。
+点群の先頭セクタの時刻＋「画像があった周の、画像と点群の時刻の差」の移動平均（初めは学習の標本の中央
+`_SCAN_AGE_NO_IMAGE_S`。固定値だと実車の配信の遅れの変化に追いつかない。レビュー L13）。
+点群が途絶えた・両方無いときは `ready=False`。
 
 **点群は `scan` をそのまま使う**（planning_node が planner に渡す前に掛ける車体マスク・ノイズ除去は通さない。
 学習の標本が記録の `scan` そのままだから）。読み方（欠測・飽和・測距不能）は `raspi.auto.base.scan_window`。
@@ -92,7 +94,7 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_VEHICLE_STATE,
 )
 
-__all__ = ["FusionOnnx", "load_model", "pick_model_name", "E2EFusionNode", "MODES"]
+__all__ = ["FusionOnnx", "load_model", "pick_model_name", "pick_model_names", "E2EFusionNode", "MODES"]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "e2e_fusion"
@@ -104,6 +106,9 @@ HB_HZ = 10
 MODES = ("e2e_fusion",)
 #: 画像が無い周の基準時刻を、点群の先頭セクタの時刻からどれだけ後に置くか [s]（学習の標本の点群の古さの中央）
 _SCAN_AGE_NO_IMAGE_S = 0.12
+#: 画像と点群の時刻の差の移動平均の重み（10Hz で約 1 秒）と、採る範囲 [s]（外れた組は使わない）
+_SCAN_AGE_EMA = 0.1
+_SCAN_AGE_RANGE_S = (0.03, 0.3)
 #: LD06 の1周 [s]
 _SCAN_PERIOD_S = 0.1
 #: 最新の点群がこれより古ければ推論しない [s]
@@ -203,21 +208,32 @@ def load_model(onnx_path: Path) -> FusionOnnx:
     return model
 
 
-def pick_model_name(models_dir: Path, conf_path: Path = MODEL_CONF) -> str:
-    """使うモデルの名前。設定ファイルの指定、無ければいちばん新しい `.onnx`。無ければ ""。"""
+def pick_model_names(models_dir: Path, conf_path: Path = MODEL_CONF) -> list[str]:
+    """使うモデルの候補を優先順に。設定ファイルの指定（あれば）、続いて契約のある `.onnx` を新しい順。
+
+    先頭が壊れていても（書き出し途中・契約が合わない）次を試せるように全部返す（レビュー L20）。
+    """
+    out: list[str] = []
     try:
         name = str(json.loads(conf_path.read_text()).get("name", ""))
         if name and (models_dir / f"{name}.onnx").is_file():
-            return name
+            out.append(name)
     except (OSError, ValueError, AttributeError):
         pass
     try:
         files = [p for p in models_dir.glob("*.onnx") if p.with_suffix(".json").is_file()]
     except OSError:
-        return ""
-    if not files:
-        return ""
-    return max(files, key=lambda p: p.stat().st_mtime_ns).stem
+        files = []
+    for p in sorted(files, key=lambda p: p.stat().st_mtime_ns, reverse=True):
+        if p.stem not in out:
+            out.append(p.stem)
+    return out
+
+
+def pick_model_name(models_dir: Path, conf_path: Path = MODEL_CONF) -> str:
+    """使うモデルの名前。設定ファイルの指定、無ければいちばん新しい `.onnx`。無ければ ""。"""
+    names = pick_model_names(models_dir, conf_path)
+    return names[0] if names else ""
 
 
 class E2EFusionNode:
@@ -233,6 +249,8 @@ class E2EFusionNode:
         #: 新しい順の `(先頭セクタの時刻, lidar_rows)`
         self._rows: deque[tuple[int, np.ndarray]] = deque(maxlen=4)
         self._last_scan_seq = -1
+        #: 画像の撮影時刻 − 点群の先頭セクタの時刻 [s] の移動平均（画像が無い周の基準時刻に使う）
+        self._scan_age_s = _SCAN_AGE_NO_IMAGE_S
         self._running = False
         self._active = False
         self._reader = FrameReader()
@@ -271,6 +289,16 @@ class E2EFusionNode:
             self._failed_key = key
             print(f"# モデル読み込み失敗（{name}）: {e}。前のモデルのまま続行", file=sys.stderr, flush=True)
             return False
+
+    def reload_first_usable(self, names: list[str]) -> bool:
+        """`names`（優先順）のうち、読めるいちばん前のモデルへ切り替える。今のモデルに着いたらそこで止める
+        （それより後ろ＝古いものへは移らない）。最新が壊れていても、古い有効なモデルで動けるように。"""
+        for name in names:
+            if name == self.model_name:
+                return False
+            if self.reload_if_changed(name):
+                return True
+        return False
 
     # ── 入力 ──
 
@@ -315,7 +343,11 @@ class E2EFusionNode:
         except Exception as e:                                # noqa: BLE001
             print(f"# e2e_fusion の推論が例外: {e}", file=sys.stderr, flush=True)
             return self.failed(f"推論に失敗: {e}", seq=seq)
-        t_ref = t_image_ns if rgb is not None else t_scan + int(_SCAN_AGE_NO_IMAGE_S * NS)
+        if rgb is not None and t_scan:
+            age = (t_image_ns - t_scan) / NS
+            if _SCAN_AGE_RANGE_S[0] <= age <= _SCAN_AGE_RANGE_S[1]:
+                self._scan_age_s += _SCAN_AGE_EMA * (age - self._scan_age_s)
+        t_ref = t_image_ns if rgb is not None else t_scan + int(self._scan_age_s * NS)
         return E2EFusionPlan(
             ready=True,
             path_x=out.path_xy[:, 0].tolist(), path_y=out.path_xy[:, 1].tolist(),
@@ -372,7 +404,7 @@ class E2EFusionNode:
                     next_model_check = time.monotonic() + _MODEL_CHECK_S
                     # GUI から「自動」と言われていれば最新、何も届いていなければ設定ファイル → 最新
                     conf = self.models_dir / "__none__.json" if wanted is not None else MODEL_CONF
-                    self.reload_if_changed(pick_model_name(self.models_dir, conf))
+                    self.reload_first_usable(pick_model_names(self.models_dir, conf))
                 if pacer.should_publish(active, now):
                     plan = self.failed("このモードが選ばれていない、または DISARM 中", seq=seq)
             elif new_scans:
@@ -420,7 +452,7 @@ def main() -> int:
         node.model = load_model(Path(args.model))
         node.model_name = Path(args.model).stem
     else:
-        node.reload_if_changed(pick_model_name(node.models_dir))
+        node.reload_first_usable(pick_model_names(node.models_dir))
 
     pub = Publisher("e2e_fusion")
     sub = Subscriber({TOPIC_SCAN: SCAN_POLICY, TOPIC_IMAGE_FRONT: LATEST, TOPIC_IMAGE_LEFT: LATEST, TOPIC_VEHICLE_STATE: LATEST,

@@ -115,6 +115,23 @@ class TestPickModel(_Tmp):
         self.assertEqual(pick_model_name(self.dir, conf), "new")
         self.assertEqual(pick_model_name(self.dir / "empty", conf), "")
 
+    def test_a_broken_newest_model_falls_back_to_an_older_one(self):
+        """「自動」で最新が壊れていたら、古い有効なモデルで動く（レビュー L20）。"""
+        from raspi.nodes.e2e_fusion_node import pick_model_names
+        _write_model(self.dir / "old.onnx")
+        os.utime(self.dir / "old.onnx", ns=(1_000 * NS, 1_000 * NS))
+        (self.dir / "new.onnx").write_bytes(b"broken")
+        (self.dir / "new.json").write_text((self.dir / "old.json").read_text())
+        os.utime(self.dir / "new.onnx", ns=(2_000 * NS, 2_000 * NS))
+        names = pick_model_names(self.dir, self.dir / "conf.json")
+        self.assertEqual(names, ["new", "old"])
+        node = E2EFusionNode(models_dir=self.dir, vehicle=Vehicle.load())
+        self.addCleanup(node.close)
+        self.assertTrue(node.reload_first_usable(names))
+        self.assertEqual(node.model_name, "old")
+        self.assertFalse(node.reload_first_usable(names))          # 壊れた最新は試し直さない・今のまま
+        self.assertEqual(node.model_name, "old")
+
 
 class TestInferOnce(_Tmp):
     def setUp(self):
@@ -145,6 +162,18 @@ class TestInferOnce(_Tmp):
         self.assertFalse(plan.has_image)
         self.assertGreater(plan.t_capture, t_scan)
         self.assertLess(plan.t_capture - t_scan, 0.2 * NS)
+
+    def test_without_image_the_offset_follows_what_was_observed(self):
+        """画像が無い周の基準時刻は、画像があった周に見た「画像 − 点群」の差の移動平均で置く（レビュー L13）。"""
+        for k in range(60):                                          # 画像が点群の 0.06s 後、が続いた
+            t_scan = (10 + k) * NS
+            self.node.push_scan(_scan(t_scan))
+            self.node.infer_once(rgb=self.rgb, rgb_left=self.rgb, t_image_ns=t_scan + 60_000_000, vs=self.vs,
+                                 now_ns=t_scan + 70_000_000)
+        t_scan = 80 * NS
+        self.node.push_scan(_scan(t_scan))
+        plan = self.node.infer_once(rgb=None, t_image_ns=0, vs=self.vs, now_ns=t_scan + 70_000_000)
+        self.assertAlmostEqual((plan.t_capture - t_scan) / NS, 0.06, delta=0.005)
 
     def test_stale_scan_is_not_used(self):
         self.node.push_scan(_scan(10 * NS - NS))                      # 1s 前
