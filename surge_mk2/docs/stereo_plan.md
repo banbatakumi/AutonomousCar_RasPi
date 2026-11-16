@@ -437,8 +437,12 @@ A を基準線として並べて比べる。C は B の成績を見てから。
 - 入力: 左右の画像（`[右, 左]` の 6ch）＋視差の帯 `(2, 12, 68)`（帯 150〜260 行から照合できない左 96 列を落とし、9×8 画素ごとの
   視差の平均/探索幅と照合の出た割合）＋車両状態。出力は `e2e_fusion` と同じ経路点
 - 視差は**学習は記録の JPEG から Mac で作り直す**、**実車は `stereo_node` が `stereo/disp` に出す**（同じ `disp_band_input`）。
-  差は `ml_stereo_e2e.eval --check-disp` で見る（**`logger_node.DEFAULT_TOPICS` に `stereo/disp` を足すまで、記録には残らない**。`docs/review_2026_11_17.md` H3）
-- 推論は `stereo/disp` が届くたび（10Hz に間引く設定だが、ARM 中の視差は 15Hz で届くので実際は 1 組おきの 7.5Hz。`docs/review_2026_11_17.md` M3）、その視差を作った組の画像と一緒に。手順は `docs/development.md` §12.5
+  差は `ml_stereo_e2e.eval --check-disp` で見る（`stereo/disp`・`stereo_e2e/plan` は 2026-11-17 から記録に残る）
+- 推論は `stereo/disp` が届くたび（ARM 中 15Hz の視差を、平均 10Hz になるよう 3 組に 2 組通す）、その視差を作った組の画像と一緒に。手順は `docs/development.md` §12.5
+- 向きの拡張（2026-11-17 に作り直し）: 視差の帯は透視投影どおりにずらし（`stereo_e2e_preproc.yaw_shift_disp`）、両端 `disp_crop_cols` 列を
+  落とした中央の窓だけをモデルに渡す（推論も同じ窓。ずらしで空いた列を窓に入れない）。±6° で 68 列のうち両端 11 列を落とす。
+  照合の方式・窓・一意性（`StereoDisp.algo`・`block`・`uniqueness`）も契約と照合する。学習の校正値は抽出時の記録の校正（`calib_values`）だけを使う。
+  **前の形式（PREPROC_VERSION 1）の標本・モデルは使えない**ので、抽出から作り直す
 - 実データの確認（2026-11-17、Mac）: `surge_20261115_002230`・`surge_20261114_065947` から 2388 枚を 17 秒で抽出（視差の出た割合 0.67・0.61）、
   2 エポックの試し学習 → 書き出し → 開ループ評価まで通った（推論 7.5ms/Mac）。**本番の学習・Pi での遅れと電流・実走はまだ**
 

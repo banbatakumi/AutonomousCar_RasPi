@@ -152,7 +152,8 @@ class StereoProcessor:
         arr = disp_band_input(d, self.match.num_disp)
         return StereoDisp(data=disp_to_bytes(arr), h=arr.shape[1], w=arr.shape[2],
                           num_disp=self.match.num_disp, scale=self.match.scale, rows=list(self.rect.rows),
-                          preproc_version=DISP_VERSION, t_capture=t_capture_ns, seq=seq)
+                          preproc_version=DISP_VERSION, algo=self.match.algo, block=int(self.match.block),
+                          uniqueness=int(self.match.uniqueness), t_capture=t_capture_ns, seq=seq)
 
     @staticmethod
     def failed(seq: int = 0, reason: str = "") -> Scan:

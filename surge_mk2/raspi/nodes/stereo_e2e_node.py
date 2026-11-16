@@ -48,6 +48,7 @@ from raspi.core.stereo_e2e_preproc import (  # noqa: E402
     INPUT_NAMES,
     PREPROC_VERSION,
     FusionOutput,
+    crop_disp,
     decode_output,
     disp_from_bytes,
     disp_input,
@@ -89,7 +90,7 @@ _NO_DISP_REPORT_S = 0.5
 #: 推論していない間、モデルの選び直しを見る間隔 [s]
 _MODEL_CHECK_S = 2.0
 #: 契約に要るキー
-_CONTRACT_KEYS = ("input_size", "crop_x", "disp_hw", "disp_num_disp", "disp_rows", "disp_scale", "disp_version",
+_CONTRACT_KEYS = ("input_size", "crop_x", "disp_hw", "disp_crop_cols", "disp_num_disp", "disp_rows", "disp_scale", "disp_version",
                   "k", "ds", "xy_scale", "max_steer", "speed_ref", "yaw_rate_ref")
 
 
@@ -118,6 +119,12 @@ class StereoOnnx:
         self.disp_rows = [int(x) for x in cfg["disp_rows"]]
         self.disp_scale = float(cfg["disp_scale"])
         self.disp_version = int(cfg["disp_version"])
+        #: 帯の両端で落とす列（学習の向きの拡張の余白。モデルに入るのは中央の窓だけ）
+        self.disp_crop_cols = int(cfg["disp_crop_cols"])
+        #: 照合の方式・窓・一意性（契約の JSON に無い古いモデルは照合しない）
+        self.disp_algo = str(cfg.get("disp_algo", ""))
+        self.disp_block = int(cfg.get("disp_block", 0))
+        self.disp_uniqueness = int(cfg.get("disp_uniqueness", 0))
         self.k = int(cfg["k"])
         self.ds = float(cfg["ds"])
         self.xy_scale = float(cfg["xy_scale"])
@@ -125,7 +132,8 @@ class StereoOnnx:
         self.speed_ref = float(cfg["speed_ref"])
         self.yaw_rate_ref = float(cfg["yaw_rate_ref"])
         self._zero_image = np.zeros((1, 6, self.input_size[1], self.input_size[0]), dtype=np.float32)
-        self._zero_disp = np.zeros((1, 2, *self.disp_hw), dtype=np.float32)
+        self._zero_disp = np.zeros((1, 2, self.disp_hw[0], self.disp_hw[1] - 2 * self.disp_crop_cols),
+                                   dtype=np.float32)
 
     def disp_mismatch(self, msg: StereoDisp) -> str:
         """`stereo/disp` の設定が契約と違えば理由（同じなら空文字）。"""
@@ -137,6 +145,11 @@ class StereoOnnx:
             return f"探索幅・縮尺 {msg.num_disp}/{msg.scale:g}（モデル {self.disp_num_disp}/{self.disp_scale:g}）"
         if list(msg.rows) != self.disp_rows:
             return f"行の帯 {list(msg.rows)}（モデル {self.disp_rows}）"
+        # 方式・窓・一意性（`stereo_node --algo bm` や `MatchParams` の既定の変更で入力の分布が黙って変わるのを止める）
+        got = (msg.algo, msg.block, msg.uniqueness)
+        want = (self.disp_algo, self.disp_block, self.disp_uniqueness)
+        if self.disp_algo and got != want:
+            return f"照合の方式・窓・一意性 {got[0] or '?'}/{got[1]}/{got[2]}（モデル {want[0]}/{want[1]}/{want[2]}）"
         return ""
 
     def image_input(self, rgb: np.ndarray, rgb_left: np.ndarray) -> np.ndarray:
@@ -183,6 +196,8 @@ def load_model(onnx_path: Path) -> StereoOnnx:
         raise ValueError(f"視差の版が違う（モデル {cfg['disp_version']}・ノード {DISP_VERSION}）")
     if not 0.0 < float(cfg["crop_x"]) < 0.3:
         raise ValueError(f"crop_x が不正: {cfg['crop_x']}")
+    if not 0 <= int(cfg["disp_crop_cols"]) < int(cfg["disp_hw"][1]) // 2:
+        raise ValueError(f"disp_crop_cols が不正: {cfg['disp_crop_cols']}")
     for key in ("max_steer", "speed_ref", "yaw_rate_ref", "ds", "xy_scale"):
         if not float(cfg[key]) > 0:
             raise ValueError(f"{key} が正でない: {cfg[key]}")
@@ -260,7 +275,7 @@ class StereoE2ENode:
             return self.failed(f"視差の設定がモデルと違う: {why}", seq=seq)
         t0 = time.perf_counter()
         try:
-            d = disp_input(disp_from_bytes(disp.data, disp.h, disp.w))
+            d = disp_input(crop_disp(disp_from_bytes(disp.data, disp.h, disp.w), m.disp_crop_cols))
             image = m.image_input(rgb, rgb_left) if rgb is not None and rgb_left is not None else None
             state = m.state_input(vs.speed, vs.steer_actual, vs.yaw_rate) if vs is not None else None
             out = m.infer(image, d, state)

@@ -1232,6 +1232,11 @@ class StereoDisp(MsgBase):
     scale: float = 1.0             #: 照合の縮尺
     rows: list[int] = msgspec.field(default_factory=lambda: [0, 0])   #: 平行化画像の行の帯 [v0, v1)
     preproc_version: int = 0       #: `stereo_e2e_preproc.DISP_VERSION`
+    #: 照合の方式・窓・一意性（`MatchParams`）。変わると視差の分布が黙って変わるので、モデルの契約と照合する
+    #: （レビュー M5）。空文字・0 は「載っていない」（古い記録）
+    algo: str = ""
+    block: int = 0
+    uniqueness: int = 0
 
 
 class CamPath(MsgBase):

@@ -9,6 +9,9 @@
    （学習で使わない）
 
 校正値は**記録したときの** `vehicle.toml`（記録のメタデータ `provenance`）。無い古い記録は今の `vehicle.toml`。
+学習が使う校正の値（視差の帯の焦点距離・主点、左右のカメラの fx、`max_steer`・`steer_link`）も、その校正から
+求めて `dataset.json` の記録ごとの `calib_values` に残す。**学習は今の `vehicle.toml` を見ない**（記録の後で
+校正を直しても、視差と画像の拡張・正規化が食い違わない。レビュー M10）。
 照合の設定は既定で Pi の `stereo_node` と同じ（`MatchParams()`・行の帯 `DEFAULT_ROWS`）。設定は `dataset.json` の
 `stereo` に書き、`train.py` がモデルの契約へ写す。Pi の `stereo/disp` がこれと違う設定なら推論しない。
 
@@ -31,10 +34,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 from ml_e2e import extract as E  # noqa: E402
-from raspi.core.stereo_e2e_preproc import DEFAULT_DISP_HW, DISP_VERSION, disp_band_input  # noqa: E402
+from raspi.core.stereo_e2e_preproc import DEFAULT_DISP_HW, DISP_VERSION, band_geometry, disp_band_input  # noqa: E402
 from raspi.core.stereo_match import MatchParams  # noqa: E402
 
-__all__ = ["SELF_SOURCES", "stereo_settings", "make_processor", "disparity_for", "extract_recording", "main"]
+__all__ = ["SELF_SOURCES", "stereo_settings", "make_processor", "disparity_for", "calib_values", "extract_recording",
+           "main"]
 
 #: 手本にしない（このモデル自身・LiDAR を使う E2E 融合の）走行の指令の `source`
 SELF_SOURCES = ("auto:stereo_e2e", "auto:e2e_fusion")
@@ -82,11 +86,21 @@ def disparity_for(proc, jpg_right: bytes, jpg_left: bytes, disp_hw) -> tuple[np.
     return arr.astype(np.float16).astype(np.float32), float(proc.last_valid_frac)
 
 
-def cols_per_rad(proc, settings: dict) -> float:
-    """視差の帯の1列が何 rad か の逆数 [列/rad]（向きの拡張で帯を横にずらす量。平行化画像の焦点距離から）。"""
-    w = int(round(640 * float(settings["scale"]))) - int(settings["num_disp"])
-    bw = w // int(settings["disp_hw"][1])
-    return float(proc.rect.f) * float(settings["scale"]) / bw
+def calib_values(proc, vehicle, settings: dict, image_w: int) -> dict:
+    """学習が使う校正の値（記録の校正から。`train.py` は今の `vehicle.toml` を見ずにこれを使う）。
+
+    - `band_f`・`band_cx`: 視差の帯の列で測った焦点距離・主点（`stereo_e2e_preproc.band_geometry`。向きの拡張）
+    - `fx_px`・`fx_px_left`: 保存した画像（幅 `image_w`）の左右のカメラの水平焦点距離（画像の向きの拡張）
+    - `max_steer`・`steer_link`: 車両状態の正規化と、その舵角の意味（ステアのリンクの換算）
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ml_cam_e2e"))
+    from yaw_aug import camera_fx_px  # noqa: PLC0415
+
+    f_b, cx_b = band_geometry(proc.rect.f, proc.rect.cx, float(settings["scale"]), int(settings["num_disp"]),
+                              int(settings["disp_hw"][1]))
+    return {"band_f": f_b, "band_cx": cx_b, "image_w": int(image_w),
+            "fx_px": camera_fx_px(vehicle, "front", image_w), "fx_px_left": camera_fx_px(vehicle, "left", image_w),
+            "max_steer": float(vehicle.max_steer), "steer_link": [float(x) for x in vehicle.steer_link]}
 
 
 def extract_recording(path: Path, out_dir: Path, cfg: E.ExtractConfig, settings: dict, *,
@@ -112,6 +126,7 @@ def extract_recording(path: Path, out_dir: Path, cfg: E.ExtractConfig, settings:
     disp = np.zeros((n, 2, *hw), dtype=np.float16)
     ok = np.zeros(n, dtype=bool)
     valid = []
+    image_w = 0
     for i in range(n):
         try:
             arr, vf = disparity_for(proc, (out_dir / str(d["image"][i])).read_bytes(),
@@ -122,12 +137,17 @@ def extract_recording(path: Path, out_dir: Path, cfg: E.ExtractConfig, settings:
         disp[i] = arr
         ok[i] = True
         valid.append(vf)
+        if not image_w:
+            import cv2
+            img = cv2.imdecode(np.frombuffer((out_dir / str(d["image"][i])).read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+            image_w = int(img.shape[1]) if img is not None else 0
     d["disp"] = disp
     d["disp_ok"] = ok
     np.savez_compressed(npz, **d)
     info["disp_ok"] = int(ok.sum())
     info["valid_frac"] = round(float(np.mean(valid)), 3) if valid else None
-    info["cols_per_rad"] = cols_per_rad(proc, settings)
+    if image_w:
+        info["calib_values"] = calib_values(proc, vehicle, settings, image_w)
     return info
 
 

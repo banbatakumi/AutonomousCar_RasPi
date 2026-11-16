@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from raspi.core.stereo_e2e_preproc import PREPROC_VERSION
 from raspi.msgs import StereoDisp
 from raspi.msgs.types import TOPIC_AUTO_CTRL, TOPIC_STEREO_E2E_PLAN
 from raspi.nodes.stereo_e2e_node import StereoE2ENode, load_model
@@ -58,7 +59,7 @@ def test_without_model_reports_reason():
 def test_contract_must_describe_disparity(tmp_path: Path):
     onnx = tmp_path / "m.onnx"
     onnx.write_bytes(b"")
-    onnx.with_suffix(".json").write_text(json.dumps({"preproc_version": 1, "image_preproc_version": 3,
+    onnx.with_suffix(".json").write_text(json.dumps({"preproc_version": PREPROC_VERSION, "image_preproc_version": 3,
                                                      "cams": ["front", "left"]}))
     with pytest.raises(ValueError, match="契約に"):
         load_model(onnx)

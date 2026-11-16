@@ -41,12 +41,12 @@ from yaw_aug import camera_fx_px, yawed_window  # noqa: E402
 from ml_e2e import labels as L  # noqa: E402
 from ml_e2e import records as R  # noqa: E402
 from ml_e2e.eval import _corr, _uncrop, _vs  # noqa: E402
-from ml_stereo_e2e.dataset import shift_disp  # noqa: E402
 from ml_stereo_e2e.extract import disparity_for, make_processor, vehicle_for  # noqa: E402
 from raspi.auto.registry import merged_params  # noqa: E402
 from raspi.auto.stereo_e2e import StereoE2E  # noqa: E402
 from raspi.core.cam_e2e_preproc import crop_margin_px  # noqa: E402
-from raspi.core.stereo_e2e_preproc import DISP_VERSION, disp_from_bytes, disp_input, disp_to_bytes  # noqa: E402
+from raspi.core.stereo_e2e_preproc import (DISP_VERSION, crop_disp, disp_from_bytes, disp_input,  # noqa: E402
+                                           disp_to_bytes, yaw_shift_disp)
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import StereoDisp, VehicleState  # noqa: E402
 from raspi.nodes.stereo_e2e_node import StereoE2ENode, StereoOnnx, load_model  # noqa: E402
@@ -69,11 +69,12 @@ def model_settings(model: StereoOnnx) -> dict:
 def _disp_msg(arr: np.ndarray, model: StereoOnnx, t: int, seq: int) -> StereoDisp:
     return StereoDisp(data=disp_to_bytes(arr), h=arr.shape[1], w=arr.shape[2], num_disp=model.disp_num_disp,
                       scale=model.disp_scale, rows=list(model.disp_rows), preproc_version=DISP_VERSION,
+                      algo=model.disp_algo, block=model.disp_block, uniqueness=model.disp_uniqueness,
                       t_capture=t, seq=seq)
 
 
 def replay(mcap: Path, node: StereoE2ENode, vehicle: Vehicle, *, params: dict[str, float],
-           cols_per_rad: float, labels: dict | None = None, yaw_every: int = 0) -> dict:
+           band: tuple[float, float] | None, labels: dict | None = None, yaw_every: int = 0) -> dict:
     """記録1本を推論ノードと planner に通す。数字の dict を返す。"""
     rec = R.load(mcap)
     model = node.model
@@ -138,7 +139,7 @@ def replay(mcap: Path, node: StereoE2ENode, vehicle: Vehicle, *, params: dict[st
                 out["full"].append(float(d[ok].mean()))
 
         if yaw_every and out["ready"] % yaw_every == 0:
-            g = yaw_response(model, vehicle, rgb, rgb_left, arr, vs, params, cols_per_rad,
+            g = yaw_response(model, vehicle, rgb, rgb_left, arr, vs, params, band,
                              ref_xy=np.column_stack([plan.path_x, plan.path_y]))
             if g is not None and abs(g[1]) > 1e-3:
                 out["dpsi"].append(g[0])
@@ -147,11 +148,12 @@ def replay(mcap: Path, node: StereoE2ENode, vehicle: Vehicle, *, params: dict[st
 
 
 def yaw_response(model: StereoOnnx, vehicle: Vehicle, rgb: np.ndarray, rgb_left: np.ndarray, disp: np.ndarray,
-                 vs: VehicleState, params: dict[str, float], cols_per_rad: float, psi_deg: int = 4,
+                 vs: VehicleState, params: dict[str, float], band: tuple[float, float], psi_deg: int = 4,
                  ref_xy: np.ndarray | None = None) -> tuple[float, float] | None:
     """車の向きを ±`psi_deg` ずらした入力での、経路を追う舵の変化 dδ/dψ [rad/rad] と、その理想の値。
 
-    `ml_e2e/eval.yaw_response` と同じ測り方。点群の代わりに視差の帯を同じ角度だけ横にずらす（`dataset.shift_disp`）。
+    `ml_e2e/eval.yaw_response` と同じ測り方。点群の代わりに視差の帯を同じ角度だけ透視投影どおりに横にずらし
+    （`stereo_e2e_preproc.yaw_shift_disp`。`band` は帯の列で測った焦点距離・主点）、学習と同じ窓を切る。
     """
     fx = camera_fx_px(vehicle, "front", rgb.shape[1])
     fx_left = camera_fx_px(vehicle, "left", rgb.shape[1])
@@ -164,7 +166,7 @@ def yaw_response(model: StereoOnnx, vehicle: Vehicle, rgb: np.ndarray, rgb_left:
         psi = math.radians(sgn * psi_deg)
         win = _uncrop(yawed_window(rgb, margin, psi, fx, None), margin)
         win_left = _uncrop(yawed_window(rgb_left, margin, psi, fx_left, None), margin)
-        o = model.infer(model.image_input(win, win_left), disp_input(shift_disp(disp, psi * cols_per_rad)),
+        o = model.infer(model.image_input(win, win_left), disp_input(crop_disp(yaw_shift_disp(disp, psi, *band), model.disp_crop_cols)),
                         model.state_input(vs.speed, vs.steer_actual, vs.yaw_rate))
         steers.append(L.pursuit_steer(o.path_xy, look, vehicle.wheelbase, vehicle.max_steer))
         if ref_xy is not None:
@@ -243,7 +245,7 @@ def main() -> int:
     params = merged_params(StereoE2E.id, {"max_speed": args.max_speed})
     cfg = json.loads(args.model.with_suffix(".json").read_text())
     trained = set(cfg.get("train_records", []))
-    cols_per_rad = float(cfg.get("disp_cols_per_rad", 0.0))
+    band = (float(cfg["disp_col_f"]), float(cfg["disp_col_cx"])) if "disp_col_f" in cfg else None
     ds_data = None
     if args.data is not None:
         ds_data = float(json.loads((args.data / "dataset.json").read_text())["config"]["ds"])
@@ -255,8 +257,8 @@ def main() -> int:
         if args.data is not None and (args.data / f"{p.stem}.npz").exists():
             d = np.load(args.data / f"{p.stem}.npz")
             labels = {"t": d["t"], "path_xy": d["path_xy"], "path_valid": d["path_valid"], "ds": ds_data}
-        r = replay(p, node, vehicle, params=params, cols_per_rad=cols_per_rad, labels=labels,
-                   yaw_every=args.yaw_every if cols_per_rad > 0 else 0)
+        r = replay(p, node, vehicle, params=params, band=band, labels=labels,
+                   yaw_every=args.yaw_every if band is not None else 0)
 
         def med(key):
             return float(np.median(r[key])) if r[key] else float("nan")

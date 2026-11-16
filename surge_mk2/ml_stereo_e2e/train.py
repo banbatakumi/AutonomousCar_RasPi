@@ -8,6 +8,9 @@
 違いは2番目の入力が視差の帯であることと、左右反転をしないこと（`dataset.py`）。視差の帯の設定（照合・行の帯・
 縮めた大きさ）は `dataset.json` の `stereo` を契約へ写す（Pi の `stereo/disp` と照合される）。
 
+**校正の値（視差の帯の焦点距離・主点、カメラの fx、`max_steer`・`steer_link`）は `dataset.json` の記録ごとの
+`calib_values`（抽出したときの記録の校正）だけを使い、今の `vehicle.toml` は見ない**（レビュー M10）。
+
 検証で出す数字は `ml_e2e` と同じ（経路の平均誤差・最初の 2m・速度）に加え、画像・視差・車両状態を伏せたときの経路誤差。
 """
 
@@ -28,15 +31,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "ml_cam_e2e"))
 
-from yaw_aug import BODY_MASK_LEFT_NAME, camera_fx_px, ensure_body_mask, front_fx_px, margin_for  # noqa: E402
+from yaw_aug import BODY_MASK_LEFT_NAME, ensure_body_mask, margin_for  # noqa: E402
 
 from ml_e2e.train import _avail, _to, evaluate, losses, pick_device  # noqa: E402
 from ml_stereo_e2e.dataset import (StereoDataset, StereoSpec, load_records, split_records,  # noqa: E402
                                    stereo_sample_weights)
 from ml_stereo_e2e.model import StereoE2EModel  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
-from raspi.core.stereo_e2e_preproc import PREPROC_VERSION  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
+from raspi.core.stereo_e2e_preproc import PREPROC_VERSION, disp_margin_cols  # noqa: E402
 
 __all__ = ["main"]
 
@@ -69,7 +71,6 @@ def main() -> int:
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    vehicle = Vehicle.load()
     w, h = (int(x) for x in args.size.lower().split("x"))
     meta = json.loads((args.data / "dataset.json").read_text())
     stereo = meta.get("stereo")
@@ -83,29 +84,51 @@ def main() -> int:
     if args.yaw_aug_deg <= 0:
         print("--yaw-aug-deg は正の値が要る（左右2台の前処理は左右の切り落としが要る）", file=sys.stderr)
         return 2
-    cprs = [r["cols_per_rad"] for r in meta["records"].values() if r.get("cols_per_rad")]
-    if not cprs:
-        print("視差のある記録がありません。先に `ml_stereo_e2e.extract` で標本を作ってください", file=sys.stderr)
+    records, _ = load_records(args.data)
+    calib = {r.name: meta["records"].get(r.name, {}).get("calib_values") for r in records}
+    no_calib = [name for name, c in calib.items() if not c]
+    if not records or no_calib:
+        print("視差のある記録が無い、または校正の値（calib_values）の無い記録がある"
+              f"{'（' + '・'.join(no_calib) + '）' if no_calib else ''}。"
+              "`ml_stereo_e2e.extract` で標本を作り直してください", file=sys.stderr)
         return 2
-    cols_per_rad = float(np.median(cprs))
+    # 舵角の意味（max_steer・steer_link）は全記録で同じでなければ混ぜられない
+    steer = {(round(c["max_steer"], 6), tuple(round(x, 6) for x in c["steer_link"])) for c in calib.values()}
+    if len(steer) != 1:
+        print(f"記録によって max_steer・steer_link が違う（{sorted(steer)}）。同じ校正の記録だけで学習する",
+              file=sys.stderr)
+        return 2
+    (max_steer, steer_link), = steer
+    src_w = {c["image_w"] for c in calib.values()}
+    if len(src_w) != 1:
+        print(f"記録によって画像の幅が違う（{sorted(src_w)}）", file=sys.stderr)
+        return 2
+    src_w = src_w.pop()
+    fx_px = float(np.median([c["fx_px"] for c in calib.values()]))
+    fx_px_left = float(np.median([c["fx_px_left"] for c in calib.values()]))
+    band_geom = {name: (float(c["band_f"]), float(c["band_cx"])) for name, c in calib.items()}
+    disp_hw_full = (int(stereo["disp_hw"][0]), int(stereo["disp_hw"][1]))
+    # 視差の帯の窓: どの記録の帯でも、±yaw_aug_deg のずらしで空いた列が入らない幅
+    crop_cols = max(disp_margin_cols(math.radians(args.yaw_aug_deg), f, cx, disp_hw_full[1])
+                    for f, cx in band_geom.values())
+    disp_hw = (disp_hw_full[0], disp_hw_full[1] - 2 * crop_cols)
+    f_med = float(np.median([g[0] for g in band_geom.values()]))
+    cx_med = float(np.median([g[1] for g in band_geom.values()]))
 
     all_frames = sorted((args.data / "frames").glob("*/*.jpg"))
     frames = [p for p in all_frames if not p.stem.endswith("_left")]
     frames_left = [p for p in all_frames if p.stem.endswith("_left")]
-    from PIL import Image
-    src_w = Image.open(frames[0]).size[0]
-    fx_px = front_fx_px(vehicle, src_w)
-    fx_px_left = camera_fx_px(vehicle, "left", src_w)
+    if not frames or not frames_left:
+        print(f"{args.data / 'frames'} に左右の画像がありません", file=sys.stderr)
+        return 2
     crop_x = margin_for(args.yaw_aug_deg, max(fx_px, fx_px_left)) / src_w
     body_mask = ensure_body_mask(args.data, frames)
     body_mask_left = ensure_body_mask(args.data, frames_left, BODY_MASK_LEFT_NAME)
     print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  fx={fx_px:.1f}px  左右の切り落とし {crop_x * 100:.1f}%  "
-          f"視差の帯 {cols_per_rad:.1f}列/rad")
+          f"視差の帯 {disp_hw_full[1]}列のうち両端 {crop_cols}列を落とした窓")
 
-    disp_hw = (int(stereo["disp_hw"][0]), int(stereo["disp_hw"][1]))
-    spec = StereoSpec(size=(w, h), crop_x=crop_x, k=args.k, stride=args.stride, max_steer=vehicle.max_steer,
+    spec = StereoSpec(size=(w, h), crop_x=crop_x, k=args.k, stride=args.stride, max_steer=max_steer,
                       disp_hw=disp_hw)
-    records, _ = load_records(args.data)
     train_r, val_r = split_records(records, args.val)
     if not train_r:
         print("学習に使える記録がありません", file=sys.stderr)
@@ -113,10 +136,10 @@ def main() -> int:
     print("# 学習: " + " ".join(f"{r.name}({int(r.data['disp_ok'].sum())})" for r in train_r))
     print("# 検証: " + (" ".join(f"{r.name}({int(r.data['disp_ok'].sum())})" for r in val_r) or "なし"))
 
-    train_ds = StereoDataset(train_r, args.data, spec, cols_per_rad=cols_per_rad, augment=True,
+    train_ds = StereoDataset(train_r, args.data, spec, band_geom=band_geom, crop_cols=crop_cols, augment=True,
                              yaw_max_deg=args.yaw_aug_deg, fx_px=fx_px, body_mask=body_mask,
                              photo_strength=args.photo_aug, fx_px_left=fx_px_left, body_mask_left=body_mask_left)
-    val_ds = StereoDataset(val_r, args.data, spec)
+    val_ds = StereoDataset(val_r, args.data, spec, band_geom=band_geom, crop_cols=crop_cols)
     xy_scale = train_ds.xy_scale
     loader_kw = dict(batch_size=args.batch_size, num_workers=args.workers, persistent_workers=args.workers > 0)
     if args.balance > 0:
@@ -145,13 +168,13 @@ def main() -> int:
         "image_preproc_version": PREPROC_VERSION_STEREO,
         "cams": list(STEREO_CAMS),
         "input_size": [w, h], "crop_x": crop_x,
-        "disp_hw": list(disp_hw), "disp_num_disp": int(stereo["num_disp"]), "disp_rows": list(stereo["rows"]),
+        "disp_hw": list(disp_hw_full), "disp_crop_cols": crop_cols, "disp_num_disp": int(stereo["num_disp"]), "disp_rows": list(stereo["rows"]),
         "disp_scale": float(stereo["scale"]), "disp_version": int(stereo["disp_version"]),
         "disp_algo": stereo["algo"], "disp_block": int(stereo["block"]), "disp_uniqueness": int(stereo["uniqueness"]),
-        "disp_cols_per_rad": cols_per_rad,
+        "disp_col_f": f_med, "disp_col_cx": cx_med,
         "k": spec.k, "ds": ds, "xy_scale": xy_scale,
         "max_steer": spec.max_steer, "speed_ref": spec.speed_ref, "yaw_rate_ref": spec.yaw_rate_ref,
-        "steer_link": list(vehicle.steer_link),
+        "steer_link": list(steer_link),
         "yaw_aug_deg": args.yaw_aug_deg, "photo_aug": args.photo_aug,
         "drop": [args.drop_image, args.drop_disp, args.drop_state],
         "epochs": args.epochs, "seed": args.seed, "stride": args.stride,

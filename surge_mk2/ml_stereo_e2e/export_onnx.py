@@ -30,19 +30,25 @@ __all__ = ["CONTRACT_KEYS", "build_model", "export", "verify_parity", "main", "D
 #: `train_config.json` から契約へ写すキー
 CONTRACT_KEYS = ("preproc_version", "image_preproc_version", "input_size", "crop_x",
                  "disp_hw", "disp_num_disp", "disp_rows", "disp_scale", "disp_version", "disp_algo", "disp_block",
-                 "disp_uniqueness", "disp_cols_per_rad", "k", "ds", "xy_scale", "max_steer", "speed_ref", "yaw_rate_ref", "steer_link",
+                 "disp_uniqueness", "disp_crop_cols", "disp_col_f", "disp_col_cx", "k", "ds", "xy_scale", "max_steer", "speed_ref", "yaw_rate_ref", "steer_link",
                  "maps", "train_records")
 DEFAULT_MODELS_DIR = _ROOT / "models" / "stereo_e2e"
 
 
+def disp_input_hw(cfg: dict) -> tuple[int, int]:
+    """モデルに入る視差の窓の大きさ（帯 `disp_hw` の両端 `disp_crop_cols` 列を落とした大きさ）。"""
+    dh, dw = cfg["disp_hw"]
+    return int(dh), int(dw) - 2 * int(cfg["disp_crop_cols"])
+
+
 def build_model(cfg: dict) -> StereoE2EModel:
-    return StereoE2EModel(disp_hw=tuple(cfg["disp_hw"]), k=int(cfg["k"]), xy_scale=float(cfg["xy_scale"]),
+    return StereoE2EModel(disp_hw=disp_input_hw(cfg), k=int(cfg["k"]), xy_scale=float(cfg["xy_scale"]),
                           pretrained=False)
 
 
 def _dummy(cfg: dict, rng: np.random.Generator | None = None) -> tuple[np.ndarray, ...]:
     w, h = cfg["input_size"]
-    dh, dw = cfg["disp_hw"]
+    dh, dw = disp_input_hw(cfg)
     shapes = ((1, 6, h, w), (1, 2, dh, dw), (1, 3))
     if rng is None:
         return (*(np.zeros(s, dtype=np.float32) for s in shapes), np.ones((1, 3), dtype=np.float32))
