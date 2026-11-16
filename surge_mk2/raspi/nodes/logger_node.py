@@ -94,6 +94,8 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
+    TOPIC_STEREO_DISP,
+    TOPIC_STEREO_E2E_PLAN,
     TOPIC_STEREO_INFO,
     TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
@@ -138,6 +140,9 @@ DEFAULT_TOPICS = [
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
     TOPIC_STEREO_INFO,
+    # 実車の視差の帯（2×12×68 の float、小さい）。`ml_stereo_e2e.eval --check-disp` が Mac で作り直した
+    # 視差と比べる。学習と推論の入力のずれ（cam_e2e で苦労した種類）をここでしか検出できない
+    TOPIC_STEREO_DISP,
     # 照合・左右同期を回していた期間（`CamConfig.depth`・`stereo`）。"照合していない" と "記録が欠けた" を区別する
     TOPIC_CAM_CONFIG,
     TOPIC_LINE_CAM,
@@ -145,6 +150,7 @@ DEFAULT_TOPICS = [
     TOPIC_TRACK_TARGET,
     TOPIC_CAM_E2E_CMD,
     TOPIC_E2E_FUSION_PLAN,
+    TOPIC_STEREO_E2E_PLAN,
     # 操作のイベント
     TOPIC_LOG_CTRL,
     TOPIC_UI_EVENT,

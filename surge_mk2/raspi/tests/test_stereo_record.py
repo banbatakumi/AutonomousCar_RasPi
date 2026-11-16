@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import tomllib
@@ -54,6 +53,39 @@ class TestStereoInfo(unittest.TestCase):
     def test_topics_are_logged(self):
         self.assertIn(TOPIC_STEREO_INFO, DEFAULT_TOPICS)
         self.assertIn(TOPIC_CAM_CONFIG, DEFAULT_TOPICS)
+
+    def test_every_bus_topic_is_logged_or_excluded_on_purpose(self):
+        """バスに流れるトピックはすべて記録するか、記録しない理由が下の表にある（レビュー H3 の再発防止）。
+
+        `stereo/disp`・`stereo_e2e/plan` が録られていないまま、それを前提にした検証道具を作っていた。
+        新しいトピックを足したら、ここで「録るか・録らない理由」を決めさせる。
+        """
+        from raspi.bus.zbus import TOPIC_OWNER
+        # 記録しないトピックとその理由
+        not_logged = {
+            "cam/mask": "GUI 表示用の JPEG。中身は scan/cam・path/cam に数値で残る",
+            "cam/model": "モデル選択の意思。使ったモデルは各ノードの出力・provenance に残る",
+            "e2e/model": "同上",
+            "cam_e2e/model": "同上",
+            "e2e_fusion/model": "同上",
+            "stereo_e2e/model": "同上",
+            "track/roi": "GUI からの追跡範囲の指定。結果は track/target に残る",
+            "route/select": "信号ノードの切替要求。採用結果は auto/state に残る",
+            "signal/config": "GUI の HSV しきい値（調整用）",
+            "signal/status": "GUI のライブ調整用の表示",
+        }
+        logged = set(DEFAULT_TOPICS)
+        for topic in TOPIC_OWNER:
+            if topic.startswith("image/"):
+                continue                                   # "image/" の接頭辞購読で取る
+            with self.subTest(topic=topic):
+                self.assertTrue(topic in logged or topic in not_logged,
+                                f"{topic} を DEFAULT_TOPICS に足すか、記録しない理由を決める")
+
+    def test_stereo_e2e_inputs_and_outputs_are_logged(self):
+        from raspi.msgs.types import TOPIC_STEREO_DISP, TOPIC_STEREO_E2E_PLAN
+        self.assertIn(TOPIC_STEREO_DISP, DEFAULT_TOPICS)
+        self.assertIn(TOPIC_STEREO_E2E_PLAN, DEFAULT_TOPICS)
 
     def test_owner_is_registered(self):
         from raspi.bus.zbus import TOPIC_OWNER
