@@ -28,9 +28,25 @@ def test_new_disp_is_throttled_by_capture_time():
     assert node.take_new_disp(None) is None
     assert node.take_new_disp(_d(1, 1000)) is not None
     assert node.take_new_disp(_d(1, 1000)) is None              # 同じ組は2度使わない
-    assert node.take_new_disp(_d(2, 1067)) is None              # 15Hz の次の組（67ms）は間引く
-    assert node.take_new_disp(_d(3, 1133)) is not None          # 133ms 後は通す
-    assert node.take_new_disp(_d(4, 1210)) is not None          # 周期の 3/4（75ms）以上なら通す
+    assert node.take_new_disp(_d(2, 1067)) is None              # 予定（1100）より早い組は間引く
+    assert node.take_new_disp(_d(3, 1133)) is not None          # 予定を過ぎた組は通す（次の予定は 1200）
+    assert node.take_new_disp(_d(4, 1195)) is not None          # 揺れの幅（10%）なら早くても通す
+
+
+def test_rate_is_kept_on_average_from_a_15hz_stream():
+    """15Hz の視差から既定 10Hz に間引いて、平均が 10Hz になる（前は 1 組おきの 7.5Hz だった。レビュー M3）。"""
+    node = StereoE2ENode(rate_hz=10)
+    n = sum(node.take_new_disp(StereoDisp(seq=i + 1, t_capture=int(1e9 + i * 1e9 / 15))) is not None
+            for i in range(150))                              # 10 秒ぶん
+    assert 99 <= n <= 101
+
+
+def test_rate_restarts_after_a_gap():
+    node = StereoE2ENode(rate_hz=10)
+    assert node.take_new_disp(_d(1, 1000)) is not None
+    assert node.take_new_disp(_d(2, 3000)) is not None          # 途絶のあと
+    assert node.take_new_disp(_d(3, 3067)) is None              # 溜めた分を一気に通さない
+    assert node.take_new_disp(_d(4, 3100)) is not None
 
 
 def test_without_model_reports_reason():

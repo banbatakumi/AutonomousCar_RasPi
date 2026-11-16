@@ -14,7 +14,8 @@
 
 ## 推論のきっかけと時刻
 
-**`stereo/disp` が届いたら推論する**（照合は ARM 中 15Hz。推論は `--rate-hz` 既定 10Hz に間引く）。
+**`stereo/disp` が届いたら推論する**（照合は ARM 中 15Hz。推論は `--rate-hz` 既定 10Hz に間引く。
+平均が 10Hz になるよう 3 組に 2 組を通すので、間隔は 67ms と 133ms が交互になる）。
 画像は**その視差を作った組そのもの**（同じ `t_capture` のコマを左右のリングから読む）なので、画像と視差は必ず
 同じ瞬間。出力の基準時刻（`t_capture`）もその撮影時刻。組が読めない周は画像を伏せて（`avail`）視差と車両状態だけで
 推論する。視差の設定（帯・探索幅・縮めた大きさ・版）がモデルの契約と違えば推論しない。
@@ -79,6 +80,8 @@ HB_HZ = 10
 MODES = ("stereo_e2e",)
 #: 推論の上限頻度の既定 [Hz]
 DEFAULT_RATE_HZ = 10.0
+#: 間引きで「予定より早い」組を通す幅（周期に対する割合）。照合の時刻の揺れを吸う
+_RATE_JITTER = 0.1
 #: 視差がこれより古ければ推論しない [s]
 _DISP_STALE_S = 0.3
 #: 推論中に視差が来ないとき、`ready=False` を出す間隔 [s]
@@ -283,10 +286,15 @@ class StereoE2ENode:
             return None
         self._last_disp_seq = disp.seq
         t = int(disp.t_capture)
-        # 撮影時刻の間隔で間引く（周期の 1/4 だけ早い組も通す。`stereo_node` と同じ理由）
-        if self._last_infer_t >= 0 and t - self._last_infer_t < self.min_period_ns - self.min_period_ns // 4:
+        # 撮影時刻で間引き、**平均が `rate_hz` になる**ように「次の予定」を周期ずつ進める（レビュー M3）。
+        # 前回の推論から周期で測ると、15Hz（66.7ms 間隔）の視差を 10Hz にしたいとき 1 組おき（7.5Hz）に
+        # なっていた。予定から大きく遅れた（組が途絶えた）ら今から数え直す。照合の時刻の揺れは
+        # `_RATE_JITTER` の割合だけ早い組も通す
+        period = self.min_period_ns
+        if self._next_infer_t >= 0 and t < self._next_infer_t - int(period * _RATE_JITTER):
             return None
-        self._last_infer_t = t
+        due = self._next_infer_t + period
+        self._next_infer_t = due if self._next_infer_t >= 0 and t - due < 0 else t + period
         return disp
 
     def read_pair(self, latest: dict, t_capture: int) -> tuple[np.ndarray | None, np.ndarray | None]:
