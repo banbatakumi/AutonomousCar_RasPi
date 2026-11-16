@@ -560,19 +560,29 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 PI_THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
 
 
+#: Pi の温度を読み直す間隔 [s]。温度は秒単位でしか変わらないので、50Hz の配信のたびにファイルを開かない
+PI_TEMP_PERIOD_S = 1.0
+_pi_temp_cache: tuple[float, float | None] = (-math.inf, None)
+
+
 def _read_pi_temp_c() -> float | None:
-    """RasPi 本体の CPU 温度。GUI のラジコンビュー温度計に出す。
+    """RasPi 本体の CPU 温度。GUI のラジコンビュー温度計に出す（`PI_TEMP_PERIOD_S` ごとに読み直す）。
 
     `vcgencmd` はサブプロセス起動を挟む分だけ重く環境依存も増えるので使わない。
-    このパスは Pi 5 / Debian Trixie でも変わらず、50Hz で毎回開いても軽いので
-    キャッシュしない。**Pi 実機以外（Mac上のシムなど）ではファイルが無く None**
+    **Pi 実機以外（Mac上のシムなど）ではファイルが無く None**
     になる——STM32 側の `vs.temp` が `null = MD が無言で信用できない` を示すのと
     同じ扱いにして、GUI 側のしきい値判定（`tempLevel()`）を1本にまとめている。
     """
+    global _pi_temp_cache
+    now = time.monotonic()
+    if now - _pi_temp_cache[0] < PI_TEMP_PERIOD_S:
+        return _pi_temp_cache[1]
     try:
-        return int(PI_THERMAL_ZONE.read_text().strip()) / 1000.0
+        val: float | None = int(PI_THERMAL_ZONE.read_text().strip()) / 1000.0
     except (OSError, ValueError):
-        return None
+        val = None
+    _pi_temp_cache = (now, val)
+    return val
 
 
 # ── サーバ ──────────────────────────────────────────────────────────
@@ -3261,7 +3271,9 @@ class TelemetryServer:
         auto = self.sub.latest.get(TOPIC_AUTO_CMD)
         if auto is None:
             return
-        key = (auto.mode, auto.arm, auto.brake, auto.target_speed, auto.target_steer,
+        # 指令の中身で STM32 に効くものは全部キーに入れる（入れ忘れると、その変化だけ次の定期送信まで最大 20ms 遅れる）
+        key = (auto.mode, auto.arm, auto.brake, auto.brake_torque, auto.target_speed, auto.target_steer,
+               auto.accel_limit, auto.launch, auto.passing, auto.winker_left, auto.winker_right,
                auto.torque_mode, auto.target_torque, tuple(sorted(auto.fw_overrides.items())))
         if key == self._last_auto_key:
             return
