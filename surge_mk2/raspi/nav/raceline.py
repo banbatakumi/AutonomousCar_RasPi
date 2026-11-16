@@ -72,6 +72,21 @@ from .native import addr as _addr, f64 as _f64, lib as _NATIVE_LIB
 
 #: C の内側ループ（`nav/native.py`）。`None` なら Python 版で回す（テストが差し替えて両方を比べる）
 _NATIVE = _NATIVE_LIB
+#: これより点の多い経路を密行列で解くときは知らせる（Pi の参照 BLAS では 500 点で 10 秒を超える。レビュー L17）
+_DENSE_WARN_N = 200
+_dense_warned = False
+
+
+def _warn_dense(n: int) -> None:
+    """C 版が無く密行列で解くことを一度だけ知らせる（黙って遅くならないように）。"""
+    global _dense_warned
+    if _dense_warned:
+        return
+    _dense_warned = True
+    import sys
+    print(f"!! raceline: C 版（nav/_native.c）が使えないので {n} 点の経路を密行列で解く"
+          "（Pi では 1 本 10 秒を超えうる。`python -c 'from raspi.nav import native'` でビルドの失敗を確かめる）",
+          file=sys.stderr, flush=True)
 
 __all__ = ["RaceLine", "optimize", "curvature", "speed_profile", "min_curvature_alpha",
            "sight_distance", "sight_speed",
@@ -171,6 +186,8 @@ def min_curvature_alpha(c: np.ndarray, nrm: np.ndarray,
     if _NATIVE is not None and len(c) >= _BAND_MIN_N:
         return _min_curvature_alpha_band(c, nrm, lo, hi, lam=lam, step=step, max_iter=max_iter,
                                          closed=closed, weights=weights, warm=warm)
+    if len(c) >= _DENSE_WARN_N:
+        _warn_dense(len(c))
     n = len(c)
     d2 = _cyclic_d2(n) if closed else _open_d2(n)
     if weights is None:

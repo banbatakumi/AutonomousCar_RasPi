@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import heapq
 import math
+import threading
 import time
 import weakref
 from dataclasses import dataclass, field
@@ -263,8 +264,9 @@ class _Heuristic2D:
     def _dijkstra(self, free: np.ndarray, goal: tuple[float, float]) -> np.ndarray:
         n, res = self.n, self.res
         cost = np.full((n, n), np.inf)
-        gc = int((goal[0] - self.origin[0]) / res)
-        gr = int((goal[1] - self.origin[1]) / res)
+        # `int()` は 0 へ向けて切り捨てるので、格子の外 1 セル以内が 0 番セルになる。`_key` と同じく floor
+        gc = math.floor((goal[0] - self.origin[0]) / res)
+        gr = math.floor((goal[1] - self.origin[1]) / res)
         if not (0 <= gc < n and 0 <= gr < n):
             return cost
         # **目標セルが膨張後の自由空間に入らないことは普通に起こる**（壁に
@@ -300,8 +302,8 @@ class _Heuristic2D:
         return cost
 
     def __call__(self, x: float, y: float) -> float:
-        c = int((x - self.origin[0]) / self.res)
-        r = int((y - self.origin[1]) / self.res)
+        c = math.floor((x - self.origin[0]) / self.res)
+        r = math.floor((y - self.origin[1]) / self.res)
         if not (0 <= c < self.n and 0 <= r < self.n):
             return math.inf
         return float(self.cost[r, c]) * _OCTILE_ADMISSIBLE
@@ -480,6 +482,25 @@ def _successors(node: _Node, curvatures: list[float], lmap: LocalMap,
     return out
 
 
+#: `_native_successors` の入力（車体の円・曲率）と出力の配列。展開ごとに作り直さず、同じ円・曲率の間（plan 1 回）は
+#: 使い回す。出力は呼んだ直後に list へ写すので上書きしてよい。スレッドごとに持つ（`submit_job` は別スレッドで回る）
+_NATIVE_BUF = threading.local()
+
+
+def _native_buffers(circles_src, curvatures: list[float]):
+    key = (tuple(curvatures),)
+    got = getattr(_NATIVE_BUF, "v", None)
+    if got is not None and got[0] is circles_src and got[1] == key:
+        return got[2]
+    circles = native.f64(circles_src)
+    cx, cy = np.ascontiguousarray(circles[:, 0]), np.ascontiguousarray(circles[:, 1])
+    curv = native.f64(curvatures)
+    nchild = 2 * curv.size
+    bufs = (cx, cy, curv, np.empty(3 * nchild), *(np.empty(nchild, dtype=np.float32) for _ in range(3)))
+    _NATIVE_BUF.v = (circles_src, key, bufs)
+    return bufs
+
+
 def _native_successors(node: _Node, curvatures: list[float], lmap: LocalMap, cfg: HybridConfig):
     """`_successors_py` と同じ値の C 版（`nav/_native.c` の `hy_successors`）。使えなければ `None`。"""
     wall_e, blk_e = getattr(lmap, "_wall_edt", None), getattr(lmap, "_blocked_edt", None)
@@ -488,12 +509,8 @@ def _native_successors(node: _Node, curvatures: list[float], lmap: LocalMap, cfg
             or wall_e.shape != blk_e.shape or not wall_e.flags.c_contiguous
             or not blk_e.flags.c_contiguous):
         return None
-    circles = native.f64(lmap._circles)
-    cx, cy = np.ascontiguousarray(circles[:, 0]), np.ascontiguousarray(circles[:, 1])
-    curv = native.f64(curvatures)
+    cx, cy, curv, pose, wmin, umin, wend = _native_buffers(lmap._circles, curvatures)
     nchild = 2 * curv.size
-    pose = np.empty(3 * nchild)
-    wmin, umin, wend = (np.empty(nchild, dtype=np.float32) for _ in range(3))
     h, w = wall_e.shape
     g = lmap.grid
     x0, y0, yaw0 = node.pose

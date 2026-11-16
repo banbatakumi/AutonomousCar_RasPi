@@ -231,9 +231,14 @@ class LocalMap:
         起きる。実測では縦列駐車で「計画→即制動→再計画」が延々と交代した。
         """
         g = self.grid
-        hits0, miss0 = g.hits.copy(), g.misses.copy()
+        n_hit = int(np.count_nonzero(pts.hit))
+        # 消えた壁の判定（`_forget_vanished`）を使わない周（当たりが少ない）は、取り込む前の写しを作らない
+        # （600×600 の 2 本で約 1MB を 10Hz で写していた）
+        forget = n_hit >= self._MIN_HITS_TO_FORGET
+        hits0, miss0 = (g.hits.copy(), g.misses.copy()) if forget else (None, None)
         g.integrate(pts, pose)
-        self._forget_vanished(hits0, miss0, int(np.count_nonzero(pts.hit)))
+        if forget:
+            self._forget_vanished(hits0, miss0, n_hit)
         x0, y0, yaw = pose
         c, s = math.cos(yaw), math.sin(yaw)
         wx = x0 + pts.x[pts.hit] * c - pts.y[pts.hit] * s
