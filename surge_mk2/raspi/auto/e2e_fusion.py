@@ -262,6 +262,7 @@ class E2EFusion(Planner):
                                   now=vs.t_capture / NS if vs.t_capture else None)
         else:
             pp = follow(path, pose, vs.speed, vs.steer_actual, self._pursuit(p), hint=self._idx)
+            self._mpc.fallback = ""                   # MPC を使っていない（理由の表示に古い値を残さない）
         self._idx = pp.index
         j = nearest_index(path, pose[0], pose[1], pp.index, window=4)
         pos = speedctl.arc_index(path, j, pose[0], pose[1])
@@ -308,8 +309,9 @@ class E2EFusion(Planner):
         st.accel_limit = ramp
         st.cross_track = cross
         inputs = "＋".join(n for n, ok in (("画像", plan.has_image), (self.second_input, plan.has_lidar)) if ok)
+        mpc_note = f"・MPC の代わりに Pure Pursuit（{self._mpc.fallback}）" if self._mpc.fallback else ""
         st.reason = (f"経路 {path.length:.1f}m を追従（{inputs}・推論 {plan.infer_ms:.0f}ms・"
-                     f"遅れ {age * 1e3:.0f}ms）")
+                     f"遅れ {age * 1e3:.0f}ms{mpc_note}）")
         return st
 
     def tick(self, vs: VehicleState | None) -> tuple[float, float | None, float] | None:

@@ -180,6 +180,10 @@ def _profile(x, d0, d1, d2, dT, L1, S2, L3):
     return d, dd, ddd
 
 
+#: Frenet の初期値として扱う向きのずれの上限 [rad]。超えたら追い抜きの経路を作らない（`plan`）
+PSI_MAX = 1.2
+
+
 def frenet_state(path: RaceLine, index: int, x: float, y: float, yaw: float):
     """車の (経路の始点からの弧長 s, 横ずれ d, d' = tan(向きのずれ))。"""
     n = len(path)
@@ -191,7 +195,9 @@ def frenet_state(path: RaceLine, index: int, x: float, y: float, yaw: float):
     along = dx * t[0] + dy * t[1]
     d = -dx * t[1] + dy * t[0]
     psi = (yaw - math.atan2(t[1], t[0]) + math.pi) % (2 * math.pi) - math.pi
-    return along, d, math.tan(max(-1.2, min(1.2, psi)))
+    # tan は ±90° で発散するので有限に抑える。抑えた値（`PSI_MAX` ちょうど）なら Frenet の多項式の初期値として
+    # 意味が無いので、`plan` は追い抜きの経路を作らない
+    return along, d, math.tan(max(-PSI_MAX, min(PSI_MAX, psi)))
 
 
 def frenet_tracks(path: RaceLine, order: np.ndarray, s_rel: np.ndarray, nrm: np.ndarray,
@@ -417,6 +423,12 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
             x_prev = None
     if not tracks and abs(start[0]) < _ON_LINE_M:
         return OvertakeResult("clear", None, None, [], None, 0, "")
+    if x_prev is None and abs(math.atan(d1_act)) >= PSI_MAX - 1e-9:
+        # 経路に対して大きく横を向いている（線形の範囲外）。切った値から引いた経路は静かに誤るので作らない（レビュー L12）
+        if not tracks:
+            return OvertakeResult("clear", None, None, [], None, 0, "")
+        return OvertakeResult("blocked", None, None, [], None, 0,
+                              f"向きのずれが {math.degrees(PSI_MAX):.0f}° を超え、追い抜きの経路を作れない")
 
     sel = (index + np.arange(0, span, step_n)) % n
     x = ((s_cum[sel] - s_car) % L)

@@ -68,6 +68,10 @@ class MPCConfig(NamedTuple):
     speed_preview_s: float | None = None
 
 
+#: MPC が向きのずれを線形に扱える上限 [rad]。超えたら Pure Pursuit の舵を返す（`MPCFollower.fallback`）
+E_PSI_LINEAR_MAX = 1.2
+
+
 class MPCFollower:
     """前回解を持つ MPC 追従。planner が1つ持ち、`reset()` で捨てる。"""
 
@@ -82,6 +86,8 @@ class MPCFollower:
         #: 直近の解の診断（GUI・ベンチ用）
         self.last_iters = 0
         self.last_cost = 0.0
+        #: 直近の呼び出しで MPC を使わず Pure Pursuit の舵を返した理由（使ったら空文字）。planner が理由の表示に使う
+        self.fallback = ""
 
     def reset(self) -> None:
         self._warm = None
@@ -164,7 +170,9 @@ class MPCFollower:
             t = path.xy[min(i + 1, n - 1)] - path.xy[max(i - 1, 0)]
         tn = math.hypot(*t)
         # 接線が取れない・曲率の列が経路と合わない（曲率なしで作った経路）なら Pure Pursuit の舵で返す
+        self.fallback = ""
         if tn < 1e-9 or len(path.kappa) != n:
+            self.fallback = "経路の接線・曲率が取れない"
             return base
         ty = math.atan2(t[1], t[0])
         e_y = (t[0] * (py - path.xy[i, 1]) - t[1] * (px - path.xy[i, 0])) / tn
@@ -183,7 +191,11 @@ class MPCFollower:
         s_off = max(-s_lim, min(s_lim, s_off))
         e_y -= 0.5 * k_i * s_off * s_off          # 円弧は接線から κ·s²/2 だけ内側にある
         e_psi = (pyaw - (ty + k_i * s_off) + math.pi) % (2.0 * math.pi) - math.pi
-        e_psi = max(-1.2, min(1.2, e_psi))        # 線形化の範囲外へ飛ばさない
+        if abs(e_psi) > E_PSI_LINEAR_MAX:
+            # 線形化（sin ψ ≈ ψ）の範囲外。値を切って解くと静かに誤った舵を出すので、向きの大きなずれでも
+            # 幾何で正しい Pure Pursuit の舵にする（レビュー L12）
+            self.fallback = f"向きのずれ {math.degrees(e_psi):+.0f}° が MPC の範囲外"
+            return base
 
         N = cfg.horizon
         v = np.empty(N)

@@ -2339,7 +2339,12 @@ class Slam2dRaceLine(Planner):
         return self._us.k if p.get("us_learn", 0) > 0 else 0.0
 
     def _us_note(self, p: dict[str, float]) -> str:
-        """reason の注記: 学習したアンダーステア勾配（使っていなければ空）。"""
+        """reason の注記: 学習したアンダーステア勾配（使っていなければ空）と、MPC を使えなかった理由。"""
+        if p["ctrl_mode"] >= 0.5 and self._mpc.fallback:
+            return f"・MPC の代わりに Pure Pursuit（{self._mpc.fallback}）" + self._us_note_k(p)
+        return self._us_note_k(p)
+
+    def _us_note_k(self, p: dict[str, float]) -> str:
         if p.get("us_learn", 0) <= 0:
             return ""
         us = self._us
