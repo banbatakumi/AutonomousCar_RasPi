@@ -352,8 +352,10 @@ class FrameRing:
         if desc.slot >= self.n_slots:
             return None
         behind = self.write_seq - desc.seq
-        if behind < 0 or behind >= self.n_slots:
-            return None                      # 一周してしまった
+        # `n_slots - 1` 個遅れのスロットは「次に書かれる」スロット（`find` と同じく見ない）。返しても
+        # すぐ上書きされ、`still_valid()` で捨てられるだけ
+        if behind < 0 or behind >= self.n_slots - 1:
+            return None                      # 一周してしまった・次に上書きされる
         lock, t_cap, fid, nbytes = self._read_slot_meta(desc.slot)
         if lock % 2 == 1 or fid != desc.frame_id:
             return None

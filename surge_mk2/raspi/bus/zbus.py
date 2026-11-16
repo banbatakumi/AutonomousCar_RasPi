@@ -85,6 +85,8 @@ _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
                   "cam_perception": 5574, "line_perception": 5575, "cam_track": 5576,
                   "cam_e2e": 5577, "signal": 5578, "test": 5579,
                   "e2e_fusion": 5580, "stereo": 5581, "stereo_e2e": 5582}
+#: `hb/` を publish する（＝心拍を見る）ノード。上の表から作る（2か所に書くと片方に足し忘れる）。`test` は試験用
+_HB_NODES = tuple(n for n in _NODE_TCP_PORT if n != "test")
 
 #: トピック → どのノードが publish するか
 #:
@@ -176,10 +178,7 @@ def endpoints_for_topic(topic: str) -> list[str]:
     `hb/` は全ノードが publish するので全 endpoint に繋ぐ。
     """
     if topic.startswith("hb/") or topic == "hb/":
-        return [endpoint_for_node(n) for n in
-                ("io", "camera", "control", "planning",
-                 "cam_perception", "line_perception", "cam_track", "cam_e2e",
-                 "signal", "e2e_fusion", "stereo", "stereo_e2e")]
+        return [endpoint_for_node(n) for n in _HB_NODES]
     owner = TOPIC_OWNER.get(topic)
     if owner is None:
         # 前方一致（"image/" のような接頭辞購読）
