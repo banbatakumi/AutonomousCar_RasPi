@@ -6,6 +6,7 @@
 #   tools/deploy.sh --test           # 反映後に Pi 上でユニットテストを回す
 #   tools/deploy.sh --no-prune       # Mac に無くなった .py を Pi から消さない（既定は消す）
 #   tools/deploy.sh --services       # ★ systemd unit を入れ直す（--max-speed 等を変えたとき）
+#   tools/deploy.sh --restart        # io 以外のノードを再起動する（E-Stop には影響しない。対象は下の表）
 #   tools/deploy.sh --restart-io     # ★★ surge-io を再起動する（E-Stop がラッチする）
 #
 # ## 何を再起動すべきかは「何を直したか」で決まる
@@ -13,7 +14,7 @@
 # | 直したもの | 必要な操作 |
 # |---|---|
 # | `gui/` | **rsync だけ。** telemetry_node は毎リクエストでファイルを読む |
-# | `raspi/nodes/telemetry_node.py` `raspi/nodes/cam_perception_node.py` `raspi/nodes/cam_e2e_node.py` `raspi/nodes/line_perception_node.py` `raspi/nodes/planning_node.py` `raspi/auto/` `raspi/nav/` | `--restart` 相当（surge-telemetry/camera/cam-perception/cam-e2e/line-perception/planning の再起動。E-Stop は無関係） |
+# | `raspi/` のうち io_node 以外（`raspi/nodes/*_node.py`・`raspi/auto/`・`raspi/nav/`・`raspi/core/`）・`slam2d/`・`ml_*/` の推論の前処理 | `--restart`（`RESTART_UNITS` の再起動。unit の無い機械では飛ばす。E-Stop は無関係） |
 # | `raspi/setup/install_services.sh` の引数（`--max-speed` 等） | `--services` ＋ `--restart-io` |
 # | `raspi/nodes/io_node.py` | `--restart-io` |
 #
@@ -40,6 +41,8 @@ DO_SERVICES=0
 DO_RESTART_IO=0
 DO_RESTART=0
 PRUNE=1
+#: `--restart` で再起動する unit（io 以外。`raspi/setup/install_services.sh` の UNITS から io・mdns を除いたもの）
+RESTART_UNITS="surge-telemetry surge-camera surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-stereo surge-stereo-e2e"
 #: 一度に消してよい古い .py の数の上限（環境変数で変える）。超えたら消さずに止める
 PRUNE_MAX=${SURGE_PRUNE_MAX:-30}
 
@@ -51,7 +54,7 @@ while [ $# -gt 0 ]; do
     --restart-io) DO_RESTART_IO=1 ;;
     --restart)    DO_RESTART=1 ;;
     --no-prune)   PRUNE=0 ;;
-    -h|--help)    sed -n '2,32p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "知らない引数: $1（--help）" >&2; exit 2 ;;
   esac
   shift
@@ -145,14 +148,15 @@ rsync -az --stats \
 
 # 全体には `--delete` を掛けない（Pi にだけある状態・記録を消さないため）。代わりに、Mac で消した・
 # 名前を変えた `.py` だけを Pi からも消す。残すと、古いテストが `unittest discover` を落とし、
-# 古いモジュールが import できてしまう。**消すのは `raspi sim slam2d tools config` 配下の `.py` だけ**
+# 古いモジュールが import できてしまう。**消すのは `raspi sim slam2d tools config ml_*` 配下の `.py` だけ**
 # （設定の json・地図・モデル・記録は検出に入らない）。
 # 数が `PRUNE_MAX` を超えたら、別ブランチや空の作業ツリーから反映した事故を疑って消さずに止める。
 # `comm` は並びが揃っていないと別のファイルを「片側にだけある」と数える。macOS と Pi で `sort` の並びが
 # 違う（`_` の位置）ので、どちらも `LC_ALL=C` に固定する
+PRUNE_DIRS="raspi sim slam2d tools config $(ls -d ml_* 2>/dev/null | tr '\n' ' ')"
 STALE=$(LC_ALL=C comm -13 \
-  <(find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' | LC_ALL=C sort) \
-  <(ssh_pi "cd $DEST && find raspi sim slam2d tools config -name '*.py' -not -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort"))
+  <(find $PRUNE_DIRS -name '*.py' -not -path '*/__pycache__/*' | LC_ALL=C sort) \
+  <(ssh_pi "cd $DEST && find $PRUNE_DIRS -name '*.py' -not -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort"))
 if [ -n "$STALE" ]; then
   N_STALE=$(printf '%s\n' "$STALE" | wc -l | tr -d ' ')
   echo
@@ -164,7 +168,7 @@ if [ -n "$STALE" ]; then
     echo "   別のブランチ・古い作業ツリーから反映していないか確かめること。本当に不要なら SURGE_PRUNE_MAX を上げて再実行。" >&2
     printf '%s\n' "$STALE" | head -10 | sed 's/^/     /' >&2
     exit 1
-  elif printf '%s\n' "$STALE" | grep -qvE '^(raspi|sim|slam2d|tools|config)/[A-Za-z0-9_./-]+\.py$' || \
+  elif printf '%s\n' "$STALE" | grep -qvE '^(raspi|sim|slam2d|tools|config|ml_[A-Za-z0-9_]+)/[A-Za-z0-9_./-]+\.py$' || \
        printf '%s\n' "$STALE" | grep -qF '..'; then
     echo "!! 想定外のパスが含まれているので消さない:" >&2
     printf '%s\n' "$STALE" | sed 's/^/     /' >&2
@@ -175,13 +179,13 @@ if [ -n "$STALE" ]; then
   fi
 fi
 
-# 経路の計算・SLAM のレイの行進の C 版（`raspi/nav/_native.c`・`slam2d/core/_native.c`）を組んでおく。
-# 組まないと planning_node の最初の import で組む（Pi で約1秒）。組めなくても Python 版で走る（同じ結果で
-# 遅い）ので、止めずに知らせるだけ
-if ssh_pi "cd $DEST && .venv/bin/python -c 'import sys; from raspi.nav import native; from slam2d.core import native as s; sys.exit(native.lib is None or s.lib is None)'"; then
-  echo "# C 版（経路の計算・SLAM のレイ）: OK"
+# 経路の計算・SLAM のレイの行進・ステレオの後処理の C 版（`raspi/nav/_native.c`・`slam2d/core/_native.c`・
+# `raspi/core/stereo_native.c`）を組んでおく。組まないと各ノードの最初の import で組む（Pi で約1秒）。
+# 組めなくても Python/numpy 版で走る（同じ結果で遅い）ので、止めずに知らせるだけ
+if ssh_pi "cd $DEST && .venv/bin/python -c 'import sys; from raspi.nav import native; from slam2d.core import native as s; from raspi.core.stereo_native import load; sys.exit(native.lib is None or s.lib is None or load() is None)'"; then
+  echo "# C 版（経路の計算・SLAM のレイ・ステレオの後処理）: OK"
 else
-  echo "!! C 版を組めなかった（Python 版で走る。経路の生成が数倍〜十数倍、走行中の plan() も遅い）" >&2
+  echo "!! C 版を組めなかった（Python 版で走る。経路の生成が数倍〜十数倍、走行中の plan()・ステレオの照合も遅い）" >&2
 fi
 
 # `gui/dist` だけは --delete する。ビルドごとにファイル名のハッシュが変わるので、
@@ -212,24 +216,23 @@ fi
 # ── 5. 再起動 ──
 if [ "$DO_RESTART" = 1 ]; then
   echo
-  echo "# surge-telemetry / surge-camera / surge-cam-perception / surge-cam-e2e / surge-e2e-fusion / surge-line-perception / surge-planning / surge-stereo / surge-stereo-e2e を再起動（E-Stop には影響しない）"
-  # surge-cam-perception / surge-cam-e2e / surge-line-perception: auto/ctrl は
-  # telemetry_node が「現在の意思」を繰り返し流す設計（AutoCtrl の docstring 参照）
-  # なので、再起動しても GUI 側の再選択なしに数秒で復帰する。ftg_cam/cam_centerline・
-  # cam_e2e・line_trace 中でも scan/cam・cam_e2e/cmd・line/cam の途絶は stale_ms
-  # （500ms）超過で自然にブレーキへ倒れる（安全側）
+  echo "# io 以外のノードを再起動（E-Stop には影響しない）: $RESTART_UNITS"
+  # 推論・知覚のノード: auto/ctrl は telemetry_node が「現在の意思」を繰り返し流す設計（AutoCtrl の docstring
+  # 参照）なので、再起動しても GUI 側の再選択なしに数秒で復帰する。途絶は stale_ms（500ms）超過で自然に
+  # ブレーキへ倒れる（安全側）
   #
-  # surge-planning: `raspi/auto/registry.py` の PLANNERS はプロセス起動時に固定
-  # されるので、`raspi/auto/`（新しい planner の追加等）を直しても再起動しないと
-  # 「モードが選ばれていない」のまま反映されない。io_node とは無関係な別プロセス
-  # なので E-Stop はラッチしない（`docs/development.md` の単体コマンドでも
-  # 「自動運転だけ入れ直す（安全）」と明記）。
-  # ★ raceline/slam2d_raceline（SLAM地図生成モード）の EXPLORE/BUILD 中に
-  # 再起動すると、まだ確定（freeze）していない地図はメモリ上にしか無いため失われる
-  ssh_pi 'sudo systemctl restart surge-telemetry surge-camera surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-planning' || exit 1
-  # surge-stereo（段階4 で追加）は unit を作るまで（--services）無いので、あるときだけ再起動する
-  ssh_pi 'if systemctl cat surge-stereo >/dev/null 2>&1; then sudo systemctl restart surge-stereo; else echo "  surge-stereo の unit が無い（tools/deploy.sh --services で作る）"; fi' || exit 1
-  ssh_pi 'if systemctl cat surge-stereo-e2e >/dev/null 2>&1; then sudo systemctl restart surge-stereo-e2e; else echo "  surge-stereo-e2e の unit が無い（tools/deploy.sh --services で作る）"; fi' || exit 1
+  # surge-planning: `raspi/auto/registry.py` の PLANNERS はプロセス起動時に固定されるので、`raspi/auto/` を
+  # 直しても再起動しないと反映されない。io_node とは無関係な別プロセスなので E-Stop はラッチしない。
+  # ★ raceline/slam2d_raceline（SLAM地図生成モード）の EXPLORE/BUILD 中に再起動すると、まだ確定（freeze）
+  # していない地図はメモリ上にしか無いため失われる
+  #
+  # unit が無い機械（--services の前・一部のノードを入れていない）では飛ばして続ける。1つ欠けただけで
+  # 残りの再起動と状態の表示を止めない
+  # shellcheck disable=SC2016
+  ssh_pi "for u in $RESTART_UNITS; do
+    if systemctl cat \$u >/dev/null 2>&1; then sudo systemctl restart \$u || echo \"  !! \$u の再起動に失敗\";
+    else echo \"  \$u の unit が無い（tools/deploy.sh --services で作る）\"; fi
+  done" || exit 1
 fi
 
 if [ "$DO_RESTART_IO" = 1 ]; then

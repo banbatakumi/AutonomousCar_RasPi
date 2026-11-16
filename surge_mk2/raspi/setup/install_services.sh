@@ -97,12 +97,17 @@ case "${1:-}" in
   --safe)   ARM=""; MODE="arm 封印（DISARM 固定）" ;;
   --with-logger) WITH_LOGGER=1; UNITS+=(surge-logger) ;;
   --remove)
-    systemctl disable --now "${UNITS[@]}" surge-logger 2>/dev/null || true
-    rm -f /etc/systemd/system/surge-*.service
+    systemctl disable --now "${UNITS[@]}" surge-logger surge-arrow-signal surge-logclean.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/surge-*.service /etc/systemd/system/surge-logclean.timer
     rm -rf /etc/systemd/system/surge-telemetry.service.d /etc/systemd/system/surge-io.service.d
     rm -f /etc/udev/rules.d/99-surge-fan.rules
     rm -f /etc/sudoers.d/surge-shutdown
+    # logind（RemoveIPC）・NetworkManager（Wi-Fi の省電力）の設定も戻す
+    rm -f /etc/systemd/logind.conf.d/10-surge-removeipc.conf
+    rm -f /etc/NetworkManager/conf.d/10-surge-wifi-powersave.conf
     systemctl daemon-reload
+    systemctl restart systemd-logind 2>/dev/null || true
+    systemctl reload NetworkManager 2>/dev/null || true
     udevadm control --reload-rules 2>/dev/null || true
     # 節電のために切ったものを元に戻す（下の「節電」節を参照）
     systemctl enable --now bluetooth 2>/dev/null || true
