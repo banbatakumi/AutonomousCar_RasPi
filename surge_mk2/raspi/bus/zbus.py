@@ -322,7 +322,8 @@ class Publisher:
         self._seq[topic] = seq
         msg.seq = seq
         msg.t_pub = time.monotonic_ns()
-        if msg.t_capture == 0:
+        if msg.t_capture == 0 and not msg.ZERO_T_CAPTURE_IS_FAILURE:
+            # 未設定なら送信時刻で埋める。「失敗は 0」の型（`Scan` など）は埋めない（受け側が失敗を見分ける）
             msg.t_capture = msg.t_pub
         try:
             self.sock.send(encode(topic, msg), zmq.NOBLOCK)

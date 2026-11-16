@@ -27,6 +27,8 @@ UART 上は `0.001 m/s` のような整数スケールだが、**バスに出た
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import msgspec
 
 __all__ = [
@@ -166,6 +168,11 @@ class MsgBase(msgspec.Struct):
     t_pub: int = 0
     seq: int = 0
 
+    #: `t_capture=0` が「失敗・未選択の結果」の意味を持つ型か。True の型は `Publisher` が `t_capture=0` を
+    #: 送信時刻で**埋めない**（埋めると受け側の「撮像時刻が 0 なら失敗」が通らず、失敗フレームが「今撮れた
+    #: フレーム」に化ける。レビュー M1）。False の型は未設定の 0 を `t_pub` で埋める
+    ZERO_T_CAPTURE_IS_FAILURE: ClassVar[bool] = False
+
 
 class VehicleState(MsgBase):
     """`TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -302,6 +309,8 @@ class Scan(MsgBase):
     点ごとの時刻は `sector_t_ns` から引くこと。** 時速 10km/h なら1周で 28cm 動き、
     点群が扇形に歪む。
     """
+    #: 失敗・未選択は `t_capture=0` で出す（`Publisher` は埋めない）
+    ZERO_T_CAPTURE_IS_FAILURE: ClassVar[bool] = True
 
     dist: list[float] = msgspec.field(default_factory=lambda: [0.0] * 360)  #: [m] 0=無効
     #: 各セクタ先頭の時刻 [ns]（Pi 時刻に換算済み）。欠けたセクタは 0。
@@ -345,6 +354,8 @@ class LineScan(MsgBase):
     `Scan`（距離配列）とは形が違う情報のため専用の型にしてある
     （`follow_the_gap_cam.py` が `Scan` を再利用できたのとは対照的）。
     """
+    #: 失敗・未選択は `t_capture=0` で出す（`Publisher` は埋めない）
+    ZERO_T_CAPTURE_IS_FAILURE: ClassVar[bool] = True
 
     seen: bool = False              #: 近傍・遠方いずれかの帯で白線を検出できたか
     near_seen: bool = False
@@ -1110,6 +1121,8 @@ class TargetTrack(MsgBase):
 
     `bearing`/`distance` は追跡が成功している（`lost=False`）間だけ意味を持つ。
     """
+    #: 失敗・未選択は `t_capture=0` で出す（`Publisher` は埋めない）
+    ZERO_T_CAPTURE_IS_FAILURE: ClassVar[bool] = True
 
     #: ROIが選択され追跡中か。**False の間、他のフィールドは意味を持たない**
     tracking: bool = False
@@ -1236,6 +1249,8 @@ class CamPath(MsgBase):
 
     `seen=False`（推論が失敗した・まだモデル未選択）のときは `xs`/`ys`/`widths` は空。
     """
+    #: 失敗・未選択は `t_capture=0` で出す（`Publisher` は埋めない）
+    ZERO_T_CAPTURE_IS_FAILURE: ClassVar[bool] = True
 
     seen: bool = False
     xs: list[float] = msgspec.field(default_factory=list)     #: [m] base_link 座標

@@ -208,6 +208,20 @@ class TestPubSub(BusCase):
         self.assertGreater(msg.t_pub, 0)
         self.assertEqual(msg.t_capture, msg.t_pub)   # 未設定なら t_pub で埋める
 
+    def test_publisher_keeps_zero_t_capture_of_failure_frames(self):
+        """「失敗・未選択は `t_capture=0`」の型（`Scan` など）は埋めない。埋めると受け側の
+        「撮像時刻が 0 なら失敗」が通らず、失敗フレームが今撮れたフレームに化ける（レビュー M1）。"""
+        from raspi.bus import Publisher
+        from raspi.msgs import Scan
+        from raspi.msgs.types import CamPath, LineScan, TargetTrack
+
+        pub = self.track(Publisher("stereo"))
+        for cls in (Scan, LineScan, TargetTrack, CamPath):
+            with self.subTest(cls=cls.__name__):
+                self.assertEqual(pub.send("scan/stereo", cls()).t_capture, 0)
+                self.assertEqual(pub.send("scan/stereo", cls(t_capture=123)).t_capture, 123)
+        self.assertGreater(pub.send(TOPIC_VEHICLE_STATE, VehicleState()).t_capture, 0)
+
     def test_conflate_keeps_only_the_newest(self):
         """制御系が「2秒前の点群で舵を切る」のを防ぐのが CONFLATE の目的。"""
         from raspi.bus import LATEST, Publisher, Subscriber
