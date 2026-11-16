@@ -75,7 +75,7 @@ WS と同一オリジンになり接続先の書き分けが要らない。
 Mac で GUI を編集しながら実車に繋ぐなら:
 
 ```bash
-SURGE_HOST=surge-mk2.local npm run dev     # /ws だけ Pi に中継される
+SURGE_HOST=surge-mk2.local npm run dev     # /ws・/logs・/maps・/snapshot を Pi に中継する（vite.config.ts）
 ```
 
 ## ビルドして Pi に置く
@@ -136,7 +136,7 @@ io_node も同じだけで落とす（自律走行中だけ、Wi-Fi の瞬断を
 
 ```
 src/
-├── bus/live.ts        20Hz のデータ置き場。**React の state には入れない**
+├── bus/live.ts        テレメトリ（50Hz）のデータ置き場。**React の state には入れない**
 ├── bus/pathObstacles.ts 進路上の障害物（今の舵角のまま進んだら、どこで何に当たるか。点群を車の動きぶん戻してから車体の外形で掃く）
 ├── bus/parkSensor.ts  クリアランスソナー（車体まわり16方向の、外形から一番近い物までの距離 → 4段・断続音の周期。今は音だけが使う）
 ├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
@@ -145,7 +145,7 @@ src/
 ├── input/useDriving.ts ゲームパッド + キーボード → cmd（rAF。変化はそのフレームで、繰り返しは 50Hz 以下）
 ├── render/LidarView   Canvas 2D。rAF で live を読む
 ├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
-├── render/DepthView   ステレオの深度映像（/ws/camera/depth）。自動運転画面の2枚目。表示中だけ Pi が照合する
+├── render/DepthView   ステレオの深度映像（/ws/camera/depth）。自動運転画面の3枚目。DISARM 中は表示中だけ Pi が照合する（ARM 中は自動停止のため常に照合）
 ├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
 ├── render/MapCanvas   世界座標のキャンバス（自動運転ビューの地図パネル `AutoMapPanel`・低頻度）
 ├── views/             RcView / AutoView / DiagView / SysIdView（＝タブ4枚）

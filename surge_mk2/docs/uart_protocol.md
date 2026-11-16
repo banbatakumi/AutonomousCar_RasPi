@@ -220,7 +220,7 @@ off  size  type    field                 単位 / 備考
   8    2   i16     speed                 0.001 m/s  車速（★車体中心線方向に射影済み・§5.3.1）
  10    2   i16     yaw_rate              0.001 rad/s
  12    2   i16     steer_actual          0.0001 rad ★路面舵角（反時計回り正）
- 14    2   i16     steer_cmd_echo        0.0001 rad 指令のエコーバック
+ 14    2   i16     steer_cmd_echo        0.0001 rad 適用中の舵角指令（レート制限後。`Vehicle_GetAppliedSteerRad`）
  16    8   i16×4   wheel_speed[4]        0.001 m/s  車輪周速 [FL, FR, RL, RR] ※射影なし
  24    8   i32×2   odom_dist[2]          0.1 mm  前輪累積走行距離 [FL, FR] ※射影なし
  32    2   i16     accel_x               0.001 m/s²
@@ -347,7 +347,7 @@ prev = odom_dist[:]
 
 | bit | 名称 | 意味 |
 |---|---|---|
-| 0-1 | `mode` | STM32 が**実際に採用している**モード（0=DISARM / 1=MANUAL / 2=AUTO / 3=予約） |
+| 0-1 | `mode` | STM32 が**最後に受けた `COMMAND` の要求**モード（0=DISARM / 1=MANUAL / 2=AUTO。3=予約は受けても前の値を保つ。`vehicle.c` の `ApplyRasCommand`）。フェイルセーフ中も要求の値のまま残るので、実際に走れるかは `armed`（bit2）で見る |
 | 2 | `armed` | **上位の指令で走れる状態**（この間だけ車速・舵角の指令が効く）。ARM を要求しても、MD の起動待ち（約1秒）・ステア未較正・`mode` が MANUAL/AUTO 以外・E-Stop・`COMMAND` 途絶・ARM が外れたあとの停止待ちの間は 0 |
 | 3 | `estop_active` | ハートビート断で発動中（§9） |
 | 4 | `uart_timeout` | `COMMAND` 途絶で自動ブレーキ中 |
@@ -375,7 +375,7 @@ prev = odom_dist[:]
 | 26 | `auto_stop_blind` | ARM 中に LiDAR も前後の超音波も使えず、自動停止が何も検知できない状態が3秒続いている |
 | 27 | `stereo_ok` | ステレオの障害物（`STEREO_OBS`）が300ms以内に届いている（v0.31） |
 | 28 | `auto_stop_stereo` | 今の自動停止の介入のきっかけにステレオの点が含まれる（LiDAR・超音波と同時でも立つ）（v0.31） |
-| 27-31 | — | 予約（0） |
+| 29-31 | — | 予約（0） |
 
 - **bit5/6/16〜21/24 は「有効/無効」ではなく「今まさに介入・動作しているか」**。「なぜ急に減速・固定・点滅したのか」を後から説明するため。
   有効/無効は Pi が送った `COMMAND`・`CONFIG_SET` で分かるので返さない
@@ -463,7 +463,7 @@ MD が無言になると status は最後の値のまま固まるため。Pi は
 
 **判定と制動は STM32 だけが持つ。** Pi は許可（bit7）を毎周期出すだけで、判定にも制動にも関与しない。
 **Pi 側で `us_front`/`us_rear`/LiDAR/ステレオを見て速度を落とす二重制御を書かないこと**（どちらが止めたのか分からなくなる）。
-ステレオ（§5.6.5）も同じで、Pi は障害物の**点を渡す**だけ。最終防壁が Pi・UART の生死に依存しないよう、判定を Pi に移さない。
+ステレオ（§5.6.4.1）も同じで、Pi は障害物の**点を渡す**だけ。最終防壁が Pi・UART の生死に依存しないよう、判定を Pi に移さない。
 
 - 立っている間、**進行方向**の障害物までの距離が動的停止距離 `d_stop` 未満になると、STM32 が `target_speed`/`target_torque` を無視して**最大制動トルクで停止**する
 - `d_stop = v・t_delay + v²/(2・a_max) + margin`。`v` は進行方向の実車速の絶対値、`t_delay` = LiDAR の1回転 0.1s ＋判定の間引き 5ms ＋
@@ -476,7 +476,7 @@ MD が無言になると status は最後の値のまま固まるため。Pi は
      車体の外形（`vehicle.toml` の `footprint`）の内側の点は数えない。判定は 5ms ごと。式はファームの `src/control/auto_stop_path.h`（確かめは `tools/fwsim/tests/test_auto_stop_path.py`）
   2. **超音波（フォールバック）**: LiDAR の進行方向 ±89° に直近300ms以内のデータが1点も無いときだけ、超音波の距離を `d_stop` と比べる
   3. **超音波（近接フェイルセーフ）**: LiDAR によらず、超音波が **5cm未満**を検知したら常に作動（LiDAR の最短測距・取付高さの死角を補う）
-  4. **ステレオ（前進のみ、§5.6.5）**: 条件1と同じ予想進路に、`STEREO_OBS` の点が**直近2フレームの両方で5点以上**あれば作動（自車付近は除く）
+  4. **ステレオ（前進のみ、§5.6.4.1）**: 条件1と同じ予想進路に、`STEREO_OBS` の点が**直近2フレームの両方で5点以上**あれば作動（自車付近は除く）
 - **進行方向**は実車速（カルマンフィルタの `speed`）の符号で決める。`>= 0` なら前方、負なら後方**だけ**を見る（前方に障害物があっても後退で抜けられる）。
   `|speed| < 0.05 m/s` のときは指令の向き（`torque_mode` なら `target_torque`、それ以外は `target_speed` の符号）を使う
 - 超音波が無反射（検知範囲外）ならその条件は作動しない。`0 = 無効` を「距離 0」と読まないのと同じく、「見えていない」を「近い」に倒さない
@@ -487,7 +487,7 @@ MD が無言になると status は最後の値のまま固まるため。Pi は
   壁に詰める作業では GUI の設定パネルで `auto_stop` を切るか `margin` を下げる
 - **DISARM はしない。** 停止手段ではなく衝突緩和で、E-Stop・DISARM・`COMMAND` 途絶とは別系統
 
-#### 5.6.5 ステレオの障害物（`STEREO_OBS` 0x16）
+#### 5.6.4.1 ステレオの障害物（`STEREO_OBS` 0x16）
 
 前方ステレオ（`stereo_node` の `scan/stereo`）の障害物を、`auto_stop` の入力に**足す**。実装は STM32 の `src/control/stereo_obstacle.[ch]`
 （確かめは `tools/fwsim/tests/test_stereo_obstacle.py`）、Pi 側は `raspi/core/stereo_obs.py`（`io_node._forward_stereo`）。
@@ -505,7 +505,8 @@ MD が無言になると status は最後の値のまま固まるため。Pi は
   - 判定は 5ms ごと（LiDAR と同じ間引き）
 - **フラグ**: TELEMETRY の `stereo_ok`（bit27）、介入のきっかけにステレオが含まれるとき `auto_stop_stereo`（bit28）
 - **Pi 側の条件**: ARM 中は自動運転モードに関わらず `stereo_node` が照合を回す（`telemetry_node.STEREO_AUTO_STOP`。+約 150mA・CPU）。
-  DISARM 中は回さないので `STEREO_OBS` も出ず、`stereo_ok` は立たない
+  DISARM 中は、GUI で深度映像（`/ws/camera/depth`）を見ている間だけ 1Hz で照合し、そのつど `STEREO_OBS` も送る（`io_node._forward_stereo` は ARM を見ない）。
+  STM32 は前進中しか使わないので、DISARM 中の点は判定に効かない。見ていなければ照合しないので `STEREO_OBS` は出ず、`stereo_ok` は立たない
 - **しきい値の根拠（実走行ログの再生、`python -m tools.fwsim.stereo_replay LOG.mcap...`）**: 衝突4回のコース走行 43 秒と衝突なしの周回 120 秒（最高 4m/s）。
   - 3点・除外なしだと、周回中に LiDAR と無関係なステレオ単独の検出が 32 区間（平均 0.08 秒）。作動したら止まるまで解除しないので、短くても完全停止になる
   - 5点・除外ありで 8 区間に減る。代わりに衝突前の検出は縮む（1回目 1.32→0.29s、3回目 1.18→0.59s）。ただし縮んだ分は車体先端付近の自車の点由来で、
@@ -609,7 +610,10 @@ Pi が接続のたびに `config/vehicle.toml` の値を送る。設定値の唯
 
 Pi 側の実装（`raspi/nodes/io_node.py`）:
 
-- 調整パラメータと `[control]` に書いた ON/OFF（`tc_enable`・`tv_enable`・`wheel_lift_guard_enable`・`abs_enable`）は `ControlParamSync` が送って確かめる（§5.8.4）
+- 調整パラメータと `[control]` に書いた ON/OFF（`tc_enable`・`tv_enable`・`wheel_lift_guard_enable`・`abs_enable`）は `ControlParamSync` が送って確かめる（§5.8.4）。
+  **ただし今の `vehicle.toml` は `tc_enable`・`tv_enable` しか書いていない**ので、`abs`・`wheel_lift_guard` はファームの既定（有効）のまま。
+  `brake_hold`（`0x0090`）と自動停止のマージン（`0x0060`）は `[control]` に書く場所が無く、GUI で変えない限りファームの既定（有効・15cm）。
+  GUI で変えた値は io_node・STM32 の再起動で既定へ戻る。方針（値の出どころを Pi の1か所にする）に反しているので直す予定（`docs/review_2026_11_17.md` H2）
 - ON/OFF（`0x0010`/`0x0020`/`0x0050`/`0x0070`/`0x0090`）と自動停止のマージン（`0x0060`）は、接続時と STM32 の再起動の検出時に `CONFIG_GET` で読み直し、
   以降は GUI の操作に応じて `CONFIG_SET` を送る
 
@@ -932,6 +936,7 @@ STM32: PB12 を 2kHz の制御ループでポーリングしてエッジを監�
 |---|---|---|---|
 | `COMMAND` (0x10) | 22 B | 100 Hz（中身が変われば即時にも送る） | 2.20 kB/s（約2%） |
 | `PING` (0x12) | 11 B | 5 Hz | 0.06 kB/s |
+| `STEREO_OBS` (0x16) | 169 B | ARM 中 15 Hz（照合のたび。DISARM 中は深度映像の視聴中だけ 1 Hz） | 約 2.5 kB/s |
 | `CONFIG_SET` / `CONFIG_GET` / `*_REQ` | — | 散発 | < 0.1 kB/s |
 
 ---

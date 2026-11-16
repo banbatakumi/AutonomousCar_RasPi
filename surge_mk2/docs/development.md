@@ -56,16 +56,16 @@
 |---|---|---|
 | `gui/` | **rsync だけ**（`tools/deploy.sh`）。telemetry_node は毎リクエストでファイルを読む | しない |
 | `raspi/tools/mdns_unicast.py`（Wi-Fi 端末から `surge-mk2.local` を引けるようにする avahi の補助） | rsync ＋ `ssh surge-mk2 'sudo systemctl restart surge-mdns'`。`deploy.sh --restart` は再起動しない | しない |
-| `raspi/nodes/telemetry_node.py` `camera_node.py` `cam_perception_node.py` `cam_e2e_node.py` `line_perception_node.py` | `deploy.sh --restart`（surge-telemetry / camera / cam-perception / cam-e2e / line-perception / planning をまとめて再起動） | しない |
+| `raspi/nodes/telemetry_node.py` `camera_node.py` `cam_perception_node.py` `cam_e2e_node.py` `line_perception_node.py` | `deploy.sh --restart`（surge-telemetry / camera / cam-perception / cam-e2e / e2e-fusion / line-perception / planning をまとめて再起動し、surge-stereo / stereo-e2e は unit があれば再起動） | しない |
 | **`raspi/auto/` `raspi/nav/` `planning_node.py`** | `deploy.sh --restart`（`PLANNERS` はプロセス起動時に固定されるので必須。地図作成中に再起動すると未確定の地図は失われる） | しない |
 | `config/vehicle.toml` | **先に `python3 config/generate.py`**（GUI 用 TS を再生成）してから rsync。読んでいるノードを再起動（planning は `--restart`、`[control]` は io が接続時に STM32 へ送るので `--restart-io`） | io なら**する** |
-| `config/auto.json` `auto_presets.json` `drive_settings.json` `camera.json` `cam_model.json` `cam_e2e_model.json` `e2e_lidar_model.json` `odometer.json`・`saved_maps/` | **機械ごとの状態。`deploy.sh` は運ばない**（動いている機械で書き、起動時に戻す。Mac＝シム、Pi＝実機で別々）。地図は GUI の DL/UL で運ぶ（経路の設定も同梱） | しない |
+| `config/auto.json` `auto_presets.json` `drive_settings.json` `camera.json` `cam_model.json` `cam_e2e_model.json` `e2e_fusion_model.json` `stereo_e2e_model.json` `e2e_lidar_model.json` `odometer.json`・`saved_maps/` | **機械ごとの状態。`deploy.sh` は運ばない**（動いている機械で書き、起動時に戻す。Mac＝シム、Pi＝実機で別々）。地図は GUI の DL/UL で運ぶ（経路の設定も同梱） | しない |
 | `raspi/nodes/io_node.py` `raspi/io/` `raspi/proto/` | **`deploy.sh --restart-io`** | **★★ する** |
 | `raspi/msgs/types.py` | **先に `python3 config/gen_msgs.py`**（`gui/src/generated/msgs.ts` を再生成）→ `deploy.sh --restart --restart-io` | **★★ する** |
 | `raspi/setup/install_services.sh`（unit に書く引数。`ARM=` 行の `--max-speed` 等） | **`--services` ＋ `--restart-io`** | **★★ する** |
 | `raspi/proto/protocol.toml` | **先に `python3 raspi/proto/generate.py`**、その後 `--restart-io`。**ファームは生成ヘッダを取り込まず `ras_link.[ch]` に手で写している**ので、ファームも直して `protocol_version` を上げ、同時に書き込む（[`raspi/proto/README.md`](../raspi/proto/README.md)） | **★★ する** |
-| `models/*.onnx`（カメラセグメンテーション）`models/cam_e2e/*.onnx`（カメラE2E）`models/e2e_lidar/*.onnx`（LiDAR E2E） | **通常の `tools/deploy.sh`（rsync のみ）。** 再起動は不要——各ノード／planner の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
-| `ml_cam/` `ml_cam_e2e/` `ml_lidar/` `ml_common/`（学習パイプラインと学習 GUI の共通部品） | **Mac 側だけで完結。** rsync では運ばれるが `raspi/` 側は読まない | しない |
+| `models/seg/*.onnx`（カメラセグメンテーション）`models/cam_e2e/*.onnx`（カメラE2E）`models/e2e_fusion/*.onnx`（E2E融合）`models/stereo_e2e/*.onnx`（ステレオE2E）`models/e2e_lidar/*.onnx`（LiDAR E2E） | **通常の `tools/deploy.sh`（rsync のみ）。** 再起動は不要——各ノード／planner の `reload_if_changed()` が GUI でモデル名を選んだ瞬間に読み直す | しない |
+| `ml_cam/` `ml_cam_e2e/` `ml_e2e/` `ml_stereo_e2e/` `ml_lidar/` `ml_common/`（学習パイプラインと学習 GUI の共通部品） | **Mac 側だけで完結。** rsync では運ばれるが `raspi/` 側は読まない | しない |
 
 > **`--services` は unit ファイルを書き換えるだけ。** 走っている `io_node` は古い引数のまま
 > 動き続けるので、反映には `--restart-io` が要る（`install_services.sh` も最後にそう警告する）。
@@ -523,7 +523,7 @@ GUI でモデル名を選ぶ**」という流れは共通だが、中身も検�
 | 推論コード | `raspi/auto/e2e_lidar.py`（planner 本体） | `raspi/nodes/cam_perception_node.py`（**独立プロセス**。`scan/cam` へ変換）＋ `raspi/auto/follow_the_gap_cam.py`/`cam_centerline.py` | `raspi/nodes/cam_e2e_node.py`（**独立プロセス**。操舵を直接推論）＋ `raspi/auto/cam_e2e.py` |
 | シムで検証できるか | **できる**（`sim.run` は LiDAR を持つ） | **できない**（シムはカメラを持たない） | **できない**（同左） |
 
-`models/` は `.gitignore` 対象で、`tools/deploy.sh` の rsync で配る。種類ごとにサブフォルダを切る（セグメンテーション `models/seg/`・`models/cam_e2e/`・`models/e2e_fusion/`・`models/e2e_lidar/`・追跡器 `models/nano_track/`）。deploy は追加と上書きだけで、Mac で消したモデルは Pi に残る。実車で要る追加操作は無い（推論プロセスは常時起動で、対応するモードを選んだ間だけ推論する）。
+`models/` は `.gitignore` 対象で、`tools/deploy.sh` の rsync で配る。種類ごとにサブフォルダを切る（セグメンテーション `models/seg/`・`models/cam_e2e/`・`models/e2e_fusion/`・`models/stereo_e2e/`・`models/e2e_lidar/`・追跡器 `models/nano_track/`）。deploy は追加と上書きだけで、Mac で消したモデルは Pi に残る。実車で要る追加操作は無い（推論プロセスは常時起動で、対応するモードを選んだ間だけ推論する）。
 各学習パイプラインには操作用の薄い Tkinter GUI がある（`ml_lidar/app.py`・`ml_cam/app.py`・`ml_cam_e2e/app.py`、
 launcher から起動）。ロジックは持たないので、中身のスクリプトを直せば GUI 側は変えなくてよい。
 
@@ -748,7 +748,7 @@ LiDAR は記録のときの先生（`slam2d_route` の最適ライン・推測�
 | 視差の入力 | `stereo_node` が照合ごとに出す `stereo/disp`（帯 150〜260 行を 12×68 のブロックに縮めた視差と照合の出た割合） |
 
 **視差は2か所で作る**: 学習は記録の左右の組（JPEG 品質 90・既定 5Hz）を Mac で照合し直して作る（記録に視差が無くてよい。
-過去の記録も使える）。実車は `stereo_node` が生の画像から作る `stereo/disp`（記録にも残る）。両者の差は
+過去の記録も使える）。実車は `stereo_node` が生の画像から作る `stereo/disp`（**今は記録に残らない**。`logger_node.DEFAULT_TOPICS` に無い。`docs/review_2026_11_17.md` H3）。両者の差は
 `ml_stereo_e2e.eval --check-disp <記録>` で見る。照合の設定（帯・探索幅・縮めた大きさ）がモデルの契約と違うと推論しない。
 
 ```bash

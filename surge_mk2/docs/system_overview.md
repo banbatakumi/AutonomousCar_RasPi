@@ -258,7 +258,7 @@ Pi の単調時刻に換算済み）/ `t_pub` / `seq` を持つ**。無いと、
 |---|---|---|
 | `/ws/telemetry` | 車両状態・点群・リンク統計・自動運転の判断 | msgpack。`vehicle_state` が届いた周に送り、他は変わったときだけ載せる |
 | `/ws/camera/{front,left}` | JPEG フレーム | バイナリ。頻度の上限は GUI のカメラ設定 |
-| `/ws/camera/depth` | `stereo_node` の深度映像。**繋いでいる間だけ照合する** | バイナリ |
+| `/ws/camera/depth` | `stereo_node` の深度映像。DISARM 中は**繋いでいる間だけ** 1Hz で照合する（ARM 中は自動停止のために常に 15Hz で照合している） | バイナリ |
 | `/ws/control` | 操縦入力・設定変更・状態通知 | JSON |
 | `/ws/map` | 地図（3値を2bitに詰めて zlib）・中心線・経路 | msgpack。変わったときだけ（接続時に最新の1枚） |
 | `/ws/map_upload/<name>` | 地図のアップロード | 操作時のみ |
@@ -315,7 +315,7 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `surge-logclean.timer` | — | 古いログを定期的に消す | ディスクが埋まる |
 
 - **カメラ系の認識ノードは常時 enable。** `auto/ctrl` で対応モードが選ばれている間だけ推論する（IDLE/ACTIVE）。
-  `stereo_node` だけは `cam/config` の `depth`（telemetry_node が深度の視聴者・ステレオを使うモードから決める）で動く
+  `stereo_node` だけは `cam/config` の `depth`（telemetry_node が決める。ARM 中は常に・DISARM 中は深度映像の視聴者がいる間。`telemetry_node._desired_depth`）で動く
 - **`surge-planning` は常時上げてよい。** `auto/cmd` に出すだけで `cmd` には publish しないので、起動していること
   自体は車を動かす条件にならない
 
@@ -338,6 +338,9 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `scan/cam`・`path/cam`・`cam/mask` | カメラ由来の擬似点群・走行可能回廊・マスク | cam_perception_node |
 | `line/cam` | 白線の近傍・遠方2点（地面座標） | line_perception_node |
 | `scan/stereo`・`stereo/depth` | ステレオで見つけた低い障害物の擬似点群（0 は「見つからない」で空きではない）・深度映像 | stereo_node |
+| `stereo/info`・`stereo/disp` | 照合の統計・`stereo_e2e` の入力にする視差の帯 | stereo_node |
+| `e2e_fusion/plan` | 点群＋左右の画像からの前方の経路点 | e2e_fusion_node |
+| `stereo_e2e/plan` | 左右の画像＋視差の帯からの前方の経路点 | stereo_e2e_node |
 | `cam_e2e/cmd` | 画像からの操舵・速度 | cam_e2e_node |
 | `track/target` | 追従対象の方位・距離 | cam_track_node |
 | `route/select`・`signal/status` | 経路グループの切替要求・直近の判定 | arrow_signal_node（名前 `signal`。試験用 `raspi/tools/route_select.py` も同名） |
