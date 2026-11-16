@@ -73,6 +73,16 @@ class TestDispatch(unittest.TestCase):
                                    result=packets.ConfigResult.OK), 2)
         self.assertTrue(tr.state.abs_enabled)
 
+    def test_clamped_config_ack_is_reflected(self):
+        """範囲外で丸められた値（OUT_OF_RANGE の applied）も状態に入れる。不明 ID は捨てる（レビュー L2）。"""
+        tr = LinkTracker()
+        feed(tr, packets.ConfigAck(param_id=packets.Param.AUTO_STOP_MARGIN_CM, applied=100.0,
+                                   result=packets.ConfigResult.OUT_OF_RANGE), 1)
+        self.assertEqual(tr.state.auto_stop_margin_cm, 100.0)
+        feed(tr, packets.ConfigAck(param_id=packets.Param.AUTO_STOP_MARGIN_CM, applied=5.0,
+                                   result=packets.ConfigResult.UNKNOWN_ID), 2)
+        self.assertEqual(tr.state.auto_stop_margin_cm, 100.0)
+
     def test_version_and_stats_stored(self):
         tr = LinkTracker()
         feed(tr, packets.Version(protocol_version=4, fw_id=0xABCD), 1)

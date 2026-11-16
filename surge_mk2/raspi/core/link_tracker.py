@@ -222,11 +222,11 @@ class LinkTracker:
     def _update_config_ack(self, msg) -> None:
         """`CONFIG_ACK`（`CONFIG_SET`/`CONFIG_GET` どちらへの応答も含む）を取り込む。
 
-        対象外の `param_id` や、`result != OK`（範囲外・不明ID等）は無視する。
-        `result == OK` のときの `applied` が STM32 側で実際に適用された値
-        （クランプ後・現在値そのもの）
+        対象外の `param_id` や、`result` が OK・範囲外以外（不明ID等）は無視する。
+        OK と範囲外（`OUT_OF_RANGE`）のときの `applied` は STM32 が実際に入れた値（範囲外なら丸めた後の値）。
+        範囲外を捨てると、丸められた値（例: 自動停止のマージン）が Pi の状態に反映されない（レビュー L2）
         """
-        if msg.result != packets.ConfigResult.OK:
+        if msg.result not in (packets.ConfigResult.OK, packets.ConfigResult.OUT_OF_RANGE):
             return
         name = CONFIG_ACK_BOOL_PARAMS.get(msg.param_id)
         if name is not None:
