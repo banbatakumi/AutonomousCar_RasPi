@@ -233,7 +233,7 @@ typedef struct {
 typedef struct {
     uint16_t param_id;
     float    applied;
-    uint8_t  result;    /* 0=OK 1=不明ID 2=範囲外 3=変更不可 */
+    uint8_t  result;    /* 0=OK 1=不明ID 2=範囲外 3=予約（ファームは返さない） */
 } surge_config_ack_t;
 
 /* LOG (0x04) は可変長。[severity : uint8_t][message : char[]] として手で組む */

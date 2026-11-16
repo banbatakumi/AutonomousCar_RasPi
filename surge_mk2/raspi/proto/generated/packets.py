@@ -263,7 +263,7 @@ class ConfigAck:
 
     param_id: int = 0
     applied: float = 0.0
-    result: int = 0  # 0=OK 1=不明ID 2=範囲外 3=変更不可
+    result: int = 0  # 0=OK 1=不明ID 2=範囲外 3=予約（ファームは返さない）
 
     @classmethod
     def decode(cls, payload: bytes) -> 'ConfigAck':
