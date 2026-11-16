@@ -915,8 +915,10 @@ class IoNode:
             self.control_sync.set_wanted("abs_enable", 1.0 if msg.value else 0.0)
             self._send_ui_setting(packets.Param.ABS_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "brake_hold_enable":
+            self.control_sync.set_wanted("brake_hold_enable", 1.0 if msg.value else 0.0)
             self._send_ui_setting(packets.Param.BRAKE_HOLD_ENABLE, 1.0 if msg.value else 0.0)
         elif msg.kind == "auto_stop_margin_cm":
+            self.control_sync.set_wanted("auto_stop_margin_cm", msg.float_value)
             self._send_ui_setting(packets.Param.AUTO_STOP_MARGIN_CM, msg.float_value)
 
     def _send_command(self, pkt: packets.Command | None = None,

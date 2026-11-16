@@ -44,7 +44,7 @@ from typing import Callable
 
 from ..proto.generated import packets
 
-__all__ = ["CONTROL_PARAM_IDS", "DERIVED", "ENABLE_KEYS", "FROM_DYNAMICS", "disarm_brake_timeout_s", "REQUIRED", "OVERRIDABLE", "load_control_params", "ControlParamSync",
+__all__ = ["CONTROL_PARAM_IDS", "LINK_PARAM_IDS", "DERIVED", "ENABLE_KEYS", "FROM_DYNAMICS", "disarm_brake_timeout_s", "REQUIRED", "OVERRIDABLE", "load_control_params", "ControlParamSync",
            "DEFAULT_TOML", "STEER_LINK_X_MAX_RAD", "steer_link_road", "steer_link_x", "steer_relink"]
 
 DEFAULT_TOML = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
@@ -66,6 +66,12 @@ CONTROL_PARAM_IDS: dict[str, int] = {
         "IMU_GYRO_Z_SCALE",
         # ★v0.29: 自動停止・DISARM 後の制動の見積もり（`DERIVED` から作る）
         "BRAKE_DECEL_M_S2", "MD_TORQUE_LAG_S")}
+
+#: `[control]` に書く数値のうち、ファームの調整表（`control_params.h`）ではなく通信の設定（`ras_link.c`）が持つもの。
+#: 安全に直接効くので必須（ファームの既定に任せない。レビュー H2）。範囲は `ras_link.h` が決める
+LINK_PARAM_IDS: dict[str, int] = {
+    "auto_stop_margin_cm": packets.Param.AUTO_STOP_MARGIN_CM,   # 自動停止の安全マージン [cm]（v0.12）
+}
 
 #: `[control]` ではなく `[dynamics]` から読む項目（同定・シム・Pi の計算と共通の値。2か所に持たない）
 FROM_DYNAMICS = ("speed_kp", "speed_ki")
@@ -91,16 +97,18 @@ def disarm_brake_timeout_s(brake_decel_m_s2: float) -> float:
 
 
 #: `load_control_params` が揃っていることを求める数値項目（STM32 は値を持たず、上位が送るまで仮置き）
-REQUIRED = tuple(k for k in CONTROL_PARAM_IDS if k != "tv_test_moment_nm")
+REQUIRED = (*(k for k in CONTROL_PARAM_IDS if k != "tv_test_moment_nm"), *LINK_PARAM_IDS)
 
-#: `[control]` に書ける機能の ON/OFF（0/1 か true/false）。STM32 の既定は**無効**で、ここに書いた値を
-#: 接続のたびに送って有効にする（書かなければ無効のまま走る）。GUI の「走行アシスト」で切り替えたら
+#: `[control]` に書く機能の ON/OFF（0/1 か true/false）。**全部必須**（`strict`）。STM32 の既定は項目ごとに
+#: 違う（TC・TV は無効、ABS・片輪浮き対策・ブレーキホールドは有効）ので、既定に任せるとファームを書き換えた
+#: だけで黙って変わる。接続のたびにここの値を送って確かめる。GUI の「走行アシスト」で切り替えたら
 #: `ControlParamSync.set_wanted()` で送る値も差し替える（そうしないと読み戻しが元へ戻してしまう）
 ENABLE_KEYS: dict[str, int] = {
     "tc_enable": packets.Param.TC_ENABLE,
     "tv_enable": packets.Param.TV_ENABLE,
     "wheel_lift_guard_enable": packets.Param.WHEEL_LIFT_GUARD_ENABLE,
     "abs_enable": packets.Param.ABS_ENABLE,
+    "brake_hold_enable": packets.Param.BRAKE_HOLD_ENABLE,
 }
 
 #: ステアのリンクの換算（`steer_link_gain`・`steer_link_cubic`）の入力 x = モータ角×リンク比 の
@@ -134,7 +142,7 @@ def steer_relink(angle_rad: float, link_from: tuple[float, float], link_to: tupl
     return steer_link_road(steer_link_x(angle_rad, *link_from), *link_to)
 
 #: 一時的に上書きできる項目（調整パラメータ全部＋機能の ON/OFF）→ `param_id`
-OVERRIDABLE: dict[str, int] = {**CONTROL_PARAM_IDS, **ENABLE_KEYS}
+OVERRIDABLE: dict[str, int] = {**CONTROL_PARAM_IDS, **LINK_PARAM_IDS, **ENABLE_KEYS}
 _ENABLE_IDS = frozenset(ENABLE_KEYS.values())
 
 #: 送った値と `applied` の一致の許容（STM32 は float32 で持つ）
@@ -154,7 +162,7 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
     """`vehicle.toml` → STM32 へ送る値（キーは `CONTROL_PARAM_IDS`・`ENABLE_KEYS` の名前）。
 
     `strict`（既定）: STM32 は値を持たないので、`REQUIRED` の項目が1つでも欠けていればエラー。
-    `[control]` が無い場合も同じ。`tc_enable` などの ON/OFF は書かなければ送らない（STM32 の既定＝無効）。
+    `[control]` が無い場合も同じ。`tc_enable` などの ON/OFF（`ENABLE_KEYS`）も全部必須。
     :raises ValueError: 知らないキー・数でない値・（strict のとき）足りない項目
     """
     with open(toml_path, "rb") as f:
@@ -175,7 +183,7 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
             raise ValueError(f"[control] {key} は [dynamics] に書いてください（そちらが唯一の定義）")
         if key in DERIVED:
             raise ValueError(f"[control] {key} は書かない（{DERIVED[key][0]} から作る）")
-        if key in CONTROL_PARAM_IDS and key != "tv_test_moment_nm":
+        if (key in CONTROL_PARAM_IDS and key != "tv_test_moment_nm") or key in LINK_PARAM_IDS:
             out[key] = float(value)
         else:
             raise ValueError(f"[control] に知らないキーがあります: {key}")
@@ -195,7 +203,7 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
             raise ValueError(f"{src} が数ではありません: {v!r}")
         out[key] = float(v)
     if strict:
-        missing = [k for k in REQUIRED if k not in out]
+        missing = [k for k in (*REQUIRED, *ENABLE_KEYS) if k not in out]
         if missing:
             raise ValueError("STM32 は調整パラメータの値を持たないので vehicle.toml に全項目が要ります。"
                              f"足りない項目: {', '.join(missing)}"
@@ -219,7 +227,7 @@ class ControlParamSync:
     BURST = 4                       #: 1回の `tick()` で送る数の上限（UART を埋めない）
 
     def __init__(self, wanted: dict[str, float], send: Callable[[object], None]) -> None:
-        unknown = set(wanted) - set(CONTROL_PARAM_IDS) - set(ENABLE_KEYS)
+        unknown = set(wanted) - set(OVERRIDABLE)
         if unknown:
             raise ValueError(f"知らない調整パラメータ: {sorted(unknown)}")
         self._send = send

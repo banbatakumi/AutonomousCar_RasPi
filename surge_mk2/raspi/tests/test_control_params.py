@@ -65,7 +65,8 @@ class TestLoad(unittest.TestCase):
     def test_repo_toml_loads(self):
         """リポジトリの vehicle.toml が読め、[control] の値がそのまま出る（同定用の項目は出ない）。"""
         v = load_control_params(DEFAULT_TOML)
-        self.assertTrue(set(v) <= set(CONTROL_PARAM_IDS) | set(ENABLE_KEYS))
+        from raspi.core.control_params import LINK_PARAM_IDS
+        self.assertTrue(set(v) <= set(CONTROL_PARAM_IDS) | set(ENABLE_KEYS) | set(LINK_PARAM_IDS))
         self.assertNotIn("tv_test_moment_nm", v)
         import tomllib
         with open(DEFAULT_TOML, "rb") as f:
@@ -134,9 +135,31 @@ class TestLoad(unittest.TestCase):
             load_control_params(self._toml("[control]\ntc_enable = 0.5\n"), strict=False)
 
     def test_repo_toml_turns_tc_on_and_tv_off(self):
-        """STM32 の既定は TC・TV とも無効。toml は TC だけ有効にする（TV は無効）。"""
+        """toml は TC だけ有効にする（TV は無効）。"""
         v = load_control_params(DEFAULT_TOML)
         self.assertEqual((v["tc_enable"], v["tv_enable"]), (1.0, 0.0))
+
+    def test_safety_settings_are_required(self):
+        """安全に効く設定（ABS・片輪浮き対策・ブレーキホールド・自動停止のマージン）はファームの既定に
+        任せない（レビュー H2）。strict では欠ければエラー、リポジトリの toml には全部ある。"""
+        safety = ("abs_enable", "wheel_lift_guard_enable", "brake_hold_enable", "auto_stop_margin_cm")
+        v = load_control_params(DEFAULT_TOML)
+        for key in safety:
+            with self.subTest(key=key):
+                self.assertIn(key, v)
+        import tomllib
+        with open(DEFAULT_TOML, "rb") as f:
+            d = tomllib.load(f)
+        for key in safety:
+            body = "\n".join(f"{k} = {x!r}".replace("True", "true").replace("False", "false")
+                             for k, x in d["control"].items() if not isinstance(x, dict) and k != key)
+            body += "\n[control.plant]\n" + "\n".join(f"{k} = {x!r}" for k, x in d["control"]["plant"].items()
+                                                     if not isinstance(x, dict))
+            body += "\n[dynamics]\n" + "\n".join(f"{k} = {d['dynamics'][k]!r}" for k in FROM_DYNAMICS)
+            body += f"\n[limits]\nabs_brake_decel_m_s2 = {d['limits']['abs_brake_decel_m_s2']!r}\n"
+            with self.subTest(missing=key), self.assertRaises(ValueError) as cm:
+                load_control_params(self._toml("[control]\n" + body))
+            self.assertIn(key, str(cm.exception))
 
     def test_plant_subtable_is_ignored(self):
         v = load_control_params(self._toml("[control]\ntc_slip_target = 0.1\n[control.plant]\nmu = 0.6\n"), strict=False)

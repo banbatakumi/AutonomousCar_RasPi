@@ -610,10 +610,11 @@ Pi が接続のたびに `config/vehicle.toml` の値を送る。設定値の唯
 
 Pi 側の実装（`raspi/nodes/io_node.py`）:
 
-- 調整パラメータと `[control]` に書いた ON/OFF（`tc_enable`・`tv_enable`・`wheel_lift_guard_enable`・`abs_enable`）は `ControlParamSync` が送って確かめる（§5.8.4）。
-  **ただし今の `vehicle.toml` は `tc_enable`・`tv_enable` しか書いていない**ので、`abs`・`wheel_lift_guard` はファームの既定（有効）のまま。
-  `brake_hold`（`0x0090`）と自動停止のマージン（`0x0060`）は `[control]` に書く場所が無く、GUI で変えない限りファームの既定（有効・15cm）。
-  GUI で変えた値は io_node・STM32 の再起動で既定へ戻る。方針（値の出どころを Pi の1か所にする）に反しているので直す予定（`docs/review_2026_11_17.md` H2）
+- 調整パラメータ、ON/OFF（`tc_enable`・`tv_enable`・`wheel_lift_guard_enable`・`abs_enable`・`brake_hold_enable`）、
+  自動停止のマージン（`auto_stop_margin_cm`）は**全部 `[control]` に必須**で、`ControlParamSync` が送って確かめる（§5.8.4）。
+  ずれていれば ARM を通さない。ファームの既定（ABS・片輪浮き対策・ブレーキホールドは有効、マージン 15cm）は Pi が送るまでの
+  仮置きで、走行の値を決めない（既定を「有効」のまま残しているのは、走行中に STM32 だけが再起動したときの最大制動に ABS を効かせるため）。
+  GUI で変えた値は `set_wanted()` で送る値も差し替える（io_node の再起動で `[control]` の値へ戻る）
 - ON/OFF（`0x0010`/`0x0020`/`0x0050`/`0x0070`/`0x0090`）と自動停止のマージン（`0x0060`）は、接続時と STM32 の再起動の検出時に `CONFIG_GET` で読み直し、
   以降は GUI の操作に応じて `CONFIG_SET` を送る
 

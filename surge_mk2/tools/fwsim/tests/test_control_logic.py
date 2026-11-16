@@ -14,7 +14,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from raspi.core.control_params import CONTROL_PARAM_IDS, ENABLE_KEYS, load_control_params  # noqa: E402
+from raspi.core.control_params import CONTROL_PARAM_IDS, ENABLE_KEYS, LINK_PARAM_IDS, load_control_params  # noqa: E402
 from tools.fwsim import scenarios as S  # noqa: E402
 from tools.fwsim.fw import (FLAG_LAUNCH, FW_DIR, MODE_BRAKE, MODE_SPEED, MODE_SPEED_LAUNCH,  # noqa: E402
                             MODE_TORQUE, OUT, firmware)
@@ -43,7 +43,7 @@ class TestParamTable(unittest.TestCase):
     def test_vehicle_toml_is_within_firmware_range(self):
         table = firmware().params
         for key, value in load_control_params(DEFAULT_TOML).items():
-            if key in ENABLE_KEYS:      # 機能の ON/OFF はファームの調整表に無い
+            if key in ENABLE_KEYS or key in LINK_PARAM_IDS:   # 機能の ON/OFF・通信の設定はファームの調整表に無い
                 continue
             self.assertLessEqual(table[key].lo, value, key)
             self.assertLessEqual(value, table[key].hi, key)

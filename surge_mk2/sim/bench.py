@@ -410,10 +410,10 @@ class Bench:
         self.sim = self.link.sim
         # 車に効かないもの（TC・TV の係数など）も値を持たせる。launch_exit_torque_nm・速度 FF は車へ、
         # TC・ABS の有効/無効は旗の出し方に効く
-        from raspi.core.control_params import CONTROL_PARAM_IDS, ENABLE_KEYS
+        from raspi.core.control_params import OVERRIDABLE
         self.sim.vehicle.set_speed_ff(0.0, 0.0)
         for key, val in ctl.items():
-            pid = CONTROL_PARAM_IDS.get(key, ENABLE_KEYS.get(key))
+            pid = OVERRIDABLE.get(key)
             if pid is not None:
                 self.sim.apply_config(pid, float(val))
         if obstacles:
