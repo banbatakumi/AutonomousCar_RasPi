@@ -94,3 +94,31 @@ def test_run_reports_not_ready_while_mode_is_not_selected():
     plans = [m for t, m in pub.sent if t == TOPIC_STEREO_E2E_PLAN]
     assert plans and not any(p.ready for p in plans)
     assert any(t == "hb/stereo_e2e" for t, _ in pub.sent)
+
+
+def test_gui_choice_loads_in_background(tmp_path: Path, monkeypatch):
+    """GUI で選んだモデルは別スレッドで読み、読み終えるまで今のモデルで続ける（レビュー L21）。"""
+    import threading
+    import time
+
+    import raspi.nodes.stereo_e2e_node as N
+
+    gate = threading.Event()
+    fake = SimpleNamespace(name="new")
+
+    def slow_load(path):
+        gate.wait(2.0)
+        return fake
+
+    monkeypatch.setattr(N, "load_model", slow_load)
+    (tmp_path / "new.onnx").write_bytes(b"")
+    node = StereoE2ENode(models_dir=tmp_path, model=SimpleNamespace(name="old"), model_name="old")
+    node.reload_in_background("new")
+    assert node.model_name == "old" and not node.take_loaded()   # 読んでいる間は今のまま・塞がない
+    node.reload_in_background("new")                            # 二重に読まない
+    gate.set()
+    for _ in range(200):
+        if node.take_loaded():
+            break
+        time.sleep(0.01)
+    assert node.model_name == "new" and node.model is fake

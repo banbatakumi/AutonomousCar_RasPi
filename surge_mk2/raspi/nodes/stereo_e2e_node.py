@@ -27,6 +27,7 @@ import argparse
 import json
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -218,8 +219,12 @@ class StereoE2ENode:
         self.model_name = model_name
         self.min_period_ns = int(NS / max(0.5, rate_hz))
         self._failed_key: tuple | None = None
+        #: 別スレッドで読んでいるモデルの名前と、読み終えた結果 `(名前, キー, モデル, 例外)`（`reload_in_background`）
+        self._loading: str | None = None
+        self._loaded: tuple | None = None
         self._last_disp_seq = -1
-        self._last_infer_t = -1
+        #: 次に推論してよい撮影時刻 [ns]（-1 = まだ一度も推論していない）
+        self._next_infer_t = -1
         self._running = False
         self._active = False
         self._reader = FrameReader()
@@ -231,10 +236,7 @@ class StereoE2ENode:
 
     # ── モデル ──
 
-    def reload_if_changed(self, name: str) -> bool:
-        """`name` のモデルへ切り替える。失敗しても今のモデルを保持し、同じファイルは再試行しない。"""
-        if not name or name == self.model_name:
-            return False
+    def _model_key(self, name: str) -> tuple:
         path = self.models_dir / f"{name}.onnx"
 
         def mtime(p: Path):
@@ -243,19 +245,57 @@ class StereoE2ENode:
             except OSError:
                 return None
 
-        key = (name, mtime(path), mtime(path.with_suffix(".json")))
-        if key == self._failed_key:
-            return False
-        try:
-            self.model = load_model(path)
+        return (name, mtime(path), mtime(path.with_suffix(".json")))
+
+    def _adopt(self, name: str, key: tuple, model: StereoOnnx | None, err: Exception | None) -> bool:
+        if model is not None:
+            self.model = model
             self.model_name = name
             self._failed_key = None
             print(f"# モデル切替: {name}", flush=True)
             return True
-        except Exception as e:                                # noqa: BLE001
-            self._failed_key = key
-            print(f"# モデル読み込み失敗（{name}）: {e}。前のモデルのまま続行", file=sys.stderr, flush=True)
+        self._failed_key = key
+        print(f"# モデル読み込み失敗（{name}）: {err}。前のモデルのまま続行", file=sys.stderr, flush=True)
+        return False
+
+    def reload_if_changed(self, name: str) -> bool:
+        """`name` のモデルへ切り替える。失敗しても今のモデルを保持し、同じファイルは再試行しない。"""
+        if not name or name == self.model_name:
             return False
+        key = self._model_key(name)
+        if key == self._failed_key:
+            return False
+        try:
+            return self._adopt(name, key, load_model(self.models_dir / f"{name}.onnx"), None)
+        except Exception as e:                                # noqa: BLE001
+            return self._adopt(name, key, None, e)
+
+    def reload_in_background(self, name: str) -> None:
+        """`reload_if_changed` を別スレッドで（ONNX のセッションを作る間、推論のループを塞がない。レビュー L21）。
+        読み終えたら次の `take_loaded()` で差し替える。読んでいる間は今のモデルで推論を続ける。"""
+        if not name or name == self.model_name or self._loading is not None:
+            return
+        key = self._model_key(name)
+        if key == self._failed_key:
+            return
+        self._loading = name
+
+        def work() -> None:
+            try:
+                got = (name, key, load_model(self.models_dir / f"{name}.onnx"), None)
+            except Exception as e:                            # noqa: BLE001
+                got = (name, key, None, e)
+            self._loaded = got
+
+        threading.Thread(target=work, name="stereo_e2e-load", daemon=True).start()
+
+    def take_loaded(self) -> bool:
+        """別スレッドで読み終えたモデルがあれば差し替える。差し替えたら True。"""
+        got, self._loaded = self._loaded, None
+        if got is None:
+            return False
+        self._loading = None
+        return self._adopt(*got)
 
     # ── 1回の推論（純粋な計算） ──
 
@@ -346,8 +386,9 @@ class StereoE2ENode:
             vs = latest.get(TOPIC_VEHICLE_STATE)
             wanted = latest.get(TOPIC_STEREO_E2E_MODEL)
             chosen = wanted.name if wanted is not None and not fixed_model else ""
+            self.take_loaded()
             if chosen:
-                self.reload_if_changed(chosen)
+                self.reload_in_background(chosen)
             active = cam_infer_active(auto_ctrl, vs, MODES)
             if active != self._active:
                 self._active = active
