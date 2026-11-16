@@ -13,7 +13,7 @@ cv2 はここで遅延 import する（`StereoRectifier` と同じ。テスト�
   近い方から見て、隣の刻みと合わせて `min_points` 点以上あり、**高さの幅（10〜90% 点）が `min_height_span` 以上**の
   最初のもの。高さの幅を見るのは、斜めに見える床の取り違えが「床より数 cm 上に、高さのそろった点の列」として
   出るため（合成画像で、床の誤対応は幅 1.1cm 以下、高さ 10cm の箱は 3〜6cm）。代わりに、高さ
-  `z_min + min_height_span`（既定 5cm）より低い物は見つけられない
+  `z_min + min_height_span`（既定 6cm）より低い物は見つけられない
 - **見つからない方位は 0.0**。これは LiDAR の「反射が返らない」と同じ書き方で、**空きという意味ではない**
   （模様の無い物はステレオに写らない）。ステレオは障害物を**足すだけ**の入力として使う
 - `sector_seen` は平行化画像の視野（水平 `hfov`）に1°でも入るセクタだけ True
@@ -46,6 +46,10 @@ class MatchParams:
     num_disp: int = 96
     #: 照合の窓の一辺 [px]（奇数）。SGBM は 5、BM なら 15 前後
     block: int = 5
+    #: SGBM の `uniquenessRatio`（最良の候補が2番目よりこれ % 以上良いときだけ視差を出す）。10 → 25 は
+    #: 会場の走行記録（2026-11-15、ダクトの蛇腹の繰り返し模様）で、LiDAR に無い所の点が走行中に約 3 割減り、
+    #: 見逃しはほぼ変わらなかった（`docs/stereo_plan.md` 段階7）。BM は 10 のまま
+    uniqueness: int = 25
 
 
 def make_matcher(p: MatchParams):
@@ -62,7 +66,7 @@ def make_matcher(p: MatchParams):
         b = p.block
         return cv2.StereoSGBM_create(minDisparity=0, numDisparities=p.num_disp, blockSize=b,
                                      P1=8 * b * b, P2=32 * b * b, disp12MaxDiff=1,
-                                     uniquenessRatio=10, speckleWindowSize=50, speckleRange=2,
+                                     uniquenessRatio=p.uniqueness, speckleWindowSize=50, speckleRange=2,
                                      mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
     raise ValueError(f"知らない照合の方式: {p.algo}")
 
@@ -106,8 +110,10 @@ class ObstacleParams:
     min_points: int = 4
     #: 方位の中の距離の何パーセント点を使うか（近い側。中央値だと物の手前の縁より奥に出る）
     near_pct: float = 20.0
-    #: かたまりの高さの幅（10〜90% 点）の下限 [m]。床の取り違えを捨てる（モジュールの docstring）
-    min_height_span: float = 0.02
+    #: かたまりの高さの幅（10〜90% 点）の下限 [m]。床の取り違えを捨てる（モジュールの docstring）。
+    #: 0.02 → 0.03 は会場の走行記録で、床・白線の取り違えが減ったため（`docs/stereo_plan.md` 段階7）。
+    #: 見つけられる物の高さの下限は `z_min` + これ（6cm）
+    min_height_span: float = 0.03
     #: かたまりを探す距離の刻み [m]
     slice_m: float = 0.05
 

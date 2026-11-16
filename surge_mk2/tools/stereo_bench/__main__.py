@@ -49,7 +49,21 @@ def main(argv: list[str] | None = None) -> int:
                     help="平行化した左と視差を並べた絵を書き出す（最初の --save-n 組）")
     ap.add_argument("--save-n", type=int, default=5)
     ap.add_argument("--toml", default=None, help="vehicle.toml（既定は config/vehicle.toml）")
+    g = ap.add_argument_group("走行中の採点（--drive。`drive.py`）")
+    g.add_argument("--drive", action="store_true",
+                   help="走行中の scan/stereo を、自車の動きを補正した LiDAR で採点する")
+    g.add_argument("--no-comp", action="store_true", help="LiDAR の点の動きを補正しない（比べる用）")
+    g.add_argument("--replay", action="store_true",
+                   help="記録の画像の組を今のコードの照合（stereo_node と同じ）でやり直してから採点する。"
+                        "校正値は撮った時の vehicle.toml（記録の provenance）")
+    g.add_argument("--cam-yaw-deg", type=float, default=None,
+                   help="--replay で右カメラの取付の yaw を置き換える [deg]")
+    g.add_argument("--fit-yaw", action="store_true",
+                   help="ステレオと LiDAR の向きの差（方位の回し量）を探す。右カメラの yaw の見積もり")
     args = ap.parse_args(argv)
+    if args.drive or args.fit_yaw:
+        from .drive import main_drive
+        return main_drive(args)
 
     import cv2
 

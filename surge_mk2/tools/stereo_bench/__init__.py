@@ -4,6 +4,9 @@
     .venv/bin/python -m tools.stereo_bench REC.mcap --wall 1.00          # 物差し（LiDAR）を既知の壁で確かめる
     .venv/bin/python -m tools.stereo_bench REC.mcap --requality 70       # JPEG 品質 70 で焼き直して比べる
     .venv/bin/python -m tools.stereo_bench REC.mcap --save /tmp/stereo   # 平行化した左と視差の絵
+    .venv/bin/python -m tools.stereo_bench REC.mcap --drive              # 走行中の scan/stereo を動きを補正した LiDAR で採点（drive.py）
+    .venv/bin/python -m tools.stereo_bench REC.mcap --drive --replay     # 今のコードの照合でやり直して採点（--cam-yaw-deg で取付を置き換え）
+    .venv/bin/python -m tools.stereo_bench REC.mcap --fit-yaw            # ステレオと LiDAR の向きの差を探す
 
 計画は `docs/stereo_plan.md` 段階3。シムはカメラを描かないので、照合は実機の記録で開発する。
 

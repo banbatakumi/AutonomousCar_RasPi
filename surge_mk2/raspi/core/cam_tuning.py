@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-__all__ = ["TUNING_DIR", "apply_override", "pick_name", "lens_tuning", "check_sensor"]
+__all__ = ["TUNING_DIR", "apply_override", "with_custom_exposure", "pick_name", "lens_tuning", "check_sensor"]
 
 TUNING_DIR = Path(__file__).resolve().parents[2] / "config" / "cam_tuning"
 
@@ -61,6 +61,34 @@ def apply_override(base: dict, override: dict) -> dict:
         if target is None:
             raise ValueError(f"標準のチューニングに {name} が無い")
         target.update(params)
+    return out
+
+
+def with_custom_exposure(tuning: dict, max_exposure_us: int, *, gain_at_cap: float = 8.0,
+                         frame_us: int = 33333, max_gain: float = 10.0) -> dict:
+    """AE の露光プロファイル `custom`（`AeExposureMode.Custom`）を足す。露光を `max_exposure_us` に抑え、ゲインで稼ぐ。
+
+    AGC は `shutter[i]` まで露光を延ばしてから `gain[i]` までゲインを上げる、を順に繰り返す。ここでは
+    露光を上限の半分（ゲイン 1）→ 上限（ゲイン 2）まで延ばし、ゲインを `gain_at_cap` まで上げる。それでも暗ければ
+    露光を1コマ（`frame_us`）まで延ばし、最後にゲインを `max_gain` まで上げる。**走行中の動きブレを抑えるため**。
+
+    - **ゲインはアナログの範囲（IMX219 は約 10.7 倍まで）に収める。** 超えた分は主カメラの ISP がデジタルで掛けるが、
+      左カメラは主カメラの `AnalogueGain` だけを写す（`camera_node._follow_exposure`）ので、左だけ暗くなる
+      （2026-11-16 の夜の室内で、上限 16 倍にしたとき 右 48・左 30 の明るさ）
+    - 暗い所で露光を延ばすのは、露光不足の暗い画像の方が照合に悪いため（同じ室内で 8ms・16 倍に張り付き、画像の平均 50）。
+      明るい所では露光は `max_exposure_us` 以下にとどまる
+
+    `rpi.agc` の全チャンネルに足す（`tuning` は書き換えない）。`rpi.agc` が無ければ `ValueError`。
+    """
+    out = copy.deepcopy(tuning)
+    agc = next((a["rpi.agc"] for a in out.get("algorithms", []) if "rpi.agc" in a), None)
+    if agc is None:
+        raise ValueError("チューニングに rpi.agc が無い")
+    cap = int(max_exposure_us)
+    mode = {"shutter": [100, max(100, cap // 2), cap, max(cap, int(frame_us))],
+            "gain": [1.0, 2.0, float(gain_at_cap), float(max_gain)]}
+    for ch in agc.get("channels", [agc]):
+        ch.setdefault("exposure_modes", {})["custom"] = copy.deepcopy(mode)
     return out
 
 

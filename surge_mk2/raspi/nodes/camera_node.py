@@ -47,7 +47,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.cam_tuning import check_sensor, lens_tuning, pick_name  # noqa: E402
+from raspi.core.cam_tuning import check_sensor, lens_tuning, pick_name, with_custom_exposure  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.core.cleanup import quiet_close  # noqa: E402
 
@@ -91,8 +91,14 @@ CAM_TOPIC = {i: (f"image/{role}", role) for i, (role, _) in enumerate(_vehicle.c
 CAM_DEVICE = {i: dev for i, (_, dev) in enumerate(_vehicle.camera_devices)}
 #: ステレオで同期して撮っている間の主カメラの AE の露光プロファイル（libcamera の `AeExposureMode`）。
 #: 標準（Normal）は暗い所で露光を 1 周期いっぱい（33ms）まで延ばし、走行中はブレて左右の照合が
-#: 落ちる。Short は同じ明るさをゲインで稼いで露光を短くする（`imx219.json` の `exposure_modes.short`）
+#: 落ちる。Short（`imx219.json` の `exposure_modes.short`）もゲイン 4 で 20〜60ms まで延びるので、
+#: チューニングに露光の上限付きの `custom`（`STEREO_MAX_EXPOSURE_US`、`cam_tuning.with_custom_exposure`）を足して
+#: Custom を使う。足せなかったとき（チューニングが標準のまま等）は Short（`prepare_isp_tuning`）
 STEREO_AE_EXPOSURE_MODE = "Short"
+#: 同期中に露光を抑える値 [µs]。ゲインが 8 倍（アナログの範囲）に届くまではこれを超えず、それでも暗いときだけ
+#: 1コマまで延ばす（`cam_tuning.with_custom_exposure`）。会場の走行記録（2026-11-15、30fps・Short）で帯の鮮明度が
+#: 停止 210 → 2.5m/s 超 97 と半分に落ちていた（`docs/stereo_plan.md` 段階7）。値は次の走行の鮮明度・視差の割合で決め直す（仮）
+STEREO_MAX_EXPOSURE_US = 8000
 #: 左カメラが主カメラの露光・ゲインを写す間隔 [コマ]（30fps で約 6Hz）と、写し直す変化の下限
 STEREO_EXPOSURE_FOLLOW_FRAMES = 5
 STEREO_EXPOSURE_FOLLOW_RATIO = 0.03
@@ -129,6 +135,17 @@ def prepare_isp_tuning(indices: list[int]) -> None:
 
     _isp_tuning = lens_tuning(pick_name([CAM_ISP_TUNING.get(i, "") for i in indices]),
                               Picamera2.load_tuning_file)
+    global STEREO_AE_EXPOSURE_MODE
+    tuning, sensor = _isp_tuning
+    if tuning is None:
+        print("# 同期中の露光の上限は使えない（チューニングが標準のまま）。Short で撮る", flush=True)
+        return
+    try:
+        _isp_tuning = (with_custom_exposure(tuning, STEREO_MAX_EXPOSURE_US), sensor)
+        STEREO_AE_EXPOSURE_MODE = "Custom"
+        print(f"# 同期中の露光は {STEREO_MAX_EXPOSURE_US / 1000:.1f}ms に抑える（ゲイン 8 倍まで。AeExposureMode=Custom）", flush=True)
+    except ValueError as e:
+        print(f"!! 同期中の露光の上限を足せない（Short で撮る）: {e}", file=sys.stderr, flush=True)
 
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの

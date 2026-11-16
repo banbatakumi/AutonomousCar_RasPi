@@ -24,7 +24,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.core.cam_tuning import (TUNING_DIR, apply_override, check_sensor,  # noqa: E402
-                                   lens_tuning, pick_name)
+                                   lens_tuning, pick_name, with_custom_exposure)
 from raspi.core.vehicle import DEFAULT_PATH, Vehicle, resolve_lens  # noqa: E402
 from raspi.tools.alsc_calib import GRID, fit_tables, split_bayer  # noqa: E402
 
@@ -167,6 +167,41 @@ class TestFit(unittest.TestCase):
         r, g, b, sat = split_bayer(raw + 100, "BGGR", 100)
         self.assertEqual((r[0, 0], g[0, 0], b[0, 0]), (30, 21, 10))
         self.assertFalse(sat.any())
+
+class TestCustomExposure(unittest.TestCase):
+    """同期中の露光の上限（`with_custom_exposure`）。形は Pi の `pisp/imx219.json`（`rpi.agc` に4チャンネル）。"""
+
+    BASE = {"version": 2.0, "algorithms": [
+        {"rpi.black_level": {}},
+        {"rpi.agc": {"channels": [
+            {"exposure_modes": {"normal": {"shutter": [100, 10000, 30000], "gain": [1.0, 2.0, 4.0]},
+                                "short": {"shutter": [100, 5000, 60000], "gain": [1.0, 2.0, 10.0]}}},
+            {"exposure_modes": {"normal": {"shutter": [100], "gain": [1.0]}}}]}}]}
+
+    def test_every_channel_gets_capped_custom(self):
+        out = with_custom_exposure(self.BASE, 8000)
+        for ch in out["algorithms"][1]["rpi.agc"]["channels"]:
+            c = ch["exposure_modes"]["custom"]
+            self.assertEqual(len(c["shutter"]), len(c["gain"]))
+            self.assertEqual(c["shutter"], sorted(c["shutter"]))
+            self.assertEqual(c["gain"], sorted(c["gain"]))
+            # ゲインが gain_at_cap に届くまでは露光 8ms 以下
+            i = c["gain"].index(8.0)
+            self.assertLessEqual(max(c["shutter"][:i + 1]), 8000)
+            # ゲインはアナログの範囲（左カメラがデジタルゲインを写せないため）、最後は1コマまで延ばせる
+            self.assertLessEqual(max(c["gain"]), 10.67)
+            self.assertEqual(c["shutter"][-1], 33333)
+            self.assertIn("normal", ch["exposure_modes"])          # ほかのプロファイルは残す
+        self.assertNotIn("custom", self.BASE["algorithms"][1]["rpi.agc"]["channels"][0]["exposure_modes"])
+
+    def test_without_channels(self):
+        base = {"algorithms": [{"rpi.agc": {"exposure_modes": {}}}]}
+        out = with_custom_exposure(base, 4000)
+        self.assertEqual(out["algorithms"][0]["rpi.agc"]["exposure_modes"]["custom"]["shutter"][2], 4000)
+
+    def test_missing_agc_raises(self):
+        with self.assertRaises(ValueError):
+            with_custom_exposure({"algorithms": [{"rpi.awb": {}}]}, 8000)
 
 
 if __name__ == "__main__":
