@@ -45,6 +45,7 @@ gpiozero がオープンドレインを直接サポートしておらず、入�
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -160,7 +161,18 @@ class GpiozeroTone:
         self._dev = TonalBuzzer(gpio, octaves=2)
 
     def play(self, tone) -> None:
-        self._dev.play(tone)
+        try:
+            self._dev.play(tone)
+        except ValueError as e:
+            # 原因を追えるように、音名・周波数・このデバイスの範囲を載せて投げ直す（2026-10 に実機で一度出たが、
+            # 同じ gpiozero 2.0.1 でも手元では再現しなかった）
+            from gpiozero.tones import Tone
+            try:
+                hz = f"{Tone(tone).frequency:.1f}Hz"
+            except Exception:                         # noqa: BLE001
+                hz = "?"
+            raise ValueError(f"{e}: tone={tone!r}（{hz}）、範囲 {self._dev.min_tone!r}〜{self._dev.max_tone!r}"
+                             f"（{self._dev.min_tone.frequency:.1f}〜{self._dev.max_tone.frequency:.1f}Hz）") from e
 
     def stop(self) -> None:
         self._dev.stop()
@@ -205,6 +217,25 @@ class Buzzer:
         self._beep_on = False
         self._gen = 0
         self._primed = False
+        #: 一度知らせたブザーの失敗（同じものを毎回ログに出さない）
+        self._reported: set[str] = set()
+
+    def _safe(self, what: str, fn, *args) -> bool:
+        """ブザーを叩く。**失敗しても例外を外へ出さない**（鳴らないだけにする）。
+
+        `write()` は io_node のメインループから同期で呼ばれるので、ここで例外が出ると io_node ごと落ちて
+        ハートビートが止まり、E-Stop がラッチする。メロディのスレッドでも、例外で途中終了すると鳴りっぱなしに
+        なりうる。音が出ないことは走行の安全に関係しないので、ログに一度だけ残して続ける。
+        """
+        try:
+            fn(*args)
+            return True
+        except Exception as e:                        # noqa: BLE001
+            msg = f"{what}: {type(e).__name__}: {e}"
+            if msg not in self._reported:
+                self._reported.add(msg)
+                print(f"!! ブザーを鳴らせない（{msg}）。音を出さずに続ける", file=sys.stderr, flush=True)
+            return False
 
     def _prime(self) -> None:
         if not self._primed:
@@ -222,9 +253,9 @@ class Buzzer:
             # **ここでは `_prime()` を呼ばない。** メインループのスレッドから
             # 同期で呼ばれるため、初回待ちで `write()` を塞ぐと COMMAND 送信が
             # 遅れる。通常は起動音（別スレッド）が先に済ませているので実害は無い
-            self._dev.play(self.BEEP_TONE)
+            self._safe(f"単発ビープ {self.BEEP_TONE}", self._dev.play, self.BEEP_TONE)
         else:
-            self._dev.stop()
+            self._safe("停止", self._dev.stop)
 
     # ── メロディ ──
 
@@ -240,11 +271,12 @@ class Buzzer:
             for name, dur_ms, gap_ms in melody:
                 if gen != self._gen:
                     return
-                self._dev.play(name)
+                if not self._safe(f"メロディの音 {name}", self._dev.play, name):
+                    continue                   # 鳴らせない音は飛ばす（長さぶん待たない）
                 time.sleep(dur_ms / 1000)
                 if gen != self._gen:
                     return
-                self._dev.stop()
+                self._safe("停止", self._dev.stop)
                 if gap_ms:
                     time.sleep(gap_ms / 1000)
         finally:
@@ -252,7 +284,7 @@ class Buzzer:
             # しない。**世代が古くなっていれば触らない**（write()が単発ビープを
             # 再生中に、打ち切られたはずのこのスレッドが後から止めてしまうのを防ぐ）
             if gen == self._gen:
-                self._dev.stop()
+                self._safe("停止", self._dev.stop)
 
     def close(self) -> None:
         with quiet_close("gpiozero PWMOutputDevice（ブザー）"):
