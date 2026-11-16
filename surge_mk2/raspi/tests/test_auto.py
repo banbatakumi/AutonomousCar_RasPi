@@ -996,6 +996,10 @@ class TestAutoRelay(unittest.IsolatedAsyncioTestCase):
         latest = {}
         if auto is not None:
             auto.t_pub = now - age_ns
+            if auto.source == "":
+                # planner の走行指令は mode=2・arm（`planning_node._make_cmd`）。`planning:idle` の
+                # 試験だけは自分で mode=0 を作る
+                auto.mode, auto.arm = 2, True
             latest["auto/cmd"] = auto
         self.srv.sub = FakeSub(latest)
         return self.srv._merge_auto(self.gui, now)
@@ -1049,6 +1053,17 @@ class TestAutoRelay(unittest.IsolatedAsyncioTestCase):
         out = self.merge(DriveCmd(target_speed=0.9, target_steer=-0.2), age_ns=500_000_000)
         self.assertTrue(out.brake)
         self.assertAlmostEqual(out.target_steer, 0.31)
+
+    async def test_planning_idle_is_treated_as_stale(self):
+        """planning が engage していない間の `planning:idle`（mode=0・速度0・舵0・制動なし）は
+        新鮮でも本物の指令として流さない。制動＋最後の舵で止める（レビュー H1）。"""
+        self.merge(DriveCmd(target_speed=0.9, target_steer=0.31))
+        out = self.merge(DriveCmd(mode=0, arm=False, source="planning:idle"))
+        self.assertTrue(out.brake)
+        self.assertEqual(out.target_speed, 0.0)
+        self.assertAlmostEqual(out.target_steer, 0.31)
+        self.assertIn("stale", out.source)
+        self.assertEqual(self.srv.auto_stalls, 1)
 
     async def test_planner_brake_is_passed_through(self):
         out = self.merge(DriveCmd(brake=True, target_speed=0.0, target_steer=0.2))

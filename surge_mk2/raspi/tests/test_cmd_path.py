@@ -985,7 +985,7 @@ class TestImmediateHumanRelay(unittest.IsolatedAsyncioTestCase):
         srv._publish_auto_ctrl = lambda: None
         srv._auto_engaged, srv._auto_mode = True, "slam2d_route"
         srv._auto_was_fresh, srv._auto_last_steer, srv.auto_stalls = True, 0.0, 0
-        auto = DriveCmd(target_speed=2.8, target_steer=steer)
+        auto = DriveCmd(mode=2, arm=True, target_speed=2.8, target_steer=steer)
         auto.t_pub = time.monotonic_ns()
         srv.sub.latest = {"auto/cmd": auto, "vehicle_state": VehicleState(speed=speed)}
 

@@ -3524,6 +3524,11 @@ class TelemetryServer:
         """
         auto = self.sub.latest.get(TOPIC_AUTO_CMD)
         fresh = (auto is not None and (now - auto.t_pub) <= AUTO_CMD_STALE_NS
+                 # **走れという指令（mode=2・arm）だけを本物とみなす**（`_handover_cmd` の `usable` と
+                 # 同じ条件）。planning_node が engage していない間の `planning:idle`（速度0・舵0・
+                 # 制動なし）を載せると、planning の再起動や engage が届くまでの数十 ms に、制動なしで
+                 # 舵が直進へ戻る。外れたら stale と同じ経路（最大制動＋舵保持）に落とす
+                 and auto.mode == 2 and auto.arm
                  # **NaN/Inf な auto/cmd は「無い」のと同じ扱いにする**（issue #1）。
                  # `command_from_cmd` も同じ検査で弾くが（多層防御）、ここで落として
                  # おけば壊れた planner の出力を stale と同じ経路（制動）で扱える
