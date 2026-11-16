@@ -189,6 +189,7 @@ def _contact_floor(start: float) -> float:
 
 class ParkToPoint(Planner):
     id = "park_to_point"
+    handles_standstill_steer = True          # 自前の `StandstillSteer`（`_still`）を持つ
     name = "駐車（クリック指定）"
     description = "LiDAR画面をクリック+ドラッグして指定した位置+向きへ、地図なしで接近して停止する"
 
@@ -325,7 +326,7 @@ class ParkToPoint(Planner):
         #: engage しているか（`set_engaged`）。`planning_node` を通さず `plan()` を直接呼ぶ使い方
         #: （走行中の迂回の引き継ぎ）では呼ばれないので、既定は True
         self._engaged = True
-        #: 停車の長さ（据え切りでステア MD を過熱させない。`StandstillSteer`）
+        #: 停車の長さ（据え切りでステア MD を過熱させない。`StandstillSteer`。`handles_standstill_steer`）
         self._still = StandstillSteer()
         self.reset()
 

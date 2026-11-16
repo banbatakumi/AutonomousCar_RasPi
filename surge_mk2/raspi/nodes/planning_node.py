@@ -150,7 +150,15 @@ class PlanningNode:
 
         #: 現在の意思（`auto/ctrl` の写し）。**telemetry_node が真値を持つ**
         self.ctrl = AutoCtrl(mode=mode, engaged=False)
-        self.planner = make_planner(mode)
+        #: `--mode` 付きの起動でも planner の作成の例外でノードを落とさない（`_ask` と同じ理由）。
+        #: 失敗したら planner 無しで起動し、理由を `auto/state` に出す
+        self.planner = None
+        mode_error = ""
+        try:
+            self.planner = make_planner(mode)
+        except Exception as e:                      # noqa: BLE001
+            mode_error = f"planner の作成に失敗: {e}"
+            print(f"# {mode_error}", file=sys.stderr, flush=True)
         self._params: dict[str, float] = merged_params(mode, {})
         #: `auto/ctrl` を受けたことがあるか・**engaged=False を見たことがあるか**（`_apply_ctrl`）
         self._ctrl_seen = False
@@ -167,7 +175,7 @@ class PlanningNode:
         self._still_t_ns = 0
         #: `auto/ctrl` の要求（地図の読み込み・経路の保存など）で planner が投げた例外。次の要求が
         #: 通るかモードが変わるまで `auto/state` の理由に出す（`_ask`）
-        self._ctrl_error = ""
+        self._ctrl_error = mode_error
         #: 走行中の解除の後処理（`on_disengage`）を、車が止まるまで待っている（`_update_release`）。
         #: 待つ間も `plan()` は回るので、自己位置は止まった所まで追い続ける（解いた瞬間の姿勢を
         #: 再特定の種にすると、止まるまでの数 m・スピンで外れ、全域探索に十数秒かかる）
@@ -638,7 +646,7 @@ class PlanningNode:
         まま舵を掛ける試験がある）。発進の指令（制動でも目標速度 0 でもない）は触らない。
         """
         if (not self.ctrl.engaged or getattr(self.planner, "category", "drive") != "drive"
-                or hasattr(self.planner, "_still")):
+                or getattr(self.planner, "handles_standstill_steer", False)):
             self._still.reset()
             self._still_t_ns = 0
             return cmd

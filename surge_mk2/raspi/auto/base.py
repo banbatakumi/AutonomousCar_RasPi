@@ -133,6 +133,9 @@ class Planner:
     #: （`LineTrace`/`E2ELidar` が上書きしている）。`target_speed`/
     #: `target_steer`/`plan_hz` は全 planner が必ず書くので対象外
     stats: tuple[str, ...] = ("free_ahead", "nearest", "gap", "valid_ratio")
+    #: 停車中の据え切り（ステア MD の過熱）を planner 自身が避けるか。False なら `planning_node` が停車の長さを
+    #: 見て舵を 0 へ戻す（`_relax_standstill_steer`）。自前の `StandstillSteer` を持つ planner は True にする
+    handles_standstill_steer: bool = False
 
     def reset(self) -> None:
         """内部状態を捨てる。**モード切替・disengage のたびに呼ばれる。**
