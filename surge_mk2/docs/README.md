@@ -9,6 +9,7 @@
 | [calibration.md](calibration.md) | 車両の校正（試験 `raspi/auto/calib_*`・解析 `tools/calib`）、カメラの校正、車速 KF の調整の設計と手順 |
 | [control_constants.md](control_constants.md) | 制御定数の出どころ（物理・同定・式・方針・経験則） |
 | [competition_plan.md](competition_plan.md) | 大会に向けた計画 |
+| [review_2026_11_17.md](review_2026_11_17.md) | 横断レビュー（2026-11-17 時点の記録。バグ・認識差・対策の優先度順。対策を入れたら項目を消す） |
 | [../sim/README.md](../sim/README.md) | シミュレータ（Mac 専用）・コースの作り方・ベンチ |
 | [../gui/README.md](../gui/README.md) | GUI のコード地図 |
 | [../slam2d/README.md](../slam2d/README.md) | 車体非依存の 2D LiDAR SLAM ライブラリ |

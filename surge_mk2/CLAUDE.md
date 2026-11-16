@@ -38,6 +38,7 @@
 | STM32 の制御をホストで回して比べたい | `tools/fwsim`（ファームをそのままコンパイルして車のモデルと閉ループ。`python -m tools.fwsim.bench`） |
 | 前方ステレオ視（同期・校正・照合・残りの段階） | [`docs/stereo_plan.md`](docs/stereo_plan.md)（取付・校正値は `config/vehicle.toml` の `[sensors.cam_front]`・`[sensors.cam_left]`・`[sensors.stereo]`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
+| 未対処のバグ・STM32⇔Pi の認識差・改善候補（2026-11-17 の横断レビュー） | [`docs/review_2026_11_17.md`](docs/review_2026_11_17.md)（時点の記録。対策を入れたら項目を消す） |
 | 公開用の技術解説サイト（GitHub Pages） | 別リポジトリ [`surge-mk2`](https://github.com/banbatakumi/surge-mk2)（`~/GitHub/surge-mk2`、Zensical。公開先 https://banbatakumi.github.io/surge-mk2/）。**数値の正は持たない**ので、コードを変えたら「このサイトについて」の見直し表に従って該当ページを見直す |
 | 過去の経緯（旧 PROGRESS・監査報告・コードレビュー） | `docs/archive/`（**陳腐化。ユーザーが求めない限り読まない・根拠にしない**） |
 
