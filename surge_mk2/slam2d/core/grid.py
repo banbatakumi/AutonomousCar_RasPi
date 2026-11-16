@@ -242,12 +242,14 @@ class OccGrid:
             dx, dy, d = _native.f64(dx), _native.f64(dy), _native.f64(d)
             if getattr(self, "_touched", None) is None or self._touched.shape != self.misses.shape:
                 self._touched = np.zeros(self.misses.shape, dtype=np.uint8)
-            _native.lib.carve_touch(dx.size, float(ox), float(oy), _native.addr(dx),
-                                    _native.addr(dy), _native.addr(d), tt.size, _native.addr(tt),
-                                    back, self.origin[0], self.origin[1], self.resolution,
-                                    self.height, self.width, _native.addr(self.misses),
-                                    _COUNT_MAX, _native.addr(self._touched))
-            return
+            rc = _native.lib.carve_touch(dx.size, float(ox), float(oy), _native.addr(dx),
+                                         _native.addr(dy), _native.addr(d), tt.size, _native.addr(tt),
+                                         back, self.origin[0], self.origin[1], self.resolution,
+                                         self.height, self.width, _native.addr(self.misses),
+                                         _COUNT_MAX, _native.addr(self._touched))
+            if rc == 0:
+                return
+            # C が作業領域を確保できなかった（`misses` は触っていない）。下の numpy 版で数える
         col, row = self.to_cell(ox + dx[:, None] * t, oy + dy[:, None] * t)
         ok = self.inside(col, row)
         # 終端セルの手前まで。**終端は壁かもしれないので空きにしない**（`_END_BACKOFF`）
@@ -402,7 +404,8 @@ class OccGrid:
             first = np.empty(nr, dtype=np.int64)
             cc, ss = np.ascontiguousarray(cos[:, 0]), np.ascontiguousarray(sin[:, 0])
             xx, yy = np.ascontiguousarray(x0[:, 0]), np.ascontiguousarray(y0[:, 0])
-            g8 = np.ascontiguousarray(grid).view(np.uint8)
+            # C は 1 バイト 0/1 の格子を読む。bool 以外（uint8 の 0/255・int など）でも同じ意味になるよう bool に揃える
+            g8 = np.ascontiguousarray(grid, dtype=bool).view(np.uint8)
             _native.lib.ray_first_hit(nr, _native.addr(xx), _native.addr(yy), xx.size,
                                       _native.addr(cc), _native.addr(ss), t.size, _native.addr(t),
                                       _native.addr(g8), self.height, self.width,

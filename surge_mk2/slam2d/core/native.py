@@ -39,12 +39,12 @@ def _load():
     sm = ctypes.POINTER(SmapC)
     return load(SOURCE, "slam2d", {
         "sm_associate": (None, [sm, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr]),
-        "sm_score_rows": (None, [sm, i64, ptr, ptr, i64, ptr, ptr, dbl, ptr]),
+        "sm_score_rows": (ctypes.c_int, [sm, i64, ptr, ptr, i64, ptr, ptr, dbl, ptr]),
         "normal_sums": (None, [i64, ptr, ptr, ptr, i64, i64, ptr, ptr, i64,
                                ptr, ptr, ptr, ptr, ptr, ptr]),
         "ray_first_hit": (None, [i64, ptr, ptr, i64, ptr, ptr, i64, ptr, ptr, i64, i64,
                                  flt, flt, flt, ptr]),
-        "carve_touch": (None, [i64, dbl, dbl, ptr, ptr, ptr, i64, ptr, dbl, dbl, dbl, dbl,
+        "carve_touch": (ctypes.c_int, [i64, dbl, dbl, ptr, ptr, ptr, i64, ptr, dbl, dbl, dbl, dbl,
                                i64, i64, ptr, ctypes.c_uint16, ptr]),
     })
 

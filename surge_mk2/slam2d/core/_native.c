@@ -43,14 +43,16 @@ void ray_first_hit(int64_t nr, const float *x0, const float *y0, int64_t n0,
  *
  * numpy 版の式（float64。`t` は float32 を float64 にしたもの）:
  *   x = ox + dx * t[k]、col = floor((x − o0) / res) を int32 に、格子の中で t[k] < d − back の歩を数える。
- * `touched` は h×w の 0 の作業領域（使った後に 0 へ戻す） */
-void carve_touch(int64_t nr, double ox, double oy, const double *dx, const double *dy,
+ * `touched` は h×w の 0 の作業領域（使った後に 0 へ戻す）。
+ * 戻り値: 0 = 済、-1 = 作業領域を確保できなかった（`misses` は触らず `touched` も戻してある。呼び出し側は numpy 版で数える） */
+int carve_touch(int64_t nr, double ox, double oy, const double *dx, const double *dy,
                  const double *d, int64_t ns, const float *t, double back,
                  double o0, double o1, double res, int64_t h, int64_t w,
                  uint16_t *misses, uint16_t count_max, uint8_t *touched)
 {
     int64_t cap = 1024, nt = 0;
     int64_t *list = malloc(sizeof(int64_t) * (size_t)cap);
+    if (list == NULL) return -1;
     for (int64_t i = 0; i < nr; i++) {
         double lim = d[i] - back;
         for (int64_t k = 0; k < ns; k++) {
@@ -63,8 +65,15 @@ void carve_touch(int64_t nr, double ox, double oy, const double *dx, const doubl
             if (!touched[idx]) {
                 touched[idx] = 1;
                 if (nt == cap) {
+                    int64_t *grown = realloc(list, sizeof(int64_t) * (size_t)(cap * 2));
+                    if (grown == NULL) {
+                        touched[idx] = 0;
+                        for (int64_t j = 0; j < nt; j++) touched[list[j]] = 0;
+                        free(list);
+                        return -1;
+                    }
+                    list = grown;
                     cap *= 2;
-                    list = realloc(list, sizeof(int64_t) * (size_t)cap);
                 }
                 list[nt++] = idx;
             }
@@ -76,6 +85,7 @@ void carve_touch(int64_t nr, double ox, double oy, const double *dx, const doubl
         touched[idx] = 0;
     }
     free(list);
+    return 0;
 }
 
 /* ── 面要素地図の対応付け（`core/surfmap.py` の `SurfaceMap.associate`） ── */
@@ -150,11 +160,13 @@ static double pairwise_sum(const double *a, int64_t n)
 
 /* 総当たりの採点（`register.search_steps`・`localize.Localizer.step`）: 候補 r の点 p を
  * (bx[r] + rx[p], by[r] + ry[p]) に置き、`exp(−min(d, 10)² · inv2s2)`（対応が無効なら 0）の点の和を `out[r]` へ。
- * numpy 版は「候補 × 点」の配列を作ってから最後の軸で足す。np ≤ 8192 */
-void sm_score_rows(const smap_t *m, int64_t nrow, const double *bx, const double *by,
+ * numpy 版は「候補 × 点」の配列を作ってから最後の軸で足す。np ≤ 8192。
+ * 戻り値: 0 = 済、-1 = 作業領域を確保できなかった（呼び出し側は numpy 版で計算する） */
+int sm_score_rows(const smap_t *m, int64_t nrow, const double *bx, const double *by,
                    int64_t np_, const double *rx, const double *ry, double inv2s2, double *out)
 {
     double *like = malloc(sizeof(double) * (size_t)(np_ > 0 ? np_ : 1));
+    if (like == NULL) return -1;
     for (int64_t r = 0; r < nrow; r++) {
         for (int64_t p = 0; p < np_; p++) {
             double qx, qy, nx, ny, d;
@@ -166,6 +178,7 @@ void sm_score_rows(const smap_t *m, int64_t nrow, const double *bx, const double
         out[r] = pairwise_sum(like, np_);
     }
     free(like);
+    return 0;
 }
 
 /* ── 面要素の法線の材料（`SurfaceMap.__init__` の近傍の和） ──

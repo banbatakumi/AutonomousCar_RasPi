@@ -252,10 +252,10 @@ class SurfaceMap:
             return None
         bx, by, rx, ry = (_native.f64(a).reshape(-1) for a in (bx, by, rx, ry))
         out = np.empty(bx.size)
-        _native.lib.sm_score_rows(cm, bx.size, _native.addr(bx), _native.addr(by), rx.size,
-                                  _native.addr(rx), _native.addr(ry), float(inv2s2),
-                                  _native.addr(out))
-        return out
+        rc = _native.lib.sm_score_rows(cm, bx.size, _native.addr(bx), _native.addr(by), rx.size,
+                                       _native.addr(rx), _native.addr(ry), float(inv2s2),
+                                       _native.addr(out))
+        return out if rc == 0 else None           # 確保に失敗したら呼び出し側の numpy 版で計算する
 
     # ── 作り方 ──
 
