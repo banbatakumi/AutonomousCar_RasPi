@@ -178,5 +178,72 @@ class TestOvertake(unittest.TestCase):
         self.assertLess(ms, 15.0, f"{ms:.1f}ms")
 
 
+class TestOpponentModel(unittest.TestCase):
+    """他車の予測: 経路に沿った進め方・速度プロファイル・カーブで横の速度を使わない。"""
+
+    def test_ghost_points_advance_along_the_curve(self):
+        """経路に沿って進めた点は、同じ横ずれのまま（直線で進めるとカーブの外へはみ出す）。"""
+        path = _ring()
+        seg = np.hypot(*np.diff(np.vstack([path.xy, path.xy[:1]]), axis=0).T)
+        s_cum = np.concatenate([[0.0], np.cumsum(seg[:-1])])
+        o = _at(path, 3.0, d=-0.2, vx_along=1.5)
+        g = ot.advance_along(path, s_cum, ot.normals(path.xy), o.pts, o.vx, o.vy, 1.0)
+        r0 = np.hypot(*o.pts.T)
+        r1 = np.hypot(*g.T)
+        np.testing.assert_allclose(r1, r0, atol=0.01)
+        lin = np.hypot(*(o.pts + np.array([o.vx, o.vy])).T)
+        self.assertGreater(float((lin - r0).min()), 0.15)        # 直線ならはみ出す（確かめの確かめ）
+        # 進んだ距離は速さ × 時間（弧長）
+        self.assertAlmostEqual(float(np.arctan2(g[:, 1], g[:, 0]).mean() - np.arctan2(o.pts[:, 1], o.pts[:, 0]).mean()) * R,
+                               1.5, delta=0.1)
+
+    def test_opponent_follows_the_speed_profile(self):
+        """遅い区間で 0.7 倍なら、速い区間でも 0.7 倍で進むと予測する（一定の速さにしない）。"""
+        n = 300
+        xy = np.column_stack([np.arange(n) * 0.1, np.zeros(n)])
+        v = np.where(np.arange(n) < 50, 1.0, 3.0)
+        path = RaceLine(xy=xy, v=v, kappa=np.zeros(n), length=n * 0.1)
+        s_cum = np.arange(n) * 0.1
+        tr = ot.Track(0.0, 0.4, -0.1, 0.1, 0.7, 0.0, True, _at(_ring(), 1.0))
+        t_arr, s_arr = ot.opp_motion(tr, 0.0, s_cum, v, path.length, t_max=4.0)
+        s_at = float(np.interp(4.0, t_arr, s_arr))
+        # 5m を 0.7m/s（約 7.1s）… 4s では 2.8m。速い区間に入る前なので一定と同じ
+        self.assertAlmostEqual(s_at, 2.8, delta=0.05)
+        t_arr, s_arr = ot.opp_motion(tr._replace(u=0.7), 4.5, s_cum, v, path.length, t_max=3.0)
+        # 0.5m 走って速い区間（2.1m/s）へ: 一定の 0.7m/s（2.1m）より先へ進む
+        self.assertGreater(float(np.interp(3.0, t_arr, s_arr)), 4.5)
+
+    def test_lateral_velocity_is_ignored_in_curves(self):
+        """カーブでは、回帰の遅れで接線から傾いた速度を横の速度にしない。前へは速さの大きさで進む。"""
+        cfg = _cfg()
+        a = math.radians(25.0)
+        o = Obstacle(0.0, 0.0, 0.1, 5, None, 1.5 * math.cos(a), 1.5 * math.sin(a))
+        s = np.array([1.0, 1.2])
+        d = np.array([0.0, 0.1])
+        t, n = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+        tr = ot._track(o, s, d, t, n, cfg, kappa=1.0)
+        self.assertEqual(tr.w, 0.0)
+        self.assertAlmostEqual(tr.u, 1.5)
+        tr = ot._track(o, s, d, t, n, cfg, kappa=0.0)          # 直線では今までどおり
+        self.assertAlmostEqual(tr.w, 1.5 * math.sin(a))
+
+    def test_learned_line_predicts_the_lateral_shift(self):
+        """前に見た相手の線（場所ごとの横ずれ）から、相手が進んだ先での横ずれの変化を出す。"""
+        n = 200
+        xy = np.column_stack([np.arange(n) * 0.1, np.zeros(n)])
+        path = RaceLine(xy=xy, v=np.full(n, 2.0), kappa=np.zeros(n), length=n * 0.1, closed=False)
+        order = np.arange(0, 120)
+        s_rel = order * 0.1
+        nrm = np.tile([0.0, 1.0], (n, 1))
+        # 相手の線: x=2〜4m で d が 0 → 0.4m（左へ寄る）
+        xs = np.arange(0.5, 11.0, 0.05)
+        trail = np.column_stack([xs, np.clip((xs - 2.0) / 2.0, 0.0, 1.0) * 0.4])
+        prof = ot.line_profile(path, order, s_rel, nrm, trail)
+        sh = ot.line_shift(prof, 1.5, np.array([0.0, 1.0, 2.5, 4.0]))
+        np.testing.assert_allclose(sh, [0.0, 0.1, 0.4, 0.4], atol=0.03)
+        # 今の場所を覚えていなければ予測しない
+        self.assertTrue(np.all(ot.line_shift(prof, 11.5, np.array([0.0, 1.0])) == 0.0))
+
+
 if __name__ == "__main__":
     unittest.main()
