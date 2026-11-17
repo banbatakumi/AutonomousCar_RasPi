@@ -667,7 +667,7 @@ a {
    * 依存しているので、変えるならこの1箇所だけでよい）。
    * 2026-11-03: 420px 固定 → 画面の高さの 44%（MacBook Air 14 で従来と同じ約 420px、
    * 4K では広がり、iPad では詰まる）。高さ不足時は下段も縮小して、上段へ食い込ませない */
-  /* 上段はカメラの4:3を基本にしつつ、画面が低いときは残り高さまで縮める。
+  /* 上段はカメラ映像の縦横比（`--cam-aspect`、`AutoView` が実測から入れる）を基本にしつつ、画面が低いときは残り高さまで縮める。
    * 下段も minmax(0, ...) にして、固定の最小高さが映像へ重ならないようにする。 */
   grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
   /* 2026-11-13: 3段目を 44vh 固定から残り全部（1fr）へ。固定だと上段が4:3で低くなる横長画面で
@@ -693,7 +693,8 @@ a {
   position: relative;
   min-height: 0;
   display: flex;
-  aspect-ratio: 4 / 3;
+  /* カメラ映像の縦横比（ISP の上下クロップで変わる）。LiDAR 枠も同じ値 */
+  aspect-ratio: var(--cam-aspect, 4 / 3);
 }
 
 .cam-left {
@@ -744,6 +745,20 @@ a {
   width: 100%;
   display: block;
   object-fit: contain;
+}
+
+.depth-probe {
+  position: absolute;
+  transform: translate(10px, -130%);
+  padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid #888;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .depth-scale {
@@ -834,7 +849,8 @@ a {
 .lidar {
   grid-area: lidar;
   position: relative;
-  aspect-ratio: 4 / 3;
+  /* 上段のカメラ枠と同じ比率（4:3 のままだと行がこちらに引っ張られてカメラ枠の下に余白が出る） */
+  aspect-ratio: var(--cam-aspect, 4 / 3);
   background: var(--glass);
   border: 1px solid #222227;
   border-radius: 6px;

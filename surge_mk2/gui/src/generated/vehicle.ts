@@ -34,10 +34,10 @@ export const VEHICLE = {
   },
   /** 前方ステレオの右（主）カメラ取付。`height` は実写を見ながら設定パネルで微調整する前提の初期値
    * （`sensors.cam_front.z`）。`pitch`（取付角度）・`hfov`（未校正時の近似画角）は
-   * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`bottomCrop` は
-   * ISP が読み出し時に切り捨てる下端の割合（`camera_node.py` の `bottom_cropped`）。
-   * 進路ガイドの投影はこの分だけ主点が下にずれる補正が要る（`CameraView.tsx`）。
-   * `hfov`/`bottomCrop`/`fisheye`/`undistortHfov` は選ばれたレンズ（`lens`）の値 */
+   * 固定値——一度ネジ止めしたら変わらないので調整UIを持たない。`topCrop`/`bottomCrop` は
+   * ISP が読み出し時に切り捨てる上端/下端の割合（`camera_node.py` の `vertical_cropped`）。
+   * 進路ガイドの投影はこの分だけ主点がずれる補正が要る（`cameraModel.ts`）。
+   * `hfov`/`topCrop`/`bottomCrop`/`fisheye`/`undistortHfov` は選ばれたレンズ（`lens`）の値 */
   camFront: {
     lens: "wide160sr", // 付いているレンズ（`lens`。"" ＝ プロファイル無し）
     x: 0.09, // m base_link（後輪車軸中心）から前方。地面点→カメラ奥行きの換算に要る
@@ -45,7 +45,8 @@ export const VEHICLE = {
     height: 0.08, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
-    bottomCrop: 0.0, // 下端カット率
+    topCrop: 0.166667, // 上端カット率
+    bottomCrop: 0.166667, // 下端カット率
     /** 魚眼の校正値。null ＝ 未校正（`hfov` のピンホールで近似する） */
     fisheye: { fx: 309.5465, fy: 309.8475, cx: 305.0653, cy: 241.4527, k: [-0.02424524, -0.0357911, 0.04129701, -0.01959004], width: 640, height: 480 } as FisheyeCalib | null,
     /** 補正映像（`telemetry_node`）の仮想ピンホールの水平画角 */
@@ -59,7 +60,8 @@ export const VEHICLE = {
     height: 0.08, // m 路面からの高さ
     pitch: 0.0, // rad 下向きが正（固定値）
     hfov: 2.23, // rad 水平画角
-    bottomCrop: 0.0, // 下端カット率
+    topCrop: 0.166667, // 上端カット率
+    bottomCrop: 0.166667, // 下端カット率
     fisheye: { fx: 312.2141, fy: 312.6087, cx: 305.8205, cy: 243.8084, k: [-0.04198208, 0.01777469, -0.02573278, 0.00941388], width: 640, height: 480 } as FisheyeCalib | null,
     undistortHfov: 1.92, // rad
   },

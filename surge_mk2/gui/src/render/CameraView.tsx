@@ -23,13 +23,13 @@
  * 高さ・俯角・レンズは車体の固定値として `vehicle.toml` から使う。GUIの調整項目は持たない。
  * （変わらない物理値にスライダーは要らない）。
  *
- * ## 下端クロップぶんの主点補正
+ * ## 上下クロップぶんの主点補正
  *
- * 前カメラは ISP の ScalerCrop でボンネット等が映る下1/4を最初から読み出さない
- * （`camera_node.py` の `CAM_BOTTOM_CROP`）。配信される画像はセンサー上側3/4だけなので、
- * 光軸中心（センサー中心）は配信画像の中央ではなく、**上端から 1/(2·(1−bottomCrop)) の
- * 位置**にある（下1/4カットなら 66.7%）。ここを画像中央（h/2）のまま投影すると、
- * ガイド線が実際より上に描かれる。`VEHICLE.camFront.bottomCrop` で補正する。
+ * カメラは ISP の ScalerCrop で天井・ボンネット等が映る上下を最初から読み出さないことがある
+ * （`camera_node.py` の `CAM_CROP`、値は `vehicle.toml` の `top_crop`・`bottom_crop`）。
+ * そのとき光軸中心（センサー中心）は配信画像の中央ではなく、**上端から
+ * (1/2 − topCrop)/(1 − topCrop − bottomCrop) の位置**にある（下1/4だけカットなら 66.7%）。
+ * ここを画像中央（h/2）のまま投影するとガイド線がずれる。`cameraModel.ts` の `cropFrame()` で補正する。
  *
  * ## 走行中の車体姿勢（IMU）でも補正する
  *
@@ -420,7 +420,7 @@ export function CameraView({
         }
         // ガイドは映像そのもの（`dx,dy,dw,dh`）を基準に投影する。**箱の w/h では
         // 主点・焦点距離が箱基準になってしまう**——箱の形は CSS グリッドの行の
-        // 高さで決まるだけで、カメラの実アスペクト比（`bottomCrop` で変わる）とは
+        // 高さで決まるだけで、カメラの実アスペクト比（`topCrop`/`bottomCrop` で変わる）とは
         // 一致せず、レターボックスが入る。箱基準のまま計算すると、その余白ぶんだけ
         // ガイドがズレる（前後配置のころ、後方カメラのガイドが上に大きくズレた）
         const nowMs = performance.now()
@@ -580,7 +580,7 @@ function guideFacing(_cam: CamId): boolean {
 
 /** 実測舵角から予測進路を路面平面に置き、カメラモデル（`lensFor()`）で画像に落とす。
  * `camHeightSetting` は `vehicle.toml` 由来の固定値（左右とも同じ高さに付いている）。
- * `pitch`/レンズ（`fisheye`/`hfov`）/`bottomCrop` も `vehicle.toml` 由来の固定値（`cam` に応じて
+ * `pitch`/レンズ（`fisheye`/`hfov`）/`topCrop`/`bottomCrop` も `vehicle.toml` 由来の固定値（`cam` に応じて
  * `camFront`/`camLeft` を選ぶ）。`vs.pitch`/`vs.roll`（IMU 実測）で走行中の車体姿勢ぶんを毎フレーム補正する
  * （符号の向きはファイル冒頭コメント参照）。 */
 function drawGuide(
@@ -638,10 +638,10 @@ export function lensFor(cam: CamId, w: number, h: number): Lens {
   const geom = camGeom(cam)
   const cfg = useUi.getState().cameraConfig
   if (cfg?.undistort && cfg.undistort_available?.[cam]) {
-    return pinholeLens(w, h, geom.undistortHfov, geom.bottomCrop, 'undistorted')
+    return pinholeLens(w, h, geom.undistortHfov, geom.bottomCrop, 'undistorted', geom.topCrop)
   }
-  if (geom.fisheye) return fisheyeLens(w, h, geom.fisheye, geom.bottomCrop)
-  return pinholeLens(w, h, geom.hfov, geom.bottomCrop)
+  if (geom.fisheye) return fisheyeLens(w, h, geom.fisheye, geom.bottomCrop, geom.topCrop)
+  return pinholeLens(w, h, geom.hfov, geom.bottomCrop, 'pinhole', geom.topCrop)
 }
 
 /** 路面座標（base_link、x=前 y=左）→ 画像座標の投影器を作る。IMU による姿勢（pitch/roll）補正込み。

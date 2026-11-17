@@ -17,3 +17,14 @@ export const CAM_LABEL: Record<CamId, string> = { front: '前方', left: '左' }
 export function camGeom(cam: CamId) {
   return cam === 'front' ? VEHICLE_GEOM.camFront : VEHICLE_GEOM.camLeft
 }
+
+/** センサー自体のネイティブ比率（4:3、`camera_node.py --size` の既定 640x480） */
+const SENSOR_ASPECT = 4 / 3
+
+/** 配信される画像の縦横比の見込み（センサーの 4:3 から `topCrop`・`bottomCrop` を切った比率）。
+ * **最初のフレームが届くまでの仮の値**——実機ではセンサーが要求どおりのモードを取らないことがあるので、
+ * 届いたら `CameraView` の `onAspect`（デコードした画像の実寸）に置き換える */
+export function expectedCamAspect(cam: CamId): number {
+  const g = camGeom(cam)
+  return SENSOR_ASPECT / (1 - g.topCrop - g.bottomCrop)
+}

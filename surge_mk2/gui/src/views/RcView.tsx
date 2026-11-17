@@ -16,11 +16,11 @@
  *
  * ```
  *   ┌──────────────────────────────────────────────┐
- *   │                                              │ ⚙   ← 映像の上 1/4（天井）は切って出さない
+ *   │                                              │ ⚙   ← 映像は配信されたまま（ISP のクロップだけ）
  *   │            メインカメラ（右＝主カメラ）           │
  *   ├─────┬[◀]シフトライト[▶][⚠]┐ ← 映像の幅の 1/2 で折れる（内角 135°）
  *   │     │ ┌速度┐  舵角        │ ╲
- *   │車体図│ │(大)│  G           │ ○ ╲                  │ ← 高さは映像の 1/2。ボンネットを覆う
+ *   │車体図│ │(大)│  G           │ ○ ╲                  │ ← 高さは映像の 1/3。ボンネットを覆う
  *   │     │ 温度×5  ランプ       │LiDAR╲                │
  *   └─────┴─────────────────────┴───────┴──────────────┘
  * ```
@@ -28,10 +28,10 @@
  * **操縦はメインの映像を見て行う**ので、映像をタブいっぱいに出し、他は全部その上に重ねる。
  *
  * - **メイン映像**は前方ステレオの右（主）カメラ。後ろを見るカメラは無いのでバックミラーは無い。
- *   上 `RC_CROP_TOP` は天井しか映らないので切る（`CameraView` の `cropTop`。投影は元画像の座標のままなので
- *   進路ガイド等の重畳はずれない）
+ *   **配信された画像をそのまま出す**。天井・ボンネットは `vehicle.toml` の `top_crop`・`bottom_crop` で
+ *   ISP が切ったものだけで、この画面では足して切らない（2026-11-17 指示。以前は上 1/4 を画面側で切っていた）
  * - **計器パネル**: 右カメラでは自分の車体（ボンネット）が映像の左下に映るので、そこを覆う（指示による）。
- *   形は固定: 左端に接し、高さは映像の 1/2、上辺は映像の幅の 1/2 で折れて内角 135°（45°）で下る。
+ *   形は固定: 左端に接し、高さは映像の 1/3、上辺は映像の幅の 1/2 で折れて内角 135°（45°）で下る。
  *   中身はこの箱に詰める（`panelLayout`）:
  *   - 左: 車体図（`DrivePanel`。電圧 S/P・トルク・スリップ・近接リング）
  *   - 上段: シフトライト（`ShiftLights`、仮想変速に従う）を、ウィンカー（`WinkerLamp`、点滅表示とボタンを兼ねる）で挟み、
@@ -46,7 +46,7 @@
  *
  * ## メイン映像の箱は「前方カメラのうち見えている部分」のサイズ
  *
- * 箱の形は前方カメラの実測値（`onAspect` → `frontAspect`。上を切った後の比率）。箱はタブの中に contain-fit で収める
+ * 箱の形は前方カメラの実測値（`onAspect` → `frontAspect`）。箱はタブの中に contain-fit で収める
  * ——cover（はみ出しを切る）にしないのは、パネルを車体の映る位置に正しく重ねるには
  * 映像の下端が見えている必要があるのと、左右の端（死角になりやすい）を削らないため。
  *
@@ -80,26 +80,19 @@ import { HazardButton, WinkerLamp } from '../components/rc/WinkerHazard'
 import { SettingsDrawer } from '../components/SettingsDrawer'
 import { useContainFit } from '../hooks/useContainFit'
 import { CameraView } from '../render/CameraView'
-import { CAM_LABEL } from '../render/cameraLayout'
-import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
+import { CAM_LABEL, expectedCamAspect } from '../render/cameraLayout'
 import type { ControlChannel } from '../ws/control'
 
-/** センサー自体のネイティブ比率（4:3、`camera_node.py --size` の既定 640x480）。
- * 配信される画像はここから `bottomCrop` 分だけ下端を切ったもの */
-const SENSOR_ASPECT = 4 / 3
-/** 映像の上端から切って出さない割合（天井しか映らない。指示: 上 1/4） */
-const RC_CROP_TOP = 0.25
-/** 最初のフレームが届くまでの仮の比率（配信の下端カットと、ここで切る上端の両方を引いた比率）。
- * 実測が来次第 `frontAspect` に置き換わる */
-const FALLBACK_ASPECT = SENSOR_ASPECT / ((1 - VEHICLE_GEOM.camFront.bottomCrop) * (1 - RC_CROP_TOP))
+/** 最初のフレームが届くまでの仮の比率。実測が来次第 `frontAspect` に置き換わる */
+const FALLBACK_ASPECT = expectedCamAspect('front')
 
 // ── 計器パネルの形（指示: ボンネットを覆う。2026-11-13） ──
 //
-// 形は固定: 高さは映像の 1/2、上辺は映像の幅の 1/2 で折れ、内角 135°（斜辺は 45° で下る）。
+// 形は固定: 高さは映像の 1/3（2026-11-17 指示。以前は 1/2）、上辺は映像の幅の 1/2 で折れ、内角 135°（斜辺は 45° で下る）。
 // 中身はこの箱に合わせて詰める（`panelLayout`）。箱は縦横比が近いので、ダイヤルを横一列に並べると縦が余る——
 // 液晶は「大きい速度計＋右に舵角・G の縦積み」の2列にし、温度・ランプ・ハザードの帯は斜辺の下の三角まで伸ばす
 /** パネルの高さ（映像の高さに対する比） */
-const PANEL_H_FRAC = 0.5
+const PANEL_H_FRAC = 1 / 3
 /** 上辺の長さ（映像の幅に対する比）＝斜辺の折れる位置 */
 const PANEL_TOP_FRAC = 0.5
 /** 上辺と斜辺の内角 [deg]（指示: 135°）。斜辺は水平から 180−135 = 45° で下る */
@@ -164,7 +157,6 @@ export function RcView({ ch }: { ch: ControlChannel | null }) {
           label={CAM_LABEL.front}
           variant="minimal"
           onAspect={setFrontAspect}
-          cropTop={RC_CROP_TOP}
           overlayBottomInset={L.panelH}
         />
 

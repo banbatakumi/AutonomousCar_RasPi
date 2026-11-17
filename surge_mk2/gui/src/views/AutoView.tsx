@@ -1,7 +1,9 @@
 /**
  * 自動運転ビュー — 自律走行を**監視・デバッグする**ための画面（`system_overview.md` §10.2）。
  *
- * 上段に**前方(左)・前方(右)・深度・LiDAR を同じ幅で4分割**（2026-11-13 ステレオ化で左カメラを足した）、その下に速度・舵角の細い帯、
+ * 上段に**前方(左)・前方(右)・深度・LiDAR を同じ幅で4分割**（2026-11-13 ステレオ化で左カメラを足した）。
+ * 上段の高さは**カメラ映像の縦横比に合わせる**（右カメラの実測 `onAspect`。`top_crop`・`bottom_crop` で
+ * 横長になっても枠に余白が出ない。CSS 変数 `--cam-aspect`）。その下に速度・舵角の細い帯、
  * 一番下は「モード選択・engage・判断」（左2/3）と「車体図」（右1/3）。
  * 温度・電圧・リンク統計は出さない——正常時に読む数字ではなく、
  * 異常は `StatusBar` が全タブ共通で必ず伝える。詳しい数字は診断タブ（`DiagView`）で見る。
@@ -48,6 +50,7 @@
  * `useDriving` は常時生きている）。速度・舵の調整値はどちらのタブで
  * 操作しても同じ意味を持つので、ラジコンタブと同じドロワーをここにも出す。
  */
+import { useState, type CSSProperties } from 'react'
 import { useNumbers } from '../bus/live'
 import { AutoMapPanel } from '../components/AutoMapPanel'
 import { AutoPanel } from '../components/AutoPanel'
@@ -55,6 +58,7 @@ import { DriveBar } from '../components/DriveBar'
 import { SettingsDrawer } from '../components/SettingsDrawer'
 import { DrivePanel } from '../components/rc/DrivePanel'
 import { CameraView } from '../render/CameraView'
+import { expectedCamAspect } from '../render/cameraLayout'
 import { DepthView } from '../render/DepthView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
@@ -62,6 +66,8 @@ import type { ControlChannel } from '../ws/control'
 
 export function AutoView({ ch }: { ch: ControlChannel | null }) {
   const ui = useUi()
+  // 上段の4枠の縦横比。右（主）カメラの実際の画像から決める（左右は同じクロップ・同じ大きさ）
+  const [camAspect, setCamAspect] = useState(() => expectedCamAspect('front'))
   // 対象追従はドラッグでROIを選ぶので奪わない
   const toggleGuide = () => {
     if (ui.auto?.mode === 'follow_object') return
@@ -69,7 +75,7 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
   }
 
   return (
-    <div className="drive">
+    <div className="drive" style={{ '--cam-aspect': camAspect } as CSSProperties}>
       {/* 前方(左)・前方(右)・深度・LiDAR を**同じ幅で横並び**にする。デバッグ用の画面なので、
           4つを対等に見比べられる方が使いやすい */}
       <div className="cam-left">
@@ -77,7 +83,7 @@ export function AutoView({ ch }: { ch: ControlChannel | null }) {
       </div>
 
       <div className="cam-front" onClick={toggleGuide} title="クリックで進路ガイドの表示/非表示">
-        <CameraView cam="front" label="前方(右)" ch={ch} />
+        <CameraView cam="front" label="前方(右)" ch={ch} onAspect={setCamAspect} />
       </div>
 
       {/* 深度映像（表示している間だけ Pi が照合し、左カメラを回す） */}
