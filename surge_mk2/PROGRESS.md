@@ -13,10 +13,10 @@
 - **STM32 ファーム**（`~/GitHub/AutonomousCar`、ブランチ `FW/MainBoard_V3`、HEAD 99f7c94。origin より 3 コミット先で未 push）:
   書き込みの記録があるのは `fb65b6f`（2026-11-01、控え `~/stm32_backup_20261101/`）まで。それより後の自動停止の予想進路（11-02）、
   TC の作り直し（`TractionLimiter`、止めない PI）と過速度ガードの分離（11-09）は**書き込みの記録がない**
-- **横断レビュー（`docs/review_2026_11_17.md`）の対処（2026-11-17、未コミット）**: Pi 側は Pi に反映・io も再起動済み（`[control]` の
-  同期 ok を確認。ARM・走行では未確認）。ファーム側（ステレオの間隔 1/15s・設定を毎周期 Drive へ・受信の再同期 192B）は main の作業ツリーで
-  ビルドとホスト試験まで。**書き込みは未**（ST-Link 未接続）。ml_stereo_e2e は前処理の版 2（視差の窓）になったので標本を抽出し直す
-- **ブザーの失敗で io_node を落とさない（2026-11-17、未コミット・Pi 未反映）**: `raspi/io/gpio.Buzzer` が例外を握って一度だけログに出す。
+- **横断レビュー（`docs/review_2026_11_17.md`）の対処（2026-11-17、コミット済み）**: Pi 側は Pi に反映・io も再起動済み（`[control]` の
+  同期 ok を確認。ARM・走行では未確認）。ファーム側（ステレオの間隔 1/15s・設定を毎周期 Drive へ・受信の再同期 192B）は main の d6885be まで
+  コミット（ビルドとホスト試験まで）。**書き込みは未**（ST-Link 未接続）。ml_stereo_e2e は前処理の版 2（視差の窓）になったので標本を抽出し直す
+- **ブザーの失敗で io_node を落とさない（2026-11-17、コミット済み・Pi 未反映）**: `raspi/io/gpio.Buzzer` が例外を握って一度だけログに出す。
   実機の `tone is out of the device's range`（10 月の版の記録）は手元の gpiozero 2.0.1 では再現せず、原因は未特定。次に出たら音名・周波数・範囲がログに載る
 - **MD ファーム**（`~/GitHub/BLDC/ProgramV4`、ブランチ `FW/Program_V4`）: 仕様は `ProgramV4/docs/SERIAL_PROTOCOL.md`
 - **プロトコル v0.31**（`raspi/proto/protocol.toml` の `protocol_version` = 0x001F が正。ファームの `RAS_PROTOCOL_VERSION` も 0x001F。v0.31 で `STEREO_OBS` を追加）。
