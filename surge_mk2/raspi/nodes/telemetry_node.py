@@ -826,7 +826,8 @@ class TelemetryServer:
             if calib is not None:
                 self._undistorters[cam] = Undistorter(
                     calib, getattr(_SAFETY, f"cam_{cam}_undistort_hfov"),
-                    getattr(_SAFETY, f"cam_{cam}_bottom_crop"))
+                    getattr(_SAFETY, f"cam_{cam}_bottom_crop"),
+                    getattr(_SAFETY, f"cam_{cam}_top_crop"))
         self._load_camera_conf()          # camera_hz(GUI配信)もここで上書きされうる
 
         # ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
@@ -1007,12 +1008,13 @@ class TelemetryServer:
             return _response(500, "text/plain; charset=utf-8",
                              f"PNG 化に失敗: {type(e).__name__}: {e}".encode())
         crop = getattr(_SAFETY, f"cam_{cam}_bottom_crop")
+        top = getattr(_SAFETY, f"cam_{cam}_top_crop")
         # レンズ名も入れる（`vehicle.toml` の `lens`）。校正ツールは別レンズの写真を
         # 混ぜないようにこれで振り分け、書き込み先のプロファイルも決める
         lens = getattr(_SAFETY, f"cam_{cam}_lens")
         stamp = time.strftime("%Y%m%d_%H%M%S") + f"{int(time.time() * 1000) % 1000:03d}"
         name = (f"surge_{cam}_{lens + '_' if lens else ''}{desc.width}x{desc.height}"
-                f"_crop{crop:g}_{stamp}.png")
+                f"_crop{crop:g}_{f'top{top:g}_' if top else ''}{stamp}.png")
         return _response(200, "image/png", png, extra={
             "Content-Disposition": f'attachment; filename="{name}"',
             "X-Surge-Filename": name,
@@ -3831,9 +3833,15 @@ class TelemetryServer:
             if m is None or m.seq == last_seq:
                 continue
             last_seq = m.seq
+            # 先に `{"near_m": …}` のテキスト、続けて JPEG。GUI が色 → 距離に戻す（カーソル位置の距離表示）のに要る
+            head = _json_encode({"near_m": float(m.near_m)}).decode()
             await asyncio.gather(
-                *(self._send_or_drop(ws, m.jpeg, clients) for ws in list(clients)),
+                *(self._send_depth(ws, head, m.jpeg, clients) for ws in list(clients)),
                 return_exceptions=True)
+
+    async def _send_depth(self, ws, head: str, jpeg: bytes, clients: set) -> None:
+        if await self._send_or_drop(ws, head, clients):
+            await self._send_or_drop(ws, jpeg, clients)
 
     # ── 起動 ──
 

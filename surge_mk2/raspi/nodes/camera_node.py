@@ -112,13 +112,14 @@ STEREO_GAINS_FOLLOW_RATIO = 0.02
 #: `SyncReady` だけを信じず、もう1台の直近のコマとの差を自分で測って判定する
 STEREO_SYNC_TOL_NS = 500_000
 
-#: カメラごとの下端カット率。前方はボンネット等が映り込む下1/4を、
-#: 後方は下1/16だけ軽く除去する。**ISP の ScalerCrop で最初から読み出し範囲を
-#: 絞るので、余分な画素は main ストリームに出てこない**（後段でスライスして
-#: 捨てるより、共有メモリ書き込み・下流の処理・帯域がその分だけ軽くなる）
-#: 値は `config/vehicle.toml` の選ばれたレンズの `bottom_crop`（`[sensors.cam_*.lenses.<レンズ>]`）が正
-#: （GUI の進路ガイド `CameraView.tsx` もここを参照して主点補正する。二重管理しない）。
-CAM_BOTTOM_CROP = {i: getattr(_vehicle, f"cam_{role}_bottom_crop") for i, (_, role) in CAM_TOPIC.items()}
+#: カメラごとの上端・下端カット率 `(top, bottom)`（天井・ボンネット等の映り込み除去）。
+#: **ISP の ScalerCrop で最初から読み出し範囲を絞るので、余分な画素は main ストリームに
+#: 出てこない**（後段でスライスして捨てるより、共有メモリ書き込み・下流の処理・帯域が
+#: その分だけ軽くなる）。値は `config/vehicle.toml` の選ばれたレンズの `top_crop`・`bottom_crop`
+#: （`[sensors.cam_*.lenses.<レンズ>]`）が正（GUI の進路ガイド `CameraView.tsx` も同じ値で
+#: 主点補正する。二重管理しない）。
+CAM_CROP = {i: (getattr(_vehicle, f"cam_{role}_top_crop"), getattr(_vehicle, f"cam_{role}_bottom_crop"))
+            for i, (_, role) in CAM_TOPIC.items()}
 
 #: カメラごとの ISP チューニングの差分（選ばれたレンズの `isp_tuning`。"" ＝ センサー標準のまま）。
 #: 標準の色むら補正は純正レンズ用で、広角レンズでは周辺がピンクに写る（`raspi/core/cam_tuning.py`）。
@@ -193,25 +194,26 @@ def full_fov_sensor_size(cam, main_size: tuple[int, int]) -> tuple[int, int] | N
     return best["size"]
 
 
-def bottom_cropped(cam, size: tuple[int, int],
-                   fraction: float) -> tuple[tuple[int, int], tuple[int, int, int, int] | None]:
-    """下端を `fraction` だけ切った main size と ScalerCrop を返す。
+def vertical_cropped(cam, size: tuple[int, int], top: float,
+                     bottom: float) -> tuple[tuple[int, int], tuple[int, int, int, int] | None]:
+    """上端を `top`・下端を `bottom` だけ切った main size と ScalerCrop を返す。
 
-    **配列を受け取ってから下端をスライスするのではなく、ISP に最初から
+    **配列を受け取ってから上下をスライスするのではなく、ISP に最初から
     小さい画を作らせる。** main size をその分小さくして ScalerCrop で
-    上側だけを選ぶので、共有メモリへの書き込み量・下流の処理・帯域が
+    中央の帯だけを選ぶので、共有メモリへの書き込み量・下流の処理・帯域が
     そのぶん減る（CSI からのセンサー読み出し自体はセンサーモード次第で
-    変わらないので、そこは削れない）。
+    変わらないので、そこは削れない。読み出し時間＝ローリングシャッターの歪みと fps の上限も同じ）。
     """
-    if not fraction:
+    if not top and not bottom:
         return size, None
     full = tuple(cam.camera_properties.get("PixelArraySize", (0, 0)))
     if not all(full):
         return size, None
     fw, fh = full
-    keep_h = round(fh * (1 - fraction))
-    out_h = round(size[1] * (1 - fraction))
-    return (size[0], out_h), (0, 0, fw, keep_h)
+    y0 = round(fh * top)
+    keep_h = round(fh * (1 - top - bottom))
+    out_h = round(size[1] * (1 - top - bottom))
+    return (size[0], out_h), (0, y0, fw, keep_h)
 
 
 #: `CamStats.gaps_ms` の保持上限。中央値・最大値の統計に十分な標本数を
@@ -445,8 +447,7 @@ class CameraWorker(threading.Thread):
         if fps:
             us = int(1e6 / fps)
             ctrl["FrameDurationLimits"] = (us, us)
-        size, crop_rect = bottom_cropped(
-            self.cam, size, CAM_BOTTOM_CROP.get(idx, 0.0))
+        size, crop_rect = vertical_cropped(self.cam, size, *CAM_CROP.get(idx, (0.0, 0.0)))
         if crop_rect:
             ctrl["ScalerCrop"] = crop_rect
         ctrl.update(self._sync_controls())
@@ -927,6 +928,12 @@ def main() -> int:
         except Exception as e:
             print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
 
+    if len({CAM_CROP.get(i, (0.0, 0.0)) for i in indices}) > 1:
+        # 平行化はカメラごとのクロップで換算するので照合は合うが、左右で写る範囲が違うのは
+        # 取付の数字の書き間違いのことが多い。止めずに知らせる
+        print("!! 左右のカメラで top_crop・bottom_crop が違う: "
+              + " ".join(f"{CAM_TOPIC.get(i, ('', f'cam{i}'))[1]}={CAM_CROP.get(i, (0.0, 0.0))}"
+                         for i in indices), file=sys.stderr)
     try:
         prepare_isp_tuning(indices)
         devices = None

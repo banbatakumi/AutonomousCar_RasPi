@@ -106,7 +106,9 @@ class StereoProcessor:
         self.rect = StereoRectifier(vehicle.cam_front_fisheye, vehicle.cam_left_fisheye, vehicle.stereo,
                                     640, 480, hfov, rows=rows,
                                     crop_right=vehicle.cam_front_bottom_crop,
-                                    crop_left=vehicle.cam_left_bottom_crop)
+                                    crop_left=vehicle.cam_left_bottom_crop,
+                                    crop_top_right=vehicle.cam_front_top_crop,
+                                    crop_top_left=vehicle.cam_left_top_crop)
         self.cam_pose = (vehicle.cam_front_x, vehicle.cam_front_y, vehicle.cam_front_z,
                          vehicle.cam_front_pitch, vehicle.cam_front_yaw)
         self.fov_degs = fov_degrees(self.rect, self.cam_pose)

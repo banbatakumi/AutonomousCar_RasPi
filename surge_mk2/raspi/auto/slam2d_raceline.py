@@ -96,6 +96,12 @@ _FOLLOW_GAP = 0.70
 #: 推定の横位置が 1 周期で 20cm 以上跳ぶ（ヘアピンの頂点、sim.bench --mover）。直近の観測を推定
 #: 速度で今へ進めたものも一緒に避ける
 _GHOST_S = 0.4
+#: 他車（動く障害物）との横の余裕の上限 [m]（`OvertakeConfig.margin_lat_moving`。「障害物との余裕」が
+#: これより小さければそちら）。静止物の余裕（既定 0.20m）のままでは toyota2 で 0.7 倍の車も抜けない。
+#: 0.10m はバンビが許容した値（2026-11-17。理想化した検証で 0.12m は 15/15、0.15m 以上は抜けない）
+_OT_MARGIN_MOVING = 0.10
+#: 覚える動く相手の位置の数（10Hz で約 3 分。`_overtake_step`）
+_OPP_TRAIL_N = 2000
 #: 追い抜きの計算時間の記録を残す数（`sim.bench` が読む）
 _OT_HIST = 2000
 #: 車速が経路の速度よりこれ以上低ければ「追いつく途中」として扱う [m/s]（`_speed_cmd`）
@@ -1100,6 +1106,9 @@ class Slam2dRaceLine(Planner):
         self._ot_prev: ot_mod.Cand | None = None
         self._ot_base: np.ndarray | None = None
         self._ot_scum: np.ndarray | None = None
+        self._ot_nrm: np.ndarray | None = None
+        #: これまでに見た動く相手の位置（map フレーム、新しい順に `_OPP_TRAIL_N` 個まで）
+        self._opp_trail: list[tuple[float, float]] = []
         self._ot_status = ""
         self._ot_lead: ot_mod.Track | None = None
         #: 今走る線の上に居る動く相手と、そこまでの距離（車間を保つ上限、`_moving_ahead`）
@@ -2097,6 +2106,7 @@ class Slam2dRaceLine(Planner):
     def _begin_race(self, st: AutoState) -> None:
         """`LOCATE`/`LOCATED`から`RACE`へ入る（走り出しの状態を初期化する）。"""
         self.phase = st.phase = RACE
+        self._opp_trail = []             # 覚えた相手の線は地図の座標。別の地図・走り出し前のものは捨てる
         self._locate_seed = None
         self._locate_seed_r = None
         # クリックのヒントは使い切り（残すと、次に読む別の地図の探索までその周りに絞る）
@@ -2512,10 +2522,14 @@ class Slam2dRaceLine(Planner):
         if hit is None and self._acc is not None:
             # 追い抜く計画はあるが、まだ相手の真後ろ（今走る線の上）に居る。横へ出終わる前に計画が
             # 崩れても（相手の速度の推定が揺れる）止まり切れる車間を保つ
+            # ★ ここ（計画は「通れる」か「避ける」）で残すのは、止まり切れる車間（`_STOP_GAP`）だけ。
+            #   付いていく車間（`_FOLLOW_GAP`）は「抜けない（"blocked"）間、横へ出られる距離を残す」ための
+            #   もので、ここでも掛けると相手の 1.5m 後ろで速さが釣り合い、そこでは計画が当たらないと見て
+            #   横へ出始めず、出ている途中も差が詰まらなかった（sim.bench --mover: 0.7 倍の車を抜けない）
             o, d_acc = self._acc
             u = self._along_speed(o)
             gap_acc = max(0.0, d_acc - self.vehicle.front_overhang)
-            v_f = self._follow_speed(u, gap_acc, vs, p)
+            v_f = self._follow_speed(u, gap_acc, vs, p, _STOP_GAP)
             if v_f < st.target_speed:
                 st.target_speed = v_f
                 st.reason = f"前の車（{u:.1f}m/s・{gap_acc:.1f}m 先）との車間を保つ"
@@ -2615,6 +2629,7 @@ class Slam2dRaceLine(Planner):
             self._ot_base = path.xy
             seg = np.hypot(*np.diff(np.vstack([path.xy, path.xy[:1]]), axis=0).T)
             self._ot_scum = np.concatenate([[0.0], np.cumsum(seg[:-1])])
+            self._ot_nrm = cl_mod.normals(path.xy)
         mine = self._avoid is not None and self._avoid_how == "追い抜き"
         if not self._obs and not mine:
             self._ot_prev = None
@@ -2629,7 +2644,7 @@ class Slam2dRaceLine(Planner):
             # ★ 車の本当の限界（同定値）を渡す。`kappa_limit`（追従の余裕を引いた値）を渡すと、計画器が
             #   さらに 95% を掛けて線そのものより厳しくなり、コーナーではどの候補も曲率で落ちた
             kappa_max=v.kappa_max, a_brake=lim.a_brake, a_accel=lim.a_accel,
-            margin_lat=p["avoid_margin"])
+            margin_lat=p["avoid_margin"], margin_lat_moving=min(p["avoid_margin"], _OT_MARGIN_MOVING))
         hint = self._hint if 0 <= self._hint < len(path) else -1
         idx = (nearest_index(path, pose[0], pose[1], hint, window=12) if hint >= 0
                else nearest_index(path, pose[0], pose[1]))
@@ -2644,16 +2659,22 @@ class Slam2dRaceLine(Planner):
             dt = t_now - t
             if dt <= 0.0 or o.pts is None:
                 continue
-            g = o.pts + np.array([o.vx * dt, o.vy * dt])
+            g = ot_mod.advance_along(path, self._ot_scum, self._ot_nrm, o.pts, o.vx, o.vy, dt)
             gx, gy = float(g[:, 0].mean()), float(g[:, 1].mean())
             k = min(range(len(obs)), key=lambda i: math.hypot(obs[i].x - gx, obs[i].y - gy), default=-1)
             if k >= 0 and obs[k].pts is not None and math.hypot(obs[k].x - gx, obs[k].y - gy) < 0.5:
                 obs[k] = obs[k]._replace(pts=np.vstack([obs[k].pts, g]))
             else:
                 obs.append(o._replace(x=gx, y=gy, pts=g))
+        # 動く相手の位置を覚える（相手の線を経路に沿って覚え、横のずれを予測する。`overtake.line_profile`）
+        for o in moving:
+            self._opp_trail.append((o.x, o.y))
+        if len(self._opp_trail) > _OPP_TRAIL_N:
+            del self._opp_trail[: len(self._opp_trail) - _OPP_TRAIL_N]
         res = ot_mod.plan(path, idx, pose, float(vs.speed), base.v, a_lat, self._avoid_room(path, p),
                           obs, cfg, prev=self._ot_prev if mine else None,
-                          s_cum=self._ot_scum)
+                          s_cum=self._ot_scum,
+                          trail=np.asarray(self._opp_trail) if self._opp_trail else None)
         status = res.status
         if status == "blocked" and res.cand is not None and abs(res.cand.dT) > 1e-3:
             # 逃げ道（相手からいちばん離れていられる候補）に乗る。確かめ（壁・曲率）は同じ
@@ -2698,15 +2719,16 @@ class Slam2dRaceLine(Planner):
             del self._avoid_ms_hist[: _OT_HIST // 2]
         return res._replace(status=status)
 
-    def _follow_speed(self, u: float, gap: float, vs: VehicleState, p: dict[str, float]) -> float:
+    def _follow_speed(self, u: float, gap: float, vs: VehicleState, p: dict[str, float],
+                      keep: float = _FOLLOW_GAP) -> float:
         """前を速さ `u` で走る相手に、車体前端からの車間 `gap` [m] で付いていける速度の上限。
-        相手が同じ減速度で止まっても止まり切れる（`v² ≤ u² + 2a·(gap − 車間 − 空走)`）。"""
+        相手が同じ減速度で止まっても、車間 `keep` を残して止まり切れる（`v² ≤ u² + 2a·(gap − keep − 空走)`）。"""
         a = max(self._lim(p).a_brake, 0.1)
         u = max(u, 0.0)
-        room = gap - _FOLLOW_GAP - max(vs.speed, 0.0) * self._lim(p).react_s
+        room = gap - keep - max(vs.speed, 0.0) * self._lim(p).react_s
         if room >= 0.0:
             return math.sqrt(u * u + 2.0 * a * room)
-        return max(0.0, u * (1.0 + room / _FOLLOW_GAP))
+        return max(0.0, u * (1.0 + room / keep))
 
     def _along_speed(self, o: obs_mod.Obstacle) -> float:
         """障害物の速度の、車の向きの成分 [m/s]（負 = こちらへ向かってくる）。"""

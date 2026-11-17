@@ -265,44 +265,57 @@ MOVING_MIN_SPEED = 0.3
 _TRACK_S = 0.8
 _TRACK_MIN_N = 4
 _TRACK_MIN_SPAN_S = 0.3
+#: 見えなかった周期も履歴を残す時間 [s]。★1 周期見落とす（壁際の無視する帯に点が落ちる・2 つに割れる）
+#: たびに履歴を捨てると、点が 4 つ溜まるまでの 0.3〜0.4s は速度 0（静止物）になる。シムで前の車の
+#: 18% の周期が静止物に見え、追い抜きの計画が止まる・動くで入れ替わった（sim.bench --mover）
+_TRACK_KEEP_S = 0.3
 
 
 class VelocityTracker:
     """周期ごとの検出を結んで、障害物の速度を出す。
 
-    毎周期、新しい検出を履歴の最後の位置に近いものへ結ぶ（距離 `tol + 半径`）。結んだ位置の
-    履歴（直近 `_TRACK_S` 秒）を直線で回帰した傾きが速度。**1周期の差分は使わない**——見える面が
-    変わるたびに重心が数 cm 動き、10Hz だと 0.5m/s 近い偽の速度になる。回帰の残差が速さに
-    比べて大きい（直線に乗らない）ものと、速さが `MOVING_MIN_SPEED` 未満のものは静止として 0 にする。
+    毎周期、新しい検出を各履歴の「最後の位置を最後の速度で今へ進めた位置」に近いものへ結ぶ
+    （距離 `tol + 半径`）。結んだ位置の履歴（直近 `_TRACK_S` 秒）を直線で回帰した傾きが速度。
+    **1周期の差分は使わない**——見える面が変わるたびに重心が数 cm 動き、10Hz だと 0.5m/s 近い偽の
+    速度になる。回帰の残差が速さに比べて大きい（直線に乗らない）ものと、速さが `MOVING_MIN_SPEED`
+    未満のものは静止として 0 にする。結ばれなかった履歴も `_TRACK_KEEP_S` の間は残す。
     """
 
     def __init__(self, tol: float = 0.5) -> None:
         self._tol = tol
-        self._tracks: list[list[tuple[float, float, float]]] = []     # (t, x, y) の列
+        #: (履歴 (t, x, y) の列, 最後の速度 (vx, vy))
+        self._tracks: list[tuple[list[tuple[float, float, float]], tuple[float, float]]] = []
 
     def reset(self) -> None:
         self._tracks = []
 
     def update(self, t: float, now: list[Obstacle]) -> list[Obstacle]:
         used: set[int] = set()
-        new_tracks: list[list[tuple[float, float, float]]] = []
+        new_tracks: list[tuple[list[tuple[float, float, float]], tuple[float, float]]] = []
         out: list[Obstacle] = []
+        pred = []
+        for hist, (vx, vy) in self._tracks:
+            dt = t - hist[-1][0]
+            pred.append((hist[-1][1] + vx * dt, hist[-1][2] + vy * dt))
         for o in now:
             best, best_d = -1, math.inf
-            for i, tr in enumerate(self._tracks):
+            for i, (px, py) in enumerate(pred):
                 if i in used:
                     continue
-                d = math.hypot(o.x - tr[-1][1], o.y - tr[-1][2])
+                d = math.hypot(o.x - px, o.y - py)
                 if d <= self._tol + o.r and d < best_d:
                     best, best_d = i, d
             hist = []
             if best >= 0:
                 used.add(best)
-                hist = [h for h in self._tracks[best] if t - h[0] <= _TRACK_S]
+                hist = [h for h in self._tracks[best][0] if t - h[0] <= _TRACK_S]
             hist.append((t, o.x, o.y))
-            new_tracks.append(hist)
             vx, vy = self._fit(hist)
+            new_tracks.append((hist, (vx, vy)))
             out.append(o._replace(vx=vx, vy=vy) if (vx or vy) else o)
+        for i, tr in enumerate(self._tracks):
+            if i not in used and t - tr[0][-1][0] <= _TRACK_KEEP_S:
+                new_tracks.append(tr)
         self._tracks = new_tracks
         return out
 

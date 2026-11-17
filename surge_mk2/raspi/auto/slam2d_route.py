@@ -390,7 +390,10 @@ class Slam2dRoute(Slam2dRaceLine):
         #: `snapshot()` で最後に詰めた `AutoMap` と、そのときの `_route_ver`
         self._snap_map: AutoMap | None = None
         self._snap_ver = -1
+        #: 走行を開始してからの経過 [s]（ミッションの時間・停止経路の作り直しの間隔）。`_race_clock` が進める
         self._race_t = 0.0
+        #: 走行を開始した周期の車両状態の時刻 [ns]（0 = 時刻が無い。そのときは `_dt` を積む）
+        self._race_t0_ns = 0
         #: 学習した横の限界で速度を付け直した経路（`_grip_timed`）と、その元
         self._grip_src: rl_mod.RaceLine | None = None
         self._grip_src_key: tuple | None = None
@@ -860,6 +863,7 @@ class Slam2dRoute(Slam2dRaceLine):
 
     def _race(self, st: AutoState, scan: Scan, vs: VehicleState,
               p: dict[str, float], lost: bool) -> AutoState:
+        self._race_clock(vs)
         if self.phase == DETOUR:
             return self._detour_step(st, scan, vs, p)
         if self.phase == PARK:
@@ -896,6 +900,7 @@ class Slam2dRoute(Slam2dRaceLine):
             self._joined = False
             self._join_tried = self._join_ok = False
             self._race_t = 0.0
+            self._race_t0_ns = int(vs.t_capture)
             self.laps = 0
 
         # 学習のゲート（「走行を抑えている」）は、この先で止まる・抑える判断より前に閉じる。
@@ -923,7 +928,6 @@ class Slam2dRoute(Slam2dRaceLine):
         # 横グリップを学習している間は、学習した限界で速度を付け直した版を追う（`_grip_timed`）
         path = self._grip_timed(path, p)
         self.path = path
-        self._race_t += self._dt
         if not self._joined and not self._join_tried and self._avoid is None:
             # 走り出し・乗り直し: 今の位置と向きから経路へ合流する一時経路（`_join_back`）
             self._join_tried = True
@@ -967,6 +971,22 @@ class Slam2dRoute(Slam2dRaceLine):
                      + self._sight_note(path, p) + self._tight_note(path, p) + grip_note
                      + self._us_note(p))
         return st
+
+    def _race_clock(self, vs: VehicleState) -> None:
+        """走行を開始してからの経過（`_race_t`）を**車両状態の時刻の差**で進める。
+
+        ★ 以前は経路を追った周期だけ `_dt` を足していたので、Hybrid A* の迂回（DETOUR）・自己位置を信用できずに
+        止まった周期・LOCATE へ戻った間は時計が止まっていた。迂回や立ち往生で止まった時間だけ「180 秒で駐車へ」が
+        遅れ、決勝の駐車の 1 分（`docs/competition_plan.md` §4 4.）を逃す。
+        時刻の差なら、間の周期を飛ばしても戻った周期で追いつく。時刻の無い車両状態（テスト）だけ `_dt` を積む。
+        """
+        if not self._race_started:
+            return
+        t = int(vs.t_capture)
+        if self._race_t0_ns > 0 and t > self._race_t0_ns:
+            self._race_t = (t - self._race_t0_ns) / 1e9
+        elif self._race_t0_ns <= 0:
+            self._race_t += self._dt
 
     def _grip_timed(self, path: rl_mod.RaceLine, p: dict[str, float]) -> rl_mod.RaceLine:
         """周回の経路に、学習した横の限界で速度を付け直したもの（学習していなければ `path` のまま）。

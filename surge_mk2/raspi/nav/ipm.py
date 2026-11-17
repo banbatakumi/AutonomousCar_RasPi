@@ -36,7 +36,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from raspi.core.camera_model import FisheyeCalib, project_rays, unproject_pixels
+from raspi.core.camera_model import FisheyeCalib, crop_frame, project_rays, unproject_pixels
 
 from .grid import OccGrid
 
@@ -81,7 +81,8 @@ class CameraExtrinsics(NamedTuple):
 
 def camera_intrinsics(hfov_rad: float, width: int, height: int,
                        bottom_crop: float = 0.0,
-                       fisheye: FisheyeCalib | None = None) -> CameraIntrinsics:
+                       fisheye: FisheyeCalib | None = None,
+                       top_crop: float = 0.0) -> CameraIntrinsics:
     """内部パラメータを作る。
 
     `fisheye`（校正値）があればそれを `width`×`height` に縮尺して使う。
@@ -89,11 +90,12 @@ def camera_intrinsics(hfov_rad: float, width: int, height: int,
     （`hfov` から焦点距離を出す）。**独自に再導出しない。**
     """
     if fisheye is not None:
-        fx, fy, cx, cy = fisheye.scaled(width, height, bottom_crop)
+        fx, fy, cx, cy = fisheye.scaled(width, height, bottom_crop, top_crop)
         return CameraIntrinsics(f=fx, cx=cx, principal_y=cy, fy=fy, k=fisheye.k)
     f = (width / 2.0) / math.tan(hfov_rad / 2.0)
     cx = width / 2.0
-    principal_y = height / (2.0 * (1.0 - bottom_crop))
+    full_h, y0 = crop_frame(height, bottom_crop, top_crop)
+    principal_y = full_h / 2.0 - y0
     return CameraIntrinsics(f=f, cx=cx, principal_y=principal_y)
 
 
@@ -101,12 +103,13 @@ def vehicle_camera_intrinsics(vehicle, cam: str, width: int,
                               height: int) -> CameraIntrinsics:
     """`Vehicle` から右・主（`cam="front"`）/左（`cam="left"`）カメラの内部パラメータを作る。
 
-    各ノードが `hfov`・`bottom_crop`・`fisheye` を個別に拾うと、どれか1つを
+    各ノードが `hfov`・`top_crop`・`bottom_crop`・`fisheye` を個別に拾うと、どれか1つを
     渡し忘れた（＝校正値を無視した）ノードが黙って古いモデルで動く。口を1つにする。
     """
     return camera_intrinsics(getattr(vehicle, f"cam_{cam}_hfov"), width, height,
                              getattr(vehicle, f"cam_{cam}_bottom_crop"),
-                             getattr(vehicle, f"cam_{cam}_fisheye"))
+                             getattr(vehicle, f"cam_{cam}_fisheye"),
+                             top_crop=getattr(vehicle, f"cam_{cam}_top_crop"))
 
 
 def pixel_ray(u, v, intr: CameraIntrinsics):
