@@ -76,6 +76,7 @@ from raspi.proto.generated import packets  # noqa: E402
 
 from .course import list_courses  # noqa: E402
 from .link import create_sim_link  # noqa: E402
+from .moving import update_all  # noqa: E402
 from .params import REAL_VIBRATION  # noqa: E402
 from .stm32 import COMMAND_TIMEOUT_NS  # noqa: E402
 
@@ -658,9 +659,9 @@ class Bench:
                         q = np.asarray(path.xy, dtype=float)
                         w = np.stack([ox + q[:, 0] * cs - q[:, 1] * sn,
                                       oy + q[:, 0] * sn + q[:, 1] * cs], axis=1)
-                        m.bind(w, tuple(self.sim.course.start[:2]))
+                        m.bind(w, tuple(self.sim.course.start[:2]), np.asarray(path.v, dtype=float))
                         m.t_start += time.monotonic() - t0      # 経路ができた時刻から数える
-                    m.update(c.grid, c.origin, c.resolution, time.monotonic() - t0)
+                update_all(self._movers, c.grid, c.origin, c.resolution, time.monotonic() - t0)
                 c._padded_grid = None
                 st_ = getattr(self, "_last_st", None)
                 if st_ is not None and os.environ.get("MOVER_LOG") and st_.reason != getattr(self, "_mv_reason", None) \
@@ -687,7 +688,7 @@ class Bench:
                         rx, ry = (near.xy[0] - cx) / dist, (near.xy[1] - cy) / dist
                         sp = getattr(self, "_mv_speed", 0.0)
                         car_in = sp * (math.cos(v_.yaw) * rx + math.sin(v_.yaw) * ry)
-                        mv_in = -abs(near.speed) * (math.cos(near.yaw) * rx + math.sin(near.yaw) * ry)
+                        mv_in = -abs(near.u_now) * (math.cos(near.yaw) * rx + math.sin(near.yaw) * ry)
                         if mv_in > car_in:
                             self.res.mover_hit_behind += 1
                         else:
@@ -1029,7 +1030,7 @@ class Bench:
             fwd = (mx - v.x) * co + (my - v.y) * si
             lat = -(mx - v.x) * si + (my - v.y) * co
             near |= 0.0 < fwd < 3.0 and abs(lat) < 1.0
-            if rel[i] is not None and rel[i] > 0.0 >= fwd and abs(lat) < 1.0 and m.speed > 0:
+            if rel[i] is not None and rel[i] > 0.0 >= fwd and abs(lat) < 1.0 and m.u_now > 0:
                 r.mover_passes += 1
             rel[i] = fwd if abs(lat) < 1.0 else None
         self._mv_rel = rel
@@ -1350,10 +1351,11 @@ def main() -> int:
     ap.add_argument("--trace", default=None, help="RACE 中の速度などを CSV で書く（100Hz）")
     ap.add_argument("--obstacle", action="append", default=[], metavar="X,Y,R",
                     help="シムの世界座標に円柱の障害物を置く（繰り返し可。地図には入れないなら --map と併用）")
-    ap.add_argument("--mover", action="append", default=[], metavar="S0,SPEED[,D,R,T0,L]",
+    ap.add_argument("--mover", action="append", default=[], metavar="S0,SPEED[,D,R,T0,L,K]",
                     help="中心線に沿って動く円柱（他車の代わり。繰り返し可）。S0=出発点から先の弧長[m]、"
                          "SPEED=速度[m/s]（負で逆走）、D=横ずれ[m]、R=半径[m]（矩形なら半幅）、T0=動き出す時刻[s]、"
-                         "L=長さ[m]（0 で円盤、正で車の形の矩形）")
+                         "L=長さ[m]（0 で円盤、正で車の形の矩形）、K=正なら経路の速度プロファイル×K で走る"
+                         "（SPEED は上限、0 で上限なし。コーナーで落ちる相手）")
     ap.add_argument("--vehicle", action="append", default=[], metavar="KEY=VALUE",
                     help="真値の車だけ諸元を上書き（`sim.vehicle.VehicleSpec` の欄名。例 mu=0.37、複数可）。"
                          "planner は config/vehicle.toml のまま")

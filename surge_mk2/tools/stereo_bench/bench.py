@@ -56,7 +56,8 @@ class Geometry:
         if v.stereo is None or v.cam_front_fisheye is None or v.cam_left_fisheye is None:
             raise ValueError("vehicle.toml にステレオの校正値が無い（tools/cam_calib の「ステレオ」）")
         rect = StereoRectifier(v.cam_front_fisheye, v.cam_left_fisheye, v.stereo, 640, 480, hfov,
-                               crop_right=v.cam_front_bottom_crop, crop_left=v.cam_left_bottom_crop)
+                               crop_right=v.cam_front_bottom_crop, crop_left=v.cam_left_bottom_crop,
+                               crop_top_right=v.cam_front_top_crop, crop_top_left=v.cam_left_top_crop)
         return cls(rect, (v.cam_front_x, v.cam_front_y, v.cam_front_z, v.cam_front_pitch,
                           v.cam_front_yaw),
                    (v.lidar_x, v.lidar_y, v.lidar_z, v.lidar_yaw))

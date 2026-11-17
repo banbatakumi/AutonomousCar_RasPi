@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="1マスの実寸 [m]（印刷後に定規で測った値）")
     ap.add_argument("--crop", type=float, default=None,
                     help="下端クロップ率。省略時はファイル名から")
+    ap.add_argument("--top-crop", type=float, default=None,
+                    help="上端クロップ率。省略時はファイル名から")
     ap.add_argument("--lens", default=None,
                     help="レンズのプロファイル名（vehicle.toml の lenses.<名前>）。写真を絞り込み、"
                          "書き込み先にもなる。省略時は写真のファイル名のレンズ")
@@ -86,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dets = []
     for p in paths:
-        d = detect(p, args.board, args.crop)
+        d = detect(p, args.board, args.crop, args.top_crop)
         dets.append(d)
         print(f"  {'✓' if d.ok else '✗'} {p.name}{'' if d.ok else '  ' + d.error}")
     try:
@@ -116,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         for d in dets:
             if d.ok:
                 cv2.imwrite(str(out / f"undist_{d.path.name}"),
-                            undistort_preview(d.path, c, d.crop))
+                            undistort_preview(d.path, c, d.crop, top_crop=d.top_crop))
         print(f"プレビュー: {out}")
 
     if args.write:
@@ -144,7 +146,7 @@ def _stereo(args, paths: list[Path]) -> int:
         if n is None or n.cam not in by_cam:
             print(f"  -  {p.name}  （front/left の 📷 の写真ではないので使わない）")
             continue
-        d = detect(p, args.board, args.crop)
+        d = detect(p, args.board, args.crop, args.top_crop)
         by_cam[n.cam].append(d)
         print(f"  {'✓' if d.ok else '✗'} {p.name}{'' if d.ok else '  ' + d.error}")
     try:

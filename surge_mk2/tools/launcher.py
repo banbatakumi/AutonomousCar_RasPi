@@ -23,10 +23,10 @@ from __future__ import annotations
 import re
 import sys
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import messagebox, ttk
-from typing import Callable
 
 from ml_common.close_handler import confirm_and_close
 from ml_common.job_runner import JobRunner
@@ -94,6 +94,9 @@ APPS: list[AppSpec] = [
     AppSpec("mcap_video", "解析", "動画の書き出し",
             "mcap のカメラ画像を左右それぞれの mp4 に書き出す",
             lambda o: ["-m", "tools.mcap_video_gui"]),
+    AppSpec("mcap_stereo_cloud", "解析", "視差の点群",
+            "mcap の左右画像から視差を作り直し、Foxglove の 3D パネル用の点群を足した mcap を作る",
+            lambda o: ["-m", "tools.mcap_stereo_cloud_gui"]),
     AppSpec("ml_lidar", "学習", "ml_lidar",
             "LiDAR 強化学習の学習・観戦・エクスポート",
             lambda o: ["ml_lidar/app.py"]),
