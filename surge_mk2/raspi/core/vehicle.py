@@ -19,7 +19,7 @@
 ## カメラは前方ステレオの左右2台。レンズは「プロファイル」を1行で選ぶ
 
 カメラは前方に左右2台（右 `cam_front` が主カメラ、左 `cam_left`。`CAMERA_DEVICES`）。
-レンズで変わる値（`hfov`・`bottom_crop`・`undistort_hfov`・魚眼の校正値 `fisheye`）と
+レンズで変わる値（`hfov`・`top_crop`・`bottom_crop`・`undistort_hfov`・魚眼の校正値 `fisheye`）と
 取付位置・姿勢は `[sensors.cam_*.lenses.<名前>]` に持ち、`[sensors.cam_*]` の
 `lens = "<名前>"` で選ぶ。解決は `resolve_lens()` の1か所だけ（`config/generate.py` も使う）。
 """
@@ -118,6 +118,22 @@ def _ramp_max(dyn: dict, safety: dict) -> float:
 _DEADMAN_MS_RANGE = (20.0, 1000.0)
 
 
+def _cam_crops(cam: dict, name: str) -> tuple[float, float]:
+    """`[sensors.<name>]`（レンズ解決済み）の `(top_crop, bottom_crop)`。
+
+    どちらも 0 以上で、残す高さ `1 - top - bottom` が 0.1 以上であること。外れたら
+    **両方 0（全画角）にする**——切り過ぎた設定のまま走ると画像がほぼ無くなり、
+    下流（ステレオ・IPM）が黙って空振りする。全画角なら少なくとも映像は正しい。
+    """
+    top = float(cam.get("top_crop", 0.0))
+    bottom = float(cam.get("bottom_crop", 0.0))
+    if not (top >= 0.0 and bottom >= 0.0 and 1.0 - top - bottom >= 0.1):   # NaN もここで落ちる
+        print(f"!! vehicle.toml: {name} の top_crop = {top!r}・bottom_crop = {bottom!r} は範囲外"
+              "（どちらも 0 以上・合計 0.9 以下）。全画角（0, 0）で動く", file=sys.stderr)
+        return 0.0, 0.0
+    return top, bottom
+
+
 def _deadman_ms(value) -> float:
     """`[safety] cmd_deadman_ms`。範囲の外・数でない値は既定の 150ms にする。
 
@@ -158,9 +174,12 @@ class Vehicle:
     lidar_intensity: bool = False
     #: 点群のノイズの除去の設定（`[sensors.lidar.filter]`、`raspi/nav/scan_filter.py` の `ScanFilterConfig` のキー）
     lidar_filter: tuple[tuple[str, float], ...] = ()
-    #: カメラの下端カット率（ボンネット等の映り込み除去。`camera_node.py` の ISP
-    #: ScalerCrop が実際の読み出しに反映する）。GUI の進路ガイドの主点補正にも使う
+    #: カメラの上端・下端カット率（クロップ前の高さに対する割合。天井やボンネット等の映り込み除去。
+    #: `camera_node.py` の ISP ScalerCrop が実際の読み出しに反映する）。主点の換算
+    #: （`camera_model.crop_frame`）と GUI の進路ガイドにも使う
+    cam_front_top_crop: float = 0.0
     cam_front_bottom_crop: float = 0.0
+    cam_left_top_crop: float = 0.0
     cam_left_bottom_crop: float = 0.0
     #: 付いているレンズのプロファイル名（`[sensors.cam_*] lens`）。プロファイルを
     #: 使わない書き方なら ""。📷 のファイル名と校正ツールの書き込み先に使う
@@ -366,7 +385,11 @@ class Vehicle:
         try:
             with open(p, "rb") as fp:
                 d = tomllib.load(fp)
-        except (OSError, tomllib.TOMLDecodeError):
+        except OSError:
+            return cls()
+        except tomllib.TOMLDecodeError as e:
+            # **黙ると全項目が既定値に化けたことに気づけない**（`1/6` のような式を書いた等）
+            print(f"!! {p} の書式が壊れている（{e}）。全項目を既定値で動く", file=sys.stderr)
             return cls()
         try:
             return cls._from_dict(d, p)
@@ -384,6 +407,8 @@ class Vehicle:
         cam_front = resolve_lens(sensors.get("cam_front", {}))
         cam_left = resolve_lens(sensors.get("cam_left", {}))
         fp_raw = d.get("footprint", []) or []
+        front_top, front_bottom = _cam_crops(cam_front, "cam_front")
+        left_top, left_bottom = _cam_crops(cam_left, "cam_left")
         return cls(
             measured=bool(d.get("measured", False)),
             wheelbase=float(d.get("wheelbase", 0.23)),
@@ -397,7 +422,8 @@ class Vehicle:
             lidar_z=float(lidar.get("z", 0.0)),
             lidar_intensity=bool(lidar.get("intensity", False)),
             lidar_filter=tuple((str(k), v) for k, v in (lidar.get("filter", {}) or {}).items()),
-            cam_left_bottom_crop=float(cam_left.get("bottom_crop", 0.0)),
+            cam_left_top_crop=left_top,
+            cam_left_bottom_crop=left_bottom,
             cam_left_lens=cam_left["lens"],
             cam_left_isp_tuning=str(cam_left.get("isp_tuning", "")),
             cam_left_x=float(cam_left.get("x", 0.1)),
@@ -409,7 +435,8 @@ class Vehicle:
             cam_left_fisheye=FisheyeCalib.from_dict(cam_left.get("fisheye") or {}),
             cam_left_undistort_hfov=float(cam_left.get("undistort_hfov", 1.92)),
             stereo=stereo_calib(sensors, cam_front["lens"], cam_left["lens"]),
-            cam_front_bottom_crop=float(cam_front.get("bottom_crop", 0.0)),
+            cam_front_top_crop=front_top,
+            cam_front_bottom_crop=front_bottom,
             cam_front_lens=cam_front["lens"],
             cam_front_isp_tuning=str(cam_front.get("isp_tuning", "")),
             cam_front_x=float(cam_front.get("x", 0.097)),

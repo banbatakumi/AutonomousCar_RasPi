@@ -319,8 +319,14 @@ lens = "wide160sr"
 # hfov           [rad] 水平画角。**`fisheye`（校正値）が無い間だけ**ピンホール近似に使う。
 #                ピンホールは 180° に届かないので、校正後もここは書き換えない
 #                （実測の画角は `fisheye.hfov_deg` に参考値として入る）
-# bottom_crop    下端カット率。ボンネット等の映り込みを ISP の ScalerCrop で読み出し時に切る
-#                （`raspi/nodes/camera_node.py` の `bottom_cropped`）。GUI の進路ガイドの主点補正にも使う
+# top_crop       上端カット率（クロップ前の高さに対する割合）。天井等の不要な部分を ISP の ScalerCrop で
+#                読み出し時に切る（`raspi/nodes/camera_node.py` の `vertical_cropped`）。主点の換算・GUI の進路ガイドにも使う
+# bottom_crop    下端カット率（同上）。ボンネット等の映り込みを切る
+#                どちらも 0 以上・合計 0.9 以下（外れたら全画角で動く）。**左右のカメラで揃える**。
+#                **小数で書く**（`1/6` のような式は TOML の書式エラーで、ファイル全体が既定値になる）。
+#                変えても魚眼・ステレオの校正値はそのまま使える。CSI の読み出し（fps 上限・ローリング
+#                シャッター）は変わらず、軽くなるのは共有メモリ・JPEG 化・前処理などフレーム全体を触る処理だけ。
+#                ステレオの照合帯（`stereo_node` の rows）が外にはみ出すと stereo_node が警告を出す
 # undistort_hfov [rad] 補正映像（GUI の「魚眼/補正」、`telemetry_node`）の仮想ピンホールの水平画角
 # isp_tuning     色むら補正の差分（`config/cam_tuning/` のファイル名）。**書かなければセンサー標準のまま**
 #                （純正レンズは標準が合っているので書かない）。標準の補正は純正レンズ用で、広角レンズに
@@ -342,7 +348,8 @@ pitch = 0.0
 yaw = 0.0
 hfov = 2.23
 isp_tuning = "imx219_wide160.json"
-bottom_crop = 0
+top_crop = 0.166667
+bottom_crop = 0.166667
 undistort_hfov = 1.92
 
 [sensors.cam_front.lenses.wide160sr.fisheye]
@@ -370,7 +377,8 @@ pitch = 0.0
 yaw = 0.0
 hfov = 2.23
 isp_tuning = "imx219_wide160.json"
-bottom_crop = 0
+top_crop = 0.166667
+bottom_crop = 0.166667
 undistort_hfov = 1.92
 
 [sensors.cam_left.lenses.wide160sl.fisheye]
