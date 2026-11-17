@@ -78,6 +78,17 @@ manual → auto と切り替えたあと、`pwm1_enable=2` は正しく書けて
 `99-surge-fan.rules` 側でも `gpio` グループに書き込み権限を付与している。
 書き込めない環境（権限未適用・非対応カーネル）では黙ってスキップし、
 `pwm1_enable=2` の書き込みだけで動く。
+
+## ★★ 低温で kick すると、逆にファンが回りっぱなしになる（2026-11-17 実機）
+
+thermal zone はポーリングせず（`polling_delay` 無し）、trip を跨いだときだけ
+governor が動く。最低の active trip（50°C・ヒステリシス 5°C）より冷えているときに
+kick で `cur_state` を 0→1 にすると、跨ぐ trip が無いので解除ライン 45°C まで冷える
+まで誰も 0 に戻さない。ファン停止での定常温度が 45°C を超える（実機 48.5°C）と
+**pwm 75・約2500rpm のまま回り続ける**（起動直後の `set_auto()` で毎回起きていた。
+43°C で cur_state=1 を確認）。同じ温度ならファン分で制御系 −15mA。
+そこで最低の trip より冷えているときは 1段上げない（解除ラインより下で回っていれば
+0 を書く。`_kick_governor()`）。trip 以上では従来どおり 1段動かす。
 """
 
 from __future__ import annotations
@@ -96,6 +107,7 @@ FAN_COOLING_TYPE = "pwm-fan"
 
 HWMON_GLOB = "/sys/class/hwmon/hwmon*"
 COOLING_DEVICE_GLOB = "/sys/class/thermal/cooling_device*"
+THERMAL_ZONE_GLOB = "/sys/class/thermal/thermal_zone*"
 
 
 class FakeFan:
@@ -126,7 +138,16 @@ class SysfsFan:
     （呼び出し側はこれを見て GUI の手動モードを無効化する）。
     """
 
-    __slots__ = ("available", "_pwm1", "_pwm1_enable", "_fan1_input", "_cur_state")
+    __slots__ = (
+        "_cur_state",
+        "_fan1_input",
+        "_pwm1",
+        "_pwm1_enable",
+        "_release_mc",
+        "_trip_mc",
+        "_zone_temp",
+        "available",
+    )
 
     def __init__(self) -> None:
         self.available = False
@@ -134,6 +155,11 @@ class SysfsFan:
         self._pwm1_enable: Path | None = None
         self._fan1_input: Path | None = None
         self._cur_state: Path | None = None
+        #: ファンを受け持つ thermal zone の温度 [m°C]、最低の trip の温度と解除ライン
+        #: （trip − ヒステリシス）[m°C]。見つからなければ `None`（従来の kick だけ）
+        self._zone_temp: Path | None = None
+        self._trip_mc: int | None = None
+        self._release_mc: int | None = None
         self._probe()
 
     def _probe(self) -> None:
@@ -168,9 +194,50 @@ class SysfsFan:
                 continue
             cur_state = Path(cdev) / "cur_state"
             if os.access(cur_state, os.W_OK):
+                self._probe_zone(Path(cdev))
                 return cur_state
             return None
         return None
+
+    def _probe_zone(self, cdev: Path) -> None:
+        """`cdev` を受け持つ thermal zone の温度と、最低の trip の温度・解除ラインを探す。
+
+        zone の `cdevN` リンクが `cdev` を指すものを選び、`cdevN_trip_point` の trip の
+        うち最も低いものの `temp` を trip、`temp − hyst` を解除ラインとする。"""
+        target = cdev.resolve()
+        for zone in glob.glob(THERMAL_ZONE_GLOB):
+            z = Path(zone)
+            trips: list[tuple[int, int]] = []
+            for link in z.glob("cdev[0-9]*"):
+                if not link.name[4:].isdigit():
+                    continue                  # cdevN_trip_point 等
+                try:
+                    if link.resolve() != target:
+                        continue
+                    trip = int((z / f"{link.name}_trip_point").read_text())
+                    t = int((z / f"trip_point_{trip}_temp").read_text())
+                    h = int((z / f"trip_point_{trip}_hyst").read_text())
+                except (OSError, ValueError):
+                    continue
+                trips.append((t, h))
+            if trips:
+                t, h = min(trips)
+                self._zone_temp, self._trip_mc, self._release_mc = z / "temp", t, t - h
+                return
+
+    def _zone_mc(self) -> int | None:
+        if self._zone_temp is None:
+            return None
+        try:
+            return int(self._zone_temp.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _write_state(self, value: int) -> None:
+        try:
+            self._cur_state.write_text(str(value))
+        except OSError:
+            pass
 
     def _kick_governor(self) -> None:
         """`cur_state` に**別の値**を書き込み、thermal governor の再評価を強制する。
@@ -181,6 +248,15 @@ class SysfsFan:
         値の変化なしと判定して早期リターンする。実機で確認済み）。1段階
         だけ動かして書き込むと、その書き込みイベントをきっかけに governor
         が起き、以降は自分で正しい値へ収束していく（実機で確認済み）。
+
+        ただし最低の trip より冷えているときは 0 が正しい（解除ラインとの間の
+        ヒステリシス帯では 0 も 1 も正しい）。zone はポーリングしないので、ここで
+        0→1 にすると冷えるまで回り続ける（モジュール docstring）。そこでは上げずに:
+
+        - 状態 0 で pwm1 も 0 → 何もしない
+        - 状態 0 なのに pwm1 が残っている（手動の値）→ 1→0 と書いて pwm を出し直す
+          （pwm-fan は同じ状態の書き込みを無視するので、一度動かす）
+        - 解除ラインより冷えていて状態が 1 以上 → 0 を書く
         """
         if self._cur_state is None:
             return
@@ -188,11 +264,21 @@ class SysfsFan:
             cur = int(self._cur_state.read_text().strip())
         except (OSError, ValueError):
             return
-        nudge = cur - 1 if cur > 0 else cur + 1
-        try:
-            self._cur_state.write_text(str(nudge))
-        except OSError:
-            pass
+        temp = self._zone_mc()
+        if temp is not None and self._trip_mc is not None and temp < self._trip_mc:
+            if cur == 0:
+                try:
+                    stale = self._pwm1.read_text().strip() != "0"
+                except (OSError, AttributeError):
+                    stale = False
+                if stale:
+                    self._write_state(1)
+                    self._write_state(0)
+                return
+            if self._release_mc is not None and temp < self._release_mc:
+                self._write_state(0)
+                return
+        self._write_state(cur - 1 if cur > 0 else cur + 1)
 
     def set_auto(self) -> bool:
         if not self.available:
