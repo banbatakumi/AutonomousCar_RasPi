@@ -1574,6 +1574,7 @@ class Slam2dRaceLine(Planner):
             return self._done(st)
         self._hit_now = False
         st = self._race(st, scan, vs, p, u.lost)
+        self._record_state(st, p)
         self._signal_step(st)
         # 速度を追従の値より抑えた（障害物・推測航法など）・制動するなら、目標車速のランプは
         # 指定しない（＝STM32 の上限で動かす。プロファイルの緩い傾きのままだと減速が遅れる）
@@ -1583,6 +1584,25 @@ class Slam2dRaceLine(Planner):
             st.accel_limit = g[1] if g is not None else 0.0
         self._arm_tick(st, p)
         return st
+
+    def _record_state(self, st: AutoState, p: dict[str, float]) -> None:
+        """記録（MCAP）から判断を追うための内部状態を `AutoState` に載せる（RACE 段）。GUI は使わない。
+
+        - 追い抜き（`nav/overtake.py`）の判定と先行車。使っていない（`overtake`・`obstacle_avoid` が 0）間は空
+        - アンダーステアの学習（`nav/understeer.py`）の K と舵の上限の横加速度を `grip` に（`us_learn` が 1 の間だけ）
+        """
+        if p.get("overtake", 0) > 0 and p.get("obstacle_avoid", 0) > 0:
+            st.overtake = self._ot_status
+            st.avoid_ms = round(self._avoid_ms, 2)
+            lead = self._ot_lead
+            if lead is not None:
+                st.ot_lead_s = round(float(lead.s_lo), 3)
+                st.ot_lead_d = round(0.5 * (float(lead.d_lo) + float(lead.d_hi)), 3)
+                st.ot_lead_u = round(float(lead.u), 3)
+        if p.get("us_learn", 0) > 0:
+            us = self._us
+            st.grip = {**st.grip, "us_k": round(us.k, 6), "us_ready": 1.0 if us.ready else 0.0,
+                       "us_lock": round(us.a_lock or 0.0, 3)}
 
     # ── 点群の合間の追従 ──
 

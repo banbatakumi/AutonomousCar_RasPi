@@ -67,7 +67,8 @@ class TestPiHealthReader(unittest.TestCase):
     def _reader(self, d: Path, **kw) -> pihealth.PiHealthReader:
         return pihealth.PiHealthReader(
             proc_stat=d / "stat", proc_meminfo=d / "meminfo", proc_loadavg=d / "loadavg",
-            cpufreq_dir=d, throttled_sysfs=(d / "get_throttled",), use_vcgencmd=False, **kw)
+            cpufreq_dir=d, throttled_sysfs=(d / "get_throttled",), thermal_zone=d / "temp",
+            use_vcgencmd=False, **kw)
 
     def test_unavailable_off_pi(self):
         with tempfile.TemporaryDirectory() as td:
@@ -84,9 +85,11 @@ class TestPiHealthReader(unittest.TestCase):
             (d / "scaling_cur_freq").write_text("1500000\n")
             (d / "scaling_max_freq").write_text("2000000\n")
             (d / "get_throttled").write_text("50000\n")
+            (d / "temp").write_text("55123\n")
             r = self._reader(d)
             first = r.read()
             self.assertTrue(first.available)
+            self.assertAlmostEqual(first.temp_c, 55.123)
             self.assertIsNone(first.cpu_pct, "初回は区間が無いので使用率を出さない")
             (d / "stat").write_text(STAT_B)
             h = r.read()

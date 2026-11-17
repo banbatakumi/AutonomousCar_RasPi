@@ -64,15 +64,6 @@ class TestStereoInfo(unittest.TestCase):
         # 記録しないトピックとその理由
         not_logged = {
             "cam/mask": "GUI 表示用の JPEG。中身は scan/cam・path/cam に数値で残る",
-            "cam/model": "モデル選択の意思。使ったモデルは各ノードの出力・provenance に残る",
-            "e2e/model": "同上",
-            "cam_e2e/model": "同上",
-            "e2e_fusion/model": "同上",
-            "stereo_e2e/model": "同上",
-            "track/roi": "GUI からの追跡範囲の指定。結果は track/target に残る",
-            "route/select": "信号ノードの切替要求。採用結果は auto/state に残る",
-            "signal/config": "GUI の HSV しきい値（調整用）",
-            "signal/status": "GUI のライブ調整用の表示",
         }
         logged = set(DEFAULT_TOPICS)
         for topic in TOPIC_OWNER:

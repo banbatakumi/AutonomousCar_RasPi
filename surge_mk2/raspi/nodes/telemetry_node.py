@@ -163,7 +163,7 @@ from raspi.core.camera_model import Undistorter  # noqa: E402
 from raspi.core.jpeg import RingJpeg, encode_png  # noqa: E402
 from raspi.io.cpufreq import open_cpufreq  # noqa: E402
 from raspi.io.fan import open_fan  # noqa: E402
-from raspi.io.pihealth import PiHealth, PiHealthReader  # noqa: E402
+from raspi.io.pihealth import THERMAL_ZONE, PiHealth, PiHealthReader  # noqa: E402
 from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
 from raspi.nav.grid import pack_trinary, unpack_trinary  # noqa: E402
 from raspi.msgs import (  # noqa: E402
@@ -557,7 +557,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 #: RasPi 本体（SoC）の温度。カーネルがミリ℃で出している
-PI_THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
+PI_THERMAL_ZONE = THERMAL_ZONE
 
 
 #: Pi の温度を読み直す間隔 [s]。温度は秒単位でしか変わらないので、50Hz の配信のたびにファイルを開かない

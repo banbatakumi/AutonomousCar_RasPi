@@ -583,6 +583,13 @@ class ImageRef(MsgBase):
     #: **ステレオの照合はこれが True の組だけを使う**（揃う前は最大で半周期ずれる）。
     #: 同期を頼んでいない間（`CamConfig.stereo` が False）は常に False
     synced: bool = False
+    #: このコマの露光時間 [µs]・アナログゲイン・色のゲイン（R, B。AWB の結果）。picamera2 のメタデータそのまま。
+    #: **記録（MCAP）から左右の露光と AWB が揃っていたか、明るさの違いを追うため**（左は主カメラの値を写して撮る）。
+    #: メタデータが無いコマは 0
+    exposure_us: int = 0
+    analogue_gain: float = 0.0
+    colour_gain_r: float = 0.0
+    colour_gain_b: float = 0.0
 
 
 class Heartbeat(MsgBase):
@@ -816,6 +823,20 @@ class AutoState(MsgBase):
     #: `events`・`trials`・`passes`＝前兆・試行・通過の数、`win`＝減速を判断した周の数、
     #: `lag_dec`＝直近の周の、制動区間の終わりで車速が計画より速かったぶん [m/s]
     grip: dict[str, float] = msgspec.field(default_factory=dict)
+    #: `us_learn` が 1 の間、`grip` には `us_k`（アンダーステア勾配 K [rad/(m/s²)]）・`us_ready`（推定を使っているか）・
+    #: `us_lock`（舵の上限で出せる横加速度 [m/s²]、無ければ 0）も入る（`raspi/nav/understeer.py`）
+
+    # ── 追い抜き（`raspi/nav/overtake.py`）。記録から判定を追うためのもので、GUI は使わない ──
+    #: 判定（`OvertakeResult.status`。"clear"＝経路のまま通れる / "avoid"＝避ける線に乗る / "blocked"＝通れる候補が無く
+    #: 先行車に付いていく / ""＝追い抜きを使っていない）。避ける理由は `reason` に入る
+    overtake: str = ""
+    #: 先行車（追い抜きの相手）の、経路に沿った車からの距離（後端）[m]・経路からの横位置（中心、左が正）[m]・
+    #: 経路に沿った速度 [m/s]。先行車がいなければ 0
+    ot_lead_s: float = 0.0
+    ot_lead_d: float = 0.0
+    ot_lead_u: float = 0.0
+    #: 追い抜きの計画1回の処理時間 [ms]
+    avoid_ms: float = 0.0
 
     # ── 鮮度（planning_node が入れる） ──
     scan_age_ms: float = 0.0               #: 使った点群の古さ [ms]

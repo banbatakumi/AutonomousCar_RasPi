@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -754,7 +755,8 @@ class TestLoggerNode(unittest.TestCase):
         self.assertEqual(len(msgs["/scan"]), 1)
         self.assertIn("/viz/scan", msgs)
 
-    def test_stereo_depth_is_recorded(self):
+    def test_stereo_depth_is_recorded_only_as_viz(self):
+        """深度の JPEG は `/viz/image/depth` にだけ書く（生トピックに同じ JPEG を二重に書かない）。"""
         from raspi.bus import Publisher
         from raspi.nodes.logger_node import LoggerNode
 
@@ -767,10 +769,49 @@ class TestLoggerNode(unittest.TestCase):
         pub.close()
 
         msgs = read_back(self.path)["msgs"]
-        self.assertEqual(len(msgs["/stereo/depth"]), 1)
-        self.assertEqual(msgs["/stereo/depth"][0][1]["near_m"], 0.25)
+        self.assertNotIn("/stereo/depth", msgs)
         self.assertEqual(len(msgs["/viz/image/depth"]), 1)
         self.assertEqual(msgs["/viz/image/depth"][0][1]["format"], "jpeg")
+
+    def test_heartbeats_are_thinned_per_node(self):
+        """`hb/<node>` はノードごとに1秒に1件。pid が変わった（再起動した）ら待たずに書く。"""
+        from raspi.msgs import Heartbeat
+        from raspi.nodes.logger_node import HB_LOG_PERIOD_NS, LoggerNode
+
+        node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
+        t0 = 10_000_000_000
+        step = HB_LOG_PERIOD_NS // 10                     # 10Hz
+        for i in range(25):                               # 2.5 秒ぶん × 2ノード
+            node._on_msg("hb/io", Heartbeat(t_pub=t0 + i * step, node="io", pid=1))
+            node._on_msg("hb/stereo", Heartbeat(t_pub=t0 + i * step, node="stereo", pid=2))
+        node._on_msg("hb/io", Heartbeat(t_pub=t0 + 25 * step, node="io", pid=99))   # 再起動
+        node.close()
+
+        msgs = read_back(self.path)["msgs"]
+        self.assertEqual(len(msgs["/hb/io"]), 4)          # 0s・1s・2s・再起動
+        self.assertEqual(msgs["/hb/io"][-1][1]["pid"], 99)
+        self.assertEqual(len(msgs["/hb/stereo"]), 3)
+        self.assertEqual(node.hb_skipped, 2 * 25 - 6)
+
+    def test_pi_health_is_written_only_where_readable(self):
+        """`/pi/health` は Pi 本体の値が読める機体でだけ書く。"""
+        from raspi.io.pihealth import PiHealth
+        from raspi.nodes.logger_node import PI_HEALTH_TOPIC, LoggerNode
+
+        node = LoggerNode(self.path, topics=["vehicle_state"], image_hz=0)
+        node._pi = mock.Mock(available=False)
+        node._write_pi_health()
+        node._pi = mock.Mock(available=True)
+        node._pi.read.return_value = PiHealth(available=True, cpu_pct=12.5, cpu_khz=2_400_000,
+                                              throttled=0, temp_c=55.0)
+        node._write_pi_health()
+        node.close()
+
+        msgs = read_back(self.path)["msgs"]
+        self.assertEqual(len(msgs[PI_HEALTH_TOPIC]), 1)
+        body = msgs[PI_HEALTH_TOPIC][0][1]
+        self.assertEqual((body["cpu_pct"], body["temp_c"], body["throttled"]), (12.5, 55.0, 0))
+        self.assertIsNone(body["load1"])
 
     def test_stop_ends_the_run(self):
         import threading

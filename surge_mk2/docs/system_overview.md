@@ -697,6 +697,9 @@ WebSocket ─┬─▶ 点群・地図・カメラ → live.ts に置き、Canva
 - `raspi/tools/slam_replay.py` は記録に実機と同じ設定の slam2d を回し、比較用トピックを足した `<入力>_slam.mcap` を作る
 - **メタデータ `provenance`**（`raspi/rec/provenance.py`）に、記録した時の `vehicle.toml` の全文・`git`・主要ファイルのハッシュを残す（再生で同じ処理をやり直す・コードの版を突き合わせるため）。
   ステレオは照合ごとに `stereo/info` も記録する（何を残し何が残らないかは [`stereo_plan.md` 段階3](stereo_plan.md)）
+- **記録するトピック**は `cam/mask` 以外のバスの全部（モデル選択・信号のしきい値・追従の ROI のような小さい「意思」も）。重複する `stereo/depth` は
+  `/viz/image/depth` にだけ書き、`hb/*` はノードごとに 1Hz（と再起動の瞬間）に間引く。バスに無い Pi 本体の健全性（CPU・周波数・スロットリング・温度）は
+  logger が記録中だけ `/pi/health` に書く。理由と一覧は `raspi/nodes/logger_node.py` の docstring
 
 ---
 

@@ -27,6 +27,9 @@
 - **カメラを YUV420（sYCC）に・左の AWB を主カメラに揃える（2026-11-17、Pi に反映・関連サービス再起動済み）**: 変換は `raspi/core/pixfmt.py`。
   ステレオは Y 面を直接・JPEG は面のまま・CNN 系は使うときだけ RGB へ。ARM で cam_e2e・e2e_fusion・line_trace の出力を確認（cam_perception はモデル未選択で未確認）。
   数値は `docs/stereo_plan.md`。**走行と学習データの色（新しい記録の JPEG と過去の記録）の比較は未確認**
+- **MCAP の記録対象の整理（2026-11-18、コミット済み・Pi 未反映）**: `stereo/depth` の二重記録をやめ、`hb/*` を 1Hz に間引き、モデル選択・`route/select`・
+  `signal/*`・`track/roi` と `/pi/health` を足した。`ImageRef` に露光・ゲイン・AWB、`AutoState` に追い抜きの判定（`overtake`・`ot_lead_*`・`avoid_ms`）と
+  `grip.us_*` を足した（`MSGS_SCHEMA` が変わるので GUI と Pi を一緒に入れ替える）。**実機の記録で中身を確かめていない**
 - **MD ファーム**（`~/GitHub/BLDC/ProgramV4`、ブランチ `FW/Program_V4`）: 仕様は `ProgramV4/docs/SERIAL_PROTOCOL.md`
 - **プロトコル v0.31**（`raspi/proto/protocol.toml` の `protocol_version` = 0x001F が正。ファームの `RAS_PROTOCOL_VERSION` も 0x001F。v0.31 で `STEREO_OBS` を追加）。
   Pi とファームは一緒に入れ替える（io_node は版が一致するまで ARM を通さない）

@@ -649,7 +649,7 @@ class CameraWorker(threading.Thread):
         s.last_t_capture = t_cap
 
         if self.on_frame:
-            self.on_frame(desc, self.synced)
+            self.on_frame(desc, self.synced, self.exposure, self.colour_gains)
         self._follow_exposure()
 
     def _aligned_with_peer(self, t_cap: int) -> bool:
@@ -901,15 +901,19 @@ def main() -> int:
             # ZeroMQ のソケットはスレッドセーフではない
             pub = Publisher("camera", thread_safe=True)
 
-            def on_frame(desc, synced=False):                # noqa: F811
+            def on_frame(desc, synced=False, exposure=None, colour_gains=None):  # noqa: F811
                 idx = int(desc.name[len(SHM_PREFIX):] or 0)
                 topic, role = CAM_TOPIC.get(
                     idx, (f"image/cam{idx}", f"cam{idx}"))
+                exp_us, gain = exposure or (0, 0.0)
+                cg_r, cg_b = colour_gains or (0.0, 0.0)
                 pub.send(topic, ImageRef(
                     t_capture=desc.t_capture_ns, cam=role,
                     shm_name=desc.name, slot=desc.slot, ring_seq=desc.seq,
                     frame_id=desc.frame_id, width=desc.width, height=desc.height,
-                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, synced=synced))
+                    fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, synced=synced,
+                    exposure_us=exp_us, analogue_gain=gain,
+                    colour_gain_r=cg_r, colour_gain_b=cg_b))
 
             hb_detail = make_hb_detail()
 

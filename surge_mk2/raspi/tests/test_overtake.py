@@ -247,3 +247,35 @@ class TestOpponentModel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRecordState(unittest.TestCase):
+    """`Slam2dRaceLine._record_state`: 追い抜きの判定とアンダーステアの学習を `AutoState` に載せる（記録用）。"""
+
+    def _planner(self, status, lead):
+        from types import SimpleNamespace
+        us = SimpleNamespace(k=0.0021, ready=True, a_lock=4.8)
+        return SimpleNamespace(_ot_status=status, _ot_lead=lead, _avoid_ms=3.456, _us=us)
+
+    def test_overtake_and_understeer_are_recorded(self):
+        from raspi.auto.slam2d_raceline import Slam2dRaceLine
+        from raspi.msgs import AutoState
+
+        lead = ot.Track(s_lo=1.2, s_hi=1.5, d_lo=-0.1, d_hi=0.1, u=0.8, w=0.0, moving=True, src=None)
+        st = AutoState(grip={"lat": 5.0})
+        p = {"overtake": 1.0, "obstacle_avoid": 1.0, "us_learn": 1.0}
+        Slam2dRaceLine._record_state(self._planner("blocked", lead), st, p)
+        self.assertEqual(st.overtake, "blocked")
+        self.assertEqual((st.ot_lead_s, st.ot_lead_d, st.ot_lead_u), (1.2, 0.0, 0.8))
+        self.assertEqual(st.avoid_ms, 3.46)
+        self.assertEqual(st.grip["lat"], 5.0)               # 横グリップの学習の値は消さない
+        self.assertEqual((st.grip["us_k"], st.grip["us_ready"], st.grip["us_lock"]), (0.0021, 1.0, 4.8))
+
+    def test_nothing_when_features_are_off(self):
+        from raspi.auto.slam2d_raceline import Slam2dRaceLine
+        from raspi.msgs import AutoState
+
+        st = AutoState()
+        Slam2dRaceLine._record_state(self._planner("blocked", None), st,
+                                     {"overtake": 0.0, "obstacle_avoid": 1.0, "us_learn": 0.0})
+        self.assertEqual((st.overtake, st.avoid_ms, st.grip), ("", 0.0, {}))

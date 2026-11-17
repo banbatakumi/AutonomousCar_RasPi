@@ -148,7 +148,7 @@
   - `/stereo/info`（`StereoInfo`、照合ごと）: 左右の撮影時刻の差 `dt_lr_ns`、遅れの内訳（`cam_ms`・`wait_ms`・`read_ms`・`proc_ms`・`latency_ms`）、
     障害物の点数 `n_points`、視差の出た割合 `valid_frac`、**その時の照合・抽出の設定**（`algo`・`scale`・`num_disp`・`block`・`rows`・`z_min`…`slice_m`）、
     右カメラの取付 `cam_pose`。`scan/stereo` と同じ `t_capture`・`seq` で突き合わせる
-  - `/scan/stereo`: 方位ごとの距離（0 = 見つからない）。`/stereo/depth` は表示専用の損失画像（解析には使わない）
+  - `/scan/stereo`: 方位ごとの距離（0 = 見つからない）。深度映像は表示専用の損失画像で、記録には `/viz/image/depth` だけ残る（解析には使わない）
   - `/cam/config`: 照合（`depth`）・左右同期（`stereo`）を回していた期間。`/stereo/info` が無い区間が「回していなかった」のか「記録が欠けた」のかを分ける
   - `/vehicle_state`（`pitch`・速度・舵角）、`/scan`（LiDAR）、`/diag/link`（`stereo_ok`・`auto_stop_stereo`・`auto_stop_active`）: 誤検出の切り分けに使う
   - メタデータ `provenance`（`raspi/rec/provenance.py`）: **`vehicle_toml`（校正値の全文）**、`git`、`src_sha`（ステレオ関連ファイルのハッシュ。Pi は `.git` が無いので

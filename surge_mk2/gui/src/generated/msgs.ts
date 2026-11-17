@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0x60d7a14d
+export const MSGS_SCHEMA = 0xf9190088
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -575,6 +575,20 @@ export type AutoState = {
    * `lag_dec`＝直近の周の、制動区間の終わりで車速が計画より速かったぶん [m/s]
    */
   grip: Record<string, number>
+  /**
+   * 判定（`OvertakeResult.status`。"clear"＝経路のまま通れる / "avoid"＝避ける線に乗る / "blocked"＝通れる候補が無く
+   * 先行車に付いていく / ""＝追い抜きを使っていない）。避ける理由は `reason` に入る
+   */
+  overtake: string
+  /**
+   * 先行車（追い抜きの相手）の、経路に沿った車からの距離（後端）[m]・経路からの横位置（中心、左が正）[m]・
+   * 経路に沿った速度 [m/s]。先行車がいなければ 0
+   */
+  ot_lead_s: number
+  ot_lead_d: number
+  ot_lead_u: number
+  /** 追い抜きの計画1回の処理時間 [ms] */
+  avoid_ms: number
   /** 使った点群の古さ [ms] */
   scan_age_ms: number
   /** 実測の計画レート [Hz] */

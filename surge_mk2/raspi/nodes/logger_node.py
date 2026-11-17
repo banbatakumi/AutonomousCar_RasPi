@@ -55,6 +55,30 @@ Mac での照合に使えないため。2台の最新のうち古い方の撮影
 書き込み自体は軽い（Mac で実時間の 1200倍速。1分ぶんを 0.05秒で書く）ので、
 **気にするのは CPU ではなくカードの残量**。
 
+## 何を記録し、何を省くか
+
+**バスのトピックは `cam/mask` 以外すべて録る**（`DEFAULT_TOPICS`。新しいトピックを足したら
+`raspi/tests/test_stereo_record.py` の検査が「録るか・録らない理由」を決めさせる）。
+モデル選択・信号のしきい値・追従の ROI のような小さい「意思」のトピックも録る。
+結果のトピックだけでは「どのモデル・どのしきい値でそうなったか」を再現できないため。
+
+省く・間引くのは、中身が重複しているか、読む道具が無いのに件数が多いものだけ:
+
+- `stereo/depth` … **生トピックは書かず、`/viz/image/depth` だけに書く。** 同じ JPEG を base64 の
+  JSON と `foxglove.CompressedImage` に二重に書いていた。表示専用の損失画像で解析には使わない
+  （`near_m` は校正と `stereo/info.num_disp` から決まる）
+- `hb/<node>` … ノードごとに **1秒に1件と、pid が変わった瞬間**だけ書く（`HB_LOG_PERIOD_NS`）。
+  10Hz × 約11ノードを全部書いても読む道具が無い。`detail` の文字列とノードの再起動の証拠は残る
+
+重複していても残すもの: `/viz/scan`（Foxglove の 3D 用に `/scan` を絵にしたもの）、`cmd` と
+`auto/cmd`（実際に STM32 へ送った指令と planner の出力で、意味が違う）、`image/*` の `ImageRef`
+（コマの取りこぼし・左右の同期・露光と AWB を示す唯一の記録）。`diag/link.control_params` や
+`auto/ctrl.routes_json` の繰り返しは zstd がチャンクの中でほぼ消すので、型を変えてまで削らない。
+
+**バスに無いものを1つ足す**: `/pi/health`（スキーマ名 `PiHealth`。CPU 使用率・周波数と上限・スロットリング・温度）
+を記録中だけ 1Hz で読んで書く（`raspi/io/pihealth.py`）。遅れや処理落ちが熱による周波数低下のせいかを、
+記録だけで切り分けるため。記録中にしか要らないのでバスには流さない。Pi 以外（Mac・テスト）では書かない。
+
 ## `hb/logger` は publish しない
 
 このノードは購読専用。**バスに口を持たせると `zbus` の endpoint 表に
@@ -73,6 +97,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.bus import RELIABLE, Subscriber  # noqa: E402
+from raspi.io.pihealth import PiHealthReader  # noqa: E402
 from raspi.core.jpeg import RingJpeg  # noqa: E402
 from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_CMD,
@@ -81,6 +106,10 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_AUTO_STATE,
     TOPIC_CAM_CONFIG,
     TOPIC_CAM_E2E_CMD,
+    TOPIC_CAM_E2E_MODEL,
+    TOPIC_CAM_MODEL,
+    TOPIC_E2E_FUSION_MODEL,
+    TOPIC_E2E_MODEL,
     TOPIC_CAM_PATH,
     TOPIC_E2E_FUSION_PLAN,
     TOPIC_CMD,
@@ -90,13 +119,18 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_LEFT,
     TOPIC_LINE_CAM,
     TOPIC_LOG_CTRL,
+    TOPIC_ROUTE_SELECT,
     TOPIC_SCAN,
     TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
+    TOPIC_SIGNAL_CONFIG,
+    TOPIC_SIGNAL_STATUS,
     TOPIC_STEREO_DEPTH,
     TOPIC_STEREO_DISP,
+    TOPIC_STEREO_E2E_MODEL,
     TOPIC_STEREO_E2E_PLAN,
     TOPIC_STEREO_INFO,
+    TOPIC_TRACK_ROI,
     TOPIC_TRACK_TARGET,
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
@@ -122,7 +156,8 @@ DISK_CHECK_INTERVAL_S = 30.0
 #: `auto/map` は planning が出しているため、`auto/` だと片方が黙って届かない。
 #:
 #: `cam/mask`（GUI 表示用の JPEG）は入れない。カメラ画像と同じく重いのに、
-#: 同じ中身は `scan/cam` `path/cam` に数値で残っている
+#: 同じ中身は `scan/cam` `path/cam` に数値で残っている。
+#: `stereo/depth` は購読するが、生トピックには書かず `/viz/image/depth` にだけ書く（`_on_msg`）
 DEFAULT_TOPICS = [
     TOPIC_VEHICLE_STATE,
     TOPIC_SCAN,
@@ -151,6 +186,16 @@ DEFAULT_TOPICS = [
     TOPIC_CAM_E2E_CMD,
     TOPIC_E2E_FUSION_PLAN,
     TOPIC_STEREO_E2E_PLAN,
+    # 走らせた「意思」（結果だけでは、どのモデル・しきい値・対象でそうなったかを再現できない）。どれも 1〜5Hz で数十バイト
+    TOPIC_CAM_MODEL,
+    TOPIC_E2E_MODEL,
+    TOPIC_CAM_E2E_MODEL,
+    TOPIC_E2E_FUSION_MODEL,
+    TOPIC_STEREO_E2E_MODEL,
+    TOPIC_SIGNAL_CONFIG,
+    TOPIC_SIGNAL_STATUS,
+    TOPIC_ROUTE_SELECT,
+    TOPIC_TRACK_ROI,
     # 操作のイベント
     TOPIC_LOG_CTRL,
     TOPIC_UI_EVENT,
@@ -169,6 +214,19 @@ STEREO_ROLES = ("front", "left")
 POLL_MS = 20
 
 DEFAULT_IMAGE_HZ = 5.0
+
+#: `hb/<node>` を書く最小間隔（ノードごと）。pid が変わった（再起動した）ときは待たずに書く
+HB_LOG_PERIOD_NS = NS
+#: `/pi/health` を書く間隔
+PI_HEALTH_PERIOD_S = 1.0
+PI_HEALTH_TOPIC = "/pi/health"
+
+#: `/pi/health` のスキーマ（`raspi/io/pihealth.py` の `PiHealth` から `available`・`mem_total_mb` を除いたもの）
+_NUM_OR_NULL = {"type": ["number", "null"]}
+PI_HEALTH_FIELDS = ("cpu_pct", "cpu_max_pct", "load1", "mem_used_pct", "cpu_khz", "cpu_max_khz",
+                    "throttled", "temp_c")
+PI_HEALTH_SCHEMA = {"type": "object",
+                    "properties": {k: _NUM_OR_NULL for k in PI_HEALTH_FIELDS}}
 
 
 def _mcap_topic(bus_topic: str) -> str:
@@ -232,6 +290,12 @@ class LoggerNode:
         #: ステレオの組として焼いた数（1組 = 2枚）
         self.stereo_pairs_written = 0
         self.t_start = time.monotonic()
+        #: `hb/<node>` のトピック → 最後に書いた `hb/<node>` の (時刻 [ns], pid)
+        self._hb_last: dict[str, tuple[int, int]] = {}
+        #: 間引いて書かなかった `hb/*` の数
+        self.hb_skipped = 0
+        #: Pi 本体の健全性（Pi 以外では `available=False` で、何も書かない）
+        self._pi = PiHealthReader()
         #: カメラ役割名 → 次に JPEG を焼く時刻 [ns]
         self._next_image_ns: dict[str, int] = {}
         #: カメラ役割名 → 最後に見た `ImageRef`
@@ -247,6 +311,7 @@ class LoggerNode:
         end = self.t_start + duration_s if duration_s else None
         next_status = 0.0
         next_disk_check = 0.0
+        next_pi = 0.0
 
         try:
             while self._running:
@@ -266,6 +331,10 @@ class LoggerNode:
                 if status_cb and now_wall >= next_status:
                     status_cb(self)
                     next_status = now_wall + 0.5
+
+                if now_wall >= next_pi:
+                    next_pi = now_wall + PI_HEALTH_PERIOD_S
+                    self._write_pi_health()
 
                 if now_wall >= next_disk_check:
                     next_disk_check = now_wall + DISK_CHECK_INTERVAL_S
@@ -325,16 +394,37 @@ class LoggerNode:
         self.vizrec = VizRecorder(self.log) if self.viz else None
         self.reopened += 1
 
+    def _write_pi_health(self) -> None:
+        """Pi 本体の健全性を `/pi/health` に1件書く。初回は CPU 使用率が出ない（区間が無い）が、そのまま書く。"""
+        if not self._pi.available:
+            return
+        h = self._pi.read()
+        self.log.write_dict(PI_HEALTH_TOPIC, {k: getattr(h, k) for k in PI_HEALTH_FIELDS},
+                            "PiHealth", PI_HEALTH_SCHEMA, time.monotonic_ns())
+
+    def _hb_due(self, topic: str, msg) -> bool:
+        """この `hb/<node>` を書くか。ノードごとに `HB_LOG_PERIOD_NS` に1件と、pid が変わった瞬間。"""
+        t = msg.t_pub or time.monotonic_ns()
+        last = self._hb_last.get(topic)
+        if last is not None and last[1] == msg.pid and t - last[0] < HB_LOG_PERIOD_NS:
+            self.hb_skipped += 1
+            return False
+        self._hb_last[topic] = (t, msg.pid)
+        return True
+
     def _on_msg(self, topic: str, msg) -> None:
+        if topic == TOPIC_STEREO_DEPTH:
+            # 生トピックには書かない（同じ JPEG を二重に書くだけ。モジュールの docstring）
+            if self.vizrec is not None and msg.jpeg:
+                self.log.write_viz_image(msg.jpeg, "depth", msg.t_capture)
+            return
+        if topic.startswith(TOPIC_HB_PREFIX) and not self._hb_due(topic, msg):
+            return
         self.log.write(_mcap_topic(topic), msg)
         if topic in IMAGE_TOPICS:
             # `ImageRef` 自体は全部書く（フレーム時刻の記録は軽い）。
             # 画素を焼くかどうかは `_pump_images` が別途決める
             self._last_ref[msg.cam or topic.split("/")[-1]] = msg
-        elif topic == TOPIC_STEREO_DEPTH:
-            if self.vizrec is not None and msg.jpeg:
-                self.log.write_viz_image(msg.jpeg, "depth", msg.t_capture)
-            return
         elif self.vizrec is None:
             return
         elif topic == TOPIC_VEHICLE_STATE:
@@ -521,6 +611,8 @@ def main() -> int:
             say(f"  JPEG: {jp.encoded}枚  {jp.cpu_per_frame_ms:.1f}ms/枚 "
                 f"(CPU 計 {jp.encode_cpu_s:.1f}s = 実時間の "
                 f"{100 * jp.encode_cpu_s / max(el, 1e-9):.1f}%)  [{jp.impl}]")
+        if node.hb_skipped:
+            say(f"  hb/* を間引いた: {node.hb_skipped}件（ノードごとに {HB_LOG_PERIOD_NS / NS:.0f}秒に1件）")
         if node.reopened:
             say(f"  書き込み失敗でファイルを切り替えた: {node.reopened}回（最後は {node.log.path}）")
         if node.log.errors:

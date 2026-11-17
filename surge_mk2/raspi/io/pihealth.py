@@ -1,8 +1,9 @@
-"""RasPi 本体の健全性（CPU 使用率・メモリ・周波数・スロットリング）— 診断タブ用。
+"""RasPi 本体の健全性（CPU 使用率・メモリ・周波数・スロットリング・温度）— 診断タブと MCAP 記録用。
 
 `raspi/io/wifi.py` と同じ作り: 低頻度（1Hz）で `telemetry_node` の `_pi_health_pump`
 が `asyncio.to_thread` 越しに読み、`/ws/control` の `status.pi` に載せる。
-**指令を出すイベントループの中では読まない。**
+**指令を出すイベントループの中では読まない。** `logger_node` も記録中だけ 1Hz で読み、
+MCAP の `/pi/health` に直接書く（バスには流さない）。
 
 読むのは `/proc` と sysfs だけ（1回あたり数十μs）。例外はスロットリングで、
 sysfs に出ていない機体では `vcgencmd get_throttled` を使う。こちらはサブプロセスの
@@ -19,12 +20,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 __all__ = ["PiHealth", "PiHealthReader", "parse_cpu_times", "parse_meminfo",
-           "parse_throttled", "THROTTLED_BITS"]
+           "parse_throttled", "THROTTLED_BITS", "THERMAL_ZONE"]
 
 PROC_STAT = Path("/proc/stat")
 PROC_MEMINFO = Path("/proc/meminfo")
 PROC_LOADAVG = Path("/proc/loadavg")
 CPUFREQ_DIR = Path("/sys/devices/system/cpu/cpufreq/policy0")
+#: CPU 温度（ミリ度）。`telemetry_node` のラジコンビューの温度計もここを読む
+THERMAL_ZONE = Path("/sys/class/thermal/thermal_zone0/temp")
 #: ファームウェアのスロットリング状態を sysfs に出す機体での置き場所（無ければ `vcgencmd`）。
 #: ★ Pi 5 実機でこのパスがあるかは未確認。無くても `vcgencmd` へ落ちるだけ
 THROTTLED_SYSFS = (
@@ -60,6 +63,7 @@ class PiHealth:
     cpu_max_khz: int | None = None  #: 今の上限（ARM/DISARM で切り替わる。`cpufreq.py`）
     #: `get_throttled` の生値。読めない機体では None
     throttled: int | None = None
+    temp_c: float | None = None     #: CPU 温度 [°C]
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -125,11 +129,13 @@ class PiHealthReader:
     def __init__(self, *, proc_stat: Path = PROC_STAT, proc_meminfo: Path = PROC_MEMINFO,
                  proc_loadavg: Path = PROC_LOADAVG, cpufreq_dir: Path = CPUFREQ_DIR,
                  throttled_sysfs: tuple[Path, ...] = THROTTLED_SYSFS,
+                 thermal_zone: Path = THERMAL_ZONE,
                  use_vcgencmd: bool = True) -> None:
         self._stat = proc_stat
         self._meminfo = proc_meminfo
         self._loadavg = proc_loadavg
         self._cpufreq = cpufreq_dir
+        self._thermal = thermal_zone
         self.available = proc_stat.exists()
         self._prev: dict[str, tuple[int, int]] = {}
         self._throttled_path = next((p for p in throttled_sysfs if p.exists()), None)
@@ -169,6 +175,8 @@ class PiHealthReader:
         h.cpu_khz = _read_int(self._cpufreq / "scaling_cur_freq")
         h.cpu_max_khz = _read_int(self._cpufreq / "scaling_max_freq")
         h.throttled = self._read_throttled()
+        t = _read_int(self._thermal)
+        h.temp_c = t / 1000.0 if t is not None else None
         self._n += 1
         return h
 
