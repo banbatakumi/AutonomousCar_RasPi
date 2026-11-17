@@ -374,7 +374,8 @@ class CamCalibApp(tk.Tk):
             return
         try:
             d = self.dets[iid]
-            self._set_preview(undistort_preview(d.path, self.result.calib, d.crop))
+            self._set_preview(undistort_preview(d.path, self.result.calib, d.crop,
+                                                 top_crop=d.top_crop))
         except Exception as e:                              # noqa: BLE001
             self.preview.config(image="", text=f"プレビューを作れない: {e}")
 

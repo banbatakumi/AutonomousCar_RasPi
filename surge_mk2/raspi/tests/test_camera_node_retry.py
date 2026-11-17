@@ -291,9 +291,6 @@ class TestTransientErrorIsCleared(unittest.TestCase):
         self.assertIsNone(w.error)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestDisabledWorkerIsNotHung(unittest.TestCase):
     """カメラを止めている間（左カメラは同期の要求が無いときの既定）は `_grab()` が呼ばれない。
@@ -325,3 +322,29 @@ class TestDisabledWorkerIsNotHung(unittest.TestCase):
             w._running = False
             w.join(timeout=2.0)
         self.assertLess(age_s, 1.0, "OFF 中でも last_grab_ns が更新されていない")
+
+
+class TestVerticalCropped(unittest.TestCase):
+    """`vertical_cropped`（ISP の ScalerCrop で上下を切る）。picamera2 は使わない。"""
+
+    class _Cam:
+        camera_properties = {"PixelArraySize": (3280, 2464)}
+
+    def test_no_crop(self):
+        from raspi.nodes.camera_node import vertical_cropped
+        self.assertEqual(vertical_cropped(self._Cam(), (640, 480), 0.0, 0.0), ((640, 480), None))
+
+    def test_top_and_bottom(self):
+        from raspi.nodes.camera_node import vertical_cropped
+        size, rect = vertical_cropped(self._Cam(), (640, 480), 1 / 6, 1 / 6)
+        self.assertEqual(size, (640, 320))
+        self.assertEqual(rect, (0, 411, 3280, 1643))
+
+    def test_bottom_only_keeps_old_behavior(self):
+        from raspi.nodes.camera_node import vertical_cropped
+        self.assertEqual(vertical_cropped(self._Cam(), (640, 480), 0.0, 0.25),
+                         ((640, 360), (0, 0, 3280, 1848)))
+
+
+if __name__ == "__main__":
+    unittest.main()

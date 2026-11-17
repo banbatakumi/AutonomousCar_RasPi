@@ -1,7 +1,7 @@
 """進路ガイド（GUI の `cameraModel.ts`）と IPM（Python の `ipm.py`）が同じ場所を指すこと。
 
 **GUI の投影式を Python の基準実装と数値で突き合わせる。** 画像サイズ（`--size`・
-`bottom_crop`・縮小配信）が変わっても、魚眼/ピンホール/補正映像のどれでも
+`top_crop`・`bottom_crop`・縮小配信）が変わっても、魚眼/ピンホール/補正映像のどれでも
 ずれないことを、サイズの組み合わせを振って確かめる。
 node と `gui/node_modules`（esbuild）が無い環境（クラウド CI 等）では skip する。
 """
@@ -28,9 +28,10 @@ ESBUILD = ROOT / "gui" / "node_modules" / ".bin" / "esbuild"
 CALIB = {"fx": 307.9092, "fy": 307.5942, "cx": 307.4241, "cy": 241.533,
          "k": [-0.03208693, 0.00352001, -0.01074923, 0.00351499],
          "width": 640, "height": 480}
-#: (幅, 高さ, bottom_crop)。高さは 480*(1-crop) 相当（実機の配信）と、縮小・別比率の両方
-SIZES = [(640, 360, 0.25), (640, 450, 0.0625), (640, 274, 0.43), (320, 180, 0.25),
-         (1280, 720, 0.25), (800, 600, 0.0), (480, 200, 0.4)]
+#: (幅, 高さ, bottom_crop, top_crop)。高さは 480*(1-top-bottom) 相当（実機の配信）と、縮小・別比率の両方
+SIZES = [(640, 360, 0.25, 0.0), (640, 450, 0.0625, 0.0), (640, 274, 0.43, 0.0), (320, 180, 0.25, 0.0),
+         (1280, 720, 0.25, 0.0), (800, 600, 0.0, 0.0), (480, 200, 0.4, 0.0),
+         (640, 320, 1 / 6, 1 / 6), (640, 400, 0.0, 1 / 6), (320, 156, 0.2, 0.15)]
 # 路面の点（base_link, x=前 y=左）。前は前方、後ろは後方に取る
 GROUND = [(x, y) for x in (0.3, 0.6, 1.0, 1.5, 2.5, 4.0) for y in (-0.8, -0.2, 0.0, 0.3, 0.9)]
 POSES = [  # (x, y, height, pitch)
@@ -49,8 +50,8 @@ def _bundle_and_run(cases: list[dict]) -> list:
 import {{ fisheyeLens, pinholeLens, groundProjector }} from "{(ROOT / 'gui/src/render/cameraModel.ts').as_posix()}"
 const cases = JSON.parse(process.argv[2])
 const out = cases.map((c: any) => {{
-  const lens = c.lens === 'fisheye' ? fisheyeLens(c.w, c.h, c.calib, c.crop)
-    : pinholeLens(c.w, c.h, c.hfov, c.crop)
+  const lens = c.lens === 'fisheye' ? fisheyeLens(c.w, c.h, c.calib, c.crop, c.top)
+    : pinholeLens(c.w, c.h, c.hfov, c.crop, 'pinhole', c.top)
   const proj = groundProjector(lens, c.pose, c.roll ?? 0)
   return c.points.map((p: number[]) => proj(p[0], p[1]))
 }})
@@ -66,7 +67,8 @@ console.log(JSON.stringify(out))
 
 def _python_ref(case: dict) -> list:
     calib = FisheyeCalib.from_dict(case["calib"]) if case["lens"] == "fisheye" else None
-    intr = camera_intrinsics(case["hfov"], case["w"], case["h"], case["crop"], calib)
+    intr = camera_intrinsics(case["hfov"], case["w"], case["h"], case["crop"], calib,
+                             top_crop=case["top"])
     x, y, height, pitch = case["pose"]["x"], case["pose"]["y"], case["pose"]["height"], \
         case["pose"]["pitch"]
     ext = CameraExtrinsics(x=x, y=y, height=height, pitch=pitch, yaw=0.0)
@@ -78,10 +80,10 @@ def _python_ref(case: dict) -> list:
 class TestGuiProjectionMatchesIpm(unittest.TestCase):
     def _cases(self, lens: str) -> list[dict]:
         cases = []
-        for w, h, crop in SIZES:
+        for w, h, crop, top in SIZES:
             for px, py, ph, pp in POSES:
                 pts = GROUND
-                cases.append({"lens": lens, "w": w, "h": h, "crop": crop,
+                cases.append({"lens": lens, "w": w, "h": h, "crop": crop, "top": top,
                               "hfov": 2.23, "calib": CALIB,
                               "pose": {"x": px, "y": py, "height": ph, "pitch": pp},
                               "points": [list(p) for p in pts]})
@@ -95,7 +97,7 @@ class TestGuiProjectionMatchesIpm(unittest.TestCase):
         for case, got in zip(cases, ts):
             ref = _python_ref(case)
             for g, r, pt in zip(got, ref, case["points"]):
-                tag = (lens, case["w"], case["h"], case["crop"], case["pose"], pt)
+                tag = (lens, case["w"], case["h"], case["crop"], case["top"], case["pose"], pt)
                 self.assertEqual(g is None, r is None, f"映る/映らないが食い違う {tag}")
                 if g is None:
                     continue
@@ -120,20 +122,20 @@ class TestGuiProjectionMatchesIpm(unittest.TestCase):
         """
         hfov_out = 1.92
         cases = []
-        for w, h, crop in SIZES:
+        for w, h, crop, top in SIZES:
             pose = {"x": 0.1, "y": 0.0, "height": 0.088, "pitch": 0.0}
             pts = [list(p) for p in GROUND]
-            base = {"w": w, "h": h, "crop": crop, "calib": CALIB,
+            base = {"w": w, "h": h, "crop": crop, "top": top, "calib": CALIB,
                     "pose": pose, "points": pts}
             cases.append({**base, "lens": "fisheye", "hfov": 0})
             cases.append({**base, "lens": "pinhole", "hfov": hfov_out})
         ts = _bundle_and_run(cases)
         calib = FisheyeCalib.from_dict(CALIB)
         compared = 0
-        for i, (w, h, crop) in enumerate(SIZES):
+        for i, (w, h, crop, top) in enumerate(SIZES):
             fish, pin = ts[2 * i], ts[2 * i + 1]
-            fx, fy, cx, cy = calib.scaled(w, h, crop)
-            mx, my = virtual_pinhole_maps(fx, fy, cx, cy, tuple(calib.k), w, h, hfov_out, crop)
+            fx, fy, cx, cy = calib.scaled(w, h, crop, top)
+            mx, my = virtual_pinhole_maps(fx, fy, cx, cy, tuple(calib.k), w, h, hfov_out, crop, top)
             for f, p in zip(fish, pin):
                 if f is None or p is None:
                     continue
@@ -150,7 +152,7 @@ class TestGuiProjectionMatchesIpm(unittest.TestCase):
                 err = math.hypot(su - f[0], sv - f[1])
                 compared += 1
                 # マップは float32・双一次補間なので 1e-6 とはいかない
-                self.assertLess(err, 0.05, f"補正映像とずれる {(w, h, crop)} err={err:.3f}px")
+                self.assertLess(err, 0.05, f"補正映像とずれる {(w, h, crop, top)} err={err:.3f}px")
         self.assertGreater(compared, 30)
 
 

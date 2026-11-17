@@ -157,6 +157,30 @@ class TestVelocityTracker(unittest.TestCase):
         o = self._run(lambda t: (1.0 + rng.normal(0, 0.03), 2.0 + rng.normal(0, 0.03)))
         self.assertEqual(o.speed, 0.0)
 
+    def test_one_missed_cycle_keeps_the_velocity(self):
+        """1 周期見えなくても履歴を捨てない（捨てると 0.3〜0.4s 静止物に見える）。"""
+        tr = obs_mod.VelocityTracker()
+        out = []
+        for k in range(10):
+            t = k * 0.1
+            if k == 6:
+                out = tr.update(t, [])
+                continue
+            out = tr.update(t, [obs_mod.Obstacle(1.0 + 1.5 * t, 2.0, 0.1, 5)])
+            if k == 7:
+                self.assertAlmostEqual(out[0].vx, 1.5, places=1)
+        self.assertAlmostEqual(out[0].vx, 1.5, places=1)
+
+    def test_lost_track_is_dropped_after_a_while(self):
+        """長く見えない履歴は捨てる（別の物に結ばない）。"""
+        tr = obs_mod.VelocityTracker()
+        for k in range(6):
+            tr.update(k * 0.1, [obs_mod.Obstacle(1.0 + 1.5 * k * 0.1, 2.0, 0.1, 5)])
+        for k in range(6, 11):
+            tr.update(k * 0.1, [])
+        out = tr.update(1.1, [obs_mod.Obstacle(2.65, 2.0, 0.1, 5)])
+        self.assertEqual(out[0].speed, 0.0)
+
     def test_swept_path_covers_the_travel(self):
         o = obs_mod.Obstacle(0.0, 0.0, 0.1, 5, None, 1.0, 0.0)
         trail = obs_mod.swept(o, 2.0, 0.05)

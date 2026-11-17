@@ -907,6 +907,32 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_race_clock_runs_while_detouring(self):
+        """★ ミッションの時間は走行を開始してからの実時間。Hybrid A* の迂回中も進む（駐車の 1 分を逃さない）。"""
+        from raspi.auto.slam2d_raceline import DETOUR, RACE
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import AutoState, Scan, VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            x, y = pl._routes["A"].xy[0]
+            pl.slam.set_pose(float(x), float(y), 0.0)
+            pl.phase = RACE
+            pl._dt = 0.1
+            p = pl.merged({})
+            scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12)
+            t0 = 50 * 10**9
+            pl._race(AutoState(match_score=1.0), scan, VehicleState(t_capture=t0), p, False)
+            self.assertTrue(pl._race_started)
+            self.assertLess(pl._race_t, 0.2)
+            pl.phase = DETOUR
+            with mock.patch.object(pl, "_detour_step", side_effect=lambda st, *a: st):
+                pl._race(AutoState(match_score=1.0), scan, VehicleState(t_capture=t0 + 40 * 10**9), p, False)
+            self.assertAlmostEqual(pl._race_t, 40.0, places=3)
+        finally:
+            pl.close()
+
     def test_stop_failure_is_not_resubmitted(self):
         from concurrent.futures import Future
 

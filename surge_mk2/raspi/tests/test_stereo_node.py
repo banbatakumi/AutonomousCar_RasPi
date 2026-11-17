@@ -40,7 +40,8 @@ def _vehicle() -> Vehicle:
         v, cam_front_fisheye=RIGHT, cam_left_fisheye=LEFT,
         stereo=StereoCalib(R=tuple(R_LR.ravel()), T=tuple(T_LR), lens_right="r", lens_left="l"),
         cam_front_x=CAM[0], cam_front_y=CAM[1], cam_front_z=CAM[2], cam_front_pitch=0.0,
-        cam_front_yaw=0.0, cam_front_bottom_crop=0.0, cam_left_bottom_crop=0.0)
+        cam_front_yaw=0.0, cam_front_bottom_crop=0.0, cam_left_bottom_crop=0.0,
+        cam_front_top_crop=0.0, cam_left_top_crop=0.0)
 
 
 def _tex(seed, n=1024):
