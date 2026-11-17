@@ -265,7 +265,7 @@ TC・ABS を入れたまま、直線で全開の発進と最大の制動を 3 �
 [sensors.cam_front]
 lens = "wide160sr"             # ← 付いているレンズ＋取付（右・主カメラ）
 
-[sensors.cam_front.lenses.wide160sr]          # x y z roll pitch yaw（取付位置・姿勢）・hfov・bottom_crop・undistort_hfov
+[sensors.cam_front.lenses.wide160sr]          # x y z roll pitch yaw（取付位置・姿勢）・hfov・top_crop・bottom_crop・undistort_hfov
 [sensors.cam_front.lenses.wide160sr.fisheye]  # 校正値（tools/cam_calib が書く）
 
 [sensors.cam_left]
@@ -301,7 +301,7 @@ lens = "wide160sl"             # 左カメラ（項目は同じ）
 4. 反映: `tools/deploy.sh --restart`（校正値は起動時に読む。io_node は無関係＝E-Stop はラッチしない）
 
 - 校正値はカメラ×レンズごと。カメラを入れ替えたり、ピントリングを回したら撮り直す
-- 解像度（`camera_node --size`）や `bottom_crop` を変えても校正値はそのまま使える
+- 解像度（`camera_node --size`）や `top_crop`・`bottom_crop` を変えても校正値はそのまま使える（📷 の写真もクロップしたまま校正に使える。上端のクロップ率はファイル名の `top…_` から読む）
 - カメラ学習モデル（`ml_cam`・`ml_cam_e2e`）は撮ったレンズの画像に依存するので、**レンズを替えたら再学習が要る**
 
 ### 7.1 色むら補正（レンズごとの ISP チューニング）

@@ -449,6 +449,9 @@ python -m raspi.nodes.replay_node logs/x.sfl --bus --loop  # バスに流し直�
   **Mac 上で `replay_node --bus` + `telemetry_node` を直接叩く**
 - **動画にする**: launcher の「動画の書き出し」（`tools/mcap_video_gui.py`、CLI は `python -m tools.mcap_video`）→
   `<入力>_front.mp4` / `<入力>_left.mp4`（左右は同じ時間軸）
+- **視差を 3D で見る**: launcher の「視差の点群」（`tools/mcap_stereo_cloud_gui.py`、CLI は `python -m tools.mcap_stereo_cloud <mcap>`）→ `<入力>_stereo.mcap`。記録の左右画像から Pi と同じ照合を
+  Mac で回し直し、`/viz/stereo/points`（`foxglove.PointCloud`）を足す。Foxglove の 3D パネルで色は輝度、`odom` フレームで世界に並ぶ。
+  視差の生データは記録に無いための後処理（画像の間引き 5Hz・JPEG 経由なので Pi の照合とは完全には一致しない）
 - **走行の結果を 1 枚で見る**: launcher の「走行サマリ」（`tools/run_summary_gui.py`、中身は `raspi/tools/run_summary.py`）。
   周回タイム・衝突・電圧・前兆・学習値・通信と、直前の走行との差分。CLI は
   `python3 -m raspi.tools.run_summary <mcap> [--out-dir DIR] [--prev 前回の_summary.json]`
