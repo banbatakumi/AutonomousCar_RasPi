@@ -3,13 +3,14 @@
 `gui.py`（画面）と `__main__.py`（CLI）がここを呼ぶ。テストは `tests/` で、既知の
 レンズで描いた合成画像から元の値に戻るかを確かめる。
 
-## 下端クロップされた写真をそのまま使う
+## 上下クロップされた写真をそのまま使う
 
-📷 で撮った写真は camera_node が ISP で下端を切り落とした画像（前カメラは下 1/4）。
-`raspi/core/camera_model.py` の docstring のとおり、クロップは「フル画像の下を切っただけ」
-なので、**写真の画素座標はそのままフル画像の画素座標**として扱える。校正には
-クロップ前の大きさ `(幅, 高さ / (1 - crop))` を渡し、主点 `cy` もフル画像の座標で求まる。
-クロップ率はファイル名（`surge_front_wide160_640x360_crop0.25_…png`）から読む。
+📷 で撮った写真は camera_node が ISP で上下（`top_crop`・`bottom_crop`）を切り落とした画像。
+`raspi/core/camera_model.py` の docstring のとおり、クロップは「フル画像の上下を切っただけ」
+なので、**写真の画素座標に上端で切った行数を足せばフル画像の画素座標**になる（`detect` が
+角点を足してから返す）。校正にはクロップ前の大きさ `(幅, 高さ / (1 - top - bottom))` を渡し、
+主点 `cy` もフル画像の座標で求まる。クロップ率はファイル名
+（`surge_front_wide160_640x320_crop0.1667_top0.1667_…png`。`top…_` は上端を切ったときだけ）から読む。
 
 ## 校正値はレンズのプロファイルごと
 
@@ -46,7 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from raspi.core.camera_model import FisheyeCalib, Undistorter, horizontal_fov  # noqa: E402
+from raspi.core.camera_model import FisheyeCalib, Undistorter, crop_frame, horizontal_fov  # noqa: E402
 from raspi.core.stereo_model import StereoCalib  # noqa: E402
 
 __all__ = ["ShotName", "Detection", "CalibResult", "parse_name", "detect", "calibrate",
@@ -58,9 +59,9 @@ __all__ = ["ShotName", "Detection", "CalibResult", "parse_name", "detect", "cali
 DEFAULT_TOML = REPO_ROOT / "config" / "vehicle.toml"
 
 #: 📷 の保存名（`telemetry_node._serve_snapshot`）。
-#: `surge_<cam>_<lens>_<W>x<H>_crop<率>_<時刻>.png`。`<lens>_` はレンズのプロファイルを
-#: 使わない設定のときは付かない（2026-10-03 より前の名前もこの形）
-_NAME_RE = re.compile(r"surge_(front|left)_(?:([A-Za-z0-9-]+)_)?(\d+)x(\d+)_crop([0-9.]+)_")
+#: `surge_<cam>_<lens>_<W>x<H>_crop<下端率>_top<上端率>_<時刻>.png`。`<lens>_` はレンズのプロファイルを
+#: 使わない設定のときは付かない（2026-10-03 より前の名前もこの形）。`top<上端率>_` は上端を切ったときだけ
+_NAME_RE = re.compile(r"surge_(front|left)_(?:([A-Za-z0-9-]+)_)?(\d+)x(\d+)_crop([0-9.]+)_(?:top([0-9.]+)_)?")
 #: 保存名の末尾の時刻 `YYYYmmdd_HHMMSS<ミリ秒3桁>`（ステレオの組を作るのに使う）
 _STAMP_RE = re.compile(r"_(\d{8})_(\d{6})(\d{3})(?:\D[^/]*)?\.png$")
 
@@ -85,6 +86,7 @@ class ShotName(NamedTuple):
     cam: str        #: "front"（右・主）/ "left"
     lens: str       #: レンズのプロファイル名。名前に無ければ ""
     crop: float     #: 下端クロップ率
+    top_crop: float = 0.0   #: 上端クロップ率
 
 
 def parse_name(path: str | Path) -> ShotName | None:
@@ -92,7 +94,7 @@ def parse_name(path: str | Path) -> ShotName | None:
     m = _NAME_RE.search(Path(path).name)
     if not m:
         return None
-    return ShotName(m.group(1), m.group(2) or "", float(m.group(5)))
+    return ShotName(m.group(1), m.group(2) or "", float(m.group(5)), float(m.group(6) or 0.0))
 
 
 def shot_time(path: str | Path) -> float | None:
@@ -118,7 +120,7 @@ class Detection:
 
     path: Path
     ok: bool
-    #: 角点 (N,1,2) float64。画像（＝フル画像）の画素座標
+    #: 角点 (N,1,2) float64。**フル画像（上下クロップ前）**の画素座標（写真の座標 + `top_px`）
     corners: np.ndarray | None
     #: 写真の大きさ (幅, 高さ)。クロップ後
     size: tuple[int, int]
@@ -126,12 +128,19 @@ class Detection:
     error: str = ""
     #: 撮ったときのレンズ（ファイル名から。不明なら ""）
     lens: str = ""
+    #: 上端クロップ率
+    top_crop: float = 0.0
 
     @property
     def full_size(self) -> tuple[int, int]:
         """クロップ前のフル画像の大きさ。"""
         w, h = self.size
-        return w, int(round(h / (1.0 - self.crop)))
+        return w, int(round(crop_frame(h, self.crop, self.top_crop)[0]))
+
+    @property
+    def top_px(self) -> float:
+        """上端で切った行数（写真の行 v はフル画像の行 v + これ）。"""
+        return crop_frame(self.size[1], self.crop, self.top_crop)[1]
 
 
 @dataclass
@@ -165,13 +174,14 @@ def _fisheye_flag(cv2, name: str) -> int:
 
 
 def detect(path: str | Path, board: tuple[int, int],
-           crop: float | None = None) -> Detection:
+           crop: float | None = None, top_crop: float | None = None) -> Detection:
     """チェッカーボードの内側の角点を探す。
 
     :param board: 内側の角点の数（列, 行）。9x6 なら白黒 10x7 マスのボード。
         **片方を偶数・片方を奇数にする**——両方奇数（7x5 など）だとボードが 180° 回転
         対称になり、写真ごとに角点の並び順が逆転して校正が破綻する
     :param crop: 下端クロップ率。None ならファイル名から読む（読めなければ 0）
+    :param top_crop: 上端クロップ率。None ならファイル名から読む（読めなければ 0）
     """
     cv2 = _cv2()
     path = Path(path)
@@ -179,9 +189,11 @@ def detect(path: str | Path, board: tuple[int, int],
     lens = parsed.lens if parsed else ""
     if crop is None:
         crop = parsed.crop if parsed else 0.0
+    if top_crop is None:
+        top_crop = parsed.top_crop if parsed else 0.0
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
-        return Detection(path, False, None, (0, 0), crop, "画像を読めない", lens)
+        return Detection(path, False, None, (0, 0), crop, "画像を読めない", lens, top_crop)
     size = (img.shape[1], img.shape[0])
     # SB（セクターベース）版の方が魚眼の端で強く歪んだボードでも拾え、精度も高い
     flags = cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY
@@ -194,9 +206,11 @@ def detect(path: str | Path, board: tuple[int, int],
                 img, corners, (5, 5), (-1, -1),
                 (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.01))
     if not ok:
-        return Detection(path, False, None, size, crop, "ボードが見つからない", lens)
-    return Detection(path, True, corners.reshape(-1, 1, 2).astype(np.float64), size, crop,
-                     lens=lens)
+        return Detection(path, False, None, size, crop, "ボードが見つからない", lens, top_crop)
+    d = Detection(path, True, corners.reshape(-1, 1, 2).astype(np.float64), size, crop,
+                  lens=lens, top_crop=top_crop)
+    d.corners[..., 1] += d.top_px          # 写真の座標 → フル画像の座標
+    return d
 
 
 def _object_points(board: tuple[int, int], square: float) -> np.ndarray:
@@ -327,19 +341,19 @@ def coverage(detections: list[Detection], grid: tuple[int, int] = (4, 3)) -> flo
         w, h = d.size
         pts = d.corners.reshape(-1, 2)
         ix = np.clip((pts[:, 0] / w * gx).astype(int), 0, gx - 1)
-        iy = np.clip((pts[:, 1] / h * gy).astype(int), 0, gy - 1)
+        iy = np.clip(((pts[:, 1] - d.top_px) / h * gy).astype(int), 0, gy - 1)
         hit[iy, ix] = True
     return float(hit.mean())
 
 
 def undistort_preview(path: str | Path, calib: FisheyeCalib, crop: float,
-                      hfov_out: float = math.radians(110)) -> np.ndarray:
+                      hfov_out: float = math.radians(110), top_crop: float = 0.0) -> np.ndarray:
     """左に元画像、右に補正画像（GUI の補正映像と同じ変換）を並べた BGR 画像。"""
     cv2 = _cv2()
     img = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"画像を読めない: {path}")
-    und = Undistorter(calib, hfov_out, crop)(img)
+    und = Undistorter(calib, hfov_out, crop, top_crop)(img)
     return np.hstack([img, und])
 
 
@@ -738,7 +752,8 @@ def rectified_preview(pair: StereoPair, right: FisheyeCalib, left: FisheyeCalib,
     if ir is None or il is None:
         raise ValueError("画像を読めない")
     rect = StereoRectifier(right, left, stereo, right.width, right.height, hfov,
-                           crop_right=pair.right.crop, crop_left=pair.left.crop)
+                           crop_right=pair.right.crop, crop_left=pair.left.crop,
+                           crop_top_right=pair.right.top_crop, crop_top_left=pair.left.top_crop)
     rr, rl = rect(ir, il)
     img = np.hstack([rl, rr])
     for y in range(line_step // 2, img.shape[0], line_step):

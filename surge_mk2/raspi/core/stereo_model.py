@@ -36,6 +36,7 @@ X はそれぞれのカメラ座標（`camera_model.py` と同じ: x ＝ 画像�
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 
 import numpy as np
@@ -128,18 +129,22 @@ class StereoRectifier:
     :param rows: 平行化画像のうち残す行 `(v0, v1)`（半開区間）。None なら全部。
         **横は削らず縦だけ削る**（解像度を落とすと距離の誤差が増えるため。`docs/stereo_plan.md` §3）
     :param crop_right, crop_left: 入力画像の下端クロップ率（`bottom_crop`）
+    :param crop_top_right, crop_top_left: 入力画像の上端クロップ率（`top_crop`）
     """
 
     def __init__(self, right: FisheyeCalib, left: FisheyeCalib, ext: StereoCalib,
                  out_w: int = 640, out_h: int = 480, hfov: float = math.radians(100),
                  rows: tuple[int, int] | None = None,
-                 crop_right: float = 0.0, crop_left: float = 0.0) -> None:
+                 crop_right: float = 0.0, crop_left: float = 0.0,
+                 crop_top_right: float = 0.0, crop_top_left: float = 0.0) -> None:
         self.right, self.left, self.ext = right, left, ext
         self.out_w, self.out_h = int(out_w), int(out_h)
         self.rows = (0, self.out_h) if rows is None else (int(rows[0]), int(rows[1]))
         if not 0 <= self.rows[0] < self.rows[1] <= self.out_h:
             raise ValueError(f"rows {rows} が 0..{self.out_h} に収まっていない")
-        self.crops = {"right": float(crop_right), "left": float(crop_left)}
+        #: カメラ → `(bottom_crop, top_crop)`（`FisheyeCalib.scaled` の引数の順）
+        self.crops = {"right": (float(crop_right), float(crop_top_right)),
+                      "left": (float(crop_left), float(crop_top_left))}
         #: 仮想ピンホール（2台共通）。`cy` は**行を削る前**の座標
         self.f = (self.out_w / 2.0) / math.tan(hfov / 2.0)
         self.cx = self.out_w / 2.0
@@ -214,9 +219,9 @@ class StereoRectifier:
                          R[2, 0] * X + R[2, 1] * Y + R[2, 2] * Z + z], -1)
 
     def maps(self, cam: str, in_w: int, in_h: int) -> tuple[np.ndarray, np.ndarray]:
-        """`cv2.remap` 用のマップ（float32、`rows` を削った大きさ）。入力は `in_w`×`in_h`（下端クロップ済み）。"""
+        """`cv2.remap` 用のマップ（float32、`rows` を削った大きさ）。入力は `in_w`×`in_h`（上下クロップ済み）。"""
         c = self._calib(cam)
-        fx, fy, cx, cy = c.scaled(in_w, in_h, self.crops[cam])
+        fx, fy, cx, cy = c.scaled(in_w, in_h, *self.crops[cam])
         v0, v1 = self.rows
         vs, us = np.mgrid[v0:v1, 0:self.out_w].astype(np.float64)
         ray = np.stack([(us - self.cx) / self.f, (vs - self.cy) / self.f, np.ones_like(us)], -1)
@@ -226,10 +231,20 @@ class StereoRectifier:
                               fx, fy, cx, cy, c.k)
         return mu.astype(np.float32), mv.astype(np.float32)
 
+    def outside_fraction(self, cam: str, in_w: int, in_h: int) -> float:
+        """照合する帯（`rows`）のうち、元画像（`in_w`×`in_h`、クロップ済み）の外から取る画素の割合。
+
+        **0 でなければ帯の一部が真っ黒になり、そこは視差が出ない**（エラーにはならない）。
+        `top_crop`・`bottom_crop` を大きくし過ぎたか、`rows` を広げ過ぎたときに起こる。
+        """
+        mu, mv = self.maps(cam, in_w, in_h)
+        inside = (mu >= 0.0) & (mu <= in_w - 1.0) & (mv >= 0.0) & (mv <= in_h - 1.0)
+        return float(1.0 - inside.mean())
+
     def rectify_points(self, cam: str, u, v, in_w: int, in_h: int):
         """元画像の画素 → 平行化画像の画素 `(u', v')`（行を削る前の座標）。光軸の後ろは nan。"""
         c = self._calib(cam)
-        fx, fy, cx, cy = c.scaled(in_w, in_h, self.crops[cam])
+        fx, fy, cx, cy = c.scaled(in_w, in_h, *self.crops[cam])
         x, y, z = unproject_pixels(u, v, fx, fy, cx, cy, c.k)
         p = np.stack([x, y, z], -1) @ self._rot[cam].T
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -246,6 +261,12 @@ class StereoRectifier:
             key = (cam, w, h)
             if key not in self._maps:
                 self._maps[key] = cv2.convertMaps(*self.maps(cam, w, h), cv2.CV_16SC2)
+                out_frac = self.outside_fraction(cam, w, h)
+                if out_frac > 0.0:
+                    print(f"!! ステレオ: {cam} の照合帯 rows={self.rows} の {100 * out_frac:.1f}% が"
+                          f"元画像（{w}x{h}、クロップ (上, 下)={self.crops[cam][::-1]}）の外。"
+                          "そこは視差が出ない。vehicle.toml の top_crop・bottom_crop を小さくする",
+                          file=sys.stderr, flush=True)
             m1, m2 = self._maps[key]
             out.append(cv2.remap(img, m1, m2, interpolation=cv2.INTER_LINEAR,
                                  borderMode=cv2.BORDER_CONSTANT))

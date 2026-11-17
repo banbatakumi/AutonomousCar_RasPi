@@ -152,3 +152,26 @@ def test_points_from_pixels_matches_dense():
     R = camera_to_base_rotation(0.05, 0.02) @ rect.R_rect.T
     assert np.allclose(rect.rect_to_base(sparse, 0.1, -0.03, 0.08, 0.05, 0.02),
                        sparse @ R.T + [0.1, -0.03, 0.08], atol=1e-12)
+
+
+def test_top_crop_rectifies_like_full_image():
+    """上下を切った画像を平行化すると、フル画像を平行化したものと同じ（照合帯の内側）。"""
+    rows = (150, 260)
+    full = StereoRectifier(RIGHT, LEFT, EXT, 640, 480, math.radians(100), rows=rows)
+    top, bottom = 1 / 6, 1 / 6
+    crop = StereoRectifier(RIGHT, LEFT, EXT, 640, 480, math.radians(100), rows=rows,
+                           crop_right=bottom, crop_left=bottom,
+                           crop_top_right=top, crop_top_left=top)
+    for cam in ("right", "left"):
+        uf, vf = full.maps(cam, 640, 480)
+        uc, vc = crop.maps(cam, 640, 320)
+        assert np.allclose(uc, uf, atol=1e-3)
+        assert np.allclose(vc, vf - 80.0, atol=1e-3)       # 上端で切った 80 行ぶん
+        assert crop.outside_fraction(cam, 640, 320) == 0.0
+
+
+def test_outside_fraction_detects_too_much_crop():
+    rect = StereoRectifier(RIGHT, LEFT, EXT, 640, 480, math.radians(100), rows=(150, 260),
+                           crop_right=0.0, crop_left=0.0,
+                           crop_top_right=0.45, crop_top_left=0.45)
+    assert rect.outside_fraction("right", 640, 264) > 0.0

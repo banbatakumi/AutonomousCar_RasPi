@@ -22,12 +22,12 @@ IMX219 160° 広角レンズでは、「歪みのないピンホール + `hfov`�
 **cv2 には依存しない（numpy だけ）。** 校正（`cv2.fisheye.calibrate`）だけは
 Mac 側ツールが cv2 で行うが、使う側は numpy で完結させ、テストも cv2 なしで回す。
 
-## 座標は「フル画角・下端クロップ前」の画素で持つ
+## 座標は「フル画角・上下クロップ前」の画素で持つ
 
-`camera_node.bottom_cropped()` は ISP の ScalerCrop で `(0, 0, fw, keep_h)` を
-**縦横同じ倍率で**縮小するので、クロップ後の画像は「フル画像の下を切り落とした
-だけ」になる。つまり fx, fy, cx, cy は**クロップの有無で変わらない**（`cy` が
-画像の下端より下に来ることがあるだけ）。校正値はクロップ前のフル画像の大きさ
+`camera_node.vertical_cropped()` は ISP の ScalerCrop で `(0, y0, fw, keep_h)` を
+**縦横同じ倍率で**縮小するので、クロップ後の画像は「フル画像の上下を切り落とした
+だけ」になる。つまり fx, fy, cx は**クロップの有無で変わらず**、cy は上端を切った
+行数 `y0` だけ小さくなる（`crop_frame()`）。校正値はクロップ前のフル画像の大きさ
 （`width`, `height`）と一緒に保存し、使う側の解像度へは倍率を掛けて合わせる
 （`FisheyeCalib.scaled()`）。
 
@@ -43,7 +43,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["FisheyeCalib", "distort_theta", "undistort_theta",
+__all__ = ["FisheyeCalib", "crop_frame", "distort_theta", "undistort_theta",
            "project_rays", "unproject_pixels", "virtual_pinhole_maps",
            "horizontal_fov", "Undistorter"]
 
@@ -51,11 +51,23 @@ __all__ = ["FisheyeCalib", "distort_theta", "undistort_theta",
 _NEWTON_ITERS = 20
 
 
+def crop_frame(height: float, bottom_crop: float = 0.0,
+               top_crop: float = 0.0) -> tuple[float, float]:
+    """上下を切った画像の高さ `height` → `(クロップ前の高さ, 上端で切った行数)`（同じ画素の単位）。
+
+    クロップ後の画像の行 v はクロップ前の行 `v + 上端で切った行数` にあたる。
+    `bottom_crop`・`top_crop` は**クロップ前の高さ**に対する割合（`vehicle.toml` の値）。
+    """
+    keep = 1.0 - bottom_crop - top_crop
+    full_h = height / keep if keep > 0.0 else height
+    return full_h, full_h * top_crop
+
+
 @dataclass(frozen=True, slots=True)
 class FisheyeCalib:
     """魚眼レンズの校正値（`vehicle.toml` の `[sensors.cam_*.lenses.<レンズ>.fisheye]`）。
 
-    すべて**フル画角・下端クロップ前**の `width`×`height` 画像の画素単位。
+    すべて**フル画角・上下クロップ前**の `width`×`height` 画像の画素単位。
     """
 
     fx: float
@@ -85,19 +97,20 @@ class FisheyeCalib:
             return None
         return c
 
-    def scaled(self, width: int, height: int,
-               bottom_crop: float = 0.0) -> tuple[float, float, float, float]:
-        """実際に使う画像（`width`×`height`、下端 `bottom_crop` 切り落とし済み）の
+    def scaled(self, width: int, height: int, bottom_crop: float = 0.0,
+               top_crop: float = 0.0) -> tuple[float, float, float, float]:
+        """実際に使う画像（`width`×`height`、上下 `top_crop`・`bottom_crop` 切り落とし済み）の
         `(fx, fy, cx, cy)`。
 
-        クロップ後の高さからクロップ前の高さ `height / (1 - bottom_crop)` に
-        戻してから倍率を出す。縦横の倍率を別々に出すので、`cam_perception_node`
-        のようにモデル入力へ非等方にリサイズした画像にもそのまま使える。
+        クロップ後の高さからクロップ前の高さ `height / (1 - top_crop - bottom_crop)` に
+        戻してから倍率を出し、cy から上端で切った行数を引く（`crop_frame`）。縦横の倍率を
+        別々に出すので、`cam_perception_node` のようにモデル入力へ非等方にリサイズした
+        画像にもそのまま使える。
         """
         sx = width / self.width
-        full_h = height / (1.0 - bottom_crop) if bottom_crop < 1.0 else height
+        full_h, y0 = crop_frame(height, bottom_crop, top_crop)
         sy = full_h / self.height
-        return self.fx * sx, self.fy * sy, self.cx * sx, self.cy * sy
+        return self.fx * sx, self.fy * sy, self.cx * sx, self.cy * sy - y0
 
 
 def distort_theta(theta, k):
@@ -181,24 +194,26 @@ def horizontal_fov(calib: FisheyeCalib) -> float:
 def virtual_pinhole_maps(fx: float, fy: float, cx: float, cy: float,
                          k: tuple[float, float, float, float],
                          out_w: int, out_h: int, hfov_out: float,
-                         bottom_crop: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+                         bottom_crop: float = 0.0,
+                         top_crop: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """魚眼画像 → 仮想ピンホール画像の `cv2.remap` 用マップ `(map_x, map_y)`（float32）。
 
     仮想ピンホールの内部パラメータは**固定の式**にする:
 
         f' = (out_w / 2) / tan(hfov_out / 2),  cx' = out_w / 2,
-        cy' = out_h / (2 (1 - bottom_crop))
+        cy' = out_h (1/2 - top_crop) / (1 - top_crop - bottom_crop)
 
     これは従来の未校正ピンホール（`raspi/nav/ipm.camera_intrinsics()`）と全く同じ式で、
     `hfov` を `hfov_out` に置き換えただけ。GUI は補正映像を表示している間、
     進路ガイドを「hfov = `undistort_hfov` のピンホール」として描けば済む
     （`estimateNewCameraMatrixForUndistortRectify` を TypeScript に移植しなくてよい）。
 
-    `fx..cy` は入力画像（下端クロップ済み）の解像度に合わせたもの（`FisheyeCalib.scaled()`）。
+    `fx..cy` は入力画像（上下クロップ済み）の解像度に合わせたもの（`FisheyeCalib.scaled()`）。
     """
     f_out = (out_w / 2.0) / math.tan(hfov_out / 2.0)
     cx_out = out_w / 2.0
-    cy_out = out_h / (2.0 * (1.0 - bottom_crop))
+    full_h, y0 = crop_frame(out_h, bottom_crop, top_crop)
+    cy_out = full_h / 2.0 - y0
     vs, us = np.mgrid[0:out_h, 0:out_w].astype(np.float64)
     x = (us - cx_out) / f_out
     y = (vs - cy_out) / f_out
@@ -214,10 +229,12 @@ class Undistorter:
     cv2 は遅延 import する——補正映像を使わない構成では読み込まない。
     """
 
-    def __init__(self, calib: FisheyeCalib, hfov_out: float, bottom_crop: float) -> None:
+    def __init__(self, calib: FisheyeCalib, hfov_out: float, bottom_crop: float,
+                 top_crop: float = 0.0) -> None:
         self.calib = calib
         self.hfov_out = hfov_out
         self.bottom_crop = bottom_crop
+        self.top_crop = top_crop
         self._key: tuple[int, int] | None = None
         self._maps: tuple[np.ndarray, np.ndarray] | None = None
 
@@ -226,9 +243,9 @@ class Undistorter:
 
         h, w = arr.shape[:2]
         if self._key != (w, h):
-            fx, fy, cx, cy = self.calib.scaled(w, h, self.bottom_crop)
+            fx, fy, cx, cy = self.calib.scaled(w, h, self.bottom_crop, self.top_crop)
             mx, my = virtual_pinhole_maps(fx, fy, cx, cy, self.calib.k, w, h,
-                                          self.hfov_out, self.bottom_crop)
+                                          self.hfov_out, self.bottom_crop, self.top_crop)
             # 固定小数点マップの方が remap が速い
             self._maps = cv2.convertMaps(mx, my, cv2.CV_16SC2)
             self._key = (w, h)

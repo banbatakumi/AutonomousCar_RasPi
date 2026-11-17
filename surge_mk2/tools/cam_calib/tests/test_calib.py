@@ -125,6 +125,33 @@ def test_parse_name():
     n = parse_name("surge_front_640x360_crop0.25_20261003_101010123.png")
     assert (n.cam, n.lens, n.crop) == ("front", "", 0.25)
     assert parse_name("IMG_0001.png") is None
+    assert n.top_crop == 0.0
+    # 上端も切った写真（`top…_` が付く）
+    n = parse_name("surge_front_wide160sr_640x320_crop0.166667_top0.166667_20261117_101010123.png")
+    assert (n.cam, n.lens, n.crop, n.top_crop) == ("front", "wide160sr", 0.166667, 0.166667)
+
+
+def test_top_and_bottom_cropped_photos_give_full_image_corners(tmp_path):
+    """上下を切った写真の角点は、フル画像の角点（上端の行数を足した座標）として返る。"""
+    top, bottom = 0.125, 0.125
+    y0, y1 = int(round(H * top)), int(round(H * (1 - bottom)))
+    for i, (R, t) in enumerate(_poses(14)):
+        full = _render(R, t)
+        p = tmp_path / f"surge_front_{W}x{y1 - y0}_crop{bottom:g}_top{top:g}_20261117_0000{i:02d}.png"
+        cv2.imwrite(str(p), full[y0:y1])
+        d = detect(p, BOARD)
+        if not d.ok:
+            continue
+        assert d.full_size == (W, H)
+        assert d.top_px == pytest.approx(y0)
+        want = _corners_px(R, t)
+        # 角点の並び順は写真ごとに逆転しうるので、近い方と比べる
+        got = d.corners.reshape(-1, 2)
+        err = min(np.max(np.linalg.norm(got - want, axis=1)),
+                  np.max(np.linalg.norm(got[::-1] - want, axis=1)))
+        assert err < 1.0
+        return
+    pytest.fail("どの写真でもボードが見つからない")
 
 
 def test_calibration_recovers_lens(shots):

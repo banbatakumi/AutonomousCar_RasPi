@@ -89,6 +89,21 @@ class TestScaling(unittest.TestCase):
         cropped = CALIB.scaled(640, 360, 0.25)
         np.testing.assert_allclose(full, cropped)
 
+    def test_top_crop_shifts_only_cy(self):
+        """上端クロップは cy を切った行数だけ上げる（fx, fy, cx はそのまま）。"""
+        fx, fy, cx, cy = CALIB.scaled(640, 480, 0.0)
+        got = CALIB.scaled(640, 320, 1 / 6, 1 / 6)
+        np.testing.assert_allclose(got, (fx, fy, cx, cy - 80.0))
+
+    def test_top_crop_pixel_is_same_ray(self):
+        """クロップ後の画素 (u, v) とフル画像の (u, v + 上端の行数) は同じ光線。"""
+        full = CALIB.scaled(640, 480)
+        crop = CALIB.scaled(640, 320, 1 / 6, 1 / 6)
+        u, v = np.array([10.0, 320.0, 600.0]), np.array([5.0, 160.0, 300.0])
+        a = unproject_pixels(u, v + 80.0, *full, CALIB.k)
+        b = unproject_pixels(u, v, *crop, CALIB.k)
+        np.testing.assert_allclose(a, b, atol=1e-12)
+
     def test_resolution_scale(self):
         fx, fy, cx, cy = CALIB.scaled(320, 240)
         self.assertAlmostEqual(fx, CALIB.fx / 2)
@@ -231,6 +246,26 @@ k = [0.01, 0.0, 0.0, 0.0]
         # 取付位置・姿勢はレンズに依らずカメラの表のまま
         self.assertAlmostEqual(v.cam_front_x, 0.1)
         self.assertAlmostEqual(v.cam_front_pitch, 0.05)
+
+    def test_top_crop_is_read_and_checked(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write("[sensors.cam_front]\ntop_crop = 0.15\nbottom_crop = 0.2\n"
+                    "[sensors.cam_left]\ntop_crop = 0.6\nbottom_crop = 0.4\n")
+        try:
+            v = Vehicle.load(f.name)
+        finally:
+            Path(f.name).unlink()
+        self.assertAlmostEqual(v.cam_front_top_crop, 0.15)
+        self.assertAlmostEqual(v.cam_front_bottom_crop, 0.2)
+        # 切り過ぎ（残り 0）は両方 0（全画角）に戻す。他の値は既定値に落とさない
+        self.assertEqual((v.cam_left_top_crop, v.cam_left_bottom_crop), (0.0, 0.0))
+        self.assertAlmostEqual(v.cam_front_top_crop, 0.15)
+
+    def test_pinhole_principal_point_with_top_crop(self):
+        intr = camera_intrinsics(1.152, 640, 320, bottom_crop=1 / 6, top_crop=1 / 6)
+        self.assertAlmostEqual(intr.principal_y, 160.0)
+        intr = camera_intrinsics(1.152, 640, 400, top_crop=1 / 6)
+        self.assertAlmostEqual(intr.principal_y, 160.0)
 
     def test_switching_back_to_stock(self):
         v = self._load("stock")

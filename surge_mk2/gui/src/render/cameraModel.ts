@@ -29,14 +29,22 @@ export interface Lens {
 /** 光軸方向の距離がこれ未満は「真下・背後」として捨てる（`ipm.py` の `_MIN_ZC` と同じ） */
 export const MIN_ZC = 0.15
 
-/** 表示画像（幅 `w`・高さ `h`、下端 `bottomCrop` 切り落とし済み）のピンホール。
+/** 上下を切った画像の高さ `h` → `[クロップ前の高さ, 上端で切った行数]`（`camera_model.crop_frame()` と同じ） */
+export function cropFrame(h: number, bottomCrop: number, topCrop: number): [number, number] {
+  const keep = 1 - bottomCrop - topCrop
+  const fullH = keep > 0 ? h / keep : h
+  return [fullH, fullH * topCrop]
+}
+
+/** 表示画像（幅 `w`・高さ `h`、上下 `topCrop`・`bottomCrop` 切り落とし済み）のピンホール。
  * `ipm.camera_intrinsics()` と同一の式 */
 export function pinholeLens(w: number, h: number, hfov: number, bottomCrop: number,
-  kind: LensKind = 'pinhole'): Lens {
+  kind: LensKind = 'pinhole', topCrop = 0): Lens {
   const f = w / 2 / Math.tan(hfov / 2)
   const cx = w / 2
-  // 下端クロップぶん、光軸（センサー中心）は配信画像の中央より下にずれる
-  const cy = h / (2 * (1 - bottomCrop))
+  // 上下クロップぶん、光軸（センサー中心）は配信画像の中央からずれる
+  const [fullH, y0] = cropFrame(h, bottomCrop, topCrop)
+  const cy = fullH / 2 - y0
   return {
     kind,
     cx,
@@ -46,14 +54,17 @@ export function pinholeLens(w: number, h: number, hfov: number, bottomCrop: numb
 }
 
 /** 表示画像に縮尺した魚眼。**校正値はフル画角・クロップ前の画素**なので、
- * クロップ後の高さからクロップ前の高さに戻して倍率を出す（`FisheyeCalib.scaled()` と同じ） */
-export function fisheyeLens(w: number, h: number, calib: FisheyeCalib, bottomCrop: number): Lens {
+ * クロップ後の高さからクロップ前の高さに戻して倍率を出し、上端で切った行数を引く
+ * （`FisheyeCalib.scaled()` と同じ） */
+export function fisheyeLens(w: number, h: number, calib: FisheyeCalib, bottomCrop: number,
+  topCrop = 0): Lens {
+  const [fullH, y0] = cropFrame(h, bottomCrop, topCrop)
   const sx = w / calib.width
-  const sy = h / (1 - bottomCrop) / calib.height
+  const sy = fullH / calib.height
   const fx = calib.fx * sx
   const fy = calib.fy * sy
   const cx = calib.cx * sx
-  const cy = calib.cy * sy
+  const cy = calib.cy * sy - y0
   const [k1, k2, k3, k4] = calib.k
   return {
     kind: 'fisheye',
