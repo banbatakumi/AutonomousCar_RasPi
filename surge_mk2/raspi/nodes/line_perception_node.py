@@ -67,6 +67,7 @@ import numpy as np  # noqa: E402
 
 from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
+from raspi.core.pixfmt import to_bgr  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import ImageRef, LineScan, VehicleState  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
@@ -366,6 +367,8 @@ class LinePerceptionNode:
                         self._last_scan = None
                     else:
                         frame, t_capture = got
+                        # 白の判定は RGB の最小・最大だけを見るので並びはどちらでもよいが、3チャンネルは要る
+                        frame = to_bgr(frame, ref.fmt)
                         self._last_ring_seq = ref.ring_seq
                         try:
                             st = self.process_frame(frame, vs=vs, t_capture_ns=t_capture, seq=seq)

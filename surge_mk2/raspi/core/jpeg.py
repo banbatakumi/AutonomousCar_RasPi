@@ -3,6 +3,12 @@
 同じことを2箇所に書くと、片方だけ色が入れ替わる（BGR/RGB）という直しにくい
 バグになる。エンコーダの選択も、共有メモリの読み方も、ここ1箇所に置く。
 
+## 画素形式
+
+カメラは `YUV420`（sYCC＝JPEG と同じ全範囲の YCbCr）で撮るので、Y・U・V 面をそのまま焼く
+（`colorspace="I420"`。RGB から焼くより速い: 640×480 で 3.7 → 1.6ms、Pi 5・1.5GHz）。補正映像（`transform`）と
+撮影ボタンの PNG は BGR に直してから扱う（`core/pixfmt.py`）。
+
 ## エンコーダの選択
 
 `simplejpeg` は picamera2 が依存しているので **Pi には既に入っている。**
@@ -36,6 +42,7 @@ from __future__ import annotations
 import time
 
 from .cleanup import quiet_close
+from .pixfmt import is_yuv420, to_bgr, yuv420_planes
 
 __all__ = ["make_encoder", "encode_png", "RingJpeg", "STALE_GAP"]
 
@@ -60,6 +67,9 @@ def make_encoder(quality: int):
             # の `encode_mask_jpeg()`）があるため、ここで合わせる
             # （実機の simplejpeg でのみ踏む——Mac 開発環境は Pillow にフォール
             # バックし、`Image.fromarray()` は2次元のままで動くため気づきにくい）
+            if colorspace == "I420":
+                y, u, v = yuv420_planes(arr)
+                return simplejpeg.encode_jpeg_yuv_planes(y, u, v, quality=quality)
             if colorspace == "GRAY" and arr.ndim == 2:
                 arr = arr[:, :, None]
             return simplejpeg.encode_jpeg(arr, quality=quality, colorspace=colorspace)
@@ -72,6 +82,8 @@ def make_encoder(quality: int):
         from PIL import Image
 
         def enc(arr, colorspace):
+            if colorspace == "I420":
+                arr, colorspace = to_bgr(arr, "YUV420"), "BGR"
             if colorspace == "BGR":
                 arr = arr[:, :, ::-1]
             buf = BytesIO()
@@ -216,8 +228,11 @@ class RingJpeg:
             return None
         arr = frame.as_array()
         # `fmt` は**メモリ上の実際のバイト順**。名前を信じて入れ替えない
-        colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
+        fmt = frame.desc.fmt
+        colorspace = "I420" if is_yuv420(fmt) else "BGR" if fmt.startswith("BGR") else "RGB"
         t0 = time.process_time()
+        if transform is not None and colorspace == "I420":
+            arr, colorspace = to_bgr(arr, fmt), "BGR"     # 補正は画素ごとの remap なので色の画にしてから
         if transform is not None:
             # 補正映像（魚眼 → 仮想ピンホール）。remap は新しい配列を作るので
             # 以降は共有メモリを読まない。検証（`still_valid`）は下で同じように効く
@@ -248,7 +263,10 @@ class RingJpeg:
                     return None
                 arr = np.array(frame.as_array(), copy=True)
                 if frame.still_valid():
-                    colorspace = "BGR" if frame.desc.fmt.startswith("BGR") else "RGB"
+                    fmt = frame.desc.fmt
+                    if is_yuv420(fmt):
+                        return to_bgr(arr, fmt), "BGR", frame.desc
+                    colorspace = "BGR" if fmt.startswith("BGR") else "RGB"
                     return arr, colorspace, frame.desc
                 self.torn += 1
             return None

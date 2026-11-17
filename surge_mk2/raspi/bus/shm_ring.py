@@ -113,7 +113,14 @@ _S_SLOT = struct.Struct("<4Q")          # seq, t_capture_ns, frame_id, nbytes
 
 #: 1画素あたりのバイト数。生の画素だけを扱う（圧縮形式は対象外）
 _BYTES_PER_PIXEL = {"RGB888": 3, "BGR888": 3, "XRGB8888": 4, "XBGR8888": 4,
-                    "RGB565": 2, "GREY": 1}
+                    "RGB565": 2, "GREY": 1, "YUV420": 1}
+#: 画像の高さに対する行数の倍率（`YUV420`＝I420 は Y 面の下に U・V 面が続き 1.5 倍。
+#: 詰め物の無い `stride == width` だけを扱う。配列は `(H*3/2, W)` の2次元）
+_ROWS_PER_LINE = {"YUV420": 1.5}
+
+
+def _rows(fmt: str, height: int) -> int:
+    return int(height * _ROWS_PER_LINE.get(fmt, 1))
 
 
 def _open_shm(name: str, create: bool = False, size: int = 0):
@@ -171,6 +178,10 @@ class FrameRef:
         if bpp is None:
             raise ValueError(f"画素形式 {d.fmt} の配列化には対応していません")
         arr = np.frombuffer(self.buffer, dtype=np.uint8)
+        if d.fmt in _ROWS_PER_LINE:
+            if d.stride != d.width:
+                raise ValueError(f"{d.fmt} の詰め物のあるストライドには対応していません")
+            return arr.reshape(_rows(d.fmt, d.height), d.width)
         if d.stride == d.width * bpp:
             return arr.reshape(d.height, d.width, bpp) if bpp > 1 else \
                 arr.reshape(d.height, d.width)
@@ -234,7 +245,9 @@ class FrameRing:
         if n_slots < 2:
             raise ValueError("n_slots は 2 以上（1枚だと必ず読み書きが衝突する）")
         stride = stride or width * bpp
-        slot_bytes = _align(stride * height)
+        if fmt in _ROWS_PER_LINE and stride != width:
+            raise ValueError(f"{fmt} の詰め物のあるストライドには対応していません")
+        slot_bytes = _align(stride * _rows(fmt, height))
         total = _align(HEADER_SIZE + n_slots * SLOT_META_SIZE) + n_slots * slot_bytes
 
         try:

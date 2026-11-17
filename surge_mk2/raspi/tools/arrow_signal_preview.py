@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
+from raspi.core.pixfmt import to_bgr  # noqa: E402
 from raspi.nodes.arrow_signal_node import (  # noqa: E402
     _DEFAULT_HUE_BANDS,
     ArrowSignalDetector,
@@ -64,9 +65,7 @@ def _frame_source_from_shm(name: str):
             if not ok:
                 continue
             last_seq = ref.desc.seq
-            if ref.desc.fmt.startswith("RGB"):
-                arr = arr[..., ::-1].copy()
-            yield arr
+            yield np.ascontiguousarray(to_bgr(arr, ref.desc.fmt))
     finally:
         ring.close()
 

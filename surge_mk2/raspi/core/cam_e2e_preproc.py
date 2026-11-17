@@ -65,11 +65,12 @@ def to_rgb(frame: np.ndarray, fmt: str) -> np.ndarray:
     `fmt` は `ImageRef.fmt`（**メモリ上の実際のバイト順**、`camera_node.py` の
     `_MEMORY_ORDER` 参照）。判定は `raspi/core/jpeg.py` と同じ「`BGR` で始まるか」。
     記録の JPEG は jpeg.py が同じ規則で正しい色にしているので、ここが揃っていれば
-    学習（JPEG をデコードした RGB）と推論の色が一致する。
+    学習（JPEG をデコードした RGB）と推論の色が一致する。`YUV420` もここで RGB に直す
+    （`core/pixfmt.py`）。
     """
-    if fmt.startswith("BGR"):
-        return frame[..., 2::-1]
-    return frame[..., :3]
+    from .pixfmt import to_rgb as _to_rgb
+
+    return _to_rgb(frame, fmt)
 
 
 @lru_cache(maxsize=8)

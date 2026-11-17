@@ -34,8 +34,12 @@ def to_rgb(arr, fmt: str):
 
     リングには**メモリ上の実際の並び**が記録されている（`camera_node` が
     libcamera の名前を変換して入れている）ので、その名前を見て判断する。
-    ここで無条件に入れ替えると、正しい並びの画を壊すことになる。
+    ここで無条件に入れ替えると、正しい並びの画を壊すことになる。`YUV420` は RGB に直す。
     """
+    if fmt == "YUV420":
+        from raspi.core.pixfmt import to_rgb as _to_rgb
+
+        return _to_rgb(arr, fmt)
     if not fmt.startswith(("BGR", "XBGR")):
         return arr
     return arr[..., ::-1] if arr.ndim == 3 and arr.shape[2] == 3 else arr[..., 2::-1]

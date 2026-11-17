@@ -72,16 +72,14 @@ def make_matcher(p: MatchParams):
 
 
 def to_gray(img: np.ndarray, fmt: str = "BGR888") -> np.ndarray:
-    """共有メモリの画像 → グレースケール。`fmt` は**メモリ上の実際のバイト順**（`ImageRef.fmt`）。"""
-    import cv2
+    """共有メモリの画像 → グレースケール。`fmt` は**メモリ上の実際のバイト順**（`ImageRef.fmt`）。
 
-    if img.ndim == 2:
-        return img
-    if img.shape[2] == 4:
-        # 4 バイト形式は先頭 3 バイトを色として使う（並びの違いは灰色の重みが少し変わるだけで、照合には効かない）
-        img = img[:, :, :3]
-    code = cv2.COLOR_RGB2GRAY if fmt.startswith("RGB") else cv2.COLOR_BGR2GRAY
-    return cv2.cvtColor(np.ascontiguousarray(img), code)
+    `YUV420` は Y 面をそのまま使う（変換なし。`core/pixfmt.py`）。2026-11-17 の比較で、RGB を受けて
+    灰色に直すより視差の出る割合が +1pt・静止時の揺れ −7%・灰色化 0.46 → 0.01ms（`docs/stereo_plan.md`）。
+    4 バイト形式は先頭 3 バイトを色として使う（並びの違いは灰色の重みが少し変わるだけで、照合には効かない）。"""
+    from .pixfmt import to_gray as _to_gray
+
+    return _to_gray(img, fmt)
 
 
 def disparity(p: MatchParams, matcher, rect_left: np.ndarray, rect_right: np.ndarray) -> np.ndarray:

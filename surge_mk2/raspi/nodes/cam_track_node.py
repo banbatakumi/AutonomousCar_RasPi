@@ -65,6 +65,7 @@ import numpy as np  # noqa: E402
 from raspi.auto.base import sector_of_deg  # noqa: E402
 from raspi.core.auto_gate import IdlePacer, vehicle_armed  # noqa: E402
 from raspi.core.frame_reader import FrameReader  # noqa: E402
+from raspi.core.pixfmt import to_bgr  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
 from raspi.msgs import ImageRef, Scan, TargetRoiCtrl, TargetTrack, VehicleState  # noqa: E402
@@ -598,6 +599,7 @@ class CamTrackNode:
                         got = reader.read(ref)
                         if got is not None:
                             frame, t_capture = got
+                            frame = to_bgr(frame, ref.fmt)      # 追跡器（OpenCV）は BGR 前提
                             last_ring_seq = ref.ring_seq
                             last_tracked_capture_ns = cap_ns
 

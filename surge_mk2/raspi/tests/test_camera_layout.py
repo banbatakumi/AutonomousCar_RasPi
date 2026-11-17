@@ -19,7 +19,8 @@ import msgspec  # noqa: E402
 from raspi.msgs.types import type_for_topic  # noqa: E402
 from raspi.nodes import camera_node  # noqa: E402
 from raspi.nodes.camera_node import (  # noqa: E402
-    STEREO_SYNC_TOL_NS, CameraNode, CameraWorker, exposure_changed, frame_phase_error_ns)
+    STEREO_SYNC_TOL_NS, CameraNode, CameraWorker, exposure_changed, frame_phase_error_ns,
+    gains_changed)
 
 _TOML = """
 [sensors.cam_front]
@@ -122,6 +123,34 @@ class TestExposureFollow(unittest.TestCase):
         self.assertFalse(exposure_changed((10000, 2.0), (10100, 2.0), 0.03))
         self.assertTrue(exposure_changed((10000, 2.0), (10000, 2.2), 0.03))
 
+    def test_gains_changed(self):
+        self.assertFalse(gains_changed(None, None, 0.02))
+        self.assertTrue(gains_changed(None, (1.2, 1.8), 0.02))
+        self.assertFalse(gains_changed((1.2, 1.8), (1.21, 1.81), 0.02))
+        self.assertTrue(gains_changed((1.2, 1.8), (1.2, 1.9), 0.02))
+
+    def test_follow_copies_exposure_and_colour_gains(self):
+        class Cam:
+            def __init__(self): self.log = []
+            def set_controls(self, c): self.log.append(dict(c))
+
+        src = CameraWorker.__new__(CameraWorker)
+        src.exposure, src.colour_gains = (8000, 2.0), (1.19, 1.78)
+        w = CameraWorker.__new__(CameraWorker)
+        w.cam, w.follow, w._sync_on = Cam(), src, True
+        w.stats = camera_node.CamStats()
+        w._followed = w._followed_gains = None
+        w._follow_exposure()
+        self.assertEqual(w.cam.log, [{"AeEnable": False, "ExposureTime": 8000, "AnalogueGain": 2.0,
+                                      "AwbEnable": False, "ColourGains": (1.19, 1.78)}])
+        w.cam.log.clear()
+        src.colour_gains = (1.19, 1.90)              # 色だけ変わったら色だけ写す
+        w._follow_exposure()
+        self.assertEqual(w.cam.log, [{"AwbEnable": False, "ColourGains": (1.19, 1.90)}])
+        w.cam.log.clear()
+        w._follow_exposure()                         # 変わらなければ何もしない
+        self.assertEqual(w.cam.log, [])
+
 
 class _FakeWorker:
     def __init__(self, role: str) -> None:
@@ -199,14 +228,16 @@ class TestSyncToggle(unittest.TestCase):
         w.sync_role = "client"
         w.synced = True
         w._followed = (1000, 1.0)
+        w._followed_gains = (1.2, 1.8)
         w.follow = object()
         w._sync_controls = lambda: {"SyncMode": "off" if not w._sync_on else "client"}
         w.request_stereo(False)
         w._apply_pending()
         self.assertEqual(w.cam.log, ["stop", ("ctrl", {"SyncMode": "off"}),
-                                     ("ctrl", {"AeEnable": True}), "start"])
+                                     ("ctrl", {"AeEnable": True, "AwbEnable": True}), "start"])
         self.assertFalse(w.synced)
         self.assertIsNone(w._followed)
+        self.assertIsNone(w._followed_gains)
         w.cam.log.clear()
         w.request_stereo(False)          # 同じ要求では何もしない
         w._apply_pending()

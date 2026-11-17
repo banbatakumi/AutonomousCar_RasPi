@@ -139,7 +139,7 @@ def signal_mask(frame: np.ndarray, *,
                 hue_bands: tuple[tuple[int, int], ...] = _DEFAULT_HUE_BANDS,
                 sat_range: tuple[int, int] = _DEFAULT_SAT_RANGE,
                 val_min: int = _DEFAULT_VAL_MIN) -> np.ndarray:
-    """`(H, W, C)` uint8（`camera_node.py`既定の`RGB888`要求→メモリ上はBGR888）
+    """BGR の `(H, W, C)` uint8（共有メモリの生フレームは `_to_bgr` で直してから渡す）
     → 「薄い色」で点灯している画素の bool マスク。
 
     色相帯を複数OR合成する——矢印の色そのものに意味はなく、青/紫/緑いずれかの
@@ -396,9 +396,9 @@ class ArrowSignalNode:
 
 def _to_bgr(frame: np.ndarray, fmt: str) -> np.ndarray:
     """共有メモリの生フレーム → BGR の (H, W, 3)。`fmt` は `ImageRef.fmt`（メモリ上のバイト順）。"""
-    if fmt.startswith("BGR"):
-        return frame[..., :3]
-    return np.ascontiguousarray(frame[..., 2::-1])
+    from raspi.core.pixfmt import to_bgr
+
+    return to_bgr(frame, fmt)
 
 
 def _parse_band(s: str) -> tuple[float, float]:

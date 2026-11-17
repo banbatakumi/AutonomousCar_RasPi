@@ -18,6 +18,15 @@
   コミット（ビルドとホスト試験まで）。**書き込みは未**（ST-Link 未接続）。ml_stereo_e2e は前処理の版 2（視差の窓）になったので標本を抽出し直す
 - **ブザーの失敗で io_node を落とさない（2026-11-17、コミット済み・Pi 未反映）**: `raspi/io/gpio.Buzzer` が例外を握って一度だけログに出す。
   実機の `tone is out of the device's range`（10 月の版の記録）は手元の gpiozero 2.0.1 では再現せず、原因は未特定。次に出たら音名・周波数・範囲がログに載る
+- **省電力の測り直し（2026-11-17、制御系電流 `batt_current[1]` の A-B-A、各 40s）**: DISARM 待機 440mA・ARM（mode なし・止めた車）約 820mA。
+  効かなかったもの: 待機中の知覚5ノード停止・BT の rfkill（±2mA）、DISARM の 1.5GHz 未満（ハードの下限が 1.5GHz）。
+  ARM の内訳（1.5GHz 固定）はステレオ照合 57・カメラ2台の撮影 111・カメラ無しでも DISARM より +130（STM32/LiDAR 側）。
+  未採用の候補: ARM 上限 1.8GHz（−25mA、ステレオ遅れ p50 +2ms）・1.5GHz（−95mA、p90 49.5ms で合格線ぎりぎり）・ARM 中カメラ 15fps（−31mA、GUI 設定だけで可）。
+  採用したのは**ファンの固着修正**（`raspi/io/fan.py`。起動時の kick が低温で `cur_state` を 0→1 にし、ポーリングしない thermal zone が戻さず回り続けていた。
+  同じ温度ならファン分 −15mA、止めると温度が上がる分で定常の差は数 mA。修正後の待機 429mA）。Pi に反映済み
+- **カメラを YUV420（sYCC）に・左の AWB を主カメラに揃える（2026-11-17、Pi に反映・関連サービス再起動済み）**: 変換は `raspi/core/pixfmt.py`。
+  ステレオは Y 面を直接・JPEG は面のまま・CNN 系は使うときだけ RGB へ。ARM で cam_e2e・e2e_fusion・line_trace の出力を確認（cam_perception はモデル未選択で未確認）。
+  数値は `docs/stereo_plan.md`。**走行と学習データの色（新しい記録の JPEG と過去の記録）の比較は未確認**
 - **MD ファーム**（`~/GitHub/BLDC/ProgramV4`、ブランチ `FW/Program_V4`）: 仕様は `ProgramV4/docs/SERIAL_PROTOCOL.md`
 - **プロトコル v0.31**（`raspi/proto/protocol.toml` の `protocol_version` = 0x001F が正。ファームの `RAS_PROTOCOL_VERSION` も 0x001F。v0.31 で `STEREO_OBS` を追加）。
   Pi とファームは一緒に入れ替える（io_node は版が一致するまで ARM を通さない）

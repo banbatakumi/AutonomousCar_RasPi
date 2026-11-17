@@ -18,7 +18,7 @@
 **共有メモリの 0 番（`surge_cam0`・`image/front`）は主カメラ（右）。**
 
 左右のフレームの開始を libcamera のソフト同期で揃え（`SyncMode`。実測で差は
-最大 79µs、揃うまで約 3 秒）、左の露光を主カメラに合わせる。揃ったコマは `ImageRef.synced` が
+最大 79µs、揃うまで約 3 秒）、左の露光と色のゲイン（AWB）を主カメラに合わせる。揃ったコマは `ImageRef.synced` が
 True。同期して撮るのは `CamConfig.stereo` が True の間だけで、False なら左カメラを止める。
 指定した番号のカメラが一部見えないときは、**見えているカメラだけで起動を続ける**
 （欠けた側の配信は止まり、`hb/camera` の detail に `<役割>=missing` と出る）。
@@ -102,6 +102,10 @@ STEREO_MAX_EXPOSURE_US = 8000
 #: 左カメラが主カメラの露光・ゲインを写す間隔 [コマ]（30fps で約 6Hz）と、写し直す変化の下限
 STEREO_EXPOSURE_FOLLOW_FRAMES = 5
 STEREO_EXPOSURE_FOLLOW_RATIO = 0.03
+#: 左カメラが主カメラの色のゲイン（`ColourGains`＝AWB の R/B）を写し直す変化の下限。左右で処理の条件を
+#: 揃えるため（2026-11-17 の検証では、左右で別々に AWB を回してもゲインはほぼ同じで、照合への効果は無かった。
+#: 照明の色が偏った所で左右がずれる余地を消すために揃える）。間隔は露光と同じ
+STEREO_GAINS_FOLLOW_RATIO = 0.02
 #: 左右のフレームの開始がこれ以内に揃っているコマだけを `synced` とする [ns]。揃っているときの実測は
 #: 最大 0.11ms。**libcamera の `SyncReady` は fps を変えた後も立ったまま**で、その間の差は最大 19ms、
 #: 揃い直すまで 14→30fps で約 15 秒・30→14fps で 35 秒以上かかる（2026-11-12 実測）。だから
@@ -237,6 +241,16 @@ def exposure_changed(prev: tuple[int, float] | None, want: tuple[int, float] | N
         return True
     a, b = prev[0] * prev[1], want[0] * want[1]
     return abs(b - a) > ratio * max(a, 1e-9)
+
+
+def gains_changed(prev: tuple[float, float] | None, want: tuple[float, float] | None,
+                  ratio: float) -> bool:
+    """左カメラの色のゲイン（R, B）を写し直すべきか（どちらかが `ratio` 以上変わったとき）。"""
+    if want is None:
+        return False
+    if prev is None:
+        return True
+    return any(abs(w - p) > ratio * max(p, 1e-9) for p, w in zip(prev, want))
 
 
 def frame_phase_error_ns(t_a: int, t_b: int, period_ns: float) -> float:
@@ -393,11 +407,14 @@ class CameraWorker(threading.Thread):
         self.synced = False
         #: 直近のコマの (露光時間 [µs], アナログゲイン)。左カメラがこれを写す
         self.exposure: tuple[int, float] | None = None
+        #: 直近のコマの色のゲイン（R, B。AWB の結果）。左カメラがこれを写す
+        self.colour_gains: tuple[float, float] | None = None
         #: もう1台のワーカー（`CameraNode` が繋ぐ）。フレームの開始の差を測る相手
         self.peer: "CameraWorker | None" = None
         #: 露光を写す元のワーカー（左カメラだけ。`CameraNode` が繋ぐ）と、最後に写した値
         self.follow: "CameraWorker | None" = None
         self._followed: tuple[int, float] | None = None
+        self._followed_gains: tuple[float, float] | None = None
         self.size = size
         self.fmt = fmt
         self.fps = fps
@@ -436,6 +453,12 @@ class CameraWorker(threading.Thread):
         sensor_size = full_fov_sensor_size(self.cam, size)
         cfg_kwargs = {"main": {"size": size, "format": fmt},
                       "buffer_count": 6, "controls": ctrl}
+        if fmt == "YUV420":
+            # **全範囲の BT.601（sYCC＝JPEG の YCbCr）に固定する。** 既定（SMPTE170M）は制限範囲で、
+            # Y・U・V 面のまま JPEG に焼くと色が薄くなる（`core/pixfmt.py`）
+            from libcamera import ColorSpace
+
+            cfg_kwargs["colour_space"] = ColorSpace.Sycc()
         if sensor_size:
             cfg_kwargs["sensor"] = {"output_size": sensor_size}
         cfg = self.cam.create_video_configuration(**cfg_kwargs)
@@ -446,6 +469,9 @@ class CameraWorker(threading.Thread):
         self.size = main["size"]
         self.libcamera_fmt = main["format"]
         self.fmt = memory_format(self.libcamera_fmt)      # メモリ上の並びで記録する
+        if self.fmt == "YUV420" and main.get("stride", self.size[0]) != self.size[0]:
+            # 詰め物のある I420 は U・V 面の並びが変わる。リング（`FrameRing`）は詰め物無しだけを扱う
+            raise ValueError(f"YUV420 の stride {main.get('stride')} が幅 {self.size[0]} と違う（幅を 64 の倍数に）")
         self.ring = FrameRing.create(f"{SHM_PREFIX}{idx}", self.size[0], self.size[1],
                                      self.fmt, n_slots=n_slots)
 
@@ -453,7 +479,7 @@ class CameraWorker(threading.Thread):
         """今の `_sync_on` に合う同期・AE のコントロール（同期の役割が無ければ空）。
 
         主カメラは AE を続け、同期中だけ露光の短いプロファイルにする。左カメラの露光は
-        `_follow_exposure` が主カメラの値を写す（左右で明るさが違うと照合が落ちる）。"""
+        `_follow_exposure` が主カメラの値（と色のゲイン）を写す（左右で明るさが違うと照合が落ちる）。"""
         if self.sync_role is None:
             return {}
         from libcamera import controls
@@ -468,16 +494,25 @@ class CameraWorker(threading.Thread):
         return ctrl
 
     def _follow_exposure(self) -> None:
-        """左カメラ: 主カメラの露光時間とゲインを写す（AE を切って手動で置く）。"""
+        """左カメラ: 主カメラの露光時間・ゲインと色のゲインを写す（AE・AWB を切って手動で置く）。"""
         src = self.follow
         if src is None or not self._sync_on or self.stats.frames % STEREO_EXPOSURE_FOLLOW_FRAMES:
             return
+        ctrl: dict = {}
         want = src.exposure
-        if not exposure_changed(self._followed, want, STEREO_EXPOSURE_FOLLOW_RATIO):
+        if exposure_changed(self._followed, want, STEREO_EXPOSURE_FOLLOW_RATIO):
+            ctrl.update({"AeEnable": False, "ExposureTime": int(want[0]),
+                         "AnalogueGain": float(want[1])})
+        want_g = src.colour_gains
+        if gains_changed(self._followed_gains, want_g, STEREO_GAINS_FOLLOW_RATIO):
+            ctrl.update({"AwbEnable": False, "ColourGains": (float(want_g[0]), float(want_g[1]))})
+        if not ctrl:
             return
-        self.cam.set_controls({"AeEnable": False, "ExposureTime": int(want[0]),
-                               "AnalogueGain": float(want[1])})
-        self._followed = want
+        self.cam.set_controls(ctrl)
+        if "ExposureTime" in ctrl:
+            self._followed = want
+        if "ColourGains" in ctrl:
+            self._followed_gains = want_g
 
     def start_camera(self) -> None:
         self.cam.start()
@@ -533,11 +568,12 @@ class CameraWorker(threading.Thread):
             self._sync_on = sync
             self.synced = False
             self._followed = None
+            self._followed_gains = None
             if self._enabled:
                 self.cam.stop()
             self.cam.set_controls(self._sync_controls())
             if not sync and self.follow is not None:
-                self.cam.set_controls({"AeEnable": True})
+                self.cam.set_controls({"AeEnable": True, "AwbEnable": True})
             if self._enabled:
                 self.cam.start()
                 self.stats.last_grab_ns = time.monotonic_ns()
@@ -582,6 +618,9 @@ class CameraWorker(threading.Thread):
                            and self._aligned_with_peer(t_cap))
             if "ExposureTime" in md and "AnalogueGain" in md:
                 self.exposure = (int(md["ExposureTime"]), float(md["AnalogueGain"]))
+            cg = md.get("ColourGains")
+            if cg is not None and len(cg) == 2:
+                self.colour_gains = (float(cg[0]), float(cg[1]))
             # make_array は DMA バッファへの view。**release() すると無効になる**ので、
             # 共有メモリへの書き込みは release より前に済ませる。
             # ここで release を先にすると、解放済みメモリを読むことになる
@@ -813,9 +852,10 @@ def _status(node: CameraNode) -> None:
              f"{w.stats.frames / el if el else 0:.1f}fps" for w in node.workers]
     # 同期と露光合わせの様子（左の露光が主カメラに付いてきているかを目で確かめる用）
     for w in node.workers:
-        e = w.exposure
+        e, g = w.exposure, w.colour_gains
         parts.append(f"cam{w.idx} {'synced' if w.synced else 'unsynced'} "
-                     + (f"{e[0] / 1e3:.1f}ms×{e[1]:.2f}" if e else "-"))
+                     + (f"{e[0] / 1e3:.1f}ms×{e[1]:.2f}" if e else "-")
+                     + (f" R{g[0]:.2f}/B{g[1]:.2f}" if g else ""))
     sys.stdout.write("\r" + " | ".join(parts) + "    ")
     sys.stdout.flush()
 
@@ -826,7 +866,9 @@ def main() -> int:
     ap.add_argument("--cameras", default="0,1",
                     help="使うカメラのリング番号（例 0 / 0,1）。0 が主カメラ（image/front）")
     ap.add_argument("--size", default="640x480")
-    ap.add_argument("--fmt", default="RGB888")
+    ap.add_argument("--fmt", default="YUV420",
+                    help="画素形式。既定の YUV420（sYCC）はステレオが Y 面を直接使い、JPEG も面のまま焼く"
+                         "（`core/pixfmt.py`）。RGB888 でも全ノードが動く")
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--slots", type=int, default=DEFAULT_SLOTS,
                     help="リングの枚数（既定8。読み手が遅れても上書きされにくくなる）")
