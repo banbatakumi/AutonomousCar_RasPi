@@ -44,7 +44,7 @@ from ..nav import obstacles as obs_mod
 from ..nav import overtake as ot_mod
 from ..nav import raceline as rl_mod
 from ..nav.grid import pack_trinary
-from ..nav.mpc import MPCConfig, MPCFollower
+from ..nav.mpc import MPCConfig, MPCFollower, steer_rate_for
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from ..nav import speedctl
 from ..nav.understeer import UndersteerLearner
@@ -618,6 +618,7 @@ def mpc_config(p: dict[str, float], vehicle) -> MPCConfig:
     """遅延補償は Pure Pursuit と同じ `steer_delay`（どちらも「今」へ進めた姿勢を使うので、見込む遅れは同じ）。"""
     return MPCConfig(
         wheelbase=vehicle.wheelbase, max_steer=vehicle.max_steer,
+        steer_rate=steer_rate_for(vehicle.cmd_steer_rate_limit_rad_s),
         horizon=int(p["mpc_horizon"]), dt=p["mpc_dt"], delay_s=steer_delay(p, vehicle),
         q_y=p["mpc_q_y"], q_psi=p["mpc_q_psi"], r_d=p["mpc_r_d"],
         steer_map=vehicle.steer_map, servo_gain=vehicle.steer_servo_gain,

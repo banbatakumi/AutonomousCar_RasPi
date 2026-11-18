@@ -43,7 +43,7 @@ from ..core.vehicle import Vehicle
 from ..msgs.types import TOPIC_E2E_FUSION_PLAN, AutoState, E2EFusionPlan, VehicleState
 from ..nav import raceline as rl_mod
 from ..nav import speedctl
-from ..nav.mpc import MPCConfig, MPCFollower
+from ..nav.mpc import MPCConfig, MPCFollower, steer_rate_for
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from .base import CMD_HZ, ParamSpec, Planner, bool_param, choice_param
 
@@ -247,7 +247,8 @@ class E2EFusion(Planner):
 
     def _mpc_config(self, p: dict[str, float]) -> MPCConfig:
         veh = self.vehicle
-        return MPCConfig(wheelbase=veh.wheelbase, max_steer=veh.max_steer, horizon=int(p["mpc_horizon"]),
+        return MPCConfig(wheelbase=veh.wheelbase, max_steer=veh.max_steer,
+                         steer_rate=steer_rate_for(veh.cmd_steer_rate_limit_rad_s), horizon=int(p["mpc_horizon"]),
                          dt=p["mpc_dt"], delay_s=veh.steer_delay_s + self._cmd_latency(),
                          q_y=p["mpc_q_y"], q_psi=p["mpc_q_psi"], r_d=p["mpc_r_d"], steer_map=veh.steer_map,
                          servo_gain=veh.steer_servo_gain, speed_preview_s=p["speed_preview"])

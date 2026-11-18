@@ -42,7 +42,7 @@ import numpy as np
 from .purepursuit import Pursuit, PursuitConfig, SteerMap, _predict, follow, nearest_index
 from .raceline import RaceLine
 
-__all__ = ["MPCConfig", "MPCFollower"]
+__all__ = ["MPCConfig", "MPCFollower", "steer_rate_for"]
 
 #: モデルに使う速度の下限 [m/s]（停止中・量子化された低速で時間刻みの弧長が潰れないように）
 V_FLOOR = 0.3
@@ -51,7 +51,7 @@ V_FLOOR = 0.3
 class MPCConfig(NamedTuple):
     wheelbase: float = 0.23
     max_steer: float = 0.46175             #: 指令舵角の上限 [rad]（`Vehicle.max_steer`）
-    steer_rate: float = 7.0                #: 舵レートの上限 [rad/s]
+    steer_rate: float = 7.0                #: 舵レートの上限 [rad/s]。実機の値は `steer_rate_for(vehicle.cmd_steer_rate_limit_rad_s)`
     horizon: int = 20                      #: 予測ステップ数 N
     dt: float = 0.1                        #: 1ステップの時間 [s]
     delay_s: float = 0.06                  #: 遅延補償の時間 [s]
@@ -66,6 +66,16 @@ class MPCConfig(NamedTuple):
     servo_gain: float = 1.0                #: 指令→実舵角の定常ゲイン（箱の上限に使う）
     #: 速度を読む先読み時間 [s]（`PursuitConfig.speed_preview_s`）
     speed_preview_s: float | None = None
+
+
+#: 舵レートの制限が無い（`cmd_steer_rate_limit_rad_s = 0`）ときに箱制約へ入れる値 [rad/s]。0 を渡すと舵が動かなくなる
+NO_STEER_RATE_LIMIT = 1.0e3
+
+
+def steer_rate_for(cmd_steer_rate_limit_rad_s: float) -> float:
+    """`MPCConfig.steer_rate` に入れる値。実機の舵は COMMAND のレート制限（`[safety] cmd_steer_rate_limit_rad_s`）で
+    ランプした参照に追従するので、その値を予測の制約にする。0 以下（制限なし）なら `NO_STEER_RATE_LIMIT`。"""
+    return cmd_steer_rate_limit_rad_s if cmd_steer_rate_limit_rad_s > 0 else NO_STEER_RATE_LIMIT
 
 
 #: MPC が向きのずれを線形に扱える上限 [rad]。超えたら Pure Pursuit の舵を返す（`MPCFollower.fallback`）

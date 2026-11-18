@@ -187,6 +187,19 @@ class TestMPC(unittest.TestCase):
         self.assertLess(out.max() - out.min(), 0.005)
         self.assertAlmostEqual(float(out.mean()), steer, delta=0.02)
 
+    def test_舵レートは車両のCOMMANDの制限を使う(self):
+        """planner の MPC は `[safety] cmd_steer_rate_limit_rad_s`（実機の舵がランプする速さ）を舵レートの制約にする。
+        0（制限なし）なら大きな値にして、舵が止まらない。"""
+        from dataclasses import replace
+        from raspi.auto import slam2d_raceline as sr
+        from raspi.auto.registry import merged_params
+        from raspi.core.vehicle import Vehicle
+        from raspi.nav.mpc import NO_STEER_RATE_LIMIT, steer_rate_for
+        p = merged_params("slam2d_route", {})
+        veh = replace(Vehicle.load(), cmd_steer_rate_limit_rad_s=3.5)
+        self.assertEqual(sr.mpc_config(p, veh).steer_rate, 3.5)
+        self.assertEqual(steer_rate_for(0.0), NO_STEER_RATE_LIMIT)
+
     def test_plannerの切替パラメータ(self):
         keys = {s.key for s in PLANNERS["slam2d_raceline"].params}
         self.assertTrue({"ctrl_mode", "mpc_horizon", "mpc_dt", "mpc_q_y", "mpc_q_psi",
