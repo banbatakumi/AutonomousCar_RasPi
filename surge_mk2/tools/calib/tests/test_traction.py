@@ -170,6 +170,26 @@ class TestTyreRamp(unittest.TestCase):
             # シムのタイヤは山が 0.46 と遠く平らで、95% に届く点は試験の細部（toml の車速 PI など）で動く
             self.assertTrue(0.04 < res.measured[key] <= tyre._TARGET_CAP, (key, res.measured[key], res.report()))
 
+    def test_mu_is_physical_when_the_md_gives_less_torque(self):
+        """MD のトルクが指令の 0.8 倍の車でも、体重計の質量で力を出すので μ の見積もりは同じ車（k = 1）と同じに出る
+        （2026-11-18 までは指令の単位の質量で出していて 1/k 倍に出ていた）。k の車はシムでは質量・荷重を 1/k 倍して作る
+        （`tools/fwsim/plant.py` の `in_command_units`）。"""
+        import re
+        from dataclasses import replace
+        k = 0.8
+        car_k = replace(self.car, mass_kg=self.car.mass_kg / k, fz_static_n=self.car.fz_static_n / k)
+        log, _ = simcar.run(CalibWheel(), car_k, self.enc, lifted=True)
+        c_k = consts_for(car_k, wheel.analyze(log).values)
+        c_k = replace(c_k, mass=self.car.mass_kg)          # 体重計の質量（実際の値）
+        self.assertAlmostEqual(c_k.k, k, delta=0.03)
+        log, _ = simcar.run(CalibTyre(), car_k, self.enc, max_s=200)
+        res_k = tyre.analyze(log, c_k)
+
+        def mu(res):
+            m = [re.search(r"μ(?: ≈ |（≥ )([0-9.]+)", f.text) for f in res.findings]
+            return float(next(x for x in m if x).group(1))
+        self.assertAlmostEqual(mu(res_k), mu(self.res), delta=0.05 * mu(self.res), msg=res_k.report())
+
     def test_fails_when_controllers_were_not_switched_off(self):
         from unittest import mock
         from raspi.auto import calib_tyre

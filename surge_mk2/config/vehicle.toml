@@ -265,7 +265,9 @@ imu_gyro_z_scale = 1.0
 # **校正 6（後輪の空転、`calib_wheel`）**が wheel_* と md_*（MD のトルク＋速度の報告の遅れの合計）、
 # **校正 7（タイヤ）**が mu・tyre_b・tyre_c を書く。yaw_* は 2026-10-05 のヨーモーメント試験の値（TV は同定しない）
 [control.plant]
-mu = 1.3227
+# 実際の力で出した μ。2026-11-18 に、校正 7 が指令の単位の質量で出していた 1.3227 を k（トルク定数の誤差 0.778、
+# `tools/calib/torque_scale.py`）倍して換算した。fwsim は質量・荷重を 1/k 倍して使う（`Plant.in_command_units`）
+mu = 1.029
 tyre_b = 97.679
 tyre_c = 0.3
 load_transfer = 0.13324492181757844

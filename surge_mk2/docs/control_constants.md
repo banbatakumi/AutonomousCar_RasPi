@@ -63,6 +63,7 @@
 | `DRIVE_LAUNCH_TIMEOUT_S`・`_MIN_STEP_M_S`・`_REVERSE_SPEED_M_S` | 3.0・0.5・0.3 | D | 発進を始める・打ち切る条件 |
 | `DRIVE_ABS_FALLBACK_LIMIT_RATIO`・`_TIME_S` | 0.2・0.2 | D | 前輪エンコーダ故障時に ABS が制動を抜き続けないための見張り |
 | `tc_slip_target`・`abs_slip_target` | 0.15・0.15（手置き、`tools/calib/slip_gains.py`） | D | 前後の力は肩より先でほぼ平ら（fwsim で 0.12〜0.40 の発進の効率 0.945〜0.950）、上げるほど横グリップを失う。前後と横の配分の方針として固定し、床ごとに測らない（2026-11-18）。校正 7 は肩と食い違わないかを確かめるだけ |
+| トルク定数の誤差 k（書き込まない） | 約 0.78（2026-11-18） | C（k = r·m/(1/G − 2J/r)） | 校正 5 の G・6 の J・体重計の質量から `tools/calib/torque_scale.py` が出す。校正 7 の力・μ と fwsim／校正 9 の予測の車の単位合わせに使う。制御は指令の単位で閉じていて使わない |
 | `tc_kp/ki`・`abs_kp/ki` | ωc 120・60rad/s、比 8・4 | C（式 kp = ωc·J/r）＋E（ωc・比） | J は校正 6。ωc・比は旧校正 8（実機で ωc を振った、2026-11-18 廃止）の結果を固定（`slip_gains.py`） |
 | `slip_speed_floor_m_s`・`wheel_lift_diff_threshold_m_s` | 0.5・0.35 | E | 低速のスリップ率の分母、片輪浮きの判定。前輪の読みの誤差（タイヤ径・周期誤差 数%）より上に置く。後者は車速に比例させる（例: 7%×車速＋下限）のが物理的 |
 | `tv_max_ratio` | 0.5 | D | 内輪のトルクを残す上限 |

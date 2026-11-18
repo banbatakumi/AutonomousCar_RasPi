@@ -7,6 +7,7 @@ planner は通さない（記録の `/cmd` が入力）。指令が STM32 に効
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,7 @@ from tools.fwsim.fw import IN, MODE_BRAKE, MODE_SPEED, MODE_TORQUE, OUT, HostCon
 
 from .log import Log
 from .simcar import DT, SUBSTEPS, Car, firmware
+from .torque_scale import torque_scale
 
 __all__ = ["replay", "car_from_toml", "best_latency"]
 
@@ -30,7 +32,7 @@ def car_from_toml(path: str | Path = DEFAULT_TOML) -> Car:
 
     車速の同定（`[dynamics] speed_plant_gain`・`rolling_resistance`）は、車輪の回転の慣性・摩擦を含んだ実効の値。
     モデルの車輪の慣性 J（`[control.plant]`）ぶんを質量から引き、摩擦は転がり抵抗に含めて 0 にする。
-    MD の遅れ・タイヤは `[control.plant]`（校正 6・7）。"""
+    MD の遅れ・タイヤは `[control.plant]`（校正 6・7。μ は実際の値）。"""
     with open(path, "rb") as f:
         d = tomllib.load(f)
     dyn = d.get("dynamics", {})
@@ -41,6 +43,11 @@ def car_from_toml(path: str | Path = DEFAULT_TOML) -> Car:
     G = float(dyn.get("speed_plant_gain", 0.0)) or 1.0 / (r * float(d.get("mass", 2.0)))
     over = dict(mass_kg=max(0.5, 1.0 / (r * G) - 2 * J / r ** 2), wheel_inertia_kgm2=J, wheel_friction_nm=0.0,
                 rolling_decel_m_s2=float(dyn.get("rolling_resistance", car.rolling_decel_m_s2)))
+    # 上の質量は指令の単位（= m/k。k はトルク定数の誤差）。μ は実際の値なので、静止荷重も 1/k 倍してタイヤの力を指令の単位に
+    # そろえる（`tools/calib/torque_scale.py`・`tools/fwsim/plant.py` の `in_command_units` と同じ）
+    k = torque_scale(G, J, float(d.get("mass", float("nan"))), r)
+    if math.isfinite(k) and k > 0:
+        over["fz_static_n"] = car.fz_static_n / k
     for k in ("md_delay_s", "md_tau_s", "mu", "tyre_b", "tyre_c", "load_transfer"):
         if k in plant:
             over[k] = float(plant[k])

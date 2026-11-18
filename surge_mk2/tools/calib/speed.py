@@ -265,6 +265,24 @@ def direction_check(segs: list[Segment]) -> tuple[float, float] | None:
     return fit_plant(a, fit_viscous=False).G, fit_plant(b, fit_viscous=False).G
 
 
+def _report_torque_scale(res: Result, **known) -> None:
+    """MD のトルク定数の誤差 k（実際のトルク ÷ 指令）を、この解析の値と今の toml の残りから出して所見に足す（書き込まない）。"""
+    from .torque_scale import K_RANGE, torque_scale_from_toml
+    try:
+        k = torque_scale_from_toml(**known)
+    except (OSError, ValueError):
+        return
+    if k != k:
+        res.info("トルク定数の誤差 k は出せない（G・後輪の慣性・質量のどれかが無い）")
+        return
+    msg = (f"トルク定数の誤差 k = {k:.3f}（実際のトルク ÷ 指令。体重計の質量と G・後輪の慣性から。書き込まない。"
+           "校正 7 の力と fwsim の車が使う。`tools/calib/torque_scale.py`）")
+    if K_RANGE[0] <= k <= K_RANGE[1]:
+        res.info(msg)
+    else:
+        res.warn(msg + f"。ありそうな範囲 {K_RANGE[0]}〜{K_RANGE[1]} の外: G・後輪の慣性・質量・MD のトルクの設定を確かめる")
+
+
 def analyze(log: Log) -> Result:
     res = Result("校正 5: 車速制御（車体の同定と PI・FF の設計）")
     if log.aborted:
@@ -285,6 +303,7 @@ def analyze(log: Log) -> Result:
     res.info(f"トルク→加速度の遅れ: むだ時間 {f.d * 1000:.1f}ms＋1次遅れ {f.tau * 1000:.1f}ms（MD のトルクの遅れと、"
              "後輪が滑って前後力が立ち上がるまでの遅れの合計。分け方は 10ms の TELEMETRY からは確かでない）")
     res.info(f"当てはめの残差 {f.resid_mm:.2f}mm（走行距離。{f.segments} 区間・{f.n} 点）")
+    _report_torque_scale(res, G=f.G)
     if not 0.75 * G_NOMINAL < f.G < 1.35 * G_NOMINAL:
         res.warn(f"G が名目の {f.G / G_NOMINAL:.2f} 倍。質量・車輪半径・MD のトルクの設定を確かめる")
     if not 0.03 < f.rr_fwd < 1.0:

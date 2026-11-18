@@ -33,7 +33,7 @@ from .encoder import _stm_time
 from .log import Log
 from .result import Result
 from .slip_gains import WC_RAD_S, gains_for_inertia
-from .speed import _FINE_DT, Segment, _fine_input
+from .speed import _FINE_DT, Segment, _fine_input, _report_torque_scale
 
 __all__ = ["analyze", "WheelFit", "fit_wheels"]
 
@@ -225,6 +225,7 @@ def analyze(log: Log) -> Result:
                        "control.plant.md_delay_s": round(d, 5), "control.plant.md_tau_s": round(tau, 5)})
     res.notes.update({"control.plant.wheel_inertia_kgm2": "左右の平均",
                       "control.plant.md_delay_s": "MD のトルクの遅れ＋MD の速度の遅れ（左右の大きい方）"})
+    _report_torque_scale(res, wheel_inertia_kgm2=float(f"{J:.4g}"))
     # TC・ABS のゲインは J から式で決まる（`tools/calib/slip_gains.py`。床・タイヤに依らない）
     g = gains_for_inertia(float(f"{J:.4g}"))     # 書き込む J（丸めた値）から
     res.values.update({f"control.{k}": v for k, v in g.items()})

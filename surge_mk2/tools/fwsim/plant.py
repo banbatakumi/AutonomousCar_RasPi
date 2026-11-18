@@ -122,7 +122,29 @@ class Plant:
         for k, v in d.get("control", {}).get("plant", {}).items():
             if k in names and isinstance(v, (int, float)):
                 over[k] = float(v)
-        return replace(cls(), **over)
+        return replace(cls(), **over).in_command_units(torque_scale_of(d))
+
+    def in_command_units(self, k: float) -> "Plant":
+        """MD のトルク定数の誤差 k（実際のトルク ÷ 指令。`tools/calib/torque_scale.py`）を入れた車。
+
+        `host_sim.c` はトルク指令をそのまま実際のトルクにする。同定した後輪の慣性・摩擦（校正 6）とヨーの慣性・減衰
+        （トルク差で当てはめた値）は**指令の単位**なので、残りの車体側（質量・後輪の静止荷重）を 1/k 倍して単位をそろえる。
+        タイヤの力も 1/k 倍になり（μ は実際の値のまま）、加速度・荷重移動・摩擦円はトルクを k 倍した実際の車と同じになる。
+        k が決まらない（nan）・1 なら、そのまま。"""
+        if not math.isfinite(k) or k <= 0 or k == 1.0:
+            return self
+        return replace(self, mass_kg=self.mass_kg / k, fz_static_n=self.fz_static_n / k)
+
+
+def torque_scale_of(d: dict) -> float:
+    """読んだ `vehicle.toml` から k（G・後輪の慣性・質量のどれかが無ければ nan）。"""
+    from tools.calib.torque_scale import torque_scale
+    G = d.get("dynamics", {}).get("speed_plant_gain")
+    J = d.get("control", {}).get("plant", {}).get("wheel_inertia_kgm2")
+    m = d.get("mass")
+    if not all(isinstance(x, (int, float)) for x in (G, J, m)):
+        return float("nan")
+    return torque_scale(float(G), float(J), float(m))
 
 
 NOMINAL = Plant()

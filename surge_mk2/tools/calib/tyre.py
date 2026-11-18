@@ -11,9 +11,9 @@
 
 - スリップ率: STM32 が測って制御に使っている値（TELEMETRY の `tc_slip`）の左右別。**`trim`（ほぼ加速していない定速）の
   中央値を引く**（前輪の倍率誤差などによる偏り。0.006〜0.011 ある）。制動は符号を反転して大きさにする
-- 前後力の合計: 車体の運動から F = m_b·(a + r_b)。a は走行距離を 2 次式で当てはめた加速度、m_b は車体の実効の質量
-  （校正 5 の G から後輪の回転の慣性を除いたもの）、r_b は車体の転がり抵抗
-- 前後力の左右の比: 車輪の運動方程式から f = (T − J·ω̇ − T_f)/r（T は各輪のトルク指令、ω̇ は周速の傾き。J・T_f は校正 6）。
+- 前後力の合計: 車体の運動から F = m·(a + r_b)。a は走行距離を 2 次式で当てはめた加速度、m は体重計の質量（実際の力。
+  2026-11-18 までは指令の単位の実効の質量 m/k を使っていて、力と μ が 1/k 倍に出ていた）、r_b は車体の転がり抵抗
+- 前後力の左右の比: 車輪の運動方程式から f = k·(T − J·ω̇ − T_f)/r（k はトルク定数の誤差。T・J・T_f は指令の単位）（T は各輪のトルク指令、ω̇ は周速の傾き。J・T_f は校正 6）。
   ランプが遅ければ慣性の項は力の 3% 程度で、空転・ロックに入った後も慣性の項ごと数えているので力が出る。
   **各輪の力は、車体の合計を車輪から出した左右の比で配る**（F_L = F·f_L/(f_L + f_R)）。MD のトルク定数や、制動の低い周速での
   トルク抜け（約 20rad/s 以下）など、指令と実際のトルクの差は左右で同じと見て、比には効かない。車輪から出した和と車体の合計の
@@ -70,6 +70,7 @@ from . import toml_io
 from .encoder import _stm_time
 from .log import Log
 from .result import Result
+from .torque_scale import K_RANGE, torque_scale
 from .slip_gains import SLIP_TARGET
 from .speed import body_distance
 
@@ -105,11 +106,20 @@ class Consts:
     Tf: float = 0.0025              #: 校正 6 の後輪の摩擦 [N·m]
     d: float = 0.006                #: 校正 6 の遅れ（むだ時間）[s]
     tau: float = 0.005              #: 同 1次遅れ [s]
-    mass: float = 2.0
+    mass: float = 2.0               #: 体重計の質量 [kg]
+
+    @property
+    def k(self) -> float:
+        """MD のトルク定数の誤差（実際のトルク ÷ 指令。`tools/calib/torque_scale.py`）。G・J は指令の単位で測っているので、
+        体重計の質量と合わせると出る。決まらないときは 1（指令の単位のまま）。"""
+        k = torque_scale(self.G, self.J, self.mass, R)
+        return k if math.isfinite(k) else 1.0
 
     @property
     def m_body(self) -> float:
-        return 1.0 / (R * self.G) - 2.0 * self.J / R ** 2
+        """前後力を出す質量 [kg]: 体重計の質量（実際の力）。2026-11-18 までは 1/(r·G) − 2J/r²（指令の単位の実効の質量 = m/k）を
+        使っていて、力と μ が 1/k 倍（実機で約 1.29 倍）に出ていた。"""
+        return self.mass
 
     @property
     def rr_body(self) -> float:
@@ -236,7 +246,7 @@ def curve_points(log: Log, c: Consts) -> tuple[list[CurvePoint], dict[str, float
                 fw = []
                 for w in (0, 1):
                     dv_dt = float(np.polyfit(tt, wsp[part, w], 1)[0])
-                    f = (float(np.mean(tqc[part, w])) - c.J * dv_dt / R - c.Tf * sgn) / R
+                    f = c.k * (float(np.mean(tqc[part, w])) - c.J * dv_dt / R - c.Tf * sgn) / R   # 指令の単位 → 実際の力
                     fw.append(-f if kind == "brake" else f)
                 if fw[0] + fw[1] < 0.3 or F < 0.3:
                     continue
@@ -356,15 +366,19 @@ def pick_target(curve: Curve, lam_max: float, frac: float = 0.95) -> tuple[float
 def analyze(log: Log, consts: Consts | None = None) -> Result:
     c = consts or Consts.from_toml()
     res = Result("校正 7: タイヤ（スリップ率→前後力）と肩の確かめ")
+    k = torque_scale(c.G, c.J, c.mass, R)
+    if math.isfinite(k):
+        res.info(f"トルク定数の誤差 k = {k:.3f}（体重計の質量 {c.mass:.2f}kg・G {c.G:.2f}・後輪の慣性から）。前後力は実際の力 [N] で出す")
+    else:
+        res.warn("トルク定数の誤差 k が出せない（G・後輪の慣性・質量を確かめる）。前後力はトルク指令の単位のまま")
     if log.aborted:
         res.warn(f"試験は途中で中止された（{log.aborted}）。残った区間で解析する")
     pts, diag = curve_points(log, c)
-    res.info(f"使った値: 車体の実効の質量 {c.m_body:.3f}kg・転がり抵抗 {c.rr_body:.3f}m/s²（校正 5）、後輪の慣性 "
+    res.info(f"使った値: 質量 {c.m_body:.3f}kg・転がり抵抗 {c.rr_body:.3f}m/s²（校正 5）、後輪の慣性 "
              f"{c.J * 1e6:.1f}e-6kg·m²・遅れ {c.d * 1000:.1f}＋{c.tau * 1000:.1f}ms（校正 6）")
-    if not 0.8 * c.mass < c.m_body < 1.2 * c.mass:
-        res.warn(f"車体の実効の質量 {c.m_body:.2f}kg が車両の質量 {c.mass:.2f}kg と 2 割以上違う（toml の speed_plant_gain が"
-                 "古い？・MD のトルク定数が実際と違う＝指令ほどトルクが出ていない）。前後力はトルク指令の単位で出る"
-                 "（TC・ABS の設計はこの単位で閉じるので影響しない。μ はこの比で狂う）")
+    if math.isfinite(k) and not K_RANGE[0] <= k <= K_RANGE[1]:
+        res.warn(f"k = {k:.2f} がありそうな範囲 {K_RANGE[0]}〜{K_RANGE[1]} の外（toml の speed_plant_gain・後輪の慣性・質量が古い？"
+                 "MD のトルクの設定が変わった？）")
     if diag["active_frac"] > _ACTIVE_FRAC_MAX:
         res.fail(f"ランプの間に TC・ABS が {diag['active_frac']:.0%} の時間働いていた。切る上書きが STM32 に入っていない"
                  "（記録の /diag/link を確かめる）。曲線は制御器の影響を受けている")
