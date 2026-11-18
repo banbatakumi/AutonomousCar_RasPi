@@ -37,7 +37,7 @@
 
 - `[dynamics]` の舵・ヨーの遅れ・車体の利得・転がり抵抗・遅延（校正 2〜5）
 - `[control]` の `steer_link_*`・`max_steer`（校正 2）、`enc_*`（校正 1）、`kf_*`（`tools/calib/kf.py`、検定は `raspi/tools/kf_consistency.py`）
-- `[control]` の TC・ABS の目標（校正 7）とゲイン（校正 8。実機で ωc を振って決める）、`[control.plant]`（校正 6・7）
+- `[control]` の TC・ABS のゲイン（校正 6 の J から式）、`[control.plant]`（校正 6・7）
 - `[limits]`（slam2d の上限。校正 7・9）
 - 自動停止・DISARM 後の制動の見積もり: `[limits] abs_brake_decel_m_s2`（校正 9 の ABS の制動）と
   `[control.plant] md_delay_s + md_tau_s`（校正 6）を、io_node が CONFIG_SET（`BRAKE_DECEL_M_S2`・
@@ -62,7 +62,8 @@
 | `DRIVE_LAUNCH_END_MARGIN_M_S` | 0.05 | E | ファームのコメントの根拠「前輪 LPF τ≈10ms の遅れ×全開の加速度」は古い（車速はカルマンフィルタ）。今の式なら 加速度×(加速度計の DLPF 3ms＋MD 4.5ms) ≒ 0.02。実機のローンチの記録で確かめてから直す |
 | `DRIVE_LAUNCH_TIMEOUT_S`・`_MIN_STEP_M_S`・`_REVERSE_SPEED_M_S` | 3.0・0.5・0.3 | D | 発進を始める・打ち切る条件 |
 | `DRIVE_ABS_FALLBACK_LIMIT_RATIO`・`_TIME_S` | 0.2・0.2 | D | 前輪エンコーダ故障時に ABS が制動を抜き続けないための見張り |
-| `tc_slip_target`・`abs_slip_target` | 校正 7 が決める | D | 曲線の山の 95% の力が出るスリップ率（`tools/calib/tyre.py`。前後の力を優先し、横のための上限は付けない）。ゲインは校正 8（`tools/calib/tc_gain.py`）が実機で決める |
+| `tc_slip_target`・`abs_slip_target` | 0.15・0.15（手置き、`tools/calib/slip_gains.py`） | D | 前後の力は肩より先でほぼ平ら（fwsim で 0.12〜0.40 の発進の効率 0.945〜0.950）、上げるほど横グリップを失う。前後と横の配分の方針として固定し、床ごとに測らない（2026-11-18）。校正 7 は肩と食い違わないかを確かめるだけ |
+| `tc_kp/ki`・`abs_kp/ki` | ωc 120・60rad/s、比 8・4 | C（式 kp = ωc·J/r）＋E（ωc・比） | J は校正 6。ωc・比は旧校正 8（実機で ωc を振った、2026-11-18 廃止）の結果を固定（`slip_gains.py`） |
 | `slip_speed_floor_m_s`・`wheel_lift_diff_threshold_m_s` | 0.5・0.35 | E | 低速のスリップ率の分母、片輪浮きの判定。前輪の読みの誤差（タイヤ径・周期誤差 数%）より上に置く。後者は車速に比例させる（例: 7%×車速＋下限）のが物理的 |
 | `tv_max_ratio` | 0.5 | D | 内輪のトルクを残す上限 |
 | `[control] kf_*`（`SPEED_KF_*` は既定値） | 0.8mm・0.6・0・100・0.05・0.15 | B（`tools/calib/kf.py` が書く。今の値は経験値のまま） | 校正 1 を入れた後の記録で推定し直す。`kf_lever_arm_m` は旋回を含む記録のときだけ推定（IMU の取付位置を実測すれば一部は A にできる） |

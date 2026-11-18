@@ -5,6 +5,7 @@
 - `findings`: 所見。`level` は `ok`（確かめて問題なし）・`info`（参考）・`warn`（★値は出るが確かめること）・
   `fail`（この記録の値は使えない）
 - `verdict`: 所見の最も悪いもの（`fail` があれば「不合格」、`warn` があれば「要確認」、なければ「合格」）
+- `measured`: 測ったが書き込まない値（確かめ用）
 - `series`: GUI に描く時系列・散布図（名前 → (x, y の組の並び)）。描かなくても値は使える
 """
 
@@ -35,6 +36,8 @@ class Result:
     series: dict[str, list[tuple[str, np.ndarray, np.ndarray]]] = field(default_factory=dict)
     #: 値ごとの説明（GUI の一覧に出す。キーは `values` と同じ）
     notes: dict[str, str] = field(default_factory=dict)
+    #: 測ったが書き込まない値（確かめに使う。例: 校正 7 のタイヤの肩のスリップ率）
+    measured: dict[str, float] = field(default_factory=dict)
 
     def add(self, level: str, text: str) -> None:
         assert level in LEVELS, level

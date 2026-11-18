@@ -1,14 +1,14 @@
-"""校正 6〜8（後輪の空転・タイヤ・TC/ABS の確かめ）: 真値の分かっているシムで通す。"""
+"""校正 6・7・9（後輪の空転とゲイン・タイヤの肩・TC/ABS の確かめ）: 真値の分かっているシムで通す。"""
 
 from __future__ import annotations
 
 import unittest
 
-from raspi.auto.calib_tc_gain import KEYS, base_gains
 from raspi.auto.calib_traction_check import CalibTractionCheck
 from raspi.auto.calib_tyre import CalibTyre
 from raspi.auto.calib_wheel import CalibWheel
 from tools.calib import simcar, traction, traction_sim, tyre, wheel
+from tools.calib.slip_gains import SLIP_TARGET, gains_for_inertia
 
 R = 0.030
 
@@ -21,14 +21,13 @@ def consts_for(car: simcar.Car, wf) -> tyre.Consts:
                        d=wf["control.plant.md_delay_s"], tau=wf["control.plant.md_tau_s"], mass=car.mass_kg)
 
 
-def control_part(values: dict[str, float]) -> dict[str, float]:
-    return {k.split(".", 1)[1]: v for k, v in values.items() if k.startswith("control.") and ".plant." not in k}
+#: 固定の目標スリップ率（`slip_gains.SLIP_TARGET`。校正では決めない）
+TARGETS = {"tc_slip_target": SLIP_TARGET, "abs_slip_target": SLIP_TARGET}
 
 
-def gain_part(inertia: float, wc: float = 120.0, ratio: float = 4.0) -> dict[str, float]:
-    """校正 8 が決めるゲインの代わり（交差周波数 wc の基準のゲイン）。校正 7 は目標スリップ率だけを決める。"""
-    kp, ki = base_gains(wc, ratio, inertia)
-    return {k: v for pair in KEYS.values() for k, v in zip(pair, (kp, ki))}
+def gain_part(inertia: float) -> dict[str, float]:
+    """J から式で決まる TC・ABS のゲイン（校正 6 が書く値）。"""
+    return gains_for_inertia(inertia)
 
 
 class TestTraction(unittest.TestCase):
@@ -52,38 +51,51 @@ class TestTraction(unittest.TestCase):
         truth = self.car.md_delay_s + self.car.md_tau_s + self.car.md_speed_tau_s + 0.00475
         self.assertAlmostEqual(lag, truth, delta=0.003)
 
-    def test_tc_target_is_on_rising_side(self):
-        """選んだ TC の目標は「山の 95% の力」なので、発進の距離が最良になる目標（山）より手前にあり、
-        最良の 92% 以上は出る（残りは横のグリップのために残している。シムのタイヤは真の山がスリップ率 0.47 と
-        試した範囲の外で、当てはめた曲線は山を手前に見積もるので 95% より少し下になる）。"""
-        params = {**self.enc, **control_part(self.tyre.values), **gain_part(self.car.wheel_inertia_kgm2)}
+    def test_wheel_writes_gains_from_inertia(self):
+        """校正 6 は J から TC・ABS のゲインを書く（kp = ωc·J/r）。旧校正 8 の実機の値（J = 3.581e-5）を再現する。"""
+        J = self.wheel.values["control.plant.wheel_inertia_kgm2"]
+        for k, v in gain_part(J).items():
+            self.assertAlmostEqual(self.wheel.values[f"control.{k}"], v, places=6)
+        old = gain_part(3.581e-5)
+        self.assertAlmostEqual(old["tc_kp_nm_per_m_s"], 0.14324, places=5)
+        self.assertAlmostEqual(old["tc_ki_nm_per_m"], 2.1486, places=4)
+        self.assertAlmostEqual(old["abs_kp_nm_per_m_s"], 0.07162, places=5)
+        self.assertAlmostEqual(old["abs_ki_nm_per_m"], 1.0743, places=4)
+
+    def test_fixed_tc_target_is_near_best(self):
+        """固定の TC の目標は、発進の距離が最良になる目標の 92% 以上を出す（力は肩より先でほぼ平ら）。"""
+        params = {**self.enc, **TARGETS, **gain_part(self.car.wheel_inertia_kgm2)}
         chosen = traction_sim.launch(self.car, params).distance
         runs = {k: traction_sim.launch(self.car, {**params, "tc_slip_target": k}).distance
                 for k in (0.06, 0.08, 0.10, 0.12, 0.15, 0.2, 0.3)}
         best_k = max(runs, key=runs.get)
-        self.assertLess(params["tc_slip_target"], best_k)
         self.assertGreater(chosen, 0.92 * runs[best_k], (chosen, runs, self.tyre.report()))
 
     def test_designed_gains_are_robust(self):
         """設計したゲインは、4 倍のゲインより（山のあるタイヤでも）トルクが暴れず、発進も遅くない。"""
         from dataclasses import replace
-        params = {**self.enc, **control_part(self.tyre.values), **gain_part(self.car.wheel_inertia_kgm2)}
+        params = {**self.enc, **TARGETS, **gain_part(self.car.wheel_inertia_kgm2)}
         hot = {**params, "tc_kp_nm_per_m_s": params["tc_kp_nm_per_m_s"] * 4, "tc_ki_nm_per_m": params["tc_ki_nm_per_m"] * 4}
         for car in (self.car, replace(self.car, tyre_c=1.6)):
             ok, bad = traction_sim.launch(car, params), traction_sim.launch(car, hot)
             self.assertLess(ok.chatter, bad.chatter)
             self.assertGreater(ok.distance, 0.99 * bad.distance)
 
-    def test_check_passes_with_designed_values(self):
-        params = {**self.enc, **control_part(self.tyre.values), **gain_part(self.car.wheel_inertia_kgm2)}
+    def test_check_with_designed_values_fails_only_on_low_mu_abs(self):
+        params = {**self.enc, **TARGETS, **gain_part(self.car.wheel_inertia_kgm2)}
         log, _ = simcar.run(CalibTractionCheck(), self.car, params)
         res = traction.analyze(log, self.car)
-        self.assertEqual(res.verdict, "合格", res.report())
+        # このシムの車は μ 0.45 と低い。ABS の ωc を実機の値（60rad/s）に固定したので、低い μ では制動のスリップ率が目標 0.15 を
+        # 超える（ωc 90 なら保てる。2026-11-18 に実機の値を残すと決めた）。不合格は ABS の目標の項目だけであること
+        fails = [f.text for f in res.findings if f.level == "fail"]
+        for t in fails:
+            self.assertRegex(t, r"（ABS）: スリップ率の平均", res.report())
+        self.assertFalse(any("発振" in f.text for f in res.findings if f.level == "fail"), res.report())
         self.assertGreater(res.values["limits.a_accel_m_s2"], 1.5)
         self.assertGreater(res.values["limits.a_brake_m_s2"], 1.5)
 
     def test_check_fails_with_oscillating_tc(self):
-        params = {**self.enc, **control_part(self.tyre.values), **gain_part(self.car.wheel_inertia_kgm2),
+        params = {**self.enc, **TARGETS, **gain_part(self.car.wheel_inertia_kgm2),
                   "tc_kp_nm_per_m_s": 1.5, "tc_ki_nm_per_m": 60.0}
         log, _ = simcar.run(CalibTractionCheck(), self.car, params)
         res = traction.analyze(log, self.car)
@@ -129,22 +141,22 @@ class TestTyreRamp(unittest.TestCase):
         d = np.diff(tq)
         self.assertGreater(float(np.mean(d[np.abs(d) < 0.01] >= -1e-3)), 0.9)
 
-    def test_target_is_the_measured_slip_where_force_reaches_95_percent(self):
-        """目標は測定したスリップ率のまま（遅れの補正をしない）で、力が最大の 95% に届く点。上限 0.3。"""
-        for key in ("control.tc_slip_target", "control.abs_slip_target"):
-            self.assertTrue(0.02 <= self.res.values[key] <= tyre._TARGET_CAP, (key, self.res.values[key]))
+    def test_knee_is_the_measured_slip_where_force_reaches_95_percent(self):
+        """肩は測定したスリップ率のまま（遅れの補正をしない）で、力が最大の 95% に届く点。上限 0.3。"""
+        for key in ("tc_knee", "abs_knee"):
+            self.assertTrue(0.02 <= self.res.measured[key] <= tyre._TARGET_CAP, (key, self.res.measured[key]))
 
-    def test_gains_are_not_designed_here(self):
-        """ゲインは校正 8 が実機の閉ループで決める。校正 7 は目標スリップ率だけを出す。"""
-        keys = [k for k in self.res.values if k.endswith(("_kp_nm_per_m_s", "_ki_nm_per_m"))]
+    def test_targets_and_gains_are_not_written_here(self):
+        """目標スリップ率は固定、ゲインは校正 6 が書く。校正 7 はどちらも書かない。"""
+        keys = [k for k in self.res.values if k.endswith(("_kp_nm_per_m_s", "_ki_nm_per_m", "_slip_target"))]
         self.assertEqual(keys, [], keys)
 
     def test_knee_is_found_for_a_symmetric_tyre(self):
         self.assertNotEqual(self.res.verdict, "不合格", self.res.report())
         # 真のタイヤ（B=15・C=1.1）の山の 95% は真のスリップ率 0.145。STM32 の読みは加速中に a·L/v だけ小さい（約 0.01〜0.03）
         # 測定したスリップ率の 95% 点（遅れの補正なし）なので、真の 0.145 より少し高く出る。山（0.46）の手前で、上限 0.3 より下
-        for key in ("control.tc_slip_target", "control.abs_slip_target"):
-            self.assertTrue(0.10 <= self.res.values[key] <= 0.30, (key, self.res.values[key]))
+        for key in ("tc_knee", "abs_knee"):
+            self.assertTrue(0.10 <= self.res.measured[key] <= 0.30, (key, self.res.measured[key]))
         ratio = [f.text for f in self.res.findings if "左右比" in f.text]
         self.assertTrue(ratio and "左/右 = 1.0" in ratio[0], ratio)
 
@@ -154,9 +166,9 @@ class TestTyreRamp(unittest.TestCase):
         self.assertNotEqual(res.verdict, "不合格", res.report())
         warns = " ".join(f.text for f in res.findings if f.level == "warn")
         self.assertIn("左後輪", warns, res.report())
-        for key in ("control.tc_slip_target", "control.abs_slip_target"):
+        for key in ("tc_knee", "abs_knee"):
             # シムのタイヤは山が 0.46 と遠く平らで、95% に届く点は試験の細部（toml の車速 PI など）で動く
-            self.assertTrue(0.04 < res.values[key] <= tyre._TARGET_CAP, (key, res.values[key], res.report()))
+            self.assertTrue(0.04 < res.measured[key] <= tyre._TARGET_CAP, (key, res.measured[key], res.report()))
 
     def test_fails_when_controllers_were_not_switched_off(self):
         from unittest import mock

@@ -1,4 +1,7 @@
-"""校正 7: タイヤ（`raspi/auto/calib_tyre.py` の記録）→ TC・ABS の目標スリップ率。設計は `docs/calibration.md` §4.7。
+"""校正 7: タイヤ（`raspi/auto/calib_tyre.py` の記録）→ タイヤの肩のスリップ率（確かめ）と μ。設計は `docs/calibration.md` §4.7。
+
+**目標スリップ率は書かない**（2026-11-18〜。`tools/calib/slip_gains.py` の固定値 `SLIP_TARGET`）。ここでは肩を測り、固定の目標と
+大きく食い違わないかを確かめる（食い違えば★）。以下の「目標」は、その肩のスリップ率のこと。
 
 ## 1. 曲線を測る
 
@@ -43,7 +46,7 @@ STM32 の測り方の値なので、`V_TARGET` の車速・その力の加速度
 
 位相余裕の式でのゲイン設計（スリップ速度 u' = (r/J)·T − a·u の線形化）は、実機でゲインが高すぎて振動した。
 TC・ABS を切ったランプでも制動側の周速は 0.03m/s 揺れ（定速は 0.004）、揺れの一部は制御器の外（MD・タイヤ）にある。
-ゲインは校正 8（`calib_tc_gain`）が、交差周波数を振って実機の閉ループで決める。
+ゲインは後輪の慣性 J から式で決める（校正 6 が書く。`tools/calib/slip_gains.py`）。
 
 ## 4. 曲線が標準の式に合わないとき
 
@@ -67,6 +70,7 @@ from . import toml_io
 from .encoder import _stm_time
 from .log import Log
 from .result import Result
+from .slip_gains import SLIP_TARGET
 from .speed import body_distance
 
 __all__ = ["CurvePoint", "Curve", "Empirical", "curve_points", "fit_curve", "estimate_lag", "empirical_peak", "pick_target", "analyze", "Consts"]
@@ -82,6 +86,8 @@ _TRIM_SKIP_S = 0.05
 _MIN_POINTS = 12
 _SLIP_LOW_OK = 0.03
 _SLIP_HIGH_OK = 0.15
+#: 肩がこの倍数 × 固定の目標を超えたら★（その輪は目標では力の 95% に届かない）
+KNEE_WARN_RATIO = 2.0
 _ACTIVE_FRAC_MAX = 0.05
 _MIN_V = 0.6
 #: 横の上限の見積もりに使う、後軸の静止荷重の割合と重心高/ホイールベース（実測していない机上の値）
@@ -349,7 +355,7 @@ def pick_target(curve: Curve, lam_max: float, frac: float = 0.95) -> tuple[float
 
 def analyze(log: Log, consts: Consts | None = None) -> Result:
     c = consts or Consts.from_toml()
-    res = Result("校正 7: タイヤ（スリップ率→前後力）と TC・ABS の目標スリップ率")
+    res = Result("校正 7: タイヤ（スリップ率→前後力）と肩の確かめ")
     if log.aborted:
         res.warn(f"試験は途中で中止された（{log.aborted}）。残った区間で解析する")
     pts, diag = curve_points(log, c)
@@ -391,7 +397,7 @@ def analyze(log: Log, consts: Consts | None = None) -> Result:
         slips = np.array([max(q.slip_l, q.slip_r) for q in p])
         if slips.max() < _SLIP_HIGH_OK:
             res.warn(f"{name}: スリップ率が {slips.max():.2f} までしか上がっていない（{_SLIP_HIGH_OK} 以上要る）。力の頭打ちが"
-                     "見えず、目標は当てにならない（路面のグリップが強すぎる？ランプが直線の端で切られた？）")
+                     "見えず、肩は当てにならない（路面のグリップが強すぎる？ランプが直線の端で切られた？）")
         low = np.array([min(q.slip_l, q.slip_r) for q in p])
         if low.min() > _SLIP_LOW_OK:
             res.warn(f"{name}: 最も低いスリップ率が {low.min():.3f}。立ち上がり（肩）が測れていない")
@@ -438,16 +444,16 @@ def analyze(log: Log, consts: Consts | None = None) -> Result:
                 tt = emp0.target
                 note = "" if emp0.target <= _TARGET_CAP else f"（上限 {_TARGET_CAP} で頭打ち）"
                 res.info(f"{name}・{wname}: 測定したスリップ率で、力（群ごとの中央値）が最大 {emp0.f_max:.2f}N の 95% に届くのは "
-                         f"{emp0.target:.3f}（{emp0.n_bins} 群、〜{emp0.lam_max:.2f}）{note} → 目標 {tg:.3f}")
+                         f"{emp0.target:.3f}（{emp0.n_bins} 群、〜{emp0.lam_max:.2f}）{note} → 肩 {tg:.3f}")
                 if not hp:
                     res.warn(f"{name}・{wname}: 試したスリップ率（〜{emp0.lam_max:.2f}）の中に力の山（その先で力が落ちる点）は見えない。"
-                             f"力が頭打ちになる点（95%）の {tg:.3f} を目標にした。山がもっと先なら、力を少し捨てている")
+                             f"力が頭打ちになる点（95%）の {tg:.3f} を肩とした。山がもっと先なら、肩はもっと高い")
             elif hp:
                 tg = max(0.02, tt - at * lag / V_TARGET)
             else:
                 top = sorted(q.slip for q in pw)[-max(3, len(pw) // 10):]
                 tg = max(0.02, min(_TARGET_CAP, float(np.median(top))))
-                res.warn(f"{name}・{wname}: 点が足りず山を読めない。ランプの終わりのスリップ率 {tg:.3f} を目標にした（低めに出る）")
+                res.warn(f"{name}・{wname}: 点が足りず山を読めない。ランプの終わりのスリップ率 {tg:.3f} を肩とした（低めに出る）")
             tts.append(tt)
             hps.append(hp)
             ats.append(at)
@@ -456,14 +462,14 @@ def analyze(log: Log, consts: Consts | None = None) -> Result:
             tgs.append(tg)
         if kind == "drive":
             # TC は各輪が同じ目標を使う。左右の肩が違うとき、弱い輪（大きい方）に合わせると強い輪の保護が緩く、強い輪に合わせると
-            # 弱い輪の力を削る。力は肩の付近でほぼ平らなので、**左右の平均**を採る（実機: 左 0.15・右 0.31 → 0.23。校正 8 の実測で TC に
+            # 弱い輪の力を削る。力は肩の付近でほぼ平らなので、**左右の平均**を採る（実機: 左 0.15・右 0.31 → 0.23。旧校正 8 の実測で TC に
             # 0.2 前後を保たせても加速は 0.3 のときと 7% 以内、横力の余裕は残る）
             target = float(np.mean(tgs))
             if abs(tgs[0] - tgs[1]) < 0.4 * max(tgs):
-                res.ok(f"{name}: 目標スリップ率 {target:.3f}（左右の平均。左 {tgs[0]:.3f}・右 {tgs[1]:.3f}）")
+                res.ok(f"{name}: 肩のスリップ率 {target:.3f}（左右の平均。左 {tgs[0]:.3f}・右 {tgs[1]:.3f}）")
             else:
-                res.warn(f"{name}: 左右の肩が違う（左 {tgs[0]:.3f}・右 {tgs[1]:.3f}）。平均 {target:.3f} を採る。肩が高い輪は力を少し捨てる"
-                         "（左右の荷重・タイヤ・MD を揃えると目標を 1 つにできる）")
+                res.warn(f"{name}: 左右の肩が違う（左 {tgs[0]:.3f}・右 {tgs[1]:.3f}、平均 {target:.3f}）。TC は各輪が同じ目標を使うので、"
+                         "肩が高い輪は力を少し捨てる（左右の荷重・タイヤ・MD を確かめる）")
             ratio = plats[0] / plats[1] if plats[1] > 1e-9 else float("inf")
             res.info(f"{name}: 力の上限の左右比 左/右 = {ratio:.2f}（左 {plats[0]:.2f}N・右 {plats[1]:.2f}N）")
             if not 0.8 < ratio < 1.25:
@@ -475,7 +481,7 @@ def analyze(log: Log, consts: Consts | None = None) -> Result:
             a_ts = ats
         else:
             target = tgs[0]
-            res.ok(f"{name}: 目標スリップ率 {target:.3f}")
+            res.ok(f"{name}: 肩のスリップ率 {target:.3f}")
         targets[kind] = target
         # 同じ力を出すのに左右で滑り方がどれだけ違うか（ランプの前半: 力が出始めて肩の手前まで）
         sel = [q for q in p if 0.03 < max(q.slip_l, q.slip_r) < 0.4 and q.force > 1.0]
@@ -492,9 +498,14 @@ def analyze(log: Log, consts: Consts | None = None) -> Result:
             res.info(f"{name}: 車輪から出した力の和 ÷ 車体から出した力 = {fr:.2f}（1 に近いほど J・質量・MD のトルクが合っている）")
             if not 0.85 < fr < 1.15:
                 res.warn(f"{name}: 車輪と車体から出した力が {abs(fr - 1):.0%} 食い違う。校正 5・6 の値（質量・慣性・摩擦）か MD の"
-                         "トルク定数がずれている。左右の比と目標は影響が小さいが、μ・横の上限は当てにならない")
-        res.values[f"control.{key}_slip_target"] = round(target, 4)
-        res.notes[f"control.{key}_slip_target"] = "力が最大の 95% に届く測定したスリップ率（STM32 の読み。TC は左右の平均。各輪の上限 0.3）"
+                         "トルク定数がずれている。左右の比と肩は影響が小さいが、μ・横の上限は当てにならない")
+        # 目標は固定（`slip_gains.SLIP_TARGET`）。肩は確かめにだけ使う
+        res.measured[f"{key}_knee"] = round(target, 4)
+        for wname, tg in zip((w for w, _ in sets), tgs):
+            if tg > KNEE_WARN_RATIO * SLIP_TARGET:
+                res.warn(f"{name}・{wname}: 肩 {tg:.3f} が固定の目標 {SLIP_TARGET} の {KNEE_WARN_RATIO:.0f} 倍を超える（この輪は目標では"
+                         "力の 95% に届かない。タイヤ・荷重・MD を確かめる。路面の違いなら走行中の学習に任せる）")
+        res.info(f"{name}: 肩 {target:.3f}（固定の目標 {SLIP_TARGET}。書き込まない）")
         if kind == "drive":
             drive_cvs = cvs
         for (wname, pw), cv_w in zip(sets, cvs):
@@ -521,5 +532,5 @@ def analyze(log: Log, consts: Consts | None = None) -> Result:
             # 山が範囲の外・曲線の形が決まらないときは D が当てにならない（2026-10-19 の実機で μ 1.24・12.1m/s² と出た）
             res.warn(f"駆動の力の山が測った範囲に無い、または曲線の形が決まらないので μ（≥ {mu:.2f} 程度）・タイヤの係数・横の上限は"
                      "書かない（今の値のまま。走行中の学習に任せる）")
-    res.info("ゲイン（kp・ki）はここでは決めない。校正 8（`calib_tc_gain`）が、実機で交差周波数を振って決める")
+    res.info("目標スリップ率とゲインはここでは決めない（目標は固定、ゲインは校正 6 の J から式。`tools/calib/slip_gains.py`）")
     return res

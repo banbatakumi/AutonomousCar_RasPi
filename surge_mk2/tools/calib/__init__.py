@@ -67,11 +67,6 @@ def _tyre(log):
     return tyre.analyze(log)
 
 
-def _tc_gain(log):
-    from . import tc_gain
-    return tc_gain.analyze(log)
-
-
 def _traction(log):
     from . import traction
     return traction.analyze(log)
@@ -92,9 +87,8 @@ CALIBRATIONS: tuple[Calibration, ...] = (
     Calibration("5", "車速制御（測る）", ("calib_speed", "sysid_speed_pi"), _speed, "1", _ENC),
     Calibration("5", "車速制御（確かめる）", ("calib_speed_check",), _speed_check, "5（測る）を適用", _ENC + _SPEED),
     Calibration("6", "後輪の空転（台上）", ("calib_wheel", "sysid_wheel"), _wheel),
-    Calibration("7", "タイヤ→TC・ABS", ("calib_tyre",), _tyre, "1 を適用して録る・5・6 を適用して解析", _ENC),
-    Calibration("8", "TC・ABS のゲイン", ("calib_tc_gain",), _tc_gain, "5・6・7 を適用", _ENC + _SLIP_TARGETS),
-    Calibration("9", "TC・ABS の確かめ", ("calib_traction_check",), _traction, "7・8 を適用", _ENC + _TRACTION),
+    Calibration("7", "タイヤの肩（確かめ）", ("calib_tyre",), _tyre, "1 を適用して録る・5・6 を適用して解析", _ENC),
+    Calibration("9", "TC・ABS の確かめ", ("calib_traction_check",), _traction, "6 を適用", _ENC + _TRACTION),
 )
 
 

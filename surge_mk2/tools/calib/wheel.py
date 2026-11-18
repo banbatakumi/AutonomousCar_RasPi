@@ -1,4 +1,5 @@
-"""校正 6: 後輪の空転（`raspi/auto/calib_wheel.py` の記録 → `[control.plant]`）。設計は `docs/calibration.md` §4.6。
+"""校正 6: 後輪の空転（`raspi/auto/calib_wheel.py` の記録 → `[control.plant]` と、J から式で決まる TC・ABS のゲイン）。
+設計は `docs/calibration.md` §4.6。
 
 ## モデル（1輪ごと。周速 w = 車輪の角速度 × 半径）
 
@@ -31,6 +32,7 @@ from raspi.auto._calib_common import phase_parts
 from .encoder import _stm_time
 from .log import Log
 from .result import Result
+from .slip_gains import WC_RAD_S, gains_for_inertia
 from .speed import _FINE_DT, Segment, _fine_input
 
 __all__ = ["analyze", "WheelFit", "fit_wheels"]
@@ -223,4 +225,10 @@ def analyze(log: Log) -> Result:
                        "control.plant.md_delay_s": round(d, 5), "control.plant.md_tau_s": round(tau, 5)})
     res.notes.update({"control.plant.wheel_inertia_kgm2": "左右の平均",
                       "control.plant.md_delay_s": "MD のトルクの遅れ＋MD の速度の遅れ（左右の大きい方）"})
+    # TC・ABS のゲインは J から式で決まる（`tools/calib/slip_gains.py`。床・タイヤに依らない）
+    g = gains_for_inertia(float(f"{J:.4g}"))     # 書き込む J（丸めた値）から
+    res.values.update({f"control.{k}": v for k, v in g.items()})
+    for kind in ("tc", "abs"):
+        res.notes[f"control.{kind}_kp_nm_per_m_s"] = f"= ωc·J/r（ωc {WC_RAD_S[kind]:.0f}rad/s 固定、`slip_gains.py`）"
+    res.info(f"TC・ABS のゲインを J から決めた（kp = ωc·J/r。TC kp {g['tc_kp_nm_per_m_s']:.4g}・ABS kp {g['abs_kp_nm_per_m_s']:.4g}）")
     return res

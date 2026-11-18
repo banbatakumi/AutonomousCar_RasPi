@@ -23,7 +23,6 @@ from __future__ import annotations
 import numpy as np
 
 from raspi.auto._calib_common import phase_parts
-from raspi.auto.calib_tc_gain import OSC_FREQ_MIN_HZ
 from raspi.msgs.convert import MAX_TARGET_TORQUE_NM
 
 from .encoder import _stm_time
@@ -40,6 +39,8 @@ SLIP_TOL_REL = 0.25
 #: 発振で不合格にする揺れ（区間内の標準偏差）の下限。実機は TC・ABS のゲインによらず 20〜30Hz の常在の揺れがあり（標準偏差 0.05〜0.14。ABS が最大）、
 #: 一つの周波数に集まるだけでは発振と言えない。それより大きい集中した揺れだけを不合格にし、小さければ★
 OSC_FAIL_STD = 0.2
+#: 発振とみなす周波数の下限 [Hz]。それより遅い揺れはゲインが低くて目標に保てていないだけ
+OSC_FREQ_MIN_HZ = 12.0
 SLIP_STD_MAX = 0.04
 #: 揺れのパワーのうち一番強い周波数（隣の 1 本を含む）が占める割合の上限。超えたら発振とみなす
 PEAK_SHARE_MAX = 0.5
@@ -188,7 +189,7 @@ def analyze(log: Log, car=None) -> Result:
                          f"（目安 {PEAK_SHARE_MAX:.0%} 以下。TC・ABS が発振している）")
             elif share > PEAK_SHARE_MAX:
                 res.warn(f"{name}: 区間の中のスリップ率の揺れ {std:.3f} は {f_pk:.0f}Hz に {share:.0%} 集まる。実機は TC・ABS のゲインによらず"
-                         f" 20〜30Hz の揺れが常にあるので、{OSC_FAIL_STD} 以下は発振とは言えず★（校正 8 でゲインによって増えないことを確かめている）")
+                         f" 20〜30Hz の揺れが常にあるので、{OSC_FAIL_STD} 以下は発振とは言えず★（旧校正 8 の実機で、ゲインを上げても増えないことを確かめた）")
             else:
                 res.warn(f"{name}: 区間の中のスリップ率の揺れ {std:.3f} は大きいが、周波数は散っている（一番強い {f_pk:.0f}Hz で"
                          f" {share:.0%}）。発振ではなく、滑っているタイヤの力のむら")
