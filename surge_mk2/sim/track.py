@@ -67,6 +67,26 @@ def _disc_slices(h: int, w: int, row: int, col: int, r: int):
     return gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1
 
 
+def disc_union(shape: tuple[int, int], rows: np.ndarray, cols: np.ndarray, r: int) -> np.ndarray:
+    """中心 `(rows, cols)` に置いた半径 `r` セルの円盤（`x²+y² <= r²`）の和集合のマスク。
+
+    円盤を1つずつ重ねる Python のループの代わりに、中心の点を立てた画像を円盤の形で膨張させる
+    （`cv2.dilate`。点の集合を円盤で膨張させたもの＝円盤の和集合）。格子の外の中心も、はみ出した
+    部分が格子に掛かるよう r だけ余白を付けた画像で膨張させてから切り出す（`_disc_slices` と同じ結果）。
+    """
+    import cv2
+
+    h, w = shape
+    rows = np.asarray(rows, dtype=np.int64)
+    cols = np.asarray(cols, dtype=np.int64)
+    canvas = np.zeros((h + 2 * r, w + 2 * r), dtype=np.uint8)
+    ok = (rows >= -r) & (rows < h + r) & (cols >= -r) & (cols < w + r)
+    canvas[rows[ok] + r, cols[ok] + r] = 1
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    kernel = ((xx * xx + yy * yy) <= r * r).astype(np.uint8)
+    return cv2.dilate(canvas, kernel)[r:r + h, r:r + w].astype(bool)
+
+
 def centerline(path: list, x: float, y: float, yaw: float,
                step: float) -> np.ndarray:
     """区間の並び → 中心線の点列 `(N, 3)`（x, y, 向き）。"""
@@ -137,35 +157,19 @@ def rasterize(pts: np.ndarray, width: float, resolution: float,
     w = int(math.ceil((xs.max() + pad - x0) / resolution))
     h = int(math.ceil((ys.max() + pad - y0) / resolution))
 
-    grid = np.ones((h, w), dtype=bool)
     r = max(1, int(round(half / resolution)))
-    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
-    disc = (xx * xx + yy * yy) <= r * r
-
     cols = np.round((xs - x0) / resolution).astype(np.int64)
     rows = np.round((ys - y0) / resolution).astype(np.int64)
-    for c, rw in zip(cols, rows):
-        sl = _disc_slices(h, w, rw, c, r)
-        if sl is None:
-            continue
-        gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
-        grid[gr0:gr1, gc0:gc1] &= ~disc[sr0:sr1, sc0:sc1]
+    grid = ~disc_union((h, w), rows, cols, r)
 
     if divider:
         # 中心線に沿った弧長。**始点からの距離**で区間を指定する
         seg = np.hypot(*np.diff(pts[:, :2], axis=0).T)
         arc = np.concatenate([[0.0], np.cumsum(seg)])
         dr = max(1, int(round(divider_width / 2.0 / resolution)))
-        yy, xx = np.mgrid[-dr:dr + 1, -dr:dr + 1]
-        dot = (xx * xx + yy * yy) <= dr * dr
         for a, b in divider:
             m = (arc >= float(a)) & (arc <= float(b))
-            for c, rw in zip(cols[m], rows[m]):
-                sl = _disc_slices(h, w, rw, c, dr)
-                if sl is None:
-                    continue
-                gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
-                grid[gr0:gr1, gc0:gc1] |= dot[sr0:sr1, sc0:sc1]
+            grid |= disc_union((h, w), rows[m], cols[m], dr)
     return grid, (x0, y0)
 
 
@@ -200,18 +204,11 @@ def add_offset_discs(grid: np.ndarray, origin: tuple[float, float], resolution: 
         ox = xs[m] + nx[m] * offset_m
         oy = ys[m] + ny[m] * offset_m
         r = max(1, int(round(radius_m / resolution)))
-        yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
-        disc = (xx * xx + yy * yy) <= r * r
         cols = np.round((ox - x0) / resolution).astype(np.int64)
         rows = np.round((oy - y0) / resolution).astype(np.int64)
-        for c, rw in zip(cols, rows):
-            # ★narrow/obstacleのオフセットは`rasterize()`本体の壁掘りより外側に
-            # 出ることがあるため、格子外へのはみ出しはクリップする
-            sl = _disc_slices(h, w, rw, c, r)
-            if sl is None:
-                continue
-            gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
-            grid[gr0:gr1, gc0:gc1] |= disc[sr0:sr1, sc0:sc1]
+        # ★narrow/obstacleのオフセットは`rasterize()`本体の壁掘りより外側に
+        # 出ることがあるため、格子外へのはみ出しはクリップする（`disc_union` が切り出す）
+        grid |= disc_union((h, w), rows, cols, r)
 
 
 def stamp_discs(grid: np.ndarray, origin: tuple[float, float], resolution: float,

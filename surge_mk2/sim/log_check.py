@@ -28,13 +28,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 
+from raspi.core.vehicle import read_toml, section  # noqa: E402
 from sim.vehicle import DEFAULT_SPEC_PATH, GRAVITY_MPS2, DriveInput, VehicleModel, VehicleSpec  # noqa: E402
 
 __all__ = ["check", "firmware_build_epoch", "report"]
@@ -114,8 +114,7 @@ def check(log, spec: VehicleSpec | None = None, control: dict | None = None, lat
     if spec is None:
         spec = VehicleSpec.load()
     if control is None:
-        with open(DEFAULT_SPEC_PATH, "rb") as f:
-            control = tomllib.load(f).get("control", {})
+        control = section(read_toml(DEFAULT_SPEC_PATH), "control")
     sim = replay(log, spec, control, latency, window)
     vs = log.vs
     v, d, r = vs["speed"], vs["steer_actual"], vs["yaw_rate"]
@@ -235,8 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     spec = VehicleSpec.load(args.vehicle)
-    with open(args.vehicle, "rb") as f:
-        control = tomllib.load(f).get("control", {})
+    control = section(read_toml(args.vehicle), "control")
     out = {}
     for p in args.logs:
         print(f"== {Path(p).name}")

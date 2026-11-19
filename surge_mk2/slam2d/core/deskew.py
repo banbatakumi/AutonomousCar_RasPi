@@ -37,7 +37,7 @@ import numpy as np
 
 import math
 
-from .types import Pose2D, RawScan, ScanPoints, Twist2D
+from .types import Pose2D, RawScan, ScanPoints, Twist2D, wrap_angle
 from .types import _STRAIGHT_EPS
 
 __all__ = ["deskew", "deskew_traj", "truncate", "TwistBuffer"]
@@ -236,7 +236,7 @@ class TwistBuffer:
                 arc_dy = (v0 * (1.0 - c) + vy0 * s) / w0
             ddx = np.where(straight, v0 * dt, arc_dx)
             ddy = np.where(straight, vy0 * dt, arc_dy)
-            ddyaw = np.where(straight, 0.0, _wrap_angle_vec(wt))
+            ddyaw = np.where(straight, 0.0, wrap_angle(wt))
 
             yaw[1:] = np.cumsum(ddyaw)
             cp, sp = np.cos(yaw[:-1]), np.sin(yaw[:-1])
@@ -258,9 +258,6 @@ class TwistBuffer:
                       float(-pyaw[0]))
 
 
-def _wrap_angle_vec(a: np.ndarray) -> np.ndarray:
-    """`types.wrap_angle`のnumpy版（`[-pi, pi)`へ畳む）。式は同一。"""
-    return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def _interp_pose(t: np.ndarray, x: np.ndarray, y: np.ndarray, yaw: np.ndarray,

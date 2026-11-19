@@ -83,7 +83,9 @@ class ScanPoints(NamedTuple):
 
 
 def wrap_angle(a: float) -> float:
-    """角度を [-pi, pi) へ畳む（`wrap_angle(pi) == -pi`）。"""
+    """角度を [-pi, pi) へ畳む（`wrap_angle(pi) == -pi`）。numpy 配列もそのまま渡せる。
+
+    slam2d 側の**唯一の実装**（raspi 側は `raspi.nav.se2.wrap_angle`。slam2d は raspi に依存させない）。"""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 

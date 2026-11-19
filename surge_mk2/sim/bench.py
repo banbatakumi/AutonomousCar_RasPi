@@ -57,9 +57,9 @@ import argparse
 import json
 import math
 import os
-import statistics
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -74,16 +74,15 @@ from raspi.msgs.types import TOPIC_SCAN, TOPIC_VEHICLE_STATE  # noqa: E402
 from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
 from raspi.proto.generated import packets  # noqa: E402
 
+from .bench_events import BenchEvents  # noqa: E402
+from .bench_record import TraceWriter  # noqa: E402
+from .bench_report import Result  # noqa: E402
 from .course import list_courses  # noqa: E402
 from .link import create_sim_link  # noqa: E402
 from .moving import update_all  # noqa: E402
 from .params import REAL_VIBRATION  # noqa: E402
-from .stm32 import COMMAND_TIMEOUT_NS  # noqa: E402
 
-#: 仮想 STM32 が COMMAND 途絶で車を止める間隔 [ms]
-_DEADMAN_MS = COMMAND_TIMEOUT_NS / 1e6
-
-__all__ = ["Bench", "Result"]
+__all__ = ["Bench", "BenchOptions", "Result"]
 
 NS = 1_000_000_000
 CMD_HZ = 100
@@ -105,231 +104,42 @@ class _Capture:
             self.scan = obj
 
 
-class Result:
-    """1回の走行の結果。**数字は全部ここに集める。**"""
+@dataclass
+class BenchOptions:
+    """`Bench` の走らせ方（コース・モード・planner のパラメータ以外の全部）。
 
-    def __init__(self) -> None:
-        self.plans = 0
-        self.plan_ms: list[float] = []
-        self.pose_err: list[float] = []        #: SLAM と真値の**移動量**の差 [m]
-        self.yaw_err: list[float] = []         #: 同 向き [deg]
-        self.cross: list[float] = []           #: 経路からの横偏差 [m]（RACE 段のみ。planner の自己申告）
-        #: 真の位置から経路までの距離 [m]（`--map` の RACE 段。地図を真のコースへ重ねて測る）
-        self.cross_true: list[float] = []
-        self.collisions = 0
-        self.laps = 0
-        self.phase = ""
-        self.reason = ""
-        self.lap_times: list[float] = []
-        self.distance = 0.0
-        #: EXPLORE段が終わった瞬間（地図構築完了時点）の自己位置・向き誤差。
-        #: RACE段の誤差は「凍結地図に対する追跡精度」でしかなく、地図自体が
-        #: 歪んでいるかどうかはこの数字でしか直接見えない
-        #: （`/Users/banbatakumi/.claude/plans/slam2d-slam-slam2d-imu-slam-slam2d-imu-nifty-aurora.md`
-        #: フェーズ1参照）
-        self.explore_end_pose_err: float | None = None
-        self.explore_end_yaw_err: float | None = None
-        #: 経路選択走行（`slam2d_route`）の検証。周回ごとに真値で通った道路グラフの
-        #: エッジ列（真のコースから作ったグラフの番号）と、その周に走っていた経路
-        self.lap_edges: list[tuple[str, list[int]]] = []
-        #: 停止点に止まったときの、真値の位置と停止点の距離 [m]。**自己位置の誤差を含む**
-        self.stop_err: float | None = None
-        #: 同じく推定位置（map フレーム）と停止点の距離 [m]。**止める制御の精度**
-        #: （実機では停止点を SLAM の地図の上で置くので、こちらが「狙った所に止まれたか」）
-        self.stop_err_est: float | None = None
-        self.notes: list[str] = []
-        #: 真値のゲートで計ったラップ [s]（先頭はスタンディングスタートを含む）
-        self.gate_laps: list[float] = []
-        self.race_vmax = 0.0                   #: RACE 中の真値の最高速度 [m/s]
-        self.race_brake_s = 0.0                #: RACE 中に制動を出していた時間 [s]
-        self.race_collisions = 0               #: RACE 中の衝突
-        #: RACE 中の車体外形と真の壁との最小距離 [m]（周回ごと・全体）。衝突の手前の余裕
-        self.race_min_clear = math.inf
-        self.lap_min_clear: list[float] = []
-        self.ideal_lap: float | None = None    #: 速度プロファイルどおりの1周 [s]
-        self.path_len: float | None = None
-        # RACE 中の真値（100Hz）。**「車の実力を使えているか」を見る数字**
-        self.race_n = 0
-        self.race_steer_sat = 0                #: 舵の指令が上限に張り付いていたサンプル数
-        self.race_a_lat: list[float] = []      #: 横加速度の絶対値 [m/s²]
-        self.race_accel: list[float] = []      #: 加速を要求している間（指令 > 車速+0.3）の実加速 [m/s²]
-        self.race_decel: list[float] = []      #: 減速を要求している間（指令 < 車速-0.3）の実減速 [m/s²]
-        self.race_over: list[float] = []       #: 経路の速度に対する出過ぎ [m/s]（正 = 速すぎ）
-        # 障害物の回避（planner の内部状態を読む）
-        self.avoid_starts = 0                  #: 横へ避ける経路を引いた回数
-        self.avoid_elastic = 0                 #: そのうち、窓の中の線を引き直して作った回数
-        self.avoid_ms: list[float] = []        #: その計算時間 [ms]
-        self.detour_starts = 0                 #: Hybrid A* の迂回に入った回数
-        self.detour_s = 0.0                    #: 迂回していた時間 [s]
-        self.stop_s = 0.0                      #: RACE 中に止まっていた時間 [s]（車速 < 0.05）
-        # 動く障害物（`--mover`）の追い抜き（真値）
-        self.mover_passes = 0                  #: 他車を後ろから抜いた回数（車の座標で前→後ろへ移った）
-        #: 他車との接触のうち、他車の方が速く近づいていたもの（避けない他車に当てられた）
-        self.mover_hit_behind = 0
-        self.mover_hit_front = 0               #: 同じく車の方が速く近づいていたもの（こちらが当てた）
-        self.mover_min_clear = math.inf        #: 車体外形と他車の最小距離 [m]
-        #: 他車が 3m 以内に居る間に、車速が元の経路の速度より 0.3m/s 以上遅かった時間 [s]（抑えられた時間）
-        self.mover_slow_s = 0.0
-        # 横グリップの学習（`raspi/nav/grip.py`。planner の内部状態と真値を突き合わせる）
-        self.grip_on = False
-        #: 前兆ごとの記録: RACE 開始からの時刻・学習側の値・真値の超過率（0 = 限界より下＝誤検出）・
-        #: その後 1.5 秒の横偏差の最大と壁との余裕の最小
-        self.grip_events: list[dict] = []
-        self.grip_conv_t: float | None = None  #: 収束した時刻（RACE 開始から）[s]
-        self.grip_conv_laps: int | None = None #: そのとき走り終えていた周の数
-        self.grip_level = 0.0                  #: 終わったときの横の上限 [m/s²]
-        self.grip_ceil = 0.0                   #: 安全装置が働いた上限（`GripMap.ceil`）[m/s²]
-        self.grip_state = ""
-        self.grip_steps = (0, 0)               #: タイムで決めた段の (判断, 採用)
-        self.grip_true = 0.0                   #: 終わったときの真値の横の限界 [m/s²]
-        self.grip_levels: list[tuple[float, float]] = []   #: (RACE 開始からの時刻, 全体の値) の移り変わり
-        #: 加速・減速の学習（終わりの値・真値・出なかった窓・移り変わり）
-        self.grip_long: dict = {}
-        self.cmd_gap_ms = 0.0                  #: 指令を送る間隔の最大 [ms]
-        self.rearms = 0                        #: 仮想 STM32 が ARM を断り、外して入れ直した回数
-        self.slow_ms: dict[str, float] = {}
+    `main` の引数が 38 個あり、`Bench` へ並べて渡していたのを 1 つにまとめた。
+    各欄の意味は `main` の `--` 引数の help と `Bench.__init__` の注釈を見る。
+    """
 
-    def report(self) -> str:
-        def stat(v, unit, scale=1.0):
-            if not v:
-                return "—"
-            a = [x * scale for x in v]
-            return (f"平均 {statistics.fmean(a):.2f}{unit} "
-                    f"中央 {statistics.median(a):.2f}{unit} "
-                    f"最大 {max(a):.2f}{unit}")
-
-        gap = (f"  指令の間隔 最大 {self.cmd_gap_ms:.0f}ms"
-               + (f"（★{_DEADMAN_MS:.0f}ms を超えた。デッドマンで止まった走行。捨てて走らせ直す）"
-                  if self.cmd_gap_ms > _DEADMAN_MS else ""))
-        if self.cmd_gap_ms > 100.0:
-            gap += "  各部の最大 " + "・".join(f"{k} {v:.0f}ms" for k, v in self.slow_ms.items())
-        if self.rearms:
-            gap += f"  ARM の入れ直し {self.rearms} 回（ホストが詰まって COMMAND が途切れた）"
-        out = [
-            f"計画       {self.plans} 回  1周期 {stat(self.plan_ms, 'ms')}{gap}",
-            f"自己位置   {stat(self.pose_err, 'cm', 100)}",
-            f"向き       {stat(self.yaw_err, '°')}",
-            f"横偏差     {stat([abs(c) for c in self.cross], 'cm', 100)}（自己申告）",
-            *([f"真の横偏差 {stat(self.cross_true, 'cm', 100)}（地図を真のコースへ重ねた）"]
-              if self.cross_true else []),
-            f"周回       {self.laps} 周  走行 {self.distance:.1f}m  衝突 {self.collisions}",
-        ]
-        if self.explore_end_pose_err is not None:
-            out.append(
-                f"EXPLORE終了時点  自己位置 {self.explore_end_pose_err * 100:.1f}cm  "
-                f"向き {self.explore_end_yaw_err:.1f}°")
-        if self.lap_times:
-            out.append(
-                "ラップ     " + " / ".join(f"{t:.1f}s" for t in self.lap_times))
-        for i, (key, edges) in enumerate(self.lap_edges):
-            out.append(f"周{i + 1:<2} 経路{key or '-'}  通ったエッジ {'→'.join(map(str, edges))}")
-        if self.stop_err is not None:
-            out.append(f"停止誤差   真値 {self.stop_err * 100:.1f}cm（自己位置の誤差を含む）・"
-                       f"推定 {self.stop_err_est * 100:.1f}cm（止める制御の精度）")
-        if self.gate_laps:
-            fly = self.gate_laps[1:]
-            best = f"最良 {min(fly):.2f}s 平均 {statistics.fmean(fly):.2f}s" if fly else "—"
-            out.append("真値ラップ " + " / ".join(f"{t:.2f}s" for t in self.gate_laps)
-                       + f"  （2周目以降 {best}）")
-        if self.ideal_lap is not None:
-            out.append(f"理想ラップ {self.ideal_lap:.2f}s（プロファイルどおり・"
-                       f"1周 {self.path_len:.1f}m）")
-        out.append(f"RACE       最高速 {self.race_vmax:.2f}m/s  制動 {self.race_brake_s:.1f}s  "
-                   f"衝突 {self.race_collisions}  車体と壁の最小距離 "
-                   f"{self.race_min_clear * 100:.1f}cm")
-        if self.race_n:
-            def mean(v):
-                return f"{statistics.fmean(v):.2f}" if v else "—"
-            p99 = (f"{float(np.percentile(self.race_a_lat, 99)):.2f}" if self.race_a_lat else "—")
-            over = (f"平均 {statistics.fmean(self.race_over):+.2f} "
-                    f"最大 {max(self.race_over):+.2f}m/s" if self.race_over else "—")
-            pms = (f"{float(np.percentile(self.plan_ms, 99)):.1f}" if self.plan_ms else "—")
-            out.append(f"車の使い方 舵の張り付き {100.0 * self.race_steer_sat / self.race_n:.1f}%  "
-                       f"横G p99 {p99}m/s²  要求中の加速 {mean(self.race_accel)}・"
-                       f"減速 {mean(self.race_decel)}m/s²  経路速度からの出過ぎ {over}  "
-                       f"停止 {self.stop_s:.1f}s  計画 p99 {pms}ms")
-        if self.mover_min_clear < math.inf:
-            out.append(f"他車       抜いた {self.mover_passes} 回  接触 当てた {self.mover_hit_front}・当てられた {self.mover_hit_behind}  "
-                       f"最小距離 {self.mover_min_clear * 100:.1f}cm  "
-                       f"近くで経路の速度より遅かった {self.mover_slow_s:.1f}s")
-        if self.avoid_starts or self.detour_starts:
-            ms = (f"計算 平均 {statistics.fmean(self.avoid_ms):.1f}ms "
-                  f"p99 {float(np.percentile(self.avoid_ms, 99)):.1f}ms 最大 {max(self.avoid_ms):.1f}ms"
-                  f"（{len(self.avoid_ms)} 回）" if self.avoid_ms else "")
-            out.append(f"回避       止まらず避けた {self.avoid_starts} 回（うち引き直し {self.avoid_elastic}） {ms}  "
-                       f"迂回(Hybrid A*) {self.detour_starts} 回・{self.detour_s:.1f}s")
-        if self.grip_on:
-            ev = self.grip_events
-            # 横偏差の増え（周を終えてから分かる）は、その瞬間の真値と突き合わせられないので誤検出に数えない
-            false = sum(1 for e in ev if e["over"] <= 0.0 and e["kind"] != "横偏差の増え")
-            conv = (f"収束 {self.grip_conv_t:.1f}s・{self.grip_conv_laps}周" if self.grip_conv_t is not None
-                    else "収束せず")
-            out.append(f"横G学習    横 {self.grip_level:.2f}m/s²（真値 {self.grip_true:.2f}・"
-                       f"天井 {self.grip_ceil:.2f}・{self.grip_state}）  {conv}  "
-                       f"段の判断 {self.grip_steps[0]}（採用 {self.grip_steps[1]}）  "
-                       f"安全装置 {len(ev)} 回（うち誤検出 {false}）")
-            if self.grip_conv_t is not None and self.gate_laps:
-                k = self.grip_conv_laps or 0
-                after = self.gate_laps[max(k, 1):]
-                if after:
-                    ref = statistics.fmean(after)
-                    lost = sum(t - ref for t in self.gate_laps[1:max(k, 1)])
-                    out.append(f"           収束後のラップ 平均 {ref:.2f}s（{len(after)} 周）・"
-                               f"収束までに失った時間 {lost:+.2f}s（2周目から）")
-            if ev:
-                out.append("           安全装置のあと 1.5s: 横偏差 最大 "
-                           f"{max(e['cross'] for e in ev) * 100:.1f}cm・壁との余裕 最小 "
-                           f"{min(e['clear'] for e in ev) * 100:.1f}cm・真値の超過 最大 "
-                           f"{max(e['over'] for e in ev) * 100:.1f}%")
-                for e in ev[:40]:
-                    out.append(f"             {e['t']:6.1f}s {e['kind']} 横加速度 {e['a']:.2f}（上限 "
-                               f"{e['applied']:.2f}）真値の超過 "
-                               f"{e['over'] * 100:+.1f}% → 横偏差 {e['cross'] * 100:.1f}cm・"
-                               f"余裕 {e['clear'] * 100:.1f}cm")
-            if self.grip_long:
-                lg = self.grip_long
-                out.append(f"           加速 {lg['acc']:.2f}m/s²（真値 {lg['acc_true']:.2f}）・減速 "
-                           f"{lg['dec']:.2f}m/s²（真値 {lg['dec_true']:.2f}）  判断 {lg['windows']} 回・"
-                           f"下げた {len(lg['events'])} 回"
-                           + (f"  包絡（横の使い具合 0/0.5/1）加速 {'/'.join(f'{x:.2f}' for x in lg['acc_env'])}"
-                              f"・減速 {'/'.join(f'{x:.2f}' for x in lg['dec_env'])}" if lg.get("acc_env") else "")
-                           + "".join(f"\n             {e['t']:6.1f}s {e['kind']} u={e.get('u', 0.0):.1f} "
-                                     f"{e['ask']:.2f} → {e['got']:.2f}"
-                                     + (f"（計画との差 {e['lag']:+.2f}m/s）" if "lag" in e else
-                                        f"（出た÷求めた {e['ratio']:.2f}）" if "ratio" in e else "")
-                                     for e in lg["events"][:12]))
-                if lg["trail"]:
-                    out.append("           加速/減速の移り変わり " + " ".join(
-                        f"{t:.0f}s:{a:.2f}/{d:.2f}" for t, a, d in lg["trail"][:40]))
-            if self.grip_levels:
-                out.append("           値の移り変わり " + " ".join(
-                    f"{t:.0f}s:{lv:.2f}" for t, lv in self.grip_levels[:60]))
-        if self.lap_min_clear:
-            out.append("周ごとの最小距離 " + " / ".join(f"{c * 100:.1f}cm"
-                                                      for c in self.lap_min_clear))
-        out.extend(self.notes)
-        out.append(f"最後の状態 [{self.phase}] {self.reason}")
-        return "\n".join(out)
+    max_speed: float = 3.0
+    max_steer: float = 0.524
+    model: str | None = None
+    quiet: bool = False
+    seed: int = 0
+    routes: dict | None = None
+    events: list[tuple[float, str, str]] | None = None
+    auto_race: bool = True
+    map_name: str | None = None
+    trace: Path | None = None
+    locate_hint: tuple[float, float] | None = None
+    obstacles: list[tuple[float, float, float]] | None = None
+    movers: list[str] | None = None
+    vehicle: dict[str, float] | None = None
+    control: dict[str, float] | None = None
+    surface: dict | None = None
+    assume: dict[str, float] | None = None
+    grip_file: Path | None = None
+    grip_cfg: dict[str, float] | None = None
+    sim_params: dict[str, float] | None = None
+    state_dir: Path | None = None
+    hijacks: list[tuple[float, float, float, float]] | None = None
+    plan_slowdown: float = 1.0
 
 
 class Bench:
-    def __init__(self, course: str | Path, mode: str, params: dict[str, float], *,
-                 max_speed: float = 3.0, max_steer: float = 0.524,
-                 model: str | None = None, quiet: bool = False, seed: int = 0,
-                 routes: dict | None = None, events: list[tuple[float, str, str]] | None = None,
-                 auto_race: bool = True, map_name: str | None = None,
-                 trace: Path | None = None,
-                 locate_hint: tuple[float, float] | None = None,
-                 obstacles: list[tuple[float, float, float]] | None = None,
-                 movers: list[str] | None = None,
-                 vehicle: dict[str, float] | None = None,
-                 control: dict[str, float] | None = None,
-                 surface: dict | None = None, assume: dict[str, float] | None = None,
-                 grip_file: Path | None = None, grip_cfg: dict[str, float] | None = None,
-                 sim_params: dict[str, float] | None = None,
-                 state_dir: Path | None = None,
-                 hijacks: list[tuple[float, float, float, float]] | None = None,
-                 plan_slowdown: float = 1.0) -> None:
+    def __init__(self, course: str | Path, mode: str, params: dict[str, float],
+                 opts: BenchOptions | None = None) -> None:
         """:param model: `reload_if_changed(name)`を持つplanner（今のところ`e2e_lidar`
             だけ）へ渡すモデル名。`raspi/nodes/planning_node.py`の`_apply_e2e_model()`
             と同じダックタイピング（`E2ELidar`をここでimportして特別扱いしない）。
@@ -337,6 +147,15 @@ class Bench:
             （GUI/`e2e/model`トピック経由でしかモデルを選べないので、
             `sim.bench`単体で検証するために必要）
         """
+        o = opts or BenchOptions()
+        self._course = course
+        self._setup_maps(o.map_name, o.grip_file, o.state_dir)
+        self._setup_sim(o)
+        self._setup_planner(mode, o)
+        self._init_state(mode, params, o)
+
+    def _setup_maps(self, map_name: str | None, grip_file: Path | None,
+                    state_dir: Path | None) -> None:
         # 地図を作る planner は BUILD の終わりに地図を自動保存する。**実機の
         # `saved_maps/` を bench の地図で埋めない**よう、保存先を一時ディレクトリへ
         import tempfile
@@ -368,6 +187,10 @@ class Bench:
                     f = state_dir / f"{map_name}{suf}"
                     if f.is_file():
                         shutil.copy(f, mapstore.MAPS_DIR / f.name)
+
+    def _setup_sim(self, o: BenchOptions) -> None:
+        """真値の側（シムの車・路面・仮想 STM32 の設定・障害物・他車）を作る。"""
+        vehicle, sim_params, surface = o.vehicle, o.sim_params, o.surface
         # `--vehicle`: **真値の車だけ**諸元を変える（planner は `config/vehicle.toml` のまま）。
         # 同定値が外れていたとき（グリップが低い・舵が届かない等）に走りが壊れないかを見る
         spec = None
@@ -389,7 +212,7 @@ class Bench:
             if bad:
                 raise SystemExit(f"--sim: 知らない項目 {', '.join(bad)}")
             params_sim = _replace(SimParams.load(), **sim_params)
-        self.link = create_sim_link(course, seed=seed, with_channel=False, spec=spec,
+        self.link = create_sim_link(self._course, seed=o.seed, with_channel=False, spec=spec,
                                     params=params_sim)
         # `--mu`・`--surface`・`--mu-at`: 真値の路面を場所と時刻で変える（`sim/surface.py`）。
         # コースの床（JSON の `"surface"`）が土台で、`--mu` はそれを置き換える
@@ -407,7 +230,7 @@ class Bench:
         # 実機では io_node が `[control]` を CONFIG_SET で STM32 へ入れる。bench は io_node を
         # 通さないので、車速PIの加速度フィードフォワード（★v0.21）だけ直に入れる
         from raspi.core.control_params import load_control_params
-        ctl = {**load_control_params(), **(control or {})}
+        ctl = {**load_control_params(), **(o.control or {})}
         self.sim = self.link.sim
         # 車に効かないもの（TC・TV の係数など）も値を持たせる。launch_exit_torque_nm・速度 FF は車へ、
         # TC・ABS の有効/無効は旗の出し方に効く
@@ -417,19 +240,23 @@ class Bench:
             pid = OVERRIDABLE.get(key)
             if pid is not None:
                 self.sim.apply_config(pid, float(val))
-        if obstacles:
+        if o.obstacles:
             # 障害物はシムの世界（LiDAR と衝突判定が見る格子）にだけ刻む。`--map` と
             # 併用すると凍結地図には無い物が経路の上に居る状況になる
             from .track import stamp_discs
             c = self.sim.course
-            stamp_discs(c.grid, c.origin, c.resolution, list(obstacles))
+            stamp_discs(c.grid, c.origin, c.resolution, list(o.obstacles))
             c._padded_grid = None
         self._movers = []
         self._mv_col = 0
-        if movers:
+        if o.movers:
             from .moving import parse_mover
-            self._movers = [parse_mover(m) for m in movers]
+            self._movers = [parse_mover(m) for m in o.movers]
             self.sim.course._padded_grid = None
+
+    def _setup_planner(self, mode: str, o: BenchOptions) -> None:
+        """planner と、planning_node と同じ前処理（車体の内側の点・点群のノイズ）を作る。"""
+        model, assume, grip_cfg = o.model, o.assume, o.grip_cfg
         self.planner = make_planner(mode)
         # planning_node と同じく、車体の内側の点は planner に渡さない（`raspi/nav/body_mask.py`）
         from raspi.core.vehicle import Vehicle
@@ -462,6 +289,9 @@ class Bench:
                 if not hasattr(learner.cfg, k):
                     raise SystemExit(f"--grip-set: 知らない項目 {k}")
                 setattr(learner.cfg, k, type(getattr(learner.cfg, k))(val))
+
+    def _init_state(self, mode: str, params: dict[str, float], o: BenchOptions) -> None:
+        """走行中に数える状態・受信経路・真値の起点・要求・ゲート・記録を用意する。"""
         self._grip_n = 0
         self._grip_open: list[dict] = []
         self._grip_slip: list[tuple[float, float]] = []    # 直近の (時刻, 真値の超過率)
@@ -472,14 +302,14 @@ class Bench:
         self._race_t0: float | None = None
         #: 走行開始から `(t, dur, steer, speed)` の間、指令を乗っ取る（人が押した・ぶつかって弾かれた代わり。
         #: 経路から外れた・壁に当たった所から戻れるかを見る）
-        self._hijacks = sorted(hijacks or [])
+        self._hijacks = sorted(o.hijacks or [])
         self.mode = mode
         self.params = merged_params(mode, params, hidden=True)
-        self.max_speed = max_speed
+        self.max_speed = o.max_speed
         #: `plan()` を何倍遅く見せるか（Pi の計算の遅さ。`--plan-slowdown`）
-        self.plan_slowdown = max(1.0, float(plan_slowdown))
-        self.max_steer = max_steer
-        self.quiet = quiet
+        self.plan_slowdown = max(1.0, float(o.plan_slowdown))
+        self.max_steer = o.max_steer
+        self.quiet = o.quiet
 
         # `io_node` と同じ受信経路（時刻同期つき）。バスの代わりに `_Capture` が結果を受ける
         self._cap = _Capture()
@@ -503,22 +333,19 @@ class Bench:
         self._prev_laps = 0
         self._prev_phase = ""
 
-        #: DONE（地図作成が終わって人の「走行」を待つ段）で、自動保存した地図を
-        #: 読み込ませて走り出させる（GUI の「レーシングライン走行」を押すのと同じ）
-        self.auto_race = auto_race
-        #: `(時刻, 種類, 値)`。種類は "route"（`request_route`）/"signal"（`request_signal`）
-        self.events = sorted(events or [])
         self._truth_log: list[tuple[str, int, str, float, float]] = []
+        routes = o.routes
         self._routes_world = routes
         if routes is not None:
             if getattr(self.planner, "request_routes", None) is None:
                 raise SystemExit(f"{mode!r} は経路の設定（--routes）に対応していない")
-            if not map_name:
+            if not o.map_name:
                 self.planner.request_routes(json.dumps(self._to_map_frame(routes)))
-        #: `--map` の読み込みは最初の `plan()` の後に行う（`slam2d_route` は
-        #: `plan()` で受けたパラメータで経路を作るため）
-        self._load_pending = bool(map_name)
-        self._locate_hint = locate_hint
+        #: 人の代わりに出す要求（`--map` の読み込み・DONE での「走行」・`--switch`/`--signal`）
+        self._events = BenchEvents(self.planner, map_name=o.map_name, routes_world=routes,
+                                   to_map_frame=self._to_map_frame, locate_hint=o.locate_hint,
+                                   auto_race=o.auto_race, events=o.events,
+                                   notes=self.res.notes, quiet=self.quiet)
 
         # 真値のゲート（モジュール docstring）
         self._gate: tuple[float, float, float, float] | None = None
@@ -526,28 +353,8 @@ class Bench:
         self._gate_last_t: float | None = None
         self._gate_odom = 0.0
         self._race_col0: int | None = None
-        self._trace_f = open(trace, "w") if trace else None
-        if self._trace_f:
-            self._trace_f.write("t,phase,x,y,yaw,v,cmd_v,brake,prof_v,idx,cross,clear,launch,"
-                                "steer_cmd,steer,a_lat,a_x,kappa,slip,g_level,g_cross_gain,g_cap,g_gate\n")
-            # 加速・減速の学習（`nav/grip.LongLearner`）へ渡した値と、その瞬間の真値（`<trace>.long.csv`）
-            lg = getattr(getattr(self.planner, "_grip", None), "long", None)
-            if lg is not None:
-                self._long_f = open(str(trace) + ".long.csv", "w")
-                self._long_f.write("t,v,a_plan,gate,v_plan,v_true,ax_true,grip_long,u_y,"
-                                   "cmd_v,accel,decel\n")
-                inner = lg.observe
-
-                def observe(t, v, a_plan, gate, v_plan=None, *rest, _in=inner, _lg=lg, **kw):
-                    tv, sp = self.sim.vehicle, self.sim.spec
-                    u = tv.speed ** 2 * abs(tv._curv_req) / max(sp.mu * tv.grip_lat * 9.81, 1e-6)
-                    self._long_f.write(
-                        f"{t:.4f},{v:.4f},{a_plan:.4f},{gate},"
-                        f"{float('nan') if v_plan is None else v_plan:.4f},{tv.speed:.4f},"
-                        f"{tv.accel_x:.4f},{tv.grip_long:.4f},{u:.4f},{tv.cmd.target_speed:.4f},"
-                        f"{_lg.map.accel:.4f},{_lg.map.decel:.4f}\n")
-                    return _in(t, v, a_plan, gate, v_plan, *rest, **kw)
-                lg.observe = observe
+        #: `--trace` の CSV（`sim/bench_record.py`）
+        self._trace = TraceWriter(o.trace, self.planner, self.sim) if o.trace else None
         # 車体外形の輪郭と、真の壁からの距離場（`_clearance`）
         from scipy.ndimage import distance_transform_edt
 
@@ -628,19 +435,11 @@ class Bench:
 
     def run(self, duration_s: float) -> Result:
         t0 = time.monotonic()
-        next_cmd = time.monotonic_ns()
-        cmd_period = NS // CMD_HZ
-        cmd = DriveCmd(mode=0)
-        last_plan_ns = 0
-        next_tick = next_cmd
-
-        slow = self.res.slow_ms                  # ループの各部の最大 [ms]（どこで詰まったかを見る）
-
-        def took(key: str, t_start: float) -> None:
-            if self._gate is not None:
-                slow[key] = max(slow.get(key, 0.0), (time.perf_counter() - t_start) * 1000)
-
-        rearm = False
+        self._next_cmd_ns = time.monotonic_ns()
+        self._cmd = DriveCmd(mode=0)
+        self._last_plan_ns = 0
+        self._next_tick_ns = self._next_cmd_ns
+        self._rearm = False
         # 仮想 STM32 は起動直後、ARM を一度外すまで ARM を受け付けない。最初の指令を ARM にすると
         # 断られて入れ直しになる（実機では人が ARM を入れる前に DISARM が流れている）ので、先に DISARM を送る
         self.link.send(command_from_cmd(DriveCmd(mode=0), allow_arm=True,
@@ -649,168 +448,199 @@ class Bench:
             t_poll = time.perf_counter()
             frames = self.link.poll()
             if self._movers:
-                c = self.sim.course
-                path = getattr(self.planner, "path", None)
-                for m in self._movers:
-                    if (m.center is None and path is not None and len(path) >= 3
-                            and (self._map_origin is not None or not self._map_name)):
-                        ox, oy, oyaw = self._map_origin or self._origin
-                        cs, sn = math.cos(oyaw), math.sin(oyaw)
-                        q = np.asarray(path.xy, dtype=float)
-                        w = np.stack([ox + q[:, 0] * cs - q[:, 1] * sn,
-                                      oy + q[:, 0] * sn + q[:, 1] * cs], axis=1)
-                        m.bind(w, tuple(self.sim.course.start[:2]), np.asarray(path.v, dtype=float))
-                        m.t_start += time.monotonic() - t0      # 経路ができた時刻から数える
-                update_all(self._movers, c.grid, c.origin, c.resolution, time.monotonic() - t0)
-                c._padded_grid = None
-                st_ = getattr(self, "_last_st", None)
-                if st_ is not None and os.environ.get("MOVER_LOG") and st_.reason != getattr(self, "_mv_reason", None) \
-                        and any(k in st_.reason for k in ("障害", "避け")):
-                    v_ = self.sim.vehicle
-                    print(f"  {time.monotonic() - t0:5.1f}s v={v_.speed:.2f} car({v_.x:.2f},{v_.y:.2f}) "
-                          f"mover({self._movers[0].xy[0]:.2f},{self._movers[0].xy[1]:.2f}) {st_.reason}", flush=True)
-                if st_ is not None:
-                    self._mv_reason = st_.reason
-                ncol = self.sim.vehicle.collisions
-                if ncol == self._mv_col:
-                    self._mv_speed = float(self.sim.vehicle.speed)
-                if ncol != self._mv_col:
-                    self._mv_col = ncol
-                    v_ = self.sim.vehicle
-                    # 車体の中心（後輪軸から前へ半分）から見て、いちばん近い他車が前か後ろか
-                    ctr = 0.5 * (max(x for x, _ in self.sim.spec.footprint) + min(x for x, _ in self.sim.spec.footprint))
-                    cx = v_.x + ctr * math.cos(v_.yaw)
-                    cy = v_.y + ctr * math.sin(v_.yaw)
-                    near = min(self._movers, key=lambda m: math.hypot(m.xy[0] - cx, m.xy[1] - cy))
-                    dist = math.hypot(near.xy[0] - cx, near.xy[1] - cy)
-                    if dist < 0.6:
-                        # どちらが当てたか: 相手へ向かう速さ（車は接触で速度が 0 になるので直前の値）
-                        rx, ry = (near.xy[0] - cx) / dist, (near.xy[1] - cy) / dist
-                        sp = getattr(self, "_mv_speed", 0.0)
-                        car_in = sp * (math.cos(v_.yaw) * rx + math.sin(v_.yaw) * ry)
-                        mv_in = -abs(near.u_now) * (math.cos(near.yaw) * rx + math.sin(near.yaw) * ry)
-                        if mv_in > car_in:
-                            self.res.mover_hit_behind += 1
-                        else:
-                            self.res.mover_hit_front += 1
-                    st_ = getattr(self, "_last_st", None)
-                    print(f"  {time.monotonic() - t0:5.1f}s 衝突 車({v_.x:.2f},{v_.y:.2f}) 向き{math.degrees(v_.yaw):.0f}° "
-                          f"速度{v_.speed:.2f} "
-                          + " ".join(f"mover({m.xy[0]:.2f},{m.xy[1]:.2f}) 向き{math.degrees(m.yaw):.0f}°"
-                                     for m in self._movers)
-                          + (f" [{st_.phase}] {st_.reason}" if st_ is not None else ""), flush=True)
-            took("シム", t_poll)
+                self._step_movers(t0)
+            self._took("シム", t_poll)
             for f in frames:
-                self._cap.scan = None
-                msg = self.tracker.feed(f.rx_ns, f.type, f.seq, f.payload)
-                if isinstance(msg, packets.Telemetry):
-                    self.vs = self._cap.vs
-                    # `planning_node` と同じく、届いた順に全部渡す（点ごとの脱スキューと、
-                    # 点群の合間の姿勢の前進に使う。渡さないと SLAM は
-                    # 「1周のあいだ twist は一定」の近似になる）
-                    if self._feed_vs is not None:
-                        t_vs = time.perf_counter()
-                        self._feed_vs(self.vs)
-                        took("車両状態", t_vs)
-                    continue
-                if isinstance(msg, packets.Log) and msg.message.startswith(b"ARM ignored"):
-                    # ホストが詰まって COMMAND が 100ms 途切れると、仮想 STM32 はファームと同じく
-                    # ARM を一度外すまで受け付けない。実機では io_node が GUI の ARM を下ろさせ、
-                    # 人が入れ直す。ベンチは人の代わりに1回だけ外して入れ直す
-                    rearm = True
-                    continue
-                if not isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
-                                        packets.LidarSectorC)):
-                    continue
-                scan = self._cap.scan
-                if scan is None:
-                    continue
-
-                now = time.monotonic_ns()
-                dt = (now - last_plan_ns) / NS if last_plan_ns else 0.0
-                last_plan_ns = now
-                scan = mask_body(scan, self._body)
-                scan = self._scan_filter.apply(scan, self.vs)
-                self.scan_dropped += self._scan_filter.dropped
-                t_plan = time.perf_counter()
-                st = self.planner.plan(scan, self.vs, self.params, dt)
-                if self.plan_slowdown > 1.0:
-                    # Pi の遅さ: 壁時計で回るので、待つ間も仮想 STM32 の車は進む（指令が古くなる）
-                    time.sleep((time.perf_counter() - t_plan) * (self.plan_slowdown - 1.0))
-                self.res.plan_ms.append((time.perf_counter() - t_plan) * 1000)
-                self.res.plans += 1
-                took("計画", t_plan)
-                t_now = time.monotonic() - t0
-                t_rec = time.perf_counter()
-                self._record(st, t_now)
-                self._step_events(st, t_now)
-                took("記録", t_rec)
-
-                # `planning_node._cmd_from` と同じ変換に、実機で `telemetry_node._merge_auto` が
-                # 載せる GUI のレート制限（`[safety] cmd_*_limit`）を足す。★ 載せないと
-                # `steer_rate_limit=0` をファームが「最大舵角/秒」（0.52rad/s、実機の 7.0 の
-                # 1/13）と読み、切り返しに舵が間に合わず経路から外れた
-                sp = self.sim.spec
-                accel = sp.cmd_accel_limit_m_s2
-                if st.accel_limit > 0:
-                    accel = min(accel, st.accel_limit) if accel > 0 else st.accel_limit
-                if not st.ready or st.brake:
-                    cmd = DriveCmd(mode=2, arm=True, brake=True,
-                                   target_steer=st.target_steer,
-                                   steer_rate_limit=sp.cmd_steer_rate_limit_rad_s,
-                                   brake_torque=st.brake_torque if st.ready else 0.0)
-                else:
-                    cmd = DriveCmd(mode=2, arm=True, target_speed=st.target_speed,
-                                   target_steer=st.target_steer, accel_limit=accel,
-                                   steer_rate_limit=sp.cmd_steer_rate_limit_rad_s,
-                                   launch=st.launch)
+                self._on_frame(f, t0)
 
             now = time.monotonic_ns()
             if now >= self._next_ping_ns:
                 self._send_ping(now)
-            if now >= next_tick:
+            if now >= self._next_tick_ns:
                 # 点群の合間の追従（`planning_node._tick` と同じ。50Hz）
-                next_tick = now + NS // 50
-                st_last = getattr(self, "_last_st", None)
-                if (self._tick_fn is not None and st_last is not None and st_last.ready
-                        and not cmd.brake and cmd.mode == 2):
-                    t_tick = time.perf_counter()
-                    out = self._tick_fn(self.vs)
-                    took("追従", t_tick)
-                    if out is not None:
-                        steer, speed, ramp = out
-                        if steer is not None:
-                            cmd.target_steer = float(steer)
-                        if speed is not None:
-                            cmd.target_speed = float(speed)
-                            lim = self.sim.spec.cmd_accel_limit_m_s2
-                            cmd.accel_limit = (min(lim, ramp) if lim > 0 else ramp) if ramp > 0 \
-                                else lim
-            if now >= next_cmd:
-                # 指令の間隔（ホストが詰まって `cmd_deadman_ms` を超えると、仮想 STM32 が車を止める。
-                # その走行は捨てる——走りの問題ではない）
-                # （走っている間だけ数える。地図の読み込み・ラインの計算で止まっている間は関係ない）
-                if self._last_cmd_ns and self._gate is not None and abs(self.sim.vehicle.speed) > 0.3:
-                    self.res.cmd_gap_ms = max(self.res.cmd_gap_ms, (now - self._last_cmd_ns) / 1e6)
-                self._last_cmd_ns = now
-                next_cmd = now + cmd_period
-                out_cmd = cmd
-                hj = self._hijack(time.monotonic() - t0)
-                if hj is not None:
-                    out_cmd = DriveCmd(mode=2, arm=True, target_speed=hj[1], target_steer=hj[0],
-                                       accel_limit=self.sim.spec.cmd_accel_limit_m_s2,
-                                       steer_rate_limit=self.sim.spec.cmd_steer_rate_limit_rad_s)
-                if rearm:
-                    out_cmd = DriveCmd(mode=0)       # ARM を一度外す（次の周期から元の指令に戻る）
-                    rearm = False
-                    self.res.rearms += 1
-                self.link.send(command_from_cmd(
-                    out_cmd, allow_arm=True,
-                    max_speed=self.max_speed, max_steer=self.max_steer))
-                t_smp = time.perf_counter()
-                self._sample(time.monotonic() - t0, cmd, cmd_period / NS)
-                took("集計", t_smp)
+                self._next_tick_ns = now + NS // 50
+                self._step_tick()
+            if now >= self._next_cmd_ns:
+                self._send_cmd(now, t0)
 
+        self._finish_run()
+        return self.res
+
+    def _took(self, key: str, t_start: float) -> None:
+        """ループの各部の最大 [ms]（どこで詰まったかを見る）。走り出してから数える。"""
+        if self._gate is not None:
+            slow = self.res.slow_ms
+            slow[key] = max(slow.get(key, 0.0), (time.perf_counter() - t_start) * 1000)
+
+    def _step_movers(self, t0: float) -> None:
+        """他車（`--mover`）を動かして世界の格子へ刻み、接触を数える。"""
+        c = self.sim.course
+        path = getattr(self.planner, "path", None)
+        for m in self._movers:
+            if (m.center is None and path is not None and len(path) >= 3
+                    and (self._map_origin is not None or not self._map_name)):
+                ox, oy, oyaw = self._map_origin or self._origin
+                cs, sn = math.cos(oyaw), math.sin(oyaw)
+                q = np.asarray(path.xy, dtype=float)
+                w = np.stack([ox + q[:, 0] * cs - q[:, 1] * sn,
+                              oy + q[:, 0] * sn + q[:, 1] * cs], axis=1)
+                m.bind(w, tuple(self.sim.course.start[:2]), np.asarray(path.v, dtype=float))
+                m.t_start += time.monotonic() - t0      # 経路ができた時刻から数える
+        update_all(self._movers, c.grid, c.origin, c.resolution, time.monotonic() - t0)
+        c._padded_grid = None
+        st_ = getattr(self, "_last_st", None)
+        if st_ is not None and os.environ.get("MOVER_LOG") and st_.reason != getattr(self, "_mv_reason", None) \
+                and any(k in st_.reason for k in ("障害", "避け")):
+            v_ = self.sim.vehicle
+            print(f"  {time.monotonic() - t0:5.1f}s v={v_.speed:.2f} car({v_.x:.2f},{v_.y:.2f}) "
+                  f"mover({self._movers[0].xy[0]:.2f},{self._movers[0].xy[1]:.2f}) {st_.reason}", flush=True)
+        if st_ is not None:
+            self._mv_reason = st_.reason
+        ncol = self.sim.vehicle.collisions
+        if ncol == self._mv_col:
+            self._mv_speed = float(self.sim.vehicle.speed)
+        if ncol != self._mv_col:
+            self._mv_col = ncol
+            v_ = self.sim.vehicle
+            # 車体の中心（後輪軸から前へ半分）から見て、いちばん近い他車が前か後ろか
+            ctr = 0.5 * (max(x for x, _ in self.sim.spec.footprint) + min(x for x, _ in self.sim.spec.footprint))
+            cx = v_.x + ctr * math.cos(v_.yaw)
+            cy = v_.y + ctr * math.sin(v_.yaw)
+            near = min(self._movers, key=lambda m: math.hypot(m.xy[0] - cx, m.xy[1] - cy))
+            dist = math.hypot(near.xy[0] - cx, near.xy[1] - cy)
+            if dist < 0.6:
+                # どちらが当てたか: 相手へ向かう速さ（車は接触で速度が 0 になるので直前の値）
+                rx, ry = (near.xy[0] - cx) / dist, (near.xy[1] - cy) / dist
+                sp = getattr(self, "_mv_speed", 0.0)
+                car_in = sp * (math.cos(v_.yaw) * rx + math.sin(v_.yaw) * ry)
+                mv_in = -abs(near.u_now) * (math.cos(near.yaw) * rx + math.sin(near.yaw) * ry)
+                if mv_in > car_in:
+                    self.res.mover_hit_behind += 1
+                else:
+                    self.res.mover_hit_front += 1
+            st_ = getattr(self, "_last_st", None)
+            print(f"  {time.monotonic() - t0:5.1f}s 衝突 車({v_.x:.2f},{v_.y:.2f}) 向き{math.degrees(v_.yaw):.0f}° "
+                  f"速度{v_.speed:.2f} "
+                  + " ".join(f"mover({m.xy[0]:.2f},{m.xy[1]:.2f}) 向き{math.degrees(m.yaw):.0f}°"
+                             for m in self._movers)
+                  + (f" [{st_.phase}] {st_.reason}" if st_ is not None else ""), flush=True)
+
+    def _on_frame(self, f, t0: float) -> None:
+        """受信した 1 フレーム。点群が組み上がったら計画し、指令（`self._cmd`）を作り直す。"""
+        self._cap.scan = None
+        msg = self.tracker.feed(f.rx_ns, f.type, f.seq, f.payload)
+        if isinstance(msg, packets.Telemetry):
+            self.vs = self._cap.vs
+            # `planning_node` と同じく、届いた順に全部渡す（点ごとの脱スキューと、
+            # 点群の合間の姿勢の前進に使う。渡さないと SLAM は
+            # 「1周のあいだ twist は一定」の近似になる）
+            if self._feed_vs is not None:
+                t_vs = time.perf_counter()
+                self._feed_vs(self.vs)
+                self._took("車両状態", t_vs)
+            return
+        if isinstance(msg, packets.Log) and msg.message.startswith(b"ARM ignored"):
+            # ホストが詰まって COMMAND が 100ms 途切れると、仮想 STM32 はファームと同じく
+            # ARM を一度外すまで受け付けない。実機では io_node が GUI の ARM を下ろさせ、
+            # 人が入れ直す。ベンチは人の代わりに1回だけ外して入れ直す
+            self._rearm = True
+            return
+        if not isinstance(msg, (packets.LidarSector, packets.LidarSectorI,
+                                packets.LidarSectorC)):
+            return
+        scan = self._cap.scan
+        if scan is None:
+            return
+
+        now = time.monotonic_ns()
+        dt = (now - self._last_plan_ns) / NS if self._last_plan_ns else 0.0
+        self._last_plan_ns = now
+        scan = mask_body(scan, self._body)
+        scan = self._scan_filter.apply(scan, self.vs)
+        self.scan_dropped += self._scan_filter.dropped
+        t_plan = time.perf_counter()
+        st = self.planner.plan(scan, self.vs, self.params, dt)
+        if self.plan_slowdown > 1.0:
+            # Pi の遅さ: 壁時計で回るので、待つ間も仮想 STM32 の車は進む（指令が古くなる）
+            time.sleep((time.perf_counter() - t_plan) * (self.plan_slowdown - 1.0))
+        self.res.plan_ms.append((time.perf_counter() - t_plan) * 1000)
+        self.res.plans += 1
+        self._took("計画", t_plan)
+        t_now = time.monotonic() - t0
+        t_rec = time.perf_counter()
+        self._record(st, t_now)
+        self._events.step(st, t_now)
+        self._took("記録", t_rec)
+        self._cmd = self._cmd_from(st)
+
+    def _cmd_from(self, st) -> DriveCmd:
+        # `planning_node._cmd_from` と同じ変換に、実機で `telemetry_node._merge_auto` が
+        # 載せる GUI のレート制限（`[safety] cmd_*_limit`）を足す。★ 載せないと
+        # `steer_rate_limit=0` をファームが「最大舵角/秒」（0.52rad/s、実機の 7.0 の
+        # 1/13）と読み、切り返しに舵が間に合わず経路から外れた
+        sp = self.sim.spec
+        accel = sp.cmd_accel_limit_m_s2
+        if st.accel_limit > 0:
+            accel = min(accel, st.accel_limit) if accel > 0 else st.accel_limit
+        if not st.ready or st.brake:
+            return DriveCmd(mode=2, arm=True, brake=True,
+                            target_steer=st.target_steer,
+                            steer_rate_limit=sp.cmd_steer_rate_limit_rad_s,
+                            brake_torque=st.brake_torque if st.ready else 0.0)
+        return DriveCmd(mode=2, arm=True, target_speed=st.target_speed,
+                        target_steer=st.target_steer, accel_limit=accel,
+                        steer_rate_limit=sp.cmd_steer_rate_limit_rad_s,
+                        launch=st.launch)
+
+    def _step_tick(self) -> None:
+        """点群の合間の追従（`planning_node._tick` と同じ）。指令の舵・速度を上書きする。"""
+        cmd = self._cmd
+        st_last = getattr(self, "_last_st", None)
+        if (self._tick_fn is not None and st_last is not None and st_last.ready
+                and not cmd.brake and cmd.mode == 2):
+            t_tick = time.perf_counter()
+            out = self._tick_fn(self.vs)
+            self._took("追従", t_tick)
+            if out is not None:
+                steer, speed, ramp = out
+                if steer is not None:
+                    cmd.target_steer = float(steer)
+                if speed is not None:
+                    cmd.target_speed = float(speed)
+                    lim = self.sim.spec.cmd_accel_limit_m_s2
+                    cmd.accel_limit = (min(lim, ramp) if lim > 0 else ramp) if ramp > 0 \
+                        else lim
+
+    def _send_cmd(self, now: int, t0: float) -> None:
+        """指令を送る（100Hz）。乗っ取り（`--hijack`）と ARM の入れ直しはここで差し替える。"""
+        cmd_period = NS // CMD_HZ
+        cmd = self._cmd
+        # 指令の間隔（ホストが詰まって `cmd_deadman_ms` を超えると、仮想 STM32 が車を止める。
+        # その走行は捨てる——走りの問題ではない）
+        # （走っている間だけ数える。地図の読み込み・ラインの計算で止まっている間は関係ない）
+        if self._last_cmd_ns and self._gate is not None and abs(self.sim.vehicle.speed) > 0.3:
+            self.res.cmd_gap_ms = max(self.res.cmd_gap_ms, (now - self._last_cmd_ns) / 1e6)
+        self._last_cmd_ns = now
+        self._next_cmd_ns = now + cmd_period
+        out_cmd = cmd
+        hj = self._hijack(time.monotonic() - t0)
+        if hj is not None:
+            out_cmd = DriveCmd(mode=2, arm=True, target_speed=hj[1], target_steer=hj[0],
+                               accel_limit=self.sim.spec.cmd_accel_limit_m_s2,
+                               steer_rate_limit=self.sim.spec.cmd_steer_rate_limit_rad_s)
+        if self._rearm:
+            out_cmd = DriveCmd(mode=0)       # ARM を一度外す（次の周期から元の指令に戻る）
+            self._rearm = False
+            self.res.rearms += 1
+        self.link.send(command_from_cmd(
+            out_cmd, allow_arm=True,
+            max_speed=self.max_speed, max_steer=self.max_steer))
+        t_smp = time.perf_counter()
+        self._sample(time.monotonic() - t0, cmd, cmd_period / NS)
+        self._took("集計", t_smp)
+
+    def _finish_run(self) -> None:
+        """走り終えたときの集計（衝突・回避の計算時間・理想ラップ）と記録の後始末。"""
         self.res.collisions = self.sim.vehicle.collisions
         hist = getattr(self.planner, "_avoid_ms_hist", None)
         if hist:
@@ -824,20 +654,8 @@ class Bench:
             v = np.maximum(path.v, 1e-3)
             self.res.ideal_lap = float(np.sum(2.0 * ds / (v + np.roll(v, -1))))
             self.res.path_len = float(path.length)
-        if self._trace_f:
-            self._trace_f.close()
-            if path is not None and len(path) >= 3:
-                # 終わったときに追っていた経路（`<trace>.path.csv`）
-                from raspi.nav.raceline import speed_kappa
-                kap = speed_kappa(path.xy, path.closed)
-                with open(self._trace_f.name + ".path.csv", "w") as f:
-                    f.write("idx,x,y,v,kappa\n")
-                    for i in range(len(path)):
-                        f.write(f"{i},{path.xy[i, 0]:.4f},{path.xy[i, 1]:.4f},{path.v[i]:.4f},"
-                                f"{kap[i]:.5f}\n")
-        if getattr(self, "_long_f", None):
-            self._long_f.close()
-        return self.res
+        if self._trace is not None:
+            self._trace.close()
 
     def _hijack(self, t: float) -> tuple[float, float] | None:
         """`--hijack` の窓の中なら `(舵角, 速度)`。走行開始（`_race_t0`）から数える。"""
@@ -926,24 +744,8 @@ class Bench:
             if not self._prev_detour:
                 r.detour_starts += 1
         self._prev_detour = dt_on
-        if self._trace_f:
-            path = getattr(self.planner, "path", None)
-            i = getattr(self.planner, "_hint", -1)
-            pv = float(path.v[i]) if path is not None and 0 <= i < len(path) else float("nan")
-            self._trace_f.write(
-                f"{t:.3f},{st.phase},{v.x:.4f},{v.y:.4f},{v.yaw:.4f},{v.speed:.4f},"
-                f"{cmd.target_speed:.3f},{int(cmd.brake)},{pv:.3f},{i},{st.cross_track:.4f},"
-                f"{clear:.4f},{int(v.launching)},{cmd.target_steer:.4f},{v.steer_actual:.4f},"
-                f"{v.accel_lateral:.3f},{v.accel_x:.3f},"
-                f"{(v.yaw_rate / v.speed if abs(v.speed) > 0.05 else 0.0):.4f},"
-                f"{v.slip_frac:.4f},{self._trace_grip()}\n")
-
-    def _trace_grip(self) -> str:
-        g = getattr(self.planner, "_grip", None)
-        if g is None or not getattr(self.planner, "_grip_on", False):
-            return "0,0,0,"
-        return (f"{g.map.level:.3f},{g.last_cross_gain:.4f},"
-                f"{g.cap if g.cap is not None else 0.0:.3f},{self.planner._grip_gate}")
+        if self._trace is not None:
+            self._trace.row(t, st, v, cmd, clear)
 
     def _sample_grip(self, t: float, st, v) -> None:
         """横グリップの学習の状態を真値と突き合わせる（100Hz）。"""
@@ -1051,48 +853,6 @@ class Bench:
         rows = np.clip(((wy - c.origin[1]) / c.resolution).astype(np.int32), 0,
                        self._edt.shape[0] - 1)
         return float(self._edt[rows, cols].min())
-
-    def _step_events(self, st, t: float) -> None:
-        if self._load_pending:
-            self._load_pending = False
-            if self._routes_world is not None:
-                # 経路の設定は地図と一緒に読ませる（読み込み後に渡すと、道路グラフが
-                # できる前なので経由点のグループが作られない）
-                from raspi.auto import mapstore
-                cfg = self._to_map_frame(self._routes_world)
-                # 地図作成の軌跡（自動経路のスタートと逆走禁止の元）は地図側のものを残す
-                # （GUI の保存 `request_routes` と同じ。消すと自動経路が保存した線をなぞるだけになる）
-                try:
-                    old = json.loads(mapstore.load_routes(self._map_name) or "{}")
-                except ValueError:
-                    old = {}
-                if "explore_traj" in old and "explore_traj" not in cfg:
-                    cfg["explore_traj"] = old["explore_traj"]
-                mapstore.save_routes(self._map_name, json.dumps(cfg))
-            self.planner.request_load(self._map_name)
-            err = getattr(self.planner, "_load_error", "")
-            if err:
-                raise SystemExit(err)
-            if self._locate_hint is not None:
-                self.planner.request_locate_hint(*self._locate_hint)
-            if not self.quiet:
-                print(f"  {t:5.1f}s 保存済み地図『{self._map_name}』を読み込んだ", flush=True)
-            return
-        if (self.auto_race and st.phase == "DONE"
-                and getattr(self.planner, "_saved_map_name", "")):
-            name = self.planner._saved_map_name
-            if not self.quiet:
-                print(f"  {t:5.1f}s 地図『{name}』で走行を開始する（bench が押す）", flush=True)
-            self.planner.request_load(name)
-        while self.events and self.events[0][0] <= t:
-            _, kind, value = self.events.pop(0)
-            fn = getattr(self.planner, "request_route" if kind == "route" else "request_signal",
-                         None)
-            if fn is not None:
-                fn(value, "bench")
-                self.res.notes.append(f"{t:5.1f}s {kind} → {value}")
-                if not self.quiet:
-                    print(f"  {t:5.1f}s 切替要求 {kind}={value}", flush=True)
 
     def _record(self, st, t: float) -> None:
         self._last_st = st
@@ -1318,7 +1078,7 @@ def _error_preset(name: str) -> dict[str, float]:
             "gyro_bias_dps": m.gyro_bias_dps, "gyro_noise_dps": m.gyro_noise_dps}
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--course", default="normal", help="コース名 or パス")
@@ -1398,22 +1158,24 @@ def main() -> int:
                     help="plan() を K 倍遅く見せる（その間も車は進む）。Mac は Pi より速いので、Pi で同じ planner を"
                          "回した時間との比を入れると計算の遅れを Pi 相当にできる。計画 p99 の表示も K 倍込み")
     ap.add_argument("--quiet", action="store_true")
-    args = ap.parse_args()
+    return ap
 
-    course = Path(args.course)
+
+def _resolve_course(name: str) -> Path | None:
+    """コース名かパス → コースのファイル。無ければ候補を出して None。"""
+    course = Path(name)
     if not course.exists():
-        found = [p for p in list_courses() if p.stem == args.course]
+        found = [p for p in list_courses() if p.stem == name]
         if not found:
             names = ", ".join(sorted({p.stem for p in list_courses()}))
-            print(f"コースが無い: {args.course}（候補 {names}）", file=sys.stderr)
-            return 2
+            print(f"コースが無い: {name}（候補 {names}）", file=sys.stderr)
+            return None
         course = found[0]
+    return course
 
-    params: dict[str, float] = {}
-    for kv in args.set:
-        k, _, v = kv.partition("=")
-        params[k.strip()] = float(v)
 
+def _options_from_args(args: argparse.Namespace) -> BenchOptions:
+    """コマンドラインの引数 → `BenchOptions`。"""
     routes = json.loads(Path(args.routes).read_text()) if args.routes else None
     events: list[tuple[float, str, str]] = []
     for kind, items in (("route", args.switch), ("signal", args.signal)):
@@ -1436,32 +1198,30 @@ def main() -> int:
         surface["changes"] = [nums(c, ":") for c in args.mu_at]
     grip_cfg = pairs(args.grip_set)
 
-    b = Bench(course, args.mode, params, max_speed=args.max_speed,
-              max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed,
-              routes=routes, events=events, auto_race=not args.no_auto_race,
-              map_name=args.map, trace=Path(args.trace) if args.trace else None,
-              locate_hint=(tuple(float(v) for v in args.locate_hint.split(","))
-                           if args.locate_hint else None),
-              obstacles=[tuple(float(v) for v in o.split(",")) for o in args.obstacle],
-              movers=args.mover,
-              vehicle={k.strip(): float(v) for k, _, v in
-                       (kv.partition("=") for kv in args.vehicle)},
-              control={k.strip(): float(v) for k, _, v in
-                       (kv.partition("=") for kv in args.control)},
-              surface=surface or None, assume=pairs(args.assume),
-              grip_file=Path(args.grip) if args.grip else None, grip_cfg=grip_cfg,
-              sim_params={**(REAL_VIBRATION if args.real_noise else {}),
-                          **_error_preset(args.errors), **pairs(args.sim)},
-              state_dir=Path(args.state) if args.state else None,
-              hijacks=[nums(h, ":") for h in args.hijack],
-              plan_slowdown=args.plan_slowdown)
-    print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
-    try:
-        res = b.run(args.time)
-    except KeyboardInterrupt:
-        res = b.res
-    quality = b.map_quality()
-    b.route_report()
+    return BenchOptions(
+        max_speed=args.max_speed,
+        max_steer=args.max_steer, model=args.model, quiet=args.quiet, seed=args.seed,
+        routes=routes, events=events, auto_race=not args.no_auto_race,
+        map_name=args.map, trace=Path(args.trace) if args.trace else None,
+        locate_hint=(tuple(float(v) for v in args.locate_hint.split(","))
+                     if args.locate_hint else None),
+        obstacles=[tuple(float(v) for v in o.split(",")) for o in args.obstacle],
+        movers=args.mover,
+        vehicle={k.strip(): float(v) for k, _, v in
+                 (kv.partition("=") for kv in args.vehicle)},
+        control={k.strip(): float(v) for k, _, v in
+                 (kv.partition("=") for kv in args.control)},
+        surface=surface or None, assume=pairs(args.assume),
+        grip_file=Path(args.grip) if args.grip else None, grip_cfg=grip_cfg,
+        sim_params={**(REAL_VIBRATION if args.real_noise else {}),
+                    **_error_preset(args.errors), **pairs(args.sim)},
+        state_dir=Path(args.state) if args.state else None,
+        hijacks=[nums(h, ":") for h in args.hijack],
+        plan_slowdown=args.plan_slowdown)
+
+
+def _save_after_run(b: Bench, args: argparse.Namespace, res: Result) -> None:
+    """走り終えた後の保存（`--save-map`・`--save-grip`・`--state`）。"""
     if args.save_map:
         res.notes.append(b.save_built_map(args.save_map))
     if args.save_grip:
@@ -1479,6 +1239,28 @@ def main() -> int:
             if f.is_file():
                 _sh.copy(f, _st / f.name)
         res.notes.append(f"地図の学習値・経路の写しを {_st} に書いた")
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
+    course = _resolve_course(args.course)
+    if course is None:
+        return 2
+
+    params: dict[str, float] = {}
+    for kv in args.set:
+        k, _, v = kv.partition("=")
+        params[k.strip()] = float(v)
+
+    b = Bench(course, args.mode, params, _options_from_args(args))
+    print(f"# {course.name} / {args.mode} / {args.time:.0f}s / seed={args.seed}")
+    try:
+        res = b.run(args.time)
+    except KeyboardInterrupt:
+        res = b.res
+    quality = b.map_quality()
+    b.route_report()
+    _save_after_run(b, args, res)
     b.close()
     if args.obs_log:
         print("\n=== 障害物まわりの判断 ===")

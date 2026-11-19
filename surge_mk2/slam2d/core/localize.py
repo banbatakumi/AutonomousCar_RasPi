@@ -48,7 +48,7 @@ import numpy as np
 
 from .grid import OccGrid
 from .surfmap import SurfaceMap
-from .types import ScanPoints
+from .types import ScanPoints, wrap_angle
 
 __all__ = ["LocalizeConfig", "LocalizeResult", "GlobalLocalizer"]
 
@@ -208,7 +208,7 @@ class GlobalLocalizer:
                 break
             x, y, yw = float(self._xs[pos[i]]), float(self._ys[pos[i]]), float(yaw[i])
             if any(math.hypot(x - p.x, y - p.y) < self._config.ambiguous_min_dist
-                   and abs(math.remainder(yw - p.yaw, 2.0 * math.pi)) < math.radians(60.0)
+                   and abs(wrap_angle(yw - p.yaw)) < math.radians(60.0)
                    for p in picked):
                 continue
             picked.append(LocalizeResult(x, y, yw, float(score[i]), False))

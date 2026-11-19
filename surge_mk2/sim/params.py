@@ -9,11 +9,12 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import NamedTuple
+
+from raspi.core.atomic import atomic_write_text
 
 __all__ = ["SimParams", "TUNABLES", "Tunable", "REAL_VIBRATION"]
 
@@ -125,12 +126,9 @@ class SimParams:
 
     def save(self) -> None:
         try:
-            SIM_PARAMS_CONF.parent.mkdir(parents=True, exist_ok=True)
-            tmp = SIM_PARAMS_CONF.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps({f.name: getattr(self, f.name) for f in fields(self)}))
-            os.replace(tmp, SIM_PARAMS_CONF)
-        except Exception:
-            pass                           # 保存できなくてもシムは動き続けられるべき
+            atomic_write_text(SIM_PARAMS_CONF, json.dumps({f.name: getattr(self, f.name) for f in fields(self)}))
+        except Exception as e:             # 保存できなくてもシムは動き続けられるべき
+            print(f"[sim] シムのパラメータを保存できない: {e!r}", flush=True)
 
 
 class Tunable(NamedTuple):

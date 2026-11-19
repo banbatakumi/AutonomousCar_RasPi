@@ -433,21 +433,12 @@ def dilate(mask: np.ndarray, cells: int) -> np.ndarray:
     動的障害物の判定で「壁のすぐ近く」を除外する用途に使う。局在化が1〜2セル
     ずれると壁の点が空きセルに落ち、動く物が居ないのに誤検出する。
     """
-    out = mask
-    for _ in range(max(0, cells)):
-        out = _spread(out, out, np.logical_or)
-    return out
+    if cells <= 0:
+        return mask
+    import cv2           # Pi には scipy が無い（`surfmap.py` と同じく cv2 を使う）
 
-
-def _spread(base: np.ndarray, src: np.ndarray, op) -> np.ndarray:
-    """`src`を上下左右に1つずらして`base`に重ねる。
-
-    **`np.roll`を使ってはいけない。** 端が反対側へ回り込むので、地図の下端に
-    ある壁が上端に漏れる。スライスなら回り込まないうえ速い。
-    """
-    out = base.copy()
-    op(out[1:, :], src[:-1, :], out=out[1:, :])
-    op(out[:-1, :], src[1:, :], out=out[:-1, :])
-    op(out[:, 1:], src[:, :-1], out=out[:, 1:])
-    op(out[:, :-1], src[:, 1:], out=out[:, :-1])
-    return out
+    # 4近傍で1セルずつ `cells` 回太らせる＝十字の核で `cells` 回の膨張。格子の外は「壁なし」
+    # （cv2.dilate の既定の境界）なので、端の壁が反対側へ回り込むことも無い
+    out = cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3)),
+                     iterations=int(cells))
+    return out.astype(bool)

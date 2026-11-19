@@ -27,7 +27,7 @@ DS = 0.1
 def auto_ramp(veh: Vehicle, use: float = 0.95) -> float:
     """自動運転中に planner が送る目標車速のランプ（`slam2d_raceline.auto_ramp`）。この試験の走りの上限から"""
     from raspi.auto.slam2d_raceline import Limits, auto_ramp as ramp
-    return ramp(veh, Limits(a_lat=0.0, a_accel=use * veh.a_accel_max(), a_brake=use * veh.a_decel_max, react_s=0.0))
+    return ramp(veh, Limits(a_lat=0.0, a_accel=use * veh.a_accel_max, a_brake=use * veh.a_decel_max, react_s=0.0))
 
 SEGS = ((4.0, 3.0), (1.2, 1.2), (2.5, 3.0), (1.0, 0.9), (6.0, 3.0), (1.5, 1.6), (1.5, 3.0),
         (1.0, 1.1))
@@ -37,7 +37,7 @@ def make_track(veh: Vehicle, use: float = 0.95) -> tuple[np.ndarray, RaceLine]:
     lim = np.concatenate([np.full(int(round(length / DS)), v) for length, v in SEGS])
     n = len(lim)
     v = lim.copy()
-    aa, ab = use * veh.a_accel_max(), use * veh.a_decel_max
+    aa, ab = use * veh.a_accel_max, use * veh.a_decel_max
     for _ in range(2):
         for i in range(n - 1, -1, -1):
             v[i] = min(v[i], math.sqrt(v[(i + 1) % n] ** 2 + 2 * ab * DS))

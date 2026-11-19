@@ -283,8 +283,52 @@ class Frontend:
     def update(self, raw: RawScan, dt: float) -> FrontendUpdate:
         """1周ぶんの点群を取り込んで姿勢を更新する。
 
+        段: 脱スキュー → 時刻を進める → 推測航法の予測 → 合わせる点を選ぶ → 位置合わせ
+        → 運動モデルの学習 → 姿勢の確定・見失いの数え・キーフレーム。
+
         :param dt: 前回の`update()`からの経過[s]。点群の時刻が取れないときの予備
         """
+        pts, twist, buf, use_traj = self._deskew(raw)
+        first = self.updates == 0
+        span, prev_t_ref = self._advance_time(pts, dt)
+        pred, cov_world, info_pred, raw_delta = self._predict(
+            pts, twist, buf, use_traj, first, span, prev_t_ref)
+        hx, hy, all_x, all_y = self._select_hits(pts, pred)
+
+        field_ = self._field(pred)
+        matched = field_ is not None and not field_.empty and hx.size > 0
+        # ★ 見失いから戻る周期の姿勢の差には、見失っていた間の推測航法のずれが全部入っている。
+        #   それを1周期ぶんの回頭・前進として学習させない（15°の探し直しでジャイロのゼロ点が
+        #   1.5°/s 動いた。時定数は約10秒なので、直後の推測航法での続行がそのぶん曲がる）
+        recovering = self.lost_streak > 0
+        lost = False
+        score = 0.0
+        new_pose = pred
+        res: RegisterResult | None = None
+        if matched:
+            res, hx, hy, good, recovering = self._match(
+                field_, hx, hy, all_x, all_y, pred, info_pred, recovering)
+            score = res.inlier
+            if good:
+                new_pose = res.pose
+            else:
+                lost = True
+        elif not first and field_ is not None and not field_.empty:
+            # 地図はあるのに合わせる点が1つも無い（全点が範囲外・壁の向こう・無効）。**合わせようとして
+            # いない**だけで、推測航法の姿勢のままキーフレームにして地図へ焼くと壁が二重になる。
+            # 見失いとして数える（連続すれば作り直しが掛かる）
+            lost = True
+        self.last = res
+
+        if not (lost or first or recovering):
+            self._learn_motion(res, new_pose, span, raw_delta)
+        lost = self._commit(pts, hx, hy, res, new_pose, cov_world, lost)
+        self.updates += 1
+        return FrontendUpdate(self.pose, score, lost, matched)
+
+    def _deskew(self, raw: RawScan):
+        """点群を脱スキューする。時刻つきの twist の履歴が点群の時間を覆っていれば点ごと、
+        無ければ「1周期のあいだ twist は一定」の近似。`(点群, twist, 補正済みの履歴, 点ごとか)`。"""
         cfg = self.config
         twist = self.motion.current_twist()
         if not (math.isfinite(twist.vx) and math.isfinite(twist.vy)
@@ -306,8 +350,10 @@ class Frontend:
             pts = deskew(raw, twist, mount_x=cfg.mount_x, mount_y=cfg.mount_y,
                          max_range=cfg.max_range)
         self.last_points = pts
+        return pts, twist, buf, use_traj
 
-        first = self.updates == 0
+    def _advance_time(self, pts: ScanPoints, dt: float) -> tuple[float, int]:
+        """点群の基準時刻を進め、前回からの経過 `span`[s] と前回の基準時刻を返す。"""
         span = dt
         if self._t_ref and pts.t_ref_ns:
             span = (pts.t_ref_ns - self._t_ref) / NS
@@ -316,8 +362,11 @@ class Frontend:
         prev_t_ref = self._t_ref
         if pts.t_ref_ns:
             self._t_ref = pts.t_ref_ns
-        span = max(1e-3, span)
+        return max(1e-3, span), prev_t_ref
 
+    def _predict(self, pts: ScanPoints, twist: Twist2D, buf, use_traj: bool, first: bool,
+                 span: float, prev_t_ref: int):
+        """推測航法の予測。`(予測の姿勢, 共分散(世界), その情報行列, 補正前の履歴の差 or None)`。"""
         raw_delta: Pose2D | None = None
         if first:
             delta_pred = Pose2D(0.0, 0.0, 0.0)
@@ -337,7 +386,12 @@ class Frontend:
         pred = compose(self.pose, delta_pred)
         cov_world = _world_cov(cov_body, self.pose.yaw)
         info_pred = np.linalg.inv(cov_world + np.eye(3) * 1e-12)
+        return pred, cov_world, info_pred, raw_delta
 
+    def _select_hits(self, pts: ScanPoints, pred: Pose2D):
+        """合わせる点を選ぶ（範囲内の当たり。凍結地図なら壁の向こう・手前の点を外す）。
+        `(外した残り x, y, 外す前 x, y)`。"""
+        cfg = self.config
         d = np.hypot(pts.x, pts.y)
         sel = pts.hit & (d <= cfg.match_range)
         hx, hy = pts.x[sel], pts.y[sel]
@@ -348,56 +402,44 @@ class Frontend:
         if self.grid.frozen and (cfg.behind_margin > 0.0 or cfg.front_margin > 0.0) and hx.size > 0:
             keep = self._not_behind_wall(hx, hy, pred)
             hx, hy = hx[keep], hy[keep]
+        return hx, hy, all_x, all_y
 
-        field_ = self._field(pred)
-        matched = field_ is not None and not field_.empty and hx.size > 0
-        lost = False
-        score = 0.0
-        new_pose = pred
-        res: RegisterResult | None = None
-        # ★ 見失いから戻る周期の姿勢の差には、見失っていた間の推測航法のずれが全部入っている。
-        #   それを1周期ぶんの回頭・前進として学習させない（15°の探し直しでジャイロのゼロ点が
-        #   1.5°/s 動いた。時定数は約10秒なので、直後の推測航法での続行がそのぶん曲がる）
-        recovering = self.lost_streak > 0
-        if matched:
-            res = register(field_, hx, hy, pred, prior=pred, prior_info=info_pred,
+    def _match(self, field_: SurfaceMap, hx, hy, all_x, all_y, pred: Pose2D, info_pred,
+               recovering: bool):
+        """位置合わせ（外しすぎなら全点でも、合わなければ探し直しも）。
+        `(結果, 採った点 x, y, 合ったか, 見失いから戻る周期か)`。"""
+        cfg = self.config
+        res = register(field_, hx, hy, pred, prior=pred, prior_info=info_pred,
+                       config=cfg.register)
+        if self._filter_doubt:
+            # 外した点が多すぎる: 全点でも合わせ、全点のうち壁に乗る点が多い姿勢を採る（`behind_max_ratio`）
+            self.filter_doubts += 1
+            alt = register(field_, all_x, all_y, pred, prior=pred, prior_info=info_pred,
                            config=cfg.register)
-            if self._filter_doubt:
-                # 外した点が多すぎる: 全点でも合わせ、全点のうち壁に乗る点が多い姿勢を採る（`behind_max_ratio`）
-                self.filter_doubts += 1
-                alt = register(field_, all_x, all_y, pred, prior=pred, prior_info=info_pred,
-                               config=cfg.register)
-                # 差が小さければ外した方のまま（全点の方は地図に無い物の点が残差を膨らませ、見失い判定に掛かりやすい）
-                h_alt = _wall_hits(field_, all_x, all_y, alt.pose, cfg.register.inlier_dist)
-                h_res = _wall_hits(field_, all_x, all_y, res.pose, cfg.register.inlier_dist)
-                if h_alt > 1.1 * h_res + 3:
-                    res, hx, hy = alt, all_x, all_y
-                    self.filter_reverts += 1
-            good = self._good(res)
-            if not good and self.lost_streak + 1 >= cfg.reloc_after:
-                alt = self._relocalize(field_, hx, hy, pred)
-                if alt is not None and self._good(alt):
-                    res, good = alt, True
-                    self.relocs += 1
-                    recovering = True
-            score = res.inlier
-            self.wall_hits = _wall_hits(field_, all_x, all_y, res.pose, cfg.register.inlier_dist)
-            if good:
-                new_pose = res.pose
-                a = cfg.rms_alpha
-                self.rms_ref += a * (min(res.rms, cfg.max_rms) - self.rms_ref)
-            else:
-                lost = True
-        elif not first and field_ is not None and not field_.empty:
-            # 地図はあるのに合わせる点が1つも無い（全点が範囲外・壁の向こう・無効）。**合わせようとして
-            # いない**だけで、推測航法の姿勢のままキーフレームにして地図へ焼くと壁が二重になる。
-            # 見失いとして数える（連続すれば作り直しが掛かる）
-            lost = True
-        self.last = res
+            # 差が小さければ外した方のまま（全点の方は地図に無い物の点が残差を膨らませ、見失い判定に掛かりやすい）
+            h_alt = _wall_hits(field_, all_x, all_y, alt.pose, cfg.register.inlier_dist)
+            h_res = _wall_hits(field_, all_x, all_y, res.pose, cfg.register.inlier_dist)
+            if h_alt > 1.1 * h_res + 3:
+                res, hx, hy = alt, all_x, all_y
+                self.filter_reverts += 1
+        good = self._good(res)
+        if not good and self.lost_streak + 1 >= cfg.reloc_after:
+            alt = self._relocalize(field_, hx, hy, pred)
+            if alt is not None and self._good(alt):
+                res, good = alt, True
+                self.relocs += 1
+                recovering = True
+        self.wall_hits = _wall_hits(field_, all_x, all_y, res.pose, cfg.register.inlier_dist)
+        if good:
+            a = cfg.rms_alpha
+            self.rms_ref += a * (min(res.rms, cfg.max_rms) - self.rms_ref)
+        return res, hx, hy, good, recovering
 
-        if lost or first or recovering:
-            pass
-        elif res is not None:
+    def _learn_motion(self, res: RegisterResult | None, new_pose: Pose2D, span: float,
+                      raw_delta: Pose2D | None) -> None:
+        """位置合わせで決まった姿勢の差から、運動モデル（ジャイロのゼロ点・倍率）を学ぶ。"""
+        cfg = self.config
+        if res is not None:
             info_body = rotate_info(res.info / max(cfg.register.info_scale, 1e-12), new_pose.yaw)
             self.motion.update(between(self.pose, new_pose), span, info_body, raw_delta,
                                absolute=self.grid.frozen)
@@ -405,6 +447,11 @@ class Frontend:
             self.motion.update(between(self.pose, new_pose), span, None, raw_delta,
                                absolute=self.grid.frozen)
 
+    def _commit(self, pts: ScanPoints, hx, hy, res: RegisterResult | None, new_pose: Pose2D,
+                cov_world, lost: bool) -> bool:
+        """姿勢を確定し、見失いを数え（続けば局所地図を作り直す）、動いていればキーフレームを足す。
+        見失いとして返すかを返す（作り直した周期は見失いとして返さない）。"""
+        cfg = self.config
         self._path += math.hypot(new_pose.x - self.pose.x, new_pose.y - self.pose.y)
         self.pose = new_pose
         self._cov_since_kf = self._cov_since_kf + cov_world
@@ -424,9 +471,7 @@ class Frontend:
 
         if not self.grid.frozen and not lost and (restarted or self._moved_enough()):
             self._add_keyframe(pts, hx, hy, res)
-
-        self.updates += 1
-        return FrontendUpdate(self.pose, score, lost, matched)
+        return lost
 
     def corrected_delta(self, t0_ns: int, t1_ns: int) -> Pose2D:
         """`t0`の車体から見た`t1`の姿勢を、学習済みのバイアス・倍率で補正した履歴から積む。

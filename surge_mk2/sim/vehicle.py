@@ -66,11 +66,11 @@
 from __future__ import annotations
 
 import math
-import tomllib
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from raspi.core.vehicle import read_toml, section
 from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM as _MAX_BRAKE_TORQUE_NM
 
 __all__ = ["VehicleSpec", "VehicleModel", "DriveInput", "SteerServo", "SteerLink", "next_speed",
@@ -190,14 +190,13 @@ class VehicleSpec:
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_SPEC_PATH) -> "VehicleSpec":
-        with open(path, "rb") as fp:
-            d = tomllib.load(fp)
-        dyn = d.get("dynamics", {})
+        d = read_toml(path)
+        dyn = section(d, "dynamics")
         # シムの車だけが使う値（実機の制御は読まない・同定しない）は `[sim]`。古い toml は [dynamics] にある
-        sim_only = {**dyn, **d.get("sim", {})}
+        sim_only = {**dyn, **section(d, "sim")}
         # 走りの上限は、校正（7・8）が実機で測って `[limits]` に書いた値から作る（シムが実機から離れていかないように）。
         # `[limits]` は正味の加速度、シムの drive_accel・speed_decel は転がり抵抗を引く／足す前の値
-        lim = d.get("limits", {})
+        lim = section(d, "limits")
         rr = float(dyn.get("rolling_resistance", 0.35))
         if lim.get("a_lat_m_s2"):
             sim_only["mu"] = float(lim["a_lat_m_s2"]) / GRAVITY_MPS2
@@ -207,7 +206,7 @@ class VehicleSpec:
             sim_only["speed_decel_m_s2"] = max(0.05, float(lim["a_brake_m_s2"]) - rr)
         if lim.get("abs_brake_decel_m_s2"):
             sim_only["brake_decel_m_s2"] = float(lim["abs_brake_decel_m_s2"])
-        safety = d.get("safety", {})
+        safety = section(d, "safety")
         dflt = cls()
         return cls(
             wheelbase=d.get("wheelbase", 0.23),

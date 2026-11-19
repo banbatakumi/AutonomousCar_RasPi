@@ -56,13 +56,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from raspi.msgs import SPEED_DEADBAND_MPS  # noqa: E402
+from slam2d.core.types import Pose2D, between, compose, inverse, wrap_angle  # noqa: E402
 from raspi.msgs.convert import ScanAssembler  # noqa: E402
 from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
 from raspi.msgs.types import VehicleState  # noqa: E402
 
 from .course import Course, list_courses  # noqa: E402
 from .lidar import VirtualLidar  # noqa: E402
-from .params import SimParams  # noqa: E402
 from .vehicle import DriveInput, VehicleModel, VehicleSpec  # noqa: E402
 
 __all__ = ["SensorModel", "RunConfig", "run", "load_course"]
@@ -75,215 +75,10 @@ COURSE_DIR = Path(__file__).resolve().parent / "courses"
 
 # ── センサ誤差 ─────────────────────────────────────────────────────────────
 
-@dataclass(frozen=True)
-class SensorModel:
-    """推測航法を狂わせる誤差と、LiDAR の意地悪さ。
+from .sensor_faults import (  # noqa: E402
+    SensorModel, _wall_bbox, car_box, inject_boxes, inject_ghost, inject_pillars, mask_fov,
+)
 
-    ## 値の根拠（外部調査）
-
-    - **MPU6050**: データシートのゼロ点誤差は±20°/s（較正前）、ノイズ密度
-      0.005°/s/√Hz。Allan分散の実測報告でバイアス不安定性 0.0013〜0.0024°/s、
-      ノイズ 約0.009°/s/√Hz。**起動時の静止較正が前提**で、残るのは温度ドリフト。
-      感度（倍率）誤差はデータシートで±3%
-    - **LD06**: 0.3m超で誤差±45mm・標準偏差10mm、角度誤差 最大2°、10Hz回転。
-      黒い物体は近赤外を吸収するので欠測が増える（大会コースのトンネルは黒壁）
-    - **車速**: 前輪アナログ絶対角エンコーダ。分解能が粗く強いローパス。
-      低μ板の上ではスリップして読みが伸びる
-
-    `real` は「静止較正はしたが温度ドリフトが残る」程度、`harsh` は
-    「較正が甘く、黒壁で欠測が増え、低μ板で滑る」大会当日の上振れを想定する。
-    """
-
-    speed_scale: float = 1.0        #: 車速の倍率誤差（車輪半径の誤差・摩耗）
-    speed_noise: float = 0.0        #: 車速の白色ノイズ σ [m/s]
-    speed_tau: float = 0.0          #: 車速の計測遅れ（1次遅れ）[s]。強いローパスの再現
-    speed_quant: float = 0.0        #: 車速の量子化の刻み [m/s]（アナログ絶対角エンコーダの粗さ。0=無し）
-    #: テレメトリの時刻の一定のずれ [ms]（時刻同期の残差。+ は実際より未来の時刻を付ける）。
-    #: 脱スキューと`pose_now`は`t_capture`で履歴を引くので、ずれると推測航法が狂う
-    time_offset_ms: float = 0.0
-    gyro_bias_dps: float = 0.0      #: ジャイロのゼロ点ずれ [°/s]
-    gyro_noise_dps: float = 0.0     #: ジャイロの白色ノイズ σ [°/s]
-    gyro_scale: float = 1.0         #: ジャイロの倍率誤差
-    #: スリップ区間。(x0, y0, x1, y1, 倍率) の矩形の中では車速の読みがこの倍率に
-    #: なる（低μ板で後輪が空転・前輪が滑る状況の近似）。世界座標
-    slip_zones: tuple[tuple[float, float, float, float, float], ...] = ()
-    lidar: SimParams = field(default_factory=SimParams)
-    #: 壁越しに別の部屋が見える区間。`(段, 開始, 秒数, deg0, deg1, offset)`:
-    #: 段（0=地図作成 1=凍結地図での走行）の進捗の割合`開始`から`秒数`のあいだ、
-    #: 車両角`deg0`〜`deg1`の点を「コースの外接矩形を`offset`m広げた部屋の壁」までの
-    #: 距離に差し替える（低い壁の上を走査面が越えた状況）。地図作成中に入れると
-    #: 壁の外が「既知の空き」になり、走行中の越境点が外壁に対応付く危険な状況を作れる
-    ghost: tuple[tuple[float, float, float, float, float, float], ...] = ()
-
-    @classmethod
-    def preset(cls, name: str, course: Course | None = None) -> "SensorModel":
-        if name == "ideal":
-            lid = SimParams(lidar_noise_sigma_m=0.0, lidar_noise_rel=0.0,
-                            lidar_drop_rate=0.0, lidar_sector_drop_rate=0.0,
-                            lidar_delay_jitter_ms=0.0)
-            return cls(lidar=lid)
-        if name == "real":
-            # 静止較正済みのジャイロ（残るのは温度ドリフト）＋ LD06 の実力値
-            return cls(speed_scale=1.02, speed_noise=0.02, speed_tau=0.05,
-                       gyro_bias_dps=0.5, gyro_noise_dps=0.3, gyro_scale=1.01)
-        if name == "harsh":
-            # 測距ノイズはデータシート（σ10mm・±45mm）の倍程度に留め、
-            # **欠測・スリップ・ジャイロの粗さ**で意地悪をする
-            lid = SimParams(lidar_noise_sigma_m=0.015, lidar_noise_rel=0.005,
-                            lidar_drop_rate=0.10, lidar_sector_drop_rate=0.03,
-                            lidar_delay_jitter_ms=5.0)
-            zones: tuple = ()
-            if course is not None and course.centerline is not None:
-                # 中心線の 1/3 付近に 1.2m 四方の低μ区間を置く（読みが 15% 伸びる）
-                cx, cy = course.centerline[len(course.centerline) // 3, :2]
-                zones = ((cx - 0.6, cy - 0.6, cx + 0.6, cy + 0.6, 1.15),)
-            return cls(speed_scale=0.95, speed_noise=0.05, speed_tau=0.08,
-                       gyro_bias_dps=1.5, gyro_noise_dps=1.0, gyro_scale=1.03,
-                       slip_zones=zones, lidar=lid)
-        raise ValueError(f"unknown preset: {name}")
-
-
-def _wall_bbox(course: Course) -> tuple[float, float, float, float]:
-    rows, cols = np.nonzero(course.grid)
-    r = course.resolution
-    return (course.origin[0] + cols.min() * r, course.origin[1] + rows.min() * r,
-            course.origin[0] + (cols.max() + 1) * r, course.origin[1] + (rows.max() + 1) * r)
-
-
-def _ray_box_exit(ox: float, oy: float, ang: np.ndarray, box) -> np.ndarray:
-    """矩形の内側の点`(ox, oy)`から`ang`方向へ撃ったレイが矩形を出るまでの距離。"""
-    x0, y0, x1, y1 = box
-    c, s = np.cos(ang), np.sin(ang)
-    with np.errstate(divide="ignore"):
-        tx = np.where(c > 0, (x1 - ox) / c, np.where(c < 0, (x0 - ox) / c, np.inf))
-        ty = np.where(s > 0, (y1 - oy) / s, np.where(s < 0, (y0 - oy) / s, np.inf))
-    return np.minimum(tx, ty)
-
-
-def inject_ghost(scan, pose_lidar: tuple[float, float, float], deg0: float, deg1: float,
-                 box, max_range: float) -> None:
-    """`scan.dist`の`deg0`〜`deg1`（車両角）を、仮想の部屋の壁`box`までの距離に書き換える。"""
-    deg = np.arange(360)
-    span = (deg - deg0) % 360
-    sel = span <= (deg1 - deg0) % 360
-    ang = pose_lidar[2] + np.radians(deg[sel])
-    d = _ray_box_exit(pose_lidar[0], pose_lidar[1], ang, box)
-    d = np.where(d <= max_range, d, 0.0)
-    dist = np.asarray(scan.dist, dtype=float)
-    dist[sel] = d
-    scan.dist = dist.tolist()
-    if scan.saturated is not None:
-        sat = np.asarray(scan.saturated, dtype=bool)
-        sat[sel] = False
-        scan.saturated = sat.tolist()
-
-
-#: 他車（小さな障害物）の箱の大きさ [m]（長さ, 幅）。自車と同程度の小型車
-CAR_SIZE = (0.40, 0.22)
-
-
-def inject_boxes(scan, pose_lidar: tuple[float, float, float],
-                 boxes: list[tuple[float, float, float, float, float]], max_range: float) -> None:
-    """`scan.dist`の全周に、有向矩形`(cx, cy, yaw, 長さ, 幅)`（世界座標）を差し込む。
-
-    他車が走査線を遮った状態を作る。レイが矩形に当たり、かつ壁より手前なら距離を書き換える
-    （壁の距離0=無効は「無限遠」として扱う）。
-    """
-    if not boxes:
-        return
-    ang = pose_lidar[2] + np.radians(np.arange(360))
-    dx, dy = np.cos(ang), np.sin(ang)
-    dist = np.asarray(scan.dist, dtype=float)
-    cur = np.where(dist > 0.0, dist, np.inf)
-    for cx, cy, yaw, ln, wd in boxes:
-        c, s = math.cos(yaw), math.sin(yaw)
-        ox = c * (pose_lidar[0] - cx) + s * (pose_lidar[1] - cy)
-        oy = -s * (pose_lidar[0] - cx) + c * (pose_lidar[1] - cy)
-        ux, uy = c * dx + s * dy, -s * dx + c * dy
-        t0 = np.full(360, -np.inf)
-        t1 = np.full(360, np.inf)
-        ok = np.ones(360, dtype=bool)
-        for o, u, h in ((ox, ux, ln / 2), (oy, uy, wd / 2)):
-            par = np.abs(u) < 1e-9
-            ok &= ~par | (np.abs(o) <= h)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                a, b = (-h - o) / u, (h - o) / u
-            t0 = np.maximum(t0, np.where(par, -np.inf, np.minimum(a, b)))
-            t1 = np.minimum(t1, np.where(par, np.inf, np.maximum(a, b)))
-        hit = ok & (t0 <= t1) & (t0 > 0.05) & (t0 < cur) & (t0 <= max_range)
-        cur = np.where(hit, t0, cur)
-    out = np.where(np.isfinite(cur), cur, 0.0)
-    scan.dist = out.tolist()
-    if scan.saturated is not None:
-        sat = np.asarray(scan.saturated, dtype=bool)
-        sat[out != dist] = False
-        scan.saturated = sat.tolist()
-
-
-def mask_fov(scan, fov_deg: float) -> None:
-    """`scan.dist`の車両角 ±`fov_deg`/2 の外を 0（無効）にする。"""
-    if fov_deg >= 360.0:
-        return
-    deg = np.arange(360)
-    off = np.minimum(deg, 360 - deg)
-    dist = np.asarray(scan.dist, dtype=float)
-    dist[off > fov_deg / 2.0] = 0.0
-    scan.dist = dist.tolist()
-
-
-def inject_pillars(scan, pillars, mixed_pixel: float, rng: np.random.Generator) -> None:
-    """`scan.dist`に、LiDAR 基準で固定された円柱`(車両角, 距離, 直径)`を差し込む。
-
-    縁のレイ（支柱に当たる範囲の両端とその外側1本）は確率`mixed_pixel`で支柱と背景の間の
-    一様な距離になる（ビームの一部が支柱・残りが背景に当たったときの LD06 の誤測距の近似）。
-    """
-    if not pillars:
-        return
-    dist = np.asarray(scan.dist, dtype=float)
-    ang = np.radians(np.arange(360))
-    for deg, r, dia in pillars:
-        cx, cy = r * math.cos(math.radians(deg)), r * math.sin(math.radians(deg))
-        proj = cx * np.cos(ang) + cy * np.sin(ang)
-        perp2 = r * r - proj * proj
-        rad = dia / 2.0
-        hit = (proj > 0) & (perp2 <= rad * rad)
-        t = proj - np.sqrt(np.maximum(rad * rad - perp2, 0.0))
-        bg = dist.copy()
-        dist = np.where(hit & ((bg <= 0) | (t < bg)), t, dist)
-        if mixed_pixel > 0.0 and hit.any():
-            idx = np.nonzero(hit)[0]
-            # 360° を跨ぐ支柱もあるので、当たったレイの両隣で当たっていないものを縁とする
-            edge = {int(i) for i in idx if not hit[(i - 1) % 360] or not hit[(i + 1) % 360]}
-            edge |= {int(j) % 360 for i in idx for j in (i - 1, i + 1) if not hit[j % 360]}
-            for i in edge:
-                if rng.random() < mixed_pixel:
-                    far = bg[i] if bg[i] > 0 else 2.0
-                    near = r - rad
-                    dist[i] = float(rng.uniform(near, max(near, far)))
-    if scan.saturated is not None:
-        sat = np.asarray(scan.saturated, dtype=bool)
-        sat[dist != np.asarray(scan.dist, dtype=float)] = False
-        scan.saturated = sat.tolist()
-    scan.dist = dist.tolist()
-
-
-def car_box(driver: "TruthDriver", s: float, lateral: float,
-            backward: bool = False) -> tuple[float, float, float, float, float]:
-    """中心線の弧長`s`の地点から左へ`lateral`ずらした位置の他車の箱。向きは中心線の接線（`backward`で逆走）。"""
-    n = len(driver.xy)
-    f = (s / driver.step) % n
-    i = int(f) % n
-    a = f - int(f)
-    p0, p1 = driver.xy[i], driver.xy[(i + 1) % n]
-    p = p0 * (1.0 - a) + p1 * a
-    tx, ty = p1[0] - p0[0], p1[1] - p0[1]
-    h = math.atan2(ty, tx)
-    x = p[0] - math.sin(h) * lateral
-    y = p[1] + math.cos(h) * lateral
-    return (float(x), float(y), h + (math.pi if backward else 0.0), CAR_SIZE[0], CAR_SIZE[1])
-
-
-# ── コースと真値の運転手 ───────────────────────────────────────────────────
 
 def load_course(name_or_path: str, route: str = "") -> Course:
     """コースを読み、PNG コースなら隣の `<name>_centerline.npz` から中心線を補う。
@@ -605,247 +400,283 @@ class _TruthLog:
         return x, y, yaw
 
 
-def _rel(origin, pose) -> tuple[float, float, float]:
-    ox, oy, oyaw = origin
-    c, s = math.cos(-oyaw), math.sin(-oyaw)
-    dx, dy = pose[0] - ox, pose[1] - oy
-    return (dx * c - dy * s, dx * s + dy * c, _wrap(pose[2] - oyaw))
-
-
-def _compose(a, b) -> tuple[float, float, float]:
-    c, s = math.cos(a[2]), math.sin(a[2])
-    return (a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], _wrap(a[2] + b[2]))
-
-
-def _inverse(a) -> tuple[float, float, float]:
-    c, s = math.cos(a[2]), math.sin(a[2])
-    return (-(c * a[0] + s * a[1]), -(-s * a[0] + c * a[1]), _wrap(-a[2]))
-
-
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2 * math.pi) - math.pi
-
-
 def run(cfg: RunConfig, factory: Callable[[], object] | None = None, *,
         verbose: bool = False) -> RunResult:
-    t_wall = time.perf_counter()
-    course = load_course(cfg.course, cfg.route)
-    sensors = SensorModel.preset(cfg.errors, course)
-    if cfg.ghost:
-        sensors = dataclasses.replace(sensors, ghost=sensors.ghost + tuple(cfg.ghost))
-    if cfg.sensor_overrides:
-        sensors = dataclasses.replace(sensors, **dict(cfg.sensor_overrides))
-    spec = VehicleSpec.load()
-    lidar_x, lidar_y, _ = spec.sensor_pose("lidar")
-    ghost_box = _wall_bbox(course)
-    ghost_t0: list[int | None] = [None] * len(sensors.ghost)
-    veh = VehicleModel(spec, course.start)
-    lidar = VirtualLidar(course, spec, sensors.lidar, seed=cfg.seed)
-    asm = ScanAssembler()
-    rng = np.random.default_rng(cfg.seed + 12345)
-    driver = TruthDriver(course, spec, a_lat=cfg.a_lat)
-    slam = SlamUnderTest(factory or default_factory())
-    body = course.body_samples(spec.footprint)
-    body_rng = body_ranges(spec.footprint, lidar_x, lidar_y)
+    return _Run(cfg, factory, verbose).execute()
 
-    truth = _TruthLog()
-    t_ns = 0
-    queue: list[tuple[int, object]] = []
-    speed_meas = 0.0
-    vs: VehicleState | None = None
-    next_tlm = 0
-    bias = math.radians(sensors.gyro_bias_dps)
-    gsig = math.radians(sensors.gyro_noise_dps)
 
-    explore, race = PhaseStats(), PhaseStats()
-    stats = explore
-    phase = "explore"
-    v_max = cfg.explore_speed
-    explore_len = cfg.laps * driver.length
-    race_len = cfg.race_laps * driver.length
-    origin = None
-    traj_true: list[tuple[float, float, float]] = []
-    traj_est: list[tuple[float, float, float]] = []
-    phase_split = 0
-    map_before: dict = {}
-    map_after: dict = {}
-    freeze_ms = 0.0
-    locate: dict = {}
-    loc_done = 0
-    lost_streak = 0
-    was_colliding = False
-    last_plan_ns = 0
-    steer_cmd = 0.0
-    speed_cmd = 0.0
-    race_start_progress = 0.0
-    max_t = (explore_len / 0.3 + race_len / 0.5) + 60.0
+class _Run:
+    """`run` の 1 回の走行。段（真値の運転 → 計測 → LiDAR → 外乱 → SLAM → 採点 → 段の切り替え）を
+    メソッドに分けるため、ループの状態をここに持つ（分ける前は 1 関数の局所変数だった）。"""
 
-    while t_ns < max_t * NS:
-        # ── 真値の運転手（100Hz 相当で指令を更新）──
-        if t_ns < cfg.still_s * NS:
-            speed_cmd, steer_cmd = 0.0, 0.0
-        elif (t_ns // 1_000_000) % 10 == 0:
-            speed_cmd, steer_cmd = driver.command(veh.x, veh.y, veh.yaw, v_max)
-        veh.apply(DriveInput(armed=True, target_speed=speed_cmd, target_steer=steer_cmd))
+    def __init__(self, cfg: RunConfig, factory: Callable[[], object] | None,
+                 verbose: bool) -> None:
+        self.t_wall = time.perf_counter()
+        self.cfg = cfg
+        self.factory = factory
+        self.verbose = verbose
+        course = self.course = load_course(cfg.course, cfg.route)
+        sensors = SensorModel.preset(cfg.errors, course)
+        if cfg.ghost:
+            sensors = dataclasses.replace(sensors, ghost=sensors.ghost + tuple(cfg.ghost))
+        if cfg.sensor_overrides:
+            sensors = dataclasses.replace(sensors, **dict(cfg.sensor_overrides))
+        self.sensors = sensors
+        spec = VehicleSpec.load()
+        self.lidar_x, self.lidar_y, _ = spec.sensor_pose("lidar")
+        self.ghost_box = _wall_bbox(course)
+        self.ghost_t0: list[int | None] = [None] * len(sensors.ghost)
+        self.veh = VehicleModel(spec, course.start)
+        self.lidar = VirtualLidar(course, spec, sensors.lidar, seed=cfg.seed)
+        self.asm = ScanAssembler()
+        self.rng = np.random.default_rng(cfg.seed + 12345)
+        self.driver = TruthDriver(course, spec, a_lat=cfg.a_lat)
+        self.slam = SlamUnderTest(factory or default_factory())
+        self.body = course.body_samples(spec.footprint)
+        self.body_rng = body_ranges(spec.footprint, self.lidar_x, self.lidar_y)
+
+        self.truth = _TruthLog()
+        self.t_ns = 0
+        self.queue: list[tuple[int, object]] = []
+        self.speed_meas = 0.0
+        self.vs: VehicleState | None = None
+        self.next_tlm = 0
+        self.bias = math.radians(sensors.gyro_bias_dps)
+        self.gsig = math.radians(sensors.gyro_noise_dps)
+
+        self.explore, self.race = PhaseStats(), PhaseStats()
+        self.stats = self.explore
+        self.phase = "explore"
+        self.v_max = cfg.explore_speed
+        self.explore_len = cfg.laps * self.driver.length
+        self.race_len = cfg.race_laps * self.driver.length
+        self.origin = None
+        self.traj_true: list[tuple[float, float, float]] = []
+        self.traj_est: list[tuple[float, float, float]] = []
+        self.phase_split = 0
+        self.map_before: dict = {}
+        self.map_after: dict = {}
+        self.freeze_ms = 0.0
+        self.locate: dict = {}
+        self.loc_done = 0
+        self.lost_streak = 0
+        self.was_colliding = False
+        self.last_plan_ns = 0
+        self.steer_cmd = 0.0
+        self.speed_cmd = 0.0
+        self.race_start_progress = 0.0
+        self.max_t = (self.explore_len / 0.3 + self.race_len / 0.5) + 60.0
+
+    def execute(self) -> RunResult:
+        while self.t_ns < self.max_t * NS:
+            self._drive()
+            self._measure()
+            scan = self._collect_scan()
+            if scan is None or self.vs is None:
+                continue
+            scan, ghosted = self._inject(scan)
+            tr = self._slam_step(scan, ghosted)
+            if self.phase == "explore" and self.driver.progress >= self.explore_len:
+                self._end_explore()
+            elif self.phase == "race":
+                if self._race_step(scan, tr):
+                    break
+        return self._result()
+
+    # ── 段ごと ──
+
+    def _drive(self) -> None:
+        """真値の運転手（100Hz 相当で指令を更新）と車の積分・衝突。"""
+        veh, cfg = self.veh, self.cfg
+        if self.t_ns < cfg.still_s * NS:
+            self.speed_cmd, self.steer_cmd = 0.0, 0.0
+        elif (self.t_ns // 1_000_000) % 10 == 0:
+            self.speed_cmd, self.steer_cmd = self.driver.command(veh.x, veh.y, veh.yaw, self.v_max)
+        veh.apply(DriveInput(armed=True, target_speed=self.speed_cmd, target_steer=self.steer_cmd))
         veh.step(DT)
-        t_ns += int(DT * NS)
-        truth.add(t_ns, veh.x, veh.y, veh.yaw)
-        hit = course.collides(veh.x, veh.y, veh.yaw, body)
-        if hit and not was_colliding:
-            stats.collisions += 1
-        was_colliding = hit
+        self.t_ns += int(DT * NS)
+        self.truth.add(self.t_ns, veh.x, veh.y, veh.yaw)
+        hit = self.course.collides(veh.x, veh.y, veh.yaw, self.body)
+        if hit and not self.was_colliding:
+            self.stats.collisions += 1
+        self.was_colliding = hit
 
-        # ── 車速・ヨーレートの計測（誤差を注入）──
+    def _measure(self) -> None:
+        """車速・ヨーレートの計測（誤差を注入）。"""
+        veh, sensors, t_ns = self.veh, self.sensors, self.t_ns
         scale = sensors.speed_scale
         for (x0, y0, x1, y1, k) in sensors.slip_zones:
             if x0 <= veh.x <= x1 and y0 <= veh.y <= y1:
                 scale *= k
         a = 1.0 if sensors.speed_tau <= 0 else 1.0 - math.exp(-DT / sensors.speed_tau)
-        speed_meas += a * (veh.speed * scale - speed_meas)
-        if t_ns >= next_tlm:
-            next_tlm += NS // TELEMETRY_HZ
-            sp = speed_meas + (float(rng.normal(0, sensors.speed_noise)) if sensors.speed_noise > 0 else 0.0)
+        self.speed_meas += a * (veh.speed * scale - self.speed_meas)
+        if t_ns >= self.next_tlm:
+            self.next_tlm += NS // TELEMETRY_HZ
+            rng, gsig = self.rng, self.gsig
+            sp = self.speed_meas + (float(rng.normal(0, sensors.speed_noise)) if sensors.speed_noise > 0 else 0.0)
             if sensors.speed_quant > 0.0:
                 sp = round(sp / sensors.speed_quant) * sensors.speed_quant
-            yr = (veh.yaw_rate * sensors.gyro_scale + bias
+            yr = (veh.yaw_rate * sensors.gyro_scale + self.bias
                   + (float(rng.normal(0, gsig)) if gsig > 0 else 0.0))
-            vs = VehicleState(speed=sp, yaw_rate=yr, steer_actual=veh.steer_actual,
-                              t_capture=t_ns + int(sensors.time_offset_ms * 1e6), stopped=abs(sp) < SPEED_DEADBAND_MPS)
-            slam.on_vehicle_state(vs)
+            self.vs = VehicleState(speed=sp, yaw_rate=yr, steer_actual=veh.steer_actual,
+                                   t_capture=t_ns + int(sensors.time_offset_ms * 1e6), stopped=abs(sp) < SPEED_DEADBAND_MPS)
+            self.slam.on_vehicle_state(self.vs)
 
-        # ── LiDAR（セクタ単位・伝送遅延つき）→ ScanAssembler ──
-        for gen_ns, pkt in lidar.poll(t_ns, veh, lambda t: (t // 1000) & 0xFFFFFFFF):
-            queue.append((gen_ns, pkt))
+    def _collect_scan(self):
+        """LiDAR（セクタ単位・伝送遅延つき）→ ScanAssembler。組み上がった点群か None。"""
+        t_ns = self.t_ns
+        for gen_ns, pkt in self.lidar.poll(t_ns, self.veh, lambda t: (t // 1000) & 0xFFFFFFFF):
+            self.queue.append((gen_ns, pkt))
         scan = None
-        if queue:
+        if self.queue:
             keep = []
-            for gen_ns, pkt in queue:
+            for gen_ns, pkt in self.queue:
                 if gen_ns <= t_ns:
                     # セクタ先頭の Pi 時刻。時刻同期が収束している前提で、STM32 時刻をそのまま戻す
-                    done = asm.feed(pkt, int(pkt.t_start_us) * 1000)
+                    done = self.asm.feed(pkt, int(pkt.t_start_us) * 1000)
                     if done is not None:
                         scan = done
                 else:
                     keep.append((gen_ns, pkt))
-            queue = keep
-        if scan is None or vs is None:
-            continue
+            self.queue = keep
+        return scan
 
+    def _lidar_pose(self) -> tuple[float, float, float]:
+        veh = self.veh
+        c, s = math.cos(veh.yaw), math.sin(veh.yaw)
+        return (veh.x + c * self.lidar_x - s * self.lidar_y,
+                veh.y + s * self.lidar_x + c * self.lidar_y, veh.yaw)
+
+    def _inject(self, scan):
+        """点群へ外乱（越境・他車・視野・支柱）を入れ、車体の内側を捨てる。`(点群, 越境を入れたか)`。"""
+        cfg, sensors, phase, t_ns = self.cfg, self.sensors, self.phase, self.t_ns
+        driver = self.driver
         ghosted = False
         for k, (ph, f0, dur, deg0, deg1, off) in enumerate(sensors.ghost):
             if int(ph) != (1 if phase == "race" else 0):
                 continue
             if phase == "race":
-                done_m, total = driver.progress - race_start_progress, race_len
+                done_m, total = driver.progress - self.race_start_progress, self.race_len
             else:
-                done_m, total = driver.progress, explore_len
-            if ghost_t0[k] is None and done_m >= f0 * total:
-                ghost_t0[k] = t_ns
-            t_start = ghost_t0[k]
+                done_m, total = driver.progress, self.explore_len
+            if self.ghost_t0[k] is None and done_m >= f0 * total:
+                self.ghost_t0[k] = t_ns
+            t_start = self.ghost_t0[k]
             if t_start is None or t_ns - t_start > dur * NS:
                 continue
-            c, s = math.cos(veh.yaw), math.sin(veh.yaw)
-            lp = (veh.x + c * lidar_x - s * lidar_y, veh.y + s * lidar_x + c * lidar_y, veh.yaw)
-            box = (ghost_box[0] - off, ghost_box[1] - off, ghost_box[2] + off, ghost_box[3] + off)
-            inject_ghost(scan, lp, deg0, deg1, box, sensors.lidar.lidar_max_range_m)
+            gb = self.ghost_box
+            box = (gb[0] - off, gb[1] - off, gb[2] + off, gb[3] + off)
+            inject_ghost(scan, self._lidar_pose(), deg0, deg1, box, sensors.lidar.lidar_max_range_m)
             ghosted = phase == "race"
 
         if cfg.cars:
             ph = 1.0 if phase == "race" else 0.0
             boxes = [car_box(driver, s0 + v * t_ns / NS, lat, v < 0)
                      for (cp, s0, lat, v) in cfg.cars if cp == 2.0 or cp == ph]
-            c, s_ = math.cos(veh.yaw), math.sin(veh.yaw)
-            inject_boxes(scan, (veh.x + c * lidar_x - s_ * lidar_y, veh.y + s_ * lidar_x + c * lidar_y, veh.yaw),
-                         boxes, sensors.lidar.lidar_max_range_m)
+            inject_boxes(scan, self._lidar_pose(), boxes, sensors.lidar.lidar_max_range_m)
 
         mask_fov(scan, cfg.fov_deg)
-        inject_pillars(scan, cfg.pillars, cfg.mixed_pixel, rng)
+        inject_pillars(scan, cfg.pillars, cfg.mixed_pixel, self.rng)
         # 実機の planning_node と同じく、車体の外形の内側の点を捨ててから SLAM に渡す
-        scan = mask_body(scan, body_rng)
+        scan = mask_body(scan, self.body_rng)
+        return scan, ghosted
 
-        dt = (t_ns - last_plan_ns) / NS if last_plan_ns else 0.1
-        last_plan_ns = t_ns
+    def _slam_step(self, scan, ghosted: bool) -> tuple[float, float, float]:
+        """SLAM を 1 回進め、真値（SLAM 原点基準）と比べて記録する。真値の姿勢を返す。"""
+        stats, veh = self.stats, self.veh
+        t_ns = self.t_ns
+        dt = (t_ns - self.last_plan_ns) / NS if self.last_plan_ns else 0.1
+        self.last_plan_ns = t_ns
         t0 = time.perf_counter()
-        pose, score, lost, t_ref = slam.update(scan, vs, dt)
+        pose, score, lost, t_ref = self.slam.update(scan, self.vs, dt)
         stats.update_ms.append((time.perf_counter() - t0) * 1000.0)
         stats.updates += 1
-        fe = getattr(slam.nav, "_fe", None)
+        fe = getattr(self.slam.nav, "_fe", None)
         if fe is not None:
             stats.behind.append(float(getattr(fe, "behind_ratio", 0.0)))
         if lost:
             stats.lost += 1
-            lost_streak += 1
-            stats.max_lost_streak = max(stats.max_lost_streak, lost_streak)
+            self.lost_streak += 1
+            stats.max_lost_streak = max(stats.max_lost_streak, self.lost_streak)
         else:
-            lost_streak = 0
-        tp = truth.at(t_ref) if t_ref > 0 else (veh.x, veh.y, veh.yaw)
-        if origin is None:
+            self.lost_streak = 0
+        tp = self.truth.at(t_ref) if t_ref > 0 else (veh.x, veh.y, veh.yaw)
+        if self.origin is None:
             # SLAM の原点 = 最初の点群の基準時刻の姿勢。**初回の推定値そのものを
             # 真値に重ねる**（初回に推測航法を少し進める実装でも原点がずれない
             # ように。ずれは「世界座標で一定のオフセット」として全周期に乗り、
             # 進行方向が変わるたびに誤差の見かけを変えてしまう）
-            origin = _compose(tp, _inverse(tuple(pose)))
-        tr = _rel(origin, tp)
+            self.origin = tuple(compose(Pose2D(*tp), inverse(Pose2D(*pose))))
+        tr = tuple(between(Pose2D(*self.origin), Pose2D(*tp)))
         stats.pos_err.append(math.hypot(pose[0] - tr[0], pose[1] - tr[1]))
         _c, _s = math.cos(tr[2]), math.sin(tr[2])
         _dx, _dy = pose[0] - tr[0], pose[1] - tr[1]
         stats.fwd_err.append(_c * _dx + _s * _dy)
         stats.lat_err.append(-_s * _dx + _c * _dy)
-        stats.yaw_err.append(abs(math.degrees(_wrap(pose[2] - tr[2]))))
+        stats.yaw_err.append(abs(math.degrees(wrap_angle(pose[2] - tr[2]))))
         if ghosted:
             stats.ghost_updates += 1
             stats.ghost_max_err = max(stats.ghost_max_err, stats.pos_err[-1])
-        traj_true.append(tr)
-        traj_est.append((pose[0], pose[1], pose[2]))
+        self.traj_true.append(tr)
+        self.traj_est.append((pose[0], pose[1], pose[2]))
 
-        if verbose and stats.updates % 50 == 0:
-            print(f"  [{phase}] {driver.progress:6.1f}m err {stats.pos_err[-1] * 100:5.1f}cm "
+        if self.verbose and stats.updates % 50 == 0:
+            print(f"  [{self.phase}] {self.driver.progress:6.1f}m err {stats.pos_err[-1] * 100:5.1f}cm "
                   f"{stats.yaw_err[-1]:4.1f}deg score {score:.2f}{' LOST' if lost else ''}",
                   flush=True)
+        return tr
 
-        if phase == "explore" and driver.progress >= explore_len:
-            # ★ 採点の条件を揃える: 前後どちらも真のコースへ剛体で重ねてから採点する
-            #   （前だけ重ねないと、地図全体が少し回っているだけで before が悪く見える）
-            aligned_before = align_map(slam.grid, course, origin)
-            map_before = map_quality(slam.grid, course, aligned_before)
-            t0 = time.perf_counter()
-            slam.freeze()
-            freeze_ms = (time.perf_counter() - t0) * 1000.0
-            aligned = align_map(slam.grid, course, origin)
-            map_after = map_quality(slam.grid, course, aligned)
-            map_after["rigid_deg"] = abs(math.degrees(_wrap(aligned[2] - origin[2])))
-            map_after["rigid_cm"] = math.hypot(aligned[0] - origin[0], aligned[1] - origin[1]) * 100
-            # ここから先（凍結地図での走行）は、地図を真のコースへ重ねた姿勢を原点にする
-            origin = aligned
-            phase = "race"
-            stats = race
-            v_max = cfg.race_speed
-            phase_split = len(traj_true)
-            race_start_progress = driver.progress
-            lost_streak = 0
-        elif phase == "race":
-            done_m = driver.progress - race_start_progress
-            if cfg.locate > 0 and loc_done < cfg.locate and done_m >= race_len * (loc_done + 0.5) / cfg.locate:
-                loc_done += 1
-                tscan = scan
-                if cfg.locate_cars > 0:
-                    tscan = copy.deepcopy(scan)
-                    c, s_ = math.cos(veh.yaw), math.sin(veh.yaw)
-                    inject_boxes(tscan, (veh.x + c * lidar_x - s_ * lidar_y, veh.y + s_ * lidar_x + c * lidar_y, veh.yaw),
-                                 _trial_cars(driver, cfg.locate_cars, loc_done), sensors.lidar.lidar_max_range_m)
-                _locate_trial(slam, tscan, tr, factory or default_factory(), locate,
-                              force_rescan=tscan is not scan)
-            if done_m >= race_len:
-                break
+    def _end_explore(self) -> None:
+        """地図作成の終わり: 凍結の前後で地図を採点し、凍結地図での走行へ移る。"""
+        slam, course, origin = self.slam, self.course, self.origin
+        # ★ 採点の条件を揃える: 前後どちらも真のコースへ剛体で重ねてから採点する
+        #   （前だけ重ねないと、地図全体が少し回っているだけで before が悪く見える）
+        aligned_before = align_map(slam.grid, course, origin)
+        self.map_before = map_quality(slam.grid, course, aligned_before)
+        t0 = time.perf_counter()
+        slam.freeze()
+        self.freeze_ms = (time.perf_counter() - t0) * 1000.0
+        aligned = align_map(slam.grid, course, origin)
+        map_after = self.map_after = map_quality(slam.grid, course, aligned)
+        map_after["rigid_deg"] = abs(math.degrees(wrap_angle(aligned[2] - origin[2])))
+        map_after["rigid_cm"] = math.hypot(aligned[0] - origin[0], aligned[1] - origin[1]) * 100
+        # ここから先（凍結地図での走行）は、地図を真のコースへ重ねた姿勢を原点にする
+        self.origin = aligned
+        self.phase = "race"
+        self.stats = self.race
+        self.v_max = self.cfg.race_speed
+        self.phase_split = len(self.traj_true)
+        self.race_start_progress = self.driver.progress
+        self.lost_streak = 0
 
-    return RunResult(
-        cfg=cfg, explore=explore, race=race, map_before=map_before, map_after=map_after,
-        freeze_ms=freeze_ms, relocs=slam.relocs(), loop_closures=slam.loop_closures(),
-        out_of_bounds=int(getattr(slam.grid, "out_of_bounds", 0)),
-        traj_true=np.asarray(traj_true), traj_est=np.asarray(traj_est),
-        phase_split=phase_split, wall_time_s=time.perf_counter() - t_wall,
-        map_walls=_walls_world(slam.grid, origin) if origin is not None else None,
-        course_obj=course, locate=locate)
+    def _race_step(self, scan, tr) -> bool:
+        """凍結地図での走行中: 決めた所で LOCATE を試す。走り終えたら True。"""
+        cfg = self.cfg
+        done_m = self.driver.progress - self.race_start_progress
+        if cfg.locate > 0 and self.loc_done < cfg.locate and \
+                done_m >= self.race_len * (self.loc_done + 0.5) / cfg.locate:
+            self.loc_done += 1
+            tscan = scan
+            if cfg.locate_cars > 0:
+                tscan = copy.deepcopy(scan)
+                inject_boxes(tscan, self._lidar_pose(),
+                             _trial_cars(self.driver, cfg.locate_cars, self.loc_done),
+                             self.sensors.lidar.lidar_max_range_m)
+            _locate_trial(self.slam, tscan, tr, self.factory or default_factory(), self.locate,
+                          force_rescan=tscan is not scan)
+        return done_m >= self.race_len
+
+    def _result(self) -> RunResult:
+        slam = self.slam
+        return RunResult(
+            cfg=self.cfg, explore=self.explore, race=self.race, map_before=self.map_before,
+            map_after=self.map_after,
+            freeze_ms=self.freeze_ms, relocs=slam.relocs(), loop_closures=slam.loop_closures(),
+            out_of_bounds=int(getattr(slam.grid, "out_of_bounds", 0)),
+            traj_true=np.asarray(self.traj_true), traj_est=np.asarray(self.traj_est),
+            phase_split=self.phase_split, wall_time_s=time.perf_counter() - self.t_wall,
+            map_walls=_walls_world(slam.grid, self.origin) if self.origin is not None else None,
+            course_obj=self.course, locate=self.locate)
 
 
 def _trial_cars(driver: "TruthDriver", n: int, k: int) -> list[tuple[float, float, float, float, float]]:
@@ -871,7 +702,6 @@ def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict,
     from raspi.auto.slam2d_raceline import (LOCATE_CANDIDATES, locate_score, locate_score_robust,
                                             pick_locate)
     from slam2d.core.localize import GlobalLocalizer
-    from slam2d.core.types import Pose2D
 
     g = slam.grid
     loaded = occgrid_from_trinary(g.trinary(), resolution=g.resolution, origin=tuple(g.origin),
@@ -907,7 +737,7 @@ def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict,
         return
     pose = best.pose
     err = math.hypot(pose.x - truth_pose[0], pose.y - truth_pose[1])
-    yaw = abs(math.degrees(_wrap(pose.yaw - truth_pose[2])))
+    yaw = abs(math.degrees(wrap_angle(pose.yaw - truth_pose[2])))
     out.setdefault("err_cm", []).append(err * 100.0)
     key = "ok" if err <= 0.10 and yaw <= 3.0 else "wrong"
     out[key] = out.get(key, 0) + 1
@@ -1018,12 +848,10 @@ def align_map(grid, course: Course, origin) -> tuple[float, float, float]:
 
 
 def _erode(m: np.ndarray) -> np.ndarray:
-    out = m.copy()
-    out[1:, :] &= m[:-1, :]
-    out[:-1, :] &= m[1:, :]
-    out[:, 1:] &= m[:, :-1]
-    out[:, :-1] &= m[:, 1:]
-    return out
+    """4近傍で1セル削る（格子の外は削る理由にしない＝cv2.erode の既定の境界）。"""
+    import cv2
+
+    return cv2.erode(m.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))).astype(bool)
 
 
 # ── 出力 ──────────────────────────────────────────────────────────────────

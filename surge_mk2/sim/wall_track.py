@@ -43,7 +43,7 @@ import networkx as nx
 import numpy as np
 
 from .sketch import Loop, path_to_loop, sample_loop
-from .track import _disc_slices, stamp_discs
+from .track import disc_union, stamp_discs
 
 __all__ = ["WallExtractionError", "rasterize_walls", "derive_centerline", "build"]
 
@@ -108,18 +108,10 @@ def rasterize_walls(loops: list[Loop], thickness: float, resolution: float,
         grid[rr[ok], cc[ok]] = True
         return grid, (x0, y0)
     r = max(1, int(round(half / resolution)))
-    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
-    disc = (xx * xx + yy * yy) <= r * r
-
     for pts in pts_list:
         cols = np.round((pts[:, 0] - x0) / resolution).astype(np.int64)
         rows = np.round((pts[:, 1] - y0) / resolution).astype(np.int64)
-        for c, rw in zip(cols, rows):
-            sl = _disc_slices(h, w, rw, c, r)
-            if sl is None:
-                continue
-            gr0, gr1, gc0, gc1, sr0, sr1, sc0, sc1 = sl
-            grid[gr0:gr1, gc0:gc1] |= disc[sr0:sr1, sc0:sc1]
+        grid |= disc_union((h, w), rows, cols, r)
     return grid, (x0, y0)
 
 
@@ -146,6 +138,10 @@ def _flood_fill_free(grid: np.ndarray, origin: tuple[float, float], resolution: 
 
 def _thin_zhang_suen(mask: np.ndarray) -> np.ndarray:
     """Zhang-Suen 細線化。`mask`（True=前景）を1px幅の骨格へ削る。
+
+    `cv2.ximgproc.thinning(THINNING_ZHANGSUEN)` に置き換えなかったのは、結果が一致しないため
+    （2026-11-18、乱数で作った20枚すべてで骨格が違った。判定の順と境界の扱いが違う）。骨格はコースの
+    中心線の元なので、変えるならコースの形が変わらないことを確かめてから。
 
     1反復 = 8近傍パターンによる2段階の削除判定。両方とも削除対象が無くなるまで
     反復する。各段の判定は配列全体を一度にベクトル化して行う。

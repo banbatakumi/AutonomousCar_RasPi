@@ -326,7 +326,7 @@ def search_steps(smap: SurfaceMap, px: np.ndarray, py: np.ndarray, center: Pose2
     # （正方形の部屋のように、同じ位置でも90°回すと同じ形に見えることがある）
     ii, jj = np.meshgrid(offs, offs, indexing="ij")
     far_xy = np.hypot(ii - offs[i], jj - offs[j]) >= ambiguity_dist
-    far_yaw = np.abs(np.arctan2(np.sin(dyaws - dyaws[k]), np.cos(dyaws - dyaws[k]))) >= ambiguity_yaw
+    far_yaw = np.abs(wrap_angle(dyaws - dyaws[k])) >= ambiguity_yaw
     far = far_xy[None, :, :] | far_yaw[:, None, None]
     second = float(scores[far].max()) if far.any() else 0.0
     edge = bool((nt > 0 and (i in (0, 2 * nt) or j in (0, 2 * nt)))
