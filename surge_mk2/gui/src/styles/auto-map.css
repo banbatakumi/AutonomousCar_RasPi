@@ -1,0 +1,62 @@
+/* ── 自動運転ビューの地図パネル（`AutoMapPanel.tsx`）─────────────────────
+   `slam2d_raceline`選択時だけ、車体図（`.auto-car`）の左に挟む正方形パネル。
+   独立タブ（旧`地図生成`、2026-09-03廃止）と違い、地図とグリッドだけを見せ
+   数値は出さない——車体図と並ぶ都合上、細い柱を割く余地が無いため。 */
+.auto-map {
+  position: relative;
+  flex: 0 1 auto;
+  height: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--glass);
+  border: 1px solid #1b2229;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: var(--bezel);
+}
+
+.map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.auto-map .map-canvas {
+  cursor: crosshair;
+}
+
+.auto-map-badge {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  font-size: 11px;
+  background: #000a;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+/* **地図を削除**。数値パネルごと無くなったので、隅のアイコンボタンに畳む。
+ * その左隣が「軌跡のみ削除」（`.auto-map-trail`） */
+.auto-map-trail {
+  position: absolute;
+  right: 36px;
+  top: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.auto-map-clear {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+}
+

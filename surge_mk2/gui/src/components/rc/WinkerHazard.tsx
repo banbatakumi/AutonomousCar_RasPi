@@ -24,6 +24,7 @@
  */
 import { useNumbers } from '../../bus/live'
 import { useUi } from '../../store/ui'
+import { useShallow } from 'zustand/react/shallow'
 
 export function WinkerLamp({ side }: { side: 'left' | 'right' }) {
   // 点滅は実測（STM32 が実際に点滅させているか）、縁は要求。冒頭コメント参照
@@ -43,7 +44,13 @@ export function WinkerLamp({ side }: { side: 'left' | 'right' }) {
 }
 
 export function HazardButton() {
-  const ui = useUi()
+  const ui = useUi(
+    useShallow((s) => ({
+      set: s.set,
+      winkerLeftRequested: s.winkerLeftRequested,
+      winkerRightRequested: s.winkerRightRequested,
+    })),
+  )
   const forced = useNumbers().vs?.faults?.includes('drive_undervoltage') ?? false
   const on = ui.winkerLeftRequested && ui.winkerRightRequested
   const toggle = () =>

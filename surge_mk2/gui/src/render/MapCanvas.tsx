@@ -38,6 +38,7 @@ import { live } from '../bus/live'
 import { mapPreview } from '../bus/mapPreview'
 import { GROUP_COLOR, parseCfg, routeEdit, type RouteCfg } from '../bus/routeEdit'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
+import { rafLoop } from '../hooks/useRaf'
 
 /** 車体の描画用寸法 [m]。`LidarView.tsx` と同じ算出方法（`config/vehicle.toml` の
  * `footprint` から生成）。手で数値を書かない。 */
@@ -120,7 +121,6 @@ export function MapCanvas({
     if (!cv) return
     const ctx = cv.getContext('2d')
     if (!ctx) return
-    let raf = 0
     // 地図まわりの線のオフスクリーン（何で焼いたかを覚えて、変わったときだけ焼き直す）
     const layer: {
       cv: HTMLCanvasElement | null
@@ -130,7 +130,6 @@ export function MapCanvas({
     } = { cv: null, map: null, pw: 0, ph: 0, ox: 0, oy: 0, px: 0, dpr: 0, pending: '' }
 
     const draw = () => {
-      raf = requestAnimationFrame(draw)
       const dpr = window.devicePixelRatio || 1
       const w = cv.clientWidth
       const h = cv.clientHeight
@@ -265,8 +264,7 @@ export function MapCanvas({
       if (mapPreview.hint) drawHint(ctx, mapPreview.hint.x, mapPreview.hint.y, sx, sy)
       drawScale(ctx, w, h, px)
     }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
+    return rafLoop(draw)
   }, [])
 
   // 画面座標 → 世界座標。`sx`/`sy`の逆変換（中心基準、yは反転）

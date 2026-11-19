@@ -31,6 +31,7 @@ import { useUi } from '../store/ui'
 import { VEHICLE as VEHICLE_GEOM } from '../generated/vehicle'
 import type { ControlChannel } from '../ws/control'
 import type { AutoState } from '../generated/msgs'
+import { rafLoop } from '../hooks/useRaf'
 
 /** 車体の描画用寸法 [m]。原点は base_link ＝ 後輪車軸の中心。
  * `config/vehicle.toml`（唯一の正）から生成された `footprint` ポリゴンの
@@ -126,10 +127,8 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
     if (!cv) return
     const ctx = cv.getContext('2d')
     if (!ctx) return
-    let raf = 0
 
     const draw = () => {
-      raf = requestAnimationFrame(draw)
       const dpr = window.devicePixelRatio || 1
       const w = cv.clientWidth
       const h = cv.clientHeight
@@ -215,8 +214,7 @@ export function LidarView({ ch }: { ch?: ControlChannel | null } = {}) {
         }
       }
     }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
+    return rafLoop(draw)
   }, [zoom])
 
   return (

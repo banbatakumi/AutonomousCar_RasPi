@@ -1,0 +1,206 @@
+/*
+ * レース用ダッシュの計器盤（2026-11-03、全タブをラジコンタブの見た目に揃えた）。
+ * 走行中に**横目で読む**ことを前提にしている。
+ *
+ * 色は意味に割り当てる。装飾で意味色を使わない（ISO 2575 の警告灯の色の約束に合わせる）。
+ *   lv-ok   正常・作動中（緑）   lv-warn 注意（黄）   lv-bad 異常・止める（赤）
+ *   live    指令値・ARM 保持中（琥珀）   trace 計測値の線（青。グラフ・帯の実測）
+ *   dim     参考値・無効
+ * **正常なものは光らせない**（航空機の「ダーク・コックピット」）。色と発光は注意・異常・作動中だけ。
+ *
+ * `--brand`（赤）は**値を持たない所**——筐体の縁・見出し・選択中のタブ——だけに使う。
+ * 異常の赤（`--bad`）と取り違えないよう、彩度と明るさを落としてある。
+ *
+ * 外装は2層: 地は**カーボン**（`--carbon`）、計器・パネルは**黒いガラスの液晶**（`--glass`）。
+ * 数字は DIN（`--font-num`。macOS・iPadOS に最初から入っているので依存もネットも要らない）。
+ */
+
+:root {
+  --bg: #0a0a0c;
+  --panel: #131316;
+  --panel2: #1a1a1e;
+  --line: #2a2a30;
+  --line-soft: #1e1e23;
+  --fg: #dfe1e5;
+  --dim: #767a83;
+  --ok: #3ac26a;
+  --warn: #e8ab21;
+  --bad: #f2544b;
+  --live: #ffc63f;
+  /* 計測値の線（旧 `--accent` の青）。指令（`--live`）と対で読む */
+  --trace: #4aa8ff;
+  --brand: #d5303f;
+  --brand-dim: #6a1c24;
+
+  /* 液晶の地。上辺に赤の細い縁（中央ほど濃い）、上から薄い反射 */
+  --glass:
+    linear-gradient(90deg, transparent 0%, #d5303f99 18%, #d5303f99 82%, transparent 100%) top / 100% 1px no-repeat,
+    linear-gradient(172deg, rgba(255, 255, 255, .035) 0%, rgba(255, 255, 255, 0) 32%),
+    radial-gradient(130% 100% at 50% 0%, #17171b 0%, #0c0c0e 75%);
+  /* 縁取り（ベゼル）。外に落ちる影＋内側の細い明るい縁 */
+  --bezel: inset 0 0 0 1px #26262c, inset 0 1px 0 rgba(255, 255, 255, .05), 0 2px 10px #0009;
+  /* カーボン織り（ラジコン HUD の台形と同じ模様。画像ファイルは使わない） */
+  --carbon:
+    linear-gradient(27deg, #0f0f11 2.5px, transparent 2.5px) 0 2.5px / 10px 10px,
+    linear-gradient(207deg, #0f0f11 2.5px, transparent 2.5px) 5px 0 / 10px 10px,
+    linear-gradient(27deg, #17171a 2.5px, transparent 2.5px) 0 5px / 10px 10px,
+    linear-gradient(207deg, #17171a 2.5px, transparent 2.5px) 5px 2.5px / 10px 10px,
+    linear-gradient(90deg, #121214 5px, transparent 5px) 0 0 / 10px 10px,
+    linear-gradient(#141416 25%, #101012 25%, #101012 50%, transparent 50%, transparent 75%, #18181b 75%, #18181b) 0 0 / 10px 10px,
+    #0d0d0f;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Segoe UI', sans-serif;
+  --font-num: 'DIN Alternate', 'Bahnschrift', 'Hiragino Sans', sans-serif;
+  --font-code: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+code,
+kbd,
+pre,
+.mono {
+  font-family: var(--font-code);
+}
+
+/* 数字は DIN の等幅数字。桁が変わっても位置が動かない */
+.num,
+b,
+.metric b {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * ボタンは物理スイッチの見た目: 上が明るい樹脂のキャップ、押すと沈む。
+ * `on`（選択中・作動中）は下辺に赤の発光ライン（値を持たない「選択」なので `--brand`）
+ */
+button {
+  font: inherit;
+  color: var(--fg);
+  background: linear-gradient(#222227, #18181c);
+  border: 1px solid #2e2e35;
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 1px 2px #0008;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:hover {
+  border-color: #45454f;
+}
+
+button:active:not(:disabled) {
+  background: linear-gradient(#141417, #1b1b1f);
+  box-shadow: inset 0 1px 3px #000c;
+  transform: translateY(1px);
+}
+
+button.on {
+  background: linear-gradient(#2a1a1d, #1c1214);
+  border-color: var(--brand);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 var(--brand), inset 0 1px 0 rgba(255, 255, 255, .06), 0 0 8px #d5303f40;
+}
+
+select,
+input[type='text'],
+input[type='number'],
+input:not([type]) {
+  font: inherit;
+  color: var(--fg);
+  background: #0c0c0e;
+  border: 1px solid #2e2e35;
+  border-radius: 4px;
+  box-shadow: inset 0 1px 3px #000a;
+}
+
+select:focus-visible,
+input:focus-visible,
+button:focus-visible {
+  outline: 1px solid var(--brand);
+  outline-offset: 1px;
+}
+
+input[type='range'] {
+  accent-color: var(--brand);
+}
+
+a {
+  color: var(--trace);
+}
+
+/* タッチ（iPad）のときだけ押す所を大きくする。マウスの Mac では今の密度のまま */
+@media (pointer: coarse) {
+
+  /* ラジコンの HUD・歯車は寸法を計算で決めているので除く */
+  button:not(.rc-hud *):not(.gear) {
+    min-height: 36px;
+    padding: 6px 12px;
+  }
+
+  .seg button {
+    min-height: 32px;
+  }
+
+  select,
+  input[type='text'],
+  input[type='number'] {
+    min-height: 36px;
+  }
+}
+
+/* 小見出し（パネルの名前）。小さく、字間を広く、赤 */
+.cp-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .2em;
+  color: var(--brand);
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.lv-ok {
+  color: var(--ok);
+}
+
+.lv-warn {
+  color: var(--warn);
+}
+
+.lv-bad {
+  color: var(--bad);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--carbon);
+}
+

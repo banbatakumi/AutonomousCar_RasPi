@@ -1,0 +1,75 @@
+/* ── 設定ドロワー（ラジコンタブ内） ───────────────────── */
+
+.gear {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 4;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  background: #000a;
+  border-radius: 6px;
+}
+
+.gear.on {
+  background: #3a1418;
+  border-color: var(--brand);
+}
+
+/*
+ * 右端に寄せるだけで、背景は覆わない。
+ * **開けている間もカメラと計器が見えている**必要がある（走りながら調整するため）。
+ */
+.drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  width: min(420px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px #0008;
+  transform: translateX(100%);
+  transition: transform 180ms ease;
+  visibility: hidden;
+}
+
+.drawer.open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 14px;
+  flex: 1;
+}
+
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* タブだったころの余白は広すぎる。ドロワー幅に合わせて詰める */
+.drawer .settings {
+  padding: 12px 14px 32px;
+  max-width: none;
+  height: auto;
+}
+

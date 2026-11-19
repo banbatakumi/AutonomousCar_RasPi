@@ -10,6 +10,8 @@
  * ブラウザのタブが裏にある間と、一時停止中で窓が変わっていない間は何もしない。
  */
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import { localPersistStorage } from '../../store/persistStorage'
 import { HISTORY_SPAN_S, historyNow, readFlags, type FlagTrack } from '../../bus/history'
 
 export const PAGES = ['概要', '電源・熱', '駆動・制御', '通信', 'センサ・Pi', '記録'] as const
@@ -18,32 +20,16 @@ export type DiagPage = (typeof PAGES)[number]
 export const SPANS = [30, 60, HISTORY_SPAN_S] as const
 
 const REDRAW_HZ = 4
-const KEY_PAGE = 'surge.diag.page'
-const KEY_SPAN = 'surge.diag.span'
 
-function loadPage(): DiagPage {
+/** `persist` 導入前のキー（ページ名・幅の秒数をそれぞれ生の文字列で持っていた）。読めたら移行する */
+function readLegacyView(): Partial<Pick<DiagViewState, 'page' | 'spanS'>> | null {
   try {
-    const v = localStorage.getItem(KEY_PAGE)
-    return (PAGES as readonly string[]).includes(v ?? '') ? (v as DiagPage) : '概要'
+    const page = localStorage.getItem('surge.diag.page')
+    const span = localStorage.getItem('surge.diag.span')
+    if (page == null && span == null) return null
+    return { page: (page ?? undefined) as DiagPage | undefined, spanS: span == null ? undefined : Number(span) }
   } catch {
-    return '概要'
-  }
-}
-
-function loadSpan(): number {
-  try {
-    const v = Number(localStorage.getItem(KEY_SPAN))
-    return (SPANS as readonly number[]).includes(v) ? v : 60
-  } catch {
-    return 60
-  }
-}
-
-function save(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value)
-  } catch {
-    // 保存できなくても表示には関係ない（プライベートウィンドウなど）
+    return null
   }
 }
 
@@ -57,20 +43,36 @@ type DiagViewState = {
   togglePause: () => void
 }
 
-export const useDiagView = create<DiagViewState>((set, get) => ({
-  page: loadPage(),
-  spanS: loadSpan(),
-  frozenAt: null,
-  setPage: (page) => {
-    save(KEY_PAGE, page)
-    set({ page })
-  },
-  setSpan: (spanS) => {
-    save(KEY_SPAN, String(spanS))
-    set({ spanS })
-  },
-  togglePause: () => set({ frozenAt: get().frozenAt == null ? historyNow() : null }),
-}))
+export const useDiagView = create<DiagViewState>()(
+  persist(
+    (set, get) => ({
+      page: '概要',
+      spanS: 60,
+      frozenAt: null,
+      setPage: (page) => set({ page }),
+      setSpan: (spanS) => set({ spanS }),
+      togglePause: () => set({ frozenAt: get().frozenAt == null ? historyNow() : null }),
+    }),
+    {
+      // 保存するのはページと幅だけ（一時停止は開き直したら解く）。保存できなくても表示には関係ない
+      name: 'surge.diag',
+      version: 1,
+      storage: localPersistStorage<Pick<DiagViewState, 'page' | 'spanS'>>(readLegacyView),
+      partialize: (s) => ({ page: s.page, spanS: s.spanS }),
+      // 版 0（旧キー）も今と同じ形。中身の検査は `merge` が毎回する
+      migrate: (state) => state as Pick<DiagViewState, 'page' | 'spanS'>,
+      // 知らないページ名・幅（版が変わって消えた等）は既定に倒す
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<DiagViewState>
+        return {
+          ...current,
+          page: (PAGES as readonly string[]).includes(p.page ?? '') ? (p.page as DiagPage) : current.page,
+          spanS: (SPANS as readonly number[]).includes(Number(p.spanS)) ? Number(p.spanS) : current.spanS,
+        }
+      },
+    },
+  ),
+)
 
 /** 1回の刻みで全グラフが共有する窓 */
 export type Frame = {

@@ -20,6 +20,7 @@
 import { useNumbers } from '../bus/live'
 import { MODE_NAME, healthLevel, ms, rttLevel } from '../format'
 import { useUi } from '../store/ui'
+import { useShallow } from 'zustand/react/shallow'
 import { askConfirm } from './ConfirmDialog'
 import { WifiIcon } from './WifiIcon'
 
@@ -35,7 +36,17 @@ export function StatusBar({
   variant?: StatusVariant
 }) {
   const n = useNumbers()
-  const ui = useUi()
+  const ui = useUi(
+    useShallow((s) => ({
+      armRequested: s.armRequested,
+      disarmReason: s.disarmReason,
+      notice: s.notice,
+      schemaMismatch: s.schemaMismatch,
+      settings: s.settings,
+      status: s.status,
+      telemetryOpen: s.telemetryOpen,
+    })),
+  )
   const vs = n.vs
   const link = n.link
 
@@ -203,22 +214,23 @@ export function StatusBar({
  */
 function ArmButton() {
   const n = useNumbers()
-  const ui = useUi()
+  const armRequested = useUi((s) => s.armRequested)
   const inhibited = n.link?.arm_inhibited ?? true
   const left = n.armRemainingMs
   // **解除はいつでも押せる。** 封印中・テレメトリ未受信で止めるのは「入れる」方だけ
-  const blocked = inhibited && !ui.armRequested
+  const blocked = inhibited && !armRequested
 
   const toggle = () => {
     // 自分で押して解除したときは理由を出さない（見れば分かる。指示による）。
     // 理由を出すのは、押していないのに外れたとき（E-STOP・操縦権の喪失・無操作など）だけ
-    if (ui.armRequested) ui.set({ armRequested: false, disarmReason: '' })
-    else ui.set({ armRequested: true, disarmReason: '' })
+    const ui = useUi.getState()
+    if (ui.armRequested) ui.disarm('')
+    else ui.arm()
   }
 
   return (
     <button
-      className={`armbtn ${ui.armRequested ? 'on' : ''} ${n.link?.no_heartbeat || n.link?.auto_stop_blind ? 'warn' : ''}`}
+      className={`armbtn ${armRequested ? 'on' : ''} ${n.link?.no_heartbeat || n.link?.auto_stop_blind ? 'warn' : ''}`}
       onClick={toggle}
       disabled={blocked}
       title={
@@ -232,7 +244,7 @@ function ArmButton() {
       }
     >
       {/* 残り 10秒を切ったら 0.1秒刻みにする。長いうちは秒刻みの方が落ち着いて読める */}
-      {ui.armRequested
+      {armRequested
         ? `ARM 保持中 ${left >= 10_000 ? Math.ceil(left / 1000) : (left / 1000).toFixed(1)}s`
         : 'ARM'}
     </button>

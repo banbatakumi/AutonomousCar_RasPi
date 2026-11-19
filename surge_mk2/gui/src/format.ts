@@ -5,7 +5,7 @@
 export const RAD2DEG = 180 / Math.PI
 
 /** 標準重力 [m/s²]。加速度を「G」で読ませるためだけに持つ */
-export const G = 9.80665
+const G = 9.80665
 
 /** 加速度 [m/s²] → G。**ラジコンの G メータ専用**（制御には使わない） */
 export function gForce(a: number): number {
@@ -104,10 +104,9 @@ export function num(v: number | null | undefined, digits = 1): string {
   return v == null || !Number.isFinite(v) ? '—' : v.toFixed(digits)
 }
 
-/** 8セル NiMH の放電終止・STM32 の低電圧復帰点・満充電 [V]（`uart_protocol.md` §5.3） */
+/** 8セル NiMH の放電終止・STM32 の低電圧復帰点 [V]（`uart_protocol.md` §5.3） */
 export const BATT_EMPTY_V = 8.0
 export const BATT_WARN_V = 8.8
-export const BATT_FULL_V = 11.2
 /** 温度表示のしきい値 [℃]（`tempLevel` と同じ値。グラフの線に使う） */
 export const TEMP_WARN_C = 55
 export const TEMP_BAD_C = 70

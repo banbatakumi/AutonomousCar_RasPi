@@ -17,6 +17,7 @@
 import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
 import { virtualGear } from '../../bus/virtualGear'
+import { rafLoop } from '../../hooks/useRaf'
 
 const N_LEDS = 15
 /** 外側からの段（0〜7）ごとの点灯しきい値（rpmFrac）。最初の段から最後の段まで等間隔 */
@@ -40,10 +41,8 @@ export function ShiftLights() {
   const refs = useRef<(HTMLSpanElement | null)[]>([])
 
   useEffect(() => {
-    let raf = 0
     const shown: string[] = []
     const tick = () => {
-      raf = requestAnimationFrame(tick)
       const vs = live.vs
       const fresh = vs != null && performance.now() - live.lastRxMs < 500
       const on = fresh && !!vs?.armed
@@ -64,8 +63,7 @@ export function ShiftLights() {
         }
       }
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return rafLoop(tick)
   }, [])
 
   return (

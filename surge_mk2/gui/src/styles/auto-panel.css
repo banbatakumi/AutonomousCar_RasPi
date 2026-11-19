@@ -1,0 +1,275 @@
+/* ── 自動運転（モード選択・engage・判断・パラメータ） ───────────────
+ *
+ * **engage 中は枠を光らせる。** 自律で走っているのか手動なのかが、
+ * 画面のどこを見ていても分かる必要がある。
+ *
+ * 2026-08-28 に3列固定グリッドから**縦積みの1カラム**へ作り直した
+ * （`AutoPanel.tsx` 冒頭「構造を作り直した」参照）。車体図と横並びで幅が
+ * 2/3 に減ったことで3列は窮屈すぎ、判断の数値が幅の途中で折り返して
+ * 値と単位が分離する崩れ方をしたため。高さは `.drive` 側の固定行
+ * （`grid-template-rows` の3段目、420px）で決まる——ここでは
+ * `max-height` を明示しない。2026-08-29 に親を grid セルから `.auto-bottom`
+ * の flex アイテムに変えたが、`align-items:stretch`（flex の既定）で行の
+ * 高さに自動的に揃うのは変わらない。`overflow-y:auto` はパラメータを開いて
+ * 中身がそれを超えたときだけ効く。
+ */
+
+/* `.autopanel`（判断・パラメータ）と `.auto-car`（車体図）の横並び
+ * （2026-08-29、`.drive` 側コメント参照）。車体図の幅は自分の内在サイズ
+ * （高さ×縦横比）で決まり、`AutoPanel` が残りの横幅を全部取る */
+.auto-bottom {
+  grid-area: bottom;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.autopanel {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
+  padding: 8px 12px 10px;
+  box-shadow: var(--bezel);
+}
+
+.autopanel.engaged {
+  border-color: var(--live);
+  box-shadow: inset 0 0 0 1px #ffc63f33;
+}
+
+.autopanel section {
+  min-width: 0;
+}
+
+.autopanel .label {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  color: var(--brand);
+}
+
+/* モード選択（走らせ方）と engage を横並びの1行に。狭い幅では折り返す */
+.auto-row1 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: flex-start;
+}
+
+.auto-modes {
+  flex: 1 1 200px;
+}
+
+/* モード選択。走らせ方は
+ * 1つしか選べないので、増えても場所を取らないドロップダウンの方が合う。
+ * `max-width` は 2026-08-29 追加——`.auto-modes` が `flex:1` で伸びる分だけ
+ * `width:100%` の select も横に間延びしていた（指摘による） */
+.auto-mode-select {
+  display: block;
+  margin-top: 3px;
+  width: 100%;
+  max-width: 320px;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.auto-mode-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* モードごとのモデル選択（`ftg_cam`/`e2e_lidar`）。選んだモードのときだけ出る */
+.auto-model-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.auto-model-label {
+  color: var(--dim);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+/* `flex:1` のままだと `.auto-mode-select` と同じ理由で行いっぱいに伸びていた
+ * ので `max-width` で頭打ちにする */
+.auto-model-row select {
+  flex: 1;
+  min-width: 120px;
+  max-width: 320px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+/* 選択中モデルの備考（`ml_lidar/app.py`の備考欄由来）。折り返して全幅を使う */
+.auto-model-note {
+  flex: 1 0 100%;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* 縮めてよい（`min-width:0`）。縮めないと iPad の幅で中のボタン行（`.slam-race-buttons`）が
+ * 折り返せず、パネルの外にはみ出す */
+.auto-engage {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+/* **押し間違えない大きさにする。** 走り出すボタンなので他より一段大きい */
+.auto-engage .engage {
+  padding: 6px 16px;
+  font-weight: 600;
+  border-color: #3b4550;
+}
+
+.auto-engage .engage.on {
+  background: #4a3a12;
+  border-color: var(--live);
+  color: #ffe6a6;
+}
+
+.auto-engage .engage:disabled {
+  color: var(--dim);
+  cursor: default;
+  opacity: .6;
+}
+
+.auto-state {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.auto-state .auto-reason {
+  margin-top: 3px;
+  font-size: 12px;
+  /* パネル自体が縦スクロールするので、ここは無理に1行へ詰めず折り返してよい */
+  line-height: 1.4;
+}
+
+/* 判断の数値。**「値＋単位」を1つのグリッドセルにまとめる**ことで、
+ * 折り返しの途中で値と単位が別の行に分離しないようにする（`AutoPanel.tsx`
+ * の `Stat` コンポーネント参照。以前の `.auto-metrics`（flex + baseline）は
+ * 値と単位を別要素にしていたため、幅が狭いとここで分離していた） */
+.auto-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px 10px;
+  margin-top: 6px;
+}
+
+.auto-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.auto-stat b {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.auto-stat span {
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* 2026-08-29: `<details>` の折り畳みをやめ常時表示にした（指示による）ので
+ * ラベルは他セクション（`.auto-modes`/`.auto-state`）と同じ `.label` を使う */
+.auto-params {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* 2026-08-28: `minmax(220px,1fr)` だと2列で頭打ちになり、奇数個だと
+ * 最後の1個だけ寂しく余っていた。狭めて幅なりに3〜4列まで流れるようにした
+ * （無理に2列に揃える理由が無い、との指摘） */
+.auto-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin-top: 6px;
+}
+
+.auto-param {
+  display: block;
+  min-width: 0;
+}
+
+.auto-param-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+}
+
+.auto-param-head b {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.auto-param-head i {
+  font-style: normal;
+  color: var(--dim);
+}
+
+.auto-param input[type='range'] {
+  width: 100%;
+  accent-color: var(--brand);
+}
+
+/* 0/1 の切り替え（`ParamSpec.kind = "bool"`） */
+.auto-param-bool {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.auto-param-bool input {
+  accent-color: var(--brand);
+}
+
+/* 名前の付いた選択肢（`ParamSpec.kind = "choice"`） */
+.auto-param-choice {
+  display: flex;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.auto-param-choice button {
+  flex: 1;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.auto-param-choice button.active {
+  background: var(--brand);
+  color: #fff;
+}
+

@@ -28,7 +28,7 @@ function byGroup(params: AutoParamSpec[]): [string, AutoParamSpec[]][] {
  * `show_if`（`ParamSpec.show_if`）を満たすか。条件のキーが宣言に無い（隠し項目など）ときは、
  * そのキーの既定値で判定する。値は浮動小数なので刻みの半分の幅で比べる
  */
-export function shown(
+function shown(
   p: AutoParamSpec,
   params: AutoParamSpec[],
   values: Record<string, number>,

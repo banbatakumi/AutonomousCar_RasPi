@@ -1,0 +1,72 @@
+/* ── 保存済み地図の管理（`MapLibrary.tsx`）: 保存・一覧・DL・アップロード・削除 */
+.map-library {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.map-library-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.map-library-row input[type='text'] {
+  flex: 1;
+  min-width: 100px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.map-library-pick {
+  margin-top: 6px;
+}
+
+.map-library-pick select {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.map-library-pick a {
+  color: var(--trace);
+  font-size: 12px;
+}
+
+.map-library-empty {
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+
+/* 起動時のみ出るエンブレム。裏の操作を邪魔しないので pointer-events は殺す */
+.splash-emblem {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity 0.9s ease;
+}
+
+.splash-emblem.fade-out {
+  opacity: 0;
+}
+
+.splash-emblem img {
+  width: auto;
+  height: auto;
+  max-width: min(90vw, 1600px);
+  max-height: 70vh;
+  filter: drop-shadow(0 0 24px rgba(242, 84, 75, 0.35));
+  opacity: 0;
+  transition: opacity 0.7s ease;
+}
+
+.splash-emblem img.show {
+  opacity: 1;
+}

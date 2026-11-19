@@ -21,7 +21,9 @@
  */
 
 /** 開くまでの時間切れ [ms] */
-export const WS_OPEN_TIMEOUT_MS = 4000
+const WS_OPEN_TIMEOUT_MS = 4000
+/** テスト用（`socket.test.ts`）。本体のコードからは使わない */
+export const WS_OPEN_TIMEOUT_MS_FOR_TEST = WS_OPEN_TIMEOUT_MS
 const CHECK_MS = 500
 
 export interface SocketGuard {

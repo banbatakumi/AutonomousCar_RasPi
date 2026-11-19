@@ -6,7 +6,7 @@ React + TypeScript + Vite。`docs/system_overview.md` §10 の設計に沿う。
 
 見た目は全タブ共通でレース用ダッシュ風。地はカーボン、パネルは黒いガラスの液晶、
 数字は DIN（macOS・iPadOS 標準搭載なので依存なし）。**正常なものは光らせず、色と発光は注意・異常・作動中だけ**
-（色の約束は `src/styles.css` 冒頭）。タブは数字キー `1`〜`4` でも切り替わる。iPad（タッチ）ではボタンが大きくなる。
+（色の約束は `src/styles/base.css` 冒頭。スタイルは `src/styles/` に機能ごと）。タブは数字キー `1`〜`4` でも切り替わる。iPad（タッチ）ではボタンが大きくなる。
 4K ではブラウザのズーム（⌘＋）で文字を大きくする（CSS の `zoom` は地図・LiDAR のクリック座標を狂わせうるので使っていない）。
 
 | タブ | 誰のための画面か | 特徴 |
@@ -86,6 +86,13 @@ SURGE_HOST=surge-mk2.local npm run dev     # /ws・/logs・/maps・/snapshot を
 tools/deploy.sh          # GUI をビルドして rsync（既定）
 ```
 
+### 検査
+
+```bash
+npx tsc -b && npm run lint && npm test && npx vite build   # 型・ESLint（hooks の依存配列）・vitest・ビルド
+npm run knip                                               # 使われていない export・ファイル・依存
+```
+
 ## 映像に重ねるもの
 
 `render/CameraView.tsx`。どれも進路ガイド（`pathGuide`）に従い、ラジコンのメイン映像クリックでまとめて消える。
@@ -142,9 +149,12 @@ src/
 ├── bus/history.ts     診断用リングバッファ（10Hz × 180秒・常時記録）。数値の系列＋フラグのビット列＋イベントログ
 ├── ws/telemetry.ts    /ws/telemetry（msgpack バイナリ・50Hz）
 ├── ws/control.ts      /ws/control?catalog=changed（JSON・操縦権・E-Stop。auto.catalog は接続時の1通目のみ → App.tsx が前の値を保つ）
-├── input/useDriving.ts ゲームパッド + キーボード → cmd（rAF。変化はそのフレームで、繰り返しは 50Hz 以下）
+├── ws/socket.ts       WebSocket の共通部品（番犬付きで開く・切れたら張り直す。待ち時間はチャンネルごとに選ぶ）
+├── ws/messages.ts     受信メッセージの型ガード（札だけ実行時に確かめる）
+├── input/useDriving.ts ゲームパッド + キーボード → cmd（rAF。変化はそのフレームで、繰り返しは 50Hz 以下）。方式の説明はここ
+├── input/             useKeyboardInput（キー）/ useCommandLoop（送信ループ）/ drivingLogic・gamepad（純粋な計算・テストあり）/ useWakeLock
 ├── render/LidarView   Canvas 2D。rAF で live を読む
-├── render/CameraView  JPEG → ImageBitmap → Canvas。進路ガイドの投影は render/cameraModel.ts（魚眼/補正映像/未校正ピンホール）
+├── render/CameraView  JPEG → ImageBitmap → Canvas。受信は useFrameStream（latestFrameDecoder で最新の1枚だけ）、重畳は cameraOverlays、投影は cameraModel.ts（魚眼/補正映像/未校正ピンホール）
 ├── render/DepthView   ステレオの深度映像（/ws/camera/depth）。自動運転画面の3枚目。DISARM 中は表示中だけ Pi が照合する（ARM 中は自動停止のため常に照合）
 ├── hooks/useSnapshot  📷 撮影（GET /snapshot/<cam>.png → Mac にダウンロード。校正用の生画像）
 ├── render/MapCanvas   世界座標のキャンバス（自動運転ビューの地図パネル `AutoMapPanel`・低頻度）
@@ -154,8 +164,11 @@ src/
 ├── components/diag/   診断タブの部品（下の「診断タブ」）
 ├── components/rc/     ラジコン専用の計器（SpeedGauge / GMeter / SteerGauge / AssistLamps / ShiftLights / RcTemps / DrivePanel）
 ├── hooks/useParkBeep  クリアランスソナーの音（ARM 中・進む向きの半周が近いとき。どのタブでも鳴る）
-├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel）
-├── store/ui.ts        イベント駆動の状態だけ（zustand）
+├── components/SettingsDrawer  ⚙ から出る設定ドロワー（中身は SettingsPanel、タブごとの子は components/settings/）
+├── hooks/useRaf       rAF ループの共通部品（タブが隠れている間は止める）
+├── store/ui.ts        イベント駆動の状態だけ（zustand。保存は persist、ARM と灯火は arm()/disarm()）
+├── store/settings.ts  運転設定の型・既定値・レンジ・クランプ・旧版の補正 / gear.ts（MT のギア）/ notice.ts（通知）
+├── styles/            スタイル。index.css が機能ごとのファイルを元の順で読む（順番に意味がある）
 └── format.ts          SI → 表示単位。**ここ以外で単位を変えない**
 ```
 

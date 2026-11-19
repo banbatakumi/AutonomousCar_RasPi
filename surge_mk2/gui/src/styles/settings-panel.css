@@ -1,0 +1,31 @@
+/* ── 設定パネル（ドロワーの中身） ─────────────────────── */
+
+.settings {
+  padding: 20px 28px 40px;
+  max-width: 44rem;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.settings-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.settings-head h2 {
+  margin: 0;
+}
+
+/* ページ名に添える英字（タブの `.tab-sub` と同じ流儀） */
+.page-sub {
+  margin-left: 10px;
+  font-family: var(--font-num);
+  font-size: 12px;
+  font-style: italic;
+  letter-spacing: .22em;
+  color: var(--brand);
+}
+

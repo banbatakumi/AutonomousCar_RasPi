@@ -52,7 +52,7 @@ function yRange(def: ChartDef) {
   }
 }
 
-export function Chart({ def }: { def: ChartDef }) {
+function Chart({ def }: { def: ChartDef }) {
   const host = useRef<HTMLDivElement>(null)
   const values = useRef<(HTMLElement | null)[]>([])
   const when = useRef<HTMLSpanElement>(null)

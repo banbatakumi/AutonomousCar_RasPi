@@ -1,7 +1,7 @@
 /**
  * 診断タブの uPlot（時系列グラフ・イベント帯）で共通の部品。
  *
- * - 色は CSS 変数から引く（`styles.css` 冒頭の規約。**ここに色の値を書かない**）
+ * - 色は CSS 変数から引く（`styles/base.css` 冒頭の規約。**ここに色の値を書かない**）
  * - 横軸は全グラフで同じ窓 `[end − span, end]`。目盛りは「何秒前か」
  * - カーソルは `SYNC_KEY` で全グラフ同期（どれか1枚に当てると全部に縦線が出る）
  */
@@ -9,7 +9,7 @@ import uPlot from 'uplot'
 import { flagSpans, type FlagTrack } from '../../bus/history'
 import type { Frame } from './view'
 
-export const SYNC_KEY = 'surge-diag'
+const SYNC_KEY = 'surge-diag'
 /** 縦軸の幅 [px]。**全グラフで揃える**（揃っていないとカーソルの縦線が隣とずれて見える） */
 export const Y_AXIS_PX = 52
 

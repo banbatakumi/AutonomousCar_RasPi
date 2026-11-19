@@ -47,7 +47,7 @@ const SAMPLE_S = 1.5 / HISTORY_HZ
  * 系列の定義。**ここと `pushHistory` に足せば貯まる**（グラフの定義は `components/diag/chartDefs.ts`）。
  * 単位はグラフにそのまま出すので、SI から離れる場合はここで変換する。
  */
-export const SERIES = [
+const SERIES = [
   'speed', // m/s 実測
   'speedCmd', // m/s 自分が送っている指令
   'wheelFL', // m/s 車輪速（射影なし）
@@ -172,21 +172,15 @@ export type DiagEvent = {
 
 const EVENT_CAP = 300
 const events: DiagEvent[] = []
-let eventRevision = 0
 
 function logEvent(level: DiagEvent['level'], text: string): void {
   events.push({ wall: Date.now(), t: performance.now() / 1000, level, text })
   if (events.length > EVENT_CAP) events.shift()
-  eventRevision++
 }
 
-/** 新しいものが末尾。**同じ配列を書き換え続ける**ので、変化は `eventRev()` で見る */
+/** 新しいものが末尾。**同じ配列を書き換え続ける**（受け取った配列を持ち続けても、中身は新しくなる） */
 export function eventLog(): readonly DiagEvent[] {
   return events
-}
-
-export function eventRev(): number {
-  return eventRevision
 }
 
 /** 変化を見るための前回値。`null` は「まだ1回も見ていない」（最初の1点では何も言わない） */
@@ -524,8 +518,4 @@ export function seriesStats(
   }
   if (Number.isNaN(first)) return null
   return { min, max, first, last, dtS: tLast - tFirst }
-}
-
-export function historyCount(): number {
-  return count
 }

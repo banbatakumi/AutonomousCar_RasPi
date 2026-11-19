@@ -45,6 +45,7 @@
 import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
 import { gForce } from '../../format'
+import { rafLoop } from '../../hooks/useRaf'
 
 /** 前進加速 → 上、右旋回 → 右 になるように。`accel` は X=前・Y=左が正
  * （ファームは2026-10-01以降。それ以前の実機記録は x/y が逆＝後方・右が正）。
@@ -77,10 +78,8 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
     if (!ctx) return
 
     const trail: P[] = []
-    let raf = 0
 
     const draw = () => {
-      raf = requestAnimationFrame(draw)
 
       const rect = cv.getBoundingClientRect()
       const dpr = Math.min(2, window.devicePixelRatio || 1)
@@ -114,7 +113,7 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
       if (r <= 0) return
 
       // ── 目盛り（同心円と十字） ──
-      // 色は舵角計・速度計の目盛り（`.arc-tick`/`.arc-zero`、`styles.css`）と
+      // 色は舵角計・速度計の目盛り（`.arc-tick`/`.arc-zero`、`styles/rc-view.css`）と
       // 揃えた暖色の濃いマルーン。旧色（`#241b1d`/`#3a2226`）は実機で
       // 「グリッドが消えた」と見えるほど沈んでいたため明るくした
       ctx.lineWidth = dpr
@@ -164,8 +163,7 @@ export function GMeter({ dialHeight }: { dialHeight: number | null }) {
         ctx.shadowBlur = 0
       }
     }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
+    return rafLoop(draw)
   }, [])
 
   return (

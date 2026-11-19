@@ -10,7 +10,7 @@
  *   境に、上へ伸びれば駆動、下へ伸びれば制動）、外側半分＝スリップゲージ。前輪はモータを
  *   持たないのでタイヤ全幅がスリップゲージ。
  * - 満スケールは STM32 `LIMITS` の `max_torque_nm`（1輪あたりの物理的なトルク上限、
- *   `LinkDiag` 経由）。`LIMITS` 未受信の間は `MAX_BRAKE_TORQUE_NM`（`store/ui.ts`）に
+ *   `LinkDiag` 経由）。`LIMITS` 未受信の間は `MAX_BRAKE_TORQUE_NM`（`store/settings.ts`）に
  *   フォールバックする（`SpeedGauge.tsx` が `max_speed_m_s`/`PI_MAX_SPEED_CAP` で行うのと同じ）。
  *   TC が動的に絞る駆動トルク上限（`tc_limit_nm`）はバー内の横線マーカーで示す。非介入時は
  *   `max_torque_nm` と同値でバーの上端に張り付き、TC が効くと途中まで下りる。
@@ -55,7 +55,7 @@
  */
 import { useNumbers } from '../../bus/live'
 import { battLevel } from '../../format'
-import { MAX_BRAKE_TORQUE_NM } from '../../store/ui'
+import { MAX_BRAKE_TORQUE_NM } from '../../store/settings'
 import { BODY_H, BODY_W, BODY_X, BODY_Y, CX_L, CX_R, CY_FRONT, CY_REAR, WHEEL_H } from './carLayout'
 import { ProximityRing } from './ProximityRing'
 

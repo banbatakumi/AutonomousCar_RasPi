@@ -19,7 +19,8 @@ import type {
   LogFile,
   MapFile,
 } from '../types'
-import { guardSocket, type SocketGuard } from './guard'
+import { isControlStatus, parseServerMsg, type ServerMsg } from './messages'
+import { reconnectingSocket, type ReconnectingSocket } from './socket'
 import { authToken } from './token'
 import { wsUrl } from './url'
 
@@ -32,30 +33,6 @@ const IDLE_MS = 5000
  * 発火し、Pi は受けるたびに設定ファイルを書いて全クライアントへ status を配るので、
  * ドラッグ中は間引いて最後の値を必ず送る（`sendCoalesced`） */
 const SETTING_TX_INTERVAL_MS = 150
-
-/**
- * `/ws/control` でサーバから降ってくる JSON の**振り分けに要る分だけ**の形。
- *
- * 全フィールドを実行時に検証はしない（`type` で分岐したあとの中身は
- * `ControlStatus` の宣言を信じる）。ここで潰したいのは「`any` にしたせいで
- * 打ち間違いまで通る」ことのほうで、境界の実行時検証は
- * `/ws/telemetry` 側の札（`MSGS_SCHEMA`）が担っている。
- */
-type ServerMsg = {
-  type?: string
-  holder?: string
-  reason?: string
-  files?: LogFile[]
-  cam_model_files?: CamModelFile[]
-  e2e_model_files?: E2EModelFile[]
-  cam_e2e_model_files?: CamE2EModelFile[]
-  e2e_fusion_model_files?: E2EFusionModelFile[]
-  stereo_e2e_model_files?: E2EFusionModelFile[]
-  map_files?: MapFile[]
-  ok?: boolean
-  error?: string
-  id?: number
-}
 
 export type ControlHandlers = {
   onStatus: (s: ControlStatus) => void
@@ -97,13 +74,10 @@ function shallowMerge(a: Record<string, unknown>, b: Record<string, unknown>): R
 }
 
 export class ControlChannel {
-  private ws: WebSocket | null = null
-  private timer: number | undefined
-  private closed = false
+  private sock: ReconnectingSocket | null = null
   private pingId = 0
   private pingSentAt = 0
   private pongReceived = true
-  private guard: SocketGuard | null = null
 
   /**
    * このタブの識別子。**サーバの `status.controller` と突き合わせて
@@ -117,69 +91,67 @@ export class ControlChannel {
   }
 
   private open() {
-    const ws = new WebSocket(wsUrl('/ws/control?catalog=changed'))
-    this.ws = ws
-    // 半開き・接続中のまま止まった接続を見切る（`guard.ts`）
-    const guard = guardSocket(ws, () => {
-      if (!this.closed) lost()
-    }, IDLE_MS)
-    this.guard = guard
-    ws.onopen = () => {
-      this.h.onOpenChange(true)
-      this.flushAllCoalesced()
+    this.sock = reconnectingSocket(wsUrl('/ws/control?catalog=changed'), {
+      backoff: RECONNECT_MS,
+      // 半開き・接続中のまま止まった接続を見切る（`guard.ts`）
+      idleMs: IDLE_MS,
+      onOpen: () => {
+        this.h.onOpenChange(true)
+        this.flushAllCoalesced()
+      },
+      onLost: () => {
+        this.h.onOpenChange(false)
+        this.h.onRtt(null)
+      },
+      onMessage: (ev) => {
+        // **`any` にしない。** `any` は以降のフィールドアクセスを全て検査対象から
+        // 外すので、`m.holdr` のような打ち間違いも通る。札だけ確かめた部分型で受けて、
+        // 使うところで絞る（`ws/messages.ts`）
+        const m = parseServerMsg(ev.data)
+        if (!m) {
+          console.warn('control WS: 解釈できないメッセージ', ev.data)
+          return
+        }
+        this.dispatch(m)
+      },
+    })
+  }
+
+  private dispatch(m: ServerMsg) {
+    if (m.type === 'status') {
+      if (isControlStatus(m)) this.h.onStatus(m)
+      else console.warn('control WS: 必須の項目が欠けた status を捨てた', m)
+    } else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '', m.reason)
+    else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
+    else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
+    else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
+    else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
+    else if (m.type === 'e2e_fusion_models') this.h.onE2EFusionModels(m.e2e_fusion_model_files ?? [])
+    else if (m.type === 'stereo_e2e_models') this.h.onStereoE2EModels(m.stereo_e2e_model_files ?? [])
+    else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
+    else if (m.type === 'logs_delete_result') {
+      if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
+    } else if (m.type === 'shutdown_denied') this.h.onShutdownDenied(m.reason ?? '')
+    else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
+    else if (m.type === 'maps_clear_grip_result') this.h.onMapsClearGripResult(!!m.ok, m.error ?? '')
+    else if (m.type === 'pong' && m.id === this.pingId) {
+      this.pongReceived = true
+      this.h.onRtt(performance.now() - this.pingSentAt)
     }
-    ws.onmessage = (ev) => {
-      guard.alive()
-      // **`any` にしない。** `any` は以降のフィールドアクセスを全て検査対象から
-      // 外すので、`m.holdr` のような打ち間違いも通る。`unknown` に寄せた形の
-      // 部分型で受けて、使うところで絞る
-      let m: ServerMsg
-      try {
-        m = JSON.parse(ev.data as string) as ServerMsg
-      } catch (e) {
-        console.warn('control WS: JSON.parse に失敗', e, ev.data)
-        return
-      }
-      if (m.type === 'status') this.h.onStatus(m as unknown as ControlStatus)
-      else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '', m.reason)
-      else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
-      else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
-      else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
-      else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
-      else if (m.type === 'e2e_fusion_models') this.h.onE2EFusionModels(m.e2e_fusion_model_files ?? [])
-      else if (m.type === 'stereo_e2e_models') this.h.onStereoE2EModels(m.stereo_e2e_model_files ?? [])
-      else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
-      else if (m.type === 'logs_delete_result') {
-        if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
-      } else if (m.type === 'shutdown_denied') this.h.onShutdownDenied(m.reason ?? '')
-      else if (m.type === 'maps_save_result') this.h.onMapsSaveResult(!!m.ok, m.error ?? '')
-      else if (m.type === 'maps_clear_grip_result') this.h.onMapsClearGripResult(!!m.ok, m.error ?? '')
-      else if (m.type === 'pong' && m.id === this.pingId) {
-        this.pongReceived = true
-        this.h.onRtt(performance.now() - this.pingSentAt)
-      }
-    }
-    const lost = () => {
-      guard.stop()
-      this.h.onOpenChange(false)
-      this.h.onRtt(null)
-      if (!this.closed) this.timer = window.setTimeout(() => this.open(), RECONNECT_MS)
-    }
-    ws.onclose = lost
-    ws.onerror = () => ws.close()
   }
 
   private send(obj: Record<string, unknown>) {
-    if (this.ws?.readyState !== WebSocket.OPEN) return
+    const ws = this.sock?.ws
+    if (ws?.readyState !== WebSocket.OPEN) return
     // 書き込み系にはトークンを載せる（サーバの `OPERATOR_ONLY_KINDS`/`TOKEN_ONLY_KINDS`）。
     // 50Hz の `cmd` は操縦権で守られているので載せない
     const t = obj.type
     const body = t === 'cmd' || t === 'ping' || t === 'estop' ? obj : { ...obj, token: authToken() }
-    this.ws.send(JSON.stringify(body))
+    ws.send(JSON.stringify(body))
   }
 
   private isOpen(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN
+    return this.sock?.ws?.readyState === WebSocket.OPEN
   }
 
   /** 未接続の間に持っておいた設定を、繋がった時点で送る */
@@ -707,10 +679,7 @@ export class ControlChannel {
   }
 
   close() {
-    this.closed = true
-    window.clearTimeout(this.timer)
     for (const st of this.coalesce.values()) window.clearTimeout(st.timer)
-    this.guard?.stop()
-    this.ws?.close()
+    this.sock?.close()
   }
 }

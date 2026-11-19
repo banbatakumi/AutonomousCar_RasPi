@@ -13,7 +13,7 @@
  * `{"ok": bool, "error"?: string}` を1通返して自分で閉じる。
  */
 import { authToken } from './token'
-import { guardSocket } from './guard'
+import { openGuardedSocket } from './socket'
 import { wsUrl } from './url'
 
 //: 1フレームあたりの送信サイズ。地図は数百KB〜数MBなので、大きすぎる
@@ -26,8 +26,6 @@ export function uploadMap(
   file: File,
   report: (ok: boolean, error?: string) => void,
 ): void {
-  const ws = new WebSocket(wsUrl(`/ws/map_upload/${encodeURIComponent(name)}`))
-  ws.binaryType = 'arraybuffer'
   // 結果は1回だけ伝える（エラーの後に close が来る、応答なしで閉じられる、のどれでも
   // 呼び出し側が「アップロード中…」のまま残らないように）
   let reported = false
@@ -38,7 +36,10 @@ export function uploadMap(
     report(ok, error)
   }
   // 開くまでの時間切れ（`guard.ts`）。握手の返らない接続を残すと、Safari では他の WS の張り直しまで止まる
-  const guard = guardSocket(ws, () => onDone(false, 'Pi に繋がりませんでした（時間切れ）'))
+  const { ws, guard } = openGuardedSocket(wsUrl(`/ws/map_upload/${encodeURIComponent(name)}`), {
+    binaryType: 'arraybuffer',
+    onDead: () => onDone(false, 'Pi に繋がりませんでした（時間切れ）'),
+  })
 
   ws.onopen = async () => {
     try {

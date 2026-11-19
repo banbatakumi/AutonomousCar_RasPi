@@ -16,37 +16,81 @@
  * 通常の自動運転と同じく人間が ARM（Enter）を保持し続ける必要がある。
  * システム同定試験だからといってこの安全弁は外さない。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useReducer } from 'react'
 import { useNumbers } from '../bus/live'
 import { ParamSliders } from '../components/ParamSliders'
 import { useMcapDownload } from '../hooks/useMcapDownload'
 import { useUi } from '../store/ui'
+import { useShallow } from 'zustand/react/shallow'
 import type { ControlChannel } from '../ws/control'
 
 /** planner の判断がこれ以上古ければ「planning_node が落ちている」と見なす */
 const AUTO_STALE_MS = 600
+/**
+ * engage の返事（サーバの engaged の echo か、`control_denied`）がこれだけ来なければ諦める [ms]。
+ * 断られた場合は `control_denied` で**すぐ**分かる（`ui.autoDenial`）。これは送信そのものが届かなかった
+ * （control の接続が切れていて黙って捨てられた）ときの受け皿
+ */
+const START_NO_REPLY_MS = 3000
+
+/**
+ * 試験の進み具合。**このビューが始めた試験だけを追う**——このビューはタブを替えても外されない
+ * （`App.tsx`）ので、自動運転タブで走らせている planner の「完了」を試験の終わりと取り違えない。
+ * - `idle`: 試験をしていない（始める前・終わった後）
+ * - `starting`: engage を送って返事を待っている（多重クリックもここで弾く）
+ * - `running`: サーバの engaged を見た（以後に外から解除されたら記録も止める）
+ */
+type TestState = {
+  phase: 'idle' | 'starting' | 'running'
+  downloaded: boolean
+  canceled: boolean
+  /** 終了時の理由（「完了（後輪が滑った…）」など）。disengage すると reason が消えるので残す */
+  endReason: string
+  /** 始めた時点の `autoDenial.seq`。これより新しい拒否だけを、この試験への返事とみなす */
+  denialSeqAtStart: number
+}
+
+type TestAction =
+  | { type: 'clear' }
+  | { type: 'start'; denialSeq: number }
+  | { type: 'engaged' }
+  | { type: 'end'; canceled: boolean; reason?: string }
+  | { type: 'downloaded' }
+
+const INITIAL: TestState = { phase: 'idle', downloaded: false, canceled: false, endReason: '', denialSeqAtStart: 0 }
+
+function reduce(st: TestState, a: TestAction): TestState {
+  switch (a.type) {
+    case 'clear':
+      return { ...st, downloaded: false, canceled: false, endReason: '' }
+    case 'start':
+      return { ...st, phase: 'starting', downloaded: false, canceled: false, endReason: '', denialSeqAtStart: a.denialSeq }
+    case 'engaged':
+      return st.phase === 'starting' ? { ...st, phase: 'running' } : st
+    case 'end':
+      return {
+        ...st,
+        phase: 'idle',
+        canceled: a.canceled,
+        endReason: a.reason ?? st.endReason,
+        downloaded: a.canceled && a.reason === undefined ? false : st.downloaded,
+      }
+    case 'downloaded':
+      return { ...st, downloaded: true }
+  }
+}
+
+const DENIAL_TEXT: Record<string, string> = {
+  auto_engage: '自律走行を開始できなかった（先に ARM して操縦権を取る）',
+  auto_busy: '自律走行を開始できなかった（他の操縦者が自律走行中）',
+}
 
 export function SysIdView({ ch }: { ch: ControlChannel | null }) {
-  const ui = useUi()
+  const ui = useUi(useShallow((s) => ({ armRequested: s.armRequested, auto: s.auto, autoDenial: s.autoDenial })))
   const auto = ui.auto
   const n = useNumbers()
-  const [downloaded, setDownloaded] = useState(false)
-  const [canceled, setCanceled] = useState(false)
-  // 終了時の理由（「完了（後輪が滑った…）」など）。disengage すると reason が消えるので残す
-  const [endReason, setEndReason] = useState('')
-  // このビューが始めた試験が進行中でないか。**試験を始めるまでは true**——このビューはタブを
-  // 替えても外されない（`App.tsx`）ので、自動運転タブで走らせている planner の「完了」を
-  // 試験の終わりと取り違えて解除しないようにする
-  const stoppedRef = useRef(true)
-  // 試験を始めてから、サーバの engaged を一度でも見たか（外から解除されたことを見分ける）
-  const sawEngagedRef = useRef(false)
-  const startTimerRef = useRef<number | undefined>(undefined)
-  // **試験開始ボタンの多重クリック対策。** `auto.engaged`はサーバのechoを
-  // 待つ必要があり、ボタンの`disabled`が実際に効くまでの往復のわずかな間に
-  // 連打されると`start()`（=RecordChannel）とengageが二重に走ってしまう。
-  // ローカルで即座に立てるフラグでその隙間を塞ぐ（`auto.engaged`がTrueに
-  // なったら役目を終えるので下のuseEffectで下ろす）
-  const startingRef = useRef(false)
+  const [test, dispatch] = useReducer(reduce, INITIAL)
+  const { phase, downloaded, canceled, endReason } = test
 
   const sysidCatalog = auto?.catalog.filter((c) => c.category === 'sysid') ?? []
   const selected = sysidCatalog.find((c) => c.id === auto?.mode) ?? null
@@ -63,34 +107,41 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
 
   // ── 終了検知: プランナーが「完了」「中止」を出し車が止まったら自動で disengage → 記録停止 ──
   useEffect(() => {
-    if (!auto?.engaged || !finished || stoppedRef.current) return
-    stoppedRef.current = true
-    if (aborted) setCanceled(true)
-    setEndReason(reason)
+    if (!auto?.engaged || !finished || phase === 'idle') return
+    dispatch({ type: 'end', canceled: aborted, reason })
     ch?.setAuto({ engaged: false })
     ch?.mcapRecordStop()
-  }, [auto?.engaged, finished, aborted, reason, ch])
+  }, [auto?.engaged, finished, aborted, reason, ch, phase])
 
-  // サーバが engaged を echo してきたら多重クリック対策フラグを下ろす。
+  // サーバが engaged を echo してきたら走行中に進める。
   // **試験中に外から解除されたら（人の操作・E-STOP・操縦権の喪失）、記録も止める**——
   // 止めないと「試験中止」も押せないまま記録だけが続く。録れた分は中止と同じくダウンロードする
   useEffect(() => {
     if (auto?.engaged) {
-      if (startingRef.current) {
-        startingRef.current = false
-        sawEngagedRef.current = true
-        window.clearTimeout(startTimerRef.current)
-      }
+      dispatch({ type: 'engaged' })
       return
     }
-    if (stoppedRef.current || !sawEngagedRef.current) return
-    stoppedRef.current = true
-    setCanceled(true)
-    setEndReason('自律走行が解除された')
+    if (phase !== 'running') return
+    dispatch({ type: 'end', canceled: true, reason: '自律走行が解除された' })
     ch?.mcapRecordStop()
-  }, [auto?.engaged, ch])
+  }, [auto?.engaged, ch, phase])
 
-  useEffect(() => () => window.clearTimeout(startTimerRef.current), [])
+  // **engage が断られたら（`control_denied`）すぐに打ち切る。** 断られたまま待ち続けると、記録だけが回り
+  // 「試験開始」も押せなくなる。返事そのものが来ないときは `START_NO_REPLY_MS` で諦める
+  const denial = ui.autoDenial
+  useEffect(() => {
+    if (phase !== 'starting') return
+    const fail = (why: string) => {
+      dispatch({ type: 'end', canceled: true, reason: why })
+      ch?.mcapRecordStop()
+    }
+    if (denial && denial.seq > test.denialSeqAtStart) {
+      fail(DENIAL_TEXT[denial.reason] ?? '自律走行を開始できなかった')
+      return
+    }
+    const t = window.setTimeout(() => fail('自律走行を開始できなかった（Pi から返事が無い）'), START_NO_REPLY_MS)
+    return () => window.clearTimeout(t)
+  }, [phase, denial, test.denialSeqAtStart, ch])
 
   if (!auto) {
     return (
@@ -102,46 +153,28 @@ export function SysIdView({ ch }: { ch: ControlChannel | null }) {
 
   const setMode = (id: string) => {
     ch?.setAuto({ mode: id })
-    setDownloaded(false)
-    setCanceled(false)
-    setEndReason('')
+    dispatch({ type: 'clear' })
   }
 
   const beginTest = () => {
-    if (!selected || active || startingRef.current) return
-    startingRef.current = true
-    setDownloaded(false)
-    setCanceled(false)
-    setEndReason('')
-    stoppedRef.current = false
-    sawEngagedRef.current = false
-    start(false, () => setDownloaded(true))
+    // 多重クリック対策: `auto.engaged` はサーバの echo を待つので、返事が来るまでは `starting` で弾く
+    if (!selected || active || phase !== 'idle') return
+    dispatch({ type: 'start', denialSeq: denial?.seq ?? 0 })
+    start(false, () => dispatch({ type: 'downloaded' }))
+    // engage は操縦権が無いと断られる（先に ARM して操縦権を取っておく必要がある）
     ch?.setAuto({ engaged: true })
-    // engage は操縦権が無いと断られる（先に ARM して操縦権を取っておく必要がある）。
-    // 断られたまま待ち続けると、記録だけが回り「試験開始」も押せなくなるので打ち切る
-    window.clearTimeout(startTimerRef.current)
-    startTimerRef.current = window.setTimeout(() => {
-      if (!startingRef.current) return
-      startingRef.current = false
-      stoppedRef.current = true
-      setCanceled(true)
-      setEndReason('自律走行を開始できなかった（先に ARM して操縦権を取る）')
-      ch?.mcapRecordStop()
-    }, 3000)
   }
 
   // **中止も「記録を止めてダウンロード」までは正常終了と同じ経路を通す。**
   // 録れた範囲のログはフィッティングには使えなくても、何が起きたかを
   // 後から見返す手がかりになるので捨てない
   const cancelTest = () => {
-    if (stoppedRef.current) {
+    if (phase === 'idle') {
       // このビューの試験ではない engage（リロード後など）。解除だけする
       ch?.setAuto({ engaged: false })
       return
     }
-    stoppedRef.current = true
-    setDownloaded(false)
-    setCanceled(true)
+    dispatch({ type: 'end', canceled: true })
     ch?.setAuto({ engaged: false })
     ch?.mcapRecordStop()
   }

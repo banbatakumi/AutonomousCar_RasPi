@@ -11,7 +11,7 @@
  * 色は `--ok`/`--bad` と同じ意味（遠い＝安全＝緑、近い＝危険＝赤）だが、
  * Canvas 直描きなので CSS 変数は読めず、同じ意味の色を直接埋め込んでいる。
  *
- * 円形クリップは親側（`.rc-lidar-mini`、`styles.css`）の `border-radius: 50%`
+ * 円形クリップは親側（`.rc-lidar-mini`、`styles/rc-view.css`）の `border-radius: 50%`
  * に任せる。ここでは正方形いっぱいに描くだけでよい。
  *
  * ズームは既定 3m 圏（`DEFAULT_RADIUS_M`）。計器パネルに置く小さな丸に
@@ -35,6 +35,7 @@
 import { useEffect, useRef } from 'react'
 import { live, useNumbers } from '../../bus/live'
 import { useUi } from '../../store/ui'
+import { rafLoop } from '../../hooks/useRaf'
 
 /** パッドで触っていない間の既定値。`live.lidarMiniZoomM` の初期値と同じ（`bus/live.ts`） */
 const DEFAULT_RADIUS_M = 3
@@ -92,10 +93,8 @@ export function LidarMini() {
     if (!cv) return
     const ctx = cv.getContext('2d')
     if (!ctx) return
-    let raf = 0
 
     const draw = () => {
-      raf = requestAnimationFrame(draw)
       const dpr = window.devicePixelRatio || 1
       const w = cv.clientWidth
       const h = cv.clientHeight
@@ -146,8 +145,7 @@ export function LidarMini() {
         }
       }
     }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
+    return rafLoop(draw)
   }, [])
 
   return (

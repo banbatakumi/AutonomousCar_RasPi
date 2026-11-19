@@ -27,10 +27,12 @@ import { StatusBar } from './components/StatusBar'
 import { live } from './bus/live'
 import { useEngineSound } from './hooks/useEngineSound'
 import { useParkBeep } from './hooks/useParkBeep'
-import { isTextEntry, useDriving } from './input/useDriving'
-import type { DrivingSettings } from './store/ui'
+import { useDriving } from './input/useDriving'
+import { isTextEntry } from './input/useKeyboardInput'
+import type { DrivingSettings } from './store/settings'
 import { MSGS_SCHEMA } from './generated/msgs'
-import { notify, useUi } from './store/ui'
+import { notify } from './store/notice'
+import { useUi } from './store/ui'
 import { AutoView } from './views/AutoView'
 import { DiagView } from './views/DiagView'
 import { RcView } from './views/RcView'
@@ -140,6 +142,9 @@ export function App() {
         }
       },
       onDenied: (holder, reason) => {
+        if (reason === 'auto_engage' || reason === 'auto_busy') {
+          set({ autoDenial: { reason, seq: (useUi.getState().autoDenial?.seq ?? 0) + 1 } })
+        }
         if (reason === 'auto_busy') {
           // 自律走行中の操作は操縦者だけが行える。操縦権は変わらないので hasControl は触らない
           notify(`自律走行中は操縦者（${holder || '不明'}）以外は設定を変えられません（解除だけ可）`)
@@ -220,8 +225,7 @@ export function App() {
   // 走らせないよう、車を止める。`StatusBar` と `useDriving` は境界の外なので生きている
   const stopOnRenderError = () => {
     ch?.estop()
-    const ui = useUi.getState()
-    if (ui.armRequested) ui.set({ armRequested: false, disarmReason: '画面の表示エラーで停止' })
+    useUi.getState().disarm('画面の表示エラーで停止')
   }
 
   return (
@@ -233,8 +237,7 @@ export function App() {
         // すぐに取り直して走り続ける（Esc・パッドの × と同じ扱いにする）
         onEstop={() => {
           ch?.estop()
-          const ui = useUi.getState()
-          if (ui.armRequested) ui.set({ armRequested: false, disarmReason: 'E-STOP ボタン' })
+          useUi.getState().disarm('E-STOP ボタン')
         }}
         onShutdown={() => ch?.shutdown()}
         variant={tab === 'ラジコン' ? 'rc' : 'full'}

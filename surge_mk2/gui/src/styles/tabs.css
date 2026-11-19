@@ -1,0 +1,88 @@
+/* ── タブ ────────────────────────────────────────────── */
+
+/*
+ * ドライブモードの切替スイッチ風。斜めに切った板を並べ、選択中は
+ * 赤く点灯して下辺が光る。左上の数字は切替キー（1〜4）
+ */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: linear-gradient(#0e0e10, #0a0a0c);
+  border-bottom: 1px solid #1c1c21;
+  flex: 0 0 auto;
+}
+
+.tabset {
+  display: flex;
+  gap: 3px;
+  padding-left: 6px;
+}
+
+.tabs .tab {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  column-gap: 7px;
+  align-items: center;
+  min-width: 7.5em;
+  padding: 4px 18px 4px 14px;
+  border: none;
+  border-radius: 0;
+  background: linear-gradient(#1d1d22, #141417);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .05);
+  clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+  color: var(--dim);
+  text-align: left;
+}
+
+.tabs .tab:hover {
+  color: var(--fg);
+  background: linear-gradient(#25252b, #19191d);
+}
+
+.tabs .tab.on {
+  background: linear-gradient(#b52532, #6e1720);
+  color: #fff;
+  box-shadow: inset 0 -2px 0 #ff5d6a, inset 0 1px 0 rgba(255, 255, 255, .2);
+}
+
+.tab-key {
+  grid-row: 1 / 3;
+  font-family: var(--font-num);
+  font-size: 18px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
+  opacity: .55;
+}
+
+.tab.on .tab-key {
+  opacity: .9;
+}
+
+.tab-name {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.tab-sub {
+  font-family: var(--font-num);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .22em;
+  line-height: 1;
+  opacity: .6;
+}
+
+/* 灯火・ファン（DriveControls.tsx）。運転できるタブのときだけタブバー右側に出る */
+.drive-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+

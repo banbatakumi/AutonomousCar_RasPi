@@ -8,7 +8,7 @@ import { EV, type SeriesKey } from '../../bus/history'
 import { BATT_EMPTY_V, BATT_WARN_V, DRIVE_CUTOFF_A, TEMP_BAD_C, TEMP_WARN_C } from '../../format'
 import type { Tone } from './uplotBase'
 
-export type SeriesDef = {
+type SeriesDef = {
   key: SeriesKey
   label: string
   tone: Tone

@@ -11,13 +11,13 @@
  * 開閉・再接続は `CameraView` の `/ws/camera/mask` と同じ作法。
  */
 import { useEffect, useRef, useState } from 'react'
-import { guardSocket, type SocketGuard } from '../ws/guard'
+import { CAM_RECONNECT_WAIT_MS, reconnectingSocket } from '../ws/socket'
 import { wsUrl } from '../ws/url'
 
 /** OpenCV の COLORMAP_JET（v = 0〜255 → RGB）。`colorize_disparity` の逆引き表に使う。 */
 const JET = (() => {
   const clamp = (x: number) => Math.max(0, Math.min(1, x))
-  return Array.from({ length: 256 }, (_, v) => {
+  return Array.from({ length: 256 }, (_, v): [number, number, number] => {
     const x = v / 255
     return [
       clamp(1.5 - Math.abs(4 * x - 3)) * 255,
@@ -33,7 +33,7 @@ function jetValue(r: number, g: number, b: number): number | null {
   let best = 1
   let bestD = Infinity
   for (let v = 1; v < 256; v++) {
-    const [jr, jg, jb] = JET[v]
+    const [jr, jg, jb] = JET[v]! // v は 1〜255 なので表の範囲内
     const d = (jr - r) ** 2 + (jg - g) ** 2 + (jb - b) ** 2
     if (d < bestD) {
       bestD = d
@@ -53,10 +53,6 @@ export function DepthView({ label = '深度' }: { label?: string }) {
   const [probe, setProbe] = useState<Probe | null>(null)
 
   useEffect(() => {
-    let ws: WebSocket | null = null
-    let timer: number | undefined
-    let closed = false
-    let guard: SocketGuard | null = null
     let url: string | null = null
     let frames = 0
     let last = performance.now()
@@ -68,15 +64,10 @@ export function DepthView({ label = '深度' }: { label?: string }) {
       setStatus(fps > 0 ? `${fps.toFixed(1)}fps` : '待機中（左右が揃うまで数秒）')
     }, 1000)
 
-    const open = () => {
-      const sock = new WebSocket(wsUrl('/ws/camera/depth'))
-      ws = sock
-      sock.binaryType = 'arraybuffer'
-      guard?.stop()
-      guard = guardSocket(sock, () => {
-        if (!closed) timer = window.setTimeout(open, 800)
-      })
-      sock.onmessage = (ev) => {
+    const sock = reconnectingSocket(wsUrl('/ws/camera/depth'), {
+      binaryType: 'arraybuffer',
+      backoff: CAM_RECONNECT_WAIT_MS,
+      onMessage: (ev) => {
         if (typeof ev.data === 'string') {
           try {
             nearRef.current = Number(JSON.parse(ev.data).near_m) || 0
@@ -91,21 +82,12 @@ export function DepthView({ label = '深度' }: { label?: string }) {
         if (url) URL.revokeObjectURL(url)
         url = next
         frames += 1
-      }
-      sock.onclose = () => {
-        guard?.stop()
-        if (!closed) timer = window.setTimeout(open, 800)
-      }
-      sock.onerror = () => sock.close()
-    }
-    open()
+      },
+    })
 
     return () => {
-      closed = true
-      window.clearTimeout(timer)
       window.clearInterval(tick)
-      guard?.stop()
-      ws?.close()
+      sock.close()
       if (url) URL.revokeObjectURL(url)
     }
   }, [])
@@ -129,7 +111,7 @@ export function DepthView({ label = '深度' }: { label?: string }) {
     const ctx = cv.getContext('2d', { willReadFrequently: true })
     if (!ctx) return
     ctx.drawImage(img, 0, 0)
-    const [r, g, b] = ctx.getImageData(px, py, 1, 1).data
+    const [r = 0, g = 0, b = 0] = ctx.getImageData(px, py, 1, 1).data
     const v = jetValue(r, g, b)
     const near = nearRef.current
     const text = v === null ? '測れない' : near > 0 ? `約 ${((near * 255) / v).toFixed(2)} m` : '…'

@@ -1,0 +1,259 @@
+/* ── 運転ビュー ───────────────────────────────────────── */
+
+/*
+ * 上段は**前方・後方・LiDAR を等幅で3分割**。デバッグ用の画面なので前方を
+ * 特別扱いしない（ラジコンビューは逆に前方を全面に使う。`.rc` を参照）。
+ *
+ * 下2段は 2026-08-28 に再編した——速度・舵角は上段の直下に細い帯（`bar`）で
+ * 独立させ、最下段は「モード選択・engage・判断」と「車体図」に分けた
+ * （指示による）。
+ *
+ * 2026-08-29: 最下段の2要素は元々グリッドの3等分列をそのまま
+ * `ctrl`（2列ぶん）/`car`（1列ぶん）に割り当てていたが、車体図は実寸の
+ * 縦長い比率（`DrivePanel.tsx` の viewBox）を保ったまま行の高さいっぱいに
+ * 拡大する作りなので、割り当てられた列幅（1/3）よりずっと狭い幅にしか
+ * ならず、左右に大きな余白が残っていた（指摘による）。列を分けるのをやめ、
+ * `bottom` 1エリアの中を `.auto-bottom` の flex 横並びにして、車体図
+ * （`.auto-car`、`flex: 0 0 auto`＝自分の縦横比が決める幅だけを取る）と
+ * `AutoPanel`（`.autopanel`、`flex:1`＝余った幅を全部取る）に分けた。
+ */
+.drive {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 3段目は通常 420px（`auto` にすると `.auto-car` の `aspect-ratio` 由来の
+   * 内在サイズ（実測 552px）が `.autopanel` の実際のコンテンツ高さを大きく
+   * 上回り、行の高さがそちらに引っ張られて `.autopanel` の下に空白ができる
+   * トラブルを実測して踏んだ——grid の `align-items:stretch`（既定）は
+   * 「行の高さに揃える」だけで、行の高さ自体が `auto` だと `.auto-car` 側の
+   * 内在サイズにつられて膨らんでしまう。**行自体を固定値にして初めて
+   * 両セルが同じ高さになる**。`.autopanel`（`overflow-y:auto` で吸収）・
+   * `.auto-car`（`height:100%` の子がここに揃う）はどちらもこの値に暗黙で
+   * 依存しているので、変えるならこの1箇所だけでよい）。
+   * 2026-11-03: 420px 固定 → 画面の高さの 44%（MacBook Air 14 で従来と同じ約 420px、
+   * 4K では広がり、iPad では詰まる）。高さ不足時は下段も縮小して、上段へ食い込ませない */
+  /* 上段はカメラ映像の縦横比（`--cam-aspect`、`AutoView` が実測から入れる）を基本にしつつ、画面が低いときは残り高さまで縮める。
+   * 下段も minmax(0, ...) にして、固定の最小高さが映像へ重ならないようにする。 */
+  grid-template-rows: minmax(0, auto) auto minmax(0, 1fr);
+  /* 2026-11-13: 3段目を 44vh 固定から残り全部（1fr）へ。固定だと上段が4:3で低くなる横長画面で
+   * 下に空白が残った。車体図（高さ基準）もパラメータ欄もその分だけ大きくなる */
+  /* **グリッドエリア名に `auto` は使わない**——`grid-area: auto` はエリア名の
+   * 参照ではなく CSS のキーワード `auto`（＝自動配置）として解釈されてしまい、
+   * 意図した列に auto-placement されず空白ができるという罠を実機で踏んだ。
+   * 同じ理由で最下段のエリア名も `bottom` にしてある */
+  grid-template-areas:
+    'caml camf depth lidar'
+    'bar  bar  bar  bar'
+    'bottom bottom bottom bottom';
+  overflow: hidden;
+  gap: 6px;
+  padding: 6px;
+  position: relative;
+  /* 設定ドロワーの基準（`.rc` と同じ理由、`SettingsDrawer.tsx` 参照） */
+}
+
+.cam-left,
+.cam-front,
+.cam-depth {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  /* カメラ映像の縦横比（ISP の上下クロップで変わる）。LiDAR 枠も同じ値 */
+  aspect-ratio: var(--cam-aspect, 4 / 3);
+}
+
+.cam-left {
+  grid-area: caml;
+}
+
+.cam-front {
+  grid-area: camf;
+}
+
+.cam-depth {
+  grid-area: depth;
+}
+
+.cam-left>.camera,
+.cam-front>.camera,
+.cam-depth>.camera {
+  flex: 1;
+  min-width: 0;
+}
+
+.camera {
+  position: relative;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 0;
+  box-shadow: var(--bezel);
+}
+
+.camera canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 深度映像（`DepthView`）。照合した行の帯だけなので横長。枠の中に収めて中央に置く */
+.cam-depth>.camera {
+  display: flex;
+  flex-direction: column;
+}
+
+.camera .depth-img {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  width: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.depth-probe {
+  position: absolute;
+  transform: translate(10px, -130%);
+  padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.75);
+  border: 1px solid #888;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.depth-scale {
+  flex: 0 0 45px;
+  padding: 3px 8px 5px;
+  background: #08080b;
+}
+
+.depth-scale-bar {
+  height: 12px;
+  border: 1px solid #555;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    #f00 0%,
+    #ff0 50%,
+    #00ff00 75%,
+    #00ffff 87.5%,
+    #00f 98.5%,
+    #000080 100%
+  );
+}
+
+.depth-scale-labels {
+  position: relative;
+  margin-top: 3px;
+  height: 10px;
+  color: #c9c9cf;
+  font-size: 9px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.depth-scale-labels span {
+  position: absolute;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.depth-scale-labels span:first-child {
+  transform: none;
+}
+
+.depth-scale-labels span:last-child {
+  transform: translateX(-100%);
+}
+
+.camera-tag {
+  position: absolute;
+  top: 5px;
+  left: 7px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  background: #0009;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+
+/* `variant="minimal"`（ラジコンビュー）用。ラベルは出さず fps だけを隅に残す */
+.camera-fps {
+  position: absolute;
+  bottom: 5px;
+  right: 7px;
+  font-size: 10px;
+  color: var(--dim);
+  background: #0009;
+  padding: 1px 6px;
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.cam-controls {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  background: #000a;
+  padding: 3px 6px;
+  border-radius: 4px;
+  z-index: 2;
+}
+
+.lidar {
+  grid-area: lidar;
+  position: relative;
+  /* 上段のカメラ枠と同じ比率（4:3 のままだと行がこちらに引っ張られてカメラ枠の下に余白が出る） */
+  aspect-ratio: var(--cam-aspect, 4 / 3);
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
+  overflow: hidden;
+  min-height: 0;
+  box-shadow: var(--bezel);
+}
+
+.lidar-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.lidar-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: #000a;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.scan-badge {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 11px;
+  background: #000a;
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+

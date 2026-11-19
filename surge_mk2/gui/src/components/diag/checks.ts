@@ -33,7 +33,7 @@ export type Check = {
 }
 
 /** `get_throttled` のビット（`raspi/io/pihealth.py` の `THROTTLED_BITS`） */
-export const THROTTLED = {
+const THROTTLED = {
   UNDERVOLTAGE: 0x1,
   FREQ_CAPPED: 0x2,
   THROTTLED: 0x4,

@@ -23,6 +23,8 @@
 import { useEffect, useRef } from 'react'
 import { live } from '../../bus/live'
 import { useUi } from '../../store/ui'
+import { useShallow } from 'zustand/react/shallow'
+import { rafLoop } from '../../hooks/useRaf'
 
 /** 一瞬の介入も目視できる最低点灯時間 */
 const HOLD_MS = 300
@@ -32,10 +34,9 @@ export function AssistLamps() {
   const tvRef = useRef<HTMLSpanElement>(null)
   const absRef = useRef<HTMLSpanElement>(null)
   const asRef = useRef<HTMLSpanElement>(null)
-  const ui = useUi()
+  const ui = useUi(useShallow((s) => ({ braking: s.braking, launchPhase: s.launchPhase })))
 
   useEffect(() => {
-    let raf = 0
     // 立ち上がりの時刻。0 は「一度も点いていない」
     const since = { tc: 0, tv: 0, abs: 0, as: 0 }
     const shown = { tc: false, tv: false, abs: false, as: false }
@@ -51,7 +52,6 @@ export function AssistLamps() {
     }
 
     const tick = () => {
-      raf = requestAnimationFrame(tick)
       const vs = live.vs
       const fresh = vs != null && performance.now() - live.lastRxMs < 500
       apply(tcRef.current, 'tc', !!(fresh && vs?.tc_active))
@@ -59,8 +59,7 @@ export function AssistLamps() {
       apply(absRef.current, 'abs', !!(fresh && vs?.abs_active))
       apply(asRef.current, 'as', !!(fresh && vs?.auto_stop_active))
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    return rafLoop(tick)
   }, [])
 
   return (

@@ -1,0 +1,1139 @@
+/* ── ラジコンビュー ───────────────────────────────────── */
+
+/*
+ * GR 風「黒基調＋赤アクセント」。2026-11-03 に赤アクセント（`--brand`）を
+ * 全タブ共通にしたので、ここで上書きするのはパネルの地の暖色寄りの黒だけ。
+ * `--fg`/`--dim`/`--ok`/`--warn`/`--bad`/`--live` は安全に関わる意味色なので上書きしない。
+ */
+.rc {
+  --panel: #131013;
+  --panel2: #181415;
+  --line: #2b2224;
+
+  flex: 1;
+  min-height: 0;
+  /* 映像をタブいっぱいに contain-fit で置き、中央に寄せる（`RcView.tsx`）。
+   * 計器・LiDAR・車体図は全部その上に重ねる */
+  display: flex;
+  /* 映像は上に詰める（指示による。余りは下に回す） */
+  align-items: flex-start;
+  justify-content: center;
+  position: relative;
+  /* 設定ドロワー・車体図ドロワーの基準 */
+  overflow: hidden;
+  background: #000;
+}
+
+/*
+ * メイン映像。`width`/`height` は `RcView.tsx` が
+ * `useContainFit` で実測して inline style に px で入れる。**CSS の `aspect-ratio` +
+ * `max-width`/`max-height` だけでは足りない**——中に `<canvas>` がいると intrinsic
+ * サイズに引っ張られて縮んだままになる（`hooks/useContainFit.ts`）。ここの
+ * `max-*`/`aspect-ratio` は JS が測り終わるまでの一瞬のフォールバック。
+ *
+ * LiDAR・HUD はこの箱の中で絶対配置する。クリックで LiDAR・進路ガイドを
+ * 一括で表示/非表示（子のクリックは `stopPropagation` で伝播させない）。
+ */
+.rc-cam-video {
+  position: relative;
+  flex: 0 0 auto;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 16 / 9;
+  display: flex;
+  cursor: pointer;
+}
+
+.rc-cam-video>.camera {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  cursor: default;
+  border: none;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+}
+
+/*
+ * 計器パネル。前方映像の左下（右カメラでは自分の車体が映る所）に重ねる（2026-11-13、`RcView.tsx` 冒頭）。
+ * 大きさ・中の部品の位置は `RcView.tsx` が映像の大きさから決めて inline style に入れる。
+ * 背景は左端に接し右辺だけ斜めの台形（`.rc-hud-trap`）。見た目はカーボン調の筐体＋液晶＋シフトライトの
+ * レース用ダッシュ風。`cursor: default` は映像クリック（重畳の一括切替）と見分けるため。
+ */
+.rc-hud {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  z-index: 2;
+  cursor: default;
+}
+
+/* 中の部品は台形の上に載せる。位置は `RcView.tsx` が px で入れる */
+.rc-hud-car,
+.rc-hud-main,
+.rc-hud-foot {
+  position: absolute;
+  z-index: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.rc-hud-car .drivepanel-wrap {
+  height: 100%;
+  /* viewBox（`DrivePanel.tsx`）と同じ比。`RcView.tsx` の `CAR_AR` も合わせる */
+  aspect-ratio: 146 / 246.52;
+}
+
+/* 右側: 上段（ウィンカー・シフトライト）＋液晶（メータ） */
+.rc-hud-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 上段の高さは `RcView.tsx` の `TOP_ROW_H_PX`、間隔（`.rc-hud-main` の gap）は `TOP_ROW_GAP_PX` と同じ */
+.rc-hud-top {
+  flex: none;
+  height: 22px;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+/* 下の帯（液晶の下）: 温度・介入ランプ */
+.rc-hud-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.rc-hud-top>.hazard-btn {
+  flex: none;
+  height: 100%;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
+/*
+ * 台形の背景。左端に接し、右辺だけ斜め。上辺の長さ（`--trap-top`）を px で渡して clip-path で切る
+ * （底辺は箱の幅＝ `RcView.tsx` が斜辺の角 `PANEL_ANGLE_DEG` から計算済み。% だと幅で角度が変わる）。
+ * 外側（縁の色）と内側（地の色）の2枚で、上辺と斜辺に細い縁を付ける。
+ * 内側の斜辺は外側と平行に縁の太さぶん内へずらす（`--trap-top-in`・`--trap-foot-in`）
+ */
+.rc-hud-trap,
+.rc-hud-trap-in {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.rc-hud-trap {
+  top: 0;
+  /* 縁。上辺は赤のアクセント、斜辺を下るほど暗くする */
+  background: linear-gradient(to bottom, #d5303f 0%, #6a1c24 35%, #2b2224 100%);
+  clip-path: polygon(0 0, var(--trap-top) 0, 100% 100%, 0 100%);
+}
+
+/*
+ * 地はカーボン織り。斜めの綾織りを gradient の重ね合わせで作る
+ * （よく知られた CSS だけのカーボン模様を 1/2 に縮めたもの。画像ファイルは使わない）。
+ * 一番上の層は上から当たる光の反射と、下へ向かう影
+ */
+.rc-hud-trap-in {
+  top: 2px;
+  background-color: #111113;
+  background-image:
+    linear-gradient(to bottom, rgba(255, 255, 255, .08) 0%, rgba(255, 255, 255, 0) 30%, rgba(0, 0, 0, .45) 100%),
+    linear-gradient(27deg, #141416 2.5px, transparent 2.5px),
+    linear-gradient(207deg, #141416 2.5px, transparent 2.5px),
+    linear-gradient(27deg, #202024 2.5px, transparent 2.5px),
+    linear-gradient(207deg, #202024 2.5px, transparent 2.5px),
+    linear-gradient(90deg, #19191c 5px, transparent 5px),
+    linear-gradient(#1b1b1e 25%, #17171a 25%, #17171a 50%, transparent 50%, transparent 75%, #222226 75%, #222226);
+  background-size: 100% 100%, 10px 10px, 10px 10px, 10px 10px, 10px 10px, 10px 10px, 10px 10px;
+  background-position: 0 0, 0 2.5px, 5px 0, 0 5px, 5px 2.5px, 0 0, 0 0;
+  clip-path: polygon(0 0, var(--trap-top-in) 0, calc(100% - var(--trap-foot-in)) 100%, 0 100%);
+}
+
+/*
+ * メータの後ろの液晶（`.rc-hud-main` の中、シフトライトの下の残り全部）。
+ * 黒いガラスに、上からの薄い反射と内側の影。大きさはダイヤルの計算に使う（`RcView.tsx` が実測）
+ */
+.rc-hud-screen {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  box-sizing: border-box;
+  border-radius: 10px;
+  background: radial-gradient(120% 90% at 50% 0%, #1c1315 0%, #080708 70%);
+  box-shadow: inset 0 2px 12px #000, inset 0 0 0 1px #2c2226, 0 -1px 0 rgba(255, 255, 255, .06);
+  overflow: hidden;
+}
+
+.rc-hud-screen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(172deg, rgba(255, 255, 255, .07) 0%, rgba(255, 255, 255, 0) 38%);
+}
+
+/*
+ * シフトライト（`ShiftLights.tsx`）。液晶の上に載る細いポッド。
+ * 消灯中もその色の暗い LED を見せる（実物の LED と同じく「そこにある」のが分かる）
+ */
+.shift-lights {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1px 12px 0;
+  background: linear-gradient(to bottom, #1a1a1d, #0b0b0c);
+  border: 1px solid #2c2427;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.sl-led {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, .6);
+  transition: background 60ms linear, box-shadow 60ms linear;
+}
+
+.sl-g {
+  background: #10291a;
+}
+
+.sl-y {
+  background: #2e2608;
+}
+
+.sl-r {
+  background: #331012;
+}
+
+.sl-g.on {
+  background: #3ddc6a;
+  box-shadow: 0 0 6px #3ddc6a, 0 0 2px #fff inset;
+}
+
+.sl-y.on {
+  background: #ffc63f;
+  box-shadow: 0 0 6px #ffc63f, 0 0 2px #fff inset;
+}
+
+.sl-r.on {
+  background: #ff3b4b;
+  box-shadow: 0 0 7px #ff3b4b, 0 0 2px #fff inset;
+}
+
+/* シフトアップの合図。全灯を青で点滅 */
+.sl-led.shift {
+  background: #4aa8ff;
+  box-shadow: 0 0 8px #4aa8ff, 0 0 2px #fff inset;
+  animation: slblink 160ms steps(1, start) infinite;
+}
+
+/* TC/ABS の介入。両端を黄で点滅 */
+.sl-led.assist {
+  background: #ffc63f;
+  box-shadow: 0 0 8px #ffc63f;
+  animation: slblink 220ms steps(1, start) infinite;
+}
+
+@keyframes slblink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: .2;
+  }
+}
+
+/*
+ * 液晶の中は [速度（大）][舵角 / G の縦積み] の2列（大きさは `RcView.tsx` の `panelLayout`）。
+ * padding・gap は `RcView.tsx` の `SCREEN_*` と同じ値
+ */
+.rc-hud-screen>.rc-cam-gauges {
+  z-index: 1;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  grid-template-columns: auto auto;
+  grid-template-rows: auto auto;
+  justify-content: center;
+  align-content: center;
+  align-items: center;
+  gap: 12px;
+}
+
+.rc-hud-screen>.rc-cam-gauges>.meter-speed {
+  grid-row: 1 / 3;
+}
+
+.rc-hud-screen>.rc-cam-gauges>.meter-steer,
+.rc-hud-screen>.rc-cam-gauges>.meter-g {
+  justify-self: center;
+}
+
+/* ダイヤルの大きさは `RcView.tsx` がパネルの高さ（と映像の幅の上限）から決めて px で渡す。
+ * 共通 CSS の `flex: 1`（高さいっぱいに伸びる）を止める——伸びると幅が `dialHeight` の想定を超え、
+ * 舵角計・G メータが押し出されて消える（2026-11-13 に踏んだ） */
+.rc-hud-screen .dial-wrap,
+.rc-hud-screen .gmeter-wrap {
+  flex: none;
+}
+
+/* 下の帯の中。2段×3列（TC/ABS/BRAKE・TV/STOP/LC） */
+.rc-hud-foot>.lamps {
+  position: relative;
+  display: grid;
+  grid-template-rows: repeat(2, auto);
+  grid-auto-flow: column;
+  gap: 3px;
+  flex: none;
+}
+
+/* 介入ランプ（下の帯）。消灯中は枠だけ薄く出す */
+.rc-hud .lamp {
+  background: #0009;
+  font-size: 9px;
+  line-height: 1.25;
+  padding: 1px 6px;
+  text-align: center;
+}
+
+/*
+ * ── HUD の計器をレース用ダッシュ風に ──
+ * 共通の計器 CSS（`.arc-*`・`.needle` など）は残し、HUD の中だけ上書きする。
+ * 弧は細かい区切りのセグメント、塗りと針は発光、ギアは大きな斜体の白に赤い縁
+ */
+.rc-hud .arc-bg,
+.rc-hud .arc-fill {
+  stroke-width: 8;
+  stroke-linecap: butt;
+  stroke-dasharray: 2.4 1.3;
+}
+
+.rc-hud .arc-bg {
+  stroke: #24181b;
+}
+
+.rc-hud .arc-fill {
+  stroke: #ff3445;
+  filter: drop-shadow(0 0 3px rgba(255, 52, 69, .9));
+}
+
+.rc-hud .arc-tick {
+  stroke: #6a4a50;
+}
+
+.rc-hud .needle line {
+  stroke: #fff;
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, .9));
+}
+
+.rc-hud .needle-hub {
+  fill: #0b0b0c;
+  stroke: #ff3445;
+}
+
+.rc-hud .gear-chip {
+  fill: none;
+  stroke: none;
+}
+
+.rc-hud .gear-label {
+  fill: #fff;
+  font-size: 24px;
+  font-weight: 800;
+  font-style: italic;
+  paint-order: stroke;
+  stroke: #d5303f;
+  stroke-width: 1.2;
+  filter: drop-shadow(0 0 3px rgba(255, 52, 69, .8));
+}
+
+.rc-hud .gear-label.rev {
+  fill: var(--warn);
+  stroke: #6a4c08;
+}
+
+.rc-hud .meter-read b {
+  letter-spacing: -.02em;
+  text-shadow: 0 0 6px rgba(255, 52, 69, .45), 0 1px 3px #000;
+}
+
+/*
+ * ウィンカー（`WinkerLamp`、シフトライトの両端）。点滅表示とボタンを兼ねる:
+ * 消灯は暗い緑の矢印、要求中は縁が緑、STM32 が点滅させている間は矢印が緑に点滅して発光
+ */
+.winker-lamp {
+  flex: none;
+  height: 100%;
+  padding: 0 12px;
+  font-size: 15px;
+  line-height: 1;
+  color: #1d3a26;
+  background: linear-gradient(to bottom, #1a1a1d, #0b0b0c);
+  border: 1px solid #2c2427;
+  border-radius: 6px;
+  box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, .06);
+}
+
+.winker-lamp:hover {
+  color: #2f6b42;
+}
+
+.winker-lamp.req {
+  border-color: #2f7a46;
+}
+
+.winker-lamp.blink {
+  color: #3ddc6a;
+  text-shadow: 0 0 8px #3ddc6a;
+  animation: winkerblink 1s steps(1, start) infinite;
+}
+
+/* ハザード: 赤い物理ボタン風 */
+.rc-hud-top>.hazard-btn {
+  background: linear-gradient(to bottom, #3a1215, #1a0708);
+  border-color: #7d2b23;
+  box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, .1);
+}
+
+.rc-hud-top>.hazard-btn.on {
+  box-shadow: 0 0 12px rgba(242, 84, 75, .7), inset 0 1px 0 rgba(255, 255, 255, .15);
+}
+
+/* 介入ランプ: 消灯中は黒いバックライト無しのボタン、点灯で発光（既存の `.lamp-*.on`） */
+.rc-hud .lamp:not(.on) {
+  background: #0a0a0c;
+  border-color: #26262b;
+  color: #3a3a42;
+}
+
+/* 映像の四隅を少し暗くする（コックピットから覗いている感じ）。クリックは下へ通す */
+.rc-cam-video::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: radial-gradient(ellipse 75% 70% at 50% 45%, transparent 55%, rgba(0, 0, 0, .5) 100%);
+}
+
+/* メイン映像の fps は右下（台形の外の隅）。HUD（z-index 2）の透明な部分より上に出す */
+.rc-cam-video>.camera .camera-fps {
+  bottom: 8px;
+  right: 8px;
+  z-index: 3;
+}
+
+/*
+ * 温度（`RcTemps.tsx`、下の帯の左。2026-11-13）。1つ = 上にラベル・数字、下に短いセグメント。
+ * セグメントは少し傾けて（skew）速さを出す。正常は白、注意は黄、危険は赤で点滅
+ */
+.rc-temps {
+  display: flex;
+  /* 狭い画面では帯の幅に合わせて縮む（ランプは縮めない） */
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 200ms;
+}
+
+/* 受信が途絶したら沈める。**古い値を現在値に見せない** */
+.rc-temps.stale {
+  opacity: .4;
+}
+
+.rct-head {
+  flex: none;
+  align-self: center;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: .12em;
+  color: #d5303f;
+}
+
+.rct-cell {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 4px;
+  row-gap: 3px;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 64px;
+}
+
+.rct-cell>.rcs-segs {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
+.rcs-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: #8a8a94;
+}
+
+.rct-cell>b {
+  font-size: 14px;
+  font-weight: 800;
+  font-style: italic;
+  color: #fff;
+  text-align: right;
+}
+
+.rcs-segs {
+  display: flex;
+  gap: 2px;
+  flex: 1;
+}
+
+.rcs-segs>i {
+  flex: 1;
+  height: 8px;
+  background: #1c1a1d;
+  transform: skewX(-18deg);
+}
+
+.rcs-segs>i.on.lv-ok {
+  background: #e9e9ee;
+  box-shadow: 0 0 4px rgba(233, 233, 238, .6);
+}
+
+.rcs-segs>i.on.lv-warn {
+  background: #ffc63f;
+  box-shadow: 0 0 5px rgba(255, 198, 63, .8);
+}
+
+.rcs-segs>i.on.lv-bad {
+  background: #ff3b4b;
+  box-shadow: 0 0 6px rgba(255, 59, 75, .9);
+}
+
+/* 取得不可（シムでの RasPi 温度）。異常ではないので沈めるだけ */
+.rcs-na>b,
+.rcs-na>.rcs-label {
+  color: #4a4a52;
+}
+
+.rcs-warn>b {
+  color: #ffc63f;
+}
+
+/* 危険と未受信（`tempLevel(null)`）は赤で点滅させる。見落とすと壊すため */
+.rcs-bad>b,
+.rcs-bad>.rcs-label {
+  color: #ff3b4b;
+  animation: winkerblink 1s steps(1, start) infinite;
+}
+
+/*
+ * 舵角・速度・G メータの行。
+ *
+ * ## 速度計を常に中央に
+ *
+ * `1fr auto 1fr` の3カラムにして、舵角側・G 側を中央カラムに寄せる
+ * （`justify-self`）。中央の速度計は auto カラムなので、左右の中身の幅が
+ * 違っても常に列の中心に来る——単純な `justify-content: center` だと
+ * 左右の幅差でずれる。
+ *
+ * ## メータの大きさ
+ *
+ * `RcView.tsx` が液晶（`.rc-hud-screen`）の実測の高さと幅の両方に収まる `dialHeight` を計算して px で渡す。
+ * 舵角計と G メータは同じ大きさ、**速度計だけ `SPEED_SCALE` 倍**（2026-11-13、案の画像に合わせて中央の主計器を大きく）。
+ * 以前は3つとも同じ大きさに揃えていた（ウィンカーの場所を空けるため舵角・G だけ縮めたら揃わなくなる不具合があった）。
+ * ウィンカーは今は液晶の四隅に重ねるので、メータの幅を食わない。
+ * 行は液晶の縦の中央に置く（`.rc-hud-screen>.rc-cam-gauges`）。
+ */
+.rc-cam-gauges {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  /* 中身の幅に縮める（台形をその外側に敷く）。縮めても `1fr` の2列は大きい方に揃うので
+   * 速度計は中央のまま */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 4px 18px;
+}
+
+.rc-cam-gauges>.meter-steer {
+  justify-self: end;
+}
+
+.rc-cam-gauges>.meter-speed {
+  justify-self: center;
+}
+
+.rc-cam-gauges>.meter-g {
+  justify-self: start;
+}
+
+/* ウィンカー・温度の危険表示の点滅 */
+@keyframes winkerblink {
+
+  0%,
+  49% {
+    opacity: 1;
+  }
+
+  50%,
+  100% {
+    opacity: .15;
+  }
+}
+
+/* ハザード（`HazardButton`）。置き場所は `.rc-hud-top` の右端（計器パネルの上段、右ウィンカーの隣） */
+.hazard-btn {
+  font-size: 23px;
+  line-height: 1;
+  padding: 5px 12px;
+  color: var(--bad);
+  border-color: #5a2320;
+}
+
+.hazard-btn.on {
+  background: #3a1512;
+  border-color: var(--bad);
+  color: #ff9b93;
+}
+
+/* LiDAR ミニマップ（2026-11-13 に映像右上から計器パネルの斜辺の下の三角へ移した。`RcView.tsx`）。
+   位置と大きさは `RcView.tsx` が三角の内接円から px で入れる。クリックで拡大（映像の中央に大きく） */
+.rc-lidar-mini {
+  position: absolute;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  overflow: hidden;
+  box-shadow: 0 3px 12px #000c, 0 0 0 2px var(--brand);
+  cursor: pointer;
+}
+
+.rc-lidar-mini.in-panel {
+  z-index: 1;
+  background: #070708;
+}
+
+/* 拡大中は映像の中央。HUD（z-index 2）より上に出す */
+.rc-lidar-mini.expanded {
+  z-index: 4;
+  top: 50%;
+  left: 50%;
+  height: 82%;
+  max-height: 640px;
+  transform: translate(-50%, -50%);
+}
+
+/* `LidarMini.tsx` の中身。円形クリップは親（`.rc-lidar-mini`）の border-radius が担う */
+.lidar-mini {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.lidar-mini-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.lidar-mini-ng {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--bad);
+  background: #0009;
+  pointer-events: none;
+}
+
+/* 灯火・サイドブレーキ共通の操作トグル（DriveControls.tsx、タブ行）。 */
+.rc-ctl {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.rc-ctl .label {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.rc-ctl .seg {
+  margin-top: 0;
+}
+
+/*
+ * `.meter` は縦並び：ダイヤル（`flex:1`、伸縮する）＋ その下の数字（自然な高さ）。
+ * 行全体の高さ（`.rc-cam-gauges`）が変わればダイヤルがそのまま追従して
+ * 拡大縮小する（2026-08-17、指示によりウィンドウサイズ応答に変更）。
+ * `min-width: 0` は grid セル内で潰れないようにするため。
+ *
+ * サイズ計算は `.dial-wrap`（ただの div）が担う。`<svg>` は replaced element
+ * なので `flex`/`aspect-ratio` を直に乗せても intrinsic サイズに負けて縮んだ
+ * ままになる——`DrivePanel.tsx` の `.drivepanel-wrap`／`GMeter.tsx` の
+ * `.gmeter-wrap` と同じ「div に計算させ、中身は width/height:100% だけ」の型。
+ */
+.meter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  min-height: 0;
+}
+
+.dial-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: auto;
+  max-width: 100%;
+  /* viewBox 0 0 120 92 と同じ比率 */
+  aspect-ratio: 120 / 92;
+}
+
+.meter .arc {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.arc-bg {
+  fill: none;
+  stroke: var(--panel2);
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+/* 実測の塗り。**ほんの少しだけ発光させる**（GR 風の締まり — 出しすぎると眩しいので控えめに） */
+.arc-fill {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 7;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 3px rgba(213, 48, 63, .55));
+}
+
+.arc-tick {
+  stroke: #453036;
+  stroke-width: 1;
+}
+
+.arc-zero {
+  stroke: #59383e;
+  stroke-width: 1.5;
+}
+
+/* 指令値は針とは別の色（--live）。実測との差＝アクチュエータの遅れ */
+.arc-target {
+  stroke: var(--live);
+  stroke-width: 2;
+}
+
+/* MT のレッドライン（v0.18）。**常時描画**して「このギアの上限はここ」を速度に
+   関わらず先に見せる——実車のタコメータの赤ゾーンと同じ発想。本体の弧（r=46）
+   ではなく外側の r=52 に描くのは、`--brand`（弧の色）が既に赤系で、
+   同じ半径だと現在速度の塗り（`.arc-fill`）に埋もれて見えなくなるため */
+.arc-redline {
+  fill: none;
+  stroke: var(--warn);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+/* 実速度が帯に入ったら格上げ（`.lamp-warn.on`→`.lamp-bad.on` と同じ二段階） */
+.arc-redline.hot {
+  stroke: var(--bad);
+  filter: drop-shadow(0 0 4px rgba(242, 84, 75, .5));
+}
+
+/*
+ * 針は 8Hz でしか角度が変わらないので、間を CSS で埋めて滑らかに見せる。
+ * transform-box を指定しないと transform-origin が要素の bbox 基準になり、
+ * 針が明後日の方向へ飛ぶ。
+ */
+.needle {
+  transform-box: view-box;
+  transform-origin: 60px 58px;
+  transition: transform 125ms linear;
+}
+
+.needle line {
+  stroke: var(--fg);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.needle-hub {
+  fill: var(--fg);
+  stroke: var(--brand);
+  stroke-width: 1.5;
+}
+
+/* ギア/レンジ表示（v0.18）。240°スイープの下120°の空きに常時表示——速度制御・
+   トルク制御中は D/R、MT モード中は R/1〜5。`--brand`（弧の色）は使わない。
+   現在速度の表示と混同されないよう別の意味の色にしてある */
+.gear-chip {
+  fill: var(--panel2);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.gear-label {
+  fill: var(--fg);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* 後退だけ「後退」警告テキスト（.lv-warn）と同じ色にして、同じ意味だと分かるようにする */
+.gear-label.rev {
+  fill: var(--warn);
+}
+
+.meter-read {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: -6px;
+  cursor: pointer;
+}
+
+.meter-read b {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: .01em;
+  font-variant-numeric: tabular-nums;
+  font-style: italic;
+}
+
+.meter-read i {
+  font-style: normal;
+  color: var(--dim);
+  font-size: 11px;
+}
+
+/* 正常時は数値を出さない方針にしたため、今は「後退」警告表示だけがここを使う */
+.meter-sub {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--dim);
+  margin-top: 2px;
+}
+
+/* 速度計・舵角計と同じく、高さいっぱいに広がる正方形 */
+.gmeter-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+}
+
+.gmeter {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.rc-side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/*
+ * 駆動配分パネル — 車体を上から見た図（`DrivePanel.tsx`）。
+ * バーは ok/warn/bad の意味を持たない単色（量だけを示す）。
+ */
+/*
+ * svg は replaced element なので、flex の align-items: stretch だけでは
+ * 幅が親に追従しない。ただの div（.drivepanel-wrap）で幅を確定させてから
+ * 中の svg に width: 100% を効かせる。
+ */
+.drivepanel-wrap {
+  width: 100%;
+  /* `.rc` の映像:計器＝4:1（`styles/drive-view.css`）のもとでも計器パネルの列幅は
+   * この上限よりだいぶ広いことが多く、以前はここが実質の頭打ちになって
+   * 余白ばかり増えていた（映像パネル側は狭めない前提での対応） */
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* `height: 100%` にして親の縦幅いっぱいに描画領域を確保し、viewBox の既定
+ * `preserveAspectRatio="xMidYMid meet"` で縦横比を保ったまま中央に収める
+ * （contain）。`.auto-car .drivepanel-wrap` は `height:100%` を明示済みなので
+ * 影響なし。 */
+.drivepanel {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.dp-body {
+  fill: var(--panel2);
+  stroke: var(--brand);
+  stroke-opacity: .35;
+  stroke-width: 1.5;
+}
+
+/* タイヤの地色（ゴム）。中の塗り（`.dp-wheel-fill`）が無い前輪もこの色のまま */
+.dp-wheel {
+  fill: #171213;
+}
+
+/* 後輪のみ。車軸の高さ（`.dp-wheel-zero`）を境にトルクぶんだけ塗る単色ゲージ */
+.dp-wheel-fill {
+  fill: var(--brand);
+  filter: drop-shadow(0 0 2px rgba(213, 48, 63, .5));
+}
+
+.dp-wheel-zero {
+  fill: #4a3438;
+}
+
+/* 制動中だけ後輪の下に出る赤ライン。明るさ（opacity）は制動トルクに比例（`BrakeLine`） */
+.dp-brake-line {
+  stroke: var(--bad);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 2px var(--bad));
+}
+
+/* TC の動的トルク上限マーカー（`tc_limit_nm`）。`.arc-target`（指令速度マーカー）
+ * と同じ `--live` 系の色で、トルクゲージ本体（`--brand`）とは意図的に見分ける。
+ * 非介入時はバーの上端に張り付き、TC が効くとバーの途中まで下りてくる */
+.dp-tc-limit {
+  stroke: var(--live);
+  stroke-width: 1.5;
+}
+
+.dp-wheel-tread {
+  stroke: #2a2224;
+  stroke-width: 1;
+}
+
+/* ゲージ・トレッドの上から輪郭を引き直して縁を締める */
+.dp-wheel-outline {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+/*
+ * スリップゲージ（後輪はタイヤの外側半分、前輪はタイヤ全幅）。ok/warn/bad の
+ * 判定を持たない量なので `--dim`（「参考値」の意味、ファイル冒頭のコメント
+ * 参照）で塗る——電流ゲージの `--brand`（赤系）とは
+ * 意図的に違う色にして見分ける。
+ */
+.dp-slip-fill {
+  fill: var(--dim);
+}
+
+/* 後輪タイヤの車体側/外側の境目 */
+.dp-wheel-divider {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+/* バッテリーイラストの真上に置く S/P 1文字。背景チップは満充電時に塗りと
+ * 混ざって読みにくかったため廃止し、白文字だけにした */
+.dp-batt-letter {
+  fill: var(--fg);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+/* viewBox を横だけ詰めた（`DrivePanel.tsx`）分、単位あたりの実寸が上がって
+ * 文字だけ相対的に大きく見えるようになったため、他の要素より font-size を
+ * 少し絞ってある */
+.dp-label {
+  fill: var(--dim);
+  font-size: 8px;
+}
+
+.dp-value {
+  fill: var(--fg);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 駆動・信号系統の乾電池型ゲージ。塗りは lv-bg-* を流用（`battLevel` の色分けと共通） */
+.dp-batt-body {
+  fill: var(--panel2);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+.dp-batt-nub {
+  fill: var(--line);
+}
+
+/*
+ * 駆動バッテリー→後輪モータのフローライン。破線が流れて見える＝電流が流れて
+ * いることを示す（Tesla Energy Flow 風）。色は .dp-wheel-fill と同じ単色
+ * （安全判定を持たせない）。駆動/回生は向き（順再生/逆再生）だけで表す。
+ */
+.dp-flow-bg {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.dp-flow {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 3 6;
+  filter: drop-shadow(0 0 2px rgba(213, 48, 63, .5));
+  animation: dp-flow-move 1s linear infinite;
+  transition: opacity 200ms linear;
+}
+
+/* ほぼ無電流。常に動いていると「今流れていない」ことが伝わらないので、止めて薄く */
+.dp-flow--idle {
+  opacity: .15;
+  animation-play-state: paused;
+}
+
+@keyframes dp-flow-move {
+  to {
+    stroke-dashoffset: -9;
+  }
+}
+
+/*
+ * 障害物近接リング（`ProximityRing.tsx`）。色は JS 側で `--warn`/`--bad` 相当を
+ * 補間して1本ずつ `style.stroke` に入れるので、ここでは線の太さ・端の形だけ。
+ */
+.dp-proximity-seg {
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+/*
+ * 介入ランプ。**消えている間は主張しない**（枠だけ）。
+ * 点いたら発光させる — 一瞬でも視界の端で捉えられる必要がある。
+ */
+.lamps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.lamp {
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel2);
+  color: #3d4753;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  white-space: nowrap;
+  transition: color 90ms linear, background 90ms linear, box-shadow 90ms linear;
+}
+
+.lamp-warn.on {
+  color: var(--warn);
+  background: #3d3208;
+  border-color: #8a6d13;
+  box-shadow: 0 0 8px rgba(232, 171, 33, .35);
+}
+
+.lamp-bad.on {
+  color: #ff9b93;
+  background: #3a1512;
+  border-color: #7d2b23;
+  box-shadow: 0 0 8px rgba(242, 84, 75, .4);
+}
+
+.lamp-dim.on {
+  color: var(--dim);
+  border-color: #3b4550;
+}
+
+/*
+ * `background` は div のミニバー用、`fill` は SVG rect（駆動配分パネルの
+ * 乾電池ゲージ）用。同じ意味色を両方の文脈で使い回すため両方に指定している。
+ * `fill` は SVG 以外の要素には無視されるだけなので害はない。
+ */
+.lv-bg-dim {
+  background: #2f3a46;
+  fill: #2f3a46;
+}
+
+.lv-bg-ok {
+  background: var(--ok);
+  fill: var(--ok);
+}
+
+.lv-bg-warn {
+  background: var(--warn);
+  fill: var(--warn);
+}
+
+.lv-bg-bad {
+  background: var(--bad);
+  fill: var(--bad);
+}
+
+/*
+ * `lv-bg-dim` はゲージの「空の器」用でほぼ黒（#2f3a46）— 器の輪郭に囲まれて
+ * 初めて見える色なので、輪郭を持たない `WifiIcon` の消灯部分に使うと
+ * 背景に溶けて見えなくなる。こちらは `--dim`（#6a7683、`.dim` と同じ）を使う。
+ */
+.lv-bg-dim2 {
+  fill: var(--dim);
+}
+
+.lv-stroke-dim {
+  stroke: var(--dim);
+}
+
+.lv-stroke-ok {
+  stroke: var(--ok);
+}
+
+.lv-stroke-warn {
+  stroke: var(--warn);
+}
+
+.lv-stroke-bad {
+  stroke: var(--bad);
+}
+
+.wifi-icon {
+  flex: 0 0 auto;
+  vertical-align: middle;
+}
+

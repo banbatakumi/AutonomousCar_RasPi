@@ -64,7 +64,9 @@ export function RoutePanel({ ch, mode }: { ch: ControlChannel | null; mode: stri
 
   // 読ませた地図が届いたら編集を始める（`auto/state` で 10Hz に描き直されるので毎回見る）。
   // 届く前に始めると、前の地図の設定を写し取り、保存で「地図が替わった」と弾かれる。
-  // 待っている間に別の地図を下見し始めたらやめる
+  // 待っている間に別の地図を下見し始めたらやめる。
+  // 依存配列は**あえて付けない**（毎回の描き直しで見るのが目的。`waitMap` が空なら即抜ける）
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!waitMap) return
     if (mapPreview.data) setWaitMap('')

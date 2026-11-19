@@ -81,7 +81,7 @@ export type AutoParamSpec = {
 }
 
 /** 選べる自動運転モード1つ（`raspi/auto/registry.py` の `catalog()`）。 */
-export type AutoPlannerInfo = {
+type AutoPlannerInfo = {
   id: string
   name: string
   description: string
@@ -274,7 +274,7 @@ export type SignalConfigStatus = {
 }
 
 /** 接続中Wi-FiのSSID・電波強度。**サーバが真値**（`raspi/io/wifi.py`、1Hzで再取得）。 */
-export type WifiStatus = {
+type WifiStatus = {
   /** 接続中のSSID。未接続なら null */
   ssid: string | null
   /** 電波強度 [dBm]。取得できなければ null */
@@ -284,7 +284,7 @@ export type WifiStatus = {
 }
 
 /** Pi 本体の健全性（`raspi/io/pihealth.py` の `PiHealth`）。読めない項目は null */
-export type PiHealth = {
+type PiHealth = {
   /** この機体で読めるか（Mac のシム等では false） */
   available: boolean
   cpu_pct: number | null
@@ -300,7 +300,7 @@ export type PiHealth = {
 }
 
 /** ノードの生存申告（`hb/<node>`）。生死の判定は GUI がする（`format.ts` の `nodeLevel`） */
-export type NodeAlive = {
+type NodeAlive = {
   node: string
   /** 最後の申告からの経過 [ms]（status を作った時点） */
   age_ms: number
@@ -407,12 +407,6 @@ export type LogFile = {
   mtime: number
 }
 
-/** `/ws/control` のサーバ → GUI。`logs_list`/`logs_delete` への応答。 */
-export type LogsMsg = {
-  type: 'logs'
-  files: LogFile[]
-}
-
 /** `saved_maps/` にある保存済み地図の1件（`maps_list`の応答、`raspi/auto/mapstore.py`）。
  * `LogFile`と同じ形だが、地図固有のメタデータ（格子サイズ・経路長）を持つ */
 export type MapFile = {
@@ -428,12 +422,6 @@ export type MapFile = {
   length_m: number
   /** この地図の学習値（`<name>.grip.json`）があるか。無ければ「学習値を消す」は押せない */
   has_grip: boolean
-}
-
-/** `/ws/control` のサーバ → GUI。`maps_list`/`maps_save`/`maps_delete` への応答。 */
-export type MapsMsg = {
-  type: 'maps'
-  map_files: MapFile[]
 }
 
 /** GUI → サーバ の走行指令。SI 単位。 */

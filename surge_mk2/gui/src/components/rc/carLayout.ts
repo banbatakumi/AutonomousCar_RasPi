@@ -25,10 +25,10 @@ export const FOOT_MIN_Y = Math.min(...ys)
 export const FOOT_MAX_Y = Math.max(...ys)
 
 /** 実寸 [m] → svg 座標のスケール。横方向・縦方向で別スケール（車体矩形が正方形でないため） */
-export const SCALE_X = BODY_W / (FOOT_MAX_Y - FOOT_MIN_Y)
-export const SCALE_Y = BODY_H / (FOOT_MAX_X - FOOT_MIN_X)
-export const SVG_CX = BODY_X + BODY_W / 2
-export const SVG_CY = BODY_Y + FOOT_MAX_X * SCALE_Y
+const SCALE_X = BODY_W / (FOOT_MAX_Y - FOOT_MIN_Y)
+const SCALE_Y = BODY_H / (FOOT_MAX_X - FOOT_MIN_X)
+const SVG_CX = BODY_X + BODY_W / 2
+const SVG_CY = BODY_Y + FOOT_MAX_X * SCALE_Y
 
 /** 実寸 (x=前, y=左) [m] → svg 座標 */
 export function toSvg(xPhys: number, yPhys: number): [number, number] {

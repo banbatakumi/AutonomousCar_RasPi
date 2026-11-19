@@ -15,7 +15,9 @@
 import { useNumbers } from '../../bus/live'
 import { kmh, mps } from '../../format'
 import { virtualGear } from '../../bus/virtualGear'
-import { mtGearRatio, PI_MAX_SPEED_CAP, useUi } from '../../store/ui'
+import { mtGearRatio } from '../../store/gear'
+import { useUi } from '../../store/ui'
+import { PI_MAX_SPEED_CAP } from '../../store/settings'
 
 /**
  * 目盛りの円弧。**真上（0°）を直進側の基準に、-120°〜120°の240°**
@@ -115,7 +117,7 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
   return (
     <div className={`meter meter-speed ${n.stale ? 'stale' : ''}`}>
       {/*
-        映像下のメータ行は可変高さ（`RcView.tsx` の `useElementSize`）なので、
+        映像下のメータ行は可変高さ（`RcView.tsx` が `useContainFit` の実測から決める）なので、
         3つのメータは上端揃え（top-align）にしている。
 
         `dialHeight` は `RcView.tsx` がメータ行の実測高さから逆算して渡す px。
@@ -123,7 +125,7 @@ export function SpeedGauge({ dialHeight }: { dialHeight: number | null }) {
         replaced element なので、intrinsic サイズ（既定 300×150 相当）に負けて
         縮んだままになる挙動を実機で確認したため（`hooks/useContainFit.ts`
         冒頭のコメント）。`dialHeight` が来るまでは CSS 側のフォールバック
-        （`styles.css` の `.dial-wrap`）に任せる。
+        （`styles/rc-view.css` の `.dial-wrap`）に任せる。
       */}
       <div
         className="dial-wrap"

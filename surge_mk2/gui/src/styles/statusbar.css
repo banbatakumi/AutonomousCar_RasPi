@@ -1,0 +1,255 @@
+/* ── ステータスバー（層 B） ─────────────────────────────── */
+
+/*
+ * ダッシュの上辺。地はカーボン、下辺に赤の縁（ラジコン HUD の台形の上辺と同じ
+ * 「中央ほど濃い」線）。ピルは**警告灯（テルテール）**の見た目:
+ *   lv-ok   消灯に近い地に緑の小さな LED だけ（正常は光らせない）
+ *   lv-warn 琥珀に点灯   lv-bad 赤に点灯   dim 消灯（LED も暗い）
+ * 色に加えて LED の有無と地の明るさでも区別できる（色覚に頼らない）。
+ */
+.statusbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 7px;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, .04), rgba(0, 0, 0, .35)),
+    var(--carbon);
+  flex: 0 0 auto;
+  z-index: 5;
+}
+
+.statusbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #2b2224 0%, var(--brand) 30%, var(--brand) 70%, #2b2224 100%);
+  box-shadow: 0 0 10px #d5303f55;
+  pointer-events: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+  white-space: nowrap;
+  font-family: var(--font-num);
+  font-style: italic;
+}
+
+/* 2本の赤い斜線（レーシングストライプ） */
+.brand-mark {
+  width: 16px;
+  height: 16px;
+  background: linear-gradient(90deg, var(--brand) 0 5px, transparent 5px 9px, var(--brand) 9px 14px, transparent 14px);
+  transform: skewX(-20deg);
+  filter: drop-shadow(0 0 4px #d5303f88);
+}
+
+.brand-name {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  color: #fff;
+}
+
+.brand-mk {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  color: var(--brand);
+  align-self: flex-end;
+  margin-bottom: 2px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid #26262c;
+  border-radius: 3px;
+  background: linear-gradient(#141417, #0d0d0f);
+  box-shadow: inset 0 1px 2px #000a;
+  color: #c4c7cd;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+/* LED。消灯中も「そこにある」のが分かる暗い粒を見せる（実物の警告灯と同じ） */
+.pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #2c2c33;
+  flex: 0 0 auto;
+}
+
+.pill.dim {
+  color: var(--dim);
+}
+
+.pill.lv-ok {
+  color: #c4c7cd;
+}
+
+.pill.lv-ok::before {
+  background: var(--ok);
+  box-shadow: 0 0 5px var(--ok);
+}
+
+.pill.lv-warn {
+  color: #1a1305;
+  background: linear-gradient(#f2bb37, #c98f12);
+  border-color: #f5c95a;
+  box-shadow: 0 0 10px #e8ab2160;
+}
+
+.pill.lv-warn::before {
+  background: #fff3cf;
+}
+
+.pill.lv-bad {
+  color: #fff;
+  background: linear-gradient(#e2433b, #a81f19);
+  border-color: #ff7a72;
+  box-shadow: 0 0 12px #f2544b70;
+}
+
+.pill.lv-bad::before {
+  background: #ffe1df;
+}
+
+/* SIM — 相手が実 STM32 ではなくシミュレータのときだけ出る。
+   **他のどのピルとも似ていない見た目にする。** 実機と見分けがつかないまま
+   --allow-arm すると本物の車が動くので、ここは控えめにしてはいけない。
+   斜線は「この画面の数字は本物ではない」の記号として効く */
+.pill.sim {
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: #14181d;
+  border-color: #b98b1b;
+  background: repeating-linear-gradient(-45deg, #e0aa2a, #e0aa2a 6px, #c9971f 6px, #c9971f 12px);
+}
+
+.pill.sim::before {
+  display: none;
+}
+
+.metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.metric b {
+  font-weight: 600;
+}
+
+.metric i {
+  font-style: normal;
+  color: var(--dim);
+  font-size: 10px;
+}
+
+/*
+ * ARM — トグルスイッチ。保持中は琥珀に点灯して脈打つ（遠目にも「保持されている」と分かる）
+ */
+.armbtn {
+  min-width: 9.5em;
+  padding: 5px 12px;
+  font-family: var(--font-num);
+  font-weight: 700;
+  letter-spacing: .1em;
+  font-variant-numeric: tabular-nums;
+}
+
+.armbtn.on {
+  background: linear-gradient(#5a470c, #3a2d06);
+  border-color: #e0ac24;
+  color: var(--live);
+  text-shadow: 0 0 6px #ffc63f88;
+  animation: armpulse 1.2s ease-in-out infinite;
+}
+
+.armbtn.warn:not(.on) {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.armbtn:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}
+
+@keyframes armpulse {
+
+  0%,
+  100% {
+    box-shadow: inset 0 -2px 0 #ffc63f, 0 0 0 0 rgba(255, 198, 63, .45);
+  }
+
+  50% {
+    box-shadow: inset 0 -2px 0 #ffc63f, 0 0 0 5px rgba(255, 198, 63, 0);
+  }
+}
+
+/* E-STOP — 赤い大きな押しボタン。**どのタブでも同じ場所・同じ見た目** */
+.estop {
+  padding: 5px 16px;
+  background: linear-gradient(#d23a32, #8e1913);
+  border: 1px solid #ff6a62;
+  color: #fff;
+  font-family: var(--font-num);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: .12em;
+  text-shadow: 0 1px 0 #0006;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25), 0 0 0 2px #2a0c0a, 0 0 12px #f2544b55;
+}
+
+.estop:hover {
+  background: linear-gradient(#e2433b, #a01d16);
+  border-color: #ff8f88;
+}
+
+/* シャットダウンは押し間違えたくないので沈ませる */
+.statusbar .shutdown-btn {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+/* ラッチ系は health より目立たせる。人間が物理操作しないと戻らないため */
+.latch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(#4a1714, #33100e);
+  border-bottom: 1px solid #a3322a;
+  color: #ffd6d2;
+  padding: 6px 14px;
+  font-weight: 700;
+}
+
+.latch::before {
+  content: '!';
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background: var(--bad);
+  color: #fff;
+  font-size: 11px;
+  padding-top: 4px;
+}
+

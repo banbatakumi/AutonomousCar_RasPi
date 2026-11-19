@@ -1,0 +1,131 @@
+/* ── 速度・舵角の帯（上段のすぐ下、細い HUD ライン） ─────────────────
+ *
+ * 2026-08-28: 太い計器パネルから「上のカメラ帯にぴったり収まる細い1本の
+ * バー」へ全面改訂（指示による）。超音波・走行距離は削除済み
+ * （`DriveBar.tsx` 冒頭のコメント）ので、速度・舵角の2つだけを横並びにする。
+ */
+
+.drivebar {
+  grid-area: bar;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
+  padding: 5px 16px;
+  box-shadow: var(--bezel);
+}
+
+/* 受信が途絶したら数字をグレーにする。**古い値を現在値に見せない** */
+.drivebar.stale {
+  opacity: .45;
+}
+
+.gauge {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+}
+
+.gauge-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: nowrap;
+  flex: 0 0 auto;
+}
+
+.gauge .label {
+  color: var(--dim);
+  font-size: 10px;
+}
+
+.gauge .big {
+  font-family: var(--font-num);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge .unit {
+  color: var(--dim);
+  font-size: 10px;
+}
+
+.gauge .sub {
+  color: var(--dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* 停止判定のただし書き。**細い帯の高さは普段どおり**、出たときだけ改行して
+ * 2行目に収める（`flex-wrap` の折返し先。`width:100%` で強制改行する） */
+.gauge .note {
+  width: 100%;
+  color: var(--dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* バーは帯の残りいっぱいに伸ばす。**細くグロウさせて「HUD の線」に見せる**
+ * （指示の「細くかっこいい感じ」への回答） */
+.bibar {
+  position: relative;
+  flex: 1;
+  min-width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  overflow: visible;
+}
+
+.bibar-zero {
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: #3b4550;
+}
+
+.bibar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  background: var(--trace);
+  box-shadow: 0 0 6px 0 color-mix(in srgb, var(--trace) 70%, transparent);
+}
+
+/* 指令値は線で重ねる。実測との差＝アクチュエータの遅れ */
+.bibar-target {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--live);
+  box-shadow: 0 0 5px 0 color-mix(in srgb, var(--live) 80%, transparent);
+}
+
+.kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.kv span {
+  color: var(--dim);
+  min-width: 5.5em;
+}
+
+.kv b {
+  font-weight: 600;
+  min-width: 4.5em;
+}
+

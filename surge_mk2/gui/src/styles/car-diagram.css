@@ -1,0 +1,82 @@
+/* ── 車体図（`AutoPanel` の右隣、右下）────────────────────────────
+ *
+ * `components/rc/DrivePanel.tsx` をラジコンビューと共用。
+ * スリップ・トルク・電圧・障害物近接リングを一望できる図で、自律走行の監視にも
+ * そのまま使える。
+ *
+ * 2026-08-28: 幅基準（`max-width`）で縮めていたところ、パネルの実際の
+ * 高さに対してかなり小さくなり余白が目立つ指摘を受けた。**高さ基準に変更**
+ * ——`.drivepanel-wrap` を `height:100%` にして `aspect-ratio`（viewBox と
+ * 同じ比）で幅を逆算させれば、**パネルの高さいっぱいまで**車体図が拡大される。
+ *
+ * 2026-08-29: `.auto-car` はグリッドの1列（幅1/3）を丸ごと専有していたが、
+ * 上の高さ基準の仕組みだと車体図（縦長）はその幅までは伸びず、左右に
+ * 大きな余白が残っていた（指摘による）。`.auto-bottom`（flex 横並び）の子に
+ * 変えたことで `flex:0 1 auto` の既定どおり**自分の内在幅（=高さ×縦横比）
+ * だけ**を取るようになり、余白は消えて余った幅が `.autopanel` 側に渡る。
+ */
+.auto-car {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--glass);
+  border: 1px solid #222227;
+  border-radius: 6px;
+  padding: 8px;
+  box-shadow: var(--bezel);
+}
+
+.auto-car .drivepanel-wrap {
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  /* viewBox（`DrivePanel.tsx`）と同じ比。viewBox を変えたらここも合わせる */
+  aspect-ratio: 146 / 246.52;
+  margin: 0 auto;
+}
+
+/* 3段の灯火モード。**今どれなのかが一目で分かること**だけを狙う。
+ * 見た目はダッシュの切替スイッチ: 凹んだ溝に板が並び、選んだ板だけが点灯する */
+.seg {
+  display: inline-flex;
+  margin-top: 3px;
+  padding: 2px;
+  gap: 2px;
+  background: #0a0a0c;
+  border: 1px solid #222227;
+  border-radius: 5px;
+  box-shadow: inset 0 1px 3px #000c;
+}
+
+.seg button {
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--dim);
+  padding: 3px 10px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.seg button:hover {
+  color: var(--fg);
+  border-color: transparent;
+}
+
+.seg button.on {
+  background: linear-gradient(#2c1b1e, #1e1315);
+  color: #fff;
+  border-color: #5a1e25;
+  box-shadow: inset 0 -2px 0 var(--brand), 0 0 8px #d5303f33;
+}
+
+.seg button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+

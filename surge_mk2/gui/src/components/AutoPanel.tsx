@@ -55,7 +55,7 @@
  * パネル全体に `max-height` を付け、車体図（`AutoView.tsx` の `.auto-car`）と
  * 同じ行の高さをここで決める——`.auto-car` はこの高さいっぱいまで車体図を
  * 拡大する作りなので、ここの高さが車体図の実際の大きさを決めている
- * （`styles.css` の `.auto-car .drivepanel-wrap` 参照）。パラメータを開いて
+ * （`styles/car-diagram.css` の `.auto-car .drivepanel-wrap` 参照）。パラメータを開いて
  * 縦に伸びても、上段カメラ帯の高さやこの行全体を押し広げず**パネル内だけで
  * スクロール**する。
  *
@@ -71,7 +71,9 @@ import { useEffect, useState } from 'react'
 import { live, useNumbers } from '../bus/live'
 import { clearPreview, selectPreviewMap } from '../bus/mapPreview'
 import { RAD2DEG, mps } from '../format'
-import { capAutoParams, useUi } from '../store/ui'
+import { capAutoParams } from '../store/settings'
+import { useUi } from '../store/ui'
+import { useShallow } from 'zustand/react/shallow'
 import type { ControlChannel } from '../ws/control'
 import { askConfirm } from './ConfirmDialog'
 import { MapLibrary } from './MapLibrary'
@@ -83,7 +85,15 @@ import { RoutePanel } from './RoutePanel'
 const AUTO_STALE_MS = 600
 
 export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
-  const ui = useUi()
+  const ui = useUi(
+    useShallow((s) => ({
+      armRequested: s.armRequested,
+      auto: s.auto,
+      autoOffReason: s.autoOffReason,
+      set: s.set,
+      settings: s.settings,
+    })),
+  )
   const auto = ui.auto
   const n = useNumbers()
 
@@ -476,7 +486,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
       {/* ── パラメータ ──
           常時表示（開閉の手間なく見える方が走行中の微調整に向く）。
           `max_speed`/`v_max`/`a_accel`/`a_brake`系のスライダ上限を
-          STM32の`LIMITS`実測値に同期する（`capAutoParams`、`store/ui.ts`）。
+          STM32の`LIMITS`実測値に同期する（`capAutoParams`、`store/settings.ts`）。
           ラジコンタブの`effectiveRange`と同じ理由・同じ方針 */}
       {selected && (
         <section className="auto-params">

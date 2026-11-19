@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -15,6 +16,11 @@ export default defineConfig({
   // telemetry_node がどのパスから配っても動くように相対パスで吐く
   base: './',
   build: { outDir: 'dist', emptyOutDir: true },
+  // 単体テスト（`npm test`）。ストアが localStorage・window を触るので DOM を模した環境で回す
+  test: {
+    environment: 'happy-dom',
+    include: ['src/**/*.test.ts'],
+  },
   server: {
     proxy: {
       '/ws': { target: `ws://${host}:${port}`, ws: true, changeOrigin: true },

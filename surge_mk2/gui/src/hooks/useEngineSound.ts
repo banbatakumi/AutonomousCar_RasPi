@@ -32,6 +32,7 @@ import { EngineSound } from '../audio/engineSound'
 import { live } from '../bus/live'
 import { virtualGear } from '../bus/virtualGear'
 import { useUi } from '../store/ui'
+import { rafLoop } from './useRaf'
 
 export function useEngineSound() {
   const engineRef = useRef<EngineSound | null>(null)
@@ -53,11 +54,8 @@ export function useEngineSound() {
     }
     // トグル ON のクリックというユーザー操作のすぐ後で呼ぶ（自動再生制限を通すため）
     engine.start(type)
-
-    let raf = 0
     let prevShift: number | null = null
     const tick = () => {
-      raf = requestAnimationFrame(tick)
       const ui = useUi.getState()
       const s = ui.settings
       const vs = live.vs
@@ -80,7 +78,7 @@ export function useEngineSound() {
       if (isCombustion && prevShift != null && prevShift !== vg.shiftCount) engine.shiftBlip()
       prevShift = vg.shiftCount
     }
-    raf = requestAnimationFrame(tick)
+    const stopRaf = rafLoop(tick)
     // タブが背後に回ると rAF が止まり、最後の周波数のまま鳴り続ける。非表示の間は止める
     // （表示に戻れば `update()` が `resume()` する）
     const onVisibility = () => {
@@ -88,11 +86,12 @@ export function useEngineSound() {
     }
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
-      cancelAnimationFrame(raf)
+      stopRaf()
       document.removeEventListener('visibilitychange', onVisibility)
     }
     // `type` は初回 start() のみに使う（以後の変更は上の effect が `setType()` で担う）ので、
     // 依存配列にはあえて含めない——含めると音色を変えるたびに rAF ループを作り直してしまう
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine, on])
 
   // アンマウント時（タブごと閉じる等）は確実に止める

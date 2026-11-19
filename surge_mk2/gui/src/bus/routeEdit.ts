@@ -31,7 +31,7 @@ export const STOPS = ['P1', 'P2', 'P3'] as const
 /** 編集対象「避ける点」のキー */
 export const AVOID = 'avoid'
 
-export type Stop = { x: number; y: number; yaw: number | null; mode: 'stop' | 'park' }
+type Stop = { x: number; y: number; yaw: number | null; mode: 'stop' | 'park' }
 export type RouteCfg = {
   groups: Record<string, number[][]>
   active: string

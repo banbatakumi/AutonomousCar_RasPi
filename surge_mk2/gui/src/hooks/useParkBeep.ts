@@ -9,7 +9,8 @@
 import { useEffect } from 'react'
 import { live } from '../bus/live'
 import { beepPeriodMs, relevantDistance, sectorClearance } from '../bus/parkSensor'
-import { reverseSelected, useUi } from '../store/ui'
+import { reverseSelected } from '../store/gear'
+import { useUi } from '../store/ui'
 
 const TONE_HZ = 1900
 const BEEP_MS = 70

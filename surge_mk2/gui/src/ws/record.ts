@@ -10,7 +10,8 @@
  * 中継そのものが終わるまで待ってからダウンロードを発火させたい
  * （`close()` を自分で呼んだとき＝アンマウント等では呼ばない）。
  */
-import { guardSocket, type SocketGuard } from './guard'
+import type { SocketGuard } from './guard'
+import { openGuardedSocket } from './socket'
 import { wsUrl } from './url'
 
 export class RecordChannel {
@@ -22,8 +23,15 @@ export class RecordChannel {
     private onChunk: (data: ArrayBuffer) => void,
     private onClose?: () => void,
   ) {
-    const ws = new WebSocket(wsUrl('/ws/record'))
-    ws.binaryType = 'arraybuffer'
+    // 開くまでの時間切れ（`guard.ts`）。握手の返らない接続を残すと、Safari では他の WS の張り直しまで止まる。
+    // 見切ったら Pi が閉じたのと同じ扱い（呼び出し側は中継の終わりとして片付ける）
+    const { ws, guard } = openGuardedSocket(wsUrl('/ws/record'), {
+      binaryType: 'arraybuffer',
+      onDead: () => {
+        if (!this.closingByUs) this.onClose?.()
+      },
+    })
+    this.guard = guard
     ws.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) this.onChunk(ev.data)
     }
@@ -32,11 +40,6 @@ export class RecordChannel {
       if (!this.closingByUs) this.onClose?.()
     }
     this.ws = ws
-    // 開くまでの時間切れ（`guard.ts`）。握手の返らない接続を残すと、Safari では他の WS の張り直しまで止まる。
-    // 見切ったら Pi が閉じたのと同じ扱い（呼び出し側は中継の終わりとして片付ける）
-    this.guard = guardSocket(ws, () => {
-      if (!this.closingByUs) this.onClose?.()
-    })
   }
 
   close() {

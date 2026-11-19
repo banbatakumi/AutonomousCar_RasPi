@@ -22,9 +22,18 @@
  */
 import { useNumbers } from '../bus/live'
 import { LIGHT_CYCLE, LIGHT_LABEL, useUi } from '../store/ui'
+import { useShallow } from 'zustand/react/shallow'
 
 export function DriveControls({ hideLight = false }: { hideLight?: boolean }) {
-  const ui = useUi()
+  const ui = useUi(
+    useShallow((s) => ({
+      gear: s.gear,
+      lightMode: s.lightMode,
+      mtGear: s.mtGear,
+      set: s.set,
+      sideBrakeRequested: s.sideBrakeRequested,
+    })),
+  )
   const vs = useNumbers().vs
 
   return (

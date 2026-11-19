@@ -1,0 +1,27 @@
+/* ── `slam2d_raceline`専用: 「地図を作成」/「レーシングライン走行」の
+   2ボタンと保存済み地図の選択（`AutoPanel.tsx`、`ftg_cam`等と同じ
+   「id直書きの例外」）。単一engageボタンの代わりに出る */
+.slam-race-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.slam-race-buttons select {
+  flex: 1;
+  min-width: 120px;
+  max-width: 220px;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+/* `DONE`段（地図と経路ができて保存済み・待機中）でも自律走行を止められる
+ * 逃げ道。2ボタン（`.slam-race-buttons`）の主役を邪魔しないよう控えめに */
+.engage-cancel {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  padding: 2px 8px;
+}
+

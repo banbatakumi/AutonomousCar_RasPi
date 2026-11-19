@@ -21,7 +21,9 @@
  * 描画から同じフレームに呼ばれても、片方だけ余分に進むことはない。
  */
 import { live } from './live'
-import { mtGearRatio, PI_MAX_SPEED_CAP, useUi } from '../store/ui'
+import { mtGearRatio } from '../store/gear'
+import { useUi } from '../store/ui'
+import { PI_MAX_SPEED_CAP } from '../store/settings'
 
 /** 仮想 AT の各速の上限（車の最大速度に対する比）。上の段ほど間隔を詰める（実車の AT と同じ傾向） */
 const AT_RATIOS = [0.18, 0.31, 0.45, 0.6, 0.78, 1.0]

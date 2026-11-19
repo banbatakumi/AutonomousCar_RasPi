@@ -27,10 +27,10 @@ export interface Lens {
 }
 
 /** 光軸方向の距離がこれ未満は「真下・背後」として捨てる（`ipm.py` の `_MIN_ZC` と同じ） */
-export const MIN_ZC = 0.15
+const MIN_ZC = 0.15
 
 /** 上下を切った画像の高さ `h` → `[クロップ前の高さ, 上端で切った行数]`（`camera_model.crop_frame()` と同じ） */
-export function cropFrame(h: number, bottomCrop: number, topCrop: number): [number, number] {
+function cropFrame(h: number, bottomCrop: number, topCrop: number): [number, number] {
   const keep = 1 - bottomCrop - topCrop
   const fullH = keep > 0 ? h / keep : h
   return [fullH, fullH * topCrop]

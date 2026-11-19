@@ -83,3 +83,14 @@ export const SAFETY = {
   cmdAccelLimit: 4.0, // m/s²
   cmdSteerRateLimit: 7.0, // rad/s
 } as const
+
+/** STM32 の `LIMITS` が届くまでの上限（届いたらそちらを使う）。正は `raspi/msgs/convert.py`。
+ * 超えた値を送っても STM32 が黙って丸めるので、GUI のスライダの上限もここから引く */
+export const DRIVE_FALLBACK = {
+  /** 後輪1輪あたりの制動トルクの上限 [N·m]（STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM`） */
+  maxBrakeTorqueNm: 0.15,
+  /** 駆動トルク直接指令の上限 [N·m]（STM32 の `DRIVE_MAX_TORQUE_NM`） */
+  maxTargetTorqueNm: 0.15,
+  /** 最高速度の仮値 [m/s]（io_node の `--max-speed`。`install_services.sh`） */
+  maxSpeedMS: 3.0,
+} as const

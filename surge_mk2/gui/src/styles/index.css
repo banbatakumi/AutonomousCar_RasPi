@@ -1,0 +1,26 @@
+/*
+ * GUI のスタイルの入口。もとは 3789 行の styles.css 1枚だったのを、機能ごとのファイルに分けた
+ * （技術的負債の棚卸し 2026-11-18 低。中身は1行も変えていない）。
+ *
+ * ⚠ **並び順に意味がある。** 後のファイルほど優先される（同じ詳細度のセレクタは後勝ち）ので、
+ * 元の1枚の中での順番のまま並べてある。足すときも順番を崩さないこと。Vite がこの @import を
+ * 1枚にまとめるので、出力は分ける前と同じ。
+ */
+@import './base.css'; /* 色・フォント・リセット・共通部品 */
+@import './statusbar.css'; /* ステータスバー（層 B） */
+@import './tabs.css'; /* タブ */
+@import './log-controls.css'; /* 記録ボタン（LogControls.tsx） */
+@import './drive-view.css'; /* 運転ビュー */
+@import './hud.css'; /* 速度・舵角の帯 */
+@import './auto-panel.css'; /* 自動運転パネル */
+@import './car-diagram.css'; /* 車体図 */
+@import './rc-view.css'; /* ラジコンビュー */
+@import './settings-drawer.css'; /* 設定ドロワー */
+@import './diag.css'; /* 診断タブ */
+@import './settings-panel.css'; /* 設定パネル */
+@import './sysid.css'; /* システム同定 */
+@import './logs.css'; /* 記録ファイル一覧 */
+@import './auto-map.css'; /* 自動運転ビューの地図パネル */
+@import './slam-race.css'; /* slam2d_raceline の操作 */
+@import './map-library.css'; /* 保存済み地図の管理 */
+@import './route-panel.css'; /* 経路パネル */

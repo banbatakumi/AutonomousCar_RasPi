@@ -62,10 +62,11 @@ import { expectedCamAspect } from '../render/cameraLayout'
 import { DepthView } from '../render/DepthView'
 import { LidarView } from '../render/LidarView'
 import { useUi } from '../store/ui'
+import { useShallow } from 'zustand/react/shallow'
 import type { ControlChannel } from '../ws/control'
 
 export function AutoView({ ch }: { ch: ControlChannel | null }) {
-  const ui = useUi()
+  const ui = useUi(useShallow((s) => ({ auto: s.auto, lidarZoom: s.lidarZoom, pathGuide: s.pathGuide, set: s.set })))
   // 上段の4枠の縦横比。右（主）カメラの実際の画像から決める（左右は同じクロップ・同じ大きさ）
   const [camAspect, setCamAspect] = useState(() => expectedCamAspect('front'))
   // 対象追従はドラッグでROIを選ぶので奪わない

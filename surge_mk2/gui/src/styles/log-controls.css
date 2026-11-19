@@ -1,0 +1,85 @@
+/* ── 記録ボタン（`LogControls.tsx`、タブバー常設。旧ログタブ廃止 2026-09-03） ── */
+
+.log-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.recbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+}
+
+.rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+
+.recbtn.recording {
+  background: #4a1410;
+  border-color: var(--bad);
+  color: #ffb4ae;
+}
+
+.recbtn.snapbtn.busy {
+  opacity: 0.5;
+}
+
+.recbtn.active {
+  border-color: var(--brand);
+}
+
+.recbtn.recording .rec-dot {
+  background: var(--bad);
+  animation: recpulse 1s ease-in-out infinite;
+}
+
+@keyframes recpulse {
+
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(242, 84, 75, .55);
+  }
+
+  50% {
+    opacity: .35;
+    box-shadow: 0 0 0 5px rgba(242, 84, 75, 0);
+  }
+}
+
+.badge-live {
+  background: #4a3a08;
+  border: 1px solid #8a6d13;
+  color: var(--live);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-weight: 600;
+}
+
+.badge-warn {
+  background: #3d3208;
+  border: 1px solid #6b5210;
+  color: var(--warn);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  margin-left: 5px;
+}
+
+.badge-bad {
+  background: #3a1512;
+  border: 1px solid #7d2b23;
+  color: #ff9b93;
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10px;
+  margin-left: 5px;
+}
+

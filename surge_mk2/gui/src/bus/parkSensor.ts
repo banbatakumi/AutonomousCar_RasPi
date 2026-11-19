@@ -16,9 +16,9 @@ import { VEHICLE } from '../generated/vehicle'
 import type { Scan, VehicleState } from '../types'
 
 /** 方向の数。0 が真正面、反時計回り（左回り）に増える */
-export const SECTORS = 16
+const SECTORS = 16
 /** 段のしきい値 [m]（車体の外形から）。遠い順。距離がこれを下回るたびに1段近くなる（4段） */
-export const PARK_STEPS_M = [0.4, 0.3, 0.2, 0.1] as const
+const PARK_STEPS_M = [0.4, 0.3, 0.2, 0.1] as const
 /** これより近ければ連続音 [m]（一番近い段と同じ） */
 const CONT_M = PARK_STEPS_M[3]
 /** 断続音が鳴り始める距離 [m] と、そこでの間隔・連続音の直前の間隔 [ms] */
@@ -26,7 +26,7 @@ const BEEP_START_M = PARK_STEPS_M[0]
 const BEEP_SLOW_MS = 700
 const BEEP_FAST_MS = 120
 /** これより速く走っている間は表示も音も出さない [m/s]（コースの壁で出っぱなしにしない。駐車の速さだけ） */
-export const PARK_MAX_SPEED_MS = 1.0
+const PARK_MAX_SPEED_MS = 1.0
 /** 見る範囲 [m]。一番遠い段より少し先まで */
 const MAX_RANGE_M = 1.2
 
@@ -37,16 +37,9 @@ const X1 = Math.max(...XS)
 const Y0 = Math.min(...YS)
 const Y1 = Math.max(...YS)
 /** 車体の中心（base_link）。方向はここから見た角度 */
-export const BODY_CENTER_X = (X0 + X1) / 2
+const BODY_CENTER_X = (X0 + X1) / 2
 /** 車体の大きさ [m]（表示の縮尺に使う） */
-export const BODY_LEN_M = X1 - X0
-export const BODY_WIDTH_M = Y1 - Y0
-
-/** 段（0=何も無い、1=遠い〜4=一番近い） */
-export function stepOf(d: number | null | undefined): number {
-  if (d == null || !isFinite(d)) return 0
-  return PARK_STEPS_M.filter((t) => d < t).length
-}
+const BODY_LEN_M = X1 - X0
 
 /** 方向ごとの、車体の外形から一番近い物までの距離 [m]（無ければ Infinity）。長さ `SECTORS` */
 export function sectorClearance(scan: Scan | null, vs: VehicleState | null): number[] {
