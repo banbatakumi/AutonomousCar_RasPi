@@ -48,13 +48,14 @@ from ..nav.mpc import MPCConfig, MPCFollower, steer_rate_for
 from ..nav.purepursuit import PursuitConfig, follow, nearest_index
 from ..nav import speedctl
 from ..nav.understeer import UndersteerLearner
-from ..nav.signals import SignalLights
 from ..proto.generated.packets import FLG_FAULT_DRIVE_UNDERVOLTAGE, MDS_COMM_OK
 from . import mapstore
 from ._slam2d_nav import WALL_HIT_WEIGHT, Slam2dNav, occgrid_from_trinary
 from .base import CMD_HZ, ParamSpec, Planner
 from .follow_the_gap import FollowTheGap
 from .park_to_point import ParkToPoint
+from .raceline_parts import (Alias, AvoidState, DetourState, FollowState, GripState, LapCounter, LineState,
+                             LocateState, MapPublish, MapState, ObstacleState, RouteCache, SafetyState)
 
 __all__ = ["Slam2dRaceLine"]
 
@@ -474,7 +475,7 @@ def limits(p: dict[str, float], vehicle, learned: tuple[float, float, float] | N
 def fixed_defaults(vehicle) -> tuple[float, float, float]:
     """学習しないときの `(横, 加速, 減速)` の既定 [m/s²] = 同定値 × `FIXED_*_USE`（GUI の項目の既定値）。"""
     return (FIXED_LAT_USE * vehicle.a_lat_max,
-            FIXED_ACCEL_USE * vehicle.a_accel_max(0.0),
+            FIXED_ACCEL_USE * vehicle.a_accel_max,
             FIXED_BRAKE_USE * vehicle.a_decel_max)
 
 
@@ -989,7 +990,193 @@ class Slam2dRaceLine(Planner):
     #: 保存済み地図を読んだとき、中心線からラインを引き直すか（`slam2d_route` は自前で作る）
     _reline_on_load = True
 
+    # ── 状態の部品（`raceline_parts.py`）──
+    #
+    # 状態は責務ごとの部品に分けて持つ（属性の定義と初期値は部品の宣言にある）。分ける前の属性名は
+    # テスト・`sim.bench`・`slam2d_route` が使っているので、`Alias` で部品へつないで残す
+
+    # 周回数（`LapCounter`）
+    laps = Alias("_lapc", "laps")
+    _lap_idx = Alias("_lapc", "lap_idx")
+    _lap_hits = Alias("_lapc", "lap_hits")
+    _overrun = Alias("_lapc", "overrun")
+    _prev_idx = Alias("_lapc", "prev_idx")
+    _lap_s = Alias("_lapc", "lap_s")
+    _lap_gate = Alias("_lapc", "lap_gate")
+    _lap_gate_ref = Alias("_lapc", "lap_gate_ref")
+    _lap_gate_idx = Alias("_lapc", "lap_gate_idx")
+    _lap_frac = Alias("_lapc", "lap_frac")
+
+    # 地図の作成・凍結・確定・保存・読み込み（`MapState`）
+    _build_step = Alias("_mapc", "build_step")
+    _build_error = Alias("_mapc", "build_error")
+    _freeze_requested = Alias("_mapc", "freeze_requested")
+    _freeze_iter = Alias("_mapc", "freeze_iter")
+    _build_job = Alias("_mapc", "build_job")
+    _loaded_centerline_xy = Alias("_mapc", "loaded_centerline_xy")
+    _load_error = Alias("_mapc", "load_error")
+    _load_failed = Alias("_mapc", "load_failed")
+    _saved_map_name = Alias("_mapc", "saved_map_name")
+    _active_map_name = Alias("_mapc", "active_map_name")
+    _save_error = Alias("_mapc", "save_error")
+
+    # 障害物を避ける一時経路・追い抜き（`AvoidState`）
+    _avoid = Alias("_avoidc", "avoid")
+    _avoid_path = Alias("_avoidc", "avoid_path")
+    _avoid_base = Alias("_avoidc", "avoid_base")
+    _avoid_ms = Alias("_avoidc", "avoid_ms")
+    _ot_prev = Alias("_avoidc", "ot_prev")
+    _ot_base = Alias("_avoidc", "ot_base")
+    _ot_scum = Alias("_avoidc", "ot_scum")
+    _ot_nrm = Alias("_avoidc", "ot_nrm")
+    _opp_trail = Alias("_avoidc", "opp_trail")
+    _ot_status = Alias("_avoidc", "ot_status")
+    _ot_lead = Alias("_avoidc", "ot_lead")
+    _acc = Alias("_avoidc", "acc")
+    _avoid_ms_hist = Alias("_avoidc", "avoid_ms_hist")
+    _ghosts = Alias("_avoidc", "ghosts")
+    _avoid_fail = Alias("_avoidc", "avoid_fail")
+    _avoid_why = Alias("_avoidc", "avoid_why")
+    _avoid_how = Alias("_avoidc", "avoid_how")
+    _avoid_room_path = Alias("_avoidc", "avoid_room_path")
+    _elastic_job = Alias("_avoidc", "elastic_job")
+    _elastic_base = Alias("_avoidc", "elastic_base")
+
+    # 周期ごとの追従・経路への合流（`FollowState`）
+    _hint = Alias("_followc", "hint")
+    _sff_t = Alias("_followc", "sff_t")
+    _tick_ctx = Alias("_followc", "tick_ctx")
+    _tick_raw = Alias("_followc", "tick_raw")
+    _tick_path = Alias("_followc", "tick_path")
+    _joined = Alias("_followc", "joined")
+    _join_tried = Alias("_followc", "join_tried")
+    _join_ok = Alias("_followc", "join_ok")
+    _off_t = Alias("_followc", "off_t")
+    _rejoins = Alias("_followc", "rejoins")
+    _launch_armed = Alias("_followc", "launch_armed")
+    _dt = Alias("_followc", "dt")
+
+    # 保存済み地図の上で自己位置を探す（`LocateState`）
+    _located_lost = Alias("_locc", "located_lost")
+    _localizer = Alias("_locc", "localizer")
+    _loc_cands = Alias("_locc", "loc_cands")
+    _loc_scored = Alias("_locc", "loc_scored")
+    _loc_scorer = Alias("_locc", "loc_scorer")
+    _loc_hint = Alias("_locc", "loc_hint")
+    _loc_hint_t = Alias("_locc", "loc_hint_t")
+    _loc_hint_stage = Alias("_locc", "loc_hint_stage")
+    _loc_move_n = Alias("_locc", "loc_move_n")
+    _locate_seed = Alias("_locc", "locate_seed")
+    _locate_pose = Alias("_locc", "locate_pose")
+    _locate_seed_r = Alias("_locc", "locate_seed_r")
+
+    # 障害物の検出・止まる/抜ける判断（`ObstacleState`）
+    _obs_free = Alias("_obsc", "obs_free")
+    _obs_near = Alias("_obsc", "obs_near")
+    _obs_wdist = Alias("_obsc", "obs_wdist")
+    _obs_free_key = Alias("_obsc", "obs_free_key")
+    _obs_pad = Alias("_obsc", "obs_pad")
+    _obs_pad_ref = Alias("_obsc", "obs_pad_ref")
+    _hit_now = Alias("_obsc", "hit_now")
+    _vel_tracker = Alias("_obsc", "vel_tracker")
+    _obs_t = Alias("_obsc", "obs_t")
+    _detour_side = Alias("_obsc", "detour_side")
+    _v_now = Alias("_obsc", "v_now")
+    _blocked_t = Alias("_obsc", "blocked_t")
+    _stuck_t = Alias("_obsc", "stuck_t")
+    _brake_hold = Alias("_obsc", "brake_hold")
+    _prev_obs = Alias("_obsc", "prev_obs")
+    _obs = Alias("_obsc", "obs")
+
+    # 経路から作って使い回す物（`RouteCache`）
+    _sight = Alias("_routec", "sight")
+    _sight_ref = Alias("_routec", "sight_ref")
+    _sight_seq = Alias("_routec", "sight_seq")
+    _sighted = Alias("_routec", "sighted")
+    _sighted_src = Alias("_routec", "sighted_src")
+    _sighted_key = Alias("_routec", "sighted_key")
+    _sight_msg = Alias("_routec", "sight_msg")
+    _tight_key = Alias("_routec", "tight_key")
+    _tight_ref = Alias("_routec", "tight_ref")
+    _tight_msg = Alias("_routec", "tight_msg")
+    _room = Alias("_routec", "room")
+    _room_key = Alias("_routec", "room_key")
+    _room_ref = Alias("_routec", "room_ref")
+    _body = Alias("_routec", "body")
+    _body_seq = Alias("_routec", "body_seq")
+    _speed_key = Alias("_routec", "speed_key")
+
+    # 安全系の見張りと灯火（`SafetyState`）
+    _coast_t = Alias("_safec", "coast_t")
+    _lost_still_t = Alias("_safec", "lost_still_t")
+    _speed_now = Alias("_safec", "speed_now")
+    _yaw_rate_now = Alias("_safec", "yaw_rate_now")
+    _still_steer_t = Alias("_safec", "still_steer_t")
+    _prev_steer = Alias("_safec", "prev_steer")
+    _signals = Alias("_safec", "signals")
+    _md_t = Alias("_safec", "md_t")
+    _batt_t = Alias("_safec", "batt_t")
+    _batt_stop = Alias("_safec", "batt_stop")
+
+    # Hybrid A* の迂回（`DetourState`）
+    _detour = Alias("_detourc", "detour")
+    _detour_error = Alias("_detourc", "detour_error")
+    _detour_tries = Alias("_detourc", "detour_tries")
+
+    # ラインの引き直し（`LineState`）
+    _line_job = Alias("_linec", "line_job")
+    _line_built = Alias("_linec", "line_built")
+    _line_next = Alias("_linec", "line_next")
+    _line_next_key = Alias("_linec", "line_next_key")
+
+    # GUI へ配る地図（`MapPublish`）
+    _map = Alias("_mappubc", "map")
+    _map_seq = Alias("_mappubc", "map_seq")
+    _map_frozen = Alias("_mappubc", "map_frozen")
+    _map_dirty = Alias("_mappubc", "map_dirty")
+    _map_ver = Alias("_mappubc", "map_ver")
+
+    # 学習を走行へつなぐ状態（`GripState`）
+    _us_saved = Alias("_gripc", "us_saved")
+    _grip_on = Alias("_gripc", "grip_on")
+    _grip_name = Alias("_gripc", "grip_name")
+    _grip_line = Alias("_gripc", "grip_line")
+    _grip_gate = Alias("_gripc", "grip_gate")
+    _grip_gate_t = Alias("_gripc", "grip_gate_t")
+    _grip_ax = Alias("_gripc", "grip_ax")
+    _grip_u = Alias("_gripc", "grip_u")
+    _grip_catch = Alias("_gripc", "grip_catch")
+    _grip_vp = Alias("_gripc", "grip_vp")
+    _grip_quiet_ns = Alias("_gripc", "grip_quiet_ns")
+    _grip_quiet_why = Alias("_gripc", "grip_quiet_why")
+    _grip_sat_ns = Alias("_gripc", "grip_sat_ns")
+    _grip_sat_cross = Alias("_gripc", "grip_sat_cross")
+    _grip_cache = Alias("_gripc", "grip_cache")
+    _grip_tight_arr = Alias("_gripc", "grip_tight_arr")
+    _grip_tight_ref = Alias("_gripc", "grip_tight_ref")
+    _grip_tight_key = Alias("_gripc", "grip_tight_key")
+    _grip_hold_cap = Alias("_gripc", "grip_hold_cap")
+    _grip_plain = Alias("_gripc", "grip_plain")
+    _grip_ver = Alias("_gripc", "grip_ver")
+    _grip_tok = Alias("_gripc", "grip_tok")
+    _grip_capped = Alias("_gripc", "grip_capped")
+    _grip_saved = Alias("_gripc", "grip_saved")
+    _grip_save_t = Alias("_gripc", "grip_save_t")
+
     def __init__(self) -> None:
+        #: 状態の部品（上の `Alias` の行き先）。`reset()` より先に作る
+        self._lapc = LapCounter()
+        self._mapc = MapState()
+        self._avoidc = AvoidState()
+        self._followc = FollowState()
+        self._locc = LocateState()
+        self._obsc = ObstacleState()
+        self._routec = RouteCache()
+        self._safec = SafetyState()
+        self._detourc = DetourState()
+        self._linec = LineState()
+        self._mappubc = MapPublish()
+        self._gripc = GripState()
         self._last_p: dict[str, float] | None = None
         #: 自動運転に入っているか（`planning_node` が毎周期 `set_engaged` で渡す）。
         #: **入っていない EXPLORE は人のラジコンでの地図作成**として扱う。
@@ -1030,234 +1217,43 @@ class Slam2dRaceLine(Planner):
 
     def reset(self) -> None:
         self.phase = EXPLORE
+        # 部品を宣言どおりの初期値へ戻す（ワーカーの計算は下の `_drop_job` で取り消す）
+        self._lapc.reset()
+        self._mapc.reset()
+        self._avoidc.reset()
+        self._followc.reset()
+        self._locc.reset()
+        self._obsc.reset()
+        self._routec.reset()
+        self._safec.reset()
+        self._detourc.reset()
+        self._linec.reset()
+        self._mappubc.reset()
         self.slam.reset()
         self.ftg.reset()
-        self.laps = 0
         self.centerline: cl_mod.Centerline | None = None
         self.path: rl_mod.RaceLine | None = None
-        self._lap_idx: list[int] = [0]
-        self._lap_hits = 0
-        #: 最後の周回を検出した後の走り足し中なら (その時の走行距離, ループ拘束の本数)
-        self._overrun: tuple[float, int] | None = None
-        self._build_step = 0
-        self._build_error = ""
-        self._freeze_requested = False
-        #: 地図の確定（`Slam2dNav.freeze_steps`）の途中ならそのジェネレータ
-        self._freeze_iter = None
-        self._hint = -1
         self._mpc.reset()
         self._sff.reset()
-        #: 速度指令を前回計算した時刻 [ns]（`VehicleState.t_capture`）
-        self._sff_t = 0
-        #: 点群の合間の追従（`tick`）に使う、直近の `plan()` の結果:
-        #: (追っている経路, 設定, 速度の上限, 追従の起点の添字)。`None` = 合間は更新しない
-        self._tick_ctx: tuple | None = None
-        self._tick_raw = math.inf
-        self._tick_path: rl_mod.RaceLine | None = None
-        #: 周回の数え上げ（`_count_lap`）。前の周期の最寄り点の添字と、前回数えてから経路に
-        #: 沿って進んだ距離 [m]
-        self._prev_idx = -1
-        self._lap_s = 0.0
-        #: 周回を数えるゲート（地図座標の点。`None` = 次に数えた経路の先頭の点にする）と、
-        #: それを経路の添字に直した値・直した経路（`_count_lap`）
-        self._lap_gate: tuple[float, float] | None = None
-        self._lap_gate_ref: np.ndarray | None = None
-        self._lap_gate_idx = 0
-        #: 前の周期にゲートから進んでいた割合 [0, 1)（-1 = まだ無い）
-        self._lap_frac = -1.0
-        #: 障害物の候補にしてよいセル（`obs_mod.free_mask`）と、それを作った (地図の版, 幅)
-        self._obs_free: np.ndarray | None = None
-        self._obs_near: np.ndarray | None = None
-        self._obs_wdist: np.ndarray | None = None
-        self._obs_free_key: tuple | None = None
-        #: 実際に使っている無視幅（`_obstacle_pad`）と、それを決めた経路
-        self._obs_pad = 0.0
-        self._obs_pad_ref: np.ndarray | None = None
-        #: 経路に乗ったか（乗るまでは `join_speed` に抑える、`_join_cap`）
-        self._joined = False
-        #: 経路へ合流する一時経路を今の乗りに行く間に作ったか（`_join_back`）・作れたか。作れたら `join_speed` で
-        #: 抑えず、周回と同じ速度の計画（横・前後の上限）で乗りに行く
-        self._join_tried = False
-        self._join_ok = False
-        #: 経路から外れて止まっている時間 [s] と、乗り直した回数（`_off_route`）
-        self._off_t = 0.0
-        self._rejoins = 0
-        #: 自己位置を信用できない状態が続いている時間 [s]（`_localization_ok`）
-        self._coast_t = 0.0
-        #: 自己位置を信用できないまま止まっている時間 [s]（`LOST_RELOCATE_S`で`LOCATE`へ戻る）
-        self._lost_still_t = 0.0
-        self._speed_now = 0.0
-        self._yaw_rate_now = 0.0
-        #: 停車中に舵を動かしている時間 [s]（手動の地図作成での据え切りの注意）と直前の舵角
-        self._still_steer_t = 0.0
-        self._prev_steer = 0.0
-        #: 灯火（パッシング→ウィンカー）。`_signal_step` が毎周期 `st` へ書く
-        self._signals = SignalLights()
-        self._hit_now = False             #: この周期、前方を塞ぐ障害物を見ているか（`_track`）
-        self._vel_tracker = obs_mod.VelocityTracker()   #: 障害物の速度を出す（動く物の予測に使う）
-        self._obs_t = 0.0
-        self._detour_side = 0             #: Hybrid A* の迂回先の向き（+1=左 -1=右 0=不明）
-        #: 障害物を避けている一時経路（`avoid.plan_offset`）と、その元にした経路
-        self._avoid: av_mod.AvoidPlan | None = None
-        self._avoid_path: rl_mod.RaceLine | None = None
-        self._avoid_base: rl_mod.RaceLine | None = None
-        self._avoid_ms = 0.0
-        #: 追い抜きの計画（`_overtake_step`）: 前の周期に選んだ候補と、その元の経路・弧長・状態・
-        #: 経路のままだと当たる相手・計算時間の記録
-        self._ot_prev: ot_mod.Cand | None = None
-        self._ot_base: np.ndarray | None = None
-        self._ot_scum: np.ndarray | None = None
-        self._ot_nrm: np.ndarray | None = None
-        #: これまでに見た動く相手の位置（map フレーム、新しい順に `_OPP_TRAIL_N` 個まで）
-        self._opp_trail: list[tuple[float, float]] = []
-        self._ot_status = ""
-        self._ot_lead: ot_mod.Track | None = None
-        #: 今走る線の上に居る動く相手と、そこまでの距離（車間を保つ上限、`_moving_ahead`）
-        self._acc: tuple[obs_mod.Obstacle, float] | None = None
-        self._avoid_ms_hist: list[float] = []
-        #: 動く相手の直近の観測 (観測の時刻, 障害物)（`_GHOST_S`）
-        self._ghosts: list[tuple[float, obs_mod.Obstacle]] = []
-        #: 横へ避ける経路を引けなかったときの (障害物と条件のキー, 車の添字, 経路)。`_plan_avoid` 参照
-        self._avoid_fail: tuple | None = None
-        #: 直近に横へ避ける経路を引けなかった理由（表示用）
-        self._avoid_why = ""
-        #: 今の避ける経路の作り方（"横ずらし" = 決まった形、"引き直し" = `avoid.plan_elastic`）
-        self._avoid_how = ""
-        #: 見通しの距離（`_sight_cap`）と、それを掛けた経路（`_with_sight`）のキャッシュ
-        self._sight: np.ndarray | None = None
-        self._sight_ref: np.ndarray | None = None
-        self._sight_seq = -1
-        self._sighted: rl_mod.RaceLine | None = None
-        self._sighted_src: rl_mod.RaceLine | None = None
-        self._sighted_key: tuple | None = None
-        self._sight_msg = ""
-        #: 今の避ける経路の元にした経路（見通しの上限をそこから取る）
-        self._avoid_room_path: rl_mod.RaceLine | None = None
-        #: 別プロセスで引き直している避ける経路（`avoid.plan_elastic`）と、その元の経路
+        # 別プロセスで引き直している避ける経路（`avoid.plan_elastic`）を取り消す
         self._drop_job("_elastic_job")
-        self._elastic_base: np.ndarray | None = None
-        self._v_now = 0.0                  #: 直近の車速（障害物の「近い」の範囲に使う）
-        #: 「曲がり切れない区間」の注記と、それを測った (経路, 曲率の上限)（`_tight_note`）
-        self._tight_key: tuple | None = None
-        self._tight_ref: np.ndarray | None = None
-        self._tight_msg = ""
-        #: 経路の各点から左右へずらせる量（`_avoid_room`）と、それを作った (経路, 地図の版, 合格線)
-        self._room: tuple | None = None
-        self._room_key: tuple | None = None
-        self._room_ref: np.ndarray | None = None
-        #: 壁と車体外形の余裕を測る距離場（地図の版ごとに作る、`_body_check`）
-        self._body: rl_mod._BodyCheck | None = None
-        self._body_seq = -1
-        #: LiDAR から車体の外形を出るまでの距離（`body_mask.body_ranges`）。障害物の判定で車体のすぐ脇の点を使わない
+        #: LiDAR から車体の外形を出るまでの距離（`body_mask.body_ranges`）。障害物の判定で車体のすぐ脇の点を使わない。
+        #: 部品にせず毎回ここで作る: `self.vehicle` は作った後に差し替えられることがある（`sim.bench --assume`）
         self._body_rng = body_ranges(self.vehicle.footprint, self.vehicle.lidar_x, self.vehicle.lidar_y)
-        #: 塞がれて止まっている時間・進めずに止まっている時間 [s]
-        self._blocked_t = 0.0
-        self._stuck_t = 0.0
-        #: 障害物で制動してから検出が途切れている時間 [s]（`None` = 制動していない）
-        self._brake_hold: float | None = None
-        #: 駆動 MD が片輪だけ無応答の状態が続いている時間 [s]（`_md_fault`）
-        self._md_t = 0.0
-        #: 駆動電池の電圧低下の警告が続いている時間 [s] と、それで止めたか（この走行の間は戻らない。`_low_batt`）
-        self._batt_t = 0.0
-        self._batt_stop = False
-        #: 止まってから経路の速度に届くまで（＝発進の間）True（`_launch_ok`）
-        self._launch_armed = False
-        #: Hybrid A* で抜けている（`DETOUR`）。同じ障害物で試した回数（失敗が続いたら止まって待つ）
-        self._detour: ParkToPoint | None = None
-        self._detour_error = ""
-        self._detour_tries = 0
-        self._dt = 0.0
-        #: 今の経路の速度プロファイルを作った設定（`_retime`）
-        self._speed_key: tuple | None = None
-        #: 地図の読み込み・ラインの形を決める設定（`LINE_KEYS`）の変更で引き直しているライン
-        #: （`_submit_line`）と、今のライン（引き直し中ならその計算）の設定。`None` = 引き直さない
+        # 地図の読み込み・ラインの形を決める設定（`LINE_KEYS`）の変更で引き直しているライン（`_submit_line`）を取り消す
         self._drop_job("_line_job")
-        self._line_built: tuple | None = None
-        #: 引き直しが済んで、乗り移れる場所を待っているライン（`_try_adopt_line`）
-        self._line_next: rl_mod.RaceLine | None = None
-        self._line_next_key: tuple | None = None
-        #: BUILD で引いているライン（`_build`）
+        # BUILD で引いているライン（`_build`）を取り消す
         self._drop_job("_build_job")
-        self._prev_obs: list[obs_mod.Obstacle] = []
-        self._obs: list[obs_mod.Obstacle] = []
-        self._map: AutoMap | None = None
+        # 地図の版は向こうの定数で決まる（`MapPublish.map_seq` の注記）
         self._map_seq = -_MAP_EVERY
-        self._map_frozen = False
-        self._map_dirty = True
-        #: `snapshot()` で `AutoMap` を詰め直した回数（`AutoMap.route_seq` に載せる。版は戻さない）
-        self._map_ver = getattr(self, "_map_ver", 0)
-        #: 保存済み地図から読み込んだ中心線（`self.centerline`はEXPLORE→BUILDで
-        #: 自前生成するものだけを持つので、読み込み経路はここに置く。
-        #: `snapshot()`が両方を出し分ける）
-        self._loaded_centerline_xy: np.ndarray | None = None
-        self._located_lost = 0                   #: `LOCATED`で見失った周期数
-        #: 進行中のグローバルローカリゼーション（`LOCATE`段でのみ非None）
-        self._localizer: GlobalLocalizer | None = None
-        #: 粗探索の上位候補のうち、まだ仕上げていないもの（`None` = 粗探索中）と仕上げた結果
-        self._loc_cands: list | None = None
-        self._loc_scored: list = []
-        self._loc_scorer: LocateScorer | None = None   #: 候補の採点器（地図ごとの前処理を持つ。LOCATEごとに作る）
-        #: 地図パネルのクリックによる絞り込みヒント（mapフレーム座標）
-        self._loc_hint: tuple[float, float] | None = None
-        self._loc_hint_t = 0.0                   #: `_loc_hint` を受けた時刻（`time.monotonic()`）
-        self._loc_hint_stage = 0                 #: `_LOC_HINT_RADII` の何段目か（失敗するたびに広げる）
-        self._loc_move_n = 0                     #: `LOCATE` 中に動いていた連続周期数
-        #: 地図作成直後に走り出すときの「直前の自己位置」（`request_load`参照）
-        self._locate_seed: tuple[float, float] | None = None
-        #: 自動運転を解いて地図を読み直したときの、解く直前の姿勢 `(x, y, yaw)`（`on_disengage`）。
-        #: `_locate` はまずこの姿勢の周りを 1 回だけ照合し、合えば全域を探さずに特定済みにする
-        self._locate_pose: tuple[float, float, float] | None = None
-        #: `on_disengage` の種の周りを探す半径 [m]。解いてから止まるまでに転がる分（None = 既定）
-        self._locate_seed_r: float | None = None
-        self._load_error = ""
-        #: 地図の読み込みに失敗した（`request_load`）。解くまで指令を出さない
-        self._load_failed = False
-        #: BUILD完了時に自動保存した地図の名前（`DONE`段の表示用）
-        self._saved_map_name = ""
-        #: いま走っている地図の名前（読み込んだ・作って保存した）。解除で地図を捨てないために持つ
-        self._active_map_name = ""
-        self._save_error = ""
+        # 学習の状態は、戻す前に今の値を地図の横へ保存する（`_grip_save` は戻す前の地図名・保存済みの鍵を読む）
         self._grip_save()
+        self._gripc.reset()
         self._grip.reset()
         self._us.reset()
-        self._us_saved = (0.0, 0.0)
-        self._grip_on = False
-        #: 読み込んだ地図の名前（学習した横グリップの保存先）
-        self._grip_name = ""
-        #: 今のラインを引いたときの学習値 `(横, 加速, 減速)`（`None` = 同定値で引いた、`_grip_line_stale`）
-        self._grip_line: tuple | None = None
-        #: 学習を止めている理由（空 = 学習してよい）と、それを決めた時刻 [ns]
-        self._grip_gate = "走行していない"
-        self._grip_gate_t = 0
-        #: 今の場所で計画している前後の加速度 [m/s²]（`_speed_cmd`）
-        self._grip_ax = 0.0
-        #: 同じく、計画の横の使い具合（横加速度 ÷ 横の限界。前後の包絡の学習が使う）
-        self._grip_u = 0.0
-        self._grip_catch = False            #: 追いつく途中か（`_speed_cmd`）
-        self._grip_vp: float | None = None  #: 同じく、プロファイルの速度 [m/s]
-        #: この時刻 [ns] までは学習しない（別の線へ乗り換えた直後。横へ数 cm 跳ぶぶんが前兆に見える）
-        self._grip_quiet_ns = 0
-        self._grip_quiet_why = ""                #: 上の理由（reason の「停止: …」に出す）
-        #: 「舵が上限」が最後に掛かっていた時刻 [ns]（0 = 「舵が上限の直後」も解けている）と、その間の横偏差の最大 [m]
-        self._grip_sat_ns = 0
-        self._grip_sat_cross = 0.0
-        #: 経路の各点の `(求める横加速度, 限界)`（`_grip_levels`）: [(経路の点, 鍵, 配列の組)]（直近の3本）
-        self._grip_cache: list[tuple] = []
-        #: 曲がり切れない区間の印（`_grip_tight`）
-        self._grip_tight_arr: np.ndarray | None = None
-        self._grip_tight_ref: np.ndarray | None = None
-        self._grip_tight_key: tuple | None = None
-        #: 上げた速度を車の先にだけ反映するための上限（`_grip_hold`）:
-        #: (経路の点, 点ごとの上限, 窓の始まりの添字, 窓の点の数)
-        self._grip_hold_cap: tuple | None = None
-        self._grip_plain: tuple | None = None
-        #: 速度へ反映済みの学習の版 `(ver, ver_down)` と、速度の作り直しの鍵に入れる通し番号
-        self._grip_ver = (-1, -1)
-        self._grip_tok = getattr(self, "_grip_tok", 0) + 1
-        #: 前兆で落とした速度をこの周期の指令に掛けたか
-        self._grip_capped = False
-        self._grip_saved: tuple = (0, 0.0)
-        self._grip_save_t = 0.0
+        # 速度の作り直しの鍵に入れる通し番号は戻さず 1 つ進める（分ける前の `getattr(self, "_grip_tok", 0) + 1` と同じ。
+        # 前の走行の鍵と重ならないようにするため）
+        self._grip_tok += 1
 
     def on_vehicle_state(self, vs: VehicleState) -> None:
         """`planning_node`が`vehicle_state`を受けるたびに呼ぶ（100Hz）。
@@ -1979,19 +1975,12 @@ class Slam2dRaceLine(Planner):
         1周期に候補角度1つぶんしか進めない（計算コストを1周期に収める設計、
         `localize.py`のモジュールdocstring参照）ので、この段の間は車両を
         `ready=False`で静止させたまま複数周期にわたって`step()`を呼び続ける。
+
+        段: 動いていれば待つ → 解く直前の姿勢で照合（1回だけ）→ 粗探索 → 候補を1周期に1つ仕上げる
+        → 仕上げた候補から決める。
         """
-        if (abs(self._speed_now) > _LOCATE_MOVE_SPEED
-                or abs(self._yaw_rate_now) > _LOCATE_MOVE_YAW_RATE):
-            # 動いている間は探さない（途中までの候補は別の場所の点群で仕上げたもの）。
-            # 動きが続く（_LOCATE_MOVE_CYCLES 周期）なら、止まってから最初からやり直す。
-            # 1〜2 周期の微動は探索を進めず待つだけ（捨てない）
-            self._loc_move_n += 1
-            if self._loc_move_n >= _LOCATE_MOVE_CYCLES:
-                self._localizer = None
-                self._loc_cands, self._loc_scored = None, []
-            st.reason = "自己位置を探している。車が動いている間は待つ（止まってから探索する）"
+        if self._locate_wait_still(st):
             return st
-        self._loc_move_n = 0
         pts = self.slam.deskew_scan(scan)
         # ヒントは「クリック→読み込み」の意思なので読み込みでは捨てないが、古いものは使わない
         # （別の地図・別の出発点で、ずっと前のクリックに探索が絞られないように）
@@ -2005,39 +1994,66 @@ class Slam2dRaceLine(Planner):
             if best is not None:
                 return self._adopt_locate(st, best)
 
-        if self._loc_cands is None:
-            if self._localizer is None:
-                hint = self._loc_hint or self._locate_seed
-                radius = (_LOC_HINT_RADII[self._loc_hint_stage] if self._loc_hint is not None
-                          else self._locate_seed_r)
-                self._localizer = GlobalLocalizer(self.slam.grid, hint=hint, hint_radius=radius)
-                if self._localizer.done and self._loc_hint is not None:
-                    self._widen_hint()      # この半径に空きセルが無い。広げて次周期に探す
-                    self._localizer = None
-                    st.reason = "自己位置の探索範囲に空きセルが無い。ヒントの探索半径を広げる"
-                    return st
-                if self._localizer.done:
-                    st.reason = ("自己位置の探索範囲に空きセルが無い。"
-                                 "地図の選択かクリックしたヒントを見直してください")
-                    return st
+        if self._loc_cands is None and not self._locate_coarse(st, pts, seeded):
+            return st
+        if not self._locate_refine_one(st, pts):
+            return st
+        return self._locate_decide(st, seeded, p)
 
-            if not self._localizer.step(pts):
-                rtxt = (f"・ヒント半径 {_LOC_HINT_RADII[self._loc_hint_stage]:.1f}m"
-                        if self._loc_hint is not None else "")
-                st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%{rtxt}）"
-                return st
+    def _locate_wait_still(self, st: AutoState) -> bool:
+        """車が動いている間は探さない。待つなら `st.reason` を書いて True。"""
+        if (abs(self._speed_now) > _LOCATE_MOVE_SPEED
+                or abs(self._yaw_rate_now) > _LOCATE_MOVE_YAW_RATE):
+            # 動いている間は探さない（途中までの候補は別の場所の点群で仕上げたもの）。
+            # 動きが続く（_LOCATE_MOVE_CYCLES 周期）なら、止まってから最初からやり直す。
+            # 1〜2 周期の微動は探索を進めず待つだけ（捨てない）
+            self._loc_move_n += 1
+            if self._loc_move_n >= _LOCATE_MOVE_CYCLES:
+                self._localizer = None
+                self._loc_cands, self._loc_scored = None, []
+            st.reason = "自己位置を探している。車が動いている間は待つ（止まってから探索する）"
+            return True
+        self._loc_move_n = 0
+        return False
 
-            cands = self._localizer.candidates(LOCATE_CANDIDATES)
-            self._localizer = None
-            if not cands:
-                if seeded:
-                    self._locate_seed = None      # 種の周りに候補が無い。全域で探し直す
-                self._widen_hint()
-                st.reason = "自己位置の候補が見つからない"
-                return st
-            self._loc_cands, self._loc_scored = list(cands), []
-            self._loc_scorer = LocateScorer(self.slam.grid)
+    def _locate_coarse(self, st: AutoState, pts, seeded: bool) -> bool:
+        """粗探索を1周期ぶん進める。終わって候補が揃ったら True（`_loc_cands` に載せる）。
+        まだ・候補が無いなら `st.reason` を書いて False。"""
+        if self._localizer is None:
+            hint = self._loc_hint or self._locate_seed
+            radius = (_LOC_HINT_RADII[self._loc_hint_stage] if self._loc_hint is not None
+                      else self._locate_seed_r)
+            self._localizer = GlobalLocalizer(self.slam.grid, hint=hint, hint_radius=radius)
+            if self._localizer.done and self._loc_hint is not None:
+                self._widen_hint()      # この半径に空きセルが無い。広げて次周期に探す
+                self._localizer = None
+                st.reason = "自己位置の探索範囲に空きセルが無い。ヒントの探索半径を広げる"
+                return False
+            if self._localizer.done:
+                st.reason = ("自己位置の探索範囲に空きセルが無い。"
+                             "地図の選択かクリックしたヒントを見直してください")
+                return False
 
+        if not self._localizer.step(pts):
+            rtxt = (f"・ヒント半径 {_LOC_HINT_RADII[self._loc_hint_stage]:.1f}m"
+                    if self._loc_hint is not None else "")
+            st.reason = f"自己位置を探索中（{self._localizer.progress * 100:.0f}%{rtxt}）"
+            return False
+
+        cands = self._localizer.candidates(LOCATE_CANDIDATES)
+        self._localizer = None
+        if not cands:
+            if seeded:
+                self._locate_seed = None      # 種の周りに候補が無い。全域で探し直す
+            self._widen_hint()
+            st.reason = "自己位置の候補が見つからない"
+            return False
+        self._loc_cands, self._loc_scored = list(cands), []
+        self._loc_scorer = LocateScorer(self.slam.grid)
+        return True
+
+    def _locate_refine_one(self, st: AutoState, pts) -> bool:
+        """候補を1つ仕上げる。全部仕上げ終わったら True、まだ残っていれば `st.reason` を書いて False。"""
         # ★ 粗探索（0.2m間隔・15°刻み）の得点だけで決めない。上位候補を
         #   それぞれ総当たり＋Gauss-Newton で仕上げ、**全点に対する当たり率と残差RMS**
         #   （`locate_score`）で比べる。粗い尺度では並ぶ候補（オーバルの反対側の直線など）も、
@@ -2051,7 +2067,11 @@ class Slam2dRaceLine(Planner):
             self._loc_scored.append((locate_score(ref), locate_score_robust(fit), ref))
         if self._loc_cands:
             st.reason = f"自己位置の候補を仕上げている（残り {len(self._loc_cands)}）"
-            return st
+            return False
+        return True
+
+    def _locate_decide(self, st: AutoState, seeded: bool, p: dict[str, float]) -> AutoState:
+        """仕上げた候補から自己位置を決める（決められなければ理由を書いて探し直しへ）。"""
         scored, self._loc_cands, self._loc_scored = self._loc_scored, None, []
         if not scored:
             if seeded:
@@ -2532,7 +2552,27 @@ class Slam2dRaceLine(Planner):
         #   「止まってから避け直す」待ちでもない。数えると ARM 前に Hybrid A* へ入り、ARM した
         #   瞬間に後退を含む操縦から始まった
         driving = bool(vs.armed)
-        if hit is None and self._brake_hold is not None:
+        if hit is None:
+            return self._no_obstacle(st, vs, p, path, index, unstick_on, driving)
+
+        self._stuck_t = 0.0
+        front = self.vehicle.front_overhang
+        gap = max(0.0, dist - front)
+        lead = self._ot_lead if self._ot_status == "blocked" else None
+        if avoid_on and lead is not None and lead.moving and lead.u >= obs_mod.MOVING_MIN_SPEED:
+            self._follow_lead(st, lead, gap, vs, p)
+            return True
+        done = self._slow_or_stop(st, hit, gap, vs, p, slow_on, avoid_on)
+        if not done:
+            return False
+        if done == "stop" and avoid_on and driving and abs(vs.speed) < 0.05:
+            self._after_stopped(st, hit, dist, vs, p, path, index)
+        return True
+
+    def _no_obstacle(self, st: AutoState, vs: VehicleState, p: dict[str, float],
+                     path: rl_mod.RaceLine, index: int, unstick_on: bool, driving: bool) -> bool:
+        """前方を塞ぐ障害物が無い周期（`_obstacle_response`）: 制動の保持・前の車との車間・スタックの検出。"""
+        if self._brake_hold is not None:
             # 制動の途中で検出が1〜2周期途切れても解かない（すぐ近くの物は点が安定しない）
             self._brake_hold += self._dt
             if self._brake_hold <= _BRAKE_HOLD_S and abs(vs.speed) >= 0.05:
@@ -2540,7 +2580,7 @@ class Slam2dRaceLine(Planner):
                 st.target_speed = 0.0
                 st.reason = "障害物で制動中（検出が途切れた。止まるまで保つ）"
                 return True
-        if hit is None and self._acc is not None:
+        if self._acc is not None:
             # 追い抜く計画はあるが、まだ相手の真後ろ（今走る線の上）に居る。横へ出終わる前に計画が
             # 崩れても（相手の速度の推定が揺れる）止まり切れる車間を保つ
             # ★ ここ（計画は「通れる」か「避ける」）で残すのは、止まり切れる車間（`_STOP_GAP`）だけ。
@@ -2554,44 +2594,44 @@ class Slam2dRaceLine(Planner):
             if v_f < st.target_speed:
                 st.target_speed = v_f
                 st.reason = f"前の車（{u:.1f}m/s・{gap_acc:.1f}m 先）との車間を保つ"
-        if hit is None:
-            self._brake_hold = None
-            self._blocked_t = 0.0
-            # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）。
-            # ★ 「進めと言っている」は指令の大きさではなく、**止める指令でないこと＋経路の計画速度**で見る。
-            #   止まった所からの追い付き（`speedctl.catch_up`）は今の車速から出発するので、車が動かないと
-            #   指令が下限 0.05m/s に張り付き、指令 > 0.1 の判定に届かない
-            #   （`surge_20261106_123306`: ヘアピンの壁に当たり、計画速度 1.76 のまま 19 秒止まり続けた）
-            n_path = len(path)
-            v_plan = float(path.v[index % n_path if path.closed else min(max(index, 0), n_path - 1)]) \
-                if n_path else 0.0
-            wants = st.target_speed > 0.0 and not st.brake and max(st.target_speed, v_plan) > 0.1
-            if unstick_on and driving and wants and abs(vs.speed) < 0.03:
-                self._stuck_t += self._dt
-            else:
-                self._stuck_t = 0.0
-                if abs(vs.speed) > 0.2:
-                    self._detour_tries = 0          # 走り出せたら数え直す
-            if unstick_on and self._stuck_t > p["stuck_s"] and self._detour_tries < DETOUR_TRIES:
-                self._start_detour(st, path, index, None, 0.0, p, "進めない（スタック）")
-                return True
-            return False
-
-        self._stuck_t = 0.0
-        front = self.vehicle.front_overhang
-        gap = max(0.0, dist - front)
-        lead = self._ot_lead if self._ot_status == "blocked" else None
-        if avoid_on and lead is not None and lead.moving and lead.u >= obs_mod.MOVING_MIN_SPEED:
-            # 前を同じ向きに走る車で、今は抜ける隙が無い。止まらずに相手の速さで付いていき、
-            # 隙ができたら（毎周期の `_overtake_step` が候補を見つけたら）抜く。車間は「相手が
-            # 同じ減速度で止まっても止まり切れる」距離（`v² ≤ u² + 2a·余り`）
-            self._brake_hold = None
-            self._blocked_t = 0.0
-            st.target_speed = min(st.target_speed, self._follow_speed(lead.u, gap, vs, p))
-            st.brake = gap < 0.5 * _FOLLOW_GAP and vs.speed > lead.u
-            st.reason = (f"前の車（{lead.u:.1f}m/s・{gap:.1f}m 先）に付いていく。抜ける隙ができたら抜く"
-                         f"（{self._avoid_why}）")
+        self._brake_hold = None
+        self._blocked_t = 0.0
+        # 進めと言っているのに止まっている（壁に擦った・段差・見えない物）。
+        # ★ 「進めと言っている」は指令の大きさではなく、**止める指令でないこと＋経路の計画速度**で見る。
+        #   止まった所からの追い付き（`speedctl.catch_up`）は今の車速から出発するので、車が動かないと
+        #   指令が下限 0.05m/s に張り付き、指令 > 0.1 の判定に届かない
+        #   （`surge_20261106_123306`: ヘアピンの壁に当たり、計画速度 1.76 のまま 19 秒止まり続けた）
+        n_path = len(path)
+        v_plan = float(path.v[index % n_path if path.closed else min(max(index, 0), n_path - 1)]) \
+            if n_path else 0.0
+        wants = st.target_speed > 0.0 and not st.brake and max(st.target_speed, v_plan) > 0.1
+        if unstick_on and driving and wants and abs(vs.speed) < 0.03:
+            self._stuck_t += self._dt
+        else:
+            self._stuck_t = 0.0
+            if abs(vs.speed) > 0.2:
+                self._detour_tries = 0          # 走り出せたら数え直す
+        if unstick_on and self._stuck_t > p["stuck_s"] and self._detour_tries < DETOUR_TRIES:
+            self._start_detour(st, path, index, None, 0.0, p, "進めない（スタック）")
             return True
+        return False
+
+    def _follow_lead(self, st: AutoState, lead, gap: float, vs: VehicleState,
+                     p: dict[str, float]) -> None:
+        """前を同じ向きに走る車で、今は抜ける隙が無い。止まらずに相手の速さで付いていき、
+        隙ができたら（毎周期の `_overtake_step` が候補を見つけたら）抜く。車間は「相手が
+        同じ減速度で止まっても止まり切れる」距離（`v² ≤ u² + 2a·余り`）"""
+        self._brake_hold = None
+        self._blocked_t = 0.0
+        st.target_speed = min(st.target_speed, self._follow_speed(lead.u, gap, vs, p))
+        st.brake = gap < 0.5 * _FOLLOW_GAP and vs.speed > lead.u
+        st.reason = (f"前の車（{lead.u:.1f}m/s・{gap:.1f}m 先）に付いていく。抜ける隙ができたら抜く"
+                     f"（{self._avoid_why}）")
+
+    def _slow_or_stop(self, st: AutoState, hit: obs_mod.Obstacle, gap: float, vs: VehicleState,
+                      p: dict[str, float], slow_on: bool, avoid_on: bool) -> str:
+        """避けられない障害物の手前で減速し、近ければ止める。"stop"（止めた）・"slow"（減速だけ）・
+        ""（何もしない）。"""
         stop_at = p["obstacle_stop"]
         if slow_on:
             # 横へ避けられなかった（避けていればここへは来ない）。障害物の手前
@@ -2606,8 +2646,8 @@ class Slam2dRaceLine(Planner):
             if slow_on:
                 st.reason = (f"前方 {gap:.1f}m に避けられない障害物。止まれる速度へ減速"
                              + (f"（{self._avoid_why}）" if self._avoid_why else ""))
-                return True
-            return False
+                return "slow"
+            return ""
         st.brake = True
         st.target_speed = 0.0
         self._brake_hold = 0.0
@@ -2616,9 +2656,11 @@ class Slam2dRaceLine(Planner):
         st.reason = f"前方 {gap:.1f}m（{ang:+.0f}°）に障害物。停止"
         if slow_on and not avoid_on:
             st.reason += "（停止点へ向かう経路では避けない。どくまで待つ）"
-        if not avoid_on or not driving or abs(vs.speed) >= 0.05:
-            return True
-        # 止まってから: 曲がれる限界の近くまで使って横へ避け直す → だめなら Hybrid A*
+        return "stop"
+
+    def _after_stopped(self, st: AutoState, hit: obs_mod.Obstacle, dist: float, vs: VehicleState,
+                       p: dict[str, float], path: rl_mod.RaceLine, index: int) -> None:
+        """障害物の手前で止まってから: 曲がれる限界の近くまで使って横へ避け直す → だめなら Hybrid A*。"""
         self._blocked_t += self._dt
         wait = p["avoid_wait"]
         if (self._blocked_t >= 0.5 * wait and p["overtake"] <= 0
@@ -2634,7 +2676,6 @@ class Slam2dRaceLine(Planner):
         elif self._detour_tries >= DETOUR_TRIES:
             st.reason += (f"。Hybrid A* でも{DETOUR_TRIES}回抜けられなかったので待つ"
                           + (f"（{self._detour_error}）" if self._detour_error else ""))
-        return True
 
     def _overtake_step(self, path: rl_mod.RaceLine, pose, vs: VehicleState,
                        p: dict[str, float]) -> ot_mod.OvertakeResult | None:
@@ -2642,15 +2683,13 @@ class Slam2dRaceLine(Planner):
 
         使わない設定・開いた経路なら `None`（従来の `_blocking` → `_plan_avoid`）。障害物が無く、
         避けている途中でもなければ何も計算しない（障害物の無い周回は今までと同じ処理）。
+
+        段: 経路が変わったら弧長・法線を作り直す → 相手（今の観測＋残像）を揃える → 計画
+        → 結果に従って一時経路を載せる・外す → 計算時間を記録。
         """
         if p["obstacle_avoid"] <= 0 or p["overtake"] <= 0 or not path.closed:
             return None
-        if self._ot_base is not path.xy:
-            self._ot_prev = None
-            self._ot_base = path.xy
-            seg = np.hypot(*np.diff(np.vstack([path.xy, path.xy[:1]]), axis=0).T)
-            self._ot_scum = np.concatenate([[0.0], np.cumsum(seg[:-1])])
-            self._ot_nrm = cl_mod.normals(path.xy)
+        self._ot_rebase(path)
         mine = self._avoid is not None and self._avoid_how == "追い抜き"
         if not self._obs and not mine:
             self._ot_prev = None
@@ -2658,19 +2697,47 @@ class Slam2dRaceLine(Planner):
             self._ot_status, self._ot_lead = "clear", None
             return ot_mod.OvertakeResult("clear", None, None, [], None, 0, "")
         t0 = time.perf_counter()
-        v = self.vehicle
         lim = self._lim(p)
-        cfg = ot_mod.OvertakeConfig(
-            half_width=v.half_width, front=v.front_overhang, rear=v.rear_overhang,
-            # ★ 車の本当の限界（同定値）を渡す。`kappa_limit`（追従の余裕を引いた値）を渡すと、計画器が
-            #   さらに 95% を掛けて線そのものより厳しくなり、コーナーではどの候補も曲率で落ちた
-            kappa_max=v.kappa_max, a_brake=lim.a_brake, a_accel=lim.a_accel,
-            margin_lat=p["avoid_margin"], margin_lat_moving=min(p["avoid_margin"], _OT_MARGIN_MOVING))
+        cfg = self._ot_config(p, lim)
         hint = self._hint if 0 <= self._hint < len(path) else -1
         idx = (nearest_index(path, pose[0], pose[1], hint, window=12) if hint >= 0
                else nearest_index(path, pose[0], pose[1]))
         base = self._with_sight(path, p)
         a_lat = self._spd(p, path).get("a_lat", lim.a_lat)
+        obs = self._ot_opponents(path)
+        res = ot_mod.plan(path, idx, pose, float(vs.speed), base.v, a_lat, self._avoid_room(path, p),
+                          obs, cfg, prev=self._ot_prev if mine else None,
+                          s_cum=self._ot_scum,
+                          trail=np.asarray(self._opp_trail) if self._opp_trail else None)
+        status = self._ot_apply(path, idx, res, mine, p)
+        self._ot_status, self._ot_lead = status, res.lead
+        self._avoid_ms = (time.perf_counter() - t0) * 1000.0
+        self._avoid_ms_hist.append(self._avoid_ms)
+        if len(self._avoid_ms_hist) > _OT_HIST:
+            del self._avoid_ms_hist[: _OT_HIST // 2]
+        return res._replace(status=status)
+
+    def _ot_rebase(self, path: rl_mod.RaceLine) -> None:
+        """追う経路が変わったら、前の候補を捨てて経路の弧長・法線を作り直す。"""
+        if self._ot_base is not path.xy:
+            self._ot_prev = None
+            self._ot_base = path.xy
+            seg = np.hypot(*np.diff(np.vstack([path.xy, path.xy[:1]]), axis=0).T)
+            self._ot_scum = np.concatenate([[0.0], np.cumsum(seg[:-1])])
+            self._ot_nrm = cl_mod.normals(path.xy)
+
+    def _ot_config(self, p: dict[str, float], lim: Limits) -> ot_mod.OvertakeConfig:
+        v = self.vehicle
+        return ot_mod.OvertakeConfig(
+            half_width=v.half_width, front=v.front_overhang, rear=v.rear_overhang,
+            # ★ 車の本当の限界（同定値）を渡す。`kappa_limit`（追従の余裕を引いた値）を渡すと、計画器が
+            #   さらに 95% を掛けて線そのものより厳しくなり、コーナーではどの候補も曲率で落ちた
+            kappa_max=v.kappa_max, a_brake=lim.a_brake, a_accel=lim.a_accel,
+            margin_lat=p["avoid_margin"], margin_lat_moving=min(p["avoid_margin"], _OT_MARGIN_MOVING))
+
+    def _ot_opponents(self, path: rl_mod.RaceLine) -> list[obs_mod.Obstacle]:
+        """計画に渡す相手: 今の観測に、動く相手の残像（`_GHOST_S` 以内）を経路に沿って進めて足す。
+        動く相手の位置は `_opp_trail` に覚える。"""
         t_now = self._obs_t
         moving = [o for o in self._obs if o.speed >= obs_mod.MOVING_MIN_SPEED]
         self._ghosts = [(t, o) for t, o in self._ghosts if t_now - t <= _GHOST_S] + [(t_now, o) for o in moving]
@@ -2692,21 +2759,26 @@ class Slam2dRaceLine(Planner):
             self._opp_trail.append((o.x, o.y))
         if len(self._opp_trail) > _OPP_TRAIL_N:
             del self._opp_trail[: len(self._opp_trail) - _OPP_TRAIL_N]
-        res = ot_mod.plan(path, idx, pose, float(vs.speed), base.v, a_lat, self._avoid_room(path, p),
-                          obs, cfg, prev=self._ot_prev if mine else None,
-                          s_cum=self._ot_scum,
-                          trail=np.asarray(self._opp_trail) if self._opp_trail else None)
+        return obs
+
+    def _ot_take(self, path: rl_mod.RaceLine, plan: av_mod.AvoidPlan, cand, p: dict[str, float]) -> None:
+        """追い抜きの一時経路を載せる。"""
+        self._avoid_room_path = path
+        self._avoid_path = self._avoid_timed(plan, p)
+        self._avoid, self._avoid_base = plan, path
+        self._avoid_how = "追い抜き"
+        self._ot_prev = cand
+
+    def _ot_apply(self, path: rl_mod.RaceLine, idx: int, res: ot_mod.OvertakeResult, mine: bool,
+                  p: dict[str, float]) -> str:
+        """計画の結果に従って一時経路を載せる・外す。確かめで全部落ちたら "blocked" に直して返す。"""
         status = res.status
         if status == "blocked" and res.cand is not None and abs(res.cand.dT) > 1e-3:
             # 逃げ道（相手からいちばん離れていられる候補）に乗る。確かめ（壁・曲率）は同じ
             plan = ot_mod.build(path, idx, res.cand, self._ot_scum,
                                 res.lead.src if res.lead is not None else None)
             if not self._overtake_ok(path, plan, p):
-                self._avoid_room_path = path
-                self._avoid_path = self._avoid_timed(plan, p)
-                self._avoid, self._avoid_base = plan, path
-                self._avoid_how = "追い抜き"
-                self._ot_prev = res.cand
+                self._ot_take(path, plan, res.cand, p)
         if status == "avoid" and not (res.kept and mine):
             chosen = None
             whys = []
@@ -2723,22 +2795,13 @@ class Slam2dRaceLine(Planner):
                 self._avoid_why = "候補はあったが確かめで落ちた: " + "・".join(whys[:3])
             else:
                 c, plan = chosen
-                self._avoid_room_path = path
-                self._avoid_path = self._avoid_timed(plan, p)
-                self._avoid, self._avoid_base = plan, path
-                self._avoid_how = "追い抜き"
-                self._ot_prev = c
+                self._ot_take(path, plan, c, p)
         if status == "clear" and mine:
             self._clear_avoid()
             self._ot_prev = None
         if status == "blocked":
             self._avoid_why = self._avoid_why if res.why == "" else res.why
-        self._ot_status, self._ot_lead = status, res.lead
-        self._avoid_ms = (time.perf_counter() - t0) * 1000.0
-        self._avoid_ms_hist.append(self._avoid_ms)
-        if len(self._avoid_ms_hist) > _OT_HIST:
-            del self._avoid_ms_hist[: _OT_HIST // 2]
-        return res._replace(status=status)
+        return status
 
     def _follow_speed(self, u: float, gap: float, vs: VehicleState, p: dict[str, float],
                       keep: float = _FOLLOW_GAP) -> float:
@@ -3549,7 +3612,7 @@ class Slam2dRaceLine(Planner):
         # 前後の上限の包絡は、校正の値（直線）に既定の形を掛けた所から始め、計画が包絡で決まっている所で実際に出た値に
         # 合わせる（`grip.LongLearner`）。校正の値は出発点にだけ使う。天井は目標車速のランプの上限
         # `[safety] cmd_accel_limit_m_s2`（それより上は指令が届かない）
-        g.long.configure(acc_init=v.a_accel_max(), dec_init=v.a_decel_max,
+        g.long.configure(acc_init=v.a_accel_max, dec_init=v.a_decel_max,
                          acc_max=v.speed_ramp_max_m_s2, dec_max=v.speed_ramp_max_m_s2,
                          down_only=down_only, loop_tau_s=v.speed_loop_tau_s)
         path, i = self.path, self._hint
