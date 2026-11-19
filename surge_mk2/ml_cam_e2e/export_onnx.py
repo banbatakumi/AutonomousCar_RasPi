@@ -3,8 +3,8 @@
     python3 ml_cam_e2e/export_onnx.py --checkpoint ml_cam_e2e/runs/v1/best.pt \\
         --out models/cam_e2e/v1.onnx
 
-`ml_cam/export_onnx.py` と同じ構成（opset 18・`external_data=False`・
-PyTorch/ONNXRuntime往復検証）。**前処理契約（入力解像度・色順・縮小方式・
+書き出しの設定（opset 18・`external_data=False`）と PyTorch/ONNXRuntime の往復検証・
+版の検査は `ml_common/onnx_export.py`（4本の `export_onnx.py` で共通）。**前処理契約（入力解像度・色順・縮小方式・
 平均/分散）と出力契約（`max_steer`・`speed_ref`・出力の並び）を `<out>.json`
 に書く**——`raspi/nodes/cam_e2e_node.py` の `load_model()` がこれを照合し、
 合わないモデルは読み込まない。
@@ -17,7 +17,6 @@ PyTorch/ONNXRuntime往復検証）。**前処理契約（入力解像度・色�
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -27,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from ml_common import onnx_export  # noqa: E402
+from ml_common.onnx_export import read_train_config  # noqa: E402
 from model import DriveRegressionModel  # noqa: E402
 from raspi.core.cam_e2e_preproc import (  # noqa: E402
     PREPROC_VERSION_STEREO,
@@ -41,17 +42,6 @@ __all__ = ["export", "verify_parity", "read_train_config", "MEAN", "STD"]
 #: **変えたら両方直すこと。**
 MEAN = 0.0
 STD = 255.0
-
-
-def read_train_config(run_dir: Path) -> dict:
-    """`run_dir/train_config.json`。無い・読めないなら空の dict。"""
-    cfg_path = run_dir / "train_config.json"
-    if not cfg_path.exists():
-        return {}
-    try:
-        return json.loads(cfg_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
 
 
 def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None, *,
@@ -74,11 +64,8 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
             raise ValueError(f"{checkpoint.parent}/train_config.json に input_size が無い。"
                              f"--size で指定してください")
         size = (int(cfg["input_size"][0]), int(cfg["input_size"][1]))
-    trained_ver = cfg.get("preproc_version")
-    if trained_ver != PREPROC_VERSION_STEREO:
-        # 版1・2は前後配置のころの右1台の学習（ノードは版3しか読まない）
-        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 {PREPROC_VERSION_STEREO} と違う。"
-                         f"左右2台で学習し直してください")
+    # 版1・2は前後配置のころの右1台の学習（ノードは版3しか読まない）。左右2台で学習し直す
+    onnx_export.check_version("前処理", cfg.get("preproc_version"), PREPROC_VERSION_STEREO)
     # 左右の切り落とし。学習と同じ窓で推論させるため契約に書く
     crop_x = float(cfg.get("crop_x", 0.0) or 0.0)
     if crop_x <= 0:
@@ -107,15 +94,9 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     model.eval()
 
-    dummy = torch.zeros(1, 6, h, w)
-    torch.onnx.export(
-        model, dummy, str(out_path),
-        input_names=["input"], output_names=["output"],
-        opset_version=18,          # `ml_cam/export_onnx.py` と同じ理由（18未満は失敗する）
-        external_data=False,       # 同上。重みを別ファイルに切り出させない
-    )
+    onnx_export.export(model, np.zeros((1, 6, h, w), dtype=np.float32), out_path)
 
-    out_path.with_suffix(".json").write_text(json.dumps({
+    onnx_export.write_contract(out_path, {
         "input_size": [w, h],           # [width, height]
         "input_layout": "NCHW",
         "color": "RGB",
@@ -130,33 +111,17 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
         "steer_link": steer_link,       # [gain, cubic] 学習時の STM32 ステアのリンク換算
         "speed_ref": float(speed_ref),  # [m/s] speed = speed_norm * speed_ref
         "note": note,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
     return size
 
 
 def verify_parity(onnx_path: Path, model, size: tuple[int, int], *,
                   n_samples: int = 4, atol: float = 1e-3, seed: int = 0) -> float:
-    """PyTorch と ONNXRuntime の出力差の最大値を返す。`atol` を超えたら例外
-    （`ml_cam/export_onnx.py` の `verify_parity()` と同じ）。"""
-    import onnxruntime as ort
-
+    """PyTorch と ONNXRuntime の出力差の最大値を返す。`atol` を超えたら例外（`ml_common.onnx_export`）。
+    入力は左右2台を重ねた 6ch。"""
     w, h = size
-    ch = 6
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    model.eval()
-    rng = np.random.default_rng(seed)
-    max_err = 0.0
-    with torch.no_grad():
-        for _ in range(n_samples):
-            x_np = rng.random((1, ch, h, w), dtype=np.float32)
-            torch_out = model(torch.from_numpy(x_np)).numpy()
-            onnx_out = session.run(None, {"input": x_np})[0]
-            max_err = max(max_err, float(np.abs(torch_out - onnx_out).max()))
-    if max_err > atol:
-        raise ValueError(
-            f"PyTorch と ONNXRuntime の出力が最大 {max_err:.2e} ずれています"
-            f"（許容 {atol}）")
-    return max_err
+    return onnx_export.verify_parity(onnx_path, model, lambda rng: (rng.random((1, 6, h, w), dtype=np.float32),),
+                                     n_samples=n_samples, atol=atol, seed=seed)
 
 
 def main() -> int:

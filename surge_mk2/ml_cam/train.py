@@ -16,7 +16,6 @@ import json
 import random
 import sys
 import time
-import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,6 +25,15 @@ import torch  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 from dataset import DrivableDataset, list_labeled_pairs  # noqa: E402
+from ml_common.train_utils import (  # noqa: E402
+    BestTracker,
+    group_split,
+    make_optimizer,
+    pick_device,
+    seed_all,
+    time_block,
+    train_epoch,
+)
 from model import DrivableSegModel  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 
@@ -56,42 +64,26 @@ def _frame_block(frame: Path, block_s: float) -> str | None:
     head, sep, tail = frame.stem.rpartition("_")
     if not sep or not tail.isdigit():
         return None
-    block = int(tail) // max(1, int(block_s * 1_000_000_000))
-    return f"{head}:{block}"
+    return f"{head}:{time_block(int(tail), block_s)}"
 
 
 def split_pairs_blocks(pairs: list, val_ratio: float = 0.15, seed: int = 0,
                        block_s: float = 5.0) -> tuple[list, list]:
-    """train/val に**時間ブロック単位**で分ける（`ml_cam_e2e/samples.py`と同じ考え方）。
+    """train/val に**時間ブロック単位**で分ける（`ml_common.train_utils.group_split`。`ml_cam_e2e` と同じ方式）。
 
     連続フレームはほぼ同じ絵なので、フレーム単位でシャッフルすると、train の隣のフレームが
     val に漏れて val_iou が過大になる。`block_s`秒のかたまり（元ファイル・カメラ別）を
-    まるごと振り分ける。ブロックを`seed`で決まる順に並べ、val のフレーム数が
-    `val_ratio`に届くまで val に回す（trainを1ブロックは残す）。ブロックが1つしか
-    取れない（名前が`extract_frames.py`形式でない・短い録画）ときはフレーム単位
-    （`split_pairs`）へ倒す。
+    まるごと振り分ける。どちらに回すかはかたまりの名前のハッシュで決まるので、ラベルを足しても
+    既存のかたまりの振り分けは動かない。ラベル付きの画像は少ないので、片側が空になったら1ブロック移して
+    両側を残す（`keep_both`）。ブロックが1つしか取れない（名前が`extract_frames.py`形式でない・短い録画）
+    ときはフレーム単位（`split_pairs`）へ倒す。
     """
-    blocks: dict[str, list] = {}
-    for pair in pairs:
-        key = _frame_block(Path(pair[0]), block_s)
-        if key is None:
-            return split_pairs(pairs, val_ratio, seed)
-        blocks.setdefault(key, []).append(pair)
-    if len(blocks) < 2:
+    keys = [_frame_block(Path(pair[0]), block_s) for pair in pairs]
+    if any(k is None for k in keys) or len(set(keys)) < 2:
         return split_pairs(pairs, val_ratio, seed)
-    order = sorted(blocks, key=lambda k: zlib.crc32(f"{k}:{seed}".encode()))
-    n_val_target = max(1, int(round(len(pairs) * val_ratio)))
-    val_keys: list[str] = []
-    n_val = 0
-    for key in order[:-1]:                 # trainに最低1ブロックは残す
-        if n_val >= n_val_target:
-            break
-        val_keys.append(key)
-        n_val += len(blocks[key])
-    chosen = set(val_keys)
-    val = [pair for key in val_keys for pair in blocks[key]]
-    train = [pair for key in order if key not in chosen for pair in blocks[key]]
-    return train, val
+    train, val = group_split(list(zip(keys, pairs)), lambda kp: kp[0], val_ratio=val_ratio, seed=seed,
+                             keep_both=True)
+    return [pair for _, pair in train], [pair for _, pair in val]
 
 
 def iou_score(pred: torch.Tensor, target: torch.Tensor, *, threshold: float = 0.5,
@@ -113,20 +105,7 @@ def iou_score(pred: torch.Tensor, target: torch.Tensor, *, threshold: float = 0.
 
 
 def train_one_epoch(model, loader, optimizer, device) -> float:
-    model.train()
-    total_loss = 0.0
-    n = 0
-    loss_fn = torch.nn.BCELoss()
-    for img, msk in loader:
-        img, msk = img.to(device), msk.to(device)
-        optimizer.zero_grad()
-        out = model(img)
-        loss = loss_fn(out, msk)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * img.size(0)
-        n += img.size(0)
-    return total_loss / max(n, 1)
+    return train_epoch(model, loader, optimizer, device, torch.nn.BCELoss())
 
 
 @torch.no_grad()
@@ -138,14 +117,6 @@ def evaluate(model, loader, device) -> float:
         out = model(img)
         ious.append(iou_score(out, msk))
     return sum(ious) / len(ious) if ious else 0.0
-
-
-def pick_device() -> "torch.device":
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
 
 
 def main() -> int:
@@ -172,7 +143,7 @@ def main() -> int:
     # `split_pairs`のseedはこれで既に固定されるが、モデルの重み初期化・
     # augmentation（`dataset.py`の`np.random.rand()`）・DataLoaderのシャッフル順は
     # 別系統の乱数源なので、ここで明示的に固定しないと再現性が取れない
-    torch.manual_seed(args.seed)
+    seed_all(args.seed)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
     pairs = list_labeled_pairs(args.frames, args.masks)
@@ -192,24 +163,24 @@ def main() -> int:
     print(f"# device: {device}  学習 {len(train_pairs)}枚 / 検証 {len(val_pairs)}枚")
 
     model = DrivableSegModel(pretrained=not args.no_pretrained).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # weight_decay=0 の AdamW は Adam と同じ更新（`make_optimizer`）。以前の Adam と学習結果は変わらない
+    optimizer = make_optimizer(model.parameters(), lr=args.lr)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    best_iou = -1.0
+    best = BestTracker("max")
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         loss = train_one_epoch(model, train_loader, optimizer, device)
         iou = evaluate(model, val_loader, device) if val_pairs else float("nan")
         print(f"epoch {epoch:3d}/{args.epochs}  loss={loss:.4f}  val_iou={iou:.3f}"
               f"  ({time.time() - t0:.0f}s)")
-        if val_pairs and iou > best_iou:
-            best_iou = iou
+        if val_pairs and best.update(iou):
             torch.save(model.state_dict(), args.out / "best.pt")
 
     # 検証データが無い（データがごく少ない）ときは最終エポックを best として残す
     if not val_pairs:
         torch.save(model.state_dict(), args.out / "best.pt")
-        best_iou = float("nan")
+    best_iou = best.best_or_nan()
     torch.save(model.state_dict(), args.out / "last.pt")
     (args.out / "train_config.json").write_text(json.dumps({
         "input_size": [w, h], "preproc_version": PREPROC_VERSION,

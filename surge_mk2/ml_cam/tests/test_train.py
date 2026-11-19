@@ -90,7 +90,21 @@ class TestSplitPairsBlocks(unittest.TestCase):
         t_val = {int(p[0].stem.rsplit("_", 1)[1]) // 5_000_000_000 for p in val}
         t_train = {int(p[0].stem.rsplit("_", 1)[1]) // 5_000_000_000 for p in train}
         self.assertEqual(t_val & t_train, set())          # 同じ5秒ブロックは片側だけ
-        self.assertGreaterEqual(len(val), 120)
+        self.assertTrue(train and val)
+
+    def test_val_ratio_is_approached_with_many_blocks(self):
+        """振り分けはブロック名のハッシュなので、割合はブロックが多いほど val_ratio に近づく。"""
+        pairs = [(Path(f"run1_front_{int(i * 0.1 * 1e9)}.jpg"), Path("m.png")) for i in range(6000)]
+        _train, val = split_pairs_blocks(pairs, val_ratio=0.2, seed=1, block_s=5.0)
+        self.assertTrue(0.1 < len(val) / len(pairs) < 0.3)
+
+    def test_assignment_is_stable_when_labels_are_added(self):
+        """ラベルを足しても既存ブロックの振り分けが動かない（前の run と同じ検証データで比べられる）。"""
+        a = self._pairs()
+        b = [(Path(f"run2_front_{int(i * 0.1 * 1e9)}.jpg"), Path("m.png")) for i in range(600)]
+        before = set(split_pairs_blocks(a, val_ratio=0.3, seed=0)[1])
+        after = {p for p in split_pairs_blocks(a + b, val_ratio=0.3, seed=0)[1] if p[0].name.startswith("run1")}
+        self.assertEqual(before, after)
 
     def test_deterministic_given_seed(self):
         self.assertEqual(split_pairs_blocks(self._pairs(), seed=3),

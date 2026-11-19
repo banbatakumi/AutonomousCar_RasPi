@@ -44,6 +44,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler  # noqa: E402
 
 import samples as S  # noqa: E402
 from dataset import DriveDataset  # noqa: E402
+from ml_common.train_utils import BestTracker, make_optimizer, pick_device, seed_all, train_epoch  # noqa: E402
 from model import DriveRegressionModel  # noqa: E402
 from raspi.core.cam_e2e_preproc import (  # noqa: E402
     PREPROC_VERSION_STEREO,
@@ -84,18 +85,7 @@ def loss_fn(out: torch.Tensor, target: torch.Tensor, speed_weight: float) -> tor
 
 
 def train_one_epoch(model, loader, optimizer, device, speed_weight: float) -> float:
-    model.train()
-    total_loss = 0.0
-    n = 0
-    for img, target in loader:
-        img, target = img.to(device), target.to(device)
-        optimizer.zero_grad()
-        loss = loss_fn(model(img), target, speed_weight)
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item() * img.size(0)
-        n += img.size(0)
-    return total_loss / max(n, 1)
+    return train_epoch(model, loader, optimizer, device, lambda out, target: loss_fn(out, target, speed_weight))
 
 
 @torch.no_grad()
@@ -111,14 +101,6 @@ def evaluate(model, loader, device) -> tuple[float, float]:
     if n == 0:
         return math.nan, math.nan
     return float(err[0] / n), float(err[1] / n)
-
-
-def pick_device() -> "torch.device":
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
 
 
 def main() -> int:
@@ -156,7 +138,9 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    torch.manual_seed(args.seed)
+    # torch だけでなく np.random・random も固定する。`dataset.py` の水増しは np.random から種を取り、
+    # `yaw_aug.sample_psi` は random を使うので、torch だけでは seed を同じにしても再現しない
+    seed_all(args.seed)
 
     w, h = (int(v) for v in args.size.lower().split("x"))
     if args.yaw_aug_deg <= 0:
@@ -215,7 +199,8 @@ def main() -> int:
           f"max_steer={max_steer:.3f}rad  speed_ref={speed_ref:.2f}m/s")
 
     model = DriveRegressionModel(pretrained=not args.no_pretrained).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # weight_decay=0 の AdamW は Adam と同じ更新（`make_optimizer`）。以前の Adam と学習結果は変わらない
+    optimizer = make_optimizer(model.parameters(), lr=args.lr)
 
     args.out.mkdir(parents=True, exist_ok=True)
     config = {
@@ -242,8 +227,7 @@ def main() -> int:
     # エクスポート（解像度と正規化基準をここから読む）ができるようにしておく
     write_config()
 
-    best_score = math.inf
-    best = (math.nan, math.nan)
+    tracker = BestTracker("min")
     t0 = time.time()
     for epoch in range(1, args.epochs + 1):
         loss = train_one_epoch(model, train_loader, optimizer, device, args.speed_weight)
@@ -255,14 +239,13 @@ def main() -> int:
               f"  ({math.degrees(mae * max_steer):.1f}deg, {speed_mae * speed_ref:.2f}m/s,"
               f" {time.time() - t0:.0f}s)", flush=True)
         score = mae + args.speed_weight * speed_mae
-        if val_s and score < best_score:
-            best_score = score
-            best = (mae, speed_mae)
+        if val_s and tracker.update(score, (mae, speed_mae)):
             torch.save(model.state_dict(), args.out / "best.pt")
 
     if not val_s:
         torch.save(model.state_dict(), args.out / "best.pt")
     torch.save(model.state_dict(), args.out / "last.pt")
+    best = tracker.info or (math.nan, math.nan)
     write_config(best_val_mae=best[0], best_val_speed_mae=best[1])
     print(f"# 完了。最良 val_mae={best[0]:.4f}  val_speed_mae={best[1]:.4f} → {args.out}/best.pt")
     return 0

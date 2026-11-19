@@ -36,9 +36,13 @@ from __future__ import annotations
 import csv
 import json
 import math
-import zlib
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
+
+from ml_common.train_utils import group_split, is_val_group, time_block  # noqa: E402
 
 __all__ = [
     "MANIFEST_COLUMNS", "EXCLUSIONS_FILE", "STOP_CMD_SPEED", "STOP_ACTUAL_SPEED",
@@ -184,19 +188,19 @@ def usable(sample: Sample, exclusions: list[Exclusion]) -> bool:
 
 def is_val(source_mcap: str, t_ns: int, *, block_s: float = 5.0,
            val_ratio: float = 0.15, seed: int = 0) -> bool:
-    block = t_ns // max(1, int(block_s * NS))
-    h = zlib.crc32(f"{source_mcap}:{block}:{seed}".encode())
-    return (h % 10_000) < val_ratio * 10_000
+    """`block_s` 秒のかたまり（元の .mcap 別）を検証に回すか（`ml_common.train_utils.is_val_group`。
+    かたまりの名前だけで決まるので、学習後に1枚ずつ train/val を言い直せる）。"""
+    return is_val_group(_block_key(source_mcap, t_ns, block_s), val_ratio=val_ratio, seed=seed)
+
+
+def _block_key(source_mcap: str, t_ns: int, block_s: float) -> str:
+    return f"{source_mcap}:{time_block(t_ns, block_s)}"
 
 
 def split(samples: list[Sample], *, block_s: float = 5.0, val_ratio: float = 0.15,
           seed: int = 0) -> tuple[list[Sample], list[Sample]]:
-    train: list[Sample] = []
-    val: list[Sample] = []
-    for s in samples:
-        (val if is_val(s.source_mcap, s.t_ns, block_s=block_s, val_ratio=val_ratio,
-                       seed=seed) else train).append(s)
-    return train, val
+    return group_split(samples, lambda s: _block_key(s.source_mcap, s.t_ns, block_s),
+                       val_ratio=val_ratio, seed=seed)
 
 
 # ── ラベル ──

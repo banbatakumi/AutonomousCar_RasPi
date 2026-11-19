@@ -18,9 +18,9 @@
 `balance_tab.py`・`eval_tab.py` に分けてあり、どれを学習に使うかの判断は
 `samples.py`（学習スクリプトと共有）に任せる。
 
-ログ表示・サブプロセス実行基盤・run名管理・note.txt・学習曲線グラフ・
-ウィンドウクローズ処理は `ml_cam/app.py`・`ml_lidar/app.py` と共通実装のため
-`ml_common/` に切り出してある。
+ログ表示・サブプロセス実行基盤（ジョブの実行・停止・備考は `ml_common/job_panel.JobPanelBase`）・
+run名管理・note.txt・学習曲線グラフ・ウィンドウクローズ処理は `ml_cam/app.py`・`ml_lidar/app.py` と
+共通実装のため `ml_common/` に切り出してある。
 
 ## セグメンテーション（`ml_cam/app.py`）と違い、アノテーションタブが無い
 
@@ -49,11 +49,9 @@ ML_CAM_E2E_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ML_CAM_E2E_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from ml_common.close_handler import confirm_and_close  # noqa: E402
 from ml_common.dialogs import confirm_overwrite  # noqa: E402
 from ml_common.epoch_log import make_epoch_line_parser  # noqa: E402
-from ml_common.job_runner import JobRunner  # noqa: E402
-from ml_common.log_console import LogConsole  # noqa: E402
+from ml_common.job_panel import CONFIRM_STOP_JOB_KEYS, JobPanelBase  # noqa: E402
 from ml_common.naming import list_versioned_names, next_versioned_name  # noqa: E402
 from ml_common.notes import read_note, write_note  # noqa: E402
 from ml_common.paths import make_rel  # noqa: E402
@@ -78,10 +76,8 @@ RUNS_DIR = ML_CAM_E2E_DIR / "runs"
 #: 実車側（`cam_e2e_node.py` の `DEFAULT_MODELS_DIR`）と同じ場所。セグメンテーション用
 #: （`models/seg/`）と混ざらないよう分けてある
 MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
-#: 学習中でも壊れない・止めても惜しくない類のジョブは確認無しで終了時に落とす。
-#: 学習だけは数十分〜数時間かかりうるので、ウィンドウを閉じる前に一言確認する
-#: （`ml_lidar/app.py`と同じ考え方）
-_CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
+#: 閉じるときに確認するジョブ（学習だけ。`ml_common/job_panel.py`）
+_CONFIRM_STOP_JOB_KEYS = CONFIRM_STOP_JOB_KEYS
 
 rel = make_rel(REPO_ROOT)
 list_model_names = list_versioned_names
@@ -169,25 +165,18 @@ def build_eval_cmd(python: str, frames_dir: str, run_dir: str, model_path: str) 
 
 # ── GUI ──
 
-class App:
+class App(JobPanelBase):
     """タブ6枚（抽出・確認/選別・偏り・学習・エクスポート・評価）＋共有のログ欄。"""
 
     def __init__(self, root: tk.Tk) -> None:
-        self.root = root
+        self._init_job_panel(root, REPO_ROOT, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
         root.title("SURGE Mk.2 — カメラE2E（模倣学習）")
         root.geometry("1010x860")
 
-        self.python = sys.executable
-        self.jobs = JobRunner(REPO_ROOT, allow_concurrent=False, prefix_labels=False)
-        self._last_exported_model_name = ""
         self.max_steer = Vehicle.load().max_steer
 
         self._build_widgets()
-        self.root.after(100, self._drain_log)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(
-            self.root, self.jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS,
-            confirm_message=lambda label: f"{label}が実行中です。終了すると学習が中断されます。"
-            "\n\n本当に終了しますか？"))
+        self._start_job_panel()
 
     # ── 画面構築 ──
 
@@ -202,18 +191,8 @@ class App:
         self.balance_var = tk.DoubleVar(value=0.5)
 
         # 下から先に置く。ログ欄は固定の高さにして、残りをタブに渡す
-        bottom = ttk.Frame(self.root)
-        bottom.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-        self.status_label = ttk.Label(bottom, text="待機中")
-        self.status_label.pack(side="left")
-        self.stop_btn = ttk.Button(bottom, text="停止", command=self._stop, state="disabled")
-        self.stop_btn.pack(side="right")
-
-        log_frame = ttk.LabelFrame(self.root, text="ログ")
-        log_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-        self.log_console = LogConsole(log_frame, height=7)
+        self.log_console = self._build_log_and_status(log_height=7, at_bottom=True)
         self.log_widget = self.log_console.widget
-        self.log_widget.pack(fill="both", expand=True, padx=4, pady=4)
 
         nb = ttk.Notebook(self.root)
         nb.pack(side="top", fill="both", expand=True, padx=8, pady=8)
@@ -234,14 +213,16 @@ class App:
         nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.root.bind("<Key>", self._on_key)
 
-        self.model_name_var.trace_add("write", self._on_model_name_changed)
-        self._on_model_name_changed()
+        self._bind_model_name(self.model_name_var)
 
     # ── タブ間の配線 ──
 
-    def _run_dir_or_none(self) -> Path | None:
+    def _current_model_dir(self) -> Path | None:
         name = self.model_name_var.get().strip()
         return RUNS_DIR / name if name else None
+
+    def _run_dir_or_none(self) -> Path | None:
+        return self._current_model_dir()
 
     def _frames_dir_or_none(self) -> Path | None:
         run_dir = self._run_dir_or_none()
@@ -300,41 +281,29 @@ class App:
 
     # ── モデル名（①〜③タブ共有） ──
 
-    def _require_model_dir(self) -> Path | None:
-        name = self.model_name_var.get().strip()
-        if not name:
-            messagebox.showerror("入力エラー", "①タブでモデル名を入力してください")
-            return None
-        return RUNS_DIR / name
-
-    def _on_model_name_changed(self, *_args) -> None:
-        name = self.model_name_var.get().strip()
-        if name:
-            model_dir = RUNS_DIR / name
+    def _on_model_name_changed(self) -> None:
+        model_dir = self._current_model_dir()
+        if model_dir is not None:
             self.frames_path_var.set(rel(model_dir / "frames"))
             self.model_out_dir_var.set(rel(model_dir))
             self.checkpoint_path_var.set(rel(model_dir / "best.pt"))
-            self.export_out_path_var.set(rel(MODELS_DIR / f"{name}.onnx"))
+            self.export_out_path_var.set(rel(MODELS_DIR / f"{model_dir.name}.onnx"))
             self.model_status_var.set(describe_model_status(model_dir))
-            note = read_note(model_dir)
         else:
             self.frames_path_var.set("（モデル名を入力してください）")
             self.model_out_dir_var.set("")
             self.checkpoint_path_var.set("")
             self.export_out_path_var.set("")
             self.model_status_var.set("")
-            note = ""
-        self.note_text.delete("1.0", "end")
-        self.note_text.insert("1.0", note)
+        self._show_note(model_dir)
         # 表に出ているタブが②③⑥なら、新しいモデルの内容に差し替える
         self._on_tab_changed()
 
-    def _save_note(self) -> None:
-        model_dir = self._require_model_dir()
-        if model_dir is None:
-            return
-        write_note(model_dir, self.note_text.get("1.0", "end-1c"))
-        self._append_log(f"\n備考を保存しました（{self.model_name_var.get().strip()}）\n")
+    def _refresh_model_status(self, ok: bool) -> None:
+        """ペア抽出・学習の完了後に、モデルの状態（ペアの件数・学習済みか）の表示を更新する。"""
+        if ok:
+            self.model_status_var.set(
+                describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
 
     def _refresh_model_names(self) -> None:
         self.model_combo["values"] = list_model_names(RUNS_DIR)
@@ -453,7 +422,7 @@ class App:
                                     include_auto_var.get())
             report: list[str] = []
             self._run("extract", cmd, "ペア抽出", on_line=report.append,
-                      on_done=lambda ok: self._after_extract(ok, report))
+                      on_done=lambda ok: (self._refresh_model_status(ok), self._after_extract(ok, report)))
 
         ttk.Button(frame, text="抽出実行", command=run).grid(row=12, column=0, sticky="w", pady=10)
 
@@ -556,7 +525,7 @@ class App:
                                   batch, size_var.get(), no_pretrained_var.get(),
                                   balance=self.balance_var.get(), speed_weight=speed_weight,
                                   no_flip=no_flip_var.get())
-            self._run("train", cmd, "学習", on_line=on_epoch_line)
+            self._run("train", cmd, "学習", on_line=on_epoch_line, on_done=self._refresh_model_status)
 
         ttk.Button(frame, text="学習開始", command=run).grid(row=10, column=0, sticky="w", pady=10)
 
@@ -595,50 +564,12 @@ class App:
             out_path = MODELS_DIR / f"{name}.onnx"
             if not confirm_overwrite(out_path, rel):
                 return
-            self._last_exported_model_name = name
             cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path))
-            self._run("export", cmd, "エクスポート")
+            # ⑥タブの評価対象に、今エクスポートしたモデルを選んでおく
+            self._run("export", cmd, "エクスポート",
+                      on_done=lambda ok: self.eval_tab.select_model(name) if ok else None)
 
         ttk.Button(frame, text="エクスポート実行", command=run).grid(row=5, column=0, sticky="w", pady=10)
-
-    # ── サブプロセス実行・ログ配線 ──
-
-    def _append_log(self, text: str) -> None:
-        self.log_console.append(text)
-
-    def _run(self, job_key: str, cmd: list[str], label: str, *,
-            on_line: Callable[[str], None] | None = None,
-            on_done: Callable[[bool], None] | None = None) -> None:
-        if self.jobs.is_busy():
-            messagebox.showwarning("実行中", "他の処理が終わってから実行してください")
-            return
-        self.status_label.config(text=f"{label} 実行中…")
-        self.stop_btn.config(state="normal")
-        self._append_log(f"\n$ {' '.join(cmd)}\n")
-        self.jobs.start(job_key, cmd, label, on_line=on_line,
-                        on_done=lambda code: self._on_job_done(label, code, on_done))
-
-    def _on_job_done(self, label: str, code: int,
-                     on_done: Callable[[bool], None] | None = None) -> None:
-        ok = code == 0
-        if ok and label in ("ペア抽出", "学習"):
-            self.model_status_var.set(
-                describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
-        if ok and label == "エクスポート":
-            self.eval_tab.select_model(self._last_exported_model_name)
-        self.status_label.config(text="待機中")
-        self.stop_btn.config(state="disabled")
-        if on_done is not None:
-            on_done(ok)
-
-    def _stop(self) -> None:
-        active = self.jobs.active_jobs()
-        if active and self.jobs.stop(active[0][0]):
-            self._append_log("\n（停止を指示しました）\n")
-
-    def _drain_log(self) -> None:
-        self.jobs.drain(self._append_log)
-        self.root.after(100, self._drain_log)
 
 
 def main() -> int:

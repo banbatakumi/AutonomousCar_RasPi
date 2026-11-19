@@ -259,7 +259,7 @@ class TestRunJobKeys(unittest.TestCase):
             app._run("train", ["true"], "学習")
             self.assertEqual(captured["job_key"], "train")
 
-            app._on_job_done("学習", 0)
+            app._on_job_done(0)
             app._run("extract", ["true"], "ペア抽出")
             self.assertEqual(captured["job_key"], "extract")
         finally:

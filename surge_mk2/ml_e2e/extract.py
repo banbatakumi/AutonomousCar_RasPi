@@ -49,6 +49,7 @@ import shutil
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -57,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 from ml_e2e import labels as L  # noqa: E402
 from ml_e2e import records as R  # noqa: E402
 
-__all__ = ["ExtractConfig", "extract_recording", "main", "SRC_NONE", "SRC_LINE", "SRC_FUTURE",
+__all__ = ["ExtractConfig", "extract_recording", "add_common_args", "run_extract", "main", "SRC_NONE", "SRC_LINE", "SRC_FUTURE",
            "KIND_MANUAL", "KIND_AUTO", "KIND_SELF"]
 
 NS = 1_000_000_000
@@ -257,49 +258,74 @@ def extract_recording(path: Path, out_dir: Path, cfg: ExtractConfig, *,
     return info
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+# ── `ml_stereo_e2e/extract.py` と共通の手順（記録ごとに何を足すかと、表示だけが違う） ──
+
+def add_common_args(ap: argparse.ArgumentParser, *, include_self_help: str) -> None:
     ap.add_argument("mcap_files", nargs="+", type=Path)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--k", type=int, default=40, help="経路点の数（既定 40）")
     ap.add_argument("--ds", type=float, default=0.25, help="経路点の間隔 [m]（既定 0.25）")
-    ap.add_argument("--include-self", action="store_true", help="このモデル自身の走行も使う")
-    args = ap.parse_args()
+    ap.add_argument("--include-self", action="store_true", help=include_self_help)
 
-    cfg = ExtractConfig(k=args.k, ds=args.ds, include_self=args.include_self)
-    args.out.mkdir(parents=True, exist_ok=True)
-    meta_path = args.out / "dataset.json"
-    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {"config": cfg.to_json(), "records": {}}
-    if meta["config"] != cfg.to_json():
+
+def run_extract(mcap_files: list[Path], out: Path, settings: dict,
+                extract_one: Callable[[Path, Counter], dict], describe: Callable[[dict], str],
+                count: Callable[[dict], int]) -> int:
+    """記録を1本ずつ標本にして `<out>/dataset.json` に内訳を足す。終了コードを返す。
+
+    :param settings: `dataset.json` の `records` 以外の項目（抽出の設定）。既にある `dataset.json` と違えば
+        混ぜずに止める（違う設定の標本が同じ所に並ぶと、学習がどちらの設定か分からなくなる）
+    :param extract_one: `(記録, 理由の Counter) → 内訳の dict`
+    :param describe: 内訳 → 1行の表示（ファイル名の後ろ）
+    :param count: 内訳 → 合計に足す枚数
+    """
+    out.mkdir(parents=True, exist_ok=True)
+    meta_path = out / "dataset.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {**settings, "records": {}}
+    if any(meta.get(key) != val for key, val in settings.items()):
         print(f"{meta_path} の設定が今回と違います。別の --out へ抽出してください", file=sys.stderr)
         return 2
 
     rejects: Counter = Counter()
     total = 0
-    for p in args.mcap_files:
+    for p in mcap_files:
         if not p.exists():
             print(f"# skip: {p}（見つからない）", file=sys.stderr)
             continue
         try:
-            info = extract_recording(p, args.out, cfg, rejects=rejects)
+            info = extract_one(p, rejects)
         except Exception as e:                              # noqa: BLE001
             print(f"# skip: {p.name}（読めない: {type(e).__name__}: {e}）。壊れていれば "
                   f"`python -m raspi.tools.mcap_repair {p} --inplace`", file=sys.stderr)
             continue
         meta["records"][p.stem] = info
-        total += info["samples"]
         if info.get("skipped"):
             print(f"# {p.name}: 使わない（{info['skipped']}）", flush=True)
         else:
-            print(f"# {p.name}: {info['samples']}枚（ライン {info.get('line', 0)}・軌跡 {info.get('future', 0)}／"
-                  f"自動 {info.get('auto', 0)}・手動 {info.get('manual', 0)}／姿勢のずれ {info.get('pose_lag_ms')}ms）",
-                  flush=True)
+            total += count(info)
+            print(f"# {p.name}: {describe(info)}", flush=True)
+        # 1本ごとに書く。長い抽出を途中で止めても、そこまでの記録は `dataset.json` に残る
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
-    print(f"# 合計 {total}枚 → {args.out}")
+    print(f"# 合計 {total}枚 → {out}")
     if rejects:
         print("# 使わなかったコマ: " + "・".join(f"{r} {n}枚" for r, n in rejects.most_common()))
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_common_args(ap, include_self_help="このモデル自身の走行も使う")
+    args = ap.parse_args()
+
+    cfg = ExtractConfig(k=args.k, ds=args.ds, include_self=args.include_self)
+    return run_extract(
+        args.mcap_files, args.out, {"config": cfg.to_json()},
+        lambda p, rejects: extract_recording(p, args.out, cfg, rejects=rejects),
+        lambda info: (f"{info['samples']}枚（ライン {info.get('line', 0)}・軌跡 {info.get('future', 0)}／"
+                      f"自動 {info.get('auto', 0)}・手動 {info.get('manual', 0)}／姿勢のずれ {info.get('pose_lag_ms')}ms）"),
+        lambda info: info["samples"])
 
 
 if __name__ == "__main__":

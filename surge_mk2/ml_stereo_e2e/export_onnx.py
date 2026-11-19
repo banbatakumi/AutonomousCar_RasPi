@@ -6,12 +6,14 @@
 契約は `<run>/train_config.json`（`train.py` が書く）からそのまま写す（`ml_e2e/export_onnx.py` と同じ理由で、
 今の `vehicle.toml` では埋めない）。`raspi/nodes/stereo_e2e_node.py` の `load_model()` がこの契約を照合し、合わないモデルは
 読まない。書き出した後、PyTorch と ONNXRuntime の出力を突き合わせ、実車と同じ `load_model()` で読めることを確かめる。
+
+書き出しの手順（版の検査・契約の写し方）は `ml_e2e.export_onnx.export_run` と共通で、ここは2番目の入力（視差の窓）に
+関わる差分（契約のキー・入力の名前・モデルの組み立て・形を決める入力）だけを渡す。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -21,8 +23,9 @@ import torch
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from ml_common import onnx_export  # noqa: E402
+from ml_e2e.export_onnx import export_run  # noqa: E402
 from ml_stereo_e2e.model import StereoE2EModel  # noqa: E402
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
 from raspi.core.stereo_e2e_preproc import INPUT_NAMES, PREPROC_VERSION  # noqa: E402
 
 __all__ = ["CONTRACT_KEYS", "build_model", "export", "verify_parity", "main", "DEFAULT_MODELS_DIR"]
@@ -56,54 +59,22 @@ def _dummy(cfg: dict, rng: np.random.Generator | None = None) -> tuple[np.ndarra
     return (*(rng.random(s, dtype=np.float32) for s in shapes), avail)
 
 
+def _load(model: StereoE2EModel, path: Path) -> None:
+    model.load_state_dict(torch.load(path, map_location="cpu"))
+
+
 def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: str = "") -> dict:
     """`run_dir` の重みを `out_path` へ書き、同名の `.json` に契約を書く。契約の dict を返す。"""
-    cfg = json.loads((run_dir / "train_config.json").read_text())
-    if cfg.get("preproc_version") != PREPROC_VERSION:
-        raise ValueError(f"学習時の入出力の版 {cfg.get('preproc_version')} が今の版 {PREPROC_VERSION} と違う。"
-                         "学習し直してください")
-    if cfg.get("image_preproc_version") != PREPROC_VERSION_STEREO:
-        raise ValueError("学習時の画像の前処理の版が今と違う（学習し直してください）")
-    missing = [key for key in CONTRACT_KEYS if key not in cfg]
-    if missing:
-        raise ValueError(f"train_config.json に {missing} が無い")
-
-    model = build_model(cfg)
-    model.load_state_dict(torch.load(run_dir / checkpoint, map_location="cpu"))
-    model.eval()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        model, tuple(torch.from_numpy(a) for a in _dummy(cfg)), str(out_path),
-        input_names=list(INPUT_NAMES), output_names=["output"],
-        opset_version=18, external_data=False,     # `ml_e2e/export_onnx.py` と同じ
-    )
-    contract = {key: cfg[key] for key in CONTRACT_KEYS}
-    contract["inputs"] = list(INPUT_NAMES)
-    contract["cams"] = list(STEREO_CAMS)
-    contract["best"] = cfg.get("best", {})
-    contract["note"] = note
-    out_path.with_suffix(".json").write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")
-    return contract
+    return export_run(run_dir, out_path, preproc_version=PREPROC_VERSION, contract_keys=CONTRACT_KEYS,
+                      input_names=INPUT_NAMES, build=build_model, load=_load, dummy=_dummy,
+                      checkpoint=checkpoint, note=note)
 
 
 def verify_parity(onnx_path: Path, model: StereoE2EModel, cfg: dict, *, n_samples: int = 4,
                   atol: float = 1e-3, seed: int = 0) -> float:
-    """PyTorch と ONNXRuntime の出力差の最大値。`atol` を超えたら例外。入力を伏せた組も混ぜる。"""
-    import onnxruntime as ort
-
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    model.eval()
-    rng = np.random.default_rng(seed)
-    max_err = 0.0
-    with torch.no_grad():
-        for _ in range(n_samples):
-            arrs = _dummy(cfg, rng)
-            ref = model(*(torch.from_numpy(a) for a in arrs)).numpy()
-            got = session.run(None, dict(zip(INPUT_NAMES, arrs)))[0]
-            max_err = max(max_err, float(np.abs(ref - got).max()))
-    if max_err > atol:
-        raise ValueError(f"PyTorch と ONNXRuntime の出力が最大 {max_err:.2e} ずれています（許容 {atol}）")
-    return max_err
+    """PyTorch と ONNXRuntime の出力差の最大値。`atol` を超えたら例外。入力を伏せた組も混ぜる（`_dummy`）。"""
+    return onnx_export.verify_parity(onnx_path, model, lambda rng: _dummy(cfg, rng), input_names=INPUT_NAMES,
+                                     n_samples=n_samples, atol=atol, seed=seed)
 
 
 def main() -> int:
@@ -120,7 +91,7 @@ def main() -> int:
     try:
         cfg = export(args.run, out, checkpoint=args.checkpoint, note=note)
         model = build_model(cfg)
-        model.load_state_dict(torch.load(args.run / args.checkpoint, map_location="cpu"))
+        _load(model, args.run / args.checkpoint)
         err = verify_parity(out, model, cfg)
         from raspi.nodes.stereo_e2e_node import load_model
         load_model(out)                    # 実車と同じ読み込みが通るか

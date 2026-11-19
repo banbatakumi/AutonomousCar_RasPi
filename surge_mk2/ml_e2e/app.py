@@ -13,7 +13,8 @@
 
 重い処理は `extract.py`・`check_labels.py`・`train.py`・`export_onnx.py`・`eval.py` をサブプロセスとして呼ぶだけ
 （`ml_cam_e2e/app.py` と同じ設計。このプロセスは torch を import しない）。ログ表示・サブプロセスの実行・
-モデル名の採番・備考・学習曲線・閉じるときの確認は `ml_common/` の共通部品。
+モデル名の採番・備考・学習曲線・閉じるときの確認は `ml_common/` の共通部品（ジョブの実行・停止・備考は
+`ml_common/job_panel.JobPanelBase`）。
 
 ## モデル名がそのまま置き場を決める
 
@@ -39,19 +40,16 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 ML_E2E_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ML_E2E_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from ml_common.close_handler import confirm_and_close  # noqa: E402
 from ml_common.dialogs import confirm_overwrite  # noqa: E402
 from ml_common.epoch_log import make_epoch_line_parser  # noqa: E402
-from ml_common.job_runner import JobRunner  # noqa: E402
-from ml_common.log_console import LogConsole  # noqa: E402
+from ml_common.job_panel import CONFIRM_STOP_JOB_KEYS, JobPanelBase  # noqa: E402
 from ml_common.naming import list_versioned_names, next_versioned_name  # noqa: E402
-from ml_common.notes import read_note, write_note  # noqa: E402
 from ml_common.paths import make_rel  # noqa: E402
 from ml_common.train_graph import TrainCurveCanvas  # noqa: E402
 
@@ -80,8 +78,8 @@ class Flavor(NamedTuple):
 
 
 FUSION = Flavor("ml_e2e", "E2E 融合（LiDAR＋カメラ）", RUNS_DIR, MODELS_DIR, "点群")
-#: 学習だけは長いので、ウィンドウを閉じる前に確認する
-_CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
+#: 学習だけは長いので、ウィンドウを閉じる前に確認する（`ml_common/job_panel.py`）
+_CONFIRM_STOP_JOB_KEYS = CONFIRM_STOP_JOB_KEYS
 
 rel = make_rel(REPO_ROOT)
 parse_epoch_line = make_epoch_line_parser("val_mae")
@@ -199,29 +197,23 @@ def describe_model_status(model_dir: Path) -> str:
 
 # ── GUI ──
 
-class App:
+class App(JobPanelBase):
     """タブ5枚（標本作成・ラベル確認・学習・エクスポート・評価）＋共有のログ欄。"""
 
     def __init__(self, root: tk.Tk, flavor: Flavor = FUSION) -> None:
-        self.root = root
+        self._init_job_panel(root, REPO_ROOT, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
         if flavor is FUSION:
             # 作った時点のモジュールの `RUNS_DIR`・`MODELS_DIR` を使う（テストが差し替える）
             flavor = flavor._replace(runs_dir=RUNS_DIR, models_dir=MODELS_DIR)
         self.flavor = flavor
         root.title(f"SURGE Mk.2 — {flavor.title}")
         root.geometry("1120x900")
-        self.python = sys.executable
-        self.jobs = JobRunner(REPO_ROOT, allow_concurrent=False, prefix_labels=False)
         self._check_images: list[Path] = []
         self._check_index = 0
         self._photo: tk.PhotoImage | None = None        # 参照を持たないと GC で消える
 
         self._build_widgets()
-        self.root.after(100, self._drain_log)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(
-            self.root, self.jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS,
-            confirm_message=lambda label: f"{label}が実行中です。終了すると学習が中断されます。"
-            "\n\n本当に終了しますか？"))
+        self._start_job_panel()
 
     # ── 画面構築 ──
 
@@ -231,17 +223,7 @@ class App:
         self.data_path_var = tk.StringVar(value="")
         self.export_out_path_var = tk.StringVar(value="")
 
-        bottom = ttk.Frame(self.root)
-        bottom.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-        self.status_label = ttk.Label(bottom, text="待機中")
-        self.status_label.pack(side="left")
-        self.stop_btn = ttk.Button(bottom, text="停止", command=self._stop, state="disabled")
-        self.stop_btn.pack(side="right")
-
-        log_frame = ttk.LabelFrame(self.root, text="ログ")
-        log_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-        self.log_console = LogConsole(log_frame, height=9)
-        self.log_console.widget.pack(fill="both", expand=True, padx=4, pady=4)
+        self.log_console = self._build_log_and_status(log_height=9, at_bottom=True)
 
         nb = ttk.Notebook(self.root)
         nb.pack(side="top", fill="both", expand=True, padx=8, pady=8)
@@ -253,8 +235,7 @@ class App:
         self._build_eval_tab(nb)
         nb.bind("<<NotebookTabChanged>>", lambda _e: self._refresh())
 
-        self.model_name_var.trace_add("write", lambda *_a: self._on_model_name_changed())
-        self._on_model_name_changed()
+        self._bind_model_name(self.model_name_var)
 
     def _initial_name(self) -> str:
         """作業中のモデル（いちばん新しい run）。無ければ `v1`。"""
@@ -266,33 +247,24 @@ class App:
 
     # ── モデル名（全タブ共有） ──
 
-    def _model_dir(self) -> Path | None:
+    def _current_model_dir(self) -> Path | None:
         name = self.model_name_var.get().strip()
         return self.flavor.runs_dir / name if name else None
 
-    def _require_model_dir(self) -> Path | None:
-        d = self._model_dir()
-        if d is None:
-            messagebox.showerror("入力エラー", "①タブでモデル名を入力してください")
-        return d
-
     def _on_model_name_changed(self) -> None:
-        d = self._model_dir()
+        d = self._current_model_dir()
         if d is not None:
             self.data_path_var.set(rel(d / "data"))
             self.export_out_path_var.set(rel(self.flavor.models_dir / f"{d.name}.onnx"))
-            note = read_note(d)
         else:
             self.data_path_var.set("（モデル名を入力してください）")
             self.export_out_path_var.set("")
-            note = ""
-        self.note_text.delete("1.0", "end")
-        self.note_text.insert("1.0", note)
+        self._show_note(d)
         self._refresh()
 
     def _refresh(self) -> None:
         """今のモデルの内容を全タブに映し直す（タブを開くたび・処理が終わるたび）。"""
-        d = self._model_dir()
+        d = self._current_model_dir()
         meta = read_dataset(d / "data") if d is not None else {"records": {}}
         rows = record_rows(meta)
         self.model_status_var.set(describe_model_status(d) if d is not None else "")
@@ -316,13 +288,6 @@ class App:
         self.init_combo["values"] = [""] + [n for n in list_versioned_names(runs)
                                            if (runs / n / "best.pt").exists()
                                            and (d is None or n != d.name)]
-
-    def _save_note(self) -> None:
-        d = self._require_model_dir()
-        if d is None:
-            return
-        write_note(d, self.note_text.get("1.0", "end-1c"))
-        self._append_log(f"\n備考を保存しました（{d.name}）\n")
 
     # ── ① 標本作成 ──
 
@@ -413,7 +378,7 @@ class App:
                                    "同じ設定に戻すか、新しいモデル名で作ってください。")
 
     def _remove_selected(self) -> None:
-        d = self._model_dir()
+        d = self._current_model_dir()
         names = list(self.record_tree.selection())
         if d is None or not names:
             return
@@ -466,7 +431,7 @@ class App:
         self.check_canvas.pack(fill="both", expand=True, pady=(4, 0))
 
     def _load_check_images(self) -> None:
-        d = self._model_dir()
+        d = self._current_model_dir()
         images = sorted((d / "data" / "check").glob("*.jpg")) if d is not None else []
         if images != self._check_images:
             self._check_images = images
@@ -672,38 +637,11 @@ class App:
             "★ 開ループの比較（車は記録どおりに動く）。周回できるかどうかは実走でしか分からない。"),
             foreground="gray", justify="left").grid(row=3, column=0, columnspan=2, sticky="w")
 
-    # ── サブプロセス実行・ログ配線 ──
+    # ── サブプロセス実行・ログ配線（`JobPanelBase`） ──
 
-    def _append_log(self, text: str) -> None:
-        self.log_console.append(text)
-
-    def _run(self, job_key: str, cmd: list[str], label: str, *,
-             on_line: Callable[[str], None] | None = None,
-             on_done: Callable[[bool], None] | None = None) -> None:
-        if self.jobs.is_busy():
-            messagebox.showwarning("実行中", "他の処理が終わってから実行してください")
-            return
-        self.status_label.config(text=f"{label} 実行中…")
-        self.stop_btn.config(state="normal")
-        self._append_log(f"\n$ {' '.join(cmd)}\n")
-        self.jobs.start(job_key, cmd, label, on_line=on_line,
-                        on_done=lambda code: self._on_job_done(code, on_done))
-
-    def _on_job_done(self, code: int, on_done: Callable[[bool], None] | None = None) -> None:
-        self.status_label.config(text="待機中")
-        self.stop_btn.config(state="disabled")
+    def _after_job(self, ok: bool) -> None:
+        # どの処理の後でも、記録の一覧・状態の表示を今のモデルの内容に映し直す
         self._refresh()
-        if on_done is not None:
-            on_done(code == 0)
-
-    def _stop(self) -> None:
-        active = self.jobs.active_jobs()
-        if active and self.jobs.stop(active[0][0]):
-            self._append_log("\n（停止を指示しました）\n")
-
-    def _drain_log(self) -> None:
-        self.jobs.drain(self._append_log)
-        self.root.after(100, self._drain_log)
 
 
 def main(flavor: Flavor = FUSION) -> int:

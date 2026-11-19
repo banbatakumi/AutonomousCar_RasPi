@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -53,14 +52,12 @@ def stereo_settings(match: MatchParams, rows: tuple[int, int], disp_hw: tuple[in
 
 def vehicle_for(path: Path):
     """記録したときの `Vehicle`（メタデータ `provenance.vehicle_toml`）。無ければ今の `vehicle.toml`。`(Vehicle, 出どころ)`。"""
-    import tomllib
-
     from raspi.core.vehicle import Vehicle
     from tools.stereo_bench.data import load_run_info
 
-    toml = load_run_info(path).get("provenance", {}).get("vehicle_toml")
-    if toml:
-        return Vehicle._from_dict(tomllib.loads(toml), Path("<provenance>")), "記録"
+    recorded = Vehicle.from_provenance(load_run_info(path))
+    if recorded is not None:
+        return recorded, "記録"
     return Vehicle.load(), "今の vehicle.toml"
 
 
@@ -153,11 +150,7 @@ def extract_recording(path: Path, out_dir: Path, cfg: E.ExtractConfig, settings:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mcap_files", nargs="+", type=Path)
-    ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--k", type=int, default=40, help="経路点の数（既定 40）")
-    ap.add_argument("--ds", type=float, default=0.25, help="経路点の間隔 [m]（既定 0.25）")
-    ap.add_argument("--include-self", action="store_true", help="このモデル自身・E2E 融合の走行も手本に使う")
+    E.add_common_args(ap, include_self_help="このモデル自身・E2E 融合の走行も手本に使う")
     ap.add_argument("--algo", choices=("bm", "sgbm"), default=MatchParams.algo)
     ap.add_argument("--scale", type=float, default=MatchParams.scale)
     ap.add_argument("--num-disp", type=int, default=MatchParams.num_disp)
@@ -174,40 +167,12 @@ def main() -> int:
     settings = stereo_settings(MatchParams(args.algo, args.scale, args.num_disp, args.block, args.uniqueness),
                                rows, hw)
     cfg = E.ExtractConfig(k=args.k, ds=args.ds, include_self=args.include_self, self_sources=SELF_SOURCES)
-    args.out.mkdir(parents=True, exist_ok=True)
-    meta_path = args.out / "dataset.json"
-    meta = (json.loads(meta_path.read_text()) if meta_path.exists()
-            else {"config": cfg.to_json(), "stereo": settings, "records": {}})
-    if meta["config"] != cfg.to_json() or meta.get("stereo") != settings:
-        print(f"{meta_path} の設定が今回と違います。別の --out へ抽出してください", file=sys.stderr)
-        return 2
-
-    rejects: Counter = Counter()
-    total = 0
-    for p in args.mcap_files:
-        if not p.exists():
-            print(f"# skip: {p}（見つからない）", file=sys.stderr)
-            continue
-        try:
-            info = extract_recording(p, args.out, cfg, settings, rejects=rejects)
-        except Exception as e:                              # noqa: BLE001
-            print(f"# skip: {p.name}（読めない: {type(e).__name__}: {e}）。壊れていれば "
-                  f"`python -m raspi.tools.mcap_repair {p} --inplace`", file=sys.stderr)
-            continue
-        meta["records"][p.stem] = info
-        if info.get("skipped"):
-            print(f"# {p.name}: 使わない（{info['skipped']}）", flush=True)
-            continue
-        total += info.get("disp_ok", 0)
-        print(f"# {p.name}: {info.get('disp_ok', 0)}/{info['samples']}枚（ライン {info.get('line', 0)}・"
-              f"軌跡 {info.get('future', 0)}／視差の出た割合 {info.get('valid_frac')}／校正は{info.get('calib')}）",
-              flush=True)
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
-    print(f"# 合計 {total}枚 → {args.out}")
-    if rejects:
-        print("# 使わなかったコマ: " + "・".join(f"{r} {n}枚" for r, n in rejects.most_common()))
-    return 0
+    return E.run_extract(
+        args.mcap_files, args.out, {"config": cfg.to_json(), "stereo": settings},
+        lambda p, rejects: extract_recording(p, args.out, cfg, settings, rejects=rejects),
+        lambda info: (f"{info.get('disp_ok', 0)}/{info['samples']}枚（ライン {info.get('line', 0)}・"
+                      f"軌跡 {info.get('future', 0)}／視差の出た割合 {info.get('valid_frac')}／校正は{info.get('calib')}）"),
+        lambda info: info.get("disp_ok", 0))
 
 
 if __name__ == "__main__":

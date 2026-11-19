@@ -7,8 +7,11 @@
 埋めない**（学習後に同定で値が変わると、学習時と違う基準で物理量へ戻すことになる）。
 `raspi/nodes/e2e_fusion_node.py` の `load_model()` がこの契約を照合し、合わないモデルは読まない。
 
-**舵・速度の直接出力があった頃（入出力の版 1）に学習した重みも書き出せる。** 入力と経路点の並びは同じで、
-直接出力のヘッドを捨てるだけ（`model.load_weights`）。契約の版は今の版で書く。
+**学習時の入出力の版（`preproc_version`）と画像の前処理の版が今と一致しなければ書き出さない。** 以前は舵・速度の
+直接出力があった頃（版 1）の重みを、直接出力のヘッドを捨てて今の版として書き出していたが、版を黙って書き換えると
+ノードの照合をすり抜ける抜け道になる（`ml_stereo_e2e` は版が違えば拒否しており、扱いも食い違っていた）。
+版の検査は `ml_common/onnx_export.check_version` で4本の書き出しに共通。版 1 の重みは `train.py --init` で
+追加学習の出発点には使える（`model.load_weights`）。
 
 書き出した後、PyTorch と ONNXRuntime の出力を突き合わせ、さらに**実車と同じ `load_model()` で読めること**を確かめる。
 """
@@ -19,13 +22,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
-import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from ml_common import onnx_export  # noqa: E402
 from ml_e2e.model import FusionModel, load_weights  # noqa: E402
 from raspi.core.cam_e2e_preproc import (  # noqa: E402
     PREPROC_VERSION_STEREO,
@@ -33,14 +37,12 @@ from raspi.core.cam_e2e_preproc import (  # noqa: E402
 )
 from raspi.core.e2e_fusion_preproc import INPUT_NAMES, PREPROC_VERSION  # noqa: E402
 
-__all__ = ["CONTRACT_KEYS", "build_model", "export", "verify_parity", "main"]
+__all__ = ["CONTRACT_KEYS", "build_model", "export", "export_run", "verify_parity", "main"]
 
 #: `train_config.json` から契約へ写すキー
 CONTRACT_KEYS = ("preproc_version", "image_preproc_version", "input_size", "crop_x", "fov_deg", "max_range",
                  "history", "k", "ds", "xy_scale", "max_steer", "speed_ref", "yaw_rate_ref", "steer_link",
                  "maps", "train_records")
-#: 学習時の入出力の版のうち、今の版として書き出せるもの（1 = 直接出力のヘッドつき。入力と経路点は同じ）
-_EXPORTABLE_VERSIONS = (1, PREPROC_VERSION)
 DEFAULT_MODELS_DIR = _ROOT / "models" / "e2e_fusion"
 
 
@@ -58,57 +60,45 @@ def _dummy(cfg: dict, rng: np.random.Generator | None = None) -> tuple[np.ndarra
     return (*(rng.random(s, dtype=np.float32) for s in shapes), avail)
 
 
-def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: str = "") -> dict:
-    """`run_dir` の重みを `out_path` へ書き、同名の `.json` に契約を書く。契約の dict を返す。"""
+def export_run(run_dir: Path, out_path: Path, *, preproc_version: int, contract_keys: tuple[str, ...],
+               input_names: tuple[str, ...], build: Callable[[dict], Any], load: Callable[[Any, Path], None],
+               dummy: Callable[..., tuple[np.ndarray, ...]], checkpoint: str = "best.pt", note: str = "") -> dict:
+    """`train_config.json` から契約を写して書き出す、融合系（`ml_e2e`・`ml_stereo_e2e`）で共通の手順。
+    ステレオは2番目の入力（視差）に関わる `contract_keys`・`input_names`・`build`・`dummy` だけを差し替える。
+    契約の dict を返す。"""
     cfg = json.loads((run_dir / "train_config.json").read_text())
-    if cfg.get("preproc_version") not in _EXPORTABLE_VERSIONS:
-        raise ValueError(f"学習時の入出力の版 {cfg.get('preproc_version')} が今の版 {PREPROC_VERSION} と違う。"
-                         "学習し直してください")
-    cfg["preproc_version"] = PREPROC_VERSION
-    if cfg.get("image_preproc_version") != PREPROC_VERSION_STEREO:
-        # 版2は前後配置のころの右1台の学習（ノードは版3しか読まない）
-        raise ValueError("学習時の画像の前処理の版が今と違う（左右2台で学習し直してください）")
-    missing = [key for key in CONTRACT_KEYS if key not in cfg]
+    onnx_export.check_version("入出力", cfg.get("preproc_version"), preproc_version)
+    # 版2は前後配置のころの右1台の学習（ノードは版3しか読まない）
+    onnx_export.check_version("画像の前処理", cfg.get("image_preproc_version"), PREPROC_VERSION_STEREO)
+    missing = [key for key in contract_keys if key not in cfg]
     if missing:
         raise ValueError(f"train_config.json に {missing} が無い")
 
-    model = build_model(cfg)
-    load_weights(model, run_dir / checkpoint)
+    model = build(cfg)
+    load(model, run_dir / checkpoint)
     model.eval()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        model, tuple(torch.from_numpy(a) for a in _dummy(cfg)), str(out_path),
-        input_names=list(INPUT_NAMES), output_names=["output"],
-        opset_version=18,          # `ml_cam/export_onnx.py` と同じ理由（18未満は失敗する）
-        external_data=False,       # 重みを別ファイルに切り出させない
-    )
-    contract = {key: cfg[key] for key in CONTRACT_KEYS}
-    contract["inputs"] = list(INPUT_NAMES)
+    onnx_export.export(model, dummy(cfg), out_path, input_names=input_names)
+    contract = {key: cfg[key] for key in contract_keys}
+    contract["inputs"] = list(input_names)
     contract["cams"] = list(STEREO_CAMS)          # 画像のカメラの並び（[右, 左] の 6ch）
     contract["best"] = cfg.get("best", {})
     contract["note"] = note
-    out_path.with_suffix(".json").write_text(json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8")
+    onnx_export.write_contract(out_path, contract)
     return contract
+
+
+def export(run_dir: Path, out_path: Path, *, checkpoint: str = "best.pt", note: str = "") -> dict:
+    """`run_dir` の重みを `out_path` へ書き、同名の `.json` に契約を書く。契約の dict を返す。"""
+    return export_run(run_dir, out_path, preproc_version=PREPROC_VERSION, contract_keys=CONTRACT_KEYS,
+                      input_names=INPUT_NAMES, build=build_model, load=load_weights, dummy=_dummy,
+                      checkpoint=checkpoint, note=note)
 
 
 def verify_parity(onnx_path: Path, model: FusionModel, cfg: dict, *, n_samples: int = 4,
                   atol: float = 1e-3, seed: int = 0) -> float:
-    """PyTorch と ONNXRuntime の出力差の最大値。`atol` を超えたら例外。入力を伏せた組も混ぜる。"""
-    import onnxruntime as ort
-
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    model.eval()
-    rng = np.random.default_rng(seed)
-    max_err = 0.0
-    with torch.no_grad():
-        for _ in range(n_samples):
-            arrs = _dummy(cfg, rng)
-            ref = model(*(torch.from_numpy(a) for a in arrs)).numpy()
-            got = session.run(None, dict(zip(INPUT_NAMES, arrs)))[0]
-            max_err = max(max_err, float(np.abs(ref - got).max()))
-    if max_err > atol:
-        raise ValueError(f"PyTorch と ONNXRuntime の出力が最大 {max_err:.2e} ずれています（許容 {atol}）")
-    return max_err
+    """PyTorch と ONNXRuntime の出力差の最大値。`atol` を超えたら例外。入力を伏せた組も混ぜる（`_dummy`）。"""
+    return onnx_export.verify_parity(onnx_path, model, lambda rng: _dummy(cfg, rng), input_names=INPUT_NAMES,
+                                     n_samples=n_samples, atol=atol, seed=seed)
 
 
 def main() -> int:

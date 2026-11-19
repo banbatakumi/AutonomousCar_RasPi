@@ -15,8 +15,10 @@ onnx>=1.16
 onnxruntime>=1.18,<2
 onnxscript>=0.7          # torch 2.5+ の既定エクスポータ（dynamo=True）が要求する
 
-# アノテーションツール（`ml_cam/annotate.py`）の表示・マウス入力
-opencv-python>=4.9
+# アノテーションツール（`ml_cam/annotate.py`）の表示・マウス入力。Mac は GUI 付きの contrib 版。
+# raspi/requirements.txt・tools/requirements.txt と同じ配布物にする（opencv-python 系を2つ併存させると cv2 が壊れる）
+opencv-contrib-python-headless>=4.9,<6; platform_system != "Darwin"
+opencv-contrib-python>=4.9,<6; platform_system == "Darwin"
 
 # SAM（Segment Anything）— 半自動アノテーションの本体。
 # チェックポイントは同梱されないので別途ダウンロードすること:

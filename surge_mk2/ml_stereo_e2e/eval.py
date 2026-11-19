@@ -26,7 +26,6 @@ import io
 import json
 import math
 import sys
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -36,15 +35,15 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(_ROOT / "ml_cam_e2e"))
 
-from yaw_aug import camera_fx_px, yawed_window  # noqa: E402
+from yaw_aug import yawed_window  # noqa: E402
 
 from ml_e2e import labels as L  # noqa: E402
 from ml_e2e import records as R  # noqa: E402
-from ml_e2e.eval import _corr, _uncrop, _vs  # noqa: E402
+from ml_e2e.eval import (_uncrop, _vs, add_yaw, ideal_steer, is_driving, label_index, load_labels,  # noqa: E402
+                         new_result, print_header, print_row, score_step, yaw_window)
 from ml_stereo_e2e.extract import disparity_for, make_processor, vehicle_for  # noqa: E402
 from raspi.auto.registry import merged_params  # noqa: E402
 from raspi.auto.stereo_e2e import StereoE2E  # noqa: E402
-from raspi.core.cam_e2e_preproc import crop_margin_px  # noqa: E402
 from raspi.core.stereo_e2e_preproc import (DISP_VERSION, crop_disp, disp_from_bytes, disp_input,  # noqa: E402
                                            disp_to_bytes, yaw_shift_disp)
 from raspi.core.vehicle import Vehicle  # noqa: E402
@@ -80,11 +79,8 @@ def replay(mcap: Path, node: StereoE2ENode, vehicle: Vehicle, *, params: dict[st
     model = node.model
     proc = make_processor(vehicle_for(mcap)[0], model_settings(model))
     planner = StereoE2E()
-    label_idx = {int(t): i for i, t in enumerate(labels["t"])} if labels is not None else {}
-    stride = max(1, int(round(model.ds / float(labels["ds"])))) if labels is not None else 1
-
-    out = {"n": 0, "ready": 0, "reasons": Counter(), "steer": [], "steer_ref": [], "speed": [], "speed_ref": [],
-           "near": [], "full": [], "b": [], "infer_ms": [], "dpsi": [], "dpsi_ratio": []}
+    label_idx, stride = label_index(labels, model.ds)
+    out = new_result()
     vi = 0
     last_plan_t = 0
     for seq, (t, jpg, jpg_left) in enumerate(R.iter_image_pairs(mcap)):
@@ -96,9 +92,7 @@ def replay(mcap: Path, node: StereoE2ENode, vehicle: Vehicle, *, params: dict[st
             continue
         vs = _vs(rec, vi - 1)
         ci = min(max(int(np.searchsorted(rec.cmd_t, t_now)), 0), len(rec.cmd_t) - 1)
-        driving = (bool(rec.cmd_arm[ci]) and rec.cmd_mode[ci] in (1, 2) and vs.speed >= 0.15
-                   and not rec.cmd_torque_mode[ci])
-        if not driving:
+        if not is_driving(rec, ci, vs):
             continue
         try:
             arr, _ = disparity_for(proc, jpg, jpg_left, model.disp_hw)
@@ -112,38 +106,13 @@ def replay(mcap: Path, node: StereoE2ENode, vehicle: Vehicle, *, params: dict[st
         dt = (t_now - last_plan_t) / NS if last_plan_t else 0.0
         last_plan_t = t_now
         st = planner.plan(plan, vs, params, dt)
-        out["n"] += 1
-        if plan.ready:
-            out["infer_ms"].append(plan.infer_ms)
-        if not st.ready:
-            out["reasons"][st.reason.split("（")[0]] += 1
+        if not score_step(out, plan, st, rec, ci, model, labels, label_idx.get(t), stride):
             continue
-        out["ready"] += 1
-        out["steer"].append(st.target_steer)
-        out["steer_ref"].append(float(rec.cmd_steer[ci]))
-        if rec.cmd_mode[ci] == 2 and not rec.cmd_brake[ci] and rec.cmd_speed[ci] > 0.2:
-            out["speed"].append(st.target_speed)
-            out["speed_ref"].append(float(rec.cmd_speed[ci]))
-        out["b"].append(float(np.mean(plan.path_b)))
-
-        li = label_idx.get(t)
-        if li is not None:
-            sel = slice(stride - 1, stride * model.k, stride)
-            ref = labels["path_xy"][li][sel]
-            ok = labels["path_valid"][li][sel]
-            d = np.hypot(np.asarray(plan.path_x) - ref[:, 0], np.asarray(plan.path_y) - ref[:, 1])
-            near = max(1, int(2.0 / model.ds))
-            if ok[:near].any():
-                out["near"].append(float(d[:near][ok[:near]].mean()))
-            if ok.any():
-                out["full"].append(float(d[ok].mean()))
 
         if yaw_every and out["ready"] % yaw_every == 0:
             g = yaw_response(model, vehicle, rgb, rgb_left, arr, vs, params, band,
                              ref_xy=np.column_stack([plan.path_x, plan.path_y]))
-            if g is not None and abs(g[1]) > 1e-3:
-                out["dpsi"].append(g[0])
-                out["dpsi_ratio"].append(g[0] / g[1])
+            add_yaw(out, g)
     return out
 
 
@@ -155,11 +124,10 @@ def yaw_response(model: StereoOnnx, vehicle: Vehicle, rgb: np.ndarray, rgb_left:
     `ml_e2e/eval.yaw_response` と同じ測り方。点群の代わりに視差の帯を同じ角度だけ透視投影どおりに横にずらし
     （`stereo_e2e_preproc.yaw_shift_disp`。`band` は帯の列で測った焦点距離・主点）、学習と同じ窓を切る。
     """
-    fx = camera_fx_px(vehicle, "front", rgb.shape[1])
-    fx_left = camera_fx_px(vehicle, "left", rgb.shape[1])
-    margin = crop_margin_px(rgb.shape[1], model.crop_x)
-    if math.ceil(max(fx, fx_left) * math.radians(psi_deg)) > margin:
+    win_geom = yaw_window(vehicle, rgb, model.crop_x, psi_deg)
+    if win_geom is None:
         return None
+    fx, fx_left, margin = win_geom
     look = params["look_k"] * vs.speed + params["look_min"]
     steers, ideal = [], []
     for sgn in (-1, 1):
@@ -170,9 +138,7 @@ def yaw_response(model: StereoOnnx, vehicle: Vehicle, rgb: np.ndarray, rgb_left:
                         model.state_input(vs.speed, vs.steer_actual, vs.yaw_rate))
         steers.append(L.pursuit_steer(o.path_xy, look, vehicle.wheelbase, vehicle.max_steer))
         if ref_xy is not None:
-            c, sn = math.cos(-psi), math.sin(-psi)
-            rot = np.stack([c * ref_xy[:, 0] - sn * ref_xy[:, 1], sn * ref_xy[:, 0] + c * ref_xy[:, 1]], axis=1)
-            ideal.append(L.pursuit_steer(rot, look, vehicle.wheelbase, vehicle.max_steer))
+            ideal.append(ideal_steer(ref_xy, psi, look, vehicle))
     span = math.radians(2 * psi_deg)
     g_ideal = (ideal[1] - ideal[0]) / span if len(ideal) == 2 else float("nan")
     return (steers[1] - steers[0]) / span, g_ideal
@@ -246,35 +212,12 @@ def main() -> int:
     cfg = json.loads(args.model.with_suffix(".json").read_text())
     trained = set(cfg.get("train_records", []))
     band = (float(cfg["disp_col_f"]), float(cfg["disp_col_cx"])) if "disp_col_f" in cfg else None
-    ds_data = None
-    if args.data is not None:
-        ds_data = float(json.loads((args.data / "dataset.json").read_text())["config"]["ds"])
 
-    print(f"{'記録':30} {'学習':4} {'組':>5} {'走れる':>6} {'舵相関':>6} {'舵RMS':>6} {'速度比':>6} "
-          f"{'近く':>6} {'全体':>6} {'b':>5} {'dδ/dψ':>6} {'理想比':>6} {'推論':>6}")
+    print_header("組")
     for p in args.mcap_files:
-        labels = None
-        if args.data is not None and (args.data / f"{p.stem}.npz").exists():
-            d = np.load(args.data / f"{p.stem}.npz")
-            labels = {"t": d["t"], "path_xy": d["path_xy"], "path_valid": d["path_valid"], "ds": ds_data}
-        r = replay(p, node, vehicle, params=params, band=band, labels=labels,
+        r = replay(p, node, vehicle, params=params, band=band, labels=load_labels(args.data, p.stem),
                    yaw_every=args.yaw_every if band is not None else 0)
-
-        def med(key):
-            return float(np.median(r[key])) if r[key] else float("nan")
-
-        def mean(key):
-            return float(np.mean(r[key])) if r[key] else float("nan")
-
-        s, ref = np.asarray(r["steer"]), np.asarray(r["steer_ref"])
-        rms = float(np.degrees(np.sqrt(np.mean((s - ref) ** 2)))) if len(s) else float("nan")
-        ratio = float(np.median(np.asarray(r["speed"]) / np.asarray(r["speed_ref"]))) if r["speed"] else float("nan")
-        print(f"{p.stem:30} {'○' if p.stem in trained else '—':4} {r['n']:5d} "
-              f"{100.0 * r['ready'] / max(1, r['n']):5.1f}% {_corr(s, ref):6.3f} {rms:5.1f}° "
-              f"{ratio:6.2f} {mean('near'):5.2f}m {mean('full'):5.2f}m {mean('b'):5.2f} {med('dpsi'):6.2f} "
-              f"{med('dpsi_ratio'):6.2f} {mean('infer_ms'):5.1f}ms", flush=True)
-        for why, n in r["reasons"].most_common(4):
-            print(f"    走れない: {why} ×{n}")
+        print_row(p.stem, r, trained)
     return 0
 
 

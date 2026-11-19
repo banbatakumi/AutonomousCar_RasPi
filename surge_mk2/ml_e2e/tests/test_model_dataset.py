@@ -203,9 +203,10 @@ class TestExport(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     export(run, out)
 
-    def test_weights_with_the_old_direct_head_export_to_the_same_path_outputs(self):
-        """舵・速度の直接出力があった頃（版 1）の重みは、そのヘッドだけ捨てて今の版で書き出せる。"""
-        from raspi.nodes.e2e_fusion_node import load_model
+    def test_old_direct_head_run_is_refused_but_its_weights_still_load(self):
+        """舵・速度の直接出力があった頃（版 1）の run は書き出さない（版を黙って今の版に書き換えない）。
+        重みそのものは、ヘッドだけ捨てて読める（`--init` で追加学習の出発点に使う）。"""
+        from ml_e2e.model import load_weights
 
         with tempfile.TemporaryDirectory() as d:
             run = Path(d) / "run"
@@ -222,11 +223,13 @@ class TestExport(unittest.TestCase):
             old["ctrl_head.bias"] = torch.zeros(2)
             torch.save(old, run / "best.pt")
             out = Path(d) / "models" / "t.onnx"
-            contract = export(run, out)
-            self.assertEqual(contract["preproc_version"], PREPROC_VERSION)
-            self.assertNotIn("label_shift_ms", contract)
-            self.assertLess(verify_parity(out, model, contract), 1e-3)
-            self.assertEqual(load_model(out).k, K)
+            with self.assertRaises(ValueError):
+                export(run, out)
+            self.assertFalse(out.exists())
+            fresh = build_model(cfg)
+            load_weights(fresh, run / "best.pt")
+            for key, val in model.state_dict().items():
+                self.assertTrue(torch.equal(fresh.state_dict()[key], val), key)
 
 
 class TestStereo(_Data):

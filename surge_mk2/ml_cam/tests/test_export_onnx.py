@@ -30,6 +30,9 @@ class TestExportOnnx(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         cls.ckpt_path = Path(cls._tmp.name) / "model.pt"
         torch.save(DrivableSegModel(pretrained=False).state_dict(), cls.ckpt_path)
+        # 版の記録が要る（無い run は書き出さない。`ml_common.onnx_export.check_version`）
+        (Path(cls._tmp.name) / "train_config.json").write_text(
+            json.dumps({"input_size": [64, 48], "preproc_version": PREPROC_VERSION}))
         cls.out_path = Path(cls._tmp.name) / "model.onnx"
         export(cls.ckpt_path, cls.out_path, (64, 48))
 
@@ -83,16 +86,20 @@ class TestExportOnnx(unittest.TestCase):
             with self.assertRaises(ValueError):
                 export(ckpt, Path(d) / "m.onnx")
 
+    def test_run_without_preproc_version_is_rejected(self):
+        """版の記録が無い run は、今の版を書いて通さない（版の一致が必須）。"""
+        with tempfile.TemporaryDirectory() as d:
+            ckpt = self._ckpt_with_train_config(d, input_size=[64, 48])
+            with self.assertRaises(ValueError):
+                export(ckpt, Path(d) / "m.onnx")
+
     def test_note_is_embedded_in_the_exported_json(self):
         """`ml_cam/app.py`の備考欄→`note.txt`→エクスポート、という経路で
         `<名前>.json`に書き込まれる自由記述の備考（`ml_lidar/export_onnx_rl.py`
         の同名テストと対称）。GUIのモデル選択（`AutoPanel.tsx`）
         が表示するので、`note`キーの往復を確認する。"""
         with tempfile.TemporaryDirectory() as d:
-            ckpt_path = Path(d) / "model.pt"
-            model = DrivableSegModel(pretrained=False)
-            torch.save(model.state_dict(), ckpt_path)
-
+            ckpt_path = self._ckpt_with_train_config(d, preproc_version=PREPROC_VERSION)
             out_path = Path(d) / "model.onnx"
             export(ckpt_path, out_path, (64, 48), note="夜間走行用、露出補正あり")
 

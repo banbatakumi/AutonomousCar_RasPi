@@ -9,9 +9,9 @@
 子プロセスの標準出力をログ欄に流し込む配線だけ。中身のスクリプトを直接
 書き換えれば、このGUI側は何も変えなくてよい。
 
-ログ表示・サブプロセス実行基盤・run名管理・note.txt・学習曲線グラフ・
-ウィンドウクローズ処理は `ml_cam_e2e/app.py`・`ml_lidar/app.py` と共通実装のため
-`ml_common/` に切り出してある。SAMチェックポイントのダウンロードは
+ログ表示・サブプロセス実行基盤（ジョブの実行・停止・備考は `ml_common/job_panel.JobPanelBase`）・
+run名管理・note.txt・学習曲線グラフ・ウィンドウクローズ処理は `ml_cam_e2e/app.py`・`ml_lidar/app.py` と
+共通実装のため `ml_common/` に切り出してある。SAMチェックポイントのダウンロードは
 Popenを使わない`urllib`ダウンロードで他2アプリに無い処理のため、共通化せずこのまま。
 
 Tkinter は Python 標準ライブラリ同梱なので、`ml_cam/requirements.txt` に
@@ -48,11 +48,9 @@ ML_CAM_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ML_CAM_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from ml_common.close_handler import confirm_and_close  # noqa: E402
 from ml_common.dialogs import confirm_overwrite  # noqa: E402
 from ml_common.epoch_log import make_epoch_line_parser  # noqa: E402
-from ml_common.job_runner import JobRunner  # noqa: E402
-from ml_common.log_console import LogConsole  # noqa: E402
+from ml_common.job_panel import CONFIRM_STOP_JOB_KEYS, JobPanelBase  # noqa: E402
 from ml_common.naming import list_versioned_names, next_versioned_name  # noqa: E402
 from ml_common.notes import read_note, write_note  # noqa: E402
 from ml_common.paths import make_rel  # noqa: E402
@@ -68,16 +66,14 @@ __all__ = [
 ]
 
 RUNS_DIR = ML_CAM_DIR / "runs"
-#: 実車側（`raspi/nodes/cam_perception_node.py` の `DEFAULT_MODELS_DIR`・`telemetry_node.py` の
-#: `SEG_MODELS_DIR`）と同じ場所。モデルの種類ごとに `models/` のサブフォルダを切る
+#: 実車側（`raspi/nodes/cam_perception_node.py` の `DEFAULT_MODELS_DIR`・`raspi/nodes/telemetry/models.py` の
+#: `MODEL_SLOTS["cam_model"]`）と同じ場所。モデルの種類ごとに `models/` のサブフォルダを切る
 MODELS_DIR = REPO_ROOT / "models" / "seg"
 DEFAULT_CHECKPOINT_DIR = ML_CAM_DIR / "checkpoints"
 #: これまでのトラブルシューティングで実際に使った SAM のチェックポイント
 SAM_CHECKPOINT_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-#: 学習中でも壊れない・止めても惜しくない類のジョブは確認無しで終了時に落とす。
-#: 学習だけは数十分〜数時間かかりうるので、ウィンドウを閉じる前に一言確認する
-#: （`ml_lidar/app.py`と同じ考え方）
-_CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
+#: 閉じるときに確認するジョブ（学習だけ。`ml_common/job_panel.py`）
+_CONFIRM_STOP_JOB_KEYS = CONFIRM_STOP_JOB_KEYS
 
 rel = make_rel(REPO_ROOT)
 list_model_names = list_versioned_names
@@ -174,29 +170,21 @@ def download_file(url: str, dest: Path, *, progress_cb: Callable[[int, int | Non
 
 # ── GUI ──
 
-class App:
+class App(JobPanelBase):
     """タブ5枚（抽出・アノテーション・学習・エクスポート・プレビュー）＋共有のログ欄。"""
 
     def __init__(self, root: tk.Tk) -> None:
-        self.root = root
+        self._init_job_panel(root, REPO_ROOT, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
         root.title("SURGE Mk.2 — 学習データ作成・学習")
         root.geometry("760x680")
 
-        self.python = sys.executable
-        self.jobs = JobRunner(REPO_ROOT, allow_concurrent=False, prefix_labels=False)
         #: SAMチェックポイントのダウンロード中フラグ。`self.jobs`はPopenベースの
         #: ジョブしか追跡できないため、排他制御だけ`_is_busy()`で合わせて見る
         self._downloading = False
         self.download_queue: "queue.Queue[tuple]" = queue.Queue()
-        #: 直近でエクスポートしたモデル名。完了後に⑤プレビュータブへ引き継ぐために覚えておく
-        self._last_exported_model_name = ""
 
         self._build_widgets()
-        self.root.after(100, self._drain_log)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(
-            self.root, self.jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS,
-            confirm_message=lambda label: f"{label}が実行中です。終了すると学習が中断されます。"
-            "\n\n本当に終了しますか？"))
+        self._start_job_panel()
 
     def _is_busy(self) -> bool:
         return self.jobs.is_busy() or self._downloading
@@ -224,21 +212,10 @@ class App:
         self._build_preview_tab(nb)
 
         # ウィジェット（note_text等）が全部揃ってからトレースを張り、初期値を反映する
-        self.model_name_var.trace_add("write", self._on_model_name_changed)
-        self._on_model_name_changed()
+        self._bind_model_name(self.model_name_var)
 
-        log_frame = ttk.LabelFrame(self.root, text="ログ")
-        log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.log_console = LogConsole(log_frame, height=16)
+        self.log_console = self._build_log_and_status(log_height=16, at_bottom=False)
         self.log_widget = self.log_console.widget
-        self.log_widget.pack(fill="both", expand=True, padx=4, pady=4)
-
-        bottom = ttk.Frame(self.root)
-        bottom.pack(fill="x", padx=8, pady=(0, 8))
-        self.status_label = ttk.Label(bottom, text="待機中")
-        self.status_label.pack(side="left")
-        self.stop_btn = ttk.Button(bottom, text="停止", command=self._stop, state="disabled")
-        self.stop_btn.pack(side="right")
 
     def _browse_dir(self, var: tk.StringVar) -> None:
         d = filedialog.askdirectory(initialdir=var.get() or str(REPO_ROOT))
@@ -252,40 +229,32 @@ class App:
 
     # ── モデル名（①〜④タブ共有） ──
 
-    def _require_model_dir(self) -> Path | None:
+    def _current_model_dir(self) -> Path | None:
         name = self.model_name_var.get().strip()
-        if not name:
-            messagebox.showerror("入力エラー", "①タブでモデル名を入力してください")
-            return None
-        return RUNS_DIR / name
+        return RUNS_DIR / name if name else None
 
-    def _on_model_name_changed(self, *_args) -> None:
-        name = self.model_name_var.get().strip()
-        if name:
-            model_dir = RUNS_DIR / name
+    def _on_model_name_changed(self) -> None:
+        model_dir = self._current_model_dir()
+        if model_dir is not None:
             self.frames_path_var.set(rel(model_dir / "frames"))
             self.model_out_dir_var.set(rel(model_dir))
             self.checkpoint_path_var.set(rel(model_dir / "best.pt"))
-            self.export_out_path_var.set(rel(MODELS_DIR / f"{name}.onnx"))
+            self.export_out_path_var.set(rel(MODELS_DIR / f"{model_dir.name}.onnx"))
             self.preview_frames_var.set(rel(model_dir / "frames"))
             self.model_status_var.set(describe_model_status(model_dir))
-            note = read_note(model_dir)
         else:
             self.frames_path_var.set("（モデル名を入力してください）")
             self.model_out_dir_var.set("")
             self.checkpoint_path_var.set("")
             self.export_out_path_var.set("")
             self.model_status_var.set("")
-            note = ""
-        self.note_text.delete("1.0", "end")
-        self.note_text.insert("1.0", note)
+        self._show_note(model_dir)
 
-    def _save_note(self) -> None:
-        model_dir = self._require_model_dir()
-        if model_dir is None:
-            return
-        write_note(model_dir, self.note_text.get("1.0", "end-1c"))
-        self._append_log(f"\n備考を保存しました（{self.model_name_var.get().strip()}）\n")
+    def _refresh_model_status(self, ok: bool) -> None:
+        """フレーム抽出・学習の完了後に、モデルの状態（フレーム枚数・学習済みか）の表示を更新する。"""
+        if ok:
+            self.model_status_var.set(
+                describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
 
     def _refresh_model_names(self) -> None:
         """モデル名コンボボックスのドロップダウンを開く直前に呼ばれ、既存モデル名で
@@ -385,7 +354,7 @@ class App:
                     return
             cmd = build_extract_cmd(self.python, self._extract_files, str(model_dir / "frames"),
                                     cam_var.get(), interval, count)
-            self._run("extract", cmd, "フレーム抽出")
+            self._run("extract", cmd, "フレーム抽出", on_done=self._refresh_model_status)
 
         ttk.Button(frame, text="抽出実行", command=run).grid(row=10, column=0, sticky="w", pady=10)
 
@@ -514,7 +483,7 @@ class App:
             self.train_graph.reset()
             cmd = build_train_cmd(self.python, str(model_dir / "frames"), str(model_dir), epochs,
                                   batch, size_var.get(), no_pretrained_var.get())
-            self._run("train", cmd, "学習", on_line=on_epoch_line)
+            self._run("train", cmd, "学習", on_line=on_epoch_line, on_done=self._refresh_model_status)
 
         ttk.Button(frame, text="学習開始", command=run).grid(row=7, column=0, sticky="w", pady=10)
 
@@ -551,9 +520,8 @@ class App:
             out_path = MODELS_DIR / f"{name}.onnx"
             if not confirm_overwrite(out_path, rel):
                 return
-            self._last_exported_model_name = name
             cmd = build_export_cmd(self.python, str(model_dir / "best.pt"), str(out_path))
-            self._run("export", cmd, "エクスポート")
+            self._run("export", cmd, "エクスポート", on_done=lambda ok: self._after_export(ok, name))
 
         ttk.Button(frame, text="エクスポート実行", command=run).grid(row=5, column=0, sticky="w", pady=10)
 
@@ -597,34 +565,13 @@ class App:
         ttk.Button(frame, text="プレビュー開始（別ウィンドウが開きます）", command=run).grid(
             row=3, column=0, columnspan=2, sticky="w", pady=10)
 
-    # ── サブプロセス実行・ログ配線 ──
+    # ── サブプロセス実行・ログ配線（`JobPanelBase`） ──
 
-    def _append_log(self, text: str) -> None:
-        self.log_console.append(text)
-
-    def _run(self, job_key: str, cmd: list[str], label: str, *,
-            on_line: Callable[[str], None] | None = None) -> None:
-        if self._is_busy():
-            messagebox.showwarning("実行中", "他の処理が終わってから実行してください")
-            return
-        self.status_label.config(text=f"{label} 実行中…")
-        self.stop_btn.config(state="normal")
-        self._append_log(f"\n$ {' '.join(cmd)}\n")
-        self.jobs.start(job_key, cmd, label, on_line=on_line,
-                        on_done=lambda code: self._on_job_done(label, code))
-
-    def _on_job_done(self, label: str, code: int) -> None:
-        ok = code == 0
-        if ok and label in ("フレーム抽出", "学習"):
-            # モデルの状態（フレーム枚数・学習済みか）が変わったので更新する
-            self.model_status_var.set(
-                describe_model_status(RUNS_DIR / self.model_name_var.get().strip()))
-        if ok and label == "エクスポート":
+    def _after_export(self, ok: bool, name: str) -> None:
+        if ok:
             # ⑤タブのプレビュー対象に、今エクスポートしたモデルを選んでおく
             self._refresh_exported_models()
-            self.preview_model_var.set(self._last_exported_model_name)
-        self.status_label.config(text="待機中")
-        self.stop_btn.config(state="disabled")
+            self.preview_model_var.set(name)
 
     def _download_sam_checkpoint(self, dest: Path) -> None:
         if self._is_busy():
@@ -658,11 +605,6 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _stop(self) -> None:
-        active = self.jobs.active_jobs()
-        if active and self.jobs.stop(active[0][0]):
-            self._append_log("\n（停止を指示しました）\n")
-
     def _drain_download_queue(self) -> None:
         try:
             while True:
@@ -678,10 +620,8 @@ class App:
         except queue.Empty:
             pass
 
-    def _drain_log(self) -> None:
-        self.jobs.drain(self._append_log)
+    def _poll(self) -> None:
         self._drain_download_queue()
-        self.root.after(100, self._drain_log)
 
 
 def main() -> int:

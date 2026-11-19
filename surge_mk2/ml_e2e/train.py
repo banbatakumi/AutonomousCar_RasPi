@@ -35,8 +35,8 @@ import math
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
@@ -46,26 +46,20 @@ sys.path.insert(0, str(_ROOT / "ml_cam_e2e"))
 
 from yaw_aug import BODY_MASK_LEFT_NAME, camera_fx_px, ensure_body_mask, front_fx_px, margin_for  # noqa: E402
 
+from ml_common.train_utils import BestTracker, make_optimizer, pick_device, seed_all  # noqa: E402
 from ml_e2e.dataset import FusionDataset, InputSpec, load_records, sample_weights, split_records  # noqa: E402
 from ml_e2e.model import FusionModel, load_weights  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
 from raspi.core.e2e_fusion_preproc import PREPROC_VERSION  # noqa: E402
 from raspi.core.vehicle import Vehicle  # noqa: E402
 
-__all__ = ["pick_device", "split_output", "losses", "evaluate", "main"]
+__all__ = ["pick_device", "split_output", "losses", "evaluate", "add_common_args", "read_path_ds", "list_frames",
+           "image_crop", "make_loaders", "fit", "main"]
 
 #: 素の L1 を足す重み（経路点の NLL に対して）
 _L1_WEIGHT = 0.5
 #: 「近く」の経路誤差を出す範囲 [m]
 _NEAR_M = 2.0
-
-
-def pick_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 def split_output(out: torch.Tensor, k: int):
@@ -136,8 +130,10 @@ def evaluate(model: FusionModel, loader, device, spec: InputSpec, xy_scale: floa
             "v_mps": div("v", "v_n") * spec.speed_ref}
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+# ── `ml_stereo_e2e/train.py` と共通の手順（2番目の入力が点群か視差かだけが違う） ──
+
+def add_common_args(ap: argparse.ArgumentParser, *, second: str, no_flip_help: str | None = None) -> None:
+    """融合系の学習で共通の引数。`second` は2番目の入力の名前（`--drop-<second>` になる）。"""
     ap.add_argument("--data", type=Path, required=True, help="`extract.py` の出力フォルダ")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--epochs", type=int, default=20)
@@ -146,37 +142,137 @@ def main() -> int:
     ap.add_argument("--size", default="224x128", help="画像の入力解像度 幅x高さ")
     ap.add_argument("--k", type=int, default=32, help="経路点の数")
     ap.add_argument("--stride", type=int, default=1, help="抽出した経路点を何個おきに使うか")
-    ap.add_argument("--fov-deg", type=int, default=270)
-    ap.add_argument("--max-range", type=float, default=8.0)
     ap.add_argument("--val", nargs="*", default=None, help="検証に回す記録の名前（既定は地図ごとに最後の1本）")
     ap.add_argument("--balance", type=float, default=0.5, help="直進過多の補正 0〜1")
-    ap.add_argument("--no-flip", action="store_true")
-    ap.add_argument("--yaw-aug-deg", type=float, default=6.0, help="向きをずらす拡張の最大角[deg]。0 で無効")
+    ap.add_argument("--no-flip", action="store_true", help=no_flip_help)
+    ap.add_argument("--yaw-aug-deg", type=float, default=6.0, help="向きをずらす拡張の最大角[deg]（正の値）")
     ap.add_argument("--photo-aug", type=float, default=1.0)
     ap.add_argument("--drop-image", type=float, default=0.15)
-    ap.add_argument("--drop-lidar", type=float, default=0.15)
+    ap.add_argument(f"--drop-{second}", type=float, default=0.15)
     ap.add_argument("--drop-state", type=float, default=0.2)
     ap.add_argument("--w-v", type=float, default=1.0)
     ap.add_argument("--init", type=Path, default=None, help="この重みから始める（追加学習）")
     ap.add_argument("--no-pretrained", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--seed", type=int, default=0)
+
+
+def read_path_ds(meta: dict, args) -> float | None:
+    """経路点の間隔 [m]。抽出した点の数が `--k`×`--stride` に足りなければ `None`（理由は表示済み）。"""
+    if args.k * args.stride > int(meta["config"]["k"]):
+        print(f"経路点が足りません（抽出は {meta['config']['k']} 点）", file=sys.stderr)
+        return None
+    return float(meta["config"]["ds"]) * args.stride
+
+
+def list_frames(data_dir: Path) -> tuple[list[Path], list[Path]]:
+    """`(右の画像, 左の画像)`。左は名前の末尾が `_left`。"""
+    all_frames = sorted((data_dir / "frames").glob("*/*.jpg"))
+    return ([p for p in all_frames if not p.stem.endswith("_left")],
+            [p for p in all_frames if p.stem.endswith("_left")])
+
+
+def image_crop(data_dir: Path, frames: list[Path], frames_left: list[Path], *, yaw_aug_deg: float,
+               fx_px: float, fx_px_left: float, src_w: int):
+    """`(左右の切り落とし crop_x, 右の車体マスク, 左の車体マスク)`。切り落としは左右の fx の大きい方で決める
+    （どちらのカメラでも、±`yaw_aug_deg` のずらしで空いた列が窓に入らない幅）。"""
+    crop_x = margin_for(yaw_aug_deg, max(fx_px, fx_px_left)) / src_w
+    return (crop_x, ensure_body_mask(data_dir, frames),
+            ensure_body_mask(data_dir, frames_left, BODY_MASK_LEFT_NAME))
+
+
+def make_loaders(train_ds, val_ds, weights, args):
+    """`(学習の loader, 検証の loader または None)`。`weights` があれば直進過多の補正の重み付き抽選。"""
+    loader_kw = dict(batch_size=args.batch_size, num_workers=args.workers, persistent_workers=args.workers > 0)
+    if weights is not None:
+        sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
+        train_loader = DataLoader(train_ds, sampler=sampler, drop_last=True, **loader_kw)
+    else:
+        train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kw)
+    val_loader = DataLoader(val_ds, shuffle=False, **loader_kw) if len(val_ds) else None
+    return train_loader, val_loader
+
+
+def fit(model, train_loader, val_loader, device, spec, xy_scale: float, ds: float, args, *,
+        second: str, second_label: str, drop_second: float, write_config: Callable[..., None]) -> None:
+    """学習ループ（エポックごとの検証・best/last の保存・最後に入力を伏せた評価）。
+
+    `second` はモデルの2番目の入力（batch のキー。`lidar` か `disp`）、`second_label` は表示の名前。
+    best は検証の経路誤差（`path_m`）が最小のエポック。検証が無ければ最後のエポックを best.pt にする。
+    """
+    opt = make_optimizer(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    steps = args.epochs * len(train_loader)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=max(1, steps), pct_start=0.1)
+
+    def ev(avail=(1.0, 1.0, 1.0)):
+        return evaluate(model, val_loader, device, spec, xy_scale, ds, avail=avail, second=second)
+
+    best = BestTracker("min")
+    t0 = time.time()
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        agg = {"path": 0.0, "v": 0.0}
+        nb = 0
+        for batch in train_loader:
+            batch = _to(batch, device)
+            a = _avail(batch["image"].shape[0], device, drop_image=args.drop_image,
+                       drop_lidar=drop_second, drop_state=args.drop_state)
+            ls = losses(model(batch["image"], batch[second], batch["state"], a), batch, spec.k, xy_scale)
+            loss = ls["path"] + args.w_v * ls["v"]
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            opt.step()
+            sched.step()
+            for key in agg:
+                agg[key] += float(ls[key].detach())
+            nb += 1
+        tr = {key: val / max(1, nb) for key, val in agg.items()}
+        line = f"epoch {epoch:3d}/{args.epochs}  loss={sum(tr.values()):.4f}"
+        if val_loader is not None:
+            m = ev()
+            # `ml_common/epoch_log.py` は `loss=` の直後の `val_mae=` を読む。項目は後ろに足す
+            line += (f"  val_mae={m['path_m']:.4f}  near={m['near_m']:.3f}m  b={m['b_m']:.2f}m"
+                     f"  v={m['v_mps']:.2f}m/s")
+            if best.update(m["path_m"], m):
+                torch.save(model.state_dict(), args.out / "best.pt")
+        print(line + f"  ({time.time() - t0:.0f}s)", flush=True)
+    if val_loader is None:
+        torch.save(model.state_dict(), args.out / "best.pt")
+    torch.save(model.state_dict(), args.out / "last.pt")
+
+    best_metrics = best.info or {}
+    extra: dict = {"best": best_metrics}
+    if val_loader is not None:
+        model.load_state_dict(torch.load(args.out / "best.pt", map_location=device))
+        no_img, no_2nd, no_st = ev((0.0, 1.0, 1.0)), ev((1.0, 0.0, 1.0)), ev((1.0, 1.0, 0.0))
+        extra.update({"no_image": no_img, f"no_{second}": no_2nd, "no_state": no_st})
+        print(f"# 最良: 経路 {best_metrics['path_m']:.3f}m（近く {best_metrics['near_m']:.3f}m）  "
+              f"点の速度 {best_metrics['v_mps']:.2f}m/s")
+        print(f"# 入力を伏せたときの経路誤差: 画像なし {no_img['path_m']:.3f}m（近く {no_img['near_m']:.3f}m）  "
+              f"{second_label}なし {no_2nd['path_m']:.3f}m（近く {no_2nd['near_m']:.3f}m）  "
+              f"車両状態なし {no_st['path_m']:.3f}m")
+    write_config(**extra)
+    print(f"# 完了 → {args.out}/best.pt")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_common_args(ap, second="lidar")
+    ap.add_argument("--fov-deg", type=int, default=270)
+    ap.add_argument("--max-range", type=float, default=8.0)
     args = ap.parse_args()
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    seed_all(args.seed)
     vehicle = Vehicle.load()
     w, h = (int(x) for x in args.size.lower().split("x"))
     meta = json.loads((args.data / "dataset.json").read_text())
-    ds = float(meta["config"]["ds"]) * args.stride
-    if args.k * args.stride > int(meta["config"]["k"]):
-        print(f"経路点が足りません（抽出は {meta['config']['k']} 点）", file=sys.stderr)
+    ds = read_path_ds(meta, args)
+    if ds is None:
         return 2
 
     margin_deg = int(math.ceil(args.yaw_aug_deg))
-    all_frames = sorted((args.data / "frames").glob("*/*.jpg"))
-    frames = [p for p in all_frames if not p.stem.endswith("_left")]       # 右（左は `_left` 付き）
-    frames_left = [p for p in all_frames if p.stem.endswith("_left")]
+    frames, frames_left = list_frames(args.data)
     if not frames:
         print("画像がありません。先に `ml_e2e.extract` で標本を作ってください", file=sys.stderr)
         return 2
@@ -190,9 +286,8 @@ def main() -> int:
     src_w = Image.open(frames[0]).size[0]
     fx_px = front_fx_px(vehicle, src_w)
     fx_px_left = camera_fx_px(vehicle, "left", src_w)
-    crop_x = margin_for(args.yaw_aug_deg, max(fx_px, fx_px_left)) / src_w
-    body_mask = ensure_body_mask(args.data, frames)
-    body_mask_left = ensure_body_mask(args.data, frames_left, BODY_MASK_LEFT_NAME)
+    crop_x, body_mask, body_mask_left = image_crop(args.data, frames, frames_left, yaw_aug_deg=args.yaw_aug_deg,
+                                                   fx_px=fx_px, fx_px_left=fx_px_left, src_w=src_w)
     note = (f"車体マスク 右 {body_mask.mean() * 100:.1f}%・左 {body_mask_left.mean() * 100:.1f}%"
             f"  fx(左)={fx_px_left:.1f}px")
     print(f"# 向きの拡張: ±{args.yaw_aug_deg:g}°  fx={fx_px:.1f}px  左右の切り落とし {crop_x * 100:.1f}%  "
@@ -214,15 +309,8 @@ def main() -> int:
                              fx_px_left=fx_px_left, body_mask_left=body_mask_left)
     val_ds = FusionDataset(val_r, args.data, spec, margin_deg=margin_deg)
     xy_scale = train_ds.xy_scale
-    loader_kw = dict(batch_size=args.batch_size, num_workers=args.workers,
-                     persistent_workers=args.workers > 0)
-    if args.balance > 0:
-        sampler = WeightedRandomSampler(sample_weights(train_r, spec.max_steer, alpha=args.balance),
-                                        num_samples=len(train_ds), replacement=True)
-        train_loader = DataLoader(train_ds, sampler=sampler, drop_last=True, **loader_kw)
-    else:
-        train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **loader_kw)
-    val_loader = DataLoader(val_ds, shuffle=False, **loader_kw) if len(val_ds) else None
+    weights = sample_weights(train_r, spec.max_steer, alpha=args.balance) if args.balance > 0 else None
+    train_loader, val_loader = make_loaders(train_ds, val_ds, weights, args)
 
     device = pick_device()
     model = FusionModel(lidar_ch=spec.history + 1, lidar_n=spec.fov_deg + 1, k=spec.k, xy_scale=xy_scale,
@@ -231,9 +319,6 @@ def main() -> int:
         load_weights(model, args.init)
         print(f"# {args.init} から追加学習")
     model.to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    steps = args.epochs * len(train_loader)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=max(1, steps), pct_start=0.1)
     print(f"# device: {device}  学習 {len(train_ds)}件 / 検証 {len(val_ds)}件  経路点 {spec.k}×{ds:g}m "
           f"（{xy_scale:g}m）  max_steer={spec.max_steer:.3f}rad")
 
@@ -257,56 +342,8 @@ def main() -> int:
         (args.out / "train_config.json").write_text(json.dumps({**config, **extra}, indent=2, ensure_ascii=False))
 
     write_config()
-    best = math.inf
-    best_metrics: dict = {}
-    t0 = time.time()
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        agg = {"path": 0.0, "v": 0.0}
-        nb = 0
-        for batch in train_loader:
-            batch = _to(batch, device)
-            a = _avail(batch["image"].shape[0], device, drop_image=args.drop_image,
-                       drop_lidar=args.drop_lidar, drop_state=args.drop_state)
-            ls = losses(model(batch["image"], batch["lidar"], batch["state"], a), batch, spec.k, xy_scale)
-            loss = ls["path"] + args.w_v * ls["v"]
-            opt.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            opt.step()
-            sched.step()
-            for key in agg:
-                agg[key] += float(ls[key].detach())
-            nb += 1
-        tr = {key: val / max(1, nb) for key, val in agg.items()}
-        line = (f"epoch {epoch:3d}/{args.epochs}  loss={sum(tr.values()):.4f}")
-        if val_loader is not None:
-            m = evaluate(model, val_loader, device, spec, xy_scale, ds)
-            # `ml_common/epoch_log.py` は `loss=` の直後の `val_mae=` を読む。項目は後ろに足す
-            line += (f"  val_mae={m['path_m']:.4f}  near={m['near_m']:.3f}m  b={m['b_m']:.2f}m"
-                     f"  v={m['v_mps']:.2f}m/s")
-            if m["path_m"] < best:
-                best, best_metrics = m["path_m"], m
-                torch.save(model.state_dict(), args.out / "best.pt")
-        print(line + f"  ({time.time() - t0:.0f}s)", flush=True)
-    if val_loader is None:
-        torch.save(model.state_dict(), args.out / "best.pt")
-    torch.save(model.state_dict(), args.out / "last.pt")
-
-    extra: dict = {"best": best_metrics}
-    if val_loader is not None:
-        model.load_state_dict(torch.load(args.out / "best.pt", map_location=device))
-        no_img = evaluate(model, val_loader, device, spec, xy_scale, ds, avail=(0.0, 1.0, 1.0))
-        no_lid = evaluate(model, val_loader, device, spec, xy_scale, ds, avail=(1.0, 0.0, 1.0))
-        no_st = evaluate(model, val_loader, device, spec, xy_scale, ds, avail=(1.0, 1.0, 0.0))
-        extra.update(no_image=no_img, no_lidar=no_lid, no_state=no_st)
-        print(f"# 最良: 経路 {best_metrics['path_m']:.3f}m（近く {best_metrics['near_m']:.3f}m）  "
-              f"点の速度 {best_metrics['v_mps']:.2f}m/s")
-        print(f"# 入力を伏せたときの経路誤差: 画像なし {no_img['path_m']:.3f}m（近く {no_img['near_m']:.3f}m）  "
-              f"点群なし {no_lid['path_m']:.3f}m（近く {no_lid['near_m']:.3f}m）  "
-              f"車両状態なし {no_st['path_m']:.3f}m")
-    write_config(**extra)
-    print(f"# 完了 → {args.out}/best.pt")
+    fit(model, train_loader, val_loader, device, spec, xy_scale, ds, args, second="lidar", second_label="点群",
+        drop_second=args.drop_lidar, write_config=write_config)
     return 0
 
 

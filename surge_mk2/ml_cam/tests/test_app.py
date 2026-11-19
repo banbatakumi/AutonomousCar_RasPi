@@ -164,7 +164,8 @@ class TestPaths(unittest.TestCase):
         # 実車側（cam_perception_node・telemetry_node）と同じ `models/seg/`
         self.assertEqual(MODELS_DIR, REPO_ROOT / "models" / "seg")
         from raspi.nodes.cam_perception_node import DEFAULT_MODELS_DIR
-        from raspi.nodes.telemetry_node import SEG_MODELS_DIR
+        from raspi.nodes.telemetry.models import MODEL_SLOTS
+        SEG_MODELS_DIR = MODEL_SLOTS["cam_model"].models_dir
         self.assertEqual(MODELS_DIR, DEFAULT_MODELS_DIR)
         self.assertEqual(MODELS_DIR, SEG_MODELS_DIR)
 
@@ -326,7 +327,7 @@ class TestRunJobKeys(unittest.TestCase):
             app._run("train", ["true"], "学習")
             self.assertEqual(captured["job_key"], "train")
 
-            app._on_job_done("学習", 0)  # 状態を待機中へ戻す（次のassertのため）
+            app._on_job_done(0)  # 状態を待機中へ戻す（次のassertのため）
             app._run("extract", ["true"], "フレーム抽出")
             self.assertEqual(captured["job_key"], "extract")
         finally:

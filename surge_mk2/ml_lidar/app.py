@@ -7,8 +7,8 @@
 サブプロセスとして呼び出すだけの薄い操作パネル。**学習・推論のロジックは
 一切持たない**——`ml_cam/app.py`・`ml_cam_e2e/app.py`と同じ設計方針。
 
-ログ表示・サブプロセス実行基盤・run名管理・note.txt・ウィンドウクローズ処理は
-`ml_common/`に切り出してある共通実装をそのまま使う。
+ログ表示・サブプロセス実行基盤（ジョブの実行・備考は `ml_common/job_panel.JobPanelBase` の並行実行の形）・
+run名管理・note.txt・ウィンドウクローズ処理は `ml_common/`に切り出してある共通実装をそのまま使う。
 
 ## `ml_cam_e2e/app.py`と違い、学習中もTensorBoard・観戦・エクスポートを並行実行できる
 
@@ -33,17 +33,14 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable
 
 ML_LIDAR_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ML_LIDAR_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from ml_common.close_handler import confirm_and_close  # noqa: E402
-from ml_common.job_runner import JobRunner  # noqa: E402
+from ml_common.job_panel import CONFIRM_STOP_JOB_KEYS, JobPanelBase  # noqa: E402
 from ml_common.log_window import LogWindow  # noqa: E402
 from ml_common.naming import latest_run_name, list_versioned_names, next_versioned_name  # noqa: E402
-from ml_common.notes import read_note, write_note  # noqa: E402
 from ml_common.paths import make_rel  # noqa: E402
 from ml_common.sys_monitor import SysMonitorWindow  # noqa: E402
 from ml_lidar.run_info import has_existing_run  # noqa: E402
@@ -63,9 +60,8 @@ from ml_lidar.real_courses import load_real_course  # noqa: E402
 #: 学習タブ「探索ノイズ初期標準偏差(log)」の既定（gSDE OFF時）。gSDEのチェックで-3と
 #: 相互に切り替える判定にも使うので、表示値と同じ文字列で持つ
 _LOG_STD_INIT_DEFAULT = "-1.0"
-#: 学習中でも壊れない・止めても惜しくない類のジョブは確認無しで終了時に落とす。
-#: 学習だけは数十分〜数時間かかりうるので、ウィンドウを閉じる前に一言確認する
-_CONFIRM_STOP_JOB_KEYS = frozenset({"train"})
+#: 閉じるときに確認するジョブ（学習だけ。`ml_common/job_panel.py`）
+_CONFIRM_STOP_JOB_KEYS = CONFIRM_STOP_JOB_KEYS
 
 rel = make_rel(REPO_ROOT)
 
@@ -160,26 +156,23 @@ def build_eval_stats_cmd(python: str, model_path: str, episodes: int) -> list[st
 
 # ── GUI ──
 
-class App:
+class App(JobPanelBase):
     """タブ4枚（学習・観戦・エクスポート・run一覧）＋共有のログ欄・実行中ジョブ一覧。"""
 
+    model_name_hint = "run名を入力してください"
+
     def __init__(self, root: tk.Tk) -> None:
-        self.root = root
+        self._init_job_panel(root, REPO_ROOT, allow_concurrent=True, prefix_labels=True,
+                             confirm_job_keys=_CONFIRM_STOP_JOB_KEYS)
         root.title("SURGE Mk.2 — ml_lidar 学習・観戦・エクスポート")
         root.geometry("820x560")
 
-        self.python = sys.executable
         self.tensorboard_bin = str(Path(self.python).parent / "tensorboard")
-        self.jobs = JobRunner(REPO_ROOT, allow_concurrent=True, prefix_labels=True)
         self._suppress_export_sync = False
         self.sys_monitor = SysMonitorWindow(self.root)
 
         self._build_widgets()
-        self.root.after(100, self._drain_log)
-        self.root.protocol("WM_DELETE_WINDOW", lambda: confirm_and_close(
-            self.root, self.jobs, confirm_job_keys=_CONFIRM_STOP_JOB_KEYS,
-            confirm_message=lambda label: f"{label}が実行中です。終了すると学習が中断されます。"
-            "\n\n本当に終了しますか？"))
+        self._start_job_panel()
 
     # ── 画面構築 ──
 
@@ -194,10 +187,9 @@ class App:
         self._build_export_tab(nb)
         self._build_runs_tab(nb)
 
-        self.run_name_var.trace_add("write", self._on_run_name_changed)
-        self._on_run_name_changed()
-
         self.log_window = LogWindow(self.root, height=24)
+        self.log_sink = self.log_window
+        self._bind_model_name(self.run_name_var)
 
         jobs_frame = ttk.LabelFrame(self.root, text="実行中のジョブ")
         jobs_frame.pack(fill="x", padx=8, pady=(0, 8))
@@ -214,33 +206,18 @@ class App:
 
     # ── run名（①③タブ・run一覧タブで共有） ──
 
-    def _run_dir(self) -> Path | None:
+    def _current_model_dir(self) -> Path | None:
         name = self.run_name_var.get().strip()
-        if not name:
-            messagebox.showerror("入力エラー", "run名を入力してください")
-            return None
-        return RUNS_DIR / name
+        return RUNS_DIR / name if name else None
 
-    def _on_run_name_changed(self, *_args) -> None:
-        name = self.run_name_var.get().strip()
-        if name:
-            run_dir = RUNS_DIR / name
+    def _on_model_name_changed(self) -> None:
+        run_dir = self._current_model_dir()
+        if run_dir is not None:
             self.run_status_var.set(describe_run_status(run_dir))
-            note = read_note(run_dir)
-            self.export_name_var.set(name)
+            self.export_name_var.set(run_dir.name)
         else:
             self.run_status_var.set("")
-            note = ""
-        self.note_text.delete("1.0", "end")
-        self.note_text.insert("1.0", note)
-
-    def _save_note(self) -> None:
-        run_dir = self._run_dir()
-        if run_dir is None:
-            return
-        run_dir.mkdir(parents=True, exist_ok=True)
-        write_note(run_dir, self.note_text.get("1.0", "end-1c"))
-        self._append_log(f"\n備考を保存しました（{self.run_name_var.get().strip()}）\n")
+        self._show_note(run_dir)
 
     def _refresh_run_names(self) -> None:
         names = list_versioned_names(RUNS_DIR)
@@ -463,13 +440,13 @@ class App:
             elif resume_or_overwrite == "overwrite":
                 args["overwrite"] = True
             cmd = build_train_cmd(self.python, run_name, args)
-            self._run("train", cmd, "学習")
+            self._run("train", cmd, "学習", on_done=self._refresh_run_status)
 
         ttk.Button(frame, text="学習開始", command=run).grid(
             row=adv_toggle_row + 2, column=0, sticky="w", pady=(10, 4))
 
         def open_tensorboard() -> None:
-            run_dir = self._run_dir()
+            run_dir = self._require_model_dir()
             if run_dir is None:
                 return
             cmd = build_tensorboard_cmd(self.tensorboard_bin, run_dir / "tb", 6006)
@@ -670,7 +647,9 @@ class App:
                 messagebox.showerror("入力エラー", "出力名を入力してください")
                 return
             cmd = build_export_cmd(self.python, str(src), name)
-            self._run("export", cmd, "エクスポート", on_done=lambda _c: None)
+            # 観戦タブのモデル一覧に、今エクスポートしたモデルを足す
+            self._run("export", cmd, "エクスポート", on_done=lambda ok: self.watch_model_combo.configure(
+                values=list_exported_model_names()) if ok else None)
 
         ttk.Button(frame, text="エクスポート実行", command=run_export).grid(
             row=3, column=0, sticky="w", pady=10)
@@ -743,27 +722,11 @@ class App:
 
     # ── サブプロセス実行・ログ配線 ──
 
-    def _append_log(self, text: str) -> None:
-        self.log_window.append(text)
-
-    def _run(self, job_key: str, cmd: list[str], label: str, *,
-            on_line: Callable[[str], None] | None = None,
-            on_done: Callable[[int], None] | None = None) -> None:
-        self._append_log(f"\n$ {' '.join(cmd)}\n")
-        ok = self.jobs.start(job_key, cmd, label, on_line=on_line,
-                             on_done=lambda code: self._on_job_done(job_key, label, code, on_done))
-        if not ok:
-            messagebox.showwarning("実行中", f"{label}は既に実行中です")
-        self._refresh_jobs_listbox()
-
-    def _on_job_done(self, job_key: str, label: str, code: int,
-                     extra: Callable[[int], None] | None) -> None:
-        if job_key == "train" and code == 0:
+    def _refresh_run_status(self, ok: bool) -> None:
+        if ok:
             self.run_status_var.set(describe_run_status(RUNS_DIR / self.run_name_var.get().strip()))
-        if job_key == "export" and code == 0:
-            self.watch_model_combo.configure(values=list_exported_model_names())
-        if extra is not None:
-            extra(code)
+
+    def _on_jobs_changed(self) -> None:
         self._refresh_jobs_listbox()
 
     def _stop_selected(self) -> None:
@@ -781,10 +744,6 @@ class App:
         self.jobs_listbox.delete(0, "end")
         for job_key, label in self.jobs.active_jobs():
             self.jobs_listbox.insert("end", f"{label} [{job_key}]")
-
-    def _drain_log(self) -> None:
-        self.jobs.drain(self._append_log)
-        self.root.after(100, self._drain_log)
 
 
 def main() -> int:

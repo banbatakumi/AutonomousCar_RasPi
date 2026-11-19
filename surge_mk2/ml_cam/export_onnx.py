@@ -10,13 +10,13 @@
 
 エクスポート後、**PyTorch と ONNXRuntime の出力を突き合わせて検証する。**
 エクスポートが成功しただけでは何も保証されない——opset や演算子の対応漏れで
-静かに違う結果を返すことがあるため、必ず数値で確認する。
+静かに違う結果を返すことがあるため、必ず数値で確認する。書き出しの設定・突き合わせ・版の検査は
+`ml_common/onnx_export.py`（4本の `export_onnx.py` で共通）。
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from ml_common import onnx_export  # noqa: E402
+from ml_common.onnx_export import read_train_config  # noqa: E402
 from model import DrivableSegModel  # noqa: E402
 from raspi.core.cam_e2e_preproc import PREPROC_VERSION  # noqa: E402
 
@@ -39,15 +41,6 @@ STD = 255.0
 THRESHOLD = 0.5
 
 
-def read_train_config(run_dir: Path) -> dict:
-    """`run_dir/train_config.json`。無い・読めないなら空の dict。"""
-    cfg_path = run_dir / "train_config.json"
-    try:
-        return json.loads(cfg_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
 def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None, *,
            note: str = "") -> tuple[int, int]:
     """`checkpoint`（`state_dict`）を `out_path` へエクスポートし、同名 `.json` に
@@ -56,7 +49,8 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
     `size` を省くと `train_config.json`（学習時の入力解像度）を使う。**学習時と違う値を渡すと
     例外**にする——ONNX の変換は同じサイズどうしで突き合わせるので、解像度の食い違いは
     `verify_parity` では見つからず、精度だけが静かに落ちる。学習時の前処理の版
-    （`preproc_version`）が今と違う場合も例外にする。
+    （`preproc_version`）が今と違う・記録が無い場合も例外にする（`onnx_export.check_version`。
+    以前は版の無い古い run を警告だけで通していたが、4本の書き出しで扱いを揃えた）。
     :return: 実際に使った入力解像度 `(width, height)`
 
     :param note: `<out_path>.json`に同梱する自由記述の備考（どんな変更をしたか・
@@ -74,35 +68,13 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
     elif trained is not None and tuple(int(v) for v in trained) != tuple(size):
         raise ValueError(f"--size {size[0]}x{size[1]} が学習時の入力解像度 "
                          f"{int(trained[0])}x{int(trained[1])} と違う（精度が静かに落ちる）")
-    trained_ver = train_cfg.get("preproc_version")
-    if trained_ver is not None and trained_ver != PREPROC_VERSION:
-        raise ValueError(f"学習時の前処理の版 {trained_ver} が今の版 {PREPROC_VERSION} と違う。"
-                         "契約に今の版を書くと照合をすり抜けるので、学習し直してください")
-    if trained_ver is None:
-        print(f"!! {checkpoint.parent}/train_config.json に preproc_version が無い"
-              f"（古い run）。今の版 {PREPROC_VERSION} を契約に書く", file=sys.stderr)
+    onnx_export.check_version("前処理", train_cfg.get("preproc_version"), PREPROC_VERSION)
     w, h = size
     model = DrivableSegModel(pretrained=False)
     model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     model.eval()
 
-    dummy = torch.zeros(1, 3, h, w)
-    torch.onnx.export(
-        model, dummy, str(out_path),
-        input_names=["input"], output_names=["output"],
-        # **18 未満を指定すると失敗する。** torch の dynamo エクスポータ
-        # （既定）は `interpolate` を新しい opset の演算子表現に変換してから
-        # 下位変換を試みるが、対応できず盛大な警告を出したうえで結局 18 に
-        # フォールバックする（実測）。最初から 18 を指定して無駄な変換の
-        # 試行錯誤を避ける。**onnxruntime>=1.18 は opset 18 を扱える。**
-        opset_version=18,
-        # **`external_data=False`が必須。** 既定(True)だと重みが`<out_path>.data`
-        # という別ファイルに切り出され、`.onnx`単体をコピー/配置すると壊れる
-        # （`ml_lidar/export_onnx_rl.py`が同じ罠を実際に踏んで判明。Pi の
-        # `models/seg/`へは`.onnx`だけを配置する運用なので、ここが漏れると
-        # cam_perception_node のロードが実機でだけ失敗する）
-        external_data=False,
-    )
+    onnx_export.export(model, np.zeros((1, 3, h, w), dtype=np.float32), out_path)
 
     cfg = {
         "input_size": [w, h],           # [width, height]
@@ -115,31 +87,16 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
         "output": "probability (sigmoid, 0-1); >= threshold means drivable",
         "note": note,
     }
-    out_path.with_suffix(".json").write_text(json.dumps(cfg, indent=2))
+    onnx_export.write_contract(out_path, cfg)
     return size
 
 
 def verify_parity(onnx_path: Path, model, size: tuple[int, int], *,
                   n_samples: int = 4, atol: float = 1e-3, seed: int = 0) -> float:
-    """PyTorch と ONNXRuntime の出力差の最大値を返す。`atol` を超えたら例外。"""
-    import onnxruntime as ort
-
+    """PyTorch と ONNXRuntime の出力差の最大値を返す。`atol` を超えたら例外（`ml_common.onnx_export`）。"""
     w, h = size
-    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    model.eval()
-    rng = np.random.default_rng(seed)
-    max_err = 0.0
-    with torch.no_grad():
-        for _ in range(n_samples):
-            x_np = rng.random((1, 3, h, w), dtype=np.float32)
-            torch_out = model(torch.from_numpy(x_np)).numpy()
-            onnx_out = session.run(None, {"input": x_np})[0]
-            max_err = max(max_err, float(np.abs(torch_out - onnx_out).max()))
-    if max_err > atol:
-        raise ValueError(
-            f"PyTorch と ONNXRuntime の出力が最大 {max_err:.2e} ずれています"
-            f"（許容 {atol}）。opset やモデル構造（補間の実装差など）を見直してください")
-    return max_err
+    return onnx_export.verify_parity(onnx_path, model, lambda rng: (rng.random((1, 3, h, w), dtype=np.float32),),
+                                     n_samples=n_samples, atol=atol, seed=seed)
 
 
 def main() -> int:

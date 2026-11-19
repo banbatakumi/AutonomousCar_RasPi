@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import math
 import sys
 from collections import Counter
@@ -50,7 +51,8 @@ from raspi.core.vehicle import Vehicle  # noqa: E402
 from raspi.msgs import Scan, VehicleState  # noqa: E402
 from raspi.nodes.e2e_fusion_node import E2EFusionNode, load_model  # noqa: E402
 
-__all__ = ["replay", "yaw_response", "main"]
+__all__ = ["replay", "yaw_response", "main", "new_result", "is_driving", "label_index", "score_step", "add_yaw",
+           "yaw_window", "ideal_steer", "load_labels", "print_header", "print_row"]
 
 NS = 1_000_000_000
 #: 点群の1周が届くのは、先頭セクタの時刻からこれだけ後 [s]（1周 0.1s ＋ 通信・組み立て）
@@ -71,6 +73,113 @@ def _scan(rec: R.Recording, i: int, seq: int) -> Scan:
                 sector_seen=rec.scan_seen[i].tolist(), saturated=sat.tolist() if sat.any() else None)
 
 
+# ── `ml_stereo_e2e/eval.py` と共通の部品（2番目の入力が点群か視差かと、推論の時刻の取り方だけが違う） ──
+
+def new_result() -> dict:
+    """`replay` が返す数字の入れ物。"""
+    return {"n": 0, "ready": 0, "reasons": Counter(), "steer": [], "steer_ref": [], "speed": [], "speed_ref": [],
+            "near": [], "full": [], "b": [], "infer_ms": [], "dpsi": [], "dpsi_ratio": []}
+
+
+def is_driving(rec: R.Recording, ci: int, vs: VehicleState) -> bool:
+    """手本と比べる周か（ARM・自動か手動の速度指令・0.15m/s 以上・トルク指令でない）。"""
+    return (bool(rec.cmd_arm[ci]) and rec.cmd_mode[ci] in (1, 2) and vs.speed >= 0.15
+            and not rec.cmd_torque_mode[ci])
+
+
+def label_index(labels: dict | None, model_ds: float) -> tuple[dict[int, int], int]:
+    """`(撮影時刻 → 標本の番号, 経路点の間引き)`。ラベルが無ければ空。"""
+    if labels is None:
+        return {}, 1
+    return ({int(t): i for i, t in enumerate(labels["t"])},
+            max(1, int(round(model_ds / float(labels["ds"])))))
+
+
+def score_step(out: dict, plan, st, rec: R.Recording, ci: int, model, labels: dict | None, li: int | None,
+               stride: int) -> bool:
+    """1周の推論 `plan` と planner の出力 `st` を `out` に足す。planner が走れる（`st.ready`）なら `True`。"""
+    out["n"] += 1
+    if plan.ready:
+        out["infer_ms"].append(plan.infer_ms)
+    if not st.ready:
+        out["reasons"][st.reason.split("（")[0]] += 1
+        return False
+    out["ready"] += 1
+    out["steer"].append(st.target_steer)
+    out["steer_ref"].append(float(rec.cmd_steer[ci]))
+    if rec.cmd_mode[ci] == 2 and not rec.cmd_brake[ci] and rec.cmd_speed[ci] > 0.2:
+        out["speed"].append(st.target_speed)
+        out["speed_ref"].append(float(rec.cmd_speed[ci]))
+    out["b"].append(float(np.mean(plan.path_b)))
+    if li is not None:
+        sel = slice(stride - 1, stride * model.k, stride)
+        ref = labels["path_xy"][li][sel]
+        ok = labels["path_valid"][li][sel]
+        d = np.hypot(np.asarray(plan.path_x) - ref[:, 0], np.asarray(plan.path_y) - ref[:, 1])
+        near = max(1, int(2.0 / model.ds))
+        if ok[:near].any():
+            out["near"].append(float(d[:near][ok[:near]].mean()))
+        if ok.any():
+            out["full"].append(float(d[ok].mean()))
+    return True
+
+
+def add_yaw(out: dict, g: tuple[float, float] | None) -> None:
+    if g is not None and abs(g[1]) > 1e-3:
+        out["dpsi"].append(g[0])
+        out["dpsi_ratio"].append(g[0] / g[1])
+
+
+def yaw_window(vehicle: Vehicle, rgb: np.ndarray, crop_x: float, psi_deg: int) -> tuple[float, float, int] | None:
+    """`(右の fx, 左の fx, 切り落としの幅 px)`。±`psi_deg` のずらしが切り落としの余白に収まらなければ `None`。"""
+    fx = camera_fx_px(vehicle, "front", rgb.shape[1])
+    fx_left = camera_fx_px(vehicle, "left", rgb.shape[1])
+    margin = crop_margin_px(rgb.shape[1], crop_x)
+    if math.ceil(max(fx, fx_left) * math.radians(psi_deg)) > margin:
+        return None
+    return fx, fx_left, margin
+
+
+def ideal_steer(ref_xy: np.ndarray, psi: float, look: float, vehicle: Vehicle) -> float:
+    """ずらさない入力で出た経路 `ref_xy` を ∓`psi` [rad] 回して追ったときの舵（dδ/dψ の理想の値を作る）。"""
+    c, sn = math.cos(-psi), math.sin(-psi)
+    rot = np.stack([c * ref_xy[:, 0] - sn * ref_xy[:, 1], sn * ref_xy[:, 0] + c * ref_xy[:, 1]], axis=1)
+    return L.pursuit_steer(rot, look, vehicle.wheelbase, vehicle.max_steer)
+
+
+def load_labels(data: Path | None, stem: str) -> dict | None:
+    """`extract.py` の出力 `data` にある記録 `stem` の経路のラベル。無ければ `None`。"""
+    if data is None or not (data / f"{stem}.npz").exists():
+        return None
+    ds_data = float(json.loads((data / "dataset.json").read_text())["config"]["ds"])
+    d = np.load(data / f"{stem}.npz")
+    return {"t": d["t"], "path_xy": d["path_xy"], "path_valid": d["path_valid"], "ds": ds_data}
+
+
+def print_header(unit: str) -> None:
+    """表の見出し。`unit` は1行に数えるもの（点群の周・画像の組）。"""
+    print(f"{'記録':30} {'学習':4} {unit:>5} {'走れる':>6} {'舵相関':>6} {'舵RMS':>6} {'速度比':>6} "
+          f"{'近く':>6} {'全体':>6} {'b':>5} {'dδ/dψ':>6} {'理想比':>6} {'推論':>6}")
+
+
+def print_row(stem: str, r: dict, trained: set[str]) -> None:
+    def med(key):
+        return float(np.median(r[key])) if r[key] else float("nan")
+
+    def mean(key):
+        return float(np.mean(r[key])) if r[key] else float("nan")
+
+    s, ref = np.asarray(r["steer"]), np.asarray(r["steer_ref"])
+    rms = float(np.degrees(np.sqrt(np.mean((s - ref) ** 2)))) if len(s) else float("nan")
+    ratio = float(np.median(np.asarray(r["speed"]) / np.asarray(r["speed_ref"]))) if r["speed"] else float("nan")
+    print(f"{stem:30} {'○' if stem in trained else '—':4} {r['n']:5d} "
+          f"{100.0 * r['ready'] / max(1, r['n']):5.1f}% {_corr(s, ref):6.3f} {rms:5.1f}° "
+          f"{ratio:6.2f} {mean('near'):5.2f}m {mean('full'):5.2f}m {mean('b'):5.2f} {med('dpsi'):6.2f} "
+          f"{med('dpsi_ratio'):6.2f} {mean('infer_ms'):5.1f}ms", flush=True)
+    for why, n in r["reasons"].most_common(4):
+        print(f"    走れない: {why} ×{n}")
+
+
 def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[str, float],
            use_image: bool = True, use_lidar: bool = True, labels: dict | None = None,
            yaw_every: int = 0) -> dict:
@@ -81,11 +190,8 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
     img_t = np.array([im[0] for im in images], dtype=np.int64)
     planner = E2EFusion()
     node._rows.clear()
-    label_idx = {int(t): i for i, t in enumerate(labels["t"])} if labels is not None else {}
-    stride = max(1, int(round(model.ds / float(labels["ds"])))) if labels is not None else 1
-
-    out = {"n": 0, "ready": 0, "reasons": Counter(), "steer": [], "steer_ref": [],
-           "speed": [], "speed_ref": [], "near": [], "full": [], "b": [], "infer_ms": [], "dpsi": [], "dpsi_ratio": []}
+    label_idx, stride = label_index(labels, model.ds)
+    out = new_result()
     vi = 0
     last_plan_t = 0
     for si in range(len(rec.scan_t)):
@@ -101,9 +207,7 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
             node.push_scan(_scan(rec, si, si))
         ci = int(np.searchsorted(rec.cmd_t, t_now))
         ci = min(max(ci, 0), len(rec.cmd_t) - 1)
-        driving = bool(rec.cmd_arm[ci]) and rec.cmd_mode[ci] in (1, 2) and vs.speed >= 0.15 \
-            and not rec.cmd_torque_mode[ci]
-        if not driving:
+        if not is_driving(rec, ci, vs):
             continue                               # 止まっている・DISARM の周は比べない
 
         rgb, rgb_left, t_img = None, None, 0
@@ -118,38 +222,13 @@ def replay(mcap: Path, node: E2EFusionNode, vehicle: Vehicle, *, params: dict[st
         dt = (t_now - last_plan_t) / NS if last_plan_t else 0.0
         last_plan_t = t_now
         st = planner.plan(plan, vs, params, dt)
-        out["n"] += 1
-        if plan.ready:
-            out["infer_ms"].append(plan.infer_ms)
-        if not st.ready:
-            out["reasons"][st.reason.split("（")[0]] += 1
+        if not score_step(out, plan, st, rec, ci, model, labels, label_idx.get(t_img), stride):
             continue
-        out["ready"] += 1
-        out["steer"].append(st.target_steer)
-        out["steer_ref"].append(float(rec.cmd_steer[ci]))
-        if rec.cmd_mode[ci] == 2 and not rec.cmd_brake[ci] and rec.cmd_speed[ci] > 0.2:
-            out["speed"].append(st.target_speed)
-            out["speed_ref"].append(float(rec.cmd_speed[ci]))
-        out["b"].append(float(np.mean(plan.path_b)))
-
-        li = label_idx.get(t_img)
-        if li is not None:
-            sel = slice(stride - 1, stride * model.k, stride)
-            ref = labels["path_xy"][li][sel]
-            ok = labels["path_valid"][li][sel]
-            d = np.hypot(np.asarray(plan.path_x) - ref[:, 0], np.asarray(plan.path_y) - ref[:, 1])
-            near = max(1, int(2.0 / model.ds))
-            if ok[:near].any():
-                out["near"].append(float(d[:near][ok[:near]].mean()))
-            if ok.any():
-                out["full"].append(float(d[ok].mean()))
 
         if yaw_every and rgb is not None and out["ready"] % yaw_every == 0 and rec.scan_seen[si].all():
             g = yaw_response(node, vehicle, rgb, rec.scan_dist[max(si - model.history + 1, 0):si + 1], vs,
                              params, ref_xy=np.column_stack([plan.path_x, plan.path_y]), rgb_left=rgb_left)
-            if g is not None and abs(g[1]) > 1e-3:
-                out["dpsi"].append(g[0])
-                out["dpsi_ratio"].append(g[0] / g[1])
+            add_yaw(out, g)
     return out
 
 
@@ -168,11 +247,10 @@ def yaw_response(node: E2EFusionNode, vehicle: Vehicle, rgb: np.ndarray, dists: 
     model = node.model
     if rgb_left is None:
         return None
-    fx = camera_fx_px(vehicle, "front", rgb.shape[1])
-    fx_left = camera_fx_px(vehicle, "left", rgb.shape[1])
-    margin = crop_margin_px(rgb.shape[1], model.crop_x)
-    if math.ceil(max(fx, fx_left) * math.radians(psi_deg)) > margin:
+    win_geom = yaw_window(vehicle, rgb, model.crop_x, psi_deg)
+    if win_geom is None:
         return None
+    fx, fx_left, margin = win_geom
     from raspi.auto.base import scan_window
     from raspi.core.e2e_fusion_preproc import lidar_input, lidar_rows
 
@@ -195,9 +273,7 @@ def yaw_response(node: E2EFusionNode, vehicle: Vehicle, rgb: np.ndarray, dists: 
         o = model.infer(image, lidar, model.state_input(vs.speed, vs.steer_actual, vs.yaw_rate))
         steers.append(L.pursuit_steer(o.path_xy, look, vehicle.wheelbase, vehicle.max_steer))
         if ref_xy is not None:
-            c, sn = math.cos(-math.radians(psi)), math.sin(-math.radians(psi))
-            rot = np.stack([c * ref_xy[:, 0] - sn * ref_xy[:, 1], sn * ref_xy[:, 0] + c * ref_xy[:, 1]], axis=1)
-            ideal.append(L.pursuit_steer(rot, look, vehicle.wheelbase, vehicle.max_steer))
+            ideal.append(ideal_steer(ref_xy, math.radians(psi), look, vehicle))
     span = math.radians(2 * psi_deg)
     g_ideal = (ideal[1] - ideal[0]) / span if len(ideal) == 2 else float("nan")
     return (steers[1] - steers[0]) / span, g_ideal
@@ -224,42 +300,17 @@ def main() -> int:
     ap.add_argument("--yaw-every", type=int, default=10, help="何周に1回 dδ/dψ を測るか（0 で測らない）")
     args = ap.parse_args()
 
-    import json
-
     vehicle = Vehicle.load()
     node = E2EFusionNode(model=load_model(args.model), model_name=args.model.stem, vehicle=vehicle)
     params = merged_params(E2EFusion.id, {"max_speed": args.max_speed})
-    ds_data = None
-    if args.data is not None:
-        ds_data = float(json.loads((args.data / "dataset.json").read_text())["config"]["ds"])
     cfg = json.loads(args.model.with_suffix(".json").read_text())
     trained = set(cfg.get("train_records", []))
 
-    print(f"{'記録':30} {'学習':4} {'周':>5} {'走れる':>6} {'舵相関':>6} {'舵RMS':>6} {'速度比':>6} "
-          f"{'近く':>6} {'全体':>6} {'b':>5} {'dδ/dψ':>6} {'理想比':>6} {'推論':>6}")
+    print_header("周")
     for p in args.mcap_files:
-        labels = None
-        if args.data is not None and (args.data / f"{p.stem}.npz").exists():
-            d = np.load(args.data / f"{p.stem}.npz")
-            labels = {"t": d["t"], "path_xy": d["path_xy"], "path_valid": d["path_valid"], "ds": ds_data}
         r = replay(p, node, vehicle, params=params, use_image=not args.no_image, use_lidar=not args.no_lidar,
-                   labels=labels, yaw_every=args.yaw_every)
-
-        def med(key):
-            return float(np.median(r[key])) if r[key] else float("nan")
-
-        def mean(key):
-            return float(np.mean(r[key])) if r[key] else float("nan")
-
-        s, ref = np.asarray(r["steer"]), np.asarray(r["steer_ref"])
-        rms = float(np.degrees(np.sqrt(np.mean((s - ref) ** 2)))) if len(s) else float("nan")
-        ratio = float(np.median(np.asarray(r["speed"]) / np.asarray(r["speed_ref"]))) if r["speed"] else float("nan")
-        print(f"{p.stem:30} {'○' if p.stem in trained else '—':4} {r['n']:5d} "
-              f"{100.0 * r['ready'] / max(1, r['n']):5.1f}% {_corr(s, ref):6.3f} {rms:5.1f}° "
-              f"{ratio:6.2f} {mean('near'):5.2f}m {mean('full'):5.2f}m {mean('b'):5.2f} {med('dpsi'):6.2f} {med('dpsi_ratio'):6.2f} "
-              f"{mean('infer_ms'):5.1f}ms", flush=True)
-        for why, n in r["reasons"].most_common(4):
-            print(f"    走れない: {why} ×{n}")
+                   labels=load_labels(args.data, p.stem), yaw_every=args.yaw_every)
+        print_row(p.stem, r, trained)
     return 0
 
 
