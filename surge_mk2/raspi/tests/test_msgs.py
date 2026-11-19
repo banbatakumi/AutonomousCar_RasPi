@@ -5,13 +5,10 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import (  # noqa: E402
+from raspi.msgs import (
     MAX_BRAKE_TORQUE_NM,
     MAX_TARGET_TORQUE_NM,
     SPEED_DEADBAND_MPS,
@@ -21,8 +18,8 @@ from raspi.msgs import (  # noqa: E402
     command_from_cmd,
     decode_flags,
 )
-from raspi.msgs.types import type_for_topic  # noqa: E402
-from raspi.proto import packets  # noqa: E402
+from raspi.msgs.types import type_for_topic
+from raspi.proto import packets
 
 
 def telem(**kw) -> packets.Telemetry:

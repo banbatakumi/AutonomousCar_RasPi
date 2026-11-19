@@ -6,12 +6,9 @@ from __future__ import annotations
 
 import socket
 import struct
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from raspi.tools.mdns_unicast import build_answer, wants_answer  # noqa: E402
+from raspi.tools.mdns_unicast import build_answer, wants_answer
 
 FQDN = "surge-mk2.local"
 IP = socket.inet_aton("192.168.68.83")

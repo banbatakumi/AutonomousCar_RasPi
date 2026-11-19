@@ -6,26 +6,23 @@
 （`test_line_perception_node.py` と同じ「配管のテスト」の流儀）。
 """
 
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import cv2  # noqa: E402
-import numpy as np  # noqa: E402
+import cv2
+import numpy as np
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.msgs import ImageRef, SignalConfig, VehicleState  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.msgs import ImageRef, SignalConfig, VehicleState
 from raspi.msgs.types import TOPIC_HB_PREFIX, TOPIC_IMAGE_FRONT, TOPIC_ROUTE_SELECT, \
-    TOPIC_SIGNAL_CONFIG, TOPIC_SIGNAL_STATUS, TOPIC_VEHICLE_STATE  # noqa: E402
-from raspi.nodes.arrow_signal_node import (  # noqa: E402
+    TOPIC_SIGNAL_CONFIG, TOPIC_SIGNAL_STATUS, TOPIC_VEHICLE_STATE
+from raspi.nodes.arrow_signal_node import (
     ArrowSignalDetector,
     ArrowSignalNode,
     signal_mask,
 )
-from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
+from raspi.tests.fakes import FakePub, FakeSub
 
 #: `signal_mask()` の既定「薄い青」帯に入るBGR値（HSV h=110,s=100,v=200 を逆変換）
 _LIGHT_BLUE_BGR = tuple(int(c) for c in

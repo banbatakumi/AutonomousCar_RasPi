@@ -11,17 +11,14 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.nav.deskew import deskew  # noqa: E402
-from raspi.nav.scan2scan import match_scans  # noqa: E402
-from raspi.nav.scan_anchor import ScanAnchor  # noqa: E402
+from raspi.nav.deskew import deskew
+from raspi.nav.scan2scan import match_scans
+from raspi.nav.scan_anchor import ScanAnchor
 
-from .test_nav import ROOM, make_room_scan  # noqa: E402
+from .test_nav import ROOM, make_room_scan
 
 #: 平行な壁だけの通路。**進行方向（x）が観測できない**配置
 CORRIDOR = [

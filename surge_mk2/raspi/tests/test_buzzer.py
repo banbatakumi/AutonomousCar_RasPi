@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import io
-import sys
 import unittest
 from contextlib import redirect_stderr
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.io.gpio import MELODY_BOOT, MELODY_GUI_CONNECT, Buzzer  # noqa: E402
+from raspi.io.gpio import MELODY_BOOT, MELODY_GUI_CONNECT, Buzzer
 
 
 class _Dev:

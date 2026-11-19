@@ -122,7 +122,7 @@ class TestFirmwareConstants(unittest.TestCase):
 
     def test_torque_limit_is_the_same_everywhere(self):
         """1 輪のトルク上限は `convert.MAX_TARGET_TORQUE_NM` が Pi 側の唯一の定義。ファーム（`DRIVE_MAX_TORQUE_NM`）・
-        GUI（`store/ui.ts`）・toml の `speed_torque_max_nm`（2 輪分）・シムの写しがこれと一致する。
+        GUI（`generated/vehicle.ts` の `DRIVE_FALLBACK`）・toml の `speed_torque_max_nm`（2 輪分）・シムの写しがこれと一致する。
         食い違うと、片方が黙ってクランプして「スライダを上げても効きが変わらない」・ファームが MD を使えないと判断する。"""
         from raspi.msgs import convert
         from sim import stm32 as sim_stm32
@@ -133,11 +133,17 @@ class TestFirmwareConstants(unittest.TestCase):
         self.assertAlmostEqual(self.toml["dynamics"]["speed_torque_max_nm"], 2 * limit, places=6)
         self.assertEqual(sim_stm32.DRIVE_MAX_TORQUE_NM, limit)
         self.assertEqual(VehicleModel.MAX_BRAKE_TORQUE_NM, convert.MAX_BRAKE_TORQUE_NM)
-        ui = (Path(__file__).resolve().parents[3] / "gui" / "src" / "store" / "ui.ts").read_text(encoding="utf-8")
-        for name, expect in (("MAX_TARGET_TORQUE_NM", limit), ("MAX_BRAKE_TORQUE_NM", convert.MAX_BRAKE_TORQUE_NM)):
-            m = re.search(rf"export const {name} = ([0-9.]+)", ui)
-            self.assertIsNotNone(m, name)
-            self.assertAlmostEqual(float(m.group(1)), expect, places=6, msg=f"gui/src/store/ui.ts の {name}")
+        # GUI は手書きの数値を持たず、生成物 `DRIVE_FALLBACK`（`config/generate.py` が convert から写す）を読む
+        gui = Path(__file__).resolve().parents[3] / "gui" / "src"
+        settings = (gui / "store" / "settings.ts").read_text(encoding="utf-8")
+        for name, key in (("MAX_TARGET_TORQUE_NM", "maxTargetTorqueNm"), ("MAX_BRAKE_TORQUE_NM", "maxBrakeTorqueNm")):
+            self.assertRegex(settings, rf"export const {name}: number = DRIVE_FALLBACK\.{key}\b",
+                             f"gui/src/store/settings.ts の {name} が生成物から取っていない")
+        gen = (gui / "generated" / "vehicle.ts").read_text(encoding="utf-8")
+        for key, expect in (("maxTargetTorqueNm", limit), ("maxBrakeTorqueNm", convert.MAX_BRAKE_TORQUE_NM)):
+            m = re.search(rf"^\s*{key}: ([0-9.]+),", gen, re.M)
+            self.assertIsNotNone(m, key)
+            self.assertAlmostEqual(float(m.group(1)), expect, places=6, msg=f"generated/vehicle.ts の {key}")
 
     def test_sim_speed_controller_mirrors_drive_h(self):
         for attr, name in (("STANDSTILL_M_S", "DRIVE_STANDSTILL_SPEED_M_S"),

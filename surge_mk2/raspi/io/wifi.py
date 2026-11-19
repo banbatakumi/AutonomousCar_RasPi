@@ -13,6 +13,7 @@ NetworkManager前提、`system_overview.md` §5.4）、RSSIは `/proc/net/wirele
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -118,5 +119,7 @@ def open_wifi(iface: str = "wlan0") -> NmcliWifi | FakeWifi:
     （Mac開発機など）でも例外を出さず `FakeWifi` を返す。"""
     try:
         return NmcliWifi(iface)
-    except Exception:
+    except Exception as e:
+        # Mac など無い環境では正常。実機で出たら故障・権限の手がかり（黙らない）
+        print(f"[warn] Wi-Fi の状態の問い合わせ（nmcli）を開けない（無しで続行）: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return FakeWifi()

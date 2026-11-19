@@ -5,20 +5,17 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.park_to_point import ParkToPoint  # noqa: E402
-from raspi.msgs.types import AutoState, Scan, VehicleState  # noqa: E402
-from raspi.nav.deskew import Points  # noqa: E402
-from raspi.nav.reeds_shepp import (  # noqa: E402
+from raspi.auto.park_to_point import ParkToPoint
+from raspi.msgs.types import AutoState, Scan, VehicleState
+from raspi.nav.deskew import Points
+from raspi.nav.reeds_shepp import (
     PathSegment, ReedsSheppPath, sample_path_array,
 )
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 
 def _points(xy):

@@ -11,10 +11,9 @@ import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import DriveCmd, VehicleState  # noqa: E402
-from raspi.msgs.types import TOPIC_CMD, TOPIC_VEHICLE_STATE  # noqa: E402
+from raspi.msgs import DriveCmd, VehicleState
+from raspi.msgs.types import TOPIC_CMD, TOPIC_VEHICLE_STATE
 
 
 def _pump(sub, want=1, timeout_s=2.0):

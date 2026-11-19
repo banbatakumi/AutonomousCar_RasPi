@@ -6,17 +6,14 @@
 from __future__ import annotations
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs.types import Scan  # noqa: E402
-from raspi.nav.body_mask import BODY_MARGIN_M, body_ranges, mask_body  # noqa: E402
+from raspi.core.vehicle import Vehicle
+from raspi.msgs.types import Scan
+from raspi.nav.body_mask import BODY_MARGIN_M, body_ranges, mask_body
 
 FP = ((0.30, 0.09), (0.30, -0.09), (-0.07, -0.09), (-0.07, 0.09))
 LX = 0.07

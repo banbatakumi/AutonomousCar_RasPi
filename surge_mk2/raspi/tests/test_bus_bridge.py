@@ -1,14 +1,11 @@
 """`BusBridge` が `VehicleState.t_capture` に入れる時刻。"""
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.bus_bridge import BusBridge  # noqa: E402
-from raspi.msgs import VehicleState  # noqa: E402
-from raspi.proto import packets  # noqa: E402
+from raspi.core.bus_bridge import BusBridge
+from raspi.msgs import VehicleState
+from raspi.proto import packets
 
 
 class TestStateCaptureTime(unittest.TestCase):

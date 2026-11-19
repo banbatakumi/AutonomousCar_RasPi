@@ -94,12 +94,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.bus import RELIABLE, Subscriber  # noqa: E402
-from raspi.io.pihealth import PiHealthReader  # noqa: E402
-from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.bus import RELIABLE, Subscriber
+from raspi.io.pihealth import PiHealthReader
+from raspi.core.jpeg import RingJpeg
+from raspi.msgs.types import (
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
     TOPIC_AUTO_MAP,
@@ -135,10 +134,10 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.rec import logclean  # noqa: E402
-from raspi.rec import provenance  # noqa: E402
-from raspi.rec.mcap_log import McapLog, default_mcap_path  # noqa: E402
-from raspi.rec.viz import VizRecorder  # noqa: E402
+from raspi.rec import logclean
+from raspi.rec import provenance
+from raspi.rec.mcap_log import McapLog, default_mcap_path
+from raspi.rec.viz import VizRecorder
 
 __all__ = ["LoggerNode", "DEFAULT_TOPICS", "IMAGE_TOPICS"]
 

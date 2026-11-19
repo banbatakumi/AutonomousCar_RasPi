@@ -1,0 +1,10 @@
+# 配布物ではない（pip install しない）。テストと静的検査の設定だけを置く。
+#
+# モジュールは**リポジトリ根（このファイルの場所）から `python -m` で起動する**約束
+# （systemd の unit も `WorkingDirectory=<根>` + `python -m raspi.nodes.<ノード>`。`raspi/setup/install_services.sh`）。
+# なので各ファイルで `sys.path.insert` して根を足す必要は無い。例外は、パスを直接指定して叩く CLI
+# （`raspi/tools/*`・`config/*.py`・`raspi/proto/generate.py`・ml_* の GUI が起動するスクリプト）だけ。
+
+[tool.pytest.ini_options]
+# `pytest raspi/tests` などをどこから打っても、根を import の起点にする
+pythonpath = ["."]

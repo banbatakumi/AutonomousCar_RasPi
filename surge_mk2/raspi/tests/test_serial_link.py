@@ -2,16 +2,13 @@
 
 import os
 import pty
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.io.serial_link import SerialLink  # noqa: E402
-from raspi.proto import packets  # noqa: E402
-from raspi.proto.framing import build_frame  # noqa: E402
+from raspi.io.serial_link import SerialLink
+from raspi.proto import packets
+from raspi.proto.framing import build_frame
 
 
 class TestNonBlockingPoll(unittest.TestCase):

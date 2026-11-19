@@ -49,24 +49,22 @@ import math
 import signal
 import sys
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.auto_gate import IdlePacer  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.jpeg import make_encoder  # noqa: E402
-from raspi.core.stereo_match import (MatchParams, ObstacleParams,  # noqa: E402
+from raspi.core.auto_gate import IdlePacer
+from raspi.core.frame_reader import FrameReader
+from raspi.core.jpeg import make_encoder
+from raspi.core.stereo_match import (MatchParams, ObstacleParams,
                                      colorize_disparity, disparity, fov_degrees, make_matcher,
                                      obstacles_from_disparity, to_gray)
-from raspi.core.stereo_e2e_preproc import DISP_VERSION, disp_band_input, disp_to_bytes  # noqa: E402
-from raspi.core.stereo_model import StereoRectifier  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs import Scan, StereoDepth, StereoDisp, StereoInfo  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.stereo_e2e_preproc import DISP_VERSION, disp_band_input, disp_to_bytes
+from raspi.core.stereo_model import StereoRectifier
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import Heartbeat as HbMsg
+from raspi.msgs import Scan, StereoDepth, StereoDisp, StereoInfo
+from raspi.msgs.types import (
     TOPIC_CAM_CONFIG,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,

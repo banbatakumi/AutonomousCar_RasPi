@@ -38,7 +38,6 @@ planner が `AutoState.fw_overrides` に書いた値を、指令（`DriveCmd.fw_
 from __future__ import annotations
 
 import math
-import tomllib
 from pathlib import Path
 from typing import Callable
 
@@ -165,8 +164,8 @@ def load_control_params(toml_path: str | Path = DEFAULT_TOML, strict: bool = Tru
     `[control]` が無い場合も同じ。`tc_enable` などの ON/OFF（`ENABLE_KEYS`）も全部必須。
     :raises ValueError: 知らないキー・数でない値・（strict のとき）足りない項目
     """
-    with open(toml_path, "rb") as f:
-        d = tomllib.load(f)
+    from .vehicle import read_toml
+    d = read_toml(toml_path)
     control = d.get("control")
     out: dict[str, float] = {}
     for key, value in (control or {}).items():
@@ -382,6 +381,3 @@ class ControlParamSync:
                 "に丸められました（範囲外）" for pid in sorted(self._clamped & set(target))]
         return out
 
-    @property
-    def overriding(self) -> bool:
-        return bool(self._overrides)

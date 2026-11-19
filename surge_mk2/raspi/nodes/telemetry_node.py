@@ -138,66 +138,56 @@ import os
 import secrets
 import signal
 import socket
-import sys
-import tempfile
 import time
 from pathlib import Path
+from typing import Callable
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import msgspec  # noqa: E402
-import numpy as np  # noqa: E402
-import websockets  # noqa: E402
-from websockets.asyncio.server import serve  # noqa: E402
-from websockets.datastructures import Headers  # noqa: E402
-from websockets.http11 import Response  # noqa: E402
+import msgspec
+import numpy as np
+import websockets
+from websockets.asyncio.server import serve
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
-from raspi.auto import mapstore  # noqa: E402
-from raspi.auto.base import CMD_HZ, RELEASE_STOP_TAG  # noqa: E402
-from raspi.auto.registry import PLANNERS, catalog as auto_catalog, merged_params  # noqa: E402
-from raspi.auto.route_config import ROUTE_KEYS  # noqa: E402
-from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
-from raspi.core.cleanup import failure_count, quiet_close, recent_failures  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.core.camera_model import Undistorter  # noqa: E402
-from raspi.core.jpeg import RingJpeg, encode_png  # noqa: E402
-from raspi.io.cpufreq import open_cpufreq  # noqa: E402
-from raspi.io.fan import open_fan  # noqa: E402
-from raspi.io.pihealth import THERMAL_ZONE, PiHealth, PiHealthReader  # noqa: E402
-from raspi.io.wifi import WifiState, open_wifi  # noqa: E402
-from raspi.nav.grid import pack_trinary, unpack_trinary  # noqa: E402
-from raspi.msgs import (  # noqa: E402
+from raspi.auto import mapstore
+from raspi.auto.base import CMD_HZ, RELEASE_STOP_TAG
+from raspi.auto.registry import PLANNERS, catalog as auto_catalog, merged_params
+from raspi.auto.route_config import ROUTE_KEYS
+from raspi.bus import LATEST, Policy, Publisher, Subscriber
+from raspi.core.cleanup import failure_count, quiet_close, recent_failures, warn_on_error
+from raspi.core.vehicle import Vehicle
+from raspi.core.camera_model import Undistorter
+from raspi.core.jpeg import RingJpeg, encode_png
+from raspi.io.cpufreq import open_cpufreq
+from raspi.io.fan import open_fan
+from raspi.io.pihealth import THERMAL_ZONE, PiHealth, PiHealthReader
+from raspi.io.wifi import WifiState, open_wifi
+from raspi.nav.grid import pack_trinary, unpack_trinary
+from raspi.msgs import (
     AutoCtrl,
     AutoMap,
     CamConfig,
-    CamModelCtrl,
     DriveCmd,
-    CamE2EModelCtrl,
-    E2EFusionModelCtrl,
-    E2EModelCtrl,
+    ModelSelectCtrl,
     Heartbeat as HbMsg,
     LogCtrl,
     SignalConfig,
     TargetRoiCtrl,
     UiEvent,
 )
-from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM  # noqa: E402
-from raspi.msgs.schema import schema_version  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM
+from raspi.msgs.schema import schema_version
+from raspi.msgs.types import (
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CAM_CONFIG,
     TOPIC_CAM_MASK,
-    TOPIC_CAM_MODEL,
     TOPIC_STEREO_DEPTH,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
-    TOPIC_CAM_E2E_MODEL,
-    TOPIC_E2E_FUSION_MODEL,
-    TOPIC_STEREO_E2E_MODEL,
-    TOPIC_E2E_MODEL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_LINE_CAM,
@@ -210,6 +200,14 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_UI_EVENT,
     TOPIC_VEHICLE_STATE,
 )
+
+from raspi.nodes.telemetry.conf import read_conf, write_conf
+from raspi.nodes.telemetry.models import MODEL_HZ, MODEL_SLOTS, ModelSlot
+from raspi.nodes.telemetry.periodic import run_periodic
+from raspi.nodes.telemetry.recorder import Recorder
+from raspi.core.log import get_logger, setup_logging
+
+_log = get_logger("telemetry")
 
 __all__ = ["TelemetryServer"]
 
@@ -241,33 +239,7 @@ DRIVE_SETTINGS_CONF = REPO_ROOT / "config" / "drive_settings.json"
 #: `CAMERA_CONF` と同じ流儀
 SIGNAL_CONF = REPO_ROOT / "config" / "signal.json"
 #: 推論用モデルの親フォルダ（`.gitignore` 済み）。モデルの種類ごとにサブフォルダを切る
-MODELS_DIR = REPO_ROOT / "models"
-#: `cam_perception_node`（セグメンテーション、`ml_cam`）へ渡す ONNX モデル（`<name>.onnx` + `<name>.json`）の置き場
-#: （`raspi/nodes/cam_perception_node.py` の `DEFAULT_MODELS_DIR` と同じ場所）
-SEG_MODELS_DIR = MODELS_DIR / "seg"
-#: 選ばれているモデル名を覚えておく場所。`AUTO_CONF`/`CAMERA_CONF` と同じ流儀
-CAM_MODEL_CONF = REPO_ROOT / "config" / "cam_model.json"
-#: `e2e_lidar` へ渡す ONNX モデルの置き場。**セグメンテーション用とは別**
-#: （前処理契約が違うので、同じ一覧に混ぜると選び間違いの温床になる。
-#: `raspi/auto/e2e_lidar.py`・`ml_lidar/export_onnx_rl.py` 参照）
-E2E_MODELS_DIR = MODELS_DIR / "e2e_lidar"
-#: 選ばれている E2E LiDAR モデル名。`CAM_MODEL_CONF` と同じ流儀
-E2E_MODEL_CONF = REPO_ROOT / "config" / "e2e_lidar_model.json"
-#: `cam_e2e`（カメラE2E・模倣学習）へ渡す ONNX モデルの置き場。`E2E_MODELS_DIR` と
-#: 同じ理由でセグメンテーション用と分ける
-#: （`raspi/nodes/cam_e2e_node.py` の `DEFAULT_MODELS_DIR` と同じ場所）
-CAM_E2E_MODELS_DIR = MODELS_DIR / "cam_e2e"
-#: 選ばれているカメラE2Eモデル名。`CAM_MODEL_CONF` と同じ流儀
-CAM_E2E_MODEL_CONF = REPO_ROOT / "config" / "cam_e2e_model.json"
-#: `e2e_fusion`（LiDAR＋カメラの融合 E2E）のモデルの置き場と、選ばれているモデル名
-#: （`raspi/nodes/e2e_fusion_node.py` の `DEFAULT_MODELS_DIR`・`MODEL_CONF` と同じ場所。
-#: ノードは telemetry が居ないときこのファイルを自分で読む）
-E2E_FUSION_MODELS_DIR = MODELS_DIR / "e2e_fusion"
-E2E_FUSION_MODEL_CONF = REPO_ROOT / "config" / "e2e_fusion_model.json"
-#: `stereo_e2e`（ステレオの画像＋視差の E2E）のモデルの置き場と、選ばれているモデル名
-#: （`raspi/nodes/stereo_e2e_node.py` の `DEFAULT_MODELS_DIR`・`MODEL_CONF` と同じ場所）
-STEREO_E2E_MODELS_DIR = MODELS_DIR / "stereo_e2e"
-STEREO_E2E_MODEL_CONF = REPO_ROOT / "config" / "stereo_e2e_model.json"
+#: 推論モデルの置き場・選んだモデルの保存先は `raspi/nodes/telemetry/models.py` の `MODEL_SLOTS`
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
 #: 無ければここを読む。無ければトークン無し（＝誰でも操縦権を取れる）
 SECRET_PATH = REPO_ROOT / "config" / "secret.txt"
@@ -314,7 +286,7 @@ CAM_FRONT_FPS_DISARM_DEFAULT = 10.0
 #: 新しく現れた障害物を見つけるまでの待ちが 100 → 67ms になる。20Hz は 30fps を割り切れず間隔が 33/67ms で揺れるので採らない
 STEREO_DEPTH_FPS_ARMED = 15.0
 STEREO_DEPTH_FPS_DISARM = 1.0
-#: capture側の意思（`cam/config`）の再送周期。`_fan_pump`/`_auto_ctrl_pump` と
+#: capture側の意思（`cam/config`）の再送周期。`_reapply_fan`/周期送信（`_periodic_jobs`） と
 #: 同じ理由（camera_node の再起動や取りこぼしで食い違ったままにならないように）
 CAM_CONFIG_HZ = 1
 #: 矢印信号認識への意思（`signal/config`）の再送周期。`CAM_CONFIG_HZ` と同じ理由
@@ -331,16 +303,10 @@ SIGNAL_CONFIG_HZ = 1
 #: `e2e_fusion` は点群の1周ごとに最新のコマと組にして推論するので同じ扱い。`stereo_e2e` も同じ
 CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object",
                                "cam_e2e", "e2e_fusion", "stereo_e2e"})
-#: `track/roi`（★対象追従のROI選択）の再送周期。`_auto_ctrl_pump`と同じ理由
+#: `track/roi`（★対象追従のROI選択）の再送周期。周期送信（`_periodic_jobs`）と同じ理由
 #: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
 TRACK_ROI_HZ = 5
-#: `cam/model`（★モデル選択）の再送周期。`CAM_CONFIG_HZ` と同じ理由
-#: （cam_perception_node の再起動や取りこぼしで食い違ったままにならないように）
-CAM_MODEL_HZ = 1
-#: `e2e/model`（★モデル選択）の再送周期。`CAM_MODEL_HZ` と同じ理由
-E2E_MODEL_HZ = 1
-#: `cam_e2e/model`（★モデル選択）の再送周期。`CAM_MODEL_HZ` と同じ理由
-CAM_E2E_MODEL_HZ = 1
+
 #: `cam/mask`（`ftg_cam` の走行可否マスク）を中継するポーリング周期。
 #: カメラ本編（`CAMERA_HZ`）ほどの滑らかさは要らないデバッグ表示用途なので、
 #: 低めに抑えて CPU/帯域を節約する
@@ -441,15 +407,8 @@ CMD_SPARSE_GAP_NS = 300_000_000
 DEFAULT_MCAP_IMAGE_HZ = 10.0
 #: 🎥 録画（mp4）の fps。カメラの上限と同じ。録画中は前カメラ（同期中は左も）の capture もこれに上げる
 VIDEO_FPS = CAM_FPS_MAX
-#: 🎥 録画が自動で止まるまでの時間 [s]（止め忘れでSDが埋まるのを防ぐ）
-VIDEO_MAX_S = 600
 #: `GET /logs/<name>` の `.mp4` の上限 [B]（全量をメモリに載せて返すので `.mcap` より大きく取れない）
 MAX_INLINE_VIDEO_BYTES = 256 * 1024 * 1024
-#: 中継の読み取り単位
-RECORD_CHUNK = 65536
-#: 最初の視聴者（`/ws/record`）が繋がるまで取っておく量の上限 [B]（`_mcap_pump`）。
-#: 接続は数十msで済むので、ふつうは先頭の数百バイトしか溜まらない
-RECORD_BACKLOG_MAX = 8 * 1024 * 1024
 #: `GET /logs/<name>` でメモリに載せてよい上限。これを超えたら 413 を返して
 #: `scp` 運用に倒す。**全量を一度に `read_bytes()` すると Pi のメモリが尽きる**
 #: （`image_hz=5` × カメラ2台で `.mcap` は毎時 1GB 近く育つ）。読むのは別スレッドだが、
@@ -464,21 +423,12 @@ MAX_MAP_UPLOAD_BYTES = 32 * 1024 * 1024
 LOG_ACTIVE_GUARD_S = 30.0
 #: 操縦者の名前の長さの上限（`cmd` の `source` として 50Hz でバスに載る）
 CONTROLLER_NAME_MAX = 40
-#: `/ws/control` のうち、**車の挙動を変える・消す・止める**書き込み。トークンに加えて
-#: 「操縦者本人か、操縦者がいないとき」に限る。観戦している別の端末が走行中に TC/ABS を
-#: 切ったり、記録や地図を消したりできないようにする（E-Stop・解除は対象外＝誰でも押せる）
-OPERATOR_ONLY_KINDS = frozenset({
-    "fan", "camera", "signal", "cam_model_select", "e2e_model_select", "cam_e2e_model_select",
-    "e2e_fusion_model_select", "stereo_e2e_model_select",
-    "track_roi_select", "track_roi_clear", "tc_tv", "wheel_lift_guard", "abs", "brake_hold",
-    "auto_stop_margin", "logs_delete", "maps_save", "maps_delete", "maps_clear_grip", "shutdown",
-})
-#: トークンだけ要る書き込み（走行に影響しないもの。記録は観戦側の端末からも取りたい）
-TOKEN_ONLY_KINDS = frozenset({
-    "drive_settings", "sfl_record", "mcap_record_start", "mcap_record_stop",
-    "video_record_start", "video_record_stop",
-})
-#: `config/auto.json` を書くまでの待ち [s]。スライダを動かしている間は1目盛りごとに
+#: 制御メッセージの権限（`_CONTROL_HANDLERS` の表の2つ目）。**止める操作（estop・release_control・
+#: 自律の解除）には掛けない**
+AUTH_ANY = "any"              #: 誰でも（観戦の端末からも）
+AUTH_TOKEN = "token"          #: トークンだけ要る書き込み（走行に影響しないもの。記録は観戦側の端末からも取りたい）
+AUTH_OPERATOR = "operator"    #: トークン＋操縦者（操縦者が居るときは操縦者だけ。車の動き・設定・ファイルを変える）
+AUTH_AUTO = "auto"            #: 自律走行: 解除は誰でも、それ以外はトークン（操縦者の判定はハンドラの中）
 #: メッセージが来るので、最後の値だけを1回書く（終了時は待たずに書く）
 AUTO_CONF_SAVE_DELAY_S = 0.5
 #: 1クライアントへの1回の送信に許す時間 [s]。受信が止まった相手（スリープした PC・圏外に出た
@@ -537,25 +487,6 @@ _json_encode = msgspec.json.encode
 _json_decode = msgspec.json.decode
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    """設定ファイルを tmp ファイル + `os.replace()` でアトミックに書く。
-
-    `write_bytes()` の直書きだと、書き込み中の電源断で壊れた（中身が
-    半端な）ファイルが残りうる。`raspi/nodes/io_node.py` の
-    `_save_odometer_base` と同じパターン（このリポジトリでの初出）。
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}-")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except BaseException:
-        # 書けなかった（満杯など）tmp を残さない。残すと失敗のたびに増えていく
-        with quiet_close("設定の一時ファイルの削除"):
-            os.unlink(tmp)
-        raise
-
 #: RasPi 本体（SoC）の温度。カーネルがミリ℃で出している
 PI_THERMAL_ZONE = THERMAL_ZONE
 
@@ -595,31 +526,6 @@ def _preset_name(v) -> str:
     if not name or len(name) > PRESET_NAME_MAX or any(ord(c) < 32 for c in name):
         return ""
     return name
-
-
-def _onnx_model_files(models_dir: Path) -> list[dict]:
-    """`models_dir` にある `.onnx` の一覧（GUI のモデル選択欄に並べる形）。
-
-    `note` は同名 `.json` の自由記述の備考（エクスポート時に書かれる）——どんな
-    変更・どのコースのモデルかを選ぶときに確認できるようにするため。
-    `.json` が壊れていても一覧自体は壊さない（空文字で返す）。
-    """
-    files = []
-    if models_dir.is_dir():
-        for p in sorted(models_dir.iterdir()):
-            if not p.is_file() or p.suffix != ".onnx":
-                continue
-            st = p.stat()
-            cfg_path = p.with_suffix(".json")
-            note = ""
-            if cfg_path.exists():
-                try:
-                    note = str(_json_decode(cfg_path.read_bytes()).get("note", ""))
-                except Exception:                                    # noqa: BLE001
-                    pass
-            files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
-                         "has_config": cfg_path.exists(), "note": note})
-    return files
 
 
 class TelemetryServer:
@@ -796,7 +702,7 @@ class TelemetryServer:
         #: 直前に見た ARM 状態。None は「まだ反映していない」（初回に必ず切り替える）
         self._last_armed: bool | None = None
         #: 常駐ロガー（surge-logger。画像を記録する）が動いているか。DISARM 中に
-        #: カメラを止めてよいかの判定に使う（`_cam_config_pump` が1Hzで更新）
+        #: カメラを止めてよいかの判定に使う（`_resend_cam_config` が1Hzで更新）
         self._logger_running = False
 
         # ── Wi-Fi（SSID・電波強度） ──
@@ -851,33 +757,9 @@ class TelemetryServer:
         self._signal_min_lit_frac = 0.02
         self._load_signal_conf()
 
-        # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
-        #: 選ばれているモデル名。**空文字 = 未選択**（`config/cam_model.json` に
+        # ── 推論モデルの選択（`telemetry/models.py` の `MODEL_SLOTS`。種類 → 選んだ名前） ──
         #: 保存され次回起動で戻る。`engaged` は他の自動運転設定と同じく保存しない
-        #: が、こちらはモデル選択そのものなので `auto.json` 側には持たせない）
-        self._cam_model = ""
-        self._load_cam_model_conf()
-
-        # ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
-        #: 選ばれているモデル名。**空文字 = 未選択**（`config/e2e_lidar_model.json`に
-        #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
-        self._e2e_model = ""
-        self._load_e2e_model_conf()
-
-        # ── カメラE2E モデルの選択（`cam_e2e` 用） ──
-        #: 選ばれているモデル名。**空文字 = 未選択**（`config/cam_e2e_model.json`に
-        #: 保存され次回起動で戻る）。`_cam_model` と同じ流儀
-        self._cam_e2e_model = ""
-        self._load_cam_e2e_model_conf()
-
-        # ── E2E 融合モデルの選択（`e2e_fusion` 用） ──
-        #: 選ばれているモデル名。**空文字 = 自動**（ノードがいちばん新しいモデルを使う）
-        self._e2e_fusion_model = ""
-        self._load_e2e_fusion_model_conf()
-
-        # ── ステレオ E2E モデルの選択（`stereo_e2e` 用。`e2e_fusion` と同じ形） ──
-        self._stereo_e2e_model = ""
-        self._load_stereo_e2e_model_conf()
+        self._models: dict[str, str] = {k: slot.load() for k, slot in MODEL_SLOTS.items()}
 
         # ── 対象追従（`follow_object`）のROI選択 ──
         #: GUIがドラッグ選択した矩形（正規化座標）。**永続化しない**
@@ -887,24 +769,12 @@ class TelemetryServer:
         self._track_select_seq = 0
         self._track_clear_seq = 0
 
-        #: mcap のライブ中継（`logger_node -o -` のサブプロセス）
-        self._mcap_proc: asyncio.subprocess.Process | None = None
-        #: `_mcap_start` の `await create_subprocess_exec` 中の再入防止フラグ
-        self._mcap_starting = False
-        self._mcap_started_ns = 0
-        self._mcap_error: str | None = None
-
-        #: 🎥 録画（`video_node` のサブプロセス。Pi の `logs/` に mp4 を書く）
-        self._video_proc: asyncio.subprocess.Process | None = None
-        self._video_starting = False
-        self._video_started_ns = 0
-        self._video_error: str | None = None
-        #: 今回（または直近）の出力の接頭辞と、書き終えた mp4 のファイル名。
-        #: `files` が空でなく `active` が false になったら GUI がダウンロードする
-        self._video_prefix = ""
-        self._video_files: list[str] = []
-        self._video_stopping = False
-        self._video_task: asyncio.Task | None = None
+        #: 記録の子プロセス（mcap のライブ中継・🎥 録画。`telemetry/recorder.py`）
+        self._recorder = Recorder(
+            repo_root=REPO_ROOT, video_fps=VIDEO_FPS,
+            record_clients=self.record_clients, send_or_drop=self._send_or_drop,
+            on_cameras_change=self._publish_cam_config, on_status=self._status_soon,
+            broadcast_status=self._broadcast_control_status)
 
 
         #: `SNAPSHOT_ON_CHANGE` のキーごとに、最後に `/ws/telemetry` へ載せた版 `(seq, t_pub)`。
@@ -1120,7 +990,7 @@ class TelemetryServer:
             return
         self.camera_clients[cam].add(ws)
         # DISARM 中は視聴者の有無でカメラを止めている（`_desired_front_enabled`）ので、
-        # 来た・去った瞬間に頼み直す（1Hz の `_cam_config_pump` を待たせない）
+        # 来た・去った瞬間に頼み直す（1Hz の `_resend_cam_config` を待たせない）
         self._publish_cam_config()
         try:
             await ws.wait_closed()
@@ -1151,9 +1021,9 @@ class TelemetryServer:
             await ws.wait_closed()
         finally:
             self.record_clients.discard(ws)
-            if not self.record_clients and self._mcap_proc is not None:
+            if not self.record_clients and self._recorder.mcap_proc is not None:
                 # 見ている人が誰もいなくなった録画を続ける意味は無い
-                await self._mcap_stop()
+                await self._recorder.mcap_stop()
                 await self._broadcast_control_status()
 
     async def _control_channel(self, ws) -> None:
@@ -1190,13 +1060,16 @@ class TelemetryServer:
         """
         try:
             await self._handle_control(ws, raw)
-        except Exception:
+        except Exception as e:
             self.bad_cmds += 1
+            # 数えるだけだと、ハンドラのバグが「壊れた指令」に紛れて見えなくなる
+            _log.warning("制御メッセージの処理で例外（捨てて続行）: %s: %s", type(e).__name__, e)
 
     async def _handle_control(self, ws, raw) -> None:
         try:
             m = _json_decode(raw)
-        except Exception:
+        except msgspec.DecodeError:
+            self.bad_cmds += 1
             return
         if not isinstance(m, dict):
             # **配列などdict以外のJSONも構文上は合法。** `m.get` が無いので
@@ -1204,358 +1077,311 @@ class TelemetryServer:
             # `async for` から抜け、操縦者の接続なら走行中に DISARM される（issue #12）
             return
         kind = m.get("type")
+        entry = _CONTROL_HANDLERS.get(kind) if isinstance(kind, str) else None
+        if entry is None:
+            return                         # 知らない種類は捨てる（古い・新しい GUI）
+        handler, auth = entry
 
         # 書き込みの権限。**止める操作（estop・release_control・自律の解除）には掛けない**
         auto_disengage_only = kind == "auto" and "engaged" in m and not m["engaged"]
-        needs_token = (kind in OPERATOR_ONLY_KINDS or kind in TOKEN_ONLY_KINDS
-                       or (kind == "auto" and not auto_disengage_only))
+        needs_token = auth in (AUTH_TOKEN, AUTH_OPERATOR) or (auth == AUTH_AUTO and not auto_disengage_only)
         if needs_token and not self._token_ok(m):
             self.auth_rejects += 1
             await self._send_json(ws, {"type": "control_denied", "holder": "",
                                        "reason": "write_bad_token"})
             return
-        if (kind in OPERATOR_ONLY_KINDS and self.controller is not None
-                and self.controller is not ws):
+        if auth == AUTH_OPERATOR and self.controller is not None and self.controller is not ws:
             await self._send_json(ws, {"type": "control_denied",
                                        "holder": self.controller_name, "reason": "operator_only"})
             return
+        await handler(self, ws, m)
 
-        if kind == "take_control":
-            if not self._token_ok(m):
-                self.auth_rejects += 1
-                await self._send_json(ws, {"type": "control_denied",
-                                           "holder": "", "reason": "bad_token"})
-                return
-            if self.controller is not None and self.controller is not ws:
-                await self._send_json(ws, {"type": "control_denied",
-                                           "holder": self.controller_name})
-                return
-            self.controller = ws
-            self.controller_name = str(m.get("name", "gui"))[:CONTROLLER_NAME_MAX]
-            self._last_cmd = None
-            self._last_cmd_ns = 0
-            self._cmd_clock_base_ms = None    # 遅れの基準は操縦権を取るたびに測り直す
-            self._late_since_ns = None
-            self._prev_cmd_arrival_ns = 0
+    # ── 制御メッセージの処理（`_CONTROL_HANDLERS` の表から呼ぶ。1つの kind に1つのメソッド） ──
+
+    async def _ctl_take_control(self, ws, m: dict) -> None:
+        if not self._token_ok(m):
+            self.auth_rejects += 1
+            await self._send_json(ws, {"type": "control_denied",
+                                       "holder": "", "reason": "bad_token"})
+            return
+        if self.controller is not None and self.controller is not ws:
+            await self._send_json(ws, {"type": "control_denied",
+                                       "holder": self.controller_name})
+            return
+        self.controller = ws
+        self.controller_name = str(m.get("name", "gui"))[:CONTROLLER_NAME_MAX]
+        self._last_cmd = None
+        self._last_cmd_ns = 0
+        self._cmd_clock_base_ms = None    # 遅れの基準は操縦権を取るたびに測り直す
+        self._late_since_ns = None
+        self._prev_cmd_arrival_ns = 0
+        self._relay_now()
+        self._status_soon()
+
+    async def _ctl_release_control(self, ws, m: dict) -> None:
+        if self.controller is ws:
+            self._release_control("解放")
             self._relay_now()
             self._status_soon()
 
-        elif kind == "release_control":
-            if self.controller is ws:
-                self._release_control("解放")
+    async def _ctl_cmd(self, ws, m: dict) -> None:
+        if self.controller is not ws:
+            return                        # 操縦権が無い接続の指令は捨てる
+        try:
+            cmd = self._decode_cmd(m)
+        except (TypeError, ValueError, OverflowError):
+            # **壊れた指令は捨てるだけ。接続は維持する。**
+            # msgspec は NaN / 1e400 を弾くが、`{"speed": "abc"}` や桁の多すぎる整数は
+            # 素通りする（`float()` が `ValueError`／`OverflowError`）。
+            # 切ると 150ms 後に DISARM して復帰に人手が要るので、
+            # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
+            self.bad_cmds += 1
+            return
+        if not cmd.arm:
+            # 人が ARM を外した。E-Stop 後の「ARM を入れ直すまで通さない」をここで解く
+            self._estop_hold = False
+        # **遅れて届いた「走れ」は捨てる**。Wi-Fi が詰まると GUI の指令は
+        # ブラウザと TCP に溜まり、復帰した瞬間にまとめて届く。受信時刻だけで鮮度を
+        # 見ると、何十秒も前の ARM でデッドマンが「生きている」に戻り、人の操作なしに
+        # 走り出す。**止める指令（DISARM・`arm=false`）は遅れていても通す**
+        now_ns = time.monotonic_ns()
+        late_ms = self._cmd_lateness_ms(m.get("t"), now_ns)
+        gap_ns = now_ns - self._prev_cmd_arrival_ns if self._prev_cmd_arrival_ns else 0
+        self._prev_cmd_arrival_ns = now_ns
+        go = cmd.arm and cmd.mode != 0
+        if late_ms > _SAFETY.cmd_deadman_ms and go:
+            self.stale_cmds += 1
+            if self._late_since_ns is None:
+                self._late_since_ns = now_ns
+            elif now_ns - self._late_since_ns >= CMD_LATE_RELEASE_NS:
+                # 遅れが続いている＝基準が古い。操縦権を外して人に取り直させる（測り直す）
+                self._release_control("通信の遅れが続いたため操縦権を解放（取り直してください）")
                 self._relay_now()
                 self._status_soon()
-
-        elif kind == "cmd":
-            if self.controller is not ws:
-                return                        # 操縦権が無い接続の指令は捨てる
-            try:
-                cmd = self._decode_cmd(m)
-            except (TypeError, ValueError, OverflowError):
-                # **壊れた指令は捨てるだけ。接続は維持する。**
-                # msgspec は NaN / 1e400 を弾くが、`{"speed": "abc"}` や桁の多すぎる整数は
-                # 素通りする（`float()` が `ValueError`／`OverflowError`）。
-                # 切ると 150ms 後に DISARM して復帰に人手が要るので、
-                # **GUI のバグ1つで走行中に操縦が切れる**方には倒さない
-                self.bad_cmds += 1
-                return
-            if not cmd.arm:
-                # 人が ARM を外した。E-Stop 後の「ARM を入れ直すまで通さない」をここで解く
-                self._estop_hold = False
-            # **遅れて届いた「走れ」は捨てる**。Wi-Fi が詰まると GUI の指令は
-            # ブラウザと TCP に溜まり、復帰した瞬間にまとめて届く。受信時刻だけで鮮度を
-            # 見ると、何十秒も前の ARM でデッドマンが「生きている」に戻り、人の操作なしに
-            # 走り出す。**止める指令（DISARM・`arm=false`）は遅れていても通す**
-            now_ns = time.monotonic_ns()
-            late_ms = self._cmd_lateness_ms(m.get("t"), now_ns)
-            gap_ns = now_ns - self._prev_cmd_arrival_ns if self._prev_cmd_arrival_ns else 0
-            self._prev_cmd_arrival_ns = now_ns
-            go = cmd.arm and cmd.mode != 0
-            if late_ms > _SAFETY.cmd_deadman_ms and go:
-                self.stale_cmds += 1
-                if self._late_since_ns is None:
-                    self._late_since_ns = now_ns
-                elif now_ns - self._late_since_ns >= CMD_LATE_RELEASE_NS:
-                    # 遅れが続いている＝基準が古い。操縦権を外して人に取り直させる（測り直す）
-                    self._release_control("通信の遅れが続いたため操縦権を解放（取り直してください）")
-                    self._relay_now()
-                    self._status_soon()
-                return
-            if go:
-                self._late_since_ns = None
-            if go and gap_ns > CMD_SPARSE_GAP_NS:
-                # 間引かれた指令（バックグラウンドの 1Hz 等）や途絶明けの最初の1発では走らせない。
-                # 到着は記録したので、続けて 50Hz で届けば次の指令から通る
-                self.sparse_cmds += 1
-                return
-            # **中身が変わったらその場で `/cmd` へ**。50Hz の `_cmd_pump` を待つと
-            # GUI の 50Hz と非同期で平均10ms・最大20ms遅れ、人のブレーキも同じだけ遅れた。
-            # 同じ中身の繰り返し（スティックを保持中）は送らない——デッドマンの鮮度だけ更新し、
-            # 定期送信に任せる。Wi-Fi の詰まりでまとめて届いても、変化したものだけが順に出る
-            # （時間で間引くと、まとめて届いたブレーキが次の定期送信まで遅れる）
-            changed = cmd != self._last_cmd or not self._cmd_was_live
-            self._last_cmd = cmd
-            self._last_cmd_ns = time.monotonic_ns()
-            if changed:
-                self._relay_now()
-
-        elif kind == "estop":
-            # **誰であっても止められる。** 操縦権を持っていなくても通す
-            self._last_cmd = None
-            self._last_cmd_ns = 0
-            # 次の操縦者が ARM を入れ直す（`arm=False` を一度送る）まで ARM を通さない
-            self._estop_hold = True
-            self._release_control("E-Stop 要求")
+            return
+        if go:
+            self._late_since_ns = None
+        if go and gap_ns > CMD_SPARSE_GAP_NS:
+            # 間引かれた指令（バックグラウンドの 1Hz 等）や途絶明けの最初の1発では走らせない。
+            # 到着は記録したので、続けて 50Hz で届けば次の指令から通る
+            self.sparse_cmds += 1
+            return
+        # **中身が変わったらその場で `/cmd` へ**。50Hz の `_cmd_pump` を待つと
+        # GUI の 50Hz と非同期で平均10ms・最大20ms遅れ、人のブレーキも同じだけ遅れた。
+        # 同じ中身の繰り返し（スティックを保持中）は送らない——デッドマンの鮮度だけ更新し、
+        # 定期送信に任せる。Wi-Fi の詰まりでまとめて届いても、変化したものだけが順に出る
+        # （時間で間引くと、まとめて届いたブレーキが次の定期送信まで遅れる）
+        changed = cmd != self._last_cmd or not self._cmd_was_live
+        self._last_cmd = cmd
+        self._last_cmd_ns = time.monotonic_ns()
+        if changed:
             self._relay_now()
-            self._status_soon()
 
-        # ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
+    async def _ctl_estop(self, ws, m: dict) -> None:
+        # **誰であっても止められる。** 操縦権を持っていなくても通す
+        self._last_cmd = None
+        self._last_cmd_ns = 0
+        # 次の操縦者が ARM を入れ直す（`arm=False` を一度送る）まで ARM を通さない
+        self._estop_hold = True
+        self._release_control("E-Stop 要求")
+        self._relay_now()
+        self._status_soon()
 
-        elif kind == "auto":
-            # **解除・停止は誰でも通す。開始だけ操縦権を要求する。**
-            # engage も同じ経路を通していたので、操縦権を持たない第三者が
-            # 自律走行を開始できてしまっていた。止める側の条件は増やさない
-            if m.get("engaged") and self.controller is not ws:
+    # ── 自動運転（誰でも操作できる。**解除だけは特に条件をつけない**） ──
+    async def _ctl_auto(self, ws, m: dict) -> None:
+        # **解除・停止は誰でも通す。開始だけ操縦権を要求する。**
+        # engage も同じ経路を通していたので、操縦権を持たない第三者が
+        # 自律走行を開始できてしまっていた。止める側の条件は増やさない
+        if m.get("engaged") and self.controller is not ws:
+            await self._send_json(ws, {"type": "control_denied",
+                                       "holder": self.controller_name,
+                                       "reason": "auto_engage"})
+            return
+        if self._auto_engaged and self.controller is not ws:
+            # **走っている最中の自律走行を、操縦者以外が書き換えない**（パラメータ・駐車目標・
+            # 経路・地図の操作は、走っている車の速度と行き先を変える）。解除だけは通す
+            if "engaged" in m and not m["engaged"]:
+                m = {"engaged": False}
+            else:
                 await self._send_json(ws, {"type": "control_denied",
                                            "holder": self.controller_name,
-                                           "reason": "auto_engage"})
+                                           "reason": "auto_busy"})
                 return
-            if self._auto_engaged and self.controller is not ws:
-                # **走っている最中の自律走行を、操縦者以外が書き換えない**（パラメータ・駐車目標・
-                # 経路・地図の操作は、走っている車の速度と行き先を変える）。解除だけは通す
-                if "engaged" in m and not m["engaged"]:
-                    m = {"engaged": False}
-                else:
-                    await self._send_json(ws, {"type": "control_denied",
-                                               "holder": self.controller_name,
-                                               "reason": "auto_busy"})
-                    return
-            self._on_auto(m)
-            self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
-            self._relay_now()              # 解除も待たせない（GUI の速度・舵に戻す）
-            # **モード・engage が変わると前カメラの capture fps の希望も変わりうる**
-            # （`CAMERA_AUTO_MODES` を engage した瞬間に上限まで上げたい）
-            self._publish_cam_config()
-            self._status_soon()
+        self._on_auto(m)
+        self._publish_auto_ctrl()      # 待たせない。engage は即座に効かせる
+        self._relay_now()              # 解除も待たせない（GUI の速度・舵に戻す）
+        # **モード・engage が変わると前カメラの capture fps の希望も変わりうる**
+        # （`CAMERA_AUTO_MODES` を engage した瞬間に上限まで上げたい）
+        self._publish_cam_config()
+        self._status_soon()
 
-        # ── ファン（誰でも操作できる。灯火と同じ「状態」トグル） ──
+    # ── ファン（誰でも操作できる。灯火と同じ「状態」トグル） ──
+    async def _ctl_fan(self, ws, m: dict) -> None:
+        self._on_fan(m)
+        self._status_soon()
 
-        elif kind == "fan":
-            self._on_fan(m)
-            self._status_soon()
+    # ── カメラ capture 設定（誰でも操作できる。ファンと同じ「状態」トグル） ──
+    async def _ctl_camera(self, ws, m: dict) -> None:
+        self._on_camera(m)
+        self._status_soon()
 
-        # ── カメラ capture 設定（誰でも操作できる。ファンと同じ「状態」トグル） ──
+    # ── GUIの運転設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
+    async def _ctl_drive_settings(self, ws, m: dict) -> None:
+        self._on_drive_settings(m)
+        self._status_soon()
 
-        elif kind == "camera":
-            self._on_camera(m)
-            self._status_soon()
+    # ── 矢印信号認識の設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
+    async def _ctl_signal(self, ws, m: dict) -> None:
+        self._on_signal_config(m)
+        self._status_soon()
 
-        # ── GUIの運転設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
+    # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
+    #    `AutoCtrl.freeze_seq`/`clear_map` と同じ「回数」の約束） ──
+    async def _ctl_track_roi_select(self, ws, m: dict) -> None:
+        self._on_track_roi_select(m)
 
-        elif kind == "drive_settings":
-            self._on_drive_settings(m)
-            self._status_soon()
+    async def _ctl_track_roi_clear(self, ws, m: dict) -> None:
+        self._on_track_roi_clear()
 
-        # ── 矢印信号認識の設定（誰でも操作できる。カメラ設定と同じ「状態」トグル） ──
+    # ── TC/TV 有効切り替え（誰でも操作できる） ──
+    # STM32側の適用結果は `diag/link`(tc_enabled/tv_enabled) 経由で戻ってくるので
+    # ここでは broadcast しない（fan と違いサーバ内で完結する状態を持たないため）
+    async def _ctl_tc_tv(self, ws, m: dict) -> None:
+        if "tc" in m:
+            self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tc_enable", value=bool(m["tc"])))
+        if "tv" in m:
+            self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tv_enable", value=bool(m["tv"])))
 
-        elif kind == "signal":
-            self._on_signal_config(m)
-            self._status_soon()
+    # ── 片輪浮き対策（誰でも操作できる。TC/TV本体とは独立した別機構） ──
+    async def _ctl_wheel_lift_guard(self, ws, m: dict) -> None:
+        if "enabled" in m:
+            self.pub.send(TOPIC_UI_EVENT,
+                           UiEvent(kind="wheel_lift_guard_enable", value=bool(m["enabled"])))
 
-        # ── カメラセグメンテーションモデルの選択（誰でも操作できる。
-        #    `ftg_cam` を engage する前に選び直す想定——一覧は要求があった
-        #    クライアントにだけ返す（`logs_list` と同じ流儀）） ──
+    # ── ABS（誰でも操作できる）。適用結果は `diag/link`(abs_enabled) で戻る ──
+    async def _ctl_abs(self, ws, m: dict) -> None:
+        if "enabled" in m:
+            self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="abs_enable", value=bool(m["enabled"])))
 
-        elif kind == "cam_model_list":
-            await self._send_json(ws, self._cam_models_list())
+    # ── ブレーキホールド（誰でも操作できる）。適用結果は `diag/link`(brake_hold_enabled) で戻る ──
+    async def _ctl_brake_hold(self, ws, m: dict) -> None:
+        if "enabled" in m:
+            self.pub.send(TOPIC_UI_EVENT,
+                           UiEvent(kind="brake_hold_enable", value=bool(m["enabled"])))
 
-        elif kind == "cam_model_select":
-            self._on_cam_model(m)
-            self._status_soon()
-
-        # ── E2E LiDAR モデルの選択（誰でも操作できる。`cam_model_list`/`select`
-        #    と全く同じ形。`e2e_lidar` を engage する前に選び直す想定） ──
-
-        elif kind == "e2e_model_list":
-            await self._send_json(ws, self._e2e_models_list())
-
-        elif kind == "e2e_model_select":
-            self._on_e2e_model(m)
-            self._status_soon()
-
-        # ── カメラE2E モデルの選択（同じ形。`cam_e2e` を engage する前に選び直す想定） ──
-
-        elif kind == "cam_e2e_model_list":
-            await self._send_json(ws, self._cam_e2e_models_list())
-
-        elif kind == "cam_e2e_model_select":
-            self._on_cam_e2e_model(m)
-            self._status_soon()
-
-        # ── E2E 融合モデルの選択（同じ形） ──
-
-        elif kind == "e2e_fusion_model_list":
-            await self._send_json(ws, self._e2e_fusion_models_list())
-
-        elif kind == "e2e_fusion_model_select":
-            self._on_e2e_fusion_model(m)
-            self._status_soon()
-
-        elif kind == "stereo_e2e_model_list":
-            await self._send_json(ws, self._stereo_e2e_models_list())
-
-        elif kind == "stereo_e2e_model_select":
-            self._on_stereo_e2e_model(m)
-            self._status_soon()
-
-        # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
-        #    `AutoCtrl.freeze_seq`/`clear_map` と同じ「回数」の約束） ──
-
-        elif kind == "track_roi_select":
-            self._on_track_roi_select(m)
-
-        elif kind == "track_roi_clear":
-            self._on_track_roi_clear()
-
-        # ── TC/TV 有効切り替え（誰でも操作できる） ──
-        # STM32側の適用結果は `diag/link`(tc_enabled/tv_enabled) 経由で戻ってくるので
-        # ここでは broadcast しない（fan と違いサーバ内で完結する状態を持たないため）
-
-        elif kind == "tc_tv":
-            if "tc" in m:
-                self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tc_enable", value=bool(m["tc"])))
-            if "tv" in m:
-                self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="tv_enable", value=bool(m["tv"])))
-
-        # ── 片輪浮き対策（誰でも操作できる。TC/TV本体とは独立した別機構） ──
-
-        elif kind == "wheel_lift_guard":
-            if "enabled" in m:
-                self.pub.send(TOPIC_UI_EVENT,
-                               UiEvent(kind="wheel_lift_guard_enable", value=bool(m["enabled"])))
-
-        # ── ABS（誰でも操作できる）。適用結果は `diag/link`(abs_enabled) で戻る ──
-
-        elif kind == "abs":
-            if "enabled" in m:
-                self.pub.send(TOPIC_UI_EVENT, UiEvent(kind="abs_enable", value=bool(m["enabled"])))
-
-        # ── ブレーキホールド（誰でも操作できる）。適用結果は `diag/link`(brake_hold_enabled) で戻る ──
-
-        elif kind == "brake_hold":
-            if "enabled" in m:
-                self.pub.send(TOPIC_UI_EVENT,
-                               UiEvent(kind="brake_hold_enable", value=bool(m["enabled"])))
-
-        # ── 自動停止の安全マージン[cm]（誰でも操作できる） ──
-        # STM32側の適用結果は tc_tv/wheel_lift_guard と同様
-        # `diag/link`(auto_stop_margin_cm) 経由で戻ってくるのでここでは broadcast しない
-
-        elif kind == "auto_stop_margin":
-            if "margin_cm" in m:
-                try:
-                    margin_cm = float(m["margin_cm"])
-                except (TypeError, ValueError):
-                    pass
-                else:
-                    # **NaN/Inf は STM32 へ CONFIG_SET として直接飛ぶので、ここで
-                    # 弾かないと `command_from_cmd` の防御を経由せず届いてしまう**（issue #1）
-                    if math.isfinite(margin_cm):
-                        self.pub.send(TOPIC_UI_EVENT,
-                                       UiEvent(kind="auto_stop_margin_cm", float_value=margin_cm))
-
-        elif kind == "ping":
-            await self._send_json(ws, {"type": "pong", "id": m.get("id"),
-                                       "t_server": time.monotonic_ns()})
-
-        # ── 記録（誰でも操作できる。走行の操縦権とは別物） ──
-
-        elif kind == "sfl_record":
-            self._sfl_active = bool(m.get("active", False))
-            self._status_soon()
-
-        elif kind == "mcap_record_start":
+    # ── 自動停止の安全マージン[cm]（誰でも操作できる） ──
+    # STM32側の適用結果は tc_tv/wheel_lift_guard と同様
+    # `diag/link`(auto_stop_margin_cm) 経由で戻ってくるのでここでは broadcast しない
+    async def _ctl_auto_stop_margin(self, ws, m: dict) -> None:
+        if "margin_cm" in m:
             try:
-                image_hz = float(m.get("image_hz", DEFAULT_MCAP_IMAGE_HZ))
+                margin_cm = float(m["margin_cm"])
             except (TypeError, ValueError):
-                image_hz = DEFAULT_MCAP_IMAGE_HZ
-            if not math.isfinite(image_hz):
-                image_hz = DEFAULT_MCAP_IMAGE_HZ
-            await self._mcap_start(image_hz=image_hz)
-            self._status_soon()
+                pass
+            else:
+                # **NaN/Inf は STM32 へ CONFIG_SET として直接飛ぶので、ここで
+                # 弾かないと `command_from_cmd` の防御を経由せず届いてしまう**（issue #1）
+                if math.isfinite(margin_cm):
+                    self.pub.send(TOPIC_UI_EVENT,
+                                   UiEvent(kind="auto_stop_margin_cm", float_value=margin_cm))
 
-        elif kind == "mcap_record_stop":
-            await self._mcap_stop()
-            self._status_soon()
+    async def _ctl_ping(self, ws, m: dict) -> None:
+        await self._send_json(ws, {"type": "pong", "id": m.get("id"),
+                                   "t_server": time.monotonic_ns()})
 
-        elif kind == "video_record_start":
-            await self._video_start()
-            self._status_soon()
+    # ── 記録（誰でも操作できる。走行の操縦権とは別物） ──
+    async def _ctl_sfl_record(self, ws, m: dict) -> None:
+        self._sfl_active = bool(m.get("active", False))
+        self._status_soon()
 
-        elif kind == "video_record_stop":
-            await self._video_stop()
-            self._status_soon()
+    async def _ctl_mcap_record_start(self, ws, m: dict) -> None:
+        try:
+            image_hz = float(m.get("image_hz", DEFAULT_MCAP_IMAGE_HZ))
+        except (TypeError, ValueError):
+            image_hz = DEFAULT_MCAP_IMAGE_HZ
+        if not math.isfinite(image_hz):
+            image_hz = DEFAULT_MCAP_IMAGE_HZ
+        await self._recorder.mcap_start(image_hz=image_hz)
+        self._status_soon()
 
-        elif kind == "logs_list":
-            await self._send_json(ws, self._logs_list())
+    async def _ctl_mcap_record_stop(self, ws, m: dict) -> None:
+        await self._recorder.mcap_stop()
+        self._status_soon()
 
-        elif kind == "logs_delete":
-            error = self._logs_delete(str(m.get("name", "")))
-            if error:
-                await self._send_json(ws, {"type": "logs_delete_result", "ok": False,
-                                           "error": error})
-            await self._send_json(ws, self._logs_list())
+    async def _ctl_video_record_start(self, ws, m: dict) -> None:
+        await self._recorder.video_start(self.logs_dir)
+        self._status_soon()
 
-        # ── 保存済み地図の一覧・保存・削除（誰でも操作できる。`logs_list`/
-        #    `logs_delete`と同じ流儀。アップロードとダウンロードは別経路——
-        #    §`_serve_map_file`（GET）・`_map_upload_channel`（専用WS）参照） ──
+    async def _ctl_video_record_stop(self, ws, m: dict) -> None:
+        await self._recorder.video_stop()
+        self._status_soon()
 
-        elif kind == "maps_list":
-            await self._send_json(ws, self._maps_list())
+    async def _ctl_logs_list(self, ws, m: dict) -> None:
+        await self._send_json(ws, self._logs_list())
 
-        elif kind == "maps_save":
-            # **同期I/O（ディスク書き込み）を制御チャネルのイベントループから逃がす。**
-            # `OSError`（ENOSPC 等）を `_maps_save` 側が捕まえていなかった上に、
-            # ブロッキングI/Oがイベントループを止めていた（issue #12）
-            try:
-                ok, error = await asyncio.to_thread(self._maps_save, str(m.get("name", "")))
-            except OSError as e:
-                ok, error = False, f"保存に失敗: {e}"
-            await self._send_json(ws, {"type": "maps_save_result", "ok": ok, "error": error})
-            await self._send_json(ws, self._maps_list())
+    async def _ctl_logs_delete(self, ws, m: dict) -> None:
+        error = self._logs_delete(str(m.get("name", "")))
+        if error:
+            await self._send_json(ws, {"type": "logs_delete_result", "ok": False,
+                                       "error": error})
+        await self._send_json(ws, self._logs_list())
 
-        elif kind == "maps_delete":
-            mapstore.delete_map(str(m.get("name", "")))
-            await self._send_json(ws, self._maps_list())
+    # ── 保存済み地図の一覧・保存・削除（誰でも操作できる。`logs_list`/
+    #    `logs_delete`と同じ流儀。アップロードとダウンロードは別経路——
+    #    §`_serve_map_file`（GET）・`_map_upload_channel`（専用WS）参照） ──
+    async def _ctl_maps_list(self, ws, m: dict) -> None:
+        await self._send_json(ws, self._maps_list())
 
-        elif kind == "maps_clear_grip":
-            # 地図の学習値（`.grip.json`）だけを消す。**地図・経路・経由点は残す。**
-            ok, error = self._maps_clear_grip(str(m.get("name", "")))
-            await self._send_json(ws, {"type": "maps_clear_grip_result",
-                                       "ok": ok, "error": error})
-            await self._send_json(ws, self._maps_list())
+    async def _ctl_maps_save(self, ws, m: dict) -> None:
+        # **同期I/O（ディスク書き込み）を制御チャネルのイベントループから逃がす。**
+        # `OSError`（ENOSPC 等）を `_maps_save` 側が捕まえていなかった上に、
+        # ブロッキングI/Oがイベントループを止めていた（issue #12）
+        try:
+            ok, error = await asyncio.to_thread(self._maps_save, str(m.get("name", "")))
+        except OSError as e:
+            ok, error = False, f"保存に失敗: {e}"
+        await self._send_json(ws, {"type": "maps_save_result", "ok": ok, "error": error})
+        await self._send_json(ws, self._maps_list())
 
-        # ── シャットダウン（誰でも実行できる。estop と同じく、走行の操縦権とは無関係。
-        #    誤操作は GUI 側の window.confirm で防ぐ——操縦権を要求すると
-        #    「操縦権が無い接続には holder="" の control_denied が返るだけで GUI に
-        #    何も表示されない」という無反応バグになる。実機で発覚） ──
+    async def _ctl_maps_delete(self, ws, m: dict) -> None:
+        mapstore.delete_map(str(m.get("name", "")))
+        await self._send_json(ws, self._maps_list())
 
-        elif kind == "shutdown":
-            vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
-            if vs is not None and vs.armed:
-                # **ARM 中は受け付けない。** 走っている車の計算機を、見ているだけの画面から
-                # 落とせないようにする。止めたいなら E-Stop（誰でも押せる）が先
-                await self._send_json(ws, {"type": "shutdown_denied", "reason": "armed"})
-                return
-            await self._shutdown_pi()
+    async def _ctl_maps_clear_grip(self, ws, m: dict) -> None:
+        # 地図の学習値（`.grip.json`）だけを消す。**地図・経路・経由点は残す。**
+        ok, error = self._maps_clear_grip(str(m.get("name", "")))
+        await self._send_json(ws, {"type": "maps_clear_grip_result",
+                                   "ok": ok, "error": error})
+        await self._send_json(ws, self._maps_list())
+
+    # ── シャットダウン（誰でも実行できる。estop と同じく、走行の操縦権とは無関係。
+    #    誤操作は GUI 側の window.confirm で防ぐ——操縦権を要求すると
+    #    「操縦権が無い接続には holder="" の control_denied が返るだけで GUI に
+    #    何も表示されない」という無反応バグになる。実機で発覚） ──
+    async def _ctl_shutdown(self, ws, m: dict) -> None:
+        vs = self.sub.latest.get(TOPIC_VEHICLE_STATE)
+        if vs is not None and vs.armed:
+            # **ARM 中は受け付けない。** 走っている車の計算機を、見ているだけの画面から
+            # 落とせないようにする。止めたいなら E-Stop（誰でも押せる）が先
+            await self._send_json(ws, {"type": "shutdown_denied", "reason": "armed"})
+            return
+        await self._shutdown_pi()
+
+    # ── 推論モデルの一覧・選択（`MODEL_SLOTS` の種類ごとに表へ登録する） ──
+
+    async def _ctl_model_list(self, ws, m: dict) -> None:
+        await self._send_json(ws, MODEL_SLOTS[m["type"].removesuffix("_list")].list_message())
+
+    async def _ctl_model_select(self, ws, m: dict) -> None:
+        self._on_model_select(MODEL_SLOTS[m["type"].removesuffix("_select")], m)
+        self._status_soon()
 
     async def _shutdown_pi(self) -> None:
         """Pi を安全にシャットダウンする。`raspi/setup/install_services.sh` が入れる
         `sudoers.d` で、この固定コマンドだけ NOPASSWD 許可されている前提"""
-        try:
+        # sudoers 未設定等で失敗しても GUI 側は反応が無ければ気付ける。原因はログに残す
+        with warn_on_error("Pi のシャットダウン（sudo /sbin/shutdown）"):
             await asyncio.create_subprocess_exec("sudo", "/sbin/shutdown", "-h", "now")
-        except Exception:
-            pass  # sudoers 未設定等。GUI 側は反応が無ければ気付ける
 
     def _token_ok(self, m: dict) -> bool:
         """共有トークンの照合。**未設定なら常に通す**。
@@ -1801,10 +1627,9 @@ class TelemetryServer:
             self._save_auto_presets()
 
     def _load_auto_presets(self) -> None:
-        try:
-            raw = _json_decode(AUTO_PRESETS_CONF.read_bytes())
-        except Exception:
-            return                         # 無い・壊れている → プリセット無し
+        raw = read_conf(AUTO_PRESETS_CONF)          # 無い・壊れている → 既定のまま（壊れていれば警告）
+        if raw is None:
+            return
         out: dict[str, dict[str, dict[str, float]]] = {}
         if isinstance(raw, dict):
             for mode, presets in raw.items():
@@ -1816,18 +1641,12 @@ class TelemetryServer:
         self._auto_presets = out
 
     def _save_auto_presets(self) -> None:
-        try:
-            _atomic_write_bytes(AUTO_PRESETS_CONF, _json_encode(self._auto_presets))
-        except Exception:
-            pass                           # 保存できなくても走行は続けられるべき
+        write_conf(AUTO_PRESETS_CONF, self._auto_presets)
 
     def _load_auto_conf(self) -> None:
         """`config/auto.json` からモードとパラメータを戻す。**engage は戻さない。**"""
-        try:
-            raw = _json_decode(AUTO_CONF.read_bytes())
-        except Exception:
-            return                         # 無い・壊れている → 既定のまま
-        if not isinstance(raw, dict):
+        raw = read_conf(AUTO_CONF)          # 無い・壊れている → 既定のまま（壊れていれば警告）
+        if raw is None:
             return
         mode = str(raw.get("mode") or "")
         # **知らないモードの分も捨てずに持ち続ける。** planner の読み込みに失敗した
@@ -1867,12 +1686,8 @@ class TelemetryServer:
     def _save_auto_conf(self) -> None:
         if self._auto_mode:
             self._auto_params_by_mode[self._auto_mode] = dict(self._auto_params)
-        try:
-            _atomic_write_bytes(AUTO_CONF, _json_encode(
-                {"mode": self._auto_mode, "params": self._auto_params,
-                 "params_by_mode": self._auto_params_by_mode}))
-        except Exception:
-            pass                           # 保存できなくても走行は続けられるべき
+        write_conf(AUTO_CONF, {"mode": self._auto_mode, "params": self._auto_params,
+                               "params_by_mode": self._auto_params_by_mode})
 
     # ── ファン（Pi5純正クーリング） ──
 
@@ -1952,7 +1767,7 @@ class TelemetryServer:
         """
         if self._auto_fps_override():
             return CAM_FPS_MAX
-        if self._video_recording():
+        if self._recorder.video_recording:
             return CAM_FPS_MAX
         if self._desired_stereo():
             # **左右を同期して撮っている間は ARM/DISARM で fps を変えない。** 走らせたまま fps を変えると
@@ -1968,10 +1783,6 @@ class TelemetryServer:
         """カメラを使う自動運転の engage で前カメラを `CAM_FPS_MAX` に上げるか（`_desired_front_fps` の 1）。"""
         return (self._auto_engaged and self._auto_mode in CAMERA_AUTO_MODES
                 and not self._desired_stereo())
-
-    def _video_recording(self) -> bool:
-        """🎥 録画中（起動処理の途中を含む）か。"""
-        return self._video_proc is not None or self._video_starting
 
     def _desired_front_enabled(self) -> bool:
         """前カメラの capture ON/OFF。
@@ -2008,8 +1819,8 @@ class TelemetryServer:
     def _cam_in_use_while_disarmed(self, cam: str) -> bool:
         """DISARM 中に `cam` の映像を使う者がいるか（GUI の視聴者・mcap 記録・🎥 録画・常駐ロガー）。"""
         return (bool(self.camera_clients.get(cam))
-                or self._mcap_proc is not None or self._mcap_starting
-                or self._video_recording() or self._logger_running)
+                or self._recorder.mcap_busy
+                or self._recorder.video_recording or self._logger_running)
 
     def _camera_config_status(self) -> dict:
         return {
@@ -2047,12 +1858,9 @@ class TelemetryServer:
         ARM 側の初期値として引き継ぐ（DISARM側はコード既定のまま）。前後配置のころの後カメラの
         キー（`rear_*`）は読まない（次に保存したときに消える）。
         """
-        try:
-            raw = _json_decode(CAMERA_CONF.read_bytes())
-        except Exception:
+        raw = read_conf(CAMERA_CONF)          # 無い・壊れている → 既定のまま（壊れていれば警告）
+        if raw is None:
             return
-        if not isinstance(raw, dict):
-            return                         # 配列など → 無いのと同じ扱い
         if isinstance(raw.get("front_fps_armed"), (int, float)):
             self._cam_front_fps_armed = self._clamp_cam_hz(float(raw["front_fps_armed"]))
         elif isinstance(raw.get("front_cap_hz"), (int, float)):
@@ -2065,15 +1873,12 @@ class TelemetryServer:
             self._cam_undistort = raw["undistort"]
 
     def _save_camera_conf(self) -> None:
-        try:
-            _atomic_write_bytes(CAMERA_CONF, _json_encode({
+        write_conf(CAMERA_CONF, {
                 "front_fps_armed": self._cam_front_fps_armed,
                 "front_fps_disarm": self._cam_front_fps_disarm,
                 "gui_hz": self.camera_hz,
                 "undistort": self._cam_undistort,
-            }))
-        except Exception:
-            pass
+            })
 
     # ── GUIの運転設定（速度ダイヤル・制御モード・フィール値等） ──
 
@@ -2123,18 +1928,12 @@ class TelemetryServer:
         self._save_drive_settings()
 
     def _load_drive_settings(self) -> None:
-        try:
-            raw = _json_decode(DRIVE_SETTINGS_CONF.read_bytes())
-        except Exception:
-            return                         # 無い・壊れている → 空のまま（GUI側の既定値を使う）
-        if isinstance(raw, dict):
+        raw = read_conf(DRIVE_SETTINGS_CONF)          # 無い・壊れている → 既定のまま（壊れていれば警告）
+        if raw is not None:
             self._drive_settings = self._valid_drive_settings(raw)
 
     def _save_drive_settings(self) -> None:
-        try:
-            _atomic_write_bytes(DRIVE_SETTINGS_CONF, _json_encode(self._drive_settings))
-        except Exception:
-            pass                           # 保存できなくても走行は続けられるべき
+        write_conf(DRIVE_SETTINGS_CONF, self._drive_settings)
 
     # ── 矢印信号認識の設定（ON/OFF・HSVしきい値） ──
 
@@ -2144,7 +1943,7 @@ class TelemetryServer:
 
         どれも省略可。`_on_camera`と同じく**サーバ側でも必ずクランプする**。
         会場でスライダーを動かすたびに飛んでくる想定なので、`_publish_cam_config`
-        と同じく**待たせずすぐ効かせる**（次の`_signal_config_pump`周期を待たない）。
+        と同じく**待たせずすぐ効かせる**（次の周期送信（`_periodic_jobs`）周期を待たない）。
         """
         if "enabled" in m:
             self._signal_enabled = bool(m["enabled"])
@@ -2183,12 +1982,9 @@ class TelemetryServer:
 
     def _load_signal_conf(self) -> None:
         """`config/signal.json` から戻す。`_load_camera_conf`と同じ流儀。"""
-        try:
-            raw = _json_decode(SIGNAL_CONF.read_bytes())
-        except Exception:
+        raw = read_conf(SIGNAL_CONF)          # 無い・壊れている → 既定のまま（壊れていれば警告）
+        if raw is None:
             return
-        if not isinstance(raw, dict):
-            return                         # 配列など → 無いのと同じ扱い
         if isinstance(raw.get("enabled"), bool):
             self._signal_enabled = raw["enabled"]
         if isinstance(raw.get("roi_top"), (int, float)):
@@ -2205,8 +2001,7 @@ class TelemetryServer:
             self._signal_min_lit_frac = max(0.0, min(1.0, float(raw["min_lit_frac"])))
 
     def _save_signal_conf(self) -> None:
-        try:
-            _atomic_write_bytes(SIGNAL_CONF, _json_encode({
+        write_conf(SIGNAL_CONF, {
                 "enabled": self._signal_enabled,
                 "roi_top": self._signal_roi_top,
                 "roi_bottom": self._signal_roi_bottom,
@@ -2214,298 +2009,34 @@ class TelemetryServer:
                 "sat_max": self._signal_sat_max,
                 "val_min": self._signal_val_min,
                 "min_lit_frac": self._signal_min_lit_frac,
-            }))
-        except Exception:
-            pass
+            })
 
-    # ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
+    # ── 推論モデルの選択（`telemetry/models.py`。種類ごとの違いは `MODEL_SLOTS` の表だけ） ──
     #
-    # `cam_perception_node` を再起動もSSHも無しに切り替えるための口。
-    # **走行開始（engage）ボタンを押す前に選び直す**という使い方を想定していて、
-    # `_on_auto` と同じ「変えたら engage は必ず落とす」を踏襲する（このコード
-    # ベースには「engage 中は操作を拒否する」という前例が無く、代わりに
-    # 「変わったものを反映するために engage を落とす」という設計で統一されている
-    # ——`_on_auto` のモード変更、`_release_control` の操縦者消失と同じ形）。
+    # 推論ノード・planner を再起動も SSH も無しに切り替えるための口。engage する前に選び直す想定で、
+    # `_on_auto` と同じ「変えたら engage は必ず落とす」を踏襲する（このコードベースには「engage 中は
+    # 操作を拒否する」という前例が無く、「変わったものを反映するために engage を落とす」で統一されている）。
 
-    def _cam_models_list(self) -> dict:
-        """`models/seg/` にある `.onnx` の一覧。`_logs_list` と同じ流儀
-        （要求したクライアントにだけ返す。ブロードキャストしない）。
-
-        **キー名は `files` ではなく `cam_model_files`。** `_logs_list()` の
-        `files`（`LogFile[]`）と型が違うので、GUI 側の `ServerMsg`（型で
-        振り分けられない1つの受け皿）で混ざらないよう分けてある。
-
-        `note`（`ml_cam/export_onnx.py`が`<名前>.json`に書く自由記述の備考。
-        `_e2e_models_list()`と同じ流儀）も一緒に返す。
-        `.json`が壊れていても一覧自体は壊さない（空文字で返す）。
-        """
-        files = []
-        if SEG_MODELS_DIR.is_dir():
-            for p in sorted(SEG_MODELS_DIR.iterdir()):
-                if not p.is_file() or p.suffix != ".onnx":
-                    continue
-                st = p.stat()
-                cfg_path = p.with_suffix(".json")
-                note = ""
-                if cfg_path.exists():
-                    try:
-                        note = str(_json_decode(cfg_path.read_bytes()).get("note", ""))
-                    except Exception:                                    # noqa: BLE001
-                        pass
-                files.append({"name": p.stem, "size": st.st_size, "mtime": st.st_mtime,
-                             "has_config": cfg_path.exists(), "note": note})
-        return {"type": "cam_models", "cam_model_files": files}
-
-    def _on_cam_model(self, m: dict) -> None:
-        """`{"type":"cam_model_select", "name": str}`。
-
-        `name` が `models/seg/` に実在する `.onnx` と一致しなければ黙って捨てる
-        （`_on_auto` が知らない planner id を捨てるのと同じ——GUI の一覧に
-        出ていないものは選べないので、ここに来る時点で基本的に一致するはずだが、
-        一覧取得後にファイルが削除された等のズレを机上でも弾いておく）。
-        """
+    def _on_model_select(self, slot: ModelSlot, m: dict) -> None:
+        """`{"type":"<key>_select", "name": str}`。置き場に実在しない名前は黙って捨てる。"""
         name = str(m.get("name") or "")
-        if name and not (SEG_MODELS_DIR / f"{name}.onnx").is_file():
+        if name and not slot.exists(name):
             return
-        if name == self._cam_model:
+        if name == self._models[slot.key]:
             return
-        self._cam_model = name
-        # **モデルを変えたら ftg_cam の engage は必ず落とす。** 前のモデルの
-        # つもりで engage したまま推論だけ入れ替わるのを防ぐ（`_on_auto` の
-        # 「モードを変えたら engage は必ず落とす」と同じ理由・同じ形）
-        if self._auto_engaged and self._auto_mode == "ftg_cam":
+        self._models[slot.key] = name
+        if self._auto_engaged and self._auto_mode == slot.auto_mode:
             self._auto_engaged = False
             self._publish_auto_ctrl()
-        self._save_cam_model_conf()
-        self._publish_cam_model()          # 待たせない。cam_config と同じく即座に効かせる
+        slot.save(name)
+        self._publish_model(slot)          # 待たせない。周期の再送を待たずに即座に効かせる
 
-    def _cam_model_status(self) -> dict:
-        return {"name": self._cam_model}
+    def _publish_model(self, slot: ModelSlot) -> None:
+        self.pub.send(slot.topic, ModelSelectCtrl(name=self._models[slot.key]))
 
-    def _publish_cam_model(self) -> None:
-        self.pub.send(TOPIC_CAM_MODEL, CamModelCtrl(name=self._cam_model))
-
-    def _load_cam_model_conf(self) -> None:
-        """`config/cam_model.json` から戻す。`_load_camera_conf` と同じ流儀。"""
-        try:
-            raw = _json_decode(CAM_MODEL_CONF.read_bytes())
-        except Exception:
-            return                         # 無い・壊れている → 既定（未選択）のまま
-        if not isinstance(raw, dict):
-            return                         # 配列など → 無いのと同じ扱い
-        name = raw.get("name")
-        if isinstance(name, str) and (not name or (SEG_MODELS_DIR / f"{name}.onnx").is_file()):
-            self._cam_model = name
-
-    def _save_cam_model_conf(self) -> None:
-        try:
-            _atomic_write_bytes(CAM_MODEL_CONF, _json_encode({"name": self._cam_model}))
-        except Exception:
-            pass
-
-    # ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
-    #
-    # `_cam_model*` と全く同じ構造。`planning_node` を再起動もSSHも無しに
-    # 切り替えるための口で、`e2e_lidar` を engage する前に選び直す想定。
-    # 「変えたら engage を必ず落とす」も `_on_cam_model` と同じ理由で踏襲する。
-
-    def _e2e_models_list(self) -> dict:
-        """`models/e2e_lidar/` にある `.onnx` の一覧。`_cam_models_list()` と同じ流儀
-        （要求したクライアントにだけ返す）。**キー名は `e2e_model_files`**
-        （`cam_model_files` と型は同じだが、GUI側の受け皿で混ざらないよう分ける）。
-
-        `note`（`ml_lidar/export_onnx_rl.py`が`<名前>.json`に書く自由記述の備考）も一緒に返す——GUIのモデル選択でどんな変更・どのコースかを
-        確認できるようにするため。`.json`が壊れていても一覧自体は壊さない（空文字で返す）。
-        """
-        return {"type": "e2e_models", "e2e_model_files": _onnx_model_files(E2E_MODELS_DIR)}
-
-    def _on_e2e_model(self, m: dict) -> None:
-        """`{"type":"e2e_model_select", "name": str}`。
-
-        `name` が `models/e2e_lidar/` に実在する `.onnx` と一致しなければ黙って捨てる
-        （`_on_cam_model` と同じ理由）。
-        """
-        name = str(m.get("name") or "")
-        if name and not (E2E_MODELS_DIR / f"{name}.onnx").is_file():
-            return
-        if name == self._e2e_model:
-            return
-        self._e2e_model = name
-        # **モデルを変えたら e2e_lidar の engage は必ず落とす。**
-        # `_on_cam_model` の「モデルを変えたら ftg_cam の engage を必ず落とす」と同じ理由
-        if self._auto_engaged and self._auto_mode == "e2e_lidar":
-            self._auto_engaged = False
-            self._publish_auto_ctrl()
-        self._save_e2e_model_conf()
-        self._publish_e2e_model()          # 待たせない。cam_model と同じく即座に効かせる
-
-    def _e2e_model_status(self) -> dict:
-        return {"name": self._e2e_model}
-
-    def _publish_e2e_model(self) -> None:
-        self.pub.send(TOPIC_E2E_MODEL, E2EModelCtrl(name=self._e2e_model))
-
-    def _load_e2e_model_conf(self) -> None:
-        """`config/e2e_lidar_model.json` から戻す。`_load_cam_model_conf` と同じ流儀。"""
-        try:
-            raw = _json_decode(E2E_MODEL_CONF.read_bytes())
-        except Exception:
-            return
-        if not isinstance(raw, dict):
-            return                         # 配列など → 無いのと同じ扱い
-        name = raw.get("name")
-        if isinstance(name, str) and (not name or (E2E_MODELS_DIR / f"{name}.onnx").is_file()):
-            self._e2e_model = name
-
-    def _save_e2e_model_conf(self) -> None:
-        try:
-            _atomic_write_bytes(E2E_MODEL_CONF, _json_encode({"name": self._e2e_model}))
-        except Exception:
-            pass
-
-    # ── カメラE2E モデルの選択（`cam_e2e` 用） ──
-    #
-    # `_e2e_model*` と全く同じ構造。受け手は `cam_e2e_node`（`cam_e2e/model` を
-    # 購読し、名前が変わったら読み直す）。これが無かった間は
-    # `cam_e2e_node --model` で起動時に固定するしかなく、GUI から選べなかった。
-
-    def _cam_e2e_models_list(self) -> dict:
-        """`models/cam_e2e/` にある `.onnx` の一覧。**キー名は `cam_e2e_model_files`**
-        （他のモデル一覧と GUI 側の受け皿で混ざらないよう分ける）。
-        `note` は `ml_cam_e2e/export_onnx.py` が同梱 JSON に書く備考。"""
-        return {"type": "cam_e2e_models",
-                "cam_e2e_model_files": _onnx_model_files(CAM_E2E_MODELS_DIR)}
-
-    def _on_cam_e2e_model(self, m: dict) -> None:
-        """`{"type":"cam_e2e_model_select", "name": str}`。
-
-        `name` が `models/cam_e2e/` に実在する `.onnx` と一致しなければ黙って捨てる
-        （`_on_cam_model` と同じ理由）。
-        """
-        name = str(m.get("name") or "")
-        if name and not (CAM_E2E_MODELS_DIR / f"{name}.onnx").is_file():
-            return
-        if name == self._cam_e2e_model:
-            return
-        self._cam_e2e_model = name
-        # **モデルを変えたら cam_e2e の engage は必ず落とす。**
-        # 走行中に別の手本で学んだモデルへ切り替わると挙動が急変する
-        # （`_on_cam_model`/`_on_e2e_model` と同じ理由）
-        if self._auto_engaged and self._auto_mode == "cam_e2e":
-            self._auto_engaged = False
-            self._publish_auto_ctrl()
-        self._save_cam_e2e_model_conf()
-        self._publish_cam_e2e_model()      # 待たせない。cam_model と同じく即座に効かせる
-
-    def _cam_e2e_model_status(self) -> dict:
-        return {"name": self._cam_e2e_model}
-
-    def _publish_cam_e2e_model(self) -> None:
-        self.pub.send(TOPIC_CAM_E2E_MODEL, CamE2EModelCtrl(name=self._cam_e2e_model))
-
-    def _load_cam_e2e_model_conf(self) -> None:
-        """`config/cam_e2e_model.json` から戻す。`_load_cam_model_conf` と同じ流儀。"""
-        try:
-            raw = _json_decode(CAM_E2E_MODEL_CONF.read_bytes())
-        except Exception:
-            return
-        if not isinstance(raw, dict):
-            return                         # 配列など → 無いのと同じ扱い
-        name = raw.get("name")
-        if isinstance(name, str) and (
-                not name or (CAM_E2E_MODELS_DIR / f"{name}.onnx").is_file()):
-            self._cam_e2e_model = name
-
-    def _save_cam_e2e_model_conf(self) -> None:
-        try:
-            _atomic_write_bytes(CAM_E2E_MODEL_CONF,
-                                _json_encode({"name": self._cam_e2e_model}))
-        except Exception:
-            pass
-
-    # ── E2E 融合モデルの選択（`e2e_fusion` 用） ──
-    #
-    # `_cam_e2e_model*` と同じ構造。受け手は `e2e_fusion_node`（`e2e_fusion/model`）。
-    # 違いは空文字の意味: ここでは「自動」（ノードがいちばん新しいモデルを使う）。
-
-    def _e2e_fusion_models_list(self) -> dict:
-        """`models/e2e_fusion/` にある `.onnx` の一覧。キー名は `e2e_fusion_model_files`。"""
-        return {"type": "e2e_fusion_models",
-                "e2e_fusion_model_files": _onnx_model_files(E2E_FUSION_MODELS_DIR)}
-
-    def _on_e2e_fusion_model(self, m: dict) -> None:
-        """`{"type":"e2e_fusion_model_select", "name": str}`。実在しない名前は黙って捨てる。"""
-        name = str(m.get("name") or "")
-        if name and not (E2E_FUSION_MODELS_DIR / f"{name}.onnx").is_file():
-            return
-        if name == self._e2e_fusion_model:
-            return
-        self._e2e_fusion_model = name
-        # モデルを変えたら e2e_fusion の engage は必ず落とす（走行中に挙動が急変する）
-        if self._auto_engaged and self._auto_mode == "e2e_fusion":
-            self._auto_engaged = False
-            self._publish_auto_ctrl()
-        try:
-            _atomic_write_bytes(E2E_FUSION_MODEL_CONF, _json_encode({"name": name}))
-        except Exception:
-            pass
-        self._publish_e2e_fusion_model()
-
-    def _e2e_fusion_model_status(self) -> dict:
-        return {"name": self._e2e_fusion_model}
-
-    def _publish_e2e_fusion_model(self) -> None:
-        self.pub.send(TOPIC_E2E_FUSION_MODEL, E2EFusionModelCtrl(name=self._e2e_fusion_model))
-
-    def _load_e2e_fusion_model_conf(self) -> None:
-        """`config/e2e_fusion_model.json` から戻す。無い・壊れている・消えたモデルなら「自動」。"""
-        try:
-            raw = _json_decode(E2E_FUSION_MODEL_CONF.read_bytes())
-        except Exception:
-            return
-        name = raw.get("name") if isinstance(raw, dict) else None
-        if isinstance(name, str) and name and (E2E_FUSION_MODELS_DIR / f"{name}.onnx").is_file():
-            self._e2e_fusion_model = name
-
-    # ── ステレオ E2E モデルの選択（`stereo_e2e` 用） ──
-    #
-    # `_e2e_fusion_model*` と同じ形（空文字は「自動」）。受け手は `stereo_e2e_node`（`stereo_e2e/model`）。
-
-    def _stereo_e2e_models_list(self) -> dict:
-        """`models/stereo_e2e/` にある `.onnx` の一覧。キー名は `stereo_e2e_model_files`。"""
-        return {"type": "stereo_e2e_models",
-                "stereo_e2e_model_files": _onnx_model_files(STEREO_E2E_MODELS_DIR)}
-
-    def _on_stereo_e2e_model(self, m: dict) -> None:
-        """`{"type":"stereo_e2e_model_select", "name": str}`。実在しない名前は黙って捨てる。"""
-        name = str(m.get("name") or "")
-        if name and not (STEREO_E2E_MODELS_DIR / f"{name}.onnx").is_file():
-            return
-        if name == self._stereo_e2e_model:
-            return
-        self._stereo_e2e_model = name
-        # モデルを変えたら engage は必ず落とす（走行中に挙動が急変する）
-        if self._auto_engaged and self._auto_mode == "stereo_e2e":
-            self._auto_engaged = False
-            self._publish_auto_ctrl()
-        try:
-            _atomic_write_bytes(STEREO_E2E_MODEL_CONF, _json_encode({"name": name}))
-        except Exception:
-            pass
-        self._publish_stereo_e2e_model()
-
-    def _publish_stereo_e2e_model(self) -> None:
-        self.pub.send(TOPIC_STEREO_E2E_MODEL, E2EFusionModelCtrl(name=self._stereo_e2e_model))
-
-    def _load_stereo_e2e_model_conf(self) -> None:
-        """`config/stereo_e2e_model.json` から戻す。無い・壊れている・消えたモデルなら「自動」。"""
-        try:
-            raw = _json_decode(STEREO_E2E_MODEL_CONF.read_bytes())
-        except Exception:
-            return
-        name = raw.get("name") if isinstance(raw, dict) else None
-        if isinstance(name, str) and name and (STEREO_E2E_MODELS_DIR / f"{name}.onnx").is_file():
-            self._stereo_e2e_model = name
+    def _publish_models(self) -> None:
+        for slot in MODEL_SLOTS.values():
+            self._publish_model(slot)
 
     # ── 対象追従（`follow_object`）のROI選択 ──
     #
@@ -2517,7 +2048,7 @@ class TelemetryServer:
     def _on_track_roi_select(self, m: dict) -> None:
         """`{"type":"track_roi_select", "x0","y0","x1","y1"}`（前方カメラ映像の
         正規化座標、0〜1）。**選び直すたびに `follow_object` の engage を必ず落とす**
-        （`_on_cam_model`/`_on_e2e_model` の「モデルを変えたら engage を必ず落とす」
+        （`_on_model_select` の「モデルを変えたら engage を必ず落とす」
         と同じ理由——前の対象のつもりで engage したまま追跡対象だけ入れ替わるのを防ぐ）。
 
         **DISARM 中の選択は受け付けない**。cam_track_node は
@@ -2651,8 +2182,8 @@ class TelemetryServer:
             "origin_rejects": self.origin_rejects,
             "bad_cmds": self.bad_cmds,
             "sfl": {"active": self._sfl_active},
-            "mcap": self._mcap_status(),
-            "video": self._video_status(),
+            "mcap": self._recorder.mcap_status(),
+            "video": self._recorder.video_status(),
             "auto": self._auto_status(catalog),
             "fan": self._fan_status(),
             "wifi": self._wifi_status(),
@@ -2661,11 +2192,7 @@ class TelemetryServer:
             "camera_config": self._camera_config_status(),
             "drive_settings": self._drive_settings,
             "signal_config": self._signal_config_status(),
-            "cam_model": self._cam_model_status(),
-            "e2e_model": self._e2e_model_status(),
-            "cam_e2e_model": self._cam_e2e_model_status(),
-            "e2e_fusion_model": self._e2e_fusion_model_status(),
-            "stereo_e2e_model": {"name": self._stereo_e2e_model},
+            **{key: {"name": name} for key, name in self._models.items()},
         }
 
     def _auto_status(self, catalog: bool = True) -> dict:
@@ -2688,172 +2215,6 @@ class TelemetryServer:
         if catalog:
             out["catalog"] = auto_catalog()
         return out
-
-    def _mcap_status(self) -> dict:
-        active = self._mcap_proc is not None
-        elapsed = (time.monotonic_ns() - self._mcap_started_ns) / NS if active else 0.0
-        return {"active": active, "elapsed_s": elapsed, "error": self._mcap_error}
-
-    # ── 🎥 録画（`video_node` が `logs/` に mp4 を書く。止めたら GUI が `GET /logs/<name>` で取る） ──
-
-    def _video_status(self) -> dict:
-        active = self._video_proc is not None
-        elapsed = (time.monotonic_ns() - self._video_started_ns) / NS if active else 0.0
-        return {"active": active, "elapsed_s": elapsed, "error": self._video_error,
-                "files": [] if active else list(self._video_files)}
-
-    async def _video_start(self) -> None:
-        if self._video_proc is not None or self._video_starting:
-            return
-        self._video_starting = True
-        self._video_error = None
-        self._video_files = []
-        # DISARM 中に止めているカメラを起こし、fps を `CAM_FPS_MAX` に上げる
-        self._publish_cam_config()
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        prefix = self.logs_dir / f"surge_{time.strftime('%Y%m%d_%H%M%S')}"
-        cmd = [sys.executable, "-u", "-m", "raspi.nodes.video_node",
-               "--prefix", str(prefix), "--fps", str(VIDEO_FPS),
-               "--duration", str(VIDEO_MAX_S)]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=str(REPO_ROOT),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        except Exception as e:
-            self._video_error = f"video_node を起動できない: {e}"
-            self._video_starting = False
-            self._publish_cam_config()        # 起動に失敗したら fps を戻す
-            return
-        # `_video_proc` を先に立ててから `_video_starting` を下ろす（間で fps が戻らないように）
-        self._video_prefix = str(prefix)
-        self._video_proc = proc
-        self._video_starting = False
-        self._video_started_ns = time.monotonic_ns()
-        self._video_task = asyncio.create_task(self._video_wait(proc))
-
-    async def _video_wait(self, proc: asyncio.subprocess.Process) -> None:
-        """`video_node` の終了を待ち、書き終えた mp4 の一覧を status に載せる。"""
-        assert proc.stderr is not None
-        err = (await proc.stderr.read()).decode(errors="replace").strip()
-        rc = await proc.wait()
-        if self._video_proc is proc:
-            self._video_proc = None
-        prefix = Path(self._video_prefix)
-        self._video_files = sorted(p.name for p in prefix.parent.glob(prefix.name + "_*.mp4"))
-        if rc != 0 and not self._video_stopping:
-            self._video_error = f"video_node が異常終了しました（rc={rc}）: {err[-200:]}"
-        elif not self._video_files:
-            self._video_error = "映像が来なかったので mp4 ができていません（カメラが止まっていないか確認）"
-        self._video_stopping = False
-        self._publish_cam_config()            # 録画のために上げた fps・起こしたカメラを元に戻す
-        await self._broadcast_control_status()
-
-    async def _video_stop(self) -> None:
-        proc = self._video_proc
-        if proc is None:
-            return
-        self._video_stopping = True
-        try:
-            proc.terminate()                  # SIGTERM → video_node が mp4 を閉じて終わる
-        except ProcessLookupError:
-            pass
-
-    # ── mcap のライブ中継（Piのディスクには書かない） ──
-
-    async def _mcap_start(self, *, image_hz: float) -> None:
-        if self._mcap_proc is not None or self._mcap_starting:
-            return                            # 既に録画中、または起動処理の途中
-        prev = getattr(self, "_mcap_pump_task", None)
-        if prev is not None and not prev.done():
-            # 止めた直後の記録は、末尾（索引）の中継がまだ続いている。ここで次を始めると、
-            # 前の記録の末尾が新しい視聴者へ混ざり、前の中継の終了が新しい `/ws/record` を切る
-            self._mcap_error = "前の記録の終了処理中です。少し待ってからもう一度"
-            return
-        # **`await create_subprocess_exec` の間だけこのフラグで再入を防ぐ。**
-        # `self._mcap_proc is not None` のチェックと代入の間には中断点（await）
-        # があり、素通しだと短時間の二重呼び出しで logger_node を二重起動して
-        # しまう（録画データの混線・先発プロセスのリーク）
-        self._mcap_starting = True
-        self._mcap_error = None
-        # DISARM 中に止めているカメラを記録のために起こす（`_cam_in_use_while_disarmed`）
-        self._publish_cam_config()
-        cmd = [sys.executable, "-u", "-m", "raspi.nodes.logger_node",
-               "--quiet", "-o", "-", "--image-hz", str(image_hz)]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, cwd=str(REPO_ROOT),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        except Exception as e:
-            self._mcap_error = f"logger_node を起動できない: {e}"
-            return
-        finally:
-            self._mcap_starting = False
-        self._mcap_proc = proc
-        self._mcap_started_ns = time.monotonic_ns()
-        self._mcap_pump_task = asyncio.create_task(self._mcap_pump(proc))
-
-    async def _mcap_pump(self, proc: asyncio.subprocess.Process) -> None:
-        """`logger_node -o -` の標準出力を `/ws/record` へ生中継する。
-
-        **視聴者が居なくても読み続ける。** 読まないと子プロセスのパイプが詰まって
-        書き込みがブロックしてしまう（Piには保存しないので読んだ分は捨てるだけ）。
-        """
-        assert proc.stdout is not None
-        # **最初の視聴者が繋がるまでの分は捨てずに取っておく**。ブラウザは `/ws/record` を
-        # 開くのと同時に記録開始を送るので、logger_node の最初の出力（MCAP のマジック・ヘッダ）が
-        # `/ws/record` の接続より先に届くことがある。捨てると先頭の欠けた mcap になり、普通の
-        # リーダでは開けない（実機で `sysid_wheel` の記録がこうなった: "invalid magic"）。
-        # 一度でも視聴者が付いた後は捨てる（視聴者が去った＝もう要らない）
-        backlog: list[bytes] = []
-        backlog_bytes = 0
-        had_client = False
-        try:
-            while True:
-                chunk = await proc.stdout.read(RECORD_CHUNK)
-                if not chunk:
-                    break
-                if not self.record_clients:
-                    if not had_client and backlog_bytes < RECORD_BACKLOG_MAX:
-                        backlog.append(chunk)
-                        backlog_bytes += len(chunk)
-                    continue
-                had_client = True
-                if backlog:
-                    chunk = b"".join(backlog) + chunk
-                    backlog.clear()
-                await asyncio.gather(
-                    *(self._send_or_drop(ws, chunk, self.record_clients)
-                      for ws in list(self.record_clients)),
-                    return_exceptions=True)
-        finally:
-            rc = await proc.wait()
-            # `self._mcap_proc is proc` が False なら `_mcap_stop` が既に片付け済み
-            # （＝人間が止めた）。ここで上書きすると正常終了がエラー扱いになる
-            if self._mcap_proc is proc:
-                if rc != 0:
-                    self._mcap_error = f"logger_node が異常終了しました（rc={rc}）"
-                self._mcap_proc = None
-                self._publish_cam_config()
-                self._status_soon()
-            # **中継が完全に終わった合図として `/ws/record` を切る。** MCAP の索引は
-            # 最後に書かれるので、GUI 側はこの切断イベントを「もう来ない」の目印にして
-            # ダウンロードを発火する（`record.ts` の `onClose`）
-            for ws in list(self.record_clients):
-                # 既に相手が切っていれば例外になる。**それはむしろ望んだ状態**
-                with quiet_close("/ws/record の切断（mcap 中継の終了合図）"):
-                    await ws.close()
-
-    async def _mcap_stop(self) -> None:
-        proc = self._mcap_proc
-        if proc is None:
-            return
-        self._mcap_proc = None
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
-        self._publish_cam_config()            # 記録のために上げた fps / 起こしたカメラを元に戻す
-        # 実際の終了待ち・末尾チャンク（MCAPの索引）の中継は `_mcap_pump` が続ける
 
     # ── `logs/` の一覧・ダウンロード・削除 ──
     #
@@ -3233,7 +2594,7 @@ class TelemetryServer:
         - カメラの capture（DISARM 中は使う者がいなければ止める。`_desired_front_enabled`）
 
         `vehicle_state` を受けたその周で効かせるため `_bus_pump` から呼ぶ（ARM した
-        瞬間に戻す。1Hz の `_cam_config_pump` を待たない）。`_vehicle_armed()` は
+        瞬間に戻す。1Hz の `_resend_cam_config` を待たない）。`_vehicle_armed()` は
         未受信を ARM 扱いにするので、起動直後は高い方に倒れる。"""
         armed = self._vehicle_armed()
         if armed == self._last_armed:
@@ -3258,7 +2619,7 @@ class TelemetryServer:
         self._last_estop_active = active
 
     def _apply_cpu_cap(self) -> None:
-        """今の ARM 状態の上限周波数にする（今の値と同じなら書かない）。`_cam_config_pump`
+        """今の ARM 状態の上限周波数にする（今の値と同じなら書かない）。`_resend_cam_config`
         からも1Hzで呼び、外から書き換えられても戻す。"""
         self._cpufreq.set_max_khz(CPU_MAX_KHZ_ARMED if self._vehicle_armed()
                                   else CPU_MAX_KHZ_DISARM)
@@ -3599,136 +2960,61 @@ class TelemetryServer:
             fw_overrides=auto.fw_overrides,
             source=f"auto:{self._auto_mode}")
 
-    async def _hb_pump(self) -> None:
-        period = 1.0 / HB_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self.pub.send(TOPIC_HB_PREFIX + "control",
-                          HbMsg(node="control",
-                                detail=f"ws={len(self.telemetry_clients)}"))
+    # ── 「現在の意思」の周期的な再送（`telemetry/periodic.py` の1本のループ） ──
 
-    async def _fan_pump(self) -> None:
-        """ファンの意思（manualデューティ／autoへの追従）を低頻度で再適用する。
+    def _periodic_jobs(self) -> list[tuple[float, Callable[[], None]]]:
+        """`(周期 [s], 関数)` の表。受け手の再起動・取りこぼしから最大1周期で戻すための保険
+        （変更の瞬間は各ハンドラが即座に1発送っている）。"""
+        return [
+            (1.0 / HB_HZ, self._send_hb),
+            (1.0 / FAN_PUMP_HZ, self._reapply_fan),
+            (1.0 / CAM_CONFIG_HZ, self._resend_cam_config),
+            (1.0 / SIGNAL_CONFIG_HZ, self._publish_signal_config),
+            (1.0 / MODEL_HZ, self._publish_models),
+            (1.0 / TRACK_ROI_HZ, self._publish_track_roi),
+            (1.0 / LOG_CTRL_HZ, self._resend_log_ctrl),
+            # planning_node が落ちて上がり直したときに engage が届くまでの空白を短くするため速い
+            (1.0 / AUTO_CTRL_HZ, self._publish_auto_ctrl),
+        ]
 
-        `_log_ctrl_pump`/`_auto_ctrl_pump` と同じ理由。`_on_fan` はGUIからの
-        メッセージが来た瞬間にしか書き込まないため：
+    async def _periodic_pump(self) -> None:
+        await run_periodic(self._periodic_jobs(), lambda: self._running)
 
-        - manual時: そのあとカーネルの thermal governor が `pwm1` を上書き
-          してくると（`raspi/io/fan.py` の「高温になると強制上書き」の記述
-          どおり、温度がしきい値を跨ぐたびに低温側でも起こりうる）、GUI
-          表示は manual/指定値のままなのに実回転数だけ落ちて気づけない
-        - auto時: governor 自体が再評価を止めてしまい、`pwm1` が manual
-          時の値に張り付いたまま下がらないことがある（同モジュール参照）
+    def _send_hb(self) -> None:
+        self.pub.send(TOPIC_HB_PREFIX + "control",
+                      HbMsg(node="control", detail=f"ws={len(self.telemetry_clients)}"))
 
-        どちらも定期的に `set_manual`/`set_auto` を再送することで、巻き
-        戻され／固まっても最大1秒で復帰させる。
+    def _reapply_fan(self) -> None:
+        """ファンの意思（manual デューティ／auto への追従）を再適用する。`_on_fan` は GUI からの
+        メッセージが来た瞬間にしか書き込まないため:
+
+        - manual 時: カーネルの thermal governor が `pwm1` を上書きしてくると（`raspi/io/fan.py`）、
+          GUI 表示は manual/指定値のままなのに実回転数だけ落ちて気づけない
+        - auto 時: governor 自体が再評価を止めてしまい、`pwm1` が manual 時の値に張り付くことがある
+
+        どちらも定期的に `set_manual`/`set_auto` を再送して、巻き戻され／固まっても最大1秒で復帰させる。
         """
-        period = 1.0 / FAN_PUMP_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            if not self._fan.available:
-                continue
-            if self._fan_mode == "manual":
-                self._fan.set_manual(self._fan_duty)
-            else:
-                # 毎秒 kick すると低温時にファンが毎秒回っては止まる（fan.py `ensure_auto`）
-                self._fan.ensure_auto()
+        if not self._fan.available:
+            return
+        if self._fan_mode == "manual":
+            self._fan.set_manual(self._fan_duty)
+        else:
+            # 毎秒 kick すると低温時にファンが毎秒回っては止まる（fan.py `ensure_auto`）
+            self._fan.ensure_auto()
 
-    async def _cam_config_pump(self) -> None:
-        """capture側(camera_node)への希望（FPS上限・後方ON/OFF）を低頻度で再送する。
+    def _resend_cam_config(self) -> None:
+        """camera_node への希望（FPS 上限・ON/OFF）。`_desired_front_fps()` は自動運転の engage 状態にも
+        依存するので、engage 側のイベントを取りこぼしても最大1秒で追従する保険にもなる。"""
+        self._logger_running = _logger_process_running()
+        self._publish_cam_config()
+        self._apply_cpu_cap()
 
-        `_fan_pump`/`_auto_ctrl_pump` と同じ理由：camera_node が再起動しても
-        1秒以内に最新の意思へ復帰させる。また `_desired_front_fps()` は
-        自動運転の engage 状態にも依存するため、engage 側のイベントを
-        取りこぼしても最大1秒で追従する保険にもなる。
-        """
-        period = 1.0 / CAM_CONFIG_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._logger_running = _logger_process_running()
-            self._publish_cam_config()
-            self._apply_cpu_cap()
-
-    async def _signal_config_pump(self) -> None:
-        """矢印信号認識への希望（ON/OFF・HSVしきい値）を低頻度で再送する。
-
-        `_cam_config_pump`と同じ理由：arrow_signal_nodeが再起動しても1秒以内に
-        最新の意思へ復帰させる。
-        """
-        period = 1.0 / SIGNAL_CONFIG_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_signal_config()
-
-    async def _cam_model_pump(self) -> None:
-        """`cam_perception_node` への希望モデル名を低頻度で再送する。
-
-        `_cam_config_pump` と同じ理由：cam_perception_node が再起動しても
-        1秒以内に最新の選択へ復帰させる（GUI で何も操作していなくても）。
-        """
-        period = 1.0 / CAM_MODEL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_cam_model()
-
-    async def _e2e_model_pump(self) -> None:
-        """`planning_node`（`e2e_lidar`）への希望モデル名を低頻度で再送する。
-        `_cam_model_pump` と同じ理由。"""
-        period = 1.0 / E2E_MODEL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_e2e_model()
-
-    async def _cam_e2e_model_pump(self) -> None:
-        """`cam_e2e_node` への希望モデル名を低頻度で再送する。`_cam_model_pump` と同じ理由。"""
-        period = 1.0 / CAM_E2E_MODEL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_cam_e2e_model()
-
-    async def _e2e_fusion_model_pump(self) -> None:
-        """`e2e_fusion_node` への希望モデル名を低頻度で再送する。`_cam_model_pump` と同じ理由。"""
-        period = 1.0 / CAM_E2E_MODEL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_e2e_fusion_model()
-            self._publish_stereo_e2e_model()
-
-    async def _track_roi_pump(self) -> None:
-        """対象追従のROI選択（`track/roi`）を低頻度で再送する。
-        `_cam_model_pump`/`_e2e_model_pump` と同じ理由
-        （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）。
-        """
-        period = 1.0 / TRACK_ROI_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_track_roi()
-
-    async def _log_ctrl_pump(self) -> None:
-        """`.sfl` の意思（`log/ctrl`）と、録画中の経過時間を低頻度で再送する。
-
-        `_cmd_pump` と同じ理由（1回だけ送ると io_node の再起動や取りこぼしで
-        食い違ったままになる）。録画中だけステータスも再送し、GUI の
-        経過時間表示を進める（アイドル時は既存どおりイベント駆動のみ）。
-        """
-        period = 1.0 / LOG_CTRL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self.pub.send(TOPIC_LOG_CTRL, LogCtrl(active=self._sfl_active))
-            if self._mcap_proc is not None or self._video_proc is not None:
-                await self._broadcast_control_status()
-
-    async def _auto_ctrl_pump(self) -> None:
-        """自動運転の意思（`auto/ctrl`）を低頻度で再送する。
-
-        `_log_ctrl_pump` と同じ理由（1回だけ送ると planning_node の再起動や
-        取りこぼしで食い違ったままになる）。**変更時は `_on_control` が
-        即座に 1 発送っている**ので、こちらは取りこぼしの保険。
-        """
-        period = 1.0 / AUTO_CTRL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            self._publish_auto_ctrl()
+    def _resend_log_ctrl(self) -> None:
+        """`.sfl` の意思（`log/ctrl`）。録画中だけステータスも再送し、GUI の経過時間表示を進める
+        （アイドル時はイベント駆動のみ）。"""
+        self.pub.send(TOPIC_LOG_CTRL, LogCtrl(active=self._sfl_active))
+        if self._recorder.active:
+            self._status_soon()
 
     async def _camera_pump(self) -> None:
         """共有メモリから読んで JPEG にして送る。**購読者がいないときは何もしない。**
@@ -3803,7 +3089,7 @@ class TelemetryServer:
         **エンコード作業がここには無い**（`ImageRef` の共有メモリ読み出しも
         `to_thread` も不要）ので専用の軽いポンプにしてある。周期は
         `camera_hz` と揃える理由が無い（マスクの更新は cam_perception_node の
-        推論周期任せ）ので、`_cam_model_pump` 等と同じ低頻度ポーリングにする。
+        推論周期任せ）ので、モデル選択の周期送信（`_periodic_jobs`）と同じ低頻度ポーリングにする。
         """
         last_seq = -1
         period = 1.0 / CAM_MASK_POLL_HZ
@@ -3856,11 +3142,8 @@ class TelemetryServer:
                          compression=None) as server:  # noqa: F841
             tasks = [asyncio.create_task(t(), name=t.__name__) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
-                self._camera_pump, self._hb_pump, self._log_ctrl_pump,
-                self._auto_ctrl_pump, self._fan_pump, self._wifi_pump, self._pi_health_pump,
-                self._cam_config_pump, self._cam_model_pump, self._e2e_model_pump,
-                self._cam_e2e_model_pump, self._e2e_fusion_model_pump,
-                self._mask_pump, self._depth_pump, self._track_roi_pump, self._signal_config_pump)]
+                self._camera_pump, self._wifi_pump, self._pi_health_pump,
+                self._periodic_pump, self._mask_pump, self._depth_pump)]
             for t in tasks:
                 t.add_done_callback(lambda t: self._on_pump_done(t, stop))
             try:
@@ -3903,7 +3186,7 @@ class TelemetryServer:
             self._cpufreq.restore()   # 上限を絞ったまま残さない
         # mcap 中継のサブプロセスも道連れにする（ベストエフォート。
         # systemd 配下なら KillMode=control-group で既に片付いているはず）
-        for proc in (self._mcap_proc, self._video_proc):
+        for proc in (self._recorder.mcap_proc, self._recorder.video_proc):
             if proc is not None:
                 try:
                     proc.terminate()
@@ -3919,12 +3202,54 @@ class TelemetryServer:
 LOGGER_UNIT_MARKER = "/run/systemd/units/invocation:surge-logger.service"
 
 
+
+#: 制御メッセージ（`/ws/control` の `type`）→ (ハンドラ, 権限)。**ここに無い kind は捨てる。**
+#: 権限は `_handle_control` が見る（`AUTH_*`）。推論モデルの一覧・選択は `MODEL_SLOTS` の種類ごとに足す
+S = TelemetryServer
+_CONTROL_HANDLERS: dict[str, tuple] = {
+    "take_control": (S._ctl_take_control, AUTH_ANY),  # トークンはハンドラの中で見る（理由を "bad_token" で返す）
+    "release_control": (S._ctl_release_control, AUTH_ANY),
+    "cmd": (S._ctl_cmd, AUTH_ANY),  # 操縦者の判定はハンドラの中
+    "estop": (S._ctl_estop, AUTH_ANY),  # 誰であっても止められる
+    "auto": (S._ctl_auto, AUTH_AUTO),
+    "fan": (S._ctl_fan, AUTH_OPERATOR),
+    "camera": (S._ctl_camera, AUTH_OPERATOR),
+    "drive_settings": (S._ctl_drive_settings, AUTH_TOKEN),
+    "signal": (S._ctl_signal, AUTH_OPERATOR),
+    "track_roi_select": (S._ctl_track_roi_select, AUTH_OPERATOR),
+    "track_roi_clear": (S._ctl_track_roi_clear, AUTH_OPERATOR),
+    "tc_tv": (S._ctl_tc_tv, AUTH_OPERATOR),
+    "wheel_lift_guard": (S._ctl_wheel_lift_guard, AUTH_OPERATOR),
+    "abs": (S._ctl_abs, AUTH_OPERATOR),
+    "brake_hold": (S._ctl_brake_hold, AUTH_OPERATOR),
+    "auto_stop_margin": (S._ctl_auto_stop_margin, AUTH_OPERATOR),
+    "ping": (S._ctl_ping, AUTH_ANY),
+    "sfl_record": (S._ctl_sfl_record, AUTH_TOKEN),
+    "mcap_record_start": (S._ctl_mcap_record_start, AUTH_TOKEN),
+    "mcap_record_stop": (S._ctl_mcap_record_stop, AUTH_TOKEN),
+    "video_record_start": (S._ctl_video_record_start, AUTH_TOKEN),
+    "video_record_stop": (S._ctl_video_record_stop, AUTH_TOKEN),
+    "logs_list": (S._ctl_logs_list, AUTH_ANY),
+    "logs_delete": (S._ctl_logs_delete, AUTH_OPERATOR),
+    "maps_list": (S._ctl_maps_list, AUTH_ANY),
+    "maps_save": (S._ctl_maps_save, AUTH_OPERATOR),
+    "maps_delete": (S._ctl_maps_delete, AUTH_OPERATOR),
+    "maps_clear_grip": (S._ctl_maps_clear_grip, AUTH_OPERATOR),
+    "shutdown": (S._ctl_shutdown, AUTH_OPERATOR),  # ARM 中はハンドラが断る
+    **{slot.list_kind: (S._ctl_model_list, AUTH_ANY) for slot in MODEL_SLOTS.values()},
+    **{slot.select_kind: (S._ctl_model_select, AUTH_OPERATOR) for slot in MODEL_SLOTS.values()},
+}
+del S
+#: 権限ごとの kind の集合（テスト・文書が参照する）
+OPERATOR_ONLY_KINDS = frozenset(k for k, (_, a) in _CONTROL_HANDLERS.items() if a == AUTH_OPERATOR)
+TOKEN_ONLY_KINDS = frozenset(k for k, (_, a) in _CONTROL_HANDLERS.items() if a == AUTH_TOKEN)
+
 def _logger_process_running() -> bool:
     """常駐ロガー（surge-logger.service）が動いているか。
 
     常駐ロガーはバスに何も publish しないので、systemd の目印で見る。DISARM 中に
     カメラを止めると画像の無い記録になるため、動いている間は止めない
-    （`_cam_in_use_while_disarmed`）。GUI の mcap 記録は `_mcap_proc` で別に見ている。
+    （`_cam_in_use_while_disarmed`）。GUI の mcap 記録は `_recorder.mcap_busy` で別に見ている。
     `/proc` を毎秒走査しないのは、telemetry_node の Python 側の負荷の上位に出たため。
     手で `python -m raspi.nodes.logger_node` を起動した場合は検出できない。"""
     return os.path.lexists(LOGGER_UNIT_MARKER)
@@ -3975,6 +3300,7 @@ def _load_token() -> str:
 
 
 def main() -> int:
+    setup_logging("telemetry")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -3997,22 +3323,22 @@ def main() -> int:
                           jpeg_quality=args.jpeg_quality, camera_hz=args.camera_hz,
                           token=token)
 
-    print(f"# telemetry_node  http://{args.host}:{args.port}/  "
+    _log.info(f"telemetry_node  http://{args.host}:{args.port}/  "
           f"(mDNS を入れてあれば http://surge.local:{args.port}/)")
     if args.host in ("127.0.0.1", "localhost"):
-        print("# ★ loopback のみで待ち受け中。外の PC から繋ぐには --host 0.0.0.0")
+        _log.info("★ loopback のみで待ち受け中。外の PC から繋ぐには --host 0.0.0.0")
     print("# 操縦権トークン: " + ("設定あり（GUI は ?token=… で一度開く）"
                                   if token else "無し（誰でも操縦権を取れる）"))
     print(f"# GUI: {args.dist}" + ("" if args.dist.is_dir() else "  ← 未ビルド"))
     from raspi.bus import endpoints_for_topic
-    print(f"# バス購読 {' '.join(endpoints_for_topic(TOPIC_VEHICLE_STATE))} ほか")
-    print(f"# cmd publish {srv.pub.endpoint} @{CMD_PUB_HZ}Hz "
+    _log.info(f"バス購読 {' '.join(endpoints_for_topic(TOPIC_VEHICLE_STATE))} ほか")
+    _log.info(f"cmd publish {srv.pub.endpoint} @{CMD_PUB_HZ}Hz "
           f"(操縦者不在なら DISARM)")
-    print(f"# JPEG エンコーダ: {srv._jpeg_impl or '無し（カメラ配信は無効）'}")
-    print(f"# 自動運転 {', '.join(PLANNERS) or '（planner 無し）'}"
+    _log.info(f"JPEG エンコーダ: {srv._jpeg_impl or '無し（カメラ配信は無効）'}")
+    _log.info(f"自動運転 {', '.join(PLANNERS) or '（planner 無し）'}"
           f" / 起動時のモード {srv._auto_mode or 'なし'}"
           f"（engage は保存しない）")
-    print("# arm の可否は io_node が持つ。ここでは解禁できない\n")
+    _log.info("arm の可否は io_node が持つ。ここでは解禁できない")
 
     async def run() -> None:
         loop = asyncio.get_running_loop()

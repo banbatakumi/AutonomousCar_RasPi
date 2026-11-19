@@ -48,28 +48,21 @@
 from __future__ import annotations
 
 import argparse
-import json
-import signal
-import sys
 import time
 from collections import deque
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.base import scan_window  # noqa: E402
-from raspi.bus import Policy  # noqa: E402
-from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.cam_e2e_preproc import (  # noqa: E402
-    PREPROC_VERSION_STEREO,
-    STEREO_CAMS,
+from raspi.auto.base import scan_window
+from raspi.bus import Policy
+from raspi.core.cam_e2e_preproc import (
     STEREO_PAIR_TOL_NS,
     preprocess_stereo,
     to_rgb,
 )
-from raspi.core.e2e_fusion_preproc import (  # noqa: E402
+from raspi.core.e2e_fusion_preproc import (
     INPUT_NAMES,
     PREPROC_VERSION,
     FusionOutput,
@@ -79,20 +72,24 @@ from raspi.core.e2e_fusion_preproc import (  # noqa: E402
     output_size,
     state_input,
 )
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import E2EFusionPlan, Scan, VehicleState  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.onnx_session import make_session
+from raspi.nodes.e2e_base import E2ENodeBase, check_contract
+from raspi.nodes.e2e_base import pick_model_names as _pick_model_names
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import E2EFusionPlan, Scan, VehicleState
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_E2E_FUSION_MODEL,
     TOPIC_E2E_FUSION_PLAN,
-    TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_LEFT,
     TOPIC_SCAN,
     TOPIC_VEHICLE_STATE,
 )
+from raspi.core.log import get_logger, setup_logging
+from raspi.core.runner import run_node
+
+_log = get_logger("e2e_fusion")
 
 __all__ = ["FusionOnnx", "load_model", "pick_model_name", "pick_model_names", "E2EFusionNode", "MODES"]
 
@@ -101,7 +98,6 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "e2e_fusion"
 MODEL_CONF = REPO_ROOT / "config" / "e2e_fusion_model.json"
 
 NS = 1_000_000_000
-HB_HZ = 10
 #: 推論を必要とする自動運転モード
 MODES = ("e2e_fusion",)
 #: 画像が無い周の基準時刻を、点群の先頭セクタの時刻からどれだけ後に置くか [s]（学習の標本の点群の古さの中央）
@@ -113,8 +109,6 @@ _SCAN_AGE_RANGE_S = (0.03, 0.3)
 _SCAN_PERIOD_S = 0.1
 #: 最新の点群がこれより古ければ推論しない [s]
 _SCAN_STALE_S = 0.3
-#: 推論していない間、モデルの選び直しを見る間隔 [s]
-_MODEL_CHECK_S = 2.0
 #: 点群は1周も落とさず受ける（履歴に使う）。キューは数周ぶん
 SCAN_POLICY = Policy(conflate=False, hwm=8)
 
@@ -123,15 +117,7 @@ class FusionOnnx:
     """ONNX 推論の薄いラッパ。契約（入出力の形と正規化）はモデル同梱の JSON から読む。"""
 
     def __init__(self, model_path: str, cfg: dict) -> None:
-        import onnxruntime as ort
-
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 2
-        opts.inter_op_num_threads = 1
-        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
-        self.session = ort.InferenceSession(model_path, sess_options=opts,
-                                            providers=["CPUExecutionProvider"])
+        self.session = make_session(model_path)
         names = tuple(i.name for i in self.session.get_inputs())
         if names != INPUT_NAMES:
             raise ValueError(f"入力名が {list(INPUT_NAMES)} ではない: {list(names)}")
@@ -177,30 +163,11 @@ class FusionOnnx:
 
 def load_model(onnx_path: Path) -> FusionOnnx:
     """`<name>.onnx` と同梱の `<name>.json` から読む。**契約が合わないモデルは読まない**（例外）。"""
-    if not onnx_path.exists():
-        raise FileNotFoundError(f"モデルが見つかりません: {onnx_path}")
-    cfg_path = onnx_path.with_suffix(".json")
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"契約ファイルがありません: {cfg_path}")
-    cfg = json.loads(cfg_path.read_text())
-    if cfg.get("preproc_version") != PREPROC_VERSION:
-        raise ValueError(f"入出力の版が違う（モデル {cfg.get('preproc_version')}・ノード {PREPROC_VERSION}）。"
-                         "`ml_e2e.export_onnx` で書き出し直す")
-    if cfg.get("image_preproc_version") != PREPROC_VERSION_STEREO:
-        # 版2は前後配置のころの右1台のモデル（視点が違うので使えない。左右の組で学習し直す）
-        raise ValueError(f"画像の前処理の版が違う（モデル {cfg.get('image_preproc_version')}・"
-                         f"ノード {PREPROC_VERSION_STEREO}）。左右2台で学習し直したモデルが必要")
-    if tuple(cfg.get("cams", ())) != STEREO_CAMS:
-        raise ValueError(f"cams が {list(STEREO_CAMS)} ではない: {cfg.get('cams')}")
-    for key in ("input_size", "crop_x", "fov_deg", "max_range", "history", "k", "ds", "xy_scale",
-                "max_steer", "speed_ref", "yaw_rate_ref"):
-        if key not in cfg:
-            raise ValueError(f"契約に {key} が無い")
-    if not 0.0 < float(cfg["crop_x"]) < 0.3:
-        raise ValueError(f"crop_x が不正: {cfg['crop_x']}")
-    for key in ("max_steer", "speed_ref", "yaw_rate_ref", "max_range", "ds", "xy_scale"):
-        if not float(cfg[key]) > 0:
-            raise ValueError(f"{key} が正でない: {cfg[key]}")
+    cfg = check_contract(
+        onnx_path, preproc_version=PREPROC_VERSION, export_hint="ml_e2e.export_onnx",
+        required=("input_size", "crop_x", "fov_deg", "max_range", "history", "k", "ds", "xy_scale",
+                  "max_steer", "speed_ref", "yaw_rate_ref"),
+        positive=("max_steer", "speed_ref", "yaw_rate_ref", "max_range", "ds", "xy_scale"))
     model = FusionOnnx(str(onnx_path), cfg)
     out_dim = model.session.get_outputs()[0].shape[-1]
     if isinstance(out_dim, int) and out_dim != output_size(model.k):
@@ -209,25 +176,8 @@ def load_model(onnx_path: Path) -> FusionOnnx:
 
 
 def pick_model_names(models_dir: Path, conf_path: Path = MODEL_CONF) -> list[str]:
-    """使うモデルの候補を優先順に。設定ファイルの指定（あれば）、続いて契約のある `.onnx` を新しい順。
-
-    先頭が壊れていても（書き出し途中・契約が合わない）次を試せるように全部返す（レビュー L20）。
-    """
-    out: list[str] = []
-    try:
-        name = str(json.loads(conf_path.read_text()).get("name", ""))
-        if name and (models_dir / f"{name}.onnx").is_file():
-            out.append(name)
-    except (OSError, ValueError, AttributeError):
-        pass
-    try:
-        files = [p for p in models_dir.glob("*.onnx") if p.with_suffix(".json").is_file()]
-    except OSError:
-        files = []
-    for p in sorted(files, key=lambda p: p.stat().st_mtime_ns, reverse=True):
-        if p.stem not in out:
-            out.append(p.stem)
-    return out
+    """使うモデルの候補を優先順に（`e2e_base.pick_model_names`。既定の設定ファイルはこのノードの）。"""
+    return _pick_model_names(models_dir, conf_path)
 
 
 def pick_model_name(models_dir: Path, conf_path: Path = MODEL_CONF) -> str:
@@ -236,69 +186,39 @@ def pick_model_name(models_dir: Path, conf_path: Path = MODEL_CONF) -> str:
     return names[0] if names else ""
 
 
-class E2EFusionNode:
-    """**`infer_once()` はバス・共有メモリを知らない純粋な計算。** `run()`（実バス配線）とテストの両方がここを通る。"""
+class E2EFusionNode(E2ENodeBase[FusionOnnx]):
+    """**`infer_once()` はバス・共有メモリを知らない純粋な計算。** `run()`（`E2ENodeBase`）とテストの両方がここを通る。"""
+
+    NAME = "e2e_fusion"
+    MODES = MODES
+    MODEL_TOPIC = TOPIC_E2E_FUSION_MODEL
+    PLAN_TOPIC = TOPIC_E2E_FUSION_PLAN
+    MODEL_CONF = MODEL_CONF
 
     def __init__(self, *, model: FusionOnnx | None = None, models_dir: Path | None = None,
                  model_name: str = "", vehicle: Vehicle | None = None) -> None:
-        self.model = model
-        self.models_dir = models_dir or DEFAULT_MODELS_DIR
-        self.model_name = model_name
-        self._failed_key: tuple | None = None
+        super().__init__(load_model=lambda p: load_model(p), models_dir=models_dir or DEFAULT_MODELS_DIR,
+                         model=model, model_name=model_name)
         self.vehicle = vehicle or Vehicle.load()
         #: 新しい順の `(先頭セクタの時刻, lidar_rows)`
         self._rows: deque[tuple[int, np.ndarray]] = deque(maxlen=4)
         self._last_scan_seq = -1
+        self._new_scans: list[Scan] = []
         #: 画像の撮影時刻 − 点群の先頭セクタの時刻 [s] の移動平均（画像が無い周の基準時刻に使う）
         self._scan_age_s = _SCAN_AGE_NO_IMAGE_S
-        self._running = False
-        self._active = False
-        self._reader = FrameReader()
-        #: 左カメラのリング用（`FrameReader` は1本のリングしか掴まない）
-        self._reader_left = FrameReader()
 
-    def close(self) -> None:
-        self._reader.close()
-        self._reader_left.close()
+    def on_model_changed(self) -> None:
+        self._rows.clear()                     # 視野・距離の上限がモデルごとに違う
 
-    # ── モデル ──
+    def on_active_changed(self, active: bool) -> None:
+        if not active:
+            self._rows.clear()
 
-    def reload_if_changed(self, name: str) -> bool:
-        """`name` のモデルへ切り替える。失敗しても今のモデルを保持し、同じファイルは再試行しない。"""
-        if not name or name == self.model_name:
-            return False
-        path = self.models_dir / f"{name}.onnx"
-
-        def mtime(p: Path):
-            try:
-                return p.stat().st_mtime_ns
-            except OSError:
-                return None
-
-        key = (name, mtime(path), mtime(path.with_suffix(".json")))
-        if key == self._failed_key:
-            return False
-        try:
-            self.model = load_model(path)
-            self.model_name = name
-            self._failed_key = None
-            self._rows.clear()                 # 視野・距離の上限がモデルごとに違う
-            print(f"# モデル切替: {name}", flush=True)
-            return True
-        except Exception as e:                                # noqa: BLE001
-            self._failed_key = key
-            print(f"# モデル読み込み失敗（{name}）: {e}。前のモデルのまま続行", file=sys.stderr, flush=True)
-            return False
-
-    def reload_first_usable(self, names: list[str]) -> bool:
-        """`names`（優先順）のうち、読めるいちばん前のモデルへ切り替える。今のモデルに着いたらそこで止める
-        （それより後ろ＝古いものへは移らない）。最新が壊れていても、古い有効なモデルで動けるように。"""
-        for name in names:
-            if name == self.model_name:
-                return False
-            if self.reload_if_changed(name):
-                return True
-        return False
+    def on_poll(self, msgs: list) -> None:
+        for topic, msg in msgs:
+            if topic == TOPIC_SCAN and msg.seq != self._last_scan_seq:
+                self._last_scan_seq = msg.seq
+                self._new_scans.append(msg)
 
     # ── 入力 ──
 
@@ -341,7 +261,7 @@ class E2EFusionNode:
                      if vs is not None else None)
             out = self.model.infer(image, lidar, state)
         except Exception as e:                                # noqa: BLE001
-            print(f"# e2e_fusion の推論が例外: {e}", file=sys.stderr, flush=True)
+            _log.info(f"e2e_fusion の推論が例外: {e}")
             return self.failed(f"推論に失敗: {e}", seq=seq)
         if rgb is not None and t_scan:
             age = (t_image_ns - t_scan) / NS
@@ -360,84 +280,33 @@ class E2EFusionNode:
         return E2EFusionPlan(ready=False, reason=reason, model=self.model_name, seq=seq,
                              t_capture=time.monotonic_ns())
 
-    # ── ループ（実バス配線） ──
+    # ── 推論中の1周期（`E2ENodeBase.run` から） ──
 
-    def stop(self) -> None:
-        self._running = False
-
-    def run(self, *, sub, pub, duration_s: float | None = None, status_cb=None,
-            fixed_model: bool = False) -> None:
-        self._running = True
-        seq = 0
-        t_end = time.monotonic() + duration_s if duration_s else None
-        next_hb = time.monotonic_ns()
-        next_model_check = 0.0
-        pacer = IdlePacer()
-        while self._running:
-            if t_end and time.monotonic() >= t_end:
-                break
-            new_scans: list[Scan] = []
-            for topic, msg in sub.poll(pacer.poll_timeout_ms(self._active)):
-                if topic == TOPIC_SCAN and msg.seq != self._last_scan_seq:
-                    self._last_scan_seq = msg.seq
-                    new_scans.append(msg)
-
-            auto_ctrl = sub.latest.get(TOPIC_AUTO_CTRL)
-            vs = sub.latest.get(TOPIC_VEHICLE_STATE)
-            # GUI で選んだモデル（空の名前は「自動」＝下の、推論していない間の選び直しに任せる）
-            wanted = sub.latest.get(TOPIC_E2E_FUSION_MODEL)
-            chosen = wanted.name if wanted is not None and not fixed_model else ""
-            if chosen:
-                self.reload_if_changed(chosen)
-            active = cam_infer_active(auto_ctrl, vs, MODES)
-            if active != self._active:
-                self._active = active
-                print(f"# e2e_fusion {'推論開始' if active else '推論停止'}", flush=True)
-                if not active:
-                    self._rows.clear()
-
-            now = time.monotonic_ns()
-            plan: E2EFusionPlan | None = None
-            if not active:
-                # 走っていない間だけモデルを選び直す
-                if not fixed_model and not chosen and time.monotonic() >= next_model_check:
-                    next_model_check = time.monotonic() + _MODEL_CHECK_S
-                    # GUI から「自動」と言われていれば最新、何も届いていなければ設定ファイル → 最新
-                    conf = self.models_dir / "__none__.json" if wanted is not None else MODEL_CONF
-                    self.reload_first_usable(pick_model_names(self.models_dir, conf))
-                if pacer.should_publish(active, now):
-                    plan = self.failed("このモードが選ばれていない、または DISARM 中", seq=seq)
-            elif new_scans:
-                for sc in new_scans:
-                    self.push_scan(sc)
-                rgb, rgb_left, t_img = None, None, 0
-                ref = sub.latest.get(TOPIC_IMAGE_FRONT)
-                # 右も通知された瞬間のコマを読む（リングの最新は通知より新しいことがあり、その左はまだ無い）
-                got = (self._reader.read_at(ref, ref.t_capture, STEREO_PAIR_TOL_NS)
-                       if ref is not None else None)
-                if got is not None:
-                    frame, t_img = got
-                    rgb = to_rgb(frame, ref.fmt)
-                    left = sub.latest.get(TOPIC_IMAGE_LEFT)
-                    if left is not None:
-                        got_l = self._reader_left.read_at(left, t_img, STEREO_PAIR_TOL_NS)
-                        if got_l is not None:
-                            rgb_left = to_rgb(got_l[0], left.fmt)
-                plan = self.infer_once(rgb=rgb, t_image_ns=t_img, vs=vs, now_ns=now, seq=seq,
-                                       rgb_left=rgb_left)
-            if plan is not None:
-                pub.send(TOPIC_E2E_FUSION_PLAN, plan)
-                seq += 1
-                if status_cb:
-                    status_cb(plan)
-
-            if now >= next_hb:
-                next_hb = now + NS // HB_HZ
-                pub.send(TOPIC_HB_PREFIX + "e2e_fusion", HbMsg(node="e2e_fusion"))
-            pacer.idle_sleep(active)
+    def step(self, latest: dict, vs, now_ns: int, seq: int, last_pub_ns: int) -> E2EFusionPlan | None:
+        """新しい点群の周ごとに1回推論する（点群が来ていなければ何も出さない）。"""
+        new_scans, self._new_scans = self._new_scans, []
+        if not new_scans:
+            return None
+        for sc in new_scans:
+            self.push_scan(sc)
+        rgb, rgb_left, t_img = None, None, 0
+        ref = latest.get(TOPIC_IMAGE_FRONT)
+        # 右も通知された瞬間のコマを読む（リングの最新は通知より新しいことがあり、その左はまだ無い）
+        got = (self._reader.read_at(ref, ref.t_capture, STEREO_PAIR_TOL_NS)
+               if ref is not None else None)
+        if got is not None:
+            frame, t_img = got
+            rgb = to_rgb(frame, ref.fmt)
+            left = latest.get(TOPIC_IMAGE_LEFT)
+            if left is not None:
+                got_l = self._reader_left.read_at(left, t_img, STEREO_PAIR_TOL_NS)
+                if got_l is not None:
+                    rgb_left = to_rgb(got_l[0], left.fmt)
+        return self.infer_once(rgb=rgb, t_image_ns=t_img, vs=vs, now_ns=now_ns, seq=seq, rgb_left=rgb_left)
 
 
 def main() -> int:
+    setup_logging("e2e_fusion")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None,
                     help="使うモデルを固定する（ONNX のパス。同名の .json が必要）。省略時は設定ファイルか最新")
@@ -457,19 +326,9 @@ def main() -> int:
     pub = Publisher("e2e_fusion")
     sub = Subscriber({TOPIC_SCAN: SCAN_POLICY, TOPIC_IMAGE_FRONT: LATEST, TOPIC_IMAGE_LEFT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
                       TOPIC_AUTO_CTRL: LATEST, TOPIC_E2E_FUSION_MODEL: LATEST})
-    print(f"# e2e_fusion_node  publish {pub.endpoint}  モデル: {node.model_name or '（なし）'}", flush=True)
+    _log.info(f"e2e_fusion_node  publish {pub.endpoint}  モデル: {node.model_name or '（なし）'}")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-    try:
-        node.run(sub=sub, pub=pub, duration_s=args.duration, fixed_model=bool(args.model))
-    finally:
-        node.close()
-        sub.close()
-        pub.close()
+    run_node(node, lambda: node.run(sub=sub, pub=pub, duration_s=args.duration, fixed_model=bool(args.model)), close=(sub, pub))
     return 0
 
 

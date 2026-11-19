@@ -38,6 +38,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from raspi.auto._calib_common import phase_parts
+from raspi.nav.se2 import wrap_angle
 
 from .log import Log
 from .result import Result
@@ -69,8 +70,6 @@ _HIGHER_WARN_DEG = 0.3
 _POST_RESID_OK_DEG = 0.2
 
 
-def _wrap_pi(a):
-    return (a + math.pi) % TWO_PI - math.pi
 
 
 def ripple(h: np.ndarray, theta) -> np.ndarray:
@@ -191,7 +190,7 @@ def fit_wheel(t: np.ndarray, u: np.ndarray, segs: list[tuple[int, int]], side: s
             th = np.polyval(cs[k], taus[k])
             pred = th + ripple(h, th)
             got = (meas[k] - lo) / span * TWO_PI
-            out.append(_wrap_pi(got - pred))
+            out.append(wrap_angle(got - pred))
         return np.concatenate(out)
 
     x0 = np.concatenate([[span0], np.zeros(4), np.concatenate(polys)])

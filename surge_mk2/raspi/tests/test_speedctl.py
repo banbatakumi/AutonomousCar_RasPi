@@ -5,21 +5,18 @@
 """
 
 import math
-import sys
 import unittest
 from dataclasses import replace
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.slam2d_raceline import (Slam2dRaceLine, kappa_limit, limits,  # noqa: E402
+from raspi.auto.slam2d_raceline import (Slam2dRaceLine, kappa_limit, limits,
                                         speed_kwargs, steer_delay)
-from raspi.core.vehicle import GRAVITY, Vehicle  # noqa: E402
-from raspi.nav import avoid as av  # noqa: E402
-from raspi.nav import raceline as rl  # noqa: E402
-from raspi.nav import speedctl  # noqa: E402
+from raspi.core.vehicle import GRAVITY, Vehicle
+from raspi.nav import avoid as av
+from raspi.nav import raceline as rl
+from raspi.nav import speedctl
 
 
 def ring(radius: float = 3.0, step: float = 0.1, v: float = 2.0) -> rl.RaceLine:
@@ -41,7 +38,7 @@ class TestVehicleEnvelope(unittest.TestCase):
         """上限は `[limits]` の値（正味。校正 7・8 が書く）をそのまま使う。"""
         v = self.v
         self.assertAlmostEqual(v.a_lat_max, 0.4 * GRAVITY)
-        self.assertAlmostEqual(v.a_accel_max(), 2.5)
+        self.assertAlmostEqual(v.a_accel_max, 2.5)
         self.assertAlmostEqual(v.a_decel_max, 2.5)
         self.assertAlmostEqual(v.speed_loop_tau_s, 1 / (25.0 * 0.25))
         self.assertAlmostEqual(v.speed_loop_reset_s, 0.5)
@@ -50,7 +47,7 @@ class TestVehicleEnvelope(unittest.TestCase):
     def test_ramp_caps_the_limits(self):
         """STM32 は目標速度を `speed_ramp_max_m_s2` でならすので、それより上は出ない。"""
         v = replace(self.v, lim_accel_m_s2=9.0, lim_brake_m_s2=9.0)
-        self.assertAlmostEqual(v.a_accel_max(), v.speed_ramp_max_m_s2)
+        self.assertAlmostEqual(v.a_accel_max, v.speed_ramp_max_m_s2)
         self.assertAlmostEqual(v.a_decel_max, v.speed_ramp_max_m_s2)
 
     def test_limits_read_from_toml(self):
@@ -63,7 +60,7 @@ class TestVehicleEnvelope(unittest.TestCase):
     def test_unidentified_values_fall_back(self):
         v = Vehicle()
         self.assertGreater(v.a_lat_max, 1.0)
-        self.assertGreater(v.a_accel_max(), 0.5)
+        self.assertGreater(v.a_accel_max, 0.5)
         self.assertGreater(v.a_decel_max, 0.5)
         self.assertEqual(v.speed_loop_tau_s, 0.0)                 # 前倒ししない
 

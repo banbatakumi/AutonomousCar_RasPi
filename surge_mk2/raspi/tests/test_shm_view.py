@@ -7,18 +7,16 @@ torn（壊れた）画像が検証前にディスクへ保存されてしまう�
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.bus.shm_ring import FrameRing  # noqa: E402
-from raspi.tools import shm_view  # noqa: E402
+from raspi.bus.shm_ring import FrameRing
+from raspi.tools import shm_view
 
 W, H = 4, 4
 FMT = "RGB888"

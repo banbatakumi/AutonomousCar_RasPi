@@ -9,5 +9,7 @@ mcap>=1.2,<2            # mcapログの読み込み（raspi/requirements.txt と
 numpy                    # ステップ応答のフィッティング（raspi/requirements.txt に既に入っている想定）
 scipy                    # 校正の当てはめ（tools/calib。sim/requirements.txt にも入っている）
 tomlkit                  # vehicle.toml のコメント・書式を保ったまま書き換える
-opencv-contrib-python-headless>=4.9,<6  # カメラ校正（cv2.fisheye）。raspi/requirements.txt と同じ配布物にする（opencv-python と併存させると cv2 が壊れる）
+# カメラ校正（cv2.fisheye）。raspi/requirements.txt と同じ配布物にする（opencv-python 系を2つ併存させると cv2 が壊れる）
+opencv-contrib-python-headless>=4.9,<6; platform_system != "Darwin"
+opencv-contrib-python>=4.9,<6; platform_system == "Darwin"
 pillow                   # 印刷用チェッカーボードの PDF 書き出し（tools/cam_calib/board.py）

@@ -54,8 +54,8 @@ sysfs に公開している（`/sys/class/hwmon/hwmonN/pwm1` 系）。`raspi/io/
 報告された。`pwm1_enable=1` の安定保持は「数秒〜十数秒」の範囲でしか実機
 確認していなかった点、温度がしきい値をまたぐタイミング次第でもっと低い
 温度域から `cooling_device0` が介入しうる点を踏まえ、`telemetry_node.py` の
-`_fan_pump`（1Hz）で manual 時のデューティを低頻度に再送するようにした
-（`_log_ctrl_pump`/`_auto_ctrl_pump` と同じ「意思は1回で終わらせず再送する」
+telemetry_node の `_reapply_fan`（1Hz）で manual 時のデューティを低頻度に再送するようにした
+（`_periodic_jobs` の他の再送と同じ「意思は1回で終わらせず再送する」
 という既存パターンに合わせた）。governor に書き換えられても最大1秒で
 指定値へ復帰する。
 
@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import glob
 import os
+import sys
 from pathlib import Path
 
 __all__ = ["FakeFan", "SysfsFan", "open_fan"]
@@ -291,7 +292,7 @@ class SysfsFan:
         return True
 
     def ensure_auto(self) -> bool:
-        """auto を**保つ**ための定期呼び出し用（`_fan_pump` の1Hz）。
+        """auto を**保つ**ための定期呼び出し用（`_reapply_fan` の1Hz）。
 
         `pwm1_enable` が 2 から外れているときだけ `set_auto()`（kick 付き）で戻す。
         毎秒 `set_auto()` を呼ぶと、低温時に
@@ -334,5 +335,7 @@ def open_fan() -> SysfsFan | FakeFan:
     環境でも例外を出さず、`available=False` の `SysfsFan` を返す。"""
     try:
         return SysfsFan()
-    except Exception:
+    except Exception as e:
+        # Mac など無い環境では正常。実機で出たら故障・権限の手がかり（黙らない）
+        print(f"[warn] ファン制御（pwm-fan の hwmon）を開けない（無しで続行）: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return FakeFan()

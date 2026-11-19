@@ -21,7 +21,7 @@ Planner の責務にする。
 ## どのモデルを使うかは `cam/model` トピックで決まる（GUI から選ぶ）
 
 起動時に `--model` を渡さなければ、GUI（設定タブ）で選ばれたモデル名を
-telemetry_node が `cam/model`（`CamModelCtrl`）で繰り返し流してくるのを待つ。
+telemetry_node が `cam/model`（`ModelSelectCtrl`）で繰り返し流してくるのを待つ。
 モデル名は `--models-dir`（既定 `models/seg/`）配下の `<name>.onnx` に解決される
 （前処理設定は同名の `<name>.json`。`ml_cam/export_onnx.py` が書く）。
 `ftg_cam` を engage する前に、走行開始ボタンを押さずにモデルだけ選び直せる
@@ -69,24 +69,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import signal
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.cam_e2e_preproc import resize_area, to_rgb  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.jpeg import make_encoder  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import CamMask, CamPath, ImageRef, Scan, VehicleState  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.auto.base import sector_of_deg
+from raspi.core.auto_gate import IdlePacer, cam_infer_active
+from raspi.core.cam_e2e_preproc import resize_area, to_rgb
+from raspi.core.frame_reader import FrameReader
+from raspi.core.onnx_session import make_session
+from raspi.core.jpeg import make_encoder
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import CamMask, CamPath, ImageRef, Scan, VehicleState
+from raspi.msgs import Heartbeat as HbMsg
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_MASK,
     TOPIC_CAM_MODEL,
@@ -96,15 +94,19 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_SCAN_CAM,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.drivable_path import extract_centerline  # noqa: E402
-from raspi.nav.grid import OccGrid  # noqa: E402
-from raspi.nav.ipm import (  # noqa: E402
+from raspi.nav.drivable_path import extract_centerline
+from raspi.nav.grid import OccGrid
+from raspi.nav.ipm import (
     CameraExtrinsics,
     CameraIntrinsics,
     project_mask_to_grid,
     project_seen_to_grid,
     vehicle_camera_intrinsics,
 )
+from raspi.core.log import get_logger, setup_logging
+from raspi.core.runner import run_node
+
+_log = get_logger("cam_perception")
 
 __all__ = ["SegmentationModel", "CamPerceptionNode"]
 
@@ -134,20 +136,7 @@ class SegmentationModel:
 
     def __init__(self, model_path: str, *, input_size: tuple[int, int] = (224, 224),
                 mean: float = 0.0, std: float = 255.0, threshold: float = 0.5) -> None:
-        import onnxruntime as ort
-
-        # ★省電力化: 224x224程度の軽量モデルでは全4コアへ並列化するオーバーヘッドの
-        # 方が大きく、かつ他ノード（camera_node/planning_node等）とコアを取り合う。
-        # さらに ONNXRuntime は既定でスレッドをスピンウェイトさせ、推論の合間も
-        # CPUを回し続けて電力を無駄にする（`session.*.allow_spinning`）ので明示的に切る。
-        # 参照: https://onnxruntime.ai/docs/performance/tune-performance/threading.html
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 2
-        opts.inter_op_num_threads = 1
-        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
-        self.session = ort.InferenceSession(model_path, sess_options=opts,
-                                            providers=["CPUExecutionProvider"])
+        self.session = make_session(model_path)
         self.input_name = self.session.get_inputs()[0].name
         self.input_size = input_size           # (width, height)
         self.mean = mean
@@ -341,12 +330,12 @@ class CamPerceptionNode:
             self.model = self._load_model_by_name(desired_name)
             self._loaded_model_name = desired_name
             self._failed_model_key = None
-            print(f"# モデル切替: {desired_name}", flush=True)
+            _log.info(f"モデル切替: {desired_name}")
             return True
         except Exception as e:                                # noqa: BLE001
             self._failed_model_key = key
-            print(f"# モデル読み込み失敗（{desired_name}）: {e}。"
-                 f"前のモデルのまま続行", file=sys.stderr, flush=True)
+            _log.info(f"モデル読み込み失敗（{desired_name}）: {e}。"
+                 f"前のモデルのまま続行")
             return False
 
     # ── 1周期ぶんの処理（純粋関数。バスを知らない） ──
@@ -494,7 +483,7 @@ class CamPerceptionNode:
                     reason = "非選択: 推論停止"
                 else:
                     reason = "DISARM: 推論停止"
-                print(f"# {mode} {reason}", flush=True)
+                _log.info(f"{mode} {reason}")
 
             ref = sub.latest.get(TOPIC_IMAGE_FRONT)
             now = time.monotonic_ns()
@@ -554,8 +543,7 @@ class CamPerceptionNode:
                         # 推論(CNN+IPM+raycast)側のバグでノード全体を巻き込んで
                         # 落とさない。契約2の「壁」扱いに自然に落とす
                         # （`planning_node._replan()` と同じパターン）
-                        print(f"# cam_perception process_frame() が例外: {e}",
-                             file=sys.stderr, flush=True)
+                        _log.info(f"cam_perception process_frame() が例外: {e}")
                         st = self.failed_frame(seq=seq, reason=f"推論が例外: {e}")
                         self._last_scan = None
                         self._last_path = None
@@ -594,6 +582,7 @@ class CamPerceptionNode:
 
 
 def main() -> int:
+    setup_logging("cam_perception")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None,
@@ -640,20 +629,9 @@ def main() -> int:
     sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
                       TOPIC_CAM_MODEL: LATEST, TOPIC_AUTO_CTRL: LATEST})
 
-    print(f"# cam_perception_node  publish {pub.endpoint}  scan/cam・path/cam へ配信")
+    _log.info(f"cam_perception_node  publish {pub.endpoint}  scan/cam・path/cam へ配信")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-
-    try:
-        node.run(sub=sub, pub=pub, duration_s=args.duration)
-    finally:
-        node.close()
-        sub.close()
-        pub.close()
+    run_node(node, lambda: node.run(sub=sub, pub=pub, duration_s=args.duration), close=(sub, pub))
     return 0
 
 

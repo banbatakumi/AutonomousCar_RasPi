@@ -1,14 +1,11 @@
 """`raspi/core/auto_gate.py` の単体テスト。"""
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.auto_gate import (  # noqa: E402
+from raspi.core.auto_gate import (
     IDLE_PUBLISH_PERIOD_NS, IdlePacer, cam_infer_active, vehicle_armed)
-from raspi.msgs import AutoCtrl, VehicleState  # noqa: E402
+from raspi.msgs import AutoCtrl, VehicleState
 
 _MODES = ("ftg_cam", "cam_centerline")
 

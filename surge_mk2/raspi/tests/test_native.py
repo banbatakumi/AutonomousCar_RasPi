@@ -13,16 +13,15 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto._slam2d_nav import occgrid_from_trinary  # noqa: E402
-from raspi.nav import centerline as cl_mod  # noqa: E402
-from raspi.nav import native  # noqa: E402
-from raspi.nav import raceline as rl_mod  # noqa: E402
-from raspi.nav import roadgraph  # noqa: E402
-from raspi.tests.test_laptime import FOOTPRINT, RES, SPEED, divider_course, stadium  # noqa: E402
+from raspi.auto._slam2d_nav import occgrid_from_trinary
+from raspi.nav import centerline as cl_mod
+from raspi.nav import native
+from raspi.nav import raceline as rl_mod
+from raspi.nav import roadgraph
+from raspi.tests.test_laptime import FOOTPRINT, RES, SPEED, divider_course, stadium
 
 NATIVE = native.lib is not None
 

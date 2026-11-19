@@ -1,16 +1,14 @@
 """`raspi/core/control_params.py`: `[control]` の読み込みと、STM32 へ入れて確かめる手順。"""
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.control_params import (CONTROL_PARAM_IDS, DEFAULT_TOML, ENABLE_KEYS, FROM_DYNAMICS, OVERRIDABLE, REQUIRED,  # noqa: E402
+from raspi.core.control_params import (CONTROL_PARAM_IDS, DEFAULT_TOML, ENABLE_KEYS, FROM_DYNAMICS, OVERRIDABLE, REQUIRED,
                                        STEER_LINK_X_MAX_RAD, ControlParamSync, load_control_params,
                                        steer_link_road, steer_link_x, steer_relink)
-from raspi.proto.generated import packets  # noqa: E402
+from raspi.proto.generated import packets
 
 P = packets.Param
 OK, UNKNOWN, CLAMPED = (packets.ConfigResult.OK, packets.ConfigResult.UNKNOWN_ID,
@@ -287,7 +285,7 @@ class TestOverrides(unittest.TestCase):
         sync, stm = make({"tc_slip_target": 0.12})
         run(sync, ms=200)
         sync.set_overrides({"tc_enable": 0.0, "tv_test_moment_nm": 0.1})
-        self.assertTrue(sync.overriding)
+        self.assertTrue(bool(sync._overrides))
         run(sync, start_ms=200, ms=100)
         self.assertEqual(stm.values[P.TC_ENABLE], 0.0)
         self.assertAlmostEqual(stm.values[P.TV_TEST_MOMENT_NM], 0.1)
@@ -353,12 +351,12 @@ class TestOverrides(unittest.TestCase):
     def test_values_too_large_for_the_packet_are_ignored(self):
         sync, stm = make({})
         sync.set_overrides({"tc_slip_target": 1e39})
-        self.assertFalse(sync.overriding)
+        self.assertFalse(bool(sync._overrides))
 
     def test_garbage_overrides_are_ignored(self):
         sync, stm = make({})
         sync.set_overrides({"no_such": 1.0, "tc_enable": float("nan"), "abs_enable": True})
-        self.assertFalse(sync.overriding)
+        self.assertFalse(bool(sync._overrides))
         run(sync, ms=100)
         self.assertEqual(stm.sent, [])
 

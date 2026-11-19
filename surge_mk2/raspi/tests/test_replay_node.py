@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import contextlib
 import io
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.nodes.replay_node import ReplayNode, verify  # noqa: E402
-from raspi.proto import packets  # noqa: E402
-from raspi.rec.framelog import FrameLogWriter  # noqa: E402
+from raspi.nodes.replay_node import ReplayNode, verify
+from raspi.proto import packets
+from raspi.rec.framelog import FrameLogWriter
 
 MS = 1_000_000
 

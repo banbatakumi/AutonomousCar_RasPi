@@ -6,21 +6,18 @@
 from __future__ import annotations
 
 import io
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import cv2  # noqa: E402
+import cv2
 
-from raspi.bus.shm_ring import FrameRing  # noqa: E402
-from raspi.core import pixfmt  # noqa: E402
-from raspi.core.cam_e2e_preproc import to_rgb as preproc_to_rgb  # noqa: E402
-from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.core.stereo_match import to_gray as stereo_to_gray  # noqa: E402
+from raspi.bus.shm_ring import FrameRing
+from raspi.core import pixfmt
+from raspi.core.cam_e2e_preproc import to_rgb as preproc_to_rgb
+from raspi.core.jpeg import RingJpeg
+from raspi.core.stereo_match import to_gray as stereo_to_gray
 
 H, W = 48, 64
 

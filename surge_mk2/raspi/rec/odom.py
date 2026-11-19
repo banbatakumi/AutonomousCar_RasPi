@@ -38,6 +38,8 @@ import math
 
 import msgspec
 
+from ..nav.se2 import wrap_angle
+
 __all__ = ["DeadReckoner", "OdomPose"]
 
 NS = 1_000_000_000
@@ -89,8 +91,6 @@ class OdomPose(msgspec.Struct):
     gaps: int = 0
 
 
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
 class DeadReckoner:
@@ -170,7 +170,7 @@ class DeadReckoner:
         # **書き出す値だけ丸める**（内部の積分は丸めない）。JSON に全桁書くと
         # 1件 290B になり、100Hz で記録の数値部分の大半を占めた（実機 sysid 記録で測定）
         return OdomPose(t_capture=t, x=round(self.x, 4), y=round(self.y, 4),
-                        yaw=round(_wrap(self.yaw), 5), yaw_unwrapped=round(self.yaw, 5),
+                        yaw=round(wrap_angle(self.yaw), 5), yaw_unwrapped=round(self.yaw, 5),
                         v=round(v, 4), omega=round(w, 5), gyro_bias=round(self.bias, 6),
                         dist=round(self.dist, 4), stopped=bool(st.stopped),
                         bias_learn_s=round(self.bias_learn_s, 3), gaps=self.gaps)

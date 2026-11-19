@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import time
 import unittest
@@ -16,13 +15,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import raspi.nodes.camera_node as cn  # noqa: E402
-import raspi.nodes.telemetry_node as tn  # noqa: E402
-from raspi.io import pihealth  # noqa: E402
-from raspi.nodes.io_node import IoNode  # noqa: E402
-from raspi.tests.test_io_node_log import FakeLink  # noqa: E402
+import raspi.nodes.camera_node as cn
+import raspi.nodes.telemetry_node as tn
+from raspi.io import pihealth
+from raspi.nodes.io_node import IoNode
+from raspi.tests.test_io_node_log import FakeLink
 
 STAT_A = """cpu  100 0 100 800 0 0 0 0 0 0
 cpu0 50 0 50 400 0 0 0 0 0 0

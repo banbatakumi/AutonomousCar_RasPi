@@ -8,13 +8,13 @@ planner は通さない（記録の `/cmd` が入力）。指令が STM32 に効
 from __future__ import annotations
 
 import math
-import tomllib
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from raspi.core.control_params import DEFAULT_TOML
+from raspi.core.vehicle import read_toml, section
 from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM
 from tools.fwsim.fw import IN, MODE_BRAKE, MODE_SPEED, MODE_TORQUE, OUT, HostConfig
 
@@ -33,10 +33,9 @@ def car_from_toml(path: str | Path = DEFAULT_TOML) -> Car:
     車速の同定（`[dynamics] speed_plant_gain`・`rolling_resistance`）は、車輪の回転の慣性・摩擦を含んだ実効の値。
     モデルの車輪の慣性 J（`[control.plant]`）ぶんを質量から引き、摩擦は転がり抵抗に含めて 0 にする。
     MD の遅れ・タイヤは `[control.plant]`（校正 6・7。μ は実際の値）。"""
-    with open(path, "rb") as f:
-        d = tomllib.load(f)
-    dyn = d.get("dynamics", {})
-    plant = d.get("control", {}).get("plant", {})
+    d = read_toml(path)
+    dyn = section(d, "dynamics")
+    plant = section(d, "control", "plant")
     car = Car()
     r = 0.030
     J = float(plant.get("wheel_inertia_kgm2", car.wheel_inertia_kgm2))

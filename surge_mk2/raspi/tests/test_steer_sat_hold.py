@@ -6,13 +6,10 @@
 
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.slam2d_raceline import steer_sat_hold  # noqa: E402
+from raspi.auto.slam2d_raceline import steer_sat_hold
 
 NS = 10 ** 8   # 計画の周期 0.1s [ns]
 

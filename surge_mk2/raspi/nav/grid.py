@@ -371,7 +371,7 @@ class UnknownWallGrid:
 
     **スキャンの死角になった小さな未知の穴は塞いで空き扱いにする**（`build_graph` と同じ
     closing）。塞がないと、空きの真ん中の穴で道幅が急に縮む。
-    それ以外は `base` へ委ねる（`resolution`・`origin`・`to_cell` など）。
+    幾何（`resolution`・`origin`・`to_cell` など）は `base` へ委ねる。
     """
 
     def __init__(self, base, hole_cells: int = 5) -> None:
@@ -381,8 +381,29 @@ class UnknownWallGrid:
         self._wall = np.ascontiguousarray(base.wall_mask() | self.unknown_wall)
         self._wall.setflags(write=False)
 
-    def __getattr__(self, name):
-        return getattr(self._base, name)
+    # ── `base` へ委ねるもの（読むだけ。足すときは明示的に足す——`__getattr__` で丸投げすると typo が実行まで分からない）──
+    resolution = property(lambda self: self._base.resolution)
+    width = property(lambda self: self._base.width)
+    height = property(lambda self: self._base.height)
+    origin = property(lambda self: self._base.origin)
+    seq = property(lambda self: self._base.seq)
+    frozen = property(lambda self: self._base.frozen)
+    seen = property(lambda self: self._base.seen)
+
+    def to_cell(self, x, y):
+        return self._base.to_cell(x, y)
+
+    def to_world(self, col, row):
+        return self._base.to_world(col, row)
+
+    def inside(self, col, row):
+        return self._base.inside(col, row)
+
+    def known_free_mask(self) -> np.ndarray:
+        return self._base.known_free_mask()
+
+    def trinary(self) -> np.ndarray:
+        return self._base.trinary()
 
     def wall_mask(self) -> np.ndarray:
         return self._wall

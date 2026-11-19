@@ -52,7 +52,12 @@ onnxruntime>=1.18,<2
 # `cam_track_node.py` の NanoTrack（`cv2.TrackerNano_create`）。TrackerNano は
 # OpenCV 本体（video モジュール）に入っているが、contrib 込みの headless 版を
 # 明示しておく方が Pi 上でのビルド差異に左右されにくい
-opencv-contrib-python-headless>=4.9,<6
+#
+# Mac は GUI 付きの contrib 版（headless の上位集合）。`ml_cam/annotate.py`・`preview.py` が cv2.imshow を使う。
+# **配布物は OS ごとに1つだけ。** opencv-python 系を2つ入れると同じ cv2/ を上書きし合って壊れる。
+# `tools/requirements.txt`・`ml_cam/requirements.txt` もこの2行と同じにする
+opencv-contrib-python-headless>=4.9,<6; platform_system != "Darwin"
+opencv-contrib-python>=4.9,<6; platform_system == "Darwin"
 
 # ── slam2d バックエンド（ポーズグラフ最適化・ループ閉じ） ──
 # 以前は「slam2d/ の依存（g2opy）は raspi/ に持ち込まない」方針だったが、

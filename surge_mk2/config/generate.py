@@ -20,14 +20,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tomllib
 from pathlib import Path
 
 CONFIG_DIR = Path(__file__).resolve().parent
 # レンズのプロファイルの解決（`lens = "…"` → `lenses.<名前>` を重ねる）は Pi 側と同じ関数を使う。
 # 2箇所に書くと、GUI のガイドとノードが別のレンズを見ることになる
 sys.path.insert(0, str(CONFIG_DIR.parent))
-from raspi.core.vehicle import LENS_NAME_RE, resolve_lens  # noqa: E402
+from raspi.core.vehicle import LENS_NAME_RE, read_toml, resolve_lens  # noqa: E402
+from raspi.msgs.convert import FALLBACK_MAX_SPEED_M_S, MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM  # noqa: E402
 TOML_PATH = CONFIG_DIR / "vehicle.toml"
 TS_OUT = CONFIG_DIR.parent / "gui" / "src" / "generated" / "vehicle.ts"
 
@@ -148,6 +148,17 @@ def gen_ts(spec: dict) -> str:
         f"  cmdSteerRateLimit: {float(safety.get('cmd_steer_rate_limit_rad_s', 7.0))}, // rad/s",
         "} as const",
         "",
+        "/** STM32 の `LIMITS` が届くまでの上限（届いたらそちらを使う）。正は `raspi/msgs/convert.py`。",
+        " * 超えた値を送っても STM32 が黙って丸めるので、GUI のスライダの上限もここから引く */",
+        "export const DRIVE_FALLBACK = {",
+        "  /** 後輪1輪あたりの制動トルクの上限 [N·m]（STM32 の `DRIVE_MAX_BRAKE_TORQUE_NM`） */",
+        f"  maxBrakeTorqueNm: {float(MAX_BRAKE_TORQUE_NM)},",
+        "  /** 駆動トルク直接指令の上限 [N·m]（STM32 の `DRIVE_MAX_TORQUE_NM`） */",
+        f"  maxTargetTorqueNm: {float(MAX_TARGET_TORQUE_NM)},",
+        "  /** 最高速度の仮値 [m/s]（io_node の `--max-speed`。`install_services.sh`） */",
+        f"  maxSpeedMS: {float(FALLBACK_MAX_SPEED_M_S)},",
+        "} as const",
+        "",
     ])
 
 
@@ -156,8 +167,7 @@ def main() -> int:
     ap.add_argument("--check", action="store_true", help="生成物が最新かだけ確認する")
     args = ap.parse_args()
 
-    with TOML_PATH.open("rb") as fp:
-        spec = tomllib.load(fp)
+    spec = read_toml(TOML_PATH)
 
     text = gen_ts(spec)
 

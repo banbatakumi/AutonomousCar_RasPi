@@ -8,25 +8,23 @@
 
 import json
 import math
-import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto._slam2d_nav import occgrid_from_trinary  # noqa: E402
-from raspi.auto.route_config import RouteConfig, paint_avoid  # noqa: E402
-from raspi.nav import raceline as rl_mod  # noqa: E402
-from raspi.nav.purepursuit import PursuitConfig, follow  # noqa: E402
-from raspi.nav.roadgraph import CorridorGrid, build_graph  # noqa: E402
-from raspi.nav.route import (RouteError, Waypoint, build_raceline,  # noqa: E402
+from raspi.auto._slam2d_nav import occgrid_from_trinary
+from raspi.auto.route_config import RouteConfig, paint_avoid
+from raspi.nav import raceline as rl_mod
+from raspi.nav.purepursuit import PursuitConfig, follow
+from raspi.nav.roadgraph import CorridorGrid, build_graph
+from raspi.nav.route import (RouteError, Waypoint, build_raceline,
                              plan_loop, plan_to, snap, tightest_radius,
                              waypoints_from_traj)
-from raspi.nav.route_switch import Mission, RouteSwitcher  # noqa: E402
+from raspi.nav.route_switch import Mission, RouteSwitcher
 
 RES = 0.025
 KEEP = 0.11          # 車体半幅 0.09 + 余裕 0.02

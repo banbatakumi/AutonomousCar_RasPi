@@ -440,15 +440,6 @@ def _lateral_limit(kappa: np.ndarray, *, v_max: float, a_lat: float) -> np.ndarr
     return np.minimum(v_max, np.sqrt(a_lat / np.maximum(np.abs(kappa), 1e-6)))
 
 
-def _next_v(v: float, a_x: float, kappa: float, a_lat: float, ds: float,
-            friction_circle: bool) -> float:
-    """速度 `v` の点から距離 `ds` だけ加速（減速）したときに届く速度。"""
-    if friction_circle:
-        ay = v * v * kappa
-        a_x = a_x * math.sqrt(max(0.0, 1.0 - (ay / a_lat) ** 2))
-    return math.sqrt(v * v + 2.0 * a_x * ds)
-
-
 def speed_profile(xy: np.ndarray, kappa: np.ndarray, *,
                   v_max: float, v_min: float, a_lat,
                   a_accel: float, a_brake: float, closed: bool = True,

@@ -6,12 +6,11 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import tomlkit
 
+from raspi.core.atomic import atomic_write_text
 from raspi.core.control_params import DEFAULT_TOML
 
 __all__ = ["read_flat", "apply", "DEFAULT_TOML"]
@@ -69,8 +68,5 @@ def apply(values: dict[str, float], path: str | Path = DEFAULT_TOML) -> list[str
             else:
                 tbl[key] = new
     text = tomlkit.dumps(doc)
-    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".vehicle.", suffix=".toml")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, p)
+    atomic_write_text(p, text)
     return changed

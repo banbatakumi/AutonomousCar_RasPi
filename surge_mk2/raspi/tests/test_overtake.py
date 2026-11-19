@@ -13,18 +13,15 @@
 """
 
 import math
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav import overtake as ot  # noqa: E402
-from raspi.nav.obstacles import Obstacle  # noqa: E402
-from raspi.nav.raceline import RaceLine, curvature  # noqa: E402
+from raspi.nav import overtake as ot
+from raspi.nav.obstacles import Obstacle
+from raspi.nav.raceline import RaceLine, curvature
 
 R = 5.0
 

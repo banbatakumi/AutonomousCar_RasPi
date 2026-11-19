@@ -16,26 +16,23 @@
 """
 
 import math
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.nav.deskew import deskew  # noqa: E402
-from raspi.nav.hybrid_astar import (  # noqa: E402
+from raspi.core.vehicle import Vehicle
+from raspi.nav.deskew import deskew
+from raspi.nav.hybrid_astar import (
     _DIJKSTRA_CACHE, HybridConfig, _Heuristic2D, plan,
 )
-from raspi.nav.local_map import LocalMap  # noqa: E402
-from raspi.nav.reeds_shepp import (  # noqa: E402
+from raspi.nav.local_map import LocalMap
+from raspi.nav.reeds_shepp import (
     candidate_paths, sample_path_array,
 )
 
-from .test_nav import make_room_scan  # noqa: E402
+from .test_nav import make_room_scan
 
 VEH = Vehicle.load()
 FOOTPRINT = list(VEH.footprint)

@@ -8,32 +8,30 @@
 """
 
 import json
-import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 try:
-    import onnx  # noqa: E402
-    from onnx import TensorProto, helper  # noqa: E402
+    import onnx
+    from onnx import TensorProto, helper
 except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの道具。Pi には入れない（実行は onnxruntime）
     raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.cam_e2e_preproc import (  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.core.cam_e2e_preproc import (
     PREPROC_VERSION_CROP,
     PREPROC_VERSION_STEREO,
     STEREO_CAMS,
 )
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamE2EModelCtrl, ImageRef, VehicleState  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import AutoCtrl, ModelSelectCtrl, ImageRef, VehicleState
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_E2E_MODEL,
@@ -41,13 +39,13 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_LEFT,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nodes.cam_e2e_node import (  # noqa: E402
+from raspi.nodes.cam_e2e_node import (
     MODEL_OUTPUTS,
     CamE2ENode,
     RegressionModel,
     load_model,
 )
-from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
+from raspi.tests.fakes import FakePub, FakeSub
 
 
 def _make_dummy_regression_model(path: Path, h: int, w: int, n_out: int = 2) -> None:
@@ -353,7 +351,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_idle")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -371,7 +369,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_active")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -390,7 +388,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_disarm")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
             pub = FakePub()
@@ -409,7 +407,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_armed")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
             pub = FakePub()
@@ -427,7 +425,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_out")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -452,7 +450,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_rate")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)      # 10Hz の1周期（100ms）未満
@@ -469,7 +467,7 @@ class TestModeGating(unittest.TestCase):
         rings, refs = _pair_with_frame("surge_test_ce2e_same")
         try:
             sub = FakeSub({**refs,
-                            TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                            TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.15)      # 1周期は過ぎるが2周期未満
@@ -498,7 +496,7 @@ class TestModeGating(unittest.TestCase):
 
         try:
             sub = _CameraSub({**refs,
-                              TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="model_a"),
+                              TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="model_a"),
                               TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             sub.n = 0
             pub = FakePub()
@@ -618,7 +616,7 @@ class TestStereoPairing(unittest.TestCase):
         rings, (rf, rl) = _stereo_refs(tag, **ref_kw)
         try:
             sub = FakeSub({TOPIC_IMAGE_FRONT: rf, TOPIC_IMAGE_LEFT: rl,
-                           TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl(name="st"),
+                           TOPIC_CAM_E2E_MODEL: ModelSelectCtrl(name="st"),
                            TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_e2e")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.05)

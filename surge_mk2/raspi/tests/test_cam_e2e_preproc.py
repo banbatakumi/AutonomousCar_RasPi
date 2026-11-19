@@ -4,15 +4,12 @@
 性質——色順の入れ替え・面積平均・出力の形——だけを確かめる。
 """
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.cam_e2e_preproc import (  # noqa: E402
+from raspi.core.cam_e2e_preproc import (
     crop_window,
     preprocess,
     resize_area,

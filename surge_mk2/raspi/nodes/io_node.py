@@ -54,25 +54,24 @@ import math
 import os
 import signal
 import sys
-import tempfile
 import threading
 import time
 
+from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.bus_bridge import BusBridge  # noqa: E402
-from raspi.core.control_params import ControlParamSync, disarm_brake_timeout_s, load_control_params  # noqa: E402
-from raspi.core.stereo_obs import scan_to_obs  # noqa: E402
-from raspi.core.steer_guard import GIVE_UP, PAUSE, RESUME, SteerGuard  # noqa: E402
-from raspi.core.link_tracker import (  # noqa: E402
+from raspi.core.bus_bridge import BusBridge
+from raspi.core.control_params import ControlParamSync, disarm_brake_timeout_s, load_control_params
+from raspi.core.stereo_obs import scan_to_obs
+from raspi.core.steer_guard import GIVE_UP, PAUSE, RESUME, SteerGuard
+from raspi.core.link_tracker import (
     LinkState,
     LinkTracker,
     format_status,
     write_status,
 )
-from raspi.io.gpio import (  # noqa: E402
+from raspi.io.gpio import (
     PIN_BUZZER,
     PIN_HEARTBEAT,
     PIN_LED_GREEN,
@@ -86,21 +85,25 @@ from raspi.io.gpio import (  # noqa: E402
     open_output,
     open_tone,
 )
-from raspi.io.serial_link import SerialLink  # noqa: E402
-from raspi.msgs import SPEED_DEADBAND_MPS, DriveCmd, Heartbeat as HbMsg, command_from_cmd  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.io.serial_link import SerialLink
+from raspi.msgs import SPEED_DEADBAND_MPS, DriveCmd, Heartbeat as HbMsg, command_from_cmd
+from raspi.msgs.types import (
     TOPIC_CMD,
     TOPIC_HB_PREFIX,
     TOPIC_LOG_CTRL,
     TOPIC_SCAN_STEREO,
     TOPIC_UI_EVENT,
 )
-from raspi.proto import UART_BAUD, packets  # noqa: E402
-from raspi.proto.generated.packets import PROTOCOL_VERSION  # noqa: E402
-from raspi.rec.framelog import AsyncFrameLog, FrameLogWriter, default_log_path  # noqa: E402
-from raspi.rec import logclean  # noqa: E402
-from raspi.core.cleanup import quiet_close  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
+from raspi.proto import UART_BAUD, packets
+from raspi.proto.generated.packets import PROTOCOL_VERSION
+from raspi.rec.framelog import AsyncFrameLog, FrameLogWriter, default_log_path
+from raspi.rec import logclean
+from raspi.core.atomic import atomic_write_text
+from raspi.core.cleanup import quiet_close
+from raspi.core.vehicle import Vehicle
+from raspi.core.log import get_logger, setup_logging
+
+_log = get_logger("io")
 
 __all__ = ["IoNode", "LinkState"]
 
@@ -194,22 +197,20 @@ def _load_odometer_base() -> float:
     try:
         v = float(json.loads(ODOM_CONF.read_text()).get("total_m", 0.0))
         return v if math.isfinite(v) and v >= 0 else 0.0
-    except Exception:
+    except FileNotFoundError:
+        return 0.0
+    except Exception as e:
+        print(f"[io] 総走行距離（{ODOM_CONF.name}）を読めない。0 から数える: {e!r}", flush=True)
         return 0.0
 
 
 def _save_odometer_base(v: float) -> None:
     """total_m を書く。**単調増加であるべき値**なので、書き込み中の電源断で
-    壊れないよう tmp ファイル + `os.replace()` でアトミックに置き換える
-    （`config/auto.json` 等の直接書きとは異なる、このリポジトリ初のパターン）"""
+    壊れないよう原子的に置き換える（`core/atomic.py`）"""
     try:
-        ODOM_CONF.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(ODOM_CONF.parent), prefix=".odometer-")
-        with os.fdopen(fd, "w") as f:
-            json.dump({"total_m": v}, f)
-        os.replace(tmp, ODOM_CONF)
-    except Exception:
-        pass  # 保存できなくても走行は続けられるべき
+        atomic_write_text(ODOM_CONF, json.dumps({"total_m": v}))
+    except Exception as e:
+        print(f"[io] 総走行距離を保存できない（走行は続ける）: {e!r}", flush=True)
 
 
 class _QuietStream:
@@ -236,8 +237,45 @@ class _QuietStream:
         except OSError:
             pass
 
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
+    # print・traceback・logging が stdout/stderr に使うもの（明示的に委ねる。`__getattr__` の丸投げはしない）
+    @property
+    def encoding(self) -> str:
+        return self._stream.encoding
+
+    @property
+    def errors(self):
+        return self._stream.errors
+
+    @property
+    def buffer(self):
+        return self._stream.buffer
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def isatty(self) -> bool:
+        return self._stream.isatty()
+
+
+@dataclass
+class _Schedule:
+    """メインループの「次に行う時刻」[ns]（`IoNode.run`）。"""
+
+    cmd: int
+    ping: int
+    status: int
+    linkstats: int
+    diag: int
+    hb: int
+    limits_retry: int
+    odom_save: int
+    disk_check: int
+    cmd_period: int = NS // COMMAND_HZ
+
+    @classmethod
+    def starting_at(cls, t: int) -> "_Schedule":
+        return cls(cmd=t, ping=t, status=t, linkstats=t + NS // LINKSTATS_HZ, diag=t, hb=t,
+                   limits_retry=t, odom_save=t + int(ODOM_SAVE_INTERVAL_S * NS), disk_check=t)
 
 
 class IoNode:
@@ -1093,177 +1131,190 @@ class IoNode:
                 return frames
 
     def run(self, duration_s: float | None = None, status_cb=None) -> None:
+        """メインループ。1周で 受信 → 再送 → 指令の受け取り → 調整パラメータ → 送信 → 健全性 → 配信 → 保守。"""
         self._running = True
         self._poller = self._make_poller()
         self._t_start = time.monotonic()
-        next_cmd = time.monotonic_ns()
-        next_ping = next_cmd
-        next_status = next_cmd
-        next_linkstats = next_cmd + NS // LINKSTATS_HZ
-        next_diag = next_cmd
-        next_hb = next_cmd
-        next_limits_retry = next_cmd
-        next_odom_save = next_cmd + int(ODOM_SAVE_INTERVAL_S * NS)
-        next_disk_check = next_cmd
-        cmd_period = NS // COMMAND_HZ
+        sch = _Schedule.starting_at(time.monotonic_ns())
         #: 「ループ1周」の所要時間を測る基準時刻（issue #5・`_log_linkstats` 参照）
-        prev_loop_ns = next_cmd
+        prev_loop_ns = sch.cmd
 
         while self._running:
             now = time.monotonic_ns()
-            loop_dt = now - prev_loop_ns
+            self._note_loop_time(now - prev_loop_ns)
             prev_loop_ns = now
-            if loop_dt > self._loop_max_ns:
-                self._loop_max_ns = loop_dt
-            if loop_dt > self._diag_loop_max_ns:
-                self._diag_loop_max_ns = loop_dt
-            elapsed = (now - int(self._t_start * NS)) / NS
 
             # 「メインループは生きている」の申告。これが途切れるとハートビートが
             # 自分で波形を止め、STM32 が E-Stop に入る（フリーズ検出）
             if self.heartbeat is not None:
                 self.heartbeat.kick()
 
-            had_limits = self.state.limits is not None
-            for rx in self._poll_link(now, min(next_cmd, next_ping)):
-                if self._log is not None:
-                    self._log_rx(rx)
-                self.tracker.feed(rx.rx_ns, rx.type, rx.seq, rx.payload)
-            if self.state.limits is not None and not had_limits:
-                lim = self.state.limits
-                print(f"# STM32 LIMITS 受信（handshake 後の再送で取得）: "
-                      f"速度{lim.max_speed_m_s:.2f}m/s 加速度{lim.max_accel_m_s2:.2f}m/s² "
-                      f"トルク{lim.max_torque_nm:.3f}N·m 舵角±{math.degrees(lim.max_steer_rad):.1f}°",
-                      file=sys.stderr)
-                self._log_event("limits", {
-                    "max_speed_m_s": lim.max_speed_m_s,
-                    "max_accel_m_s2": lim.max_accel_m_s2,
-                    "max_torque_nm": lim.max_torque_nm,
-                    "max_steer_rad": lim.max_steer_rad,
-                    "via": "retry",
-                })
-
-            # `handshake()` が LIMITS・VERSION を取り損ねていたら定期的に再送する。
-            # STM32 起動時の3回burstを取り逃した／応答が1回落ちた場合の保険。
-            # 一度受け取れば `state.limits`/`state.version` が埋まるので、以降は送らなくなる。
-            # **VERSION が無い間は ARM を通さない**（`_arm_block_reason`）ので、取り直せないと走れない
-            if now >= next_limits_retry and (self.state.limits is None
-                                              or self.state.version is None):
-                if self.state.limits is None:
-                    self.link.send(packets.LimitsReq())
-                if self.state.version is None:
-                    self._version_req_ns = now
-                    self.link.send(packets.VersionReq())
-                next_limits_retry = now + int(LIMITS_RETRY_S * NS)
-
+            self._receive(now, sch)
+            self._retry_handshake(now, sch)
             self._recv_cmd(now)
-
-            # 調整パラメータの送信・読み戻し。同定の試験が指令に載せた一時的な上書き
-            # （`DriveCmd.fw_overrides`）は、指令が届いている間だけ入れる（途絶えたら元へ戻す）
-            self.control_sync.set_overrides(
-                self.cmd.fw_overrides if (self.cmd is not None and not self.cmd_stale) else {})
-            prev_ctrl = self.control_sync.status
-            self.control_sync.tick(now)
-            if self.control_sync.drift_count != self._control_drift_seen:
-                # 読み戻しが食い違った＝STM32 の値が勝手に変わった（気づけなかった再起動など）。
-                # 入り直すまで ARM を通さない
-                self._control_drift_seen = self.control_sync.drift_count
-                self._control_synced = False
-            if self.control_sync.status in ("ok", "none"):
-                self._control_synced = True
-            if self.control_sync.status != prev_ctrl:
-                self._log_event("control_params", {"status": self.control_sync.status,
-                                                   "problems": self.control_sync.problems})
-
-            # **指令の中身が変わったらその場で送る**。100Hz の定期送信を待つと
-            # 平均5ms・最大10ms遅れていた。telemetry_node は同じ中身を50Hzで繰り返すので、
-            # エンコードした中身が前回と同じなら送らない（定期送信に任せる）。送る中身は
-            # 定期送信と同じ `_command_packet()`（DISARM の判断・上限のクランプを含む）
-            changed = False
-            pkt = encoded = None
-            if self._cmd_arrived:
-                self._cmd_arrived = False
-                pkt = self._command_packet()
-                encoded = pkt.encode()
-                changed = encoded != self._last_command_bytes
-            if changed or now >= next_cmd:
-                self._send_command(pkt, encoded)
-                next_cmd = now + cmd_period if changed else next_cmd + cmd_period
-                if now - next_cmd > cmd_period * 5:   # 大きく遅れたら追いつきをやめる
-                    next_cmd = now + cmd_period
-
-            if now >= next_ping:
-                self._send_ping()
-                hz = PING_WARMUP_HZ if elapsed < WARMUP_S else PING_HZ
-                next_ping = now + NS // hz
-
-            prev_health = self.state.health
-            changed = self.tracker.update_health(now)
-            if self.indicator is not None:
-                self.indicator.update(self._indication())
-            if self._log is not None:
-                if changed is not None:
-                    self._log_event("health", {"from": prev_health, "to": changed})
-                if now >= next_linkstats:
-                    self._log_linkstats(now)
-                    next_linkstats = now + NS // LINKSTATS_HZ
-
-            if status_cb and now >= next_status:
-                status_cb(self)
-                next_status = now + NS // 2      # 2Hz 更新
-
-            if now >= next_diag:
-                if now >= self._diag_loop_window_end_ns:
-                    self._diag_loop_prev_ns = self._diag_loop_max_ns
-                    self._diag_loop_max_ns = 0
-                    self._diag_loop_window_end_ns = now + NS
-                self.bridge.publish_diag(
-                    self.state, self.sync, self.link.stats,
-                    heartbeat=self.heartbeat,
-                    arm_inhibited=bool(self._arm_block_reason()),
-                    arm_inhibit_reason=self._arm_block_reason(),
-                    stm_log=self.stm_log,
-                    cmd_source=self.cmd.source if self.cmd else "",
-                    cmd_stale=self.cmd_stale,
-                    expected_version=PROTOCOL_VERSION,
-                    control_sync=self.control_sync,
-                    control_params_error=self.control_params_error,
-                    loop_max_ms=max(self._diag_loop_max_ns,
-                                    self._diag_loop_prev_ns) / 1e6,
-                    cmd_timeouts=self.cmd_timeouts,
-                    disk_free_pct=self._disk_free_pct,
-                    log_errors=self._log_errors,
-                    # シミュレータの link だけがこれを持つ（`sim/link.py`）。
-                    # GUI に SIM バッジを出す唯一の根拠。**実機の link には何も足さない**
-                    sim=getattr(self.link, "is_sim", False))
-                next_diag = now + NS // DIAG_HZ
-
-            if self.pub is not None and now >= next_hb:
-                self.pub.send(TOPIC_HB_PREFIX + "io",
-                              HbMsg(node="io", pid=os.getpid(),
-                                    detail=self.state.health))
-                next_hb = now + NS // HB_HZ
-
-            # 前回起こしたディスクチェックが終わっていれば結果を処理する
-            # （実処理はワーカースレッド。issue #5）
-            self._poll_disk_check()
-            self._poll_log_open_error()
-            if now >= next_disk_check:
-                next_disk_check = now + int(DISK_CHECK_INTERVAL_S * NS)
-                self._check_disk_space()
-
-            # 総走行距離の永続化。**両方満たしたときだけ書く**——止まっている間は
-            # 30秒経っても書かない（SDカードの消耗を避ける、バンビ指定）。
-            # 書き込み自体はワーカースレッドに逃がす（issue #5）
-            if now >= next_odom_save:
-                next_odom_save = now + int(ODOM_SAVE_INTERVAL_S * NS)
-                current_odom = self.bridge.state_builder.odom_center
-                if abs(current_odom - self._last_saved_odom) >= ODOM_SAVE_MIN_DELTA_M:
-                    self._save_odometer_async(current_odom)
-                    self._last_saved_odom = current_odom
+            self._sync_control_params(now)
+            self._send_due(now, sch)
+            self._update_health(now, sch)
+            self._publish_status(now, sch, status_cb)
+            self._housekeeping(now, sch)
 
             if duration_s is not None and time.monotonic() - self._t_start >= duration_s:
                 break
+
+    # ── メインループの各段（`run` から順に呼ぶ。`sch` は次に行う時刻の表） ──
+
+    def _note_loop_time(self, loop_dt: int) -> None:
+        if loop_dt > self._loop_max_ns:
+            self._loop_max_ns = loop_dt
+        if loop_dt > self._diag_loop_max_ns:
+            self._diag_loop_max_ns = loop_dt
+
+    def _receive(self, now: int, sch: "_Schedule") -> None:
+        """UART から受けたフレームを記録・解釈する（次の送信の時刻まで待つ）。"""
+        had_limits = self.state.limits is not None
+        for rx in self._poll_link(now, min(sch.cmd, sch.ping)):
+            if self._log is not None:
+                self._log_rx(rx)
+            self.tracker.feed(rx.rx_ns, rx.type, rx.seq, rx.payload)
+        if self.state.limits is not None and not had_limits:
+            lim = self.state.limits
+            _log.info(f"STM32 LIMITS 受信（handshake 後の再送で取得）: "
+                  f"速度{lim.max_speed_m_s:.2f}m/s 加速度{lim.max_accel_m_s2:.2f}m/s² "
+                  f"トルク{lim.max_torque_nm:.3f}N·m 舵角±{math.degrees(lim.max_steer_rad):.1f}°")
+            self._log_event("limits", {
+                "max_speed_m_s": lim.max_speed_m_s,
+                "max_accel_m_s2": lim.max_accel_m_s2,
+                "max_torque_nm": lim.max_torque_nm,
+                "max_steer_rad": lim.max_steer_rad,
+                "via": "retry",
+            })
+
+    def _retry_handshake(self, now: int, sch: "_Schedule") -> None:
+        # `handshake()` が LIMITS・VERSION を取り損ねていたら定期的に再送する。
+        # STM32 起動時の3回burstを取り逃した／応答が1回落ちた場合の保険。
+        # 一度受け取れば `state.limits`/`state.version` が埋まるので、以降は送らなくなる。
+        # **VERSION が無い間は ARM を通さない**（`_arm_block_reason`）ので、取り直せないと走れない
+        if now >= sch.limits_retry and (self.state.limits is None
+                                          or self.state.version is None):
+            if self.state.limits is None:
+                self.link.send(packets.LimitsReq())
+            if self.state.version is None:
+                self._version_req_ns = now
+                self.link.send(packets.VersionReq())
+            sch.limits_retry = now + int(LIMITS_RETRY_S * NS)
+
+    def _sync_control_params(self, now: int) -> None:
+        # 調整パラメータの送信・読み戻し。同定の試験が指令に載せた一時的な上書き
+        # （`DriveCmd.fw_overrides`）は、指令が届いている間だけ入れる（途絶えたら元へ戻す）
+        self.control_sync.set_overrides(
+            self.cmd.fw_overrides if (self.cmd is not None and not self.cmd_stale) else {})
+        prev_ctrl = self.control_sync.status
+        self.control_sync.tick(now)
+        if self.control_sync.drift_count != self._control_drift_seen:
+            # 読み戻しが食い違った＝STM32 の値が勝手に変わった（気づけなかった再起動など）。
+            # 入り直すまで ARM を通さない
+            self._control_drift_seen = self.control_sync.drift_count
+            self._control_synced = False
+        if self.control_sync.status in ("ok", "none"):
+            self._control_synced = True
+        if self.control_sync.status != prev_ctrl:
+            self._log_event("control_params", {"status": self.control_sync.status,
+                                               "problems": self.control_sync.problems})
+
+    def _send_due(self, now: int, sch: "_Schedule") -> None:
+        """COMMAND（変わったら即座に・変わらなければ周期で）と PING。"""
+        elapsed = (now - int(self._t_start * NS)) / NS
+        # **指令の中身が変わったらその場で送る**。100Hz の定期送信を待つと
+        # 平均5ms・最大10ms遅れていた。telemetry_node は同じ中身を50Hzで繰り返すので、
+        # エンコードした中身が前回と同じなら送らない（定期送信に任せる）。送る中身は
+        # 定期送信と同じ `_command_packet()`（DISARM の判断・上限のクランプを含む）
+        changed = False
+        pkt = encoded = None
+        if self._cmd_arrived:
+            self._cmd_arrived = False
+            pkt = self._command_packet()
+            encoded = pkt.encode()
+            changed = encoded != self._last_command_bytes
+        if changed or now >= sch.cmd:
+            self._send_command(pkt, encoded)
+            sch.cmd = now + sch.cmd_period if changed else sch.cmd + sch.cmd_period
+            if now - sch.cmd > sch.cmd_period * 5:   # 大きく遅れたら追いつきをやめる
+                sch.cmd = now + sch.cmd_period
+
+        if now >= sch.ping:
+            self._send_ping()
+            hz = PING_WARMUP_HZ if elapsed < WARMUP_S else PING_HZ
+            sch.ping = now + NS // hz
+
+    def _update_health(self, now: int, sch: "_Schedule") -> None:
+        prev_health = self.state.health
+        changed = self.tracker.update_health(now)
+        if self.indicator is not None:
+            self.indicator.update(self._indication())
+        if self._log is not None:
+            if changed is not None:
+                self._log_event("health", {"from": prev_health, "to": changed})
+            if now >= sch.linkstats:
+                self._log_linkstats(now)
+                sch.linkstats = now + NS // LINKSTATS_HZ
+
+    def _publish_status(self, now: int, sch: "_Schedule", status_cb) -> None:
+        """ライブ表示・`diag/link`・`hb/io`。"""
+        if status_cb and now >= sch.status:
+            status_cb(self)
+            sch.status = now + NS // 2      # 2Hz 更新
+
+        if now >= sch.diag:
+            if now >= self._diag_loop_window_end_ns:
+                self._diag_loop_prev_ns = self._diag_loop_max_ns
+                self._diag_loop_max_ns = 0
+                self._diag_loop_window_end_ns = now + NS
+            self.bridge.publish_diag(
+                self.state, self.sync, self.link.stats,
+                heartbeat=self.heartbeat,
+                arm_inhibited=bool(self._arm_block_reason()),
+                arm_inhibit_reason=self._arm_block_reason(),
+                stm_log=self.stm_log,
+                cmd_source=self.cmd.source if self.cmd else "",
+                cmd_stale=self.cmd_stale,
+                expected_version=PROTOCOL_VERSION,
+                control_sync=self.control_sync,
+                control_params_error=self.control_params_error,
+                loop_max_ms=max(self._diag_loop_max_ns,
+                                self._diag_loop_prev_ns) / 1e6,
+                cmd_timeouts=self.cmd_timeouts,
+                disk_free_pct=self._disk_free_pct,
+                log_errors=self._log_errors,
+                # シミュレータの link だけがこれを持つ（`sim/link.py`）。
+                # GUI に SIM バッジを出す唯一の根拠。**実機の link には何も足さない**
+                sim=getattr(self.link, "is_sim", False))
+            sch.diag = now + NS // DIAG_HZ
+
+        if self.pub is not None and now >= sch.hb:
+            self.pub.send(TOPIC_HB_PREFIX + "io",
+                          HbMsg(node="io", pid=os.getpid(),
+                                detail=self.state.health))
+            sch.hb = now + NS // HB_HZ
+
+    def _housekeeping(self, now: int, sch: "_Schedule") -> None:
+        """ディスクの空き・記録の開き直しの結果・総走行距離の保存（重い処理はワーカースレッド）。"""
+        # 前回起こしたディスクチェックが終わっていれば結果を処理する
+        # （実処理はワーカースレッド。issue #5）
+        self._poll_disk_check()
+        self._poll_log_open_error()
+        if now >= sch.disk_check:
+            sch.disk_check = now + int(DISK_CHECK_INTERVAL_S * NS)
+            self._check_disk_space()
+
+        # 総走行距離の永続化。**両方満たしたときだけ書く**——止まっている間は
+        # 30秒経っても書かない（SDカードの消耗を避ける、バンビ指定）。
+        # 書き込み自体はワーカースレッドに逃がす（issue #5）
+        if now >= sch.odom_save:
+            sch.odom_save = now + int(ODOM_SAVE_INTERVAL_S * NS)
+            current_odom = self.bridge.state_builder.odom_center
+            if abs(current_odom - self._last_saved_odom) >= ODOM_SAVE_MIN_DELTA_M:
+                self._save_odometer_async(current_odom)
+                self._last_saved_odom = current_odom
 
     def stop(self) -> None:
         self._running = False
@@ -1275,7 +1326,7 @@ def _status_line(node: IoNode) -> None:
     write_status(format_status(node.state, node.sync, node.link.stats))
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default="/dev/serial0")
@@ -1309,10 +1360,11 @@ def main() -> int:
                          "実機では使わない")
     ap.add_argument("--course", default="normal",
                     help="--sim のときのコース。名前（`normal`）か sim/courses の PNG・JSON のパス（sim.run と同じ）")
-    args = ap.parse_args()
+    return ap.parse_args(argv)
 
-    sys.stdout, sys.stderr = _QuietStream(sys.stdout), _QuietStream(sys.stderr)
 
+def _open_link(args: argparse.Namespace):
+    """UART（`--sim` ならシミュレータ）を開く。開けなければ None。"""
     try:
         if args.sim:
             # **遅延 import。** Pi にはこのパッケージを配らないので、
@@ -1323,10 +1375,14 @@ def main() -> int:
         else:
             link = SerialLink(args.port, args.baud)
     except Exception as e:
-        print(f"ポートを開けない: {e}", file=sys.stderr)
-        return 2
+        _log.warning(f"ポートを開けない: {e}")
+        return None
 
-    # ── バス ──
+    return link
+
+
+def _open_bus(args: argparse.Namespace):
+    """`(pub, sub)`。バス無しで続けるなら `(None, None)`。**二重起動なら例外**（`RuntimeError`）。"""
     pub = sub = None
     if not args.no_bus:
         try:
@@ -1339,52 +1395,39 @@ def main() -> int:
             # 取りこぼしてはいけないので RELIABLE にする
             sub = Subscriber({TOPIC_CMD: LATEST, TOPIC_LOG_CTRL: LATEST,
                                TOPIC_UI_EVENT: RELIABLE, TOPIC_SCAN_STEREO: LATEST})
-            print(f"# バス配信 {pub.endpoint} "
+            _log.info(f"バス配信 {pub.endpoint} "
                   f"(vehicle_state / scan / diag/link / hb/io)")
         except ImportError as e:
-            print(f"!! pyzmq/msgspec が無いのでバス無しで動く: {e}")
-        except RuntimeError as e:
-            # 同じ名前の Publisher が既にいる＝io_node の二重起動（`zbus._lock_endpoint`）。バス無しで
-            # 続けると、1本の UART に2つの io_node が COMMAND を書き込むことになる
-            print(f"!! {e}", file=sys.stderr)
-            link.close()
-            return 2
+            _log.warning(f"pyzmq/msgspec が無いのでバス無しで動く: {e}")
+        except RuntimeError:
+            raise                              # 二重起動（`main` が起動を断る）
         except Exception as e:
-            print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
+            _log.warning(f"バスを開けない（バス無しで続行）: {e}")
 
-    # **`args.log` 無しでも常に用意しておく。** `log/ctrl`（GUI の記録ボタン）で
-    # セッション中に記録を始めるとき、同じメタデータで書けるようにするため
-    # `args.port` ではなく `link.port` を書く。--sim のとき記録に "/dev/serial0" と
-    # 残ると、後からログを見て実機の記録と区別がつかなくなる
-    log_meta = {"node": "io_node", "port": link.port, "baud": link.baud,
-                "protocol_version": PROTOCOL_VERSION, "sim": args.sim}
-    log = None
-    if args.log is not None:
-        path = Path(args.log) if args.log.endswith(".sfl") else default_log_path(args.log)
-        log = AsyncFrameLog(path, meta=log_meta)
-        print(f"# 記録: {path}")
+    return pub, sub
 
-    # ── GPIO ──
+
+def _open_gpio(args: argparse.Namespace):
+    """`(heartbeat, indicator, buzzer)`。`--require-gpio` なのに開けなければ None。"""
     heartbeat = indicator = None
     if not args.no_heartbeat:
         pin = open_output(PIN_HEARTBEAT)
         if pin is None:
             msg = f"GPIO{PIN_HEARTBEAT} を開けない（E-Stop ハートビートなし）"
             if args.require_gpio:
-                print(f"!! {msg}", file=sys.stderr)
-                link.close()
-                return 2
-            print(f"!! {msg}。--require-gpio で起動を止められる")
+                _log.warning(msg)
+                return None
+            _log.warning(f"{msg}。--require-gpio で起動を止められる")
         else:
             heartbeat = Heartbeat(pin)
-            print(f"# E-Stop ハートビート GPIO{PIN_HEARTBEAT} "
+            _log.info(f"E-Stop ハートビート GPIO{PIN_HEARTBEAT} "
                   f"{heartbeat.hz}Hz（kick 途絶 {heartbeat.kick_timeout_s}s で停止）")
-            print("#  注意: 一度出し始めたら、止めた時点で STM32 が E-Stop をラッチする。"
-                  "\n#        解除には車両のボタン2を押す必要がある（--no-heartbeat で回避）")
+            _log.info("注意: 一度出し始めたら、止めた時点で STM32 が E-Stop をラッチする。"
+                  "　解除には車両のボタン2を押す必要がある（--no-heartbeat で回避）")
     else:
         # STM32 はハートビートを一度も見ていない間は E-Stop を発動しない。
         # ベンチ診断で E-Stop をラッチさせたくないときはこちら
-        print("# ハートビート無効（ベンチ診断用）。STM32 は未接続扱いのまま")
+        _log.info("ハートビート無効（ベンチ診断用）。STM32 は未接続扱いのまま")
 
     buzzer = None
     if not args.no_leds:
@@ -1398,7 +1441,87 @@ def main() -> int:
         if buzzer is not None:
             # 起動音。STM32 側（C5→E5→G5 の上昇）と被らない下降アルペジオ
             buzzer.play(MELODY_BOOT)
-            print(f"# 起動音 GPIO{PIN_BUZZER}")
+            _log.info(f"起動音 GPIO{PIN_BUZZER}")
+
+    return heartbeat, indicator, buzzer
+
+
+def _print_stats(node: "IoNode", link, heartbeat, duration_s: float | None) -> None:
+    """終了時の統計（人が読む報告なので print）。"""
+    st = link.stats
+    print("\n\n=== 終了時の統計 ===")
+    print(f"frames_ok={st.frame_ok} crc_err={st.crc_error} len_err={st.len_error} "
+          f"loss={st.packet_loss} reordered={st.reordered} dup={st.duplicate} "
+          f"unknown={st.unknown_type} resync={st.resync_bytes}B")
+    print(f"time sync: n={node.sync.n_samples} "
+          f"offset={node.sync.offset_ns} ns best_delay={node.sync.best_delay_ns} ns "
+          f"drift={node.sync.drift_ppm} ppm")
+    if node.state.lidar_sectors:
+        print(f"lidar sectors seen: {len(node.state.lidar_sectors)}/12")
+    b = node.bridge
+    print(f"bus: vehicle_state={b.vehicle_states} scan={b.published_scans} "
+          f"lidar_sectors_lost={b.scans.sectors_lost} "
+          f"cmd_rtt={'—' if b.cmd_rtt_ms is None else f'{b.cmd_rtt_ms:.1f}ms'} "
+          f"cmd_timeout={node.cmd_timeouts}回 "
+          f"odom_center={b.state_builder.odom_center:.3f}m "
+          f"(jump={b.state_builder.odom_jumps})")
+    if heartbeat is not None:
+        st = heartbeat.stats
+        hz = st.edges / 2 / duration_s if duration_s else None
+        print(f"heartbeat: edges={st.edges}"
+              + (f" ({hz:.1f}Hz)" if hz else "")
+              + f" 最大遅れ={st.max_late_ns / 1e6:.2f}ms "
+                f"停止={st.stalls}回 skip={st.skipped} {st.late_hist}")
+    if node._log is not None:
+        lg = node._log
+        mb = lg.stats.bytes_written / 1e6
+        # `node._log_errors` は io_node 側（`_log_rx`/`_on_tx`/`_log_event`）で
+        # 捕まえた例外の数、`lg.stats.write_errors` は `FrameLogWriter._write` が
+        # OSError（ENOSPC 等）を捕まえて数えた分。前者はもう後者を含まない
+        # （`_write` が例外を投げなくなったため）ので両方出す
+        errs = node._log_errors + lg.stats.write_errors + getattr(lg, "dropped", 0)
+        print(f"log: {lg.path} rx={lg.stats.rx} tx={lg.stats.tx} "
+              f"events={lg.stats.events} {mb:.1f}MB"
+              + (f" !! 書き込みエラー {errs} 回"
+                 f"（{lg.last_write_error or 'ディスク以外'}）" if errs else ""))
+    if node._disk_free_pct is not None:
+        print(f"disk: 空き {node._disk_free_pct:.1f}%")
+
+
+def main(argv: list[str] | None = None) -> int:
+    setup_logging("io")
+    args = parse_args(argv)
+    sys.stdout, sys.stderr = _QuietStream(sys.stdout), _QuietStream(sys.stderr)
+
+    link = _open_link(args)
+    if link is None:
+        return 2
+    try:
+        pub, sub = (None, None) if args.no_bus else _open_bus(args)
+    except RuntimeError as e:
+        # 同じ名前の Publisher が既にいる＝io_node の二重起動（`zbus._lock_endpoint`）。バス無しで
+        # 続けると、1本の UART に2つの io_node が COMMAND を書き込むことになる
+        _log.warning(str(e))
+        link.close()
+        return 2
+
+    # **`args.log` 無しでも常に用意しておく。** `log/ctrl`（GUI の記録ボタン）で
+    # セッション中に記録を始めるとき、同じメタデータで書けるようにするため
+    # `args.port` ではなく `link.port` を書く。--sim のとき記録に "/dev/serial0" と
+    # 残ると、後からログを見て実機の記録と区別がつかなくなる
+    log_meta = {"node": "io_node", "port": link.port, "baud": link.baud,
+                "protocol_version": PROTOCOL_VERSION, "sim": args.sim}
+    log = None
+    if args.log is not None:
+        path = Path(args.log) if args.log.endswith(".sfl") else default_log_path(args.log)
+        log = AsyncFrameLog(path, meta=log_meta)
+        _log.info(f"記録: {path}")
+
+    gpio = _open_gpio(args)
+    if gpio is None:
+        link.close()
+        return 2
+    heartbeat, indicator, buzzer = gpio
 
     # 足回りの制御の調整パラメータ。読めなくても io_node は止めない（STM32 の既定値で
     # 走れる）が、黙って無視もしない——`LinkDiag.control_params_status` が `invalid` になる
@@ -1408,7 +1531,7 @@ def main() -> int:
         control_params = load_control_params()
     except (OSError, ValueError) as e:
         control_params_error = f"vehicle.toml の [control] を読めません: {e}"
-        print(f"!! {control_params_error}（STM32 の既定値のまま走ります）", file=sys.stderr)
+        _log.warning(f"{control_params_error}（STM32 の既定値のまま走ります）")
 
     node = IoNode(link, log=log, log_meta=log_meta, heartbeat=heartbeat,
                   indicator=indicator, buzzer=buzzer, pub=pub, sub=sub, allow_arm=args.allow_arm,
@@ -1426,13 +1549,13 @@ def main() -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, _shutdown)
 
-    print(f"# io_node port={link.port} baud={link.baud} 期待 v{PROTOCOL_VERSION:#06x}")
+    _log.info(f"io_node port={link.port} baud={link.baud} 期待 v{PROTOCOL_VERSION:#06x}")
     ver = node.handshake()
     if ver is None:
-        print("!! VERSION 応答なし。STM32 が繋がっていない可能性。受信は続行する。")
+        _log.warning("VERSION 応答なし。STM32 が繋がっていない可能性。受信は続行する。")
     else:
         ok = "✓" if ver.protocol_version == PROTOCOL_VERSION else "✗ 不一致! ARM を通しません"
-        print(f"# STM32 protocol_version=0x{ver.protocol_version:04X} "
+        _log.info(f"STM32 protocol_version=0x{ver.protocol_version:04X} "
               f"fw=0x{ver.fw_id:08X} {ok}")
         # 機能の ON/OFF・自動停止のマージンは GUI の操作を待たずに一度聞いておく（STM32 は Flash に
         # 持たないので、GUI を触る前でも STM32 の実際の状態を出せるように）
@@ -1444,23 +1567,23 @@ def main() -> int:
     # --max-steer との「小さい方」から変更。詳細は _send_command）
     lim = node.state.limits
     if lim is not None:
-        print(f"# STM32 上限値(LIMITS): 速度{lim.max_speed_m_s:.2f}m/s "
+        _log.info(f"STM32 上限値(LIMITS): 速度{lim.max_speed_m_s:.2f}m/s "
               f"加速度{lim.max_accel_m_s2:.2f}m/s² トルク{lim.max_torque_nm:.3f}N·m "
               f"舵角±{math.degrees(lim.max_steer_rad):.1f}°")
     else:
-        print("!! LIMITS 応答なし。受信できるまで ARM は通さない（LIMITS_REQ を再送し続ける）")
+        _log.warning("LIMITS 応答なし。受信できるまで ARM は通さない（LIMITS_REQ を再送し続ける）")
 
     if args.allow_arm:
         eff_speed = lim.max_speed_m_s if lim else args.max_speed
         eff_steer = lim.max_steer_rad if lim else node.max_steer
         source = "LIMITS" if lim else "未受信（受信するまで ARM は通らない）"
         print("#\n#  ★★ --allow-arm 指定。バスの cmd が STM32 に届く＝モータが回りうる。")
-        print(f"#     実効クランプ: 速度 ±{eff_speed:.3f} m/s / 舵角 ±{eff_steer:.3f} rad（出所: {source}）")
-        print(f"#     cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら最大制動 → 停止後に DISARM")
-        print("#     protocol_version の一致と [control] の同期が済むまで ARM は通らない")
-        print("#     車輪を浮かせるか、周囲に人と物が無いことを確認すること\n")
+        _log.info(f"実効クランプ: 速度 ±{eff_speed:.3f} m/s / 舵角 ±{eff_steer:.3f} rad（出所: {source}）")
+        _log.info(f"cmd が {CMD_TIMEOUT_NS // 1_000_000}ms 途絶したら最大制動 → 停止後に DISARM")
+        _log.info("protocol_version の一致と [control] の同期が済むまで ARM は通らない")
+        _log.info("車輪を浮かせるか、周囲に人と物が無いことを確認すること")
     else:
-        print("# COMMAND は常に DISARM（安全）。--allow-arm で解禁。Ctrl-C で停止。\n")
+        _log.info("COMMAND は常に DISARM（安全）。--allow-arm で解禁。Ctrl-C で停止。")
     if heartbeat is not None:
         node._log_event("heartbeat_start", {"pin": PIN_HEARTBEAT, "hz": heartbeat.hz})
         heartbeat.start()
@@ -1497,46 +1620,8 @@ def main() -> int:
         if pub is not None:
             pub.close()
 
-    st = link.stats
-    print("\n\n=== 終了時の統計 ===")
-    print(f"frames_ok={st.frame_ok} crc_err={st.crc_error} len_err={st.len_error} "
-          f"loss={st.packet_loss} reordered={st.reordered} dup={st.duplicate} "
-          f"unknown={st.unknown_type} resync={st.resync_bytes}B")
-    print(f"time sync: n={node.sync.n_samples} "
-          f"offset={node.sync.offset_ns} ns best_delay={node.sync.best_delay_ns} ns "
-          f"drift={node.sync.drift_ppm} ppm")
-    if node.state.lidar_sectors:
-        print(f"lidar sectors seen: {len(node.state.lidar_sectors)}/12")
-    b = node.bridge
-    print(f"bus: vehicle_state={b.vehicle_states} scan={b.published_scans} "
-          f"lidar_sectors_lost={b.scans.sectors_lost} "
-          f"cmd_rtt={'—' if b.cmd_rtt_ms is None else f'{b.cmd_rtt_ms:.1f}ms'} "
-          f"cmd_timeout={node.cmd_timeouts}回 "
-          f"odom_center={b.state_builder.odom_center:.3f}m "
-          f"(jump={b.state_builder.odom_jumps})")
-    if heartbeat is not None:
-        st = heartbeat.stats
-        hz = st.edges / 2 / args.duration if args.duration else None
-        print(f"heartbeat: edges={st.edges}"
-              + (f" ({hz:.1f}Hz)" if hz else "")
-              + f" 最大遅れ={st.max_late_ns / 1e6:.2f}ms "
-                f"停止={st.stalls}回 skip={st.skipped} {st.late_hist}")
-    if node._log is not None:
-        lg = node._log
-        mb = lg.stats.bytes_written / 1e6
-        # `node._log_errors` は io_node 側（`_log_rx`/`_on_tx`/`_log_event`）で
-        # 捕まえた例外の数、`lg.stats.write_errors` は `FrameLogWriter._write` が
-        # OSError（ENOSPC 等）を捕まえて数えた分。前者はもう後者を含まない
-        # （`_write` が例外を投げなくなったため）ので両方出す
-        errs = node._log_errors + lg.stats.write_errors + getattr(lg, "dropped", 0)
-        print(f"log: {lg.path} rx={lg.stats.rx} tx={lg.stats.tx} "
-              f"events={lg.stats.events} {mb:.1f}MB"
-              + (f" !! 書き込みエラー {errs} 回"
-                 f"（{lg.last_write_error or 'ディスク以外'}）" if errs else ""))
-    if node._disk_free_pct is not None:
-        print(f"disk: 空き {node._disk_free_pct:.1f}%")
+    _print_stats(node, link, heartbeat, args.duration)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

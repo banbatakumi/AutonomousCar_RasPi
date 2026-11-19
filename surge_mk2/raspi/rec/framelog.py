@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, NamedTuple
 
+from ..core.cleanup import quiet_close
+
 __all__ = [
     "MAGIC",
     "FORMAT_VERSION",
@@ -467,10 +469,8 @@ class AsyncFrameLog:
                     self._wake.wait(0.02)
                     self._wake.clear()
         finally:
-            try:
+            with quiet_close("framelog の書き出し先"):
                 w.close()
-            except Exception:
-                pass
 
 
 # ── 読み出し ────────────────────────────────────────────────────────────

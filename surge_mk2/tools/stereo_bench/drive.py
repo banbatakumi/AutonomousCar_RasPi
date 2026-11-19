@@ -310,12 +310,9 @@ def vehicle_from_log(log: DriveLog):
     """撮った時の vehicle.toml（記録の `provenance`）の `Vehicle`。無ければ None。"""
     if not log.vehicle_toml:
         return None
-    import tomllib
-    from pathlib import Path
-
     from raspi.core.vehicle import Vehicle
 
-    return Vehicle._from_dict(tomllib.loads(log.vehicle_toml), Path("<provenance>"))
+    return Vehicle.from_toml_text(log.vehicle_toml, "<provenance>")
 
 
 # ---------------------------------------------------------------- 照合のやり直しと CLI

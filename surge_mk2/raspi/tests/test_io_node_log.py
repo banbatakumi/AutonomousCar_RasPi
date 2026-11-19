@@ -10,19 +10,17 @@ SerialLink を差し替えた偽リンクで io_node を回し、
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.nodes.io_node import IoNode  # noqa: E402
-from raspi.proto import FrameEncoder, FrameParser, packets  # noqa: E402
-from raspi.proto.generated.packets import HEADER_SIZE, S2P_TYPES  # noqa: E402
-from raspi.rec.framelog import FrameLogReader, FrameLogWriter, Kind  # noqa: E402
-from raspi.tests.fakes import fake_disk_usage  # noqa: E402
+from raspi.nodes.io_node import IoNode
+from raspi.proto import FrameEncoder, FrameParser, packets
+from raspi.proto.generated.packets import HEADER_SIZE, S2P_TYPES
+from raspi.rec.framelog import FrameLogReader, FrameLogWriter, Kind
+from raspi.tests.fakes import fake_disk_usage
 
 
 class FakeLink:

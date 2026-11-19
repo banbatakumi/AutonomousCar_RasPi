@@ -49,22 +49,19 @@ from __future__ import annotations
 
 import argparse
 import math
-import signal
 import sys
 import time
-from pathlib import Path
 
 import msgspec
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.base import CMD_HZ, RELEASE_STOP_TAG, StandstillSteer  # noqa: E402  `auto/cmd` の発行レート
-from raspi.auto.registry import PLANNERS, make_planner, merged_params  # noqa: E402
-from raspi.bus import LATEST, Policy, Publisher, Subscriber  # noqa: E402
-from raspi.core.cleanup import quiet_close  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, AutoState, DriveCmd, Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.auto.base import CMD_HZ, RELEASE_STOP_TAG, StandstillSteer  # `auto/cmd` の発行レート
+from raspi.auto.registry import PLANNERS, make_planner, merged_params
+from raspi.bus import LATEST, Policy, Publisher, Subscriber
+from raspi.core.cleanup import quiet_close
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import AutoCtrl, AutoState, DriveCmd, Heartbeat as HbMsg
+from raspi.msgs.types import (
     TOPIC_AUTO_CMD,
     TOPIC_AUTO_CTRL,
     TOPIC_AUTO_MAP,
@@ -75,8 +72,12 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_VEHICLE_STATE,
     Scan,
 )
-from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
-from raspi.nav.scan_filter import ScanFilter, config_from_items  # noqa: E402
+from raspi.nav.body_mask import body_ranges, mask_body
+from raspi.nav.scan_filter import ScanFilter, config_from_items
+from raspi.core.log import get_logger, setup_logging
+from raspi.core.runner import run_node
+
+_log = get_logger("planning")
 
 __all__ = ["PlanningNode", "input_topics"]
 
@@ -158,7 +159,7 @@ class PlanningNode:
             self.planner = make_planner(mode)
         except Exception as e:                      # noqa: BLE001
             mode_error = f"planner の作成に失敗: {e}"
-            print(f"# {mode_error}", file=sys.stderr, flush=True)
+            _log.info(mode_error)
         self._params: dict[str, float] = merged_params(mode, {})
         #: `auto/ctrl` を受けたことがあるか・**engaged=False を見たことがあるか**（`_apply_ctrl`）
         self._ctrl_seen = False
@@ -221,7 +222,7 @@ class PlanningNode:
             fn(*args)
         except Exception as e:                      # noqa: BLE001
             self._ctrl_error = f"{what}に失敗: {e}"
-            print(f"# {what}で例外: {e}", file=sys.stderr, flush=True)
+            _log.info(f"{what}で例外: {e}")
             return False
         self._ctrl_error = ""
         return True
@@ -272,23 +273,23 @@ class PlanningNode:
             self._ask("地図の削除", self.planner.request_clear)
             self._last_map_seq = -1
             if not self.quiet:
-                print("# 地図を削除（GUI）", flush=True)
+                _log.info("地図を削除（GUI）")
         if freeze and self.planner is not None:
             self._ask("地図の確定", self.planner.request_freeze)
             if not self.quiet:
-                print("# 地図を確定（GUI）", flush=True)
+                _log.info("地図を確定（GUI）")
         if load and self.planner is not None:
             self._ask("地図の読み込み", self.planner.request_load, c.race_map)
             self._last_map_seq = -1
             if not self.quiet:
-                print(f"# 地図を読み込み（GUI）: {c.race_map}", flush=True)
+                _log.info(f"地図を読み込み（GUI）: {c.race_map}")
         if grip_clear and self.planner is not None:
             # telemetry_node も先にファイルを消しているが、planner は学習値を持ったまま
             # 走っているので、こちらでも同じ地図の持ち物を初期化する（次に学習を保存しても
             # 古い値が書き戻らないように、ファイルの削除も planner 側でやり直す）
             self._ask("学習値の削除", self.planner.request_clear_grip, c.grip_clear_map)
             if not self.quiet:
-                print(f"# 学習値を削除（GUI）: {c.grip_clear_map}", flush=True)
+                _log.info(f"学習値を削除（GUI）: {c.grip_clear_map}")
         if hint and self.planner is not None:
             self._ask("自己位置のヒント", self.planner.request_locate_hint, c.loc_hint_x, c.loc_hint_y)
         if park and self.planner is not None:
@@ -318,7 +319,7 @@ class PlanningNode:
             self._last_plan_ns = 0      # 前のモードを走っていた時間を、次の planner の最初の `dt` にしない
             if not self.quiet:
                 who = self.planner.name if self.planner else "（なし）"
-                print(f"# モード → {who}", flush=True)
+                _log.info(f"モード → {who}")
             # 作り直した直後に、既に届いている `e2e/model` の意思があれば
             # 即座に反映する（次のポンプまで待たせない）
             m = self.sub.latest.get(TOPIC_E2E_MODEL)
@@ -360,7 +361,7 @@ class PlanningNode:
             try:
                 d = fn(merged_params(c.mode, c.params))
             except Exception as e:                  # noqa: BLE001  使えなければ従来の受け渡し
-                print(f"# {self.planner.name} の release_stop_decel() が例外: {e}", file=sys.stderr, flush=True)
+                _log.info(f"{self.planner.name} の release_stop_decel() が例外: {e}")
                 d = None
             if d is not None and math.isfinite(d) and d > 0.0:
                 self._release_decel = float(d)
@@ -405,10 +406,10 @@ class PlanningNode:
             try:
                 fn(m.value, m.source or "signal")
             except Exception as e:                  # noqa: BLE001  信号1つでノードを落とさない
-                print(f"# 経路の切替（信号）で例外: {e}", file=sys.stderr, flush=True)
+                _log.info(f"経路の切替（信号）で例外: {e}")
                 return
             if not self.quiet:
-                print(f"# 経路の切替要求（{m.source or 'signal'}）: {m.value}", flush=True)
+                _log.info(f"経路の切替要求（{m.source or 'signal'}）: {m.value}")
 
     def _apply_e2e_model(self, m) -> None:
         """`e2e/model`（GUIが選んだモデル名）を、対応できる planner にだけ伝える。
@@ -463,8 +464,7 @@ class PlanningNode:
         except Exception as e:
             # planner側のバグでノード全体を巻き込んで落とさない。`ready=False`の
             # ままにして `_cmd_from` の「ready=Falseは必ず制動」に自然に落とす
-            print(f"# {self.planner.name} の plan() が例外: {e}",
-                 file=sys.stderr, flush=True)
+            _log.info(f"{self.planner.name} の plan() が例外: {e}")
             st = AutoState(mode=self.ctrl.mode, planner=self.planner.name,
                            reason=f"plannerが例外: {e}")
         st.engaged = self.ctrl.engaged
@@ -504,7 +504,7 @@ class PlanningNode:
         try:
             out = fn(self.sub.latest.get(TOPIC_VEHICLE_STATE))
         except Exception as e:                      # noqa: BLE001  直前の判断のまま送る
-            print(f"# {self.planner.name} の tick() が例外: {e}", file=sys.stderr, flush=True)
+            _log.info(f"{self.planner.name} の tick() が例外: {e}")
             return
         if out is None:
             return
@@ -671,7 +671,7 @@ class PlanningNode:
         try:
             m = self.planner.snapshot()
         except Exception as e:                      # noqa: BLE001  表示専用。走行の判断を巻き込まない
-            print(f"# {self.planner.name} の snapshot() が例外: {e}", file=sys.stderr, flush=True)
+            _log.info(f"{self.planner.name} の snapshot() が例外: {e}")
             return
         if m is None:
             return
@@ -718,8 +718,7 @@ class PlanningNode:
                         try:
                             fn(msg)
                         except Exception as e:      # noqa: BLE001  planner のバグでノードを落とさない
-                            print(f"# {self.planner.name} の on_vehicle_state() が例外: {e}",
-                                  file=sys.stderr, flush=True)
+                            _log.info(f"{self.planner.name} の on_vehicle_state() が例外: {e}")
 
             now = time.monotonic_ns()
             self._update_release(now)
@@ -765,6 +764,7 @@ class PlanningNode:
 
 
 def main() -> int:
+    setup_logging("planning")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", default="",
@@ -787,26 +787,17 @@ def main() -> int:
     node = PlanningNode(pub=pub, sub=sub, mode=args.mode, quiet=args.quiet)
 
     if not args.quiet:
-        print(f"# planning_node  publish {pub.endpoint}")
-        print(f"# モード: {', '.join(f'{k}({v.name})' for k, v in PLANNERS.items())}")
-        print(f"# 起動時 {args.mode or '（なし。GUI の自動運転タブで選ぶ）'}")
+        _log.info(f"planning_node  publish {pub.endpoint}")
+        _log.info(f"モード: {', '.join(f'{k}({v.name})' for k, v in PLANNERS.items())}")
+        _log.info(f"起動時 {args.mode or '（なし。GUI の自動運転タブで選ぶ）'}")
         print("#\n# `auto/cmd` は engage されている間だけ telemetry_node が"
               " `cmd` へ中継する。")
-        print("# **このノード単独では車は動かない**（ARM も人間が GUI で保持する）\n")
+        _log.info("**このノード単独では車は動かない**（ARM も人間が GUI で保持する）")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-
-    try:
-        node.run()
-    finally:
-        node.close()
-        if not args.quiet:
-            print(f"\n=== 終了時の統計 ===\n計画 {node._plans} 回 "
-                  f"（実測 {node._plan_hz:.1f}Hz）")
+    run_node(node, node.run)
+    if not args.quiet:
+        print(f"\n=== 終了時の統計 ===\n計画 {node._plans} 回 "
+              f"（実測 {node._plan_hz:.1f}Hz）")
     return 0
 
 

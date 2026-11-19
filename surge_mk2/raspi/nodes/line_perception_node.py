@@ -56,29 +56,27 @@
 from __future__ import annotations
 
 import argparse
-import signal
 import sys
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.pixfmt import to_bgr  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import ImageRef, LineScan, VehicleState  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, cam_infer_active
+from raspi.core.runner import run_node
+from raspi.core.frame_reader import FrameReader
+from raspi.core.pixfmt import to_bgr
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import ImageRef, LineScan, VehicleState
+from raspi.msgs import Heartbeat as HbMsg
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_LINE_CAM,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.ipm import (  # noqa: E402
+from raspi.nav.ipm import (
     CameraExtrinsics,
     ground_to_pixel,
     pixel_to_ground,
@@ -435,18 +433,7 @@ def main() -> int:
 
     print(f"# line_perception_node  publish {pub.endpoint}  line/cam へ配信")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-
-    try:
-        node.run(sub=sub, pub=pub, duration_s=args.duration)
-    finally:
-        node.close()
-        sub.close()
-        pub.close()
+    run_node(node, lambda: node.run(sub=sub, pub=pub, duration_s=args.duration), close=(sub, pub))
     return 0
 
 

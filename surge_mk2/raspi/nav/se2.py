@@ -31,7 +31,9 @@ Pose = tuple[float, float, float]
 
 
 def wrap_angle(a: float) -> float:
-    """角度を `[-π, π)` へ畳む（`wrap_angle(π) == -π`）。"""
+    """角度を `[-π, π)` へ畳む（`wrap_angle(π) == -π`）。numpy 配列もそのまま渡せる。
+
+    raspi 側の**唯一の実装**（slam2d は依存させないので `slam2d.core.types.wrap_angle` が同じ式を持つ）。"""
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 

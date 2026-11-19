@@ -42,6 +42,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from raspi.msgs.types import Scan  # noqa: E402
+from raspi.nav.se2 import wrap_angle  # noqa: E402
 from raspi.nav.deskew import point_times_ns  # noqa: E402
 
 NS = 1_000_000_000
@@ -60,8 +61,6 @@ JUMP_M = 0.25
 SPEED_BINS = (0.5, 1.5, 2.5, 99.0)
 
 
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 def load(path: Path) -> dict:
@@ -231,7 +230,7 @@ def windows(data: dict, horizons: list[float], bias: float,
             kind = "slip" if slip > SLIP_THR else ("bumpy" if bump > BUMP_THR else "normal")
             out.append({"t0": t0, "t1": t1, "j": j, "h": h, "x0": x0, "y0": y0, "yaw0": yaw0, "v": vmean, "dist": dist,
                         "e_long": e_long, "e_lat": e_lat,
-                        "e_yaw_deg": math.degrees(_wrap(pyaw - yt)),
+                        "e_yaw_deg": math.degrees(wrap_angle(pyaw - yt)),
                         "slip": slip, "bump": bump, "kind": kind})
     return out
 
@@ -243,7 +242,7 @@ def _errors(vs: dict, truth: list, r: dict, bias: float, model: Model) -> tuple[
     ex = r["x0"] + c * dx - s * dy - xt
     ey = r["y0"] + s * dx + c * dy - yt_
     ct, st = math.cos(yawt), math.sin(yawt)
-    return ct * ex + st * ey, -st * ex + ct * ey, _wrap(r["yaw0"] + dyaw - yawt)
+    return ct * ex + st * ey, -st * ex + ct * ey, wrap_angle(r["yaw0"] + dyaw - yawt)
 
 
 def fit(runs: list[tuple[dict, float, list[dict]]], h: float) -> Model:

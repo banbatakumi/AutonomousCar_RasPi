@@ -1,18 +1,15 @@
 """`raspi/core/frame_reader.py` — 共有メモリの作り直し（camera_node の再起動）から復帰できるか。"""
 
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core import frame_reader  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.msgs import ImageRef  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.core import frame_reader
+from raspi.core.frame_reader import FrameReader
+from raspi.msgs import ImageRef
 
 NAME = "surge_test_frame_reader"
 

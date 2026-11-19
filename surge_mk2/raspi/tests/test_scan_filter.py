@@ -1,15 +1,12 @@
 """`raspi/nav/scan_filter.py`: 走行モードに依らない点群のノイズの除去。"""
 
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import Scan, VehicleState  # noqa: E402
-from raspi.nav.scan_filter import ScanFilter, ScanFilterConfig, config_from_items  # noqa: E402
+from raspi.msgs import Scan, VehicleState
+from raspi.nav.scan_filter import ScanFilter, ScanFilterConfig, config_from_items
 
 DT_NS = 100_000_000
 

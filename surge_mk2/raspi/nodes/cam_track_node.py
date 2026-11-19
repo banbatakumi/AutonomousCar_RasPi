@@ -43,7 +43,7 @@ IDLE中に毎周期読むと実車でCPU 33%程度を消費するので、`cam_p
 
 **armedを見る理由**: ROI選択（`track/roi`）はtelemetry_nodeがプロセス
 再起動まで覚えていて、GUI再読み込みでも復元・再送され続ける
-（`_track_roi_pump()`）。armedを見ないと、一度でも追跡対象を選択すると
+（telemetry_node の周期送信 `_periodic_jobs`）。armedを見ないと、一度でも追跡対象を選択すると
 駐車中（DISARM）もNanoTrackが回り続ける——`cam_perception_node.py`等の
 主モードゲートと全く同じ形の省電力バグだったため、同じ設計
 （`raspi/core/auto_gate.vehicle_armed()`）で揃えた。
@@ -58,18 +58,17 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.core.auto_gate import IdlePacer, vehicle_armed  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.pixfmt import to_bgr  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs import ImageRef, Scan, TargetRoiCtrl, TargetTrack, VehicleState  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.auto.base import sector_of_deg
+from raspi.core.auto_gate import IdlePacer, vehicle_armed
+from raspi.core.frame_reader import FrameReader
+from raspi.core.pixfmt import to_bgr
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import Heartbeat as HbMsg
+from raspi.msgs import ImageRef, Scan, TargetRoiCtrl, TargetTrack, VehicleState
+from raspi.msgs.types import (
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_SCAN,
@@ -77,7 +76,8 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_TRACK_TARGET,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.ipm import CameraIntrinsics, pixel_ray, vehicle_camera_intrinsics  # noqa: E402
+from raspi.nav.se2 import wrap_angle
+from raspi.nav.ipm import CameraIntrinsics, pixel_ray, vehicle_camera_intrinsics
 
 __all__ = ["CamTrackNode", "TargetTracker"]
 
@@ -191,9 +191,6 @@ class TargetTrackerFactory:
             return None
 
 
-def _wrap_rad(rad: float) -> float:
-    """`base.wrap_deg()`のラジアン版。±πの符号付きに直す。"""
-    return (rad + math.pi) % (2.0 * math.pi) - math.pi
 
 
 class CamTrackNode:
@@ -348,7 +345,7 @@ class CamTrackNode:
         地面までの距離や取付ピッチが要らない式になる。
         """
         raw = self.vehicle.cam_front_yaw + self._ray_angle(u_px)
-        return _wrap_rad(raw)
+        return wrap_angle(raw)
 
     # ── LiDAR融合 ──
 
@@ -568,7 +565,7 @@ class CamTrackNode:
                 #: `TOPIC_IMAGE_FRONT` の共有メモリすら読まない——`cam_perception_node.py`
                 #: と同じ「使わないものは読まない」節電（実車確認、待機時CPU 33%→数%）。
                 #: **DISARM中は選択済み/追跡中でも読まない**——ROI選択は
-                #: telemetry_node が再起動まで覚えている（`_track_roi_pump()`）ので、
+                #: telemetry_node が再起動まで覚えている（telemetry_node の周期送信 `_periodic_jobs`）ので、
                 #: armed を見ないと駐車中もNanoTrackが回り続ける
                 #: （`cam_perception_node.py`等と同じ省電力バグ）
                 #: **モデル未配置（`_factory.available=False`）の間はROI選択の

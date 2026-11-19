@@ -10,17 +10,14 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav import obstacles as obs_mod  # noqa: E402
-from raspi.nav.deskew import Points  # noqa: E402
-from slam2d.core.grid import OccGrid  # noqa: E402
+from raspi.nav import obstacles as obs_mod
+from raspi.nav.deskew import Points
+from slam2d.core.grid import OccGrid
 
 
 def _open_grid() -> OccGrid:

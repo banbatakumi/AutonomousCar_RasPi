@@ -6,25 +6,23 @@
 """
 
 import math
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto import mapstore  # noqa: E402
-from raspi.auto.registry import PLANNERS, make_planner  # noqa: E402
-from raspi.auto.slam2d_raceline import (BUILD, DONE, EXPLORE, LOCATE, LOCATED, RACE,  # noqa: E402
+from raspi.auto import mapstore
+from raspi.auto.registry import PLANNERS, make_planner
+from raspi.auto.slam2d_raceline import (BUILD, DONE, EXPLORE, LOCATE, LOCATED, RACE,
                                         Slam2dRaceLine, forward_traj)
-from raspi.msgs import VehicleState  # noqa: E402
-from raspi.nav.grid import unpack_trinary  # noqa: E402
-from raspi.tests.test_nav import ROOM, make_room_scan  # noqa: E402
-from slam2d.core.grid import OccGrid  # noqa: E402
-from slam2d.core.types import Pose2D, Twist2D  # noqa: E402
-from slam2d.tests.helpers import make_room_points  # noqa: E402
+from raspi.msgs import VehicleState
+from raspi.nav.grid import unpack_trinary
+from raspi.tests.test_nav import ROOM, make_room_scan
+from slam2d.core.grid import OccGrid
+from slam2d.core.types import Pose2D, Twist2D
+from slam2d.tests.helpers import make_room_points
 
 
 def vs(speed=0.0, yaw_rate=0.0) -> VehicleState:

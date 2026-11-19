@@ -5,21 +5,19 @@ cv2 があれば `cv2.fisheye` と式が一致することも確かめる（校�
 """
 
 import math
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.camera_model import (FisheyeCalib, distort_theta,  # noqa: E402
+from raspi.core.camera_model import (FisheyeCalib, distort_theta,
                                      horizontal_fov, project_rays,
                                      undistort_theta, unproject_pixels,
                                      virtual_pinhole_maps)
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.nav.ipm import (CameraExtrinsics, camera_intrinsics,  # noqa: E402
+from raspi.core.vehicle import Vehicle
+from raspi.nav.ipm import (CameraExtrinsics, camera_intrinsics,
                            ground_to_pixel, pixel_to_ground,
                            vehicle_camera_intrinsics)
 

@@ -112,7 +112,7 @@ def load_frames(path: str | Path, *, pair_tol_ns: int = 500_000, max_scan_dt_ns:
 def load_run_info(path: str | Path) -> dict[str, dict[str, str]]:
     """記録のメタデータ（`surge` = 記録元・引数、`provenance` = 校正値 `vehicle_toml`・コードの版 `git` `src_sha`）。
 
-    `vehicle_toml` を `tomllib.loads` に渡せば、撮った時の校正値で照合をやり直せる（`raspi/rec/provenance.py`）。
+    `vehicle_toml` を `Vehicle.from_toml_text` に渡せば、撮った時の校正値で照合をやり直せる（`raspi/rec/provenance.py`）。
     古い記録（`provenance` 無し）は `surge` だけ。
     """
     from mcap.reader import make_reader

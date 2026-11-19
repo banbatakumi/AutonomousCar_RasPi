@@ -10,17 +10,14 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav import avoid as av  # noqa: E402
-from raspi.nav.obstacles import Obstacle  # noqa: E402
-from raspi.nav.raceline import RaceLine, _BodyCheck, curvature  # noqa: E402
+from raspi.nav import avoid as av
+from raspi.nav.obstacles import Obstacle
+from raspi.nav.raceline import RaceLine, _BodyCheck, curvature
 
 R = 5.0
 RES = 0.02

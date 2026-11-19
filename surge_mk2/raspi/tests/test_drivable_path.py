@@ -5,16 +5,13 @@
 出てくることだけを確認する。
 """
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav.drivable_path import extract_centerline  # noqa: E402
-from raspi.nav.grid import OccGrid  # noqa: E402
+from raspi.nav.drivable_path import extract_centerline
+from raspi.nav.grid import OccGrid
 
 
 def _empty_blocked(grid: OccGrid) -> np.ndarray:

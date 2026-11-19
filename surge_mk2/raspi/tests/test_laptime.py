@@ -6,19 +6,16 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto._slam2d_nav import occgrid_from_trinary  # noqa: E402
-from raspi.auto.slam2d_raceline import SPEED_KEYS, Slam2dRaceLine  # noqa: E402
-from raspi.nav import centerline as cl_mod  # noqa: E402
-from raspi.nav import raceline as rl_mod  # noqa: E402
-from raspi.nav.purepursuit import PursuitConfig, follow  # noqa: E402
+from raspi.auto._slam2d_nav import occgrid_from_trinary
+from raspi.auto.slam2d_raceline import SPEED_KEYS, Slam2dRaceLine
+from raspi.nav import centerline as cl_mod
+from raspi.nav import raceline as rl_mod
+from raspi.nav.purepursuit import PursuitConfig, follow
 
 RES = 0.025
 FOOTPRINT = ((0.30, 0.09), (0.30, -0.09), (-0.07, -0.09), (-0.07, 0.09))

@@ -5,24 +5,22 @@
 """
 
 import asyncio
-import sys
 import time
 import unittest
-from pathlib import Path
 
 import msgspec
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.io.serial_link import RxFrame  # noqa: E402
-from raspi.msgs import DriveCmd  # noqa: E402
-from raspi.nodes.io_node import (  # noqa: E402
+from raspi.io.serial_link import RxFrame
+from raspi.msgs import DriveCmd
+from raspi.nodes.io_node import (
     CMD_TIMEOUT_NS,
     FAILSAFE_STOPPED_NS,
     IoNode,
 )
-from raspi.proto import packets  # noqa: E402
-from raspi.proto.framing import RxStats  # noqa: E402
+from raspi.proto import packets
+from raspi.proto.framing import RxStats
+from raspi.tests.fakes import idle_recorder
 
 
 class FakeLink:
@@ -442,14 +440,7 @@ class TestWsDeadman(unittest.IsolatedAsyncioTestCase):
         srv._jpeg = None                   # カメラ配信なし（JPEG の実測も出ない）
         srv.sub = type("S", (), {"latest": {}})()
         srv._sfl_active = False
-        srv._mcap_proc = None
-        srv._mcap_started_ns = 0
-        srv._mcap_error = None
-        srv._video_proc = None
-        srv._video_starting = False
-        srv._video_started_ns = 0
-        srv._video_error = None
-        srv._video_files = []
+        srv._recorder = idle_recorder()
 
         class _P:
             """本物の `Publisher.send` と同じく、渡された msg に `seq`/`t_pub` を押す。
@@ -1188,16 +1179,8 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._jpeg = None                   # カメラ配信なし（JPEG の実測も出ない）
         srv.sub = type("S", (), {"latest": {}})()
         srv._sfl_active = False
-        srv._mcap_proc = None
-        srv._mcap_starting = False
-        srv._video_proc = None
-        srv._video_starting = False
-        srv._video_started_ns = 0
-        srv._video_error = None
-        srv._video_files = []
+        srv._recorder = idle_recorder()
         srv._logger_running = False
-        srv._mcap_started_ns = 0
-        srv._mcap_error = None
         # 自動運転（§8）。**engage していない既定の状態**を組む
         srv._auto_mode = ""
         srv._auto_engaged = False
@@ -1248,22 +1231,10 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._signal_min_lit_frac = 0.02
         srv._publish_signal_config = lambda: None  # バスに触らせない
         srv._save_signal_conf = lambda: None       # ディスクに触らせない
-        # カメラセグメンテーションモデルの選択（`ftg_cam` 用）。**未選択の既定状態**を組む
-        srv._cam_model = ""
-        srv._publish_cam_model = lambda: None      # バスに触らせない
-        srv._save_cam_model_conf = lambda: None    # ディスクに触らせない
-        # E2E LiDARモデルの選択（`e2e_lidar` 用）。`_cam_model` と同じ形
-        srv._e2e_model = ""
-        srv._publish_e2e_model = lambda: None      # バスに触らせない
-        srv._save_e2e_model_conf = lambda: None    # ディスクに触らせない
-        # カメラE2Eモデルの選択（`cam_e2e` 用）。同じ形
-        srv._cam_e2e_model = ""
-        srv._publish_cam_e2e_model = lambda: None  # バスに触らせない
-        srv._e2e_fusion_model = ""
-        srv._publish_e2e_fusion_model = lambda: None
-        srv._stereo_e2e_model = ""
-        srv._publish_stereo_e2e_model = lambda: None
-        srv._save_cam_e2e_model_conf = lambda: None  # ディスクに触らせない
+        # 推論モデルの選択（`MODEL_SLOTS`）。**未選択の既定状態**を組む
+        from raspi.nodes.telemetry.models import MODEL_SLOTS
+        srv._models = {k: "" for k in MODEL_SLOTS}
+        srv._publish_model = lambda slot: None     # バスに触らせない
         srv.sent = []
 
         async def _send_json(ws, obj):

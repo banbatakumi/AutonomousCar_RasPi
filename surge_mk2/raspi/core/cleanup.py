@@ -42,7 +42,11 @@ from collections import deque
 from contextlib import contextmanager
 from typing import Iterator
 
-__all__ = ["quiet_close", "note_cleanup_failure", "recent_failures", "failure_count"]
+from .log import get_logger
+
+__all__ = ["quiet_close", "warn_on_error", "note_cleanup_failure", "recent_failures", "failure_count"]
+
+_log = get_logger("cleanup")
 
 #: 捨てた後始末の記録。**上限つきの環状バッファ。**
 #: 長時間走行で無限に伸びるとそれ自体がメモリリークになる
@@ -70,6 +74,23 @@ def quiet_close(what: str) -> Iterator[None]:
         with _LOCK:
             _COUNT += 1
             _RECENT.append((time.monotonic(), what, f"{type(e).__name__}: {e}"))
+
+
+@contextmanager
+def warn_on_error(what: str) -> Iterator[None]:
+    """**平常の経路で**、失敗しても処理を続けたい所（設定の保存・状態の読み込み）の例外を捨てる。
+
+    `quiet_close` と違い、捨てるたびに**警告を1行出す**（journald に残る）。設定の保存に失敗しても
+    何も出ないと、再起動して設定が消えていても原因を追えない。記録は `recent_failures()` にも残る。
+
+        with warn_on_error("config/auto.json の保存"):
+            atomic_write_bytes(AUTO_CONF, data)
+    """
+    try:
+        yield
+    except Exception as e:
+        note_cleanup_failure(what, e)
+        _log.warning("%s に失敗（続行）: %s: %s", what, type(e).__name__, e)
 
 
 def note_cleanup_failure(what: str, exc: BaseException) -> None:

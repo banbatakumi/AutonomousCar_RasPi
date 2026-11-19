@@ -38,16 +38,15 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.link_tracker import (  # noqa: E402
+from raspi.core.link_tracker import (
     LinkTracker,
     format_status,
     write_status,
 )
-from raspi.proto import packets  # noqa: E402
-from raspi.proto.framing import RxStats  # noqa: E402
-from raspi.rec.framelog import FrameLogReader, Kind  # noqa: E402
+from raspi.proto import packets
+from raspi.proto.framing import RxStats
+from raspi.rec.framelog import FrameLogReader, Kind
 
 __all__ = ["ReplayNode"]
 

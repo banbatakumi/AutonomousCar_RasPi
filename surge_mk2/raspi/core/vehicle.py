@@ -36,11 +36,14 @@ from pathlib import Path
 from .camera_model import FisheyeCalib
 from .stereo_model import StereoCalib
 
-__all__ = ["Vehicle", "DEFAULT_PATH", "resolve_lens", "LENS_NAME_RE",
+__all__ = ["Vehicle", "DEFAULT_PATH", "read_toml", "section", "resolve_lens", "LENS_NAME_RE",
            "CAMERA_DEVICES", "CAMERA_ROLES", "stereo_calib"]
 
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "vehicle.toml"
 GRAVITY = 9.81
+#: 走りの限界を校正していない（`[limits]` が 0）ときに使う控えめな値 [m/s²]。横（`a_lat_max`）と前後（`a_accel_max`・`a_decel_max`）
+UNCALIBRATED_A_LAT_M_S2 = 3.5
+UNCALIBRATED_A_LONG_M_S2 = 2.5
 
 #: レンズ名に使える文字。📷 のファイル名（`surge_front_<lens>_640x360_…png`）に
 #: 入るので `_` は使わせない（校正ツールが名前を区切れなくなる）
@@ -311,23 +314,24 @@ class Vehicle:
 
     @property
     def a_lat_max(self) -> float:
-        """横加速度の限界 [m/s²]（`[limits] a_lat_m_s2`。校正 7 がタイヤの μ から見積もる）。未校正なら 3.5。"""
-        return self.lim_lat_m_s2 if self.lim_lat_m_s2 > 1e-6 else 3.5
+        """横加速度の限界 [m/s²]（`[limits] a_lat_m_s2`。校正 7 がタイヤの μ から見積もる）。未校正なら `UNCALIBRATED_A_LAT_M_S2`。"""
+        return self.lim_lat_m_s2 if self.lim_lat_m_s2 > 1e-6 else UNCALIBRATED_A_LAT_M_S2
 
-    def a_accel_max(self, v: float = 0.0) -> float:
+    @property
+    def a_accel_max(self) -> float:
         """直線を加速できる上限 [m/s²]（正味。`[limits] a_accel_m_s2`。校正 9 が TC を入れた全開の発進で測る）。
 
         目標速度は `speed_ramp_max_m_s2`（Pi が送る `accel_limit` の上限）でならすので、それより上は出ない。
         走行中の学習（`grip.LongLearner`）はこの値から始め、実際に出た値に合わせる。
-        `v` は互換のため（車速による低下は測っていない。2m の直線で出せるのは約 2m/s まで）。"""
-        a = self.lim_accel_m_s2 if self.lim_accel_m_s2 > 1e-6 else 2.5
+        車速による低下は測っていない（2m の直線で出せるのは約 2m/s まで）。"""
+        a = self.lim_accel_m_s2 if self.lim_accel_m_s2 > 1e-6 else UNCALIBRATED_A_LONG_M_S2
         return max(0.05, min(a, self.speed_ramp_max_m_s2))
 
     @property
     def a_decel_max(self) -> float:
         """速度指令を下げたときの減速度の上限 [m/s²]（正味。`[limits] a_brake_m_s2`。校正 9 が車速指令で
         目一杯減速して測る。`brake`＝ABS は使わない）。"""
-        a = self.lim_brake_m_s2 if self.lim_brake_m_s2 > 1e-6 else 2.5
+        a = self.lim_brake_m_s2 if self.lim_brake_m_s2 > 1e-6 else UNCALIBRATED_A_LONG_M_S2
         return max(0.05, min(a, self.speed_ramp_max_m_s2))
 
     @property
@@ -392,13 +396,27 @@ class Vehicle:
             print(f"!! {p} の書式が壊れている（{e}）。全項目を既定値で動く", file=sys.stderr)
             return cls()
         try:
-            return cls._from_dict(d, p)
+            return cls.from_dict(d, p)
         except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
             print(f"!! {p} の値を読めない（{type(e).__name__}: {e}）。既定値で動く", file=sys.stderr)
             return cls()
 
     @classmethod
-    def _from_dict(cls, d: dict, p: Path) -> "Vehicle":
+    def from_toml_text(cls, text: str, source: str = "<text>") -> "Vehicle":
+        """toml の文字列から（記録に残した `vehicle.toml` の控えなど）。**読めなければ例外**
+        （`load` と違って既定値に化けさせない——撮った時の校正値で解析し直す道具が、黙って今の既定値で
+        走ると気づけない）。"""
+        return cls.from_dict(tomllib.loads(text), Path(source))
+
+    @classmethod
+    def from_provenance(cls, run_info: dict) -> "Vehicle | None":
+        """記録のメタデータ（`raspi/rec/provenance.py` の `provenance.vehicle_toml`）から。控えが無ければ None。"""
+        text = (run_info.get("provenance") or {}).get("vehicle_toml")
+        return cls.from_toml_text(text, "<provenance>") if text else None
+
+    @classmethod
+    def from_dict(cls, d: dict, p: Path = Path("<dict>")) -> "Vehicle":
+        """読んだ `vehicle.toml` の dict から。値の型が違えば例外（`TypeError`・`ValueError` など）。"""
 
         dyn = d.get("dynamics", {})
         safety = d.get("safety", {})
@@ -474,3 +492,25 @@ class Vehicle:
             auto_cmd_stale_ms=float(safety.get("auto_cmd_stale_ms", 200.0)),
             _path=p,
         )
+
+
+def read_toml(path: str | Path | None = None) -> dict:
+    """`vehicle.toml` を dict で読む。**読めなければ例外**（`OSError`・`tomllib.TOMLDecodeError`）。
+
+    `Vehicle` の外の値（質量・`[control.plant]`・`[sim]` など、シム・校正の道具だけが使う値）を読む口。
+    **`vehicle.toml` を開くのはここ（と `Vehicle.load`）だけ**にする——道具ごとに `tomllib.load` すると、
+    古い書式への対応や既定値の補い方がファイルごとにずれる。表は `section()` で取り出す。
+    """
+    with open(Path(path) if path else DEFAULT_PATH, "rb") as fp:
+        return tomllib.load(fp)
+
+
+def section(d: dict, *names: str) -> dict:
+    """`d[names[0]][names[1]]...` の表（無ければ空の dict）。表でない値が入っていれば `ValueError`
+    （`[dynamics]` を `dynamics = 1` と書いた等を、黙って既定値で走らせない）。"""
+    cur = d
+    for i, name in enumerate(names):
+        cur = cur.get(name, {})
+        if not isinstance(cur, dict):
+            raise ValueError(f"vehicle.toml の [{'.'.join(names[:i + 1])}] が表ではない: {cur!r}")
+    return cur

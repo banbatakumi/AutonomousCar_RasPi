@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 import threading
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core import cleanup  # noqa: E402
+from raspi.core import cleanup
 
 
 class TestQuietClose(unittest.TestCase):

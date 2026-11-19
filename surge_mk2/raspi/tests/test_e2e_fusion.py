@@ -5,19 +5,16 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.e2e_fusion import E2EFusion, PoseTrack  # noqa: E402
-from raspi.auto.registry import PLANNERS, merged_params  # noqa: E402
-from raspi.core import e2e_fusion_preproc as P  # noqa: E402
-from raspi.msgs import E2EFusionPlan, VehicleState  # noqa: E402
-from raspi.msgs.types import TOPIC_E2E_FUSION_PLAN, TOPIC_TYPES  # noqa: E402
+from raspi.auto.e2e_fusion import E2EFusion, PoseTrack
+from raspi.auto.registry import PLANNERS, merged_params
+from raspi.core import e2e_fusion_preproc as P
+from raspi.msgs import E2EFusionPlan, VehicleState
+from raspi.msgs.types import TOPIC_E2E_FUSION_PLAN, TOPIC_TYPES
 
 NS = 1_000_000_000
 T0 = 5 * NS

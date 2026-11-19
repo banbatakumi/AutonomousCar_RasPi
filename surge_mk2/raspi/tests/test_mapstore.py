@@ -3,16 +3,14 @@
 `slam2d`にもGUIにも触れず、ファイルI/Oだけで完結する。
 """
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto import mapstore  # noqa: E402
+from raspi.auto import mapstore
 
 
 def make_trinary(h=8, w=8) -> np.ndarray:

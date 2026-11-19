@@ -7,20 +7,17 @@
 （`raspi/tests/test_auto.py` の `FakeSub` と同じ流儀）。
 """
 
-import sys
 import time
 import unittest
-from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.e2e_lidar import E2ELidar  # noqa: E402
-from raspi.auto.registry import make_planner  # noqa: E402
-from raspi.msgs import AutoCtrl, AutoState, Scan, VehicleState  # noqa: E402
-from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,  # noqa: E402
-                              TOPIC_SCAN_CAM, TOPIC_VEHICLE_STATE, E2EModelCtrl)
-from raspi.nodes.planning_node import (  # noqa: E402
+from raspi.auto.e2e_lidar import E2ELidar
+from raspi.auto.registry import make_planner
+from raspi.msgs import AutoCtrl, AutoState, Scan, VehicleState
+from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,
+                              TOPIC_SCAN_CAM, TOPIC_VEHICLE_STATE, ModelSelectCtrl)
+from raspi.nodes.planning_node import (
     POLL_MAX_MS, PlanningNode, _poll_timeout_ms, input_topics)
 
 
@@ -596,18 +593,18 @@ class TestE2EModelRouting(unittest.TestCase):
         node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
         fake = _FakeReloadablePlanner()
         node.planner = fake
-        node._apply_e2e_model(E2EModelCtrl(name="alpha"))
+        node._apply_e2e_model(ModelSelectCtrl(name="alpha"))
         self.assertEqual(fake.calls, ["alpha"])
 
     def test_noop_for_planner_without_reload_if_changed(self):
         """`reload_if_changed`を持たない普通のplanner（例: `ftg`）は無視される
         （例外にならないことだけを確認する）。"""
         node = PlanningNode(pub=FakePub(), sub=FakeSub(), mode="ftg")
-        node._apply_e2e_model(E2EModelCtrl(name="alpha"))
+        node._apply_e2e_model(ModelSelectCtrl(name="alpha"))
 
     def test_switching_to_e2e_lidar_applies_cached_model_immediately(self):
         """モード切替直後に、既に届いている`e2e/model`を次のポンプを待たず反映する。"""
-        sub = FakeSub({TOPIC_E2E_MODEL: E2EModelCtrl(name="alpha")})
+        sub = FakeSub({TOPIC_E2E_MODEL: ModelSelectCtrl(name="alpha")})
         node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
         with mock.patch.object(E2ELidar, "reload_if_changed") as m:
             node._apply_ctrl(AutoCtrl(mode="e2e_lidar", engaged=False))

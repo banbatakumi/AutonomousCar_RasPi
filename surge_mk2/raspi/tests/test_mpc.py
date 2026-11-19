@@ -5,19 +5,16 @@
 """
 
 import math
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.registry import PLANNERS  # noqa: E402
-from raspi.nav.mpc import MPCConfig, MPCFollower  # noqa: E402
-from raspi.nav.purepursuit import SteerMap  # noqa: E402
-from raspi.tests.test_laptime import _line, stadium  # noqa: E402
+from raspi.auto.registry import PLANNERS
+from raspi.nav.mpc import MPCConfig, MPCFollower
+from raspi.nav.purepursuit import SteerMap
+from raspi.tests.test_laptime import _line, stadium
 
 L = 0.23
 

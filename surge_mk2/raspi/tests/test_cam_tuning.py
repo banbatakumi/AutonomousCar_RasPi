@@ -14,19 +14,17 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.cam_tuning import (TUNING_DIR, apply_override, check_sensor,  # noqa: E402
+from raspi.core.cam_tuning import (TUNING_DIR, apply_override, check_sensor,
                                    lens_tuning, pick_name, with_custom_exposure)
-from raspi.core.vehicle import DEFAULT_PATH, Vehicle, resolve_lens  # noqa: E402
-from raspi.tools.alsc_calib import GRID, fit_tables, split_bayer  # noqa: E402
+from raspi.core.vehicle import DEFAULT_PATH, Vehicle, resolve_lens
+from raspi.tools.alsc_calib import GRID, fit_tables, split_bayer
 
 try:
     import tomllib

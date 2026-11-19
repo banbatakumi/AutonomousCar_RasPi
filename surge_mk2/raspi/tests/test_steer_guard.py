@@ -6,18 +6,15 @@
 
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.steer_guard import (GIVE_UP, HOLD_S, MAX_TRIPS, PAUSE, PAUSE_MAX_S, RESUME,  # noqa: E402
+from raspi.core.steer_guard import (GIVE_UP, HOLD_S, MAX_TRIPS, PAUSE, PAUSE_MAX_S, RESUME,
                                     RESUME_S, SteerGuard)
-from raspi.nodes.io_node import REARM_STEER_STUCK, IoNode  # noqa: E402
-from raspi.msgs import DriveCmd  # noqa: E402
-from raspi.proto import packets  # noqa: E402
-from raspi.tests.test_io_node_log import FakeLink  # noqa: E402
+from raspi.nodes.io_node import REARM_STEER_STUCK, IoNode
+from raspi.msgs import DriveCmd
+from raspi.proto import packets
+from raspi.tests.test_io_node_log import FakeLink
 
 MS = 1_000_000
 

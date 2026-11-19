@@ -7,17 +7,12 @@ picamera2 が無い開発機（Mac）でも通るように、`CameraWorker`/`Cam
 
 from __future__ import annotations
 
-import io
-import sys
 import unittest
-from contextlib import redirect_stderr
-from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core import cleanup  # noqa: E402
-from raspi.nodes.camera_node import CameraNode, CameraWorker  # noqa: E402
+from raspi.core import cleanup
+from raspi.nodes.camera_node import CameraNode, CameraWorker
 
 
 class _FakeCam:
@@ -162,11 +157,10 @@ class TestConfigLoopLogsOnPollFailure(unittest.TestCase):
         node._cfg_sub = _FakeCfgSub(ConnectionError("ソケットが壊れた"))
         node._cfg_running = True
 
-        buf = io.StringIO()
-        with redirect_stderr(buf):
+        with self.assertLogs("surge.camera", level="WARNING") as logs:
             node._config_loop()                 # 例外を外に投げず、breakして戻ること
 
-        err = buf.getvalue()
+        err = "\n".join(logs.output)
         self.assertIn("cam/config", err)
         self.assertIn("ConnectionError", err)
 

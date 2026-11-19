@@ -4,14 +4,11 @@
 「走ってよいか分からないときは`ready=False`」を各分岐で守れているかを確認する。
 """
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.auto.follow_object import FollowObject  # noqa: E402
-from raspi.msgs.types import TargetTrack  # noqa: E402
+from raspi.auto.follow_object import FollowObject
+from raspi.msgs.types import TargetTrack
 
 
 class TestNotSelected(unittest.TestCase):

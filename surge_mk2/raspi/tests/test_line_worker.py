@@ -5,19 +5,16 @@
 
 import math
 import multiprocessing
-import sys
 import unittest
 from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto import slam2d_raceline as sr  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.nav import centerline as cl_mod  # noqa: E402
-from raspi.nav import raceline as rl  # noqa: E402
+from raspi.auto import slam2d_raceline as sr
+from raspi.core.vehicle import Vehicle
+from raspi.nav import centerline as cl_mod
+from raspi.nav import raceline as rl
 
 RES = 0.025
 

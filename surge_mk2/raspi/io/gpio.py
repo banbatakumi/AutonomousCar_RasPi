@@ -50,7 +50,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from ..core.cleanup import quiet_close
+from ..core.cleanup import note_cleanup_failure, quiet_close
 
 __all__ = [
     "PIN_HEARTBEAT", "PIN_LED_GREEN", "PIN_LED_RED", "PIN_BUZZER",
@@ -118,7 +118,9 @@ def open_output(gpio: int, initial: bool = False):
     """
     try:
         return GpiozeroPin(gpio, initial)
-    except Exception:
+    except Exception as e:
+        # 呼び出し側が警告を出す約束（下の docstring）。理由は記録だけ残す
+        note_cleanup_failure(f"GPIO{gpio} を開く", e)
         return None
 
 
@@ -186,7 +188,9 @@ def open_tone(gpio: int = PIN_BUZZER):
     """トーン出力（周波数可変）を開く。開けなければ `None`（メロディ無しで動き続ける）。"""
     try:
         return GpiozeroTone(gpio)
-    except Exception:
+    except Exception as e:
+        # Mac など無い環境では正常。実機で出たら故障・権限の手がかり（黙らない）
+        print(f"[warn] ブザー（GPIO のトーン出力）を開けない（無しで続行）: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return None
 
 

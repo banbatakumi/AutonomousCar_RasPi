@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import math
 
-import tomllib
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+
+from raspi.core.vehicle import read_toml, section
 
 from .fw import HostPlant
 
@@ -104,9 +105,8 @@ class Plant:
     @classmethod
     def load(cls, toml_path: str | Path = DEFAULT_TOML) -> "Plant":
         """`vehicle.toml` の実測（質量・`[dynamics]`・`[control.plant]`）で机上値を上書きする。"""
-        with open(toml_path, "rb") as f:
-            d = tomllib.load(f)
-        dyn = d.get("dynamics", {})
+        d = read_toml(toml_path)
+        dyn = section(d, "dynamics")
         over: dict[str, float] = {}
         if "mass" in d:
             over["mass_kg"] = float(d["mass"])
@@ -119,7 +119,7 @@ class Plant:
         if dyn.get("mu"):
             over["lateral_accel_max_m_s2"] = float(dyn["mu"]) * 9.80665
         names = {f.name for f in fields(cls)}
-        for k, v in d.get("control", {}).get("plant", {}).items():
+        for k, v in section(d, "control", "plant").items():
             if k in names and isinstance(v, (int, float)):
                 over[k] = float(v)
         return replace(cls(), **over).in_command_units(torque_scale_of(d))
@@ -139,8 +139,8 @@ class Plant:
 def torque_scale_of(d: dict) -> float:
     """読んだ `vehicle.toml` から k（G・後輪の慣性・質量のどれかが無ければ nan）。"""
     from tools.calib.torque_scale import torque_scale
-    G = d.get("dynamics", {}).get("speed_plant_gain")
-    J = d.get("control", {}).get("plant", {}).get("wheel_inertia_kgm2")
+    G = section(d, "dynamics").get("speed_plant_gain")
+    J = section(d, "control", "plant").get("wheel_inertia_kgm2")
     m = d.get("mass")
     if not all(isinstance(x, (int, float)) for x in (G, J, m)):
         return float("nan")

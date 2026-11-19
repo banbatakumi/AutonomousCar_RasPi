@@ -42,9 +42,9 @@ __all__ = [
     "TOPIC_AUTO_CTRL", "TOPIC_AUTO_CMD", "TOPIC_AUTO_STATE", "TOPIC_AUTO_MAP",
     "RouteSelect", "TOPIC_ROUTE_SELECT",
     "SignalConfig", "TOPIC_SIGNAL_CONFIG", "ArrowSignalStatus", "TOPIC_SIGNAL_STATUS",
-    "TOPIC_UI_EVENT", "CamModelCtrl", "TOPIC_CAM_MODEL", "E2EModelCtrl", "TOPIC_E2E_MODEL",
-    "CamE2EModelCtrl", "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
-    "E2EFusionPlan", "TOPIC_E2E_FUSION_PLAN", "E2EFusionModelCtrl", "TOPIC_E2E_FUSION_MODEL",
+    "TOPIC_UI_EVENT", "ModelSelectCtrl", "TOPIC_CAM_MODEL", "TOPIC_E2E_MODEL",
+    "TOPIC_CAM_E2E_MODEL", "CamE2ECmd", "TOPIC_CAM_E2E_CMD",
+    "E2EFusionPlan", "TOPIC_E2E_FUSION_PLAN", "TOPIC_E2E_FUSION_MODEL",
     "TargetRoiCtrl", "TOPIC_TRACK_ROI", "TargetTrack", "TOPIC_TRACK_TARGET",
     "StereoDepth", "StereoInfo", "TOPIC_SCAN_STEREO", "TOPIC_STEREO_DEPTH", "TOPIC_STEREO_INFO",
     "StereoDisp", "TOPIC_STEREO_DISP", "TOPIC_STEREO_E2E_PLAN", "TOPIC_STEREO_E2E_MODEL",
@@ -125,11 +125,11 @@ TOPIC_CAM_CONFIG = "cam/config"
 #: が拾って ONNX 推論セッションを作り直す。**`scan/cam`（推論の出力）とは別物**
 TOPIC_CAM_MODEL = "cam/model"
 #: `e2e_lidar`（`raspi/auto/e2e_lidar.py`）が使うモデルの選択。`cam/model`と同じ
-#: 「意思を繰り返し流す」パターン（下記 `E2EModelCtrl` 参照）
+#: 「意思を繰り返し流す」パターン（下記 `ModelSelectCtrl` 参照）
 TOPIC_E2E_MODEL = "e2e/model"
 
 #: `cam_e2e_node.py` が使う画像→操舵直接回帰モデルの選択。`cam/model`/`e2e/model`と
-#: 同じ「意思を繰り返し流す」パターン（下記 `CamE2EModelCtrl` 参照）。
+#: 同じ「意思を繰り返し流す」パターン（下記 `ModelSelectCtrl` 参照）。
 #: **カメラ用セグメンテーション（`cam/model`）とは別トピック**——前処理・出力の
 #: 契約が全く違うモデルを同じ選択欄に混ぜると選び間違いの温床になる
 #: （`raspi/auto/e2e_lidar.py` が `models/e2e_lidar/` をカメラ用と分けた理由と同じ）
@@ -145,7 +145,7 @@ TOPIC_E2E_FUSION_MODEL = "e2e_fusion/model"
 #: `stereo_e2e_node.py` が publish する推論結果（型は `E2EFusionPlan` と同じ。前方の経路点）。
 #: `raspi/auto/stereo_e2e.py`（id `stereo_e2e`）の `input_topic`
 TOPIC_STEREO_E2E_PLAN = "stereo_e2e/plan"
-#: `stereo_e2e_node.py` が使うモデルの選択（型は `E2EFusionModelCtrl` と同じ）
+#: `stereo_e2e_node.py` が使うモデルの選択（`ModelSelectCtrl`）
 TOPIC_STEREO_E2E_MODEL = "stereo_e2e/model"
 
 #: 対象追従（`follow_object`）のROI選択の意思。GUIがドラッグ矩形で選んだ対象を
@@ -976,10 +976,10 @@ class UiEvent(MsgBase):
 
 class CamConfig(MsgBase):
     """camera_node への capture 側の希望設定。`AutoCtrl`/ファンと同じく
-    **「現在の意思」を繰り返し流す**（telemetry_node の `_cam_config_pump`）。
+    **「現在の意思」を繰り返し流す**（telemetry_node の `_resend_cam_config`）。
 
     一度きりの `UiEvent` にしなかったのは、camera_node が再起動したときに
-    1秒以内で最新の意思に復帰させたいため（`_fan_pump`/`_auto_ctrl_pump` と同じ理由）。
+    1秒以内で最新の意思に復帰させたいため（`_reapply_fan`/周期送信（`_periodic_jobs`） と同じ理由）。
 
     左カメラは独自の fps を持たない（同期する間は主カメラと同じ `front_fps`、それ以外は止める）。
     カメラを使う自動運転モードで engage 中は telemetry_node 側が `front_fps` を上限まで引き上げる
@@ -1006,48 +1006,23 @@ class CamConfig(MsgBase):
     depth_fps: float = 10.0
 
 
-class CamModelCtrl(MsgBase):
-    """`cam_perception_node` への「このモデルを使ってほしい」という意思。
+class ModelSelectCtrl(MsgBase):
+    """推論ノード・planner への「このモデルを使ってほしい」という意思（モデルの選択はどれもこの形）。
 
-    `CamConfig` と同じく**「現在の意思」を繰り返し流す**（telemetry_node の
-    `_cam_model_pump`）——cam_perception_node が再起動しても、GUI で何も
-    操作しないまま数秒で最新の意思に復帰させたい。
+    **「現在の意思」を繰り返し流す**（telemetry_node の周期送信）——受け手が再起動しても、GUI で何も
+    操作しないまま数秒で最新の意思に復帰させたい。`name` は各置き場の `<name>.onnx`（＋同名の `.json`。
+    前処理の契約。各 `export_onnx.py` が書く）を指す。
 
-    `name` は `models/<name>.onnx`（+ 同名の `.json`。前処理設定。
-    `ml_cam/export_onnx.py` が書く）を指す。**空文字は「未選択」**——
-    cam_perception_node はモデルを持たないまま `scan/cam` を「壁」扱いで
-    出し続ける（`follow_the_gap_cam.py` 側の `MIN_SEEN_RATIO` で自然に停止する）。
-    """
+    | トピック | 受け手 | 置き場 | 空文字の意味 |
+    |---|---|---|---|
+    | `cam/model` | cam_perception_node（セグメンテーション、`ml_cam`） | `models/seg/` | 未選択（`scan/cam` を「壁」扱いで出し続け、`ftg_cam` は自然に止まる） |
+    | `e2e/model` | planning_node の `e2e_lidar`（`ml_lidar`） | `models/e2e_lidar/` | 未選択（`ready=False` のまま） |
+    | `cam_e2e/model` | cam_e2e_node（`ml_cam_e2e`） | `models/cam_e2e/` | 未選択 |
+    | `e2e_fusion/model` | e2e_fusion_node（`ml_e2e`） | `models/e2e_fusion/` | **自動**（いちばん新しいモデル） |
+    | `stereo_e2e/model` | stereo_e2e_node（`ml_stereo_e2e`） | `models/stereo_e2e/` | **自動** |
 
-    name: str = ""
-
-
-class E2EModelCtrl(MsgBase):
-    """`planning_node`（`e2e_lidar`エンゲージ中）への「このモデルを使ってほしい」意思。
-
-    `CamModelCtrl`と同じ設計: **「現在の意思」を繰り返し流す**
-    （telemetry_node の `_e2e_model_pump`）。`name`は`models/e2e_lidar/<name>.onnx`
-    （+ 同名の`.json`。`ml_lidar/export_onnx_rl.py`が書く）を指す。**空文字は
-    「未選択」**——`E2ELidar`はモデルを持たないまま`ready=False`を返し続ける。
-
-    カメラ用モデル（`models/`直下、`cam/model`）とは**別ディレクトリ**
-    （`models/e2e_lidar/`）に置く。同じ`models/`に混ぜると、GUIの一覧に
-    カメラ用とLiDAR用のモデルが混在してしまうため
-    （前処理契約が全く違うので、選び間違えると壊れた入力を渡すことになる）。
-    """
-
-    name: str = ""
-
-
-class CamE2EModelCtrl(MsgBase):
-    """`cam_e2e_node.py` への「このモデルを使ってほしい」という意思。
-
-    `CamModelCtrl`/`E2EModelCtrl` と同じ設計（現在の意思を繰り返し流す）。
-    `name` は `models/cam_e2e/<name>.onnx`（+ 同名の `.json`。
-    `ml_cam_e2e/export_onnx.py` が書く）を指す。**セグメンテーション用
-    （`models/` 直下）とは置き場を分ける**——前処理契約も出力も違うので、
-    同じ一覧に並ぶと選び間違えたときに壊れた入力を渡すことになる
-    （`E2EModelCtrl` と同じ理由）。空文字は「未選択」。
+    **置き場はモデルの種類ごとに分ける。** 前処理の契約も出力も違うので、同じ一覧に並ぶと選び間違えた
+    ときに壊れた入力を渡すことになる。
     """
 
     name: str = ""
@@ -1070,17 +1045,6 @@ class CamE2ECmd(MsgBase):
     speed_norm: float = 0.0        #: モデル出力（sigmoid、0..1）。`model_speed_ref` を掛けて速度にする
     model_max_steer: float = 0.0   #: [rad] エクスポート時の契約値（0ならモデル未選択）
     model_speed_ref: float = 0.0   #: [m/s] 同上。`speed_norm=1` が表す速度
-
-
-class E2EFusionModelCtrl(MsgBase):
-    """`e2e_fusion_node.py` への「このモデルを使ってほしい」という意思（`CamE2EModelCtrl` と同じ設計）。
-
-    `name` は `models/e2e_fusion/<name>.onnx`（＋同名の `.json`。`ml_e2e/export_onnx.py` が書く）。
-    **空文字は「自動」**: ノードが `models/e2e_fusion/` のいちばん新しいモデルを使う
-    （他のモデル選択の空文字は「未選択」で走らないが、ここは選ばなくても走れるようにしてある）。
-    """
-
-    name: str = ""
 
 
 class E2EFusionPlan(MsgBase):
@@ -1110,7 +1074,7 @@ class E2EFusionPlan(MsgBase):
 
 class TargetRoiCtrl(MsgBase):
     """GUIがドラッグ矩形で選んだ追従対象の意思。**telemetry_node が送り続け、
-    `cam_track_node.py` が従う**（`AutoCtrl`/`CamModelCtrl` と同じ「現在の意思を
+    `cam_track_node.py` が従う**（`AutoCtrl`/`ModelSelectCtrl` と同じ「現在の意思を
     繰り返し流す」パターン——1回だけ送ると、cam_track_node の再起動や
     取りこぼしで選択が食い違ったままになる）。
 
@@ -1316,14 +1280,14 @@ TOPIC_TYPES: dict[str, type[MsgBase]] = {
     TOPIC_SIGNAL_STATUS: ArrowSignalStatus,
     TOPIC_UI_EVENT: UiEvent,
     TOPIC_CAM_CONFIG: CamConfig,
-    TOPIC_CAM_MODEL: CamModelCtrl,
-    TOPIC_E2E_MODEL: E2EModelCtrl,
-    TOPIC_CAM_E2E_MODEL: CamE2EModelCtrl,
+    TOPIC_CAM_MODEL: ModelSelectCtrl,
+    TOPIC_E2E_MODEL: ModelSelectCtrl,
+    TOPIC_CAM_E2E_MODEL: ModelSelectCtrl,
     TOPIC_CAM_E2E_CMD: CamE2ECmd,
     TOPIC_E2E_FUSION_PLAN: E2EFusionPlan,
-    TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl,
+    TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl,
     TOPIC_STEREO_E2E_PLAN: E2EFusionPlan,
-    TOPIC_STEREO_E2E_MODEL: E2EFusionModelCtrl,
+    TOPIC_STEREO_E2E_MODEL: ModelSelectCtrl,
     TOPIC_TRACK_ROI: TargetRoiCtrl,
     TOPIC_TRACK_TARGET: TargetTrack,
 }

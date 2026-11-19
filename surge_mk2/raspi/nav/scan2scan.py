@@ -66,6 +66,7 @@ import numpy as np
 
 from . import native as _native
 from .deskew import Points
+from .se2 import wrap_angle
 
 #: 方位の表と対応探しを C で回す（`nav/native.py`）。`False` なら numpy 版（テストが比べる）
 USE_NATIVE = True
@@ -229,7 +230,7 @@ def match_scans(prev: Points, cur: Points,
         lam_t = (RESID_SIGMA / max(prior_xy, 1e-6)) ** 2
         lam_r = (RESID_SIGMA / max(prior_yaw * LEVER, 1e-6)) ** 2
         lam = np.array([lam_t, lam_t, lam_r])
-        dev = np.array([tx - guess[0], ty - guess[1], _wrap(th - guess[2])])
+        dev = np.array([tx - guess[0], ty - guess[1], wrap_angle(th - guess[2])])
         ata[0, 0] += lam[0]
         ata[1, 1] += lam[1]
         ata[2, 2] += lam[2]
@@ -248,8 +249,6 @@ def match_scans(prev: Points, cur: Points,
             break
 
     ok = inlier >= 0.5 and residual < max_pair * 0.5
-    return Delta(tx, ty, _wrap(th), inlier, residual, ok)
+    return Delta(tx, ty, wrap_angle(th), inlier, residual, ok)
 
 
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2.0 * math.pi) - math.pi

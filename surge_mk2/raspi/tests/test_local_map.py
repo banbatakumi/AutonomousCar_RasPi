@@ -13,16 +13,13 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.nav.deskew import deskew  # noqa: E402
-from raspi.nav.local_map import LocalMap, footprint_circles  # noqa: E402
+from raspi.nav.deskew import deskew
+from raspi.nav.local_map import LocalMap, footprint_circles
 
-from .test_nav import make_room_scan  # noqa: E402
+from .test_nav import make_room_scan
 
 #: `config/vehicle.toml` の実測値と同じ形
 FOOTPRINT = [(0.30, 0.09), (0.30, -0.09), (-0.07, -0.09), (-0.07, 0.09)]

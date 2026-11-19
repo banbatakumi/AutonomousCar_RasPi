@@ -7,20 +7,17 @@
 
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.link_tracker import (  # noqa: E402
+from raspi.core.link_tracker import (
     TELEM_DEGRADED_NS,
     TELEM_FAULT_NS,
     LinkTracker,
     format_status,
 )
-from raspi.core.link_tracker import _MAX_PENDING_PINGS  # noqa: E402
-from raspi.proto import packets  # noqa: E402
+from raspi.core.link_tracker import _MAX_PENDING_PINGS
+from raspi.proto import packets
 
 MS = 1_000_000
 

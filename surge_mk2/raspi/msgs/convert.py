@@ -78,6 +78,11 @@ MAX_BRAKE_TORQUE_NM = 0.15
 #: `tools/fwsim/tests/test_fw_constants.py` が突き合わせる
 MAX_TARGET_TORQUE_NM = 0.15
 
+#: STM32 から `LIMITS` が届くまでの最高速度の仮値 [m/s]。io_node へは `raspi/setup/install_services.sh` の
+#: `--max-speed` で渡り（`raspi/tests/test_generated_limits.py` が一致を確かめる）、GUI へは
+#: `config/generate.py` が `gui/src/generated/vehicle.ts` の `DRIVE_FALLBACK` に写す
+FALLBACK_MAX_SPEED_M_S = 3.0
+
 #: 立っていたら名前で持ち回る fault。ビットのまま流すと GUI 側で意味を再定義する羽目になる
 FAULT_FLAGS = {
     "drive_overcurrent": packets.FLG_FAULT_DRIVE_OVERCURRENT,

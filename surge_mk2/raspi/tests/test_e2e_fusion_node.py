@@ -6,26 +6,24 @@
 
 import json
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
 try:
-    import onnx  # noqa: E402
-    from onnx import TensorProto, helper, numpy_helper  # noqa: E402
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
 except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの道具。Pi には入れない
     raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
-from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, PREPROC_VERSION_STEREO, STEREO_CAMS  # noqa: E402
-from raspi.core.e2e_fusion_preproc import PREPROC_VERSION  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import Scan, VehicleState  # noqa: E402
-from raspi.nodes.e2e_fusion_node import E2EFusionNode, load_model, pick_model_name  # noqa: E402
+from raspi.core.cam_e2e_preproc import PREPROC_VERSION_CROP, PREPROC_VERSION_STEREO, STEREO_CAMS
+from raspi.core.e2e_fusion_preproc import PREPROC_VERSION
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import Scan, VehicleState
+from raspi.nodes.e2e_fusion_node import E2EFusionNode, load_model, pick_model_name
 
 NS = 1_000_000_000
 K, W, H, FOV, HIST = 4, 32, 16, 90, 3
@@ -235,41 +233,41 @@ class TestModelChoiceInRun(_Tmp):
         return [m for t, m in pub.sent if t == TOPIC_E2E_FUSION_PLAN]
 
     def test_auto_picks_the_newest_while_idle(self):
-        from raspi.msgs import E2EFusionModelCtrl
+        from raspi.msgs import ModelSelectCtrl
         from raspi.msgs.types import TOPIC_E2E_FUSION_MODEL
 
-        plans = self._spin({TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="")})
+        plans = self._spin({TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl(name="")})
         self.assertEqual(self.node.model_name, "new")
         self.assertTrue(plans and not plans[-1].ready)              # モードが選ばれていないので推論しない
 
     def test_gui_choice_wins_over_the_newest(self):
-        from raspi.msgs import E2EFusionModelCtrl
+        from raspi.msgs import ModelSelectCtrl
         from raspi.msgs.types import TOPIC_E2E_FUSION_MODEL
 
-        self._spin({TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="old")})
+        self._spin({TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl(name="old")})
         self.assertEqual(self.node.model_name, "old")
         # 「自動」に戻すと最新へ
         self.node._failed_key = None
-        self._spin({TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="")})
+        self._spin({TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl(name="")})
         self.assertEqual(self.node.model_name, "new")
 
     def test_gui_choice_switches_even_while_active_but_auto_does_not(self):
-        from raspi.msgs import AutoCtrl, E2EFusionModelCtrl
+        from raspi.msgs import AutoCtrl, ModelSelectCtrl
         from raspi.msgs.types import TOPIC_AUTO_CTRL, TOPIC_E2E_FUSION_MODEL, TOPIC_VEHICLE_STATE
 
         active = {TOPIC_AUTO_CTRL: AutoCtrl(mode="e2e_fusion"), TOPIC_VEHICLE_STATE: VehicleState(armed=True)}
-        self._spin({**active, TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="")})
+        self._spin({**active, TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl(name="")})
         self.assertEqual(self.node.model_name, "", "推論中に「自動」で勝手にモデルを読んだ")
-        self._spin({**active, TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="old")})
+        self._spin({**active, TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl(name="old")})
         self.assertEqual(self.node.model_name, "old")
 
     def test_fixed_model_ignores_the_gui(self):
-        from raspi.msgs import E2EFusionModelCtrl
+        from raspi.msgs import ModelSelectCtrl
         from raspi.msgs.types import TOPIC_E2E_FUSION_MODEL
         from raspi.tests.fakes import FakePub, FakeSub
 
         self.node.reload_if_changed("old")
-        self.node.run(sub=FakeSub({TOPIC_E2E_FUSION_MODEL: E2EFusionModelCtrl(name="new")}), pub=FakePub(),
+        self.node.run(sub=FakeSub({TOPIC_E2E_FUSION_MODEL: ModelSelectCtrl(name="new")}), pub=FakePub(),
                       duration_s=0.1, fixed_model=True)
         self.assertEqual(self.node.model_name, "old")
 

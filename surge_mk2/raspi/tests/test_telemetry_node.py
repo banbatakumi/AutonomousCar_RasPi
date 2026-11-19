@@ -1,28 +1,26 @@
 """`raspi/nodes/telemetry_node.py`のうち、`self`に依存しない純粋な部分だけを狙って
 テストする。`TelemetryServer`本体はソケット類を抱えて重く、軽量に構築する口が
 無いので、対象を「`self`を一切使わないメソッド」に絞ってある
-（`_e2e_models_list`は`TelemetryServer._e2e_models_list(None)`のように未束縛でも
-呼べる）。
 """
 
 import asyncio
 import json
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-import raspi.nodes.telemetry_node as tn  # noqa: E402
-from raspi.auto import mapstore  # noqa: E402
-from raspi.msgs import AutoMap, AutoState, VehicleState  # noqa: E402
-from raspi.msgs.types import TOPIC_AUTO_MAP, TOPIC_AUTO_STATE  # noqa: E402
-from raspi.nav.grid import OccGrid, pack_trinary  # noqa: E402
+from raspi.tests.fakes import idle_recorder
+
+import raspi.nodes.telemetry_node as tn
+from raspi.auto import mapstore
+from raspi.msgs import AutoMap, AutoState, VehicleState
+from raspi.msgs.types import TOPIC_AUTO_MAP, TOPIC_AUTO_STATE
+from raspi.nav.grid import OccGrid, pack_trinary
 
 
 class TestDecodeCmdRejectsNonFinite(unittest.TestCase):
@@ -51,219 +49,35 @@ class TestDecodeCmdRejectsNonFinite(unittest.TestCase):
             self._decode(type="cmd", accel_limit=float("inf"))
 
 
-class TestAtomicWriteBytes(unittest.TestCase):
-    """★ C4: 設定JSONの書き込みが `os.replace()` でアトミックであること。"""
+class TestModelSlots(unittest.TestCase):
+    """推論モデルの選択（`telemetry/models.py` の `MODEL_SLOTS`）。一覧・選択・保存・engage の解除を
+    全種類で同じように確かめる（以前は種類ごとにコピーした実装とテストが5組あった）。"""
 
-    def test_writes_the_content(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "sub" / "auto.json"
-            tn._atomic_write_bytes(path, b'{"mode":"ftg"}')
-            self.assertEqual(path.read_bytes(), b'{"mode":"ftg"}')
-
-    def test_failure_mid_write_does_not_corrupt_existing_file(self):
-        """途中で例外が起きても、既存ファイルの中身は古いまま保たれること。
-
-        `os.fdopen(...).write()` が例外を投げても、`os.replace()` に
-        到達しないので元ファイルは触られない——tmpファイルへの直書きだけが
-        失敗するアトミック置換の要点。
-        """
+    def setUp(self) -> None:
         from unittest import mock
 
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "auto.json"
-            path.write_bytes(b'{"mode":"old"}')
-
-            with mock.patch("os.replace", side_effect=RuntimeError("boom")):
-                with self.assertRaises(RuntimeError):
-                    tn._atomic_write_bytes(path, b'{"mode":"new"}')
-
-            self.assertEqual(path.read_bytes(), b'{"mode":"old"}')
-
-    def test_no_leftover_tmp_file_on_success(self):
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "auto.json"
-            tn._atomic_write_bytes(path, b"{}")
-            leftovers = [p for p in Path(td).iterdir() if p.name != "auto.json"]
-            self.assertEqual(leftovers, [])
-
-
-class TestE2eModelsListNote(unittest.TestCase):
-    """`_e2e_models_list()`が`<名前>.json`の`note`（`ml_lidar/export_onnx_rl.py`が
-    書く自由記述の備考）を拾って返すことを確認する。"""
-
-    def setUp(self) -> None:
-        self._orig_dir = tn.E2E_MODELS_DIR
         self._tmp = tempfile.TemporaryDirectory()
-        tn.E2E_MODELS_DIR = Path(self._tmp.name)
-        self.addCleanup(self._cleanup)
-
-    def _cleanup(self) -> None:
-        tn.E2E_MODELS_DIR = self._orig_dir
-        self._tmp.cleanup()
-
-    def _by_name(self, files: list[dict]) -> dict[str, dict]:
-        return {f["name"]: f for f in files}
-
-    def test_reads_note_from_sibling_json(self) -> None:
-        d = tn.E2E_MODELS_DIR
-        (d / "v1.onnx").write_bytes(b"dummy")
-        (d / "v1.json").write_text(json.dumps({"note": "グリップ限界+報酬改善版"}))
-
-        result = tn.TelemetryServer._e2e_models_list(None)
-        files = self._by_name(result["e2e_model_files"])
-        self.assertEqual(files["v1"]["note"], "グリップ限界+報酬改善版")
-        self.assertTrue(files["v1"]["has_config"])
-
-    def test_missing_json_gives_empty_note(self) -> None:
-        d = tn.E2E_MODELS_DIR
-        (d / "v2.onnx").write_bytes(b"dummy")
-
-        result = tn.TelemetryServer._e2e_models_list(None)
-        files = self._by_name(result["e2e_model_files"])
-        self.assertEqual(files["v2"]["note"], "")
-        self.assertFalse(files["v2"]["has_config"])
-
-    def test_corrupt_json_gives_empty_note_without_crashing(self) -> None:
-        d = tn.E2E_MODELS_DIR
-        (d / "v3.onnx").write_bytes(b"dummy")
-        (d / "v3.json").write_text("{ not json")
-
-        result = tn.TelemetryServer._e2e_models_list(None)
-        files = self._by_name(result["e2e_model_files"])
-        self.assertEqual(files["v3"]["note"], "")
-        self.assertTrue(files["v3"]["has_config"])   # ファイルは在る（壊れているだけ）
-
-    def test_json_without_note_field_gives_empty_note(self) -> None:
-        d = tn.E2E_MODELS_DIR
-        (d / "v4.onnx").write_bytes(b"dummy")
-        (d / "v4.json").write_text(json.dumps({"max_speed": 1.5}))
-
-        result = tn.TelemetryServer._e2e_models_list(None)
-        files = self._by_name(result["e2e_model_files"])
-        self.assertEqual(files["v4"]["note"], "")
-
-
-
-class TestCamE2eModelSelection(unittest.TestCase):
-    """カメラE2E（`cam_e2e`）のモデル選択。一覧・選択・保存・engage の解除。
-
-    以前は `cam_e2e/model` を publish するコードが無く、GUI から選べなかった。
-    """
-
-    def setUp(self) -> None:
-        self._orig = (tn.CAM_E2E_MODELS_DIR, tn.CAM_E2E_MODEL_CONF)
-        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
-        tn.CAM_E2E_MODELS_DIR = root / "models" / "cam_e2e"
-        tn.CAM_E2E_MODELS_DIR.mkdir(parents=True)
-        tn.CAM_E2E_MODEL_CONF = root / "cam_e2e_model.json"
-        for name in ("v1", "v2"):
-            (tn.CAM_E2E_MODELS_DIR / f"{name}.onnx").write_bytes(b"dummy")
-        (tn.CAM_E2E_MODELS_DIR / "v1.json").write_text(json.dumps({"note": "屋内コース"}))
-        self.addCleanup(self._cleanup)
+        self.orig = {k: (s.models_dir, s.conf_path) for k, s in tn.MODEL_SLOTS.items()}
+        for key, slot in tn.MODEL_SLOTS.items():
+            d = root / "models" / key
+            d.mkdir(parents=True)
+            for name in ("v1", "v2"):
+                (d / f"{name}.onnx").write_bytes(b"dummy")
+            (d / "v1.json").write_text(json.dumps({"note": f"{key} の備考"}))
+            (d / "v2.json").write_text("{ not json")
+            for attr, val in (("models_dir", d), ("conf_path", root / f"{key}.json")):
+                p = mock.patch.object(slot, attr, val)
+                p.start()
+                self.addCleanup(p.stop)
 
-    def _cleanup(self) -> None:
-        tn.CAM_E2E_MODELS_DIR, tn.CAM_E2E_MODEL_CONF = self._orig
-        self._tmp.cleanup()
-
-    def _server(self, *, mode="cam_e2e", engaged=True):
-        class Pub:
-            def __init__(self):
-                self.sent = []
-
-            def send(self, topic, msg):
-                self.sent.append((topic, msg))
-
-        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
-        srv.pub = Pub()
-        srv._cam_e2e_model = ""
-        srv._auto_engaged = engaged
-        srv._auto_mode = mode
-        srv.auto_ctrl_published = 0
-
-        def _publish_auto_ctrl():
-            srv.auto_ctrl_published += 1
-        srv._publish_auto_ctrl = _publish_auto_ctrl
-        return srv
-
-    def test_list_uses_its_own_key_and_carries_the_note(self) -> None:
-        result = tn.TelemetryServer._cam_e2e_models_list(None)
-        self.assertEqual(result["type"], "cam_e2e_models")
-        files = {f["name"]: f for f in result["cam_e2e_model_files"]}
-        self.assertEqual(sorted(files), ["v1", "v2"])
-        self.assertEqual(files["v1"]["note"], "屋内コース")
-        self.assertFalse(files["v2"]["has_config"])
-
-    def test_select_publishes_saves_and_drops_engage(self) -> None:
-        srv = self._server()
-        srv._on_cam_e2e_model({"name": "v1"})
-
-        self.assertEqual(srv._cam_e2e_model, "v1")
-        self.assertEqual(srv._cam_e2e_model_status(), {"name": "v1"})
-        sent = [m for t, m in srv.pub.sent if t == tn.TOPIC_CAM_E2E_MODEL]
-        self.assertEqual([m.name for m in sent], ["v1"])
-        self.assertFalse(srv._auto_engaged, "モデルを変えたのに engage が残っている")
-        self.assertEqual(srv.auto_ctrl_published, 1)
-        self.assertEqual(json.loads(tn.CAM_E2E_MODEL_CONF.read_text()), {"name": "v1"})
-
-    def test_other_modes_keep_their_engage(self) -> None:
-        srv = self._server(mode="slam2d")
-        srv._on_cam_e2e_model({"name": "v1"})
-        self.assertTrue(srv._auto_engaged)
-
-    def test_unknown_name_is_ignored(self) -> None:
-        srv = self._server()
-        srv._on_cam_e2e_model({"name": "../../etc/passwd"})
-        srv._on_cam_e2e_model({"name": "no-such"})
-        self.assertEqual(srv._cam_e2e_model, "")
-        self.assertEqual(srv.pub.sent, [])
-        self.assertTrue(srv._auto_engaged)
-
-    def test_saved_selection_comes_back_only_if_the_file_still_exists(self) -> None:
-        srv = self._server()
-        tn.CAM_E2E_MODEL_CONF.write_text(json.dumps({"name": "v2"}))
-        srv._load_cam_e2e_model_conf()
-        self.assertEqual(srv._cam_e2e_model, "v2")
-
-        srv._cam_e2e_model = ""
-        tn.CAM_E2E_MODEL_CONF.write_text(json.dumps({"name": "deleted"}))
-        srv._load_cam_e2e_model_conf()
-        self.assertEqual(srv._cam_e2e_model, "")
-
-    def test_engaging_cam_e2e_raises_the_front_camera_rate(self) -> None:
-        self.assertIn("cam_e2e", tn.CAMERA_AUTO_MODES)
-
-    def test_models_dir_matches_the_node(self) -> None:
-        """一覧を出す場所と、ノードが読みに行く場所が同じであること。"""
-        from raspi.nodes import cam_e2e_node
-        self.assertEqual(self._orig[0], cam_e2e_node.DEFAULT_MODELS_DIR)
-
-
-class TestE2eFusionModelSelection(unittest.TestCase):
-    """E2E 融合（`e2e_fusion`）のモデル選択。`cam_e2e` と同じ形だが、空の名前は「自動」。"""
-
-    def setUp(self) -> None:
-        self._orig = (tn.E2E_FUSION_MODELS_DIR, tn.E2E_FUSION_MODEL_CONF)
-        self._tmp = tempfile.TemporaryDirectory()
-        root = Path(self._tmp.name)
-        tn.E2E_FUSION_MODELS_DIR = root / "models" / "e2e_fusion"
-        tn.E2E_FUSION_MODELS_DIR.mkdir(parents=True)
-        tn.E2E_FUSION_MODEL_CONF = root / "e2e_fusion_model.json"
-        for name in ("v1", "v2"):
-            (tn.E2E_FUSION_MODELS_DIR / f"{name}.onnx").write_bytes(b"dummy")
-        (tn.E2E_FUSION_MODELS_DIR / "v1.json").write_text(json.dumps({"note": "会場のコース"}))
-        self.addCleanup(self._cleanup)
-
-    def _cleanup(self) -> None:
-        tn.E2E_FUSION_MODELS_DIR, tn.E2E_FUSION_MODEL_CONF = self._orig
-        self._tmp.cleanup()
-
-    def _server(self, *, mode="e2e_fusion", engaged=True):
+    def _server(self, *, mode: str, engaged: bool = True):
         from raspi.tests.fakes import FakePub
 
         srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
         srv.pub = FakePub()
-        srv._e2e_fusion_model = ""
+        srv._models = {k: "" for k in tn.MODEL_SLOTS}
         srv._auto_engaged = engaged
         srv._auto_mode = mode
         srv.auto_ctrl_published = 0
@@ -274,168 +88,89 @@ class TestE2eFusionModelSelection(unittest.TestCase):
         return srv
 
     def test_list_uses_its_own_key_and_carries_the_note(self) -> None:
-        result = tn.TelemetryServer._e2e_fusion_models_list(None)
-        self.assertEqual(result["type"], "e2e_fusion_models")
-        files = {f["name"]: f for f in result["e2e_fusion_model_files"]}
-        self.assertEqual(sorted(files), ["v1", "v2"])
-        self.assertEqual(files["v1"]["note"], "会場のコース")
-        self.assertFalse(files["v2"]["has_config"])
+        for key, slot in tn.MODEL_SLOTS.items():
+            with self.subTest(key):
+                msg = slot.list_message()
+                self.assertEqual(msg["type"], f"{key}s")
+                files = {f["name"]: f for f in msg[f"{key}_files"]}
+                self.assertEqual(sorted(files), ["v1", "v2"])
+                self.assertEqual(files["v1"]["note"], f"{key} の備考")
+                self.assertEqual(files["v2"]["note"], "")         # 壊れた json でも一覧は壊さない
+                self.assertTrue(files["v2"]["has_config"])
 
-    def test_select_publishes_saves_and_drops_engage(self) -> None:
-        srv = self._server()
-        srv._on_e2e_fusion_model({"name": "v1"})
-        self.assertEqual(srv._e2e_fusion_model_status(), {"name": "v1"})
-        sent = [m for t, m in srv.pub.sent if t == tn.TOPIC_E2E_FUSION_MODEL]
-        self.assertEqual([m.name for m in sent], ["v1"])
-        self.assertFalse(srv._auto_engaged, "モデルを変えたのに engage が残っている")
-        self.assertEqual(srv.auto_ctrl_published, 1)
-        self.assertEqual(json.loads(tn.E2E_FUSION_MODEL_CONF.read_text()), {"name": "v1"})
+    def test_select_publishes_saves_and_drops_only_its_engage(self) -> None:
+        for key, slot in tn.MODEL_SLOTS.items():
+            with self.subTest(key):
+                srv = self._server(mode=slot.auto_mode)
+                srv._on_model_select(slot, {"name": "v1"})
+                self.assertEqual(srv._models[key], "v1")
+                self.assertEqual([m.name for t, m in srv.pub.sent if t == slot.topic], ["v1"])
+                self.assertFalse(srv._auto_engaged, "モデルを変えたのに engage が残っている")
+                self.assertEqual(srv.auto_ctrl_published, 1)
+                self.assertEqual(json.loads(slot.conf_path.read_text()), {"name": "v1"})
+                # 空文字（未選択／自動）も選べて保存される
+                srv._on_model_select(slot, {"name": ""})
+                self.assertEqual(json.loads(slot.conf_path.read_text()), {"name": ""})
+                other = self._server(mode="slam2d_route")
+                other._on_model_select(slot, {"name": "v1"})
+                self.assertTrue(other._auto_engaged)
 
-    def test_empty_name_means_auto_and_is_saved(self) -> None:
-        srv = self._server()
-        srv._on_e2e_fusion_model({"name": "v1"})
-        srv._auto_engaged = True
-        srv._on_e2e_fusion_model({"name": ""})
-        self.assertEqual(srv._e2e_fusion_model, "")
-        self.assertEqual([m.name for t, m in srv.pub.sent if t == tn.TOPIC_E2E_FUSION_MODEL], ["v1", ""])
-        self.assertFalse(srv._auto_engaged)
-        self.assertEqual(json.loads(tn.E2E_FUSION_MODEL_CONF.read_text()), {"name": ""})
-
-    def test_other_modes_keep_their_engage_and_unknown_names_are_ignored(self) -> None:
-        srv = self._server(mode="slam2d_route")
-        srv._on_e2e_fusion_model({"name": "v1"})
-        self.assertTrue(srv._auto_engaged)
-        srv = self._server()
-        srv._on_e2e_fusion_model({"name": "../../etc/passwd"})
-        srv._on_e2e_fusion_model({"name": "no-such"})
-        self.assertEqual(srv.pub.sent, [])
-        self.assertTrue(srv._auto_engaged)
+    def test_unknown_or_path_like_names_are_ignored(self) -> None:
+        for slot in tn.MODEL_SLOTS.values():
+            srv = self._server(mode=slot.auto_mode)
+            for bad in ("../../etc/passwd", "no-such", ".hidden", "a/b"):
+                srv._on_model_select(slot, {"name": bad})
+            self.assertEqual(srv.pub.sent, [])
+            self.assertTrue(srv._auto_engaged)
 
     def test_saved_selection_comes_back_only_if_the_file_still_exists(self) -> None:
-        srv = self._server()
-        tn.E2E_FUSION_MODEL_CONF.write_text(json.dumps({"name": "v2"}))
-        srv._load_e2e_fusion_model_conf()
-        self.assertEqual(srv._e2e_fusion_model, "v2")
-        srv._e2e_fusion_model = ""
-        tn.E2E_FUSION_MODEL_CONF.write_text(json.dumps({"name": "deleted"}))
-        srv._load_e2e_fusion_model_conf()
-        self.assertEqual(srv._e2e_fusion_model, "")
+        for slot in tn.MODEL_SLOTS.values():
+            slot.conf_path.write_text(json.dumps({"name": "v2"}))
+            self.assertEqual(slot.load(), "v2")
+            slot.conf_path.write_text(json.dumps({"name": "deleted"}))
+            self.assertEqual(slot.load(), "")
+            slot.conf_path.write_text("[1, 2]")                    # dict でない → 既定
+            self.assertEqual(slot.load(), "")
+            slot.conf_path.unlink()
+            self.assertEqual(slot.load(), "")
 
-    def test_paths_match_the_node_and_the_select_is_operator_only(self) -> None:
+    def test_paths_match_the_nodes_and_topics_are_owned_by_control(self) -> None:
         """一覧を出す場所・保存先と、ノードが読みに行く場所が同じであること。"""
-        from raspi.nodes import e2e_fusion_node
-        self.assertEqual(self._orig, (e2e_fusion_node.DEFAULT_MODELS_DIR, e2e_fusion_node.MODEL_CONF))
-        self.assertIn("e2e_fusion_model_select", tn.OPERATOR_ONLY_KINDS)
-        self.assertIn("e2e_fusion", tn.CAMERA_AUTO_MODES)
+        from raspi.auto import e2e_lidar
         from raspi.bus.zbus import TOPIC_OWNER
-        self.assertEqual(TOPIC_OWNER[tn.TOPIC_E2E_FUSION_MODEL], "control")
-
-
-class TestStereoE2eModelSelection(unittest.TestCase):
-    """ステレオ E2E（`stereo_e2e`）のモデル選択（E2E 融合と同じ形）と、照合・左右同期を回す条件。"""
-
-    def setUp(self) -> None:
-        self._orig = (tn.STEREO_E2E_MODELS_DIR, tn.STEREO_E2E_MODEL_CONF)
-        self._tmp = tempfile.TemporaryDirectory()
-        root = Path(self._tmp.name)
-        tn.STEREO_E2E_MODELS_DIR = root / "models" / "stereo_e2e"
-        tn.STEREO_E2E_MODELS_DIR.mkdir(parents=True)
-        tn.STEREO_E2E_MODEL_CONF = root / "stereo_e2e_model.json"
-        (tn.STEREO_E2E_MODELS_DIR / "v1.onnx").write_bytes(b"dummy")
-        self.addCleanup(self._cleanup)
-
-    def _cleanup(self) -> None:
-        tn.STEREO_E2E_MODELS_DIR, tn.STEREO_E2E_MODEL_CONF = self._orig
-        self._tmp.cleanup()
-
-    def test_select_publishes_saves_and_drops_engage(self) -> None:
-        from raspi.tests.fakes import FakePub
-
-        srv = tn.TelemetryServer.__new__(tn.TelemetryServer)
-        srv.pub = FakePub()
-        srv._stereo_e2e_model = ""
-        srv._auto_engaged, srv._auto_mode = True, "stereo_e2e"
-        srv._publish_auto_ctrl = lambda: None
-        srv._on_stereo_e2e_model({"name": "no-such"})
-        self.assertEqual(srv.pub.sent, [])
-        srv._on_stereo_e2e_model({"name": "v1"})
-        self.assertEqual([m.name for t, m in srv.pub.sent if t == tn.TOPIC_STEREO_E2E_MODEL], ["v1"])
-        self.assertFalse(srv._auto_engaged)
-        self.assertEqual(json.loads(tn.STEREO_E2E_MODEL_CONF.read_text()), {"name": "v1"})
-        srv._stereo_e2e_model = ""
-        srv._load_stereo_e2e_model_conf()
-        self.assertEqual(srv._stereo_e2e_model, "v1")
-        files = tn.TelemetryServer._stereo_e2e_models_list(None)["stereo_e2e_model_files"]
-        self.assertEqual([f["name"] for f in files], ["v1"])
-
-    def test_paths_modes_and_owners(self) -> None:
-        from raspi.bus.zbus import TOPIC_OWNER
-        from raspi.nodes import stereo_e2e_node
-        self.assertEqual(self._orig, (stereo_e2e_node.DEFAULT_MODELS_DIR, stereo_e2e_node.MODEL_CONF))
-        self.assertIn("stereo_e2e_model_select", tn.OPERATOR_ONLY_KINDS)
+        from raspi.nodes import cam_e2e_node, cam_perception_node, e2e_fusion_node, stereo_e2e_node
+        dirs = {"cam_model": cam_perception_node.DEFAULT_MODELS_DIR, "e2e_model": e2e_lidar.DEFAULT_MODELS_DIR,
+                "cam_e2e_model": cam_e2e_node.DEFAULT_MODELS_DIR,
+                "e2e_fusion_model": e2e_fusion_node.DEFAULT_MODELS_DIR,
+                "stereo_e2e_model": stereo_e2e_node.DEFAULT_MODELS_DIR}
+        self.assertEqual({k: d for k, (d, _) in self.orig.items()}, dirs)
+        self.assertEqual(self.orig["e2e_fusion_model"][1], e2e_fusion_node.MODEL_CONF)
+        self.assertEqual(self.orig["stereo_e2e_model"][1], stereo_e2e_node.MODEL_CONF)
+        for key, slot in tn.MODEL_SLOTS.items():
+            self.assertIn(slot.select_kind, tn.OPERATOR_ONLY_KINDS)
+            self.assertNotIn(slot.list_kind, tn.OPERATOR_ONLY_KINDS)
+            self.assertEqual(TOPIC_OWNER[slot.topic], "control")
+        for mode in ("cam_e2e", "e2e_fusion"):
+            self.assertIn(mode, tn.CAMERA_AUTO_MODES)
         # 視差（照合）と左右の組の両方を使う
         self.assertIn("stereo_e2e", tn.STEREO_AUTO_MODES)
         self.assertIn("stereo_e2e", tn.STEREO_PAIR_AUTO_MODES)
-        self.assertEqual(TOPIC_OWNER[tn.TOPIC_STEREO_E2E_MODEL], "control")
         self.assertEqual(TOPIC_OWNER["stereo_e2e/plan"], "stereo_e2e")
         self.assertEqual(TOPIC_OWNER["stereo/disp"], "stereo")
 
 
-class TestCamModelsListNote(unittest.TestCase):
-    """`_cam_models_list()`が`<名前>.json`の`note`（`ml_cam/export_onnx.py`が
-    書く自由記述の備考。`TestE2eModelsListNote`と対称）を拾って
-    返すことを確認する。"""
+class TestControlTable(unittest.TestCase):
+    """制御メッセージの表（`_CONTROL_HANDLERS`）。止める操作に権限を掛けていないこと。"""
 
-    def setUp(self) -> None:
-        self._orig_dir = tn.SEG_MODELS_DIR
-        self._tmp = tempfile.TemporaryDirectory()
-        tn.SEG_MODELS_DIR = Path(self._tmp.name)
-        self.addCleanup(self._cleanup)
+    def test_stop_operations_need_no_token(self) -> None:
+        for kind in ("estop", "release_control", "take_control", "cmd", "ping"):
+            self.assertEqual(tn._CONTROL_HANDLERS[kind][1], tn.AUTH_ANY, kind)
+        self.assertEqual(tn._CONTROL_HANDLERS["auto"][1], tn.AUTH_AUTO)
 
-    def _cleanup(self) -> None:
-        tn.SEG_MODELS_DIR = self._orig_dir
-        self._tmp.cleanup()
-
-    def _by_name(self, files: list[dict]) -> dict[str, dict]:
-        return {f["name"]: f for f in files}
-
-    def test_reads_note_from_sibling_json(self) -> None:
-        d = tn.SEG_MODELS_DIR
-        (d / "v1.onnx").write_bytes(b"dummy")
-        (d / "v1.json").write_text(json.dumps({"note": "夜間走行用、露出補正あり"}))
-
-        result = tn.TelemetryServer._cam_models_list(None)
-        files = self._by_name(result["cam_model_files"])
-        self.assertEqual(files["v1"]["note"], "夜間走行用、露出補正あり")
-        self.assertTrue(files["v1"]["has_config"])
-
-    def test_missing_json_gives_empty_note(self) -> None:
-        d = tn.SEG_MODELS_DIR
-        (d / "v2.onnx").write_bytes(b"dummy")
-
-        result = tn.TelemetryServer._cam_models_list(None)
-        files = self._by_name(result["cam_model_files"])
-        self.assertEqual(files["v2"]["note"], "")
-        self.assertFalse(files["v2"]["has_config"])
-
-    def test_corrupt_json_gives_empty_note_without_crashing(self) -> None:
-        d = tn.SEG_MODELS_DIR
-        (d / "v3.onnx").write_bytes(b"dummy")
-        (d / "v3.json").write_text("{ not json")
-
-        result = tn.TelemetryServer._cam_models_list(None)
-        files = self._by_name(result["cam_model_files"])
-        self.assertEqual(files["v3"]["note"], "")
-        self.assertTrue(files["v3"]["has_config"])   # ファイルは在る（壊れているだけ）
-
-    def test_json_without_note_field_gives_empty_note(self) -> None:
-        d = tn.SEG_MODELS_DIR
-        (d / "v4.onnx").write_bytes(b"dummy")
-        (d / "v4.json").write_text(json.dumps({"input_size": [224, 224]}))
-
-        result = tn.TelemetryServer._cam_models_list(None)
-        files = self._by_name(result["cam_model_files"])
-        self.assertEqual(files["v4"]["note"], "")
+    def test_every_handler_is_a_coroutine_function(self) -> None:
+        import inspect
+        for kind, (handler, _) in tn._CONTROL_HANDLERS.items():
+            self.assertTrue(inspect.iscoroutinefunction(handler), kind)
 
 
 def _sample_auto_map() -> AutoMap:
@@ -689,10 +424,8 @@ def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mod
         _auto_engaged=auto_engaged, _auto_mode=auto_mode,
         _cam_front_fps_armed=30.0, _cam_front_fps_disarm=10.0,
         camera_clients={"front": set(), "left": set(), "mask": set(), "depth": set()},
-        _mcap_proc=None, _mcap_starting=False, _logger_running=False,
-        _video_proc=None, _video_starting=False)
+        _recorder=idle_recorder(), _logger_running=False)
     fake._vehicle_armed = lambda: tn.TelemetryServer._vehicle_armed(fake)
-    fake._video_recording = lambda: tn.TelemetryServer._video_recording(fake)
     fake._cam_in_use_while_disarmed = \
         lambda cam: tn.TelemetryServer._cam_in_use_while_disarmed(fake, cam)
     fake._desired_depth = lambda: tn.TelemetryServer._desired_depth(fake)
@@ -960,7 +693,7 @@ class TestVideoRecordingFps(unittest.TestCase):
     def test_disarmed_recording_raises_front_to_max(self):
         fake = _fake_cam_server(armed=False)
         fake._cam_front_fps_armed = 20.0
-        fake._video_proc = object()
+        fake._recorder.video_proc = object()
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), tn.CAM_FPS_MAX)
 
     def test_mcap_recording_does_not_force_fps(self):
@@ -968,12 +701,12 @@ class TestVideoRecordingFps(unittest.TestCase):
         ARM 中の fps に固定される（`TestStereoDepthDemand`）。"""
         fake = _fake_cam_server(armed=False)
         fake._cam_front_fps_armed = 20.0
-        fake._mcap_proc = object()
+        fake._recorder.mcap_proc = object()
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), 20.0)
 
     def test_starting_counts_as_recording(self):
         fake = _fake_cam_server(armed=False)
-        fake._video_starting = True
+        fake._recorder.video_starting = True
         self.assertEqual(tn.TelemetryServer._desired_front_fps(fake), tn.CAM_FPS_MAX)
 
     def test_not_recording_keeps_user_settings(self):
@@ -1002,7 +735,8 @@ class TestDesiredFrontEnabled(unittest.TestCase):
 
     def test_disarmed_but_used_is_enabled(self):
         for attr, val in (("camera_clients", {"front": {object()}, "left": set()}),
-                          ("_mcap_proc", object()), ("_mcap_starting", True),
+                          ("_recorder", idle_recorder(mcap_proc=object())),
+                          ("_recorder", idle_recorder(mcap_starting=True)),
                           ("_logger_running", True)):
             with self.subTest(attr):
                 fake = _fake_cam_server(armed=False)
@@ -1548,11 +1282,6 @@ class TestConfLoadersTolerateNonDict(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             for const, loader in (("CAMERA_CONF", "_load_camera_conf"),
                                   ("SIGNAL_CONF", "_load_signal_conf"),
-                                  ("CAM_MODEL_CONF", "_load_cam_model_conf"),
-                                  ("E2E_MODEL_CONF", "_load_e2e_model_conf"),
-                                  ("CAM_E2E_MODEL_CONF", "_load_cam_e2e_model_conf"),
-                                  ("E2E_FUSION_MODEL_CONF", "_load_e2e_fusion_model_conf"),
-                                  ("STEREO_E2E_MODEL_CONF", "_load_stereo_e2e_model_conf"),
                                   ("AUTO_CONF", "_load_auto_conf"),
                                   ("DRIVE_SETTINGS_CONF", "_load_drive_settings")):
                 for text in ("[]", "null", "3"):
@@ -1602,9 +1331,9 @@ class TestAutoConfDeferredSave(unittest.IsolatedAsyncioTestCase):
 class TestMcapRestartWaitsForThePreviousRelay(unittest.IsolatedAsyncioTestCase):
     async def test_start_is_refused_while_the_old_pump_is_draining(self):
         srv = _cp.TestControlOwnership._server(self)
-        srv._mcap_starting = False
-        srv._mcap_pump_task = asyncio.create_task(asyncio.sleep(10))
-        await srv._mcap_start(image_hz=5.0)
-        self.assertIsNone(srv._mcap_proc)
-        self.assertIn("終了処理中", srv._mcap_error)
-        srv._mcap_pump_task.cancel()
+        rec = srv._recorder
+        rec.mcap_pump_task = asyncio.create_task(asyncio.sleep(10))
+        await rec.mcap_start(image_hz=5.0)
+        self.assertIsNone(rec.mcap_proc)
+        self.assertIn("終了処理中", rec.mcap_error)
+        rec.mcap_pump_task.cancel()

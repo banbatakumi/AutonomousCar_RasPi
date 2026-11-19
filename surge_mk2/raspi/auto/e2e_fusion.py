@@ -234,7 +234,7 @@ class E2EFusion(Planner):
             # 経路の先が見えていない。どんなコーナーが来ても曲がれる速度で終える
             v_end = min(v_max, math.sqrt(veh.a_lat_max / max(veh.kappa_max, 1e-6)))
         v = rl_mod.speed_profile(xy, kappa, v_max=v_max, v_min=v_min, a_lat=veh.a_lat_max,
-                                 a_accel=veh.a_accel_max(), a_brake=veh.a_decel_max, closed=False,
+                                 a_accel=veh.a_accel_max, a_brake=veh.a_decel_max, closed=False,
                                  v_start=max(v_now, v_min), v_end=max(v_end, v_min), v_cap=cap)
         return rl_mod.RaceLine(xy=xy, v=np.asarray(v, dtype=np.float64), kappa=kappa, length=length,
                                closed=False), ""

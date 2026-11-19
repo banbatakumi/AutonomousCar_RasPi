@@ -42,14 +42,15 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.cam_tuning import check_sensor, lens_tuning, pick_name, with_custom_exposure  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.core.cleanup import quiet_close  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.core.cam_tuning import check_sensor, lens_tuning, pick_name, with_custom_exposure
+from raspi.core.vehicle import Vehicle
+from raspi.core.cleanup import quiet_close
+from raspi.core.log import get_logger, setup_logging
+
+_log = get_logger("camera")
 
 SHM_PREFIX = "surge_cam"
 
@@ -70,8 +71,27 @@ class _Stamped:
         self._stream.write("".join(out))
         return len(text)
 
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
+    def flush(self) -> None:
+        self._stream.flush()
+
+    # print・traceback・logging が stdout/stderr に使うもの（明示的に委ねる。`__getattr__` の丸投げはしない）
+    @property
+    def encoding(self) -> str:
+        return self._stream.encoding
+
+    @property
+    def errors(self):
+        return self._stream.errors
+
+    @property
+    def buffer(self):
+        return self._stream.buffer
+
+    def fileno(self) -> int:
+        return self._stream.fileno()
+
+    def isatty(self) -> bool:
+        return self._stream.isatty()
 
 
 #: `_grab()` が連続してこの回数失敗したら、そのカメラは諦めてスレッドを終了する
@@ -143,14 +163,14 @@ def prepare_isp_tuning(indices: list[int]) -> None:
     global STEREO_AE_EXPOSURE_MODE
     tuning, sensor = _isp_tuning
     if tuning is None:
-        print("# 同期中の露光の上限は使えない（チューニングが標準のまま）。Short で撮る", flush=True)
+        _log.info("同期中の露光の上限は使えない（チューニングが標準のまま）。Short で撮る")
         return
     try:
         _isp_tuning = (with_custom_exposure(tuning, STEREO_MAX_EXPOSURE_US), sensor)
         STEREO_AE_EXPOSURE_MODE = "Custom"
-        print(f"# 同期中の露光は {STEREO_MAX_EXPOSURE_US / 1000:.1f}ms に抑える（ゲイン 8 倍まで。AeExposureMode=Custom）", flush=True)
+        _log.info(f"同期中の露光は {STEREO_MAX_EXPOSURE_US / 1000:.1f}ms に抑える（ゲイン 8 倍まで。AeExposureMode=Custom）")
     except ValueError as e:
-        print(f"!! 同期中の露光の上限を足せない（Short で撮る）: {e}", file=sys.stderr, flush=True)
+        _log.warning(f"同期中の露光の上限を足せない（Short で撮る）: {e}")
 
 #: **libcamera の形式名はメモリ上のバイト順ではない。**
 #: 32bit ワードにパックしたときの並びを指すので、リトルエンディアンの
@@ -290,7 +310,7 @@ def run_bounded(fn, timeout_s: float) -> bool:
         try:
             fn()
         except Exception as e:                       # noqa: BLE001
-            print(f"!! 後始末中の例外: {type(e).__name__}: {e}", file=sys.stderr)
+            _log.warning(f"後始末中の例外: {type(e).__name__}: {e}")
 
     t = threading.Thread(target=body, name="camclose", daemon=True)
     t.start()
@@ -440,8 +460,8 @@ class CameraWorker(threading.Thread):
         tuning, tuning_sensor = _isp_tuning
         self.cam = Picamera2(self.device, tuning=tuning)
         props = self.cam.camera_properties
-        print(f"# cam{idx}: libcamera 番号 {self.device}  {props.get('Model', '?')}  "
-              f"{props.get('Location', '')}", flush=True)
+        _log.info(f"cam{idx}: libcamera 番号 {self.device}  {props.get('Model', '?')}  "
+              f"{props.get('Location', '')}")
         check_sensor(tuning_sensor, str(props.get("Model", "")), idx)
         ctrl = {}
         if fps:
@@ -702,8 +722,8 @@ class CameraNode:
             except Exception as e:                   # noqa: BLE001
                 last_err = e
                 self.missing.append(i)
-                print(f"!! cam{i} を開けない（{type(e).__name__}: {e}）。"
-                      f"開けたカメラだけで続行する", file=sys.stderr, flush=True)
+                _log.warning(f"cam{i} を開けない（{type(e).__name__}: {e}）。"
+                      f"開けたカメラだけで続行する")
         if not self.workers:
             assert last_err is not None
             raise last_err
@@ -804,10 +824,9 @@ class CameraNode:
             try:
                 events = self._cfg_sub.poll(200)
             except Exception as e:
-                print(f"!! cam/config 受信スレッドが異常終了"
+                _log.warning(f"cam/config 受信スレッドが異常終了"
                       f"（以後 GUI からの cam/config 変更が反映されない）: "
-                      f"{type(e).__name__}: {e}",
-                      file=sys.stderr)
+                      f"{type(e).__name__}: {e}")
                 break
             for topic, msg in events:
                 if topic != TOPIC_CAM_CONFIG:
@@ -862,6 +881,7 @@ def _status(node: CameraNode) -> None:
 
 
 def main() -> int:
+    setup_logging("camera")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cameras", default="0,1",
@@ -928,9 +948,9 @@ def main() -> int:
             # **失敗しても撮像自体は続ける**（既定 fps・常時 ON のまま動くだけ）
             cfg_sub = Subscriber({TOPIC_CAM_CONFIG: LATEST})
         except ImportError as e:
-            print(f"!! pyzmq/msgspec が無いのでバス無しで動く: {e}")
+            _log.warning(f"pyzmq/msgspec が無いのでバス無しで動く: {e}")
         except Exception as e:
-            print(f"!! バスを開けない（バス無しで続行）: {e}", file=sys.stderr)
+            _log.warning(f"バスを開けない（バス無しで続行）: {e}")
 
     if len({CAM_CROP.get(i, (0.0, 0.0)) for i in indices}) > 1:
         # 平行化はカメラごとのクロップで換算するので照合は合うが、左右で写る範囲が違うのは
@@ -943,18 +963,18 @@ def main() -> int:
         devices = None
         if args.by_i2c:
             if _isp_tuning[0] is not None:
-                print("!! --by-i2c は ISP チューニング使用中は使えない（カメラを数えると"
-                      "チューニングが標準に固定される）。番号どおりに開く", file=sys.stderr)
+                _log.warning("--by-i2c は ISP チューニング使用中は使えない（カメラを数えると"
+                      "チューニングが標準に固定される）。番号どおりに開く")
             else:
                 from picamera2 import Picamera2
 
                 infos = Picamera2.global_camera_info()
-                print(f"# 見えているカメラ: {[i.get('Id') for i in infos]}")
+                _log.info(f"見えているカメラ: {[i.get('Id') for i in infos]}")
                 roles = [CAM_TOPIC.get(i, ("", f"cam{i}"))[1] for i in indices]
                 by_role = devices_by_i2c(infos, roles)
                 devices = {i: by_role[CAM_TOPIC[i][1]] for i in indices
                            if i in CAM_TOPIC and CAM_TOPIC[i][1] in by_role}
-                print(f"# I2C で決めた番号（リング番号→libcamera 番号）: {devices}")
+                _log.info(f"I2C で決めた番号（リング番号→libcamera 番号）: {devices}")
         node = CameraNode(indices, (w, h), args.fmt, args.fps, args.slots,
                           on_frame=on_frame, cfg_sub=cfg_sub, devices=devices)
     except Exception as e:
@@ -967,12 +987,12 @@ def main() -> int:
         signal.signal(sig, lambda *_: node.stop())
 
     if node.missing:
-        print(f"!! 開けなかったカメラ: {node.missing}（配信しない）", file=sys.stderr)
+        _log.warning(f"開けなかったカメラ: {node.missing}（配信しない）")
     for wk in node.workers:
-        print(f"# cam{wk.idx} (libcamera {wk.device}) -> /dev/shm/{wk.ring.name}  "
+        _log.info(f"cam{wk.idx} (libcamera {wk.device}) -> /dev/shm/{wk.ring.name}  "
               f"{wk.ring.width}x{wk.ring.height} {wk.ring.fmt} "
               f"×{wk.ring.n_slots}枚 ({wk.ring._shm.size / 1e6:.1f}MB)")
-    print("# 読み手: python3 -m raspi.tools.shm_view "
+    _log.info("読み手: python3 -m raspi.tools.shm_view "
           f"{SHM_PREFIX}{node.workers[0].idx}\n")
 
     try:
@@ -994,8 +1014,7 @@ def main() -> int:
         # `capture_request()` が本当にハングしていると後始末も戻らないことがある。
         # 時間を区切り、超えたらプロセスごと落として systemd に再起動させる
         if not run_bounded(_cleanup, CLOSE_TIMEOUT_S):
-            print(f"!! 後始末が{CLOSE_TIMEOUT_S:.0f}s で終わらない。強制終了する",
-                  file=sys.stderr, flush=True)
+            _log.warning(f"後始末が{CLOSE_TIMEOUT_S:.0f}s で終わらない。強制終了する")
             sys.stdout.flush()
             os._exit(1)
     # **いずれかのワーカーにエラーが残っていれば exit 1。**

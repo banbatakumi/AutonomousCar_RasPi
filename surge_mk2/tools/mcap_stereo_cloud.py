@@ -23,7 +23,6 @@ import argparse
 import base64
 import json
 import sys
-import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -93,12 +92,9 @@ def _vehicle(src: Path, override: Path | None):
 
     if override is not None:
         return Vehicle.load(override), f"指定 {override}"
-    toml = load_run_info(src).get("provenance", {}).get("vehicle_toml")
-    if toml:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "vehicle.toml"
-            p.write_text(toml, encoding="utf-8")
-            return Vehicle.load(p), "記録の provenance"
+    recorded = Vehicle.from_provenance(load_run_info(src))
+    if recorded is not None:
+        return recorded, "記録の provenance"
     return Vehicle.load(), "config/vehicle.toml（記録に校正値の控えが無い）"
 
 

@@ -8,20 +8,17 @@ bbox→bearing変換・LiDAR距離融合・IDLE/TRACKING状態遷移という配
 """
 
 import math
-import sys
 import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import ImageRef, VehicleState  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import ImageRef, VehicleState
+from raspi.msgs.types import (
     TOPIC_IMAGE_FRONT,
     TOPIC_TRACK_ROI,
     TOPIC_TRACK_TARGET,
@@ -30,8 +27,8 @@ from raspi.msgs.types import (  # noqa: E402
     TargetRoiCtrl,
     TargetTrack,
 )
-from raspi.nodes.cam_track_node import CamTrackNode  # noqa: E402
-from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
+from raspi.nodes.cam_track_node import CamTrackNode
+from raspi.tests.fakes import FakePub, FakeSub
 
 
 def _blank_frame(w: int, h: int) -> np.ndarray:

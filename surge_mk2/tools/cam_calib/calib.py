@@ -364,12 +364,9 @@ def _selected_lens(cam_tbl) -> str:
 
 def lens_profiles(cam: str, toml_path: str | Path = DEFAULT_TOML) -> tuple[str, list[str]]:
     """`(今選ばれているレンズ, プロファイル名の一覧)`。プロファイルを使わない書き方なら `("", [])`。"""
-    import tomllib
+    from raspi.core.vehicle import read_toml, section
 
-    with open(toml_path, "rb") as f:
-        d = tomllib.load(f)
-    sensors = d.get("sensors", {})
-    tbl = sensors.get(f"cam_{cam}", {})
+    tbl = section(read_toml(toml_path), "sensors", f"cam_{cam}")
     return _selected_lens(tbl), sorted(tbl.get("lenses", {}) or {})
 
 

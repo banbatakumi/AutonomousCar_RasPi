@@ -2,17 +2,15 @@
 
 import json
 import math
-import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav import grip  # noqa: E402
-from raspi.nav import raceline as rl  # noqa: E402
-from raspi.nav import speedctl  # noqa: E402
+from raspi.nav import grip
+from raspi.nav import raceline as rl
+from raspi.nav import speedctl
 
 DT = 0.01
 DATA = Path(__file__).resolve().parent / "data"
@@ -749,13 +747,13 @@ class TestLongLearner(unittest.TestCase):
         lg._set(lg.dec, 2, 2.0, 1.0, "減速")             # u=1 を 2.0 へ → u=0.5 も 2.0 まで持ち上がる
         second = list(lg.map.dec)
         lg._set(lg.dec, 0, 2.2, 2.0, "減速")
-        self.assertEqual(lg.last_raise_t, 2.0)
+        self.assertEqual(lg.raise_t(), 2.0)
         self.assertTrue(lg.undo_last(3.0, "横偏差"))
         self.assertEqual(lg.map.dec, second)
         self.assertTrue(lg.undo_last(4.0, "横偏差"))
         self.assertEqual(lg.map.dec, first)
         self.assertFalse(lg.undo_last(5.0, "横偏差"))
-        self.assertEqual(lg.last_raise_t, -math.inf)
+        self.assertEqual(lg.raise_t(), -math.inf)
 
     def test_time_learner_judges_once_per_lap(self):
         """横をタイムで決める学習器は、自前のゲートで 1 周を数えて加速・減速も判断する。"""

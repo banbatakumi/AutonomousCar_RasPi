@@ -7,16 +7,14 @@ from __future__ import annotations
 
 import json
 import struct
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.proto import packets  # noqa: E402
-from raspi.rec.framelog import (  # noqa: E402
+from raspi.proto import packets
+from raspi.rec.framelog import (
     HEADER_SIZE,
     MAGIC,
     REC_HEADER_SIZE,

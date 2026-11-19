@@ -14,25 +14,23 @@ import json
 import math
 import os
 import struct
-import sys
 import tempfile
 import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import DriveCmd, Scan, StereoDepth, VehicleState  # noqa: E402
-from raspi.proto import packets  # noqa: E402
-from raspi.rec.framelog import FrameLogWriter  # noqa: E402
-from raspi.rec.mcap_log import (  # noqa: E402
+from raspi.msgs import DriveCmd, Scan, StereoDepth, VehicleState
+from raspi.proto import packets
+from raspi.rec.framelog import FrameLogWriter
+from raspi.rec.mcap_log import (
     HAS_MCAP,
     McapLog,
     json_schema,
     pointcloud_from_scan,
 )
-from raspi.tests.fakes import fake_disk_usage  # noqa: E402
+from raspi.tests.fakes import fake_disk_usage
 
 MS = 1_000_000
 

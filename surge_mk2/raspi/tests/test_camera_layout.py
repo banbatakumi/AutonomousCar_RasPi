@@ -5,20 +5,18 @@ picamera2 が無い開発機（Mac）でも通るように、カメラには触�
 
 from __future__ import annotations
 
-import sys
 import threading
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.vehicle import CAMERA_DEVICES, Vehicle, resolve_lens  # noqa: E402
-from raspi.msgs import CamConfig, ImageRef, TOPIC_IMAGE_LEFT  # noqa: E402
-import msgspec  # noqa: E402
+from raspi.core.vehicle import CAMERA_DEVICES, Vehicle, resolve_lens
+from raspi.msgs import CamConfig, ImageRef, TOPIC_IMAGE_LEFT
+import msgspec
 
-from raspi.msgs.types import type_for_topic  # noqa: E402
-from raspi.nodes import camera_node  # noqa: E402
-from raspi.nodes.camera_node import (  # noqa: E402
+from raspi.msgs.types import type_for_topic
+from raspi.nodes import camera_node
+from raspi.nodes.camera_node import (
     STEREO_SYNC_TOL_NS, CameraNode, CameraWorker, exposure_changed, frame_phase_error_ns,
     gains_changed)
 

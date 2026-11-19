@@ -71,21 +71,19 @@ bind するため、**このノードと`route_select.py`は同時に使えな�
 from __future__ import annotations
 
 import argparse
-import signal
 import sys
 import time
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import cv2  # noqa: E402
-import numpy as np  # noqa: E402
+import cv2
+import numpy as np
 
-from raspi.core.auto_gate import IdlePacer, vehicle_armed  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.msgs import ImageRef, SignalConfig, VehicleState  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, vehicle_armed
+from raspi.core.runner import run_node
+from raspi.core.frame_reader import FrameReader
+from raspi.msgs import ImageRef, SignalConfig, VehicleState
+from raspi.msgs import Heartbeat as HbMsg
+from raspi.msgs.types import (
     TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_ROUTE_SELECT,
@@ -328,7 +326,7 @@ class ArrowSignalNode:
             if cfg is not None:
                 #: 会場でGUIのスライダーを動かすたびに反映する（モジュールdocstring
                 #: 「GUIからのライブ設定」参照）。値が同じでも軽量な代入なので、
-                #: 変化検出は不要——`CamModelCtrl`拾い直しと同じ「毎回代入」でよい
+                #: 変化検出は不要——`ModelSelectCtrl`拾い直しと同じ「毎回代入」でよい
                 self.detector.roi_band = (cfg.roi_top, cfg.roi_bottom)
                 self.detector.sat_range = (cfg.sat_min, cfg.sat_max)
                 self.detector.val_min = cfg.val_min
@@ -432,18 +430,7 @@ def main() -> int:
 
     print(f"# arrow_signal_node  publish {pub.endpoint}  route/select へ配信")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-
-    try:
-        node.run(sub=sub, pub=pub, duration_s=args.duration)
-    finally:
-        node.close()
-        sub.close()
-        pub.close()
+    run_node(node, lambda: node.run(sub=sub, pub=pub, duration_s=args.duration), close=(sub, pub))
     return 0
 
 

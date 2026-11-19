@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.core.stereo_match import MatchParams, ObstacleParams  # noqa: E402
-from raspi.msgs import Scan, StereoInfo  # noqa: E402
-from raspi.msgs.types import TOPIC_CAM_CONFIG, TOPIC_STEREO_INFO  # noqa: E402
-from raspi.nodes.logger_node import DEFAULT_TOPICS  # noqa: E402
-from raspi.nodes.stereo_node import StereoNode  # noqa: E402
-from raspi.rec import provenance  # noqa: E402
+from raspi.core.stereo_match import MatchParams, ObstacleParams
+from raspi.msgs import Scan, StereoInfo
+from raspi.msgs.types import TOPIC_CAM_CONFIG, TOPIC_STEREO_INFO
+from raspi.nodes.logger_node import DEFAULT_TOPICS
+from raspi.nodes.stereo_node import StereoNode
+from raspi.rec import provenance
 
 try:
     import mcap  # noqa: F401

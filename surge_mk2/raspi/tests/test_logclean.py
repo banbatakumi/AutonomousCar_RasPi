@@ -8,17 +8,15 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.rec import logclean  # noqa: E402
-from raspi.tests.fakes import fake_disk_usage  # noqa: E402
+from raspi.rec import logclean
+from raspi.tests.fakes import fake_disk_usage
 
 
 class TempDirCase(unittest.TestCase):

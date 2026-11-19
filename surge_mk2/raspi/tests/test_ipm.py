@@ -7,16 +7,13 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav.grid import OccGrid  # noqa: E402
-from raspi.nav.ipm import (CameraExtrinsics, camera_intrinsics,  # noqa: E402
+from raspi.nav.grid import OccGrid
+from raspi.nav.ipm import (CameraExtrinsics, camera_intrinsics,
                           ground_to_pixel, pixel_to_ground,
                           project_mask_to_grid, project_seen_to_grid)
 

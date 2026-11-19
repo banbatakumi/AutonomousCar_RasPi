@@ -28,12 +28,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.bus import LATEST, Subscriber  # noqa: E402
-from raspi.core.jpeg import RingJpeg  # noqa: E402
-from raspi.core.vehicle import CAMERA_ROLES  # noqa: E402
-from raspi.msgs.types import TOPIC_IMAGE_FRONT, TOPIC_IMAGE_LEFT  # noqa: E402
+from raspi.bus import LATEST, Subscriber
+from raspi.core.jpeg import RingJpeg
+from raspi.core.vehicle import CAMERA_ROLES
+from raspi.msgs.types import TOPIC_IMAGE_FRONT, TOPIC_IMAGE_LEFT
 
 NS = 1_000_000_000
 DEFAULT_FPS = 30.0

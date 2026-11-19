@@ -3,19 +3,16 @@
 import json
 import math
 import random
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav.grip import GripMap  # noqa: E402
-from raspi.nav.mpc import MPCConfig, MPCFollower  # noqa: E402
-from raspi.nav.purepursuit import SteerMap  # noqa: E402
-from raspi.nav.understeer import K_MAX, UndersteerConfig, UndersteerLearner  # noqa: E402
-from raspi.tests.test_laptime import _line, stadium  # noqa: E402
+from raspi.nav.grip import GripMap
+from raspi.nav.mpc import MPCConfig, MPCFollower
+from raspi.nav.purepursuit import SteerMap
+from raspi.nav.understeer import K_MAX, UndersteerConfig, UndersteerLearner
+from raspi.tests.test_laptime import _line, stadium
 
 L = 0.23
 

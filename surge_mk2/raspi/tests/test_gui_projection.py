@@ -10,17 +10,15 @@ import json
 import math
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.camera_model import FisheyeCalib, virtual_pinhole_maps  # noqa: E402
-from raspi.nav.ipm import CameraExtrinsics, camera_intrinsics, ground_to_pixel  # noqa: E402
+from raspi.core.camera_model import FisheyeCalib, virtual_pinhole_maps
+from raspi.nav.ipm import CameraExtrinsics, camera_intrinsics, ground_to_pixel
 
 ROOT = Path(__file__).resolve().parents[2]
 ESBUILD = ROOT / "gui" / "node_modules" / ".bin" / "esbuild"

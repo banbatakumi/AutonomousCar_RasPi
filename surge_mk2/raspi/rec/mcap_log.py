@@ -243,8 +243,12 @@ class _CountingWriter:
     def tell(self) -> int:
         return self.count
 
-    def __getattr__(self, name):
-        return getattr(self._raw, name)
+    # `mcap.writer.Writer` と `McapLog` が使うのは write・tell・flush・close だけ（明示的に委ねる）
+    def flush(self) -> None:
+        self._raw.flush()
+
+    def close(self) -> None:
+        self._raw.close()
 
 
 # ── 本体 ────────────────────────────────────────────────────────────────

@@ -6,13 +6,10 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.nav.reeds_shepp import (  # noqa: E402
+from raspi.nav.reeds_shepp import (
     _GENERATORS, candidate_paths, integrate_path, sample_path, sample_path_array,
     shortest_path,
 )

@@ -7,15 +7,12 @@
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.nodes.camera_node import (  # noqa: E402
+from raspi.nodes.camera_node import (
     MAX_CONSECUTIVE_GRAB_FAILURES,
     CameraNode,
     CamStats,

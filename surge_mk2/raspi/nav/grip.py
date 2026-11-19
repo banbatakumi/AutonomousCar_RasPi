@@ -399,10 +399,6 @@ class LongLearner:
             side.step = [self.cfg.step_min] * len(ENV_SHAPE)
             side.decisions = max(side.decisions, 1)
 
-    @property
-    def last_raise_t(self) -> float:
-        """直近に包絡を上げた時刻 [s]（無ければ −inf）。"""
-        return self.raise_t()
 
     def _last(self, side: _Side | None) -> int:
         """`_raises` の中の、`side`（`None` ならどちらでも）を最後に上げた記録の位置（無ければ −1）。"""

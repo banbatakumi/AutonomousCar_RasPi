@@ -16,7 +16,7 @@ from raspi.msgs.convert import MAX_BRAKE_TORQUE_NM, MAX_TARGET_TORQUE_NM
 
 from tools.fwsim.fw import IN, MODE_BRAKE, MODE_SPEED, MODE_TORQUE, OUT, HostConfig
 
-from .simcar import DT, SUBSTEPS, Car, firmware
+from tools.calib.simcar import DT, SUBSTEPS, Car, firmware
 
 __all__ = ["Outcome", "launch", "brake"]
 

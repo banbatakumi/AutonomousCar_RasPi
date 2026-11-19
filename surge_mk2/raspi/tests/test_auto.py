@@ -6,37 +6,35 @@
 
 import json
 import math
-import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import msgspec  # noqa: E402
-import numpy as np  # noqa: E402
+import msgspec
+import numpy as np
 try:
-    import onnx  # noqa: E402
-    from onnx import TensorProto, helper  # noqa: E402
+    import onnx
+    from onnx import TensorProto, helper
 except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの道具。Pi には入れない（実行は onnxruntime）
     raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.core.control_params import steer_relink  # noqa: E402
-from raspi.auto.base import extend_disparity as _extend  # noqa: E402
-from raspi.auto.base import blind_reason, scan_window, sector_of_deg  # noqa: E402
-from raspi.auto.cam_centerline import CamCenterline  # noqa: E402
-from raspi.auto.cam_e2e import CamE2E  # noqa: E402
-from raspi.auto.disparity_extender import DisparityExtender  # noqa: E402
-from raspi.auto.e2e_lidar import E2ELidar  # noqa: E402
-from raspi.auto.follow_the_gap import FollowTheGap  # noqa: E402
-from raspi.auto.follow_the_gap_cam import FollowTheGapCam  # noqa: E402
-from raspi.auto.gap_pursuit import DisparityPursuit, _best_band  # noqa: E402
-from raspi.auto.line_trace import LineTrace  # noqa: E402
-from raspi.auto.registry import PLANNERS, catalog, make_planner  # noqa: E402
-from raspi.msgs import AutoState, CamE2ECmd, CamPath, DriveCmd, LineScan, Scan, VehicleState  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.vehicle import Vehicle
+from raspi.core.control_params import steer_relink
+from raspi.auto.base import extend_disparity as _extend
+from raspi.auto.base import blind_reason, scan_window, sector_of_deg
+from raspi.auto.cam_centerline import CamCenterline
+from raspi.auto.cam_e2e import CamE2E
+from raspi.auto.disparity_extender import DisparityExtender
+from raspi.auto.e2e_lidar import E2ELidar
+from raspi.auto.follow_the_gap import FollowTheGap
+from raspi.auto.follow_the_gap_cam import FollowTheGapCam
+from raspi.auto.gap_pursuit import DisparityPursuit, _best_band
+from raspi.auto.line_trace import LineTrace
+from raspi.auto.registry import PLANNERS, catalog, make_planner
+from raspi.msgs import AutoState, CamE2ECmd, CamPath, DriveCmd, LineScan, Scan, VehicleState
+from raspi.msgs.types import (
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_PATH,
     TOPIC_LINE_CAM,

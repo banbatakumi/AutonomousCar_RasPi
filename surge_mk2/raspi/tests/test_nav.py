@@ -12,18 +12,15 @@
 """
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.auto.base import sector_of_deg  # noqa: E402
-from raspi.msgs import Scan  # noqa: E402
-from raspi.nav.deskew import deskew, point_times_ns, integrate_pose  # noqa: E402
-from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, OccGrid, dilate  # noqa: E402
+from raspi.auto.base import sector_of_deg
+from raspi.msgs import Scan
+from raspi.nav.deskew import deskew, point_times_ns, integrate_pose
+from raspi.nav.grid import FREE, OCCUPIED, UNKNOWN, OccGrid, dilate
 
 NS = 1_000_000_000
 

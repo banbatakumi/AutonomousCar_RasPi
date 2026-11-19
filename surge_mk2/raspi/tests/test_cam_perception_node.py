@@ -6,26 +6,24 @@
 推論の精度は問わない——それは実データが要る領域（`ml_cam/`）の仕事。
 """
 
-import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 try:
-    import onnx  # noqa: E402
-    from onnx import TensorProto, helper  # noqa: E402
+    import onnx
+    from onnx import TensorProto, helper
 except ModuleNotFoundError as e:    # ダミーモデルを書き出すだけの道具。Pi には入れない（実行は onnxruntime）
     raise unittest.SkipTest(f"{e}（モデルを作る側の道具。Mac で回す）") from e
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, CamModelCtrl, ImageRef, VehicleState  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import AutoCtrl, ModelSelectCtrl, ImageRef, VehicleState
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_MODEL,
     TOPIC_CAM_PATH,
@@ -33,11 +31,11 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_SCAN_CAM,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nodes.cam_perception_node import (  # noqa: E402
+from raspi.nodes.cam_perception_node import (
     CamPerceptionNode,
     SegmentationModel,
 )
-from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
+from raspi.tests.fakes import FakePub, FakeSub
 
 
 def _make_dummy_model(path: Path, h: int, w: int) -> None:
@@ -120,7 +118,7 @@ class TestColorOrder(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="red"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="red"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
             node.run(sub=sub, pub=FakePub(), duration_s=0.02)
             self.assertIsNotNone(node._last_drivable)
@@ -459,7 +457,7 @@ class TestRunModelSwitchIntegration(unittest.TestCase):
             ref = ImageRef(shm_name=ring.name, slot=desc.slot, ring_seq=desc.seq,
                            frame_id=desc.frame_id, width=desc.width, height=desc.height,
                            fmt=desc.fmt, stride=desc.stride, nbytes=desc.nbytes, cam="front")
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -512,7 +510,7 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_idle")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="line_trace")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -537,7 +535,7 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_no_ctrl")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a")})
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 
@@ -559,7 +557,7 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_cl")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="cam_centerline")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -582,7 +580,7 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_disarm")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=False)})
             pub = FakePub()
@@ -603,7 +601,7 @@ class TestModeGating(unittest.TestCase):
         node = CamPerceptionNode(models_dir=self.models_dir, vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_cam_gating_armed")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam"),
                             TOPIC_VEHICLE_STATE: VehicleState(armed=True)})
             pub = FakePub()
@@ -670,7 +668,7 @@ class TestInferenceRateLimiting(unittest.TestCase):
 
         node.read_frame = counting_read_frame
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
             orig_poll = sub.poll
 
@@ -707,7 +705,7 @@ class TestInferenceRateLimiting(unittest.TestCase):
                                  infer_hz=0.0)
         ring, ref = self._ref_with_frame("surge_test_ratelim_unthr")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                             TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
@@ -725,7 +723,7 @@ class TestInferenceRateLimiting(unittest.TestCase):
                                  infer_hz=1.0)
         ring, ref = self._ref_with_frame("surge_test_ratelim_resume")
         try:
-            latest = {TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: CamModelCtrl(name="model_a"),
+            latest = {TOPIC_IMAGE_FRONT: ref, TOPIC_CAM_MODEL: ModelSelectCtrl(name="model_a"),
                       TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")}
             sub = FakeSub(latest)
             pub = FakePub()

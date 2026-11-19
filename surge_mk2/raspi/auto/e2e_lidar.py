@@ -39,6 +39,7 @@ import math
 from pathlib import Path
 
 from ..core.control_params import steer_relink
+from ..core.onnx_session import make_session
 from ..core.vehicle import Vehicle
 from ..msgs.types import AutoState, Scan, VehicleState
 from .base import ParamSpec, Planner, blind_reason, scan_window
@@ -70,8 +71,6 @@ def _load_from_path(path: Path) -> dict:
     保持する」を判断するので、ここでは握りつぶさない
     （`cam_perception_node.py`の`_load_model_by_name()`と同じ形）。
     """
-    import onnxruntime as ort
-
     cfg_path = path.with_suffix(".json")
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
     # ★`steer_rate_max_rad_s`が無いjson（v13より前、行動空間が「舵角そのもの」
@@ -84,17 +83,8 @@ def _load_from_path(path: Path) -> dict:
         raise ValueError(
             f"{cfg_path} に steer_rate_max_rad_s が無い（v13より前の非互換モデル）。"
             "行動空間が舵角速度に変わったため、v13以降で再学習・再exportしたモデルのみ使える")
-    # ★省電力化: 既定のSessionOptionsは全4コア＋スピンウェイトで、
-    # 0.3msで終わる推論の後も全コアを回し続ける。10Hz推論で制御系電流が+100mA・
-    # CPU31%だったのが、1スレッド・スピン無効で+3mAになり推論時間も変わらなかった。
-    # 観測273次元のMLPなのでスレッド並列化の恩恵が無い（`cam_perception_node.py`と同じ流儀）
-    opts = ort.SessionOptions()
-    opts.intra_op_num_threads = 1
-    opts.inter_op_num_threads = 1
-    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-    opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
-    session = ort.InferenceSession(str(path), sess_options=opts,
-                                   providers=["CPUExecutionProvider"])
+    # 観測273次元の MLP なのでスレッド並列化の恩恵が無い（1スレッド。`core/onnx_session.py`）
+    session = make_session(path, intra_threads=1)
     # ★入力次元はJSON（`in_dim`）ではなくONNXグラフ自身の宣言shapeから読む
     # （`export_onnx_rl.py`は`dynamic_axes`無しでバッチ1固定の具体的なshapeで
     # エクスポートしているので`shape[-1]`は必ず具体的な整数になる）。JSONの値とズレようがない

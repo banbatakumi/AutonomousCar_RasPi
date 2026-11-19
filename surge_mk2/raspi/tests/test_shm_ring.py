@@ -9,14 +9,11 @@ seqlock は「正常時に読める」ことより **「壊れたときに壊れ
 from __future__ import annotations
 
 import struct
-import sys
 import unittest
 from multiprocessing import shared_memory
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.bus.shm_ring import (  # noqa: E402
+from raspi.bus.shm_ring import (
     HEADER_SIZE,
     MAGIC,
     SLOT_META_SIZE,
@@ -181,24 +178,6 @@ class TestSeqlock(RingCase):
         seq, t, fid, n = struct.unpack_from("<4Q", r._shm.buf, off)
         struct.pack_into("<4Q", r._shm.buf, off, seq + 1, t, fid, n)
         self.assertIsNone(r.latest())
-
-    def test_latest_copy_retries_and_succeeds(self):
-        r = self.create(n_slots=4)
-        r.write(frame(9), t_capture_ns=42)
-        got = r.latest_copy()
-        self.assertIsNotNone(got)
-        desc, data = got
-        self.assertEqual(desc.t_capture_ns, 42)
-        self.assertEqual(data, frame(9))
-
-    def test_latest_copy_gives_up_when_always_torn(self):
-        """書き込み中のままなら諦めて None を返すこと（無限ループしない）。"""
-        r = self.create(n_slots=4)
-        r.write(frame(1), t_capture_ns=1)
-        off = r._slot_meta_off(0)
-        seq, t, fid, n = struct.unpack_from("<4Q", r._shm.buf, off)
-        struct.pack_into("<4Q", r._shm.buf, off, seq + 1, t, fid, n)
-        self.assertIsNone(r.latest_copy(retries=3))
 
 
 class TestReadByDesc(RingCase):

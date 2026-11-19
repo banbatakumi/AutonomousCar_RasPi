@@ -6,14 +6,11 @@
 from __future__ import annotations
 
 import math
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs import VehicleState  # noqa: E402
-from raspi.rec.odom import DeadReckoner  # noqa: E402
+from raspi.msgs import VehicleState
+from raspi.rec.odom import DeadReckoner
 
 MS = 1_000_000
 DT_NS = 10 * MS                            # 100Hz

@@ -46,12 +46,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import time
 from pathlib import Path
 from typing import BinaryIO, NamedTuple
 
 import numpy as np
+
+from ..core.atomic import atomic_write_bytes, atomic_write_text, atomic_writer
 
 __all__ = ["MAPS_DIR", "LoadedMap", "resolve_map_path", "list_maps",
            "save_map", "load_map", "delete_map", "validate_upload", "save_upload",
@@ -132,18 +133,6 @@ def polyline_length(xy: np.ndarray) -> float:
     return float(np.hypot(d[:, 0], d[:, 1]).sum())
 
 
-def _write_text_atomic(p: Path, text: str, *, sync: bool) -> None:
-    """`p` へ原子的に書く。`sync` なら差し替える前にディスクまで落とす（`_write_npz_atomic`）。
-    走行中に何度も書く小さなファイル（`.grip.json`）は `sync=False`（計画の周期を止めない）。"""
-    tmp = p.with_name(p.name + ".tmp")
-    with open(tmp, "w") as f:
-        f.write(text)
-        if sync:
-            f.flush()
-            os.fsync(f.fileno())
-    os.replace(tmp, p)
-
-
 def _write_meta(target: Path, loaded: LoadedMap) -> None:
     height, width = loaded.trinary.shape
     meta = {
@@ -156,7 +145,7 @@ def _write_meta(target: Path, loaded: LoadedMap) -> None:
     }
     # 途中で落ちても壊れた JSON を残さない（壊れると `list_maps` がその地図を黙って飛ばす）
     p = _meta_path(target)
-    _write_text_atomic(p, json.dumps(meta, allow_nan=False), sync=True)
+    atomic_write_text(p, json.dumps(meta, allow_nan=False), fsync=True)
 
 
 # ── 一覧 ──
@@ -211,26 +200,21 @@ def save_map(name: str, *, resolution: float, origin_x: float, origin_y: float,
         created_at=float(created_at))
     _check_finite(loaded)       # 読み込み側が弾く地図を、保存の時点で断る（一覧に居座って消せなくなる）
 
-    tmp = target.with_name(target.name + ".tmp")
-    # **ファイルオブジェクトを渡す。** `np.savez_compressed(path, ...)` は
-    # 拡張子が`.npz`で終わっていないと自動で足してしまい、`<name>.npz.tmp`が
-    # `<name>.npz.tmp.npz`として書かれて後続の`os.replace`が壊れる
-    _write_npz_atomic(tmp, target, loaded)
+    _write_npz_atomic(target, loaded)
     _write_meta(target, loaded)
 
 
-def _write_npz_atomic(tmp: Path, target: Path, m: LoadedMap) -> None:
-    """`tmp` へ書いて**ディスクまで落としてから**（fsync）`target` へ原子的に差し替える。
+def _write_npz_atomic(target: Path, m: LoadedMap) -> None:
+    """一時ファイルへ書いて**ディスクまで落としてから**（fsync）`target` へ原子的に差し替える。
 
     地図は数分かけて作るもので、作った直後に電源を切られることが多い（バッテリーを抜く）。
     fsync しないと、差し替えだけがディスクに残って中身の無いファイルになりうる。
     走行中に何度も書く小さなファイル（`.grip.json`）は fsync しない（計画の周期を止めない）。
+    **ファイルオブジェクトを渡す。** `np.savez_compressed(path, ...)` は拡張子が `.npz` で
+    終わっていないと自動で足してしまい、一時ファイルの名前がずれる。
     """
-    with open(tmp, "wb") as f:
+    with atomic_writer(target, "wb", fsync=True) as f:
         _write_npz(f, m)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, target)
 
 
 def _write_npz(f: BinaryIO, m: LoadedMap, *, routes: str | None = None,
@@ -390,8 +374,7 @@ def import_upload(name: str, data: bytes) -> tuple[LoadedMap | None, str]:
     except Exception as e:                  # noqa: BLE001  壊れ方は問わない（`_load_npz`）
         return None, f"同梱の経路の設定が不正です（{e}）"
     MAPS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".tmp")
-    _write_npz_atomic(tmp, target, loaded)  # 同梱の経路の設定はディスクの npz に残さない
+    _write_npz_atomic(target, loaded)  # 同梱の経路の設定はディスクの npz に残さない
     _write_meta(target, loaded)
     if routes is None:
         _routes_path(target).unlink(missing_ok=True)
@@ -448,7 +431,7 @@ def save_routes(name: str, text: str) -> bool:
     if target is None or not target.is_file():
         return False
     # 人が置いた経由点・停止点。電源を切られても失わないよう fsync する（編集のたびで、周期の中ではない）
-    _write_text_atomic(_routes_path(target), text, sync=True)
+    atomic_write_text(_routes_path(target), text, fsync=True)
     return True
 
 
@@ -470,7 +453,7 @@ def save_grip(name: str, text: str) -> bool:
     target = resolve_map_path(name)
     if target is None or not target.is_file():
         return False
-    _write_text_atomic(_grip_path(target), text, sync=False)
+    atomic_write_text(_grip_path(target), text, fsync=False)
     return True
 
 
@@ -516,7 +499,7 @@ def save_line_cache(name: str, key: str, data: bytes) -> None:
     if target is None or not target.is_file():
         return
     try:
-        _write_bytes_atomic(_lines_path(target), json.dumps({"key": key}).encode() + b"\n" + data)
+        atomic_write_bytes(_lines_path(target), json.dumps({"key": key}).encode() + b"\n" + data)
     except OSError:
         pass
 
@@ -536,7 +519,3 @@ def load_line_cache(name: str, key: str) -> bytes | None:
     return data or None
 
 
-def _write_bytes_atomic(p: Path, data: bytes) -> None:
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, p)

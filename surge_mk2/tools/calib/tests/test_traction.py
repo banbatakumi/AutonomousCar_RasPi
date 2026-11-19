@@ -7,7 +7,8 @@ import unittest
 from raspi.auto.calib_traction_check import CalibTractionCheck
 from raspi.auto.calib_tyre import CalibTyre
 from raspi.auto.calib_wheel import CalibWheel
-from tools.calib import simcar, traction, traction_sim, tyre, wheel
+from tools.calib import simcar, traction, tyre, wheel
+from tools.calib.tests import traction_sim
 from tools.calib.slip_gains import SLIP_TARGET, gains_for_inertia
 
 R = 0.030

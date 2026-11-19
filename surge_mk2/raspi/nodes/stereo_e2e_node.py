@@ -24,27 +24,19 @@
 from __future__ import annotations
 
 import argparse
-import json
-import signal
-import sys
-import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.cam_e2e_preproc import (  # noqa: E402
-    PREPROC_VERSION_STEREO,
-    STEREO_CAMS,
+from raspi.core.cam_e2e_preproc import (
     STEREO_PAIR_TOL_NS,
     preprocess_stereo,
     to_rgb,
 )
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.stereo_e2e_preproc import (  # noqa: E402
+from raspi.core.onnx_session import make_session
+from raspi.core.stereo_e2e_preproc import (
     DISP_VERSION,
     INPUT_NAMES,
     PREPROC_VERSION,
@@ -56,11 +48,9 @@ from raspi.core.stereo_e2e_preproc import (  # noqa: E402
     output_size,
     state_input,
 )
-from raspi.msgs import E2EFusionPlan, StereoDisp, VehicleState  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.msgs import E2EFusionPlan, StereoDisp, VehicleState
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
-    TOPIC_HB_PREFIX,
     TOPIC_IMAGE_FRONT,
     TOPIC_IMAGE_LEFT,
     TOPIC_STEREO_DISP,
@@ -68,7 +58,11 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_STEREO_E2E_PLAN,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nodes.e2e_fusion_node import pick_model_name  # noqa: E402
+from raspi.nodes.e2e_base import E2ENodeBase, check_contract, pick_model_names
+from raspi.core.log import get_logger, setup_logging
+from raspi.core.runner import run_node
+
+_log = get_logger("stereo_e2e")
 
 __all__ = ["StereoOnnx", "load_model", "StereoE2ENode", "MODES", "DEFAULT_MODELS_DIR", "MODEL_CONF"]
 
@@ -77,7 +71,6 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "stereo_e2e"
 MODEL_CONF = REPO_ROOT / "config" / "stereo_e2e_model.json"
 
 NS = 1_000_000_000
-HB_HZ = 10
 #: 推論を必要とする自動運転モード
 MODES = ("stereo_e2e",)
 #: 推論の上限頻度の既定 [Hz]
@@ -88,8 +81,6 @@ _RATE_JITTER = 0.1
 _DISP_STALE_S = 0.3
 #: 推論中に視差が来ないとき、`ready=False` を出す間隔 [s]
 _NO_DISP_REPORT_S = 0.5
-#: 推論していない間、モデルの選び直しを見る間隔 [s]
-_MODEL_CHECK_S = 2.0
 #: 契約に要るキー
 _CONTRACT_KEYS = ("input_size", "crop_x", "disp_hw", "disp_crop_cols", "disp_num_disp", "disp_rows", "disp_scale", "disp_version",
                   "k", "ds", "xy_scale", "max_steer", "speed_ref", "yaw_rate_ref")
@@ -99,16 +90,8 @@ class StereoOnnx:
     """ONNX 推論の薄いラッパ。契約（入出力の形と正規化）はモデル同梱の JSON から読む。"""
 
     def __init__(self, model_path: str, cfg: dict) -> None:
-        import onnxruntime as ort
-
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 2
-        opts.inter_op_num_threads = 1
-        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
         self.path = model_path
-        self.session = ort.InferenceSession(model_path, sess_options=opts,
-                                            providers=["CPUExecutionProvider"])
+        self.session = make_session(model_path)
         names = tuple(i.name for i in self.session.get_inputs())
         if names != INPUT_NAMES:
             raise ValueError(f"入力名が {list(INPUT_NAMES)} ではない: {list(names)}")
@@ -176,32 +159,12 @@ class StereoOnnx:
 
 def load_model(onnx_path: Path) -> StereoOnnx:
     """`<name>.onnx` と同梱の `<name>.json` から読む。**契約が合わないモデルは読まない**（例外）。"""
-    if not onnx_path.exists():
-        raise FileNotFoundError(f"モデルが見つかりません: {onnx_path}")
-    cfg_path = onnx_path.with_suffix(".json")
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"契約ファイルがありません: {cfg_path}")
-    cfg = json.loads(cfg_path.read_text())
-    if cfg.get("preproc_version") != PREPROC_VERSION:
-        raise ValueError(f"入出力の版が違う（モデル {cfg.get('preproc_version')}・ノード {PREPROC_VERSION}）。"
-                         "`ml_stereo_e2e.export_onnx` で書き出し直す")
-    if cfg.get("image_preproc_version") != PREPROC_VERSION_STEREO:
-        raise ValueError(f"画像の前処理の版が違う（モデル {cfg.get('image_preproc_version')}・"
-                         f"ノード {PREPROC_VERSION_STEREO}）")
-    if tuple(cfg.get("cams", ())) != STEREO_CAMS:
-        raise ValueError(f"cams が {list(STEREO_CAMS)} ではない: {cfg.get('cams')}")
-    for key in _CONTRACT_KEYS:
-        if key not in cfg:
-            raise ValueError(f"契約に {key} が無い")
+    cfg = check_contract(onnx_path, preproc_version=PREPROC_VERSION, export_hint="ml_stereo_e2e.export_onnx",
+                         required=_CONTRACT_KEYS, positive=("max_steer", "speed_ref", "yaw_rate_ref", "ds", "xy_scale"))
     if cfg["disp_version"] != DISP_VERSION:
         raise ValueError(f"視差の版が違う（モデル {cfg['disp_version']}・ノード {DISP_VERSION}）")
-    if not 0.0 < float(cfg["crop_x"]) < 0.3:
-        raise ValueError(f"crop_x が不正: {cfg['crop_x']}")
     if not 0 <= int(cfg["disp_crop_cols"]) < int(cfg["disp_hw"][1]) // 2:
         raise ValueError(f"disp_crop_cols が不正: {cfg['disp_crop_cols']}")
-    for key in ("max_steer", "speed_ref", "yaw_rate_ref", "ds", "xy_scale"):
-        if not float(cfg[key]) > 0:
-            raise ValueError(f"{key} が正でない: {cfg[key]}")
     model = StereoOnnx(str(onnx_path), cfg)
     out_dim = model.session.get_outputs()[0].shape[-1]
     if isinstance(out_dim, int) and out_dim != output_size(model.k):
@@ -209,93 +172,24 @@ def load_model(onnx_path: Path) -> StereoOnnx:
     return model
 
 
-class StereoE2ENode:
-    """**`infer_once()` はバス・共有メモリを知らない純粋な計算。** `run()`（実バス配線）とテストの両方がここを通る。"""
+class StereoE2ENode(E2ENodeBase[StereoOnnx]):
+    """**`infer_once()` はバス・共有メモリを知らない純粋な計算。** `run()`（`E2ENodeBase`）とテストの両方がここを通る。"""
+
+    NAME = "stereo_e2e"
+    MODES = MODES
+    MODEL_TOPIC = TOPIC_STEREO_E2E_MODEL
+    PLAN_TOPIC = TOPIC_STEREO_E2E_PLAN
+    MODEL_CONF = MODEL_CONF
+    BACKGROUND_LOAD = True
 
     def __init__(self, *, model: StereoOnnx | None = None, models_dir: Path | None = None,
                  model_name: str = "", rate_hz: float = DEFAULT_RATE_HZ) -> None:
-        self.model = model
-        self.models_dir = models_dir or DEFAULT_MODELS_DIR
-        self.model_name = model_name
+        super().__init__(load_model=lambda p: load_model(p), models_dir=models_dir or DEFAULT_MODELS_DIR,
+                         model=model, model_name=model_name)
         self.min_period_ns = int(NS / max(0.5, rate_hz))
-        self._failed_key: tuple | None = None
-        #: 別スレッドで読んでいるモデルの名前と、読み終えた結果 `(名前, キー, モデル, 例外)`（`reload_in_background`）
-        self._loading: str | None = None
-        self._loaded: tuple | None = None
         self._last_disp_seq = -1
         #: 次に推論してよい撮影時刻 [ns]（-1 = まだ一度も推論していない）
         self._next_infer_t = -1
-        self._running = False
-        self._active = False
-        self._reader = FrameReader()
-        self._reader_left = FrameReader()
-
-    def close(self) -> None:
-        self._reader.close()
-        self._reader_left.close()
-
-    # ── モデル ──
-
-    def _model_key(self, name: str) -> tuple:
-        path = self.models_dir / f"{name}.onnx"
-
-        def mtime(p: Path):
-            try:
-                return p.stat().st_mtime_ns
-            except OSError:
-                return None
-
-        return (name, mtime(path), mtime(path.with_suffix(".json")))
-
-    def _adopt(self, name: str, key: tuple, model: StereoOnnx | None, err: Exception | None) -> bool:
-        if model is not None:
-            self.model = model
-            self.model_name = name
-            self._failed_key = None
-            print(f"# モデル切替: {name}", flush=True)
-            return True
-        self._failed_key = key
-        print(f"# モデル読み込み失敗（{name}）: {err}。前のモデルのまま続行", file=sys.stderr, flush=True)
-        return False
-
-    def reload_if_changed(self, name: str) -> bool:
-        """`name` のモデルへ切り替える。失敗しても今のモデルを保持し、同じファイルは再試行しない。"""
-        if not name or name == self.model_name:
-            return False
-        key = self._model_key(name)
-        if key == self._failed_key:
-            return False
-        try:
-            return self._adopt(name, key, load_model(self.models_dir / f"{name}.onnx"), None)
-        except Exception as e:                                # noqa: BLE001
-            return self._adopt(name, key, None, e)
-
-    def reload_in_background(self, name: str) -> None:
-        """`reload_if_changed` を別スレッドで（ONNX のセッションを作る間、推論のループを塞がない。レビュー L21）。
-        読み終えたら次の `take_loaded()` で差し替える。読んでいる間は今のモデルで推論を続ける。"""
-        if not name or name == self.model_name or self._loading is not None:
-            return
-        key = self._model_key(name)
-        if key == self._failed_key:
-            return
-        self._loading = name
-
-        def work() -> None:
-            try:
-                got = (name, key, load_model(self.models_dir / f"{name}.onnx"), None)
-            except Exception as e:                            # noqa: BLE001
-                got = (name, key, None, e)
-            self._loaded = got
-
-        threading.Thread(target=work, name="stereo_e2e-load", daemon=True).start()
-
-    def take_loaded(self) -> bool:
-        """別スレッドで読み終えたモデルがあれば差し替える。差し替えたら True。"""
-        got, self._loaded = self._loaded, None
-        if got is None:
-            return False
-        self._loading = None
-        return self._adopt(*got)
 
     # ── 1回の推論（純粋な計算） ──
 
@@ -320,7 +214,7 @@ class StereoE2ENode:
             state = m.state_input(vs.speed, vs.steer_actual, vs.yaw_rate) if vs is not None else None
             out = m.infer(image, d, state)
         except Exception as e:                                # noqa: BLE001
-            print(f"# stereo_e2e の推論が例外: {e}", file=sys.stderr, flush=True)
+            _log.info(f"stereo_e2e の推論が例外: {e}")
             return self.failed(f"推論に失敗: {e}", seq=seq)
         return E2EFusionPlan(
             ready=True,
@@ -363,68 +257,23 @@ class StereoE2ENode:
             return None, None
         return to_rgb(got[0], ref.fmt), to_rgb(got_l[0], left.fmt)
 
-    # ── ループ（実バス配線） ──
+    # ── 推論中の1周期（`E2ENodeBase.run` から） ──
 
-    def stop(self) -> None:
-        self._running = False
-
-    def run(self, *, sub, pub, duration_s: float | None = None, fixed_model: bool = False) -> None:
-        self._running = True
-        seq = 0
-        t_end = time.monotonic() + duration_s if duration_s else None
-        next_hb = time.monotonic_ns()
-        next_model_check = 0.0
-        last_pub = 0
-        pacer = IdlePacer()
-        while self._running:
-            if t_end and time.monotonic() >= t_end:
-                break
-            for _ in sub.poll(pacer.poll_timeout_ms(self._active)):
-                pass
-            latest = sub.latest
-            auto_ctrl = latest.get(TOPIC_AUTO_CTRL)
-            vs = latest.get(TOPIC_VEHICLE_STATE)
-            wanted = latest.get(TOPIC_STEREO_E2E_MODEL)
-            chosen = wanted.name if wanted is not None and not fixed_model else ""
-            self.take_loaded()
-            if chosen:
-                self.reload_in_background(chosen)
-            active = cam_infer_active(auto_ctrl, vs, MODES)
-            if active != self._active:
-                self._active = active
-                print(f"# stereo_e2e {'推論開始' if active else '推論停止'}", flush=True)
-
-            now = time.monotonic_ns()
-            plan: E2EFusionPlan | None = None
-            if not active:
-                if not fixed_model and not chosen and time.monotonic() >= next_model_check:
-                    next_model_check = time.monotonic() + _MODEL_CHECK_S
-                    conf = self.models_dir / "__none__.json" if wanted is not None else MODEL_CONF
-                    self.reload_if_changed(pick_model_name(self.models_dir, conf))
-                if pacer.should_publish(active, now):
-                    plan = self.failed("このモードが選ばれていない、または DISARM 中", seq=seq)
-            else:
-                disp = self.take_new_disp(latest.get(TOPIC_STEREO_DISP))
-                if disp is not None:
-                    rgb, rgb_left = self.read_pair(latest, int(disp.t_capture))
-                    plan = self.infer_once(disp=disp, rgb=rgb, rgb_left=rgb_left, vs=vs, now_ns=now, seq=seq)
-                elif now - last_pub > _NO_DISP_REPORT_S * NS:
-                    cur = latest.get(TOPIC_STEREO_DISP)
-                    plan = self.infer_once(disp=cur, rgb=None, rgb_left=None, vs=vs, now_ns=now, seq=seq)
-                    if plan.ready:
-                        plan = None                 # 届いている（間引いただけ）
-            if plan is not None:
-                pub.send(TOPIC_STEREO_E2E_PLAN, plan)
-                seq += 1
-                last_pub = now
-
-            if now >= next_hb:
-                next_hb = now + NS // HB_HZ
-                pub.send(TOPIC_HB_PREFIX + "stereo_e2e", HbMsg(node="stereo_e2e"))
-            pacer.idle_sleep(active)
+    def step(self, latest: dict, vs, now_ns: int, seq: int, last_pub_ns: int) -> E2EFusionPlan | None:
+        """新しい視差ごとに1回推論する。視差が来ない間は、届かない理由をときどき流す。"""
+        disp = self.take_new_disp(latest.get(TOPIC_STEREO_DISP))
+        if disp is not None:
+            rgb, rgb_left = self.read_pair(latest, int(disp.t_capture))
+            return self.infer_once(disp=disp, rgb=rgb, rgb_left=rgb_left, vs=vs, now_ns=now_ns, seq=seq)
+        if now_ns - last_pub_ns > _NO_DISP_REPORT_S * NS:
+            plan = self.infer_once(disp=latest.get(TOPIC_STEREO_DISP), rgb=None, rgb_left=None, vs=vs,
+                                   now_ns=now_ns, seq=seq)
+            return None if plan.ready else plan       # ready なら届いている（間引いただけ）
+        return None
 
 
 def main() -> int:
+    setup_logging("stereo_e2e")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None,
                     help="使うモデルを固定する（ONNX のパス。同名の .json が必要）。省略時は設定ファイルか最新")
@@ -440,24 +289,14 @@ def main() -> int:
         node.model = load_model(Path(args.model))
         node.model_name = Path(args.model).stem
     else:
-        node.reload_if_changed(pick_model_name(node.models_dir, MODEL_CONF))
+        node.reload_first_usable(pick_model_names(node.models_dir, MODEL_CONF))
 
     pub = Publisher("stereo_e2e")
     sub = Subscriber({TOPIC_STEREO_DISP: LATEST, TOPIC_IMAGE_FRONT: LATEST, TOPIC_IMAGE_LEFT: LATEST,
                       TOPIC_VEHICLE_STATE: LATEST, TOPIC_AUTO_CTRL: LATEST, TOPIC_STEREO_E2E_MODEL: LATEST})
-    print(f"# stereo_e2e_node  publish {pub.endpoint}  モデル: {node.model_name or '（なし）'}", flush=True)
+    _log.info(f"stereo_e2e_node  publish {pub.endpoint}  モデル: {node.model_name or '（なし）'}")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-    try:
-        node.run(sub=sub, pub=pub, duration_s=args.duration, fixed_model=bool(args.model))
-    finally:
-        node.close()
-        sub.close()
-        pub.close()
+    run_node(node, lambda: node.run(sub=sub, pub=pub, duration_s=args.duration, fixed_model=bool(args.model)), close=(sub, pub))
     return 0
 
 

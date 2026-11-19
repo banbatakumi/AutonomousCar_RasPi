@@ -4,16 +4,13 @@
 こと（`centerline.py` の docstring「壁の小さな穴が中心線を暴れさせる」参照）。
 """
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.nav import centerline as cl  # noqa: E402
-from raspi.nav.grid import OccGrid  # noqa: E402
+from raspi.nav import centerline as cl
+from raspi.nav.grid import OccGrid
 
 
 def straight_corridor(width: float = 0.6, length: float = 4.0, res: float = 0.05,

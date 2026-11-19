@@ -69,29 +69,27 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import signal
-import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.core.auto_gate import IdlePacer, cam_infer_active  # noqa: E402
-from raspi.core.cam_e2e_preproc import (  # noqa: E402
+from raspi.core.auto_gate import IdlePacer, cam_infer_active
+from raspi.core.cam_e2e_preproc import (
     PREPROC_VERSION_STEREO,
     STEREO_CAMS,
     STEREO_PAIR_TOL_NS,
     preprocess_stereo,
     to_rgb,
 )
-from raspi.core.control_params import steer_relink  # noqa: E402
-from raspi.core.frame_reader import FrameReader  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import CamE2ECmd, ImageRef  # noqa: E402
-from raspi.msgs import Heartbeat as HbMsg  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.core.control_params import steer_relink
+from raspi.core.frame_reader import FrameReader
+from raspi.core.onnx_session import make_session
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import CamE2ECmd, ImageRef
+from raspi.msgs import Heartbeat as HbMsg
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_E2E_MODEL,
@@ -100,6 +98,10 @@ from raspi.msgs.types import (  # noqa: E402
     TOPIC_IMAGE_LEFT,
     TOPIC_VEHICLE_STATE,
 )
+from raspi.core.log import get_logger, setup_logging
+from raspi.core.runner import run_node
+
+_log = get_logger("cam_e2e")
 
 __all__ = ["MODEL_OUTPUTS", "RegressionModel", "load_model", "CamE2ENode"]
 
@@ -132,16 +134,7 @@ class RegressionModel:
                 mean: float = 0.0, std: float = 255.0, max_steer: float = 0.0,
                 speed_ref: float = 0.0,
                 steer_link: tuple[float, float] | None = None, crop_x: float = 0.0) -> None:
-        import onnxruntime as ort
-
-        # `cam_perception_node.SegmentationModel` と同じ省電力設定
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 2
-        opts.inter_op_num_threads = 1
-        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
-        self.session = ort.InferenceSession(model_path, sess_options=opts,
-                                            providers=["CPUExecutionProvider"])
+        self.session = make_session(model_path)
         self.input_name = self.session.get_inputs()[0].name
         self.input_size = input_size           # (width, height)
         self.mean = mean
@@ -206,9 +199,8 @@ def load_model(onnx_path: Path) -> RegressionModel:
         gain, cubic = cfg["steer_link"]
         steer_link = (float(gain), float(cubic))
     else:
-        print(f"# {onnx_path.name}: 契約 JSON に steer_link が無い（舵角をそのまま使う。"
-              f"ステアの換算が違う車で学習したモデルなら舵の切れ角がずれる）",
-              file=sys.stderr, flush=True)
+        _log.info(f"{onnx_path.name}: 契約 JSON に steer_link が無い（舵角をそのまま使う。"
+              f"ステアの換算が違う車で学習したモデルなら舵の切れ角がずれる）")
     return RegressionModel(str(onnx_path), input_size=(int(w), int(h)),
                            mean=float(cfg.get("mean", 0.0)),
                            std=float(cfg.get("std", 255.0)),
@@ -272,12 +264,12 @@ class CamE2ENode:
             self.model = load_model(onnx_path)
             self._loaded_model_name = desired_name
             self._failed_model_key = None
-            print(f"# モデル切替: {desired_name}", flush=True)
+            _log.info(f"モデル切替: {desired_name}")
             return True
         except Exception as e:                                # noqa: BLE001
             self._failed_model_key = key
-            print(f"# モデル読み込み失敗（{desired_name}）: {e}。"
-                 f"前のモデルのまま続行", file=sys.stderr, flush=True)
+            _log.info(f"モデル読み込み失敗（{desired_name}）: {e}。"
+                 f"前のモデルのまま続行")
             return False
 
     # ── 1周期ぶんの処理（純粋関数） ──
@@ -335,7 +327,7 @@ class CamE2ENode:
             # 推論側のバグでノード全体を巻き込んで落とさない。
             # 契約の「ready=False」に自然に落とす
             # （`planning_node._replan()` と同じパターン）
-            print(f"# cam_e2e process_frame() が例外: {e}", file=sys.stderr, flush=True)
+            _log.info(f"cam_e2e process_frame() が例外: {e}")
             return self.failed_cmd(seq=seq, t_capture_ns=t_capture)
         link = self.model.steer_link
         if link is not None and self.model.max_steer > 0 and math.isfinite(steer_norm):
@@ -382,7 +374,7 @@ class CamE2ENode:
                     reason = "非選択: 推論停止"
                 else:
                     reason = "DISARM: 推論停止"
-                print(f"# {mode} {reason}", flush=True)
+                _log.info(f"{mode} {reason}")
 
             now = time.monotonic_ns()
             # IDLE中は約2Hzに間引く（`IdlePacer`。省電力）。
@@ -425,6 +417,7 @@ class CamE2ENode:
 
 
 def main() -> int:
+    setup_logging("cam_e2e")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=None,
@@ -445,20 +438,9 @@ def main() -> int:
     sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_IMAGE_LEFT: LATEST, TOPIC_VEHICLE_STATE: LATEST,
                       TOPIC_CAM_E2E_MODEL: LATEST, TOPIC_AUTO_CTRL: LATEST})
 
-    print(f"# cam_e2e_node  publish {pub.endpoint}  cam_e2e/cmd へ配信")
+    _log.info(f"cam_e2e_node  publish {pub.endpoint}  cam_e2e/cmd へ配信")
 
-    def _shutdown(*_):
-        node.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _shutdown)
-
-    try:
-        node.run(sub=sub, pub=pub, duration_s=args.duration)
-    finally:
-        node.close()
-        sub.close()
-        pub.close()
+    run_node(node, lambda: node.run(sub=sub, pub=pub, duration_s=args.duration), close=(sub, pub))
     return 0
 
 

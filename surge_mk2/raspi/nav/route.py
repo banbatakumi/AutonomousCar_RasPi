@@ -42,6 +42,7 @@ import numpy as np
 from . import centerline as cl_mod
 from . import raceline as rl_mod
 from .roadgraph import CorridorGrid, RoadGraph
+from .se2 import wrap_angle
 
 __all__ = ["Waypoint", "RoutePath", "RouteError", "plan_loop", "plan_to", "build_raceline",
            "waypoints_from_traj", "snap", "tightest_radius",
@@ -136,8 +137,6 @@ def _heading(a, b) -> float:
     return math.atan2(float(b[1] - a[1]), float(b[0] - a[0]))
 
 
-def _wrap(a: float) -> float:
-    return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
 #: 経由点どうしを「同じ場所」とみなす距離 [m]（`plan_loop`）
@@ -222,7 +221,7 @@ def _leg(graph: RoadGraph, geo: _Geom, a: _Snap, da: int, b: _Snap, db: int,
                 if ed.dir_allowed and ed.dir_allowed != d2:
                     continue
                 h_out = geo.out_h[e2][0 if d2 > 0 else 1]
-                if abs(_wrap(h_out - h_in)) > turn_max:
+                if abs(wrap_angle(h_out - h_in)) > turn_max:
                     continue
                 if e2 == b.edge and d2 == db:
                     to_b = b.s if d2 > 0 else geo.length(e2) - b.s
@@ -472,7 +471,7 @@ def enumerate_loops(graph: RoadGraph, start: Waypoint, *, turn_max_deg: float = 
             for d2 in (+1, -1):
                 if entry_node(e2, d2) != n or (ed.dir_allowed and ed.dir_allowed != d2):
                     continue
-                if abs(_wrap(geo.out_h[e2][0 if d2 > 0 else 1] - h_in)) > turn_max:
+                if abs(wrap_angle(geo.out_h[e2][0 if d2 > 0 else 1] - h_in)) > turn_max:
                     continue
                 if (e2, d2) == (a.edge, d0):
                     loops.append((cost + end_cost, steps + [(e2, d2)]))

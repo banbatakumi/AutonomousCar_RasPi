@@ -5,15 +5,12 @@
 
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from raspi.msgs.types import UiEvent  # noqa: E402
-from raspi.nodes.io_node import IoNode  # noqa: E402
-from raspi.tests.test_io_node_log import FakeLink  # noqa: E402
+from raspi.msgs.types import UiEvent
+from raspi.nodes.io_node import IoNode
+from raspi.tests.test_io_node_log import FakeLink
 
 
 class TestUiEventSeqReset(unittest.TestCase):

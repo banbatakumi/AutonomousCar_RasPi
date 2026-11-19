@@ -343,20 +343,6 @@ class FrameRing:
                          self.width, self.height, self.fmt, self.stride, nbytes)
         return FrameRef(self, desc, lock)
 
-    def latest_copy(self, retries: int = 8) -> tuple[FrameDesc, bytes] | None:
-        """最新フレームを**安全にコピー**して返す。上書きされたら再試行する。
-
-        ゼロコピーの参照を扱いたくない場面（記録・送信）用。
-        """
-        for _ in range(retries):
-            ref = self.latest()
-            if ref is None:
-                return None
-            data = ref.copy()
-            if ref.still_valid():
-                return ref.desc, data
-        return None
-
     def read(self, desc: FrameDesc) -> FrameRef | None:
         """バスから受け取った説明を使って該当スロットを参照する。
 

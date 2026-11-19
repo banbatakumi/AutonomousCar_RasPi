@@ -6,30 +6,27 @@
 （`test_cam_perception_node.py` と同じ「配管のテスト」の流儀）。
 """
 
-import sys
 import time
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from raspi.bus import FrameRing  # noqa: E402
-from raspi.core.vehicle import Vehicle  # noqa: E402
-from raspi.msgs import AutoCtrl, ImageRef, VehicleState  # noqa: E402
-from raspi.msgs.types import (  # noqa: E402
+from raspi.bus import FrameRing
+from raspi.core.vehicle import Vehicle
+from raspi.msgs import AutoCtrl, ImageRef, VehicleState
+from raspi.msgs.types import (
     TOPIC_AUTO_CTRL,
     TOPIC_IMAGE_FRONT,
     TOPIC_LINE_CAM,
     TOPIC_VEHICLE_STATE,
 )
-from raspi.nav.ipm import vehicle_camera_intrinsics  # noqa: E402
-from raspi.nodes.line_perception_node import (  # noqa: E402
+from raspi.nav.ipm import vehicle_camera_intrinsics
+from raspi.nodes.line_perception_node import (
     LinePerceptionNode,
     white_mask,
 )
-from raspi.tests.fakes import FakePub, FakeSub  # noqa: E402
+from raspi.tests.fakes import FakePub, FakeSub
 
 
 def _frame_with_white_column(h: int, w: int, col: int, *, band_width: int = 20) -> np.ndarray:
