@@ -88,7 +88,8 @@ DEFAULT_ROWS = (150, 260)
 RECT_HFOV_RAD = math.radians(100)
 #: 深度映像の JPEG の幅の上限 [px]（表示専用）
 DEPTH_JPEG_W = 320
-#: OpenCV（照合）のスレッド数の既定。Pi 5 の実測で 1 → 2 で処理 44 → 32ms、制御系電流は差なし（A-B-A-B）
+#: OpenCV（照合）のスレッド数の既定。ARM 中 15Hz の A-B-A-B（2026-11-19、`docs/stereo_plan.md` 段階7）で処理の中央値は
+#: 1: 30ms・2: 19ms・3: 22ms・4: 26ms。電流は 1 と 2 が同じで、4 は約 +50mA
 DEFAULT_THREADS = 2
 
 
