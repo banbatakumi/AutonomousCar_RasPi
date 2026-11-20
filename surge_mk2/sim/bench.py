@@ -75,6 +75,14 @@ from raspi.nav.body_mask import body_ranges, mask_body  # noqa: E402
 from raspi.proto.generated import packets  # noqa: E402
 
 from .bench_events import BenchEvents  # noqa: E402
+from .bench_faults import (  # noqa: E402
+    KidnapRunner,
+    blank_scan,
+    carve_rects,
+    parse_kidnap,
+    parse_place,
+    parse_rect,
+)
 from .bench_record import TraceWriter  # noqa: E402
 from .bench_report import Result  # noqa: E402
 from .course import list_courses  # noqa: E402
@@ -135,6 +143,10 @@ class BenchOptions:
     state_dir: Path | None = None
     hijacks: list[tuple[float, float, float, float]] | None = None
     plan_slowdown: float = 1.0
+    #: `--kidnap`: (走行開始からの秒, DX, DY, DYAW[deg], 持ち上げ[s])
+    kidnaps: list[tuple] | None = None
+    #: `--wall-gap`: 世界の壁を消す矩形 (x0, y0, x1, y1)
+    wall_gaps: list[tuple[float, float, float, float]] | None = None
 
 
 class Bench:
@@ -247,6 +259,12 @@ class Bench:
             c = self.sim.course
             stamp_discs(c.grid, c.origin, c.resolution, list(o.obstacles))
             c._padded_grid = None
+        if o.wall_gaps:
+            # 壁の欠け: シムの世界からだけ消す（`--map` の凍結地図には残る）
+            c = self.sim.course
+            n = carve_rects(c.grid, c.origin, c.resolution, list(o.wall_gaps))
+            c._padded_grid = None
+            self._wall_gap_cells = n
         self._movers = []
         self._mv_col = 0
         if o.movers:
@@ -303,6 +321,9 @@ class Bench:
         #: 走行開始から `(t, dur, steer, speed)` の間、指令を乗っ取る（人が押した・ぶつかって弾かれた代わり。
         #: 経路から外れた・壁に当たった所から戻れるかを見る）
         self._hijacks = sorted(o.hijacks or [])
+        #: `--kidnap`（`sim/bench_faults.py`）
+        self._kidnap = KidnapRunner(list(o.kidnaps or [])) if o.kidnaps else None
+        self._wrong_xy: tuple[float, float] | None = None
         self.mode = mode
         self.params = merged_params(mode, params, hidden=True)
         self.max_speed = o.max_speed
@@ -449,6 +470,8 @@ class Bench:
             frames = self.link.poll()
             if self._movers:
                 self._step_movers(t0)
+            if self._kidnap is not None:
+                self._kidnap.step(time.monotonic() - t0, self._race_t0, self.sim.vehicle)
             self._took("シム", t_poll)
             for f in frames:
                 self._on_frame(f, t0)
@@ -477,7 +500,12 @@ class Bench:
         c = self.sim.course
         path = getattr(self.planner, "path", None)
         for m in self._movers:
-            if (m.center is None and path is not None and len(path) >= 3
+            # ★ 経路の計算（仕上げ）が終わってから結び付ける。最初の経路（仕上げ前・速度の低い線）に結ぶと、
+            #   他車はそれを自車と違う線・遅い速度で走り続け、結ぶタイミング次第で結果が大きく変わった
+            #   （同じ設定で 2 周目以降の平均 12.3 秒と 16.2 秒）
+            busy = getattr(self.planner, "_job", None) is not None
+            if (m.center is None and path is not None and len(path) >= 3 and not busy
+                    and getattr(path, "closed", True)
                     and (self._map_origin is not None or not self._map_name)):
                 ox, oy, oyaw = self._map_origin or self._origin
                 cs, sn = math.cos(oyaw), math.sin(oyaw)
@@ -555,6 +583,8 @@ class Bench:
         now = time.monotonic_ns()
         dt = (now - self._last_plan_ns) / NS if self._last_plan_ns else 0.0
         self._last_plan_ns = now
+        if self._kidnap is not None and self._kidnap.holding:
+            scan = blank_scan(scan)          # 持ち上げている間は何も見えない
         scan = mask_body(scan, self._body)
         scan = self._scan_filter.apply(scan, self.vs)
         self.scan_dropped += self._scan_filter.dropped
@@ -642,6 +672,9 @@ class Bench:
     def _finish_run(self) -> None:
         """走り終えたときの集計（衝突・回避の計算時間・理想ラップ）と記録の後始末。"""
         self.res.collisions = self.sim.vehicle.collisions
+        if self._kidnap is not None:
+            self.res.kidnaps = [k.line() for k in self._kidnap.items]
+            self.res.kidnap_items = list(self._kidnap.items)
         hist = getattr(self.planner, "_avoid_ms_hist", None)
         if hist:
             self.res.avoid_ms = list(hist)     # 追い抜きの計画は回した周期ごとの時間
@@ -871,6 +904,14 @@ class Bench:
             self.res.pose_err.append(math.hypot(st.pose_x - tx, st.pose_y - ty))
             d = (st.pose_yaw - tyaw + math.pi) % (2 * math.pi) - math.pi
             self.res.yaw_err.append(abs(math.degrees(d)))
+            if st.phase in ("RACE", "DETOUR", "LOCATE") and self._map_origin is not None:
+                pe = self.res.pose_err[-1]
+                step = 0.0 if self._wrong_xy is None else math.hypot(v.x - self._wrong_xy[0], v.y - self._wrong_xy[1])
+                if pe > 0.30 and step < 0.5:          # 0.5m 超の 1 周期の跳びは置き直し（走った距離ではない）
+                    self.res.wrong_pose_dist += step
+                self._wrong_xy = (v.x, v.y)
+                if self._kidnap is not None:
+                    self._kidnap.observe(t, pe, self.res.yaw_err[-1], v.x, v.y)
             if self._map_name and st.phase in ("RACE", "DETOUR"):
                 dist = self._path_distance(tx, ty)
                 if dist is not None:
@@ -1157,6 +1198,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--plan-slowdown", type=float, default=1.0, metavar="K",
                     help="plan() を K 倍遅く見せる（その間も車は進む）。Mac は Pi より速いので、Pi で同じ planner を"
                          "回した時間との比を入れると計算の遅れを Pi 相当にできる。計画 p99 の表示も K 倍込み")
+    ap.add_argument("--kidnap", action="append", default=[], metavar="T:DX:DY:DYAW[:HOLD]",
+                    help="走行開始から T 秒で真の車を車体基準で (DX,DY)m・DYAW° 動かす。HOLD 秒は持ち上げ"
+                         "（その姿勢で止め、LiDAR は何も返さない）。人が車を置き直す状況（sim/bench_faults.py）")
+    ap.add_argument("--place", action="append", default=[], metavar="T:X:Y:YAW[:HOLD]",
+                    help="走行開始から T 秒で真の車を世界座標の姿勢 (X,Y,YAW°) へ置き直す（HOLD は --kidnap と同じ）")
+    ap.add_argument("--wall-gap", action="append", default=[], metavar="X0,Y0,X1,Y1",
+                    help="シムの世界の壁を矩形で消す（世界座標。--map の凍結地図には残る＝壁の欠け）")
     ap.add_argument("--quiet", action="store_true")
     return ap
 
@@ -1217,6 +1265,8 @@ def _options_from_args(args: argparse.Namespace) -> BenchOptions:
                     **_error_preset(args.errors), **pairs(args.sim)},
         state_dir=Path(args.state) if args.state else None,
         hijacks=[nums(h, ":") for h in args.hijack],
+        kidnaps=[parse_kidnap(k) for k in args.kidnap] + [parse_place(k) for k in args.place],
+        wall_gaps=[parse_rect(r) for r in args.wall_gap],
         plan_slowdown=args.plan_slowdown)
 
 

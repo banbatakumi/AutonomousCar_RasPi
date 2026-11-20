@@ -101,6 +101,10 @@ class Result:
         self.cmd_gap_ms = 0.0                  #: 指令を送る間隔の最大 [ms]
         self.rearms = 0                        #: 仮想 STM32 が ARM を断り、外して入れ直した回数
         self.slow_ms: dict[str, float] = {}
+        #: 自己位置の妨害（`sim/bench_faults.py`）
+        self.wrong_pose_dist = 0.0            #: 自己位置が真値から 0.3m 超ずれたまま真の車が進んだ距離 [m]
+        self.kidnaps: list[str] = []           #: `--kidnap` ごとの復帰の結果
+        self.kidnap_items: list = []
 
     def report(self) -> str:
         def stat(v, unit, scale=1.0):
@@ -127,6 +131,9 @@ class Result:
               if self.cross_true else []),
             f"周回       {self.laps} 周  走行 {self.distance:.1f}m  衝突 {self.collisions}",
         ]
+        if self.wrong_pose_dist > 0 or self.kidnaps:
+            out.append(f"誤った姿勢 0.3m 超のまま {self.wrong_pose_dist:.2f}m 走行")
+        out.extend(self.kidnaps)
         if self.explore_end_pose_err is not None:
             out.append(
                 f"EXPLORE終了時点  自己位置 {self.explore_end_pose_err * 100:.1f}cm  "

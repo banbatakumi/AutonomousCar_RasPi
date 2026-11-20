@@ -372,6 +372,7 @@ class RunResult:
             relocs=self.relocs, loops=self.loop_closures, oob=self.out_of_bounds,
             loc_n=self.locate.get("n", 0), loc_ok=self.locate.get("ok", 0),
             loc_amb=self.locate.get("ambiguous", 0), loc_wrong=self.locate.get("wrong", 0), loc_none=self.locate.get("none", 0),
+            loc_ms=statistics.median(self.locate["ms"]) if self.locate.get("ms") else float("nan"),
         )
 
 
@@ -715,22 +716,33 @@ def _locate_trial(slam: "SlamUnderTest", scan, truth_pose, factory, out: dict,
     if fe is not None and force_rescan:
         fe.last_points = None
     pts = slam.nav.deskew_scan(scan)
-    loc = GlobalLocalizer(loaded)
-    for _ in range(10_000):
-        if loc.step(pts):
-            break
-    cands = loc.candidates(LOCATE_CANDIDATES)
+    import time as _time
+    t0 = _time.perf_counter()
+    # `LOC_ENGINE=grid` で旧来の総当たり（`GlobalLocalizer`）。既定は分枝限定法（`globalmatch`。C が無ければ旧来）
+    from slam2d.core import globalmatch
+    use_bb = os.environ.get("LOC_ENGINE", "bb") != "grid" and globalmatch.available()
+    if use_bb:
+        cands = globalmatch.GlobalMatcher(loaded).match(pts, LOCATE_CANDIDATES)
+        win = {"trans": globalmatch.REFINE_TRANS, "rot": globalmatch.REFINE_ROT}
+    else:
+        loc = GlobalLocalizer(loaded)
+        for _ in range(10_000):
+            if loc.step(pts):
+                break
+        cands = loc.candidates(LOCATE_CANDIDATES)
+        win = {}
     from slam2d.core.locscore import LocateScorer
     scorer = LocateScorer(loaded)
     scored = []
     for c in cands:
-        ref = nav2.refine(pts, Pose2D(c.x, c.y, c.yaw))
+        ref = nav2.refine(pts, Pose2D(c.x, c.y, c.yaw), **win)
         if ref is not None:
             scored.append((locate_score(ref), locate_score_robust(scorer.fit(pts, ref.pose, nav2.lidar_xy)), ref))
     if os.environ.get("LOC_DEBUG"):
         print("   LOC", " ".join(sorted(f"{a:.2f}/{b:.2f}(e{math.hypot(r.pose.x - truth_pose[0], r.pose.y - truth_pose[1])*100:.0f})"
                                          for a, b, r in scored)[::-1]), flush=True)
     best, why = pick_locate(scored)
+    out.setdefault("ms", []).append((_time.perf_counter() - t0) * 1000.0)
     if best is None:
         key = {"ambiguous": "ambiguous"}.get(why, "none")
         out[key] = out.get(key, 0) + 1
@@ -868,6 +880,7 @@ _COLS = [
     ("ms_mean", "{:6.1f}"), ("ms_max", "{:7.0f}"),
     ("relocs", "{:4d}"), ("loops", "{:4d}"), ("oob", "{:6d}"),
     ("loc_n", "{:5d}"), ("loc_ok", "{:6d}"), ("loc_amb", "{:7d}"), ("loc_wrong", "{:9d}"), ("loc_none", "{:8d}"),
+    ("loc_ms", "{:6.0f}"),
 ]
 
 
