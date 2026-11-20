@@ -263,7 +263,7 @@
 }
 
 /*
- * 液晶の中は [速度（大）][舵角 / G の縦積み] の2列（大きさは `RcView.tsx` の `panelLayout`）。
+ * 液晶の中は [速度][舵角][G] の同じ大きさ3列（大きさは `RcView.tsx` の `panelLayout`）。
  * padding・gap は `RcView.tsx` の `SCREEN_*` と同じ値
  */
 .rc-hud-screen>.rc-cam-gauges {
@@ -271,20 +271,14 @@
   height: 100%;
   box-sizing: border-box;
   padding: 6px 10px;
-  grid-template-columns: auto auto;
-  grid-template-rows: auto auto;
-  justify-content: center;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: auto;
   align-content: center;
   align-items: center;
   gap: 12px;
 }
 
-.rc-hud-screen>.rc-cam-gauges>.meter-speed {
-  grid-row: 1 / 3;
-}
-
-.rc-hud-screen>.rc-cam-gauges>.meter-steer,
-.rc-hud-screen>.rc-cam-gauges>.meter-g {
+.rc-hud-screen>.rc-cam-gauges>.meter {
   justify-self: center;
 }
 

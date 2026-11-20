@@ -112,15 +112,13 @@ const FOOT_H_PX = 44
 /** LiDAR の丸の、斜辺の下の三角の内接円からの余白 [px] */
 const LIDAR_MARGIN_PX = 10
 
-// ── 液晶の中: [速度（大）][舵角 / G の縦積み] ──
+// ── 液晶の中: [速度][舵角][G] を同じ大きさで横一列 ──
 /** 液晶の上下・左右の余白と列・行の間隔 [px]（`.rc-hud-screen>.rc-cam-gauges` の padding・gap と同じ値） */
 const SCREEN_PAD_Y_PX = 6
 const SCREEN_PAD_X_PX = 10
 const SCREEN_GAP_PX = 12
 /** 速度・舵角の下の数字がダイヤルにかからずに食う高さ [px]（数字 30px − 食い込み 6px） */
 const DIAL_TEXT_RESERVE_PX = 26
-/** 舵角計・G メータの大きさの、速度計に対する比 */
-const SUB_DIAL_RATIO = 0.45
 /** 舵角・速度のダイヤルの幅/高さ（viewBox 120×92。G は正方形） */
 const DIAL_AR = 120 / 92
 /** 舵角・G のダイヤルの高さの下限 [px] */
@@ -258,17 +256,13 @@ function panelLayout(vw: number, vh: number) {
   const lidarCx = topW + inR
   const lidarCy = panelH - inR
 
-  // 液晶: 速度計（高さ speedH）の右に舵角・G（高さ subH）を縦に積む
+  // 液晶: 速度計・舵角計・G メータを同じ大きさで横一列（3列を等分し、各列の幅と高さに収まる大きさ）
   const screenW = mainW
   const screenH = mainH - TOP_ROW_H_PX - ROW_GAP_PX
-  const availW = screenW - 2 * SCREEN_PAD_X_PX - SCREEN_GAP_PX
+  const availW = screenW - 2 * SCREEN_PAD_X_PX - 2 * SCREEN_GAP_PX
   const availH = screenH - 2 * SCREEN_PAD_Y_PX
-  // 速度計: 高さに収まり、かつ右の列（舵角の幅 = subH·DIAL_AR）と並べて幅に収まる大きさ
-  const speedH = Math.max(0, Math.min(availH - DIAL_TEXT_RESERVE_PX, availW / (DIAL_AR * (1 + SUB_DIAL_RATIO))))
-  // 舵角・G: 速度計の比で、縦に2つ（舵角の下の数字・行の間隔を含む）積んで高さに収まる大きさ
-  const subH = Math.max(
-    DIAL_MIN_PX,
-    Math.min(speedH * SUB_DIAL_RATIO, (availH - DIAL_TEXT_RESERVE_PX - SCREEN_GAP_PX) / 2),
-  )
+  const dialH = Math.max(DIAL_MIN_PX, Math.min(availH - DIAL_TEXT_RESERVE_PX, availW / 3 / DIAL_AR))
+  const speedH = dialH
+  const subH = dialH
   return { panelH, topW, botW, footIn, topWIn, carW, mainLeft, mainW, mainH, speedH, subH, lidarR, lidarCx, lidarCy }
 }
