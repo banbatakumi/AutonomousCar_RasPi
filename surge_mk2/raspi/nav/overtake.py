@@ -468,19 +468,35 @@ def eval_cand(cands: np.ndarray, x, kr, v_cap, a_lat, ds, room_l, room_r, v_now,
     k_lim = np.maximum(0.95 * cfg.kappa_max, np.abs(kr) + _KAPPA_SLACK * cfg.kappa_max)
     k_ok = ((np.abs(kap_c) <= np.where(np.abs(kr) > 0.95 * cfg.kappa_max, k_lim, 0.95 * cfg.kappa_max)[None, :]).all(axis=1)
             & (one > 0.2).all(axis=1))
-    v, v_ok = _speeds(kap_c, v_cap, a_lat, ds, v_now, cfg)
-    dt = 2.0 * ds[None, :] / (v[:, :-1] + v[:, 1:])
-    t = np.concatenate([np.zeros((len(cands), 1)), np.cumsum(dt, axis=1)], axis=1)
-    check = np.ones((1, len(x)), dtype=bool)
-    if follow is not None:
-        t, f_ok, check = _follow_times(t, x, ds, cands[:, 4] == 0.0, follow, cfg.a_brake)
-        v_ok = v_ok & f_ok
-    hit, first, gap = _collide(x, d, dd, t, tracks, cfg, check, d_start, motion)
-    ok = in_room & k_ok & v_ok & ~hit
-    cost = t[:, -1] + _END_COST * np.abs(d[:, -1]) + _LAT_COST * np.abs(d).max(axis=1)
-    fails = {"道幅": int((~in_room).sum()), "曲率": int((~k_ok).sum()), "減速": int((~v_ok).sum()),
+    # ★ 速度・時刻・当たり判定は、道幅と曲率を満たす候補だけで計算する（結果は全候補で計算したときと同じ）。
+    #   相手 2 台で「通れない」と出る周期は 1500 本中 1200 本がここで落ち、残りの計算が無駄だった
+    C = len(cands)
+    geo = in_room & k_ok
+    # 経路へ戻る候補（数本）は形によらず含める（`_follow_times` が戻る候補全体の時刻を見るため、外すと結果が変わる）
+    sub = np.nonzero(geo | (cands[:, 4] == 0.0))[0]
+    ok = np.zeros(C, dtype=bool)
+    cost = np.full(C, np.inf)
+    first = np.full(C, -1)
+    gap = np.full(C, -np.inf)
+    v_ok = np.zeros(C, dtype=bool)
+    hit = np.zeros(C, dtype=bool)
+    if sub.size:
+        v, vk = _speeds(kap_c[sub], v_cap, a_lat, ds, v_now, cfg)
+        dt = 2.0 * ds[None, :] / (v[:, :-1] + v[:, 1:])
+        t = np.concatenate([np.zeros((sub.size, 1)), np.cumsum(dt, axis=1)], axis=1)
+        check = np.ones((1, len(x)), dtype=bool)
+        if follow is not None:
+            t, f_ok, check = _follow_times(t, x, ds, cands[sub, 4] == 0.0, follow, cfg.a_brake)
+            vk = vk & f_ok
+        ds_ = d[sub]
+        h, f1, g1 = _collide(x, ds_, dd[sub], t, tracks, cfg, check, d_start, motion)
+        g = geo[sub]
+        v_ok[sub], hit[sub], first[sub], gap[sub] = vk, h, f1, np.where(g, g1, -np.inf)
+        ok[sub] = vk & ~h & g
+        cost[sub] = t[:, -1] + _END_COST * np.abs(ds_[:, -1]) + _LAT_COST * np.abs(ds_).max(axis=1)
+    fails = {"道幅": int((~in_room).sum()), "曲率": int((~k_ok).sum()), "減速": int((geo & ~v_ok).sum()),
              "重なる": int(hit.sum())}
-    return ok, cost, first, d, fails, np.where(in_room & k_ok, gap, -np.inf)
+    return ok, cost, first, d, fails, gap
 
 
 def opp_motion(tr: Track, s_abs: float, s_cum: np.ndarray, v_line: np.ndarray, L: float,
