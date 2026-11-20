@@ -751,7 +751,7 @@ LiDAR は記録のときの先生（`slam2d_route` の最適ライン・推測�
 | 視差の入力 | `stereo_node` が照合ごとに出す `stereo/disp`（帯 150〜260 行を 12×68 のブロックに縮めた視差と照合の出た割合） |
 
 **視差は2か所で作る**: 学習は記録の左右の組（JPEG 品質 90・既定 5Hz）を Mac で照合し直して作る（記録に視差が無くてよい。
-過去の記録も使える）。実車は `stereo_node` が生の画像から作る `stereo/disp`（**今は記録に残らない**。`logger_node.DEFAULT_TOPICS` に無い。`docs/review_2026_11_17.md` H3）。両者の差は
+過去の記録も使える）。実車は `stereo_node` が生の画像から作る `stereo/disp`（2026-11-17 から記録に残る。`docs/review_2026_11_17.md` H3）。両者の差は
 `ml_stereo_e2e.eval --check-disp <記録>` で見る。照合の設定（帯・探索幅・縮めた大きさ）がモデルの契約と違うと推論しない。
 
 ```bash
