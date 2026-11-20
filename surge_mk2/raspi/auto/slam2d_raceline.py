@@ -30,7 +30,8 @@ from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
 
-from slam2d.core.localize import GlobalLocalizer
+from slam2d.core import globalmatch as gm_mod
+from slam2d.core.localize import GlobalLocalizer, LocalizeConfig
 from slam2d.core.locscore import LocateScorer
 from slam2d.core.types import Pose2D
 
@@ -257,6 +258,43 @@ def locate_score_robust(fit) -> float:
     return float(base * math.exp(-0.5 * (fit.rms / LOCATE_ROBUST_RMS_SCALE) ** 2))
 
 
+#: 全域の分枝限定法の角度を何周期に分けるか（Pi 1.5GHz で一括 140ms → 1 塊 中央 約 35ms・最大 約 80ms）
+_LOCATE_CHUNKS = 8
+#: 全域の候補の得点（尤度の平均）の下限。低いほど枝刈りが遅れ、最初の塊が Pi で 150ms を超えた。
+#: 他車に遮られた真の姿勢でも 0.5 前後は出る
+_LOCATE_MIN_SCORE_BB = 0.35
+#: 分枝限定法の候補を 1 周期に仕上げる数（候補は 4cm・1° の精度なので仕上げの窓が狭く、Pi で 1 つ約 9ms）
+_LOCATE_REFINE_PER_CYCLE = 4
+
+
+class _GmLocalizer:
+    """`globalmatch.MatchJob` を `GlobalLocalizer` と同じ使い方（`done`・`progress`・`step(pts)`・`candidates(k)`）にする。"""
+
+    fine = True        #: 候補が細かい（仕上げの窓を狭く・1 周期に複数仕上げる）
+
+    def __init__(self, job) -> None:
+        self._job = job
+
+    @property
+    def done(self) -> bool:
+        return self._job.done
+
+    @property
+    def progress(self) -> float:
+        return self._job.progress
+
+    def step(self, pts) -> bool:          # 点群は始めたときのもの（車は止まっている）
+        return self._job.step()
+
+    def candidates(self, k: int):
+        return self._job.result()[:k]
+
+
+#: 仕上げた候補どうしがこれより近ければ同じ姿勢とみなす（`pick_locate`）
+_LOCATE_SAME_M = 0.25
+_LOCATE_SAME_RAD = math.radians(10.0)
+
+
 def pick_locate(scored: list, *, hinted: bool = False) -> tuple[object | None, str]:
     """仕上げた候補`[(厳密な点数, 頑健な点数, ref)]`から採る姿勢を決める。戻り値は`(ref, 断る理由)`。
 
@@ -278,7 +316,18 @@ def pick_locate(scored: list, *, hinted: bool = False) -> tuple[object | None, s
         order, k = sorted(scored, key=lambda t: -t[1]), 1
         if order[0][1] < min_robust:
             return None, "low"
-    if len(order) >= 2 and order[0][k] > 0 and order[1][k] >= order[0][k] * LOCATE_SCORE_RATIO:
+    # ★ 仕上げで同じ姿勢に収束した候補は 2 位として数えない（全域の分枝限定法は離れた候補を出すが、
+    #   仕上げの窓の中で同じ峰へ登ると 1 位と並び、真の姿勢なのに「絞り込めない」で断っていた）
+    b = getattr(order[0][2], "pose", None)
+
+    def same(t) -> bool:
+        q = getattr(t[2], "pose", None)
+        if b is None or q is None:
+            return False
+        return (math.hypot(q.x - b.x, q.y - b.y) <= _LOCATE_SAME_M
+                and abs(math.atan2(math.sin(q.yaw - b.yaw), math.cos(q.yaw - b.yaw))) <= _LOCATE_SAME_RAD)
+    rest = [t for t in order[1:] if not same(t)]
+    if rest and order[0][k] > 0 and rest[0][k] >= order[0][k] * LOCATE_SCORE_RATIO:
         return None, "ambiguous"
     return order[0][2], ""
 
@@ -714,7 +763,28 @@ _LOC_HINT_TTL_S = 120.0
 #: 走行中に自己位置を信用できなくなり、止まったまま（`_STILL_SPEED`未満）これだけ続いたら、
 #: 今の推定姿勢を種に`LOCATE`（全域探索）へ戻る。凍結地図の上の追跡は予測の周りの±0.4m・±15°
 #: しか探さないので、それより外へずれると追跡のままでは戻れない
-LOST_RELOCATE_S = 3.0
+LOST_RELOCATE_S = 1.0
+#: 自己位置の見張り（`_watch_pose`）: 疑わしくなくても全域の探索で照らし合わせる間隔 [s]
+_WD_PERIOD_S = 5.0
+#: 見張りの全域探索を何周期に分けるか（走行中は計画の時間に足されるので LOCATE より細かく。Pi で 1 塊 約 25ms）
+_WD_CHUNKS = 12
+#: 外した点（地図に無い物・壁の向こう）の割合がこれを超えたら疑わしい（誤った姿勢に貼り付くと増える）
+_WD_DROPPED = 0.35
+#: 全域の最良に乗り換える条件: 今の姿勢の得点が最良のこの割合未満・最良の得点がこれ以上・2 位（別の場所）が
+#: 最良のこの割合未満（曖昧なら乗り換えない）
+_WD_SWITCH_RATIO = 0.75
+_WD_MIN_SCORE = 0.6
+_WD_UNIQUE_RATIO = 0.85
+#: 有効な点がこれ未満の点群は「何も見えていない」（持ち上げられた・覆われた）。その後の見失いは推測航法で続けない
+_BLANK_POINTS = 60
+#: 車体の傾き（`pitch`・`roll`、重力で補正済み）がこれを超えて `_TILT_CYCLES` 周期続いたら、持ち上げられた疑い。
+#: 坂道ショートカット（②）より大きく、でこぼこ道（⑦）の一瞬の傾きは拾わない
+_TILT_RAD = math.radians(20.0)
+_TILT_CYCLES = 3
+#: 走行の途中で見失い、候補が絞れない（似た場所が複数）とき、反応型（FTG）で這う距離 [m] と速さ [m/s]。
+#: 見える物が変わると候補が分かれる。決勝では人がクリックで教えられない
+_CRAWL_M = 0.6
+_CRAWL_SPEED = 0.4
 #: 地図の確定（ループ閉じ）で、1周期に焼き直すキーフレームの数（1個約5ms、Pi 5）
 FREEZE_CHUNK = 8
 _STILL_SPEED = 0.1
@@ -1059,6 +1129,7 @@ class Slam2dRaceLine(Planner):
     # 保存済み地図の上で自己位置を探す（`LocateState`）
     _located_lost = Alias("_locc", "located_lost")
     _localizer = Alias("_locc", "localizer")
+    _gmatch = Alias("_locc", "gmatch")
     _loc_cands = Alias("_locc", "loc_cands")
     _loc_scored = Alias("_locc", "loc_scored")
     _loc_scorer = Alias("_locc", "loc_scorer")
@@ -1217,6 +1288,12 @@ class Slam2dRaceLine(Planner):
 
     def reset(self) -> None:
         self.phase = EXPLORE
+        self._reloc_race = False
+        self._crawl_left = 0.0
+        self._kidnap_suspect = False
+        self._wd_job = None
+        self._wd_since = 0.0
+        self._wd_note = ""
         # 部品を宣言どおりの初期値へ戻す（ワーカーの計算は下の `_drop_job` で取り消す）
         self._lapc.reset()
         self._mapc.reset()
@@ -1523,6 +1600,7 @@ class Slam2dRaceLine(Planner):
         self._last_p = p
         self._tick_ctx = self._tick_path = None
         self._speed_now = vs.speed if vs is not None else 0.0
+        self._last_vs = vs
         self._yaw_rate_now = vs.yaw_rate if vs is not None else 0.0
         self._poll_line()
 
@@ -1570,7 +1648,13 @@ class Slam2dRaceLine(Planner):
         if self.phase == DONE:
             return self._done(st)
         self._hit_now = False
+        self._watch_blank(scan)
+        self._wd_note = ""
+        if self._watch_pose(st, scan, u, p):
+            u = u._replace(lost=False)
         st = self._race(st, scan, vs, p, u.lost)
+        if self._wd_note:
+            st.reason = f"{self._wd_note}・{st.reason}"
         self._record_state(st, p)
         self._signal_step(st)
         # 速度を追従の値より抑えた（障害物・推測航法など）・制動するなら、目標車速のランプは
@@ -1979,6 +2063,9 @@ class Slam2dRaceLine(Planner):
         段: 動いていれば待つ → 解く直前の姿勢で照合（1回だけ）→ 粗探索 → 候補を1周期に1つ仕上げる
         → 仕上げた候補から決める。
         """
+        crawl = getattr(self, "_crawl_left", 0.0)
+        if crawl > 0.0:
+            return self._locate_crawl(st, scan, p)
         if self._locate_wait_still(st):
             return st
         pts = self.slam.deskew_scan(scan)
@@ -1999,6 +2086,24 @@ class Slam2dRaceLine(Planner):
         if not self._locate_refine_one(st, pts):
             return st
         return self._locate_decide(st, seeded, p)
+
+    def _locate_crawl(self, st: AutoState, scan: Scan, p: dict[str, float]) -> AutoState:
+        """反応型（FTG）で `_CRAWL_SPEED` 以下で `_crawl_left` だけ進む。進み切ったら止まって探し直す。"""
+        self._crawl_left -= abs(self._speed_now) * self._dt
+        if self._crawl_left <= 0.0:
+            self._crawl_left = 0.0
+            self.ftg.reset()
+            st.ready, st.brake, st.target_speed = True, True, 0.0
+            st.reason = "進み終えた。止まって自己位置を探し直す"
+            return st
+        fp = FollowTheGap.merged({"max_speed": min(_CRAWL_SPEED, p["explore_speed"]),
+                                  "gap_min": p["explore_gap_min"], "bubble_m": p["explore_bubble"]})
+        sub = self.ftg.plan(scan, self._last_vs, fp, self._dt)
+        st.ready, st.brake = sub.ready, sub.brake
+        st.target_speed = min(sub.target_speed, _CRAWL_SPEED)
+        st.target_steer = sub.target_steer
+        st.reason = f"自己位置の候補を絞るため反応型でゆっくり進む（残り {self._crawl_left:.2f}m）"
+        return st
 
     def _locate_wait_still(self, st: AutoState) -> bool:
         """車が動いている間は探さない。待つなら `st.reason` を書いて True。"""
@@ -2023,7 +2128,7 @@ class Slam2dRaceLine(Planner):
             hint = self._loc_hint or self._locate_seed
             radius = (_LOC_HINT_RADII[self._loc_hint_stage] if self._loc_hint is not None
                       else self._locate_seed_r)
-            self._localizer = GlobalLocalizer(self.slam.grid, hint=hint, hint_radius=radius)
+            self._localizer = self._new_localizer(pts, hint, radius)
             if self._localizer.done and self._loc_hint is not None:
                 self._widen_hint()      # この半径に空きセルが無い。広げて次周期に探す
                 self._localizer = None
@@ -2041,6 +2146,7 @@ class Slam2dRaceLine(Planner):
             return False
 
         cands = self._localizer.candidates(LOCATE_CANDIDATES)
+        self._loc_fine = getattr(self._localizer, "fine", False)
         self._localizer = None
         if not cands:
             if seeded:
@@ -2052,6 +2158,18 @@ class Slam2dRaceLine(Planner):
         self._loc_scorer = LocateScorer(self.slam.grid)
         return True
 
+    def _new_localizer(self, pts, hint, radius):
+        """全域の探索器。C があれば分枝限定法（全域を 1°・4cm で厳密に、`_LOCATE_CHUNKS` 周期で）、無ければ総当たり。"""
+        g = self.slam.grid
+        if gm_mod.available():
+            if self._gmatch is None or self._gmatch.seq != g.seq:
+                self._gmatch = gm_mod.GlobalMatcher(g)
+            r = radius if radius is not None else (LocalizeConfig().hint_radius if hint is not None else None)
+            job = self._gmatch.begin(pts, LOCATE_CANDIDATES, hint=hint, radius=r, chunks=_LOCATE_CHUNKS,
+                                     min_score=_LOCATE_MIN_SCORE_BB)
+            return _GmLocalizer(job)
+        return GlobalLocalizer(g, hint=hint, hint_radius=radius)
+
     def _locate_refine_one(self, st: AutoState, pts) -> bool:
         """候補を1つ仕上げる。全部仕上げ終わったら True、まだ残っていれば `st.reason` を書いて False。"""
         # ★ 粗探索（0.2m間隔・15°刻み）の得点だけで決めない。上位候補を
@@ -2060,11 +2178,16 @@ class Slam2dRaceLine(Planner):
         #   仕上げるとはっきり差がつく（`slam2d/core/localize.py`参照）。
         #   1候補の仕上げは Pi で数十ms かかるので **1周期に1候補**（まとめると
         #   指令が `cmd_deadman_ms` を超えて途切れる。停止中なので点群は変わらない）
-        c = self._loc_cands.pop(0)
-        ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw))
-        if ref is not None:
-            fit = self._loc_scorer.fit(pts, ref.pose, self.slam.lidar_xy)
-            self._loc_scored.append((locate_score(ref), locate_score_robust(fit), ref))
+        fine = getattr(self, "_loc_fine", False)
+        for _ in range(_LOCATE_REFINE_PER_CYCLE if fine else 1):
+            if not self._loc_cands:
+                break
+            c = self._loc_cands.pop(0)
+            win = {"trans": gm_mod.REFINE_TRANS, "rot": gm_mod.REFINE_ROT} if fine else {}
+            ref = self.slam.refine(pts, Pose2D(c.x, c.y, c.yaw), **win)
+            if ref is not None:
+                fit = self._loc_scorer.fit(pts, ref.pose, self.slam.lidar_xy)
+                self._loc_scored.append((locate_score(ref), locate_score_robust(fit), ref))
         if self._loc_cands:
             st.reason = f"自己位置の候補を仕上げている（残り {len(self._loc_cands)}）"
             return False
@@ -2080,6 +2203,13 @@ class Slam2dRaceLine(Planner):
             st.reason = "自己位置の候補を仕上げられなかった"
             return st
         best, why = pick_locate(scored, hinted=self._loc_hint is not None or seeded)
+        if why in ("ambiguous", "low") and self._engaged and getattr(self, "_reloc_race", False):
+            # 走行の途中で見失った: クリックを待たず、少し這って見える物を変えてから探し直す
+            self._locate_seed = None
+            self._crawl_left = _CRAWL_M
+            st.reason = ("自己位置の候補が絞れない。ゆっくり進んで探し直す" if why == "ambiguous"
+                         else "自己位置が見つからない。ゆっくり進んで探し直す")
+            return st
         if why == "ambiguous":
             if seeded:
                 self._locate_seed = None
@@ -2148,6 +2278,10 @@ class Slam2dRaceLine(Planner):
         """`LOCATE`/`LOCATED`から`RACE`へ入る（走り出しの状態を初期化する）。"""
         self.phase = st.phase = RACE
         self._opp_trail = []             # 覚えた相手の線は地図の座標。別の地図・走り出し前のものは捨てる
+        self._reloc_race = False
+        self._crawl_left = 0.0
+        self._kidnap_suspect = False
+        self._wd_job = None
         self._locate_seed = None
         self._locate_seed_r = None
         # クリックのヒントは使い切り（残すと、次に読む別の地図の探索までその周りに絞る）
@@ -3317,6 +3451,95 @@ class Slam2dRaceLine(Planner):
         pst.reason = f"迂回（Hybrid A*、{ms:.0f}ms）: {pst.reason}"
         return pst
 
+    # ── 自己位置の見張り（誤った姿勢への貼り付き・車を動かされた） ──
+
+    def _watch_blank(self, scan: Scan) -> None:
+        """何も見えない点群（持ち上げた・覆った）を数える。見えたまま見失ったのと区別する（`_localization_ok`）。"""
+        n = int(np.count_nonzero(np.asarray(scan.dist, dtype=np.float64) > 0.0))
+        if n < _BLANK_POINTS:
+            self._kidnap_suspect = True
+        # 実機で手に持つと、LiDAR は傾いて床や天井を拾うので空にはならない。車体の傾きで見る
+        vs = self._last_vs
+        tilted = vs is not None and max(abs(vs.pitch), abs(vs.roll)) > _TILT_RAD
+        self._tilt_n = getattr(self, "_tilt_n", 0) + 1 if tilted else 0
+        if self._tilt_n >= _TILT_CYCLES:
+            self._kidnap_suspect = True
+
+    def _watch_pose(self, st: AutoState, scan: Scan, u, p: dict[str, float]) -> bool:
+        """走行中に全域の探索（分枝限定法）で今の姿勢を照らし合わせ、はっきり良い別の姿勢があれば乗り換える。
+
+        ★ 凍結地図の追跡は、合わない点を「地図に無い物」として外すので、離れた所へ置き直されると残りの点で
+        **誤った姿勢に貼り付き**、見失いにならないまま走り続けた（`sim.bench --place`、2026-11-19 の基準値で
+        3 件とも戻らず）。疑わしいとき（外した点が多い・一致度が低い・見失い）と `_WD_PERIOD_S` ごとに、
+        点群 1 つを `_WD_CHUNKS` 周期に分けて全域で探し、その点群の時刻の姿勢と比べる。乗り換えたら True。
+        """
+        if not gm_mod.available() or self.phase != RACE:
+            self._wd_job = None
+            return False
+        self._wd_since = getattr(self, "_wd_since", 0.0) + self._dt
+        job = getattr(self, "_wd_job", None)
+        if job is None:
+            suspicious = (u.lost or u.score < p["min_score"] + 0.1 or self.slam.filter_doubt
+                          or self.slam.dropped_ratio > _WD_DROPPED)
+            if not (suspicious or self._wd_since >= _WD_PERIOD_S):
+                return False
+            g = self.slam.grid
+            if self._gmatch is None or self._gmatch.seq != g.seq:
+                self._gmatch = gm_mod.GlobalMatcher(g)
+            pts = self.slam.deskew_scan(scan)
+            self._wd_pts, self._wd_pose0 = pts, tuple(self.slam.pose)
+            # 乗り換えるのは今の姿勢より得点が高い候補だけなので、今の姿勢の得点を下限にする（枝刈りが早く効く）
+            floor = max(_LOCATE_MIN_SCORE_BB, self._gmatch.score_at(pts, self._wd_pose0))
+            self._wd_job = self._gmatch.begin(pts, LOCATE_CANDIDATES, chunks=_WD_CHUNKS, min_score=floor)
+            self._wd_since = 0.0
+            return False
+        if not job.step():
+            return False
+        self._wd_job = None
+        cands = job.result()
+        if not cands:
+            return False
+        best = cands[0]
+        x0, y0, yaw0 = self._wd_pose0
+        near = (math.hypot(best.x - x0, best.y - y0) <= 0.3
+                and abs(math.atan2(math.sin(best.yaw - yaw0), math.cos(best.yaw - yaw0))) <= math.radians(10.0))
+        if near or best.score < _WD_MIN_SCORE:
+            return False
+        cur = self._gmatch.score_at(self._wd_pts, self._wd_pose0)
+        others = [c for c in cands[1:] if math.hypot(c.x - best.x, c.y - best.y) > 1.0
+                  or abs(math.atan2(math.sin(c.yaw - best.yaw), math.cos(c.yaw - best.yaw))) > math.radians(60.0)]
+        if cur >= _WD_SWITCH_RATIO * best.score or (others and others[0].score >= _WD_UNIQUE_RATIO * best.score):
+            return False
+        # 仕上げて、LOCATE と同じ尺度（`pick_locate`、全点が地図に乗るか）で今の姿勢と比べる。今の姿勢も同じ窓で
+        # 仕上げる（追跡の姿勢は少しずれていることがあり、そのままだと不利に比べてしまう）
+        win = {"trans": gm_mod.REFINE_TRANS, "rot": gm_mod.REFINE_ROT}
+        ref = self.slam.refine(self._wd_pts, Pose2D(best.x, best.y, best.yaw), **win)
+        ref_cur = self.slam.refine(self._wd_pts, Pose2D(x0, y0, yaw0), **win)
+        if ref is None or ref.inlier < p["min_score"]:
+            return False
+        g = self.slam.grid
+        if getattr(self, "_wd_scorer_seq", None) != g.seq:
+            self._wd_scorer, self._wd_scorer_seq = LocateScorer(g), g.seq
+        scored = [(locate_score(r), locate_score_robust(self._wd_scorer.fit(self._wd_pts, r.pose, self.slam.lidar_xy)), r)
+                  for r in (ref, ref_cur) if r is not None]
+        pick, _why = pick_locate(scored)
+        if pick is not ref:
+            return False
+        # 点群の時刻の姿勢 → 今: 点群の時刻からの動き（追跡が出した相対の動き）を新しい姿勢に足す
+        x1, y1, yaw1 = self.slam.pose
+        c0, s0 = math.cos(-yaw0), math.sin(-yaw0)
+        dx, dy = c0 * (x1 - x0) - s0 * (y1 - y0), s0 * (x1 - x0) + c0 * (y1 - y0)
+        dyaw = yaw1 - yaw0
+        bx, by, byaw = ref.pose
+        cb, sb = math.cos(byaw), math.sin(byaw)
+        self.slam.set_pose(bx + cb * dx - sb * dy, by + sb * dx + cb * dy, byaw + dyaw)
+        self.wd_switches = getattr(self, "wd_switches", 0) + 1
+        self._begin_race(st)
+        st.pose_x, st.pose_y, st.pose_yaw = self.slam.pose
+        self._wd_note = (f"自己位置を全域の探索で直した（{math.hypot(bx - x0, by - y0):.1f}m 離れた姿勢へ。"
+                         f"得点 {cur:.2f} → {best.score:.2f}）")
+        return True
+
     def _localization_ok(self, st: AutoState, lost: bool, p: dict[str, float]) -> bool | None:
         """自己位置を信用して走れるか。`None` = 止まる、`True` = 推測航法で続行、`False` = 正常。
 
@@ -3325,6 +3548,7 @@ class Slam2dRaceLine(Planner):
         別の部屋が一瞬見えただけで急停止する。経路に乗る前（自己位置の復元直後）は続行しない。
         """
         if not (lost or st.match_score < p["min_score"]):
+            self._kidnap_suspect = False
             if self._coast_t > 0.0:
                 # 見失いから戻った周期は、自己位置が最大で探し直しの幅（数十cm）跳ぶ。直後の横偏差を
                 # 横グリップの前兆（線から外れた）と取り違えない
@@ -3333,7 +3557,10 @@ class Slam2dRaceLine(Planner):
             self._lost_still_t = 0.0
             return False
         self._coast_t += self._dt
-        if self._joined and p["coast_s"] > 0.0 and self._coast_t <= p["coast_s"]:
+        # ★ 何も見えない点群（持ち上げられた）の後の見失いは、車を置き直された疑い。推測航法の姿勢は当てに
+        #   ならないので続行せず止まって探す（基準値では続行の 1.5 秒で壁に当たっていた）
+        if (self._joined and p["coast_s"] > 0.0 and self._coast_t <= p["coast_s"]
+                and not getattr(self, "_kidnap_suspect", False)):
             return True
         st.reason = (f"自己位置が信用できない（一致度 {st.match_score:.2f} < "
                      f"{p['min_score']:.2f}"
@@ -3351,11 +3578,20 @@ class Slam2dRaceLine(Planner):
         return None
 
     def _back_to_locate(self) -> None:
-        """走行中に見失ったまま止まったとき、今の推定姿勢を種に`LOCATE`からやり直す。
-        地図・経路・周回数は残す（`_locate()`が復元できれば`RACE`へ戻る）。"""
+        """走行中に見失ったまま止まったとき、`LOCATE`からやり直す。
+        地図・経路・周回数は残す（`_locate()`が復元できれば`RACE`へ戻る）。
+
+        まず今の推定姿勢で 1 回だけ照合し（`_locate_at_pose`）、外れたら全域を探す。全域の探索が分枝限定法
+        （`globalmatch`）なら数周期で終わるので、種の周りに絞らない（置き直された車は種から遠い）。"""
         self._lost_still_t = 0.0
         self._coast_t = 0.0
-        self._locate_seed = (self.slam.pose.x, self.slam.pose.y)
+        self._kidnap_suspect = False
+        self._reloc_race = True
+        if gm_mod.available():
+            self._locate_pose = tuple(self.slam.pose)
+            self._locate_seed = None
+        else:
+            self._locate_seed = (self.slam.pose.x, self.slam.pose.y)
         self._locate_seed_r = None
         self._loc_hint = None
         self._localizer = None

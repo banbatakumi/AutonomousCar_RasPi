@@ -898,6 +898,38 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         p._joined = True
         return p
 
+    def test_watchdog_moves_a_wrong_pose_back_to_the_true_one(self):
+        """★ 追跡が誤った姿勢に貼り付いても、見張り（全域の分枝限定法）が真の姿勢へ戻す（`_watch_pose`）。"""
+        from slam2d.core import globalmatch
+        if not globalmatch.available():
+            self.skipTest("C が組めない環境")
+        params = Slam2dRaceLine.merged({}, hidden=True)
+        p = self._race_on_line(params)
+        p.slam.set_pose(2.2, 2.6, 0.5)                   # 真の姿勢 (3.0, 2.0, 0.0) から 1m・29° ずらす
+        p._wd_since = 1e9                                # 疑わしくなくても次の周期に探す
+        for _ in range(40):
+            p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+            x, y, _ = p.slam.pose
+            if math.hypot(x - 3.0, y - 2.0) < 0.1:
+                break
+        x, y, yaw = p.slam.pose
+        self.assertLess(math.hypot(x - 3.0, y - 2.0), 0.1)
+        self.assertLess(abs(yaw), math.radians(3.0))
+
+    def test_watchdog_keeps_a_correct_pose(self):
+        """正しい姿勢のときは、見張りが探しても乗り換えない。"""
+        from slam2d.core import globalmatch
+        if not globalmatch.available():
+            self.skipTest("C が組めない環境")
+        params = Slam2dRaceLine.merged({}, hidden=True)
+        p = self._race_on_line(params)
+        p._wd_since = 1e9
+        for _ in range(30):
+            p.plan(make_room_scan(3.0, 2.0, 0.0, segs=ROOM), vs(), params, 0.1)
+        self.assertEqual(getattr(p, "wd_switches", 0), 0)
+        x, y, _ = p.slam.pose
+        self.assertLess(math.hypot(x - 3.0, y - 2.0), 0.1)     # 追跡そのものの精度（この合成の部屋で約 5cm）
+
     def test_lost_coasts_on_dead_reckoning_then_stops(self):
         params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4}, hidden=True)
         p = self._race_on_line(params)
@@ -925,7 +957,7 @@ class TestSlam2dRaceLineSavedMapLoad(unittest.TestCase):
         params = Slam2dRaceLine.merged({"coast_s": 0.5, "coast_speed": 0.4}, hidden=True)
         p = self._race_on_line(params)
         weird = [(0.0, 0.0, 1.0, 3.0), (1.0, 3.0, -2.0, 1.0)]
-        for _ in range(int(LOST_RELOCATE_S / 0.1) + 5):
+        for _ in range(int((LOST_RELOCATE_S + params["coast_s"]) / 0.1) + 5):   # 続行の後、止まったまま待つ
             st = p.plan(make_room_scan(3.0, 2.0, 0.0, segs=weird), vs(), params, 0.1)
             if p.phase == LOCATE:
                 break

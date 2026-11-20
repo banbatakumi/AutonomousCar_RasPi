@@ -209,3 +209,155 @@ void normal_sums(int64_t n, const int64_t *rows, const int64_t *cols, const int6
         sx[i] = ax; sy[i] = ay; sxx[i] = axx; syy[i] = ayy; sxy[i] = axy; cnt[i] = ac;
     }
 }
+
+/* ── 全域の自己位置探索: 多解像度の分枝限定法（`slam2d/core/globalmatch.py`） ──
+ *
+ * Cartographer の FastCorrelativeScanMatcher と同じ考え方。尤度の格子 L（壁からの距離の exp(-d²/2σ²)）を
+ * 2^h 四方の窓の最大値で縮めた格子 P_h を用意すると、2^h 四方の平行移動の候補をまとめた「節」の得点の
+ * 上界は Σ_k P_h[点 k のセル] になる。上界が今の k 番目の候補より低い節は子を見ない。**全域の最良を厳密に
+ * 見つける**（粗い総当たりのように刻みの間で真の姿勢を落とさない）。
+ *
+ * 格子の並び: 段 h は (H+pad)×(W+pad)、pad = 2^h − 1。セル (r, c)（r は −pad..H−1）の値は
+ * buf[off[h] + (r + pad)·(W + pad) + (c + pad)]。P_0 = L。free も同じ並び（その窓に車が居られるセルがあるか）。
+ * off_pts は角度ごとの点のセルのずれ (dx, dy)（[nang][npts][2]、int32）。
+ * 候補は「場所（cells）と向き」が sep_cells・sep_ang 以上離れたものを上位 k 個まで返す
+ * （out: [k][4] = 得点の和, 列, 行, 角度の番号）。戻り値は返した数。visited に調べた節の数。
+ * 角度は [a0, a1) の番号だけ調べる。out の先頭 n_init 個は前の呼び出しの候補（続きから探す。
+ * 角度を分けて複数周期で探しても、1 回で探したのと同じ上位になる）。
+ */
+typedef struct { float bound; int32_t ang, h, cx, cy; } bb_node;
+
+typedef struct {
+    int64_t H, W, nlev, npts, nang;
+    const float *pyr; const int64_t *off; const uint8_t *free_; const int32_t *pts;
+    int use_hint; double hx, hy, hr;
+    double min_sum; int64_t k; double sep_cells, sep_ang; const double *angles;
+    double *out; int64_t n_out; int64_t visited; int64_t max_visit;
+} bb_ctx;
+
+static inline float bb_bound(const bb_ctx *c, int32_t ang, int32_t h, int32_t cx, int32_t cy) {
+    const int64_t pad = ((int64_t)1 << h) - 1, ww = c->W + pad;
+    const float *g = c->pyr + c->off[h];
+    const int32_t *p = c->pts + (int64_t)ang * c->npts * 2;
+    float s = 0.0f;
+    for (int64_t k = 0; k < c->npts; k++) {
+        int64_t col = (int64_t)cx + p[2 * k], row = (int64_t)cy + p[2 * k + 1];
+        if (col < -pad || row < -pad || col >= c->W || row >= c->H) continue;
+        s += g[(row + pad) * ww + (col + pad)];
+    }
+    return s;
+}
+
+static inline int bb_free(const bb_ctx *c, int32_t h, int32_t cx, int32_t cy) {
+    const int64_t pad = ((int64_t)1 << h) - 1, ww = c->W + pad;
+    return c->free_[c->off[h] + (cy + pad) * ww + (cx + pad)] != 0;
+}
+
+/* 節（2^h 四方の候補の塊）がヒントの円に掛かるか */
+static inline int bb_in_hint(const bb_ctx *c, int32_t h, int32_t cx, int32_t cy) {
+    if (!c->use_hint) return 1;
+    double sz = (double)((int64_t)1 << h);
+    double nx = c->hx < cx ? cx : (c->hx > cx + sz - 1 ? cx + sz - 1 : c->hx);
+    double ny = c->hy < cy ? cy : (c->hy > cy + sz - 1 ? cy + sz - 1 : c->hy);
+    return (nx - c->hx) * (nx - c->hx) + (ny - c->hy) * (ny - c->hy) <= c->hr * c->hr;
+}
+
+static double bb_threshold(const bb_ctx *c) {
+    if (c->n_out < c->k) return c->min_sum;
+    double lo = c->out[0];
+    for (int64_t i = 1; i < c->n_out; i++) if (c->out[4 * i] < lo) lo = c->out[4 * i];
+    return lo > c->min_sum ? lo : c->min_sum;
+}
+
+static void bb_insert(bb_ctx *c, double s, int32_t cx, int32_t cy, int32_t ang) {
+    double a = c->angles[ang];
+    for (int64_t i = 0; i < c->n_out; i++) {
+        double *o = c->out + 4 * i;
+        double dx = o[1] - cx, dy = o[2] - cy;
+        double da = fabs(fmod(c->angles[(int64_t)o[3]] - a + 3.0 * M_PI, 2.0 * M_PI) - M_PI);
+        if (dx * dx + dy * dy < c->sep_cells * c->sep_cells && da < c->sep_ang) {
+            if (s > o[0]) { o[0] = s; o[1] = cx; o[2] = cy; o[3] = ang; }
+            return;
+        }
+    }
+    int64_t slot;
+    if (c->n_out < c->k) slot = c->n_out++;
+    else {
+        slot = 0;
+        for (int64_t i = 1; i < c->n_out; i++) if (c->out[4 * i] < c->out[4 * slot]) slot = i;
+        if (s <= c->out[4 * slot]) return;
+    }
+    double *o = c->out + 4 * slot;
+    o[0] = s; o[1] = cx; o[2] = cy; o[3] = ang;
+}
+
+static void bb_descend(bb_ctx *c, int32_t ang, int32_t h, int32_t cx, int32_t cy, float bound) {
+    if (c->max_visit > 0 && c->visited >= c->max_visit) return;
+    if (bound <= bb_threshold(c)) return;
+    if (h == 0) {
+        bb_insert(c, bound, cx, cy, ang);
+        return;
+    }
+    int32_t hh = h - 1, step = 1 << hh;
+    bb_node ch[4];
+    int n = 0;
+    for (int a = 0; a < 2; a++) {
+        for (int b = 0; b < 2; b++) {
+            int32_t x = cx + a * step, y = cy + b * step;
+            if (x >= c->W || y >= c->H) continue;
+            if (!bb_free(c, hh, x, y) || !bb_in_hint(c, hh, x, y)) continue;
+            c->visited++;
+            ch[n].bound = bb_bound(c, ang, hh, x, y);
+            ch[n].ang = ang; ch[n].h = hh; ch[n].cx = x; ch[n].cy = y;
+            n++;
+        }
+    }
+    /* 上界の高い子から（早く良い候補が見つかるほど枝刈りが効く） */
+    for (int i = 1; i < n; i++) {
+        bb_node t = ch[i]; int j = i - 1;
+        while (j >= 0 && ch[j].bound < t.bound) { ch[j + 1] = ch[j]; j--; }
+        ch[j + 1] = t;
+    }
+    for (int i = 0; i < n; i++) bb_descend(c, ch[i].ang, ch[i].h, ch[i].cx, ch[i].cy, ch[i].bound);
+}
+
+static int bb_cmp(const void *a, const void *b) {
+    float x = ((const bb_node *)a)->bound, y = ((const bb_node *)b)->bound;
+    return (x < y) - (x > y);
+}
+
+int64_t bb_match(int64_t H, int64_t W, int64_t nlev, const float *pyr, const int64_t *off,
+                 const uint8_t *free_, int64_t nang, const double *angles, int64_t npts,
+                 const int32_t *pts, int use_hint, double hx, double hy, double hr,
+                 double min_sum, int64_t k, double sep_cells, double sep_ang,
+                 int64_t max_visit, int64_t a0, int64_t a1, int64_t n_init,
+                 double *out, int64_t *visited) {
+    bb_ctx c = {H, W, nlev, npts, nang, pyr, off, free_, pts, use_hint, hx, hy, hr,
+                min_sum, k, sep_cells, sep_ang, angles, out, n_init < k ? n_init : k, 0, max_visit};
+    if (a0 < 0) a0 = 0;
+    if (a1 > nang) a1 = nang;
+    int32_t top = (int32_t)(nlev - 1), step = 1 << top;
+    int64_t nx = (W + step - 1) / step, ny = (H + step - 1) / step;
+    if (a1 <= a0) { *visited = 0; return c.n_out; }
+    bb_node *roots = (bb_node *)malloc(sizeof(bb_node) * (size_t)((a1 - a0) * nx * ny));
+    if (!roots) return -1;
+    int64_t n = 0;
+    for (int64_t a = a0; a < a1; a++)
+        for (int64_t j = 0; j < ny; j++)
+            for (int64_t i = 0; i < nx; i++) {
+                int32_t x = (int32_t)(i * step), y = (int32_t)(j * step);
+                if (!bb_free(&c, top, x, y) || !bb_in_hint(&c, top, x, y)) continue;
+                roots[n].bound = bb_bound(&c, (int32_t)a, top, x, y);
+                roots[n].ang = (int32_t)a; roots[n].h = top; roots[n].cx = x; roots[n].cy = y;
+                n++;
+            }
+    c.visited = n;
+    qsort(roots, (size_t)n, sizeof(bb_node), bb_cmp);
+    for (int64_t i = 0; i < n; i++) {
+        if (roots[i].bound <= bb_threshold(&c)) break;     /* 並べてあるので、以降は全部これ以下 */
+        bb_descend(&c, roots[i].ang, roots[i].h, roots[i].cx, roots[i].cy, roots[i].bound);
+    }
+    free(roots);
+    *visited = c.visited;
+    return c.n_out;
+}

@@ -44,6 +44,8 @@ def _load():
                                ptr, ptr, ptr, ptr, ptr, ptr]),
         "ray_first_hit": (None, [i64, ptr, ptr, i64, ptr, ptr, i64, ptr, ptr, i64, i64,
                                  flt, flt, flt, ptr]),
+        "bb_match": (i64, [i64, i64, i64, ptr, ptr, ptr, i64, ptr, i64, ptr, ctypes.c_int, dbl, dbl, dbl,
+                           dbl, i64, dbl, dbl, i64, i64, i64, i64, ptr, ptr]),
         "carve_touch": (ctypes.c_int, [i64, dbl, dbl, ptr, ptr, ptr, i64, ptr, dbl, dbl, dbl, dbl,
                                i64, i64, ptr, ctypes.c_uint16, ptr]),
     })

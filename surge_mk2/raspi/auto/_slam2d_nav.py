@@ -295,6 +295,11 @@ class Slam2dNav:
         return int(getattr(self._fe, "wall_hits", 0))
 
     @property
+    def dropped_ratio(self) -> float:
+        """直近の位置合わせで、壁の向こう・地図に無い物として外した点の割合（`Frontend.behind_ratio`＋`front_ratio`）。"""
+        return float(getattr(self._fe, "behind_ratio", 0.0)) + float(getattr(self._fe, "front_ratio", 0.0))
+
+    @property
     def filter_doubt(self) -> bool:
         """直近の周期に、地図に無い物として外した点が多すぎて、全点でも合わせて比べたか（`Frontend._filter_doubt`）。"""
         return bool(getattr(self._fe, "_filter_doubt", False))
@@ -392,9 +397,9 @@ class Slam2dNav:
         """
         self._fe.pose = Pose2D(x, y, yaw)
 
-    def refine(self, pts, guess: Pose2D):
-        """凍結地図の上で`guess`の周りを探し直した結果（`Frontend.refine()`）。"""
-        return self._fe.refine(pts, guess)
+    def refine(self, pts, guess: Pose2D, *, trans: float | None = None, rot: float | None = None):
+        """凍結地図の上で`guess`の周りを探し直した結果（`Frontend.refine()`。窓は既定で ±0.4m・±15°）。"""
+        return self._fe.refine(pts, guess, trans=trans, rot=rot)
 
     @property
     def lidar_xy(self) -> tuple[float, float]:

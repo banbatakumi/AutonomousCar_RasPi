@@ -30,7 +30,6 @@ from ..nav import obstacles as obs_mod
 from ..nav.signals import SignalLights
 
 if TYPE_CHECKING:
-    from slam2d.core.localize import GlobalLocalizer
     from slam2d.core.locscore import LocateScorer
 
     from ..nav import avoid as av_mod
@@ -199,8 +198,11 @@ class LocateState(_Part):
 
     #: `LOCATED` で見失った周期数
     located_lost: int = 0
-    #: 進行中のグローバルローカリゼーション（`LOCATE` 段でのみ非 None）
-    localizer: GlobalLocalizer | None = None
+    #: 進行中のグローバルローカリゼーション（`LOCATE` 段でのみ非 None）。C があれば分枝限定法の
+    #: `globalmatch.MatchJob`（`_GmLocalizer` で包む）、無ければ総当たりの `GlobalLocalizer`
+    localizer: object | None = None
+    #: 地図ごとの分枝限定法の前処理（`globalmatch.GlobalMatcher`。地図の `seq` が変わったら作り直す）
+    gmatch: object | None = None
     #: 粗探索の上位候補のうち、まだ仕上げていないもの（`None` = 粗探索中）と仕上げた結果
     loc_cands: list | None = None
     loc_scored: list = field(default_factory=list)
