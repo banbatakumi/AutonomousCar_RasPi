@@ -546,6 +546,24 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_auto_route_without_explore_traj_still_picks_the_fastest_loop(self):
+        # 地図作成の軌跡が無い古い地図（保存した線は遠回りの周回）でも、線の始点から全周回を
+        # 比べて最速（近道）を選ぶ。★以前は保存した線に沿った経由点で引き、遠回りに固定された
+        from raspi.auto import mapstore
+        from raspi.auto.slam2d_route import Slam2dRoute
+        mapstore.save_routes("m", "{}")
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            self.assertEqual(set(pl._routes), {"auto"}, pl._route_err)
+            self.assertIsNotNone(pl._auto_start)
+            passage = int(pl._graph.label[int(2.5 / RES), int(3.5 / RES)])
+            self.assertIn(passage, pl._route_paths_edges("auto"))
+            self.assertIn("最速", pl._auto_note)
+        finally:
+            pl.close()
+
     def test_auto_route_is_fastest_loop_and_respects_avoid(self):
         # 経由点なし＋地図作成の軌跡あり: スタートから全周回を比べて最速（近道）を選ぶ。
         # 近道に避ける点を置くと、近道を通らない周回になる
@@ -928,6 +946,89 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
             with mock.patch.object(pl, "_detour_step", side_effect=lambda st, *a: st):
                 pl._race(AutoState(match_score=1.0), scan, VehicleState(t_capture=t0 + 40 * 10**9), p, False)
             self.assertAlmostEqual(pl._race_t, 40.0, places=3)
+        finally:
+            pl.close()
+
+    def test_race_clock_starts_at_engage(self):
+        """★ ミッションの時計は「走行を開始」（engage）を押した時刻から。LOCATE・経路待ちの間も進む。"""
+        from raspi.auto.slam2d_raceline import RACE
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import AutoState, Scan, VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            pl.set_engaged(False)
+            t0 = 50 * 10**9
+            pl.on_vehicle_state(VehicleState(t_capture=t0 - 10**9))
+            pl.set_engaged(True)
+            pl.on_vehicle_state(VehicleState(t_capture=t0))          # ここが起点
+            x, y = pl._routes["A"].xy[0]
+            pl.slam.set_pose(float(x), float(y), 0.0)
+            pl.phase = RACE
+            pl._dt = 0.1
+            p = pl.merged({})
+            scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12)
+            pl._race(AutoState(match_score=1.0), scan, VehicleState(t_capture=t0 + 7 * 10**9), p, False)
+            self.assertTrue(pl._race_started)
+            self.assertAlmostEqual(pl._race_t, 7.0, places=3)
+        finally:
+            pl.close()
+
+    def test_relocalization_keeps_lap_progress_and_clock(self):
+        """★ 走行の途中の再特定（`_begin_race` の呼び直し）で、周回の数えかけと時計を消さない。"""
+        from raspi.auto.slam2d_raceline import RACE
+        from raspi.auto.slam2d_route import Slam2dRoute
+        from raspi.msgs import AutoState, Scan, VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            x, y = pl._routes["A"].xy[0]
+            pl.slam.set_pose(float(x), float(y), 0.0)
+            pl.phase = RACE
+            pl._dt = 0.1
+            p = pl.merged({})
+            scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12)
+            t0 = 50 * 10**9
+            pl._race(AutoState(match_score=1.0), scan, VehicleState(t_capture=t0), p, False)
+            gate = pl._lap_gate
+            self.assertAlmostEqual(gate[0], float(x), places=6)
+            pl._lap_s, pl._lap_frac, pl.laps = 7.0, 0.6, 2
+            pl._begin_race(AutoState())
+            self.assertEqual((pl._lap_s, pl._lap_frac, pl._lap_gate, pl.laps), (7.0, 0.6, gate, 2))
+            pl._race(AutoState(match_score=1.0), scan, VehicleState(t_capture=t0 + 30 * 10**9), p, False)
+            self.assertAlmostEqual(pl._race_t, 30.0, places=3)
+        finally:
+            pl.close()
+
+    def test_failed_park_is_retried_from_the_current_pose(self):
+        """★ 駐車（`ParkToPoint`）が失敗しても止まったままにしない。上限まで今の自己位置から出し直す。"""
+        from raspi.auto.route_config import Stop
+        from raspi.auto.slam2d_route import _PARK_RETRIES, PARK, Slam2dRoute
+        from raspi.msgs import AutoState, Scan, VehicleState
+        pl = Slam2dRoute()
+        try:
+            pl.request_load("m")
+            self._wait(pl)
+            pl.slam.set_pose(5.0, 2.5, 0.0)
+            pl._stopping, pl._stop = "P", Stop(5.6, 2.5, yaw=0.0, mode="park")
+            pl._start_park()
+            self.assertEqual(pl.phase, PARK)
+            scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12)
+            p = pl.merged({})
+            pl._dt = 0.1
+            for i in range(_PARK_RETRIES + 2):
+                pl._park._phase = "失敗"
+                pl._park._failed_reason = "テスト"
+                first = pl._park
+                pl._park_step(AutoState(), scan, VehicleState(t_capture=10**9 * (i + 1)), p)
+                if i < _PARK_RETRIES:
+                    self.assertIsNot(pl._park, first)
+                    self.assertFalse(pl._park.failed)
+                else:
+                    self.assertIs(pl._park, first)
+            self.assertEqual(pl._park_tries, _PARK_RETRIES)
         finally:
             pl.close()
 

@@ -89,6 +89,8 @@ _STOP_LEAD_S = 0.4
 _STOP_APPROACH_MIN_M_S = 0.15
 #: 止まったとみなす車速 [m/s]（停止点での停止・駐車へ移る判定）
 _STOPPED_M_S = 0.03
+#: 駐車（`ParkToPoint`）が失敗したとき、今の自己位置から目標を出し直す回数。超えたら止まったまま
+_PARK_RETRIES = 3
 
 
 @dataclass
@@ -142,10 +144,13 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
                     vehicle, graph: RoadGraph | None, *, auto_start: Waypoint | None = None,
                     avoid: list[tuple[float, float]] | None = None,
                     refine: bool = True, grip: dict | None = None,
-                    parallel: bool = False, k_us: float = 0.0) -> _BuildOut:
+                    parallel: bool = False, k_us: float = 0.0,
+                    auto_fallback: list[Waypoint] | None = None) -> _BuildOut:
     """ワーカースレッドで走る。**引数の写しだけを触る**（planner の状態を読まない）。
 
     `auto_start` があれば、グループとは別に自動経路（キー `auto`）を全周回の中の最速から選ぶ。
+    `auto_fallback`: 全周回の比較で自動経路を作れなかったときだけ使う経由点（保存した
+    レーシングラインに沿う点。地図作成の軌跡が無い古い地図、`Slam2dRoute._set_auto_source`）
     `parallel`: 仕上げの出発点を2プロセスで回す（止まっている間だけ、`Slam2dRaceLine._may_parallel`）
     `k_us`: アンダーステア勾配の学習値（曲率の上限 `kappa_limit` に入れる）
     """
@@ -158,6 +163,9 @@ def _compute_routes(trinary: np.ndarray, resolution: float, origin: tuple[float,
     kw = _line_kwargs(p, vehicle, refine, grip, parallel, k_us)
     if auto_start is not None:
         _fastest_loop(out, grid, graph, auto_start, avoid, p, kw, vehicle)
+        if AUTO_KEY in out.errors and auto_fallback:
+            groups = {**groups, AUTO_KEY: list(auto_fallback)}
+            out.auto_note = f"自動経路: 周回の比較に失敗（{out.errors.pop(AUTO_KEY)}）。保存した線に沿って引いた"
     for key, wps in groups.items():
         try:
             rp = plan_loop(graph, wps, turn_max_deg=p["turn_max_deg"], avoid=avoid)
@@ -401,14 +409,19 @@ class Slam2dRoute(Slam2dRaceLine):
         self._stopping = ""                  #: 向かっている停止点の名前
         self._stop: Stop | None = None
         self._park: ParkToPoint | None = None
+        #: 駐車を出し直した回数（`_park_step`）
+        self._park_tries = 0
+        #: 自動運転に入った（GUI の「走行を開始」）ときの車両状態の時刻 [ns]。ミッションの時計の起点。
+        #: 0 = まだ・`set_engaged` を呼ばない呼び出し元（ベンチ・テスト）。そのときは RACE に入った周期から数える
+        self._engage_ns = getattr(self, "_engage_ns", 0)
+        self._engage_edge = getattr(self, "_engage_edge", False)
         self._note = ""                      #: 設定エラー等（GUI の reason に添える）
         self._p: dict[str, float] | None = None
         #: 今の経路を作った設定（`_LINE_KEYS`）。`None` = まだ作っていない
         self._built_key: tuple | None = None
         self._want_group = ""
-        #: 自動経路の元（**経路の設定には書かない**）。ふつうはスタート（地図作成の出発点と
-        #: 向き）から全周回を比べる。地図作成の軌跡が無い古い地図だけ、保存した
-        #: レーシングラインに沿って置いた経由点で代わりにする
+        #: 自動経路の元（**経路の設定には書かない**、`_set_auto_source`）。スタートから全周回を
+        #: 比べる。`_auto_wps` は比較が失敗したときの予備（軌跡が無い古い地図だけ）
         self._auto_start: Waypoint | None = None
         self._auto_wps: list[Waypoint] = []
         self._auto_note = ""
@@ -443,6 +456,32 @@ class Slam2dRoute(Slam2dRaceLine):
 
     # ── 人間・信号からの要求 ──
 
+    def set_engaged(self, engaged: bool) -> None:
+        """`planning_node` が毎周期渡す。入った瞬間（GUI の「走行を開始」）をミッションの時計の起点にする。"""
+        if engaged and not self._engaged:
+            self._engage_edge = True
+        elif not engaged:
+            self._engage_edge = False
+            self._engage_ns = 0
+        super().set_engaged(engaged)
+
+    def on_vehicle_state(self, vs: VehicleState) -> None:
+        super().on_vehicle_state(vs)
+        if self._engage_edge:
+            self._engage_edge = False
+            self._engage_ns = int(vs.t_capture)
+
+    def _begin_race(self, st: AutoState) -> None:
+        """RACE へ入る。走行の途中の再特定（見失い・車を動かされた）では、周回の数えかけを残す。
+
+        ★ 親は周回の進み（`_lap_s`・`_lap_frac`）とゲートを消すので、半周以上進んだ所で見失うと
+        その周が数えられず、周回数のミッションで 1 周余計に走った。"""
+        keep = self._race_started
+        saved = (self._lap_s, self._lap_gate, self._lap_frac) if keep else None
+        super()._begin_race(st)
+        if saved is not None:
+            self._lap_s, self._lap_gate, self._lap_frac = saved
+
     def request_load(self, name: str) -> None:
         super().request_load(name)
         if self._load_error:
@@ -470,10 +509,8 @@ class Slam2dRoute(Slam2dRaceLine):
             self._cfg = RouteConfig()
             self._note = f"経路の設定を読めない（{e}）。既定の経路で走る"
         # 自動経路の元（経路の設定には書かない、モジュール docstring）
-        self._auto_start = _start_of(self._cfg.explore_traj)
-        self._auto_wps = (waypoints_from_traj(self.path.xy)
-                          if self._auto_start is None and self.path is not None
-                          and len(self.path) >= 20 else [])
+        self._set_auto_source(self._cfg.explore_traj,
+                              self.path.xy if self.path is not None and len(self.path) >= 20 else None)
         if not self._load_cached_lines(name):
             self._submit(graph=None)
 
@@ -659,7 +696,8 @@ class Slam2dRoute(Slam2dRaceLine):
             self.vehicle, graph,
             auto_start=self._auto_start,
             avoid=list(self._cfg.avoid), refine=refine, grip=self._grip_line_kw(),
-            parallel=self._may_parallel(), k_us=self._us_k(p))
+            parallel=self._may_parallel(), k_us=self._us_k(p),
+            auto_fallback=list(self._auto_wps) if self._auto_start is not None else None)
         self._grip_line = self._grip_learned() if self._grip_line_kw() is not None else None
         self._job_grip = self._grip_line
 
@@ -679,6 +717,21 @@ class Slam2dRoute(Slam2dRaceLine):
     @staticmethod
     def _line_key(p: dict[str, float]) -> tuple:
         return tuple(float(p[k]) for k in _LINE_KEYS)
+
+    def _set_auto_source(self, traj, line) -> None:
+        """自動経路の元を決める。**どの場合もスタートから全周回を比べて最速を選ぶ**。
+
+        スタートは地図作成の軌跡の出発点と向き。軌跡が無い古い地図（`.routes.json` の無い
+        `mpc_toyota2` など）は、保存したレーシングライン `line` の始点と向きで代える。
+        ★以前は軌跡が無いと `line` に沿った経由点で引いていて、地図作成で回った周回
+        （toyota2 では島を回る 18.1s）に固定され、近道（13.5s）を選ばなかった。
+        `line` に沿った経由点は、全周回の比較が失敗したときの予備にだけ使う
+        """
+        self._auto_start = _start_of(traj)
+        if self._auto_start is None and line is not None and len(line) >= 20:
+            self._auto_start = _start_of(line)
+        self._auto_wps = (waypoints_from_traj(line)
+                          if _start_of(traj) is None and line is not None and len(line) >= 20 else [])
 
     def _groups_to_build(self) -> dict[str, list[Waypoint]]:
         """作る経路。経由点のグループ＋自動経路（スタートから全周回を比べる場合は
@@ -815,8 +868,7 @@ class Slam2dRoute(Slam2dRaceLine):
             self._cfg.explore_traj = RouteConfig.decimate(
                 forward_traj(self.slam.trajectory_array()))
             # 自動経路の元（経由点が無い間だけ使う。経路の設定には書かない）
-            self._auto_start = _start_of(self._cfg.explore_traj)
-            self._auto_wps = [] if self._auto_start is not None else waypoints_from_traj(lap)
+            self._set_auto_source(self._cfg.explore_traj, lap)
             self._submit(graph=None)
         if not self._poll():
             st.reason = "経路を作っている（道路グラフ → 経路 → レーシングライン）"
@@ -865,6 +917,9 @@ class Slam2dRoute(Slam2dRaceLine):
               p: dict[str, float], lost: bool) -> AutoState:
         self._race_clock(vs)
         if self.phase == DETOUR:
+            # 迂回の途中でも時間が来たら停止経路を作り始める（迂回が終われば停止経路へ乗る）
+            if self._race_started and self.path is not None and self.path.closed:
+                self._maybe_finish(self.slam.pose, vs, p)
             return self._detour_step(st, scan, vs, p)
         if self.phase == PARK:
             return self._park_step(st, scan, vs, p)
@@ -895,19 +950,29 @@ class Slam2dRoute(Slam2dRaceLine):
                 self._set_active(self._switch.active_key, self._switch.active)
             self._race_started = True
             self._lap_s = 0.0
-            self._lap_gate = None              # 走り出しの経路の先頭を周回のゲートにする
+            # 周回のゲートは走り出した位置（スタートライン）。経路の先頭（経由点のグループは最初の経由点、
+            # 自動経路は地図作成の出発点）だと、走り出しの位置によって最初の 1 周が 0.5〜1.5 周になる
+            self._lap_gate = (float(self.slam.pose[0]), float(self.slam.pose[1]))
+            self._lap_gate_ref = None
             self._lap_frac = -1.0
             self._joined = False
             self._join_tried = self._join_ok = False
             self._race_t = 0.0
-            self._race_t0_ns = int(vs.t_capture)
+            # ★ 時計は「走行を開始」を押した時刻から（決勝の 3 分の起点）。RACE に入った周期からだと、
+            #   LOCATE・経路待ちの時間だけ駐車への移行が遅れる
+            t_now = int(vs.t_capture)
+            self._race_t0_ns = self._engage_ns if 0 < self._engage_ns <= t_now else t_now
             self.laps = 0
+            self._race_clock(vs)               # engage から経った分をこの周期に入れる
 
         # 学習のゲート（「走行を抑えている」）は、この先で止まる・抑える判断より前に閉じる。
         # 自己位置が信用できずに止まる周期にも、学習が前の周期の判断のまま見続けないように
         self._grip_begin(vs, p)
         coasting = self._localization_ok(st, lost, p)
         if coasting is None:
+            # 見失って止まっている間も時間の判定は続ける（戻ったときに停止経路ができている）
+            if self.path is not None and self.path.closed:
+                self._maybe_finish(self.slam.pose, vs, p)
             return st
 
         pose = self.slam.pose
@@ -933,6 +998,12 @@ class Slam2dRoute(Slam2dRaceLine):
             self._join_tried = True
             self._join_ok = self._join_back(path, p)
 
+        if not path.closed and self._hint < 0:
+            # 停止経路は 1 周回ってから止まると終わりの区間が始めの区間と重なるので、迂回・合流の後
+            # （`_hint = -1`）に全体の最寄り点を探すと終わり側を拾って早く止まる。始点の側から探す
+            k = _first_nearest(path, pose)
+            if k >= 0:
+                self._hint = k
         pp, hit, dist = self._track(st, scan, vs, p, path, pose)
 
         if path.closed:
@@ -1086,8 +1157,16 @@ class Slam2dRoute(Slam2dRaceLine):
     def _park_step(self, st: AutoState, scan: Scan, vs: VehicleState,
                    p: dict[str, float]) -> AutoState:
         assert self._park is not None
-        pp = {s.key: s.default for s in ParkToPoint.params}
+        pp = {s.key: p.get(s.key, s.default) for s in ParkToPoint.params}
+        if self._park.failed and self._park_tries < _PARK_RETRIES and abs(vs.speed) < _STOPPED_M_S:
+            # ★ 失敗のままだと目標を出し直すまで永久に止まる（`ParkToPoint._fail`）。決勝では人が触れないので、
+            #   今の自己位置（保存地図で追跡し続けている）から目標を出し直す
+            self._park_tries += 1
+            self._start_park()
         pst = self._park.plan(scan, vs, pp, self._dt)
+        if self._park.failed:
+            pst.reason += (f"（出し直し {self._park_tries}/{_PARK_RETRIES}）" if self._park_tries < _PARK_RETRIES
+                           else "（出し直しの上限。ここで止まる）")
         pst.mode, pst.planner, pst.phase = self.id, self.name, PARK
         pst.pose_x, pst.pose_y, pst.pose_yaw = st.pose_x, st.pose_y, st.pose_yaw
         pst.match_score = st.match_score
