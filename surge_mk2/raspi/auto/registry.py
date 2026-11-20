@@ -15,14 +15,12 @@ GUI・WS・planning_node のどれも触らなくてよい。モード選択も�
 from __future__ import annotations
 
 from .base import Planner
-from .cam_centerline import CamCenterline
 from .cam_e2e import CamE2E
 from .disparity_extender import DisparityExtender
 from .e2e_fusion import E2EFusion
 from .e2e_lidar import E2ELidar
 from .follow_object import FollowObject
 from .follow_the_gap import FollowTheGap
-from .follow_the_gap_cam import FollowTheGapCam
 from .gap_pursuit import DisparityPursuit
 from .line_trace import LineTrace
 from .park_to_point import ParkToPoint
@@ -44,8 +42,6 @@ __all__ = ["PLANNERS", "catalog", "make_planner", "merged_params"]
 #: id → クラス。**並び順がそのまま GUI の並び順**
 PLANNERS: dict[str, type[Planner]] = {
     FollowTheGap.id: FollowTheGap,
-    FollowTheGapCam.id: FollowTheGapCam,
-    CamCenterline.id: CamCenterline,
     CamE2E.id: CamE2E,
     DisparityExtender.id: DisparityExtender,
     DisparityPursuit.id: DisparityPursuit,

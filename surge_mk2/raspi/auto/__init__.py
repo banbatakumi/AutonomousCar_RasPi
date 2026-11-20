@@ -11,7 +11,7 @@
 `registry` 経由で全 planner が芋づる式に読み込まれ、`slam2d_raceline`/
 `slam2d_route` を通じて `slam2d.pipeline`（`backend/posegraph.py` 経由で
 g2opy が必須）まで連鎖してしまう。`raspi.auto.base` の関数を1つ使うだけの
-カメラ系ノード（cam_perception/cam_e2e/cam_track）でも g2opy が無いと
+カメラ系ノード（cam_e2e/cam_track）でも g2opy が無いと
 落ちる、という事故はこれが原因だった。使う側はサブモジュールを直接
 import すること::
 

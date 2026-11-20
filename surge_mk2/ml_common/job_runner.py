@@ -1,6 +1,6 @@
 """サブプロセス実行の共通基盤。
 
-`ml_cam`/`ml_cam_e2e` の「同時に1つしか動かさない」運用（`allow_concurrent=False`）と、
+`ml_cam_e2e` の「同時に1つしか動かさない」運用（`allow_concurrent=False`）と、
 `ml_lidar` の「学習+TensorBoard+観戦+エクスポートを並行実行したい」運用
 （`allow_concurrent=True`）を、同じ辞書ベースAPIで両立させる。
 
@@ -26,10 +26,10 @@ class JobRunner:
 
     :param cwd: 起動する子プロセスの作業ディレクトリ（通常はリポジトリルート）。
     :param allow_concurrent: `False` なら「他に1つでも実行中のジョブがあれば
-        `start()` を拒否する」（`ml_cam`/`ml_cam_e2e` の `self.busy` と同じ意味論）。
+        `start()` を拒否する」（`ml_cam_e2e` の `self.busy` と同じ意味論）。
         `True` なら `job_key` ごとに独立実行できる（`ml_lidar` の複数ジョブ運用）。
     :param prefix_labels: `True` なら実行中のログ各行の先頭に `"[label] "` を
-        前置する（`ml_lidar` 方式）。`False` なら前置しない（`ml_cam` 方式）。
+        前置する（`ml_lidar` 方式）。`False` なら前置しない（`ml_cam_e2e` 方式）。
         ジョブ完了時のメッセージには `allow_concurrent` に関わらず常に付く。
     """
 

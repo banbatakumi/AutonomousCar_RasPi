@@ -25,26 +25,25 @@ NanoTrack v2 ONNXエクスポートと同じもの。SHA1で検証済み）。**
 
 モデルが無い間は`TargetTracker.available=False`のまま——`_try_select()`が
 `select_seq`を消費せずに`tracking=False`を返し続けるので、あとからモデルを
-配置してノードを再起動すれば選び直しから復帰できる（`cam_perception_node.py`
-の「モデル未選択の間は壁扱いで出し続ける」と同じ、失敗を握りつぶして
+配置してノードを再起動すれば選び直しから復帰できる（失敗を握りつぶして
 安全側へ倒す設計）。
 
 ## `process_cycle()`はバスを知らない純粋関数
 
 `run()`（実バス配線）とテスト（`raspi/tests/test_cam_track_node.py`）の
-両方がここを通る（`cam_perception_node.py`と同じ構成）。
+両方がここを通る。
 
 ## ROI未選択（IDLE）の間、またはDISARM中はフレームを読まない
 
 `run()`は「ARM中」かつ「追跡中（`_state != "IDLE"`）か新規選択が来た周期
 （`roi.select_seq`が進んだ）」の間だけ`TOPIC_IMAGE_FRONT`の共有メモリを読む。
-IDLE中に毎周期読むと実車でCPU 33%程度を消費するので、`cam_perception_node.py`の
+IDLE中に毎周期読むと実車でCPU 33%程度を消費するので、`cam_e2e_node.py`の
 「モードが選ばれていない間は共有メモリすら読まない」節電に揃えている。
 
 **armedを見る理由**: ROI選択（`track/roi`）はtelemetry_nodeがプロセス
 再起動まで覚えていて、GUI再読み込みでも復元・再送され続ける
 （telemetry_node の周期送信 `_periodic_jobs`）。armedを見ないと、一度でも追跡対象を選択すると
-駐車中（DISARM）もNanoTrackが回り続ける——`cam_perception_node.py`等の
+駐車中（DISARM）もNanoTrackが回り続ける——`cam_e2e_node.py`等の
 主モードゲートと全く同じ形の省電力バグだったため、同じ設計
 （`raspi/core/auto_gate.vehicle_armed()`）で揃えた。
 """
@@ -83,7 +82,7 @@ __all__ = ["CamTrackNode", "TargetTracker"]
 
 NS = 1_000_000_000
 HB_HZ = 10
-#: `surge_mk2/`。既定モデルの場所を解決する基準（`cam_perception_node.py`と同じ深さ）
+#: `surge_mk2/`。既定モデルの場所を解決する基準（`cam_e2e_node.py`と同じ深さ）
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "nano_track"
 BACKBONE_NAME = "nanotrack_backbone_sim.onnx"
@@ -137,8 +136,8 @@ DEFAULT_CV_THREADS = 2
 
 class TargetTracker:
     """`cv2.TrackerNano`の薄いラッパ。**モデルが無ければ`None`同然に振る舞う**
-    （`cam_perception_node.SegmentationModel`と同じ「失敗を握りつぶして安全側
-    に倒す」思想）。1つのインスタンスは1回の選択に対応する使い切りで、
+    （失敗を握りつぶして安全側
+    に倒す思想）。1つのインスタンスは1回の選択に対応する使い切りで、
     選び直すたびに`CamTrackNode`が新しいインスタンスを作る
     （前の対象の内部状態を持ち越さないため）。
     """
@@ -179,7 +178,7 @@ class TargetTrackerFactory:
     def new_instance(self) -> TargetTracker | None:
         """**失敗しても例外を投げない。** 選択のたびに呼ぶので、ここで例外が
         漏れると`process_cycle()`ごと落ちてノードが死ぬ（`_load_from_path()`系の
-        「握りつぶさない」とは逆の場面——ロード失敗は`cam_perception_node`の
+        「握りつぶさない」とは逆の場面——ロード失敗は
         推論失敗と同じ「1周期分の失敗」として扱いたいため、ここでは握りつぶす）。
         """
         if not self.available:
@@ -562,12 +561,12 @@ class CamTrackNode:
                 #: `process_cycle()` が実際に `frame` を使うのは、追跡中
                 #: （`_tracker.update()`）か新規選択が来た周期（`_try_select()`）だけ
                 #: （201-207行目・388-391行目参照）。IDLE中で新規選択も無い間は
-                #: `TOPIC_IMAGE_FRONT` の共有メモリすら読まない——`cam_perception_node.py`
+                #: `TOPIC_IMAGE_FRONT` の共有メモリすら読まない——`cam_e2e_node.py`
                 #: と同じ「使わないものは読まない」節電（実車確認、待機時CPU 33%→数%）。
                 #: **DISARM中は選択済み/追跡中でも読まない**——ROI選択は
                 #: telemetry_node が再起動まで覚えている（telemetry_node の周期送信 `_periodic_jobs`）ので、
                 #: armed を見ないと駐車中もNanoTrackが回り続ける
-                #: （`cam_perception_node.py`等と同じ省電力バグ）
+                #: （`cam_e2e_node.py`等と同じ省電力バグ）
                 #: **モデル未配置（`_factory.available=False`）の間はROI選択の
                 #: 試行を即座に諦める。** `_try_select()`はモデルが無ければ
                 #: `select_seq`を消費せずに`False`を返し続けるので、これを

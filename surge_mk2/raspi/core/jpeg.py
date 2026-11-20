@@ -63,8 +63,7 @@ def make_encoder(quality: int):
 
         def enc(arr, colorspace):
             # `simplejpeg` は colorspace に関わらず3次元 (H, W, C) を要求する。
-            # `GRAY` を2次元 (H, W) のまま渡す呼び出し元（`cam_perception_node.py`
-            # の `encode_mask_jpeg()`）があるため、ここで合わせる
+            # `GRAY` を2次元 (H, W) のまま渡す呼び出し元があるため、ここで合わせる
             # （実機の simplejpeg でのみ踏む——Mac 開発環境は Pillow にフォール
             # バックし、`Image.fromarray()` は2次元のままで動くため気づきにくい）
             if colorspace == "I420":

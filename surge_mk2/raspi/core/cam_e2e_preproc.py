@@ -8,9 +8,6 @@ Pi の推論（`raspi/nodes/cam_e2e_node.py`）と Mac の学習・評価
 numpy だけで書く——Pi には opencv も Pillow も入れていない
 （`raspi/requirements.lock.txt`）。
 
-`to_rgb()`・`resize_area()` は `raspi/nodes/cam_perception_node.py`
-（セグメンテーション）と `ml_cam/dataset.py` も使う。同じ関数に揃えてある。
-
 `PREPROC_VERSION` はモデル同梱の `<name>.json` に書かれ、ノードが読み込み時に
 照合する。ここの処理（色順・リサイズ方式・正規化）を変えたら必ず上げること。
 古い前処理で学習したモデルを新しい前処理で走らせる事故を、読み込み拒否で止める。
@@ -22,8 +19,7 @@ cam_e2e は学習で「車の向きをずらした絵」を作る（`ml_cam_e2e/
 手がかりに覚えてしまう。そこで**学習でも推論でも左右を `crop_x`（画像幅に対する割合）ずつ
 切り落とした中央の窓を使い**、ずらすのは窓の位置だけにする（端に作り物の画素が出ない）。
 
-共有の `PREPROC_VERSION` を上げると切り落としと無関係な `ml_cam`（セグメンテーション）の
-モデルまで読めなくなるので、cam_e2e の契約だけ `PREPROC_VERSION_CROP` を書く。
+cam_e2e の契約は `PREPROC_VERSION` とは別に `PREPROC_VERSION_CROP` を持つ。
 切り落としを知らない古いノードは版の照合でそのモデルを拒否する（黙って全幅で推論しない）。
 
 ## 左右2台の入力（`PREPROC_VERSION_STEREO`、cam_e2e・e2e_fusion）
@@ -35,7 +31,7 @@ cam_e2e は学習で「車の向きをずらした絵」を作る（`ml_cam_e2e/
 画素の位置が左右で合っている必要は無い。版2（切り落とし）を含む。
 
 **cam_e2e・e2e_fusion のノードは版3だけを読む。** 版1・2（右1台）は前後配置のころのモデルの版で、
-視点が変わって使えないので読み込みで拒否する（`PREPROC_VERSION` は `ml_cam` が今も使う）。
+視点が変わって使えないので読み込みで拒否する。
 """
 
 from __future__ import annotations

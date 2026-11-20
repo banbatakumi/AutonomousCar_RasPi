@@ -8,7 +8,7 @@
  * 各フレームの前に `{"near_m": …}` のテキストが来る（赤の端 = 視差が探索幅の距離）。カーソルを合わせた画素の
  * 色を JET の逆引きで視差に戻し、距離 = near_m × 255 / v（v は色の値 0〜255）で表示する。
  * JPEG の劣化と 8bit の量子化があるので**目安**（遠いほど粗い）。黒は「測れない」。
- * 開閉・再接続は `CameraView` の `/ws/camera/mask` と同じ作法。
+ * 開閉・再接続はメイン映像（`CameraView`）の WS と同じ作法。
  */
 import { useEffect, useRef, useState } from 'react'
 import { CAM_RECONNECT_WAIT_MS, reconnectingSocket } from '../ws/socket'

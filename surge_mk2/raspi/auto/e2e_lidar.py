@@ -12,7 +12,7 @@
 
 ## モデルはGUIから名前で選ぶ（`e2e/model`）
 
-`raspi/nodes/cam_perception_node.py` の `SegmentationModel`/`reload_if_changed()` と
+`raspi/nodes/cam_e2e_node.py` の `reload_if_changed()` と
 同じ設計。`models/e2e_lidar/<name>.onnx`（+ 同名 `.json`。前処理契約。
 `ml_lidar/export_onnx_rl.py` が書く）を`e2e/model`トピック経由の名前で選び、
 `planning_node.py`（`e2e_lidar`エンゲージ中のみ）が毎周期`reload_if_changed()`を
@@ -46,7 +46,7 @@ from .base import ParamSpec, Planner, blind_reason, scan_window
 
 __all__ = ["E2ELidar"]
 
-#: `surge_mk2/`。既定モデルの場所を解決する基準（`cam_perception_node.py` と同じ深さ）
+#: `surge_mk2/`。既定モデルの場所を解決する基準（`cam_e2e_node.py` と同じ深さ）
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: カメラ用（`models/`直下）とは別ディレクトリ。前処理契約が違うので混ぜない
 DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "e2e_lidar"
@@ -69,7 +69,7 @@ def _load_from_path(path: Path) -> dict:
 
     **失敗したら例外を投げる。** `reload_if_changed()`側が捕まえて「今のモデルを
     保持する」を判断するので、ここでは握りつぶさない
-    （`cam_perception_node.py`の`_load_model_by_name()`と同じ形）。
+    （`cam_e2e_node.py` の読み込みと同じ形）。
     """
     cfg_path = path.with_suffix(".json")
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
@@ -195,7 +195,7 @@ class E2ELidar(Planner):
         **失敗しても今のモデルを保持する。** 存在しない名前を選んでも、それだけで
         走行が止まる（`ready=False`に戻る）よりは、前のモデルで走り続けられる方が
         安全側——ただし選び間違いに気づけるよう `self._load_error` には残す
-        （`cam_perception_node.py`の`reload_if_changed()`と同じ契約）。
+        （`cam_e2e_node.py`の`reload_if_changed()`と同じ契約）。
 
         :returns: 切り替えられたら`True`。名前が同じ・失敗なら`False`
         """

@@ -161,28 +161,8 @@ export type FanStatus = {
   rpm: number | null
 }
 
-/** `models/` にある `.onnx` の1件（`cam_model_list` の応答）。 */
-export type CamModelFile = {
-  name: string
-  size: number
-  /** UNIX epoch秒 */
-  mtime: number
-  /** 前処理設定（`ml_cam/export_onnx.py` が書く `<name>.json`）が同梱されているか。
-   * 無ければ既定値（0-1正規化・224x224）で読まれる */
-  has_config: boolean
-  /** 自由記述の備考（`ml_cam/app.py` の備考欄→`note.txt`→エクスポート時に`<name>.json`
-   * へ同梱される）。無ければ空文字（`E2EModelFile.note` と対称） */
-  note: string
-}
-
-/** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値**
- * （`ws/control.ts` の `camModelSelect`）。空文字は未選択 */
-export type CamModelStatus = {
-  name: string
-}
-
 /** `models/e2e_lidar/` にある `.onnx` の1件（`e2e_model_list` の応答）。
- * `CamModelFile` と同じ形だが、カメラ用モデルと混ざらないよう別の型にしてある */
+ * 他のモデル種別と混ざらないよう別の型にしてある */
 export type E2EModelFile = {
   name: string
   size: number
@@ -386,8 +366,6 @@ export type ControlStatus = {
   drive_settings: Record<string, number | boolean | string>
   /** 矢印信号認識のON/OFF・HSVしきい値。**サーバが真値** */
   signal_config: SignalConfigStatus
-  /** cam_perception_node が使うセグメンテーションモデルの選択。**サーバが真値** */
-  cam_model: CamModelStatus
   /** e2e_lidar が使うモデルの選択。**サーバが真値** */
   e2e_model: E2EModelStatus
   /** cam_e2e が使うモデルの選択。**サーバが真値** */

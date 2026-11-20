@@ -1,6 +1,6 @@
 """`ml_cam_e2e/extract_pairs.py` のテスト。
 
-`ml_cam/tests/test_extract_frames.py` と同じく、`raspi/rec/mcap_log.py`
+`raspi/rec/mcap_log.py`
 （Pi側の書き手）で実際に `.mcap` を作り、読み戻して検証する往復テスト。
 画像に加えて `/cmd`（`DriveCmd`）も同じ書き手で書く。
 """

@@ -17,7 +17,7 @@ export function CameraTab({ ch }: { ch: ControlChannel | null }) {
       {/* capture側(camera_node)の前カメラのFPS上限・GUI配信頻度。
           TC/TVと同じく状態はサーバ真値（`status.camera_config`）。
           ARM中/DISARM中で別々の値を持つ（駐車中の節電のため）。
-          前カメラの上限は目安——カメラを使う自動運転（`line_trace`/`ftg_cam`）が
+          前カメラの上限は目安——カメラを使う自動運転（`line_trace`・`cam_e2e` など）が
           engage 中はサーバ側が無視して最大まで引き上げる（`auto_override`） */}
       <section className="settings-group">
         <h3>カメラ（ARM中＝走行できる状態）</h3>
@@ -115,7 +115,7 @@ export function CameraTab({ ch }: { ch: ControlChannel | null }) {
         </div>
       </section>
 
-      {/* セグメンテーションモデル（`ftg_cam`）・E2E LiDARモデル（`e2e_lidar`）の
+      {/* E2E LiDARモデル（`e2e_lidar`）などの
           選択は自動運転タブの `AutoPanel` にある——「どのモードで
           走るか」と「そのモードが使うモデル」は同じ意思決定の一部なので、ここには置かない */}
 

@@ -1,6 +1,6 @@
 """学習曲線（loss・任意の第2指標）をTkinter Canvasに手書きで描く。
 
-`ml_cam`/`ml_cam_e2e` のみ使用する。`ml_lidar` はTensorBoardで代替しており、
+`ml_cam_e2e` などが使用する。`ml_lidar` はTensorBoardで代替しており、
 インスタンス化しなければ何のコストも掛からない。
 """
 

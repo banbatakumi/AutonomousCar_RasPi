@@ -2,7 +2,7 @@
 
 `raspi/core/jpeg.py`（同じセンサ画像を JPEG にする側）と同じ「最新スロットを
 読んで、読み終えてから検証する」「`ring_seq` の乖離で作り直しを検出して
-attach し直す」作法を、生配列がそのまま要る側（`cam_perception_node.py`・
+attach し直す」作法を、生配列がそのまま要る側（`cam_e2e_node.py`・
 `line_perception_node.py` 等、推論・CV 処理をする側）向けにまとめたもの。
 JPEG 化はしない分だけ `RingJpeg` より薄い。
 

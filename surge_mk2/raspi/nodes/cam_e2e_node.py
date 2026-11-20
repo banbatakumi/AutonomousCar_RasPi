@@ -5,8 +5,7 @@
 
 `camera_node.py` が書く共有メモリ（`image/front`・`image/left` の `ImageRef`）を読み、ONNX
 モデルで正規化した操舵（`steer_norm`、-1..1）と速度（`speed_norm`、0..1）を
-直接推論する。`cam_perception_node.py`（走行可否セグメンテーション→IPM→
-擬似`Scan`）と違い、**幾何変換（IPM）を一切経由しない**——低いカメラ高さで
+直接推論する。**幾何変換（IPM）を一切経由しない**——低いカメラ高さで
 IPMの深度誤差が拡大する問題を、画像から操作を直接学習することで迂回するのが
 このノードの存在理由（`docs/development.md` §12.3）。
 
@@ -26,14 +25,14 @@ LiDAR の前方距離は使わない（「カメラの映像だけで走る」�
 
 ## 契約: 推論が失敗した／モデル未選択のフレームは `ready=False`
 
-`cam_perception_node.py` の契約2（欠測は壁扱い）と同じ考え方。
+（`line_perception_node.py` も同じく、認識できなかった周期は「見えない」として出す）
 
 ## publish するのは「推論を試みた周期」だけ
 
 `Publisher.send()` は呼ぶたびに seq を打ち直すので、同じ中身を再送すると
 planning_node には新しい入力に見えて `plan()` が回る。推論は `--infer-hz`
 （既定10Hz）に間引いているので、publish もその周期に合わせる
-（`cam_perception_node.py` と同じ。`stale_ms=500` に対して十分な鮮度）。
+（`stale_ms=500` に対して十分な鮮度）。
 
 ## 新しいコマが届いた瞬間に推論する
 
@@ -46,10 +45,10 @@ planning_node には新しい入力に見えて `plan()` が回る。推論は `
 
 ## カメラ系モードが選ばれている間だけ推論する
 
-`cam_perception_node.py` と同じ節電方針。`cam_e2e_node` はプロセスとしては
+節電のため、`cam_e2e_node` はプロセスとしては
 常時起動（`surge-cam-e2e`）だが、`auto/ctrl` の `mode` が `cam_e2e` で、**かつ
 DISARM中（駐車中）でない**間だけ実際にフレームを読んで推論する
-（`raspi/core/auto_gate.cam_infer_active()` に集約、`cam_perception_node.py`・
+（`raspi/core/auto_gate.cam_infer_active()` に集約、
 `line_perception_node.py` と共通）。DISARM中はモードが選ばれているだけでは
 推論しない——GUI再読み込みで前回選択モードがそのまま復元されるため、
 armed/engaged を見ずにモード選択だけで駆動すると駐車中の待機でも推論が
@@ -106,8 +105,8 @@ _log = get_logger("cam_e2e")
 __all__ = ["MODEL_OUTPUTS", "RegressionModel", "load_model", "CamE2ENode"]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: モデルの種類ごとに `models/` のサブフォルダを切る（セグメンテーションは `models/seg/`。
-#: 同じ場所に置くと別の種類のモデルの選択肢に出てしまう）
+#: モデルの種類ごとに `models/` のサブフォルダを切る
+#: （同じ場所に置くと別の種類のモデルの選択肢に出てしまう）
 DEFAULT_MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
 
 NS = 1_000_000_000
@@ -127,7 +126,6 @@ class RegressionModel:
 
     前処理契約（入力解像度・平均/分散）と出力契約（`max_steer`・`speed_ref`）は
     モデルに同梱する（`ml_cam_e2e/export_onnx.py` が `<name>.json` に書く）。
-    `raspi/nodes/cam_perception_node.py` の `SegmentationModel` と同じ設計。
     """
 
     def __init__(self, model_path: str, *, input_size: tuple[int, int] = (224, 128),
@@ -213,8 +211,7 @@ class CamE2ENode:
 
     **`process_frame()` はバス・共有メモリを一切知らない純粋関数。**
     `run()`（実バス配線）とテストの両方がここを通る
-    （`cam_perception_node.py` と同じ設計方針）。
-    """
+        """
 
     def __init__(self, *, model: RegressionModel | None = None,
                 models_dir: Path | None = None, loaded_model_name: str = "",
@@ -227,7 +224,7 @@ class CamE2ENode:
         self._failed_model_key: tuple | None = None
         self.vehicle = vehicle or Vehicle.load()
 
-        # ★省電力化: `cam_perception_node.py` と同じ理由で推論を間引く
+        # ★省電力化: 推論を間引く
         self._infer_period_ns = int(NS / infer_hz) if infer_hz > 0 else 0
         self._last_attempt_ns = 0
         #: 前のループで見た最新コマ（`_frame_key`）。変わったら新しいコマ（左右2台なら組）が届いた
@@ -245,8 +242,7 @@ class CamE2ENode:
     # ── モデルの切替 ──
 
     def reload_if_changed(self, desired_name: str) -> bool:
-        """`cam_perception_node.CamPerceptionNode.reload_if_changed()` と同じ契約
-        （失敗しても今のモデルを保持し、同じファイルは再試行しない）。"""
+        """モデルの選び直し（失敗しても今のモデルを保持し、同じファイルは再試行しない）。"""
         if not desired_name or desired_name == self._loaded_model_name:
             return False
         onnx_path = self.models_dir / f"{desired_name}.onnx"

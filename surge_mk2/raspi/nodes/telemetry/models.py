@@ -26,7 +26,6 @@ import msgspec
 
 from raspi.msgs.types import (
     TOPIC_CAM_E2E_MODEL,
-    TOPIC_CAM_MODEL,
     TOPIC_E2E_FUSION_MODEL,
     TOPIC_E2E_MODEL,
     TOPIC_STEREO_E2E_MODEL,
@@ -118,9 +117,7 @@ def _slot(key: str, subdir: str, conf: str, topic: str, auto_mode: str) -> Model
 #: モデルの種類の表。置き場は各ノードの `DEFAULT_MODELS_DIR` と同じ場所（テストが突き合わせる）。
 #: e2e_fusion・stereo_e2e のノードは telemetry が居ないとき保存先を自分で読む
 MODEL_SLOTS: dict[str, ModelSlot] = {s.key: s for s in (
-    # セグメンテーション（`ml_cam`）→ cam_perception_node。`ftg_cam` が使う
-    _slot("cam_model", "seg", "cam_model.json", TOPIC_CAM_MODEL, "ftg_cam"),
-    # LiDAR E2E（`ml_lidar`）→ planning_node。セグメンテーションとは前処理の契約が違うので置き場を分ける
+    # LiDAR E2E（`ml_lidar`）→ planning_node
     _slot("e2e_model", "e2e_lidar", "e2e_lidar_model.json", TOPIC_E2E_MODEL, "e2e_lidar"),
     # カメラ E2E（`ml_cam_e2e`）→ cam_e2e_node
     _slot("cam_e2e_model", "cam_e2e", "cam_e2e_model.json", TOPIC_CAM_E2E_MODEL, "cam_e2e"),

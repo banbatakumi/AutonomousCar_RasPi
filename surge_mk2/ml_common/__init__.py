@@ -1,4 +1,4 @@
-"""ml_common — 学習用GUI（`ml_lidar/app.py`・`ml_cam/app.py`・`ml_cam_e2e/app.py`）が
+"""ml_common — 学習用GUI（`ml_lidar/app.py`・`ml_cam_e2e/app.py`）が
 共有する薄い部品群。
 
 3つのGUIは同じ設計思想（Tkinter/ttk標準ライブラリのみ、subprocessで学習スクリプトを

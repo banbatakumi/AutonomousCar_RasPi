@@ -31,20 +31,9 @@
 #     tools/record.sh                 # Mac で実行。ssh 越しに MCAP を PC へ流す
 #                                      # （GUI を開けないときの代替経路）
 #
-# ## `surge-cam-perception` は既定で入れる（`auto/ctrl` 連動）
-#
-# `ftg_cam`／`cam_centerline`（カメラの走行可否セグメンテーションで走るモード）
-# 用の推論プロセス。`cam_perception_node.py`
-# 自身が `auto/ctrl`（`AutoCtrl.mode`）を見て **カメラ系モードのいずれかが
-# 選ばれている間だけ**推論する（IDLE/ACTIVE。`cam_track_node.py` の待機コスト
-# 設計と同じ）ため、`surge-cam-track` と同様に常時起動してよい——GUI で他の
-# モードを選んでいる間はフレームの共有メモリすら読まない。
-#
-# 手順・GUI での使い方は `docs/development.md` §12.2。
-#
 # ## `surge-cam-track`（`follow_object` 用）は既定で入れる
 #
-# `cam_perception_node` とは対照的に、**GUIでROIを選択する（`track/roi`の
+# **GUIでROIを選択する（`track/roi`の
 # `select_seq`が増える）までNanoTrackの推論を一切回さない**
 # （`raspi/nodes/cam_track_node.py`の`process_cycle()`——`IDLE`状態はフレームの
 # 共有メモリ読み取りだけで、推論コストは`TRACKING`中だけ発生する）。
@@ -80,9 +69,9 @@ ROOT=$(pwd)
 USER_NAME=${SUDO_USER:-pi}
 PY="$ROOT/.venv/bin/python -u"
 # **surge-logger は既定でこの一覧に入れない**（SD 書き込みの無駄を避けるため。上記）。
-# **surge-cam-track / surge-cam-perception / surge-line-perception は入れる**
+# **surge-cam-track / surge-line-perception は入れる**
 # （いずれも待機中は認識・推論を回さない設計のため。上記）
-UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-stereo surge-stereo-e2e surge-mdns)
+UNITS=(surge-io surge-camera surge-telemetry surge-planning surge-cam-track surge-cam-e2e surge-e2e-fusion surge-line-perception surge-stereo surge-stereo-e2e surge-mdns)
 WITH_LOGGER=0
 
 # `--max-speed` / `--max-steer` は **STM32 から `LIMITS`（車両の物理的な上限）を受け取るまでの
@@ -97,7 +86,7 @@ case "${1:-}" in
   --safe)   ARM=""; MODE="arm 封印（DISARM 固定）" ;;
   --with-logger) WITH_LOGGER=1; UNITS+=(surge-logger) ;;
   --remove)
-    systemctl disable --now "${UNITS[@]}" surge-logger surge-arrow-signal surge-logclean.timer 2>/dev/null || true
+    systemctl disable --now "${UNITS[@]}" surge-logger surge-arrow-signal surge-cam-perception surge-logclean.timer 2>/dev/null || true
     rm -f /etc/systemd/system/surge-*.service /etc/systemd/system/surge-logclean.timer
     rm -rf /etc/systemd/system/surge-telemetry.service.d /etc/systemd/system/surge-io.service.d
     rm -f /etc/udev/rules.d/99-surge-fan.rules
@@ -279,7 +268,7 @@ EOF
 write_unit surge-planning  "自動運転"         "raspi.nodes.planning_node --quiet" \
            "surge-io.service"
 # `follow_object` 用の対象追跡。**常時上げてよい**（上記コメント参照）。
-# `--quiet` は渡さない（`cam_perception_node.py` と同じくargparseに無いオプション）
+# `--quiet` は渡さない（argparseに無いオプション）
 write_unit surge-cam-track "対象追従(follow_object用)の追跡" \
            "raspi.nodes.cam_track_node" "surge-camera.service"
 # ロガーの unit は**常に置く**（`--with-logger` を付けたときだけ enable する）。
@@ -291,15 +280,11 @@ if [ "$WITH_LOGGER" = 0 ]; then
   systemctl disable --now surge-logger 2>/dev/null || true
 fi
 
-# cam_perception は**常時 enable**（`UNITS` に入っている）。`ftg_cam` が
-# 選ばれていない間は自身で IDLE に落ちる（`cam_perception_node.py` の
-# モジュールdocstring参照）ので、`surge-cam-track` と同じく常時起動してよい。
-# **`--quiet` は渡さない**（`cam_perception_node.py` の argparse にそのオプション
-# が無い。渡すと起動時に即エラー終了して `Restart=on-failure` で再起動ループになる）
-write_unit surge-cam-perception "カメラの走行可否セグメンテーション推論(ftg_cam/cam_centerline用)" \
-           "raspi.nodes.cam_perception_node" "surge-camera.service"
+# 廃止したセグメンテーション推論の unit が Pi に残っていれば止めて消す
+systemctl disable --now surge-cam-perception 2>/dev/null || true
+rm -f /etc/systemd/system/surge-cam-perception.service
 
-# cam_e2e も**常時 enable**（`cam_perception` と同じ IDLE/ACTIVE 設計。
+# cam_e2e も**常時 enable**（IDLE/ACTIVE 設計。
 # `auto/ctrl` が `cam_e2e` の間だけ推論する。`docs/development.md` §12.3）
 write_unit surge-cam-e2e "カメラE2E(模倣学習)推論(cam_e2e用)" \
            "raspi.nodes.cam_e2e_node" "surge-camera.service"
@@ -321,7 +306,7 @@ write_unit surge-stereo-e2e "ステレオE2E(画像+視差)推論(stereo_e2e用)
 
 # line_perception も**常時 enable**（`UNITS` に入っている）。`line_trace` が
 # 選ばれていない間は自身で IDLE に落ちる（`line_perception_node.py` の
-# モジュールdocstring参照）ので、`surge-cam-perception` と同じく常時起動してよい
+# モジュールdocstring参照）ので、常時起動してよい
 write_unit surge-line-perception "前方カメラの白線認識(line_trace用)" \
            "raspi.nodes.line_perception_node" "surge-camera.service"
 
@@ -464,8 +449,6 @@ else
   echo "        GUI を開けないときは代わりに: tools/record.sh（Mac で実行）"
 fi
 echo
-echo "  surge-cam-perception 有効（常時）。GUI で ftg_cam 以外を選んでいる間は"
-echo "  推論そのものを回さない（IDLE）ので、無駄な CPU/電力消費にはならない"
 if [ -n "$ARM" ]; then
   echo
   # 引数は `$ARM` から拾って出す。**数字をここに直書きすると必ず腐る**（実際に腐った）

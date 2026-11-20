@@ -2,8 +2,7 @@
 
 純粋関数（コマンド組み立て・状態表示）に加え、ウィンドウクローズ時の
 確認ダイアログ（`_CONFIRM_STOP_JOB_KEYS`・`confirm_and_close`との配線）も
-検証する。GUI自体の見た目・クリック操作はテストしない（`ml_cam/tests/test_app.py`
-と同じ方針）。モデル名・備考・閉じる確認の汎用部分は `ml_common/tests` が見る。
+検証する。GUI自体の見た目・クリック操作はテストしない。モデル名・備考・閉じる確認の汎用部分は `ml_common/tests` が見る。
 """
 
 import sys
@@ -201,7 +200,7 @@ class TestModelsDir(unittest.TestCase):
 class TestCloseConfirmation(unittest.TestCase):
     """ウィンドウを閉じる際、学習中だけ確認ダイアログを出す
     （ペア抽出・エクスポート・プレビューは既存動作どおり無確認で終了）。
-    `ml_cam/tests/test_app.py`のテストと同じ考え方（`JobRunner`のダックタイピング
+    （`JobRunner`のダックタイピング
     しか要求しないため、Tkinterを起動せず軽量なフェイクで検証できる）。
     """
 

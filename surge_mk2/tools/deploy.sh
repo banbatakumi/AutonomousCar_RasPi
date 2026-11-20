@@ -42,7 +42,7 @@ DO_RESTART_IO=0
 DO_RESTART=0
 PRUNE=1
 #: `--restart` で再起動する unit（io 以外。`raspi/setup/install_services.sh` の UNITS から io・mdns を除いたもの）
-RESTART_UNITS="surge-telemetry surge-camera surge-planning surge-cam-track surge-cam-perception surge-cam-e2e surge-e2e-fusion surge-line-perception surge-stereo surge-stereo-e2e"
+RESTART_UNITS="surge-telemetry surge-camera surge-planning surge-cam-track surge-cam-e2e surge-e2e-fusion surge-line-perception surge-stereo surge-stereo-e2e"
 #: 一度に消してよい古い .py の数の上限（環境変数で変える）。超えたら消さずに止める
 PRUNE_MAX=${SURGE_PRUNE_MAX:-30}
 
@@ -130,7 +130,6 @@ rsync -az --stats \
   --exclude '/config/auto_presets.json' \
   --exclude '/config/drive_settings.json' \
   --exclude '/config/camera.json' \
-  --exclude '/config/cam_model.json' \
   --exclude '/config/e2e_lidar_model.json' \
   --exclude '/config/cam_e2e_model.json' \
   --exclude '/ml_cam_e2e/runs/' \
@@ -139,8 +138,6 @@ rsync -az --stats \
   --exclude '/ml_stereo_e2e/runs/' \
   --exclude '/config/stereo_e2e_model.json' \
   --exclude '/ml_lidar/runs/' \
-  --exclude '/ml_cam/runs/' \
-  --exclude '/ml_cam/checkpoints/' \
   --exclude '/config/odometer.json' \
   --exclude '/saved_maps/' \
   -e "$RSYNC_SSH" \

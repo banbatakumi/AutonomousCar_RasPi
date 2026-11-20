@@ -57,21 +57,16 @@
  *
  * ## モード連動のデバッグ重畳
  *
- * 前カメラだけ、選ばれている自動運転モードに応じて2種類の重畳が自動で出る
- * （バンビの「セグメンテーションマスクを見たい」「ライントレースがどの線を
- * 認識しているか見たい」という要望より）。トグルは無く、モードを選んだ時点で出る
+ * 前カメラだけ、選ばれている自動運転モードに応じて重畳が自動で出る
+ * （バンビの「ライントレースがどの線を認識しているか見たい」という要望より）。トグルは無く、モードを選んだ時点で出る
  * ——LiDAR ビューのギャップ重畳（`LidarView.tsx`）と同じ「見せたい情報は
  * 自動で出す」方針。
  *
- * - **`ftg_cam`/`cam_centerline`**: `cam_perception_node.py` の走行可否マスクを
- *   `/ws/camera/mask`（メイン映像とは別の専用 WS。`showMask` の間だけ繋ぐ）
- *   から受け、薄い半透明でそのまま重ねる（白＝走行可）。どちらのモードでも
- *   同じ推論結果を使っているので重畳も共通（`_CAM_MODES` 参照）。
- * - **`line_trace`**: `LineScan`（`/ws/telemetry` の `line_cam`）が持つ
+ * **`line_trace`**: `LineScan`（`/ws/telemetry` の `line_cam`）が持つ
  *   近傍・遠方の目標点を `makeProjector()`（`drawGuide` と共用）で画像へ
  *   逆投影し、シアン色のマーカーと線で重ねる。
  *
- * どちらも**メイン映像の WebSocket 接続とは独立**させてある——モードを
+ * この重畳は**メイン映像の WebSocket 接続とは独立**させてある——モードを
  * 切り替えるたびにメイン映像まで再接続されるのを避けるため。
  *
  * ## `onAspect`：実際に届いた画像の縦横比を親へ返す
@@ -87,7 +82,7 @@
  *
  * ## 部品（2026-11-18 に分けた）
  *
- * - 受信・デコード・固まりの監視: `useFrameStream.ts`（`LatestFrameDecoder` で最新の1枚だけ）。マスクも同じ部品
+ * - 受信・デコード・固まりの監視: `useFrameStream.ts`（`LatestFrameDecoder` で最新の1枚だけ）。
  * - 重ねる描画: `cameraOverlays.ts`
  * - ここ: 毎フレームの描画（`useRaf`）と、ROI 選択の操作
  */
@@ -168,8 +163,7 @@ export function CameraView({
 
   // ── モード連動のデバッグ重畳 ──
   //
-  // `ftg_cam`/`cam_centerline` はセグメンテーションマスク、`line_trace` は
-  // 認識した白線の目標点を前カメラにだけ重ねる。**どちらもメイン映像の
+  // `line_trace` は認識した白線の目標点を前カメラにだけ重ねる。**メイン映像の
   // WS（`open()`）とは無関係**
   // ——モードを切り替えるたびにメイン映像まで再接続されると困るので、
   // ref 経由で `draw()` に渡す（`camHeightRef` と同じ理由）
@@ -180,17 +174,11 @@ export function CameraView({
   const undistorted = useUi(
     (s) => !!(s.cameraConfig?.undistort && s.cameraConfig.undistort_available?.[cam]),
   )
-  //: `ftg_cam`/`cam_centerline` はどちらも `cam_perception_node.py` の同じ
-  //: 走行可否マスクを publish する（`cam/mask`。`_CAM_MODES` 参照）ので同じ扱い
-  const showMask = cam === 'front' && !undistorted
-    && (auto?.mode === 'ftg_cam' || auto?.mode === 'cam_centerline')
   const showLineTarget = cam === 'front' && auto?.mode === 'line_trace'
-  const showMaskRef = useRef(showMask)
-  showMaskRef.current = showMask
   const showLineTargetRef = useRef(showLineTarget)
   showLineTargetRef.current = showLineTarget
   //: 矢印信号認識は`auto.mode`に紐づかない横断的な入力（`arrow_signal_node.py`の
-  //: モジュールdocstring参照）なので、`showMask`/`showLineTarget`と違いモード判定を
+  //: モジュールdocstring参照）なので、`showLineTarget`と違いモード判定を
   //: 挟まない——`drawArrowSignal()`側が`live.signal?.enabled`を見て出し分ける
   const showSignal = cam === 'front'
   const showSignalRef = useRef(showSignal)
@@ -199,7 +187,7 @@ export function CameraView({
   // ── 対象追従（`follow_object`）のROI選択 ──
   //
   // ドラッグでROI矩形を選ぶ操作は前方カメラの `follow_object` 選択中だけ有効。
-  // `showMask`/`showLineTarget` と同じ ref 経由（draw ループの useEffect 依存に
+  // `showLineTarget` と同じ ref 経由（draw ループの useEffect 依存に
   // 入れない）。追跡結果のbbox重畳（`drawTrackBox()`）も同じ条件で出す
   const trackingMode = cam === 'front' && !undistorted && auto?.mode === 'follow_object'
   const trackingModeRef = useRef(trackingMode)
@@ -272,9 +260,6 @@ export function CameraView({
       }
     },
   })
-  // `ftg_cam` の走行可否マスク（`/ws/camera/mask`）。**メイン映像の WS とは独立**——`showMask` が
-  // 変わってもメイン映像は再接続しない。表示する間だけ繋ぎ、デコード中に届いた分は捨てる（従来どおり）
-  const mask = useFrameStream(showMask ? '/ws/camera/mask' : null, { keepPending: false })
 
   // ── 毎フレームの描画 ──
   const rate = useRef({ last: performance.now() })
@@ -317,16 +302,6 @@ export function CameraView({
       const vy = dy + crop * dh
       imgBoxRef.current = { dx, dy, dw, dh }
       ctx.drawImage(bitmap, dx, dy, dw, dh)
-      // 走行可否マスク（`ftg_cam`）。**元フレームと同じ画角から単純リサイズ
-      // しただけ**（`cam_perception_node.py` の `_resize_nearest`）なので、
-      // 映像と同じ矩形にそのまま重ねれば位置は揃う。薄く重ねるだけの
-      // 最小実装（白＝走行可で明るく浮く、黒＝不可でそのまま暗い）
-      if (showMaskRef.current && mask.current.bitmap) {
-        ctx.save()
-        ctx.globalAlpha = 0.4
-        ctx.drawImage(mask.current.bitmap, dx, dy, dw, dh)
-        ctx.restore()
-      }
       // ガイドは映像そのもの（`dx,dy,dw,dh`）を基準に投影する。**箱の w/h では
       // 主点・焦点距離が箱基準になってしまう**——箱の形は CSS グリッドの行の
       // 高さで決まるだけで、カメラの実アスペクト比（`topCrop`/`bottomCrop` で変わる）とは
@@ -397,8 +372,8 @@ export function CameraView({
             <span className="badge-warn">ガイドは校正前・暫定</span>
           )}
           {undistorted && cam === 'front'
-            && (auto?.mode === 'ftg_cam' || auto?.mode === 'cam_centerline' || auto?.mode === 'follow_object') && (
-            <span className="badge-warn">補正映像中はマスク/追跡枠を出さない</span>
+            && auto?.mode === 'follow_object' && (
+            <span className="badge-warn">補正映像中は追跡枠を出さない</span>
           )}
         </div>
       ) : (

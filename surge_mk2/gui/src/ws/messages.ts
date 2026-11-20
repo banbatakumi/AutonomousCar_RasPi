@@ -9,7 +9,6 @@
 import { MSGS_SCHEMA } from '../generated/msgs'
 import type {
   CamE2EModelFile,
-  CamModelFile,
   ControlStatus,
   E2EFusionModelFile,
   E2EModelFile,
@@ -41,7 +40,6 @@ export type ServerMsg = {
   holder?: string
   reason?: string
   files?: LogFile[]
-  cam_model_files?: CamModelFile[]
   e2e_model_files?: E2EModelFile[]
   cam_e2e_model_files?: CamE2EModelFile[]
   e2e_fusion_model_files?: E2EFusionModelFile[]

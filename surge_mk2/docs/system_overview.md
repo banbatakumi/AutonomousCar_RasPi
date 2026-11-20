@@ -238,7 +238,7 @@ planning_node ──auto/cmd(速度・舵)──▶     ↑ ここで差し替�
   ZMQ には `{buf_id, w, h, format, t_capture}` の参照だけ流す
 - エンドポイントは**ノード単位**。既定は `ipc:///tmp/surge-bus/<node>.ipc`（`SURGE_BUS_DIR` で移動、`SURGE_BUS_TCP` で TCP）
 - **新しいトピックは `TOPIC_OWNER` に登録する**。漏れると「動くのにデータが来ない」。前方一致に誤って拾われないか
-  も確かめる（`scan/cam` が `scan` に吸われた事故がある）
+  も確かめる（`scan/cam`（今は無いトピック）が `scan` に吸われた事故がある）
 
 > **ZeroMQ の落とし穴3つ**（`raspi/tests/test_zbus.py` で固定）
 > 1. **`CONFLATE` は multipart 非対応** → `topic + b"\0" + msgpack` の1フレームにした
@@ -302,7 +302,6 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `surge-camera` | `raspi.nodes.camera_node` | picamera2 → 共有メモリ | カメラ系が止まる |
 | `surge-telemetry` | `raspi.nodes.telemetry_node` | WS / HTTP サーバ。**`cmd` の唯一の発行元** | GUI が繋がらない |
 | `surge-planning` | `raspi.nodes.planning_node` | planner の購読・周期実行・`auto/*` の publish | 自律走行だけ止まる |
-| `surge-cam-perception` | `raspi.nodes.cam_perception_node` | 走行可否セグメンテーション → `scan/cam`・`path/cam` | `ftg_cam` / `cam_centerline` が使えない |
 | `surge-cam-e2e` | `raspi.nodes.cam_e2e_node` | 画像から操舵を回帰 → `cam_e2e/cmd` | `cam_e2e` が使えない |
 | `surge-e2e-fusion` | `raspi.nodes.e2e_fusion_node` | 点群＋画像＋車両状態から前方の経路点 → `e2e_fusion/plan` | `e2e_fusion` が使えない |
 | `surge-line-perception` | `raspi.nodes.line_perception_node` | 白線検出 → `line/cam` | `line_trace` が使えない |
@@ -335,7 +334,6 @@ NetworkManager は知らない SSID に自動接続しないので、**持込ル
 | `auto/state` | 判断の根拠（自己位置・段・理由 `reason`） | planning_node |
 | `auto/map` | 占有格子・中心線・経路（版が変わったとき） | planning_node |
 | `image/front`（右・主カメラ）・`image/left` | 共有メモリ参照 | camera_node |
-| `scan/cam`・`path/cam`・`cam/mask` | カメラ由来の擬似点群・走行可能回廊・マスク | cam_perception_node |
 | `line/cam` | 白線の近傍・遠方2点（地面座標） | line_perception_node |
 | `scan/stereo`・`stereo/depth` | ステレオで見つけた低い障害物の擬似点群（0 は「見つからない」で空きではない）・深度映像 | stereo_node |
 | `stereo/info`・`stereo/disp` | 照合の統計・`stereo_e2e` の入力にする視差の帯 | stereo_node |
@@ -480,13 +478,11 @@ $$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v
 
 ### 9.2 実装されているモード
 
-`raspi/auto/registry.py` の `PLANNERS` が正（`category = "sysid"` の `calib_*` はシステム同定タブ専用）。学習系の使い方は [`development.md` §12](development.md#12-学習ベースの自動運転を動かすlidar-e2e--カメラセグメンテーション--カメラe2e)。
+`raspi/auto/registry.py` の `PLANNERS` が正（`category = "sysid"` の `calib_*` はシステム同定タブ専用）。学習系の使い方は [`development.md` §12](development.md#12-学習ベースの自動運転を動かすlidar-e2e--カメラe2e-ほか)。
 
 | id | 名前 | 地図 | 考え方 |
 |---|---|---|---|
 | `ftg` | Follow the Gap | 不要 | 点群の中で**最も広く空いた区間**を選び、**その真ん中**を狙う |
-| `ftg_cam` | Follow the Gap（カメラ） | 不要 | `ftg` と同じロジックを、カメラのセグメンテーションから作った擬似点群で走らせる |
-| `cam_centerline` | 中心線追従（カメラ） | 不要 | 走行可能領域から前方の回廊中心を作り Pure Pursuit で追う |
 | `cam_e2e` | E2E カメラ（模倣学習） | 不要 | 前方の左右2台の画像から操舵を直接回帰。速度は舵の切れ具合から決める |
 | `de` | Disparity Extender | 不要 | 物の縁を車体半幅ぶん**塗り潰してから**、一番遠い帯の真ん中を狙う |
 | `dp` | Disparity Pursuit | 不要 | `de` の塗り方・狙点選択＋ `ftg` の Pure Pursuit 舵角＋狙点のヒステリシス |
@@ -504,8 +500,6 @@ $$\dot{x} = v\cos\theta,\quad \dot{y} = v\sin\theta,\quad \dot{\theta} = \frac{v
 - **`ftg`**: 最遠点ではなく区間の真ん中を狙う（最遠点狙いは壁際を縫い、外輪が当たる）
 - **`de`**: 測定値が大きく飛ぶ所を物の縁とみなし、遠い側を近い側の値で塗る（近いほど広く）。**速度は狙う方向の見通しで決め、
   正面の扇で測り直さない**（狭い走路では正面の扇の最小値が常に短く出て踏み切れない）
-- **`ftg_cam`**: `ftg` の `plan()` は上書きせず、`cam_perception_node` がセグメンテーションを `raspi/nav/ipm.py` で地面へ逆投影して
-  `scan` と同じ形にする（ギャップ探索はセンサを問わないため）
 - **`line_trace`・`e2e_lidar`**: 障害物には固定距離の停止策を持たず、STM32 の `auto_stop` で受ける。`e2e_lidar` はシム上の PPO
   （`ml_lidar/train_rl.py`）で学習するので `de` を超えうるが、未知の点群への挙動は保証できない
 
@@ -704,7 +698,7 @@ WebSocket ─┬─▶ 点群・地図・カメラ → live.ts に置き、Canva
 - `raspi/tools/slam_replay.py` は記録に実機と同じ設定の slam2d を回し、比較用トピックを足した `<入力>_slam.mcap` を作る
 - **メタデータ `provenance`**（`raspi/rec/provenance.py`）に、記録した時の `vehicle.toml` の全文・`git`・主要ファイルのハッシュを残す（再生で同じ処理をやり直す・コードの版を突き合わせるため）。
   ステレオは照合ごとに `stereo/info` も記録する（何を残し何が残らないかは [`stereo_plan.md` 段階3](stereo_plan.md)）
-- **記録するトピック**は `cam/mask` 以外のバスの全部（モデル選択・信号のしきい値・追従の ROI のような小さい「意思」も）。重複する `stereo/depth` は
+- **記録するトピック**はバスの全部（モデル選択・信号のしきい値・追従の ROI のような小さい「意思」も）。重複する `stereo/depth` は
   `/viz/image/depth` にだけ書き、`hb/*` はノードごとに 1Hz（と再起動の瞬間）に間引く。バスに無い Pi 本体の健全性（CPU・周波数・スロットリング・温度）は
   logger が記録中だけ `/pi/health` に書く。理由と一覧は `raspi/nodes/logger_node.py` の docstring
 
@@ -741,7 +735,7 @@ io_node ── link.poll/send ──┤
 
 ### 12.2 学習パイプライン（Mac）
 
-`ml_cam/`（セグメンテーション）・`ml_cam_e2e/`（カメラの模倣学習）・`ml_lidar/`（LiDAR の PPO）・`ml_e2e/`（LiDAR＋カメラ＋車両状態の融合の模倣学習）・`ml_common/`（学習 GUI の共通部品）。
+`ml_cam_e2e/`（カメラの模倣学習）・`ml_lidar/`（LiDAR の PPO）・`ml_e2e/`（LiDAR＋カメラ＋車両状態の融合の模倣学習）・`ml_common/`（学習 GUI の共通部品）。
 Mac で学習して ONNX にし、Pi の `onnxruntime` で推論する（`models/`）。依存の向きは `学習 → sim`（sim は学習を知らない）。
 
 ### 12.3 ファームのホストシム（`tools/fwsim/`）

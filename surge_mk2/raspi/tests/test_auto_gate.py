@@ -7,7 +7,7 @@ from raspi.core.auto_gate import (
     IDLE_PUBLISH_PERIOD_NS, IdlePacer, cam_infer_active, vehicle_armed)
 from raspi.msgs import AutoCtrl, VehicleState
 
-_MODES = ("ftg_cam", "cam_centerline")
+_MODES = ("line_trace", "cam_e2e")
 
 
 class TestVehicleArmed(unittest.TestCase):
@@ -24,21 +24,21 @@ class TestVehicleArmed(unittest.TestCase):
 
 class TestCamInferActive(unittest.TestCase):
     def test_mode_not_selected_is_idle_regardless_of_armed(self):
-        self.assertFalse(cam_infer_active(AutoCtrl(mode="line_trace"),
+        self.assertFalse(cam_infer_active(AutoCtrl(mode="ftg"),
                                           VehicleState(armed=True), _MODES))
         self.assertFalse(cam_infer_active(None, VehicleState(armed=True), _MODES))
 
     def test_mode_selected_and_armed_is_active(self):
-        self.assertTrue(cam_infer_active(AutoCtrl(mode="ftg_cam"),
+        self.assertTrue(cam_infer_active(AutoCtrl(mode="line_trace"),
                                          VehicleState(armed=True), _MODES))
 
     def test_mode_selected_and_disarmed_is_idle(self):
-        self.assertFalse(cam_infer_active(AutoCtrl(mode="ftg_cam"),
+        self.assertFalse(cam_infer_active(AutoCtrl(mode="line_trace"),
                                           VehicleState(armed=False), _MODES))
 
     def test_mode_selected_and_no_vehicle_state_is_active(self):
         """起動直後（`VehicleState`未受信）はARM相当として推論を始める。"""
-        self.assertTrue(cam_infer_active(AutoCtrl(mode="cam_centerline"), None, _MODES))
+        self.assertTrue(cam_infer_active(AutoCtrl(mode="cam_e2e"), None, _MODES))
 
     def test_single_mode_string_container_does_not_substring_match(self):
         """`modes`にタプルを渡す前提——文字列を直接渡すと部分一致になる罠を確認する。"""

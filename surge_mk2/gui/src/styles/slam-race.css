@@ -1,5 +1,5 @@
 /* ── `slam2d_raceline`専用: 「地図を作成」/「レーシングライン走行」の
-   2ボタンと保存済み地図の選択（`AutoPanel.tsx`、`ftg_cam`等と同じ
+   2ボタンと保存済み地図の選択（`AutoPanel.tsx`、他のモデル選択と同じ
    「id直書きの例外」）。単一engageボタンの代わりに出る */
 .slam-race-buttons {
   display: flex;

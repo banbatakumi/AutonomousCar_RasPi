@@ -1,5 +1,4 @@
-"""`ml_cam_e2e/export_onnx.py` のテスト。実データ・実学習は要らない
-（`ml_cam/tests/test_export_onnx.py` と同じ方針）。
+"""`ml_cam_e2e/export_onnx.py` のテスト。実データ・実学習は要らない。
 """
 
 import json
@@ -166,8 +165,7 @@ class TestExportOnnx(unittest.TestCase):
         self.assertLess(err, 1e-3)
 
     def test_onnx_file_loads_alone_without_its_export_directory(self):
-        """`external_data=False` により `.onnx` 単体で読める（`ml_cam/export_onnx.py`
-        と同じ回帰検出テスト）。"""
+        """`external_data=False` により `.onnx` 単体で読める（回帰検出テスト）。"""
         with tempfile.TemporaryDirectory() as lone_dir:
             lone_path = Path(lone_dir) / "renamed.onnx"
             shutil.copy(self.out_path, lone_path)

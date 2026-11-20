@@ -124,8 +124,8 @@ class TestResizeAreaMatchesMatmul(unittest.TestCase):
             np.testing.assert_array_equal(resize_area(rgb, 224, 128),
                                           _resize_area_matmul(rgb, 224, 128))
 
-    def test_cam_perception_input(self):
-        """cam_perception・ml_cam: 全幅 → 224x224（縦は拡大を含まない 360→224）。"""
+    def test_full_width_input(self):
+        """全幅（切り落としなし）→ 224x224（縦は拡大を含まない 360→224）。"""
         rng = np.random.default_rng(1)
         for src in self._images(rng, 6):
             rgb = to_rgb(src, "BGR888")

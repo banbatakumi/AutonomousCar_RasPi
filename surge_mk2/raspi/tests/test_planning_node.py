@@ -1,7 +1,7 @@
 """`raspi/nodes/planning_node.py` の入力ルーティングのテスト。
 
 **LiDAR 系 planner は無改造で動くこと**、そして**カメラ系 planner に
-切り替えた瞬間に `scan/cam` だけを見るようになること**の2つを確認する。
+切り替えた瞬間にそのトピックだけを見るようになること**の2つを確認する。
 バス・実プロセスは要らない——`Subscriber`/`Publisher` の代わりに
 `latest` 辞書と `send()` の記録だけを持つ身代わりを使う
 （`raspi/tests/test_auto.py` の `FakeSub` と同じ流儀）。
@@ -13,10 +13,11 @@ from unittest import mock
 
 
 from raspi.auto.e2e_lidar import E2ELidar
-from raspi.auto.registry import make_planner
+from raspi.auto.follow_the_gap import FollowTheGap
+from raspi.auto.registry import PLANNERS, make_planner
 from raspi.msgs import AutoCtrl, AutoState, Scan, VehicleState
-from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_SCAN,
-                              TOPIC_SCAN_CAM, TOPIC_VEHICLE_STATE, ModelSelectCtrl)
+from raspi.msgs.types import (TOPIC_AUTO_CMD, TOPIC_E2E_MODEL, TOPIC_LINE_CAM,
+                              TOPIC_SCAN, TOPIC_SCAN_STEREO, TOPIC_VEHICLE_STATE, ModelSelectCtrl)
 from raspi.nodes.planning_node import (
     POLL_MAX_MS, PlanningNode, _poll_timeout_ms, input_topics)
 
@@ -43,12 +44,26 @@ def _scan() -> Scan:
     return Scan(dist=[3.0] * 360, sector_seen=[True] * 12, seq=1)
 
 
+class _OtherSensorFtg(FollowTheGap):
+    """LiDAR 以外のトピック（`scan/stereo`）を読み、鮮度上限も別の試験用 planner。
+    `input_topic`/`stale_ms` を上書きする planner が正しく配線されることを見る。"""
+
+    id = "ftg_other_sensor"
+    input_topic = TOPIC_SCAN_STEREO
+    stale_ms = 500
+
+
+def _other_sensor_node(sub) -> PlanningNode:
+    with mock.patch.dict(PLANNERS, {_OtherSensorFtg.id: _OtherSensorFtg}):
+        return PlanningNode(pub=FakePub(), sub=sub, mode=_OtherSensorFtg.id)
+
+
 class TestInputTopics(unittest.TestCase):
     def test_includes_lidar_and_camera_topics(self):
         """`input_topics()` は登録済み全 planner の `input_topic` の和集合。"""
         topics = input_topics()
         self.assertIn(TOPIC_SCAN, topics)
-        self.assertIn(TOPIC_SCAN_CAM, topics)
+        self.assertIn(TOPIC_LINE_CAM, topics)
 
 
 class TestReplanRouting(unittest.TestCase):
@@ -61,23 +76,21 @@ class TestReplanRouting(unittest.TestCase):
         self.assertTrue(node.state.ready, node.state.reason)
 
     def test_lidar_planner_ignores_camera_topic(self):
-        """`scan/cam` にしかデータが無ければ、LiDAR 版 planner は動かない
+        """`scan/stereo` にしかデータが無ければ、LiDAR 版 planner は動かない
         （＝別センサのデータを誤って拾わないこと）。"""
-        sub = FakeSub({TOPIC_SCAN_CAM: _scan()})
+        sub = FakeSub({TOPIC_SCAN_STEREO: _scan()})
         node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg")
         node._replan(1)
         self.assertEqual(node._last_scan_seq, -1)
 
-    def test_camera_planner_reads_scan_cam_topic(self):
-        sub = FakeSub({TOPIC_SCAN_CAM: _scan()})
-        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg_cam")
+    def test_other_sensor_planner_reads_its_own_topic(self):
+        node = _other_sensor_node(FakeSub({TOPIC_SCAN_STEREO: _scan()}))
         node._replan(1)
         self.assertTrue(node.state.ready, node.state.reason)
 
-    def test_camera_planner_ignores_scan_topic(self):
-        """実 LiDAR の `scan` にしかデータが無ければ、カメラ版 planner は動かない。"""
-        sub = FakeSub({TOPIC_SCAN: _scan()})
-        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg_cam")
+    def test_other_sensor_planner_ignores_scan_topic(self):
+        """実 LiDAR の `scan` にしかデータが無ければ、他センサ版 planner は動かない。"""
+        node = _other_sensor_node(FakeSub({TOPIC_SCAN: _scan()}))
         node._replan(1)
         self.assertEqual(node._last_scan_seq, -1)
 
@@ -203,10 +216,9 @@ class TestNanPlannerOutputBrakes(unittest.TestCase):
 class TestCurrentStaleness(unittest.TestCase):
     """`_current()` の鮮度判定が `planner.stale_ms` を見ること。"""
 
-    def test_camera_planner_uses_its_own_stale_ms(self):
-        """`ftg_cam` の `stale_ms`(500) は LiDAR 版の 300ms とは別に効く。"""
-        sub = FakeSub({TOPIC_SCAN_CAM: _scan()})   # t_pub は既定の 0
-        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg_cam")
+    def test_other_sensor_planner_uses_its_own_stale_ms(self):
+        """`stale_ms`(500) を上書きした planner は LiDAR 版の 300ms とは別に効く。"""
+        node = _other_sensor_node(FakeSub({TOPIC_SCAN_STEREO: _scan()}))   # t_pub は既定の 0
 
         fresh = node._current(400 * 1_000_000)     # LiDAR 基準なら古いが 500ms 未満
         self.assertNotIn("古い", fresh.reason)
@@ -230,9 +242,8 @@ class TestPerceptionReason(unittest.TestCase):
     """知覚ノードが載せた `reason` が、鮮度判定の「古い」より先に表示へ出ること。"""
 
     def test_reason_replaces_stale_message_when_t_capture_is_zero(self):
-        sub = FakeSub({TOPIC_SCAN_CAM: Scan(dist=[0.0] * 360, sector_seen=[False] * 12,
-                                            reason="モデル未選択")})
-        node = PlanningNode(pub=FakePub(), sub=sub, mode="ftg_cam")
+        node = _other_sensor_node(FakeSub({TOPIC_SCAN_STEREO: Scan(
+            dist=[0.0] * 360, sector_seen=[False] * 12, reason="モデル未選択")}))
         st = node._current(10_000 * 1_000_000)
         self.assertEqual(st.reason, "モデル未選択")
         self.assertNotIn("古い", st.reason)
@@ -241,14 +252,13 @@ class TestPerceptionReason(unittest.TestCase):
     def test_reason_and_age_when_capture_exists(self):
         scan = Scan(dist=[3.0] * 360, sector_seen=[True] * 12, t_capture=1_000_000,
                     reason="フレームが来ない")
-        node = PlanningNode(pub=FakePub(), sub=FakeSub({TOPIC_SCAN_CAM: scan}), mode="ftg_cam")
+        node = _other_sensor_node(FakeSub({TOPIC_SCAN_STEREO: scan}))
         st = node._current(2_000 * 1_000_000)
         self.assertIn("フレームが来ない", st.reason)
         self.assertIn("古い", st.reason)
 
     def test_without_reason_message_is_unchanged(self):
-        node = PlanningNode(pub=FakePub(), sub=FakeSub({TOPIC_SCAN_CAM: _scan()}),
-                            mode="ftg_cam")
+        node = _other_sensor_node(FakeSub({TOPIC_SCAN_STEREO: _scan()}))
         self.assertTrue(node._current(600 * 1_000_000).reason.startswith("点群が"))
 
 
@@ -481,7 +491,7 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         fake = _FakeFreezeClearPlanner()
         node.planner = fake
         node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
-        node._apply_ctrl(AutoCtrl(mode="ftg_cam", freeze_seq=1))
+        node._apply_ctrl(AutoCtrl(mode="line_trace", freeze_seq=1))
         self.assertEqual(fake.freeze_calls, 1, "モード変更と同時だとfreezeが握り潰されている")
 
     def test_clear_seq_increment_with_mode_change_still_fires(self):
@@ -489,7 +499,7 @@ class TestFreezeClearWithModeChange(unittest.TestCase):
         fake = _FakeFreezeClearPlanner()
         node.planner = fake
         node._apply_ctrl(AutoCtrl(mode="ftg"))      # 起動後の最初の1通（解除状態）
-        node._apply_ctrl(AutoCtrl(mode="ftg_cam", clear_seq=1))
+        node._apply_ctrl(AutoCtrl(mode="line_trace", clear_seq=1))
         self.assertEqual(fake.clear_calls, 1, "モード変更と同時だとclearが握り潰されている")
 
     def test_grip_clear_seq_increment_passes_the_map_name_once(self):

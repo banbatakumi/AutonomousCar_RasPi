@@ -60,9 +60,7 @@ class TestStereoInfo(unittest.TestCase):
         """
         from raspi.bus.zbus import TOPIC_OWNER
         # 記録しないトピックとその理由
-        not_logged = {
-            "cam/mask": "GUI 表示用の JPEG。中身は scan/cam・path/cam に数値で残る",
-        }
+        not_logged: dict[str, str] = {}
         logged = set(DEFAULT_TOPICS)
         for topic in TOPIC_OWNER:
             if topic.startswith("image/"):

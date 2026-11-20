@@ -89,7 +89,7 @@
   line-height: 1.4;
 }
 
-/* モードごとのモデル選択（`ftg_cam`/`e2e_lidar`）。選んだモードのときだけ出る */
+/* モードごとのモデル選択（`e2e_lidar` など）。選んだモードのときだけ出る */
 .auto-model-row {
   display: flex;
   align-items: center;

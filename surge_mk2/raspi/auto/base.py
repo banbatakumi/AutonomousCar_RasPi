@@ -114,7 +114,7 @@ class Planner:
     category: str = "drive"
     params: tuple[ParamSpec, ...] = ()
     #: `plan()` の第一引数に何を渡すか。**既定は実 LiDAR の `scan`。**
-    #: カメラ由来の擬似スキャンで走る planner（`follow_the_gap_cam.py` 等）だけが
+    #: LiDAR 以外のトピック（カメラの白線・E2E 推論結果など）で走る planner だけが
     #: ここを上書きする。既存 planner はこの属性の存在を意識しなくてよい
     #: （`planning_node.py` がここを見て購読トピックを組み立てる）
     input_topic: str = TOPIC_SCAN

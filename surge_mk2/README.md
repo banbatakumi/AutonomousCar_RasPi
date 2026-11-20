@@ -48,7 +48,7 @@ flowchart LR
 | [`sim/`](sim/) | Mac 上で実車相当の上流コードを動かす 2D シミュレータ |
 | [`slam2d/`](slam2d/) | 2D SLAM、地図生成、自己位置推定 |
 | [`config/`](config/) | 車両パラメータ（`vehicle.toml`）、自動運転・走行設定の保存値、生成スクリプト |
-| [`ml_cam/`](ml_cam/)、[`ml_cam_e2e/`](ml_cam_e2e/)、[`ml_e2e/`](ml_e2e/)、[`ml_stereo_e2e/`](ml_stereo_e2e/)、[`ml_lidar/`](ml_lidar/) | 学習・評価・モデル出力のパイプライン |
+| [`ml_cam_e2e/`](ml_cam_e2e/)、[`ml_e2e/`](ml_e2e/)、[`ml_stereo_e2e/`](ml_stereo_e2e/)、[`ml_lidar/`](ml_lidar/) | 学習・評価・モデル出力のパイプライン |
 | [`ml_common/`](ml_common/) | 機械学習用 GUI と共通部品 |
 | [`tools/`](tools/) | デプロイ、検査、校正の解析、ファームのホストシム、補助 GUI のランチャーなどの開発ツール |
 | [`models/`](models/) | 推論用モデル |

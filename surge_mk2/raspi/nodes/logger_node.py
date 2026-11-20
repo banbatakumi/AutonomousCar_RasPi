@@ -57,7 +57,7 @@ Mac での照合に使えないため。2台の最新のうち古い方の撮影
 
 ## 何を記録し、何を省くか
 
-**バスのトピックは `cam/mask` 以外すべて録る**（`DEFAULT_TOPICS`。新しいトピックを足したら
+**バスのトピックは全部録る**（`DEFAULT_TOPICS`。新しいトピックを足したら
 `raspi/tests/test_stereo_record.py` の検査が「録るか・録らない理由」を決めさせる）。
 モデル選択・信号のしきい値・追従の ROI のような小さい「意思」のトピックも録る。
 結果のトピックだけでは「どのモデル・どのしきい値でそうなったか」を再現できないため。
@@ -106,10 +106,8 @@ from raspi.msgs.types import (
     TOPIC_CAM_CONFIG,
     TOPIC_CAM_E2E_CMD,
     TOPIC_CAM_E2E_MODEL,
-    TOPIC_CAM_MODEL,
     TOPIC_E2E_FUSION_MODEL,
     TOPIC_E2E_MODEL,
-    TOPIC_CAM_PATH,
     TOPIC_E2E_FUSION_PLAN,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -120,7 +118,6 @@ from raspi.msgs.types import (
     TOPIC_LOG_CTRL,
     TOPIC_ROUTE_SELECT,
     TOPIC_SCAN,
-    TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
     TOPIC_SIGNAL_CONFIG,
     TOPIC_SIGNAL_STATUS,
@@ -154,8 +151,6 @@ DISK_CHECK_INTERVAL_S = 30.0
 #: （`zbus.endpoints_for_topic`）が、`auto/ctrl` は control、`auto/cmd` `auto/state`
 #: `auto/map` は planning が出しているため、`auto/` だと片方が黙って届かない。
 #:
-#: `cam/mask`（GUI 表示用の JPEG）は入れない。カメラ画像と同じく重いのに、
-#: 同じ中身は `scan/cam` `path/cam` に数値で残っている。
 #: `stereo/depth` は購読するが、生トピックには書かず `/viz/image/depth` にだけ書く（`_on_msg`）
 DEFAULT_TOPICS = [
     TOPIC_VEHICLE_STATE,
@@ -170,7 +165,6 @@ DEFAULT_TOPICS = [
     TOPIC_AUTO_STATE,
     TOPIC_AUTO_MAP,
     # カメラ系の知覚結果
-    TOPIC_SCAN_CAM,
     TOPIC_SCAN_STEREO,
     TOPIC_STEREO_DEPTH,
     TOPIC_STEREO_INFO,
@@ -180,13 +174,11 @@ DEFAULT_TOPICS = [
     # 照合・左右同期を回していた期間（`CamConfig.depth`・`stereo`）。"照合していない" と "記録が欠けた" を区別する
     TOPIC_CAM_CONFIG,
     TOPIC_LINE_CAM,
-    TOPIC_CAM_PATH,
     TOPIC_TRACK_TARGET,
     TOPIC_CAM_E2E_CMD,
     TOPIC_E2E_FUSION_PLAN,
     TOPIC_STEREO_E2E_PLAN,
     # 走らせた「意思」（結果だけでは、どのモデル・しきい値・対象でそうなったかを再現できない）。どれも 1〜5Hz で数十バイト
-    TOPIC_CAM_MODEL,
     TOPIC_E2E_MODEL,
     TOPIC_CAM_E2E_MODEL,
     TOPIC_E2E_FUSION_MODEL,

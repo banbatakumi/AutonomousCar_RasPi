@@ -80,7 +80,7 @@ def export_model(model: PPO, out_path: Path) -> None:
 
     obs_dim = int(model.observation_space.shape[0])
     dummy = th.zeros(1, obs_dim, dtype=th.float32)
-    # external_data=False が必須（`ml_cam/export_onnx.py`と同じ）。既定だと重みが
+    # external_data=False が必須（`ml_cam_e2e/export_onnx.py`と同じ）。既定だと重みが
     # `.<name>.tmp.onnx.data` という別ファイルに出て、rename した<name>.onnxがそれに依存して壊れる
     th.onnx.export(wrapper, (dummy,), str(out_path), input_names=["obs"], output_names=["action"],
                    external_data=False)

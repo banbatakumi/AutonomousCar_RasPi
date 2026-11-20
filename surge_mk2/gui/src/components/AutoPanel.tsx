@@ -8,12 +8,10 @@
  * このファイルは 1 行も変わらない。** モード名を GUI 側にも書くと、増やすたびに
  * 2箇所を直すことになり、いつか片方だけ古くなる。
  *
- * ⚠ 例外が4つだけある——`ftg_cam`/`cam_centerline`（どちらもセグメンテーション
- * 走行。`cam_perception_node.py` の同じ推論結果を使うのでモデル選択も共通）と
- * `e2e_lidar`（E2E LiDAR走行）が使うモデルの選択、`follow_object`（対象追従）の
+ * ⚠ 例外がいくつかある——`e2e_lidar`（E2E LiDAR走行）などが使うモデルの選択、
+ * `follow_object`（対象追従）の
  * ROI選択状態の表示、`park_to_point`（駐車）の状態表示・`auto_stop`警告
  * （下記）。これらの id 文字列だけは
- * `raspi/auto/follow_the_gap_cam.py` / `raspi/auto/cam_centerline.py` /
  * `raspi/auto/e2e_lidar.py` / `raspi/auto/follow_object.py` /
  * `raspi/auto/park_to_point.py` と直接対応させて GUI 側に書いてある。
  *
@@ -33,9 +31,8 @@
  *
  * **「どのモードで走るか」と「そのモードが使うモデル」は同じ意思決定の一部**なので
  * 設定ドロワーとは分離せずここに置く。
- * `ftg_cam`/`e2e_lidar` を選んだときだけ、そのモード専用のモデル選択
- * ドロップダウンをこのパネル内に出す。一覧の取得（`camModelList`/
- * `e2eModelList`）は `DiagView.tsx` の記録一覧取得と同じくマウント時に一度要求しておく。
+ * `e2e_lidar` などを選んだときだけ、そのモード専用のモデル選択
+ * ドロップダウンをこのパネル内に出す。一覧の取得（`e2eModelList` など）は `DiagView.tsx` の記録一覧取得と同じくマウント時に一度要求しておく。
  *
  * ## モード選択はドロップダウンに
  *
@@ -97,8 +94,6 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const auto = ui.auto
   const n = useNumbers()
 
-  const camModel = useUi((s) => s.camModel)
-  const camModelFiles = useUi((s) => s.camModelFiles)
   const e2eModel = useUi((s) => s.e2eModel)
   const e2eModelFiles = useUi((s) => s.e2eModelFiles)
   const camE2eModel = useUi((s) => s.camE2eModel)
@@ -107,9 +102,6 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
   const e2eFusionModelFiles = useUi((s) => s.e2eFusionModelFiles)
   const stereoE2eModel = useUi((s) => s.stereoE2eModel)
   const stereoE2eModelFiles = useUi((s) => s.stereoE2eModelFiles)
-  // 選択中のカメラセグメンテーションモデルの備考（`ml_cam/app.py`の備考欄→エクスポート時に
-  // `<name>.json`へ同梱されたもの。`e2eSelectedNote`と対称）
-  const camSelectedNote = camModelFiles.find((f) => f.name === camModel?.name)?.note
   // 選択中のE2E LiDARモデルの備考（`ml_lidar/app.py`の備考欄→エクスポート時に
   // `<name>.json`へ同梱されたもの）
   const e2eSelectedNote = e2eModelFiles.find((f) => f.name === e2eModel?.name)?.note
@@ -126,7 +118,6 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
     .filter((f) => f.has_config)
     .reduce<(typeof stereoE2eModelFiles)[number] | null>((a, f) => (a === null || f.mtime > a.mtime ? f : a), null)
   useEffect(() => {
-    ch?.camModelList()
     ch?.e2eModelList()
     ch?.camE2eModelList()
     ch?.e2eFusionModelList()
@@ -187,7 +178,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
 
         <section className="auto-engage">
           {/* `slam2d_raceline`だけ、単一engageボタンの代わりに「地図の作成」/
-              「レーシングライン走行」の2ボタンを出す（`ftg_cam`等のモデル選択と
+              「レーシングライン走行」の2ボタンを出す（他のモデル選択と
               同じ「id直書きの例外」、`AutoPanel.tsx`冒頭docstring参照）。
               **`DONE`（地図と経路ができて保存済み・待機中）はengage済みのまま
               続く**——BUILD完了時にdisengageしないので（`slam2d_raceline.py`
@@ -238,35 +229,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
         </section>
       </div>
 
-      {/* セグメンテーション走行（`ftg_cam`/`cam_centerline`）専用のモデル選択。
-          両方とも `cam_perception_node.py` の同じ推論結果（`drivable`マスク）を使うので
-          モデルの選び方も共通（`raspi/nodes/cam_perception_node.py` の `_CAM_MODES`）。
-          engage 中に選び直すと `_on_auto` のモード変更と同じ理由で engage が必ず落ちる */}
-      {(selected?.id === 'ftg_cam' || selected?.id === 'cam_centerline') && (
-        <div className="auto-model-row">
-          <span className="auto-model-label">セグメンテーションモデル</span>
-          <select
-            value={camModel?.name ?? ''}
-            disabled={camModel === null}
-            onChange={(e) => ch?.camModelSelect(e.target.value)}
-          >
-            <option value="">（未選択）</option>
-            {camModelFiles.map((f) => (
-              <option key={f.name} value={f.name}>
-                {f.name}
-                {!f.has_config && '（前処理設定なし）'}
-              </option>
-            ))}
-          </select>
-          <button onClick={() => ch?.camModelList()}>更新</button>
-          {camModelFiles.length === 0 && (
-            <span className="dim">models/ に .onnx がありません</span>
-          )}
-          {camSelectedNote && <div className="auto-model-note">{camSelectedNote}</div>}
-        </div>
-      )}
-
-      {/* E2E LiDAR走行（`e2e_lidar`）専用のモデル選択。上と全く同じ形 */}
+      {/* E2E LiDAR走行（`e2e_lidar`）専用のモデル選択 */}
       {selected?.id === 'e2e_lidar' && (
         <div className="auto-model-row">
           <span className="auto-model-label">E2E LiDARモデル</span>
@@ -291,7 +254,7 @@ export function AutoPanel({ ch }: { ch: ControlChannel | null }) {
         </div>
       )}
 
-      {/* カメラE2E走行（`cam_e2e`、模倣学習）専用のモデル選択。上と全く同じ形。
+      {/* カメラE2E走行（`cam_e2e`、模倣学習）専用のモデル選択。
           契約ファイルの無いモデルは `cam_e2e_node` が読み込まないので選ばせない */}
       {selected?.id === 'cam_e2e' && (
         <div className="auto-model-row">

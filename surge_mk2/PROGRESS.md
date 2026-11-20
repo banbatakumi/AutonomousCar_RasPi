@@ -25,7 +25,7 @@
   採用したのは**ファンの固着修正**（`raspi/io/fan.py`。起動時の kick が低温で `cur_state` を 0→1 にし、ポーリングしない thermal zone が戻さず回り続けていた。
   同じ温度ならファン分 −15mA、止めると温度が上がる分で定常の差は数 mA。修正後の待機 429mA）。Pi に反映済み
 - **カメラを YUV420（sYCC）に・左の AWB を主カメラに揃える（2026-11-17、Pi に反映・関連サービス再起動済み）**: 変換は `raspi/core/pixfmt.py`。
-  ステレオは Y 面を直接・JPEG は面のまま・CNN 系は使うときだけ RGB へ。ARM で cam_e2e・e2e_fusion・line_trace の出力を確認（cam_perception はモデル未選択で未確認）。
+  ステレオは Y 面を直接・JPEG は面のまま・CNN 系は使うときだけ RGB へ。ARM で cam_e2e・e2e_fusion・line_trace の出力を確認。
   数値は `docs/stereo_plan.md`。**走行と学習データの色（新しい記録の JPEG と過去の記録）の比較は未確認**
 - **MCAP の記録対象の整理（2026-11-18、コミット済み・Pi 未反映）**: `stereo/depth` の二重記録をやめ、`hb/*` を 1Hz に間引き、モデル選択・`route/select`・
   `signal/*`・`track/roi` と `/pi/health` を足した。`ImageRef` に露光・ゲイン・AWB、`AutoState` に追い抜きの判定（`overtake`・`ot_lead_*`・`avoid_ms`）と
@@ -87,6 +87,10 @@
   ほとんど抜けない件は同 §6。追い抜きの不具合 7 つ（速度の途切れ・残像・カーブの横の速度・一定速度の予測・車間・
   他車の横の余裕 0.10m・付いていく候補）と、相手の線を覚えて横のずれを予測する仕組みを入れた。シムの 2 台走行で各 1 回抜けるようになったが、ラップは 16.3 秒のまま（横に並んだまま減速して下がる。並び続ける判断は接触が増えたので外した）。一旦止める・未コミット・Pi 未反映
 
+- **カメラのセグメンテーション走行を削除（2026-11-20・未コミット・Pi 未反映）**: カメラが低く使い物にならないため、`ml_cam/`・`cam_perception_node`・
+  `ftg_cam`・`cam_centerline`・トピック `scan/cam` `path/cam` `cam/mask` `cam/model`・`nav/drivable_path.py`・`nav/ipm.py` のマスク投影・GUI のモデル選択とマスク重畳・
+  `surge-cam-perception` ユニット・`models/seg/` を消した（`ml_cam_e2e` は残す）。**Pi では反映後に `install_services.sh` を再実行する**
+  （旧 `surge-cam-perception` を止めて unit を消す）。`TOPIC_OWNER` の `cam_perception`（ポート 5574）は欠番のまま
 - **決勝向けの自己位置・駐車の修正（2026-11-20・未コミット・Pi 未反映）**:
   - 全域の再特定を分枝限定法に作り直した（`slam2d/core/globalmatch.py`＋`_native.c` の `bb_match`）。`sim.slam_bench --course toyota2 --locate 20 --errors real`
     で 20/20 正解・63ms（旧来の総当たりは 15/20・315ms。旧来は 4 回、真の姿勢が候補に入らなかった）。Pi（1.5GHz）で一括 140ms なので LOCATE は 8 周期に分ける

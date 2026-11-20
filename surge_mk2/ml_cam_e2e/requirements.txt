@@ -2,8 +2,7 @@
 #
 #   .venv/bin/pip install -r ml_cam_e2e/requirements.txt
 #
-# `ml_cam/requirements.txt` とほぼ同じだが、SAM（半自動アノテーション）は
-# 不要——教師データは人間の操舵指令をそのままラベルにするため
+# 教師データは人間の操舵指令をそのままラベルにする（アノテーション用の依存は不要）
 
 torch>=2.2
 torchvision>=0.17

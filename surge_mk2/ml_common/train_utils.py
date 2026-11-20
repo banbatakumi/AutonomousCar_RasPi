@@ -1,4 +1,4 @@
-"""学習スクリプトの共通部品（`ml_cam`・`ml_cam_e2e`・`ml_e2e`・`ml_stereo_e2e` の `train.py`）。
+"""学習スクリプトの共通部品（`ml_cam_e2e`・`ml_e2e`・`ml_stereo_e2e` の `train.py`）。
 
 各 `train.py` が `pick_device`・乱数の固定・best の選び方・train/val の分け方をそれぞれ複製しており、
 すでに不揃いになっていた（装置の優先順・best の初期値の流儀・時間ブロックの分け方が2通り）。
@@ -27,7 +27,7 @@ _HASH_BINS = 10_000
 def pick_device():
     """CUDA → MPS → CPU の順に使えるものを返す。
 
-    以前は `ml_cam`・`ml_cam_e2e` が MPS を先に、`ml_e2e` が CUDA を先に見ていた。両方が使える計算機は
+    以前は `ml_cam_e2e` が MPS を先に、`ml_e2e` が CUDA を先に見ていた。両方が使える計算機は
     無い（MPS は Mac だけ、CUDA は Mac に無い）ので、どちらの順でも選ばれる装置は同じ。
     """
     import torch
@@ -44,7 +44,7 @@ def seed_all(seed: int) -> None:
 
     分割（`group_split`）は乱数を使わないが、重みの初期化・水増し（`np.random`・`random` を使うものがある）・
     DataLoader のシャッフル順はそれぞれ別系統の乱数源なので、どれかを固定し忘れると再現性が取れない
-    （`ml_cam` は torch だけを固定しており、`dataset.py` の `np.random` の水増しが毎回変わっていた）。
+    （以前は torch だけを固定しており、`dataset.py` の `np.random` の水増しが毎回変わっていた）。
     DataLoader の worker は torch が worker ごとに別の種を配る。
     """
     import numpy as np
@@ -58,9 +58,9 @@ def seed_all(seed: int) -> None:
 def make_optimizer(params, lr: float, weight_decay: float = 0.0):
     """最適化器を AdamW に揃える。
 
-    `ml_cam`・`ml_cam_e2e` は Adam、`ml_e2e`・`ml_stereo_e2e` は AdamW（`weight_decay=1e-4`）だった。
+    `ml_cam_e2e` は Adam、`ml_e2e`・`ml_stereo_e2e` は AdamW（`weight_decay=1e-4`）だった。
     **AdamW は `weight_decay=0` なら Adam と同じ更新式**（減衰の項が消え、torch の実装も同じ経路を通る）なので、
-    `ml_cam`・`ml_cam_e2e` は `weight_decay=0` を渡して学習結果を変えずに種類だけを揃える。減衰を入れるかは
+    `ml_cam_e2e` は `weight_decay=0` を渡して学習結果を変えずに種類だけを揃える。減衰を入れるかは
     モデルごとに学習し比べて決めること（ここで一律に入れると、既存の run と比べられなくなる）。
     """
     import torch
@@ -70,7 +70,7 @@ def make_optimizer(params, lr: float, weight_decay: float = 0.0):
 
 def train_epoch(model, loader, optimizer, device, loss_of: Callable) -> float:
     """`(入力, 手本)` の組を返す loader で1エポック学習し、標本数で重み付けした損失の平均を返す
-    （`ml_cam`・`ml_cam_e2e` の `train_one_epoch`。損失だけ `loss_of(出力, 手本)` で差し替える）。"""
+    （`ml_cam_e2e` の `train_one_epoch`。損失だけ `loss_of(出力, 手本)` で差し替える）。"""
     model.train()
     total_loss = 0.0
     n = 0
@@ -142,30 +142,19 @@ def is_val_group(key: str, *, val_ratio: float, seed: int = 0) -> bool:
     return _hash_bin(key, seed) < val_ratio * _HASH_BINS
 
 
-def group_split(items: Iterable[T], key: Callable[[T], Hashable], *, val_ratio: float, seed: int = 0,
-                keep_both: bool = False) -> tuple[list[T], list[T]]:
+def group_split(items: Iterable[T], key: Callable[[T], Hashable], *, val_ratio: float,
+                seed: int = 0) -> tuple[list[T], list[T]]:
     """`items` を `key(item)` のかたまり単位で train/val に分ける（同じかたまりは片側だけ）。
 
     連続した走行の隣り合う絵はほぼ同じなので、1枚ずつ振り分けると train の隣が val に漏れて検証の値が良く出すぎる。
     振り分けは `is_val_group`（かたまりの名前のハッシュ）で決める。val の割合はかたまりの数が多ければ `val_ratio` に
     近づくが、少ないとばらつく。
 
-    `keep_both=True` なら、かたまりが2つ以上あるのに片側が空になったとき、ハッシュの値がいちばん境目に近い
-    かたまりを1つ移して両側を残す（ラベル付きの画像が少ない `ml_cam` 向け）。その場合だけは `is_val_group` と
-    食い違うので、学習後に1枚ずつ train/val を言い直す使い方（`ml_cam_e2e`）では使わない。
-
-    以前は `ml_cam` が「ハッシュの順に並べ、val の枚数が `val_ratio` に届くまで詰める」方式、`ml_cam_e2e` がこの方式
-    だった。前者は割合がちょうどになる代わりに、記録を足すと既存のかたまりの振り分けまで動く（前の run と検証データが
-    変わり、足した記録の分だけ以前の学習データが検証に混ざる）ので、こちらに揃えた。
+    `is_val_group` と同じ振り分けなので、学習後に1枚ずつ train/val を言い直す使い方（`ml_cam_e2e`）と食い違わない。
     """
     keyed = [(str(key(item)), item) for item in items]
     groups = dict.fromkeys(k for k, _ in keyed)
     val_keys = {k for k in groups if is_val_group(k, val_ratio=val_ratio, seed=seed)}
-    if keep_both and len(groups) >= 2:
-        if not val_keys:
-            val_keys = {min(groups, key=lambda k: _hash_bin(k, seed))}
-        elif len(val_keys) == len(groups):
-            val_keys.discard(max(groups, key=lambda k: _hash_bin(k, seed)))
     # 元の並びのまま振り分ける（`ml_cam_e2e/samples.split` の頃と同じ並び）
     train = [item for k, item in keyed if k not in val_keys]
     val = [item for k, item in keyed if k in val_keys]

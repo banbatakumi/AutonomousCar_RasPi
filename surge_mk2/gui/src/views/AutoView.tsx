@@ -26,7 +26,7 @@
  * `AutoPanel` でモードを選び engage する。**モードの一覧は GUI に書いていない**
  * （サーバの `status.auto.catalog` から生える）ので、`raspi/auto/` に planner を
  * 足せばこの画面に勝手に出る。LiDAR ビューには planner が選んだギャップを重ねる。
- * モードごとに必要なモデル選択（`ftg_cam`/`e2e_lidar`）も `AutoPanel` の中で
+ * モードごとに必要なモデル選択（`e2e_lidar` など）も `AutoPanel` の中で
  * 選んだモードに応じて出し分ける。
  *
  * ## 車体図をラジコンビューと共通化

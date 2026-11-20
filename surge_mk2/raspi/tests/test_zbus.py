@@ -212,10 +212,10 @@ class TestPubSub(BusCase):
         「撮像時刻が 0 なら失敗」が通らず、失敗フレームが今撮れたフレームに化ける（レビュー M1）。"""
         from raspi.bus import Publisher
         from raspi.msgs import Scan
-        from raspi.msgs.types import CamPath, LineScan, TargetTrack
+        from raspi.msgs.types import LineScan, TargetTrack
 
         pub = self.track(Publisher("stereo"))
-        for cls in (Scan, LineScan, TargetTrack, CamPath):
+        for cls in (Scan, LineScan, TargetTrack):
             with self.subTest(cls=cls.__name__):
                 self.assertEqual(pub.send("scan/stereo", cls()).t_capture, 0)
                 self.assertEqual(pub.send("scan/stereo", cls(t_capture=123)).t_capture, 123)
@@ -357,32 +357,18 @@ class TestTopicOwner(unittest.TestCase):
             with self.subTest(planner=cls.id, topic=cls.input_topic):
                 endpoints_for_topic(cls.input_topic)   # 例外が出ないこと
 
-    def test_cam_model_is_owned_by_control_and_not_swallowed_by_cam_config(self):
-        """`"cam/model"`（★モデル選択トピック）が `"cam/config"` の前方一致に
-        誤って拾われていないこと。両方とも `TOPIC_OWNER` の完全一致キーとして
-        別々に存在し、どちらも実際の owner は `control`（telemetry_node）だが、
-        **偶然同じ答えになるからといって前方一致に頼ってはいけない**——
-        将来どちらかの owner だけ変えたときに、もう片方が巻き添えで
-        壊れる経路を残さないため。
-        """
-        from raspi.bus.zbus import TOPIC_OWNER, endpoint_for_node, endpoints_for_topic
+    def test_scan_stereo_is_not_swallowed_by_the_scan_prefix(self):
+        """`"scan/stereo"` は `"scan"` の前方一致フォールバックに拾われてはいけない。
 
-        self.assertIn("cam/model", TOPIC_OWNER, "完全一致キーとして登録されていない")
-        self.assertEqual(endpoints_for_topic("cam/model"),
-                         [endpoint_for_node("control")])
-
-    def test_scan_cam_is_not_swallowed_by_the_scan_prefix(self):
-        """`"scan/cam"` は `"scan"` の前方一致フォールバックに拾われてはいけない。
-
-        両方とも辞書に**完全一致キー**として存在すべきで、`"scan/cam"` を
+        両方とも辞書に**完全一致キー**として存在すべきで、`"scan/stereo"` を
         引いたときに `"scan"`（io ノード）の endpoint が返ってきたら事故
-        （`cam_perception_node` の配信が誰にも届かない、が例外にはならず
-        `ftg_cam` が「動くのにデータが来ない」という気づきにくい壊れ方をする）。
+        （配信が誰にも届かない、が例外にはならず「動くのにデータが来ない」という
+        気づきにくい壊れ方をする）。
         """
         from raspi.bus.zbus import endpoint_for_node, endpoints_for_topic
 
-        self.assertEqual(endpoints_for_topic("scan/cam"),
-                         [endpoint_for_node("cam_perception")])
+        self.assertEqual(endpoints_for_topic("scan/stereo"),
+                         [endpoint_for_node("stereo")])
         self.assertEqual(endpoints_for_topic("scan"),
                          [endpoint_for_node("io")])
 

@@ -6,7 +6,7 @@
 
 - **購読**: `vehicle_state`・`auto/ctrl`（どのモードで走るかの意思）・
   登録されている全 planner の `input_topic`（既定 `scan`。カメラ系 planner は
-  `scan/cam` を使う。`input_topics()` が和集合を作る）
+  `line/cam` などを使う。`input_topics()` が和集合を作る）
 - **発行**: `auto/cmd`（走行指令）・`auto/state`（判断の根拠）・
   `auto/map`（地図と経路。**変わったときだけ**）・`hb/planning`
 
@@ -42,7 +42,7 @@ telemetry_node も 50Hz で `cmd`（操縦者不在なら DISARM）を流して�
 telemetry_node・io_node も中身の変化をその場で中継する。平均約20ms短縮）。
 同じ周で 5 回計算しても答えは変わらないので、**新しい周が来たときだけ** planner を回して結果を
 保持する（どのトピックが「入力」かは `Planner.input_topic` が決める。
-カメラ系 planner なら `scan/cam` のケイデンスがこれに当たる）。
+カメラ系 planner なら `line/cam` のケイデンスがこれに当たる）。
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def input_topics() -> set[str]:
     （後から `add_topic()` する口が無い）ので、GUI でモードを切り替えた瞬間に
     そのトピックが未購読、という事態を避けるには起動時に全部読んでおく必要がある。
     LiDAR 系 planner しか無かった今までは `scan` 1つで足りていたが、
-    カメラ系 planner（`follow_the_gap_cam.py`）が初めてそれ以外を使う
+    カメラ系などの planner はそれ以外を使う
     （`raspi/auto/base.py` の `Planner.input_topic`）。
     """
     return {cls.input_topic for cls in PLANNERS.values()}

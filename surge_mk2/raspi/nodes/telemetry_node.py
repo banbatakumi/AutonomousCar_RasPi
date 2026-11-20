@@ -184,7 +184,6 @@ from raspi.msgs.types import (
     TOPIC_AUTO_MAP,
     TOPIC_AUTO_STATE,
     TOPIC_CAM_CONFIG,
-    TOPIC_CAM_MASK,
     TOPIC_STEREO_DEPTH,
     TOPIC_CMD,
     TOPIC_DIAG_LINK,
@@ -297,20 +296,15 @@ SIGNAL_CONFIG_HZ = 1
 #: 前カメラの capture fps をユーザー設定の上限を無視して `CAM_FPS_MAX` まで上げる。
 #: 左右を同期している間は上げない（`_auto_fps_override`）。
 #: `follow_object` は `cam_track_node.py` が毎フレーム対象を追跡し続ける必要が
-#: あるので他の2つと同じ扱いにする。`cam_centerline` は `ftg_cam` と同じ
-#: `cam_perception_node.py` の推論結果を使うので同じ扱い。`cam_e2e` は前カメラの
+#: あるので他の2つと同じ扱いにする。`cam_e2e` は前カメラの
 #: 絵だけで舵と速度を決めるので、古い絵で走らせないために同じく上限まで上げる。
 #: `e2e_fusion` は点群の1周ごとに最新のコマと組にして推論するので同じ扱い。`stereo_e2e` も同じ
-CAMERA_AUTO_MODES = frozenset({"line_trace", "ftg_cam", "cam_centerline", "follow_object",
+CAMERA_AUTO_MODES = frozenset({"line_trace", "follow_object",
                                "cam_e2e", "e2e_fusion", "stereo_e2e"})
 #: `track/roi`（★対象追従のROI選択）の再送周期。周期送信（`_periodic_jobs`）と同じ理由
 #: （cam_track_node の再起動や取りこぼしで選択が食い違ったままにならないように）
 TRACK_ROI_HZ = 5
 
-#: `cam/mask`（`ftg_cam` の走行可否マスク）を中継するポーリング周期。
-#: カメラ本編（`CAMERA_HZ`）ほどの滑らかさは要らないデバッグ表示用途なので、
-#: 低めに抑えて CPU/帯域を節約する
-CAM_MASK_POLL_HZ = 8
 #: `stereo/depth`（深度映像）を中継するポーリング周期。**照合の頻度（ARM 中 15Hz）より速く回し**、新しいコマだけを送る
 #: （`seq` で判定）ので、表示は照合と同じ頻度になる。15Hz ちょうどで回すと照合との位相のずれでコマを取りこぼす
 DEPTH_POLL_HZ = 30
@@ -360,7 +354,7 @@ _SAFETY = Vehicle.load()
 CAM_ROLES: tuple[str, ...] = _SAFETY.camera_roles
 CAM_ROLE_TOPIC: dict[str, str] = {role: f"image/{role}" for role in CAM_ROLES}
 #: 他ノードが JPEG 化済みのものを中継するだけの `/ws/camera/<名前>`（`_camera_pump` の対象外）
-_RELAYED_CAMS = frozenset({"mask", "depth"})
+_RELAYED_CAMS = frozenset({"depth"})
 _CAM_TOPICS = frozenset(CAM_ROLE_TOPIC.values())
 #: 主カメラは `image/front`（推論ノード・前方映像・📷 がこの名前で読む）
 assert CAM_ROLE_TOPIC[CAM_ROLES[0]] == TOPIC_IMAGE_FRONT
@@ -585,8 +579,6 @@ class TelemetryServer:
             TOPIC_AUTO_MAP: LATEST,
             #: ライントレースの認識点（GUI がカメラ映像へ重畳する。§`_snapshot`）
             TOPIC_LINE_CAM: LATEST,
-            #: `ftg_cam` の走行可否マスク（JPEG。GUI がカメラ映像へ重畳する。§`_mask_pump`）
-            TOPIC_CAM_MASK: LATEST,
             #: ステレオの深度映像（JPEG。自動運転画面の2枚目の枠。§`_depth_pump`）
             TOPIC_STEREO_DEPTH: LATEST,
             #: `follow_object` の追跡結果（GUI がカメラ映像へ重畳する。§`_snapshot`）
@@ -604,12 +596,11 @@ class TelemetryServer:
         self.control_clients: set = set()
         #: `status` に自動運転の宣言（`catalog`）を毎回は載せなくてよい `/ws/control` クライアント
         self._catalog_lite: set = set()
-        #: `"mask"` は `ftg_cam` の走行可否マスク（`_mask_pump` が中継。
-        #: front/left と違い telemetry_node 自身のエンコーダを使わないので
-        #: `_camera_channel` の `self._jpeg is None` チェックの対象外にしてある）
-        #: `"depth"` はステレオの深度映像（`_depth_pump` が中継。"mask" と同じく自前のエンコーダは使わない）
+        #: `"depth"` はステレオの深度映像（`_depth_pump` が中継。front/left と違い
+        #: telemetry_node 自身のエンコーダを使わないので `_camera_channel` の
+        #: `self._jpeg is None` チェックの対象外にしてある）
         self.camera_clients: dict[str, set] = {**{role: set() for role in CAM_ROLES},
-                                               "mask": set(), "depth": set()}
+                                               "depth": set()}
         #: mcap のライブ中継を見ている `/ws/record` クライアント
         self.record_clients: set = set()
         #: 地図を見ている `/ws/map` クライアント
@@ -982,8 +973,8 @@ class TelemetryServer:
         if cam not in self.camera_clients:
             await ws.close(1008, "unknown camera")
             return
-        # "mask" は cam_perception_node が既に JPEG 化した `cam/mask` を
-        # そのまま中継するだけ（`_mask_pump`）——telemetry_node 自身の
+        # "depth" は stereo_node が既に JPEG 化した `stereo/depth` を
+        # そのまま中継するだけ（`_depth_pump`）——telemetry_node 自身の
         # 共有メモリ用エンコーダ（`self._jpeg`）は使わないので、この要求から除外する
         if cam not in _RELAYED_CAMS and self._jpeg is None:
             await ws.close(1011, "no jpeg encoder on the pi")
@@ -1759,7 +1750,7 @@ class TelemetryServer:
         """前カメラの capture fps。優先度は上から:
 
         1. カメラを使う自動運転が engage 中 → 上限を無視して `CAM_FPS_MAX`
-           （`line_trace`/`ftg_cam` は毎フレーム新しい画を欲しがるため）。**ただし左右を同期して撮っている間は
+           （`line_trace` は毎フレーム新しい画を欲しがるため）。**ただし左右を同期して撮っている間は
            上げない**（下の 3 と同じ理由。上げると揃い直すまで左右の組が来ず、`cam_e2e`・`e2e_fusion` が止まる）
         2. 🎥 録画中 → `CAM_FPS_MAX`（DISARM 中でも。動画を 30fps で録るため）
         3. DISARM中（駐車中）→ 節電用の低FPS（`front_fps_disarm`）
@@ -2068,7 +2059,7 @@ class TelemetryServer:
         if self._auto_engaged and self._auto_mode == "follow_object":
             self._auto_engaged = False
             self._publish_auto_ctrl()
-        self._publish_track_roi()          # 待たせない。cam_model 等と同じく即座に効かせる
+        self._publish_track_roi()          # 待たせない。モデル選択等と同じく即座に効かせる
 
     def _on_track_roi_clear(self) -> None:
         """「選択を解除」。**engage は落とさない**——`clear_map` と同じ形。
@@ -3048,7 +3039,7 @@ class TelemetryServer:
             self._cam_wake.clear()
             pending = None
             for cam, clients in self.camera_clients.items():
-                # "mask" は `_mask_pump` が専用に中継する（このループの対象は
+                # "depth" は `_depth_pump` が専用に中継する（このループの対象は
                 # `topics` にある front/left のみ）。ここで弾かないと
                 # `topics[cam]` が KeyError になり、このタスクごと死んで
                 # front/left の配信まで巻き添えで止まる
@@ -3082,32 +3073,8 @@ class TelemetryServer:
                                        transform=transform)
         return got[0] if got else None
 
-    async def _mask_pump(self) -> None:
-        """`cam/mask`（`cam_perception_node` が JPEG 化済み）をそのまま中継する。
-
-        `_camera_pump` と同じ「購読者がいなければ何もしない」節約はするが、
-        **エンコード作業がここには無い**（`ImageRef` の共有メモリ読み出しも
-        `to_thread` も不要）ので専用の軽いポンプにしてある。周期は
-        `camera_hz` と揃える理由が無い（マスクの更新は cam_perception_node の
-        推論周期任せ）ので、モデル選択の周期送信（`_periodic_jobs`）と同じ低頻度ポーリングにする。
-        """
-        last_seq = -1
-        period = 1.0 / CAM_MASK_POLL_HZ
-        while self._running:
-            await asyncio.sleep(period)
-            clients = self.camera_clients["mask"]
-            if not clients:
-                continue
-            m = self.sub.latest.get(TOPIC_CAM_MASK)
-            if m is None or m.seq == last_seq:
-                continue
-            last_seq = m.seq
-            await asyncio.gather(
-                *(self._send_or_drop(ws, m.jpeg, clients) for ws in list(clients)),
-                return_exceptions=True)
-
     async def _depth_pump(self) -> None:
-        """`stereo/depth`（`stereo_node` が JPEG 化済み）を `/ws/camera/depth` へそのまま中継する（`_mask_pump` と同じ形）。"""
+        """`stereo/depth`（`stereo_node` が JPEG 化済み）を `/ws/camera/depth` へそのまま中継する（`_pump` 系の同じ形）。"""
         last_seq = -1
         period = 1.0 / DEPTH_POLL_HZ
         while self._running:
@@ -3143,7 +3110,7 @@ class TelemetryServer:
             tasks = [asyncio.create_task(t(), name=t.__name__) for t in (
                 self._bus_pump, self._telemetry_pump, self._map_pump, self._cmd_pump,
                 self._camera_pump, self._wifi_pump, self._pi_health_pump,
-                self._periodic_pump, self._mask_pump, self._depth_pump)]
+                self._periodic_pump, self._depth_pump)]
             for t in tasks:
                 t.add_done_callback(lambda t: self._on_pump_done(t, stop))
             try:

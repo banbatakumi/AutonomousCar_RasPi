@@ -1,4 +1,4 @@
-"""ONNX 書き出しの共通部分（`ml_cam`・`ml_cam_e2e`・`ml_e2e`・`ml_stereo_e2e` の `export_onnx.py`）。
+"""ONNX 書き出しの共通部分（`ml_cam_e2e`・`ml_e2e`・`ml_stereo_e2e` の `export_onnx.py`）。
 
 4本の `export_onnx.py` が `torch.onnx.export` の設定・PyTorch と ONNXRuntime の突き合わせ・
 契約 JSON の書き出し・前処理の版の検査をそれぞれ複製していた。片方に入れた修正（`external_data=False`

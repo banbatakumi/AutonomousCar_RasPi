@@ -56,7 +56,7 @@ def export(checkpoint: Path, out_path: Path, size: tuple[int, int] | None = None
     ことになる（train/inference skew の出力版）。黙って違う値を書くより止める。
 
     :return: 実際に使った入力解像度 `(width, height)`
-    :param note: `<out_path>.json`に同梱する自由記述の備考（`ml_cam/export_onnx.py`と対称）
+    :param note: `<out_path>.json`に同梱する自由記述の備考
     """
     cfg = read_train_config(checkpoint.parent)
     if size is None:

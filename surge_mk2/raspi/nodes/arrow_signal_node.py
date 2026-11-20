@@ -13,7 +13,7 @@
 合成データが作れず、学習データは実物の看板を実写するしかない。電光掲示板は
 色数・形状パターンが少ない閉じた問題（3矢印×薄い色3系統）で、屋内・既知の
 設置条件でもあるため、HSVしきい値＋モーメントという軽量な処理で十分と判断した
-（`docs/competition_plan.md`）。ONNX推論より遥かに軽く、`cam_perception_node.py`
+（`docs/competition_plan.md`）。ONNX推論より遥かに軽く、`cam_e2e_node.py`
 のようなスレッド数調整すら不要——`line_perception_node.py`（白線を古典的な
 色しきい値で検出する）と同じ考え方。
 
@@ -26,7 +26,7 @@ bind するため、**このノードと`route_select.py`は同時に使えな�
 
 ## ARM中は常時動く（特定の自動運転モードに紐づかない）
 
-`cam_perception_node.py`等の`auto/ctrl`連動ゲート（特定モード選択中だけ推論）
+`cam_e2e_node.py`等の`auto/ctrl`連動ゲート（特定モード選択中だけ推論）
 とは違い、矢印信号はどの自動運転モードでも該当しうる横断的な入力なので、
 `raspi.core.auto_gate.vehicle_armed()`だけで判定する（`cam_track_node.py`と
 同じ「DISARM中は共有メモリすら読まない」節電。モード選択は見ない）。

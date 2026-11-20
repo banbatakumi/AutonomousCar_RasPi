@@ -3,8 +3,7 @@
 **実NanoTrackモデルは要らない。** `TargetTrackerFactory`と同じインタフェース
 （`available`/`new_instance()`）を持つ偽トラッカーに差し替え、
 bbox→bearing変換・LiDAR距離融合・IDLE/TRACKING状態遷移という配管が
-壊れずに流れることだけを確認する（`test_cam_perception_node.py`の
-ダミーONNXモデルと同じ考え方——推論の精度そのものは実データが要る領域）。
+壊れずに流れることだけを確認する（ダミーONNXモデルで見る考え方——推論の精度そのものは実データが要る領域）。
 """
 
 import math

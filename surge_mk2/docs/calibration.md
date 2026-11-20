@@ -273,7 +273,7 @@ lens = "wide160sl"             # 左カメラ（項目は同じ）
 
 | 使うところ | 校正値の効き方 |
 |---|---|
-| IPM（`raspi/nav/ipm.py`）→ `line_trace`・`ftg_cam`・`cam_centerline` | 画素 → 地面座標の変換が魚眼モデルになる |
+| IPM（`raspi/nav/ipm.py`）→ `line_trace` | 画素 → 地面座標の変換が魚眼モデルになる |
 | `cam_track_node`（`follow_object`）| 画素 → 方位角 |
 | GUI の進路ガイド・重畳（`gui/src/render/cameraModel.ts`）| 地面 → 画素の投影（`config/generate.py` 経由） |
 | GUI の「補正」映像 | `telemetry_node` が仮想ピンホール（`undistort_hfov`）に remap して配信 |
@@ -296,7 +296,7 @@ lens = "wide160sl"             # 左カメラ（項目は同じ）
 
 - 校正値はカメラ×レンズごと。カメラを入れ替えたり、ピントリングを回したら撮り直す
 - 解像度（`camera_node --size`）や `top_crop`・`bottom_crop` を変えても校正値はそのまま使える（📷 の写真もクロップしたまま校正に使える。上端のクロップ率はファイル名の `top…_` から読む）
-- カメラ学習モデル（`ml_cam`・`ml_cam_e2e`）は撮ったレンズの画像に依存するので、**レンズを替えたら再学習が要る**
+- カメラ学習モデル（`ml_cam_e2e`）は撮ったレンズの画像に依存するので、**レンズを替えたら再学習が要る**
 
 ### 7.1 色むら補正（レンズごとの ISP チューニング）
 

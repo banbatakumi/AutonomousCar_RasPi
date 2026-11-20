@@ -31,18 +31,15 @@ IMX219 160° 広角レンズに替えたので、`vehicle.toml` に校正値
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 from typing import NamedTuple
 
 import numpy as np
 
 from raspi.core.camera_model import FisheyeCalib, crop_frame, project_rays, unproject_pixels
 
-from .grid import OccGrid
-
 __all__ = ["CameraIntrinsics", "CameraExtrinsics", "camera_intrinsics",
            "vehicle_camera_intrinsics", "pixel_ray", "pixel_to_ground",
-           "ground_to_pixel", "project_mask_to_grid", "project_seen_to_grid"]
+           "ground_to_pixel"]
 
 #: `project()`/`pixel_to_ground()` 共通の下限。光軸方向の距離がこれ未満は
 #: 「カメラの真下・背後」とみなして解を捨てる（`CameraView.tsx` の `zc < 0.15` と同じ）
@@ -172,25 +169,6 @@ def _pixel_to_ground_vec(u: np.ndarray, v: np.ndarray, intr: CameraIntrinsics,
 
 
 #: 走行不可の画素を地面へ落とすときの縦のずれ（画素単位。0.5 ＝ 画素の下端）。
-#: 分類の量子化で壁が最大1画素遠くに出るぶんを近い側へ見込む
-_WALL_V_OFFSET = 1.5
-
-
-@lru_cache(maxsize=8)
-def _image_rays(height: int, width: int, col_stride: int, v_offset: float,
-                intr: CameraIntrinsics) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """全行 × `col_stride` 列おきの画素の光線 `(rx, ry, rz)`（形 `(height, ⌈width/col_stride⌉)`）。
-
-    光線は内部パラメータだけで決まり、毎フレーム変わるのは取付ピッチ（IMU 補正）だけ
-    なので、魚眼の逆写像（Newton 法）は解像度ごとに1回で済ませる。
-    `v_offset` は画素の中心からのずれ（0.5 ＝ 画素の下端）。
-    """
-    vs, us = np.mgrid[0:height, 0:width:col_stride].astype(np.float64)
-    rays = pixel_ray(us, vs + v_offset, intr)
-    for r in rays:
-        r.setflags(write=False)
-    return rays
-
 
 def _rays_to_ground(rx: np.ndarray, ry: np.ndarray, rz: np.ndarray,
                     ext: CameraExtrinsics) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -211,79 +189,3 @@ def _rays_to_ground(rx: np.ndarray, ry: np.ndarray, rz: np.ndarray,
     x = ext.x + depth * cy - lateral * sy
     y = ext.y + depth * sy + lateral * cy
     return x, y, valid
-
-
-def project_mask_to_grid(drivable_mask: np.ndarray, intr: CameraIntrinsics,
-                          ext: CameraExtrinsics, grid: OccGrid,
-                          *, stride: int = 2) -> np.ndarray:
-    """走行不可マスク（`drivable_mask == False` の画素）を occupancy grid へ投影する。
-
-    `drivable_mask` は `(height, width)` の bool 配列。**True ＝ 走行可能。**
-    返り値は `grid` と同じ形の bool 配列（True ＝ 占有）で、そのまま
-    `OccGrid.raycast(..., mask=占有配列)` に渡せる。
-
-    地平線より上の画素（`pixel_to_ground` が解を持たない）は無視する
-    （＝空きでも壁でもなく「その先は分からない」——`raycast` 側で
-    `max_range` が受け止める。`scan_window()` の「欠測は壁」とは違う扱いに
-    なる点に注意: ここは"見えている範囲の外"であって"欠測"ではない）。
-
-    **縦は間引かず、各画素の下端からさらに1画素下（`v + 1.5`）を投影する。** カメラが低いので
-    地平線付近の 1 行は遠方の数十 cm に当たる。行を間引いたり画素の中心を使ったりすると、
-    壁の根元が実際より遠くに出る（＝危険側）。マスクは「画素の中心が壁の向こうか」で
-    分類されるので、最後の走行不可の行の下端（`v + 0.5`）と次の行の中心の間に本当の境界が
-    あり得る。その分（最大1画素）を近い側へ見込んで、低解像度（160x120 など）でも
-    壁が真の距離より遠くに出ないようにする。`stride` は列（横方向）だけを間引く。
-    """
-    occ = np.zeros((grid.height, grid.width), dtype=bool)
-    h, w = drivable_mask.shape
-    not_drivable = ~drivable_mask[:, ::stride]
-    if not not_drivable.any():
-        return occ
-    rx, ry, rz = _image_rays(h, w, stride, _WALL_V_OFFSET, intr)
-    x, y, valid = _rays_to_ground(rx[not_drivable], ry[not_drivable], rz[not_drivable], ext)
-    x, y = x[valid], y[valid]
-    if x.size == 0:
-        return occ
-
-    col, row = grid.to_cell(x, y)
-    inside = grid.inside(col, row)
-    occ[row[inside], col[inside]] = True
-    return occ
-
-
-def project_seen_to_grid(mask_shape: tuple[int, int], intr: CameraIntrinsics,
-                          ext: CameraExtrinsics, grid: OccGrid,
-                          *, stride: int = 2) -> np.ndarray:
-    """カメラが実際に見ている範囲を occupancy grid へ投影する。**クラスは問わない。**
-
-    `project_mask_to_grid()` は「走行不可」の画素だけを壁として彫るので、
-    水平画角の外や地平線より上（そもそも `pixel_to_ground` が解を持たない範囲）は
-    暗黙に「空き」のまま残る。`follow_the_gap_cam.py` は `fov_deg` を絞ってこの穴を
-    回避しているが、車両の正面軸から離れた前方距離まで左右にレイを撃つ
-    `raspi/nav/drivable_path.py` の中心線抽出では同じ回避策が使えない
-    （そもそも角度で視野を切っていない）。
-
-    返り値は `grid` と同じ形の bool 配列（True＝観測済み）。呼び出し側で
-    `blocked = (~seen) | occ` を作り、**未観測は壁と同じ扱いにする**
-    （`scan_window()` の「欠測は壁」と同じ安全側の判断）。
-
-    **格子のセルの中心を画像へ順投影し、画像の内側に落ちたセルを観測済みにする。**
-    画素を地面へ逆投影して点を打つだけだと、遠方（地平線付近）では 1 行が数十 cm に
-    広がるので観測済みのセルが飛び飛びの円弧になり、間が全部「未観測＝壁」になる
-    （低いカメラでは 1m 先から先がほぼ塞がる）。加えて `project_mask_to_grid()` と同じ
-    画素の点（列は `stride` おき）も観測済みにするので、占有セルは必ず観測済みに含まれる。
-
-    `mask_shape` は `(height, width)`。中身の画素値は使わない。
-    """
-    h, w = mask_shape
-    gc, gr = np.meshgrid(np.arange(grid.width), np.arange(grid.height))
-    gx, gy = grid.to_world(gc, gr)
-    u, v, valid = _ground_to_pixel_vec(gx, gy, intr, ext)
-    seen = valid & (u >= 0.0) & (u < w) & (v >= 0.0) & (v < h)
-
-    rx, ry, rz = _image_rays(h, w, stride, 0.5, intr)
-    x, y, ok = _rays_to_ground(rx, ry, rz, ext)
-    col, row = grid.to_cell(x[ok], y[ok])
-    inside = grid.inside(col, row)
-    seen[row[inside], col[inside]] = True
-    return seen

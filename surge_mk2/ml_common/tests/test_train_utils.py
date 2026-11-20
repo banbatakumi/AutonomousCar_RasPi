@@ -66,11 +66,8 @@ class TestGroupSplit(unittest.TestCase):
         after = {i for i in group_split(a + b, self._key, val_ratio=0.2)[1] if i[0] == "a"}
         self.assertEqual(before, after)
 
-    def test_keep_both_leaves_one_group_on_each_side(self):
+    def test_zero_val_ratio_puts_everything_in_train(self):
         items = [("a", 0), ("a", 9 * 10**9)]
-        for ratio in (0.0, 1.0):
-            train, val = group_split(items, self._key, val_ratio=ratio, keep_both=True)
-            self.assertEqual((len(train), len(val)), (1, 1))
         train, val = group_split(items, self._key, val_ratio=0.0)
         self.assertEqual((len(train), len(val)), (2, 0))
 

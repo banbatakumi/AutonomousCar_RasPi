@@ -5,7 +5,7 @@
 
 `ml_lidar/train_rl.py`・`watch.py`・`export_onnx_rl.py`・`eval_stats.py`を
 サブプロセスとして呼び出すだけの薄い操作パネル。**学習・推論のロジックは
-一切持たない**——`ml_cam/app.py`・`ml_cam_e2e/app.py`と同じ設計方針。
+一切持たない**——`ml_cam_e2e/app.py`と同じ設計方針。
 
 ログ表示・サブプロセス実行基盤（ジョブの実行・備考は `ml_common/job_panel.JobPanelBase` の並行実行の形）・
 run名管理・note.txt・ウィンドウクローズ処理は `ml_common/`に切り出してある共通実装をそのまま使う。

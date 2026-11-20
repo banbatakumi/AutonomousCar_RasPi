@@ -24,22 +24,18 @@ from raspi.core.vehicle import Vehicle
 from raspi.core.control_params import steer_relink
 from raspi.auto.base import extend_disparity as _extend
 from raspi.auto.base import blind_reason, scan_window, sector_of_deg
-from raspi.auto.cam_centerline import CamCenterline
 from raspi.auto.cam_e2e import CamE2E
 from raspi.auto.disparity_extender import DisparityExtender
 from raspi.auto.e2e_lidar import E2ELidar
 from raspi.auto.follow_the_gap import FollowTheGap
-from raspi.auto.follow_the_gap_cam import FollowTheGapCam
 from raspi.auto.gap_pursuit import DisparityPursuit, _best_band
 from raspi.auto.line_trace import LineTrace
 from raspi.auto.registry import PLANNERS, catalog, make_planner
-from raspi.msgs import AutoState, CamE2ECmd, CamPath, DriveCmd, LineScan, Scan, VehicleState
+from raspi.msgs import AutoState, CamE2ECmd, DriveCmd, LineScan, Scan, VehicleState
 from raspi.msgs.types import (
     TOPIC_CAM_E2E_CMD,
-    TOPIC_CAM_PATH,
     TOPIC_LINE_CAM,
     TOPIC_SCAN,
-    TOPIC_SCAN_CAM,
 )
 
 
@@ -65,24 +61,6 @@ def offset_gap(center_deg: int, half_width: int, *, wall=1.0, open_dist=5.0) -> 
     for deg in range(center_deg - half_width, center_deg + half_width + 1):
         dist[deg % 360] = open_dist
     return Scan(dist=dist, sector_seen=[True] * 12, rot_speed_dps=3600.0)
-
-
-def camera_scan(fov_deg: int, *, wall=0.5, open_dist=5.0, open_within=None) -> Scan:
-    """**カメラの視野（±`fov_deg`/2）だけが見えている**点群。
-
-    LiDAR 用の `corridor()`/`offset_gap()` は `sector_seen=[True]*12`（全周が
-    見えている）前提だが、カメラは実視野の外を一切受信できない。その外側の
-    セクタを `sector_seen=False` にして、`FollowTheGapCam` が本当に
-    「カメラが見えている範囲だけ」で判断できることを試す。
-    """
-    half = fov_deg // 2
-    open_half = (fov_deg if open_within is None else open_within) // 2
-    dist = [wall] * 360
-    for deg in range(-open_half, open_half + 1):
-        dist[deg % 360] = open_dist
-    visible = {sector_of_deg(d % 360) for d in range(-half, half + 1)}
-    sector_seen = [s in visible for s in range(12)]
-    return Scan(dist=dist, sector_seen=sector_seen, rot_speed_dps=3600.0)
 
 
 class TestSectorMapping(unittest.TestCase):
@@ -295,60 +273,6 @@ class TestFollowTheGap(unittest.TestCase):
             self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
 
 
-class TestFollowTheGapCam(unittest.TestCase):
-    """カメラ由来の擬似スキャンでも `FollowTheGap` のロジックがそのまま動くこと。
-
-    `follow_the_gap_cam.py` は `plan()` を一切上書きしていない——それ自体が
-    設計の核心（`raspi/nav/ipm.py`・`cam_perception_node.py` が作る）なので、
-    ここでまず**同じ関数であること**を直接確認してから、実際にカメラの
-    実視野しか見えていない点群で動くことを試す。
-    """
-
-    def test_plan_is_not_overridden(self):
-        """`FollowTheGapCam` はギャップ探索を1行も書いていない証明。"""
-        self.assertIs(FollowTheGapCam.plan, FollowTheGap.plan)
-
-    def test_declares_a_distinct_input_topic_and_staleness(self):
-        self.assertEqual(FollowTheGapCam.input_topic, TOPIC_SCAN_CAM)
-        self.assertNotEqual(FollowTheGapCam.input_topic, FollowTheGap.input_topic)
-        self.assertEqual(FollowTheGap.input_topic, TOPIC_SCAN)
-        self.assertGreater(FollowTheGapCam.stale_ms, FollowTheGap.stale_ms)
-
-    def test_only_fov_deg_param_differs_from_follow_the_gap(self):
-        """`fov_deg` の範囲/既定値だけをカメラの実視野に合わせて狭めている。"""
-        base = {s.key: s for s in FollowTheGap.params}
-        cam = {s.key: s for s in FollowTheGapCam.params}
-        self.assertEqual(set(base), set(cam), "パラメータの構成が変わっている")
-        for key in base:
-            if key == "fov_deg":
-                self.assertNotEqual(cam[key].default, base[key].default)
-                self.assertLessEqual(cam[key].max, base[key].max)
-            else:
-                self.assertEqual(cam[key], base[key], f"{key} が無断で変わっている")
-
-    def test_drives_using_only_the_camera_fov(self):
-        """視野の外（`sector_seen=False`）が壁として扱われても、視野内の
-        隙間だけで普通に走り出す（LiDAR 版と同じ安全側の読み方を継承）。"""
-        p = FollowTheGapCam()
-        params = FollowTheGapCam.merged({})
-        scan = camera_scan(int(params["fov_deg"]))
-        st = p.plan(scan, None, params, 0.1)
-        self.assertTrue(st.ready, st.reason)
-        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
-        self.assertGreater(st.target_speed, 0.0)
-
-    def test_stops_when_camera_fov_is_too_narrow_to_see_enough(self):
-        """視野の大半が `sector_seen=False` なら、LiDAR 版と同じ
-        `MIN_SEEN_RATIO` の下限に引っかかって止まる（＝カメラの推論が
-        止まった／未起動のフレームを「壁」として安全側に倒す設計の確認）。"""
-        p = FollowTheGapCam()
-        params = FollowTheGapCam.merged({"fov_deg": 60})
-        scan = Scan(dist=[5.0] * 360, sector_seen=[False] * 12)
-        st = p.plan(scan, None, params, 0.1)
-        self.assertFalse(st.ready)
-        self.assertTrue(st.reason)
-
-
 class TestLineTrace(unittest.TestCase):
     """白線の目標点（`LineScan`）を Pure Pursuit で追う。"""
 
@@ -420,100 +344,6 @@ class TestLineTrace(unittest.TestCase):
     def test_not_ready_always_carries_a_reason(self):
         for line in (LineScan(seen=False), LineScan(seen=True, coverage=0.0)):
             st = self.plan(line)
-            if not st.ready or st.brake:
-                self.assertTrue(st.reason)
-
-
-def make_cam_path(*, x_min=0.3, x_max=1.5, x_step=0.1, y=0.0, width=1.0,
-                  seen=True) -> CamPath:
-    """一定の `y`（中心）・`width`（幅）が続く走行可能領域の中心線を作る。"""
-    if not seen:
-        return CamPath(seen=False)
-    n = int(round((x_max - x_min) / x_step)) + 1
-    xs = [x_min + i * x_step for i in range(n)]
-    ys = [y] * n
-    widths = [width] * n
-    return CamPath(seen=True, xs=xs, ys=ys, widths=widths)
-
-
-class TestCamCenterline(unittest.TestCase):
-    """走行可能領域の中心線（`CamPath`）を Pure Pursuit で追う。
-
-    `raspi/nav/drivable_path.py` の幾何そのもの（占有格子から中心線を作る部分）
-    は `raspi/tests/test_drivable_path.py` で検証済み。ここでは合成した `CamPath`
-    から `plan()` が正しい方向・停止判断を作ることだけを確認する。
-    """
-
-    def setUp(self):
-        self.p = CamCenterline()
-        self.params = CamCenterline.merged({})
-
-    def plan(self, path, vs=None, dt=0.1, **over):
-        p = {**self.params, **over}
-        return self.p.plan(path, vs, p, dt)
-
-    def test_declares_a_distinct_input_topic(self):
-        self.assertEqual(CamCenterline.input_topic, TOPIC_CAM_PATH)
-        self.assertNotEqual(CamCenterline.input_topic, TOPIC_SCAN)
-
-    def test_straight_corridor_goes_straight(self):
-        st = self.plan(make_cam_path(y=0.0))
-        self.assertTrue(st.ready, st.reason)
-        self.assertFalse(st.brake)
-        self.assertAlmostEqual(st.target_steer, 0.0, delta=0.05)
-        self.assertGreater(st.target_speed, 0.0)
-
-    def test_corridor_centered_left_steers_left(self):
-        """中心線が左（y正）に寄っていれば正の舵角（反時計回り正）で向く。"""
-        st = self.plan(make_cam_path(y=0.3))
-        self.assertTrue(st.ready, st.reason)
-        self.assertGreater(st.target_steer, 0.0)
-
-    def test_corridor_centered_right_steers_right(self):
-        st = self.plan(make_cam_path(y=-0.3))
-        self.assertTrue(st.ready, st.reason)
-        self.assertLess(st.target_steer, 0.0)
-
-    def test_stops_when_path_is_not_seen(self):
-        st = self.plan(make_cam_path(seen=False))
-        self.assertFalse(st.ready)
-        self.assertIn("届いていない", st.reason)
-        self.assertEqual(st.target_speed, 0.0)
-
-    def test_stops_when_nearest_point_is_too_narrow(self):
-        """直前の1点目から既に `min_width_m` を下回っていれば止まる。"""
-        st = self.plan(make_cam_path(width=0.1), min_width_m=0.4)
-        self.assertFalse(st.ready)
-        self.assertIn("幅が足りない", st.reason)
-
-    def test_truncates_path_at_first_narrow_point(self):
-        """途中から幅が足りなくなったら、それ以遠は使わず free_ahead で止める。"""
-        path = make_cam_path(x_min=0.3, x_max=1.5, x_step=0.1, y=0.0, width=1.0)
-        # 5点目（x=0.7）以降を通行不可にする
-        widths = list(path.widths)
-        for i in range(4, len(widths)):
-            widths[i] = 0.1
-        path = CamPath(seen=True, xs=path.xs, ys=path.ys, widths=widths)
-
-        st = self.plan(path, min_width_m=0.4)
-        self.assertAlmostEqual(st.free_ahead, path.xs[3], places=6)
-
-    def test_speed_never_exceeds_max_speed(self):
-        for y in (-0.3, 0.0, 0.3):
-            st = self.plan(make_cam_path(y=y), max_speed=0.3)
-            self.assertLessEqual(st.target_speed, 0.3 + 1e-9)
-
-    def test_reset_clears_the_steering_state(self):
-        path = make_cam_path(y=0.4)
-        for _ in range(20):
-            converged = self.plan(path).target_steer
-        self.assertGreater(abs(converged), 0.05)
-        self.p.reset()
-        self.assertLess(abs(self.plan(path).target_steer), abs(converged) * 0.8)
-
-    def test_not_ready_always_carries_a_reason(self):
-        for path in (make_cam_path(seen=False), make_cam_path(width=0.1)):
-            st = self.plan(path)
             if not st.ready or st.brake:
                 self.assertTrue(st.reason)
 
@@ -929,18 +759,9 @@ class TestRegistry(unittest.TestCase):
         self.assertIsNone(make_planner(""))
         self.assertIsInstance(make_planner("ftg"), FollowTheGap)
 
-    def test_camera_planner_is_registered(self):
-        """`ftg_cam` が 1 ファイル＋1 行の追加だけで GUI の選択肢に出る。"""
-        self.assertIn("ftg_cam", PLANNERS)
-        self.assertIsInstance(make_planner("ftg_cam"), FollowTheGapCam)
-
     def test_line_trace_planner_is_registered(self):
         self.assertIn("line_trace", PLANNERS)
         self.assertIsInstance(make_planner("line_trace"), LineTrace)
-
-    def test_cam_centerline_planner_is_registered(self):
-        self.assertIn("cam_centerline", PLANNERS)
-        self.assertIsInstance(make_planner("cam_centerline"), CamCenterline)
 
     def test_e2e_lidar_planner_is_registered(self):
         self.assertIn("e2e_lidar", PLANNERS)
@@ -1300,8 +1121,7 @@ _OBS_DIM = 363
 
 def _make_dummy_e2e_model(path: Path, in_dim: int = _OBS_DIM) -> None:
     """`(1,in_dim) → (1,2)` の全結合1層だけのONNXモデル。**torch は使わない**
-    （`test_cam_perception_node.py` の `_make_dummy_model()` と同じ手法。
-    `raspi/tests/` を重い依存から切り離す方針を守る）。
+    （`raspi/tests/` を重い依存から切り離す方針を守る）。
 
     重みは決め打ちで、テストの入力から出力を逆算しやすくしてある:
     steer は先頭の点にだけ反応、speed は末尾から2番目の入力（正規化した自車速度。

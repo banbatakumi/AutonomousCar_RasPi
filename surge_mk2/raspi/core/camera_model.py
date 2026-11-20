@@ -104,7 +104,7 @@ class FisheyeCalib:
 
         クロップ後の高さからクロップ前の高さ `height / (1 - top_crop - bottom_crop)` に
         戻してから倍率を出し、cy から上端で切った行数を引く（`crop_frame`）。縦横の倍率を
-        別々に出すので、`cam_perception_node` のようにモデル入力へ非等方にリサイズした
+        別々に出すので、`cam_e2e_node` のようにモデル入力へ非等方にリサイズした
         画像にもそのまま使える。
         """
         sx = width / self.width

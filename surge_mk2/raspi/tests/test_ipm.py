@@ -1,7 +1,7 @@
 """カメラ IPM（`raspi/nav/ipm.py`）のテスト。
 
 **実機もモデルも要らない。** 合成した地面の点をピンホールモデルで画素へ順投影し
-（`ground_to_pixel`）、それを画像とみなして `project_mask_to_grid` で逆投影し、
+（`ground_to_pixel`）、`pixel_to_ground` で逆投影し、
 元の地面座標に戻ることを確認する（`test_nav.py` の「合成部屋から答え合わせする」
 流儀と同じ）。
 """
@@ -10,12 +10,8 @@ import math
 import unittest
 
 
-import numpy as np
-
-from raspi.nav.grid import OccGrid
 from raspi.nav.ipm import (CameraExtrinsics, camera_intrinsics,
-                          ground_to_pixel, pixel_to_ground,
-                          project_mask_to_grid, project_seen_to_grid)
+                          ground_to_pixel, pixel_to_ground)
 
 
 class TestRoundTrip(unittest.TestCase):
@@ -64,103 +60,3 @@ class TestRoundTrip(unittest.TestCase):
         ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
         # principal_y より上（v が小さい）＝ 光軸より上方向
         self.assertIsNone(pixel_to_ground(intr.cx, intr.principal_y - 5, intr, ext))
-
-
-class TestProjectMaskToGrid(unittest.TestCase):
-    """合成した「壁」領域が画素→占有格子の投影で復元されること。"""
-
-    def test_wall_rectangle_recovered(self):
-        width, height = 480, 360
-        intr = camera_intrinsics(1.152, width, height, bottom_crop=0.25)
-        ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
-
-        # 地面上の「壁」矩形（車両前方 1.0〜1.1m、左右 ±0.3m）
-        x0, x1 = 1.0, 1.1
-        y0, y1 = -0.3, 0.3
-
-        drivable = np.ones((height, width), dtype=bool)
-        n = 60
-        for xi in np.linspace(x0, x1, n):
-            for yi in np.linspace(y0, y1, n):
-                px = ground_to_pixel(float(xi), float(yi), intr, ext)
-                if px is None:
-                    continue
-                u, v = int(round(px[0])), int(round(px[1]))
-                if 0 <= u < width and 0 <= v < height:
-                    drivable[v, u] = False          # 走行不可（壁）として焼き込む
-
-        grid = OccGrid(resolution=0.05, size_m=6.0, origin=(-1.0, -3.0))
-        occ = project_mask_to_grid(drivable, intr, ext, grid, stride=1)
-
-        # 期待される占有セル（矩形の中心と四隅が属するセル）
-        expect_cells = set()
-        for xi in np.linspace(x0, x1, 10):
-            for yi in np.linspace(y0, y1, 10):
-                col, row = grid.to_cell(float(xi), float(yi))
-                expect_cells.add((int(row), int(col)))
-
-        hit = sum(1 for r, c in expect_cells if occ[r, c])
-        self.assertGreater(hit / len(expect_cells), 0.5,
-                           "壁矩形の大半が占有セルとして復元されていない")
-
-        # 矩形から離れた場所（例えば x=3m 付近）は誤って占有にならない
-        far_col, far_row = grid.to_cell(3.0, 0.0)
-        self.assertFalse(bool(occ[far_row, far_col]),
-                         "壁が無い遠方セルが誤って占有になった")
-
-    def test_no_solid_mask_yields_empty_grid(self):
-        """全画素が走行可能なら、投影結果は空（占有セル無し）。"""
-        width, height = 64, 48
-        intr = camera_intrinsics(1.152, width, height, bottom_crop=0.25)
-        ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
-        grid = OccGrid(resolution=0.05, size_m=4.0, origin=(-1.0, -2.0))
-        occ = project_mask_to_grid(np.ones((height, width), dtype=bool), intr, ext, grid)
-        self.assertEqual(int(occ.sum()), 0)
-
-
-class TestProjectSeenToGrid(unittest.TestCase):
-    """`raspi/nav/drivable_path.py` の `blocked = (~seen) | occ` が前提にする
-    「カメラの視野内だけが `seen=True` になる」ことを確認する。"""
-
-    def test_visible_ground_point_is_seen_far_lateral_point_is_not(self):
-        width, height = 480, 360
-        intr = camera_intrinsics(1.152, width, height, bottom_crop=0.25)
-        ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
-        grid = OccGrid(resolution=0.05, size_m=6.0, origin=(-1.0, -3.0))
-
-        seen = project_seen_to_grid((height, width), intr, ext, grid, stride=1)
-
-        near_col, near_row = grid.to_cell(1.0, 0.0)
-        self.assertTrue(bool(seen[near_row, near_col]),
-                        "画角内のはずの前方の点が観測済みになっていない")
-
-        # 大きく横に外れた点は画角外（`ground_to_pixel` が None を返す）になるはず
-        far_col, far_row = grid.to_cell(1.0, 2.5)
-        self.assertFalse(bool(seen[far_row, far_col]),
-                         "画角外のはずの点が観測済みになった")
-
-    def test_occupied_cells_are_always_a_subset_of_seen_cells(self):
-        """`project_mask_to_grid` と同じ画素座標をサンプルしているので、走行不可
-        セル（`occ`）は必ず `seen` にも含まれる（`blocked` 合成の前提）。"""
-        width, height = 480, 360
-        intr = camera_intrinsics(1.152, width, height, bottom_crop=0.25)
-        ext = CameraExtrinsics(x=0.0, y=0.0, height=0.09, pitch=0.0, yaw=0.0)
-        # principal_y = height/(2*(1-0.25)) = 240。それより下（v>240）が地面に
-        # 交わる範囲なので、壁のブロックはそこに置くこと（上に置くと「空」扱いで
-        # 何も投影されず、このテストの前提が成り立たない）
-        drivable = np.ones((height, width), dtype=bool)
-        drivable[260:280, 200:220] = False   # 壁として焼き込む
-        grid = OccGrid(resolution=0.05, size_m=6.0, origin=(-1.0, -3.0))
-
-        occ = project_mask_to_grid(drivable, intr, ext, grid, stride=2)
-        seen = project_seen_to_grid((height, width), intr, ext, grid, stride=2)
-
-        occupied_cells = np.argwhere(occ)
-        self.assertGreater(len(occupied_cells), 0)
-        for row, col in occupied_cells:
-            self.assertTrue(bool(seen[row, col]),
-                            "occで占有と判定されたセルがseenでは未観測になっている")
-
-
-if __name__ == "__main__":
-    unittest.main()

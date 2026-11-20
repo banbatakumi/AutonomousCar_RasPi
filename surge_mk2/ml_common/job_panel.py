@@ -1,4 +1,4 @@
-"""学習 GUI のジョブ実行・ログ・停止・備考・モデル名の変更の共通部分（`ml_cam`・`ml_cam_e2e`・`ml_e2e`・`ml_lidar`
+"""学習 GUI のジョブ実行・ログ・停止・備考・モデル名の変更の共通部分（`ml_cam_e2e`・`ml_e2e`・`ml_lidar`
 の `app.py`）。
 
 4つの `App` が `_run`・`_on_job_done`・`_stop`・`_drain_log`・`_save_note`・`_on_model_name_changed` をほぼ同じ文で
@@ -47,7 +47,7 @@ _DRAIN_MS = 100
 class JobPanelBase:
     """ジョブ実行・ログ・停止・備考・モデル名の変更。
 
-    `allow_concurrent=False`（既定。`ml_cam` 系・`ml_e2e`）は「同時に1つだけ」で、下の帯の `status_label`・
+    `allow_concurrent=False`（既定。`ml_cam_e2e`・`ml_e2e`）は「同時に1つだけ」で、下の帯の `status_label`・
     `stop_btn` を使う。`True`（`ml_lidar`）は学習中も観戦・エクスポートを並行でき、停止は各 `App` がジョブ一覧から
     選んで行う（`_on_jobs_changed` で一覧を作り直す）。
     """

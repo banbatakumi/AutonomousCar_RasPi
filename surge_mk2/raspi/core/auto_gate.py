@@ -1,7 +1,7 @@
-"""カメラ系知覚ノード（cam_perception / cam_e2e / line_perception）の
+"""カメラ系の推論ノード（cam_e2e / line_perception / e2e_fusion など）の
 ACTIVE/IDLE 判定（省電力ゲート）を1箇所に集約する。
 
-3ノードとも「`auto/ctrl`（`AutoCtrl.mode`）が該当モードで選ばれている間だけ推論する」
+どのノードも「`auto/ctrl`（`AutoCtrl.mode`）が該当モードで選ばれている間だけ推論する」
 という同じ設計を持つが、これは `VehicleState.armed` を一切見ないため、DISARM中
 （駐車中の待機）でもモードが選ばれているだけで CNN 推論が回り続ける省電力上のバグに
 なっていた。**DISARM中のみ推論を止める。ARM中は engage の有無に関わらず現状維持**
@@ -10,7 +10,7 @@ ACTIVE/IDLE 判定（省電力ゲート）を1箇所に集約する。
 
 `telemetry_node._vehicle_armed()` と同じ規約：`VehicleState` 未受信（`vs is None`）は
 「わからない」を安全側＝ARM相当として扱う（起動直後の一瞬だけ推論が止まって見える
-回帰を避けるため）。3ノードに同じロジックを複製すると、この規約が将来ノードごとに
+回帰を避けるため）。各ノードに同じロジックを複製すると、この規約が将来ノードごとに
 食い違う恐れがあるのでここに集約する。
 """
 

@@ -7,8 +7,6 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
   AutoStatus,
-  CamModelFile,
-  CamModelStatus,
   CameraConfigStatus,
   ControlStatus,
   CamE2EModelFile,
@@ -259,15 +257,6 @@ type UiState = {
   signalConfig: SignalConfigStatus | null
 
   /**
-   * cam_perception_node が使うセグメンテーションモデルの選択。
-   * **サーバが真値なのでここでは編集しない。** 押した結果は `status` の
-   * ブロードキャストで返ってくる（`ws/control.ts` の `camModelSelect`）。
-   */
-  camModel: CamModelStatus | null
-  /** `models/` にある `.onnx` の一覧（`camModelList` の応答） */
-  camModelFiles: CamModelFile[]
-
-  /**
    * e2e_lidar（強化学習）が使うモデルの選択。**サーバが真値なのでここでは編集しない。**
    * 押した結果は `status` のブロードキャストで返ってくる（`ws/control.ts` の
    * `e2eModelSelect`）。
@@ -384,8 +373,6 @@ export const useUi = create<UiState>()(
       fan: null,
       cameraConfig: null,
       signalConfig: null,
-      camModel: null,
-      camModelFiles: [],
       e2eModel: null,
       e2eModelFiles: [],
       camE2eModel: null,

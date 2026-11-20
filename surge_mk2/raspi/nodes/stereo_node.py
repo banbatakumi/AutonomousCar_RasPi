@@ -3,7 +3,7 @@
     .venv/bin/python -m raspi.nodes.stereo_node
     .venv/bin/python -m raspi.nodes.stereo_node --algo sgbm --scale 0.5 --rate-hz 10
 
-計画は `docs/stereo_plan.md` 段階4。作りは `cam_perception_node.py` と同じ（共有メモリを読み、
+計画は `docs/stereo_plan.md` 段階4。作りは `cam_e2e_node.py` と同じ（共有メモリを読み、
 IDLE/ACTIVE で省電力、`hb/stereo`）。
 
 ## 出力

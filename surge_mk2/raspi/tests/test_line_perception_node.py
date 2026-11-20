@@ -3,7 +3,7 @@
 **実カメラは要らない。** 合成フレーム（白い帯を描いただけの画像）で、
 色しきい値→帯の重心→IPM逆投影→`LineScan`化という配管が壊れずに流れることと、
 白線の位置が動けば目標点の左右も動くことを確認する
-（`test_cam_perception_node.py` と同じ「配管のテスト」の流儀）。
+（認識の精度ではなく配管を見る「配管のテスト」の流儀）。
 """
 
 import time
@@ -219,7 +219,7 @@ class TestModeGating(unittest.TestCase):
 
     `line_perception_node` は常時起動（`surge-line-perception`）が前提になった
     ため、`line_trace` が選ばれていない間はフレームを読みすらしないことを
-    ここで保証する（`cam_perception_node.py` の IDLE と同じ考え方）。
+    ここで保証する（`cam_e2e_node.py` の IDLE と同じ考え方）。
     """
 
     def _ref_with_frame(self, ring_name: str):
@@ -237,7 +237,7 @@ class TestModeGating(unittest.TestCase):
         node = LinePerceptionNode(vehicle=Vehicle.load())
         ring, ref = self._ref_with_frame("surge_test_line_gating_idle")
         try:
-            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg_cam")})
+            sub = FakeSub({TOPIC_IMAGE_FRONT: ref, TOPIC_AUTO_CTRL: AutoCtrl(mode="ftg")})
             pub = FakePub()
             node.run(sub=sub, pub=pub, duration_s=0.02)
 

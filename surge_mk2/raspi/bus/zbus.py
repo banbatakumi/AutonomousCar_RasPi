@@ -82,7 +82,7 @@ _DEFAULT_DIR = "/tmp/surge-bus"
 #: ノードごとに1本の endpoint を bind する。**トピックごとではない。**
 #: PUB を1プロセス1本にしておくと、購読側は接続先が固定されて配線が単純になる
 _NODE_TCP_PORT = {"io": 5570, "camera": 5571, "control": 5572, "planning": 5573,
-                  "cam_perception": 5574, "line_perception": 5575, "cam_track": 5576,
+                  "line_perception": 5575, "cam_track": 5576,
                   "cam_e2e": 5577, "signal": 5578, "test": 5579,
                   "e2e_fusion": 5580, "stereo": 5581, "stereo_e2e": 5582}
 #: `hb/` を publish する（＝心拍を見る）ノード。上の表から作る（2か所に書くと片方に足し忘れる）。`test` は試験用
@@ -98,9 +98,8 @@ _HB_NODES = tuple(n for n in _NODE_TCP_PORT if n != "test")
 #:
 #: ★ **完全一致で先に引けるキーを持たせること。** 前方一致フォールバック
 #: （`endpoints_for_topic()` 参照）は辞書の並び順に依存する上、
-#: `"scan/cam"` が `"scan"` の前方一致に誤って拾われ `cam_perception` ではなく
-#: `io` に解決される、という事故が実際に起きた（`scan/cam` が
-#: 常に空のまま `ftg_cam` が動かなかった）。新しいトピックを足すときは、
+#: `"scan/cam"`（削除済みのセグメンテーション用）が `"scan"` の前方一致に誤って拾われ
+#: `io` に解決される、という事故が実際に起きた（購読が常に空のまま走行モードが動かなかった）。新しいトピックを足すときは、
 #: 既存キーの前方一致に誤って拾われないか必ず確認すること
 TOPIC_OWNER: dict[str, str] = {
     "vehicle_state": "io",
@@ -111,7 +110,6 @@ TOPIC_OWNER: dict[str, str] = {
     "auto/ctrl": "control",
     "ui/event": "control",
     "cam/config": "control",
-    "cam/model": "control",
     "e2e/model": "control",
     "cam_e2e/model": "control",
     "e2e_fusion/model": "control",
@@ -123,9 +121,6 @@ TOPIC_OWNER: dict[str, str] = {
     "image/": "camera",
     "image/front": "camera",
     "image/left": "camera",
-    "scan/cam": "cam_perception",
-    "cam/mask": "cam_perception",
-    "path/cam": "cam_perception",
     "line/cam": "line_perception",
     "track/target": "cam_track",
     #: 経路グループの切替要求。**信号認識ノード（`arrow_signal_node.py`）の名前を

@@ -13,21 +13,20 @@
     ⑥ 評価        モデルの予測を手本と並べ、誤差の大きい場面を見る
 
 ①④⑤⑥の重い処理は `extract_pairs.py`・`train.py`・`export_onnx.py`・
-`eval_model.py` をサブプロセスとして呼び出すだけ（`ml_cam/app.py` と同じ設計方針。
-このプロセスは torch を import しない）。②③⑥の表示は `review_tab.py`・
+`eval_model.py` をサブプロセスとして呼び出すだけ（このプロセスは torch を import しない）。②③⑥の表示は `review_tab.py`・
 `balance_tab.py`・`eval_tab.py` に分けてあり、どれを学習に使うかの判断は
 `samples.py`（学習スクリプトと共有）に任せる。
 
 ログ表示・サブプロセス実行基盤（ジョブの実行・停止・備考は `ml_common/job_panel.JobPanelBase`）・
-run名管理・note.txt・学習曲線グラフ・ウィンドウクローズ処理は `ml_cam/app.py`・`ml_lidar/app.py` と
+run名管理・note.txt・学習曲線グラフ・ウィンドウクローズ処理は `ml_lidar/app.py` と
 共通実装のため `ml_common/` に切り出してある。
 
-## セグメンテーション（`ml_cam/app.py`）と違い、アノテーションタブが無い
+## アノテーションタブが無い
 
 教師データは録画に既に入っている人間の操作そのもの——ラベル付け作業が
 丸ごと不要。その代わり「悪い手本を外す」作業（②）が品質を決める。
 
-## モデル名がそのままフレーム・学習出力先を兼ねる（`ml_cam/app.py`と同じ考え方）
+## モデル名がそのままフレーム・学習出力先を兼ねる
 
     ml_cam_e2e/runs/<モデル名>/frames/            … ①の出力・②③④⑥の入力
     ml_cam_e2e/runs/<モデル名>/frames/exclusions.json … ②で付けた除外
@@ -73,8 +72,7 @@ __all__ = [
 ]
 
 RUNS_DIR = ML_CAM_E2E_DIR / "runs"
-#: 実車側（`cam_e2e_node.py` の `DEFAULT_MODELS_DIR`）と同じ場所。セグメンテーション用
-#: （`models/seg/`）と混ざらないよう分けてある
+#: 実車側（`cam_e2e_node.py` の `DEFAULT_MODELS_DIR`）と同じ場所
 MODELS_DIR = REPO_ROOT / "models" / "cam_e2e"
 #: 閉じるときに確認するジョブ（学習だけ。`ml_common/job_panel.py`）
 _CONFIRM_STOP_JOB_KEYS = CONFIRM_STOP_JOB_KEYS

@@ -12,7 +12,6 @@
 import type {
   CamE2EModelFile,
   E2EFusionModelFile,
-  CamModelFile,
   CmdOut,
   ControlStatus,
   E2EModelFile,
@@ -44,8 +43,6 @@ export type ControlHandlers = {
   onRtt: (ms: number | null) => void
   /** `logs_list`/`logs_delete` への応答 */
   onLogs: (files: LogFile[]) => void
-  /** `cam_model_list` への応答（`models/` にある `.onnx` の一覧） */
-  onCamModels: (files: CamModelFile[]) => void
   /** `e2e_model_list` への応答（`models/e2e_lidar/` にある `.onnx` の一覧） */
   onE2EModels: (files: E2EModelFile[]) => void
   /** `cam_e2e_model_list` への応答（`models/cam_e2e/` にある `.onnx` の一覧） */
@@ -123,7 +120,6 @@ export class ControlChannel {
       else console.warn('control WS: 必須の項目が欠けた status を捨てた', m)
     } else if (m.type === 'control_denied') this.h.onDenied(m.holder ?? '', m.reason)
     else if (m.type === 'logs') this.h.onLogs(m.files ?? [])
-    else if (m.type === 'cam_models') this.h.onCamModels(m.cam_model_files ?? [])
     else if (m.type === 'e2e_models') this.h.onE2EModels(m.e2e_model_files ?? [])
     else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
     else if (m.type === 'e2e_fusion_models') this.h.onE2EFusionModels(m.e2e_fusion_model_files ?? [])
@@ -440,7 +436,7 @@ export class ControlChannel {
    * ARM中/DISARM中で別々の値を持つ。
    *
    * `frontFpsArmed` は目安の上限にすぎない——カメラを使う自動運転モード
-   * （`line_trace`/`ftg_cam`）が engage されている間は、サーバ側がこれを無視して
+   * （`line_trace` など）が engage されている間は、サーバ側がこれを無視して
    * 上限まで引き上げる（`status.camera_config.auto_override` で分かる）。
    * `guiHz` はブラウザへ送るJPEGの頻度で、ARM状態と無関係（Wi-Fi帯域が理由）。
    */
@@ -493,27 +489,8 @@ export class ControlChannel {
     })
   }
 
-  // ── カメラセグメンテーションモデルの選択（`ftg_cam` 用） ──
-
-  /** `models/` にある `.onnx` の一覧を要求する。応答は `onCamModels`。
-   * `logsList` と同じく、開いた/更新ボタンを押したタイミングで呼べばよい */
-  camModelList() {
-    this.send({ type: 'cam_model_list' })
-  }
-
-  /**
-   * `cam_perception_node` が使うモデルを選ぶ。空文字で「未選択」に戻せる。
-   * `fan`/`camera` と同じく状態はサーバが真値。
-   *
-   * ⚠ **`ftg_cam` を engage 中に選び直すと engage は必ず落ちる**
-   * （サーバ側の約束。`setAuto` のモード変更と同じ形）。
-   */
-  camModelSelect(name: string) {
-    this.send({ type: 'cam_model_select', name })
-  }
-
   // ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──
-  // `camModelList`/`camModelSelect` と全く同じ形。
+  // 各モデル種別の一覧・選択は同じ形。
 
   /** `models/e2e_lidar/` にある `.onnx` の一覧を要求する。応答は `onE2EModels`。 */
   e2eModelList() {
@@ -524,14 +501,14 @@ export class ControlChannel {
    * `e2e_lidar`（強化学習）が使うモデルを選ぶ。空文字で「未選択」に戻せる。
    *
    * ⚠ **`e2e_lidar` を engage 中に選び直すと engage は必ず落ちる**
-   * （サーバ側の約束。`camModelSelect` と同じ形）。
+   * （サーバ側の約束。`setAuto` のモード変更と同じ形）。
    */
   e2eModelSelect(name: string) {
     this.send({ type: 'e2e_model_select', name })
   }
 
   // ── カメラE2E モデルの選択（`cam_e2e` 用） ──
-  // `camModelList`/`camModelSelect` と全く同じ形。
+  // `e2eModelList`/`e2eModelSelect` と全く同じ形。
 
   /** `models/cam_e2e/` にある `.onnx` の一覧を要求する。応答は `onCamE2EModels`。 */
   camE2eModelList() {
@@ -542,7 +519,7 @@ export class ControlChannel {
    * `cam_e2e`（カメラE2E・模倣学習）が使うモデルを選ぶ。空文字で「未選択」に戻せる。
    *
    * ⚠ **`cam_e2e` を engage 中に選び直すと engage は必ず落ちる**
-   * （サーバ側の約束。`camModelSelect` と同じ形）。
+   * （サーバ側の約束。`setAuto` のモード変更と同じ形）。
    */
   camE2eModelSelect(name: string) {
     this.send({ type: 'cam_e2e_model_select', name })
@@ -583,7 +560,7 @@ export class ControlChannel {
    * （左上原点、0〜1）。`fan`/`camera` と同じく状態はサーバが真値。
    *
    * ⚠ **選び直すと `follow_object` の engage は必ず落ちる**
-   * （サーバ側の約束。`camModelSelect` のモデル変更と同じ形）。
+   * （サーバ側の約束。`setAuto` のモード変更と同じ形）。
    */
   setTrackRoi(box: { x0: number; y0: number; x1: number; y1: number }) {
     this.send({ type: 'track_roi_select', ...box })

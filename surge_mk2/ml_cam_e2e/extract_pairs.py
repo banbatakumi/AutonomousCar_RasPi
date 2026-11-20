@@ -11,7 +11,7 @@
 `/vehicle_state` の実速度も一緒に書く（学習時に「止まったままの待機」を
 見分けるため。`samples.py` 参照）。
 
-## セグメンテーション（`ml_cam/`）と違い、手作業のアノテーションが要らない
+## 手作業のアノテーションが要らない
 
 ラベルは人間がその瞬間に実際に出していた指令そのもの。**その代わり、
 質の悪いペアを機械的に弾く責任がここに集まる**:
@@ -82,7 +82,7 @@ __all__ = ["VIZ_IMAGE_PREFIX", "CMD_MCAP_TOPIC", "STATE_MCAP_TOPIC", "MODE_MANUA
            "iter_valid_pairs", "count_valid_pairs", "extract_one", "check_manifest_header",
            "DEFAULT_LABEL_SHIFT_MS"]
 
-#: `raspi/rec/mcap_log.py` の `VIZ_IMAGE_PREFIX` と同じ値（`ml_cam/extract_frames.py` 参照）
+#: `raspi/rec/mcap_log.py` の `VIZ_IMAGE_PREFIX` と同じ値
 VIZ_IMAGE_PREFIX = "/viz/image/"
 #: `raspi/rec/mcap_log.py` の `_mcap_topic()`（バスのトピック名の先頭に `/` を付けるだけ）
 #: と同じ変換を `TOPIC_CMD`（`raspi/msgs/types.py`）に適用したもの。
@@ -239,7 +239,7 @@ def extract_one(mcap_path: Path, out_dir: Path, writer: csv.writer, *,
     """1つの `.mcap` からペアを書き出す。`(書いた枚数, 更新後の acc_by_cam)` を返す。
 
     間引きの2方式（誤差蓄積法 `keep_ratio` / 時間間隔 `min_interval_ns`）は
-    `ml_cam/extract_frames.py` の `extract_one()` と同じ実装・同じ選び方
+    同じ実装・同じ選び方
     （`keep_ratio < 1.0` の方が優先）。ここでは**フィルタ後の有効なペアだけ**を
     間引きの対象にする——除外されるフレームまで数えると、目標枚数
     （`--target-count`）からのズレが大きくなる。

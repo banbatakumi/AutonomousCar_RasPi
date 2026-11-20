@@ -138,8 +138,8 @@ class TestModelSlots(unittest.TestCase):
         """一覧を出す場所・保存先と、ノードが読みに行く場所が同じであること。"""
         from raspi.auto import e2e_lidar
         from raspi.bus.zbus import TOPIC_OWNER
-        from raspi.nodes import cam_e2e_node, cam_perception_node, e2e_fusion_node, stereo_e2e_node
-        dirs = {"cam_model": cam_perception_node.DEFAULT_MODELS_DIR, "e2e_model": e2e_lidar.DEFAULT_MODELS_DIR,
+        from raspi.nodes import cam_e2e_node, e2e_fusion_node, stereo_e2e_node
+        dirs = {"e2e_model": e2e_lidar.DEFAULT_MODELS_DIR,
                 "cam_e2e_model": cam_e2e_node.DEFAULT_MODELS_DIR,
                 "e2e_fusion_model": e2e_fusion_node.DEFAULT_MODELS_DIR,
                 "stereo_e2e_model": stereo_e2e_node.DEFAULT_MODELS_DIR}
@@ -423,7 +423,7 @@ def _fake_cam_server(*, armed: bool | None, auto_engaged: bool = False, auto_mod
         sub=SimpleNamespace(latest=latest),
         _auto_engaged=auto_engaged, _auto_mode=auto_mode,
         _cam_front_fps_armed=30.0, _cam_front_fps_disarm=10.0,
-        camera_clients={"front": set(), "left": set(), "mask": set(), "depth": set()},
+        camera_clients={"front": set(), "left": set(), "depth": set()},
         _recorder=idle_recorder(), _logger_running=False)
     fake._vehicle_armed = lambda: tn.TelemetryServer._vehicle_armed(fake)
     fake._cam_in_use_while_disarmed = \
@@ -480,7 +480,7 @@ class TestServeSnapshot(unittest.TestCase):
         self.assertEqual(resp.status_code, 404)
 
     def test_unknown_camera_is_404(self):
-        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/mask.png")
+        resp = tn.TelemetryServer._serve_snapshot(self.fake, "/snapshot/depth.png")
         self.assertEqual(resp.status_code, 404)
 
     def test_no_camera_is_503(self):
@@ -750,19 +750,19 @@ class TestDesiredFrontEnabled(unittest.TestCase):
         self.assertFalse(self._front(fake))
 
 
-class TestCameraPumpMaskClient(unittest.IsolatedAsyncioTestCase):
-    """`_camera_pump`（実機で発覚: `/ws/camera/mask`にクライアントが1人でも繋がると
-    `topics`（カメラの役割しか無い）を`camera_clients`（カメラ＋maskの3種）で
+class TestCameraPumpRelayedClient(unittest.IsolatedAsyncioTestCase):
+    """`_camera_pump`（実機で発覚: `/ws/camera/depth`にクライアントが1人でも繋がると
+    `topics`（カメラの役割しか無い）を`camera_clients`（カメラ＋depthの3種）で
     引いて`KeyError`になり、タスクごと死んでカメラの配信まで巻き添えで
     止まっていた。2026-09-03、実機での「前後とも映像が見れない」報告から特定）。
     """
 
-    async def test_mask_client_does_not_crash_the_pump(self):
+    async def test_relayed_client_does_not_crash_the_pump(self):
         fake = SimpleNamespace(
             _running=True,
             _jpeg=object(),         # `is None`判定を通過させるだけのダミー
             camera_hz=1000.0,       # 待たずに何周かループを回す
-            camera_clients={"front": set(), "left": set(), "mask": {object()}},
+            camera_clients={"front": set(), "left": set(), "depth": {object()}},
             sub=SimpleNamespace(latest={}),
             _cam_wake=asyncio.Event(),
         )
@@ -789,7 +789,7 @@ class TestCameraPumpOnArrival(unittest.IsolatedAsyncioTestCase):
 
         fake = SimpleNamespace(
             _running=True, _jpeg=object(), camera_hz=hz,
-            camera_clients={"front": {object()}, "left": set(), "mask": set()},
+            camera_clients={"front": {object()}, "left": set(), "depth": set()},
             sub=SimpleNamespace(latest={}), _cam_wake=asyncio.Event(),
             _encode_frame=lambda ref, cam="": b"jpg%d" % ref.ring_seq,
             _send_or_drop=send_or_drop)

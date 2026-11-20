@@ -1,7 +1,6 @@
 """ml_cam_e2e/model.py — 画像から操舵と速度（正規化値）を直接回帰する軽量モデル。
 
-`ml_cam/model.py` の `DrivableSegModel` と同じ MobileNetV3-Small エンコーダを
-再利用し、デコーダ（セグメンテーション用のアップサンプル列）の代わりに
+MobileNetV3-Small エンコーダの上に、
 グローバル平均プーリング→全結合の回帰ヘッドを載せる。**幾何変換（IPM）を
 一切経由しない**——これがこのモデルの存在理由そのもの（低いカメラ高さで
 IPMの深度誤差が拡大する問題を、画像から直接操作を学習することで迂回する）。
@@ -36,7 +35,7 @@ class DriveRegressionModel(nn.Module):
     """操舵（正規化 -1..1）と速度（正規化 0..1）の回帰。
 
     :param pretrained: ImageNet 事前学習重みを使うか。**オフライン環境や
-        テストでは `False` にする**（`ml_cam/model.py` と同じ理由）
+        テストでは `False` にする**（ネットワークから重みを取りに行かないため）
     :param hidden_dim: プーリング後の全結合の中間層幅
     """
 
@@ -56,7 +55,7 @@ class DriveRegressionModel(nn.Module):
             if isinstance(m, nn.BatchNorm2d):
                 m.momentum = _BN_MOMENTUM
 
-        # `ml_cam/model.py` と同じ理由——エンコーダの出力チャネル数は
+        # エンコーダの出力チャネル数は
         # torchvision のバージョンで内部構成が変わりうるのでハードコードしない
         with torch.no_grad():
             probe = self.encoder(torch.zeros(1, 3, 64, 64))

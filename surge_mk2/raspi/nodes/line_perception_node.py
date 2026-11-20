@@ -8,11 +8,8 @@
 `raspi.nav.ipm.pixel_to_ground()` で地面座標へ逆投影した2点を `LineScan`
 （`raspi/msgs/types.py`）として `line/cam` へ publish する。
 
-`cam_perception_node.py`（走行可能／不可能セグメンテーション）とは別モジュール
-にしてあるのは、**ここは学習済みモデルを一切要らない**ため——白線は「明るく
-無彩色」という単純な色特徴で足り、ONNX 推論のコストも学習データも不要。
-走行可能領域そのものを知りたい場合（未舗装路の縁・低い障害物など）は引き続き
-`cam_perception_node.py` を使う。
+**学習済みモデルは一切要らない**——白線は「明るく無彩色」という単純な色特徴で足り、
+ONNX 推論のコストも学習データも不要。
 
 ## 契約: 見失ったら `near_seen`/`far_seen` を両方 False にする
 
@@ -45,10 +42,10 @@
 
 プロセスとしては常時起動（`surge-line-perception`）だが、`white_mask()` は
 フレームが来るたびに毎回回るので上げっぱなしだと CPU・電力を無駄に消費する。
-`cam_perception_node.py`（`auto/ctrl` の `mode` がカメラ系モードの間だけ推論する）
+`cam_e2e_node.py`（`auto/ctrl` の `mode` がカメラ系モードの間だけ推論する）
 と同じ考え方で、`mode == "line_trace"` で、**かつ DISARM中（駐車中）でない**間だけ
 実際にフレームを読んで判定する（`raspi/core/auto_gate.cam_infer_active()` に集約、
-`cam_perception_node.py`・`cam_e2e_node.py` と共通）。DISARM中はモードが選ばれて
+`cam_e2e_node.py` と共通）。DISARM中はモードが選ばれて
 いるだけでは判定しない。非アクティブの間は
 `failed_frame()`（見失った扱い）を出すだけで、共有メモリの読み取りすらしない。
 """
@@ -104,8 +101,7 @@ def white_mask(frame: np.ndarray, *, min_brightness: int = 170,
 
     HSV へ変換せず、RGB の最小値（明るさの下限）と最大−最小（彩度の近似）
     だけで判定する。白線は「明るく・色が付いていない」の2条件で十分に分離
-    でき、`cv2` 依存を増やさずに済む（`cam_perception_node.py` の
-    `_resize_nearest` と同じ理由——依存を増やす前にこれで足りるか確かめる）。
+    でき、`cv2` 依存を増やさずに済む（依存を増やす前にこれで足りるか確かめる）。
 
     :param min_brightness: RGB各chの最小値がこれ未満なら白ではない
     :param max_chroma: RGBの最大−最小がこれを超えたら色が付いている＝白ではない
@@ -174,7 +170,7 @@ class LinePerceptionNode:
 
     **`process_frame()` はバス・共有メモリを一切知らない純粋関数。**
     `run()`（実バス配線）とテストの両方がここを通る——
-    `cam_perception_node.CamPerceptionNode` と同じ理由（配線とアルゴリズムを
+    配線とアルゴリズムを
     分けておくと、片方だけをテストで踏める）。
     """
 
@@ -245,8 +241,7 @@ class LinePerceptionNode:
                       t_capture_ns: int = 0, seq: int = 0) -> LineScan:
         """1枚のフレーム → `LineScan`。
 
-        IMU が有効なら `pitch` を実測ぶん補正する（`cam_perception_node.py`
-        と同じ式・同じ理由——車体の加減速でピッチが動くと、地平線付近の
+        IMU が有効なら `pitch` を実測ぶん補正する（車体の加減速でピッチが動くと、地平線付近の
         投影誤差が発散するため）。
         """
         mask = white_mask(frame, min_brightness=self.min_brightness,

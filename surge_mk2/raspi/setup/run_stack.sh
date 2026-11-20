@@ -6,7 +6,7 @@
 #   unit が再起動したノードと二重になった場合は、バスの endpoint の排他（`raspi/bus/zbus.py`）で
 #   後から来た方が起動を拒否される。cam_track・cam_e2e・line_perception はここからは上がらない。
 #
-#   ./raspi/setup/run_stack.sh start          # io + camera + telemetry + planning + cam_perception + logger
+#   ./raspi/setup/run_stack.sh start          # io + camera + telemetry + planning + logger
 #   ./raspi/setup/run_stack.sh start --heartbeat   # ★ GPIO6 ハートビートも出す
 #   ./raspi/setup/run_stack.sh start --no-logger   # MCAP 記録を止める（ディスク節約）
 #   ./raspi/setup/run_stack.sh status
@@ -69,9 +69,6 @@ case "${1:-status}" in
     start_one telemetry raspi.nodes.telemetry_node --host 0.0.0.0
     # 自動運転。**上げただけでは何も起きない**（engage は GUI から人間が行う）
     start_one planning raspi.nodes.planning_node --quiet
-    # ftg_cam 用セグメンテーション推論。auto/ctrl の mode!=ftg_cam の間は
-    # IDLE で推論を回さない（`cam_perception_node.py` 参照）ので常時上げてよい
-    start_one cam_perception raspi.nodes.cam_perception_node
     # ロガーは最後。**カメラより後に上げる**と、記録の先頭から画像が入る
     [ "$LOGGER" = 1 ] && start_one logger raspi.nodes.logger_node --quiet
     sleep 3
@@ -86,7 +83,7 @@ case "${1:-status}" in
     echo "=== 稼働中 ==="
     pgrep -af "$PATTERN" | sed 's#.*/python -m ##' || echo "  （無し）"
     echo
-    for f in io camera telemetry planning cam_perception logger; do
+    for f in io camera telemetry planning logger; do
       [ -f "$LOGS/$f.out" ] || continue
       echo "=== $f ==="
       grep -v '^$' "$LOGS/$f.out" | tail -6
@@ -96,7 +93,7 @@ case "${1:-status}" in
 
   logs)
     tail -n 40 -F "$LOGS"/io.out "$LOGS"/camera.out "$LOGS"/telemetry.out \
-         "$LOGS"/planning.out "$LOGS"/cam_perception.out "$LOGS"/logger.out
+         "$LOGS"/planning.out "$LOGS"/logger.out
     ;;
 
   *)

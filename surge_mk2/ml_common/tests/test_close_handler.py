@@ -3,7 +3,7 @@
 
 `confirm_and_close` がウィンドウに対して呼ぶのは `destroy()` だけなので、root も
 `MagicMock` で足りる（Tk を起動しない＝ディスプレイの無い CI でも回る）。
-`ml_cam`・`ml_cam_e2e` のアプリ側のテストは、ここに無いアプリ固有の
+`ml_cam_e2e` のアプリ側のテストは、ここに無いアプリ固有の
 `_CONFIRM_STOP_JOB_KEYS` との配線だけを見る。
 """
 

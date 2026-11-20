@@ -2,8 +2,7 @@
 
 `ml_cam_e2e/train.py`（教師あり学習、人間の運転ログから操舵を回帰）で
 学習したモデルを `raspi/nodes/cam_e2e_node.py` が推論し、その結果
-（`CamE2ECmd`）を読むだけの薄い Planner。`cam_centerline.py`/`ftg_cam` が
-セグメンテーション＋IPM（幾何変換）で回廊を作るのに対し、**ここは幾何変換を
+（`CamE2ECmd`）を読むだけの薄い Planner。**ここは幾何変換を
 一切経由しない**——低いカメラ高さでIPMの深度誤差が拡大する問題（実車で
 「奥行きを掴むのが難しい」と分かった件）を、画像から操作を直接学習する
 ことで迂回するのがこの Planner の存在理由（`docs/development.md` §12.3）。
@@ -11,7 +10,7 @@
 ## カメラだけで走る。速度は舵から決める
 
 LiDAR は見ない。速度はモデルが出した舵角の曲率 `κ=tan(δ)/L` から
-`v ≤ sqrt(a_lat_max/κ)` で決める（`cam_centerline.py`/`follow_the_gap.py` と
+`v ≤ sqrt(a_lat_max/κ)` で決める（`follow_the_gap.py` と
 同じ式）。直線では `max_speed`、舵を切るほど遅くなる。
 
 速度を人の運転から学ばない理由: 手本は舵に集中してゆっくり走った方が質が上がり、
@@ -50,7 +49,7 @@ class CamE2E(Planner):
 
     #: `cam_e2e_node.py` が publish する推論結果を使う
     input_topic = TOPIC_CAM_E2E_CMD
-    #: カメラ側の推論ケイデンスに余裕を持たせる（`cam_centerline.py` と同じ理由）
+    #: カメラ側の推論ケイデンスに余裕を持たせる（`e2e_lidar.py` と同じ理由）
     stale_ms = 500
     #: 地図もギャップ探索も距離も持たないので判断欄に出す数値が無い
     stats = ()
@@ -76,7 +75,7 @@ class CamE2E(Planner):
         ParamSpec(key="steer_tau", label="舵の平滑化", min=0.0, max=0.5, step=0.01,
                   default=0.10, unit="s",
                   note="舵指令の1次遅れの時定数。0 で平滑化なし。上げると滑らかだが反応が鈍る"
-                       "（`e2e_lidar.py`/`cam_centerline.py` と同じ仕組み）"),
+                       "（`e2e_lidar.py` と同じ仕組み）"),
     )
 
     def __init__(self) -> None:
@@ -117,14 +116,14 @@ class CamE2E(Planner):
         max_steer = self.vehicle.max_steer
         target = max(-max_steer, min(max_steer, raw_steer))
 
-        # 時間ベースの1次遅れ（`cam_centerline.py`/`e2e_lidar.py` と同じ式）
+        # 時間ベースの1次遅れ（`e2e_lidar.py` と同じ式）
         tau = p["steer_tau"]
         alpha = 1.0 if tau <= 1e-3 or dt <= 0 else 1.0 - math.exp(-dt / tau)
         self._steer += (target - self._steer) * alpha
         st.target_steer = self._steer
 
         # ── 速度。モデルの出力は使わず、舵の曲率から決める ──
-        # 平滑化する前の `target` で見る（`cam_centerline.py` と同じ）。
+        # 平滑化する前の `target` で見る（`e2e_lidar.py` と同じ）。
         # 平滑化後の舵だと、切り始めの減速がさらに `steer_tau` ぶん遅れる
         v_max = p["max_speed"]
         v_min = min(p["min_speed"], v_max)
