@@ -85,7 +85,7 @@ DERIVED: dict[str, tuple[str, Callable[[dict], float]]] = {
 
 #: STM32 の最高速の歯止め（`drive.h` の DRIVE_MAX_SPEED_M_S）と、止まり切るはずの時間に掛ける余裕
 #: （`vehicle.h` の VEHICLE_STOP_TIME_MARGIN）。ファームの定数の写し（`tools/fwsim/tests/test_fw_constants.py` が突き合わせる）
-STM32_MAX_SPEED_M_S = 5.0
+STM32_MAX_SPEED_M_S = 6.0
 STOP_TIME_MARGIN = 1.5
 
 

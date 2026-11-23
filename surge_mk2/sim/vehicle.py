@@ -391,7 +391,7 @@ class SteerServo:
 
 
 #: ファームの `DRIVE_MAX_SPEED_M_S`。目標車速のクランプと、これを超えたら加速させない最終防壁
-DRIVE_MAX_SPEED_M_S = 5.0
+DRIVE_MAX_SPEED_M_S = 6.0
 
 
 def drive_accel_limit(spec: VehicleSpec, v: float) -> float:

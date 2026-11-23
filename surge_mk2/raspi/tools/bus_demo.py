@@ -243,7 +243,7 @@ def main() -> int:
                 loop_max_ms=1.2 + abs(random.gauss(0, 0.6)), cmd_timeouts=0,
                 stm_resets=0, odom_jumps=0, disk_free_pct=62.5, log_errors=0,
                 fw_build_epoch=1_790_000_000,
-                max_speed_m_s=5.0, max_accel_m_s2=6.0, max_torque_nm=0.15,
+                max_speed_m_s=6.0, max_accel_m_s2=6.0, max_torque_nm=0.15,
                 max_steer_rad=0.52))
             # 診断タブのノード表に io が載るように、実物と同じ生存申告も出す
             pub.send(TOPIC_HB_PREFIX + "io",

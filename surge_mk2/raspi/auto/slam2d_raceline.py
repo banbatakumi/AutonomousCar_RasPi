@@ -441,7 +441,7 @@ def kappa_limit(p: dict[str, float], vehicle, a_lat=None, k_us: float = 0.0) -> 
     a = limits(p, vehicle).a_lat if a_lat is None else float(np.max(a_lat))
     L = vehicle.wheelbase
     k_us = max(0.0, float(k_us))
-    v2_max = float(p.get("v_max", 5.0)) ** 2
+    v2_max = float(p.get("v_max", 6.0)) ** 2
     k = vehicle.kappa_max - track
     for _ in range(4):
         v2 = min(a / max(k, 1e-3), v2_max)
@@ -856,10 +856,10 @@ class Slam2dRaceLine(Planner):
                        "アンダーステアで割り引く）− この値。追従がずれを直す舵をこのぶん残す。"
                        "0.4 は実機の記録で追従が使った修正の曲率（内向き p95 0.37〜0.38）から。"
                        "道幅が足りず開けない所は、いちばん緩い線になり、走行中の表示に『舵の余裕が足りない区間』と出る"),
-        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=5.0, default=2.0,
+        ParamSpec(group=GROUP_SPEED, key="v_max", label="最高速度", min=0.2, max=6.0, default=2.0,
                   step=0.05, unit="m/s",
                   note="★io_node の --max-speed を超えても Pi 側で切り捨てられるだけ。"
-                       "★上限は STM32 の速度上限（5m/s）に合わせてある。4m/s より上は実機で未検証"
+                       "★上限は STM32 の速度上限（6m/s）に合わせてある。4.6m/s より上は実機で未検証（5m/s 超は逆起電力で加速が落ちる）"
                        "（2026-11-02 の記録で 4.06m/s まで。4m/s でも電流は指令どおり出ており、巡航のトルクは"
                        "上限の約15%）。長い直線の無いコースでは上げても縮まない。"
                        "★約4.3m/s より上は、後輪 MD をトルクモードの過速度のしきい値 270 rad/s の版"

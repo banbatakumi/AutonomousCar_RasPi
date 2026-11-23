@@ -382,7 +382,7 @@ prev = odom_dist[:]
 - **bit11/12 はリセットまで消えない。** bit13/14 は電圧が戻れば消える（8.0V 未満が 1秒続くと立ち、8.8V で戻る）
 - **bit15 が立っている間、`arm` を要求しても bit2 は立たない。これは仕様で FAULT 扱いにしない。**
   GUI は「駆動電源ラッチ中 — 電源を入れ直してください」と出し、通信 FAULT と区別する
-- ARM が外れたあとの停止待ちは、停車するか `最高速 5m/s ÷ BRAKE_DECEL_M_S2 × 1.5` 秒経つまで（`vehicle.c` の `DisarmBrakeTimeoutS`）
+- ARM が外れたあとの停止待ちは、停車するか `最高速 6m/s ÷ BRAKE_DECEL_M_S2 × 1.5` 秒経つまで（`vehicle.c` の `DisarmBrakeTimeoutS`）
 
 ### 5.5 `md_status[i]` (u8) ビット定義
 
