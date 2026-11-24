@@ -1377,3 +1377,4 @@ class TestSteerSaturationCap(unittest.TestCase):
         self.assertEqual(p._steer_sat_cap(sat_on, v, prm), math.inf)
         self.assertEqual(p._steer_sat_cap(free_off, v, prm), math.inf)
         self.assertAlmostEqual(p._steer_sat_cap(sat_off, vs(speed=0.1), prm), 0.35, places=9)
+

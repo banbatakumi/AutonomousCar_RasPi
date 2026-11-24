@@ -113,10 +113,12 @@ class TestOvertake(unittest.TestCase):
         self.assertEqual(_plan(path, [_at(path, 1.5, vx_along=2.5)], v_now=2.0).status, "clear")
 
     def test_narrow_road_is_blocked_and_reports_the_lead(self):
+        """道幅が足りなければ横へ出ない。前の相手に付いていく（線のまま付いていく候補が通れれば "clear"）相手を
+        `lead` で返す。"""
         path = _ring()
         o = _at(path, 3.0, vx_along=1.0)
         res = _plan(path, [o], half=0.25)
-        self.assertEqual(res.status, "blocked")
+        self.assertIn(res.status, ("blocked", "clear"))
         self.assertIsNotNone(res.lead)
         self.assertGreater(res.lead.u, 0.5)
 
@@ -240,6 +242,131 @@ class TestOpponentModel(unittest.TestCase):
         np.testing.assert_allclose(sh, [0.0, 0.1, 0.4, 0.4], atol=0.03)
         # 今の場所を覚えていなければ予測しない
         self.assertTrue(np.all(ot.line_shift(prof, 11.5, np.array([0.0, 1.0])) == 0.0))
+
+
+
+class TestPredictiveOvertake(unittest.TestCase):
+    """抜き切れる区間でだけ仕掛ける（区間の入口まで付いていき、入口で横へ出て全速で抜く）。"""
+
+    def test_trails_until_the_wide_section_then_passes(self):
+        """狭い所では横へ出ず線の上で付いていき、道幅のある区間の入口で横へ出る候補を選ぶ。抜き切る（S2 が有限）。"""
+        path = _ring()
+        n = len(path)
+        s = np.arange(n) * path.length / n
+        wide = (s >= 5.0) & (s <= 16.0)
+        room = (np.where(wide, 0.56, 0.05), np.full(n, 0.05))
+        opp = _at(path, 1.6, r=0.09, vx_along=1.5)
+        res = ot.plan(path, 0, (R, 0.0, math.pi / 2), 1.5, path.v, 6.0, room, [opp], _cfg())
+        self.assertEqual(res.status, "avoid")
+        self.assertGreater(res.cand.S1, 0.3)                      # 今は横へ出ない
+        self.assertGreaterEqual(res.cand.S1 + res.cand.L1, 5.0 - 0.3)   # 出終わるのは広い区間の入口
+        self.assertTrue(math.isfinite(res.cand.S2))
+        self.assertGreater(res.cand.dT, 0.0)                      # 広いのは左
+
+    def test_no_pass_is_started_without_room_to_finish(self):
+        """抜き切る前に道幅が尽きるなら仕掛けない（並んだまま戻れなくなる試みをしない）。"""
+        path = _ring()
+        n = len(path)
+        s = np.arange(n) * path.length / n
+        short = (s >= 3.0) & (s <= 4.5)
+        room = (np.where(short, 0.56, 0.05), np.full(n, 0.05))
+        opp = _at(path, 1.6, r=0.09, vx_along=2.4)
+        res = ot.plan(path, 0, (R, 0.0, math.pi / 2), 2.4, path.v, 6.0, room, [opp], _cfg())
+        self.assertNotEqual(res.status, "avoid")
+
+    def test_grid_points_start_ahead_of_the_car(self):
+        """最も近い点（`index`）が車の少し後ろでも、見る先の格子 `sel` と弧長 x がずれない（最初の点は車より先）。"""
+        path = _ring()
+        a = 0.06 / R                                         # 車は点 0 の 6cm 先（点の間隔 0.1m）
+        pose = (R * math.cos(a), R * math.sin(a), a + math.pi / 2)
+        res = ot.plan(path, 0, pose, 2.0, path.v, 6.0, _room(path), [_at(path, 3.0, vx_along=1.0)], _cfg())
+        self.assertIsNotNone(res.sel)
+        seg = path.length / len(path)
+        self.assertGreater(int(res.sel[0]) * seg, 0.06 - 1e-9)
+
+    def test_learned_speed_is_used_for_prediction(self):
+        """覚えた場所ごとの相手の速さ（`line_profile` の 4 つ目）で相手を進める。"""
+        n = 200
+        xy = np.column_stack([np.arange(n) * 0.1, np.zeros(n)])
+        path = RaceLine(xy=xy, v=np.full(n, 2.0), kappa=np.zeros(n), length=n * 0.1, closed=False)
+        order = np.arange(0, 150)
+        s_rel = order * 0.1
+        nrm = np.tile([0.0, 1.0], (n, 1))
+        xs = np.arange(0.5, 14.0, 0.05)
+        u = np.where(xs < 5.0, 1.0, 2.0)
+        trail = np.column_stack([xs, np.zeros_like(xs), u, np.zeros_like(xs)])
+        prof = ot.line_profile(path, order, s_rel, nrm, trail)
+        self.assertAlmostEqual(float(np.nanmean(prof[3][5:20])), 1.0, places=2)
+        self.assertAlmostEqual(float(np.nanmean(prof[3][30:60])), 2.0, places=2)
+        v_learn = np.full(n, np.nan)
+        b = np.clip(((s_rel - prof[0]) / 0.2).astype(int), 0, len(prof[3]) - 1)
+        v_learn[order] = prof[3][b]
+        s_cum = np.arange(n) * 0.1
+        tr = ot.Track(1.0, 1.4, -0.1, 0.1, 1.0, 0.0, True, Obstacle(1.0, 0.0, 0.1, 5))
+        t_arr, s_arr = ot.opp_motion(tr, 1.0, s_cum, path.v, path.length, t_max=6.0, v_learn=v_learn)
+        # 1m → 5m を 1m/s（4s）、その先 2m/s。6s で 4 + 4 = 8m（比で伸ばすと今の 1m/s のまま 6m）
+        self.assertAlmostEqual(float(np.interp(6.0, t_arr, s_arr)), 8.0, delta=0.3)
+
+    def test_learned_speed_uses_position_differences_when_timed(self):
+        """軌跡に時刻があれば、速さは位置の前後の差から覚える（追跡の速さが減速中に遅れて高く出ても偏らない）。"""
+        n = 200
+        xy = np.column_stack([np.arange(n) * 0.1, np.zeros(n)])
+        path = RaceLine(xy=xy, v=np.full(n, 2.0), kappa=np.zeros(n), length=n * 0.1, closed=False)
+        order = np.arange(0, 150)
+        s_rel = order * 0.1
+        nrm = np.tile([0.0, 1.0], (n, 1))
+        t = np.arange(0.0, 6.0, 0.1)
+        xs = 0.5 + 1.5 * t                                   # 真の速さ 1.5m/s
+        trail = np.column_stack([xs, np.zeros_like(xs), np.full_like(xs, 2.4), np.zeros_like(xs), t])  # 追跡の速さは 2.4
+        prof = ot.line_profile(path, order, s_rel, nrm, trail)
+        self.assertAlmostEqual(float(np.nanmean(prof[3][10:40])), 1.5, places=2)
+
+    def test_speed_recovers_with_acceleration_limit_after_trailing(self):
+        """付いていった後に元の速さへ戻るところは加速度の上限で上げる（瞬時に戻らない）。"""
+        x = np.arange(0.0, 8.01, 0.2)
+        ds = np.diff(x)
+        t_free = x / 3.0
+        follow = (1.0, np.array([0.0, 10.0]), np.array([0.0, 10.0]), 0.3, 0.3)    # 相手は 1m 先を 1m/s
+        t, ok, _ = ot._follow_times(t_free[None, :], x, ds, np.array([True]), follow, 3.0,
+                                    upto=np.array([2.0]), a_accel=2.0)
+        v = ds / np.diff(t[0])
+        k = int(np.searchsorted(x, 2.0))
+        self.assertLess(v[k - 1], 1.2)                           # 出始めるまでは相手の速さ
+        for j in range(k, len(v) - 1):                          # その先は v² の増え方が 2·a·ds 以下
+            self.assertLessEqual(v[j + 1] ** 2 - v[j] ** 2, 2 * 2.0 * ds[j] * 2.0 + 1e-6)
+
+
+
+class TestLongitudinalModel(unittest.TestCase):
+    """前後に出せる加速度は速度プロファイルと同じモデル（横の使い具合 u = v²|κ| ÷ 横の限界 で減る）。"""
+
+    def test_friction_circle_reduces_braking_in_a_corner(self):
+        lon = ot._Long(np.array([4.0]), 3.0, 2.5, None)
+        self.assertAlmostEqual(float(lon.dec(np.array([2.0]), np.array([0.0]))[0]), 2.5)
+        # u = 2²·0.8/4 = 0.8 → 2.5·√(1−0.64) = 1.5
+        self.assertAlmostEqual(float(lon.dec(np.array([2.0]), np.array([0.8]))[0]), 1.5, places=6)
+
+    def test_learned_envelope_is_interpolated(self):
+        lon = ot._Long(np.array([4.0]), 3.0, 2.5, ((3.0, 2.0, 1.0), (2.6, 2.0, 0.8)))
+        # u = 0.25 → 減速の包絡 2.6 と 2.0 の中間
+        self.assertAlmostEqual(float(lon.dec(np.array([1.0]), np.array([1.0]))[0]), 2.3, places=6)
+        self.assertAlmostEqual(float(lon.acc(np.array([2.0]), np.array([0.0]))[0]), 3.0)
+
+    def test_follower_brakes_earlier_before_a_corner(self):
+        """コーナーの手前で減速する相手に付いていく計画は、横を使う所の減速の小さいぶん早く減速し始める。"""
+        x = np.arange(0.0, 6.01, 0.2)
+        ds = np.diff(x)
+        kap = np.where(x > 2.0, 1.2, 0.0)[None, :]
+        t_free = x / 2.5
+        follow = (1.0, np.array([0.0, 1.0, 10.0]), np.array([0.0, 2.0, 2.0 + 9.0 * 0.6]), 0.3, 0.3)
+        lon_c = ot._Long(np.full(len(x), 3.0), 3.0, 2.5, None)
+        t1, _, _ = ot._follow_times(t_free[None, :], x, ds, np.array([True]), follow, 2.5,
+                                    a_accel=3.0, lon=lon_c, kap=kap)
+        t0, _, _ = ot._follow_times(t_free[None, :], x, ds, np.array([True]), follow, 2.5, a_accel=3.0)
+        v1 = ds / np.diff(t1[0])
+        v0 = ds / np.diff(t0[0])
+        k = int(np.searchsorted(x, 1.6))
+        self.assertLess(v1[k], v0[k] + 1e-9)               # 横の使い具合を見ると、コーナーより手前で遅い
 
 
 if __name__ == "__main__":

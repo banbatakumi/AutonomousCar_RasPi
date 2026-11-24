@@ -178,6 +178,36 @@ class TestVelocityTracker(unittest.TestCase):
         out = tr.update(1.1, [obs_mod.Obstacle(2.65, 2.0, 0.1, 5)])
         self.assertEqual(out[0].speed, 0.0)
 
+    def test_split_detection_of_one_car_is_merged(self):
+        """1 台の車が 2 つの検出（後ろ面と側面）に割れても、1 つの動く物として返す（余った方が静止物にならない）。"""
+        tr = obs_mod.VelocityTracker()
+        out = []
+        for k in range(10):
+            t = k * 0.1
+            x = 1.0 + 1.5 * t
+            rear = np.column_stack([np.full(5, x), np.linspace(-0.09, 0.09, 5)])
+            side = np.column_stack([np.linspace(x + 0.25, x + 0.40, 4), np.full(4, 0.09)])
+            objs = [obs_mod.Obstacle(float(rear[:, 0].mean()), 0.0, 0.09, 5, rear)]
+            if k >= 3:                                            # 途中から側面も見える（間隔 0.25m で別の塊）
+                objs.append(obs_mod.Obstacle(float(side[:, 0].mean()), 0.09, 0.08, 4, side))
+            out = tr.update(t, objs)
+        self.assertEqual(len(out), 1)
+        self.assertGreater(out[0].speed, 1.0)
+
+    def test_static_obstacle_beside_a_passing_car_is_not_merged(self):
+        """動く車のそばの静止物（自分の追跡がある）は車にまとめない。"""
+        tr = obs_mod.VelocityTracker()
+        cone = np.column_stack([np.full(5, 2.0), np.linspace(0.30, 0.40, 5)])
+        out = []
+        for k in range(10):
+            t = k * 0.1
+            x = 1.0 + 1.5 * t
+            rear = np.column_stack([np.full(5, x), np.linspace(-0.09, 0.09, 5)])
+            out = tr.update(t, [obs_mod.Obstacle(x, 0.0, 0.09, 5, rear),
+                                obs_mod.Obstacle(2.0, 0.35, 0.05, 5, cone)])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(sorted(round(o.speed > 0.0) for o in out), [0, 1])
+
     def test_swept_path_covers_the_travel(self):
         o = obs_mod.Obstacle(0.0, 0.0, 0.1, 5, None, 1.0, 0.0)
         trail = obs_mod.swept(o, 2.0, 0.05)

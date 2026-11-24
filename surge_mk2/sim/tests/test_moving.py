@@ -66,6 +66,22 @@ class TestMovers(unittest.TestCase):
         with self.assertRaises(ValueError):
             Mover(s0=0.0, speed=0.0, d=0.0, r=0.09, profile=0.5).bind(line, (0.0, 0.0))
 
+    def test_rebind_continues_from_the_current_position(self):
+        """経路の形が替わったら、今の位置のまま新しい線へ乗せ替える（跳ばない・新しい線の上を進む）。"""
+        for m in (Mover(s0=1.0, speed=1.0, d=0.0, r=0.09),
+                  Mover(s0=1.0, speed=0.0, d=0.0, r=0.09, profile=0.5)):
+            line = _line()
+            m.bind(line, (0.0, 0.0), np.full(len(line), 2.0) if m.profile else None)
+            m.pose_at(0.0)
+            p0 = m.pose_at(1.0)
+            # 新しい線: y を 0.02m ずらした同じ形
+            m.rebind(line + np.array([0.0, 0.02]), 1.0, np.full(len(line), 2.0) if m.profile else None)
+            p1 = m.pose_at(1.0)
+            self.assertLess(abs(p1[0] - p0[0]), 0.06)
+            self.assertAlmostEqual(p1[1], 0.02, places=3)
+            p2 = m.pose_at(1.5)
+            self.assertAlmostEqual(p2[0] - p1[0], 0.5, delta=0.06)
+
     def test_walls_are_kept(self):
         """壁のセルは他車が通っても消えない。"""
         grid = np.zeros((60, 200), dtype=bool)

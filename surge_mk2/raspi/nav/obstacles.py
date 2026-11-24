@@ -66,8 +66,18 @@ class Obstacle(NamedTuple):
     #: どうかはこの点で直接測る — `avoid.clearance_to_points`）
     pts: np.ndarray | None = None
     #: 速度 [m/s]（map フレーム）。`VelocityTracker` が入れる。静止していると見なせば 0
+    #: （動いているかを二択で使う所: 止まって待つか迂回するか・残像・相手の線の学習など）
     vx: float = 0.0
     vy: float = 0.0
+    #: 速度の推定値 [m/s]（map フレーム。静止と見なしても 0 にしない）と、その標準偏差 [m/s]（大きい方の向き。
+    #: 観測が少ないほど大きい。`VelocityTracker` が無いときは inf）。追い抜きの予測（`overtake`）は二択で
+    #: 切らずにこれを使う（`docs/overtake.md`）
+    ex: float = 0.0
+    ey: float = 0.0
+    sv: float = math.inf
+    #: この物の追跡が一度でも確かに動いたか（粘り付く。車らしい扱い — 見えない奥行き・横の余裕 — に使う。
+    #: 周期ごとの判定で揺れない）
+    moved: bool = False
 
     @property
     def speed(self) -> float:
@@ -261,84 +271,225 @@ def blocking(obstacles: list[Obstacle], path_xy: np.ndarray, index: int,
 #: 動いていると見なす最小の速さ [m/s]。見える面が変わると重心が数 cm ずれる（10Hz で 0.2〜0.5m/s 相当）
 #: ので、それより十分上に置く
 MOVING_MIN_SPEED = 0.3
-#: 速度を回帰する履歴の長さ [s] と、必要な点数・時間幅
-_TRACK_S = 0.8
-_TRACK_MIN_N = 4
-_TRACK_MIN_SPAN_S = 0.3
 #: 見えなかった周期も履歴を残す時間 [s]。★1 周期見落とす（壁際の無視する帯に点が落ちる・2 つに割れる）
-#: たびに履歴を捨てると、点が 4 つ溜まるまでの 0.3〜0.4s は速度 0（静止物）になる。シムで前の車の
-#: 18% の周期が静止物に見え、追い抜きの計画が止まる・動くで入れ替わった（sim.bench --mover）
+#: たびに履歴を捨てると、速度が分かるまでの間は静止物に見える。シムで前の車の 18% の周期が静止物に見え、
+#: 追い抜きの計画が止まる・動くで入れ替わった（sim.bench --mover）
 _TRACK_KEEP_S = 0.3
+#: 追跡の EKF の雑音: 重心の観測の揺れ [m]・速度を変える白色加速度 [m/s²]・ヨーレートの変化 [rad/s²]
+_EKF_SIGMA_MEAS = 0.05
+_EKF_SIGMA_ACC = 3.0
+_EKF_SIGMA_WDOT = 6.0
+#: 新しい追跡の速度・ヨーレートの初期の標準偏差と、ヨーレートの上限 [rad/s]
+_EKF_P0_VEL = 2.0
+_EKF_P0_W = 1.5
+_EKF_W_MAX = 4.0
+#: 動いていると言うのに要る観測の数・最初の観測からの時間 [s]
+_MOVING_MIN_UPDATES = 3
+_MOVING_MIN_AGE_S = 0.2
+#: 速さが推定の標準偏差のこの倍に満たなければ静止とする
+_MOVING_NSIG = 1.0
+#: 動いたかを確かめる観測の窓 [s] と、窓の前半・後半の平均位置の差の下限 [m]・その差の速さの下限
+#: （`MOVING_MIN_SPEED` に対する割合）。★EKF の速さだけで決めると、重心が白色に 5cm 揺れる静止物の
+#: 17% の周期が動いて見えた。平均を取ると揺れは打ち消され 3% になる（3cm なら 0%）
+_MOVING_WIN_S = 0.6
+_MOVING_DISP_M = 0.08
+_MOVING_DISP_SPEED = 0.5
+#: 同じ追跡に結ばれた検出を 1 つの物にまとめる、点どうしの距離の上限 [m]（`VelocityTracker.update`）
+_MERGE_M = 0.30
+
+
+def _ct_predict(x: np.ndarray, T: float) -> tuple[np.ndarray, np.ndarray]:
+    """協調旋回（CT）モデルで状態 `[px, py, vx, vy, ω]` を `T` 秒進めた値と、そのヤコビアン。"""
+    _, _, vx, vy, w = x
+    wT = w * T
+    s, c = math.sin(wT), math.cos(wT)
+    if abs(w) < 1e-4:
+        s_w, c_w = T, 0.5 * w * T * T                  # sin(ωT)/ω, (1−cos ωT)/ω の ω→0 の近似
+        ds_w, dc_w = -w * T ** 3 / 3.0, 0.5 * T * T     # それぞれの ω による微分
+    else:
+        s_w, c_w = s / w, (1.0 - c) / w
+        ds_w = (T * c * w - s) / (w * w)
+        dc_w = (T * s * w - (1.0 - c)) / (w * w)
+    xn = np.array([x[0] + s_w * vx - c_w * vy, x[1] + c_w * vx + s_w * vy,
+                   c * vx - s * vy, s * vx + c * vy, w])
+    F = np.eye(5)
+    F[0, 2], F[0, 3], F[0, 4] = s_w, -c_w, ds_w * vx - dc_w * vy
+    F[1, 2], F[1, 3], F[1, 4] = c_w, s_w, dc_w * vx + ds_w * vy
+    F[2, 2], F[2, 3], F[2, 4] = c, -s, -T * (s * vx + c * vy)
+    F[3, 2], F[3, 3], F[3, 4] = s, c, T * (c * vx - s * vy)
+    return xn, F
+
+
+def _ct_q(T: float) -> np.ndarray:
+    """白色加速度（x・y 独立）とヨーレートのランダムウォークを `T` 秒で離散化したプロセス雑音。"""
+    q = _EKF_SIGMA_ACC ** 2
+    Q = np.zeros((5, 5))
+    for i, j in ((0, 2), (1, 3)):
+        Q[i, i] = q * T ** 3 / 3.0
+        Q[i, j] = Q[j, i] = q * T ** 2 / 2.0
+        Q[j, j] = q * T
+    Q[4, 4] = _EKF_SIGMA_WDOT ** 2 * T
+    return Q
+
+
+class _Track:
+    """1 つの追跡（EKF の状態・共分散と、動いたかを確かめる観測の履歴）。"""
+
+    __slots__ = ("x", "P", "t", "t0", "n", "hist", "moved")
+
+    def __init__(self, t: float, px: float, py: float) -> None:
+        sm, sv = _EKF_SIGMA_MEAS ** 2, _EKF_P0_VEL ** 2
+        self.x = np.array([px, py, 0.0, 0.0, 0.0])
+        self.P = np.diag([sm, sm, sv, sv, _EKF_P0_W ** 2])
+        self.t = self.t0 = t
+        self.n = 1
+        self.hist = [(t, px, py)]
+        self.moved = False
+
+    def predicted(self, t: float) -> tuple[np.ndarray, np.ndarray]:
+        T = t - self.t
+        if T <= 0.0:
+            return self.x, self.P
+        x, F = _ct_predict(self.x, T)
+        return x, F @ self.P @ F.T + _ct_q(T)
+
+    def correct(self, t: float, x: np.ndarray, P: np.ndarray, zx: float, zy: float) -> None:
+        S = P[:2, :2] + np.eye(2) * _EKF_SIGMA_MEAS ** 2
+        K = P[:, :2] @ np.linalg.inv(S)
+        x = x + K @ np.array([zx - x[0], zy - x[1]])
+        P = P - K @ P[:2, :]
+        x[4] = max(-_EKF_W_MAX, min(_EKF_W_MAX, x[4]))
+        self.x, self.P, self.t = x, 0.5 * (P + P.T), t
+        self.n += 1
+        self.hist = [h for h in self.hist if t - h[0] <= _MOVING_WIN_S] + [(t, zx, zy)]
+
+    def velocity(self, t: float) -> tuple[float, float]:
+        """外へ出す速度。動いていると言える条件を満たさなければ (0, 0)。"""
+        if self.n < _MOVING_MIN_UPDATES or t - self.t0 < _MOVING_MIN_AGE_S:
+            return 0.0, 0.0
+        vx, vy = float(self.x[2]), float(self.x[3])
+        sp = math.hypot(vx, vy)
+        if sp < MOVING_MIN_SPEED:
+            return 0.0, 0.0
+        u = np.array([vx, vy]) / sp
+        if sp < _MOVING_NSIG * math.sqrt(max(float(u @ self.P[2:4, 2:4] @ u), 0.0)):
+            return 0.0, 0.0
+        m = len(self.hist) // 2
+        if m < 1:
+            return 0.0, 0.0
+        a, b = np.asarray(self.hist[:m]), np.asarray(self.hist[m:])
+        dt = float(b[:, 0].mean() - a[:, 0].mean())
+        disp = math.hypot(float(b[:, 1].mean() - a[:, 1].mean()), float(b[:, 2].mean() - a[:, 2].mean()))
+        if dt <= 0.0 or disp < _MOVING_DISP_M or disp / dt < _MOVING_DISP_SPEED * MOVING_MIN_SPEED:
+            return 0.0, 0.0
+        return vx, vy
 
 
 class VelocityTracker:
-    """周期ごとの検出を結んで、障害物の速度を出す。
+    """周期ごとの検出を結んで、障害物の速度を出す（協調旋回モデルの EKF）。
 
-    毎周期、新しい検出を各履歴の「最後の位置を最後の速度で今へ進めた位置」に近いものへ結ぶ
-    （距離 `tol + 半径`）。結んだ位置の履歴（直近 `_TRACK_S` 秒）を直線で回帰した傾きが速度。
-    **1周期の差分は使わない**——見える面が変わるたびに重心が数 cm 動き、10Hz だと 0.5m/s 近い偽の
-    速度になる。回帰の残差が速さに比べて大きい（直線に乗らない）ものと、速さが `MOVING_MIN_SPEED`
-    未満のものは静止として 0 にする。結ばれなかった履歴も `_TRACK_KEEP_S` の間は残す。
+    状態は map フレームの `[px, py, vx, vy, ω]`、観測は検出の重心。毎周期、新しい検出を各追跡の
+    「今の時刻への予測位置」に近いものへ結ぶ（距離 `tol + 半径`）。結ばれなかった追跡も
+    `_TRACK_KEEP_S` の間は予測だけで残す。
+
+    **速度は直交成分で持つ**（向きと速さで持つ CTRV は、止まった物で向きが観測できず線形化が特異になる。
+    障害物には静止物も混ざる）。★それまでの直線の回帰（直近 0.8s）は、曲がる相手の向きが 0.4s ぶん遅れ
+    （カーブで中央 28°）、速さも弦のぶん遅く出た。EKF は同じ検出の列（sim.bench --mover の記録）で
+    向き 4〜5°・速度ベクトルの誤差 0.87 → 0.30m/s・0.5 秒先の予測 0.65 → 0.35m。
+
+    静止とする（速度 0 で返す）のは: 観測が少ない・新しい、速さが `MOVING_MIN_SPEED` 未満か推定の
+    標準偏差の `_MOVING_NSIG` 倍未満、窓の中で実際に動いていない（`_MOVING_DISP_*`）とき。
     """
 
     def __init__(self, tol: float = 0.5) -> None:
         self._tol = tol
-        #: (履歴 (t, x, y) の列, 最後の速度 (vx, vy))
-        self._tracks: list[tuple[list[tuple[float, float, float]], tuple[float, float]]] = []
+        self._tracks: list[_Track] = []
 
     def reset(self) -> None:
         self._tracks = []
 
     def update(self, t: float, now: list[Obstacle]) -> list[Obstacle]:
+        preds = [tr.predicted(t) for tr in self._tracks]
+        now = self._merge_split(now, preds)
         used: set[int] = set()
-        new_tracks: list[tuple[list[tuple[float, float, float]], tuple[float, float]]] = []
+        new_tracks: list[_Track] = []
         out: list[Obstacle] = []
-        pred = []
-        for hist, (vx, vy) in self._tracks:
-            dt = t - hist[-1][0]
-            pred.append((hist[-1][1] + vx * dt, hist[-1][2] + vy * dt))
         for o in now:
             best, best_d = -1, math.inf
-            for i, (px, py) in enumerate(pred):
+            for i, (x, _) in enumerate(preds):
                 if i in used:
                     continue
-                d = math.hypot(o.x - px, o.y - py)
+                d = math.hypot(o.x - x[0], o.y - x[1])
                 if d <= self._tol + o.r and d < best_d:
                     best, best_d = i, d
-            hist = []
             if best >= 0:
                 used.add(best)
-                hist = [h for h in self._tracks[best][0] if t - h[0] <= _TRACK_S]
-            hist.append((t, o.x, o.y))
-            vx, vy = self._fit(hist)
-            new_tracks.append((hist, (vx, vy)))
-            out.append(o._replace(vx=vx, vy=vy) if (vx or vy) else o)
+                tr = self._tracks[best]
+                tr.correct(t, *preds[best], o.x, o.y)
+            else:
+                tr = _Track(t, o.x, o.y)
+            new_tracks.append(tr)
+            vx, vy = tr.velocity(t)
+            tr.moved = tr.moved or bool(vx or vy)
+            ex, ey = float(tr.x[2]), float(tr.x[3])
+            sv = math.sqrt(max(float(np.linalg.eigvalsh(tr.P[2:4, 2:4]).max()), 0.0))
+            if not tr.moved and tr.n >= _MOVING_MIN_UPDATES and t - tr.t0 >= _MOVING_MIN_AGE_S:
+                # 観測が溜まり、窓の中で動いていない（`velocity` が 0）物は速度 0・不確かさ 0。★EKF の速度の σ は
+                # プロセス雑音（加速度 3m/s²）のため止まった物でも 0.3〜0.5m/s から下がらず、推定値も 0 の周りで揺れる。
+                # それをそのまま予測に使うと静止物が「ゆっくり動く・大きく広がる物」に見え、避けにくくなった
+                # （sim.bench toyota2 の静止物 3 つ: 平均ラップ 10.5 → 16.1 秒・Hybrid A* 3 → 7 回）
+                ex = ey = sv = 0.0
+            out.append(o._replace(vx=vx, vy=vy, ex=ex, ey=ey, sv=sv, moved=tr.moved))
         for i, tr in enumerate(self._tracks):
-            if i not in used and t - tr[0][-1][0] <= _TRACK_KEEP_S:
+            if i not in used and t - tr.t <= _TRACK_KEEP_S:
                 new_tracks.append(tr)
         self._tracks = new_tracks
         return out
 
-    @staticmethod
-    def _fit(hist: list[tuple[float, float, float]]) -> tuple[float, float]:
-        if len(hist) < _TRACK_MIN_N or hist[-1][0] - hist[0][0] < _TRACK_MIN_SPAN_S:
-            return 0.0, 0.0
-        a = np.asarray(hist)
-        tt = a[:, 0] - a[:, 0].mean()
-        den = float((tt * tt).sum())
-        if den < 1e-9:
-            return 0.0, 0.0
-        vx = float((tt * (a[:, 1] - a[:, 1].mean())).sum() / den)
-        vy = float((tt * (a[:, 2] - a[:, 2].mean())).sum() / den)
-        sp = math.hypot(vx, vy)
-        if sp < MOVING_MIN_SPEED:
-            return 0.0, 0.0
-        # 直線に乗っているか: 予測との残差が速さ×0.25s（=ほぼ 1 周期ぶん）を超えたら信じない
-        rx = a[:, 1] - (a[:, 1].mean() + vx * tt)
-        ry = a[:, 2] - (a[:, 2].mean() + vy * tt)
-        if float(np.hypot(rx, ry).max()) > max(0.06, 0.25 * sp):
-            return 0.0, 0.0
-        return vx, vy
+    def _merge_split(self, now: list[Obstacle], preds) -> list[Obstacle]:
+        """1 つの物が 2 つ以上の検出に割れたもの（車の後ろ面と側面が点の間隔で切れる等）を 1 つにまとめる。
+
+        各検出を最も近い追跡（門 `tol + 半径` の内側）に割り当て、同じ追跡に割り当たった検出のうち、最も近いもの
+        と点どうしが `_MERGE_M` 以内のものを合わせる。★割れたまま 1 対 1 で結ぶと、余った方は毎周期新しい追跡に
+        なって静止物と出続け、動く車の位置に静止物が居ることになった（付いていく候補がそれに当たって "blocked"、
+        「避けられない障害物」で急減速。sim.bench --mover、相手 0.65 倍の後ろで 1 周に何度も）。静止物は自分の
+        追跡が最も近いので、そばを通る車の追跡には入らない。"""
+        if len(now) < 2 or not preds:
+            return now
+        groups: dict[int, list[tuple[float, int]]] = {}
+        for k, o in enumerate(now):
+            best, best_d = -1, math.inf
+            for i, (x, _) in enumerate(preds):
+                d = math.hypot(o.x - x[0], o.y - x[1])
+                if d <= self._tol + o.r and d < best_d:
+                    best, best_d = i, d
+            if best >= 0:
+                groups.setdefault(best, []).append((best_d, k))
+        drop: set[int] = set()
+        merged: dict[int, Obstacle] = {}
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            members.sort()
+            k0 = members[0][1]
+            base = now[k0]
+            if base.pts is None:
+                continue
+            pts = [base.pts]
+            for _, k in members[1:]:
+                o = now[k]
+                if o.pts is None:
+                    continue
+                d2 = ((o.pts[:, None, :] - base.pts[None, :, :]) ** 2).sum(axis=2)
+                if float(np.sqrt(d2.min())) <= _MERGE_M:
+                    pts.append(o.pts)
+                    drop.add(k)
+            if len(pts) > 1:
+                p = np.vstack(pts)
+                cx, cy = float(p[:, 0].mean()), float(p[:, 1].mean())
+                r = float(np.hypot(p[:, 0] - cx, p[:, 1] - cy).max())
+                merged[k0] = base._replace(x=cx, y=cy, r=max(r, base.r), n=len(p), pts=p)
+        return [merged.get(k, o) for k, o in enumerate(now) if k not in drop]
 
 
 def swept(o: Obstacle, horizon_s: float, step: float) -> list[Obstacle]:

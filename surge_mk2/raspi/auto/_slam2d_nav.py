@@ -323,6 +323,15 @@ class Slam2dNav:
             return fe.pose
         return compose(fe.pose, fe.corrected_delta(t0, t1))
 
+    def age_s(self, vs: VehicleState | None) -> float:
+        """`pose`（点群の基準時刻）から `vs` の時刻までの秒（`pose_now` が進める時間。進めないときは 0）。"""
+        fe = self._fe
+        t0 = int(fe._t_ref)
+        t1 = int(vs.t_capture) if vs is not None else 0
+        if not t0 or t1 <= t0 or t1 - t0 > 500_000_000 or len(fe.twists) < 2:
+            return 0.0
+        return (t1 - t0) * 1e-9
+
     @property
     def grid(self) -> OccGrid:
         return self._fe.grid

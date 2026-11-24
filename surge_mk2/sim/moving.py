@@ -65,6 +65,24 @@ class Mover:
         self.start_s = float(self._s[k])
         self.center = c
 
+    def rebind(self, center: np.ndarray, t: float, v: np.ndarray | None = None) -> None:
+        """走らせる線を取り替える（今の位置のまま、新しい線の上の最も近い点から続ける）。
+
+        ★ planner の経路は走行中に形が替わる（1 周目の出発点からの枝を含む線 26.0m → 定常の周回 21.8m、
+        toyota2 の経路 A）。最初に結んだ線のまま走らせると、他車は自分と別の線を走り続け、線が分かれる所で
+        横切る・予測と食い違う（追い抜きの評価に作り物の接触と取り違えが混ざった）。"""
+        if self.center is None:
+            return
+        old_xy = self.pose_at(t)                   # `xy` は描いたときだけ進むので、その時刻の位置を出し直す
+        t_run = getattr(self, "_t_run", None)
+        self.bind(center, old_xy, v)
+        # bind は start_xy（今の位置）に最も近い点を弧長 0 にする。そこから続ける
+        self.s0 = 0.0
+        if self.profile > 0.0:
+            self._s_run, self._t_run = 0.0, (t if t_run is not None else None)
+        else:
+            self.s0 = -self.speed * max(0.0, t - self.t_start)
+
     def _travelled(self, t: float) -> float:
         """動き出してから `t` までに線に沿って進んだ距離 [m]。"""
         if self.profile <= 0.0:

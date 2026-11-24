@@ -514,6 +514,17 @@ class Bench:
                               oy + q[:, 0] * sn + q[:, 1] * cs], axis=1)
                 m.bind(w, tuple(self.sim.course.start[:2]), np.asarray(path.v, dtype=float))
                 m.t_start += time.monotonic() - t0      # 経路ができた時刻から数える
+                m._bound_xy = path.xy
+            elif (m.center is not None and path is not None and len(path) >= 3 and not busy
+                  and getattr(path, "closed", True) and getattr(m, "_bound_xy", None) is not path.xy):
+                # 経路の形が替わった（1 周目の枝を含む線 → 定常の周回など）。今の位置のまま新しい線へ乗せ替える
+                ox, oy, oyaw = self._map_origin or self._origin
+                cs, sn = math.cos(oyaw), math.sin(oyaw)
+                q = np.asarray(path.xy, dtype=float)
+                w = np.stack([ox + q[:, 0] * cs - q[:, 1] * sn,
+                              oy + q[:, 0] * sn + q[:, 1] * cs], axis=1)
+                m.rebind(w, time.monotonic() - t0, np.asarray(path.v, dtype=float))
+                m._bound_xy = path.xy
         update_all(self._movers, c.grid, c.origin, c.resolution, time.monotonic() - t0)
         c._padded_grid = None
         st_ = getattr(self, "_last_st", None)
