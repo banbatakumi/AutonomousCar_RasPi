@@ -348,7 +348,8 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
             min_len: float = 0.0, end_at_goal: bool = True,
             extend: float = 0.0,
             avoid: list[tuple[float, float]] | None = None,
-            start_edges: set[int] | frozenset[int] | None = None) -> RoutePath:
+            start_edges: set[int] | frozenset[int] | None = None,
+            goal_edges: set[int] | frozenset[int] | None = None) -> RoutePath:
     """今の位置（今の向きで進む）からゴールまでの開いた経路。
 
     :param min_len: ゴールがこれより近い（すぐ後ろにある等）なら1周回ってでも
@@ -361,6 +362,8 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
     :param start_edges: 今の位置を吸着させるエッジ（今走っている経路のエッジ）。★与えないと
         グラフ全体の最寄りエッジに吸着するので、分岐の近くでは走っていない枝（行き止まり等）を
         始点にして「経路が見つからない」「逆走になる」で失敗した
+    :param goal_edges: ゴールを吸着させるエッジ（与えなければグラフ全体の最寄り）。駐車で、枠の
+        そばの枝へ曲がり切れないときに今走っている周回の上で止まるのに使う（`slam2d_route._compute_stop`）
     """
     turn_max = math.radians(turn_max_deg)
     geo = _Geom(graph)
@@ -369,7 +372,7 @@ def plan_to(graph: RoadGraph, pose: tuple[float, float, float], goal: Waypoint, 
     da_list = _dirs(graph, a, pose[2])
     if not da_list:
         raise RouteError("今の向きでは今いる道を進めない（逆走になる）")
-    b = snap(graph, goal.x, goal.y, snap_radius)
+    b = snap(graph, goal.x, goal.y, snap_radius, edges=goal_edges or None)
     best = None
     for db in _dirs(graph, b, goal.yaw) or []:
         leg = _leg(graph, geo, a, da_list[0], b, db, turn_max, forbidden)

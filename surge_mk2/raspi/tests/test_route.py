@@ -181,6 +181,17 @@ class TestRoute(unittest.TestCase):
         rp = plan_to(self.g, (3.45, 1.3, 0.0), Waypoint(6.0, 2.5), start_edges={bottom})
         self.assertEqual(rp.steps[0][0], bottom)
 
+    def test_goal_snaps_to_the_given_edges(self):
+        """ゴールの吸着も今走っている経路のエッジに限れる（駐車で、枠のそばの枝へ曲がり切れないとき）。"""
+        bottom = self._edges_near(2.0, 1.0)
+        # 近道の通路のそばの枠: 全体から吸着すると通路（x=3.5）に入る
+        free = plan_to(self.g, (1.0, 1.0, 0.0), Waypoint(3.5, 1.7), snap_radius=2.5, end_at_goal=False)
+        self.assertGreater(float(free.xy[-1, 1]), 1.3)
+        held = plan_to(self.g, (1.0, 1.0, 0.0), Waypoint(3.5, 1.7), snap_radius=2.5, end_at_goal=False,
+                       start_edges={bottom}, goal_edges={bottom})
+        self.assertAlmostEqual(float(held.xy[-1, 1]), 1.0, delta=0.1)
+        self.assertEqual({e for e, _d in held.steps}, {bottom})
+
     def test_waypoint_selects_branch(self):
         start = self.START
         via_short = plan_loop(self.g, [start, Waypoint(3.5, 2.5)])
@@ -263,6 +274,57 @@ class TestRoute(unittest.TestCase):
         wps = waypoints_from_traj(np.column_stack([xs, np.zeros_like(xs)]), spacing=2.0)
         self.assertEqual(len(wps), 5)
         self.assertTrue(all(abs(w.yaw) < 1e-6 for w in wps))
+
+
+def dead_end_stub(road: float = 0.6, stub: float = 0.55) -> np.ndarray:
+    """幅 `road` の周回路の上辺から、幅 `stub` の行き止まりの枝が真上（x=3.5）へ出る地図。
+
+    `surge_20261124_075042` の形（周回の上辺から北の行き止まりへ直角に曲がる）を小さくしたもの。
+    """
+    t = _canvas(7.0, 5.0)
+    _rect(t, 0.5, 0.5, 6.5, 3.0, 1)
+    _box_wall(t, 0.5, 0.5, 6.5, 3.0)
+    _rect(t, 0.55 + road, 0.55 + road, 6.45 - road, 2.95 - road, 2)
+    x0, x1 = 3.5 - stub / 2, 3.5 + stub / 2
+    _rect(t, x0, 2.9, x1, 4.3, 1)
+    _rect(t, x0 - 0.05, 2.95, x0, 4.35, 2)
+    _rect(t, x1, 2.95, x1 + 0.05, 4.35, 2)
+    _rect(t, x0, 4.3, x1, 4.35, 2)
+    return t
+
+
+class TestParkStopOnLoop(unittest.TestCase):
+    """★ 駐車の枠が行き止まりの枝にあり、周回から枝へ曲がり切れないなら、周回の上で止まって
+    `ParkToPoint`（切り返し）に任せる（`slam2d_route._compute_stop`）。
+
+    `surge_20261124_075042`: 周回の上辺から北の枝へ半径 21cm の直角を引き、曲がり切れずに壁に当たった。
+    """
+
+    def test_stops_on_the_loop_instead_of_turning_into_the_stub(self):
+        from raspi.auto.route_config import Stop
+        from raspi.auto.slam2d_raceline import PATH_STEP
+        from raspi.auto.slam2d_route import Slam2dRoute, _compute_stop
+        t = dead_end_stub()
+        yc = 2.95 - 0.3                                     # 上辺の道の中心
+        g = build_graph(t, resolution=RES, origin=(0.0, 0.0), keep=KEEP, seed=(3.5, 0.85))
+        self.assertEqual(branches(g), 1)
+        pl = Slam2dRoute()
+        p, vehicle = pl.merged({}), pl.vehicle
+        pl.close()
+        p["turn_max_deg"] = 150.0                           # 枝への直角を経路として許す（実機の設定）
+        loop = plan_loop(g, [Waypoint(2.0, yc, math.pi), Waypoint(1.0, 1.5)])
+        edges = frozenset(loop.edge_ids)
+        slot = Stop(3.5, 3.7, yaw=0.0, mode="park")
+        # 吸着をグラフ全体にすると（従来）枝の奥まで入る経路になり、曲がり切れない
+        direct, _w = _compute_stop(t, RES, (0.0, 0.0), g, (5.0, yc, math.pi), slot, 1.5, p, vehicle,
+                                   None, None)
+        self.assertGreater(float(direct.xy[-1, 1]), 3.0)
+        self.assertLess(tightest_radius(direct, PATH_STEP)[0], 1.0 / vehicle.kappa_max)
+        line, warn = _compute_stop(t, RES, (0.0, 0.0), g, (5.0, yc, math.pi), slot, 1.5, p, vehicle,
+                                   None, edges)
+        self.assertAlmostEqual(float(line.xy[-1, 1]), yc, delta=0.1)
+        self.assertLess(float(line.xy[-1, 0]), 3.5)         # 枠の横を通り過ぎた先（後退で入れる）
+        self.assertIn("周回の上で止まって", warn)
 
 
 class TestOpenPath(unittest.TestCase):
@@ -1002,6 +1064,35 @@ class TestSlam2dRoutePlanner(unittest.TestCase):
         finally:
             pl.close()
 
+    def test_stuck_on_the_stop_path_hands_over_or_stops(self):
+        """★ 停止経路の途中で進めなくなったら、計画速度のまま壁を押し続けない（`surge_20261124_075042`
+        で 7A・12 秒）。駐車の停止点なら今の位置から `ParkToPoint` へ、ただの停止点は止まる。"""
+        from raspi.auto.route_config import Stop
+        from raspi.auto.slam2d_route import PARK, STOPPED, Slam2dRoute
+        from raspi.msgs import AutoState, VehicleState
+        for mode, phase in (("park", PARK), ("stop", STOPPED)):
+            pl = Slam2dRoute()
+            try:
+                pl.request_load("m")
+                self._wait(pl)
+                pl.slam.set_pose(2.0, 0.0, 0.0)
+                pl._stopping, pl._stop = "P", Stop(8.0, 0.0, yaw=0.0, mode=mode)
+                p = pl.merged({})
+                pl._dt = 0.1
+                path = _straight(0, 0)
+                st = AutoState(target_speed=1.0, ready=True)
+                pl._approach_stop(st, path, pl.slam.pose, VehicleState(speed=0.0, armed=True), p)
+                self.assertFalse(st.brake)                  # まだ数えていない
+                pl._stuck_t = p["stuck_s"] + 0.1
+                st = AutoState(target_speed=1.0, ready=True)
+                pl._approach_stop(st, path, pl.slam.pose, VehicleState(speed=0.0, armed=True), p)
+                self.assertTrue(st.brake)
+                self.assertEqual(st.target_speed, 0.0)
+                self.assertEqual(pl.phase, phase)
+                self.assertEqual(pl._park is not None, mode == "park")
+            finally:
+                pl.close()
+
     def test_failed_park_is_retried_from_the_current_pose(self):
         """★ 駐車（`ParkToPoint`）が失敗しても止まったままにしない。上限まで今の自己位置から出し直す。"""
         from raspi.auto.route_config import Stop
@@ -1355,6 +1446,16 @@ class TestObstacleResponse(unittest.TestCase):
         handled, st = self._respond(_straight(0, 0), self.hit, 1.3, speed=1.5, obstacle_avoid=0)
         self.assertFalse(handled)
         self.assertEqual(st.target_speed, 1.5)
+
+    def test_stuck_is_counted_on_an_open_path_without_detour(self):
+        """開いた経路（停止経路）でも進めない時間は数える（`slam2d_route` が止める・駐車に移る）。
+        Hybrid A* の迂回は閉じた経路だけ。"""
+        for _ in range(30):
+            handled, _ = self._respond(_straight(0, 0), None, np.inf, speed=0.0, armed=True,
+                                       obstacle_avoid=1)
+            self.assertFalse(handled)
+        self.assertGreater(self.pl._stuck_t, self.p["stuck_s"])
+        self.assertEqual(self.pl.phase, "EXPLORE")
 
     def test_standing_still_before_arm_is_not_stuck(self):
         """★ engage 済みで ARM 前の静止を「進めない」と数えない（数えると ARM 前に DETOUR）。"""

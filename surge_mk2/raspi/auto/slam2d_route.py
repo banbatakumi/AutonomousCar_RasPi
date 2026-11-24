@@ -304,22 +304,40 @@ def _compute_stop(trinary: np.ndarray, resolution: float, origin: tuple[float, f
     # 計算している間（数百ms）に進むぶん（`_STOP_LEAD_S`）も足す。経路は今の位置から引く
     need = (v * v / (2.0 * max(limits(p, vehicle).a_brake, 0.1)) + p["creep_dist"] + 0.5
             + _STOP_LEAD_S * v)
-    rp = plan_to(graph, pose, goal, turn_max_deg=p["turn_max_deg"],
-                 snap_radius=_PARK_SNAP_M if park else 0.6,
-                 min_len=need, end_at_goal=not park,
-                 extend=p["park_lead"] if park else 0.0, avoid=avoid,
-                 start_edges=start_edges)
     kw = _line_kwargs(p, vehicle)
     kw["v_min"] = p["creep_speed"]
-    rl, _ = build_raceline(grid, graph, rp, v_start=v_now, v_end=p["creep_speed"], **kw)
+    r_min = 1.0 / vehicle.kappa_max
+
+    def line(goal_edges=None):
+        rp = plan_to(graph, pose, goal, turn_max_deg=p["turn_max_deg"],
+                     snap_radius=_PARK_SNAP_M if park else 0.6,
+                     min_len=need, end_at_goal=not park,
+                     extend=p["park_lead"] if park else 0.0, avoid=avoid,
+                     start_edges=start_edges, goal_edges=goal_edges)
+        rl, _ = build_raceline(grid, graph, rp, v_start=v_now, v_end=p["creep_speed"], **kw)
+        return rl, tightest_radius(rl, PATH_STEP)[0]
+
+    rl, r = line()
+    warn = ""
+    if park and r < r_min and start_edges:
+        # ★ 駐車の枠のそばの道（行き止まりの枝など）へ曲がり切れない。そのまま走ると角を曲がり切れずに
+        #   壁に当たった（`surge_20261124_075042`: 周回から北の枝へ半径 21cm の直角、車の最小旋回半径 45cm）。
+        #   今走っている周回の上で枠に最も近い点の先で止まり、そこから先は後退・切り返しのできる
+        #   `ParkToPoint` に任せる
+        try:
+            rl2, r2 = line(goal_edges=start_edges)
+        except RouteError:
+            rl2 = None
+        if rl2 is not None and r2 > r:
+            rl, r = rl2, r2
+            warn = ("駐車の枠のそばの道へは曲がり切れないので、今の周回の上で止まって"
+                    "駐車（切り返し）に任せる")
     # 停止点が道の中心から横に離れていると、最後が真横への折れになる（吸着点→停止点は
     # 中心線に垂直）。曲がり切れない半径なら知らせる（止まる位置がそのぶんずれる）
-    warn = ""
-    r, _i = tightest_radius(rl, PATH_STEP)
-    r_min = 1.0 / vehicle.kappa_max
     if r < r_min:
-        warn = (f"停止点への経路に半径{r * 100:.0f}cmの所がある（車の最小旋回半径"
-                f"{r_min * 100:.0f}cm）。停止点を道の中心へ寄せると止まる位置が合う")
+        warn += "。" if warn else ""
+        warn += (f"停止点への経路に半径{r * 100:.0f}cmの所がある（車の最小旋回半径"
+                 f"{r_min * 100:.0f}cm）。停止点を道の中心へ寄せると止まる位置が合う")
     if rl.unknown_short:
         warn += ("。" if warn else "") + UNKNOWN_SHORT_NOTE.rstrip("。")
     return rl, warn
@@ -1116,6 +1134,20 @@ class Slam2dRoute(Slam2dRaceLine):
     def _approach_stop(self, st: AutoState, path: rl_mod.RaceLine, pose, vs: VehicleState,
                        p: dict[str, float]) -> AutoState:
         rem = _remaining(path, pose, self._hint)
+        if self._stuck_t > p["stuck_s"]:
+            # ★ 進めと言っているのに止まっている（壁に当たった）。停止経路では Hybrid A* の迂回をしないので、
+            #   ここで手を打たないと計画速度のまま壁を押し続ける（`surge_20261124_075042` で 7A・12 秒）。
+            #   駐車の停止点なら、後退・切り返しのできる `ParkToPoint` に今の位置から任せる。ただの停止点は止まる
+            self._stuck_t = 0.0
+            st.brake = True
+            st.target_speed = 0.0
+            if self._stop is not None and self._stop.mode == "park":
+                self._start_park()
+                st.reason = f"停止点『{self._stopping}』へ向かう途中で進めなくなった。ここから駐車に移る"
+                return st
+            self.phase = st.phase = STOPPED
+            st.reason = f"停止点『{self._stopping}』へ向かう途中で進めなくなったので止まった（残り {rem:.2f}m）"
+            return st
         v = max(0.0, vs.speed)
         # 今の速度で止まれる距離（遅延のあいだに進むぶん＋減速）
         brake_d = v * self._lim(p).react_s + v * v / (2.0 * max(self._lim(p).a_brake, 0.1))
