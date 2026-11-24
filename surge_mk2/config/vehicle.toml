@@ -20,7 +20,7 @@ wheelbase = 0.23              # L [m]
 track = 0.155                  # トレッド [m]
 # 最大路面舵角 [rad]（0.47167 ≈ 27.0°）。**ステアのリンクの換算（[control] の steer_link_*）を、モータの可動範囲
 # （モータ角×0.5 で ±30°）に通した値**。システム同定が steer_link_* と一緒に書く（手で変えない）。
-max_steer = 0.47167
+max_steer = 0.477802
 # ステアモータの可動域は機構上 ±60°（1.047 rad）だが、リンク比 0.5（2026-08-20 実測確定）
 # によりタイヤ側は半分しか切れない。上の値はタイヤ側（路面舵角）基準。
 wheel_radius = 0.03          # [m]
@@ -82,26 +82,26 @@ cmd_steer_rate_limit_rad_s = 7.0
 #    = むだ時間 + 1次遅れ + 2ζ/ωn）に使う。値は 2026-10-20 に反映した校正 3 の結果 ──
 tau_steer_s = 0.0            # サーボの1次遅れ [s]
 dead_time_s = 0.01           # サーボのむだ時間 [s]
-yaw_natural_freq_rad_s = 68.97   # 曲率の2次遅れの固有角振動数 [rad/s]。0 = 無し
-yaw_damping = 0.9              # 同 減衰比
+yaw_natural_freq_rad_s = 55.24   # 曲率の2次遅れの固有角振動数 [rad/s]。0 = 無し
+yaw_damping = 0.8              # 同 減衰比
 # ── 校正 2（ステア、`calib_steer`）: 舵角 → 曲率。[control] の steer_link_* と最上位の max_steer と**一緒に**書く ──
-steer_servo_gain = 0.98689   # サーボの定常ゲイン（報告舵角 / 参照舵角）
-steer_offset_rad = -0.008817   # 中立のずれ [rad]（正 = 左へ曲がる。Pi が指令から引く）
+steer_servo_gain = 0.98463   # サーボの定常ゲイン（報告舵角 / 参照舵角）
+steer_offset_rad = -0.001588   # 中立のずれ [rad]（正 = 左へ曲がる。Pi が指令から引く）
 # 換算（steer_link_*）に畳み込んだ残り。校正 2 は 1 と 0 を書く
 steer_gain = 1.0
 steer_gain_cubic = 0.0
 # ── 校正 4（遅延、`calib_latency`）: スキャン完了 → STM32 受理 [s]。実ノードを通さない学習環境（ml_lidar）も使う ──
-control_latency_s = 0.0039
+control_latency_s = 0.0059
 # ── 校正 5（車速制御、`calib_speed` → 確かめ `calib_speed_check`）──
 # 車体の利得 [(m/s²)/(N·m)]（後輪2輪の合計トルク → 加速度。車輪の回転の慣性を含む実効の値。名目 16.7）と、
 # 転がり抵抗の減速度 [m/s²]（後輪の摩擦を含む）。★PI を通した応答に記録時のゲインを既知として当てはめると
 # 利得を誤る（21.5 と出た例がある）。PI を仮定せずに当てはめる（docs/calibration.md）
-speed_plant_gain = 12.5758
-rolling_resistance = 0.2925
+speed_plant_gain = 11.5799
+rolling_resistance = 0.1832
 # 車速 PI のゲイン（io_node が CONFIG_SET で STM32 へ送る。`raspi/core/control_params.py` の FROM_DYNAMICS）。
 # 校正 5 が測った利得と遅れから位相余裕 60° の式で決める（`tools/calib/loop.py`）
-speed_kp = 1.15716
-speed_ki = 4.33934
+speed_kp = 1.25668
+speed_ki = 4.71254
 # ── ファームの定数（同定しない）──
 speed_torque_max_nm = 0.30      # 車速 PI の出力の上限（DRIVE_MAX_TORQUE_NM × 2輪）
 speed_filter_s = 0.00995           # wheel_speed（報告用）のローパス（DRIVE_LPF_TAU_FRONT_S）。シムの観測だけ
@@ -115,11 +115,11 @@ drive_ratio = 2.0             # 駆動輪数（後輪2輪ぶんのトルクが�
 # 実測して書く
 [limits]
 a_lat_m_s2 = 4.0912
-a_accel_m_s2 = 2.925
-a_brake_m_s2 = 2.5413
+a_accel_m_s2 = 3.315
+a_brake_m_s2 = 3.262
 # 非常時の最大制動（ABS）の減速度 [m/s²]。slam2d は使わない。io_node が CONFIG_SET（★v0.29 `BRAKE_DECEL_M_S2`）で
 # STM32 へ送り、自動停止の停止距離と DISARM 後の制動の上限に使う（ファームは値を持たない）。校正 9 が書く
-abs_brake_decel_m_s2 = 2.165
+abs_brake_decel_m_s2 = 3.234
 
 # ── シムの車だけが使う値（`sim/vehicle.py` の `VehicleSpec`。**実機の制御は読まない・同定しない**）──
 # 以前の同定手順で測った値。slam2d に要らないので測り直さない。
@@ -183,16 +183,16 @@ slip_speed_floor_m_s = 0.5
 # **ゲイン（kp・ki）は校正 6（`calib_wheel`）が後輪の慣性 J から式で書く**（kp = ωc·J/r、ki = kp·ωc/比。ωc・比は
 # slip_gains.py の固定値）。効きは校正 9 が確かめる。
 tc_slip_target = 0.15
-tc_kp_nm_per_m_s = 0.14324        # スリップ速度の偏差 [m/s] → トルクの上限 [N·m]
-tc_ki_nm_per_m = 2.1486         # 同 積分 [N·m/(m/s)/s]
+tc_kp_nm_per_m_s = 0.16728        # スリップ速度の偏差 [m/s] → トルクの上限 [N·m]
+tc_ki_nm_per_m = 2.5092         # 同 積分 [N·m/(m/s)/s]
 tc_min_torque_nm = 0.0        # トルクの上限の下限。0 でよい（浮いた輪は 0.005 でも回り続ける）
 # ── 片輪浮き対策: 後輪左右の速度差（ヨーレートで説明できる分を除く）がこれを超えたら、
 #    先走っている輪を TC と同じ PI で絞る [m/s]。前輪エンコーダが壊れても働く見張り ──
 wheel_lift_diff_threshold_m_s = 0.35
 # ── ABS（制動モード。左右共通 = ロックしかけている側に合わせる）。目標は手置きの固定値、ゲインは校正 6 が書く（TC と同じ）──
 abs_slip_target = 0.15
-abs_kp_nm_per_m_s = 0.07162
-abs_ki_nm_per_m = 1.0743
+abs_kp_nm_per_m_s = 0.08364
+abs_ki_nm_per_m = 1.2546
 # ── TV（後輪左右の荷重に比例した配分。★プロトコル v0.17。フィードフォワードのみ）──
 # 左右のトルク差 = 総駆動トルク × clamp(tv_load_gain_s2_per_m × 車速 × ヨーレート, ±tv_max_ratio)。
 # 旋回で荷重の乗る外輪へ多く配り、荷重の抜けた内輪を空転させない（定速の旋回ではほぼ何もしない）。
@@ -209,21 +209,21 @@ tv_max_ratio = 0.5            # 比率の上限。1 で内輪のトルクが 0
 # これで決まる。リンクが複雑で設計から式を出せないため、低速の弧の曲率から測る。
 # [dynamics] の steer_gain=1・steer_gain_cubic=0・steer_offset_rad と最上位の max_steer と一緒に書く
 # （**そろって初めて意味が合う。片方だけ手で変えない**）。値は 2026-10-20 に反映した校正 2 の結果
-steer_link_gain = 1.101158
-steer_link_cubic = -0.730735
+steer_link_gain = 1.098543
+steer_link_cubic = -0.678477
 # ── ローンチコントロール（★プロトコル v0.20。手動操作の発進（GUI）・planner が `launch` を立てた発進で、STM32 が目標車速の
 #    ランプと車速PIを迂回して全開＋TC で加速する。空転を抑えるのは上の TC の値）──
 # 発進を終えて車速PIへ戻すときの積分の初期値 [N·m、1輪あたり] = その車速を保つのに要るトルク
 # = rolling_resistance ÷ speed_plant_gain ÷ 2。**校正 5 が書く**
-launch_exit_torque_nm = 0.011629
+launch_exit_torque_nm = 0.007909
 
 # ── 車速PIの加速度フィードフォワード（★プロトコル v0.21。後輪2輪の合計トルク [N·m]）──
 # STM32 は車速PIの出力に「speed_ff_nm_per_m_s2 × 目標車速の傾き [m/s²] ＋ speed_ff_rr_nm × 進む向き」を足す。
 # 加速に要るトルクを先に足せば、PI は残ったずれだけを直せばよい（2 自由度制御）。**校正 5 が書く**:
 # speed_ff_nm_per_m_s2 = 1 ÷ speed_plant_gain、speed_ff_rr_nm = rolling_resistance ÷ speed_plant_gain。
 # 0 にすると無効で、planner は Pi 側で遅れを見込む
-speed_ff_nm_per_m_s2 = 0.079518
-speed_ff_rr_nm = 0.023258
+speed_ff_nm_per_m_s2 = 0.086357
+speed_ff_rr_nm = 0.015817
 
 # ── 前輪エンコーダの校正（★プロトコル v0.27。調整値ではなく**校正の結果**。STM32 `lib/encoder_cal`）──
 # アナログ出力の絶対角エンコーダ（AS5600）の読みを STM32 が真の角度へ直してから、車速・`odom_dist`・
@@ -234,18 +234,18 @@ speed_ff_rr_nm = 0.023258
 #                 2026-10-17 の走行記録の推定では左 ±1.1°・右 ±2.3°（右はデータシートの INL ±1° を超える。磁石のずれの疑い）
 # 下の値は 2026-10-18 11:39 の記録の校正 1（左 ±1.2°・右 ±3.2°）。この校正を入れた STM32 で録った記録で、走行距離に
 # 残る周期誤差が ±0.1〜0.2° に落ちることを確かめてある（同じ日の別の記録とは係数が 0.1° 程度で一致）
-enc_left_lo = 0.00105
-enc_left_hi = 0.998416
-enc_left_h1s = 0.002271
-enc_left_h1c = 0.003257
-enc_left_h2s = 0.002677
-enc_left_h2c = 0.015984
-enc_right_lo = 0.002732
-enc_right_hi = 1.0
-enc_right_h1s = -0.002154
-enc_right_h1c = 0.018629
-enc_right_h2s = -0.031218
-enc_right_h2c = 0.008232
+enc_left_lo = 0.002745
+enc_left_hi = 1.0
+enc_left_h1s = 0.000405
+enc_left_h1c = 0.006083
+enc_left_h2s = -0.00486
+enc_left_h2c = 0.000156
+enc_right_lo = 0.001273
+enc_right_hi = 0.998546
+enc_right_h1s = -0.013935
+enc_right_h1c = 0.009826
+enc_right_h2s = -0.040774
+enc_right_h2c = 0.018354
 # ── 車速のカルマンフィルタの調整値（★v0.27。STM32 `src/control/speed_kf.h`）──
 # 下の値の一部は 2026-10-16・17 の記録1本から決めた経験値（`docs/control_constants.md`）。
 # 検定は `raspi/tools/kf_consistency.py`（NIS≈1・相関≈0 になること）
@@ -273,10 +273,10 @@ tyre_c = 0.3
 load_transfer = 0.13324492181757844
 yaw_damping = 1.6390035452184182
 yaw_inertia_kgm2 = 0.014779822379128905
-wheel_inertia_kgm2 = 3.581e-05
-wheel_friction_nm = 0.003061
-wheel_damping_nms = 1.79e-05
-md_delay_s = 0.007
+wheel_inertia_kgm2 = 4.182e-05
+wheel_friction_nm = 0.00301
+wheel_damping_nms = 2.091e-05
+md_delay_s = 0.013
 md_tau_s = 0.009
 
 # ── センサ取付位置 ──────────────────────────────────────────────────────
