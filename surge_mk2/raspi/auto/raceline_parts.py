@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING
 
@@ -143,8 +145,13 @@ class AvoidState(_Part):
     ot_nrm: np.ndarray | None = None
     #: これまでに見た動く相手の位置（map フレーム、新しい順に `_OPP_TRAIL_N` 個まで）
     opp_trail: list[tuple[float, float]] = field(default_factory=list)
+    #: 覚えた速さによる相手の予測の前側の外れ（実測、`overtake.calibrate_spread`）と、それを測った観測の時刻
+    ot_spread: float | None = None
+    ot_spread_t: float = -math.inf
     ot_status: str = ""
     ot_lead: ot_mod.Track | None = None
+    #: 付いていく相手の予測の速さ（`OvertakeResult.lead_u`。付いていく制御が追跡の生の速さの代わりに使う）
+    ot_lead_u: float | None = None
     #: 今走る線の上に居る動く相手と、そこまでの距離（車間を保つ上限、`_moving_ahead`）
     acc: tuple[obs_mod.Obstacle, float] | None = None
     #: 追い抜きの計算時間の記録（`sim.bench` が読む）

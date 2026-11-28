@@ -40,7 +40,8 @@ from .obstacles import MOVING_MIN_SPEED, Obstacle
 from .raceline import ENV_U, RaceLine, curvature
 
 __all__ = ["OvertakeConfig", "Track", "Cand", "OvertakeResult", "frenet_state", "frenet_tracks",
-           "advance_along", "opp_motion", "line_profile", "line_shift", "plan", "eval_cand", "build"]
+           "advance_along", "opp_motion", "line_profile", "line_shift", "pred_spread", "calibrate_spread", "plan",
+           "eval_cand", "build"]
 
 #: 格子の点の間隔 [m]（経路の点 0.1m の 2〜3 つおき）。速いときは粗くする（車体の長さ 0.37m より
 #: 細かければ、静止物を飛び越す判定にはならない）
@@ -98,6 +99,14 @@ _S1_BACKS = (0.0, 0.5, 1.0)
 _S2_STEP_LATE = 0.8
 #: 前の相手に付いていく候補が、当たり判定の前後の余裕（`margin_long`＋予測の広がりの上限）に足す車間 [m]
 _FOLLOW_SLACK = 0.05
+#: 付いていく候補の「今すでに車間の内側か」の判定で許す量 [m]（相手の後ろ面の観測の揺れ。`_follow_times`）
+_INSIDE_TOL = 0.05
+#: 乗っている計画を続ける候補の確かめで許す道幅 [m] と曲率の割合（`eval_cand` の `keep_last`）。★時間が最短の候補は
+#: 道幅が尽きる直前で戻るので道幅の境目に居り、毎周期の格子のずれ（0.2〜0.3m）による標本化の差で、一度確かめて乗った
+#: 計画が落ちて「横へ出ては戻る」を繰り返した（理想化した検証、相手 0.7 倍）。道幅には壁との余裕（`avoid_clear`）が
+#: 別に入っている
+_KEEP_ROOM_TOL = 0.02
+_KEEP_KAPPA_TOL = 0.03
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,9 @@ class OvertakeConfig:
     #: 減速の上限は 2.54m/s²）。見込まないと、相手に近づきながら付く所で毎回間に合わず追突した（車間 0.3m・相手 0.75 倍で
     #: 1 本に 16〜19 回）
     cmd_lead_s: float = 0.0
+    #: 覚えた速さで予測する相手の前側の広がり（予測で進む距離に対する割合）。走行中に予測の外れを実測した値
+    #: （`calibrate_spread`。呼び出し側が 1 秒に 1 回ほど出す）。None なら一定の `_GROW_LEARNED`
+    grow_learned: float | None = None
 
 
 
@@ -214,6 +226,9 @@ class OvertakeResult(NamedTuple):
     #: 線のまま前の相手に付いていく最善の速度の計画（`speeds` と同じ点。避ける候補が直交座標の確かめで全部落ちた
     #: ときの付いていく速さ）
     line_speed: np.ndarray | None = None
+    #: 付いていく相手（`lead`）の今の場所での予測の速さ [m/s]（付いていく計画と同じ、覚えた速さの遅い側。覚えていない
+    #: 場所は今の速さの比で伸ばした値）。付いていく制御が追跡の生の速さの代わりに使う
+    lead_u: float | None = None
 
 
 def _quintic(d0, d1, d2, dT, L):
@@ -429,6 +444,14 @@ class _Long(NamedTuple):
         return self.a_brake * np.sqrt(np.maximum(1.0 - u * u, 0.0))
 
 
+def _path_ds(ds: np.ndarray, kr: np.ndarray, d: np.ndarray, dd: np.ndarray) -> np.ndarray:
+    """横ずれ `d(x)` の経路が格子の点の間に走る道のり (C, K-1)。経路の弧長 `ds` に `√((1−κr·d)² + d'²)` を掛けた
+    もの。★以前は時刻を経路の弧長で出していて、カーブの外側を回る候補の時刻を短く（κ=0.45・外へ 0.4m で 18%）、
+    内側を長く見積もっていた。外から抜く候補は追い付く時刻が早すぎ、内から抜く候補は遅すぎた"""
+    f = np.sqrt((1.0 - kr[None, :] * d) ** 2 + dd * dd)
+    return ds[None, :] * 0.5 * (f[:, :-1] + f[:, 1:])
+
+
 def _speeds(kap_c, v_cap, a_lat, ds, v_now, cfg: OvertakeConfig, lon: _Long | None = None):
     """候補 (C, K) の速度: 曲率で決まる上限 → 後ろから減速 → 今の速度から加速。点 k から出る加減速はその点の
     横の使い具合で決まる（`_Long`。速度プロファイルと同じ）。今の速度から減速し切れない候補は `feasible=False`。"""
@@ -437,14 +460,16 @@ def _speeds(kap_c, v_cap, a_lat, ds, v_now, cfg: OvertakeConfig, lon: _Long | No
     with np.errstate(divide="ignore"):
         v = np.minimum(v_cap[None, :], np.sqrt(a_lat[None, :] / np.maximum(np.abs(kap_c), 1e-6)))
     K = v.shape[1]
+    # 道のり: 候補ごと (C, K-1)（`_path_ds`）でも経路の弧長 (K-1,) でもよい
+    dsm = np.broadcast_to(ds, (v.shape[0], K - 1))
     for k in range(K - 2, -1, -1):
         a = lon.dec(v[:, k + 1], kap_c[:, k + 1], k + 1)
-        v[:, k] = np.minimum(v[:, k], np.sqrt(v[:, k + 1] ** 2 + 2.0 * a * ds[k]))
+        v[:, k] = np.minimum(v[:, k], np.sqrt(v[:, k + 1] ** 2 + 2.0 * a * dsm[:, k]))
     ok = v[:, 0] >= v_now - 0.3
     v[:, 0] = np.minimum(v[:, 0], max(v_now, 0.0))
     for k in range(K - 1):
         a = lon.acc(v[:, k], kap_c[:, k], k)
-        v[:, k + 1] = np.minimum(v[:, k + 1], np.sqrt(v[:, k] ** 2 + 2.0 * a * ds[k]))
+        v[:, k + 1] = np.minimum(v[:, k + 1], np.sqrt(v[:, k] ** 2 + 2.0 * a * dsm[:, k]))
     return np.maximum(v, 0.05), ok
 
 
@@ -552,6 +577,7 @@ def _follow_times(t: np.ndarray, x: np.ndarray, ds: np.ndarray, rows: np.ndarray
       予測の終わりで相手を止めて見るので、付いていく候補が止まった相手に当たったことになる）
     """
     s_lo, t_arr, s_arr, keep, front = follow[:5]
+    keep_now = follow[5] if len(follow) > 5 else keep
     t = t.copy()
     ok = np.ones(len(t), dtype=bool)
     check = np.ones(t.shape, dtype=bool)
@@ -562,6 +588,8 @@ def _follow_times(t: np.ndarray, x: np.ndarray, ds: np.ndarray, rows: np.ndarray
     t_req = np.where(need <= 0.0, 0.0, np.interp(np.minimum(need, s_arr[-1]), s_arr, t_arr))
     tr_ = t[rows]
     dt0 = np.diff(tr_, axis=1)
+    # 道のり: `rows` の候補ごと (R, K-1)（`_path_ds`）か経路の弧長 (K-1,)
+    ds = ds[rows] if np.ndim(ds) == 2 else np.broadcast_to(ds, (len(tr_), len(x) - 1))
     out = np.empty_like(tr_)
     up = np.full(len(tr_), np.inf) if upto is None else np.asarray(upto, dtype=float)
     req_m = np.where((x[None, :] <= up[:, None]) & ~beyond[None, :], t_req[None, :], 0.0)
@@ -575,41 +603,49 @@ def _follow_times(t: np.ndarray, x: np.ndarray, ds: np.ndarray, rows: np.ndarray
     #   上限で後ろから均し（`v[k]² ≤ v[k+1]² + 2a·ds`）、今の速さからそれだけ減速できない候補は使えない。
     #   均さずに最初の区間だけ確かめると、横に並んだ所から「相手の後ろへ戻る」計画が瞬時に下がれる前提に
     #   なり、戻る途中で相手に当てた（sim.bench --mover、1 本に 4〜7 回）
-    v_seg = ds[None, :] / np.maximum(np.diff(out, axis=1), 1e-6)
+    v_seg = ds / np.maximum(np.diff(out, axis=1), 1e-6)
     v_pt = np.empty_like(out)
     v_pt[:, 0] = v_seg[:, 0]
     v_pt[:, -1] = v_seg[:, -1]
     v_pt[:, 1:-1] = np.minimum(v_seg[:, :-1], v_seg[:, 1:])
     for k in range(v_pt.shape[1] - 2, -1, -1):
         a = lon.dec(v_pt[:, k + 1], kap[:, k + 1], k + 1) if lon is not None else a_brake
-        v_pt[:, k] = np.minimum(v_pt[:, k], np.sqrt(v_pt[:, k + 1] ** 2 + 2.0 * a * ds[k]))
-    v_first = ds[0] / max(float(dt0[:, 0].min()), 1e-6) if dt0.shape[1] else 0.0
-    v_now = np.minimum(ds[0] / np.maximum(dt0[:, 0], 1e-6), v_first)
+        v_pt[:, k] = np.minimum(v_pt[:, k], np.sqrt(v_pt[:, k + 1] ** 2 + 2.0 * a * ds[:, k]))
+    v_first = float(np.max(ds[:, 0] / np.maximum(dt0[:, 0], 1e-6))) if dt0.shape[1] else 0.0
+    v_now = np.minimum(ds[:, 0] / np.maximum(dt0[:, 0], 1e-6), v_first)
     # 今の速さからは減速度の上限でしか落とせない（物理的に走れる速さで時刻を出し、相手に重なるかは当たり判定が決める）。
     # ★以前は「狙いの車間を守れるだけ減速できるか」で候補を捨てていた。車間 0.3m で付いていくと余裕が無く、相手が
     #   コーナーの手前で減速するたびに付いていく候補も区間の入口まで付いていく候補も全部落ち、一度も仕掛けなかった
     v_pt[:, 0] = v_now
     for k in range(v_pt.shape[1] - 1):
         a = lon.dec(v_pt[:, k], kap[:, k], k) if lon is not None else a_brake
-        v_pt[:, k + 1] = np.maximum(v_pt[:, k + 1], np.sqrt(np.maximum(v_pt[:, k] ** 2 - 2.0 * a * ds[k], 0.0)))
+        v_pt[:, k + 1] = np.maximum(v_pt[:, k + 1], np.sqrt(np.maximum(v_pt[:, k] ** 2 - 2.0 * a * ds[:, k], 0.0)))
     # 付いていった後に元の速さへ戻るところは加速度の上限で上げる（瞬時に戻る前提だと、遅らせて横へ出る候補が
     # 追い付く時刻を早く見積もる）
     if lon is not None or math.isfinite(a_accel):
         for k in range(v_pt.shape[1] - 1):
             a = lon.acc(v_pt[:, k], kap[:, k], k) if lon is not None else a_accel
-            v_pt[:, k + 1] = np.minimum(v_pt[:, k + 1], np.sqrt(v_pt[:, k] ** 2 + 2.0 * a * ds[k]))
-    dt_new = 2.0 * ds[None, :] / np.maximum(v_pt[:, :-1] + v_pt[:, 1:], 1e-6)
+            v_pt[:, k + 1] = np.minimum(v_pt[:, k + 1], np.sqrt(v_pt[:, k] ** 2 + 2.0 * a * ds[:, k]))
+    dt_new = 2.0 * ds / np.maximum(v_pt[:, :-1] + v_pt[:, 1:], 1e-6)
     out2 = np.concatenate([out[:, :1], out[:, :1] + np.cumsum(dt_new, axis=1)], axis=1)
     t[rows] = out2 if (lon is not None or math.isfinite(a_accel)) else np.maximum(out, out2)
-    ok[rows] = req_m[:, 0] <= 1e-3                      # 今すでに車間の内側なら、車間を守る候補としては使えない
+    # 今すでに車間の内側なら、車間を守る候補としては使えない。★「今」は付いていく制御が保つ車間（上乗せ前の
+    #   `keep_now`。`slam2d_raceline._follow_speed` と同じ）で見る。上乗せ（予測の不確かさ × 遅れ・近づく速さ × 指令の
+    #   遅れ）込みの車間で見ると、制御どおりに付いていくほど常に内側に居ることになり、「区間の入口まで付いていって
+    #   から抜く」候補が全部捨てられていた（理想化した検証で、続ける計画が落ちる理由のいちばん）。上乗せ分は先の点の
+    #   時刻（少し下がる計画）で扱う。観測の揺れ（後ろ面の位置 ±数 cm）の分は許す
+    need_now = x[0] + front + keep_now - s_lo
+    ok[rows] = need_now <= _INSIDE_TOL
     check[np.ix_(rows, beyond)] = False
     return t, ok, check
 
 
 def eval_cand(cands: np.ndarray, x, kr, v_cap, a_lat, ds, room_l, room_r, v_now,
               tracks, cfg: OvertakeConfig, d_start: float, motion: list | None = None,
-              follow=None, grow_rel: list | None = None, lon: _Long | None = None, slow: list | None = None):
-    """候補 (C, 9) をまとめて評価する。戻り値 `(使えるか, 時間のコスト, 当たる最初の障害物, d, 落ちた理由, 横の間隔,
+              follow=None, grow_rel: list | None = None, lon: _Long | None = None, slow: list | None = None,
+              keep_last: bool = False):
+    """候補 (C, 9) をまとめて評価する。`keep_last` なら最後の候補（乗っている計画を続けるもの）の道幅・曲率の確かめに
+    `_KEEP_ROOM_TOL`・`_KEEP_KAPPA_TOL` だけ許す（一度確かめて乗った形を、格子のずれによる標本化の差で落とさない）。戻り値 `(使えるか, 時間のコスト, 当たる最初の障害物, d, 落ちた理由, 横の間隔,
     各点の時刻)`（時刻は計算しなかった候補が nan）。
 
     `follow` があれば、経路へ戻る候補（`dT = 0`）は前の相手に付いていく速さで走る（`_follow_times`）。
@@ -621,14 +657,29 @@ def eval_cand(cands: np.ndarray, x, kr, v_cap, a_lat, ds, room_l, room_r, v_now,
     fade = np.clip(1.0 - x / 1.0, 0.0, 1.0)
     lim_l = np.maximum(room_l, max(d_start, 0.0) * fade + 0.005)
     lim_r = np.maximum(room_r, max(-d_start, 0.0) * fade + 0.005)
-    in_room = ((d <= lim_l[None, :]) & (-d <= lim_r[None, :])).all(axis=1)
+    tol = np.zeros((len(cands), 1))
+    if keep_last:
+        tol[-1] = _KEEP_ROOM_TOL
+    in_room = ((d <= lim_l[None, :] + tol) & (-d <= lim_r[None, :] + tol)).all(axis=1)
+    k_tol = 1.0 + tol / max(_KEEP_ROOM_TOL, 1e-9) * _KEEP_KAPPA_TOL
     # Frenet の曲率は近似なので（直交座標で測ると数 % 大きい）、限界の 95% までにする。元の線が
     # すでに限界を超えている所（道幅が足りず半径を開けられないヘアピン）は、元の曲率に限界の
     # `_KAPPA_SLACK` まで上乗せしてよい（`avoid.plan_offset` と同じ。+0.001 しか許さないと、
     # そこでは少しでも横へずれた候補がすべて落ち、他車の後ろを 1 周近く付いて回った）
     k_lim = np.maximum(0.95 * cfg.kappa_max, np.abs(kr) + _KAPPA_SLACK * cfg.kappa_max)
-    k_ok = ((np.abs(kap_c) <= np.where(np.abs(kr) > 0.95 * cfg.kappa_max, k_lim, 0.95 * cfg.kappa_max)[None, :]).all(axis=1)
-            & (one > 0.2).all(axis=1))
+    k_ok = ((np.abs(kap_c) <= np.where(np.abs(kr) > 0.95 * cfg.kappa_max, k_lim, 0.95 * cfg.kappa_max)[None, :] * k_tol)
+            .all(axis=1) & (one > 0.2).all(axis=1))
+    # 格子の点の間（中点）でも曲率を確かめる。★点だけで見ると、毎周期の格子のずれで同じ候補の曲率が限界の前後を
+    #   行き来し、乗っている計画が落ちて別の候補へ入れ替わった
+    g0 = np.nonzero(k_ok & in_room)[0]
+    if g0.size:
+        xm = 0.5 * (x[:-1] + x[1:])
+        km = 0.5 * (kr[:-1] + kr[1:])
+        dm_, _, dddm = _profile(xm, *cands[g0, 1:].T)
+        kap_m = km[None, :] / np.maximum(1.0 - km[None, :] * dm_, 0.2) + dddm
+        lim_m = np.maximum(0.95 * cfg.kappa_max, np.abs(km) + _KAPPA_SLACK * cfg.kappa_max)
+        k_ok[g0] = (np.abs(kap_m) <= np.where(np.abs(km) > 0.95 * cfg.kappa_max, lim_m, 0.95 * cfg.kappa_max)[None, :]
+                    * k_tol[g0]).all(axis=1)
     # ★ 速度・時刻・当たり判定は、道幅と曲率を満たす候補だけで計算する（結果は全候補で計算したときと同じ）。
     #   相手 2 台で「通れない」と出る周期は 1500 本中 1200 本がここで落ち、残りの計算が無駄だった
     C = len(cands)
@@ -643,8 +694,9 @@ def eval_cand(cands: np.ndarray, x, kr, v_cap, a_lat, ds, room_l, room_r, v_now,
     hit = np.zeros(C, dtype=bool)
     tm = np.full((C, len(x)), np.nan)
     if sub.size:
-        v, vk = _speeds(kap_c[sub], v_cap, a_lat, ds, v_now, cfg, lon)
-        dt = 2.0 * ds[None, :] / (v[:, :-1] + v[:, 1:])
+        dsc = _path_ds(ds, kr, d[sub], dd[sub])
+        v, vk = _speeds(kap_c[sub], v_cap, a_lat, dsc, v_now, cfg, lon)
+        dt = 2.0 * dsc / (v[:, :-1] + v[:, 1:])
         t = np.concatenate([np.zeros((sub.size, 1)), np.cumsum(dt, axis=1)], axis=1)
         check = np.ones((1, len(x)), dtype=bool)
         if follow is not None:
@@ -652,7 +704,7 @@ def eval_cand(cands: np.ndarray, x, kr, v_cap, a_lat, ds, room_l, room_r, v_now,
             late = cands[sub, 8] > 0.0 if cands.shape[1] > 8 else np.zeros(sub.size, dtype=bool)
             rows_f = (cands[sub, 4] == 0.0) | late
             upto = np.where(late[rows_f], cands[sub, 8][rows_f] if cands.shape[1] > 8 else np.inf, np.inf)
-            t, f_ok, check = _follow_times(t, x, ds, rows_f, follow, cfg.a_brake, upto, cfg.a_accel,
+            t, f_ok, check = _follow_times(t, x, dsc, rows_f, follow, cfg.a_brake, upto, cfg.a_accel,
                                            lon, kap_c[sub][rows_f] if lon is not None else None)
             vk = vk & f_ok
         ds_ = d[sub]
@@ -688,7 +740,12 @@ def eval_cand(cands: np.ndarray, x, kr, v_cap, a_lat, ds, room_l, room_r, v_now,
         v_ok[sub], hit[sub], first[sub], gap[sub] = vk, h, f1, np.where(g, g1, -np.inf)
         ok[sub] = vk & ~h & g
         tm[sub] = t
-        cost[sub] = t[:, -1] + _END_COST * np.abs(ds_[:, -1]) + _LAT_COST * np.abs(ds_).max(axis=1)
+        # 順位付けの時間: 線より長い道のりは損として数えるが、短い道のり（カーブの内側）は得にしない。★本当の道のりで
+        #   比べると、速度の上限（`v_max`・見通し）で抑えた所では内側へずれる候補が線より速くなり、障害物が見えるたびに
+        #   線を外れて内側を走った。線はその速度の上限の下で引いた最善の線として扱う（時刻・当たり判定は本当の道のり）
+        w = np.maximum(1.0, ds[None, :] / np.maximum(dsc, 1e-9))
+        cost[sub] = ((np.diff(t, axis=1) * w).sum(axis=1) + _END_COST * np.abs(ds_[:, -1])
+                     + _LAT_COST * np.abs(ds_).max(axis=1))
     fails = {"道幅": int((~in_room).sum()), "曲率": int((~k_ok).sum()), "減速": int((geo & ~v_ok).sum()),
              "重なる": int(hit.sum())}
     return ok, cost, first, d, fails, gap, tm
@@ -736,10 +793,22 @@ _LINE_MIN_N = 2
 #: 覚えた速さを使うのに要る観測の数。1 周で 1 区間に約 1 つ（10Hz・2m/s で 0.2m おき）しか入らないので 1。
 #: EKF の速さは 1 つでも真値の ±数 %（追跡の `VelocityTracker`）
 _SPEED_MIN_N = 1
+#: 場所ごとの相手の速さに使う直近の観測の数（中央値。1 周で 1 区間に約 1 つなので、直近の約 3 周）
+_SPEED_RECENT = 3
+#: 場所ごとの相手の速さ・ばらつきを均す前後の区間の数（±0.4m）
+_SPEED_SMOOTH = 2
 #: 相手の軌跡から速さを差分で出すとき、前後の観測の時刻の間隔の上限 [s] と、結んでよい速さの上限 [m/s]（`line_profile`）
 _DIFF_GAP_S = 0.15
 _DIFF_VMAX = 6.0
 _LINE_SHIFT_MAX = 0.6
+#: 予測の当たり具合を測る（`pred_spread`）: 予測の長さ [s]（追い付いてから抜き切るまで 1〜3 秒）・後の観測の時刻の
+#: 許容 [s]（点群 1 周 0.1s の半分）・使うのに要る組の数・下限（観測の位置の揺れ 2〜3cm ÷ 1〜3 秒で進む 2〜7m）
+_CAL_TAU = (1.0, 2.0, 3.0)
+_CAL_DT = 0.05
+_CAL_MIN_N = 30
+_CAL_FLOOR = 0.03
+#: 予測の当たり具合を測る直近の時間 [s]（約 2 周。それより前の観測で覚えた速さで、この間の観測を予測する）
+_CAL_RECENT_S = 20.0
 
 
 def line_profile(path: RaceLine, order: np.ndarray, s_rel: np.ndarray, nrm: np.ndarray,
@@ -801,14 +870,135 @@ def line_profile(path: RaceLine, order: np.ndarray, s_rel: np.ndarray, nrm: np.n
     if u is not None:
         uk = u[keep]
         mv = uk >= MOVING_MIN_SPEED
-        cnt_u = np.bincount(b[mv], minlength=nb).astype(float)
-        sum_u = np.bincount(b[mv], weights=uk[mv], minlength=nb)
-        sum_u2 = np.bincount(b[mv], weights=uk[mv] ** 2, minlength=nb)
-        mean_u = np.where(cnt_u > 0, sum_u / np.maximum(cnt_u, 1.0), np.nan)
-        # 場所ごとのばらつき（観測 2 つ以上。無ければ nan）。付いていく計画は遅い側（`_slow_side`）を使う
-        var = sum_u2 / np.maximum(cnt_u, 1.0) - mean_u ** 2
-        sd_u = np.where(cnt_u >= 2, np.sqrt(np.maximum(var, 0.0) * cnt_u / np.maximum(cnt_u - 1.0, 1.0)), np.nan)
-    return s0, np.where(cnt > 0, tot / np.maximum(cnt, 1.0), 0.0), cnt, mean_u, cnt_u, sd_u
+        bm, um = b[mv], uk[mv]
+        if trail.shape[1] >= 5 and len(bm):
+            # ★場所ごとに**直近の `_SPEED_RECENT` 回**の観測だけを使い、その中央値を覚えた速さにする。以前は 3 分ぶん全部の
+            #   平均で、相手の線や速さが周ごとに変わると（シムの他車は自車の経路に乗り、自車の経路が周ごとに替わる）古い周の
+            #   値で予測が外れた（1 周目は s=4〜10m で 0.7m/s、以降 1.2〜1.5m/s。予測の外れの p90 が標本外で進む距離の 52%）。
+            #   中央値は、別の相手を結んだ差分などの外れ値にも強い
+            tm_ = trail[m, 4][keep][mv]
+            o = np.lexsort((-tm_, bm))                   # 区間ごとに新しい順
+            bo = bm[o]
+            st_ = np.r_[0, np.nonzero(np.diff(bo))[0] + 1]
+            rank = np.arange(len(bo)) - np.repeat(st_, np.diff(np.r_[st_, len(bo)]))
+            sel = rank < _SPEED_RECENT
+            bm, um = bo[sel], um[o][sel]
+            o2 = np.lexsort((um, bm))                    # 区間ごとに値の順
+            bm, um = bm[o2], um[o2]
+            cnt_u = np.bincount(bm, minlength=nb).astype(float)
+            first = np.r_[0, np.cumsum(cnt_u)[:-1]].astype(int)
+            c_ = cnt_u.astype(int)
+            lo_i = np.clip(first + (c_ - 1) // 2, 0, max(len(um) - 1, 0))
+            hi_i = np.clip(first + c_ // 2, 0, max(len(um) - 1, 0))
+            mean_u = np.where(cnt_u > 0, 0.5 * (um[lo_i] + um[hi_i]), np.nan)
+        else:
+            cnt_u = np.bincount(bm, minlength=nb).astype(float)
+            mean_u = np.where(cnt_u > 0, np.bincount(bm, weights=um, minlength=nb) / np.maximum(cnt_u, 1.0), np.nan)
+        # 場所ごとのばらつき（同じ観測で 2 つ以上。無ければ nan）。付いていく計画は遅い側（`_slow_side`）を使う
+        sum_u = np.bincount(bm, weights=um, minlength=nb)
+        sum_u2 = np.bincount(bm, weights=um ** 2, minlength=nb)
+        mu_ = sum_u / np.maximum(cnt_u, 1.0)
+        var = np.where(cnt_u >= 2, np.maximum(sum_u2 / np.maximum(cnt_u, 1.0) - mu_ ** 2, 0.0)
+                       * cnt_u / np.maximum(cnt_u - 1.0, 1.0), np.nan)
+        # ★経路に沿って ±`_SPEED_SMOOTH` 区間で均す（覚えていない区間へは広げない）。区間（0.2m）ごとの値は直近の数回の
+        #   観測だけで決まり、区間ごとに ±0.2m/s ほどばらつく。その値で付いていく制御が相手の速さを読むと周期ごとに
+        #   0.16m/s（中央）変わり、自車の速さも揺れた。左右対称の平均なので、減速区間の一次の変化は保たれる
+        mean_u = _smooth_bins(mean_u, _SPEED_SMOOTH)
+        sd_u = np.sqrt(_smooth_bins(var, _SPEED_SMOOTH))
+    # 射影した観測（経路に沿った位置・時刻・その時の経路に沿った速さ）。予測の当たり具合を測るのに使う（`pred_spread`）
+    samples = None
+    if trail.shape[1] >= 5:
+        samples = (s[keep], trail[m, 4][keep], u[keep] if u is not None else np.full(int(keep.sum()), np.nan))
+    return s0, np.where(cnt > 0, tot / np.maximum(cnt, 1.0), 0.0), cnt, mean_u, cnt_u, sd_u, samples
+
+
+def pred_spread(prof: tuple) -> tuple[float, int] | None:
+    """覚えた速さ（`line_profile`）で相手の位置を予測したときの、前側の外れの p90 ÷ 予測で進む距離と、測った組の数。
+
+    これまでに見た相手の観測の組（時刻が `_CAL_TAU` 秒離れたもの）で、前の観測から覚えた速さで進めた位置と、後の観測
+    の位置を比べる。★以前は過去の 1 回のベンチの記録から決めた一定の割合（`_GROW_LEARNED` = 0.2）で前側を広げて
+    いた。予測どおりに走る相手でも 3 秒先で約 1m 前へ広がり、抜き切って前へ戻る所が確かめられず、知覚と制御が完全な
+    理想化した検証でも 0.65 倍より速い相手を一度も抜けなかった（広がりを 0.02 にすると 0.7 倍まで全部抜けた）。
+    予測がよく当たる相手には小さく、揺れる相手には大きくなる（測れなければ None で、一定の割合のまま）。
+    覚えた速さはその組自身も含めて平均したもの（同じ所を何周も見ていれば影響は小さい）"""
+    if prof is None or len(prof) < 7 or prof[6] is None or prof[3] is None:
+        return None
+    s_pts, t_pts, u_pts = prof[6]
+    if len(s_pts) < 2 * _CAL_MIN_N:
+        return None
+    s0, mean_u = prof[0], prof[3]
+    # 区間（`_LINE_BIN`）ごとの通過時間の累積 T(s)。覚えていない区間を挟む組は使わない
+    v = np.where(np.isfinite(mean_u) & (mean_u >= MOVING_MIN_SPEED), mean_u, np.nan)
+    dtb = _LINE_BIN / v
+    Tc = np.concatenate([[0.0], np.cumsum(np.nan_to_num(dtb, nan=0.0))])
+    gap = np.concatenate([[0], np.cumsum(~np.isfinite(dtb))])        # 覚えていない区間の数の累積
+    edges = s0 + _LINE_BIN * np.arange(len(Tc))
+    o = np.argsort(t_pts)
+    s_pts, t_pts, u_pts = s_pts[o], t_pts[o], u_pts[o]
+    rel: list[np.ndarray] = []
+    n = 0
+    for tau in _CAL_TAU:
+        jb = np.searchsorted(t_pts, t_pts + tau)
+        # 後の観測の候補: 時刻がほぼ τ 後のもの（同時に複数の相手がいれば、等速で進めた位置に近い方）
+        best = np.full(len(t_pts), -1)
+        err_b = np.full(len(t_pts), np.inf)
+        for dj in (-1, 0, 1, 2):
+            jj = np.clip(jb + dj, 0, len(t_pts) - 1)
+            okt = np.abs(t_pts[jj] - (t_pts + tau)) <= _CAL_DT
+            guess = s_pts + np.nan_to_num(u_pts, nan=1.0) * tau
+            e = np.abs(s_pts[jj] - guess)
+            take = okt & (e < err_b)
+            best = np.where(take, jj, best)
+            err_b = np.where(take, e, err_b)
+        a = np.nonzero(best >= 0)[0]
+        if not len(a):
+            continue
+        b = best[a]
+        sa, sb = s_pts[a], s_pts[b]
+        adv_obs = sb - sa
+        ia = np.clip(((sa - s0) / _LINE_BIN), 0, len(Tc) - 1)
+        Ta = np.interp(ia, np.arange(len(Tc)), Tc)
+        s_pred = np.interp(Ta + tau, Tc, edges)
+        ip = np.clip(((s_pred - s0) / _LINE_BIN), 0, len(Tc) - 1)
+        good = ((adv_obs > 0.0) & (adv_obs < _DIFF_VMAX * tau) & (s_pred > sa + 0.1) & (s_pred < edges[-1] - 1e-6)
+                & (np.interp(ip, np.arange(len(gap)), gap) - np.interp(ia, np.arange(len(gap)), gap) < 0.5))
+        if not good.any():
+            continue
+        rel.append((sb[good] - s_pred[good]) / (s_pred[good] - sa[good]))
+        n += int(good.sum())
+    if n < _CAL_MIN_N:
+        return None
+    r = np.concatenate(rel)
+    return float(max(np.percentile(r, 90), _CAL_FLOOR)), n
+
+
+def calibrate_spread(path: RaceLine, s_cum: np.ndarray, nrm: np.ndarray, trail: np.ndarray) -> tuple[float, int] | None:
+    """これまでに見た相手の軌跡 `trail` (N, 5) で、覚えた速さによる予測の前側の外れ（`pred_spread`）を 1 周ぶん全体で
+    標本外に測る: 直近 `_CAL_RECENT_S` 秒の観測を、それより前の観測で覚えた速さで予測する（予測に使う速さは直近の
+    観測まで含むので、実際の予測はこれより当たる側＝安全側）。測れなければ None。重いので毎周期は呼ばない"""
+    if trail is None or len(trail) < 2 * _CAL_MIN_N or trail.shape[1] < 5:
+        return None
+    order = np.arange(len(path))
+    t_cut = float(trail[:, 4].max()) - _CAL_RECENT_S
+    old, new = trail[trail[:, 4] < t_cut], trail[trail[:, 4] >= t_cut]
+    if len(old) < _CAL_MIN_N or len(new) < _CAL_MIN_N:
+        return None
+    p_old = line_profile(path, order, s_cum, nrm, old)
+    p_new = line_profile(path, order, s_cum, nrm, new)
+    if p_old is None or p_new is None or p_old[3] is None:
+        return None
+    return pred_spread(p_old[:6] + (p_new[6],))
+
+
+def _smooth_bins(v: np.ndarray, w: int) -> np.ndarray:
+    """区間の値の、前後 `w` 区間の平均（nan は数えない）。もとが nan の区間は nan のまま。"""
+    if v is None or w <= 0:
+        return v
+    m = np.isfinite(v)
+    k = np.ones(2 * w + 1)
+    num = np.convolve(np.where(m, v, 0.0), k, mode="same")
+    den = np.convolve(m.astype(float), k, mode="same")
+    return np.where(m & (den > 0), num / np.maximum(den, 1e-9), np.nan)
 
 
 def line_shift(prof, s_now: float, s_adv: np.ndarray) -> np.ndarray:
@@ -941,7 +1131,11 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
     v_cap = np.asarray(v_base, dtype=float)[sel]
     al = np.broadcast_to(np.asarray(a_lat, dtype=float), (n,))[sel] if np.ndim(a_lat) else \
         np.full(len(sel), float(a_lat))
-    room_l, room_r = room[0][sel], room[1][sel]
+    # 道幅は格子の点の前後の区間（経路の細かい点）の最小で見る。★格子の点（0.2〜0.3m おき）だけで見ると、道幅が狭まる
+    #   所では毎周期の格子のずれで同じ候補が通ったり落ちたりし、乗っている追い抜きの計画が道幅で落ちて別の候補へ
+    #   入れ替わった（理想化した検証、相手 0.7 倍で横へ出ては戻るを繰り返した）
+    fine = (sel[:, None] + np.arange(-step_n, step_n + 1)[None, :]) % n
+    room_l, room_r = room[0][fine].min(axis=1), room[1][fine].min(axis=1)
     # 前後に出せる加速度のモデル（速度プロファイルと同じ。横の限界 `a_grip` は無ければ `a_lat`）
     if a_grip is None:
         grip = al
@@ -977,7 +1171,9 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
         j0 = int(np.searchsorted(s_cum, (s_car + tr.s_lo) % L, side="right") - 1) % n
         return bool(np.isfinite(v_learn[j0]))
 
-    grow_rel = [None if mo is None else (_GROW_LEARNED if _learned_at(tr) else _GROW_RATIO)
+    # 覚えた速さで予測する相手の前側の広がり: 予測の当たり具合を実測した値（測れなければ一定の割合）
+    g_learned = cfg.grow_learned if cfg.grow_learned is not None else _GROW_LEARNED
+    grow_rel = [None if mo is None else (g_learned if _learned_at(tr) else _GROW_RATIO)
                 for tr, mo in zip(tracks, motion)]
     if prof is not None:
         motion = [mo if mo is None else (*mo, line_shift(prof, 0.5 * (tr.s_lo + tr.s_hi), mo[1]))
@@ -993,6 +1189,7 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
     if ahead:
         j = min(ahead, key=lambda q: tracks[q].s_lo)
         keep = cfg.follow_keep if cfg.follow_keep is not None else cfg.margin_long + cfg.u_grow_max + _FOLLOW_SLACK
+        keep_base = keep
         g_lead = grow_rel[j] if grow_rel[j] is not None else _GROW_RATIO
         # 計画し直しが効くまでの相手の予測の不確かさと、減速の指令が実際の減速になるまでに詰まる距離
         # （近づく速さ × 応答の時間。相手と同じ速さで付いているときは 0）
@@ -1004,8 +1201,11 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
         #   予測より遅いとき（抜く車に危ないのは速いとき。`_collide` の前側の広がり）。平均で進む相手に付いていくと、
         #   ヘアピンで相手の見える面が後ろから横へ変わる所（速さが 1.8〜1.9m/s に出る。真値 1.1〜1.3）で近づきすぎて追突した
         mo_f = slow[j] if slow is not None and slow[j] is not None else motion[j]
-        follow = (tracks[j].s_lo, mo_f[0], mo_f[1], keep, cfg.front)
+        follow = (tracks[j].s_lo, mo_f[0], mo_f[1], keep, cfg.front, keep_base)
     j_lead = None if follow is None else min(ahead, key=lambda q: tracks[q].s_lo)
+    lead_u = None
+    if follow is not None and len(follow[1]) > 1 and follow[1][1] > follow[1][0]:
+        lead_u = float((follow[2][1] - follow[2][0]) / (follow[1][1] - follow[1][0]))
 
     d0, d1, d2 = start
     k_budget = max(0.3 * cfg.kappa_max, cfg.kappa_max - float(np.abs(kr).max()))
@@ -1097,7 +1297,8 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
     cands = np.array(rows, dtype=float)
 
     ok, cost, first, dmat, fails, gap, tm = eval_cand(cands, x, kr, v_cap, al, ds, room_l, room_r, v0, tracks, cfg,
-                                                      d0, motion, follow, grow_rel, lon, slow)
+                                                      d0, motion, follow, grow_rel, lon, slow,
+                                                      keep_last=len(rows) > n_before)
     line = cands[:, 4] == 0.0
 
     def _vel(i: int) -> np.ndarray | None:
@@ -1115,7 +1316,8 @@ def plan(path: RaceLine, index: int, pose: tuple[float, float, float], v_now: fl
     v_line_best = _vel(i_line) if i_line is not None else None
 
     def _done(r: OvertakeResult, speeds: list | None = None) -> OvertakeResult:
-        return r._replace(sel=sel, speeds=speeds if speeds is not None else [v_line_best], line_speed=v_line_best)
+        return r._replace(sel=sel, speeds=speeds if speeds is not None else [v_line_best], line_speed=v_line_best,
+                          lead_u=lead_u)
     # ★ 横へ出る計画に乗っている間は、それが当たり判定で有効なら乗り続ける（ForzaETH の Overtake 状態と同じ。
     #   無効になったときだけ選び直す）。所要時間の小さな差で毎周期選び直すと、右の 7m 先・左の 2m 先…と入れ替わり、
     #   どれにも乗り切れずに相手の後ろに留まった（sim.bench --mover）

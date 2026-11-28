@@ -403,3 +403,107 @@ class TestRecordState(unittest.TestCase):
         Slam2dRaceLine._record_state(self._planner("blocked", None), st,
                                      {"overtake": 0.0, "obstacle_avoid": 1.0, "us_learn": 0.0})
         self.assertEqual((st.overtake, st.avoid_ms, st.grip), ("", 0.0, {}))
+
+
+class TestPredictionAndTiming(unittest.TestCase):
+    """相手の予測の作り方・当たり具合の実測と、候補の時刻（2026-11-26）。"""
+
+    @staticmethod
+    def _straight(n=200):
+        xy = np.column_stack([np.arange(n) * 0.1, np.zeros(n)])
+        path = RaceLine(xy=xy, v=np.full(n, 2.0), kappa=np.zeros(n), length=n * 0.1, closed=False)
+        return path, np.tile([0.0, 1.0], (n, 1))
+
+    def test_offset_path_is_longer_on_the_outside(self):
+        """横ずれした経路の道のり: カーブの外側（右 = 負、左カーブ κ>0）は (1 − κd) 倍に伸びる。"""
+        ds = np.full(10, 0.2)
+        kr = np.full(11, 0.5)
+        d = np.full((1, 11), -0.4)
+        np.testing.assert_allclose(ot._path_ds(ds, kr, d, np.zeros((1, 11)))[0], 0.2 * 1.2)
+        np.testing.assert_allclose(ot._path_ds(ds, kr, -d, np.zeros((1, 11)))[0], 0.2 * 0.8)
+
+    def test_learned_speed_follows_a_changed_opponent(self):
+        """場所ごとの速さは直近の観測（`_SPEED_RECENT` 回）の中央値: 相手が途中から速くなれば、新しい速さを覚える。"""
+        path, nrm = self._straight()
+        order = np.arange(0, 150)
+        rows, t = [], 0.0
+        for lap in range(6):
+            v = 1.0 if lap < 3 else 2.0
+            for x in np.arange(0.5, 14.0, v * 0.1):
+                rows.append((x, 0.0, v, 0.0, t))
+                t += 0.1
+            t += 5.0
+        prof = ot.line_profile(path, order, order * 0.1, nrm, np.array(rows))
+        self.assertAlmostEqual(float(np.nanmedian(prof[3][10:50])), 2.0, delta=0.05)   # 全部の平均なら 1.5
+
+    def test_smoothing_keeps_unlearned_bins_unknown(self):
+        v = np.array([1.0, 1.2, np.nan, 2.0, 2.2, 2.4])
+        out = ot._smooth_bins(v, 1)
+        self.assertTrue(np.isnan(out[2]))
+        self.assertAlmostEqual(float(out[4]), 2.2)
+        self.assertAlmostEqual(float(out[0]), 1.1)
+
+    @staticmethod
+    def _ring_trail(speed_of_lap, laps=8):
+        path = _ring()
+        n = len(path)
+        rows, t = [], 0.0
+        for lap in range(laps):
+            v = speed_of_lap(lap)
+            s = 0.0
+            while s < path.length - 1e-6:
+                a = s / R
+                rows.append((R * math.cos(a), R * math.sin(a), -v * math.sin(a), v * math.cos(a), t))
+                s += v * 0.1
+                t += 0.1
+        seg = np.hypot(*np.diff(np.vstack([path.xy, path.xy[:1]]), axis=0).T)
+        s_cum = np.concatenate([[0.0], np.cumsum(seg[:-1])])
+        from raspi.nav.centerline import normals
+        return path, s_cum, normals(path.xy), np.array(rows)
+
+    def test_spread_is_small_for_a_consistent_opponent(self):
+        """毎周同じ速さで走る相手なら、予測の外れの実測（前側の p90 ÷ 進む距離）は下限まで小さい。"""
+        path, s_cum, nrm, trail = self._ring_trail(lambda lap: 2.0)
+        sp = ot.calibrate_spread(path, s_cum, nrm, trail)
+        self.assertIsNotNone(sp)
+        self.assertLess(sp[0], 0.05)
+
+    def test_spread_is_large_for_an_erratic_opponent(self):
+        """周ごとに速さが変わる相手なら、外れは大きく出る（一定の割合より大きくもなる）。"""
+        rng = np.random.default_rng(0)
+        speeds = rng.uniform(1.4, 2.6, 20)
+        path, s_cum, nrm, trail = self._ring_trail(lambda lap: float(speeds[lap]), laps=10)
+        sp = ot.calibrate_spread(path, s_cum, nrm, trail)
+        self.assertIsNotNone(sp)
+        self.assertGreater(sp[0], 0.15)
+
+    def test_measured_spread_widens_the_opponent_front(self):
+        """`grow_learned` を大きくすると抜く候補が厳しくなる（覚えた速さで予測する相手の前側の広がりに使う）。"""
+        path = _ring()
+        opp = _at(path, 1.6, r=0.09, vx_along=1.5)
+        n = len(path)
+        rows, t = [], 0.0
+        for lap in range(2):
+            for s in np.arange(0.0, path.length, 0.15):
+                a = s / R
+                rows.append((R * math.cos(a), R * math.sin(a), -1.5 * math.sin(a), 1.5 * math.cos(a), t))
+                t += 0.1
+        trail = np.array(rows)
+        wide = (np.full(n, 0.56), np.full(n, 0.05))
+        tight = ot.plan(path, 0, (R, 0.0, math.pi / 2), 1.5, path.v, 6.0, wide, [opp], _cfg(grow_learned=0.03), trail=trail)
+        loose = ot.plan(path, 0, (R, 0.0, math.pi / 2), 1.5, path.v, 6.0, wide, [opp], _cfg(grow_learned=2.0), trail=trail)
+        self.assertEqual(tight.status, "avoid")
+        self.assertNotEqual(loose.status, "avoid")
+
+    def test_inside_check_uses_the_controllers_gap(self):
+        """「今すでに車間の内側か」は付いていく制御が保つ車間（上乗せ前）で見る。上乗せ込みで見ると、制御どおりに
+        付いていくほど常に内側に居ることになり、区間の入口まで付いていく候補が全部捨てられた。"""
+        x = np.arange(0.0, 6.01, 0.2)
+        ds = np.diff(x)
+        t_free = (x / 2.0)[None, :]
+        far = np.array([0.0, 20.0]), np.array([0.0, 20.0])
+        # 相手の後ろ面は 0.9m 先、前端 0.3m。制御の車間 0.6m なら今ちょうど、上乗せ込み 0.7m なら 0.1m 内側
+        _, ok_base, _ = ot._follow_times(t_free, x, ds, np.array([True]), (0.9, *far, 0.7, 0.3, 0.6), 3.0)
+        _, ok_full, _ = ot._follow_times(t_free, x, ds, np.array([True]), (0.9, *far, 0.7, 0.3), 3.0)
+        self.assertTrue(ok_base[0])
+        self.assertFalse(ok_full[0])

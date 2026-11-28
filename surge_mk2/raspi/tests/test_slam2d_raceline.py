@@ -1378,3 +1378,33 @@ class TestSteerSaturationCap(unittest.TestCase):
         self.assertEqual(p._steer_sat_cap(free_off, v, prm), math.inf)
         self.assertAlmostEqual(p._steer_sat_cap(sat_off, vs(speed=0.1), prm), 0.35, places=9)
 
+
+
+class TestFollowingTheLead(unittest.TestCase):
+    """付いていく相手の速さと、相手の軌跡に覚える点（2026-11-26）。"""
+
+    def test_lead_speed_prefers_the_prediction_unless_the_track_is_much_slower(self):
+        from types import SimpleNamespace
+        from raspi.auto.slam2d_raceline import Slam2dRaceLine, _LEAD_U_TOL
+        f = Slam2dRaceLine._lead_speed
+        self.assertEqual(f(SimpleNamespace(_ot_lead_u=None), 1.7), 1.7)
+        self.assertEqual(f(SimpleNamespace(_ot_lead_u=2.0), 1.8), 2.0)            # 生の速さの揺れは使わない
+        self.assertEqual(f(SimpleNamespace(_ot_lead_u=2.0), 2.0 - _LEAD_U_TOL - 0.2), 2.0 - _LEAD_U_TOL - 0.2)  # 急に遅くなった
+
+    def test_trail_point_is_the_rear_face(self):
+        """軌跡に覚える点は、見えている点の経路に沿って最も後ろ × 横の平均（見え方で重心が動いても後ろ面は同じ）。"""
+        from types import SimpleNamespace
+        from raspi.auto.slam2d_raceline import Slam2dRaceLine
+        from raspi.nav import centerline as cl_mod
+        from raspi.nav.obstacles import Obstacle
+        from raspi.nav.raceline import RaceLine
+        n = 100
+        xy = np.column_stack([np.arange(n) * 0.1, np.zeros(n)])
+        path = RaceLine(xy=xy, v=np.full(n, 2.0), kappa=np.zeros(n), length=n * 0.1, closed=False)
+        ns = SimpleNamespace(_ot_nrm=cl_mod.normals(xy))
+        rear = np.column_stack([np.full(5, 3.0), np.linspace(-0.09, 0.09, 5)])
+        side = np.column_stack([np.linspace(3.0, 3.37, 6), np.full(6, 0.09)])
+        for pts in (rear, np.vstack([rear, side])):
+            c = pts.mean(axis=0)
+            q = Slam2dRaceLine._opp_ref(ns, path, Obstacle(float(c[0]), float(c[1]), 0.1, len(pts), pts))
+            self.assertAlmostEqual(q[0], 3.0, places=6)
