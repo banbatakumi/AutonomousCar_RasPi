@@ -17,6 +17,17 @@
 のようなスレッド数調整すら不要——`line_perception_node.py`（白線を古典的な
 色しきい値で検出する）と同じ考え方。
 
+## YOLO 方式（GUI で古典CVと切り替える、2026-11-28）
+
+上の理由で古典CVを既定にしたまま、実物の看板を撮った写真で学習した YOLO も選べるようにした
+（GUI の設定パネル「矢印信号」→「認識の方式」。`SignalConfig.method`）。モデルは
+`models/arrow_yolo/<名前>.onnx`（ultralytics の ONNX 書き出し。クラス名 `left`/`right`/`straight`）。
+推論は `raspi/core/arrow_yolo.py`、`_YOLO_MIN_PERIOD_S` 間隔（10Hz）に間引く。
+モデルは launcher の「ml_arrow_yolo」（`ml_arrow_yolo/app.py`）で、走行記録の前方カメラの画像から作る。
+ROI 帯はどちらの方式にも効く（YOLO は検出の中心が帯の外なら捨てる）。confirm・寿命・
+`route/select` の流し方は方式によらず同じ。**YOLO を選んでもモデルが読めなければ古典CVで判定し、
+理由を `ArrowSignalStatus.error` で GUI に出す**（看板を読めないまま走るより安全側）。
+
 ## 受け口: `route/select`（ノード名`signal`を予約）
 
 `raspi/bus/zbus.py`の`TOPIC_OWNER`で`route/select`は`signal`ノードの持ち物として
@@ -73,11 +84,13 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 
 
 import cv2
 import numpy as np
 
+from raspi.core.arrow_yolo import YoloArrowDetector
 from raspi.core.auto_gate import IdlePacer, vehicle_armed
 from raspi.core.runner import run_node
 from raspi.core.frame_reader import FrameReader
@@ -98,6 +111,14 @@ __all__ = ["ArrowSignalDetector", "ArrowSignalNode", "ArrowResult", "signal_mask
 
 NS = 1_000_000_000
 HB_HZ = 10
+
+#: YOLO モデルの置き場（`models/arrow_yolo/<名前>.onnx`。telemetry_node の一覧と同じ場所）
+DEFAULT_MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "arrow_yolo"
+#: 方式（`SignalConfig.method`）
+METHODS = ("classic", "yolo")
+#: YOLO の推論の最短間隔 [s]。カメラは30fpsだが看板の判定に毎フレームは要らない（CPU節電）。
+#: `_CONFIRM_FRAMES` 回の連続一致で確定するので、確定まで約 0.3 秒
+_YOLO_MIN_PERIOD_S = 0.1
 
 #: 画面高さに対する割合 `(top, bottom)`。看板は空間に固定されているので
 #: `nav/ipm.py`の地面平面前提は使わない（地面上の物体ではないため相性が悪い、
@@ -124,13 +145,21 @@ _CONFIRM_TTL_S = 10.0
 
 
 class ArrowResult:
-    """1フレームの判定結果。`value`は`"left"`/`"right"`/`"straight"`/`None`（非該当）。"""
+    """1フレームの判定結果。`value`は`"left"`/`"right"`/`"straight"`/`None`（非該当）。
 
-    __slots__ = ("value", "lit_frac")
+    `lit_frac` は古典CVの点灯割合、`score`・`box`（正規化 x0,y0,x1,y1）・`label` は YOLO の
+    検出（`raspi/core/arrow_yolo.py`）。使わない方式の項目は既定値のまま。
+    """
 
-    def __init__(self, value: str | None, lit_frac: float = 0.0) -> None:
+    __slots__ = ("value", "lit_frac", "score", "box", "label")
+
+    def __init__(self, value: str | None, lit_frac: float = 0.0, *, score: float = 0.0,
+                 box: list[float] | None = None, label: str = "") -> None:
         self.value = value
         self.lit_frac = lit_frac
+        self.score = score
+        self.box = box
+        self.label = label
 
 
 def signal_mask(frame: np.ndarray, *,
@@ -205,10 +234,19 @@ class ArrowSignalNode:
     """前方カメラ → `route/select`。`process_cycle()`はバス・共有メモリを知らない純粋関数。"""
 
     def __init__(self, *, detector: ArrowSignalDetector | None = None,
+                yolo: YoloArrowDetector | None = None,
+                models_dir: str | Path | None = None,
                 confirm_frames: int = _CONFIRM_FRAMES,
                 confirm_ttl_s: float = _CONFIRM_TTL_S,
                 clock=time.monotonic) -> None:
         self.detector = detector or ArrowSignalDetector()
+        #: YOLO 方式の検出器（`raspi/core/arrow_yolo.py`）。モデルは `set_yolo_model()` で読む
+        self.yolo = yolo or YoloArrowDetector(min_period_s=_YOLO_MIN_PERIOD_S)
+        self.models_dir = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
+        #: GUI が選んだ方式（`"classic"`/`"yolo"`）。YOLO のモデルが読めていなければ
+        #: 実際には古典CVで判定する（`active_method`）——看板を読めないまま走るより安全側
+        self.method = "classic"
+        self._yolo_name = ""
         self.confirm_frames = confirm_frames
         self.confirm_ttl_s = confirm_ttl_s
         self._clock = clock
@@ -242,6 +280,38 @@ class ArrowSignalNode:
     def close(self) -> None:
         self._reader.close()
 
+    # ── 方式の切替（GUI の `SignalConfig.method`・`yolo_model`） ──
+
+    @property
+    def active_method(self) -> str:
+        """実際に判定している方式。YOLO を選んでもモデルが読めていなければ `"classic"`。"""
+        return "yolo" if self.method == "yolo" and self.yolo.ready else "classic"
+
+    def set_yolo_model(self, name: str) -> None:
+        """`models_dir/<name>.onnx` を読む（名前が前回と同じなら何もしない）。空文字なら外す。"""
+        if name == self._yolo_name:
+            return
+        self._yolo_name = name
+        if not name:
+            self.yolo.unload()
+            return
+        if "/" in name or "\\" in name or name.startswith("."):
+            self.yolo.unload()
+            self.yolo.error = f"不正なモデル名: {name}"
+            return
+        path = self.models_dir / f"{name}.onnx"
+        if not path.is_file():
+            self.yolo.unload()
+            self.yolo.error = f"モデルが無い: {path}"
+        elif self.yolo.load(path):
+            print(f"# arrow_signal: YOLO モデルを読んだ {path.name} names={self.yolo.names}"
+                  f" imgsz={self.yolo.imgsz}", flush=True)
+        if self.yolo.error:
+            print(f"# arrow_signal: {self.yolo.error}（古典CVで判定する）", file=sys.stderr, flush=True)
+
+    def _active_detector(self):
+        return self.yolo if self.active_method == "yolo" else self.detector
+
     # ── 1周期ぶんの処理（純粋関数。バスを知らない） ──
 
     def process_cycle(self, frame: np.ndarray | None) -> RouteSelect | None:
@@ -250,7 +320,7 @@ class ArrowSignalNode:
         publishしてよい契約——モジュールdocstring参照）。
         """
         if frame is not None:
-            result = self.detector.process_frame(frame)
+            result = self._active_detector().process_frame(frame)
             self.last_result = result
             raw = result.value
             if raw in ("left", "right"):
@@ -331,6 +401,12 @@ class ArrowSignalNode:
                 self.detector.sat_range = (cfg.sat_min, cfg.sat_max)
                 self.detector.val_min = cfg.val_min
                 self.detector.min_lit_frac = cfg.min_lit_frac
+                self.method = cfg.method if cfg.method in METHODS else "classic"
+                self.yolo.conf_min = cfg.yolo_conf
+                self.yolo.roi_band = self.detector.roi_band
+                if self.method == "yolo":
+                    # 読むのは YOLO を選んだときだけ（古典CVの間はモデルをメモリに載せない）
+                    self.set_yolo_model(cfg.yolo_model)
 
             vs: VehicleState | None = sub.latest.get(TOPIC_VEHICLE_STATE)
             frame = None
@@ -345,7 +421,11 @@ class ArrowSignalNode:
                 #: （モジュールdocstring参照、`cam_track_node.py`と同じ節電）
                 ref = sub.latest.get(TOPIC_IMAGE_FRONT)
                 if ref is not None:
-                    if ref.ring_seq == self._last_ring_seq:
+                    if self.active_method == "yolo" and not self.yolo.due():
+                        # YOLO は `_YOLO_MIN_PERIOD_S` より短い間隔では回さない（CPU節電）。
+                        # 新しいフレームでも読まずに確定状態だけ流す
+                        skip_same_frame = True
+                    elif ref.ring_seq == self._last_ring_seq:
                         # ★省電力化・デバウンス修正: 新しいカメラフレームが
                         # まだ来ていない。読み取り・process_cycle()の両方を
                         # スキップする（上の `_last_ring_seq` docstring参照）
@@ -376,12 +456,19 @@ class ArrowSignalNode:
             #: GUIライブチューニング・映像オーバーレイ向けの現在値（モジュール
             #: docstring「GUIへのライブフィードバック」参照）。`LineScan`と同じく
             #: 確定の有無に関わらず毎周期出す
+            r = self.last_result
             status = ArrowSignalStatus(
                 enabled=enabled,
-                value=(self.last_result.value or "") if self.last_result else "",
-                lit_frac=self.last_result.lit_frac if self.last_result else 0.0,
+                value=(r.value or "") if r else "",
+                lit_frac=r.lit_frac if r else 0.0,
                 confirmed_value=self._confirmed_value or "",
-                roi_top=self.detector.roi_band[0], roi_bottom=self.detector.roi_band[1])
+                roi_top=self.detector.roi_band[0], roi_bottom=self.detector.roi_band[1],
+                method=self.active_method,
+                score=r.score if r else 0.0,
+                box=list(r.box) if r is not None and r.box else [0.0] * 4,
+                label=r.label if r else "",
+                infer_ms=self.yolo.last_infer_ms if self.active_method == "yolo" else 0.0,
+                error=self.yolo.error if self.method == "yolo" else "")
             if publish:
                 pub.send(TOPIC_SIGNAL_STATUS, status)
 
@@ -413,6 +500,9 @@ def main() -> int:
     ap.add_argument("--sat-max", type=int, default=_DEFAULT_SAT_RANGE[1])
     ap.add_argument("--val-min", type=int, default=_DEFAULT_VAL_MIN)
     ap.add_argument("--min-lit-frac", type=float, default=_MIN_LIT_FRAC)
+    ap.add_argument("--method", choices=METHODS, default="classic",
+                    help="判定の方式（GUI の signal/config が届けばそちらが優先）")
+    ap.add_argument("--yolo-model", default="", help="models/arrow_yolo/<名前>.onnx の名前")
     ap.add_argument("--duration", type=float, default=None)
     args = ap.parse_args()
 
@@ -423,6 +513,9 @@ def main() -> int:
                                    val_min=args.val_min,
                                    min_lit_frac=args.min_lit_frac)
     node = ArrowSignalNode(detector=detector)
+    node.method = args.method
+    if args.method == "yolo":
+        node.set_yolo_model(args.yolo_model)
 
     pub = Publisher("signal")
     sub = Subscriber({TOPIC_IMAGE_FRONT: LATEST, TOPIC_VEHICLE_STATE: LATEST,

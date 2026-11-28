@@ -910,6 +910,13 @@ class SignalConfig(MsgBase):
     sat_max: int = 180
     val_min: int = 150
     min_lit_frac: float = 0.02
+    #: 判定の方式。`"classic"`（HSV＋重心）か `"yolo"`（`raspi/core/arrow_yolo.py`）。
+    #: ROI 帯はどちらにも効く。HSV の項目は classic だけ、`yolo_*` は yolo だけに効く
+    method: str = "classic"
+    #: `models/arrow_yolo/<名前>.onnx` の名前。空文字・読めないモデルなら古典CVで判定する
+    yolo_model: str = ""
+    #: YOLO の検出を採るスコアの下限
+    yolo_conf: float = 0.5
 
 
 class ArrowSignalStatus(MsgBase):
@@ -931,6 +938,18 @@ class ArrowSignalStatus(MsgBase):
     confirmed_value: str = ""              #: "left"/"right"/""（未確定）
     roi_top: float = 0.05
     roi_bottom: float = 0.55
+    #: 実際に判定している方式（"classic"/"yolo"）。YOLO を選んでもモデルが読めなければ "classic"
+    method: str = "classic"
+    #: YOLO の検出のスコア（classic・非検出は 0）
+    score: float = 0.0
+    #: YOLO の検出枠。前方カメラ画像の正規化座標 x0,y0,x1,y1（検出が無ければ全部 0）
+    box: list[float] = msgspec.field(default_factory=lambda: [0.0] * 4)
+    #: YOLO の検出のクラス名（方向でないクラスも出す。非検出は空文字）
+    label: str = ""
+    #: YOLO の直近の推論時間 [ms]
+    infer_ms: float = 0.0
+    #: YOLO のモデルが読めない理由（GUI に出す。問題が無ければ空文字）
+    error: str = ""
 
 
 class UiEvent(MsgBase):

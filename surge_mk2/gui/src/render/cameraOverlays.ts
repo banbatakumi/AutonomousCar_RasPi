@@ -165,16 +165,29 @@ export function drawArrowSignal(ctx: CanvasRenderingContext2D, w: number, h: num
   const y0 = sig.roi_top * h
   const y1 = sig.roi_bottom * h
   const confirmed = sig.confirmed_value
-  const lit = sig.lit_frac > 0.005
+  const isYolo = sig.method === 'yolo'
+  const lit = isYolo ? sig.score > 0 : sig.lit_frac > 0.005
 
   ctx.save()
   ctx.strokeStyle = confirmed ? 'rgba(255,204,0,0.9)' : 'rgba(255,255,255,0.25)'
   ctx.lineWidth = confirmed ? 3 : 1
   ctx.strokeRect(0, y0, w, y1 - y0)
 
+  // YOLO の検出枠（方向のクラスは水色、方向でないクラス＝非該当は灰色）
+  const [bx0, by0, bx1, by1] = sig.box
+  if (isYolo && sig.score > 0 && bx1 > bx0 && by1 > by0) {
+    ctx.strokeStyle = sig.value ? 'rgba(80,200,255,0.95)' : 'rgba(180,180,180,0.8)'
+    ctx.lineWidth = 2
+    ctx.strokeRect(bx0 * w, by0 * h, (bx1 - bx0) * w, (by1 - by0) * h)
+    ctx.font = '12px sans-serif'
+    ctx.fillStyle = ctx.strokeStyle
+    ctx.textAlign = 'left'
+    ctx.fillText(`${sig.label} ${sig.score.toFixed(2)}`, bx0 * w, Math.max(12, by0 * h - 4))
+  }
+
   const label = confirmed
     ? { left: '◀ 左折', right: '右折 ▶' }[confirmed]
-    : (lit ? (sig.value || '判定中') : '')
+    : (lit ? (sig.value || (isYolo ? '非該当' : '判定中')) : '')
   if (label) {
     ctx.font = confirmed ? 'bold 22px sans-serif' : '13px sans-serif'
     ctx.fillStyle = confirmed ? 'rgba(255,204,0,0.95)' : 'rgba(255,255,255,0.6)'

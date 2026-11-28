@@ -169,6 +169,7 @@ export function App() {
       onCamE2EModels: (files) => set({ camE2eModelFiles: files }),
       onE2EFusionModels: (files) => set({ e2eFusionModelFiles: files }),
       onStereoE2EModels: (files) => set({ stereoE2eModelFiles: files }),
+      onSignalModels: (files) => set({ signalModelFiles: files }),
       onMaps: (files) => set({ mapFiles: files }),
       onLogsDeleteResult: (error) => notify(`記録の削除に失敗: ${error || '理由不明'}`, 'bad'),
       onShutdownDenied: (reason) =>

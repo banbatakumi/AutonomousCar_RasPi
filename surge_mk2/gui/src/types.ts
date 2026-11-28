@@ -251,7 +251,16 @@ export type SignalConfigStatus = {
   val_min: number
   /** ROI内の点灯画素がこの割合未満なら非該当（非点灯扱い） */
   min_lit_frac: number
+  /** 判定の方式。`yolo` はモデルが読めなければ Pi 側で古典CVに戻る（`status.signal.method` が実際の方式） */
+  method: 'classic' | 'yolo'
+  /** `models/arrow_yolo/<名前>.onnx` の名前。空文字は未選択 */
+  yolo_model: string
+  /** YOLO の検出を採るスコアの下限 */
+  yolo_conf: number
 }
+
+/** `models/arrow_yolo/` にある `.onnx` の1件（`signal_model_list` の応答） */
+export type SignalModelFile = CamE2EModelFile
 
 /** 接続中Wi-FiのSSID・電波強度。**サーバが真値**（`raspi/io/wifi.py`、1Hzで再取得）。 */
 type WifiStatus = {

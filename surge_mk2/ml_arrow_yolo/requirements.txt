@@ -1,0 +1,18 @@
+# ml_arrow_yolo/ — 矢印信号の YOLO の学習（Mac 側。`raspi/requirements.txt` とは別管理）
+#
+#   .venv/bin/pip install -r ml_arrow_yolo/requirements.txt
+#
+# 車（Pi）には入れない。車は書き出した ONNX を onnxruntime で読むだけ（`raspi/core/arrow_yolo.py`）
+
+# 学習・ONNX 書き出し（torch を連れてくる）
+ultralytics>=8.3
+onnx>=1.16
+onnxruntime>=1.18,<2
+
+# `.mcap` からの画像の抽出（`extract_frames.py`）
+mcap>=1.2,<2
+
+# ラベル付けタブの画像表示
+pillow>=10
+numpy>=2.1
+opencv-python-headless>=4.9

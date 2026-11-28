@@ -201,7 +201,7 @@ from raspi.msgs.types import (
 )
 
 from raspi.nodes.telemetry.conf import read_conf, write_conf
-from raspi.nodes.telemetry.models import MODEL_HZ, MODEL_SLOTS, ModelSlot
+from raspi.nodes.telemetry.models import MODEL_HZ, MODEL_SLOTS, ModelSlot, onnx_model_files
 from raspi.nodes.telemetry.periodic import run_periodic
 from raspi.nodes.telemetry.recorder import Recorder
 from raspi.core.log import get_logger, setup_logging
@@ -237,6 +237,19 @@ DRIVE_SETTINGS_CONF = REPO_ROOT / "config" / "drive_settings.json"
 #: 矢印信号認識（`arrow_signal_node`）のON/OFF・HSVしきい値を覚えておく場所。
 #: `CAMERA_CONF` と同じ流儀
 SIGNAL_CONF = REPO_ROOT / "config" / "signal.json"
+#: 矢印信号の YOLO モデルの置き場（`arrow_signal_node.DEFAULT_MODELS_DIR` と同じ場所）
+SIGNAL_MODELS_DIR = REPO_ROOT / "models" / "arrow_yolo"
+
+
+def _signal_model_ok(name: str) -> bool:
+    """矢印信号の YOLO モデル名として受け付けるか。空文字（外す）か、置き場に実在する名前だけ。"""
+    if name == "":
+        return True
+    if "/" in name or "\\" in name or name.startswith("."):
+        return False
+    return (SIGNAL_MODELS_DIR / f"{name}.onnx").is_file()
+
+
 #: 推論用モデルの親フォルダ（`.gitignore` 済み）。モデルの種類ごとにサブフォルダを切る
 #: 推論モデルの置き場・選んだモデルの保存先は `raspi/nodes/telemetry/models.py` の `MODEL_SLOTS`
 #: 共有トークンの既定の置き場。**`.gitignore` 済み**。`--token` / `SURGE_TOKEN` が
@@ -746,6 +759,10 @@ class TelemetryServer:
         self._signal_sat_max = 180
         self._signal_val_min = 150
         self._signal_min_lit_frac = 0.02
+        #: 判定の方式（"classic"/"yolo"）・YOLO のモデル名・スコア下限（`SignalConfig` 参照）
+        self._signal_method = "classic"
+        self._signal_yolo_model = ""
+        self._signal_yolo_conf = 0.5
         self._load_signal_conf()
 
         # ── 推論モデルの選択（`telemetry/models.py` の `MODEL_SLOTS`。種類 → 選んだ名前） ──
@@ -1225,6 +1242,11 @@ class TelemetryServer:
     async def _ctl_signal(self, ws, m: dict) -> None:
         self._on_signal_config(m)
         self._status_soon()
+
+    async def _ctl_signal_model_list(self, ws, m: dict) -> None:
+        """矢印信号の YOLO モデル（`models/arrow_yolo/*.onnx`）の一覧。要求したクライアントにだけ返す。"""
+        await self._send_json(ws, {"type": "signal_models",
+                                   "signal_model_files": onnx_model_files(SIGNAL_MODELS_DIR)})
 
     # ── 対象追従（`follow_object`）のROI選択（誰でも操作できる。
     #    `AutoCtrl.freeze_seq`/`clear_map` と同じ「回数」の約束） ──
@@ -1950,6 +1972,12 @@ class TelemetryServer:
             self._signal_val_min = max(0, min(255, int(m["val_min"])))
         if "min_lit_frac" in m and isinstance(m["min_lit_frac"], (int, float)):
             self._signal_min_lit_frac = max(0.0, min(1.0, float(m["min_lit_frac"])))
+        if m.get("method") in ("classic", "yolo"):
+            self._signal_method = m["method"]
+        if isinstance(m.get("yolo_model"), str) and _signal_model_ok(m["yolo_model"]):
+            self._signal_yolo_model = m["yolo_model"]
+        if "yolo_conf" in m and isinstance(m["yolo_conf"], (int, float)):
+            self._signal_yolo_conf = max(0.01, min(1.0, float(m["yolo_conf"])))
         self._save_signal_conf()
         self._publish_signal_config()   # 待たせない。cam_config と同じく即座に効かせる
 
@@ -1962,6 +1990,9 @@ class TelemetryServer:
             "sat_max": self._signal_sat_max,
             "val_min": self._signal_val_min,
             "min_lit_frac": self._signal_min_lit_frac,
+            "method": self._signal_method,
+            "yolo_model": self._signal_yolo_model,
+            "yolo_conf": self._signal_yolo_conf,
         }
 
     def _publish_signal_config(self) -> None:
@@ -1969,7 +2000,9 @@ class TelemetryServer:
             enabled=self._signal_enabled,
             roi_top=self._signal_roi_top, roi_bottom=self._signal_roi_bottom,
             sat_min=self._signal_sat_min, sat_max=self._signal_sat_max,
-            val_min=self._signal_val_min, min_lit_frac=self._signal_min_lit_frac))
+            val_min=self._signal_val_min, min_lit_frac=self._signal_min_lit_frac,
+            method=self._signal_method, yolo_model=self._signal_yolo_model,
+            yolo_conf=self._signal_yolo_conf))
 
     def _load_signal_conf(self) -> None:
         """`config/signal.json` から戻す。`_load_camera_conf`と同じ流儀。"""
@@ -1990,6 +2023,12 @@ class TelemetryServer:
             self._signal_val_min = max(0, min(255, int(raw["val_min"])))
         if isinstance(raw.get("min_lit_frac"), (int, float)):
             self._signal_min_lit_frac = max(0.0, min(1.0, float(raw["min_lit_frac"])))
+        if raw.get("method") in ("classic", "yolo"):
+            self._signal_method = raw["method"]
+        if isinstance(raw.get("yolo_model"), str) and _signal_model_ok(raw["yolo_model"]):
+            self._signal_yolo_model = raw["yolo_model"]
+        if isinstance(raw.get("yolo_conf"), (int, float)):
+            self._signal_yolo_conf = max(0.01, min(1.0, float(raw["yolo_conf"])))
 
     def _save_signal_conf(self) -> None:
         write_conf(SIGNAL_CONF, {
@@ -2000,6 +2039,9 @@ class TelemetryServer:
                 "sat_max": self._signal_sat_max,
                 "val_min": self._signal_val_min,
                 "min_lit_frac": self._signal_min_lit_frac,
+                "method": self._signal_method,
+                "yolo_model": self._signal_yolo_model,
+                "yolo_conf": self._signal_yolo_conf,
             })
 
     # ── 推論モデルの選択（`telemetry/models.py`。種類ごとの違いは `MODEL_SLOTS` の表だけ） ──
@@ -3183,6 +3225,7 @@ _CONTROL_HANDLERS: dict[str, tuple] = {
     "camera": (S._ctl_camera, AUTH_OPERATOR),
     "drive_settings": (S._ctl_drive_settings, AUTH_TOKEN),
     "signal": (S._ctl_signal, AUTH_OPERATOR),
+    "signal_model_list": (S._ctl_signal_model_list, AUTH_ANY),
     "track_roi_select": (S._ctl_track_roi_select, AUTH_OPERATOR),
     "track_roi_clear": (S._ctl_track_roi_clear, AUTH_OPERATOR),
     "tc_tv": (S._ctl_tc_tv, AUTH_OPERATOR),
