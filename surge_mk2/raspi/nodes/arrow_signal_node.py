@@ -23,6 +23,7 @@
 （GUI の設定パネル「矢印信号」→「認識の方式」。`SignalConfig.method`）。モデルは
 `models/arrow_yolo/<名前>.onnx`（ultralytics の ONNX 書き出し。クラス名 `left`/`right`/`straight`）。
 推論は `raspi/core/arrow_yolo.py`、`_YOLO_MIN_PERIOD_S` 間隔（10Hz）に間引く。
+モデルは launcher の「ml_arrow_yolo」（`ml_arrow_yolo/app.py`）で、走行記録の前方カメラの画像から作る。
 ROI 帯はどちらの方式にも効く（YOLO は検出の中心が帯の外なら捨てる）。confirm・寿命・
 `route/select` の流し方は方式によらず同じ。**YOLO を選んでもモデルが読めなければ古典CVで判定し、
 理由を `ArrowSignalStatus.error` で GUI に出す**（看板を読めないまま走るより安全側）。

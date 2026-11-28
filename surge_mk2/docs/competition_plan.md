@@ -78,7 +78,7 @@
 | `slam2d_route`（土台 `slam2d_raceline`、`slam2d/`、g2opy採用） | 地図作成・経路・追従・走行中の学習（`nav/grip.py`）・障害物回避（`nav/overtake.py`）まで実装。分岐コース（toyota2）用に道路グラフ＋経由点＋走行中切替＋n周後の停止/駐車。会場の試走と予選で走行済み。実機で未確認の変更は PROGRESS.md 冒頭 |
 | `park_to_point`（自律駐車） | Reeds-Shepp・Hybrid A*・LiDAR障害物回避まで実装。シムのベンチ（`sim.park_bench`）で検証。実機は未検証 |
 | `e2e_lidar`（RL方策） | シムでの新規学習は停止中。未知の点群パターンへの挙動を原理的に保証できないため、本番主力にはしない |
-| 矢印信号認識 | `raspi/nodes/arrow_signal_node.py`を実装済み（`route/select`で`slam2d_route`へ渡す）。HSVしきい値は会場での調整前で、サービス `surge-arrow-signal` は既定で無効（調整は `raspi/tools/arrow_signal_preview.py`）。2026-11-28 に YOLO（`models/arrow_yolo/`、ultralytics の ONNX）を GUI で古典CVと切り替えられるようにした（モデルは未学習） |
+| 矢印信号認識 | `raspi/nodes/arrow_signal_node.py`を実装済み（`route/select`で`slam2d_route`へ渡す）。HSVしきい値は会場での調整前で、サービス `surge-arrow-signal` は既定で無効（調整は `raspi/tools/arrow_signal_preview.py`）。2026-11-28 に YOLO（`models/arrow_yolo/`、ultralytics の ONNX）を GUI で古典CVと切り替えられるようにした。モデルを作る道具は launcher の「ml_arrow_yolo」（モデルは未学習） |
 
 **★最大の懸念**: シムで作り込んだ分と実車の差。シムでの作り込みより「実車で動かして確かめる」に比重を置く。
 

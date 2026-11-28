@@ -197,13 +197,14 @@ class YoloArrowDetector:
     def due(self) -> bool:
         return self._clock() - self._t_last >= self.min_period_s
 
-    def process_frame(self, frame: np.ndarray):
-        """BGR の `(H, W, 3)` → `ArrowResult`（`score` に確からしさ、`box` に正規化した枠）。"""
-        from raspi.nodes.arrow_signal_node import ArrowResult
+    def detect(self, frame: np.ndarray) -> list[tuple[list[float], float, int]]:
+        """BGR の `(H, W, 3)` → `[(正規化した枠 [x0,y0,x1,y1], score, cls), ...]`（score の降順・ROI 無視）。
 
+        学習用の下書きラベル（`ml_arrow_yolo/prelabel.py`）もこれを使う。
+        """
         self._t_last = self._clock()
         if self.session is None:
-            return ArrowResult(None)
+            return []
         h0, w0 = frame.shape[:2]
         img, scale, (px, py) = letterbox(frame[..., :3], self.imgsz)
         x = img[..., ::-1].transpose(2, 0, 1)[None].astype(np.float32) / 255.0
@@ -211,17 +212,23 @@ class YoloArrowDetector:
         out = self.session.run(None, {self.input_name: np.ascontiguousarray(x)})[0]
         self.last_infer_ms = (time.perf_counter() - t0) * 1e3
         dets = postprocess(out, conf_min=self.conf_min, n_classes=len(self.names))
+        res = []
         for x0, y0, x1, y1, score, c in dets:
             # 入力画像 → 元画像の正規化座標
-            bx0 = (x0 - px) / scale / w0
-            by0 = (y0 - py) / scale / h0
-            bx1 = (x1 - px) / scale / w0
-            by1 = (y1 - py) / scale / h0
-            cy = (by0 + by1) / 2
+            box = [max(0.0, (x0 - px) / scale / w0), max(0.0, (y0 - py) / scale / h0),
+                   min(1.0, (x1 - px) / scale / w0), min(1.0, (y1 - py) / scale / h0)]
+            res.append((box, score, c))
+        return res
+
+    def process_frame(self, frame: np.ndarray):
+        """BGR の `(H, W, 3)` → `ArrowResult`（`score` に確からしさ、`box` に正規化した枠）。"""
+        from raspi.nodes.arrow_signal_node import ArrowResult
+
+        for box, score, c in self.detect(frame):
+            cy = (box[1] + box[3]) / 2
             if not (self.roi_band[0] <= cy <= self.roi_band[1]):
                 continue                          # ROI 帯の外（看板ではない場所）
             name = self.names[c] if 0 <= c < len(self.names) else ""
-            box = [max(0.0, bx0), max(0.0, by0), min(1.0, bx1), min(1.0, by1)]
             # 最も確からしい検出だけで決める。方向でないクラスなら非該当（安全側）
             return ArrowResult(class_to_direction(name), score=score, box=box, label=name)
         return ArrowResult(None)

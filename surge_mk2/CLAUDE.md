@@ -36,6 +36,7 @@
 | 制御の定数がどこから来た数字か（物理・同定・式・方針・経験則） | [`docs/control_constants.md`](docs/control_constants.md)（ファームへの写しは `tools/fwsim/tests/test_fw_constants.py` が突き合わせる） |
 | 車両を校正したい（エンコーダ・ステア・遅延・車速制御・TC/ABS・カメラ・車速 KF）・その値の意味 | [`docs/calibration.md`](docs/calibration.md)（試験 `raspi/auto/calib_*`、解析 `tools/calib`、GUI は launcher の「車両の校正」）。値は `config/vehicle.toml`（io_node が `[control]` を STM32 へ送る） |
 | STM32 の制御をホストで回して比べたい | `tools/fwsim`（ファームをそのままコンパイルして車のモデルと閉ループ。`python -m tools.fwsim.bench`） |
+| 矢印信号の YOLO を作りたい（記録からの画像抽出・ラベル付け・学習・ONNX 書き出し） | `ml_arrow_yolo/app.py`（launcher の「学習」→「ml_arrow_yolo」）。車での使い方は `raspi/nodes/arrow_signal_node.py` のモジュール docstring |
 | 前方ステレオ視（同期・校正・照合・残りの段階） | [`docs/stereo_plan.md`](docs/stereo_plan.md)（取付・校正値は `config/vehicle.toml` の `[sensors.cam_front]`・`[sensors.cam_left]`・`[sensors.stereo]`） |
 | 大会出場に向けて何をすべきか | [`docs/competition_plan.md`](docs/competition_plan.md) |
 | 他車の追い抜き（追跡・予測・計画）と、toyota2 で何倍の相手まで抜けるか | [`docs/overtake.md`](docs/overtake.md) |

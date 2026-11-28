@@ -84,7 +84,7 @@ jobs:
       - name: pytest (ml)
         working-directory: surge_mk2
         run: |
-          for d in ml_cam_e2e ml_lidar ml_common; do
+          for d in ml_cam_e2e ml_lidar ml_common ml_arrow_yolo; do
             python -m pytest "$d/tests" -q || exit 1
           done
 

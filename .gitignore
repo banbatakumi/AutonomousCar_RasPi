@@ -65,6 +65,10 @@ surge_mk2/ml_cam_e2e/runs/
 surge_mk2/ml_e2e/runs/
 # ml_stereo_e2e/（ステレオの画像＋視差の E2E）の生成物。ml_e2e/runs/ と同じ
 surge_mk2/ml_stereo_e2e/runs/
+# ml_arrow_yolo/（矢印信号の YOLO）の画像・ラベル・学習結果。モデル名ごと
+surge_mk2/ml_arrow_yolo/runs/
+# ultralytics が学習の初回に作業フォルダ（surge_mk2/）へ落とす元の重み
+surge_mk2/yolo*.pt
 
 # slam2d/（汎用2D LiDAR SLAM）の検証用生ログ。公開データセットは各自ダウンロードする
 # 前提で、slam2d/datasets/README.md に入手手順だけ書く
