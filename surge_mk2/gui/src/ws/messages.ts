@@ -14,6 +14,7 @@ import type {
   E2EModelFile,
   LogFile,
   MapFile,
+  SignalModelFile,
   Snapshot,
 } from '../types'
 
@@ -44,6 +45,7 @@ export type ServerMsg = {
   cam_e2e_model_files?: CamE2EModelFile[]
   e2e_fusion_model_files?: E2EFusionModelFile[]
   stereo_e2e_model_files?: E2EFusionModelFile[]
+  signal_model_files?: SignalModelFile[]
   map_files?: MapFile[]
   ok?: boolean
   error?: string

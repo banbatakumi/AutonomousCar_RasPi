@@ -22,7 +22,7 @@
  * **手で上げる版番号ではない。** `raspi/msgs/types.py` を触れば必ず変わり、
  * 触っていなければ絶対に変わらない（上げ忘れが起きない形にしてある）。
  */
-export const MSGS_SCHEMA = 0xf9190088
+export const MSGS_SCHEMA = 0xa1ea8741
 
 /**
  * `TELEMETRY`(0x02) を SI に直したもの。100Hz。
@@ -742,4 +742,16 @@ export type ArrowSignalStatus = {
   confirmed_value: 'left' | 'right' | ''
   roi_top: number
   roi_bottom: number
+  /** 実際に判定している方式（"classic"/"yolo"）。YOLO を選んでもモデルが読めなければ "classic" */
+  method: string
+  /** YOLO の検出のスコア（classic・非検出は 0） */
+  score: number
+  /** YOLO の検出枠。前方カメラ画像の正規化座標 x0,y0,x1,y1（検出が無ければ全部 0） */
+  box: [number, number, number, number]
+  /** YOLO の検出のクラス名（方向でないクラスも出す。非検出は空文字） */
+  label: string
+  /** YOLO の直近の推論時間 [ms] */
+  infer_ms: number
+  /** YOLO のモデルが読めない理由（GUI に出す。問題が無ければ空文字） */
+  error: string
 }

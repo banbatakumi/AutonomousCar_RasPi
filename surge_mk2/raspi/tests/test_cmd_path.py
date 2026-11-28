@@ -1229,6 +1229,9 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
         srv._signal_sat_max = 180
         srv._signal_val_min = 150
         srv._signal_min_lit_frac = 0.02
+        srv._signal_method = "classic"
+        srv._signal_yolo_model = ""
+        srv._signal_yolo_conf = 0.5
         srv._publish_signal_config = lambda: None  # バスに触らせない
         srv._save_signal_conf = lambda: None       # ディスクに触らせない
         # 推論モデルの選択（`MODEL_SLOTS`）。**未選択の既定状態**を組む
@@ -1241,6 +1244,29 @@ class TestControlOwnership(unittest.IsolatedAsyncioTestCase):
             srv.sent.append((ws, obj))
         srv._send_json = _send_json
         return srv
+
+    async def test_signal_method_and_yolo_model_are_validated(self):
+        """矢印信号の方式（classic/yolo）・YOLO モデル名。不正な値・実在しないモデルは捨てる。"""
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import raspi.nodes.telemetry_node as tn
+        srv = self._server()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(tn, "SIGNAL_MODELS_DIR", Path(d)):
+            (Path(d) / "arrow_v1.onnx").write_bytes(b"x")
+            srv._on_signal_config({"method": "yolo", "yolo_model": "arrow_v1", "yolo_conf": 0.3})
+            self.assertEqual((srv._signal_method, srv._signal_yolo_model, srv._signal_yolo_conf),
+                             ("yolo", "arrow_v1", 0.3))
+            srv._on_signal_config({"method": "cnn", "yolo_model": "../etc", "yolo_conf": 5})
+            self.assertEqual((srv._signal_method, srv._signal_yolo_model, srv._signal_yolo_conf),
+                             ("yolo", "arrow_v1", 1.0))
+            st = srv._signal_config_status()
+            self.assertEqual(st["method"], "yolo")
+            await srv._ctl_signal_model_list(object(), {"type": "signal_model_list"})
+            msg = srv.sent[-1][1]
+            self.assertEqual(msg["type"], "signal_models")
+            self.assertEqual([f["name"] for f in msg["signal_model_files"]], ["arrow_v1"])
 
     async def test_second_client_is_denied(self):
         srv = self._server()

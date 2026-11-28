@@ -17,6 +17,7 @@ import type {
   E2EModelFile,
   LogFile,
   MapFile,
+  SignalModelFile,
 } from '../types'
 import { isControlStatus, parseServerMsg, type ServerMsg } from './messages'
 import { reconnectingSocket, type ReconnectingSocket } from './socket'
@@ -51,6 +52,8 @@ export type ControlHandlers = {
   onE2EFusionModels: (files: E2EFusionModelFile[]) => void
   /** `stereo_e2e_model_list` への応答（`models/stereo_e2e/` にある `.onnx` の一覧） */
   onStereoE2EModels: (files: E2EFusionModelFile[]) => void
+  /** `signal_model_list` への応答（`models/arrow_yolo/` にある `.onnx` の一覧） */
+  onSignalModels: (files: SignalModelFile[]) => void
   /** `maps_list`/`maps_save`/`maps_delete` への応答（`saved_maps/` の一覧） */
   onMaps: (files: MapFile[]) => void
   /** `mapsSave()` の成否。`error`は失敗時の理由（成功時は空文字） */
@@ -124,6 +127,7 @@ export class ControlChannel {
     else if (m.type === 'cam_e2e_models') this.h.onCamE2EModels(m.cam_e2e_model_files ?? [])
     else if (m.type === 'e2e_fusion_models') this.h.onE2EFusionModels(m.e2e_fusion_model_files ?? [])
     else if (m.type === 'stereo_e2e_models') this.h.onStereoE2EModels(m.stereo_e2e_model_files ?? [])
+    else if (m.type === 'signal_models') this.h.onSignalModels(m.signal_model_files ?? [])
     else if (m.type === 'maps') this.h.onMaps(m.map_files ?? [])
     else if (m.type === 'logs_delete_result') {
       if (!m.ok) this.h.onLogsDeleteResult(m.error ?? '')
@@ -479,6 +483,7 @@ export class ControlChannel {
     roiTop?: number; roiBottom?: number
     satMin?: number; satMax?: number; valMin?: number
     minLitFrac?: number
+    method?: 'classic' | 'yolo'; yoloModel?: string; yoloConf?: number
   }) {
     this.sendCoalesced('signal', {
       type: 'signal',
@@ -486,7 +491,13 @@ export class ControlChannel {
       roi_top: p.roiTop, roi_bottom: p.roiBottom,
       sat_min: p.satMin, sat_max: p.satMax, val_min: p.valMin,
       min_lit_frac: p.minLitFrac,
+      method: p.method, yolo_model: p.yoloModel, yolo_conf: p.yoloConf,
     })
+  }
+
+  /** `models/arrow_yolo/` にある `.onnx` の一覧を要求する。応答は `onSignalModels`。 */
+  signalModelList() {
+    this.send({ type: 'signal_model_list' })
   }
 
   // ── E2E LiDAR モデルの選択（`e2e_lidar` 用） ──

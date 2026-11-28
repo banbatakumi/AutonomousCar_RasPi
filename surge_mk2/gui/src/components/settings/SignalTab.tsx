@@ -1,4 +1,5 @@
 /** 設定パネルの「矢印信号（ウィンカーの点滅・矢印信号認識のしきい値）」タブ。`SettingsPanel.tsx` から分けた。 */
+import { useEffect } from 'react'
 import type { ControlChannel } from '../../ws/control'
 import { useNumbers } from '../../bus/live'
 import { useUi } from '../../store/ui'
@@ -7,6 +8,12 @@ export function SignalTab({ ch }: { ch: ControlChannel | null }) {
   const { signal: signalLive } = useNumbers()
   const sig = useUi((s) => s.signalConfig)
   const winkerMode = useUi((s) => s.winkerMode)
+  const modelFiles = useUi((s) => s.signalModelFiles)
+  const method = sig?.method ?? 'classic'
+  // タブを開いたときにモデルの一覧を取りに行く（AutoPanel のモデル選択と同じ流儀）
+  useEffect(() => {
+    ch?.signalModelList()
+  }, [ch])
 
   return (
     <>
@@ -43,9 +50,63 @@ export function SignalTab({ ch }: { ch: ControlChannel | null }) {
         {signalLive && (
           <p className="dim">
             判定: {signalLive.confirmed_value || signalLive.value || '(非該当)'}
-            　lit_frac {signalLive.lit_frac.toFixed(3)}
+            　[{signalLive.method}]
+            {signalLive.method === 'yolo'
+              ? ` ${signalLive.label || '-'} ${signalLive.score.toFixed(2)} / ${signalLive.infer_ms.toFixed(0)}ms`
+              : ` lit_frac ${signalLive.lit_frac.toFixed(3)}`}
             {signalLive.confirmed_value && '　→ route/select 送信中'}
           </p>
+        )}
+      </section>
+
+      {/* 判定の方式。YOLO はモデルが読めなければ Pi 側で古典CVに戻る（status の方式表示が実際の方式） */}
+      <section className="settings-group">
+        <h3>認識の方式</h3>
+        <div className="seg">
+          {([['classic', '古典CV（HSV）'], ['yolo', 'YOLO']] as const).map(([m, label]) => (
+            <button key={m} className={method === m ? 'on' : ''} disabled={sig === null}
+              onClick={() => ch?.setSignalConfig({ method: m })}>{label}</button>
+          ))}
+        </div>
+        {method === 'yolo' && (
+          <>
+            <div className="settings-row">
+              <div className="settings-row-head">
+                <span className="label">モデル</span>
+                <button onClick={() => ch?.signalModelList()}>更新</button>
+              </div>
+              <select
+                value={sig?.yolo_model ?? ''}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ yoloModel: e.target.value })}
+              >
+                <option value="">（未選択）</option>
+                {modelFiles.map((f) => (
+                  <option key={f.name} value={f.name}>{f.name}{f.note ? ` — ${f.note}` : ''}</option>
+                ))}
+                {sig?.yolo_model && !modelFiles.some((f) => f.name === sig.yolo_model) && (
+                  <option value={sig.yolo_model}>{sig.yolo_model}</option>
+                )}
+              </select>
+              <p className="dim">models/arrow_yolo/ の .onnx（ultralytics の書き出し）。クラス名 left/right/straight を方向として読む</p>
+            </div>
+            <div className="settings-row" title="これ未満のスコアの検出は捨てる">
+              <div className="settings-row-head">
+                <span className="label">スコア下限</span>
+                <b>{(sig?.yolo_conf ?? 0.5).toFixed(2)}</b>
+              </div>
+              <input
+                type="range" min={0.05} max={0.95} step={0.05}
+                value={sig?.yolo_conf ?? 0.5}
+                disabled={sig === null}
+                onChange={(e) => ch?.setSignalConfig({ yoloConf: Number(e.target.value) })}
+              />
+            </div>
+            {signalLive?.error && <p className="lv-warn">⚠ {signalLive.error}（古典CVで判定中）</p>}
+            {signalLive && signalLive.method !== 'yolo' && !signalLive.error && signalLive.enabled && (
+              <p className="dim">モデル未読み込み（古典CVで判定中）</p>
+            )}
+          </>
         )}
       </section>
 
@@ -80,7 +141,7 @@ export function SignalTab({ ch }: { ch: ControlChannel | null }) {
       </section>
 
       <section className="settings-group">
-        <h3>「薄い色」判定（HSV）</h3>
+        <h3>「薄い色」判定（HSV）{method === 'yolo' && <span className="dim">　※古典CVのときだけ効く</span>}</h3>
         <div className="settings-row" title="低すぎると背景のノイズまで拾い、高すぎると濃い色の表示（別の意味）まで拾う">
           <div className="settings-row-head">
             <span className="label">彩度 下限</span>

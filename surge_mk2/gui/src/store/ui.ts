@@ -19,6 +19,7 @@ import type {
   LogFile,
   MapFile,
   SignalConfigStatus,
+  SignalModelFile,
 } from '../types'
 import type { MtGear } from './gear'
 import { localPersistStorage } from './persistStorage'
@@ -282,6 +283,8 @@ type UiState = {
   stereoE2eModel: E2EFusionModelStatus | null
   /** `models/stereo_e2e/` にある `.onnx` の一覧 */
   stereoE2eModelFiles: E2EFusionModelFile[]
+  /** 矢印信号の YOLO モデルの一覧（`signal_model_list` の応答） */
+  signalModelFiles: SignalModelFile[]
 
   /** `saved_maps/` にある保存済み地図の一覧（`mapsList`/`mapsSave`/`mapsDelete` の応答） */
   mapFiles: MapFile[]
@@ -381,6 +384,7 @@ export const useUi = create<UiState>()(
       e2eFusionModelFiles: [],
       stereoE2eModel: null,
       stereoE2eModelFiles: [],
+      signalModelFiles: [],
       mapFiles: [],
       mapSaveResult: null,
 
